@@ -1326,6 +1326,11 @@ void applySettings() {
   // level can't drop below). OFF (default) → ESP_LOG_NONE for those tags.
   applyHttpsLogLevels(gSettings.debugHttps);
 
+  // The radio stacks' own tags (ESP-Hosted, the C6 console, Bluedroid,
+  // BLE_COEX): ERROR unless debugwifidriver / debugbluetoothcore is on, a saved
+  // esplog level over both. The boot's esplog apply follows in hardwareone_setup().
+  applyRadioStackLogLevels();
+
   DEBUG_SYSTEMF("[applySettings] Applied debug flags");
 
   // Apply ESP-NOW mode from settings (directly to gEspNow if initialized)
@@ -1361,7 +1366,9 @@ bool buildSettingsJsonDoc(JsonDocument& doc, bool excludePasswords, bool mainFil
 
   // wifiPrimarySSID: runtime-only convenience field for web UI (not saved, not a setting)
 #if ENABLE_WIFI
-  {
+  // Only while joined: unjoined, SSID() asks the AP and gets an error (an RPC
+  // to the C6 on the P4X-EYE) for an empty answer.
+  if (WiFi.isConnected()) {
     String cur = WiFi.SSID();
     if (cur.length() > 0) {
       doc["wifiPrimarySSID"] = cur;
@@ -2639,13 +2646,16 @@ static constexpr SettingEntry debugSettingEntries[] = {
   // firmware broadcastOutput anywhere — that's plumbed via MSG_ROUTE_*.
   { "webConsole", SETTING_BOOL, &gSettings.webConsoleDebug,     ENABLE_DEBUG_ALL_BY_DEFAULT, 0, nullptr, 0, 1, "Allow page console.log", nullptr, false, "page", "webconsole" },
   { "logLevel",         SETTING_INT,  &gSettings.logLevel,            3, 0, nullptr, 0, 3, "Log Level",            "0:error,1:warn,2:info,3:debug", false, nullptr, "loglevel" },
+  // ESP-IDF log levels by tag, "tag:L,tag:L" (L = N/E/W/I/D/V); esplog edits
+  // and validates it, the boot applies it after the firmware's own levels.
+  { "espLogLevels",     SETTING_STRING, &gSettings.espLogLevels,      0, 0, "",      0, 0, "ESP-IDF log levels by tag", nullptr, false, nullptr, "esplog" },
 };
 #undef DBG_SUBROW
 #undef DBG_ROW
 
-// Row accounting, pinned: 169 = 126 flag-backed + 40 bitless-sub + 3 hand rows.
+// Row accounting, pinned: 170 = 126 flag-backed + 40 bitless-sub + 4 hand rows.
 static constexpr size_t kDbgRegGeneratedRows = (DBG_FLAG_COUNT - 1) + DBG_SUBBOOL_COUNT;  // ALWAYS emits no row
-static constexpr size_t kDbgRegHandRows = 3;  // memorysampleintervalsec, webconsole, loglevel
+static constexpr size_t kDbgRegHandRows = 4;  // memorysampleintervalsec, webconsole, loglevel, esplog
 static_assert(sizeof(debugSettingEntries) / sizeof(debugSettingEntries[0])
                   == kDbgRegGeneratedRows + kDbgRegHandRows,
               "debug registry row count drifted — a pick or table row changed without the other (or a hand row came/went without updating kDbgRegHandRows)");

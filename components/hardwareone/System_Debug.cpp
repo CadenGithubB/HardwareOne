@@ -16,6 +16,9 @@
 #include "System_CLIMode.h"
 #include "System_Command.h"
 #include "System_Debug.h"
+#include "System_EspLogCore.h"
+#include "System_RadioLogCore.h"
+#include "HAL_Radio.h"  // HW1_RADIO_COMPANION: the ESP-Hosted tags exist
 #include "System_Logging.h"
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
@@ -1371,6 +1374,7 @@ void applyLogLevel(uint8_t level) {
   esp_log_level_set("wifi", espLevel);
   esp_log_level_set("wifi_init", espLevel);
   esp_log_level_set("phy_init", espLevel);
+  applyEspLogOverrides(false);  // a saved esplog entry for these tags wins
 }
 
 // Set the ESP-IDF log level for the TLS/HTTPS framework tags. These emit a
@@ -1384,6 +1388,274 @@ void applyHttpsLogLevels(bool verbose) {
   esp_log_level_set("esp_https_server", lvl);
   esp_log_level_set("httpd", lvl);
   esp_log_level_set("httpd_txrx", lvl);
+  applyEspLogOverrides(false);  // a saved esplog entry for these tags wins
+}
+
+// ---- radio stack logs: which tags exist, which flags are on ------------------
+// The tag table and its levels live in System_RadioLogCore.h; the apply is
+// after cmd_esplog (applyRadioStackLogLevels).
+static bool radioLogStackPresent(radiolog::Stack stack) {
+  switch (stack) {
+    case radiolog::Stack::Hosted:
+      return HW1_RADIO_COMPANION;
+    case radiolog::Stack::Bluedroid:
+#if ENABLE_BLUETOOTH && defined(CONFIG_BT_BLUEDROID_ENABLED) && CONFIG_BT_BLUEDROID_ENABLED
+      return true;
+#else
+      return false;
+#endif
+    case radiolog::Stack::BleController:
+#if ENABLE_BLUETOOTH && defined(CONFIG_BT_CONTROLLER_ENABLED) && CONFIG_BT_CONTROLLER_ENABLED && !CONFIG_IDF_TARGET_ESP32
+      return true;
+#else
+      return false;
+#endif
+    case radiolog::Stack::BtdmController:
+#if ENABLE_BLUETOOTH && defined(CONFIG_BT_CONTROLLER_ENABLED) && CONFIG_BT_CONTROLLER_ENABLED && CONFIG_IDF_TARGET_ESP32
+      return true;
+#else
+      return false;
+#endif
+    case radiolog::Stack::CoexRecords:
+      return ENABLE_BLE_COEX_RECORDS;
+  }
+  return false;
+}
+// The runtime layers (`temp` toggles write them); debugverbose forces both,
+// as it forces every debug output. The parents (debugwifi, debugbluetooth)
+// do not: as for the rest of their families, a parent does not switch its
+// children's output on.
+static bool radioLogWifiDriverOn() { return gDebugVerbose || gDebugSubFlags.wifiDriver; }
+static bool radioLogBluetoothCoreOn() { return isDebugFlagSet(DEBUG_BLUETOOTH_CORE); }
+
+// ---- esplog: the saved string's lock -----------------------------------------
+// gSettings.espLogLevels is written by esplog on the command task and read by
+// applyRadioStackLogLevels on the loop task too (each companion TRANSPORT_UP).
+// The lock covers each save's reserve and assignment and each radio apply
+// whole: an apply never parses a string being reallocated, and two applies
+// never interleave, so the last one sets the latest string's and flags' levels.
+// The debug.json write after a save runs outside it.
+static StaticSemaphore_t gEspLogMutexStorage;
+static SemaphoreHandle_t gEspLogMutex = nullptr;
+static portMUX_TYPE gEspLogInitMux = portMUX_INITIALIZER_UNLOCKED;
+
+static void espLogLock() {
+  if (!gEspLogMutex) {
+    portENTER_CRITICAL(&gEspLogInitMux);
+    if (!gEspLogMutex) gEspLogMutex = xSemaphoreCreateMutexStatic(&gEspLogMutexStorage);
+    portEXIT_CRITICAL(&gEspLogInitMux);
+  }
+  xSemaphoreTake(gEspLogMutex, portMAX_DELAY);
+}
+static void espLogUnlock() { xSemaphoreGive(gEspLogMutex); }
+
+// ---- esplog: ESP-IDF log levels by tag, saved -------------------------------
+// HTTP_CLIENT's DEBUG lines print request headers, Authorization included;
+// System_LLMHttp pins the tag to WARN for each request and refuses one above
+// it. An override never raises it past WARN.
+static constexpr const char* kEspLogCredentialTag = "HTTP_CLIENT";
+
+static esp_log_level_t espLogLevelFor(const char* tag, int level) {
+  if (!strcmp(tag, kEspLogCredentialTag) && level > ESP_LOG_WARN) level = ESP_LOG_WARN;
+  return static_cast<esp_log_level_t>(level);
+}
+
+// Arduino String leaves a null buffer after a failed allocation.
+static const char* espLogStored() {
+  const char* stored = gSettings.espLogLevels.c_str();
+  return stored ? stored : "";
+}
+
+// Saves `next`, or keeps the old value when memory is short: the copy is made
+// and the field's room reserved before the assignment, which would otherwise
+// invalidate the old value on a failed allocation. Both run under the lock
+// (espLogLock); the persistence request after it.
+static bool espLogSave(const char* next) {
+  const String value(next);
+  if (!value.c_str()) return false;
+  espLogLock();
+  const bool changed = gSettings.espLogLevels != value;
+  const bool saved = !changed || gSettings.espLogLevels.reserve(value.length());
+  if (changed && saved) gSettings.espLogLevels = value;
+  espLogUnlock();
+  if (changed && saved) (void)requestDebugSettingsPersist();
+  return saved;
+}
+static constexpr const char* kEspLogNoMemory = "Error: Not enough memory to save tag levels";
+
+void applyEspLogOverrides(bool includeWildcard) {
+  const char* stored = espLogStored();
+  if (!stored[0]) return;
+  if (includeWildcard) {
+    const int all = esplog::levelOf(stored, "*");
+    if (all >= 0) {
+      // Resets every tag's level, the firmware's quieted ones too; the tag
+      // entries below go on top. HTTP_CLIENT keeps its ceiling.
+      esp_log_level_set("*", static_cast<esp_log_level_t>(all));
+      esp_log_level_set(kEspLogCredentialTag, espLogLevelFor(kEspLogCredentialTag, all));
+      // "*" dropped every tag's own level: a radio stack tag whose debug flag
+      // is on gets its stock level back (the flag wins over the wildcard).
+      applyRadioStackLogLevels();
+    }
+  }
+  esplog::forEach(stored, [](const char* tag, size_t len, int level) {
+    if (esplog::isWildcard(tag, len)) return;
+    char name[esplog::kMaxTagLen + 1];
+    memcpy(name, tag, len);
+    name[len] = '\0';
+    esp_log_level_set(name, espLogLevelFor(name, level));
+  });
+}
+
+static const char* espLogEditError(esplog::Edit e) {
+  switch (e) {
+    case esplog::Edit::BadTag:
+      return "Error: a tag is 1-31 characters without spaces, commas, colons or quotes (or * for every tag)";
+    case esplog::Edit::BadLevel:
+      return "Error: level is none, error, warn, info, debug or verbose";
+    case esplog::Edit::TooMany:
+      return "Error: at most 16 tag levels are saved; remove one with esplog <tag> default";
+    case esplog::Edit::TooLong:
+      return "Error: the saved tag levels would pass 240 characters; remove one with esplog <tag> default";
+    case esplog::Edit::NotFound:
+      return "No saved level for that tag";
+    case esplog::Edit::Duplicate:
+      return "Error: a tag appears twice";
+    default:
+      return "Error: tag levels not changed";
+  }
+}
+
+// Debug and verbose lines exist only up to the build's maximum level.
+static const char* espLogBuildNote(int level) {
+#if defined(CONFIG_LOG_MAXIMUM_LEVEL) && CONFIG_LOG_MAXIMUM_LEVEL >= 0 && CONFIG_LOG_MAXIMUM_LEVEL < 5
+  static char note[64];
+  if (level > CONFIG_LOG_MAXIMUM_LEVEL) {
+    snprintf(note, sizeof(note), " (this build compiles ESP-IDF lines only up to %s)",
+             esplog::kNames[CONFIG_LOG_MAXIMUM_LEVEL]);
+    return note;
+  }
+#else
+  (void)level;
+#endif
+  return "";
+}
+
+const char* cmd_esplog(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  CommandArgs ca(argsInput);
+  const char* stored = espLogStored();
+
+  if (ca.count() == 0) {
+    size_t used = (size_t)snprintf(gDebugBuffer, 1024, "Saved ESP-IDF log levels (esplog):");
+    const size_t n = esplog::forEach(stored, [&](const char* tag, size_t len, int level) {
+      if (used >= 1024) return;
+      const int w = snprintf(gDebugBuffer + used, 1024 - used, "\n  %.*s %s", (int)len, tag,
+                             esplog::kNames[level]);
+      used += w > 0 ? (size_t)w : 0;
+      if (used > 1023) used = 1023;  // truncated: the rest is dropped
+    });
+    if (n == 0) snprintf(gDebugBuffer + used, 1024 - used, " none (the firmware's own levels apply)");
+    return gDebugBuffer;
+  }
+
+  static constexpr const char* kUsage =
+      "Usage: esplog [<tag|*> <none|error|warn|info|debug|verbose|default>] | esplog clear";
+  char next[esplog::kMaxStoredLen + 1];
+  const String tag = ca.arg(0);
+  if (ca.count() == 1 && tag.equalsIgnoreCase("clear")) {
+    if (!stored[0]) return "No saved ESP-IDF log levels";
+    if (!espLogSave("")) return kEspLogNoMemory;
+    applyRadioStackLogLevels();
+    return "Saved ESP-IDF log levels cleared; the radio stack tags follow their debug flags again, the "
+           "firmware's other levels return at the next reboot";
+  }
+  // The settings editors send the whole "tag:L,tag:L" string; it replaces
+  // every entry.
+  if (tag.indexOf(':') >= 0) {
+    const esplog::Edit e = esplog::replaceAll(ca.raw().c_str(), next, sizeof(next));
+    if (e != esplog::Edit::Ok) return espLogEditError(e);
+    if (!strcmp(next, stored)) return "ESP-IDF log levels unchanged";
+    if (esplog::levelOf(next, kEspLogCredentialTag) > ESP_LOG_WARN) {
+      return "Error: HTTP_CLIENT stays at warn or below (its debug lines print request headers)";
+    }
+    if (!espLogSave(next)) return kEspLogNoMemory;
+    applyRadioStackLogLevels();  // a removed radio stack tag follows its debug flag again
+    applyEspLogOverrides(true);
+    snprintf(gDebugBuffer, 1024, "ESP-IDF log levels saved: %s; removed entries return to the "
+             "firmware's level at the next reboot", next[0] ? next : "(none)");
+    return gDebugBuffer;
+  }
+  if (ca.count() != 2) return kUsage;
+
+  const String levelText = ca.arg(1);
+  if (levelText.equalsIgnoreCase("default")) {
+    const esplog::Edit e = esplog::remove(stored, tag.c_str(), next, sizeof(next));
+    if (e != esplog::Edit::Ok) return espLogEditError(e);
+    if (!espLogSave(next)) return kEspLogNoMemory;
+    if (radiolog::find(tag.c_str())) {
+      applyRadioStackLogLevels();
+      snprintf(gDebugBuffer, 1024, "%s: saved level removed; it follows its debug flag again", tag.c_str());
+    } else if (esplog::isWildcard(tag.c_str(), tag.length())) {
+      applyRadioStackLogLevels();
+      snprintf(gDebugBuffer, 1024, "*: saved level removed; the radio stack tags follow their debug flags "
+               "again, the other tags keep it until the next reboot");
+    } else {
+      snprintf(gDebugBuffer, 1024, "%s: saved level removed; its firmware level returns at the next reboot",
+               tag.c_str());
+    }
+    return gDebugBuffer;
+  }
+  const int level = esplog::parseLevel(levelText.c_str());
+  if (level < 0) return espLogEditError(esplog::Edit::BadLevel);
+  if (!strcmp(tag.c_str(), kEspLogCredentialTag) && level > ESP_LOG_WARN) {
+    return "Error: HTTP_CLIENT stays at warn or below (its debug lines print request headers)";
+  }
+  const esplog::Edit e = esplog::set(stored, tag.c_str(), level, next, sizeof(next));
+  if (e != esplog::Edit::Ok && e != esplog::Edit::Unchanged) return espLogEditError(e);
+  if (!espLogSave(next)) return kEspLogNoMemory;
+  if (esplog::isWildcard(tag.c_str(), tag.length())) {
+    applyEspLogOverrides(true);
+    snprintf(gDebugBuffer, 1024,
+             "*: %s (saved). Every tag was set, the firmware's quieted ones too; saved tag levels "
+             "were applied again%s", esplog::kNames[level], espLogBuildNote(level));
+  } else {
+    esp_log_level_set(tag.c_str(), espLogLevelFor(tag.c_str(), level));
+    snprintf(gDebugBuffer, 1024, "%s: %s (saved)%s", tag.c_str(), esplog::kNames[level],
+             espLogBuildNote(level));
+  }
+  return gDebugBuffer;
+}
+
+// ---- radio stack logs: apply --------------------------------------------------
+// Sets every radio stack tag of this build (System_RadioLogCore.h): its saved
+// esplog level, else its stock level while its debug flag is on, else the
+// saved wildcard, else ERROR. Called at boot (applySettings), on
+// debugwifidriver, debugbluetoothcore and debugverbose, after the wildcard is
+// applied, when an esplog entry is removed, and on each companion
+// TRANSPORT_UP and failure (esp_hosted_init sets rpc_core/rpc_rsp/rpc_evt to
+// WARN for every new Hosted session).
+void applyRadioStackLogLevels() {
+  espLogLock();  // the loop task applies too: see espLogLock
+  const char* stored = espLogStored();
+  const bool wifiDriver = radioLogWifiDriverOn();
+  const bool bluetoothCore = radioLogBluetoothCoreOn();
+  for (const radiolog::TagRow& row : radiolog::kTags) {
+    if (!radioLogStackPresent(row.stack)) continue;
+    esp_log_level_set(row.tag, espLogLevelFor(row.tag, radiolog::levelFor(row, wifiDriver, bluetoothCore, stored)));
+  }
+  espLogUnlock();
+}
+
+// A path that replaces the whole live mask (`log start flags=`, the saved
+// system-log mask at `log start`, `log autostart` and `systemlogflags`) runs
+// what the per-flag commands run: the radio stack tags follow
+// debugbluetoothcore, and the HTTPS tags debughttps when its bit changed (an
+// unchanged bit leaves a saved esplog wildcard's level on them).
+void applyDebugMaskLogLevels(DebugFlagMask before) {
+  applyRadioStackLogLevels();
+  if (((before ^ gDebugFlags) & DEBUG_HTTPS) != (DebugFlagMask)0) applyHttpsLogLevels(isDebugFlagSet(DEBUG_HTTPS));
 }
 
 const char* cmd_debugverbose(const String& argsInput) {
@@ -1393,6 +1665,7 @@ const char* cmd_debugverbose(const String& argsInput) {
   const int v = parseBoolArg(ca.arg(0));
   if (v < 0) return kCommandReplyNotOnOff;
   gDebugVerbose = (v == 1);
+  applyRadioStackLogLevels();  // verbose shows the radio stacks' routine lines too
   return gDebugVerbose ? "debugVerbose enabled" : "debugVerbose disabled";
 }
 
@@ -1694,6 +1967,9 @@ static void dbgApplyHook(DbgFlagIdx idx, bool modeTemp, int v, bool* settingPtr)
     case DBG_BLUETOOTH_DATA:
       // Recompute the Bluetooth parent on BOTH paths (SETTINGS_BITS family).
       dbgRecomputeParent(DBG_BLUETOOTH);
+      // debugbluetoothcore also owns the Bluetooth stack's own log tags
+      // (Bluedroid, BLE_COEX, the C6 console): stock level on, ERROR off.
+      if (idx == DBG_BLUETOOTH_CORE && !gCliValidateOnly) applyRadioStackLogLevels();
       break;
     default:
       break;
@@ -1757,6 +2033,9 @@ static const char* dbgSubCmd(DbgSubIdx sidx, const String& argsInput) {
   *kDbgSubRuntimePtr[sidx] = (v != 0);
   if (!modeTemp) setDebugSetting(*kDbgSubSettingPtr[sidx], (bool)(v != 0));
   dbgRecomputeParent(kDbgSubParentIdx[sidx]);
+  // debugwifidriver also owns ESP-Hosted's and the C6 console's log tags
+  // (System_RadioLogCore.h): stock level on, ERROR off, on both paths.
+  if (sidx == DBG_SUB_WIFI_DRIVER) applyRadioStackLogLevels();
   if (modeTemp) {
     snprintf(buf, sizeof(buf), "%s %s (runtime only)", kDbgSubRetName[sidx], v ? "enabled" : "disabled");
     return buf;
@@ -1930,7 +2209,9 @@ bool systemLogApplyPersistedFlags() {
   if (gSettings.systemLogFlags.length() == 0) return false;
   DebugFlagMask restored = (DebugFlagMask)0;
   if (!parseSystemLogFlags(gSettings.systemLogFlags, restored)) return false;
+  const DebugFlagMask before = gDebugFlags;
   gDebugFlags = restored;
+  applyDebugMaskLogLevels(before);
   return true;
 }
 
@@ -2170,7 +2451,9 @@ const char* cmd_log(const String& argsInput) {
     // setting, so a start that failed above leaves them as they were.
     // Apply debug flags if specified; otherwise restore last-used system-log mask
     if (flagsSet) {
+      const DebugFlagMask before = gDebugFlags;
       gDebugFlags = debugFlags;
+      applyDebugMaskLogLevels(before);
       setSetting(gSettings.systemLogFlags, formatSystemLogFlags(debugFlags));
       char flagsText[80];
       formatSystemLogFlags(gDebugFlags, flagsText, sizeof(flagsText));
@@ -2287,7 +2570,10 @@ const CommandEntry debugCommands[] = {
   { "debugauth", "Debug authentication (parent flag).", true, cmd_debugauth, "Usage: debugauth <0|1> [temp|runtime]" },
   { "debugespnow", "Debug ESP-NOW core messages (alias of debugespnowcore).", true, cmd_debugespnowcore, "Usage: debugespnow <0|1> [temp|runtime]" },
   { "debugbluetooth", "Debug Bluetooth (parent flag).", true, cmd_debugbluetooth, "Usage: debugbluetooth <0|1> [temp|runtime]" },
-  { "debugbluetoothcore", "Debug Bluetooth core lifecycle.", true, cmd_debugbluetoothcore, "Usage: debugbluetoothcore <0|1> [temp|runtime]" },
+  { "debugbluetoothcore", "Debug Bluetooth core lifecycle; also shows the Bluetooth stack's own routine log lines (Bluedroid BT_*, BLE_COEX records, the P4X-EYE's C6 console), which print only errors while it is off.", true, cmd_debugbluetoothcore,
+    "Usage: debugbluetoothcore <0|1> [temp|runtime]\n"
+    "  On: BT_APPL, BT_BTM, BT_HCI, BT_L2CAP, BT_GATT, BT_SMP, BT_BTC, BLE_INIT, BTDM_INIT, BLE_COEX and C6> at their stock level.\n"
+    "  Off (default): errors only. debugbluetooth alone does not change them; a saved esplog level wins." },
   { "debugbluetoothgatt", "Debug Bluetooth GATT operations.", true, cmd_debugbluetoothgatt, "Usage: debugbluetoothgatt <0|1> [temp|runtime]" },
   { "debugbluetoothdata", "Debug Bluetooth command/data path.", true, cmd_debugbluetoothdata, "Usage: debugbluetoothdata <0|1> [temp|runtime]" },
   { "debuguart", "Debug UART host link (parent flag).", true, cmd_debuguart, "Usage: debuguart <0|1> [temp|runtime]" },
@@ -2406,7 +2692,10 @@ const CommandEntry debugCommands[] = {
   { "debugwificonnection", "Debug WiFi connection.", true, cmd_debugwificonnection, "Usage: debugwificonnection <0|1> [temp|runtime]" },
   { "debugwificonfig", "Debug WiFi config.", true, cmd_debugwificonfig, "Usage: debugwificonfig <0|1> [temp|runtime]" },
   { "debugwifiscanning", "Debug WiFi scanning.", true, cmd_debugwifiscanning, "Usage: debugwifiscanning <0|1> [temp|runtime]" },
-  { "debugwifidriver", "Debug WiFi driver.", true, cmd_debugwifidriver, "Usage: debugwifidriver <0|1> [temp|runtime]" },
+  { "debugwifidriver", "Debug WiFi driver; on the P4X-EYE also shows ESP-Hosted's and the C6 console's routine log lines, which print only errors while it is off.", true, cmd_debugwifidriver,
+    "Usage: debugwifidriver <0|1> [temp|runtime]\n"
+    "  On: transport, H_SDIO_DRV, sdio_wrapper, H_API, RPC_WRAP, rpc_*, vhci_drv, os_wrapper_esp, esp_cli, esp_wifi_remote\n"
+    "  and C6> at their stock level. Off (default): errors only. debugwifi alone does not change them; a saved esplog level wins." },
   { "debugstoragefiles", "Debug storage files.", true, cmd_debugstoragefiles, "Usage: debugstoragefiles <0|1> [temp|runtime]" },
   { "debugstoragejson", "Debug storage JSON.", true, cmd_debugstoragejson, "Usage: debugstoragejson <0|1> [temp|runtime]" },
   { "debugstoragesettings", "Debug storage settings.", true, cmd_debugstoragesettings, "Usage: debugstoragesettings <0|1> [temp|runtime]" },
@@ -2464,6 +2753,14 @@ const CommandEntry debugCommands[] = {
   { "debugfmradio", "Debug FM Radio operations.", true, cmd_debugfmradio, "Usage: debugfmradio <0|1> [temp|runtime]" },
   { "memorysampleintervalsec", "Set memory sampling interval in seconds (0=disabled).", true, cmd_memorysampleintervalsec, "Usage: memorysampleintervalsec <0-300>" },
   { "loglevel", "Set log level (error|warn|info|debug).", true, cmd_loglevel, "Usage: loglevel <error|warn|info|debug>" },
+  { "esplog", "ESP-IDF log levels by tag, saved across reboots (loglevel covers only HardwareOne's own log).", true, cmd_esplog,
+    "Usage: esplog [<tag|*> <none|error|warn|info|debug|verbose|default>] | esplog clear\n"
+    "  (bare): list the saved tag levels\n"
+    "  <tag> <level>: set and save, e.g. esplog BT_BTM error, esplog rpc_utils warn\n"
+    "  <tag> default: remove the saved level (a radio stack tag follows its debug flag again at once,\n"
+    "    any other tag gets the firmware's level back at the next reboot)\n"
+    "  * <level>: every tag, the firmware's quieted ones too; tag entries go on top\n"
+    "  clear: remove every saved level" },
   { "log", "System-wide logging to file.", true, cmd_log, "Usage: log <start|stop|status|autostart>\n  start [\"filepath\"] [flags=0x...] [tags=0|1]: Begin system logging\n    filepath: Log file path, quoted (auto-generated if omitted)\n    flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h)\n    tags: Prefix lines with category tags (0|1, default 1)\n  stop / status: Stop logging / show logging status\n  maxsize <bytes> / rotations <0-9>: Rotate the file at this size, keeping that many old files (.1, .2, ...)\n  autostart [on|off]: Toggle logging auto-start on boot (bare = toggle)" },
   { "webconsole", "Enable/disable browser-side debug console output in the web UI.", true, cmd_webconsole, "Usage: webconsole <0|1>" },
 };
@@ -2478,10 +2775,10 @@ const size_t debugCommandsCount = sizeof(debugCommands) / sizeof(debugCommands[0
 // two feature-gated table spans: 6 LLM flag rows, 7 debugg2* + 7 debugring*
 // flag rows (both under ENABLE_BLUETOOTH && ENABLE_G2_GLASSES), and the
 // outg2 hand row.
-static constexpr size_t kDbgHandCmdRows = 15;  // debugespnow(alias), notifstats,
+static constexpr size_t kDbgHandCmdRows = 16;  // debugespnow(alias), notifstats,
   // debugverbose, debugbuffer, debugflags, loglink, debugstack,
   // commandmodulesummary, settingsmodulesummary, outg2, outble,
-  // memorysampleintervalsec, loglevel, log, webconsole
+  // memorysampleintervalsec, loglevel, esplog, log, webconsole
 static constexpr size_t kDbgGenCmdRowsInTable =
     (size_t)(DBG_FLAG_COUNT - 1) + (size_t)DBG_SUBBOOL_COUNT
 #if !ENABLE_LLM_SOURCE_ONBOARD

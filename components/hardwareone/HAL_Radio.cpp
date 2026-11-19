@@ -27,6 +27,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "Radio_CompanionCore.h"
+#include "System_RadioLogCore.h"
 
 // ESP-Hosted 2.12.13 host/drivers/transport/transport_drv.{h,c} (external
 // linkage, but not in the component's public include dirs).
@@ -76,17 +77,32 @@ constexpr uart_port_t kConsoleUart = UART_NUM_1;
 TaskHandle_t sConsoleTask = nullptr;
 volatile bool sConsoleStop = false;
 
+// Each line goes out at the level the C6 printed it with (its crash reports
+// as errors), so the quiet default of the C6> tag still shows the companion's
+// errors; debugwifidriver or debugbluetoothcore shows the rest
+// (System_RadioLogCore.h).
+void logC6Line(radiolog::C6ConsoleLevels& levels, const char* line, bool continued) {
+  switch (levels.classify(line, continued)) {
+    case radiolog::LineLevel::Error: ESP_LOGE(radiolog::kC6ConsoleTag, "%s", line); break;
+    case radiolog::LineLevel::Warn: ESP_LOGW(radiolog::kC6ConsoleTag, "%s", line); break;
+    default: ESP_LOGI(radiolog::kC6ConsoleTag, "%s", line); break;
+  }
+}
+
 void consoleTask(void*) {
   uint8_t buf[256];
   char line[200];
   size_t n = 0;
+  bool split = false;  // the next chunk continues a line longer than `line`
+  radiolog::C6ConsoleLevels levels;
   while (!sConsoleStop) {
     const int got = uart_read_bytes(kConsoleUart, buf, sizeof(buf), pdMS_TO_TICKS(200));
     for (int i = 0; i < got; i++) {
       const char c = static_cast<char>(buf[i]);
       if (c == '\n' || n >= sizeof(line) - 1) {
         line[n] = '\0';
-        if (n) ESP_LOGI("C6>", "%s", line);
+        if (n) logC6Line(levels, line, split);
+        split = c != '\n';
         n = 0;
         if (c != '\n' && c != '\r') line[n++] = c;
       } else if (c != '\r') {
@@ -175,12 +191,19 @@ esp_err_t prepareBoard() {
   return ESP_OK;
 }
 
-void quietRpcLogs() {
+void quietHostedLogs() {
   // initArduino() resets the global log level after Hosted's constructor
-  // muted per-RPC INFO traffic. Restore only those tags.
-  esp_log_level_set("rpc_core", ESP_LOG_WARN);
-  esp_log_level_set("rpc_rsp", ESP_LOG_WARN);
-  esp_log_level_set("rpc_evt", ESP_LOG_WARN);
+  // muted per-RPC INFO traffic. Every Hosted tag and the C6 console start
+  // quiet (ERROR): the settings, debugwifidriver among them, load only after
+  // this first session, and applySettings() then sets each tag from its debug
+  // flag and the saved esplog levels (applyRadioStackLogLevels). rpc_utils'
+  // one line is a WARN "Event: SSID <ssid>" printed for every station-config
+  // answer, not an event (the ESP-NOW channel check reads it every 15 s).
+  for (const radiolog::TagRow& row : radiolog::kTags) {
+    if (row.stack == radiolog::Stack::Hosted) {
+      esp_log_level_set(row.tag, static_cast<esp_log_level_t>(radiolog::kQuiet));
+    }
+  }
 }
 
 void deliver(RadioHalEvent type, uint32_t value, uint32_t value2 = 0) {
@@ -406,7 +429,7 @@ bool radioHalConsoleMirrorOn() { return false; }
 #endif
 
 esp_err_t radioHalPrepare() {
-  quietRpcLogs();
+  quietHostedLogs();
   ESP_RETURN_ON_ERROR(prepareBoard(), kTag, "Board preparation failed");
   radioHalConsoleMirror(true);  // not fatal; c6_console off silences it
   ESP_RETURN_ON_ERROR(registerEvents(), kTag, "Hosted events");

@@ -352,6 +352,26 @@ void applyLogLevel(uint8_t level);
 // DEBUG_HTTPS flag; called at boot from applySettings() and on `debughttps`.
 void applyHttpsLogLevels(bool verbose);
 
+// Apply the saved `esplog` ESP-IDF tag levels (gSettings.espLogLevels) over
+// the firmware's own. The boot calls it with the wildcard once its own
+// esp_log_level_set callers have run; applyLogLevel and applyHttpsLogLevels
+// call it without, so a saved tag entry keeps winning when they run again.
+// "*" resets every tag's level in ESP-IDF, so it is applied only at boot and
+// by the command.
+void applyEspLogOverrides(bool includeWildcard);
+
+// Set the radio stacks' own ESP-IDF tags (ESP-Hosted, the C6 console,
+// Bluedroid, BLE_COEX; table in System_RadioLogCore.h): ERROR by default, the
+// stock level while debugwifidriver / debugbluetoothcore is on, a saved
+// esplog level over both. The boot (applySettings), those flag commands,
+// debugverbose, esplog and each companion TRANSPORT_UP call it.
+void applyRadioStackLogLevels();
+
+// After a path replaced the whole live debug mask (`log start flags=`, the
+// saved system-log mask): the radio stack tags follow debugbluetoothcore
+// again, and the HTTPS tags debughttps when its bit changed from `before`.
+void applyDebugMaskLogLevels(DebugFlagMask before);
+
 // Sub-flag accessor functions
 inline DebugSubFlags& getDebugSubFlags() { return gDebugSubFlags; }
 

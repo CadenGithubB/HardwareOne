@@ -819,6 +819,10 @@ void handleEvent(const RadioHalEventData& event, uint32_t now) {
       // A feature re-opened the transport after an idle close: the companion
       // rebooted for it, so its identity and monitoring must be re-read.
       if (before == CompanionState::Idle && !sOpInFlight.load()) onTransportResumed();
+      // Every fresh Hosted session (a recovery, a release, an idle reopen)
+      // sets rpc_core/rpc_rsp/rpc_evt back to WARN in esp_hosted_init(): the
+      // radio stack tags take their flag's (or saved esplog) level again.
+      applyRadioStackLogLevels();
       break;
     }
     case RadioHalEvent::TransportDown:
@@ -826,6 +830,7 @@ void handleEvent(const RadioHalEventData& event, uint32_t now) {
       break;
     case RadioHalEvent::TransportFailure:
       withMonitor([&](CompanionMonitor& m) { m.onTransportFailure(now); });
+      applyRadioStackLogLevels();  // a failed session start ran esp_hosted_init too
       if (!sOpInFlight.load()) {
         systemEventPost(SYSEVT_COMPANION_OFFLINE, "transport_failure", "SDIO link failed");
         logSystemEvent("C6", "transport failure");
@@ -1211,8 +1216,10 @@ const char* cmd_c6console(const String& argsInput) {
   String arg = a.arg(0);
   arg.toLowerCase();
   if (arg.length() == 0) {
-    return radioHalConsoleMirrorOn() ? "C6 console mirror: on (the companion's log appears as C6> lines)"
-                                     : "C6 console mirror: off";
+    return radioHalConsoleMirrorOn()
+               ? "C6 console mirror: on (the companion's errors appear as C6> lines; debugwifidriver or "
+                 "debugbluetoothcore shows the rest)"
+               : "C6 console mirror: off";
   }
   const int want = parseBoolArg(arg);
   if (want < 0) return kCommandReplyNotOnOff;
@@ -1223,8 +1230,10 @@ const char* cmd_c6console(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Error: console mirror failed: %s", esp_err_to_name(err));
     return getDebugBuffer();
   }
-  return on ? "C6 console mirror on: the companion's own log appears as C6> lines"
-            : "C6 console mirror off";
+  setSetting(gSettings.c6ConsoleMirror, on);  // the boot follows it (radioCompanionBootInit)
+  return on ? "C6 console mirror on (saved): the companion's errors and crash reports appear as C6> lines; "
+              "debugwifidriver or debugbluetoothcore shows the rest"
+            : "C6 console mirror off (saved)";
 }
 
 const char* cmd_c6autorecover(const String& argsInput) {
@@ -1269,6 +1278,12 @@ void radioCompanionBootInit() {
   }
   radioHalSetEventHandler(onHalEvent);
   applyPolicyFromSettings();
+  // radioHalPrepare starts the mirror before the settings load, so the C6's
+  // errors and crash reports during its boot are always seen (quietHostedLogs
+  // holds C6> at ERROR until applySettings; with debugwifidriver or
+  // debugbluetoothcore on, `c6restart` shows a session's start lines); a
+  // saved `c6console off` stops it here.
+  if (!gSettings.c6ConsoleMirror) radioHalConsoleMirror(false);
   const bool up = radioHalPrepared() && radioHalTransportUp();
   withMonitor([&](CompanionMonitor& m) { m.onBootResult(millis(), up); });
   sBootInitDone = true;
@@ -1402,7 +1417,7 @@ const CommandEntry companionCommands[] = {
   { "c6update",      "Flash companion firmware from a file over SDIO: c6update \"<path>\".", true, cmd_c6update,
     "Usage: c6update \"/sd/firmware/network_adapter.bin\"\nThe file must be an ESP32-C6 image built by tools/p4/companion (it is checked for the ESP-NOW bridge marker before anything is sent).", true },
   { "c6confirm",     "Confirm the companion's running image so it cannot roll back.", true, cmd_c6confirm },
-  { "c6console",     "Mirror the C6's own console into the P4 log: c6console [on|off].", true, cmd_c6console },
+  { "c6console",     "Mirror the C6's own console into the P4 log: c6console [on|off] (persists).", true, cmd_c6console },
   // 64713c0d renamed the task and, by accident, the user command; the documented name is
   // c6console. The underscore form stays as an alias for anything that learned it.
   { "c6_console",    "Alias of c6console.", true, cmd_c6console },
@@ -1416,6 +1431,7 @@ static const SettingEntry companionSettingsEntries[] = {
   { "c6AutoRecover",  SETTING_BOOL, &gSettings.c6AutoRecover,  1, 0, nullptr, 0, 1,  "Auto-recover after an outage", nullptr, false, nullptr, "c6autorecover" },
   { "c6AutoHold",     SETTING_BOOL, &gSettings.c6AutoHold,     0, 0, nullptr, 0, 1,  "Hold in reset while idle",      nullptr, false, nullptr, "c6autohold" },
   { "c6HeartbeatSec", SETTING_INT,  &gSettings.c6HeartbeatSec, 5, 0, nullptr, 0, 60, "Heartbeat interval (s, 0=off)", nullptr, false, nullptr, "c6heartbeat" },
+  { "c6ConsoleMirror", SETTING_BOOL, &gSettings.c6ConsoleMirror, 1, 0, nullptr, 0, 1, "Mirror the C6 console",       nullptr, false, nullptr, "c6console" },
 };
 
 extern const SettingsModule companionSettingsModule = {

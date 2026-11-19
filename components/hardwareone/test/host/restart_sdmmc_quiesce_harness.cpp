@@ -371,7 +371,7 @@ Identity sIdentity = {};
 uint32_t nowMs() { return gNow; }
 bool hostedIsInitialized() { return gHostedInitialized; }
 esp_err_t prepareBoard() { return ESP_OK; }
-void quietRpcLogs() {}
+void quietHostedLogs() {}
 esp_err_t radioHalConsoleMirror(bool) { return ESP_OK; }
 bool hostedInitWiFi() {
   note("hostedInitWiFi");

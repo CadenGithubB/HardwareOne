@@ -1935,6 +1935,7 @@ function saveNotifPolicy() {
     debugmqtt:"Logs MQTT client connection, publish, subscribe, and message delivery.",
     webconsole:"Allow the served web pages to emit normal JavaScript console.log/warn/debug to your browser DevTools. Default OFF mutes those calls (page-side noise only). Does NOT route firmware output to the browser console.",
     loglevel:"Minimum severity that gets printed: Error, Warn, Info, or Debug. Debug is most verbose.",
+    esplog:"ESP-IDF log levels by tag, saved across reboots: tag:L pairs separated by commas, L one of N E W I D V (none..verbose); * is every tag. Same as the esplog command.",
     memorysampleintervalsec:"How often (in seconds) the memory monitor records a snapshot. Lower = more detail, more CPU."
   };
   // Generic fallback for group sub-flags not in the map above.
@@ -2025,6 +2026,10 @@ function saveNotifPolicy() {
           h+='<option value="1"'+(v===1?' selected':'')+'>Warn</option>';
           h+='<option value="2"'+(v===2?' selected':'')+'>Info</option>';
           h+='<option value="3"'+(v===3?' selected':'')+'>Debug</option></select></div>';
+        } else if(e.type==='string'){
+          // esplog's "tag:L,tag:L" (L = N/E/W/I/D/V); the command validates it.
+          h+='<div style="display:flex;align-items:center;gap:0.5rem"'+tAttr+'><span style="font-size:0.88rem;color:var(--panel-fg)">'+e.label+'</span>';
+          h+='<input type="text" class="dbg-input form-input input-fit"'+dbgCmdAttr(cmd)+' value="'+esc(v)+'" placeholder="BT_BTM:E,rpc_utils:W" style="width:260px"'+tAttr+'></div>';
         } else {
           h+='<div style="display:flex;align-items:center;gap:0.5rem"'+tAttr+'><span style="font-size:0.88rem;color:var(--panel-fg)">'+e.label+'</span>';
           var mi=e.min!==undefined?' min="'+e.min+'"':'',ma=e.max!==undefined?' max="'+e.max+'"':'';
@@ -2072,6 +2077,7 @@ function saveNotifPolicy() {
       var cmd=el.getAttribute('data-cmd');if(!cmd)return;
       var val=el.value;
       if(cmd in bl && bl[cmd]===val)return;
+      if(el.type==='text'&&!val.trim())val='clear';  // esplog: an emptied field clears
       cmds.push(cmd+' '+val);
     });
     if(!cmds.length){

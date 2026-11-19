@@ -112,9 +112,31 @@ in P4 images; every other board compiles it to nothing.
   releases the companion when a feature asks for the radio.
 - **Console mirror.** The C6's own UART console reaches the P4 on GPIO36 and
   is mirrored into the P4 log as `C6>` lines (`c6console [on|off]`, on by
-  default). It is the only view of the companion's boot messages and crash
-  backtraces while HardwareOne is running; it found the first hardware bug of
-  this subsystem within minutes.
+  default; the choice is saved, and after `c6console off` the mirror stops once
+  the settings load at boot). Each line keeps the level the C6 printed it
+  with, and a crash report (panic, abort, assert, stack overflow, brownout, a
+  failed `ESP_ERROR_CHECK` with its file and expression, heap corruption, a
+  task watchdog's register dump, through the reset that follows) is relayed
+  as errors. By default only those errors show; the rest follows
+  `debugwifidriver` or `debugbluetoothcore` (see the next item). It is the only
+  view of the companion's boot messages and crash backtraces while HardwareOne
+  is running; it found the first hardware bug of this subsystem within minutes.
+- **Radio stack logs.** ESP-Hosted, the C6 console and Bluedroid log routine
+  lines in normal use: about 40 per Hosted session (boot, recovery, release,
+  idle reopen), one per station state change, three `C6>` lines per RPC, a
+  `BT_*` warning per connect and disconnect. Their tags print only errors by
+  default. `debugwifidriver 1` brings back ESP-Hosted's (`transport`,
+  `H_SDIO_DRV`, `sdio_wrapper`, `H_API`, `RPC_WRAP`, `rpc_core`, `rpc_rsp`,
+  `rpc_evt`, `rpc_utils`, `vhci_drv`, `os_wrapper_esp`, `esp_cli`,
+  `esp_wifi_remote`) and `C6>`; `debugbluetoothcore 1` brings back
+  Bluedroid's (`BT_APPL`, `BT_BTM`, `BT_HCI`, `BT_L2CAP`, `BT_GATT`, `BT_SMP`,
+  `BT_BTC`), `BLE_COEX` and `C6>`. Both apply at once, `temp` too, at
+  boot, and when a whole mask is set (`log start flags=`, `systemlogflags`,
+  `log autostart`); `debugwifi` or `debugbluetooth` alone does not, as for the rest of
+  their families. A saved `esplog <tag> <level>` wins over both, and a saved
+  `esplog * <level>` takes the error default's place. The first Hosted
+  session starts before the settings load, so its start lines stay quiet
+  even with `debugwifidriver` saved on; `c6restart` shows a session's.
 - **Firmware updates.** `c6update "<file>"` streams an image from the P4's
   storage to the C6 over SDIO (ESP-Hosted OTA into the inactive ota slot).
   The file is checked first: an ESP32-C6 application image of at most 1920 KB

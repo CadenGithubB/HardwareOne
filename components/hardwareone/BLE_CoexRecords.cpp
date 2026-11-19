@@ -68,23 +68,34 @@ void unlockLog() { xSemaphoreGive(gLock); }
 // The BLE_COEX lines are the record's own text, as two lines (the record,
 // then its Wi-Fi span) so each stays within the 255 bytes `loglink on` passes
 // on to the web log and file. Without loglink they reach only the console.
+// The lines print only while the BLE_COEX tag is at info: debugbluetoothcore
+// sets it there, ERROR otherwise (System_RadioLogCore.h; `esplog BLE_COEX info`
+// also works). A peer that stays away (a half-connected G2 pair's repair
+// scans, the phone's enroll scans) scans every few seconds for hours. The
+// record is kept either way; `blerecords` shows it and the counters.
+bool linesOn() { return esp_log_level_get(kTag) >= ESP_LOG_INFO; }
+
 void appendScan(const ScanRecord& record) {
   if (!lockLog()) return;  // diagnostics only: drop rather than block a radio owner
   const ScanRecord& r = gLog.addScan(record);
-  Log::scanBody(gLine, sizeof(gLine), r, false);
-  ESP_LOGI(kTag, "scan #%lu %s", (unsigned long)r.seq, gLine);
-  formatWifi(gLine, sizeof(gLine), r.wifi);
-  ESP_LOGI(kTag, "scan #%lu%s", (unsigned long)r.seq, gLine);
+  if (linesOn()) {
+    Log::scanBody(gLine, sizeof(gLine), r, false);
+    ESP_LOGI(kTag, "scan #%lu %s", (unsigned long)r.seq, gLine);
+    formatWifi(gLine, sizeof(gLine), r.wifi);
+    ESP_LOGI(kTag, "scan #%lu%s", (unsigned long)r.seq, gLine);
+  }
   unlockLog();
 }
 
 void appendConnect(const ConnectRecord& record) {
   if (!lockLog()) return;
   const ConnectRecord& r = gLog.addConnect(record);
-  Log::connectBody(gLine, sizeof(gLine), r, false);
-  ESP_LOGI(kTag, "connect #%lu %s", (unsigned long)r.seq, gLine);
-  formatWifi(gLine, sizeof(gLine), r.wifi);
-  ESP_LOGI(kTag, "connect #%lu%s", (unsigned long)r.seq, gLine);
+  if (linesOn()) {
+    Log::connectBody(gLine, sizeof(gLine), r, false);
+    ESP_LOGI(kTag, "connect #%lu %s", (unsigned long)r.seq, gLine);
+    formatWifi(gLine, sizeof(gLine), r.wifi);
+    ESP_LOGI(kTag, "connect #%lu%s", (unsigned long)r.seq, gLine);
+  }
   unlockLog();
 }
 

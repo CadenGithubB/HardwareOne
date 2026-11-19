@@ -207,6 +207,7 @@ struct Settings {
       debugSrLifecycle(false),
       debugSrTuning(false),
       logLevel(3),                    // Default: LOG_LEVEL_DEBUG (show everything)
+      espLogLevels(""),               // No ESP-IDF tag overrides (esplog)
       memorySampleIntervalSec(30),
       espnowEnabled(false),
       espnowmesh(false),
@@ -419,6 +420,7 @@ struct Settings {
       c6AutoRecover(true),
       c6AutoHold(false),
       c6HeartbeatSec(5),
+      c6ConsoleMirror(true),
       bleRequireSecureChannel(true),
       bleSecureChannelSecret(""),
       bleConsoleOnPipe(true),
@@ -757,6 +759,7 @@ struct Settings {
   bool debugCmdflowContext;
   bool webConsoleDebug;                // Enable browser console.log/warn/debug output in web UI (default: false)
   int logLevel;                        // Severity-based logging level (0=error, 1=warn, 2=info, 3=debug)
+  String espLogLevels;                 // ESP-IDF log levels by tag, "tag:L,tag:L" (esplog; System_EspLogCore.h)
   int memorySampleIntervalSec;  // Periodic memory sampling interval in seconds (0=disabled, default: 30)
   // ESP-NOW settings
   bool espnowEnabled;
@@ -1195,6 +1198,7 @@ struct Settings {
   bool c6AutoRecover;           // Recover the companion on its own after an outage (default: true)
   bool c6AutoHold;              // Hold the companion in reset while no radio feature runs (default: false)
   int  c6HeartbeatSec;          // Companion heartbeat interval in seconds, 0 = watchdog off (default: 5)
+  bool c6ConsoleMirror;         // Mirror the companion's own console as C6> lines (c6console; default: true)
   bool bleRequireSecureChannel; // Require the app-layer Secure Channel (server mode); refuse plaintext commands when set
   String bleSecureChannelSecret;// Pre-shared passphrase for the Secure Channel (PBKDF2 -> PSK). Secret.
   String phonePipeSecret;       // Dedicated pipe secret; registry loads/mutates into internal RAM.

@@ -56,7 +56,7 @@ IDF_LOG_ALLOWED: dict[str, int] = {
     "HAL_Camera_P4.cpp": 3,
     "HAL_Display_P4Eye.cpp": 5,
     "HAL_Display_Waveshare.cpp": 5,
-    "HAL_Radio.cpp": 16,      # C6 bring-up at boot, before the queued log runs; 16th: transport not up N ms after the start
+    "HAL_Radio.cpp": 18,      # C6 bring-up at boot, before the queued log runs; 16th: transport not up N ms after the start; 17th-18th: the C6 console mirror relays E/W lines at their own level (C6> tag)
     "HAL_SDCard.cpp": 4,
     "Input_GT911.cpp": 2,
     "System_Filesystem.cpp": 10,

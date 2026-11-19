@@ -269,6 +269,8 @@ Arduino File's void flush/close calls cannot expose every backend failure.
 python3 components/hardwareone/test/host/test_log_level_application.py --sanitize
 python3 components/hardwareone/test/host/test_system_log_status.py --sanitize
 python3 components/hardwareone/test/host/test_command_feed.py --sanitize
+python3 components/hardwareone/test/host/test_esp_log_overrides.py --sanitize
+python3 components/hardwareone/test/host/test_radio_stack_logs.py --sanitize
 ```
 
 `log_level_application` runs the shipping `applyLogLevel`, `cmd_loglevel`, the
@@ -277,7 +279,38 @@ boot clamp block from `applySettings()` and `setDebugSetting`, with DebugManager
 checks the ERROR/WARN/INFO mapping (anything else is DEBUG), that exactly the
 `wifi`, `wifi_init` and `phy_init` tags follow the level, every accepted
 spelling, the persistence request before the apply, no request for an unchanged
-value, refusals that change nothing, and the boot clamp into 0-3.
+value, refusals that change nothing, and the boot clamp into 0-3. The owner
+then re-applies the saved `esplog` tag levels (recorded here).
+
+`esp_log_overrides` runs the shipping `System_EspLogCore.h` and the
+`applyEspLogOverrides`/`cmd_esplog` block of `System_Debug.cpp` with
+`esp_log_level_set` and the persistence request recorded: level names, tag
+validation (the C6 mirror's `C6>` included), set/replace in place/remove, the
+wildcard first, the 16-entry and 240-character limits, the editors' whole
+`tag:L,tag:L` string, malformed stored entries skipped, `HTTP_CLIENT` capped at
+warn, the wildcard applied only at boot and by the command, and refusals that
+change nothing. Its source checks pin the wiring and the rest of the
+2026-11-18 field-log fixes: the boot apply after the firmware's own levels,
+heartbeat RSSI asked only while joined, the `BLE_COEX` scan lines following
+their tag's level, the G2 scans' skipped stop after a scan that ended itself,
+`rpc_utils` among the quiet Hosted tags and `c6console` persisting.
+
+`radio_stack_logs` runs the shipping `System_RadioLogCore.h`, the esplog block
+and `applyRadioStackLogLevels` of `System_Debug.cpp` and HAL_Radio's
+`quietHostedLogs` against a model of ESP-IDF's tag levels (a default, per-tag
+levels, `*` dropping them): every radio stack tag of the build at ERROR by
+default; `debugwifidriver` bringing ESP-Hosted's tags and `C6>` back to their
+stock level, `debugbluetoothcore` Bluedroid's, `BLE_COEX` and `C6>`; a saved
+esplog level winning over both and a saved wildcard taking the quiet default's
+place, each removal taking effect at once; the boot order and a new Hosted
+session (esp_hosted_init's WARN) ending on the same levels; and the C6
+console's line levels (the C6's own prefix, crash reports as errors, among
+them a failed `ESP_ERROR_CHECK`, heap corruption and a task watchdog's dump, a
+split line keeping its level); and the esplog lock taken once per save and per
+apply, never nested, with debug.json written outside it. Its source checks pin
+the flag readers and every caller (the paths that replace the whole debug mask
+included), HAL's quiet start, the `BLE_COEX` lines following their tag, the help
+text, and that every tag in the table is one this build's sources log with.
 
 `system_log_status` runs `formatSystemLogStatus`, both `formatSystemLogFlags`
 overloads, `parseSystemLogFlags`, `systemLogApplyPersistedFlags` and

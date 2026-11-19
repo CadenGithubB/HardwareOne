@@ -21,6 +21,11 @@ static const char* const kEspNames[] = {"NONE", "ERROR", "WARN", "INFO", "DEBUG"
 void esp_log_level_set(const char* tag, esp_log_level_t level) {
   events.push_back(std::string("esp:") + tag + "=" + kEspNames[level]);
 }
+// The saved esplog tag levels go on top of the owner's (test_esp_log_overrides
+// runs them); here only the call and its place are recorded.
+void applyEspLogOverrides(bool includeWildcard) {
+  events.push_back(includeWildcard ? "overrides:all" : "overrides:tags");
+}
 struct DebugManager {
   static DebugManager& getInstance() { static DebugManager instance; return instance; }
   void setLogLevel(uint8_t level) { events.push_back("manager=" + std::to_string(level)); }
@@ -52,7 +57,7 @@ static void bootApplyLogLevel() {
 static std::vector<std::string> applied(int manager, const char* esp) {
   const std::string level = esp;
   return {"manager=" + std::to_string(manager), "esp:wifi=" + level, "esp:wifi_init=" + level,
-          "esp:phy_init=" + level};
+          "esp:phy_init=" + level, "overrides:tags"};
 }
 static std::vector<std::string> withPersist(std::vector<std::string> calls) {
   calls.insert(calls.begin(), "persist");

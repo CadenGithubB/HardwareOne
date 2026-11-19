@@ -172,7 +172,7 @@ enum class LlmState { UNLOADED, LOADING, READY, GENERATING, ERROR };
 struct LlmStatus { LlmState state; char modelPath[64]; char errorMsg[128]; };
 struct LlmGenParams {};
 using esp_err_t = int;
-constexpr int ESP_LOG_WARN = 2, ESP_LOG_DEBUG = 4;
+constexpr int ESP_LOG_ERROR = 1, ESP_LOG_WARN = 2, ESP_LOG_DEBUG = 4;
 static int httpLogLevel = ESP_LOG_DEBUG;
 static int logSuppressions = 0;
 static bool ignoreLogSuppression = false;
@@ -365,6 +365,13 @@ int main() {
   assert(httpLlmStartAsync("unsafe debug profile", {})); drainWorker();
   assert(opens == 0 && auth.empty());
   assert(response().find("HTTP debug logging exposes credentials") != std::string::npos);
+  // A quieter saved level (esplog HTTP_CLIENT error) stays: the worker only
+  // lowers a level above WARN.
+  resetServer(); httpLogLevel = ESP_LOG_ERROR;
+  assert(httpLlmStartAsync("quieter level kept", {}));
+  { auto task = pendingTask; void* arg = pendingArg; pendingTask = nullptr; pendingArg = nullptr; task(arg); }
+  assert(httpLlmIsDone() && allocations == 0 && opens == 1);
+  assert(logSuppressions == 0 && httpLogLevel == ESP_LOG_ERROR);
   // Snapshot allocation failure closes admission immediately, even with a
   // previously working target. A later successful publication re-enables it.
   resetServer(); failConfigAllocation = true;

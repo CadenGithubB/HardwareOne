@@ -46,6 +46,17 @@ static int settingWrites = 0;
 static void setSetting(String& field, const String& value) {
   if (field != value) { field = value; ++settingWrites; }
 }
+// The flag hooks after a whole-mask change (System_Debug.cpp
+// applyDebugMaskLogLevels; test_radio_stack_logs pins its body): the restore
+// must call it with the mask it replaced, and only when it replaced it.
+static int maskApplies = 0;
+static DebugFlagMask maskBefore;
+static DebugFlagMask maskSeen;
+void applyDebugMaskLogLevels(DebugFlagMask before) {
+  ++maskApplies;
+  maskBefore = before;
+  maskSeen = gDebugFlags;
+}
 // INSERT_PRODUCTION
 
 static constexpr size_t kCliStatus = HW1_CLI_STATUS_BYTES;
@@ -175,13 +186,17 @@ int main() {
     gSettings.systemLogFlags = rejected;
     CHECK(!systemLogApplyPersistedFlags() && gDebugFlags == live);
   }
+  CHECK(maskApplies == 0);
+  gDebugFlags = live;
   gSettings.systemLogFlags = "0x0000000000000000:0000000000000000:0000000000000001:0000000000000000";
   CHECK(systemLogApplyPersistedFlags() && gDebugFlags == DEBUG_BIT(64));
+  // The flag hooks ran once, after the new mask was live, told the old one.
+  CHECK(maskApplies == 1 && maskBefore == live && maskSeen == DEBUG_BIT(64));
   // Saved text that is not a hex mask is refused too; it does not clear the
   // live flags.
   gDebugFlags = live;
   gSettings.systemLogFlags = "zz";
-  CHECK(!systemLogApplyPersistedFlags() && gDebugFlags == live);
+  CHECK(!systemLogApplyPersistedFlags() && gDebugFlags == live && maskApplies == 1);
 
   // A persistent per-flag change follows into the saved mask, so the next
   // boot's autostart does not bring a cleared category back.

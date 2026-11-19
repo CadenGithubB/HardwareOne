@@ -4483,6 +4483,16 @@ static bool sessionPrewarmNoteAttempt(SessionPrewarm* pw, uint32_t nowMs) {
   return true;
 }
 
+// The station's RSSI for a heartbeat, or -127 when it is not joined. The AP is
+// asked only while joined (the joined test this file uses for the channel):
+// unjoined, the answer is that error anyway, and on the P4X-EYE every ask is
+// an RPC to the C6 that both sides log as a failure, once per heartbeat (5 s).
+static int8_t heartbeatStaRssi() {
+  if (WiFi.status() != WL_CONNECTED) return (int8_t)-127;
+  wifi_ap_record_t ap = {};
+  return (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : (int8_t)-127;
+}
+
 // The one HEARTBEAT builder: every sender (the periodic broadcast, the
 // master's unicast to its backup, the pairing seeds and the app ping) sends
 // a full 44-byte payload, so none falls under the row's minimum. peerCount is
@@ -4490,8 +4500,7 @@ static bool sessionPrewarmNoteAttempt(SessionPrewarm* pw, uint32_t nowMs) {
 static void v4FillHeartbeat(V4PayloadHeartbeat& hb) {
   memset(&hb, 0, sizeof(hb));
   hb.role      = gSettings.meshRole;
-  wifi_ap_record_t ap = {};
-  hb.rssi      = (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : (int8_t)-127;
+  hb.rssi      = heartbeatStaRssi();
   hb.uptimeSec = SelfDevice::uptimeSeconds();
   hb.freeHeap  = (uint32_t)ESP.getFreeHeap();
   devicename::putField(hb.deviceName, gSettings.espnowDeviceName.c_str());
@@ -13159,8 +13168,7 @@ void processMeshHeartbeats() {
         phb.seqNum    = gBondHeartbeatSeqNum + 1;
         phb.bootCounter = gBootCounter;
         phb.settingsHash = gEspNow ? gEspNow->bondLocalSettingsHash : 0;
-        wifi_ap_record_t ap2 = {};
-        phb.rssi = (esp_wifi_sta_get_ap_info(&ap2) == ESP_OK) ? ap2.rssi : (int8_t)-127;
+        phb.rssi = heartbeatStaRssi();
         // Encrypted + initiator-only: without a session bondSendEncryptedAsync
         // drops the heartbeat and, on the initiator (higher-MAC) side, starts
         // the handshake (backed off for a partner that does not answer); the

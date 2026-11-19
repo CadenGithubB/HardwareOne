@@ -2018,6 +2018,10 @@ void hardwareone_setup() {
   // 7. NETWORK — WiFi + NTP
   // ========================================================================
   crashRecordSetPhase(CRASH_PHASE_NETWORK);
+  // The saved esplog tag levels, wildcard included, after every boot-time
+  // esp_log_level_set of the firmware's own (HAL_Radio's RPC tags, applySettings'
+  // Wi-Fi/HTTPS tags, the I2C tag above) and before the radios start.
+  applyEspLogOverrides(true);
   // Radio companion first (P4X-EYE): records how the C6 came up and arms its
   // monitor, so the feature starts below can ask whether the radio exists.
   radioCompanionBootInit();

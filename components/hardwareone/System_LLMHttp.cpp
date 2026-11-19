@@ -215,7 +215,8 @@ void worker(void* context) {
   // (including Authorization) and inbound header values. Suppress that tag
   // before initialization/header setup and keep it suppressed after cleanup.
   // Do not restore a previous debug level while another request can start.
-  esp_log_level_set("HTTP_CLIENT", ESP_LOG_WARN);
+  // Only lowered: a quieter saved `esplog HTTP_CLIENT` level stays.
+  if (esp_log_level_get("HTTP_CLIENT") > ESP_LOG_WARN) esp_log_level_set("HTTP_CLIENT", ESP_LOG_WARN);
   auto* run = static_cast<Run*>(context);
   // Some IDF profiles compile dynamic log-level control out, making set_level
   // a no-op. Fail before constructing a credential-bearing HTTP client if its

@@ -2247,8 +2247,11 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_resident_stack_floor.py)
 # The .3 sharing milestones: log-level owner and its CLI/boot callers, the
-# system-log status/flag formatters, and the shared command-origin prefix.
-foreach(test_name IN ITEMS log_level_application system_log_status command_feed)
+# system-log status/flag formatters, and the shared command-origin prefix; and
+# esplog (ESP-IDF tag levels, saved) with the field-log quieting around it; and
+# the radio stacks' own tags, quiet unless debugwifidriver/debugbluetoothcore.
+foreach(test_name IN ITEMS log_level_application system_log_status command_feed esp_log_overrides
+        radio_stack_logs)
   add_test(
     NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE}

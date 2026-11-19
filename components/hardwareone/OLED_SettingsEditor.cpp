@@ -242,9 +242,11 @@ static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
   if (editorIsRemote()) return commitRemoteSettingValue(entry, value);
   char out[128];
   // An emptied master fingerprint goes as 'clear' (no master named): an
-  // empty argument would only show the value and report it saved.
-  bool ok = executeOledCommandWithResult(
-      String(cmdName) + " " + espnowsensor::fingerprintEditorArg(cmdName, value.c_str()), out, sizeof(out));
+  // empty argument would only show the value and report it saved. An emptied
+  // esplog field likewise goes as 'clear' (a bare esplog only lists levels).
+  const char* arg = espnowsensor::fingerprintEditorArg(cmdName, value.c_str());
+  if (!strcasecmp(cmdName, "esplog") && !arg[strspn(arg, " \t\r\n")]) arg = "clear";
+  bool ok = executeOledCommandWithResult(String(cmdName) + " " + arg, out, sizeof(out));
   if (!ok) {
     settingsEditorShowError((out[0] != '\0') ? String(out) : String("Save failed"), 2500);
     return false;

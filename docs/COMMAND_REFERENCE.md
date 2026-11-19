@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1038 commands across 57 modules (1038 registry entries).
+1039 commands across 57 modules (1039 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -51,7 +51,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`i2c`](#i2c) — 24 commands
 - [`automation`](#automation) — 9 commands
 - [`battery`](#battery) — 3 commands
-- [`debug`](#debug) — 181 commands
+- [`debug`](#debug) — 182 commands
 - [`settings`](#settings) — 18 commands
 - [`sensorlog`](#sensorlog) — 2 commands
 - [`health`](#health) — 2 commands
@@ -297,7 +297,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `c6autohold` | A | Hold the companion in reset while no radio feature runs: c6autohold [on\|off] (persists). |
 | `c6autorecover` | A | Auto-recover the companion after an outage: c6autorecover [on\|off] (persists). |
 | `c6confirm` | A | Confirm the companion's running image so it cannot roll back. |
-| `c6console` | A | Mirror the C6's own console into the P4 log: c6console [on\|off]. |
+| `c6console` | A | Mirror the C6's own console into the P4 log: c6console [on\|off] (persists). |
 | `c6heartbeat` | A | Companion heartbeat interval in seconds, 0 disables the watchdog: c6heartbeat <0..60> (persists). |
 | `c6hold` | A | Hold the C6 in reset (radio fully off) or release it: c6hold [on\|off].<br/>`Usage: c6hold [on\|off] on - stop Wi-Fi, Bluetooth and ESP-NOW and hold the companion in reset off - release it and restore what was running` |
 | `c6restart` | A | Restart the C6 companion in place (radio features stop and come back). |
@@ -949,7 +949,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `debugautoscheduler` | A | Debug automations scheduler.<br/>`Usage: debugautoscheduler <0\|1> [temp\|runtime]` |
 | `debugautotiming` | A | Debug automations timing.<br/>`Usage: debugautotiming <0\|1> [temp\|runtime]` |
 | `debugbluetooth` | A | Debug Bluetooth (parent flag).<br/>`Usage: debugbluetooth <0\|1> [temp\|runtime]` |
-| `debugbluetoothcore` | A | Debug Bluetooth core lifecycle.<br/>`Usage: debugbluetoothcore <0\|1> [temp\|runtime]` |
+| `debugbluetoothcore` | A | Debug Bluetooth core lifecycle; also shows the Bluetooth stack's own routine log lines (Bluedroid BT_*, BLE_COEX records, the P4X-EYE's C6 console), which print only errors while it is off.<br/>`Usage: debugbluetoothcore <0\|1> [temp\|runtime] On: BT_APPL, BT_BTM, BT_HCI, BT_L2CAP, BT_GATT, BT_SMP, BT_BTC, BLE_INIT, BTDM_INIT, BLE_COEX and C6> at their stock level. Off (default): errors only. debugbluetooth alone does not change them; a saved esplog level wins.` |
 | `debugbluetoothdata` | A | Debug Bluetooth command/data path.<br/>`Usage: debugbluetoothdata <0\|1> [temp\|runtime]` |
 | `debugbluetoothgatt` | A | Debug Bluetooth GATT operations.<br/>`Usage: debugbluetoothgatt <0\|1> [temp\|runtime]` |
 | `debugbuffer` | A | Show debug ring buffer status. |
@@ -1099,8 +1099,9 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `debugwifi` | A | Debug WiFi operations.<br/>`Usage: debugwifi <0\|1> [temp\|runtime]` |
 | `debugwificonfig` | A | Debug WiFi config.<br/>`Usage: debugwificonfig <0\|1> [temp\|runtime]` |
 | `debugwificonnection` | A | Debug WiFi connection.<br/>`Usage: debugwificonnection <0\|1> [temp\|runtime]` |
-| `debugwifidriver` | A | Debug WiFi driver.<br/>`Usage: debugwifidriver <0\|1> [temp\|runtime]` |
+| `debugwifidriver` | A | Debug WiFi driver; on the P4X-EYE also shows ESP-Hosted's and the C6 console's routine log lines, which print only errors while it is off.<br/>`Usage: debugwifidriver <0\|1> [temp\|runtime] On: transport, H_SDIO_DRV, sdio_wrapper, H_API, RPC_WRAP, rpc_*, vhci_drv, os_wrapper_esp, esp_cli, esp_wifi_remote and C6> at their stock level. Off (default): errors only. debugwifi alone does not change them; a saved esplog level wins.` |
 | `debugwifiscanning` | A | Debug WiFi scanning.<br/>`Usage: debugwifiscanning <0\|1> [temp\|runtime]` |
+| `esplog` | A | ESP-IDF log levels by tag, saved across reboots (loglevel covers only HardwareOne's own log).<br/>`Usage: esplog [<tag\|*> <none\|error\|warn\|info\|debug\|verbose\|default>] \| esplog clear (bare): list the saved tag levels <tag> <level>: set and save, e.g. esplog BT_BTM error, esplog rpc_utils warn <tag> default: remove the saved level (a radio stack tag follows its debug flag again at once, any other tag gets the firmware's level back at the next reboot) * <level>: every tag, the firmware's quieted ones too; tag entries go on top clear: remove every saved level` |
 | `log` | A | System-wide logging to file.<br/>`Usage: log <start\|stop\|status\|autostart> start ["filepath"] [flags=0x...] [tags=0\|1]: Begin system logging filepath: Log file path, quoted (auto-generated if omitted) flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h) tags: Prefix lines with category tags (0\|1, default 1) stop / status: Stop logging / show logging status maxsize <bytes> / rotations <0-9>: Rotate the file at this size, keeping that many old files (.1, .2, ...) autostart [on\|off]: Toggle logging auto-start on boot (bare = toggle)` |
 | `loglevel` | A | Set log level (error\|warn\|info\|debug).<br/>`Usage: loglevel <error\|warn\|info\|debug>` |
 | `loglink` | A | Route ESP-IDF logs through the unified output queue (stops UART interleave).<br/>`Usage: loglink [<0\|1\|on\|off>] (bare = show status)` |

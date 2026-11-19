@@ -715,16 +715,19 @@ static void case_editor_commits_local_otherwise() {
 
 // An emptied master fingerprint field is saved as 'clear' (no master named):
 // the bare command only shows the value, and the editor took that reply for
-// a save. A value goes as typed; another string setting keeps its empty text.
+// a save. An emptied esplog field is 'clear' too (a bare esplog only lists).
+// A value goes as typed; another string setting keeps its empty text.
 static void case_editor_clears_fingerprint() {
   gCase = "editor_clears_fingerprint";
-  static String master, backup, other;
+  static String master, backup, other, esplogLevels;
   const SettingEntry entries[] = {
     {"masterFingerprint", SETTING_STRING, &master, 0, 0, "", 0, 0, "Master Fingerprint", nullptr, false, "mesh",
      "espnowmasterfingerprint"},
     {"backupMasterFingerprint", SETTING_STRING, &backup, 0, 0, "", 0, 0, "Backup Master Fingerprint", nullptr, false,
      "mesh", "espnowbackupfingerprint"},
     {"ntpServer", SETTING_STRING, &other, 0, 0, "", 0, 0, "NTP", nullptr, false, "wifi", "ntpserver"},
+    {"espLogLevels", SETTING_STRING, &esplogLevels, 0, 0, "", 0, 0, "ESP-IDF log levels by tag", nullptr, false,
+     "debug", "esplog"},
   };
   const std::string hex = "6e9c0f7a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6";
   resetWorld();
@@ -734,8 +737,11 @@ static void case_editor_clears_fingerprint() {
   setSettingValueStr(&entries[1], "  ");
   setSettingValueStr(&entries[0], String(hex.c_str()));
   setSettingValueStr(&entries[2], "");
+  setSettingValueStr(&entries[3], " ");
+  setSettingValueStr(&entries[3], "BT_BTM:E");
   EXPECT(commandsAre(gWithResult, {"espnowmasterfingerprint clear", "espnowbackupfingerprint clear",
-                                   "espnowmasterfingerprint " + hex, "ntpserver "}),
+                                   "espnowmasterfingerprint " + hex, "ntpserver ", "esplog clear",
+                                   "esplog BT_BTM:E"}),
          "an emptied fingerprint goes as 'clear', ran: " + joined(gWithResult));
 }
 

@@ -532,9 +532,9 @@ struct V4PayloadBondHeartbeat {
 namespace SelfDevice { [[maybe_unused]] static uint32_t uptimeSeconds() { return gNowMs / 1000; } }
 struct EspClass { uint32_t getFreeHeap() const { return 100000; } };
 [[maybe_unused]] static EspClass ESP;
-struct wifi_ap_record_t { int8_t rssi; };
-static constexpr int ESP_OK = 0;
-[[maybe_unused]] static int esp_wifi_sta_get_ap_info(wifi_ap_record_t* ap) { ap->rssi = -50; return ESP_OK; }
+[[maybe_unused]] static constexpr int ESP_OK = 0;
+// System_ESPNow.cpp's joined-only AP lookup (the heartbeats' RSSI).
+[[maybe_unused]] static int8_t heartbeatStaRssi() { return -50; }
 // The event log: every line, as "CATEGORY: text".
 static std::vector<std::string> gEventLines;
 [[maybe_unused]] static void logSystemEvent(const char* category, const char* fmt, ...) {

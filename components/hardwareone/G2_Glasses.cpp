@@ -595,6 +595,11 @@ static BLEScan*       gScan    = nullptr;
 // Bluedroid's BLEScan has no isScanning() (NimBLE does); we skip a redundant
 // stop() at the end of the poll loop to avoid "scan not active" errors.
 static volatile bool gG2ScanStoppedEarly = false;
+// Set by the scan's completion callback: the controller's timer ended the scan
+// (a scan that found nothing runs out before the poll loop's cushion does).
+// Cleared before each start. Same pattern as G2_Ring.cpp's gRingScanEnded.
+static std::atomic<bool> gG2ScanEnded{false};
+static void g2ScanEndedCallback(BLEScanResults) { gG2ScanEnded = true; }
 static portMUX_TYPE gG2ScanCallbackMux = portMUX_INITIALIZER_UNLOCKED;
 static bool gG2ScanCallbackAdmission = false;
 static uint16_t gG2ScanCallbacksInFlight = 0;
@@ -716,12 +721,14 @@ static bool g2ScanCallbacksIdle() {
   return idle;
 }
 
-// G2ScanCallbacks may call stop() when all required temples are found early.
-// Calling stop() again after the poll loop triggers Bluedroid noise:
-// "BTM_BleScan scan not active" / stop scan failed status=0x6.
+// G2ScanCallbacks may call stop() when all required temples are found early,
+// and a scan that finds nothing ends on its own timer. Calling stop() again in
+// either case triggers Bluedroid noise: "BTM_BleScan scan not active" / stop
+// scan failed status=0x6 (every missed repair scan of a half-connected pair).
+// A scan that ended itself already gave the scanner's end semaphore.
 static void g2ScanStopIfActive() {
   if (!gScan) return;
-  if (!gG2ScanStoppedEarly) gScan->stop();
+  if (!gG2ScanStoppedEarly && !gG2ScanEnded) gScan->stop();
   gG2ScanStoppedEarly = false;
 }
 
@@ -11239,6 +11246,7 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
   gScan->setAdvertisedDeviceCallbacks(&gG2ScanCallbacks, true);
   const uint32_t kScanSec = 3;
   gG2ScanStoppedEarly = false;
+  gG2ScanEnded = false;
   const uint32_t scanEpoch = g2ScanCallbackBegin();
   if (scanEpoch == 0) {
     g2ScanClearMacContext();
@@ -11248,7 +11256,7 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
   }
   bleCoexScanBegin(hw1coex::Peer::Glasses, hw1coex::Purpose::Repair, 160, 158, true, false,
                    uint8_t(kScanSec));
-  gScan->start(kScanSec, [](BLEScanResults) {}, false);
+  gScan->start(kScanSec, g2ScanEndedCallback, false);
 
   // Same poll-with-yield pattern as g2ConnectSync. Yields the heartbeat
   // task while the BLE event handler dispatches advert callbacks; bails
@@ -16990,6 +16998,7 @@ static bool g2ConnectSync(G2Eye eye,
   // Use the non-blocking form so this call doesn't hog the command handler.
   const uint32_t scanSec = (SCAN_DURATION_MS + 999) / 1000;
   gG2ScanStoppedEarly = false;
+  gG2ScanEnded = false;
   const uint32_t scanEpoch = g2ScanCallbackBegin();
   if (scanEpoch == 0) {
     g2ScanClearMacContext();
@@ -17002,10 +17011,10 @@ static bool g2ConnectSync(G2Eye eye,
   const hw1coex::Purpose connectPurpose =
       savedFilter ? hw1coex::Purpose::Saved : hw1coex::Purpose::Discovery;
   bleCoexScanBegin(hw1coex::Peer::Glasses, connectPurpose, 160, 158, true, false, uint8_t(scanSec));
-  gScan->start(scanSec, [](BLEScanResults) {
-    // No-op — we react to individual results in the advertised-device
-    // callback. This just exists so start() takes the non-blocking path.
-  }, false);
+  // Results are handled in the advertised-device callback; the completion
+  // callback only notes that the scan ended itself (and makes start() take
+  // the non-blocking path).
+  gScan->start(scanSec, g2ScanEndedCallback, false);
 
   // Poll for a found-both condition, up to the scan window + a small cushion.
   const uint32_t deadline = millis() + (scanSec * 1000) + 1000;

@@ -219,6 +219,20 @@ everything user-visible since the v0.99.99.1 tag.
   The web Remote page and the OLED bond screen say when the partner has no bond with this device. A
   partner running firmware from before this ignores the new messages, and the bond with it behaves
   as it did (its bond heartbeat counts as its agreement). Host-tested; not yet run on hardware.
+- `esplog` (admin): ESP-IDF log levels by tag, saved across reboots (`loglevel` covers only HardwareOne's own
+  log and the Wi-Fi/PHY tags). `esplog` lists the saved levels; `esplog <tag> <none|error|warn|info|debug|verbose>`
+  sets and saves one (for example `esplog BT_BTM error`); `esplog <tag> default` removes it (the firmware's
+  level returns at the next reboot; a radio stack tag, or the radio stack tags after removing `*`, follows its
+  debug flag again at once); `esplog * <level>` sets every tag, the firmware's quieted ones too, with
+  the saved tag levels on top; `esplog clear` removes all. Up to 16 tags in one debug setting `espLogLevels`
+  (`tag:L,tag:L`, at most 240 characters; the web Debug settings show it as a text field). The boot applies
+  them after the firmware's own levels and before the radios; `loglevel` and `debughttps` keep them on
+  top. `HTTP_CLIENT` stays at warn or below, as its debug lines print request headers. Debug and verbose
+  lines exist only in builds that compile them (the shipped configurations stop at info). Host-tested; not
+  yet run on hardware.
+- `c6console on|off` is saved (companion setting `c6ConsoleMirror`, on by default). The mirror still starts
+  with the companion at boot and stops once the settings load when it was turned off. Host-tested; not yet
+  run on hardware.
 
 ### Fixed
 - Phone link: `phone pair new`, `phone pair`, `phone forget`, `phone stats`, `relay status` and
@@ -780,8 +794,41 @@ everything user-visible since the v0.99.99.1 tag.
   tick is waiting (between stream commands, or for the file system in the manifest lookup); a status
   request the old partner made just before the change is no longer answered after it. Host-tested; not
   yet tested on hardware.
+- P4X-EYE console noise with Wi-Fi not joined (field log, v0.99.99.1, hours of repeats): the ESP-NOW
+  heartbeats (every 5 s, mesh and bond) asked the station's AP for its RSSI even when it was not joined.
+  On the P4X-EYE each ask is an RPC to the C6, which failed and was logged on both sides
+  (`rpc_rsp ... resp code [12303]`, `RPC_WRAP: rpc_wifi_sta_get_ap_info: failed`, `C6>: ... slave_wifi_std:
+  req_wifi_sta_get_ap_info ... failed`). They now ask only while joined and send the "no AP" RSSI (-127)
+  otherwise, as before; the settings file's runtime SSID field is read only while joined too. Joined
+  behaviour is unchanged.
+- The ESP-Hosted line `rpc_utils: Event: SSID <ssid>` every 15 s is gone: it is printed at WARN for
+  every station-config answer (the ESP-NOW channel check reads the config every 15 s), not for an
+  event. `rpc_utils` is now lowered with the other Hosted RPC tags (to error; the file logs nothing
+  else); `esplog rpc_utils warn` brings it back.
+- Bluetooth: a G2 repair or connect scan that found nothing ended on its own timer and was then
+  stopped again, which Bluedroid reported as `BT_BTM: BTM_BleScan scan not active` and
+  `BT_APPL: bta_dm_ble_scan stop scan failed, status=0x6` on every missed scan of a half-connected pair.
+  The G2 scans now note their own end (as the ring scan does) and skip that stop. The `BLE_COEX` line
+  pairs print only with `debugbluetoothcore` on (see the radio stack logs under Changed); the records and
+  counters (`blerecords`) are kept as before. Host-tested; not yet run on hardware.
 
 ### Changed
+- Radio stack logs are quiet unless their debug flag is on, for every user. ESP-Hosted's tags (`transport`,
+  `H_SDIO_DRV`, `sdio_wrapper`, `H_API`, `RPC_WRAP`, `rpc_core`, `rpc_rsp`, `rpc_evt`, `rpc_utils`, `vhci_drv`,
+  `os_wrapper_esp`, `esp_cli`, `esp_wifi_remote`), the C6 console mirror (`C6>`), Bluedroid's (`BT_APPL`,
+  `BT_BTM`, `BT_HCI`, `BT_L2CAP`, `BT_GATT`, `BT_SMP`, `BT_BTC`), the on-chip controller's init (`BLE_INIT`,
+  `BTDM_INIT`) and `BLE_COEX` print only errors by default; on the P4X-EYE they repeated every Hosted session
+  start, station state change, connect, disconnect and companion RPC. `debugwifidriver 1` brings ESP-Hosted's
+  tags and `C6>` back to their stock level, `debugbluetoothcore 1` Bluedroid's, the controller's, `BLE_COEX`
+  and `C6>`, at once (`temp` too) and at boot; `debugverbose 1` both. A mask set whole (`log start flags=`,
+  `systemlogflags`, the saved mask at `log start` and `log autostart`) takes effect on them at once too. A saved `esplog <tag> <level>` wins
+  over the flags, a saved `esplog * <level>` takes the error default's place, and each companion
+  reconnect sets the levels again (ESP-Hosted resets its RPC tags to warn for every session). The C6
+  console now relays each line at the level the C6 printed it with and a crash report as errors (a panic,
+  abort, assert, stack overflow, brownout, failed `ESP_ERROR_CHECK` with its file and expression, heap
+  corruption, or a task watchdog's register dump), so the companion's errors and backtraces still show. The first Hosted session at boot starts before the
+  settings load and stays quiet; `c6restart` shows a session's start lines. Host-tested; not yet run on
+  hardware.
 - ESP-NOW 1.0 forward compatibility (back-capture design, 2026-11-19). A device that only passes a routed
   frame on now refuses just the 1.0 neighbour-only message types (relay envelopes, heartbeats, route
   lists, topology, pairing and the bond numbers) and passes every other one, including types this firmware

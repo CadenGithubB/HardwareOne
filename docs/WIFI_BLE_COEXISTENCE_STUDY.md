@@ -117,7 +117,9 @@ now names the source of a cancel instead of "phone operation cancelled".
 - **Records.** `BLE_CoexRecords` keeps the last 16 scans and 16 connects for G2 (each temple), the ring and the phone,
   with per-peer outcome counters. `blerecords [scans|connects|clear]` shows them as whole lines within the 4 KB
   command reply; each record also prints two `BLE_COEX` log lines, the record and its Wi-Fi span (run `loglink on` to
-  reach the web log and file). No addresses or names are kept.
+  reach the web log and file). The lines print only while `debugbluetoothcore` is on (or `esplog BLE_COEX info`): a
+  peer that stays away scans every few seconds, and `BLE_COEX` is one of the radio stack tags held at error by
+  default, with Bluedroid's `BT_*` tags (see the P4X-EYE notes). No addresses or names are kept.
 - **Scans.** Purpose (discovery, saved, repair, reconnect, enroll); outcome (found, partial, missed, aborted when it
   ended well before its length, start-failed when the controller never confirmed it); duration, from the
   controller's start and end events when both were seen (`dur_ms=…(ctl)`), else the task's span (`(task)`); time to
@@ -178,8 +180,9 @@ now names the source of a cancel instead of "phone operation cancelled".
 **Controls:**
 - the same AP and channel; record RSSI only, never names or addresses;
 - quiet filesystem activity;
-- fixed log levels, and `loglink on` before a capture: the `BLE_COEX` lines are ESP-IDF log lines, which otherwise
-  reach only the serial console and can interleave with other output there;
+- fixed log levels, `debugbluetoothcore 1` (the `BLE_COEX` lines and Bluedroid's warnings print only with it), and
+  `loglink on` before a capture: the `BLE_COEX` lines are ESP-IDF log lines, which otherwise reach only the serial
+  console and can interleave with other output there;
 - the firmware hash recorded for every run.
 
 **The P4 starts here.** The firmware-007 phone-pipe A/B arms are the first part of this plan.

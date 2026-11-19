@@ -113,6 +113,10 @@ bool oledRunCommand(const String& command) {
   return true;
 }
 
+// The flag hooks after a whole-mask change (System_Debug.cpp; run by
+// test_radio_stack_logs and system_log_status). Counted only.
+static int maskApplies = 0;
+void applyDebugMaskLogLevels(DebugFlagMask) { ++maskApplies; }
 // INSERT_PRODUCTION
 
 // ---------------------------------------------------------------------------
@@ -280,8 +284,10 @@ int main() {
   requests.clear();
   const std::string espnowCore = std::string(kDbgLabel[DBG_ESPNOW_CORE]);
   CHECK(selectedRow() == "[ ] " + espnowCore);
+  const int appliesBefore = maskApplies;
   press(INPUT_BUTTON_A);
   CHECK(requests.size() == 1 && requests[0].rfind("systemlogflags 0x", 0) == 0);
+  CHECK(maskApplies == appliesBefore + 1);  // the live mask changed whole: its flag hooks ran
   CHECK(systemLogConfiguredFlags() == (before | DEBUG_ESPNOW_CORE));
   CHECK(gDebugFlags == (before | DEBUG_ESPNOW_CORE));
   CHECK(selectedRow() == "[+] " + espnowCore);
