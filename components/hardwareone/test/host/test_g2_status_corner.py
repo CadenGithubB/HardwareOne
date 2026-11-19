@@ -88,7 +88,7 @@ int main() {
     return in;
   };
   FakeLinkInputs stopped, noSecret, ready, pairing;
-  noSecret.label = "configure phone secret first";
+  noSecret.label = "no secret: phone pair new, or New code on screen";
   ready = running(PipeStep::Link, "ready", true); ready.pipeReady = true;
   pairing = running(PipeStep::Scanning, "waiting to enroll", false); pairing.enrolling = true;
   const Phase phases[] = {

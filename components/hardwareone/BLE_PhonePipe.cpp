@@ -267,12 +267,24 @@ uint32_t pairId=0,pairOpenedAt=0;bool pairOnDisplay=false;
 char pairCode[hw1code::kDisplayLen+1]{};
 std::atomic<uint32_t> pairCloseWanted{0};  // the window the code screen let go of (any task)
 
+// The owner mutex exists from the first Lock on, made under initMux in static
+// storage, with no queue, task or stack as a side effect: a phone command on a
+// boot whose link never opened (`phone pair new` with no secret yet) gets the
+// lock, so a failed Lock only means another holder. resources() makes it the
+// same way. Once made it is never deleted or replaced.
 class Lock {
  public:
-  explicit Lock(uint32_t wait=50) : held(mutex && xSemaphoreTake(mutex,pdMS_TO_TICKS(wait))==pdTRUE) {}
-  ~Lock(){if(held)xSemaphoreGive(mutex);}
+  explicit Lock(uint32_t wait=50) : handle(owner()),held(handle && xSemaphoreTake(handle,pdMS_TO_TICKS(wait))==pdTRUE) {}
+  ~Lock(){if(held)xSemaphoreGive(handle);}
   explicit operator bool() const{return held;}
- private: bool held;
+  static SemaphoreHandle_t owner() {
+    portENTER_CRITICAL(&initMux);
+    if(!mutex)mutex=xSemaphoreCreateMutexStatic(&mutexStorage);
+    const SemaphoreHandle_t made=mutex;
+    portEXIT_CRITICAL(&initMux);
+    return made;
+  }
+ private: SemaphoreHandle_t handle;bool held;
 };
 class Role {
  public:
@@ -627,7 +639,7 @@ void beginJob(uint32_t now) {
 // window) for the admin session that asked, queued on the setup worker;
 // nullptr when queued. Owner mutex held, step Idle with no job.
 const char* startEnrollmentLocked(uint32_t now,TransportSessionEpoch epoch,CommandSource source) {
-  uint32_t t=0;if(!bleSetupClaim(BleSetupClient::Phone,&t))return "Error: phone pipe busy; disconnect first";
+  uint32_t t=0;if(!bleSetupClaim(BleSetupClient::Phone,&t))return "Error: phone pipe busy: previous setup unfinished; retry soon";
   if(!blePeerBeginManualLearn(BLE_PEER_PHONE,intent,identityGeneration)) {
     bleSetupCancelClaim(BleSetupClient::Phone,t);return "Error: enrollment authority unavailable";
   }
@@ -635,7 +647,7 @@ const char* startEnrollmentLocked(uint32_t now,TransportSessionEpoch epoch,Comma
   enrolling=job=true;request={};jobAt=now;wantToken.store(t);setStep(Step::Waiting,PipeStatus::WaitingToEnroll,jobAt);
   if(!bleSetupPublish(BleSetupClient::Phone,t)) {
     bleSetupCancelClaim(BleSetupClient::Phone,t);wantToken.store(0);job=enrolling=false;
-    setStep(Step::Idle,PipeStatus::Disconnected,jobAt);return "Error: phone pipe busy; disconnect first";
+    setStep(Step::Idle,PipeStatus::Disconnected,jobAt);return "Error: phone pipe busy: previous setup unfinished; retry soon";
   }
   return nullptr;
 }
@@ -943,12 +955,14 @@ void run(void*) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
+// The queue and the task, from the first link open on (the owner mutex may
+// exist already: Lock makes it). gapQueue set means this ran once.
 bool resources() {
+  const SemaphoreHandle_t owner=Lock::owner();
   portENTER_CRITICAL(&initMux);
-  if(!mutex)mutex=xSemaphoreCreateMutexStatic(&mutexStorage);
   if(!gapQueue)gapQueue=xQueueCreateStatic(8,sizeof(GapEvent),gapQueueBytes,&gapQueueStorage);
   portEXIT_CRITICAL(&initMux);
-  if(!mutex || !gapQueue)return false;
+  if(!owner || !gapQueue)return false;
   if(!worker && xTaskCreateLogged(run,"phone_pipe",8192,nullptr,kPipePriority,&worker,"BLE phone pipe")!=pdPASS)return false;
   return true;
 }
@@ -995,7 +1009,8 @@ void giveStateBack(){if(stateHeld.exchange(false))blePipeConsoleStateRelease();}
 // phonePipeInvalidateSecret() ran since the key was found missing. A secret
 // change racing a background start (boot, the radio companion, stuck-phone
 // recovery) then never leaves a key for neither secret: that start fails and
-// the next derives the new key. Retry: such a race, or the owner mutex busy.
+// the next derives the new key. Retry: such a race, the owner mutex busy, or
+// a stored secret whose key derivation failed. NoSecret: none stored.
 enum class PskLoad : uint8_t { Ready, NoSecret, Retry };
 PskLoad loadPsk() {
   uint32_t seen=0;
@@ -1005,7 +1020,9 @@ PskLoad loadPsk() {
   const bool derived=secret.length() && sodium_init()>=0 &&
       hw1sc::scPbkdf2(reinterpret_cast<const uint8_t*>(secret.c_str()),secret.length(),
           reinterpret_cast<const uint8_t*>(hw1phone::kPipeLabel),strlen(hw1phone::kPipeLabel),100000,psk);
-  PskLoad got=derived?PskLoad::Retry:PskLoad::NoSecret;
+  // A stored secret whose key could not be derived (libsodium or an mbedTLS
+  // allocation failed) is not a missing secret: retry, never "pair new".
+  PskLoad got=secret.length()?PskLoad::Retry:PskLoad::NoSecret;
   if(derived){Lock lock(1000);
     if(lock && pskInvalidations==seen){std::memcpy(cachedPsk,psk,sizeof(psk));pskValid=true;got=PskLoad::Ready;}}
   sodium_memzero(psk,sizeof(psk));
@@ -1150,6 +1167,9 @@ bool phonePipeWorkerRelease(uint32_t timeoutMs) {
 bool phonePipeInvalidateSecret() {
   if(!mutex)return true; // no resources means no cached key
   Lock lock(1000);if(!lock || active.load())return false;
+  // The secret is changing: the last open's "no secret" says nothing about the
+  // next one, and its label would send the user to replace the new secret.
+  PipeStatus noSecret=PipeStatus::NoSecret;(void)status.compare_exchange_strong(noSecret,PipeStatus::Stopped);
   // A failure charged against the replaced key says nothing about the new one.
   // A start deriving meanwhile throws its key away (loadPsk).
   sodium_memzero(cachedPsk,sizeof(cachedPsk));pskValid=false;haveAuthFailure=false;++pskInvalidations;return true;
@@ -1184,7 +1204,8 @@ PhonePipePush phonePipeConsolePush(uint32_t generation,uint16_t streamId,const u
   return PhonePipePush::Gone;
 }
 bool phonePipeLinkSummary(PhonePipeLinkSummary* out) {
-  if(!mutex){if(out)*out={};return false;}  // never started: nothing to report
+  // Never started (resources() never ran; the owner mutex alone says nothing): nothing to report.
+  if(!gapQueue){if(out)*out={};return false;}
   portENTER_CRITICAL(&summaryMux);const PhonePipeLinkSummary s=linkSummary;portEXIT_CRITICAL(&summaryMux);
   if(out)*out=s;
   return true;
@@ -1309,6 +1330,25 @@ bool phonePipeRetired(PhonePipeStream handle) {
   Lock lock(0);if(!lock)return false;
   return handle.generation!=phoneGatt.generation() || !phoneGatt.pipe.find(handle.id);
 }
+// A phone command's busy answer: what the pipe is busy with and what to do.
+// Without the owner lock (another phone command or the pipe task holds it for
+// a moment) nothing more is known; with it (locked: owner mutex held), the
+// pipe's own work that refused the command.
+// Short enough for the screen's error toast (15 columns, 6 lines on the
+// P4X-EYE), which shows the Pair Phone and Forget rows' refusals.
+static const char* pipeBusy(bool locked) {
+  if(!locked)return "Error: phone pipe busy (another phone task holds it); retry soon";
+  if(step==Step::Fault)return "Error: phone pipe busy: cleanup failed; wait, or closeble then openble";
+  if(forgetWanted)return "Error: phone pipe busy: a phone forget is finishing; wait";
+  if(step==Step::Retiring)return "Error: phone pipe busy: the last link is closing; retry soon";
+  // A linked phone keeps its job until the link is lost.
+  if(ready.load())return "Error: phone pipe busy: a phone is connected; closephone first";
+  if(pairState.load()==PhonePairWindow::Open)
+    return "Error: phone pipe busy: pairing window open; pair in the app or closephone";
+  if(job && enrolling.load())return "Error: phone pipe busy: pairing in progress; see phone status or closephone";
+  if(job || step!=Step::Idle)return "Error: phone pipe busy: connecting; see phone status or closephone";
+  return "Error: phone pipe busy; retry soon";
+}
 // `phone scan [default|legacy|<interval_ms> <window_ms> dup|nodup]`: show the
 // reconnect scan profile and the last eight scans, or change the profile.
 static const char* scanCommand(const char* args,bool local) {
@@ -1322,7 +1362,7 @@ static const char* scanCommand(const char* args,bool local) {
     if(!local)return "Error: changing the phone scan requires an authenticated local admin";
     if(const char* why=hw1scan::parse(args,wanted)){snprintf(text,sizeof(text),"Error: phone scan: %s",why);return text;}
   }
-  Lock lock;if(!lock)return "Error: phone pipe busy";
+  Lock lock;if(!lock)return pipeBusy(false);
   if(change)scanProfile=wanted;
   size_t used=size_t(snprintf(text,sizeof(text),"Phone pipe scan: "));
   used+=size_t(hw1scan::format(text+used,sizeof(text)-used,scanProfile));
@@ -1349,11 +1389,11 @@ static bool localAdmin(const AuthContext& auth) {
   return (auth.transport==SOURCE_SERIAL || auth.transport==SOURCE_LOCAL_DISPLAY) && currentExecIsAdmin();
 }
 // Pair and forget open a closed link first, on the shared client stack. They
-// never take the host from the app console server: `closeconsole`, then
-// `openphone`.
+// never take the host from the app console server: `closeconsole`, then the
+// same command again (`openphone` would not pair or forget).
 static const char* startLinkIfStopped() {
   if(active.load())return nullptr;
-  if(isBleServerInitialized())return "Error: the app console server owns Bluetooth; run 'closeconsole', then 'openphone'";
+  if(isBleServerInitialized())return "Error: the app console server owns Bluetooth; run 'closeconsole', then this command again";
   if(phoneLinkOpen())return nullptr;
   EXT_RAM_BSS_ATTR static char text[96];
   snprintf(text,sizeof(text),"Error: phone link could not open (%s)",statusText());
@@ -1393,7 +1433,14 @@ static const char* cmd_closephone(const String&) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Closed already (a stack close or `openconsole` did it without the user's
   // stamp): the user's close still means "stay down until openphone".
-  if(!active.load()){blePeerNoteUserDisconnect(BLE_PEER_PHONE);return "Error: The phone link is not open. Open it with 'openphone'.";}
+  if(!active.load()) {
+    blePeerNoteUserDisconnect(BLE_PEER_PHONE);
+    // No phone secret stored: `openphone` cannot open it either. The stored
+    // secret, not the last open's status, which `phone secret` leaves alone.
+    if(!gSettings.phonePipeSecret.length())
+      return "Error: The phone link is not open and has no phone secret; run phone pair new (serial) or New code and pair (screen)";
+    return "Error: The phone link is not open. Open it with 'openphone'.";
+  }
   if(!phoneLinkClose(/*userInitiated=*/true))return "Error: phone link did not close (role transition busy or pipe cleanup incomplete); retry closephone";
   return "Phone: closed (link dropped, pipe stopped; glasses, ring and Bluetooth stay up)";
 }
@@ -1411,7 +1458,8 @@ static const char* phoneForgetCommand(const String&) {
   const auto epoch=captureTransportSessionEpoch(auth);
   if(!epoch)return "Error: local authenticated session required";
   if(const char* refused=startLinkIfStopped())return refused;
-  Lock lock;if(!lock || forgetWanted || step==Step::Fault)return "Error: phone forget busy";
+  Lock lock;if(!lock)return pipeBusy(false);
+  if(forgetWanted || step==Step::Fault)return pipeBusy(true);
   // Forgetting also ends `phone pair new`'s window, with its attempt.
   const bool closed=closePairWindowLocked(millis());
   if(!blePeerBeginPhonePipeForget(owner.generation,forgetRequest))
@@ -1433,7 +1481,8 @@ static const char* phonePairCommand(const String& args) {
   if(!epoch)return "Error: local authenticated session required";
   (void)liftVersionHold();
   if(const char* refused=startLinkIfStopped())return refused;
-  Lock lock;if(!lock || job || forgetWanted || step!=Step::Idle)return "Error: phone pipe busy; disconnect first";
+  Lock lock;if(!lock)return pipeBusy(false);
+  if(job || forgetWanted || step!=Step::Idle)return pipeBusy(true);
   const uint32_t now=millis();
   if(authCoolingDown(now))return "Error: pipe authentication cooldown (30 seconds)";
   if(const char* refused=startEnrollmentLocked(now,epoch,auth.transport))return refused;
@@ -1456,14 +1505,14 @@ static const char* phonePairNewCommand(const String& args) {
   if(display && !oledPhonePairCodeSinkReady())return "Error: the OLED cannot show a pairing code now";
   if(!display && !serialCommandSecretSinkReady())
     return "Error: phone pair new prints its code once on this console; turn serial output on";
-  if(isBleServerInitialized())return "Error: the app console server owns Bluetooth; run 'closeconsole', then 'openphone'";
+  if(isBleServerInitialized())return "Error: the app console server owns Bluetooth; run 'closeconsole', then this command again";
   if(!active.load() && !gSettings.bleEnabled)return "Error: Bluetooth is disabled; run bleenabled on first";
   bleStampPairedByIfBlank(BLE_PEER_PHONE);
   BlePeerOwnerSession owner;
   if(!blePeerOwnerSessionSnapshot(BLE_PEER_PHONE,owner) || owner.user!=auth.user)return "Error: phone is owned by another account";
   const auto epoch=captureTransportSessionEpoch(auth);
   if(!epoch)return "Error: local authenticated session required";
-  {Lock lock;if(!lock)return "Error: phone pipe busy";
+  {Lock lock;if(!lock)return pipeBusy(false);
     if(authCoolingDown(millis()))return "Error: pipe authentication cooldown (30 seconds)";}
   (void)liftVersionHold();  // no reseek: the window starts its own attempt
   // 75 random bits and the check symbol, on this stack only (internal RAM).
@@ -1476,7 +1525,7 @@ static const char* phonePairNewCommand(const String& args) {
   if(const char* why=phonePipeReplaceSecret(code,hw1code::kSymbols,true,&replaced))
     return replaced?"Error: the new code replaced the phone secret, then a cleanup step failed; run phone pair new again":why;
   if(const char* refused=startLinkIfStopped())return refused;  // the code was never shown
-  {Lock lock(1000);if(!lock)return "Error: phone pipe busy; run phone pair new again";
+  {Lock lock(1000);if(!lock)return "Error: phone pipe busy (another phone task holds it); run phone pair new again";
     // The sink again, under the lock that opens the window: the session may
     // have ended (a logout, another login) during the stop and the key.
     // A session that is gone gets no window and no code.
@@ -1502,7 +1551,7 @@ static const char* phoneStatsCommand(const String&) {
   EXT_RAM_BSS_ATTR static char text[1536];
   // The console driver's counters before the owner mutex (its chain lock is outer to it).
   PipeConsoleStatus console;pipeConsoleStatus(&console);
-  Lock lock;if(!lock)return "Error: phone pipe busy";
+  Lock lock;if(!lock)return pipeBusy(false);
   const auto& st=sessionStats;
   // Connection interval unit is 1.25 ms; 0 until the controller reports one.
   size_t used=size_t(snprintf(text,sizeof(text),"Phone pipe: %s interval_ms=%u.%02u params=%s\n"
@@ -1546,7 +1595,7 @@ static const char* relayStatusCommand(const String&) {
   // Worst case is about 2.5 KB (eight full records); under CMD_RESULT_MAX.
   EXT_RAM_BSS_ATTR static char text[3072];
   size_t used=0;
-  {Lock lock;if(!lock)return "Error: phone pipe busy";
+  {Lock lock;if(!lock)return pipeBusy(false);
     char corr[17]="-";
     if(ready.load()){const uint8_t* n=phoneGatt.pipe.nonce();for(unsigned i=0;i<8;++i)snprintf(corr+2*i,3,"%02x",n[i]);}
     // relay: the phone's RELAY_ON (unknown without a session).

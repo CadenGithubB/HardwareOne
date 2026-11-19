@@ -85,7 +85,7 @@ static void pipes() {
   // Not running: off, or no secret.
   CHECK(pipeAt(PipeStep::Idle, "stopped", false).phase == Pipe::Off);
   CHECK(pipeAt(PipeStep::Idle, "phone not found", false).phase == Pipe::Off);
-  CHECK(pipeAt(PipeStep::Idle, "configure phone secret first", false).phase == Pipe::NoSecret);
+  CHECK(pipeAt(PipeStep::Idle, "no secret: phone pair new, or New code on screen", false).phase == Pipe::NoSecret);
   // Running: the step decides; pairing covers the whole enroll attempt.
   CHECK(pipeAt(PipeStep::Waiting, "waiting for radio").phase == Pipe::Waiting);
   CHECK(pipeAt(PipeStep::ScanParams, "scanning").phase == Pipe::Searching);

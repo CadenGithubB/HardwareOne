@@ -221,6 +221,16 @@ everything user-visible since the v0.99.99.1 tag.
   as it did (its bond heartbeat counts as its agreement). Host-tested; not yet run on hardware.
 
 ### Fixed
+- Phone link: `phone pair new`, `phone pair`, `phone forget`, `phone stats`, `relay status` and
+  `phone scan` no longer fail with "phone pipe busy" on a boot where the phone link never opened (bench
+  P4X-EYE, v0.99.99.1, never paired: `phone pair new` was refused every time). The phone pipe's owner
+  lock was only made by the first link open; the first phone command makes it now. Busy replies say what
+  the pipe is busy with (another phone task, a phone connected, a pairing window or attempt, a connect, a
+  forget, a closing link, a failed cleanup) and are short enough for the screen's error toast. `phone
+  pair` with a phone connected says so again. With no phone secret, `openphone`, `phone status` and
+  `closephone` point to `phone pair new` (serial) or "New code and pair" (screen); setting a secret
+  clears that status, and a stored secret whose key derivation fails is retried instead of reported as
+  missing.
 - A device updated to the one device name kept its name. The rename read only the new setting
   (`system.device.identity.deviceName`), so a device updated from any earlier build came up with
   "Device name: (not set)", and ESP-NOW refused to start ("No device name configured"): its peers could

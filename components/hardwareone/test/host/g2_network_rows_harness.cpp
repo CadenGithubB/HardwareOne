@@ -763,7 +763,7 @@ static void phone_rows_unchanged_state() {
 
   // Stopped because no phone secret is configured: still "Open Phone".
   linkIn = FakeLinkInputs{};
-  linkIn.label = "configure phone secret first";
+  linkIn.label = "no secret: phone pair new, or New code on screen";
   showBluetoothPhoneMenu();
   CHECK(std::strcmp(shownRows[1], "Pipe: no secret") == 0 &&
         std::strcmp(shownRows[shownCount - 1], "Open Phone") == 0);

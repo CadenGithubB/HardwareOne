@@ -147,7 +147,7 @@ inline constexpr PipeStatusRow kPipeStatusRows[] = {
     {PipeStatus::CallbackQueueFull, "BLE callback queue full", "busy"},
     {PipeStatus::CleanupIncomplete, "phone cleanup incomplete", "cleanup"},
     {PipeStatus::EnrollmentForgotten, "phone pipe enrollment forgotten", "forgotten"},
-    {PipeStatus::NoSecret, "configure phone secret first", "no secret"},
+    {PipeStatus::NoSecret, "no secret: phone pair new, or New code on screen", "no secret"},
     {PipeStatus::VersionMismatch, "phone app version mismatch", "version"},
     {PipeStatus::AppTooOld, "phone app too old", "app old"},
     {PipeStatus::PairingCodeExpired, "pairing code expired", "expired"},

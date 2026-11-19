@@ -1,0 +1,18 @@
+{
+  "board": "p4x_eye",
+  "features": {
+    "ENABLE_CAMERA_SENSOR": 0,
+    "ENABLE_ESP_SR": 0,
+    "ENABLE_G2_GLASSES": 0,
+    "ENABLE_LOCAL_STT": 0,
+    "ENABLE_MICROPHONE_SENSOR": 0,
+    "ENABLE_MQTT": 1,
+    "ENABLE_R1_HEALTH": 0,
+    "ENABLE_SDMMC_CARD": 1
+  },
+  "sdkconfig": {
+    "CONFIG_HEAP_USE_HOOKS": true
+  },
+  "summary": "Rack-mounted mesh master: ESP-NOW, MQTT to the homelab broker, Wi-Fi, web page and microSD card. No speech, glasses, ring, camera or microphone.",
+  "title": "Home node"
+}
