@@ -191,8 +191,13 @@ static ForwardResolve peWhose(const uint8_t src[6], const char* name, bool bondL
 static void peResumeTaken(const uint8_t via[6], uint8_t streamId) { espnowForwardResumeTaken(via, streamId); }
 static bool peLinkActive(const uint8_t via[6], const uint8_t origin[6]) { return espnowForwardLinkActive(via, origin); }
 // The bond master hands what it kept of its partner to its forwarder.
-static void peForwardPower(const uint8_t src[6], const espnowsensor::PowerFrame& f) { bondForwardPower(src, f); }
-static void peForwardEvent(const uint8_t src[6], const espnowsensor::EventFrame& f) { bondForwardEvent(src, f); }
+// The payload as received, at its full length: it goes on verbatim (1.0 rule W2).
+static void peForwardPower(const uint8_t src[6], const uint8_t* payload, size_t len) {
+  bondForwardPower(src, payload, len);
+}
+static void peForwardEvent(const uint8_t src[6], const uint8_t* payload, size_t len) {
+  bondForwardEvent(src, payload, len);
+}
 static void peNotKept(uint8_t streamId) { bondForwardNotKept(streamId); }
 // The name of the device that forwarded a record.
 static void peViaName(const uint8_t mac[6], char* out, size_t cap) {
@@ -677,7 +682,7 @@ static void powerEventsIngestPower(const uint8_t* sender, const char* senderName
   }
   PE_UNLOCK();
   if (origin.resumePending) peResumeTaken(origin.via, espnowfwd::kStreamIdBattery);
-  if (bondLink && kept) peForwardPower(sender, frame);
+  if (bondLink && kept) peForwardPower(sender, payload, len);
 }
 
 // EVENT_PUSH from a paired sender over its session (`bondLink`:
@@ -758,7 +763,7 @@ static void powerEventsIngestEvent(const uint8_t* sender, const char* senderName
   if (origin.resumePending) peResumeTaken(origin.via, espnowfwd::kStreamIdEvents);
   // The bond master forwards what the counter rule kept, whatever its own
   // list's rate limit did (that limit is about this device's list).
-  if (bondLink && kept) peForwardEvent(sender, frame);
+  if (bondLink && kept) peForwardEvent(sender, payload, len);
   if (!store) return;
   // Which entry it takes is worked out without the lock (a full list costs
   // 24 x 24 compares over 3.6 KB of PSRAM): only this task writes the lists,

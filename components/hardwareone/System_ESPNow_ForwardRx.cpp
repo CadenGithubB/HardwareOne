@@ -171,6 +171,7 @@ static void fwdAnswer(const uint8_t to[6], const espnowfwd::LinkFrame& f, uint8_
   a.result = result;
   a.linkGen = f.linkGen;
   a.viaBootTag = f.viaBootTag;
+  a.announceGen = f.announceGen;  // which announcement this answers (byte 7)
   a.streams = f.streams;
   a.sensorMask = f.sensorMask;
   memcpy(a.partnerMac, f.partnerMac, 6);

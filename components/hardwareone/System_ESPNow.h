@@ -959,8 +959,9 @@ struct EspNowState {
                                 // clamp both derive from that one constant, so a maximal reassembled
                                 // CMD_RESP now fits exactly. Sized from the WIRE, not from CMD_RESULT_MAX:
                                 // the sender is a remote peer whose output limit is not ours to assume.
-  bool deferredCmdRespSuccess;
-  uint32_t deferredCmdRespReqId; // Correlation id — the request's msgId, echoed in the CMD_RESP frame header
+  bool deferredCmdRespSuccess;   // status == 0
+  uint8_t deferredCmdRespStatus; // the answer's status (espnowanswer, rule F3)
+  uint32_t deferredCmdRespReqId; // Correlation id — the request's msgId, carried in the CMD_RESP's reqId
   
   // STREAM message ring buffer (replaces single-buffer to prevent overwrite loss).
   // Allocated separately in initEspNow(): STREAM_QUEUE_SIZE_PSRAM slots when PSRAM
@@ -974,7 +975,7 @@ struct EspNowState {
     uint8_t srcMac[6];
     char deviceName[32];
     char content[256];
-    uint32_t cmdMsgId;  // originating command's msgId (STREAM frame header). Stored
+    uint32_t cmdMsgId;  // originating command's msgId (the STREAM answer's reqId). Stored
                         // as the record's reqId so remote command output correlates
                         // to its command. 0 = legacy startstream (unsolicited telemetry).
     bool used;          // Slot contains valid data
@@ -1079,6 +1080,7 @@ struct EspNowState {
     deferredCmdRespPending(false),
     deferredCmdRespResult(nullptr),
     deferredCmdRespSuccess(false),
+    deferredCmdRespStatus(0),
     deferredCmdRespReqId(0),
     streamQueue(nullptr),
     streamQueueCap(0),

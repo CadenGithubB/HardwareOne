@@ -208,8 +208,11 @@ def main():
     ))
 
     harness = (HERE / 'espnow_file_transfer_harness.cpp').read_text()
+    # Rule F3: the FILE_CANCEL sender as it is ({reqId, status} under a fresh msgId).
+    cancel_tx = body(main_cpp, 'static bool v4_send_file_cancel(', E)
     for tag, value in (('// INSERT_RESULT_TYPES', result_types), ('// INSERT_SLOTS_HEADER', slots_header),
-                       ('// INSERT_SLOTS_SOURCE', slots_source), ('// INSERT_RX', rx),
+                       ('// INSERT_SLOTS_SOURCE', slots_source), ('// INSERT_CANCEL_TX', cancel_tx),
+                       ('// INSERT_RX', rx),
                        ('// INSERT_TX', tx), ('// INSERT_COMMANDS', commands)):
         if harness.count(tag) != 1:
             raise SystemExit(f'harness: {tag} must appear once')
@@ -224,11 +227,11 @@ def main():
         (d / 'esp_now.h').write_text(ESP_NOW)
         # Real headers, from the tree under test: wire structs, the receive
         # context and the MAC text helpers.
-        # (the wire header includes the four dependency-free rules headers)
+        # (the wire header includes the five dependency-free rules headers)
         for name in ('System_ESPNow_Wire.h', 'System_ESPNow_RxCtx.h', 'System_MacText.h',
                      'System_ESPNow_SensorCore.h', 'System_ESPNow_TimeCore.h',
                      'System_ESPNow_PowerEventCore.h', 'System_ESPNow_ForwardCore.h',
-                     'System_DeviceName.h'):
+                     'System_ESPNow_AnswerCore.h', 'System_DeviceName.h'):
             shutil.copyfile(path_of(name), d / name)
         unit, exe = d / 'espnow_file_transfer.cpp', d / 'espnow_file_transfer'
         unit.write_text(harness)

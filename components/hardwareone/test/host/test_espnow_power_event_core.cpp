@@ -590,6 +590,40 @@ static void testEventList() {
   CHECK(eventListSlot(split, kEventListLen) == 0);
 }
 
+// 1.0 rule W2: a bond master's copy of its partner's frame is the received
+// payload at its full length with only the forwarding fields patched; a path
+// too short for a grown frame gets its first 1.0-length bytes.
+static void testForwardCopy() {
+  CHECK(kForwardCopyMax == 202);
+  CHECK(forwardSendLen(24, kPowerFrameLen, 146) == 24 && forwardSendLen(40, kPowerFrameLen, 146) == 40);
+  CHECK(forwardSendLen(160, kEventFrameLen, 146) == kEventFrameLen && forwardSendLen(160, kEventFrameLen, 202) == 160);
+  CHECK(forwardSendLen(23, kPowerFrameLen, 202) == 0 && forwardSendLen(127, kEventFrameLen, 202) == 0);
+  uint8_t in[210];
+  for (size_t i = 0; i < sizeof(in); ++i) in[i] = (uint8_t)(0x30 + i);
+  uint8_t out[kForwardCopyMax];
+  CHECK(forwardPowerCopy(out, in, 23, 5) == 0 && forwardPowerCopy(out, nullptr, 24, 5) == 0);
+  CHECK(forwardPowerCopy(out, in, 40, 5) == 40 && out[16] == 5);
+  bool same = true;
+  for (size_t i = 0; i < 40; ++i) same = same && (i == 16 || out[i] == in[i]);
+  CHECK(same);
+  in[4] = 0xC2;  // flag bits 6 and 7 (unknown) and the detail-cut bit
+  CHECK(forwardEventCopy(out, in, 127, 9) == 0);
+  CHECK(forwardEventCopy(out, in, 150, 9) == 150 && out[4] == (0xC2 | kEventFlagForwarded) && out[7] == 9);
+  same = true;
+  for (size_t i = 0; i < 150; ++i) same = same && (i == 4 || i == 7 || out[i] == in[i]);
+  CHECK(same);
+  // A frame longer than one sealed frame's payload goes on at its 1.0 length,
+  // never cut in the middle of a later field.
+  CHECK(forwardCopyLen(kForwardCopyMax, kEventFrameLen) == kForwardCopyMax);
+  CHECK(forwardCopyLen(kForwardCopyMax + 1, kEventFrameLen) == kEventFrameLen);
+  CHECK(forwardCopyLen(kForwardCopyMax + 1, kPowerFrameLen) == kPowerFrameLen);
+  CHECK(forwardEventCopy(out, in, sizeof(in), 9) == kEventFrameLen && out[7] == 9);
+  CHECK(forwardPowerCopy(out, in, sizeof(in), 5) == kPowerFrameLen && out[16] == 5);
+  CHECK(forwardPowerCopy(out, in, kForwardCopyMax, 5) == kForwardCopyMax);
+  // What reaches a direct target is then the whole 1.0 frame.
+  CHECK(forwardSendLen(forwardCopyLen(300, kEventFrameLen), kEventFrameLen, 202) == kEventFrameLen);
+}
+
 int main() {
   testPowerFrame();
   testPowerSendRule();
@@ -599,6 +633,7 @@ int main() {
   testPushDecide();
   testWireText();
   testEventList();
+  testForwardCopy();
   std::printf("espnow_power_event_core_tests: %u checks passed\n", gChecks);
   return 0;
 }

@@ -13,6 +13,7 @@
 #include "fake_vfs.h"
 #include <ArduinoJson.h>
 #include "System_PollPause.h"
+#include "System_ESPNow_AnswerCore.h"
 
 #include <cctype>
 #include <cstdarg>
@@ -155,25 +156,48 @@ static struct { bool espnowUserSyncEnabled = true; } gSettings;
 enum : uint8_t { ESPNOW_V4_TYPE_CMD_RESP = 51 };
 enum : uint16_t { ESPNOW_V4_FLAG_ACK_REQ = 0x0001 };
 
-struct Reply { uint32_t msgId; bool ok; std::string text; };
+// A CMD_RESP is an answer (rule F3): {u32 reqId, u8 status} + text. `msgId`
+// is the reqId (the request's number); `frameMsgId` the answer frame's own
+// header msgId, 0 for the USER_SYNC double, which builds no frame.
+struct Reply { uint32_t msgId; bool ok; std::string text; uint8_t status; uint32_t frameMsgId; };
 static std::vector<Reply> replies;  // CMD_RESP frames, both senders
 static int acks = 0;
 static bool v4_send_ack(const uint8_t*, uint32_t) { ++acks; return true; }
-bool v4_send_command_response(const uint8_t*, uint32_t msgId, bool success, const char* text,
+bool v4_send_command_response(const uint8_t*, uint32_t reqId, uint8_t status, const char* text,
                               uint16_t length) {
-  replies.push_back({msgId, success, std::string(text, length)});
+  replies.push_back({reqId, status == 0, std::string(text, length), status, 0});
   return true;
 }
+// This device's own message numbers, far from the requests' in the cases.
+static uint32_t nextOwnMsgId = 0x70000000u;
+uint32_t generateMessageId() { return ++nextOwnMsgId; }
+static int malformedReplies = 0;
 namespace espnowtx {
 bool sendAead(const uint8_t*, uint8_t type, uint16_t, uint32_t msgId, const uint8_t* payload,
               uint16_t length, uint8_t) {
-  if (type == ESPNOW_V4_TYPE_CMD_RESP && length >= 2) {
-    replies.push_back({msgId, payload[0] != 0,
-                       std::string(reinterpret_cast<const char*>(payload + 1))});
+  if (type == ESPNOW_V4_TYPE_CMD_RESP) {
+    uint32_t reqId = 0;
+    uint8_t status = 0;
+    if (!espnowanswer::parseHeader(payload, length, &reqId, &status)) {
+      ++malformedReplies;
+      return true;
+    }
+    replies.push_back({reqId, status == 0,
+                       std::string(reinterpret_cast<const char*>(payload + espnowanswer::kHeaderLen),
+                                   length - espnowanswer::kHeaderLen),
+                       status, msgId});
   }
   return true;
 }
 }  // namespace espnowtx
+
+// Every refusal is an answer: its reqId is the request's msgId, its own
+// header msgId is this device's fresh number, and its status is not ok.
+static bool lastRefusal(uint32_t reqId, uint8_t status) {
+  return !replies.empty() && malformedReplies == 0 && replies.back().msgId == reqId &&
+         replies.back().status == status && replies.back().frameMsgId > 0x70000000u &&
+         replies.back().frameMsgId != reqId;
+}
 
 static String redactCmdForAudit(const String& line) { return line; }
 
@@ -310,6 +334,8 @@ static void scenarioRemoteLockout() {
   for (uint32_t id = 1; id <= 5; ++id) {
     remoteCommand(kPeerA, id, "carol:wrong:status");
     check(lastReply(id, false, kLoginFailed), name, "a wrong password answers Login failed with its msgId");
+    check(lastRefusal(id, espnowanswer::kRefused), name,
+          "the refusal is an answer: reqId = the command's msgId, status refused, a fresh msgId of its own");
   }
   check(passwordChecks == 5 && countEvents(SYSEVT_LOGIN_FAIL) == 5, name,
         "five checks, five SYSEVT_LOGIN_FAIL posts");
@@ -317,7 +343,8 @@ static void scenarioRemoteLockout() {
   check(passwordChecks == 5, name, "another peer's right password is not checked while locked");
   check(accepted.empty(), name, "and runs nothing");
   check(lastReply(6, false, "Error: Login locked out. Retry in 30s."), name,
-        "the lockout answers in the same CMD_RESP shape with the msgId echoed");
+        "the lockout answers in the same CMD_RESP shape with the msgId as its reqId");
+  check(lastRefusal(6, espnowanswer::kRefused), name, "the lockout answer is status refused under a fresh msgId");
   check(countEvents(SYSEVT_LOGIN_LOCKED) == 1 && countEvents(SYSEVT_LOGIN_FAIL) == 5, name,
         "one lock event; the refusal is not a login failure");
   gClockMs += LOGIN_LOCKOUT_TIER1_MS;
@@ -334,11 +361,13 @@ static void scenarioPlaintextAndBond() {
   check(passwordChecks == 0, name, "a plaintext command is refused before any check");
   check(lastReply(6, false, "Error: Remote command must be session-encrypted. Pair the devices again."), name,
         "with its existing refusal");
+  check(lastRefusal(6, espnowanswer::kRefused), name, "status refused, reqId 6, a fresh frame msgId");
   for (uint32_t id = 10; id <= 15; ++id) {
     remoteCommand(kPeerA, id, "@BOND:ffffffffffffffffffffffffffffffff:status");
   }
   check(bondFailures == 6 && lastReply(15, false, "Error: Bond session token refused. Check the passphrase on both devices."), name,
         "bad bond tokens still go to logBondAuthFailure with their own reply");
+  check(lastRefusal(15, espnowanswer::kRefused), name, "the token refusal is status refused for reqId 15");
   check(credentialAttemptFailures(SOURCE_ESPNOW, "espnow") == 0, name,
         "bond-token failures do not count toward the password lock");
   for (uint32_t id = 20; id <= 24; ++id) remoteCommand(kPeerA, id, "carol:wrong:status");
@@ -353,7 +382,8 @@ static void scenarioSyncAdminLockout() {
   begin();
   for (uint32_t id = 1; id <= 3; ++id) remoteCommand(kPeerA, id, "carol:wrong:status");
   userSync(4, syncJson("wrong", "dave", "dave-pass"));
-  check(lastReply(4, false, "Admin authentication failed"), name, "a wrong admin password keeps its text");
+  check(lastReply(4, false, "Admin authentication failed") && replies.back().status == espnowanswer::kRefused,
+        name, "a wrong admin password keeps its text (status refused)");
   userSync(5, syncJson("wrong", "dave", "dave-pass"));
   const int checksAtLock = passwordChecks;
   userSync(6, syncJson("root-pass", "dave", "dave-pass"));
@@ -376,8 +406,9 @@ static void scenarioSyncRefusals() {
     ++id;
   }
   userSync(id, syncJson("root-pass", "dave", "abc"));
-  check(lastReply(id, false, "Password must be at least 6 characters"), name,
-        "a short password is refused with the owner's text");
+  check(lastReply(id, false, "Password must be at least 6 characters") &&
+            replies.back().status == espnowanswer::kBadRequest,
+        name, "a short password is refused with the owner's text (status bad_request)");
   check(fake_vfs::fs().text(USERS_JSON_FILE) == before, name, "users.json is untouched");
   check(countEvents(SYSEVT_USER_ADDED) == 0 && identityBumps == 0, name,
         "no account event or identity bump");
@@ -390,8 +421,8 @@ static void scenarioSyncCreates() {
   idMark = 40;
   wallTime = 1700000000;  // 2023-11-14T22:13:20Z
   userSync(9, syncJson("root-pass", "dave", "dave-pass", "admin"));
-  check(lastReply(9, true, "User 'dave' created (id=41)"), name,
-        "the reply carries createAccount's id, above the mark");
+  check(lastReply(9, true, "User 'dave' created (id=41)") && replies.back().status == espnowanswer::kOk, name,
+        "the reply carries createAccount's id, above the mark (status 0)");
   JsonDocument doc; JsonObject user;
   const bool found = rosterUser("dave", doc, user);
   check(found && user["id"].as<unsigned>() == 41, name, "the roster holds id 41, not nextId 5");
@@ -424,7 +455,8 @@ static void scenarioSyncCheckedWrite() {
   credentialOk = false;
   const std::string before = fake_vfs::fs().text(USERS_JSON_FILE);
   userSync(3, syncJson("root-pass", "erin", "erin-pass"));
-  check(lastReply(3, false, "Failed to write user settings"), name, "the sender hears the failure");
+  check(lastReply(3, false, "Failed to write user settings") && replies.back().status == espnowanswer::kCmdFailed,
+        name, "the sender hears the failure (status failed)");
   check(fake_vfs::fs().text(USERS_JSON_FILE) == before, name, "users.json is untouched");
   check(countEvents(SYSEVT_USER_ADDED) == 0 && identityBumps == 0, name,
         "no account event or identity bump");

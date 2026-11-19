@@ -4,7 +4,7 @@
 Extracts from System_ESPNow.cpp the whole of v4_try_handle_incoming, the
 duplicate rings and their functions, the opcode table with v4_dispatch_lookup
 and v4_dispatch_table_try, the real v4h_heartbeat and v4h_relay_data, the flood
-forwarder (v4_relay_maybe_forward) with both relay allow-lists, the peer slot
+forwarder (v4_relay_maybe_forward) with both relay allow-lists and the relay hop list, the peer slot
 owners (getMeshPeerHealth, getMeshPeerMeta, noteMeshPeerRxActivity,
 isPairedDevice, removeEspNowDevice, processMetadata and, when the tree has
 them, meshPeerMetaReclaimSlot and meshPeerSlotsRelease) and v4_crc16_ccitt;
@@ -28,6 +28,10 @@ without one; plaintext frames from a MAC that is not paired create no health
 or metadata slot, and neither does a captured group-tagged HEARTBEAT replayed
 from an invented radio MAC; unpair releases the metadata slot; a full metadata table
 gives a slot to a newly paired peer and never takes one from a paired peer.
+The relay hop rule (1.0): a hop passes on any inner opcode but the exact list
+of 1.0 link-local opcodes (unknown and later opcodes included, never a range),
+keeps its version, magic, ttl, route and meshRelay checks, and the final
+destination refuses what it does not take routed and counts routedDropPolicy.
 
 `--component <dir>` or `--source-dir <overlay>` replays another tree's
 production sources (such as the saved base tree). A tree without
@@ -62,6 +66,7 @@ GROUP_MARKERS = (
 )
 ANNOUNCE_REGION = ('// ---- Room and tag membership: what a peer announces -----',
                    '// ---- Room and tag membership: acceptance -----')
+HOP_RULE = 'static bool v4_relay_hop_refused(uint8_t type)'
 UNPAIR_SLOT_COMMENT = "// Clear the peer's mesh-liveness slot regardless of mode."
 
 
@@ -180,9 +185,13 @@ def main():
 
     relay = [one(source, 'static bool v4_group_tag('),
              one(source, 'static inline bool v4_flood_type_allowed('),
-             last(source, 'static bool v4_routed_type_allowed('),
-             one(source, 'static void v4_relay_maybe_forward('),
-             one(source, 'static void v4h_relay_data(')]
+             last(source, 'static bool v4_routed_type_allowed(')]
+    # The relay hop rule (1.0, W1): a tree before it has none and is judged
+    # by the behavioral cases.
+    if HOP_RULE in source:
+        relay.append(one(source, HOP_RULE))
+    relay += [one(source, 'static void v4_relay_maybe_forward('),
+              one(source, 'static void v4h_relay_data(')]
     incoming = source[source.rindex('static bool v4_try_handle_incoming('):]
     incoming = extract_block(incoming, 'static bool v4_try_handle_incoming(')
     # The must-understand drop counter (1.0 header flag classes), where the tree has it.
@@ -222,6 +231,8 @@ def main():
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
         (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
         (unit.parent / 'System_DeviceName.h').write_text((HERE.parents[1] / 'System_DeviceName.h').read_text())
+        (unit.parent / 'System_ESPNow_AnswerCore.h').write_text(
+            (HERE.parents[1] / 'System_ESPNow_AnswerCore.h').read_text())
         (unit.parent / 'System_ESPNow_GroupCore.h').write_text(
             (HERE.parents[1] / 'System_ESPNow_GroupCore.h').read_text())
         unit.write_text(harness)

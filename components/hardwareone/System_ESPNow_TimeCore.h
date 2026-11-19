@@ -41,6 +41,9 @@ constexpr uint8_t kSrcManual    = 3;
 constexpr uint8_t kSrcCm5       = 4;
 // 5 gps and 6 phone are kept for the day those set a clock.
 constexpr uint8_t kSrcWeakFirst = 128;
+// 128 ring, 129 mesh and 130 carried (a clock carried over a soft restart)
+// are earmarked weak values for back-capture's captureClock (built in 1.x);
+// TIME_SYNC never sends them.
 
 constexpr uint8_t kFlagActingBackup = 0x01;
 

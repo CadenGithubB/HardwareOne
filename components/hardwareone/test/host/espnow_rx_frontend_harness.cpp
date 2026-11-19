@@ -21,6 +21,7 @@
 #include <vector>
 #include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
 #include "System_DeviceName.h"  // the device-name rule (copied beside this unit)
+#include "System_ESPNow_AnswerCore.h"  // the answer header {reqId, status} (copied beside this unit)
 
 #ifndef ENABLE_BONDED_MODE
 #error "ENABLE_BONDED_MODE must be defined by the runner"
@@ -614,6 +615,40 @@ static void testSealedRetriesStillSuppressed() {
         calls("v4h_text") == 2 && gFragAcksSent == 3);
 }
 
+// Rule F3: answers carry the request's number in their payload (reqId) and a
+// header msgId of their own, so STREAM and CMD_RESP no longer skip the
+// duplicate check (they used to borrow the command's msgId and every one of
+// them did). A re-sealed retry of one is dispatched once; two lines of the
+// same command's output (one reqId, two msgIds) are both dispatched.
+static Frame answer(uint32_t reqId, uint8_t status, const char* body) {
+  Frame f = text(body);
+  Frame out(espnowanswer::kHeaderLen, 0);
+  espnowanswer::packHeader(out.data(), reqId, status);
+  out.insert(out.end(), f.begin(), f.end());
+  return out;
+}
+static void testAnswersAreDeduplicated() {
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_STREAM, gPeerB, 300, answer(77, 0, "line one")));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_STREAM, gPeerB, 300, answer(77, 0, "line one")));
+  check("re-sealed STREAM retry: acknowledged, dispatched once (FAILS WITH THE BYPASS LIST)",
+        calls("v4h_stream") == 1 && gReplayRejects == 0);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_STREAM, gPeerB, 301, answer(77, 0, "line two")));
+  check("the next line of the same command (same reqId, its own msgId) is dispatched",
+        calls("v4h_stream") == 2);
+
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 310, answer(77, 0, "done")));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 310, answer(77, 0, "done")));
+  check("re-sealed CMD_RESP retry: dispatched once (FAILS WITH THE BYPASS LIST)", calls("v4h_cmd_resp") == 1);
+  // The answer's msgId is the answerer's own: a CMD of this device's with the
+  // same number does not hide the answer, nor the answer the CMD.
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD, gPeerB, 311, text("status")));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 312, answer(311, 0, "ok")));
+  check("a CMD and the CMD_RESP answering it (reqId 311, msgId 312) are both dispatched",
+        calls("v4h_cmd") == 1 && calls("v4h_cmd_resp") == 2);
+}
+
 static void testFloodLoopSuppression() {
   reset(true);
   const Frame viaR = groupFrame(ESPNOW_V4_TYPE_TEXT, gFar, 80, text("hello mesh"), 3);
@@ -913,7 +948,7 @@ static void testTimeAndSensorFramesThroughRelay() {
   const Row rows[] = {
     { ESPNOW_V4_TYPE_TIME_SYNC,       "v4hTimeSync",         16 },
     { ESPNOW_V4_TYPE_SENSOR_STATUS,   "v4h_sensor_status",   16 },
-    { ESPNOW_V4_TYPE_SENSOR_REQ,      "v4h_sensor_req",      16 },
+    { ESPNOW_V4_TYPE_SENSOR_REQ,      "v4h_sensor_req",      20 },
     { ESPNOW_V4_TYPE_SENSOR_ENVELOPE, "v4h_sensor_envelope", 60 },
     // A part of a reading at the routed size: header 12 + 134 bytes of text
     // is exactly what one sealed frame carries inside the envelope.
@@ -1168,12 +1203,136 @@ static void testMustUnderstandFlags() {
 #endif
 }
 
+// The relay hop rule (1.0, back-capture design W1): a hop that only passes an
+// envelope on checks the envelope and the inner header (magic, version,
+// header length), ttl, hop count and route, and refuses only an exact list of
+// the 1.0 link-local opcodes. Any other inner opcode goes on, also one this
+// firmware does not know (opcodes added after 1.0 still cross a 1.0 relay);
+// the final destination keeps its own gate and refuses what it does not take
+// routed, counting routedDropPolicy.
+static Frame envelopeTo(const uint8_t* finalDst, const uint8_t* relay, const Frame& inner, uint32_t msgId,
+                        uint8_t ttl = 2) {
+  V4PayloadRelayData env{};
+  std::memcpy(env.finalDst, finalDst, 6);
+  env.hopsUsed = 1;
+  Frame body(sizeof env + inner.size());
+  std::memcpy(body.data(), &env, sizeof env);
+  std::memcpy(body.data() + sizeof env, inner.data(), inner.size());
+  return groupFrame(ESPNOW_V4_TYPE_RELAY_DATA, relay, msgId, body, ttl);
+}
+
+static void testRelayHopOpcodeRule() {
+  uint32_t id = 3000;
+  // Opcodes no 1.0 row takes routed: the earmarked back-capture numbers, free
+  // and user-defined ones, and 1.0 opcodes the destination refuses routed.
+  const uint8_t passOn[] = { 82, 85, 86, 156, 157, 158, 159, 190, 200, 255,
+                             ESPNOW_V4_TYPE_FS_LIST_REQ, ESPNOW_V4_TYPE_FILE_DATA, ESPNOW_V4_TYPE_STREAM,
+                             ESPNOW_V4_TYPE_SESSION_UNKNOWN };
+  for (uint8_t type : passOn) {
+    reset(true);
+    gRouteNext = gRelayR2;
+    const Frame inner = sealedFrame(gSessB, type, gPeerB, ++id, Frame(24, 0x5A), 0, 1, 0);
+    deliver(gRelayR, envelopeTo(gFar, gRelayR, inner, id));
+    char what[160];
+    std::snprintf(what, sizeof what, "a hop passes inner opcode %u on, unopened (FAILS WITHOUT THE W1 RULE)",
+                  (unsigned)type);
+    check(what, gRelayForwards == 1 && gRelayMetrics.routedForwards == 1 && gRelayMetrics.routedDropPolicy == 0 &&
+                gCalls.empty() && gUnwrapCalls == 0);
+  }
+  // The exact 1.0 link-local list: refused at the hop and counted.
+  const uint8_t linkLocal[] = {
+    ESPNOW_V4_TYPE_RELAY_DATA, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_TYPE_PEER_LIST,
+    ESPNOW_V4_TYPE_TOPO_REQ, ESPNOW_V4_TYPE_TOPO_START, ESPNOW_V4_TYPE_TOPO_PEER,
+    ESPNOW_V4_TYPE_PAIR_BEACON, ESPNOW_V4_TYPE_PAIR_REQUEST, ESPNOW_V4_TYPE_PAIR_ACCEPT, ESPNOW_V4_TYPE_PAIR_REJECT,
+    ESPNOW_V4_TYPE_BOND_HEARTBEAT, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_TYPE_BOND_CAP_RESP,
+    ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_TYPE_SETTINGS_REQ, ESPNOW_V4_TYPE_BOND_STATUS_REQ,
+    ESPNOW_V4_TYPE_BOND_STATUS_RESP, ESPNOW_V4_TYPE_SCHEMA_REQ, ESPNOW_V4_TYPE_BOND_STREAM_CTRL,
+    ESPNOW_V4_TYPE_BOND_SENSOR_DATA, ESPNOW_V4_TYPE_BOND_POWER_STATUS, ESPNOW_V4_TYPE_BOND_EVENT_PUSH,
+    ESPNOW_V4_TYPE_BOND_REQUEST, ESPNOW_V4_TYPE_BOND_NOTICE, ESPNOW_V4_TYPE_BOND_SENSOR_STATUS };
+  for (uint8_t type : linkLocal) {
+    reset(true);
+    gRouteNext = gRelayR2;
+    const Frame inner = plainFrame(type, gPeerB, ++id, Frame(24, 0x5A));
+    deliver(gRelayR, envelopeTo(gFar, gRelayR, inner, id));
+    char what[160];
+    std::snprintf(what, sizeof what, "a hop refuses link-local inner opcode %u and counts it", (unsigned)type);
+    check(what, gRelayForwards == 0 && gRelayMetrics.routedDropPolicy == 1 && gCalls.empty());
+  }
+  // Neither range is refused whole: 181 (earmarked bond number) and 186-189
+  // (free bond numbers) go on.
+  for (uint8_t type : { (uint8_t)181, (uint8_t)186, (uint8_t)189, (uint8_t)37, (uint8_t)43 }) {
+    reset(true);
+    gRouteNext = gRelayR2;
+    ++id;
+    deliver(gRelayR, envelopeTo(gFar, gRelayR, plainFrame(type, gPeerB, id, Frame(8, 0)), id));
+    char what[120];
+    std::snprintf(what, sizeof what, "opcode %u (not a 1.0 link-local opcode) is not refused by range", (unsigned)type);
+    check(what, gRelayForwards == 1 && gRelayMetrics.routedDropPolicy == 0);
+  }
+  // The hop keeps its other checks for an unknown inner opcode.
+  reset(true);
+  gRouteNext = gRelayR2;
+  ++id;
+  deliver(gRelayR, envelopeTo(gFar, gRelayR, sealedFrame(gSessB, 156, gPeerB, id, Frame(24, 1), 0, 1, 0), id, 1));
+  check("an unknown inner opcode with ttl 1 at a hop: dropped for ttl", gRelayForwards == 0 &&
+        gRelayMetrics.routedDropTtl == 1);
+  reset(true);
+  ++id;
+  deliver(gRelayR, envelopeTo(gFar, gRelayR, sealedFrame(gSessB, 156, gPeerB, id, Frame(24, 1), 0, 1, 0), id));
+  check("an unknown inner opcode with no route: dropped as no route", gRelayForwards == 0 &&
+        gRelayMetrics.routedDropNoRoute == 1);
+  reset(true);
+  gRouteNext = gRelayR2;
+  gSettings.meshRelay = false;
+  ++id;
+  deliver(gRelayR, envelopeTo(gFar, gRelayR, sealedFrame(gSessB, 156, gPeerB, id, Frame(24, 1), 0, 1, 0), id));
+  check("relaying switched off: an unknown inner opcode is not passed on", gRelayForwards == 0 &&
+        gRelayMetrics.routedDropPolicy == 1);
+  reset(true);
+  gRouteNext = gRelayR2;
+  {
+    Frame inner = sealedFrame(gSessB, 156, gPeerB, ++id, Frame(24, 1), 0, 1, 0);
+    inner[2] = 5;  // the version byte (magic at 0-1)
+    deliver(gRelayR, envelopeTo(gFar, gRelayR, inner, id));
+  }
+  check("an inner frame of another version is refused at the hop", gRelayForwards == 0 &&
+        gRelayMetrics.routedDropPolicy == 1);
+  reset(true);
+  gRouteNext = gRelayR2;
+  {
+    Frame inner = sealedFrame(gSessB, 156, gPeerB, ++id, Frame(24, 1), 0, 1, 0);
+    inner[0] ^= 0xFF;  // the magic
+    deliver(gRelayR, envelopeTo(gFar, gRelayR, inner, id));
+  }
+  check("an inner frame with a wrong magic is refused at the hop", gRelayForwards == 0 &&
+        gRelayMetrics.routedDropPolicy == 1);
+  // The final destination keeps its gate: an opcode it does not take routed
+  // is refused and counted, never handed to a handler.
+  for (uint8_t type : { (uint8_t)156, (uint8_t)ESPNOW_V4_TYPE_FILE_DATA, (uint8_t)ESPNOW_V4_TYPE_HEARTBEAT }) {
+    reset(true);
+    ++id;
+    deliver(gRelayR, envelope(gRelayR, sealedFrame(gSessB, type, gPeerB, id, Frame(24, 1), 0, 1, 0), id));
+    char what[160];
+    std::snprintf(what, sizeof what, "at the final destination inner opcode %u is refused and counted (routedDropPolicy)",
+                  (unsigned)type);
+    check(what, gCalls.empty() && gRelayMetrics.routedDelivered == 0 && gRelayMetrics.routedDropPolicy == 1 &&
+                gRelayForwards == 0);
+  }
+  // ... and still delivers what it takes routed.
+  reset(true);
+  ++id;
+  deliver(gRelayR, envelope(gRelayR, sealedFrame(gSessB, ESPNOW_V4_TYPE_TEXT, gPeerB, id, text("hi")), id));
+  check("at the final destination a routed TEXT is delivered", calls("v4h_text") == 1 &&
+        gRelayMetrics.routedDelivered == 1);
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IOLBF, 0);  // keep the case lines if a pre-fix tree aborts
   testMeshIdGate();
   testForgedPlaintextDoesNotShadowSealed();
   testAuthenticatedFramesDoNotShadowEachOther();
   testSealedRetriesStillSuppressed();
+  testAnswersAreDeduplicated();
   testFloodLoopSuppression();
   testRelayedLoopSuppression();
   testTimeAndSensorFramesThroughRelay();
@@ -1186,6 +1345,7 @@ int main() {
   testReplayedHeartbeatFromInventedSource();
   testUnknownSessionAsksForHint();
   testMustUnderstandFlags();
+  testRelayHopOpcodeRule();
   std::printf("espnow_rx_frontend: %u failure%s\n", gFailures, gFailures == 1 ? "" : "s");
   return gFailures ? 1 : 0;
 }

@@ -5,6 +5,9 @@
 //   * whether B forwards and why not (every row, first match), the partner's
 //     agreement (unknown after agreed keeps the link, never agreed does not,
 //     declined and a partner change forget it), the link numbers;
+//   * FORWARD_LINK byte 7 (1.0 rule W4): the announcement number, stepped on
+//     every announcement, echoed; an acceptance needs the latest number and
+//     may echo a subset of the streams and sensors, never more;
 //   * B's state per master: announce, back-off, only a matching answer counts,
 //     stale, refused and its retry, a new session, a rekey (same session id)
 //     keeps the link, query, refresh, withdraw tries, the withdrawal of
@@ -85,6 +88,13 @@ static LinkFrame answer(uint8_t answers, uint8_t result, uint8_t gen, uint16_t b
   a.streams = kStreamsAll;
   a.sensorMask = kSensorMaskDefault;
   if (partner) std::memcpy(a.partnerMac, partner, 6);
+  return a;
+}
+
+// The answer a master gives to the latest announcement to `t`: it echoes the
+// announcement number (byte 7).
+static LinkFrame echo(const TargetState& t, LinkFrame a) {
+  a.announceGen = t.announceGen;
   return a;
 }
 
@@ -301,8 +311,8 @@ static void testTarget() {
     CHECK(targetStep(t, wantGen(1), 0x1234, true, now) == kActAnnounce);
   }
   // Only a matching answer counts: wrong link number, boot tag, op, or not an answer.
-  CHECK(targetAnswer(t, answer(kOpAnnounce, kResultAccepted, 2, kBoot), kBoot, now) == AnswerEffect::Ignored);
-  CHECK(targetAnswer(t, answer(kOpAnnounce, kResultAccepted, 1, kBoot + 1), kBoot, now) == AnswerEffect::Ignored);
+  CHECK(targetAnswer(t, echo(t, answer(kOpAnnounce, kResultAccepted, 2, kBoot)), kBoot, now) == AnswerEffect::Ignored);
+  CHECK(targetAnswer(t, echo(t, answer(kOpAnnounce, kResultAccepted, 1, kBoot + 1)), kBoot, now) == AnswerEffect::Ignored);
   CHECK(targetAnswer(t, answer(kOpWithdraw, kResultWithdrawn, 1, kBoot), kBoot, now) == AnswerEffect::Ignored);
   LinkFrame notAnswer = answer(kOpAnnounce, kResultAccepted, 1, kBoot);
   notAnswer.op = kOpQuery;
@@ -311,7 +321,7 @@ static void testTarget() {
   // Nothing is carried before it accepted.
   CHECK(!targetCarries(t, 0x1234, kStreamBattery, -1));
   CHECK(targetWhyNot(t, 0x1234, kStreamBattery, -1) == WhyNot::NotAccepted);
-  CHECK(targetAnswer(t, answer(kOpAnnounce, kResultAccepted, 1, kBoot), kBoot, now) == AnswerEffect::Accepted);
+  CHECK(targetAnswer(t, echo(t, answer(kOpAnnounce, kResultAccepted, 1, kBoot)), kBoot, now) == AnswerEffect::Accepted);
   CHECK(t.state == TState::Accepted && t.acceptedStreams == kStreamsAll && t.acceptedMask == kSensorMaskDefault);
   CHECK(targetCarries(t, 0x1234, kStreamReadings, REMOTE_SENSOR_GPS) && targetCarries(t, 0x1234, kStreamEvents, -1));
   CHECK(!targetCarries(t, 0x1234, kStreamReadings, REMOTE_SENSOR_INPUT));
@@ -328,38 +338,46 @@ static void testTarget() {
   CHECK(!targetCarries(t, 0x9999, kStreamBattery, -1));
   CHECK(targetStep(t, wantGen(1), 0x9999, false, now) == 0 && t.state == TState::Announcing);
   CHECK(targetStep(t, wantGen(1), 0x9999, true, now) == kActAnnounce && t.linkGen == 1);
-  CHECK(targetAnswer(t, answer(kOpAnnounce, kResultAccepted, 1, kBoot), kBoot, now) == AnswerEffect::Accepted);
+  CHECK(targetAnswer(t, echo(t, answer(kOpAnnounce, kResultAccepted, 1, kBoot)), kBoot, now) == AnswerEffect::Accepted);
   CHECK(targetCarries(t, 0x9999, kStreamBattery, -1));
   // A query: announce again at once.
   targetQuery(t);
   CHECK(targetStep(t, wantGen(1), 0x9999, true, now + 10) == kActAnnounce && t.state == TState::Announcing);
-  CHECK(targetAnswer(t, answer(kOpAnnounce, kResultAccepted, 1, kBoot), kBoot, now) == AnswerEffect::Accepted);
+  CHECK(targetAnswer(t, echo(t, answer(kOpAnnounce, kResultAccepted, 1, kBoot)), kBoot, now) == AnswerEffect::Accepted);
   // Refused: retried after 10 minutes, not before.
   TargetState r = t;
   targetQuery(r);
   CHECK(targetStep(r, wantGen(1), 0x9999, true, now) == kActAnnounce);
-  CHECK(targetAnswer(r, answer(kOpAnnounce, kResultNameTaken, 1, kBoot), kBoot, now) == AnswerEffect::Refused);
+  CHECK(targetAnswer(r, echo(r, answer(kOpAnnounce, kResultNameTaken, 1, kBoot)), kBoot, now) == AnswerEffect::Refused);
   CHECK(r.state == TState::Refused && r.lastResult == kResultNameTaken && !targetCarries(r, 0x9999, kStreamBattery, -1));
   CHECK(targetWhyNot(r, 0x9999, kStreamBattery, -1) == WhyNot::Refused);
   CHECK(targetStep(r, wantGen(1), 0x9999, true, now + kRefusedRetryMs - 1) == 0);
+  const uint8_t refusedGen = r.announceGen;
   CHECK(targetStep(r, wantGen(1), 0x9999, true, now + kRefusedRetryMs) == kActAnnounce && r.state == TState::Announcing);
+  // The retry is a new announcement with its own number (W4): the refusal of
+  // the earlier one, delivered again, does not refuse the retry.
+  CHECK(r.announceGen == announceGenNext(refusedGen));
+  LinkFrame oldRefusal = answer(kOpAnnounce, kResultNameTaken, 1, kBoot);
+  oldRefusal.announceGen = refusedGen;
+  CHECK(targetAnswer(r, oldRefusal, kBoot, now + kRefusedRetryMs) == AnswerEffect::Ignored &&
+        r.state == TState::Announcing);
   // ... or at once when anything changes (another link number).
   TargetState r2 = t;
   targetQuery(r2);
   targetStep(r2, wantGen(1), 0x9999, true, now);
-  targetAnswer(r2, answer(kOpAnnounce, kResultFull, 1, kBoot), kBoot, now);
+  targetAnswer(r2, echo(r2, answer(kOpAnnounce, kResultFull, 1, kBoot)), kBoot, now);
   CHECK(r2.state == TState::Refused && targetStep(r2, wantGen(2), 0x9999, true, now + 1) == kActAnnounce);
   // Stale: the owner steps its number; the target announces again.
   TargetState s = t;
   targetQuery(s);
   targetStep(s, wantGen(1), 0x9999, true, now);
-  CHECK(targetAnswer(s, answer(kOpAnnounce, kResultStale, 1, kBoot), kBoot, now) == AnswerEffect::Stale);
+  CHECK(targetAnswer(s, echo(s, answer(kOpAnnounce, kResultStale, 1, kBoot)), kBoot, now) == AnswerEffect::Stale);
   CHECK(s.state == TState::Announcing && targetStep(s, wantGen(2), 0x9999, true, now) == kActAnnounce && s.linkGen == 2);
   // The streams or sensors changed: announced again.
   TargetWant fewer = wantGen(1);
   fewer.sensorMask = espnowsensor::sensorBit(REMOTE_SENSOR_GPS);
   CHECK(targetStep(t, fewer, 0x9999, true, now + 20) == kActAnnounce);
-  LinkFrame gpsOnly = answer(kOpAnnounce, kResultAccepted, 1, kBoot);
+  LinkFrame gpsOnly = echo(t, answer(kOpAnnounce, kResultAccepted, 1, kBoot));
   gpsOnly.sensorMask = fewer.sensorMask;
   CHECK(targetAnswer(t, gpsOnly, kBoot, now) == AnswerEffect::Accepted);
   CHECK(t.acceptedMask == espnowsensor::sensorBit(REMOTE_SENSOR_GPS));
@@ -374,24 +392,49 @@ static void testTarget() {
     all.sensorMask = espnowsensor::kSensorMaskAll;
     CHECK(targetStep(c, all, 0x0303, true, 100) == kActAnnounce && c.state == TState::Announcing &&
           c.sensorMask == espnowsensor::kSensorMaskAll);
-    CHECK(targetAnswer(c, answer(kOpAnnounce, kResultAccepted, 1, kBoot), kBoot, 150) == AnswerEffect::Ignored &&
+    LinkFrame older = answer(kOpAnnounce, kResultAccepted, 1, kBoot);
+    older.announceGen = (uint8_t)(c.announceGen - 1);  // the answer to the first announcement
+    CHECK(targetAnswer(c, older, kBoot, 150) == AnswerEffect::Ignored &&
           c.state == TState::Announcing && c.lastResult == 0);
-    LinkFrame allAnswer = answer(kOpAnnounce, kResultAccepted, 1, kBoot);
+    LinkFrame allAnswer = echo(c, answer(kOpAnnounce, kResultAccepted, 1, kBoot));
     allAnswer.sensorMask = espnowsensor::kSensorMaskAll;
     CHECK(targetAnswer(c, allAnswer, kBoot, 200) == AnswerEffect::Accepted &&
           targetCarries(c, 0x0303, kStreamReadings, REMOTE_SENSOR_INPUT));
-    // A refusal of the older one still counts (it does not depend on the sensors).
+    // A refusal of the older one does not count either: the master may have
+    // changed its verdict since (it was full, now it has room), and the
+    // newer announcement gets its own answer.
     TargetState d = {};
     d.have = true;
     targetStep(d, wantGen(1), 0x0303, true, 0);
     targetStep(d, all, 0x0303, true, 100);
-    CHECK(targetAnswer(d, answer(kOpAnnounce, kResultNameTaken, 1, kBoot), kBoot, 150) == AnswerEffect::Refused);
+    LinkFrame olderFull = answer(kOpAnnounce, kResultFull, 1, kBoot);
+    olderFull.announceGen = (uint8_t)(d.announceGen - 1);
+    CHECK(targetAnswer(d, olderFull, kBoot, 150) == AnswerEffect::Ignored && d.state == TState::Announcing &&
+          d.lastResult == 0);
+    LinkFrame olderStale = answer(kOpAnnounce, kResultStale, 1, kBoot);
+    olderStale.announceGen = (uint8_t)(d.announceGen - 1);
+    CHECK(targetAnswer(d, olderStale, kBoot, 150) == AnswerEffect::Ignored && d.linkGen == 1);
+    LinkFrame newerAll = echo(d, answer(kOpAnnounce, kResultAccepted, 1, kBoot));
+    newerAll.sensorMask = espnowsensor::kSensorMaskAll;
+    CHECK(targetAnswer(d, newerAll, kBoot, 160) == AnswerEffect::Accepted && d.state == TState::Accepted);
+    // A refusal of the latest one counts.
+    TargetState e = {};
+    e.have = true;
+    targetStep(e, wantGen(1), 0x0303, true, 0);
+    targetStep(e, all, 0x0303, true, 100);
+    CHECK(targetAnswer(e, echo(e, answer(kOpAnnounce, kResultNameTaken, 1, kBoot)), kBoot, 150) == AnswerEffect::Refused);
+    // No answer counts before an announcement went out (announceGen 0).
+    TargetState z = {};
+    z.have = true;
+    z.state = TState::Announcing;
+    z.linkGen = 1;
+    CHECK(targetAnswer(z, answer(kOpAnnounce, kResultFull, 1, kBoot), kBoot, 0) == AnswerEffect::Ignored);
     // The backup master is announced no sensors and answers none.
     TargetState b = {};
     b.have = true;
     TargetWant backup = wantGen(1, streamsForTarget(kTargetBackup));
     CHECK(targetStep(b, backup, 0x0404, true, 0) == kActAnnounce && announcedMask(b) == 0);
-    LinkFrame backupAnswer = answer(kOpAnnounce, kResultAccepted, 1, kBoot);
+    LinkFrame backupAnswer = echo(b, answer(kOpAnnounce, kResultAccepted, 1, kBoot));
     backupAnswer.streams = streamsForTarget(kTargetBackup);
     backupAnswer.sensorMask = 0;
     CHECK(targetAnswer(b, backupAnswer, kBoot, 10) == AnswerEffect::Accepted && b.acceptedStreams == backupAnswer.streams);
@@ -857,6 +900,80 @@ static void testEndToEnd() {
   CHECK(counterJudge(onM, cM, 0xBBBB, 1, false, now) == espnowsensor::CounterVerdict::Restart);
 }
 
+// 1.0 rule W4 (back-capture design): byte 7 of FORWARD_LINK is the bond
+// master's announcement number, stepped on every announcement it sends and
+// echoed by the master. An acceptance counts only with the latest number, and
+// its streams and sensors may be any subset of what was announced (a master
+// on older firmware drops sensors and streams it does not know and echoes the
+// rest), never more.
+static void testAnnounceGen() {
+  const uint16_t kBoot = 0x0022;
+  // Byte 7 on the wire.
+  LinkFrame f = announce(3, kBoot);
+  f.announceGen = 0xA7;
+  uint8_t wire[kLinkFrameLen];
+  packLinkFrame(wire, f);
+  LinkFrame back = {};
+  CHECK(wire[7] == 0xA7 && parseLinkFrame(wire, sizeof(wire), back) && back.announceGen == 0xA7);
+  // 1..255, never 0.
+  CHECK(announceGenNext(0) == 1 && announceGenNext(1) == 2 && announceGenNext(255) == 1);
+
+  TargetState t = {};
+  t.have = true;
+  uint32_t now = 0;
+  CHECK(targetStep(t, wantGen(1), 0x0505, true, now) == kActAnnounce && t.announceGen == 1);
+  now += kAnnounceBackoffMs[0];
+  CHECK(targetStep(t, wantGen(1), 0x0505, true, now) == kActAnnounce && t.announceGen == 2);
+  // The answer to the first announcement arrives after the second went out.
+  LinkFrame first = answer(kOpAnnounce, kResultAccepted, 1, kBoot);
+  first.announceGen = 1;
+  CHECK(targetAnswer(t, first, kBoot, now) == AnswerEffect::Ignored && t.state == TState::Announcing);
+  LinkFrame second = first;
+  second.announceGen = 2;
+  CHECK(targetAnswer(t, second, kBoot, now) == AnswerEffect::Accepted && t.state == TState::Accepted);
+  // The 10-minute refresh steps it too; an answer to the earlier one leaves
+  // the acceptance as it is and changes nothing.
+  CHECK(targetStep(t, wantGen(1), 0x0505, true, now + kRefreshMs) == kActAnnounce && t.announceGen == 3);
+  CHECK(targetAnswer(t, second, kBoot, now) == AnswerEffect::Ignored && t.state == TState::Accepted);
+
+  // Subset: every sensor announced, a master that knows fewer echoes those.
+  TargetState u = {};
+  u.have = true;
+  TargetWant all = wantGen(1);
+  all.sensorMask = espnowsensor::kSensorMaskAll;
+  CHECK(targetStep(u, all, 0x0606, true, 0) == kActAnnounce);
+  LinkFrame fewer = echo(u, answer(kOpAnnounce, kResultAccepted, 1, kBoot));
+  fewer.sensorMask = kSensorMaskDefault;  // the input device left out
+  CHECK(targetAnswer(u, fewer, kBoot, 10) == AnswerEffect::Accepted && u.acceptedMask == kSensorMaskDefault &&
+        u.acceptedStreams == kStreamsAll);
+  CHECK(!targetCarries(u, 0x0606, kStreamReadings, REMOTE_SENSOR_INPUT) &&
+        targetCarries(u, 0x0606, kStreamReadings, REMOTE_SENSOR_GPS));
+  // ... and fewer streams: battery and events only.
+  TargetState v = {};
+  v.have = true;
+  CHECK(targetStep(v, wantGen(1), 0x0707, true, 0) == kActAnnounce);
+  LinkFrame noReadings = echo(v, answer(kOpAnnounce, kResultAccepted, 1, kBoot));
+  noReadings.streams = kStreamBattery | kStreamEvents;
+  noReadings.sensorMask = 0;
+  CHECK(targetAnswer(v, noReadings, kBoot, 10) == AnswerEffect::Accepted &&
+        v.acceptedStreams == (kStreamBattery | kStreamEvents) && v.acceptedMask == 0 &&
+        !targetCarries(v, 0x0707, kStreamReadings, REMOTE_SENSOR_GPS) && targetCarries(v, 0x0707, kStreamEvents, -1));
+  // Never more than announced: a sensor or a stream that was not announced.
+  TargetState w = {};
+  w.have = true;
+  TargetWant gps = wantGen(1);
+  gps.sensorMask = espnowsensor::sensorBit(REMOTE_SENSOR_GPS);
+  CHECK(targetStep(w, gps, 0x0808, true, 0) == kActAnnounce);
+  LinkFrame more = echo(w, answer(kOpAnnounce, kResultAccepted, 1, kBoot));
+  CHECK(targetAnswer(w, more, kBoot, 10) == AnswerEffect::Ignored && w.state == TState::Announcing);
+  TargetState x = {};
+  x.have = true;
+  CHECK(targetStep(x, wantGen(1, kStreamBattery | kStreamEvents), 0x0909, true, 0) == kActAnnounce);
+  LinkFrame readingsToo = echo(x, answer(kOpAnnounce, kResultAccepted, 1, kBoot));
+  readingsToo.sensorMask = 0;
+  CHECK(targetAnswer(x, readingsToo, kBoot, 10) == AnswerEffect::Ignored && x.state == TState::Announcing);
+}
+
 int main() {
   testFrame();
   testDecide();
@@ -868,6 +985,7 @@ int main() {
   testSensorRequests();
   testLeaseEnds();
   testEndToEnd();
+  testAnnounceGen();
   std::printf("espnow_forward_core_tests: %u checks passed\n", gChecks);
   return 0;
 }

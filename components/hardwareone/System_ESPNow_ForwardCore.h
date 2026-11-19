@@ -102,7 +102,10 @@ constexpr uint8_t streamsForTarget(uint8_t kind) {
 //   4  streams     bit 0 readings, bit 1 battery, bit 2 events (echoed)
 //   5  result      answer only (kResult*)
 //   6  answers     answer only: the op answered (1 or 2)
-//   7  reserved    sent 0, ignored
+//   7  announceGen announce: B's announcement number for this master, 1..255,
+//                  stepped on every announcement B sends (a re-send and the
+//                  10-minute refresh included); an answer echoes it. 0 in a
+//                  withdrawal and a query (1.0 rule, back-capture design W4)
 //   8  partnerMac  X's address; all zero in a withdrawal of everything and in
 //                  a query
 //  14  reserved    2 bytes, sent 0, ignored
@@ -149,6 +152,7 @@ struct LinkFrame {
   uint8_t  streams;
   uint8_t  result;
   uint8_t  answers;
+  uint8_t  announceGen;  // byte 7
   uint8_t  partnerMac[6];
   SensorMask sensorMask;
   uint8_t  partnerKey[kPartnerKeyLen];
@@ -164,6 +168,7 @@ inline void packLinkFrame(uint8_t out[kLinkFrameLen], const LinkFrame& f) {
   out[4] = (uint8_t)(f.streams & kStreamsAll);
   out[5] = f.result;
   out[6] = f.answers;
+  out[7] = f.announceGen;
   memcpy(out + 8, f.partnerMac, 6);
   out[kLinkOffMask + 0] = (uint8_t)(f.sensorMask & 0xFF);
   out[kLinkOffMask + 1] = (uint8_t)((f.sensorMask >> 8) & 0xFF);
@@ -189,6 +194,7 @@ inline bool parseLinkFrame(const uint8_t* in, size_t len, LinkFrame& f) {
   f.streams = (uint8_t)(in[4] & kStreamsAll);
   f.result = in[5];
   f.answers = in[6];
+  f.announceGen = in[7];
   memcpy(f.partnerMac, in + 8, 6);
   const uint8_t* m = in + kLinkOffMask;
   f.sensorMask = ((SensorMask)m[0] | ((SensorMask)m[1] << 8) | ((SensorMask)m[2] << 16) | ((SensorMask)m[3] << 24)) &
@@ -233,6 +239,11 @@ inline const char* resultText(uint8_t result) {
 // same boot are ordered in u8 serial arithmetic.
 // ---------------------------------------------------------------------------
 constexpr uint8_t linkGenNext(uint8_t gen) { return gen >= 255 ? (uint8_t)1 : (uint8_t)(gen + 1); }
+
+// Announcement numbers (byte 7): per target, 1..255 and never 0, stepped on
+// every announcement sent. Only the answer to the latest one is taken as an
+// acceptance (targetAnswer).
+constexpr uint8_t announceGenNext(uint8_t gen) { return linkGenNext(gen); }
 
 // True when `a` is newer than `b`: (a - b) mod 256 in 1..127.
 constexpr bool serialNewer(uint8_t a, uint8_t b) {
@@ -466,6 +477,7 @@ struct TargetState {
   SensorMask sensorMask;
   uint8_t  acceptedStreams; // what the answer echoed, within what was announced
   SensorMask acceptedMask;
+  uint8_t  announceGen;     // the number of the last announcement sent (0: none yet)
   uint8_t  lastResult;      // of the last answer to an announcement (0: none)
   uint8_t  backoff;
   bool     queried;
@@ -554,6 +566,7 @@ inline uint8_t targetStep(TargetState& t, const TargetWant& w, uint16_t sessionI
     case TState::Announcing:
       if (deadlineReached(nowMs, t.nextMs)) {
         act |= kActAnnounce;
+        t.announceGen = announceGenNext(t.announceGen);
         t.nextMs = nowMs + kAnnounceBackoffMs[t.backoff];
         if (t.backoff + 1 < kAnnounceBackoffSteps) t.backoff++;
         t.lastAnnounceMs = nowMs;
@@ -563,6 +576,7 @@ inline uint8_t targetStep(TargetState& t, const TargetWant& w, uint16_t sessionI
     case TState::Accepted:
       if ((uint32_t)(nowMs - t.lastAnnounceMs) >= kRefreshMs) {
         act |= kActAnnounce;
+        t.announceGen = announceGenNext(t.announceGen);
         t.lastAnnounceMs = nowMs;
         t.toldSessionId = sessionId;
       }
@@ -571,6 +585,7 @@ inline uint8_t targetStep(TargetState& t, const TargetWant& w, uint16_t sessionI
       if (deadlineReached(nowMs, t.nextMs)) {
         targetRestartAnnounce(t, nowMs);
         act |= kActAnnounce;
+        t.announceGen = announceGenNext(t.announceGen);
         t.nextMs = nowMs + kAnnounceBackoffMs[0];
         t.backoff = 1;
         t.lastAnnounceMs = nowMs;
@@ -592,16 +607,23 @@ constexpr SensorMask announcedMask(const TargetState& t) {
 enum class AnswerEffect : uint8_t { Ignored, Accepted, Refused, Stale, WithdrawDone, Noted };
 
 // An answer from this target. Used only when it answers what is outstanding:
-// the same op, link number and boot tag; an acceptance also echoes the
-// streams and sensors announced last (one that echoes an older set answers an
-// announcement since replaced, and the newer one is still out). `Stale`: the
-// owner steps its link number and announces again.
+// the same op, link number and boot tag, and (1.0 rule, back-capture design
+// W4) the number of the latest announcement (announceGen). An answer with an
+// older number, an acceptance or a refusal alike, answers an announcement
+// since replaced: the newer one is still out and gets its own answer, so the
+// older verdict never overrides it. An acceptance's streams and sensors must
+// also be a subset of what that announcement carried: a master on older
+// firmware drops the streams and sensors it does not know when it reads the
+// announcement and echoes the rest, and what it echoes is what it takes.
+// `Stale`: the owner steps its link number and announces again.
 inline AnswerEffect targetAnswer(TargetState& t, const LinkFrame& a, uint16_t myBootTag, uint32_t nowMs) {
   if (a.op != kOpAnswer) return AnswerEffect::Ignored;
   if (a.answers == kOpAnnounce) {
     if (t.state != TState::Announcing && t.state != TState::Accepted) return AnswerEffect::Ignored;
     if (a.linkGen != t.linkGen || a.viaBootTag != myBootTag) return AnswerEffect::Ignored;
-    if (a.result == kResultAccepted && (a.streams != t.streams || a.sensorMask != announcedMask(t))) {
+    if (t.announceGen == 0 || a.announceGen != t.announceGen) return AnswerEffect::Ignored;
+    if (a.result == kResultAccepted &&
+        ((a.streams & (uint8_t)~t.streams) != 0 || (a.sensorMask & (SensorMask)~announcedMask(t)) != 0)) {
       return AnswerEffect::Ignored;
     }
     t.lastResult = a.result;
@@ -707,7 +729,7 @@ inline bool parseStatusFrame(const uint8_t* in, size_t len, StatusFrame& f) {
 // A sensor request for the partner (SENSOR_REQ, 153, with its link byte set).
 // The mesh master asks for X's readings as it asks any sender: subscribe with
 // a lease, a one-shot, unsubscribe. It addresses B (the via) with B's link
-// number in byte 14 of the request (V4PayloadSensorReq.fwdLink). X never
+// number in byte 5 of the request (V4PayloadSensorReq.fwdLink). X never
 // takes a request from a mesh master (meshDataAllowed): B takes it, when
 // forwarding is on and the link stands, and turns it into its own bond-link
 // control of X's sensors (BOND_STREAM_CTRL on / off); the readings come back

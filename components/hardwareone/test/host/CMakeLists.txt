@@ -329,6 +329,15 @@ target_include_directories(espnow_time_core_tests PRIVATE ../..)
 target_compile_options(espnow_time_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# The answer header of ESP-NOW frames (System_ESPNow_AnswerCore.h, rule F3):
+# {u32 reqId, u8 status}, the shared status table and the per-frame names.
+add_executable(espnow_answer_core_tests test_espnow_answer_core.cpp)
+set_target_properties(espnow_answer_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_answer_core_tests PRIVATE ../..)
+target_compile_options(espnow_answer_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # Projection and pan math shared by MapCore::renderMap and the G2 map page.
 # The production header is dependency-light so geometry can be verified here
 # without Arduino, ESP-IDF, filesystem, or BLE mocks.
@@ -568,6 +577,10 @@ if(HW1_SANITIZE)
   target_compile_options(espnow_time_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(espnow_time_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(espnow_answer_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(espnow_answer_core_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(espnow_session_caps_core_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -1541,6 +1554,7 @@ add_test(NAME espnow_history_stress_tests COMMAND espnow_history_stress_tests)
 add_test(NAME espnow_sensor_core_tests COMMAND espnow_sensor_core_tests)
 add_test(NAME espnow_session_caps_core_tests COMMAND espnow_session_caps_core_tests)
 add_test(NAME espnow_time_core_tests COMMAND espnow_time_core_tests)
+add_test(NAME espnow_answer_core_tests COMMAND espnow_answer_core_tests)
 add_test(NAME espnow_power_event_core_tests COMMAND espnow_power_event_core_tests)
 add_test(NAME espnow_forward_core_tests COMMAND espnow_forward_core_tests)
 add_test(NAME map_viewport_core_tests COMMAND map_viewport_core_tests)
@@ -2820,6 +2834,17 @@ add_test(
   NAME espnow_file_transfer
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_file_transfer.py
+          ${ESPNOW_FILE_TRANSFER_TEST_ARGS})
+
+# Rule F3 of the 1.0 ESP-NOW format (System_ESPNow_AnswerCore.h): the
+# production CMD_RESP and STREAM senders and receivers end to end. Every answer
+# starts {u32 reqId, u8 status} under the answerer's own fresh msgId, and the
+# receivers correlate by the payload's reqId; the duplicate check no longer
+# skips STREAM, BOND_STREAM_CTRL or CMD_RESP.
+add_test(
+  NAME espnow_answers
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_answers.py
           ${ESPNOW_FILE_TRANSFER_TEST_ARGS})
 
 # ESP-NOW command privileges (README "ESP-NOW command privileges"): test commands

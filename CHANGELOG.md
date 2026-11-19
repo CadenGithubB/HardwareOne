@@ -772,6 +772,45 @@ everything user-visible since the v0.99.99.1 tag.
   yet tested on hardware.
 
 ### Changed
+- ESP-NOW 1.0 forward compatibility (back-capture design, 2026-11-19). A device that only passes a routed
+  frame on now refuses just the 1.0 neighbour-only message types (relay envelopes, heartbeats, route
+  lists, topology, pairing and the bond numbers) and passes every other one, including types this firmware
+  does not know, so frames added after 1.0 still cross a 1.0 relay; the device the frame is for still
+  takes only what it accepts routed and counts the rest (`espnowmeshmetrics`, routed `policy=`). A bond master
+  forwards its partner's battery and event frames byte for byte at their received length and keeps flag
+  bits it does not know in readings, changing only the link byte and the forwarded bit, so what a later
+  firmware adds to those frames reaches the mesh master (a frame too long for the path, or longer than
+  one sealed frame, goes on as its whole 1.0 part, never cut inside a later field). In the forward-link
+  frame (155) byte 7 is now the bond master's announcement number, which the master echoes: the bond
+  master takes an answer only to its latest announcement (an older acceptance or refusal no longer
+  overrides the newer answer, which could leave forwarding off for up to 10 minutes), and accepts also
+  when the master takes fewer streams or sensors than were announced (a master on older firmware leaves
+  out sensors it does not know). Numbers are reserved for
+  back-capture, built after 1.0: message types 82-85 (file catch-up) and 156-158 (device outbox), 86 and
+  159 kept free; session capability bits 8 `backlog_serve` and 9 `files_serve` are named (no 1.0 build
+  sets them; `espnowsessions` shows them by name when a peer does); the outbox's fixed stream numbers
+  (0-127 a sensor type, 0xF0 battery, 0xF1 events). Host-tested; not yet run on hardware.
+- ESP-NOW answers (1.0 wire format, rule F3): every answer frame now starts with the number of the
+  request it answers (32 bits) and one status byte from a shared table: 0 ok; 1-15 the same reason in
+  every answer (busy, refused, unsupported, too_large, no_slot, bad_request, not_ready, io_error,
+  not_found, timeout, cancelled); 16 and up a reason of that frame alone (`failed` for a command reply,
+  `not_a_dir` for the file answers, `incomplete` and `crc_mismatch` for a file cancel). This covers the
+  command reply (CMD_RESP, now 5 bytes before its text), each line of a remote command's output (STREAM),
+  the file cancel (FILE_CANCEL, 5 bytes), the remote file answers (their status numbers change: busy 1,
+  denied 2, not ready 7, I/O error 8, not found 9, not a directory 16) and the topology answers
+  (TOPO_START, and TOPO_PEER, which grows to 47 bytes; one that is not ok records nothing, so a busy
+  device is not shown as having no peers). Every frame, answers included, now goes under
+  the sender's own fresh message number: an answer no longer reuses the request's, which had let a
+  reply's acknowledgement mark an unrelated send of the answering device as delivered and could drop a
+  file cancel as a duplicate. Command output and command replies are now checked for duplicates like
+  every other frame (a resent frame is shown once). The sensor request (SENSOR_REQ) carries a 32-bit
+  request number and grows to 20 bytes; the end-of-file frame's status byte is 0 for a complete file
+  (it was 1); the capability summary's first byte is reserved (it was an unread version). A failed
+  command reply now says why on the console (`Command FAILED (busy) from ...`). The web bond page's
+  remote-file errors use the same words: `busy` and `refused` (they were `too_busy` and `perm_denied`). Devices on builds from
+  before this change and after it do not exchange command replies, command output, file cancels, sensor
+  requests or remote file answers, so the fleet is reflashed together, as the 1.0 full erase requires.
+  Host-tested; not yet run on hardware.
 - ESP-NOW 1.0 frame rules (a full-erase install: devices on builds from before this change do not talk
   to devices after it). Every frame layout is fixed, little-endian and checked byte by byte at build
   time; each message type has a minimum length, a shorter frame is dropped and counted (`espnowstats`:

@@ -282,7 +282,8 @@ static size_t count(uint8_t kind, const uint8_t* to = nullptr) {
   return n;
 }
 static void answer(const uint8_t from[6], uint8_t answers, uint8_t result, uint8_t gen, const uint8_t* partner = kPorch,
-                   uint8_t streams = espnowfwd::kStreamsAll, espnowsensor::SensorMask mask = espnowfwd::kSensorMaskDefault) {
+                   uint8_t streams = espnowfwd::kStreamsAll, espnowsensor::SensorMask mask = espnowfwd::kSensorMaskDefault,
+                   int announceGen = -1) {
   espnowfwd::LinkFrame a{};
   a.op = espnowfwd::kOpAnswer;
   a.answers = answers;
@@ -292,6 +293,12 @@ static void answer(const uint8_t from[6], uint8_t answers, uint8_t result, uint8
   a.streams = streams;
   a.sensorMask = mask;
   if (partner) std::memcpy(a.partnerMac, partner, 6);
+  // A master echoes the number of the announcement it answers (byte 7): by
+  // default the latest one sent to it.
+  for (const auto& t : sBf.targets) {
+    if (t.have && std::memcmp(t.mac, from, 6) == 0) a.announceGen = t.announceGen;
+  }
+  if (announceGen >= 0) a.announceGen = (uint8_t)announceGen;
   bondForwardOnLinkFrame(from, a);
 }
 static std::string describe(const char* args) { return cmd_bond_forward(String(args)); }
@@ -304,6 +311,18 @@ static void reading(const uint8_t src[6], uint8_t sensor, uint16_t counter, cons
   h.partCount = 1;
   h.ageMs = 0;
   bondForwardReading(src, h, (const uint8_t*)text.data(), text.size());
+}
+// The partner's battery and event frames as the ingest hands them on: the
+// received payload.
+static void forwardPower(const uint8_t src[6], const espnowsensor::PowerFrame& f) {
+  uint8_t b[espnowsensor::kPowerFrameLen];
+  espnowsensor::packPowerFrame(b, f);
+  bondForwardPower(src, b, sizeof(b));
+}
+static void forwardEvent(const uint8_t src[6], const espnowsensor::EventFrame& f) {
+  uint8_t b[espnowsensor::kEventFrameLen];
+  espnowsensor::packEventFrame(b, f);
+  bondForwardEvent(src, b, sizeof(b));
 }
 static std::string jsonOf(size_t len) {
   std::string s = "{\"k\":\"";
@@ -444,6 +463,8 @@ static void testAnnounceAndForward() {
   check(linkFrames(kHub).size() == 1, "not within 2 s");
   run(1);
   check(linkFrames(kHub).size() == 2 && linkFrames(kHub)[1].linkGen == 1, "again after 2 s, the same number");
+  check(linkFrames(kHub)[0].announceGen == 1 && linkFrames(kHub)[1].announceGen == 2 && linkFrames(kSpare)[0].announceGen == 1,
+        "each announcement carries the next announcement number in byte 7 (1.0 rule W4)");
   // A wrong answer is ignored; the right one accepts.
   gConsole.clear();
   answer(kHub, espnowfwd::kOpAnnounce, espnowfwd::kResultAccepted, 2);
@@ -499,7 +520,7 @@ static void testAnnounceAndForward() {
   pf.bootTag = 0xAAAA;
   pf.known = espnowsensor::kPowerPercentValid;
   pf.percentX10 = 715;
-  bondForwardPower(kPorch, pf);
+  forwardPower(kPorch, pf);
   check(count(152, kHub) == 1 && count(152, kSpare) == 1 && gWatched == 2, "battery state to both, acknowledged");
   espnowsensor::PowerFrame back{};
   espnowsensor::parsePowerFrame(gSent.back().bytes.data(), gSent.back().bytes.size(), back);
@@ -512,7 +533,7 @@ static void testAnnounceAndForward() {
   ef.flags = espnowsensor::kEventCutDetail;
   ef.eventSeq = 99;
   espnowsensor::eventFieldPut(ef.kind, sizeof(ef.kind), "login_fail", 11);
-  bondForwardEvent(kPorch, ef);
+  forwardEvent(kPorch, ef);
   check(count(132, kHub) == 1 && count(132, kSpare) == 1, "an event to both");
   espnowsensor::EventFrame eb{};
   espnowsensor::parseEventFrame(gSent.back().bytes.data(), gSent.back().bytes.size(), eb);
@@ -802,7 +823,9 @@ static void testReviewCases() {
   hub = linkFrames(kHub);
   check(hub.size() == 2 && hub[1].sensorMask == espnowsensor::kSensorMaskAll, "announced again at once with every sensor");
   const uint32_t ignoredBefore = sBf.counts.answersIgnored;
-  answer(kHub, espnowfwd::kOpAnnounce, espnowfwd::kResultAccepted, 1);  // echoes the default sensors
+  // echoes the default sensors and the first announcement's number
+  answer(kHub, espnowfwd::kOpAnnounce, espnowfwd::kResultAccepted, 1, kPorch, espnowfwd::kStreamsAll,
+         espnowfwd::kSensorMaskDefault, hub[0].announceGen);
   check(sBf.targets[espnowfwd::kTargetPrimary].state == espnowfwd::TState::Announcing &&
         sBf.counts.answersIgnored == ignoredBefore + 1, "the answer to the older announcement is ignored");
   answer(kHub, espnowfwd::kOpAnnounce, espnowfwd::kResultAccepted, 1, kPorch, espnowfwd::kStreamsAll,
@@ -904,7 +927,7 @@ static void testPrimaryMesh() {
   gSent.clear();
   espnowsensor::PowerFrame pf{};
   pf.counter = 1;
-  bondForwardPower(kPorch, pf);
+  forwardPower(kPorch, pf);
   check(count(152, kHub) == 1 && count(152, kSpare) == 0, "battery state only to the primary mesh's master");
   check(describe("") == "OK: forwarding is on: porch's readings, battery state and events go to hub (accepted).",
         "bondforward names only the primary mesh's master");
@@ -1294,6 +1317,87 @@ static void testPartnerSensorList() {
         "a list from another device does not count as the partner's");
 }
 
+// 1.0 rule W2 (back-capture design): the bond master forwards the partner's
+// battery and event frames verbatim at the full received length, patching
+// only the link byte and the forwarded bit, so a frame a later firmware grew
+// at its end (or whose reserved bytes and unknown bits it uses) reaches the
+// master whole. Readings keep unknown flag bits too.
+static void testVerbatimForward() {
+  resetAll();
+  upAndAccepted();
+  // A battery frame grown to 32 bytes, with reserved bytes, an unknown
+  // `known` bit and appended bytes set.
+  espnowsensor::PowerFrame pf{};
+  pf.counter = 9;
+  pf.bootTag = 0xAAAA;
+  pf.known = espnowsensor::kPowerPercentValid;
+  pf.percentX10 = 500;
+  std::vector<uint8_t> power(32, 0);
+  espnowsensor::packPowerFrame(power.data(), pf);
+  power[7] |= 0x80;  // known bit 15, unknown at 1.0
+  for (size_t i = 17; i < 24; ++i) power[i] = (uint8_t)(0xA0 + i);
+  for (size_t i = 24; i < 32; ++i) power[i] = (uint8_t)(0xB0 + i);
+  bondForwardPower(kPorch, power.data(), power.size());
+  std::vector<uint8_t> want = power;
+  want[16] = 1;  // the link number, and nothing else
+  bool same = count(152) == 2;
+  for (const Sent& s : gSent) same = same && (s.kind != 152 || s.bytes == want);
+  check(same, "a grown battery frame goes to both masters whole, only byte 16 patched (FAILS WITHOUT THE W2 RULE)");
+
+  // An event grown to 160 bytes, with unknown flag bits, the reserved u16 and
+  // appended bytes set.
+  espnowsensor::EventFrame ef{};
+  ef.counter = 10;
+  ef.bootTag = 0xAAAA;
+  ef.flags = espnowsensor::kEventCutDetail;
+  ef.eventSeq = 77;
+  espnowsensor::eventFieldPut(ef.kind, sizeof(ef.kind), "login_fail", 11);
+  std::vector<uint8_t> event(160, 0);
+  espnowsensor::packEventFrame(event.data(), ef);
+  event[4] |= 0xC0;  // flag bits 6 and 7, unknown at 1.0
+  event[10] = 0x55;
+  event[11] = 0x66;
+  for (size_t i = 128; i < 160; ++i) event[i] = (uint8_t)(0xC0 + (i & 0x1F));
+  gSent.clear();
+  bondForwardEvent(kPorch, event.data(), event.size());
+  want = event;
+  want[4] = (uint8_t)(event[4] | espnowsensor::kEventFlagForwarded);
+  want[7] = 1;
+  same = count(132) == 2;
+  for (const Sent& s : gSent) same = same && (s.kind != 132 || s.bytes == want);
+  check(same, "a grown event goes to both masters whole: bit 4 and byte 7 patched, unknown flag bits, the reserved "
+              "bytes and the appended bytes kept (FAILS WITHOUT THE W2 RULE)");
+  // A path that cannot carry the grown frame gets its 1.0 part, patched the same.
+  sessionOf(kHub)->routed = true;
+  gSent.clear();
+  bondForwardEvent(kPorch, event.data(), event.size());
+  bool routedPrefix = false, directWhole = false;
+  for (const Sent& s : gSent) {
+    if (s.kind != 132) continue;
+    if (std::memcmp(s.dst, kHub, 6) == 0)
+      routedPrefix = s.bytes.size() == espnowsensor::kEventFrameLen &&
+                     std::equal(s.bytes.begin(), s.bytes.end(), want.begin());
+    if (std::memcmp(s.dst, kSpare, 6) == 0) directWhole = s.bytes == want;
+  }
+  check(routedPrefix && directWhole, "160 bytes do not fit a routed frame (146): that master gets the first 128 bytes, "
+                                     "the other one the whole frame");
+  sessionOf(kHub)->routed = false;
+  // A 1.0 frame is unchanged by the rule: same bytes as before, X's values.
+  gSent.clear();
+  forwardPower(kPorch, pf);
+  espnowsensor::PowerFrame back{};
+  check(count(152) == 2 && gSent.back().bytes.size() == espnowsensor::kPowerFrameLen &&
+        espnowsensor::parsePowerFrame(gSent.back().bytes.data(), gSent.back().bytes.size(), back) && back.fwdLink == 1 &&
+        back.counter == 9 && back.percentX10 == 500, "a 24-byte battery frame goes on as 24 bytes");
+  // A reading keeps flag bits this firmware does not know.
+  gSent.clear();
+  reading(kPorch, REMOTE_SENSOR_GPS, 11, "{\"v\":11}", (uint8_t)(0x80 | espnowsensor::kReadingFlagAgeValid));
+  espnowsensor::ReadingHeader h{};
+  check(count(154, kHub) == 1 && espnowsensor::parseReadingHeader(gSent[0].bytes.data(), gSent[0].bytes.size(), h) &&
+        h.flags == (0x80 | espnowsensor::kReadingFlagAgeValid | espnowsensor::kReadingFlagForwarded) && h.fwdLink == 1,
+        "a reading keeps an unknown flag bit, with the forwarded bit and the link number (FAILS WITHOUT THE W2 RULE)");
+}
+
 int main() {
   testOffAndReasons();
   testAnnounceAndForward();
@@ -1303,6 +1407,7 @@ int main() {
   testStatusAndRequests();
   testLeaseReview();
   testPartnerSensorList();
+  testVerbatimForward();
   check(gLockViolations == 0, "nothing that may block, print or send ran under the lock");
   check(gLockDepth == 0, "every lock was released");
   if (failures != 0) {

@@ -295,22 +295,25 @@ struct HandedOn {
   uint8_t src[6];
   espnowsensor::PowerFrame p;
   espnowsensor::EventFrame e;
+  std::vector<uint8_t> raw;  // the payload handed on, as received (1.0 rule W2)
 };
 static std::vector<HandedOn> gHandedOn;
 static std::vector<uint8_t> gNotKept;
-static void peForwardPower(const uint8_t src[6], const espnowsensor::PowerFrame& f) {
+static void peForwardPower(const uint8_t src[6], const uint8_t* payload, size_t len) {
   notUnderLock();
   HandedOn h{};
   h.power = true;
   std::memcpy(h.src, src, 6);
-  h.p = f;
+  espnowsensor::parsePowerFrame(payload, len, h.p);
+  h.raw.assign(payload, payload + len);
   gHandedOn.push_back(h);
 }
-static void peForwardEvent(const uint8_t src[6], const espnowsensor::EventFrame& f) {
+static void peForwardEvent(const uint8_t src[6], const uint8_t* payload, size_t len) {
   notUnderLock();
   HandedOn h{};
   std::memcpy(h.src, src, 6);
-  h.e = f;
+  espnowsensor::parseEventFrame(payload, len, h.e);
+  h.raw.assign(payload, payload + len);
   gHandedOn.push_back(h);
 }
 static void peNotKept(uint8_t streamId) {
@@ -1734,6 +1737,21 @@ static void testBondAndForwarding() {
   gAllocFails = false;
   check(gNotKept.size() == 1 && gNotKept[0] == espnowfwd::kStreamIdEvents && gHandedOn.size() == 1,
         "an event the bond master has no list for is counted not kept, and not handed on");
+  // 1.0 rule W2: what is handed on is the payload as received, at its full
+  // length (a later firmware's frame grown at its end, reserved bytes set).
+  resetAll();
+  gBondMaster = true;
+  std::vector<uint8_t> grownPower = powerBytes(1, 0x0E0E, 500, espnowsensor::kPowerPercentValid);
+  grownPower[20] = 0x5A;  // a reserved byte
+  grownPower.resize(40, 0x77);
+  rxPower(kShed, "shed", grownPower, true);
+  std::vector<uint8_t> grownEvent = eventBytes(1, 0x0E0E, "x", "y");
+  grownEvent[4] |= 0x40;  // a flag bit 1.0 does not know
+  grownEvent.resize(150, 0x66);
+  rxEvent(kShed, "shed", grownEvent, true);
+  check(gHandedOn.size() == 2 && gHandedOn[0].power && gHandedOn[0].raw == grownPower && !gHandedOn[1].power &&
+        gHandedOn[1].raw == grownEvent,
+        "a grown 180 and 182 are handed on whole, at their received length (FAILS WITHOUT THE W2 RULE)");
 
   // The mesh master: what glasses forwards for its partner is kept under
   // (partner via glasses), never under glasses or the partner's own record.

@@ -259,24 +259,39 @@ String getEspNowDeviceName(const uint8_t* mac) {
   return String();
 }
 
+// A FILE_CANCEL as production's v4_send_file_cancel puts it on the air (rule
+// F3): `msgId` is the payload's reqId (the transfer's FILE_START msgId),
+// `reason` its status, `frameMsgId` the cancel frame's own header msgId.
 struct Cancel {
   uint8_t to[6];
   uint32_t msgId;
   uint8_t reason;
+  uint32_t frameMsgId;
 };
 static std::vector<Cancel> cancels;
 static std::vector<uint32_t> acks;
 static bool loopback = false;  // receiver replies are delivered to the sender
-static void deliverCancelToSender(uint32_t msgId, uint8_t reason);
-bool v4_send_file_cancel(const uint8_t* dst, uint32_t msgId, uint8_t reason) {
+static void deliverCancelToSender(uint32_t frameMsgId, const uint8_t* payload, uint16_t len);
+bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
+                           const uint8_t* payload, uint16_t len, uint8_t ttl);
+uint32_t generateMessageId();
+static unsigned borrowedCancelIds = 0;
+// The FILE_CANCEL branch of the smart-send double (receiver -> sender).
+static bool recordCancelFrame(const uint8_t* dst, uint32_t frameMsgId, const uint8_t* payload, uint16_t len) {
   Cancel c{};
   std::memcpy(c.to, dst, 6);
-  c.msgId = msgId;
-  c.reason = reason;
+  c.frameMsgId = frameMsgId;
+  check(len == sizeof(V4PayloadFileCancel) && len == espnowanswer::kHeaderLen &&
+            espnowanswer::parseHeader(payload, len, &c.msgId, &c.reason),
+        "FILE_CANCEL is the 5-byte answer {reqId, status}");
+  if (frameMsgId == c.msgId) ++borrowedCancelIds;
   cancels.push_back(c);
-  if (loopback) deliverCancelToSender(msgId, reason);
+  if (loopback) deliverCancelToSender(frameMsgId, payload, len);
   return true;
 }
+
+// ---- production: the FILE_CANCEL sender ----------------------------------------------------
+// INSERT_CANCEL_TX
 bool v4_send_ack(const uint8_t*, uint32_t ackFor) {
   acks.push_back(ackFor);
   return true;
@@ -317,10 +332,8 @@ static void rxFrame(uint8_t type, uint8_t* src, uint32_t msgId, const uint8_t* p
     default: check(false, "rxFrame: unexpected frame type");
   }
 }
-static void deliverCancelToSender(uint32_t msgId, uint8_t reason) {
-  V4PayloadFileCancel p{};
-  p.reason = reason;
-  rxFrame(ESPNOW_V4_TYPE_FILE_CANCEL, kReceiver, msgId, reinterpret_cast<const uint8_t*>(&p), sizeof(p));
+static void deliverCancelToSender(uint32_t frameMsgId, const uint8_t* payload, uint16_t len) {
+  rxFrame(ESPNOW_V4_TYPE_FILE_CANCEL, kReceiver, frameMsgId, payload, len);
 }
 
 // ---- sessions, the pending-frame store and the smart send path ----------------------------
@@ -396,6 +409,7 @@ static void putOnAir(const AirFrame& f) {
 // (refused when 4 wait) with a handshake kick when none is in flight.
 bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t, uint32_t msgId,
                            const uint8_t* payload, uint16_t len, uint8_t) {
+  if (type == ESPNOW_V4_TYPE_FILE_CANCEL) return recordCancelFrame(dst, msgId, payload, len);
   if (std::memcmp(dst, kReceiver, 6) != 0) check(false, "smart send: unexpected destination");
   AirFrame f{type, msgId, std::vector<uint8_t>(payload, payload + len)};
   SessionState* s = sessionFindByPeer(dst, 0);
@@ -559,10 +573,12 @@ static void rxChunk(uint8_t* src, uint32_t msgId, const std::string& bytes, uint
   std::memcpy(d.data, bytes.data() + offset, n);
   rxFrame(ESPNOW_V4_TYPE_FILE_DATA, src, msgId, reinterpret_cast<const uint8_t*>(&d), static_cast<uint16_t>(2 + n));
 }
-static void rxEnd(uint8_t* src, uint32_t msgId, uint32_t crc, uint8_t success = 1) {
+// FILE_END's status: 0 = the sender sent the whole file (0 is ok in every
+// status byte, rule F3); anything else (kCancelled) = it stopped.
+static void rxEnd(uint8_t* src, uint32_t msgId, uint32_t crc, uint8_t status = espnowanswer::kOk) {
   V4PayloadFileEnd e{};
   e.crc32 = crc;
-  e.success = success;
+  e.status = status;
   rxFrame(ESPNOW_V4_TYPE_FILE_END, src, msgId, reinterpret_cast<const uint8_t*>(&e), sizeof(e));
 }
 // Chunks [from, to) of a streaming receive, the writer keeping up after each.
@@ -605,7 +621,7 @@ static void resetWorld() {
   boundedMisses = deadlocks = 0;
   fsLockWaitsUnderSlotLock = fsCallsUnderSlotLock = 0;
   cmdExecRefuseNext = 0;
-  cancels.clear(); acks.clear(); events.clear(); broadcasts.clear();
+  cancels.clear(); acks.clear(); events.clear(); broadcasts.clear(); borrowedCancelIds = 0;
   air.clear(); pendingFrames.clear(); pendingParked = 0;
   loopback = false;
   gEspNowStorage = EspNowState{};
@@ -678,7 +694,7 @@ static void testWriterBusyDoesNotCancelHealthyReceive() {
   rxChunksWithWriter(kSender, 21, a, 0, 30);   // the .part is open by now
   rxStart(kOther, 22, "b.txt", b.size());
   rxChunk(kOther, 22, b, 0);
-  rxEnd(kSender, 21, 0, 0);                    // the sender aborted A: teardown is queued
+  rxEnd(kSender, 21, 0, espnowanswer::kCancelled);  // the sender aborted A: teardown is queued
   check(slotState(21) == FILE_SLOT_COMPLETING, "writer busy: A is waiting for its abort job");
   const unsigned cancelsBefore = static_cast<unsigned>(cancels.size());
   bool hookRan = false;
@@ -706,7 +722,7 @@ static void testTeardownKeepsTheSlotClaimed() {
   const std::string a = pattern(kStreamSize, 5);
   rxStart(kSender, 31, "a.bin", a.size());
   rxChunksWithWriter(kSender, 31, a, 0, 30);
-  rxEnd(kSender, 31, 0, 0);
+  rxEnd(kSender, 31, 0, espnowanswer::kCancelled);
   uint8_t stateDuringFsWork = FILE_SLOT_FREE;
   uint8_t slotsInUse = 0;
   onFsLockWait = [&] {
@@ -1174,6 +1190,36 @@ static void testBondSyncFilesAreQuiet() {
   check(!fileRxIsBondSync(true, true, nullptr), "no name: not quiet");
 }
 
+// Rule F3: FILE_CANCEL is an answer. The receiver puts the transfer's msgId
+// in the payload's reqId and its reason in status, under a fresh header msgId
+// of its own; the sender stops the transfer the reqId names and reports it
+// once, whatever header msgIds the repeats carry.
+static void testCancelIsAnAnswer() {
+  resetWorld();
+  loopback = true;
+  gEspNow->fileSendInProgress = true;
+  std::memcpy(gEspNow->fileSendPeer, kReceiver, 6);
+  gEspNow->fileSendMsgId = 777;
+  v4_send_file_cancel(kSender, 777, FILE_CANCEL_INCOMPLETE);
+  check(cancels.size() == 1 && cancels[0].msgId == 777 && cancels[0].reason == espnowanswer::kFileIncomplete,
+        "cancel answer: reqId = the transfer's msgId, status incomplete (16)");
+  check(borrowedCancelIds == 0 && cancels[0].frameMsgId != 777,
+        "cancel answer: its header msgId is the canceller's own, not the transfer's");
+  check(gEspNow->fileSendAbortMsgId == 777, "cancel answer: the sender stops the transfer the reqId names");
+  check(eventCount(MSG_FILE_SEND_FAILED) == 1, "cancel answer: the failed send is recorded");
+  // A repeat (another fresh header msgId) is not recorded again.
+  v4_send_file_cancel(kSender, 777, FILE_CANCEL_INCOMPLETE);
+  check(cancels.size() == 2 && cancels[1].frameMsgId != cancels[0].frameMsgId,
+        "cancel answer: each repeat has a header msgId of its own");
+  check(eventCount(MSG_FILE_SEND_FAILED) == 1, "cancel answer: a repeat is not recorded twice");
+  // A cancel for another transfer leaves this one running.
+  gEspNow->fileSendAbortMsgId = 0;
+  nowMs += 6000;
+  v4_send_file_cancel(kSender, 778, FILE_CANCEL_CRC_MISMATCH);
+  check(gEspNow->fileSendAbortMsgId == 0, "cancel answer: another transfer's cancel stops nothing");
+  gEspNow->fileSendInProgress = false;
+}
+
 int main(int argc, char** argv) {
   // With a case name, only that case runs (a case that leaves a slot behind on
   // a broken tree would otherwise blur the ones after it).
@@ -1195,6 +1241,7 @@ int main(int argc, char** argv) {
     {"session-lost", testSessionLostMidTransfer},
     {"callers", testCallersSayThereIsNoSession},
     {"bond-sync-quiet", testBondSyncFilesAreQuiet},
+    {"cancel-answer", testCancelIsAnAnswer},
   };
   check(fileSlotsInit(), "slot table initialised");
   liveAllocations = 0;  // count transfer buffers only, not the table

@@ -599,8 +599,9 @@ static bool v4_relay_wrap_and_send(const uint8_t nextHop[6], const uint8_t final
                                    const uint8_t* innerFrame, size_t innerLen,
                                    uint8_t ttl, uint8_t hopsUsed, uint32_t msgId);
 // Positive list of opcodes that may travel inside an envelope (defined with the
-// forwarding engine, below). Consulted on BOTH sides: the sender will not wrap
-// an ineligible frame, and the receiver will not deliver one.
+// forwarding engine, below). Consulted at both ENDS: the sender will not wrap
+// an ineligible frame, and the final destination will not deliver one. A hop
+// that only passes an envelope on asks v4_relay_hop_refused instead.
 static bool v4_routed_type_allowed(uint8_t type);
 
 // Forward declarations for V3 helper functions (non-static for external linkage)
@@ -634,7 +635,8 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
                                const uint8_t* payload, uint16_t payloadLen,
                                uint8_t ttl);
 bool v4_broadcast_topo_request(uint32_t reqId);
-bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool success, const char* resultText, uint16_t textLen);
+bool v4_send_command_response(const uint8_t* dst, uint32_t reqId, uint8_t status, const char* resultText, uint16_t textLen);
+static bool v4_send_cmd_resp_async(const uint8_t* dst, uint32_t reqId, uint8_t status, const char* text);
 bool v4_send_text(const uint8_t* dst, const char* text, uint16_t textLen);
 bool v4_broadcast_text(const char* text, uint16_t textLen);
 // (The sensor senders v4_send_sensor_status / v4_send_sensor_part are declared in System_ESPNow.h.)
@@ -1528,7 +1530,8 @@ void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& r
   BROADCAST_PRINTF("[ESP-NOW] Sending response to %s (%u bytes)", senderName.c_str(), (unsigned)result.length());
 
   // Send via V3 command response
-  bool sent = v4_send_command_response(targetMac, msgId, success, fullResult.c_str(), fullResult.length());
+  bool sent = v4_send_command_response(targetMac, msgId, success ? espnowanswer::kOk : espnowanswer::kCmdFailed,
+                                       fullResult.c_str(), fullResult.length());
 
   if (sent) {
     broadcastOutput("[ESP-NOW] V3 response sent successfully");
@@ -1544,6 +1547,25 @@ void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& r
 
 // Forward declaration for session-based streaming helper (defined in V3 protocol section)
 static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t len);
+
+// One STREAM frame (rule F3): {reqId, status 0} and then the line, cut to the
+// one-frame plaintext budget for `dst` (202 B direct, 146 B routed, header
+// included). STREAM is fire-and-forget (sendAead): a line longer than one AEAD
+// frame would fragment on the dispatcher and stall every other sender. reqId
+// is the command's msgId (0: startstream output, which answers nothing); the
+// frame's own header msgId is a fresh one, so the duplicate check applies to
+// STREAM like to any other frame.
+static bool v4_send_stream_line(const uint8_t* dst, uint32_t reqId, const char* data, size_t len) {
+  uint8_t frame[ESPNOW_V4_MAX_PLAINTEXT];
+  size_t cap = v4_single_frame_cap(dst);
+  if (cap > sizeof(frame)) cap = sizeof(frame);
+  if (cap <= espnowanswer::kHeaderLen || len == 0) return false;
+  if (len > cap - espnowanswer::kHeaderLen) len = cap - espnowanswer::kHeaderLen;
+  espnowanswer::packHeader(frame, reqId, espnowanswer::kOk);
+  memcpy(frame + espnowanswer::kHeaderLen, data, len);
+  return espnowtx::sendAead(dst, ESPNOW_V4_TYPE_STREAM, 0, generateMessageId(), frame,
+                            (uint16_t)(espnowanswer::kHeaderLen + len), 1);
+}
 
 // The stream session of the ESP-NOW command the calling task is running, or 0.
 // v4_handle_cmd keys the session by the request's msgId and queues the command
@@ -1603,20 +1625,11 @@ void sendEspNowStreamMessage(const String& message) {
   }
   gEspNow->lastStreamSendTime = now;
 
-  // STREAM is fire-and-forget (sendAead): a line longer than one AEAD frame to
-  // this target would fragment on the dispatcher and stall every other sender,
-  // so clamp to the single-frame plaintext budget (202 B direct, 146 B routed).
-  size_t msgLen = safeMessage.length();
-  const size_t lineCap = v4_single_frame_cap(gEspNow->streamTarget);
-  if (msgLen > lineCap) msgLen = lineCap;
-
   // Legacy global stream (startstream/stopstream) is uncorrelated live telemetry,
-  // not a reply to any request — send msgId 0 so the receiver stores it as reqId 0
-  // ("unsolicited"), exactly as before. (0 is also the dedup-skip sentinel.)
-  // Command-session output uses the command's msgId instead (see trySendToStreamSession).
-  uint32_t msgId = 0;
-  bool sent = espnowtx::sendAead(gEspNow->streamTarget, ESPNOW_V4_TYPE_STREAM, 0, msgId,
-                                  (const uint8_t*)safeMessage.c_str(), (uint16_t)msgLen, 1);
+  // not a reply to any request: reqId 0, which the receiver stores as "unsolicited".
+  // Command-session output carries the command's msgId instead (trySendToStreamSession).
+  // v4_send_stream_line cuts the line to one frame for this target.
+  bool sent = v4_send_stream_line(gEspNow->streamTarget, 0, safeMessage.c_str(), safeMessage.length());
 
   if (sent) {
     gEspNow->streamSentCount++;
@@ -1717,14 +1730,10 @@ static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t l
   StreamSession* sess = findStreamSession(cmdMsgId);
   if (!sess || !sess->active) return false;
 
-  // One frame per line (see sendEspNowStreamMessage): fire-and-forget STREAM
-  // must never take the fragmenting path.
-  const size_t lineCap = v4_single_frame_cap(sess->targetMac);
-  if (len > lineCap) len = lineCap;
-
+  // One frame per line (v4_send_stream_line): fire-and-forget STREAM must
+  // never take the fragmenting path. reqId = the command's msgId.
   // Step 3c: fire-and-forget through clerk (called from cmd_exec output path).
-  espnowtx::sendAead(sess->targetMac, ESPNOW_V4_TYPE_STREAM, 0, cmdMsgId,
-                     (const uint8_t*)data, (uint16_t)len, 1);
+  v4_send_stream_line(sess->targetMac, cmdMsgId, data, len);
   DEBUG_ESPNOW_STREAMF("[STREAM] Session %lu sent: %.50s", (unsigned long)cmdMsgId, data);
   return true;
 }
@@ -3515,13 +3524,16 @@ static bool v4_send_ack(const uint8_t* dst, uint32_t ackFor) {
 
 // Phase 4: tell a sender that a file transfer it started will not complete.
 // The sender is fire-and-forget (it returns "sent" once frames are handed off,
-// without waiting for completion), so this is a post-hoc failure notice keyed
-// by the original transfer's msgId (echoed in the header). Same session AEAD
-// path as FILE_START/DATA/END — RX requires REQ_SESSION_ENC.
-static bool v4_send_file_cancel(const uint8_t* dst, uint32_t msgId, uint8_t reason) {
+// without waiting for completion), so this is a post-hoc failure notice. An
+// answer (rule F3): reqId = the transfer's FILE_START msgId, status = the
+// reason; the frame's own header msgId is fresh, so it is never taken for a
+// duplicate of a frame this device sent under the same number. Same session
+// AEAD path as FILE_START/DATA/END — RX requires REQ_SESSION_ENC.
+static bool v4_send_file_cancel(const uint8_t* dst, uint32_t transferMsgId, uint8_t reason) {
   V4PayloadFileCancel p = {};
-  p.reason = reason;
-  return v4_send_payload_smart(dst, ESPNOW_V4_TYPE_FILE_CANCEL, 0, msgId,
+  p.reqId = transferMsgId;
+  p.status = reason;
+  return v4_send_payload_smart(dst, ESPNOW_V4_TYPE_FILE_CANCEL, 0, generateMessageId(),
                                (const uint8_t*)&p, sizeof(p), 1);
 }
 
@@ -3840,6 +3852,7 @@ void bondNotifySessionEstablished(const uint8_t* peerMac) {
 static bool v4_send_topo_start(const uint8_t* dst, uint32_t reqId, uint8_t peerCount) {
   V4PayloadTopoStart payload = {};
   payload.reqId = reqId;
+  payload.status = espnowanswer::kOk;
   payload.peerCount = peerCount;
   memset(payload.reserved, 0, sizeof(payload.reserved));
   
@@ -3853,6 +3866,7 @@ static bool v4_send_topo_peer(const uint8_t* dst, uint32_t reqId, uint8_t peerIn
                                bool encrypted, const char* peerName) {
   V4PayloadTopoPeer payload = {};
   payload.reqId = reqId;
+  payload.status = espnowanswer::kOk;
   payload.peerIndex = peerIndex;
   payload.isLast = isLast ? 1 : 0;
   memcpy(payload.mac, peerMac, 6);
@@ -3988,11 +4002,14 @@ bool v4_send_text(const uint8_t* dst, const char* text, uint16_t textLen) {
   return result;
 }
 
-bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool success, const char* resultText, uint16_t textLen) {
+// CMD_RESP from a task that may block (cmd_exec): {reqId, status} + text
+// (rule F3). reqId is the request's header msgId; the answer goes under a
+// fresh msgId of this device's own.
+bool v4_send_command_response(const uint8_t* dst, uint32_t reqId, uint8_t status, const char* resultText, uint16_t textLen) {
   if (!resultText || textLen == 0) return false;
 
-  // Build response payload: success byte + result text
-  uint16_t totalLen = 1 + textLen;
+  // Build response payload: answer header + result text
+  uint16_t totalLen = (uint16_t)(espnowanswer::kHeaderLen + textLen);
   char dstMac[18];
   macToDisplay(dst, dstMac, sizeof(dstMac));
 
@@ -4008,15 +4025,29 @@ bool v4_send_command_response(const uint8_t* dst, uint32_t cmdMsgId, bool succes
   // from here. Keeps a multi-KB command response off the internal heap.
   uint8_t* buffer = (uint8_t*)ps_alloc(totalLen, AllocPref::PreferPsram, "espnow.tx.cmdresp");
   if (!buffer) return false;
-  buffer[0] = success ? 1 : 0;
-  memcpy(buffer + 1, resultText, textLen);
-  DEBUG_ESPNOWF("[V4_TX_CMD_RESP] Sending to %s cmdMsgId=%lu len=%u (encrypt-preferred)",
-         dstMac, (unsigned long)cmdMsgId, totalLen);
+  espnowanswer::packHeader(buffer, reqId, status);
+  memcpy(buffer + espnowanswer::kHeaderLen, resultText, textLen);
+  DEBUG_ESPNOWF("[V4_TX_CMD_RESP] Sending to %s reqId=%lu status=%u len=%u (encrypt-preferred)",
+         dstMac, (unsigned long)reqId, (unsigned)status, totalLen);
   bool result = v4_send_payload_smart(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                                       cmdMsgId, buffer, totalLen, 1);
+                                       generateMessageId(), buffer, totalLen, 1);
   free(buffer);
   DEBUG_ESPNOWF("[V4_TX_CMD_RESP] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
+}
+
+// A short CMD_RESP from the espnow_task receive path (a refusal before the
+// command runs): {reqId, status} + text, queued (sendAead never blocks), under
+// a fresh msgId of this device's own (rule F3). The text has no terminator on
+// the wire and is cut to fit one frame.
+static bool v4_send_cmd_resp_async(const uint8_t* dst, uint32_t reqId, uint8_t status, const char* text) {
+  uint8_t frame[espnowanswer::kHeaderLen + 120];
+  size_t len = text ? strlen(text) : 0;
+  if (len > sizeof(frame) - espnowanswer::kHeaderLen) len = sizeof(frame) - espnowanswer::kHeaderLen;
+  espnowanswer::packHeader(frame, reqId, status);
+  if (len) memcpy(frame + espnowanswer::kHeaderLen, text, len);
+  return espnowtx::sendAead(dst, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
+                            frame, (uint16_t)(espnowanswer::kHeaderLen + len), 1);
 }
 
 
@@ -4359,19 +4390,17 @@ static void v4h_cmd(const V4RxCtx& ctx) {
     // The one slot still holds a command the task has not run yet. Tell the
     // sender, which was already told "sent", that this one was not taken. A
     // second copy of the pending command itself gets no answer: it will run.
-    static const char kBusy[] = "Error: Device busy with another remote command. Send it again.";
-    uint8_t resp[1 + sizeof(kBusy)];
-    resp[0] = 0;
-    memcpy(resp + 1, kBusy, sizeof(kBusy));
-    // RX-handler context: queued send, never a blocking one.
-    espnowtx::sendAead(ctx.recv_info->src_addr, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                       ctx.h->msgId, resp, sizeof(resp) - 1, 1);  // the text without its NUL
+    // RX-handler context: queued send, never a blocking one. reqId = this CMD's msgId.
+    v4_send_cmd_resp_async(ctx.recv_info->src_addr, ctx.h->msgId, espnowanswer::kBusy,
+                           "Error: Device busy with another remote command. Send it again.");
   }
 }
 
 // CMD_RESP — deferred to task via gEspNow->deferredCmdResp* fields.
 static void v4h_cmd_resp(const V4RxCtx& ctx) {
   if (!gEspNow) return;
+  // {reqId, status} (rule F3): reqId is the msgId of the CMD this answers; the
+  // frame's own header msgId says nothing about which request it was.
   V4PayloadCmdRespHeader resp;
   ctx.read(resp);
   size_t resultLen = 0;
@@ -4397,8 +4426,9 @@ static void v4h_cmd_resp(const V4RxCtx& ctx) {
   memcpy(gEspNow->deferredCmdRespSrcMac, ctx.recv_info->src_addr, 6);
   strncpy(gEspNow->deferredCmdRespDeviceName, ctx.deviceName, sizeof(gEspNow->deferredCmdRespDeviceName) - 1);
   gEspNow->deferredCmdRespDeviceName[sizeof(gEspNow->deferredCmdRespDeviceName) - 1] = '\0';
-  gEspNow->deferredCmdRespSuccess = resp.success;
-  gEspNow->deferredCmdRespReqId = ctx.h->msgId;  // correlate this result back to the request that produced it
+  gEspNow->deferredCmdRespSuccess = espnowanswer::isOk(resp.status);
+  gEspNow->deferredCmdRespStatus = resp.status;
+  gEspNow->deferredCmdRespReqId = resp.reqId;  // correlate this result back to the request that produced it
   gEspNow->deferredCmdRespPending = true;
 }
 
@@ -5441,6 +5471,13 @@ static void v4h_topo_start(const V4RxCtx& ctx) {
   ctx.read(ts);
   DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_START] reqId=%lu peerCount=%u",
          (unsigned long)ts.reqId, ts.peerCount);
+  // Rule F3: an answer that is not ok (a status this firmware may not know,
+  // from a later firmware) carries no topology. Nothing is recorded: the
+  // sender is not taken for an edge device with no peers.
+  if (!espnowanswer::isOk(ts.status)) {
+    WARN_ESPNOWF("[V4_RX_TOPO_START] Answer status %u (not ok); nothing recorded", (unsigned)ts.status);
+    return;
+  }
   if (ts.peerCount > MESH_PEER_MAX) {
     WARN_ESPNOWF("[V4_RX_TOPO_START] Rejected peerCount=%u (max=%u)",
                  ts.peerCount, (unsigned)MESH_PEER_MAX);
@@ -5520,6 +5557,11 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
   macToDisplay(tp.mac, peerMacStr, sizeof(peerMacStr));
   DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_PEER] reqId=%lu idx=%u isLast=%u mac=%s name=%s",
          (unsigned long)tp.reqId, tp.peerIndex, tp.isLast, peerMacStr, wireName);
+  // Rule F3: a peer entry that is not ok is not a peer; nothing is stored.
+  if (!espnowanswer::isOk(tp.status)) {
+    WARN_ESPNOWF("[V4_RX_TOPO_PEER] Answer status %u (not ok); nothing stored", (unsigned)tp.status);
+    return;
+  }
   if (tp.isLast > 1) {
     WARN_ESPNOWF("[V4_RX_TOPO_PEER] Rejected invalid isLast=%u", tp.isLast);
     return;
@@ -5692,7 +5734,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
 
   if (payloadLen == 0) {
     WARN_ESPNOWF("[USER_SYNC] Empty payload from %s", deviceName);
-    v4_send_command_response(srcAddr, msgId, false, "Empty payload", strlen("Empty payload"));
+    v4_send_command_response(srcAddr, msgId, espnowanswer::kBadRequest, "Empty payload", strlen("Empty payload"));
     return;
   }
 
@@ -5700,7 +5742,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
   String jsonStr((const char*)payload, payloadLen);
   if (deserializeJson(doc, jsonStr) != DeserializationError::Ok) {
     WARN_ESPNOWF("[USER_SYNC] Malformed JSON from %s", deviceName);
-    v4_send_command_response(srcAddr, msgId, false, "Malformed JSON", strlen("Malformed JSON"));
+    v4_send_command_response(srcAddr, msgId, espnowanswer::kBadRequest, "Malformed JSON", strlen("Malformed JSON"));
     return;
   }
 
@@ -5717,7 +5759,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
 
   if (!strlen(adminUser) || !strlen(adminPass) || !strlen(targetUser) || !strlen(targetPass)) {
     WARN_ESPNOWF("[USER_SYNC] Missing required fields from %s", deviceName);
-    v4_send_command_response(srcAddr, msgId, false, "Missing required fields", strlen("Missing required fields"));
+    v4_send_command_response(srcAddr, msgId, espnowanswer::kBadRequest, "Missing required fields", strlen("Missing required fields"));
     return;
   }
 
@@ -5734,20 +5776,20 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
     snprintf(lockedMsg, sizeof(lockedMsg),
              "Admin authentication locked out. Retry in %lus",
              (lockoutRetryMs + 999UL) / 1000UL);
-    v4_send_command_response(srcAddr, msgId, false, lockedMsg, strlen(lockedMsg));
+    v4_send_command_response(srcAddr, msgId, espnowanswer::kRefused, lockedMsg, strlen(lockedMsg));
     return;
   }
   if (adminCheck != CredentialCheck::Valid) {
     ERROR_ESPNOWF("[USER_SYNC] Admin auth FAILED for '%s' from %s", adminUser, deviceName);
     broadcastOutput("[ESP-NOW] User sync: Admin authentication FAILED");
-    v4_send_command_response(srcAddr, msgId, false, "Admin authentication failed", strlen("Admin authentication failed"));
+    v4_send_command_response(srcAddr, msgId, espnowanswer::kRefused, "Admin authentication failed", strlen("Admin authentication failed"));
     return;
   }
 
   if (!isAdminUser(String(adminUser))) {
     ERROR_ESPNOWF("[USER_SYNC] '%s' is not admin — sync rejected from %s", adminUser, deviceName);
     broadcastOutput("[ESP-NOW] User sync: Admin privileges required");
-    v4_send_command_response(srcAddr, msgId, false, "Admin privileges required", strlen("Admin privileges required"));
+    v4_send_command_response(srcAddr, msgId, espnowanswer::kRefused, "Admin privileges required", strlen("Admin privileges required"));
     return;
   }
 
@@ -5755,13 +5797,13 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
   if (getUserIdByUsername(String(targetUser), existingId)) {
     WARN_ESPNOWF("[USER_SYNC] User '%s' already exists (id=%u) — skipping", targetUser, (unsigned)existingId);
     BROADCAST_PRINTF("[ESP-NOW] User sync: '%s' already exists", targetUser);
-    v4_send_command_response(srcAddr, msgId, true, "User already exists (skipped)", strlen("User already exists (skipped)"));
+    v4_send_command_response(srcAddr, msgId, espnowanswer::kOk, "User already exists (skipped)", strlen("User already exists (skipped)"));
     return;
   }
 
   if (!filesystemReady) {
     ERROR_ESPNOWF("[USER_SYNC] Filesystem not ready");
-    v4_send_command_response(srcAddr, msgId, false, "Filesystem not ready", strlen("Filesystem not ready"));
+    v4_send_command_response(srcAddr, msgId, espnowanswer::kNotReady, "Filesystem not ready", strlen("Filesystem not ready"));
     return;
   }
 
@@ -5771,7 +5813,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
   if (!isValidPublicPassword(String(targetPass), &passwordError)) {
     WARN_ESPNOWF("[USER_SYNC] Refused '%s' from %s: %s", targetUser, deviceName,
                  passwordError.c_str());
-    v4_send_command_response(srcAddr, msgId, false, passwordError.c_str(),
+    v4_send_command_response(srcAddr, msgId, espnowanswer::kBadRequest, passwordError.c_str(),
                              passwordError.length());
     return;
   }
@@ -5799,7 +5841,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
   if (!createAccount(account, newId, createError)) {
     ERROR_ESPNOWF("[USER_SYNC] Could not create '%s' from %s: %s", targetUser, deviceName,
                   createError.c_str());
-    v4_send_command_response(srcAddr, msgId, false, createError.c_str(),
+    v4_send_command_response(srcAddr, msgId, espnowanswer::kCmdFailed, createError.c_str(),
                              createError.length());
     return;
   }
@@ -5823,7 +5865,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
 
   char respBuf[128];
   snprintf(respBuf, sizeof(respBuf), "User '%s' created (id=%u)", targetUser, (unsigned)newId);
-  v4_send_command_response(srcAddr, msgId, true, respBuf, strlen(respBuf));
+  v4_send_command_response(srcAddr, msgId, espnowanswer::kOk, respBuf, strlen(respBuf));
 }
 
 static void runDeferredUserSync(void* arg) {
@@ -6227,23 +6269,29 @@ static void v4h_metadata_resp_push(const V4RxCtx& ctx) {
     metaType, (int)wasPending);
 }
 
-// STREAM — incoming stream output; ring-buffer enqueue to task. Bypasses
-// dedup (see special-cased dedup bypass in v4_try_handle_incoming).
+// STREAM — incoming stream output; ring-buffer enqueue to task. {reqId,
+// status} then the line (rule F3); each frame has its own msgId, so the
+// duplicate check applies as to any frame.
 static void v4h_stream(const V4RxCtx& ctx) {
-  if (ctx.payloadLen == 0 || ctx.payloadLen > ESPNOW_V4_MAX_PAYLOAD || !gEspNow || !gEspNow->streamQueue) return;
+  if (ctx.payloadLen > ESPNOW_V4_MAX_PAYLOAD || !gEspNow || !gEspNow->streamQueue) return;
+  V4PayloadStreamHeader sh;
+  ctx.read(sh);
+  size_t lineLen = 0;
+  const uint8_t* line = ctx.tail(sizeof(sh), &lineLen);
+  if (!line || lineLen == 0) return;
   int head = gEspNow->streamQueueHead;
   int nextHead = (head + 1) & gEspNow->streamQueueMask;
   if (nextHead != gEspNow->streamQueueTail) {
     auto& entry = gEspNow->streamQueue[head];
-    size_t copyLen = (ctx.payloadLen < sizeof(entry.content) - 1) ? ctx.payloadLen : sizeof(entry.content) - 1;
-    memcpy(entry.content, ctx.payload, copyLen);
+    size_t copyLen = (lineLen < sizeof(entry.content) - 1) ? lineLen : sizeof(entry.content) - 1;
+    memcpy(entry.content, line, copyLen);
     entry.content[copyLen] = '\0';
     memcpy(entry.srcMac, ctx.recv_info->src_addr, 6);
     strncpy(entry.deviceName, ctx.deviceName, sizeof(entry.deviceName) - 1);
     entry.deviceName[sizeof(entry.deviceName) - 1] = '\0';
-    // Carry the command correlation id (frame msgId). For remote command output
-    // this is the command's reqId; for legacy startstream it's 0 (unsolicited).
-    entry.cmdMsgId = ctx.h->msgId;
+    // Carry the command correlation id (the answer's reqId). For remote command
+    // output this is the command's msgId; for legacy startstream it's 0 (unsolicited).
+    entry.cmdMsgId = sh.reqId;
     entry.used = true;
     gEspNow->streamQueueHead = nextHead;
   } else {
@@ -6543,21 +6591,23 @@ static void v4h_file_end(const V4RxCtx& ctx) {
     return;
   }
   // The receive table drops a FILE_END shorter than its 5 bytes (the CRC
-  // gates below make fe->crc32 an accept/reject-deciding input).
+  // gates below make fev.crc32 an accept/reject-deciding input).
   V4PayloadFileEnd fev;
   ctx.read(fev);
-  const V4PayloadFileEnd* fe = &fev;
+  // status 0: the sender sent the whole file (0 = ok in every status byte,
+  // rule F3); anything else: it stopped the transfer itself.
+  const bool senderComplete = espnowanswer::isOk(fev.status);
   const uint8_t* sndMac    = fileSlotsGetSenderMac(slot);
   const char*    filename  = fileSlotsGetFilename(slot);
   const uint8_t* dataBuf   = fileSlotsGetBuffer(slot);
   uint32_t       recvBytes = fileSlotsGetReceivedBytes(slot);
   String senderMacStr = macToDisplayStr(sndMac);
 
-  DEBUG_ESPNOWF("[V4_FILE_RX] FILE_END: %s (%lu bytes, %u/%u chunks, success=%d)",
+  DEBUG_ESPNOWF("[V4_FILE_RX] FILE_END: %s (%lu bytes, %u/%u chunks, status=%u)",
                filename, (unsigned long)recvBytes,
                fileSlotsGetReceivedChunks(slot),
                fileSlotsGetTotalChunks(slot),
-               fe->success);
+               (unsigned)fev.status);
 
   // ---- Streaming slot (file > 128 KB): bytes are buffered to a .part on flash via
   // cmd_exec. FILE_END hands finalize (drain remaining buffers, close, rename, ACK,
@@ -6581,8 +6631,8 @@ static void v4h_file_end(const V4RxCtx& ctx) {
     // after it would leak the slot, both PSRAM buffers, and the open .part
     // handle permanently on mismatch. The accumulator is final here: every
     // chunk was appended by earlier v4h_file_data calls on this same task.
-    bool crcOk = complete && (fileSlotsGetReceivedCrc(slot) == fe->crc32);
-    if (complete && fe->success && crcOk && fileSlotsStreamBeginFinalize(slot)) {
+    bool crcOk = complete && (fileSlotsGetReceivedCrc(slot) == fev.crc32);
+    if (complete && senderComplete && crcOk && fileSlotsStreamBeginFinalize(slot)) {
       // Off-task finalize: the job owns drain + close + rename + ACK + release.
       if (!submitDeferredToCmdExec(fileWriterFinalizeJob, slot)) {
         ERROR_ESPNOWF("[V4_FILE] stream finalize submit failed (queue full) — aborting '%s'", filename);
@@ -6602,16 +6652,16 @@ static void v4h_file_end(const V4RxCtx& ctx) {
                      (unsigned)fileSlotsGetTotalChunks(slot),
                      (unsigned long)recvBytes,
                      (unsigned long)fileSlotsGetTotalSize(slot));
-      } else if (fe->success && !crcOk) {
+      } else if (senderComplete && !crcOk) {
         BROADCAST_PRINTF("[V4_FILE] REJECTED stream '%s': CRC mismatch (got %08lx, declared %08lx)",
                      filename,
                      (unsigned long)fileSlotsGetReceivedCrc(slot),
-                     (unsigned long)fe->crc32);
+                     (unsigned long)fev.crc32);
       }
       // Cancel echo ONLY when the sender still believes the transfer is alive.
-      // On fe->success == 0 the sender initiated this abort and already knows —
+      // When the sender reports it stopped (status != 0), it initiated this abort and already knows —
       // echoing a cancel back would just double-log the failure on its side.
-      if (fe->success) {
+      if (senderComplete) {
         v4_send_file_cancel(sndMac, ctx.h->msgId,
                             !complete ? FILE_CANCEL_INCOMPLETE
                                       : (!crcOk ? FILE_CANCEL_CRC_MISMATCH
@@ -6631,9 +6681,9 @@ static void v4h_file_end(const V4RxCtx& ctx) {
                  (unsigned long)recvBytes,
                  (unsigned long)fileSlotsGetTotalSize(slot));
     // Tell the sender — but only if it still believes the transfer is alive.
-    // On fe->success == 0 the sender aborted this transfer itself and already
+    // When the sender reports it stopped (status != 0), it aborted this transfer itself and already
     // knows; echoing a cancel back would double-log the failure on its side.
-    if (fe->success) {
+    if (senderComplete) {
       v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_INCOMPLETE);
     }
     logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
@@ -6650,11 +6700,11 @@ static void v4h_file_end(const V4RxCtx& ctx) {
   // ROM table lookups on espnow_task, small next to the synchronous flash write
   // this same branch already performs inline. RAM-path teardown shape (inline
   // release) is correct here — only streaming slots defer teardown to cmd_exec.
-  if (fe->success && dataBuf) {
+  if (senderComplete && dataBuf) {
     uint32_t gotCrc = esp_crc32_le(0, dataBuf, recvBytes);
-    if (gotCrc != fe->crc32) {
+    if (gotCrc != fev.crc32) {
       BROADCAST_PRINTF("[V4_FILE] REJECTED '%s': CRC mismatch (got %08lx, declared %08lx)",
-                       filename, (unsigned long)gotCrc, (unsigned long)fe->crc32);
+                       filename, (unsigned long)gotCrc, (unsigned long)fev.crc32);
       v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_CRC_MISMATCH);
       logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
       fileSlotsRelease(slot);
@@ -6662,7 +6712,7 @@ static void v4h_file_end(const V4RxCtx& ctx) {
     }
   }
 
-  if (fe->success && dataBuf) {
+  if (senderComplete && dataBuf) {
 #if ENABLE_BONDED_MODE
     if (strcmp(filename, "_manifest_out.json") == 0 ||
         strcmp(filename, "_settings_out.json") == 0 ||
@@ -6818,16 +6868,16 @@ static void v4h_file_end(const V4RxCtx& ctx) {
 //      sendFileToMac is pumping right now on cmd_exec, publish the msgId
 //      into fileSendAbortMsgId so its chunk loop stops within one chunk
 //      instead of burning the rest of the file's airtime into a dead slot.
-// msgId echoes the original FILE_START, so correlation is exact.
+// reqId (rule F3) is the original FILE_START's msgId, so correlation is
+// exact; the cancel's own header msgId is the canceller's and is not used.
 static void v4h_file_cancel(const V4RxCtx& ctx) {
   V4PayloadFileCancel cancel;
   ctx.read(cancel);
-  const uint8_t reason = cancel.reason;
-  const char* why = (reason == FILE_CANCEL_TIMEOUT)      ? "timeout" :
-                    (reason == FILE_CANCEL_WRITE_FAILED) ? "write failed" :
-                    (reason == FILE_CANCEL_INCOMPLETE)   ? "incomplete" :
-                    (reason == FILE_CANCEL_CRC_MISMATCH) ? "crc mismatch" :
-                    (reason == FILE_CANCEL_REJECTED)     ? "rejected by receiver" : "unknown";
+  const uint32_t transferMsgId = cancel.reqId;
+  const uint8_t reason = cancel.status;
+  const char* statusWord = espnowanswer::statusName(ESPNOW_V4_TYPE_FILE_CANCEL, reason);
+  const char* why = (reason == FILE_CANCEL_REJECTED) ? "rejected by receiver"
+                    : statusWord                      ? statusWord : "unknown";
   // Abort matcher. Gate on fileSendInProgress FIRST — peer/msgId are stale
   // between sends (the guard dtor only clears the flag). The stored value is
   // the msgId itself, not a bool: the sender's loop compares it against its
@@ -6836,36 +6886,35 @@ static void v4h_file_cancel(const V4RxCtx& ctx) {
   // cmd_exec) is harmless — a late store of A's id can never equal B's id.
   if (gEspNow && gEspNow->fileSendInProgress &&
       memcmp(gEspNow->fileSendPeer, ctx.recv_info->src_addr, 6) == 0 &&
-      gEspNow->fileSendMsgId == ctx.h->msgId) {
-    gEspNow->fileSendAbortMsgId = ctx.h->msgId;
+      gEspNow->fileSendMsgId == transferMsgId) {
+    gEspNow->fileSendAbortMsgId = transferMsgId;
   }
-  // Report ONCE per (peer, msgId). The receiver deliberately repeats cancels
-  // so the abort survives a dropped frame; the frame-level dedup ring already
-  // collapses most of those (FILE_CANCEL is not in its exemption list, TTL
-  // 5 s), but the ring is only 64 entries, so under load a repeat can still
-  // arrive here and append a second identical "FAILED on receiver" record to
-  // the peer history. This memo covers that eviction window. The abort store
-  // above stays unconditional; only operator-visible reporting is deduped.
+  // Report ONCE per (peer, transfer). The receiver deliberately repeats
+  // cancels so the abort survives a dropped frame; each repeat has its own
+  // header msgId (rule F3), so the frame-level dedup ring passes them all and
+  // this memo is what keeps a repeat from appending a second identical
+  // "FAILED on receiver" record to the peer history. The abort store above
+  // stays unconditional; only operator-visible reporting is deduped.
   {
     static uint8_t  sLastRepMac[6] = {0};
     static uint32_t sLastRepMsgId  = 0;
     static uint32_t sLastRepMs     = 0;
     const uint32_t nowMs = (uint32_t)millis();
-    const bool dup = (sLastRepMsgId == ctx.h->msgId) &&
+    const bool dup = (sLastRepMsgId == transferMsgId) &&
                      (memcmp(sLastRepMac, ctx.recv_info->src_addr, 6) == 0) &&
                      ((nowMs - sLastRepMs) < 5000);
     if (dup) {
       DEBUG_ESPNOWF("[V4_FILE_TX] duplicate cancel for msgId=%lu (%s) — not re-logged",
-                    (unsigned long)ctx.h->msgId, why);
+                    (unsigned long)transferMsgId, why);
       return;
     }
     memcpy(sLastRepMac, ctx.recv_info->src_addr, 6);
-    sLastRepMsgId = ctx.h->msgId;
+    sLastRepMsgId = transferMsgId;
     sLastRepMs    = nowMs;
   }
   String macStr = macToDisplayStr(ctx.recv_info->src_addr);
   BROADCAST_PRINTF("[V4_FILE_TX] file to %s FAILED on receiver (msgId=%lu): %s",
-                   macStr.c_str(), (unsigned long)ctx.h->msgId, why);
+                   macStr.c_str(), (unsigned long)transferMsgId, why);
   logFileTransferEvent((uint8_t*)ctx.recv_info->src_addr, macStr.c_str(), "(remote)", MSG_FILE_SEND_FAILED);
 }
 
@@ -6979,6 +7028,49 @@ static bool v4_routed_type_allowed(uint8_t type) {
       //                       stores fragments at a fixed 200-byte stride that a
       //                       146-byte routed frame would corrupt
       //   BOND_*              the remote-exec channel — stays proximity-scoped
+      //   unknown opcodes     this firmware has no row for them
+      return false;
+  }
+}
+
+// What a hop that only passes an envelope on refuses (1.0 rule, back-capture
+// design W1). An exact list of the 1.0 link-local opcodes, never a range and
+// never "every opcode this firmware does not know": an opcode added after 1.0
+// must still cross a 1.0 relay, and its final destination (which knows it)
+// decides with its own v4_routed_type_allowed and receive-table gates. The
+// relay cannot read the sealed inner frame anyway; it checks the envelope
+// (group tag, ttl, hop count, route) and the inner header's magic, version
+// and header length. A later firmware does not add to this list: a new
+// link-local opcode is simply never wrapped by its sender.
+static bool v4_relay_hop_refused(uint8_t type) {
+  switch (type) {
+    case ESPNOW_V4_TYPE_RELAY_DATA:         // nesting
+    case ESPNOW_V4_TYPE_HEARTBEAT:          // "I am your neighbour"
+    case ESPNOW_V4_TYPE_PEER_LIST:          // the sender's own routes
+    case ESPNOW_V4_TYPE_TOPO_REQ:           // direct neighbours only
+    case ESPNOW_V4_TYPE_TOPO_START:
+    case ESPNOW_V4_TYPE_TOPO_PEER:
+    case ESPNOW_V4_TYPE_PAIR_BEACON:        // proximity-scoped consent
+    case ESPNOW_V4_TYPE_PAIR_REQUEST:
+    case ESPNOW_V4_TYPE_PAIR_ACCEPT:
+    case ESPNOW_V4_TYPE_PAIR_REJECT:
+    case ESPNOW_V4_TYPE_BOND_HEARTBEAT:     // the bond numbers that exist at 1.0
+    case ESPNOW_V4_TYPE_BOND_CAP_REQ:
+    case ESPNOW_V4_TYPE_BOND_CAP_RESP:
+    case ESPNOW_V4_TYPE_MANIFEST_REQ:
+    case ESPNOW_V4_TYPE_SETTINGS_REQ:
+    case ESPNOW_V4_TYPE_BOND_STATUS_REQ:
+    case ESPNOW_V4_TYPE_BOND_STATUS_RESP:
+    case ESPNOW_V4_TYPE_SCHEMA_REQ:
+    case ESPNOW_V4_TYPE_BOND_STREAM_CTRL:
+    case ESPNOW_V4_TYPE_BOND_SENSOR_DATA:
+    case ESPNOW_V4_TYPE_BOND_POWER_STATUS:
+    case ESPNOW_V4_TYPE_BOND_EVENT_PUSH:
+    case ESPNOW_V4_TYPE_BOND_REQUEST:
+    case ESPNOW_V4_TYPE_BOND_NOTICE:
+    case ESPNOW_V4_TYPE_BOND_SENSOR_STATUS:
+      return true;
+    default:
       return false;
   }
 }
@@ -7110,14 +7202,20 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
   const EspNowV4Header* ih = &ihv;
 
   if (ih->magic != (uint16_t)ESPNOW_V4_MAGIC || ih->ver != ESPNOW_V4_VERSION ||
-      ih->headerLen != sizeof(EspNowV4Header) || !v4_routed_type_allowed(ih->type)) {
+      ih->headerLen != sizeof(EspNowV4Header)) {
     m.routedDropPolicy++;
-    DEBUG_ESPNOW_MESHF("[MESH_ROUTED] refused inner type=%u (policy or malformed)",
-           (unsigned)ih->type);
+    DEBUG_ESPNOW_MESHF("[MESH_ROUTED] refused inner type=%u (malformed)", (unsigned)ih->type);
     return;
   }
 
   if (isSelfMac(env->finalDst)) {
+    // The final destination knows every opcode it can take: only those that
+    // may arrive routed are delivered (and then pass the receive table).
+    if (!v4_routed_type_allowed(ih->type)) {
+      m.routedDropPolicy++;
+      DEBUG_ESPNOW_MESHF("[MESH_ROUTED] refused inner type=%u (not taken routed)", (unsigned)ih->type);
+      return;
+    }
     // === Delivery: synthetic-source re-entry ===
     //
     // Hand the inner frame back to the top of the RX path with recv_info
@@ -7159,7 +7257,14 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
   }
 
   // === Forwarding ===
+  // A hop refuses only the 1.0 link-local opcodes; any other inner opcode,
+  // also one this firmware does not know, goes on (v4_relay_hop_refused).
   if (!gSettings.meshRelay)                        { m.routedDropPolicy++; return; }
+  if (v4_relay_hop_refused(ih->type)) {
+    m.routedDropPolicy++;
+    DEBUG_ESPNOW_MESHF("[MESH_ROUTED] hop refused link-local inner type=%u", (unsigned)ih->type);
+    return;
+  }
   if (ctx.h->ttl < 2)                              { m.routedDropTtl++;    return; }
   if (env->hopsUsed + 1 >= MESH_ROUTE_MAX_HOPS)    { m.routedDropTtl++;    return; }
 
@@ -8533,14 +8638,13 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   }
   
   // Dedup check
-  // The streaming-response family (STREAM, STREAM_CTRL, CMD_RESP) intentionally
-  // reuses msgId=cmdMsgId for correlation and spans multiple frames. If we dedup
-  // any of them by (origin,msgId), the first frame inserts the id and every later
-  // frame with the same id — including the CMD_RESP that carries the actual command
-  // output (e.g. a bonded `files /` listing) — is dropped as a "duplicate". That
-  // silently empties the bonded-device file/CLI views on the master. FILE_* frames
-  // are likewise multi-frame under one msgId.
-  // RELAY_DATA is bypassed for a different reason than the streaming family:
+  // Answers carry the request's number in their payload (reqId, rule F3) and
+  // a fresh header msgId of their own, so STREAM and CMD_RESP are checked like
+  // every other frame (they used to borrow the command's msgId and had to skip
+  // the check). Two kinds still skip it:
+  // FILE_START/DATA/END are multi-frame under the transfer's one msgId (each
+  // FILE_DATA chunk repeats it), until FILE_START carries a transfer id.
+  // RELAY_DATA is bypassed for a different reason:
   // an envelope carries the INNER message's msgId, while its origin is rewritten
   // to the current forwarder. A legitimate retransmission of the same inner
   // message therefore arrives with an identical (origin, msgId) pair and would
@@ -8548,10 +8652,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // chunked sender depends on. Loop protection for envelopes comes from ttl and
   // the hopsUsed ceiling instead, and the endpoint still dedups the inner frame
   // normally after unwrapping (keyed on its true origin).
-  if (h->type != ESPNOW_V4_TYPE_STREAM &&
-      h->type != ESPNOW_V4_TYPE_BOND_STREAM_CTRL &&
-      h->type != ESPNOW_V4_TYPE_CMD_RESP &&
-      h->type != ESPNOW_V4_TYPE_RELAY_DATA &&
+  if (h->type != ESPNOW_V4_TYPE_RELAY_DATA &&
       h->type != ESPNOW_V4_TYPE_FILE_START &&
       h->type != ESPNOW_V4_TYPE_FILE_DATA &&
       h->type != ESPNOW_V4_TYPE_FILE_END) {
@@ -8729,20 +8830,22 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
   // can actually carry: the fragmentation budget less the success byte.
   // The old 6143 was neither: it was copied from the RX buffer's size and
   // described as a "margin" against a budget it had no relationship to.
-  const size_t kMaxSendText = V4_REASM_MAX_MSG - 1;  // 1 success byte
+  const size_t kMaxSendText = V4_REASM_MAX_MSG - espnowanswer::kHeaderLen;  // {reqId, status}
   if (textLen > kMaxSendText) textLen = kMaxSendText;
   
-  // The payload: 1 byte success + the result text to the end of the payload,
-  // no terminator (Wire.h, V4PayloadCmdRespHeader). The buffer keeps one more
-  // byte for the NUL written below, which is not sent.
-  size_t payloadLen = 1 + textLen;
+  // The payload: {reqId, status} (rule F3; reqId = the CMD's msgId) + the
+  // result text to the end of the payload, no terminator (Wire.h,
+  // V4PayloadCmdRespHeader). The buffer keeps one more byte for the NUL
+  // written below, which is not sent. The frame's own msgId is fresh.
+  const uint8_t status = ok ? espnowanswer::kOk : espnowanswer::kCmdFailed;
+  size_t payloadLen = espnowanswer::kHeaderLen + textLen;
   // PSRAM: CPU-filled staging on cmd_exec; sendAeadSync seals into a stack
   // frame and esp_now_send copies the payload, so nothing DMAs from here.
   uint8_t* respPayload = (uint8_t*)ps_alloc(payloadLen + 1, AllocPref::PreferPsram, "espnow.tx.cmdresp2");
   if (respPayload) {
-    respPayload[0] = ok ? 1 : 0;
-    memcpy(respPayload + 1, resultText, textLen);
-    respPayload[1 + textLen] = '\0';
+    espnowanswer::packHeader(respPayload, ctx->cmdMsgId, status);
+    memcpy(respPayload + espnowanswer::kHeaderLen, resultText, textLen);
+    respPayload[payloadLen] = '\0';
     
     // Step 3c: cmd_exec context (callback fires after deferred CMD finishes).
     // sendAeadSync provides backpressure — the caller blocks until the wire
@@ -8751,21 +8854,21 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
     // fragment/ACK loop here on cmd_exec (not on the espnow_tx dispatcher) and
     // may take longer than the 2000 ms, which bounds only single-frame sends.
     espnowtx::sendAeadSync(ctx->srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                           ctx->cmdMsgId, respPayload, payloadLen, 1, 2000);
+                           generateMessageId(), respPayload, payloadLen, 1, 2000);
     free(respPayload);
   } else {
     // No memory for the result text: a success answers with the command's
     // name, a failure with the out-of-memory reply.
     uint8_t fallback[64];
-    fallback[0] = ok ? 1 : 0;
     const char* name = !ok ? kCommandReplyOutOfMemory
                            : (ctx->cmdName[0] ? ctx->cmdName : "OK");
     size_t nameLen = strlen(name);  // no terminator on the wire
-    if (nameLen > sizeof(fallback) - 1) nameLen = sizeof(fallback) - 1;
-    memcpy(fallback + 1, name, nameLen);
+    if (nameLen > sizeof(fallback) - espnowanswer::kHeaderLen) nameLen = sizeof(fallback) - espnowanswer::kHeaderLen;
+    espnowanswer::packHeader(fallback, ctx->cmdMsgId, status);
+    memcpy(fallback + espnowanswer::kHeaderLen, name, nameLen);
     // Step 3c: cmd_exec context — same reasoning as the alloc'd-path send above.
     espnowtx::sendAeadSync(ctx->srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                           ctx->cmdMsgId, fallback, 1 + nameLen, 1, 2000);
+                           generateMessageId(), fallback, espnowanswer::kHeaderLen + nameLen, 1, 2000);
   }
   
   // Clean up session
@@ -8808,15 +8911,11 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     ERROR_ESPNOWF("[ESP-NOW] REJECTED plaintext remote command from %s — session "
                   "encryption required (credential exposure / replay)", deviceName);
     BROADCAST_PRINTF("[ESP-NOW] SECURITY: rejected unencrypted remote command from %s", deviceName);
-    uint8_t respPayload[80];
-    respPayload[0] = 0;
-    const char* errMsg = "Error: Remote command must be session-encrypted. Pair the devices again.";
-    memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
     // Step 3c: espnow_task RX-handler context — MUST NOT block (would stall
     // the RX drainer per the processMeshHeartbeats architecture invariant).
-    // Echo the request's msgId so the requester can correlate this rejection.
-    espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                       msgId, respPayload, 1 + strlen(errMsg), 1);
+    // reqId = the request's msgId so the requester can correlate this rejection.
+    v4_send_cmd_resp_async(srcMac, msgId, espnowanswer::kRefused,
+                           "Error: Remote command must be session-encrypted. Pair the devices again.");
     return;
   }
 
@@ -8871,14 +8970,10 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
       // login_fail parity with web/CLI/MQTT — closes the event-register
       // visibility hole for remote-command auth failures.
       systemEventPost(SYSEVT_LOGIN_FAIL, deviceName, "espnow");
-      uint8_t respPayload[80];
-      respPayload[0] = 0;
-      const char* errMsg = "Error: Bond session token refused. Check the passphrase on both devices.";
-      memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
       // Step 3c: espnow_task RX-handler context — fire-and-forget.
-      // Echo the request's msgId so the requester can correlate this failure.
-      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                         msgId, respPayload, 1 + strlen(errMsg), 1);
+      // reqId = the request's msgId so the requester can correlate this failure.
+      v4_send_cmd_resp_async(srcMac, msgId, espnowanswer::kRefused,
+                             "Error: Bond session token refused. Check the passphrase on both devices.");
       return;
     }
   } else
@@ -8887,12 +8982,8 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   // the token validators) and fall through to username:password auth.
   if (strncmp(cmdPayload, "@BOND:", 6) == 0) {
     BROADCAST_PRINTF("[ESP-NOW] Rejected bonded command from %s (bond mode not compiled)", deviceName);
-    uint8_t respPayload[88];
-    respPayload[0] = 0;
-    const char* errMsg = "Error: Bond mode is not in this build. Use 'espnowremote' with a login instead.";
-    memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
-    espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                       msgId, respPayload, 1 + strlen(errMsg), 1);
+    v4_send_cmd_resp_async(srcMac, msgId, espnowanswer::kUnsupported,
+                           "Error: Bond mode is not in this build. Use 'espnowremote' with a login instead.");
     return;
   } else
 #endif
@@ -8943,27 +9034,20 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
     } else if (check == CredentialCheck::LockedOut) {
       BROADCAST_PRINTF("[ESP-NOW] Remote command login locked out (user '%s' from %s)",
                        username, deviceName);
-      // Same CMD_RESP shape and msgId echo as the failure below; the text is
-      // formatted in place to keep espnow_task's frame small.
-      uint8_t respPayload[56];
-      respPayload[0] = 0;
-      char* errMsg = reinterpret_cast<char*>(respPayload + 1);
-      snprintf(errMsg, sizeof(respPayload) - 1, "Error: Login locked out. Retry in %lus.",
+      // Same CMD_RESP shape and reqId as the failure below; the text is
+      // formatted on espnow_task's frame, kept small.
+      char errMsg[56];
+      snprintf(errMsg, sizeof(errMsg), "Error: Login locked out. Retry in %lus.",
                (lockoutRetryMs + 999UL) / 1000UL);
-      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                         msgId, respPayload, 1 + strlen(errMsg), 1);
+      v4_send_cmd_resp_async(srcMac, msgId, espnowanswer::kRefused, errMsg);
       return;
     } else {
       BROADCAST_PRINTF("[ESP-NOW] Auth failed for user '%s' from %s", username, deviceName);
       systemEventPost(SYSEVT_LOGIN_FAIL, username, "espnow");
-      uint8_t respPayload[80];
-      respPayload[0] = 0;
-      const char* errMsg = "Error: Login failed. Check the user name and password of the target device.";
-      memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
       // Step 3c: espnow_task RX-handler context — fire-and-forget.
-      // Echo the request's msgId so the requester can correlate this failure.
-      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                         msgId, respPayload, 1 + strlen(errMsg), 1);
+      // reqId = the request's msgId so the requester can correlate this failure.
+      v4_send_cmd_resp_async(srcMac, msgId, espnowanswer::kRefused,
+                             "Error: Login failed. Check the user name and password of the target device.");
       return;
     }
   }
@@ -8974,13 +9058,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   StreamSession* sess = createStreamSession(srcMac, msgId);
   if (!sess) {
     BROADCAST_PRINTF("[ESP-NOW] CMD handler: no stream session slots");
-    uint8_t respPayload[80];
-    respPayload[0] = 0;
-    const char* errMsg = "Error: No free command session on the target. Send the command again shortly.";
-    memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
     // Step 3c: espnow_task RX-handler context — fire-and-forget.
-    espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                       msgId, respPayload, 1 + strlen(errMsg), 1);
+    v4_send_cmd_resp_async(srcMac, msgId, espnowanswer::kNoSlot,
+                           "Error: No free command session on the target. Send the command again shortly.");
     return;
   }
   
@@ -9050,15 +9130,11 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
                                          : "command exceeds input limit");
     destroyStreamSession(msgId);
     free(asyncCtx);
-    uint8_t respPayload[72];
-    respPayload[0] = 0;
-    const char* errMsg = inputLengthAccepted
-                             ? "Error: The target could not queue the command. Send it again shortly."
-                             : "Error: Command too long for the target. Shorten the command.";
-    memcpy(respPayload + 1, errMsg, strlen(errMsg) + 1);
     // Step 3c: espnow_task RX-handler context — fire-and-forget.
-    espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_CMD_RESP, ESPNOW_V4_FLAG_ACK_REQ,
-                       msgId, respPayload, 1 + strlen(errMsg), 1);
+    v4_send_cmd_resp_async(srcMac, msgId, inputLengthAccepted ? espnowanswer::kBusy : espnowanswer::kTooLarge,
+                           inputLengthAccepted
+                               ? "Error: The target could not queue the command. Send it again shortly."
+                               : "Error: Command too long for the target. Shorten the command.");
   }
 }
 
@@ -9352,9 +9428,7 @@ void buildLocalBondStatus(BondPeerStatus& status) {
  * Build CapabilitySummary for this device
  */
 static void buildCapabilitySummary(CapabilitySummary& cap) {
-  memset(&cap, 0, sizeof(CapabilitySummary));
-  
-  cap.protoVersion = 1;
+  memset(&cap, 0, sizeof(CapabilitySummary));  // byte 0 is reserved (was protoVersion, never read)
   
   // Firmware identity: SHA-256 the build timestamp and keep the first 16 bytes
   // of the DIGEST. It identifies a build, it is not a hash of the image. Only
@@ -13296,7 +13370,14 @@ void processMeshHeartbeats() {
     if (gEspNow->deferredCmdRespSuccess) {
       BROADCAST_PRINTF("[ESP-NOW] Command result from %s: %s", deviceName.c_str(), safeDeferredResult.c_str());
     } else {
-      BROADCAST_PRINTF("[ESP-NOW] Command FAILED from %s: %s", deviceName.c_str(), safeDeferredResult.c_str());
+      const char* statusWord = espnowanswer::statusName(ESPNOW_V4_TYPE_CMD_RESP, gEspNow->deferredCmdRespStatus);
+      if (statusWord) {
+        BROADCAST_PRINTF("[ESP-NOW] Command FAILED (%s) from %s: %s", statusWord, deviceName.c_str(),
+                         safeDeferredResult.c_str());
+      } else {
+        BROADCAST_PRINTF("[ESP-NOW] Command FAILED (status %u) from %s: %s",
+                         (unsigned)gEspNow->deferredCmdRespStatus, deviceName.c_str(), safeDeferredResult.c_str());
+      }
     }
 
     // Bus event: the result of a remote command we sent came back. Event-only
@@ -19803,7 +19884,7 @@ FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath) 
   if (!receiverKilled && espnowSessionActiveWith(mac)) {
     V4PayloadFileEnd endPayload = {};
     endPayload.crc32 = runningCrc;
-    endPayload.success = aborted ? 0 : 1;
+    endPayload.status = aborted ? espnowanswer::kCancelled : espnowanswer::kOk;
     for (int attempt = 0; attempt < 3 && !endSent; attempt++) {
       endSent = fileSendFrame(ESPNOW_V4_TYPE_FILE_END, ESPNOW_V4_FLAG_ACK_REQ, transferId,
                               (const uint8_t*)&endPayload, sizeof(endPayload));
@@ -23004,7 +23085,7 @@ const char* cmd_espnow_sensorreq(const String& argsInput) {
   }
   if (a.count() != at + 4) return kUsage;
   V4PayloadSensorReq rq = {};
-  rq.reqId      = (uint8_t)(generateMessageId() & 0xFF);
+  rq.reqId      = generateMessageId();  // 32 bits, like every request number (rule F3)
   // The sensors and the mode in words or as numbers (System_ESPNow_SensorCore.h).
   uint32_t sensorMask = 0;
   uint8_t mode = 0;

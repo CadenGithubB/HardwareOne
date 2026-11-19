@@ -373,6 +373,7 @@ int main() {
 // ============================================================================
 // Unit 2: STREAM line sender
 // ============================================================================
+#include "System_ESPNow_AnswerCore.h"  // the answer header every STREAM frame starts with (rule F3)
 static int gOtherToken;
 static TaskHandle_t const OTHER_TASK = &gOtherToken;
 class String {
@@ -428,19 +429,27 @@ struct SendCall {
   uint8_t mac[6];
   uint8_t type;
   uint16_t flags;
-  uint32_t msgId;
-  uint16_t len;
+  uint32_t msgId;   // the frame's own header msgId
+  uint16_t len;     // the whole payload, answer header included
+  bool answer;      // the payload starts with a readable {reqId, status}
+  uint32_t reqId;
+  uint8_t status;
 };
 static std::vector<SendCall> gSends;
+// This device's own message numbers (generateMessageId), far from the cases'
+// command ids so a borrowed one shows.
+static uint32_t gNextOwnMsgId = 0x70000000u;
+uint32_t generateMessageId() { return ++gNextOwnMsgId; }
 namespace espnowtx {
 bool sendAead(const uint8_t mac[6], uint8_t type, uint16_t flags, uint32_t msgId,
-              const uint8_t*, uint16_t payloadLen, uint8_t) {
+              const uint8_t* payload, uint16_t payloadLen, uint8_t) {
   SendCall c = {};
   std::memcpy(c.mac, mac, 6);
   c.type = type;
   c.flags = flags;
   c.msgId = msgId;
   c.len = payloadLen;
+  c.answer = espnowanswer::parseHeader(payload, payloadLen, &c.reqId, &c.status);
   gSends.push_back(c);
   return true;
 }
@@ -494,7 +503,9 @@ static bool streamGate() {
 #endif
 }
 
-static void expectOneSend(const char* label, const uint8_t* mac, uint32_t msgId, uint16_t expectLen) {
+// `reqId` is the command's msgId (0: startstream output); `expectLen` the
+// whole payload, the 5-byte answer header included.
+static void expectOneSend(const char* label, const uint8_t* mac, uint32_t reqId, uint16_t expectLen) {
   std::printf("%s: sent %zu frame(s), len=%u (expect %u)\n", label, gSends.size(),
               gSends.empty() ? 0u : (unsigned)gSends.front().len, (unsigned)expectLen);
   CHECK(gSends.size() == 1);
@@ -502,7 +513,18 @@ static void expectOneSend(const char* label, const uint8_t* mac, uint32_t msgId,
   const SendCall& c = gSends.front();
   CHECK(std::memcmp(c.mac, mac, 6) == 0);
   CHECK(c.type == ESPNOW_V4_TYPE_STREAM);
-  CHECK(c.msgId == msgId);
+  // Rule F3: {reqId, status 0} first, and the frame's own msgId is a fresh
+  // number of this device, never the command's.
+  if (!c.answer || c.reqId != reqId || c.status != 0) {
+    std::fprintf(stderr, "FAIL %s: STREAM payload does not start {reqId %lu, status 0}\n", label,
+                 (unsigned long)reqId);
+    ++failures;
+  }
+  if (c.msgId <= 0x70000000u || c.msgId == reqId) {
+    std::fprintf(stderr, "FAIL %s: STREAM header msgId %lu is not this device's own fresh number\n", label,
+                 (unsigned long)c.msgId);
+    ++failures;
+  }
   if (c.len != expectLen) {
     std::fprintf(stderr,
                  "FAIL %s: STREAM line sent with %u B, over the %u B single-frame budget for its target "
@@ -543,12 +565,12 @@ int main() {
   gState.streamActive = true;
   std::memcpy(gState.streamTarget, kRouted, 6);
   sendEspNowStreamMessage(line(50));
-  expectOneSend("S3 legacy short", kRouted, 0, 50);
+  expectOneSend("S3 legacy short", kRouted, 0, 55);
   resetStream();
   queueEspNowRequest(0, 7, kDirect);
   runOnExec(ORIGIN_ESPNOW, 7);
   sendEspNowStreamMessage(line(50));
-  expectOneSend("S3 session short", kDirect, 7, 50);
+  expectOneSend("S3 session short", kDirect, 7, 55);
 
   // S3b: a blank line (broadcastOutput("") ends every listing) sends no frame
   //      on either path: STREAM's 1-byte minimum would drop and count it as a
@@ -610,11 +632,11 @@ int main() {
   queueEspNowRequest(1, 43, kRouted);
   runOnExec(ORIGIN_ESPNOW, 42);
   sendEspNowStreamMessage(line(40));
-  expectOneSend("S7 first requester's output", kDirect, 42, 40);
+  expectOneSend("S7 first requester's output", kDirect, 42, 45);
   gSends.clear();
   runOnExec(ORIGIN_ESPNOW, 43);
   sendEspNowStreamMessage(line(40));
-  expectOneSend("S7 second requester's output", kRouted, 43, 40);
+  expectOneSend("S7 second requester's output", kRouted, 43, 45);
 
   // S8: a local (web) command runs on cmd_exec while request 42 waits in the
   //     queue, even with a colliding millis() id: nothing streams to the peer.
@@ -650,7 +672,7 @@ int main() {
   std::memcpy(gState.streamTarget, kRouted, 6);
   CHECK(streamGate());
   sendEspNowStreamMessage(line(40));
-  expectOneSend("S10 legacy sink while a remote command is in flight", kRouted, 0, 40);
+  expectOneSend("S10 legacy sink while a remote command is in flight", kRouted, 0, 45);
   resetStream();
   gState.streamActive = true;
   std::memcpy(gState.streamTarget, kRouted, 6);

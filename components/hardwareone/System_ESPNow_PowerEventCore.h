@@ -429,6 +429,53 @@ inline bool parseEventFrame(const uint8_t* in, size_t len, EventFrame& f) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// A bond master forwards its partner's battery and event frames verbatim
+// (1.0 rule, back-capture design W2). It copies the payload it received at
+// its full received length and patches only the forwarding fields: the link
+// byte (battery byte 16, event byte 7) and, in an event, the forwarded bit
+// (byte 4 bit 4). Every other byte goes on as received: reserved bytes,
+// flag and `known` bits this firmware does not know, and fields a later
+// firmware appends at the end ("a frame only grows at its end"). The frames
+// are never re-packed from the parsed struct, which would zero all of that.
+// ---------------------------------------------------------------------------
+constexpr size_t kForwardCopyMax = kFrameCapDirect;  // the largest payload one sealed frame carries
+
+// How many of the received `inLen` bytes go to a target whose path carries
+// `cap` bytes of payload: all of them when they fit; else the frame's 1.0
+// length `frameLen` (a frame grows only at its end, so its first frameLen
+// bytes are a whole 1.0 frame and a reader zero-fills what is missing); 0
+// for a payload shorter than the frame.
+constexpr size_t forwardSendLen(size_t inLen, size_t frameLen, size_t cap) {
+  return inLen < frameLen ? 0 : (inLen <= cap ? inLen : (frameLen <= cap ? frameLen : 0));
+}
+
+// `out` (kForwardCopyMax bytes) gets the received frame with the link byte
+// patched. Returns the bytes copied: the received length when it fits
+// kForwardCopyMax; else the frame's 1.0 length `frameLen` (never a cut in the
+// middle of a later field: the first frameLen bytes are a whole 1.0 frame);
+// 0 for a payload shorter than the frame.
+constexpr size_t forwardCopyLen(size_t inLen, size_t frameLen) {
+  return inLen < frameLen ? 0 : (inLen <= kForwardCopyMax ? inLen : frameLen);
+}
+
+inline size_t forwardPowerCopy(uint8_t out[kForwardCopyMax], const uint8_t* in, size_t inLen, uint8_t fwdLink) {
+  const size_t n = in ? forwardCopyLen(inLen, kPowerFrameLen) : 0;
+  if (!n) return 0;
+  memcpy(out, in, n);
+  out[16] = fwdLink;
+  return n;
+}
+
+inline size_t forwardEventCopy(uint8_t out[kForwardCopyMax], const uint8_t* in, size_t inLen, uint8_t fwdLink) {
+  const size_t n = in ? forwardCopyLen(inLen, kEventFrameLen) : 0;
+  if (!n) return 0;
+  memcpy(out, in, n);
+  out[4] = (uint8_t)(out[4] | kEventFlagForwarded);  // the other bits as received
+  out[7] = fwdLink;
+  return n;
+}
+
 // Sender: `text` (in a buffer of `textCap` bytes, read up to its terminator
 // or that many bytes) into a zero-padded field of `fieldLen` bytes. True when
 // the text did not fit and was cut; a cut never ends inside a UTF-8 character.

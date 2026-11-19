@@ -1968,18 +1968,12 @@ static void webFsGetAckCallback(const uint8_t /*mac*/[6],
   if (sWebFsGetBridge.done) xSemaphoreGive(sWebFsGetBridge.done);
 }
 
-// Map FsListStatus to a short error tag for the JSON response.
+// The JSON error tag of an FS answer's status: the one name table of rule F3
+// (System_ESPNow_AnswerCore.h), the same words the console and the OLED use;
+// "unknown" for a code this firmware does not know.
 static const char* fsStatusTag(uint8_t status) {
-  switch ((FsListStatus)status) {
-    case FS_LIST_STATUS_OK:          return "ok";
-    case FS_LIST_STATUS_NOT_FOUND:   return "not_found";
-    case FS_LIST_STATUS_NOT_A_DIR:   return "not_a_dir";
-    case FS_LIST_STATUS_PERM_DENIED: return "perm_denied";
-    case FS_LIST_STATUS_IO_ERROR:    return "io_error";
-    case FS_LIST_STATUS_TOO_BUSY:    return "too_busy";
-    case FS_LIST_STATUS_NOT_READY:   return "not_ready";
-    default:                         return "unknown";
-  }
+  const char* name = espnowanswer::statusName(ESPNOW_V4_TYPE_FS_LIST_REPLY, status);
+  return name ? name : "unknown";
 }
 
 } // anonymous namespace

@@ -1,7 +1,9 @@
 // The session capability word (System_ESPNow_SessionCapsCore.h, compiled as is).
 //
 // These cases check:
-//   * the bit values and the known mask stay what 1.0 put on the air;
+//   * the bit values and the known mask stay what 1.0 put on the air; bits 8
+//     backlog_serve and 9 files_serve are named (back-capture earmark) and
+//     never set by a 1.0 build;
 //   * buildCaps: the build-dependent bits (bond, sensor_send, collect) follow
 //     their arguments and every other 1.0 bit is always set;
 //   * capsText: names in bit order, reserved bits as "+0x...", "none" for 0,
@@ -30,13 +32,17 @@ int main() {
   // Values on the air: never renumbered.
   CHECK(kBond == 0x01 && kRemoteFs == 0x02 && kFileReceive == 0x04 && kSensorSend == 0x08);
   CHECK(kCollect == 0x10 && kRelayForward == 0x20 && kTimeMaster == 0x40 && kSessionUnknown == 0x80);
-  CHECK(kKnownMask == 0xFFu);
-  CHECK(kBitCount == 8);
+  // Back-capture (1.0 earmark W5): bits 8 and 9 are named, never set by 1.0.
+  CHECK(kBacklogServe == 0x100 && kFilesServe == 0x200);
+  CHECK(kKnownMask == 0x3FFu && kSentMask == 0xFFu);
+  CHECK(kBitCount == 10);
   CHECK(is(bitName(0), "bond") && is(bitName(3), "sensor_send") && is(bitName(7), "session_unknown"));
-  CHECK(bitName(8) == nullptr);
+  CHECK(is(bitName(8), "backlog_serve") && is(bitName(9), "files_serve"));
+  CHECK(bitName(10) == nullptr);
 
   // buildCaps.
-  static_assert(buildCaps(true, true, true) == kKnownMask, "every 1.0 bit");
+  static_assert(buildCaps(true, true, true) == kSentMask, "every 1.0 bit");
+  CHECK(!has(buildCaps(true, true, true), kBacklogServe) && !has(buildCaps(true, true, true), kFilesServe));
   CHECK(!has(buildCaps(false, true, false), kBond));
   CHECK(has(buildCaps(true, false, false), kBond));
   CHECK(!has(buildCaps(true, false, false), kSensorSend));
@@ -45,7 +51,7 @@ int main() {
   const uint32_t always = kRemoteFs | kFileReceive | kRelayForward | kTimeMaster | kSessionUnknown;
   CHECK((buildCaps(false, false, false) & always) == always);
   CHECK(buildCaps(false, false, false) == always);
-  CHECK((buildCaps(true, true, true) & ~kKnownMask) == 0);   // reserved bits are sent 0
+  CHECK((buildCaps(true, true, true) & ~kSentMask) == 0);   // reserved and earmarked bits are sent 0
 
   // capsText.
   char buf[128];
@@ -54,15 +60,17 @@ int main() {
   n = capsText(0, buf, sizeof buf);
   CHECK(is(buf, "none") && n == 4);
   n = capsText(kRemoteFs | 0x100u | 0x80000000u, buf, sizeof buf);
-  CHECK(is(buf, "remote_fs,+0x80000100"));
+  CHECK(is(buf, "remote_fs,backlog_serve,+0x80000000"));
   n = capsText(0x200u, buf, sizeof buf);
-  CHECK(is(buf, "+0x200"));
-  n = capsText(kKnownMask, buf, sizeof buf);
+  CHECK(is(buf, "files_serve"));
+  n = capsText(0x400u, buf, sizeof buf);
+  CHECK(is(buf, "+0x400"));
+  n = capsText(kSentMask, buf, sizeof buf);
   CHECK(is(buf, "bond,remote_fs,file_receive,sensor_send,collect,relay_forward,time_master,session_unknown"));
   const size_t full = n;
   char small[8];
   std::memset(small, 'X', sizeof small);
-  n = capsText(kKnownMask, small, sizeof small);
+  n = capsText(kSentMask, small, sizeof small);
   CHECK(n == full && small[7] == '\0' && is(small, "bond,re"));
   char one[1] = {'X'};
   n = capsText(kBond, one, sizeof one);

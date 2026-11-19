@@ -31,9 +31,10 @@
 //     PEER_LIST (V4PayloadPeerListHeader, V4PayloadPeerListEntry),
 //     SENSOR_ENVELOPE and BOND_SENSOR_DATA (V4PayloadSensorReading, then a
 //     part of the reading), CMD_RESP (V4PayloadCmdRespHeader, then text),
-//     FILE_DATA (V4PayloadFileData), FS_LIST_REPLY (V4PayloadFsListReplyHeader,
-//     V4PayloadFsEntry), and the text-only TEXT, STREAM, BOOT, CMD and
-//     USER_SYNC. Each of those structs is marked "Fixed header: cannot grow".
+//     STREAM (V4PayloadStreamHeader, then text), FILE_DATA
+//     (V4PayloadFileData), FS_LIST_REPLY (V4PayloadFsListReplyHeader,
+//     V4PayloadFsEntry), and the text-only TEXT, BOOT, CMD and USER_SYNC.
+//     Each of those structs is marked "Fixed header: cannot grow".
 //   - Reserved bytes are sent as 0 and ignored by the receiver.
 //   - A receiver reads a payload with V4RxCtx::read(struct) (zero-fills what
 //     the frame lacks), a tail with V4RxCtx::tail(offset), or a Core parse*()
@@ -49,6 +50,16 @@
 //   - An ACK means "received", not "accepted": the ACK goes out before the
 //     dispatcher, so a frame dropped for its length is visible only in
 //     rxLengthDrops on the receiver.
+//   - Answers (rule F3, System_ESPNow_AnswerCore.h): every answer frame
+//     starts {u32 reqId, u8 status} (V4PayloadAnswerHeader). reqId is the
+//     request's correlation number (its reqId field, or its header msgId when
+//     it has none; 0 = sent unasked); status 0 is ok, 1-15 are the shared
+//     reasons (busy, refused, unsupported, too_large, no_slot, bad_request,
+//     not_ready, io_error, not_found, timeout, cancelled), 16 and up a reason
+//     of that frame alone. The header msgId of every frame, answers included,
+//     is the sender's own fresh number: no frame borrows the request's msgId.
+//     The answers are TOPO_START, TOPO_PEER, CMD_RESP, FS_LIST_REPLY,
+//     FS_STAT_REPLY, FS_GET_ACK, STREAM and FILE_CANCEL.
 //   - METADATA is exactly the 202-byte sealed budget, so it cannot grow (to a
 //     peer behind a relay it goes as sealed fragments: sendMetadata);
 //     FS_STAT_REPLY (164) has 38 bytes left, the routed frames their margins
@@ -67,6 +78,7 @@
 #include "System_ESPNow_PowerEventCore.h"  // the battery and event frames' sizes
 #include "System_ESPNow_ForwardCore.h"     // the forward-link frame's size
 #include "System_ESPNow_TimeCore.h"    // the TIME_SYNC frame's size and source numbers
+#include "System_ESPNow_AnswerCore.h"  // the answer header {reqId, status} and the status table (rule F3)
 #include "System_DeviceName.h"        // the device-name rule and its 32-byte wire field
 
 #if ENABLE_ESPNOW
@@ -130,7 +142,10 @@ static_assert(ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT == 202, "group-signed pay
 //                           PEER_LIST=39 live; 37/38 earmarked CAP_REQ/CAP_RESP)
 //   50–69    App unicast   (CMD, CMD_RESP, TEXT, METADATA_*, USER_SYNC)
 //   70–89    Remote FS     (FS_* read side live 70–75; 76–81 earmarked write
-//                           side: DELETE_REQ/ACK, PUT_REQ/ACK, MKDIR, RENAME)
+//                           side: DELETE_REQ/ACK, PUT_REQ/ACK, MKDIR, RENAME;
+//                           82–85 earmarked file catch-up (back-capture, 1.x):
+//                           CATCHUP_LIST_REQ=82, CATCHUP_LIST_RESP=83,
+//                           CATCHUP_READ_REQ=84, CATCHUP_READ_RESP=85; 86–89 free)
 //   90–109   Streaming     (STREAM; 91–93 earmarked MEDIA_START/DATA/END)
 //   110–129  Files         (FILE_START/DATA/END/CANCEL live; FILE_ACK=113,
 //                           FILE_PROGRESS=114, FILE_NACK=116, FILE_RESUME_OK=117 reserved)
@@ -149,7 +164,10 @@ static_assert(ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT == 202, "group-signed pay
 //                           masters named on it that it forwards its bond partner's
 //                           readings, battery state, events and sensor status, and
 //                           they answer; a master's SENSOR_REQ with its link byte set
-//                           asks the bond master for its partner's readings)
+//                           asks the bond master for its partner's readings;
+//                           156–158 earmarked device outbox (back-capture, 1.x):
+//                           BACKLOG_REQ=156, BACKLOG_RESP=157, BACKLOG_DATA=158;
+//                           159 free)
 //   170–189  Bond          (BOND_*, MANIFEST_REQ, SETTINGS_REQ, SCHEMA_REQ, plus
 //                           BOND_STREAM_CTRL/BOND_SENSOR_DATA — moved in from
 //                           streaming/sensors because they were always bond-gated;
@@ -250,6 +268,8 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_FS_GET_ACK      = 75,  // Synchronous ack for FS_GET_REQ (status + fileSize)
   // 76–81 earmarked write side: FS_DELETE_REQ/ACK, FS_PUT_REQ/ACK, FS_MKDIR,
   // FS_RENAME (V4PayloadFsEntry.perms already carries WRITE/DELETE bits)
+  // 82–85 earmarked file catch-up: CATCHUP_LIST_REQ/RESP, CATCHUP_READ_REQ/RESP
+  // (back-capture design 2026-11-19, built in 1.x); 86–89 free
 
   // --- Streaming (90–109) ---
   ESPNOW_V4_TYPE_STREAM          = 90,
@@ -279,6 +299,8 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_SENSOR_ENVELOPE = 154,  // worker → master: one part of a sensor reading (V4PayloadSensorReading)
   ESPNOW_V4_TYPE_FORWARD_LINK    = 155,  // bond master ⇄ the masters named on it: "I forward for my bond partner"
                                          //   and the answer (V4PayloadForwardLink, System_ESPNow_ForwardCore.h)
+  // 156–158 earmarked device outbox: BACKLOG_REQ / BACKLOG_RESP / BACKLOG_DATA
+  // (back-capture design 2026-11-19, built in 1.x; wire stream ids below); 159 free
 
   // --- Bond (170–189) ---
   ESPNOW_V4_TYPE_BOND_HEARTBEAT  = 170,
@@ -299,6 +321,18 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_BOND_SENSOR_STATUS = 185,  // bond worker → its bond master: sensors present / streaming (same layout as 151)
 };
 
+// ---- Wire stream ids (earmarked for back-capture, built in 1.x) -------------
+// The stream byte of the back-capture frames (BACKLOG_*, 156–158) is a fixed
+// wire number, independent of REMOTE_SENSOR_MAX, so a new sensor type never
+// renumbers battery or events. The device maps it to its internal stream ids
+// (espnowfwd::kStreamId*) at the edge:
+//     0–127   the sensor type (RemoteSensorType, the reading header's byte 0)
+//     0xF0    battery (the POWER_STATUS values)
+//     0xF1    events (the EVENT_PUSH values)
+//     0xFF    all streams (a status request or the "I hold backlog" notice)
+// Every other value is unassigned. Comment only until those frames land: an
+// enum symbol comes with its row.
+//
 // ---- Flag bits (16-bit in V4; was 8-bit in V3) -----------------------------
 //
 // Two classes of bit (1.0 rule):
@@ -388,6 +422,20 @@ static_assert(offsetof(EspNowV4Header, magic) == 0 && offsetof(EspNowV4Header, v
               "EspNowV4Header layout");
 
 // ---- Payload structs -------------------------------------------------------
+
+// ---- Answer header (rule F3) ------------------------------------------------
+// The first five bytes of every answer frame (System_ESPNow_AnswerCore.h has
+// the rules and the status table; espnowanswer::packHeader / parseHeader
+// write and read it). Each answer struct below starts with these two fields
+// at these offsets; the asserts after the structs pin it.
+struct __attribute__((packed)) V4PayloadAnswerHeader {
+  uint32_t reqId;   // 0  the request this answers (0: sent unasked)
+  uint8_t  status;  // 4  0 ok; 1-15 shared (espnowanswer::k*); 16+ this frame's own
+};
+static_assert(sizeof(V4PayloadAnswerHeader) == 5 && sizeof(V4PayloadAnswerHeader) == espnowanswer::kHeaderLen,
+              "V4PayloadAnswerHeader is 5 bytes on the wire");
+static_assert(offsetof(V4PayloadAnswerHeader, reqId) == 0 && offsetof(V4PayloadAnswerHeader, status) == 4,
+              "V4PayloadAnswerHeader layout (espnowanswer::packHeader writes these offsets)");
 
 // ---- Multi-hop: routed unicast envelope (ESPNOW_V4_TYPE_RELAY_DATA) --------
 //
@@ -563,31 +611,36 @@ static_assert(sizeof(V4PayloadTopoReq) == 8, "V4PayloadTopoReq layout");
 static_assert(offsetof(V4PayloadTopoReq, reqId) == 0 && offsetof(V4PayloadTopoReq, reserved) == 4,
               "V4PayloadTopoReq layout");
 
-// Topology start payload (first message in topology response)
+// Topology start payload (first message in topology response). An answer:
+// {reqId, status} first (rule F3); status is always 0 today.
 struct __attribute__((packed)) V4PayloadTopoStart {
-  uint32_t reqId;       // 0  Matches request ID
-  uint8_t  peerCount;   // 4  Number of TOPO_PEER messages to follow
-  uint8_t  reserved[3]; // 5  sent 0, ignored
+  uint32_t reqId;       // 0  the TOPO_REQ's reqId
+  uint8_t  status;      // 4  0 ok (espnowanswer)
+  uint8_t  peerCount;   // 5  Number of TOPO_PEER messages to follow
+  uint8_t  reserved[2]; // 6  sent 0, ignored
 };
 static_assert(sizeof(V4PayloadTopoStart) == 8, "V4PayloadTopoStart layout");
-static_assert(offsetof(V4PayloadTopoStart, reqId) == 0 && offsetof(V4PayloadTopoStart, peerCount) == 4 &&
-              offsetof(V4PayloadTopoStart, reserved) == 5, "V4PayloadTopoStart layout");
+static_assert(offsetof(V4PayloadTopoStart, reqId) == 0 && offsetof(V4PayloadTopoStart, status) == 4 &&
+              offsetof(V4PayloadTopoStart, peerCount) == 5 && offsetof(V4PayloadTopoStart, reserved) == 6,
+              "V4PayloadTopoStart layout");
 
-// Topology peer entry (one per peer)
+// Topology peer entry (one per peer). An answer: {reqId, status} first.
 struct __attribute__((packed)) V4PayloadTopoPeer {
-  uint32_t reqId;       // 0   Matches request ID
-  uint8_t  peerIndex;   // 4   Which peer (0-based)
-  uint8_t  isLast;      // 5   1 if this is the last peer
-  uint8_t  mac[6];      // 6   Peer MAC
-  int8_t   rssi;        // 12  Last RSSI
-  uint8_t  encrypted;   // 13  1 if encrypted
-  char     name[32];    // 14  Peer name (System_DeviceName.h rule; empty = no name, the receiver shows the MAC)
+  uint32_t reqId;       // 0   the TOPO_REQ's reqId
+  uint8_t  status;      // 4   0 ok (espnowanswer)
+  uint8_t  peerIndex;   // 5   Which peer (0-based)
+  uint8_t  isLast;      // 6   1 if this is the last peer
+  uint8_t  mac[6];      // 7   Peer MAC
+  int8_t   rssi;        // 13  Last RSSI
+  uint8_t  encrypted;   // 14  1 if encrypted
+  char     name[32];    // 15  Peer name (System_DeviceName.h rule; empty = no name, the receiver shows the MAC)
 };
-static_assert(sizeof(V4PayloadTopoPeer) == 46, "V4PayloadTopoPeer layout");
-static_assert(offsetof(V4PayloadTopoPeer, reqId) == 0 && offsetof(V4PayloadTopoPeer, peerIndex) == 4 &&
-              offsetof(V4PayloadTopoPeer, isLast) == 5 && offsetof(V4PayloadTopoPeer, mac) == 6 &&
-              offsetof(V4PayloadTopoPeer, rssi) == 12 && offsetof(V4PayloadTopoPeer, encrypted) == 13 &&
-              offsetof(V4PayloadTopoPeer, name) == 14, "V4PayloadTopoPeer layout");
+static_assert(sizeof(V4PayloadTopoPeer) == 47, "V4PayloadTopoPeer layout");
+static_assert(offsetof(V4PayloadTopoPeer, reqId) == 0 && offsetof(V4PayloadTopoPeer, status) == 4 &&
+              offsetof(V4PayloadTopoPeer, peerIndex) == 5 &&
+              offsetof(V4PayloadTopoPeer, isLast) == 6 && offsetof(V4PayloadTopoPeer, mac) == 7 &&
+              offsetof(V4PayloadTopoPeer, rssi) == 13 && offsetof(V4PayloadTopoPeer, encrypted) == 14 &&
+              offsetof(V4PayloadTopoPeer, name) == 15, "V4PayloadTopoPeer layout");
 static_assert(sizeof(V4PayloadTopoPeer::name) == devicename::kFieldLen, "TOPO_PEER name field");
 
 #if ENABLE_BONDED_MODE
@@ -694,7 +747,7 @@ enum BondNoticeFlags : uint8_t {
 // (buildCapabilitySummary). Declared in every build (a value type); only bond
 // builds send or receive it.
 struct __attribute__((packed)) CapabilitySummary {
-  uint8_t  protoVersion;       // 0   sent 1, ignored
+  uint8_t  reserved;           // 0   sent 0, ignored (was protoVersion, sent 1 and never read)
   uint8_t  role;               // 1   0=worker, 1=master
   uint8_t  inputDeviceType;    // 2   INPUT_DEVICE_TYPE: 0 none, 1 Seesaw gamepad, 2 ANO encoder
   uint8_t  chipModel;          // 3   esp_chip_info model
@@ -711,7 +764,7 @@ struct __attribute__((packed)) CapabilitySummary {
   char     deviceName[32];     // 52  device name (System_DeviceName.h): devicename::putField / getField
 };
 static_assert(sizeof(CapabilitySummary) == 84, "CapabilitySummary layout");
-static_assert(offsetof(CapabilitySummary, protoVersion) == 0 && offsetof(CapabilitySummary, role) == 1 &&
+static_assert(offsetof(CapabilitySummary, reserved) == 0 && offsetof(CapabilitySummary, role) == 1 &&
               offsetof(CapabilitySummary, inputDeviceType) == 2 && offsetof(CapabilitySummary, chipModel) == 3 &&
               offsetof(CapabilitySummary, featureMask) == 4 && offsetof(CapabilitySummary, serviceMask) == 8 &&
               offsetof(CapabilitySummary, sensorMask) == 12 && offsetof(CapabilitySummary, mac) == 16 &&
@@ -818,20 +871,23 @@ static_assert(SENSOR_READING_HEADER_LEN + SENSOR_READING_PART_MAX_ROUTED == ESPN
 // receiver, its bond master, turns it into its own bond-link control of the
 // partner's sensors (System_ESPNow_ForwardCore.h, sensorReqDecide); a device
 // never applies such a request to its own sensors.
+// reqId is 32 bits like every other request number (rule F3): an answer to a
+// sensor request, when one is added, carries it back in its {reqId, status}.
+// 1.0 has no such answer (the readings and SENSOR_STATUS follow instead).
 struct __attribute__((packed)) V4PayloadSensorReq {
-  uint8_t  reqId;       // app-level correlation / renewal generation
-  uint8_t  mode;        // 0=subscribe, 1=unsubscribe, 2=oneshot (see SensorReqMode)
-  uint32_t sensorMask;  // bitmask over RemoteSensorType (bit i = 1u<<i)
-  uint32_t intervalMs;  // desired per-sensor cadence hint (worker floors at spec.minIntervalMs)
-  uint32_t leaseMs;     // lease duration (ms); must exceed the renewal cadence (e.g. 90000 for a 30s tick)
-  uint8_t  fwdLink;     // 14  0, or the receiver's link number: a request for the receiver's bond partner
-  uint8_t  reserved;    // 15  0
+  uint32_t reqId;       // 0   the sender's request number (nonzero; generateMessageId)
+  uint8_t  mode;        // 4   0=subscribe, 1=unsubscribe, 2=oneshot (see SensorReqMode)
+  uint8_t  fwdLink;     // 5   0, or the receiver's link number: a request for the receiver's bond partner
+  uint8_t  reserved[2]; // 6   0
+  uint32_t sensorMask;  // 8   bitmask over RemoteSensorType (bit i = 1u<<i)
+  uint32_t intervalMs;  // 12  desired per-sensor cadence hint (worker floors at spec.minIntervalMs)
+  uint32_t leaseMs;     // 16  lease duration (ms); must exceed the renewal cadence (e.g. 90000 for a 30s tick)
 };
-static_assert(sizeof(V4PayloadSensorReq) == 16, "V4PayloadSensorReq is 16 bytes on the wire");
-static_assert(offsetof(V4PayloadSensorReq, reqId) == 0 && offsetof(V4PayloadSensorReq, mode) == 1 &&
-              offsetof(V4PayloadSensorReq, reserved) == 15 &&
-              offsetof(V4PayloadSensorReq, sensorMask) == 2 && offsetof(V4PayloadSensorReq, intervalMs) == 6 &&
-              offsetof(V4PayloadSensorReq, leaseMs) == 10 && offsetof(V4PayloadSensorReq, fwdLink) == 14,
+static_assert(sizeof(V4PayloadSensorReq) == 20, "V4PayloadSensorReq is 20 bytes on the wire");
+static_assert(offsetof(V4PayloadSensorReq, reqId) == 0 && offsetof(V4PayloadSensorReq, mode) == 4 &&
+              offsetof(V4PayloadSensorReq, fwdLink) == 5 && offsetof(V4PayloadSensorReq, reserved) == 6 &&
+              offsetof(V4PayloadSensorReq, sensorMask) == 8 && offsetof(V4PayloadSensorReq, intervalMs) == 12 &&
+              offsetof(V4PayloadSensorReq, leaseMs) == 16,
               "V4PayloadSensorReq layout");
 
 // POWER_STATUS (152): the sender's battery state. A session unicast to each
@@ -911,7 +967,7 @@ struct __attribute__((packed)) V4PayloadForwardLink {
   uint8_t  streams;         // 4   bit 0 readings, bit 1 battery, bit 2 events
   uint8_t  result;          // 5   answer: 1 accepted ... 9 name_taken
   uint8_t  answers;         // 6   answer: the op answered
-  uint8_t  reserved0;       // 7   0
+  uint8_t  announceGen;     // 7   announce: the bond master's announcement number (1..255), echoed by the answer
   uint8_t  partnerMac[6];   // 8   the bond partner; all zero: "for nobody" (withdraw) or a query
   uint16_t reserved1;       // 14  sent 0, ignored
   uint32_t sensorMask;      // 16  the sensors forwarded (32 bits)
@@ -921,7 +977,7 @@ struct __attribute__((packed)) V4PayloadForwardLink {
 };
 static_assert(sizeof(V4PayloadForwardLink) == 96 && sizeof(V4PayloadForwardLink) == espnowfwd::kLinkFrameLen,
               "V4PayloadForwardLink is 96 bytes on the wire");
-static_assert(offsetof(V4PayloadForwardLink, op) == 0 && offsetof(V4PayloadForwardLink, reserved0) == 7 &&
+static_assert(offsetof(V4PayloadForwardLink, op) == 0 && offsetof(V4PayloadForwardLink, announceGen) == 7 &&
               offsetof(V4PayloadForwardLink, linkGen) == 1 && offsetof(V4PayloadForwardLink, viaBootTag) == 2 &&
               offsetof(V4PayloadForwardLink, streams) == 4 && offsetof(V4PayloadForwardLink, result) == 5 &&
               offsetof(V4PayloadForwardLink, answers) == 6 && offsetof(V4PayloadForwardLink, partnerMac) == 8 &&
@@ -966,16 +1022,37 @@ static_assert(sizeof(V4PayloadMetadata::deviceName) == devicename::kFieldLen &&
               sizeof(V4PayloadForwardLink::partnerName) == devicename::kFieldLen,
               "every frame that carries the device name has a 32-byte field");
 
-// CMD_RESP (51): one success byte, then the command's output text to the end
-// of the payload, with no terminator (a receiver strips one trailing NUL that
-// a sender may still add). Larger outputs go through v4_send_payload_smart,
-// which seals and fragments them.
+// CMD_RESP (51): the answer to a CMD (and to USER_SYNC): {reqId, status},
+// then the command's output text to the end of the payload, with no
+// terminator (a receiver strips one trailing NUL that a sender may still
+// add). reqId is the CMD's header msgId; the CMD_RESP has its own. status:
+// 0 ok; busy, refused, unsupported, too_large, no_slot, bad_request,
+// not_ready (shared);
+// 16 failed: the command ran and reported a failure. Larger outputs go through
+// v4_send_payload_smart, which seals and fragments them.
 // Fixed header: cannot grow (see the frame rules at the top of this file).
 struct __attribute__((packed)) V4PayloadCmdRespHeader {
-  uint8_t success;           // 0  1=success, 0=failure
+  uint32_t reqId;            // 0  the CMD's header msgId
+  uint8_t  status;           // 4  espnowanswer: 0 ok, 1-15 shared, 16 failed
 };
-static_assert(sizeof(V4PayloadCmdRespHeader) == 1, "V4PayloadCmdRespHeader layout");
-static_assert(offsetof(V4PayloadCmdRespHeader, success) == 0, "V4PayloadCmdRespHeader layout");
+static_assert(sizeof(V4PayloadCmdRespHeader) == 5, "V4PayloadCmdRespHeader layout");
+static_assert(offsetof(V4PayloadCmdRespHeader, reqId) == 0 && offsetof(V4PayloadCmdRespHeader, status) == 4,
+              "V4PayloadCmdRespHeader layout");
+
+// STREAM (90): one line of a remote command's output while it runs (and the
+// startstream live output): {reqId, status}, then the line to the end of the
+// payload, no terminator. reqId is the CMD's header msgId, 0 for startstream
+// output, which answers nothing; status is 0. Each STREAM frame has its own
+// header msgId (they used to all carry the command's, which forced the
+// duplicate check to skip them).
+// Fixed header: cannot grow (see the frame rules at the top of this file).
+struct __attribute__((packed)) V4PayloadStreamHeader {
+  uint32_t reqId;            // 0  the CMD's header msgId; 0 = startstream output
+  uint8_t  status;           // 4  0
+};
+static_assert(sizeof(V4PayloadStreamHeader) == 5, "V4PayloadStreamHeader layout");
+static_assert(offsetof(V4PayloadStreamHeader, reqId) == 0 && offsetof(V4PayloadStreamHeader, status) == 4,
+              "V4PayloadStreamHeader layout");
 
 // ---- Phase 3.3 — KEY_EX handshake payloads ---------------------------------
 //
@@ -1224,36 +1301,43 @@ static_assert(offsetof(V4PayloadFileData, chunkIndex) == 0 && offsetof(V4Payload
 struct __attribute__((packed)) V4PayloadFileEnd {
   uint32_t crc32;         // CRC32 of the entire file, computed with esp_crc32_le
                           // (seed 0) on both ends. Receiver REJECTS on mismatch
-                          // (FILE_CANCEL_CRC_MISMATCH). Ignored when success=0.
+                          // (FILE_CANCEL_CRC_MISMATCH). Ignored when status != 0.
                           // Flag day 2026-07: older firmware sent 0 here; both
                           // peers must run post-CRC firmware or every non-empty
                           // transfer fails.
-  uint8_t  success;       // 1=transfer complete, 0=sender aborted mid-transfer
+  uint8_t  status;        // 0 = transfer complete; anything else = the sender stopped it
+                          // mid-transfer (it sends espnowanswer::kCancelled). Was
+                          // `success` with 1 = complete: 0 means ok in every status
+                          // byte since 1.0 (rule F3)
 };
 static_assert(sizeof(V4PayloadFileEnd) == 5, "V4PayloadFileEnd layout");
-static_assert(offsetof(V4PayloadFileEnd, crc32) == 0 && offsetof(V4PayloadFileEnd, success) == 4,
+static_assert(offsetof(V4PayloadFileEnd, crc32) == 0 && offsetof(V4PayloadFileEnd, status) == 4,
               "V4PayloadFileEnd layout");
 
 // Phase 4: FILE_CANCEL — the receiver tells the sender a transfer it started
-// will not complete. The header's msgId correlates to the original FILE_START.
-// Integrity pass: no longer just a post-hoc log notice — the sender matches
-// (peer, msgId) against its in-flight send and ABORTS the chunk loop, so a
-// cancel now stops the remaining airtime spend (see fileSendAbortMsgId).
+// will not complete. An answer (rule F3): reqId is the FILE_START's header
+// msgId (the transfer's number until FILE_START carries its own id); the
+// FILE_CANCEL's header msgId is the canceller's own. The sender matches
+// (peer, reqId) against its in-flight send and ABORTS the chunk loop, so a
+// cancel stops the remaining airtime spend (see fileSendAbortMsgId).
+// The reasons are status values of the shared table (espnowanswer); two are
+// this frame's own (16, 17).
+// The numbers are those of espnowanswer (asserted after the answer structs).
 enum EspNowFileCancelReason : uint8_t {
-  FILE_CANCEL_TIMEOUT      = 1,  // no frame arrived within the slot timeout
-  FILE_CANCEL_WRITE_FAILED = 2,  // staging write / rename to flash failed
-  FILE_CANCEL_INCOMPLETE   = 3,  // FILE_END arrived but chunks were missing
-  FILE_CANCEL_CRC_MISMATCH = 4,  // all chunks arrived but the whole-file CRC32
-                                 // didn't match FILE_END's declared value
-  FILE_CANCEL_REJECTED     = 5,  // FILE_START rejected (no slot / alloc / too
-                                 // big), or a chunk arrived for an unknown
-                                 // transfer — receiver never had/lost the slot
+  FILE_CANCEL_TIMEOUT      = 10,  // timeout: no frame arrived within the slot timeout
+  FILE_CANCEL_WRITE_FAILED = 8,   // io_error: staging write / rename to flash failed
+  FILE_CANCEL_INCOMPLETE   = 16,  // incomplete (this frame's own): FILE_END arrived but chunks were missing
+  FILE_CANCEL_CRC_MISMATCH = 17,  // crc_mismatch (this frame's own): all chunks arrived but the whole-file
+                                  // CRC32 didn't match FILE_END's declared value
+  FILE_CANCEL_REJECTED     = 2,   // refused: FILE_START rejected (no slot / alloc / too big), or a chunk
+                                  // arrived for an unknown transfer — receiver never had/lost the slot
 };
 struct __attribute__((packed)) V4PayloadFileCancel {
-  uint8_t reason;         // 0  EspNowFileCancelReason
+  uint32_t reqId;         // 0  the FILE_START's header msgId
+  uint8_t  status;        // 4  EspNowFileCancelReason (never 0)
 };
-static_assert(sizeof(V4PayloadFileCancel) == 1 && offsetof(V4PayloadFileCancel, reason) == 0,
-              "V4PayloadFileCancel layout");
+static_assert(sizeof(V4PayloadFileCancel) == 5 && offsetof(V4PayloadFileCancel, reqId) == 0 &&
+              offsetof(V4PayloadFileCancel, status) == 4, "V4PayloadFileCancel layout");
 
 // ---- FS LIST request/reply (ESPNOW_V4_TYPE_FS_LIST_REQ / _REPLY) ----------
 //
@@ -1298,33 +1382,35 @@ static_assert(sizeof(V4PayloadFsListReq) <= ESPNOW_V4_MAX_PLAINTEXT,
 // Reply layout (variable-length, on wire):
 //   [V4PayloadFsListReplyHeader] [V4PayloadFsEntry × header.entryCount]
 //
-// status codes:
-//   0 = OK
-//   1 = NOT_FOUND      (path doesn't exist on receiver)
-//   2 = NOT_A_DIR      (path exists but is a file)
-//   3 = PERM_DENIED    (path exists but bonded-peer identity can't read)
-//   4 = IO_ERROR       (FS error reading dir)
-//   5 = TOO_BUSY       (receiver is in the middle of another listing;
-//                       caller should retry with backoff)
-//   6 = NOT_READY      (filesystem not mounted yet — early boot)
+// status codes (FS_LIST_REPLY, FS_STAT_REPLY and FS_GET_ACK; the answer
+// table of rule F3, System_ESPNow_AnswerCore.h):
+//   0  = OK
+//   9  = NOT_FOUND      (shared not_found: path doesn't exist on receiver)
+//   16 = NOT_A_DIR      (this frame's own: path exists but is a file)
+//   2  = PERM_DENIED    (shared refused: bonded-peer identity can't read)
+//   8  = IO_ERROR       (shared io_error: FS error reading dir)
+//   1  = TOO_BUSY       (shared busy: receiver is in the middle of another
+//                        listing; caller should retry with backoff)
+//   7  = NOT_READY      (shared not_ready: filesystem not mounted yet)
 //
 // hasMore=1 + nextStartIndex tells the client to issue a follow-up with
 // startIndex=nextStartIndex to fetch the rest of a large directory.
 
+// The numbers are those of espnowanswer (asserted after the answer structs).
 enum FsListStatus : uint8_t {
-  FS_LIST_STATUS_OK          = 0,
-  FS_LIST_STATUS_NOT_FOUND   = 1,
-  FS_LIST_STATUS_NOT_A_DIR   = 2,
-  FS_LIST_STATUS_PERM_DENIED = 3,
-  FS_LIST_STATUS_IO_ERROR    = 4,
-  FS_LIST_STATUS_TOO_BUSY    = 5,
-  FS_LIST_STATUS_NOT_READY   = 6,
+  FS_LIST_STATUS_OK          = 0,   // ok
+  FS_LIST_STATUS_NOT_FOUND   = 9,   // not_found
+  FS_LIST_STATUS_NOT_A_DIR   = 16,  // not_a_dir (FS answers only)
+  FS_LIST_STATUS_PERM_DENIED = 2,   // refused
+  FS_LIST_STATUS_IO_ERROR    = 8,   // io_error
+  FS_LIST_STATUS_TOO_BUSY    = 1,   // busy
+  FS_LIST_STATUS_NOT_READY   = 7,   // not_ready
 };
 
 // Fixed header: cannot grow (see the frame rules at the top of this file).
 struct __attribute__((packed)) V4PayloadFsListReplyHeader {
-  uint32_t reqId;          // Echoes request
-  uint8_t  status;         // FsListStatus
+  uint32_t reqId;          // Echoes request (answer header, rule F3)
+  uint8_t  status;         // FsListStatus (the answer status table)
   uint8_t  entryCount;     // Number of V4PayloadFsEntry records that follow
   uint8_t  hasMore;        // 1 if more entries available beyond this batch
   uint8_t  reserved;       // sent 0, ignored
@@ -1523,6 +1609,44 @@ static_assert(sizeof(V4PayloadHeartbeat::deviceName) == ESPNOW_V4_NAME_LEN &&
 static_assert(ESPNOW_V4_NAME_LEN == devicename::kFieldLen,
               "the wire name width is the device-name field (System_DeviceName.h)");
 
+// ---- Answer frames (rule F3) --------------------------------------------------
+// The opcodes System_ESPNow_AnswerCore.h names are these, and every answer
+// struct starts with the answer header {reqId u32 at 0, status u8 at 4}.
+static_assert(espnowanswer::kOpTopoStart == ESPNOW_V4_TYPE_TOPO_START &&
+              espnowanswer::kOpTopoPeer == ESPNOW_V4_TYPE_TOPO_PEER &&
+              espnowanswer::kOpCmdResp == ESPNOW_V4_TYPE_CMD_RESP &&
+              espnowanswer::kOpFsListReply == ESPNOW_V4_TYPE_FS_LIST_REPLY &&
+              espnowanswer::kOpFsStatReply == ESPNOW_V4_TYPE_FS_STAT_REPLY &&
+              espnowanswer::kOpFsGetAck == ESPNOW_V4_TYPE_FS_GET_ACK &&
+              espnowanswer::kOpStream == ESPNOW_V4_TYPE_STREAM &&
+              espnowanswer::kOpFileCancel == ESPNOW_V4_TYPE_FILE_CANCEL,
+              "System_ESPNow_AnswerCore.h names the answer opcodes of this file");
+#define ESPNOW_V4_ANSWER_HEADER_AT_START(T) \
+  (offsetof(T, reqId) == offsetof(V4PayloadAnswerHeader, reqId) && \
+   offsetof(T, status) == offsetof(V4PayloadAnswerHeader, status) && \
+   sizeof(((T*)nullptr)->reqId) == 4 && sizeof(((T*)nullptr)->status) == 1)
+static_assert(ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadTopoStart) &&
+              ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadTopoPeer) &&
+              ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadCmdRespHeader) &&
+              ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadStreamHeader) &&
+              ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFsListReplyHeader) &&
+              ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFsStatReply) &&
+              ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFsGetAck) &&
+              ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFileCancel),
+              "every answer starts {u32 reqId, u8 status} (rule F3)");
+#undef ESPNOW_V4_ANSWER_HEADER_AT_START
+static_assert(FS_LIST_STATUS_OK == espnowanswer::kOk && FS_LIST_STATUS_NOT_FOUND == espnowanswer::kNotFound &&
+              FS_LIST_STATUS_NOT_A_DIR == espnowanswer::kFsNotADir &&
+              FS_LIST_STATUS_PERM_DENIED == espnowanswer::kRefused &&
+              FS_LIST_STATUS_IO_ERROR == espnowanswer::kIoError && FS_LIST_STATUS_TOO_BUSY == espnowanswer::kBusy &&
+              FS_LIST_STATUS_NOT_READY == espnowanswer::kNotReady,
+              "the FS answers use the shared status table (rule F3)");
+static_assert(FILE_CANCEL_TIMEOUT == espnowanswer::kTimeout && FILE_CANCEL_WRITE_FAILED == espnowanswer::kIoError &&
+              FILE_CANCEL_INCOMPLETE == espnowanswer::kFileIncomplete &&
+              FILE_CANCEL_CRC_MISMATCH == espnowanswer::kFileCrcMismatch &&
+              FILE_CANCEL_REJECTED == espnowanswer::kRefused,
+              "FILE_CANCEL's reasons are answer statuses (rule F3)");
+
 // ---- Receive minimum lengths (kV4HandlerTable's minLen column) --------------
 //
 // The smallest payload a legitimate 1.0 sender sends for each opcode, after
@@ -1546,30 +1670,30 @@ static_assert(ESPNOW_V4_NAME_LEN == devicename::kFieldLen,
 #define ESPNOW_V4_MINLEN_RELAY_DATA          40   // envelope 8 + an inner header 32
 #define ESPNOW_V4_MINLEN_PEER_LIST           4    // header; entries follow (count checked by the handler)
 #define ESPNOW_V4_MINLEN_CMD                 1
-#define ESPNOW_V4_MINLEN_CMD_RESP            1    // success byte; text follows
+#define ESPNOW_V4_MINLEN_CMD_RESP            5    // answer header {reqId, status}; text follows
 #define ESPNOW_V4_MINLEN_HEARTBEAT           44
 #define ESPNOW_V4_MINLEN_PAIR_BEACON         36
 #define ESPNOW_V4_MINLEN_PAIR_REQUEST        40
 #define ESPNOW_V4_MINLEN_PAIR_ACCEPT         40
 #define ESPNOW_V4_MINLEN_PAIR_REJECT         40
 #define ESPNOW_V4_MINLEN_SENSOR_STATUS       16
-#define ESPNOW_V4_MINLEN_SENSOR_REQ          16
+#define ESPNOW_V4_MINLEN_SENSOR_REQ          20
 #define ESPNOW_V4_MINLEN_SENSOR_ENVELOPE     13   // reading header 12 + at least one byte of the part
 #define ESPNOW_V4_MINLEN_POWER_STATUS        24
 #define ESPNOW_V4_MINLEN_EVENT_PUSH          128
 #define ESPNOW_V4_MINLEN_FORWARD_LINK        96
 #define ESPNOW_V4_MINLEN_TOPO_REQ            8
 #define ESPNOW_V4_MINLEN_TOPO_START          8
-#define ESPNOW_V4_MINLEN_TOPO_PEER           46
+#define ESPNOW_V4_MINLEN_TOPO_PEER           47
 #define ESPNOW_V4_MINLEN_USER_SYNC           1
 #define ESPNOW_V4_MINLEN_METADATA_REQ        0    // senders send no payload
 #define ESPNOW_V4_MINLEN_METADATA_RESP       202
 #define ESPNOW_V4_MINLEN_METADATA_PUSH       202
-#define ESPNOW_V4_MINLEN_STREAM              1    // stream data; the empty BEGIN/END markers are gone
+#define ESPNOW_V4_MINLEN_STREAM              6    // answer header {reqId, status} + at least one byte of the line
 #define ESPNOW_V4_MINLEN_FILE_START          72
 #define ESPNOW_V4_MINLEN_FILE_DATA           3    // chunk index 2 + at least one byte
 #define ESPNOW_V4_MINLEN_FILE_END            5
-#define ESPNOW_V4_MINLEN_FILE_CANCEL         1
+#define ESPNOW_V4_MINLEN_FILE_CANCEL         5
 #define ESPNOW_V4_MINLEN_SUBSCRIBE_UPDATE    16
 #define ESPNOW_V4_MINLEN_FS_LIST_REQ         144
 #define ESPNOW_V4_MINLEN_FS_LIST_REPLY       140  // header; entries follow (count checked by the handler)
@@ -1626,6 +1750,7 @@ static_assert(sizeof(V4PayloadSessionUnknown) == ESPNOW_V4_MINLEN_SESSION_UNKNOW
               offsetof(V4PayloadFileData, data) + 1 == ESPNOW_V4_MINLEN_FILE_DATA &&
               sizeof(V4PayloadFileEnd) == ESPNOW_V4_MINLEN_FILE_END &&
               sizeof(V4PayloadFileCancel) == ESPNOW_V4_MINLEN_FILE_CANCEL &&
+              sizeof(V4PayloadStreamHeader) + 1 == ESPNOW_V4_MINLEN_STREAM &&
               sizeof(V4PayloadSubscribe) == ESPNOW_V4_MINLEN_SUBSCRIBE_UPDATE &&
               sizeof(V4PayloadFsListReq) == ESPNOW_V4_MINLEN_FS_LIST_REQ &&
               sizeof(V4PayloadFsListReplyHeader) == ESPNOW_V4_MINLEN_FS_LIST_REPLY &&

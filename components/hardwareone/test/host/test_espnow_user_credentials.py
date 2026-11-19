@@ -135,7 +135,14 @@ def generate(component: Path) -> str:
     sync = unique_block(espnow, "struct DeferredUserSyncWork", "System_ESPNow.cpp") + ";\n\n"
     sync += unique_block(espnow, "static void doUserSyncWork(const DeferredUserSyncWork* w)",
                          "System_ESPNow.cpp")
-    remote = unique_block(espnow, "static void v4_handle_cmd(const uint8_t* srcMac, const char* "
+    # The refusal sender (rule F3: {reqId, status} + text under a fresh msgId),
+    # as it is; the harness doubles only espnowtx::sendAead and generateMessageId.
+    cmd_resp = "static bool v4_send_cmd_resp_async(const uint8_t* dst, uint32_t reqId, uint8_t status, " \
+               "const char* text)"
+    # The bare signature also matches the forward declaration; take the definition.
+    require(espnow.count(cmd_resp + " {") == 1, f"System_ESPNow.cpp: expected one {cmd_resp!r} definition")
+    remote = extract_block(espnow[espnow.index(cmd_resp + " {"):], cmd_resp) + "\n\n"
+    remote += unique_block(espnow, "static void v4_handle_cmd(const uint8_t* srcMac, const char* "
                                   "deviceName, uint32_t msgId, const char* cmdPayload",
                           "System_ESPNow.cpp")
     require(remote.count(AUTH_DECISION) == 1, f"v4_handle_cmd: one {AUTH_DECISION!r}")

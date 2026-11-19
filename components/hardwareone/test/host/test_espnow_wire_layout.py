@@ -26,7 +26,12 @@ Source rules:
     struct is marked, and every ctx.tail() read starts after one of them;
   * sensor masks are 32 bits: no 16-bit field or variable named *mask/*Mask in
     the sensor and forwarding code (the peer bitmap receivedPeerMask, which is
-    not a sensor mask and never on the wire, is allowed).
+    not a sensor mask and never on the wire, is allowed);
+  * back-capture earmarks (1.0, W5): 82-85 file catch-up and 156-158
+    BACKLOG_* are named in the opcode map and at the enum and stay
+    unallocated, 86 and 159 stay free, the wire stream-id table (0-127 sensor
+    type, 0xF0 battery, 0xF1 events) is in the header, and
+    docs/COMPATIBILITY.md states them.
 
 Options: --cxx <compiler>, --component <dir> (--sanitize is accepted and unused).
 """
@@ -60,15 +65,16 @@ GOLDEN = {
     'V4PayloadPairCtrl': (40, [('targetMac', 0), ('role', 6), ('reserved', 7), ('deviceName', 8)]),
     'V4PayloadTimeSync': (16, [('epochMs', 0), ('source', 8), ('flags', 9), ('sinceSetMin', 10), ('reserved', 12)]),
     'V4PayloadTopoReq': (8, [('reqId', 0), ('reserved', 4)]),
-    'V4PayloadTopoStart': (8, [('reqId', 0), ('peerCount', 4), ('reserved', 5)]),
-    'V4PayloadTopoPeer': (46, [('reqId', 0), ('peerIndex', 4), ('isLast', 5), ('mac', 6), ('rssi', 12),
-                               ('encrypted', 13), ('name', 14)]),
+    'V4PayloadAnswerHeader': (5, [('reqId', 0), ('status', 4)]),
+    'V4PayloadTopoStart': (8, [('reqId', 0), ('status', 4), ('peerCount', 5), ('reserved', 6)]),
+    'V4PayloadTopoPeer': (47, [('reqId', 0), ('status', 4), ('peerIndex', 5), ('isLast', 6), ('mac', 7),
+                               ('rssi', 13), ('encrypted', 14), ('name', 15)]),
     'V4PayloadBondHeartbeat': (24, [('role', 0), ('rssi', 1), ('reserved', 2), ('uptimeSec', 4), ('freeHeap', 8),
                                     ('seqNum', 12), ('bootCounter', 16), ('settingsHash', 20)]),
     'V4PayloadStreamCtrl': (4, [('sensorType', 0), ('enable', 1), ('reserved', 2)]),
     'V4PayloadBondRequest': (8, [('role', 0), ('flags', 1), ('seq', 2), ('reserved', 4)]),
     'V4PayloadBondNotice': (8, [('reason', 0), ('role', 1), ('seq', 2), ('flags', 4), ('reserved', 5)]),
-    'CapabilitySummary': (84, [('protoVersion', 0), ('role', 1), ('inputDeviceType', 2), ('chipModel', 3),
+    'CapabilitySummary': (84, [('reserved', 0), ('role', 1), ('inputDeviceType', 2), ('chipModel', 3),
                                ('featureMask', 4), ('serviceMask', 8), ('sensorMask', 12), ('mac', 16),
                                ('wifiChannel', 22), ('reserved0', 23), ('flashSizeMb', 24), ('psramSizeMb', 28),
                                ('uptimeSeconds', 32), ('fwHash', 36), ('deviceName', 52)]),
@@ -79,8 +85,8 @@ GOLDEN = {
                                    ('reserved', 11)]),
     'V4PayloadSensorReading': (12, [('sensorType', 0), ('flags', 1), ('bootTag', 2), ('counter', 4), ('parts', 6),
                                     ('fwdLink', 7), ('ageMs', 8)]),
-    'V4PayloadSensorReq': (16, [('reqId', 0), ('mode', 1), ('sensorMask', 2), ('intervalMs', 6), ('leaseMs', 10),
-                                ('fwdLink', 14), ('reserved', 15)]),
+    'V4PayloadSensorReq': (20, [('reqId', 0), ('mode', 4), ('fwdLink', 5), ('reserved', 6), ('sensorMask', 8),
+                                ('intervalMs', 12), ('leaseMs', 16)]),
     'V4PayloadPowerStatus': (24, [('counter', 0), ('bootTag', 2), ('status', 4), ('backend', 5), ('known', 6),
                                   ('voltageMv', 8), ('percentX10', 10), ('rateX10', 12), ('sampleAgeMs', 14),
                                   ('fwdLink', 16), ('reserved', 17)]),
@@ -88,11 +94,12 @@ GOLDEN = {
                                  ('fwdLink', 7), ('skipped', 8), ('reserved1', 10), ('eventSeq', 12), ('ageMs', 16),
                                  ('kind', 20), ('subject', 52), ('detail', 84), ('who', 116)]),
     'V4PayloadForwardLink': (96, [('op', 0), ('linkGen', 1), ('viaBootTag', 2), ('streams', 4), ('result', 5),
-                                  ('answers', 6), ('reserved0', 7), ('partnerMac', 8), ('reserved1', 14),
+                                  ('answers', 6), ('announceGen', 7), ('partnerMac', 8), ('reserved1', 14),
                                   ('sensorMask', 16), ('partnerKey', 20), ('partnerName', 52), ('reserved2', 84)]),
     'V4PayloadMetadata': (202, [('deviceName', 0), ('friendlyName', 32), ('room', 80), ('zone', 112), ('tags', 144),
                                 ('stationary', 198), ('reserved', 199)]),
-    'V4PayloadCmdRespHeader': (1, [('success', 0)]),
+    'V4PayloadCmdRespHeader': (5, [('reqId', 0), ('status', 4)]),
+    'V4PayloadStreamHeader': (5, [('reqId', 0), ('status', 4)]),
     'V4PayloadKeyExHello': (72, [('meshFingerprint', 0), ('senderMac', 2), ('senderPubEd25519', 8), ('hmac', 40)]),
     'V4PayloadKeyExReply': (72, [('meshFingerprint', 0), ('responderMac', 2), ('responderPubEd25519', 8),
                                  ('hmac', 40)]),
@@ -108,8 +115,8 @@ GOLDEN = {
     'V4PayloadSubscribe': (16, [('requestedEvents', 0), ('reserved', 4)]),
     'V4PayloadFileStart': (72, [('fileSize', 0), ('chunkCount', 4), ('chunkSize', 6), ('filename', 8)]),
     'V4PayloadFileData': (202, [('chunkIndex', 0), ('data', 2)]),
-    'V4PayloadFileEnd': (5, [('crc32', 0), ('success', 4)]),
-    'V4PayloadFileCancel': (1, [('reason', 0)]),
+    'V4PayloadFileEnd': (5, [('crc32', 0), ('status', 4)]),
+    'V4PayloadFileCancel': (5, [('reqId', 0), ('status', 4)]),
     'V4PayloadFsListReq': (144, [('reqId', 0), ('startIndex', 4), ('maxEntries', 6), ('path', 8), ('reserved', 136)]),
     'V4PayloadFsListReplyHeader': (140, [('reqId', 0), ('status', 4), ('entryCount', 5), ('hasMore', 6),
                                          ('reserved', 7), ('totalEntries', 8), ('nextStartIndex', 10), ('path', 12)]),
@@ -123,8 +130,23 @@ GOLDEN = {
     'V4PayloadSessionUnknown': (12, [('sessionId', 0), ('reserved', 2), ('frameSeq', 4), ('msgId', 8)]),
 }
 
+# Status values on the wire (rule F3: answers share one status table, 0 ok,
+# 1-15 shared, 16+ per frame; System_ESPNow_AnswerCore.h). Frozen at 1.0.
+STATUS_GOLDEN = {
+    'FS_LIST_STATUS_OK': 0, 'FS_LIST_STATUS_TOO_BUSY': 1, 'FS_LIST_STATUS_PERM_DENIED': 2,
+    'FS_LIST_STATUS_NOT_READY': 7, 'FS_LIST_STATUS_IO_ERROR': 8, 'FS_LIST_STATUS_NOT_FOUND': 9,
+    'FS_LIST_STATUS_NOT_A_DIR': 16,
+    'FILE_CANCEL_REJECTED': 2, 'FILE_CANCEL_WRITE_FAILED': 8, 'FILE_CANCEL_TIMEOUT': 10,
+    'FILE_CANCEL_INCOMPLETE': 16, 'FILE_CANCEL_CRC_MISMATCH': 17,
+    'espnowanswer::kOk': 0, 'espnowanswer::kBusy': 1, 'espnowanswer::kRefused': 2,
+    'espnowanswer::kUnsupported': 3, 'espnowanswer::kTooLarge': 4, 'espnowanswer::kNoSlot': 5,
+    'espnowanswer::kBadRequest': 6, 'espnowanswer::kNotReady': 7, 'espnowanswer::kIoError': 8,
+    'espnowanswer::kNotFound': 9, 'espnowanswer::kTimeout': 10, 'espnowanswer::kCancelled': 11,
+    'espnowanswer::kCmdFailed': 16,
+}
+
 CORE_HEADERS = ('System_ESPNow_SensorCore.h', 'System_ESPNow_PowerEventCore.h', 'System_ESPNow_ForwardCore.h',
-                'System_ESPNow_TimeCore.h', 'System_DeviceName.h')
+                'System_ESPNow_TimeCore.h', 'System_ESPNow_AnswerCore.h', 'System_DeviceName.h')
 
 # Receive code may read FS list entries in place (V4PayloadFsEntry is packed,
 # alignment 1, and the count is checked first).
@@ -140,10 +162,10 @@ MASK_ALLOWED = ('receivedPeerMask',)  # one bit per validated peer index, RAM on
 FIXED_HEADER = {
     'V4PayloadRelayData': 'RELAY_DATA', 'V4PayloadPeerListHeader': 'PEER_LIST',
     'V4PayloadPeerListEntry': 'PEER_LIST', 'V4PayloadSensorReading': 'BOND_SENSOR_DATA',
-    'V4PayloadCmdRespHeader': 'CMD_RESP', 'V4PayloadFileData': 'FILE_DATA',
+    'V4PayloadCmdRespHeader': 'CMD_RESP', 'V4PayloadStreamHeader': 'STREAM', 'V4PayloadFileData': 'FILE_DATA',
     'V4PayloadFsListReplyHeader': 'FS_LIST_REPLY', 'V4PayloadFsEntry': 'FS_LIST_REPLY',
 }
-TEXT_ONLY_FRAMES = ('SENSOR_ENVELOPE', 'TEXT', 'STREAM', 'BOOT', 'CMD', 'USER_SYNC')
+TEXT_ONLY_FRAMES = ('SENSOR_ENVELOPE', 'TEXT', 'BOOT', 'CMD', 'USER_SYNC')
 FIXED_MARK = '// Fixed header: cannot grow'
 
 # Sites whose limit follows from the group tag's length (System_ESPNow.cpp).
@@ -214,7 +236,8 @@ def check_golden(blocks: dict[str, str]) -> str:
     expect(sorted(blocks) == sorted(GOLDEN),
            f'the structs of System_ESPNow_Wire.h are the golden table\'s: '
            f'new {sorted(set(blocks) - set(GOLDEN))}, gone {sorted(set(GOLDEN) - set(blocks))}')
-    lines = []
+    lines = [f'static_assert({name} == {value}, "golden: {name} is {value} on the wire");'
+             for name, value in STATUS_GOLDEN.items()]
     for name, (size, layout) in GOLDEN.items():
         if name not in blocks:
             continue
@@ -335,6 +358,40 @@ def check_sources(component: Path) -> None:
            'System_Settings.h: bondForwardSensors is 32 bits')
 
 
+# Back-capture earmarks (1.0, design W5): the numbers are named in the map and
+# at the enum, and stay unallocated until their frames land with their rows.
+EARMARKS = {82: 'CATCHUP_LIST_REQ', 83: 'CATCHUP_LIST_RESP', 84: 'CATCHUP_READ_REQ', 85: 'CATCHUP_READ_RESP',
+            156: 'BACKLOG_REQ', 157: 'BACKLOG_RESP', 158: 'BACKLOG_DATA'}
+EARMARK_FREE = (86, 159)
+
+
+def check_earmarks(component: Path) -> None:
+    wire = (component / 'System_ESPNow_Wire.h').read_text()
+    code = strip_comments(wire)
+    enum = code[code.index('enum EspNowV4Type'):]
+    enum = enum[:enum.index('};')]
+    taken = {int(v) for v in re.findall(r'ESPNOW_V4_TYPE_\w+\s*=\s*(\d+)', enum)}
+    for number in sorted(set(EARMARKS) | set(EARMARK_FREE)):
+        expect(number not in taken, f'opcode {number} is earmarked for back-capture or kept free, not allocated')
+    ranges = wire[wire.index('// Ranges:'):wire.index('// Allocation policy')]
+    for number, name in EARMARKS.items():
+        expect(f'{name}={number}' in ranges, f'the opcode map names {name}={number}')
+    expect('82–85 earmarked file catch-up' in ranges and '86–89 free' in ranges,
+           'the opcode map earmarks 82–85 for file catch-up and keeps 86–89 free')
+    expect('156–158 earmarked device outbox' in ranges and '159 free' in ranges,
+           'the opcode map earmarks 156–158 for the device outbox and keeps 159 free')
+    enum_text = wire[wire.index('enum EspNowV4Type'):]
+    enum_text = enum_text[:enum_text.index('};')]
+    expect('82–85 earmarked file catch-up' in enum_text and '156–158 earmarked device outbox' in enum_text,
+           'the enum marks the earmarked numbers where they would go')
+    streams = wire[wire.index('// ---- Wire stream ids'):wire.index('// ---- Flag bits')]
+    for row in ('0–127   the sensor type', '0xF0    battery', '0xF1    events'):
+        expect(row in streams, f'the wire stream-id table has the row "{row}"')
+    compat = (component.parents[1] / 'docs' / 'COMPATIBILITY.md').read_text()
+    expect('82-85' in compat and '156-158' in compat and 'backlog_serve' in compat and '0xF0' in compat,
+           'docs/COMPATIBILITY.md states the back-capture earmarks')
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--cxx', default=os.environ.get('CXX') or shutil.which('clang++') or shutil.which('c++'))
@@ -349,6 +406,7 @@ def main() -> int:
     golden = check_golden(blocks)
     compile_header(a.component, a.cxx, golden)
     check_sources(a.component)
+    check_earmarks(a.component)
     for line in failures:
         print(f'FAIL: {line}')
     if failures:

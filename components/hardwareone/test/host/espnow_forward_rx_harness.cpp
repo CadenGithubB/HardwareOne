@@ -255,6 +255,20 @@ static void testAnnounce() {
         "the console says it once");
   rx(kGlasses, "glasses", announceOf(1, 7, kPorch, "porch"));
   check(lastResult() == espnowfwd::kResultAccepted && gConsole.size() == 1, "a repeat: accepted again, said no more");
+  // 1.0 rule W4: the answer echoes the announcement number (byte 7), also
+  // for a refusal.
+  {
+    espnowfwd::LinkFrame numbered = announceOf(1, 7, kPorch, "porch");
+    numbered.announceGen = 0xC3;
+    rx(kGlasses, "glasses", numbered);
+    check(lastResult() == espnowfwd::kResultAccepted && gSent.back().f.announceGen == 0xC3,
+          "the answer echoes the announcement number in byte 7 (FAILS WITHOUT THE W4 RULE)");
+    numbered = announceOf(2, 7, kGlasses, "me");
+    numbered.announceGen = 0x3C;
+    rx(kGlasses, "glasses", numbered);
+    check(lastResult() == espnowfwd::kResultBadPartner && gSent.back().f.announceGen == 0x3C,
+          "a refusal echoes it too");
+  }
   // Bad partners.
   rx(kGlasses, "glasses", announceOf(2, 7, kGlasses, "me"));
   check(lastResult() == espnowfwd::kResultBadPartner, "the partner is the sender itself: bad_partner");

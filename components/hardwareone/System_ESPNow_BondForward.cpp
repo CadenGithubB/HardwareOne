@@ -262,6 +262,7 @@ static void bfSendAnnounce(const espnowfwd::TargetState& t) {
   f.viaBootTag = bfBootTag();
   f.streams = t.streams;
   f.sensorMask = (t.streams & espnowfwd::kStreamReadings) ? t.sensorMask : 0;
+  f.announceGen = t.announceGen;  // stepped by targetStep for this announcement
   memcpy(f.partnerMac, sBf.link.partner, 6);
   memcpy(f.partnerKey, sBf.link.partnerKey, sizeof(f.partnerKey));
   char name[40];
@@ -598,9 +599,10 @@ void bondForwardReading(const uint8_t src[6], const espnowsensor::ReadingHeader&
     bfCount(kBfStreamReadings, espnowfwd::WhyNot::TooLong);
     return;
   }
+  // The partner's header as received, flag bits this firmware does not know
+  // included (1.0 rule W2); only the forwarding fields and the parts change.
   espnowsensor::ReadingHeader fh = h;
-  fh.flags = (uint8_t)((h.flags & (espnowsensor::kReadingFlagAgeValid | espnowsensor::kReadingFlagStreamStart)) |
-                       espnowsensor::kReadingFlagForwarded);
+  fh.flags = (uint8_t)(h.flags | espnowsensor::kReadingFlagForwarded);
   fh.fwdLink = sBf.link.linkGen;
   fh.partCount = plan.count;
   for (uint8_t i = 0; i < plan.count; ++i) {
@@ -617,9 +619,12 @@ void bondForwardReading(const uint8_t src[6], const espnowsensor::ReadingHeader&
   bfCount(kBfStreamReadings, espnowfwd::WhyNot::Forwards);
 }
 
-// A battery or event frame to every accepted target that carries it.
+// A battery or event frame to every accepted target that carries it: the
+// received `len` bytes when they fit the target's path, else the frame's 1.0
+// length `frameLen` (espnowsensor::forwardSendLen).
 template <typename SendFn>
-static void bfToTargets(uint8_t stream, uint8_t streamBit, const uint8_t* payload, uint16_t len, SendFn send) {
+static void bfToTargets(uint8_t stream, uint8_t streamBit, const uint8_t* payload, size_t len, size_t frameLen,
+                        SendFn send) {
   bool any = false;
   bool queueFull = false;
   espnowfwd::WhyNot first = espnowfwd::WhyNot::NoMaster;
@@ -629,8 +634,18 @@ static void bfToTargets(uint8_t stream, uint8_t streamBit, const uint8_t* payloa
     if (!t.have) continue;
     const uint16_t sid = bfSessionId(t.mac);
     if (espnowfwd::targetCarries(t, sid, streamBit, -1)) {
-      if (send(t.mac, payload, len)) any = true;
-      else queueFull = true;
+      const size_t n = espnowsensor::forwardSendLen(len, frameLen, bfFrameCap(t.mac));
+      if (!n) {
+        // Cannot happen at 1.0 (both frames fit a routed frame); counted, not sent.
+        if (!haveFirst) {
+          first = espnowfwd::WhyNot::TooLong;
+          haveFirst = true;
+        }
+      } else if (send(t.mac, payload, (uint16_t)n)) {
+        any = true;
+      } else {
+        queueFull = true;
+      }
     } else if (!haveFirst) {
       first = espnowfwd::targetWhyNot(t, sid, streamBit, -1);
       haveFirst = true;
@@ -640,31 +655,31 @@ static void bfToTargets(uint8_t stream, uint8_t streamBit, const uint8_t* payloa
   else bfCount(stream, queueFull ? espnowfwd::WhyNot::QueueFull : first);
 }
 
-void bondForwardPower(const uint8_t src[6], const espnowsensor::PowerFrame& f) {
+// The partner's battery and event frames go on verbatim, at their full
+// received length, with only the forwarding fields patched (1.0 rule W2):
+// what a later firmware appends or sets in reserved bytes reaches the master.
+void bondForwardPower(const uint8_t src[6], const uint8_t* payload, size_t len) {
   const espnowfwd::WhyNot why = bfFrameCheck(src);
   if (why != espnowfwd::WhyNot::Forwards) {
     bfCount(kBfStreamBattery, why);
     return;
   }
-  espnowsensor::PowerFrame g = f;
-  g.fwdLink = sBf.link.linkGen;
-  uint8_t payload[espnowsensor::kPowerFrameLen];
-  espnowsensor::packPowerFrame(payload, g);
-  bfToTargets(kBfStreamBattery, espnowfwd::kStreamBattery, payload, (uint16_t)sizeof(payload), bfSendPower);
+  uint8_t out[espnowsensor::kForwardCopyMax];
+  const size_t n = espnowsensor::forwardPowerCopy(out, payload, len, sBf.link.linkGen);
+  if (!n) return;  // shorter than the frame: cannot happen, the ingest parsed it
+  bfToTargets(kBfStreamBattery, espnowfwd::kStreamBattery, out, n, espnowsensor::kPowerFrameLen, bfSendPower);
 }
 
-void bondForwardEvent(const uint8_t src[6], const espnowsensor::EventFrame& f) {
+void bondForwardEvent(const uint8_t src[6], const uint8_t* payload, size_t len) {
   const espnowfwd::WhyNot why = bfFrameCheck(src);
   if (why != espnowfwd::WhyNot::Forwards) {
     bfCount(kBfStreamEvents, why);
     return;
   }
-  espnowsensor::EventFrame g = f;
-  g.flags = (uint8_t)((f.flags & espnowsensor::kEventCutMask) | espnowsensor::kEventFlagForwarded);
-  g.fwdLink = sBf.link.linkGen;
-  uint8_t payload[espnowsensor::kEventFrameLen];
-  espnowsensor::packEventFrame(payload, g);
-  bfToTargets(kBfStreamEvents, espnowfwd::kStreamEvents, payload, (uint16_t)sizeof(payload), bfSendEvent);
+  uint8_t out[espnowsensor::kForwardCopyMax];
+  const size_t n = espnowsensor::forwardEventCopy(out, payload, len, sBf.link.linkGen);
+  if (!n) return;  // shorter than the frame: cannot happen, the ingest parsed it
+  bfToTargets(kBfStreamEvents, espnowfwd::kStreamEvents, out, n, espnowsensor::kEventFrameLen, bfSendEvent);
 }
 
 void bondForwardNotKept(uint8_t streamId) {

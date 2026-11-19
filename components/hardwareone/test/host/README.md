@@ -4110,6 +4110,61 @@ settings, and no other file does it itself; Bluetooth's server and client roles 
 name and a cut name is advertised as shortened; every frame field that carries the name is written with
 `putField` and read with `getField`; `espnow pair` and `espnowpairsecure` return the peer-name refusal.
 
+## ESP-NOW answers (rule F3)
+
+`espnow_answer_core_tests` (`test_espnow_answer_core.cpp`) runs `System_ESPNow_AnswerCore.h` as it is: the 5-byte
+answer header `{u32 reqId little endian, u8 status}` and its round trip, a payload under five bytes that does not
+parse, 0 as the only ok, the pinned shared numbers (1 busy ... 11 cancelled), the one name table (a shared code has
+the same name in every answer, 12-15 and an unknown 16+ code have none, 16 is `failed` in CMD_RESP, `not_a_dir` in
+the FS answers and `incomplete` in FILE_CANCEL) and the eight 1.0 answer opcodes.
+
+`espnow_answers` (`test_espnow_answers.py`) compiles, unchanged from `System_ESPNow.cpp`, the CMD_RESP senders
+(`v4_send_command_response`, `v4_send_cmd_resp_async`), the STREAM line sender (`v4_send_stream_line`) and the
+receivers `v4h_cmd_resp` and `v4h_stream` against the real `System_ESPNow_Wire.h` and `System_ESPNow_RxCtx.h`. A
+recorded frame is handed to its receiver under its own header msgId. It checks that a refusal and a result carry
+the CMD's number as reqId and a status (busy; failed, named; ok) under a msgId of the answerer's own; that the
+receiver files the answer by the payload's reqId whatever the header msgId; that each STREAM line has its own msgId
+and is filed under its command (0 for `startstream`); that a line is cut to one frame for its path, header
+included; and that a header-only STREAM files nothing. Source rules: no CMD_RESP or STREAM send in
+`System_ESPNow.cpp` uses anything but `generateMessageId()` as its msgId, and the duplicate check no longer skips
+STREAM, BOND_STREAM_CTRL or CMD_RESP. The same suite compiles the command path unchanged: `v4h_cmd` (a second
+sealed CMD while one waits is answered `busy`; the waiting one again and an unsealed one get no answer),
+`v4_handle_cmd` from its authentication decision on (`no_slot` with no stream session, `busy` when the queue does
+not take the command, `too_large` for one over the input limit) and `v4CmdResultCallback`, the answer to every
+command that ran (ok and `failed`, with and without text, and the out-of-memory fallback), each as `{reqId = the
+CMD's msgId, status}` under a fresh msgId and read back by name; the console line names the status from the one
+table ("Command FAILED (busy)"). It also runs `v4h_topo_start` and `v4h_topo_peer` with a one-slot stream table:
+a TOPO_START or TOPO_PEER whose status is not ok (busy, or a code a later firmware adds) records nothing, so a
+busy answer with 0 peers is not taken for an edge device; and it runs the web bond page's `fsStatusTag`
+(`WebPage_Bond.cpp`), whose JSON error words must be the shared table's for every status (`busy`, `refused`, not
+a second set of names). With F3 also: `espnow_rx_frontend` delivers a re-sealed STREAM and CMD_RESP
+retry once and two lines of one command both; `espnow_file_transfer` runs the production FILE_CANCEL sender (reqId
+= the transfer, fresh msgId, the sender stops the named transfer once) and FILE_END's status 0 = complete;
+`espnow_user_credentials` checks that each refusal of a remote command is `{reqId, refused}` under a fresh msgId;
+`espnow_tx_multiframe` checks each STREAM line's header and msgId; `espnow_wire_layout` pins the answer layouts
+and the status numbers of the FS answers and FILE_CANCEL.
+
+## ESP-NOW 1.0 forward compatibility (back-capture W1, W2, W4, W5)
+
+`espnow_rx_frontend` runs the relay hop rule (W1): a hop passes on any inner opcode except the exact list of 1.0
+link-local opcodes (unknown and later opcodes cross, and no range is refused), and still checks the inner frame's
+version, magic and header length, `meshRelay`, ttl, the route and split horizon; the final destination refuses
+what it does not take routed and counts `routedDropPolicy`. `espnow_power_event_core_tests` (testForwardCopy) runs
+W2's copy rule: a bond master forwards the partner's battery and event frames at their full received length with
+only the link byte (and the event's forwarded bit) patched; a path too short for a grown frame gets its first
+1.0-length bytes; and a frame longer than one sealed frame (202 bytes) goes on at its 1.0 length, never cut in the
+middle of a later field. `espnow_bond_forward` (testVerbatimForward) and `espnow_power_events` check the same end
+to end, with readings that keep flag bits this firmware does not know. `espnow_forward_core_tests` (testTarget,
+testAnnounceGen) runs W4: byte 7 `announceGen` packs and parses, steps 1..255 (never 0) on every announcement
+(the back-off re-send, the 10-minute refresh and the retry after a refusal); an answer counts only when it echoes
+the latest number, so an older acceptance, refusal or stale answer changes nothing and an answer before any
+announcement is ignored; an acceptance may carry a subset of the announced streams and sensors, never more, and
+what it carries is what is forwarded. `espnow_forward_rx` and `espnow_bond_forward` check that the master echoes
+the number and the bond master sends it. W5: `espnow_wire_layout` (check_earmarks) pins the opcode map's earmarks
+(82-85, 156-158, 86 and 159 free), the stream-id rows and the COMPATIBILITY text, and
+`espnow_session_caps_core_tests` pins caps bits 8 `backlog_serve` and 9 `files_serve` as named and never sent by a
+1.0 build.
+
 ## ESP-NOW dispatch policy
 
 `espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. TIME_SYNC, SENSOR_STATUS, SENSOR_REQ and SENSOR_ENVELOPE need one too, on a keyed and a keyless device, with no bond partner required; a signed broadcast is not enough for them. Once the device has a mesh passphrase, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. Every zero-flag row is on an explicit allow-list (handshakes, HEARTBEAT, TOPO_*, USER_SYNC); this is a subset check, so later items may only shrink the list (`V4_OPC_LEN_EXACT` is not a policy flag). The length column: every row has a minimum length equal to the 1.0 value in the driver's `EXPECTED_MINLEN` (these never rise), `V4_OPC_LEN_EXACT` is on exactly the six handshake rows, and for every row, with all its policy gates passed, one byte short is dropped before the handler and counted once in `gEspNowRxLenDrops`, the minimum passes, and a longer frame reaches the handler with its length intact (a handshake frame one byte long is dropped). An empty STREAM is dropped and counted (1.0 removed the empty STREAM_BEGIN / STREAM_END markers); a 24-byte SUBSCRIBE_UPDATE with reserved bytes set reaches the subscription store through the real handler, and a 20-byte SESSION_UNKNOWN reaches its rule. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
@@ -4180,7 +4235,8 @@ SESSION_OPEN (130 bytes) and SESSION_CONFIRM (146 bytes) carry each side's 32-bi
 once, the responder's after the first sealed frame of the session), that a changed caps byte in OPEN or CONFIRM
 fails the signature, that a REKEY keeps the words, that a new handshake replaces them and holds none while in
 flight, that the glare re-send signs the same word, and golden transcript bytes. `espnow_session_caps_core_tests`
-compiles the header: bit values, the image's word, the text with reserved bits as `+0x...`.
+compiles the header: bit values, the image's word, the text with reserved bits as `+0x...`, and the 1.x names of
+bits 8 and 9 (named, never set by a 1.0 build).
 `espnow_bond_agreement` (caseNoBondBuild) and `espnow_bond_agree_core_tests` (caseNoBondBuild) check the owner's
 rule that a partner whose word lacks the bond bit gets no BOND_REQUEST: not from a tick between the session going
 ACTIVE and the session hook, not after a reset, not over later sessions; one line, `no_bond_build` in bondstatus,

@@ -15,7 +15,11 @@
 //     can keep it, and the glare re-send of an OPEN signs the same value.
 //   * No negotiation: each side only reads the other's word. Frames sent
 //     without a session (handshake, group-signed, plaintext) never depend on it.
-//   * Bits 8-31 are reserved: sent 0, ignored on receipt, kept as received and
+//   * Bits 8 and 9 are named for back-capture (built in 1.x) and never set by
+//     a 1.0 image: backlog_serve (serves its outbox, BACKLOG_* 156-158) and
+//     files_serve (serves file catch-up, CATCHUP_* 82-85). The puller is the
+//     existing kCollect. A 1.0 image shows them by name when a peer sets them.
+//   * Bits 10-31 are reserved: sent 0, ignored on receipt, kept as received and
 //     shown as "+0x..." so a later firmware's bits stay visible.
 //   * "Known" caps exist only for an ACTIVE or REKEYING session. The responder
 //     learns the initiator's word from a SESSION_OPEN, whose signature covers
@@ -45,21 +49,26 @@ constexpr uint32_t kRelayForward   = 1u << 5;  // can forward routed and flooded
 constexpr uint32_t kTimeMaster     = 1u << 6;  // can send TIME_SYNC
 constexpr uint32_t kSessionUnknown = 1u << 7;  // understands SESSION_UNKNOWN (opcode 18); informational:
                                                // the sender of SESSION_UNKNOWN holds no session to read it from
-constexpr uint32_t kKnownMask      = 0xFFu;
+constexpr uint32_t kBacklogServe   = 1u << 8;  // serves its outbox (BACKLOG_*); named, never set by 1.0
+constexpr uint32_t kFilesServe     = 1u << 9;  // serves file catch-up (CATCHUP_*); named, never set by 1.0
+constexpr uint32_t kKnownMask      = 0x3FFu;   // the named bits
+constexpr uint32_t kSentMask       = 0xFFu;    // the bits a 1.0 image may set (buildCaps)
 
-constexpr unsigned kBitCount = 8;  // named bits, from bit 0
+constexpr unsigned kBitCount = 10;  // named bits, from bit 0
 
 // Names for display and JSON, by bit.
 inline const char* bitName(unsigned bit) {
   static const char* const kNames[kBitCount] = {
     "bond", "remote_fs", "file_receive", "sensor_send",
     "collect", "relay_forward", "time_master", "session_unknown",
+    "backlog_serve", "files_serve",
   };
   return bit < kBitCount ? kNames[bit] : nullptr;
 }
 
 // This image's word. The bits every 1.0 image has are always set; the three
-// build-dependent ones come from the caller.
+// build-dependent ones come from the caller. Never kBacklogServe or
+// kFilesServe (nothing serves them at 1.0).
 constexpr uint32_t buildCaps(bool bond, bool sensors, bool collect) {
   return (bond ? kBond : 0u) | kRemoteFs | kFileReceive | (sensors ? kSensorSend : 0u) |
          (collect ? kCollect : 0u) | kRelayForward | kTimeMaster | kSessionUnknown;

@@ -161,13 +161,14 @@ int main() {
     check(std::memcmp(packed, &wire, sizeof(wire)) == 0, "espnowfwd::packStatusFrame writes the struct's layout");
   }
 
-  // The request: 16 bytes, the link byte of a request for a bond partner
-  // where a reserved byte was (no growth).
-  check(sizeof(V4PayloadSensorReq) == 16 && offsetof(V4PayloadSensorReq, reqId) == 0 &&
-        offsetof(V4PayloadSensorReq, mode) == 1 && offsetof(V4PayloadSensorReq, sensorMask) == 2 &&
-        offsetof(V4PayloadSensorReq, intervalMs) == 6 && offsetof(V4PayloadSensorReq, leaseMs) == 10 &&
-        offsetof(V4PayloadSensorReq, fwdLink) == 14 && offsetof(V4PayloadSensorReq, reserved) == 15,
-        "V4PayloadSensorReq: 0 id, 1 mode, 2 mask, 6 interval, 10 lease, 14 link byte, 15 reserved");
+  // The request: 20 bytes, a 32-bit request number like every other request
+  // (rule F3), then the mode and the link byte of a request for a bond partner.
+  check(sizeof(V4PayloadSensorReq) == 20 && offsetof(V4PayloadSensorReq, reqId) == 0 &&
+        sizeof(V4PayloadSensorReq::reqId) == 4 &&
+        offsetof(V4PayloadSensorReq, mode) == 4 && offsetof(V4PayloadSensorReq, fwdLink) == 5 &&
+        offsetof(V4PayloadSensorReq, reserved) == 6 && offsetof(V4PayloadSensorReq, sensorMask) == 8 &&
+        offsetof(V4PayloadSensorReq, intervalMs) == 12 && offsetof(V4PayloadSensorReq, leaseMs) == 16,
+        "V4PayloadSensorReq: 0 id (32 bits), 4 mode, 5 link byte, 6 reserved, 8 mask, 12 interval, 16 lease");
 
   // The time frame: 16 bytes.
   check(sizeof(V4PayloadTimeSync) == 16 && offsetof(V4PayloadTimeSync, epochMs) == 0 &&
@@ -296,12 +297,13 @@ int main() {
   check(sizeof(V4PayloadForwardLink) == 96 && offsetof(V4PayloadForwardLink, op) == 0 &&
         offsetof(V4PayloadForwardLink, linkGen) == 1 && offsetof(V4PayloadForwardLink, viaBootTag) == 2 &&
         offsetof(V4PayloadForwardLink, streams) == 4 && offsetof(V4PayloadForwardLink, result) == 5 &&
-        offsetof(V4PayloadForwardLink, answers) == 6 && offsetof(V4PayloadForwardLink, reserved0) == 7 &&
+        offsetof(V4PayloadForwardLink, answers) == 6 && offsetof(V4PayloadForwardLink, announceGen) == 7 &&
         offsetof(V4PayloadForwardLink, partnerMac) == 8 && offsetof(V4PayloadForwardLink, reserved1) == 14 &&
         offsetof(V4PayloadForwardLink, sensorMask) == 16 && sizeof(((V4PayloadForwardLink*)nullptr)->sensorMask) == 4 &&
         offsetof(V4PayloadForwardLink, partnerKey) == 20 && offsetof(V4PayloadForwardLink, partnerName) == 52 &&
         offsetof(V4PayloadForwardLink, reserved2) == 84 && sizeof(((V4PayloadForwardLink*)nullptr)->reserved2) == 12,
-        "V4PayloadForwardLink: 0 op, 1 link number, 2 boot tag, 4 streams, 5 result, 6 answers, 8 partner, "
+        "V4PayloadForwardLink: 0 op, 1 link number, 2 boot tag, 4 streams, 5 result, 6 answers, 7 announcement "
+        "number, 8 partner, "
         "14 reserved, 16 sensors (32 bits), 20 key[32], 52 name[32], 84 reserved[12]");
   {
     V4PayloadForwardLink wire{};

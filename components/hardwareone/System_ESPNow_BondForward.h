@@ -31,10 +31,13 @@ void bondForwardTick(uint32_t nowMs);
 // over). True: taken (also when it is ignored and counted here).
 bool bondForwardOnLinkFrame(const uint8_t src[6], const espnowfwd::LinkFrame& f);
 // The partner's frames this device kept (the ingests call these after the
-// counter rule kept them; `src` is the radio source).
+// counter rule kept them; `src` is the radio source). Battery and event
+// frames come as the payload received, at its full length: they are sent on
+// verbatim with only the forwarding fields patched (espnowsensor::
+// forwardPowerCopy / forwardEventCopy).
 void bondForwardReading(const uint8_t src[6], const espnowsensor::ReadingHeader& h, const uint8_t* text, size_t len);
-void bondForwardPower(const uint8_t src[6], const espnowsensor::PowerFrame& f);
-void bondForwardEvent(const uint8_t src[6], const espnowsensor::EventFrame& f);
+void bondForwardPower(const uint8_t src[6], const uint8_t* payload, size_t len);
+void bondForwardEvent(const uint8_t src[6], const uint8_t* payload, size_t len);
 // A frame of the partner this device could not keep (no record, no memory).
 void bondForwardNotKept(uint8_t streamId);
 // The partner's sensor status (BOND_SENSOR_STATUS) this device kept.
@@ -57,8 +60,8 @@ const char* cmd_bond_forward(const String& args);
 #else
 // Builds without bond mode never forward.
 inline void bondForwardReading(const uint8_t*, const espnowsensor::ReadingHeader&, const uint8_t*, size_t) {}
-inline void bondForwardPower(const uint8_t*, const espnowsensor::PowerFrame&) {}
-inline void bondForwardEvent(const uint8_t*, const espnowsensor::EventFrame&) {}
+inline void bondForwardPower(const uint8_t*, const uint8_t*, size_t) {}
+inline void bondForwardEvent(const uint8_t*, const uint8_t*, size_t) {}
 inline void bondForwardNotKept(uint8_t) {}
 inline void bondForwardStatus(const uint8_t*, const espnowfwd::StatusFrame&) {}
 #endif  // ENABLE_BONDED_MODE

@@ -87,6 +87,10 @@ def stream_unit(source: str) -> str:
     table_end = source.index(table_end_marker, table_start) + len(table_end_marker)
     pieces.append(source[table_start:table_end])
     pieces.append(extract_block(source, "static StreamSession* findStreamSession(uint32_t cmdMsgId)"))
+    # Rule F3: every STREAM frame is {reqId, status} + line under a fresh msgId.
+    line_sender = "static bool v4_send_stream_line(const uint8_t* dst, uint32_t reqId, const char* data, size_t len)"
+    require(source.count(line_sender + " {") == 1, "expected one v4_send_stream_line definition")
+    pieces.append(extract_block(source[source.index(line_sender + " {"):], line_sender))
     # The bare signature also matches the forward declaration; take the definition.
     helper = "static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t len)"
     require(source.count(helper + " {") == 1, "expected one trySendToStreamSession definition")
@@ -196,6 +200,7 @@ def main() -> None:
         for header in ("FreeRTOS.h", "task.h"):
             (work / "freertos" / header).write_text("#pragma once\n")
         shutil.copyfile(path("System_ESPNow_Tx.h"), work / "System_ESPNow_Tx.h")
+        shutil.copyfile(path("System_ESPNow_AnswerCore.h"), work / "System_ESPNow_AnswerCore.h")
         for label, define, text in units:
             unit, exe = work / f"{label}.cpp", work / label
             unit.write_text(text)
