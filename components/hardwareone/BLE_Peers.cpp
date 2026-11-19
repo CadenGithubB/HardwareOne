@@ -97,6 +97,12 @@ struct PeerReconnectRuntime {
   bool droppedBeforeCommit = false;
   uint8_t launchedAttempts = 0;
   uint32_t dueMs = 0;
+  // Phone only: a one-shot reseek (manual openphone, a radio restore) keeps
+  // retrying until this time instead of ending after its first attempt. 0:
+  // no window.
+  uint32_t reseekUntilMs = 0;
+  // The last admission result (BlePeerConnectAdmission), 0xff before any.
+  uint8_t lastAdmission = 0xff;
   uint32_t intentGeneration = 0;
   uint32_t identityGeneration = 0;
   uint32_t ownerGeneration = 0;
@@ -104,6 +110,10 @@ struct PeerReconnectRuntime {
 };
 
 PeerReconnectRuntime sReconnect[BLE_PEER_MAX];
+// The phone's reseek windows: a manual openphone, and a radio restore
+// (blePeerRequestReseek: recycle, role switch, stuck-phone recovery).
+constexpr uint32_t kPhoneManualReseekWindowMs = 60000;
+constexpr uint32_t kPhoneRestoreReseekWindowMs = 120000;
 char sPhoneConsoleAddress[BLE_PEER_ADDRESS_TEXT_CAPACITY]{};
 portMUX_TYPE sReconnectMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -121,6 +131,23 @@ void reconnectBumpIntentLocked(PeerReconnectRuntime& state) {
 void reconnectBumpIdentityLocked(PeerReconnectRuntime& state) {
   state.identityGeneration =
       nextReconnectGeneration(state.identityGeneration);
+}
+
+// The phone's reseek window (reseekUntilMs) is still open at `now`.
+bool reseekWindowOpenLocked(const PeerReconnectRuntime& state, uint32_t now) {
+  return state.reseekUntilMs != 0 && (int32_t)(state.reseekUntilMs - now) > 0;
+}
+
+// Opens (or extends) the reseek window to now + windowMs; never shortens it.
+void reseekWindowExtendLocked(PeerReconnectRuntime& state, uint32_t now,
+                              uint32_t windowMs) {
+  if (!windowMs) return;
+  uint32_t until = now + windowMs;
+  if (!until) until = 1;
+  if (!reseekWindowOpenLocked(state, now) ||
+      (int32_t)(until - state.reseekUntilMs) > 0) {
+    state.reseekUntilMs = until;
+  }
 }
 
 // Publish fixed-size mirrors of persisted reconnect configuration. Arduino
@@ -416,6 +443,7 @@ void noteLinkUpLocked(PeerReconnectRuntime& state) {
   state.reseekEvenIfNoAuto = false;
   state.launchedAttempts = 0;
   state.dueMs = 0;
+  state.reseekUntilMs = 0;
   reconnectBumpIntentLocked(state);
 }
 }  // namespace
@@ -437,6 +465,8 @@ bool blePeerReconnectSnapshot(BlePeerKind kind,
   out.admissionInFlight = state.admissionInFlight;
   out.launchedAttempts = state.launchedAttempts;
   out.dueMs = state.dueMs;
+  out.reseekUntilMs = state.reseekUntilMs;
+  out.lastAdmission = state.lastAdmission;
   portEXIT_CRITICAL(&sReconnectMux);
   return true;
 }
@@ -504,6 +534,13 @@ bool blePeerBeginManualConnectRequest(
     if (state.autoReconnect && !state.wantReconnect) {
       state.wantReconnect = true;
       state.dueMs = millis() + 5000;
+    }
+    if (kind == BLE_PEER_PHONE) {
+      // A manual openphone starts a fresh burst: the attempt it admits, then
+      // 2/4/8/16 s retries (blePeerNoteAttemptFailed) for 60 s, even with
+      // auto-reconnect off. The pipe calls this only with no job in flight.
+      state.launchedAttempts = 0;
+      reseekWindowExtendLocked(state, millis(), kPhoneManualReseekWindowMs);
     }
     reconnectBumpIntentLocked(state);
     out.intentGeneration = state.intentGeneration;
@@ -1078,9 +1115,13 @@ bool bleAnyPeerWantsAutoReconnect(void) {
 // -----------------------------------------------------------------------------
 
 static uint32_t bleReconnectBackoffMs(BlePeerKind kind, uint8_t attempt) {
-  // 5s, 15s, 45s, 90s, then 180s capped. The phone is the standing fallback
-  // path, so its schedule stops growing at 30 s (A-3); the glasses keep the
-  // long tail.
+  // 5s, 15s, 45s, 90s, then 180s capped for the glasses.
+  //
+  // The phone is the standing internet path out and about, so its schedule
+  // never stops and starts fast: 2, 4, 8, 16 s, then 30 s up to attempt 24
+  // (about 10 min of outage), then 60 s for good. Success resets it
+  // (noteLinkUpLocked), so a drop starts again at 2 s. The next try is timed
+  // from the end of the attempt (blePeerNoteAttemptFailed), not its admission.
   //
   // The ring follows faceclaw (ConnectionOptions.kt RING_RECONNECT_DELAY_MS /
   // RING_RECONNECT_MAX_DELAY_MS): 2 s after a drop, then 2 s doubling to 60 s.
@@ -1091,11 +1132,13 @@ static uint32_t bleReconnectBackoffMs(BlePeerKind kind, uint8_t attempt) {
   // job that ends without counting a failure (dropped unrun by the setup
   // worker) to the same 60 s cap.
   static const uint32_t kSteps[] = { 5000, 15000, 45000, 90000, 180000 };
-  static const uint32_t kPhoneSteps[] = { 5000, 15000, 30000 };
+  static const uint32_t kPhoneSteps[] = { 2000, 4000, 8000, 16000, 30000 };
   static const uint32_t kRingSteps[] = { 2000, 2000, 4000, 8000, 16000, 32000, 60000 };
+  static constexpr uint8_t kPhoneSlowAfter = 24;  // attempts at 30 s before 60 s
   const uint32_t* steps = kSteps;
   size_t n = sizeof(kSteps) / sizeof(kSteps[0]);
   if (kind == BLE_PEER_PHONE) {
+    if (attempt > kPhoneSlowAfter) return 60000;
     steps = kPhoneSteps;
     n = sizeof(kPhoneSteps) / sizeof(kPhoneSteps[0]);
   } else if (kind == BLE_PEER_R1_RING) {
@@ -1253,6 +1296,7 @@ static bool commitAdmission(const ReconnectAdmissionClaim& claim,
   state.admissionInFlight = false;
   const bool droppedBeforeCommit = state.droppedBeforeCommit;
   state.droppedBeforeCommit = false;
+  state.lastAdmission = (uint8_t)result;
   if (sameIncarnation) {
     switch (result) {
       case BlePeerConnectAdmission::STARTED:
@@ -1263,6 +1307,13 @@ static bool commitAdmission(const ReconnectAdmissionClaim& claim,
         // restored one (blePeerRestoreDroppedReseek).
         if (droppedBeforeCommit && !state.autoReconnect && state.reseekEvenIfNoAuto) {
           state.dueMs = now + kAdmissionRoleRetryMs;
+        } else if (!state.autoReconnect && state.reseekEvenIfNoAuto &&
+                   reseekWindowOpenLocked(state, now)) {
+          // The phone's reseek window (a manual openphone, a radio restore)
+          // keeps the nudge until it ends; the attempt's end times the next
+          // one (blePeerNoteAttemptFailed).
+          state.dueMs = now +
+              bleReconnectBackoffMs(claim.kind, state.launchedAttempts);
         } else if (!state.autoReconnect && state.reseekEvenIfNoAuto) {
           state.wantReconnect = false;
           state.reseekEvenIfNoAuto = false;
@@ -1296,7 +1347,10 @@ static bool commitAdmission(const ReconnectAdmissionClaim& claim,
         state.reseekEvenIfNoAuto = false;
         state.launchedAttempts = 0;
         state.dueMs = 0;
-        reconnectBumpIntentLocked(state);
+        // A READY phone pipe job holds the current intent (committed at link
+        // up); bumping it here would make the pipe drop that working link as
+        // "phone intent changed". Other peers keep the bump.
+        if (claim.kind != BLE_PEER_PHONE) reconnectBumpIntentLocked(state);
         break;
 
       case BlePeerConnectAdmission::NO_TARGET:
@@ -1385,6 +1439,7 @@ void blePeerNoteUserDisconnect(BlePeerKind kind) {
   state.reseekEvenIfNoAuto = false;
   state.launchedAttempts = 0;
   state.dueMs = 0;
+  state.reseekUntilMs = 0;
   reconnectBumpIntentLocked(state);
   portEXIT_CRITICAL(&sReconnectMux);
   DEBUG_G2F("[BLE-Peers] User disconnect stamped for kind=%u — no auto-reseek",
@@ -1477,6 +1532,80 @@ void blePeerNoteLinkLost(BlePeerKind kind) {
   }
 }
 
+// An admitted attempt ended without reaching the link (the phone: not found,
+// a link or handshake failure, a turn that ended unused). Schedules the next
+// try from the end of this one, without bumping the intent: the scheduler's
+// own STARTED due was measured from the admission. A one-shot already
+// consumed is re-armed while its reseek window is open. Generations that are
+// no longer current (a user disconnect, a target or owner change, a newer
+// manual intent) change nothing.
+void blePeerNoteAttemptFailed(BlePeerKind kind, uint32_t intentGeneration,
+                              uint32_t identityGeneration) {
+  if (kind >= BLE_PEER_MAX || intentGeneration == 0 ||
+      identityGeneration == 0) return;
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&sReconnectMux);
+  PeerReconnectRuntime& state = sReconnect[kind];
+  if (state.intentGeneration == intentGeneration &&
+      state.identityGeneration == identityGeneration &&
+      !state.userDisconnect && state.hasSavedTarget &&
+      state.ownerAuthorityAvailable) {
+    bool schedule = false;
+    if (state.wantReconnect) {
+      schedule = state.autoReconnect || state.reseekEvenIfNoAuto;
+    } else if (state.autoReconnect) {
+      // Auto-reconnect is on but no episode is armed (a manual attempt after
+      // the scheduler's intent was consumed): every end schedules the next.
+      state.wantReconnect = true;
+      schedule = true;
+    } else if (reseekWindowOpenLocked(state, now)) {
+      state.wantReconnect = true;
+      state.reseekEvenIfNoAuto = true;
+      schedule = true;
+    }
+    if (schedule) {
+      state.dueMs = now + bleReconnectBackoffMs(kind, state.launchedAttempts);
+      if (!state.dueMs) state.dueMs = 1;
+    }
+  }
+  portEXIT_CRITICAL(&sReconnectMux);
+}
+
+// Brings the next attempt forward without bumping the intent, so an attempt in
+// flight is never cancelled. Critical section only: safe from the BTC task.
+bool blePeerExpediteReconnect(BlePeerKind kind, uint32_t windowMs) {
+  if (kind >= BLE_PEER_MAX) return false;
+  // A linked peer has nothing to bring forward: arming it would reach the
+  // scheduler as ALREADY_UP (the phone's READY flag is an atomic, BTC-safe).
+  const BlePeerSpec* p = bleFindPeer(kind);
+  if (p && p->ops && p->ops->isConnected && p->ops->isConnected()) return false;
+  const uint32_t now = millis();
+  bool accepted = false;
+  portENTER_CRITICAL(&sReconnectMux);
+  PeerReconnectRuntime& state = sReconnect[kind];
+  const bool armedOneShot = state.wantReconnect && state.reseekEvenIfNoAuto;
+  // With auto-reconnect off and no window asked for, only a reseek already
+  // armed or a window already open may be brought forward: the user's
+  // auto=off stays as it is.
+  const bool allowed = state.autoReconnect || windowMs != 0 || armedOneShot ||
+      reseekWindowOpenLocked(state, now);
+  if (!state.userDisconnect && state.hasSavedTarget &&
+      state.ownerAuthorityAvailable && allowed) {
+    state.wantReconnect = true;
+    if (!state.autoReconnect) {
+      state.reseekEvenIfNoAuto = true;
+      reseekWindowExtendLocked(state, now, windowMs);
+    }
+    state.launchedAttempts = 0;
+    if (state.dueMs == 0 || (int32_t)(state.dueMs - now) > 0) {
+      state.dueMs = now ? now : 1;
+    }
+    accepted = true;
+  }
+  portEXIT_CRITICAL(&sReconnectMux);
+  return accepted;
+}
+
 void blePeerNoteLinkUp(BlePeerKind kind) {
   if (kind >= BLE_PEER_MAX) return;
   portENTER_CRITICAL(&sReconnectMux);
@@ -1557,6 +1686,10 @@ void blePeerRequestReseek(BlePeerKind kind) {
     state.reseekEvenIfNoAuto = true;
     state.launchedAttempts = 0;
     state.dueMs = now;
+    // A phone restore keeps trying for 2 min instead of one scan.
+    if (kind == BLE_PEER_PHONE) {
+      reseekWindowExtendLocked(state, now, kPhoneRestoreReseekWindowMs);
+    }
     reconnectBumpIntentLocked(state);
     accepted = true;
   }
@@ -1974,7 +2107,24 @@ const char* cmd_blepeers(const String& argsInput) {
     }
     pos += snprintf(out + pos, cap - pos, " pairedBy=%s",
                     owner.user.length() ? owner.user.c_str() : "(none)");
-    pos += snprintf(out + pos, cap - pos, "\n");
+    // The scheduler: whether it wants the peer, when it tries next (seconds,
+    // rounded up), the attempts in this outage and the last admission result.
+    if (pos < cap) {
+      const uint32_t now = millis();
+      const int32_t left = (int32_t)(reconnect.dueMs - now);
+      char next[12] = "-";
+      if (reconnect.wantsReconnect) {
+        snprintf(next, sizeof(next), "%lus",
+                 (unsigned long)(left > 0 ? ((uint32_t)left + 999u) / 1000u : 0u));
+      }
+      pos += snprintf(out + pos, cap - pos, " want=%s next=%s try=%u last=%s",
+                      reconnect.wantsReconnect ? "y" : "n", next,
+                      (unsigned)reconnect.launchedAttempts,
+                      reconnect.lastAdmission == 0xff
+                          ? "-"
+                          : admissionName((BlePeerConnectAdmission)reconnect.lastAdmission));
+    }
+    if (pos < cap) pos += snprintf(out + pos, cap - pos, "\n");
   }
   cliHint("to see a bonded peer's data, run 'bondstatus' (or 'bondrequestcap' for its capabilities)");
   return out;

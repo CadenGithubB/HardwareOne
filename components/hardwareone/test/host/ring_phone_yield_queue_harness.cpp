@@ -1032,7 +1032,7 @@ static void roleTransitionWaits() {
   resetWorld();
 }
 
-// Turn order with the real ops: glasses, ring retirement, ring, phone. A
+// Turn order with the real ops: glasses, ring retirement, phone, ring. A
 // phone setup in progress is never cancelled by a glasses or ring submit:
 // they wait for its end, then run in turn order, and record that wait.
 static void turnOrder() {
@@ -1059,7 +1059,8 @@ static void turnOrder() {
     CHECK(lastConnect().wait == 1000 && lastSetupWait().label == "ring mac" && lastSetupWait().ms == 1000);
     CHECK(lastRun(kSpyPhone).queuedMs == 0);
   }
-  // Glasses running; ring and phone queued behind them: the ring goes first.
+  // Glasses running; ring and phone queued behind them: the phone goes first
+  // (an absent ring's long connects never hold it), the ring right after.
   {
     gBlockG2 = true;
     CHECK(g2Saved());
@@ -1070,11 +1071,13 @@ static void turnOrder() {
     clearEvents();
     gReleaseG2 = true;
     SETTLE();
-    CHECK((eventsOf({"run Ring", "run Phone"}) == std::vector<std::string>{"run Ring", "run Phone"}));
+    CHECK((eventsOf({"run Ring", "run Phone"}) == std::vector<std::string>{"run Phone"}));
     CHECK(gTurn.granted.load() == phone && hw1setup::consumeGrant(gTurn, phone));
     // The phone's turn records nothing on accessory connect records.
     CHECK(gPhoneRunWait.load() == kNoWait && lastSetupWait().label == "phone");
     phoneEndTurn(phone);
+    SETTLE();
+    CHECK((eventsOf({"run Ring", "run Phone"}) == std::vector<std::string>{"run Phone", "run Ring"}));
     gBlockG2 = false; gReleaseG2 = false;
   }
   resetWorld();
@@ -1700,7 +1703,7 @@ int main() {
   gWorker.join();
   done = true;
   std::printf("Ring yield queue: %ld checks. Real worker, ops and submitters: refusals while yielding and"
-              " four links; turn order G2 > retire > ring > phone, a phone turn never cancelled; cancels,"
+              " four links; turn order G2 > retire > phone > ring, a phone turn never cancelled; cancels,"
               " faults, recovery, yield end a queued job at the next recheck with one finish and the flag"
               " released; role waits; rule R; repair outcomes; G2 audio wait; recorded wait; withdraw;"
               " preemption; ring retirement; worker release; the automatic reconnect backoff (2 s doubling to"

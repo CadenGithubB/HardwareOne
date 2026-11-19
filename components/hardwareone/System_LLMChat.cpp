@@ -312,19 +312,37 @@ EXT_RAM_BSS_ATTR static char sFramedPrompt[1024];
 // Mutating operations
 // ============================================================================
 
+// Why the last chatBeginTurn returned 0, for a surface that wants to say so.
+// Written without the chat lock: a racing refusal can only replace one complete
+// line with another, and the last byte is never anything but the terminator.
+static char sBeginRefusal[128];
+static int refuseBegin(const char* why) {
+  strlcpy(sBeginRefusal, why, sizeof(sBeginRefusal));
+  return 0;
+}
+const char* chatLastBeginRefusal() { return sBeginRefusal; }
+
 int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt, ChatRunToken* run) {
   if (run) *run = 0;
   chatInit();
-  if (!userPrompt || !*userPrompt) return 0;
-  if (!llmBackendIsReady()) return 0;
+  if (!userPrompt || !*userPrompt) return refuseBegin("empty prompt");
+  // Lazy load: the HTTP default is selected here when its autostart has not
+  // happened yet (the source never waits for the phone to be selected).
+  llmBackendEnsureDefaultSelected();
+  if (!llmBackendIsReady()) {
+    char why[sizeof(sBeginRefusal)];
+    if (!llmBackendNotReadyReason(why, sizeof(why))) strlcpy(why, "model not ready", sizeof(why));
+    return refuseBegin(why);
+  }
   // Do:-mode is on-device only. Refused here rather than at the framing
   // chokepoint because framing cannot fail — it returns a string — and every
   // surface funnels through this call, so one guard covers web, CLI, OLED, the
   // lens and the BLE app at once.
-  if (llmPromptIsCommandMode(userPrompt) && !llmBackendSupportsCommandMode()) return 0;
+  if (llmPromptIsCommandMode(userPrompt) && !llmBackendSupportsCommandMode())
+    return refuseBegin("Do: commands need the on-device model");
 
   ChatLock lk;
-  if (!lk.held) return 0;
+  if (!lk.held) return refuseBegin("busy: the chat is in use");
 #ifdef ESP_PLATFORM
   {
     // One post covers web, CLI, OLED, the lens and the BLE app; never the text.
@@ -338,7 +356,7 @@ int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt, ChatRunT
   if (sStreamingTurnSlot >= 0) {
     // Drain first to check if it's actually still running.
     drainEngineLocked();
-    if (sStreamingTurnSlot >= 0) return 0;
+    if (sStreamingTurnSlot >= 0) return refuseBegin("busy: a request is running");
   }
 
   // Append USER turn (full prompt copied into the slot's buffer)
@@ -362,7 +380,9 @@ int chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt, ChatRunT
     // Engine refused — roll back the empty assistant turn so the UI doesn't
     // show a stale "..." that never resolves.
     popLastTurnLocked();
-    return 0;
+    char why[sizeof(sBeginRefusal)];
+    if (!llmBackendNotReadyReason(why, sizeof(why))) strlcpy(why, "the source did not start the request", sizeof(why));
+    return refuseBegin(why);
   }
 
   sStreamingTurnSlot   = assistantSlot;

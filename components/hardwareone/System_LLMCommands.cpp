@@ -44,6 +44,33 @@
 // single buffer is safe; PSRAM keeps it off the tight internal heap.
 EXT_RAM_BSS_ATTR static char llmCmdBuf[1024];
 
+// Firmware text as JSON string content: quotes and backslashes escaped,
+// control characters dropped, cut to fit.
+static const char* llmJsonText(const char* text, char* out, size_t cap) {
+  size_t w = 0;
+  for (const char* p = text ? text : ""; *p && w + 2 < cap; ++p) {
+    if ((unsigned char)*p < 0x20) continue;
+    if (*p == '"' || *p == '\\') out[w++] = '\\';
+    out[w++] = *p;
+  }
+  out[w] = '\0';
+  return out;
+}
+static const char* llmNotReadyJsonReason(char* out, size_t cap) {
+  char text[128];
+  if (!llmBackendNotReadyReason(text, sizeof(text))) strlcpy(text, "model not ready", sizeof(text));
+  return llmJsonText(text, out, cap);
+}
+// {"schema":1,"ok":false,"error":"model not ready","reason":"..."}: the error
+// text stays the app contract; reason is the optional, human explanation.
+static const char* llmNotReadyJson() {
+  char reason[192];
+  snprintf(llmCmdBuf, sizeof(llmCmdBuf),
+           "{\"schema\":1,\"ok\":false,\"error\":\"model not ready\",\"reason\":\"%s\"}",
+           llmNotReadyJsonReason(reason, sizeof(reason)));
+  return llmCmdBuf;
+}
+
 // ---------------------------------------------------------------------------
 // Model listing — a projection of the registry, usable with no engine present
 // ---------------------------------------------------------------------------
@@ -116,7 +143,12 @@ static const char* cmdLlmCorruptRow(const String& a) {
 // the guard catches it, rebinds from the intact base blocks, and continues — so
 // the answer still completes. Lets the corruption-recovery path be proven on demand.
 static const char* cmd_llm_corrupt_test(const String& /*args*/) {
-  if (!llmBackendIsReady()) return "Error: LLM not loaded — load a model first";
+  if (!llmBackendIsReady()) {
+    char why[128];
+    if (!llmBackendNotReadyReason(why, sizeof(why))) strlcpy(why, "load a model first", sizeof(why));
+    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "Error: LLM not ready: %s", why);
+    return llmCmdBuf;
+  }
 #if ENABLE_LLM_SOURCE_ONBOARD
   gLlm.injectCorruptOnce = true;
 #else
@@ -199,6 +231,16 @@ static const char* cmd_llm_status(const String& argsInput) {
       snprintf(ctxWarnLine, sizeof(ctxWarnLine), "WARNING: %s\n", w);
 #endif
   }
+  // A READY source's message is a note (e.g. the HTTP source's last request);
+  // the HTTP path line below replaces a message that only repeats it.
+  const char* note = st.errorMsg;
+#if ENABLE_LLM_SOURCE_HTTP
+  char path[128] = {0};
+  if (llmBackendActiveKind() == LlmBackendKind::Http) {
+    httpLlmPathText(path, sizeof(path));
+    if (!strcmp(path, note)) note = "";
+  }
+#endif
   snprintf(llmCmdBuf, sizeof(llmCmdBuf),
     "LLM State: %s\n"
     "Model: %s\n"
@@ -214,8 +256,16 @@ static const char* cmd_llm_status(const String& argsInput) {
     (unsigned)(st.runtimeSizeBytes / 1024),
     st.lastTokenCount, st.lastTokensPerSec,
     ctxWarnLine,
-    st.errorMsg[0] ? "Error: " : "",
-    st.errorMsg[0] ? st.errorMsg : "");
+    note[0] ? (st.state == LlmState::READY ? "Note: " : "Error: ") : "",
+    note);
+#if ENABLE_LLM_SOURCE_HTTP
+  // The HTTP source's request path: Wi-Fi, phone relay, or why neither is up.
+  if (path[0]) {
+    const size_t used = strlen(llmCmdBuf);
+    snprintf(llmCmdBuf + used, sizeof(llmCmdBuf) - used, "%spath: %s",
+             used && llmCmdBuf[used - 1] != '\n' ? "\n" : "", path);
+  }
+#endif
   return llmCmdBuf;
 }
 
@@ -256,11 +306,17 @@ static const char* cmd_llm_load(const String& args) {
   if (ok) {
     // A remote source returns here with the host still switching models, so
     // report accepted-not-ready rather than implying the model is live.
+    // Not ready also says why (optional "reason"): e.g. the phone relay is off.
     const bool ready = llmBackendIsReady();
-    snprintf(llmCmdBuf, sizeof(llmCmdBuf),
-             "{\"schema\":1,\"ok\":true,\"ready\":%s%s}",
-             ready ? "true" : "false",
-             ready ? "" : ",\"hint\":\"the source is still loading - poll 'llmstatus json'\"");
+    if (ready) {
+      snprintf(llmCmdBuf, sizeof(llmCmdBuf), "{\"schema\":1,\"ok\":true,\"ready\":true}");
+    } else {
+      char reason[192];
+      snprintf(llmCmdBuf, sizeof(llmCmdBuf),
+               "{\"schema\":1,\"ok\":true,\"ready\":false,"
+               "\"hint\":\"the source is still loading - poll 'llmstatus json'\",\"reason\":\"%s\"}",
+               llmNotReadyJsonReason(reason, sizeof(reason)));
+    }
   } else {
     // err is firmware-controlled (short, no quotes/backslashes) — safe to inline.
     snprintf(llmCmdBuf, sizeof(llmCmdBuf),
@@ -339,7 +395,9 @@ static const char* cmd_llm_generate(const String& args) {
   {
     String a = args; a.trim();
     if (argLeadingTokenIsJson(a)) {
-      if (!llmBackendIsReady()) return "{\"schema\":1,\"ok\":false,\"error\":\"model not ready\"}";
+      // Lazy load of the HTTP default (its autostart may not have happened).
+      llmBackendEnsureDefaultSelected();
+      if (!llmBackendIsReady()) return llmNotReadyJson();
       String payload = a.startsWith("json ") ? a.substring(5) : String();
       payload.trim();
       if (payload.length() == 0) return "{\"schema\":1,\"ok\":false,\"error\":\"empty prompt\"}";
@@ -367,7 +425,13 @@ static const char* cmd_llm_generate(const String& args) {
       }
 
       int session = chatBeginTurn(prompt.c_str(), haveOverrides ? &ov : nullptr);
-      if (session <= 0) return "{\"schema\":1,\"ok\":false,\"error\":\"busy or failed to start\"}";
+      if (session <= 0) {
+        char reason[192];
+        snprintf(llmCmdBuf, sizeof(llmCmdBuf),
+                 "{\"schema\":1,\"ok\":false,\"error\":\"busy or failed to start\",\"reason\":\"%s\"}",
+                 llmJsonText(chatLastBeginRefusal(), reason, sizeof(reason)));
+        return llmCmdBuf;
+      }
       // Mirror the web's {"ok":true,"session":N} (POST /api/llm/generate &
       // /chat/retry). The app validates the start by `ok`, so omitting it reads
       // as "command not recognized" → its "streaming not supported" fallback.
@@ -382,7 +446,13 @@ static const char* cmd_llm_generate(const String& args) {
     }
   }
 
-  if (!llmBackendIsReady()) return "Error: no model loaded";
+  llmBackendEnsureDefaultSelected();
+  if (!llmBackendIsReady()) {
+    char why[128];
+    if (!llmBackendNotReadyReason(why, sizeof(why))) strlcpy(why, "no model loaded", sizeof(why));
+    snprintf(llmCmdBuf, sizeof(llmCmdBuf), "Error: model not ready: %s", why);
+    return llmCmdBuf;
+  }
 
   CommandArgs ca(args);
   if (ca.count() == 0) return "Error: No prompt given. Usage: llmgenerate <question>";
@@ -519,7 +589,7 @@ static const char* cmd_llm_retry(const String&) {
   // model away from repeating it, and kicks off a fresh async generation.
   // Returns a session exactly like `llmgenerate json` — the app then polls
   // `llmresult json <offset>` to stream the new reply.
-  if (!llmBackendIsReady()) return "{\"schema\":1,\"ok\":false,\"error\":\"model not ready\"}";
+  if (!llmBackendIsReady()) return llmNotReadyJson();
   int session = chatRetryLast(nullptr);
   if (session <= 0) return "{\"schema\":1,\"ok\":false,\"error\":\"no prior turn or busy\"}";
   // Like llmgenerate, this only kicks off the regeneration; the new reply

@@ -45,7 +45,7 @@ enum class LlmBackendKind : uint8_t {
   None    = 0,
   Onboard = 1,   // on-device PSRAM engine (ENABLE_LLM_SOURCE_ONBOARD)
   Cm5     = 2,   // CM5 / Pi 5 co-processor over the UART host link (ENABLE_LLM_SOURCE_CM5)
-  Http    = 3,   // OpenClaw over Wi-Fi (ENABLE_LLM_SOURCE_HTTP)
+  Http    = 3,   // OpenClaw over Wi-Fi or the phone relay (ENABLE_LLM_SOURCE_HTTP)
 };
 
 const char* llmBackendKindName(LlmBackendKind k);   // "onboard" / "cm5" / "none"
@@ -120,16 +120,31 @@ bool llmResolveModelId(const char* id, LlmModelDesc* out);
 // window), and a non-zero maxCtx may only lower it.
 // Loading and unloading are admin commands: surfaces submit `llmload` /
 // `llmunload` through the command executor (llmBuildLoadCommand below), which
-// also serialises them on cmd_exec. Only those command handlers and the boot
-// autostart of a remote default model (llmBackendTick) call these directly.
+// also serialises them on cmd_exec. Only those command handlers, the autostart
+// of a remote default model (llmBackendTick) and the lazy select of the HTTP
+// default (llmBackendEnsureDefaultSelected) call these directly.
 bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx = 0);
 
 // Build the `llmload "<id>" [maxCtx]` command line a surface submits. False
 // when the id is empty, holds a quote or control character, or does not fit.
 bool llmBuildLoadCommand(const char* id, int maxCtx, char* out, size_t outCap);
 
-// Drop the active selection and release whatever it held.
+// Drop the active selection and release whatever it held. A user action: the
+// HTTP default is not reselected on its own again this boot (until the next
+// explicit selection).
 void llmBackendUnload();
+
+// Lazy load: when nothing is selected and the HTTP default would autostart
+// (LLM on, autostart on, an http: default, no llmunload this boot), select it
+// now. Returns whether a model is selected afterwards.
+bool llmBackendEnsureDefaultSelected();
+
+// Why llmBackendIsReady() is false, as one line for a person: "LLM disabled
+// (llmenabled 0)", "no model selected (llmload http:openclaw)", "busy: a
+// request is running", "HTTP agent disabled (llmhttpenabled)", the network
+// path ("relay off in the app", "phone link down, retrying in 12 s"), or the
+// source's own status error. "" (length 0) when ready.
+size_t llmBackendNotReadyReason(char* out, size_t cap);
 
 LlmBackendKind llmBackendActiveKind();
 bool           llmBackendActiveModel(LlmModelDesc* out);   // false when none selected

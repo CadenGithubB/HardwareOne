@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <Arduino.h>
 #include "BLE_PhonePipeTypes.h"
+#include "BLE_PhonePipePath.h"  // phonePipePathView / phonePipeNudgeReconnect (every build)
 #include "System_User.h"  // CommandSource, TransportSessionEpoch (PhonePairView)
 // The READY session's link, for the app console on the same link
 // (BLE_ConsoleAttachCore.h hw1console::PipeLink). generation is the GATT
@@ -28,6 +29,10 @@ struct PhonePipeLinkSummary {
   uint16_t lastEnd = 0;          // the last one's end reason (0..18)
   uint32_t versionMismatches = 0;
   uint32_t endReason[19] = {};
+  // The last finished scan: every report heard, and the pipe's advertisements
+  // among them (scanKnown false before the first one).
+  bool scanKnown = false;
+  uint32_t scanReports = 0, scanMatches = 0;
 };
 // `phone pair new`'s pairing window (phone link v2) as its OLED code screen
 // sees it: open, or how the last one ended.

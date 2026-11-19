@@ -253,9 +253,10 @@ void bleArmAutoReconnectPeers(void);
 //     only if the exact admitted request is still current, so a late success
 //     cannot undo a newer user disconnect or target/owner change.
 //   bleAutoReconnectTick — call from the main loop; fires due reconnects
-//     with exponential backoff (5s → ~3 min; the phone caps at 30 s; the
-//     ring follows faceclaw: 2 s after a drop, then 2 s doubling to 60 s,
-//     timed by the ring's own hold from each failure).
+//     with exponential backoff (5s → ~3 min; the phone 2/4/8/16 s, then
+//     30 s, then 60 s after about 10 min, never stopping; the ring follows
+//     faceclaw: 2 s after a drop, then 2 s doubling to 60 s, timed by the
+//     ring's own hold from each failure).
 void blePeerNoteUserDisconnect(BlePeerKind kind);
 void blePeerNoteUserConnectIntent(BlePeerKind kind);
 void blePeerNoteLinkLost(BlePeerKind kind);
@@ -314,7 +315,24 @@ void bleAutoReconnectTick(void);
 // Track mine due while the ring is down). No-ops if the user intentionally
 // disconnected, there is no saved MAC, or the peer is already linked.
 // Non-blocking — the next bleAutoReconnectTick fires connectSaved.
+// The phone's reseek also opens a 2 min window: a restore (recycle, role
+// switch, stuck-phone recovery) keeps retrying at the backoff until it ends.
 void blePeerRequestReseek(BlePeerKind kind);
+// An admitted attempt ended without reaching the link. Schedules the next try
+// from now (the attempt's end) at the peer's backoff, without bumping the
+// intent; re-arms a consumed one-shot while its reseek window is open (or
+// starts an episode when auto-reconnect is on). Only while the generations
+// are still current.
+void blePeerNoteAttemptFailed(BlePeerKind kind, uint32_t intentGeneration,
+                              uint32_t identityGeneration);
+// Demand or evidence that the peer is reachable now: wants the peer, resets
+// the backoff and pulls the next try to now, without bumping the intent (an
+// attempt in flight continues). With auto-reconnect off, windowMs opens (or
+// extends) a reseek window of that length; 0 adds none and is then accepted
+// only when a reseek is already armed. Refused (false) after a user
+// disconnect, with no saved target or no owner authority. Critical section
+// only: safe from the BTC task.
+bool blePeerExpediteReconnect(BlePeerKind kind, uint32_t windowMs);
 // Re-arm a one-shot reseek whose admitted job was dropped unrun, only while the
 // job's intent and identity generations are still current. True if re-armed.
 bool blePeerRestoreDroppedReseek(BlePeerKind kind, uint32_t intentGeneration,
@@ -338,6 +356,10 @@ struct BlePeerReconnectSnapshot {
   bool admissionInFlight = false;
   uint8_t launchedAttempts = 0;
   uint32_t dueMs = 0;
+  // Phone only: the reseek window's end (0: none), see blePeerExpediteReconnect.
+  uint32_t reseekUntilMs = 0;
+  // The last admission result as BlePeerConnectAdmission, 0xff before any.
+  uint8_t lastAdmission = 0xff;
 };
 
 bool blePeerReconnectSnapshot(BlePeerKind kind,
@@ -425,6 +447,8 @@ inline bool blePeerCommitRepairIfCurrent(int, uint32_t, uint32_t,
                                           bool* = nullptr) { return false; }
 inline void bleAutoReconnectTick(void)                  {}
 inline void blePeerRequestReseek(int)                   {}
+inline void blePeerNoteAttemptFailed(int, uint32_t, uint32_t) {}
+inline bool blePeerExpediteReconnect(int, uint32_t)     { return false; }
 inline bool blePeerRestoreDroppedReseek(int, uint32_t, uint32_t) { return false; }
 inline bool blePeerAutoReconnectEnabled(int)            { return false; }
 

@@ -35,9 +35,13 @@ if __name__=='__main__':
     production='\n'.join([
         extract_block(source,'struct PeerReconnectRuntime')+';',
         'PeerReconnectRuntime sReconnect[BLE_PEER_MAX];',
+        # The phone's reseek windows (a manual openphone, a restore).
+        source[source.index('constexpr uint32_t kPhoneManualReseekWindowMs'):source.index('char sPhoneConsoleAddress[')],
         'portMUX_TYPE sReconnectMux = portMUX_INITIALIZER_UNLOCKED;',
         extract_block(source,'uint32_t nextReconnectGeneration('),
         extract_block(source,'void reconnectBumpIntentLocked('),
+        extract_block(source,'bool reseekWindowOpenLocked('),
+        extract_block(source,'void reseekWindowExtendLocked('),
         extract_block(source,'void noteLinkUpLocked('),
         extract_block(source,'bool blePeerReconnectSnapshot('),
         source[source.index('static const BlePeerSpec* gPeerByKind'):source.index('// MAC auto-save')],

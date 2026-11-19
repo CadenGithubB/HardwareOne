@@ -36,7 +36,7 @@ This changes the approved 2026-10-15 rule only where it said the phone yields. T
 **Where they meet.**
 - Both meet at the setup gate in `BLE_CentralCoordinator.cpp`, a recursive mutex plus waiter and holder counts.
 - The phone may not start while a glasses or ring job waits.
-- If one starts waiting during the phone's setup, the phone cancels itself (`tickLocked`, `cause=14(yielded)`) and retries on its 5/15/30 s ladder. A cancelled setup typically costs 20 s or more.
+- If one starts waiting during the phone's setup, the phone cancels itself (`tickLocked`, `cause=14(yielded)`) and retries on its ladder (2/4/8/16/30 s since 2026-11-19, see PHONE_PIPE_SCAN_BACKOFF.md). A cancelled setup typically costs 20 s or more.
 
 **Since the C6 reflash (four links):**
 - The ring is no longer shut out while the pipe is on, so glasses, ring and phone can all want a turn on the bench.
@@ -91,7 +91,8 @@ The host-recovery path that drops the glasses is a last resort, not the first re
 - **One task, `ble_setup`** (BLE_SetupWorker.h/.cpp):
   - priority 5 on APP_CORE, started on first use;
   - the stack is 5120 bytes of internal RAM on boards with glasses and 4096 without (p4-phone-only).
-- **Clients, in turn order:** glasses, ring retirement (pipe builds only), ring, phone.
+- **Clients, in turn order:** glasses, ring retirement (pipe builds only), phone, ring (since 2026-11-19; the enum values and log ids are unchanged). A ring passed over still runs one phone turn later.
+- **Recovery block bound (2026-11-19).** A phone job waiting on the host-recovery block waits at most 30 s, then drops; the drop ends as an unused turn and the scheduler retries it.
 - **Slots.** Each client has one slot with a token. Submit and withdraw never block or allocate.
 - **Ordering.** A ready job that was passed over goes next. Several passed-over jobs go in the order they were passed over, so a job waits for at most one turn of each other client.
 - **Pure scheduler.** The scheduler is BLE_SetupWorkerCore.h and has no OS dependencies.
@@ -151,7 +152,7 @@ The host-recovery path that drops the glasses is a last resort, not the first re
 - **`ble_setup`:** present, using 3,224 of 5,120 bytes of stack on the P4. `phone_pipe` uses 2,084 of 8,192.
 - **Glasses:** `setup wait g2 saved ms=2021` (behind the phone's boot turn), then both temples connected in 65 and 45 ms.
 - **Ring:** connected in 69 ms with `wait_ms=0`; setup verified as 2.3.2.0008.
-- **Phone:** absent, so it missed on its 5/15/30 s schedule.
+- **Phone:** absent, so it missed on its 5/15/30 s schedule (the schedule then; now 2/4/8/16/30 s, then 60 s).
 - **Worker warnings:** no `BLE_SETUP:` warnings.
 
 **Cost.**

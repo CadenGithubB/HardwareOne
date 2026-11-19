@@ -103,8 +103,13 @@ void chatParamOverrideFromJson(JsonObjectConst src, ChatParamOverride& out);
 // Optional opaque run identity for consumers which outlive a view/session.
 // It is unique across source switches and Clear; backend session numbers are not.
 using ChatRunToken = uint64_t;
+// Selects the HTTP default first when it would autostart and nothing is
+// selected (llmBackendEnsureDefaultSelected). Returns 0 when refused.
 int  chatBeginTurn(const char* userPrompt, const ChatParamOverride* opt = nullptr,
                    ChatRunToken* run = nullptr);
+// Why the most recent chatBeginTurn returned 0, as one line ("" before any
+// refusal): the backend's not-ready reason, or busy / Do: mode / start refused.
+const char* chatLastBeginRefusal();
 // Re-run the most recent USER turn. Removes the last ASSISTANT turn (if any)
 // and tokenizes its text as suppress tokens to steer the model away from
 // repeating itself. Returns session ID (>0) on success; 0 if no prior turn,

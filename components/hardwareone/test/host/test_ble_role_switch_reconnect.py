@@ -75,8 +75,11 @@ def unit(component: Path) -> str:
     scheduler = '\n\n'.join([
         extract_block(peers, 'struct PeerReconnectRuntime') + ';',
         'PeerReconnectRuntime sReconnect[BLE_PEER_MAX];',
+        # The phone's reseek windows (a manual openphone, a restore).
+        between(peers, 'constexpr uint32_t kPhoneManualReseekWindowMs', 'char sPhoneConsoleAddress['),
         'portMUX_TYPE sReconnectMux = portMUX_INITIALIZER_UNLOCKED;',
         *blocks(peers, 'uint32_t nextReconnectGeneration(', 'void reconnectBumpIntentLocked(',
+                'bool reseekWindowOpenLocked(', 'void reseekWindowExtendLocked(',
                 'bool savedTargetMatches(', 'bool connectRequestIsCurrentLocked(',
                 'void noteLinkUpLocked(', 'bool blePeerReconnectSnapshot(',
                 'bool blePeerConnectRequestIsCurrent(', 'bool blePeerBeginManualConnectRequest('),
@@ -180,8 +183,11 @@ def check_text(component: Path) -> None:
     server = strip_comments(extract_block(bluetooth, 'bool initBluetooth() '))
     require(server.index('deinitG2Client()') < server.index('bleStackDown()'),
             'initBluetooth closes the glasses before the stack')
-    # The pipe's worker notes a READY link that ended (a stop included) as lost.
-    require('if(lost)blePeerNoteLinkLost(BLE_PEER_PHONE);' in pipe, 'the pipe notes a lost link')
+    # The pipe's worker notes a READY link that ended (a stop included) as
+    # lost, and an attempt that never got there as a failed attempt.
+    require('if(published || wasEnrolling)blePeerNoteLinkLost(BLE_PEER_PHONE);' in pipe and
+            'else blePeerNoteAttemptFailed(BLE_PEER_PHONE,intent,identityGeneration);' in pipe,
+            'the pipe notes a lost link, or a failed attempt')
 
 
 if __name__ == '__main__':

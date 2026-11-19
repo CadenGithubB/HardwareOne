@@ -1,8 +1,11 @@
 #pragma once
 // One BLE setup worker: an allocation-free turn scheduler for central setup.
 // Glasses, ring retirement, ring and phone each own one slot; one task gives
-// the turns, in that order, and a running setup is never cancelled for another
-// client's. No BLE, OS or Arduino dependencies: the caller supplies the lock,
+// the turns in kTurnOrder (glasses, ring retirement, phone, ring), and a
+// running setup is never cancelled for another client's. The phone comes
+// before the ring: an absent ring's 25 s connects must not hold the phone
+// (the internet path out and about) behind them, and a ring passed over still
+// runs at the latest one phone turn later. No BLE, OS or Arduino dependencies: the caller supplies the lock,
 // clock, wake and client callbacks (Env), so the host tests run this file as is.
 // See docs/BLE_SETUP_WORKER_PLAN.md.
 #include <atomic>
@@ -10,9 +13,11 @@
 #include <cstdint>
 
 namespace hw1setup {
-// The index is the turn order.
+// The index is the slot (and the value logs and tests print); kTurnOrder below
+// is the turn order.
 enum class Client : uint8_t { G2 = 0, RingRetire = 1, Ring = 2, Phone = 3 };
 constexpr size_t kClients = 4;
+constexpr Client kTurnOrder[kClients] = { Client::G2, Client::RingRetire, Client::Phone, Client::Ring };
 constexpr uint8_t clientMask(Client c) { return uint8_t(1u << unsigned(c)); }
 constexpr uint8_t kAccessories = clientMask(Client::G2) | clientMask(Client::RingRetire) | clientMask(Client::Ring);
 constexpr uint8_t kAll = kAccessories | clientMask(Client::Phone);
@@ -200,12 +205,13 @@ inline uint32_t audioSoFar(const Slot& s, uint32_t now) {
 }
 
 // The client to run: of the Run-ready slots that were passed over, the one
-// passed over first; otherwise the first Run-ready slot in turn order; -1 if
-// none is ready. So once passed over, a job waits for at most one turn of
-// each other client.
+// passed over first; otherwise the first Run-ready slot in turn order
+// (kTurnOrder); -1 if none is ready. So once passed over, a job waits for at
+// most one turn of each other client.
 inline int decide(const Slot (&view)[kClients], const Verdict (&v)[kClients]) {
   int first = -1, passed = -1;
-  for (size_t i = 0; i < kClients; ++i) {
+  for (const Client c : kTurnOrder) {
+    const size_t i = size_t(c);
     if (view[i].state != State::Queued || v[i].ready != Ready::Run) continue;
     if (view[i].passedOver &&
         (passed < 0 || int32_t(view[i].passedSeq - view[size_t(passed)].passedSeq) < 0)) passed = int(i);
@@ -229,7 +235,9 @@ inline Applied Core::apply(const Slot (&view)[kClients], const Verdict (&v)[kCli
     out.run = Ticket{Client(run), s.token, RunInfo{now - s.submittedMs, s.selfWaitMs, s.audioMs}, true};
     ran = true;
   }
-  for (size_t i = 0; i < kClients; ++i) {
+  // In turn order, so clients passed over by the same turn keep it.
+  for (const Client c : kTurnOrder) {
+    const size_t i = size_t(c);
     if (int(i) == run || !same(i)) continue;
     Slot& s = slots_[i];
     switch (v[i].ready) {

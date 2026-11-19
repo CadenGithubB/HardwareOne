@@ -39,7 +39,8 @@ JSON_INCLUDE = COMPONENT.parent / "hardwareone_libs" / "ArduinoJson" / "src"
 CASES = ["user_load_refused", "user_unload_refused", "admin_load_through_command",
          "admin_unload_through_command", "unload_with_nothing_loaded", "bad_id_rejected",
          "select_applies_setting",
-         "command_context_argument", "build_load_command"]
+         "command_context_argument", "build_load_command", "not_ready_reason_json",
+         "autostart_retry_core"]
 
 
 def read(name: str) -> str:
@@ -126,7 +127,10 @@ def generated() -> str:
     # The shipping default argument lives on the header declaration.
     backend_parts.insert(0, "bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx = 0);")
 
-    command_parts = [unique_block(commands, "static const char* cmd_llm_load("),
+    command_parts = [unique_block(commands, "static const char* llmJsonText("),
+                     unique_block(commands, "static const char* llmNotReadyJsonReason("),
+                     unique_block(commands, "static const char* llmNotReadyJson("),
+                     unique_block(commands, "static const char* cmd_llm_load("),
                      unique_block(commands, "static const char* cmd_llm_unload(")]
     web_parts = []
     if "static esp_err_t sendLlmCommandReply(" in web:
@@ -163,6 +167,22 @@ def source_guard() -> None:
             "the OLED picker and Unload row must submit llmload/llmunload")
 
 
+def generate_guard() -> None:
+    """llmgenerate json selects the HTTP default lazily and keeps the app's error text."""
+    commands = strip_comments(read("System_LLMCommands.cpp"))
+    generate = unique_block(commands, "static const char* cmd_llm_generate(")
+    ensure = generate.find("llmBackendEnsureDefaultSelected();")
+    ready = generate.find("if (!llmBackendIsReady()) return llmNotReadyJson();")
+    require(0 <= ensure < ready, "llmgenerate json must select the default before the ready check")
+    require('\\"error\\":\\"busy or failed to start\\",\\"reason\\"' in generate,
+            "llmgenerate json start refusal keeps its error and adds a reason")
+    require("chatLastBeginRefusal()" in generate, "the start refusal reason comes from the chat layer")
+    chat = strip_comments(read("System_LLMChat.cpp"))
+    begin = unique_block(chat, "int chatBeginTurn(")
+    require(0 <= begin.find("llmBackendEnsureDefaultSelected();") < begin.find("if (!llmBackendIsReady())"),
+            "chatBeginTurn must select the default before the ready check")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
@@ -178,7 +198,7 @@ def main() -> None:
                    "-Wno-unused-parameter",
                    "-DARDUINOJSON_ENABLE_ARDUINO_STRING=0", "-DARDUINOJSON_ENABLE_ARDUINO_STREAM=0",
                    "-DARDUINOJSON_ENABLE_ARDUINO_PRINT=0", "-DARDUINOJSON_ENABLE_PROGMEM=0",
-                   "-I", str(JSON_INCLUDE), str(unit), "-o", str(binary)]
+                   "-I", str(JSON_INCLUDE), "-I", str(COMPONENT), str(unit), "-o", str(binary)]
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                             "-fno-omit-frame-pointer", "-g"]
@@ -190,12 +210,13 @@ def main() -> None:
             if result.returncode != 0:
                 print(f"FAIL {case}: {result.stderr.strip().splitlines()[-1] if result.stderr.strip() else result.returncode}")
                 failures.append(case)
-    try:
-        source_guard()
-        print("PASS source_guard")
-    except AssertionError as error:
-        print(f"FAIL source_guard: {error}")
-        failures.append("source_guard")
+    for guard in (source_guard, generate_guard):
+        try:
+            guard()
+            print(f"PASS {guard.__name__}")
+        except AssertionError as error:
+            print(f"FAIL {guard.__name__}: {error}")
+            failures.append(guard.__name__)
     require(not failures, "failed: " + ", ".join(failures))
 
 

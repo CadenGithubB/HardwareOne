@@ -4,6 +4,7 @@
 #define EXT_RAM_BSS_ATTR
 #endif
 #include "BLE_PhonePipeTypes.h"
+#include "BLE_PhonePipePath.h"
 #include <algorithm>
 #include <atomic>
 #include <cassert>
@@ -205,6 +206,8 @@ static unsigned opens=0,closes=0,releases=0,nextStream=0;
 // allocate a stream the caller must release, as the real owner does.
 static PhonePipeOpenStatus phoneOpen=PhonePipeOpenStatus::Opened;
 static uint16_t phoneOpenCode=0;
+// From this OPEN on (1-based), the OPEN succeeds: a phone that recovers.
+static unsigned openSucceedsFrom=0;
 static uint32_t phoneOpenCost=0,phoneGeneration=1,lastOpenBudget=0;
 static bool newSessionDuringOpen=false;
 static bool phonePipeReady(){return phoneReady;}
@@ -213,20 +216,40 @@ static bool phonePipeRelayAvailable(){return phoneReady && phoneRelay;}
 static uint32_t phonePipeGeneration(){return phoneGeneration;}
 static PhonePipeOpenResult phonePipeOpen(PhonePipeStream& h,const char*,uint16_t,uint32_t budget,const std::atomic<bool>& cancel,const std::atomic<bool>* interrupted){
  assert(interrupted);++opens;lastOpenBudget=budget;h={};
+ const bool recovered=openSucceedsFrom && opens>=openSucceedsFrom;
+ const PhonePipeOpenStatus status=recovered?PhonePipeOpenStatus::Opened:phoneOpen;
+ const uint16_t code=recovered?0:phoneOpenCode;
  if(cancel.load() || interrupted->load())return {PhonePipeOpenStatus::Cancelled};
  if(budget<kPhonePipeOpenResponseMs)return {PhonePipeOpenStatus::NoBudget};
- if(phoneOpen==PhonePipeOpenStatus::NotReady || phoneOpen==PhonePipeOpenStatus::Rejected ||
-    phoneOpen==PhonePipeOpenStatus::NoBudget || phoneOpen==PhonePipeOpenStatus::Cancelled)return {phoneOpen,phoneOpenCode};
+ if(status==PhonePipeOpenStatus::NotReady || status==PhonePipeOpenStatus::Rejected ||
+    status==PhonePipeOpenStatus::NoBudget || status==PhonePipeOpenStatus::Cancelled)return {status,code};
  h.generation=phoneGeneration;h.corr=0x0102030405060708ull;
  h.openedAt=millis();now+=openWakeDelay;h.id=++nextStream;pipes[h.id]={};
- if(failAfterOpen)return {PhonePipeOpenStatus::LinkLost};
- now+=phoneOpenCost;if(newSessionDuringOpen)++phoneGeneration;return {phoneOpen,phoneOpenCode};
+ if(failAfterOpen && !recovered)return {PhonePipeOpenStatus::LinkLost};
+ now+=phoneOpenCost;if(newSessionDuringOpen)++phoneGeneration;return {status,code};
 }
 static int phonePipeRead(PhonePipeStream h,uint8_t* out,size_t n){auto& p=pipes.at(h.id);
  n=std::min(n,p.input.size());std::memcpy(out,p.input.data(),n);p.input.erase(0,n);return n?int(n):(p.eof?-2:0);}
 static int phonePipeWrite(PhonePipeStream h,const uint8_t* p,size_t n){pipes.at(h.id).output.append(reinterpret_cast<const char*>(p),n);return int(n);}
 static void phonePipeClose(PhonePipeStream h,bool){assert(pipes.count(h.id));++closes;}
 static void phonePipeRelease(PhonePipeStream h){if(!delayRetirement)assert(pipes.erase(h.id));++releases;}
+// The phone path view (BLE_PhonePipePath.h; BLE_PhonePipe.cpp on the device).
+// By default it follows the fake link: Up, RelayOff, or Off when not READY. A
+// test sets pathView to model a link that is coming back or held.
+static bool pathViewSet=false;
+static PhonePathView pathView;
+static unsigned nudges=0;
+PhonePathView phonePipePathView(){
+ if(pathViewSet)return pathView;
+ PhonePathView v;v.state=!phoneReady?PhonePathState::Off:phoneRelay?PhonePathState::Up:PhonePathState::RelayOff;return v;
+}
+bool phonePipeNudgeReconnect(){++nudges;return phonePathRecoverable(phonePipePathView());}
+static void viewRetrying(PhonePathHint hint=PhonePathHint::None,uint32_t inMs=12000){
+ pathViewSet=true;pathView={};pathView.state=PhonePathState::Retrying;pathView.hint=hint;pathView.retryInMs=inMs;pathView.attempt=2;
+}
+static void viewState(PhonePathState state,PhonePathHint hint=PhonePathHint::None){
+ pathViewSet=true;pathView={};pathView.state=state;pathView.hint=hint;
+}
 struct Transport;
 using esp_transport_handle_t=Transport*;
 struct Transport{void* data=nullptr;int(*connect)(Transport*,const char*,int,int)=nullptr;
@@ -249,11 +272,13 @@ static bool isPlausibleEpoch(long){return valid;}
 enum class LlmHttpRequestKind : uint8_t { Chat, Terminal };
 enum class LlmHttpAdmission : uint8_t { Accepted, Busy, Unavailable };
 bool llmHttpPathAvailable(bool);
+bool llmHttpPathRecoverable(bool);
 bool phonePipeRetired(PhonePipeStream h){return !h.id || !pipes.count(h.id);}
 // INSERT_PRODUCTION
 static std::atomic<bool> cancelFlag{false};
-static LlmHttpIo* make(bool secure=true,const char* ca="fixture CA",uint32_t total=15000){
- auto* io=llmHttpIoCreate(ca,secure,cancelFlag,now,total,1,LlmHttpRequestKind::Chat);assert(io);
+static LlmHttpIo* make(bool secure=true,const char* ca="fixture CA",uint32_t total=15000,
+                       LlmHttpRequestKind kind=LlmHttpRequestKind::Chat){
+ auto* io=llmHttpIoCreate(ca,secure,cancelFlag,now,total,1,kind);assert(io);
  esp_http_client_config_t cfg{};assert(llmHttpIoConfigure(io,cfg) && cfg.transport==io->transport);return io;
 }
 static int dial(LlmHttpIo* io){return io->transport->connect(io->transport,"relay.example",443,2000);}
@@ -271,12 +296,14 @@ static void reset(){
  dnsDelay=dnsFailure=false;health={};healthEpoch=healthRevision=0;++wifiEpoch;
  phoneHealth={};phoneHealthGeneration=phoneHealthRevision=0;newSessionDuringOpen=false;
  pathStats={};recordSeq=0;for(auto& r:recent)r={};
+ pathViewSet=false;pathView={};nudges=0;openSucceedsFrom=0;
 }
 int main(){
  // Deadline begins at OPEN_OK, including delayed worker wake and TLS setup.
+ // (Terminal: one attempt, so the deadline is measured alone; a chat would retry once.)
  for(uint32_t clock:{uint32_t(100),UINT32_MAX-2000}) {
   reset();now=clock;WiFi.up=false;openWakeDelay=500;setupDelay=1000;
-  tlsHandshake=MBEDTLS_ERR_SSL_WANT_READ;auto* io=make();
+  tlsHandshake=MBEDTLS_ERR_SSL_WANT_READ;auto* io=make(true,"fixture CA",15000,LlmHttpRequestKind::Terminal);
   assert(dial(io)<0 && io->failure==Failure::Network && uint32_t(now-clock)==4500);
   assert(handshakes>0);release(io);
  }
@@ -442,12 +469,14 @@ int main(){
   assert(strstr(report,"requests=1 carried wifi=0 phone=1 none=0 fallback wifi>phone=1 phone>wifi=0\n"));
   assert(strstr(report,"outcomes completed=1 failed_before_send=0 failed_after_send=0 unreported=0\n"));
   assert(strstr(report,"phone_open: opened=1\nopen_err:\nrecent:\n#1 chat first=wifi"));}
- {reset();WiFi.up=false;phoneOpen=Status::Refused;phoneOpenCode=5;auto* io=make();assert(dial(io)<0);
+ // A chat with the phone as its only path tries it once more (nothing was sent).
+ {reset();WiFi.up=false;phoneOpen=Status::Refused;phoneOpenCode=5;auto* io=make();assert(dial(io)<0 && opens==2);
   llmHttpIoFinish(io,false);io->transport->close(io->transport);release(io);
   assert(pathLogs.back().find("first=phone carried=none wifi=- phone=network open=refused:5 outcome=failed-before-send corr=0102030405060708 stream=")!=npos);
-  assert(pathLogs.back().find("stream=0 ")==npos);
+  assert(pathLogs.back().find("stream=0 ")==npos && pathLogs.back().find(" same_path_retry=1")!=npos);
   char report[2048];llmHttpPathReport(report,sizeof(report));
-  assert(strstr(report,"failed_before_send=1") && strstr(report,"phone_open: refused=1") && strstr(report,"open_err: 5=1"));}
+  assert(strstr(report,"failed_before_send=1") && strstr(report,"phone_open: refused=1") && strstr(report,"open_err: 5=1"));
+  assert(strstr(report,"\npath_wait waited=0 gave_up=0 same_path_retries=1\n"));}
  {reset();directNegative();phoneOpen=Status::Refused;phoneOpenCode=6;auto* io=make();assert(dial(io)==0);
   assert(io->transport->write(io->transport,"x",1,2000)==1);llmHttpIoFinish(io,false);release(io);
   assert(pathLogs.back().find("first=phone carried=wifi wifi=ok phone=network open=refused:6 outcome=failed-after-send")!=npos);
@@ -482,7 +511,147 @@ int main(){
  {reset();directNegative();phoneRelay=false;auto* io=make();   // a negative Wi-Fi hint never picks a relay-off phone
   assert(dial(io)==0 && io->attempt.first==Path::Wifi && !opens);release(io);}
  {reset();directNegative();auto* io=make();assert(dial(io)==0 && io->attempt.first==Path::Phone && opens==1);release(io);}  // relay on
+ // ---- Phone lifecycle: admission, the bounded path wait, the same-path retry ----
+ // Attempt::retrySame: once, Network/Resources only, never after a write.
+ {Attempt a;assert(!a.retrySame(Failure::Network));         // no path selected yet
+  assert(a.select(Path::Phone) && a.retrySame(Failure::Network) && a.sameRetries()==1);
+  assert(!a.retrySame(Failure::Network) && a.tried(Path::Phone) && !a.select(Path::Phone));
+  Attempt b;assert(b.select(Path::Phone));
+  for(Failure f:{Failure::Trust,Failure::Cancelled,Failure::Protocol})assert(!b.retrySame(f));
+  assert(b.retrySame(Failure::Resources));
+  Attempt c;assert(c.select(Path::Phone));c.beforeHttpWrite();assert(!c.retrySame(Failure::Network));
+  Attempt d;assert(d.select(Path::Phone));d.finish();assert(!d.retrySame(Failure::Network));
+  Attempt e;assert(e.select(Path::Phone) && e.retrySame(Failure::Network) && e.fallback(Failure::Network,Path::Wifi,true));}
+ // Admission: a chat is accepted while the phone link is coming back; a
+ // Terminal request needs a path now. Held, relay off, not paired: Unavailable.
+ {reset();WiFi.up=false;phoneReady=false;viewRetrying();
+  assert(!llmHttpPathAvailable(true) && llmHttpPathRecoverable(true) && !llmHttpPathRecoverable(false));
+  assert(llmHttpRequestAdmit(LlmHttpRequestKind::Chat,true)==LlmHttpAdmission::Accepted);
+  assert(llmHttpRequestAdmit(LlmHttpRequestKind::Terminal,true)==LlmHttpAdmission::Unavailable);
+  assert(llmHttpRequestAdmit(LlmHttpRequestKind::Chat,false)==LlmHttpAdmission::Unavailable);  // plaintext: Wi-Fi only
+  llmHttpRequestRelease(LlmHttpRequestKind::Chat);
+  viewState(PhonePathState::Connecting);
+  assert(llmHttpRequestAdmit(LlmHttpRequestKind::Chat,true)==LlmHttpAdmission::Accepted);llmHttpRequestRelease(LlmHttpRequestKind::Chat);
+  for(auto state:{PhonePathState::Held,PhonePathState::RelayOff,PhonePathState::NotPaired,PhonePathState::Off}) {
+   viewState(state);assert(!llmHttpPathRecoverable(true));
+   assert(llmHttpRequestAdmit(LlmHttpRequestKind::Chat,true)==LlmHttpAdmission::Unavailable);}
+  WiFi.up=true;viewRetrying();assert(!llmHttpPathRecoverable(true));}  // Wi-Fi up: nothing to recover
+ // connect waits for the phone: one nudge, a 100 ms poll, and the request goes
+ // out on the phone the moment its relay is ready.
+ {reset();WiFi.up=false;phoneReady=false;viewRetrying();
+  auto* io=make(true,"fixture CA",300000);const uint32_t start=now;
+  delayHook=[&]{if(now-start>=2000){phoneReady=true;pathViewSet=false;}};
+  assert(dial(io)==0 && opens==1 && nudges==1 && io->attempt.path==Path::Phone);
+  assert(now-start==2000 && io->waitedForPath && !io->pathWaitFailed && !llmHttpIoPathWaitFailed(io));
+  delayHook={};llmHttpIoFinish(io,true);release(io);
+  assert(pathLogs.back().find(" path_wait=ok:2000ms")!=npos);
+  char report[2048];llmHttpPathReport(report,sizeof(report));
+  assert(strstr(report,"\npath_wait waited=1 gave_up=0 same_path_retries=0\n"));}
+ // Wi-Fi coming back ends the wait too.
+ {reset();WiFi.up=false;phoneReady=false;viewRetrying();auto* io=make(true,"fixture CA",300000);const uint32_t start=now;
+  delayHook=[&]{if(now-start>=500)WiFi.up=true;};
+  assert(dial(io)==0 && io->attempt.path==Path::Wifi && !opens && nudges==1);delayHook={};release(io);}
+ // No wait when a path is up, and a Terminal request never waits or nudges.
+ {reset();WiFi.up=false;auto* io=make();assert(dial(io)==0 && !nudges && !io->waitedForPath);release(io);}
+ {reset();WiFi.up=false;phoneReady=false;viewRetrying();const uint32_t start=now;
+  auto* io=make(true,"fixture CA",300000,LlmHttpRequestKind::Terminal);
+  assert(dial(io)<0 && now==start && !nudges && !opens && !io->waitedForPath);release(io);}
+ // The wait ends at once when the link stops coming back (held, relay off,
+ // not paired, Bluetooth off): nothing is sent and the record says so.
+ for(auto state:{PhonePathState::Held,PhonePathState::RelayOff,PhonePathState::NotPaired,PhonePathState::Off}) {
+  reset();WiFi.up=false;phoneReady=false;viewState(state,PhonePathHint::ClosedByUser);const uint32_t start=now;
+  auto* io=make(true,"fixture CA",300000);
+  assert(dial(io)<0 && now==start && nudges==1 && !opens && io->failure==Failure::Network);
+  assert(llmHttpIoPathWaitFailed(io) && !llmHttpIoRetriedSamePath(io) && !llmHttpIoRetireWaitFailed(io));
+  llmHttpIoFinish(io,false);release(io);
+  assert(pathLogs.back().find("first=none carried=none wifi=- phone=- open=-:0 outcome=failed-before-send")!=npos);
+  assert(pathLogs.back().find(" path_wait=gave-up:0ms")!=npos);}
+ // ... or when the link is held part way through the wait.
+ {reset();WiFi.up=false;phoneReady=false;viewRetrying();auto* io=make(true,"fixture CA",300000);const uint32_t start=now;
+  delayHook=[&]{if(now-start>=700)viewState(PhonePathState::Held,PhonePathHint::ClosedByUser);};
+  assert(dial(io)<0 && now-start==700 && llmHttpIoPathWaitFailed(io));delayHook={};release(io);}
+ // Bounded: 30 s at most, and never past the request's own budget or a cancel.
+ {reset();WiFi.up=false;phoneReady=false;viewRetrying();auto* io=make(true,"fixture CA",300000);const uint32_t start=now;
+  assert(dial(io)<0 && now-start==30000 && io->failure==Failure::Network && llmHttpIoPathWaitFailed(io) && !opens);
+  assert(!llmHttpIoRetireWaitFailed(io));release(io);
+  char report[2048];llmHttpPathReport(report,sizeof(report));
+  assert(strstr(report,"\npath_wait waited=1 gave_up=1 same_path_retries=0\n"));}
+ {reset();WiFi.up=false;phoneReady=false;viewState(PhonePathState::Connecting);auto* io=make(true,"fixture CA",1500);const uint32_t start=now;
+  assert(dial(io)<0 && now-start==1500 && io->failure==Failure::Cancelled && !opens);release(io);}
+ {reset();WiFi.up=false;phoneReady=false;viewRetrying();auto* io=make(true,"fixture CA",300000);const uint32_t start=now;
+  delayHook=[&]{if(now-start>=400)llmHttpIoCancel(io);};
+  assert(dial(io)<0 && now-start==400 && io->failure==Failure::Cancelled && !opens);delayHook={};release(io);}
+ // Exactly one same-path retry for a chat when the phone was the only path and
+ // nothing was sent: OPEN_ERR 8, not ready, link lost, TLS lost on the link.
+ for(auto status:{Status::Refused,Status::NotReady,Status::LinkLost,Status::SubmitTimeout}) {
+  reset();WiFi.up=false;phoneOpen=status;phoneOpenCode=8;failAfterOpen=status==Status::LinkLost;
+  if(failAfterOpen)phoneOpen=Status::Opened;
+  openSucceedsFrom=2;auto* io=make(true,"fixture CA",300000);
+  assert(dial(io)==0 && opens==2 && io->attempt.path==Path::Phone && llmHttpIoRetriedSamePath(io));
+  llmHttpIoFinish(io,true);release(io);assert(pathLogs.back().find(" same_path_retry=1")!=npos);}
+ for(auto status:{Status::Refused,Status::NotReady,Status::LinkLost}) {   // still failing: no third try
+  reset();WiFi.up=false;phoneOpen=status;phoneOpenCode=8;failAfterOpen=status==Status::LinkLost;
+  if(failAfterOpen)phoneOpen=Status::Opened;
+  auto* io=make(true,"fixture CA",300000);assert(dial(io)<0 && opens==2 && llmHttpIoRetriedSamePath(io));release(io);}
+ // A TLS handshake on the link that never completes (Network, before any write).
+ {reset();WiFi.up=false;tlsHandshake=MBEDTLS_ERR_SSL_WANT_READ;auto* io=make(true,"fixture CA",300000);const uint32_t start=now;
+  assert(dial(io)<0 && opens==2 && io->failure==Failure::Network && now-start==9000);release(io);}
+ // No retry: the phone's relay refused (16), a target or protocol refusal (4,
+ // 17), a trust failure, a Terminal request, or Wi-Fi up (the normal fallback).
+ for(uint16_t code:{16,4,17}) {reset();WiFi.up=false;phoneOpen=Status::Refused;phoneOpenCode=code;openSucceedsFrom=2;
+  auto* io=make(true,"fixture CA",300000);assert(dial(io)<0 && opens==1 && !llmHttpIoRetriedSamePath(io));release(io);}
+ {reset();WiFi.up=false;tlsFlags=1;openSucceedsFrom=2;auto* io=make(true,"fixture CA",300000);
+  assert(dial(io)<0 && opens==1 && io->failure==Failure::Trust);release(io);}
+ {reset();WiFi.up=false;phoneOpen=Status::Refused;phoneOpenCode=8;openSucceedsFrom=2;
+  auto* io=make(true,"fixture CA",300000,LlmHttpRequestKind::Terminal);assert(dial(io)<0 && opens==1);release(io);}
+ // The retry waits for the phone link to come back (a new session) and for the
+ // first stream to retire, so one request never holds two streams.
+ {reset();WiFi.up=false;phoneOpen=Status::LinkLost;failAfterOpen=true;phoneOpen=Status::Opened;openSucceedsFrom=2;delayRetirement=true;
+  auto* io=make(true,"fixture CA",300000);const uint32_t start=now;uint16_t first=0;
+  delayHook=[&]{
+   if(!first && !pipes.empty())first=pipes.begin()->first;
+   if(now-start==100){phoneReady=false;viewRetrying(PhonePathHint::FoundNoLink);}  // the link dropped
+   if(now-start==600){phoneReady=true;pathViewSet=false;++phoneGeneration;}       // back, new session
+   if(now-start==900 && first)pipes.erase(first);                                  // CLOSE_ACK/RESET
+  };
+  // The first OPEN fails at once, so the wait starts with the old stream live.
+  assert(dial(io)==0 && opens==2 && now-start==900 && io->waitedForPath && !io->pathWaitFailed);
+  assert(io->phoneGeneration==phoneGeneration);
+  delayHook={};delayRetirement=false;io->transport->close(io->transport);pipes.clear();llmHttpIoDestroy(io);assert(allocations==0);}
+ // Wi-Fi comes up during the retry wait: the request takes the untried Wi-Fi.
+ {reset();WiFi.up=false;phoneOpen=Status::Refused;phoneOpenCode=8;phoneReady=true;
+  auto* io=make(true,"fixture CA",300000);const uint32_t start=now;
+  // The refused stream has not retired yet, so the retry waits; Wi-Fi associates.
+  delayHook=[&]{if(now-start>=300)WiFi.up=true;};
+  delayRetirement=true;
+  assert(dial(io)==0 && io->attempt.path==Path::Wifi && directCalls==1 && opens==1);
+  delayHook={};delayRetirement=false;pipes.clear();release(io);}
+ // The phone relay stays up but never retires the refused stream: the retry's
+ // wait gives up at 30 s and says so (the path text would name a working
+ // path), with nothing sent.
+ {reset();WiFi.up=false;phoneOpen=Status::Refused;phoneOpenCode=8;phoneReady=true;delayRetirement=true;
+  auto* io=make(true,"fixture CA",300000);const uint32_t start=now;
+  assert(dial(io)<0 && opens==1 && now-start==30000 && io->failure==Failure::Network);
+  assert(llmHttpIoPathWaitFailed(io) && llmHttpIoRetireWaitFailed(io));
+  delayRetirement=false;pipes.clear();release(io);}
+ // The path line for status surfaces.
+ {reset();char text[160];
+  assert(llmHttpPathText(true,text,sizeof(text))==5 && !strcmp(text,"Wi-Fi"));
+  WiFi.up=false;assert(!strcmp((llmHttpPathText(true,text,sizeof(text)),text),"phone relay"));
+  llmHttpPathText(false,text,sizeof(text));assert(strstr(text,"no network: Wi-Fi off"));
+  phoneReady=false;viewRetrying(PhonePathHint::NotHeard,12000);
+  assert(llmHttpPathText(true,text,sizeof(text))==strlen(text));
+  assert(!strcmp(text,"phone not heard (out of range, or phone Bluetooth/app off?), retrying in 12 s"));
+  phoneReady=true;phoneRelay=false;viewState(PhonePathState::RelayOff);
+  llmHttpPathText(true,text,sizeof(text));assert(!strcmp(text,"relay off in the app"));
+  phoneReady=false;viewState(PhonePathState::Off);
+  llmHttpPathText(true,text,sizeof(text));assert(!strcmp(text,"no network: Wi-Fi off and no phone link"));
+  viewState(PhonePathState::Off,PhonePathHint::ConsoleServer);
+  llmHttpPathText(true,text,sizeof(text));assert(!strcmp(text,"console server owns Bluetooth (closeconsole)"));
+  char tiny[8];assert(llmHttpPathText(true,tiny,sizeof(tiny))==7 && strlen(tiny)==7);
+  assert(llmHttpPathText(true,nullptr,0)==0);}
  puts("HTTP transport: two-way pre-write fallback by OPEN class, phone hint scope and probes, A-1 budget, F3 records;");
  puts("HTTP transport: relay availability (READY and RELAY_ON) for path choice, fallback and admission; refusal 16 network, 17 protocol, counts per code 0..18;");
+ puts("HTTP transport: chat admitted while the phone link comes back, bounded path wait (nudge, 30 s, budget, cancel, held), one same-path pre-send retry, path text;");
  puts("HTTP transport: Wi-Fi first, strict failure routing, pre-header replay latch, DNS retirement, cancellation, TLS BIO waits and concurrent streams passed");
 }

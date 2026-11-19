@@ -113,11 +113,29 @@ std::atomic<bool> gapOverflow{false},active{false},ready{false},stopWanted{false
 // cleared before it drops, so it never reads true without READY.
 std::atomic<bool> relayOn{false};
 // Version mismatch (phone link v2): strikes in a row of sessions that ended
-// before HELLO_ACK by the phone's version RESET or by silence (the core's
-// helloEnd()); three hold auto-reconnect (admit() answers ROLE_BLOCKED) until
-// `openphone` / `phone pair` or a reboot. READY resets both. RAM only.
+// before HELLO_ACK by the phone's version RESET (the core's helloEnd()
+// VersionSignal; silence is counted in the stats but is no strike); three hold
+// auto-reconnect (admit() answers ROLE_BLOCKED) until `openphone` / `phone
+// pair`, a reboot, or the probe kVersionProbeMs later. READY resets both. RAM only.
 std::atomic<uint8_t> versionStrikes{0};
 std::atomic<bool> versionLatched{false};
+// When the hold latched. admit() probes once kVersionProbeMs later: the hold
+// lifts with two strikes, so one more version RESET latches it again at once.
+std::atomic<uint32_t> versionLatchedAt{0};
+constexpr uint32_t kVersionProbeMs=600000;
+// What the last finished scan heard (noteScan): every report, and the pipe's
+// advertisements. The path view's hint (phonePipePathView) and `phone status`.
+std::atomic<uint32_t> lastScanReports{0},lastScanMatches{0};
+std::atomic<bool> lastScanKnown{false};
+// Rate limits: an advertisement heard in another client's scan expedites the
+// next attempt at most every 5 s (gapCallback, BTC task); a caller's demand
+// (phonePipeNudgeReconnect) at most every 3 s.
+constexpr uint32_t kForeignAdvertMs=5000,kNudgeMs=3000;
+// The retry a closing READY link shows before blePeerNoteLinkLost schedules
+// it: the phone's first reconnect step (BLE_Peers.cpp).
+constexpr uint32_t kRetiringRetryMs=2000;
+std::atomic<uint32_t> foreignAdvertAt{0},nudgeAt{0};
+std::atomic<bool> foreignAdvertSeen{false},nudgeSeen{false};
 // This pipe holds gBleState for its console row (blePipeConsoleStateAcquire).
 // Taken and given back outside the owner mutex: the lifecycle lock is never
 // taken under it.
@@ -314,6 +332,28 @@ bool hasService(const uint8_t* data,size_t size) {
   }
   return false;
 }
+// One shot per window: true when `at` is unset or `span` has passed since it,
+// and this caller claimed the new window (any task, BTC included).
+bool claimWindow(std::atomic<uint32_t>& at,std::atomic<bool>& seen,uint32_t now,uint32_t span) {
+  uint32_t last=at.load();
+  if(seen.load() && !hw1pipe::expired(now,last,span))return false;
+  if(!at.compare_exchange_strong(last,now))return false;
+  seen=true;return true;
+}
+// P4: another client's scan (the ring's or the glasses' no-address scan, a
+// manual scan) heard the phone's advertisement while the pipe is down: the
+// phone is back in range with its app advertising, so the next attempt comes
+// forward now. Opportunistic: only those scans see it. No intent change, so an
+// attempt in flight continues; window 0 keeps a user's auto=off.
+void noteForeignAdvert(const esp_ble_gap_cb_param_t* p) {
+  if(p->scan_rst.search_evt!=ESP_GAP_SEARCH_INQ_RES_EVT || ready.load())return;
+  if(p->scan_rst.adv_data_len>31 || !hasService(p->scan_rst.ble_adv,p->scan_rst.adv_data_len))return;
+  // Our own last scan already heard the phone (the link or handshake failed):
+  // hearing it again is no new evidence, so the backoff keeps building.
+  if(lastScanKnown.load() && lastScanMatches.load())return;
+  if(!claimWindow(foreignAdvertAt,foreignAdvertSeen,millis(),kForeignAdvertMs))return;
+  (void)blePeerExpediteReconnect(BLE_PEER_PHONE,0);
+}
 bool gapCallback(esp_gap_ble_cb_event_t kind,esp_ble_gap_cb_param_t* p) {
   if(!p)return false;
   Route r;
@@ -333,7 +373,8 @@ bool gapCallback(esp_gap_ble_cb_event_t kind,esp_ble_gap_cb_param_t* p) {
       if(!p->scan_stop_cmpl.status)scanTally.end(millis());
       e.kind=GapKind::ScanStopped;e.status=p->scan_stop_cmpl.status;break;
     case ESP_GAP_BLE_SCAN_RESULT_EVT:
-      if(!r.scan)return false;
+      // Another client's scan: the event stays with it (false) either way.
+      if(!r.scan){noteForeignAdvert(p);return false;}
       if(p->scan_rst.search_evt==ESP_GAP_SEARCH_INQ_CMPL_EVT){scanTally.end(millis());e.kind=GapKind::ScanDone;break;}
       if(p->scan_rst.search_evt!=ESP_GAP_SEARCH_INQ_RES_EVT)return true;
       scanTally.report();
@@ -364,6 +405,10 @@ bool currentJob() {
   if(enrolling && (!enrollmentEpoch || !transportSessionEpochIsLive(enrollmentSource,enrollmentEpoch)))return false;
   return blePeerIntentIsCurrent(BLE_PEER_PHONE,intent,identityGeneration);
 }
+// The job as `openphone` sees it (owner mutex held): none, one whose intent is
+// still current (it must continue), or one already being replaced or stopped.
+enum class JobView : uint8_t { None, Current, Stale };
+JobView jobView(){return !job?JobView::None:currentJob()?JobView::Current:JobView::Stale;}
 // READY and the console's link record change together, under the owner mutex.
 // The record goes out after ready and is cleared before it, so a valid record
 // always means READY; it is set only while this pipe's client holds the link.
@@ -485,6 +530,7 @@ void noteScan(uint32_t now,bool cut) {
   pendingScan=scanRecord(now,scanTally.matches.load()?hw1coex::ScanOutcome::Found
                              :cut?hw1coex::ScanOutcome::Aborted:hw1coex::ScanOutcome::Missed);
   lastScanDurationMs=pendingScan.durationMs;scanRecordPending=true;
+  lastScanReports=pendingScan.reports;lastScanMatches=pendingScan.matches;lastScanKnown=true;
 }
 // The scan never started: its parameters or start refused, synchronously or
 // by the controller.
@@ -736,16 +782,21 @@ void tickLocked(uint32_t now) {
       setupHeld=true;heldToken=t;grantAt=now;
       BleCentralLinkGuard link(BleCentralLink::Phone,ENABLE_G2_GLASSES);  // the arms keep their links where glasses can open
       if(!link) {
+        const bool wasEnrolling=enrolling;
         job=false;enrolling=false;
         setStep(Step::Idle,PipeStatus::NoLinkCapacity,now);leaveSetup();
+        // P3: no link to spare is contention, never an end state: retried.
+        if(!wasEnrolling)blePeerNoteAttemptFailed(BLE_PEER_PHONE,intent,identityGeneration);
       } else {link.retain(&phoneGatt);beginJob(now);}
     } else if(!bleSetupLive(BleSetupClient::Phone,t)) {
       // The worker ended this job without a turn (the pipe stopping, or a
       // grant that went unused): never stay Waiting and answer BUSY forever.
       const bool nudge=!enrolling && request.explicitReseek && !request.autoReconnect;
+      const bool wasEnrolling=enrolling;
       job=false;enrolling=false;wantToken.store(0);
       setStep(Step::Idle,PipeStatus::TurnEndedUnused,now);
       if(nudge)(void)blePeerRestoreDroppedReseek(BLE_PEER_PHONE,intent,identityGeneration);
+      if(!wasEnrolling)blePeerNoteAttemptFailed(BLE_PEER_PHONE,intent,identityGeneration);
     }
   }
   if(step==Step::Link) {
@@ -776,15 +827,23 @@ void tickLocked(uint32_t now) {
       }
     }
     if(phoneGatt.idle() || phoneGatt.phase()==Gatt::Phase::Retiring || phoneGatt.phase()==Gatt::Phase::Quarantined) {
-      // A strike: this attempt's HELLO went out and the session ended before
-      // HELLO_ACK by the phone's version RESET or by silence (the core latched
-      // which; start() resets it, so the attempt must have reached Pipe).
-      if(!published && phoneGatt.enteredAt(Gatt::Phase::Pipe) && phoneGatt.pipe.helloEnd()!=hw1pipe::HelloEnd::None) {
+      // This attempt's HELLO went out and the session ended before HELLO_ACK
+      // by the phone's version RESET or by silence (the core latched which;
+      // start() resets it, so the attempt must have reached Pipe). Both count
+      // as a mismatch for diagnostics, but only the phone's version RESET is a
+      // strike: silence is also what a Bluetooth toggle or marginal radio
+      // looks like out and about, so it stays an ordinary, retried failure.
+      const hw1pipe::HelloEnd hello=phoneGatt.pipe.helloEnd();
+      if(!published && phoneGatt.enteredAt(Gatt::Phase::Pipe) && hello==hw1pipe::HelloEnd::Silent) {
+        ++sessionStats.versionMismatches;
+        fail(now,phoneGatt.pipe.error,PipeStatus::VersionMismatch);
+      } else if(!published && phoneGatt.enteredAt(Gatt::Phase::Pipe) && hello==hw1pipe::HelloEnd::VersionSignal) {
         ++sessionStats.versionMismatches;
         const uint8_t strikes=uint8_t(versionStrikes.load()<255?versionStrikes.load()+1:255);versionStrikes=strikes;
         if(strikes>=3) {
           // Held: the ring gets its link back while the phone cannot use one.
-          versionLatched=true;bleCentralPhoneEnabled(false);
+          // admit() probes again kVersionProbeMs later.
+          versionLatchedAt=now;versionLatched=true;bleCentralPhoneEnabled(false);
           fail(now,phoneGatt.pipe.error,PipeStatus::AppTooOld);
           // The hold ends `phone pair new`'s window too: its attempts skip
           // admit() and would keep claiming a link the ring may now hold. The
@@ -827,7 +886,17 @@ void tickLocked(uint32_t now) {
     }
     if(phoneGatt.idle() && !scanParamsPending &&
        !scanStarted && !scanStartPending && !scanStopPending) {
-      const bool lost=job;job=false;enrolling=false;clearReady();
+      const bool lost=job,wasEnrolling=enrolling;job=false;enrolling=false;clearReady();
+      // P3: every end of an attempt schedules the next one. A session that
+      // was READY starts a new episode; an attempt that never got there is
+      // retried from its end, without changing the intent. An enrollment
+      // keeps the old link-lost call (its window drives its own retries).
+      // Before Idle is published, so the lock-free path view never reads an
+      // idle pipe with nothing scheduled.
+      if(lost) {
+        if(published || wasEnrolling)blePeerNoteLinkLost(BLE_PEER_PHONE);
+        else blePeerNoteAttemptFailed(BLE_PEER_PHONE,intent,identityGeneration);
+      }
       // Publish the idle route before the next setup can start: while
       // route.scan still reads true the GAP interceptor swallows the next
       // client's scan events (consume() ends a retiring scan without routeSet).
@@ -844,7 +913,6 @@ void tickLocked(uint32_t now) {
       if(recoveryNeeded.exchange(false))bleCentralRecoveryBlock(false);
       endTurn();
       if(held && recoveryNeeded.exchange(false))bleCentralRecoveryBlock(false);
-      if(lost)blePeerNoteLinkLost(BLE_PEER_PHONE);
     } else if(!recoveryNeeded.load() &&
         hw1pipe::expired(now,at,scanStopRefused?scanUsed.seconds*1000u+1000u:4000u))
       cleanupExpired(now,PipeStatus::CleanupIncomplete);
@@ -895,6 +963,7 @@ void publishSummary() {
   for(const auto& stream:phoneGatt.pipe.streams)if(stream.live())++(stream.console?s.consoleStreams:s.relayStreams);
   const auto& st=sessionStats;
   s.ended=st.ended;s.lastEnd=st.lastEnd;s.versionMismatches=st.versionMismatches;
+  s.scanKnown=lastScanKnown.load();s.scanReports=lastScanReports.load();s.scanMatches=lastScanMatches.load();
   std::memcpy(s.endReason,st.endReason,sizeof(s.endReason));
   portENTER_CRITICAL(&summaryMux);linkSummary=s;portEXIT_CRITICAL(&summaryMux);
 }
@@ -972,17 +1041,26 @@ BlePeerConnectAdmission admit(const BlePeerConnectRequest& wanted) {
   // is nothing to open on (the scheduler never starts the stack).
   if(!active.load() && (!bleStackReady() || !phoneLinkOpen()))return BlePeerConnectAdmission::ROLE_BLOCKED;
   // A version-mismatch hold keeps the scheduler's intent (it retries every
-  // 15 s without work) until a user's `openphone` or `phone pair` lifts it.
-  if(stopWanted.load() || versionLatched.load())return BlePeerConnectAdmission::ROLE_BLOCKED;
+  // 15 s without work) until a user's `openphone` or `phone pair` lifts it,
+  // or kVersionProbeMs pass: then one probe attempt goes out with two
+  // strikes, so another version RESET holds it again at once.
+  if(stopWanted.load())return BlePeerConnectAdmission::ROLE_BLOCKED;
+  if(versionLatched.load() && !hw1pipe::expired(millis(),versionLatchedAt.load(),kVersionProbeMs))
+    return BlePeerConnectAdmission::ROLE_BLOCKED;
   // Glasses may be off. In G2 mode the arms keep their capacity through
   // reserveArms (Waiting step) and win setup through the accessory gate.
   Lock lock;if(!lock)return BlePeerConnectAdmission::BUSY;
+  if(versionLatched.load() && hw1pipe::expired(millis(),versionLatchedAt.load(),kVersionProbeMs)) {
+    versionStrikes=2;versionLatched=false;bleCentralPhoneEnabled(true);
+  }
   if(ready.load())return BlePeerConnectAdmission::ALREADY_UP;
   if(job || forgetWanted || step!=Step::Idle || authCoolingDown(millis()))return BlePeerConnectAdmission::BUSY;
   if(!blePeerConnectRequestIsCurrent(BLE_PEER_PHONE,wanted))return BlePeerConnectAdmission::NO_TARGET;
   uint32_t t=0;if(!bleSetupClaim(BleSetupClient::Phone,&t))return BlePeerConnectAdmission::BUSY;
   request=wanted;intent=wanted.intentGeneration;identityGeneration=wanted.identityGeneration;
-  enrolling=false;job=true;jobAt=millis();wantToken.store(t);setStep(Step::Waiting,PipeStatus::WaitingForRadio,jobAt);
+  // published names this job's READY from here on (beginJob clears it again):
+  // a job that ends while Waiting is a failed attempt, not the last session's loss.
+  enrolling=false;job=true;published=false;jobAt=millis();wantToken.store(t);setStep(Step::Waiting,PipeStatus::WaitingForRadio,jobAt);
   if(!bleSetupPublish(BleSetupClient::Phone,t)) {
     bleSetupCancelClaim(BleSetupClient::Phone,t);wantToken.store(0);job=false;
     setStep(Step::Idle,PipeStatus::Disconnected,jobAt);return BlePeerConnectAdmission::BUSY;
@@ -1053,9 +1131,14 @@ struct TurnEnv {
 };
 const char* setupLabel(uint32_t){return "phone";}
 hw1setup::Verdict setupReady(uint32_t t,const hw1setup::WaitInfo& info) {
+  constexpr uint32_t kRecoveryWaitMs=30000;  // the most a host recovery holds the phone's job
   if(!active.load() || stopWanted.load() || quiesceWanted.load() || wantToken.load()!=t)
     return {hw1setup::Ready::Drop,hw1setup::kInactive};
-  if(bleCentralRecoveryBlocked())return {hw1setup::Ready::Wait,hw1setup::kRecovery};
+  // A host recovery in progress: wait at most 30 s, then drop the job, which
+  // ends unused and is retried (blePeerNoteAttemptFailed) instead of waiting
+  // without bound.
+  if(bleCentralRecoveryBlocked())
+    return {info.queuedMs<kRecoveryWaitMs?hw1setup::Ready::Wait:hw1setup::Ready::Drop,hw1setup::kRecovery};
   // On a C6 with fewer than four links the ring gives its link up for the
   // pipe; until its retirement completes the phone cannot get one. Wait for
   // it, at most 10 s.
@@ -1247,6 +1330,60 @@ void phonePipePairClose(uint32_t id) {
   pairCloseWanted=id;
 }
 void phonePipeTick(){if(active.load())g2RingYieldToPhonePipe();}
+// P7: the phone path for the LLM source and the status text. Atomics and the
+// scheduler's snapshot only: never the owner mutex. Not from the BTC task
+// (isBleServerInitialized tries the lifecycle lock without waiting).
+PhonePathView phonePipePathView() {
+  PhonePathView v;  // Off
+  if(!gSettings.bleEnabled)return v;
+  if(isBleServerInitialized()){v.hint=PhonePathHint::ConsoleServer;return v;}
+  if(ready.load()){v.state=relayOn.load()?PhonePathState::Up:PhonePathState::RelayOff;return v;}
+  BlePeerReconnectSnapshot snap;(void)blePeerReconnectSnapshot(BLE_PEER_PHONE,snap);
+  if(!snap.hasSavedTarget || status.load()==PipeStatus::NoSecret){v.state=PhonePathState::NotPaired;return v;}
+  v.attempt=snap.launchedAttempts;
+  const uint32_t now=millis();
+  v.state=PhonePathState::Held;
+  if(snap.userDisconnect){v.hint=PhonePathHint::ClosedByUser;return v;}
+  if(versionLatched.load()) {
+    v.hint=PhonePathHint::AppTooOld;
+    const uint32_t held=now-versionLatchedAt.load();
+    v.retryInMs=held<kVersionProbeMs?kVersionProbeMs-held:0;
+    return v;
+  }
+  const Step now_step=step.load();
+  if(now_step==Step::Fault || bleStackLifecycleFaulted()){v.hint=PhonePathHint::RadioFault;return v;}
+  if(now_step==Step::Waiting || now_step==Step::ScanParams || now_step==Step::Scanning || now_step==Step::Link) {
+    v.state=PhonePathState::Connecting;return v;
+  }
+  // A READY link that just dropped is still closing: the scheduler re-arms it
+  // (blePeerNoteLinkLost) only once the GATT client is idle. With auto on that
+  // is a retry about to be scheduled, not a hold. With auto off it stays Held.
+  if(now_step==Step::Retiring && !snap.wantsReconnect && snap.autoReconnect) {
+    v.state=PhonePathState::Retrying;v.retryInMs=kRetiringRetryMs;v.attempt=0;return v;
+  }
+  if(snap.wantsReconnect && (snap.autoReconnect || snap.explicitReseek)) {
+    v.state=PhonePathState::Retrying;
+    const int32_t left=int32_t(snap.dueMs-now);
+    v.retryInMs=left>0?uint32_t(left):0;
+    if(lastScanKnown.load()) {
+      const uint32_t reports=lastScanReports.load(),matches=lastScanMatches.load();
+      v.hint=matches?PhonePathHint::FoundNoLink:reports?PhonePathHint::NotHeard:PhonePathHint::RadioSilent;
+    }
+    return v;
+  }
+  return v;  // Held: auto-reconnect off and no reseek window
+}
+// A caller needs the phone now (an LLM request): bring the next attempt
+// forward, never cancel one in flight. With the pipe closed and auto on, the
+// scheduler's admit() opens it. With auto off, a 60 s reseek window. At most
+// one expedite per kNudgeMs.
+bool phonePipeNudgeReconnect() {
+  // A READY pipe (relay on or off) has no attempt to bring forward, and an
+  // expedite then would reach the scheduler as ALREADY_UP.
+  if(ready.load())return phonePathRecoverable(phonePipePathView());
+  if(claimWindow(nudgeAt,nudgeSeen,millis(),kNudgeMs))(void)blePeerExpediteReconnect(BLE_PEER_PHONE,60000);
+  return phonePathRecoverable(phonePipePathView());
+}
 
 PhonePipeOpenResult phonePipeOpen(PhonePipeStream& out,const char* host,uint16_t port,uint32_t budgetMs,const std::atomic<bool>& cancelled,const std::atomic<bool>* interrupted) {
   using Status=PhonePipeOpenStatus;
@@ -1409,24 +1546,57 @@ static bool liftVersionHold() {
   return lifted;
 }
 static const char* phoneStatusRow(const String& args){RETURN_VALID_IF_VALIDATE_CSTR();return phoneStatusCommand(args);}
+// Seconds until the scheduler's next phone attempt (rounded up, 0 when due).
+static uint32_t nextAttemptSeconds() {
+  BlePeerReconnectSnapshot snap;(void)blePeerReconnectSnapshot(BLE_PEER_PHONE,snap);
+  const int32_t left=int32_t(snap.dueMs-millis());
+  return snap.wantsReconnect && left>0?(uint32_t(left)+999u)/1000u:0u;
+}
 // openphone: open the phone link on the shared client stack (bringing the
-// stack up when it is off) and connect to the paired phone now.
+// stack up when it is off) and connect to the paired phone now. Idempotent: it
+// never cancels an attempt in flight (only closephone stops one); a repeat
+// brings the next attempt forward instead.
 static const char* cmd_openphone(const String&) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if(isBleServerInitialized())return "Error: the app console server owns Bluetooth; run 'closeconsole', then 'openphone'";
   (void)liftVersionHold();  // before the open, which reads it
+  EXT_RAM_BSS_ATTR static char text[160];
   if(!phoneLinkOpen()) {
-    EXT_RAM_BSS_ATTR static char text[96];
     snprintf(text,sizeof(text),"Error: phone link could not open (%s)",statusText());
     return text;
   }
   if(ready.load())return "Error: The phone link is already open and connected. Stop it first with 'closephone' to restart it.";
-  BlePeerConnectRequest wanted;
-  if(!blePeerBeginManualConnectRequest(BLE_PEER_PHONE,wanted))
-    return "Phone: open on the client stack (no enrolled phone to connect; 'phone pair new' enrols one)";
-  return admit(wanted)==BlePeerConnectAdmission::STARTED
-      ?"Phone: open; connecting to the paired phone"
-      :"Phone: open; connect pending (busy, the scheduler retries)";
+  // The job under the owner mutex; admit() takes it itself, so it is released
+  // before the admission (admit() re-checks the job and answers BUSY).
+  JobView view=JobView::Stale;bool idle=false;
+  {Lock lock;if(lock){view=jobView();idle=view==JobView::None && step==Step::Idle;}}
+  if(view==JobView::Current) {
+    // An attempt for the current intent is queued or running: it continues,
+    // and the next one (if it fails) comes at once.
+    (void)blePeerExpediteReconnect(BLE_PEER_PHONE,60000);
+    snprintf(text,sizeof(text),"Phone: already connecting (%s); the attempt continues",statusText());
+    return text;
+  }
+  if(idle) {
+    BlePeerConnectRequest wanted;
+    if(!blePeerBeginManualConnectRequest(BLE_PEER_PHONE,wanted))
+      return "Phone: open on the client stack (no enrolled phone to connect; 'phone pair new' enrols one)";
+    if(admit(wanted)==BlePeerConnectAdmission::STARTED)return "Phone: open; connecting to the paired phone";
+  }
+  // A job that is retiring or already replaced, the owner busy, or an
+  // admission refused (auth cooldown, setup claim): the scheduler tries next.
+  // A user's earlier closephone still stamps the peer; this openphone lifts it.
+  if(!blePeerExpediteReconnect(BLE_PEER_PHONE,60000)) {
+    // Refused because the attempt reached READY meanwhile: a manual request
+    // now would replace the intent its link holds and drop it.
+    if(ready.load())return "Phone: open; connected to the paired phone";
+    BlePeerConnectRequest wanted;
+    if(!blePeerBeginManualConnectRequest(BLE_PEER_PHONE,wanted))
+      return "Phone: open on the client stack (no enrolled phone to connect; 'phone pair new' enrols one)";
+    (void)blePeerExpediteReconnect(BLE_PEER_PHONE,60000);
+  }
+  snprintf(text,sizeof(text),"Phone: open; next attempt in %lu s",(unsigned long)nextAttemptSeconds());
+  return text;
 }
 // closephone: stop the pipe; the glasses, the ring and the stack stay up.
 static const char* cmd_closephone(const String&) {
@@ -1656,4 +1826,11 @@ extern const CommandEntry relayCommands[] = {
 };
 extern const size_t relayCommandsCount = 1;
 
+#endif
+
+#if !(ENABLE_BLUETOOTH && ENABLE_BLE_PHONE_PIPE)
+// BLE_PhonePipePath.h declares these in every build: without the pipe there is
+// no phone path.
+PhonePathView phonePipePathView(){return PhonePathView{};}
+bool phonePipeNudgeReconnect(){return false;}
 #endif

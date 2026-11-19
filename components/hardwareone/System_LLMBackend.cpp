@@ -28,6 +28,7 @@
 #endif
 #if ENABLE_LLM_SOURCE_HTTP
   #include "System_LLMHttp.h"
+  #include "System_LLMAutostartCore.h"
 #endif
 
 // ============================================================================
@@ -42,6 +43,9 @@ static LlmBackendKind sActiveKind = LlmBackendKind::None;
 // Unload retains display history. Remember its source until the next selection
 // so unloading cannot bypass the explicit Clear boundary for an agent route.
 static LlmBackendKind sUnloadedKind = LlmBackendKind::None;
+// An explicit llmunload this boot: the HTTP autostart and the lazy select of
+// the default model stay off until the next explicit selection.
+static bool sUserUnloadedThisBoot = false;
 #endif
 EXT_RAM_BSS_ATTR static LlmModelDesc sActiveDesc;  // PSRAM: task-context select/unload/read only (initializer dropped: .ext_ram.bss is zeroed)
 
@@ -240,8 +244,20 @@ bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
   if (!gSettings.llmEnabled) return bail("the LLM is disabled (llmenabled 0)");
 
   LlmModelDesc d;
+#if ENABLE_LLM_SOURCE_HTTP
+  // The HTTP source says why it is not there (disabled, not configured); the
+  // network path never makes it unavailable.
+  char httpReason[96];
+  const bool httpId = !strncasecmp(id, "http:", 5);
+  if (!llmResolveModelId(id, &d))
+    return bail(httpId && httpLlmUnavailableReason(httpReason, sizeof(httpReason)) ? httpReason : "no such model");
+  if (!d.available)
+    return bail(d.backend == LlmBackendKind::Http && httpLlmUnavailableReason(httpReason, sizeof(httpReason))
+                    ? httpReason : "that model is not available right now");
+#else
   if (!llmResolveModelId(id, &d)) return bail("no such model");
   if (!d.available)               return bail("that model is not available right now");
+#endif
 
 #if ENABLE_LLM_SOURCE_HTTP
   // Agent routes must not inherit a different source's visible transcript or
@@ -272,6 +288,9 @@ bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
 #endif
       sActiveDesc = d;
       sActiveKind = LlmBackendKind::Onboard;
+#if ENABLE_LLM_SOURCE_HTTP
+      sUserUnloadedThisBoot = false;
+#endif
       return true;
     }
 #endif
@@ -285,6 +304,9 @@ bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
 #endif
       sActiveDesc = d;                      // descriptor before kind — see above
       sActiveKind = LlmBackendKind::Cm5;
+#if ENABLE_LLM_SOURCE_HTTP
+      sUserUnloadedThisBoot = false;
+#endif
 #ifdef ESP_PLATFORM
       systemEventPost(SYSEVT_LLM_MODEL_LOADED, d.name, "cm5");
 #endif
@@ -296,6 +318,7 @@ bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
       if (!httpLlmSelectByName(d.name, errOut, errCap)) return false;
       sActiveDesc = d;
       sActiveKind = LlmBackendKind::Http;
+      sUserUnloadedThisBoot = false;
 #ifdef ESP_PLATFORM
       systemEventPost(SYSEVT_LLM_MODEL_LOADED, d.name, "http");
 #endif
@@ -310,6 +333,9 @@ bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
 void llmBackendUnload() {
 #if ENABLE_LLM_SOURCE_HTTP
   if (sActiveKind != LlmBackendKind::None) sUnloadedKind = sActiveKind;
+  // The only caller is the llmunload command (a user action): no automatic
+  // reselection of the default model for the rest of this boot.
+  sUserUnloadedThisBoot = true;
 #endif
   switch (sActiveKind) {
 #if ENABLE_LLM_SOURCE_ONBOARD
@@ -564,18 +590,78 @@ int llmBackendTokenize(const char* text, int* outTokens, int maxTokens) {
   }
 }
 
+#if ENABLE_LLM_SOURCE_HTTP
+// The default model is an http: id and nothing stops selecting it on its own:
+// LLM on, autostart on (after a RAM flush's override), nothing selected and no
+// llmunload this boot.
+static bool httpDefaultWanted() {
+  return gSettings.llmEnabled && ramFlushResolve(RF_LLM, gSettings.llmAutoStart) &&
+         !strncasecmp(gSettings.llmDefaultModel.c_str(), "http:", 5) &&
+         sActiveKind == LlmBackendKind::None && !sUserUnloadedThisBoot;
+}
+static bool selectHttpDefault(char* error, size_t cap) {
+  return llmBackendSelect(gSettings.llmDefaultModel.c_str(), error, cap);
+}
+#endif
+
+bool llmBackendEnsureDefaultSelected() {
+#if ENABLE_LLM_SOURCE_HTTP
+  if (sActiveKind == LlmBackendKind::None && httpDefaultWanted()) {
+    char error[96] = {0};
+    (void)selectHttpDefault(error, sizeof(error));
+  }
+#endif
+  return sActiveKind != LlmBackendKind::None;
+}
+
+size_t llmBackendNotReadyReason(char* out, size_t cap) {
+  if (!out || !cap) return 0;
+  out[0] = '\0';
+  auto put = [&](const char* text) {
+    const size_t n = strlcpy(out, text, cap);
+    return n < cap ? n : cap - 1;
+  };
+  if (!gSettings.llmEnabled) return put("LLM disabled (llmenabled 0)");
+  if (sActiveKind == LlmBackendKind::None) {
+#if ENABLE_LLM_SOURCE_HTTP
+    // The lazy select of the http: default failed for a configuration reason:
+    // name it, not an llmload that would fail the same way.
+    if (httpDefaultWanted() && httpLlmUnavailableReason(out, cap)) return strlen(out);
+    return put("no model selected (llmload http:openclaw)");
+#else
+    return put("no model selected (llmload <model id>)");
+#endif
+  }
+  if (llmBackendIsReady()) return 0;
+  if (!llmBackendIsDone()) return put("busy: a request is running");
+#if ENABLE_LLM_SOURCE_HTTP
+  if (sActiveKind == LlmBackendKind::Http) {
+    if (httpLlmUnavailableReason(out, cap)) return strlen(out);
+    if (!httpLlmPathUp()) return httpLlmPathText(out, cap);
+  }
+#endif
+  const LlmStatus st = llmBackendStatus();
+  if (st.state == LlmState::GENERATING) return put("busy: a request is running");
+  return put(st.errorMsg[0] ? st.errorMsg : "model not ready");
+}
+
 void llmBackendTick() {
 #if ENABLE_LLM_SOURCE_HTTP
   httpLlmTick();
-  static bool sHttpAutostartTried = false;
-  if (!sHttpAutostartTried && sActiveKind == LlmBackendKind::None &&
-      gSettings.llmEnabled && ramFlushResolve(RF_LLM, gSettings.llmAutoStart) &&
-      gSettings.llmDefaultModel.startsWith("http:")) {
-    LlmModelDesc d;
-    if (llmResolveModelId(gSettings.llmDefaultModel.c_str(), &d) && d.available) {
-      sHttpAutostartTried = true;
-      char error[96] = {0};
-      (void)llmBackendSelect(d.id, error, sizeof(error));
+  // HTTP default autostart: a level rule with backoff (System_LLMAutostartCore.h),
+  // replacing the one-shot latch that never retried once the phone returned.
+  static llmautostart::Retry sHttpAutostart;
+  static char sHttpAutostartLast[96] = {0};
+  sHttpAutostart.notePath(httpLlmPathUp());
+  if (httpDefaultWanted() && sHttpAutostart.due(millis())) {
+    char error[96] = {0};
+    const bool ok = selectHttpDefault(error, sizeof(error));
+    sHttpAutostart.result(ok, millis());
+    const char* result = ok ? "selected" : (error[0] ? error : "failed");
+    if (strcmp(result, sHttpAutostartLast)) {
+      strlcpy(sHttpAutostartLast, result, sizeof(sHttpAutostartLast));
+      DEBUG_UART_CONTROLF("[LLM] http autostart %s: %s%s", gSettings.llmDefaultModel.c_str(), result,
+                          ok ? "" : " (retrying with backoff)");
     }
   }
 #endif

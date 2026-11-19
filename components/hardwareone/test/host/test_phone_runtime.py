@@ -34,8 +34,10 @@ SPIED = (
 # Production order. TurnEnv, the setup ops and phonePipeSetupOps sit between
 # BEFORE and AFTER.
 BEFORE = (
-    'void setStep(', 'void routeSet(', 'bool matches(', 'bool hasService(', 'bool gapCallback(',
-    'bool currentJob(', 'void setReady() ', 'bool clearReady() ', 'void formatPhoneEnd(', 'void fail(', 'void cleanupExpired(',
+    'void setStep(', 'void routeSet(', 'bool matches(', 'bool hasService(',
+    # An advertisement in another client's scan expedites the next attempt (P4).
+    'bool claimWindow(', 'void noteForeignAdvert(', 'bool gapCallback(',
+    'bool currentJob(', 'JobView jobView()', 'void setReady() ', 'bool clearReady() ', 'void formatPhoneEnd(', 'void fail(', 'void cleanupExpired(',
     'void leaveSetup() ', 'void endTurn() ',
     'void configureScan(', 'void startForget(', 'hw1coex::ScanRecord scanRecord(', 'void noteScan(',
     'void noteScanFailed(uint32_t now) ', 'void noteAttempt(', 'void noteAttemptIfWanted(', 'void flushRecords(',
@@ -59,12 +61,14 @@ AFTER = (
     'bool phonePipeLinkSummary(',
     'bool phonePipeLinkRecord(', 'void phonePipeNoteConsoleActivity(',
     'bool phonePipeEnrolling(', 'PhonePairView phonePipePairView(', 'void phonePipePairClose(',
+    # The phone path for the LLM source and the status text (P7).
+    'PhonePathView phonePipePathView(', 'bool phonePipeNudgeReconnect(',
     'PhonePipeOpenResult phonePipeOpen(', 'void phonePipeClose(',
     # A busy command's answer, then `phone scan`.
     'static const char* pipeBusy(', 'static const char* scanCommand(',
     # The `phone` and `relay` command handlers (the tables are registry data).
     'static bool localAdmin(', 'static const char* startLinkIfStopped(', 'static bool liftVersionHold(',
-    'static const char* cmd_openphone(', 'static const char* cmd_closephone(',
+    'static uint32_t nextAttemptSeconds(', 'static const char* cmd_openphone(', 'static const char* cmd_closephone(',
     'static const char* phoneScanCommand(', 'static const char* phoneForgetCommand(',
     'static const char* phonePairCommand(', 'static const char* phonePairNewCommand(',
     'static const char* phoneStatsCommand(',
@@ -260,7 +264,8 @@ def generated(component: Path) -> str:
     phone = (component / 'BLE_PhonePipe.cpp').read_text()
     check_sources(phone)
     kinds = '\n'.join(extract_block(phone, k) + ';' for k in
-                      ('enum class Step', 'enum class GapKind', 'struct GapEvent', 'struct Route', 'enum class PskLoad'))
+                      ('enum class Step', 'enum class GapKind', 'struct GapEvent', 'struct Route', 'enum class PskLoad',
+                       'enum class JobView'))
     # The console's record type, from the public header.
     public = (component / 'BLE_PhonePipe.h').read_text()
     kinds += '\n' + '\n'.join(extract_block(public, k) + ';' for k in

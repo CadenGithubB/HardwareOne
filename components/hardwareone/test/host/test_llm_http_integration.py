@@ -20,7 +20,8 @@ JSON_INCLUDE = COMPONENT.parent / 'hardwareone_libs/ArduinoJson/src'
 
 
 def without_includes(path):
-    return re.sub(r'^\s*#\s*include[^\n]*$', '', path.read_text(), flags=re.M)
+    text = re.sub(r'^\s*#\s*include[^\n]*$', '', path.read_text(), flags=re.M)
+    return re.sub(r'^\s*#\s*pragma once\s*$', '', text, flags=re.M)
 
 
 def flag_header(text, flags):
@@ -65,7 +66,7 @@ def main():
     harness = (HERE / 'llm_http_integration_harness.cpp').read_text()
     headers = '\n'.join(without_includes(COMPONENT / name) for name in (
         'System_LLMTypes.h', 'System_LLMHomeMenuCore.h', 'System_LLMBackend.h',
-        'System_LLMReplyLimits.h', 'System_LLMChat.h'))
+        'System_LLMReplyLimits.h', 'System_LLMChat.h', 'System_LLMAutostartCore.h'))
     source = '\n'.join(without_includes(COMPONENT / name) for name in (
         'System_LLMBackend.cpp', 'System_LLMChat.cpp'))
     unit = harness.replace('// INSERT_PRODUCTION_HEADERS', headers).replace(

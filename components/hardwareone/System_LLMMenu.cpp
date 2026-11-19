@@ -457,9 +457,17 @@ const char* cmd_llm_ask(const String& args) {
   const int base = json ? 1 : 0;             // skip the leading "json" token
   String first = ca.arg(base);
 
-  if (!llmIsReady())
-    return json ? "{\"schema\":1,\"ok\":false,\"error\":\"model not ready\"}"
-                : "Error: no model loaded";
+  if (!llmIsReady()) {
+    // Guided questions need the on-device model; say why it is not ready.
+    char why[128] = {0};
+    if (llmBackendActiveKind() == LlmBackendKind::Onboard) llmBackendNotReadyReason(why, sizeof(why));
+    if (!why[0]) strlcpy(why, "no on-device model loaded", sizeof(why));
+    for (char* c = why; *c; ++c) if (*c == '"' || *c == '\\' || (unsigned char)*c < 0x20) *c = '\'';
+    if (json) snprintf(menuCmdBuf, sizeof(menuCmdBuf),
+                       "{\"schema\":1,\"ok\":false,\"error\":\"model not ready\",\"reason\":\"%s\"}", why);
+    else snprintf(menuCmdBuf, sizeof(menuCmdBuf), "Error: no model loaded (%s)", why);
+    return menuCmdBuf;
+  }
 
   // Re-ask the last guided question (PLAIN — no suppress list).
   if (first == "repeat") {

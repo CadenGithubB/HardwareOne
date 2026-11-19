@@ -23,10 +23,20 @@ class Attempt {
            why==Failure::Network && nextAvailable && !(tried_ & pathBit(next));
   }
   bool tried(Path p) const {return (tried_ & pathBit(p))!=0;}
+  // The same path once more after a Network or Resources failure before any
+  // HTTP write (the phone link dropped, or the phone's connect timed out, while
+  // it was the only path). At most once per request; the path stays selected
+  // and tried_ is unchanged, so fallback() never returns to a tried path.
+  bool retrySame(Failure why) {
+    if(finished || mayHaveSent || path==Path::None || sameRetries_>=1 ||
+       (why!=Failure::Network && why!=Failure::Resources)) return false;
+    ++sameRetries_; return true;
+  }
+  uint8_t sameRetries() const {return sameRetries_;}
   void beforeHttpWrite() { mayHaveSent=true; }
   void finish() { finished=true; }
  private:
-  uint8_t tried_=0;
+  uint8_t tried_=0,sameRetries_=0;
   static constexpr uint8_t pathBit(Path p) {return uint8_t(1u<<unsigned(p));}
 };
 // Reachability hint for one path. Call under the shared path-health lock. The

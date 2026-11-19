@@ -61,20 +61,55 @@ int main() {
     const size_t before=calls.size();opened(g);
     tick(g,3000);assert(g.phase()==Phase::Mtu);
     esp_ble_gattc_cb_param_t d{};d.dis_srvc_cmpl.conn_id=4;post(g,ESP_GATTC_DIS_SRVC_CMPL_EVT,d);tick(g);
-    tick(g,1900);assert(g.phase()==Phase::Mtu);
+    tick(g,700);assert(g.phase()==Phase::Mtu);
     discover(g,244);assert(std::count(calls.begin()+before,calls.end(),"mtu")==1); // one per link
     subscribed(g);finish(g);
   }
-  // After discovery, an unanswered MTU request fails 2 s later (clock wrap too).
+  // Field log 2026-11-19 ("GATTC_ConfigureMTU GATT_BUSY"): Bluedroid refused
+  // the request at OPEN and dropped it, so no answer comes. 800 ms after
+  // discovery it is sent once more; 1.5 s after that the link goes on at the
+  // MTU it has, or (23, under the 64 minimum) stops as Connect for the
+  // scheduler to retry; never the old 2 s deadline (clock wrap too).
   for(bool wrap:{false,true}) {
     now=wrap?UINT32_MAX-1000:100;
     hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};begin(g);opened(g);tick(g,500);
     esp_ble_gattc_cb_param_t d{};d.dis_srvc_cmpl.conn_id=4;post(g,ESP_GATTC_DIS_SRVC_CMPL_EVT,d);tick(g);
     const uint32_t doneAt=now;const size_t n=calls.size();
-    while(g.phase()==Phase::Mtu) tick(g,50);
-    assert(uint32_t(now-doneAt)>=2000 && uint32_t(now-doneAt)<2100);
-    assert(std::count(calls.begin()+n,calls.end(),"mtu")==0);
-    assert(g.pipe.error==hw1pipe::Error::Deadline && !g.authenticationFailed());finish(g);
+    tick(g,780);assert(std::count(calls.begin()+n,calls.end(),"mtu")==0);
+    uint32_t resentAt=0;
+    while(g.phase()==Phase::Mtu){tick(g,50);if(!resentAt && std::count(calls.begin()+n,calls.end(),"mtu"))resentAt=now;}
+    assert(uint32_t(resentAt-doneAt)>=800 && uint32_t(resentAt-doneAt)<850);
+    assert(uint32_t(now-resentAt)>=1500 && uint32_t(now-resentAt)<1550);
+    assert(std::count(calls.begin()+n,calls.end(),"mtu")==1);  // resent once only
+    assert(g.pipe.error==hw1pipe::Error::Connect && !g.authenticationFailed());
+    assert(g.attemptEnd()->stage==hw1coex::ConnectStage::Mtu);finish(g);
+  }
+  // The same with a usable MTU from OPEN (the phone exchanged it): the link
+  // goes on to discovery at 1.5 s after the resend; a late CFG_MTU after that
+  // is ignored (outside Phase::Mtu), and setup completes.
+  {
+    now=100;hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};begin(g);
+    esp_ble_gattc_cb_param_t e{};e.open.conn_id=4;e.open.mtu=247;std::memcpy(e.open.remote_bda,address,6);
+    post(g,ESP_GATTC_OPEN_EVT,e);tick(g);assert(g.phase()==Phase::Mtu);
+    esp_ble_gattc_cb_param_t d{};d.dis_srvc_cmpl.conn_id=4;post(g,ESP_GATTC_DIS_SRVC_CMPL_EVT,d);tick(g);
+    const size_t n=calls.size();
+    while(g.phase()==Phase::Mtu)tick(g,50);
+    assert(g.phase()==Phase::Discovering && std::count(calls.begin()+n,calls.end(),"mtu")==1 && !g.attemptEnd());
+    esp_ble_gattc_cb_param_t late{};late.cfg_mtu.conn_id=4;late.cfg_mtu.mtu=100;post(g,ESP_GATTC_CFG_MTU_EVT,late);tick(g);
+    assert(g.phase()==Phase::Discovering && !g.attemptEnd());
+    e={};e.search_res.conn_id=4;e.search_res.start_handle=10;e.search_res.end_handle=20;e.search_res.is_primary=true;
+    e.search_res.srvc_id.uuid.len=16;
+    const uint8_t uuid[16]={0xa0,0xc6,0x21,0x50,0x9f,0x3d,0xc4,0xa8,0x2e,0x4b,0x7d,0x6f,0,0,0xe1,0xb7};
+    std::memcpy(e.search_res.srvc_id.uuid.uuid.uuid128,uuid,16);post(g,ESP_GATTC_SEARCH_RES_EVT,e);
+    e.search_cmpl.conn_id=4;post(g,ESP_GATTC_SEARCH_CMPL_EVT,e);tick(g);
+    subscribed(g);finish(g);
+  }
+  // The resent request is answered: the link goes on at the answered MTU.
+  {
+    now=100;hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};begin(g);opened(g);
+    esp_ble_gattc_cb_param_t d{};d.dis_srvc_cmpl.conn_id=4;post(g,ESP_GATTC_DIS_SRVC_CMPL_EVT,d);tick(g);
+    const size_t n=calls.size();tick(g,850);assert(std::count(calls.begin()+n,calls.end(),"mtu")==1 && g.phase()==Phase::Mtu);
+    tick(g,600);discover(g,185);subscribed(g);finish(g);
   }
   // With no discovery event and no answer, Phase::Mtu still ends at 10 s
   // (clock wrap too).
@@ -242,11 +277,11 @@ int main() {
     e.search_cmpl.conn_id=4;e.search_cmpl.status=esp_gatt_status_t(0x81);post(g,ESP_GATTC_SEARCH_CMPL_EVT,e);tick(g);
     const auto* end=g.attemptEnd();
     assert(end && end->stage==S::Search && end->error==hw1pipe::Error::Protocol && end->gatt==0x81);g.hostStopped();}
-  // G5: after a clean discovery, no MTU answer within 2 s reads mtu; a
-  // refused MTU request reads mtu too.
+  // G5: after a clean discovery, no MTU answer (one resend, then 1.5 s) at
+  // MTU 23 reads mtu; a refused MTU request reads mtu too.
   {now=100;hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};begin(g);opened(g);autoDiscovered(g);
     while(g.phase()==Phase::Mtu)tick(g,50);
-    assert(g.attemptEnd()->stage==S::Mtu && g.attemptEnd()->error==hw1pipe::Error::Deadline);g.hostStopped();}
+    assert(g.attemptEnd()->stage==S::Mtu && g.attemptEnd()->error==hw1pipe::Error::Connect);g.hostStopped();}
   {now=100;hw1pipe::Session session;Gatt::Event slabs[Gatt::kSlabCount]{};Gatt g{session,slabs};begin(g);failApi="mtu";
     esp_ble_gattc_cb_param_t e{};e.open.conn_id=4;std::memcpy(e.open.remote_bda,address,6);
     post(g,ESP_GATTC_OPEN_EVT,e);tick(g);failApi.clear();

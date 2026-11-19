@@ -24,7 +24,9 @@ PhoneStatusSnapshot phoneStatusSnapshot();
 // /api/ble/status "phone" object (schema 2); `phone status json` serializes the
 // same. "text" is pipeLine ("ready", "fail: not found"); "pipe", "pipeText" and
 // "pipeReason" are the pipe words, "console" and "consoleText" the app console;
-// "state" keeps the pipe's own text for diagnostics.
+// "state" keeps the pipe's own text for diagnostics. Optional (additive):
+// "pathState" and "pathText" (BLE_PhonePipePath.h), "retryInS" while it
+// retries, "attempt" during an outage.
 bool phoneBuildStatusJson(JsonObject out);
 // The same from a snapshot the caller already took (one reading per response).
 struct BleLinkStatus;
@@ -34,7 +36,8 @@ bool phoneBuildStatusJson(JsonObject out, const BleLinkStatus& link);
 void phoneStatusTick();
 // `phone status [json]`; a row of BLE_PhonePipe.cpp's phoneCommands. Text:
 // pipe=<pipeLine> role=<roleId> paired=yes|no auto=on|off console=<consoleId>
-// state='<pipe text>'.
+// state='<pipe text>' next=<s>s|- try=<k> heard=<reports>|- phone=<matches>|-
+// path='<phonePathText>'.
 const char* phoneStatusCommand(const String& args);
 #else
 inline void phoneStatusTick() {}

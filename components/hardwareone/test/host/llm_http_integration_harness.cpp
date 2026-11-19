@@ -39,6 +39,8 @@ void webBatchTestStringAppend() {}
 bool ramFlushResolve(int, bool requested) { return requested; }
 enum class AllocPref { PreferPsram };
 void* ps_realloc(void* memory, size_t size, AllocPref) { return std::realloc(memory, size); }
+static uint32_t testNow = 1000;
+uint32_t millis() { return testNow; }
 
 // INSERT_PRODUCTION_HEADERS
 
@@ -70,11 +72,15 @@ struct MockTransport {
 };
 MockTransport httpTransport, cm5Transport;
 
+// The HTTP source as the backend sees it: configured (available) or not, and
+// whether a request path is up; resolves counts the autostart's attempts.
+bool httpAvailable = true, httpPathUp = true;
+int httpResolves = 0;
 bool mockFind(const char* name, LlmModelDesc* out, LlmBackendKind kind, const char* prefix) {
   if (!name || !name[0] || !out) return false;
   *out = {};
   out->backend = kind;
-  out->available = true;
+  out->available = kind != LlmBackendKind::Http || httpAvailable;
   out->storage = LLM_STORAGE_REMOTE;
   std::snprintf(out->id, sizeof(out->id), "%s:%s", prefix, name);
   std::snprintf(out->name, sizeof(out->name), "%s", name);
@@ -113,7 +119,18 @@ int mockChunk(MockTransport& transport, int offset, char* out, int cap) {
 
 #if ENABLE_LLM_SOURCE_HTTP
 bool httpLlmFindByName(const char* name, LlmModelDesc* out) {
+  ++httpResolves;
   return mockFind(name, out, LlmBackendKind::Http, "http");
+}
+size_t httpLlmUnavailableReason(char* out, size_t cap) {
+  if (!cap) return 0;
+  out[0] = '\0';
+  if (httpAvailable) return 0;
+  return testStrlcpy(out, "HTTP agent disabled (llmhttpenabled)", cap);
+}
+bool httpLlmPathUp() { return httpPathUp; }
+size_t httpLlmPathText(char* out, size_t cap) {
+  return testStrlcpy(out, httpPathUp ? "Wi-Fi" : "phone link down, retrying in 4 s", cap);
 }
 size_t httpLlmEnumerate(LlmModelDesc* out, size_t cap) {
   return cap && httpLlmFindByName("openclaw", out) ? 1 : 0;
@@ -183,6 +200,81 @@ static void longReplyRetention(MockTransport& transport) {
   assert(retained == reply);  // terminal notice survives the shared chat cap
   assert(chatClear());
 }
+
+#if ENABLE_LLM_SOURCE_HTTP
+// The HTTP default's autostart is a level rule with backoff, the chat selects
+// it lazily, and a user unload stops both for the rest of the boot.
+static void httpAutostartAndLazySelect() {
+  char reason[128];
+  llmBackendUnload();
+  assert(chatClear());
+  sUserUnloadedThisBoot = false;   // as at boot
+  gSettings.llmAutoStart = true;
+  gSettings.llmDefaultModel = "HTTP:openclaw";   // the prefix is case-insensitive
+  httpAvailable = false; httpPathUp = false;
+  // Failures back off 5, 10, 20, 40 s, then 60 s for good.
+  httpResolves = 0;
+  llmBackendTick(); assert(httpResolves == 1 && llmBackendActiveKind() == LlmBackendKind::None);
+  testNow += 4999; llmBackendTick(); assert(httpResolves == 1);
+  testNow += 1; llmBackendTick(); assert(httpResolves == 2);
+  for (uint32_t delay : {10000u, 20000u, 40000u, 60000u, 60000u}) {
+    testNow += delay - 1; llmBackendTick(); const int before = httpResolves;
+    testNow += 1; llmBackendTick(); assert(httpResolves == before + 1);
+  }
+  // The path coming up retries at once.
+  testNow += 1000; llmBackendTick(); const int before = httpResolves;
+  httpPathUp = true; llmBackendTick(); assert(httpResolves == before + 1);
+  // llmload says why it is not available, not "not available right now".
+  assert(!llmBackendSelect("http:openclaw", reason, sizeof(reason)));
+  assert(!std::strcmp(reason, "HTTP agent disabled (llmhttpenabled)"));
+  // Not ready, with the reason the commands and the glasses show: the lazy
+  // select of the default failed, so its configuration reason, not an llmload
+  // that would fail the same way.
+  assert(llmBackendNotReadyReason(reason, sizeof(reason)) && !std::strcmp(reason, "HTTP agent disabled (llmhttpenabled)"));
+  assert(chatBeginTurn("before the agent is configured") == 0);
+  assert(!std::strcmp(chatLastBeginRefusal(), "HTTP agent disabled (llmhttpenabled)"));
+  // Configured again: the next due try selects it (path down does not matter).
+  httpAvailable = true; httpPathUp = false;
+  testNow += 60000; llmBackendTick(); assert(llmBackendActiveKind() == LlmBackendKind::Http);
+  assert(llmBackendNotReadyReason(reason, sizeof(reason)) == 0);
+  // A user unload: no autostart, no lazy select, for the rest of this boot.
+  llmBackendUnload();
+  const int afterUnload = httpResolves;
+  for (int i = 0; i < 3; ++i) { testNow += 60000; llmBackendTick(); }
+  assert(httpResolves == afterUnload && llmBackendActiveKind() == LlmBackendKind::None);
+  assert(!llmBackendEnsureDefaultSelected());
+  assert(chatBeginTurn("after unload") == 0 && llmBackendActiveKind() == LlmBackendKind::None);
+  // Nothing selects the default by itself now: "no model selected" names the
+  // command, even with the agent's configuration also refused.
+  httpAvailable = false;
+  assert(llmBackendNotReadyReason(reason, sizeof(reason)) && !std::strcmp(reason, "no model selected (llmload http:openclaw)"));
+  httpAvailable = true;
+  // An explicit select lifts it; after the next unload the flag is set again.
+  assert(llmBackendSelect("http:openclaw", reason, sizeof(reason)));
+  assert(!sUserUnloadedThisBoot);
+  llmBackendUnload(); assert(sUserUnloadedThisBoot);
+  // Lazy select: the chat selects the default itself and starts the turn.
+  sUserUnloadedThisBoot = false;
+  ChatRunToken run = 0;
+  const int session = chatBeginTurn("Hey Even", nullptr, &run);
+  assert(session > 0 && run && llmBackendActiveKind() == LlmBackendKind::Http);
+  assert(httpTransport.prompt == "Hey Even");
+  finish(httpTransport, "Hello");
+  // Busy, then the source's own not-ready reason.
+  httpTransport.done = false;
+  assert(llmBackendNotReadyReason(reason, sizeof(reason)) && !std::strcmp(reason, "busy: a request is running"));
+  httpTransport.done = true;
+  // Autostart off: neither the tick nor the chat selects anything.
+  llmBackendUnload(); assert(chatClear()); sUserUnloadedThisBoot = false;
+  gSettings.llmAutoStart = false;
+  testNow += 60000; llmBackendTick(); assert(llmBackendActiveKind() == LlmBackendKind::None);
+  assert(!llmBackendEnsureDefaultSelected());
+  gSettings.llmEnabled = false;
+  assert(llmBackendNotReadyReason(reason, sizeof(reason)) && !std::strcmp(reason, "LLM disabled (llmenabled 0)"));
+  gSettings.llmEnabled = true;
+  gSettings.llmDefaultModel = "";
+}
+#endif
 
 int main() {
   // A CLI/web New chat may be the first chat operation after boot. It must
@@ -310,6 +402,10 @@ int main() {
   assert(llmBackendActiveKind() == LlmBackendKind::None);
   assert(llmBackendIsDone());
   assert(chatBeginTurn("No source") == 0);
+  assert(chatLastBeginRefusal()[0]);
   assert(chatClear());
+#if ENABLE_LLM_SOURCE_HTTP
+  httpAutostartAndLazySelect();
+#endif
   std::puts("LLM backend/chat lifecycle passed");
 }

@@ -188,6 +188,8 @@ enum class LlmHttpAdmission : uint8_t { Accepted, Busy, Unavailable };
 struct PhonePipeStream { uint32_t generation=1; uint16_t id=0; };
 hw1pipe::Session admissionPipe;
 bool llmHttpPathAvailable(bool){return pathAvailable;}
+// A chat may also be admitted while the phone link comes back; Terminal never.
+bool llmHttpPathRecoverable(bool){return false;}
 bool phonePipeRetired(PhonePipeStream h){
   if (!h.id) return true;
   auto* stream=admissionPipe.find(h.id);

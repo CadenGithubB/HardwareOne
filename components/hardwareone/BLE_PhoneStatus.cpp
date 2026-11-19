@@ -6,6 +6,7 @@
 #include "BLE_Events.h"      // CompactJson + blePushEvent
 #include "BLE_LinkStatus.h"
 #include "BLE_PhonePipe.h"
+#include "BLE_PhonePipePath.h"  // phonePipePathView + phonePathText: the path words
 #include "System_CommandRegistry.h"  // argWantsJson
 #include "System_MemUtil.h"  // PSRAM_JSON_DOC
 #include "G2_Glasses.h"      // isG2ClientInitialized: the pipe's place beside the glasses
@@ -35,6 +36,20 @@ static const char* pipeRoleName(bool active, bool standalone) {
   return standalone ? "phone-only" : "with-glasses";
 }
 
+// The path view's state as a JSON word.
+static const char* pathStateId(PhonePathState state) {
+  switch (state) {
+    case PhonePathState::Up: return "up";
+    case PhonePathState::RelayOff: return "relay-off";
+    case PhonePathState::Connecting: return "connecting";
+    case PhonePathState::Retrying: return "retrying";
+    case PhonePathState::Held: return "held";
+    case PhonePathState::NotPaired: return "not-paired";
+    case PhonePathState::Off: return "off";
+  }
+  return "off";
+}
+
 bool phoneBuildStatusJson(JsonObject out) {
   return phoneBuildStatusJson(out, bleLinkStatus());
 }
@@ -59,6 +74,15 @@ bool phoneBuildStatusJson(JsonObject out, const BleLinkStatus& link) {
   if (link.pipe.reason) out["pipeReason"] = link.pipe.reason;
   out["console"] = hw1link::consoleId(link.console);
   out["consoleText"] = hw1link::consoleLongText(link.console);
+  // The phone path (optional keys, schema unchanged): what the LLM source and
+  // the reconnect scheduler see, with the next try while it retries.
+  const PhonePathView path = phonePipePathView();
+  char pathText[112];
+  phonePathText(path, pathText, sizeof(pathText));
+  out["pathState"] = pathStateId(path.state);
+  out["pathText"] = pathText;  // copied
+  if (path.state == PhonePathState::Retrying) out["retryInS"] = hw1path::ceilSeconds(path.retryInMs);
+  if (path.attempt) out["attempt"] = path.attempt;
   return true;
 }
 
@@ -106,7 +130,7 @@ void phoneStatusTick() {
 }
 
 const char* phoneStatusCommand(const String& args) {
-  EXT_RAM_BSS_ATTR static char buf[384];
+  EXT_RAM_BSS_ATTR static char buf[640];
   if (argWantsJson(args)) {
     PSRAM_JSON_DOC(doc);
     const bool available = phoneBuildStatusJson(doc.to<JsonObject>());
@@ -118,14 +142,29 @@ const char* phoneStatusCommand(const String& args) {
   }
   const BleLinkStatus link = bleLinkStatus();
   char line[24];
+  // The path: the next try (seconds, "-" when none is scheduled), the attempts
+  // in this outage, what the last scan heard (every report, then the phone's
+  // advertisements; "-" before the first scan) and the path text.
+  const PhonePathView path = phonePipePathView();
+  char pathText[112], next[12] = "-", heard[12] = "-", phone[12] = "-";
+  phonePathText(path, pathText, sizeof(pathText));
+  if (path.state == PhonePathState::Retrying)
+    snprintf(next, sizeof(next), "%us", hw1path::ceilSeconds(path.retryInMs));
+  PhonePipeLinkSummary summary;
+  if (phonePipeLinkSummary(&summary) && summary.scanKnown) {
+    snprintf(heard, sizeof(heard), "%lu", (unsigned long)summary.scanReports);
+    snprintf(phone, sizeof(phone), "%lu", (unsigned long)summary.scanMatches);
+  }
   // role= is the pipe's place, as in the JSON form; `blestatus` shows the device role.
   const int n = snprintf(buf, sizeof(buf),
-                         "pipe=%s role=%s paired=%s auto=%s console=%s state='%s'",
+                         "pipe=%s role=%s paired=%s auto=%s console=%s state='%s' "
+                         "next=%s try=%u heard=%s phone=%s path='%s'",
                          hw1link::pipeLine(link.pipe, line, sizeof(line)),
                          pipeRoleName(phonePipeActive(), phonePipeAlone()),
                          link.pipePaired ? "yes" : "no",
                          link.pipeAutoReconnect ? "on" : "off",
-                         hw1link::consoleId(link.console), link.pipeLabel);
+                         hw1link::consoleId(link.console), link.pipeLabel,
+                         next, (unsigned)path.attempt, heard, phone, pathText);
   if (n < 0 || (size_t)n >= sizeof(buf)) return "Error: phone status too large";
   return buf;
 }

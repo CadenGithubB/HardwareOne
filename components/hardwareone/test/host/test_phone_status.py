@@ -19,8 +19,12 @@ status and its row's leaf snapshot (fakes here); the console stream comes first
 in the console word, `status json` carries the compact `phoneLink` block, and
 the secret's kind comes from its length and Settings::phonePipeSecretGenerated
 (`phone pair new`'s mark), read directly: a marked code reads "code", an
-unmarked secret "passphrase". This does not qualify the phone link, Android or
-the web/lens renderers that consume it.
+unmarked secret "passphrase". The phone path (BLE_PhonePipePath.h): the
+optional "pathState"/"pathText"/"retryInS"/"attempt" keys, the text row's
+next/try/heard/phone/path fields (the SSE event unchanged), and every
+phonePathText long and short string (ASCII, the short form within 21 columns).
+This does not qualify the phone link, Android or the web/lens renderers that
+consume it.
 """
 from __future__ import annotations
 
@@ -61,7 +65,8 @@ def stubs(work: Path, component: Path, pipe: int) -> None:
     # The pipe's public status calls, with the real link summary (phone link v2).
     pipe_header = (component / "BLE_PhonePipe.h").read_text()
     (work / "BLE_PhonePipe.h").write_text(
-        "#pragma once\n#include <cstdint>\nbool phonePipeActive();\nbool phonePipeStandalone();\n"
+        "#pragma once\n#include <cstdint>\n#include \"BLE_PhonePipePath.h\"\n"
+        "bool phonePipeActive();\nbool phonePipeStandalone();\n"
         "bool phonePipeReady();\nconst char* phonePipeStatus();\nuint8_t phonePipeStatusCode();\n"
         "uint8_t phonePipeStep();\nbool phonePipeEnrolling();\n"
         + extract_block(pipe_header, "struct PhonePipeLinkSummary") + ";\n"
@@ -89,7 +94,8 @@ def stubs(work: Path, component: Path, pipe: int) -> None:
     # Copied, not included from the component: their quoted includes must
     # resolve to these stubs, never to the real build configuration.
     for name in ("BLE_PhoneStatus.h", "BLE_Events.h", "BLE_LinkStatus.h",
-                 "BLE_LinkStatusCore.h", "BLE_LinkStatus.cpp", "BLE_PhonePipeConsole.h"):
+                 "BLE_LinkStatusCore.h", "BLE_LinkStatus.cpp", "BLE_PhonePipeConsole.h",
+                 "BLE_PhonePipePath.h"):
         shutil.copyfile(component / name, work / name)
 
 
@@ -186,7 +192,8 @@ def main() -> None:
                                "connected": True, "state": "ready", "text": "ready",
                                "role": "with-glasses", "enrolled": True, "autoReconnect": False,
                                "pipe": "ready", "pipeText": "ready", "console": "signed-in",
-                               "consoleText": "app signed in"},
+                               "consoleText": "app signed in",
+                               "pathState": "up", "pathText": "phone relay ready"},
                 "/api/ble/status phone object, G2 mode with the pipe ready and the console on its link")
         require(objects[1] == {"schema": 2, "active": True, "standalone": True,
                                "connected": False, "state": "phone not found",
@@ -194,16 +201,20 @@ def main() -> None:
                                "enrolled": True, "autoReconnect": True, "pipe": "fail",
                                "pipeText": "fail", "pipeReason": "not found",
                                "console": "not-here",
-                               "consoleText": "not available in this mode"},
-                "phone object, phone-only after a failed search")
+                               "consoleText": "not available in this mode",
+                               "pathState": "retrying", "pathText": "phone not heard (out of range, or phone Bluetooth/app off?), retrying in 13 s",
+                               "retryInS": 13, "attempt": 3},
+                "phone object, phone-only after a failed search: the path retries, the next try and attempt")
         require(objects[2] == {"schema": 2, "active": False, "standalone": False,
                                "connected": False, "state": "stopped", "text": "off",
                                "role": "off", "enrolled": False, "autoReconnect": False,
                                "pipe": "off", "pipeText": "off", "console": "signed-in",
-                               "consoleText": "app signed in"},
+                               "consoleText": "app signed in", "pathState": "off",
+                               "pathText": "console server owns Bluetooth (closeconsole)"},
                 "phone object, server mode with a signed-in app")
         require(objects[3]["pipe"] == "searching" and objects[3]["text"] == "searching" and
-                objects[3]["console"] == "not-here",
+                objects[3]["console"] == "not-here" and objects[3]["pathState"] == "connecting" and
+                objects[3]["attempt"] == 1 and "retryInS" not in objects[3],
                 "phone object, a standalone pipe while the saved mode is server")
         require(objects[4]["role"] == "with-glasses" and objects[4]["pipe"] == "searching" and
                 objects[4]["console"] == "waiting-phone" and
@@ -213,7 +224,8 @@ def main() -> None:
                                "connected": True, "state": "ready", "text": "ready",
                                "role": "phone-only", "enrolled": True, "autoReconnect": False,
                                "pipe": "ready", "pipeText": "ready", "console": "signed-in",
-                               "consoleText": "app signed in"},
+                               "consoleText": "app signed in",
+                               "pathState": "relay-off", "pathText": "relay off in the app"},
                 "phone object, phone-only: the console stream open and signed in (phone link v2)")
         require(objects[6]["role"] == "phone-only" and objects[6]["console"] == "waiting-phone" and
                 objects[6]["consoleText"] == "waiting for the phone link",
@@ -222,17 +234,25 @@ def main() -> None:
         cmd_objects = [json.loads(p) for k, p in records if k == "CMDJSON"]
         require(cmd_objects == objects, "`phone status json` is the same object")
         texts = [p for k, p in records if k == "TEXT"]
+        none = " next=- try=0 heard=- phone=- path="
+        connecting = " next=- try=1 heard=- phone=- path='connecting to phone'"
         require(texts == [
             # role= is the pipe's place (as in the JSON); blestatus shows the device role.
-            "pipe=ready role=with-glasses paired=yes auto=off console=signed-in state='ready'",
+            # Then the path: the next try, attempts, what the last scan heard
+            # (all reports, then the phone's), and the path text.
+            "pipe=ready role=with-glasses paired=yes auto=off console=signed-in state='ready'" +
+            none + "'phone relay ready'",
             "pipe=fail: not found role=phone-only paired=yes auto=on console=not-here "
-            "state='phone not found'",
-            "pipe=off role=off paired=no auto=off console=signed-in state='stopped'",
-            "pipe=searching role=phone-only paired=no auto=off console=not-here state='scanning'",
+            "state='phone not found' next=13s try=3 heard=14 phone=0 path='phone not heard (out of range, or phone Bluetooth/app off?), retrying in 13 s'",
+            "pipe=off role=off paired=no auto=off console=signed-in state='stopped'" +
+            none + "'console server owns Bluetooth (closeconsole)'",
+            "pipe=searching role=phone-only paired=no auto=off console=not-here state='scanning'" + connecting,
             "pipe=searching role=with-glasses paired=no auto=off console=waiting-phone "
-            "state='scanning'",
-            "pipe=ready role=phone-only paired=yes auto=off console=signed-in state='ready'",
-            "pipe=ready role=phone-only paired=yes auto=off console=waiting-phone state='ready'",
+            "state='scanning'" + connecting,
+            "pipe=ready role=phone-only paired=yes auto=off console=signed-in state='ready'" +
+            none + "'relay off in the app'",
+            "pipe=ready role=phone-only paired=yes auto=off console=waiting-phone state='ready'" +
+            none + "'relay off in the app'",
         ], "`phone status` text")
         bluetooth = [json.loads(p) for k, p in records if k == "STATUSBT"]
         base = {"running": True, "state": "connected", "client": False, "g2Connected": False}
@@ -308,7 +328,35 @@ def main() -> None:
         check_status_json_guard(COMPONENT)
         check_generated_mark(COMPONENT)
         largest = int(next(p for k, p in records if k == "LARGEST"))
-        require(largest < 384, f"the largest phone object fits the reply ({largest} bytes)")
+        require(largest < 640, f"the largest phone object fits the reply ({largest} bytes)")
+        longest_text = int(next(p for k, p in records if k == "LONGESTTEXT"))
+        require(longest_text < 640, f"the longest status row fits the reply ({longest_text} bytes)")
+        # The path texts (BLE_PhonePipePath.h), long and short, as every
+        # surface shows them: (state, hint) -> (long, short).
+        paths = {(int(a), int(b)): (c, d) for a, b, c, d in
+                 (p.split("\t") for k, p in records if k == "PATHTEXT")}
+        expected_paths = {
+            (0, 0): ("phone relay ready", "relay ready"),
+            (1, 0): ("relay off in the app", "relay off"),
+            (2, 0): ("connecting to phone", "connecting"),
+            (3, 1): ("phone not heard (out of range, or phone Bluetooth/app off?), retrying in 13 s", "no phone, retry 13s"),
+            (3, 2): ("radio heard nothing, retrying in 13 s", "no radio, retry 13s"),
+            (3, 3): ("phone found but link failed, retrying in 13 s", "link fail, retry 13s"),
+            (3, 0): ("phone link down, retrying in 13 s", "down, retry 13s"),
+            (4, 4): ("phone link closed (openphone to reconnect)", "closed"),
+            (4, 5): ("phone app too old: update it (next check in 0 min)", "app old"),
+            (4, 6): ("Bluetooth fault: restart may be needed", "BT fault"),
+            (4, 7): ("console server owns Bluetooth (closeconsole)", "console srv"),
+            (4, 0): ("phone link down (auto-reconnect off; openphone)", "down, auto off"),
+            (5, 0): ("no phone paired (phone pair new)", "not paired"),
+            (6, 0): ("Bluetooth off", "BT off"),
+            (6, 7): ("console server owns Bluetooth (closeconsole)", "console srv"),
+        }
+        for key, want in expected_paths.items():
+            require(paths.get(key) == want, f"path text {key}: {paths.get(key)} != {want}")
+        require(all(len(short) <= 21 for _, short in paths.values()), "short path texts fit 21 columns")
+        require("Bluetooth off on the phone" not in "\n".join(p for _, p in records),
+                "the board never claims the phone's Bluetooth is off")
         joined = "\n".join(p for _, p in records)
         # The phone link names the secret's kind, never the secret: the values
         # the cases store never appear, and "secret" holds only a kind word.

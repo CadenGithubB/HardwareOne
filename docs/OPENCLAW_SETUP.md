@@ -220,8 +220,18 @@ never paste a real token into this repository or a shared transcript.
 | `llmresult json 0` | Read the streamed reply from offset zero |
 
 The LLM feature must also be enabled in the ordinary app settings. Optional
-startup uses `llmdefaultmodel http:openclaw` and `llmautostart 1`; selection waits
-for Wi-Fi and valid configuration. No request is sent just by selecting a source.
+startup uses `llmdefaultmodel http:openclaw` and `llmautostart 1`; selection needs
+only valid configuration, and with no Wi-Fi the agent uses the phone relay. Autostart
+retries every 5-60 s and at once when a path comes up; `llmunload` stops it (and the
+chat's own selection of the default) for the rest of the boot. No request is sent just
+by selecting a source.
+
+The agent waits for the phone. While the phone link is reconnecting (`phone status`
+shows `path='... retrying in N s'`), the source stays `READY` with the path as a note,
+and a chat request waits up to 30 s for the link, then retries the phone once if
+nothing was sent. If the link is closed (`closephone`), no phone is paired, or the
+app's relay is off, the request fails at once with that reason (`llmstatus` shows it
+on its `path:` line). Terminal requests do not wait.
 
 Follow the [HTTPS relay setup](../integrations/openclaw/relay/README.md) for its
 endpoint, separate device token, and public CA certificate. HTTPS verifies the

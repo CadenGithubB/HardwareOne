@@ -45,6 +45,16 @@ static uint8_t pipeStatusCodeOf(const char* label) {
 uint8_t phonePipeStatusCode() { return pipeStatusCodeOf(phonePipeStatus()); }
 uint8_t phonePipeStep() { return uint8_t(pipeStep); }
 bool phonePipeEnrolling() { return pipeEnrolling; }
+// The phone path (BLE_PhonePipePath.h): the view the cases set, and the nudge
+// (never called by the status owner).
+static PhonePathView pathView;
+static unsigned pathReads = 0;
+PhonePathView phonePipePathView() { ++pathReads; return pathView; }
+bool phonePipeNudgeReconnect() { CHECK(false); return false; }
+static PhonePathView path(PhonePathState state, PhonePathHint hint = PhonePathHint::None,
+                          uint32_t retryInMs = 0, uint8_t attempt = 0) {
+  PhonePathView v; v.state = state; v.hint = hint; v.retryInMs = retryInMs; v.attempt = attempt; return v;
+}
 
 // Phone link v2: the owner's summary (false before the pipe has resources), the
 // console driver's status and its row's leaf snapshot.
@@ -228,6 +238,7 @@ int main() {
   summary.active = summary.ready = summary.relayOn = true; summary.relayStreams = 1;
   summary.ended = 2; summary.lastEnd = 18; summary.endReason[14] = 1; summary.endReason[18] = 1;
   consoleStream = {}; consoleStream.state = PipeConsoleState::NotOffered;
+  pathView = path(PhonePathState::Up);
   set(true, false, true, PipeStep::Link, "ready");
   printJson("JSON");
   printStatusJson();
@@ -236,7 +247,10 @@ int main() {
   gSettings.bleMode = 1; glassesUp = false; peerAutoReconnect = true; consoleView = {};  // the pipe alone is the client role (no phone-client mode)
   gSettings.phonePipeSecret = "";
   summary.ready = summary.relayOn = false; summary.relayStreams = 0;
+  // The last scan heard 14 reports, none the phone's: retrying in 13 s, try 3.
+  summary.scanKnown = true; summary.scanReports = 14; summary.scanMatches = 0;
   consoleStream = {};
+  pathView = path(PhonePathState::Retrying, PhonePathHint::NotHeard, 12001, 3);
   set(true, true, false, PipeStep::Idle, "phone not found");
   printJson("JSON");
   printStatusJson();
@@ -247,12 +261,14 @@ int main() {
   consoleView.clients = 1; consoleView.signedIn = true;
   peerEnrolled = peerAutoReconnect = false;
   summaryKnown = false;
+  pathView = path(PhonePathState::Off, PhonePathHint::ConsoleServer);
   set(false, false, false, PipeStep::Idle, "stopped");
   printJson("JSON");
   printStatusJson();
   // A standalone pipe while the saved mode is server: no console here.
   serverUp = false; consoleView = {};
   summaryKnown = true; summary = {}; summary.active = true;
+  pathView = path(PhonePathState::Connecting, PhonePathHint::None, 0, 1);
   set(true, true, false, PipeStep::Scanning, kScanning);
   printJson("JSON");
   // G2 mode, the pipe searching again: the slot its old link left is neither
@@ -275,6 +291,7 @@ int main() {
   consoleStream.offered = consoleStream.wanted = true; consoleStream.streamId = 3;
   consoleRow = {}; consoleRow.bound = true; consoleRow.streamId = 3; consoleRow.epoch = 9;
   consoleRow.authed = true;
+  pathView = path(PhonePathState::RelayOff);
   set(true, true, true, PipeStep::Link, "ready");
   printJson("JSON");
   printStatusJson();
@@ -311,18 +328,59 @@ int main() {
   markGenerated(false); gSettings.phonePipeSecret = ""; peerEnrolled = false;
 
   // The largest real object (longest text, a reason, the longest console
-  // words) stays far inside the 384-byte reply.
+  // words, the longest path text with a 3-digit retry and attempt) and the
+  // largest text row stay inside the 640-byte reply.
   serverUp = true; consoleView = {}; consoleView.up = true;
+  summaryKnown = true; summary = {}; summary.scanKnown = true;
+  summary.scanReports = 4294967295u; summary.scanMatches = 4294967295u;
+  pathView = path(PhonePathState::Retrying, PhonePathHint::NotHeard, 999000, 255);
   set(true, true, false, PipeStep::Retiring, "pipe authentication cooldown or secret unavailable");
   {
     JsonDocument doc;
     CHECK(phoneBuildStatusJson(doc.to<JsonObject>()));
     CHECK(doc["pipeReason"] == "auth fail" && doc["consoleText"] == "not visible (advertising off)");
+    CHECK(doc["retryInS"] == 999 && doc["attempt"] == 255);
     std::printf("LARGEST\t%zu\n", measureJson(doc));
-    CHECK(measureJson(doc) < 384);
+    CHECK(measureJson(doc) < 640);
+    const char* text = phoneStatusCommand(String(""));
+    CHECK(std::strncmp(text, "pipe=", 5) == 0);
+    std::printf("LONGESTTEXT\t%zu\n", std::strlen(text));
+  }
+  // phonePathText: every state's long and short text; the short form fits a
+  // 21-column OLED line even at its widest.
+  {
+    const PhonePathState states[] = {PhonePathState::Up, PhonePathState::RelayOff, PhonePathState::Connecting,
+                                     PhonePathState::Retrying, PhonePathState::Held, PhonePathState::NotPaired,
+                                     PhonePathState::Off};
+    const PhonePathHint hints[] = {PhonePathHint::None, PhonePathHint::NotHeard, PhonePathHint::RadioSilent,
+                                   PhonePathHint::FoundNoLink, PhonePathHint::ClosedByUser, PhonePathHint::AppTooOld,
+                                   PhonePathHint::RadioFault, PhonePathHint::ConsoleServer};
+    for (PhonePathState st : states)
+      for (PhonePathHint h : hints)
+        for (uint32_t ms : {0u, 1u, 12001u, 60000u, 600000u, 4294967295u}) {
+          const PhonePathView v = path(st, h, ms, 7);
+          char longText[112], shortText[22];
+          const size_t n = phonePathText(v, longText, sizeof(longText));
+          const size_t m = phonePathShortText(v, shortText, sizeof(shortText));
+          CHECK(n == std::strlen(longText) && n > 0 && n < sizeof(longText) - 1);
+          CHECK(m == std::strlen(shortText) && m > 0 && m <= 21);
+          for (const char* c = longText; *c; ++c) CHECK(*c >= 0x20 && *c < 0x7f);
+          for (const char* c = shortText; *c; ++c) CHECK(*c >= 0x20 && *c < 0x7f);
+          if (ms == 12001u && st == PhonePathState::Retrying)
+            std::printf("PATHTEXT\t%d\t%d\t%s\t%s\n", int(st), int(h), longText, shortText);
+          if (ms == 0u && st != PhonePathState::Retrying)
+            std::printf("PATHTEXT\t%d\t%d\t%s\t%s\n", int(st), int(h), longText, shortText);
+        }
+    // A small buffer is cut, never overrun; a zero-size one writes nothing.
+    char tiny[8];
+    CHECK(phonePathText(path(PhonePathState::RelayOff), tiny, sizeof(tiny)) == 7 && std::strcmp(tiny, "relay o") == 0);
+    CHECK(phonePathText(path(PhonePathState::RelayOff), tiny, 0) == 0);
+    CHECK(phonePathRecoverable(path(PhonePathState::Connecting)) && phonePathRecoverable(path(PhonePathState::Retrying)));
+    CHECK(!phonePathRecoverable(path(PhonePathState::Held)) && !phonePathRecoverable(path(PhonePathState::RelayOff)) &&
+          !phonePathRecoverable(path(PhonePathState::Up)));
   }
   // A text nobody bounded is refused, never cut.
-  const std::string huge(400, 'x');
+  const std::string huge(700, 'x');
   set(true, true, false, PipeStep::Idle, huge.c_str());
   CHECK(std::strcmp(phoneStatusCommand(String("")), "Error: phone status too large") == 0);
   CHECK(std::strcmp(phoneStatusCommand(String("json")), "{\"error\":\"status too large\"}") == 0);

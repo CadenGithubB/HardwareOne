@@ -1,7 +1,39 @@
 # Phone pipe: backing off the reconnect scan while the phone is absent
 
-Status: proposal (2026-10-18). Nothing here is implemented. The schedule is
-amendment A-3 with the Android team, so a change goes to them first.
+Status: proposal (2026-10-18), superseded on 2026-11-19 by the schedule below
+(field log: phone Bluetooth off and on, out and about). The rest of this page is the
+history and the options that were weighed.
+
+## The schedule since 2026-11-19
+
+- **Steps.** 2, 4, 8, 16, 30 s, then 30 s up to attempt 24 (about 10 min of
+  outage), then 60 s for good. Each gap is timed from the end of the failed attempt
+  (`blePeerNoteAttemptFailed`), not its admission. A link-up resets it; a READY
+  link that drops starts a new episode, first try 2 s later. Glasses and ring are
+  unchanged. Scan duty while the phone is absent is about 13% at 30 s and 7% at 60 s.
+- **Reseek windows (phone only).** A manual `openphone` opens a 60 s window and a
+  radio restore (`blePeerRequestReseek`: recycle, role switch, stuck-phone restore)
+  a 120 s one. While a window is open the one-shot keeps retrying on the steps above,
+  also with auto-reconnect off; link-up and `closephone` end it.
+- **Expedite, never cancel.** `openphone` while an attempt runs, an LLM request that
+  needs the phone (`phonePipeNudgeReconnect`, at most every 3 s) and a heard advert
+  bring the next try forward without changing the intent, so an attempt in flight
+  continues. Nothing expedites a connected phone.
+- **Advert heard elsewhere.** The phone's advert (31 bytes or less, pipe UUID) seen
+  in another client's scan expedites the next try, at most every 5 s, with no window
+  (auto=off stays off), and not when the pipe's own last scan already heard the phone
+  (then the link, not range, is failing and the backoff builds). Opportunistic: only
+  the ring's and glasses' no-address scans and manual scans see it.
+- **Version hold.** Only the phone's version RESET is a strike (three latch the hold);
+  silence after HELLO is counted in the statistics but retried as an ordinary
+  failure. A hold is probed after 10 min with two strikes, so one more RESET holds it
+  again at once.
+- **What the board shows.** `phone status` adds `next= try= heard= phone= path=`;
+  `blepeers` adds `want= next= try= last=`.
+
+Android side, not firmware: reopen the GATT server and advertising on Bluetooth
+on, advertise the pipe UUID in the primary legacy advert, restart advertising at
+once after a disconnect.
 
 ## What happens today
 

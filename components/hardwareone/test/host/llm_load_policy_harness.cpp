@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <ArduinoJson.h>
+#include "System_LLMAutostartCore.h"
 
 static unsigned checks;
 #define CHECK(condition) do { ++checks; if (!(condition)) { \
@@ -90,11 +91,12 @@ static bool gDirectSelectTest = false; // the backend's own unit cases call it d
 static std::vector<int> gLoadCtx;      // maxCtx each llmLoadModel received
 static unsigned gUnloads = 0;
 static bool gReady = false;
+static bool gLoadLeavesNotReady = false;  // a source accepted the select but is not ready
 
 static bool llmLoadModel(const char*, int maxCtx) {
   CHECK(gInExecutor || gDirectSelectTest);   // never straight from a surface
   gLoadCtx.push_back(maxCtx);
-  gReady = true;
+  gReady = !gLoadLeavesNotReady;
   return true;
 }
 static void llmUnload() {
@@ -103,6 +105,13 @@ static void llmUnload() {
   gReady = false;
 }
 static bool llmBackendIsReady() { return gReady; }
+// The backend's not-ready reason (System_LLMBackend.cpp has its own suite).
+static std::string gNotReadyReason = "no model selected (llmload http:openclaw)";
+static size_t llmBackendNotReadyReason(char* out, size_t cap) {
+  if (gReady) { out[0] = '\0'; return 0; }
+  std::snprintf(out, cap, "%s", gNotReadyReason.c_str());
+  return std::strlen(out);
+}
 
 static bool llmResolveModelId(const char* id, LlmModelDesc* out) {
   if (!id || (std::strcmp(id, "onboard:tiny.bin") != 0 && std::strcmp(id, "tiny.bin") != 0))
@@ -160,6 +169,8 @@ static void reset() {
   gUnloads = 0;
   gReady = false;
   gDirectSelectTest = false;
+  gLoadLeavesNotReady = false;
+  gNotReadyReason = "no model selected (llmload http:openclaw)";
   sActiveKind = LlmBackendKind::None;
 }
 
@@ -311,6 +322,68 @@ static void caseCommandContextArgument() {
   gInExecutor = false;
 }
 
+// llmload/llmgenerate json not ready: "error" stays the app's text, "reason"
+// says why (escaped, bounded), and llmload's not-ready reply carries it too.
+static void caseNotReadyReasonJson() {
+  reset();
+  JsonDocument doc;
+  CHECK(!deserializeJson(doc, llmNotReadyJson()));
+  CHECK(doc["ok"] == false && doc["error"] == "model not ready");
+  CHECK(doc["reason"] == "no model selected (llmload http:openclaw)");
+  gNotReadyReason = "relay \"off\" in the app \\ now\n";
+  CHECK(!deserializeJson(doc, llmNotReadyJson()));
+  CHECK(doc["reason"] == "relay \"off\" in the app \\ now");
+  gNotReadyReason = std::string(400, 'x');
+  CHECK(!deserializeJson(doc, llmNotReadyJson()));
+  CHECK(std::strlen(doc["reason"] | "") == 127);
+  // A load the source accepts but that is not ready (its path is held):
+  // ready false, the hint, and the reason.
+  gNotReadyReason = "relay off in the app";
+  gLoadLeavesNotReady = true;
+  gInExecutor = true;
+  const char* reply = cmd_llm_load(String("onboard:tiny.bin"));
+  gInExecutor = false;
+  CHECK(!deserializeJson(doc, reply));
+  CHECK(doc["ok"] == true && doc["ready"] == false);
+  CHECK(std::strstr(doc["hint"] | "", "poll 'llmstatus json'") != nullptr);
+  CHECK(doc["reason"] == "relay off in the app");
+  // Ready: no hint, no reason.
+  gLoadLeavesNotReady = false;
+  gInExecutor = true;
+  CHECK(!deserializeJson(doc, cmd_llm_load(String("onboard:tiny.bin"))));
+  gInExecutor = false;
+  CHECK(doc["ready"] == true && doc["reason"].isNull() && doc["hint"].isNull());
+}
+
+// The autostart's retry rule: 5 s doubling to 60 s, now on a path rising edge,
+// reset by a success, and correct across the millis() wrap.
+static void caseAutostartRetryCore() {
+  for (uint32_t start : {uint32_t(1000), UINT32_MAX - 30000}) {
+    llmautostart::Retry r;
+    CHECK(r.due(start));
+    r.result(false, start);
+    CHECK(!r.due(start + 4999) && r.due(start + 5000));
+    uint32_t t = start + 5000;
+    for (uint32_t delay : {10000u, 20000u, 40000u, 60000u, 60000u}) {
+      r.result(false, t);
+      CHECK(!r.due(t + delay - 1) && r.due(t + delay));
+      t += delay;
+    }
+    r.notePath(false);
+    r.result(false, t);
+    CHECK(!r.due(t + 1));
+    r.notePath(true);              // rising edge: due now, delay back to 5 s
+    CHECK(r.due(t + 1) && r.delayMs() == llmautostart::kFirstDelayMs);
+    r.result(false, t + 1);
+    r.notePath(true);              // still up: no new edge
+    CHECK(!r.due(t + 2));
+    r.notePath(false); r.notePath(true);
+    CHECK(r.due(t + 2));
+    r.result(true, t + 2);         // success: due again at once, delay reset
+    CHECK(r.due(t + 2) && r.delayMs() == llmautostart::kFirstDelayMs);
+  }
+}
+
 static void caseBuildLoadCommand() {
 #if HAVE_BUILD_LOAD_COMMAND
   char out[64];
@@ -338,6 +411,8 @@ int main(int argc, char** argv) {
     {"select_applies_setting", caseSelectAppliesSetting},
     {"command_context_argument", caseCommandContextArgument},
     {"build_load_command", caseBuildLoadCommand},
+    {"not_ready_reason_json", caseNotReadyReasonJson},
+    {"autostart_retry_core", caseAutostartRetryCore},
   };
   unsigned ran = 0;
   for (const auto& c : cases) {

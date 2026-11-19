@@ -13,6 +13,7 @@
 #include "BLE_LinkStatusCore.h"  // hw1link::PipeStatus, the pipe's status value
 #include "BLE_PhonePipeCore.h"
 #include "BLE_PhonePipeTypes.h"
+#include "BLE_PhonePipePath.h"  // the phone path view (P7), as the LLM source reads it
 #include "BLE_PhonePairCode.h"  // `phone pair new` (phone link v2)
 #include "BLE_CentralCoordinator.h"
 #include "BLE_PhonePipeScan.h"
@@ -139,7 +140,34 @@ static bool blePeerCommitPhonePipeEnrollmentIfCurrent(uint32_t& intent,uint32_t&
  if(!blePeerIntentIsCurrent(0,intent,identity))return false;
  ++acceptCount;intent=++authorityIntent;identity=++authorityIdentity;*persist=true;return true;
 }
-static void blePeerNoteLinkLost(int){}
+static unsigned linkLosts=0;
+static void(*linkLostHook)()=nullptr;  // sees the pipe's state at the call
+static void blePeerNoteLinkLost(int){++linkLosts;if(linkLostHook)linkLostHook();}
+// The scheduler's view of the phone (phonePipePathView, nextAttemptSeconds)
+// and the two calls that move its next attempt without an intent bump.
+struct BlePeerReconnectSnapshot{
+ uint32_t intentGeneration=0,identityGeneration=0;
+ bool userDisconnect=false,wantsReconnect=false,explicitReseek=false,autoReconnect=true,hasSavedTarget=true,
+      ownerAuthorityAvailable=true,admissionInFlight=false;
+ uint8_t launchedAttempts=0;uint32_t dueMs=0,reseekUntilMs=0;uint8_t lastAdmission=0xff;
+};
+static BlePeerReconnectSnapshot peerSnap;
+static bool blePeerReconnectSnapshot(int kind,BlePeerReconnectSnapshot& out){assert(kind==BLE_PEER_PHONE);out=peerSnap;return true;}
+struct AttemptFailed{uint32_t intent,identity,at;};
+static std::vector<AttemptFailed> attemptFails;
+static void blePeerNoteAttemptFailed(int kind,uint32_t intent,uint32_t identity){
+ assert(kind==BLE_PEER_PHONE && critDepth==0);attemptFails.push_back({intent,identity,clockMs});}
+struct Expedite{uint32_t window,at;};
+static std::vector<Expedite> expedites;static bool expediteOk=true;
+static void(*expediteHook)()=nullptr;  // runs at the call (a READY that lands meanwhile)
+static bool blePeerExpediteReconnect(int kind,uint32_t window){
+ assert(kind==BLE_PEER_PHONE);expedites.push_back({window,clockMs});if(expediteHook)expediteHook();if(!expediteOk)return false;
+ peerSnap.wantsReconnect=true;peerSnap.launchedAttempts=0;
+ if(!peerSnap.autoReconnect)peerSnap.explicitReseek=true;
+ if(!peerSnap.dueMs || int32_t(peerSnap.dueMs-clockMs)>0)peerSnap.dueMs=clockMs;
+ return true;
+}
+static bool stackFaulted=false;static bool bleStackLifecycleFaulted(){return stackFaulted;}
 static bool requestSettingsPersist(){++persistCount;return true;}
 // The one-shot reseek a job dropped unrun gives back (the Waiting backstop).
 static unsigned reseekRestores=0;static uint32_t reseekIntent=0,reseekIdentity=0;
@@ -151,11 +179,14 @@ static unsigned manualLearns=0;static bool manualLearnOk=true;
 static bool blePeerBeginManualLearn(int,uint32_t& intent,uint32_t& identity){
  ++manualLearns;if(!manualLearnOk)return false;intent=++authorityIntent;identity=authorityIdentity;return true;
 }
+static unsigned manualConnects=0;static bool manualConnectOk=true;
 static bool blePeerBeginManualConnectRequest(int,BlePeerConnectRequest& out){
- out=BlePeerConnectRequest{};out.intentGeneration=++authorityIntent;out.identityGeneration=authorityIdentity;return true;
+ ++manualConnects;if(!manualConnectOk)return false;
+ out=BlePeerConnectRequest{};out.intentGeneration=++authorityIntent;out.identityGeneration=authorityIdentity;
+ out.explicitReseek=true;peerSnap.userDisconnect=false;return true;
 }
 static unsigned userDisconnects=0;
-static void blePeerNoteUserDisconnect(int){++userDisconnects;++authorityIntent;}
+static void blePeerNoteUserDisconnect(int){++userDisconnects;++authorityIntent;peerSnap.userDisconnect=true;peerSnap.wantsReconnect=false;}
 static void bleStampPairedByIfBlank(int){}
 struct BlePeerOwnerSession{String user;uint32_t generation=0;};
 static const char* ownerUser="admin";  // the phone's owning account
@@ -686,6 +717,9 @@ static void reset() {
  failPublish=inPublish=false;claimCalls=publishCalls=cancelCalls=withdrawCalls=0;lastCancelToken=0;
  lastWithdraw=BleSetupWithdraw::NotLive;atClaim={};
  reseekRestores=0;reseekIntent=reseekIdentity=0;manualLearns=0;manualLearnOk=true;userDisconnects=0;
+ linkLosts=0;peerSnap=BlePeerReconnectSnapshot{};attemptFails.clear();expedites.clear();expediteOk=true;expediteHook=nullptr;linkLostHook=nullptr;stackFaulted=false;
+ manualConnects=0;manualConnectOk=true;versionLatchedAt=0;lastScanReports=0;lastScanMatches=0;lastScanKnown=false;
+ foreignAdvertAt=0;foreignAdvertSeen=false;nudgeAt=0;nudgeSeen=false;
  execAdmin=true;authContext=AuthContext{};halStopped=true;
  g2Up=serverUp=false;startOk=true;stackReady=true;pipeStarts=0;
  onPipeStart=[]()->bool{active=true;return true;};
@@ -1254,7 +1288,20 @@ static void opsTests() {
   w.queuedMs=0;ringLinkHeld=false;assert(is(hw1setup::Ready::Run,hw1setup::kNone));
   ringLinkHeld=true;ringYield=false;assert(is(hw1setup::Ready::Run,hw1setup::kNone));
   ringYield=true;assert(is(hw1setup::Ready::Wait,hw1setup::kYield));
-  ringYield=false;recoveryBlocked=true;assert(is(hw1setup::Ready::Wait,hw1setup::kRecovery));}
+  ringYield=false;recoveryBlocked=true;assert(is(hw1setup::Ready::Wait,hw1setup::kRecovery));
+  // P6: the recovery block holds the phone's job at most 30 s, then drops it
+  // (it ends unused and is retried), never an unbounded wait.
+  w.queuedMs=29999;assert(is(hw1setup::Ready::Wait,hw1setup::kRecovery));
+  w.queuedMs=30000;assert(is(hw1setup::Ready::Drop,hw1setup::kRecovery));}
+ // Dropped by the worker at 30 s: the turn ends unused and the next attempt is
+ // scheduled from its end (no intent change).
+ {reset();recoveryBlocked=true;const uint32_t t=admitPhone();
+  for(int i=0;i<400 && bleSetupLive(kPhone,t);++i)serveWorker();
+  assert(!bleSetupLive(kPhone,t)&&prioritySets.empty());
+  tickFlush(clockMs+=10);
+  assert(step==Step::Idle&&statusIs("setup turn ended unused")&&!job);
+  assert(attemptFails.size()==1&&attemptFails[0].intent==intent&&attemptFails[0].identity==identityGeneration);
+  recoveryBlocked=false;}
 }
 
 // ---- Admission: claim first, then state; every failure gives the slot back -------------
@@ -1279,10 +1326,44 @@ static void admissionTests() {
   assert(t&&job&&!enrolling&&step==Step::Waiting&&statusIs("waiting for radio")&&jobAt==clockMs&&request.explicitReseek);
   assert(phoneSlotState()==hw1setup::State::Queued&&bleSetupLive(kPhone,t)&&wakeGiven&&prioritySets.empty());
   assert(!atClaim.job&&atClaim.step==Step::Idle);}
- // `openphone` on a running pipe admits a fresh manual request; a second one
- // finds that job pending.
+ // `openphone` on a running pipe admits a fresh manual request. Repeats
+ // during that job never bump the intent (field log 2026-11-19: a second
+ // openphone cancelled the attempt in flight as "phone intent changed"): the
+ // job continues and the next attempt is brought forward instead.
  {reset();assert(!std::strcmp(cmd_openphone(""),"Phone: open; connecting to the paired phone")&&job&&intent==authorityIntent);
-  assert(!std::strcmp(cmd_openphone(""),"Phone: open; connect pending (busy, the scheduler retries)")&&claimCalls==1&&pipeStarts==0);}
+  const uint32_t jobIntent=intent;assert(manualConnects==1&&expedites.empty());
+  for(int i=0;i<2;++i)
+   assert(!std::strcmp(cmd_openphone(""),"Phone: already connecting (waiting for radio); the attempt continues"));
+  assert(claimCalls==1&&pipeStarts==0&&manualConnects==1&&authorityIntent==jobIntent&&intent==jobIntent);
+  assert(expedites.size()==2&&expedites[0].window==60000&&expedites[1].window==60000);
+  tickFlush(clockMs+=10);assert(job&&currentJob()&&status.load()!=PipeStatus::IntentChanged);
+  assert(jobView()==JobView::Current);}
+ // A job already replaced (stale) or retiring: no new manual request (it
+ // would answer BUSY); the scheduler's next attempt is due now.
+ {reset();admitPhone();++authorityIntent;assert(jobView()==JobView::Stale);
+  assert(!std::strcmp(cmd_openphone(""),"Phone: open; next attempt in 0 s"));
+  assert(manualConnects==0&&expedites.size()==1&&expedites[0].window==60000&&peerSnap.dueMs==clockMs&&claimCalls==1);}
+ {reset();step=Step::Retiring;job=false;assert(jobView()==JobView::None);
+  assert(!std::strcmp(cmd_openphone(""),"Phone: open; next attempt in 0 s")&&manualConnects==0&&expedites.size()==1);}
+ // A user's closephone still stamped (the expedite refused): this openphone
+ // lifts it with a manual intent, the retiring job's end changes nothing.
+ {reset();step=Step::Retiring;job=false;expediteOk=false;peerSnap.wantsReconnect=true;peerSnap.dueMs=clockMs+12345;
+  assert(!std::strcmp(cmd_openphone(""),"Phone: open; next attempt in 13 s")&&manualConnects==1&&expedites.size()==2);}
+ // The attempt reaches READY between openphone's checks and its expedite
+ // (refused: the peer is linked): no manual request, which would replace the
+ // intent the READY link holds and drop it.
+ {reset();step=Step::Retiring;job=false;expediteOk=false;expediteHook=[]{ready=true;};
+  const uint32_t before=authorityIntent;
+  assert(!std::strcmp(cmd_openphone(""),"Phone: open; connected to the paired phone"));
+  assert(manualConnects==0&&expedites.size()==1&&authorityIntent==before);
+  expediteHook=nullptr;ready=false;}
+ // An idle pipe whose admission is refused (the auth cooldown): the
+ // scheduler's next attempt comes forward.
+ {reset();haveAuthFailure=true;lastAuthFailure=clockMs;
+  assert(!std::strcmp(cmd_openphone(""),"Phone: open; next attempt in 0 s")&&manualConnects==1&&expedites.size()==1&&!job);}
+ // No enrolled phone: nothing to connect.
+ {reset();manualConnectOk=false;
+  assert(!std::strcmp(cmd_openphone(""),"Phone: open on the client stack (no enrolled phone to connect; 'phone pair new' enrols one)"));}
  // A closed pipe opens first, on the shared stack (beside the glasses or
  // alone: the same open), then connects. Never over the app console server.
  {reset();active=false;g2Up=true;
@@ -1414,6 +1495,10 @@ static void waitingTests() {
   assert(step==Step::Idle&&statusIs("setup turn ended unused")&&!job&&!enrolling&&!wantToken&&!setupHeld);
   assert(reseekRestores==(c.nudge?1u:0u)&&withdrawCalls==0&&phoneWakes.empty());
   if(c.nudge)assert(reseekIntent==intent&&reseekIdentity==identityGeneration);
+  // P3: a reconnect job that ended unused schedules the next attempt; an
+  // enrollment does not (its window retries it).
+  assert(attemptFails.size()==(c.enroll?0u:1u)&&linkLosts==0);
+  if(!c.enroll)assert(attemptFails[0].intent==intent&&attemptFails[0].identity==identityGeneration);
   tickFlush(clockMs+=10);assert(reseekRestores==(c.nudge?1u:0u));
   BlePeerConnectRequest again;assert(admit(again)==BlePeerConnectAdmission::STARTED);}  // not stuck BUSY
 }
@@ -1603,6 +1688,7 @@ static void turnTests() {
  // No link capacity at the grant: Idle, and the turn goes straight back.
  {reset();capacityAvailable=false;const uint32_t t=admitPhone();const uint32_t servedAt=clockMs;serveWorker();
   assert(statusIs("central link capacity unavailable")&&step==Step::Idle&&!job&&!setupHeld&&!wantToken);
+  assert(attemptFails.size()==1&&attemptFails[0].intent==intent&&linkLosts==0);  // P3: contention is retried
   assert(turn.ended==t&&!turn.granted&&phoneWakes.size()==1&&clockMs==servedAt+10&&phonePriority==1);
   assert(lastReserveArms&&!capacityReservations&&!registrationCount&&events.empty()&&!recoveryNeeded&&!logged("overran"));}
  // R2: an accessory job submitted during discovery never cancels the
@@ -1759,13 +1845,32 @@ static void turnTests() {
 static void idleLabelTests() {
  {reset();runScan(0,30);drainGap();assert(statusIs("phone not found")&&step==Step::Retiring);
   for(int i=0;i<3&&step!=Step::Idle;++i)tickFlush(clockMs+=10);
-  assert(step==Step::Idle&&statusIs("phone not found")&&!published);}
+  assert(step==Step::Idle&&statusIs("phone not found")&&!published);
+  // P3: the failed attempt schedules the next one (no new episode, no intent
+  // change); the scan's tally is kept for the path view and `phone status`.
+  assert(attemptFails.size()==1&&attemptFails[0].intent==intent&&attemptFails[0].at==clockMs&&linkLosts==0);
+  assert(lastScanKnown&&lastScanReports==30&&lastScanMatches==0);
+  static int summaryHandle;PhonePipeLinkSummary sum;mutex=&summaryHandle;assert(phonePipeLinkSummary(&sum));mutex=nullptr;
+  assert(sum.scanKnown&&sum.scanReports==30&&!sum.scanMatches);}
  // A link that was READY reads "disconnected" once it is gone, or "stopped".
  for(int stop=0;stop<2;++stop){reset();pendingEnrollment();lastStreamAt=clockMs-kParamsActiveHoldMs;phoneGatt.state=Gatt::Phase::Pipe;
   phoneGatt.pipe.state=hw1pipe::State::Ready;tickFlush(clockMs);assert(ready&&published&&statusIs("ready"));
   if(stop)stopWanted=true;
   fail(clockMs,Error::Connect,PipeStatus::LinkLost);
+  // While the dropped link closes, the scheduler is not re-armed yet
+  // (wantsReconnect false since link up): with auto on the view reads a retry
+  // about to be scheduled, never "auto-reconnect off"; with auto off, held.
+  if(!stop){assert(step==Step::Retiring&&!peerSnap.wantsReconnect);
+   PhonePathView v=phonePipePathView();
+   assert(v.state==PhonePathState::Retrying&&v.retryInMs==2000&&!v.attempt&&phonePathRecoverable(v));
+   peerSnap.autoReconnect=false;v=phonePipePathView();
+   assert(v.state==PhonePathState::Held&&v.hint==PhonePathHint::None&&!phonePathRecoverable(v));
+   peerSnap.autoReconnect=true;}
+  // The new episode is scheduled before Idle is published (the view is lock-free).
+  static bool beforeIdle;beforeIdle=false;linkLostHook=[]{beforeIdle=step!=Step::Idle;};
   for(int i=0;i<3&&step!=Step::Idle;++i)tickFlush(clockMs+=10);
+  linkLostHook=nullptr;
+  assert(linkLosts==1&&attemptFails.empty()&&beforeIdle);  // a READY session's end starts a new episode
   assert(step==Step::Idle&&statusIs(stop?"stopped":"disconnected"));}
  // An open that fails before READY keeps "phone link lost".
  {reset();runScan(1,0);drainGap();holdTurn();
@@ -2070,34 +2175,67 @@ static void v2Tests() {
   assert(statusIs("phone link lost") && versionStrikes==1 && phoneSession.helloEnd()==hw1pipe::HelloEnd::None);
   pipeAttempt([&]{assert(!phoneDeliver(hw1pipe::kVersion,Op::Reset,0,paused,2));});
   assert(statusIs("phone link lost") && versionStrikes==1 && phoneSession.error==Error::Paused);
-  // Strike 2: silence, the link lost within 1.5 s.
-  pipeAttempt([&]{clockMs+=500;phoneGatt.failNext=true;phoneGatt.failError=Error::Connect;});
-  assert(phoneSession.helloEnd()==hw1pipe::HelloEnd::Silent && versionStrikes==2 && !versionLatched);
-  assert(statusIs("phone app version mismatch"));
-  // Strike 3: the HELLO deadline. Held: no reconnect admission (the scheduler
-  // keeps its intent), the ring gets its link back, the reason is shown.
-  const uint32_t at=clockMs;pipeAttempt([]{});
-  assert(phoneSession.helloEnd()==hw1pipe::HelloEnd::Silent && clockMs-at>=3000 && phoneGatt.stopError==Error::Deadline);
-  assert(versionStrikes==3 && versionLatched && statusIs("phone app too old") && sessionStats.versionMismatches==3);
+  // Silence (the link lost within 1.5 s of the HELLO, or the HELLO deadline)
+  // is counted as a mismatch but never a strike (P5): a Bluetooth toggle or
+  // marginal radio out and about looks the same. Three never hold the link;
+  // each is an ordinary failure, retried at the normal backoff.
+  attemptFails.clear();
+  for(int i=0;i<3;++i) {
+   const uint32_t at=clockMs;
+   if(i==1)pipeAttempt([]{});  // the HELLO deadline
+   else pipeAttempt([&]{clockMs+=500;phoneGatt.failNext=true;phoneGatt.failError=Error::Connect;});
+   assert(phoneSession.helloEnd()==hw1pipe::HelloEnd::Silent && (i!=1 || (clockMs-at>=3000 && phoneGatt.stopError==Error::Deadline)));
+   assert(versionStrikes==1 && !versionLatched && statusIs("phone app version mismatch") && pipeAdmissionEnabled);
+   assert(sessionStats.versionMismatches==2u+unsigned(i) && attemptFails.size()==size_t(i+1));
+  }
+  // Strikes 2 and 3: the phone's version RESET. Held: no reconnect admission
+  // (the scheduler keeps its intent), the ring gets its link back, the reason
+  // is shown.
+  pipeAttempt([&]{assert(!phoneDeliver(1,Op::Reset,0,versionReset,2));});
+  assert(versionStrikes==2 && !versionLatched);
+  pipeAttempt([&]{assert(!phoneDeliver(1,Op::Reset,0,versionReset,2));});
+  const uint32_t latchedAt=versionLatchedAt.load();
+  assert(phoneSession.helloEnd()==hw1pipe::HelloEnd::VersionSignal && latchedAt && latchedAt<=clockMs);
+  assert(versionStrikes==3 && versionLatched && statusIs("phone app too old") && sessionStats.versionMismatches==6);
   assert(!pipeAdmissionEnabled && !sessionStats.ended);
+  // The path view: held, the app too old, the probe's time left.
+  {const PhonePathView v=phonePipePathView();
+   assert(v.state==PhonePathState::Held && v.hint==PhonePathHint::AppTooOld && v.retryInMs==600000-(clockMs-latchedAt));
+   char text[112];phonePathText(v,text,sizeof(text));assert(!std::strcmp(text,"phone app too old: update it (next check in 10 min)"));}
   const unsigned claims=claimCalls;BlePeerConnectRequest wanted;
   assert(admit(wanted)==BlePeerConnectAdmission::ROLE_BLOCKED && claimCalls==claims && step==Step::Idle && !job);
   tickFlush(clockMs+=10);PhonePipeLinkSummary sum;mutex=&handle;assert(phonePipeLinkSummary(&sum));mutex=nullptr;
-  assert(sum.versionLatched && sum.strikes==3 && sum.versionMismatches==3 && !sum.ended);
+  assert(sum.versionLatched && sum.strikes==3 && sum.versionMismatches==6 && !sum.ended);
   // The validate pass lifts nothing.
   gCliValidateOnly=true;assert(!std::strcmp(cmd_openphone(""),"VALID") && versionLatched);gCliValidateOnly=false;
   // `openphone` lifts it and connects now (its own job: no reseek).
   assert(!std::strcmp(cmd_openphone(""),"Phone: open; connecting to the paired phone"));
   assert(!versionLatched && versionStrikes==0 && pipeAdmissionEnabled && job && reseeks==0);}
  // `openphone` on a held, open pipe lifts the hold and connects; a second one
- // finds the job pending. A pipe that is stopping keeps the ring's way clear
- // (a real open enables it itself) and admits nothing.
+ // finds the job running and lets it continue. A pipe that is stopping keeps
+ // the ring's way clear (a real open enables it itself) and admits nothing:
+ // the scheduler's next attempt comes forward instead.
  {reset();versionLatched=true;versionStrikes=3;bleCentralPhoneEnabled(false);
   assert(!std::strcmp(cmd_openphone(""),"Phone: open; connecting to the paired phone"));
   assert(!versionLatched && !versionStrikes && pipeAdmissionEnabled && job && reseeks==0);
-  assert(!std::strcmp(cmd_openphone(""),"Phone: open; connect pending (busy, the scheduler retries)") && reseeks==0);
+  assert(!std::strcmp(cmd_openphone(""),"Phone: already connecting (waiting for radio); the attempt continues") && reseeks==0);
   versionLatched=true;stopWanted=true;bleCentralPhoneEnabled(false);
-  assert(!std::strcmp(cmd_openphone(""),"Phone: open; connect pending (busy, the scheduler retries)") && !versionLatched && !pipeAdmissionEnabled && reseeks==0);}
+  assert(!std::strcmp(cmd_openphone(""),"Phone: already connecting (waiting for radio); the attempt continues") && !versionLatched && !pipeAdmissionEnabled && reseeks==0);
+  job=false;step=Step::Idle;versionLatched=true;
+  assert(!std::strcmp(cmd_openphone(""),"Phone: open; next attempt in 0 s") && !versionLatched && !pipeAdmissionEnabled && reseeks==0);}
+ // The 10 min probe (P5): a held pipe is admitted again once, with two
+ // strikes, so one more version RESET holds it at once; an attempt before
+ // then stays held.
+ {reset();versionLatched=true;versionStrikes=3;versionLatchedAt=clockMs;bleCentralPhoneEnabled(false);
+  BlePeerConnectRequest wanted;
+  clockMs+=599990;assert(admit(wanted)==BlePeerConnectAdmission::ROLE_BLOCKED && versionLatched && !job);
+  clockMs+=10;assert(admit(wanted)==BlePeerConnectAdmission::STARTED);
+  assert(!versionLatched && versionStrikes==2 && pipeAdmissionEnabled && job);
+  job=false;step=Step::Idle;wantToken=0;endTurn();
+  const uint32_t probeAt=clockMs;
+  pipeAttempt([&]{assert(!phoneDeliver(1,Op::Reset,0,versionReset,2));});
+  assert(versionLatched && versionStrikes==3 && !pipeAdmissionEnabled);
+  assert(int32_t(versionLatchedAt-probeAt)>0 && int32_t(clockMs-versionLatchedAt)>=0);}
  // `phone pair` lifts it too and starts its enrollment (no reseek).
  {reset();versionLatched=true;versionStrikes=3;bleCentralPhoneEnabled(false);
   assert(std::string(phonePairCommand("")).rfind("Pairing opened for 60 seconds",0)==0);
@@ -2105,7 +2243,7 @@ static void v2Tests() {
  // READY resets the streak and lifts a hold.
  {reset();
   pipeAttempt([&]{assert(!phoneDeliver(1,Op::Reset,0,versionReset,2));});
-  pipeAttempt([&]{clockMs+=100;phoneGatt.failNext=true;phoneGatt.failError=Error::Connect;});
+  pipeAttempt([&]{assert(!phoneDeliver(1,Op::Reset,0,versionReset,2));});
   assert(versionStrikes==2);versionLatched=true;bleCentralPhoneEnabled(false);
   pendingEnrollment();std::memset(phoneGatt.entered,0,sizeof(phoneGatt.entered));phoneSilent=false;enterPipe();
   for(int i=0;i<5 && !ready;++i)tickFlush(clockMs+=10);
@@ -2366,6 +2504,96 @@ static void pairNewTests() {
 // INSERT_SINK_TESTS
 #endif
 
+// ---- The phone path (P4, P7): heard adverts, the caller's nudge, the view ----------------
+static void pathTests() {
+ const auto text=[](const PhonePathView& v){static char t[112];phonePathText(v,t,sizeof(t));return std::string(t);};
+ // P4: the phone's advertisement in another client's scan (the route not
+ // scanning) expedites the next attempt, window 0, and stays with that client
+ // (false). Rate-limited to one per 5 s; never while READY, never for another
+ // device's advertisement or an oversized report.
+ {reset();assert(!route.scan&&route.enabled==false);routeSet();assert(route.enabled&&!route.scan);
+  auto pipe=report(true,-60),other=report(false,-60);
+  assert(!gapCallback(ESP_GAP_BLE_SCAN_RESULT_EVT,&other)&&expedites.empty());
+  assert(!gapCallback(ESP_GAP_BLE_SCAN_RESULT_EVT,&pipe)&&expedites.size()==1&&expedites[0].window==0);
+  assert(gapEvents.empty()&&!scanTally.reports.load());  // nothing queued, the pipe's own tally untouched
+  clockMs+=4990;assert(!gapCallback(ESP_GAP_BLE_SCAN_RESULT_EVT,&pipe)&&expedites.size()==1);
+  clockMs+=10;assert(!gapCallback(ESP_GAP_BLE_SCAN_RESULT_EVT,&pipe)&&expedites.size()==2);
+  clockMs+=6000;auto big=pipe;big.scan_rst.adv_data_len=32;
+  assert(!gapCallback(ESP_GAP_BLE_SCAN_RESULT_EVT,&big)&&expedites.size()==2);
+  ready=true;assert(!gapCallback(ESP_GAP_BLE_SCAN_RESULT_EVT,&pipe)&&expedites.size()==2);ready=false;
+  // Our own last scan already heard the phone (its link failed): hearing it
+  // again is no new evidence, so the backoff is left to build.
+  clockMs+=6000;lastScanKnown=true;lastScanReports=12;lastScanMatches=1;
+  assert(!gapCallback(ESP_GAP_BLE_SCAN_RESULT_EVT,&pipe)&&expedites.size()==2);
+  lastScanMatches=0;assert(!gapCallback(ESP_GAP_BLE_SCAN_RESULT_EVT,&pipe)&&expedites.size()==3);
+  lastScanKnown=false;lastScanReports=0;
+  // The pipe's own scan still takes its reports (true) and never expedites.
+  job=true;holdTurn();beginJob(clockMs);scanEvent(ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT);drainGap();
+  assert(route.scan&&gapCallback(ESP_GAP_BLE_SCAN_RESULT_EVT,&pipe)&&expedites.size()==3);}
+ // A stopped pipe's route claims nothing and expedites nothing.
+ {reset();active=false;routeSet();auto pipe=report(true,-60);
+  assert(!gapCallback(ESP_GAP_BLE_SCAN_RESULT_EVT,&pipe)&&expedites.empty());}
+ // The caller's nudge: one expedite (60 s window) per 3 s; true while the
+ // view is Connecting/Retrying.
+ {reset();peerSnap.wantsReconnect=true;peerSnap.dueMs=clockMs+20000;
+  assert(phonePipeNudgeReconnect()&&expedites.size()==1&&expedites[0].window==60000&&peerSnap.dueMs==clockMs);
+  clockMs+=2990;assert(phonePipeNudgeReconnect()&&expedites.size()==1);
+  clockMs+=10;assert(phonePipeNudgeReconnect()&&expedites.size()==2);
+  clockMs+=3000;peerSnap.userDisconnect=true;expediteOk=false;
+  assert(!phonePipeNudgeReconnect()&&expedites.size()==3);
+  // READY (relay on or off): nothing to bring forward, so no expedite (it
+  // would reach the scheduler as ALREADY_UP), and the window is not used.
+  clockMs+=3000;peerSnap.userDisconnect=false;expediteOk=true;ready=true;relayOn=true;
+  assert(!phonePipeNudgeReconnect()&&expedites.size()==3);
+  relayOn=false;assert(!phonePipeNudgeReconnect()&&expedites.size()==3);
+  ready=false;assert(phonePipeNudgeReconnect()&&expedites.size()==4);}
+ // The view, state by state.
+ {reset();
+  // Retrying, with the last scan's hint and the next try.
+  peerSnap.wantsReconnect=true;peerSnap.launchedAttempts=3;peerSnap.dueMs=clockMs+12001;
+  PhonePathView v=phonePipePathView();
+  assert(v.state==PhonePathState::Retrying&&v.hint==PhonePathHint::None&&v.retryInMs==12001&&v.attempt==3);
+  assert(text(v)=="phone link down, retrying in 13 s"&&phonePathRecoverable(v));
+  lastScanKnown=true;lastScanReports=14;lastScanMatches=0;v=phonePipePathView();
+  assert(v.hint==PhonePathHint::NotHeard&&text(v)=="phone not heard (out of range, or phone Bluetooth/app off?), retrying in 13 s");
+  lastScanReports=0;assert(phonePipePathView().hint==PhonePathHint::RadioSilent);
+  lastScanReports=9;lastScanMatches=2;assert(phonePipePathView().hint==PhonePathHint::FoundNoLink);
+  peerSnap.dueMs=clockMs-5;assert(phonePipePathView().retryInMs==0);  // due: never negative
+  // Auto off with a reseek window armed: still retrying; without one, held.
+  peerSnap.autoReconnect=false;peerSnap.explicitReseek=true;assert(phonePipePathView().state==PhonePathState::Retrying);
+  peerSnap.explicitReseek=false;v=phonePipePathView();
+  assert(v.state==PhonePathState::Held&&v.hint==PhonePathHint::None&&!phonePathRecoverable(v));
+  assert(text(v)=="phone link down (auto-reconnect off; openphone)");
+  peerSnap.autoReconnect=true;
+  // Connecting: a job queued or running.
+  for(Step st:{Step::Waiting,Step::ScanParams,Step::Scanning,Step::Link}){step=st;
+   v=phonePipePathView();assert(v.state==PhonePathState::Connecting&&text(v)=="connecting to phone"&&phonePathRecoverable(v));}
+  step=Step::Retiring;assert(phonePipePathView().state==PhonePathState::Retrying);
+  // Held by a fault, the user's closephone, an old app.
+  step=Step::Fault;v=phonePipePathView();
+  assert(v.state==PhonePathState::Held&&v.hint==PhonePathHint::RadioFault&&text(v)=="Bluetooth fault: restart may be needed");
+  step=Step::Idle;stackFaulted=true;assert(phonePipePathView().hint==PhonePathHint::RadioFault);stackFaulted=false;
+  versionLatched=true;versionLatchedAt=clockMs-60000;v=phonePipePathView();
+  assert(v.hint==PhonePathHint::AppTooOld&&v.retryInMs==540000&&text(v)=="phone app too old: update it (next check in 9 min)");
+  versionLatched=false;
+  peerSnap.userDisconnect=true;v=phonePipePathView();
+  assert(v.state==PhonePathState::Held&&v.hint==PhonePathHint::ClosedByUser&&text(v)=="phone link closed (openphone to reconnect)");
+  peerSnap.userDisconnect=false;
+  // Not paired: no enrolled target, or no secret.
+  peerSnap.hasSavedTarget=false;v=phonePipePathView();
+  assert(v.state==PhonePathState::NotPaired&&text(v)=="no phone paired (phone pair new)");
+  peerSnap.hasSavedTarget=true;status=PipeStatus::NoSecret;assert(phonePipePathView().state==PhonePathState::NotPaired);
+  status=PipeStatus::Disconnected;
+  // Up, or READY with the app's relay off.
+  ready=true;relayOn=true;v=phonePipePathView();assert(v.state==PhonePathState::Up&&!v.attempt&&text(v)=="phone relay ready");
+  relayOn=false;v=phonePipePathView();assert(v.state==PhonePathState::RelayOff&&text(v)=="relay off in the app"&&!phonePathRecoverable(v));
+  ready=false;
+  // Off: Bluetooth disabled, or the console server owns the radio.
+  gSettings.bleEnabled=false;v=phonePipePathView();assert(v.state==PhonePathState::Off&&text(v)=="Bluetooth off");
+  gSettings.bleEnabled=true;serverUp=true;v=phonePipePathView();
+  assert(v.state==PhonePathState::Off&&v.hint==PhonePathHint::ConsoleServer&&text(v)=="console server owns Bluetooth (closeconsole)");
+  serverUp=false;}
+}
 int main(){
  alarm(110);  // a hung run fails instead of hanging
  assert(bleSetupWorkerStart()&&workerStackBytes==5120&&workerTaskPriority==5&&bleSetupWorkerStart());
@@ -2389,6 +2617,7 @@ int main(){
  pairNewTests();
 #endif
  turnTests();
+ pathTests();
  assert(critDepth==0);
  puts("Phone runtime on the setup worker: whole turns (priority 5 then 1, grant after the raise, one consume, give-back at READY), "
       "claim-first admission and enrollment, Waiting backstop and one-shot nudge, every exit gives the turn back once "
@@ -2405,5 +2634,7 @@ int main(){
       "end never ending the link or its relay; no secret read on a stopped pass, the key published only "
       "if no invalidation raced it; the pipe task's exit: refused while active, the host up, the reset unrun or a phone "
       "turn pending, the reset on the task before the request, the final stopped summary before the leave, no priority "
-      "call after, a timeout withdrawn with the task kept, a second release a no-op, the idle exit on an up host (2 s after the pipe is idle, held by an app id, a job, an active pipe or a phone turn) passed");
+      "call after, a timeout withdrawn with the task kept, a second release a no-op, the idle exit on an up host (2 s after the pipe is idle, held by an app id, a job, an active pipe or a phone turn); "
+      "durable lifecycle: openphone never cancels an attempt in flight, every attempt end schedules the next, a silent HELLO is no strike, "
+      "the 10 min version probe, the 30 s recovery bound, a heard advert expedites, the nudge and the path view passed");
 }

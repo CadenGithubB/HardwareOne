@@ -3,6 +3,7 @@
 #include "BLE_PhoneGatt.h"
 #include "BLE_CentralTx.h"
 #include <esp_gap_ble_api.h>
+#include <esp_log.h>
 #include <esp_random.h>
 #include <cstring>
 
@@ -24,7 +25,7 @@ bool Gatt::begin(uint16_t appId, const uint8_t address[6], uint8_t type, uint32_
   std::memcpy(address_,address,6); type_=type; appId_=appId;
   conn_=0xffff; mtu_=23; serviceStart_=serviceEnd_=rx_=tx_=cccd_=0; services_=0;
   opened_=openPending_=cancelPending_=closePending_=unregisterPending_=writePending_=congested_=false;
-  autoDiscoveryDone_=false;
+  autoDiscoveryDone_=mtuResent_=false; autoDiscoveryAt_=mtuResentAt_=0;
   pipe.down();channel_.reset();std::memcpy(psk_,psk,32);replyLength_=0;
   descriptorPending_=authenticationFailed_=rejectPending_=serviceChanged_=false;
   if (++generation_==0) ++generation_;
@@ -255,6 +256,9 @@ void Gatt::consume(const Event& e, uint32_t now) {
     if (retiring) return;
     if (e.status!=ESP_GATT_OK) { stop(now,hw1pipe::Error::Connect); return; }
     enter(Phase::Mtu,now);
+    // Attributes a later "GATTC_ConfigureMTU GATT_BUSY conn_id = N" to this
+    // link (no address).
+    ESP_LOGI("PIPE_SETUP","gatt_if=%u conn=%04x",unsigned(interface_.load()),unsigned(conn_));
     if(esp_ble_gattc_send_mtu_req(interface_.load(),conn_)!=ESP_OK){mtuRefused_=true;stop(now,hw1pipe::Error::Connect);}
     return;
   }
@@ -293,9 +297,11 @@ void Gatt::consume(const Event& e, uint32_t now) {
   switch (e.kind) {
     case ESP_GATTC_CFG_MTU_EVT:
       if (phase_!=Phase::Mtu) break;
-      // A completed unsupported MTU negotiation keeps the existing MTU. On a
-      // live link IDF 5.5.5 never reports BUSY here: a CFG_MTU issued during
-      // discovery is queued, and a synchronous failure is dropped unreported.
+      // A completed unsupported MTU negotiation keeps the existing MTU. A
+      // CFG_MTU issued during discovery is queued, but Bluedroid can also
+      // refuse it synchronously as GATT_BUSY (field log 2026-11-19) and drop
+      // it with no event: poll() then sends it once more. A late answer to
+      // the first request after the resend is ignored outside Phase::Mtu.
       noteStatus(e.status);
       // Our CFG_MTU is queued behind Bluedroid's discovery, so running before
       // DIS_SRVC_CMPL means that discovery ended without one: it failed, and
@@ -395,11 +401,23 @@ void Gatt::poll(uint32_t now, bool relayPressure, bool consoleDisplayBusy) {
     if (phase_==Phase::Retiring && hw1pipe::expired(now,phaseAt_,3000)) enter(Phase::Quarantined,now);
     return;
   }
+  if (phase_==Phase::Mtu && autoDiscoveryDone_) {
+    // The MTU answer is missing after discovery: the request may never have
+    // gone out (a synchronous GATT_BUSY). Ask once more at 800 ms; 1.5 s
+    // later go on at the MTU this link has, as Even falls back, or stop the
+    // attempt (the scheduler retries it).
+    if (!mtuResent_ && hw1pipe::expired(now,autoDiscoveryAt_,800)) {
+      mtuResent_=true; mtuResentAt_=now;
+      (void)esp_ble_gattc_send_mtu_req(interface_.load(),conn_);
+    } else if (mtuResent_ && hw1pipe::expired(now,mtuResentAt_,1500)) {
+      if (mtu_<kMinimumMtu || !discover(now)) stop(now,hw1pipe::Error::Connect);
+      return;
+    }
+  }
   const bool discovery=phase_==Phase::Discovering || phase_==Phase::Subscribe || phase_==Phase::Cccd;
   if ((phase_==Phase::Registering && hw1pipe::expired(now,phaseAt_,2000)) ||
       (phase_==Phase::Opening && hw1pipe::expired(now,phaseAt_,10000)) ||
-      (phase_==Phase::Mtu && (autoDiscoveryDone_ ? hw1pipe::expired(now,autoDiscoveryAt_,2000)
-                                                 : hw1pipe::expired(now,phaseAt_,10000))) ||
+      (phase_==Phase::Mtu && !autoDiscoveryDone_ && hw1pipe::expired(now,phaseAt_,10000)) ||
       (discovery && hw1pipe::expired(now,discoveryAt_,3000)) ||
       (writePending_ && hw1pipe::expired(now,writeAt_,2000))) {
     stop(now,hw1pipe::Error::Deadline); return;

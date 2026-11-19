@@ -48,6 +48,9 @@ std::atomic<bool> sCancel{false};
 std::atomic<bool> sConfigAdmitted{false};
 std::atomic<bool> sConfigFailurePending{false};
 std::atomic<SemaphoreHandle_t> sMutex{nullptr};
+// Whether the published URL is HTTPS (the phone relay carries HTTPS only), for
+// lock-free path checks from the backend tick.
+std::atomic<bool> sSecure{true};
 constexpr const char* kConfigPublicationError = "Agent configuration could not be applied; request stopped";
 
 struct Lock {
@@ -223,7 +226,7 @@ void worker(void* context) {
   // effective level still permits header dumps.
   const char* error = esp_log_level_get("HTTP_CLIENT") >= ESP_LOG_DEBUG ?
       "HTTP debug logging exposes credentials; lower log verbosity" : nullptr;
-  char errorBuffer[96]{};
+  char errorBuffer[112]{};
   JsonBudget allocator;
   auto* parserMemory = ps_alloc(sizeof(hw1http::Stream), AllocPref::PreferPsram, "llm.http.stream");
   auto* stream = parserMemory ? new (parserMemory) hw1http::Stream(&allocator) : nullptr;
@@ -276,6 +279,20 @@ void worker(void* context) {
   if (!error && client && !sCancel.load(std::memory_order_acquire)) {
     if (esp_http_client_open(client, static_cast<int>(bodyLen)) != ESP_OK)
       error = "Agent connection failed; request was not retried";
+    if (error && llmHttpIoRetireWaitFailed(io)) {
+      // The path is up; the phone kept the previous stream: the path text
+      // would name a working path as the reason.
+      error = "Not sent: the phone did not release the previous request in time";
+    } else if (error && llmHttpIoPathWaitFailed(io)) {
+      // The bounded wait for a path ended (or the phone link stopped coming
+      // back): no HTTP byte went out on any path.
+      char path[96];
+      llmHttpPathText(!strncasecmp(run->config.url, "https://", 8), path, sizeof(path));
+      snprintf(errorBuffer, sizeof(errorBuffer), "Not sent: %s", path);
+      error = errorBuffer;
+    } else if (error && llmHttpIoRetriedSamePath(io)) {
+      error = "Agent connection failed after one retry; request was not sent";
+    }
     if (!error) {
       Lock lock(true);
       if (lock) {
@@ -341,7 +358,8 @@ void worker(void* context) {
   if (stream) {
     if (error) {
       stream->text.finish(false);
-      char notice[68]; snprintf(notice, sizeof(notice), "\n[%.60s]", error);
+      // Wide enough for a whole path reason ("Not sent: phone not heard ...").
+      char notice[108]; snprintf(notice, sizeof(notice), "\n[%.100s]", error);
       stream->text.literal(notice, strlen(notice));
     }
     publish(*run, stream->text.bytes, stream->text.size, error, true);
@@ -424,6 +442,7 @@ bool httpLlmConfigure(bool enabled, const char* baseUrl, const char* model,
       else sError[0] = 0;
     }
     strlcpy(sConfigError, reason ? reason : "", sizeof(sConfigError));
+    sSecure.store(!strncasecmp(sConfig.url, "https://", 8), std::memory_order_release);
     if (recoveringPublication && !sWorker) sError[0] = 0;
     sConfigAdmitted.store(true, std::memory_order_release);
   }
@@ -431,11 +450,29 @@ bool httpLlmConfigure(bool enabled, const char* baseUrl, const char* model,
   return valid;
 }
 
+namespace {
+bool secureLocked() { return !strncasecmp(sConfig.url, "https://", 8); }
+// The path is up, or the phone link is coming back by itself (a chat waits
+// for it in the transport). Wi-Fi recovery is not modelled.
+bool pathUsableLocked() {
+  const bool secure = secureLocked();
+  return llmHttpPathAvailable(secure) || llmHttpPathRecoverable(secure);
+}
+// Configuration reasons only; the path never makes the source unavailable.
+const char* unavailableLocked() {
+  return !sConfigAdmitted.load(std::memory_order_acquire) ? kConfigPublicationError :
+         !sConfig.enabled ? "HTTP agent disabled (llmhttpenabled)" :
+         !sConfig.valid ? sConfigError : nullptr;
+}
+}  // namespace
+
 size_t httpLlmEnumerate(LlmModelDesc* out, size_t cap) {
   if (!out || !cap) return 0;
   Lock lock;
   if (!lock || !sConfig.enabled) return 0;
-  descriptor(out, sConfigAdmitted.load(std::memory_order_acquire) && sConfig.valid && llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8))); return 1;
+  // Availability is configuration only: a phone link that is down or coming
+  // back never hides the source or refuses its selection.
+  descriptor(out, sConfigAdmitted.load(std::memory_order_acquire) && sConfig.valid); return 1;
 }
 bool httpLlmFindByName(const char* name, LlmModelDesc* out) {
   return name && !strcasecmp(name, "openclaw") && httpLlmEnumerate(out, 1) == 1;
@@ -446,12 +483,24 @@ bool httpLlmSelectByName(const char* name, char* error, size_t cap) {
       !name || strcasecmp(name, "openclaw") ? "Unknown HTTP agent" :
       !sConfigAdmitted.load(std::memory_order_acquire) ? kConfigPublicationError :
       !sConfig.enabled ? "HTTP agent is disabled" :
-      !sConfig.valid ? sConfigError : sWorker ? "HTTP agent request still active" :
-      !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8)) ? "No relay transport is ready" : nullptr;
+      !sConfig.valid ? sConfigError : sWorker ? "HTTP agent request still active" : nullptr;
   if (reason) { if (error && cap) strlcpy(error, reason, cap); return false; }
   sSelected = true; sError[0] = 0;
   if (!sConversation[0]) rotateLocked();
   return true;
+}
+size_t httpLlmUnavailableReason(char* out, size_t cap) {
+  if (!out || !cap) return 0;
+  out[0] = 0;
+  Lock lock;
+  const char* reason = !lock ? "HTTP agent busy" : unavailableLocked();
+  if (!reason) return 0;
+  const size_t n = strlcpy(out, reason, cap);
+  return n < cap ? n : cap - 1;
+}
+bool httpLlmPathUp() { return llmHttpPathAvailable(sSecure.load(std::memory_order_acquire)); }
+size_t httpLlmPathText(char* out, size_t cap) {
+  return llmHttpPathText(sSecure.load(std::memory_order_acquire), out, cap);
 }
 void httpLlmUnload() {
   httpLlmStop(); Lock lock;
@@ -460,7 +509,7 @@ void httpLlmUnload() {
 bool httpLlmIsReady() {
   Lock lock;
   return lock && sConfigAdmitted.load(std::memory_order_acquire) && sSelected &&
-         sConfig.enabled && sConfig.valid && !sWorker && llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8));
+         sConfig.enabled && sConfig.valid && !sWorker && pathUsableLocked();
 }
 LlmStatus httpLlmStatus() {
   LlmStatus st{}; Lock lock;
@@ -470,11 +519,17 @@ LlmStatus httpLlmStatus() {
     st.state = LlmState::ERROR;
     strlcpy(st.errorMsg, kConfigPublicationError, sizeof(st.errorMsg)); return st;
   }
+  const bool secure = secureLocked();
+  const bool up = llmHttpPathAvailable(secure);
+  const bool usable = up || llmHttpPathRecoverable(secure);
+  // A failed request no longer makes the source ERROR: the next one may work.
+  // ERROR is for configuration, or a path that will not come back by itself.
   st.state = !sSelected ? LlmState::UNLOADED : sWorker ? LlmState::GENERATING :
-             sError[0] || !sConfig.valid || !sConfig.enabled || !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8)) ? LlmState::ERROR : LlmState::READY;
-  const char* reason = sError[0] ? sError : !sConfig.enabled ? "HTTP agent disabled" :
-                       !sConfig.valid ? sConfigError : !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8)) ? "No relay transport ready" : "";
-  strlcpy(st.errorMsg, reason, sizeof(st.errorMsg)); return st;
+             !sConfig.valid || !sConfig.enabled || !usable ? LlmState::ERROR : LlmState::READY;
+  if (const char* reason = unavailableLocked()) strlcpy(st.errorMsg, reason, sizeof(st.errorMsg));
+  else if (!up) llmHttpPathText(secure, st.errorMsg, sizeof(st.errorMsg));
+  else if (sError[0]) snprintf(st.errorMsg, sizeof(st.errorMsg), "last request: %s", sError);
+  return st;
 }
 int httpLlmStartAsync(const char* prompt, const LlmGenParams& /*params*/) {
   if (!prompt || !*prompt || strlen(prompt) > kPromptMax) return 0;
@@ -482,8 +537,9 @@ int httpLlmStartAsync(const char* prompt, const LlmGenParams& /*params*/) {
   if (!run) return 0;
   new (run) Run;
   Lock lock;
+  // The transport admits a chat while the phone link is coming back.
   if (!lock || !sConfigAdmitted.load(std::memory_order_acquire) || !sSelected ||
-      !sConfig.enabled || !sConfig.valid || sWorker || !llmHttpPathAvailable(!strncasecmp(sConfig.url, "https://", 8))) {
+      !sConfig.enabled || !sConfig.valid || sWorker) {
     run->~Run(); ps_free(run); return 0;
   }
   if(llmHttpRequestAdmit(LlmHttpRequestKind::Chat,!strncasecmp(sConfig.url,"https://",8))!=LlmHttpAdmission::Accepted) {

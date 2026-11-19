@@ -3,6 +3,7 @@
 #include "System_LLMHttpTransportCore.h"
 #include "System_MemUtil.h"
 #include "BLE_PhonePipe.h"
+#include "BLE_PhonePipePath.h"  // phonePipePathView, phonePipeNudgeReconnect, phonePathText
 #include <WiFi.h>
 #include <esp_transport.h>
 #include <esp_tls.h>
@@ -43,6 +44,9 @@ using hw1httptransport::Failure;
 namespace {
 #if ENABLE_BLE_PHONE_PIPE
 constexpr uint32_t kDirectMs=2000,kHandshakeMs=4500,kIoMs=2000;
+// A chat request waits this long (within its own budget) for a phone link that
+// is coming back, polling every kPathPollMs. Terminal requests never wait.
+constexpr uint32_t kChatPathWaitMs=30000,kPathPollMs=100;
 struct PhoneTls {
   mbedtls_ssl_context ssl;
   mbedtls_ssl_config config;
@@ -86,6 +90,13 @@ struct LlmHttpIo {
   PhonePipeOpenResult phoneOpen{};
   uint64_t phoneCorr=0;uint16_t phoneStream=0; // kept for F3 after close() drops the handle
   bool begun=false,connected=false,networkError=false;
+  // Chat path wait (connect): it waited for a path, and the wait ran out or
+  // the phone link stopped coming back. Nothing was sent then.
+  bool waitedForPath=false,pathWaitFailed=false;
+  // The same-path retry's wait ended with the phone relay up but this
+  // consumer's previous stream not yet retired by the phone.
+  bool retireWaitFailed=false;
+  uint32_t pathWaitMs=0;
   char host[254]{};
 #endif
 };
@@ -460,13 +471,66 @@ bool connectPhone(LlmHttpIo& io,int port) {
   }
   io.failure=cancelled(io)?Failure::Cancelled:Failure::Network;return false;
 }
+// The phone is a path only while READY with its relay on (RELAY_ON).
+bool phoneUp(const LlmHttpIo& io){return io.secure && phonePipeRelayAvailable();}
+// Chat only: no path is up, but the phone link is coming back (connecting or
+// retrying). Nudge it once, then poll every kPathPollMs until a path is up,
+// bounded by kChatPathWaitMs and the request's own budget. It gives up at once
+// when the link stops coming back (held, not paired, relay off, Bluetooth off).
+// retired: the phone must also have retired this consumer's previous stream
+// (the same-path retry, so one request never holds two streams). False leaves
+// io.failure set; no HTTP byte was written on any path.
+bool awaitPath(LlmHttpIo& io,bool retired) {
+  auto ready=[&] {
+    return WiFi.isConnected() ||
+           (phoneUp(io) && (!retired || phonePipeRetired(requestSlots[unsigned(io.kind)].retiring)));
+  };
+  if(ready())return true;
+  const uint32_t start=millis();
+  io.waitedForPath=true;
+  if(!phoneUp(io))(void)phonePipeNudgeReconnect();
+  bool ok=false;
+  for(;;) {
+    if(cancelled(io)){io.failure=Failure::Cancelled;break;}
+    if(ready()){ok=true;break;}
+    if(expired(start,kChatPathWaitMs) ||
+       (!phoneUp(io) && !(io.secure && phonePathRecoverable(phonePipePathView())))) {
+      io.failure=Failure::Network;break;
+    }
+    vTaskDelay(pdMS_TO_TICKS(kPathPollMs));
+  }
+  io.pathWaitMs+=uint32_t(millis()-start);
+  io.pathWaitFailed=!ok;
+  io.retireWaitFailed=!ok && retired && io.failure==Failure::Network && phoneUp(io);
+  return ok;
+}
+// After the phone failed with Wi-Fi down: one more phone try for a chat when
+// no HTTP byte was written and the failure was the link or the phone's network
+// (OPEN_ERR 5/6/7/8/11, 9/10, not ready, link lost, submit or answer timeout, a
+// TLS failure on the link). Never after the phone's relay refused (16: only the
+// app turns it back on) or a trust, policy or protocol fault.
+bool phoneRetryAllowed(LlmHttpIo& io) {
+  if(io.kind!=LlmHttpRequestKind::Chat || WiFi.isConnected())return false;
+  if(io.phoneOpen.status==PhonePipeOpenStatus::Refused && io.phoneOpen.code==16)return false;
+  return io.attempt.retrySame(io.failure);
+}
+// The retry may run on a new phone session: attribute its result to that one.
+void phoneContext(LlmHttpIo& io) {
+  io.phoneGeneration=phonePipeGeneration();
+  portENTER_CRITICAL(&healthMux);
+  phoneHealth.context(io.phoneGeneration,io.revision);
+  phoneHealthGeneration=io.phoneGeneration;phoneHealthRevision=io.revision;
+  portEXIT_CRITICAL(&healthMux);
+}
 int connect(esp_transport_handle_t transport,const char* host,int port,int) {
   auto& io=context(transport);
   if(io.begun || cancelled(io) || !host || !*host || strlen(host)>253 || port<=0 || port>65535)return -1;
   io.begun=true;strlcpy(io.host,host,sizeof(io.host));
-  // The phone is a path only while READY with its relay on (RELAY_ON).
-  for(Path path=firstPath(io,WiFi.isConnected(),io.secure && phonePipeRelayAvailable());path!=Path::None;) {
-    if(cancelled(io) || !io.attempt.select(path))return -1;
+  if(io.kind==LlmHttpRequestKind::Chat && !awaitPath(io,false))return -1;
+  bool again=false;  // the same-path retry: the path is already selected
+  for(Path path=firstPath(io,WiFi.isConnected(),phoneUp(io));path!=Path::None;) {
+    if(cancelled(io) || (!again && !io.attempt.select(path)))return -1;
+    again=false;
     const bool wifi=path==Path::Wifi;
     const bool success=wifi?connectDirect(io,port):connectPhone(io,port);
     if(wifi)directResult(io,success);else phoneResult(io,success);
@@ -478,9 +542,12 @@ int connect(esp_transport_handle_t transport,const char* host,int port,int) {
     closeChild(io);
     // Never before an HTTP write, never back to a path already tried.
     const Path next=wifi?Path::Phone:Path::Wifi;
-    const bool nextUp=wifi?(io.secure && phonePipeRelayAvailable()):WiFi.isConnected();
-    if(!io.attempt.fallback(io.failure,next,nextUp))return -1;
-    path=next;
+    const bool nextUp=wifi?phoneUp(io):WiFi.isConnected();
+    if(io.attempt.fallback(io.failure,next,nextUp)){path=next;continue;}
+    if(wifi || !phoneRetryAllowed(io) || !awaitPath(io,true))return -1;
+    // Wi-Fi came up during the wait: it is untried, and nothing was sent.
+    if(WiFi.isConnected() && io.attempt.fallback(Failure::Network,Path::Wifi,true)){path=Path::Wifi;continue;}
+    phoneContext(io);again=true;path=Path::Phone;
   }
   return -1;
 }
@@ -540,11 +607,13 @@ int destroy(esp_transport_handle_t transport) {
 // "carried" is the path that may have carried HTTP bytes; None means no HTTP
 // byte was written on any path, so the request was never delivered.
 struct PathRecord {
-  uint32_t seq=0,ms=0;uint64_t corr=0;uint16_t stream=0;
+  uint32_t seq=0,ms=0,waitMs=0;uint64_t corr=0;uint16_t stream=0;
   uint8_t kind=0,first=0,carried=0,wifi=0,phone=0,open=0,code=0;int8_t outcome=-1;
+  uint8_t waited=0,retries=0;  // waited: 0 none, 1 path came, 2 gave up (not sent)
 };
 struct PathStats {
   uint32_t requests=0,carried[3]{},toPhone=0,toWifi=0;
+  uint32_t pathWaits=0,pathWaitFailed=0,sameRetries=0;
   uint32_t completed=0,failedBeforeSend=0,failedAfterSend=0,unreported=0;
   uint32_t open[9]{},refusal[hw1httptransport::kRefusalCodes]{};
 };
@@ -569,18 +638,22 @@ const char* outcomeName(const PathRecord& r) {
   if(r.outcome<0)return "unreported";
   return r.carried?"failed-after-send":"failed-before-send";
 }
-size_t formatRecord(const PathRecord& r,char* out,size_t cap) {
-  const int n=snprintf(out,cap,"#%lu %s first=%s carried=%s wifi=%s phone=%s open=%s:%u outcome=%s corr=%016llx stream=%u ms=%lu",
-      (unsigned long)r.seq,r.kind?"terminal":"chat",pathName(r.first),pathName(r.carried),pathCodeName(r.wifi),
-      pathCodeName(r.phone),r.phone?openName(r.open):"-",unsigned(r.code),outcomeName(r),
-      (unsigned long long)r.corr,unsigned(r.stream),(unsigned long)r.ms);
-  return n<0?0:std::min(size_t(n),cap?cap-1:0);
-}
 size_t appendf(char* out,size_t cap,size_t used,const char* format,...) __attribute__((format(printf,4,5)));
 size_t appendf(char* out,size_t cap,size_t used,const char* format,...) {
   if(used+1>=cap)return used;
   va_list args;va_start(args,format);const int n=vsnprintf(out+used,cap-used,format,args);va_end(args);
   return n>0?used+std::min(size_t(n),cap-used-1):used;
+}
+size_t formatRecord(const PathRecord& r,char* out,size_t cap) {
+  if(!cap)return 0;
+  out[0]=0;
+  size_t used=appendf(out,cap,0,"#%lu %s first=%s carried=%s wifi=%s phone=%s open=%s:%u outcome=%s corr=%016llx stream=%u ms=%lu",
+      (unsigned long)r.seq,r.kind?"terminal":"chat",pathName(r.first),pathName(r.carried),pathCodeName(r.wifi),
+      pathCodeName(r.phone),r.phone?openName(r.open):"-",unsigned(r.code),outcomeName(r),
+      (unsigned long long)r.corr,unsigned(r.stream),(unsigned long)r.ms);
+  if(r.waited)used=appendf(out,cap,used," path_wait=%s:%lums",r.waited==1?"ok":"gave-up",(unsigned long)r.waitMs);
+  if(r.retries)used=appendf(out,cap,used," same_path_retry=%u",unsigned(r.retries));
+  return used;
 }
 void record(const LlmHttpIo& io) {
   if(!io.begun)return;
@@ -590,9 +663,13 @@ void record(const LlmHttpIo& io) {
   r.wifi=pathCode(io.wifiOutcome);r.phone=pathCode(io.phoneOutcome);
   r.open=uint8_t(io.phoneOpen.status);r.code=uint8_t(io.phoneOpen.code&0xff);r.outcome=io.outcome;
   if(io.phoneOutcome.tried){r.corr=io.phoneCorr;r.stream=io.phoneStream;}
+  r.waited=io.waitedForPath?(io.pathWaitFailed?2:1):0;r.waitMs=io.pathWaitMs;r.retries=io.attempt.sameRetries();
   portENTER_CRITICAL(&healthMux);
   r.seq=++recordSeq;
   auto& st=pathStats;++st.requests;++st.carried[r.carried<3?r.carried:0];
+  if(r.waited)++st.pathWaits;
+  if(r.waited==2)++st.pathWaitFailed;
+  st.sameRetries+=r.retries;
   if(io.attempt.first==Path::Wifi && io.phoneOutcome.tried)++st.toPhone;
   if(io.attempt.first==Path::Phone && io.wifiOutcome.tried)++st.toWifi;
   if(r.outcome==1)++st.completed;
@@ -671,7 +748,10 @@ void llmHttpIoDestroy(LlmHttpIo* io) {
 #endif
 }
 LlmHttpAdmission llmHttpRequestAdmit(LlmHttpRequestKind kind,bool secure) {
-  if(!llmHttpPathAvailable(secure))return LlmHttpAdmission::Unavailable;
+  // A chat is also admitted while the phone link is coming back: connect waits
+  // for it. A Terminal request needs a path now (its callers drop on Unavailable).
+  if(!llmHttpPathAvailable(secure) &&
+     !(kind==LlmHttpRequestKind::Chat && llmHttpPathRecoverable(secure)))return LlmHttpAdmission::Unavailable;
   auto& slot=requestSlots[unsigned(kind)];
   if(slot.claimed.exchange(true,std::memory_order_acquire))return LlmHttpAdmission::Busy;
 #if ENABLE_BLE_PHONE_PIPE
@@ -696,6 +776,47 @@ bool llmHttpPathAvailable(bool secure) {
   // A READY link with the phone's relay off carries the console only.
   return WiFi.isConnected() || (secure && phonePipeRelayAvailable());
 }
+bool llmHttpPathRecoverable(bool secure) {
+  // The phone carries HTTPS only (TLS ends on this device).
+  return !WiFi.isConnected() && secure && phonePathRecoverable(phonePipePathView());
+}
+namespace {
+size_t copyText(char* out,size_t cap,const char* text) {
+  const size_t n=strlcpy(out,text,cap);
+  return n<cap?n:cap-1;
+}
+}
+size_t llmHttpPathText(bool secure,char* out,size_t cap) {
+  if(!out || !cap)return 0;
+  if(WiFi.isConnected())return copyText(out,cap,"Wi-Fi");
+  if(secure && phonePipeRelayAvailable())return copyText(out,cap,"phone relay");
+  if(!secure)return copyText(out,cap,"no network: Wi-Fi off (a plaintext agent cannot use the phone)");
+  const PhonePathView view=phonePipePathView();
+  if(view.state==PhonePathState::Off && view.hint==PhonePathHint::None)
+    return copyText(out,cap,"no network: Wi-Fi off and no phone link");
+  return phonePathText(view,out,cap);
+}
+bool llmHttpIoPathWaitFailed(const LlmHttpIo* io) {
+#if ENABLE_BLE_PHONE_PIPE
+  return io && io->pathWaitFailed;
+#else
+  (void)io;return false;
+#endif
+}
+bool llmHttpIoRetireWaitFailed(const LlmHttpIo* io) {
+#if ENABLE_BLE_PHONE_PIPE
+  return io && io->pathWaitFailed && io->retireWaitFailed;
+#else
+  (void)io;return false;
+#endif
+}
+bool llmHttpIoRetriedSamePath(const LlmHttpIo* io) {
+#if ENABLE_BLE_PHONE_PIPE
+  return io && io->attempt.sameRetries()>0;
+#else
+  (void)io;return false;
+#endif
+}
 size_t llmHttpPathReport(char* out,size_t cap) {
   if(!out || !cap)return 0;
   out[0]=0;
@@ -707,6 +828,8 @@ size_t llmHttpPathReport(char* out,size_t cap) {
   size_t used=appendf(out,cap,0,"requests=%lu carried wifi=%lu phone=%lu none=%lu fallback wifi>phone=%lu phone>wifi=%lu\n",
       (unsigned long)st.requests,(unsigned long)st.carried[1],(unsigned long)st.carried[2],(unsigned long)st.carried[0],
       (unsigned long)st.toPhone,(unsigned long)st.toWifi);
+  used=appendf(out,cap,used,"path_wait waited=%lu gave_up=%lu same_path_retries=%lu\n",
+      (unsigned long)st.pathWaits,(unsigned long)st.pathWaitFailed,(unsigned long)st.sameRetries);
   used=appendf(out,cap,used,"outcomes completed=%lu failed_before_send=%lu failed_after_send=%lu unreported=%lu\nphone_open:",
       (unsigned long)st.completed,(unsigned long)st.failedBeforeSend,(unsigned long)st.failedAfterSend,(unsigned long)st.unreported);
   for(unsigned i=0;i<9;++i)if(st.open[i])used=appendf(out,cap,used," %s=%lu",openName(uint8_t(i)),(unsigned long)st.open[i]);

@@ -69,16 +69,17 @@ int main() {
   assert(pipe::admits==1 && glassesAdmits==1 && gNow==3000);
   assert(pipe::last.autoReconnect && !pipe::last.explicitReseek && pipe::last.intentGeneration==intent+1);
   assert(!std::strcmp(pipe::last.savedTarget.mac1,"app-key-v1"));
-  assert(!sReconnect[BLE_PEER_PHONE].admissionInFlight && sReconnect[BLE_PEER_PHONE].dueMs==1000+15000);
+  assert(!sReconnect[BLE_PEER_PHONE].admissionInFlight && sReconnect[BLE_PEER_PHONE].dueMs==1000+4000);
 
-  // Link up, then lost: the tick redials the phone 5 s later (A-3).
+  // Link up, then lost: the tick redials the phone 2 s later.
   blePeerNoteLinkUp(BLE_PEER_PHONE);blePeerNoteLinkUp(BLE_PEER_G2_GLASSES);
   gNow=20000;blePeerNoteLinkLost(BLE_PEER_PHONE);
-  assert(sReconnect[BLE_PEER_PHONE].wantReconnect && sReconnect[BLE_PEER_PHONE].dueMs==25000);
-  gNow=24999;bleAutoReconnectTick();assert(pipe::admits==1);
-  gNow=25000;bleAutoReconnectTick();assert(pipe::admits==2 && pipe::last.autoReconnect && glassesAdmits==1);
-  // That attempt didn't connect: the next one is 15 s later.
-  gNow=40000;bleAutoReconnectTick();assert(pipe::admits==3);
+  assert(sReconnect[BLE_PEER_PHONE].wantReconnect && sReconnect[BLE_PEER_PHONE].dueMs==22000);
+  gNow=21999;bleAutoReconnectTick();assert(pipe::admits==1);
+  gNow=22000;bleAutoReconnectTick();assert(pipe::admits==2 && pipe::last.autoReconnect && glassesAdmits==1);
+  // That attempt didn't connect: the next one is 4 s later.
+  gNow=25999;bleAutoReconnectTick();assert(pipe::admits==2);
+  gNow=26000;bleAutoReconnectTick();assert(pipe::admits==3);
   // Once the link is up, a due tick reports ALREADY_UP without admitting.
   gPhoneUp=true;gNow=70000;bleAutoReconnectTick();
   assert(pipe::admits==3 && !sReconnect[BLE_PEER_PHONE].wantReconnect);

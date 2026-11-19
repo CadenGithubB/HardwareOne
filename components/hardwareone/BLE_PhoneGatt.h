@@ -123,9 +123,13 @@ class Gatt {
   // starts it before our OPEN arrives (this build keeps no GATT cache, so every
   // connection rediscovers), and IDF 5.5.5 queues our CFG_MTU behind it: it
   // runs once DIS_SRVC_CMPL is posted. Phase::Mtu therefore lasts up to 10 s
-  // until DIS_SRVC_CMPL, then 2 s for the answer. The request is sent once.
-  bool autoDiscoveryDone_=false;
-  uint32_t autoDiscoveryAt_=0;
+  // until DIS_SRVC_CMPL. A request Bluedroid refused as GATT_BUSY at OPEN
+  // (field log 2026-11-19: "GATTC_ConfigureMTU GATT_BUSY") never went out and
+  // has no answer, so 800 ms after DIS_SRVC_CMPL it is sent once more; 1.5 s
+  // after that the link goes on at the MTU it has (at least kMinimumMtu), or
+  // the attempt stops to be retried.
+  bool autoDiscoveryDone_=false, mtuResent_=false;
+  uint32_t autoDiscoveryAt_=0, mtuResentAt_=0;
   AttemptEnd end_;
   bool armed_=false, concluded_=false;
   int16_t consuming_=-1;  // task-local callback provenance; never set on BTC

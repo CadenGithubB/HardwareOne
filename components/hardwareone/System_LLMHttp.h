@@ -15,7 +15,16 @@ bool httpLlmConfigure(bool enabled, const char* baseUrl, const char* model,
                       const char* token, bool allowPlaintext, const char* caPem);
 size_t httpLlmEnumerate(LlmModelDesc* out, size_t cap);
 bool httpLlmFindByName(const char* name, LlmModelDesc* out);
+// Selection is a choice of source: it never fails because the network path is
+// down. The path decides readiness (up, or the phone link coming back).
 bool httpLlmSelectByName(const char* name, char* error, size_t errorCap);
+// Why the source is listed unavailable (configuration only); "" when it is
+// available. Returns the length written.
+size_t httpLlmUnavailableReason(char* out, size_t cap);
+// Lock-free: a request path is up now (Wi-Fi, or the phone relay for HTTPS).
+bool httpLlmPathUp();
+// The path line for status surfaces (llmHttpPathText for the published URL).
+size_t httpLlmPathText(char* out, size_t cap);
 void httpLlmUnload();
 bool httpLlmIsReady();
 LlmStatus httpLlmStatus();

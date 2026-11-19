@@ -147,8 +147,28 @@ static void order() {
     seen[i] = p.run.client;
     runTicket(core, env, p.run);
   }
-  CHECK(seen[0] == Client::G2 && seen[1] == Client::RingRetire && seen[2] == Client::Ring && seen[3] == Client::Phone);
+  // The turn order: glasses, ring retirement, then the phone before the ring
+  // (an absent ring's long connects never hold the phone behind them).
+  CHECK(seen[0] == Client::G2 && seen[1] == Client::RingRetire && seen[2] == Client::Phone && seen[3] == Client::Ring);
   CHECK(core.idle(kAll));
+  // A ring passed over by the phone runs next, even before a new phone job
+  // (which it passes over in turn); so the ring runs at the latest one phone
+  // turn later.
+  submit(core, env, Client::Ring);
+  submit(core, env, Client::Phone);
+  Pick p = pickOnce(core, env);
+  CHECK(p.run.client == Client::Phone && core.peek(Client::Ring).passedOver);
+  runTicket(core, env, p.run);
+  submit(core, env, Client::Phone);
+  p = pickOnce(core, env);
+  CHECK(p.run.client == Client::Ring && core.peek(Client::Phone).passedOver);
+  runTicket(core, env, p.run);
+  p = pickOnce(core, env);
+  CHECK(p.run.client == Client::Phone);
+  runTicket(core, env, p.run);
+  CHECK(core.idle(kAll));
+  CHECK(kTurnOrder[0] == Client::G2 && kTurnOrder[1] == Client::RingRetire &&
+        kTurnOrder[2] == Client::Phone && kTurnOrder[3] == Client::Ring);
 }
 
 static void passOver() {
@@ -307,9 +327,14 @@ static void resubmitDuringReady() {
   CHECK(!p.run.valid && !p.changed);
   CHECK(env.count('f', Client::Ring) == 1 && env.log.back().end == End::Withdrawn);
   CHECK(core.live(Client::Ring, fresh) && core.peek(Client::Ring).state == State::Queued);
-  // The same for a Run verdict: the stale run is refused.
+  // The same for a Run verdict: the stale run is refused. The phone comes
+  // before the ring in the turn order, so the phone is the stale pick here and
+  // the ready ring behind it is not passed over (nobody ran).
   env.verdict[size_t(Client::Ring)] = {Ready::Run, kNone};
+  static uint32_t freshPhone;
+  submit(core, env, Client::Phone);
   env.duringReady = [](Env& e, Client c, uint32_t t) {
+    if (c != Client::Phone) return;
     Record taken;
     e.lock();
     CHECK(e.core->withdraw(c, t, e.clock, &taken) == Core::Withdraw::Withdrawn);
@@ -317,23 +342,22 @@ static void resubmitDuringReady() {
     e.finish(c, taken.token, FinishInfo{End::Withdrawn, kNone, 0});
     e.lock();
     e.core->finished(c);
-    CHECK(e.core->claim(c, &fresh) && e.core->publish(c, fresh, e.clock));
+    CHECK(e.core->claim(c, &freshPhone) && e.core->publish(c, freshPhone, e.clock));
     e.unlock();
     e.duringReady = nullptr;
   };
-  const uint32_t waitingPhone = submit(core, env, Client::Phone);
   const Pick q = pickOnce(core, env);
   CHECK(!q.run.valid);
-  CHECK(core.live(Client::Ring, fresh) && core.peek(Client::Ring).state == State::Queued);
-  // Nobody ran, so the ready phone was not passed over.
-  CHECK(!core.peek(Client::Phone).passedOver);
-  Record phoneTaken;
-  CHECK(core.withdraw(Client::Phone, waitingPhone, env.clock, &phoneTaken) == Core::Withdraw::Withdrawn);
-  core.finished(Client::Phone);
+  CHECK(core.live(Client::Phone, freshPhone) && core.peek(Client::Phone).state == State::Queued);
+  // Nobody ran, so the ready ring was not passed over.
+  CHECK(!core.peek(Client::Ring).passedOver);
+  Record ringTaken;
+  CHECK(core.withdraw(Client::Ring, fresh, env.clock, &ringTaken) == Core::Withdraw::Withdrawn);
+  core.finished(Client::Ring);
   const Pick r = pickOnce(core, env);
-  CHECK(r.run.valid && r.run.token == fresh);
+  CHECK(r.run.valid && r.run.client == Client::Phone && r.run.token == freshPhone);
   runTicket(core, env, r.run);
-  CHECK(env.count('f', Client::Ring) == 3 && core.idle(kAll));
+  CHECK(env.count('f', Client::Ring) == 1 && env.count('f', Client::Phone) == 2 && core.idle(kAll));
 }
 
 static void serveRechecks() {

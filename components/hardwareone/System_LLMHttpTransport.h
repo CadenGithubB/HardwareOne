@@ -28,6 +28,20 @@ void llmHttpIoCancel(LlmHttpIo* io);
 void llmHttpIoFinish(LlmHttpIo* io, bool completed);
 void llmHttpIoDestroy(LlmHttpIo* io);
 bool llmHttpPathAvailable(bool secure);
+// No path is up, but the phone link is coming back by itself (connecting or
+// retrying; Wi-Fi recovery is not modelled). Chat requests are admitted then
+// and wait in connect for the path, nudging the phone once.
+bool llmHttpPathRecoverable(bool secure);
+// One line for status surfaces: "Wi-Fi" or "phone relay" when a path is up,
+// otherwise the phone link's own text (BLE_PhonePipePath.h). Returns the length.
+size_t llmHttpPathText(bool secure, char* out, size_t cap);
+// After the request: connect gave up waiting for a path (nothing was sent),
+// and whether it used its one same-path retry before any HTTP write.
+bool llmHttpIoPathWaitFailed(const LlmHttpIo* io);
+bool llmHttpIoRetriedSamePath(const LlmHttpIo* io);
+// The failed wait was the same-path retry's: the phone relay was up but the
+// phone had not released this consumer's previous stream in time.
+bool llmHttpIoRetireWaitFailed(const LlmHttpIo* io);
 // F3: request path counters and the most recent records, one per line. No
 // host, port, credential or content is stored. Returns the length written.
 size_t llmHttpPathReport(char* out, size_t cap);

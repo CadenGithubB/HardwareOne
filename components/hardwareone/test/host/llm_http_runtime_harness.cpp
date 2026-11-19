@@ -1,5 +1,6 @@
 #include "System_LLMHttpCore.h"
 #include "System_LLMHttpTransportCore.h"
+#include "BLE_PhonePipePath.h"
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
@@ -243,6 +244,19 @@ static bool esp_http_client_is_complete_data_received(Client*) { return complete
 // users route on (phone link v2).
 static bool phoneRelay = false;
 static bool phonePipeRelayAvailable() { return phoneRelay; }
+// The phone path view (BLE_PhonePipePath.h): by default Up with the relay on,
+// otherwise Off. A test sets pathView for a link that is coming back or held.
+static bool pathViewSet = false;
+static PhonePathView pathView;
+static unsigned nudges = 0;
+PhonePathView phonePipePathView() {
+  if (pathViewSet) return pathView;
+  PhonePathView v; v.state = phoneRelay ? PhonePathState::Up : PhonePathState::Off; return v;
+}
+bool phonePipeNudgeReconnect() { ++nudges; return phonePathRecoverable(phonePipePathView()); }
+static void phoneView(PhonePathState state, PhonePathHint hint = PhonePathHint::None, uint32_t inMs = 0) {
+  pathViewSet = true; pathView = {}; pathView.state = state; pathView.hint = hint; pathView.retryInMs = inMs;
+}
 // INSERT_TASK_UTILS
 // INSERT_IO
 // INSERT_INTERFACE
@@ -407,6 +421,55 @@ int main() {
   assert(httpLlmStartAsync("allocation publication failure", {})); drainWorker();
   assert(shuts == 1 && response().find("configuration could not be applied") != std::string::npos);
   assert(!httpLlmIsReady() && !httpLlmStartAsync("old config remains barred", {}));
+  // Phone lifecycle: the source is a choice that never depends on the path.
+  // Listed, selectable and ready while the phone link is coming back; a chat
+  // is admitted then (the transport waits for the link). Held or relay off is
+  // not ready, with the reason in the status.
+  assert(httpLlmConfigure(true, "https://relay/v1", "openclaw/default", "device-token", false, "test-ca"));
+  WiFi.connected = false; phoneRelay = false;
+  phoneView(PhonePathState::Retrying, PhonePathHint::NotHeard, 12000);
+  { LlmModelDesc row{}; assert(httpLlmEnumerate(&row, 1) == 1 && row.available); }
+  { char reason[96]; assert(httpLlmUnavailableReason(reason, sizeof(reason)) == 0 && !reason[0]); }
+  httpLlmUnload(); assert(httpLlmSelectByName("openclaw", error, sizeof(error)));
+  assert(httpLlmIsReady() && !httpLlmPathUp());
+  { const LlmStatus st = httpLlmStatus();
+    assert(st.state == LlmState::READY);
+    assert(!strcmp(st.errorMsg, "phone not heard (out of range, or phone Bluetooth/app off?), retrying in 12 s")); }
+  { char path[160]; assert(httpLlmPathText(path, sizeof(path)) == strlen(path) && !strcmp(path, httpLlmStatus().errorMsg)); }
+  resetServer(); assert(httpLlmStartAsync("while the phone comes back", {}) > 0); drainWorker();
+  assert(opens == 1 && response() == "answer");
+  phoneView(PhonePathState::Connecting);
+  assert(httpLlmIsReady() && !strcmp(httpLlmStatus().errorMsg, "connecting to phone"));
+  struct HeldCase { PhonePathState state; PhonePathHint hint; const char* text; };
+  for (const HeldCase& c : {HeldCase{PhonePathState::Held, PhonePathHint::ClosedByUser, "phone link closed (openphone to reconnect)"},
+                            HeldCase{PhonePathState::RelayOff, PhonePathHint::None, "relay off in the app"},
+                            HeldCase{PhonePathState::NotPaired, PhonePathHint::None, "no phone paired (phone pair new)"},
+                            HeldCase{PhonePathState::Off, PhonePathHint::None, "no network: Wi-Fi off and no phone link"}}) {
+    phoneView(c.state, c.hint);
+    assert(!httpLlmIsReady() && !httpLlmStartAsync("refused", {}));
+    const LlmStatus st = httpLlmStatus(); assert(st.state == LlmState::ERROR && !strcmp(st.errorMsg, c.text));
+    // Still listed and selectable: the phone being down never refuses the source.
+    LlmModelDesc row{}; assert(httpLlmEnumerate(&row, 1) == 1 && row.available);
+    httpLlmUnload(); assert(httpLlmSelectByName("openclaw", error, sizeof(error)));
+  }
+  // A failed request no longer turns the source to ERROR: it stays READY and
+  // the status carries the last request's error until the next one.
+  WiFi.connected = true; pathViewSet = false;
+  assert(httpLlmPathUp());
+  { char path[32]; httpLlmPathText(path, sizeof(path)); assert(!strcmp(path, "Wi-Fi")); }
+  resetServer(); status = 500; assert(httpLlmStartAsync("fails once", {})); drainWorker();
+  { const LlmStatus st = httpLlmStatus();
+    assert(st.state == LlmState::READY && httpLlmIsReady());
+    assert(!strcmp(st.errorMsg, "last request: Agent HTTP 500; request was not retried")); }
+  resetServer(); assert(httpLlmStartAsync("works again", {})); drainWorker();
+  assert(httpLlmStatus().state == LlmState::READY && !httpLlmStatus().errorMsg[0]);
+  // Configuration still makes it unavailable, with the reason.
+  assert(httpLlmConfigure(false, "https://relay/v1", "openclaw/default", "device-token", false, "test-ca"));
+  { char reason[96]; assert(httpLlmUnavailableReason(reason, sizeof(reason)) && !strcmp(reason, "HTTP agent disabled (llmhttpenabled)"));
+    LlmModelDesc row{}; assert(httpLlmEnumerate(&row, 1) == 0); }
+  assert(!httpLlmSelectByName("openclaw", error, sizeof(error)));
+  assert(httpLlmConfigure(true, "https://relay/v1", "openclaw/default", "device-token", false, "test-ca"));
+  assert(httpLlmSelectByName("openclaw", error, sizeof(error)));
   // Terminal runs the actual bounded JSON worker using the same immutable
   // credentials, without exposing its JSON in the shared chat result.
   assert(httpLlmConfigure(true, "https://relay/v1", "openclaw/default", "device-token", false, "test-ca"));

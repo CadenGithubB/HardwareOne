@@ -92,6 +92,11 @@ entry "Command replies" under Unreleased states what changed.
    (see sec. 11.9).
 11. **Versions** - `versions json` is new, and `status json` gains the same keys
    as its `versions` object (see sec. 4).
+12. **Phone path and LLM reasons (2026-11-19, additive)** - `phone status json` and
+   the `/api/ble/status` phone object gain the optional `pathState`, `pathText`,
+   `retryInS` and `attempt` (sec. 11.6); `llmgenerate json`, `llmretry`, `llmload`
+   and `llmask json` gain an optional `reason`, and `llmstatus json` can be `READY`
+   with a non-empty `error` (sec. 11.10). The `phone-status` SSE event is unchanged.
 
 ---
 
@@ -780,10 +785,16 @@ the relay pipe, from the device's side.
 | `autoReconnect` | bool | Reconnect the paired phone at boot |
 | `pipe`, `pipeText`, `pipeReason`? | string | As in sec. 11.1 |
 | `console`, `consoleText` | string | As in sec. 11.1 |
+| `pathState`? | string | The phone path as the LLM source sees it: `up` \| `relay-off` \| `connecting` \| `retrying` \| `held` \| `not-paired` \| `off`. Optional (2026-11-19) |
+| `pathText`? | string | The same, as one readable line (e.g. `phone not heard (out of range, or phone Bluetooth/app off?), retrying in 12 s`). For display; not a contract |
+| `retryInS`? | int | Seconds to the next reconnect attempt; only while `pathState` is `retrying` |
+| `attempt`? | int | Reconnect attempts in this outage; only when nonzero |
 
 `phone status json` errors: `{"error":"oom"}`, `{"error":"unavailable"}`,
 `{"error":"status too large"}`. Plain `phone status` prints
-`pipe=<text> role=<role> paired=yes|no auto=on|off console=<console> state='<state>'`.
+`pipe=<text> role=<role> paired=yes|no auto=on|off console=<console> state='<state>'
+next=<s>s|- try=<k> heard=<n>|- phone=<n>|- path='<path text>'` (`heard` and `phone`:
+what the pipe's last scan heard, every report and the phone's own adverts).
 
 ### 11.7 Web SSE: `phone-status`
 
@@ -877,6 +888,22 @@ Phone link: ready
 ```
 
 The `End reasons:` line is left out while nothing has ended.
+
+### 11.10 LLM not-ready reasons (2026-11-19, additive)
+
+`llmgenerate json` and `llmretry` keep `{"ok":false,"error":"model not ready"}` and
+may add `"reason":"<text>"` (for example `relay off in the app`, `HTTP agent disabled
+(llmhttpenabled)`, `no model selected (llmload http:openclaw)`); a refused start keeps
+`"error":"busy or failed to start"` and may add `reason`. `llmload` answering
+`{"ok":true,"ready":false}` and `llmask json` may add `reason` too. Keep matching on
+`error`; `reason` is for display.
+
+`llmstatus json` (and `/api/llm/status`) for the HTTP source: `"state":"READY"` can now
+come with a non-empty `"error"` - the phone path while the link reconnects (the request
+waits up to 30 s for it), or `last request: <error>` after a failed request. Treat
+`READY` as usable and show `error` as a note. `ERROR` means a configuration problem or a
+path that does not come back by itself (relay off in the app, link closed, no phone
+paired).
 
 ## 12. Status
 
