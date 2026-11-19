@@ -221,6 +221,27 @@ everything user-visible since the v0.99.99.1 tag.
   as it did (its bond heartbeat counts as its agreement). Host-tested; not yet run on hardware.
 
 ### Fixed
+- A device updated to the one device name kept its name. The rename read only the new setting
+  (`system.device.identity.deviceName`), so a device updated from any earlier build came up with
+  "Device name: (not set)", and ESP-NOW refused to start ("No device name configured"): its peers could
+  not open sessions with it (bench 2026-11-18: the XIAO's `benchxiao` and the P4's `benchp4b` were lost).
+  The settings load now takes the old name once when no device name is stored: the old ESP-NOW name
+  (`network.espnow.identity.deviceName`), else the old Bluetooth name
+  (`network.bluetooth.bluetoothDeviceName`) unless it is the old default `HardwareOne`. A name that
+  breaks the rule is converted (spaces and `_` to `-`, other characters dropped, runs of `-` joined, cut
+  to 31 bytes, `-` trimmed at the ends; `Living_Room` becomes `Living-Room`); one with nothing valid
+  left is dropped. One line in the system log names what was taken. ESP-NOW's start, Bluetooth and the
+  Wi-Fi hostname use the name from that boot on; the file is rewritten once with the name under the new
+  key and both old keys removed, and every full settings save removes them too (so a later
+  `devicename clear` stays cleared). A stored device name is never replaced. Host-tested
+  (`device_name_migration_tests`, `settings_file_writes`, `device_name_sources`); not yet run on
+  hardware.
+- `espnowchannel` printed "Expected right now: 0 (following the joined AP)" and "Checker: MISMATCH"
+  whenever ESP-NOW was stopped, even with the radio on the joined AP's channel (bench 2026-11-18, P4
+  joined on channel 11). The expected channel is now the AP's channel while joined (else the setting,
+  else the last-known channel, else 1) whether or not ESP-NOW runs; offline with ESP-NOW stopped the
+  checker says "not checked" (nothing pins the radio then) instead of MISMATCH. Host-tested
+  (`espnow_channel_core_tests`).
 - `espnowmeshes add fjqo` gave the mesh id 0 (CRC16 of "fjqo"), which every receiver took as "no mesh"; a
   mesh id now comes from the mesh key and is never 0.
 - A device name of 20-31 bytes, or one with characters outside the old rule, could be set through the
@@ -764,7 +785,8 @@ everything user-visible since the v0.99.99.1 tag.
   address), checked in one place (`System_DeviceName.h`). It is the ESP-NOW name, the Bluetooth name and
   the Wi-Fi hostname (the hostname was never set before), and `devicename [<name>|clear]` sets it in
   every build; `espnowsetname`, `blename` and the Bluetooth-only `bluetoothDeviceName` setting are gone,
-  and the settings row moved from `espnow.deviceName` to `system.device.deviceName`. Without a stored
+  and the settings row moved from `espnow.deviceName` to `system.device.deviceName` (a device updated
+  from an earlier build takes its old name into it once: see Fixed). Without a stored
   name Bluetooth and Wi-Fi use `HardwareOne-XXXXXX` (on a P4 board from the P4's own address, not the
   radio address of its C6). `devicename` and the setup wizard warn when another device this one knows has
   the name (both are then shown by address); a name chosen in the setup wizard is the Wi-Fi hostname of

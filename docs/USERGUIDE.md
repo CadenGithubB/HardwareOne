@@ -731,6 +731,15 @@ name is advertised shortened); a connected phone reads the whole name. A receive
 rule is not used or cleaned: the sender is shown by its address (an unpaired sender in the pairing list
 as `peer-XXXXXX`). The free-text display label is separate: `espnowfriendlyname` (up to 47 bytes).
 
+A device updated from a build before the one device name (which had `espnowsetname` and a separate
+Bluetooth name) keeps its name: the first start after the update takes its old ESP-NOW name, or, when
+it had none, its old Bluetooth name unless that was the default `HardwareOne`. A name that breaks the
+rule is converted: spaces and `_` become `-`, other characters are dropped, runs of `-` are joined, the
+name is cut to 31 bytes and `-` is trimmed at the ends (`Living_Room` becomes `Living-Room`). The system
+log has one line naming the name taken and where it came from; when nothing valid is left the old name
+is dropped and the line says to set one with `devicename <name>`. This happens once and never replaces a
+device name that is already stored; the old settings are removed from `settings.json`.
+
 ### Mesh id
 Every ESP-NOW frame carries a 16-bit mesh id, which a receiver matches against its own meshes. The id
 comes from the mesh key (the label and the passphrase), so a mesh has none until its passphrase is set,

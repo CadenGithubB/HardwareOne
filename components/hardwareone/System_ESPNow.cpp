@@ -54,6 +54,7 @@
 #include "System_ESPNow_Deadline.h"  // wrap-safe pre-warm cooldown
 #include "System_ESPNow_PairCore.h"  // discover-then-confirm request/answer state + retransmit
 #include "System_DeviceName.h"       // the device-name rule: setter, wire fields, pairing names
+#include "System_ESPNow_ChannelCore.h"  // espnowch::expected / check: the channel for the Wi-Fi state, the checker
 #include "System_ESPNow_MeshIdCore.h" // the mesh id: pick from the key subkey, clash check
 #include "System_ESPNow_BondAgreeCore.h"  // BOND_REQUEST / BOND_NOTICE: what the partner said about the bond
 #include "System_ESPNow_GroupCore.h"  // room and tag membership: announced by the peer, accepted here
@@ -1440,12 +1441,9 @@ static uint8_t espnowComputeChannel() {
     staCh = (wc >= 1 && wc <= 13) ? (uint8_t)wc : 0;
   }
 
-  bool associated = (WiFi.status() == WL_CONNECTED) && staCh >= 1 && staCh <= 13;
-  if (associated) return staCh;  // follow the AP; a radio can't be on two channels
-
-  uint8_t pinned = gSettings.espnowChannel;
-  if (pinned >= 1 && pinned <= 13) return pinned;   // user-forced field channel
-  return (staCh >= 1 && staCh <= 13) ? staCh : 1;   // auto: last-known, else fallback 1
+  // Follow the AP while joined (a radio can't be on two channels), else the
+  // user-forced field channel, else the last-known one, else 1.
+  return espnowch::expected(WiFi.status() == WL_CONNECTED, staCh, gSettings.espnowChannel);
 }
 
 // Apply `ch` as gEspNow->channel, and — only when the STA is NOT associated —
@@ -16472,17 +16470,28 @@ const char* cmd_espnow_channel(const String& argsInput) {
     // Checker: read the ACTUAL radio channel and compare it to what it should be
     // for the current WiFi state, so silent drift or a missed re-sync is visible
     // instead of trusting our cached value. Expected = follow-AP while joined,
-    // else the pinned setting, else the auto fallback (espnowComputeChannel).
+    // else the pinned setting, else the auto fallback (espnowComputeChannel),
+    // whether or not ESP-NOW is running (System_ESPNow_ChannelCore.h: a stopped
+    // ESP-NOW used to read as "expected 0", a MISMATCH while joined).
     uint8_t hwCh = 0; wifi_second_chan_t sec2;
     if (esp_wifi_get_channel(&hwCh, &sec2) != ESP_OK) hwCh = 0;
-    uint8_t expected = (gEspNow && gEspNow->initialized) ? espnowComputeChannel() : 0;
+    const bool running = gEspNow && gEspNow->initialized;
+    const uint8_t expected = espnowComputeChannel();
     const char* source = joined ? "following the joined AP"
-                                : ((gSettings.espnowChannel >= 1 && gSettings.espnowChannel <= 13)
+                                : (espnowch::validChannel(gSettings.espnowChannel)
                                      ? "pinned from the setting (offline)"
                                      : "auto fallback (offline, no setting)");
-    const char* verdict = (expected != 0 && hwCh == expected)
-                            ? "OK — radio matches expected"
-                            : "MISMATCH — run 'espnowchannel resync' to re-pin";
+    const char* verdict = "OK — radio matches expected";
+    switch (espnowch::check(joined, running, (uint8_t)hwCh, expected)) {
+      case espnowch::Verdict::Ok: break;
+      case espnowch::Verdict::Mismatch:
+        verdict = running ? "MISMATCH — run 'espnowchannel resync' to re-pin"
+                          : "MISMATCH — the radio is not on the joined AP's channel yet (Wi-Fi may be reconnecting)";
+        break;
+      case espnowch::Verdict::NotPinned:
+        verdict = "not checked — ESP-NOW is stopped, so nothing pins the radio offline; it uses the expected channel when it starts";
+        break;
+    }
     snprintf(getDebugBuffer(), 1024,
              "ESP-NOW channel preference: %s\n"
              "Radio channel (actual): %u\n"

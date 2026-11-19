@@ -27,7 +27,9 @@ never 0; a receiver drops 0 and every id no enabled mesh of its own has. Devices
 stamp CRC16 of the label and drop, and are dropped by, devices after it at the mesh gate: reflash the
 fleet together. The `SYSEVT_SETTING_CHANGED` key for the name is now `deviceName` (was
 `espnowDeviceName`), its settings path `system.device.deviceName` (was `espnow.deviceName`), and the
-`bluetoothDeviceName` setting is gone; `bleinfo json` keeps `deviceName`, now the device name.
+`bluetoothDeviceName` setting is gone (a settings file with the old keys gives its name to the new one
+once at load, converted to the rule when needed, and loses the old keys: `System_DeviceNameLegacy.h`);
+`bleinfo json` keeps `deviceName`, now the device name.
 
 `versions` on the device lists these, as this image carries them, in one place: the firmware, the
 recovery updater and OTA layout, the ESP-NOW format and stack, the BLE console channel, the phone

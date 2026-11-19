@@ -4,7 +4,8 @@
 The shared snapshot helper, main/debug/restamp and per-user entry points,
 load/mutate/save transactions, the boot loader and the parse-failure quarantine
 (G-38), writer mutex and filesystem guard are extracted without rewriting their
-bodies. File/VFS/stat, the live-settings document builder,
+bodies, and so is the device name's move from the old ESP-NOW/Bluetooth names
+(System_DeviceName.cpp), which the boot load and the boot rewrite call. File/VFS/stat, the live-settings document builder,
 RTOS and cache invalidation are observed boundaries. --baseline replays targeted
 regressions against saved code. --case user-parity prints synthetic JSON hashes
 for byte comparisons; --case user also characterizes the legacy save failures.
@@ -78,8 +79,23 @@ def generate(source: str) -> str:
         "static bool writeSettingsJsonImpl(", "bool writeSettingsJson(", "bool writeSettingsJsonForFactoryReset(", "static void buildDebugJsonDoc(",
         "bool writeDebugJson(", "bool readDebugJson()", "bool settingsFirmwareVersionRestampPending(",
         "bool settingsRestampFirmwareVersion(")]
+    # The device name's move from the old names (System_DeviceName.cpp: the RAM
+    # side that the loader and the boot rewrite call), unchanged but for the
+    # function names, which the harness's observers wrap.
+    device_name = (COMPONENT / "System_DeviceName.cpp").read_text()
+    move_start = device_name.index("static bool sLegacyPatchPending")
+    move_end = device_name.index("void deviceNameLegacyPatchSaved()", move_start)
+    move = device_name[move_start:move_end] + extract_block(device_name, "void deviceNameLegacyPatchSaved()")
+    renamed = {"void deviceNameMigrateLegacy(": "static void realDeviceNameMigrateLegacy(",
+               "bool deviceNameLegacyPatchPending(": "static bool realDeviceNameLegacyPatchPending(",
+               "bool deviceNameLegacyPatch(": "static bool realDeviceNameLegacyPatch(",
+               "void deviceNameLegacyPatchSaved(": "static void realDeviceNameLegacyPatchSaved("}
+    for old, new in renamed.items():
+        require(move.count("\n" + old) == 1, f"the device-name move defines {old}")
+        move = move.replace("\n" + old, "\n" + new)
     harness = (HERE / "settings_file_writes_harness.cpp").read_text()
     for marker, text in {
+        "// INSERT_DEVICE_NAME_MOVE": move,
         "// INSERT_FS_GUARD": guard,
         "// INSERT_WRITER_GUARD": source[start:end],
         "// INSERT_SNAPSHOT": helper + "\n" + quarantine,

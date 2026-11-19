@@ -8,6 +8,7 @@
 #include "System_PollPause.h"
 #include "System_SettingsWriteBatchCore.h"
 #include "System_ConfigLoad.h"
+#include "System_DeviceNameLegacy.h"  // the old device-name keys (real JSON patch and removal)
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -333,10 +334,43 @@ static int gSecretLoadFailures = 0;
 static unsigned sectionReads = 0;
 static void espnowMeshesReadJson(JsonDocument&) { ++sectionReads; }
 static void selectDeviceKeyEpoch(JsonDocument&) {}
-static size_t readRegisteredSettings(JsonDocument&, const char*, bool allFiles) {
-  check(!allFiles, "boot load changed document scope"); ++sectionReads; return 1;
+// The one registered setting these cases watch: the device name (row
+// system.device.identity.deviceName, a string with default "").
+struct HarnessSettings { String espnowDeviceName; };
+static HarnessSettings gSettings;
+static unsigned registeredReads = 0;
+static size_t readRegisteredSettings(JsonDocument& doc, const char*, bool allFiles) {
+  check(!allFiles, "boot load changed document scope"); ++sectionReads; ++registeredReads;
+  gSettings.espnowDeviceName = doc["system"]["device"]["identity"]["deviceName"] | "";
+  return 1;
 }
 static int wifiNetworksReadJson(JsonDocument&) { return 0; }
+// The device name's move from the old ESP-NOW/Bluetooth names: the shipping
+// RAM side (System_DeviceName.cpp, extracted unchanged with its functions
+// renamed real*) runs behind these observers, and the re-stamp applies its
+// patch to the file.
+static unsigned nameMigrations = 0;
+// INSERT_DEVICE_NAME_MOVE
+static void deviceNameMigrateLegacy(const JsonDocument& doc) {
+  check(registeredReads > 0, "device-name move ran before the registered read");
+  ++nameMigrations;
+  realDeviceNameMigrateLegacy(doc);
+}
+static bool deviceNameLegacyPatchPending() { return realDeviceNameLegacyPatchPending(); }
+static bool deviceNameLegacyPatch(JsonDocument& doc) {
+  check(writerDepth > 0, "device-name patch outside the settings writer");
+  return realDeviceNameLegacyPatch(doc);
+}
+static void deviceNameLegacyPatchSaved() {
+  check(writerDepth > 0 && !ownsFs, "device-name patch marked saved before the writer released the file");
+  realDeviceNameLegacyPatchSaved();
+}
+static void resetDeviceNameMove() {
+  gSettings.espnowDeviceName = "";
+  registeredReads = 0;
+  sLegacyPatchPending = false;
+  std::memset(sLegacyMoved, 0, sizeof(sLegacyMoved));
+}
 static bool readText(const char* path, String& output, const AuthContext&) {
   {
     PollPauseGuard pause;
@@ -414,6 +448,7 @@ static void reset() {
   writerLockAttempts = diagnosticCalls = 0;
   statCalls = invalidations = mutations = 0; statFailure = 0; invalidationLocks.clear();
   sectionReads = 0; failRenameInto.clear(); ownerSetupArms = 0; ownerSetupArmSucceeds = true;
+  nameMigrations = 0; resetDeviceNameMove();
   interleave = restampRead = resumeRestamp = writerBlocked = mainDone = false;
 }
 static void balanced() {
@@ -611,6 +646,169 @@ static bool bootLoad() {
   // for the guarded VFS's own locking around its open and read.
   FsLockGuard boot("test.boot");
   return readSettingsJson();
+}
+// A settings.json from before the one device name: the old ESP-NOW name
+// (network.espnow.identity.deviceName) and Bluetooth name
+// (network.bluetooth.bluetoothDeviceName), beside keys that must stay.
+static const std::string oldNames = R"({"firmwareVersion":"0.99.99.1","unknown":7,"network":{"espnow":{"enabled":true,"identity":{"deviceName":"benchxiao","room":"lab"}},"bluetooth":{"bluetoothDeviceName":"HardwareOne","bleEnabled":true}}})";
+// The same board after a save by the rename build (7f433e04): the version is
+// current, the device name was written empty and the merge kept the old key.
+static const std::string savedByRename = R"({"firmwareVersion":"0.99.97.2","system":{"device":{"identity":{"deviceName":""}}},"network":{"espnow":{"identity":{"deviceName":"benchp4b"}},"bluetooth":{"bluetoothDeviceName":"HardwareOne"}}})";
+static bool loggedLine(const char* a, const char* b = nullptr) {
+  for (const auto& log : logs)
+    if (log.find(a) != std::string::npos && (!b || log.find(b) != std::string::npos)) return true;
+  return false;
+}
+static size_t loggedCount(const char* a) {
+  size_t n = 0;
+  for (const auto& log : logs) n += log.find(a) != std::string::npos;
+  return n;
+}
+// One boot as setup() runs it: the load, then the one-key rewrite.
+static bool bootAndRestamp() {
+  if (!bootLoad()) return false;
+  return settingsRestampFirmwareVersion();
+}
+static void deviceNameLegacyCases() {
+  // The bench boards: the boot load moves the old ESP-NOW name into the device
+  // name after the registered read (one log line), and the boot's rewrite
+  // stores it under the new key, removes both old keys, keeps everything else
+  // and re-stamps the version in the same single write.
+  reset(); store(SETTINGS_JSON_FILE, oldNames);
+  check(bootLoad() && nameMigrations == 1, "the boot load did not hand the old names to the move");
+  check(gSettings.espnowDeviceName == "benchxiao", "the boot load did not give the old ESP-NOW name back");
+  check(loggedCount("device name ") == 1 && loggedLine("device name \"benchxiao\" taken from the old ESP-NOW name"),
+        "the move did not log one line naming the name and its source");
+  check(settingsRestampFirmwareVersion() && writeOpens == 1, "re-stamp and patch did not share one write");
+  balanced();
+  auto doc = parse(files.at(SETTINGS_JSON_FILE)->bytes);
+  check(doc["system"]["device"]["identity"]["deviceName"] == "benchxiao", "moved name not stored under system.device");
+  check(doc["network"]["espnow"]["identity"]["deviceName"].isNull() &&
+            doc["network"]["bluetooth"]["bluetoothDeviceName"].isNull(),
+        "old name keys left in the file");
+  check(doc["network"]["espnow"]["identity"]["room"] == "lab" && doc["network"]["espnow"]["enabled"] == true &&
+            doc["network"]["bluetooth"]["bleEnabled"] == true && doc["unknown"] == 7,
+        "the patch changed other values");
+  check(doc["firmwareVersion"] == SelfDevice::firmwareVersion() && builds == 0,
+        "the boot rewrite lost the re-stamp or rebuilt from RAM");
+  check(!deviceNameLegacyPatchPending() && !settingsFirmwareVersionRestampPending(), "the boot rewrite left a pending flag");
+  // The next boot reads the new key and has nothing to move or write.
+  const std::string patched = files.at(SETTINGS_JSON_FILE)->bytes;
+  logs.clear(); writeOpens = 0; nameMigrations = 0; gSettings.espnowDeviceName = "";
+  check(bootAndRestamp() && gSettings.espnowDeviceName == "benchxiao" && nameMigrations == 1,
+        "the next boot did not read the moved name");
+  check(writeOpens == 0 && !deviceNameLegacyPatchPending() && loggedCount("device name ") == 0 &&
+            files.at(SETTINGS_JSON_FILE)->bytes == patched,
+        "the next boot moved or wrote again");
+  balanced();
+
+  // A damaged file never reaches the move.
+  reset(); store(SETTINGS_JSON_FILE, "{\"truncated\":");
+  check(!bootLoad() && nameMigrations == 0, "a damaged file reached the device-name move");
+  balanced();
+
+  // A file saved by the rename build (version current, new key ""): the move
+  // alone is one rewrite of the parsed file; firmwareVersion and the re-stamp
+  // line are untouched.
+  reset(); gSettingsVersionRestampPending = false; store(SETTINGS_JSON_FILE, savedByRename);
+  check(bootLoad() && gSettings.espnowDeviceName == "benchp4b" && !settingsFirmwareVersionRestampPending(),
+        "a file saved by the rename build did not give the old name back");
+  check(settingsRestampFirmwareVersion() && writeOpens == 1, "device-name patch was not written once");
+  balanced();
+  doc = parse(files.at(SETTINGS_JSON_FILE)->bytes);
+  check(doc["system"]["device"]["identity"]["deviceName"] == "benchp4b" &&
+            doc["network"]["espnow"]["identity"]["deviceName"].isNull() &&
+            doc["network"]["bluetooth"]["bluetoothDeviceName"].isNull(),
+        "the patch did not store the moved name or kept an old key");
+  check(doc["firmwareVersion"] == "0.99.97.2" && !loggedLine("re-stamped"), "the patch re-stamped");
+  writeOpens = readOpens = 0;
+  check(settingsRestampFirmwareVersion() && writeOpens == 0 && readOpens == 0, "a done patch performed I/O");
+  balanced();
+
+  // An old name that breaks the rule is converted, logged with the old value,
+  // and the converted name is what the file gets.
+  reset(); gSettingsVersionRestampPending = false;
+  store(SETTINGS_JSON_FILE, R"({"firmwareVersion":"0.99.97.2","network":{"espnow":{"identity":{"deviceName":"Living_Room"}}}})");
+  check(bootAndRestamp() && gSettings.espnowDeviceName == "Living-Room", "an old '_' name was not converted");
+  check(loggedLine("device name \"Living-Room\" taken from the old ESP-NOW name \"Living_Room\"", "changed to fit"),
+        "the conversion line does not name the old value");
+  doc = parse(files.at(SETTINGS_JSON_FILE)->bytes);
+  check(doc["system"]["device"]["identity"]["deviceName"] == "Living-Room" &&
+            doc["network"]["espnow"]["identity"]["deviceName"].isNull(),
+        "the converted name did not reach the file");
+  balanced();
+
+  // A chosen Bluetooth name is taken when there was no ESP-NOW name.
+  reset(); gSettingsVersionRestampPending = false;
+  store(SETTINGS_JSON_FILE, R"({"firmwareVersion":"0.99.97.2","network":{"bluetooth":{"bluetoothDeviceName":"Kitchen Speaker"}}})");
+  check(bootAndRestamp() && gSettings.espnowDeviceName == "Kitchen-Speaker" &&
+            loggedLine("taken from the old Bluetooth name \"Kitchen Speaker\""),
+        "a chosen Bluetooth name was not taken");
+  balanced();
+
+  // Nothing valid in the old names: no name, one line saying how to set one,
+  // and the old keys still leave the file.
+  reset(); gSettingsVersionRestampPending = false;
+  store(SETTINGS_JSON_FILE, R"({"firmwareVersion":"0.99.97.2","network":{"espnow":{"identity":{"deviceName":"clear"}},"bluetooth":{"bluetoothDeviceName":"HardwareOne"}}})");
+  check(bootAndRestamp() && gSettings.espnowDeviceName == "" && writeOpens == 1,
+        "an unusable old name was taken or the old keys stayed");
+  check(loggedCount("device name") == 1 && loggedLine("\"clear\" gives no valid name", "devicename <name>"),
+        "an unusable old name was not reported once");
+  doc = parse(files.at(SETTINGS_JSON_FILE)->bytes);
+  check(!devicename::hasLegacyKeys(doc.as<JsonVariantConst>()) &&
+            !devicename::storedNameIn(doc.as<JsonVariantConst>())[0],
+        "the unusable old name reached the file or stayed in it");
+  balanced();
+
+  // A device name already stored is never replaced, valid or not; the old
+  // keys go, and nothing is logged.
+  for (const char* stored : {"Desk", "bad_name"}) {
+    reset(); gSettingsVersionRestampPending = false;
+    store(SETTINGS_JSON_FILE, std::string(R"({"firmwareVersion":"0.99.97.2","system":{"device":{"identity":{"deviceName":")") +
+                                  stored + R"("}}},"network":{"espnow":{"identity":{"deviceName":"benchxiao"}}}})");
+    check(bootAndRestamp() && gSettings.espnowDeviceName == stored && loggedCount("device name") == 0,
+          "the move replaced a stored device name");
+    doc = parse(files.at(SETTINGS_JSON_FILE)->bytes);
+    check(doc["system"]["device"]["identity"]["deviceName"] == stored &&
+              doc["network"]["espnow"]["identity"]["deviceName"].isNull(),
+          "the patch replaced a stored device name or kept the old key");
+    balanced();
+  }
+
+  // A file without the old keys: no move, no write.
+  reset(); gSettingsVersionRestampPending = false;
+  store(SETTINGS_JSON_FILE, R"({"firmwareVersion":"0.99.97.2","system":{"device":{"identity":{"deviceName":"Desk"}}},"network":{"espnow":{"enabled":true}}})");
+  check(bootAndRestamp() && writeOpens == 0 && !deviceNameLegacyPatchPending() && loggedCount("device name") == 0,
+        "a file without old names was rewritten");
+  balanced();
+
+  // A failed write keeps the patch pending (the next boot repeats the move)
+  // and leaves the file as it was; the next boot gives the same name.
+  reset(); store(SETTINGS_JSON_FILE, oldNames);
+  check(bootLoad(), "boot load failed");
+  fault = Fault::Short;
+  check(!settingsRestampFirmwareVersion() && files.at(SETTINGS_JSON_FILE)->bytes == oldNames && deviceNameLegacyPatchPending(),
+        "a failed patch damaged the file or dropped the pending move");
+  fault = Fault::None;
+  balanced();
+  resetDeviceNameMove();
+  check(bootAndRestamp() && gSettings.espnowDeviceName == "benchxiao" && !deviceNameLegacyPatchPending(),
+        "the boot after a failed patch did not repeat the move");
+  check(parse(files.at(SETTINGS_JSON_FILE)->bytes)["system"]["device"]["identity"]["deviceName"] == "benchxiao",
+        "the repeated move did not reach the file");
+  balanced();
+
+  // Every full save removes the old keys: the merge keeps unknown keys, and an
+  // old name left there would return after 'devicename clear'.
+  reset(); store(SETTINGS_JSON_FILE, oldNames);
+  check(writeSettingsJson(), "full save failed");
+  doc = parse(files.at(SETTINGS_JSON_FILE)->bytes);
+  check(doc["network"]["espnow"]["identity"]["deviceName"].isNull() &&
+            doc["network"]["bluetooth"]["bluetoothDeviceName"].isNull(),
+        "a full save kept the old name keys");
+  check(doc["network"]["espnow"]["identity"]["room"] == "lab" && doc["network"]["bluetooth"]["bleEnabled"] == true,
+        "a full save dropped keys beside the old names");
+  balanced();
 }
 static void corruptSettingsQuarantine() {
   for (const std::string& text : {std::string{}, std::string{"{\"truncated\":"}, std::string{"\xff\xfe garbage"}}) {
@@ -1069,6 +1267,7 @@ int main(int argc, char** argv) {
           failureCase(writer, injected);
       corruptSettingsQuarantine();
       debugLoadGate();
+      deviceNameLegacyCases();
     }
     if (selected == "all" || selected == "user" || selected == "user-parity") userSuccessCases(selected == "user-parity");
     if (selected == "all" || selected == "user") {

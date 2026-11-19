@@ -20,7 +20,13 @@ in one place. What cannot run on the host is pinned in the source:
     cut name is advertised as shortened;
   - every frame field that carries this device's name is written with
     devicename::putField and every received one is read with devicename::getField;
-  - the setter is registered with its settings row in an always-compiled module.
+  - the setter is registered with its settings row in an always-compiled module;
+  - a settings file from before the one device name keeps its name: the boot
+    load moves the old ESP-NOW (else a chosen Bluetooth) name into the setting
+    after the registered read and before ESP-NOW's start gate, Bluetooth and the
+    hostname read it; the boot's one-key rewrite patches the file and every
+    full save removes the old keys (the pick: device_name_migration_tests; the
+    move's RAM side with the boot load and the file rewrites: settings_file_writes).
 """
 import argparse
 from pathlib import Path
@@ -140,6 +146,37 @@ def main():
          'FORWARD_LINK partnerName is not written with putField')
     need('devicename::getField(f.partnerName, sizeof(f.partnerName), shown)' in text('System_ESPNow_ForwardRx.cpp'),
          'FORWARD_LINK partnerName is not read with getField')
+
+    # The move from the names the device name replaced (System_DeviceNameLegacy.h).
+    load = settings[settings.find('bool readSettingsJson() {'):]
+    load = load[:load.find('\n}\n')]
+    need(0 <= load.find('readRegisteredSettings(doc, nullptr') < load.find('deviceNameMigrateLegacy(doc);'),
+         'readSettingsJson does not move the old name after the registered read')
+    restamp = settings[settings.find('bool settingsRestampFirmwareVersion() {'):]
+    restamp = restamp[:restamp.find('\n}\n')]
+    need('deviceNameLegacyPatchPending()' in restamp and 'deviceNameLegacyPatch(doc)' in restamp and
+         0 <= restamp.find('writeJsonSnapshot(') < restamp.find('deviceNameLegacyPatchSaved();'),
+         'the boot rewrite does not patch the file or marks the patch saved before writing it')
+    full = settings[settings.find('static bool writeSettingsJsonImpl('):]
+    full = full[:full.find('\n}\n')]
+    need(0 <= full.find('buildSettingsJsonDoc(doc') < full.find('devicename::removeLegacyKeys(doc);') <
+         full.find('writeSettingsSnapshot(doc'),
+         'a full save does not remove the old name keys after the merge and build')
+    move = setter[setter.find('void deviceNameMigrateLegacy('):]
+    move = move[:move.find('\n}\n')]
+    need('devicename::pickLegacy(gSettings.espnowDeviceName.c_str()' in move and
+         'gSettings.espnowDeviceName = pick.name;' in move and 'logSystemEvent(' in move,
+         'deviceNameMigrateLegacy does not take the pick into the setting with a log line')
+    # setup()'s own calls (the earlier bootAutostartEspNow call is the deferred
+    # hand-off, which runs after setup).
+    loaded = boot.find('if (readSettingsJson()) {')
+    need(0 <= loaded < boot.rfind('bootAutostartEspNow(sBootNetServices.espnow);') and
+         loaded < boot.rfind('if (initBluetooth())'),
+         'ESP-NOW or Bluetooth can start before the settings load (and the move)')
+    gate = espnow[espnow.find('const char* checkEspNowFirstTimeSetup() {'):]
+    gate = gate[:gate.find('\n}\n')]
+    need('devicename::valid(gSettings.espnowDeviceName.c_str())' in gate,
+         "ESP-NOW's start gate does not read the device name setting")
 
     for f in failures:
         print(f'FAIL {f}')
