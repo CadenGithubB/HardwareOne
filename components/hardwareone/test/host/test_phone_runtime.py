@@ -59,7 +59,9 @@ AFTER = (
     'bool phonePipeLinkSummary(',
     'bool phonePipeLinkRecord(', 'void phonePipeNoteConsoleActivity(',
     'bool phonePipeEnrolling(', 'PhonePairView phonePipePairView(', 'void phonePipePairClose(',
-    'PhonePipeOpenResult phonePipeOpen(', 'void phonePipeClose(', 'static const char* scanCommand(',
+    'PhonePipeOpenResult phonePipeOpen(', 'void phonePipeClose(',
+    # A busy command's answer, then `phone scan`.
+    'static const char* pipeBusy(', 'static const char* scanCommand(',
     # The `phone` and `relay` command handlers (the tables are registry data).
     'static bool localAdmin(', 'static const char* startLinkIfStopped(', 'static bool liftVersionHold(',
     'static const char* cmd_openphone(', 'static const char* cmd_closephone(',
@@ -200,6 +202,58 @@ def check_sources(phone: str) -> None:
         .replace(extract_block(code, 'bool phonePipeWorkerRelease('), '')
     assert re.findall(r'(?<![\w.])worker\s*=(?!=)', rest) == ['worker='] and 'TaskHandle_t worker=nullptr;' in rest
     assert re.findall(r'(?<![\w.])exitWanted\s*=(?!=)', rest) == ['exitWanted='] and 'bool exitWanted=false;' in rest
+    # The owner mutex: made by the first Lock (static storage, under initMux),
+    # never by starting the link, so a phone command on a boot whose link never
+    # opened still gets it (`phone pair new` read "busy" there). Nothing but
+    # Lock::owner() makes it, and nothing deletes or replaces it.
+    lock = extract_block(phone, 'class Lock')
+    owner = extract_block(lock, 'static SemaphoreHandle_t owner() ')
+    assert 'handle(owner())' in lock and 'mutex &&' not in lock, 'every Lock makes the owner mutex first'
+    assert owner.index('portENTER_CRITICAL(&initMux);') < \
+        owner.index('if(!mutex)mutex=xSemaphoreCreateMutexStatic(&mutexStorage);') < owner.index('portEXIT_CRITICAL(&initMux);')
+    for side in ('xTaskCreate', 'xQueueCreate', 'bleStackUp', 'resources(', 'phoneLinkOpen('):
+        assert side not in owner, side
+    # The declaration and Lock::owner() only.
+    assert re.findall(r'(?<![\w.])mutex\s*=(?!=)', code) == ['mutex=', 'mutex='] and 'SemaphoreHandle_t mutex=nullptr;' in code
+    assert 'vSemaphoreDelete' not in code
+    assert 'Lock::owner()' in extract_block(phone, 'bool resources() ')
+    # "Never started" for the status snapshot is resources(), not the mutex.
+    assert 'if(!gapQueue)' in extract_block(phone, 'bool phonePipeLinkSummary(')
+
+
+# The production Lock on its own, against counting FreeRTOS stubs: the
+# harness swaps in its own Lock, which never reads the owner mutex, so this
+# is the behavioural check that a phone command on a boot whose link never
+# opened gets the lock (the field bug: Lock was `mutex && take`, mutex nullptr).
+LOCK_UNIT = r"""
+#include <cassert>
+#include <cstdint>
+typedef int portMUX_TYPE;typedef struct{int held;} StaticSemaphore_t;typedef StaticSemaphore_t* SemaphoreHandle_t;
+#define pdTRUE 1
+#define pdFALSE 0
+static int critical=0,creations=0,takes=0,gives=0;
+#define portENTER_CRITICAL(m) (++critical)
+#define portEXIT_CRITICAL(m) (--critical)
+static uint32_t pdMS_TO_TICKS(uint32_t ms){return ms;}
+static SemaphoreHandle_t xSemaphoreCreateMutexStatic(StaticSemaphore_t* s){assert(critical==1);++creations;s->held=0;return s;}
+static int xSemaphoreTake(SemaphoreHandle_t m,uint32_t){++takes;if(m->held)return pdFALSE;m->held=1;return pdTRUE;}
+static int xSemaphoreGive(SemaphoreHandle_t m){++gives;assert(m->held);m->held=0;return pdTRUE;}
+static StaticSemaphore_t mutexStorage;static SemaphoreHandle_t mutex=nullptr;static portMUX_TYPE initMux=0;
+// LOCK
+int main(){
+  assert(!mutex);
+  {Lock a;assert(a && mutex==&mutexStorage && creations==1 && !critical);
+   Lock b(0);assert(!b);}          // a failed Lock: another holder, nothing else
+  const SemaphoreHandle_t made=mutex;
+  {Lock c(0);assert(c && mutex==made && creations==1);}
+  assert(Lock::owner()==made && creations==1 && takes==3 && gives==2 && !mutexStorage.held);
+  return 0;
+}
+"""
+
+
+def lock_unit(phone: str) -> str:
+    return LOCK_UNIT.replace('// LOCK\n', extract_block(phone, 'class Lock') + ';\n')
 
 
 def generated(component: Path) -> str:
@@ -254,3 +308,8 @@ if __name__ == '__main__':
         for external in (0, 1):
             subprocess.run(command + [f'-DCONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY={external}'], check=True)
             subprocess.run([str(binary)], check=True, timeout=100)
+        lock = Path(tmp) / 'lock.cpp'
+        lock_binary = Path(tmp) / 'lock'
+        lock.write_text(lock_unit((component / 'BLE_PhonePipe.cpp').read_text()))
+        subprocess.run(command[:command.index(str(unit))] + [str(lock), '-o', str(lock_binary)], check=True)
+        subprocess.run([str(lock_binary)], check=True, timeout=30)

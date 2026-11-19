@@ -1005,7 +1005,7 @@ static void phoneScreen() {
 
   // Stopped, and stopped for want of a secret.
   w.pipeActive = false;
-  w.label = "configure phone secret first";
+  w.label = "no secret: phone pair new, or New code on screen";
   EXPECT_ROWS(render(OLED_BLUETOOTH_PHONE), "PIPE [!!] not paired", "no secret", "Console: off");
   w.paired = true;
   w.label = "stopped";

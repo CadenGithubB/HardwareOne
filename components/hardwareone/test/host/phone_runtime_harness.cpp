@@ -275,14 +275,14 @@ static void sodium_memzero(void* p,size_t n){memzeroed.push_back(p);std::memset(
 // secret, never under the owner mutex. onPbkdf2 runs in its middle, as a
 // secret change racing a start does (the real one yields every 4096 rounds).
 static int sodium_init(){return 0;}
-static unsigned pbkdf2Calls=0;static const uint8_t* pbkdf2Out=nullptr;static std::function<void()> onPbkdf2;
+static unsigned pbkdf2Calls=0;static const uint8_t* pbkdf2Out=nullptr;static std::function<void()> onPbkdf2;static bool pbkdf2Fails=false;
 static void fakeKey(const char* secret,size_t n,uint8_t out[32]){for(size_t i=0;i<32;++i)out[i]=uint8_t(secret[i%n]^i^0x5a);}
 namespace hw1sc {
 static bool scPbkdf2(const uint8_t* pw,size_t pwLen,const uint8_t* salt,size_t saltLen,uint32_t iters,uint8_t out[32]){
  assert(ownerDepth==0 && pw && pwLen && saltLen==11 && !std::memcmp(salt,"HW1-PIPE-v1",11) && iters==100000);
  ++pbkdf2Calls;pbkdf2Out=out;fakeKey(reinterpret_cast<const char*>(pw),pwLen,out);
  if(onPbkdf2){auto hook=onPbkdf2;hook();}
- return true;
+ return !pbkdf2Fails;
 }
 }
 constexpr int AF_INET=2,AF_INET6=10;
@@ -716,7 +716,7 @@ static void reset() {
  // the version hold, the gBleState hold, the snapshot and the console spies.
  phoneSession=hw1pipe::Session{};relayOn=false;versionStrikes=0;versionLatched=false;stateHeld=false;linkSummary={};
  consoleFlags=0;consoleTicks.clear();afterUnlocks=0;consoleStatus={};stateReleases=0;reseeks=0;lockRefused=false;
- localFlagReads=0;memzeroed.clear();pbkdf2Calls=0;pbkdf2Out=nullptr;onPbkdf2=nullptr;pskInvalidations=0;
+ localFlagReads=0;memzeroed.clear();pbkdf2Calls=0;pbkdf2Out=nullptr;onPbkdf2=nullptr;pbkdf2Fails=false;pskInvalidations=0;
  phoneGatt.pipeLive=phoneGatt.startOnPoll=false;phoneGatt.mtu=247;phoneGatt.phoneRx=nullptr;phoneGatt.lastConsoleBusy=false;
  phoneSeq=0;phoneFlags=0;phoneSilent=false;pingTimes.clear();helloFlags.clear();linkStates.clear();
  // `phone pair new`: no window, the sinks ready, the known random words.
@@ -1293,7 +1293,7 @@ static void admissionTests() {
   assert(!std::strcmp(cmd_openphone(""),"Error: the app console server owns Bluetooth; run 'closeconsole', then 'openphone'"));
   assert(pipeStarts==0&&!job&&claimCalls==0);}
  {reset();active=false;startOk=false;status=PipeStatus::NoSecret;
-  assert(!std::strcmp(cmd_openphone(""),"Error: phone link could not open (configure phone secret first)"));
+  assert(!std::strcmp(cmd_openphone(""),"Error: phone link could not open (no secret: phone pair new, or New code on screen)"));
   assert(pipeStarts==1&&!job&&claimCalls==0);}
  // An already-open pipe that is connected says so, with no new job.
  {reset();ready=true;assert(!std::strcmp(cmd_openphone(""),"Error: The phone link is already open and connected. Stop it first with 'closephone' to restart it.")&&!job&&claimCalls==0);}
@@ -1304,7 +1304,7 @@ static void admissionTests() {
   reset();active=false;execAdmin=false;assert(!std::strcmp(phonePairCommand(""),"Error: phone pairing requires an authenticated local admin"));
   assert(pipeStarts==0);
   reset();active=false;serverUp=true;
-  assert(!std::strcmp(phonePairCommand(""),"Error: the app console server owns Bluetooth; run 'closeconsole', then 'openphone'"));
+  assert(!std::strcmp(phonePairCommand(""),"Error: the app console server owns Bluetooth; run 'closeconsole', then this command again"));
   assert(!claimCalls&&!manualLearns&&pipeStarts==0);}
  {reset();active=false;g2Up=true;const std::string reply=phonePairCommand("");
   assert(reply.rfind("Pairing opened for 60 seconds",0)==0&&pipeStarts==1&&enrolling);}
@@ -1312,17 +1312,52 @@ static void admissionTests() {
   assert(!std::strcmp(phonePairCommand(""),"Error: pipe authentication cooldown (30 seconds)"));
   assert(manualLearns==0&&claimCalls==0&&authorityIntent==7&&!job&&!enrolling);}
  {reset();uint32_t other=0;assert(realSetupClaim(kPhone,&other));
-  assert(!std::strcmp(phonePairCommand(""),"Error: phone pipe busy; disconnect first"));
+  assert(!std::strcmp(phonePairCommand(""),"Error: phone pipe busy: previous setup unfinished; retry soon"));
   assert(claimCalls==1&&manualLearns==0&&authorityIntent==7&&!job&&!enrolling);}
  {reset();manualLearnOk=false;
   assert(!std::strcmp(phonePairCommand(""),"Error: enrollment authority unavailable"));
   assert(manualLearns==1&&cancelCalls==1&&phoneSlotIdle()&&!job&&!enrolling&&!wantToken&&step==Step::Idle);}
  {reset();failPublish=true;
-  assert(!std::strcmp(phonePairCommand(""),"Error: phone pipe busy; disconnect first"));
+  assert(!std::strcmp(phonePairCommand(""),"Error: phone pipe busy: previous setup unfinished; retry soon"));
   assert(cancelCalls==1&&phoneSlotIdle()&&!job&&!enrolling&&!wantToken&&step==Step::Idle&&statusIs("disconnected"));}
  {reset();const uint32_t t=enrollPhone();
   assert(t&&job&&enrolling&&step==Step::Waiting&&statusIs("waiting to enroll")&&bleSetupLive(kPhone,t));
-  assert(manualLearns==1&&intent==authorityIntent&&enrollmentEpoch==5&&jobAt==clockMs&&!atClaim.job);}
+  assert(manualLearns==1&&intent==authorityIntent&&enrollmentEpoch==5&&jobAt==clockMs&&!atClaim.job);
+  // A second `phone pair` names the work it waits on and what to do.
+  assert(!std::strcmp(phonePairCommand(""),"Error: phone pipe busy: pairing in progress; see phone status or closephone"));
+  assert(manualLearns==1&&claimCalls==1);}
+ // Busy replies say what the pipe is busy with: the owner lock held elsewhere,
+ // a connect, a forget draining, a cleanup fault. None changes anything.
+ {reset();lockRefused=true;
+  assert(!std::strcmp(phonePairCommand(""),"Error: phone pipe busy (another phone task holds it); retry soon"));
+  assert(!std::strcmp(phoneForgetCommand(""),"Error: phone pipe busy (another phone task holds it); retry soon"));
+  assert(!std::strcmp(phoneStatsCommand(""),"Error: phone pipe busy (another phone task holds it); retry soon"));
+  assert(!std::strcmp(relayStatusCommand(""),"Error: phone pipe busy (another phone task holds it); retry soon"));
+  assert(!std::strcmp(phoneScanCommand(""),"Error: phone pipe busy (another phone task holds it); retry soon"));
+  lockRefused=false;assert(!claimCalls&&!manualLearns&&!job&&!forgetWanted);}
+ {reset();(void)admitPhone();const unsigned claims=claimCalls;
+  assert(!std::strcmp(phonePairCommand(""),"Error: phone pipe busy: connecting; see phone status or closephone"));
+  assert(claimCalls==claims&&!manualLearns&&!enrolling);}
+ {reset();forgetWanted=true;
+  assert(!std::strcmp(phonePairCommand(""),"Error: phone pipe busy: a phone forget is finishing; wait"));
+  assert(!std::strcmp(phoneForgetCommand(""),"Error: phone pipe busy: a phone forget is finishing; wait"));
+  forgetWanted=false;step=Step::Fault;
+  assert(!std::strcmp(phoneForgetCommand(""),"Error: phone pipe busy: cleanup failed; wait, or closeble then openble"));
+  step=Step::Retiring;
+  assert(!std::strcmp(phonePairCommand(""),"Error: phone pipe busy: the last link is closing; retry soon"));
+  step=Step::Idle;job=true;pairState=PhonePairWindow::Open;
+  assert(!std::strcmp(phonePairCommand(""),"Error: phone pipe busy: pairing window open; pair in the app or closephone"));
+  pairState=PhonePairWindow::None;job=false;assert(!claimCalls&&!manualLearns);}
+ // `closephone` on a closed link: `openphone` only where it can open it.
+ {reset();active=false;gSettings.phonePipeSecret="x";
+  assert(!std::strcmp(cmd_closephone(""),"Error: The phone link is not open. Open it with 'openphone'."));
+  gSettings.phonePipeSecret="";
+  assert(!std::strcmp(cmd_closephone(""),"Error: The phone link is not open and has no phone secret; run phone pair new (serial) or New code and pair (screen)"));
+  // A secret set after a failed open (`phone secret`): `openphone` again, by
+  // the stored secret, not the stale NoSecret status.
+  status=PipeStatus::NoSecret;gSettings.phonePipeSecret="x";
+  assert(!std::strcmp(cmd_closephone(""),"Error: The phone link is not open. Open it with 'openphone'."));
+  gSettings.phonePipeSecret="";}
  // The validate pass (automation checks) answers VALID before any handler
  // acts, and never starts a stopped link.
  {reset();active=false;gCliValidateOnly=true;
@@ -1905,6 +1940,11 @@ static void v2Tests() {
   // relay status reads both the link and the phone's switch.
   linkUp(hw1pipe::kPhoneRelayOn);assert(std::string(relayStatusCommand("")).rfind("Relay: phone up relay=on corr=a102030405060708\n",0)==0);
   linkUp(0);assert(std::string(relayStatusCommand("")).rfind("Relay: phone up relay=off corr=",0)==0);}
+ // `phone pair` with a phone linked (its job stays until the link is lost):
+ // "connected", never "connecting"; nothing changes.
+ {linkUp(hw1pipe::kPhoneRelayOn);const unsigned learns=manualLearns,claims=claimCalls;assert(job && step==Step::Link);
+  assert(!std::strcmp(phonePairCommand(""),"Error: phone pipe busy: a phone is connected; closephone first"));
+  assert(manualLearns==learns && claimCalls==claims && ready && job && step==Step::Link);}
  // The activity rule (A-4): an open console stream alone is idle; the
  // driver's note (COMMAND/BINARY in, TEXT/BLOB out) and relay streams are activity.
  {linkUp(hw1pipe::kPhoneConsoleWanted,hw1pipe::kP4ConsoleOffered);
@@ -1940,8 +1980,10 @@ static void v2Tests() {
   fail(clockMs,Error::Connect,PipeStatus::LinkLost);assert(phonePipeConsolePush(gen,id,head,4,text,2,4,0)==PhonePipePush::Gone);
   mutex=nullptr;assert(phonePipeConsolePush(gen,id,head,4,text,2,4,0)==PhonePipePush::Gone && !phonePipeOwnerHeldByCurrentTask());}
  // The status snapshot: copied under its leaf lock, never the owner mutex;
- // false and zeroed before the pipe has resources.
- {reset();PhonePipeLinkSummary sum;sum.ended=7;sum.active=true;assert(!phonePipeLinkSummary(&sum) && !sum.ended && !sum.active);
+ // false and zeroed before the pipe has resources (the owner mutex alone,
+ // which a phone command's Lock makes, is not resources).
+ {reset();PhonePipeLinkSummary sum;sum.ended=7;sum.active=true;gapQueue=nullptr;static int handle;mutex=&handle;
+  assert(!phonePipeLinkSummary(&sum) && !sum.ended && !sum.active);gapQueue=&queueHandle;mutex=nullptr;
   linkUp(hw1pipe::kPhoneRelayOn|hw1pipe::kPhoneConsoleWanted,hw1pipe::kP4ConsoleOffered);mutex=&handle;
   uint8_t host[4]={192,0,2,1};assert(phoneSession.open(1,host,4,443,clockMs) && phoneSession.openConsole(clockMs));
   versionStrikes=2;sessionStats.versionMismatches=5;tickFlush(clockMs+=10);
@@ -1986,6 +2028,13 @@ static void v2Tests() {
   assert(loadPsk()==PskLoad::NoSecret && !pskValid && pbkdf2Calls==3);
   gSettings.phonePipeSecret="first pipe secret";lockRefused=true;
   assert(loadPsk()==PskLoad::Retry && !pskValid && pbkdf2Calls==3);lockRefused=false;
+  // A stored secret whose derivation fails is not "no secret" (that label
+  // tells the user to replace it): retry.
+  pbkdf2Fails=true;assert(loadPsk()==PskLoad::Retry && !pskValid && pbkdf2Calls==4);pbkdf2Fails=false;
+  // A secret change ends a stale "no secret" from the last open; other
+  // statuses stay.
+  status=PipeStatus::NoSecret;assert(phonePipeInvalidateSecret() && status.load()==PipeStatus::Stopped);
+  status=PipeStatus::LinkLost;assert(phonePipeInvalidateSecret() && status.load()==PipeStatus::LinkLost);
   mutex=nullptr;}
  // `phone stats`: the version counters and the console driver's counts (no content).
  {reset();consoleStatus.opens=3;consoleStatus.cardDrops=1;consoleStatus.mirrorDrops=2;consoleStatus.unknown=4;
@@ -2119,12 +2168,12 @@ static void pairNewTests() {
   {"Error: phone pair new requires an authenticated local admin on serial or the OLED","",[]{authContext.transport=SOURCE_WEB;}},
   {"Error: phone pair new prints its code once on this console; turn serial output on","",[]{serialSinkReady=false;}},
   {"Error: the OLED cannot show a pairing code now","",[]{authContext.transport=SOURCE_LOCAL_DISPLAY;displaySinkReady=false;}},
-  {"Error: the app console server owns Bluetooth; run 'closeconsole', then 'openphone'","",[]{serverUp=true;}},
+  {"Error: the app console server owns Bluetooth; run 'closeconsole', then this command again","",[]{serverUp=true;}},
   {"Error: Bluetooth is disabled; run bleenabled on first","",[]{active=false;gSettings.bleEnabled=false;}},
   {"Error: phone is owned by another account","",[]{ownerUser="other";}},
   {"Error: local authenticated session required","",[]{captureEpoch=0;}},
   {"Error: pipe authentication cooldown (30 seconds)","",[]{haveAuthFailure=true;lastAuthFailure=clockMs;}},
-  {"Error: phone pipe busy","",[]{lockRefused=true;}},
+  {"Error: phone pipe busy (another phone task holds it); retry soon","",[]{lockRefused=true;}},
  };
  for(const auto& r:refusals){
   pairNewReset();versionLatched=true;versionStrikes=3;r.arrange();
