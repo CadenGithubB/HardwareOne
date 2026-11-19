@@ -246,6 +246,16 @@ everything user-visible since the v0.99.99.1 tag.
   mesh id now comes from the mesh key and is never 0.
 - A device name of 20-31 bytes, or one with characters outside the old rule, could be set through the
   setup wizard (it copied the free-text label unchecked) and was cut to 19 bytes on the air.
+- G2 glasses: a `g2micwav` capture (the glasses microphone decoded to a WAV) cut by a power loss or
+  reset was lost: nothing was synced and the WAV header kept its zero sizes until `g2micwav stop`. The
+  writer now checkpoints every 64000 bytes of audio (2 s): it syncs the audio, then on the SD card
+  sets the header's RIFF and data sizes to what is on disk and syncs again, so a cut capture plays as
+  it is and loses at most its last 2 s. The checkpoint runs where the packet is written, under locks
+  already held, so it adds no lock wait to the BLE receive path. The 16 MB cap now closes the file
+  there too, instead of after the write released the FS lock, where the close could wait for that
+  lock in the BLE host task. On internal flash (a path outside `/sd/`) it only syncs and the header
+  is completed at stop, because rewriting it there copies the whole file. Host test
+  `g2_mic_wav_checkpoint` cuts captures at random points; not yet run on hardware.
 - ESP-NOW: messages sent to a device that has just restarted are no longer sent into the session it no
   longer has. Sessions live in RAM, so a restarted device has none, while its peers kept the old one and
   sealed messages into it; the restarted device could not open them and dropped them without a word

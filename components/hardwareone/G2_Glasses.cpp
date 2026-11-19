@@ -3804,7 +3804,9 @@ static void micRecDrainTick() {
 // (16 kHz, 10 ms). Five frames per packet → 5 × 160 = 800 samples =
 // 1600 bytes of PCM per BLE notification, written straight to a WAV
 // file. WAV header written on start with placeholder sizes; on stop
-// we seek back and patch the riff-size + data-size fields.
+// we seek back and patch the riff-size + data-size fields. While
+// recording, a checkpoint every kMicWavCheckpointBytes makes the file
+// survive a power cut or reset (see micWavCheckpointLocked).
 //
 // Decoder memory is ~6 KB for 16 kHz / 10 ms — heap-allocated once on
 // first start, freed on stop. Mutex serialises the BLE notify task
@@ -3820,6 +3822,19 @@ static void*             gMicWavDecMem  = nullptr;
 static uint32_t          gMicWavDecodeFails = 0;
 static uint32_t          gMicWavPlcFrames   = 0;
 static constexpr uint32_t kMicWavMaxBytes = 16u * 1024u * 1024u;  // ~8.7 min @ 32 KB/s decoded
+// Power-cut checkpoint: every 40 packets (64000 B of PCM = 2.0 s of audio) the
+// writer syncs the file and, on the SD card, updates the header sizes to what is
+// on disk, so a reset loses at most the last 2 s and leaves a valid WAV. Counted
+// in audio bytes, not wall time: a stalled stream writes nothing that needs a
+// checkpoint. Two syncs and one header-sector write per 2 s are negligible SD
+// wear next to the 32 KB/s of PCM, and keep the stall this adds to the BLE
+// notify task (the writer) to one short burst per interval.
+static constexpr uint32_t kMicWavCheckpointBytes = 40u * 1600u;
+static uint32_t          gMicWavCheckpointBytes = 0;  // PCM bytes the last checkpoint covers
+// Header rewrites at a checkpoint only on the SD card (FAT patches the sector in
+// place). LittleFS rewrites a file from the changed block to its end, so there a
+// checkpoint only syncs and the header is completed at stop.
+static bool              gMicWavPatchHeader     = false;
 
 static constexpr int kMicLc3FrameUs   = 10000;  // 10 ms
 static constexpr int kMicLc3SampleHz  = 16000;  // 16 kHz mono
@@ -3867,11 +3882,12 @@ static void micWavWriteHeader(File& f, uint32_t pcmBytes) {
   f.write(header, sizeof(header));
 }
 
-// Patch the riff-size and data-size fields on close so the WAV is
-// playable without depending on the original placeholder values.
-// Caller must hold gMicWavMutex.
-static void micWavPatchSizesLocked() {
-  if (!gMicWavFile) return;
+// Patch the riff-size and data-size fields (on close, and at each SD
+// checkpoint) so the WAV is playable without depending on the original
+// placeholder values. Caller must hold gMicWavMutex. False when the file is not
+// back at its append position: the next write would land inside the data.
+static bool micWavPatchSizesLocked() {
+  if (!gMicWavFile) return false;
   const uint32_t riffSize = 36 + gMicWavBytes;
   uint8_t riff[4] = {
     (uint8_t)(riffSize), (uint8_t)(riffSize>>8),
@@ -3883,7 +3899,28 @@ static void micWavPatchSizesLocked() {
   };
   if (gMicWavFile->seek(4))  gMicWavFile->write(riff, 4);
   if (gMicWavFile->seek(40)) gMicWavFile->write(dat, 4);
-  gMicWavFile->seek(44 + gMicWavBytes);  // restore append position (defensive)
+  return gMicWavFile->seek(44 + gMicWavBytes);  // restore append position
+}
+
+// Power-cut checkpoint, due once kMicWavCheckpointBytes of PCM were written
+// since the last one. Runs in the writer (BLE notify task) right after a packet
+// write, with gMicWavMutex and the FS lock already held, so it adds no lock
+// wait to the receive path, only the sync itself once per interval. Order: sync
+// the PCM and the file length first, then the header that describes them, so a
+// cut at any point leaves a header that claims no more than the disk holds
+// (exactly the checkpointed size once the second sync lands). False when the
+// header rewrite could not return to the append position (caller closes).
+static bool micWavCheckpointLocked() {
+  if (!gMicWavFile || gMicWavBytes - gMicWavCheckpointBytes < kMicWavCheckpointBytes) {
+    return true;
+  }
+  gMicWavFile->flush();
+  if (gMicWavPatchHeader) {
+    if (!micWavPatchSizesLocked()) return false;
+    gMicWavFile->flush();
+  }
+  gMicWavCheckpointBytes = gMicWavBytes;
+  return true;
 }
 
 static void micWavCloseLocked(const char* reason) {
@@ -4363,6 +4400,16 @@ static bool micWavWritePacketLocked(const uint8_t* pkt) {
                                 sizeof(pcm));
   gMicWavBytes   += (uint32_t)n;
   gMicWavPackets += 1;
+  if (!micWavCheckpointLocked()) {
+    micWavCloseLocked("checkpoint failed");  // FS lock still held: no wait
+    return false;
+  }
+  // The cap closes here, while this write still holds the FS lock: once the
+  // guard is released, the close's own FsLockGuard would wait (portMAX_DELAY)
+  // in the BLE host task for whoever took the lock next.
+  if (gMicWavBytes >= kMicWavMaxBytes) {
+    micWavCloseLocked("cap reached");
+  }
   return n == sizeof(pcm);
 }
 
@@ -4480,10 +4527,8 @@ static void handleAudioNotify(G2Temple& t, const uint8_t* data, size_t len) {
       if (gMicWavFile && gMicWavBytes < kMicWavMaxBytes && gMicWavDecoder) {
         // The first 200 bytes are 5 × 40 B LC3 frames. Last 5 bytes
         // are the metadata trailer — discard.
+        // Closes the file itself at kMicWavMaxBytes, under its FS lock.
         micWavWritePacketLocked(data);
-        if (gMicWavBytes >= kMicWavMaxBytes) {
-          micWavCloseLocked("cap reached");
-        }
       }
       xSemaphoreGive(gMicWavMutex);
     }
@@ -27640,9 +27685,16 @@ static const char* cmd_g2micwav(const String& argsInput) {
       return ret;
     }
     micWavWriteHeader(*f, /*pcmBytes*/ 0);
+    f->flush();  // a cut before the first checkpoint leaves an empty valid WAV
     gMicWavFile        = f;
     gMicWavPath        = path;
     gMicWavBytes       = 0;
+    gMicWavCheckpointBytes = 0;
+    // Same routing as the open above (openGuarded normalizes, then routes),
+    // so "//sd/x.wav" is on the SD card here too.
+    String normPath;
+    gMicWavPatchHeader = normalizeFsPath(path, normPath) &&
+                         VFS::getStorageType(normPath) == VFS::SDCARD;
     gMicWavPackets     = 0;
     gMicWavStartMs     = millis();
     gMicWavDecoder     = dec;
