@@ -207,8 +207,12 @@ static void dropsAndWaits() {
   const uint32_t g2 = submit(core, env, Client::G2);
   env.verdict[size_t(Client::Ring)] = {Ready::Wait, kAudio};
   env.verdict[size_t(Client::G2)] = {Ready::Drop, kStale};
+  CHECK(core.otherQueued(Client::G2) && core.otherReadyQueued(Client::G2));  // not yet judged
   Pick p = pickOnce(core, env);
   CHECK(!p.run.valid && p.changed);
+  // The ring waits on its own reason: queued, but not ready to run next.
+  CHECK(core.otherQueued(Client::G2) && !core.otherReadyQueued(Client::G2));
+  CHECK(!core.otherReadyQueued(Client::Ring));
   CHECK(env.count('f', Client::G2) == 1 && env.log[0].reason == kStale && env.log[0].end == End::Dropped);
   CHECK(!core.live(Client::G2, g2) && core.idle(clientMask(Client::G2)));
   CHECK(env.count('w', Client::Ring) == 1);

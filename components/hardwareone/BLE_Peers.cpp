@@ -1079,14 +1079,29 @@ bool bleAnyPeerWantsAutoReconnect(void) {
 
 static uint32_t bleReconnectBackoffMs(BlePeerKind kind, uint8_t attempt) {
   // 5s, 15s, 45s, 90s, then 180s capped. The phone is the standing fallback
-  // path, so its schedule stops growing at 30 s (A-3); glasses and ring keep
-  // the long tail.
+  // path, so its schedule stops growing at 30 s (A-3); the glasses keep the
+  // long tail.
+  //
+  // The ring follows faceclaw (ConnectionOptions.kt RING_RECONNECT_DELAY_MS /
+  // RING_RECONNECT_MAX_DELAY_MS): 2 s after a drop, then 2 s doubling to 60 s.
+  // The ring's admission holds each automatic attempt that long from the
+  // failure that ended the one before (ringRetryHoldRemainingMs, answering
+  // BUSY, which spends no step here), and step n here equals that hold after
+  // failure n, so the ring's hold decides the gap. These steps only bound a
+  // job that ends without counting a failure (dropped unrun by the setup
+  // worker) to the same 60 s cap.
   static const uint32_t kSteps[] = { 5000, 15000, 45000, 90000, 180000 };
   static const uint32_t kPhoneSteps[] = { 5000, 15000, 30000 };
-  const bool phone = kind == BLE_PEER_PHONE;
-  const uint32_t* steps = phone ? kPhoneSteps : kSteps;
-  const size_t n = phone ? sizeof(kPhoneSteps) / sizeof(kPhoneSteps[0])
-                         : sizeof(kSteps) / sizeof(kSteps[0]);
+  static const uint32_t kRingSteps[] = { 2000, 2000, 4000, 8000, 16000, 32000, 60000 };
+  const uint32_t* steps = kSteps;
+  size_t n = sizeof(kSteps) / sizeof(kSteps[0]);
+  if (kind == BLE_PEER_PHONE) {
+    steps = kPhoneSteps;
+    n = sizeof(kPhoneSteps) / sizeof(kPhoneSteps[0]);
+  } else if (kind == BLE_PEER_R1_RING) {
+    steps = kRingSteps;
+    n = sizeof(kRingSteps) / sizeof(kRingSteps[0]);
+  }
   return steps[attempt < n ? attempt : n - 1];
 }
 
@@ -1589,7 +1604,9 @@ bool blePeerRestoreDroppedReseek(BlePeerKind kind, uint32_t intentGeneration,
 void bleAutoReconnectTick(void) {
   // Debug lines only. A peer that stays ROLE_BLOCKED retries every 15 s for as
   // long as the block lasts (the ring paused for the phone pipe), so its
-  // repeats stay quiet until the result changes. Main loop only.
+  // repeats stay quiet until the result changes. The ring's BUSY is the same:
+  // it answers BUSY every 2 s while an attempt runs and while its backoff
+  // hold lasts. Main loop only.
   static BlePeerConnectAdmission sLastResult[BLE_PEER_MAX] = {};
   const uint32_t now = millis();
   for (size_t i = 0; i < gPeerCount; i++) {
@@ -1598,8 +1615,12 @@ void bleAutoReconnectTick(void) {
     const BlePeerKind kind = p->kind;
     ReconnectAdmissionClaim claim;
     if (!claimDueAdmission(kind, now, claim)) continue;
-    const bool wasBlocked =
-        sLastResult[kind] == BlePeerConnectAdmission::ROLE_BLOCKED;
+    const BlePeerConnectAdmission quietResult =
+        kind == BLE_PEER_R1_RING &&
+                sLastResult[kind] == BlePeerConnectAdmission::BUSY
+            ? BlePeerConnectAdmission::BUSY
+            : BlePeerConnectAdmission::ROLE_BLOCKED;
+    const bool wasBlocked = sLastResult[kind] == quietResult;
     if (!wasBlocked) {
       DEBUG_G2F("[BLE-Peers] Reseek '%s' attempt=%u",
                 p->name, (unsigned)claim.launchedAttempts + 1);
@@ -1613,7 +1634,7 @@ void bleAutoReconnectTick(void) {
         requestPeerConnectAdmission(p, claim, roleAllowed);
     const bool committed = commitAdmission(claim, result, now);
     sLastResult[kind] = result;
-    if (!wasBlocked || result != BlePeerConnectAdmission::ROLE_BLOCKED) {
+    if (!wasBlocked || result != quietResult) {
       DEBUG_G2F("[BLE-Peers] Reseek '%s': admission=%s committed=%d",
                 p->name, admissionName(result), (int)committed);
     }

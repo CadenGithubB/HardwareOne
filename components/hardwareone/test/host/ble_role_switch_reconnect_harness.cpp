@@ -161,6 +161,10 @@ static void ringClearGattPointers(bool) {}
 static unsigned ringClockResets = 0;
 static void ringClockCustodyReset() { ++ringClockResets; }
 static void ringNoteConnectFailure(const char*, uint32_t) {}
+// Defined after the extracted range in G2_Ring.cpp. The ring's backoff hold is
+// covered by ring_phone_yield_queue_harness; here it never holds.
+static void ringPostConnectFailureEvent(const char*, uint32_t) {}
+static uint32_t ringRetryHoldRemainingMs(uint32_t) { return 0; }
 static void g2RingWithdrawQueuedConnect() {}
 static void g2CancelActiveRingScan() {}
 static bool bleCentralTxTake(uint32_t) { return true; }

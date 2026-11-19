@@ -1070,6 +1070,18 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_ring_daily_ack.py
           ${RING_DAILY_ACK_TEST_ARGS})
 
+# The ring's 25 s direct connect bound (under Bluedroid's 30 s link timer), its
+# failed-connect settle and the faceclaw backoff wiring (README "Ring connect bound").
+set(RING_CONNECT_BOUND_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND RING_CONNECT_BOUND_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME ring_connect_bound
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_ring_connect_bound.py
+          ${RING_CONNECT_BOUND_TEST_ARGS})
+
 # BLE server stop: deinitBluetooth() reports deferred/failed stops; closeble and
 # blemode client keep bleMode and the app sessions (README "Bluetooth server stop").
 set(BLE_SERVER_STOP_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
@@ -3446,7 +3458,10 @@ add_test(NAME p4_ram_monitor COMMAND ${Python3_EXECUTABLE}
 add_test(NAME p4_prepare_sdk COMMAND ${Python3_EXECUTABLE} -B
   ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_prepare_sdk.py)
 # The local Bluetooth patches (idf-bt-manifest.json local_patches) apply exactly
-# to the pinned ESP-IDF; GAP's GATT callbacks check that GAP is still alive.
+# to the pinned ESP-IDF; GAP's GATT callbacks check that GAP is still alive; a
+# failed LE connection complete never releases the live link holding its handle;
+# a forgotten handle that keeps sending ACL data gets HCI_Disconnect (host-built
+# harnesses: needs a C compiler and, on macOS, SDKROOT).
 add_test(NAME p4_idf_bt_local_patches COMMAND ${Python3_EXECUTABLE} -B
   ${CMAKE_CURRENT_LIST_DIR}/../../../../tools/p4/test_idf_bt_local_patches.py)
 # Exit 77 = the pinned ESP-IDF install is not on this machine (reported as skipped).

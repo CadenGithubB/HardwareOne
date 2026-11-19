@@ -180,6 +180,14 @@ struct G2Temple {
   // attempt will destroy and recreate the BLEClient rather than reuse the
   // stale one (which Arduino BLE handles unreliably).
   bool                         clientStale;
+  // The last drop carried HCI 0x02: the host released a link the controller
+  // may still own. Set by g2BeginTempleDown; the next repair try reads and
+  // clears it (that try does not scan for this arm), as does a new link.
+  bool                         hostDesyncSuspected;
+  // The next connectTemple dials deviceAddress/deviceAddressType directly
+  // (the half-connected repair's saved-address reconnect) instead of the
+  // cached advert. connectTemple consumes it.
+  bool                         directConnectArmed;
 
   // Reassembly — the firmware groups fragments by the 'seq' byte. Start
   // collecting on the first fragment; dispatch when totalLen bytes received.

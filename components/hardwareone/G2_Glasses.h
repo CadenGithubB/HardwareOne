@@ -247,10 +247,14 @@ void bleNoteClientConnectOutcome(BLEClient* client, bool ok,
 // the application slot, delete it only if the library positively proves all
 // callback routing retired, and otherwise leave it in BLEDevice's terminal
 // teardown registry. Returns true when `client` was consumed and nulled.
+// connectBoundMs is the timeout the caller gave connect(): an OPEN_TIMEOUT
+// from a bound under Bluedroid's own establishment timer (the 25 s repair
+// dial) is an ordinary miss; 0 or a longer bound reads it as a lost OPEN.
 bool bleQuarantineClientAfterFailedConnect(BLEClient*& client,
                                            uint8_t retirementSlot,
                                            uint8_t peerKind,
-                                           const char* logTag);
+                                           const char* logTag,
+                                           uint32_t connectBoundMs = 0);
 // Fixed retirement slots for the only three central BLEClient owners. A
 // false return means deletion is not yet safe: the pointer was transferred to
 // a bounded retry slot (or retained on a slot collision), so callers must not

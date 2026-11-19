@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run the production reconnect admission commit through repeated attempts.
 
-The phone's schedule caps at 30 s (A-3); glasses and ring keep 5/15/45/90/180 s.
+The phone's schedule caps at 30 s (A-3); the glasses keep 5/15/45/90/180 s; the
+ring follows faceclaw: 2 s after a drop, then 2 s doubling to 60 s.
 """
 import argparse
 import os

@@ -2405,8 +2405,9 @@ void g2RingTimeSyncTick(void) {
 static volatile bool  gRingConnectTaskActive = false;
 // Stamped whenever the flag flips true, so reject paths can report how long
 // the in-flight attempt has been running — a normal saved-MAC attempt tops
-// out around 53s (20s glasses wait + 3s settle + ~30s connect timeout);
-// anything much past that means the worker is stuck.
+// out around 48s (20s glasses wait + 3s settle + the 25s connect bound,
+// RING_DIRECT_CONNECT_TIMEOUT_MS); anything much past that means the worker
+// is stuck.
 static volatile uint32_t gRingConnectTaskSinceMs = 0;
 static portMUX_TYPE gRingConnectMux = portMUX_INITIALIZER_UNLOCKED;
 // Every Ring central job carries the generation it was admitted under.
@@ -2478,15 +2479,76 @@ bool g2RingConnectInFlight() {
   portEXIT_CRITICAL(&gRingConnectMux);
   return active;
 }
+// A job admitted less than this long ago is a normal attempt: at most ~48 s
+// of its own plus its turn on the setup worker. Past it ringConnectGateOpen
+// warns about the job.
+static constexpr uint32_t RING_INFLIGHT_NORMAL_MS = 120000;
+static bool ringConnectInFlightNormal(uint32_t nowMs) {
+  portENTER_CRITICAL(&gRingConnectMux);
+  const bool normal = gRingConnectTaskActive && !gRingDisconnecting &&
+      (uint32_t)(nowMs - gRingConnectTaskSinceMs) < RING_INFLIGHT_NORMAL_MS;
+  portEXIT_CRITICAL(&gRingConnectMux);
+  return normal;
+}
 
 // Failed-connect visibility. Every failure broadcasts on regular output, but
 // the persisted bus event is throttled to the first failure of a streak plus
-// one per 10 min — an unreachable ring retries every ≤180s and would
-// otherwise flood events.log. Streak resets on successful connect.
+// one per 10 min — an unreachable ring retries as often as every 60 s
+// (RING_RETRY_MAX_MS) and would otherwise flood events.log. Streak resets on
+// successful connect.
 static uint8_t  sRingConnFailStreak    = 0;
 static uint32_t sRingConnFailLastEvtMs = 0;
 
-static void ringNoteConnectFailure(const char* reason, uint32_t elapsedMs) {
+// Automatic reconnect pacing, after faceclaw (ConnectionOptions.kt
+// RING_RECONNECT_DELAY_MS / RING_RECONNECT_MAX_DELAY_MS, GlassesSessionCore.kt
+// tryConnectRing): a failed ring connect holds the next automatic attempt 2 s,
+// doubling with each failure in a row up to 60 s, counted from the failure. A
+// connect that finishes setup starts the ladder over. The ring is often out of
+// range or held by the glasses' own ring link, and every attempt shares the
+// radio and the setup worker with the temples, so an unreachable ring stays
+// low-duty. Only the reconnect scheduler's admission is held
+// (ringPeerConnectSavedAdmissionThunk); openring and the other manual paths
+// never are.
+static constexpr uint32_t RING_RETRY_BASE_MS = 2000;
+static constexpr uint32_t RING_RETRY_MAX_MS = 60000;
+static uint8_t  sRingRetryFailures = 0;     // under gRingConnectMux
+static uint32_t sRingRetryFailedAtMs = 0;   // under gRingConnectMux
+
+static uint32_t ringRetryDelayMs(uint8_t failures) {
+  if (failures == 0) return 0;
+  const unsigned shift = failures - 1u < 5u ? failures - 1u : 5u;
+  const uint32_t delay = RING_RETRY_BASE_MS << shift;
+  return delay < RING_RETRY_MAX_MS ? delay : RING_RETRY_MAX_MS;
+}
+
+// What is left of the hold after the last failure; 0 = an attempt may start.
+static uint32_t ringRetryHoldRemainingMs(uint32_t nowMs) {
+  portENTER_CRITICAL(&gRingConnectMux);
+  const uint8_t failures = sRingRetryFailures;
+  const uint32_t failedAtMs = sRingRetryFailedAtMs;
+  portEXIT_CRITICAL(&gRingConnectMux);
+  const uint32_t delay = ringRetryDelayMs(failures);
+  const uint32_t elapsed = nowMs - failedAtMs;
+  return elapsed >= delay ? 0 : delay - elapsed;
+}
+
+static void ringRetryNoteFailure(uint32_t nowMs) {
+  portENTER_CRITICAL(&gRingConnectMux);
+  if (sRingRetryFailures < 255) sRingRetryFailures++;
+  sRingRetryFailedAtMs = nowMs;
+  portEXIT_CRITICAL(&gRingConnectMux);
+}
+
+static void ringRetryNoteConnected() {
+  portENTER_CRITICAL(&gRingConnectMux);
+  sRingRetryFailures = 0;
+  sRingRetryFailedAtMs = 0;
+  portEXIT_CRITICAL(&gRingConnectMux);
+}
+
+// The bus event alone. The in-flight watchdog reports a stuck job with it
+// without counting an attempt that has not ended.
+static void ringPostConnectFailureEvent(const char* reason, uint32_t elapsedMs) {
   if (sRingConnFailStreak < 255) sRingConnFailStreak++;
   const uint32_t now = millis();
   if (sRingConnFailStreak > 1 && (now - sRingConnFailLastEvtMs) < 600000UL) return;
@@ -2497,6 +2559,13 @@ static void ringNoteConnectFailure(const char* reason, uint32_t elapsedMs) {
   systemEventPost(SYSEVT_RING_RECONNECT_FAILED,
                   gRingDeviceName.length() > 0 ? gRingDeviceName.c_str() : "R1",
                   detail);
+}
+
+// A connect attempt that ended without a ring: report it and start (or
+// lengthen) the automatic reconnect hold.
+static void ringNoteConnectFailure(const char* reason, uint32_t elapsedMs) {
+  ringRetryNoteFailure(millis());
+  ringPostConnectFailureEvent(reason, elapsedMs);
 }
 
 // Gate shared by the three public connect entry points. Returns true when
@@ -2543,7 +2612,7 @@ static bool ringConnectGateOpen(uint32_t* generationOut) {
     DEBUG_RING_LIFECYCLEF("[RING] Connect skipped — attempt already in flight (%lus)",
                           (unsigned long)inflightS);
   }
-  if (inflightS > 120) ringNoteConnectFailure("stuck", inflightS * 1000);
+  if (inflightS > 120) ringPostConnectFailureEvent("stuck", inflightS * 1000);
   return false;
 }
 
@@ -5671,6 +5740,45 @@ bool g2RingScanAsync(uint32_t timeoutSec) {
 // Connect flow
 // =============================================================================
 
+// Bound on one direct ring connect (saved MAC or scanned advert). Bluedroid
+// cancels a pending direct connect itself after
+// CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT (30 s); our bound ends the attempt first,
+// so the ring path, not the host's timer, decides when it gives up. Faceclaw
+// keeps its ring and arm connect windows (20 s) under Android's own ~30 s
+// direct-connect timeout the same way (ConnectionOptions.kt
+// RING_CONNECT_TIMEOUT_MS / ARM_CONNECT_WINDOW_MS); 25 s is the owner's choice
+// (2026-11-19). The ring link itself asks for no connection priority, as in
+// faceclaw and the Even app: HIGH's 5 s supervision timeout killed faceclaw's
+// ring link.
+static constexpr uint32_t RING_DIRECT_CONNECT_TIMEOUT_MS = 25000;
+#if defined(CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT)
+static_assert(RING_DIRECT_CONNECT_TIMEOUT_MS <
+                  (uint32_t)CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT * 1000u,
+              "the ring connect bound must end before Bluedroid's own link timer");
+#endif
+
+// After a failed ring connect. Our bound ending an attempt to an absent ring
+// leaves the library at OPEN_TIMEOUT; when its GATT application then
+// unregistered cleanly the host answered, so this is an ordinary miss, the
+// same as Bluedroid's own 30 s failure (OPEN_EVENT 0x85) was: give the link
+// slot back and keep the client, as the shared quarantine does for that case.
+// bleQuarantineClientAfterFailedConnect reads any OPEN_TIMEOUT as a lost OPEN
+// event and arms a whole-stack recycle, which would take the temples down on
+// every missed ring. Every other failure goes through it as before.
+static void ringSettleClientAfterFailedConnect() {
+  if (!gRing.client) return;
+  const BLEClientConnectOutcome outcome = gRing.client->getLastConnectOutcome();
+  if (!outcome.success &&
+      outcome.stage == BLEClientConnectStage::OPEN_TIMEOUT &&
+      outcome.unregisterState == BLEClientUnregisterState::COMPLETED) {
+    bleCentralLinkReleaseClient(gRing.client);
+    return;
+  }
+  (void)bleQuarantineClientAfterFailedConnect(
+      gRing.client, BLE_CLIENT_RETIRE_R1,
+      (uint8_t)BLE_PEER_R1_RING, "RING");
+}
+
 // RAII guard: drop glasses connection priority to BALANCED for the
 // duration of a ring connect attempt, then restore HIGH on exit. Both
 // glasses links at HIGH priority (~12 ms intervals) saturate the single-
@@ -5898,11 +6006,11 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
     }
     // Explicit timeout: the default is portMAX_DELAY, which turned a lost
     // OPEN event into a forever-wedged connect worker (root-cause candidate
-    // for the 2026-07-28 2h no-reconnect window). 35s clears the ring's
-    // normal ~30s direct-connect timeout with margin.
+    // for the 2026-07-28 2h no-reconnect window). The bound ends before
+    // Bluedroid's own 30 s link timer (RING_DIRECT_CONNECT_TIMEOUT_MS).
     link.retain(gRing.client);
     bleCoexConnectBegin(hw1coex::Peer::Ring, hw1coex::Purpose::Saved, addr.getNative());
-    connOk = gRing.client->connect(addr, addrType, 35000);
+    connOk = gRing.client->connect(addr, addrType, RING_DIRECT_CONNECT_TIMEOUT_MS);
     if (connOk) {
       // Populate the cached descriptors so subsequent disconnect / status
       // paths print sensible names.
@@ -5911,14 +6019,14 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
       g2RingSetIdentity(gRingDeviceName.c_str());
     }
   } else {
-    // Same 35s bound as the saved-MAC path (the plain connect(device)
-    // overload hardwires the portMAX_DELAY default).
+    // Same bound as the saved-MAC path (the plain connect(device) overload
+    // hardwires the portMAX_DELAY default).
     link.retain(gRing.client);
     {
       BLEAddress target = gRingAdvertisedDevice->getAddress();
       bleCoexConnectBegin(hw1coex::Peer::Ring, hw1coex::Purpose::Discovery, target.getNative());
     }
-    connOk = gRing.client->connectTimeout(gRingAdvertisedDevice, 35000);
+    connOk = gRing.client->connectTimeout(gRingAdvertisedDevice, RING_DIRECT_CONNECT_TIMEOUT_MS);
   }
   // Classify BOTH overloads above (the saved-MAC path takes a BLEAddress, so
   // bleConnectWatched's advertised-device wrapper can't cover it — and saved
@@ -5930,9 +6038,7 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
                 (unsigned)dt,
                 useSavedMac ? "saved" : "scan");
     ringNoteConnectFailure("link", dt);
-    (void)bleQuarantineClientAfterFailedConnect(
-        gRing.client, BLE_CLIENT_RETIRE_R1,
-        (uint8_t)BLE_PEER_R1_RING, "RING");
+    ringSettleClientAfterFailedConnect();
     return false;
   }
   if (ringAbortSupersededRequest(expectedRequest, cancelGeneration, "OPEN")) {
@@ -6091,6 +6197,7 @@ bool ringPerformConnect(const String& savedMac /* = String() */,
                                         *expectedRequest));
       if (completionCurrent) {
         if (!expectedRequest) blePeerNoteLinkUp(BLE_PEER_R1_RING);
+        ringRetryNoteConnected();   // the reconnect backoff starts over
         gRingUpEventPublished = true;
         INFO_RINGF("Connected to %s (setup verified, profile %s)",
                    gRingDeviceName.c_str(),
@@ -6396,6 +6503,15 @@ static BlePeerConnectAdmission ringPeerConnectSavedAdmissionThunk(
     return BlePeerConnectAdmission::ROLE_BLOCKED;
   }
   sYieldLogged = false;
+  // Faceclaw's ring backoff (RING_RETRY_BASE_MS): while an attempt runs, or
+  // while the hold after a failed one lasts, answer BUSY. The scheduler asks
+  // again in 2 s without spending a ladder step, so the next attempt starts
+  // when the hold ends, counted from the failure. A job running past a normal
+  // attempt falls through to the gate below, which reports it.
+  const uint32_t nowMs = millis();
+  if (ringConnectInFlightNormal(nowMs) || ringRetryHoldRemainingMs(nowMs) > 0) {
+    return BlePeerConnectAdmission::BUSY;
+  }
   // The ring is a device on the shared stack: closed, it opens on the first
   // admitted reconnect (boot, `openble`, a recycle), as `openring` opens it.
   // A refused open (owner task memory) is retried on the BUSY backoff.

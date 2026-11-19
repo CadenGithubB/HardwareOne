@@ -13,7 +13,7 @@ BLE_COEX: scan #N phone reconnect missed dur_ms=4002(ctl) ... matches=0 scan=60.
 ```
 
 **How the timing works** (`BLE_Peers.cpp`):
-- **The ladder.** `bleReconnectBackoffMs` gives the phone `kPhoneSteps = {5000, 15000, 30000}`. Glasses and the ring use `{5000, 15000, 45000, 90000, 180000}`.
+- **The ladder.** `bleReconnectBackoffMs` gives the phone `kPhoneSteps = {5000, 15000, 30000}`. The glasses use `{5000, 15000, 45000, 90000, 180000}`. The ring uses `kRingSteps = {2000, 2000, 4000, 8000, 16000, 32000, 60000}` (faceclaw's 2 s doubling to 60 s), and its admission holds each attempt that long from the failure before it.
 - **What moves it.** Only an admission that returns STARTED moves the ladder up (`commitAdmission`). A scan that misses ends in `fail("phone not found")`, then `blePeerNoteLinkLost`, which does nothing in the middle of an episode. So a miss neither advances the ladder nor restarts it.
 - **After a link loss:** admissions at 5, 20, 50, 80 s, then every 30 s.
 - **From boot:** at T, T+15, T+45, then every 30 s.

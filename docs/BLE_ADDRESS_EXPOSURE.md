@@ -9,7 +9,7 @@ numbers are approximate; the files are being edited by several sessions.
 
 | Where | Was | Now |
 |---|---|---|
-| `G2_Glasses.cpp` `attemptMissingArmRecoverySync` | `Recovery: scanning for missing %s temple (MAC <saved address>, attempt n/7)` on every repair attempt | `(saved-address match, attempt n/7)` |
+| `G2_Glasses.cpp` `attemptMissingArmRecoverySync` | `Recovery: scanning for missing %s temple (MAC <saved address>, attempt n/7)` on every repair attempt | `Recovery: reconnecting missing %s temple by saved address (attempt n/7)` or `scanning for missing %s temple (no saved MAC — name-based match, attempt n/7)`; neither prints an address |
 | `G2_HijackCmd.cpp` stuck-owner warning | `mac1='<saved address>'` | `saved target present (L=saved R=none)`; it now also fires for a right-only pairing |
 | `G2_Ring.cpp` `ringPerformConnect` | `BLE connect FAILED after N ms (<saved ring address>)` | `(saved target)` or `(scan target)` |
 | `G2_Ring.cpp` `g2RingScan` | `ringscan: found <name> @ <address>` (INFO, on by default) | `ringscan: found <name>` |

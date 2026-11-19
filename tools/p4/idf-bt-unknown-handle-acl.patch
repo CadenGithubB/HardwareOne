@@ -1,0 +1,139 @@
+--- a/components/bt/host/bluedroid/stack/l2cap/l2c_main.c
++++ b/components/bt/host/bluedroid/stack/l2cap/l2c_main.c
+@@ -35,6 +35,7 @@
+ #include "stack/l2c_api.h"
+ #include "l2c_int.h"
+ #include "stack/l2cdefs.h"
++#include "osi/alarm.h"
+ //#include "osi/include/log.h"
+ 
+ /********************************************************************************/
+@@ -56,6 +57,104 @@
+ static BOOLEAN s_l2cap_bqb_bad_cmd_len_rej_flag = FALSE;
+ #endif /* BT_CLASSIC_BQB_INCLUDED */
+ 
++/* HardwareOne local patch (tools/p4/idf-bt-unknown-handle-acl.patch).
++ * Safety net for a link the controller still carries but the host has
++ * forgotten (see idf-bt-failed-conn-handle.patch for the known cause). Stock
++ * Bluedroid logs and drops every ACL packet on such a handle forever, and no
++ * API can disconnect a handle the host no longer knows. When an unknown handle
++ * keeps sending (HW1_GHOST_BURST packets within HW1_GHOST_WINDOW_MS, or seen
++ * again HW1_GHOST_PERSIST_MS or more after its first packet: the idle ghost
++ * seen on the bench sent one LE Connection Parameter Update Request every
++ * ~39 s) and BTM has no ACL entry for it, send HCI_Disconnect for it, at most
++ * once per HW1_GHOST_DISC_GAP_MS per handle. No check for a link being set up
++ * is needed: HCI events and ACL data reach this task in order on one queue,
++ * and a link's handle is set when its successful LE Connection Complete is
++ * processed, so data on a handle never belongs to a link still connecting.
++ * The controller's Disconnection Complete then finds no link in the host, as
++ * after any failed connection. The unknown-handle error is logged for the
++ * first packet and then every HW1_GHOST_LOG_EVERY packets per handle. */
++#define HW1_GHOST_SLOTS         4
++#define HW1_GHOST_BURST         3
++#define HW1_GHOST_WINDOW_MS     1000
++#define HW1_GHOST_PERSIST_MS    2000    /* seen again this long after the first packet */
++#define HW1_GHOST_DISC_GAP_MS   5000
++#define HW1_GHOST_LOG_EVERY     100
++#define HW1_GHOST_FORGET_MS     60000   /* a handle quiet this long starts a new episode */
++
++typedef struct {
++    BOOLEAN in_use;
++    BOOLEAN disc_sent;
++    UINT16  handle;
++    UINT8   burst;
++    UINT32  first_seen_ms;
++    UINT32  window_start_ms;
++    UINT32  last_seen_ms;
++    UINT32  last_disc_ms;
++    UINT32  dropped;
++} tHW1_GHOST_HANDLE;
++
++static tHW1_GHOST_HANDLE hw1_ghost_handles[HW1_GHOST_SLOTS];
++
++/* Counts one dropped packet on an unknown handle and disconnects the handle
++ * when it keeps sending. Returns the handle's dropped count when the caller
++ * should log the unknown-handle error, else 0. */
++static UINT32 hw1_l2c_unknown_handle_acl(UINT16 handle)
++{
++    UINT32 now = osi_time_get_os_boottime_ms();
++    tHW1_GHOST_HANDLE *p_slot = NULL;
++    tHW1_GHOST_HANDLE *p_oldest = &hw1_ghost_handles[0];
++    int xx;
++
++    for (xx = 0; xx < HW1_GHOST_SLOTS; xx++) {
++        tHW1_GHOST_HANDLE *p = &hw1_ghost_handles[xx];
++        if (p->in_use && p->handle == handle) {
++            p_slot = p;
++            break;
++        }
++        if (!p->in_use) {
++            p_oldest = p;
++        } else if (p_oldest->in_use && (now - p->last_seen_ms) > (now - p_oldest->last_seen_ms)) {
++            p_oldest = p;
++        }
++    }
++    if (p_slot != NULL && (now - p_slot->last_seen_ms) > HW1_GHOST_FORGET_MS) {
++        p_slot->in_use = FALSE;
++        p_oldest = p_slot;
++        p_slot = NULL;
++    }
++    if (p_slot == NULL) {
++        p_slot = p_oldest;
++        memset(p_slot, 0, sizeof(*p_slot));
++        p_slot->in_use = TRUE;
++        p_slot->handle = handle;
++        p_slot->first_seen_ms = now;
++        p_slot->window_start_ms = now;
++    }
++    p_slot->last_seen_ms = now;
++    p_slot->dropped++;
++
++    if ((now - p_slot->window_start_ms) > HW1_GHOST_WINDOW_MS) {
++        p_slot->window_start_ms = now;
++        p_slot->burst = 0;
++    }
++    if (p_slot->burst < 0xFF) {
++        p_slot->burst++;
++    }
++    if ((p_slot->burst >= HW1_GHOST_BURST || (now - p_slot->first_seen_ms) >= HW1_GHOST_PERSIST_MS)
++            && (!p_slot->disc_sent || (now - p_slot->last_disc_ms) >= HW1_GHOST_DISC_GAP_MS)
++            && btm_handle_to_acl(handle) == NULL) {
++        p_slot->disc_sent = TRUE;
++        p_slot->last_disc_ms = now;
++        L2CAP_TRACE_WARNING("hw1: unknown handle %u still sending (%u dropped); sending HCI_Disconnect",
++                            (unsigned)handle, (unsigned)p_slot->dropped);
++        btsnd_hcic_disconnect(handle, HCI_ERR_PEER_USER);
++    }
++    if (p_slot->dropped == 1 || (p_slot->dropped % HW1_GHOST_LOG_EVERY) == 0) {
++        return p_slot->dropped;
++    }
++    return 0;
++}
++
+ #if 0 //Unused
+ /*******************************************************************************
+ **
+@@ -185,9 +284,12 @@
+ 
+                 return;
+             } else {
+-                L2CAP_TRACE_ERROR ("L2CAP - rcvd ACL for unknown handle:%d ls:%d cid:%d"
+-                                   " opcode:%d cur count:%d", handle, p_msg->layer_specific, rcv_cid,
+-                                   cmd_code, list_length(l2cb.rcv_pending_q));
++                UINT32 dropped = hw1_l2c_unknown_handle_acl(handle);
++                if (dropped) {
++                    L2CAP_TRACE_ERROR ("L2CAP - rcvd ACL for unknown handle:%d ls:%d cid:%d"
++                                       " opcode:%d cur count:%d dropped:%u", handle, p_msg->layer_specific, rcv_cid,
++                                       cmd_code, list_length(l2cb.rcv_pending_q), (unsigned)dropped);
++                }
+             }
+             osi_free (p_msg);
+             return;
+@@ -943,6 +1045,7 @@
+     l2c_cb_ptr = (tL2C_CB *)osi_malloc(sizeof(tL2C_CB));
+ #endif /* #if L2C_DYNAMIC_MEMORY */
+     memset (&l2cb, 0, sizeof (tL2C_CB));
++    memset (hw1_ghost_handles, 0, sizeof (hw1_ghost_handles));
+ #if (CLASSIC_BT_INCLUDED == TRUE)
+     /* the psm is increased by 2 before being used */
+     l2cb.dyn_psm = 0xFFF;

@@ -797,9 +797,12 @@ add_compile_definitions(
 
 # ESP32-P4 builds replace two ESP-IDF 5.5.5 components with verified patched
 # copies (never edits to the shared SDK): `bt` carries the upstream TinyCrypt
-# ECC fix that BLE Secure Connections needs on P4 (esp-idf#19002) and a local
-# fix for GAP's callbacks running after GAP_Deinit() during host teardown
-# (tools/p4/idf-bt-gap-deinit.patch, see idf-bt-manifest.json), and
+# ECC fix that BLE Secure Connections needs on P4 (esp-idf#19002) and local
+# fixes (see idf-bt-manifest.json): GAP's callbacks running after GAP_Deinit()
+# during host teardown (tools/p4/idf-bt-gap-deinit.patch), a failed LE
+# connection complete releasing the live link that holds its meaningless
+# handle (idf-bt-failed-conn-handle.patch), and HCI_Disconnect for a forgotten
+# handle that keeps sending ACL data (idf-bt-unknown-handle-acl.patch); and
 # `esp_driver_jpeg` fixes allocation/interrupt unwind and marks the hardware
 # JPEG decoder as qualified. The managed espressif/esp-dl 3.3.12 is replaced
 # the same way (tools/p4/esp-dl-3.3.12-hw1.patch: P4 pointwise-conv tiles,
@@ -825,6 +828,33 @@ if(_inferred_target STREQUAL "esp32p4")
                 "exported, run:\n    tools/p4/prepare_sdk.sh")
         endif()
         list(APPEND EXTRA_COMPONENT_DIRS "${_hw1_p4_sdk_dir}/${_hw1_p4_component}")
+    endforeach()
+    # A staged `bt` copy is only verified, never refreshed, so a copy made
+    # before a Bluetooth patch changed would otherwise build without it. Check
+    # every patched file against its pin in idf-bt-manifest.json (the full
+    # check is `tools/p4/prepare_idf_bt.py --check`), and re-check whenever the
+    # manifest or a pinned file changes.
+    set(_hw1_bt_manifest "${CMAKE_CURRENT_SOURCE_DIR}/tools/p4/idf-bt-manifest.json")
+    file(READ "${_hw1_bt_manifest}" _hw1_bt_manifest_json)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_hw1_bt_manifest}")
+    string(JSON _hw1_bt_pins LENGTH "${_hw1_bt_manifest_json}" patched_files)
+    math(EXPR _hw1_bt_last "${_hw1_bt_pins} - 1")
+    foreach(_hw1_bt_index RANGE 0 ${_hw1_bt_last})
+        string(JSON _hw1_bt_file MEMBER "${_hw1_bt_manifest_json}" patched_files ${_hw1_bt_index})
+        string(JSON _hw1_bt_pin GET "${_hw1_bt_manifest_json}" patched_files "${_hw1_bt_file}")
+        set(_hw1_bt_path "${_hw1_p4_sdk_dir}/bt/${_hw1_bt_file}")
+        set(_hw1_bt_sha "missing")
+        if(EXISTS "${_hw1_bt_path}")
+            file(SHA256 "${_hw1_bt_path}" _hw1_bt_sha)
+            set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_hw1_bt_path}")
+        endif()
+        if(NOT _hw1_bt_sha STREQUAL _hw1_bt_pin)
+            message(FATAL_ERROR
+                "Stale ${_hw1_p4_sdk_dir}/bt: ${_hw1_bt_file} does not match its pin "
+                "in tools/p4/idf-bt-manifest.json (a Bluetooth patch changed). Move "
+                "that bt folder aside and, with ESP-IDF 5.5.5 exported, run:\n"
+                "    tools/p4/prepare_sdk.sh")
+        endif()
     endforeach()
     message(STATUS "ESP32-P4 SDK overrides: ${_hw1_p4_sdk_dir}/{bt,esp_driver_jpeg,espressif__esp-dl,espressif__esp_hosted}")
 endif()

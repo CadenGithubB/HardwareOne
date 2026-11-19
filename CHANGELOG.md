@@ -487,6 +487,28 @@ everything user-visible since the v0.99.99.1 tag.
   P4 builds only; the ESP32 and ESP32-S3 builds keep the stock component. Existing checkouts re-stage
   with `tools/p4/prepare_sdk.sh` after moving `.sdk-overrides/esp32p4/bt` aside. On the bench P4
   since 2026-11-13 without the fault recurring, though nothing has provoked it on purpose.
+- ESP32-P4 Bluetooth: a failed LE connection no longer drops a live link. When a direct connect timed
+  out (Bluedroid's 30 s limit, e.g. the R1 ring) or was cancelled, the C6 answered the cancel with
+  status 0x02 on handle 0, and Bluedroid released whichever link held handle 0 (often the G2 LEFT arm)
+  without telling the controller: the arm stayed connected but forgotten, never advertised again, and
+  flooded "rcvd ACL for unknown handle". `tools/p4/idf-bt-failed-conn-handle.patch` ignores the handle
+  of a failed connection complete when it names a live link (one `BT_BTM` warning). Safety net
+  `tools/p4/idf-bt-unknown-handle-acl.patch`: a forgotten handle that keeps sending (3 packets in 1 s,
+  or seen again 2 s or more after its first packet, as the bench ghost's one parameter request every
+  ~39 s) and that BTM does not know gets HCI_Disconnect at most every 5 s, and the unknown-handle
+  error is logged for the first and every 100th packet. The ring's 25 s connect and the G2
+  saved-address repair dial below rely on the first patch: every connect they give up on cancels a
+  pending connect. Both are applied by `prepare_idf_bt.py` and pinned by hash. Existing checkouts
+  re-stage: move `.sdk-overrides/esp32p4/bt` aside and rerun `tools/p4/prepare_sdk.sh` (an existing
+  copy is only verified); a P4 configure now stops with that instruction when a patched file in the
+  copy does not match its pin. Host-tested against the real Bluedroid code; not yet run on hardware.
+- G2: a quiet LEFT arm is no longer treated as a fault. On stock firmware RIGHT is the master temple
+  and LEFT sends only mic audio and acks, so LEFT heartbeat silence never counts toward "plugin
+  silent", on any firmware. LEFT health is its link plus the TX-wedge rule. "plugin silent" and
+  `g2_plugin_silent` now come from RIGHT only, and the line says what it measures (no heartbeat reply,
+  rendering paused on that arm, link still up). Not yet run on hardware.
+- G2: the half-connected repair's fallback scan (100 ms interval, 30 ms window) no longer leaves the
+  shared scanner at that window: a full glasses connect sets its own 100/99 ms scan each time.
 - Saved files: no file is replaced unless the boot read it. `settings.json`, `debug.json`, the
   notification policy, map waypoints, the IP ban list, the ESP-NOW device registry, automations,
   `pending_users.json` and `boot_anchors.json` keep a load result. A damaged file (empty, cut short,
@@ -813,6 +835,21 @@ everything user-visible since the v0.99.99.1 tag.
   counters (`blerecords`) are kept as before. Host-tested; not yet run on hardware.
 
 ### Changed
+- R1 ring: a direct ring connect gives up at 25 s, before Bluedroid's own 30 s link timer
+  (`RING_DIRECT_CONNECT_TIMEOUT_MS`, after faceclaw). Automatic ring reconnects back off as
+  faceclaw's do: 2 s after a drop, then 2 s doubling up to 60 s after each failed attempt, counted
+  from the failure, starting over after a successful connect (the reconnect scheduler's ring steps
+  now match that hold; glasses keep 5/15/45/90/180 s, the phone 5/15/30 s). Manual `openring` is never
+  held, and the ring link still asks for no connection priority. The ring is also held by the glasses'
+  own ring link; our direct link for Health forwarding is kept. Not yet run on hardware.
+- G2: the half-connected repair reconnects a missing arm by its saved address with a 25 s direct
+  connect, under Bluedroid's 30 s timer, instead of scanning (a connected arm does not advertise). It
+  scans only when that side has no saved address, at about 30% duty (100/30 ms, 5 s), and then gives
+  way to a ring or phone setup that is ready to run. A temple drop with HCI 0x02 is logged as a
+  host/controller desync; the repair does not scan for that arm, it dials the saved address and backs
+  off if the address is refused at once (busy). A connect our own 25 s bound ends is an ordinary miss:
+  it does not retire the client or arm a stack recycle, and a 25 s dial to an absent temple does not
+  count toward the repair's recycle streak. Not yet run on hardware.
 - Radio stack logs are quiet unless their debug flag is on, for every user. ESP-Hosted's tags (`transport`,
   `H_SDIO_DRV`, `sdio_wrapper`, `H_API`, `RPC_WRAP`, `rpc_core`, `rpc_rsp`, `rpc_evt`, `rpc_utils`, `vhci_drv`,
   `os_wrapper_esp`, `esp_cli`, `esp_wifi_remote`), the C6 console mirror (`C6>`), Bluedroid's (`BT_APPL`,

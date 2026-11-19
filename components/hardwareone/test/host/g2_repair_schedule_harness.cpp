@@ -611,7 +611,7 @@ static void randomCore() {
     bool claimed = false;
     for (int step = 0; step < 2000; ++step) {
       now += uint32_t(next() % 20000);
-      switch (next() % 9) {
+      switch (next() % 10) {
         case 0: (void)s.due(now); break;
         case 1: if (!claimed) claimed = s.claim(); break;
         case 2: if (claimed) { s.unclaim(); claimed = false; s.refused(next() & 1, now); } break;
@@ -621,7 +621,9 @@ static void randomCore() {
         case 6: if (next() % 10 == 0) s.end(); break;
         case 7: if (next() % 20 == 0) s.restart(now, 0); break;
         case 8: s.slowNotice = s.restartNotice = false; break;
+        case 9: if (next() % 3 == 0) s.deferred(); break;
       }
+      CHECK(!s.deferNext || s.queued);
       CHECK(s.queued == claimed);
       CHECK(s.failed <= g2repair::kFastTries);
       CHECK(!s.active || int32_t(s.nextMs - now) <= int32_t(g2repair::kSlowRetryMs));
@@ -630,6 +632,113 @@ static void randomCore() {
       CHECK(!s.slowNotice || s.failed == g2repair::kFastTries);
       CHECK(!s.restartNotice || s.failed < g2repair::kFastTries);
     }
+  }
+}
+
+// A try that gave way to a ring or phone setup on the worker (the Defer path)
+// does not use up a try; it is asked again kDeferMs after it ended.
+static void deferredTry() {
+  world(1000);
+  recoveryHeartbeatTick();  // the drop is noticed: try 1 is due in 5 s
+  gNow += 5000;
+  recoveryHeartbeatTick();
+  CHECK(gQueue.size() == 1 && gQueue.back().fastTry == 1);
+  portENTER_CRITICAL(&gRecoveryMux);
+  gRepair.deferred();  // attemptMissingArmRecoverySync's Defer path, on the worker
+  portEXIT_CRITICAL(&gRecoveryMux);
+  gNow += 100;
+  const uint32_t ended = gNow;
+  (void)runTry(false);
+  CHECK(status() == "1/7" && gRepair.failed == 0 && !gRepair.deferNext);
+  CHECK(gRepair.nextMs == ended + g2repair::kDeferMs);
+  gNow = ended + g2repair::kDeferMs - 1;
+  recoveryHeartbeatTick();
+  CHECK(gQueue.empty());
+  gNow = ended + g2repair::kDeferMs;
+  recoveryHeartbeatTick();
+  CHECK(gQueue.size() == 1 && gQueue.back().fastTry == 1);
+  (void)runTry(false);  // a real miss uses the try
+  CHECK(status() == "2/7" && gRepair.failed == 1);
+  // Outside a running try there is nothing to defer.
+  gRepair.deferred();
+  CHECK(!gRepair.deferNext);
+  // A deferred try whose pair came back (or went fully down) still ends the episode.
+  recoveryHeartbeatTick();
+  gNow += g2repair::kFastBackoffMs[1];
+  recoveryHeartbeatTick();
+  CHECK(gQueue.size() == 1);
+  gRepair.deferred();
+  gR.connected = true;
+  (void)runTry(false);
+  CHECK(status() == "none" && !gRepair.active);
+}
+
+// Which path a try takes, and the bounds it runs under.
+static void reconnectPath() {
+  using g2repair::TryPath;
+  using g2repair::tryPath;
+  // A saved address is always dialled directly: after a desync, and with a
+  // ring or phone setup waiting (the worker runs one setup at a time anyway).
+  CHECK(tryPath(true, false, false) == TryPath::Direct);
+  CHECK(tryPath(true, true, false) == TryPath::Direct);
+  CHECK(tryPath(true, false, true) == TryPath::Direct);
+  CHECK(tryPath(true, true, true) == TryPath::Direct);
+  // No saved address: a desync backs off without a scan, a waiting setup
+  // defers the scan, otherwise scan.
+  CHECK(tryPath(false, true, false) == TryPath::BackOff);
+  CHECK(tryPath(false, true, true) == TryPath::BackOff);
+  CHECK(tryPath(false, false, true) == TryPath::Defer);
+  CHECK(tryPath(false, false, false) == TryPath::Scan);
+  // 25 s, under Bluedroid's 30 s establishment timer.
+  CHECK(g2repair::kDirectConnectTimeoutMs == 25000);
+  CHECK(g2repair::kDirectConnectTimeoutMs < g2repair::kHostEstablishTimeoutMs);
+  CHECK(g2repair::kHostEstablishTimeoutMs == 30000);
+  // A refusal is fast; a miss runs the bound.
+  CHECK(g2repair::directRefusedBusy(false, 40));
+  CHECK(!g2repair::directRefusedBusy(true, 40));
+  CHECK(!g2repair::directRefusedBusy(false, g2repair::kDirectConnectTimeoutMs));
+  // The found-but-refused streak: every scan-found failure, but a direct dial
+  // only when it was refused at once (an absent arm never recycles the host).
+  CHECK(g2repair::countsTowardOpenFailStreak(false, 25000));
+  CHECK(g2repair::countsTowardOpenFailStreak(true, 60));
+  CHECK(!g2repair::countsTowardOpenFailStreak(true, g2repair::kDirectConnectTimeoutMs + 10));
+  // Our own 25 s bound is a miss; a bound past the host's timer (the 35 s
+  // scan-found connect) or no bound given means the OPEN event was lost.
+  CHECK(g2repair::openTimeoutWasOwnBound(g2repair::kDirectConnectTimeoutMs));
+  CHECK(!g2repair::openTimeoutWasOwnBound(g2repair::kHostEstablishTimeoutMs));
+  CHECK(!g2repair::openTimeoutWasOwnBound(35000));
+  CHECK(!g2repair::openTimeoutWasOwnBound(0));
+  // HCI 0x02 alone is the desync signature.
+  CHECK(g2repair::isHostDesyncReason(0x02));
+  for (uint16_t reason : {0x00, 0x01, 0x08, 0x13, 0x16, 0x22, 0x3e, 0x0100, 0x0101, 0x0102})
+    CHECK(!g2repair::isHostDesyncReason(reason));
+  // About 30% duty, and the coex record in 0.625 ms units matches.
+  CHECK(g2repair::kScanIntervalMs == 100 && g2repair::kScanWindowMs == 30);
+  CHECK(g2repair::kScanIntervalUnits * 5 == g2repair::kScanIntervalMs * 8);
+  CHECK(g2repair::kScanWindowUnits * 5 == g2repair::kScanWindowMs * 8);
+  // The saved address type, or a guess: 0b11 top bits is random static.
+  CHECK(g2repair::savedAddressType(true, 0, 0xD4) == 0);
+  CHECK(g2repair::savedAddressType(true, 1, 0x00) == 1);
+  CHECK(g2repair::savedAddressType(false, 0, 0xD4) == 1);
+  CHECK(g2repair::savedAddressType(false, 0, 0x3C) == 0);
+}
+
+// The shipped renderer watchdog behind beatOne's gate: five minutes of
+// heartbeats with no E0 reply. LEFT stays healthy on any firmware (no silent
+// edge, so no PLUGIN_SILENT and no log); RIGHT goes silent once.
+static void armLiveness() {
+  CHECK(g2repair::rendererSilenceCounts('R'));
+  CHECK(!g2repair::rendererSilenceCounts('L'));
+  for (char side : {'L', 'R'}) {
+    uint32_t missed = 0;
+    bool awaiting = false, dead = false;
+    unsigned silentEdges = 0;
+    for (unsigned beat = 0; beat < 60; ++beat) {
+      if (!g2repair::rendererSilenceCounts(side)) continue;
+      if (g2RendererHeartbeatAcceptedState(missed, awaiting, dead)) ++silentEdges;
+    }
+    if (side == 'L') CHECK(silentEdges == 0 && !dead && missed == 0);
+    else CHECK(silentEdges == 1 && dead && missed == HEARTBEAT_DEAD_THRESHOLD + 1);
   }
 }
 
@@ -643,6 +752,9 @@ int main() {
   ladder();
   statusText();
   randomCore();
+  deferredTry();
+  reconnectPath();
+  armLiveness();
   CHECK(gLockDepth == 0);
   std::printf("G2 repair schedule: %u checks\n", assertions);
 }

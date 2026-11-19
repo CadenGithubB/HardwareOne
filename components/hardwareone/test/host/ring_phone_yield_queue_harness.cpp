@@ -797,6 +797,7 @@ static void resetWorld() {
   gBlockG2 = false; gReleaseG2 = false;
   gDuringG2Saved = nullptr;
   gRing.client = nullptr;
+  ringRetryNoteConnected();  // a failed submit in one case holds no other
   SETTLE();
   CHECK(bleSetupIdle(hw1setup::kAll) && !gConnectActive() && !g2RingConnectInFlight());
 }
@@ -1593,6 +1594,69 @@ static void workerRelease() {
   resetWorld();
 }
 
+// Automatic reconnects back off after faceclaw (GlassesSessionCore.kt
+// tryConnectRing): a failed attempt holds the scheduler's next admission 2 s,
+// doubling with each failure in a row up to 60 s, counted from the failure. A
+// running attempt answers BUSY (the scheduler's 2 s re-poll) until it is past a
+// normal attempt, then the gate reports it. Manual paths are never held; a
+// connect that finished setup starts the ladder over.
+static void autoRetryBackoff() {
+  const uint32_t ladder[] = {0, 2000, 4000, 8000, 16000, 32000, 60000, 60000, 60000};
+  for (uint8_t failures = 0; failures < 9; ++failures) CHECK(ringRetryDelayMs(failures) == ladder[failures]);
+  CHECK(ringRetryDelayMs(255) == 60000);
+  CHECK(ringRetryHoldRemainingMs(millis()) == 0);
+  // Each failure in a row, through the real admission on the virtual clock.
+  for (uint8_t failure = 1; failure <= 7; ++failure) {
+    ringNoteConnectFailure("link", 25000);
+    const uint32_t hold = ladder[failure < 8 ? failure : 8];
+    CHECK(ringRetryHoldRemainingMs(millis()) == hold);
+    CHECK(ringPeerConnectSavedAdmissionThunk(savedRing()) == BlePeerConnectAdmission::BUSY);
+    CHECK(ringPeerConnectSavedAdmissionThunk(savedRing(true, true)) == BlePeerConnectAdmission::BUSY);
+    ADVANCE(hold - 1);
+    CHECK(ringPeerConnectSavedAdmissionThunk(savedRing()) == BlePeerConnectAdmission::BUSY);
+    ADVANCE(1);
+    const size_t connects = connectCount();
+    CHECK(ringSaved());
+    SETTLE();
+    CHECK(connectCount() == connects + 1 && !g2RingConnectInFlight());
+  }
+  // Held at the cap, manual connects still run at once.
+  ringNoteConnectFailure("link", 25000);
+  CHECK(ringRetryHoldRemainingMs(millis()) == 60000);
+  const size_t connects = connectCount();
+  CHECK(ringManualSaved());
+  SETTLE();
+  CHECK(ringMac());
+  SETTLE();
+  CHECK(connectCount() == connects + 2);
+  CHECK(ringPeerConnectSavedAdmissionThunk(savedRing()) == BlePeerConnectAdmission::BUSY);
+  // A connect that finished setup starts over: no hold, and the next failure
+  // holds 2 s again.
+  ringRetryNoteConnected();
+  CHECK(ringRetryHoldRemainingMs(millis()) == 0 && ringSaved());
+  SETTLE();
+  ringNoteConnectFailure("link", 25000);
+  CHECK(ringRetryHoldRemainingMs(millis()) == 2000);
+  ringRetryNoteConnected();
+  // A running attempt: BUSY while it is a normal one, the gate (COALESCED)
+  // once it is past RING_INFLIGHT_NORMAL_MS. The watchdog's "stuck" report is
+  // an event only; it does not count as a failed attempt.
+  gBlockRing = true;
+  CHECK(ringSaved());
+  SETTLE();
+  CHECK(g2RingConnectInFlight());
+  CHECK(ringPeerConnectSavedAdmissionThunk(savedRing()) == BlePeerConnectAdmission::BUSY);
+  ADVANCE(RING_INFLIGHT_NORMAL_MS - 1);
+  CHECK(ringPeerConnectSavedAdmissionThunk(savedRing()) == BlePeerConnectAdmission::BUSY);
+  ADVANCE(2000);
+  CHECK(ringPeerConnectSavedAdmissionThunk(savedRing()) == BlePeerConnectAdmission::COALESCED);
+  CHECK(ringRetryHoldRemainingMs(millis()) == 0);
+  gReleaseRing = true;
+  SETTLE();
+  CHECK(!g2RingConnectInFlight());
+  resetWorld();
+}
+
 int main() {
   std::atomic<bool> done{false};
   std::thread([&done] {
@@ -1626,6 +1690,7 @@ int main() {
   preemption();
   ringRetirement();
   workerRelease();
+  autoRetryBackoff();
 
   {
     std::lock_guard<std::mutex> lock(gSched.m);
@@ -1638,6 +1703,7 @@ int main() {
               " four links; turn order G2 > retire > ring > phone, a phone turn never cancelled; cancels,"
               " faults, recovery, yield end a queued job at the next recheck with one finish and the flag"
               " released; role waits; rule R; repair outcomes; G2 audio wait; recorded wait; withdraw;"
-              " preemption; ring retirement; worker release\n", gChecks.load());
+              " preemption; ring retirement; worker release; the automatic reconnect backoff (2 s doubling to"
+              " 60 s from the failure, BUSY while an attempt runs, manual paths never held)\n", gChecks.load());
   return 0;
 }

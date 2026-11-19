@@ -80,9 +80,9 @@ if __name__ == '__main__':
 
     body = extract_block(ring, 'bool ringPerformConnect(')
     order(body, 'bleCoexConnectBegin(hw1coex::Peer::Ring, hw1coex::Purpose::Saved, addr.getNative())',
-          'connect(addr, addrType, 35000)',
+          'connect(addr, addrType, RING_DIRECT_CONNECT_TIMEOUT_MS)',
           'bleCoexConnectBegin(hw1coex::Peer::Ring, hw1coex::Purpose::Discovery, target.getNative())',
-          'connectTimeout(gRingAdvertisedDevice, 35000)', 'bleNoteClientConnectOutcome(gRing.client')
+          'connectTimeout(gRingAdvertisedDevice, RING_DIRECT_CONNECT_TIMEOUT_MS)', 'bleNoteClientConnectOutcome(gRing.client')
     no_return_between(body, 'bleCoexConnectBegin(', 'bleNoteClientConnectOutcome(gRing.client')
 
     # Records and their log lines carry no addresses or names: the record

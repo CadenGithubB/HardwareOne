@@ -56,6 +56,9 @@ def generated(component: Path) -> str:
         'static void endRepairEpisode() ', 'static void g2RepairNudge(bool gesture) ',
         'static void g2RepairNoteLensInput(uint32_t etype) ', 'static const char* g2RepairDescribe(')]
     production.append(line(owner, 'enum class RepairQueue'))
+    # The renderer watchdog beatOne applies once its arm gate passes.
+    production.append(line(owner, 'static constexpr uint32_t HEARTBEAT_DEAD_THRESHOLD'))
+    production.append(extract_block(owner, 'static bool g2RendererHeartbeatAcceptedState('))
     production += [extract_block(owner, marker) for marker in (
         'static bool repairIntentReady(', 'static bool repairSurvivorSaved(', 'static bool repairHeldNow(',
         'static RepairQueue queueMissingArmRecovery(', 'static RepairQueue noteRepairQueued(',
@@ -116,6 +119,81 @@ def check_sources(component: Path) -> None:
     require('link["repair"] = connection.repair;' in web, '/api/ble/status carries the repair')
     # The heartbeat drives the tick.
     require(owner.count('recoveryHeartbeatTick();') == 1, 'one heartbeat call site')
+    check_arm_liveness(owner)
+    check_reconnect_path(owner)
+
+
+def check_arm_liveness(owner: str) -> None:
+    """(a) LEFT E0 silence never counts; RIGHT drives pluginDead and PLUGIN_SILENT."""
+    beat = extract_block(owner, 'static void beatOne(G2Temple& t) ')
+    # The TX-wedge rule (LEFT's health) runs first, then the arm gate, then the watchdog.
+    order(beat, 'G2_TX_STUCK_DISCONNECT_BEATS', 'disconnectTemple(t);',
+          'if (!g2repair::rendererSilenceCounts(t.side)) return;',
+          'g2RendererHeartbeatAcceptedState(', 'plugin silent', 'SYSEVT_G2_PLUGIN_SILENT')
+    require('firmwareRoutesEvenHubRepliesToRight' not in beat,
+            'the firmware allowlist no longer gates LEFT silence')
+    silent = beat[beat.index('BROADCAST_PRINTF("[G2] %s temple plugin silent'):]
+    silent = silent[:silent.index(';')]
+    require('not worn' not in silent and 'no heartbeat reply' in silent,
+            'the silent line says what it measures, not "not worn"')
+    # Nothing else marks a temple's plugin dead.
+    require(re.search(r'pluginDead\s*=\s*true', owner) is None, 'pluginDead is set only by the watchdog')
+    require(owner.count('g2RendererHeartbeatAcceptedState(\n        t.heartbeatMissed') == 1,
+            'one production watchdog call site (beatOne)')
+
+
+def check_reconnect_path(owner: str) -> None:
+    """(b) saved-address direct reconnect at 25 s, 30% duty scan fallback; (c) 0x02."""
+    attempt = extract_block(owner, 'static bool attemptMissingArmRecoverySync(')
+    order(attempt, '__atomic_exchange_n(&missing->hostDesyncSuspected, false',
+          'g2repair::tryPath(', 'bleSetupOtherReadyQueued(BleSetupClient::G2)',
+          'if (path == g2repair::TryPath::Defer) {', 'gRepair.deferred();',
+          'if (path == g2repair::TryPath::BackOff) {',
+          'if (path == g2repair::TryPath::Direct) {', 'missing->directConnectArmed = true;',
+          '} else {', 'gScan->setInterval(g2repair::kScanIntervalMs);',
+          'gScan->setWindow(g2repair::kScanWindowMs);',
+          'g2repair::kScanIntervalUnits, g2repair::kScanWindowUnits',
+          'connectTemple(*missing, hw1coex::Purpose::Repair)')
+    # The Defer and BackOff paths return before any scan or connect.
+    for path in ('Defer', 'BackOff'):
+        section = attempt[attempt.index(f'if (path == g2repair::TryPath::{path}) {{'):]
+        section = section[:section.index('\n  }\n')]
+        require('return false;' in section and 'gScan' not in section and 'connectTemple' not in section,
+                f'the {path} path neither scans nor connects')
+    require('setWindow(99)' not in attempt and 'setInterval(100)' not in attempt, 'no ~99% duty repair scan')
+    full = extract_block(owner, 'static bool g2ConnectSync(')
+    order(full, 'gScan->setActiveScan(true);', 'gScan->setInterval(100);', 'gScan->setWindow(99);',
+          'bleCoexScanBegin(hw1coex::Peer::Glasses, connectPurpose, 160, 158,', 'gScan->start(scanSec,')
+    require(attempt.count('gScan->start(') == 1, 'one scan, on the no-saved-address path only')
+    direct = attempt[attempt.index('if (path == g2repair::TryPath::Direct) {'):]
+    direct = direct[:direct.index('} else {')]
+    require('gScan' not in direct and 'missing->deviceAddress = savedMac;' in direct and
+            'g2repair::savedAddressType(' in direct, 'the direct path dials the saved address, no scan')
+    connect = extract_block(owner, 'static bool connectTemple(G2Temple& t, hw1coex::Purpose purpose) ')
+    order(connect, 'const bool direct = t.directConnectArmed;', 't.directConnectArmed = false;',
+          'bleConnectWatchedAddress(t.client, t.deviceAddress, t.deviceAddressType,',
+          'g2repair::kDirectConnectTimeoutMs',
+          'gRepairDirectBusy = g2repair::directRefusedBusy(linked, directElapsedMs);',
+          'g2repair::countsTowardOpenFailStreak(direct, directElapsedMs)', '++gRepairOpenFailStreak;')
+    watched = extract_block(owner, 'static bool bleConnectWatchedAddress(')
+    order(watched, 'bleCoexConnectBegin(', 'client->connect(target, addressType, timeoutMs)',
+          'bleNoteClientConnectOutcome(client, ok, elapsed, logTag)')
+    quarantine = extract_block(owner, 'bool bleQuarantineClientAfterFailedConnect(')
+    require('!g2repair::openTimeoutWasOwnBound(connectBoundMs)' in quarantine,
+            'an OPEN wait our own 25 s bound ended is an ordinary miss, not a host wedge')
+    require('const uint32_t connectBoundMs = direct ? g2repair::kDirectConnectTimeoutMs : 35000;' in connect
+            and '(uint8_t)BLE_PEER_G2_GLASSES, connTag, connectBoundMs);' in connect,
+            'connectTemple passes its own connect bound to the quarantine')
+    # (c) 0x02: named, logged as a desync, and marks the arm.
+    names = extract_block(owner, 'static const char* g2DisconnectReasonName(')
+    require('case 0x02:   return "host/controller desync";' in names, '0x02 is named')
+    down = extract_block(owner, 'static G2TempleDownTransition g2BeginTempleDown(')
+    order(down, 'g2repair::isHostDesyncReason(hciReason)',
+          '__atomic_store_n(&temple.hostDesyncSuspected, hostDesync', 'if (hostDesync) {',
+          'host/controller desync')
+    # A new link clears the mark.
+    require('__atomic_store_n(&t.hostDesyncSuspected, false, __ATOMIC_RELEASE);' in owner,
+            'a promoted link clears the desync mark')
 
 
 def main() -> None:
@@ -138,7 +216,8 @@ def main() -> None:
         print(subprocess.check_output([str(binary)], text=True, timeout=120).strip())
     check_sources(component)
     print('G2 repair: fast tries then every 10 min, no restart at the cap, wear/gesture restart, '
-          'held vs busy, ladder deferral, status text')
+          'held vs busy, ladder deferral, status text, saved-address direct reconnect (25 s), '
+          '30% duty scan fallback, 0x02 desync, LEFT silence never counts')
 
 
 if __name__ == '__main__':

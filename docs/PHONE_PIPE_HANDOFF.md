@@ -177,8 +177,9 @@ Path records (F3):
   logged under `LLM_PATH`.
 
 Reconnect, parameters and expiry:
-- **A-3:** the phone's reconnect schedule is 5 s, 15 s, then 30 s capped. Glasses
-  and ring keep 5/15/45/90/180 s.
+- **A-3:** the phone's reconnect schedule is 5 s, 15 s, then 30 s capped. The
+  glasses keep 5/15/45/90/180 s. The ring follows faceclaw: 2 s after a drop,
+  then 2 s doubling to 60 s, counted from each failure.
 - **A-4:** connection parameters are per connection. A new connection starts idle
   and asks for idle parameters at once. It goes active on relay or console
   traffic and back to idle 30 s after the last of it. One request is in flight at

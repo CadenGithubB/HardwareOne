@@ -2112,7 +2112,9 @@
     "common/tinycrypt/src/ecc.c": "025b237331acb4e800f4d6fdaee83ed263e41e4428e6233be9ad9f11dab5dc34",
     "common/tinycrypt/src/ecc_dh.c": "c0cb59554bb0a20f143b861441218d27a90289fc25dc3fe9c221819cd5d84a58",
     "common/tinycrypt/src/ecc_dsa.c": "e6e876d13f1ebbafb439e4866cbc28a7c83b01dcdc32251745509717648748ed",
-    "host/bluedroid/stack/gap/gap_ble.c": "220c9993ffa53454771dbfc49fe7d0a3ff2497f16302feda8646fcc3c1492f8f"
+    "host/bluedroid/stack/btm/btm_ble.c": "5348b6e30291cc90f8b4d3d8866b5fdb0353fe406eec334be3f00074c6c6de94",
+    "host/bluedroid/stack/gap/gap_ble.c": "220c9993ffa53454771dbfc49fe7d0a3ff2497f16302feda8646fcc3c1492f8f",
+    "host/bluedroid/stack/l2cap/l2c_main.c": "75ca945812d6935cfd43f7aa359e54d35bdee2624e9e5d5a2315bd51932d16bc"
   },
   "upstream_git_blob_sha1": {
     "common/tinycrypt/port/esp_tinycrypt_port.c": "16bbfb822ce3fc565c04b51e4a2512ccc8543917",
@@ -2131,6 +2133,26 @@
       ],
       "upstream": "Not fixed upstream (checked release/v5.5, release/v6.0 and master on 2026-11-13): GAP_Deinit() frees gap_cb without deregistering GAP from GATT. Drop this patch when ESP-IDF fixes it.",
       "review": "GAP's three GATT callbacks return at once when gap_cb_ptr is NULL. Fixes a load access fault in gap_find_clcb_by_bd_addr() during esp_bluedroid_deinit(): btu_task_shut_down() frees GAP (BTE_DeinitStack) before L2CAP (btu_free_core), and l2c_free() releases each remaining link, whose GATT clean-up calls GAP's connect callback. Seen on the P4X-EYE 2026-11-13 when the G2 stack recycle tore the host down with a ring connection still pending. No behaviour change while GAP is alive."
+    },
+    {
+      "file": "idf-bt-failed-conn-handle.patch",
+      "sha256": "339eaa428860c2654df28e6479fc563c48608fc2c2d0bb83bae8fa9afce9c228",
+      "strip": 3,
+      "files": [
+        "host/bluedroid/stack/btm/btm_ble.c"
+      ],
+      "upstream": "Not fixed upstream as of ESP-IDF 5.5.5 (btm_ble_conn_complete still passes the failed event's handle to l2c_link_hci_disc_comp and btm_sec_disconnected); to be reported to Espressif. Drop this patch when ESP-IDF ignores the handle of a failed LE Connection Complete.",
+      "review": "A failed LE Connection Complete names no link (Core spec: the handle is only valid on success). After HCI_LE_Create_Connection_Cancel (BTM_BLE_CONN_EST_TOUT, CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT=30 s) the C6 controller answers status 0x02 with the handle zero-filled, and the stock failure branch released whichever established link held handle 0 (seen: the G2 LEFT arm, when the R1 ring's direct connect timed out) without an HCI_Disconnect, leaving a controller link the host no longer knows. Now, when that handle names an in-use LCB or a security record (and is not HCI_INVALID_HANDLE), it logs one BTM warning and passes 0xFFFE, a handle no link can hold. The connecting LCB holds HCI_INVALID_HANDLE and was never found by the event's handle (it is released by L2CA_CancelBleConnectReq or by l2c_link_timeout), so its clean-up is unchanged, and L2CAP still runs BTM_Recovery_Pre_State as for any failed connection. No change for successful connections or for failures whose handle names no link."
+    },
+    {
+      "file": "idf-bt-unknown-handle-acl.patch",
+      "sha256": "9e8862cd347662f64980719339dfb492289eab87946a227bb81046415395c0cd",
+      "strip": 3,
+      "files": [
+        "host/bluedroid/stack/l2cap/l2c_main.c"
+      ],
+      "upstream": "HardwareOne safety net, not an upstream bug fix: stock ESP-IDF (5.5.5, release/v5.5) logs and drops ACL data on an unknown handle forever. Keep while links the host forgot remain possible; review when idf-bt-failed-conn-handle.patch is dropped.",
+      "review": "In l2c_rcv_acl_data's unknown-handle branch only (not the INFO/CONN hold path): four static slots track recent unknown handles. When one handle delivers 3 or more ACL packets within 1 s, or is seen again 2 s or more after its first packet (the bench ghost sent one LE Connection Parameter Update Request every ~39 s), and BTM has no ACL entry for it, it sends HCI_Disconnect(handle, 0x13) at most once per 5 s per handle and logs one warning. The controller's Disconnection Complete then finds no link (l2c_link_hci_disc_comp returns FALSE after BTM_Recovery_Pre_State, btm_sec_disconnected finds no record). The unknown-handle error is logged for the first packet and every 100th per handle, with a dropped count; a handle quiet for 60 s starts a new episode; l2c_init clears the slots. There is no link-setup gate: HCI events and ACL data reach the BTU task in order on SIG_BTU_HCI_MSG and a link's handle is set when its successful LE Connection Complete is processed, so data on a handle never belongs to a link still connecting (a global is_ble_connecting gate would also block the net for as long as a connect hangs)."
     }
   ]
 }

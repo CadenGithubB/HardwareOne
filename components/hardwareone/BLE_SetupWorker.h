@@ -59,6 +59,9 @@ bool bleSetupAccessoryBusy();
 // The job running right now, if any, and for how long. Any task.
 bool bleSetupRunning(BleSetupClient* client, uint32_t* runningMs);
 bool bleSetupOtherQueued(BleSetupClient self);
+// As bleSetupOtherQueued, but ignores a job last judged to wait on its own
+// reason (it would not run next anyway).
+bool bleSetupOtherReadyQueued(BleSetupClient self);
 void bleSetupWake();
 // The worker's own sleep, for a phone turn (worker task only).
 void bleSetupWaitWake(uint32_t ms);
@@ -74,6 +77,7 @@ inline bool bleSetupIdle(uint8_t) { return true; }
 inline bool bleSetupWaitIdle(uint8_t, uint32_t) { return true; }
 inline bool bleSetupAccessoryBusy() { return false; }
 inline bool bleSetupOtherQueued(BleSetupClient) { return false; }
+inline bool bleSetupOtherReadyQueued(BleSetupClient) { return false; }
 inline void bleSetupWake() {}
 inline void bleSetupWaitWake(uint32_t) {}
 #endif

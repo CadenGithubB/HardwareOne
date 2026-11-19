@@ -242,6 +242,13 @@ bool bleSetupOtherQueued(BleSetupClient self) {
   return queued;
 }
 
+bool bleSetupOtherReadyQueued(BleSetupClient self) {
+  portENTER_CRITICAL(&sCoreMux);
+  const bool queued = sCore.otherReadyQueued(self);
+  portEXIT_CRITICAL(&sCoreMux);
+  return queued;
+}
+
 void bleSetupWake() { if (sWake) (void)xSemaphoreGive(sWake); }
 
 void bleSetupWaitWake(uint32_t ms) {

@@ -5190,6 +5190,14 @@ python3 components/hardwareone/test/host/test_ring_daily_ack.py --sanitize
 
 `ring_daily_ack` compiles the production ring RX path (`ringProcessRxFrame`, `ringExtractTelemetryCache`, `ringReasmFinalize`, the RX duplicate filter and the packetAck lane from G2_Ring.cpp) with the production Health pending-session model (`g2HealthApply*Daily`, `g2HealthHistoryFetchStarted/Finished`, the day-key and peer checks from G2_Health.cpp) and the production profile capabilities and packetAck descriptor factories (R1_Protocol.cpp). The frame decoder and typed daily parsers are doubles that return the test's page. On 2.2.9 a daily page gets a packetAck only when the model accepted it into the active sweep: a page outside a sweep, in a sweep dropped behind an uncommitted result or a failing commit, with another day key, with a zero-base day or during a pending peer switch gets none, while it still refreshes the live cache; an accepted page gets exactly one ACK, and its retransmit is ACKed again without a second ingestion. 2.2.7 keeps its established flow control (every eligible daily NOTIFY, sleep and reassembled activity included, is ACKed) until a device check. `--component` / `--source-dir` read the production sources from another tree; the 0.99.97.4 sources fail the seven refused-page checks. No BLE link, ring firmware, owner-loop scheduling or store commit is simulated.
 
+## Ring connect bound
+
+```sh
+python3 components/hardwareone/test/host/test_ring_connect_bound.py --sanitize
+```
+
+`ring_connect_bound` compiles the production `RING_DIRECT_CONNECT_TIMEOUT_MS` (25 s), its `static_assert` against `CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT` and `ringSettleClientAfterFailedConnect` from G2_Ring.cpp, and runs the settle over fake BLEClient outcomes: an open-timeout whose GATT app unregistered cleanly gives the link slot back and keeps the client, every other failure goes through the shared quarantine. It checks that the `static_assert` refuses a Bluedroid timer of 25 s and of 20 s, and that every checked-in sdkconfig keeps the timer above 25 s. Source checks pin what the unit cannot run: both ring connect calls (saved MAC and scanned advert) use the constant; the failed-link branch touches no glasses state; the ring asks for no connection priority (only GlassesPriorityGuard lowers the glasses to BALANCED); and the faceclaw backoff (2 s doubling to 60 s from each failure, reset by a finished connect) sits in the admission after the yield check and before `g2RingInit` and the gate, with the manual paths never held. `ring_phone_yield_queue_harness` runs that backoff through the real admission on a virtual clock (`test_ring_phone_yield.py`). No BLE link or ring firmware is simulated.
+
 ## R1 ring health controls and history
 
 `health_logging_ui` reads the R1 Health action body with the shared bounded reader (`webRecvRequestBody` from WebServer_Utils.cpp, compiled unchanged); the page keeps no reader of its own. Checks: one idle wait between chunks is retried; two consecutive idle waits (a half-open socket) end the request with the 400 "invalid action body" reply; a socket error is never retried; an empty body or one of 160 bytes or more is refused before reading. `--component <component-directory>` reads production sources from another checkout and `--source-dir <directory>` overlays single files; the 0.99.97.4 sources fail the half-open case because that reader retried timeouts without bound.
@@ -6395,7 +6403,9 @@ Path switching and the OPEN phases are covered as follows:
   is credited to the state that was asked for, only when the interval lands in
   its range.
 - `ble_reconnect_schedule` runs the real `commitAdmission` through repeated
-  attempts: the phone caps at 30 s (A-3), and glasses and ring are unchanged.
+  attempts: the phone caps at 30 s (A-3), the glasses keep 5/15/45/90/180 s,
+  and the ring follows faceclaw (2 s after a drop, then 2/4/8/16/32/60 s, each
+  step equal to the ring's own hold after that many failures).
 - `ble_coex_records` runs the shared coexistence records
   (docs/WIFI_BLE_COEXISTENCE_STUDY.md, lever 1). It covers the Wi-Fi state
   classifier's priorities (scanning over associated, associated over a connect

@@ -113,6 +113,14 @@ class Core {
   }
   bool anyQueued() const { return busyState(0xff, State::Queued); }
   bool otherQueued(Client self) const { return busyState(uint8_t(0xff & ~clientMask(self)), State::Queued); }
+  // Another client's job is queued and was not last judged Wait (not yet
+  // judged counts as ready): one that would run next rather than keep waiting
+  // on its own reason (the ring on G2 audio, the phone's yield).
+  bool otherReadyQueued(Client self) const {
+    for (size_t i = 0; i < kClients; ++i)
+      if (Client(i) != self && slots_[i].state == State::Queued && slots_[i].waitReason == kNone) return true;
+    return false;
+  }
   void snapshot(Slot (&out)[kClients]) const { for (size_t i = 0; i < kClients; ++i) out[i] = slots_[i]; }
   // The one running job, if any: which client and when its run began.
   bool running(Client* c, uint32_t* sinceMs) const {

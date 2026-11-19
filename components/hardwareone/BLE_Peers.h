@@ -253,7 +253,9 @@ void bleArmAutoReconnectPeers(void);
 //     only if the exact admitted request is still current, so a late success
 //     cannot undo a newer user disconnect or target/owner change.
 //   bleAutoReconnectTick — call from the main loop; fires due reconnects
-//     with exponential backoff (5s → ~3 min; the phone caps at 30 s).
+//     with exponential backoff (5s → ~3 min; the phone caps at 30 s; the
+//     ring follows faceclaw: 2 s after a drop, then 2 s doubling to 60 s,
+//     timed by the ring's own hold from each failure).
 void blePeerNoteUserDisconnect(BlePeerKind kind);
 void blePeerNoteUserConnectIntent(BlePeerKind kind);
 void blePeerNoteLinkLost(BlePeerKind kind);

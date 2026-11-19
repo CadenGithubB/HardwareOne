@@ -848,7 +848,7 @@ setting, regardless of which setting it was.
 | `mqtt_connected` / `mqtt_disconnected` | broker link up / lost (once per transition) | broker / seconds up |
 | `ble_connected` / `ble_disconnected` | companion BLE device connected / dropped | device type / MAC |
 | `g2_connected` / `g2_disconnected` | glasses link up / temple dropped | sides / side |
-| `g2_plugin_alive` / `g2_plugin_silent` | the temple's app plugin answering / not answering renderer heartbeats (app idle or set down; not a wear sensor) | side |
+| `g2_plugin_alive` / `g2_plugin_silent` | the temple's app plugin answering / not answering renderer heartbeats (app idle or set down; not a wear sensor). RIGHT temple only: on stock firmware LEFT is silent by design (it sends only mic audio and acks) | side |
 | `ring_connected` / `ring_disconnected` | R1 ring GATT up (after setup) / link lost | name / MAC |
 | `ring_worn` / `ring_not_worn` | R1 on / off finger (wearStatus edge) | name |
 | `time_synced` | clock first became valid (NTP or RTC) | ntp\|rtc / time |

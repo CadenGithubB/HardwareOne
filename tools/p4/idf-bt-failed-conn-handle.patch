@@ -1,0 +1,26 @@
+--- a/components/bt/host/bluedroid/stack/btm/btm_ble.c
++++ b/components/bt/host/bluedroid/stack/btm/btm_ble.c
+@@ -2172,6 +2172,23 @@
+ 
+     BOOLEAN bg_con = btm_ble_update_mode_operation(role, bda, status);
+     if (status != HCI_SUCCESS && !bg_con) {
++        /* HardwareOne local patch (tools/p4/idf-bt-failed-conn-handle.patch).
++         * A failed LE Connection Complete creates no link, so its handle is
++         * meaningless: after HCI_LE_Create_Connection_Cancel (the 30 s
++         * BTM_BLE_CONN_EST_TOUT, or a closed pending open) the controller
++         * sends status 0x02 with the handle zero-filled. When an established
++         * link holds that handle, the two calls below released it in the host
++         * without an HCI_Disconnect: the controller kept the link and its
++         * traffic hit "rcvd ACL for unknown handle". The connecting link
++         * control block holds HCI_INVALID_HANDLE and is never found by this
++         * handle, so pass a handle no link uses: L2CAP still runs its
++         * unknown-handle recovery (BTM_Recovery_Pre_State) as for any other
++         * failed connection. */
++        if (handle != HCI_INVALID_HANDLE
++                && (l2cu_find_lcb_by_handle (handle) != NULL || btm_find_dev_by_handle (handle) != NULL)) {
++            BTM_TRACE_WARNING("hw1: failed conn cmpl 0x%02x names live handle %u; ignored", status, (unsigned)handle);
++            handle = 0xFFFE;
++        }
+         // notify connection failed
+         l2c_link_hci_disc_comp (handle, status);
+ #if (SMP_INCLUDED == TRUE)

@@ -77,6 +77,13 @@ extern "C" {
 #include "BLE_CentralCoordinator.h"
 #include "BLE_SetupWorker.h"     // the one central setup worker (glasses, ring, phone)
 #include "G2_RepairCore.h"       // the one-temple repair schedule
+#if defined(CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT)
+// The repair's 25 s direct dial and the OPEN_TIMEOUT classification assume
+// Bluedroid's own establishment timer (g2repair::kHostEstablishTimeoutMs).
+static_assert(g2repair::kHostEstablishTimeoutMs ==
+                  (uint32_t)CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT * 1000u,
+              "g2repair::kHostEstablishTimeoutMs must match CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT");
+#endif
 #include "BLE_PhonePipe.h"     // controller-level TX gate (G2 L/R + R1)
 #include "G2_Ring.h"  // g2RingInit (eager registration in initG2Client)
 #include "G2_HealthPush.h"      // stock Health panel feed (sid 0x0E)
@@ -1470,7 +1477,9 @@ static bool g2SettingsReceive(G2Temple& temple, const G2EnvelopeView& env,
 
 // Exact compatibility rule for the ordinary EvenHub/EvenCore response plane.
 // Captured builds route create/image/heartbeat replies through RIGHT even when
-// TX occurred on LEFT, so LEFT's E0 miss counter cannot be meaningful there.
+// TX occurred on LEFT. This predicate only picks which arm a CREATE/image ACK
+// waiter binds to; it no longer gates LEFT health: LEFT E0 silence never
+// counts on any firmware (g2repair::rendererSilenceCounts, beatOne).
 // This predicate must never be used for direct DevCfg sid=0x80 ACKs: those are
 // per-arm in 2.2.9 and promotion binds them to the actual callback arm.
 static bool firmwareRoutesEvenHubRepliesToRight() {
@@ -1482,8 +1491,8 @@ static bool firmwareRoutesEvenHubRepliesToRight() {
   portEXIT_CRITICAL(&gRxPacketMux);
 
   // Until the first fused version snapshot arrives, retain the established
-  // safe assumption.  Once a non-allowlisted pair is known, fail closed so a
-  // future build that restores LEFT replies gets its own watchdog.
+  // safe assumption.  Once a non-allowlisted pair is known, fail closed: an
+  // ACK for a LEFT TX is then awaited on LEFT itself.
   if (!left[0] && !right[0]) return true;
   // The attached 2.2.9.22 serial capture independently shows two E0 heartbeat
   // ACKs arriving on RIGHT after one TX per arm.  The version bytes themselves
@@ -2536,14 +2545,18 @@ static const uint32_t kBleInstantFailMs = 250;
 static const uint8_t  kBleWedgeStreakTrip = 2;
 static volatile uint8_t gBleWedgeStreak = 0;
 // Half-connected repair tries that FOUND the missing temple advertising and
-// still could not open a link (slow OPEN failure or the 35 s timeout). A slow
-// failure alone says nothing (the peer may be away), but a peer that answers
-// scans and refuses connects for a whole fast ladder is the host-orphaned
+// still could not open a link, or whose saved-address dial was refused at once
+// (busy; a direct dial that ran its 25 s bound means "away" and is not
+// counted). A slow failure alone says nothing (the peer may be away), but a
+// peer that refuses connects for a whole fast ladder is the host-orphaned
 // link seen 2026-10-29: the controller still owned the LEFT link while the
 // host had freed it, so every OPEN against that address failed and nothing
 // escalated for hours. This streak lets bleStackRecycleIfWedged() act on it.
 static volatile uint8_t gRepairOpenFailStreak = 0;
 static const uint8_t  kRepairOpenFailTrip = 7;  // == g2repair::kFastTries
+// The last direct (saved-address) repair connect was refused at once: the
+// address is busy, so the try backs off instead of scanning. Setup worker only.
+static bool gRepairDirectBusy = false;
 // A client whose accepted APP_REGISTER/UNREGISTER never delivered its
 // retirement event cannot be reused or freed while Bluedroid may still route
 // callbacks to it. Unlike the ordinary cancel wedge, leaving another link up
@@ -2756,7 +2769,8 @@ bool bleCentralClientsRetirementPending() {
 bool bleQuarantineClientAfterFailedConnect(BLEClient*& client,
                                            uint8_t retirementSlot,
                                            uint8_t peerKind,
-                                           const char* logTag) {
+                                           const char* logTag,
+                                           uint32_t connectBoundMs) {
   if (!client) return false;
 
   const BLEClientConnectOutcome outcome = client->getLastConnectOutcome();
@@ -2770,8 +2784,13 @@ bool bleQuarantineClientAfterFailedConnect(BLEClient*& client,
   // setup worker forever (the 2026-11-05 four-hour stall). The library now
   // releases that semaphore too; retiring the client here is the belt to
   // that suspender, the same answer as a registration the host ignored.
+  // A wait that our own bound ended before Bluedroid's establishment timer
+  // (the 25 s repair dial) is an ordinary miss: the unregister that follows
+  // cancels the pending open, and its outcome is judged below. Judged by the
+  // caller's bound, not by elapsed time, which also counts APP_REGISTER.
   const bool openTimedOut =
-      outcome.stage == BLEClientConnectStage::OPEN_TIMEOUT;
+      outcome.stage == BLEClientConnectStage::OPEN_TIMEOUT &&
+      !g2repair::openTimeoutWasOwnBound(connectBoundMs);
   const bool stalePrecheck =
       outcome.stage == BLEClientConnectStage::PRECHECK &&
       outcome.espStatus == ESP_ERR_INVALID_STATE;
@@ -2823,6 +2842,28 @@ bool bleConnectWatched(BLEClient* client, BLEAdvertisedDevice* dev,
   const uint32_t t0 = millis();
   const bool ok = client->connectTimeout(dev, timeoutMs);
   bleNoteClientConnectOutcome(client, ok, millis() - t0, logTag);
+  return ok;
+}
+
+// bleConnectWatched for a saved address: a direct connect with no advert.
+// elapsedMsOut reports how long the attempt took (a fast failure is a busy
+// address, see g2repair::directRefusedBusy).
+static bool bleConnectWatchedAddress(BLEClient* client, const String& mac,
+                                     uint8_t addressType, uint32_t timeoutMs,
+                                     const char* logTag, hw1coex::Purpose purpose,
+                                     uint32_t* elapsedMsOut) {
+  if (elapsedMsOut) *elapsedMsOut = 0;
+  if (!client || mac.length() == 0) return false;
+  BLEAddress target(mac);
+  bleCoexConnectBegin(logTag && !strcmp(logTag, "G2-L")   ? hw1coex::Peer::GlassesLeft
+                      : logTag && !strcmp(logTag, "G2-R") ? hw1coex::Peer::GlassesRight
+                                                          : hw1coex::Peer::Glasses,
+                      purpose, target.getNative());
+  const uint32_t t0 = millis();
+  const bool ok = client->connect(target, addressType, timeoutMs);
+  const uint32_t elapsed = millis() - t0;
+  bleNoteClientConnectOutcome(client, ok, elapsed, logTag);
+  if (elapsedMsOut) *elapsedMsOut = elapsed;
   return ok;
 }
 
@@ -3388,6 +3429,9 @@ static const char* g2DisconnectReasonName(uint16_t reason) {
     case 0x22:   return "lmp timeout";
     case 0x3e:   return "failed to establish";
     case 0x01:   return "l2cap failure";
+    // Not a controller disconnect: the host released a link the controller
+    // still owns (a failed connect's completion named its handle).
+    case 0x02:   return "host/controller desync";
     case 0x0100: return "cancelled";
     case 0x0101: return "no connection";
     default:     return "unknown";
@@ -3418,6 +3462,14 @@ static G2TempleDownTransition g2BeginTempleDown(G2Temple& temple, uint16_t hciRe
   temple.notifyChar = nullptr;
   temple.audioNotifyChar = nullptr;
 
+  // HCI 0x02 marks a host/controller desync: the controller may still hold
+  // this arm, which then does not advertise. The repair reconnects it by its
+  // saved address and does not scan for it (attemptMissingArmRecoverySync).
+  const bool hostDesync = transition.wasConnected && g2repair::isHostDesyncReason(hciReason);
+  if (transition.wasConnected) {
+    __atomic_store_n(&temple.hostDesyncSuspected, hostDesync, __ATOMIC_RELEASE);
+  }
+
   const uint8_t bit = g2TemplePublishedBit(temple);
   transition.downEventPublished = (gG2PublishedTempleMask & bit) != 0;
   gG2PublishedTempleMask &= (uint8_t)~bit;
@@ -3431,6 +3483,14 @@ static G2TempleDownTransition g2BeginTempleDown(G2Temple& temple, uint16_t hciRe
     logSystemEvent("G2", "%s temple dropped: %s; HCI reason 0x%02x %s",
                    sideStr, left, (unsigned)hciReason, g2DisconnectReasonName(hciReason));
     systemEventPost(SYSEVT_G2_DISCONNECTED, sideStr, det);
+  }
+  if (hostDesync) {
+    const char* sideStr = temple.side == 'L' ? "LEFT" : "RIGHT";
+    BROADCAST_PRINTF("[G2] %s temple: reason 0x02 is a host/controller desync "
+                     "(the controller may still hold the link); the repair dials "
+                     "its saved address and does not scan for it next", sideStr);
+    logSystemEvent("G2", "%s temple drop with HCI 0x02: host/controller desync suspected",
+                   sideStr);
   }
   if ((transition.wasConnected || transition.downEventPublished) &&
       !g2BothConnected()) {
@@ -10985,12 +11045,12 @@ static void beatOne(G2Temple& t) {
     return;
   }
 
-  // LEFT-arm exception on firmware that silences L's notify channel:
-  // heartbeat acks will never arrive on L, so counting misses there is
-  // meaningless and the resulting pluginDead flip is a false alarm. We
-  // still send the heartbeat (the write channel works fine and keeps
-  // the link warm); we just don't escalate on missed responses.
-  if (t.side == 'L' && firmwareRoutesEvenHubRepliesToRight()) return;
+  // Only RIGHT's silence counts, on every firmware. Stock LEFT sends only mic
+  // audio and acks for traffic written to it (RIGHT is the master temple), so
+  // its E0 silence is normal, not a dead plugin. LEFT health is its link (a
+  // real DISCONNECT) plus the TX-wedge rule above. We still beat LEFT: the
+  // write is harmless and keeps the link warm.
+  if (!g2repair::rendererSilenceCounts(t.side)) return;
 
   bool becameSilent = false;
   bool emitNotWorn = false;
@@ -11015,9 +11075,11 @@ static void beatOne(G2Temple& t) {
     // moment validated current EvenCore renderer traffic resumes we flip back
     // to alive without needing a reconnect. Other protocol planes are not
     // sufficient.
-    BROADCAST_PRINTF("[G2] %s temple plugin silent — %u completed intervals "
-                     "(likely idle / not worn). Still pinging; will recover "
-                     "automatically when firmware responds.",
+    // What is measured: no EvenCore reply to the heartbeat on this arm for
+    // `missed` intervals. Rendering pauses on it; the link is still up.
+    BROADCAST_PRINTF("[G2] %s temple plugin silent — no heartbeat reply in "
+                     "%u intervals; rendering paused on this arm, link still "
+                     "up. Still pinging; recovers when it replies.",
                      t.side == 'L' ? "LEFT" : "RIGHT",
                      (unsigned)missed);
     g2RingDump(t.side == 'L' ? "plugin silent (L)" : "plugin silent (R)");
@@ -11134,9 +11196,14 @@ static const char* g2RepairDescribe(bool left, bool right, char (&buf)[8]) {
   return g2repair::describe(repair, buf);
 }
 
-// Synchronous attempt to scan + connect the missing temple, on the setup
-// worker. The surviving temple's heartbeat carries on in the control task
-// while the scan (~3 s) runs. Caller is responsible for backoff scheduling.
+// Synchronous attempt to reconnect the missing temple, on the setup worker.
+// It runs only while that temple's link is down (a real DISCONNECT, a forced
+// TX-wedge disconnect, or a side the first connect never reached); plugin
+// silence never starts it. With a saved address it dials that address
+// directly (up to 25 s, no scan); without one it scans at about 30% duty
+// (5 s), giving way to a ring or phone setup waiting on the worker. The
+// surviving temple's heartbeat carries on in the control task meanwhile.
+// Caller is responsible for backoff scheduling.
 // attemptNumber is the fast try (1..7), or 0 for a 10-minute retry.
 //
 // Returns true if the missing temple was found and connected.
@@ -11189,12 +11256,19 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
 
   // mac1=L, mac2=R per the codebase convention (see g2ConnectSync's
   // bleSavePeerMac call). The save only happens after a successful
-  // connect, so a temple whose initial connect failed has no saved MAC
-  // — we fall through to a name-based scan in that case rather than
-  // skipping recovery entirely (the original bug: missing temple stays
-  // unreconnected forever until the user manually triggers g2scan).
+  // connect, so a temple whose initial connect failed has no saved MAC.
   const char* savedMac = needL ? job.mac : job.mac2;
   const bool haveMac = savedMac && savedMac[0];
+  // A drop with HCI 0x02 left the controller possibly holding this arm, so it
+  // does not advertise: this try must not scan for it. Consumed here.
+  const bool hostDesync =
+      __atomic_exchange_n(&missing->hostDesyncSuspected, false, __ATOMIC_ACQ_REL);
+  // The worker runs one setup at a time; a ring or phone setup waiting behind
+  // this try goes first rather than share the radio with a scan. A job that
+  // is itself waiting (the ring on G2 audio, the phone's yield) would not run
+  // next, so it does not hold the repair back.
+  const g2repair::TryPath path = g2repair::tryPath(
+      haveMac, hostDesync, bleSetupOtherReadyQueued(BleSetupClient::G2));
 
   // Never the address itself: this line is always on.
   char tryText[20];
@@ -11204,101 +11278,136 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
   } else {
     snprintf(tryText, sizeof(tryText), "10-minute retry");
   }
-  BROADCAST_PRINTF("[G2] Recovery: scanning for missing %s temple (%s, %s)",
-                   sideStr,
-                   haveMac ? "saved-address match"
-                           : "no saved MAC — name-based match",
-                   tryText);
-  logSystemEvent("G2", "half-connected repair: scanning for %s temple (%s, %s)",
-                 sideStr, haveMac ? "saved address" : "name match", tryText);
 
-  // Tear down any stale advert object so the scan callback can claim
-  // the new one. The callback's `if (t.advertisedDevice) return` guard
-  // would otherwise drop the match silently.
+  if (path == g2repair::TryPath::Defer) {
+    portENTER_CRITICAL(&gRecoveryMux);
+    gRepair.deferred();
+    portEXIT_CRITICAL(&gRecoveryMux);
+    DEBUG_G2F("[G2] recovery: %s scan deferred, another setup is waiting", sideStr);
+    return false;
+  }
+  if (path == g2repair::TryPath::BackOff) {
+    BROADCAST_PRINTF("[G2] Recovery: missing %s temple has no saved address and "
+                     "dropped with a host/controller desync; not scanning this "
+                     "try (%s)", sideStr, tryText);
+    logSystemEvent("G2", "half-connected repair: %s temple desync, no saved address; "
+                   "backing off (%s)", sideStr, tryText);
+    return false;
+  }
+
+  // Tear down any stale advert object: the scan callback's
+  // `if (t.advertisedDevice) return` guard would otherwise drop a new match,
+  // and a direct connect must not fall back to an old advert.
   if (missing->advertisedDevice) {
     delete missing->advertisedDevice;
     missing->advertisedDevice = nullptr;
   }
 
-  // When we have a saved MAC, filter the scan to just this side's MAC
-  // (G2ScanCallbacks honours gG2FilterMacL/R as an authoritative override).
-  // When we don't, leave both filters empty so the callback falls back
-  // to its name-based classifier (classifyG2Name on "Even G2_32_L_..."
-  // / "Even G2_32_R_..." prefixes) — same path the initial g2ConnectSync
-  // takes on first-ever connect. gConnectTarget still pins the side, so
-  // an advert for the *other* temple won't accidentally claim this slot.
-  if (haveMac) {
-    g2ScanSetMacContext(needL ? savedMac : nullptr,
-                        needR ? savedMac : nullptr,
-                        job.mac, job.mac2);
+  if (path == g2repair::TryPath::Direct) {
+    // A connected arm stops advertising, and the controller may still hold
+    // this one: dial its saved address, as the Even app and faceclaw do, with
+    // a bound under Bluedroid's own 30 s timer. No scan.
+    BROADCAST_PRINTF("[G2] Recovery: reconnecting missing %s temple by saved "
+                     "address%s (%s)", sideStr,
+                     hostDesync ? " after a host/controller desync" : "", tryText);
+    logSystemEvent("G2", "half-connected repair: %s temple by saved address (%s)",
+                   sideStr, tryText);
+    const uint8_t savedType = needL ? job.addressType1 : job.addressType2;
+    const bool savedTypeKnown = needL ? job.addressType1Known : job.addressType2Known;
+    unsigned msb = 0;
+    (void)sscanf(savedMac, "%2x", &msb);
+    missing->deviceAddress = savedMac;
+    missing->deviceAddressType = g2repair::savedAddressType(savedTypeKnown, savedType, msb);
+    missing->deviceAddressTypeKnown = true;
+    missing->directConnectArmed = true;
+    gRepairDirectBusy = false;
   } else {
-    g2ScanSetMacContext(nullptr, nullptr, job.mac, job.mac2);
-  }
-  gConnectTarget = missingEye;
-  gScanFoundL = false;
-  gScanFoundR = false;
+    BROADCAST_PRINTF("[G2] Recovery: scanning for missing %s temple (no saved "
+                     "MAC — name-based match, %s)", sideStr, tryText);
+    logSystemEvent("G2", "half-connected repair: scanning for %s temple (name match, %s)",
+                   sideStr, tryText);
 
-  // Brief scan with the same active-scan tuning as g2ConnectSync. The
-  // callback stops the scan early on first match (see G2ScanCallbacks).
-  gScan->setActiveScan(true);
-  gScan->setInterval(100);
-  gScan->setWindow(99);
-  gScan->setAdvertisedDeviceCallbacks(&gG2ScanCallbacks, true);
-  const uint32_t kScanSec = 3;
-  gG2ScanStoppedEarly = false;
-  gG2ScanEnded = false;
-  const uint32_t scanEpoch = g2ScanCallbackBegin();
-  if (scanEpoch == 0) {
+    // No saved MAC: leave both filters empty so the callback falls back to its
+    // name-based classifier (classifyG2Name on "Even G2_32_L_..." /
+    // "Even G2_32_R_..." prefixes) — the same path the initial g2ConnectSync
+    // takes on first-ever connect. gConnectTarget still pins the side, so an
+    // advert for the *other* temple won't accidentally claim this slot.
+    g2ScanSetMacContext(nullptr, nullptr, job.mac, job.mac2);
+    gConnectTarget = missingEye;
+    gScanFoundL = false;
+    gScanFoundR = false;
+
+    // About 30% duty (interval 100 ms, window 30 ms): the four live links
+    // keep their airtime. The callback stops the scan early on first match.
+    gScan->setActiveScan(true);
+    gScan->setInterval(g2repair::kScanIntervalMs);
+    gScan->setWindow(g2repair::kScanWindowMs);
+    gScan->setAdvertisedDeviceCallbacks(&gG2ScanCallbacks, true);
+    const uint32_t kScanSec = g2repair::kScanSeconds;
+    gG2ScanStoppedEarly = false;
+    gG2ScanEnded = false;
+    const uint32_t scanEpoch = g2ScanCallbackBegin();
+    if (scanEpoch == 0) {
+      g2ScanClearMacContext();
+      gConnectTarget = G2_EYE_AUTO;
+      DEBUG_G2F("[G2] recovery: scan generation unavailable");
+      return false;
+    }
+    bleCoexScanBegin(hw1coex::Peer::Glasses, hw1coex::Purpose::Repair,
+                     g2repair::kScanIntervalUnits, g2repair::kScanWindowUnits, true, false,
+                     uint8_t(kScanSec));
+    gScan->start(kScanSec, g2ScanEndedCallback, false);
+
+    // Same poll-with-yield pattern as g2ConnectSync. Yields the heartbeat
+    // task while the BLE event handler dispatches advert callbacks; bails
+    // as soon as the missing side is populated.
+    const uint32_t deadline = millis() + (kScanSec * 1000) + 500;
+    while (millis() < deadline) {
+      if (gBeatTaskStop || gConnectCancel || !repairIntentCurrent() ||
+          !survivorCurrent()) {
+        break;
+      }
+      if ((needL && gScanFoundL) || (needR && gScanFoundR)) break;
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    g2ScanStopIfActive();
+    const bool scanCallbacksIdle = g2ScanCallbackEnd(scanEpoch);
+    bleCoexScanEnd(!scanCallbacksIdle || gBeatTaskStop || gConnectCancel || !repairIntentCurrent() ||
+                           !survivorCurrent()
+                       ? hw1coex::ScanOutcome::Aborted
+                   : (needL && gScanFoundL) || (needR && gScanFoundR) ? hw1coex::ScanOutcome::Found
+                                                                       : hw1coex::ScanOutcome::Missed);
+
+    // Clear the filters so the next open scan (manual g2connect, etc.)
+    // sees both sides again.
     g2ScanClearMacContext();
     gConnectTarget = G2_EYE_AUTO;
-    DEBUG_G2F("[G2] recovery: scan generation unavailable");
-    return false;
-  }
-  bleCoexScanBegin(hw1coex::Peer::Glasses, hw1coex::Purpose::Repair, 160, 158, true, false,
-                   uint8_t(kScanSec));
-  gScan->start(kScanSec, g2ScanEndedCallback, false);
 
-  // Same poll-with-yield pattern as g2ConnectSync. Yields the heartbeat
-  // task while the BLE event handler dispatches advert callbacks; bails
-  // as soon as the missing side is populated.
-  const uint32_t deadline = millis() + (kScanSec * 1000) + 500;
-  while (millis() < deadline) {
-    if (gBeatTaskStop || gConnectCancel || !repairIntentCurrent() ||
-        !survivorCurrent()) {
-      break;
+    if (!scanCallbacksIdle) {
+      DEBUG_G2F("[G2] recovery: scan callback did not quiesce");
+      return false;
     }
-    if ((needL && gScanFoundL) || (needR && gScanFoundR)) break;
-    vTaskDelay(pdMS_TO_TICKS(100));
-  }
-  g2ScanStopIfActive();
-  const bool scanCallbacksIdle = g2ScanCallbackEnd(scanEpoch);
-  bleCoexScanEnd(!scanCallbacksIdle || gBeatTaskStop || gConnectCancel || !repairIntentCurrent() ||
-                         !survivorCurrent()
-                     ? hw1coex::ScanOutcome::Aborted
-                 : (needL && gScanFoundL) || (needR && gScanFoundR) ? hw1coex::ScanOutcome::Found
-                                                                     : hw1coex::ScanOutcome::Missed);
-
-  // Clear the filters so the next open scan (manual g2connect, etc.)
-  // sees both sides again.
-  g2ScanClearMacContext();
-  gConnectTarget = G2_EYE_AUTO;
-
-  if (!scanCallbacksIdle) {
-    DEBUG_G2F("[G2] recovery: scan callback did not quiesce");
-    return false;
   }
 
   if (gBeatTaskStop || gConnectCancel || !repairIntentCurrent() ||
       !survivorCurrent()) {
+    missing->directConnectArmed = false;
     return false;
   }
 
-  if (!missing->advertisedDevice) {
+  if (path == g2repair::TryPath::Scan && !missing->advertisedDevice) {
     DEBUG_G2F("[G2] recovery: %s temple not seen during scan", sideStr);
     return false;
   }
 
   if (!connectTemple(*missing, hw1coex::Purpose::Repair)) {
+    if (path == g2repair::TryPath::Direct && gRepairDirectBusy) {
+      // Refused at once: the controller may still hold this arm. Back off on
+      // the schedule and dial again; never scan for an arm in this state.
+      BROADCAST_PRINTF("[G2] Recovery: %s temple's saved address is busy (the "
+                       "controller may still hold the link); backing off",
+                       sideStr);
+    }
     DEBUG_G2F("[G2] recovery: connectTemple() failed for %s", sideStr);
     return false;
   }
@@ -11504,7 +11613,7 @@ static void recoveryHeartbeatTick() {
                      "missing %s temple", missing);
   }
   // Admission only. The setup worker performs the scan/connect, leaving the
-  // heartbeat/control owner responsive during a 35 s OPEN wait.
+  // heartbeat/control owner responsive during a 25 s OPEN wait.
   if (due) (void)noteRepairQueued(queueMissingArmRecovery());
   g2RepairPushIfChanged(links);
 }
@@ -16100,7 +16209,12 @@ static void g2RetireStaleTempleClients() {
 }
 
 static bool connectTemple(G2Temple& t, hw1coex::Purpose purpose) {
-  if (!t.advertisedDevice) {
+  // The repair's saved-address reconnect dials deviceAddress directly
+  // (attemptMissingArmRecoverySync arms it); every other connect needs the
+  // advert its scan cached.
+  const bool direct = t.directConnectArmed;
+  t.directConnectArmed = false;
+  if (!direct && !t.advertisedDevice) {
     DEBUG_G2F("[G2-%c] connectTemple: no advertisedDevice cached", t.side);
     return false;
   }
@@ -16186,17 +16300,30 @@ static bool connectTemple(G2Temple& t, hw1coex::Purpose purpose) {
   // bleConnectWatched so a synchronous refusal by a wedged host stack is
   // counted rather than retried forever — see the bleStackWedge notes up top.
   link.retain(t.client); // pending OPEN consumes capacity, including quarantine
-  if (!bleConnectWatched(t.client, t.advertisedDevice, 35000, connTag, purpose)) {
+  // The direct reconnect is bounded under Bluedroid's own 30 s link timer
+  // (g2repair::kDirectConnectTimeoutMs), so our wait decides a miss.
+  uint32_t directElapsedMs = 0;
+  const uint32_t connectBoundMs = direct ? g2repair::kDirectConnectTimeoutMs : 35000;
+  const bool linked = direct
+      ? bleConnectWatchedAddress(t.client, t.deviceAddress, t.deviceAddressType,
+                                 g2repair::kDirectConnectTimeoutMs, connTag, purpose,
+                                 &directElapsedMs)
+      : bleConnectWatched(t.client, t.advertisedDevice, 35000, connTag, purpose);
+  if (direct) gRepairDirectBusy = g2repair::directRefusedBusy(linked, directElapsedMs);
+  if (!linked) {
     DEBUG_G2F("[G2-%c] BLE connect failed after %u ms",
               t.side, (unsigned)(millis() - tConnStart));
-    if (purpose == hw1coex::Purpose::Repair && gRepairOpenFailStreak < 255) {
-      ++gRepairOpenFailStreak;  // the scan found it; the open did not take
+    // The scan found it and the open did not take, or the saved address was
+    // refused at once (busy). A direct try that ran its bound means "away".
+    if (purpose == hw1coex::Purpose::Repair && gRepairOpenFailStreak < 255 &&
+        g2repair::countsTowardOpenFailStreak(direct, directElapsedMs)) {
+      ++gRepairOpenFailStreak;
     }
     (void)bleQuarantineClientAfterFailedConnect(
         t.client,
         t.side == 'L' ? BLE_CLIENT_RETIRE_G2_LEFT
                       : BLE_CLIENT_RETIRE_G2_RIGHT,
-        (uint8_t)BLE_PEER_G2_GLASSES, connTag);
+        (uint8_t)BLE_PEER_G2_GLASSES, connTag, connectBoundMs);
     return false;
   }
   DEBUG_G2F("[G2-%c] BLE connect OK in %u ms",
@@ -16335,6 +16462,7 @@ static bool connectTemple(G2Temple& t, hw1coex::Purpose purpose) {
   }
 
   g2SetTempleConnected(t, true);
+  __atomic_store_n(&t.hostDesyncSuspected, false, __ATOMIC_RELEASE);
   portENTER_CRITICAL(&gTopologyMux);
   t.heartbeatCounter = 0;
   t.heartbeatMissed = 0;
@@ -17006,8 +17134,13 @@ static bool g2ConnectSync(G2Eye eye,
     DEBUG_G2F("[G2] Scan generation unavailable; connect aborted");
     return false;
   }
-  // The shared scanner's settings (initG2Client, g2RingScan, the repair scan):
-  // active, 100 ms interval, 99 ms window, no controller duplicate filter.
+  // Set the connect scan's own settings on the shared scanner: active, 100 ms
+  // interval, 99 ms window, no controller duplicate filter. The half-connected
+  // repair's fallback scan leaves it at a 30 ms window (about 30% duty), and
+  // BLEScan applies whatever was set last at start().
+  gScan->setActiveScan(true);
+  gScan->setInterval(100);
+  gScan->setWindow(99);
   const hw1coex::Purpose connectPurpose =
       savedFilter ? hw1coex::Purpose::Saved : hw1coex::Purpose::Discovery;
   bleCoexScanBegin(hw1coex::Peer::Glasses, connectPurpose, 160, 158, true, false, uint8_t(scanSec));
