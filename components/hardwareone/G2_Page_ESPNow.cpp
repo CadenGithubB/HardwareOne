@@ -64,6 +64,19 @@ static inline void setSub(EspNowAppSub s) {
 // -1 means "no peer selected" (peer-detail not reachable).
 static int gSelectedPeer = -1;
 
+#if ENABLE_ESPNOW
+// The Peers list's rows. gEspNow->devices[] also holds this device's own
+// entry, which is not a peer and is not listed, so a row is not a devices[]
+// index. showPeersMenu records the address each row was drawn for, once the
+// lens accepted the list, and handlePeersTap finds that address in devices[]
+// again: a tap selects the peer its row named, also when the registry changed
+// between the draw and the tap.
+// PSRAM .bss: written by the render and read by the tap, both on the lens
+// page worker.
+static EXT_RAM_BSS_ATTR uint8_t gPeerRowMac[16][6];
+static uint8_t gPeerRowCount = 0;
+#endif
+
 // Row index of the tappable "Channel" row on the Stats page. Recorded when the
 // page is built (its position varies with what's shown) so handleStatsTap can
 // tell the channel row from the info-only rows. -1 = not present this render.
@@ -246,7 +259,10 @@ void g2BuildEspNowAppInfo(char* out, size_t cap) {
     char line[64];
     snprintf(line, sizeof(line), "Mode: %s\n", getEspNowModeString());
     s += line;
-    snprintf(line, sizeof(line), "Peers: %d\n", gEspNow->deviceCount);
+    // Up / paired without this device, as the lens status line counts them.
+    int peersUp = 0, peersPaired = 0;
+    g2EspNowPeerCounts(&peersUp, &peersPaired);
+    snprintf(line, sizeof(line), "Peers: %d/%d up\n", peersUp, peersPaired);
     s += line;
     snprintf(line, sizeof(line), "TX %lu  RX %lu\n",
              (unsigned long)gEspNow->routerMetrics.messagesSent,
@@ -278,14 +294,17 @@ static void showMainMenu() {
 
   snprintf(stateLine, sizeof(stateLine), "%s", phaseLabel(currentPhase()));
 
+  // Peers up / paired without this device, the status line's rule (0/0 while
+  // ESP-NOW is off). Drawn once per render: it follows a session change on
+  // the next redraw of this menu, not while it stays open.
+  int nPeersUp = 0, nPeers = 0;
+  g2EspNowPeerCounts(&nPeersUp, &nPeers);
 #if ENABLE_ESPNOW
-  int nPeers = (gEspNow && gEspNow->initialized) ? gEspNow->deviceCount : 0;
   int nInbox = countInboxAll();
 #else
-  int nPeers = 0;
   int nInbox = 0;
 #endif
-  snprintf(peersLine, sizeof(peersLine), "Peers (%d) >>", nPeers);
+  snprintf(peersLine, sizeof(peersLine), "Peers (%d/%d up) >>", nPeersUp, nPeers);
   snprintf(inboxLine, sizeof(inboxLine), "Inbox (%d) >>", nInbox);
 
   const char* items[] = {
@@ -298,8 +317,8 @@ static void showMainMenu() {
     "Bonded Device >>", // 6 — remote sensors streamed across the bond/mesh
   };
   g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
-  DEBUG_G2F("[G2-ESP-NOW-APP] main menu shown (phase=%d, peers=%d, inbox=%d)",
-            (int)currentPhase(), nPeers, nInbox);
+  DEBUG_G2F("[G2-ESP-NOW-APP] main menu shown (phase=%d, peers=%d/%d up, inbox=%d)",
+            (int)currentPhase(), nPeersUp, nPeers, nInbox);
 }
 
 void g2ShowEspNowAppMenu() {
@@ -312,6 +331,9 @@ void g2ShowEspNowAppMenu() {
 // -----------------------------------------------------------------------------
 
 static void showPeersMenu() {
+#if ENABLE_ESPNOW
+  const bool listWasShown = (gSub == ESPN_APP_SUB_PEERS);
+#endif
   setSub(ESPN_APP_SUB_PEERS);
 
 #if ENABLE_ESPNOW
@@ -323,33 +345,50 @@ static void showPeersMenu() {
   strlcpy(rows[0], "<- Back", sizeof(rows[0]));
   ptrs[0] = rows[0];
   size_t n = 1;
+  // The address of each row being drawn; the tap table takes them below.
+  static EXT_RAM_BSS_ATTR uint8_t drawnMac[16][6];
+  uint8_t drawn = 0;
 
   if (gEspNow && gEspNow->initialized) {
     int count = gEspNow->deviceCount;
     if (count > 16) count = 16;
     for (int i = 0; i < count; i++) {
       const EspNowDevice& d = gEspNow->devices[i];
+      // This device's own entry is not a peer: no row (it used to open a
+      // detail page with Ping, Send and Forget on this device itself), so the
+      // list is as long as the "Peers" count says.
+      if (isSelfMac(d.mac)) continue;
       // Prefer mesh-cached friendly name if available; fall back to local
       // name; final fallback shows the MAC tail.
       const char* label =
           (d.friendlyName.length() > 0) ? d.friendlyName.c_str() :
           (d.name.length()         > 0) ? d.name.c_str()         : nullptr;
       if (label) {
-        snprintf(rows[1 + i], sizeof(rows[1 + i]), "%s", label);
+        snprintf(rows[n], sizeof(rows[n]), "%s", label);
       } else {
-        macToDisplay(d.mac, rows[1 + i], sizeof(rows[1 + i]));
+        macToDisplay(d.mac, rows[n], sizeof(rows[n]));
       }
-      ptrs[n++] = rows[1 + i];
+      memcpy(drawnMac[drawn++], d.mac, 6);  // row n is this peer
+      ptrs[n] = rows[n];
+      n++;
     }
   }
 
-  if (n == 1) {
-    static const char* empty[] = { "<- Back", "(no paired peers)" };
-    g2ShowListPage(empty, 2);
-  } else {
-    g2ShowListPage(ptrs, n);
+  static const char* empty[] = { "<- Back", "(no paired peers)" };
+  const bool accepted = (n == 1) ? g2ShowListPage(empty, 2) : g2ShowListPage(ptrs, n);
+  if (accepted) {
+    // The lens takes this list: its rows are the ones a tap means now.
+    memcpy(gPeerRowMac, drawnMac, sizeof(gPeerRowMac));
+    gPeerRowCount = drawn;
+  } else if (!listWasShown) {
+    // Refused, and the lens still shows another page: no row is a peer, so a
+    // tap draws the list again instead of opening a peer.
+    gPeerRowCount = 0;
   }
-  DEBUG_G2F("[G2-ESP-NOW-APP] peers menu shown (%u rows)", (unsigned)(n - 1));
+  // Refused over an earlier Peers list: that list is still on the lens and
+  // its rows keep the peers they showed.
+  DEBUG_G2F("[G2-ESP-NOW-APP] peers menu %s (%u rows)", accepted ? "shown" : "refused",
+            (unsigned)(n - 1));
 #else
   static const char* na[] = { "<- Back", "(ESP-NOW not compiled)" };
   g2ShowListPage(na, 2);
@@ -474,7 +513,10 @@ static void showStatsMenu() {
   if (gEspNow && gEspNow->initialized) {
     snprintf(rows[n], sizeof(rows[n]), "Mode: %s", getEspNowModeString());
     ptrs[n] = rows[n]; n++;
-    snprintf(rows[n], sizeof(rows[n]), "Peers: %d", gEspNow->deviceCount);
+    // Up / paired without this device, as the lens status line counts them.
+    int peersUp = 0, peersPaired = 0;
+    g2EspNowPeerCounts(&peersUp, &peersPaired);
+    snprintf(rows[n], sizeof(rows[n]), "Peers: %d/%d up", peersUp, peersPaired);
     ptrs[n] = rows[n]; n++;
     snprintf(rows[n], sizeof(rows[n]), "TX: %lu",
              (unsigned long)gEspNow->routerMetrics.messagesSent);
@@ -1103,13 +1145,30 @@ static void handleMainTap(uint32_t idx) {
 static void handlePeersTap(uint32_t idx) {
   if (idx == 0) { showMainMenu(); return; }
 #if ENABLE_ESPNOW
-  // Rows 1..N map directly to gEspNow->devices[0..N-1].
-  int peerIdx = (int)idx - 1;
-  if (!gEspNow || !gEspNow->initialized ||
-      peerIdx < 0 || peerIdx >= gEspNow->deviceCount) {
-    DEBUG_G2F("[G2-ESP-NOW-APP] peers: invalid idx=%u (count=%d)",
-              (unsigned)idx,
+  // Row 1..N is the peer showPeersMenu drew there (gPeerRowMac), not
+  // devices[row - 1]: this device's own entry has no row. Find the row's
+  // address in devices[] again, so gSelectedPeer stays a devices[] index and
+  // names the peer the row showed.
+  const int row = (int)idx - 1;
+  int peerIdx = -1;
+  if (gEspNow && gEspNow->initialized && row >= 0 && row < (int)gPeerRowCount) {
+    const int count = gEspNow->deviceCount < 16 ? gEspNow->deviceCount : 16;
+    for (int i = 0; i < count; i++) {
+      if (memcmp(gEspNow->devices[i].mac, gPeerRowMac[row], 6) == 0) {
+        peerIdx = i;
+        break;
+      }
+    }
+    // Never this device, whatever the table holds.
+    if (peerIdx >= 0 && isSelfMac(gEspNow->devices[peerIdx].mac)) peerIdx = -1;
+  }
+  if (peerIdx < 0) {
+    // ESP-NOW stopped, a tap past the rows drawn, or the peer was unpaired
+    // since the draw: show the list as it is now instead of a stale target.
+    DEBUG_G2F("[G2-ESP-NOW-APP] peers: row %u has no peer now (rows=%u, count=%d)",
+              (unsigned)idx, (unsigned)gPeerRowCount,
               (gEspNow && gEspNow->initialized) ? gEspNow->deviceCount : -1);
+    showPeersMenu();
     return;
   }
   gSelectedPeer = peerIdx;

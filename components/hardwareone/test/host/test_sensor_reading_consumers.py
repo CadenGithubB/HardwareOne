@@ -55,6 +55,12 @@ def generate(component, baseline):
     constants.append(re.search(r'static const char\* kRtcDow\[8\] = \{.*?\};', g2, re.S)[0])
     functions = [extract_block(g2, 'static void ' + name + '(')
                  for name in ['gpCell', 'anoCell', *FORMATTERS]]
+    # The RTC row and readout show local time: the production conversion, over
+    # the harness's timezone offset (0 for the recorded fixture).
+    rtc_owner = (component / 'i2csensor_ds3231.cpp').read_text()
+    functions = [extract_block(rtc_owner, marker) for marker in (
+        'static int rtcDaysInMonth(', 'static int rtcDayOfWeek(',
+        'RtcDateTime rtcLocalTime(')] + functions
     functions.append(extract_block((component / 'BLE_Server.cpp').read_text(),
                                    'static void buildSensorDataJson('))
     functions.append(extract_block(g2_client_text(component),

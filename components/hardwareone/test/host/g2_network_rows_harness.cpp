@@ -125,6 +125,14 @@ struct FakeEspNow { bool initialized = false; int deviceCount = 0; };
 static FakeEspNow espnowState;
 static FakeEspNow* gEspNow = &espnowState;
 static const char* getEspNowModeString() { return "mesh"; }
+// G2_Page_Network.cpp's g2EspNowPeerCounts (defined outside the lifted
+// functions; test_g2_espnow_peer_rows runs the production one): peers up /
+// paired without this device, which the "Peers" row shows.
+static int peersUp = 0, peersPaired = 0;
+static void g2EspNowPeerCounts(int* up, int* paired) {
+  if (up) *up = peersUp;
+  if (paired) *paired = peersPaired;
+}
 
 static int serverObject = 0;
 static void* server = nullptr;
@@ -225,13 +233,15 @@ static void espnow_view_devices_after_stop() {
 }
 
 static void espnow_peers_row_after_stop() {
-  espnowState = FakeEspNow{true, 2};
+  espnowState = FakeEspNow{true, 3};  // this device's entry and two peers
+  peersUp = 1;
+  peersPaired = 2;
   showEspNowMenu();
-  const size_t row = rowOf("Peers: 2");
+  const size_t row = rowOf("Peers: 1/2 up");
   espnowState.initialized = false;
   handleEspNowTap(tapRow(row));
   EXPECT(keyboards == 0 && submits == 0,
-         "'Peers: N' (info row) opened the name keyboard after ESP-NOW stopped");
+         "'Peers: up/paired' (info row) opened the name keyboard after ESP-NOW stopped");
 }
 
 static void espnow_toggle_follows_label() {
@@ -268,9 +278,13 @@ static void espnow_auto_start_follows_label() {
 }
 
 static void espnow_rows_unchanged_state() {
-  espnowState = FakeEspNow{true, 3};
+  // The Peers row is up / paired without this device (the lens status line's
+  // count), not the registry size, which also holds this device's own entry.
+  espnowState = FakeEspNow{true, 4};
+  peersUp = 2;
+  peersPaired = 3;
   showEspNowMenu();
-  const char* on[] = {"<- WiFi", "ESP-NOW: ON", "Mode: mesh", "Peers: 3",
+  const char* on[] = {"<- WiFi", "ESP-NOW: ON", "Mode: mesh", "Peers: 2/3 up",
                       "View Devices", "Name: lab", "Auto Start: ON"};
   CHECK(shownCount == 7);
   for (size_t i = 0; i < 7; ++i) CHECK(std::strcmp(shownRows[i], on[i]) == 0);

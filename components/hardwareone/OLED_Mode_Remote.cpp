@@ -313,8 +313,13 @@ void displayRemoteMode() {
     int savedSel = bondPickerScroll->selectedIndex;
     int savedOff = bondPickerScroll->scrollOffset;
     oledScrollClear(bondPickerScroll);
-    uint8_t selfMac[6];
-    esp_wifi_get_mac(WIFI_IF_STA, selfMac);
+    // ESP-NOW's cached address while it runs: this list rebuilds every frame,
+    // and the driver query is a round trip to the radio co-processor on a
+    // Hosted board (espnowSelfStaMac only falls back to it while ESP-NOW is
+    // stopped). One read for the whole loop; zeroed so a failed read matches
+    // no device.
+    uint8_t selfMac[6] = {};
+    (void)espnowSelfStaMac(selfMac);
     int total = min(gEspNow->deviceCount, 16);
     pickerFilteredCount = 0;
     for (int i = 0; i < total; i++) {

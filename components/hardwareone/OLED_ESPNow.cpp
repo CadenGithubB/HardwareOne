@@ -1562,9 +1562,13 @@ void oledEspNowRefreshDeviceList() {
   // to 0) would snap the selection back to the top every second.
   oledScrollClearKeepSelection(&sEspNowDeviceListScroll);
   
-  // Get own MAC to skip self
-  uint8_t myMac[6];
-  esp_wifi_get_mac(WIFI_IF_STA, myMac);
+  // Own MAC to skip self: ESP-NOW's cached address while it runs. This list
+  // rebuilds every second, and the driver query is a round trip to the radio
+  // co-processor on a Hosted board; espnowSelfStaMac only falls back to it
+  // while ESP-NOW is stopped. One read for the whole loop (isSelfMac would
+  // repeat the fallback per row). Zeroed so a failed read matches no device.
+  uint8_t myMac[6] = {};
+  (void)espnowSelfStaMac(myMac);
   
   // Static buffers for scroll item text (pointers stored in scroll items, so
   // they must outlive this call). PSRAM .bss: display text and sort rows,
@@ -1963,7 +1967,13 @@ bool oledEspNowHandleRemoteFormInput(int deltaX, int deltaY, uint32_t newlyPress
         gOledEspNowState.remoteFormField == 0
             ? OledKeyboardDictationPolicy::ALLOW_PLAINTEXT
             : OledKeyboardDictationPolicy::DENY;
-    oledKeyboardInit(title, initialText, 64, policy,
+    // The command field holds what the keyboard does: a Device Config row
+    // prefills up to "espnowfriendlyname " plus 47 characters (66), and at 64
+    // opening the field cut the end of that name off without a word. A line
+    // too long for the frame is refused by `espnowremote` with its reason.
+    const int maxLength =
+        gOledEspNowState.remoteFormField == 2 ? OLED_KEYBOARD_MAX_LENGTH : 64;
+    oledKeyboardInit(title, initialText, maxLength, policy,
                      gOledEspNowState.remoteFormField == 1);  // password
     return true;
   }
@@ -2262,26 +2272,30 @@ bool oledEspNowHandleSettingsInput(int deltaX, int deltaY, uint32_t newlyPressed
     String initialValue = "";
     int maxLen = 32;
     
+    // The name and metadata editors accept what their commands accept, no
+    // more (a longer entry was refused after typing) and no less: the device
+    // name's rule, and for the others the metadata frame's text field without
+    // its NUL (V4PayloadMetadata: room 31, zone 31, friendly name 47, tags 53).
     switch (gOledEspNowState.settingsEditField) {
       case 0: // Device Name
         initialValue = gSettings.espnowDeviceName;
-        maxLen = 16;
+        maxLen = (int)devicename::kMaxLen;
         break;
       case 1: // Room
         initialValue = gSettings.espnowRoom;
-        maxLen = 30;
+        maxLen = (int)(sizeof(V4PayloadMetadata::room) - 1);
         break;
       case 2: // Zone
         initialValue = gSettings.espnowZone;
-        maxLen = 30;
+        maxLen = (int)(sizeof(V4PayloadMetadata::zone) - 1);
         break;
       case 3: // Friendly Name
         initialValue = gSettings.espnowFriendlyName;
-        maxLen = 46;
+        maxLen = (int)(sizeof(V4PayloadMetadata::friendlyName) - 1);
         break;
       case 4: // Tags
         initialValue = gSettings.espnowTags;
-        maxLen = 62;
+        maxLen = (int)(sizeof(V4PayloadMetadata::tags) - 1);
         break;
       case 6: // Passphrase
         initialValue = "";  // Don't show existing passphrase
@@ -2372,17 +2386,29 @@ struct DeviceConfigAction {
   uint8_t     valueMax;        // longest value the keyboard accepts
   bool        startsWithPeerName;
 };
+// A name, room, zone or friendly name is as long as the peer's command
+// accepts: the device name's rule, and the metadata frame's text field
+// without its NUL (V4PayloadMetadata: room 31, zone 31, friendly name 47).
 static const DeviceConfigAction kDeviceConfigActions[] = {
-  { "Restart Device",  "reboot",             nullptr,                        0,  false },
-  { "Set Role",        "espnowmeshrole",     "Role (master/backup/worker):", 16, false },
-  { "Set Name",        "devicename",         "Device Name:",                 31, true  },
-  { "Set Room",        "espnowroom",         "Room:",                        16, false },
-  { "Set Zone",        "espnowzone",         "Zone:",                        16, false },
-  { "Set Pretty Name", "espnowfriendlyname", "Pretty Name:",                 24, false },
-  { "Unpair Device",   nullptr,              nullptr,                        0,  false },
+  { "Restart Device",    "reboot",             nullptr,                        0,  false },
+  { "Set Role",          "espnowmeshrole",     "Role (master/backup/worker):", 16, false },
+  { "Set Name",          "devicename",         "Device Name:",                 devicename::kMaxLen, true },
+  { "Set Room",          "espnowroom",         "Room:",                        sizeof(V4PayloadMetadata::room) - 1, false },
+  { "Set Zone",          "espnowzone",         "Zone:",                        sizeof(V4PayloadMetadata::zone) - 1, false },
+  { "Set Friendly Name", "espnowfriendlyname", "Friendly Name:",               sizeof(V4PayloadMetadata::friendlyName) - 1, false },
+  { "Unpair Device",     nullptr,              nullptr,                        0,  false },
 };
 static const int DEVICE_CONFIG_COUNT =
     (int)(sizeof(kDeviceConfigActions) / sizeof(kDeviceConfigActions[0]));
+// Every editor limit taken from the name rule or the metadata frame is a
+// length the on-screen keyboard holds, which also keeps it inside valueMax.
+static_assert(OLED_KEYBOARD_MAX_LENGTH <= UINT8_MAX &&
+              devicename::kMaxLen <= OLED_KEYBOARD_MAX_LENGTH &&
+              sizeof(V4PayloadMetadata::room) - 1 <= OLED_KEYBOARD_MAX_LENGTH &&
+              sizeof(V4PayloadMetadata::zone) - 1 <= OLED_KEYBOARD_MAX_LENGTH &&
+              sizeof(V4PayloadMetadata::friendlyName) - 1 <= OLED_KEYBOARD_MAX_LENGTH &&
+              sizeof(V4PayloadMetadata::tags) - 1 <= OLED_KEYBOARD_MAX_LENGTH,
+              "an OLED name or metadata editor limit does not fit the keyboard");
 
 void oledEspNowOpenDeviceConfig() {
   gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG;

@@ -2024,7 +2024,8 @@ Neither exposed the complete set of readings this panel needs.
 
 `G2ConnectionStatus` and `g2ConnectionStatusSnapshot` now provide those readings
 through the glasses owner. `getG2Status` retains its public API and exact text
-format for CLI/OLED consumers. A shared `formatG2Status` lets HTTP produce the
+format for the CLI (the OLED G2 Status screen now draws its own rows from
+`g2ConnectionStatusSnapshot`). A shared `formatG2Status` lets HTTP produce the
 legacy display text from the same captured values without sampling again.
 The disabled snapshot reports unavailable without changing caller data, and
 disabled text functions respect zero-capacity buffers.

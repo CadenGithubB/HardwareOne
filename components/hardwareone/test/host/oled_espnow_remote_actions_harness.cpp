@@ -85,12 +85,17 @@ struct Keyboard {
   int inits = 0;
 };
 static Keyboard keyboard;
+// OLED_Utils.h: the most the on-screen keyboard holds (hand copy).
+static constexpr int OLED_KEYBOARD_MAX_LENGTH = 128;
+// As the real keyboard: the limit is clamped to what it holds, and text it is
+// opened with is cut to that limit.
 static void oledKeyboardInit(const char* title, const char* initialText, int maxLength,
                              OledKeyboardDictationPolicy, bool masked = false) {
+  if (maxLength > OLED_KEYBOARD_MAX_LENGTH) maxLength = OLED_KEYBOARD_MAX_LENGTH;
   keyboard = Keyboard{};
   keyboard.active = true;
   keyboard.title = title;
-  keyboard.text = initialText;
+  keyboard.text = std::string(initialText).substr(0, (size_t)maxLength);
   keyboard.maxLength = maxLength;
   keyboard.masked = masked;
   keyboard.inits = 1;
@@ -109,6 +114,26 @@ static void typeAndConfirm(const char* text) { keyboard.text = text; keyboard.co
 [[maybe_unused]] static void removeEspNowDevice(const uint8_t*) { std::abort(); }
 
 bool oledEspNowSendRemoteCommand();
+
+// What the Device Config table takes its value limits from, as far as it reads
+// them: the device name's rule (System_DeviceName.h) and the text fields of
+// the metadata frame (System_ESPNow_Wire.h V4PayloadMetadata, whose real
+// layout the espnow_wire_layout suite pins). Hand copies: the asserts below
+// stop a change here that the headers did not make.
+namespace devicename { constexpr size_t kMaxLen = 31; }
+struct V4PayloadMetadata {
+  char deviceName[32];
+  char friendlyName[48];
+  char room[32];
+  char zone[32];
+  char tags[54];
+  uint8_t stationary;
+  uint8_t reserved[3];
+};
+static_assert(sizeof(V4PayloadMetadata) == 202 && sizeof(V4PayloadMetadata::deviceName) - 1 == devicename::kMaxLen &&
+              sizeof(V4PayloadMetadata::room) - 1 == 31 && sizeof(V4PayloadMetadata::zone) - 1 == 31 &&
+              sizeof(V4PayloadMetadata::friendlyName) - 1 == 47 && sizeof(V4PayloadMetadata::tags) - 1 == 53,
+              "the stand-in is not the metadata frame's text fields (31/31/47/53 without the NUL)");
 
 // INSERT_PRODUCTION
 
@@ -203,14 +228,18 @@ int main() {
   expectFormOpenedWith("reboot");
 
   // D2: the five value rows ask for the value, then open the form with
-  // "<registered command> <value>".
-  struct ValueRow { const char* label; const char* value; const char* command; };
+  // "<registered command> <value>". The keyboard takes as many characters as
+  // the peer's command accepts: 31 for the device name (its rule), 31/31/47
+  // for room, zone and friendly name (the metadata frame's fields without the
+  // NUL). They were 31/16/16/24, so a room the peer accepts could not be typed.
+  struct ValueRow { const char* label; const char* value; const char* command;
+                    const char* title; int maxLength; const char* initial; };
   const ValueRow valueRows[] = {
-      {"Set Role", "backup", "espnowmeshrole backup"},
-      {"Set Name", "bench2", "devicename bench2"},
-      {"Set Room", "Kitchen", "espnowroom Kitchen"},
-      {"Set Zone", "Door", "espnowzone Door"},
-      {"Set Pretty Name", "Bench Two", "espnowfriendlyname Bench Two"},
+      {"Set Role", "backup", "espnowmeshrole backup", "Role (master/backup/worker):", 16, ""},
+      {"Set Name", "bench2", "devicename bench2", "Device Name:", 31, "lab"},
+      {"Set Room", "Kitchen", "espnowroom Kitchen", "Room:", 31, ""},
+      {"Set Zone", "Door", "espnowzone Door", "Zone:", 31, ""},
+      {"Set Friendly Name", "Bench Two", "espnowfriendlyname Bench Two", "Friendly Name:", 47, ""},
   };
   for (const ValueRow& row : valueRows) {
     beginCase(row.label, ESPNOW_VIEW_DEVICE_CONFIG);
@@ -219,10 +248,73 @@ int main() {
     CHECK(commands.empty(), "a value row sends nothing before its value is typed");
     CHECK(gOledEspNowState.currentView == ESPNOW_VIEW_DEVICE_CONFIG_KEYBOARD && keyboard.inits == 1,
           "a value row opens its keyboard");
+    CHECK(keyboard.title == row.title, "the keyboard is titled with the row's prompt");
+    CHECK(keyboard.maxLength == row.maxLength, "the keyboard takes what the peer's command accepts");
+    CHECK(keyboard.text == row.initial, "only Set Name starts from the peer's shown name");
     typeAndConfirm(row.value);
     CHECK(configKeyboardInput(0), "the confirmed keyboard is consumed");
     expectFormOpenedWith(row.command);
   }
+
+  // D2b: the limits come from the name rule and the metadata frame, the row
+  // says "Friendly Name" as the local settings list does (it said "Pretty
+  // Name"), and every label fits the menu row: 20 columns from x=4 on the
+  // 128 px panel.
+  beginCase("D2b limits and labels", ESPNOW_VIEW_DEVICE_CONFIG);
+  CHECK(kDeviceConfigActions[rowOf("Set Name")].valueMax == devicename::kMaxLen &&
+        kDeviceConfigActions[rowOf("Set Room")].valueMax == sizeof(V4PayloadMetadata::room) - 1 &&
+        kDeviceConfigActions[rowOf("Set Zone")].valueMax == sizeof(V4PayloadMetadata::zone) - 1 &&
+        kDeviceConfigActions[rowOf("Set Friendly Name")].valueMax == sizeof(V4PayloadMetadata::friendlyName) - 1,
+        "a value limit is the name rule's or the metadata field's");
+  for (int i = 0; i < DEVICE_CONFIG_COUNT; i++) {
+    const DeviceConfigAction& action = kDeviceConfigActions[i];
+    CHECK(std::strlen(action.label) <= 20, "a Device Config label fits its menu row (20 columns)");
+    CHECK(!std::strstr(action.label, "Pretty") &&
+          !(action.valuePrompt && std::strstr(action.valuePrompt, "Pretty")),
+          "the friendly name is called 'Friendly Name'");
+    CHECK(!action.valuePrompt || action.valueMax > 0, "a row that asks for a value accepts one");
+  }
+
+  // D2c: the form's Command field holds every command a Device Config row
+  // can prefill, so opening that field and confirming it leaves the command as
+  // it was. At 64 characters a 47-character friendly name ("espnowfriendlyname"
+  // plus a space plus the name: 66) lost its last two characters there, and
+  // the peer stored the shortened name. User and Pass keep their 64.
+  beginCase("D2c long value through the Command field", ESPNOW_VIEW_DEVICE_CONFIG);
+  const std::string longName(sizeof(V4PayloadMetadata::friendlyName) - 1, 'n');
+  const std::string longCommand = "espnowfriendlyname " + longName;
+  gOledEspNowState.deviceConfigMenuIndex = rowOf("Set Friendly Name");
+  CHECK(oledEspNowHandleDeviceConfigInput(0, 0, INPUT_BUTTON_A), "A on a row is consumed");
+  typeAndConfirm(longName.c_str());
+  CHECK(configKeyboardInput(0), "the confirmed keyboard is consumed");
+  expectFormOpenedWith(longCommand.c_str());
+  gOledEspNowState.remoteFormField = 2;
+  CHECK(oledEspNowHandleRemoteFormInput(0, 0, INPUT_BUTTON_A), "A on the Command field is consumed");
+  CHECK(keyboard.inits == 1 && keyboard.title == "Command:" && !keyboard.masked,
+        "A on the Command field opens its keyboard, unmasked");
+  CHECK(keyboard.text == longCommand, "the Command keyboard opens with the whole prefilled command");
+  for (int i = 0; i < DEVICE_CONFIG_COUNT; i++) {
+    const DeviceConfigAction& action = kDeviceConfigActions[i];
+    if (!action.remoteCommand) continue;
+    const size_t longest = std::strlen(action.remoteCommand) + (action.valuePrompt ? 1 + action.valueMax : 0);
+    CHECK(longest <= (size_t)keyboard.maxLength, "the Command field holds a row's longest command");
+  }
+  keyboard.completed = true;  // confirmed as it stands
+  CHECK(oledEspNowHandleRemoteFormInput(0, 0, 0), "the confirmed keyboard is consumed");
+  CHECK(gOledEspNowState.remoteCommand == longCommand && !oledKeyboardIsActive(),
+        "confirming the Command field unchanged keeps the whole command");
+  for (int field = 0; field < 2; field++) {
+    gOledEspNowState.remoteFormField = field;
+    CHECK(oledEspNowHandleRemoteFormInput(0, 0, INPUT_BUTTON_A), "A on a form field is consumed");
+    CHECK(keyboard.maxLength == 64 && keyboard.masked == (field == 1),
+          "User and Pass keep 64 characters; only Pass is masked");
+    keyboard.cancelled = true;
+    CHECK(oledEspNowHandleRemoteFormInput(0, 0, 0), "the cancelled keyboard is consumed");
+  }
+  gOledEspNowState.remoteFormField = 2;
+  sendForm(longCommand.c_str());
+  CHECK(commands.size() == 1 && commands[0] == std::string(kLine) + longCommand,
+        "the long command is submitted whole");
 
   // D3: an empty or cancelled value returns to the menu; nothing is sent.
   beginCase("D3 empty value", ESPNOW_VIEW_DEVICE_CONFIG);

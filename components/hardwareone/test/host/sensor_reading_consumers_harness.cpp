@@ -56,6 +56,8 @@ static int trackedSnprintf(char* dst, size_t cap, const char* fmt, ...) {
   int n=vsnprintf(dst,cap,fmt,args); va_end(args); return n;
 }
 #define snprintf trackedSnprintf
+// System_Clock.h, as rtcLocalTime reads it: the timezone setting in minutes.
+namespace Clock { static int tzOffset=0; static int tzOffsetMinutes() { return tzOffset; } }
 // FUNCTIONS
 static void setup(int state) {
   admit=state!=2; held=false;
@@ -120,5 +122,24 @@ int main() {
   }
 #if !TEST_BASELINE
   setup(2); char fm[160];buildFmTunerReadout(fm,sizeof(fm));assert(std::string(fm)=="Radio busy\n(reading...)");
+  // The lens shows the RTC in local time (the chip keeps UTC): Thu 2026-10-08
+  // 23:58:42 UTC is Fri 01:58:42 at +120 min, with the date and the weekday
+  // carried over midnight, and Thu 18:58:42 at -300 min. Row and readout agree.
+  struct Local { int offset; const char* row; const char* readout; };
+  const Local locals[]={
+    {120,"01:58","Fri 2026-10-09\n   01:58:42\nTemp: -1.5 C"},
+    {-300,"18:58","Thu 2026-10-08\n   18:58:42\nTemp: -1.5 C"},
+    {0,"23:58","Thu 2026-10-08\n   23:58:42\nTemp: -1.5 C"},
+  };
+  for(const Local& local:locals) {
+    setup(0); Clock::tzOffset=local.offset; char rtc[96];
+    rtcG2FormatValue(rtc,sizeof(rtc));assert(std::string(rtc)==local.row);
+    g2BuildRtcReadout(rtc,sizeof(rtc));assert(std::string(rtc)==local.readout);
+  }
+  Clock::tzOffset=120;  // the waiting and busy words are not times: unchanged
+  setup(1); { char rtc[96];rtcG2FormatValue(rtc,sizeof(rtc));assert(std::string(rtc)=="...");
+    g2BuildRtcReadout(rtc,sizeof(rtc));assert(std::string(rtc)=="RTC\n(reading...)"); }
+  setup(2); { char rtc[96];rtcG2FormatValue(rtc,sizeof(rtc));assert(std::string(rtc)=="busy"); }
+  Clock::tzOffset=0;
 #endif
 }

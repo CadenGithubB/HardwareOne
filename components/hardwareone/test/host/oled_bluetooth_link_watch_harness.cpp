@@ -263,7 +263,33 @@ static bool isG2Connected() { return w.glasses; }
 static bool isG2ClientInitialized() { return w.glassesClient; }
 static G2State getG2State() { return G2_STATE_IDLE; }
 static const char* getG2StateString() { return "idle"; }
-static void getG2Status(char* out, size_t n) { std::snprintf(out, n, "ok"); }
+// The connection status the G2 status screen draws its rows from: the fields
+// of G2_Glasses.h's G2TempleConnectionStatus / G2ConnectionStatus, same names
+// and order (that header is an empty stand-in here). No getG2Status: the
+// screen must not go back to the `g2status` line, which does not fit a row.
+struct G2TempleConnectionStatus {
+  bool connected = false;
+  uint16_t mtu = 0;
+  int battery = -1;
+  uint32_t tx = 0;
+  uint32_t rx = 0;
+};
+struct G2ConnectionStatus {
+  const char* state = "off";
+  bool running = false;
+  G2TempleConnectionStatus left;
+  G2TempleConnectionStatus right;
+  char repair[8] = "none";  // "none", "1/7".."7/7", "slow", "held"
+};
+static G2ConnectionStatus gG2Status;    // what the owner's next snapshot holds
+static bool gG2StatusAvailable = true;  // false: the owner has no status to give
+static unsigned gG2Snapshots = 0;
+static bool g2ConnectionStatusSnapshot(G2ConnectionStatus* out) {
+  ++gG2Snapshots;
+  if (!out || !gG2StatusAvailable) return false;
+  *out = gG2Status;
+  return true;
+}
 static void g2ShowText(const char*) {}
 bool gG2MenuNavEnabled = false;
 static bool g2RingIsConnected() { return w.ring; }
@@ -445,6 +471,9 @@ static void reset() {
   gToasts.clear();
   gAsyncCommands.clear();
   currentOledMode = OLED_BLUETOOTH;
+  gG2Status = G2ConnectionStatus();
+  gG2StatusAvailable = true;
+  gG2MenuNavEnabled = false;
 #if ENABLE_BLE_PHONE_PIPE
   gPair = PairWorld();
   gPairCloses.clear();
@@ -1079,6 +1108,23 @@ static void phoneScreen() {
 }
 #endif
 
+#if ENABLE_G2_GLASSES
+// The owner's next status snapshot (the G2 Status screen and its watch).
+static void setG2(const char* state, bool left, int leftBattery, bool right, int rightBattery,
+                  const char* repair) {
+  gG2Status = G2ConnectionStatus();
+  gG2Status.state = state;
+  gG2Status.running = true;
+  gG2Status.left.connected = left;
+  gG2Status.left.battery = leftBattery;
+  gG2Status.left.mtu = gG2Status.right.mtu = 247;
+  gG2Status.left.tx = gG2Status.right.rx = 4000000000u;  // widest counters: never drawn
+  gG2Status.right.connected = right;
+  gG2Status.right.battery = rightBattery;
+  std::snprintf(gG2Status.repair, sizeof(gG2Status.repair), "%s", repair);
+}
+#endif
+
 // ---- Link watcher -------------------------------------------------------------------
 static void tickExpect(int wanted, int line) {
   const int before = gMarks;
@@ -1138,6 +1184,48 @@ static void linkWatch() {
   TICK(1);
 #endif
 #if ENABLE_G2_GLASSES
+  // The G2 Status screen draws each temple, its battery, the repair state and
+  // Nav Mode, and "glasses connected" (either temple) covers none of them.
+  // While the screen is open, a change in a row it draws is a redraw; a change
+  // in what it does not draw (MTU, counters) is not, and off the screen the
+  // status is not even read.
+  setG2("connected", true, 85, true, 90, "none");
+  gG2Snapshots = 0;
+  TICK(0);
+  setG2("connected", true, 84, true, 90, "none");
+  TICK(0);                                  // another screen: no row shows it
+  CHECK(gG2Snapshots == 0);
+  currentOledMode = OLED_BLUETOOTH_G2_STATUS;
+  TICK(0);                                  // opening the screen draws it anyway
+  TICK(0);
+  CHECK(gG2Snapshots == 2);                 // one capture per tick on the screen
+  setG2("connected", true, 83, true, 90, "none");   TICK(1);  // left battery
+  TICK(0);
+  setG2("connected", true, 83, true, -1, "none");   TICK(1);  // right battery unknown
+  setG2("connected", true, 83, true, 300, "none");  TICK(0);  // still drawn as "--"
+  setG2("connecting", true, 83, false, 300, "1/7"); TICK(1);  // right temple drops
+  setG2("connecting", true, 83, false, 12, "1/7");  TICK(0);  // a down temple shows no battery
+  setG2("connecting", true, 83, false, 12, "2/7");  TICK(1);  // the repair moves on
+  setG2("connecting", true, 83, false, 12, "slow"); TICK(1);
+  setG2("connected", true, 83, true, 12, "none");   TICK(1);  // and the temple is back
+  gG2Status.left.mtu = 23;
+  gG2Status.left.tx = gG2Status.right.rx = 7;
+  TICK(0);                                  // MTU and counters are not on the screen
+  gG2MenuNavEnabled = true;  TICK(1);       // Nav Mode: ON (set from the lens)
+  gG2MenuNavEnabled = false; TICK(1);
+  gG2StatusAvailable = false; TICK(1);      // "Status unavailable"
+  gG2StatusAvailable = true;  TICK(1);
+  TICK(0);
+  currentOledMode = OLED_BLUETOOTH;
+  TICK(0);                                  // leaving the screen is a redraw already
+  setG2("connected", true, 50, true, 50, "none");
+  TICK(0);
+  currentOledMode = OLED_BLUETOOTH_G2_STATUS;
+  TICK(0);                                  // back on it: drawn fresh, no extra mark
+  currentOledMode = OLED_BLUETOOTH;
+  gG2Status = G2ConnectionStatus();
+  TICK(0);
+
   w.ring = false; TICK(1);
   w.glassesClient = w.glasses = false; TICK(1);
 #endif
@@ -1281,6 +1369,86 @@ static void pairWatch() {
 }
 #endif
 
+#if ENABLE_G2_GLASSES
+// The G2 status screen (Bluetooth > G2 > Status): its own short rows from one
+// captured status, never the `g2status` line. State, each temple with its
+// battery, the repair, Nav Mode: five rows, the 64 px panel's whole body, so
+// render() fails on a sixth (footer) or on a row past 21 columns.
+static bool anyRowHas(const Rows& rows, const char* text) {
+  for (const auto& r : rows) if (r.find(text) != std::string::npos) return true;
+  return false;
+}
+
+static void g2StatusScreen() {
+  reset();
+  // Not connected: the state and the hint, no temple, repair or Nav Mode row.
+  gG2Status.state = "idle";
+  EXPECT_EXACT(render(OLED_BLUETOOTH_G2_STATUS), "State: idle", "Not connected.", "Use Connect to",
+               "pair glasses.");
+  gG2Status.state = "scanning";
+  EXPECT_ROWS(render(OLED_BLUETOOTH_G2_STATUS), "State: scanning", "Not connected.");
+
+  // Both temples up: one row each with its battery. 100 % on the right is the
+  // widest temple row (20 columns).
+  w.glassesClient = w.glasses = true;
+  setG2("connected", true, 85, true, 100, "none");
+  gG2Snapshots = 0;
+  Rows rows = render(OLED_BLUETOOTH_G2_STATUS);
+  EXPECT_EXACT(rows, "State: connected", "Left: up, batt 85%", "Right: up, batt 100%", "Repair: none",
+               "Nav Mode: OFF");
+  CHECK(gG2Snapshots == 1);  // one capture per draw: the rows agree with each other
+  // Nothing of the `g2status` line (state=.. L=.. mtu=.. tx=.. rx=..) is left.
+  CHECK(!anyRowHas(rows, "=") && !anyRowHas(rows, "mtu") && !anyRowHas(rows, "tx") &&
+        !anyRowHas(rows, "4000000000") && !anyRowHas(rows, "247"));
+  setG2("connected", true, 0, true, 7, "none");
+  EXPECT_ROWS(render(OLED_BLUETOOTH_G2_STATUS), "State: connected", "Left: up, batt 0%", "Right: up, batt 7%");
+  gG2MenuNavEnabled = true;
+  EXPECT_EXACT(render(OLED_BLUETOOTH_G2_STATUS), "State: connected", "Left: up, batt 0%",
+               "Right: up, batt 7%", "Repair: none", "Nav Mode: ON");
+  gG2MenuNavEnabled = false;
+
+  // One temple down: "down" without a battery, and the repair in the owner's
+  // words (fast tries, slow, held).
+  setG2("connecting", true, 42, false, 64, "7/7");
+  EXPECT_EXACT(render(OLED_BLUETOOTH_G2_STATUS), "State: connecting", "Left: up, batt 42%", "Right: down",
+               "Repair: 7/7", "Nav Mode: OFF");
+  setG2("connecting", false, 42, true, 64, "1/7");
+  EXPECT_EXACT(render(OLED_BLUETOOTH_G2_STATUS), "State: connecting", "Left: down", "Right: up, batt 64%",
+               "Repair: 1/7", "Nav Mode: OFF");
+  for (const char* repair : {"slow", "held"}) {
+    setG2("connecting", true, 42, false, -1, repair);
+    rows = render(OLED_BLUETOOTH_G2_STATUS);
+    CHECK(rows.size() == 5 && rows[2] == "Right: down" && rows[3] == std::string("Repair: ") + repair);
+  }
+
+  // No battery reading yet (-1) or one out of range: "--", never "-1%".
+  setG2("connected", true, -1, true, 300, "none");
+  rows = render(OLED_BLUETOOTH_G2_STATUS);
+  EXPECT_EXACT(rows, "State: connected", "Left: up, batt --", "Right: up, batt --", "Repair: none",
+               "Nav Mode: OFF");
+  CHECK(!anyRowHas(rows, "-1") && !anyRowHas(rows, "300"));
+
+  // The longest state name fills its row exactly (21 columns), with all five rows.
+  setG2("authenticating", true, 100, true, 100, "held");
+  rows = render(OLED_BLUETOOTH_G2_STATUS);
+  CHECK(rows.size() == 5 && rows[0] == "State: authenticating" && rows[0].size() == 21);
+  setG2("disconnecting", true, 100, true, 100, "7/7");
+  EXPECT_ROWS(render(OLED_BLUETOOTH_G2_STATUS), "State: disconnecting", "Left: up, batt 100%");
+
+  // The owner has no status to give: one row says so, and nothing is drawn
+  // from the unfilled copy (no temple, battery or repair row).
+  setG2("connected", true, 85, true, 90, "none");
+  gG2StatusAvailable = false;
+  rows = render(OLED_BLUETOOTH_G2_STATUS);
+  EXPECT_EXACT(rows, "State: idle", "Status unavailable", "Nav Mode: OFF");
+  CHECK(!anyRowStarts(rows, "Left") && !anyRowStarts(rows, "Right") && !anyRowStarts(rows, "Repair"));
+  w.glasses = false;
+  EXPECT_EXACT(render(OLED_BLUETOOTH_G2_STATUS), "State: idle", "Not connected.", "Use Connect to",
+               "pair glasses.");
+  reset();
+}
+#endif
+
 int main() {
   statusOff();
   statusCentral();
@@ -1288,6 +1456,7 @@ int main() {
   mainMenu();
 #if ENABLE_G2_GLASSES
   peerMenus();
+  g2StatusScreen();
 #endif
   roleRows();
 #if ENABLE_BLE_PHONE_PIPE

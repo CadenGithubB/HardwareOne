@@ -43,12 +43,22 @@ void g2ShowNetworkMenu();
 // Caller passes the index of the tapped item in the current list.
 void g2NetworkHandleTap(uint32_t idx);
 
+// ESP-NOW peers for the lens "Peers" rows (this page and the ESP-NOW app), by
+// the status line's rule: *paired = every registry entry except this device,
+// *up = those with an ACTIVE encrypted session. Both 0 while ESP-NOW is
+// stopped or not compiled in. Either pointer may be null.
+void g2EspNowPeerCounts(int* up, int* paired);
+
 #else
 inline void g2BuildNetworkInfo(char* out, size_t cap) {
   if (out && cap > 0) out[0] = '\0';
 }
 inline void g2ShowNetworkMenu() {}
 inline void g2NetworkHandleTap(uint32_t idx) { (void)idx; }
+inline void g2EspNowPeerCounts(int* up, int* paired) {
+  if (up) *up = 0;
+  if (paired) *paired = 0;
+}
 #endif
 
 #endif  // G2_PAGE_NETWORK_H

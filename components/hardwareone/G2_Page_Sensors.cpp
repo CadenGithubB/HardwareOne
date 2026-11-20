@@ -158,10 +158,12 @@ static void rtcG2FormatValue(char* out, size_t cap) {
     if (rtc.dataValid) {
       // Show clock time HH:MM — the temperature reading is a
       // secondary feature on this part and the date eats too much
-      // of the value column.
+      // of the value column. The chip keeps UTC; screens show local time
+      // (rtcLocalTime applies the timezone setting, as the OLED RTC page does).
+      const RtcDateTime t = rtcLocalTime(&rtc.dateTime);
       snprintf(out, cap, "%02u:%02u",
-               (unsigned)rtc.dateTime.hour,
-               (unsigned)rtc.dateTime.minute);
+               (unsigned)t.hour,
+               (unsigned)t.minute);
     } else {
       snprintf(out, cap, "...");
     }
@@ -913,6 +915,8 @@ static void g2BuildAnoArt(char* out, size_t cap) {
 // page ticks at 1 Hz, so the seconds advance), and the chip temperature.
 // Richer than rtcG2FormatValue's HH:MM landing-list value, which has to fit a
 // narrow column. No "°" glyph — the lens font drops uncommon symbols.
+// Local time, as the landing row: rtcLocalTime carries the date and the
+// weekday across midnight with the timezone setting.
 //   Sun 2026-06-07
 //      14:30:52
 //   Temp: 24.5 C
@@ -923,7 +927,7 @@ static void g2BuildRtcReadout(char* out, size_t cap) {
     snprintf(out, cap, "RTC\n(reading...)");
     return;
   }
-  const RtcDateTime& t = rtc.dateTime;
+  const RtcDateTime t = rtcLocalTime(&rtc.dateTime);
   const uint8_t dow = (t.dayOfWeek >= 1 && t.dayOfWeek <= 7) ? t.dayOfWeek : 0;
   snprintf(out, cap,
            "%s %04u-%02u-%02u\n"

@@ -598,27 +598,75 @@ static bool g2InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
 }
 
 // ---- OLED_BLUETOOTH_G2_STATUS: G2 status detail (read-only, pushed) --------
+// One temple's row: "Left: up, batt 85%", "Right: up, batt --" (no battery
+// reading yet), "Left: down". 20 columns at most.
+static void g2TempleRow(const char* side, const G2TempleConnectionStatus& temple) {
+  if (!temple.connected) {
+    btDetail("%s: down", side);
+  } else if (temple.battery >= 0 && temple.battery <= 100) {
+    btDetail("%s: up, batt %d%%", side, temple.battery);
+  } else {
+    btDetail("%s: up, batt --", side);
+  }
+}
+
 static void displayG2StatusDetail() {
   if (!oledDisplay) return;
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(SSD1306_WHITE);
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
 
-  // The header names the screen; every line fits the 64 px panel's 5 rows.
-  oledDisplay->print("State: ");
-  oledDisplay->println(getG2StateString());
+  // The header names the screen; the rows are this screen's own, five at most
+  // (the 64 px panel's body) and 21 columns each, from one captured status.
+  // (It used to print the `g2status` line, about 110 characters, cut at 63.)
+  G2ConnectionStatus status{};
+  const bool captured = g2ConnectionStatusSnapshot(&status);
+  btRow("State: ", captured ? status.state : getG2StateString());
 
   if (isG2Connected()) {
-    char statusBuf[64];
-    getG2Status(statusBuf, sizeof(statusBuf));
-    oledDisplay->println(statusBuf);
-    oledDisplay->print("Nav Mode: ");
-    oledDisplay->println(gG2MenuNavEnabled ? "ON" : "OFF");
+    if (captured) {
+      g2TempleRow("Left", status.left);
+      g2TempleRow("Right", status.right);
+      btDetail("Repair: %s", status.repair);  // none, 1/7..7/7, slow, held
+    } else {
+      btDetail("Status unavailable");
+    }
+    btDetail("Nav Mode: %s", gG2MenuNavEnabled ? "ON" : "OFF");
   } else {
     oledDisplay->println("Not connected.");
     oledDisplay->println("Use Connect to");
     oledDisplay->println("pair glasses.");
   }
+}
+
+// What those rows show, as one number for the link watcher: the display
+// redraws only when marked dirty, and a temple dropping, a battery step or the
+// repair moving on ("2/7" to "slow") is not input. Only what is drawn counts
+// (not MTU or the packet counters), so the screen repaints when a row changes
+// and not otherwise. Never 0.
+static uint32_t g2StatusRowsSignature() {
+  uint32_t sig = 2166136261u;  // FNV-1a
+  auto mix = [&sig](uint8_t byte) { sig = (sig ^ byte) * 16777619u; };
+  auto mixText = [&mix](const char* text) {
+    for (; text && *text; ++text) mix((uint8_t)*text);
+    mix(0);
+  };
+  auto mixTemple = [&mix](const G2TempleConnectionStatus& temple) {
+    const bool known = temple.battery >= 0 && temple.battery <= 100;
+    mix(temple.connected ? 1 : 0);
+    mix(!temple.connected ? 0xFE : known ? (uint8_t)temple.battery : 0xFF);
+  };
+  G2ConnectionStatus status{};
+  const bool captured = g2ConnectionStatusSnapshot(&status);
+  mix(captured ? 1 : 0);
+  mixText(captured ? status.state : getG2StateString());
+  if (captured) {
+    mixTemple(status.left);
+    mixTemple(status.right);
+    mixText(status.repair);
+  }
+  mix(gG2MenuNavEnabled ? 1 : 0);
+  return sig | 1u;
 }
 
 // ---- OLED_BLUETOOTH_R1: R1 ring connect submenu -----------------------------
@@ -988,8 +1036,22 @@ void oledBluetoothLinkWatch() {
   }
   pairSig = pairSig << 4 | uint32_t(pair.state);
 #endif
+  // The G2 Status screen shows more than "connected": each temple, its
+  // battery, the repair state and Nav Mode. While it is open a change in one
+  // of those rows is a redraw too. Opening or leaving the screen already is
+  // one, so only a change between two ticks on the screen counts.
+  uint32_t g2Rows = 0;
+#if ENABLE_G2_GLASSES
+  if (currentOledMode == OLED_BLUETOOTH_G2_STATUS) g2Rows = g2StatusRowsSignature();
+#endif
+  static uint32_t lastG2Rows = 0;
+  const bool g2RowsChanged = g2Rows != 0 && lastG2Rows != 0 && g2Rows != lastG2Rows;
+  lastG2Rows = g2Rows;
   static uint32_t lastPairSig = 0;
-  if (seeded && sig == lastSig && pipeLabel == lastPipeLabel && pairSig == lastPairSig) return;
+  if (seeded && sig == lastSig && pipeLabel == lastPipeLabel && pairSig == lastPairSig &&
+      !g2RowsChanged) {
+    return;
+  }
   const bool changed = seeded;
   seeded = true;
   lastSig = sig;

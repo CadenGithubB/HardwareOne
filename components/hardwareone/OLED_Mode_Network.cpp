@@ -1071,8 +1071,10 @@ void prepareMeshStatusData() {
   meshStatusRenderData.meshEnabled = meshEnabled();
 
   if (meshStatusRenderData.espNowEnabled && meshStatusRenderData.meshEnabled) {
-    uint8_t myMac[6];
-    esp_wifi_get_mac(WIFI_IF_STA, myMac);
+    // ESP-NOW's cached address (it is running here): no driver query, which is
+    // a round trip to the radio co-processor on a Hosted board, per repaint.
+    uint8_t myMac[6] = {};
+    (void)espnowSelfStaMac(myMac);
     String myName = getEspNowDeviceName(myMac);
     if (myName.length() == 0) {
       myName = macToDisplayStr(myMac).substring(8);

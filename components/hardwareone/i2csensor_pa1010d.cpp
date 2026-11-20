@@ -214,7 +214,7 @@ const char* cmd_gps(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
-    int n = gpsBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
+    int n = gpsBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / ESP-NOW)
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
