@@ -198,15 +198,23 @@ def source_checks() -> None:
         require(clear >= 0 and clear > body.rfind("gScan->start(") and "\n}\n" not in body[clear:],
                 f"cleared before {marker}")
 
-    # c6console persists: the command saves, the boot follows the setting.
+    # c6console persists: the command saves. The mirror is off by default
+    # (UP-14, 2026-11-20): the boot starts and stops none itself and hands the
+    # decision to the fault service, which follows the saved setting
+    # (test_companion_fault_mirror.py runs it).
     companion = (COMPONENT / "System_RadioCompanion.cpp").read_text()
-    require(re.search(r'\{ "c6ConsoleMirror", SETTING_BOOL, &gSettings\.c6ConsoleMirror, 1,.*"c6console" \},', companion),
-            "c6ConsoleMirror is a companion row bound to c6console, default on")
+    require(re.search(r'\{ "c6ConsoleMirror", SETTING_BOOL, &gSettings\.c6ConsoleMirror, 0,.*"c6console" \},', companion),
+            "c6ConsoleMirror is a companion row bound to c6console, default off")
     order(extract_block(companion, "const char* cmd_c6console(const String& argsInput)"),
           "radioHalConsoleMirror(on);", "if (err != ESP_OK) {", "setSetting(gSettings.c6ConsoleMirror, on);")
-    order(extract_block(companion, "void radioCompanionBootInit()"),
-          "applyPolicyFromSettings();", "if (!gSettings.c6ConsoleMirror) radioHalConsoleMirror(false);")
-    require("c6ConsoleMirror(true)," in settings_h, "the mirror stays on by default")
+    boot = extract_block(companion, "void radioCompanionBootInit()")
+    order(boot, "applyPolicyFromSettings();", "m.onBootResult(", "serviceFaults(")
+    require("radioHalConsoleMirror(" not in re.sub(r"//[^\n]*", "", boot),
+            "boot init neither starts nor stops the mirror itself")
+    service = extract_block(companion, "void serviceFaults(uint32_t now, bool quiet)")
+    require("sMirror.tick(now, state, gSettings.c6ConsoleMirror, running)" in service,
+            "the fault service follows the saved setting")
+    require("c6ConsoleMirror(false)," in settings_h, "the mirror is off by default")
     print("esplog wiring, joined-only AP lookups, BLE_COEX scan lines, G2 scan stop, rpc_utils, c6console: OK")
 
 

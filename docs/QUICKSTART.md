@@ -63,7 +63,7 @@ Both return OK when the connection is *started*, not finished - give them a
 moment before expecting status to read connected.
 
 ### Bonded Microcontrollers
-With `ENABLE_BONDED_MODE=1`, two devices can bond into a paired set. One acts as the local controller (typically with OLED + gamepad), the other as the remote endpoint. The controller gains a **Remote** tab in its web UI showing the paired device's features, even if those features aren't compiled into the controller. Command registries are shared between the two, so either device can execute commands on the other transparently.
+Bonded mode is off unless you choose it for a build: turn on **Bonded pair** in the guided setup (`python3 tools/build_config.py new`, group Network) for both devices, or write `ENABLE_BONDED_MODE=1` in their saved configurations. With it, two devices can bond into a paired set. One acts as the local controller (typically with OLED + gamepad), the other as the remote endpoint. The controller gains a **Remote** tab in its web UI showing the paired device's features, even if those features aren't compiled into the controller. Command registries are shared between the two, so either device can execute commands on the other transparently.
 
 1. Set up the hardware for your specific needs, using the steps above. Do it twice, one for each of the bonded devices.
 2. Complete two Software Setups, one for each Hardware Setup.
@@ -111,15 +111,37 @@ the IDF carries the PIE fix that P4X-EYE speaker labels need
 
 ### 2. Configure your build (optional)
 
-Open `components/hardwareone/System_BuildConfig.h` and enable or disable any features you want - sensors, web modules, ESP-NOW, MQTT, etc. This header is *your* configuration surface: every `ENABLE_*` flag is a plain `0` / `1` that you set for your own device. The values checked into the repo are whatever the last person building from this tree happened to need - treat them as a starting point, not as a contract, and read through the file once to set the flags your hardware and use case actually call for.
+Start with the guided setup. It asks for your board, offers that board's saved configurations as starting points, lists everything the board can have under plain names, and saves your selection as a small file in `configurations/`:
+
+```bash
+python3 tools/build_config.py new
+```
+
+It needs Python and a host C++ compiler, not the ESP-IDF environment. On and off in its lists are what the firmware will really have for your board: the setup evaluates `components/hardwareone/System_BuildConfig.h` with your choices, turns on what an item needs, and shows the header's own reason when a combination is refused. `python3 tools/build_config.py list configurations` shows the saved configurations that come with the repository; [`configurations/README.md`](../configurations/README.md) describes them and the setup in full.
+
+Three features are off unless you choose them, on every board: **HTTPS for the web interface**, the **Bonded pair** and the **Assistant** (the LLM, with its answer sources: over HTTP, from a Raspberry Pi, or a small model on the board). A build from a board's defaults has none of them. Turn them on in the setup (groups Network and Assistant); the saved configurations that use them say so in their files.
+
+Skip this step to build a board with its defaults, or to build one of the saved configurations as it is.
+
+You can still edit `components/hardwareone/System_BuildConfig.h` by hand: every `ENABLE_*` flag there is a plain `0` / `1` and the shared default for all boards. A saved configuration is the better place for your own choices, because it changes one build and leaves the shared header alone.
 
 If you are using Bonded mode, ensure that you reconfigure, fullclean, and then compile the build again.
 
-**LLM assistant (`ENABLE_LLM_BACKEND`):** `ENABLE_LLM_BACKEND` is the master switch for the feature. Set it to `1` and turn on at least one answer source alongside it - `ENABLE_LLM_SOURCE_ONBOARD` (tiny transformer inference on this chip; needs PSRAM, and by far the largest part of the feature's flash) or `ENABLE_LLM_SOURCE_CM5` (a CM5 / Pi 5 co-processor reached over the UART host link, which costs almost no flash because the model runs on the other end). The header refuses to compile the two mismatched combinations - the backend with no source, and a source with no backend - so you get a clear `#error` rather than a strange build. Keep all three as plain literals - CMake greps those exact lines to decide which files reach the compiler. For the on-board source, put a model file on the device's LittleFS under `/system/llm/` or on an SD card under `/sd/llm/`; `llmload <filename.bin>` looks a bare filename up internally first and then on the SD card, and `llmmodels` lists what it can see. You can copy files to LittleFS via the web UI's file manager or the `filecreate`/`fileview` CLI commands.
+**LLM assistant (`ENABLE_LLM_BACKEND`):** `ENABLE_LLM_BACKEND` is the master switch for the feature, and it is off by default. In the guided setup, turning on an answer source turns it on as well. By hand, set it to `1` and turn on at least one answer source alongside it - `ENABLE_LLM_SOURCE_HTTP` (an OpenClaw endpoint over Wi-Fi; no model on the device), `ENABLE_LLM_SOURCE_ONBOARD` (tiny transformer inference on this chip; needs PSRAM, and by far the largest part of the feature's flash) or `ENABLE_LLM_SOURCE_CM5` (a CM5 / Pi 5 co-processor reached over the UART host link, which costs almost no flash because the model runs on the other end). The header refuses to compile the two mismatched combinations - the backend with no source, and a source with no backend - so you get a clear `#error` rather than a strange build. Keep them as plain literals - CMake greps those exact lines to decide which files reach the compiler. For the on-board source, put a model file on the device's LittleFS under `/system/llm/` or on an SD card under `/sd/llm/`; `llmload <filename.bin>` looks a bare filename up internally first and then on the SD card, and `llmmodels` lists what it can see. You can copy files to LittleFS via the web UI's file manager or the `filecreate`/`fileview` CLI commands.
 
 ### 3. Set your target board and flash
 
-Use the per-board wrapper. Every board gets its own build directory and its own `sdkconfig`, so you never have to clean between boards.
+Source the ESP-IDF environment, then build what you saved in step 2 (in the guided setup, **Save and build** does the same). A saved configuration knows its board and gets its own build directory:
+
+```bash
+# Build a saved configuration (your own, or one that comes with the repository)
+python3 tools/build_config.py build my-xiao            # -> build-config-my-xiao/
+
+# Flash it and open the serial monitor (replace PORT with your device's port)
+tools/build_board.sh xiao_s3 --config my-xiao -p PORT flash monitor
+```
+
+Without a saved configuration, use the per-board wrapper with the board's defaults. Every board gets its own build directory and its own `sdkconfig`, so you never have to clean between boards.
 
 ```bash
 # Build (board name = a boards/<name>.defaults file, minus the .defaults suffix)
@@ -201,9 +223,11 @@ Two layers of defaults are applied for you, and it helps to know which is which.
 > **Bluedroid is compiled out** (`CONFIG_BT_ENABLED=n`) to buy back flash and RAM on
 > `qtpy_esp32` (~14 KB IRAM / ~80 KB DRAM / ~70 KB flash on the memory-tight classic ESP32)
 > and in the saved XIAO configurations (`xiao-default`, `xiao-base`, `xiao-openclaw`). The bare `xiao_s3`
-> board file keeps Bluetooth on for the `pocket_assistant` deployment, so a plain
-> `tools/build_board.sh xiao_s3` overflows the 5.8 MB factory partition (by ~14 KB on
-> 2026-11-08); use `--config xiao-default` or the deployment. You do **not** hand-edit `System_BuildConfig.h` for this any more:
+> board file keeps Bluetooth on for the `pocket_assistant` deployment, and a plain
+> `tools/build_board.sh xiao_s3` overflowed the 5.8 MB factory partition (by ~14 KB on
+> 2026-11-08). That was measured while HTTPS, the bonded pair and the assistant were
+> still on in the shared defaults; they are off since 2026-11-20 and the plain build has
+> not been measured again. Use `--config xiao-default` or the deployment. You do **not** hand-edit `System_BuildConfig.h` for this any more:
 > the header's derived rules see `CONFIG_BT_ENABLED` missing and force `ENABLE_BLUETOOTH` - and
 > its G2 / R1 dependents - to `0`, and `components/hardwareone/CMakeLists.txt` applies the same
 > downgrade to its source-list filter, so the `#if` gates and the file list cannot diverge.

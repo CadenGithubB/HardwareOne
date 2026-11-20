@@ -71,7 +71,11 @@ constexpr gpio_num_t kC6UartTx = static_cast<gpio_num_t>(RADIO_C6_UART_TX_PIN);
 // The C6's UART0 console reaches the P4 on GPIO36. Mirroring it into the P4 log
 // is the only way to see the companion's own boot messages, crashes and
 // backtraces while HardwareOne drives it (the programmer service is the
-// alternative, and it replaces the application).
+// alternative, and it replaces the application). It costs internal SRAM (the
+// 2048 B UART buffer, the 4096 B task stack and the driver's own objects), so
+// it is not started at every boot: radioHalPrepare starts it once a boot
+// attempt has failed, and System_RadioCompanion starts it after a companion
+// fault or when `c6console on` is saved, and stops it again.
 #if defined(RADIO_C6_UART_TX_PIN)
 constexpr uart_port_t kConsoleUart = UART_NUM_1;
 TaskHandle_t sConsoleTask = nullptr;
@@ -422,16 +426,17 @@ esp_err_t radioHalConsoleMirror(bool on) {
 }
 
 bool radioHalConsoleMirrorOn() { return sConsoleTask != nullptr; }
+bool radioHalConsoleMirrorSupported() { return true; }
 #else
 // This assembly has no P4-connected companion UART console.
 esp_err_t radioHalConsoleMirror(bool on) { return on ? ESP_ERR_NOT_SUPPORTED : ESP_OK; }
 bool radioHalConsoleMirrorOn() { return false; }
+bool radioHalConsoleMirrorSupported() { return false; }
 #endif
 
 esp_err_t radioHalPrepare() {
   quietHostedLogs();
   ESP_RETURN_ON_ERROR(prepareBoard(), kTag, "Board preparation failed");
-  radioHalConsoleMirror(true);  // not fatal; c6_console off silences it
   ESP_RETURN_ON_ERROR(registerEvents(), kTag, "Hosted events");
   esp_err_t err = ESP_FAIL;
   for (int attempt = 1; attempt <= kBootAttempts; attempt++) {
@@ -441,7 +446,14 @@ esp_err_t radioHalPrepare() {
     // reset, no wait, and the version query fails in the same millisecond
     // (bench log 2026-11-08: attempts 1 and 2 both failed at 26756 ms). Close
     // it first, as the companion's Recover does before every retry.
-    if (attempt > 1) radioHalStopTransport();
+    if (attempt > 1) {
+      // The first start failed, which is a companion fault: mirror the C6's
+      // console from here on, so the retry's own boot messages are seen. Not
+      // fatal; radioCompanionBootInit finds the mirror on and keeps it for
+      // the time a fault earns (System_RadioCompanion.cpp).
+      radioHalConsoleMirror(true);
+      radioHalStopTransport();
+    }
     err = radioHalStartTransport();
     if (err == ESP_OK) break;
     ESP_LOGW(kTag, "C6 did not come up (attempt %d of %d): %s", attempt, kBootAttempts, esp_err_to_name(err));

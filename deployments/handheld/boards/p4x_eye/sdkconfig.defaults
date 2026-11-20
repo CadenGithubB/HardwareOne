@@ -1,0 +1,12 @@
+# Handheld sdkconfig overlay: Espressif ESP32-P4X-EYE.
+#
+# Layered after the shared and board software presets for the main application
+# (contract.conf SDKCONFIG_DEFAULTS).
+#
+# Local speech-to-text measures the internal memory its own allocations use
+# through the heap allocation hooks (stt/stt_internal_memory.cpp). Without
+# them it runs on its fixed floors (stt/stt_internal_memory_core.h), which
+# hold back more internal SRAM than a session needs. Every saved P4 speech
+# configuration sets this key (configurations/p4-portable.json and the
+# guided setup's "Speech to text" item); the deployment states it here.
+CONFIG_HEAP_USE_HOOKS=y

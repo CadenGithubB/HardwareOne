@@ -57,7 +57,10 @@ class NetworkBuildSelection(unittest.TestCase):
         # These expectations describe requested outcomes at public entry points.
         # No test-side mapping derives pages or dependencies from feature levels.
         cases = [
-            ("shared-default", {}, {}, {}, False, (1, 1, 1, 1)),
+            # HTTPS is off in the shared defaults since 2026-11-20 (G-15): a selection
+            # that wants it says so, in the header, a saved configuration or a deployment.
+            ("shared-default", {}, {}, {}, False, (1, 1, 0, 1)),
+            ("manual-https-on", {"ENABLE_HTTPS": 1}, {}, {}, False, (1, 1, 1, 1)),
             ("manual-network-disabled", {"NETWORK_FEATURE_LEVEL": 0}, {}, {}, False, (0, 0, 0, 0)),
             ("manual-wifi-only", {"NETWORK_FEATURE_LEVEL": 1}, {}, {}, False, (1, 0, 0, 0)),
             ("manual-custom-http-off", {"CUSTOM_ENABLE_NET_HTTP": 0}, {}, {}, False, (1, 0, 0, 0)),
@@ -68,14 +71,15 @@ class NetworkBuildSelection(unittest.TestCase):
             ("manual-network-expressions", {"NETWORK_FEATURE_LEVEL": "(1 + 1)",
                                              "WEB_FEATURE_LEVEL": "(1 + 2)",
                                              "ENABLE_HTTPS": "(1)"}, {}, {}, False, (1, 1, 1, 1)),
-            ("xiao-board-default", {}, {}, {}, True, (1, 1, 1, 1)),
+            ("xiao-board-default", {}, {}, {}, True, (1, 1, 0, 1)),
+            ("named-https-on", {}, {"ENABLE_HTTPS": 1}, {}, True, (1, 1, 1, 1)),
             ("named-http-off", {}, {"WEB_FEATURE_LEVEL": 0}, {}, True, (1, 0, 0, 0)),
             ("named-custom-wifi-off", {}, {"CUSTOM_ENABLE_NET_WIFI": 0,
                                            "ENABLE_MQTT": 0}, {}, True, (0, 0, 0, 0)),
             ("named-overrides-manual", {"WEB_FEATURE_LEVEL": 0},
-             {"NETWORK_FEATURE_LEVEL": 2, "WEB_FEATURE_LEVEL": 3}, {}, True, (1, 1, 1, 1)),
+             {"NETWORK_FEATURE_LEVEL": 2, "WEB_FEATURE_LEVEL": 3, "ENABLE_HTTPS": 1}, {}, True, (1, 1, 1, 1)),
             ("deployment-overrides-manual", {"WEB_FEATURE_LEVEL": 0}, {},
-             {"NETWORK_FEATURE_LEVEL": 2, "WEB_FEATURE_LEVEL": 3}, True, (1, 1, 1, 1)),
+             {"NETWORK_FEATURE_LEVEL": 2, "WEB_FEATURE_LEVEL": 3, "ENABLE_HTTPS": 1}, True, (1, 1, 1, 1)),
             ("deployment-restore-only", {}, {},
              {"NETWORK_FEATURE_LEVEL": 1, "WEB_FEATURE_LEVEL": 0,
               "ENABLE_MIGRATION_TOOL": 1}, True, (1, 0, 0, 1)),

@@ -2890,6 +2890,10 @@ static const SettingEntry sttSettingEntries[] = {
   { "sttg2decisionmod", SETTING_INT, &gSettings.sttG2DecisionMod, 0, 0, nullptr, 0, 1000, "G2 mic: onset modulation gate (ratio x0.01, 0 = off, 101-1000)", nullptr, false, nullptr, "sttg2decisionmod" },
   { "sttg2decisionhold", SETTING_BOOL, &gSettings.sttG2DecisionHold, 0, 0, nullptr, 0, 1, "G2 mic: onset raw-latch hold", nullptr, false, nullptr, "sttg2decisionhold" },
   { "sttg2autogain", SETTING_BOOL, &gSettings.sttG2AutoGain, 1, 0, nullptr, 0, 1, "G2 mic: automatic PCM gain for STT", nullptr, false, nullptr, "sttg2autogain" },
+  // Within-phrase leveler (System_STT.cpp): steps the session's audio x1..x8 every
+  // 0.1 s, for the mic whose automatic gain is on. Off by default: on the Citrinet
+  // bench (2026-11-17) it raised word errors in steady hiss.
+  { "sttphraselevel", SETTING_BOOL, &gSettings.sttPhraseLevel, 0, 0, nullptr, 0, 1, "Within-phrase leveler for STT", nullptr, false, nullptr, "sttphraselevel" },
 };
 
 static const SettingsModule sttSettingsModule = {
@@ -3602,7 +3606,7 @@ static void applyMasterEnableDisable(const char* cmdKey) {
     { "inputenabled",      "closeinput" },
     { "cameraenabled",     "closecamera" },
     { "micenabled",        "closemic" },
-    { "srenabled",         "srstop" },
+    { "srenabled",         "closesr" },
     { "llmenabled",        "llmunload" },
     { "sensorlogenabled",  "sensorlog stop" },
     { "systemlogenabled",  "log stop" },
@@ -3854,6 +3858,7 @@ static const char* cmd_set_sttg2decisionmod(const String& a) {
   return sttDecisionModCommand("sttg2decisionmod", a);
 }
 SETTING_EDITOR_CMD(cmd_set_sttg2autogain,        "sttg2autogain")
+SETTING_EDITOR_CMD(cmd_set_sttphraselevel,       "sttphraselevel")
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 SETTING_EDITOR_CMD(cmd_set_g2holdaction,         "g2holdaction")
@@ -3960,6 +3965,7 @@ const CommandEntry settingEditorCommands[] = {
   { "sttg2decisionhold", "G2 glasses-mic profile: onset raw-latch hold (0 = off, the default); applies to the next session.", true, cmd_set_sttg2decisionhold, "Usage: sttg2decisionhold [0|1]" },
   { "sttg2autogain", "G2 glasses-mic profile: STT multiplies the glasses audio (1..8). Starts at x1 and changes only when several sessions agree. Applies to the next session.", true, cmd_set_sttg2autogain, "Usage: sttg2autogain [0|1]" },
   { "sttautogain", "STT picks its own onboard-mic gain (changed only when several sessions agree) and a 120 Hz high-pass; 0 = use pdmamplify/pdmhpf. Applies to the next session.", true, cmd_set_sttautogain, "Usage: sttautogain [0|1]" },
+  { "sttphraselevel", "Within-phrase leveler: STT steps a session's audio x1..x8 every 0.1 s, for the mic whose automatic gain is on (0 = off, the default). Applies to the next session.", true, cmd_set_sttphraselevel, "Usage: sttphraselevel [0|1]" },
 #endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   { "g2holdaction",     "Set what a ring/temple hold on a HW1 lens page does", true, cmd_set_g2holdaction,

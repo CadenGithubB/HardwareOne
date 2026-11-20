@@ -10,13 +10,15 @@ python3 tools/build_config.py build xiao-default
 python3 tools/build_config.py new
 ```
 
-Eleven configurations are kept, each a board and a job:
+Thirteen configurations are kept, each a board and a job:
 
 | Board | Configuration | What it is for |
 |---|---|---|
 | ESP32-P4X-EYE | `p4-glasses-test` | Glasses captions: speech-to-text on the board with the G2 glasses and R1 ring |
 | | `p4-openclaw` | Captions plus an assistant that answers over HTTP (OpenClaw) |
 | | `p4-phone-pipe` | Captions and the HTTP assistant plus the link to the Android app |
+| | `p4-portable` | The carry-around device: speech-to-text, glasses, ring, phone link, the HTTP assistant and microSD; ESP-NOW worker in the home mesh. No camera |
+| | `p4-home-node` | Rack-mounted mesh master: ESP-NOW, MQTT, Wi-Fi, the web page and microSD. No speech, glasses, ring, camera or microphone |
 | XIAO ESP32-S3 Sense | `xiao-default` | The standard selection; Bluetooth and MQTT off to fit the app partition |
 | | `xiao-base` | The standard selection for a XIAO without the Sense board |
 | | `xiao-mqtt` | Home Assistant node: MQTT and its settings page; offline maps off to fit |
@@ -29,6 +31,25 @@ Eleven configurations are kept, each a board and a job:
 Each file carries that line as its `title` and `summary`; the lists and the guided setup show them.
 The other boards (FeatherS3, Feather ESP32 V2, Waveshare ESP32-P4 Touch LCD 5) have no saved
 configuration: the guided setup starts them from the board's defaults.
+
+**Off unless chosen (since 2026-11-20).** HTTPS for the web interface, the bonded pair and the
+assistant (with its three answer sources) are off in the shared defaults of
+`System_BuildConfig.h`. A build from a board's defaults alone has none of them; the guided setup
+offers each under its plain name (groups Network and Assistant), starting at off. The saved
+configurations above were not changed by this: each one that had HTTPS, the bonded pair or the
+assistant through the old defaults now writes the switch itself (`ENABLE_HTTPS`,
+`ENABLE_BONDED_MODE`, `ENABLE_LLM_BACKEND`, `ENABLE_LLM_SOURCE_ONBOARD`, `ENABLE_LLM_SOURCE_CM5`
+in the three QT Py and five XIAO files), and all thirteen resolve to the same features as before.
+The five P4X-EYE configurations already had them off or written, in the file or in
+`boards/p4x_eye.features.h`.
+
+A configuration of your own that was saved before 2026-11-20 is not covered: a saved file holds
+only what differs from the defaults, so one that had these features through the old defaults
+builds without them now, and nothing warns. To keep them, add the switches to its `features`
+(`"ENABLE_HTTPS": 1`, `"ENABLE_BONDED_MODE": 1`, `"ENABLE_LLM_BACKEND": 1` with at least one
+`ENABLE_LLM_SOURCE_*`), for example with
+`python3 tools/build_config.py edit <name> --set ENABLE_HTTPS=1`. A device rebuilt without HTTPS
+serves plain HTTP even with `httpsenabled` saved, so an `https://` bookmark stops working.
 
 Add `--wdt-soak` to `tools/build_board.sh` (for example
 `tools/build_board.sh xiao_s3 --config xiao-default --wdt-soak`, or
@@ -71,8 +92,9 @@ to fit the existing app partition;
 the user selected that trade-off for remote-agent testing. It also turns off
 the BLE coexistence records (`ENABLE_BLE_COEX_RECORDS`): with them on, the image
 overflowed the partition by 5,696 bytes (2026-10-17; 2,480 bytes remain without
-them). Shared defaults retain the onboard LLM and BLE records; the records are
-derived off in profiles that disable Bluetooth. TLS
+them). The assistant and its Raspberry Pi source are written in the file (the
+shared defaults have the assistant off); the BLE records stay a shared default and
+are derived off in profiles that disable Bluetooth. TLS
 trust/verification and all other existing choices are unchanged. Endpoint credentials remain runtime device
 settings; the saved configuration contains no secrets.
 
@@ -111,7 +133,7 @@ remain in effect until explicitly changed.
 `qtpy-oled` uses the same QT Py bus and ToF/presence/GPS selection, with an
 SSD1306 OLED in place of the gamepad and an APDS9960 at `0x39`. Both display
 addresses (`0x3D`, `0x3C`) are supported. Physical input is disabled; serial
-commands control the bench test. Use `oledstart`, `oledstop`, `oledbrightness <0..255>` and `oledstatus`.
+commands control the bench test. Use `openoled`, `closeoled`, `oledbrightness <0..255>` and `oledstatus`.
 For startup on reboot, enable `oledenabled 1` and `oledautostart 1`; these are
 saved device settings, independent of compiling the display into the image.
 Start APDS with `openapds` (color mode by default); `apdscolor` and
@@ -244,7 +266,9 @@ preserves unmentioned choices and refuses conflicting set/unset operations.
 An unchanged edit leaves the existing file and timestamp alone.
 
 Explicit `0` (or SDK `false`) selects off. `--unset` / `--unset-sdk` removes the
-choice and restores the inherited default, which may be on. Build again after
+choice and restores the inherited default: off for HTTPS, the bonded pair and the
+assistant, and for other switches whatever the board and the shared defaults say,
+which may be on. Build again after
 an edit to apply it. The named configuration keeps its board; choose a new name
 when switching boards. You can also edit the JSON directly.
 

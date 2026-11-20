@@ -86,18 +86,31 @@ class SavedConfiguration(unittest.TestCase):
                                "ENABLE_LLM_SOURCE_CM5": "1",
                                "ENABLE_MQTT": "0"}.items():
             self.assertEqual(values[flag], expected, flag)
+        self.assertEqual(values["ENABLE_LLM_BACKEND"], "1")
+        # The profile writes the assistant and its Raspberry Pi source itself: the
+        # shared defaults have every part of the assistant off (since 2026-11-20).
+        for flag in ("ENABLE_LLM_BACKEND", "ENABLE_LLM_SOURCE_CM5", "ENABLE_HTTPS", "ENABLE_BONDED_MODE"):
+            self.assertEqual(saved["features"].get(flag), 1, flag)
         self.save("baseline", {"ENABLE_MQTT": 0})
         self.configure("baseline")
         baseline = build_config.check("baseline")["value"]
-        self.assertEqual(baseline["ENABLE_LLM_SOURCE_HTTP"], "0")
-        self.assertEqual(baseline["ENABLE_LLM_SOURCE_ONBOARD"], "1")
-        self.assertEqual(baseline["ENABLE_LLM_SOURCE_CM5"], "1")
+        for flag in ("ENABLE_LLM_BACKEND", "ENABLE_LLM_SOURCE_HTTP", "ENABLE_LLM_SOURCE_ONBOARD",
+                     "ENABLE_LLM_SOURCE_CM5"):
+            self.assertEqual(baseline[flag], "0", flag)
 
     def test_saved_http_source_requires_wifi(self):
-        self.save("bad-http", {"ENABLE_LLM_SOURCE_HTTP": 1, "NETWORK_FEATURE_LEVEL": 0})
+        self.save("bad-http", {"ENABLE_LLM_BACKEND": 1, "ENABLE_LLM_SOURCE_HTTP": 1, "NETWORK_FEATURE_LEVEL": 0})
         self.configure("bad-http")
         with self.assertRaisesRegex(ValueError, "ENABLE_LLM_SOURCE_HTTP requires Wi-Fi"):
             build_config.check("bad-http")
+
+    def test_saved_source_without_the_assistant_explains_dependency(self):
+        # The assistant's master switch is off unless chosen: a hand-written
+        # configuration with only a source is refused with the header's reason.
+        self.save("source-only", {"ENABLE_LLM_SOURCE_HTTP": 1})
+        self.configure("source-only")
+        with self.assertRaisesRegex(ValueError, "An LLM source is enabled but ENABLE_LLM_BACKEND is 0"):
+            build_config.check("source-only")
 
     def test_missing_wifi_explains_dependency(self):
         self.save("bad", {"ENABLE_MQTT": 1, "NETWORK_FEATURE_LEVEL": 0})

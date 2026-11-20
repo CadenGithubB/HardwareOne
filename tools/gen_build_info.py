@@ -491,8 +491,7 @@ def source_versions(enabled, firmware="", argv=None, companion=False):
     if enabled("ENABLE_ESPNOW"):
         wire = hw + "System_ESPNow_Wire.h"
         frame = _int_expr(_define("ESPNOW_V4_HEADER_LEN", wire)) + _int_expr(_define("ESPNOW_V4_MAX_PAYLOAD", wire))
-        release = _match(r'^#define\s+HW1_ESPNOW_RELEASE\s+"([^"]+)"', wire)
-        add("espnow", "ESP-NOW", "ESPNOW V%d (%s)" % (1 if frame <= 250 else 2, release))
+        add("espnow", "ESP-NOW", "custom ESP-NOW v%d" % (1 if frame <= 250 else 2))
         add("espnow_wire", "ESP-NOW wire byte", _int_expr(_define("ESPNOW_V4_VERSION", wire)))
         identity = hw + "System_ESPNow_Identity.cpp"
         add("espnow_identity_file", "ESP-NOW identity file",

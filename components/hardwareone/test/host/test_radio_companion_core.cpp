@@ -10,6 +10,8 @@ using hw1::radio::CompanionMonitor;
 using hw1::radio::CompanionOutage;
 using hw1::radio::CompanionPolicy;
 using hw1::radio::CompanionState;
+using hw1::radio::ConsoleMirrorPolicy;
+using hw1::radio::MirrorStep;
 
 static CompanionPolicy policy() {
   CompanionPolicy p;
@@ -266,6 +268,248 @@ static void the_wait_survives_a_clock_wrap() {
   assert(l.now - startedAt == 1000);
 }
 
+// ---- incident and fault counts ------------------------------------------------
+// `outages` is what the lifetime count adds up: one per incident. `faults`
+// moves on every fault, retries included; the owner arms the console mirror
+// on a change.
+static void an_incident_counts_once_and_its_retries_do_not() {
+  CompanionMonitor m(policy());
+  m.onBootResult(0, false);  // the companion did not come up: one incident
+  assert(m.stats().outages == 1 && m.stats().faults == 1);
+  uint32_t now = 0;
+  for (int retry = 1; retry <= 6; retry++) {  // a wedged companion: every retry fails
+    now = m.stats().nextRetryAt;
+    assert(m.tick(now) == CompanionAction::StartTransport);
+    m.onStartAttempt(now);
+    m.onStartResult(now + 100, false);
+    assert(m.stats().outages == 1);                               // still the same incident
+    assert(m.stats().faults == 1u + static_cast<uint32_t>(retry));  // but a fault each time
+  }
+  m.onStartAttempt(now + 1000);
+  m.onStartResult(now + 2000, true);
+  assert(m.stats().outages == 1);
+
+  // An outage while running is the second incident; its failed recovery is a retry.
+  m.onHeartbeat(now + 3000, 1);
+  const uint32_t faults = m.stats().faults;
+  assert(m.tick(now + 3000 + 3000) == CompanionAction::Recover);
+  assert(m.stats().outages == 2 && m.stats().faults == faults + 1);
+  m.onRecoveryStarted(now + 6000);
+  m.onRecoveryResult(now + 7000, false);
+  assert(m.stats().outages == 2 && m.stats().faults == faults + 2);
+}
+
+static void restarts_on_purpose_are_not_incidents() {
+  CompanionMonitor m(policy());
+  m.onBootResult(0, true);
+  // c6restart: the owner starts a recovery itself and it succeeds.
+  m.onManualStartRequested();
+  m.onRecoveryStarted(100);
+  m.onCompanionBoot(200, 1, /*expected=*/true);
+  m.onRecoveryResult(300, true);
+  // c6hold on / off, an idle close, light sleep, a good update.
+  m.onHold(400);
+  m.onRelease(500);
+  m.onStartAttempt(500);
+  m.onStartResult(600, true);
+  m.onTransportDown(700);
+  m.onTransportUp(800);
+  m.onWatchdogPaused(900);
+  m.onWatchdogResumed(1000);
+  m.onUpdateStarted();
+  m.onTransportFailure(1100);
+  m.onUpdateFinished(1200, true);
+  assert(m.stats().outages == 0 && m.stats().faults == 0);
+  // The ones that fail are faults (the mirror should show why), not incidents.
+  m.onRecoveryStarted(1300);
+  m.onRecoveryResult(1400, false);
+  assert(m.stats().outages == 0 && m.stats().faults == 1);
+}
+
+static void every_way_out_of_an_outage_counts_it_once() {
+  // Soft recovery, the reboot request, the slow retry when a reboot is not
+  // allowed, and manual mode: one incident and one fault each.
+  CompanionPolicy p = policy();
+  p.softRecoveriesBeforeHard = 1;
+  p.softRecoveryWindowMs = 60000;
+  CompanionMonitor m(p);
+  m.onBootResult(0, true);
+  m.onTransportFailure(1000);  // soft recovery
+  assert(m.tick(1000) == CompanionAction::Recover);
+  assert(m.stats().outages == 1 && m.stats().faults == 1);
+  m.onRecoveryStarted(1000);
+  m.onRecoveryResult(2000, true);
+  m.onTransportFailure(3000);  // one recovery in the window already: reboot
+  assert(m.tick(3000) == CompanionAction::HardReboot);
+  assert(m.stats().outages == 2 && m.stats().faults == 2);
+
+  p.hardRebootAllowed = false;
+  CompanionMonitor n(p);
+  n.onBootResult(0, true);
+  n.onTransportFailure(1000);
+  assert(n.tick(1000) == CompanionAction::Recover);
+  n.onRecoveryStarted(1000);
+  n.onRecoveryResult(2000, true);
+  n.onTransportFailure(3000);  // no reboot allowed: offline on the slowest retry
+  assert(n.tick(3000) == CompanionAction::None && n.state() == CompanionState::Offline);
+  assert(n.stats().outages == 2 && n.stats().faults == 2);
+
+  p.autoRecover = false;
+  CompanionMonitor manual(p);
+  manual.onBootResult(0, true);
+  manual.onTransportFailure(1000);
+  assert(manual.state() == CompanionState::Offline);
+  assert(manual.stats().outages == 1 && manual.stats().faults == 1);
+}
+
+// ---- console mirror policy ----------------------------------------------------
+constexpr uint32_t kHealthy = 600000;  // the shipped 10 minutes
+
+static void the_mirror_is_not_wanted_without_a_fault_or_the_setting() {
+  ConsoleMirrorPolicy mirror(kHealthy);
+  for (uint32_t now = 0; now < 3 * kHealthy; now += 1000) {
+    assert(mirror.tick(now, CompanionState::Online, /*userOn=*/false, /*running=*/false) == MirrorStep::None);
+  }
+  assert(!mirror.armed());
+}
+
+static void a_fault_starts_it_and_ten_healthy_minutes_stop_it() {
+  ConsoleMirrorPolicy mirror(kHealthy);
+  mirror.onFault(1000);
+  assert(mirror.armed());
+  assert(mirror.tick(1000, CompanionState::Recovering, false, false) == MirrorStep::Start);
+  // Recovering for 20 s, then online: the healthy time starts at the return.
+  assert(mirror.tick(11000, CompanionState::Recovering, false, true) == MirrorStep::None);
+  assert(mirror.tick(21000, CompanionState::Online, false, true) == MirrorStep::None);
+  assert(mirror.tick(21000 + kHealthy - 1, CompanionState::Online, false, true) == MirrorStep::None);
+  assert(mirror.tick(21000 + kHealthy, CompanionState::Online, false, true) == MirrorStep::Stop);
+  assert(!mirror.armed());
+  // Handed out once, also while the stop has not run yet.
+  assert(mirror.tick(21000 + kHealthy + 10, CompanionState::Online, false, true) == MirrorStep::None);
+  assert(mirror.tick(21000 + kHealthy + 20, CompanionState::Online, false, false) == MirrorStep::None);
+}
+
+static void a_second_fault_restarts_the_healthy_time() {
+  ConsoleMirrorPolicy mirror(kHealthy);
+  mirror.onFault(0);
+  assert(mirror.tick(0, CompanionState::Recovering, false, false) == MirrorStep::Start);
+  assert(mirror.tick(5000, CompanionState::Online, false, true) == MirrorStep::None);
+  const uint32_t second = 5000 + kHealthy - 60000;  // nine minutes in
+  mirror.onFault(second);
+  assert(mirror.tick(second, CompanionState::Recovering, false, true) == MirrorStep::None);
+  assert(mirror.tick(second + 5000, CompanionState::Online, false, true) == MirrorStep::None);
+  assert(mirror.tick(5000 + kHealthy + 1000, CompanionState::Online, false, true) == MirrorStep::None);
+  assert(mirror.tick(second + 5000 + kHealthy, CompanionState::Online, false, true) == MirrorStep::Stop);
+}
+
+static void a_wedged_companion_keeps_it_and_counts_from_its_return() {
+  ConsoleMirrorPolicy mirror(kHealthy);
+  mirror.onFault(0);
+  assert(mirror.tick(0, CompanionState::Offline, false, false) == MirrorStep::Start);
+  // Offline for an hour, with no further fault reported in the last 15 minutes.
+  for (uint32_t now = 1000; now <= 3600000; now += 1000) {
+    assert(mirror.tick(now, CompanionState::Offline, false, true) == MirrorStep::None);
+  }
+  // Back: not stopped at once although the last fault is long past.
+  assert(mirror.tick(3601000, CompanionState::Starting, false, true) == MirrorStep::None);
+  assert(mirror.tick(3602000, CompanionState::Online, false, true) == MirrorStep::None);
+  assert(mirror.tick(3602000 + kHealthy - 1, CompanionState::Online, false, true) == MirrorStep::None);
+  assert(mirror.tick(3602000 + kHealthy, CompanionState::Online, false, true) == MirrorStep::Stop);
+}
+
+static void restarts_on_purpose_do_not_break_the_healthy_time() {
+  ConsoleMirrorPolicy mirror(kHealthy);
+  mirror.onFault(0);
+  assert(mirror.tick(0, CompanionState::Recovering, false, false) == MirrorStep::Start);
+  assert(mirror.tick(1000, CompanionState::Online, false, true) == MirrorStep::None);
+  // c6restart, a hold and release, an update, an idle close: no fault, no reset.
+  assert(mirror.tick(100000, CompanionState::Recovering, false, true) == MirrorStep::None);
+  assert(mirror.tick(110000, CompanionState::Online, false, true) == MirrorStep::None);
+  assert(mirror.tick(200000, CompanionState::Held, false, true) == MirrorStep::None);
+  assert(mirror.tick(300000, CompanionState::Starting, false, true) == MirrorStep::None);
+  assert(mirror.tick(400000, CompanionState::Updating, false, true) == MirrorStep::None);
+  assert(mirror.tick(500000, CompanionState::Idle, false, true) == MirrorStep::None);
+  // Not stopped in the middle of a restart, even past the time.
+  assert(mirror.tick(1000 + kHealthy, CompanionState::Recovering, false, true) == MirrorStep::None);
+  assert(mirror.tick(1000 + kHealthy + 5000, CompanionState::Held, false, true) == MirrorStep::Stop);
+}
+
+static void a_failed_start_is_not_repeated_until_the_next_arming() {
+  ConsoleMirrorPolicy mirror(kHealthy);
+  mirror.onFault(0);
+  assert(mirror.tick(0, CompanionState::Offline, false, false) == MirrorStep::Start);
+  // The start failed (no memory): running stays false. No second attempt,
+  // also not for the failed retries of the same outage.
+  for (uint32_t now = 10; now < 100000; now += 10) {
+    if (now % 5000 == 0) mirror.onFault(now);
+    assert(mirror.tick(now, CompanionState::Offline, false, false) == MirrorStep::None);
+  }
+  // Healthy for ten minutes: let go. The next fault is a new arming.
+  assert(mirror.tick(100000, CompanionState::Online, false, false) == MirrorStep::None);
+  assert(mirror.tick(100000 + kHealthy, CompanionState::Online, false, false) == MirrorStep::None);
+  assert(!mirror.armed());
+  mirror.onFault(100000 + kHealthy + 1000);
+  assert(mirror.tick(100000 + kHealthy + 1000, CompanionState::Recovering, false, false) == MirrorStep::Start);
+}
+
+static void a_step_the_worker_did_not_take_is_offered_again() {
+  ConsoleMirrorPolicy mirror(kHealthy);
+  mirror.onFault(0);
+  assert(mirror.tick(0, CompanionState::Recovering, false, false) == MirrorStep::Start);
+  mirror.notTaken(MirrorStep::Start);  // the command queue was full
+  assert(mirror.tick(10, CompanionState::Recovering, false, false) == MirrorStep::Start);
+  assert(mirror.tick(20, CompanionState::Online, false, true) == MirrorStep::None);
+  assert(mirror.tick(20 + kHealthy, CompanionState::Online, false, true) == MirrorStep::Stop);
+  mirror.notTaken(MirrorStep::Stop);
+  assert(mirror.tick(30 + kHealthy, CompanionState::Online, false, true) == MirrorStep::Stop);
+}
+
+static void the_saved_setting_keeps_it_on() {
+  ConsoleMirrorPolicy mirror(kHealthy);
+  // Boot with `c6console on` saved: one start, then nothing, however long.
+  assert(mirror.tick(0, CompanionState::Online, true, false) == MirrorStep::Start);
+  for (uint32_t now = 1000; now < 3 * kHealthy; now += 1000) {
+    assert(mirror.tick(now, CompanionState::Online, true, true) == MirrorStep::None);
+  }
+  // A fault and its ten healthy minutes do not stop a mirror the user keeps on.
+  mirror.onFault(3 * kHealthy);
+  assert(mirror.tick(3 * kHealthy, CompanionState::Recovering, true, true) == MirrorStep::None);
+  assert(mirror.tick(3 * kHealthy + 1000, CompanionState::Online, true, true) == MirrorStep::None);
+  assert(mirror.tick(5 * kHealthy, CompanionState::Online, true, true) == MirrorStep::None);
+  assert(!mirror.armed());
+  // Setting off without the command (the settings editor): stopped once.
+  assert(mirror.tick(5 * kHealthy + 1000, CompanionState::Online, false, true) == MirrorStep::Stop);
+  assert(mirror.tick(5 * kHealthy + 2000, CompanionState::Online, false, true) == MirrorStep::None);
+  assert(mirror.tick(5 * kHealthy + 3000, CompanionState::Online, false, false) == MirrorStep::None);
+  // Setting on again without the command: started once, also after a failed start.
+  assert(mirror.tick(5 * kHealthy + 4000, CompanionState::Online, true, false) == MirrorStep::Start);
+  assert(mirror.tick(5 * kHealthy + 5000, CompanionState::Online, true, false) == MirrorStep::None);
+}
+
+static void off_by_hand_ends_a_fault_mirror_until_the_next_fault() {
+  ConsoleMirrorPolicy mirror(kHealthy);
+  mirror.onFault(0);
+  assert(mirror.tick(0, CompanionState::Recovering, false, false) == MirrorStep::Start);
+  assert(mirror.tick(1000, CompanionState::Online, false, true) == MirrorStep::None);
+  mirror.onUserOff();  // `c6console off`: the owner stopped the mirror itself
+  assert(!mirror.armed());
+  for (uint32_t now = 2000; now < 2 * kHealthy; now += 1000) {
+    assert(mirror.tick(now, CompanionState::Online, false, false) == MirrorStep::None);
+  }
+  mirror.onFault(2 * kHealthy);
+  assert(mirror.tick(2 * kHealthy, CompanionState::Recovering, false, false) == MirrorStep::Start);
+}
+
+static void the_healthy_time_survives_a_clock_wrap() {
+  ConsoleMirrorPolicy mirror(kHealthy);
+  const uint32_t fault = 0xFFFFFFFFu - 1000;
+  mirror.onFault(fault);
+  assert(mirror.tick(fault, CompanionState::Recovering, false, false) == MirrorStep::Start);
+  assert(mirror.tick(fault + 500, CompanionState::Online, false, true) == MirrorStep::None);
+  assert(mirror.tick(fault + 500 + kHealthy - 1, CompanionState::Online, false, true) == MirrorStep::None);
+  assert(mirror.tick(fault + 500 + kHealthy, CompanionState::Online, false, true) == MirrorStep::Stop);
+}
+
 int main() {
   the_bench_retry_with_a_wedged_host_waits_out_the_budget();
   a_start_waits_for_the_slave_after_hosted_gives_up_at_once();
@@ -280,6 +524,19 @@ int main() {
   orderly_down_is_idle_and_may_hold();
   sleep_pauses_the_watchdog();
   unexpected_reset_recovers_and_update_suppresses();
+  an_incident_counts_once_and_its_retries_do_not();
+  restarts_on_purpose_are_not_incidents();
+  every_way_out_of_an_outage_counts_it_once();
+  the_mirror_is_not_wanted_without_a_fault_or_the_setting();
+  a_fault_starts_it_and_ten_healthy_minutes_stop_it();
+  a_second_fault_restarts_the_healthy_time();
+  a_wedged_companion_keeps_it_and_counts_from_its_return();
+  restarts_on_purpose_do_not_break_the_healthy_time();
+  a_failed_start_is_not_repeated_until_the_next_arming();
+  a_step_the_worker_did_not_take_is_offered_again();
+  the_saved_setting_keeps_it_on();
+  off_by_hand_ends_a_fault_mirror_until_the_next_fault();
+  the_healthy_time_survives_a_clock_wrap();
   puts("radio companion core tests passed");
   return 0;
 }

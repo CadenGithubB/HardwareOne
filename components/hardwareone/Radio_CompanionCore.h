@@ -52,6 +52,13 @@ struct CompanionStats {
   uint32_t softRecoveries = 0;
   uint32_t recoveriesFailed = 0;
   uint32_t hardRebootsRequested = 0;
+  // Incidents this boot: the companion failed while it was running, or it did
+  // not come up at boot. The failed starts and recoveries that follow one
+  // incident are retries of it and are not counted here.
+  uint32_t outages = 0;
+  // Every fault this boot, those retries included. It only ever grows: the
+  // owner compares it with the value it saw last to learn of a new fault.
+  uint32_t faults = 0;
   CompanionOutage lastOutage = CompanionOutage::None;
   uint32_t lastOutageAt = 0;
   uint32_t onlineSince = 0;
@@ -88,6 +95,7 @@ class CompanionMonitor {
     } else {
       stats_.startFailures++;
       stats_.consecutiveFailures++;
+      stats_.outages++;
       failed(now, CompanionOutage::BootFailed);
     }
   }
@@ -259,6 +267,11 @@ class CompanionMonitor {
   }
 
   void failed(uint32_t now, CompanionOutage why) {
+    stats_.faults++;
+    enterOffline(now, why);
+  }
+
+  void enterOffline(uint32_t now, CompanionOutage why) {
     state_ = CompanionState::Offline;
     stats_.lastOutage = why;
     stats_.lastOutageAt = now;
@@ -271,6 +284,8 @@ class CompanionMonitor {
   // An outage while running: decide between soft recovery and a reboot. The
   // owner performs the action; this only records and routes it.
   void outage(uint32_t now, CompanionOutage why) {
+    stats_.outages++;
+    stats_.faults++;
     stats_.lastOutage = why;
     stats_.lastOutageAt = now;
     if (!policy_.autoRecover) {
@@ -289,7 +304,7 @@ class CompanionMonitor {
       // Rebooting is off, or was already tried: stop churning the radio and
       // come back on the slowest retry step instead.
       stats_.consecutiveFailures = 5;
-      failed(now, why);
+      enterOffline(now, why);  // counted above
       return;
     }
     state_ = CompanionState::Recovering;
@@ -319,6 +334,88 @@ class CompanionMonitor {
   uint32_t recoveryAt_[kRecoveryRing] = {};
   bool recoveryValid_[kRecoveryRing] = {};
   uint8_t recoveryIndex_ = 0;
+};
+
+// ---- console mirror ---------------------------------------------------------
+// The companion's own console (its UART, mirrored into the host log) costs the
+// host a UART buffer and a task stack, so it does not run all the time. It is
+// wanted while the user's saved setting is on, and for a while after a
+// companion fault: from the fault until the companion has been healthy
+// (Online, Idle or Held) for healthyMs without another one. A companion the
+// owner restarts on purpose (Recovering, Starting, Updating with a good end)
+// is neither a fault nor a break in the healthy time.
+//
+// The owner calls tick() from its main loop and performs the step it returns
+// on the task that owns the mirror; a start or a stop is handed out once, not
+// every tick, so a start that fails is not repeated until the next arming
+// (the next fault after the mirror was let go, or the user's setting).
+enum class MirrorStep : uint8_t { None = 0, Start, Stop };
+
+class ConsoleMirrorPolicy {
+ public:
+  explicit ConsoleMirrorPolicy(uint32_t healthyMs = 600000) : healthyMs_(healthyMs) {}
+
+  uint32_t healthyMs() const { return healthyMs_; }
+  // Wanted because of a fault (not because of the user's setting).
+  bool armed() const { return armed_; }
+
+  // A companion fault was seen: an outage, a failed start or recovery, a boot
+  // attempt that failed, a reboot made for the companion.
+  void onFault(uint32_t now) {
+    if (!armed_) {
+      armed_ = true;
+      startSpent_ = false;
+    }
+    sick_ = true;
+    since_ = now;
+  }
+
+  // The user switched the mirror off by hand; the owner stops it itself.
+  // Nothing is wanted until the next fault.
+  void onUserOff() { armed_ = false; }
+
+  // The owner could not hand the step to its worker: offer it again.
+  void notTaken(MirrorStep step) {
+    if (step == MirrorStep::Start) startSpent_ = false;
+    if (step == MirrorStep::Stop) stopSpent_ = false;
+  }
+
+  // userOn: the saved setting. running: the mirror exists right now.
+  MirrorStep tick(uint32_t now, CompanionState state, bool userOn, bool running) {
+    const bool healthy = state == CompanionState::Online || state == CompanionState::Idle ||
+                         state == CompanionState::Held;
+    if (state == CompanionState::Offline) sick_ = true;
+    if (healthy && sick_) {  // back from a fault: the healthy time starts now
+      sick_ = false;
+      since_ = now;
+    }
+    if (armed_ && healthy && now - since_ >= healthyMs_) armed_ = false;
+    if (userOn != lastUserOn_) {  // the setting changed: a fresh attempt either way
+      lastUserOn_ = userOn;
+      startSpent_ = false;
+    }
+    const bool wanted = userOn || armed_;
+    if (!wanted) startSpent_ = false;
+    if (wanted || !running) stopSpent_ = false;
+    if (wanted && !running && !startSpent_) {
+      startSpent_ = true;
+      return MirrorStep::Start;
+    }
+    if (!wanted && running && !stopSpent_) {
+      stopSpent_ = true;
+      return MirrorStep::Stop;
+    }
+    return MirrorStep::None;
+  }
+
+ private:
+  uint32_t healthyMs_;
+  uint32_t since_ = 0;        // the last fault, or the return to health after it
+  bool armed_ = false;
+  bool sick_ = false;         // a fault was seen and health has not come back yet
+  bool startSpent_ = false;   // the start for the current want was handed out
+  bool stopSpent_ = false;    // the stop for the current "not wanted" was handed out
+  bool lastUserOn_ = false;
 };
 
 // ---- transport start: wait for the slave ----------------------------------

@@ -82,12 +82,14 @@ In that one commit:
    device keeps a `1.1.0` updater.
 3. Phone link: v2 becomes v1 in the firmware and in the phone app in the same change, and the old v1
    handling is deleted rather than relabelled. Update `APP_JSON_CONTRACT.md` section 11.9.
-4. ESP-NOW: HardwareOne's mesh format is named **ESPNOW V1 (1.0)** (`HW1_ESPNOW_RELEASE`). "V1" says it
-   runs on Espressif ESP-NOW v1 (250-byte frames); "1.0" is HardwareOne's own mesh format version. On
-   the wire `ESPNOW_V4_VERSION` in `System_ESPNow_Wire.h` goes from 4 to 1, the `static_assert` beside
-   it moves with it, and the V4 names and log text follow the rename plan (kept off the repo).
+4. ESP-NOW: HardwareOne's mesh format is shown as **custom ESP-NOW v1**: its own format carried in
+   Espressif ESP-NOW v1 frames (250 bytes). "v1" is the Espressif frame class, worked out from the
+   header and payload lengths; `versions` shows no format number of HardwareOne's own
+   (`HW1_ESPNOW_RELEASE` in `System_ESPNow_Wire.h` keeps it for the documents). On the wire
+   `ESPNOW_V4_VERSION` in `System_ESPNow_Wire.h` goes from 4 to 1, the `static_assert` beside it moves
+   with it, and the V4 names and log text follow the rename plan (kept off the repo).
 5. `versions` on a built 1.0.0 image shows firmware 1.0.0, updater 1.0.0, phone link v1 and
-   ESPNOW V1 (1.0) with wire byte 1 in `versions json`.
+   custom ESP-NOW v1 with wire byte 1 in `versions json`.
 6. `docs/COMPATIBILITY.md` lists the new numbers.
 
 Already at 1, leave as they are: HW1-PIPE-v1, the CM5 control protocol, the OTA manifest format and

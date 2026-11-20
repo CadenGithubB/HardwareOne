@@ -166,11 +166,18 @@ void radioHalSilenceForRestart();
 // Packets the producers dropped at that fence (silently, no log on their
 // task); reported with "SDMMC quiesced".
 uint32_t radioHalRestartTxDrops();
-// Mirror the companion's UART console into the P4 log (tag "C6>"). Started by
-// radioHalPrepare(); the only view of the C6's own boot log and crashes while
-// HardwareOne is running.
+// Mirror the companion's UART console into the P4 log (tag "C6>"): the only
+// view of the C6's own boot log and crashes while HardwareOne is running. Off
+// unless something starts it: radioHalPrepare() after a failed boot attempt,
+// System_RadioCompanion after a companion fault or for a saved `c6console on`.
+// While on it holds about 6 KB of internal SRAM (UART buffer and task stack).
+// No lock: after boot only the command executor task calls it. Stopping waits
+// for the mirror task to leave its read (up to about 220 ms).
 esp_err_t radioHalConsoleMirror(bool on);
 bool radioHalConsoleMirrorOn();
+// False on an assembly without a P4-connected companion console (the start
+// then answers ESP_ERR_NOT_SUPPORTED).
+bool radioHalConsoleMirrorSupported();
 
 // Companion firmware update, streamed over the transport (ESP-Hosted OTA).
 esp_err_t radioHalUpdateBegin();

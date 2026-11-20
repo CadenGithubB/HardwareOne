@@ -71,11 +71,10 @@ void versionsCollect(hw1versions::List& out) {
 #endif
 
 #if ENABLE_ESPNOW
-  // The released name: the Espressif frame class the format fits ("V1": 250-
-  // byte frames) and its release number. The byte peers compare is JSON only.
-  out.add("espnow", "ESP-NOW", "ESPNOW V%d (%s)",
-          (ESPNOW_V4_HEADER_LEN + ESPNOW_V4_MAX_PAYLOAD) <= ESP_NOW_MAX_IE_DATA_LEN ? 1 : 2,
-          HW1_ESPNOW_RELEASE);
+  // HardwareOne's own mesh format, named by the Espressif frame class it fits
+  // ("v1": 250-byte frames). The byte peers compare is JSON only.
+  out.add("espnow", "ESP-NOW", "custom ESP-NOW v%d",
+          (ESPNOW_V4_HEADER_LEN + ESPNOW_V4_MAX_PAYLOAD) <= ESP_NOW_MAX_IE_DATA_LEN ? 1 : 2);
   out.add("espnow_wire", nullptr, "%u", (unsigned)ESPNOW_V4_VERSION);
   {
     // Read at ESP-NOW init on every board (through the bridge on a P4): the

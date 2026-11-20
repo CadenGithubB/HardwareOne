@@ -111,7 +111,11 @@
 // HTTPS: TLS-encrypted HTTP. Self-signed or uploaded certs in /system/certs/.
 // Runtime toggle: gSettings.httpsEnabled (admin can flip via web UI).
 // Auto-disabled if HTTP server is off.
-#define ENABLE_HTTPS            1
+// Off unless chosen (since 2026-11-20): a build from these defaults serves
+// plain HTTP whatever httpsEnabled is saved. The guided setup
+// (tools/build_config.py new, "HTTPS for the web interface") or a saved
+// configuration turns it on.
+#define ENABLE_HTTPS            0
 
 // MQTT: Home Assistant integration via MQTT broker.
 // Auto-disabled if WiFi is off.
@@ -342,7 +346,7 @@
 // on ESP-NOW (Connectivity); the speech web page surfaces ESP-SR.
 
 // Speech recognition (ESP-SR): WakeNet wake word + MultiNet command grammar.
-// Runtime: srstart / srstop. Web page: CUSTOM_ENABLE_WEB_SPEECH (Connectivity).
+// Runtime: opensr / closesr. Web page: CUSTOM_ENABLE_WEB_SPEECH (Connectivity).
 #define ENABLE_ESP_SR           0
 
 // Fully local buffered dictation backend; independent of displays and UART.
@@ -424,7 +428,9 @@
 // Bonded mode: two-device bonded pair via ESP-NOW (master/worker).
 // Master shows remote UI for worker features, manifest cached in LittleFS.
 // Auto-disabled if ESP-NOW is off.
-#define ENABLE_BONDED_MODE      1
+// Off unless chosen (since 2026-11-20): the guided setup ("Bonded pair") or a
+// saved configuration turns it on.
+#define ENABLE_BONDED_MODE      0
 
 // Back-capture over ESP-NOW (docs/BACKCAPTURE_FILES.md, design 2026-11-19).
 // SEND: this device serves its whitelisted logs to the masters named on it
@@ -473,17 +479,24 @@
 //   preprocessor, so nesting a source inside `#if ENABLE_LLM_BACKEND` would
 //   still be read as its literal and compile the engine with the feature off.
 //   The dependency between them is enforced by #error in §8 instead.
-#define ENABLE_LLM_BACKEND          1
-#define ENABLE_LLM_SOURCE_ONBOARD   1
-#define ENABLE_LLM_SOURCE_CM5       1
+//
+//   All off unless chosen (since 2026-11-20): a build from these defaults has
+//   no assistant. The guided setup (tools/build_config.py new, group
+//   "Assistant") or a saved configuration turns on a source, and the master
+//   switch with it.
+#define ENABLE_LLM_BACKEND          0
+#define ENABLE_LLM_SOURCE_ONBOARD   0
+#define ENABLE_LLM_SOURCE_CM5       0
 #define ENABLE_LLM_SOURCE_HTTP      0
 
-#if ENABLE_LLM_SOURCE_ONBOARD
-// Max KV / attention context in tokens (0 = use checkpoint's seq_len only).
-// Lower uses less PSRAM; must cover prompt + max generation.
-// Typical tiny models: 256–1024.
+// On-board source only: max KV / attention context in tokens (0 = use
+// checkpoint's seq_len only). Lower uses less PSRAM; must cover prompt + max
+// generation. Typical tiny models: 256–1024. Not behind
+// `#if ENABLE_LLM_SOURCE_ONBOARD`: that test is false here now, before a
+// board profile or a saved configuration switches the source on further down,
+// so the value would silently come from the #ifndef fallback in System_LLM.h
+// (the same 1024) and an edit of this line would do nothing.
 #define LLM_MAX_CONTEXT_LEN     1024
-#endif
 
 // Maps: offline maps and waypoints web page.
 #define ENABLE_MAPS             1   // CARRIER BUILD: dropped for BT flash headroom; was 1

@@ -107,9 +107,142 @@ class Catalogue(unittest.TestCase):
             blocked = self.setup.blocked(config, off)
             reachable |= offered - set(blocked)
             reasons.update({switch: f"{board}: {reason}" for switch, reason in blocked.items()})
+            # An item that cannot be switched on by itself still counts when an item that needs it
+            # brings it on: the assistant (off in the shared defaults since 2026-11-20) comes on
+            # with its first answer source, as its hint says.
+            for switch in set(blocked) & offered:
+                for other, row in self.setup.options.items():
+                    if switch not in row.get("needs", ()) or other in blocked or other not in off:
+                        continue
+                    brought, _ = self.setup.change_option(config, other, True)
+                    values_after, messages = self.setup.evaluate(brought)
+                    if not messages and self.setup.is_on(values_after, switch):
+                        self.assertTrue(self.setup.options[switch].get("hint"),
+                                        f"{self.setup.title(switch)} only comes on with another item: "
+                                        "give it a hint that says so")
+                        reachable.add(switch)
+                        break
         missing = {self.setup.title(switch): reasons.get(switch, "offered on no board")
                    for switch in set(self.setup.options) - reachable}
         self.assertEqual(missing, {}, "an item no board can have: its needs or board list are wrong")
+
+    # G-15 (2026-11-20): HTTPS, the bonded pair and the assistant are off in the shared defaults; a
+    # user gets them from the guided setup. From a bare board each is offered under a plain name,
+    # starts at off, and can be switched on with what it needs.
+    OPT_IN = ("ENABLE_HTTPS", "ENABLE_BONDED_MODE", "ENABLE_LLM_BACKEND", "ENABLE_LLM_SOURCE_ONBOARD",
+              "ENABLE_LLM_SOURCE_CM5", "ENABLE_LLM_SOURCE_HTTP")
+
+    @HAVE_COMPILER
+    def test_https_bonded_pair_and_assistant_start_off_on_a_bare_board(self):
+        header = (REPO / "components/hardwareone/System_BuildConfig.h").read_text().split(
+            "// CHECKED-IN DEPLOYMENT PROFILE OVERRIDE", 1)[0]
+        for switch in self.OPT_IN:
+            with self.subTest(shared_default=switch):
+                self.assertRegex(header, rf"(?m)^#define {switch}\s+0\b", "the shared default is off")
+                row = self.setup.options[switch]
+                self.assertTrue(row["title"].strip() and row["summary"].strip())
+                self.assertNotIn("ENABLE_", row["title"] + row["summary"], "plain words, no switch names")
+        for board in build_config.board_choices():
+            config = {"board": board, "features": {}}
+            values, _ = self.setup.evaluate(config)
+            self.assertTrue(values, board)
+            for switch in self.OPT_IN:
+                with self.subTest(board=board, switch=switch):
+                    self.assertTrue(self.setup.offered(config, self.setup.options[switch]))
+                    self.assertFalse(self.setup.is_on(values, switch), "off until the user chooses it")
+
+    @HAVE_COMPILER
+    def test_the_setup_switches_them_on_with_what_they_need(self):
+        config = {"board": "xiao_s3", "features": {}}
+        self.assertEqual(self.setup.evaluate(config)[1], ())
+        # HTTPS and the bonded pair: one step each.
+        for switch in ("ENABLE_HTTPS", "ENABLE_BONDED_MODE"):
+            with self.subTest(switch=switch):
+                chosen, _ = self.setup.change_option(config, switch, True)
+                values, messages = self.setup.evaluate(chosen)
+                self.assertEqual(messages, ())
+                self.assertTrue(self.setup.is_on(values, switch))
+                self.assertEqual(chosen["features"][switch], 1)
+        # The assistant: not by itself (the header wants a source), and the refusal says what to do.
+        with self.assertRaises(Refused) as refused:
+            self.setup.change_option(config, "ENABLE_LLM_BACKEND", True)
+        self.assertIn("answer sources", str(refused.exception))
+        # Each answer source brings the assistant on with it and resolves.
+        for source in ("ENABLE_LLM_SOURCE_HTTP", "ENABLE_LLM_SOURCE_CM5", "ENABLE_LLM_SOURCE_ONBOARD"):
+            with self.subTest(source=source):
+                chosen, notes = self.setup.change_option(config, source, True)
+                values, messages = self.setup.evaluate(chosen)
+                self.assertEqual(messages, ())
+                self.assertTrue(self.setup.is_on(values, source))
+                self.assertTrue(self.setup.is_on(values, "ENABLE_LLM_BACKEND"))
+                self.assertEqual(chosen["features"]["ENABLE_LLM_BACKEND"], 1)
+                self.assertTrue(any("Assistant" in note for note in notes), notes)
+                # The other sources stay off: nothing comes on that was not chosen.
+                for other in set(self.OPT_IN) - {source, "ENABLE_LLM_BACKEND"}:
+                    self.assertFalse(self.setup.is_on(values, other), other)
+        # And off again: the last source takes the assistant with it or is refused with a reason.
+        chosen, _ = self.setup.change_option(config, "ENABLE_LLM_SOURCE_HTTP", True)
+        back, _ = self.setup.change_option(chosen, "ENABLE_LLM_BACKEND", False)
+        values, messages = self.setup.evaluate(back)
+        self.assertEqual(messages, ())
+        self.assertFalse(self.setup.is_on(values, "ENABLE_LLM_BACKEND"))
+        self.assertFalse(self.setup.is_on(values, "ENABLE_LLM_SOURCE_HTTP"))
+
+    @HAVE_COMPILER
+    def test_saved_configurations_do_not_lean_on_the_shared_defaults_for_them(self):
+        # A saved configuration that has one of them on says so itself (the starting points of the
+        # setup keep what they had before the defaults went off), and both daily P4 configurations
+        # are untouched by the change: all five are off or written in the file or the board profile.
+        for row in build_config.list_choices("configurations"):
+            config = build_config.load(row["name"])
+            values, messages = self.setup.evaluate(config)
+            self.assertEqual(messages, (), row["name"])
+            board_profile = (REPO / f"boards/{config['board']}.features.h")
+            profile = board_profile.read_text() if board_profile.is_file() else ""
+            for switch in self.OPT_IN:
+                if self.setup.is_on(values, switch):
+                    with self.subTest(configuration=row["name"], switch=switch):
+                        self.assertEqual(config["features"].get(switch), 1,
+                                         "on in the resolved build but not written in the configuration")
+                elif row["name"] in ("p4-portable", "p4-home-node") and switch != "ENABLE_LLM_SOURCE_HTTP":
+                    with self.subTest(configuration=row["name"], switch=switch):
+                        self.assertTrue(config["features"].get(switch) == 0 or
+                                        f"#define {switch} 0" in profile,
+                                        "off, and written as off in the file or the board profile")
+
+    # What each saved configuration resolves to for the six switches of OPT_IN, in that order. These
+    # are the values from before the shared defaults went off (2026-11-20): the QT Py and XIAO files
+    # write the switches themselves to keep them. A line dropped from one of those files resolves to
+    # off without any other message, so the values are pinned here. Change a row only together with
+    # the configuration it describes (the owner decides which of them really lose a feature).
+    SAVED_OPT_IN = {
+        "p4-glasses-test": (0, 0, 0, 0, 0, 0),
+        "p4-home-node":    (0, 0, 0, 0, 0, 0),
+        "p4-openclaw":     (0, 0, 1, 0, 0, 1),
+        "p4-phone-pipe":   (0, 0, 1, 0, 0, 1),
+        "p4-portable":     (0, 0, 1, 0, 0, 1),
+        "qtpy-espnow":     (1, 1, 0, 0, 0, 0),
+        "qtpy-oled":       (1, 0, 0, 0, 0, 0),
+        "qtpy-sensors":    (1, 0, 0, 0, 0, 0),
+        "xiao-base":       (1, 1, 1, 1, 1, 0),
+        "xiao-default":    (1, 1, 1, 1, 1, 0),
+        "xiao-display":    (1, 1, 1, 0, 1, 0),
+        "xiao-mqtt":       (1, 1, 1, 1, 1, 0),
+        "xiao-openclaw":   (1, 1, 1, 0, 1, 1),
+    }
+
+    @HAVE_COMPILER
+    def test_saved_configurations_keep_https_bonded_pair_and_assistant_as_they_were(self):
+        names = [row["name"] for row in build_config.list_choices("configurations")]
+        self.assertEqual(sorted(names), sorted(self.SAVED_OPT_IN),
+                         "a saved configuration was added or removed: give it a row in SAVED_OPT_IN")
+        for name in names:
+            values, messages = self.setup.evaluate(build_config.load(name))
+            self.assertEqual(messages, (), name)
+            with self.subTest(configuration=name):
+                self.assertEqual(tuple(int(self.setup.is_on(values, switch)) for switch in self.OPT_IN),
+                                 self.SAVED_OPT_IN[name],
+                                 "resolved " + ", ".join(self.OPT_IN) + " differ from the pinned values")
 
     @HAVE_COMPILER
     def test_a_rejected_board_default_can_be_repaired_from_the_checklist(self):

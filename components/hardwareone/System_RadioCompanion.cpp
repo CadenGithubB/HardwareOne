@@ -26,6 +26,7 @@
 #include "Radio_CompanionCore.h"
 #include "System_AuthIdentity.h"
 #include "System_BuildConfig.h"
+#include "System_Clock.h"
 #include "System_Command.h"
 #include "System_CommandTypes.h"
 #include "System_Debug.h"
@@ -56,6 +57,8 @@ using hw1::radio::CompanionOutage;
 using hw1::radio::CompanionPolicy;
 using hw1::radio::CompanionState;
 using hw1::radio::CompanionStats;
+using hw1::radio::ConsoleMirrorPolicy;
+using hw1::radio::MirrorStep;
 using hw1::radio::companionOutageName;
 using hw1::radio::companionStateName;
 
@@ -84,6 +87,17 @@ bool sBridgeAbsentReported = false;
 uint32_t sLastLowMemoryEventMs = 0;
 char sLastResult[160] = "none";
 bool sHardRebootAllowed = true;  // one companion reboot per power cycle
+
+// The console mirror is off unless `c6console on` is saved or a fault armed it
+// (ConsoleMirrorPolicy, Radio_CompanionCore.h). 10 min is also the monitor's
+// soft-recovery window: the mirror leaves when the escalation memory expires.
+constexpr uint32_t kMirrorHealthyMs = 600000;
+ConsoleMirrorPolicy sMirror(kMirrorHealthyMs);  // guarded by sLock
+uint32_t sFaultsSeen = 0;      // main loop: monitor faults already given to sMirror
+uint32_t sOutagesCounted = 0;  // main loop: monitor outages already in the lifetime count
+// The lifetime counts (gSettings.c6OutageCount and its two neighbours) changed
+// and are not saved yet. Set on the main loop, saved from cmd_exec.
+std::atomic<bool> sFaultCountsDirty{false};
 
 // What was running before a stop, so recovery, hold and update put it back.
 struct RadioUsers {
@@ -805,6 +819,108 @@ const char* opName(Op op) {
   }
 }
 
+// ---- console mirror and lifetime fault counts ------------------------------
+// Why the mirror is on or off, as c6status json reports it.
+const char* mirrorReason() {
+  if (!radioHalConsoleMirrorSupported()) return "unsupported";
+  if (!radioHalConsoleMirrorOn()) return "off";
+  return gSettings.c6ConsoleMirror ? "saved" : "fault";
+}
+
+// The same for people (c6status, c6console).
+const char* mirrorText() {
+  if (!radioHalConsoleMirrorSupported()) return "not available on this board";
+  if (!radioHalConsoleMirrorOn()) {
+    return gSettings.c6ConsoleMirror ? "off (c6console is on, but the mirror did not start)"
+                                     : "off (starts by itself after a companion fault)";
+  }
+  return gSettings.c6ConsoleMirror
+             ? "on (saved: c6console on; c6console off makes it fault-only)"
+             : "on after a companion fault (stops once the companion has been healthy for 10 minutes)";
+}
+
+// cmd_exec, like `c6console`: after boot every start and stop of the mirror
+// runs on this one task (radioHalConsoleMirror has no lock, and a stop waits
+// up to about 220 ms for the mirror task, which the main loop must not).
+// arg: non-null to start, null to stop.
+void consoleMirrorProc(void* arg) {
+  portENTER_CRITICAL(&sLock);
+  const bool armed = sMirror.armed();
+  portEXIT_CRITICAL(&sLock);
+  const bool wanted = armed || gSettings.c6ConsoleMirror;
+  if (arg) {
+    if (!wanted || radioHalConsoleMirrorOn()) return;  // `c6console off` came first, or it runs already
+    const esp_err_t err = radioHalConsoleMirror(true);
+    if (err == ESP_OK) {
+      if (gSettings.c6ConsoleMirror) {
+        logSystemEvent("C6", "console mirror on (c6console on)");
+      } else {
+        logSystemEvent("C6", "console mirror on after a companion fault; it stops once the companion has been "
+                             "healthy for 10 minutes (c6console on keeps it)");
+      }
+    } else if (err != ESP_ERR_NOT_SUPPORTED) {
+      // One attempt per arming (the policy does not ask again): no retry loop
+      // when the internal memory for it is not there.
+      logSystemEvent("C6", "console mirror not started: %s", esp_err_to_name(err));
+    }
+    return;
+  }
+  if (wanted || !radioHalConsoleMirrorOn()) return;  // a fault or `c6console on` came since the stop was asked
+  radioHalConsoleMirror(false);
+  logSystemEvent("C6", "console mirror off: no companion fault for 10 minutes, or the saved setting was switched off");
+}
+
+// A fault for the lifetime counts. Plain assignments, as HardwareOne.cpp does
+// for crashCount: setSetting() would post a setting-changed event per field
+// and write the file on the caller's task. The save follows from cmd_exec.
+void noteLifetimeFault(uint32_t outages, uint32_t reboots) {
+  gSettings.c6OutageCount += outages;
+  gSettings.c6RebootCount += reboots;
+  // The time belongs to this fault. With no clock it becomes 0 ("not
+  // recorded"): an earlier fault's time must not be shown as the last one.
+  const time_t t = Clock::epochSeconds();
+  gSettings.c6LastFaultEpochSec = Clock::isPlausibleEpoch(t) ? static_cast<uint32_t>(t) : 0;
+  sFaultCountsDirty.store(true);
+}
+
+// cmd_exec: the ordinary settings save. It is never run on the main loop: the
+// writer asks Wi-Fi for the SSID while Wi-Fi counts as joined, and with a
+// dead companion that request waits out its timeout.
+void faultCountsSaveProc(void*) {
+  if (!requestSettingsPersist()) {
+    logSystemEvent("C6", "companion fault counts not saved yet; the settings writer retries");
+  }
+}
+
+// Main loop (from dispatch) and boot init. Gives new faults to the mirror
+// policy and to the lifetime counts, hands the mirror's start or stop to
+// cmd_exec, and, when `quiet` (no companion action starts in this tick),
+// queues the save of changed counts. Never blocks.
+void serviceFaults(uint32_t now, bool quiet) {
+  const CompanionStats stats = monitorStats();
+  const CompanionState state = monitorState();
+  if (stats.outages != sOutagesCounted) {
+    noteLifetimeFault(stats.outages - sOutagesCounted, 0);
+    sOutagesCounted = stats.outages;
+  }
+  const bool fault = stats.faults != sFaultsSeen;
+  sFaultsSeen = stats.faults;
+  const bool running = radioHalConsoleMirrorOn();
+  portENTER_CRITICAL(&sLock);
+  if (fault) sMirror.onFault(now);
+  const MirrorStep step = sMirror.tick(now, state, gSettings.c6ConsoleMirror, running);
+  portEXIT_CRITICAL(&sLock);
+  if (step != MirrorStep::None &&
+      !submitDeferredToCmdExec(consoleMirrorProc, step == MirrorStep::Start ? &sMirror : nullptr)) {
+    portENTER_CRITICAL(&sLock);
+    sMirror.notTaken(step);  // the queue was full: offered again next tick
+    portEXIT_CRITICAL(&sLock);
+  }
+  if (quiet && sFaultCountsDirty.load() && submitDeferredToCmdExec(faultCountsSaveProc, nullptr)) {
+    sFaultCountsDirty.store(false);
+  }
+}
+
 // ---- event processing on the main loop ------------------------------------
 void handleEvent(const RadioHalEventData& event, uint32_t now) {
   switch (event.type) {
@@ -859,6 +975,11 @@ void handleEvent(const RadioHalEventData& event, uint32_t now) {
 }
 
 void dispatch(CompanionAction action, uint32_t now) {
+  // Before the action: a recovery's mirror start is queued ahead of the
+  // recovery itself, so the mirror shows the companion's restart. Not before
+  // a reboot: nothing is counted or queued in a boot that is about to end
+  // (the next boot counts the outage and the reboot from the RTC marker).
+  if (action != CompanionAction::HardReboot) serviceFaults(now, action == CompanionAction::None);
   switch (action) {
     case CompanionAction::None:
       break;
@@ -1000,10 +1121,20 @@ void fillStatus(JsonObject out, bool full) {
   rec["soft"] = stats.softRecoveries;
   rec["failed"] = stats.recoveriesFailed;
   rec["hard_requested"] = stats.hardRebootsRequested;
+  // Incidents: this boot, and kept across restarts (settings rows, saved after a fault).
+  rec["outages"] = stats.outages;
+  rec["lifetime_outages"] = gSettings.c6OutageCount;
+  rec["lifetime_reboots"] = gSettings.c6RebootCount;
+  if (gSettings.c6LastFaultEpochSec) {
+    rec["last_fault_epoch_ms"] = static_cast<int64_t>(gSettings.c6LastFaultEpochSec) * 1000;
+  } else {
+    rec["last_fault_epoch_ms"] = nullptr;  // none yet, or the clock was not set at the time
+  }
   rec["outage_age_ms"] = stats.lastOutage == CompanionOutage::None ? 0 : (unsigned long)(now - stats.lastOutageAt);
   rec["next_retry_ms"] = stats.retryPending ? (long)(stats.nextRetryAt - now) : 0;
   rec["online_age_ms"] = state == CompanionState::Online ? (unsigned long)(now - stats.onlineSince) : 0;
   rec["events_dropped"] = sEventsDropped;
+  out["console_mirror_reason"] = mirrorReason();  // off | saved | fault | unsupported
   char last[sizeof(sLastResult)];
   portENTER_CRITICAL(&sLock);
   memcpy(last, sLastResult, sizeof(last));
@@ -1091,14 +1222,26 @@ const char* cmd_c6status(const String& argsInput) {
   BROADCAST_PRINTF("  Bridge counters: %" PRIu32 " timeouts, %" PRIu32 " transport errors, %" PRIu32
                    " dropped events, %" PRIu32 " BLE HCI packets dropped while the link was down",
                    bs.timeouts, bs.transportErrors, bs.eventsDropped, bs.hciTxDownDrops);
-  BROADCAST_PRINTF("  Recovery: %" PRIu32 " starts (%" PRIu32 " failed), %" PRIu32 " soft recoveries (%" PRIu32
-                   " failed), %" PRIu32 " reboots requested; last outage: %s",
-                   stats.startAttempts, stats.startFailures, stats.softRecoveries, stats.recoveriesFailed,
-                   stats.hardRebootsRequested, companionOutageName(stats.lastOutage));
+  BROADCAST_PRINTF("  Recovery: %" PRIu32 " outages, %" PRIu32 " starts (%" PRIu32 " failed), %" PRIu32
+                   " soft recoveries (%" PRIu32 " failed), %" PRIu32 " reboots requested; last outage: %s",
+                   stats.outages, stats.startAttempts, stats.startFailures, stats.softRecoveries,
+                   stats.recoveriesFailed, stats.hardRebootsRequested, companionOutageName(stats.lastOutage));
   if (stats.retryPending) BROADCAST_PRINTF("  Next start attempt in %ld ms", (long)(stats.nextRetryAt - now));
-  BROADCAST_PRINTF("  Auto-recover: %s, auto-hold when idle: %s, reboot escalation: %s, console mirror: %s",
+  {
+    // Kept across restarts (saved after a fault). The line above is this boot only.
+    char when[24] = "";
+    if (gSettings.c6LastFaultEpochSec) {
+      Clock::formatIso8601Local(static_cast<time_t>(gSettings.c6LastFaultEpochSec), when, sizeof(when));
+    }
+    const bool any = gSettings.c6OutageCount || gSettings.c6RebootCount;
+    BROADCAST_PRINTF("  Lifetime: %" PRIu32 " outages, %" PRIu32 " restarts of this device for the companion; last fault: %s",
+                     gSettings.c6OutageCount, gSettings.c6RebootCount,
+                     when[0] ? when : any ? "time not recorded (the clock was not set)" : "none");
+  }
+  BROADCAST_PRINTF("  Auto-recover: %s, auto-hold when idle: %s, reboot escalation: %s",
                    gSettings.c6AutoRecover ? "on" : "off", gSettings.c6AutoHold ? "on" : "off",
-                   sHardRebootAllowed ? "armed" : "off until power cycle", radioHalConsoleMirrorOn() ? "on" : "off");
+                   sHardRebootAllowed ? "armed" : "off until power cycle");
+  BROADCAST_PRINTF("  Console mirror: %s", mirrorText());
   char last[sizeof(sLastResult)];
   portENTER_CRITICAL(&sLock);
   memcpy(last, sLastResult, sizeof(last));
@@ -1211,14 +1354,22 @@ const char* cmd_c6console(const String& argsInput) {
   String arg = a.arg(0);
   arg.toLowerCase();
   if (arg.length() == 0) {
-    return radioHalConsoleMirrorOn()
-               ? "C6 console mirror: on (the companion's errors appear as C6> lines; debugwifidriver or "
-                 "debugbluetoothcore shows the rest)"
-               : "C6 console mirror: off";
+    if (!ensureDebugBuffer()) return radioHalConsoleMirrorOn() ? "C6 console mirror: on" : "C6 console mirror: off";
+    snprintf(getDebugBuffer(), 1024,
+             "C6 console mirror: %s. While on, the companion's errors appear as C6> lines; debugwifidriver or "
+             "debugbluetoothcore shows the rest",
+             mirrorText());
+    return getDebugBuffer();
   }
   const int want = parseBoolArg(arg);
   if (want < 0) return kCommandReplyNotOnOff;
   const bool on = want == 1;
+  if (!on) {
+    // Off by hand also ends a mirror a fault started; the next fault starts it again.
+    portENTER_CRITICAL(&sLock);
+    sMirror.onUserOff();
+    portEXIT_CRITICAL(&sLock);
+  }
   const esp_err_t err = radioHalConsoleMirror(on);
   if (err != ESP_OK) {
     if (!ensureDebugBuffer()) return "Error: console mirror failed";
@@ -1226,9 +1377,10 @@ const char* cmd_c6console(const String& argsInput) {
     return getDebugBuffer();
   }
   setSetting(gSettings.c6ConsoleMirror, on);  // the boot follows it (radioCompanionBootInit)
-  return on ? "C6 console mirror on (saved): the companion's errors and crash reports appear as C6> lines; "
-              "debugwifidriver or debugbluetoothcore shows the rest"
-            : "C6 console mirror off (saved)";
+  return on ? "C6 console mirror on (saved): it stays on, also after a restart. The companion's errors and crash "
+              "reports appear as C6> lines; debugwifidriver or debugbluetoothcore shows the rest"
+            : "C6 console mirror off (saved): it starts by itself after a companion fault and stops once the "
+              "companion has been healthy for 10 minutes";
 }
 
 const char* cmd_c6autorecover(const String& argsInput) {
@@ -1264,24 +1416,42 @@ const char* cmd_c6heartbeat(const String& argsInput) {
 // ---- public API --------------------------------------------------------------
 void radioCompanionBootInit() {
   if (sBootInitDone) return;
+  bool rebootedForCompanion = false;
   if (gCompanionRebootMarker == kRebootMarker) {
     // The last thing the previous boot did was reboot for this companion. A
     // second one would not help; keep retrying slowly instead.
     gCompanionRebootMarker = 0;
     sHardRebootAllowed = false;
+    rebootedForCompanion = true;
     logSystemEvent("C6", "previous boot ended in a reboot for the companion; automatic reboots are off until the next power cycle");
   }
   radioHalSetEventHandler(onHalEvent);
   applyPolicyFromSettings();
-  // radioHalPrepare starts the mirror before the settings load, so the C6's
-  // errors and crash reports during its boot are always seen (quietHostedLogs
-  // holds C6> at ERROR until applySettings; with debugwifidriver or
-  // debugbluetoothcore on, `c6restart` shows a session's start lines); a
-  // saved `c6console off` stops it here.
-  if (!gSettings.c6ConsoleMirror) radioHalConsoleMirror(false);
   const bool up = radioHalPrepared() && radioHalTransportUp();
   withMonitor([&](CompanionMonitor& m) { m.onBootResult(millis(), up); });
   sBootInitDone = true;
+  // The console mirror is not started at boot. radioHalPrepare runs before
+  // the settings load and starts it only after a failed boot attempt; from
+  // here the policy decides (serviceFaults): a saved `c6console on` starts
+  // it now, on cmd_exec, and so does a fault: a mirror already running (a
+  // boot attempt failed), a companion that did not come up (the monitor
+  // counted it just above), or a previous boot that ended in a reboot for
+  // the companion. The C6's own boot messages before this point are
+  // therefore seen only after a failed first attempt; `c6restart` with the
+  // mirror on shows a start.
+  if (rebootedForCompanion) {
+    // The outage that asked for the reboot, and the reboot: that boot ended
+    // before either could be saved. Only counted here; the save is queued
+    // from the main loop (nothing is written during boot).
+    noteLifetimeFault(1, 1);
+  }
+  if (rebootedForCompanion || radioHalConsoleMirrorOn()) {
+    const uint32_t now = millis();
+    portENTER_CRITICAL(&sLock);
+    sMirror.onFault(now);
+    portEXIT_CRITICAL(&sLock);
+  }
+  serviceFaults(millis(), /*quiet=*/false);
   if (up) {
     sEverOnline = true;
     reportIdentity();
@@ -1412,10 +1582,8 @@ const CommandEntry companionCommands[] = {
   { "c6update",      "Flash companion firmware from a file over SDIO: c6update \"<path>\".", true, cmd_c6update,
     "Usage: c6update \"/sd/firmware/network_adapter.bin\"\nThe file must be an ESP32-C6 image built by tools/p4/companion (it is checked for the ESP-NOW bridge marker before anything is sent).", true },
   { "c6confirm",     "Confirm the companion's running image so it cannot roll back.", true, cmd_c6confirm },
-  { "c6console",     "Mirror the C6's own console into the P4 log: c6console [on|off] (persists).", true, cmd_c6console },
-  // 64713c0d renamed the task and, by accident, the user command; the documented name is
-  // c6console. The underscore form stays as an alias for anything that learned it.
-  { "c6_console",    "Alias of c6console.", true, cmd_c6console },
+  { "c6console",     "Keep the C6's own console mirrored into the P4 log: c6console [on|off] (persists). Off: only for 10 minutes after a companion fault.", true, cmd_c6console,
+    "Usage: c6console [on|off]\n  on  - mirror the companion's console as C6> lines all the time (uses about 6 KB of internal memory)\n  off - mirror it only after a companion fault, until the companion has been healthy for 10 minutes (the default)" },
   { "c6autorecover", "Auto-recover the companion after an outage: c6autorecover [on|off] (persists).", true, cmd_c6autorecover },
   { "c6autohold",    "Hold the companion in reset while no radio feature runs: c6autohold [on|off] (persists).", true, cmd_c6autohold },
   { "c6heartbeat",   "Companion heartbeat interval in seconds, 0 disables the watchdog: c6heartbeat <0..60> (persists).", true, cmd_c6heartbeat },
@@ -1426,7 +1594,12 @@ static const SettingEntry companionSettingsEntries[] = {
   { "c6AutoRecover",  SETTING_BOOL, &gSettings.c6AutoRecover,  1, 0, nullptr, 0, 1,  "Auto-recover after an outage", nullptr, false, nullptr, "c6autorecover" },
   { "c6AutoHold",     SETTING_BOOL, &gSettings.c6AutoHold,     0, 0, nullptr, 0, 1,  "Hold in reset while idle",      nullptr, false, nullptr, "c6autohold" },
   { "c6HeartbeatSec", SETTING_INT,  &gSettings.c6HeartbeatSec, 5, 0, nullptr, 0, 60, "Heartbeat interval (s, 0=off)", nullptr, false, nullptr, "c6heartbeat" },
-  { "c6ConsoleMirror", SETTING_BOOL, &gSettings.c6ConsoleMirror, 1, 0, nullptr, 0, 1, "Mirror the C6 console",       nullptr, false, nullptr, "c6console" },
+  { "c6ConsoleMirror", SETTING_BOOL, &gSettings.c6ConsoleMirror, 0, 0, nullptr, 0, 1, "Keep the C6 console mirrored", nullptr, false, nullptr, "c6console" },
+  // Fault history kept across restarts: read-only, no command (c6status shows
+  // them). Assigned in noteLifetimeFault, never through setSetting.
+  { "c6OutageCount",       SETTING_U32, &gSettings.c6OutageCount,       0, 0, nullptr, 0, 0, "Companion outages (lifetime)",          nullptr, false, nullptr, nullptr, true },
+  { "c6RebootCount",       SETTING_U32, &gSettings.c6RebootCount,       0, 0, nullptr, 0, 0, "Restarts for the companion (lifetime)", nullptr, false, nullptr, nullptr, true },
+  { "c6LastFaultEpochSec", SETTING_U32, &gSettings.c6LastFaultEpochSec, 0, 0, nullptr, 0, 0, "Last companion fault (Unix seconds)",   nullptr, false, nullptr, nullptr, true },
 };
 
 extern const SettingsModule companionSettingsModule = {

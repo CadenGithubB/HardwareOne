@@ -56,7 +56,7 @@ PROFILES = {
                  "FIXTURE_ESPNOW_STACK": 2, "ENABLE_AUTOMATION": 1, "ENABLE_MIGRATION_TOOL": 1,
                  "ENABLE_BLUETOOTH": 1, "ENABLE_RASPBERRY_PI_HOST_FAN": 1},
                 ["firmware"] + OTA + ESPNOW + FILES + ["ble_console_channel", "cm5_control"] + TAIL,
-                {"espnow": "ESPNOW V1 (1.0)", "espnow_stack": "v2", "automations_file": "2",
+                {"espnow": "custom ESP-NOW v1", "espnow_stack": "v2", "automations_file": "2",
                  "backup_format": "1"}),
     # Each persisted-file item is gated by its own feature alone.
     "automation_only": ({"ENABLE_AUTOMATION": 1}, ["firmware", "automations_file"] + TAIL,
@@ -228,8 +228,10 @@ def check_profile(name, exe, keys, spot, failures):
     for line, key in zip(text, shown):
         if not line.endswith("  " + doc[key]) or line.startswith(" "):
             failures.append(f"{name}: line {line!r} does not end with {key}'s value")
-    if "espnow" in keys and not any(re.fullmatch(r"ESP-NOW\s+ESPNOW V1 \(1\.0\)", l) for l in text):
-        failures.append(f"{name}: no 'ESP-NOW  ESPNOW V1 (1.0)' line: {text}")
+    if "espnow" in keys and not any(re.fullmatch(r"ESP-NOW\s+custom ESP-NOW v1", l) for l in text):
+        failures.append(f"{name}: no 'ESP-NOW  custom ESP-NOW v1' line: {text}")
+    if any("(1.0)" in l or "ESPNOW V" in l for l in text) or "(1.0)" in doc.get("espnow", ""):
+        failures.append(f"{name}: the old 'ESPNOW V1 (1.0)' wording is still printed: {text}")
     if any("wire byte" in l.lower() for l in text):
         failures.append(f"{name}: the wire byte is printed")
     return doc

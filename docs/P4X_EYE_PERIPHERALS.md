@@ -111,9 +111,22 @@ in P4 images; every other board compiles it to nothing.
   the P4 does that by itself after the radio has been idle for 30 s, and
   releases the companion when a feature asks for the radio.
 - **Console mirror.** The C6's own UART console reaches the P4 on GPIO36 and
-  is mirrored into the P4 log as `C6>` lines (`c6console [on|off]`, on by
-  default; the choice is saved, and after `c6console off` the mirror stops once
-  the settings load at boot). Each line keeps the level the C6 printed it
+  can be mirrored into the P4 log as `C6>` lines. The mirror holds about 6 KB
+  of the P4's internal memory while it runs, so it is off by default and not
+  started at boot. It starts by itself when a companion fault is seen (an
+  outage, a failed start or recovery, a boot attempt that failed, a restart
+  made for the companion) and stops once the companion has been healthy for
+  10 minutes. `c6console on` keeps it on all the time, also after a restart;
+  `c6console off` returns to the default and ends a mirror a fault started
+  (the choice is saved). Consequences: the C6's messages from the moment it
+  fails, before the P4 has noticed (a crash report included), are not
+  captured unless the mirror was already on; what follows, the recovery and
+  any repeat, is. With `c6console on` the mirror starts when the settings
+  have loaded, so the C6's very first boot messages are not shown;
+  `c6restart` shows a start. A device whose saved settings already hold
+  `c6ConsoleMirror: true` (builds from 2026-11-19 stored the old default)
+  keeps the mirror on until `c6console off` is run once; `c6status` shows
+  why it is on ("saved: c6console on" or "after a companion fault"). Each line keeps the level the C6 printed it
   with, and a crash report (panic, abort, assert, stack overflow, brownout, a
   failed `ESP_ERROR_CHECK` with its file and expression, heap corruption, a
   task watchdog's register dump, through the reset that follows) is relayed
@@ -161,7 +174,11 @@ report the channel.
 A reproducible release of this board is the factory-only deployment
 `deployments/handheld/boards/p4x_eye` (`tools/build_deployment.sh handheld
 p4x_eye`, no signing key); see its `MIGRATION.md` for the cable-flash
-procedure. There is no recovery-OTA layout for the P4 yet.
+procedure. There is no recovery-OTA layout for the P4 yet. Since 2026-11-20
+the deployment contains the microSD card and local speech-to-text (Citrinet-384
+with its language-model decoder and speaker labels) next to the display, input,
+camera, microphone, battery, radio and wake word; that selection has not been
+built or run as one image yet (see its `features.h`).
 
 ## Hardware identified
 
@@ -192,8 +209,11 @@ The board wiring lives in `components/hardwareone/System_Board_P4X_EYE.h`.
 `boards/p4x_eye.features.h` selects the devices independently; it applies only
 when this board is built. The shipped profile enables the display
 (`DISPLAY_TYPE 4`), wheel and buttons (`INPUT_DEVICE_TYPE 3`), camera,
-microphone, battery, BLE/G2/R1, Wi-Fi/web, ESP-NOW, ESP-SR and local
-speech-to-text. The microSD card is off until it has been qualified with a card:
+microphone, battery, BLE/G2/R1, Wi-Fi/web, ESP-NOW and ESP-SR. The board
+profile leaves the microSD card, and with it local speech-to-text, off. A saved
+configuration switches the card on with `ENABLE_SDMMC_CARD=1` (the guided
+setup's "microSD card" item; `configurations/p4-portable.json` does), and the
+handheld deployment's feature header carries both literals:
 
 ```c
 #undef ENABLE_SDMMC_CARD
@@ -218,9 +238,12 @@ the GPIO encoder input selection.
 Local speech-to-text needs a model file that is not part of the image, and on
 this board it always runs from the microSD card. This board profile (card
 off) builds without local STT; `ENABLE_SDMMC_CARD=1` with `ENABLE_LOCAL_STT=1`
-enables it, the 15×5 model and speaker labels follow, and the build refuses
-local STT without the card. The saved P4 configurations
-(`configurations/p4-*.json`) enable both and so the 15×5 gen2 model at
+enables it, speaker labels follow, and the build refuses local STT without
+the card. The saved P4 speech configurations (`configurations/p4-*.json`) and
+the handheld deployment enable both. They build the default acoustic model,
+Citrinet-384, read from `/sd/STT Models/citrinet384-2000h.p4.stt`. A QuartzNet
+build (`ENABLE_STT_MODEL_QUARTZNET=1`, `ENABLE_STT_MODEL_CITRINET=0`) runs the
+15×5 gen2 model at
 `/sd/STT Models/quartznet15x5-gen2-25397.p4.stt`, published as
 [`model-gen2-25397`](https://github.com/CadenGithubB/ESP32_Onboard_Speech_To_Text/releases/tag/model-gen2-25397)
 (`quartznet15x5-gen2-25397.p4.stt`, 20,112,224 bytes, SHA-256
@@ -282,7 +305,7 @@ permission-checked file commands use the selected storage backend. LittleFS
 remains the source of settings and account data. An absent or unrecognized card
 does not prevent boot, and ordinary mounting **never formats a card**.
 `sdformat confirm` remains an explicitly destructive operation. Stop writers and close files, then unmount before
-removing a card; removal detection blocks new VFS use and requires remounting.
+removing a card; removal detection blocks new VFS use, and a card put back is mounted on its own 1 to 2 s later; `sdmount` is needed only after `sdunmount` with the card left in.
 
 ## Power
 
@@ -310,8 +333,11 @@ Hardware results live with the experiments that produced this board support:
 [battery](../experiments/battery_portable/RESULTS.md) and
 [speech-to-text](../experiments/stt_p4/README.md).
 
-Not yet qualified: the microSD card (no card was fitted), battery-only
-operation and power draw, idle/sleep clocks, C6 crash recovery, and long
-endurance. Known issues: mesh pairing between two new devices saves only the
+Not yet qualified by a dated record here: battery-only operation and power
+draw, idle/sleep clocks, C6 crash recovery, and long endurance. The microSD
+card had no card fitted when the board was qualified; it has been in daily use
+since in the `p4-portable` configuration, which is not a qualification record.
+The handheld deployment's selection (card and local speech-to-text next to
+the camera and the wake word) has not been built or run as one image. Known issues: mesh pairing between two new devices saves only the
 accepting peer, and cancelling an R1 connection can block the next BLE role
 change until reboot ([details](../experiments/board_qualification/RESULTS.md)).

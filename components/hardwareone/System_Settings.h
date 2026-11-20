@@ -380,7 +380,7 @@ struct Settings {
       sttG2DecisionMod(0),
       sttG2DecisionHold(false),
       sttG2AutoGain(true),
-      sttPhraseLevel(true),
+      sttPhraseLevel(false),
       micSource("auto"),  // Mic source preference: "auto" | "pdm" | "g2" (resolved at capture time)
       sttSaveTranscripts(false),
       noteMaxSec(HW1_NOTE_MAX_SEC_DEFAULT),
@@ -434,7 +434,10 @@ struct Settings {
       c6AutoRecover(true),
       c6AutoHold(false),
       c6HeartbeatSec(5),
-      c6ConsoleMirror(true),
+      c6OutageCount(0),
+      c6RebootCount(0),
+      c6LastFaultEpochSec(0),
+      c6ConsoleMirror(false),
       bleRequireSecureChannel(true),
       bleSecureChannelSecret(""),
       bleConsoleOnPipe(true),
@@ -1132,7 +1135,7 @@ struct Settings {
   int sttG2DecisionMod;
   bool sttG2DecisionHold;
   bool sttG2AutoGain;           // STT multiplies glasses PCM (1..8, agreed over sessions). Starts at x1.
-  bool sttPhraseLevel;          // Within-phrase software leveler: steps x1..x8 every 0.1 s while that mic's auto gain is on.
+  bool sttPhraseLevel;          // Within-phrase software leveler: steps x1..x8 every 0.1 s while that mic's auto gain is on (sttphraselevel; default: false).
   String micSource;             // Preferred mic source: "auto" | "pdm" | "g2" (resolved lazily against availability)
   bool sttSaveTranscripts;      // Save recognized text; latched when a local or Pi dictation session starts
   // QuickNote (System_QuickNote.cpp), read when a note starts / each pass:
@@ -1235,7 +1238,13 @@ struct Settings {
   bool c6AutoRecover;           // Recover the companion on its own after an outage (default: true)
   bool c6AutoHold;              // Hold the companion in reset while no radio feature runs (default: false)
   int  c6HeartbeatSec;          // Companion heartbeat interval in seconds, 0 = watchdog off (default: 5)
-  bool c6ConsoleMirror;         // Mirror the companion's own console as C6> lines (c6console; default: true)
+  // Companion fault history, kept across restarts (read-only rows; c6status shows them).
+  // Written by System_RadioCompanion only, by plain assignment, and saved after a fault.
+  // Placed ahead of the bool so the three add 12 bytes and no padding.
+  uint32_t c6OutageCount;       // Companion outages since the counts began (default: 0)
+  uint32_t c6RebootCount;       // Restarts of this device made to recover the companion (default: 0)
+  uint32_t c6LastFaultEpochSec; // Clock time of the last of either, seconds since 1970 UTC; 0 = none, or the clock was not set (default: 0)
+  bool c6ConsoleMirror;         // Keep the companion's console mirrored as C6> lines (c6console; default: false = only for a while after a companion fault)
   bool bleRequireSecureChannel; // Require the app-layer Secure Channel (server mode); refuse plaintext commands when set
   String bleSecureChannelSecret;// Pre-shared passphrase for the Secure Channel (PBKDF2 -> PSK). Secret.
   String phonePipeSecret;       // Dedicated pipe secret; registry loads/mutates into internal RAM.

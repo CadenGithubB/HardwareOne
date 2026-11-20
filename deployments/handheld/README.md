@@ -32,13 +32,34 @@ tools/build_deployment.sh handheld p4x_eye   # -> build/deployments/handheld/p4x
 ```
 
 Installation and the data-preserving reflash procedure are in
-[`boards/p4x_eye/MIGRATION.md`](boards/p4x_eye/MIGRATION.md). Local
-speech-to-text is off in this deployment: on the P4 it runs the published 15×5
-gen2 model from the microSD card, and microSD stays off here until it is
-qualified. Setting `ENABLE_SDMMC_CARD`, `ENABLE_SD_CARD` and
-`ENABLE_LOCAL_STT` to 1 in `boards/p4x_eye/features.h` enables it with the
-15×5 model; see the
-[Local speech-to-text model](../../docs/README_DETAILS.md#local-speech-to-text-model-esp32-p4)
-section for its URL and SHA-256. The ESP32-C6
+[`boards/p4x_eye/MIGRATION.md`](boards/p4x_eye/MIGRATION.md). The ESP32-C6
 companion firmware this image expects is built and flashed with
 [`tools/p4/companion`](../../tools/p4/companion/README.md).
+
+## What the P4X-EYE deployment contains
+
+`boards/p4x_eye/features.h` is the complete list. In short: the display, wheel
+and buttons, camera, microphone, battery, the microSD card, Wi-Fi and the web
+UI, Bluetooth for the G2 glasses and the R1 ring, the ESP-NOW mesh, the ESP-SR
+wake word, and local speech-to-text with speaker labels and QuickNote. It
+leaves out HTTPS, MQTT, bonded mode, automations, the assistant (LLM), maps,
+games and the phone link.
+
+microSD and local speech-to-text were switched on on 2026-11-20
+(`ENABLE_SDMMC_CARD`, `ENABLE_SD_CARD` and `ENABLE_LOCAL_STT` are 1). Local
+speech-to-text on the P4 reads its acoustic model from the card: this
+deployment builds Citrinet-384 and loads
+`/sd/STT Models/citrinet384-2000h.p4.stt`; the
+[Local speech-to-text model](../../docs/README_DETAILS.md#local-speech-to-text-model-esp32-p4)
+section says where the file comes from. Without the card or the file the
+rest of the device works and speech-to-text reports that its model cannot be
+opened.
+`boards/p4x_eye/sdkconfig.defaults` adds the one SDK option local
+speech-to-text measures its memory with.
+
+The card and local speech-to-text run daily on this board in the saved
+configuration `p4-portable`, which has no camera and no wake word. This
+deployment's selection, with both next to local speech-to-text, has not been
+built or run on hardware as one image: the image size against the release
+gate (`MAIN_RELEASE_MAX` in the contract) and a wake-word plus dictation
+session are checked before a release is made from it.

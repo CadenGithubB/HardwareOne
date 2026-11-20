@@ -2,6 +2,7 @@
 """Compile the real configuration for independent display/input/storage choices."""
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -46,6 +47,18 @@ class PeripheralConfig(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
             else:
                 self.assertNotEqual(result.returncode, 0)
+
+    def check_deployment(self, deployment, board_profile, checks):
+        """A checked-in deployment header after a board profile, as a deployment build compiles it."""
+        compiler = shutil.which('c++')
+        self.assertIsNotNone(compiler)
+        source = '#include "System_BuildConfig.h"\n'
+        source += '\n'.join(f'static_assert({expr}, "{expr}");' for expr in checks)
+        result = subprocess.run([compiler, '-x', 'c++', '-std=c++17', '-fsyntax-only', '-I', str(SOURCE),
+                                 '-DCONFIG_IDF_TARGET_ESP32P4=1', f'-DHW1_BOARD_CONFIG_HEADER="{board_profile}"',
+                                 f'-DHW1_DEPLOYMENT_CONFIG_HEADER="{deployment}"', '-'],
+                                input=source, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def profile(self, display=0, wheel=0, sd=0):
         return dict(HW_BOARD_P4X_EYE=1, I2C_FEATURE_LEVEL=0,
@@ -178,15 +191,57 @@ class PeripheralConfig(unittest.TestCase):
         self.check_profile({'ENABLE_SDMMC_CARD': 1, 'ENABLE_LOCAL_STT': 1, 'ENABLE_STT_MODEL_CITRINET': 0},
                            [], succeeds=False, board_profile=board)   # no model
 
-    def test_handheld_local_stt_follows_card(self):
+    def test_handheld_has_the_card_and_local_stt(self):
+        # G-13 (2026-11-20): the handheld deployment contains microSD and local speech-to-text.
         handheld = SOURCE.parents[1] / 'deployments/handheld/boards/p4x_eye/features.h'
         include = {'HW1_HANDHELD_INCLUDED': f'1\n#include "{handheld}"'}
-        self.check_profile(include, ['ENABLE_SD_CARD == 0', 'ENABLE_LOCAL_STT == 0',
-                                     'ENABLE_STT_MODEL_15X5_GEN2 == 0'])
-        self.check_profile(dict(include, ENABLE_LOCAL_STT=1), [], succeeds=False)
-        self.check_profile(dict(include, ENABLE_SDMMC_CARD=1, ENABLE_SD_CARD=1, ENABLE_LOCAL_STT=1),
-                           ['ENABLE_SD_CARD == 1', 'ENABLE_LOCAL_STT == 1', 'ENABLE_STT_MODEL_CITRINET == 1',
-                            'ENABLE_STT_MODEL_15X5_GEN2 == 0'])
+        contains = ['ENABLE_SDMMC_CARD == 1', 'ENABLE_SD_CARD == 1', 'ENABLE_LOCAL_STT == 1',
+                    'ENABLE_STT_MODEL_CITRINET == 1', 'ENABLE_STT_MODEL_QUARTZNET == 0',
+                    'ENABLE_STT_MODEL_15X5_GEN2 == 0', 'ENABLE_STT_SPEAKER_LABELS == 1', 'ENABLE_STT_LM == 1',
+                    'ENABLE_QUICKNOTE == 1', 'ENABLE_DICTATION == 1',
+                    # What it had before stays: wake word, camera, glasses and ring, mesh, web.
+                    'ENABLE_ESP_SR == 1', 'ENABLE_CAMERA_SENSOR == 1', 'ENABLE_G2_GLASSES == 1',
+                    'ENABLE_R1_HEALTH == 1', 'ENABLE_ESPNOW == 1', 'ENABLE_HTTP_SERVER == 1',
+                    # And what it leaves out stays out.
+                    'ENABLE_HTTPS == 0', 'ENABLE_BONDED_MODE == 0', 'ENABLE_MQTT == 0', 'ENABLE_LLM_BACKEND == 0',
+                    'ENABLE_AUTOMATION == 0', 'ENABLE_MAPS == 0', 'ENABLE_UART_HOST_LINK == 0']
+        # As the assembly-only cases above: the deployment header alone ...
+        self.check_profile(include, contains)
+        # ... and as the firmware build includes it, after the board profile: the same result, so the
+        # deployment does not lean on the board profile for any of it.
+        board = SOURCE.parents[1] / 'boards/p4x_eye.features.h'
+        self.check_deployment(handheld, board, contains)
+        # The header's rules still hold for an edited copy: no local STT without the card, one model.
+        self.check_profile(dict(include, ENABLE_SDMMC_CARD=0, ENABLE_SD_CARD=0), [], succeeds=False)
+        self.check_profile(dict(include, ENABLE_STT_MODEL_QUARTZNET=1), [], succeeds=False)
+        # Local STT off again in an edited copy: its speaker labels and decoder go with it, the card stays.
+        self.check_profile(dict(include, ENABLE_LOCAL_STT=0),
+                           ['ENABLE_LOCAL_STT == 0', 'ENABLE_STT_SPEAKER_LABELS == 0', 'ENABLE_STT_LM == 0',
+                            'ENABLE_SD_CARD == 1'])
+
+    def test_handheld_source_gates_are_bare_literals(self):
+        # CMake picks the sources from the first definition's text (components/hardwareone/
+        # CMakeLists.txt, HW_CFG_TEXT_FLAGS), and the deployment header is read first: each speech
+        # gate is defined there, once, as a bare integer.
+        text = (SOURCE.parents[1] / 'deployments/handheld/boards/p4x_eye/features.h').read_text()
+        for flag, value in (('ENABLE_LOCAL_STT', 1), ('ENABLE_STT_MODEL_CITRINET', 1),
+                            ('ENABLE_STT_MODEL_QUARTZNET', 0), ('ENABLE_STT_SPEAKER_LABELS', 1),
+                            ('ENABLE_ESP_SR', 1), ('ENABLE_CAMERA_SENSOR', 1)):
+            with self.subTest(flag=flag):
+                found = re.findall(rf'^#define[ \t]+{flag}[ \t]+(.*)$', text, re.M)
+                self.assertEqual(found, [str(value)])
+        contract = (SOURCE.parents[1] / 'deployments/handheld/boards/p4x_eye/contract.conf').read_text()
+        overlay = re.search(r'^SDKCONFIG_DEFAULTS=(.+)$', contract, re.M)
+        self.assertIsNotNone(overlay, 'the deployment names its sdkconfig overlay')
+        lines = (SOURCE.parents[1] / overlay.group(1)).read_text().splitlines()
+        # Local STT measures its internal memory through the heap hooks, as every saved P4 speech
+        # configuration (and the guided setup's item) selects.
+        self.assertIn('CONFIG_HEAP_USE_HOOKS=y', lines)
+        catalog = json.loads((SOURCE.parents[1] / 'tools/build_config_catalog.json').read_text())
+        stt = next(row for row in catalog['options'] if row['switch'] == 'ENABLE_LOCAL_STT')
+        self.assertEqual(stt['sdk_on'], ['CONFIG_HEAP_USE_HOOKS'])
+        self.assertEqual([line for line in lines if line and not line.startswith('#')],
+                         ['CONFIG_HEAP_USE_HOOKS=y'], 'the overlay holds that one option')
 
     def test_p4_openclaw_preserves_local_speech_profile(self):
         repo = SOURCE.parents[1]

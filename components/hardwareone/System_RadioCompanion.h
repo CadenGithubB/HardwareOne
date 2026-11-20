@@ -9,6 +9,11 @@
  * companion that never came up, recovers one that stops answering, and
  * escalates to a reboot only when soft recovery keeps failing.
  *
+ * It also owns the companion's console mirror (HAL_Radio.h): off unless
+ * `c6console on` is saved, started on a companion fault and stopped after ten
+ * healthy minutes; and the fault history that survives restarts (settings
+ * rows c6OutageCount, c6RebootCount, c6LastFaultEpochSec; `c6status`).
+ *
  * Boards with an on-chip radio compile every entry point to a no-op.
  */
 #ifndef SYSTEM_RADIO_COMPANION_H
@@ -25,7 +30,10 @@ class String;
 
 // Boot (from setup(), before any radio feature starts): subscribe to the
 // HAL's events, apply the persisted monitoring settings, record how the
-// transport came up and post the boot summary events.
+// transport came up and post the boot summary events. Starts no console
+// mirror and writes no settings itself: a wanted mirror is queued for the
+// command executor, and changed fault counts are saved from the main loop's
+// first quiet tick.
 void radioCompanionBootInit();
 // One line per fact after setup(), for the boot log.
 void radioCompanionLogBootSummary();

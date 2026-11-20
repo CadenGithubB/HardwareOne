@@ -99,11 +99,13 @@ static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
 #define ESPNOW_V4_HEADER_LEN   32            // Header size in bytes (was 24 in V3)
 #define ESPNOW_V4_MAX_PAYLOAD  (250 - 32)    // 218 bytes max payload (was 226 in V3)
 
-// The released name of this format, as `versions` shows it: "ESPNOW V1 (1.0)".
-// "V1" is the Espressif ESP-NOW frame class the format fits (header + payload
-// within ESP-NOW v1's 250 bytes, not v2's 1470); "1.0" is the owner's release
-// number for the format. Display only: peers still check ESPNOW_V4_VERSION,
-// the byte on the wire, which this does not change.
+// The name of this format, as `versions` shows it: "custom ESP-NOW v1". It is
+// HardwareOne's own mesh format carried in Espressif ESP-NOW frames; "v1" is
+// the Espressif frame class it fits (header + payload within ESP-NOW v1's 250
+// bytes, not v2's 1470), worked out from the two lengths above. Display only:
+// peers still check ESPNOW_V4_VERSION, the byte on the wire, which this does
+// not change. HW1_ESPNOW_RELEASE is the owner's own number for the format; it
+// is not displayed, and it moves when the wire format does (the assert below).
 #define HW1_ESPNOW_RELEASE     "1.0"
 static_assert(ESPNOW_V4_VERSION == 4,
               "wire format changed: bump HW1_ESPNOW_RELEASE and docs/COMPATIBILITY.md");

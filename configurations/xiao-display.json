@@ -2,7 +2,11 @@
   "board": "xiao_s3",
   "features": {
     "DISPLAY_TYPE": 1,
+    "ENABLE_BONDED_MODE": 1,
     "ENABLE_CAMERA_SENSOR": 0,
+    "ENABLE_HTTPS": 1,
+    "ENABLE_LLM_BACKEND": 1,
+    "ENABLE_LLM_SOURCE_CM5": 1,
     "ENABLE_LLM_SOURCE_ONBOARD": 0,
     "ENABLE_MAPS": 0,
     "ENABLE_MQTT": 0,
