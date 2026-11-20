@@ -5033,8 +5033,11 @@ static void buildSensorDataJson(char* buf, size_t bufSize) {
 }
 
 static void buildSystemStatusJson(char* buf, size_t bufSize) {
-  uint32_t freeHeap = ESP.getFreeHeap();
-  uint32_t minHeap = ESP.getMinFreeHeap();
+  // heap_free and heap_min are the byte-addressable internal heap, the figure
+  // every other surface reports (System_MemUtil.h); Arduino's ESP heap calls
+  // also count the IRAM-only heap, about 25.8 KB on the classic ESP32.
+  uint32_t freeHeap = (uint32_t)hw1InternalFreeBytes();
+  uint32_t minHeap = (uint32_t)hw1InternalMinFreeBytes();
   uint32_t freePsram = ESP.getFreePsram();
   uint32_t uptime = SelfDevice::uptimeSeconds();
   

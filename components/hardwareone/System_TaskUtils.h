@@ -492,8 +492,10 @@ extern TaskHandle_t gInputTaskHandle;
 
 // One row per task the firmware creates under a fixed name and stack size.
 // collectKnownTaskRows() in System_TaskUtils.cpp holds the one table of them:
-// reportAllTaskStacks() (`taskstats`) and the memory monitor's periodic stack
-// sample both walk its rows, so a task added there shows up in both.
+// reportAllTaskStacks() (the DEBUG_MEMORY 60 s task report; `taskstats` is a
+// separate command that lists every task FreeRTOS reports) and the memory
+// monitor's periodic stack sample both walk its rows, so a task added there
+// shows up in both.
 struct KnownTaskRow {
   const char*  name;           // the name the task is created with
   TaskHandle_t handle;         // null when there is no such task

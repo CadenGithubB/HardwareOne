@@ -6,7 +6,7 @@
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
 #include "System_MemoryMonitor.h"
-#include "System_HeapLowCore.h"  // heap_low event policy (host-tested)
+#include "System_HeapLowCore.h"  // heap_low event policy, fragmentation figure (host-tested)
 #include "System_Events.h"       // systemEventPost(SYSEVT_HEAP_LOW)
 #include "System_MemTracker.h"
 #include "System_MemUtil.h"
@@ -245,6 +245,18 @@ static size_t gLowestHeapSeen = UINT32_MAX;
 static const size_t HEAP_WARNING_THRESHOLD = heap_low_core::kFreeBytes;  // 25KB warning threshold
 static_assert(heap_low_core::kFreeBytes == 25600, "heap_low and [HEAP_PRESSURE] share the 25 KB line");
 
+// The one [HEAP_PRESSURE] line, for memsample and the Tier 1 watch below: one
+// format, and min_ever read here so no caller can pass a different source. It
+// is the allocator's low-water mark for the internal 8-bit heap, so it includes
+// dips between two samples; ESP-IDF keeps one mark per region and adds them up,
+// so it can read slightly under any total that existed at one instant. No
+// static state: memsample runs on the command task, Tier 1 on the main loop.
+static void printHeapPressure(size_t dramFree) {
+  BROADCAST_PRINTF("[HEAP_PRESSURE] WARNING: DRAM free %u B (threshold=%u, min_ever=%u)",
+                   (unsigned)dramFree, (unsigned)HEAP_WARNING_THRESHOLD,
+                   (unsigned)hw1InternalMinFreeBytes());
+}
+
 void sampleMemoryState(bool forceFullScan) {
   // ── Internal heap (NOT combined — PSRAM is reported separately below) ──
   // Internal 8-bit RAM only. Previously: ESP.* (MALLOC_CAP_INTERNAL, no 8BIT)
@@ -314,12 +326,12 @@ void sampleMemoryState(bool forceFullScan) {
   }
   
   // ── DRAM fragmentation indicator ──
-  if (dramFree > 0) {
-    int fragPct = 100 - (int)((dramLargest * 100) / dramFree);
-    if (fragPct > 30) {
-      BROADCAST_PRINTF("[MEMSAMPLE] DRAM fragmentation: %d%% (largest_block=%u vs free=%u)",
-                       fragPct, (unsigned)dramLargest, (unsigned)dramFree);
-    }
+  // Shared figure and warning line (System_HeapLowCore.h), the same ones the
+  // DEBUG_MEMORY task report uses.
+  if (heap_low_core::fragWarn(dramFree, dramLargest)) {
+    BROADCAST_PRINTF("[MEMSAMPLE] DRAM fragmentation: %u%% (largest_block=%u vs free=%u)",
+                     heap_low_core::fragPercent(dramFree, dramLargest),
+                     (unsigned)dramLargest, (unsigned)dramFree);
   }
   
   if (isNewLow) {
@@ -327,8 +339,7 @@ void sampleMemoryState(bool forceFullScan) {
                   (unsigned)dramFree, (unsigned)dramMinFree);
   }
   if (isPressured) {
-    BROADCAST_PRINTF("[HEAP_PRESSURE] WARNING: DRAM free %u bytes (threshold=%u, min_ever=%u)",
-                     (unsigned)dramFree, (unsigned)HEAP_WARNING_THRESHOLD, (unsigned)dramMinFree);
+    printHeapPressure(dramFree);
   }
   
   // ── Main loop (caller) stack watermark - always report since this is the tightest task ──
@@ -363,8 +374,9 @@ void sampleMemoryState(bool forceFullScan) {
   
   if (doTaskScan) {
     // The rows of the one known-task table (System_TaskUtils.cpp), the same
-    // rows `taskstats` prints. A row that is not alive may hold a stale handle
-    // (the task deleted itself) and is skipped.
+    // rows the DEBUG_MEMORY task report (reportAllTaskStacks) walks. A row that
+    // is not alive may hold a stale handle (the task deleted itself) and is
+    // skipped.
     KnownTaskRow tasks[kKnownTaskMax];
     const size_t taskCount = collectKnownTaskRows(tasks, kKnownTaskMax);
 
@@ -529,8 +541,7 @@ void periodicMemorySample() {
         static unsigned long lastPressureWarnMs = 0;
         if (lastPressureWarnMs == 0 || (nowMs - lastPressureWarnMs) >= 10000UL) {
           lastPressureWarnMs = nowMs;
-          BROADCAST_PRINTF("[HEAP_PRESSURE] WARNING: DRAM free %u B (threshold=%u, min_ever=%u)",
-                           (unsigned)dramFree, (unsigned)HEAP_WARNING_THRESHOLD, (unsigned)gLowestHeapSeen);
+          printHeapPressure(dramFree);
         }
       }
       // heap_low system event: the same pressure as a record automations and

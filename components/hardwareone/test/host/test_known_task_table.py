@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One table of known tasks, read by both stack reports.
 
-`taskstats` (reportAllTaskStacks) and the memory monitor's periodic stack
+The DEBUG_MEMORY 60 s task report (reportAllTaskStacks) and the memory monitor's periodic stack
 sample each kept their own table of task name, handle and stack size, plus a
 parallel list of "alive" flags in the same order. The copies had drifted: the
 monitor's had no espnow_tx row, so the periodic sample never looked at that

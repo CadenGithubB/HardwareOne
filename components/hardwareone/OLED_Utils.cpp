@@ -4081,7 +4081,7 @@ void updateOledDisplay() {
       prepareMemoryData();
       break;
     case OLED_PERF_STATS:
-      preparePerfData();  // 1 Hz uxTaskGetSystemState sample behind everyMs gate
+      preparePerfData();  // reads the shared task-CPU sampler, 2 Hz behind an everyMs gate
       break;
     case OLED_I2C_DIAG:
 #if ENABLE_I2C_SYSTEM

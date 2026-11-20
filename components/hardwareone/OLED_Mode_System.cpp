@@ -216,13 +216,15 @@ void displayMemoryStatsRendered() {
 // ============================================================================
 // Live Perf Stats (two-phase rendering, self-refreshing)
 // ============================================================================
-// Task CPU% + stack low-watermarks on the shared display canvas, backed directly by
-// uxTaskGetSystemState (the same raw API taskstats/perftop use — there is no
-// text parsing). CPU% is a NON-BLOCKING interval delta against the previous
-// 500 ms sample (reportAllTaskStacks' RunSample pattern) — never cmd_perftop's
-// vTaskDelay(750) two-snapshot form, which would park the main loop. The
-// baseline is deliberately mode-LOCAL: sharing reportAllTaskStacks' 60 s
-// baseline would corrupt its dCPU column (baselines are per-consumer).
+// Task CPU% + stack low-watermarks on the shared display canvas. Both pages
+// read the shared task-CPU sampler (taskCpuShares, System_TaskUtils.h), the
+// source `perftop` and the JSON readers use, so every surface shows one number
+// and there is no text parsing. The sampler runs on the main loop every
+// TASK_CPU_SAMPLE_MS (500 ms, 2 Hz) while a reader has asked recently, and a
+// read never blocks: it copies the shares of the last completed interval.
+// This mode keeps no CPU baseline of its own and takes no task snapshot. The
+// DEBUG_MEMORY task report keeps its separate 60 s baseline for its own dCPU
+// column; nothing here touches it.
 
 #include "System_TaskUtils.h"
 #include "System_MemUtil.h"

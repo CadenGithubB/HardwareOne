@@ -3,7 +3,8 @@
 #include "System_Filesystem.h"    // For filesystemReady, isFsLockedByCurrentTask
 #include "System_Mutex.h"  // For isFsLockedByCurrentTask
 #include "System_Debug.h"  // For DEBUG_CLIF macro
-#include "System_MemUtil.h"      // For ps_alloc, AllocPref
+#include "System_MemUtil.h"      // For ps_alloc, AllocPref, hw1InternalFreeBytes
+#include "System_HeapLowCore.h"  // shared low-heap line and fragmentation figure
 #include "System_ESPNow.h"       // Safe espnow_task stack snapshot
 #include "System_ESPNow_Tx.h"    // Safe espnow_tx stack snapshot
 #include "System_I2C.h"          // For queueProcessorTask
@@ -251,13 +252,12 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
                               const char* tag,
                               BaseType_t coreId) {
   // Measure before
-  size_t heapBefore = ESP.getFreeHeap();
   size_t psTot = ESP.getPsramSize();
   size_t psBefore = (psTot > 0) ? ESP.getFreePsram() : 0;
   size_t internalBefore = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   size_t largestBefore = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
-  // Record the total before creating, so `taskstats --json` can report stack
+  // Record the total before creating, so `taskstats json` can report stack
   // size alongside the high-water mark (FreeRTOS cannot recover it later).
   taskStackRecord(pcName, usStackDepth);
 
@@ -296,7 +296,12 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
     }
     String prefix = ok ? String(tsPrefix) : String("[BOOTING] | ");
 
-    size_t heapAfter = ESP.getFreeHeap();
+    // The heap trio is the internal 8-bit heap, from the two reads taken right
+    // around the create (not Arduino's free-heap call, which also counts the
+    // IRAM-only heap on the classic ESP32). heapDelta is therefore the cost of
+    // the create alone. The field names in the line stay as they were.
+    size_t heapBefore = internalBefore;
+    size_t heapAfter = internalAfter;
     size_t psAfter = (psTot > 0) ? ESP.getFreePsram() : 0;
     long heapDelta = (long)heapBefore - (long)heapAfter;
     long psDelta = (long)psBefore - (long)psAfter;
@@ -609,9 +614,10 @@ void reportAllTaskStacks() {
   broadcastOutput("========== TASK STACK REPORT ==========");
   
   // Memory stats - kept for fragmentation/warning calculations, but verbose output removed
-  // (detailed memory overview now handled by periodicMemorySample())
-  size_t heapFree = ESP.getFreeHeap();
-  size_t largestFreeBlock = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  // (detailed memory overview now handled by periodicMemorySample()).
+  // Both figures describe the internal 8-bit heap, so their ratio is one pool.
+  size_t heapFree = hw1InternalFreeBytes();
+  size_t largestFreeBlock = hw1InternalLargestBlock();
   
   // Get all tasks from system
   UBaseType_t taskCount = uxTaskGetNumberOfTasks();
@@ -907,14 +913,13 @@ void reportAllTaskStacks() {
     (unsigned)(totalStackAllocated/1024),
     (unsigned)totalTcbOverhead, tcbMeasured, (unsigned)numTasks,
     (unsigned)((totalStackAllocated + totalTcbOverhead)/1024));
-  unsigned fragPercent = 0;
-  if (heapFree > 0) {
-    fragPercent = (unsigned)((largestFreeBlock * 100) / heapFree);
-  }
+  // Same figure as memreport and memsample: the share of internal free memory
+  // outside the largest free block (System_HeapLowCore.h).
+  unsigned fragPct = heap_low_core::fragPercent(heapFree, largestFreeBlock);
   BROADCAST_PRINTF(
-    "  Heap Fragmentation:   %2u%% (largest block vs free)\n"
+    "  Heap Fragmentation:   %2u%% (internal free outside the largest block)\n"
     "  Task Memory Waste:    %6u KB (allocated but unused stack)",
-    fragPercent,
+    fragPct,
     (unsigned)((totalStackAllocated - totalStackUsed)/1024));
   
   // Warnings
@@ -938,13 +943,15 @@ void reportAllTaskStacks() {
     }
   }
   
-  if (heapFree < 40960) {
-    BROADCAST_PRINTF("  [!] HEAP: Only %u KB free (< 40KB threshold)", 
-      (unsigned)(heapFree/1024));
+  // The shared low-heap line, the one [HEAP_PRESSURE] and heap_low use.
+  if (heapFree < heap_low_core::kFreeBytes) {
+    BROADCAST_PRINTF("  [!] HEAP: Only %u KB free (< %u KB threshold)",
+      (unsigned)(heapFree/1024), (unsigned)(heap_low_core::kFreeBytes/1024));
     hasWarning = true;
   }
   
-  if (heapFree > 0 && largestFreeBlock < heapFree / 2) {
+  // The shared fragmentation warning line, the one memsample uses.
+  if (heap_low_core::fragWarn(heapFree, largestFreeBlock)) {
     BROADCAST_PRINTF("  [!] FRAGMENTATION: Largest block %u KB vs %u KB free",
       (unsigned)(largestFreeBlock/1024), (unsigned)(heapFree/1024));
     hasWarning = true;
