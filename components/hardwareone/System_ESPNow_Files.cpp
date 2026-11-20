@@ -194,6 +194,15 @@ void releaseSlot(FileTransferSlotImpl& s) {
     if (!g.ok) return;                       // no mutex: module never initialised
     if (s.state == FILE_SLOT_FREE) return;   // idempotent
     if (!s.streaming) {
+      // FILE-3: a RAM-path transfer released with every chunk in was written
+      // by its FILE_END (or refused there, which is rare: then this counts a
+      // file too many until the free figure is next read). From here on it is
+      // no longer in flight (slotUnwrittenBytes), so its bytes are counted
+      // against the stored figure instead. A counter add: no filesystem work.
+      if ((s.state == FILE_SLOT_RECEIVING || s.state == FILE_SLOT_COMPLETING) && s.totalSize != 0 &&
+          s.receivedChunks == s.totalChunks && s.receivedBytes == s.totalSize) {
+        VFS::noteBulkWriteTaken(s.totalSize);
+      }
       releaseLocked(s);
       return;
     }
@@ -282,6 +291,17 @@ void fileSlotsBootCleanup() {
       INFO_ESPNOWF("[FileSlots] boot cleanup removed orphan %s", victims[i]);
     }
   }
+}
+
+// FILE-3: what a slot's transfer may still put on LittleFS. A RAM-mode file is
+// written whole at FILE_END, a streaming one has its unreceived bytes and at
+// most its two half-buffers to go. Free and failed slots write nothing.
+static uint32_t slotUnwrittenBytes(const FileTransferSlotImpl& s) {
+  if (s.state != FILE_SLOT_RECEIVING && s.state != FILE_SLOT_COMPLETING) return 0;
+  if (!s.streaming) return s.totalSize;
+  const uint32_t unreceived = s.totalSize > s.receivedBytes ? s.totalSize - s.receivedBytes : 0;
+  const uint64_t left = (uint64_t)unreceived + (uint64_t)s.streamBufCap * kFileStreamBufs;
+  return left > s.totalSize ? s.totalSize : (uint32_t)left;
 }
 
 FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
@@ -399,6 +419,27 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
     // file, fresh msgId — sendFileToMac mints one per call) or a reused id
     // describing a different file. Either way it can never complete.
     if (supersedeIdx < 0) supersedeIdx = (int)i;
+  }
+
+  // FILE-3: storage admission, before anything is torn down for the newcomer.
+  // Received files land on LittleFS (/espnow/received), so the file has to fit
+  // above the log reserve together with what the other transfers in flight
+  // will still write. This runs on espnow_task: the stored free figure only
+  // (VFS::BulkFigure::Peek), never a volume walk. A refusal is answered by the
+  // caller like every other allocation error (FILE_CANCEL_REJECTED). A
+  // streaming transfer is asked again, with a fresh figure, when cmd_exec
+  // opens its .part (streamDrainPending).
+  {
+    uint64_t pendingBytes = fileSize;
+    for (uint8_t i = 0; i < kFileSlots; i++) {
+      if ((int)i == supersedeIdx) continue;  // replaced by this transfer
+      pendingBytes += slotUnwrittenBytes(gFileSlots[i]);
+    }
+    const size_t ask = pendingBytes > SIZE_MAX ? SIZE_MAX : (size_t)pendingBytes;
+    if (!VFS::admitBulkWrite(VFS::INTERNAL, ask, "ESP-NOW file receive", VFS::BulkFigure::Peek)) {
+      setErr(kFileSlotErrStorage);
+      return nullptr;
+    }
   }
 
   // Pass 2 — act, now that freeIdx is known.
@@ -641,6 +682,7 @@ void streamDrainPending(FileTransferSlotImpl& s) {
   for (;;) {
     uint8_t  buf;
     uint32_t len;
+    uint32_t total;
     bool     needOpen;
     char     partPathCopy[80];
     {
@@ -649,6 +691,7 @@ void streamDrainPending(FileTransferSlotImpl& s) {
       if (!s.streaming || s.streamFailed || s.streamPendCount == 0) return;
       buf      = s.streamPendQ[s.streamPendHead];
       len      = s.streamBufLen[buf];
+      total    = s.totalSize;
       needOpen = !s.streamOpened;
       strlcpy(partPathCopy, s.partPath, sizeof(partPathCopy));
     }
@@ -657,7 +700,16 @@ void streamDrainPending(FileTransferSlotImpl& s) {
     bool wrote = false, openedNow = false;
     {
       FsLockGuard fg("fileslots.stream.write");
-      if (needOpen) {
+      // FILE-3: the acceptance on espnow_task used a stored free figure that
+      // may be old. Nothing of this file is on flash yet, so ask once more
+      // here on cmd_exec, where a fresh reading (a volume walk when the stored
+      // one is stale) is allowed. Refused: no .part is made, the write below
+      // does not happen and the transfer fails like any stream write error.
+      if (needOpen && !VFS::admitBulkWrite(VFS::INTERNAL, total, "ESP-NOW file receive",
+                                           VFS::BulkFigure::Refresh)) {
+        ERROR_ESPNOWF("[FileSlots] no room above the reserve for %s (%lu bytes): transfer failed",
+                      partPathCopy, (unsigned long)total);
+      } else if (needOpen) {
         AuthContext actx = VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.file_stream_open");
         VFS::mkdirGuarded("/espnow/received", actx);
         gStreamFile[idx] = VFS::openGuarded(partPathCopy, "w", actx, true);
@@ -668,6 +720,9 @@ void streamDrainPending(FileTransferSlotImpl& s) {
         size_t wn = gStreamFile[idx].write(s.streamBuf[buf], len);
         wrote = (wn == len);
         if (!wrote) ERROR_ESPNOWF("[FileSlots] stream write short (%u/%lu)", (unsigned)wn, (unsigned long)len);
+        // FILE-3: these bytes are on flash and no longer in flight
+        // (slotUnwrittenBytes): count them against the stored free figure.
+        else VFS::noteBulkWriteTaken(len);
       }
     }
     {
@@ -778,7 +833,13 @@ void fileSlotsStreamDrainJob(void* arg) {        // cmd_exec
     // for backpressure.
     FileSlotsLockGuard g(kFileSlotsLockWait);
     if (!g.ok) return;
-    if (s.streamPendCount == 0) { s.streamDrainQueued = false; return; }
+    // A failed stream keeps its unwritten buffer in the FIFO (streamDrainPending
+    // returns without popping it, and returns at once from then on), so the
+    // FIFO never empties: without this exit the job spun here for good, on
+    // cmd_exec, after any .part open or write error. The buffers are freed by
+    // the teardown that FILE_END, the next chunk's cancel or the timeout sweep
+    // starts. Found 2026-11-20 with the FILE-3 refusal, which takes this path.
+    if (s.streamPendCount == 0 || s.streamFailed) { s.streamDrainQueued = false; return; }
   }
 }
 

@@ -960,6 +960,10 @@ const char* cmd_log(const String& argsInput);
 
 // System log auto-start (called from boot)
 void systemLogAutoStart();
+// UP-06: closes the system log's file when it is on the SD card, so the
+// card's mount can end. Called by VFS under the filesystem lock before every
+// unmount, remount and format; the log reopens the file on its next line.
+void systemLogReleaseSdHandle();
 
 // The system log's state. One definition for the CLI text, the web page's json
 // and the OLED label, so the three cannot disagree.

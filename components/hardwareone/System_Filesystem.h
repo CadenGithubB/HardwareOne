@@ -260,7 +260,16 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
  * @param line Line to append: `lineLength` bytes, no terminator needed; the
  *        file receives those bytes and CRLF
  * @param lineLength Bytes of `line`
- * @param capBytes Maximum file size in bytes
+ * @param capBytes Maximum size of the log in bytes, as its fixed constant. The
+ *        writer scales it to the LittleFS partition (UP-03: all capped logs
+ *        together use at most a quarter of it, cappedLogScaledCap). A
+ *        two-generation log keeps "<path>.1" and `path`, each up to half the
+ *        scaled cap; events.log, errors.log and crash-history.log stay one
+ *        file trimmed by copy in a build with ENABLE_ESPNOW_SEND.
+ *
+ * Lines are batched (S-8): except for the login logs and the crash history,
+ * a line waits in a PSRAM buffer and reaches the file within 2 s or when about
+ * 2 KB is pending; the call then returns true before anything is written.
  * @return false on a detected append or rotation failure. A short append also
  *         skips rotation. A rotation whose copy cannot be written (low space,
  *         no copy buffer) restarts the log with a one-line drop marker and the
@@ -277,6 +286,32 @@ bool appendLineWithCap(const char* path, const char* line, size_t lineLength, si
 inline bool appendLineWithCap(const char* path, const String& line, size_t capBytes) {
   return appendLineWithCap(path, line.c_str(), line.length(), capBytes);
 }
+
+// Capped-log batching and sizes (S-8, UP-03).
+// After the LittleFS mount: reads the partition size the caps are scaled to
+// and makes the batch buffers (PSRAM only; without them every line is written
+// through).
+void cappedLogsInit();
+// The cap a log with fixed cap `capBytes` has on this device.
+size_t cappedLogScaledCap(size_t capBytes);
+// Writes every pending line now. With `thenWriteThrough`, later lines of this
+// boot are written at once: call it when a restart or deep sleep is certain
+// (the log task does when it writes the [EVENT][REBOOT] line). Takes the
+// filesystem lock; not for a task with a small stack (esp_timer).
+void cappedLogsFlush(bool thenWriteThrough);
+// The log task's tick: writes the logs whose oldest pending line is 1.5 s old.
+// Two reads when nothing is pending.
+void cappedLogsFlushDue();
+bool cappedLogsPending();
+// True once cappedLogsFlush(true) ran: a restart or deep sleep was announced.
+bool cappedLogsRestartAnnounced();
+// The main loop is running, so boot is over (one flag write; VFS::sdWatchTick
+// calls it on every pass). Until then a log that older firmware left above
+// its new size is not cut down: that cut copies up to half the log's cap
+// under the filesystem lock, and boot must not wait for it. During boot a
+// file is copied only above the cap its caller names, where older firmware
+// rotated too; the first write after boot cuts the rest.
+void cappedLogsNoteLoopRunning();
 
 /**
  * Recover a log file from a partial rotation. SD rotation (and older LittleFS

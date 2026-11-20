@@ -59,7 +59,12 @@ extern const char* const LOG_ERROR_FILE;   // ERROR_* macro lines from debug que
 extern const char* const LOG_EVENTS_FILE;  // System lifecycle events ([EVENT]...) — see logSystemEvent()
 extern const char* const LOG_EVENT_STREAM_FILE;  // Structured event-ring history ([EVLOG]...) — see systemEventLogTick()
 
-// Log file caps (bytes)
+// Log file caps (bytes). These are the upper bounds: the capped-log writer
+// scales the cap it is given to the LittleFS partition, so that all capped
+// logs together use at most a quarter of it (UP-03, System_LogCapsCore.h;
+// cappedLogScaledCap() gives the size in effect). On the P4X-EYE layout they
+// come to about 82 % of these values. Change a value here and in
+// System_LogCapsCore.h together; the host test log_caps compares them.
 constexpr size_t LOG_CAP_BYTES = 696969;  // ~680 KB (for login logs)
 constexpr size_t LOG_I2C_CAP = 64 * 1024;  // 64KB (for I2C errors)
 constexpr size_t LOG_ERROR_CAP = 256 * 1024;  // 256KB ring for application errors

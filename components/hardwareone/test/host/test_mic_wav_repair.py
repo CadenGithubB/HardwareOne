@@ -48,7 +48,7 @@ def main() -> None:
     boot = (COMPONENT / "HardwareOne.cpp").read_text()
     require(boot.count("micRecordingRepairInterrupted();") == 1 and
             boot.index("micRecordingRepairInterrupted();") <
-            boot.index('runUnifiedSystemCommand("srstart")'),
+            boot.index('runUnifiedSystemCommand("opensr")'),
             "the repair runs once at boot, before the microphone auto-start")
 
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic"]

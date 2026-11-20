@@ -140,6 +140,9 @@ static unsigned long millis() { return 900; }
 static bool g2MicCaptureDegraded() { return degraded; }
 static void g2MicLinkFastRelease() { observe("g2-fast-release"); }
 static void g2MicReleaseCaptureContainer() { observe("g2-container-release"); }
+// FILE-3: the flash room a recording claimed is given back before IDLE
+// (System_Microphone.cpp); a counter in the free-space figure, no file work.
+[[maybe_unused]] static void micRecordingSettleStorage(size_t) {}
 static void micRecordingPublishIdle(bool publish, bool failed, bool discarded,
     MicRecordingOwner owner, unsigned long samples, uint32_t rate,
     const char* path, const char* reason, bool isDegraded) {

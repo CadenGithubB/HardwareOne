@@ -1191,6 +1191,51 @@ console.log('[LOGGING] Section 14: Log viewer functions');
 let gLogLines = [];
 let gFilteredLines = [];
 
+// The capped system logs keep two generations (firmware S-8): "<log>.1" is the
+// older half, "<log>" the current file, and right after a rotation the current
+// file is nearly empty. For a log picked under the system log folder the viewer
+// therefore reads "<log>.1" first and shows both as one log. Picking a ".1"
+// file (or any file elsewhere) shows that file alone. Returns the older
+// generation's path, or null when there is none to look for.
+function logOlderGeneration(filepath) {
+  if (!/^\/(sd\/)?system\/sys_logs\/[^\/]+$/.test(filepath)) return null;
+  if (/\.(\d+|tmp)$/.test(filepath)) return null;
+  return filepath + '.1';
+}
+
+// One file as text. mode=raw gives plain text; dec=1 asks the server to reveal
+// sealed (at-rest encrypted) captures for this parse, a no-op for plaintext.
+function fetchLogText(filepath) {
+  return hw.fetchText('/api/files/view?name=' + encodeURIComponent(filepath) + '&mode=raw&dec=1');
+}
+
+// The file view answers a missing file with these words and status 200.
+function isMissingFileAnswer(text) {
+  return String(text || '').trim() === 'File not found';
+}
+
+// The older generation's text, or '' when there is none: three of the logs
+// stay one file on a device that serves its logs to a collector, a log that
+// has not rotated yet has no ".1", and the file view's answer for a missing
+// file must not become a line.
+function fetchOlderGeneration(filepath) {
+  const older = logOlderGeneration(filepath);
+  if (!older) return Promise.resolve('');
+  return fetchLogText(older)
+    .then(text => (isMissingFileAnswer(text) ? '' : String(text || '')))
+    .catch(() => '');
+}
+
+// With an older generation read, a current file that is missing adds nothing:
+// the log was renamed to ".1" since the list was made (opening ".1" writes
+// the pending lines out, which can be what rotates it) and has no new line
+// yet. Without an older generation the answer is shown as it always was.
+function joinLogGenerations(olderText, currentText) {
+  if (!olderText) return currentText;
+  const current = isMissingFileAnswer(currentText) ? '' : currentText;
+  return olderText + (/\n$/.test(olderText) ? '' : '\n') + current;
+}
+
 function loadLogFile(filepath) {
   if (!filepath) {
     alert('Please select a log file');
@@ -1199,10 +1244,9 @@ function loadLogFile(filepath) {
   
   console.log('[LOGGING] Loading log file:', filepath);
   
-  // Use streaming fetch with mode=raw to get plain text. dec=1 asks the
-  // server to reveal sealed (at-rest encrypted) captures for this parse —
-  // a no-op for plaintext files.
-  hw.fetchText('/api/files/view?name=' + encodeURIComponent(filepath) + '&mode=raw&dec=1')
+  // One request after the other: the device serves one at a time anyway.
+  fetchOlderGeneration(filepath)
+    .then(olderText => fetchLogText(filepath).then(text => joinLogGenerations(olderText, text)))
     .then(text => {
       parseLogFile(text);
       hw.$('viewer-filters').style.display = 'block';

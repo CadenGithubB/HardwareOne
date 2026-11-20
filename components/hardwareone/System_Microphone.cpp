@@ -52,6 +52,41 @@
 // How often a manual recording commits its audio to storage while capturing.
 static constexpr uint32_t kRecCheckpointIntervalMs = 5000;
 
+// FILE-3: a recording to LittleFS keeps the 100 KB log reserve free
+// (VFS::admitBulkWrite). It starts when at least this many seconds fit above
+// the reserve and is then limited to what fits, so it ends early instead of
+// eating the space settings and accounts are saved in. Asking for the full
+// MAX_RECORDING_SEC (1.92 MB at 16 kHz) would refuse every flash recording on
+// the 8 MB layouts. A recording to the card is not limited.
+static constexpr uint32_t kRecMinAdmitSec = 5;
+// The bytes a recording of `seconds` at `sampleRate` writes (16-bit mono WAV).
+static size_t micRecordingBytes(uint32_t sampleRate, uint32_t seconds) {
+  return 44u + static_cast<size_t>(sampleRate) * sizeof(int16_t) * seconds;
+}
+// The samples a recording may write when LittleFS has `roomBytes` free above
+// the reserve: the header and one capture chunk (the loop may pass its limit
+// by one) come off first. 0 means no limit (a card, or no free figure yet).
+static uint32_t micStorageSampleLimit(size_t roomBytes) {
+  if (roomBytes == SIZE_MAX) return 0;
+  const size_t overhead = 44u + RECORDING_CHUNK_SIZE;
+  const uint64_t samples = roomBytes > overhead ? (roomBytes - overhead) / sizeof(int16_t) : 0;
+  if (samples == 0) return 1;  // admitted with next to nothing: stop at the first chunk
+  return samples > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(samples);
+}
+// The limit of the recording being started or running (startRecordingInternal
+// sets it before the task exists; the task reads it once).
+EXT_RAM_BSS_ATTR static uint32_t gRecStorageMaxSamples;
+// The flash room this recording claimed when it was admitted
+// (VFS::noteBulkWriteTaken), so an ESP-NOW file accepted meanwhile is not
+// given the same bytes. 0 for a card. Given back, less what the file holds,
+// when the recording ends or its start fails: once per claim.
+EXT_RAM_BSS_ATTR static size_t gRecStorageTakenBytes;
+static void micRecordingSettleStorage(size_t writtenBytes) {
+  const size_t taken = gRecStorageTakenBytes;
+  gRecStorageTakenBytes = 0;
+  if (taken > writtenBytes) VFS::noteBulkWriteReturned(taken - writtenBytes);
+}
+
 // Defaults: new recordings go to SD when writable; legacy/internal copies may remain on LittleFS.
 static const char kMicRecLittleFs[] = "/recordings";
 static const char kMicRecSd[]       = "/sd/recordings";
@@ -1154,6 +1189,12 @@ static void recordingTask(void* param) {
   }
 
   uint32_t maxSamples = gRecSampleRate * MAX_RECORDING_SEC;
+  if (gRecStorageMaxSamples != 0 && gRecStorageMaxSamples < maxSamples) {
+    // FILE-3: flash has room for less than a full recording above the reserve.
+    maxSamples = gRecStorageMaxSamples;
+    INFO_MIC_LIFECYCLEF("Recording limited to %lu s by free flash space (the reserve stays free)",
+                        (unsigned long)(maxSamples / (gRecSampleRate ? gRecSampleRate : 1)));
+  }
   const uint32_t captureLoopStartedMs = millis();
   uint32_t lastPcmMs = captureLoopStartedMs;
   // Power-cut checkpoint (see "Interrupted-recording repair").
@@ -1662,8 +1703,13 @@ static void recordingTask(void* param) {
 
   // IDLE is the last shared lifecycle publication. At this point the buffer is
   // gone, the WAV is closed (or removed), and all terminal events are done.
-  recordingTaskHandle = nullptr;
   const bool fileRetained = !removed && currentRecordingPath[0];
+  // FILE-3: give back the flash room this recording claimed and did not use
+  // (before IDLE: the next recording makes its own claim). The captured count
+  // is at least what the file holds.
+  micRecordingSettleStorage(fileRetained ? 44u + static_cast<size_t>(recordingSamples) * sizeof(int16_t)  // header + PCM
+                                         : 0);
+  recordingTaskHandle = nullptr;
   micRecordingPublishIdle(/*publishResult=*/true, gRecCaptureFailed,
                           discarded, disposition.owner,
                           recordingSamples, gRecSampleRate,
@@ -1707,6 +1753,8 @@ static constexpr char kRecStartFile[] =
     "Error: The recording file could not be created. Check the SD card and free space, then start again.";
 static constexpr char kRecStartTask[] =
     "Error: The recording task could not start. Free memory and start again.";
+static constexpr char kRecStartNoSpace[] =
+    "Error: Not enough free flash space to record. Delete files or insert an SD card, then start again.";
 
 // Hands `reply` to a caller that asked why; the start itself answers false.
 static bool micStartRefused(const char** why, const char* reply) {
@@ -1824,6 +1872,7 @@ static bool startRecordingInternal(MicRecordingOwner owner,
     }
     micRecordingRequestStop();
     micRecordingEnterFinalizing();
+    micRecordingSettleStorage(0);  // FILE-3: nothing was recorded; a claim on flash room is given back
     if (recordingFile) {
       FsLockGuard fsGuard("mic.record.start_cleanup");
       recordingFile.close();
@@ -1869,6 +1918,28 @@ static bool startRecordingInternal(MicRecordingOwner owner,
   }
   
   String recDir = micPrimaryRecordingsFolder();
+  // FILE-3: admission for a recording to LittleFS, before anything is created.
+  // The stored free figure decides at once when it shows room for a whole
+  // recording: no volume walk (1.3 s on the P4X-EYE) while the speaker is
+  // waiting for the recording to begin. Only when that figure is an estimate
+  // (files were deleted or bulk writes made since it was read) and shows less
+  // than that is the volume read first, so a recording is not refused or cut
+  // short on a figure from before the user made room.
+  {
+    size_t roomBytes = SIZE_MAX;
+    const size_t fullBytes = micRecordingBytes(gRecSampleRate, MAX_RECORDING_SEC);
+    if (!VFS::admitBulkWrite(VFS::getStorageType(recDir), micRecordingBytes(gRecSampleRate, kRecMinAdmitSec),
+                             "microphone recording", VFS::BulkFigure::RefreshIfShort, &roomBytes, fullBytes)) {
+      return failStart("not enough free flash space", kRecStartNoSpace);
+    }
+    gRecStorageMaxSamples = micStorageSampleLimit(roomBytes);
+    // What this recording may write is taken off the figure the next
+    // admission sees, until the volume is read again or the recording ends.
+    if (roomBytes != SIZE_MAX) {
+      gRecStorageTakenBytes = roomBytes < fullBytes ? roomBytes : fullBytes;
+      VFS::noteBulkWriteTaken(gRecStorageTakenBytes);
+    }
+  }
   DEBUG_MIC_LIFECYCLEF("[MIC_START_REC] Checking recordings folder: %s", recDir.c_str());
   {
     FsLockGuard fsGuard("mic.record.mkdir");
@@ -3498,7 +3569,7 @@ const CommandEntry micCommands[] = {
   { "micsource", "Get/set mic source: onboard microphone or G2 glasses.", false, cmd_micsource, "Usage: micsource [auto|onboard|pdm|g2]" },
 
   // Auto-start
-  { "micautostart", "Enable/disable microphone auto-start after boot [on|off]", false, cmd_micautostart, "Usage: micautostart [on|off]" },
+  { "micautostart", "Enable/disable microphone auto-start after boot [on|off]", true, cmd_micautostart, "Usage: micautostart [on|off]" },
 };
 
 const size_t micCommandsCount = sizeof(micCommands) / sizeof(micCommands[0]);

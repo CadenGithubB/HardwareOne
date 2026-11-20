@@ -29,15 +29,28 @@ PAGE = ROOT / "components/hardwareone/WebPage_Logging.h"
 HARNESS = r"""
 var nodes = {};
 function node(id) {
-  if (!nodes[id]) nodes[id] = {id: id, style: {}, textContent: '', value: '', checked: false, innerHTML: ''};
+  if (!nodes[id]) nodes[id] = {id: id, style: {}, textContent: '', value: '', checked: false, innerHTML: '',
+                               appendChild: function () {}};
   return nodes[id];
 }
 var sensorBoxes = ['thermal', 'tof', 'imu', 'gamepad', 'apds', 'gps', 'presence', 'r1'].map(function (name) {
   return {value: name, checked: false};
 });
 var fetched = [], cli = [], endpoint = null, endpointFails = false, cliReplies = {}, cliFails = {};
+// The log viewer's file reads: `files` by path. A missing file is answered the
+// way the firmware's /api/files/view answers it (status 200, these words); a
+// path in `denied` is refused (403).
+var files = {}, denied = {}, viewed = [];
 var hw = {
   $: node,
+  fetchText: function (url) {
+    var m = /^\/api\/files\/view\?name=([^&]+)&mode=raw&dec=1$/.exec(url);
+    if (!m) return Promise.reject(new Error('unexpected url ' + url));
+    var name = decodeURIComponent(m[1]);
+    viewed.push(name);
+    if (denied[name]) return Promise.reject(new Error('HTTP 403'));
+    return Promise.resolve(Object.prototype.hasOwnProperty.call(files, name) ? files[name] : 'File not found');
+  },
   qsa: function (selector) { return selector === '#sensors-pane input[type=checkbox]' ? sensorBoxes : []; },
   fetchJSON: function (url) {
     fetched.push(url);
@@ -63,6 +76,14 @@ eval(slurp(__argv[0]));
 var failures = [];
 function check(ok, message) { if (!ok) failures.push(message); }
 function text(id) { return node(id).textContent; }
+// The log viewer's rendered lines, in order, by their category tag (its line
+// store is page-private, and the message text goes through the browser's own
+// escaping, which this DOM stub does not have).
+function shownLines() {
+  var html = node('viewer-content').innerHTML, out = [], re = /font-weight:bold">\[([A-Z0-9_]+)\]<\/span>/g, m;
+  while ((m = re.exec(html))) out.push(m[1]);
+  return out;
+}
 function settle(turns) {
   var p = Promise.resolve();
   for (var i = 0; i < turns; i++) p = p.then(function () {});
@@ -245,6 +266,85 @@ settle(8).then(function () {
   return settle(12);
 }).then(function () {
   check(cli.join(',') === 'sensorlog status json' && text('status-text') === 'ACTIVE', 'a short endpoint reply falls back: ' + cli.join(','));
+
+  /* Log viewer: a capped system log is two generations, "<log>.1" then "<log>" (firmware S-8). */
+  check(logOlderGeneration('/system/sys_logs/system-events.log') === '/system/sys_logs/system-events.log.1' &&
+        logOlderGeneration('/sd/system/sys_logs/command-audit.log') === '/sd/system/sys_logs/command-audit.log.1',
+        'a system log has an older generation to look for, on flash and on the card mirror');
+  check(logOlderGeneration('/system/sys_logs/system-events.log.1') === null &&
+        logOlderGeneration('/system/sys_logs/errors.log.tmp') === null &&
+        logOlderGeneration('/logging_captures/system/system.log') === null &&
+        logOlderGeneration('/system/sys_logs/sub/x.log') === null &&
+        logOlderGeneration('/system/sys_logsX/x.log') === null,
+        'a generation file, a temp file and files elsewhere are shown alone');
+  check(joinLogGenerations('', 'b\n') === 'b\n' && joinLogGenerations('a\r\n', 'b\n') === 'a\r\nb\n' &&
+        joinLogGenerations('a', 'b\n') === 'a\nb\n', 'the two texts join on a line boundary');
+  resetDom();
+  files = {
+    '/system/sys_logs/system-events.log.1': '[2026-11-20 10:00:00.000] | [EVENT][BOOT] older one\r\n[2026-11-20 10:00:01.000] | [EVENT][FS] older two\r\n',
+    '/system/sys_logs/system-events.log': '[2026-11-20 10:00:02.000] | [EVENT][WIFI] newest\r\n'
+  };
+  viewed = [];
+  loadLogFile('/system/sys_logs/system-events.log');
+  return settle(12);
+}).then(function () {
+  check(viewed.join('|') === '/system/sys_logs/system-events.log.1|/system/sys_logs/system-events.log',
+        'the older generation is read first, then the log: ' + viewed.join('|'));
+  check(shownLines().join('|') === 'BOOT|FS|WIFI',
+        'both generations are shown as one log, oldest first: ' + JSON.stringify(shownLines()));
+  check(node('viewer-display').style.display === 'block', 'the viewer opens');
+
+  /* No older generation (not rotated yet, or a log that stays one file): only the log, no stray line. */
+  delete files['/system/sys_logs/system-events.log.1'];
+  viewed = [];
+  loadLogFile('/system/sys_logs/system-events.log');
+  return settle(12);
+}).then(function () {
+  check(viewed.length === 2 && shownLines().join('|') === 'WIFI' &&
+        node('viewer-content').innerHTML.indexOf('GENERAL') < 0,
+        'a missing older generation adds no line: ' + JSON.stringify(shownLines()));
+
+  /* The older generation cannot be read: the log itself is still shown. */
+  denied['/system/sys_logs/system-events.log.1'] = true;
+  viewed = [];
+  loadLogFile('/system/sys_logs/system-events.log');
+  return settle(12);
+}).then(function () {
+  check(viewed.length === 2 && shownLines().join('|') === 'WIFI', 'a refused older generation does not stop the viewer');
+  denied = {};
+
+  /* The log was renamed to ".1" after the list was made and has no new line
+     yet: the file view answers "File not found" (status 200) for the current
+     file. That answer is not a log line. */
+  files = {
+    '/system/sys_logs/system-events.log.1': '[2026-11-20 10:00:00.000] | [EVENT][BOOT] older one\r\n[2026-11-20 10:00:02.000] | [EVENT][WIFI] just rotated\r\n'
+  };
+  viewed = [];
+  loadLogFile('/system/sys_logs/system-events.log');
+  return settle(12);
+}).then(function () {
+  check(viewed.length === 2 && shownLines().join('|') === 'BOOT|WIFI' &&
+        node('viewer-content').innerHTML.indexOf('File not found') < 0,
+        'a current file that is missing right after a rotation adds no line: ' + JSON.stringify(shownLines()));
+  check(joinLogGenerations('a\n', 'File not found') === 'a\n' && joinLogGenerations('', 'File not found') === 'File not found',
+        'only with an older generation read is the missing-file answer dropped');
+  files['/system/sys_logs/system-events.log'] = '[2026-11-20 10:00:02.000] | [EVENT][WIFI] newest\r\n';
+
+  /* A generation file picked by itself, and a capture elsewhere: one request each. */
+  files['/system/sys_logs/system-events.log.1'] = '[2026-11-20 09:00:00.000] | [EVENT][TIME] picked alone\r\n';
+  viewed = [];
+  loadLogFile('/system/sys_logs/system-events.log.1');
+  return settle(12);
+}).then(function () {
+  check(viewed.join('|') === '/system/sys_logs/system-events.log.1' && shownLines().join('|') === 'TIME',
+        'a ".1" file is shown alone: ' + viewed.join('|'));
+  files['/logging_captures/system/system.log'] = '[1234] [WEB] capture line\n';
+  viewed = [];
+  loadLogFile('/logging_captures/system/system.log');
+  return settle(12);
+}).then(function () {
+  check(viewed.join('|') === '/logging_captures/system/system.log' && shownLines().join('|') === 'WEB',
+        'a capture outside the system log folder is one request: ' + viewed.join('|') + ' ' + JSON.stringify(shownLines()));
   if (failures.length) { __out('LOGGING_STATUS_PAGE FAIL\n' + failures.join('\n')); }
   else { __out('LOGGING_STATUS_PAGE PASS'); }
 }).catch(function (e) {

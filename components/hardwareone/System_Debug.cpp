@@ -20,6 +20,7 @@
 #include "System_RadioLogCore.h"
 #include "HAL_Radio.h"  // HW1_RADIO_COMPANION: the ESP-Hosted tags exist
 #include "System_Logging.h"
+#include "System_LogCapsCore.h"  // kBatchTickMs: this task's idle wake
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
@@ -354,13 +355,38 @@ static __attribute__((noinline)) void writeLogLine(Print& out, unsigned long tim
   }
 }
 
+// UP-06: the system log's file stays open between lines. When it is on the
+// card it has to be closed before the card's mount ends (`sdunmount`,
+// `sdmount`, `sdformat`, the card watch's remount): after that its descriptor
+// number can belong to another file. The log task opens it again on its next
+// line (and fails quietly while no card is mounted, as an open always did).
+//
+// Its callers hold the filesystem lock, so this must be the guard and never
+// the fsLock()/fsUnlock() pair: fsUnlock() gives the mutex whenever this task
+// holds it, which would hand the caller's lock away in the middle of the
+// unmount (SD.end() and the format would then run unlocked, and the caller's
+// own release would give a mutex another task may hold by then). The guard
+// takes nothing when the task already holds the lock and releases only what
+// it took.
+void systemLogReleaseSdHandle() {
+  FsLockGuard guard("debug.log.sd_release");
+  if (gSystemLogFile && gSystemLogPath.startsWith("/sd/")) {
+    gSystemLogFile.close();  // File::close() also drops the handle
+    gSystemLogUnflushedCount = 0;
+  }
+}
+
 // Debug output task - single writer for all debug messages
 static TaskHandle_t gDebugOutputTaskHandle = nullptr;
 
 void debugOutputTask(void* parameter) {
   while (true) {
     DebugMessage* msg = nullptr;
-    if (xQueueReceive(gDebugOutputQueue, &msg, portMAX_DELAY) == pdTRUE && msg) {
+    // A timed wait, so the capped logs' batched lines are written within 2 s
+    // of being logged even when no further message arrives (S-8; see
+    // cappedLogsFlushDue below). The wake costs two reads while nothing is
+    // pending.
+    if (xQueueReceive(gDebugOutputQueue, &msg, pdMS_TO_TICKS(logcaps::kBatchTickMs)) == pdTRUE && msg) {
       if (gDebugPoolGrowthRequested) {
         (void)growDebugPoolIfNeeded(true);
       }
@@ -493,6 +519,12 @@ void debugOutputTask(void* parameter) {
       // design (discrete decisions, not polling), so no dedupe window needed.
       if (filesystemReady && strncmp(msg->text, "[EVENT]", 7) == 0) {
         appendTimestampedLine(LOG_EVENTS_FILE, msg->text, LOG_EVENTS_CAP);
+        // A restart was announced (recordRebootIntent's line, every planned
+        // restart writes one): put every batched line on disk now and write
+        // the rest of this boot's lines at once. rebootDevice waits only
+        // 250-1000 ms for this task before it restarts, less than a batch may
+        // wait.
+        if (strncmp(msg->text, "[EVENT][REBOOT]", 15) == 0) cappedLogsFlush(true);
       }
 
       // Structured event-stream tee (always, independent of routing) — one
@@ -568,6 +600,9 @@ void debugOutputTask(void* parameter) {
         xQueueSend(gDebugFreeQueue, &msg, 0);
       }
     }
+    // Capped logs: write the batches whose oldest line is 1.5 s old. Runs
+    // after every message and on every idle wake of this task.
+    if (filesystemReady) cappedLogsFlushDue();
   }
 }
 
@@ -2657,11 +2692,10 @@ const CommandEntry debugCommands[] = {
   { "debugsse", "Debug Server-Sent Events.", true, cmd_debugsse, "Usage: debugsse <0|1> [temp|runtime]" },
   { "debugcli", "Debug CLI processing.", true, cmd_debugcli, "Usage: debugcli <0|1> [temp|runtime]" },
   { "debugauth", "Debug authentication (parent flag).", true, cmd_debugauth, "Usage: debugauth <0|1> [temp|runtime]" },
-  { "debugespnow", "Debug ESP-NOW core messages (alias of debugespnowcore).", true, cmd_debugespnowcore, "Usage: debugespnow <0|1> [temp|runtime]" },
   { "debugbluetooth", "Debug Bluetooth (parent flag).", true, cmd_debugbluetooth, "Usage: debugbluetooth <0|1> [temp|runtime]" },
   { "debugbluetoothcore", "Debug Bluetooth core lifecycle; also shows the Bluetooth stack's own routine log lines (Bluedroid BT_*, BLE_COEX records, the P4X-EYE's C6 console), which print only errors while it is off.", true, cmd_debugbluetoothcore,
     "Usage: debugbluetoothcore <0|1> [temp|runtime]\n"
-    "  On: BT_APPL, BT_BTM, BT_HCI, BT_L2CAP, BT_GATT, BT_SMP, BT_BTC, BLE_INIT, BTDM_INIT, BLE_COEX and C6> at their stock level.\n"
+    "  On: BT_APPL, BT_BTM, BT_HCI, BT_L2CAP, BT_GATT, BT_SMP, BT_BTC, BLE_INIT, BTDM_INIT, BLE_COEX and C6> at their stock level (C6> while the console mirror runs, see c6console).\n"
     "  Off (default): errors only. debugbluetooth alone does not change them; a saved esplog level wins." },
   { "debugbluetoothgatt", "Debug Bluetooth GATT operations.", true, cmd_debugbluetoothgatt, "Usage: debugbluetoothgatt <0|1> [temp|runtime]" },
   { "debugbluetoothdata", "Debug Bluetooth command/data path.", true, cmd_debugbluetoothdata, "Usage: debugbluetoothdata <0|1> [temp|runtime]" },
@@ -2784,7 +2818,7 @@ const CommandEntry debugCommands[] = {
   { "debugwifidriver", "Debug WiFi driver; on the P4X-EYE also shows ESP-Hosted's and the C6 console's routine log lines, which print only errors while it is off.", true, cmd_debugwifidriver,
     "Usage: debugwifidriver <0|1> [temp|runtime]\n"
     "  On: transport, H_SDIO_DRV, sdio_wrapper, H_API, RPC_WRAP, rpc_*, vhci_drv, os_wrapper_esp, esp_cli, esp_wifi_remote\n"
-    "  and C6> at their stock level. Off (default): errors only. debugwifi alone does not change them; a saved esplog level wins." },
+    "  and C6> at their stock level (C6> while the console mirror runs, see c6console). Off (default): errors only. debugwifi alone does not change them; a saved esplog level wins." },
   { "debugstoragefiles", "Debug storage files.", true, cmd_debugstoragefiles, "Usage: debugstoragefiles <0|1> [temp|runtime]" },
   { "debugstoragejson", "Debug storage JSON.", true, cmd_debugstoragejson, "Usage: debugstoragejson <0|1> [temp|runtime]" },
   { "debugstoragesettings", "Debug storage settings.", true, cmd_debugstoragesettings, "Usage: debugstoragesettings <0|1> [temp|runtime]" },
@@ -2864,7 +2898,7 @@ const size_t debugCommandsCount = sizeof(debugCommands) / sizeof(debugCommands[0
 // two feature-gated table spans: 6 LLM flag rows, 7 debugg2* + 7 debugring*
 // flag rows (both under ENABLE_BLUETOOTH && ENABLE_G2_GLASSES), and the
 // outg2 hand row.
-static constexpr size_t kDbgHandCmdRows = 16;  // debugespnow(alias), notifstats,
+static constexpr size_t kDbgHandCmdRows = 15;  // notifstats,
   // debugverbose, debugbuffer, debugflags, loglink, debugstack,
   // commandmodulesummary, settingsmodulesummary, outg2, outble,
   // memorysampleintervalsec, loglevel, esplog, log, webconsole

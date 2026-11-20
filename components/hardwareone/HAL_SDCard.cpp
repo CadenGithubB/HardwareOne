@@ -39,15 +39,8 @@ bool SdMmcCardFs::configurePower() {
   if (error_ != ESP_OK) return false;
   pinsConfigured_ = true;
 
-#if SD_MMC_DETECT_PIN >= 0
-  pins = {};
-  pins.pin_bit_mask = 1ULL << SD_MMC_DETECT_PIN;
-  pins.mode = GPIO_MODE_INPUT;
-  pins.pull_up_en = GPIO_PULLUP_ENABLE;
-  error_ = gpio_config(&pins);
+  error_ = armDetectPin();
   if (error_ != ESP_OK) return false;
-
-#endif
 
   sd_pwr_ctrl_ldo_config_t ldo = {};
   ldo.ldo_chan_id = SD_MMC_LDO_CHANNEL;
@@ -61,10 +54,33 @@ bool SdMmcCardFs::configurePower() {
   return true;
 }
 
+// The detect switch as an input with its pull-up (nothing to do on a slot
+// without one). Called before a mount and again after every release of the
+// slot: the SDMMC driver resets each pin of a slot it gives up, the
+// card-detect pin included (sdmmc_host_deinit_slot -> gpio_reset_pin, which
+// disables the pin's input), and a pin with its input disabled reads 0, the
+// level that means "card in". Left like that, cardPresent() answered
+// "present" from every unmount and every failed mount until the next mount
+// attempt, whatever was in the slot, so the card watch (UP-06) could not see
+// a card leave after `sdunmount` or after a mount that failed.
+esp_err_t SdMmcCardFs::armDetectPin() {
+#if SD_MMC_DETECT_PIN >= 0
+  gpio_config_t pin = {};
+  pin.pin_bit_mask = 1ULL << SD_MMC_DETECT_PIN;
+  pin.mode = GPIO_MODE_INPUT;
+  pin.pull_up_en = GPIO_PULLUP_ENABLE;
+  return gpio_config(&pin);
+#else
+  return ESP_OK;
+#endif
+}
+
 void SdMmcCardFs::releasePower() {
   if (pinsConfigured_) {
     gpio_set_level(static_cast<gpio_num_t>(SD_MMC_POWER_PIN),
                    !SD_MMC_POWER_ACTIVE_LEVEL);
+    // The slot is released by now (unmount, or the unwind of a failed mount).
+    (void)armDetectPin();
   }
   if (power_) {
     sd_pwr_ctrl_del_on_chip_ldo(power_);
@@ -83,6 +99,10 @@ bool SdMmcCardFs::cardPresent() const {
 #endif
 }
 
+// The latch stays until the next mount: a card that was out, even for a
+// moment, lost power and must be initialised again. Nothing here mounts; on a
+// board with a detect switch the card watch (VFS::sdWatchTick, UP-06) asks VFS
+// for that mount once the card has been back for a second.
 bool SdMmcCardFs::available() {
 #if SD_MMC_DETECT_PIN >= 0
   if (card_ && !cardPresent()) removed_ = true;

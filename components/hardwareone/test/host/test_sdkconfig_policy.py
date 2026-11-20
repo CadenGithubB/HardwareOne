@@ -4,6 +4,7 @@
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -140,6 +141,133 @@ CONFIG_PARTITION_TABLE_OFFSET=0x9000
         self.named.unlink()
         self.assertNotEqual(self.run_helper(named=self.named).returncode, 0)
         self.assertIn("missing or not a file", self.output)
+
+
+LITTLEFS_BLOCK = 4096
+LOOKAHEAD_KEY = "CONFIG_LITTLEFS_LOOKAHEAD_SIZE"
+# A board whose own table is larger than the shared value covers, and whose
+# board file does not name the key yet (2026-11-20: that file was outside the
+# file set of the change that raised the shared value; the line is reported in
+# the change's notes). The value here is what its board file has to carry. Once
+# the file names the key, the file's value is checked like any other and this
+# entry no longer matters; a value in the file that is too small fails.
+PENDING_BOARD_VALUES = {"waveshare_p4_touch_lcd_5": 768}
+
+
+def littlefs_bytes(table: Path) -> int:
+    """The littlefs partition's size from the table's size column (never its comments)."""
+    for line in table.read_text().splitlines():
+        fields = [field.strip() for field in line.split("#", 1)[0].split(",")]
+        if len(fields) >= 5 and fields[0] == "littlefs":
+            return int(fields[4], 0)
+    raise AssertionError(f"{table.name} has no littlefs partition")
+
+
+def config_value(path: Path, key: str):
+    """The last `key=value` in a defaults file, or None."""
+    value = None
+    if path.exists():
+        for line in path.read_text().splitlines():
+            if line.startswith(key + "="):
+                value = line.split("=", 1)[1].strip().strip('"')
+    return value
+
+
+class LittleFsLookahead(unittest.TestCase):
+    """S-9: the lookahead window covers every block of the largest LittleFS partition a board can have.
+
+    A fresh build takes the value from config/sdkconfig.defaults, then
+    config/sdkconfig.defaults.<target>, then the board file (CMakeLists.txt,
+    SDKCONFIG_DEFAULTS; a later file wins). A table named for a board
+    (partitions_<sr>_<flash>_<board>.csv) belongs to that board; the others
+    serve every board of that flash size.
+    """
+
+    def boards(self):
+        found = {}
+        for path in sorted((REPO / "boards").glob("*.defaults")):
+            if path.name.count(".") != 1:
+                continue  # <board>.ota.defaults is an overlay of <board>.defaults
+            text = path.read_text()
+            target = next((line.split(":", 1)[1].strip() for line in text.splitlines()
+                           if line.startswith("# HW_TARGET:")), None)
+            flash = config_value(path, "CONFIG_ESPTOOLPY_FLASHSIZE")
+            self.assertTrue(target and flash, path.name)
+            value = None
+            for layer in (REPO / "config/sdkconfig.defaults",
+                          REPO / f"config/sdkconfig.defaults.{target}", path):
+                value = config_value(layer, LOOKAHEAD_KEY) or value
+            self.assertIsNotNone(value, f"{path.stem}: no {LOOKAHEAD_KEY} in any defaults layer")
+            pending = path.stem in PENDING_BOARD_VALUES and config_value(path, LOOKAHEAD_KEY) is None
+            if pending:
+                print(f"note: boards/{path.name} does not set {LOOKAHEAD_KEY} yet; "
+                      f"checking the pending value {PENDING_BOARD_VALUES[path.stem]}", file=sys.stderr)
+                value = PENDING_BOARD_VALUES[path.stem]
+            found[path.stem] = (flash.lower(), int(value))
+        return found
+
+    def test_pending_values_are_needed_and_valid(self):
+        for board, value in PENDING_BOARD_VALUES.items():
+            self.assertTrue((REPO / "boards" / f"{board}.defaults").exists(), board)
+            shared = int(config_value(REPO / "config/sdkconfig.defaults", LOOKAHEAD_KEY))
+            self.assertTrue(value % 8 == 0 and value > shared, f"{board}: {value}")
+
+    def test_lookahead_covers_every_partition_table(self):
+        boards = self.boards()
+        tables = sorted((REPO / "partitions").glob("partitions_*.csv"))
+        self.assertGreaterEqual(len(tables), 9)
+        checked = 0
+        for table in tables:
+            size = littlefs_bytes(table)
+            blocks = -(-size // LITTLEFS_BLOCK)
+            parts = table.stem.split("_")
+            flash_at = next(i for i, part in enumerate(parts) if part.endswith("mb"))
+            flash, board = parts[flash_at], "_".join(parts[flash_at + 1:])
+            users = [board] if board else [name for name, (size_name, _) in boards.items() if size_name == flash]
+            self.assertTrue(users, f"{table.name}: no board uses a {flash} table")
+            for name in users:
+                self.assertIn(name, boards, f"{table.name}: unknown board {name}")
+                lookahead = boards[name][1]
+                with self.subTest(table=table.name, board=name):
+                    self.assertGreaterEqual(
+                        8 * lookahead * LITTLEFS_BLOCK, size,
+                        f"{LOOKAHEAD_KEY}={lookahead} covers {8 * lookahead} of the {blocks} blocks of "
+                        f"{table.name} ({size // 1024} KiB); board {name} needs at least "
+                        f"{-(-blocks // 64) * 8} in boards/{name}.defaults or config/sdkconfig.defaults")
+                    checked += 1
+        self.assertGreaterEqual(checked, 9)
+
+    def test_value_is_a_multiple_of_eight_everywhere(self):
+        # The allocator keeps one bit per block in whole bytes and the
+        # component's Kconfig asks for a multiple of 8.
+        files = [REPO / "config/sdkconfig", REPO / "config/sdkconfig.defaults",
+                 *sorted((REPO / "config").glob("sdkconfig.defaults.*")),
+                 *sorted((REPO / "boards").glob("*.defaults"))]
+        seen = 0
+        for path in files:
+            value = config_value(path, LOOKAHEAD_KEY)
+            if value is None:
+                continue
+            seen += 1
+            self.assertTrue(value.isdigit() and int(value) > 0 and int(value) % 8 == 0, f"{path}: {value}")
+        self.assertGreaterEqual(seen, 2)
+
+    def test_tracked_sdkconfig_matches_the_default(self):
+        # config/sdkconfig serves a bare idf.py (XIAO S3, 8 MB tables); a saved
+        # value is never overridden by a default, so it is kept equal by hand.
+        default = config_value(REPO / "config/sdkconfig.defaults", LOOKAHEAD_KEY)
+        self.assertEqual(config_value(REPO / "config/sdkconfig", LOOKAHEAD_KEY), default)
+        self.assertEqual(default, "320")
+
+    def test_sizes_come_from_the_size_column(self):
+        # The comments of four tables state sizes the columns no longer have.
+        expected = {"partitions_ota_no_sr_8mb.csv": 1856, "partitions_no_sr_8mb.csv": 2284,
+                    "partitions_ota_sr_16mb.csv": 5696, "partitions_sr_16mb.csv": 7808,
+                    "partitions_ota_no_sr_16mb.csv": 8704, "partitions_no_sr_16mb_p4x_eye.csv": 9068,
+                    "partitions_no_sr_16mb.csv": 10092, "partitions_sr_8mb.csv": 128,
+                    "partitions_no_sr_32mb_waveshare_p4_touch_lcd_5.csv": 24512}
+        for name, kib in expected.items():
+            self.assertEqual(littlefs_bytes(REPO / "partitions" / name), kib * 1024, name)
 
 
 if __name__ == "__main__":

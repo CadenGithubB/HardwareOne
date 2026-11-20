@@ -75,6 +75,10 @@ constexpr const char* kFileSlotErrBusy     = "BUSY";       // all slots in use
 constexpr const char* kFileSlotErrBadArgs  = "BAD_ARGS";   // size/chunk params invalid
 constexpr const char* kFileSlotErrAlloc    = "ALLOC";      // PSRAM alloc failed
 constexpr const char* kFileSlotErrTooBig   = "TOO_BIG";    // exceeds per-file budget
+// FILE-3: LittleFS has no room for the file above the log reserve
+// (VFS::admitBulkWrite). The caller answers it like every other allocation
+// error, with FILE_CANCEL_REJECTED: no new frame, no new reason on the wire.
+constexpr const char* kFileSlotErrStorage  = "NO_SPACE";
 
 // Per-file PSRAM cap for the whole-file-in-PSRAM receive path. 128 KB; with 4 slots
 // that's 512 KB peak PSRAM — fine on an 8 MB part.

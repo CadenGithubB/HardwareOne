@@ -127,6 +127,49 @@ void ps_free(void* p) { if (p) --liveAllocations; std::free(p); }
 #include "psram_json_doc_host.h"
 
 static int fsLockDepth = 0;
+// FILE-3: VFS::admitBulkWrite's rule over a free figure the test sets. The
+// production function is run by test_bulk_write_admission.py; this double
+// keeps the arithmetic (free >= reserve + bytes, an unknown figure passes) and
+// records how the receive path asks: with which figure, for how many bytes,
+// and whether a lock was held.
+static size_t fakeLittleFsFree = SIZE_MAX;          // SIZE_MAX: nothing sampled yet
+static unsigned admitPeeks = 0, admitRefreshes = 0, admitRefused = 0;
+static unsigned admitPeeksUnderFsLock = 0, admitRefreshesWithoutFsLock = 0, admitRefreshesUnderSlotLock = 0;
+static std::vector<size_t> admitAsks;
+static constexpr size_t kFakeReserve = 100 * 1024;
+// What the receive path said it put on flash since the figure was "read"
+// (VFS::noteBulkWriteTaken): the double takes it off the figure, as the
+// production rule does, and counts the calls made with the slot lock free of
+// filesystem work.
+static size_t fakeTakenBytes = 0;
+static std::vector<size_t> takenNotes;
+namespace VFS {
+enum class BulkFigure : uint8_t { Peek, Refresh, RefreshIfShort };
+inline void noteBulkWriteTaken(size_t bytes) { fakeTakenBytes += bytes; takenNotes.push_back(bytes); }
+inline bool admitBulkWrite(StorageType tier, size_t bytes, const char* why,
+                           BulkFigure figure = BulkFigure::Peek, size_t* roomBytes = nullptr,
+                           size_t wantBytes = 0) {
+  (void)why; (void)wantBytes;
+  if (roomBytes) *roomBytes = SIZE_MAX;
+  if (tier == SDCARD) return true;
+  if (figure == BulkFigure::Peek) {
+    ++admitPeeks;
+    if (fsLockDepth != 0) ++admitPeeksUnderFsLock;
+  } else {
+    ++admitRefreshes;
+    if (fsLockDepth == 0) ++admitRefreshesWithoutFsLock;
+    if (slotMutex.held) ++admitRefreshesUnderSlotLock;
+  }
+  admitAsks.push_back(bytes);
+  if (fakeLittleFsFree == SIZE_MAX) return true;
+  const size_t freeNow = fakeLittleFsFree > fakeTakenBytes ? fakeLittleFsFree - fakeTakenBytes : 0;
+  const size_t room = freeNow > kFakeReserve ? freeNow - kFakeReserve : 0;
+  if (roomBytes) *roomBytes = room;
+  if (bytes <= room) return true;
+  ++admitRefused;
+  return false;
+}
+}  // namespace VFS
 // Runs once, while the caller waits for the filesystem lock (a long directory
 // walk on another task holds it): the test plays espnow_task in here.
 static std::function<void()> onFsLockWait;
@@ -621,6 +664,12 @@ static void resetWorld() {
   boundedMisses = deadlocks = 0;
   fsLockWaitsUnderSlotLock = fsCallsUnderSlotLock = 0;
   cmdExecRefuseNext = 0;
+  fakeLittleFsFree = SIZE_MAX;
+  fakeTakenBytes = 0;
+  takenNotes.clear();
+  admitPeeks = admitRefreshes = admitRefused = 0;
+  admitPeeksUnderFsLock = admitRefreshesWithoutFsLock = admitRefreshesUnderSlotLock = 0;
+  admitAsks.clear();
   cancels.clear(); acks.clear(); events.clear(); broadcasts.clear(); borrowedCancelIds = 0;
   air.clear(); pendingFrames.clear(); pendingParked = 0;
   loopback = false;
@@ -681,6 +730,158 @@ static void testStreamingReceiveArrives() {
         "release does no filesystem work (close, remove) with the slot lock held");
   check(fsLockWaitsUnderSlotLock == 0, "release does not wait for the filesystem lock with the slot lock held");
   check(deadlocks == 0 && boundedMisses == 0, "streaming: no lock wait went wrong");
+}
+
+// FILE-3: a received file has to fit on LittleFS above the 100 KB reserve.
+// The acceptance runs on espnow_task with the stored free figure (no walk, no
+// filesystem lock) and answers a refusal with the existing rejected cancel.
+static void testStorageAdmissionAtAccept() {
+  const size_t room = 5000;
+  // N + 1 bytes with N free above the reserve: refused, storage reason.
+  resetWorld();
+  fakeLittleFsFree = kFakeReserve + room;
+  const char* reason = "unset";
+  check(fileSlotsAllocate(kSender, 50, "over.bin", room + 1, chunksOf(room + 1), kChunk, &reason) == nullptr,
+        "admission: a file one byte over the room is not given a slot");
+  check(reason && std::strcmp(reason, kFileSlotErrStorage) == 0 && std::strcmp(reason, "NO_SPACE") == 0,
+        "admission: the slot allocation reports the storage reason");
+  check(admitPeeks == 1 && admitRefreshes == 0 && admitAsks.back() == room + 1,
+        "admission: asked once for the file's size, with the stored figure");
+  rxStart(kSender, 51, "over.bin", room + 1);
+  check(cancels.size() == 1 && cancelCount(51, FILE_CANCEL_REJECTED) == 1 && fileSlotsActiveCount() == 0,
+        "admission: the sender gets the existing rejected answer, no slot is held");
+  check(admitPeeksUnderFsLock == 0 && admitRefreshes == 0 && fsCallsUnderSlotLock == 0 && fsLockWaitsUnderSlotLock == 0,
+        "admission: espnow_task takes no filesystem lock and walks nothing");
+  check(liveAllocations == 0, "admission: a refused file allocates no buffer");
+  // Exactly N bytes: accepted, and it arrives.
+  const std::string fits = pattern(room, 7);
+  rxStart(kSender, 52, "fits.bin", fits.size());
+  for (uint16_t i = 0; i < chunksOf(fits.size()); i++) rxChunk(kSender, 52, fits, i);
+  rxEnd(kSender, 52, crcOf(fits));
+  check(cancelCount(52) == 0 && fake_vfs::fs().text(inboxPath(kSender, "fits.bin")) == fits,
+        "admission: a file that exactly fits is received");
+  // Below the reserve nothing is accepted, not even an empty file's worth.
+  resetWorld();
+  fakeLittleFsFree = kFakeReserve - 1;
+  rxStart(kSender, 53, "tiny.txt", 10);
+  check(cancelCount(53, FILE_CANCEL_REJECTED) == 1 && fileSlotsActiveCount() == 0,
+        "admission: below the reserve every file is refused");
+  // No figure yet (first seconds of a boot): nothing to refuse on.
+  resetWorld();
+  const std::string early = pattern(700, 8);
+  rxStart(kSender, 54, "early.txt", early.size());
+  for (uint16_t i = 0; i < chunksOf(early.size()); i++) rxChunk(kSender, 54, early, i);
+  rxEnd(kSender, 54, crcOf(early));
+  check(admitPeeks == 1 && admitRefused == 0 && fake_vfs::fs().text(inboxPath(kSender, "early.txt")) == early,
+        "admission: an unknown free figure admits");
+
+  // Transfers in flight count: B fits alone but not beside A's unwritten bytes.
+  resetWorld();
+  fakeLittleFsFree = kFakeReserve + 3000;
+  const std::string a = pattern(2000, 9), b = pattern(1500, 10);
+  rxStart(kSender, 55, "a.bin", a.size());
+  rxChunk(kSender, 55, a, 0);
+  rxStart(kOther, 56, "b.bin", b.size());
+  check(admitAsks.back() == a.size() + b.size() && cancelCount(56, FILE_CANCEL_REJECTED) == 1,
+        "admission: the bytes other transfers still have to write are added");
+  check(cancelCount(55) == 0 && slotState(55) == FILE_SLOT_RECEIVING, "admission: the transfer in flight is left alone");
+  for (uint16_t i = 1; i < chunksOf(a.size()); i++) rxChunk(kSender, 55, a, i);
+  rxEnd(kSender, 55, crcOf(a));
+  check(fake_vfs::fs().text(inboxPath(kSender, "a.bin")) == a, "admission: and completes");
+
+  // A retry that replaces its own stale transfer is not charged for it; one
+  // that does not fit is refused without killing the transfer it would replace.
+  resetWorld();
+  fakeLittleFsFree = kFakeReserve + 2500;
+  rxStart(kSender, 57, "retry.bin", a.size());
+  rxChunk(kSender, 57, a, 0);
+  rxStart(kSender, 58, "retry.bin", a.size());          // same file, new msgId: supersedes 57
+  check(admitAsks.back() == a.size() && cancelCount(58) == 0 && slotState(58) == FILE_SLOT_RECEIVING,
+        "admission: a retry is not charged for the transfer it replaces");
+  rxStart(kSender, 59, "retry.bin", 2600);              // a different size that does not fit
+  check(cancelCount(59, FILE_CANCEL_REJECTED) == 1 && slotState(58) == FILE_SLOT_RECEIVING,
+        "admission: a refused retry leaves the transfer it would have replaced");
+  for (uint16_t i = 0; i < chunksOf(a.size()); i++) rxChunk(kSender, 58, a, i);
+  rxEnd(kSender, 58, crcOf(a));
+  check(fake_vfs::fs().text(inboxPath(kSender, "retry.bin")) == a && admitRefreshes == 0,
+        "admission: the surviving transfer completes; the RAM path never asks for a walk");
+}
+
+// FILE-3: the stored free figure is read again only by a log write, so files
+// received one after the other are decided on the same reading. Each file a
+// transfer has put on flash is counted against it (VFS::noteBulkWriteTaken)
+// once the transfer is no longer in flight. Before, three files that each
+// fitted alone were all accepted against one reading and ate the reserve.
+static void testStorageAdmissionCountsWrittenFiles() {
+  resetWorld();
+  const size_t n = 2000;
+  fakeLittleFsFree = kFakeReserve + 3 * n;               // one reading, never refreshed in this test
+  for (uint32_t id = 70; id < 73; id++) {
+    const std::string bytes = pattern(n, static_cast<uint8_t>(id));
+    char name[16];
+    std::snprintf(name, sizeof(name), "f%lu.bin", static_cast<unsigned long>(id));
+    rxStart(kSender, id, name, bytes.size());
+    check(cancelCount(id) == 0, "written files: a file that still fits is accepted");
+    check(takenNotes.size() == id - 70, "written files: a transfer in flight is counted by its slot, not noted yet");
+    for (uint16_t i = 0; i < chunksOf(bytes.size()); i++) rxChunk(kSender, id, bytes, i);
+    rxEnd(kSender, id, crcOf(bytes));
+    check(fake_vfs::fs().text(inboxPath(kSender, name)) == bytes, "written files: and arrives");
+    check(takenNotes.size() == id - 69 && takenNotes.back() == n, "written files: its bytes are counted when its slot is released");
+  }
+  rxStart(kSender, 73, "f73.bin", 1);
+  check(cancelCount(73, FILE_CANCEL_REJECTED) == 1 && fileSlotsActiveCount() == 0,
+        "written files: the fourth is refused on the same reading; the reserve is kept");
+  check(fsCallsUnderSlotLock == 0 && fsLockWaitsUnderSlotLock == 0, "written files: counting does no filesystem work");
+
+  // A transfer that ends without all its chunks wrote nothing and is not counted.
+  resetWorld();
+  fakeLittleFsFree = kFakeReserve + 3 * n;
+  const std::string part = pattern(n, 80);
+  rxStart(kSender, 80, "part.bin", part.size());
+  rxChunk(kSender, 80, part, 0);
+  rxEnd(kSender, 80, 0, espnowanswer::kCancelled);       // the sender gave up
+  check(fileSlotsActiveCount() == 0 && takenNotes.empty(), "written files: an abandoned transfer is not counted");
+
+  // A streamed file is counted write by write (its unwritten rest is in flight).
+  resetWorld();
+  const std::string big = pattern(kStreamSize, 81);
+  fakeLittleFsFree = kFakeReserve + 2 * big.size();
+  rxStart(kSender, 81, "big.bin", big.size());
+  rxChunksWithWriter(kSender, 81, big, 0, chunksOf(big.size()));
+  rxEnd(kSender, 81, crcOf(big));
+  runCmdExec();
+  check(fake_vfs::fs().text(inboxPath(kSender, "big.bin")) == big && fakeTakenBytes == big.size(),
+        "written files: a streamed file is counted as it is written, once");
+}
+
+// FILE-3: a streaming transfer is asked again when cmd_exec opens its .part,
+// with a fresh figure (the stored one may be old). Refused there, no staging
+// file is made and the transfer fails like any stream write error.
+static void testStorageAdmissionAtPartOpen() {
+  resetWorld();
+  const std::string bytes = pattern(kStreamSize, 11);
+  const uint16_t n = chunksOf(bytes.size());
+  rxStart(kSender, 61, "big.bin", bytes.size());        // no figure yet: accepted
+  check(cancels.empty() && admitPeeks == 1 && slotState(61) == FILE_SLOT_RECEIVING, "part open: accepted on the stored figure");
+  fakeLittleFsFree = kFakeReserve + bytes.size() - 1;   // what a fresh reading says
+  rxChunksWithWriter(kSender, 61, bytes, 0, n);
+  check(admitRefreshes == 1 && admitAsks.back() == bytes.size(), "part open: asked once more, for the whole file, with a fresh figure");
+  check(admitRefreshesWithoutFsLock == 0 && admitRefreshesUnderSlotLock == 0 && admitPeeksUnderFsLock == 0,
+        "part open: the fresh reading is taken on cmd_exec under the filesystem lock, never with the slot lock held");
+  check(partFiles() == 0 && fake_vfs::fs().liveHandles() == 0, "part open: no staging file is created");
+  rxEnd(kSender, 61, crcOf(bytes));
+  runCmdExec();
+  check(!fake_vfs::fs().exists(inboxPath(kSender, "big.bin")) && acks.empty(), "part open: nothing is delivered or acknowledged");
+  check(fileSlotsActiveCount() == 0 && partFiles() == 0 && liveAllocations == 0, "part open: the slot and its buffers are released");
+  // With room, the same transfer is asked once at the open and arrives.
+  resetWorld();
+  fakeLittleFsFree = kFakeReserve + bytes.size();
+  rxStart(kSender, 62, "big.bin", bytes.size());
+  rxChunksWithWriter(kSender, 62, bytes, 0, n);
+  rxEnd(kSender, 62, crcOf(bytes));
+  runCmdExec();
+  check(admitPeeks == 1 && admitRefreshes == 1 && cancels.empty() &&
+        fake_vfs::fs().text(inboxPath(kSender, "big.bin")) == bytes, "part open: a file that fits streams as before");
 }
 
 // Transfer A's teardown waits for the filesystem lock (a long directory walk
@@ -1230,6 +1431,9 @@ int main(int argc, char** argv) {
   } cases[] = {
     {"ram-receive", testRamReceiveArrives},
     {"streaming-receive", testStreamingReceiveArrives},
+    {"storage-admission", testStorageAdmissionAtAccept},
+    {"storage-part-open", testStorageAdmissionAtPartOpen},
+    {"storage-written-files", testStorageAdmissionCountsWrittenFiles},
     {"writer-busy", testWriterBusyDoesNotCancelHealthyReceive},
     {"teardown-claim", testTeardownKeepsTheSlotClaimed},
     {"busy-table", testBusyTableIsNotAMissingTransfer},

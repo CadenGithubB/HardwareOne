@@ -7,6 +7,11 @@
 
 #include <esp_log.h>
 #include <esp_partition.h>  // blank-partition probe — see littlefsPartitionIsBlank()
+#include <esp_attr.h>       // EXT_RAM_BSS_ATTR
+#include <esp_heap_caps.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/idf_additions.h"  // xSemaphoreCreateMutexWithCaps
 #include <optional>
 
 #include "System_Automation.h"
@@ -16,6 +21,7 @@
 #include "System_Filesystem_Internal.h"
 #include "System_OTASafety.h"   // otaSafetyPartitionIsBlank — shared blank-partition probe
 #include "System_Logging.h"
+#include "System_LogCapsCore.h"  // capped-log sizes by volume, rotation and batching policy
 #include "System_MemUtil.h"
 #include "System_PsramBuffer.h"
 #include "System_CommandLimits.h"
@@ -172,6 +178,28 @@ bool initFilesystem() {
 
   VFS::init();
 
+  // Capped logs: the partition size their caps are scaled to and the batch
+  // buffers (a table lookup and three PSRAM allocations; no volume walk).
+  cappedLogsInit();
+
+#ifdef CONFIG_LITTLEFS_LOOKAHEAD_SIZE
+  // S-9: the allocator's lookahead window should cover every block (one bit
+  // per 4096-byte block). config/sdkconfig.defaults sets a value that does,
+  // but a build folder made before that keeps its saved, smaller value. Say so
+  // once per boot; the volume works either way, allocation scans just take
+  // extra passes. A table lookup, no I/O.
+  {
+    const esp_partition_t* fsPart = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, kLittleFsPartitionLabel);
+    const unsigned blocks = fsPart ? (unsigned)(fsPart->size / 4096u) : 0u;
+    const unsigned covered = 8u * (unsigned)CONFIG_LITTLEFS_LOOKAHEAD_SIZE;
+    if (blocks > covered) {
+      logSystemEvent("FS", "LittleFS lookahead is %u bytes: covers %u of %u blocks (build sdkconfig older than the default; rebuild from a fresh folder)",
+                     (unsigned)CONFIG_LITTLEFS_LOOKAHEAD_SIZE, covered, blocks);
+    }
+  }
+#endif
+
 #if ENABLE_G2_GLASSES
   if (VFS::isSdAvailable()) {
     (void)VFS::mkdirGuarded(String(G2_ICON_ANIMATIONS_VFS_PATH), VFS::systemAuth(G2_ICON_ANIMATIONS_VFS_PATH, "filesystem.g2_icon_anim_init"));
@@ -182,6 +210,11 @@ bool initFilesystem() {
   // power-cut during rotation. Each call is cheap when no orphan exists
   // (single exists() check). Kept to the known logs that go through
   // appendLineWithCap; see System_Logging.cpp for their path definitions.
+  // The two-generation logs (S-8) make a ".tmp" only once, for a file older
+  // firmware left above its cap, but a ".tmp" that older firmware's copy
+  // rotation left behind still has to go. The command audit and the crash
+  // history were never in this list; they get the same check from the log
+  // task once boot is over (cappedLogsFlushDue), so boot does not grow.
   cleanupLogOrphan(LOG_OK_FILE);
   cleanupLogOrphan(LOG_FAIL_FILE);
   cleanupLogOrphan(LOG_I2C_FILE);
@@ -2015,8 +2048,8 @@ static FsRole resolveRole(const AuthContext& ctx) {
   // Named accounts must resolve positively at the access boundary.  The
   // older isAdminUser()/isGuestUser() chain defaults an unknown/unreadable
   // account to User, which is suitable for legacy UI ranking but not for VFS
-  // authorization.  This lookup is exact, rejects banned/malformed accounts,
-  // and preserves the legacy first-owner/missing-role compatibility rules.
+  // authorization.  This lookup is exact and rejects banned/malformed
+  // accounts; a role comes only from the account's own entry (G-55).
   FsLockGuard roleGuard("filesystem.resolveRole");
   if (!roleGuard.held && !isFsLockedByCurrentTask()) return FsRole::ANON;
   // ONE read of users.json answers both questions. This used to be
@@ -2387,6 +2420,25 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
 // rest of the VFS dispatcher. See VFS::resolveOverflowPath,
 // VFS::isLogOverflowActive, VFS::getCachedLittleFsFree.
 
+// Capped logs: two ways to rotate (S-8).
+//
+// Two generations (every capped log except the three below): once the current
+// file holds half its cap it is renamed to "<log>.1", replacing the older
+// generation, and the next line starts a new file. One rename under the
+// filesystem lock, no bytes copied; the two files together stay within the
+// cap. Readers that want the whole log read "<log>.1", then "<log>" (the web
+// Logging viewer does).
+//
+// Copy rotation (events.log, errors.log and crash-history.log in a build that
+// serves file catch-up, ENABLE_ESPNOW_SEND): the catch-up ledger follows these
+// by exact path and can follow a head trim but not a rename, so they keep the
+// streaming + hysteresis rotation described next. In every other build they
+// are two-generation logs too.
+//
+// The cap a caller passes is scaled to the LittleFS partition first (UP-03,
+// System_LogCapsCore.h). A log above its new cap comes down at its next
+// rotation; nothing is removed at boot.
+//
 // Streaming + hysteresis rotation.
 //
 // Previously this function slurped the whole file into a String and called
@@ -2429,8 +2481,46 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
 // so it is not re-probed at once) and retries once on the tier the latch then
 // resolves to.
 
-// One append of `line` to `dest`; true when the file holds the whole line.
-// `sz` is the post-write size and `written` the bytes the handle accepted.
+// Whether this build serves file catch-up (System_CatchupLedger.h). The three
+// logs a collector fetches then keep the copy rotation; see
+// System_LogCapsCore.h, followedByCatchup.
+#if ENABLE_ESPNOW_SEND
+static const bool kCatchupServesLogs = true;
+#else
+static const bool kCatchupServesLogs = false;
+#endif
+
+// --- capped-log writer: begin (test_capped_log_writes.py compiles from here to the end marker) ---
+// Batch state (S-8). The table and its counters are in external BSS; the
+// buffers, the log names and the mutex are PSRAM allocations made at mount
+// (cappedLogsInit) and on a log's first line.
+constexpr size_t kCappedLogSlots = 6;      // five batched logs today, one to spare
+constexpr size_t kCappedLogPathSize = 80;  // a log's path as its callers name it
+struct CappedLogSlot {
+  char*    data;      // PSRAM, logcaps::kBatchCapacity bytes; nullptr: slot free
+  size_t   capBytes;  // the cap its callers pass (not yet scaled)
+  uint32_t firstMs;   // millis() of the oldest pending line
+  uint16_t used;      // pending bytes
+  uint16_t lines;     // pending lines
+};
+struct CappedLogState {
+  CappedLogSlot     slots[kCappedLogSlots];
+  char*             paths;           // PSRAM: kCappedLogSlots names of kCappedLogPathSize bytes
+  char*             spare;           // PSRAM: the buffer a flush writes from
+  SemaphoreHandle_t mutex;           // PSRAM; nullptr: no batching
+  size_t            partitionBytes;  // LittleFS partition size (0: unknown, caps unscaled)
+  volatile bool     pending;         // some buffer holds a line
+  volatile bool     writeThrough;    // a restart was announced: no more batching this boot
+  bool              flushing;        // a flush is writing (owned by the filesystem lock)
+  bool              lateSweepDone;   // the two logs boot recovery does not list were checked
+  volatile bool     loopRunning;     // the main loop has run: boot is over (cappedLogsNoteLoopRunning)
+};
+EXT_RAM_BSS_ATTR static CappedLogState sCappedLogs;
+
+// One append of `data` to `dest`; true when the file holds all of it. A
+// single line (`addNewline`) gets the CRLF println() writes; a flushed batch
+// already carries one after each of its lines. `sz` is the post-write size and
+// `written` the bytes the handle accepted.
 //
 // Capture the post-write size from the handle we already hold. In append mode
 // ftell() (File::position) is the offset after the write, i.e. the new file
@@ -2438,9 +2528,9 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
 // bytes, so no flush and no stat. This used to be a SECOND VFS::open of the
 // same 3-level path purely to call size(), on EVERY logged line, on all 20
 // callers — a whole extra LittleFS open (~20 ms measured) for a number the
-// append handle already knew. The read handle in appendLineWithCap is opened
-// only when a rotation is actually due.
-static bool appendCappedLineOnce(const String& dest, const char* line, size_t lineLength,
+// append handle already knew. The read handle of a copy rotation is opened
+// only when that rotation is actually due.
+static bool appendCappedLineOnce(const String& dest, const char* data, size_t length, bool addNewline,
                                  const AuthContext& ctx, size_t& sz, size_t& written) {
   sz = 0;
   written = 0;
@@ -2448,9 +2538,9 @@ static bool appendCappedLineOnce(const String& dest, const char* line, size_t li
   if (!a) { STACK_TRACEF("appendLineWithCap.open_a_failed"); return false; }
   STACK_TRACEF("appendLineWithCap.opened_for_append");
   // The writes println(const String&) makes: the text, then CRLF.
-  written = a.write(reinterpret_cast<const uint8_t*>(line), lineLength);
-  written += a.println();
-  const bool appended = written == lineLength + 2 && !a.getWriteError();  // CRLF
+  written = a.write(reinterpret_cast<const uint8_t*>(data), length);
+  if (addNewline) written += a.println();
+  const bool appended = written == length + (addNewline ? 2 : 0) && !a.getWriteError();  // CRLF
   STACK_TRACEF("appendLineWithCap.println_done");
   sz = a.position();
   a.close();
@@ -2466,8 +2556,8 @@ static bool appendCappedLineOnce(const String& dest, const char* line, size_t li
 // G-39: the rotation copy could not be written, so hold the cap by starting
 // the log over. Removing first releases the old blocks before anything new is
 // written; the marker and the line are small enough for LittleFS to inline.
-static bool restartCappedLog(const String& dest, const char* line, size_t lineLength, size_t droppedBytes,
-                             const AuthContext& ctx) {
+static bool restartCappedLog(const String& dest, const char* data, size_t length, bool addNewline,
+                             size_t droppedBytes, const AuthContext& ctx) {
   if (!VFS::removeGuarded(dest, ctx)) { STACK_TRACEF("appendLineWithCap.restart_remove_failed"); return false; }
   File t = VFS::openGuarded(dest, "w", ctx, true);
   if (!t) { STACK_TRACEF("appendLineWithCap.restart_open_failed"); return false; }
@@ -2477,9 +2567,9 @@ static bool restartCappedLog(const String& dest, const char* line, size_t lineLe
   snprintf(marker, sizeof(marker), "[LOG] rotation blocked (low space): %u older bytes dropped",
            (unsigned)droppedBytes);
   size_t n = t.println(marker);
-  n += t.write(reinterpret_cast<const uint8_t*>(line), lineLength);
-  n += t.println();
-  const bool ok = n == strlen(marker) + lineLength + 4 && !t.getWriteError();
+  n += t.write(reinterpret_cast<const uint8_t*>(data), length);
+  if (addNewline) n += t.println();
+  const bool ok = n == strlen(marker) + length + (addNewline ? 4 : 2) && !t.getWriteError();
   t.close();
   VFS::noteLittleFsBytesWritten(n);
   Serial.printf("[FS] %s: rotation copy failed; log restarted to hold its cap\n", dest.c_str());
@@ -2487,99 +2577,56 @@ static bool restartCappedLog(const String& dest, const char* line, size_t lineLe
   return ok;
 }
 
-bool appendLineWithCap(const char* path, const char* line, size_t lineLength, size_t capBytes) {
-  STACK_TRACEF("appendLineWithCap.enter path=%s line_len=%u cap=%u",
-               path ? path : "(null)", (unsigned)lineLength, (unsigned)capBytes);
-
-  FsLockGuard guard("appendLineWithCap");  // reentrant-safe; nested VFS calls are fine.
-
-  // Resolve destination (LittleFS primary, or /sd overflow mirror if flash full).
-  char dest[128];
-  if (VFS::resolveLogPath(path, lineLength + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
-    // G-39: LittleFS is below the reserve and no card takes the overflow.
-    VFS::noteLogReserveDrop();
-    STACK_TRACEF("appendLineWithCap.reserve_refused");
-    return false;
-  }
-  STACK_TRACEF("appendLineWithCap.resolved dest=%s", dest);
-  // trusted: the capped-log writer, confined to the sys_logs tree of the tier
-  // the overflow latch resolved. Every caller's path lives there; one that
-  // does not is refused by the scope and shows up as a [PERM] line.
-  // destPath is `dest` as the guarded calls take it, made once per resolved
-  // tier rather than once per call.
-  String destPath(dest);
-  AuthContext ctx = VFS::systemAuth(VFS::sysLogScopeFor(destPath), "log.append");
-
-  // 1. Append the new line — fast path, same as before.
-  size_t sz = 0;
-  size_t written = 0;
-  bool appended = appendCappedLineOnce(destPath, line, lineLength, ctx, sz, written);
-  if (!appended && VFS::getStorageType(destPath) == VFS::SDCARD &&
-      VFS::getStorageType(String(path)) != VFS::SDCARD) {
-    // G-39: the latch sent this line to a card that no longer takes writes
-    // (yanked SPI or detect-less SDMMC card, or a log tree the card's write
-    // probe does not exercise). Report it so the overflow path stops choosing
-    // the card for a while — not re-probing it on the retry below — then
-    // retry once wherever the latch resolves now: flash while free space is
-    // above the floor, otherwise a counted drop.
-    VFS::noteLogOverflowSdFailure("log.append");
-    if (VFS::resolveLogPath(path, lineLength + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
-      VFS::noteLogReserveDrop();
-      STACK_TRACEF("appendLineWithCap.sd_failed_reserve_refused");
-      return false;
-    }
-    destPath = dest;
-    ctx = VFS::systemAuth(VFS::sysLogScopeFor(destPath), "log.append");
-    appended = appendCappedLineOnce(destPath, line, lineLength, ctx, sz, written);
-  }
-  if (!appended) { STACK_TRACEF("appendLineWithCap.short_append"); return false; }
-
-  // 2. Check size. Rotate only if we've exceeded the cap. The size came
-  //    from the append handle above, so the common path (no rotation) now
-  //    returns without opening the file a second time.
-  STACK_TRACEF("appendLineWithCap.size_checked sz=%u cap=%u", (unsigned)sz, (unsigned)capBytes);
-  if (sz <= capBytes) { STACK_TRACEF("appendLineWithCap.no_rotate_exit"); return true; }
-
-  // Rotation is due — only now is a read handle worth its open.
+// The newest `keepBytes` of the log at `destPath` (`sz` bytes, as the append
+// handle reported), from the start of a line, copied into "<destPath>.tmp" and
+// verified. Staged: the copy is complete and `tailStart` is the offset it
+// starts at. NothingToDo: there is nothing to drop. KeepOriginal: the file is
+// not what the append saw (open, size, seek or read failed); it stays as it
+// is. CannotWrite: the copy could not be made (no buffer, no space).
+enum class LogTailStage : uint8_t { Staged, NothingToDo, KeepOriginal, CannotWrite };
+static LogTailStage stageCappedLogTail(const String& destPath, size_t sz, size_t keepBytes,
+                                       const AuthContext& ctx, String& tmpName, size_t& tailStart) {
   File r = VFS::openGuarded(destPath, "r", ctx);
-  if (!r) { STACK_TRACEF("appendLineWithCap.open_r_failed"); return false; }
+  if (!r) { STACK_TRACEF("appendLineWithCap.open_r_failed"); return LogTailStage::KeepOriginal; }
   // close() cannot report a buffered append failure. Before discarding any
   // old data, require the reopened file to contain the size we observed.
-  if (r.size() != sz) { r.close(); return false; }
+  if (r.size() != sz) { r.close(); return LogTailStage::KeepOriginal; }
 
   STACK_TRACEF("appendLineWithCap.rotate_begin");
-  // 3. Compute trim math. Drop enough bytes that the survivors are ~85% of cap.
-  const size_t TARGET_SIZE = (capBytes * 85) / 100;
-  if (TARGET_SIZE >= sz) { r.close(); return true; }  // defensive; shouldn't happen
-  const size_t bytesToDrop = sz - TARGET_SIZE;
+  if (keepBytes >= sz) { r.close(); return LogTailStage::NothingToDo; }  // defensive; shouldn't happen
+  const size_t bytesToDrop = sz - keepBytes;
 
-  // 4. Seek to the first byte we intend to keep, then advance to the next
-  //    newline so we don't begin mid-line. Bounded scan: if no newline
-  //    within 4 KB, give up and accept the partial leading line (matches
-  //    old behaviour where a single line > cap was left alone).
-  if (!r.seek(bytesToDrop)) { r.close(); return false; }
+  // Seek to the first byte we intend to keep, then advance to the next
+  // newline so we don't begin mid-line. Bounded scan: if no newline
+  // within 4 KB, give up and accept the partial leading line (matches
+  // old behaviour where a single line > cap was left alone).
+  if (!r.seek(bytesToDrop)) { r.close(); return LogTailStage::KeepOriginal; }
   const size_t MAX_SCAN = 4096;
   for (size_t scanned = 0; scanned < MAX_SCAN; scanned++) {
     int c = r.read();
     if (c < 0) {
       const bool atEnd = r.position() == sz;
       r.close();
-      return atEnd;  // Keep the existing EOF policy; reject a premature read failure.
+      // Keep the existing EOF policy; reject a premature read failure.
+      return atEnd ? LogTailStage::NothingToDo : LogTailStage::KeepOriginal;
     }
     if (c == '\n') break;                    // cursor is now past the \n
   }
-  const size_t tailStart = r.position();
-  if (tailStart > sz) { r.close(); return false; }
+  tailStart = r.position();
+  if (tailStart > sz) { r.close(); return LogTailStage::KeepOriginal; }
   const size_t tailBytes = sz - tailStart;
 
-  // 5. Stream the tail into a temp file. The copy buffer lives in PSRAM and
-  //    is allocated once per boot, then reused — keeping it off the log_out
-  //    task's stack. LittleFS internals already use several KB of stack in
-  //    deep write paths, and a 1 KB automatic here was enough to overflow
-  //    the task during a first-of-session error-log write.
-  char tmpPath[140];
-  snprintf(tmpPath, sizeof(tmpPath), "%s.tmp", dest);
-  const String tmpName(tmpPath);
+  // Stream the tail into a temp file. The copy buffer lives in PSRAM and
+  // is allocated once per boot, then reused — keeping it off the log_out
+  // task's stack. LittleFS internals already use several KB of stack in
+  // deep write paths, and a 1 KB automatic here was enough to overflow
+  // the task during a first-of-session error-log write.
+  // The name is built in the String the caller keeps, not in a second path
+  // buffer on this stack (log_out runs this on 6 KB). A String that could not
+  // grow would still name the log itself, which the next line removes.
+  tmpName = destPath;
+  tmpName += ".tmp";
+  if (tmpName.length() != destPath.length() + 4) { r.close(); return LogTailStage::KeepOriginal; }
   VFS::removeGuarded(tmpName, ctx);  // clear any stale .tmp from a prior crash
 
   static uint8_t* sRotateBuf = nullptr;
@@ -2589,7 +2636,7 @@ bool appendLineWithCap(const char* path, const char* line, size_t lineLength, si
     if (!sRotateBuf) {
       r.close();
       STACK_TRACEF("appendLineWithCap.rotatebuf_alloc_failed");
-      return restartCappedLog(destPath, line, lineLength, sz - lineLength - 2, ctx);  // G-39: hold the cap
+      return LogTailStage::CannotWrite;
     }
   }
 
@@ -2597,7 +2644,7 @@ bool appendLineWithCap(const char* path, const char* line, size_t lineLength, si
   if (!w) {
     r.close();
     STACK_TRACEF("appendLineWithCap.open_tmp_failed");
-    return restartCappedLog(destPath, line, lineLength, sz - lineLength - 2, ctx);  // G-39: hold the cap
+    return LogTailStage::CannotWrite;
   }
   STACK_TRACEF("appendLineWithCap.tmp_opened copying...");
 
@@ -2621,11 +2668,150 @@ bool appendLineWithCap(const char* path, const char* line, size_t lineLength, si
     VFS::removeGuarded(tmpName, ctx);
     STACK_TRACEF("appendLineWithCap.incomplete_copy");
     // G-39: a copy the original could not feed keeps the original; a copy
-    // that could not be WRITTEN (the low-space case) restarts the log.
-    return readShort ? false : restartCappedLog(destPath, line, lineLength, sz - lineLength - 2, ctx);
+    // that could not be WRITTEN (the low-space case) is the caller's to hold
+    // the cap another way.
+    return readShort ? LogTailStage::KeepOriginal : LogTailStage::CannotWrite;
+  }
+  return LogTailStage::Staged;
+}
+
+// Two-generation rotation: the current file (`sz` bytes, past its generation
+// size) becomes "<dest>.1" and the next append starts a new file. One rename,
+// no data copied. LittleFS replaces the older generation in the same step; FAT
+// refuses a rename onto an existing file, so the SD mirror removes it first
+// (a power cut between the two leaves only the current file: the older
+// generation is lost, nothing needs recovery).
+//
+// A file far past its generation size was left by older firmware with a
+// larger cap (UP-03, or the one-file logs before S-8). Renaming it whole
+// would keep it above the cap until the rotation after next, so its newest
+// generation is copied to "<dest>.1" once and the file removed. If that copy
+// cannot be made the whole file is renamed after all: nothing is lost and it
+// is replaced at the next rotation.
+//
+// `copyAllowed` false (boot is not over, and older firmware would not have cut
+// the file at this line either): an oversized file is left as it is and the
+// line just appended stays on it; the first write after boot cuts it.
+static bool rotateCappedLogByRename(const String& destPath, size_t sz, size_t generation,
+                                    const AuthContext& ctx, bool copyAllowed) {
+  const bool oversized = sz > generation + logcaps::kGenerationSlack;
+  if (oversized && !copyAllowed) {
+    STACK_TRACEF("appendLineWithCap.oversize_cut_after_boot");
+    return true;
+  }
+  String olderName = destPath;
+  olderName += ".1";
+  // A String that could not grow names the log itself: leave it for the next line.
+  if (olderName.length() != destPath.length() + 2) return false;
+  const bool onSd = VFS::getStorageType(destPath) == VFS::SDCARD;
+  if (oversized) {
+    String tmpName;
+    size_t tailStart = 0;
+    if (stageCappedLogTail(destPath, sz, generation, ctx, tmpName, tailStart) == LogTailStage::Staged) {
+      if (onSd) VFS::removeGuarded(olderName, ctx);
+      if (VFS::renameGuarded(tmpName, olderName, ctx)) {
+        STACK_TRACEF("appendLineWithCap.oversize_cut kept_from=%u", (unsigned)tailStart);
+        return VFS::removeGuarded(destPath, ctx);
+      }
+      VFS::removeGuarded(tmpName, ctx);
+    }
+  }
+  if (onSd) VFS::removeGuarded(olderName, ctx);
+  if (!VFS::renameGuarded(destPath, olderName, ctx)) {
+    STACK_TRACEF("appendLineWithCap.generation_rename_failed");
+    return false;
+  }
+  STACK_TRACEF("appendLineWithCap.generation_rotated");
+  return true;
+}
+
+// True for a log that keeps the copy rotation (see System_LogCapsCore.h,
+// followedByCatchup): only in a build that serves file catch-up.
+static bool cappedLogKeepsCopyRotation(const char* path) {
+  return kCatchupServesLogs && logcaps::followedByCatchup(path);
+}
+
+// Appends `data` (one line, or a batch of CRLF-terminated lines counted in
+// `lines`) to the capped log `path` and rotates it when due. `nominalCap` is
+// the cap the caller named and `capBytes` that cap scaled to this volume. The
+// caller holds the filesystem lock.
+static bool cappedLogWrite(const char* path, const char* data, size_t length, bool addNewline,
+                           unsigned lines, size_t nominalCap) {
+  const size_t capBytes = logcaps::scaledCap(nominalCap, sCappedLogs.partitionBytes);
+  // Resolve destination (LittleFS primary, or /sd overflow mirror if flash full).
+  char dest[128];
+  if (VFS::resolveLogPath(path, length + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
+    // G-39: LittleFS is below the reserve and no card takes the overflow.
+    for (unsigned i = 0; i < lines; ++i) VFS::noteLogReserveDrop();
+    STACK_TRACEF("appendLineWithCap.reserve_refused");
+    return false;
+  }
+  STACK_TRACEF("appendLineWithCap.resolved dest=%s", dest);
+  // trusted: the capped-log writer, confined to the sys_logs tree of the tier
+  // the overflow latch resolved. Every caller's path lives there; one that
+  // does not is refused by the scope and shows up as a [PERM] line.
+  // destPath is `dest` as the guarded calls take it, made once per resolved
+  // tier rather than once per call.
+  String destPath(dest);
+  AuthContext ctx = VFS::systemAuth(VFS::sysLogScopeFor(destPath), "log.append");
+
+  // 1. Append — fast path, one open for a line or a whole batch.
+  size_t sz = 0;
+  size_t written = 0;
+  bool appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written);
+  if (!appended && VFS::getStorageType(destPath) == VFS::SDCARD &&
+      VFS::getStorageType(String(path)) != VFS::SDCARD) {
+    // G-39: the latch sent this line to a card that no longer takes writes
+    // (yanked SPI or detect-less SDMMC card, or a log tree the card's write
+    // probe does not exercise). Report it so the overflow path stops choosing
+    // the card for a while — not re-probing it on the retry below — then
+    // retry once wherever the latch resolves now: flash while free space is
+    // above the floor, otherwise a counted drop.
+    VFS::noteLogOverflowSdFailure("log.append");
+    if (VFS::resolveLogPath(path, length + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
+      for (unsigned i = 0; i < lines; ++i) VFS::noteLogReserveDrop();
+      STACK_TRACEF("appendLineWithCap.sd_failed_reserve_refused");
+      return false;
+    }
+    destPath = dest;
+    ctx = VFS::systemAuth(VFS::sysLogScopeFor(destPath), "log.append");
+    appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written);
+  }
+  if (!appended) { STACK_TRACEF("appendLineWithCap.short_append"); return false; }
+
+  // 2. Check size. The size came from the append handle above, so the common
+  //    path (no rotation) returns without opening the file a second time.
+  //    A two-generation log rotates at half its cap, a copy-rotated one at
+  //    its cap.
+  const bool copyRotation = cappedLogKeepsCopyRotation(path);
+  const size_t limit = copyRotation ? capBytes : logcaps::generationBytes(capBytes);
+  STACK_TRACEF("appendLineWithCap.size_checked sz=%u limit=%u", (unsigned)sz, (unsigned)limit);
+  if (sz <= limit) { STACK_TRACEF("appendLineWithCap.no_rotate_exit"); return true; }
+  // Boot does not wait for the cuts this firmware brings to a device that is
+  // updated: a log older firmware left above its new, smaller size is copied
+  // (up to half its cap, under the filesystem lock) the first time it is
+  // written, and every boot writes to the login logs from setup() and to the
+  // event logs seconds later. Until the main loop runs, a file is copied only
+  // where older firmware copied too, above the cap its caller names; the
+  // first write after boot does the rest. A plain generation rename copies
+  // nothing and is not put off.
+  const bool copyAllowed = logcaps::copyAllowedNow(sCappedLogs.loopRunning, sz, nominalCap);
+  if (!copyRotation) return rotateCappedLogByRename(destPath, sz, limit, ctx, copyAllowed);
+  if (!copyAllowed) { STACK_TRACEF("appendLineWithCap.copy_rotation_after_boot"); return true; }
+
+  // 3. Copy rotation — only now is a read handle worth its open. Drop enough
+  //    bytes that the survivors are ~85% of cap.
+  String tmpName;
+  size_t tailStart = 0;
+  switch (stageCappedLogTail(destPath, sz, (capBytes * 85) / 100, ctx, tmpName, tailStart)) {
+    case LogTailStage::NothingToDo:  return true;
+    case LogTailStage::KeepOriginal: return false;
+    case LogTailStage::CannotWrite:  // G-39: hold the cap
+      return restartCappedLog(destPath, data, length, addNewline, sz - length - (addNewline ? 2 : 0), ctx);
+    case LogTailStage::Staged:       break;
   }
 
-  // 6. LittleFS can replace the original directly, preserving it on rename
+  // 4. LittleFS can replace the original directly, preserving it on rename
   // failure. SD's FAT backend requires an absent destination; retain its
   // existing recovery protocol, now only with a checked complete temp file.
   const bool onSd = VFS::getStorageType(destPath) == VFS::SDCARD;
@@ -2647,6 +2833,200 @@ bool appendLineWithCap(const char* path, const char* line, size_t lineLength, si
   STACK_TRACEF("appendLineWithCap.rotate_complete");
   return true;
 }
+
+// ---------------------------------------------------------------------------
+// Batching (S-8). Each open-append-close costs a flash block erase, so the
+// lines of a batched log wait in a PSRAM buffer and reach the file in one
+// append: when about 2 KB is pending, when the oldest line is 1.5 s old (the
+// log task looks every 500 ms, cappedLogsFlushDue) or 2 s old at the next
+// line, before a reader opens the log (VFS::openGuarded), and for good once a
+// restart is announced (cappedLogsFlush(true)). The login logs and the crash
+// history are never held (logcaps::writesThrough).
+//
+// Up to 2 s of error, event and audit lines are therefore lost when the
+// device dies without a restart being announced: a panic, a watchdog or
+// brownout reset, a power cut.
+//
+// Locks: the filesystem lock, then the batch mutex. An appender takes only
+// the mutex; whoever flushes holds the filesystem lock, swaps the full buffer
+// for the spare one under the mutex and writes it after releasing the mutex,
+// so no appender waits for flash. Without PSRAM (no mutex, no buffers) every
+// line is written through as before.
+// ---------------------------------------------------------------------------
+static CappedLogSlot* cappedLogSlotFor(const char* path, bool claim) {
+  CappedLogState& s = sCappedLogs;
+  CappedLogSlot* freeSlot = nullptr;
+  for (CappedLogSlot& slot : s.slots) {
+    if (slot.data) {
+      if (strcmp(s.paths + (&slot - s.slots) * kCappedLogPathSize, path) == 0) return &slot;
+    } else if (!freeSlot) {
+      freeSlot = &slot;
+    }
+  }
+  if (!claim || !freeSlot || strlen(path) >= kCappedLogPathSize) return nullptr;
+  freeSlot->data = static_cast<char*>(ps_alloc(logcaps::kBatchCapacity, AllocPref::RequirePsram, "log.batch"));
+  if (!freeSlot->data) return nullptr;
+  memcpy(s.paths + (freeSlot - s.slots) * kCappedLogPathSize, path, strlen(path) + 1);
+  freeSlot->used = 0;
+  freeSlot->lines = 0;
+  return freeSlot;
+}
+
+// Writes what `slot` holds. With `agedMs`, only when its oldest line is that
+// old. The caller holds the filesystem lock.
+static bool cappedLogFlushSlotLocked(CappedLogSlot& slot, uint32_t agedMs) {
+  CappedLogState& s = sCappedLogs;
+  // A flush that reaches itself again (the same task: the filesystem lock is
+  // reentrant) would reuse the spare buffer the outer write is reading.
+  if (s.flushing) return true;
+  xSemaphoreTake(s.mutex, portMAX_DELAY);
+  if (!slot.data || slot.used == 0 ||
+      (agedMs != 0 && !logcaps::batchAged(millis(), slot.firstMs, agedMs))) {
+    xSemaphoreGive(s.mutex);
+    return true;
+  }
+  char* const batch = slot.data;
+  const size_t length = slot.used;
+  const unsigned lines = slot.lines;
+  const size_t capBytes = slot.capBytes;
+  slot.data = s.spare;
+  s.spare = batch;  // owned by the filesystem lock until the write is done
+  slot.used = 0;
+  slot.lines = 0;
+  bool pending = false;
+  for (const CappedLogSlot& other : s.slots) pending = pending || (other.data && other.used != 0);
+  s.pending = pending;
+  xSemaphoreGive(s.mutex);
+  s.flushing = true;
+  const bool ok = cappedLogWrite(s.paths + (&slot - s.slots) * kCappedLogPathSize, batch, length, false, lines,
+                                 capBytes);
+  s.flushing = false;
+  return ok;
+}
+
+// Takes `line` into its log's buffer; false when it has to be written through
+// (no batching, a write-through log, no free slot, a line too long).
+static bool cappedLogBatchLine(const char* path, const char* line, size_t lineLength, size_t capBytes) {
+  CappedLogState& s = sCappedLogs;
+  if (!s.mutex || s.writeThrough || logcaps::writesThrough(path) ||
+      lineLength + 2 > logcaps::kBatchCapacity) return false;
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    xSemaphoreTake(s.mutex, portMAX_DELAY);
+    CappedLogSlot* slot = s.writeThrough ? nullptr : cappedLogSlotFor(path, true);
+    if (!slot) {
+      xSemaphoreGive(s.mutex);
+      return false;
+    }
+    if (slot->used + lineLength + 2 <= logcaps::kBatchCapacity) {
+      const uint32_t now = millis();
+      if (slot->used == 0) slot->firstMs = now;
+      memcpy(slot->data + slot->used, line, lineLength);
+      slot->data[slot->used + lineLength] = '\r';
+      slot->data[slot->used + lineLength + 1] = '\n';
+      slot->used = static_cast<uint16_t>(slot->used + lineLength + 2);
+      ++slot->lines;
+      slot->capBytes = capBytes;
+      s.pending = true;
+      const bool flushNow = slot->used >= logcaps::kBatchFlushBytes ||
+                            logcaps::batchAged(now, slot->firstMs, logcaps::kBatchMaxAgeMs);
+      xSemaphoreGive(s.mutex);
+      if (flushNow) {
+        FsLockGuard guard("appendLineWithCap.batch");
+        cappedLogFlushSlotLocked(*slot, 0);
+      }
+      return true;
+    }
+    xSemaphoreGive(s.mutex);
+    // No room for this line: write the buffer out and try once more.
+    FsLockGuard guard("appendLineWithCap.batch");
+    cappedLogFlushSlotLocked(*slot, 0);
+  }
+  return false;
+}
+
+bool appendLineWithCap(const char* path, const char* line, size_t lineLength, size_t capBytes) {
+  STACK_TRACEF("appendLineWithCap.enter path=%s line_len=%u cap=%u",
+               path ? path : "(null)", (unsigned)lineLength, (unsigned)capBytes);
+  if (cappedLogBatchLine(path, line, lineLength, capBytes)) return true;
+
+  FsLockGuard guard("appendLineWithCap");  // reentrant-safe; nested VFS calls are fine.
+  CappedLogState& s = sCappedLogs;
+  if (s.mutex) {
+    // Lines of this log still in its buffer go first, so the file keeps their order.
+    xSemaphoreTake(s.mutex, portMAX_DELAY);
+    CappedLogSlot* slot = cappedLogSlotFor(path, false);
+    xSemaphoreGive(s.mutex);
+    if (slot) cappedLogFlushSlotLocked(*slot, 0);
+  }
+  return cappedLogWrite(path, line, lineLength, true, 1, capBytes);
+}
+
+void cappedLogsInit() {
+  CappedLogState& s = sCappedLogs;
+  // The partition's size, not the mounted volume's: a table lookup, where
+  // esp_littlefs_info walks the volume (about 1.3 s on the P4X-EYE).
+  const esp_partition_t* part = esp_partition_find_first(
+      ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, kLittleFsPartitionLabel);
+  s.partitionBytes = part ? part->size : 0;
+  if (s.mutex) return;
+  // PSRAM only: a board without it keeps writing every line through.
+  char* paths = static_cast<char*>(ps_alloc(kCappedLogSlots * kCappedLogPathSize, AllocPref::RequirePsram, "log.batch_paths"));
+  char* spare = static_cast<char*>(ps_alloc(logcaps::kBatchCapacity, AllocPref::RequirePsram, "log.batch"));
+  SemaphoreHandle_t mutex = (paths && spare) ? xSemaphoreCreateMutexWithCaps(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : nullptr;
+  if (!mutex) {
+    if (paths) ps_free(paths);
+    if (spare) ps_free(spare);
+    return;
+  }
+  s.paths = paths;
+  s.spare = spare;
+  s.mutex = mutex;
+}
+
+size_t cappedLogScaledCap(size_t capBytes) {
+  return logcaps::scaledCap(capBytes, sCappedLogs.partitionBytes);
+}
+
+void cappedLogsFlush(bool thenWriteThrough) {
+  CappedLogState& s = sCappedLogs;
+  if (thenWriteThrough) s.writeThrough = true;  // first: lines from now on are written at once
+  if (!s.mutex || (!thenWriteThrough && !s.pending)) return;
+  FsLockGuard guard("cappedLogs.flush");
+  for (CappedLogSlot& slot : s.slots) cappedLogFlushSlotLocked(slot, 0);
+}
+
+void cappedLogsFlushDue() {
+  CappedLogState& s = sCappedLogs;
+  if (!s.lateSweepDone && filesystemReady) {
+    // Once per boot, after boot: a ".tmp" older firmware's copy rotation left
+    // beside the command audit or the crash history (up to 425 KB) is removed,
+    // or promoted when the log itself is missing (see cleanupLogOrphan).
+    s.lateSweepDone = true;
+    FsLockGuard guard("cappedLogs.late_sweep");
+    cleanupLogOrphan("/system/sys_logs/command-audit.log");
+    cleanupLogOrphan("/system/sys_logs/crash-history.log");
+  }
+  if (!s.mutex || !s.pending) return;  // the idle case: two reads
+  const uint32_t now = millis();
+  bool due = false;
+  xSemaphoreTake(s.mutex, portMAX_DELAY);
+  for (const CappedLogSlot& slot : s.slots) {
+    due = due || (slot.data && slot.used != 0 && logcaps::batchAged(now, slot.firstMs, logcaps::kBatchDueMs));
+  }
+  xSemaphoreGive(s.mutex);
+  if (!due) return;
+  FsLockGuard guard("cappedLogs.due");
+  for (CappedLogSlot& slot : s.slots) cappedLogFlushSlotLocked(slot, logcaps::kBatchDueMs);
+}
+
+bool cappedLogsPending() { return sCappedLogs.pending; }
+
+void cappedLogsNoteLoopRunning() {
+  if (!sCappedLogs.loopRunning) sCappedLogs.loopRunning = true;
+}
+
+bool cappedLogsRestartAnnounced() { return sCappedLogs.writeThrough; }
+// --- capped-log writer: end ---
 
 // The String form: the same bytes, the text and its length taken from `line`.
 // Recover a log file's partner .tmp left over from a crashed or power-cut

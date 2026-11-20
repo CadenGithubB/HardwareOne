@@ -36,12 +36,20 @@ static size_t shortCount = 0, bytesNoted = 0, requestedSpace = 0, maxRead = 0;
 static size_t tempSizeOffset = 0, inputSizeOffset = 0, readLimit = 1024;
 static std::string refuseRemove;
 static std::vector<std::unique_ptr<uint8_t[]>> allocations;
+// S-8: the batch mutex. Order: the filesystem lock, then the mutex; file I/O
+// never runs with the mutex held.
+static int mutexDepth = 0, mutexTakes = 0;
 static void io(const std::string& event) {
   check(lockDepth == 1 || recovering, "append I/O stays under filesystem lock");
+  check(mutexDepth == 0, "no file I/O while the batch mutex is held");
   events.push_back(event);
 }
 struct FsLockGuard {
-  explicit FsLockGuard(const char*) { check(lockDepth == 0, "one filesystem lock"); ++lockDepth; events.push_back("lock"); }
+  explicit FsLockGuard(const char*) {
+    check(lockDepth == 0, "one filesystem lock");
+    check(mutexDepth == 0, "the filesystem lock is never taken with the batch mutex held");
+    ++lockDepth; events.push_back("lock");
+  }
   ~FsLockGuard() { check(liveFiles == 0, "files closed before unlock"); --lockDepth; events.push_back("unlock"); }
 };
 enum class AllocPref { PreferPsram, RequirePsram };
@@ -50,7 +58,21 @@ enum class AllocPref { PreferPsram, RequirePsram };
 static int lineAllocCalls = 0;
 static bool failLineAlloc = false;
 static std::vector<std::unique_ptr<char[]>> lineBlocks;
+// S-8: the batch buffers and the log names. PSRAM only, never under the
+// filesystem lock's I/O accounting.
+static int batchAllocCalls = 0;
+static bool failBatchAlloc = false;
+static std::vector<std::unique_ptr<char[]>> batchBlocks;
+static void ps_free(void*) {}
 static void* ps_alloc(size_t size, AllocPref pref, const char* tag) {
+  if (std::string(tag) == "log.batch" || std::string(tag) == "log.batch_paths") {
+    ++batchAllocCalls;
+    check(pref == AllocPref::RequirePsram, "batch memory is PSRAM only");
+    check(size == (std::string(tag) == "log.batch" ? size_t(2560) : size_t(6 * 80)), "batch block sizes");
+    if (failBatchAlloc) return nullptr;
+    batchBlocks.push_back(std::make_unique<char[]>(size));
+    return batchBlocks.back().get();
+  }
   if (std::string(tag) == "log.capped_line") {
     ++lineAllocCalls;
     check(size == 48 + DEBUG_MSG_SIZE && pref == AllocPref::RequirePsram && lockDepth == 0,
@@ -203,7 +225,46 @@ struct SerialOutput {
 // The wall clock of buildTimestampPrefix: a set prefix, or "" while unsynced.
 static std::string clockPrefix;
 static void getTimestampPrefixMsCached(char* out, size_t size) { std::snprintf(out, size, "%s", clockPrefix.c_str()); }
-static unsigned long millis() { return 123456; }
+static unsigned long nowMs = 123456;
+static unsigned long millis() { return nowMs; }
+
+// S-8 and UP-03 platform pieces of the writer region.
+#define EXT_RAM_BSS_ATTR
+struct HostMutex { int unused; };
+using SemaphoreHandle_t = HostMutex*;
+[[maybe_unused]] static const unsigned portMAX_DELAY = 0xffffffffu;
+static const unsigned MALLOC_CAP_SPIRAM = 1, MALLOC_CAP_8BIT = 2;
+static HostMutex hostMutex;
+static bool failMutexCreate = false;
+static SemaphoreHandle_t xSemaphoreCreateMutexWithCaps(unsigned caps) {
+  check(caps == (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT), "the batch mutex lives in PSRAM");
+  return failMutexCreate ? nullptr : &hostMutex;
+}
+static void xSemaphoreTake(SemaphoreHandle_t mutex, unsigned) {
+  check(mutex == &hostMutex && mutexDepth == 0, "the batch mutex is not taken twice");
+  ++mutexDepth; ++mutexTakes;
+}
+static void xSemaphoreGive(SemaphoreHandle_t mutex) {
+  check(mutex == &hostMutex && mutexDepth == 1, "the batch mutex is given once");
+  --mutexDepth;
+}
+struct esp_partition_t { size_t size; };
+enum { ESP_PARTITION_TYPE_DATA = 1, ESP_PARTITION_SUBTYPE_ANY = 0xff };
+[[maybe_unused]] static const char kLittleFsPartitionLabel[] = "littlefs";
+static esp_partition_t hostPartition{0};
+static bool partitionKnown = false;
+static const esp_partition_t* esp_partition_find_first(int type, int subtype, const char* label) {
+  check(type == ESP_PARTITION_TYPE_DATA && subtype == ESP_PARTITION_SUBTYPE_ANY &&
+        std::strcmp(label, "littlefs") == 0, "the cap total is the littlefs partition's size");
+  return partitionKnown ? &hostPartition : nullptr;
+}
+[[maybe_unused]] static bool filesystemReady = true;
+// A build that serves file catch-up (ENABLE_ESPNOW_SEND) keeps the copy
+// rotation for the three followed logs; the cases switch it.
+[[maybe_unused]] static bool kCatchupServesLogs = true;
+void cleanupLogOrphan(const char* path);
+
+#include "System_LogCapsCore.h"  // the production header, copied beside this unit
 
 #ifndef HAVE_CATCHUP_NOTES
 #define HAVE_CATCHUP_NOTES 0
@@ -503,7 +564,331 @@ static void timestampedLines() {
 }
 #endif
 
+#ifndef HAVE_BATCHING
+#define HAVE_BATCHING 0
+#endif
+#if HAVE_BATCHING
+// S-8 and UP-03: batched appends, two-generation rotation and scaled caps, on
+// the production writer region. The cases above ran with batching off (no
+// cappedLogsInit: every line written through), as a board without PSRAM does.
+static long countEvent(const std::string& event) { return std::count(events.begin(), events.end(), event); }
+static long countPrefix(const std::string& prefix) {
+  return std::count_if(events.begin(), events.end(), [&](const std::string& e) { return e.rfind(prefix, 0) == 0; });
+}
+static bool put(const char* path, const std::string& line, size_t cap = 100000) {
+  const bool ok = appendLineWithCap(path, line.c_str(), line.size(), cap);
+  check(lockDepth == 0 && liveFiles == 0 && mutexDepth == 0, "append releases lock, handles and mutex");
+  return ok;
+}
+static void batchReset(bool onSd = false) {
+  cappedLogsFlush(false);
+  check(!cappedLogsPending(), "nothing pending between cases");
+  reset(onSd);
+  sCappedLogs.writeThrough = false;
+  nowMs += 100000;
+}
+// What a reader shows: the older generation, then the current file.
+static std::string wholeLog(const std::string& path) {
+  return (disk.count(path + ".1") ? disk.at(path + ".1") : std::string()) +
+         (disk.count(path) ? disk.at(path) : std::string());
+}
+static void batchingCases() {
+  const char* kEvents = "/system/sys_logs/system-events.log";
+  const char* kAudit = "/system/sys_logs/command-audit.log";
+  const char* kLogin = "/system/sys_logs/failed_login.log";
+  const char* kCrash = "/system/sys_logs/crash-history.log";
+  const char* kErrors = "/system/sys_logs/errors.log";
+  const std::string events_ = kEvents, audit = kAudit, errors = kErrors;
+
+  // The late sweep: the log task's first tick removes a ".tmp" that older
+  // firmware left beside the two logs boot recovery does not list. Once.
+  reset(); disk[audit] = "audit"; disk[audit + ".tmp"] = "stale copy";
+  disk[std::string(kCrash) + ".tmp"] = "orphan";
+  cappedLogsFlushDue();
+  check(disk.at(audit) == "audit" && !disk.count(audit + ".tmp"), "a stale command-audit.log.tmp is removed after boot");
+  check(disk.count(kCrash) && disk.at(kCrash) == "orphan" && !disk.count(std::string(kCrash) + ".tmp"),
+        "an orphaned crash-history.log.tmp is promoted");
+  check(lockDepth == 0 && liveFiles == 0, "the late sweep releases the lock");
+  events.clear(); disk[audit + ".tmp"] = "again"; cappedLogsFlushDue();
+  check(events.empty() && disk.count(audit + ".tmp"), "the late sweep runs once per boot");
+
+  // No PSRAM (no buffer, or no mutex): every line is written through.
+  reset(); failBatchAlloc = true; cappedLogsInit(); failBatchAlloc = false;
+  check(sCappedLogs.mutex == nullptr, "no batching without PSRAM buffers");
+  check(put(kEvents, "direct") && countEvent("open:a") == 1 && disk.at(events_) == "direct\r\n" && mutexTakes == 0,
+        "without PSRAM a line is written at once");
+  reset(); failMutexCreate = true; cappedLogsInit(); failMutexCreate = false;
+  check(sCappedLogs.mutex == nullptr, "no batching without the mutex");
+  cappedLogsFlush(false); cappedLogsFlush(true); cappedLogsFlushDue();
+  check(events.empty() && !cappedLogsPending(), "flushes are no-ops without batching");
+  sCappedLogs.writeThrough = false;
+
+  cappedLogsInit();
+  check(sCappedLogs.mutex != nullptr && sCappedLogs.partitionBytes == 0, "batching on; unknown partition size leaves caps unscaled");
+  check(cappedLogScaledCap(696969) == 696969, "an unscaled cap is the caller's");
+  const int blocksAtInit = batchAllocCalls;
+  cappedLogsInit();
+  check(batchAllocCalls == blocksAtInit, "a second init allocates nothing");
+
+  // 20 lines within 2 s: no file is touched until the log task's tick finds
+  // the oldest line 1.5 s old, then one append open carries all of them.
+  batchReset();
+  std::string expected;
+  for (int i = 0; i < 20; ++i) {
+    const std::string line = "event line " + std::to_string(i);
+    check(put(kEvents, line), "a batched line is accepted");
+    expected += line + "\r\n";
+    nowMs += 50;
+  }
+  check(events.empty() && disk.empty() && cappedLogsPending(), "20 lines within 2 s take no filesystem lock and touch no file");
+  cappedLogsFlushDue();
+  check(events.empty(), "not written before the oldest line is 1.5 s old");
+  nowMs += 500;
+  cappedLogsFlushDue();
+  check(countEvent("open:a") == 1 && countPrefix("append:") == 1 && countEvent("lock") == 1,
+        "one append open and one write for the 20 lines");
+  check(disk.at(events_) == expected && bytesNoted == expected.size() && requestedSpace == expected.size() + 512,
+        "the file holds the 20 lines in order; one space request and one byte note for the batch");
+  check(!cappedLogsPending() && lockDepth == 0 && liveFiles == 0, "nothing pending after the flush");
+  events.clear(); cappedLogsFlushDue();
+  check(events.empty(), "an idle tick does nothing");
+
+  // About 2 KB pending is written at once, by the appender.
+  batchReset();
+  const std::string row(198, 'x');  // 200 bytes with CRLF
+  for (int i = 0; i < 10; ++i) check(put(kEvents, row), "row buffered");
+  check(events.empty(), "2000 bytes pending are below the threshold");
+  check(put(kEvents, row), "the row that passes 2 KB");
+  check(countEvent("open:a") == 1 && disk.at(events_).size() == 2200 && !cappedLogsPending(), "2 KB pending flushes in one append");
+
+  // A line that does not fit behind the pending ones: they are written first.
+  batchReset();
+  for (int i = 0; i < 10; ++i) check(put(kEvents, row), "row buffered");
+  const std::string wide(600, 'y');
+  check(put(kEvents, wide), "a line that needs room");
+  check(countEvent("open:a") == 1 && disk.at(events_).size() == 2000 && cappedLogsPending(), "the full buffer is written, the line waits");
+  cappedLogsFlush(false);
+  check(disk.at(events_).size() == 2602 && disk.at(events_).compare(2000, 602, wide + "\r\n") == 0, "order kept");
+
+  // A line longer than a buffer is written through, after the pending lines.
+  batchReset();
+  check(put(kEvents, "first") && put(kEvents, "second"), "two short lines wait");
+  const std::string huge(3000, 'z');
+  check(put(kEvents, huge), "a line longer than the buffer");
+  check(countEvent("open:a") == 2 && countEvent("lock") == 1, "pending lines and the long line in one lock hold");
+  check(disk.at(events_) == "first\r\nsecond\r\n" + huge + "\r\n" && !cappedLogsPending(), "the long line follows the earlier ones");
+
+  // Without a log-task tick the next appender writes a batch 2 s old.
+  batchReset();
+  check(put(kEvents, "old"), "a line waits");
+  nowMs += 1999; check(put(kEvents, "younger") && events.empty(), "1999 ms: still waiting");
+  nowMs += 1; check(put(kEvents, "late"), "2 s after the oldest line");
+  check(countEvent("open:a") == 1 && disk.at(events_) == "old\r\nyounger\r\nlate\r\n", "the appender writes a 2 s old batch");
+
+  // The login logs and the crash history are never held.
+  batchReset();
+  check(put(kLogin, "FAILED | user=x") && countEvent("open:a") == 1 && disk.at(kLogin) == "FAILED | user=x\r\n",
+        "a login line is on file when the call returns");
+  check(put(kCrash, "=== boot died ===") && countEvent("open:a") == 2 && !cappedLogsPending(), "so is a crash-history line");
+
+  // A flush with nothing pending takes no lock; with lines pending it writes every log.
+  batchReset();
+  cappedLogsFlush(false);
+  check(events.empty(), "an empty flush takes no filesystem lock");
+  check(put(kEvents, "e") && put(kAudit, "a") && events.empty(), "two logs pending");
+  cappedLogsFlush(false);
+  check(countEvent("open:a") == 2 && countEvent("lock") == 1 && disk.at(events_) == "e\r\n" && disk.at(audit) == "a\r\n",
+        "one flush writes both logs under one lock hold");
+
+  // An announced restart: everything pending is written, and the rest of the
+  // boot's lines are written at once, in order.
+  batchReset();
+  check(put(kEvents, "before") && put(kAudit, "audit before"), "lines pending at the restart");
+  cappedLogsFlush(true);
+  check(disk.at(events_) == "before\r\n" && disk.at(audit) == "audit before\r\n" && !cappedLogsPending(), "flushed");
+  events.clear();
+  check(put(kEvents, "[EVENT][REBOOT] command") && countEvent("open:a") == 1 &&
+        disk.at(events_) == "before\r\n[EVENT][REBOOT] command\r\n", "after the announcement a line is written at once");
+  check(put(kAudit, "audit after") && disk.at(audit) == "audit before\r\naudit after\r\n" && !cappedLogsPending(),
+        "the deferred restart's audit line too");
+  batchReset();
+  cappedLogsFlush(true);
+  check(put(kEvents, "x") && countEvent("open:a") == 1, "the announcement latches with nothing pending too");
+
+  // A batch refused for the reserve counts one drop per line.
+  batchReset(true); sdAvailable = sdWritable = false;
+  check(put(kEvents, "1") && put(kEvents, "2") && put(kEvents, "3"), "three lines wait");
+  cappedLogsFlush(false);
+  check(disk.empty() && reserveDrops == 3 && !seen("open:a"), "a refused batch is three counted drops");
+
+  // A followed log in a serving build: the batch is one append, the copy
+  // rotation trims once and leaves one trim note; a copy that cannot be
+  // written restarts the log with the marker and the whole batch.
+  batchReset(); disk[errors] = rows(0, 20);
+  check(put(kErrors, "new-1", 100) && put(kErrors, "new-2", 100) && put(kErrors, "new-3", 100) && events.empty(), "three error lines wait");
+  cappedLogsFlush(false);
+  check(countEvent("open:a") == 1 && countEvent("rename") == 1 && catchupNotes.size() == 1 &&
+        catchupNotes[0].rfind("trim:" + errors + ":", 0) == 0, "one append, one copy rotation, one trim note");
+  check(disk.at(errors).size() <= 85 && disk.at(errors).size() >= 85 - 8 &&
+        (rows(0, 20) + "new-1\r\nnew-2\r\nnew-3\r\n").compare(181 - disk.at(errors).size(), std::string::npos, disk.at(errors)) == 0 &&
+        !disk.count(errors + ".1"), "the newest 85 percent stay in the one file");
+  batchReset(); disk[errors] = rows(0, 20); copyError = true;
+  check(put(kErrors, "new-1", 100) && put(kErrors, "new-2", 100), "two error lines wait");
+  cappedLogsFlush(false);
+  check(disk.at(errors) == restartMarker(160) + "new-1\r\nnew-2\r\n" && catchupNotes == std::vector<std::string>{"restart:" + errors},
+        "a blocked copy restarts the log with the batch, one CRLF per line");
+
+  // Slots: six batched logs; a seventh, or a name too long for a slot, is written through.
+  batchReset();
+  for (const char* extra : {"/system/sys_logs/i2c_errors.log", "/system/sys_logs/extra-a.log", "/system/sys_logs/extra-b.log"})
+    check(put(extra, "slot") && events.empty(), "a further log gets a buffer");
+  check(put("/system/sys_logs/extra-c.log", "seventh") && countEvent("open:a") == 1, "a seventh log is written at once");
+  const std::string longName = "/system/sys_logs/" + std::string(70, 'n') + ".log";
+  check(put(longName.c_str(), "long name") && countEvent("open:a") == 2, "a name longer than a slot is written at once");
+
+  // Two-generation rotation, on flash and on the SD mirror: one rename, at
+  // most one remove (FAT), no byte copied; a reader of "<log>.1" then "<log>"
+  // sees the same newest lines.
+  for (bool onSd : {false, true}) {
+    const std::string dest = std::string(onSd ? "/sd" : "") + kEvents;
+    batchReset(onSd); sCappedLogs.writeThrough = true;  // written at once: the rotation is what is under test
+    disk[dest] = rows(0, 11); disk[dest + ".1"] = "older generation\r\n";
+    check(put(kEvents, "new", 200), "a line below the generation size");
+    check(!seen("rename") && disk.at(dest) == rows(0, 11) + "new\r\n" && disk.at(dest + ".1") == "older generation\r\n",
+          "half the cap is not passed: no rotation");
+    batchReset(onSd); sCappedLogs.writeThrough = true;
+    disk[dest] = rows(0, 12); disk[dest + ".1"] = "older generation\r\n";
+    check(put(kEvents, "new", 200), "a two-generation rotation succeeds");
+    check(countEvent("rename") == 1 && countPrefix("remove:") == (onSd ? 1 : 0) && countPrefix("copy:") == 0 &&
+          countPrefix("read:") == 0 && !seen("scan") && !seen("open:r") && !seen("open:w") && allocCalls == 2,
+          "one rename, at most one remove, zero bytes copied");
+    check(disk.at(dest + ".1") == rows(0, 12) + "new\r\n" && !disk.count(dest) && catchupNotes.empty(),
+          "the full file is the older generation now; no catch-up note");
+    check(put(kEvents, "next", 200) && disk.at(dest) == "next\r\n", "the next line starts a new file");
+    check(wholeLog(dest) == rows(0, 12) + "new\r\nnext\r\n", "the reader returns the same newest lines");
+    // A rename that fails keeps the file; the next line tries again.
+    batchReset(onSd); sCappedLogs.writeThrough = true;
+    disk[dest] = rows(0, 12); failRename = true;
+    check(!put(kEvents, "new", 200) && disk.at(dest) == rows(0, 12) + "new\r\n", "a failed rename reports false and keeps every line");
+    failRename = false;
+    check(put(kEvents, "again", 200) && disk.at(dest + ".1") == rows(0, 12) + "new\r\nagain\r\n" && !disk.count(dest),
+          "the next line rotates");
+
+    // A file older firmware left far above the generation size: its newest
+    // generation is copied to ".1" once, from a line start, and the file removed.
+    std::string legacy;
+    for (int i = 0; legacy.size() < 30000; ++i) legacy += "legacy row " + std::to_string(i) + "\r\n";
+    batchReset(onSd); sCappedLogs.writeThrough = true;
+    disk[dest] = legacy; disk[dest + ".1"] = "older generation\r\n";
+    check(put(kEvents, "new", 20000), "an oversized legacy log is cut once");
+    const std::string whole = legacy + "new\r\n";
+    check(!disk.count(dest) && !disk.count(dest + ".tmp") && disk.count(dest + ".1"), "only the older generation is left");
+    const std::string kept = disk.at(dest + ".1");
+    check(kept.size() <= 10000 && kept.size() > 10000 - 32 && kept.rfind("legacy row ", 0) == 0 &&
+          whole.compare(whole.size() - kept.size(), kept.size(), kept) == 0, "it holds the newest half cap from a line start");
+    check(countEvent("rename") == 1 && maxRead <= 1024 && catchupNotes.empty(), "one promotion through the bounded copy buffer");
+    check(put(kEvents, "next", 20000) && disk.at(dest) == "next\r\n" && wholeLog(dest) == kept + "next\r\n", "then a new file");
+    // The copy cannot be made: the whole file becomes the older generation.
+    batchReset(onSd); sCappedLogs.writeThrough = true;
+    disk[dest] = legacy; failTempOpen = true;
+    check(put(kEvents, "new", 20000) && disk.at(dest + ".1") == whole && !disk.count(dest) && !disk.count(dest + ".tmp"),
+          "without room for the copy the file is renamed whole; nothing is lost");
+    // Within one batch of the generation size: this writer's own rotation, a plain rename.
+    batchReset(onSd); sCappedLogs.writeThrough = true;
+    disk[dest] = legacy.substr(0, 10000 + 4096 - 5);
+    check(put(kEvents, "new", 20000) && countEvent("rename") == 1 && !seen("open:r") && disk.at(dest + ".1").size() == 10000 + 4096,
+          "a file within the slack is renamed, not copied");
+  }
+
+  // Boot does not wait for the cuts an update brings. Until the main loop
+  // runs (cappedLogsNoteLoopRunning), a file above its new size is copied only
+  // where older firmware copied too: above the cap its caller names. A plain
+  // generation rename copies nothing and is not put off.
+  {
+    std::string legacy;
+    for (int i = 0; legacy.size() < 15000; ++i) legacy += "legacy row " + std::to_string(i) + "\r\n";
+    const std::string dest = kEvents;
+    sCappedLogs.loopRunning = false;
+    // Oversized for the two-generation writer (15 000 > 10 000 + 4096) but
+    // within the caller's cap: older firmware would only have appended.
+    batchReset(); sCappedLogs.writeThrough = true;
+    disk[dest] = legacy;
+    check(put(kEvents, "boot line", 20000) && disk.at(dest) == legacy + "boot line\r\n" && !disk.count(dest + ".1"),
+          "during boot an oversized log only takes the line");
+    check(!seen("open:r") && !seen("open:w") && !seen("rename") && countPrefix("copy:") == 0 && countPrefix("remove:") == 0,
+          "during boot nothing is copied, renamed or removed for it");
+    // Above the caller's cap older firmware rotated at this line too: cut now.
+    batchReset(); sCappedLogs.writeThrough = true;
+    std::string over = legacy;
+    while (over.size() <= 20000) over += "more legacy\r\n";
+    disk[dest] = over;
+    check(put(kEvents, "boot line", 20000) && !disk.count(dest) && disk.at(dest + ".1").size() <= 10000,
+          "during boot a log above the caller's cap is still cut (a restart loop cannot grow it)");
+    // A plain generation rename is not put off.
+    batchReset(); sCappedLogs.writeThrough = true;
+    disk[dest] = rows(0, 12);
+    check(put(kEvents, "new", 200) && countEvent("rename") == 1 && !seen("open:r") && disk.at(dest + ".1") == rows(0, 12) + "new\r\n",
+          "during boot a full generation is renamed as always");
+    // The copy rotation of a followed log, with a scaled cap (1856 KiB layout:
+    // errors.log 45 000 of 262 144).
+    partitionKnown = true; hostPartition.size = 1856u * 1024u; cappedLogsInit();
+    batchReset(); sCappedLogs.writeThrough = true;
+    std::string old;
+    while (old.size() < 200000) old += "an error line from before the update\r\n";
+    disk[errors] = old;
+    check(put(kErrors, "boot error", 256 * 1024) && disk.at(errors) == old + "boot error\r\n" && !seen("open:r") &&
+          !seen("rename") && catchupNotes.empty(), "during boot a followed log above its scaled cap only takes the line");
+    // Boot is over: the first write does the cut, once.
+    cappedLogsNoteLoopRunning();
+    check(sCappedLogs.loopRunning, "the loop's tick ends the boot phase");
+    batchReset(); sCappedLogs.writeThrough = true;
+    disk[errors] = old;
+    check(put(kErrors, "first line after boot", 256 * 1024) && disk.at(errors).size() <= 45000 * 85 / 100 + 64 &&
+          disk.at(errors).size() > 30000 && seen("rename") && catchupNotes.size() == 1,
+          "after boot the followed log is trimmed by copy to 85 % of its scaled cap");
+    partitionKnown = false; cappedLogsInit();
+    batchReset(); sCappedLogs.writeThrough = true;
+    disk[dest] = legacy;
+    check(put(kEvents, "first line after boot", 20000) && !disk.count(dest) && disk.count(dest + ".1") &&
+          disk.at(dest + ".1").size() <= 10000, "after boot the oversized log is cut to its newest half cap");
+    check(logcaps::copyAllowedNow(false, 100, 100) == false && logcaps::copyAllowedNow(false, 101, 100) &&
+          logcaps::copyAllowedNow(true, 1, 100), "the rule: boot over, or above the caller's cap");
+  }
+
+  // In a build that serves no catch-up the three followed logs are
+  // two-generation logs too: no copy, no note.
+  batchReset(); sCappedLogs.writeThrough = true; kCatchupServesLogs = false;
+  disk[errors] = rows(0, 12);
+  check(put(kErrors, "new", 200) && countEvent("rename") == 1 && !seen("open:r") && catchupNotes.empty() &&
+        disk.at(errors + ".1") == rows(0, 12) + "new\r\n" && !disk.count(errors), "errors.log rotates by rename without catch-up");
+  kCatchupServesLogs = true;
+
+  // UP-03: the writer scales the cap its caller passes to the partition.
+  batchReset();
+  partitionKnown = true; hostPartition.size = 1856u * 1024u; cappedLogsInit();
+  check(cappedLogScaledCap(696969) == 113927 && cappedLogScaledCap(500 * 1024) == 84607 &&
+        cappedLogScaledCap(256 * 1024) == 45000 && cappedLogScaledCap(64 * 1024) == 13835 &&
+        cappedLogScaledCap(100) == 100,
+        "caps on the 1856 KiB layout; a cap below the floor is left alone");
+  disk[kLogin] = std::string(56960, 'l');
+  check(put(kLogin, "abcd", 696969) && countEvent("rename") == 1 && disk.count(std::string(kLogin) + ".1") && !disk.count(kLogin),
+        "a login log rotates at half its scaled cap (56963 bytes), not half of 696969");
+  hostPartition.size = 9068u * 1024u; cappedLogsInit();
+  batchReset(); disk[kLogin] = std::string(56960, 'l');
+  check(cappedLogScaledCap(696969) == 572323 && put(kLogin, "abcd", 696969) && !seen("rename"), "the P4X-EYE layout keeps it");
+  partitionKnown = false; cappedLogsInit();
+  check(cappedLogScaledCap(696969) == 696969, "back to unscaled");
+  batchReset();
+  check(mutexDepth == 0 && lockDepth == 0 && liveFiles == 0, "batching cases release everything");
+}
+#endif
+
 int main() {
+#if HAVE_BATCHING
+  // The main loop is running (its tick called this): the device is past boot.
+  // The boot-phase cases in batchingCases() switch it off for themselves.
+  cappedLogsNoteLoopRunning();
+#endif
   // Must precede successful rotation: the production allocation persists for the boot.
   reset(); disk[destination()] = rows(0, 20); failAlloc = true;
   if (BASELINE) check(!append(), "PSRAM allocation failure reported");
@@ -512,6 +897,9 @@ int main() {
   if (!BASELINE) { mirrorRecovery(); lowSpaceHoldsCap(false); lowSpaceHoldsCap(true); reserveAndSdLatch(); }
 #if HAVE_TIMESTAMPED_LINE
   if (!BASELINE) timestampedLines();
+#endif
+#if HAVE_BATCHING
+  if (!BASELINE) batchingCases();
 #endif
   check(allocCalls == 2, "one failed allocation then one reusable PSRAM allocation across all logs");
   reset(); recovering = true; cleanupLogOrphan(nullptr); recovering = false; check(events.empty(), "null recovery path is a no-op");

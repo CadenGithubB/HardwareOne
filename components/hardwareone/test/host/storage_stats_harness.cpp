@@ -9,6 +9,10 @@
 #include <vector>
 #include "System_VFSCapacityCache.h"
 
+// FILE-3: the bulk-write admission state sits in the log writer's free-space
+// cache region (System_VFS.cpp) and is placed in external BSS on the device.
+#define EXT_RAM_BSS_ATTR
+
 static void check(bool value, const std::string& why) {
   if (!value) throw std::runtime_error(why);
 }

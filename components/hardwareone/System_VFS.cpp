@@ -11,6 +11,11 @@
 #include "System_Utils.h"  // argWantsJson
 #include "System_Mutex.h"
 #include "System_Notifications.h"
+#include "System_SdWatchCore.h"   // UP-06: when a card is mounted on its own
+#include "System_Microphone.h"    // micRecordingBusy: no mount under a recording
+#if ENABLE_LOCAL_STT
+#include "System_STT.h"           // sttAnySessionActive: no mount under a transcription
+#endif
 
 #include <LittleFS.h>
 #include "System_CommandRegistry.h"
@@ -884,6 +889,16 @@ static uint32_t       gLogOverflowSdBackoffMs  = LOG_OVERFLOW_SD_REPROBE_MS;
 static unsigned long  gLogFreeCheckLastMs  = 0;
 static size_t         gLogFreeCheckCached  = SIZE_MAX;
 
+// FILE-3: bulk-write admission state (external BSS: no internal RAM).
+struct BulkWriteState {
+  size_t   lastKnownFreePlusOne;  // the reading before the last invalidation, +1 (0: none)
+  size_t   takenBytes;            // what admitted writers took since the free figure was last read
+  uint32_t refusals;              // this boot
+  uint32_t lastWarnMs;            // millis() of the last refusal line
+  volatile bool resampleQueued;   // a fresh reading was asked of cmd_exec and has not run yet
+};
+EXT_RAM_BSS_ATTR static BulkWriteState gBulkWrite;
+
 // Rough bytes-written-since-refresh counter. Incremented by
 // `noteLittleFsBytesWritten` after any successful LittleFS-targeted write,
 // checked by `refreshLittleFsFreeCached` to force a refresh when cumulative
@@ -933,6 +948,7 @@ static size_t refreshLittleFsFreeCached() {
     gLogFreeCheckCached = (total > used) ? (total - used) : 0;
     gLogFreeCheckLastMs = now;
     gLogFreeBytesWrittenSinceRefresh = 0;
+    gBulkWrite.takenBytes = 0;  // FILE-3: a new reading already shows what the bulk writers wrote
     // This walk is the whole cost of a capacity reading, so a usable one (the
     // same rule as sampleCapacityFreshLocked) also becomes the INTERNAL
     // presentation snapshot: status polls show it instead of walking again.
@@ -961,6 +977,10 @@ void noteLittleFsBytesWritten(size_t bytes) {
 // operation can call this to force the next free-space query to hit the
 // filesystem. Cheap (single volatile-ish write).
 void invalidateLittleFsFreeCache() {
+  // FILE-3: keep what was known for the callers that may not walk the volume
+  // (peekLittleFsFree). Every remove and rename lands here, and until the next
+  // log write samples again the peek would otherwise know nothing.
+  if (gLogFreeCheckCached != SIZE_MAX) gBulkWrite.lastKnownFreePlusOne = gLogFreeCheckCached + 1;
   gLogFreeCheckCached = SIZE_MAX;
   gLogFreeBytesWrittenSinceRefresh = 0;
 }
@@ -972,6 +992,111 @@ bool isLogOverflowActive() { return gLogOverflowActive; }
 size_t logReserveBytes() { return LOG_OVERFLOW_DEFAULT_RESERVE; }
 void noteLogReserveDrop() { ++gLogReserveDrops; }
 uint32_t logReserveDrops() { return gLogReserveDrops; }
+
+// FILE-3: the stored free figure, never a volume walk and no lock: for callers
+// that must not wait on flash (espnow_task, a recording about to start). The
+// reading the overflow check holds, or, right after an invalidation, the one
+// it held before (a remove only frees space, so that one errs towards
+// refusing). SIZE_MAX when nothing was ever sampled.
+size_t peekLittleFsFree() {
+  const size_t cached = gLogFreeCheckCached;
+  if (cached != SIZE_MAX) return cached;
+  const size_t known = gBulkWrite.lastKnownFreePlusOne;
+  return known != 0 ? known - 1 : SIZE_MAX;
+}
+
+// What an admitted writer will put on LittleFS, or gives back. The stored
+// figure is read again only by a log write (every 2 to 15 s with lines
+// flowing, not at all on a silent device), so without this count every
+// admission until then would be decided on the same figure: three 100 KB
+// files accepted against one 300 KB reading. The count is dropped whenever
+// the figure is read from the volume again (refreshLittleFsFreeCached).
+// Plain adds from several tasks: a lost update means one writer is not
+// counted until the next reading (as before this count existed) or stays
+// counted until then (a refusal on such a figure asks for a fresh reading).
+void noteBulkWriteTaken(size_t bytes) {
+  const size_t taken = gBulkWrite.takenBytes;
+  gBulkWrite.takenBytes = bytes > SIZE_MAX - taken ? SIZE_MAX : taken + bytes;
+}
+
+void noteBulkWriteReturned(size_t bytes) {
+  const size_t taken = gBulkWrite.takenBytes;
+  gBulkWrite.takenBytes = taken > bytes ? taken - bytes : 0;
+}
+
+// The room above the reserve by the stored figure, less what admitted writers
+// took since it was read. False when nothing was ever sampled.
+static bool bulkRoomStored(size_t& room) {
+  const size_t stored = peekLittleFsFree();
+  if (stored == SIZE_MAX) return false;
+  const size_t taken = gBulkWrite.takenBytes;
+  const size_t freeBytes = stored > taken ? stored - taken : 0;
+  room = freeBytes > LOG_OVERFLOW_DEFAULT_RESERVE ? freeBytes - LOG_OVERFLOW_DEFAULT_RESERVE : 0;
+  return true;
+}
+
+// The stored figure is not a reading of the volume as it is now: something
+// was removed or renamed since (the reading is from before that and may be
+// too low), or admitted writers took from it (their share is an upper bound).
+static bool bulkFigureIsEstimate() {
+  return gLogFreeCheckCached == SIZE_MAX || gBulkWrite.takenBytes != 0;
+}
+
+// Reads the figure from the volume now (a walk under the filesystem lock).
+static void bulkFigureResample() {
+  invalidateLittleFsFreeCache();
+  (void)refreshLittleFsFreeCached();
+}
+
+// cmd_exec: the fresh reading a refusal on espnow_task asked for.
+static void bulkFigureResampleJob(void*) {
+  bulkFigureResample();
+  gBulkWrite.resampleQueued = false;
+}
+
+// FILE-3: one admission rule for writers of large files. The 100 KB reserve
+// is kept for settings, users and automations; a bulk writer may use only
+// what LittleFS has free above it. A card is not LittleFS: it passes.
+//
+// No "no", and no smaller room than there is, on a guess where that can be
+// helped. A caller that may wait (Refresh, RefreshIfShort) has the figure read
+// from the volume when the stored one is an estimate and shows less room than
+// the caller wants. A caller that may not wait (Peek, on espnow_task) is
+// refused, and the fresh reading is asked of cmd_exec, so the sender's next
+// try is decided on the volume as it is.
+bool admitBulkWrite(StorageType tier, size_t bytes, const char* why, BulkFigure figure, size_t* roomBytes,
+                    size_t wantBytes) {
+  if (roomBytes) *roomBytes = SIZE_MAX;
+  if (tier == SDCARD) return true;
+  if (figure == BulkFigure::Refresh) (void)refreshLittleFsFreeCached();
+  size_t room = 0;
+  // Never sampled (the first seconds of a boot): no evidence to refuse on.
+  if (!bulkRoomStored(room)) return true;
+  const size_t want = wantBytes > bytes ? wantBytes : bytes;
+  if (room < want && figure != BulkFigure::Peek && bulkFigureIsEstimate()) {
+    bulkFigureResample();
+    (void)bulkRoomStored(room);
+  }
+  if (roomBytes) *roomBytes = room;
+  if (bytes <= room) return true;
+  ++gBulkWrite.refusals;
+  if (figure == BulkFigure::Peek && bulkFigureIsEstimate() && !gBulkWrite.resampleQueued) {
+    gBulkWrite.resampleQueued = true;
+    if (!submitDeferredToCmdExec(bulkFigureResampleJob, nullptr)) gBulkWrite.resampleQueued = false;
+  }
+  // One line per 10 s at most: a sender that retries must not flood the log
+  // (each line would itself be a write to the volume that is short of space).
+  const uint32_t now = millis();
+  if (gBulkWrite.refusals == 1 || (uint32_t)(now - gBulkWrite.lastWarnMs) >= 10000u) {
+    gBulkWrite.lastWarnMs = now;
+    WARN_STORAGEF("[FS] %s refused: needs %u bytes, LittleFS has %u free above the %u byte reserve",
+                  why ? why : "bulk write", (unsigned)bytes, (unsigned)room,
+                  (unsigned)LOG_OVERFLOW_DEFAULT_RESERVE);
+  }
+  return false;
+}
+
+uint32_t bulkWriteRefusals() { return gBulkWrite.refusals; }
 
 // G-39: overflow needs a card that takes writes, not just one that was
 // mounted. isSdAvailable() alone kept routing to a yanked SPI or detect-less
@@ -1085,12 +1210,76 @@ bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
   return resolveLogPath(primaryPath, reserveBytes, outPath, outPathLen) == LogTier::Overflow;
 }
 
+// ============================================================================
+// SD card watch (UP-06): the state and the notes the lifecycle calls leave
+// ============================================================================
+// Boards with a card-detect switch only (the P4X-EYE, GPIO45). The Waveshare
+// P4 slot has no switch and the SPI boards have none: nothing below is
+// compiled for them and their card is mounted at boot and by `sdmount`, as
+// before. A bare "SD_MMC_DETECT_PIN >= 0" would be true wherever the macro is
+// not defined at all, hence the full condition.
+#if ENABLE_SD_CARD && ENABLE_SDMMC_CARD && defined(SD_MMC_DETECT_PIN) && (SD_MMC_DETECT_PIN >= 0)
+#define HW1_SD_CARD_WATCH 1
+#else
+#define HW1_SD_CARD_WATCH 0
+#endif
+
+#if HW1_SD_CARD_WATCH
+// The policy's state (System_SdWatchCore.h). The main loop samples it, cmd_exec
+// writes the result of a mount and the user's sdmount/sdunmount; every change
+// is made under this spinlock (flags only, no I/O inside).
+EXT_RAM_BSS_ATTR static sdwatch::State gSdWatch;
+static portMUX_TYPE gSdWatchMux = portMUX_INITIALIZER_UNLOCKED;
+#endif
+
+// Handles that stay open across calls on the card and have no SD-in-use
+// registration must be closed while the mount they belong to still exists:
+// once the mount is gone the handle's descriptor number can be given to a
+// file opened later, and closing the stale handle then would close that file.
+// Today that is the system log when `log start` put it on the card; it reopens
+// itself on its next line. A microphone recording keeps its WAV open on the
+// card too, but the card watch's mount job does not run while one is busy
+// (micRecordingBusy covers the open through the close). Caller holds the
+// filesystem lock.
+[[maybe_unused]] static void sdReleaseHandlesBeforeUnmount() {
+  systemLogReleaseSdHandle();
+}
+
+// `sdunmount` is releasing a mount: the watch is held until `sdmount`,
+// `sdformat`, a restart, or the card leaves the slot. True when this mount's
+// removal was already reported (the card was pulled before the command), so
+// the unmount is not reported a second time.
+[[maybe_unused]] static bool sdWatchNoteExplicitUnmount() {
+#if HW1_SD_CARD_WATCH
+  portENTER_CRITICAL(&gSdWatchMux);
+  const bool alreadyReported = sdwatch::userUnmounted(gSdWatch, millis());
+  portEXIT_CRITICAL(&gSdWatchMux);
+  return alreadyReported;
+#else
+  return false;
+#endif
+}
+
+// `sdmount` or `sdformat` ran: the hold ends; a failed mount is tried again by
+// the watch after 5 s.
+[[maybe_unused]] static void sdWatchNoteUserMount(bool ok) {
+#if HW1_SD_CARD_WATCH
+  portENTER_CRITICAL(&gSdWatchMux);
+  sdwatch::userMounted(gSdWatch, ok, millis());
+  portEXIT_CRITICAL(&gSdWatchMux);
+#else
+  (void)ok;
+#endif
+}
+
 bool unmountSd() {
   FsLockGuard guard("VFS.sdUnmount");
   if (sdLifecycleRefusedLocked("Unmount")) return false;
   invalidateStatsSnapshot(SDCARD);
 #if ENABLE_SD_CARD
   if (gSdMounted) {
+    sdReleaseHandlesBeforeUnmount();
+    const bool removalReported = sdWatchNoteExplicitUnmount();
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
     const bool ended = SD.end();
     gSdMounted = false;
@@ -1101,7 +1290,8 @@ bool unmountSd() {
 #endif
     gSdMounted = false;
     gSdWritable = false;
-    systemEventPost(SYSEVT_SD_UNMOUNTED);
+    // A card pulled before the command was reported when it left (UP-06).
+    if (!removalReported) systemEventPost(SYSEVT_SD_UNMOUNTED);
     return true;
   }
 #endif
@@ -1113,12 +1303,14 @@ bool remountSd() {
   if (sdLifecycleRefusedLocked("Remount")) return false;
   invalidateStatsSnapshot(SDCARD);
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
+  sdReleaseHandlesBeforeUnmount();
   const bool ended = SD.end();
   gSdMounted = false;
   gSdWritable = false;
   if (!ended) return false;
   return tryMountSd();
 #elif ENABLE_SD_CARD && defined(SD_CS_PIN)
+  sdReleaseHandlesBeforeUnmount();
   // Full teardown regardless of current mount state — guarantees a clean bus.
   spiTeardown();
   gSdMounted = false;
@@ -1137,6 +1329,7 @@ bool formatSd() {
   invalidateStatsSnapshot(SDCARD);
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
   // Authorization and exact confirmation are enforced by cmd_sdformat.
+  sdReleaseHandlesBeforeUnmount();
   gSdMounted = false;
   gSdWritable = false;
   if (!SD.format()) return false;
@@ -1244,6 +1437,78 @@ bool formatSd() {
 }
 
 // ============================================================================
+// SD card watch (UP-06): the loop tick and the mount it asks for
+// ============================================================================
+#if HW1_SD_CARD_WATCH
+// cmd_exec, where `sdmount` runs: the mount holds the filesystem lock through
+// the card's initialisation, the write probe and the FAT free count, which can
+// take seconds on a large card and must not run on the main loop.
+static void sdWatchMountJob(void*) {
+  portENTER_CRITICAL(&gSdWatchMux);
+  const bool wanted = sdwatch::mountStillWanted(gSdWatch);
+  portEXIT_CRITICAL(&gSdWatchMux);
+  if (!wanted) return;  // `sdunmount` or `sdmount` got here first
+  // Nothing may hold a file on the mount this replaces: a registered owner
+  // (video, a web upload), a microphone recording, a transcription reading its
+  // model from the card. And no mount once a restart is announced: the restart
+  // waits for the filesystem lock for a bounded time only.
+  bool busy = sdInUseOwner() != nullptr || micRecordingBusy() || cappedLogsRestartAnnounced();
+#if ENABLE_LOCAL_STT
+  busy = busy || sttAnySessionActive();
+#endif
+  if (busy) {
+    portENTER_CRITICAL(&gSdWatchMux);
+    sdwatch::mountSkipped(gSdWatch, millis());
+    portEXIT_CRITICAL(&gSdWatchMux);
+    return;
+  }
+  const bool ok = remountSd();
+  portENTER_CRITICAL(&gSdWatchMux);
+  sdwatch::mountResult(gSdWatch, ok, millis());
+  const bool gaveUp = gSdWatch.gaveUp;
+  portEXIT_CRITICAL(&gSdWatchMux);
+  if (gaveUp) {
+    logSystemEvent("SD", "card in the slot could not be mounted after %u attempts; take it out and put it back, or run sdmount",
+                   (unsigned)sdwatch::kBackoffSteps + 1u);
+  }
+}
+#endif
+
+// Main loop, every pass. One read of the detect switch; every 500 ms a few
+// flag tests. No filesystem lock is taken here and nothing is mounted here.
+// On every board it also tells the capped-log writer that the loop is running
+// (boot is over): one flag test.
+void sdWatchTick() {
+  cappedLogsNoteLoopRunning();
+#if HW1_SD_CARD_WATCH
+  const bool present = SD.cardPresent();
+  const uint32_t now = millis();
+  // Loop-only fields: a bounce between samples is remembered, and since when
+  // the switch has read open without a break (a removal needs 100 ms of that).
+  sdwatch::look(gSdWatch, present, now);
+  if (!sdwatch::sampleDue(gSdWatch, now)) return;
+  const sdwatch::Input in{now, present, gSdMounted, SD.removalLatched()};
+  portENTER_CRITICAL(&gSdWatchMux);
+  const sdwatch::Output out = sdwatch::sample(gSdWatch, in);
+  portEXIT_CRITICAL(&gSdWatchMux);
+  if (out.noteRemoved) {
+    // The card left a mount (the switch open for 100 ms, or a card access
+    // that found it open). Latch the driver (so nothing keeps using the
+    // mount of a card that may come back) and say so once; `sdunmount` used to
+    // be the only thing that posted this event.
+    SD.noteRemoved();
+    invalidateStatsSnapshot(SDCARD);
+    systemEventPost(SYSEVT_SD_UNMOUNTED);
+  }
+  if (out.requestMount && !submitDeferredToCmdExec(sdWatchMountJob, nullptr)) {
+    portENTER_CRITICAL(&gSdWatchMux);
+    sdwatch::mountSkipped(gSdWatch, now);  // the command queue is full: look again in 2 s
+    portEXIT_CRITICAL(&gSdWatchMux);
+  }
+#endif
+}
+
+// ============================================================================
 // Guarded VFS — single enforcement point
 // ============================================================================
 // Pipeline:
@@ -1289,6 +1554,18 @@ static bool writePermitted(const String& norm, const AuthContext& ctx) {
   return false;
 }
 
+// S-8: the newest lines of a capped log may still be in its batch buffer
+// (System_Filesystem.cpp). Before a user's read of anything under the system
+// log folders they are written out, so a viewer shows the log as of now. The
+// system identities are left out on purpose: the capped-log writer's own
+// rotation opens its log for reading, and the catch-up ledger must not have a
+// rotation happen inside its walk (it reads the trim notes first).
+static void flushCappedLogsForReader(const String& norm, const AuthContext& ctx) {
+  if (!cappedLogsPending() || isSystemIdentity(ctx)) return;
+  if (!norm.startsWith("/system/sys_logs") && !norm.startsWith("/sd/system/sys_logs")) return;
+  cappedLogsFlush(false);
+}
+
 File openGuarded(const String& path, const char* mode, const AuthContext& ctx, bool create) {
   String norm;
   if (!guardedNormalize(path, norm, "open", ctx)) return File();
@@ -1304,6 +1581,7 @@ File openGuarded(const String& path, const char* mode, const AuthContext& ctx, b
     return File();
   }
   if (needsWrite && !writePermitted(norm, ctx)) return File();
+  if (needsRead) flushCappedLogsForReader(norm, ctx);
   return open(norm, mode, create);
 }
 
@@ -1627,7 +1905,9 @@ static const char* cmd_sdmount(const String& argsInput) {
     return buf;
   }
   
-  if (VFS::remountSd()) {
+  const bool mountedNow = VFS::remountSd();
+  VFS::sdWatchNoteUserMount(mountedNow);  // UP-06: ends an sdunmount hold; the watch retries a failure
+  if (mountedNow) {
     uint64_t total, used, free;
     if (VFS::getStats(VFS::SDCARD, total, used, free)) {
       snprintf(buf, sizeof(buf), "SD card mounted successfully at /sd\nSize: %llu MB, Used: %llu MB, Free: %llu MB",
@@ -1694,6 +1974,7 @@ static const char* cmd_sdformat(const String& argsInput) {
   INFO_STORAGEF("%s", buf);
   
   if (VFS::formatSd()) {
+    VFS::sdWatchNoteUserMount(true);  // UP-06: the card is mounted again
     snprintf(buf, sizeof(buf), "SD card formatted successfully as FAT32 and mounted at /sd");
     logSystemEvent("SD", "SD card formatted by '%s' — ALL card data erased", currentExecUser().c_str());
     systemEventPost(SYSEVT_STORAGE_FORMATTED, "sd", "FAT32 — all card data erased");
@@ -1833,19 +2114,56 @@ static const char* cmd_sddiag(const String& argsInput) {
   
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD
   FsLockGuard guard("VFS.sdDiag");
+  // UP-06: with a detect switch a card put in is mounted on its own; say what
+  // the watch is doing. Without one the old advice stands.
+  char watch[160];
+#if HW1_SD_CARD_WATCH
+  {
+    portENTER_CRITICAL(&VFS::gSdWatchMux);
+    const sdwatch::State st = VFS::gSdWatch;
+    portEXIT_CRITICAL(&VFS::gSdWatchMux);
+    const uint32_t now = millis();
+    const int32_t waitMs = static_cast<int32_t>(st.retryAtMs - now);
+    switch (sdwatch::phase(st)) {
+      case sdwatch::Phase::Held:
+        snprintf(watch, sizeof(watch), "Auto-mount: held by sdunmount (until sdmount, or the card is taken out and put back)");
+        break;
+      case sdwatch::Phase::Mounting:
+        snprintf(watch, sizeof(watch), "Auto-mount: mounting now");
+        break;
+      case sdwatch::Phase::GaveUp:
+        snprintf(watch, sizeof(watch), "Auto-mount: gave up after %u failed mounts (take the card out and put it back, or run sdmount)",
+                 (unsigned)st.failures);
+        break;
+      case sdwatch::Phase::Waiting:
+        snprintf(watch, sizeof(watch), "Auto-mount: next try in %ld s (%u failed)",
+                 (long)(waitMs > 0 ? (waitMs + 999) / 1000 : 0), (unsigned)st.failures);
+        break;
+      default:
+        snprintf(watch, sizeof(watch), "Auto-mount: on (a card is mounted 1 to 2 s after it is put in)");
+        break;
+    }
+  }
+  static const char* const kAdvice = "Run sdunmount before taking the card out. A card put in is mounted on its own.";
+#else
+  snprintf(watch, sizeof(watch), "Auto-mount: off (this slot has no detect switch)");
+  static const char* const kAdvice = "Use sdunmount before removal and sdmount after insertion.";
+#endif
   snprintf(buf, buf_SIZE,
       "SDMMC slot %d, 4-bit, max %d kHz\n"
       "CLK=%d CMD=%d D0=%d D1=%d D2=%d D3=%d\n"
       "Power GPIO%d (active %d), LDO%d, detect GPIO%d\n"
       "Card: %s; mount: %s; last error: %s\n"
-      "Use sdunmount before removal and sdmount after insertion.",
+      "%s\n"
+      "%s",
       SD_MMC_SLOT, SD_MMC_MAX_FREQ_KHZ,
       SD_MMC_CLK_PIN, SD_MMC_CMD_PIN, SD_MMC_D0_PIN, SD_MMC_D1_PIN,
       SD_MMC_D2_PIN, SD_MMC_D3_PIN, SD_MMC_POWER_PIN,
       SD_MMC_POWER_ACTIVE_LEVEL, SD_MMC_LDO_CHANNEL, SD_MMC_DETECT_PIN,
       SD_MMC_DETECT_PIN < 0 ? "no detect switch (presence determined at mount)" :
           (SD.cardPresent() ? "inserted" : "absent"),
-      VFS::isSdAvailable() ? "mounted" : "not mounted", SD.lastError());
+      VFS::isSdAvailable() ? "mounted" : "not mounted", SD.lastError(),
+      watch, kAdvice);
   return buf;
 #elif !ENABLE_SD_CARD
   snprintf(buf, buf_SIZE, "Error: SD card not supported on this board");

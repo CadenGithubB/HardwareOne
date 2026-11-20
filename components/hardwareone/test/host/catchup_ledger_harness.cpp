@@ -241,6 +241,58 @@ static void trimAndRestart() {
   checkCallsScoped();
 }
 
+// S-8 (2026-11-20): the capped-log writer batches lines and rotates most logs
+// by rename ("<log>.1"). The three logs the ledger follows keep the copy
+// rotation in a build that serves catch-up, because the rules above cannot
+// follow such a rename; this case holds both halves of that.
+static void rotatedFollowedLog() {
+  reset();
+  auto& fs = fake_vfs::fs();
+  const char* errors = "/system/sys_logs/errors.log";
+  std::string text;
+  for (int i = 0; i < 60; ++i) text += "error " + std::to_string(i) + " yyyyyyyyyyyyyyyyyyyyyy\r\n";
+  fs.put(errors, text);
+  CHECK(catchupLedgerEnsure(gNow, false));
+  const uint32_t id = idOf(errors);
+  CHECK(id && byPath(errors)->base == 0);
+  // A flushed batch: several lines arrive in one append and the copy rotation
+  // that append triggers drops the head. One trim note, as for a single line:
+  // the id stays, the base moves, and every byte the collector has not
+  // fetched (from the new base on) is still in the file.
+  const std::string batch = "batched 1\r\nbatched 2\r\nbatched 3\r\n";
+  const size_t tailStart = 480;
+  fs.put(errors, (text + batch).substr(tailStart));
+  catchupNoteTrim(errors, tailStart);
+  gNow += 10;
+  CHECK(catchupLedgerEnsure(gNow, false));
+  CHECK(idOf(errors) == id && byPath(errors)->base == tailStart);
+  CHECK(ec::logicalEnd(*byPath(errors)) == text.size() + batch.size());
+  // Batches between two reconciles without a rotation: the file only grew.
+  fs.put(errors, fs.text(errors) + batch + batch);
+  CHECK(fullList());
+  CHECK(idOf(errors) == id && byPath(errors)->base == tailStart);
+  CHECK(ec::logicalEnd(*byPath(errors)) == text.size() + 3 * batch.size());
+  // What a rename rotation would do to a followed log: the path holds a new
+  // file (a new id, base 0) and the renamed generation is not on the
+  // whitelist, so the rows the collector had not fetched are out of its
+  // reach. This is why these three logs are not two-generation logs here.
+  const uint32_t end = ec::logicalEnd(*byPath(errors));
+  move(errors, "/system/sys_logs/errors.log.1");
+  fs.put(errors, "first line of the new file\r\n");
+  CHECK(fullList());
+  CHECK(idOf(errors) != id && idOf(errors) != 0 && byPath(errors)->base == 0);
+  CHECK(byPath("/system/sys_logs/errors.log.1") == nullptr);
+  CHECK(ec::findById(sLedger, id) == nullptr);  // as after a restart: the old id is gone
+  CHECK(end > tailStart);
+  // The older generation of a two-generation log is never offered either.
+  fs.put("/system/sys_logs/system-events.log.1", "older generation\r\n");
+  fs.put("/system/sys_logs/command-audit.log.1", "older generation\r\n");
+  CHECK(fullList());
+  CHECK(byPath("/system/sys_logs/system-events.log.1") == nullptr);
+  CHECK(byPath("/system/sys_logs/command-audit.log.1") == nullptr);
+  checkCallsScoped();
+}
+
 static void cardOutAndBack() {
   reset();
   auto& fs = fake_vfs::fs();
@@ -510,6 +562,7 @@ int main(int argc, char** argv) {
     {"system_log_rotation", systemLogRotationKeepsIds},
     {"sensor_renames", sensorRenamesKeepIds},
     {"trim_and_restart", trimAndRestart},
+    {"rotated_followed_log", rotatedFollowedLog},
     {"card_out_and_back", cardOutAndBack},
     {"walk_budget_and_locking", walkBudgetAndLocking},
     {"whitelist_and_sealing", whitelistAndSealing},

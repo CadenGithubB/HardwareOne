@@ -186,6 +186,9 @@ File openGuarded(const String& path, const char* mode, const AuthContext& ctx, b
 // INSERT_PRODUCTION
 
 namespace VFS {
+// S-8: openGuarded flushes the capped logs' batch buffers before a user's read
+// under the system log folders (System_VFS.cpp). Not under test here.
+static void flushCappedLogsForReader(const String&, const AuthContext&) {}
 // INSERT_VFS
 }  // namespace VFS
 

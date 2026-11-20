@@ -91,11 +91,30 @@ bool isSdWritable();
 void noteSdWriteFailure(const char* hint);
 
 // SD card management. Stop active writers and close their files before
-// unmount/format; card insertion is mounted explicitly with remountSd().
-// All three refuse (return false) while an SD-in-use registration is held.
+// unmount/format. All three refuse (return false) while an SD-in-use
+// registration is held. A card is mounted at boot and by remountSd()
+// (`sdmount`); on a board with a card-detect switch (the P4X-EYE) the card
+// watch below also mounts a card that is put in after boot, or pulled and put
+// back, once it has been in for a second (UP-06).
 bool remountSd();
 bool unmountSd();
 bool formatSd();
+
+// UP-06: the card watch. Call on every pass of the main loop. On a board
+// without a card-detect switch the watch does nothing. It reads the switch (no
+// filesystem lock) and, every 500 ms, decides by System_SdWatchCore.h: a card
+// that left a mount (the switch open for 100 ms, or a card access that found
+// it open) is reported once (SD-unmounted event); a card that has
+// been in for 1 s with no usable mount gets one mount (1 to 2 s after it was
+// put in), run on cmd_exec, with
+// retries 5 s, 30 s and 5 min after a failure. `sdunmount` holds it until
+// `sdmount`, `sdformat`, a restart, or the slot is empty. A contact that
+// opens for a moment does none of that. No mount is
+// started while the card is in use (a registered owner, a recording, a
+// transcription).
+// On every board the first call also marks the end of boot for the capped-log
+// writer (cappedLogsNoteLoopRunning).
+void sdWatchTick();
 
 // SD-in-use registration. An owner that keeps an SD file open across calls
 // (the video recorder) registers before it opens the file and ends the
@@ -556,6 +575,58 @@ bool isLogOverflowActive();
  *  after 32 KB of writes reported through noteLittleFsBytesWritten: log
  *  lines, image saves, QuickNotes, transcripts). */
 size_t getCachedLittleFsFree();
+
+/** FILE-3. The stored LittleFS free figure without refreshing it: no volume
+ *  walk and no lock, so it is safe on espnow_task. It can be as old as the
+ *  last log write (2 s with lines flowing, longer on a silent device), and
+ *  right after a remove or rename it is the reading from before that. SIZE_MAX
+ *  when nothing was sampled yet. getCachedLittleFsFree() above is unchanged:
+ *  it may walk the volume under the filesystem lock. */
+size_t peekLittleFsFree();
+
+/** Which free figure an admission uses. The stored figure is an estimate
+ *  when something was removed or renamed since it was read (it is then the
+ *  reading from before, possibly too low) or when admitted writers took from
+ *  it (noteBulkWriteTaken).
+ *  Peek: the stored figure, never a walk and no lock (espnow_task). A refusal
+ *    decided on an estimate asks cmd_exec for a fresh reading, so the next
+ *    try is decided on the volume as it is.
+ *  Refresh: the overflow check's reading, walked again when it is old (takes
+ *    the filesystem lock, about 1.3 s on the P4X-EYE: never on espnow_task or
+ *    just before a capture has to start).
+ *  RefreshIfShort: the stored figure, and the volume is read only when that
+ *    figure is an estimate and shows less room than the caller wants: for a
+ *    caller that must start at once when there is room and may wait when
+ *    there seems to be too little (a recording). */
+enum class BulkFigure : uint8_t { Peek, Refresh, RefreshIfShort };
+
+/** FILE-3: may a writer put `bytes` on `tier`? One rule for the writers of
+ *  large files (a microphone recording, a received ESP-NOW file): on LittleFS
+ *  the log reserve (logReserveBytes, 100 KB) stays free for settings, users and
+ *  automations, so the answer is free >= reserve + bytes, where free is the
+ *  figure less what earlier admissions took since it was read
+ *  (noteBulkWriteTaken). A card always passes. An unknown free figure passes.
+ *  `roomBytes`, when given, receives what LittleFS has free above the reserve
+ *  (SIZE_MAX for a card or an unknown figure), so a writer that can stop early
+ *  may take less than it asked for. `wantBytes` (at least `bytes`) is what
+ *  such a writer would use if it were there: with Refresh or RefreshIfShort an
+ *  estimate that shows less room than that is replaced by a fresh reading
+ *  before `roomBytes` is filled in.
+ *  A refusal is counted (bulkWriteRefusals) and logged with `why`, at most one
+ *  line per 10 s. It changes nothing for the writers with their own reserve
+ *  checks (transcripts, QuickNotes, photos, uploads). */
+bool admitBulkWrite(StorageType tier, size_t bytes, const char* why,
+                    BulkFigure figure = BulkFigure::Peek, size_t* roomBytes = nullptr,
+                    size_t wantBytes = 0);
+/** A bulk writer says what it has put on LittleFS (a received file, each
+ *  write of a streamed one) or is about to (a recording: the room it was
+ *  limited to), so the next admission decided on the same stored figure sees
+ *  it; and gives back what it did not use after all. No lock, no I/O. Not for
+ *  a card. The count is dropped whenever the figure is read from the volume
+ *  again. */
+void noteBulkWriteTaken(size_t bytes);
+void noteBulkWriteReturned(size_t bytes);
+uint32_t bulkWriteRefusals();
 
 /** Invalidate the cached free-space reading immediately. Call after unusual
  *  events that change free space by a lot — VFS::remove and VFS::rename do
