@@ -95,17 +95,23 @@ for retired_local_cache in (
 ):
     assert retired_local_cache not in g2_cpp
 
-# Periodic system JSON is the other presentation consumer. Its zero-initialized
-# local snapshots preserve the historical zero-on-failure JSON fields. The
-# internal figure never asks for a fresh LittleFS walk once a reading exists
-# (about 1.3 s on the P4X-EYE, paid by every 10 s /api/system poll under the
-# former 5 s limit); SD keeps its 5 s limit.
+# Periodic system JSON is another presentation consumer. Without an internal
+# reading it leaves total_kb, used_kb and free_kb out (it sent 0 for each, and
+# the dashboard showed "0 / 0 KB"); the storage object stays. The internal
+# figure never asks for a fresh LittleFS walk once a reading exists (about
+# 1.3 s on the P4X-EYE, paid by every 10 s /api/system poll under the former
+# 5 s limit); SD keeps its 5 s limit.
 system_info = function_body(utils_cpp, "void buildSystemInfoJson(")
 assert "static constexpr uint32_t kSystemInfoSdStatsMaxAgeMs = 5000;" in system_info
 assert system_info.count("VFS::getStatsSnapshot(") == 2
 assert "VFS::getStatsSnapshot(VFS::INTERNAL, stats,\n                                VFS::kSnapshotAnyAgeMs);" in system_info
 assert "VFS::getStatsSnapshot(VFS::SDCARD, stats,\n                              kSystemInfoSdStatsMaxAgeMs)" in system_info
 assert system_info.count("VFS::CapacitySnapshot stats = {};") == 2
+assert "const bool haveInternal =" in system_info
+guarded = system_info[system_info.index("if (haveInternal) {"):]
+guarded = guarded[:guarded.index("}")]
+for key in ("total_kb", "used_kb", "free_kb"):
+    assert system_info.count(f'storage["{key}"]') == 1 and f'storage["{key}"]' in guarded, key
 
 # Explicit command diagnostics remain authoritative even though periodic
 # system-info projection is cached. Mount output is included because it reports
@@ -125,6 +131,24 @@ assert "VFS::getStats(VFS::INTERNAL" in logtier
 assert "VFS::getStats(VFS::SDCARD" in logtier
 assert "getStatsSnapshot" not in logtier
 
+# The web Files page (/api/files/stats, asked on every folder load) is the
+# third presentation consumer: the shared internal reading while it is at most
+# 10 s old (the glasses Files page's limit), the SD card read fresh. The
+# `files stats` command stays authoritative through the fresh entry point. The
+# storage_stats executable runs both entry points.
+assert "static constexpr uint32_t kFilesStatsInternalMaxAgeMs = 10000;" in filesystem_cpp
+assert filesystem_cpp.count("VFS::getStatsSnapshot(") == 1
+files_stats = function_body(filesystem_cpp, "static void filesStatsJson(")
+assert "if (fresh || st == VFS::SDCARD) {\n    ok = VFS::getStats(st, total, used, freeBytes);" in files_stats
+assert "ok = VFS::getStatsSnapshot(st, stats, kFilesStatsInternalMaxAgeMs);" in files_stats
+assert "filesStatsJson(path, out, outSize, /*fresh=*/false);" in function_body(
+    filesystem_cpp, "void buildFilesStatsJson(")
+assert "filesStatsJson(path, out, outSize, /*fresh=*/true);" in function_body(
+    filesystem_cpp, "void buildFilesStatsJsonFresh(")
+files_command = function_body(filesystem_cpp, "const char* cmd_files(")
+assert "buildFilesStatsJsonFresh(path, statsBuf, sizeof(statsBuf));" in files_command
+assert "buildFilesStatsJson(" not in files_command
+
 # Capacity/admission call sites remain on the authoritative legacy API.
 for relative in (
     "WebServer_Server.cpp",
@@ -135,10 +159,10 @@ for relative in (
     assert "VFS::getStats(" in source
     assert "VFS::getStatsSnapshot(" not in source
 
-# Keep the migration set reviewable: no production caller outside the two
+# Keep the migration set reviewable: no production caller outside the three
 # explicitly approved presentation projections may opt into staleness.
 for path in COMPONENT.glob("*.cpp"):
-    if path.name in {"G2_Page_Files.cpp", "System_Utils.cpp"}:
+    if path.name in {"G2_Page_Files.cpp", "System_Filesystem.cpp", "System_Utils.cpp"}:
         continue
     assert "VFS::getStatsSnapshot(" not in path.read_text(encoding="utf-8"), path
 
@@ -173,7 +197,9 @@ assert "if (filesystemReady && infoErr == ESP_OK && total > 0)" in refresh
 # any age); automatic deletes do not, or a rotating capture or a dictation
 # cleanup would make every next status poll walk LittleFS again. The upload,
 # filedelete and imagedelete marks are executed by upload_lifecycle,
-# filedelete_storage_figure and image_storage.
+# filedelete_storage_figure and image_storage; the save hook's mark (web
+# editor save, last filewrite chunk) by storage_stats, which also pins the
+# mkdir and rmdir marks.
 mic_cpp = (COMPONENT / "System_Microphone.cpp").read_text(encoding="utf-8")
 mark = "VFS::invalidateStatsSnapshot(VFS::INTERNAL);"
 recording = function_body(mic_cpp, "bool deleteRecording(const char* filename)")

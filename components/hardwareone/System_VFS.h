@@ -218,12 +218,14 @@ bool getStatsSnapshot(StorageType type, CapacitySnapshot& out,
  *  however old it is, and sample only when it has none (before the first
  *  reading, or after invalidateStatsSnapshot). For periodic status figures
  *  that must not wait on a LittleFS walk. The INTERNAL reading is renewed by
- *  any getStats() and by the log writer's free-space check, which runs with
- *  log lines (every 2, 5 or 15 s by headroom; every 30 s while logs are moved
- *  to SD). While nothing is logged it keeps its last value, so it can lag a
- *  file write for as long as the device stays quiet; a web upload, or a
- *  `filedelete`, `micdelete` or `imagedelete` on LittleFS, marks it stale
- *  (invalidateStatsSnapshot), so the next reader samples once. */
+ *  any getStats(), by the web Files page (when its reading is older than
+ *  10 s) and by the log writer's free-space check, which runs with log lines
+ *  (every 2, 5 or 15 s by headroom; every 30 s while logs are moved to SD).
+ *  While nothing is logged it keeps its last value, so it can lag a file
+ *  write for as long as the device stays quiet; a web upload, a file save,
+ *  `mkdir`, `rmdir`, or a `filedelete`, `micdelete` or `imagedelete` on
+ *  LittleFS, marks it stale (invalidateStatsSnapshot), so the next reader
+ *  samples once. */
 static constexpr uint32_t kSnapshotAnyAgeMs = UINT32_MAX;
 
 /** Cache-only capacity read for periodic telemetry on a loop that must never

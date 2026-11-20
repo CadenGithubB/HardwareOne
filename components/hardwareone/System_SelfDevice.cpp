@@ -9,10 +9,13 @@
 #include <cstring>
 
 #include <esp_mac.h>          // esp_efuse_mac_get_default
+#include <freertos/FreeRTOS.h>  // portMUX_TYPE: the kept station MAC
 #include "System_BuildConfig.h"
 #include "System_Debug.h"     // WARN_SYSTEMF
 #include "System_DeviceName.h" // the device-name rule and the fallback
 #include "System_MacText.h"   // macToDisplay
+#include "System_MemUtil.h"   // hw1InternalMinFreeBytes
+#include "System_MetricsCore.h"  // temperatureBelievable (pure header)
 #include "System_Settings.h"  // gSettings.espnowDeviceName
 #if ENABLE_WIFI
 #include <WiFi.h>             // WiFi.setHostname, WiFi.STA
@@ -50,16 +53,62 @@ uint32_t psramFreeBytes() {
 }
 
 uint32_t minFreeHeapBytes() {
-  return (uint32_t)esp_get_minimum_free_heap_size();
+  // Internal 8-bit RAM, the pool freeHeapBytes() reports. Not
+  // esp_get_minimum_free_heap_size(): that is MALLOC_CAP_DEFAULT, which takes
+  // in PSRAM on a PSRAM board and read megabytes above freeHeapBytes().
+  return (uint32_t)hw1InternalMinFreeBytes();
+}
+
+bool chipTemperatureC(float& out) {
+  // No state here: the main loop, the command executor, the automation
+  // scheduler and the G2 session task all ask.
+  const float c = temperatureRead();
+#ifdef CONFIG_IDF_TARGET_ESP32
+  // The classic ESP32's undocumented sensor reads raw 128 ((128-32)/1.8 =
+  // 53.3 C) when it has nothing: not a temperature.
+  if (c > 53.3f && c < 53.4f) return false;
+#endif
+  // A failed read on the other chips is NAN, which is not believable either.
+  if (!system_metrics_core::temperatureBelievable(c)) return false;
+  out = c;
+  return true;
 }
 
 bool macBytes(uint8_t out[6]) {
   if (!out) return false;
-  esp_err_t err = esp_wifi_get_mac(WIFI_IF_STA, out);
-  if (err != ESP_OK) {
-    // Early boot or WiFi-uninitialized path. Don't leave garbage in out[].
+  // The first good answer is kept for the boot: the driver query is a blocking
+  // round trip to the C6 on a hosted radio (P4X-EYE), and nothing in this
+  // firmware sets the station address at run time. A few bytes of internal
+  // RAM under a short lock, because any task may ask.
+  static portMUX_TYPE sKeptLock = portMUX_INITIALIZER_UNLOCKED;
+  static uint8_t sKept[6] = {0, 0, 0, 0, 0, 0};
+  static bool sKeptValid = false;
+
+  uint8_t mac[6] = {0, 0, 0, 0, 0, 0};
+  portENTER_CRITICAL(&sKeptLock);
+  const bool kept = sKeptValid;
+  if (kept) memcpy(mac, sKept, sizeof(mac));
+  portEXIT_CRITICAL(&sKeptLock);
+  if (kept) {
+    memcpy(out, mac, sizeof(mac));
+    return true;
+  }
+
+  // Asked outside the lock: the query may block.
+  if (esp_wifi_get_mac(WIFI_IF_STA, mac) != ESP_OK) {
+    // Early boot or WiFi-uninitialized path. Don't leave garbage in out[],
+    // and keep nothing: the next call asks again.
     memset(out, 0, 6);
     return false;
+  }
+  memcpy(out, mac, sizeof(mac));
+  static const uint8_t kNoMac[6] = {0, 0, 0, 0, 0, 0};
+  if (memcmp(mac, kNoMac, sizeof(mac)) != 0) {
+    // An all-zero answer is handed on as before but is not an address to keep.
+    portENTER_CRITICAL(&sKeptLock);
+    memcpy(sKept, mac, sizeof(sKept));
+    sKeptValid = true;
+    portEXIT_CRITICAL(&sKeptLock);
   }
   return true;
 }

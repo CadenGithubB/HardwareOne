@@ -18,6 +18,7 @@
 #include "System_BuildConfig.h"
 #include "System_MemUtil.h"
 #include "System_MemoryMonitor.h"
+#include "System_SelfDevice.h"  // chipTemperatureC: the one chip-temperature reader
 #include "System_TaskUtils.h"
 #include "System_VFS.h"
 #include "HAL_Radio.h"
@@ -107,11 +108,12 @@ void readCpu(MetricsState& s, Raw& all, Raw& core0, Raw& core1) {
 
 // Storage: the VFS presentation snapshots, cache only (VFS::peekStatsSnapshot
 // never takes the filesystem lock or samples). A tier with no snapshot (at
-// boot until something reads it, after the G2 Files page or a delete marks it
-// stale, after any SD mount change) reads unavailable until another reader
-// (the log writer's free-space check, /api/system, the Files page) refills
-// it. Every SD mount change drops the SD snapshot, so an SD hit also means a
-// mounted card.
+// boot until something reads it, after the G2 Files page, a web upload, a
+// file save, a folder create or remove, or a delete marks it stale, after any
+// SD mount change) reads unavailable until another reader (the log writer's
+// free-space check, /api/system, the web or G2 Files page) refills it. Every
+// SD mount change drops the SD snapshot, so an SD hit also means a mounted
+// card.
 void readStorage(MetricsState& s, uint32_t nowMs) {
   if (s.storageRead && (uint32_t)(nowMs - s.storageReadMs) < smc::kStorageRefreshMs) return;
   s.storageRead = true;
@@ -129,13 +131,10 @@ void readStorage(MetricsState& s, uint32_t nowMs) {
 }
 
 Raw readTemperature() {
-  const float c = temperatureRead();
-#ifdef CONFIG_IDF_TARGET_ESP32
-  // The classic ESP32's undocumented sensor reads raw 128 ((128-32)/1.8 =
-  // 53.3 C) when it has nothing: not a temperature.
-  if (c > 53.3f && c < 53.4f) return unavailable();
-#endif
-  if (!smc::temperatureBelievable(c)) return unavailable();
+  // The validity rules (the classic ESP32's raw 128, the believable range)
+  // are the reader's: SelfDevice::chipTemperatureC.
+  float c = 0.0f;
+  if (!SelfDevice::chipTemperatureC(c)) return unavailable();
   return Raw{c, 0.0f, 100.0f, true};
 }
 

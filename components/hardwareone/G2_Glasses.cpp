@@ -6745,11 +6745,10 @@ static bool parseAndDispatchDevEvent(G2Temple& t,
 //
 // Example output:
 //   HardwareOne
-//   Up 2h15m · Heap 45K · 42C
-//   WiFi MyNet · 192.168.1.42
-//   MAC ..DDEEFF
-//   ESPNow mesh · 5p · 1234tx/5678rx
-//   G2 batt 79%
+//   Up 2h15m - 42C          ("Up 2h15m" when the chip has no reading)
+//   IP: 192.168.1.42
+//   ESPNow: 3/5 up
+// (four lines; the battery figures are corner widgets)
 static void __attribute__((unused))
 buildG2StatusSnapshot(char* out, size_t cap) {
   if (!out || cap == 0) return;
@@ -6770,7 +6769,10 @@ buildG2StatusSnapshot(char* out, size_t cap) {
   unsigned long seconds = SelfDevice::uptimeSeconds();
   unsigned long hours   = seconds / 3600UL;
   unsigned long minutes = (seconds / 60UL) % 60UL;
-  float tempC = temperatureRead();
+  // The one chip-temperature reader. Without a believable reading (a failed
+  // read, the classic ESP32's fake 53.3 C) the line carries the uptime alone.
+  float tempC = 0.0f;
+  const bool haveTemp = SelfDevice::chipTemperatureC(tempC);
   {
     char line[96];
     // Use " - " as the section separator; the G2 font doesn't carry the
@@ -6780,9 +6782,13 @@ buildG2StatusSnapshot(char* out, size_t cap) {
     // stay byte-stable for many ticks (the cache check in
     // renderStatusCompound skips REBUILD when nothing changed, which
     // is what hides the per-tick repaint flicker).
-    snprintf(line, sizeof(line),
-             "Up %luh%lum - %.0fC\n",
-             hours, minutes, (double)tempC);
+    if (haveTemp) {
+      snprintf(line, sizeof(line),
+               "Up %luh%lum - %.0fC\n",
+               hours, minutes, (double)tempC);
+    } else {
+      snprintf(line, sizeof(line), "Up %luh%lum\n", hours, minutes);
+    }
     s += line;
   }
 
@@ -6853,9 +6859,9 @@ buildG2StatusSnapshot(char* out, size_t cap) {
   //      (observe only; gRingViaGlassesLastSeenMs in handleDevEvent).
   // Status-page body is exactly 4 lines (5th overflows the text box):
   //   1. device name
-  //   2. Up XhYm - NC
+  //   2. Up XhYm - NC (uptime alone when the chip has no temperature reading)
   //   3. IP: ... (or "WiFi off")
-  //   4. ESPNow: Np (or "ESPNow off")
+  //   4. ESPNow: U/P up (or "ESPNow off")
   // R1 battery is the corner widget (buildR1StatusBattery); `ring status`
   // has fuller diagnostics.
 #endif

@@ -867,8 +867,9 @@ inline const char* getFileBrowserScript() {
           // The one onRefresh per load: every folder load (navigation, or the
           // reload after an action) ends here, including empty folders and
           // error replies. On the Files page onRefresh asks /api/files/stats,
-          // a fresh storage reading (about 1.3 s of LittleFS walk on the
-          // P4X-EYE), so actions must not call it a second time.
+          // the storage figure (a LittleFS walk of about 1.3 s on the P4X-EYE
+          // when the shared reading is older than 10 s or marked stale), so
+          // actions must not call it a second time.
           if (config.onRefresh) config.onRefresh(currentPath);
         }
       });

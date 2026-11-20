@@ -2,9 +2,9 @@
 """The web file manager (createFileManager in WebServer_Utils.h) refreshes the
 page's storage figures once per folder load.
 
-On the Files page config.onRefresh asks /api/files/stats, a fresh storage
-reading: on the P4X-EYE a LittleFS walk of about 1.3 s that holds the single
-web server task. Every folder load, including the reload after an action, ends
+On the Files page config.onRefresh asks /api/files/stats, the storage figure:
+on the P4X-EYE a LittleFS walk of about 1.3 s that holds the single web server
+task, when the shared reading is older than 10 s or marked stale. Every folder load, including the reload after an action, ends
 in the explorer's onNavigate, which calls onRefresh. Actions used to call it a
 second time right after loadExplorer(), so every new folder, new file, upload
 and Refresh cost two walks. This guard pins the single call.

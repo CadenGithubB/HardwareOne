@@ -40,11 +40,24 @@ bool buildFilesListing(const String& inPath, String& out, bool asJson, const Aut
 
 /**
  * Build the storage-stats JSON ({total,used,free,usagePercent}) for the storage
- * tier that owns `path` (SD vs internal LittleFS). Shared by the web
- * /api/files/stats handler and the `files stats json` CLI command so both report
- * identical numbers. Writes a NUL-terminated JSON object into `out`.
+ * tier that owns `path` (SD vs internal LittleFS). Writes a NUL-terminated JSON
+ * object into `out`. One reply shape, two readers:
+ *
+ * buildFilesStatsJson is the web Files page's (/api/files/stats, asked on every
+ * folder load). For internal storage it shows the shared VFS capacity reading
+ * when that is at most 10 s old and walks LittleFS only otherwise (about 1.3 s
+ * on the P4X-EYE). A web upload, a file save (runFileWritePostSaveHooks),
+ * `mkdir`, `rmdir`, `filedelete`, `micdelete` and `imagedelete` mark the
+ * reading stale, so the page's own reload after them is a fresh one; other
+ * writers (captures, logs, settings, files received from a peer) show up
+ * within 10 s. The SD card is read fresh every time.
+ *
+ * buildFilesStatsJsonFresh is the `files stats` command's: always a fresh read
+ * (which also renews the shared reading). The two can differ by up to 10 s of
+ * internal writes.
  */
 void buildFilesStatsJson(const String& path, char* out, size_t outSize);
+void buildFilesStatsJsonFresh(const String& path, char* out, size_t outSize);
 
 /**
  * Build the complete directory-listing JSON envelope
@@ -63,8 +76,10 @@ bool buildFilesListJson(const String& path, const AuthContext& ctx, bool hideAdm
 /**
  * Post-save hook shared by every file-write path (web write, web upload, BLE
  * filewrite): keep /system/automations.json free of duplicate IDs and flag the
- * scheduler to refresh. Safe to call for any path — no-ops unless it's
- * automations.json.
+ * scheduler to refresh (that part no-ops unless the path is automations.json),
+ * and mark the internal storage reading stale when the file is on LittleFS, so
+ * the next reader of the figure (Files page, status poll) takes a fresh one.
+ * Safe to call for any path.
  */
 void runFileWritePostSaveHooks(const String& path);
 

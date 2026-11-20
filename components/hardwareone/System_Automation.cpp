@@ -4215,9 +4215,11 @@ bool evaluateCondition(const char* condition) {
     // Minutes since boot, from the uptime owner (it does not restart at 49.7 days)
     currentValue = (float)(SelfDevice::uptimeSeconds() / 60u);
   } else if (strcmp(sensor, "CHIPTEMP") == 0) {
-    // On-die SoC temperature in Celsius (self-heated, not ambient); NAN on read failure
-    float tc = temperatureRead();
-    if (isnan(tc)) return false;
+    // On-die SoC temperature in Celsius (self-heated, not ambient). No
+    // believable reading (a failed read, the classic ESP32's fake 53.3 C)
+    // must not trigger an automation: the condition is false.
+    float tc = 0.0f;
+    if (!SelfDevice::chipTemperatureC(tc)) return false;
     currentValue = tc;
   } else if (strcmp(sensor, "HOUR") == 0) {
     // Local hour of day 0-23 (reflects boot epoch until the clock is synced)

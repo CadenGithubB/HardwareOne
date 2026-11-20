@@ -99,6 +99,8 @@ namespace VFS {
 static bool isSdAvailable() { return sdMounted; }
 // INSERT_VFS
 }
+// The save hook's automation part is not under test: only its stale mark.
+#define ENABLE_AUTOMATION 0
 // INSERT_JSON_BUILDER
 
 static void balanced() {
@@ -114,11 +116,20 @@ static void reset() {
   VFS::gCapacitySnapshots = VFS::detail::CapacitySnapshotCache{};
   VFS::gLogFreeCheckCached = SIZE_MAX; VFS::gLogFreeCheckLastMs = 0; VFS::gLogFreeBytesWrittenSinceRefresh = 0;
 }
+// The web Files page's figure (/api/files/stats).
 static std::string json(const char* path) {
   char buffer[256] = {};
   buildFilesStatsJson(path, buffer, sizeof(buffer));
   return buffer;
 }
+// The `files stats` command's figure.
+static std::string freshJson(const char* path) {
+  char buffer[256] = {};
+  buildFilesStatsJsonFresh(path, buffer, sizeof(buffer));
+  return buffer;
+}
+static constexpr const char* sdMissingJson = "{\"success\":false,\"error\":\"SD card not available\"}";
+static constexpr const char* internalJson = "{\"success\":true,\"total\":1000,\"used\":250,\"free\":750,\"usagePercent\":25}";
 static constexpr const char* unavailableJson = "{\"success\":false,\"error\":\"Storage statistics unavailable\"}";
 static void expectFailure(VFS::StorageType tier, bool snapshot) {
   uint64_t total = 111, used = 222, free = 333;
@@ -306,6 +317,86 @@ int main(int argc, char** argv) {
     run("JSON retains 64-bit SD fields", [] {
       sdTotal = UINT64_C(64) * 1024 * 1024 * 1024; sdUsed = UINT64_C(16) * 1024 * 1024 * 1024;
       check(json("/sd/file") == "{\"success\":true,\"total\":68719476736,\"used\":17179869184,\"free\":51539607552,\"usagePercent\":25}", "64-bit wire capacity intact");
+    });
+    // The web Files page asks on every folder load. A LittleFS walk takes about
+    // 1.3 s under the filesystem lock on the P4X-EYE, so the page shows the
+    // shared internal reading while it is recent; `files stats` reads now.
+    run("Files page: folder loads share one LittleFS walk", [] {
+      check(json("/") == internalJson && lfsReads == 1 && takes == 1, "the first load samples once");
+      lfsUsed = 400;
+      for (const char* path : {"/notes", "/system", "/", "/sdata/x"}) {
+        nowMs += 1000;
+        check(json(path) == internalJson, std::string("the shared reading for ") + path);
+      }
+      check(lfsReads == 1, "four more folder loads do not walk LittleFS");
+      check(takes == 1, "and do not take the filesystem lock");
+    });
+    run("Files page: a reading older than its limit is renewed", [] {
+      check(json("/") == internalJson && lfsReads == 1, "first load");
+      lfsUsed = 400; nowMs += kFilesStatsInternalMaxAgeMs - 1;
+      check(json("/") == internalJson && lfsReads == 1, "just inside the limit: the shared reading");
+      nowMs += 1;
+      check(json("/") == "{\"success\":true,\"total\":1000,\"used\":400,\"free\":600,\"usagePercent\":40}" && lfsReads == 2,
+            "at the limit: one fresh reading");
+    });
+    run("Files page: a reading someone else took is shown without a walk", [] {
+      check(VFS::getCachedLittleFsFree() == 750 && lfsReads == 1, "the log writer's check walks once");
+      nowMs += 5000;
+      check(json("/") == internalJson && lfsReads == 1 && takes == 1, "the page shows that reading");
+    });
+    run("Files page: a stale mark gives one fresh reading", [] {
+      check(json("/") == internalJson && lfsReads == 1, "first load");
+      lfsUsed = 500; VFS::invalidateStatsSnapshot(VFS::INTERNAL);  // as an upload or a delete does
+      const char* after = "{\"success\":true,\"total\":1000,\"used\":500,\"free\":500,\"usagePercent\":50}";
+      check(json("/") == after && lfsReads == 2, "the reload after the change walks once");
+      check(json("/") == after && lfsReads == 2, "and the next load does not");
+    });
+    run("Files page: a saved file marks the internal reading stale", [] {
+      check(json("/") == internalJson && lfsReads == 1, "first load");
+      lfsUsed = 300; runFileWritePostSaveHooks("/notes/a.txt");  // the web editor's save, the last filewrite chunk
+      check(lfsReads == 1, "the save hook itself does not walk");
+      check(json("/") == "{\"success\":true,\"total\":1000,\"used\":300,\"free\":700,\"usagePercent\":30}" && lfsReads == 2,
+            "the page's reload shows the saved file");
+    });
+    run("Files page: a file saved to the SD card leaves the internal reading", [] {
+      check(json("/") == internalJson && lfsReads == 1, "first load");
+      lfsUsed = 300; runFileWritePostSaveHooks("/sd/a.txt");
+      check(json("/") == internalJson && lfsReads == 1, "no mark, no walk");
+    });
+    run("Files page: SD is read now on every load", [] {
+      const char* before = "{\"success\":true,\"total\":2000,\"used\":750,\"free\":1250,\"usagePercent\":37}";
+      check(json("/sd") == before && sdTotalReads == 1, "first load");
+      sdUsed = 1000;  // a delete or an upload on the card: nothing marks the SD reading
+      check(json("/sd/logs") == "{\"success\":true,\"total\":2000,\"used\":1000,\"free\":1000,\"usagePercent\":50}"
+            && sdTotalReads == 2, "the reload shows the card as it is");
+      check(lfsReads == 0, "an SD folder never walks LittleFS");
+    });
+    run("Files page: a failure is not hidden by its own earlier answer after a mark", [] {
+      check(json("/") == internalJson, "first load");
+      VFS::invalidateStatsSnapshot(VFS::INTERNAL); infoError = -1;
+      check(json("/") == unavailableJson, "no reading and a failing driver: the failure reply");
+      infoError = ESP_OK;
+      check(json("/") == internalJson, "a failed read is not kept");
+    });
+    run("files stats command reads now every time", [] {
+      check(freshJson("/") == internalJson && lfsReads == 1, "first read");
+      lfsUsed = 400;
+      const char* after = "{\"success\":true,\"total\":1000,\"used\":400,\"free\":600,\"usagePercent\":40}";
+      check(freshJson("/") == after && lfsReads == 2, "second read walks again");
+      check(freshJson("/notes") == after && lfsReads == 3, "and the third");
+      check(json("/") == after && lfsReads == 3, "the Files page then shows the command's reading");
+      sdUsed = 1000;
+      check(freshJson("/sd") == "{\"success\":true,\"total\":2000,\"used\":1000,\"free\":1000,\"usagePercent\":50}", "SD read now");
+    });
+    run("files stats command keeps the failure replies", [] {
+      sdMounted = false;
+      check(freshJson("/sd/x") == sdMissingJson && json("/sd/x") == sdMissingJson && sdTotalReads == 0, "SD not mounted, both entries");
+      sdMounted = true; sdTotal = 0;
+      check(freshJson("/sd") == unavailableJson && json("/sd") == unavailableJson, "SD failure, both entries");
+      infoError = -1;
+      check(freshJson("/") == unavailableJson && json("/") == unavailableJson, "LittleFS failure, both entries");
+      filesystemReady = false; infoError = ESP_OK;
+      check(freshJson("/") == unavailableJson && json("/") == unavailableJson, "LittleFS not ready, both entries");
     });
   }
   std::printf("%u storage-stats scenarios passed; %u failed\n", passed, failed);

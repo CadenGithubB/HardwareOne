@@ -512,17 +512,39 @@ static bool bytesNeedBase64(const uint8_t* data, size_t len) {
   return false;
 }
 
-// Build the storage-stats JSON ({total,used,free,usagePercent}) for the tier
-// that owns `path`. Shared by the web /api/files/stats handler and the
-// `files stats json` CLI command so both report identical numbers.
-void buildFilesStatsJson(const String& path, char* out, size_t outSize) {
+// How old an internal (LittleFS) reading the web Files page may show. The page
+// asks for the figure on every folder load, and a fresh reading walks LittleFS
+// (about 1.3 s under the filesystem lock on the P4X-EYE). The same limit as the
+// glasses Files page (kFilesStorageTtlMs in G2_Page_Files.cpp).
+static constexpr uint32_t kFilesStatsInternalMaxAgeMs = 10000;
+
+// The storage-stats JSON ({total,used,free,usagePercent}) for the tier that
+// owns `path`: one reply shape for the web Files page and `files stats`.
+// `fresh` reads the filesystem now. Without it an internal reading up to
+// kFilesStatsInternalMaxAgeMs old is shown (the shared VFS snapshot, which a
+// web upload, a file save, a folder create or remove and the delete commands
+// mark stale); the SD card is always read now, because that read is cheap
+// and nothing marks the SD reading stale after a write.
+static void filesStatsJson(const String& path, char* out, size_t outSize, bool fresh) {
   VFS::StorageType st = VFS::getStorageType(path);
   if (st == VFS::SDCARD && !VFS::isSdAvailable()) {
     snprintf(out, outSize, "{\"success\":false,\"error\":\"SD card not available\"}");
     return;
   }
   uint64_t total = 0, used = 0, freeBytes = 0;
-  if (!VFS::getStats(st, total, used, freeBytes)) {
+  bool ok = false;
+  if (fresh || st == VFS::SDCARD) {
+    ok = VFS::getStats(st, total, used, freeBytes);
+  } else {
+    VFS::CapacitySnapshot stats = {};
+    ok = VFS::getStatsSnapshot(st, stats, kFilesStatsInternalMaxAgeMs);
+    if (ok) {
+      total = stats.totalBytes;
+      used = stats.usedBytes;
+      freeBytes = stats.freeBytes;
+    }
+  }
+  if (!ok) {
     snprintf(out, outSize, "{\"success\":false,\"error\":\"Storage statistics unavailable\"}");
     return;
   }
@@ -531,6 +553,17 @@ void buildFilesStatsJson(const String& path, char* out, size_t outSize) {
            "{\"success\":true,\"total\":%llu,\"used\":%llu,\"free\":%llu,\"usagePercent\":%d}",
            (unsigned long long)total, (unsigned long long)used,
            (unsigned long long)freeBytes, usagePercent);
+}
+
+// The web Files page's figure (/api/files/stats): no LittleFS walk while a
+// recent reading exists. See filesStatsJson.
+void buildFilesStatsJson(const String& path, char* out, size_t outSize) {
+  filesStatsJson(path, out, outSize, /*fresh=*/false);
+}
+
+// The `files stats` command's figure: always read now.
+void buildFilesStatsJsonFresh(const String& path, char* out, size_t outSize) {
+  filesStatsJson(path, out, outSize, /*fresh=*/true);
 }
 
 // Build the COMPLETE JSON listing envelope ({success,dirPerms,files:[...]}) for
@@ -590,8 +623,9 @@ bool buildFilesListJson(const String& path, const AuthContext& ctx, bool hideAdm
 }
 
 // Post-save hook shared by every file-write path (web write, web upload, BLE
-// filewrite): keep automations.json free of duplicate IDs and flag the scheduler.
-// Safe to call for any path — no-ops unless the path is automations.json.
+// filewrite): keep automations.json free of duplicate IDs and flag the
+// scheduler (no-op for any other path), then mark the internal storage
+// reading stale when the file is on LittleFS.
 void runFileWritePostSaveHooks(const String& path) {
 #if ENABLE_AUTOMATION
   if (path == AUTOMATIONS_JSON_FILE) {
@@ -603,9 +637,14 @@ void runFileWritePostSaveHooks(const String& path) {
     // makes no change or its optional writeback fails.
     notifyAutomationScheduler();
   }
-#else
-  (void)path;
 #endif
+  // A saved file changed the used space. The web Files page and the status
+  // polls show the shared internal reading (the Files page for up to 10 s, the
+  // status polls at any age): mark it stale so the next reader takes one fresh
+  // reading. No walk here. The web upload already marks it before it calls
+  // this hook; the web editor's save and the last chunk of `filewrite` have
+  // only this mark.
+  if (VFS::getStorageType(path) != VFS::SDCARD) VFS::invalidateStatsSnapshot(VFS::INTERNAL);
 }
 
 // `files json` wrapper: applies the BLE/CLI-specific admin-only pre-check, then
@@ -661,8 +700,10 @@ const char* cmd_files(const String& argsInput) {
     return "Error: unexpected argument — quote the path, e.g. files \"/My Folder\"";
 
   if (wantStats) {
+    // An explicit command reads the filesystem now (the web Files page shows
+    // the shared reading instead).
     EXT_RAM_BSS_ATTR static char statsBuf[160];
-    buildFilesStatsJson(path, statsBuf, sizeof(statsBuf));
+    buildFilesStatsJsonFresh(path, statsBuf, sizeof(statsBuf));
     return statsBuf;
   }
   if (wantJson) {
@@ -760,6 +801,9 @@ const char* cmd_mkdir(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Error: Failed to create folder (denied or fs error): %s", path.c_str());
     return getDebugBuffer();
   }
+  // A new folder takes blocks: mark the shared internal reading stale (the
+  // Files page reloads its figure right after; see runFileWritePostSaveHooks).
+  if (VFS::getStorageType(path) != VFS::SDCARD) VFS::invalidateStatsSnapshot(VFS::INTERNAL);
   snprintf(getDebugBuffer(), 1024, "Created folder: %s", path.c_str());
   return getDebugBuffer();
 }
@@ -779,6 +823,8 @@ const char* cmd_rmdir(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024, "Error: Failed to remove folder (denied, not empty, or fs error): %s", path.c_str());
     return getDebugBuffer();
   }
+  // The folder's blocks are free again: mark the shared internal reading stale.
+  if (VFS::getStorageType(path) != VFS::SDCARD) VFS::invalidateStatsSnapshot(VFS::INTERNAL);
   snprintf(getDebugBuffer(), 1024, "Removed folder: %s", path.c_str());
   return getDebugBuffer();
 }
@@ -1431,9 +1477,11 @@ static const char* doFiledelete(const String& path, const AuthContext& ctx) {
              "Error: Failed to delete file (denied or fs error): %s", path.c_str());
     return respBuf;
   }
-  // Status polls show the newest internal capacity reading at any age; mark it
-  // stale so the next reader takes one fresh reading. No walk here: the web
-  // and glasses Files pages re-read storage right after a delete themselves.
+  // Status polls show the newest internal capacity reading at any age and the
+  // web Files page one up to 10 s old; mark it stale so the next reader takes
+  // one fresh reading. No walk here: the web and glasses Files pages ask for
+  // the storage figure right after a delete themselves, and that request does
+  // the one walk.
   if (VFS::getStorageType(path) != VFS::SDCARD) VFS::invalidateStatsSnapshot(VFS::INTERNAL);
   snprintf(respBuf, sizeof(respBuf), "Deleted file: %s", path.c_str());
   return respBuf;

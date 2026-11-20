@@ -1133,15 +1133,21 @@ const char* cmd_temperature(const String& originalCmd) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
-  // ESP32 internal temperature sensor
-  float tempC = temperatureRead();
+  // ESP32 internal temperature sensor, through the one reader. Without a
+  // believable reading (a failed read, the classic ESP32's fake 53.3 C) the
+  // command still succeeds: both JSON keys are sent as null, and the text says
+  // "unavailable" (it must not lead with "Error", which marks a failed command).
+  float tempC = 0.0f;
+  const bool haveTemp = SelfDevice::chipTemperatureC(tempC);
   float tempF = (tempC * 9.0 / 5.0) + 32.0;
 
   if (argWantsJson(originalCmd)) {
+    if (!haveTemp) return "{\"schema\":1,\"tempC\":null,\"tempF\":null}";
     snprintf(getDebugBuffer(), 1024, "{\"schema\":1,\"tempC\":%.1f,\"tempF\":%.1f}", tempC, tempF);
     return getDebugBuffer();
   }
 
+  if (!haveTemp) return "ESP32 Internal Temperature:\n  unavailable";
   snprintf(getDebugBuffer(), 1024, "ESP32 Internal Temperature:\n  %.1f°C (%.1f°F)", tempC, tempF);
   return getDebugBuffer();
 }
@@ -1546,9 +1552,9 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
     doc["system_time"] = "";
   }
 
-  // Uptime
-  unsigned long uptimeMs = millis();
-  unsigned long seconds = uptimeMs / 1000UL;
+  // Uptime, from the uptime owner: millis() / 1000 starts again at 0 after
+  // 49.7 days, and with it status json, /api/system, SSE and the dashboard.
+  unsigned long seconds = (unsigned long)SelfDevice::uptimeSeconds();
   unsigned long minutes = seconds / 60UL;
   unsigned long hours = minutes / 60UL;
   char uptimeHms[32];
@@ -1599,18 +1605,27 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   // The internal figure takes the newest reading of any age and samples only
   // when there is none: a LittleFS walk takes about 1.3 s under the FS mutex on
   // the P4X-EYE, and a 5 s limit made every 10 s /api/system poll pay it and
-  // stall the loop. The log writer's free-space check and any getStats() renew
-  // the reading; a web upload, filedelete, micdelete or imagedelete on
-  // LittleFS marks it stale for one re-read.
+  // stall the loop. The log writer's free-space check, any getStats() and the
+  // web Files page (when its reading is older than 10 s) renew the reading; a
+  // web upload, a file save (runFileWritePostSaveHooks), mkdir, rmdir,
+  // filedelete, micdelete or imagedelete on LittleFS marks it stale for one
+  // re-read.
+  // Without a reading (LittleFS not ready, or the driver reports an error) the
+  // three figures are left out: the storage object stays, and a reader shows
+  // "unavailable" instead of 0 / 0 KB. A failed read is not kept, so the next
+  // call asks again.
   static constexpr uint32_t kSystemInfoSdStatsMaxAgeMs = 5000;
   JsonObject storage = doc["storage"].to<JsonObject>();
   {
     VFS::CapacitySnapshot stats = {};
-    (void)VFS::getStatsSnapshot(VFS::INTERNAL, stats,
+    const bool haveInternal =
+        VFS::getStatsSnapshot(VFS::INTERNAL, stats,
                                 VFS::kSnapshotAnyAgeMs);
-    storage["total_kb"] = (int)(stats.totalBytes / 1024);
-    storage["used_kb"] = (int)(stats.usedBytes / 1024);
-    storage["free_kb"] = (int)(stats.freeBytes / 1024);
+    if (haveInternal) {
+      storage["total_kb"] = (int)(stats.totalBytes / 1024);
+      storage["used_kb"] = (int)(stats.usedBytes / 1024);
+      storage["free_kb"] = (int)(stats.freeBytes / 1024);
+    }
   }
   if (VFS::isSdAvailable()) {
     VFS::CapacitySnapshot stats = {};

@@ -42,28 +42,46 @@ inline uint32_t uptimeMs() { return (uint32_t)millis(); }
 
 // ----- Memory -------------------------------------------------------------
 
-// Total free heap (DRAM + PSRAM combined as ESP.getFreeHeap reports it).
+// Free internal 8-bit RAM: the same pool and the same number as
+// dramFreeBytes() below. No PSRAM in it, and not the IRAM-only heap that
+// ESP.getFreeHeap counts on the classic ESP32.
 // Units: bytes. For UI display, divide by 1024 yourself — keep helpers honest
 // about units rather than offering KB/MB variants that proliferate.
 uint32_t freeHeapBytes();
 
-// Free internal DRAM (caller-controlled allocations from MALLOC_CAP_INTERNAL).
-// Tighter constraint than freeHeapBytes — DRAM is the small, contested pool.
+// Free internal DRAM (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT): the small,
+// contested pool. freeHeapBytes() returns this.
 uint32_t dramFreeBytes();
 
 // Free PSRAM (caller-controlled allocations from MALLOC_CAP_SPIRAM). Returns
 // 0 on boards without PSRAM.
 uint32_t psramFreeBytes();
 
-// Lowest heap ever seen since boot. Useful for memory-pressure diagnostics —
-// "we got down to 12 KB at some point" tells you a transient burst happened
-// even if the current snapshot looks healthy.
+// Lowest free internal 8-bit RAM since boot: the low-water mark of the pool
+// freeHeapBytes() and dramFreeBytes() report, so it is never above them. No
+// PSRAM in it. Useful for memory-pressure diagnostics — "we got down to
+// 12 KB at some point" tells you a transient burst happened even if the
+// current snapshot looks healthy.
 uint32_t minFreeHeapBytes();
+
+// ----- Chip temperature ---------------------------------------------------
+
+// On-die temperature in Celsius (self-heated, not ambient). The one reader:
+// the `temperature` command, the glasses status line, the automation CHIPTEMP
+// condition and the stats feed all ask here. Returns false and leaves `out`
+// untouched when there is no believable reading: a failed read (NAN), a value
+// outside -40..125 C, or on the classic ESP32 the raw 128 (53.3 C) its sensor
+// gives when it has nothing. A classic ESP32 that truly sits at 128 F reads
+// "no value" for as long as it stays there.
+bool chipTemperatureC(float& out);
 
 // ----- Identity -----------------------------------------------------------
 
 // Copy this device's STA-interface MAC into out[6]. Returns false on failure
-// (e.g., WiFi not yet initialized — rare but possible during early boot).
+// (e.g., WiFi not yet initialized — rare but possible during early boot) with
+// out[] zeroed. The first successful non-zero answer is kept for the rest of
+// the boot, so later calls do not ask the driver again (a round trip to the C6
+// on a hosted radio) and keep answering while the radio is down.
 bool macBytes(uint8_t out[6]);
 
 // Formatted STA MAC as "AA:BB:CC:DD:EE:FF" (uppercase, colon-separated).
