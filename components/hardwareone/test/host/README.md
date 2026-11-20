@@ -312,12 +312,16 @@ the flag readers and every caller (the paths that replace the whole debug mask
 included), HAL's quiet start, the `BLE_COEX` lines following their tag, the help
 text, and that every tag in the table is one this build's sources log with.
 
-`system_log_status` runs `formatSystemLogStatus`, both `formatSystemLogFlags`
+`system_log_status` runs `formatSystemLogStatus`, `formatSystemLogStatusJson`,
+`systemLogState`, both `formatSystemLogFlags`
 overloads, `parseSystemLogFlags`, `systemLogApplyPersistedFlags` and
-`systemLogFollowFlagChange`. It reads the
-CLI, web-page and flag-message buffer sizes from their callers, renders the three
-logging states into both status buffers, fills the web buffer to 511 bytes plus
-NUL for a long path, and checks null and zero-size outputs, the 70-byte minimum
+`systemLogFollowFlagChange`. It reads the CLI, web-endpoint and flag-message
+buffer sizes from their callers, renders the three logging states as text and
+as json (`formatSystemLogStatusJson`, the same object in the CLI buffer and the
+endpoint's 1024-byte buffer, with the state key and the OLED label), checks
+that a long path cuts the text at a small caller's size while the json is
+either whole or the `response too large` object, to the byte at the edge, and
+checks null and zero-size outputs, the 70-byte minimum
 for the 69-character mask, a format/parse round trip of all 256 single-bit masks
 in both accepted forms, the persisted-mask restore (empty or prefix-only text
 keeps the live flags; non-hex text currently parses as zero), and the saved mask
@@ -1035,9 +1039,17 @@ name of a command that exists, that handler must be on a row of that command:
 of the Wi-Fi disconnect commands. `RETIRED` lists handler words that were
 never commands (`wifidrop`, which comments and the user guide had named as if
 it could be typed): no firmware source, and none of `docs/USERGUIDE.md`,
-`docs/QUICKSTART.md`, `KNOWN_ISSUES.md` and the top `README.md`, may name
-one. It reads source text only; `--component` points it at another component
-directory.
+`docs/QUICKSTART.md`, `KNOWN_ISSUES.md`, the top `README.md` and
+`docs/README_DETAILS.md`, may name one. It reads source text only;
+`--component` points it at another component directory.
+
+`readme_overview` keeps the top `README.md` a short overview that matches the
+tree: the title form `RELEASING.md` names, at most 120 lines, the
+getting-started commands and the tools and saved configuration they name, the
+boards table against `boards/*.defaults`, the mesh protocol name, every
+relative link and anchor in `README.md` and `docs/README_DETAILS.md`, and the
+two headings of the details page that other documents link to. `--repo` points
+it at another checkout.
 
 ## Edge Impulse inference lock and continuous task
 
@@ -1550,8 +1562,9 @@ debug and capture buffers, static result buffers), so:
 A source check requires that nothing but clearing the output runs before the
 refusal. A second source check covers the last direct caller off the executor:
 `handleEspNowStatus` (`WebPage_ESPNow.cpp`) still opens with the guest-loadable
-`WEB_AUTH_OR_RETURN`, submits each of its eight fixed status commands (same
-order; the page applies results by slot) through `executeInternalStatusCommand`,
+`WEB_AUTH_OR_RETURN`, submits each of its nine fixed status commands (eight
+json replies, then the status text for display; same order, the page applies
+results by slot) through `executeInternalStatusCommand`,
 and the file has no `executeCommand` call. `--component <dir>` /
 `--source-dir <dir>` read the production sources from another tree; the
 pre-fix tree (41eecfe6) fails both parts. Not covered: the real FreeRTOS
@@ -2519,7 +2532,9 @@ read once a reading exists, no seeding from a failed, zero-capacity or unmounted
 walk, and no publication across an invalidation during the walk.
 `--baseline <component-directory>` replays regressions against
 saved sources. `vfs_capacity_cache_tests` and `vfs_capacity_snapshot_contract`
-retain expiry, clock-wrap, invalidation and consumer-boundary checks.
+retain expiry, clock-wrap, invalidation and consumer-boundary checks. Source
+rules pin that `buildSystemInfoJson` leaves the three storage figures out
+without a reading and that the dashboard row then reads "unavailable".
 
 `filedelete_storage_figure` runs the production `doFiledelete` (the routine
 behind `filedelete` from every client) against a filesystem double: a LittleFS
@@ -2554,7 +2569,8 @@ Options: `--cxx`, `--sanitize`, `--component`, `--baseline`, `--print-stack`.
 web file manager (`createFileManager`, `WebServer_Utils.h`): the explorer's
 `onNavigate` calls `config.onRefresh`, and the actions (new folder, new file,
 upload, Refresh) only reload the folder. On the Files page each refresh is a
-fresh `/api/files/stats`, a LittleFS walk of about 1.3 s on the P4X-EYE. It
+`/api/files/stats` request, a LittleFS walk of about 1.3 s on the P4X-EYE when
+the shared reading is older than 10 s or marked stale. It
 takes an optional saved `WebServer_Utils.h` path for a before/after run.
 
 `espnow_fs_transcript_privacy` runs the actual LIST/STAT/GET handlers, path
@@ -3313,6 +3329,10 @@ row's confirm says `Switch to server?`.
 No row wraps past 21 columns. The link watcher marks the display once per
 change of role, saved mode, pipe phase or text, pairing, auto-reconnect,
 console state, clients, advertising, glasses or ring, and never when idle.
+While the G2 Status screen is open the watcher also marks once when a row it
+draws changes (a temple, a shown battery, the repair state, Nav Mode, the
+status becoming unavailable), not for MTU or counters, not on opening or
+leaving the screen, and it does not read the status on any other screen.
 
 `g2_status_corner` compiles the G2 Status compound's geometry, child count,
 child builder and phone row from G2_Glasses.cpp in all four phone-pipe x
@@ -3501,6 +3521,19 @@ qualify flash writes, CSV output, task races or physical sensor logging.
 `--baseline <component-directory>` replays the same assertions against the saved
 old sensors command branch and reproduces partial invalid-list mutation and
 the missing toggle operation. ASan/UBSan follow `HW1_SANITIZE`.
+
+`sensorlog_status_rows` runs the logger's status forms and row builders,
+extracted unchanged from `System_SensorLogging.cpp` / `.h`: `sensorlog status`
+and `sensorlog status json` print from one `SensorLogStatus` reading (the text
+keeps its wording, the json is one whole object or the `response too large`
+object, and both agree for every selection, format and running state); a CSV
+row always carries the columns its header lists (a selected sensor without a
+reading writes empty fields); and the log snapshot keeps the GPS satellite
+count and fix quality without a fix. Source contracts pin the upload admission
+arithmetic in `WebServer_Server.cpp` to 64 bits, which a 64-bit host cannot
+show by running the handler. Globals, the debug buffer, the clock and the GPS
+cache read are host doubles; this does not qualify file writes, the logging
+task or a real sensor.
 
 `sensorlog_ui` executes the production G2/OLED logging rows and input handlers
 with the shared catalog. It checks labels/checkmarks, one selection read per
@@ -3827,11 +3860,21 @@ write or event; clean ASCII and UTF-8 values are stored unchanged. This suite
 uses ASan/UBSan when `HW1_SANITIZE=ON`.
 
 `espnow_page_render` runs the shipping `web_assets/espnow-core.js` (device list,
-peer metadata panel) and the `WebPage_ESPNow.h` script chunk that draws the graph
-view, unmodified, against a fake `hw`/DOM on whatever JavaScript engine
+peer metadata panel) and the `WebPage_ESPNow.h` script chunks that define the
+graph view, the status apply, the mesh role card, the local metadata / channel
+card and the button handlers, unmodified, against a fake `hw`/DOM on whatever JavaScript engine
 `tools/webui/js_engine.py` finds (node, deno, jsc, ...). Peer names and metadata
 must reach `innerHTML` as literal text, clean text must render unchanged, and the
-Pair button must pass a discovered name with quotes intact. Static source
+Pair button must pass a discovered name with quotes intact. The page must decide
+from the json replies of `/api/espnow/status` only (nine slots, the last one
+display text): a text reply decides nothing, a slot that is not json is
+tolerated, settings strings are shape-checked and escaped, a reply that cannot
+be applied shows an error, the Initialize button opens the name setup from the
+json name fields and the mode toggle reads `espnowmode json`. The source
+contracts also pin, in `System_ESPNow.cpp`, the `espnowstatus json` size guard,
+`nameValid`, the internal-RAM heap figure in heartbeats and bond status, and the
+metadata setter limits taken from `V4PayloadMetadata`; no host test compiles
+those lines. Static source
 contracts on the same renderers run first; `--contract-only` runs only those.
 When no engine exists and the contracts pass, the suite exits 77, which CTest
 reports as skipped. Both suites take `--source-dir <component-directory>` to
@@ -4668,7 +4711,7 @@ and prints that function's result; the reply line is unchanged.
 while `millis() / 1000` is back at 1), for 100 days and for ten years. Source rules: the eight files in the
 test's table (`ASKERS`) ask the owner, and the only divisions of the 32-bit millisecond clock by 1000 or 60000
 left in the firmware are the three fallbacks for a wall clock that reads 0 (two glasses microphone file names,
-one ESP-NOW capture file).
+one ESP-NOW capture file). Source rules also pin what the four chip-temperature askers do without a reading.
 
 `stored_time_values` compiles the production `parseBootAnchors` (`System_User.cpp`) and `parseOneTrigger` with
 `nextFire` (`System_Automation.cpp`) with the real ArduinoJson. `value | default` reads with the type of the
@@ -5290,6 +5333,21 @@ row never sends a color, and a refused entry does not claim the hijack page. `g2
 then tap 1 never submits `deepsleep`) and `camera_consumers` (a refused Camera list leaves TOP's FPS row cycling
 FPS) carry the same cases for Power and Camera Settings. All three accept `--component <dir>` to replay against a
 pre-fix tree. Commands, lens, RTOS and settings-registry calls are host doubles; ASan/UBSan follow `HW1_SANITIZE`.
+
+## Lens Peers rows
+
+`g2_espnow_peer_rows` compiles the production `g2EspNowPeerCounts`, `g2BuildNetworkInfo` and
+`showEspNowDevices` (G2_Page_Network.cpp) and the ESP-NOW app's row table, `g2BuildEspNowAppInfo`,
+`showMainMenu`, `showPeersMenu`, `showStatsMenu` and `handlePeersTap` (G2_Page_ESPNow.cpp) against doubles of
+the registry, the session test and the lens list page: a peer is every registry entry except this device, up
+while it holds an ACTIVE session; the five rows print up/paired; neither peer list has a row for this device;
+a tap selects the peer its row named, also after the registry changed or a redraw was refused. Built again
+with ENABLE_ESPNOW=0. Its source part checks that the lens RTC texts go through rtcLocalTime, that the OLED G2
+status screen reads one g2ConnectionStatusSnapshot, that the OLED ESP-NOW editors take their limits from
+devicename::kMaxLen / V4PayloadMetadata, and that the OLED ESP-NOW screens do not call esp_wifi_get_mac.
+`--component` runs it against another tree.
+
+    python3 components/hardwareone/test/host/test_g2_espnow_peer_rows.py --sanitize
 
 ## G2 Network row bindings
 
@@ -6774,8 +6832,12 @@ traversal order (including a freed child), exclusive block ends, freed blocks an
 address arithmetic under ASan/UBSan. `tools/p4/test_ram_monitor.py` tests the
 live graph's numeric whitelist, malformed samples and private-log redaction.
 CTest names: `task_heap_measure`, `p4_ram_monitor`.
+`heap_reader_sources` holds source contracts for the internal-heap readers that have no harness of their own: the
+BLE system stream, the task-create debug line, the DEBUG_MEMORY task report, `memsample` and the Tier 1 pressure
+watch read the byte-addressable internal heap (`System_MemUtil.h`) and take the low-heap line, the fragmentation
+figure and its warning line from `System_HeapLowCore.h`; `heap_low_core_tests` tests the arithmetic.
 `known_task_table` covers the table of tasks created under a fixed name and
-stack size. `taskstats` (`reportAllTaskStacks`) and the memory monitor's
+stack size. The DEBUG_MEMORY 60 s task report (`reportAllTaskStacks`) and the memory monitor's
 periodic stack sample each kept a copy with a parallel list of "alive" flags;
 the monitor's copy had lost the `espnow_tx` row. The one table is
 `collectKnownTaskRows()` in `System_TaskUtils.cpp`. The test compiles that
@@ -6971,7 +7033,9 @@ return free of outside switches. `espnow_remote_ack` compiles the acknowledgemen
 command shortens the echo, never the request id; a command still waiting for the session (2026-11-18) answers
 "Queued '<command>' until the session with <target> opens. ..." with the id still last. `oled_espnow_remote_actions` runs the OLED Device Config remote
 rows: they fill in and open the remote form, and no OLED ESP-NOW action sends a command line whose first word is
-not a registered command. The form shows a refusal that leads with "Error" as its reason and any other refusal as
+not a registered command. The remote form's Command field holds the longest command a Device Config row can fill in
+("espnowfriendlyname" plus 47 characters): opening the field and confirming it unchanged keeps the whole command;
+User and Pass keep 64 characters. The form shows a refusal that leads with "Error" as its reason and any other refusal as
 "Remote not sent". Outside ctest, `tools/webui/tests/test_espnow_remote_page.py` feeds the firmware's real
 replies to the web page's remote file browser.
 

@@ -130,13 +130,20 @@ Note: read the global on/off via `automation system status json`, not from
 | `memreport` | `{"schema":1,"dram":{"total","used","free","minFree","peakUsed"},"psram":{"available","total","used","free"},"heapCaps":{"internalFree","internalLargest","dmaFree","dmaLargest"}}` |
 | `logtier` | `{"schema":1,"tier","overflow","littlefs":{"free","total","used"},"sd":{"available","total","used","free"}}` |
 | `oledstatus` | `{"schema":1,"connected","address","width","height","enabled","mode"}` |
-| `temperature` | `{"schema":1,"tempC","tempF"}` |
+| `temperature` | `{"schema":1,"tempC","tempF"}` (both `null` when the chip has no believable reading) |
+| `time` | `{"schema":1,"synced","source","time","uptime_ms","rtc_temp_c"?}`; `time` is local time as `YYYY-MM-DDTHH:MM:SS`, `""` while the clock has no time; `rtc_temp_c` only with an RTC reading |
+| `sensorlog status json` | `{"schema":1,"running","file"?,"intervalMs","format","maxSizeBytes","rotations","sensors":[names],"autoStart","lastWriteAgoSec"?,"approxSizeBytes"?}`; `format` is `text`, `csv` or `track`; `file`, `lastWriteAgoSec` and `approxSizeBytes` (the logger's running estimate) appear only while running; a reply that does not fit is `{"schema":1,"ok":false,"error":"response too large"}`. Also the second entry of `GET /api/logging/status` |
+| `log status json` (admin) | `{"schema":1,"state","running","file"?,"lastWriteAgoSec"?,"outputFlags"?,"autoStart","maxSizeKb","keep","rotations","reserveSkips","reserveKb"}`; `state` is `active`, `configured` (started but not routed to the file) or `inactive`; `file` appears while running, `lastWriteAgoSec` and `outputFlags` while active; oversize gives the same `response too large` object. Also the third entry of `GET /api/logging/status` |
 | `voltage` | `{"schema":1,"measured":false,"estimatedCurrentMa","estimatedPowerW","note"}` - estimate only; use `batterystatus json` for measured power |
 | `i2chealth` | `{"schema":1,"deviceCount","devices":[{"address","name","consecutiveErrors","totalErrors","degraded","nack","timeout","busError","adaptiveTimeoutMs"}]}` |
 | `i2cmetrics` | `{"schema":1,"uptimeSec","totalTransactions","mutexTimeouts","busContentions","totalBytes"}` |
 | `blepeers` | `{"schema":1,"peers":[{"name","displayName","connectable","connected","autoReconnect","mac1","mac2"?,"pairedBy"}],"count"}`. Errors (text, not JSON): `Error: Out of memory. Free memory and retry the command.`, `Error: Peer list too large for the reply. Run blepeers without json.` |
 | `banlist` | `{"schema":1,"bans":[{"ip","reason"}],"count"}` (stub: `available:false`). IP bans are web-only. |
 | `versions` | `{"schema":1,"firmware",...,"idf","arduino"}`: every value a string, keys in this order and present only where the build compiles that part. `firmware`; OTA layouts: `ota_layout`, `updater` (`unavailable` without a factory updater), `ota_manifest_format`, `ota_data_schema`; ESP-NOW: `espnow` (`ESPNOW V1 (1.0)`), `espnow_wire` (the frame version byte, JSON only), `espnow_stack` (`v1`/`v2`, `unknown` until ESP-NOW has started), `espnow_identity_file`, `espnow_peer_file`; automations: `automations_file`; migration tool: `backup_format`; Bluetooth: `ble_console_channel`; phone pipe: `phone_link`, `phone_pipe_channel`, `phone_console_records`; CM5 host control: `cm5_control`; C6 companion: `c6_hosted`, `c6_hosted_qualified`, `c6_bridge_wire`, `c6_bridge_wire_expected` (reported values `unknown` until the companion answers); local STT: `stt_model`; then `idf`, `arduino`. `status json` carries the same keys, without `schema`, as `versions`. Errors (text, not JSON): `Error: Out of memory. Free memory and retry the command.`, `Error: The version list does not fit one reply. Run versions without json.` |
+
+`status json` / `GET /api/system`, `storage` object: `total_kb`, `used_kb` and `free_kb` are absent when the
+internal storage reading is unavailable (they were 0); `storage` itself is always present, and `storage.sd` is
+absent without a readable card.
 
 ---
 
@@ -153,9 +160,11 @@ Note: read the global on/off via `automation system status json`, not from
 | `whereami` | `{"schema":1,"valid","road"?,"roadDistanceM"?,"area"?,"areaDistanceM"?}` |
 | `mqttexternalsensors` | `{"schema":1,"sensors":[{"name","value","ageSec"}],"count"}` |
 | **ESP-NOW** | |
-| `espnowstatus` | `{"schema":1,"initialized","channel"?,"channelPref"?,"mac"?,"pairedDevices"?,"lastInitError"?}`. Before the first start of a boot only `initialized:false` (plus `lastInitError` after a failed start). `channel` and `channelPref` (0 = auto, 1-13 = pinned when offline) appear once a start has set up the ESP-NOW state and stay after `closeespnow`; `mac` and `pairedDevices` are present only while `initialized`; `lastInitError` is the reason the last start failed, present only while ESP-NOW is down |
+| `espnowstatus` | `{"schema":1,"initialized","channel"?,"channelPref"?,"masterChannel"?,"follow"?,"masterSilentMs"?,"sweepFailures"?,"nextSweepMs"?,"mac"?,"pairedDevices"?,"lastInitError"?}`. Before the first start of a boot only `initialized:false` (plus `lastInitError` after a failed start). `channel` and `channelPref` (0 = auto, 1-13 = pinned when offline) appear once a start has set up the ESP-NOW state and stay after `closeespnow`; `mac` and `pairedDevices` are present only while `initialized`; `masterChannel` (0 = unknown), `follow` (the channel-follow phase), `masterSilentMs`, `sweepFailures` and `nextSweepMs` are present only while `initialized`; `lastInitError` is the reason the last start failed, present only while ESP-NOW is down. A reply that does not fit is `{"schema":1,"ok":false,"error":"response too large"}` |
 | `espnowdevices` *(v0.95.10)* | all peers: `{"schema":1,"devices":[{"mac","deviceName","friendlyName","room","zone","tags","pendingRoom"?,"pendingTags"?,"stationary","online","lastSeenSec","source"}],"count","notShown"?}` |
-| `espnowdeviceinfo` *(v0.95.10)* | this device (self): `{"schema":1,"name","friendlyName","room","zone","tags","stationary","meshRole","mac"}` |
+| `espnowdeviceinfo` *(v0.95.10)* | this device (self): `{"schema":1,"name","nameValid","friendlyName","room","zone","tags","stationary","meshRole","mac","hint"}`; `nameValid` is false when no usable device name is saved |
+| `espnowmode` (admin) | `{"schema":1,"enabled","mode"}`; `mode` is `direct` or `mesh` |
+| `espnowmeshrole` (admin) | `{"schema":1,"role","masterMac","backupEnabled","backupMac"}`; `role` is `worker`, `master` or `backup`; the MACs are `""` when unset |
 | `espnowrooms` | `{"schema":1,"rooms":[{"room","devices":[{"name","tags","online","accepted","pendingTags"?}]}],"count","notShown"?}` |
 | `espnowgroups` (or `espnowgroups json <name_or_mac>`; admin) | `{"schema":1,"peers":[{"mac","name","room","tags","acceptedRoom","acceptedTags","pendingRoom","pendingTags"}],"count","pendingCount","notShown"?}` |
 | `espnowgroupaccept json <name_or_mac\|all>` / `espnowgroupdrop json <name_or_mac\|all>` (admin; `json` leads) | `{"schema":1,"peers":[{"mac","name","room","tags","acceptedRoom","acceptedTags","pendingRoom","pendingTags","changed"}],"ok","count","changed","saved","error"?,"notShown"?}` |
@@ -302,7 +311,7 @@ feature is compiled out). Treat accordingly.
 - **Niche subsystems** (no app panels yet): `ei*` (Edge Impulse), `sr*` (ESP-SR),
   `g2info` / `g2protostats` / `g2sensors`.
 - **Edge data not yet covered** (ask if you need them): `imuactions` (IMU action
-  detection), `sensorinfo <name>` (static chip catalog), `sensorlog` (logging status).
+  detection), `sensorinfo <name>` (static chip catalog).
 - **Actions / setters / help:** `banuser`, `espnowforget`, `blestream`, `bondstream`,
   `oleddefaultmode`, `g2` toggles, module summaries.
 

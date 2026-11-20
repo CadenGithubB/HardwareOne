@@ -928,6 +928,40 @@ everything user-visible since the v0.99.99.1 tag.
   The G2 scans now note their own end (as the ring scan does) and skip that stop. The `BLE_COEX` line
   pairs print only with `debugbluetoothcore` on (see the radio stack logs under Changed); the records and
   counters (`blerecords`) are kept as before. Host-tested; not yet run on hardware.
+- Dashboard, `status json`, `/api/system` and the live status stream: `uptime_hms` no longer returns
+  to 0 after 49.7 days of uptime.
+- Chip temperature has one reader. `temperature`, the glasses status line and the `CHIPTEMP`
+  automation condition no longer show the classic ESP32's fake 53 C or a failed read: `temperature`
+  says "unavailable", `temperature json` sends `tempC` and `tempF` as `null` (a failed read sent
+  `nan`, which is not JSON), the lens line shows the uptime alone, and a `CHIPTEMP` condition is false.
+- Dashboard shows "unavailable" for flash storage when the reading fails, instead of "0 / 0 KB";
+  `status json` and `/api/system` leave `storage.total_kb`, `used_kb` and `free_kb` out in that case.
+- DEBUG_MEMORY task report: "Heap Fragmentation" was printed the wrong way round (the largest block
+  as a share of free memory) and compared two different pools. It is now the share of internal free
+  memory outside the largest block, the figure `memreport` and `memsample` print, and its low-heap
+  line is the shared 25 KB line instead of 40 KB.
+- `[HEAP_PRESSURE]` lines have one format (bytes as "B"), and `min_ever` is the allocator's
+  low-water mark in both places that print it.
+- Sensor CSV rows keep their columns when thermal, ToF, gamepad or APDS is selected but has no
+  reading (empty fields), so later columns stay under their header names. A day file that spans the
+  update holds the earlier short rows.
+- Sensor log rows keep the GPS satellite count and fix quality while there is no fix.
+- Web upload: the size limit was wrong with more than about 477 MB free, and an upload stopped early
+  with more than 4 GB free (the free-space figure is now kept in 64 bits).
+- `espnowstatus json` answers with an error object instead of a cut document when the reply does not
+  fit. The ESP-NOW page's tags input accepts 53 characters, the command's limit.
+- ESP-NOW web page: a status reply that cannot be applied shows an error in the status box instead
+  of leaving "Loading...".
+- OLED ESP-NOW editors accept exactly what the commands accept: device name 31, room 31, zone 31,
+  friendly name 47 and tags 53 characters. The local editors stopped at 16/30/30/46 and let 62
+  characters of tags be typed, which the command then refused; a peer's Device Config editors
+  stopped at 16 (room, zone) and 24 (friendly name). Host-tested; not yet run on hardware.
+- G2 lens ESP-NOW app: the Peers list had a row for this device, whose detail page offered Ping,
+  Send and Forget on itself. A tap now selects the peer its row showed, also when a device was
+  paired or unpaired while the list was open. Host-tested; not yet run on hardware.
+- OLED ESP-NOW device list, mesh status and the bond picker no longer ask the radio for this
+  device's address on each repaint (a round trip to the C6 on the P4X-EYE); they use the address
+  ESP-NOW cached at start. Not measured on hardware.
 
 ### Changed
 - G2 stock widget chart: always the glasses' full 185-point window, newest point at the right edge
@@ -1428,6 +1462,51 @@ everything user-visible since the v0.99.99.1 tag.
   command reference generator now resolves a path constant spliced into help text, so
   `docs/COMMAND_REFERENCE.md` is unchanged. Host-tested and built for six configurations; not run
   on hardware.
+- Heap figures mean the same on every surface: free and lowest-since-boot are the internal
+  byte-addressable heap. This changes four published values, with keys and layouts unchanged:
+  the BLE system stream (`blestream system on`) `heap_free` and `heap_min`, about 25.8 KB lower on
+  the classic ESP32; the peer free heap in ESP-NOW heartbeats and bond status, which the Bond page
+  and the `BOND_PEER_HEAP` automation condition read (lower on the classic ESP32, so a saved
+  threshold may need lowering; a peer on older firmware still reports the old figure); MQTT
+  `heap_min`, which on boards with PSRAM used to include PSRAM and read megabytes above `heap_free`
+  (Home Assistant's "Heap Min" steps down once at the update); and `heapBefore`, `heapAfter` and
+  `heapDelta` of the task-create debug line.
+- One fragmentation warning line (50 %) for `memsample` and the DEBUG_MEMORY task report;
+  `memsample`'s "DRAM fragmentation" line printed above 30 %, which a healthy ESP32-S3 exceeds.
+- The ESP-NOW and Logging web pages read JSON replies instead of matching command text. Refresh
+  works for guests and non-admin users, the ESP-NOW channel card is filled on load and shows the
+  applied channel, the bonded device is marked in the device list, and the network graph shows this
+  device's MAC. New forms for this: `sensorlog status json` and (admin) `log status json`, both
+  carried by `GET /api/logging/status`, and `nameValid` in `espnowdeviceinfo json`.
+- Logging web page: when a status cannot be read (for example on a busy device), the card says
+  "Not Available" and keeps its Start/Stop buttons instead of showing INACTIVE. The System Logging
+  card shows NOT ROUTED with Stop when logging is started but not routed to the file.
+- The OLED System Logging screen shows the same three states as `log status`: ACTIVE, NOT ROUTED,
+  STOPPED.
+- The web Files page shows the shared storage reading (at most 10 s old for internal storage)
+  instead of walking LittleFS on every folder load (about 1.3 s on the P4X-EYE). A web upload, a
+  file save, a new or removed folder and the delete commands mark the reading stale, so the page's
+  reload after them is fresh. The SD card is still read on every load, and `files stats` on the
+  CLI always reads fresh.
+- The Bond page and migration replies read the station MAC from the driver once per boot (it was a
+  round trip to the C6 on every request on the P4X-EYE).
+- G2 lens: the **Peers** rows of the ESP-NOW app (main menu, Stats) and of Connect -> ESP-NOW, and
+  the `g2network` text, show peers as up/paired, for example `Peers: 2/3 up`, by the status line's
+  rule: every paired device except this one, up while it holds an encrypted session. They showed
+  the registry size (one too many: it holds this device) or the number of peers with message
+  history. The two peer lists (Apps -> ESP-NOW -> Peers, Connect -> ESP-NOW -> View Devices) no
+  longer list this device. Host-tested; not yet run on hardware.
+- G2 lens: the RTC row of the sensor list and the RTC page show local time (the timezone setting),
+  as the OLED does; they showed UTC. Host-tested; not yet run on hardware.
+- OLED Bluetooth -> G2 -> Status shows its own rows: state, each temple (`Left: up, batt 85%`,
+  `Right: down`), the repair state and Nav Mode, and repaints while it is open when one of them
+  changes. It printed the `g2status` line cut after 63 characters and repainted only when the
+  glasses link as a whole came up or dropped. Host-tested; not yet run on hardware.
+- OLED ESP-NOW: "Set Pretty Name" in a peer's Device Config is "Set Friendly Name".
+- OLED ESP-NOW remote form: the Command field takes 128 characters (the keyboard's limit; it took
+  64), so a command filled in from Device Config always fits it. `espnowremote` still refuses a
+  line too long for one frame, with its reason. Host-tested; not yet run on hardware.
+
 ### Security
 - ESP-NOW room and tag commands: `espnowroomcmd` and `espnowtagcmd` send a command together with an
   account name and password to every device in a room or with a tag, and room and tags are what each
@@ -1531,6 +1610,11 @@ everything user-visible since the v0.99.99.1 tag.
   `wifidisconnect`. In the code, each command handler is now named after the command it serves
   (`closewifi` is handled by `cmd_closewifi`, `wifidisconnect` by `cmd_wifidisconnect`), and the
   host test `command_handler_names` keeps it so.
+- `README.md` is now a short overview and getting started that leads with the guided build setup
+  (`python3 tools/build_config.py new`). The device roles, feature table, hardware tables, support
+  matrix, speech-model install steps and build-system notes moved to `docs/README_DETAILS.md`; the
+  other documents link there. The mesh protocol is named "custom ESP-NOW v1" (the feature table
+  and the user guide said "ESP-NOW V3").
 
 ## [0.99.99.1] - 2026-11-08
 

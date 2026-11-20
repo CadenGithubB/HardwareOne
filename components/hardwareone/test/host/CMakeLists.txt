@@ -1218,6 +1218,21 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_g2_network_async_redraw.py
           ${G2_NETWORK_ASYNC_REDRAW_TEST_ARGS})
 
+# Lens "Peers" rows (README "Lens Peers rows"): the ESP-NOW app and the Network
+# page count and list this device's peers as up/paired, never this device, and
+# a tap selects the peer its row named; plus the screen source rules that
+# landed with it (RTC local time, OLED G2 status rows, OLED editor limits, no
+# driver MAC query on OLED repaints).
+set(G2_ESPNOW_PEER_ROWS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND G2_ESPNOW_PEER_ROWS_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME g2_espnow_peer_rows
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_espnow_peer_rows.py
+          ${G2_ESPNOW_PEER_ROWS_TEST_ARGS})
+
 # Sensors completions (cam_power post-hook, openmic/closemic on cmd_exec) queue a
 # generation-checked Redraw instead of rendering on their own task (README
 # "G2 Sensors completion redraws").
@@ -1855,6 +1870,14 @@ add_test(
   NAME sensorlog_selection
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_sensorlog_selection.py
+          ${SETUP_MQTT_TEST_ARGS})
+# `sensorlog status` text and json from one status reading, CSV rows as wide
+# as their header, GPS satellites without a fix, 64-bit upload admission
+# (README `sensorlog_status_rows`).
+add_test(
+  NAME sensorlog_status_rows
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_sensorlog_status_rows.py
           ${SETUP_MQTT_TEST_ARGS})
 add_test(
   NAME sensorlog_ui
@@ -2617,6 +2640,12 @@ add_test(
   NAME command_handler_names
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_command_handler_names.py)
+# README.md is the short overview; docs/README_DETAILS.md holds the reference
+# sections. Title form, getting-started commands, boards table, every relative link.
+add_test(
+  NAME readme_overview
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_readme_overview.py)
 
 # A compiled-out feature is described by the #else branch of its own header;
 # no central stub file, no include of that header behind its own flag
@@ -2798,8 +2827,8 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_json_bounds.py
           ${SETUP_MQTT_TEST_ARGS})
 # Known tasks: one table (collectKnownTaskRows, System_TaskUtils.cpp) that
-# `taskstats` and the memory monitor's stack sample both read; the monitor's
-# own copy had lost the espnow_tx row.
+# the DEBUG_MEMORY 60 s task report and the memory monitor's stack sample both
+# read; the monitor's own copy had lost the espnow_tx row.
 add_test(
   NAME known_task_table
   COMMAND ${Python3_EXECUTABLE}
@@ -3548,6 +3577,12 @@ add_test(
           --expect 6 --expect-malloc 6)
 add_test(NAME task_heap_measure COMMAND ${Python3_EXECUTABLE}
   ${CMAKE_CURRENT_LIST_DIR}/test_task_heap_measure.py)
+# One meaning for the internal heap's free, minimum and fragmentation figures:
+# the BLE system stream, the task-create line, the DEBUG_MEMORY task report,
+# memsample and the Tier 1 watch read the internal 8-bit heap and the shared
+# lines of System_HeapLowCore.h.
+add_test(NAME heap_reader_sources COMMAND ${Python3_EXECUTABLE}
+  ${CMAKE_CURRENT_LIST_DIR}/test_heap_reader_sources.py)
 # The system metrics sampler reads cached figures only: no C6 memory RPC, fresh
 # filesystem stat or WiFi.RSSI() from the main loop (stock-feed phase 3).
 add_test(NAME system_metrics_source COMMAND ${Python3_EXECUTABLE}

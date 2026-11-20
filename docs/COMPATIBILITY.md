@@ -83,7 +83,7 @@ characters, so a fresh device cannot be set up into a lockout.
 
 ## Not promised
 
-- Anything labelled experimental in the README matrix (currently the Waveshare P4 row and any OTA
+- Anything labelled experimental in the [support matrix](README_DETAILS.md#support-matrix) (currently the Waveshare P4 row and any OTA
   layout without a dated PASS record).
 - Captured logs, transcripts and sensor logs on the SD card are data, not part of the upgrade
   contract; keep your own copies.

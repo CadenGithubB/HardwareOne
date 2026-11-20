@@ -59,7 +59,7 @@ Feature flags are declared, with their defaults, in `components/hardwareone/Syst
 | `ENABLE_LLM_SOURCE_ONBOARD` | Set to `1` to build the tiny transformer that runs on this chip (needs PSRAM). Requires a model file on LittleFS or SD card. |
 | `ENABLE_LLM_SOURCE_CM5` | Set to `1` to answer from the Raspberry Pi co-processor over the UART link. Requires a board with a `UART_LINK_PORT` (all supported boards). |
 | `ENABLE_LLM_SOURCE_HTTP` | Set to `1` to answer from an OpenClaw server at a configured HTTP(S) endpoint. Requires WiFi; no local model. |
-| `ENABLE_LOCAL_STT` | On-device speech-to-text on the ESP32-P4 boards (the engine is compiled only for that target). Needs a model file on the microSD card at run time: Citrinet-384 by default (`ENABLE_STT_MODEL_CITRINET`), or the published QuartzNet 15×5 with `ENABLE_STT_MODEL_QUARTZNET=1` and `ENABLE_STT_MODEL_CITRINET=0` (one model per build). Where the file comes from and how to install it: [README, Local speech-to-text model](../README.md#local-speech-to-text-model-esp32-p4) |
+| `ENABLE_LOCAL_STT` | On-device speech-to-text on the ESP32-P4 boards (the engine is compiled only for that target). Needs a model file on the microSD card at run time: Citrinet-384 by default (`ENABLE_STT_MODEL_CITRINET`), or the published QuartzNet 15×5 with `ENABLE_STT_MODEL_QUARTZNET=1` and `ENABLE_STT_MODEL_CITRINET=0` (one model per build). Where the file comes from and how to install it: [Local speech-to-text model](README_DETAILS.md#local-speech-to-text-model-esp32-p4) |
 | `ENABLE_RASPBERRY_PI_HOST_POWER` | Set to `1` to build `cm5 power` - profile, reboot, halt, suspend, timed sleep of the Pi with confirmed request/ACK |
 | `ENABLE_RASPBERRY_PI_HOST_FAN` | Set to `1` to build `cm5 fan` - quiet/auto/max with temperature, PWM, RPM and health readback |
 
@@ -202,7 +202,7 @@ The main menu mirrors the OLED's six categories:
 | **System** | Status, System Events, Logging, Tests (only on an `ENABLE_G2_TESTSUITE` build) |
 | **Config** | Settings, Users (admin only) |
 | **Connect** | WiFi >>, Bluetooth >>, ESP-NOW >> |
-| **Hardware** | Sensor list (one row per compiled sensor), LED, FM tuner |
+| **Hardware** | Sensor list (one row per compiled sensor; the RTC row and page show local time), LED, FM tuner |
 | **Apps** | ESP-NOW, Files, Notes, Maps, LLM, Automations, Health |
 | **Power** | CPU presets, restart, power off |
 
@@ -215,7 +215,7 @@ deeper still: **Camera settings** is reached from Hardware -> sensor list -> `CA
 
 | App | Notes |
 | --- | ----- |
-| **ESP-NOW** | Peer messaging. Distinct from Connect -> ESP-NOW, which owns the settings |
+| **ESP-NOW** | Peer messaging. Distinct from Connect -> ESP-NOW, which owns the settings. `Peers (2/3 up)` counts the paired devices other than this one and how many hold an encrypted session, as the status line's `ESPNow: 2/3 up` |
 | **Files** | Browse, view, rename, delete. Folders carry an item-count badge |
 | **Notes** | Private spoken notes (QuickNote): `● New note`, your newest notes, read and delete (requires `ENABLE_QUICKNOTE`) - see [QUICKNOTE.md](QUICKNOTE.md) |
 | **Maps** | Pan/zoom offline map viewer. Row reads `Maps (none)` when no map files are present (requires `ENABLE_MAPS`) |
@@ -497,7 +497,7 @@ be set up into a lockout. Compatibility and upgrade promises:
   probation and confirmed with `otaack`; `otastatus` shows the state. Setting it
   up is a one-time, destructive migration described in
   [OTA_DEVICE_SETUP.md](OTA_DEVICE_SETUP.md). A layout counts as supported only
-  when the support matrix in the README lists a dated PASS for it on a current
+  when the [support matrix](README_DETAILS.md#support-matrix) lists a dated PASS for it on a current
   image; until then it is experimental and the cable path is the supported one.
 - **Moving from 0.99.x to 1.0** is a full-erase install (`erase-flash`, then
   flash, then the setup wizard). Within 1.x, settings, accounts, networks and
@@ -594,7 +594,7 @@ have a recent export.
 
 ## ESP-NOW Mesh
 
-ESP-NOW V3 is Hardware One's inter-device wireless protocol. Devices pair with a shared passphrase and form an encrypted mesh.
+Hardware One's custom ESP-NOW v1 mesh is its inter-device wireless protocol. Devices pair with a shared passphrase and form an encrypted mesh.
 
 ### Pairing
 1. On both devices, open the **ESP-NOW** page in the web UI (pairing lives there - there is no separate Pair page) or use the `espnowpair` CLI.
@@ -966,7 +966,7 @@ Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum vari
 | System | `BATTERY` | numeric | charge estimate; ADC values are approximate, unavailable/stale readings do not satisfy the condition |
 | System | `HEAP` `PSRAM` `FSFREE` | numeric | free internal DRAM / PSRAM / storage, in KB |
 | System | `UPTIME` | numeric | minutes since boot |
-| System | `CHIPTEMP` | numeric | SoC temperature, C |
+| System | `CHIPTEMP` | numeric | SoC temperature, C; the condition is false when the chip has no reading |
 | Network | `WIFI` `BLE` | enum | `CONNECTED` / `NONE` |
 | Network | `RSSI` | numeric | WiFi signal, dBm (negative; only while connected) |
 | Network | `PEERS` | numeric | live ESP-NOW mesh peers (heartbeat within 30s) |
@@ -979,7 +979,7 @@ Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum vari
 | Mesh/Bond | `BOND_ROLE` | enum | `MASTER` / `WORKER` |
 | Mesh/Bond | `PAIRMODE` | enum | `ACTIVE` / `NONE` (WPS pairing window open) |
 | Mesh/Bond | `BOND_RSSI` | numeric | bond link RSSI, dBm (only while online) |
-| Mesh/Bond | `BOND_PEER_HEAP` `BOND_PEER_UPTIME` | numeric | bonded peer free heap (KB) / uptime (min) |
+| Mesh/Bond | `BOND_PEER_HEAP` `BOND_PEER_UPTIME` | numeric | bonded peer free internal (byte-addressable) RAM (KB) / uptime (min) |
 | Mesh/Bond | `PAIRMODE_SECS` `PEERSKNOWN` `STALESTPEERAGE` | numeric | pairing seconds left / known peers / oldest peer heartbeat age (s) |
 | ESP-NOW | `ROOM` `ZONE` `TAGS` | string | THIS device's metadata (`gSettings.espnowRoom/Zone/Tags`); `NONE` if unset |
 
@@ -1185,7 +1185,7 @@ Available debug modules (type `help debug` on device for full list):
 | `debughttp` | HTTP request/response logging |
 | `debugwifi` | WiFi connection events |
 | `debugespnow` | Alias of `debugespnowcore` - ESP-NOW core messages |
-| `debugespnowcore` | ESP-NOW V3 frame layer |
+| `debugespnowcore` | custom ESP-NOW v1 frame layer |
 | `debugespnowmesh` | Mesh peer management |
 | `debugespnowrouter` | Message routing |
 | `debugespnowstream` | Stream output |
@@ -1698,6 +1698,7 @@ selected with a bitmask (`sensorlog sensors`), not started one-at-a-time.
 sensorlog start <filepath> [interval_ms]  - Begin logging (path required; default interval 5000 ms)
 sensorlog stop                            - Stop logging
 sensorlog status                          - Show path, interval, format, selected sensors
+sensorlog status json                     - The same status as one JSON object
 sensorlog format <text|csv|track>         - text/csv for multi-sensor; track = GPS-only
 sensorlog maxsize <bytes>                 - Max file size before rotation
 sensorlog rotations <count>               - Old logs to keep (0-9)
@@ -1705,6 +1706,9 @@ sensorlog sensors <list|all|none>         - Replace mask: thermal,tof,imu,gamepa
 sensorlog interval <ms>                   - Poll interval (100-3600000)
 sensorlog autostart [on|off]              - Auto-start on boot with last-used path/mask
 ```
+
+CSV rows always carry every selected column: a selected sensor without a reading leaves its
+fields empty, so the later columns stay under their header names.
 
 **R1 health logging (preferred):** `healthlogging on` (or the **Health Logging** row on
 Apps -> Health, the OLED R1 Health page, or the **Health logging** button on Web
