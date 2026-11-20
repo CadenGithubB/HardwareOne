@@ -1,6 +1,8 @@
 # Handheld Deployments
 
-A **Handheld** is the Standard Handheld product of the README: a board with
+A **Handheld** is the
+[Standard Handheld](../../docs/README_DETAILS.md#3-hardware-one-standard-handheld)
+configuration: a board with
 its own display and local input, usually a camera and microphone, the web UI,
 Bluetooth for the G2 glasses and R1 ring, and the ESP-NOW mesh. It is the
 full interactive device, as opposed to the screenless Headless Node and the
@@ -36,8 +38,7 @@ gen2 model from the microSD card, and microSD stays off here until it is
 qualified. Setting `ENABLE_SDMMC_CARD`, `ENABLE_SD_CARD` and
 `ENABLE_LOCAL_STT` to 1 in `boards/p4x_eye/features.h` enables it with the
 15×5 model; see the
-README's
-[Local speech-to-text model](../../README.md#local-speech-to-text-model-esp32-p4)
+[Local speech-to-text model](../../docs/README_DETAILS.md#local-speech-to-text-model-esp32-p4)
 section for its URL and SHA-256. The ESP32-C6
 companion firmware this image expects is built and flashed with
 [`tools/p4/companion`](../../tools/p4/companion/README.md).

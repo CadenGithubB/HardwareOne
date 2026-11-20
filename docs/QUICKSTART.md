@@ -93,8 +93,10 @@ libraries have been fixed for. If you don't have it installed:
 ```bash
 git clone https://github.com/CadenGithubB/HardwareOne.git
 cd HardwareOne
-. "$IDF_PATH/export.sh"      # ESP-IDF 5.5.5
-tools/vendor_arduino.sh      # clones arduino-esp32 3.3.5 into components/arduino and applies the local patches
+# ESP-IDF 5.5.5
+. "$IDF_PATH/export.sh"
+# clones arduino-esp32 3.3.5 into components/arduino and applies the local patches
+tools/vendor_arduino.sh
 ```
 
 `components/arduino` is git-ignored, so a fresh clone has none of it; the script

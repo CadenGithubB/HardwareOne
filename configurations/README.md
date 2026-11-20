@@ -3,9 +3,11 @@
 Build different feature selections for the same board without editing shared headers:
 
 ```sh
-python3 tools/build_config.py list configurations     # name, board, and what each is for
+# name, board, and what each is for
+python3 tools/build_config.py list configurations
 python3 tools/build_config.py build xiao-default
-python3 tools/build_config.py new                     # make your own: board first, then what it does
+# make your own: board first, then what it does
+python3 tools/build_config.py new
 ```
 
 Eleven configurations are kept, each a board and a job:

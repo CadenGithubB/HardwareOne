@@ -68,7 +68,7 @@ Every step below must pass on the exact commit you intend to tag, from a clean t
    the SoftAP defaults, test fixtures; the list and reasons are in the test). It cannot check for a Wi-Fi
    network name or a password: read the diff since the last tag for those.
 5. CHANGELOG `[Unreleased]` lists every user-visible change since the last tag; COMPATIBILITY.md and the
-   matrix in README match what you built.
+   support matrix in `docs/README_DETAILS.md` match what you built.
 
 ## The 1.0 cut: HardwareOne's own versions go to 1
 

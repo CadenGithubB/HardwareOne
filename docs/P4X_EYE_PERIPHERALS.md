@@ -227,7 +227,7 @@ local STT without the card. The saved P4 configurations
 `dccef3a8cead069d97d780e0d08ddfc65d9f0870c0af4673b29327f00158f048`).
 Speaker labels (on in this profile) read `/sd/STT Models/speaker.spk`, which is
 not published; transcription works without it. Installation steps are in the
-README's [Local speech-to-text model](../README.md#local-speech-to-text-model-esp32-p4)
+[Local speech-to-text model](README_DETAILS.md#local-speech-to-text-model-esp32-p4)
 section.
 
 
