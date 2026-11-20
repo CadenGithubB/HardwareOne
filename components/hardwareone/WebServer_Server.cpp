@@ -2300,17 +2300,32 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   size_t freeLimit = freeBytes;
   bool outOfSpace = false;
 
-  // Acquire only when the validated destination opens; keep it through cleanup.
-  std::optional<FsLockGuard> fileLock;
+  // No filesystem lock is held across the network receive: a slow or stalled
+  // client must not stop every other FS user (logs, transcripts, QuickNotes,
+  // the Files page) for the length of the transfer. The staged temporary is
+  // this request's own file (handlers run one at a time on httpd's worker),
+  // so the lock is taken only around each filesystem call: the staged open,
+  // each buffered write, and the commit or discard.
   // Staged replacement: the body streams into a sibling temporary that is
   // promoted over the destination only after a complete, checked upload.
   VFS::StagedWrite save("web.upload");
   bool fileOpen = false;
+  // Without the transfer-long lock, an SD destination registers as an SD user
+  // (the video recorder's mechanism) from the staged open to the finish, so
+  // sdunmount, a remount or a format refuses instead of tearing the card down
+  // under the open staged file.
+  static const char kUploadSdOwner[] = "web.upload";
+  bool sdHeld = false;
+  bool sdBusy = false;
 
   bool shortWrite = false;
   auto flushWrite = [&]() {
     if (outLen && fileOpen) {
-      size_t w = save.file().write(uploadOutBuf.get(), outLen);
+      size_t w;
+      {
+        FsLockGuard writeLock("handleFileUpload.write");
+        w = save.file().write(uploadOutBuf.get(), outLen);
+      }
       if (w != outLen) {
         shortWrite = true;
       }
@@ -2395,14 +2410,26 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     }
     DEBUG_STORAGEF("[handleFileUpload] Opening file for write: %s", path.c_str());
 
-    fileLock.emplace("handleFileUpload.file");
     // Write to a staged sibling and promote it after a complete, checked
     // upload (VFS::StagedWrite), so an existing destination survives a
     // dropped connection or a failed write. The temporary sits in the
     // destination's directory, so the same permission and admin-only rules
     // apply to it; a refused temporary fails the upload and leaves the
     // destination untouched.
-    if (!save.begin(path, ctx)) {
+    bool begun;
+    {
+      FsLockGuard openLock("handleFileUpload.open");
+      begun = save.begin(path, ctx);
+      if (begun && VFS::getStorageType(path) == VFS::SDCARD) {
+        sdHeld = VFS::sdInUseBegin(kUploadSdOwner);
+        if (!sdHeld) {
+          save.discard(ctx);
+          begun = false;
+          sdBusy = true;
+        }
+      }
+    }
+    if (!begun) {
       ERROR_STORAGEF("Failed to open file for write or denied: %s", path.c_str());
       return false;
     }
@@ -2437,7 +2464,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   const char* uploadError = [&]() -> const char* {
     if (rawBody) {
       path = queryPath;
-      if (!openFileIfNeeded()) return "Invalid path";
+      if (!openFileIfNeeded()) return sdBusy ? "SD card busy" : "Invalid path";
       while (received < contentLen) {
         // Fill the whole buffer before each write: one receive returns only
         // what the socket holds (often one or two packets).
@@ -2456,7 +2483,11 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
           have += (size_t)ret;
           received += (size_t)ret;
         }
-        size_t w = save.file().write((const uint8_t*)buf, have);
+        size_t w;
+        {
+          FsLockGuard writeLock("handleFileUpload.write");
+          w = save.file().write((const uint8_t*)buf, have);
+        }
         totalWritten += w;
         if (w != have) return "Write failed (short write)";
         if (totalWritten > freeLimit) return "Insufficient storage space";
@@ -2530,7 +2561,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
         } else {                                 // F_CONTENT
           if (!binaryKnown) binaryKnown = true;  // fallback
           if (!fileOpen) {
-            if (!openFileIfNeeded()) return "Invalid path";
+            if (!openFileIfNeeded()) return sdBusy ? "SD card busy" : "Invalid path";
           }
           if (expect && expect[expectPos] != 0) {
             if (c == expect[expectPos]) {
@@ -2623,9 +2654,11 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   }();
 
   if (fileOpen) {
-    // Both finish while the upload's lock is still held: a failed upload
-    // removes only what it wrote, the staged temporary; a complete one
-    // promotes the staged copy over the destination.
+    // Every exit of the receive loop lands here, so the staged file is always
+    // closed and finished under one short lock: a failed upload removes only
+    // what it wrote, the staged temporary; a complete one promotes the staged
+    // copy over the destination.
+    FsLockGuard finishLock("handleFileUpload.finish");
     if (uploadError) {
       save.discard(ctx);
     } else if (!save.commit(ctx)) {
@@ -2640,8 +2673,11 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       // here: the Files page already re-reads storage after an upload.
       VFS::invalidateStatsSnapshot(VFS::INTERNAL);
     }
+    if (sdHeld) {
+      VFS::sdInUseEnd(kUploadSdOwner);
+      sdHeld = false;
+    }
   }
-  fileLock.reset();
   uploadOutBuf.reset();
   uploadRecvBuf.reset();
 
@@ -3425,6 +3461,34 @@ static esp_err_t handleLoggingStatus(httpd_req_t* req) {
   return ESP_OK;
 }
 
+// The command line as the page may keep it (history, terminal echo,
+// localStorage): the audit-redacted line, percent-encoded like
+// encodeURIComponent so the header value is plain ASCII with no CR/LF and the
+// page reads it back with decodeURIComponent. PSRAM-backed; the caller keeps
+// it alive until the response is sent (httpd_resp_set_hdr stores the pointer).
+static char* encodeCliDisplayHeader(const String& safeCmd) {
+  static const char kHex[] = "0123456789ABCDEF";
+  const size_t n = safeCmd.length();
+  const char* in = safeCmd.c_str();
+  char* out = (char*)ps_alloc(n * 3 + 1, AllocPref::PreferPsram, "http.cli.display");
+  if (!out) return nullptr;
+  size_t o = 0;
+  for (size_t i = 0; i < n; ++i) {
+    const unsigned char c = (unsigned char)in[i];
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+        c == '-' || c == '_' || c == '.' || c == '!' || c == '~' || c == '*' ||
+        c == '\'' || c == '(' || c == ')') {
+      out[o++] = (char)c;
+    } else {
+      out[o++] = '%';
+      out[o++] = kHex[c >> 4];
+      out[o++] = kHex[c & 15];
+    }
+  }
+  out[o] = 0;
+  return out;
+}
+
 esp_err_t handleCliCommand(httpd_req_t* req) {
   AuthContext ctx = makeWebAuthCtx(req);
   DEBUG_CMD_FLOWF("[web.cli] enter ip=%s content_len=%d", ctx.ip.c_str(), (int)req->content_len);
@@ -3468,6 +3532,10 @@ esp_err_t handleCliCommand(httpd_req_t* req) {
   DEBUG_CMD_FLOWF("[web.cli] cmdEncoded.length()=%d after extractFormField", cmdEncoded.length());
   String cmd = urlDecode(cmdEncoded);
   const String safeCmd = redactCmdForAudit(cmd);
+  // Sent as X-Cmd-Display on every reply below, so the page keeps only the
+  // redacted line (passwords, PSKs, tokens masked) in its history and
+  // localStorage. Lives until this handler returns, past httpd_resp_send.
+  std::unique_ptr<char, void (*)(void*)> cmdDisplay(encodeCliDisplayHeader(safeCmd), free);
   DEBUG_CMD_FLOWF("[web.cli] cmd.length()=%d after urlDecode", cmd.length());
   String validateStr = extractFormField(body, "validate");
   bool doValidate = (validateStr == "1" || validateStr == "true");
@@ -3569,6 +3637,7 @@ esp_err_t handleCliCommand(httpd_req_t* req) {
                                    uc.ctx.transportSessionEpoch)) {
     httpd_resp_set_status(req, "401 Unauthorized");
     httpd_resp_set_type(req, "text/plain");
+    if (cmdDisplay) httpd_resp_set_hdr(req, "X-Cmd-Display", cmdDisplay.get());
     httpd_resp_sendstr(req, "Error: web session changed.");
     return ESP_OK;
   }
@@ -3581,6 +3650,7 @@ esp_err_t handleCliCommand(httpd_req_t* req) {
                                 uc.ctx.transportSessionEpoch)
           ? "active"
           : "inactive");
+  if (cmdDisplay) httpd_resp_set_hdr(req, "X-Cmd-Display", cmdDisplay.get());
   httpd_resp_set_type(req, "text/plain");
   if (!webSessionStillLive) {
     httpd_resp_set_status(req, "401 Unauthorized");

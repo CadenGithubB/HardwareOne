@@ -171,31 +171,54 @@ inline void streamMicrophoneSensorJs(httpd_req_t* req) {
     "        list.innerHTML = '<div class=\"no-recordings\">No recordings</div>';\n"
     "        return;\n"
     "      }\n"
+    // Recording names come from the SD card or LittleFS, so each row is built
+    // from nodes: the name is only ever text, the audio URL encodes it, and
+    // the delete button holds the original name in a closure.
     "      data.files.forEach(function(f){\n"
+    "        var name = String(f.name);\n"
     "        var item = document.createElement('div');\n"
     "        item.className = 'recording-item';\n"
-    "        var sizeKB = Math.round(f.size/1024);\n"
-    "        item.innerHTML = '<div class=\"rec-info\"><span class=\"rec-name\">' + f.name + '</span><span class=\"rec-size\">' + sizeKB + 'KB</span></div>' +\n"
-    "          '<audio controls class=\"rec-audio\" preload=\"none\"><source src=\"/api/recordings/file?name=' + f.name + '\" type=\"audio/wav\"></audio>' +\n"
-    "          '<button class=\"btn btn-sm btn-danger rec-delete\" data-name=\"' + f.name + '\">X</button>';\n"
+    "        var info = document.createElement('div');\n"
+    "        info.className = 'rec-info';\n"
+    "        var nameEl = document.createElement('span');\n"
+    "        nameEl.className = 'rec-name';\n"
+    "        nameEl.textContent = name;\n"
+    "        var sizeEl = document.createElement('span');\n"
+    "        sizeEl.className = 'rec-size';\n"
+    "        sizeEl.textContent = Math.round(f.size/1024) + 'KB';\n"
+    "        info.appendChild(nameEl); info.appendChild(sizeEl);\n"
+    "        var audio = document.createElement('audio');\n"
+    "        audio.className = 'rec-audio';\n"
+    "        audio.setAttribute('controls', '');\n"
+    "        audio.setAttribute('preload', 'none');\n"
+    "        var src = document.createElement('source');\n"
+    "        src.setAttribute('src', '/api/recordings/file?name=' + encodeURIComponent(name));\n"
+    "        src.setAttribute('type', 'audio/wav');\n"
+    "        audio.appendChild(src);\n"
+    "        var del = document.createElement('button');\n"
+    "        del.className = 'btn btn-sm btn-danger rec-delete';\n"
+    "        del.textContent = 'X';\n"
+    "        del.addEventListener('click', function(){ window.deleteMicRecording(name); });\n"
+    "        item.appendChild(info); item.appendChild(audio); item.appendChild(del);\n"
     "        list.appendChild(item);\n"
-    "      });\n"
-    "      list.querySelectorAll('.rec-delete').forEach(function(btn){\n"
-    "        btn.onclick = async function(){\n"
-    "          var name = this.getAttribute('data-name');\n"
-    "          if(await hwConfirm('Delete ' + name + '?')){\n"
-    // micdelete takes the name as a quoted token. A refusal comes back as
-    // HTTP 400/403 with the reason in the body, so read it from the Response.
-    "            hw.postForm('/api/cli',{cmd:'micdelete \"'+name+'\"'})\n"
-    "              .then(function(r){return r.text().then(function(t){if(!r.ok)throw new Error(t||('HTTP '+r.status));});})\n"
-    "              .then(function(){window.__lastRecCount=-1;window.loadMicRecordings();})\n"
-    "              .catch(function(e){alert(e.message);});\n"
-    "          }\n"
-    "        };\n"
     "      });\n"
     "    })\n"
     "    .catch(function(e){console.error('Failed to load recordings',e);});\n"
     "};"
+    // micdelete takes the name as one positional quoted token, which
+    // CommandArgs::parse ends at the first " and does not unescape: send the
+    // name as it is between quotes (a backslash, even a trailing one, is
+    // literal there), and refuse a name holding " on the page rather than let
+    // it split into extra tokens. A refusal comes back as HTTP 400/403 with
+    // the reason in the body, which hw.postFormText carries in the rejection.
+    "\nwindow.deleteMicRecording = async function(name) {\n"
+    "  name = String(name);\n"
+    "  if(name.indexOf('\"') >= 0){ alert('This name cannot be deleted here; use the Files page.'); return; }\n"
+    "  if(!(await hwConfirm('Delete ' + name + '?'))) return;\n"
+    "  return hw.postFormText('/api/cli',{cmd:'micdelete \"'+name+'\"'})\n"
+    "    .then(function(){window.__lastRecCount=-1;window.loadMicRecordings();})\n"
+    "    .catch(function(e){alert(e && e.message ? e.message : String(e));});\n"
+    "};\n"
     // /api/recordings walks BOTH /sd/recordings and /recordings on the httpd
     // worker, and ESP-IDF's httpd is single-task — every other request (notably
     // the camera preview poll) is blocked for the duration. Measured 1.2 s at 46

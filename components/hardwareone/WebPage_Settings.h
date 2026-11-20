@@ -589,7 +589,7 @@ window.SchemaPanel = (function(){
         build(cont, opts, results[0] || {}, (results[1] && results[1].settings) || {});
       }).catch(function(e){
         errp(pfx, 'Render failed: ' + e.message);
-        cont.innerHTML = '<span style="color:var(--danger,#e74c3c)">Failed to load schema: ' + e.message + '</span>';
+        cont.innerHTML = '<span style="color:var(--danger,#e74c3c)">Failed to load schema: ' + hw.esc(e.message) + '</span>';
       });
     }
   };
@@ -2055,7 +2055,7 @@ function saveNotifPolicy() {
     });
   }).catch(function(err){
     var c=hw.$('debug-dynamic-container');
-    hw.setHTML(c, '<div style="color:#f55">Error loading debug settings: '+err.message+'</div>');
+    hw.setHTML(c, '<div style="color:#f55">Error loading debug settings: '+ hw.esc(err.message) +'</div>');
   });
   window.dbgToggleAll=function(gn){
     var card=hw.$('dbg-'+gn.replace(/[^a-z0-9]/g,''));if(!card)return;
@@ -3127,7 +3127,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           sessions = Array.isArray(rs) ? rs : (rs && rs.sessions) || [];
           pending  = Array.isArray(rp) ? rp : (rp && rp.pending) || [];
         } catch(e) {
-          container.innerHTML = '<div style="color:#dc3545">Error parsing data: ' + e.message + '</div>';
+          container.innerHTML = '<div style="color:#dc3545">Error parsing data: ' + hw.esc(e.message) + '</div>';
           return;
         }
         if (!Array.isArray(users) || !Array.isArray(sessions) || !Array.isArray(pending)) {
@@ -3301,7 +3301,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         container.innerHTML = html;
       })
       .catch(function(e) {
-        container.innerHTML = '<div style="color:#dc3545">Error loading users: ' + e.message + '</div>';
+        container.innerHTML = '<div style="color:#dc3545">Error loading users: ' + hw.esc(e.message) + '</div>';
       });
     };
     
@@ -3820,7 +3820,7 @@ console.log('[SETTINGS] All parts loaded successfully');
           host.innerHTML = '<span style="opacity:0.7">No editable modules — worker may have non-default build flags.</span>';
         }
       })
-      .catch(function(e){ host.innerHTML = '<span style="color:var(--danger,#e74c3c)">Schema fetch failed: ' + e.message + '</span>'; });
+      .catch(function(e){ host.innerHTML = '<span style="color:var(--danger,#e74c3c)">Schema fetch failed: ' + hw.esc(e.message) + '</span>'; });
   }
 
   // SchemaPanel calls this after a bonded save → /api/bond/settings/sync. It

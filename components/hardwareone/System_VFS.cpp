@@ -1415,11 +1415,15 @@ bool replaceFileGuarded(const String& temporary, const String& destination,
 // than the backend may take. LittleFS keeps the limit of whoever formatted the
 // partition (64 bytes on the flashed image, 255 when the device formatted it)
 // and sizes directory-entry names by CONFIG_LITTLEFS_OBJ_NAME_LEN, so the
-// smaller bound applies; FAT long names stop at CONFIG_FATFS_MAX_LFN. Reusing
-// the short name is safe because the caller holds the filesystem lock from
-// begin() to commit() or discard(), and boot cleanup removes any ".tmp" a
-// reset leaves behind. Returns an empty String when the copy came back short.
-static String stagingPathFor(const String& destination) {
+// smaller bound applies; FAT long names stop at CONFIG_FATFS_MAX_LFN. A
+// writer need not hold the filesystem lock from begin() to commit() (the web
+// upload releases it while it receives), so two writers to one destination,
+// or two long names in one directory, could otherwise share a temporary:
+// `slot` > 0 names the alternative "<destination>.<slot>.upload.tmp" (or
+// "~stage.<slot>.upload.tmp"), and begin() takes the first one that is free.
+// Boot cleanup removes any ".tmp" a reset leaves behind. Returns an empty
+// String when the name would not fit or the copy came back short.
+static String stagingPathFor(const String& destination, unsigned slot) {
 #ifdef CONFIG_LITTLEFS_OBJ_NAME_LEN
   constexpr size_t kLittleFsNameMax = CONFIG_LITTLEFS_OBJ_NAME_LEN - 1;
 #else
@@ -1430,21 +1434,30 @@ static String stagingPathFor(const String& destination) {
 #else
   constexpr size_t kFatNameMax = 255;
 #endif
-  static const char kSuffix[] = ".upload.tmp";
-  static const char kShortName[] = "~stage.upload.tmp";
+  char suffix[24];
+  char shortName[32];
+  if (slot == 0) {
+    snprintf(suffix, sizeof(suffix), ".upload.tmp");
+    snprintf(shortName, sizeof(shortName), "~stage.upload.tmp");
+  } else {
+    snprintf(suffix, sizeof(suffix), ".%u.upload.tmp", slot);
+    snprintf(shortName, sizeof(shortName), "~stage.%u.upload.tmp", slot);
+  }
   const size_t directoryLength = (size_t)(destination.lastIndexOf('/') + 1);
   const size_t nameLength = destination.length() - directoryLength;
   const size_t nameMax = getStorageType(destination) == SDCARD ? kFatNameMax : kLittleFsNameMax;
   String staged;
   size_t expected = 0;
-  if (nameLength + strlen(kSuffix) <= nameMax) {
+  if (nameLength + strlen(suffix) <= nameMax) {
     staged = destination;
-    staged.concat(kSuffix);
-    expected = destination.length() + strlen(kSuffix);
-  } else {
+    staged.concat(suffix);
+    expected = destination.length() + strlen(suffix);
+  } else if (strlen(shortName) <= nameMax) {
     staged = destination.substring(0, directoryLength);
-    staged.concat(kShortName);
-    expected = directoryLength + strlen(kShortName);
+    staged.concat(shortName);
+    expected = directoryLength + strlen(shortName);
+  } else {
+    return String();
   }
   return staged.length() == expected ? staged : String();
 }
@@ -1452,12 +1465,23 @@ static String stagingPathFor(const String& destination) {
 bool StagedWrite::begin(const String& destination, const AuthContext& ctx) {
   if (open_) return false;
   destination_ = destination;
-  temporary_ = stagingPathFor(destination);
+  temporary_ = "";
   // No I/O on a truncated copy (a String that came back short).
-  if (destination_.length() != destination.length() || temporary_.length() == 0) {
-    temporary_ = "";
-    return false;
+  if (destination_.length() != destination.length()) return false;
+  // Probe and open under one lock, so the temporary this write takes is its
+  // own even when the caller releases the lock between writes: a name another
+  // staged write (or a reset) left in place moves this one to the next slot.
+  FsLockGuard guard("VFS.StagedWrite.begin");
+  constexpr unsigned kStagingSlots = 8;
+  for (unsigned slot = 0; slot < kStagingSlots; ++slot) {
+    String candidate = stagingPathFor(destination, slot);
+    if (candidate.length() == 0) break;
+    if (!exists(candidate)) {
+      temporary_ = candidate;
+      break;
+    }
   }
+  if (temporary_.length() == 0) return false;
   // A refused temporary (permission, full filesystem, transient error) ends
   // the write with the destination untouched. The destination is never
   // opened for writing here: that open would truncate the very file this

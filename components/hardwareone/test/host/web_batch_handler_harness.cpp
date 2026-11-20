@@ -391,7 +391,7 @@ static void testNormalAndOwnership() {
     check(replies[2].as<std::string>() == special, "JSON escaping preserves reply text");
     check(replies[3] == "Error: command refused", "command error remains in result slot");
     check(replies[4].as<std::string>() == std::string(4095, 'x'), "large reply survives");
-    if (!bond) expectFailed(doc, {3}, "a failed command is listed by its results[] index");
+    expectFailed(doc, {3}, "a failed command is listed by its results[] index");
     check(scenario.executed.size() == 3, "all nonempty commands execute exactly once");
     check(scenario.executed[0].line == (bond ? "remote:first" : "first"), "routing stays unchanged");
     check(responseAllocator.calls > 0, "actual response uses supplied JSON allocator");
@@ -475,14 +475,32 @@ static void testInteractive() {
         "bond preserves two-slot UI contract");
   check(remote["results"][1].as<std::string>().rfind("Pending:", 0) == 0,
         "bond ACK remains pending instead of claiming remote completion");
+  expectFailed(remote, {}, "a delivered bond confirmation lists no failure");
   resetScenario(); scenario.steps = {{"Error: No session token - bond not ready or passphrase mismatch", false}};
   auto unsent = decode(invoke(true, {"userdelete bob", "yes"}, true));
   check(unsent["results"][1] == "Error: No session token - bond not ready or passphrase mismatch",
         "a bond confirmation that was not sent keeps its reason");
+  expectFailed(unsent, {1}, "a bond confirmation that was not sent fails slot 1 only");
+  // A bond confirmation the executor accepted but answered with a failure reply.
+  resetScenario(); scenario.steps = {{"Error: x"}};
+  expectFailed(decode(invoke(true, {"filedelete \"/a\"", "yes"}, true)), {1},
+               "a bond confirmation answered with a failure reply fails slot 1");
   resetScenario(); scenario.steps = {{"", false}};
   auto silent = decode(invoke(true, {"tz 480"}));
   check(silent["results"][0] == "Error: Command was not sent to the bonded device. Retry.",
         "a bond batch command that failed without a reply says it was not sent");
+  expectFailed(silent, {0}, "a bond batch command that was not sent is listed as failed");
+  // /api/bond/cli/batch names its failed commands like /api/cli/batch: one
+  // delivered, one not sent (no reply), one answered with a failure reply.
+  resetScenario(); scenario.steps = {{"OK"}, {"", false}, {"Error: x"}};
+  auto mixed = decode(invoke(true, {"a", "b", "c"}));
+  check(mixed["ok"] == true && mixed["count"] == 3, "bond batch with failures still completes");
+  check(mixed["results"][0] == "OK" && mixed["results"][2] == "Error: x",
+        "bond batch keeps each reply in its slot");
+  expectFailed(mixed, {1, 2}, "bond batch lists the undelivered and the refused command");
+  // Blank placeholders keep their slot and are never listed.
+  resetScenario(); scenario.steps = {{"Usage: b <x>"}};
+  expectFailed(decode(invoke(true, {"", "b"})), {1}, "bond failed[] indexes count blank placeholders");
   resetScenario();
   const auto invalid = invoke(true, {"status", "yes"}, true);
   check(invalid.status.rfind("400", 0) == 0 && scenario.executed.empty(), "unsupported bond confirmation rejected");

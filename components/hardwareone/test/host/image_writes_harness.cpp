@@ -277,11 +277,18 @@ static ImageManager setup(bool internal = true, bool sd = true) {
 static const char* pathFor(bool sd) { return sd ? "/sd/photos/img_000000.jpg" : "/photos/img_000000.jpg"; }
 static std::string writePathFor(bool sd) { return std::string(pathFor(sd)) + (HAS_TEMP_SAVE ? ".tmp" : ""); }
 static ImageStorageLocation locationFor(bool sd) { return sd ? IMAGE_STORAGE_SD : IMAGE_STORAGE_LITTLEFS; }
+static std::string baseName(const std::string& path) { return path.substr(path.rfind('/') + 1); }
 static void hooks(const String& result, ImageStorageLocation location) {
   if (!result.length()) check(events.empty() && retentions.empty(), "failed save must publish no saved event or retention work");
   else check(events.size() == 1 && events[0].path == result.c_str() && retentions == std::vector<int>{location},
              "successful save publishes once and retains once with original location policy");
+  if (result.length()) check(events[0].name == baseName(result.c_str()), "saved event names the file the save wrote");
 }
+static std::shared_ptr<Node> photo(bool sd, const std::string& path, std::vector<uint8_t> bytes) {
+  auto node = std::make_shared<Node>(); node->tier = sd; node->bytes = std::move(bytes);
+  files[path] = node; return node;
+}
+static const std::vector<uint8_t> jpegBytes(jpeg, jpeg + sizeof(jpeg));
 static void cleanupIdentity(bool sd) {
   const std::string expected = sd ? "imgmgr.save_sd" : "imgmgr.save_image_lfs";
   for (const auto& access : accesses) {
@@ -458,24 +465,26 @@ static void filenameAndRetention() {
   check(owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_SD) == "/sd/photos/img_20261009_123456.jpg", "valid clock selects timestamp filename; post-save retention failure keeps saved result");
   check(events.size() == 3 && events.back().name == "img_20261009_123456.jpg" && retentions.size() == 3, "generated filename agrees with event payload"); balanced();
 }
+// A photo already holds this second's name: the save writes <name>_1.jpg and
+// the earlier photo is never replaced, whether the save completes or fails.
 static void collision(bool sd, Fault failure) {
   auto owner = setup(); fakeNow = 1; tiers[sd].fault = failure;
-  const std::string destination = std::string(sd ? "/sd/photos/" : "/photos/") + "img_20261009_123456.jpg";
+  const std::string folder = sd ? "/sd/photos/" : "/photos/";
+  const std::string earlier = folder + "img_20261009_123456.jpg";
+  const std::string destination = folder + "img_20261009_123456_1.jpg";
   const std::string temporary = destination + ".tmp";
-  auto original = std::make_shared<Node>(); original->tier = sd; original->bytes = {9, 8, 7};
-  files[destination] = original;
+  auto original = photo(sd, earlier, {9, 8, 7});
   const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
   const bool success = failure == Fault::None;
   check(bool(result.length()) == success, "only a completed and promoted image reports success");
+  check(files.count(earlier) && files.at(earlier) == original && original->bytes == std::vector<uint8_t>({9, 8, 7}) &&
+            !files.count(earlier + ".bak"),
+        "a same-second save leaves the earlier photo in place and unchanged");
   if (success) {
-    check(result == destination.c_str() && files.at(destination)->bytes == std::vector<uint8_t>(jpeg, jpeg + sizeof(jpeg)),
-          "same-second successful save replaces the previous image completely");
-  } else if (failure == Fault::RecoveryBackup) {
-    check(!files.count(destination) && files.at(destination + ".bak") == original && original->bytes == std::vector<uint8_t>({9, 8, 7}),
-          "caller preserves old image retained by failed SD rollback");
+    check(result == destination.c_str() && files.at(destination)->bytes == jpegBytes,
+          "a same-second save writes the next free name");
   } else {
-    check(files.count(destination) && files.at(destination) == original && original->bytes == std::vector<uint8_t>({9, 8, 7}),
-          "write or promotion failure preserves previous timestamp image bytes");
+    check(!files.count(destination), "a failed same-second save publishes nothing");
   }
   check(files.count(temporary) == unsigned(failure == Fault::Cleanup || failure == Fault::PromotionCleanup),
         "owned temporary removed or promoted; cleanup failure leaves identifiable temporary only");
@@ -509,12 +518,18 @@ static void preexistingTemporary(bool sd) {
   // init(), SD inside the first save after the card is seen again.
   if (sd) remountSd(); else owner.init();
   const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
-  check(result == pathFor(sd), "save after stale temporaries did not complete");
+  // The SD walk runs inside this save, after its name was taken from the
+  // counter: the taken name moves to _1. LittleFS was walked at init, so its
+  // counter already continues past img_000000.
+  const std::string next = folder + (sd ? "/img_000000_1.jpg" : "/img_000001.jpg");
+  check(result == next.c_str(), "save after stale temporaries did not complete under a new name");
   check(!files.count(std::string(pathFor(sd)) + ".tmp") && !files.count(folder + "/img_older.jpeg.tmp"),
         "stale photo temporaries were not swept");
   check(files.count(folder + "/notes.txt.tmp") && files.at(folder + "/notes.txt.tmp") == unrelated,
         "sweep removed a temporary that is not a photo");
-  check(files.at(pathFor(sd))->bytes == std::vector<uint8_t>(jpeg, jpeg + sizeof(jpeg)), "save did not publish the new image");
+  check(files.at(next)->bytes == jpegBytes, "save did not publish the new image");
+  check(files.at(pathFor(sd)) == original && original->bytes == std::vector<uint8_t>({9, 8, 7}),
+        "the earlier photo was replaced");
   hooks(result, locationFor(sd)); balanced();
   auto later = std::make_shared<Node>(); later->tier = sd; later->bytes = {7};
   files[folder + "/img_later.jpg.tmp"] = later;
@@ -570,7 +585,11 @@ static void bothPromotion(unsigned failedTier) {
   check(files.at(pathFor(failedTier)) == prior && prior->bytes == std::vector<uint8_t>({9, 8, 7}), "BOTH preserves previous image on failed tier");
   check(files.at(pathFor(!failedTier))->bytes == std::vector<uint8_t>(jpeg, jpeg + sizeof(jpeg)), "other tier independently retains complete image");
   check(tiers[0].promotions == 1 && tiers[1].promotions == 1, "both eligible tiers attempt promotion independently");
-  check(!files.count(std::string(pathFor(false)) + ".tmp") && !files.count(std::string(pathFor(true)) + ".tmp"), "BOTH leaves no owned temporary after handled promotion failure");
+  for (bool tier : {false, true}) {
+    const std::string base = pathFor(tier);
+    check(!files.count(base + ".tmp") && !files.count(base.substr(0, base.size() - 4) + "_1.jpg.tmp"),
+          "BOTH leaves no owned temporary after handled promotion failure");
+  }
   hooks(result, IMAGE_STORAGE_BOTH); balanced();
 }
 #if HAS_SAVE_REPORT
@@ -610,6 +629,95 @@ static void saveReports() {
     balanced(); }
 }
 #endif
+// (a) A reboot without a clock: a fresh manager walks each capture folder at
+// its first preparation and continues past the highest counter name, so the
+// earlier photo stays. LittleFS is walked at init; SD inside the first save,
+// after that save's name was taken, so that one save writes _1 and the next
+// continues the counter.
+static void freshManagers(bool sd) {
+  { auto first = setup(); check(first.saveImage(jpeg, sizeof(jpeg), locationFor(sd)) == pathFor(sd), "first boot writes img_000000"); }
+  const auto earlier = files.at(pathFor(sd));
+  const std::string folder = sd ? "/sd/photos/" : "/photos/";
+  ImageManager second; second.init(); clearObservations();
+  const std::string expected[] = {folder + (sd ? "img_000000_1.jpg" : "img_000001.jpg"),
+                                  folder + (sd ? "img_000001.jpg" : "img_000002.jpg")};
+  for (const std::string& name : expected) {
+    const auto result = second.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
+    check(result == name.c_str() && files.at(name)->bytes == jpegBytes, "the second boot writes a new name");
+    hooks(result, locationFor(sd)); balanced(); clearObservations();
+  }
+  check(files.at(pathFor(sd)) == earlier && earlier->bytes == jpegBytes, "the second boot left the first photo unchanged");
+  check(files.size() == 3, "three photos, none replaced");
+}
+// (b) Two saves in one stubbed second: the second writes _1, a third _2.
+static void sameSecond(bool sd) {
+  auto owner = setup(); fakeNow = 1;
+  const std::string folder = sd ? "/sd/photos/" : "/photos/";
+  const std::string names[] = {"img_20261009_123456.jpg", "img_20261009_123456_1.jpg", "img_20261009_123456_2.jpg"};
+  for (const std::string& name : names) {
+    clearObservations();
+    const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
+    check(result == (folder + name).c_str(), "same-second save takes the next free name");
+    hooks(result, locationFor(sd)); balanced();
+  }
+  for (const std::string& name : names) check(files.at(folder + name)->bytes == jpegBytes, "every same-second photo is kept");
+}
+// (c) BOTH with the name taken on one tier only: that tier writes _1, the
+// other keeps the plain name, and the event names the preferred copy.
+static void bothOneTierTaken(unsigned takenTier) {
+  auto owner = setup(); fakeNow = 1;
+  const std::string name = "img_20261009_123456.jpg", suffixed = "img_20261009_123456_1.jpg";
+  const std::string taken = std::string(takenTier ? "/sd/photos/" : "/photos/") + name;
+  auto original = photo(takenTier, taken, {9, 8, 7});
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), IMAGE_STORAGE_BOTH);
+  const std::string internal = std::string("/photos/") + (takenTier == 0 ? suffixed : name);
+  const std::string sdPath = std::string("/sd/photos/") + (takenTier == 1 ? suffixed : name);
+  check(result == internal.c_str(), "BOTH reports the internal copy under its final name");
+  check(files.at(internal)->bytes == jpegBytes && files.at(sdPath)->bytes == jpegBytes, "each tier writes its own free name");
+  check(files.at(taken) == original && original->bytes == std::vector<uint8_t>({9, 8, 7}), "the taken tier keeps its earlier photo");
+  check(events.size() == 1 && events[0].name == baseName(internal), "the event carries the final name, not the generated one");
+  hooks(result, IMAGE_STORAGE_BOTH); balanced();
+}
+// (d) The plain name and _1 .. _99 all taken: the save is refused and nothing
+// is opened, written or replaced. A taken .tmp counts as taken.
+static void namesExhausted(bool sd) {
+  auto owner = setup(); fakeNow = 1;
+  const std::string stem = std::string(sd ? "/sd/photos/" : "/photos/") + "img_20261009_123456";
+  std::vector<std::shared_ptr<Node>> earlier;
+  earlier.push_back(photo(sd, stem + ".jpg", {1}));
+  for (unsigned n = 1; n <= 99; ++n) {
+    const std::string path = stem + "_" + std::to_string(n) + ".jpg" + (n == 50 ? ".tmp" : "");
+    earlier.push_back(photo(sd, path, {uint8_t(n)}));
+  }
+  const size_t before = files.size();
+#if HAS_SAVE_REPORT
+  ImageSaveReport report;
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd), &report);
+  check((sd ? report.sd : report.internal) == ImageSaveFailure::WriteFailed, "an exhausted name is a failed write");
+#else
+  const auto result = owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd));
+#endif
+  check(!result.length() && !tiers[sd].opens && !tiers[sd].promotions && files.size() == before,
+        "the 100th collision is refused before any write");
+  check(earlier[0]->bytes == std::vector<uint8_t>({1}) && earlier[99]->bytes == std::vector<uint8_t>({99}),
+        "no earlier photo is replaced");
+  hooks(result, locationFor(sd)); balanced();
+  // One name freed: the next save takes it.
+  files.erase(stem + "_7.jpg"); clearObservations();
+  check(owner.saveImage(jpeg, sizeof(jpeg), locationFor(sd)) == (stem + "_7.jpg").c_str(), "a freed suffix is reused");
+  balanced();
+}
+#if HAS_COUNTER_NAMES
+static void counterNames() {
+  const std::pair<const char*, long> cases[] = {
+      {"img_000000.jpg", 0}, {"img_000042.jpg", 42}, {"img_1234567.jpg", 1234567}, {"img_000042_1.jpg", 42},
+      {"img_000042_99.jpg", 42}, {"img_20261009_123456.jpg", -1}, {"img_20261009_123456_1.jpg", -1},
+      {"img_00042.jpg", -1}, {"img_000042_100.jpg", -1}, {"img_000042_.jpg", -1}, {"img_000042.jpg.tmp", -1},
+      {"img_000042.jpeg", -1}, {"IMG_000042.jpg", -1}, {"img_000042x.jpg", -1}, {"photo.jpg", -1}, {"", -1}};
+  for (const auto& item : cases)
+    check(ImageManager::counterOfPhotoName(item.first) == item.second, std::string("counter name ") + item.first);
+}
+#endif
 int main(int argc, char** argv) {
   const std::string selected = argc > 1 ? argv[1] : "all";
   unsigned scenarios = 0, failures = 0;
@@ -641,6 +749,17 @@ int main(int argc, char** argv) {
       run(tier + "BOTH promotion failure", [=] { bothPromotion(sd); });
     }
     run("SD recovery backup belongs to promotion owner", [] { collision(true, Fault::RecoveryBackup); });
+    for (bool sd : {false, true}) {
+      const std::string tier = sd ? "SD " : "internal ";
+      run(tier + "fresh managers without a clock keep the earlier photo", [=] { freshManagers(sd); });
+      run(tier + "same-second saves take _1 and _2", [=] { sameSecond(sd); });
+      run(tier + "100th collision refused", [=] { namesExhausted(sd); });
+    }
+    for (unsigned tier = 0; tier < 2; ++tier)
+      run("BOTH name taken on tier " + std::to_string(tier) + " only", [=] { bothOneTierTaken(tier); });
+#if HAS_COUNTER_NAMES
+    run("counter photo names", counterNames);
+#endif
     run("SD mounted after init: save, sweep once, refuse after unmount", lateMountSave);
   }
   if (selected == "all") {

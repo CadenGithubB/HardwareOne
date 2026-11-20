@@ -172,15 +172,27 @@ struct FakeWiFi {
 static FakeWiFi WiFi;
 
 // The console double: scripted input, and a count of every byte the connect
-// reads from it.
+// reads from it. A byte with an arrival time is invisible until the virtual
+// clock reaches it (bytes without one are there from the start), so a key's
+// escape sequence can arrive a few milliseconds after its Esc.
 struct FakeSerial {
   std::string input;
+  std::vector<unsigned long> arrivals;  // per byte; shorter than input: the rest already arrived
   size_t next = 0;
   int reads = 0;
+  bool arrived(size_t i) const { return i >= arrivals.size() || arrivals[i] <= gNowMs; }
   int pending() const { return static_cast<int>(input.size() - next); }
-  int available() { return pending(); }
+  int available() {
+    int n = 0;
+    for (size_t i = next; i < input.size() && arrived(i); ++i) ++n;
+    return n;
+  }
+  int peek() {
+    if (next >= input.size() || !arrived(next)) return -1;
+    return static_cast<unsigned char>(input[next]);
+  }
   int read() {
-    if (next >= input.size()) return -1;
+    if (next >= input.size() || !arrived(next)) return -1;
     ++reads;
     return static_cast<unsigned char>(input[next++]);
   }
@@ -240,8 +252,15 @@ int wifiNetworkCount() { return static_cast<int>(std::min<size_t>(gScript.size()
 static bool gWifiInitOk = true;
 static int gEnsureInitCalls = 0;
 bool ensureWifiInitialized() { ++gEnsureInitCalls; return gWifiInitOk; }
-struct FakeSettings { bool wifiAutoReconnect = true; };
+struct FakeSettings {
+  bool wifiAutoReconnect = true;
+  bool wifiEnabled = true;
+};
 static FakeSettings gSettings;
+// The rehunt's side of a failed setupWifi connect (System_WiFi.cpp arms the
+// hunt through it).
+static int gRehuntConnectFailedNotes = 0;
+void wifiRehuntNoteConnectFailed() { ++gRehuntConnectFailedNotes; }
 void sortWifiByPriority() {}
 bool saveWifiNetworks() { return true; }
 void wifiNetworkMarkConnected(uint32_t, uint32_t) {}
@@ -303,6 +322,7 @@ static std::string drainConsoleLikeMainLoop() {
   std::string out;
   char c;
   while (wifiConsoleTypeaheadPop(c)) out += c;
+  Serial.arrivals.clear();  // by the time the loop reads, everything has arrived
   while (Serial.available() > 0) out += static_cast<char>(Serial.read());
   return out;
 }
@@ -332,6 +352,8 @@ static void reset(std::vector<ScriptedNetwork> script, CommandContext* context, 
   gSkipNtpInWifiConnect = true;
   gWifiInitOk = true;
   gEnsureInitCalls = 0;
+  gSettings = FakeSettings{};
+  gRehuntConnectFailedNotes = 0;
 #if HW1_WIFI_SUPERSEDE_API
   sBackgroundConnectActive.store(false);
   sBackgroundConnectSuperseded.store(false);
@@ -340,6 +362,12 @@ static void reset(std::vector<ScriptedNetwork> script, CommandContext* context, 
 
 static void reset(std::vector<ScriptedNetwork> script, CommandContext* context, int pendingBytes) {
   reset(std::move(script), context, std::string(static_cast<size_t>(pendingBytes), 'x'));
+}
+
+// Console bytes that arrive at the given offsets from now (virtual ms).
+static void arriveAt(std::vector<unsigned long> offsets) {
+  Serial.arrivals.clear();
+  for (unsigned long offset : offsets) Serial.arrivals.push_back(gNowMs + offset);
 }
 
 static bool modeRequested(const std::vector<wifi_mode_t>& modes, wifi_mode_t mode) {
@@ -514,6 +542,76 @@ int main() {
     require(!gWifiUserCancelled && drainConsoleLikeMainLoop() == "x", "boot, other key: kept for the CLI");
   }
 
+#if HW1_WIFI_CANCEL_KEYS_API
+  // An arrow key is ESC '[' 'A' (ESC 'O' 'B' in application mode): not a
+  // cancel. The Esc waits up to kWifiConsoleEscapeWaitMs for the next byte.
+  {
+    reset(missing(1), &gSerialContext, std::string("\x1b[A"));
+    arriveAt({0, 20, 30});
+    const unsigned long t0 = millis();
+    require(!wifiConsoleCancelKeyPressed(), "ESC [ A: the Esc waits for its sequence and does not cancel");
+    require(millis() - t0 >= 20 && millis() - t0 < kWifiConsoleEscapeWaitMs,
+            "ESC [ A: the wait ends when '[' arrives");
+    delay(20);
+    require(!wifiConsoleCancelKeyPressed(), "ESC [ A: the rest of the sequence is an ordinary byte");
+    require(drainConsoleLikeMainLoop() == "\x1b[A", "ESC [ A: the whole sequence reaches the CLI in order");
+  }
+  {
+    reset(missing(1), &gSerialContext, std::string("\x1bOB"));
+    arriveAt({0, 5, 9});
+    require(!wifiConsoleCancelKeyPressed(), "ESC O B: no cancel");
+    delay(10);
+    require(!wifiConsoleCancelKeyPressed(), "ESC O B: the last byte is ordinary");
+    require(drainConsoleLikeMainLoop() == "\x1bOB", "ESC O B: kept for the CLI");
+  }
+  // Through the hunt: arrows typed while a console-owned connect runs.
+  for (const char* key : {"\x1b[A", "\x1bOB"}) {
+    reset(missing(2), &gSerialContext, std::string(key));
+    arriveAt({0, 3, 6});
+    require(!huntBest(budget, WifiConnectOrigin::COMMAND), "arrow during the hunt: hunt runs");
+    require(!gWifiUserCancelled && connectCalls("missing-2") == 3,
+            "arrow during the hunt: not cancelled, every saved network tried");
+    require(drainConsoleLikeMainLoop() == key, "arrow during the hunt: the sequence reaches the CLI");
+  }
+  // A lone Esc cancels once the wait has passed, and nothing more is read.
+  {
+    reset(missing(1), &gSerialContext, std::string(1, '\x1b'));
+    const unsigned long t0 = millis();
+    require(wifiConsoleCancelKeyPressed(), "lone Esc: cancels");
+    require(millis() - t0 >= kWifiConsoleEscapeWaitMs && millis() - t0 < kWifiConsoleEscapeWaitMs + 10,
+            "lone Esc: after the escape wait, not much longer");
+    require(Serial.reads == 1 && drainConsoleLikeMainLoop().empty(), "lone Esc: consumed");
+  }
+  // Esc then another key inside the wait: cancel, and that key is kept.
+  {
+    reset(missing(1), &gSerialContext, std::string("\x1bx"));
+    arriveAt({0, 10});
+    require(wifiConsoleCancelKeyPressed(), "Esc then x: cancels");
+    require(drainConsoleLikeMainLoop() == "x", "Esc then x: the x reaches the CLI");
+  }
+  // A '[' that comes after the wait is too late to make a sequence.
+  {
+    reset(missing(1), &gSerialContext, std::string("\x1b["));
+    arriveAt({0, kWifiConsoleEscapeWaitMs + 10});
+    require(wifiConsoleCancelKeyPressed(), "Esc, late '[': cancels at the end of the wait");
+    require(drainConsoleLikeMainLoop() == "[", "Esc, late '[': the '[' is left for the CLI");
+  }
+  // Ctrl-C needs no wait.
+  {
+    reset(missing(1), &gSerialContext, std::string(1, '\x03'));
+    const unsigned long t0 = millis();
+    require(wifiConsoleCancelKeyPressed() && millis() == t0, "Ctrl-C: cancels at once");
+  }
+  // An Esc is read only with room for itself and its '[' in the typeahead.
+  {
+    const std::string typed(126, 'k');
+    reset(missing(1), &gSerialContext, typed + "\x1b[A");
+    require(!wifiConsoleCancelKeyPressed(), "Esc behind a nearly full typeahead: no cancel");
+    require(Serial.pending() == 3, "Esc behind a nearly full typeahead: the sequence stays on Serial");
+    require(drainConsoleLikeMainLoop() == typed + "\x1b[A", "nearly full typeahead: every byte in order");
+  }
+#endif
+
 #if HW1_WIFI_CONNECT_BUDGET_API
   // Boot budget: the default on a verified image, the remaining probation
   // setup window minus the reserve on a trial boot, zero once that is gone.
@@ -673,6 +771,7 @@ int main() {
     require(!wifiBackgroundConnectSuperseded(), "setupWiFi: a natural failure is not a supersede");
     require(sawMessage("WiFi connect timed out"), "setupWiFi: a natural failure is still reported");
     require(connectCalls("missing-1") == 3, "setupWiFi: the reserved hunt ran");
+    require(gRehuntConnectFailedNotes == 1, "setupWiFi: a failed boot connect arms the rehunt");
   }
   {
     reset(missing(1), nullptr, 0);
@@ -699,6 +798,7 @@ int main() {
     require(wifiBackgroundConnectSuperseded() && !wifiBackgroundConnectActive(),
             "early supersede: reported as superseded and released");
     require(!sawMessage("WiFi connect timed out"), "early supersede: not reported as a timeout");
+    require(gRehuntConnectFailedNotes == 0, "early supersede: the rehunt is not armed");
   }
   // Superseded mid-hunt through setupWifi: says why, not "timed out".
   {
@@ -712,7 +812,67 @@ int main() {
             "setupWiFi superseded mid-hunt: reported as stopped, not timed out");
     require(wifiBackgroundConnectSuperseded() && !wifiBackgroundConnectActive(),
             "setupWiFi superseded mid-hunt: superseded and released");
+    require(gRehuntConnectFailedNotes == 0,
+            "setupWiFi superseded mid-hunt: the command that took over decides; no rehunt");
   }
+  // The rehunt is armed only by a plain failure with saved networks, Wi-Fi
+  // enabled and auto-reconnect on; a cancel or a success does not arm it.
+  {
+    reset(missing(2), nullptr, std::string(1, '\x03'));
+    setupWifi(budget, WifiConnectOrigin::BOOT);
+    require(sawMessage("WiFi connect cancelled") && gRehuntConnectFailedNotes == 0,
+            "setupWiFi cancelled at the console: no rehunt");
+  }
+  {
+    reset({}, nullptr, 0);
+    setupWifi(budget, WifiConnectOrigin::BOOT);
+    require(gRehuntConnectFailedNotes == 0, "setupWiFi with no saved network: no rehunt");
+  }
+  {
+    reset(missing(1), nullptr, 0);
+    gSettings.wifiAutoReconnect = false;
+    setupWifi(budget, WifiConnectOrigin::BOOT);
+    require(gRehuntConnectFailedNotes == 0, "setupWiFi with wifiautoreconnect 0: no rehunt");
+  }
+  {
+    reset(missing(1), nullptr, 0);
+    gSettings.wifiEnabled = false;
+    setupWifi(budget, WifiConnectOrigin::BOOT);
+    require(gRehuntConnectFailedNotes == 0, "setupWiFi with wifienabled 0: no rehunt");
+  }
+  {
+    // radiopower on and the companion's restore run setupWifi() as a command.
+    reset(missing(1), &gWebContext, 0);
+    setupWifi(budget, WifiConnectOrigin::COMMAND);
+    require(sawMessage("WiFi connect timed out") && gRehuntConnectFailedNotes == 1,
+            "setupWiFi as a command (radiopower on, companion restore): a failure arms the rehunt");
+  }
+  {
+    reset({{"home", Behaviour::Connects, 2000}}, nullptr, 0);
+    setupWifi(budget, WifiConnectOrigin::BOOT);
+    require(gDriver.connected && gRehuntConnectFailedNotes == 0, "setupWiFi that joins: no rehunt");
+  }
+#if HW1_WIFI_BOOT_JOIN_API
+  // A join made inside the boot connect is boot's (boot starts its services);
+  // the rehunt's own BACKGROUND hunt is not the boot connect.
+  {
+    static bool sSawBoot = false;
+    reset({{"home", Behaviour::Connects, 2000}}, nullptr, 0);
+    wifiBackgroundConnectReserve(true);
+    sSawBoot = false;
+    gDelayHook = [] { if (sBackgroundConnectIsBoot.load()) sSawBoot = true; };
+    setupWifi(budget, WifiConnectOrigin::BACKGROUND);
+    require(sSawBoot && gDriver.connected, "boot join: marked as the boot connect's while it joins");
+    require(!sBackgroundConnectIsBoot.load(), "boot join: the mark ends with setupWifi");
+    reset({{"home", Behaviour::Connects, 2000}}, nullptr, 0);
+    wifiBackgroundConnectReserve(true);  // as wifiRehuntPoll does
+    sSawBoot = false;
+    gDelayHook = [] { if (sBackgroundConnectIsBoot.load()) sSawBoot = true; };
+    require(huntBest(budget, WifiConnectOrigin::BACKGROUND), "rehunt join: joins");
+    wifiBackgroundConnectReserve(false);
+    require(!sSawBoot, "rehunt join: not marked as the boot connect's");
+  }
+#endif
 #endif
 
   // The coexistence mirror reads the attempt as "connecting" while it runs,

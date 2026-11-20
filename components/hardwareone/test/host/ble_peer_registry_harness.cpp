@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 #ifdef NDEBUG
 #error "This harness requires assertions"
 #endif
@@ -38,12 +39,18 @@ static BlePeerConnectAdmission glassesAdmit(const BlePeerConnectRequest& request
   if(dropDuringAdmit)(void)blePeerRestoreDroppedReseek(BLE_PEER_G2_GLASSES,request.intentGeneration,request.identityGeneration);
   return BlePeerConnectAdmission::STARTED;
 }
-static bool glassesUp(){return false;}
+static bool gGlassesUp=false;
+static bool glassesUp(){return gGlassesUp;}
 static const BlePeerOps kGlassesOps{nullptr,nullptr,glassesUp,glassesAdmit};
 static const BlePeerSpec kGlasses{BLE_PEER_G2_GLASSES,"g2","G2 Glasses",2,true,&kGlassesOps};
 static void enroll(BlePeerKind kind) {
   PeerReconnectRuntime& s=sReconnect[kind];
   s.autoReconnect=s.hasSavedTarget=s.ownerAuthorityAvailable=true;std::strcpy(s.savedTarget.mac1,"app-key-v1");
+}
+// A peer at rest: enrolled, no episode, no user disconnect.
+static void atRest(BlePeerKind kind) {
+  PeerReconnectRuntime& s=sReconnect[kind];
+  s.userDisconnect=s.wantReconnect=s.reseekEvenIfNoAuto=false;s.dueMs=0;s.launchedAttempts=0;enroll(kind);
 }
 int main() {
   // Boot order: builtins, then the peer modules, then phonePipeStart.
@@ -61,15 +68,31 @@ int main() {
   static const BlePeerSpec imposter{BLE_PEER_R1_RING,"phone","Imposter",1,false,nullptr};
   assert(!bleRegisterPeer(imposter) && bleRegisteredPeerCount()==2);
 
-  // F1 enrollment leaves autoReconnect and a saved target: boot reconnect
-  // reaches the pipe's admission once, then paces the glasses 2 s later.
+  // F1 enrollment leaves autoReconnect and a saved target. Boot reconnect
+  // only arms: it returns at once, opens nothing and claims no admission; the
+  // phone is due after the 2 s settle, the glasses 2 s after it.
   enroll(BLE_PEER_PHONE);enroll(BLE_PEER_G2_GLASSES);
-  const uint32_t intent=sReconnect[BLE_PEER_PHONE].intentGeneration;
+  PeerReconnectRuntime& phone=sReconnect[BLE_PEER_PHONE];
+  PeerReconnectRuntime& glasses=sReconnect[BLE_PEER_G2_GLASSES];
+  const uint32_t intent=phone.intentGeneration,glassesIntent=glasses.intentGeneration,t=gNow;
   bleBootReconnect();
-  assert(pipe::admits==1 && glassesAdmits==1 && gNow==3000);
+  assert(pipe::admits==0 && glassesAdmits==0 && gNow==t);
+  for(const PeerReconnectRuntime* s:{&phone,&glasses})
+    assert(s->wantReconnect && !s->reseekEvenIfNoAuto && !s->admissionInFlight && s->launchedAttempts==0);
+  assert(phone.intentGeneration==intent+1 && glasses.intentGeneration==glassesIntent+1);
+  assert(phone.dueMs==t+2000 && glasses.dueMs==t+4000);
+  // The tick admits each when due, with the boot intent and saved target.
+  gNow=t+1999;bleAutoReconnectTick();assert(pipe::admits==0 && glassesAdmits==0);
+  gNow=t+2000;bleAutoReconnectTick();assert(pipe::admits==1 && glassesAdmits==0);
   assert(pipe::last.autoReconnect && !pipe::last.explicitReseek && pipe::last.intentGeneration==intent+1);
   assert(!std::strcmp(pipe::last.savedTarget.mac1,"app-key-v1"));
-  assert(!sReconnect[BLE_PEER_PHONE].admissionInFlight && sReconnect[BLE_PEER_PHONE].dueMs==1000+4000);
+  // Committed on the phone's ladder: attempt 1 is followed 4 s later.
+  assert(!phone.admissionInFlight && phone.launchedAttempts==1 && phone.dueMs==t+2000+4000);
+  gNow=t+3999;bleAutoReconnectTick();assert(pipe::admits==1 && glassesAdmits==0);
+  gNow=t+4000;bleAutoReconnectTick();assert(pipe::admits==1 && glassesAdmits==1);
+  // The glasses' ladder: 15 s after attempt 1.
+  assert(!glasses.admissionInFlight && glasses.launchedAttempts==1 && glasses.dueMs==t+4000+15000);
+  assert(glasses.intentGeneration==glassesIntent+1);
 
   // Link up, then lost: the tick redials the phone 2 s later.
   blePeerNoteLinkUp(BLE_PEER_PHONE);blePeerNoteLinkUp(BLE_PEER_G2_GLASSES);
@@ -117,6 +140,44 @@ int main() {
   assert(!g.droppedBeforeCommit && !g.admissionInFlight);
   gNow=214999;bleAutoReconnectTick();assert(glassesAdmits==4);
   gNow=215000;bleAutoReconnectTick();assert(glassesAdmits==5 && !g.wantReconnect && !g.reseekEvenIfNoAuto);
-  puts("Peer registry: the pipe's spec replaces the builtin phone in place; boot reconnect and the tick reach it;"
+  // A peer already connected at boot is not armed: no intent bump, no due
+  // time, and the next peer takes the first slot.
+  atRest(BLE_PEER_PHONE);atRest(BLE_PEER_G2_GLASSES);gPhoneUp=true;
+  gNow=300000;
+  {
+    const uint32_t upIntent=phone.intentGeneration,before=pipe::admits,glassesBefore=glassesAdmits;
+    bleBootReconnect();
+    assert(!phone.wantReconnect && phone.dueMs==0 && phone.intentGeneration==upIntent);
+    assert(glasses.wantReconnect && glasses.dueMs==302000);
+    gNow=302000;bleAutoReconnectTick();
+    assert(pipe::admits==before && glassesAdmits==glassesBefore+1);
+    // Both up: nothing is armed.
+    atRest(BLE_PEER_G2_GLASSES);gGlassesUp=true;
+    const uint32_t glassesUpIntent=glasses.intentGeneration;
+    bleBootReconnect();
+    assert(!glasses.wantReconnect && glasses.dueMs==0 && glasses.intentGeneration==glassesUpIntent);
+    gGlassesUp=false;
+  }
+  // A late first loop finds both due: the phone opens, the glasses' first
+  // attempt waits 2 s more instead of taking the radio in the same tick.
+  atRest(BLE_PEER_PHONE);atRest(BLE_PEER_G2_GLASSES);gPhoneUp=false;
+  gNow=400000;
+  {
+    const uint32_t before=pipe::admits,glassesBefore=glassesAdmits;
+    bleBootReconnect();
+    assert(phone.dueMs==402000 && glasses.dueMs==404000);
+    gNow=409000;bleAutoReconnectTick();
+    assert(pipe::admits==before+1 && glassesAdmits==glassesBefore);
+    assert(glasses.wantReconnect && !glasses.admissionInFlight && glasses.launchedAttempts==0 && glasses.dueMs==411000);
+    gNow=410999;bleAutoReconnectTick();assert(pipe::admits==before+1 && glassesAdmits==glassesBefore);
+    gNow=411000;bleAutoReconnectTick();assert(pipe::admits==before+1 && glassesAdmits==glassesBefore+1);
+  }
+  // A user disconnect or a missing owner authority keeps a peer unarmed.
+  atRest(BLE_PEER_PHONE);atRest(BLE_PEER_G2_GLASSES);
+  phone.userDisconnect=true;glasses.ownerAuthorityAvailable=false;gNow=500000;
+  bleBootReconnect();
+  assert(!phone.wantReconnect && !glasses.wantReconnect && phone.dueMs==0 && glasses.dueMs==0);
+  puts("Peer registry: the pipe's spec replaces the builtin phone in place; boot reconnect only arms (phone at"
+       " +2 s, glasses at +4 s, a connected peer skipped) and the tick reaches it, pacing two first attempts 2 s apart;"
        " a dropped one-shot reseek is put back only while its generations are current, also before its commit");
 }

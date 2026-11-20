@@ -124,9 +124,20 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
   ctx.scope = folder;
   uint64_t total = 0, used = 0, free = 0;
   constexpr uint64_t reserve = 100 * 1024;
-  // Fresh capacity, no tier switching and no automatic deletion/rotation.
-  if (!VFS::getStats(sd_ ? VFS::SDCARD : VFS::INTERNAL, total, used, free) ||
-      free < reserve + length + 256) return fail("Transcript storage full or unavailable");
+  // No tier switching and no automatic deletion/rotation. The session's first
+  // write and every SD write take a fresh reading. Later LittleFS phrases read
+  // the shared cached figure instead: a fresh one walks the whole volume under
+  // the FS mutex (about 1.3 s on the P4X-EYE) before every phrase. The cache
+  // is refreshed every 2-15 s by headroom (2 s near the reserve) and after
+  // 32 KB counted through noteLittleFsBytesWritten, which this writer feeds.
+  bool haveFree;
+  if (sd_ || first) {
+    haveFree = VFS::getStats(sd_ ? VFS::SDCARD : VFS::INTERNAL, total, used, free);
+  } else {
+    free = VFS::getCachedLittleFsFree();
+    haveFree = true;
+  }
+  if (!haveFree || free < reserve + length + 256) return fail("Transcript storage full or unavailable");
   if (first) {
     // trusted: only create the protected transcript root; owner folder/file
     // creation below always uses the admitted named user's guarded context.

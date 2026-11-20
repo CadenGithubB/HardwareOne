@@ -264,8 +264,20 @@ static AuthContext systemAuth(const char* scope, const char* reason) {
   ctx.scope = scope;
   return ctx;
 }
+// Fresh readings walk the whole volume on the device; the cached LittleFS
+// figure does not. A failed volume read leaves the real cache at 0.
+static unsigned freshStats = 0, cachedReads = 0;
+static bool cacheSet = false;
+static uint64_t cachedFree = 0;  // unset: the cache agrees with freeBytes
+static size_t getCachedLittleFsFree() {
+  assert(locks);
+  ++cachedReads;
+  if (cacheSet) return static_cast<size_t>(cachedFree);
+  return statsOk ? static_cast<size_t>(freeBytes) : 0;
+}
 static bool getStats(StorageType type, uint64_t& total, uint64_t& used, uint64_t& free) {
   assert(locks);
+  ++freshStats;
   statsTier = type;
   total = 8u << 20;
   used = 0;
@@ -306,6 +318,9 @@ static void reset() {
   VFS::freeBytes = 1 << 20;
   VFS::sdFailures = VFS::notedBytes = VFS::denials = VFS::opens = VFS::systemAuths = VFS::guardedCalls = 0;
   VFS::removeCalls = 0;
+  VFS::freshStats = VFS::cachedReads = 0;
+  VFS::cacheSet = false;
+  VFS::cachedFree = 0;
   VFS::skewAfterRename = 0;
   VFS::renames.clear(); VFS::contexts.clear(); VFS::opened.clear();
 }
@@ -745,12 +760,17 @@ static void test_room_and_stamp() {
                         QuickNotePolicy::kMaxNoteBytes + 256;
   const char* why = nullptr;
   VFS::freeBytes = need;
-  assert(QuickNoteStore::hasRoom(&why) && !why && VFS::statsTier == VFS::INTERNAL);
+  assert(QuickNoteStore::hasRoom(&why) && !why && VFS::cachedReads == 1 && !VFS::freshStats);
   VFS::freeBytes = need - 1;
   assert(!QuickNoteStore::hasRoom(&why) && !std::strcmp(why, "Note storage full or unavailable"));
   VFS::freeBytes = need;
+  VFS::statsOk = false;  // a failed LittleFS read caches 0: still refused
+  assert(!QuickNoteStore::hasRoom(&why) && !std::strcmp(why, "Note storage full or unavailable"));
+  VFS::statsOk = true;
+  assert(VFS::cachedReads == 3 && !VFS::freshStats);
   VFS::sdWritable = true;
-  assert(QuickNoteStore::hasRoom(nullptr) && VFS::statsTier == VFS::SDCARD);
+  assert(QuickNoteStore::hasRoom(nullptr) && VFS::statsTier == VFS::SDCARD && VFS::freshStats == 1 &&
+         VFS::cachedReads == 3);
   VFS::statsOk = false;
   assert(!QuickNoteStore::hasRoom(&why));
   VFS::statsOk = true;
@@ -1148,6 +1168,48 @@ static void test_native_g2_storage() {
   assert(tree.count(internal)&&tree.count(onCard)&&tree.count("/g2/quicknotes/keep.tmp"));
 }
 
+// UP-04: every hold (hasRoom) and every LittleFS save read the shared cached
+// figure, never a fresh whole-volume walk; the SD card and the boot-note
+// restamp stay fresh.
+static void test_capacity_readings() {
+  reset();
+  for (uint64_t id = 1; id <= 20; ++id) {
+    const char* why = nullptr;
+    assert(QuickNoteStore::hasRoom(&why) && !why);
+    assert(save(0x900 + id));
+  }
+  assert(countFiles(".txt") == 20 && !VFS::freshStats && VFS::cachedReads == 40);
+  // A cached figure below the reserve refuses the save before anything is written.
+  reset();
+  VFS::cacheSet = true;
+  VFS::cachedFree = QuickNoteStore::kReserveBytes + 100;
+  const char* why = nullptr;
+  assert(!QuickNoteStore::hasRoom(&why) && !std::strcmp(why, "Note storage full or unavailable"));
+  assert(!save(0x921, nullptr, &why) && !std::strcmp(why, "Note storage full or unavailable"));
+  assert(countFiles(".txt") == 0 && countFiles(".tmp") == 0 && !VFS::freshStats && VFS::cachedReads == 2);
+  // The cache decides the LittleFS save even when a fresh reading would refuse it.
+  reset();
+  VFS::cacheSet = true;
+  VFS::cachedFree = 1 << 20;
+  VFS::freeBytes = 0;
+  assert(save(0x922) && !VFS::freshStats && VFS::cachedReads == 1);
+  // SD: fresh every time, the LittleFS cache untouched.
+  reset();
+  VFS::sdWritable = true;
+  for (uint64_t id = 1; id <= 5; ++id) {
+    assert(QuickNoteStore::hasRoom(nullptr));
+    assert(save(0x930 + id));
+  }
+  assert(VFS::freshStats == 10 && !VFS::cachedReads && VFS::statsTier == VFS::SDCARD);
+  // The boot-note restamp keeps its fresh reading on LittleFS.
+  reset();
+  const std::string boot = bootNote(0x940);
+  const unsigned cachedBefore = VFS::cachedReads;
+  assert(!VFS::freshStats && cachedBefore == 1);
+  assert(restamping("alice", boot, kLater));
+  assert(VFS::freshStats == 1 && VFS::statsTier == VFS::INTERNAL && VFS::cachedReads == cachedBefore);
+}
+
 int main() {
   test_create();
   test_create_refusals();
@@ -1156,6 +1218,7 @@ int main() {
   test_read_and_remove();
   test_room_and_stamp();
   test_restamp();
+  test_capacity_readings();
   test_sweep();
   test_clock_helpers();
   test_native_g2_storage();

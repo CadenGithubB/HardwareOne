@@ -7,8 +7,10 @@ inside commands="..." as the id of the automation to replace. The production
 class (System_Command.h) and its constructor, parse(), nextKeyToken(), value()
 and hasKey() with their helpers (System_Command.cpp) are compiled as they are:
 a key counts at the start of a token (start of the line or after white space)
-and outside a quoted value, quoted values keep their spaces and unescape \\",
-and the token walk tells key=value tokens from bare words.
+and outside a quoted value, quoted values keep their spaces and unescape the
+pairs \\" and \\\\ (a value ending in a backslash does not swallow the next
+token; text the web UI quotes, nested JSON included, reads back exactly), and
+the token walk tells key=value tokens from bare words.
 
 Options: --cxx <compiler>, --sanitize (ASan + UBSan), --component <dir> to run
 the same cases against another components/hardwareone directory.
@@ -32,6 +34,31 @@ MEMBERS = ("CommandArgs::CommandArgs(", "void CommandArgs::parse(",
            "static int keyValueStart(", "String CommandArgs::value(", "bool CommandArgs::hasKey(")
 
 
+QUOTE_ESCAPE = ".replace(/\"/g,'\\\\\"')"
+BACKSLASH_ESCAPE = ".replace(/\\\\/g,'\\\\\\\\')"
+
+
+def check_web_emitters(component: Path) -> None:
+    """The reader unescapes \\\\ as well as \\", so every page emitter of a
+    quoted key="..." value must double backslashes before it escapes quotes;
+    otherwise a backslash typed in the form (a regex \\d, JSON's own \\" inside
+    secondarytriggers) reads back changed or ends the value early."""
+    page = (component / "WebPage_Automations.h").read_text()
+    sites = 0
+    start = 0
+    while True:
+        at = page.find(QUOTE_ESCAPE, start)
+        if at < 0:
+            break
+        sites += 1
+        line = page.count("\n", 0, at) + 1
+        require(page[:at].endswith(BACKSLASH_ESCAPE),
+                f"WebPage_Automations.h:{line}: a quoted value escapes \" without doubling \\ first")
+        start = at + len(QUOTE_ESCAPE)
+    require(sites >= 10, f"WebPage_Automations.h: expected the quoted-value emitters, found {sites}")
+    print(f"{sites} automation page emitters escape \\ before \"", flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
@@ -48,6 +75,7 @@ def main() -> None:
         for member in missing:
             print(f"FAIL: System_Command.cpp: no {member.rstrip('(')}", file=sys.stderr)
         sys.exit(1)
+    check_web_emitters(component)
     production = "\n\n".join([extract_block(header, "class CommandArgs") + ";",
                               "const String CommandArgs::empty_;"] +
                              [extract_block(source, member) for member in MEMBERS])

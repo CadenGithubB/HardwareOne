@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Exercise production image saves with per-tier admission and write faults.
 
+A save never replaces an earlier photo: a taken name (counter restarted by a
+reboot, or a second timestamp name in the same second) moves to _1 .. _99 per
+tier and is refused past that, and the per-mount folder walk raises the no-clock
+counter past the highest counter name it sees.
+
 The save method, filename generation, capture-folder owner, path helpers and
 FsLockGuard are extracted unchanged. File/VFS, clock/events and retention are
 boundaries. --baseline overlays a saved component directory for reproductions.
@@ -68,10 +73,14 @@ def generate(baseline: Path | None) -> str:
     sweep = "void ImageManager::sweepStaleTemporaries(" in source
     if sweep:
         markers.append("void ImageManager::sweepStaleTemporaries(")
+    # The sweep walk seeds the no-clock counter from the names it sees (the
+    # name rule is inline in the header).
+    counter_names = "long ImageManager::counterOfPhotoName(" in header
     # A save reports why a tier got no copy.
     report = "struct ImageSaveReport" in header
     methods = (f"#define HAS_FOLDER_VALIDATOR {int(validator)}\n"
                f"#define HAS_STALE_SWEEP {int(sweep)}\n"
+               f"#define HAS_COUNTER_NAMES {int(counter_names)}\n"
                f"#define HAS_SAVE_REPORT {int(report)}\n" + "\n\n".join(
         extract_block(source, marker) for marker in markers))
     constant = re.search(r"(?m)^#define MIN_FREE_SPACE_BYTES[^\n]+", source)[0]

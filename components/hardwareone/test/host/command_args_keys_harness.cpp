@@ -51,6 +51,17 @@ static void expect(const char* line, const char* key, const char* value, bool pr
             (present ? "" : " and no such key"));
 }
 
+// A quoted value as the web UI emits it (WebPage_Automations.h):
+// replace(/\\/g,'\\\\') and then replace(/"/g,'\\"').
+static std::string webQuoted(const std::string& text) {
+  std::string out = "\"";
+  for (char c : text) {
+    if (c == '\\' || c == '"') out += '\\';
+    out += c;
+  }
+  return out + "\"";
+}
+
 // The tokens of one line as "key" for key=value and "-" for anything else.
 static std::string keysOf(const char* line) {
   const CommandArgs args{String(line)};
@@ -99,6 +110,37 @@ int main() {
   expect("name=\"Morning lights\" type=attime", "name", "Morning lights", true);
   expect("name=\"Morning lights\" type=attime", "type", "attime", true);
   expect("commands=\"say \\\"hi\\\" now\"", "commands", "say \"hi\" now", true);
+
+  // \\ is an escape pair too: a backslash the web escaped reads back single,
+  // and a value that ends in one closes at the quote after it.
+  expect("name=\"a\\\\b\"", "name", "a\\b", true);
+  expect("name=\"a\\\\\" type=x", "name", "a\\", true);
+  expect("name=\"a\\\\\" type=x", "type", "x", true);
+  check(keysOf("name=\"a\\\\\" type=x") == "name type", "a value ending in \\\\ does not swallow the next token");
+  expect("name=\"\\\\\\\"\" id=3", "name", "\\\"", true);
+  expect("name=\"\\\\\\\"\" id=3", "id", "3", true);
+  // Any other backslash passes through: a typed regex is unchanged.
+  expect("match=\"\\d+\" on=x", "match", "\\d+", true);
+  expect("match=\"a\\b\\\\\" on=x", "match", "a\\b\\", true);
+  expect("match=\"a\\b\\\\\" on=x", "on", "x", true);
+  // Unquoted values are taken as they stand.
+  expect("path=C:\\\\x id=2", "path", "C:\\\\x", true);
+
+  // Text the web quotes reads back exactly, nested JSON included.
+  {
+    const std::string texts[] = {
+        "Morning lights", "a\\b", "a\\", "\\", "say \"hi\" now", "ends in quote\"",
+        "[{\"type\":\"event\",\"on\":\"wifi_connected\",\"match\":\"say \\\"hi\\\" C:\\\\tmp\\\\\"}]",
+        "[{\"type\":\"attime\",\"time\":\"07:00\"},{\"type\":\"event\",\"on\":\"x\"}]",
+        "led color=red; say \"done\\\\\"",
+    };
+    for (const std::string& text : texts) {
+      const std::string line = "name=x secondarytriggers=" + webQuoted(text) + " id=9 on=y";
+      expect(line.c_str(), "secondarytriggers", text.c_str(), true);
+      expect(line.c_str(), "id", "9", true);
+      check(keysOf(line.c_str()) == "name secondarytriggers id on", "[" + line + "] keeps its four tokens");
+    }
+  }
 
   // The token walk tells a key=value token from a bare word.
   check(keysOf("name=Morning lights type=x") == "name - type", "an unquoted value with a space leaves a bare word");

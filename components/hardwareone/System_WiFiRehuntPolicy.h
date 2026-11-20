@@ -3,21 +3,27 @@
 
 #include <cstdint>
 
-// When a lost Wi-Fi connection is followed by a hunt across every saved
-// network. The driver's own auto-reconnect retries only the network that
-// dropped, so a device carried from one saved network to another stayed
-// offline until a reboot or `openwifi`.
+// When a lost Wi-Fi connection, or a connect the device made by itself that
+// failed, is followed by a hunt across every saved network. The driver's own
+// auto-reconnect retries only the network that dropped, so a device carried
+// from one saved network to another stayed offline until a reboot or
+// `openwifi`; and after a failed boot connect nothing retried at all.
 //
 // Dependency-free (host test: test_wifi_rehunt_policy.cpp). System_WiFi.cpp
 // feeds it from the main loop and runs the hunt on a short-lived task.
 //
 // Rules:
-//  - Only an involuntary drop of an established connection starts it. A
-//    disconnect the device asked for (wifidisconnect, closewifi, a switch to
-//    another network) and a boot that never connected do not.
+//  - Two things start it: an involuntary drop of an established connection
+//    (noteDropped), and a connect the device made by itself that failed
+//    (noteConnectFailed: the boot connect, the radio companion's restore,
+//    `radiopower on`, first-time setup). A disconnect the device asked for
+//    (wifidisconnect, closewifi, a switch to another network) does not.
 //  - The driver gets kFirstDelayMs to rejoin the dropped network by itself.
-//  - With one saved network there is nothing else to hunt for, so the driver's
-//    retry is left alone. Once a hunt has failed the driver no longer retries
+//    After a failed connect the driver is not retrying (the attempt ended in a
+//    commanded disconnect), so the hunt is the only retry from the start: the
+//    first hunt follows kFirstDelayMs, also with a single saved network.
+//  - After a drop with one saved network there is nothing else to hunt for,
+//    so the driver's retry is left alone. Once a hunt has failed the driver no longer retries
 //    (the hunt's last attempt ends in a commanded disconnect), so from then on
 //    the hunt is the only retry and runs with a single saved network too.
 //  - Failed hunts back off: kGapMs[0], kGapMs[1], then kGapMs[2] for good.
@@ -38,10 +44,10 @@ struct WifiRehuntPolicy {
     int  savedCount = 0;
   };
 
-  bool     wanted = false;      // a connection was lost and has not come back
-  bool     driverIdle = false;  // a hunt failed since then: the driver is not retrying
+  bool     wanted = false;      // a connection was lost (or a connect failed) and none is up yet
+  bool     driverIdle = false;  // a hunt or a connect failed since then: the driver is not retrying
   bool     hunting = false;     // the hunt task is running or about to
-  uint8_t  failures = 0;        // failed hunts since the drop, saturating
+  uint8_t  failures = 0;        // failed hunts since the drop or failed connect, saturating
   uint32_t sinceMs = 0;         // start of the current wait
 
   void clear() {
@@ -57,6 +63,21 @@ struct WifiRehuntPolicy {
     if (wanted) return;  // already waiting; a brief rejoin does not restart the clock
     wanted = true;
     driverIdle = false;
+    failures = 0;
+    sinceMs = nowMs;
+  }
+
+  // A connect the device made by itself (not a command's) failed, and nothing
+  // else will retry it. Arms the hunt with an idle driver, so one saved
+  // network is enough. While a hunt is already wanted the clock is kept; the
+  // driver is idle from now on either way.
+  void noteConnectFailed(uint32_t nowMs) {
+    if (wanted) {
+      driverIdle = true;
+      return;
+    }
+    wanted = true;
+    driverIdle = true;
     failures = 0;
     sinceMs = nowMs;
   }

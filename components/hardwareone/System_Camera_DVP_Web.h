@@ -170,7 +170,10 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
 
   // Recordings list loader — fetches /api/videos and renders a small list
   // with play/download/delete per row. Called when the Recordings panel is
-  // opened and after a recording stops.
+  // opened and after a recording stops. Recording names come off the SD card,
+  // so each row is built from nodes: the name is only ever text, the link
+  // encodes it, and Play/Delete hold the original name in a closure (no
+  // inline onclick, no HTML string).
   httpd_resp_send_chunk(req,
     "window.loadCameraRecordings = function() {\n"
     "  var listEl = hw.$('camera-recordings-list');\n"
@@ -180,25 +183,39 @@ inline void streamCameraSensorJs(httpd_req_t* req) {
     "    if (!listEl) return;\n"
     "    if (!j.sdAvailable) { listEl.textContent = 'SD card unavailable.'; return; }\n"
     "    if (!j.files || j.files.length === 0) { listEl.textContent = 'No recordings.'; return; }\n"
-    "    var html = '';\n"
+    "    listEl.textContent = '';\n"
     "    j.files.forEach(function(f){\n"
+    "      var name = String(f.name);\n"
     "      var kb = Math.round(f.size/1024);\n"
-    "      var dl = '/api/videos/file?name=' + encodeURIComponent(f.name);\n"
-    "      var safe = f.name.replace(/'/g, \"\\\\'\");\n"
-    "      html += '<div style=\"display:flex;align-items:center;gap:6px;margin-bottom:4px\">';\n"
-    "      html += '<span style=\"flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap\">' + f.name + ' (' + kb + ' KB)</span>';\n"
-    "      html += '<button class=\"btn\" style=\"padding:2px 8px\" onclick=\"openAviPlayer(\\'' + safe + '\\')\">Play</button>';\n"
-    "      html += '<a href=\"' + dl + '\" class=\"btn\" style=\"padding:2px 8px\">Download</a>';\n"
-    "      html += '<button class=\"btn\" style=\"padding:2px 8px\" onclick=\"deleteCameraRecording(\\'' + safe + '\\')\">Delete</button>';\n"
-    "      html += '</div>';\n"
+    "      var row = document.createElement('div');\n"
+    "      row.setAttribute('style', 'display:flex;align-items:center;gap:6px;margin-bottom:4px');\n"
+    "      var label = document.createElement('span');\n"
+    "      label.setAttribute('style', 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap');\n"
+    "      label.textContent = name + ' (' + kb + ' KB)';\n"
+    "      var play = document.createElement('button');\n"
+    "      play.className = 'btn'; play.setAttribute('style', 'padding:2px 8px'); play.textContent = 'Play';\n"
+    "      play.addEventListener('click', function(){ window.openAviPlayer(name); });\n"
+    "      var dl = document.createElement('a');\n"
+    "      dl.className = 'btn'; dl.setAttribute('style', 'padding:2px 8px'); dl.textContent = 'Download';\n"
+    "      dl.setAttribute('href', '/api/videos/file?name=' + encodeURIComponent(name));\n"
+    "      var del = document.createElement('button');\n"
+    "      del.className = 'btn'; del.setAttribute('style', 'padding:2px 8px'); del.textContent = 'Delete';\n"
+    "      del.addEventListener('click', function(){ window.deleteCameraRecording(name); });\n"
+    "      row.appendChild(label); row.appendChild(play); row.appendChild(dl); row.appendChild(del);\n"
+    "      listEl.appendChild(row);\n"
     "    });\n"
-    "    listEl.innerHTML = html;\n"
-    "  }).catch(function(e){ hw.setText(listEl, 'Load failed: ' + e); });\n"
+    "  }).catch(function(e){ hw.setText(listEl, 'Load failed: ' + (e && e.message ? e.message : e)); });\n"
     "};\n"
+    // cameravideodelete takes the name as one positional quoted token, which
+    // CommandArgs::parse ends at the first " and does not unescape: send the
+    // name as it is between quotes, and refuse a name holding " on the page
+    // rather than let it split into extra tokens.
     "window.deleteCameraRecording = function(name) {\n"
+    "  name = String(name);\n"
+    "  if (name.indexOf('\"') >= 0) { alert('This name cannot be deleted here; use the Files page.'); return; }\n"
     "  if (!confirm('Delete ' + name + '?')) return;\n"
     "  hw.postFormText('/api/cli', {cmd:'cameravideodelete \"' + name + '\"'})\n"
-    "    .then(function(){ setTimeout(loadCameraRecordings, 200); });\n"
+    "    .then(function(){ setTimeout(loadCameraRecordings, 200); }, function(e){ alert('Delete failed: ' + (e && e.message ? e.message : e)); });\n"
     "};\n",
     HTTPD_RESP_USE_STRLEN);
 

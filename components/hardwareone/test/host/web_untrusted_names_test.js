@@ -6,6 +6,18 @@
  *              createFileExplorer)
  *   __argv[1]  the same script's block 2 (window.BondFs)
  *   __argv[2]  the WebPage_Settings.h Part 4 <script> that defines scanNetworks
+ *   __argv[3]  the hw runtime <script> of WebServer_Utils.cpp (hw.esc, fetchJSON,
+ *              fetchText, postFormText)
+ *   __argv[4]  System_Camera_DVP_Web.h loadCameraRecordings + deleteCameraRecording
+ *   __argv[5]  System_Microphone_Web.h loadMicRecordings + deleteMicRecording
+ *   __argv[6]  WebPage_Sensors.h hwRenderGenericSensor
+ *   __argv[7]  WebPage_Bond.cpp renderBondProgress
+ *
+ * The recording lists (R), remote-sensor rows (G) and bond progress card (P)
+ * run on the REAL hw runtime over a small node DOM: a recording name holding
+ * markup and quotes must become no element, Play/Delete must get the original
+ * name, and the delete command must quote it so it parses back unchanged.
+ * H checks that hw.fetchJSON/fetchText reject with the reply's reason.
  *
  * All three run unmodified against a fake hw/DOM. A filename, path, peer label or
  * beacon SSID holding markup, quotes and backticks must reach innerHTML as literal
@@ -125,6 +137,249 @@ function runHandlers(html) {
     }
   }
   return errors;
+}
+
+/* A small node DOM for the pages that build rows with createElement. Text is
+ * escaped when serialized, so markup only survives as an element (a node) or as
+ * a raw innerHTML string, and both are checked. */
+var byId = {};
+function escText(t) { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+function makeNode(tag) {
+  var n = { tagName: String(tag).toUpperCase(), children: [], attrs: {}, listeners: {}, style: {},
+            className: '', _text: '', _html: '' };
+  Object.defineProperty(n, 'textContent', {
+    get: function () { return this._text + this.children.map(function (c) { return c.textContent; }).join(''); },
+    set: function (v) { this._text = String(v); this._html = ''; this.children = []; }
+  });
+  Object.defineProperty(n, 'innerHTML', {
+    get: function () { return escText(this._text) + this._html + this.children.map(outerHTML).join(''); },
+    set: function (v) { this._html = String(v); this._text = ''; this.children = []; }
+  });
+  n.appendChild = function (c) { this.children.push(c); return c; };
+  n.setAttribute = function (k, v) { this.attrs[k] = String(v); };
+  n.getAttribute = function (k) { return Object.prototype.hasOwnProperty.call(this.attrs, k) ? this.attrs[k] : null; };
+  n.addEventListener = function (t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); };
+  n.click = function () { var self = this; (this.listeners.click || []).forEach(function (f) { f.call(self, {}); }); };
+  n.querySelectorAll = function () { return []; };
+  return n;
+}
+function outerHTML(n) {
+  var a = Object.keys(n.attrs).map(function (k) { return ' ' + k + '="' + escText(n.attrs[k]).replace(/"/g, '&quot;') + '"'; }).join('');
+  if (n.className) a += ' class="' + escText(n.className).replace(/"/g, '&quot;') + '"';
+  return '<' + n.tagName.toLowerCase() + a + '>' + n.innerHTML + '</' + n.tagName.toLowerCase() + '>';
+}
+function walk(n, fn) { fn(n); n.children.forEach(function (c) { walk(c, fn); }); }
+function nodesBy(root, pred) { var out = []; walk(root, function (n) { if (pred(n)) out.push(n); }); return out; }
+function rawHtmlIn(root) { var out = []; walk(root, function (n) { if (n._html) out.push(n._html); }); return out.join(''); }
+var fakeDoc = {
+  createElement: makeNode,
+  getElementById: function (id) { return byId[id] || null; },
+  documentElement: { dataset: {} },
+  querySelectorAll: function () { return []; }
+};
+function domEl(id) { var n = makeNode('div'); n.id = id; byId[id] = n; return n; }
+
+/* The device side of the runtime: replies by URL, CLI posts recorded. */
+var cliPosts = [];
+var cliStatus = {};
+function reply(status, body) {
+  return {
+    ok: status >= 200 && status < 300, status: status,
+    text: function () { return Promise.resolve(body); },
+    json: function () { return Promise.resolve(JSON.parse(body)); }
+  };
+}
+function formField(body, key) {
+  var parts = String(body || '').split('&');
+  for (var i = 0; i < parts.length; i++) {
+    var kv = parts[i].split('=');
+    if (decodeURIComponent(kv[0]) === key) return decodeURIComponent(kv.slice(1).join('='));
+  }
+  return null;
+}
+var routes = {};
+function runtimeFetch(url, opts) {
+  url = String(url);
+  if (url === '/api/cli') {
+    var cmd = formField(opts && opts.body, 'cmd');
+    cliPosts.push(cmd);
+    var st = cliStatus[cmd] || [200, 'Deleted'];
+    return Promise.resolve(reply(st[0], st[1]));
+  }
+  var r = routes[url];
+  return Promise.resolve(r ? reply(r[0], r[1]) : reply(404, ''));
+}
+// The device's rule for a positional quoted token (CommandArgs::parse): the
+// token is everything up to the first " after the opening one, with no
+// escapes; anything after that closing quote would be another argument,
+// which micdelete/cameravideodelete refuse.
+function parseQuotedToken(line, verb) {
+  if (line.indexOf(verb + ' "') !== 0) return null;
+  var body = line.slice(verb.length + 2), end = body.indexOf('"');
+  if (end < 0 || end !== body.length - 1) return null;
+  return body.slice(0, end);
+}
+
+function recordingsAndRuntime() {
+  var rw = win;  // the page scripts name window globals (loadCameraRecordings) bare
+  var pageAlerts = [];
+  var confirms = [];
+  var timers = [];
+  var played = [];
+  var deleted = [];
+  load(__argv[3], 'hw runtime', ['window', 'document', 'fetch', 'console'], [rw, fakeDoc, runtimeFetch, fakeConsole]);
+  var rhw = rw.hw || {};
+  check(typeof rhw.esc === 'function', 'H0 hw.esc defined');
+  if (typeof rhw.esc === 'function') {
+    check(rhw.esc('<a href="x">&\'') === '&lt;a href=&quot;x&quot;&gt;&amp;&#39;', 'H0 hw.esc escapes & < > " \'', rhw.esc('<a href="x">&\''));
+    check(rhw.esc(null) === '' && rhw.esc(7) === '7', 'H0 hw.esc takes null and numbers');
+  }
+  routes['/api/err-text'] = [400, 'Error: X'];
+  routes['/api/err-json'] = [403, '{"ok":false,"error":"Error: admin only"}'];
+  routes['/api/err-msg'] = [400, '{"message":"why not"}'];
+  routes['/api/err-empty'] = [503, ''];
+  routes['/api/ok'] = [200, '{"v":1}'];
+  function rejects(p, label, message, status) {
+    return p.then(function (v) {
+      check(false, label, 'resolved with ' + JSON.stringify(v));
+    }, function (e) {
+      check(e && e.message === message && e.status === status, label,
+            (e && e.message) + ' / ' + (e && e.status));
+    });
+  }
+  var hp = (typeof rhw.fetchJSON === 'function') ? Promise.all([
+    rejects(rhw.fetchJSON('/api/err-text'), 'H1 fetchJSON rejects with the reply text reason', 'X', 400),
+    rejects(rhw.fetchText('/api/err-text'), 'H1 fetchText rejects with the reply text reason', 'X', 400),
+    rejects(rhw.fetchJSON('/api/err-json'), 'H2 fetchJSON rejects with a JSON error field', 'admin only', 403),
+    rejects(rhw.fetchText('/api/err-msg'), 'H2 fetchText rejects with a JSON message field', 'why not', 400),
+    rejects(rhw.fetchJSON('/api/err-empty'), 'H3 an empty refusal falls back to HTTP n', 'HTTP 503', 503),
+    rhw.fetchJSON('/api/ok').then(function (d) { check(d && d.v === 1, 'H4 fetchJSON still resolves a 200 reply'); },
+                                  function (e) { check(false, 'H4 fetchJSON still resolves a 200 reply', e); })
+  ]) : Promise.resolve(check(false, 'H runtime loaded'));
+
+  /* R: camera and microphone recording lists. */
+  var NAME = 'a"b\'<img src=x onerror=alert(1)>.avi';
+  var SLASHED = 'c\\d.avi';
+  var TRAILING = 'f\\';
+  routes['/api/videos'] = [200, JSON.stringify({ sdAvailable: true, count: 4, files: [
+    { name: NAME, size: 2048 }, { name: SLASHED, size: 1024 }, { name: TRAILING, size: 512 },
+    { name: 'clean.avi', size: 4096 }] })];
+  routes['/api/recordings'] = [200, JSON.stringify({ count: 4, files: [
+    { name: NAME.replace('.avi', '.wav'), size: 2048 }, { name: SLASHED.replace('.avi', '.wav'), size: 1024 },
+    { name: TRAILING, size: 512 }, { name: 'clean.wav', size: 4096 }] })];
+  var camList = domEl('camera-recordings-list');
+  domEl('camera-recordings-count');
+  var micList = domEl('mic-recordings-list');
+  domEl('mic-rec-count');
+  rw.openAviPlayer = function (n) { played.push(n); };
+  var stubs = {
+    confirm: function (m) { confirms.push(m); return true; },
+    hwConfirm: function (m) { confirms.push(m); return Promise.resolve(true); },
+    alert: function (m) { pageAlerts.push(String(m)); },
+    setTimeout: function (f) { timers.push(f); return 0; }
+  };
+  var names = ['window', 'hw', 'document', 'console', 'confirm', 'hwConfirm', 'alert', 'setTimeout'];
+  var values = [rw, rhw, fakeDoc, fakeConsole, stubs.confirm, stubs.hwConfirm, stubs.alert, stubs.setTimeout];
+  load(__argv[4], 'camera recordings script', names, values);
+  load(__argv[5], 'microphone recordings script', names, values);
+  return hp.then(function () {
+    if (typeof rw.loadCameraRecordings === 'function') rw.loadCameraRecordings();
+    if (typeof rw.loadMicRecordings === 'function') rw.loadMicRecordings();
+    return settle(function () { return camList.children.length >= 4 && micList.children.length >= 4; }, 60);
+  }).then(function () {
+    [['camera', camList, '.avi'], ['mic', micList, '.wav']].forEach(function (c) {
+      var list = c[1], ext = c[2], tag = 'R ' + c[0];
+      var hostile = NAME.replace('.avi', ext), slashed = SLASHED.replace('.avi', ext);
+      var html = list.innerHTML;
+      check(nodesBy(list, function (n) { return n.tagName === 'IMG'; }).length === 0 && rawHtmlIn(list).indexOf('<img') < 0,
+            tag + ' list renders no element from a recording name', rawHtmlIn(list).slice(0, 300));
+      check(html.indexOf('<img src=x') < 0 && html.indexOf('&lt;img src=x onerror=alert(1)&gt;') >= 0,
+            tag + ' recording name is shown as literal text', html.slice(0, 300));
+      check(list.children.length === 4, tag + ' one row per recording', list.children.length);
+      check(nodesBy(list, function (n) { return n.getAttribute('onclick') !== null || n.getAttribute('data-name') !== null; }).length === 0,
+            tag + ' rows carry no inline handler or name attribute');
+      var urls = nodesBy(list, function (n) { return n.getAttribute('href') !== null || n.getAttribute('src') !== null; })
+        .map(function (n) { return n.getAttribute('href') || n.getAttribute('src'); });
+      var base = c[0] === 'camera' ? '/api/videos/file?name=' : '/api/recordings/file?name=';
+      check(urls.indexOf(base + encodeURIComponent(hostile)) >= 0 && urls.indexOf(base + encodeURIComponent(slashed)) >= 0 &&
+            urls.indexOf(base + 'clean' + ext) >= 0,
+            tag + ' file URLs encode the name', JSON.stringify(urls));
+      check(list.textContent.indexOf(hostile) >= 0 && list.textContent.indexOf('clean' + ext) >= 0,
+            tag + ' row text is the original name');
+    });
+    // Play and Delete get the original names.
+    nodesBy(camList, function (n) { return n.tagName === 'BUTTON'; }).forEach(function (b) { b.click(); });
+    nodesBy(micList, function (n) { return n.tagName === 'BUTTON'; }).forEach(function (b) { b.click(); });
+    return settle(function () { return cliPosts.length >= 6 && pageAlerts.length >= 2; }, 60);
+  }).then(function () {
+    check(played.length === 4 && played[0] === NAME && played[1] === SLASHED && played[2] === TRAILING &&
+          played[3] === 'clean.avi',
+          'R camera Play receives the original names', JSON.stringify(played));
+    function verbNames(verb) {
+      return cliPosts.filter(function (l) { return String(l).indexOf(verb + ' ') === 0; })
+        .map(function (l) { return parseQuotedToken(l, verb); });
+    }
+    var cam = verbNames('cameravideodelete'), mic = verbNames('micdelete');
+    // The device's parser reads the name back exactly, backslashes (even a
+    // trailing one) included; a name holding " is refused on the page and
+    // nothing is posted for it.
+    check(JSON.stringify(cam) === JSON.stringify([SLASHED, TRAILING, 'clean.avi']),
+          'R cameravideodelete quotes the name so the device parses it back unchanged', JSON.stringify(cliPosts));
+    check(JSON.stringify(mic) === JSON.stringify([SLASHED.replace('.avi', '.wav'), TRAILING, 'clean.wav']),
+          'R micdelete quotes the name so the device parses it back unchanged', JSON.stringify(cliPosts));
+    check(cliPosts.indexOf('cameravideodelete "clean.avi"') >= 0 && cliPosts.indexOf('micdelete "clean.wav"') >= 0 &&
+          cliPosts.indexOf('cameravideodelete "c\\d.avi"') >= 0,
+          'R a name is sent between quotes unchanged, with no escapes', JSON.stringify(cliPosts));
+    check(cliPosts.filter(function (l) { return String(l).indexOf('onerror') >= 0; }).length === 0,
+          'R a name holding a quote posts nothing', JSON.stringify(cliPosts));
+    check(pageAlerts.length === 2 && pageAlerts[0].indexOf('cannot be deleted here') >= 0 &&
+          pageAlerts[1].indexOf('cannot be deleted here') >= 0,
+          'R a name holding a quote raises the cannot-delete alert', pageAlerts.join(' | '));
+    check(confirms.length === 6 && confirms[0] === 'Delete ' + SLASHED + '?', 'R each delete asks with the original name', JSON.stringify(confirms));
+    pageAlerts.length = 0;
+    // A refused delete shows the device's reason.
+    cliStatus['micdelete "clean.wav"'] = [400, 'Error: Recording is still active/finalizing'];
+    var before = pageAlerts.length;
+    return Promise.resolve(rw.deleteMicRecording && rw.deleteMicRecording('clean.wav')).then(function () {
+      return settle(function () { return pageAlerts.length > before; }, 30);
+    }).then(function () {
+      check(pageAlerts[before] === 'Recording is still active/finalizing', 'R a refused mic delete shows the reason', pageAlerts.join(' | '));
+    });
+  }).then(function () {
+    /* G: generic remote-sensor rows; keys come from the remote device's JSON. */
+    load(__argv[6], 'generic sensor renderer', ['window'], [rw]);
+    var g = makeNode('div');
+    if (typeof rw.hwRenderGenericSensor === 'function') {
+      rw.hwRenderGenericSensor(g, { list: [{ '<img src=x onerror=alert(1)>': 1, ok: 2 }], obj: { '<svg onload=alert(2)>': 'v' } });
+    }
+    var gh = g.innerHTML;
+    check(gh.indexOf('<img src=x') < 0 && gh.indexOf('<svg') < 0, 'G nested sensor keys are not rendered as elements', gh);
+    check(gh.indexOf('&lt;img src=x onerror=alert(1)&gt;:1') >= 0 && gh.indexOf('&lt;svg onload=alert(2)&gt;:v') >= 0 &&
+          gh.indexOf('ok:2') >= 0, 'G nested sensor keys are shown as literal text', gh);
+
+    /* P: the bond progress card; the peer name may be the pairing-registry name. */
+    var render = null;
+    try {
+      render = Function('hw', 'Date', 'var bondProgressStartMs = null;\n' + slurp(__argv[7]) + '\nreturn renderBondProgress;')(rhw, Date);
+    } catch (e) {
+      check(false, 'load bond progress renderer', e);
+    }
+    var hostile = { bonded: true, peerConfigured: true, peerOnline: false, agreement: 'declined', agreementReason: 'ended',
+                    peerName: '<img src=x onerror=alert(1)>', peerMac: 'AA:BB:CC:DD:EE:FF' };
+    var card = makeNode('div');
+    if (render) render(hostile, card);
+    var ch = card.innerHTML;
+    check(ch.indexOf('<img src=x') < 0, 'P peer name is not rendered as an element', ch.slice(0, 400));
+    check(ch.indexOf('&lt;img src=x onerror=alert(1)&gt; &middot; AA:BB:CC:DD:EE:FF') >= 0 &&
+          ch.indexOf('&lt;img src=x onerror=alert(1)&gt; ended the bond') >= 0,
+          'P peer name is shown as literal text in the title and the hint');
+    var clean = makeNode('div');
+    hostile.peerName = 'Kitchen';
+    if (render) render(hostile, clean);
+    check(clean.innerHTML.indexOf('Kitchen &middot;') >= 0 && clean.innerHTML.indexOf('Kitchen ended the bond') >= 0,
+          'P a clean peer name renders unchanged');
+    return undefined;
+  });
 }
 
 load(__argv[0], 'file browser block', ['window', 'hw', 'console', 'fetch'], [win, hw, fakeConsole, fakeFetch]);
@@ -286,6 +541,8 @@ settle(function () { return listed(listEl) && listed(errEl); }, 50).then(functio
   var s = el('wifi-scan-results').innerHTML;
   check(s.indexOf('<img src=x') < 0 && s.indexOf('Scan &lt;img src=x onerror=alert(9)&gt;') >= 0,
         'S3 scan error text is shown as literal text', s);
+  return recordingsAndRuntime();
+}).then(function () {
   check(alerts.length === 0, 'no injected script ran', alerts.join(' | '));
   check(consoleErrors.length === 0, 'no console errors while rendering', consoleErrors.join(' | '));
   __out('HARNESS_RESULT passed=' + __passed + ' failed=' + __failed);

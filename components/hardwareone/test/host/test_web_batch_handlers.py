@@ -213,6 +213,9 @@ def main() -> None:
         *([] if args.baseline else [*remote_sent_constants,
                                     extract_block(utils, "bool parseRemoteCommandSentReqId(")]),
         extract_block(local, "static String redactWebCommandResult("),
+        # The X-Cmd-Display encoder handleCliCommand calls, when production has it.
+        *([extract_block(local, "static char* encodeCliDisplayHeader(")]
+          if "static char* encodeCliDisplayHeader(" in local else []),
         extract_block(local, "esp_err_t handleCliCommand("),
         extract_block(local, "static bool cliBatchCommandEquals("),
         extract_block(local, "static bool settingsSaveOutputConfirmed("),

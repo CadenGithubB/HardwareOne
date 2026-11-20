@@ -14,6 +14,8 @@
 
 #include "System_WiFi.h"
 #include "System_WiFiRehuntPolicy.h"  // when a lost connection is followed by a hunt
+#include "System_WiFiServicesPolicy.h"  // whether a later join starts the web server
+#include "System_RamFlush.h"  // ramFlushResolve(RF_HTTP) — HTTP autostart as boot resolves it
 #include "System_TaskUtils.h"  // xTaskCreateLogged, WIFI_REHUNT_STACK_WORDS
 #include "System_ESPNow.h"  // espnowOwnsRadio — radio ownership (stub when ESP-NOW is compiled out)
 #include "network/wifi/System_WiFiNetworksInternal.h"
@@ -122,6 +124,10 @@ static WifiConnectBounds wifiConnectBounds(uint32_t budgetMs, WifiConnectOrigin 
 // the request and waits for active to clear (wifiSupersedeBackgroundConnect).
 static std::atomic<bool> sBackgroundConnectActive{false};
 static std::atomic<bool> sBackgroundConnectSuperseded{false};
+// The boot connect's own span inside setupWifi (the rehunt's BACKGROUND hunt
+// does not set it). A join made in it belongs to boot, which starts the
+// network services for it; see wifiReconcileNetworkServicesJob.
+static std::atomic<bool> sBackgroundConnectIsBoot{false};
 
 static bool wifiConnectSuperseded(const WifiConnectBounds& bounds) {
   return bounds.supersedable && sBackgroundConnectSuperseded.load(std::memory_order_acquire);
@@ -161,6 +167,12 @@ struct WifiConsoleTypeahead {
     return (head.load(std::memory_order_relaxed) + 1) % kSize ==
            tail.load(std::memory_order_acquire);
   }
+  // Room for n more bytes (one slot always stays empty).
+  bool hasRoom(uint16_t n) const {
+    const uint16_t used = (head.load(std::memory_order_relaxed) + kSize -
+                           tail.load(std::memory_order_acquire)) % kSize;
+    return uint16_t(kSize - 1 - used) >= n;
+  }
   void push(char c) {
     const uint16_t at = head.load(std::memory_order_relaxed);
     bytes[at] = c;
@@ -178,15 +190,39 @@ static WifiConsoleTypeahead sWifiConsoleTypeahead;
 
 bool wifiConsoleTypeaheadPop(char& c) { return sWifiConsoleTypeahead.pop(c); }
 
+// How long an Esc waits for the byte that would make it an escape sequence.
+// A terminal sends a key's whole sequence (an arrow is ESC '[' 'A') at once.
+static constexpr uint32_t kWifiConsoleEscapeWaitMs = 50;
+
 // True once Ctrl-C (0x03) or Esc (0x1B) has arrived on the console; that key is
-// consumed. Other bytes go to the typeahead. When it is full the rest stays
-// unread in the UART buffer for the main loop, so nothing is dropped (a cancel
-// key behind them is then not seen).
+// consumed. An Esc followed within kWifiConsoleEscapeWaitMs by '[' or 'O' is an
+// escape sequence (an arrow or function key), not a cancel: it goes to the
+// typeahead whole, the rest of the sequence as ordinary bytes. A lone Esc
+// cancels; a byte other than '[' or 'O' right after it is kept for the CLI.
+// Other bytes go to the typeahead. When it is full (an Esc needs room for two)
+// the rest stays unread in the UART buffer for the main loop, so nothing is
+// dropped (a cancel key behind them is then not seen).
 static bool wifiConsoleCancelKeyPressed() {
   while (Serial.available() > 0 && !sWifiConsoleTypeahead.full()) {
+    if (Serial.peek() == 0x1B) {
+      if (!sWifiConsoleTypeahead.hasRoom(2)) break;
+      (void)Serial.read();
+      const unsigned long escAtMs = millis();
+      while (Serial.available() <= 0 && millis() - escAtMs < kWifiConsoleEscapeWaitMs) delay(1);
+      const int next = Serial.available() > 0 ? Serial.read() : -1;
+      if (next == '[' || next == 'O') {
+        sWifiConsoleTypeahead.push(static_cast<char>(0x1B));
+        sWifiConsoleTypeahead.push(static_cast<char>(next));
+        continue;
+      }
+      if (next >= 0 && next != 0x03 && next != 0x1B) {
+        sWifiConsoleTypeahead.push(static_cast<char>(next));
+      }
+      return true;
+    }
     const int c = Serial.read();
     if (c < 0) break;
-    if (c == 0x03 || c == 0x1B) return true;
+    if (c == 0x03) return true;
     sWifiConsoleTypeahead.push(static_cast<char>(c));
   }
   return false;
@@ -2235,10 +2271,12 @@ static bool connectWifiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
                     wifiStatusToString(currentStatus), currentStatus, millis() - start);
         lastStatus = currentStatus;
       }
-      // Ctrl-C or Esc cancels. Only a request that owns the console reads it
-      // (see wifiConsoleCancelApplies); otherwise the main loop is the
-      // console's reader and a keystroke there is a command. Other keys typed
-      // here reach the CLI afterwards (wifiConsoleTypeaheadPop).
+      // Ctrl-C or a lone Esc cancels; an arrow or function key (Esc '[' or
+      // Esc 'O' within kWifiConsoleEscapeWaitMs) does not. Only a request that
+      // owns the console reads it (see wifiConsoleCancelApplies); otherwise the
+      // main loop is the console's reader and a keystroke there is a command.
+      // Other keys typed here, escape sequences included, reach the CLI
+      // afterwards (wifiConsoleTypeaheadPop).
       if (bounds.consoleCancels && wifiConsoleCancelKeyPressed()) {
         DEBUG_WIFIF("[connectWiFiIndex] Connection cancelled by user");
         gWifiUserCancelled = true;  // Set global flag for multi-attempt cancellation
@@ -2485,8 +2523,15 @@ const char* cmd_ntpstatus(const String& argsInput) {
 }
 
 #if ENABLE_HTTP_SERVER
+// `closehttp` since the last `openhttp`: a later WiFi join leaves the server
+// off (wifiReconcileNetworkServicesJob). Only these two commands change it;
+// closewifi stopping the server does not. Read and written on cmd_exec only.
+static bool sHttpUserClosed = false;
+
 const char* cmd_httpstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  // The user wants the server again: later joins may start it.
+  sHttpUserClosed = false;
 
   if (!gSettings.httpEnabled) {
     return "Error: HTTP server is disabled - run 'httpenabled 1' first";
@@ -2514,6 +2559,8 @@ const char* cmd_httpstart(const String& argsInput) {
 
 const char* cmd_httpstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  // Off until openhttp: a later WiFi join does not start it again.
+  sHttpUserClosed = true;
 
   if (server == NULL) {
     return "Error: HTTP server is not running. Start it with 'openhttp'.";
@@ -2928,6 +2975,7 @@ const size_t wifiCommandsCount = sizeof(wifiCommands) / sizeof(wifiCommands[0]);
 static portMUX_TYPE sWifiDiscMux = portMUX_INITIALIZER_UNLOCKED;
 static bool          sWifiDiscPending = false;
 static bool          sWifiConnPending = false;   // GOT_IP edge: drained like the disconnect below
+static bool          sWifiConnByBoot = false;    // that join was the boot connect's (boot starts its services)
 static char          sWifiConnIp[16];
 static char          sWifiDiscSsid[33];
 static int           sWifiDiscReason = 0;
@@ -2943,9 +2991,11 @@ static void wifiEventLogger(arduino_event_id_t event, arduino_event_info_t info)
     // Every join lands here, commanded or the driver's own auto-reconnect, so
     // this edge (not connectWifiTarget) is where wifi_connected is posted.
     const String ip = IPAddress(info.got_ip.ip_info.ip.addr).toString();
+    const bool byBoot = sBackgroundConnectIsBoot.load(std::memory_order_acquire);
     portENTER_CRITICAL(&sWifiDiscMux);
     snprintf(sWifiConnIp, sizeof(sWifiConnIp), "%s", ip.c_str());
     sWifiConnPending = true;
+    sWifiConnByBoot = byBoot;
     portEXIT_CRITICAL(&sWifiDiscMux);
   } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
     espnowNoteWifiChannelMayHaveChanged();  // left the AP — re-pin the preferred channel offline
@@ -2970,18 +3020,57 @@ static void wifiEventLogger(arduino_event_id_t event, arduino_event_info_t info)
 // teardown is commanded, and the reboot itself is already logged.
 static void wifiRehuntNoteDropped();
 
+// Network services for a join made after boot: NTP and HTTP autostart used to
+// run only in the boot sequence, so a device that joined later (the rehunt
+// after a failed boot connect, the driver's own rejoin, the radio companion's
+// restore, radiopower on, openwifi) had no clock sync and no web server until
+// `ntpsync` and `openhttp`. Runs on cmd_exec, in order with every openhttp and
+// closehttp (boot's own openhttp included). Joins the boot connect made are
+// left to boot, which starts the services for them itself.
+static void wifiReconcileNetworkServicesJob(void*) {
+  if (!WiFi.isConnected()) return;  // dropped again before the job ran
+  // NTP: arm the client when nothing has (no reply wait; lwIP keeps polling and
+  // the main loop's ntpSyncDrainTick takes the reply).
+  if (!getNtpRuntimeStatus().clientArmed) setupNtp();
+#if ENABLE_HTTP_SERVER
+  WifiServicesInputs in;
+  in.httpEnabled = gSettings.httpEnabled;
+  // As boot resolves it. The RAM-flush overlay is not one-shot: it stands for
+  // the whole boot, so a later join decides the same way boot did.
+  in.autostart = ramFlushResolve(RF_HTTP, gSettings.httpAutoStart);
+  in.running = isHttpServerRunning();
+  in.userClosed = sHttpUserClosed;
+  in.bootConnectActive = sBackgroundConnectIsBoot.load(std::memory_order_acquire);
+  if (!wifiServicesShouldStartHttp(in)) return;
+  startHttpServer();
+  if (isHttpServerRunning()) {
+    BROADCAST_PRINTF("%s%s", gServerIsHttps ? "HTTPS server started. Try: https://" : "HTTP server started. Try: http://",
+                     WiFi.localIP().toString().c_str());
+  } else {
+    broadcastOutput("Error: HTTP server did not start after the WiFi join; run 'openhttp'");
+  }
+#endif
+}
+
 void wifiEventLogDrain() {
   {
     char ip[sizeof(sWifiConnIp)];
     bool conn = false;
+    bool byBoot = false;
     portENTER_CRITICAL(&sWifiDiscMux);
     if (sWifiConnPending) {
       memcpy(ip, sWifiConnIp, sizeof(ip));
       sWifiConnPending = false;
+      byBoot = sWifiConnByBoot;
       conn = true;
     }
     portEXIT_CRITICAL(&sWifiDiscMux);
-    if (conn) systemEventPost(SYSEVT_WIFI_CONNECTED, ip, WiFi.SSID().c_str());
+    if (conn) {
+      systemEventPost(SYSEVT_WIFI_CONNECTED, ip, WiFi.SSID().c_str());
+      if (!byBoot && !submitDeferredToCmdExec(wifiReconcileNetworkServicesJob, nullptr)) {
+        WARN_WIFIF("[WiFi] network services not checked after the join (command executor full)");
+      }
+    }
   }
   char ssid[sizeof(sWifiDiscSsid)];
   int reason = 0;
@@ -3013,17 +3102,28 @@ void wifiEventLogDrain() {
 }
 
 // ----------------------------------------------------------------------------
-// Rehunt: a lost connection the driver has not restored is followed by a hunt
-// across every saved network (rules in System_WiFiRehuntPolicy.h). The hunt is
-// a BACKGROUND connect on its own short-lived task: no console reads, no NTP
-// (the clock was set when the lost connection was made), and every Wi-Fi
-// command supersedes it exactly as it supersedes the boot connect.
+// Rehunt: a lost connection the driver has not restored, or a failed connect
+// of setupWifi, is followed by a hunt across every saved network (rules in
+// System_WiFiRehuntPolicy.h). The hunt is a BACKGROUND connect on its own
+// short-lived task: no console reads and no NTP inside it (the join's
+// network-services job arms NTP when it is not running, as after a boot that
+// never connected), and every Wi-Fi command supersedes it exactly as it
+// supersedes the boot connect.
 static WifiRehuntPolicy sRehunt;
 static portMUX_TYPE sRehuntMux = portMUX_INITIALIZER_UNLOCKED;
 
 static void wifiRehuntNoteDropped() {
   portENTER_CRITICAL(&sRehuntMux);
   sRehunt.noteDropped(millis());
+  portEXIT_CRITICAL(&sRehuntMux);
+}
+
+// setupWifi's connect failed (boot, the radio companion's restore, radiopower
+// on, first-time setup). Its last attempt ended in a commanded disconnect, so
+// the driver does not retry; without this nothing would until `openwifi`.
+static void wifiRehuntNoteConnectFailed() {
+  portENTER_CRITICAL(&sRehuntMux);
+  sRehunt.noteConnectFailed(millis());
   portEXIT_CRITICAL(&sRehuntMux);
 }
 
@@ -3243,10 +3343,16 @@ void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin) {
   // then still stands.
   struct BackgroundConnectScope {
     explicit BackgroundConnectScope(bool background) : background_(background) {
-      if (background_) sBackgroundConnectActive.store(true, std::memory_order_release);
+      if (background_) {
+        sBackgroundConnectIsBoot.store(true, std::memory_order_release);
+        sBackgroundConnectActive.store(true, std::memory_order_release);
+      }
     }
     ~BackgroundConnectScope() {
-      if (background_) sBackgroundConnectActive.store(false, std::memory_order_release);
+      if (background_) {
+        sBackgroundConnectActive.store(false, std::memory_order_release);
+        sBackgroundConnectIsBoot.store(false, std::memory_order_release);
+      }
     }
     const bool background_;
   } backgroundScope(origin == WifiConnectOrigin::BACKGROUND);
@@ -3321,6 +3427,12 @@ void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin) {
     broadcastOutput("WiFi connect cancelled; continuing without network");
   } else if (!connected) {
     broadcastOutput("WiFi connect timed out; continuing without network");
+    // The attempt ended in a commanded disconnect, so the driver will not
+    // retry. Hand it to the rehunt (first hunt 60 s from now, then the
+    // backoff), as for a dropped link. Every board with wifiautoreconnect on.
+    if (savedCount > 0 && gSettings.wifiEnabled && gSettings.wifiAutoReconnect) {
+      wifiRehuntNoteConnectFailed();
+    }
     // Once-per-boot latch: setupWifi can also run via first-time setup.
     static bool sBootConnectFailLogged = false;
     if (!sBootConnectFailLogged) {

@@ -450,9 +450,10 @@ String CommandArgs::remaining(int afterIndex) const {
 
 // One token of a key=value line, starting at `pos` (not white space): a bare
 // word, a "quoted text", or key=value where a value in double quotes runs to
-// its closing quote (\" does not close it). Returns the position after the
-// token; `eq` is the position of the '=' that ends the key, or -1 for a token
-// without one.
+// its closing quote. Inside such a value \\ and \" are two-byte escape pairs,
+// so \" does not close it and a value ending in \\ closes at the quote that
+// follows. Returns the position after the token; `eq` is the position of the
+// '=' that ends the key, or -1 for a token without one.
 static int scanKeyValueToken(const String& raw, int pos, int& eq) {
   const int len = (int)raw.length();
   eq = -1;
@@ -468,7 +469,8 @@ static int scanKeyValueToken(const String& raw, int pos, int& eq) {
       if (pos < len && raw[pos] == '"') {
         pos++;
         while (pos < len && raw[pos] != '"') {
-          pos += (raw[pos] == '\\' && pos + 1 < len && raw[pos + 1] == '"') ? 2 : 1;
+          pos += (raw[pos] == '\\' && pos + 1 < len &&
+                  (raw[pos + 1] == '"' || raw[pos + 1] == '\\')) ? 2 : 1;
         }
         if (pos < len) pos++;  // closing quote
       }
@@ -511,19 +513,22 @@ String CommandArgs::value(const String& key) const {
   int start = keyValueStart(*this, key);
   if (start < 0 || start >= (int)raw_.length()) return String();
 
-  // quoted value? Honor backslash-escaped quotes (\") — the web UI emits
-  // them for nested JSON (secondarytriggers=), quoted text inside commands=,
-  // and event match= patterns. The old plain indexOf('"') scan truncated all
-  // of those at the first inner quote, which silently dropped every
-  // web-created secondary trigger.
+  // quoted value? \" and \\ are escape pairs that read as " and \, as in
+  // scanKeyValueToken. A producer escapes \ as \\ first and then " as \" (the
+  // web UI for names, conditions, nested JSON in secondarytriggers=, quoted
+  // text inside commands= and event match= patterns). Without the \\ pair a
+  // backslash was stored doubled, and a value ending in one ("a\\") read its
+  // closing quote as escaped and swallowed the tokens after it. Any other
+  // backslash passes through untouched, so a typed match="\d" stays \d.
   if (raw_[start] == '"') {
     start++;
     String out;
     int i = start;
     while (i < (int)raw_.length()) {
       char c = raw_[i];
-      if (c == '\\' && i + 1 < (int)raw_.length() && raw_[i + 1] == '"') {
-        out += '"';  // unescape \" -> " ; other backslashes pass through untouched
+      if (c == '\\' && i + 1 < (int)raw_.length() &&
+          (raw_[i + 1] == '"' || raw_[i + 1] == '\\')) {
+        out += raw_[i + 1];  // \" -> " and \\ -> \ ; other backslashes pass through
         i += 2;
         continue;
       }

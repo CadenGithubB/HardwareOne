@@ -3,7 +3,8 @@
 
 Boot registers the metadata-only phone; the pipe later re-registers its
 connectable spec. Boot reconnect, the tick and name lookup must then reach the
-pipe's admission.
+pipe's admission. Boot reconnect only arms the peers (setup never waits for an
+open); the tick admits them when due, two first attempts at least 2 s apart.
 """
 import argparse
 import os
@@ -52,7 +53,7 @@ if __name__=='__main__':
             'static BlePeerConnectAdmission sanitizeAdmission(','static const char* admissionName(',
             'static BlePeerConnectAdmission requestPeerConnectAdmission(',
             'static void fillAdmissionClaimLocked(','static bool claimDueAdmission(',
-            'static bool claimBootAdmission(','static bool commitAdmission(',
+            'static bool armBootReconnect(','static bool commitAdmission(',
             'void bleBootReconnect(void)','void blePeerNoteLinkLost(','void blePeerNoteLinkUp(',
             'void blePeerRequestReseek(BlePeerKind kind) ','bool blePeerRestoreDroppedReseek(BlePeerKind kind, ',
             'void bleAutoReconnectTick(void)')),

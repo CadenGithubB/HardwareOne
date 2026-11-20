@@ -61,6 +61,15 @@ inline void streamLoginInner(httpd_req_t* req, const String& username, const Str
   </form>
 </div>
 <script>
+// Every logout and session expiry lands on this page. The CLI page keeps its
+// terminal and command history in this origin's localStorage; drop them so
+// the next person at this browser sees none of the last session's commands.
+// (Clear-Site-Data needs a secure origin; the device is often plain HTTP.)
+try{
+  ['cliHistory','cliOutputHistory','cliOutputHistoryBackup','cliInHelp','cliStoreV'].forEach(function(k){
+    try{ localStorage.removeItem(k); }catch(e){}
+  });
+}catch(e){}
 window.addEventListener('load', function(){
   setTimeout(function(){
     try{

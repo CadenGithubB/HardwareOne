@@ -117,6 +117,10 @@ public:
   // Save directly to generated paths; failed-write cleanup is best-effort.
   // BOTH tries each tier independently, succeeds if either completes, and
   // prefers the internal path when both complete. Empty means neither saved.
+  // A save never replaces an existing photo: when the generated name (or its
+  // .tmp) is taken on a tier, that tier writes <name>_1.jpg .. <name>_99.jpg,
+  // and refuses past that. The returned path, and the SYSEVT_PHOTO_SAVED
+  // name, are the final ones.
   String saveImage(const uint8_t* data, size_t len, ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS,
                    ImageSaveReport* report = nullptr);
 
@@ -149,17 +153,28 @@ public:
   // Rotation/cleanup (delete oldest when max reached)
   bool enforceMaxImages(ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS);
   
-  // Generate unique filename
+  // The name for the next photo: img_YYYYMMDD_HHMMSS.jpg with a valid clock,
+  // else img_NNNNNN.jpg from imageCounter. saveImage makes it unique per tier.
   String generateFilename();
+
+  // N of a counter photo name, img_NNNNNN.jpg or img_NNNNNN_<1-99>.jpg with 6
+  // or 7 digits, else -1. Timestamp names (8 digits, then _HHMMSS) never match.
+  static long counterOfPhotoName(const String& name);
   
   // Get the capture folder path for a location
   String getCaptureFolder(ImageStorageLocation location = IMAGE_STORAGE_LITTLEFS);
   
 private:
   bool littleFsAvailable;
-  int imageCounter;  // For unique filenames
+  // Next counter name when there is no clock. It starts at 0 each boot and
+  // is raised past the highest counter name the per-mount sweep sees in a
+  // capture folder (LittleFS at init, SD at its first save per mount), so
+  // names keep growing across boots and name-order retention stays oldest
+  // first.
+  int imageCounter;
   // One stale-temporary sweep per tier per mount: a reset mid-save leaves
   // `<image>.jpg.tmp`, which no listing or retention would otherwise reclaim.
+  // The same walk seeds imageCounter.
   // LittleFS is swept once per init(); SD once per VFS::sdMountGeneration().
   bool lfsStaleSwept = false;
   uint32_t sdSweptGeneration = 0;
@@ -174,6 +189,29 @@ private:
   // Helper to get mount prefix for location
   String getMountPrefix(ImageStorageLocation location);
 };
+
+inline long ImageManager::counterOfPhotoName(const String& name) {
+  const char* text = name.c_str();
+  if (strncmp(text, "img_", 4) != 0) return -1;
+  text += 4;
+  long counter = 0;
+  int digits = 0;
+  while (*text >= '0' && *text <= '9') {
+    if (++digits > 7) return -1;  // 8 digits: a timestamp name
+    counter = counter * 10 + (*text++ - '0');
+  }
+  if (digits < 6) return -1;
+  if (*text == '_') {  // a collision suffix _1 .. _99
+    ++text;
+    int suffixDigits = 0;
+    while (*text >= '0' && *text <= '9') {
+      if (++suffixDigits > 2) return -1;
+      ++text;
+    }
+    if (suffixDigits == 0) return -1;
+  }
+  return strcmp(text, ".jpg") == 0 ? counter : -1;
+}
 
 // Global instance
 extern ImageManager gImageManager;

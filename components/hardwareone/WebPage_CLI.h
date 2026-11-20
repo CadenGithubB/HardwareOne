@@ -139,6 +139,21 @@ var cliBondMode = false;
 function __cliDisplayCommand(command){
   return (command||'').replace(/\b(llmhttptoken|llmhttpurl)\b([\s\S]*)/i, function(_,key,tail){ return key+(tail.trim()?' ***':tail); });
 }
+// Typed arguments can be secrets (login, useradd, wifiadd, passphrases), and
+// only the device knows which. Until it answers, the page shows and keeps no
+// more than the verb; the kept copy is the device's redacted line.
+function __cliVerb(command){ var m=/^\s*(\S+)/.exec(command||''); return m?m[1]:''; }
+function __cliPendingDisplay(command){ var verb=__cliVerb(command); return verb+(/\S\s+\S/.test((command||'').trim())?' \u2026':''); }
+function __cliReplyDisplay(r,command){
+  var shown=null;
+  try{ var v=r&&r.headers?r.headers.get('X-Cmd-Display'):null; if(v){ shown=decodeURIComponent(v); } }catch(_){ shown=null; }
+  return shown ? __cliDisplayCommand(shown) : __cliVerb(command);
+}
+function __cliRemember(display){
+  if (!display || commandHistory[commandHistory.length - 1] === display) return;
+  commandHistory.push(display); if (commandHistory.length > (window.__cliHistoryMax || 50)) commandHistory.shift();
+  try{ localStorage.setItem('cliHistory', JSON.stringify(commandHistory)); }catch(_){}
+}
 hw.on(cliExecBtn, 'click', function(){ if(window.executeCommand) executeCommand(); });
 hw.on(cliInput, 'keydown', function(e){ if(e.key==='Enter' && window.executeCommand){ executeCommand(); } });
 try{console.log('[CLI] Core init ready');}catch(_){}
@@ -158,6 +173,11 @@ try{console.log('[CLI] Core init ready');}catch(_){}
   httpd_resp_send_chunk(req, R"JS(
 <script>
 try{console.log('[CLI] Session/init start');}catch(_){}
+// Before the device sent X-Cmd-Display this page stored typed commands as
+// typed (wifiadd passwords, login, tokens). The sign-in page clears the store
+// at every logout, but a device whose web login is bypassed never shows it:
+// drop a store without the current format mark once, before reading it.
+try{ if(localStorage.getItem('cliStoreV')!=='2'){ ['cliHistory','cliOutputHistory','cliOutputHistoryBackup','cliInHelp'].forEach(function(k){ try{ localStorage.removeItem(k); }catch(_){} }); localStorage.setItem('cliStoreV','2'); } }catch(_){}
 try{ commandHistory = JSON.parse(localStorage.getItem('cliHistory') || '[]'); }catch(_){ commandHistory = []; }
 historyIndex = -1; currentCommand = '';
 try{ inHelp = JSON.parse(localStorage.getItem('cliInHelp') || 'false'); }catch(_){ inHelp=false; }
@@ -241,25 +261,24 @@ function executeCommand(){
   var command = (cliInput && cliInput.value ? cliInput.value : '').trim();
   if (!command) return;
   if (cliBondMode) { runBondedCommand(command); return; }
-  var displayCommand = __cliDisplayCommand(command);
+  var pendingDisplay = __cliPendingDisplay(command);
   var responseGeneration=++cliResponseGeneration;
   ++cliLogRequestGeneration; // invalidate bootstrap/poll replies already in flight
   cliCommandPending=true;
   var outputBeforeCommand = cliOutput ? cliOutput.textContent : '';
-  if (commandHistory[commandHistory.length - 1] !== displayCommand) {
-    commandHistory.push(displayCommand); if (commandHistory.length > (window.__cliHistoryMax || 50)) commandHistory.shift();
-    try{ localStorage.setItem('cliHistory', JSON.stringify(commandHistory)); }catch(_){}
-  }
   historyIndex = -1; currentCommand = '';
-  if (cliOutput) { cliOutput.textContent += ('$ ' + displayCommand + '\n'); }
-  try { console.debug('[CLI] fetch start: ' + displayCommand); } catch(_){}
+  // Verb only while pending; the reply's X-Cmd-Display replaces this line.
+  if (cliOutput) { cliOutput.textContent += ('$ ' + pendingDisplay + '\n'); }
+  try { console.debug('[CLI] fetch start: ' + pendingDisplay); } catch(_){}
   // This is the human terminal. Other /api/cli users default to machine mode
   // so their polls/buttons cannot answer a pending confirmation.
   hw.postForm('/api/cli', { cmd: command, capture: '1', interactive: '1' })
-  .then(function(r){ var helpState=__helpStateFromResponse(r); return r.text().then(function(text){ return {result:text,helpState:helpState,status:r.status,ok:r.ok}; }); })
+  .then(function(r){ var helpState=__helpStateFromResponse(r); var display=__cliReplyDisplay(r,command); return r.text().then(function(text){ return {result:text,helpState:helpState,display:display,status:r.status,ok:r.ok}; }); })
   .then(function(reply){
     if(responseGeneration!==cliResponseGeneration){ return; }
     cliCommandPending=false;
+    __cliRemember(reply.display);
+    if (cliOutput) { cliOutput.textContent = outputBeforeCommand + '$ ' + reply.display + '\n'; }
     var result=reply.result||'';
     try { console.debug('[CLI] fetch ok, len=' + result.length); } catch(_){}
     var wasInHelp=inHelp;
@@ -281,7 +300,7 @@ function executeCommand(){
     try{ localStorage.setItem('cliOutputHistory',cliOutput?cliOutput.textContent:''); }catch(_){}
     if(cliInput){ cliInput.value=''; cliInput.focus(); }
   })
-  .catch(function(e){ if(responseGeneration!==cliResponseGeneration){ return; } cliCommandPending=false; try { console.debug('[CLI] fetch error: ' + e.message); } catch(_){} var errorMsg='Error: ' + e.message + '\n'; if (cliOutput) { cliOutput.textContent += errorMsg; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } if (cliInput) { cliInput.value=''; cliInput.focus(); } });
+  .catch(function(e){ if(responseGeneration!==cliResponseGeneration){ return; } cliCommandPending=false; __cliRemember(__cliVerb(command)); if (cliOutput) { cliOutput.textContent = outputBeforeCommand + '$ ' + __cliVerb(command) + '\n'; } try { console.debug('[CLI] fetch error: ' + e.message); } catch(_){} var errorMsg='Error: ' + e.message + '\n'; if (cliOutput) { cliOutput.textContent += errorMsg; try{ localStorage.setItem('cliOutputHistory', cliOutput.textContent); }catch(_){} } if (cliInput) { cliInput.value=''; cliInput.focus(); } });
 }
 try { console.debug('[CLI] EOF'); } catch(_){}
 function clearHistory() {
@@ -330,11 +349,9 @@ function cliSetTarget(bonded){
 
 function runBondedCommand(command){
   if (!window.BondFs) { if(cliOutput){ cliOutput.textContent += 'Error: bonded helper unavailable\n'; } return; }
-  var displayCommand = __cliDisplayCommand(command);
-  if (commandHistory[commandHistory.length - 1] !== displayCommand) {
-    commandHistory.push(displayCommand); if (commandHistory.length > (window.__cliHistoryMax || 50)) commandHistory.shift();
-    try{ localStorage.setItem('cliHistory', JSON.stringify(commandHistory)); }catch(_){}
-  }
+  // The bonded peer's reply carries no redacted line, so only the verb is kept.
+  var displayCommand = __cliPendingDisplay(command);
+  __cliRemember(displayCommand);
   historyIndex = -1; currentCommand = '';
   if (cliOutput) { cliOutput.textContent += ('[bonded]$ ' + displayCommand + '\n'); cliOutput.scrollTop = cliOutput.scrollHeight; }
   if (cliInput) { cliInput.value=''; cliInput.disabled = true; }

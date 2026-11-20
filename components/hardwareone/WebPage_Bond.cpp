@@ -198,7 +198,9 @@ void streamBondInner(httpd_req_t* req) {
     if (bondProgressStartMs === null) bondProgressStartMs = Date.now();
     const elapsedMs = Date.now() - bondProgressStartMs;
     let hint = '';
-    const peerLabel = data.peerName && data.peerName !== 'Unknown' ? data.peerName : 'The other device';
+    // The peer name is free text (the pairing registry name when no capability
+    // name has arrived): escape it before it reaches the hint's innerHTML.
+    const peerLabel = hw.esc(data.peerName && data.peerName !== 'Unknown' ? data.peerName : 'The other device');
     if (data.agreement === 'declined') {
       // The partner answered: it has no bond with this device. Waiting will
       // not help; say what does.
@@ -220,7 +222,7 @@ void streamBondInner(httpd_req_t* req) {
     let html = '';
     html += '<div class="bond-progress-card">';
     html += '<div class="bond-progress-title">' + (data.agreement === 'declined' ? 'Bond Not Confirmed' : 'Establishing Bond') + '</div>';
-    html += '<div class="bond-progress-sub">' + (data.peerName || 'Bonded device') + ' &middot; ' + (data.peerMac || '') + '</div>';
+    html += '<div class="bond-progress-sub">' + hw.esc(data.peerName || 'Bonded device') + ' &middot; ' + hw.esc(data.peerMac || '') + '</div>';
     html += '<div class="bond-progress-bar"><div class="bond-progress-fill" style="width:' + pct + '%"></div></div>';
     html += '<div class="bond-progress-pct">' + doneCount + ' of ' + steps.length + ' steps complete</div>';
     html += '<div class="bond-progress-steps">';
@@ -336,7 +338,7 @@ void streamBondInner(httpd_req_t* req) {
     html += '<div class="remote-title"><span class="status-dot ' + statusClass + '"></span>Bonded Device</div>';
     const localRole = data.role === 1 ? 'Master' : 'Worker';
     const remoteRole = data.role === 1 ? 'Worker' : 'Master';
-    html += '<div class="remote-description">This device: ' + localRole + ' · Bonded device: ' + (data.peerName || 'Unknown') + ' (' + remoteRole + ')</div>';
+    html += '<div class="remote-description">This device: ' + localRole + ' · Bonded device: ' + hw.esc(data.peerName || 'Unknown') + ' (' + remoteRole + ')</div>';
     if (data.agreementReason === 'role_conflict') {
       // Both ends report the same role, so the line above cannot be right.
       html += '<div class="remote-description" style="color:var(--danger,#c0392b)">Both devices are set to ' + localRole + '. Run bondrole on one of them so one is master and one is worker.</div>';
@@ -1008,7 +1010,6 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
   if (peerNameStr.length() == 0) {
     peerNameStr = "Unknown";
   }
-  const char* peerName = peerNameStr.c_str();
   
   // Online status and health metrics (use pre-calculated values from EspNowState)
   bool peerOnline = gEspNow ? gEspNow->bondPeerOnline : false;
@@ -1063,7 +1064,13 @@ static esp_err_t handleBondStatus(httpd_req_t* req) {
 #endif
   webBondSendChunkf(req, "\"peerMac\":\"%s\",", macStr);
   webBondSendChunkf(req, "\"localMac\":\"%s\",", localMacStr.c_str());
-  webBondSendChunkf(req, "\"peerName\":\"%s\",", peerName);
+  // Free text from the peer or the pairing registry: JSON-escaped.
+  {
+    String peerNameField = "\"peerName\":";
+    peerNameField += jsonQuote(peerNameStr);
+    peerNameField += ",";
+    webBondSendChunk(req, peerNameField.c_str());
+  }
   webBondSendChunkf(req, "\"role\":%d,", gSettings.bondRole);
   // The mask bit of each sensor type, by name, from the one sensor table: the
   // page takes every sensor mask from here and types no number of its own.
@@ -1534,9 +1541,13 @@ static esp_err_t handleBondRole(httpd_req_t* req) {
 // Mirrors /api/cli/batch but routes each command through the bond session by
 // prefixing with "remote:" before handing it to executeUnifiedWebCommand. Body
 // is JSON: {"commands":["beginwrite","tz 480","savesettings"]}. Response is
-// {"ok":true,"count":N,"results":[...]} with one entry per command (same order)
-// so the client can surface per-command errors. Used by the bonded-device
-// settings panel to apply edits to the worker in a single round.
+// {"ok":true,"count":N,"results":[...],"failed":[i,...]} with one result per
+// command (same order) and, as /api/cli/batch does, the results[] indexes of the
+// commands that failed here: not delivered, or answered with a failure reply
+// (commandReplyIsFailure). A delivered command's own verdict arrives later from
+// the peer, so it is not in failed[]. In the interactive form slot 1 (the
+// forwarded confirmation) is listed on the same rule. Used by the bonded-device
+// settings panel (sendSequential) and hw.cliConfirm.
 
 static esp_err_t handleBondCliBatch(httpd_req_t* req) {
   WEB_AUTH_JSON_OR_RETURN(req, ctx);
@@ -1587,8 +1598,15 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
   respDoc["ok"] = false;
   respDoc["count"] = 0;
   JsonArray results = respDoc["results"].to<JsonArray>();
-  bool resultsBuffered = !results.isNull() && !respDoc.overflowed();
+  JsonArray failed = respDoc["failed"].to<JsonArray>();
+  bool resultsBuffered = !results.isNull() && !failed.isNull() && !respDoc.overflowed();
   int count = 0;
+  // Lists the result just added as failed when it was not delivered or its
+  // reply is a failure.
+  auto noteFailed = [&](bool ok, const String& out) {
+    if (!resultsBuffered || (ok && !commandReplyIsFailure(out.c_str()))) return;
+    if (!failed.add(static_cast<uint32_t>(results.size() - 1))) resultsBuffered = false;
+  };
 
   if (interactive) {
     // A CliMode is deliberately local to one transport-session generation;
@@ -1621,6 +1639,7 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
     const bool ok = executeUnifiedWebCommand(req, ctx, remoteCmd, out);
     if (!requestSessionLive()) {
       results.clear();
+      failed.clear();
       webSendSessionChanged(req);
       return ESP_OK;
     }
@@ -1633,11 +1652,13 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
       resultsBuffered = false;
     }
     if (resultsBuffered && !results.add(out)) resultsBuffered = false;
+    noteFailed(ok, out);
     count = 2;
   } else {
     for (JsonVariant v : commands) {
       if (!requestSessionLive()) {
         results.clear();
+        failed.clear();
         break;
       }
       String cmd = v.as<String>();
@@ -1655,6 +1676,7 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
       bool ok = executeUnifiedWebCommand(req, ctx, remoteCmd, out);
       if (!requestSessionLive()) {
         results.clear();
+        failed.clear();
         break;
       }
       if (!ok && out.length() == 0) {
@@ -1662,6 +1684,7 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
       }
       // Keep execution order unchanged even if response buffering fails.
       if (resultsBuffered && !results.add(out)) resultsBuffered = false;
+      noteFailed(ok, out);
       count++;
 
       if (server == NULL) break;
@@ -1673,6 +1696,7 @@ static esp_err_t handleBondCliBatch(httpd_req_t* req) {
 
   if (!requestSessionLive()) {
     results.clear();
+    failed.clear();
     webSendSessionChanged(req);
     return ESP_OK;
   }

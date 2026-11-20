@@ -58,6 +58,10 @@ def generate(component: Path = COMPONENT) -> str:
             support.append(extract_block(source, "static bool wifiConsoleCancelKeyPressed("))
         else:
             support.append("bool wifiConsoleTypeaheadPop(char&) { return false; }")
+        # The escape-sequence checks call the cancel-key reader directly.
+        support.append(f"#define HW1_WIFI_CANCEL_KEYS_API {1 if cancel_keys else 0}")
+        if cancel_keys and "kWifiConsoleEscapeWaitMs" not in source:
+            support.append("static constexpr uint32_t kWifiConsoleEscapeWaitMs = 50;")
         support.append(extract_block(source, "uint32_t wifiBootConnectBudgetMs("))
         support.append("#define HW1_WIFI_CONNECT_BUDGET_API 1")
         # The superseding radio command's side of a BACKGROUND boot connect.
@@ -72,6 +76,7 @@ def generate(component: Path = COMPONENT) -> str:
             support.append(extract_block(source, "bool wifiBackgroundConnectSuperseded("))
             support.append(extract_block(source, "bool wifiSupersedeBackgroundConnect("))
         support.append(f"#define HW1_WIFI_SUPERSEDE_API {1 if supersede else 0}")
+        support.append(f"#define HW1_WIFI_BOOT_JOIN_API {1 if 'sBackgroundConnectIsBoot' in source else 0}")
         support.append("bool connectToBestWifiNetwork(uint32_t budgetMs, WifiConnectOrigin origin);")
         support.append("static bool huntBest(uint32_t budgetMs, WifiConnectOrigin origin) "
                        "{ return connectToBestWifiNetwork(budgetMs, origin); }")
@@ -80,6 +85,8 @@ def generate(component: Path = COMPONENT) -> str:
         support.append("enum class WifiConnectOrigin : uint8_t { COMMAND = 0, BOOT };")
         support.append("constexpr uint32_t kWifiConnectHuntBudgetMs = 150000;")
         support.append("#define HW1_WIFI_CONNECT_BUDGET_API 0")
+        support.append("#define HW1_WIFI_CANCEL_KEYS_API 0")
+        support.append("#define HW1_WIFI_BOOT_JOIN_API 0")
         support.append("#define HW1_WIFI_SUPERSEDE_API 0")
         support.append("bool connectToBestWifiNetwork();")
         support.append("static bool huntBest(uint32_t, WifiConnectOrigin) "
@@ -155,6 +162,59 @@ def check_boot_callers(component: Path = COMPONENT) -> None:
             "no first-time-setup connect falls back to the command origin")
 
 
+def check_rehunt_and_services(component: Path = COMPONENT) -> None:
+    """A failed setupWifi connect arms the rehunt (only the plain failure, not a
+    supersede or a console cancel), and every join that boot does not own runs
+    the network-services job on cmd_exec (NTP, HTTP autostart)."""
+    wifi = (component / "System_WiFi.cpp").read_text()
+    setup = extract_block(wifi, "void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin)")
+    superseded_at = setup.index("if (!connected && origin == WifiConnectOrigin::BACKGROUND &&")
+    cancelled_at = setup.index("} else if (!connected && gWifiUserCancelled) {", superseded_at)
+    failed_at = setup.index("} else if (!connected) {", cancelled_at)
+    joined_at = setup.index("} else {", failed_at)
+    note = "wifiRehuntNoteConnectFailed();"
+    require(note not in setup[:superseded_at], "setupWifi arms the rehunt only after the connect")
+    require(note not in setup[superseded_at:cancelled_at], "a superseded boot connect does not arm the rehunt")
+    require(note not in setup[cancelled_at:failed_at], "a console-cancelled connect does not arm the rehunt")
+    failed = setup[failed_at:joined_at]
+    require(failed.count(note) == 1, "setupWifi's failure branch arms the rehunt")
+    require("if (savedCount > 0 && gSettings.wifiEnabled && gSettings.wifiAutoReconnect)" in failed,
+            "only with saved networks, Wi-Fi enabled and auto-reconnect on")
+    require(note not in setup[joined_at:], "a join does not arm the rehunt")
+    noter = extract_block(wifi, "static void wifiRehuntNoteConnectFailed(")
+    require("portENTER_CRITICAL(&sRehuntMux);" in noter and "sRehunt.noteConnectFailed(millis());" in noter,
+            "the connect-failed note goes to the policy under the rehunt lock")
+
+    logger = extract_block(wifi, "static void wifiEventLogger(")
+    got_ip = logger[:logger.index("ARDUINO_EVENT_WIFI_STA_DISCONNECTED")]
+    require("sBackgroundConnectIsBoot.load(" in got_ip and "sWifiConnByBoot = byBoot;" in got_ip,
+            "the GOT_IP edge records whether the boot connect made the join")
+    drain = extract_block(wifi, "void wifiEventLogDrain()")
+    conn = extract_block(drain, "if (conn) {")
+    require("if (!byBoot && !submitDeferredToCmdExec(wifiReconcileNetworkServicesJob, nullptr))" in conn,
+            "the GOT_IP drain submits the network-services job for every join boot does not own")
+    job = extract_block(wifi, "static void wifiReconcileNetworkServicesJob(")
+    require(job.index("if (!WiFi.isConnected()) return;") < job.index("setupNtp();"),
+            "the job does nothing once the link is gone")
+    require("if (!getNtpRuntimeStatus().clientArmed) setupNtp();" in job, "the job arms NTP when nothing has")
+    for needle, what in (("in.httpEnabled = gSettings.httpEnabled;", "httpenabled"),
+                         ("in.autostart = ramFlushResolve(RF_HTTP, gSettings.httpAutoStart);", "autostart as boot resolves it"),
+                         ("in.running = isHttpServerRunning();", "a running server"),
+                         ("in.userClosed = sHttpUserClosed;", "closehttp"),
+                         ("in.bootConnectActive = sBackgroundConnectIsBoot.load(", "the boot connect"),
+                         ("if (!wifiServicesShouldStartHttp(in)) return;", "the services policy")):
+        require(needle in job, f"the HTTP decision reads {what}")
+    require(job.index("if (!wifiServicesShouldStartHttp(in)) return;") < job.index("startHttpServer();"),
+            "the server starts only on the policy's yes")
+    require("HTTP server started. Try: http://" in job, "the job says where the server is")
+    require("sHttpUserClosed = false;" in extract_block(wifi, "const char* cmd_httpstart("),
+            "openhttp clears the user-closed latch")
+    require("sHttpUserClosed = true;" in extract_block(wifi, "const char* cmd_httpstop("),
+            "closehttp sets the user-closed latch")
+    require("sHttpUserClosed" not in extract_block(wifi, "const char* cmd_closewifi("),
+            "closewifi stopping the server is not a user close")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
@@ -165,6 +225,7 @@ def main() -> None:
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     check_boot_callers(args.component)
+    check_rehunt_and_services(args.component)
     unit_text = generate(args.component)
     if args.keep:
         args.keep.write_text(unit_text)

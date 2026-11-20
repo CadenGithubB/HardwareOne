@@ -1151,6 +1151,29 @@ static uint32_t bleReconnectBackoffMs(BlePeerKind kind, uint8_t attempt) {
 static constexpr uint32_t kAdmissionBusyRetryMs = 2000;
 static constexpr uint32_t kAdmissionRoleRetryMs = 15000;
 static constexpr uint32_t kAdmissionCoalescedRetryMs = 30000;
+// Boot (and a companion restore) only arms the saved peers; the tick opens
+// them. The first open waits for the client stack to settle, and two peers'
+// first opens are kept this far apart so they do not take the radio together.
+static constexpr uint32_t kBootSettleMs = 2000;
+static constexpr uint32_t kBootPaceMs = 2000;
+
+// A peer whose first attempt of an episode is due in a tick that already
+// started another peer's attempt waits kBootPaceMs, as the boot pacing did.
+static bool deferDueFirstAttempt(BlePeerKind kind, uint32_t now) {
+  if (kind >= BLE_PEER_MAX) return false;
+  bool deferred = false;
+  portENTER_CRITICAL(&sReconnectMux);
+  PeerReconnectRuntime& state = sReconnect[kind];
+  const bool due = state.dueMs == 0 ||
+      (int32_t)(now - state.dueMs) >= 0;
+  if (state.wantReconnect && due && !state.admissionInFlight &&
+      state.launchedAttempts == 0) {
+    state.dueMs = now + kBootPaceMs;
+    deferred = true;
+  }
+  portEXIT_CRITICAL(&sReconnectMux);
+  return deferred;
+}
 
 struct ReconnectAdmissionClaim {
   BlePeerKind kind = BLE_PEER_G2_GLASSES;
@@ -1255,10 +1278,11 @@ static bool claimDueAdmission(BlePeerKind kind, uint32_t now,
   return claimed;
 }
 
-static bool claimBootAdmission(BlePeerKind kind, uint32_t now,
-                               ReconnectAdmissionClaim& claim) {
+// Arm one peer's boot reconnect for `dueMs`: a fresh auto-reconnect episode
+// with a new intent, admitted later by the tick. No admission is claimed here.
+static bool armBootReconnect(BlePeerKind kind, uint32_t dueMs) {
   if (kind >= BLE_PEER_MAX) return false;
-  bool claimed = false;
+  bool armed = false;
   portENTER_CRITICAL(&sReconnectMux);
   PeerReconnectRuntime& state = sReconnect[kind];
   if (state.autoReconnect && state.hasSavedTarget &&
@@ -1269,14 +1293,12 @@ static bool claimBootAdmission(BlePeerKind kind, uint32_t now,
     state.wantReconnect = true;
     state.reseekEvenIfNoAuto = false;
     state.launchedAttempts = 0;
-    state.dueMs = now;
+    state.dueMs = dueMs ? dueMs : 1;  // 0 reads as "due now"
     reconnectBumpIntentLocked(state);
-    state.admissionInFlight = true;
-    fillAdmissionClaimLocked(kind, state, claim);
-    claimed = true;
+    armed = true;
   }
   portEXIT_CRITICAL(&sReconnectMux);
-  return claimed;
+  return armed;
 }
 
 // Commit only against the exact intent+identity incarnation that made the
@@ -1368,10 +1390,12 @@ static bool commitAdmission(const ReconnectAdmissionClaim& claim,
 }
 
 void bleBootReconnect(void) {
-
-  // Pace newly started work so two peers do not attack the radio together.
-  // Non-started results remain represented by synchronized scheduler intent.
-  bool anyStarted = false;
+  // Arm only, and return at once: setup must not wait for a phone, ring or
+  // glasses open (initG2Client, g2RingInit, the phone's key derivation). Each
+  // armed peer is due kBootSettleMs from now, the next ones kBootPaceMs apart,
+  // and bleAutoReconnectTick admits it then with the usual ladder and backoff.
+  const uint32_t now = millis();
+  uint32_t armed = 0;
   for (size_t i = 0; i < gPeerCount; i++) {
     const BlePeerSpec* p = gPeerInOrder[i];
     if (!peerHasConnectAdmission(p)) continue;
@@ -1385,26 +1409,19 @@ void bleBootReconnect(void) {
                 p->name);
       continue;
     }
-    if (anyStarted) {
-      vTaskDelay(pdMS_TO_TICKS(2000));
+    if (p->ops->isConnected && p->ops->isConnected()) {
+      DEBUG_G2F("[BLE-Peers] Skip boot auto-reconnect '%s' — already connected",
+                p->name);
+      continue;
     }
-    const uint32_t now = millis();
-    ReconnectAdmissionClaim claim;
-    if (!claimBootAdmission(p->kind, now, claim)) continue;
-    // Boot reaches here only after the central/client stack was initialized by
-    // HardwareOne. Do not reject solely because persisted bleMode was coerced
-    // at boot without being rewritten.
-    const BlePeerConnectAdmission result =
-        requestPeerConnectAdmission(p, claim, true);
-    const bool committed = commitAdmission(claim, result, now);
-    DEBUG_G2F("[BLE-Peers] Boot reconnect '%s': admission=%s committed=%d",
-              p->name, admissionName(result), (int)committed);
-    if (committed && result == BlePeerConnectAdmission::STARTED) {
-      anyStarted = true;
-    }
+    const uint32_t delayMs = kBootSettleMs + armed * kBootPaceMs;
+    if (!armBootReconnect(p->kind, now + delayMs)) continue;
+    DEBUG_G2F("[BLE-Peers] Boot reconnect '%s': armed, first open in %lums",
+              p->name, (unsigned long)delayMs);
+    armed++;
   }
-  if (!anyStarted) {
-    DEBUG_G2F("[BLE-Peers] No new boot reconnect work admitted");
+  if (armed == 0) {
+    DEBUG_G2F("[BLE-Peers] No boot reconnect armed");
   }
 }
 
@@ -1742,10 +1759,14 @@ void bleAutoReconnectTick(void) {
   // hold lasts. Main loop only.
   static BlePeerConnectAdmission sLastResult[BLE_PEER_MAX] = {};
   const uint32_t now = millis();
+  bool startedThisTick = false;
   for (size_t i = 0; i < gPeerCount; i++) {
     const BlePeerSpec* p = gPeerInOrder[i];
     if (!peerHasConnectAdmission(p)) continue;
     const BlePeerKind kind = p->kind;
+    // Two first attempts never start in one tick (the boot arms several peers,
+    // and a late first loop can find them all due).
+    if (startedThisTick && deferDueFirstAttempt(kind, now)) continue;
     ReconnectAdmissionClaim claim;
     if (!claimDueAdmission(kind, now, claim)) continue;
     const BlePeerConnectAdmission quietResult =
@@ -1767,6 +1788,7 @@ void bleAutoReconnectTick(void) {
         requestPeerConnectAdmission(p, claim, roleAllowed);
     const bool committed = commitAdmission(claim, result, now);
     sLastResult[kind] = result;
+    if (result == BlePeerConnectAdmission::STARTED) startedThisTick = true;
     if (!wasBlocked || result != quietResult) {
       DEBUG_G2F("[BLE-Peers] Reseek '%s': admission=%s committed=%d",
                 p->name, admissionName(result), (int)committed);

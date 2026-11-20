@@ -90,7 +90,13 @@ struct Controls {
   size_t disconnectAt = SIZE_MAX, maxNameLength = SIZE_MAX;
   unsigned timeouts = 0;                    // consecutive timeouts before the first byte
   std::map<size_t, unsigned> timeoutAt;     // body offset -> timeouts injected at that offset
+  bool sdSlotsFull = false;                 // VFS::sdInUseBegin finds no free slot
+  bool expectSdUse = false;                 // an SD upload must hold its SD in-use slot while it receives
 } control;
+// VFS's SD in-use registry (sdInUseBegin/End): unmount, remount and format refuse while a slot is taken.
+static const char* sdOwnerSlot = nullptr;
+static unsigned sdUseBegins = 0, sdUseEnds = 0;
+static unsigned liveHandles = 0;  // open File handles (the staged temporary while it is written)
 struct Metrics {
   unsigned allocations = 0, frees = 0, opens = 0, closes = 0, flushes = 0, writes = 0;
   unsigned posthooks = 0, mapProbes = 0, mapHooks = 0, waypointHooks = 0, mkdirs = 0;
@@ -98,6 +104,12 @@ struct Metrics {
   std::vector<size_t> allocationSizes;     // every ps_alloc request, in order
   std::vector<size_t> writeSizes;          // every File::write request, in order
   bool badIoScope = false, badHookResources = false, badCloseScope = false;
+  // The upload's own FS lock was held while waiting on the network (S-4).
+  bool recvUnderUploadLock = false;
+  unsigned lockedReceives = 0;             // receives while the FS mutex was owned (any owner)
+  // An SD upload received with its staged file open but without its SD in-use slot.
+  bool recvWithoutSdUse = false;
+  unsigned sdUseReceives = 0;              // receives while "web.upload" held the SD slot
   std::vector<std::string> cleanupUsers, openedUsers, openedPaths, promotedUsers, systemReasons;
   std::vector<int> snapshotInvalidations;  // tiers marked stale for status polls
   unsigned promotionsAtInvalidation = 0;
@@ -163,6 +175,15 @@ static int httpd_req_get_hdr_value_str(httpd_req_t* req, const char* field, char
 }
 static int httpd_req_recv(httpd_req_t* req, char* output, int length) {
   ++metrics.receives;
+  // A caller's own outer lock (the nested cases) is the caller's business; the
+  // upload must not add one of its own across the receive. With the boolean
+  // mock, "held by the upload" is ownership beyond what the caller brought.
+  if (ownsFs != outerLock) metrics.recvUnderUploadLock = true;
+  if (ownsFs) ++metrics.lockedReceives;
+  if (control.expectSdUse && liveHandles > 0) {
+    if (sdOwnerSlot && std::strcmp(sdOwnerSlot, "web.upload") == 0) ++metrics.sdUseReceives;
+    else metrics.recvWithoutSdUse = true;
+  }
   if (control.timeouts) { --control.timeouts; return HTTPD_SOCK_ERR_TIMEOUT; }
   const auto idle = control.timeoutAt.find(req->position);
   if (idle != control.timeoutAt.end() && idle->second) { --idle->second; return HTTPD_SOCK_ERR_TIMEOUT; }
@@ -173,7 +194,6 @@ static int httpd_req_recv(httpd_req_t* req, char* output, int length) {
 
 struct Node { std::string bytes; };
 static std::map<std::string, std::shared_ptr<Node>> files;
-static unsigned liveHandles = 0;
 struct Handle {
   std::shared_ptr<Node> node;
   bool open = true;
@@ -204,6 +224,15 @@ namespace VFS {
 enum StorageType { INTERNAL, SDCARD };
 static StorageType getStorageType(const String& path) { return path == "/sd" || path.startsWith("/sd/") ? SDCARD : INTERNAL; }
 static bool isSdAvailable() { return control.sd; }
+static bool sdInUseBegin(const char* owner) {
+  FsLockGuard guard("VFS.sdInUseBegin"); ++sdUseBegins;
+  if (control.sdSlotsFull || sdOwnerSlot) return false;
+  sdOwnerSlot = owner; return true;
+}
+static void sdInUseEnd(const char* owner) {
+  FsLockGuard guard("VFS.sdInUseEnd"); ++sdUseEnds;
+  if (sdOwnerSlot == owner) sdOwnerSlot = nullptr;
+}
 static void invalidateStatsSnapshot(StorageType type) {
   metrics.snapshotInvalidations.push_back(int(type)); metrics.promotionsAtInvalidation = metrics.promotions;
 }
@@ -267,6 +296,7 @@ static bool tryOrganizeLegacyWaypointsAtRoot(const String&, String&) { hookScope
 static void reset() {
   for (void* buffer : buffers) std::free(buffer);
   buffers.clear(); files.clear(); control = {}; metrics = {}; filesystemReady = true;
+  sdOwnerSlot = nullptr; sdUseBegins = sdUseEnds = 0;
   ownsFs = outerLock = false; pauseDepth = pauseCalls = resumeCalls = takes = gives = 0; liveHandles = 0;
 }
 static std::string encode(const std::string& input) {
@@ -330,6 +360,10 @@ static void balanced(unsigned expectedPause = 0, bool expectedLock = false) {
   check(takes - gives == unsigned(expectedLock), "mutex calls unbalanced");
   check(!metrics.badIoScope && !metrics.badCloseScope, "filesystem work/close outside lock and polling pause");
   check(!metrics.badHookResources, "post-save hooks ran with upload resources retained");
+  check(!metrics.recvUnderUploadLock, "the upload held the filesystem lock while waiting on the network");
+  check(sdOwnerSlot == nullptr && sdUseBegins == sdUseEnds + (control.sdSlotsFull ? sdUseBegins : 0),
+        "the upload's SD in-use slot is released on every path");
+  check(!metrics.recvWithoutSdUse, "an SD upload received without holding its SD in-use slot");
 }
 static void failed(httpd_req_t& req, const char* reason) {
   check(handleFileUpload(&req) == ESP_OK, "handler response convention changed");
@@ -436,6 +470,59 @@ int main(int argc, char** argv) {
   add("binary across percent/base64 chunks", "binary", [] { control.chunkSize = 1; const std::string bytes("\0\xff\xfe\x01\x02\x7f\x80+/%", 10); auto req = request("/user/upload.bin", bytes, true); succeeded(req, "/user/upload.bin", bytes); });
   add("large binary", "binary", [] { control.chunkSize = 101; std::string bytes; for (unsigned i = 0; i < 12001; ++i) bytes += char(i % 256); auto req = request("/user/upload.bin", bytes, true); succeeded(req, "/user/upload.bin", bytes); check(metrics.writes > 2, "binary output spans buffers"); });
   add("empty binary", "binary", [] { auto req = request("/user/upload.bin", "", true); succeeded(req, "/user/upload.bin", ""); });
+  // S-4: another task's log, transcript or QuickNote write must not wait out a slow client. The upload takes the FS
+  // lock only around the staged open, each buffered write and the commit; no receive runs while it is owned.
+  add("form upload receives without the filesystem lock", "lock", [] {
+    control.chunkSize = 512; control.timeoutAt = {{2048, 1}}; const std::string bytes(20000, 'q');
+    auto req = request("/user/upload.txt", bytes); succeeded(req, "/user/upload.txt", bytes);
+    check(metrics.receives > 30 && metrics.lockedReceives == 0, "a form-body receive ran under the FS lock");
+    check(takes >= 1 + 1 + metrics.writes + 1, "the lock is taken per step (stats, open, each write, finish), not once for the transfer"); });
+  add("raw upload receives without the filesystem lock", "lock", [] {
+    control.chunkSize = 1460; control.timeoutAt = {{16384, 1}}; const std::string bytes = everyByte(50000);
+    auto req = rawRequest("/user/upload.bin", bytes); succeeded(req, "/user/upload.bin", bytes);
+    check(metrics.receives > 30 && metrics.lockedReceives == 0, "a raw-body receive ran under the FS lock");
+    check(metrics.writes == 4 && takes >= 1 + 1 + 4 + 1, "the lock is taken per write, not once for the transfer"); });
+  // Without the transfer-long lock, an SD destination holds VFS's SD in-use slot (as the video recorder does) from the
+  // staged open to the finish, so sdunmount, a remount or a format refuses rather than pulling the card from under it.
+  add("SD upload holds the SD in-use slot while it receives", "lock", [] {
+    control.sd = true; control.expectSdUse = true; control.chunkSize = 1460; const std::string bytes = everyByte(50000);
+    auto req = rawRequest("/sd/upload.bin", bytes); succeeded(req, "/sd/upload.bin", bytes);
+    check(metrics.sdUseReceives > 30 && sdUseBegins == 1 && sdUseEnds == 1, "the slot is taken once, across the receive"); });
+  add("SD form upload holds the SD in-use slot while it receives", "lock", [] {
+    control.sd = true; control.expectSdUse = true; control.chunkSize = 512; const std::string bytes(20000, 'q');
+    auto req = request("/sd/upload.txt", bytes); req.query = "path=%2Fsd%2Fupload.txt"; succeeded(req, "/sd/upload.txt", bytes);
+    check(metrics.sdUseReceives > 10 && sdUseBegins == 1 && sdUseEnds == 1, "the slot is taken once, across the receive"); });
+  add("failed SD upload releases the SD in-use slot", "lock", [] {
+    control.sd = true; control.expectSdUse = true; control.chunkSize = 512; control.disconnectAt = 8192;
+    auto req = rawRequest("/sd/upload.bin", everyByte(12000));
+    check(handleFileUpload(&req) == ESP_OK && req.response.find("\"success\":false") != std::string::npos, "disconnect fails the upload");
+    check(files.empty() && sdUseBegins == 1 && sdUseEnds == 1, "the staged file is discarded and the slot released"); balanced(); });
+  add("SD upload with no free in-use slot is refused", "lock", [] {
+    control.sd = true; control.sdSlotsFull = true; auto req = rawRequest("/sd/upload.bin", "abc");
+    failed(req, "SD card busy"); check(files.empty() && sdUseBegins == 1 && sdUseEnds == 0, "the staged file is discarded, nothing to release"); });
+  add("internal upload takes no SD in-use slot", "lock", [] {
+    auto req = rawRequest("/user/upload.bin", "abc"); succeeded(req, "/user/upload.bin", "abc");
+    check(sdUseBegins == 0 && sdUseEnds == 0, "a LittleFS upload leaves the SD registry alone"); });
+  // StagedWrite::begin probes and opens under one lock, so an upload that releases the lock between writes still owns
+  // its temporary: another writer's staged copy of the same destination (or of another long name) moves it to a slot.
+  add("a taken staging name moves the upload to the next slot", "lock", [] {
+    files["/user/upload.bin.upload.tmp"] = std::make_shared<Node>(Node{"other writer"});
+    auto req = rawRequest("/user/upload.bin", "abc");
+    check(handleFileUpload(&req) == ESP_OK && req.response == "{\"success\":true}", "upload beside another staged copy: " + req.response);
+    check(metrics.openedPaths == std::vector<std::string>{"/user/upload.bin.1.upload.tmp"}, "the upload staged under its own slot");
+    check(files.size() == 2 && files.at("/user/upload.bin")->bytes == "abc" && files.at("/user/upload.bin.upload.tmp")->bytes == "other writer",
+          "the other writer's staged copy is untouched"); balanced(); });
+  add("a taken short staging name moves the upload to the next slot", "lock", [] {
+    control.maxNameLength = 63; const std::string path = longName(60);
+    files["/user/~stage.upload.tmp"] = std::make_shared<Node>(Node{"other writer"});
+    auto req = rawRequest(path, "abc");
+    check(handleFileUpload(&req) == ESP_OK && req.response == "{\"success\":true}", "long-name upload beside another staged copy: " + req.response);
+    check(metrics.openedPaths == std::vector<std::string>{"/user/~stage.1.upload.tmp"}, "the long name staged under its own short slot");
+    check(files.size() == 2 && files.at(path)->bytes == "abc" && files.at("/user/~stage.upload.tmp")->bytes == "other writer",
+          "the other writer's staged copy is untouched"); balanced(); });
+  add("failed upload discards the staged file under a short lock", "lock", [] {
+    control.chunkSize = 512; control.disconnectAt = 8192; auto req = request("/user/upload.txt", std::string(12000, 'a'));
+    failed(req, "Recv error"); check(files.empty() && metrics.lockedReceives == 0 && metrics.closes == 1, "disconnect cleanup"); });
   add("nested caller scopes success", "nested", [] { { PollPauseGuard poll; FsLockGuard lock("outer"); outerLock = true; auto req = request(); check(handleFileUpload(&req) == ESP_OK && req.response == "{\"success\":true}", "nested success response"); balanced(1, true); } outerLock = false; balanced(); });
   add("nested caller scopes denied path", "nested", [] { { PollPauseGuard poll; FsLockGuard lock("outer"); outerLock = true; control.import = false; auto req = request(); handleFileUpload(&req); check(req.response.find("Invalid path") != std::string::npos && metrics.opens == 0, "nested denied response"); balanced(1, true); } outerLock = false; balanced(); });
   add("nested caller scopes failure", "nested", [] { { PollPauseGuard poll; FsLockGuard lock("outer"); outerLock = true; control.shortWrite = true; auto req = request(); handleFileUpload(&req); check(req.response.find("short write") != std::string::npos && files.empty(), "nested failure cleanup"); balanced(1, true); } outerLock = false; balanced(); });

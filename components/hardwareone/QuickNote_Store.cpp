@@ -226,13 +226,30 @@ bool stampSince(uint32_t uptimeS, char* out, size_t cap) {
   return stampAt(static_cast<time_t>((bootEpochMs + int64_t(uptimeS) * 1000) / 1000), out, cap);
 }
 
+// Free bytes for a note write, read with the FS lock held. The SD card is
+// read fresh. LittleFS reads the shared cached figure: a fresh reading walks
+// the whole volume under the FS mutex (about 1.3 s on the P4X-EYE), and every
+// hold and every save would pay it. The cache is refreshed every 2-15 s by
+// headroom (2 s near the reserve) and after 32 KB counted through
+// noteLittleFsBytesWritten, which writeNote feeds; a failed volume read
+// caches 0, so it still refuses. The boot-note restamp keeps its own fresh
+// reading (rare, and it runs at boot).
+static bool noteFreeBytes(bool sd, uint64_t& free) {
+  if (sd) {
+    uint64_t total = 0, used = 0;
+    return VFS::getStats(VFS::SDCARD, total, used, free);
+  }
+  free = VFS::getCachedLittleFsFree();
+  return true;
+}
+
 bool hasRoom(const char** why) {
   if (why) *why = nullptr;
   FsLockGuard lock("qnote.store", pdMS_TO_TICKS(kLockMs));
   if (!lock.held && !isFsLockedByCurrentTask()) return fail(why, "Note storage busy");
   const bool sd = VFS::isSdWritable();
-  uint64_t total = 0, used = 0, free = 0;
-  if (!VFS::getStats(sd ? VFS::SDCARD : VFS::INTERNAL, total, used, free) ||
+  uint64_t free = 0;
+  if (!noteFreeBytes(sd, free) ||
       free < kReserveBytes + kHeaderMax + kMaxNoteBytes + 256)
     return fail(why, "Note storage full or unavailable");
   return true;
@@ -298,10 +315,9 @@ bool create(CommandSource source, TransportSessionEpoch epoch, const char* user,
       snprintf(tmp, sizeof(tmp), "%s/%s", folder, tmpName) >= static_cast<int>(sizeof(tmp)))
     return fail(why, "Invalid note");
   const AuthContext ctx = ownerContext(source, user, owner);
-  uint64_t total = 0, used = 0, free = 0;
-  // Fresh capacity, no tier switching and no automatic deletion/rotation.
-  if (!VFS::getStats(sd ? VFS::SDCARD : VFS::INTERNAL, total, used, free) ||
-      free < kReserveBytes + bytes + 256)
+  uint64_t free = 0;
+  // No tier switching and no automatic deletion/rotation.
+  if (!noteFreeBytes(sd, free) || free < kReserveBytes + bytes + 256)
     return fail(why, "Note storage full or unavailable");
   // trusted: only probe and create the protected transcript root; the owner
   // and notes folders and the file below always use the named owner's

@@ -301,14 +301,17 @@ bool canWriteGuarded(const String& path, const AuthContext& ctx);
  * The temporary is "<destination>.upload.tmp" unless that name would exceed
  * the backend's name limit, in which case a short fixed name in the same
  * directory is used, so every write is staged and the destination is never
- * opened for writing. A refused temporary open (permission, full filesystem,
- * transient error) makes begin() return false with the destination
- * untouched, so the caller reports the failed save and the previous file
- * survives.
+ * opened for writing. begin() probes and opens the temporary under one lock
+ * and takes "<destination>.<n>.upload.tmp" (or "~stage.<n>.upload.tmp") when
+ * the plain name is already taken, so each instance owns its temporary. A
+ * refused temporary open (permission, full filesystem, transient error), or
+ * no free name, makes begin() return false with the destination untouched,
+ * so the caller reports the failed save and the previous file survives.
  *
- * The caller holds FsLockGuard from begin() through commit() or discard().
- * Both finish the write; later calls are no-ops. Boot cleanup removes any
- * ".tmp" left behind by a reset.
+ * The caller holds FsLockGuard around begin(), each file() write, and
+ * commit() or discard(); it need not hold it in between (the web upload
+ * releases it while it receives). Both finish the write; later calls are
+ * no-ops. Boot cleanup removes any ".tmp" left behind by a reset.
  */
 class StagedWrite {
  public:

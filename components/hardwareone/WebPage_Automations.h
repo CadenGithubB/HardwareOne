@@ -987,7 +987,7 @@ function renderAutos(json) {
     html += '</table>';
     hw.$('autos').innerHTML = html;
   } catch (e) {
-    hw.$('autos').innerHTML = 'Error parsing automations: ' + e.message;
+    hw.$('autos').innerHTML = 'Error parsing automations: ' + hw.esc(e.message);
   }
 }
 function loadAutos(){
@@ -998,7 +998,7 @@ function loadAutos(){
     renderAutos(txt);
   }).catch(e => {
     console.error('[AUTOMATIONS] Load error:',e);
-    hw.$('autos').innerHTML = 'Error loading automations: ' + e.message;
+    hw.$('autos').innerHTML = 'Error loading automations: ' + hw.esc(e.message);
   }).finally(() => {
     gAutosFetchInFlight = false;
   });
@@ -1284,7 +1284,7 @@ async function createAutomation(){
   if(/\\$/.test(name)){ hw.$('a_error').textContent='Name cannot end with a backslash.'; hw.$('a_error').style.display='block'; return; }
   const buildParts=(time,idx)=>{ 
     let parts=['automation add']; 
-    parts.push('name="'+(name+(time!==null && times.length>1?' #'+(idx+1):'')).replace(/"/g,'\\"')+'"'); 
+    parts.push('name="'+(name+(time!==null && times.length>1?' #'+(idx+1):'')).replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"'); 
     if(type==='onBoot'){
       parts.push('type=afterDelay');
       parts.push('delayms=0');
@@ -1295,7 +1295,7 @@ async function createAutomation(){
       const eo=(hw.$('a_event_on')||{}).value||'';
       parts.push('on='+eo);
       const em=((hw.$('a_event_match')||{}).value||'').trim();
-      if(em) parts.push('match="'+em.replace(/"/g,'\\"')+'"');
+      if(em) parts.push('match="'+em.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"');
     }
     if(time) parts.push('time='+time); 
     if(type==='atTime'){
@@ -1330,13 +1330,13 @@ async function createAutomation(){
         parts.push('intervalms='+intervalMs); 
       } 
     } 
-    parts.push('commands="'+cmdsParam.replace(/"/g,'\\"')+'"');
+    parts.push('commands="'+cmdsParam.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"');
     parts.push('enabled='+(en?1:0));
     // Option 2: top-level "Fire when" condition gate.
     { const cv=(hw.$('a_cond_var')||{}).value||''; const co=(hw.$('a_cond_op')||{}).value||'>'; const cval=((hw.$('a_cond_val')||{}).value||'').trim();
       const cwn=((hw.$('a_cond_wpname')||{}).value||'').trim();
       if(cv==='wp_dist' && !cwn){ hw.$('a_error').textContent='Dist to waypoint requires a waypoint name.'; hw.$('a_error').style.display='block'; throw new Error('wp_dist name'); }
-      if(cv && cval){ const sensorTok=(cv==='wp_dist')?(cv+':'+cwn):cv; parts.push('condition="'+(sensorTok+co+cval).replace(/"/g,'\\"')+'"'); } }
+      if(cv && cval){ const sensorTok=(cv==='wp_dist')?(cv+':'+cwn):cv; parts.push('condition="'+(sensorTok+co+cval).replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"'); } }
     if(runAtBoot) parts.push('runatboot=1');
     // Secondary triggers: append as a JSON array via the `secondarytriggers`
     // arg. The backend merges these with the primary trigger + runAtBoot boot
@@ -1362,7 +1362,7 @@ async function createAutomation(){
     }
     if(secondaries.length>0){
       const json=JSON.stringify(secondaries);
-      parts.push('secondarytriggers="'+json.replace(/"/g,'\\"')+'"');
+      parts.push('secondarytriggers="'+json.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"');
     }
     if(editId && idx===0) parts.push('id='+editId);
     return parts.join(' ');
@@ -1574,12 +1574,12 @@ function importAutomationFromJson(autoJson, statusEl){
     const evOn=sched.on||autoJson.on||'';
     if(evOn) parts.push('on='+evOn);
     const evMatch=sched.match||autoJson.match||'';
-    if(evMatch) parts.push('match="'+evMatch.replace(/"/g,'\\"')+'"');
+    if(evMatch) parts.push('match="'+evMatch.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"');
   }
   // Propagate secondary triggers if present in the import JSON. This ensures
   // multi-trigger automations round-trip through export → import.
   if(Array.isArray(autoJson.secondaryTriggers) && autoJson.secondaryTriggers.length > 0){
-    parts.push('secondarytriggers="'+JSON.stringify(autoJson.secondaryTriggers).replace(/"/g,'\\"')+'"');
+    parts.push('secondarytriggers="'+JSON.stringify(autoJson.secondaryTriggers).replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"');
   }
   const condition=autoJson.condition||'';
   if(condition) parts.push('condition="'+condition.replace(/\\/g,'\\\\').replace(/"/g,'\\"')+'"');
@@ -1675,7 +1675,7 @@ function downloadFromGitHub(){
     })
     .catch(e=>{
       if(!status.innerHTML.includes('dc3545'))
-        status.innerHTML='<span style="color:var(--danger)">Error: '+e.message+'</span>';
+        status.innerHTML='<span style="color:var(--danger)">Error: '+ hw.esc(e.message) +'</span>';
     });
 }
 function exportAllAutomations(){ 
@@ -1756,7 +1756,7 @@ function exportAllAutomations(){
         status.innerHTML='<span style="color:var(--danger)">No automations to export</span>'; 
       } 
     }).catch(e=>{ 
-      status.innerHTML='<span style="color:var(--danger)">Export failed: '+e.message+'</span>'; 
+      status.innerHTML='<span style="color:var(--danger)">Export failed: '+ hw.esc(e.message) +'</span>'; 
     }); 
   } else { 
     const link=document.createElement('a'); 

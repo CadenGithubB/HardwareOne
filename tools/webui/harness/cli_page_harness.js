@@ -135,7 +135,9 @@ Element.prototype.addEventListener = function (name, fn) {
 };
 Element.prototype.focus = function () { this.focusCount++; };
 
-function response(body, helpState, headerReads, status) {
+/* `display` is the device's X-Cmd-Display header: the audit-redacted command
+ * line, percent-encoded. Absent (undefined) means the reply carried none. */
+function response(body, helpState, headerReads, status, display) {
     status = status || 200;
     return {
         ok: status >= 200 && status < 300,
@@ -143,8 +145,11 @@ function response(body, helpState, headerReads, status) {
         headers: {
             get: function (name) {
                 headerReads.push(String(name));
-                return String(name).toLowerCase() === 'x-hw1-cli-help'
-                    ? helpState : null;
+                var lower = String(name).toLowerCase();
+                if (lower === 'x-cmd-display') {
+                    return display === undefined ? null : display;
+                }
+                return lower === 'x-hw1-cli-help' ? helpState : null;
             }
         },
         text: function () { return P(body, false); }
@@ -152,6 +157,15 @@ function response(body, helpState, headerReads, status) {
 }
 
 function boot(seed, logBodies, commandReplies) {
+    // Scenarios seed a store in the current format (cliStoreV 2) unless they
+    // name the mark themselves (null: a store from before the mark); a store
+    // without it is purged at init (N-38).
+    seed = Object.assign({}, seed || {});
+    if (!Object.prototype.hasOwnProperty.call(seed, 'cliStoreV')) {
+        seed.cliStoreV = '2';
+    } else if (seed.cliStoreV === null) {
+        delete seed.cliStoreV;
+    }
     var storage = new Storage(seed);
     var elements = {
         'cli-input': new Element('cli-input'),
@@ -170,6 +184,7 @@ function boot(seed, logBodies, commandReplies) {
     var logIndex = 0;
     var replyIndex = 0;
     var deferredLogs = [];
+    var pendingPosts = [];
     var intervalId = 1;
     var intervals = {};
 
@@ -247,8 +262,13 @@ function boot(seed, logBodies, commandReplies) {
                 absorbed.push('expected command ' + expected.command + ', got ' +
                               (form && form.cmd));
             }
+            if (expected.pending) {
+                var pendingReply = new Deferred();
+                pendingPosts.push({deferred: pendingReply, expected: expected});
+                return pendingReply.promise;
+            }
             return P(response(expected.body, expected.help, headerReads,
-                              expected.status || 200), false);
+                              expected.status || 200, expected.display), false);
         },
         postFormText: function () {
             postFormTextCalls++;
@@ -297,6 +317,12 @@ function boot(seed, logBodies, commandReplies) {
         getPostFormTextCalls: function () { return postFormTextCalls; },
         repliesConsumed: function () { return replyIndex; },
         deferredLogCount: function () { return deferredLogs.length; },
+        settleNextPost: function () {
+            var pending = pendingPosts.shift();
+            if (!pending) { absorbed.push('no pending command reply to settle'); return; }
+            var e = pending.expected;
+            pending.deferred.resolve(response(e.body, e.help, headerReads, e.status || 200, e.display));
+        },
         settleNextDeferredLog: function () {
             var pending = deferredLogs.shift();
             if (!pending) {
@@ -661,16 +687,24 @@ var sensitiveCommands = [
     'LLMHTTPTOKEN\tprivate-fixture-token',
     'macro add setup "llmhttpurl http://admin:private-fixture@host"'
 ];
-var safeCommands = [
-    'LLMHTTPTOKEN ***',
-    'macro add setup "llmhttpurl ***'
+/* The local terminal keeps the device's redacted line (X-Cmd-Display; the
+ * device's own audit redaction is stubbed here). The bonded peer's reply has
+ * no such header, so that terminal keeps only the verb. */
+var deviceDisplays = [
+    'LLMHTTPTOKEN%20***',
+    'macro%20add%20setup%20%22llmhttpurl%20***'
+];
+var safeByTarget = [
+    ['LLMHTTPTOKEN ***', 'macro add setup "llmhttpurl ***'],
+    ['LLMHTTPTOKEN \u2026', 'macro \u2026']
 ];
 for (var target = 0; target < 2; target++) {
     var name = target ? 'bonded' : 'local';
+    var safeCommands = safeByTarget[target];
     var redactionReplies = [];
     for (var sr = 0; sr < sensitiveCommands.length; sr++) {
         redactionReplies.push({command: sensitiveCommands[sr], help: 'inactive',
-                               body: 'Setting accepted\n'});
+                               body: 'Setting accepted\n', display: deviceDisplays[sr]});
     }
     var redacted = boot({}, [''], redactionReplies);
     redacted.probes.setTarget(!!target);
@@ -694,8 +728,68 @@ for (var target = 0; target < 2; target++) {
     var consoleText = redacted.consoleMessages.join('\n');
     check(name + ' console contains no sensitive submitted value',
           consoleText.indexOf('private-fixture') === -1 &&
-          (target || consoleText.indexOf(safeCommands[0]) >= 0));
+          (target || consoleText.indexOf('LLMHTTPTOKEN \u2026') >= 0));
 }
+
+/* N-38: credentials typed into any command (wifiadd, login, useradd, ...)
+ * never reach the terminal, history or localStorage. The device names the
+ * secret arguments; the page waits for its X-Cmd-Display before keeping more
+ * than the verb. */
+var wifi = boot({}, [''], [
+    {command: 'wifiadd net secretpass', help: 'inactive', body: 'Saved network net\n',
+     display: 'wifiadd%20net%20***', pending: true},
+    {command: 'login bob hunter2', help: 'inactive', body: 'Error: bad login\n', status: 400},
+    {command: 'useradd carol pw-fixture', help: 'inactive', body: 'Error: denied\n', status: 403,
+     display: 'not%valid%encoding'}
+]);
+wifi.command('wifiadd net secretpass');
+var pendingOutput = wifi.probes.state().output;
+check('pending command echoes only the verb',
+      pendingOutput.indexOf('$ wifiadd \u2026\n') >= 0 && pendingOutput.indexOf('net') === -1,
+      JSON.stringify(pendingOutput));
+check('pending command stores nothing',
+      wifi.storage.getItem('cliHistory') === null &&
+      JSON.stringify(wifi.storage.data).indexOf('secretpass') === -1,
+      JSON.stringify(wifi.storage.data));
+wifi.settleNextPost();
+var wifiOutput = wifi.probes.state().output;
+check('reply rewrites the echo with the device redacted line',
+      wifiOutput.indexOf('$ wifiadd net ***\nSaved network net\n') >= 0 &&
+      wifiOutput.indexOf('\u2026') === -1, JSON.stringify(wifiOutput));
+check('history keeps the device redacted line',
+      wifi.storage.getItem('cliHistory') === JSON.stringify(['wifiadd net ***']),
+      wifi.storage.getItem('cliHistory'));
+wifi.command('login bob hunter2');
+check('a reply without X-Cmd-Display keeps only the verb',
+      wifi.storage.getItem('cliHistory') === JSON.stringify(['wifiadd net ***', 'login']) &&
+      wifi.probes.state().output.indexOf('$ login\nError: bad login') >= 0,
+      wifi.storage.getItem('cliHistory'));
+wifi.command('useradd carol pw-fixture');
+check('an undecodable X-Cmd-Display keeps only the verb',
+      wifi.storage.getItem('cliHistory') === JSON.stringify(['wifiadd net ***', 'login', 'useradd']),
+      wifi.storage.getItem('cliHistory'));
+var wifiStored = JSON.stringify(wifi.storage.data) + wifi.probes.state().output + wifi.consoleMessages.join('\n');
+check('no typed secret reaches localStorage, the terminal or the console',
+      wifiStored.indexOf('secretpass') === -1 && wifiStored.indexOf('hunter2') === -1 &&
+      wifiStored.indexOf('pw-fixture') === -1 && wifiStored.indexOf('carol') === -1,
+      wifiStored);
+/* N-38, upgrade side: a store written before X-Cmd-Display holds commands as
+ * typed. A device whose web login is bypassed never shows the sign-in page
+ * that clears it, so the CLI page drops a store without the format mark once. */
+var legacy = boot({cliStoreV: null, cliHistory: '["wifiadd net oldsecret"]',
+                   cliOutputHistory: '$ wifiadd net oldsecret\n', cliOutputHistoryBackup: 'oldsecret',
+                   cliInHelp: 'true', theme: 'dark'}, [''], []);
+check('a store from before X-Cmd-Display is purged once at init',
+      JSON.stringify(legacy.storage.data).indexOf('oldsecret') === -1 &&
+      legacy.probes.state().output.indexOf('oldsecret') === -1 &&
+      legacy.storage.getItem('cliStoreV') === '2' && legacy.storage.getItem('theme') === 'dark',
+      JSON.stringify(legacy.storage.data));
+var current = boot({cliHistory: '["status"]'}, [''], []);
+check('a store in the current format is kept',
+      current.storage.getItem('cliHistory') === '["status"]', current.storage.getItem('cliHistory'));
+check('every typed command still reaches the device exactly',
+      JSON.stringify(wifi.posts.map(function (post) { return post.form.cmd; })) ===
+      JSON.stringify(['wifiadd net secretpass', 'login bob hunter2', 'useradd carol pw-fixture']));
 
 check('page callbacks threw no exceptions', absorbed.length === 0,
       absorbed.join(' | '));

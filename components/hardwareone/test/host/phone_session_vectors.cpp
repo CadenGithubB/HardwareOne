@@ -827,7 +827,7 @@ static void negative() {
   handshakeVector("disconnect_during_handshake","link drops after HELLO_ACK",
     "teardown, no cooldown",[](Run& r){
       r.phoneRaw(r.hello(),"secure_hello","phone public key and nonce");r.drain();
-      esp_ble_gattc_cb_param_t e{};e.disconnect.conn_id=4;post(r.g,ESP_GATTC_DISCONNECT_EVT,e);r.step();});
+      disconnect(r);});
   {Run run(63,scopeOf("mtu_63"));beginWith(run.g,psk);opened(run.g);
    esp_ble_gattc_cb_param_t e{};e.cfg_mtu.conn_id=4;e.cfg_mtu.mtu=63;post(run.g,ESP_GATTC_CFG_MTU_EVT,e);
    tick(run.g,1);run.mark();run.settle(100);assert(calls.back()!="cccd");

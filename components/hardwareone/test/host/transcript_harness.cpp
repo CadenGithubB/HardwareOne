@@ -53,12 +53,16 @@ namespace VFS {
  static uint64_t available=1000000;
  static bool sd=false,sdPresent=true,statsOk=true,denyMkdir=false;
  static unsigned sdFailures=0,notedBytes=0;
+ // Fresh readings (a whole-volume walk on the device) and cached-figure reads.
+ static unsigned freshStats=0,sdFreshStats=0,cachedReads=0;
+ static bool cacheSet=false; static size_t cachedFree=0; // unset: the cache agrees with `available`
  bool isSdWritable(){assert(locks);return sd&&sdPresent;}
  bool exists(const String& p){assert(locks);return files.count(p)||folders.count(p);}
  bool existsGuarded(const String& p,const AuthContext&){return exists(p);}
  bool mkdirGuarded(const String& p,const AuthContext& ctx){assert(locks);if(denyMkdir)return false;assert(ctx.user=="alice"||ctx.user=="system");folders.insert(p);return true;}
  AuthContext systemAuth(const char* scope,const char*){AuthContext c;c.user="system";c.scope=scope;return c;}
- bool getStats(StorageType type,uint64_t& total,uint64_t& used,uint64_t& free){assert(locks);total=1000000;used=0;free=available;return statsOk&&(type!=SDCARD||sdPresent);}
+ bool getStats(StorageType type,uint64_t& total,uint64_t& used,uint64_t& free){assert(locks);++freshStats;if(type==SDCARD)++sdFreshStats;total=1000000;used=0;free=available;return statsOk&&(type!=SDCARD||sdPresent);}
+ size_t getCachedLittleFsFree(){assert(locks);++cachedReads;return cacheSet?cachedFree:size_t(available);}
  void noteSdWriteFailure(const char*){++sdFailures;}
  void noteLittleFsBytesWritten(size_t n){notedBytes+=n;}
 }
@@ -96,6 +100,7 @@ static void reset(){
  VFS::files.clear();VFS::folders.clear();VFS::available=1000000;
  VFS::sd=false;VFS::sdPresent=VFS::statsOk=true;VFS::denyMkdir=false;
  VFS::sdFailures=VFS::notedBytes=0;
+ VFS::freshStats=VFS::sdFreshStats=VFS::cachedReads=0;VFS::cacheSet=false;VFS::cachedFree=0;
 }
 static TranscriptOptions options(){return transcriptCaptureOptions(SOURCE_SERIAL,7);}
 static std::string text(const TranscriptSession& s){return VFS::files.at(s.snapshot().path);}
@@ -177,4 +182,28 @@ static void terminal_and_bounds(){
  reset();TranscriptSession oversized;oversized.begin(options(),"local",43);std::string huge(513,'x');assert(!oversized.append(1,huge.c_str(),huge.size())&&VFS::files.empty());
  assert(!locks&&!filesOpen);
 }
-int main(){complete();disabled_and_identity();identity_without_saving();faults();terminal_and_bounds();puts("Shared transcript writer: identity, latch, replay, storage and cleanup checks passed");}
+// UP-04: a fresh reading walks all of LittleFS under the FS mutex (~1.3 s on the
+// P4X-EYE). An INTERNAL session takes one for its first write and reads the
+// shared cached figure for every later phrase; every SD write stays fresh.
+static void capacity_readings(){
+ reset();TranscriptSession s;s.begin(options(),"local",50);
+ for(uint32_t i=1;i<=50;++i){char phrase[24];int n=snprintf(phrase,sizeof(phrase),"phrase %u",unsigned(i));assert(s.append(i,phrase,size_t(n)));}
+ assert(s.snapshot().chunks==50&&VFS::freshStats==1&&VFS::cachedReads==49);
+ s.finish("done");assert(s.snapshot().complete&&VFS::freshStats==1&&VFS::cachedReads==50);
+ // A cached figure below the reserve refuses the phrase, with the same message.
+ reset();TranscriptSession low;low.begin(options(),"local",51);assert(low.append(1,"first",5));
+ VFS::cacheSet=true;VFS::cachedFree=100*1024+6+255;const auto before=text(low);
+ assert(!low.append(2,"second",6)&&!strcmp(low.snapshot().error,"Transcript storage full or unavailable"));
+ assert(text(low)==before&&VFS::freshStats==1&&VFS::cachedReads==1&&!filesOpen&&!locks);
+ // Exactly at the rule's edge (reserve + line + 256) still writes.
+ reset();TranscriptSession edge;edge.begin(options(),"local",52);assert(edge.append(1,"first",5));
+ VFS::cacheSet=true;VFS::cachedFree=100*1024+7+256;assert(edge.append(2,"second",6));
+ // The fresh reading on the first write still decides it, whatever the cache says.
+ reset();VFS::cacheSet=true;VFS::cachedFree=1000000;VFS::available=100*1024;TranscriptSession firstLow;firstLow.begin(options(),"local",53);
+ assert(!firstLow.append(1,"first",5)&&VFS::freshStats==1&&!VFS::cachedReads&&VFS::files.empty());
+ // SD sessions read fresh on every write and never consult the LittleFS cache.
+ reset();VFS::sd=true;TranscriptSession sd;sd.begin(options(),"pi",54);
+ for(uint32_t i=1;i<=5;++i)assert(sd.append(i,"card",4));
+ sd.finish("done");assert(sd.snapshot().complete&&VFS::sdFreshStats==6&&VFS::freshStats==6&&!VFS::cachedReads);
+}
+int main(){complete();disabled_and_identity();identity_without_saving();faults();terminal_and_bounds();capacity_readings();puts("Shared transcript writer: identity, latch, replay, storage and cleanup checks passed");}

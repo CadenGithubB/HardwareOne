@@ -149,7 +149,8 @@ bool ImageManager::ensureCaptureFolder(ImageStorageLocation location) {
 // Only this owner writes `<image>.jpg.tmp` names, and it holds the filesystem
 // lock while it does, so under the caller's lock every such entry is stale.
 // Entries are collected first; the directory is closed before anything is
-// removed.
+// removed. The same walk raises imageCounter past the highest counter name in
+// the folder, so a no-clock photo after a reboot does not reuse a name.
 void ImageManager::sweepStaleTemporaries(ImageStorageLocation location, const String& folder) {
   const bool isSd = location == IMAGE_STORAGE_SD;
   const AuthContext sys = VFS::systemAuth(folder.c_str(), isSd ? "imgmgr.sweep_stale.sd" : "imgmgr.sweep_stale");
@@ -164,6 +165,8 @@ void ImageManager::sweepStaleTemporaries(ImageStorageLocation location, const St
   while (reader.next(entry)) {
     if (entry.isFolder || entry.isVirtual) continue;
     if (entry.name.endsWith(".jpg.tmp") || entry.name.endsWith(".jpeg.tmp")) stale.push_back(entry.path);
+    const long counter = counterOfPhotoName(entry.name);
+    if (counter >= imageCounter) imageCounter = (int)counter + 1;
   }
   dir.close();
   unsigned removed = 0;
@@ -280,9 +283,27 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
       return refused(ImageSaveFailure::LowSpace);
     }
     if (!ensureCaptureFolder(target)) return refused(ImageSaveFailure::WriteFailed);
-    if (VFS::existsGuarded(temporary, sys)) {
-      ERROR_STORAGEF("[ImageManager] Temporary image already exists: %s", temporary.c_str());
-      return refused(ImageSaveFailure::WriteFailed);
+    // Never replace a photo: the counter restarts with each boot and a
+    // timestamp name lasts one second. A name taken as a photo, or as a
+    // temporary left by a failed cleanup, moves this copy to <name>_1.jpg ..
+    // <name>_99.jpg. The probe and the publish run under this one lock.
+    static constexpr unsigned kMaxNameSuffix = 99;
+    for (unsigned suffix = 1; VFS::existsGuarded(path, sys) || VFS::existsGuarded(temporary, sys); ++suffix) {
+      if (suffix > kMaxNameSuffix || !normalizedPath.endsWith(".jpg")) {
+        ERROR_STORAGEF("[ImageManager] No free photo name on %s for %s", storageName, filename.c_str());
+        return refused(ImageSaveFailure::WriteFailed);
+      }
+      const int stem = (int)normalizedPath.length() - 4;  // normalizedPath keeps the unsuffixed name
+      char tail[12];
+      snprintf(tail, sizeof(tail), "_%u.jpg", suffix);
+      String candidate = normalizedPath.substring(0, stem);
+      if ((int)candidate.length() != stem || !candidate.concat(tail)) return refused(ImageSaveFailure::WriteFailed);
+      String candidateTemporary = candidate;
+      if (candidateTemporary.length() != candidate.length() || !candidateTemporary.concat(".tmp")) {
+        return refused(ImageSaveFailure::WriteFailed);
+      }
+      path = candidate;
+      temporary = candidateTemporary;
     }
 
     File f = VFS::openGuarded(temporary, "w", sys, /*create=*/true);
@@ -326,7 +347,9 @@ String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLoca
 
   // Emit one event after both attempts have closed their files and released
   // their guards. BOTH retains its preferred internal path and retention policy.
-  systemEventPost(SYSEVT_PHOTO_SAVED, filename.c_str(), fullPath.c_str());
+  // The final name: a tier that found the generated one taken wrote a suffix.
+  const String savedName = fullPath.substring(fullPath.lastIndexOf('/') + 1);
+  systemEventPost(SYSEVT_PHOTO_SAVED, savedName.c_str(), fullPath.c_str());
   enforceMaxImages(location);
   return fullPath;
 }

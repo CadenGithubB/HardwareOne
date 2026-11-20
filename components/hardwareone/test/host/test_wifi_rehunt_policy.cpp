@@ -1,8 +1,11 @@
 // Host-side tests for the production Wi-Fi rehunt policy header: when a lost
-// connection is followed by a hunt across every saved network.
+// connection, or a failed connect the device made by itself, is followed by a
+// hunt across every saved network. Also the services policy header: whether a
+// later join starts the web server.
 #include <cstdio>
 
 #include "../../System_WiFiRehuntPolicy.h"
+#include "../../System_WiFiServicesPolicy.h"
 
 static int failures = 0;
 
@@ -166,6 +169,98 @@ static void millisWrap() {
   CHECK(p.poll(offline(2), start + Policy::kFirstDelayMs), "after the delay, across the wrap");
 }
 
+// A boot connect (or the companion's restore, radiopower on) that failed: the
+// driver is not retrying, so the hunt is armed with one saved network too.
+static void failedConnectArmsTheHunt() {
+  Policy p;
+  p.noteConnectFailed(0);
+  CHECK(p.wanted && p.driverIdle && p.failures == 0, "a failed connect arms the hunt with an idle driver");
+  CHECK(!p.poll(offline(1), 0), "no hunt at the failure");
+  CHECK(!p.poll(offline(1), 59999), "no hunt before the first delay");
+  CHECK(p.poll(offline(1), 60000), "one saved network is hunted 60 s after the failure");
+}
+
+static void failedConnectBacksOff() {
+  Policy p;
+  uint32_t now = 5000;
+  p.noteConnectFailed(now);
+  now += Policy::kFirstDelayMs;
+  CHECK(p.poll(offline(1), now), "first hunt after the first delay");
+  const uint32_t expected[] = {60000, 120000, 300000, 300000};
+  for (uint32_t gap : expected) {
+    now += 15000;
+    p.huntEnded(false, false, now);
+    CHECK(!p.poll(offline(1), now + gap - 1), "failed connect: no hunt before the gap");
+    now += gap;
+    CHECK(p.poll(offline(1), now), "failed connect: hunt after the gap (60/120/300 s)");
+  }
+  p.huntEnded(true, false, now + 3000);
+  CHECK(!p.wanted && !p.driverIdle && p.failures == 0, "a hunt that joins clears it");
+}
+
+static void failedConnectEndsOnJoinOrDisarm() {
+  Policy p;
+  p.noteConnectFailed(0);
+  Policy::Inputs in = offline(1);
+  in.connected = true;
+  CHECK(!p.poll(in, 1000), "connected: no hunt");
+  CHECK(!p.wanted && !p.driverIdle, "a join (openwifi, the companion) clears it");
+  CHECK(!p.poll(offline(1), 10 * Policy::kFirstDelayMs), "and nothing fires later");
+
+  Policy q;
+  q.noteConnectFailed(0);
+  CHECK(!q.poll(offline(1, false), Policy::kFirstDelayMs), "auto-reconnect off: no hunt");
+  CHECK(!q.wanted, "disarming clears it");
+  CHECK(!q.poll(offline(1), 10 * Policy::kFirstDelayMs), "re-arming alone does not bring it back");
+}
+
+static void failedConnectKeepsTheClock() {
+  Policy p;
+  p.noteConnectFailed(0);
+  p.noteConnectFailed(50000);  // the companion's restore failed again
+  CHECK(p.poll(offline(1), Policy::kFirstDelayMs), "a second failure does not restart the clock");
+
+  // A failure while a drop's hunt is wanted keeps that clock, and leaves the
+  // driver idle: one saved network now qualifies.
+  Policy q;
+  q.noteDropped(0);
+  q.noteConnectFailed(30000);
+  CHECK(q.driverIdle, "a failed connect leaves the driver idle");
+  CHECK(!q.poll(offline(1), Policy::kFirstDelayMs - 1), "the drop's clock stands");
+  CHECK(q.poll(offline(1), Policy::kFirstDelayMs), "and one saved network is hunted");
+}
+
+static void failedConnectWaitsForTheRadio() {
+  Policy p;
+  p.noteConnectFailed(0);
+  CHECK(!p.poll(offline(1, true, true), Policy::kFirstDelayMs), "companion offline / radio held: no hunt");
+  CHECK(p.wanted, "the request stands");
+  CHECK(!p.poll(offline(0), Policy::kFirstDelayMs), "no saved network: nothing to hunt");
+  CHECK(p.poll(offline(1), Policy::kFirstDelayMs + 1000), "it runs once the radio is free");
+}
+
+// Every combination of the five inputs: only enabled + autostart + stopped +
+// not user-closed + not the boot connect's join starts the server.
+static void servicesTruthTable() {
+  int starts = 0;
+  for (int bits = 0; bits < 32; ++bits) {
+    WifiServicesInputs in;
+    in.httpEnabled = bits & 1;
+    in.autostart = bits & 2;
+    in.running = bits & 4;
+    in.userClosed = bits & 8;
+    in.bootConnectActive = bits & 16;
+    const bool expected = in.httpEnabled && in.autostart && !in.running && !in.userClosed &&
+                          !in.bootConnectActive;
+    const bool got = wifiServicesShouldStartHttp(in);
+    CHECK(got == expected, "services decision matches the rule");
+    starts += got;
+  }
+  CHECK(starts == 1, "exactly one combination starts the server");
+  WifiServicesInputs none;
+  CHECK(!wifiServicesShouldStartHttp(none), "defaults start nothing");
+}
+
 int main() {
   idleUntilADrop();
   firstHuntAfterTheDriverHadItsTurn();
@@ -180,6 +275,12 @@ int main() {
   cancelDuringAHunt();
   repeatedDropsKeepTheClock();
   millisWrap();
+  failedConnectArmsTheHunt();
+  failedConnectBacksOff();
+  failedConnectEndsOnJoinOrDisarm();
+  failedConnectKeepsTheClock();
+  failedConnectWaitsForTheRadio();
+  servicesTruthTable();
   if (failures) {
     std::fprintf(stderr, "%d wifi rehunt policy check(s) failed\n", failures);
     return 1;

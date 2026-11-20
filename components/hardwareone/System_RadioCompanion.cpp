@@ -393,11 +393,9 @@ void restoreUsers(const RadioUsers& users) {
     if (initBluetooth()) startBleAdvertising();
   } else if (users.g2Client) {
     // The shared client stack; the devices reopen through the boot reconnect
-    // and their reseeks (each admission opens its device).
-    if (bleStackUp()) {
-      vTaskDelay(pdMS_TO_TICKS(2000));
-      bleBootReconnect();
-    }
+    // and their reseeks (each admission opens its device). The reconnect only
+    // arms them, after its own settle time; nothing here waits.
+    if (bleStackUp()) bleBootReconnect();
   }
 #endif
 #if ENABLE_HTTP_SERVER
@@ -436,11 +434,8 @@ void bringUpConfiguredUsers() {
     if (initBluetooth()) startBleAdvertising();
   } else if (wanted.g2Client && !running.g2Client) {
     // The shared stack, then each peer with auto-reconnect on opens its own
-    // device, as at boot.
-    if (bleStackUp()) {
-      vTaskDelay(pdMS_TO_TICKS(2000));
-      bleBootReconnect();
-    }
+    // device, as at boot (armed here, opened by the reconnect tick).
+    if (bleStackUp()) bleBootReconnect();
   }
 
 #endif
