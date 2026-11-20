@@ -6807,14 +6807,23 @@ buildG2StatusSnapshot(char* out, size_t cap) {
 
 #if ENABLE_ESPNOW
   // Same trim as WiFi above — the legacy "ESPNow <mode> - Np - Xtx/Yrx"
-  // line was ~28 chars and wrapped. Show just the peer count, which
-  // is the one number that actually fluctuates session-to-session.
+  // line was ~28 chars and wrapped. Show peers up / paired: "up" is an
+  // ACTIVE encrypted session (espnowSessionUp), "paired" every registry
+  // entry except this device. (It used to show peerHistoryCount, peers
+  // with message history, which read 0p while the mesh was healthy.)
   // Mode and tx/rx counts are available via `espnowinfo` on CLI / web
   // UI; the lens stays under the per-line width budget.
   if (gEspNow && gEspNow->initialized) {
+    int paired = 0, up = 0;
+    const int n = gEspNow->deviceCount < 16 ? gEspNow->deviceCount : 16;
+    for (int i = 0; i < n; i++) {
+      const uint8_t* mac = gEspNow->devices[i].mac;
+      if (isSelfMac(mac)) continue;
+      ++paired;
+      if (espnowSessionUp(mac)) ++up;
+    }
     char line[48];
-    snprintf(line, sizeof(line), "ESPNow: %dp\n",
-             gEspNow->peerHistoryCount);
+    snprintf(line, sizeof(line), "ESPNow: %d/%d up\n", up, paired);
     s += line;
   } else {
     s += "ESPNow off\n";
