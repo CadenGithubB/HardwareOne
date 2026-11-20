@@ -219,7 +219,7 @@ static std::string quoted(const std::string& value) {
 }
 
 static std::string addLine(const std::string& name, const std::string& command) {
-  return "automationadd name=" + quoted(name) + " type=interval intervalms=300000 command=" +
+  return "automation add name=" + quoted(name) + " type=interval intervalms=300000 command=" +
          quoted(command) + " enabled=1";
 }
 

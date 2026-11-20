@@ -53,7 +53,7 @@ static char sPendingDeleteName[AUTO_NAME_MAX] = {0};
 // Guided "New automation" wizard
 // ============================================================================
 // Authoring on-device (the OLED can do more than view/run/toggle now). Emits a
-// real `automationadd ...` command through executeOledCommandWithResult — the
+// real `automation add ...` command through executeOledCommandWithResult — the
 // same canonical creation path the web UI uses via /api/cli — never a direct
 // JSON write (settings-save-via-real-commands rule). Deliberately scoped: one
 // trigger, no condition expressions (a gamepad is the wrong tool for
@@ -247,11 +247,11 @@ static String wizQuote(const char* s) {
   return out;
 }
 
-// Build and dispatch the automationadd command. enabled=1 (the parser defaults
+// Build and dispatch the `automation add` command. enabled=1 (the parser defaults
 // to DISABLED). The executor's verdict decides; the reply holds the reason.
 static void wizCreate() {
   const char* wt = kWizTypes[sWizTypeIdx].wireType;
-  String cmd = "automationadd name=";
+  String cmd = "automation add name=";
   cmd += wizQuote(sWizName);
   cmd += " type=";
   cmd += wt;
@@ -744,7 +744,7 @@ static void autoRunSelected() {
   if (isAfterDelay) {
     snprintf(cmd, sizeof(cmd), "automation trigger id=%ld", sel.id);
   } else {
-    snprintf(cmd, sizeof(cmd), "automationrun id=%ld", sel.id);
+    snprintf(cmd, sizeof(cmd), "automation run id=%ld", sel.id);
   }
 
   // The dispatch is synchronous: by the time it returns we know whether the

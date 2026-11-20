@@ -9,7 +9,7 @@ OLED_Utils.h. The display, keyboard, event catalog and OLED command executor
 are doubles.
 
 The cases check that a 40-character name and command, and a command of the
-keyboard's full length, reach `automationadd` whole; that text which does not
+keyboard's full length, reach `automation add` whole; that text which does not
 fit is refused instead of stored cut short; that the confirm screen shows every
 command character (Down scrolls the rows) and keeps the old four-line layout
 for a short command. `--component <dir>` runs the same cases against saved

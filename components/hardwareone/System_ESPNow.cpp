@@ -23313,7 +23313,6 @@ const char* cmd_espnow_pairmode(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Status & Statistics ----
-  { "espnowread", "Read ESP-NOW status and configuration.", false, cmd_espnow_status },
   { "espnowstatus", "Show ESP-NOW status and configuration.", false, cmd_espnow_status },
   { "espnowstats", "Show ESP-NOW statistics (messages, errors, and received frames dropped by cause: too short for their type, an unknown must-understand flag, an unknown mesh id).", false, cmd_espnow_stats },
   { "espnowrouterstats", "Show message router statistics and metrics.", false, cmd_espnow_routerstats },

@@ -7558,8 +7558,6 @@ extern const CommandEntry g2RingCommands[] = {
     "Usage: ring panel send [test]  (test = fixed values 1234 steps, 210 kcal, sleep score 80 / 7h30m, 72 bpm, 98%)" },
   { "ring panel feed", "Feed the glasses' Health panel from the ring (saved; on by default).", true, cmd_ringpanelfeed,
     "Usage: ring panel feed [on|off]" },
-  { "ring panel on",   "Same as ring panel feed on (saved).", true, cmd_ringpanelon },
-  { "ring panel off",  "Same as ring panel feed off (saved).", true, cmd_ringpaneloff },
   { "ring panel history", "How often the feed refreshes ring history (steps, kcal, sleep).", true, cmd_ringpanelhistory,
     "Usage: ring panel history [minutes 10-1440]  (default 30)" },
 #endif

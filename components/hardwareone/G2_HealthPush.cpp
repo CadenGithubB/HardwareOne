@@ -404,16 +404,6 @@ const char* setFeed(bool on) {
 }
 }  // namespace
 
-const char* cmd_ringpanelon(const String& /*args*/) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return setFeed(true);
-}
-
-const char* cmd_ringpaneloff(const String& /*args*/) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return setFeed(false);
-}
-
 const char* cmd_ringpanelfeed(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String a = args;

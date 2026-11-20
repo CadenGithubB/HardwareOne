@@ -2204,7 +2204,7 @@ void hardwareone_setup() {
   // independently would double-claim the I2S channel.
   if (gSettings.srEnabled && ramFlushResolve(RF_SR, gSettings.srAutoStart)) {
     broadcastOutput("Starting ESP-SR speech recognition...");
-    runUnifiedSystemCommand("srstart");
+    runUnifiedSystemCommand("opensr");
   } else if (gSettings.micEnabled && ramFlushResolve(RF_MICROPHONE, gSettings.micAutoStart)) {
     broadcastOutput("Starting microphone sensor...");
     runUnifiedSystemCommand("openmic");
@@ -2604,6 +2604,7 @@ void hardwareone_loop() {
   collectWriteTick();  // file catch-up: the collector's card job (append a window, save index.json)
 #endif
   timeAnchorsTick();   // retro-date boot-named captures once the clock syncs
+  VFS::sdWatchTick();  // SD card: mount a card put in after boot (boards with a detect switch; UP-06)
   g2RingTimeSyncTick(); // ring-clock custody: adopt when dark / correct ring after sync
   cm5TimeSyncTick();    // CM5 carrier RTC: adopt when dark / correct after sync (authoritative)
   g2Tick();             // glasses: overlay auto-dismiss + adaptive clock/tz re-push (self-throttled)

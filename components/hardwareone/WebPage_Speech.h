@@ -446,7 +446,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
   
   function startSR(){
     setStatus('Starting speech recognition...');
-    postCli('srstart').then(function(out){
+    postCli('opensr').then(function(out){
       setStatus(out);
       setTimeout(refreshStatus, 500);
       startPolling();
@@ -455,7 +455,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
 
   function stopSR(){
     setStatus('Stopping speech recognition...');
-    postCli('srstop').then(function(out){
+    postCli('closesr').then(function(out){
       setStatus(out);
       setTimeout(refreshStatus, 500);
       stopPolling();
@@ -577,11 +577,11 @@ inline void streamSpeechInner(httpd_req_t* req) {
     var filename = select.value;
     // No command loads a single file from this folder: say where each kind is read from.
     if(filename === 'srmodels.bin'){
-      setFileStatus('srmodels.bin is read at srstart when srmodelsource is 1 (SD). Run srstop, then srstart.');
+      setFileStatus('srmodels.bin is read at opensr when srmodelsource is 1 (SD). Run closesr, then opensr.');
     } else if(filename === 'commands.txt'){
       setFileStatus('The command list is read from /sd/ESPSR/commands.txt. Put the file there and run srcmdsreload.');
     } else {
-      setFileStatus('Selected: ' + filename + ' (no command loads this file; models are read from srmodels.bin at srstart)');
+      setFileStatus('Selected: ' + filename + ' (no command loads this file; models are read from srmodels.bin at opensr)');
     }
   }
   

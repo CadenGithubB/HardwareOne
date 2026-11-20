@@ -2928,7 +2928,6 @@ const char* cmd_httpstatus(const String& argsInput) { RETURN_VALID_IF_VALIDATE_C
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry wifiCommands[] = {
   // Network Management
-  { "wifiread", "Read current WiFi connection info. (add 'json' for JSON output)", false, cmd_wifiinfo },
   { "wifistatus", "Show current WiFi connection info. (add 'json' for JSON output)", false, cmd_wifiinfo },
   { "wifilist", "List saved WiFi networks. (add 'json' for JSON output)", false, cmd_wifilist },
   { "wifiadd", "Add WiFi network: <ssid> <pass> [priority] [hidden]", true, cmd_wifiadd, "Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]" },
@@ -2950,7 +2949,6 @@ const CommandEntry wifiCommands[] = {
 #if ENABLE_HTTP_SERVER
   { "openhttp", "Start HTTP server.", true, cmd_httpstart },
   { "closehttp", "Stop HTTP server; it stays off across later WiFi joins until openhttp.", true, cmd_httpstop },
-  { "httpread", "Read HTTP server status. (add 'json' for JSON output)", false, cmd_httpstatus },
   { "httpstatus", "Show HTTP server status. (add 'json' for JSON output)", false, cmd_httpstatus },
 #endif
   { "certinfo", "Show HTTPS certificate details.", false, cmd_certinfo },

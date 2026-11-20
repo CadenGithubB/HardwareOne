@@ -42,8 +42,6 @@ bool g2HealthWireSend(uint32_t generation, const uint8_t* pb, size_t len);
 
 class String;
 const char* cmd_ringpanelstatus(const String& args);
-const char* cmd_ringpanelon(const String& args);
-const char* cmd_ringpaneloff(const String& args);
 const char* cmd_ringpanelfeed(const String& args);
 const char* cmd_ringpanelhistory(const String& args);
 const char* cmd_ringpanelsend(const String& args);

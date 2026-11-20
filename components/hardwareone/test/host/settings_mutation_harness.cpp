@@ -525,7 +525,7 @@ static void oledEnabledCommand() {
   }
   prepareOled("1", false, false, false); oledInitSucceeds = false;
   check(cmd_oled_enabled("1") == std::string("Error: Failed to initialize OLED display. Check wiring, "
-                                             "then run oledstart. The setting is stored as on."),
+                                             "then run openoled. The setting is stored as on."),
         "init failure reply changed");
   check(effectOrder == Effects{"persist", "display init"}, "init failure lost persist/report order");
   prepareOled("1", false, true, false);

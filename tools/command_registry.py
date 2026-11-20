@@ -9,12 +9,17 @@ Subcommands:
              diff summary if they differ.
   audit      Report registry drift without writing anything:
                - duplicate command names (two registry slots, first wins)
+               - one handler registered under two names (an alias row)
+               - a removed command name (RETIRED_NAMES) registered again
                - CommandEntry arrays never registered in gCommandModules[]
                - modules referencing an array with no definition
                - command strings invoked in code that resolve to nothing
                - SettingEntry cmdKey values that bind to no command
-             Exits non-zero if anything but the known-intentional
-             voice-alias duplicates is found, so CI can gate on it.
+               - a non-admin command that saves an *autostart/*enabled
+                 setting (CONTRIBUTING.md, "Command names"): by its row or a
+                 setting's cmdKey, or by a write to the setting's gSettings
+                 field in its handler or a function the handler calls
+             Exits non-zero on any finding, so a check can gate on it.
 
 A CommandEntry array defined more than once in one file, in mutually
 exclusive branches of the same #if/#elif/#else chain (System_OTA.cpp's
@@ -48,9 +53,50 @@ REPO = Path(__file__).resolve().parent.parent
 COMPONENTS = REPO / "components" / "hardwareone"
 OUT_REFERENCE = REPO / "docs" / "COMMAND_REFERENCE.md"
 
-# Same command name registered twice on purpose, to give it a second voice
-# phrase (CommandEntry has no alias list). Not drift.
-INTENTIONAL_DUPLICATES = {"voicecancel"}
+# One name per command (CONTRIBUTING.md, "Command names"). Removed name ->
+# the name that stays. The host test command_name_form holds the same table
+# (REMOVED_NAMES) and checks that the two agree and that no string sends a
+# removed name; this audit fails when one is a registry row again.
+RETIRED_NAMES = {
+    "automationadd": "automation add",
+    "automationrun": "automation run",
+    "automationtrigger": "automation trigger",
+    "bleread": "blestatus",
+    "c6_console": "c6console",
+    "debugespnow": "debugespnowcore",
+    "espnowread": "espnowstatus",
+    "g2ai-direct": "g2aidirect",
+    "g2ai-noask": "g2ainoask",
+    "httpread": "httpstatus",
+    "oledread": "oledstatus",
+    "oledstart": "openoled",
+    "oledstop": "closeoled",
+    "ring panel off": "ring panel feed",
+    "ring panel on": "ring panel feed",
+    "sleep": "wait",
+    "srstart": "opensr",
+    "srstop": "closesr",
+    "validate-conditions": "validateconditions",
+    "wifiread": "wifistatus",
+}
+
+# Handlers that serve several rows on purpose: stubs that answer "not built"
+# or "unavailable" for a whole family. Not aliases.
+SHARED_STUB_HANDLERS = {"phoneNotBuilt", "unavailable"}
+
+# A non-admin command that saves an *autostart/*enabled setting, left open
+# for a stated reason. Every entry is an open owner question; the audit fails
+# when an entry no longer saves a switch, so the list cannot go stale.
+OPEN_PERSISTENT_SWITCHES = {
+    "healthlogging": "R1 health logging toggle on the G2, OLED and web Health "
+                     "pages; its status verb shares the row (owner question 4, "
+                     "behaviour batch 2026-11-20, command-names)",
+    "gpslog": "starts GPS and the logger, then saves both boot autostarts "
+              "(owner question 4, behaviour batch 2026-11-20, command-names)",
+    "batterylog": "on/off saves the battery log switch; its status, tail and "
+                  "clear verbs share the row (owner question 4, behaviour "
+                  "batch 2026-11-20, command-names)",
+}
 
 
 # ============================================================================
@@ -279,6 +325,7 @@ def parse_commands_and_alternates():
                 by_array[array].append(dict(
                     name=nm.group(1),
                     help=help_,
+                    handler=(f[3].strip().lstrip("&") if len(f) > 3 else ""),
                     admin=(len(f) > 2 and f[2].strip() == "true"),
                     superadmin=bool(SUPER_RE.search(item)),
                     usage=usage,
@@ -489,9 +536,110 @@ def cmd_reference(args) -> int:
 
 CALL_RE = re.compile(
     r'\b(executeCommand|executeOledCommand|executeCommandForUser'
-    r'|submitAndExecuteSync|enqueueCommand|runCommand|oledRunCommand)\s*\(\s*"([^"]{2,60})"'
+    r'|submitAndExecuteSync|enqueueCommand|runCommand|oledRunCommand'
+    r'|oledRunCommandAsync|executeOledCommandWithResult|executeCommandThroughRegistry'
+    r'|runUnifiedSystemCommand|executeUnifiedWebCommand|executeInternalStatusCommand'
+    r'|healthRunCommand|g2SubmitHijackCommand|g2FmTunerSubmit)\s*\(\s*"([^"]{2,60})"'
 )
 SETTING_ARRAY_RE = re.compile(r"SettingEntry\s+\w+\s*\[\]\s*=\s*\{")
+
+
+# A function definition at the start of a line: `const char* cmd_x(...) {`,
+# `static bool helper(...) {`. Enough to follow a handler into its helpers.
+FUNCTION_DEF_RE = re.compile(
+    r"(?m)^(?:static\s+|inline\s+)*(?:const\s+)?[A-Za-z_][\w:<>]*[\s*&]+\**(\w+)"
+    r"\s*\(([^;{}]*)\)\s*(?:const\s*)?\{")
+SETTING_WRITE_RE = re.compile(
+    r"setSetting\s*\(\s*gSettings\.(\w+)|gSettings\.(\w+)\s*=(?!=)")
+FUNCTION_CALL_RE = re.compile(r"\b(\w+)\s*\(")
+# How many calls deep a handler is followed. Three finds every known write
+# (gpslog -> cmd_sensorlog_autostart -> sensorLogAutoStartSet); deeper adds
+# only run time.
+SWITCH_WRITE_DEPTH = 3
+
+
+def persistent_switch_findings(by_array) -> list[tuple[str, str]]:
+    """(command, reason) for each non-admin row that saves an *autostart or
+    *enabled setting: the row a setting's cmdKey resolves to (longest row
+    name, as the dispatcher does), a row whose last word ends in autostart
+    or enabled, or a row whose handler (or a function it calls, up to
+    SWITCH_WRITE_DEPTH deep) writes such a setting's gSettings field. The
+    last one also catches an open parent row that still writes the switch of
+    an admin sub-command row: a typed line the admin row does not match byte
+    for byte (two spaces, a tab, a quoted word) reaches the parent."""
+    rows = {}
+    for v in by_array.values():
+        for c in v:
+            rows.setdefault(c["name"].lower(), c)
+
+    def resolve(text: str):
+        words = text.lower().split()
+        for n in range(len(words), 0, -1):
+            row = rows.get(" ".join(words[:n]))
+            if row:
+                return row
+        return None
+
+    found: dict[str, str] = {}
+    definitions: dict[str, str] = {}
+    switch_fields: dict[str, str] = {}
+    for path in sources():
+        src = read(path)
+        for m in FUNCTION_DEF_RE.finditer(src):
+            start = m.end() - 1
+            body = src[start:match_brace(src, start) + 1]
+            definitions.setdefault(m.group(1), re.sub(r"//[^\n]*", "", body))
+        for m in SETTING_ARRAY_RE.finditer(src):
+            start = m.end() - 1
+            body = src[start:match_brace(src, start)]
+            for item in iter_initializers(body):
+                f = split_fields(item)
+                if len(f) < 3 or not f[0].startswith('"'):
+                    continue
+                key = f[0].strip('"').lower()
+                field = re.fullmatch(r"&\s*gSettings\.(\w+)", f[2].strip())
+                if field and (key.endswith("autostart") or key.endswith("enabled")):
+                    switch_fields.setdefault(field.group(1), f[0].strip('"'))
+                if len(f) < 13:
+                    continue
+                raw = f[12].strip()
+                if raw in ("", "nullptr") or not (key.endswith("autostart") or key.endswith("enabled")):
+                    continue
+                row = resolve(raw.strip('"'))
+                if row and not row["admin"] and not row["superadmin"]:
+                    found.setdefault(row["name"].lower(),
+                                     f"is the cmdKey of setting {f[0].strip(chr(34))} ({path.name})")
+    for name, row in rows.items():
+        last = name.split()[-1]
+        if (last.endswith("autostart") or last.endswith("enabled")) \
+                and not row["admin"] and not row["superadmin"]:
+            found.setdefault(name, f"is named like a saved switch ({row['file']})")
+
+    def writes(function: str, depth: int, seen: set) -> dict[str, str]:
+        """Switch field -> the function that writes it, from `function` down."""
+        if function in seen or function not in definitions:
+            return {}
+        seen.add(function)
+        body = definitions[function]
+        out = {}
+        for m in SETTING_WRITE_RE.finditer(body):
+            field = m.group(1) or m.group(2)
+            if field in switch_fields:
+                out.setdefault(field, function)
+        if depth > 0:
+            for m in FUNCTION_CALL_RE.finditer(body):
+                for field, writer in writes(m.group(1), depth - 1, seen).items():
+                    out.setdefault(field, writer)
+        return out
+
+    for name, row in rows.items():
+        if row["admin"] or row["superadmin"] or not row["handler"] or name in found:
+            continue
+        written = writes(row["handler"], SWITCH_WRITE_DEPTH, set())
+        if written:
+            what = ", ".join(f"{switch_fields[f]} (in {w})" for f, w in sorted(written.items()))
+            found[name] = f"its handler {row['handler']} saves {what} ({row['file']})"
+    return sorted(found.items())
 
 
 def cmd_audit(args) -> int:
@@ -532,9 +680,8 @@ def cmd_audit(args) -> int:
         for c in v:
             where[c["name"]].append(c)
     dupes = {n: l for n, l in where.items() if len(l) > 1}
-    real = {n: l for n, l in dupes.items() if n not in INTENTIONAL_DUPLICATES}
-    print(f"== duplicate command names ({len(real)} unexpected, "
-          f"{len(dupes) - len(real)} intentional) ==")
+    real = dupes
+    print(f"== duplicate command names ({len(real)}) ==")
     for n, l in sorted(real.items()):
         problems += 1
         print(f"  {n}")
@@ -543,6 +690,31 @@ def cmd_audit(args) -> int:
                   f"super={c['superadmin']}")
         print("      first registered wins; the other slot is dead")
     if not real:
+        print("  (none)")
+
+    # -- one handler under two names (alias rows) --------------------------
+    by_handler = collections.defaultdict(list)
+    for v in by_array.values():
+        for c in v:
+            if c["handler"] and c["handler"] not in SHARED_STUB_HANDLERS:
+                by_handler[c["handler"]].append(c)
+    aliased = {h: l for h, l in by_handler.items()
+               if len({c["name"].lower() for c in l}) > 1}
+    print(f"\n== one handler registered under two names ({len(aliased)}) ==")
+    for h, l in sorted(aliased.items()):
+        problems += 1
+        print(f"  {h}: " + ", ".join(f"{c['name']} ({c['file']})" for c in l))
+        print("      one name per command (CONTRIBUTING.md, \"Command names\")")
+    if not aliased:
+        print("  (none)")
+
+    # -- removed names registered again ------------------------------------
+    back = sorted(n for n in names if n in RETIRED_NAMES)
+    print(f"\n== removed command names registered again ({len(back)}) ==")
+    for n in back:
+        problems += 1
+        print(f"  {n}  (removed; the command is {RETIRED_NAMES[n]})")
+    if not back:
         print("  (none)")
 
     # -- array/module wiring ----------------------------------------------
@@ -615,6 +787,24 @@ def cmd_audit(args) -> int:
         print(f'  cmdKey "{k}" <- {bad[k]}')
     if not bad:
         print(f"  (none — all {checked} cmdKey bindings resolve)")
+
+    # -- persistent autostart/enabled switches are admin-only ---------------
+    print(f"\n== non-admin commands that save an *autostart/*enabled setting ==")
+    open_switches = persistent_switch_findings(by_array)
+    for name, why in open_switches:
+        if name in OPEN_PERSISTENT_SWITCHES:
+            print(f"  {name}  (left open: {OPEN_PERSISTENT_SWITCHES[name]})")
+            continue
+        problems += 1
+        print(f"  {name}  {why}; make the row admin-only (CONTRIBUTING.md, \"Command names\")")
+    for name in sorted(set(OPEN_PERSISTENT_SWITCHES) - {n for n, _ in open_switches}):
+        problems += 1
+        print(f"  {name}  is listed in OPEN_PERSISTENT_SWITCHES but no longer saves a switch "
+              f"as a non-admin; remove the entry")
+    if not open_switches:
+        print("  (none)")
+    elif all(n in OPEN_PERSISTENT_SWITCHES for n, _ in open_switches):
+        print("  (none outside the open owner questions above)")
 
     print(f"\n{'PROBLEMS: %d' % problems if problems else 'clean'}")
     return 1 if problems else 0

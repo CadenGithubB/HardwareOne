@@ -4256,7 +4256,7 @@ const char* cmd_oled_enabled(const String& argsInput) {
         broadcastOutput("OLED display started");
       } else {
         // The setting was stored above and stays on; the reply says so.
-        return "Error: Failed to initialize OLED display. Check wiring, then run oledstart. "
+        return "Error: Failed to initialize OLED display. Check wiring, then run openoled. "
                "The setting is stored as on.";
       }
     } else {
@@ -4583,7 +4583,7 @@ const char* cmd_oledmode(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
-    return "Error: OLED display not running. Use 'oledstart' first.";
+    return "Error: OLED display not running. Use 'openoled' first.";
   }
 
   String mode = argsInput;
@@ -4639,7 +4639,7 @@ const char* cmd_oledtext(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
-    return "Error: OLED display not running. Use 'oledstart' first.";
+    return "Error: OLED display not running. Use 'openoled' first.";
   }
 
   String text = argsInput;
@@ -4680,7 +4680,7 @@ const char* cmd_oledclear(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
-    return "Error: OLED display not running. Use 'oledstart' first.";
+    return "Error: OLED display not running. Use 'openoled' first.";
   }
 
   // The owner blanks and pushes the framebuffer; nothing marks the page dirty,
@@ -4798,7 +4798,7 @@ const char* cmd_oledanim(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   if (!oledConnected) {
-    return "Error: OLED display not running. Use 'oledstart' first.";
+    return "Error: OLED display not running. Use 'openoled' first.";
   }
 
   String arg = argsInput;
@@ -5165,7 +5165,7 @@ bool earlyOledInit() {
       oledConnected = false;
       gOledRunning = false;
       broadcastOutput("[OLED] Display not started: oledautostart is off. "
-                      "Run 'oledstart' for this session, or 'oledautostart 1' and reboot.");
+                      "Run 'openoled' for this session, or 'oledautostart 1' and reboot.");
       return false;
     }
   }
@@ -6649,9 +6649,6 @@ const CommandEntry oledCommands[] = {
 #endif
   { "openoled", "Start OLED display.", false, cmd_oledstart },
   { "closeoled", "Stop OLED display.", false, cmd_oledstop },
-  { "oledread", "Read OLED display status. (add 'json' for JSON output)", false, cmd_oledstatus },
-  { "oledstart", "Start OLED display.", false, cmd_oledstart },
-  { "oledstop", "Stop OLED display.", false, cmd_oledstop },
   { "oledmode", "Set display mode: <mode>", false, cmd_oledmode,
     "Usage: oledmode <menu|status|sensordata|sensorlist|thermal|camera|network|mesh|gps|text|logo|anim|imuactions|fmradio|files|logging|automations|espnow|memory|off>\n"
     "Example: oledmode memory\n"
@@ -6662,7 +6659,7 @@ const CommandEntry oledCommands[] = {
     "       oledanim fps <1-60>" },
   { "oledclear", "Clear OLED display.", false, cmd_oledclear },
   { "oledstatus", "Show OLED status. (add 'json' for JSON output)", false, cmd_oledstatus },
-  { "oledenabled", "Enable/disable OLED: <0|1>", false, cmd_oled_enabled, "Usage: oledenabled <0|1>" },
+  { "oledenabled", "Enable/disable OLED: <0|1>", true, cmd_oled_enabled, "Usage: oledenabled <0|1>" },
   { "oleddefaultmode", "OLED default mode: <logo|status|sensors|thermal|network|mesh|off>", false, cmd_oled_defaultmode, "Usage: oleddefaultmode <logo|status|sensors|thermal|network|mesh|off>" },
   { "oledbootduration", "Boot animation duration (ms): <500-10000>", false, cmd_oled_bootduration, "Usage: oledbootduration <500..10000>" },
   { "oledupdateinterval", "Display update interval (ms): <10-1000>", false, cmd_oled_updateinterval, "Usage: oledupdateinterval <10..1000>" },
@@ -7017,11 +7014,11 @@ void oledResumeFromSleep() {
     // The UI gives the panel up here, so the HAL drops its pending resume with
     // it: otherwise the next idle cycle would skip the rail cut and a later
     // wake would light a screen nothing renders to. The canvas and the
-    // post-power-cycle init flag stay for oledstart.
+    // post-power-cycle init flag stay for openoled.
     displayStop();
     oledConnected = false;
     gOledRunning = false;
-    ERROR_SYSTEMF("[OLED] Display could not resume; use oledstart to retry");
+    ERROR_SYSTEMF("[OLED] Display could not resume; use openoled to retry");
     return;
   }
   applyOledRotation();

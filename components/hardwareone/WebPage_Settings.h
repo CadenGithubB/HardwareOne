@@ -1793,7 +1793,6 @@ function saveNotifPolicy() {
     debugstoragesettings:"Logs settings-file load and save cycles.",
     debugstoragemigration:"Logs settings-schema migrations applied during load.",
     // esp-now
-    debugespnow:"Alias of debugespnowcore — ESP-NOW core messages only.",
     debugespnowstream:"Logs streaming-protocol frames (data, ack, resume).",
     debugespnowcore:"Core driver events: peer add/remove, send status, TX callbacks.",
     debugespnowrouter:"Logs the command router that decides whether an RPC runs locally or forwards to a bonded peer.",

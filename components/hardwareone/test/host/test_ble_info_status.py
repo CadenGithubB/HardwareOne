@@ -13,7 +13,7 @@ client host, or phone-client mode where the pipe's console row is a connected
 app) blestream and bleevent give the phone-link reason before anything else. --component points the suite at another copy of the
 BLE sources (BLE_Server.cpp/.h, WebPage_Bluetooth.cpp/.h).
 
-Also runs the production `blestatus`/`bleread` command against the same table:
+Also runs the production `blestatus` command against the same table:
 both forms read the guarded snapshot `bleinfo json` uses, so the JSON views
 list the same client set (connId, authed, user) and a busy lifecycle guard
 gives an explicit unavailable reply. Both start with the role, app console and
@@ -169,7 +169,7 @@ def generated(component: Path, baseline: bool) -> str:
     if "static const char* bleStateTextLocked(" in owner:
         definitions.append(extract_block(owner, "static const char* bleStateTextLocked("))
     definitions.append(extract_block(owner, "const char* getBleStateString("))
-    # blestatus/bleread and buildBleInfoJson render one guarded snapshot.
+    # blestatus and buildBleInfoJson render one guarded snapshot.
     if "struct BleStatusSnapshot" in owner:
         definitions += [extract_block(owner, "struct BleStatusSnapshot") + ";",
                         extract_block(owner, "static bool bleCaptureStatusSnapshot(")]

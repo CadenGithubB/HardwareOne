@@ -261,23 +261,47 @@ the phone app send it as text.
 - A command name is lower-case letters and digits, without a capital letter,
   hyphen or underscore: `mqtthost`, `httpautostart`, `validateconditions`.
 - A family of sub-commands puts one space between its words, and each word has
-  the same form: `phone pair new`, `ring panel on`, `cm5 power halt`. A new
+  the same form: `phone pair new`, `ring panel feed`, `cm5 power halt`. A new
   single command does not use a space.
 - The `cmdKey` of a setting row is the name of its set command and has the same
   form. The JSON key of the row keeps its own spelling (`mqttHost`); saved
   settings depend on it.
 - Lookup ignores case, so `mqttHost broker.local` from an older script still runs
   `mqtthost`. Help, usage text and documents show the lower-case name.
-- A name that was public in another form stays as an alias row for one release.
-  The row has the same handler and the help text `Alias of <name>.`. The
-  aliases today are `c6_console`, `g2ai-noask`, `g2ai-direct` and
-  `validate-conditions`. A table that matches on the command text (the masking
-  rules in `System_Utils.cpp`) lists both names while the alias exists.
+- One name per command. There are no alias rows: no second row with the same
+  handler, no shorthand row that does what another row's argument does, and no
+  handler that only forwards to another command. Argument synonyms (`on`/`1`,
+  `confirm`/`yes`) are not command names and are fine. A renamed command loses
+  its old name in the same change; the old name goes into `REMOVED_NAMES` of
+  the host test `command_name_form` and into `RETIRED_NAMES` of
+  `tools/command_registry.py`, so it cannot come back and no code string still
+  sends it. Rows that match on the command text to mask secrets in the audit
+  log (`System_Utils.cpp`, `System_Automation.cpp`) keep a removed name: a stale
+  typed or saved line still reaches the log as an unknown command. Two
+  forwarding forms remain until the owner decides on them: `fmradiounmute`
+  (forwards to `fmradiomute off`) and the `srtuning <gain|agc|vad|swgain|filters>
+  <value>` sub-form (the same as the one-word setters).
+- Which name stays: `open<x>` and `close<x>` for a lifecycle, `<x>status` for a
+  status, the form without a hyphen or underscore, and the full sub-command form
+  (`automation add`, `ring panel feed on`). A `<sensor>read` that returns the
+  sensor's data is its own command, not an alias of `<sensor>status`.
+- A command that saves an `*autostart` or `*enabled` setting is admin-only
+  (`requiresAdmin` true), also when it is a sub-command such as
+  `sensorlog autostart`: such a sub-command gets its own admin row, and the
+  open parent row's handler must not write the setting. The dispatcher picks
+  the longest row name that the typed line matches byte for byte, so a line
+  with two spaces, a tab or a quoted word (`sensorlog  autostart on`) reaches
+  the parent row; the parent answers such a line with an error that names the
+  admin row. `tools/command_registry.py audit` fails on a non-admin command
+  that is the `cmdKey` of such a setting row, whose name ends in `autostart` or
+  `enabled`, or whose handler (or a function it calls) writes such a setting's
+  `gSettings` field. Its `OPEN_PERSISTENT_SWITCHES` lists the open owner
+  questions (`healthlogging`, `gpslog`, `batterylog`).
 - The host test `command_name_form` reads every command table and every
   setting row and fails on a name of another form; it prints the file, the line
-  and the name it expects. Its tables hold the aliases and the one name that
-  keeps another form (`cm5 power sleep_for`, the action word of the CM5 host
-  protocol).
+  and the name it expects. It also fails when a removed name is a row again.
+  Its table of kept forms holds the one name that keeps another form
+  (`cm5 power sleep_for`, the action word of the CM5 host protocol).
 - After a change to a command table run `python3 tools/command_registry.py
   reference`; `docs/COMMAND_REFERENCE.md` is generated from the tables.
 

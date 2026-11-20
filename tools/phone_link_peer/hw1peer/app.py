@@ -123,6 +123,7 @@ _COMMAND_RULES: Final[tuple[tuple[tuple[str, ...], int, bool], ...]] = (
     (("dictate", "result"), 3, True),
     (("dictate", "fail"), 3, True),
     (("automation", "add"), 3, True),
+    # automationadd is a removed command name; a stale line is masked all the same.
     (("automationadd",), 2, True),
 )
 

@@ -529,7 +529,7 @@ static void caseSetPattern() {
 }
 
 static void casePlainRequest() {
-  // oledenabled and oledstart reach requestOledMode() on cmd_exec.
+  // oledenabled and openoled reach requestOledMode() on cmd_exec.
   resetCase(OLED_MENU);
   onExec();
   requestOledMode(OLED_SYSTEM_STATUS, "cmd.oledenabled.forceDefault", false);

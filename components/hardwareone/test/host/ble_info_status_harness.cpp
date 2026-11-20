@@ -674,7 +674,7 @@ static void consoleViewChecks() {
   sBleAdvertising = false; populate();
 }
 
-// blestatus / bleread render the guarded snapshot bleinfo json uses: the same
+// blestatus renders the guarded snapshot bleinfo json uses: the same
 // client set and identity facts, read under the lifecycle guard. Non-aborting:
 // every failed expectation is listed, then the run fails.
 static unsigned statusFailures = 0;
@@ -1206,7 +1206,7 @@ static void blestatusChecks() {
   millisGuardRequired = true; rejectLock = false; mutateOnUnlock = false;
   sBleLifecycleMutex = &lifecycleMutex;
   populate();
-  check(statusFailures == 0, "blestatus/bleread checks failed (listed above)");
+  check(statusFailures == 0, "blestatus checks failed (listed above)");
 }
 
 static void ownerChecks() {

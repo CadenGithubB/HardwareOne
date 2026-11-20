@@ -176,7 +176,7 @@ preserving the filesystem. `qtpy-final-flash.log` and `xiao-final-flash.log` ide
 flashes; the post-flash boot logs match the final ELF hashes recorded in
 `final-build-artifacts.json`. The older 3,443,792-byte QT Py flash precedes the
 OLED route correction. On the corrected image, `oledmode logging` succeeds
-and `oledread json` reports the connected SSD1306 in Logging mode. Visual
+and `oledstatus json` reports the connected SSD1306 in Logging mode. Visual
 confirmation was still pending at that stage; the second pass is recorded below.
 
 The first-pass `qtpy-espnow` profile has no enabled physical input driver.

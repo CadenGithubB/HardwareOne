@@ -840,7 +840,7 @@ const CommandEntry fmRadioCommands[] = {
   { "fmradiounmute", "Unmute audio", false, cmd_fmradio_unmute },
   
   // Auto-start
-  { "fmradioautostart", "Enable/disable FM Radio auto-start after boot [on|off]", false, cmd_fmradioautostart, "Usage: fmradioautostart [on|off]" },
+  { "fmradioautostart", "Enable/disable FM Radio auto-start after boot [on|off]", true, cmd_fmradioautostart, "Usage: fmradioautostart [on|off]" },
   { "fmradiobus",  "Route RDA5807 FM radio to bus: <0|1> (reboot required)", true, cmd_fmradiobus, "Usage: fmRadioBus <0|1>" },
 };
 

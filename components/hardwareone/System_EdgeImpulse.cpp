@@ -2158,7 +2158,7 @@ const char* cmd_ei_track_clear(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry edgeImpulseCommands[] = {
   { "ei", "List the Edge Impulse commands.", false, cmd_ei, "Usage: ei" },
-  { "eienable", "Enable/disable Edge Impulse inference.", false, cmd_ei_enable, "Usage: eienable <0|1>" },
+  { "eienable", "Enable/disable Edge Impulse inference.", true, cmd_ei_enable, "Usage: eienable <0|1>" },
   { "eidetect", "Run single object detection inference.", false, cmd_ei_detect, "Usage: eidetect" },
   { "eifile", "Run inference on stored JPEG image.", false, cmd_ei_file, "Usage: eifile \"<path>\"" },
   { "eicontinuous", "Start/stop continuous inference mode.", false, cmd_ei_continuous, "Usage: eicontinuous <0|1>" },

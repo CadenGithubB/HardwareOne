@@ -3645,7 +3645,7 @@ static const char* cmd_closeble(const String& /*argsInput*/) {
 }
 
 // One guarded copy of the live BLE status. buildBleInfoJson (bleinfo json and
-// the web status) and blestatus/bleread (text and json) all render from it, so
+// the web status) and blestatus (text and json) all render from it, so
 // every view reports the same client set with the same identity facts.
 struct BleStatusSnapshot {
   struct Client {
@@ -4584,7 +4584,6 @@ const CommandEntry bluetoothCommands[] = {
   { "closeble",     "Bluetooth off: close the glasses, ring, phone and the app console, then stop the host (bleenabled 0 also persists it).", true, cmd_closeble },
   { "openconsole",  "Start the app console server for a direct app connection (closes the glasses, ring and phone; saved boot role = server).", true, cmd_openconsole },
   { "closeconsole", "Stop the app console server (saved boot role back to client; 'openble' brings the client stack back).", true, cmd_closeconsole },
-  { "bleread",      "Read the Bluetooth role, app console and relay pipe. (add 'json' for JSON output)", false, cmd_blestatus },
   { "blestatus",    "Show the Bluetooth role, app console and relay pipe. (add 'json' for JSON output)", false, cmd_blestatus },
   { "bleinfo",      "Show BLE configuration and settings. (add 'json' for JSON output)",      false, cmd_bleinfo },
   { "bletxpower",   "Get/set BLE TX power [0-7].",               false, cmd_bletxpower, "Usage: bletxpower [0..7]" },

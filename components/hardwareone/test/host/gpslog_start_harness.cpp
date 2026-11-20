@@ -97,11 +97,19 @@ const char* cmd_sensorlog(const String& input) {
     }
     return borrowed(intervalReply);
   }
+  // The baseline (older) gpslog still sends the autostart through this row.
   if (input == "autostart on") {
     if (succeeded(autostartReply)) gSettings.sensorLogAutoStart = true;
     return borrowed(autostartReply);
   }
   std::abort();
+}
+// Today's gpslog saves the logger autostart through the admin row's handler.
+const char* cmd_sensorlog_autostart(const String& input) {
+  if (input != "on") std::abort();
+  actions.emplace_back("autostart on");
+  if (succeeded(autostartReply)) gSettings.sensorLogAutoStart = true;
+  return borrowed(autostartReply);
 }
 const char* sensorLogStartConfiguredSession() {
   ++configuredStarts;

@@ -956,7 +956,7 @@ const CommandEntry rtcCommands[] = {
   { "rtcsync",  "Sync time: [to|from]",                        true,  cmd_rtcsync,  "Usage: rtcsync [to|from] (to=RTC->system, from=system->RTC)" },
   
   // Auto-start
-  { "rtcautostart", "Enable/disable RTC auto-start after boot [on|off]", false, cmd_rtcautostart, "Usage: rtcautostart [on|off]" },
+  { "rtcautostart", "Enable/disable RTC auto-start after boot [on|off]", true, cmd_rtcautostart, "Usage: rtcautostart [on|off]" },
   { "rtcbus",      "Route DS3231 RTC to bus: <0|1> (reboot required)",   true, cmd_rtcbus,      "Usage: rtcBus <0|1>" },
 };
 const size_t rtcCommandsCount = sizeof(rtcCommands) / sizeof(rtcCommands[0]);
