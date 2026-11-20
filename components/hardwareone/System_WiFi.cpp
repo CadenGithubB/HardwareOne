@@ -275,15 +275,25 @@ struct CoexConnectScope {
 #else
 namespace {
 // Records compiled out: the scan and connect sites keep their scopes. The
-// connect scope still counts attempts in flight, which wifiRehuntPoll reads.
+// connect scope still counts attempts in flight, which wifiRehuntPoll reads,
+// and the scan scope still marks a scan on air for the ESP-NOW channel follow
+// (wifiStaBusyForChannelHunt).
 std::atomic<uint8_t> sCoexConnectDepth{0};
-struct CoexScanOnAir { CoexScanOnAir() {} };
+std::atomic<bool> sCoexScanOnAir{false};
+struct CoexScanOnAir {
+  CoexScanOnAir() { sCoexScanOnAir.store(true, std::memory_order_release); }
+  ~CoexScanOnAir() { sCoexScanOnAir.store(false, std::memory_order_release); }
+};
 struct CoexConnectScope {
   CoexConnectScope() { sCoexConnectDepth.fetch_add(1); }
   ~CoexConnectScope() { sCoexConnectDepth.fetch_sub(1); }
 };
 }  // namespace
 #endif
+
+// Last STA disconnect (millis() | 1, 0 = none), stamped in every Wi-Fi build by
+// wifiEventLogger: the driver's auto-reconnect retries for a while after it.
+static std::atomic<uint32_t> sStaLastDiscMs{0};
 
 namespace {
 
@@ -2999,6 +3009,7 @@ static void wifiEventLogger(arduino_event_id_t event, arduino_event_info_t info)
     portEXIT_CRITICAL(&sWifiDiscMux);
   } else if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
     espnowNoteWifiChannelMayHaveChanged();  // left the AP — re-pin the preferred channel offline
+    sStaLastDiscMs.store(millis() | 1u, std::memory_order_release);
     if (sWasConnected) {
       sWasConnected = false;
       uint8_t len = info.wifi_sta_disconnected.ssid_len;
@@ -3199,8 +3210,11 @@ void wifiRehuntPoll() {
              wifiInitialized.load() && WiFi.getAutoReconnect();
   // Not while a boot connect or a commanded connect has the radio, and not
   // while the P4's radio companion is away (its restore reconnects by itself).
+  // A mesh worker talking to its master keeps the radio on the master's
+  // channel: the hunt would pull it away (owner rule 2026-11-19). `openwifi`
+  // is a command and still scans.
   in.held = wifiBackgroundConnectActive() || sCoexConnectDepth.load() != 0 ||
-            !radioCompanionOnline();
+            !radioCompanionOnline() || espnowWorkerHoldsWifiRetry();
   in.savedCount = wifiNetworkCount();
 
   portENTER_CRITICAL(&sRehuntMux);
@@ -3315,6 +3329,28 @@ void wifiBackgroundConnectReserve(bool reserve) {
 
 bool wifiBackgroundConnectActive() {
   return sBackgroundConnectActive.load(std::memory_order_acquire);
+}
+
+// ESP-NOW channel follow: true while esp_wifi_set_channel must not run (STA
+// associated, connecting or scanning, or the driver's auto-reconnect retrying
+// after a drop). Every Wi-Fi build: the coex tag alone reads Unknown without
+// the BLE records, and Unknown is "no information", never idle. Callers ask
+// when WiFi.status() is not WL_CONNECTED, which Arduino sets only on GOT_IP:
+// associated without an IP (DHCP running, or the lease lost) is still the
+// AP's channel, so it counts as busy (WiFi.STA.connected() is the netif's
+// association bit, a local read, no RPC on the P4).
+bool wifiStaBusyForChannelHunt() {
+  if (wifiBackgroundConnectActive() || sCoexConnectDepth.load() != 0 ||
+      sCoexScanOnAir.load(std::memory_order_acquire) || WiFi.STA.connected()) return true;
+#if ENABLE_BLE_COEX_RECORDS
+  const WifiCoex s = wifiCoexTag().state;
+  if (s != WifiCoex::Unknown)
+    return s == WifiCoex::Connecting || s == WifiCoex::Hunting || s == WifiCoex::Scanning ||
+           s == WifiCoex::Associated;
+#endif
+  const uint32_t disc = sStaLastDiscMs.load(std::memory_order_acquire);
+  return wifiInitialized.load() && WiFi.getAutoReconnect() && disc &&
+         uint32_t(millis() - disc) < kWifiCoexHuntWindowMs;
 }
 
 bool wifiBackgroundConnectSuperseded() {

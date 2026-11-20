@@ -602,6 +602,18 @@ ESP-NOW V3 is Hardware One's inter-device wireless protocol. Devices pair with a
 3. One device initiates - the other accepts.
 4. Once paired, devices appear in each other's peer list.
 
+### Radio channel
+Devices only hear each other on the same radio channel. `espnowchannel` shows the preference, the radio's actual channel, the channel it should be on and a check; `espnowchannel <1-13>` pins a channel for when the device is not joined to Wi-Fi, `espnowchannel auto` (the default) lets the device choose, and `espnowchannel resync` puts the radio back on the right channel now.
+
+In `auto`:
+- **Joined to Wi-Fi**, the access point decides the channel (a radio cannot be on two at once).
+- **A mesh master** (or a backup acting as master) not joined to Wi-Fi uses its last Wi-Fi channel, or channel 1.
+- **A mesh worker** (with a master named by `espnowmasterfingerprint`, or by `espnowmeshmaster` when no fingerprint is named, and paired) follows its master's channel. Every heartbeat states its sender's channel; the worker remembers its master's last channel across reboots (setting `masterChannel`, read-only) and starts on it.
+- **Hunting:** a worker not joined to Wi-Fi that hears nothing from its master for 30 s looks for it: the saved channel first, then channels 1-11, sending one probe per channel and staying on the channel the master answers on. A failed hunt is repeated after 30 s, 60 s, 120 s, then every 5 minutes; between hunts the worker waits on the saved channel. There is no hunt while the worker is joined to Wi-Fi (or connecting to it), while a file transfer, session handshake, key exchange or pairing runs (at most 60 s), on a pinned channel, or on a master. Channels 12 and 13 are not used without Wi-Fi.
+- **Wi-Fi wins:** a worker joined to Wi-Fi on another channel than its master pauses the mesh; `espnowstatus` says so ("master on 6, me on 11 (joined to <ssid>)") and the worker follows its master again by itself when the Wi-Fi link ends. While a worker has a live, encrypted session with its master, the automatic Wi-Fi retry waits; `openwifi` still scans.
+
+`espnowstatus` shows a worker's follow state on its `Master channel:` line (`espnowstatus json`: `masterChannel`, `follow`, `masterSilentMs`, `sweepFailures`, `nextSweepMs`). A master on older firmware does not state its channel; a worker still finds it (by its acknowledgement and its next heartbeat), only more slowly, and with several candidates it picks the strongest signal. For a fleet that mixes firmware, pinning the same channel on every device stays the simplest choice.
+
 ### Multi-hop (reaching devices out of radio range)
 Devices relay for each other, so the mesh reaches further than any single radio.
 If A can hear B and B can hear C, then A and C can talk even though they cannot

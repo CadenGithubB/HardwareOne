@@ -220,6 +220,17 @@ set_target_properties(espnow_channel_core_tests PROPERTIES
 target_include_directories(espnow_channel_core_tests PRIVATE ../..)
 target_compile_options(espnow_channel_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# Workers follow their master's channel (System_ESPNow_ChannelFollowCore.h, the
+# production dependency-free header): heartbeat byte 3, the sweep order and
+# back-off, what may move the radio, leaks and older-master candidates, Wi-Fi
+# wins, the pin, the busy and Wi-Fi holds, aborts and settle, the rehunt hold
+# and millis wraparound.
+add_executable(espnow_channel_follow_tests test_espnow_channel_follow.cpp)
+set_target_properties(espnow_channel_follow_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_channel_follow_tests PRIVATE ../..)
+target_compile_options(espnow_channel_follow_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # Bond agreement rules (System_ESPNow_BondAgreeCore.h, the production
 # dependency-free header): modelled devices exchanging BOND_REQUEST and
 # BOND_NOTICE over a channel that can lose frames. Mutual and one-sided bonds,
@@ -1589,7 +1600,9 @@ add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
 add_test(NAME device_name_core_tests COMMAND device_name_core_tests)
 add_test(NAME device_name_migration_tests COMMAND device_name_migration_tests)
 add_test(NAME espnow_channel_core_tests COMMAND espnow_channel_core_tests
-         ${CMAKE_CURRENT_LIST_DIR}/../../System_ESPNow.cpp)
+         ${CMAKE_CURRENT_LIST_DIR}/../../System_ESPNow.cpp
+         ${CMAKE_CURRENT_LIST_DIR}/../../System_WiFi.cpp)
+add_test(NAME espnow_channel_follow_tests COMMAND espnow_channel_follow_tests)
 add_test(NAME espnow_bond_agree_core_tests COMMAND espnow_bond_agree_core_tests)
 add_test(NAME espnow_group_core_tests COMMAND espnow_group_core_tests)
 add_test(NAME espnow_history_core_tests COMMAND espnow_history_core_tests)

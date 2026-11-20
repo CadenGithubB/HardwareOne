@@ -536,18 +536,21 @@ static_assert(sizeof(V4PayloadPeerListHeader)
               "a full PEER_LIST must fit one broadcast-authed frame");
 
 // HEARTBEAT (30). Every sender builds it with v4FillHeartbeat (the app ping too).
+// chanInfo (System_ESPNow_ChannelFollowCore.h): bits 0-3 the sender's radio
+// channel (0 = not stated, older firmware), 0x10 probe (a hunting worker asks
+// its master to answer), 0x20 answer; 0xC0 sent 0, ignored.
 struct __attribute__((packed)) V4PayloadHeartbeat {
   uint8_t  role;          // 0
   uint8_t  peerCount;     // 1
   int8_t   rssi;          // 2
-  uint8_t  reserved;      // 3   sent 0, ignored
+  uint8_t  chanInfo;      // 3   channel + probe/answer bits (older firmware: 0, ignores it)
   uint32_t uptimeSec;     // 4
   uint32_t freeHeap;      // 8
   char     deviceName[32];  // 12  the sender's device name (System_DeviceName.h); NUL always present, rest 0
 };
 static_assert(sizeof(V4PayloadHeartbeat) == 44, "V4PayloadHeartbeat must be 44 bytes");
 static_assert(offsetof(V4PayloadHeartbeat, role) == 0 && offsetof(V4PayloadHeartbeat, peerCount) == 1 &&
-              offsetof(V4PayloadHeartbeat, rssi) == 2 && offsetof(V4PayloadHeartbeat, reserved) == 3 &&
+              offsetof(V4PayloadHeartbeat, rssi) == 2 && offsetof(V4PayloadHeartbeat, chanInfo) == 3 &&
               offsetof(V4PayloadHeartbeat, uptimeSec) == 4 && offsetof(V4PayloadHeartbeat, freeHeap) == 8 &&
               offsetof(V4PayloadHeartbeat, deviceName) == 12, "V4PayloadHeartbeat layout");
 static_assert(sizeof(V4PayloadHeartbeat::deviceName) == devicename::kFieldLen, "V4PayloadHeartbeat name field");

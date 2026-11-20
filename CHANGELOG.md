@@ -14,6 +14,14 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Added
+- Mesh workers follow their master's radio channel. Every heartbeat now states its sender's channel
+  (byte 3, which older firmware sends as 0 and ignores). A worker on `espnowchannel auto` uses the
+  channel its master last announced, remembered across reboots (setting `masterChannel`, read-only).
+  A worker not joined to Wi-Fi that hears nothing from its master for 30 s hunts for it: the saved
+  channel first, then 1-11, one probe per channel, locking on the master's answer; failed hunts
+  repeat after 30 s, 60 s, 120 s, then every 5 minutes. No hunt while joined to Wi-Fi (or associated
+  and waiting for an address), while a file transfer, handshake or pairing runs (at most 60 s), on a
+  pinned channel or on a master. Host-tested; not yet run on hardware.
 - File catch-up over ESP-NOW (back-capture packages 4 and 5; docs/BACKCAPTURE_FILES.md). A device
   built with `ENABLE_ESPNOW_SEND` (on in `configurations/p4-portable.json`) offers its logs to the
   masters named on it, by key: sensor captures, `events.log`, `battery.csv`, health files sealed at
@@ -910,6 +918,12 @@ everything user-visible since the v0.99.99.1 tag.
   counters (`blerecords`) are kept as before. Host-tested; not yet run on hardware.
 
 ### Changed
+- Wi-Fi wins over the mesh on a worker: joined to Wi-Fi on another channel than its master, the
+  worker pauses the mesh and `espnowstatus` says so (for example "master on 6, me on 11 (joined to
+  <ssid>)"); it resumes by itself when the Wi-Fi link ends. While a worker has a live, sealed session
+  with its master, the automatic Wi-Fi retry waits; `openwifi` still scans.
+- `espnowchannel auto` on a worker now means "the master's channel"; `espnowstatus` adds
+  `masterChannel`, `follow`, `masterSilentMs`, `sweepFailures` and `nextSweepMs`.
 - `phone status` shows the next try, the attempt count and what the last scan heard (` next=<s>s
   try=<k> heard=<n> phone=<n> path='<text>'`), and its JSON adds the optional `pathState`, `pathText`,
   `retryInS` and `attempt`; `blepeers` rows add `want= next= try= last=`. `llmgenerate json`,

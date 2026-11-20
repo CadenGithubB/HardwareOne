@@ -57,6 +57,7 @@
 #include "System_ESPNow_PairCore.h"  // discover-then-confirm request/answer state + retransmit
 #include "System_DeviceName.h"       // the device-name rule: setter, wire fields, pairing names
 #include "System_ESPNow_ChannelCore.h"  // espnowch::expected / check: the channel for the Wi-Fi state, the checker
+#include "System_ESPNow_ChannelFollowCore.h"  // espnowfollow::Follow: workers follow/hunt their master's channel
 #include "System_ESPNow_MeshIdCore.h" // the mesh id: pick from the key subkey, clash check
 #include "System_ESPNow_BondAgreeCore.h"  // BOND_REQUEST / BOND_NOTICE: what the partner said about the bond
 #include "System_ESPNow_GroupCore.h"  // room and tag membership: announced by the peer, accepted here
@@ -723,8 +724,10 @@ struct InboundRxItem {
   uint8_t dst[6];
   int len;
   int8_t rssi;
+  uint8_t channel;  // rx_ctrl->channel, 0 unknown (fills padding: the item stays 268 bytes)
   uint8_t data[250];
 };
+static_assert(sizeof(InboundRxItem) == 268, "the channel byte fills padding: the RX ring does not grow");
 // Slot count MUST come from this constant, never sizeof(ring)/sizeof(ring[0]):
 // the ring is a heap pointer, so that idiom silently evaluates to 0 and the RX
 // callback's `% slots` becomes a divide-by-zero inside the WiFi task.
@@ -1434,6 +1437,121 @@ static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool /*useEncryption
 // arduino_events stack). Also re-checked periodically as a cheap safety net.
 static std::atomic<bool> gEspNowChannelResyncPending{false};
 
+// ---------------------------------------------------------------------------
+// Mesh workers follow their master's channel (System_ESPNow_ChannelFollowCore.h,
+// owner design 2026-11-19). The core runs on espnow_task only: step 0 of
+// processMeshHeartbeats, the heartbeat handler, the post-gate dispatch hook and
+// the ACK branch all run there. Other tasks read gChFollowTarget, the Wi-Fi
+// hold atomic or the snapshot.
+//
+// All plain state in PSRAM (zero-filled; every default below is 0). Only the
+// atomics and the portMUX stay internal.
+EXT_RAM_BSS_ATTR static espnowfollow::Follow gChFollow;
+EXT_RAM_BSS_ATTR static uint8_t  gChFollowMasterMac[6];   // primary, resolved once per second
+EXT_RAM_BSS_ATTR static uint8_t  gChFollowBackupMac[6];   // named backup (rank 2), when resolved
+EXT_RAM_BSS_ATTR static uint8_t  gChFollowMasterRank;     // 0 none, 1 primary resolved
+EXT_RAM_BSS_ATTR static bool     gChFollowBackupResolved; // gChFollowBackupMac is valid
+EXT_RAM_BSS_ATTR static uint32_t gChFollowProbeMsgId;     // ACK match for the last probe (0 none)
+// The slow inputs (refreshed at most once a second while hunting), reused
+// between refreshes. Plain bytes, not an espnowfollow::Inputs: its non-zero
+// member defaults would be an initializer in a zero-filled section.
+struct ChFollowSlowInputs { uint8_t staChannel, maxChannel; bool sessionUp, busy; };
+EXT_RAM_BSS_ATTR static ChFollowSlowInputs gChFollowSlow;
+struct ChFollowSnapshot {
+  espnowfollow::Phase phase;
+  espnowfollow::Hold hold;
+  uint8_t masterCh, failures, sweepCh;
+  bool everHeard;
+  uint32_t silentMs, nextSweepInMs;
+};
+EXT_RAM_BSS_ATTR static ChFollowSnapshot gChFollowSnap;
+static portMUX_TYPE gChFollowSnapMux = portMUX_INITIALIZER_UNLOCKED;
+static std::atomic<bool>    gChFollowWifiHeld{false};
+static std::atomic<uint8_t> gChFollowTarget{0};   // follow channel for espnowComputeChannel (any task); 0 = no opinion
+
+// Worker only on a keyed mesh worker with its master resolved (a keyless mesh
+// has no trusted frames: E9); Master for MESH_ROLE_MASTER or a promoted backup;
+// None otherwise (mesh off, bond mode, a backup that is not promoted: Q1).
+static espnowfollow::Role espnowChFollowRole() {
+  if (!meshEnabled()) return espnowfollow::Role::None;
+#if ENABLE_BONDED_MODE
+  if (gSettings.bondModeEnabled) return espnowfollow::Role::None;  // bond pairs: later (Q6)
+#endif
+  if (gSettings.meshRole == MESH_ROLE_MASTER || gBackupPromoted) return espnowfollow::Role::Master;
+  if (gSettings.meshRole != MESH_ROLE_WORKER) return espnowfollow::Role::None;
+  if (!gEspNow->encryptionEnabled || gChFollowMasterRank == 0) return espnowfollow::Role::None;
+  return espnowfollow::Role::Worker;
+}
+
+// Which master a worker follows (Q3, default taken 2026-11-19): the paired
+// identity named by espnowmasterfingerprint (rank 1) and the one named by the
+// backup fingerprint (rank 2); only when no master fingerprint is named, the
+// espnowmeshmaster MAC if that MAC is paired. Settings and the peer table
+// only, no radio.
+static void espnowChFollowResolveMaster() {
+  uint8_t primary[6] = {}, backup[6] = {};
+  bool havePrimary = false, haveBackup = false;
+  for (uint8_t i = 0, n = peerIdentitySlotCount(); i < n; i++) {
+    const PeerIdentity* id = peerIdentityAt(i);
+    if (!id) continue;
+    const int kind = espnowNamedMasterKind(id->mac);
+    if (kind == 1 && !havePrimary) { memcpy(primary, id->mac, 6); havePrimary = true; }
+    else if (kind == 2 && !haveBackup) { memcpy(backup, id->mac, 6); haveBackup = true; }
+  }
+  if (!havePrimary && gSettings.espnowMasterFingerprint.length() != 64 &&
+      gSettings.meshMasterMac.length() > 0) {
+    uint8_t mac[6] = {};
+    if (parseMacAddress(gSettings.meshMasterMac, mac) && peerIdentityFindByMac(mac)) {
+      memcpy(primary, mac, 6);
+      havePrimary = true;
+    }
+  }
+  if (havePrimary && haveBackup && memcmp(primary, backup, 6) == 0) haveBackup = false;
+  memcpy(gChFollowMasterMac, primary, 6);
+  gChFollowMasterRank = havePrimary ? 1 : 0;
+  memcpy(gChFollowBackupMac, backup, 6);
+  gChFollowBackupResolved = haveBackup;
+}
+
+// 1 when `src` is the followed master, 2 when it is its named backup.
+static bool espnowChFollowFromMaster(const uint8_t* src, uint8_t* rankOut) {
+  if (!src || gChFollowMasterRank == 0) return false;
+  if (memcmp(src, gChFollowMasterMac, 6) == 0) { *rankOut = 1; return true; }
+  if (gChFollowBackupResolved && memcmp(src, gChFollowBackupMac, 6) == 0) { *rankOut = 2; return true; }
+  return false;
+}
+
+static bool espnowChFollowHunting() {
+  const espnowfollow::Phase p = gChFollow.phase();
+  return p == espnowfollow::Phase::Sweeping || p == espnowfollow::Phase::Confirming;
+}
+
+// The snapshot for commands (any task).
+static ChFollowSnapshot espnowChFollowSnapshot() {
+  portENTER_CRITICAL(&gChFollowSnapMux);
+  const ChFollowSnapshot snap = gChFollowSnap;
+  portEXIT_CRITICAL(&gChFollowSnapMux);
+  return snap;
+}
+
+// Only while ESP-NOW runs: a stopped espnow_task never publishes false again.
+bool espnowWorkerHoldsWifiRetry() {
+  return gEspNow && gEspNow->initialized && gChFollowWifiHeld.load(std::memory_order_acquire);
+}
+
+// ESP-NOW stopped (deinitEspNow, after espnow_task joined): nothing the core
+// published may outlive it (the Wi-Fi rehunt hold, the follow target for the
+// espnowchannel checker, the status snapshot). initEspNow starts it afresh.
+static void espnowChFollowStopped() {
+  gChFollowWifiHeld.store(false, std::memory_order_release);
+  gChFollowTarget.store(0, std::memory_order_release);
+  gChFollowProbeMsgId = 0;
+  const ChFollowSnapshot off{};  // phase Off, hold None
+  portENTER_CRITICAL(&gChFollowSnapMux);
+  gChFollowSnap = off;
+  portEXIT_CRITICAL(&gChFollowSnapMux);
+}
+
 // Decide the effective ESP-NOW channel for the current WiFi state.
 static uint8_t espnowComputeChannel() {
   wifi_config_t conf;
@@ -1446,8 +1564,17 @@ static uint8_t espnowComputeChannel() {
   }
 
   // Follow the AP while joined (a radio can't be on two channels), else the
-  // user-forced field channel, else the last-known one, else 1.
-  return espnowch::expected(WiFi.status() == WL_CONNECTED, staCh, gSettings.espnowChannel);
+  // user-forced field channel, else (a worker in auto) its master's channel,
+  // else the last-known one, else 1.
+  const bool joined = WiFi.status() == WL_CONNECTED;
+  if (!joined && gSettings.espnowChannel == 0 && !wifiStaBusyForChannelHunt()) {
+    // The follow core's home channel (never a sweep dwell); any task may read it.
+    // Not while Wi-Fi is associated without an IP, connecting or scanning:
+    // the AP's channel stands, as before (Wi-Fi wins).
+    const uint8_t follow = gChFollowTarget.load(std::memory_order_acquire);
+    if (espnowch::validChannel(follow)) return follow;
+  }
+  return espnowch::expected(joined, staCh, gSettings.espnowChannel);
 }
 
 // Apply `ch` as gEspNow->channel, and — only when the STA is NOT associated —
@@ -1508,6 +1635,25 @@ static bool espnowApplyChannel(uint8_t ch, uint32_t lockTimeoutMs = 0) {
 
   gEspNow->channel = ch;
   return true;
+}
+
+// One sweep dwell: set_channel and nothing else (one Hosted RPC on the P4,
+// ~15 ms, instead of the four of espnowApplyChannel). Never blocks behind a
+// scan (zero-time claim). The parking AP keeps its channel until the core's
+// Out.settle asks step 0 for the full apply when the hunt ends.
+enum class ChFollowSwitch : uint8_t { Ok, Refused, Busy, Stalled };
+static constexpr uint32_t kChFollowStallMs = 500;  // a switch or probe send slower than this: the C6 is stalling
+static constexpr uint32_t kChFollowStallBackoffMs = 5000;  // after a stall: no full apply for this long
+static ChFollowSwitch espnowApplySweepChannel(uint8_t ch) {
+  if (!gEspNow || !espnowch::validChannel(ch) || WiFi.status() == WL_CONNECTED || WiFi.STA.connected())
+    return ChFollowSwitch::Busy;  // joined, or associated without an IP yet: the AP owns the channel
+  WifiRadioMutationGuard radioGuard(0);
+  if (!radioGuard.acquired()) return ChFollowSwitch::Busy;    // a scan or radio change owns the radio: a hold, not a refusal
+  const esp_err_t err = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+  if (err == ESP_ERR_TIMEOUT) return ChFollowSwitch::Stalled; // Hosted RPC timeout (code to confirm on the bench, B3)
+  if (err != ESP_OK) return ChFollowSwitch::Refused;          // e.g. a channel the country does not allow
+  gEspNow->channel = ch;                                      // heartbeats/probes state the dwell
+  return ChFollowSwitch::Ok;
 }
 
 // Called from the WiFi event handler (any association change) — snapshot only,
@@ -1662,6 +1808,11 @@ static void onEspNowDataReceived(const esp_now_recv_info* recv_info, const uint8
   // rx_ctrl, so this value flows to noteMeshPeerRxActivity's linkRssi as-is —
   // and -128 is its "no sample" sentinel, keeping an unknown out of the EWMA.
   it.rssi = recv_info->rx_ctrl ? recv_info->rx_ctrl->rssi : (int8_t)-128;
+  // The channel it arrived on. When the radio does not report one (the P4's
+  // Hosted bridge may leave it 0), the radio's channel NOW, not at drain time:
+  // a sweep may switch to the next dwell before the ring is drained.
+  it.channel = (recv_info->rx_ctrl && recv_info->rx_ctrl->channel)
+                   ? (uint8_t)recv_info->rx_ctrl->channel : (gEspNow ? gEspNow->channel : 0);
   if (it.len > 0) memcpy(it.data, incomingData, it.len);
   gEspNowRxHead = next;
 }
@@ -4505,7 +4656,74 @@ static void v4FillHeartbeat(V4PayloadHeartbeat& hb) {
   hb.rssi      = heartbeatStaRssi();
   hb.uptimeSec = SelfDevice::uptimeSeconds();
   hb.freeHeap  = (uint32_t)ESP.getFreeHeap();
+  // Byte 3: the sender's channel. gEspNow->channel is the verified applied
+  // channel (or a sweep dwell), never an RPC per heartbeat.
+  hb.chanInfo  = espnowfollow::packChanInfo(gEspNow ? gEspNow->channel : 0, false, false);
   devicename::putField(hb.deviceName, gSettings.espnowDeviceName.c_str());
+}
+
+// Master: answer a hunting worker's probe at once (channel follow):
+// one heartbeat back with the answer bit, no ACK_REQ, sealed when a session is
+// up (sendAead is safe from espnow_task), else group-signed. Rate limit: one
+// answer per peer per 100 ms (a 4-slot table) and 10 per second in all.
+struct ChFollowAnswerSlot { uint8_t mac[6]; uint32_t lastMs; };
+EXT_RAM_BSS_ATTR static ChFollowAnswerSlot gChFollowAnswers[4];
+EXT_RAM_BSS_ATTR static uint32_t gChFollowAnswerWindowMs;
+EXT_RAM_BSS_ATTR static uint8_t  gChFollowAnswerCount;
+static void espnowChFollowAnswerProbe(const uint8_t* dst) {
+  if (!gEspNow || !dst) return;
+  const uint32_t now = (uint32_t)millis();
+  if (now - gChFollowAnswerWindowMs >= 1000) {
+    gChFollowAnswerWindowMs = now;
+    gChFollowAnswerCount = 0;
+  }
+  if (gChFollowAnswerCount >= 10) return;
+  int slot = -1, oldest = 0;
+  uint32_t oldestAge = 0;
+  for (int i = 0; i < 4; i++) {
+    if (memcmp(gChFollowAnswers[i].mac, dst, 6) == 0) { slot = i; break; }
+    const uint32_t age = gChFollowAnswers[i].lastMs ? now - gChFollowAnswers[i].lastMs : UINT32_MAX;
+    if (age >= oldestAge) { oldestAge = age; oldest = i; }
+  }
+  if (slot >= 0 && gChFollowAnswers[slot].lastMs && now - gChFollowAnswers[slot].lastMs < 100) return;
+  if (slot < 0) slot = oldest;
+  memcpy(gChFollowAnswers[slot].mac, dst, 6);
+  gChFollowAnswers[slot].lastMs = now ? now : 1;
+  gChFollowAnswerCount++;
+  V4PayloadHeartbeat hb;
+  v4FillHeartbeat(hb);
+  hb.chanInfo = espnowfollow::packChanInfo(gEspNow->channel, /*probe=*/false, /*answer=*/true);
+  if (espnowSessionUp(dst)) {
+    espnowtx::sendAead(dst, ESPNOW_V4_TYPE_HEARTBEAT, 0, generateMessageId(),
+                       (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
+  } else {
+    v4_send_frame_ex(dst, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_BROADCAST_AUTH, generateMessageId(),
+                     (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1, /*allowRoute=*/false);
+  }
+}
+
+// Channel follow, from v4h_heartbeat (System_ESPNow_ChannelFollowCore.h).
+// Heartbeats are ttl 1 and never relayed, so the radio source is the sender;
+// senderProven = sealed, or group-signed with origin == source.
+static void espnowChFollowOnHeartbeat(const V4RxCtx& ctx, const V4PayloadHeartbeat& hb, bool senderProven) {
+  const uint8_t rxCh = (ctx.recv_info->rx_ctrl && ctx.recv_info->rx_ctrl->channel)
+                           ? (uint8_t)ctx.recv_info->rx_ctrl->channel : (gEspNow ? gEspNow->channel : 0);
+  // Master: answer a hunting worker's probe at once.
+  if (espnowfollow::isProbe(hb.chanInfo) && senderProven && peerIdentityFindByMac(ctx.recv_info->src_addr) &&
+      (gSettings.meshRole == MESH_ROLE_MASTER || gBackupPromoted)) {
+    espnowChFollowAnswerProbe(ctx.recv_info->src_addr);  // rate-limited, sealed when the session is up
+  }
+  // Worker: a trusted frame from the followed master.
+  uint8_t rank = 0;
+  if (senderProven && espnowChFollowFromMaster(ctx.recv_info->src_addr, &rank)) {
+    espnowfollow::Heard heard;
+    heard.rank = rank;
+    heard.sealed = ctx.isSessionEncrypted;
+    heard.rxChannel = rxCh;
+    heard.chanInfo = hb.chanInfo;
+    heard.rssi = ctx.recv_info->rx_ctrl ? (int8_t)ctx.recv_info->rx_ctrl->rssi : 0;  // heard.heartbeat stays true
+    gChFollow.heard((uint32_t)millis(), heard);
+  }
 }
 
 static void v4h_heartbeat(const V4RxCtx& ctx) {
@@ -4526,6 +4744,7 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
                          ctx.recv_info->rx_ctrl ? ctx.recv_info->rx_ctrl->rssi : (int8_t)-128,
                          senderProven);
   if (gEspNow) gEspNow->heartbeatsReceived++;
+  espnowChFollowOnHeartbeat(ctx, hb, senderProven);  // channel follow: probe answer, master liveness
 
   // Proactive session pre-warm. If this heartbeat is from a peer we've ALREADY
   // paired with (a long-term identity exists) and we don't yet have an ACTIVE
@@ -4543,7 +4762,11 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
   // tries, then a radio-silent cooldown + one actionable WARN). A fresh attempt
   // only counts when there is NO session AND none ESTABLISHING (a live handshake
   // is left to run); a session reaching ACTIVE clears the backoff.
-  {
+  //
+  // Not while the channel follow hunts: a handshake started on a 150-200 ms
+  // dwell cannot finish there, and an ESTABLISHING slot counts as busy, which
+  // would abort the sweep and push the next one a whole back-off gap away.
+  if (!espnowChFollowHunting()) {
     const PeerIdentity* pid = peerIdentityFindByMac(ctx.recv_info->src_addr);
     if (pid) {
       const uint8_t* pmac = ctx.recv_info->src_addr;
@@ -6961,6 +7184,34 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
 // Single-flag (not a counter) because nested relay delivery is refused.
 bool gEspNowInRelayDelivery = false;
 
+// Channel follow, from the ACK branch: the ACK of this worker's last probe to
+// its master. A plaintext ACK only parks the sweep on its dwell (Confirming);
+// a trusted frame must follow before the channel is locked.
+static void espnowChFollowNoteAck(const esp_now_recv_info* recv_info, uint32_t msgId) {
+  if (gEspNowInRelayDelivery) return;  // a probe is one radio hop: its ACK never arrives routed
+  if (!gChFollowProbeMsgId || msgId != gChFollowProbeMsgId || !gChFollowMasterRank ||
+      memcmp(recv_info->src_addr, gChFollowMasterMac, 6) != 0) return;
+  gChFollowProbeMsgId = 0;
+  gChFollow.probeAcked((uint32_t)millis(), recv_info->rx_ctrl ? (uint8_t)recv_info->rx_ctrl->channel : 0);
+}
+
+// Channel follow, from the dispatcher after every gate: any sealed frame from
+// the followed master (commands, sensor requests, time sync) is liveness, never
+// a lock (it may be an adjacent-channel leak). Heartbeats report in their
+// handler; relay-delivered frames did not come from the master's radio.
+static void espnowChFollowOnSealedFrame(const esp_now_recv_info* recv_info, uint8_t type) {
+  if (gEspNowInRelayDelivery || type == ESPNOW_V4_TYPE_HEARTBEAT) return;
+  uint8_t rank = 0;
+  if (!espnowChFollowFromMaster(recv_info->src_addr, &rank)) return;
+  espnowfollow::Heard hd;
+  hd.rank = rank;
+  hd.sealed = true;
+  hd.heartbeat = false;
+  hd.rxChannel = (recv_info->rx_ctrl && recv_info->rx_ctrl->channel)
+                     ? (uint8_t)recv_info->rx_ctrl->channel : (gEspNow ? gEspNow->channel : 0);
+  gChFollow.heard((uint32_t)millis(), hd);
+}
+
 // Flood-forward budget. A fixed 10-second window rather than a true sliding one:
 // the worst case is 2× the nominal rate across a window boundary, which at 16
 // forwards / 10 s is still under 3% airtime — not worth the bookkeeping to
@@ -8298,6 +8549,8 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
   // time we reach this point, `payload` is already plaintext and the
   // SESSION_FRAME flag has been cleared in the local header copy.
   V4RxCtx ctx{recv_info, h, payload, payloadLen, isPaired, isAuthenticated, isSessionEncrypted, deviceName};
+  // Channel follow: a sealed frame that passed every gate above is liveness.
+  if (isSessionEncrypted) espnowChFollowOnSealedFrame(recv_info, h->type);
   e->handler(ctx);
   v4_dispatch_post_cleanup(recv_info, h);
   return true;
@@ -8639,6 +8892,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     // health update + tracker recording above are still legitimate side
     // effects of an ACK regardless of whether anyone is pinging.
     espnowAppPingNoteAck(recv_info->src_addr, h->msgId);
+    espnowChFollowNoteAck(recv_info, h->msgId);  // channel follow: the ACK of a probe to the master
 
     if (!foundV3) {
       DEBUG_ESPNOWF("[V4_ACK_RX] No matching ACK waiter found (msgId=%lu fragIdx=%u)",
@@ -12842,6 +13096,107 @@ static void bondWorkerAskForCap(uint32_t now) {
 //   transfers) stalls RX for its whole duration; prefer submitDeferredToCmdExec
 //   for infrequent heavy handlers — but never defer a session-blocking wait to
 //   cmd_exec, which serializes against runDeferredSessionConfirm.
+// ---- Channel follow: step 0 helpers (espnow_task) --------------------------
+
+// R5 as the owner wrote it: any file transfer, session handshake or key
+// exchange, with any peer, and pairing (the pair window, a request waiting on
+// the prompt, or our own request waiting for an answer). The core caps the
+// hold at 60 s per busy spell (Q5). No catch-up query: a worker serving
+// catch-up to its master hears it, so the master is never silent for 30 s
+// while that runs.
+static bool espnowChFollowBusy(uint32_t now) {
+  if (espnowPairModeActive() || espnowGetIncomingPairRequest(nullptr, 0) ||
+      espnowGetPairRequestOutcome(nullptr, 0) == ESPNOW_PAIR_OUT_WAITING) return true;
+  if (gEspNow->fileSendInProgress && now - gEspNow->fileSendStartedMs < kFileSendMaxDeferMs) return true;
+  for (uint8_t i = 0, n = fileSlotsSlotCount(); i < n; i++) {
+    FileTransferSlotInfo info;
+    if (fileSlotsSnapshot(i, &info) && info.state == FILE_SLOT_RECEIVING) return true;
+  }
+  for (uint8_t i = 0, n = sessionSlotCount(); i < n; i++) {
+    if (sessionHandshakeInFlight(sessionAt(i), now)) return true;  // null-safe: free slots read nullptr
+  }
+  return keyExAnyInFlight();
+}
+
+// Inputs: the fast fields every lap (cached bools and atomics, no RPC), the slow
+// ones at most once a second while hunting.
+static void espnowChFollowGatherInputs(espnowfollow::Inputs& in, uint32_t now, bool slow) {
+  in = espnowfollow::Inputs();
+  in.nowMs = now;
+  in.role = espnowChFollowRole();
+  in.joined = WiFi.status() == WL_CONNECTED;
+  in.pinned = gSettings.espnowChannel;
+  in.dwellMs = radioHalBackend() == RadioHalBackend::Hosted ? espnowfollow::kDwellHostedMs : espnowfollow::kDwellMs;
+  // Every lap, from sources every Wi-Fi build has (the coex tag alone reads
+  // Unknown without the BLE records).
+  in.wifiBusy = wifiStaBusyForChannelHunt();  // connect, scan, driver auto-reconnect window
+  in.radioAway = wifiRadioForcedOff() || !radioCompanionOnline();  // cached bools; online on native radios
+  if (slow) {
+    gChFollowSlow.staChannel = in.joined ? gEspNow->channel : 0;
+    gChFollowSlow.maxChannel = 11;  // Q2 (default taken 2026-11-19): 1-11 offline, no country change
+    gChFollowSlow.sessionUp = gChFollowMasterRank && espnowSessionUp(gChFollowMasterMac);  // the primary
+    gChFollowSlow.busy = espnowChFollowBusy(now);
+  }
+  in.staChannel = in.joined ? gChFollowSlow.staChannel : 0;
+  in.maxChannel = gChFollowSlow.maxChannel;  // 0 (never refreshed) reads as 11
+  in.sessionUp = gChFollowSlow.sessionUp;
+  in.busy = gChFollowSlow.busy;
+}
+
+static void espnowChFollowPublish(uint32_t now, const espnowfollow::Out& out) {
+  const bool hunting = out.phase == espnowfollow::Phase::Sweeping || out.phase == espnowfollow::Phase::Confirming;
+  if (!hunting) gChFollowTarget.store(out.channel, std::memory_order_release);  // never a dwell
+  gChFollowWifiHeld.store(out.wifiRetryHeld, std::memory_order_release);
+  ChFollowSnapshot snap{out.phase, out.hold, gChFollow.masterChannel(), gChFollow.failures(),
+                        gChFollow.sweepChannel(), gChFollow.everHeard(), gChFollow.silentMs(now),
+                        gChFollow.nextSweepInMs(now)};
+  portENTER_CRITICAL(&gChFollowSnapMux);
+  gChFollowSnap = snap;
+  portEXIT_CRITICAL(&gChFollowSnapMux);
+}
+
+// A probe: a full heartbeat with the probe bit, unicast to the master,
+// group-signed with ACK_REQ, ttl 1, one radio hop. Not smart-send: that queues
+// and starts a handshake when no session is up, which would leave stale frames
+// for later dwells and make the hunt hold itself (a handshake is "busy").
+static void espnowChFollowSendProbe(uint8_t ch) {
+  if (!gEspNow || gChFollowMasterRank == 0) return;
+  V4PayloadHeartbeat hb;
+  v4FillHeartbeat(hb);
+  hb.chanInfo = espnowfollow::packChanInfo(ch, /*probe=*/true, /*answer=*/false);
+  const uint32_t msgId = generateMessageId();
+  gChFollowProbeMsgId = msgId;
+  if (!v4_send_frame_ex(gChFollowMasterMac, ESPNOW_V4_TYPE_HEARTBEAT,
+                        (uint16_t)(ESPNOW_V4_FLAG_ACK_REQ | ESPNOW_V4_FLAG_BROADCAST_AUTH), msgId,
+                        (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1, /*allowRoute=*/false)) {
+    gChFollowProbeMsgId = 0;
+  }
+}
+
+// One system-event line per phase change and per hold reason; none per dwell.
+static void espnowChFollowLogTransitions() {
+  static espnowfollow::Phase sLastPhase = espnowfollow::Phase::Off;
+  static espnowfollow::Hold sLastHold = espnowfollow::Hold::None;
+  const espnowfollow::Phase p = gChFollow.phase();
+  const espnowfollow::Hold h = gChFollow.hold();
+  if (p == sLastPhase && h == sLastHold) return;
+  const bool phaseChanged = p != sLastPhase;
+  sLastPhase = p;
+  sLastHold = h;
+  const uint8_t mc = gChFollow.masterChannel();
+  if (phaseChanged) {
+    if (h != espnowfollow::Hold::None && h != espnowfollow::Hold::Gap) {
+      logSystemEvent("ESPNOW", "channel follow: %s (%s)", espnowfollow::phaseText(p), espnowfollow::holdText(h));
+    } else if (mc) {
+      logSystemEvent("ESPNOW", "channel follow: %s, master channel %u", espnowfollow::phaseText(p), (unsigned)mc);
+    } else {
+      logSystemEvent("ESPNOW", "channel follow: %s", espnowfollow::phaseText(p));
+    }
+  } else if (h != espnowfollow::Hold::None && h != espnowfollow::Hold::Gap) {
+    logSystemEvent("ESPNOW", "channel follow: hunt held: %s", espnowfollow::holdText(h));
+  }
+}
+
 void processMeshHeartbeats() {
   // 0. WiFi-association channel re-sync. A single-radio ESP32's channel follows
   // the STA association; when it changes (join / roam / drop) the WiFi event
@@ -12849,22 +13204,98 @@ void processMeshHeartbeats() {
   // runs here on espnow_task, not on the tiny arduino_events stack. Also re-run
   // on a slow timer as a safety net for drift we got no event for. Logs only on
   // an actual change (rare), same cadence as the peer online/offline lines below.
+  //
+  // 0a. Channel follow (System_ESPNow_ChannelFollowCore.h): a mesh worker in
+  // auto sits on its master's channel and hunts for it when the master has
+  // been silent for 30 s. Every lap while hunting, else 4 Hz.
+  {
+    static uint32_t sLastFollowMs = 0, sLastResolveMs = 0, sLastSlowInputsMs = 0;
+    static bool sSettlePending = false;  // a hunt moved the radio: one full apply still owed
+    static uint32_t sStallAtMs = 0;      // a stalling C6: no full apply (four RPCs) for 5 s after it
+    static bool sStalled = false;
+    const uint32_t now = (uint32_t)millis();
+    const bool hunting = espnowChFollowHunting();
+    if (gEspNow && gEspNow->initialized && (hunting || now - sLastFollowMs >= 250)) {
+      sLastFollowMs = now;
+      if (now - sLastResolveMs >= 1000) {
+        sLastResolveMs = now;
+        espnowChFollowResolveMaster();
+      }
+      const bool slow = !hunting || now - sLastSlowInputsMs >= 1000;
+      if (slow) sLastSlowInputsMs = now;
+      espnowfollow::Inputs in;
+      espnowChFollowGatherInputs(in, now, slow);
+      const espnowfollow::Out out = gChFollow.tick(in);
+      espnowChFollowPublish(now, out);
+      if (out.persistMasterChannel) setSetting(gSettings.espnowMasterChannel, out.persistMasterChannel);
+      if (out.settle) sSettlePending = true;
+      if (out.sweepSwitch) {
+        // millis() AFTER the switch: the dwell counts from the finished switch.
+        const uint32_t t0 = (uint32_t)millis();
+        const ChFollowSwitch r = espnowApplySweepChannel(out.channel);
+        const uint32_t t1 = (uint32_t)millis();
+        if (r == ChFollowSwitch::Busy) {
+          gChFollow.abortHunt(t1, espnowfollow::Hold::WifiBusy);
+        } else if (r == ChFollowSwitch::Stalled || t1 - t0 > kChFollowStallMs) {
+          gChFollow.abortHunt(t1, espnowfollow::Hold::RadioAway);  // a stalling C6: never 11 x 5 s per sweep
+          sStalled = true;                                         // and no four-RPC settle on it at once
+          sStallAtMs = t1;
+        } else {
+          gChFollow.applied(t1, out.channel, r == ChFollowSwitch::Ok);
+        }
+      } else if (!in.joined && !in.radioAway && !in.wifiBusy &&
+                 (!sStalled || now - sStallAtMs >= kChFollowStallBackoffMs) &&
+                 (sSettlePending || (espnowch::validChannel(out.channel) && out.channel != gEspNow->channel))) {
+        // Full apply (parking AP + set_channel + verify). After a hunt it runs even
+        // when gEspNow->channel already equals the target: the light switches
+        // left the AP config on the pre-hunt channel. Never while Wi-Fi is
+        // associated, connecting or scanning (the settle stays owed), and not
+        // within 5 s of a stall (a slow apply starts that back-off too).
+        const uint8_t ch = espnowch::validChannel(out.channel) ? out.channel : espnowComputeChannel();
+        const uint32_t a0 = (uint32_t)millis();
+        if (espnowApplyChannel(ch)) sSettlePending = false;  // else retried at the 250 ms cadence
+        const uint32_t a1 = (uint32_t)millis();
+        sStalled = a1 - a0 > kChFollowStallMs;
+        sStallAtMs = a1;
+      } else if (in.joined && sSettlePending) {
+        sSettlePending = false;  // the AP decides; the resync verifies
+        gEspNowChannelResyncPending.store(true, std::memory_order_release);
+      }
+      if (out.sendProbe) {
+        const uint32_t t0 = (uint32_t)millis();
+        espnowChFollowSendProbe(gEspNow->channel);
+        const uint32_t t1 = (uint32_t)millis();
+        if (t1 - t0 > kChFollowStallMs) {
+          gChFollow.abortHunt(t1, espnowfollow::Hold::RadioAway);  // no-op unless hunting
+          sStalled = true;
+          sStallAtMs = t1;
+        }
+      }
+      espnowChFollowLogTransitions();
+    }
+  }
+  // 0b. The re-sync below is skipped while the follow core hunts (the hunt
+  // owns the radio then); a pending request waits for the hunt to end.
   {
     static uint32_t sLastChannelCheckMs = 0;
     static uint8_t  sDriftStrikes = 0;
     uint32_t nowCh = (uint32_t)millis();
-    const bool resyncRequested =
+    const bool followHunting = espnowChFollowHunting();
+    const bool resyncRequested = !followHunting &&
         gEspNowChannelResyncPending.exchange(false, std::memory_order_acq_rel);
-    if (resyncRequested || (nowCh - sLastChannelCheckMs >= 15000)) {
+    if (!followHunting && (resyncRequested || (nowCh - sLastChannelCheckMs >= 15000))) {
       sLastChannelCheckMs = nowCh;
       if (gEspNow && gEspNow->initialized) {
         uint8_t prev = gEspNow->channel;
         uint8_t want = espnowComputeChannel();
         if (want != prev) {
           if (espnowApplyChannel(want)) {
+            const bool followingMaster = gSettings.espnowChannel == 0 &&
+                                         gChFollowTarget.load(std::memory_order_acquire) == want;
             logSystemEvent("ESPNOW", "channel re-synced %u -> %u (%s)",
                            (unsigned)prev, (unsigned)want,
-                           WiFi.status() == WL_CONNECTED ? "following AP" : "pinned offline");
+                           WiFi.status() == WL_CONNECTED ? "following AP"
+                           : (followingMaster ? "following the master" : "pinned offline"));
           }
         }
         // Cheap drift self-heal: when the user has deliberately pinned a channel
@@ -12876,7 +13307,11 @@ void processMeshHeartbeats() {
         //   (2) only after the mismatch is stable across two checks, so the brief
         //       window where a connecting STA sits on the AP channel (resolves in
         //       < 15 s) never trips it.
-        if (gSettings.espnowChannel >= 1 && gSettings.espnowChannel <= 13 &&
+        // A worker following its master's known channel has a fixed target too.
+        const bool followTarget = gSettings.espnowChannel == 0 &&
+                                  gChFollow.phase() == espnowfollow::Phase::Following &&
+                                  espnowch::validChannel(gChFollowTarget.load(std::memory_order_acquire));
+        if (((gSettings.espnowChannel >= 1 && gSettings.espnowChannel <= 13) || followTarget) &&
             WiFi.status() != WL_CONNECTED) {
           uint8_t hwCh = 0; wifi_second_chan_t drs;
           if (esp_wifi_get_channel(&hwCh, &drs) == ESP_OK && hwCh != 0 && hwCh != want) {
@@ -12915,6 +13350,7 @@ void processMeshHeartbeats() {
       // stay valid until dispatch completes and this slot is released below.
       wifi_pkt_rx_ctrl_t rxCtrl = {};
       rxCtrl.rssi = item.rssi;
+      rxCtrl.channel = item.channel;
       esp_now_recv_info_t ri = {};
       ri.src_addr = item.src;
       ri.des_addr = item.dst;
@@ -14420,8 +14856,26 @@ static bool initEspNow() {
   // set it here too so it also holds while unassociated.
   esp_wifi_set_ps(WIFI_PS_NONE);
 
+  // Channel follow: a rebooted worker starts on the saved master channel; a
+  // device that is now a master or not a worker starts as today. Nothing from
+  // the last run (a dwell, sessionUp, busy) survives an ESP-NOW stop/start.
+  // (The mesh mode and key are restored after this point, so a worker's first
+  // tick on espnow_task moves it to the saved channel within 250 ms.)
+  {
+    const uint32_t now = (uint32_t)millis();
+    gChFollow.begin(gSettings.espnowMasterChannel, now);
+    gChFollowProbeMsgId = 0;
+    memset(&gChFollowSlow, 0, sizeof(gChFollowSlow));
+    gChFollowTarget.store(0, std::memory_order_release);
+    espnowChFollowResolveMaster();
+    espnowfollow::Inputs in;
+    espnowChFollowGatherInputs(in, now, /*slow=*/true);
+    espnowChFollowPublish(now, gChFollow.tick(in));  // Following on the saved channel, or Off/Pinned/Joined
+  }
+
   // Decide the ESP-NOW channel: follow the joined AP, else the user's preferred
-  // channel (gSettings.espnowChannel) or the derived fallback. See espnowComputeChannel.
+  // channel (gSettings.espnowChannel), a worker's master channel, or the
+  // derived fallback. See espnowComputeChannel.
   uint8_t effectiveChannel = espnowComputeChannel();
 
   // Hide the channel-parking soft AP so it doesn't broadcast an SSID
@@ -14945,6 +15399,7 @@ static bool deinitEspNow(bool publishOffEvent) {
     return false;
   }
   broadcastOutput("[ESP-NOW] Heartbeat task stopped");
+  espnowChFollowStopped();  // channel follow: drop the Wi-Fi hold and the follow target
 
   // The sole topology producer is now stopped. Cancel collection and discard
   // its bounded records so a later re-init cannot expose stale request data.
@@ -15100,6 +15555,77 @@ const char* cmd_espnow_deinit(const String& argsInput) {
 }
 
 // ESP-NOW status command
+// Channel follow, for espnowstatus and espnowchannel (cmd_exec): reads the
+// snapshot only.
+static void espnowChFollowFmtAge(uint32_t ms, char* out, size_t cap) {
+  const uint32_t sec = ms / 1000;
+  if (sec < 120) snprintf(out, cap, "%lu s", (unsigned long)sec);
+  else if (sec < 7200) snprintf(out, cap, "%lu min", (unsigned long)(sec / 60));
+  else snprintf(out, cap, "%lu h", (unsigned long)(sec / 3600));
+}
+
+// The "Master channel:" text for the current follow state; false when the
+// device follows no master (not a mesh worker with a master).
+static bool espnowChFollowStatusText(const ChFollowSnapshot& f, char* out, size_t cap) {
+  using espnowfollow::Phase;
+  using espnowfollow::Hold;
+  const uint8_t mc = f.masterCh;
+  const uint8_t here = gEspNow ? gEspNow->channel : 0;
+  char ago[16], next[16];
+  espnowChFollowFmtAge(f.silentMs, ago, sizeof(ago));
+  espnowChFollowFmtAge(f.nextSweepInMs, next, sizeof(next));
+  switch (f.phase) {
+    case Phase::Off:
+      return false;
+    case Phase::Pinned:
+      if (mc && mc != gSettings.espnowChannel)
+        snprintf(out, cap, "master on %u, pinned to %u here (espnowchannel %u)", (unsigned)mc,
+                 (unsigned)gSettings.espnowChannel, (unsigned)gSettings.espnowChannel);
+      else if (mc)
+        snprintf(out, cap, "%u, pinned to the same channel here", (unsigned)mc);
+      else
+        snprintf(out, cap, "unknown, pinned to %u here", (unsigned)gSettings.espnowChannel);
+      return true;
+    case Phase::Joined:
+      if (mc) snprintf(out, cap, "%u, joined to Wi-Fi on the same channel", (unsigned)mc);
+      else snprintf(out, cap, "unknown; joined to Wi-Fi, the AP decides the channel");
+      return true;
+    case Phase::WifiPaused: {
+      const String ssid = WiFi.SSID();  // an RPC on the P4; fine in a command
+      snprintf(out, cap, "master on %u, me on %u (joined to %s): mesh paused until the Wi-Fi link ends",
+               (unsigned)mc, (unsigned)here, ssid.c_str());
+      return true;
+    }
+    case Phase::Following:
+      if (f.hold == Hold::OutOfRange)
+        snprintf(out, cap, "master last on %u; channels above 11 are not allowed here without Wi-Fi", (unsigned)mc);
+      else if (mc && f.everHeard)
+        snprintf(out, cap, "%u, heard %s ago", (unsigned)mc, ago);
+      else if (mc)
+        snprintf(out, cap, "%u (saved), not heard for %s", (unsigned)mc, ago);
+      else
+        snprintf(out, cap, "unknown, not heard for %s", ago);
+      return true;
+    case Phase::Waiting:
+      if (f.hold != Hold::None && f.hold != Hold::Gap)
+        snprintf(out, cap, "hunt held: %s (not heard for %s)", espnowfollow::holdText(f.hold), ago);
+      else if (mc)
+        snprintf(out, cap, "not heard for %s; hunting (sweep %u failed, next in %s, saved channel %u)", ago,
+                 (unsigned)f.failures, next, (unsigned)mc);
+      else
+        snprintf(out, cap, "not heard for %s; hunting (sweep %u failed, next in %s)", ago,
+                 (unsigned)f.failures, next);
+      return true;
+    case Phase::Sweeping:
+      snprintf(out, cap, "hunting now, channel %u of 1-11", (unsigned)f.sweepCh);
+      return true;
+    case Phase::Confirming:
+      snprintf(out, cap, "answer on %u, confirming", (unsigned)f.sweepCh);
+      return true;
+  }
+  return false;
+}
+
 const char* cmd_espnow_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   // Read-only status: report "idle" instead of erroring when not initialized
@@ -15118,6 +15644,15 @@ const char* cmd_espnow_status(const String& argsInput) {
     if (gEspNow) {
       doc["channel"]     = gEspNow->channel;
       doc["channelPref"] = gSettings.espnowChannel;  // 0=auto, 1-13=pinned when offline
+      if (gEspNow->initialized) {
+        // Channel follow (a mesh worker follows its master's channel).
+        const ChFollowSnapshot f = espnowChFollowSnapshot();
+        doc["masterChannel"]  = f.masterCh;   // 0 unknown
+        doc["follow"]         = espnowfollow::phaseKey(f.phase);
+        doc["masterSilentMs"] = f.silentMs;
+        doc["sweepFailures"]  = f.failures;
+        doc["nextSweepMs"]    = f.nextSweepInMs;
+      }
       if (gEspNow->initialized) {
         uint8_t mac[6]; espnowSelfStaMac(mac);
         char macStr[18];
@@ -15150,14 +15685,30 @@ const char* cmd_espnow_status(const String& argsInput) {
   }
   if (!gEspNow) return getDebugBuffer();
 
+  const ChFollowSnapshot follow = espnowChFollowSnapshot();
+  const bool followShown = gEspNow->initialized && follow.phase != espnowfollow::Phase::Off;
   if (gSettings.espnowChannel == 0) {
-    n = snprintf(p, remaining, "  Channel: %d (pref: auto)\n", gEspNow->channel);
+    const bool hunting = follow.phase == espnowfollow::Phase::Sweeping ||
+                         follow.phase == espnowfollow::Phase::Confirming;
+    const bool following = follow.phase == espnowfollow::Phase::Following ||
+                           follow.phase == espnowfollow::Phase::Waiting;
+    n = snprintf(p, remaining, "  Channel: %d (pref: auto%s)\n", gEspNow->channel,
+                 !followShown ? "" : (hunting ? " - hunting for the master"
+                                     : (following ? " - following the master" : "")));
   } else {
     n = snprintf(p, remaining, "  Channel: %d (pref: %u pinned when offline)\n",
                  gEspNow->channel, (unsigned)gSettings.espnowChannel);
   }
   p += n;
   remaining -= n;
+
+  if (followShown) {
+    char line[160];
+    if (espnowChFollowStatusText(follow, line, sizeof(line))) {
+      n = snprintf(p, remaining, "  Master channel: %s\n", line);
+      if (n > 0 && (size_t)n < remaining) { p += n; remaining -= n; }
+    }
+  }
 
   if (gEspNow->initialized) {
     n = snprintf(p, remaining, "  MAC Address: ");
@@ -16589,12 +17140,33 @@ const char* cmd_espnow_channel(const String& argsInput) {
     if (esp_wifi_get_channel(&hwCh, &sec2) != ESP_OK) hwCh = 0;
     const bool running = gEspNow && gEspNow->initialized;
     const uint8_t expected = espnowComputeChannel();
-    const char* source = joined ? "following the joined AP"
-                                : (espnowch::validChannel(gSettings.espnowChannel)
-                                     ? "pinned from the setting (offline)"
-                                     : "auto fallback (offline, no setting)");
+    // A mesh worker in auto follows its master's channel (channel follow).
+    const ChFollowSnapshot follow = espnowChFollowSnapshot();
+    const bool followActive = running && !joined && gSettings.espnowChannel == 0 &&
+                              follow.phase != espnowfollow::Phase::Off;
+    const bool followHunting = followActive && (follow.phase == espnowfollow::Phase::Sweeping ||
+                                                follow.phase == espnowfollow::Phase::Confirming);
+    char followSource[48];
+    const char* source = nullptr;
+    if (joined) {
+      source = "following the joined AP";
+    } else if (espnowch::validChannel(gSettings.espnowChannel)) {
+      source = "pinned from the setting (offline)";
+    } else if (followHunting) {
+      source = "hunting for the master";
+    } else if (followActive && espnowch::validChannel(gChFollowTarget.load(std::memory_order_acquire)) &&
+               gChFollowTarget.load(std::memory_order_acquire) == expected) {
+      snprintf(followSource, sizeof(followSource), "following the master (channel %u)", (unsigned)expected);
+      source = followSource;
+    } else if (followActive) {
+      source = "master's channel unknown, fallback";
+    } else {
+      source = "auto fallback (offline, no setting)";
+    }
     const char* verdict = "OK — radio matches expected";
-    switch (espnowch::check(joined, running, (uint8_t)hwCh, expected)) {
+    if (followHunting) {
+      verdict = "not checked — hunting for the master";
+    } else switch (espnowch::check(joined, running, (uint8_t)hwCh, expected)) {
       case espnowch::Verdict::Ok: break;
       case espnowch::Verdict::Mismatch:
         verdict = running ? "MISMATCH — run 'espnowchannel resync' to re-pin"
@@ -16629,6 +17201,11 @@ const char* cmd_espnow_channel(const String& argsInput) {
   if (arg == "resync" || arg == "recheck" || arg == "check") {
     if (!(gEspNow && gEspNow->initialized))
       return "Error: ESP-NOW not running (run 'openespnow' first)";
+    {
+      const espnowfollow::Phase fp = espnowChFollowSnapshot().phase;
+      if (fp == espnowfollow::Phase::Sweeping || fp == espnowfollow::Phase::Confirming)
+        return "Hunting for the master; the channel settles when it answers.";
+    }
     uint8_t want = espnowComputeChannel();
     if (!espnowApplyChannel(want, 250)) {
       return "Error: ESP-NOW channel re-sync did not complete; it stays pending. "
@@ -16658,12 +17235,23 @@ const char* cmd_espnow_channel(const String& argsInput) {
 
   setSetting(gSettings.espnowChannel, (uint8_t)ch);
 
-  // Apply live so the change takes effect without a re-init.
+  // Apply live so the change takes effect without a re-init. Not while the
+  // channel follow hunts: the hunt owns the radio then, a pin ends it on
+  // espnow_task's next tick (which applies the pin), and auto lets it go on.
+  bool huntOwnsRadio = false;
   if (gEspNow && gEspNow->initialized) {
-    if (!espnowApplyChannel(espnowComputeChannel(), 250)) {
+    const espnowfollow::Phase fp = espnowChFollowSnapshot().phase;
+    huntOwnsRadio = fp == espnowfollow::Phase::Sweeping || fp == espnowfollow::Phase::Confirming;
+    if (huntOwnsRadio) {
+      // nothing here: espnow_task applies the result
+    } else if (!espnowApplyChannel(espnowComputeChannel(), 250)) {
       return "ESP-NOW channel preference saved; the live re-sync is pending and is retried automatically.";
     }
     radioCh = (int)gEspNow->channel;
+  }
+  if (huntOwnsRadio) {
+    return ch == 0 ? "ESP-NOW channel set to auto; hunting for the master goes on."
+                   : "ESP-NOW channel preference saved; the hunt for the master ends and the radio moves to it shortly.";
   }
 
   if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
@@ -22755,7 +23343,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowmeshes", "Manage multi-mesh slots: 'espnowmeshes [list|add|remove|delete|enable|setdefault|rename|setpassphrase] ...'.", true, cmd_espnow_meshes, "Usage: espnowmeshes list\n       espnowmeshes add <label>          (then set passphrase via 'espnowsetpassphrase <label> <pw>')\n       espnowmeshes remove <label>       (alias: disable)\n       espnowmeshes delete <label>       (frees the slot; unpair its devices first)\n       espnowmeshes enable <label>\n       espnowmeshes setdefault <label>\n       espnowmeshes setpassphrase <label> <passphrase>\n       espnowmeshes rename <oldLabel> <newLabel>" },
   { "espnowmode", "Get/set ESP-NOW mode: 'espnowmode [direct|mesh]'.", true, cmd_espnow_mode, "Usage: espnowmode [direct|mesh]" },
   { "espnowmeshttl", "Get/set the multi-hop budget: 'espnowmeshttl [1-10]'.", false, cmd_espnow_meshttl, "Usage: espnowmeshttl [<1..10>]\n       How many hops this node's relay-eligible frames may travel. 1 = single hop (no multi-hop).\n       Applies to broadcast text/time sync and to routed unicast; heartbeats and pairing are always single-hop." },
-  { "espnowchannel", "Get/set preferred ESP-NOW channel: 'espnowchannel [1-13|auto|resync]'. No arg shows a checker (actual vs expected). Set the SAME value on both devices to pair off-grid.", true, cmd_espnow_channel, "Usage: espnowchannel [<1..13>|auto|resync]\n       (no arg) = show preference, actual radio channel, expected, and an OK/MISMATCH check.\n       auto (0) = follow WiFi, pin fallback when offline. 1-13 = force this channel when not joined to WiFi.\n       resync   = force the radio back onto the correct channel now (no setting change).\n       Two devices only hear each other on the same channel — set both the same for field use." },
+  { "espnowchannel", "Get/set preferred ESP-NOW channel: 'espnowchannel [1-13|auto|resync]'. No arg shows a checker (actual vs expected). Set the SAME value on both devices to pair off-grid.", true, cmd_espnow_channel, "Usage: espnowchannel [<1..13>|auto|resync]\n       (no arg) = show preference, actual radio channel, expected, and an OK/MISMATCH check.\n       auto (0) = a worker follows its master's channel (hunting for it when silent); a master follows WiFi; offline fallback otherwise. 1-13 = force this channel when not joined to WiFi.\n       resync   = force the radio back onto the correct channel now (no setting change).\n       Two devices only hear each other on the same channel — set both the same for field use." },
   { "espnowhbmode", "Get/set heartbeat mode: 'espnowhbmode [public|private]'.", true, cmd_espnow_hbmode, "Usage: espnowhbmode [public|private]" },
   { "espnowmeshrole", "Get/set mesh role: 'espnowmeshrole [worker|master|backup]'.", true, cmd_espnow_meshrole, "Usage: espnowmeshrole [worker|master|backup]" },
   { "espnowmeshmaster", "Get/set master MAC: 'espnowmeshmaster [MAC]'.", true, cmd_espnow_meshmaster, "Usage: espnowmeshmaster [<AA:BB:CC:DD:EE:FF>]" },
@@ -22914,6 +23502,10 @@ static const SettingEntry espnowSettingEntries[] = {
   // Preferred radio channel (0=auto, 1-13). U8 range 0..13. cmdKey routes the
   // settings editor to the custom cmd_espnow_channel so a change applies live.
   { "channel", SETTING_U8, &gSettings.espnowChannel, 0, 0, nullptr, 0, 13, "Preferred Channel (0=auto)", nullptr, false, nullptr, "espnowchannel" },
+  // The master's channel as last announced (System_ESPNow_ChannelFollowCore.h).
+  // A worker in auto starts on it after a reboot. Written by the follower only.
+  { "masterChannel", SETTING_U8, &gSettings.espnowMasterChannel, 0, 0, nullptr, 0, 13,
+    "Master's Last Channel", nullptr, false, nullptr, nullptr, true },
   { "meshRelay", SETTING_BOOL, &gSettings.meshRelay, true, 0, nullptr, 0, 1, "Relay for peers", nullptr, false, "mesh", "espnowmeshrelay" },
   { "meshPeerMax", SETTING_U8, &gSettings.meshPeerMax, 8, 0, nullptr, 1, 16, "Max Peer Slots (reboot)", nullptr, false, "mesh", "espnowmeshpeermax" },
   // Message history per peer and direction, KB. 0 = the board default (16 with

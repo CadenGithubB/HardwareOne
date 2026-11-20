@@ -257,6 +257,9 @@ static bool v4_relay_wrap_and_send(const uint8_t*, const uint8_t*, const uint8_t
 static void broadcast_tracker_record_ack(uint32_t, const uint8_t*) {}
 static void sendStatusMarkDelivered(uint32_t, const uint8_t*) {}
 static void espnowAppPingNoteAck(const uint8_t*, uint32_t) {}
+// Channel follow hooks (System_ESPNow.cpp): no follower in this harness.
+static void espnowChFollowNoteAck(const esp_now_recv_info*, uint32_t) {}
+static void espnowChFollowOnSealedFrame(const esp_now_recv_info*, uint8_t) {}
 struct EspNowTxGuard { explicit EspNowTxGuard(const char*) {} };
 #define V4_FRAG_ACK_WAIT_MAX 8
 struct V4FragAckWait { bool active; uint32_t msgId; uint8_t fragIndex; bool acked; };
@@ -321,6 +324,9 @@ static uint32_t gEspNowRxLenDrops = 0;
 static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uint8_t* data, int len);
 
 // INSERT_RELAY
+
+static void espnowChFollowOnHeartbeat(const V4RxCtx&, const V4PayloadHeartbeat&, bool) {}
+static bool espnowChFollowHunting() { return false; }  // never hunting: the pre-warm runs as before
 
 // INSERT_HEARTBEAT
 

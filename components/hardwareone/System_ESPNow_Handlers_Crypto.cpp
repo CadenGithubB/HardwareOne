@@ -696,6 +696,12 @@ bool keyExIsInFlight(const uint8_t peerMac[6]) {
   return false;
 }
 
+bool keyExAnyInFlight() {
+  for (auto& k : gKeyExInFlight)
+    if (k.inUse && !k.cancelled) return true;
+  return false;
+}
+
 void keyExRetrySweep(uint32_t nowMs) {
   for (auto& k : gKeyExInFlight) {
     if (!k.inUse) continue;

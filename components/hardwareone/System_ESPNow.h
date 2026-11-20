@@ -1207,6 +1207,10 @@ uint32_t espnowPairModeRemainingMs();
 bool espnowBackupPromoted();
 // An ACTIVE session with a paired peer; *establishedAtMs: when it went ACTIVE.
 bool espnowSessionUp(const uint8_t* mac, uint32_t* establishedAtMs = nullptr);
+// True on a mesh worker while its master session is ACTIVE and a sealed frame
+// from the master came within 30 s (channel follow): the Wi-Fi rehunt waits.
+// Any task (an atomic read).
+bool espnowWorkerHoldsWifiRetry();
 // The same, and at least 2 s old: usable for a sender's first frame.
 bool espnowSessionSettled(const uint8_t* mac, uint32_t nowMs);
 // The sessionId of the ACTIVE session with `mac` (0: none). A new one with
@@ -1711,6 +1715,7 @@ inline EspNowAppPingState espnowAppPingPoll(uint32_t* outRttMs,
 inline void espnowAppPingClear() {}
 // WiFi-only profiles have no channel follower.
 inline void espnowNoteWifiChannelMayHaveChanged() {}
+inline bool espnowWorkerHoldsWifiRetry() { return false; }
 
 #endif // ENABLE_ESPNOW
 

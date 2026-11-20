@@ -62,6 +62,9 @@ void keyExRetrySweep(uint32_t nowMs);
 // REPLY/CONFIRM has resolved it yet). Used by espnowprobe to detect when the
 // handshake has resolved (succeed → identity present; fail → identity absent).
 bool keyExIsInFlight(const uint8_t peerMac[6]);
+// True while any key exchange this device started is in flight, with any peer
+// (channel follow: no hunt while one runs).
+bool keyExAnyInFlight();
 
 // Unpair: calls off the key exchange this device started with `peerMac`, if
 // any. Its HELLO is not re-sent and a REPLY to one already sent is ignored, so

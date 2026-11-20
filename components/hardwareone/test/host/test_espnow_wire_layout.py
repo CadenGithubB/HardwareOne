@@ -60,7 +60,7 @@ GOLDEN = {
     'V4PayloadRelayData': (8, [('finalDst', 0), ('hopsUsed', 6), ('reserved', 7)]),
     'V4PayloadPeerListHeader': (4, [('entryCount', 0), ('role', 1), ('seq', 2), ('reserved', 3)]),
     'V4PayloadPeerListEntry': (8, [('mac', 0), ('hops', 6), ('metric', 7)]),
-    'V4PayloadHeartbeat': (44, [('role', 0), ('peerCount', 1), ('rssi', 2), ('reserved', 3), ('uptimeSec', 4),
+    'V4PayloadHeartbeat': (44, [('role', 0), ('peerCount', 1), ('rssi', 2), ('chanInfo', 3), ('uptimeSec', 4),
                                 ('freeHeap', 8), ('deviceName', 12)]),
     'V4PayloadPairBeacon': (36, [('role', 0), ('flags', 1), ('reserved', 2), ('deviceName', 4)]),
     'V4PayloadPairCtrl': (40, [('targetMac', 0), ('role', 6), ('reserved', 7), ('deviceName', 8)]),

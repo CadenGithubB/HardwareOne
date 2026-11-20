@@ -198,6 +198,9 @@ static void v4_dispatch_post_cleanup(const esp_now_recv_info*, const EspNowV4Hea
 // The receive-drop counter of System_ESPNow.cpp (espnowstats rxLengthDrops).
 static uint32_t gEspNowRxLenDrops = 0;
 
+// Channel follow hook (System_ESPNow.cpp): no follower in this harness.
+static void espnowChFollowOnSealedFrame(const esp_now_recv_info*, uint8_t) {}
+
 // INSERT_DISPATCH
 
 // INSERT_DRAIN

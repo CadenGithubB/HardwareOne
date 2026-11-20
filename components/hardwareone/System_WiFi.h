@@ -150,6 +150,10 @@ bool wifiSupersedeBackgroundConnect(uint32_t waitMs = kWifiSupersedeWaitMs);
 void wifiBackgroundConnectReserve(bool reserve);
 // True from that reservation until setupWifi(..., BACKGROUND) returns.
 bool wifiBackgroundConnectActive();
+// ESP-NOW channel follow: true while the radio's channel must not be switched
+// (STA connecting or scanning, or the driver's auto-reconnect retrying after a
+// drop). Any task: atomics and cached flags only.
+bool wifiStaBusyForChannelHunt();
 // True once the BACKGROUND connect has been superseded (sticky for the boot).
 bool wifiBackgroundConnectSuperseded();
 
@@ -225,6 +229,8 @@ inline bool connectToBestWifiNetwork() { return false; }
 inline void wifiEventLogDrain() {}
 inline void wifiRehuntPoll() {}
 inline void wifiRehuntCancel() {}
+inline bool wifiStaBusyForChannelHunt() { return false; }
+inline bool wifiRadioForcedOff() { return false; }
 inline bool wifiConsoleTypeaheadPop(char&) { return false; }
 inline const char* cmd_wifitxpower(const String&) { return "WiFi disabled"; }
 inline const char* cmd_wifiautoreconnect(const String&) { return "WiFi disabled"; }

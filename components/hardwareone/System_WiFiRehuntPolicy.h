@@ -40,7 +40,7 @@ struct WifiRehuntPolicy {
   struct Inputs {
     bool connected = false;  // associated with an address
     bool armed = false;      // Wi-Fi enabled and auto-reconnect on
-    bool held = false;       // radio not ours right now (boot connect, a command connecting, companion busy)
+    bool held = false;       // radio not ours right now (boot connect, a command connecting, companion busy, a mesh worker with a live master)
     int  savedCount = 0;
   };
 

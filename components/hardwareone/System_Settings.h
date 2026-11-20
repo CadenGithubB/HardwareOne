@@ -222,6 +222,7 @@ struct Settings {
       espnowStationary(false),
       espnowFirstTimeSetup(false),
       espnowChannel(0),
+      espnowMasterChannel(0),
       meshRole(0),
       meshMasterMac(""),
       meshBackupMac(""),
@@ -795,6 +796,7 @@ struct Settings {
   // other away from a shared home AP. Ignored while the STA is joined to an AP
   // (the AP's channel wins — a radio can't be on two channels at once).
   uint8_t espnowChannel;               // 0=auto, 1-13=preferred channel when offline
+  uint8_t espnowMasterChannel;         // last channel the followed master announced (0 unknown); written by the follower
   // Mesh role settings
   uint8_t meshRole;                    // 0=worker, 1=master, 2=backup_master
   String meshMasterMac;                // MAC of current master (empty if this is master)
