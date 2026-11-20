@@ -5,7 +5,7 @@
 // R1 ring data, the way the Even app does: a sid 0x0E MULT_DATA snapshot to
 // the right temple. Encoding, limits and policy live in G2_HealthPushCore.h.
 //
-// Off by default; `ring panel feed on` turns it on and saves that
+// On by default in R1 + G2 builds; `ring panel feed off` turns it off and saves that
 // (gSettings.g2HealthPanelFeed). While it runs and the right temple is
 // connected it also keeps the R1 data fresh: the health logger's timed vitals
 // read runs (g2HealthPushWantsRingData) and ring history is refreshed every

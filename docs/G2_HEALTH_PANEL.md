@@ -102,7 +102,7 @@ Ring data the feed keeps fresh while it is on and the right temple is connected:
 | `ring panel status` | Feed state, current values, last send, echo count |
 | `ring panel preview [test]` | The snapshot and its exact bytes; nothing is sent |
 | `ring panel send [test]` | (admin) Send one snapshot now; `test` uses fixed values: 1234 steps, 210 kcal, 72 bpm, 98 %, sleep score 80 with 7 h 30 min |
-| `ring panel feed [on\|off]` | (admin) Feed the panel automatically; saved, off by default. `ring panel on` / `off` are shorthands |
+| `ring panel feed [on\|off]` | (admin) Feed the panel automatically; saved, on by default. `ring panel on` / `off` are shorthands |
 | `ring panel history [minutes]` | (admin) Ring history refresh interval while the feed runs, 10–1440, default 30; saved |
 
 Both settings are also in the settings registry (`g2HealthPanelFeed`, `g2HealthPanelHistoryMin`).

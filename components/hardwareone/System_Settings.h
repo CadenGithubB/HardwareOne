@@ -326,7 +326,7 @@ struct Settings {
       sensorLogAutoStart(false),
       healthLoggingEnabled(false),
       healthLoggingPollIntervalSec(900),  // 15 min — local R1 vitals logging cadence
-      g2HealthPanelFeed(false),           // G2 Health panel feed off until the user turns it on
+      g2HealthPanelFeed(true),            // G2 Health panel feed on by default (R1 + G2 builds; ring panel feed off to stop)
       g2HealthPanelHistoryMin(30),        // ring history refresh while the feed runs
       ringHealthCollectionDesired(0),     // Preserve: do not change the ring at first boot
       ringLowPowerDesired(0),             // Preserve: do not change the ring at first boot

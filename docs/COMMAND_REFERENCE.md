@@ -1369,7 +1369,7 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 
 ## ring
 
-> The Even R1 smart ring over BLE, through a serialized, profile-gated transaction owner. ring scan [seconds] finds it and openring [saved|reconnect|<mac>] connects (scanning first when no argument is given); ring status [json] shows the link and closering ends it. ring health [json] reads vitals, ring controls and typed history; ring poll refreshes the vitals and ring history the history (ring history force, admin, skips the freshness window). ring query requests one reading; its raw form is admin-only, confirms every SET and refuses user-profile writes. ring control <collection|lowpower> <preserve|on|off> (admin) saves a desired state applied asynchronously, which the OLED and web Health controls also use; ring control refresh reads low power back. The G2's own Health panel is fed the way the Even app feeds it: ring panel status and ring panel preview [test] show the snapshot and its bytes; ring panel send [test] (admin) sends one; ring panel feed [on|off] (admin; ring panel on and ring panel off are shorthands) feeds it automatically, saved and off by default, refreshing ring history every ring panel history [minutes] (admin, default 30).
+> The Even R1 smart ring over BLE, through a serialized, profile-gated transaction owner. ring scan [seconds] finds it and openring [saved|reconnect|<mac>] connects (scanning first when no argument is given); ring status [json] shows the link and closering ends it. ring health [json] reads vitals, ring controls and typed history; ring poll refreshes the vitals and ring history the history (ring history force, admin, skips the freshness window). ring query requests one reading; its raw form is admin-only, confirms every SET and refuses user-profile writes. ring control <collection|lowpower> <preserve|on|off> (admin) saves a desired state applied asynchronously, which the OLED and web Health controls also use; ring control refresh reads low power back. The G2's own Health panel is fed the way the Even app feeds it: ring panel status and ring panel preview [test] show the snapshot and its bytes; ring panel send [test] (admin) sends one; ring panel feed [on|off] (admin; ring panel on and ring panel off are shorthands) feeds it automatically, saved and on by default, refreshing ring history every ring panel history [minutes] (admin, default 30).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -1381,7 +1381,7 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 | `ring health` |  | R1 vitals, ring controls and typed history. (add 'json' for JSON output) |
 | `ring history` |  | Refresh R1 typed history. |
 | `ring history force` | A | Refresh R1 typed history past the freshness window. |
-| `ring panel feed` | A | Feed the glasses' Health panel from the ring (saved; off by default).<br/>`Usage: ring panel feed [on\|off]` |
+| `ring panel feed` | A | Feed the glasses' Health panel from the ring (saved; on by default).<br/>`Usage: ring panel feed [on\|off]` |
 | `ring panel history` | A | How often the feed refreshes ring history (steps, kcal, sleep).<br/>`Usage: ring panel history [minutes 10-1440] (default 30)` |
 | `ring panel off` | A | Same as ring panel feed off (saved). |
 | `ring panel on` | A | Same as ring panel feed on (saved). |

@@ -2771,7 +2771,7 @@ static const SettingEntry sensorLogSettingEntries[] = {
   { "healthLoggingPollIntervalSec", SETTING_INT, &gSettings.healthLoggingPollIntervalSec, 900, 0, nullptr, 60, 86400, "Health logging poll interval (sec)", nullptr, false, nullptr, "healthlogging interval" },
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
   // Stock G2 Health panel feed (G2_HealthPush.cpp); the commands are the only writers.
-  { "g2HealthPanelFeed", SETTING_BOOL, &gSettings.g2HealthPanelFeed, 0, 0, nullptr, 0, 1, "Glasses Health panel feed", nullptr, false, nullptr, "ring panel feed" },
+  { "g2HealthPanelFeed", SETTING_BOOL, &gSettings.g2HealthPanelFeed, 1, 0, nullptr, 0, 1, "Glasses Health panel feed", nullptr, false, nullptr, "ring panel feed" },
   { "g2HealthPanelHistoryMin", SETTING_INT, &gSettings.g2HealthPanelHistoryMin, 30, 0, nullptr, 10, 1440, "Glasses Health panel history refresh (min)", nullptr, false, nullptr, "ring panel history" },
 #endif
   // These persisted desires are intentionally read-only in the generic
