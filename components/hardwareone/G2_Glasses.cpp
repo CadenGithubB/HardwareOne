@@ -88,6 +88,8 @@ static_assert(g2repair::kHostEstablishTimeoutMs ==
 #include "G2_Ring.h"  // g2RingInit (eager registration in initG2Client)
 #include "G2_HealthPush.h"      // stock Health panel feed (sid 0x0E)
 #include "G2_HealthPushCore.h"  // its whitelist, re-checked at the wire
+#include "G2_StockFeed.h"       // stock widget fed with system metrics (sid 0x01)
+#include "G2_StockFeedCore.h"   // its whitelist, re-checked at the wire
 #include "G2_Page_Common.h"    // TextPager + paging ops (g2TextPagerRender)
 #include "G2_Page_Sensors.h"   // g2ShowSensorList() (per-page module)
 #include "G2_Page_Network.h"   // g2ShowNetworkMenu / g2NetworkHandleTap
@@ -5251,6 +5253,11 @@ static void g2DispatchCompleteEnvelope(G2Temple& t, const G2EnvelopeView& env,
   if (env.sid == hw1_g2_health_push::kSid && t.side == 'R')
     g2HealthPushOnRx(generation, env.payload, env.payloadLen);
 #endif
+  // Stock widget feed: acks to its messages and the glasses' page-state
+  // pushes. sid 0x01 also carries the dashboard layout traffic, so the
+  // ordinary handler still runs.
+  if (env.sid == hw1_g2_stock_feed::kSid)
+    g2StockFeedOnRx(t.side, generation, env.payload, env.payloadLen);
   handleEnvelope(t, env, generation, lifecycleEpoch, presentationEpoch);
 }
 
@@ -10468,6 +10475,41 @@ bool g2HealthWireSend(uint32_t generation, const uint8_t* pb, size_t len) {
 }
 #endif
 
+// Stock widget feed boundary (G2_StockFeed). Same right temple and busy test
+// as the Health panel, without the R1 dependency, plus the right temple's
+// firmware for the feed's version gate.
+bool g2StockFeedRightLink(uint32_t* generation, bool* busy, char* firmware, size_t firmwareCap) {
+  const G2LinkSnapshot link = g2LinkSnapshot();
+  if (generation) *generation = link.rightReady ? link.rightGeneration : 0;
+  if (busy) *busy = g2NativeVoiceActive() || quickNoteActive();
+  if (firmware && firmwareCap) {
+    size_t i = 0;
+    portENTER_CRITICAL(&gRxPacketMux);
+    for (; i + 1 < firmwareCap && i < sizeof(gR.firmwareVersion) && gR.firmwareVersion[i]; i++)
+      firmware[i] = gR.firmwareVersion[i];
+    portEXIT_CRITICAL(&gRxPacketMux);
+    firmware[i] = '\0';
+  }
+  return link.rightReady && link.rightGeneration != 0;
+}
+
+bool g2StockFeedWireSend(uint32_t generation, const uint8_t* pb, size_t len) {
+  // Last gate before the radio: only a whitelisted stock or clear message.
+  if (!generation || !hw1_g2_stock_feed::validateMessagePb(pb, len)) return false;
+  return sendPbFragmented(gR, allocSeq(), hw1_g2_stock_feed::kSid, G2_FLAG_REQUEST,
+                          pb, len, generation);
+}
+
+bool g2StockFeedRequestFirmware(uint32_t generation) {
+  const G2LinkSnapshot link = g2LinkSnapshot();
+  if (!generation || !link.rightReady || link.rightGeneration != generation) return false;
+  uint8_t env[64];
+  const size_t n = g2BuildSettingBasicRequest(allocSeq(), g2NextSettingsMagic(), env, sizeof(env));
+  return n && sendEnvelope(gR, env, n);
+}
+
+void g2StockFeedWake() { g2ControlWake(); }
+
 // Exact manual-terminal wire ordering.  Active is published last and cleared
 // with an exact CAS; a late worker can therefore never retire a newer token.
 // Allocation/queue failures retry without releasing ordering. If the worker
@@ -15304,6 +15346,9 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     // to the remaining deadline instead of waiting for the 5/6 s heartbeat.
     const uint32_t syncWaitMs = g2SyncLifecyclePendingWaitMs();
     if (syncWaitMs < ownerWaitMs) ownerWaitMs = syncWaitMs;
+    // The stock widget feed: a queued `g2 stats` request or a batch in flight.
+    const uint32_t stockWaitMs = g2StockFeedOwnerWaitMs();
+    if (stockWaitMs < ownerWaitMs) ownerWaitMs = stockWaitMs;
     const bool signalled =
         xSemaphoreTake(gBeatSem, pdMS_TO_TICKS(ownerWaitMs)) == pdTRUE;
     if (gBeatTaskStop) break;
@@ -15423,6 +15468,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     g2NativeTerminalTick();  // all queued EXIT/ACK/voice transitions win before TX
     g2NativeNotesTick();
     g2HealthPushTick();      // stock Health panel feed; pauses for the sessions above
+    g2StockFeedTick();       // stock widget fed with system metrics; pauses the same way
 
     // Process native EXIT/ACK first, then renew only a still-live lease.
     g2ConversateTick();
@@ -28555,6 +28601,18 @@ extern const CommandEntry g2Commands[] = {
 #if ENABLE_R1_HEALTH
   { "g2health",     "Open the Health (R1 vitals + graphs) app on the G2 lens", false, cmd_g2health, "Usage: g2health   (Overview/HR/HRV/SpO2/Battery on the lens; Back to exit)" },
 #endif
+  // The glasses' own stock widget fed with system metrics (G2_StockFeed).
+  { "g2 stats status",   "Stock widget feed: state, metrics shown now, sends and acks.", false, cmd_g2statsstatus },
+  { "g2 stats preview",  "Show the stock rows and the first message's bytes without sending.", false, cmd_g2statspreview,
+    "Usage: g2 stats preview" },
+  { "g2 stats send",     "Send one batch of the saved metrics to the stock widget now.", true, cmd_g2statssend,
+    "Usage: g2 stats send  (right temple, glasses firmware 2.3.2.14)" },
+  { "g2 stats feed",     "Feed the stock widget with system metrics (saved; off by default).", true, cmd_g2statsfeed,
+    "Usage: g2 stats feed [on|off]  (off clears the widget)" },
+  { "g2 stats metrics",  "Which metrics the stock widget shows, in order (saved).", true, cmd_g2statsmetrics,
+    "Usage: g2 stats metrics [label,label,...|default]  (up to 9 of CPU CPU0 CPU1 HEAP HBLK PSRM SD LFS TEMP LINK MESH RING; default CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING)" },
+  { "g2 stats interval", "How often the stock widget feed may send changed values (saved).", true, cmd_g2statsinterval,
+    "Usage: g2 stats interval [seconds 30-3600]  (default 60; 5 s while the stock page is open)" },
   { "g2sensors",    "Show device's sensor list on the G2 lens",        false, cmd_g2sensors },
   { "g2network",    "Show Network info page on the G2 lens",           false, cmd_g2network },
   { "g2settingspage","Show Settings inspector page on the G2 lens",    false, cmd_g2settingspage },

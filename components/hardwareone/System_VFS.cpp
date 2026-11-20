@@ -818,6 +818,11 @@ bool getStatsSnapshot(StorageType type, CapacitySnapshot& out,
   return true;
 }
 
+bool peekStatsSnapshot(StorageType type, CapacitySnapshot& out) {
+  // Cache only: no filesystem lock, no sample (see System_VFS.h).
+  return readCapacitySnapshot(type, kSnapshotAnyAgeMs, out);
+}
+
 void invalidateStatsSnapshot(StorageType type) {
   const size_t tier = capacityTierIndex(type);
   portENTER_CRITICAL(&gCapacitySnapshotMux);

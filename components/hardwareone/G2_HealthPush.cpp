@@ -19,6 +19,7 @@
 #include "System_Utils.h"
 
 namespace hp = hw1_g2_health_push;
+namespace feed = hw1_g2_feed;
 
 namespace {
 
@@ -60,20 +61,7 @@ bool sHistoryScheduled = false;
 
 // Read by commands on other tasks.
 struct Status {
-  bool linkReady;
-  bool busy;
-  uint32_t sends;
-  uint32_t sendFailures;
-  uint32_t acks;
-  uint32_t lastSendMs;
-  // The policy's own pair, which the tick tests before a manual send: the last
-  // write that was sent or tried on this link. lastSendMs above only moves
-  // when a write succeeded, and sends is never reset for a new link.
-  uint32_t lastAttemptMs;
-  bool attemptedThisLink;
-  uint32_t lastAckMs;
-  uint8_t lastMagic;
-  bool awaitingAck;
+  feed::Counters feed;  // link, sends, acks, failures (G2_FeedCore.h)
   bool lastWasTest;
   uint32_t historyRequests;
   uint32_t historyRefused;
@@ -197,11 +185,13 @@ hp::Input buildInput() {
 
 void publishStatus(bool ready, bool busy) {
   portENTER_CRITICAL(&sStatusMux);
-  sStatus.linkReady = ready;
-  sStatus.busy = busy;
-  sStatus.awaitingAck = sPolicy.awaitingAck;
-  sStatus.lastAttemptMs = sPolicy.lastSendMs;
-  sStatus.attemptedThisLink = sPolicy.sentThisLink;
+  feed::countLink(sStatus.feed, sPolicy, ready, busy);
+  portEXIT_CRITICAL(&sStatusMux);
+}
+
+void countFailure() {
+  portENTER_CRITICAL(&sStatusMux);
+  feed::countFailed(sStatus.feed);
   portEXIT_CRITICAL(&sStatusMux);
 }
 
@@ -220,13 +210,11 @@ bool sendSnapshot(const hp::Snapshot& s, uint32_t generation, uint32_t now, bool
             ok ? "sent" : "NOT sent");
   portENTER_CRITICAL(&sStatusMux);
   if (ok) {
-    sStatus.sends++;
-    sStatus.lastSendMs = now;
-    sStatus.lastMagic = sMagic;
+    feed::countSent(sStatus.feed, now, sMagic);
     sStatus.lastSent = s;
     sStatus.lastWasTest = test;
   } else {
-    sStatus.sendFailures++;
+    feed::countFailed(sStatus.feed);
   }
   portEXIT_CRITICAL(&sStatusMux);
   return ok;
@@ -280,7 +268,7 @@ void historyTick(uint32_t now, bool vitalsReadActive) {
 
 bool linkReadyPublished() {
   portENTER_CRITICAL(&sStatusMux);
-  const bool ready = sStatus.linkReady;
+  const bool ready = sStatus.feed.linkReady;
   portEXIT_CRITICAL(&sStatusMux);
   return ready;
 }
@@ -316,22 +304,20 @@ void g2HealthPushTick() {
   uint32_t generation = 0;
   bool busy = false;
   const bool ready = g2HealthRightLink(&generation, &busy);
-  if (!ready) {
-    // A one-shot request never outlives the link it was made for.
-    if (sForce.exchange(0, std::memory_order_acq_rel)) {
-      portENTER_CRITICAL(&sStatusMux);
-      sStatus.sendFailures++;
-      portEXIT_CRITICAL(&sStatusMux);
-    }
-    hp::policyTick(sPolicy, false, false, 0, now, hp::Snapshot{});
-    publishStatus(false, busy);
-    return;
-  }
-  // Exclusive glasses sessions pause the feed without resetting the link
-  // state, so nothing bursts out when they end.
-  if (busy) {
-    publishStatus(true, true);
-    return;
+  switch (feed::gate(ready, generation, busy)) {
+    case feed::Gate::Down:
+      // A one-shot request never outlives the link it was made for.
+      if (sForce.exchange(0, std::memory_order_acq_rel)) countFailure();
+      feed::linkDown(sPolicy);
+      publishStatus(false, busy);
+      return;
+    case feed::Gate::Paused:
+      // Exclusive glasses sessions pause the feed without resetting the link
+      // state, so nothing bursts out when they end.
+      publishStatus(true, true);
+      return;
+    case feed::Gate::Open:
+      break;
   }
   hp::Snapshot current;
   bool have;
@@ -342,15 +328,10 @@ void g2HealthPushTick() {
   const uint8_t force = sForce.exchange(0, std::memory_order_acq_rel);
   const hp::Action action =
       hp::policyTick(sPolicy, feedOn() && have, true, generation, now, current);
-  if (force && sPolicy.sentThisLink &&
-      (uint32_t)(now - sPolicy.lastSendMs) < kManualFloorMs) {
-    portENTER_CRITICAL(&sStatusMux);
-    sStatus.sendFailures++;  // manual sends are bounded too
-    portEXIT_CRITICAL(&sStatusMux);
+  if (force && feed::tooSoon(sPolicy, now, kManualFloorMs)) {
+    countFailure();  // manual sends are bounded too
   } else if (force == 1 && (!have || !hp::hasRingData(current))) {
-    portENTER_CRITICAL(&sStatusMux);
-    sStatus.sendFailures++;  // never blank the panel, not even by hand
-    portEXIT_CRITICAL(&sStatusMux);
+    countFailure();  // never blank the panel, not even by hand
   } else if (force) {
     (void)sendSnapshot(force == 2 ? testSnapshot() : current, generation, now, force == 2);
   } else if (action == hp::Action::Send) {
@@ -362,14 +343,13 @@ void g2HealthPushTick() {
 void g2HealthPushOnRx(uint32_t rightGeneration, const uint8_t* pb, size_t len) {
   uint8_t cmd = 0, magic = 0;
   if (rightGeneration != sPolicy.generation || !hp::parseAck(pb, len, cmd, magic)) return;
-  const bool matched = hp::policyAck(sPolicy, cmd, magic);
+  const bool matched = feed::onAck(sPolicy, rightGeneration, hp::kCmdMultData, cmd, magic) ==
+                       feed::AckResult::Complete;
   DEBUG_G2F("[G2-HEALTH] echo cmd=%u magic=%u %s", (unsigned)cmd, (unsigned)magic,
             matched ? "acked" : "unmatched");
   if (!matched) return;
   portENTER_CRITICAL(&sStatusMux);
-  sStatus.acks++;
-  sStatus.lastAckMs = millis();
-  sStatus.awaitingAck = false;
+  feed::countAck(sStatus.feed, millis());
   portEXIT_CRITICAL(&sStatusMux);
 }
 
@@ -386,9 +366,10 @@ const char* cmd_ringpanelstatus(const String& /*args*/) {
   formatSnapshot(cur, sizeof cur, s.current);
   formatSnapshot(last, sizeof last, s.lastSent);
   const uint32_t now = millis();
-  if (s.sends) snprintf(sentAgo, sizeof sentAgo, "%u s ago", (unsigned)((now - s.lastSendMs) / 1000));
+  const feed::Counters& f = s.feed;
+  if (f.sends) snprintf(sentAgo, sizeof sentAgo, "%u s ago", (unsigned)((now - f.lastSendMs) / 1000));
   else snprintf(sentAgo, sizeof sentAgo, "never");
-  if (s.acks) snprintf(ackAgo, sizeof ackAgo, "%u s ago", (unsigned)((now - s.lastAckMs) / 1000));
+  if (f.acks) snprintf(ackAgo, sizeof ackAgo, "%u s ago", (unsigned)((now - f.lastAckMs) / 1000));
   else snprintf(ackAgo, sizeof ackAgo, "never");
   if (s.historyRequests)
     snprintf(histAgo, sizeof histAgo, "%u min ago", (unsigned)((now - s.lastHistoryMs) / 60000));
@@ -401,13 +382,13 @@ const char* cmd_ringpanelstatus(const String& /*args*/) {
            "Sends %u, acked %u, failed %u; last send %s, last ack %s%s\n"
            "Ring history refresh every %u min while the feed runs: %u requested (last %s), "
            "%u refused; vitals read every %u s (the healthlogging interval setting)",
-           feedOn() ? "ON" : "off", s.linkReady ? "ready" : "not ready",
-           s.busy ? " (paused: another glasses session is active)" : "",
+           feedOn() ? "ON" : "off", f.linkReady ? "ready" : "not ready",
+           f.busy ? " (paused: another glasses session is active)" : "",
            g2RingIsConnected() ? "connected" : "not connected", cur,
            hp::hasRingData(s.current) ? "" : "\n           (no ring data yet; nothing is sent until there is)",
-           s.sends ? last : "(nothing)", s.sends && s.lastWasTest ? " [test values]" : "",
-           (unsigned)s.sends, (unsigned)s.acks, (unsigned)s.sendFailures, sentAgo, ackAgo,
-           s.awaitingAck ? "; waiting for the glasses' echo" : "",
+           f.sends ? last : "(nothing)", f.sends && s.lastWasTest ? " [test values]" : "",
+           (unsigned)f.sends, (unsigned)f.acks, (unsigned)f.sendFailures, sentAgo, ackAgo,
+           f.awaitingAck ? "; waiting for the glasses' echo" : "",
            (unsigned)(historyIntervalMs() / 60000), (unsigned)s.historyRequests, histAgo,
            (unsigned)s.historyRefused, (unsigned)gSettings.healthLoggingPollIntervalSec);
   return buf;
@@ -484,15 +465,15 @@ const char* cmd_ringpanelsend(const String& args) {
   portENTER_CRITICAL(&sStatusMux);
   current = sStatus.current;
   haveCurrent = sStatus.haveCurrent;
-  attemptedThisLink = sStatus.attemptedThisLink;
-  lastAttemptMs = sStatus.lastAttemptMs;
+  attemptedThisLink = sStatus.feed.attemptedThisLink;
+  lastAttemptMs = sStatus.feed.lastAttemptMs;
   portEXIT_CRITICAL(&sStatusMux);
   if (a != "test" && (!haveCurrent || !hp::hasRingData(current))) {
     return "Error: No ring data yet, nothing sent. Run ring poll and retry, "
            "or run ring panel send test.";
   }
   // The same test g2HealthPushTick makes: a failed write counts as well.
-  if (attemptedThisLink && (uint32_t)(millis() - lastAttemptMs) < kManualFloorMs) {
+  if (feed::tooSoon(attemptedThisLink, lastAttemptMs, millis(), kManualFloorMs)) {
     return "Error: A snapshot was sent or tried less than a second ago. Wait a second and retry.";
   }
   sForce.store(a == "test" ? 2 : 1);

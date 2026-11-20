@@ -494,6 +494,20 @@ const char* cmd_memsample(const String& argsInput) {
   return "[Memory] Sample displayed";
 }
 
+// The Tier 1 watch's internal largest-free-block reading (below). File scope
+// so memoryMonitorInternalLargestBlock() can hand it out: the system metrics
+// sampler reuses it instead of walking the heap a second time. SIZE_MAX until
+// the first read. Main loop only (both the writer and the reader run there).
+static size_t sTier1LargestFree = SIZE_MAX;
+static unsigned long sTier1LargestMs = 0;
+
+bool memoryMonitorInternalLargestBlock(size_t& outBytes, uint32_t* outSampledAtMs) {
+  if (sTier1LargestFree == SIZE_MAX) return false;
+  outBytes = sTier1LargestFree;
+  if (outSampledAtMs) *outSampledAtMs = (uint32_t)sTier1LargestMs;
+  return true;
+}
+
 void periodicMemorySample() {
   // ── Tier 1 (always-on): cheap DRAM-pressure watch ────────────────────────
   // Runs regardless of DEBUG_MEMORY so a shipping device still warns *before*
@@ -524,17 +538,15 @@ void periodicMemorySample() {
       // at most every 10 s; the free total is re-read every second. One event
       // per low episode (latched, 60 s cooldown) — see System_HeapLowCore.h.
       static heap_low_core::Watch heapLowWatch;
-      static size_t largestFree = SIZE_MAX;
-      static unsigned long lastLargestMs = 0;
-      if (largestFree == SIZE_MAX || (nowMs - lastLargestMs) >= 10000UL) {
-        lastLargestMs = nowMs;
-        largestFree = hw1InternalLargestBlock();
+      if (sTier1LargestFree == SIZE_MAX || (nowMs - sTier1LargestMs) >= 10000UL) {
+        sTier1LargestMs = nowMs;
+        sTier1LargestFree = hw1InternalLargestBlock();
       }
-      if (heap_low_core::update(heapLowWatch, dramFree, largestFree, (uint32_t)nowMs)) {
+      if (heap_low_core::update(heapLowWatch, dramFree, sTier1LargestFree, (uint32_t)nowMs)) {
         char subject[16];
         char detail[32];
         snprintf(subject, sizeof(subject), "%u", (unsigned)dramFree);
-        snprintf(detail, sizeof(detail), "largest %u", (unsigned)largestFree);
+        snprintf(detail, sizeof(detail), "largest %u", (unsigned)sTier1LargestFree);
         systemEventPost(SYSEVT_HEAP_LOW, subject, detail);
       }
     }

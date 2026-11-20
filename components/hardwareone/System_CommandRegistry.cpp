@@ -752,7 +752,11 @@ static constexpr CommandModule gCommandModules[] = {
     "recording. g2micon/g2micoff are low-level stream probes; g2micrec and g2micwav "
     "remain SD-backed raw-LC3 and decoded-WAV diagnostics. closeg2 disconnects but keeps "
     "the GATT cache for fast reconnect; closeg2 full also frees the cache to recover "
-    "about 30 KB. The remaining g2* commands are low-level protocol probes and "
+    "about 30 KB. The glasses' own stock widget can show system metrics instead of share prices: "
+    "g2 stats status and g2 stats preview show the rows and bytes; g2 stats send (admin) sends one "
+    "batch; g2 stats feed [on|off] (admin, saved, off by default) feeds it on change, g2 stats "
+    "metrics <labels> and g2 stats interval <seconds> (admin, saved) choose what and how often. "
+    "The remaining g2* commands are low-level protocol probes and "
     "diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).", g2Commands,           &g2CommandsCount, 0, nullptr },
   { "ring",       "Even R1 ring link, health and controls", "The Even R1 smart ring over BLE, through a serialized, "
     "profile-gated transaction owner. ring scan [seconds] finds it and openring [saved|reconnect|<mac>] "

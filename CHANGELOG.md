@@ -14,6 +14,18 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Added
+- The G2 glasses' own stock widget can show system metrics instead of share prices (stock glasses
+  firmware 2.3.2.14). Each metric is one stock: label as the ticker, long name as the company, value
+  as the price, change since the previous sample with its arrow, the last 60 samples as the chart.
+  New commands `g2 stats status`, `g2 stats preview`, and (admin) `g2 stats send`,
+  `g2 stats feed [on|off]`, `g2 stats metrics <labels|default>`, `g2 stats interval <seconds>`;
+  settings `g2StockFeed` (off by default in every build), `g2StockMetrics` (default
+  `CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING`) and `g2StockIntervalSec` (default 60, 30-3600). The
+  feed writes the right temple only: a full set after every connect, then on change at most once
+  per interval, every 5 s while the glasses report the expanded stock page open (until they report
+  it closed or 90 s pass without a page update), paused during voice sessions and QuickNote, each
+  stock acked by its magic before the next, one retry; feed off clears the widget. Encoder byte-exact against the Even app's messages (test fixtures); host-tested, not
+  yet run on the glasses.
 - Mesh workers follow their master's radio channel. Every heartbeat now states its sender's channel
   (byte 3, which older firmware sends as 0 and ignores). A worker on `espnowchannel auto` uses the
   channel its master last announced, remembered across reboots (setting `masterChannel`, read-only).

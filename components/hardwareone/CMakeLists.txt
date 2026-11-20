@@ -174,6 +174,7 @@ set(hardwareone_srcs
         G2_ImageViewers.cpp
         G2_NativeNotes.cpp
         G2_HealthPush.cpp
+        G2_StockFeed.cpp
         G2_Ring.cpp
         BLE_CentralTx.cpp
         BLE_CentralCoordinator.cpp
@@ -267,6 +268,7 @@ set(hardwareone_srcs
         System_MemUtil.cpp
         System_MemTracker.cpp
         System_MemoryMonitor.cpp
+        System_Metrics.cpp
         System_MemDiag.cpp
         System_SensorLogging.cpp
         System_CaptureCrypto.cpp

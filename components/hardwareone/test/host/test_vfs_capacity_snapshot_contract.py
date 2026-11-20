@@ -50,6 +50,15 @@ assert "sampleCapacityFreshLocked(type)" in snapshot
 assert "if (!result.valid) return false" in snapshot
 assert "publishCapacitySnapshot(type, generation" in snapshot
 
+# The cache-only read never waits and never samples: one spinlocked cache copy
+# at any age, nothing else.
+assert "bool peekStatsSnapshot(StorageType type, CapacitySnapshot& out);" in vfs_h
+peek = function_body(vfs_cpp, "bool peekStatsSnapshot(StorageType type")
+assert "readCapacitySnapshot(type, kSnapshotAnyAgeMs, out)" in peek
+for forbidden in ("FsLockGuard", "sampleCapacityFreshLocked", "publishCapacitySnapshot",
+                  "isSdAvailable", "getStats"):
+    assert forbidden not in peek, forbidden
+
 # The storage_stats executable covers sample validity and unchanged outputs on
 # failure against the actual sampler/APIs, including the shared cache core.
 
@@ -133,6 +142,13 @@ for path in COMPONENT.glob("*.cpp"):
         continue
     assert "VFS::getStatsSnapshot(" not in path.read_text(encoding="utf-8"), path
 
+# The cache-only read has one caller, the main-loop metrics sampler, which must
+# not take the filesystem lock at all.
+for path in COMPONENT.glob("*.cpp"):
+    if path.name == "System_Metrics.cpp":
+        continue
+    assert "VFS::peekStatsSnapshot(" not in path.read_text(encoding="utf-8"), path
+
 # The overflow decision never reads presentation snapshots. Its free-space walk
 # hands a usable reading to the INTERNAL snapshot (fenced by the generation
 # taken before the walk), so status polls need no walk of their own; the
@@ -143,6 +159,7 @@ overflow = vfs_cpp[
 ]
 assert "gLogFreeCheckCached" in overflow
 assert "getStatsSnapshot" not in overflow
+assert "peekStatsSnapshot" not in overflow
 assert "readCapacitySnapshot" not in overflow
 assert "gCapacitySnapshots" not in overflow
 refresh = function_body(vfs_cpp, "static size_t refreshLittleFsFreeCached()")

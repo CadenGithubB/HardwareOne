@@ -226,6 +226,16 @@ bool getStatsSnapshot(StorageType type, CapacitySnapshot& out,
  *  (invalidateStatsSnapshot), so the next reader samples once. */
 static constexpr uint32_t kSnapshotAnyAgeMs = UINT32_MAX;
 
+/** Cache-only capacity read for periodic telemetry on a loop that must never
+ *  wait (the system metrics sampler on the main loop): the tier's newest
+ *  successful snapshot of any age, copied under the short cache spinlock.
+ *  Never takes the filesystem lock and never samples. Returns false and
+ *  leaves `out` unchanged when the tier has none: before its first reading,
+ *  after invalidateStatsSnapshot(), and after every SD mount, unmount, remount
+ *  or format (each invalidates the SD tier), so an SD hit also means the card
+ *  was mounted when it was last read. */
+bool peekStatsSnapshot(StorageType type, CapacitySnapshot& out);
+
 /** Invalidate one tier's presentation snapshot. AUTO follows the existing
  * getStats routing rule and addresses INTERNAL. Generation fencing prevents a
  * slow in-flight refresh from publishing across this invalidation. */

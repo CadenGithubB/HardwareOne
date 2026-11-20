@@ -1974,7 +1974,35 @@ g2hold sim <press|release|abort> - Admin: synthetic hold through the real dispat
 g2holdaction [0|1]              - What a hold does on a HW1 page: 0 = Off, 1 = QuickNote
 g2holdsource [0|1]              - 0 = ring only, 1 = ring + temples
 g2holdunprofiled [0|1]          - Testing: act on holds from unprofiled glasses firmware
+g2 stats status                 - Stock widget feed: state, metrics shown now, sends and acks
+g2 stats preview                - The stock rows and the first message's bytes, not sent
+g2 stats send                   - Admin: send one batch of the saved metrics now
+g2 stats feed [on|off]          - Admin: feed the stock widget with system metrics (saved, off by default)
+g2 stats metrics [list|default] - Admin: up to 9 metrics, in order (saved)
+g2 stats interval [seconds]     - Admin: least time between sends of changed values, 30-3600 (default 60)
 ```
+
+**Stock widget as a system-stats display.** The glasses' own stock widget (dashboard tile and
+expanded stock page, stock firmware 2.3.2.14 only) can show HardwareOne's system metrics in place of
+share prices: each metric is one "stock" with its label as the ticker (row 1), its long name as the
+company (row 2), the value as the price, the change since the previous sample as the change with an
+up/down/flat arrow, and its last 60 samples as the chart (percentages on a fixed 0-100 scale).
+`g2 stats feed on` (admin, saved, off by default) sends a full set to the right temple after every
+connect, then whenever a shown value changed, at most once per `g2 stats interval` (default 60 s)
+and every 5 s while the glasses report the expanded stock page open. It pauses while Even AI,
+Conversate, the native terminal, a native note or QuickNote use the glasses, and waits for the
+glasses' ack to each stock before sending the next (one retry after 3 s). The 5 s cadence ends when
+the glasses report the page closed, or 90 s after their last page update (a display that times out
+does not report it). A set that was cut short (a lost ack or a failed write) goes again after a
+clear, so the tile can be blank for a second or two. `g2 stats feed off` clears the widget. The default metrics, in order, are `CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING` (CPU load,
+internal RAM used, PSRAM used, SD card used, flash storage used, chip temperature, BLE links in use,
+ESP-NOW peers up, R1 ring battery); `CPU0`, `CPU1` (per core) and `HBLK` (largest internal RAM block,
+KB) can be chosen too, e.g. `g2 stats metrics cpu,heap,psrm`. A metric this device cannot read is
+left out rather than shown as 0; SD and flash use come from the storage readings the firmware already
+keeps, so right after boot or a card change they are left out until one exists. The stock tile has to be in the glasses' dashboard layout (set in
+the Even app); HardwareOne does not change the layout, and the Even app replaces the rows with real
+stocks when it next sends its own. Real share prices are added in the Even app's stock watchlist;
+`g2 stats metrics` only chooses system metrics.
 
 **Apps -> Health** (lens, `ENABLE_R1_HEALTH`): left list (Overview / Activity / Trends / Heart Rate /
 HRV / SpO2 / Temperature / Battery / Poll Now / Health Logging). **Overview** shows native-text

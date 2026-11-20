@@ -163,6 +163,15 @@ set_target_properties(heap_low_core_tests PROPERTIES
 target_include_directories(heap_low_core_tests PRIVATE ../..)
 target_compile_options(heap_low_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# System metrics sampler core (System_MetricsCore.h, stock-feed phase 3): the
+# metric table, 60-sample history ring and wrap, change/trend, consumer
+# intervals and the CPU warm-up schedule.
+add_executable(system_metrics_core_tests test_system_metrics_core.cpp)
+set_target_properties(system_metrics_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(system_metrics_core_tests PRIVATE ../..)
+target_compile_options(system_metrics_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # The production tracker wraps this dependency-light registry with FreeRTOS
 # synchronization. Exercise the actual hash/aggregate/top-K state machine.
 add_executable(memtracker_core_tests test_memtracker_core.cpp)
@@ -398,6 +407,23 @@ set_target_properties(g2_health_push_core_tests PROPERTIES
 target_compile_options(g2_health_push_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# Shared glasses dashboard-feed policy (Health panel, stock widget): gates,
+# settle, send on change, ack timeout + retry, multi-message units, counters.
+add_executable(g2_feed_core_tests test_g2_feed_core.cpp)
+set_target_properties(g2_feed_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(g2_feed_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
+# Stock widget fed with system metrics (G2_StockFeedCore.h): byte-exact
+# against the Even app capture fixtures (test values), clamps, whitelist
+# re-parse, acks and page-state pushes, command arguments, feed gating.
+add_executable(g2_stock_feed_core_tests test_g2_stock_feed_core.cpp)
+set_target_properties(g2_stock_feed_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(g2_stock_feed_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # Bounds-safe bit operations shared by the notification policy and OLED. The
 # real production header derives capacity from each owning array reference.
 add_executable(event_kind_mask_tests test_event_kind_mask.cpp)
@@ -580,6 +606,10 @@ if(HW1_SANITIZE)
     -fsanitize=address,undefined -g)
   target_link_options(memutil_no_psram_tests PRIVATE
     -fsanitize=address,undefined)
+  target_compile_options(system_metrics_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(system_metrics_core_tests PRIVATE
+    -fsanitize=address,undefined)
   target_compile_options(memtracker_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(memtracker_core_tests PRIVATE
@@ -647,6 +677,14 @@ if(HW1_SANITIZE)
   target_compile_options(g2_health_push_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(g2_health_push_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(g2_feed_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(g2_feed_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(g2_stock_feed_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(g2_stock_feed_core_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(event_kind_mask_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -1596,6 +1634,7 @@ add_test(NAME memutil_tests COMMAND memutil_tests)
 add_test(NAME memutil_no_psram COMMAND memutil_no_psram_tests)
 add_test(NAME memtracker_core_tests COMMAND memtracker_core_tests)
 add_test(NAME heap_low_core_tests COMMAND heap_low_core_tests)
+add_test(NAME system_metrics_core_tests COMMAND system_metrics_core_tests)
 add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
 add_test(NAME device_name_core_tests COMMAND device_name_core_tests)
 add_test(NAME device_name_migration_tests COMMAND device_name_migration_tests)
@@ -1618,6 +1657,10 @@ add_test(NAME espnow_forward_core_tests COMMAND espnow_forward_core_tests)
 add_test(NAME map_viewport_core_tests COMMAND map_viewport_core_tests)
 add_test(NAME g2_health_graph_core_tests COMMAND g2_health_graph_core_tests)
 add_test(NAME g2_health_push_core_tests COMMAND g2_health_push_core_tests)
+add_test(NAME g2_feed_core_tests COMMAND g2_feed_core_tests)
+add_test(NAME g2_stock_feed_core_tests COMMAND g2_stock_feed_core_tests)
+add_test(NAME g2_stock_feed_source COMMAND ${Python3_EXECUTABLE}
+  ${CMAKE_CURRENT_LIST_DIR}/test_g2_stock_feed_source.py)
 add_test(NAME event_kind_mask_tests COMMAND event_kind_mask_tests)
 add_test(NAME command_limit_tests COMMAND command_limit_tests)
 add_test(NAME command_lookup_core_tests COMMAND command_lookup_core_tests)
@@ -3502,6 +3545,10 @@ add_test(
           --expect 6 --expect-malloc 6)
 add_test(NAME task_heap_measure COMMAND ${Python3_EXECUTABLE}
   ${CMAKE_CURRENT_LIST_DIR}/test_task_heap_measure.py)
+# The system metrics sampler reads cached figures only: no C6 memory RPC, fresh
+# filesystem stat or WiFi.RSSI() from the main loop (stock-feed phase 3).
+add_test(NAME system_metrics_source COMMAND ${Python3_EXECUTABLE}
+  ${CMAKE_CURRENT_LIST_DIR}/test_system_metrics_source.py)
 add_test(NAME stt_conv_scratch COMMAND ${Python3_EXECUTABLE}
   ${CMAKE_CURRENT_LIST_DIR}/test_stt_conv_scratch.py)
 set_tests_properties(stt_conv_scratch PROPERTIES SKIP_RETURN_CODE 77)

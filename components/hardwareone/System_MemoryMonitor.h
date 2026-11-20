@@ -41,4 +41,10 @@ const char* cmd_memsample(const String& argsInput);
 // Periodic memory sampling (called from main loop when debug flag enabled)
 void periodicMemorySample();
 
+// The internal (8-bit) largest free block as the always-on Tier 1 watch in
+// periodicMemorySample() last read it: at most every 10 s, so it can lag by
+// up to 10 s. No heap walk here. False before the first reading. Main loop
+// only. *outSampledAtMs (optional): millis() of that reading.
+bool memoryMonitorInternalLargestBlock(size_t& outBytes, uint32_t* outSampledAtMs = nullptr);
+
 #endif // SYSTEM_MEMORYMONITOR_H

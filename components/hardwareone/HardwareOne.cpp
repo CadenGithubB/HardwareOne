@@ -125,6 +125,7 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "OLED_Display.h"  // Always include - wrapper functions are safe to call when disabled
 #include "System_NeoPixel.h"
 #include "System_MemoryMonitor.h"
+#include "System_Metrics.h"
 #if ENABLE_WIFI
   #include <arpa/inet.h>
 #endif
@@ -2556,6 +2557,10 @@ void hardwareone_loop() {
   // its DEBUG_MEMORY-gated verbose sample, so a shipping device warns before
   // it OOMs even with memory debugging off.
   periodicMemorySample();
+  // System metrics snapshot + history (System_Metrics.h): idle until a
+  // consumer opens it; cached reads only. After the memory sample so the
+  // largest-block figure it reuses is current.
+  systemMetricsTick();
 
   // Owner-scoped settings batches normally finish through `savesettings`.
   // Reap abandoned transport/request scopes and retry retained write failures

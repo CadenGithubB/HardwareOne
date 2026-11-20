@@ -21,6 +21,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "G2_FeedCore.h"
+
 namespace hw1_g2_health_push {
 
 static constexpr uint8_t kSid = 0x0E;
@@ -385,49 +387,26 @@ inline bool validateSnapshotPb(const uint8_t* pb, size_t len,
 // leading cmd/magic pair is read; anything after it is ignored.
 inline bool parseAck(const uint8_t* pb, size_t len, uint8_t& cmd,
                      uint8_t& magic) {
-  if (!pb || len < 4) return false;
-  Reader r{pb, len, 0};
-  uint32_t c = 0, m = 0;
-  if (!r.expectVarintField(1, c) || !r.expectVarintField(2, m) || c > 0xFF ||
-      m > 0xFF)
-    return false;
-  cmd = (uint8_t)c;
-  magic = (uint8_t)m;
-  return true;
+  return hw1_g2_feed::parseCmdMagic(pb, len, cmd, magic);
 }
 
-// Rolling request id, never 0 (0 would be omitted by a proto3 encoder and
-// cannot be told apart from "no magic" in an echo).
-inline uint8_t nextMagic(uint8_t prev) { return (uint8_t)(prev == 0xFF ? 1 : prev + 1); }
+// Rolling request id, never 0 (shared with every dashboard feed).
+using hw1_g2_feed::nextMagic;
 
 // ---------------------------------------------------------------- policy
+// The send policy is the shared dashboard-feed core (G2_FeedCore.h) with the
+// Health panel's timing; the key is the clamped snapshot itself.
 
 static constexpr uint32_t kConnectSettleMs = 2000;
 static constexpr uint32_t kMinIntervalMs = 60000;
 static constexpr uint32_t kAckTimeoutMs = 3000;
 static constexpr uint8_t kMaxRetries = 1;
+static constexpr hw1_g2_feed::Timing kTiming = {kConnectSettleMs, kMinIntervalMs,
+                                                kAckTimeoutMs, kMaxRetries};
 
-enum class Action : uint8_t { None, Send };
+using Action = hw1_g2_feed::Action;
+using Policy = hw1_g2_feed::Policy<Snapshot>;
 
-struct Policy {
-  uint32_t generation = 0;      // right-temple link generation being served
-  uint32_t readySinceMs = 0;
-  bool sentThisLink = false;
-  uint32_t lastSendMs = 0;
-  Snapshot lastAcked;
-  bool haveAcked = false;
-  // Last snapshot that reached the radio (acked or not). An unchanged
-  // snapshot is never re-sent after its retry, acked or rejected.
-  Snapshot lastAttempted;
-  bool haveAttempted = false;
-  bool awaitingAck = false;
-  uint8_t awaitingMagic = 0;
-  uint8_t retries = 0;
-  Snapshot pending;
-};
-
-// Decide whether to send now. `ready` = right temple session ready at
-// `generation`. Wrap-safe millisecond arithmetic throughout.
 // True when at least one value came from the ring. Goals are defaults, not
 // data. An all-zero snapshot would blank every row on the glasses (e.g. right
 // after boot, when the glasses connect before the ring), so it is never sent
@@ -437,68 +416,28 @@ inline bool hasRingData(const Snapshot& s) {
          s.heartRateAvg || s.spo2 || s.spo2Avg;
 }
 
+// Decide whether to send now. `ready` = right temple session ready at
+// `generation`.
 inline Action policyTick(Policy& p, bool enabled, bool ready,
                          uint32_t generation, uint32_t nowMs,
                          const Snapshot& current) {
-  if (!ready || generation == 0) {
-    p.generation = 0;
-    p.awaitingAck = false;
-    return Action::None;
-  }
-  if (generation != p.generation) {
-    p = Policy{};
-    p.generation = generation;
-    p.readySinceMs = nowMs;
-  }
-  if (!enabled || !hasRingData(current)) return Action::None;
-  if ((uint32_t)(nowMs - p.readySinceMs) < kConnectSettleMs) return Action::None;
-  if (p.awaitingAck) {
-    if ((uint32_t)(nowMs - p.lastSendMs) < kAckTimeoutMs) return Action::None;
-    p.awaitingAck = false;
-    if (p.retries < kMaxRetries) {
-      p.retries++;
-      p.pending = current;
-      return Action::Send;
-    }
-    // Give up until the data changes.
-  }
-  if (!p.sentThisLink) {
-    p.retries = 0;
-    p.pending = current;
-    return Action::Send;
-  }
-  if ((uint32_t)(nowMs - p.lastSendMs) < kMinIntervalMs) return Action::None;
-  if (p.haveAttempted && current == p.lastAttempted) return Action::None;
-  p.retries = 0;
-  p.pending = current;
-  return Action::Send;
+  return hw1_g2_feed::tick(p, kTiming, enabled, hasRingData(current), ready,
+                           generation, nowMs, current);
 }
 
 inline void policySent(Policy& p, uint32_t nowMs, uint8_t magic) {
-  p.sentThisLink = true;
-  p.lastSendMs = nowMs;
-  p.awaitingAck = true;
-  p.awaitingMagic = magic;
-  p.lastAttempted = p.pending;
-  p.haveAttempted = true;
+  hw1_g2_feed::sent(p, nowMs, magic, 1);
 }
 
 // The write itself failed (locks/link): nothing reached the glasses, so the
 // same snapshot may be tried again once the minimum interval has passed.
 inline void policySendFailed(Policy& p, uint32_t nowMs) {
-  p.sentThisLink = true;
-  p.lastSendMs = nowMs;
-  p.awaitingAck = false;
+  hw1_g2_feed::sendFailed(p, nowMs);
 }
 
 inline bool policyAck(Policy& p, uint8_t cmd, uint8_t magic) {
-  if (!p.awaitingAck || cmd != kCmdMultData || magic != p.awaitingMagic)
-    return false;
-  p.awaitingAck = false;
-  p.lastAcked = p.pending;
-  p.haveAcked = true;
-  p.retries = 0;
-  return true;
+  return hw1_g2_feed::ack(p, kCmdMultData, cmd, magic) ==
+         hw1_g2_feed::AckResult::Complete;
 }
 
 }  // namespace hw1_g2_health_push

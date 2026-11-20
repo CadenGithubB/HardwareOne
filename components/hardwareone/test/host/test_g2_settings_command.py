@@ -58,8 +58,9 @@ def main():
     # All ordinary BASIC callers must share the rotating ID allocator; the
     # fresh-read helper allocates its named transaction token before sending.
     basic_calls = re.findall(r'g2BuildSettingBasicRequest\([^;]+;', owner)
-    assert len(basic_calls) == 5
-    assert sum('g2NextSettingsMagic()' in call for call in basic_calls) == 4
+    # (The sixth is the stock widget feed's version query, g2StockFeedRequestFirmware.)
+    assert len(basic_calls) == 6
+    assert sum('g2NextSettingsMagic()' in call for call in basic_calls) == 5
     template = (HERE / 'g2_settings_command_harness.cpp').read_text()
     source = template.replace('// INSERT_PROTOCOL', header + '\n' + protocol)
     source = source.replace('// INSERT_TYPES_STATE', types + '\n' + state)

@@ -2769,11 +2769,20 @@ static const SettingEntry sensorLogSettingEntries[] = {
 #if ENABLE_R1_HEALTH
   { "healthLoggingEnabled", SETTING_BOOL, &gSettings.healthLoggingEnabled, 0, 0, nullptr, 0, 1, "Health logging", nullptr, false, nullptr, "healthlogging" },
   { "healthLoggingPollIntervalSec", SETTING_INT, &gSettings.healthLoggingPollIntervalSec, 900, 0, nullptr, 60, 86400, "Health logging poll interval (sec)", nullptr, false, nullptr, "healthlogging interval" },
+#endif
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
+#if ENABLE_R1_HEALTH
   // Stock G2 Health panel feed (G2_HealthPush.cpp); the commands are the only writers.
   { "g2HealthPanelFeed", SETTING_BOOL, &gSettings.g2HealthPanelFeed, 1, 0, nullptr, 0, 1, "Glasses Health panel feed", nullptr, false, nullptr, "ring panel feed" },
   { "g2HealthPanelHistoryMin", SETTING_INT, &gSettings.g2HealthPanelHistoryMin, 30, 0, nullptr, 10, 1440, "Glasses Health panel history refresh (min)", nullptr, false, nullptr, "ring panel history" },
 #endif
+  // Stock G2 stock widget fed with system metrics (G2_StockFeed.cpp); the
+  // commands are the only writers. Off by default in every build for now.
+  { "g2StockFeed", SETTING_BOOL, &gSettings.g2StockFeed, 0, 0, nullptr, 0, 1, "Glasses stock widget feed (system metrics)", nullptr, false, nullptr, "g2 stats feed" },
+  { "g2StockIntervalSec", SETTING_INT, &gSettings.g2StockIntervalSec, 60, 0, nullptr, 30, 3600, "Glasses stock widget feed interval (sec)", nullptr, false, nullptr, "g2 stats interval" },
+  { "g2StockMetrics", SETTING_STRING, &gSettings.g2StockMetrics, 0, 0, "CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING", 0, 0, "Glasses stock widget metrics (in order)", nullptr, false, nullptr, "g2 stats metrics" },
+#endif
+#if ENABLE_R1_HEALTH
   // These persisted desires are intentionally read-only in the generic
   // settings UI. Mutations must use G2_Ring's dedicated async setters so a
   // flash write is never mistaken for a ring ACK/readback.
