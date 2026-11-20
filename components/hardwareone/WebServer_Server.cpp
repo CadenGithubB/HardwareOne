@@ -38,6 +38,7 @@
 #include "System_Mutex.h"
 #include "System_PollPause.h"
 #include "System_Settings.h"
+#include "System_TaskUtils.h"  // PRO_CORE, TASK_PRIORITY_NORMAL: where the web server task runs
 #include "System_StatePaths.h"  // HW1_PENDING_USERS_JSON_PATH — the pending account list
 #include "System_ConfigLoad.h"
 #include "System_SelfDevice.h"
@@ -2523,8 +2524,11 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
       DEBUG_STORAGEF("[handleFileUpload] Chunk %d: %d bytes (total %d/%d)", (int)chunkIndex, ret, (int)received, (int)contentLen);
 
       for (int i = 0; i < ret; i++) {
-        // Yield every 64 bytes to prevent WDT timeout during base64 decoding
-        // Use delay(0) instead of taskYIELD() to ensure IDLE task runs and feeds watchdog
+        // Yield every 64 bytes during base64 decoding. delay(0) is
+        // vTaskDelay(0): it lets tasks of the same or a higher priority run,
+        // not lower ones. The main loop, cmd_exec and the idle task (the task
+        // watchdog's feeder) run while this handler blocks in httpd_req_recv
+        // or in the filesystem, once per chunk.
         if ((i & 0x3F) == 0) {
           delay(0);
         }
@@ -5671,6 +5675,10 @@ void startHttpServer() {
       // (HTTP request handling ~18 KB + mbedtls TLS handshake
       // ~8–12 KB) is ~30 KB → 44 KB leaves ~14 KB headroom.
       sslConfig.httpd.stack_size = 11059;
+      // Placement: see the plain HTTP path below. The IDF defaults are
+      // priority 5 with no affinity.
+      sslConfig.httpd.core_id = PRO_CORE;
+      sslConfig.httpd.task_priority = TASK_PRIORITY_NORMAL;
       sslConfig.httpd.recv_wait_timeout = 20;
       sslConfig.httpd.send_wait_timeout = 20;
       // 8 slots: browsers open up to 6 parallel connections per host, and a
@@ -5765,6 +5773,16 @@ void startHttpServer() {
     // runs with its own larger stack — this value is only in effect
     // when running unencrypted.
     config.stack_size = 7680;
+    // Placement (both servers): core 0 with the radio and I/O paths it
+    // serves, at priority 3, below the priority-5 real-time paths (ESP-NOW,
+    // microphone capture, speech recognition) and the priority-4 ring owner.
+    // The IDF defaults are priority 5 with no affinity, which let a handler
+    // delay those paths whenever the scheduler put it on their core.
+    // The main loop and cmd_exec run on core 0 at priority 1, so handler CPU
+    // time still runs before them; a handler that blocks on a socket, a
+    // semaphore or the filesystem lets them run.
+    config.core_id = PRO_CORE;
+    config.task_priority = TASK_PRIORITY_NORMAL;
     config.recv_wait_timeout = 30;  // 30 second timeout for large uploads
     config.send_wait_timeout = 30;  // 30 second timeout for large responses
     // Note: max header length is set via CONFIG_HTTPD_MAX_REQ_HDR_LEN in sdkconfig

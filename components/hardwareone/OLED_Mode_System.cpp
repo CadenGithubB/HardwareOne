@@ -16,6 +16,7 @@
 // Must come before the first hw1Internal*() use (this file also includes it
 // further down, but that is after the System/memory render paths).
 #include "System_MemUtil.h"
+#include "System_MemReportCore.h"  // percentOf, saturatingSub: the memreport rounding rule
 
 #if ENABLE_WIFI
 #include <WiFi.h>
@@ -112,8 +113,6 @@ struct MemoryRenderData {
   size_t totalPsram;
   size_t usedPsram;
   int psramPercent;
-  size_t minFreeHeap;
-  size_t largestBlock;
   bool hasPsram;
   bool valid;
 };
@@ -125,8 +124,13 @@ void prepareMemoryData() {
   // Internal 8-bit only — see hw1InternalFreeBytes() in System_MemUtil.h.
   memoryRenderData.freeHeap = hw1InternalFreeBytes();
   memoryRenderData.totalHeap = hw1InternalTotalBytes();
-  memoryRenderData.usedHeap = memoryRenderData.totalHeap - memoryRenderData.freeHeap;
-  memoryRenderData.heapPercent = (memoryRenderData.usedHeap * 100) / memoryRenderData.totalHeap;
+  // Used never goes below 0 and the percent is 0 when the total reads 0
+  // (memreport_core::percentOf, the rule the memreport text uses): the page
+  // draws an empty bar instead of dividing by zero.
+  memoryRenderData.usedHeap = (size_t)memreport_core::saturatingSub(
+      memoryRenderData.totalHeap, memoryRenderData.freeHeap);
+  memoryRenderData.heapPercent = (int)memreport_core::percentOf(
+      memoryRenderData.usedHeap, memoryRenderData.totalHeap);
   
   // Get PSRAM data
   memoryRenderData.freePsram = ESP.getFreePsram();
@@ -134,15 +138,16 @@ void prepareMemoryData() {
   memoryRenderData.hasPsram = (memoryRenderData.totalPsram > 0);
   
   if (memoryRenderData.hasPsram) {
-    memoryRenderData.usedPsram = memoryRenderData.totalPsram - memoryRenderData.freePsram;
-    memoryRenderData.psramPercent = (memoryRenderData.usedPsram * 100) / memoryRenderData.totalPsram;
+    memoryRenderData.usedPsram = (size_t)memreport_core::saturatingSub(
+        memoryRenderData.totalPsram, memoryRenderData.freePsram);
+    memoryRenderData.psramPercent = (int)memreport_core::percentOf(
+        memoryRenderData.usedPsram, memoryRenderData.totalPsram);
   }
   
-  // Get additional stats
-  memoryRenderData.minFreeHeap = hw1InternalMinFreeBytes();
-  // Bare MALLOC_CAP_8BIT also matches the SPIRAM heap, so this was reporting
-  // PSRAM's ~1.5 MB block as if it were internal.
-  memoryRenderData.largestBlock = hw1InternalLargestBlock();
+  // The page draws free/total and the two bars only. It used to read the
+  // low-water mark and the largest free block as well and never drew either;
+  // the largest-block read walks the whole internal heap under its lock, on
+  // every repaint. `memreport` and `memsample` show both figures.
   
   memoryRenderData.valid = true;
 }

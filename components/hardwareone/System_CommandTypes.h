@@ -78,6 +78,11 @@ enum CommandContextBehavior : uint8_t {
   // queued open/start operation from surviving logout/re-login and attaching
   // itself to a replacement host session.
   COMMAND_CONTEXT_REQUIRE_G2_EVENAI_AUTHORITY = 1u << 2,
+  // A read-only status command a web page handler polls through
+  // executeInternalStatusCommand (System_Utils.cpp). Nobody ran it, so it
+  // writes no command-audit.log line and no [CMD] echo
+  // (commandExecutionLogSuppressed). Only that helper sets it.
+  COMMAND_CONTEXT_INTERNAL_STATUS_POLL = 1u << 3,
 };
 
 struct CommandContext {

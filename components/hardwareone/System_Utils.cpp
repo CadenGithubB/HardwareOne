@@ -144,6 +144,7 @@ void secureClearString(String& s) {
 #include "System_I2C.h"     // For I2CSensorEntry, ConnectedDevice, MAX_CONNECTED_DEVICES
 #include "System_MemUtil.h"       // For AllocPref
 #include "System_MemTracker.h"
+#include "System_MemReportCore.h"  // memreport: one snapshot, one field table, both forms
 
 // Runtime subsystem interfaces used by the utilities and executor below
 #include "System_Filesystem.h"
@@ -530,9 +531,25 @@ static bool isQuietPollCommand(const char* cmd) {
  * Format: [timestamp] user@transport command -> result_status
  * Lightweight, always-enabled, no overhead when disabled
  */
+// True while this task runs a command that executeInternalStatusCommand
+// submitted: a read-only status command a web page handler polls as the system
+// identity. The mark travels in the command's own context, so a user,
+// automation or remote command that cmd_exec runs between two polls is not
+// affected by it.
+static bool currentCommandIsInternalStatusPoll() {
+  const CommandContext* ctx =
+      static_cast<const CommandContext*>(currentCommandContext());
+  return ctx && (ctx->behaviorFlags & COMMAND_CONTEXT_INTERNAL_STATUS_POLL) != 0;
+}
+
 static bool commandExecutionLogSuppressed(const char* cmd) {
   // Skip validation-only commands (dry-run checks) of this task's command
   if (currentCommandValidateOnly()) return true;
+
+  // Skip the page handlers' own status polls: nobody ran them. One ESP-NOW
+  // page poll is nine commands and each used to write an audit line and a
+  // [CMD] echo, for OK and FAIL alike.
+  if (currentCommandIsInternalStatusPoll()) return true;
 
   // Skip the audit log + broadcast for noisy read-only polls.
   return isQuietPollCommand(cmd);
@@ -841,10 +858,14 @@ namespace {
     // Automation definitions may embed arbitrary future command lines and are
     // copied into several durable/debug sinks before execution. Preserve only
     // the wrapper identity; the nested payload is opaque secret material here.
+    // The rows marked "removed name" are command names removed for 1.0
+    // (CONTRIBUTING.md, "Command names"). A stale typed or saved line still
+    // reaches the audit log as an unknown command, so its payload stays masked.
+    // Keep each next to its kept name: test_redact_audit pins this order.
     { "automation add ",     MASK_AFTER_TOKEN_POS, 2, nullptr },
-    { "automationadd ",      MASK_AFTER_TOKEN_POS, 1, nullptr },
+    { "automationadd ",      MASK_AFTER_TOKEN_POS, 1, nullptr },  // removed name: a stale line stays masked
     { "validateconditions ",  MASK_AFTER_TOKEN_POS, 1, nullptr },
-    { "validate-conditions ", MASK_AFTER_TOKEN_POS, 1, nullptr },  // the name before 1.0, still accepted
+    { "validate-conditions ", MASK_AFTER_TOKEN_POS, 1, nullptr },  // removed name: a stale line stays masked
   };
 }
 
@@ -1338,6 +1359,7 @@ const char* cmd_lightsleep(const String& argsInput) {
     batteryLogEvent(ev);
   }
 
+  cappedLogsFlush(false);  // S-8: no batched lines sit in RAM through the sleep
   // The radio companion follows the main processor: its heartbeat watchdog
   // pauses so the silence of sleep is not mistaken for an outage.
   radioCompanionBeforeLightSleep();
@@ -1408,6 +1430,7 @@ const char* cmd_deepsleep(const String& argsInput) {
   {
     batteryLogEvent("sleep:deep");
   }
+  cappedLogsFlush(true);  // S-8: batched log lines reach flash before the rails drop
   // The radio companion follows: stop what uses it and hold the C6 in reset
   // through deep sleep (no-op with an on-chip radio).
   radioCompanionBeforeDeepSleep();
@@ -2154,6 +2177,7 @@ void recordRebootIntent(const char* reason, const char* auditDetail) {
   // so the last couple seconds of history isn't lost to the restart. The
   // caller's flush delay then lets the background writer drain to flash.
   systemEventLogFlush();
+  cappedLogsFlush(true);  // S-8: batched lines reach flash even when the log task is behind
   // File catch-up: persist what the named masters said they stored (Q8), so
   // a restart does not hand those bytes to a master again.
   catchupLedgerFlush();
@@ -2813,8 +2837,6 @@ extern const CommandEntry commands[] = {
   // pendinglist is registered by the users module (System_User.cpp).
   { "wait", "Delay execution for N milliseconds: wait <ms>.", false, cmd_wait,
     "Usage: wait <ms>  (1..60000)" },
-  { "sleep", "Alias for wait: sleep <ms>.", false, cmd_wait,
-    "Usage: sleep <ms>  (1..60000)" },
   { "lightsleep", "Enter ESP32 light sleep: lightsleep [seconds] (default 20s).", true, cmd_lightsleep,
     "Usage: lightsleep [seconds]  (1..3600, default 20)" },
   { "deepsleep", "Power off via deep sleep (no wake source — reset button to wake).", true, cmd_deepsleep,
@@ -2895,28 +2917,44 @@ void printConnectedDevicesLibraries(size_t& outTotal) {
 // System Diagnostic Commands
 // ============================================================================
 
-// Comprehensive memory report - shows what's consuming memory (like Task Manager)
-void printMemoryReport() {
-  static constexpr size_t kMemReportTopCount = 15;
-  MemTrackerSnapshot allocationTraffic{};
-  MemTrackerEntry allocationTop[kMemReportTopCount]{};
-  const bool haveAllocationTraffic = memTrackerSnapshot(
-      allocationTraffic, allocationTop, kMemReportTopCount);
+// One moment of the device's memory for `memreport`, text and json alike.
+// The summary numbers themselves are named once, in kFields
+// (System_MemReportCore.h); this function only measures.
+//
+// One heap_caps_get_info per pool (internal 8-bit, DMA, SPIRAM). Each call
+// walks that pool's blocks under its lock and returns free, allocated, the
+// low-water mark and the largest free block from the same instant, so
+// dram.free and heapCaps.internalFree are one number and "largest" can no
+// longer exceed "free". The json form used to skip the SPIRAM walk; it now
+// pays it for spiramLargest, as the text form always did.
+//
+// top/topCapacity/topCount: the tracker's largest tags for the text form
+// (text-only); pass nullptr/0/nullptr to skip them.
+static void memReportGather(memreport_core::MemReportSnapshot& snap,
+                            MemTrackerEntry* top, size_t topCapacity,
+                            size_t* topCount) {
+  snap = {};
+  if (topCount) *topCount = 0;
 
   // 8-bit-capable internal RAM only. ESP.getHeapSize()/getFreeHeap() are
   // MALLOC_CAP_INTERNAL without MALLOC_CAP_8BIT, so they fold in the IRAM-only
   // heap that no malloc/new/task stack can use, and getHeapSize() additionally
-  // double-counts the DMA reserve pool. See hw1InternalFreeBytes() in
+  // double-counts the DMA reserve pool. See hw1InternalFreeBytes in
   // System_MemUtil.h. On feather_esp32_v2 the old calls overstated free by
   // ~25.8 KB and total by ~59.4 KB.
-  size_t dram_total = hw1InternalTotalBytes();
-  size_t dram_free = hw1InternalFreeBytes();
-  size_t dram_used = (dram_total > dram_free) ? (dram_total - dram_free) : 0;
-  size_t dram_min = hw1InternalMinFreeBytes();
-  size_t dram_peak_used = (dram_total > dram_min) ? (dram_total - dram_min) : 0;
+  //
+  // free/min/largest come from the one get_info below: get_free_size and
+  // get_minimum_free_size sum the same per-heap figures over the same cap
+  // predicate, so the meaning of dram.free and dram.minFree is unchanged.
+  multi_heap_info_t info{};
+  heap_caps_get_info(&info, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  snap.dramTotal     = hw1InternalTotalBytes();
+  snap.dramFree      = info.total_free_bytes;
+  snap.dramAllocated = info.total_allocated_bytes;
+  snap.dramMinFree   = info.minimum_free_bytes;
+  snap.dramLargest   = info.largest_free_block;
 
-  // The allocator's own view of the SAME heap set, sampled here beside
-  // dram_total/dram_free so every figure in TOTALS comes from one moment.
+  // The allocator's own view of the SAME heap set, for allocator metadata.
   //
   // RAW heap_caps_get_total_size(), NOT hw1InternalTotalBytes(): the helper
   // subtracts CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL to cancel the reserve
@@ -2929,100 +2967,90 @@ void printMemoryReport() {
   // span - free - allocated IS the bookkeeping, over the identical cap
   // predicate heap_caps_get_total_size/get_info both apply. This is memory
   // nobody allocated that still counts as "used": an empty heap reports its
-  // own control structures as consumed. dram_used already nets the reserve
+  // own control structures as consumed. dramUsed already nets the reserve
   // pool out, so the residual in TOTALS cancels it without naming it — exact
-  // to within one byte per reserve chunk.
-  multi_heap_info_t dram_info{};
-  heap_caps_get_info(&dram_info, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  const size_t dram_span_raw  = heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  const size_t dram_span_used = dram_info.total_free_bytes + dram_info.total_allocated_bytes;
-  const size_t alloc_meta =
-      (dram_span_raw > dram_span_used) ? (dram_span_raw - dram_span_used) : 0;
+  // to within one byte per reserve chunk. derive() does the subtraction.
+  snap.dramSpanRaw = heap_caps_get_total_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 
-  bool has_ps = psramFound();
-  size_t ps_total = has_ps ? ESP.getPsramSize() : 0;
-  size_t ps_free = has_ps ? ESP.getFreePsram() : 0;
-  size_t ps_used = ps_total - ps_free;
+  // DMA-capable pool: where driver buffers must land.
+  info = {};
+  heap_caps_get_info(&info, MALLOC_CAP_DMA);
+  snap.dmaFree    = info.total_free_bytes;
+  snap.dmaLargest = info.largest_free_block;
 
-  size_t bss_internal_bytes = (size_t)(&(_bss_end) - &(_bss_start));
-  size_t bss_psram_bytes = (size_t)(&(_ext_ram_bss_end) - &(_ext_ram_bss_start));
-  size_t noinit_internal_bytes = (size_t)(&(_noinit_end) - &(_noinit_start));
-  size_t noinit_psram_bytes = 0;
+  // PSRAM. total stays the chip's physical size (ESP.getPsramSize), not the
+  // heap's registered span; free is the figure ESP's free-PSRAM call returns
+  // (the free size of MALLOC_CAP_SPIRAM), read with the largest block.
+  if (psramFound()) {
+    snap.psramAvailable = 1;
+    snap.psramTotal = ESP.getPsramSize();
+    info = {};
+    heap_caps_get_info(&info, MALLOC_CAP_SPIRAM);
+    snap.psramFree    = info.total_free_bytes;
+    snap.psramLargest = info.largest_free_block;
+  }
+
+  snap.bssInternal    = (size_t)(&(_bss_end) - &(_bss_start));
+  snap.bssPsram       = (size_t)(&(_ext_ram_bss_end) - &(_ext_ram_bss_start));
+  snap.noinitInternal = (size_t)(&(_noinit_end) - &(_noinit_start));
   if (((uintptr_t)(&_ext_ram_noinit_start) != 0) && ((uintptr_t)(&_ext_ram_noinit_end) != 0)) {
-    noinit_psram_bytes = (size_t)(&(_ext_ram_noinit_end) - &(_ext_ram_noinit_start));
+    snap.noinitPsram = (size_t)(&(_ext_ram_noinit_end) - &(_ext_ram_noinit_start));
   }
 
-  // Header + DRAM summary packed into 2 envelopes (was 8). DRAM value group
-  // worst case ~172 B (4 lines), safely under the 255 B slot.
-  broadcastOutput("\n========== BOOT MEMORY REPORT (Task Manager) ==========\n\n-- DRAM (Internal Heap) --");
-  BROADCAST_PRINTF(
-    "  Total:      %7lu bytes (%3lu KB)\n"
-    "  Used:       %7lu bytes (%3lu KB) [%2u%%]\n"
-    "  Free:       %7lu bytes (%3lu KB) [%2u%%]\n"
-    "  Peak Used:  %7lu bytes (%3lu KB) [%2u%%]",
-    (unsigned long)dram_total,     (unsigned long)(dram_total / 1024),
-    (unsigned long)dram_used,      (unsigned long)(dram_used / 1024),      (unsigned)((dram_used * 100) / dram_total),
-    (unsigned long)dram_free,      (unsigned long)(dram_free / 1024),      (unsigned)((dram_free * 100) / dram_total),
-    (unsigned long)dram_peak_used, (unsigned long)(dram_peak_used / 1024), (unsigned)((dram_peak_used * 100) / dram_total));
-
-  // PSRAM Summary
-  if (has_ps) {
-    broadcastOutput("");
-    broadcastOutput("-- PSRAM (External) --");
-    BROADCAST_PRINTF("  Total:      %7lu bytes (%4lu KB)",
-                  (unsigned long)ps_total, (unsigned long)(ps_total / 1024));
-    BROADCAST_PRINTF("  Used:       %7lu bytes (%4lu KB) [%2u%%]",
-                  (unsigned long)ps_used, (unsigned long)(ps_used / 1024),
-                  (unsigned)((ps_used * 100) / ps_total));
-    BROADCAST_PRINTF("  Free:       %7lu bytes (%4lu KB) [%2u%%]",
-                  (unsigned long)ps_free, (unsigned long)(ps_free / 1024),
-                  (unsigned)((ps_free * 100) / ps_total));
-  } else {
-    broadcastOutput("");
-    broadcastOutput("-- PSRAM: Not available --");
+  // Cumulative allocation traffic. This registry has no free hook and is
+  // deliberately not a live-ownership ledger.
+  MemTrackerSnapshot tracker{};
+  if (memTrackerSnapshot(tracker, top, topCapacity)) {
+    snap.trafficAvailable        = 1;
+    snap.trafficEnabled          = tracker.enabled ? 1 : 0;
+    snap.trafficGeneration       = tracker.generation;
+    snap.trafficTags             = tracker.entryCount;
+    snap.trafficCapacity         = tracker.capacity;
+    snap.trafficSuccesses        = tracker.successCount;
+    snap.trafficFailures         = tracker.failureCount;
+    snap.trafficFallbacks        = tracker.fallbackCount;
+    snap.trafficDramBytes        = tracker.dramBytes;
+    snap.trafficPsramBytes       = tracker.psramBytes;
+    snap.trafficContentionDrops  = tracker.contentionDrops;
+    snap.trafficInvalidTagEvents = tracker.invalidTagEvents;
+    snap.trafficOverflowEvents   = tracker.overflowEvents;
+    if (topCount) *topCount = tracker.topCount;
   }
 
-  // BSS/NOINIT packed into 1 envelope (was 5). Worst case ~150 B.
-  BROADCAST_PRINTF(
-    "\n  BSS (Internal): %7lu bytes (%3lu KB)\n"
-    "  BSS (PSRAM):    %7lu bytes (%3lu KB)\n"
-    "  NOINIT (Int):   %7lu bytes (%3lu KB)\n"
-    "  NOINIT (PSRAM): %7lu bytes (%3lu KB)",
-    (unsigned long)bss_internal_bytes,    (unsigned long)(bss_internal_bytes / 1024),
-    (unsigned long)bss_psram_bytes,       (unsigned long)(bss_psram_bytes / 1024),
-    (unsigned long)noinit_internal_bytes, (unsigned long)(noinit_internal_bytes / 1024),
-    (unsigned long)noinit_psram_bytes,    (unsigned long)(noinit_psram_bytes / 1024));
+  memreport_core::derive(snap);
+}
 
+// Comprehensive memory report - shows what's consuming memory (like Task Manager).
+// atBoot only chooses the heading: "BOOT MEMORY REPORT" for the report setup()
+// prints, "MEMORY REPORT" for the `memreport` command.
+static void printMemoryReportImpl(bool atBoot) {
+  static constexpr size_t kMemReportTopCount = 15;
+  MemTrackerEntry allocationTop[kMemReportTopCount]{};
+  size_t allocationTopCount = 0;
+  memreport_core::MemReportSnapshot snap;
+  memReportGather(snap, allocationTop, kMemReportTopCount, &allocationTopCount);
+
+  // The two figures the live attribution and TOTALS below still use.
+  const size_t dram_used  = (size_t)snap.dramUsed;
+  const size_t alloc_meta = (size_t)snap.allocatorMeta;
+
+  // The summary: every row of kFields, group by group, the same rows
+  // `memreport json` writes. Each group is packed into records of at most
+  // 255 characters (6 records with PSRAM where the hand-written lines took
+  // 10), and percentages go through memreport_core::percentOf, which prints
+  // 0 % for a pool that reports no size instead of dividing by it.
+  auto emitRecord = [](const char* text) { broadcastOutput(text); };
+  memreport_core::emitTextGroup(snap, memreport_core::Group::Dram,
+                                memreport_core::reportTitle(atBoot), emitRecord);
+  memreport_core::emitTextGroup(snap, memreport_core::Group::Psram, nullptr, emitRecord);
+  memreport_core::emitTextGroup(snap, memreport_core::Group::Sections, nullptr, emitRecord);
   // heap_caps view — gives the truth about WHERE allocations land
   // (internal DRAM vs DMA-capable vs PSRAM) and how fragmented each
   // pool is. The "largest free block" is the indicator: when it
   // diverges from total free, the heap is fragmented and big allocs
   // (page-swap workers, image probes) will fail even with apparent
   // headroom.
-  // Derived from the single sample above, not re-queried: get_free_size sums
-  // the same per-heap free_bytes get_info reports, and get_largest_free_block
-  // IS get_info(...).largest_free_block. One fewer full TLSF block walk.
-  size_t cap_int_free = dram_info.total_free_bytes;
-  size_t cap_int_largest = dram_info.largest_free_block;
-  size_t cap_dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
-  size_t cap_dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
-  // Heap-caps header + INTERNAL + DMA packed into 1 envelope (was 4). ~161 B.
-  BROADCAST_PRINTF(
-    "\n-- HEAP CAPS (allocator-eye view) --\n"
-    "  INTERNAL  free=%7lu B (%3lu KB)  largest=%7lu B  frag=%2u%%\n"
-    "  DMA-able  free=%7lu B (%3lu KB)  largest=%7lu B",
-                   (unsigned long)cap_int_free, (unsigned long)(cap_int_free / 1024),
-                   (unsigned long)cap_int_largest,
-                   cap_int_free ? (unsigned)(100 - (cap_int_largest * 100) / cap_int_free) : 0,
-                   (unsigned long)cap_dma_free, (unsigned long)(cap_dma_free / 1024),
-                   (unsigned long)cap_dma_largest);
-  if (has_ps) {
-    size_t cap_ps_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
-    size_t cap_ps_largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
-    BROADCAST_PRINTF("  SPIRAM    free=%7lu B (%4lu KB)  largest=%7lu B",
-                     (unsigned long)cap_ps_free, (unsigned long)(cap_ps_free / 1024),
-                     (unsigned long)cap_ps_largest);
-  }
+  memreport_core::emitTextGroup(snap, memreport_core::Group::HeapCaps, nullptr, emitRecord);
 
   broadcastOutput("");
   broadcastOutput("-- MEMORY BREAKDOWN (measured live heap + cumulative allocation traffic) --");
@@ -3030,23 +3058,15 @@ void printMemoryReport() {
   // ========== SECTION 1: Cumulative allocation traffic ==========
   // This registry has no free hook and is deliberately not a live-ownership
   // ledger.  Never add these values to the live heap accounting below.
-  if (haveAllocationTraffic &&
-      (allocationTraffic.enabled || allocationTraffic.entryCount > 0 ||
-       allocationTraffic.contentionDrops > 0 ||
-       allocationTraffic.invalidTagEvents > 0)) {
-    broadcastOutput("");
-    broadcastOutput("[1] ALLOCATION TRAFFIC (cumulative since tracker reset; not live):");
-    BROADCAST_PRINTF("  State: %s  tags=%u/%u attempts=%llu successes=%llu failures=%llu fallbacks=%llu",
-                     allocationTraffic.enabled ? "ON" : "OFF",
-                     (unsigned)allocationTraffic.entryCount,
-                     (unsigned)allocationTraffic.capacity,
-                     (unsigned long long)(allocationTraffic.successCount +
-                                          allocationTraffic.failureCount),
-                     (unsigned long long)allocationTraffic.successCount,
-                     (unsigned long long)allocationTraffic.failureCount,
-                     (unsigned long long)allocationTraffic.fallbackCount);
+  // The totals are table rows (the same ones the json form writes); the
+  // largest tags are text-only.
+  if (snap.trafficAvailable &&
+      (snap.trafficEnabled || snap.trafficTags > 0 ||
+       snap.trafficContentionDrops > 0 ||
+       snap.trafficInvalidTagEvents > 0)) {
+    memreport_core::emitTextGroup(snap, memreport_core::Group::Traffic, nullptr, emitRecord);
 
-    for (size_t i = 0; i < allocationTraffic.topCount; ++i) {
+    for (size_t i = 0; i < allocationTopCount; ++i) {
       char location[12];
       if (allocationTop[i].psramBytes > 0 && allocationTop[i].dramBytes > 0) {
         snprintf(location, sizeof(location), "PS+DR");
@@ -3066,21 +3086,10 @@ void printMemoryReport() {
                        location);
     }
 
-    if (allocationTraffic.topCount < allocationTraffic.entryCount) {
+    if (allocationTopCount < snap.trafficTags) {
       BROADCAST_PRINTF("  ... and %u more tags",
-                       (unsigned)(allocationTraffic.entryCount -
-                                  allocationTraffic.topCount));
+                       (unsigned)(snap.trafficTags - allocationTopCount));
     }
-
-    BROADCAST_PRINTF("  Cumulative requested: %llu B [DRAM %llu B, PSRAM %llu B]",
-                     (unsigned long long)(allocationTraffic.dramBytes +
-                                          allocationTraffic.psramBytes),
-                     (unsigned long long)allocationTraffic.dramBytes,
-                     (unsigned long long)allocationTraffic.psramBytes);
-    BROADCAST_PRINTF("  Drops: lock=%llu invalid-tag=%llu registry-full=%llu",
-                     (unsigned long long)allocationTraffic.contentionDrops,
-                     (unsigned long long)allocationTraffic.invalidTagEvents,
-                     (unsigned long long)allocationTraffic.overflowEvents);
   }
 
   // ========== SECTION 2: LIVE HEAP ATTRIBUTION ==========
@@ -3487,7 +3496,7 @@ void printMemoryReport() {
       "  Task stacks + TCBs:   NOT MEASURED this run (no task snapshot) - rerun memreport",
       (unsigned long)dram_used,  (unsigned long)(dram_used / 1024),
       (unsigned long)alloc_meta, (unsigned long)(alloc_meta / 1024));
-    broadcastOutput("\n========== END MEMORY REPORT ==========\n");
+    broadcastOutput(memreport_core::reportFooter());
     return;
   }
 
@@ -3520,62 +3529,33 @@ void printMemoryReport() {
     (unsigned long)attributed, (unsigned long)(attributed / 1024), attr_pct,
     residual);
 
-  broadcastOutput("\n========== END MEMORY REPORT ==========\n");
+  broadcastOutput(memreport_core::reportFooter());
+}
+
+// The report setup() prints at the end of boot (HardwareOne.cpp).
+void printMemoryReport() {
+  printMemoryReportImpl(true);
 }
 
 // Command handlers
 const char* cmd_memreport(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (argWantsJson(argsInput)) {
+    // The summary rows come from kFields (System_MemReportCore.h), the same
+    // table the text form prints: add a number there, not here. Existing keys
+    // keep their name and meaning; schema stays 1 because keys were only added.
+    memreport_core::MemReportSnapshot snap;
+    memReportGather(snap, nullptr, 0, nullptr);
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
-    // 8-bit-capable internal RAM only (see hw1InternalFreeBytes, System_MemUtil.h).
-    size_t dramTotal = hw1InternalTotalBytes();
-    size_t dramFree  = hw1InternalFreeBytes();
-    size_t dramMin   = hw1InternalMinFreeBytes();
-    JsonObject dram = doc["dram"].to<JsonObject>();
-    dram["total"]    = (unsigned long)dramTotal;
-    dram["used"]     = (unsigned long)(dramTotal > dramFree ? dramTotal - dramFree : 0);
-    dram["free"]     = (unsigned long)dramFree;
-    dram["minFree"]  = (unsigned long)dramMin;
-    dram["peakUsed"] = (unsigned long)(dramTotal > dramMin ? dramTotal - dramMin : 0);
-    JsonObject ps = doc["psram"].to<JsonObject>();
-    bool hasPs = psramFound();
-    ps["available"] = hasPs;
-    if (hasPs) {
-      size_t psTotal = ESP.getPsramSize();
-      size_t psFree  = ESP.getFreePsram();
-      ps["total"] = (unsigned long)psTotal;
-      ps["used"]  = (unsigned long)(psTotal - psFree);
-      ps["free"]  = (unsigned long)psFree;
-    }
-    JsonObject hc = doc["heapCaps"].to<JsonObject>();
-    hc["internalFree"]    = (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    hc["internalLargest"] = (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    hc["dmaFree"]         = (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DMA);
-    hc["dmaLargest"]      = (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
-    MemTrackerSnapshot tracker{};
-    if (memTrackerSnapshot(tracker)) {
-      JsonObject at = doc["allocationTraffic"].to<JsonObject>();
-      at["semantics"] = "cumulative_requested_since_reset";
-      at["enabled"] = tracker.enabled;
-      at["generation"] = tracker.generation;
-      at["tags"] = (unsigned)tracker.entryCount;
-      at["capacity"] = (unsigned)tracker.capacity;
-      at["attempts"] =
-          (unsigned long long)(tracker.successCount + tracker.failureCount);
-      at["successes"] = (unsigned long long)tracker.successCount;
-      at["failures"] = (unsigned long long)tracker.failureCount;
-      at["fallbacks"] = (unsigned long long)tracker.fallbackCount;
-      at["dramBytes"] = (unsigned long long)tracker.dramBytes;
-      at["psramBytes"] = (unsigned long long)tracker.psramBytes;
-      at["contentionDrops"] = (unsigned long long)tracker.contentionDrops;
-      at["invalidTagEvents"] = (unsigned long long)tracker.invalidTagEvents;
-      at["overflowEvents"] = (unsigned long long)tracker.overflowEvents;
+    memreport_core::writeJson(doc, snap);
+    if (snap.trafficAvailable) {
+      doc[memreport_core::groupInfo(memreport_core::Group::Traffic).jsonName]["semantics"] =
+          "cumulative_requested_since_reset";
     }
     return jsonDocReply(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
   }
-  printMemoryReport();
+  printMemoryReportImpl(false);
   return "Memory report printed to serial";
 }
 
@@ -4970,6 +4950,11 @@ bool executeInternalStatusCommand(const char* cmd, char* out, size_t outSize) {
   uc.ctx.outputMask = MSG_ROUTE_FILE;
   // A page poll is not an answer to anyone's interactive prompt.
   uc.ctx.behaviorFlags |= COMMAND_CONTEXT_MODE_INDEPENDENT;
+  // Nobody ran it either: no command-audit.log line and no [CMD] echo
+  // (commandExecutionLogSuppressed). Callers pass fixed read-only status
+  // commands only; anything a person, an automation or a peer asks for goes
+  // through its own submit path and stays audited.
+  uc.ctx.behaviorFlags |= COMMAND_CONTEXT_INTERNAL_STATUS_POLL;
   String result;
   const bool ok = submitAndExecuteSync(uc, result);
   snprintf(out, outSize, "%s", result.c_str());

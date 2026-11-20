@@ -146,6 +146,8 @@ bool currentCommandValidateOnly();
 // Run a read-only status command as the internal system identity on the
 // executor and copy its result into out (always NUL-terminated). For guest-
 // readable status endpoints; mutations must never go through this helper.
+// Runs unaudited (COMMAND_CONTEXT_INTERNAL_STATUS_POLL): callers pass fixed
+// read-only status commands only; test_internal_poll_audit.py lists them.
 bool executeInternalStatusCommand(const char* cmd, char* out, size_t outSize);
 
 // Wait for a command result. The return value reports command success;

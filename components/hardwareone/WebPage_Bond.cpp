@@ -25,6 +25,8 @@
 #include "System_SelfDevice.h"    // SelfDevice:: — local MAC / name / uptime / heap accessors
 #include "System_ESPNow_Wire.h"   // V4PayloadFsListReplyHeader, V4PayloadFsEntry, FsListStatus
 #include "System_ESPNow_FsList.h" // fsListSendRequest / fsListCancel — structured peer FS listing
+#include "WebBondFsPollCore.h"    // bond_fs_poll: start-and-poll state of the three /api/bond/fs routes
+#include "System_ArgParse.h"      // parseIntArg: the id of a poll
 #include "System_FileManager.h"   // FILE_MANAGER_MAX_PATH (path buffer sizing)
 #include <freertos/semphr.h>
 #include "System_CommandRegistry.h"
@@ -1897,99 +1899,130 @@ static esp_err_t handleBondPairedDevices(httpd_req_t* req) {
 // — the doneMarker collided with concurrent `fsusage` output until a fix
 // renamed it from "Total:" to " entries", and even that's brittle.
 //
-// New path: synchronous HTTP handler that issues fsListSendRequest, waits
-// on a semaphore signalled by the reply callback, serializes the typed
-// reply as JSON. Single in-flight per device (mutex-guarded slot) — second
-// concurrent web request gets a 503-ish "bridge busy" response and the
-// browser can retry.
+// Start and poll (all three /api/bond/fs routes). esp_http_server is one
+// task; a handler that waits for the peer makes every other web request wait
+// with it, and these handlers used to wait up to 6 s on a semaphore. Now:
+//
+//   GET /api/bond/fs/list?path=/x   starts the ESP-NOW request and answers at
+//                                   once: {"success":true,"pending":true,"id":N}
+//   GET /api/bond/fs/list?id=N      {"success":true,"pending":true,"id":N}
+//                                   while the peer has not answered; then the
+//                                   answer (the same JSON as before) or the
+//                                   error, once; {"success":false,
+//                                   "error":"expired"} for an id that is not
+//                                   the request in the slot.
+//
+// No task and no tick: the reply callback stores the answer in the route's
+// bridge slot, and the transitions are in WebBondFsPollCore.h. One request per
+// route at a time; a second start while one is in flight, or while its answer
+// still waits for its page, gets "bridge busy" and the page retries. An
+// answer nobody collects is dropped by the next start after
+// bond_fs_poll::kReadyHoldMs (a browser that went away), and a request the
+// protocol never answered is cancelled after kPendingLimitMs.
+//
+// What can still block here: the send itself. fs*SendRequest hands the frame
+// to the ESP-NOW transmit queue and waits for it to be taken, a few
+// milliseconds normally and up to about 4 s when that queue is congested
+// (System_ESPNow_FsList.cpp, sendPendingRequest).
 //
 // Response shape stays close to the existing BondFs.list() expectations
 // (entries[].name + entries[].isDir + entries[].meta) so the JS migration
 // is one-line. Extra fields (size, perms, totalEntries, hasMore,
 // nextStartIndex) are added on top for clients that want them.
 
+#if ENABLE_BONDED_MODE  // the bridge and the three handlers, to the #endif after handleBondFsGet
+
 namespace {
 
+// One bridge per route, so a file listing does not hold up a storage-stat
+// update. All three are PSRAM (.ext_ram.bss); the only internal RAM is the
+// mutex pointer below and the mutex itself.
 struct WebFsBridge {
-  SemaphoreHandle_t        done;            // signalled by callback
-  uint32_t                 expectedReqId;   // for stale-reply rejection
-  bool                     received;
+  bond_fs_poll::Slot       slot;
   V4PayloadFsListReplyHeader hdr;
   V4PayloadFsEntry         entries[FS_LIST_ENTRIES_PER_REPLY];
   uint8_t                  entryCount;
 };
-
-EXT_RAM_BSS_ATTR static WebFsBridge sWebFsBridge = {};
-static SemaphoreHandle_t sWebFsBridgeMutex = nullptr;
-
-// Stat + get bridges parallel to the list bridge above. Each operation has
-// its own slot so web users browsing files don't block storage-stat updates
-// or vice versa. Memory is small — ~200 B per bridge.
 struct WebFsStatBridge {
-  SemaphoreHandle_t      done;
-  uint32_t               expectedReqId;
-  bool                   received;
+  bond_fs_poll::Slot     slot;
   V4PayloadFsStatReply   reply;
 };
 struct WebFsGetBridge {
-  SemaphoreHandle_t      done;
-  uint32_t               expectedReqId;
-  bool                   received;
+  bond_fs_poll::Slot     slot;
   V4PayloadFsGetAck      ack;
 };
-static WebFsStatBridge   sWebFsStatBridge = {};
-static SemaphoreHandle_t sWebFsStatMutex = nullptr;
-static WebFsGetBridge    sWebFsGetBridge = {};
-static SemaphoreHandle_t sWebFsGetMutex = nullptr;
 
-static void webFsBridgeEnsureInit() {
-  if (!sWebFsBridgeMutex) sWebFsBridgeMutex = xSemaphoreCreateMutex();
-  if (!sWebFsBridge.done) sWebFsBridge.done = xSemaphoreCreateBinary();
-  if (!sWebFsStatMutex)   sWebFsStatMutex   = xSemaphoreCreateMutex();
-  if (!sWebFsStatBridge.done) sWebFsStatBridge.done = xSemaphoreCreateBinary();
-  if (!sWebFsGetMutex)    sWebFsGetMutex    = xSemaphoreCreateMutex();
-  if (!sWebFsGetBridge.done)  sWebFsGetBridge.done  = xSemaphoreCreateBinary();
+EXT_RAM_BSS_ATTR static WebFsBridge     sWebFsBridge = {};
+EXT_RAM_BSS_ATTR static WebFsStatBridge sWebFsStatBridge = {};
+EXT_RAM_BSS_ATTR static WebFsGetBridge  sWebFsGetBridge = {};
+
+// Guards the three slots and their stored answers between the httpd task (the
+// handlers) and espnow_task (the reply callbacks). Never held across a send, a
+// socket write or any wait: a holder keeps it for one memcpy at most.
+static SemaphoreHandle_t sWebFsMutex = nullptr;
+
+// A handler that cannot take the mutex answers "busy" or "pending" and the
+// page asks again; a callback that cannot take it drops the reply and the
+// request ends as a timeout on the page.
+static const TickType_t kWebFsHandlerLockWait  = pdMS_TO_TICKS(100);
+static const TickType_t kWebFsCallbackLockWait = pdMS_TO_TICKS(20);
+
+struct WebFsLock {
+  bool held;
+  explicit WebFsLock(TickType_t wait) : held(false) {
+    if (sWebFsMutex) held = (xSemaphoreTake(sWebFsMutex, wait) == pdTRUE);
+  }
+  ~WebFsLock() { if (held) xSemaphoreGive(sWebFsMutex); }
+  WebFsLock(const WebFsLock&) = delete;
+  WebFsLock& operator=(const WebFsLock&) = delete;
+};
+
+// Called from the handlers only (one httpd task), before any request is sent.
+static bool webFsBridgeEnsureInit() {
+  if (!sWebFsMutex) sWebFsMutex = xSemaphoreCreateMutex();
+  return sWebFsMutex != nullptr;
 }
 
-// Callback fires on BTC_TASK — must stay minimal. Verify the reqId matches
-// our outstanding request (stale replies from prior cancelled requests would
-// otherwise overwrite the slot), copy the payload into the bridge, signal
-// the semaphore.
+// The reply callbacks run on espnow_task and must stay minimal: take the
+// bridge mutex, let the slot decide whether this reply is the one it waits
+// for (a reply of an earlier, cancelled request is refused), copy the payload.
+// The protocol calls each exactly once per request: with the peer's reply, or
+// with a synthesized IO_ERROR when its own 5 s timeout passes.
 static void webFsListReplyCallback(const uint8_t /*mac*/[6],
                                    const V4PayloadFsListReplyHeader* hdr,
                                    const V4PayloadFsEntry* entries) {
   if (!hdr) return;
-  if (hdr->reqId != sWebFsBridge.expectedReqId) return;  // stale; ignore
+  WebFsLock lock(kWebFsCallbackLockWait);
+  if (!lock.held) return;
+  if (!bond_fs_poll::accept(sWebFsBridge.slot, hdr->reqId, millis())) return;  // stale; ignore
   memcpy(&sWebFsBridge.hdr, hdr, sizeof(*hdr));
   uint8_t n = hdr->entryCount;
   if (n > FS_LIST_ENTRIES_PER_REPLY) n = FS_LIST_ENTRIES_PER_REPLY;
   if (entries && n > 0) {
     memcpy(sWebFsBridge.entries, entries, n * sizeof(V4PayloadFsEntry));
   }
-  sWebFsBridge.entryCount = n;
-  sWebFsBridge.received = true;
-  if (sWebFsBridge.done) xSemaphoreGive(sWebFsBridge.done);
+  sWebFsBridge.entryCount = (entries && n > 0) ? n : 0;
 }
 
-// Stat reply callback. Matches the active bridge's reqId, copies the reply
-// into the bridge slot, signals the semaphore. BTC_TASK-safe.
 static void webFsStatReplyCallback(const uint8_t /*mac*/[6],
                                    const V4PayloadFsStatReply* reply) {
-  if (!reply || reply->reqId != sWebFsStatBridge.expectedReqId) return;
+  if (!reply) return;
+  WebFsLock lock(kWebFsCallbackLockWait);
+  if (!lock.held) return;
+  if (!bond_fs_poll::accept(sWebFsStatBridge.slot, reply->reqId, millis())) return;
   memcpy(&sWebFsStatBridge.reply, reply, sizeof(*reply));
-  sWebFsStatBridge.received = true;
-  if (sWebFsStatBridge.done) xSemaphoreGive(sWebFsStatBridge.done);
 }
 
-// Get-ACK callback. The ACK is the sync part of the two-stage GET protocol;
+// Get-ACK callback. The ACK is the first part of the two-stage GET protocol;
 // the actual file content arrives later via FILE_START/DATA/END handled by
 // System_ESPNow_Files.
 static void webFsGetAckCallback(const uint8_t /*mac*/[6],
                                 const V4PayloadFsGetAck* ack) {
-  if (!ack || ack->reqId != sWebFsGetBridge.expectedReqId) return;
+  if (!ack) return;
+  WebFsLock lock(kWebFsCallbackLockWait);
+  if (!lock.held) return;
+  if (!bond_fs_poll::accept(sWebFsGetBridge.slot, ack->reqId, millis())) return;
   memcpy(&sWebFsGetBridge.ack, ack, sizeof(*ack));
-  sWebFsGetBridge.received = true;
-  if (sWebFsGetBridge.done) xSemaphoreGive(sWebFsGetBridge.done);
 }
 
 // The JSON error tag of an FS answer's status: the one name table of rule F3
@@ -2000,95 +2033,53 @@ static const char* fsStatusTag(uint8_t status) {
   return name ? name : "unknown";
 }
 
-} // anonymous namespace
+// The id parameter of a poll. None: the query has no id, so the request is a
+// start. Invalid: an id that is not a whole number above 0 (answered as an
+// unknown request, never treated as a start).
+enum class WebFsQueryId : uint8_t { None, Valid, Invalid };
 
-#if ENABLE_BONDED_MODE
-static esp_err_t handleBondFsList(httpd_req_t* req) {
-  WEB_AUTH_JSON_OR_RETURN(req, ctx);
-  // Browsing the bonded peer's files needs the same local authority as
-  // `remote:files`: an administrator. The peer serves under its bond
-  // identity, so this is the human half of the gate.
-  if (!hasAdminPrivilege(ctx)) return sendJsonResponse(req, "{\"success\":false,\"error\":\"admin required\"}");
-  webFsBridgeEnsureInit();
-  if (!sWebFsBridgeMutex || !sWebFsBridge.done) {
-    return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge init failed\"}");
+static WebFsQueryId webFsQueryId(const char* query, uint32_t& id) {
+  id = 0;
+  char idBuf[16];
+  const esp_err_t err = httpd_query_key_value(query, "id", idBuf, sizeof(idBuf));
+  if (err == ESP_ERR_NOT_FOUND) return WebFsQueryId::None;
+  if (err != ESP_OK) return WebFsQueryId::Invalid;
+  return parseIntArg(idBuf, 1, 0xFFFFFFFFLL, id) ? WebFsQueryId::Valid
+                                                 : WebFsQueryId::Invalid;
+}
+
+static esp_err_t webFsSendPending(httpd_req_t* req, uint32_t id) {
+  char body[64];
+  snprintf(body, sizeof(body), "{\"success\":true,\"pending\":true,\"id\":%u}", (unsigned)id);
+  return sendJsonResponse(req, body);
+}
+
+// The reply to a poll that has no stored answer to send.
+static esp_err_t webFsSendNoAnswer(httpd_req_t* req, bond_fs_poll::Poll outcome, uint32_t id) {
+  switch (outcome) {
+    case bond_fs_poll::Poll::Pending:
+      return webFsSendPending(req, id);
+    case bond_fs_poll::Poll::TimedOut:
+      return sendJsonResponse(req, "{\"success\":false,\"error\":\"timeout\"}");
+    default:
+      return sendJsonResponse(req, "{\"success\":false,\"error\":\"expired\"}");
   }
+}
 
-  // Parse query string. path is required, start is optional (default 0).
-  char qbuf[300];
-  if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) != ESP_OK) {
-    return sendJsonResponse(req, "{\"success\":false,\"error\":\"missing query\"}");
-  }
-  char pathBuf[FILE_MANAGER_MAX_PATH] = {0};
-  if (httpd_query_key_value(qbuf, "path", pathBuf, sizeof(pathBuf)) != ESP_OK
-      || pathBuf[0] == '\0') {
-    return sendJsonResponse(req, "{\"success\":false,\"error\":\"missing path\"}");
-  }
-  // URL-decode the minimum the existing files API decodes — same level of
-  // handling so behavior is consistent for users moving between local and
-  // bonded views.
-  String path(pathBuf);
-  path.replace("%2F", "/");
-  path.replace("%20", " ");
-
-  uint16_t startIdx = 0;
-  char startBuf[12];
-  if (httpd_query_key_value(qbuf, "start", startBuf, sizeof(startBuf)) == ESP_OK) {
-    int v = atoi(startBuf);
-    if (v < 0) v = 0;
-    if (v > 65535) v = 65535;
-    startIdx = (uint16_t)v;
-  }
-
-  // Bonded peer must be paired AND we must have its MAC. peerMacBytes()
-  // enforces bondModeEnabled too, so this is the single gate.
-  uint8_t peerMac[6];
-  if (!BondedPeer::peerMacBytes(peerMac)) {
-    return sendJsonResponse(req, "{\"success\":false,\"error\":\"not bonded\"}");
-  }
-
-  // Serialize concurrent web peer-fs requests through the single bridge
-  // slot. 100 ms timeout to acquire — if someone else is browsing, return
-  // a "busy" so the browser can retry quickly rather than tie up httpd
-  // workers waiting in line.
-  if (xSemaphoreTake(sWebFsBridgeMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-    return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge busy\"}");
-  }
-
-  // Drain any stale "done" signal left over from a previous round (shouldn't
-  // happen with proper cleanup, but defensive — costs ~µs).
-  xSemaphoreTake(sWebFsBridge.done, 0);
-  sWebFsBridge.received = false;
-  sWebFsBridge.entryCount = 0;
-  memset(&sWebFsBridge.hdr, 0, sizeof(sWebFsBridge.hdr));
-
-  uint32_t reqId = fsListSendRequest(peerMac, path.c_str(), startIdx, webFsListReplyCallback);
-  if (reqId == 0) {
-    xSemaphoreGive(sWebFsBridgeMutex);
-    return sendJsonResponse(req, "{\"success\":false,\"error\":\"send failed\"}");
-  }
-  sWebFsBridge.expectedReqId = reqId;
-
-  // Wait for the callback. The protocol module times out at 5s and synth-
-  // esizes an IO_ERROR reply, so 6 s here covers the worst case plus a small
-  // grace window for the send path itself.
-  if (xSemaphoreTake(sWebFsBridge.done, pdMS_TO_TICKS(6000)) != pdTRUE) {
-    fsListCancel(reqId);
-    xSemaphoreGive(sWebFsBridgeMutex);
-    return sendJsonResponse(req, "{\"success\":false,\"error\":\"timeout\"}");
-  }
-
+// Sends the listing stored in sWebFsBridge. The slot is Collecting while this
+// runs: the callback refuses to write and no other handler runs (one httpd
+// task), so the stored listing is read without the mutex and the mutex is not
+// held across the socket writes.
+static esp_err_t webFsSendListing(httpd_req_t* req) {
   // Build response JSON. Streamed in chunks since 32 entries × ~110 chars
   // = ~3.5 KB; we don't want a single contiguous String that big in DRAM.
-  httpd_resp_set_type(req, "application/json");
   uint8_t status = sWebFsBridge.hdr.status;
   uint8_t count  = sWebFsBridge.entryCount;
   uint16_t total = sWebFsBridge.hdr.totalEntries;
   bool hasMore   = sWebFsBridge.hdr.hasMore != 0;
   uint16_t nextStart = sWebFsBridge.hdr.nextStartIndex;
-  // Snapshot path before we drop the mutex (header.path is the normalized
-  // path the peer echoed back; we use it so the client sees a canonical
-  // form even after path traversal).
+  // header.path is the normalized path the peer echoed back; we use it so
+  // the client sees a canonical form even after path traversal.
   char peerEchoPath[sizeof(sWebFsBridge.hdr.path)];
   strlcpy(peerEchoPath, sWebFsBridge.hdr.path, sizeof(peerEchoPath));
 
@@ -2097,13 +2088,13 @@ static esp_err_t handleBondFsList(httpd_req_t* req) {
     snprintf(err, sizeof(err),
              "{\"success\":false,\"error\":\"%s\",\"path\":\"%s\"}",
              fsStatusTag(status), peerEchoPath);
-    xSemaphoreGive(sWebFsBridgeMutex);
     return sendJsonResponse(req, err);
   }
 
   // OK path — emit the entries array. Build the header chunk first, then
   // each entry, then the trailer. Keeps a fixed ~256 B stack buffer in
   // play instead of an N×entry-size String concatenation.
+  httpd_resp_set_type(req, "application/json");
   char chunk[300];
   int hlen = snprintf(chunk, sizeof(chunk),
                       "{\"success\":true,\"path\":\"%s\","
@@ -2145,24 +2136,183 @@ static esp_err_t handleBondFsList(httpd_req_t* req) {
 
   httpd_resp_send_chunk(req, "]}", 2);
   httpd_resp_send_chunk(req, NULL, 0);  // end stream
-
-  xSemaphoreGive(sWebFsBridgeMutex);
   return ESP_OK;
+}
+
+} // anonymous namespace
+
+static esp_err_t handleBondFsList(httpd_req_t* req) {
+  WEB_AUTH_JSON_OR_RETURN(req, ctx);
+  // Browsing the bonded peer's files needs the same local authority as
+  // `remote:files`: an administrator. The peer serves under its bond
+  // identity, so this is the human half of the gate. It is checked on the
+  // start and on every poll: an answer is only ever handed to an admin.
+  if (!hasAdminPrivilege(ctx)) return sendJsonResponse(req, "{\"success\":false,\"error\":\"admin required\"}");
+  if (!webFsBridgeEnsureInit()) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge init failed\"}");
+  }
+
+  // Parse query string. A poll carries id; a start carries path (required)
+  // and start (optional, default 0).
+  char qbuf[300];
+  if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) != ESP_OK) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"missing query\"}");
+  }
+
+  uint32_t pollId = 0;
+  const WebFsQueryId idKind = webFsQueryId(qbuf, pollId);
+  if (idKind == WebFsQueryId::Invalid) {
+    return webFsSendNoAnswer(req, bond_fs_poll::Poll::Unknown, 0);
+  }
+  if (idKind == WebFsQueryId::Valid) {
+    uint32_t cancelId = 0;
+    bond_fs_poll::Poll outcome;
+    {
+      WebFsLock lock(kWebFsHandlerLockWait);
+      if (!lock.held) return webFsSendPending(req, pollId);  // ask again
+      outcome = bond_fs_poll::poll(sWebFsBridge.slot, pollId, millis(), cancelId);
+    }
+    if (cancelId) fsListCancel(cancelId);
+    if (outcome != bond_fs_poll::Poll::Ready) return webFsSendNoAnswer(req, outcome, pollId);
+    const esp_err_t result = webFsSendListing(req);
+    {
+      WebFsLock lock(kWebFsHandlerLockWait);
+      if (lock.held) bond_fs_poll::collected(sWebFsBridge.slot);
+    }
+    return result;
+  }
+
+  char pathBuf[FILE_MANAGER_MAX_PATH] = {0};
+  if (httpd_query_key_value(qbuf, "path", pathBuf, sizeof(pathBuf)) != ESP_OK
+      || pathBuf[0] == '\0') {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"missing path\"}");
+  }
+  // URL-decode the minimum the existing files API decodes — same level of
+  // handling so behavior is consistent for users moving between local and
+  // bonded views.
+  String path(pathBuf);
+  path.replace("%2F", "/");
+  path.replace("%20", " ");
+
+  uint16_t startIdx = 0;
+  char startBuf[12];
+  if (httpd_query_key_value(qbuf, "start", startBuf, sizeof(startBuf)) == ESP_OK) {
+    int v = atoi(startBuf);
+    if (v < 0) v = 0;
+    if (v > 65535) v = 65535;
+    startIdx = (uint16_t)v;
+  }
+
+  // Bonded peer must be paired AND we must have its MAC. peerMacBytes()
+  // enforces bondModeEnabled too, so this is the single gate.
+  uint8_t peerMac[6];
+  if (!BondedPeer::peerMacBytes(peerMac)) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"not bonded\"}");
+  }
+
+  // Take the route's one slot. Busy: another listing is in flight or its
+  // answer still waits for its page; the page retries.
+  uint32_t cancelId = 0;
+  bond_fs_poll::Begin begun = bond_fs_poll::Begin::Busy;
+  {
+    WebFsLock lock(kWebFsHandlerLockWait);
+    if (lock.held) begun = bond_fs_poll::begin(sWebFsBridge.slot, millis(), cancelId);
+  }
+  if (cancelId) fsListCancel(cancelId);  // an abandoned request: free the protocol's entry
+  if (begun != bond_fs_poll::Begin::Started) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge busy\"}");
+  }
+
+  // Send without the mutex. The reply can reach the callback before this call
+  // returns; the slot is Starting and accepts it.
+  uint32_t reqId = fsListSendRequest(peerMac, path.c_str(), startIdx, webFsListReplyCallback);
+  bool recorded = false;
+  {
+    WebFsLock lock(kWebFsHandlerLockWait);
+    if (lock.held) {
+      (void)bond_fs_poll::sent(sWebFsBridge.slot, reqId);
+      recorded = true;
+    }
+  }
+  if (!recorded) {
+    // The slot stays Starting and is released by the next request once stale.
+    if (reqId) fsListCancel(reqId);
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge busy\"}");
+  }
+  if (reqId == 0) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"send failed\"}");
+  }
+  return webFsSendPending(req, reqId);
 }
 
 // =============================================================================
 // /api/bond/fs/stat — structured peer storage stats via FS_STAT_REQ
 // =============================================================================
-// Replaces the BondFs.exec('fsusage') CLI-scrape path. Same bridge pattern
-// as /api/bond/fs/list — fsStatSendRequest, wait on semaphore, serialize
-// the typed reply as JSON. Query: ?path=/sd (or omit for /).
+// Replaces the BondFs.exec('fsusage') CLI-scrape path. Same start-and-poll
+// bridge as /api/bond/fs/list — fsStatSendRequest, then ?id=N until the typed
+// reply is there. Query: ?path=/sd (or omit for /).
 static esp_err_t handleBondFsStat(httpd_req_t* req) {
   WEB_AUTH_JSON_OR_RETURN(req, ctx);
-  webFsBridgeEnsureInit();
+  if (!webFsBridgeEnsureInit()) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge init failed\"}");
+  }
 
   char pathBuf[FILE_MANAGER_MAX_PATH] = "/";
   char qbuf[200];
   if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) == ESP_OK) {
+    uint32_t pollId = 0;
+    const WebFsQueryId idKind = webFsQueryId(qbuf, pollId);
+    if (idKind == WebFsQueryId::Invalid) {
+      return webFsSendNoAnswer(req, bond_fs_poll::Poll::Unknown, 0);
+    }
+    if (idKind == WebFsQueryId::Valid) {
+      uint32_t cancelId = 0;
+      bond_fs_poll::Poll outcome;
+      V4PayloadFsStatReply reply = {};
+      {
+        WebFsLock lock(kWebFsHandlerLockWait);
+        if (!lock.held) return webFsSendPending(req, pollId);  // ask again
+        outcome = bond_fs_poll::poll(sWebFsStatBridge.slot, pollId, millis(), cancelId);
+        if (outcome == bond_fs_poll::Poll::Ready) {
+          memcpy(&reply, &sWebFsStatBridge.reply, sizeof(reply));
+          bond_fs_poll::collected(sWebFsStatBridge.slot);
+        }
+      }
+      if (cancelId) fsListCancel(cancelId);
+      if (outcome != bond_fs_poll::Poll::Ready) return webFsSendNoAnswer(req, outcome, pollId);
+
+      uint8_t status = reply.status;
+      uint64_t total = reply.totalBytes;
+      uint64_t used  = reply.usedBytes;
+      uint64_t freeB = reply.freeBytes;
+      uint16_t pct10 = reply.percentUsedX10;
+      char echoPath[sizeof(reply.path)];
+      strlcpy(echoPath, reply.path, sizeof(echoPath));
+
+      if (status != FS_LIST_STATUS_OK) {
+        char err[160];
+        snprintf(err, sizeof(err),
+                 "{\"success\":false,\"error\":\"%s\",\"path\":\"%s\"}",
+                 fsStatusTag(status), echoPath);
+        return sendJsonResponse(req, err);
+      }
+
+      char body[256];
+      // Doubles for the JSON output — 64-bit ints are fine numerically but JS
+      // loses precision past 2^53. For storage sizes (< 1 EB) we're nowhere
+      // near that limit so plain JSON numbers are safe.
+      snprintf(body, sizeof(body),
+               "{\"success\":true,\"path\":\"%s\","
+               "\"total\":%llu,\"used\":%llu,\"free\":%llu,"
+               "\"usagePercent\":%u.%u}",
+               echoPath,
+               (unsigned long long)total,
+               (unsigned long long)used,
+               (unsigned long long)freeB,
+               pct10 / 10, pct10 % 10);
+      return sendJsonResponse(req, body);
+    }
+
     if (httpd_query_key_value(qbuf, "path", pathBuf, sizeof(pathBuf)) != ESP_OK
         || pathBuf[0] == '\0') {
       strlcpy(pathBuf, "/", sizeof(pathBuf));
@@ -2178,69 +2328,51 @@ static esp_err_t handleBondFsStat(httpd_req_t* req) {
     return sendJsonResponse(req, "{\"success\":false,\"error\":\"not bonded\"}");
   }
 
-  if (xSemaphoreTake(sWebFsStatMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+  uint32_t cancelId = 0;
+  bond_fs_poll::Begin begun = bond_fs_poll::Begin::Busy;
+  {
+    WebFsLock lock(kWebFsHandlerLockWait);
+    if (lock.held) begun = bond_fs_poll::begin(sWebFsStatBridge.slot, millis(), cancelId);
+  }
+  if (cancelId) fsListCancel(cancelId);
+  if (begun != bond_fs_poll::Begin::Started) {
     return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge busy\"}");
   }
-  xSemaphoreTake(sWebFsStatBridge.done, 0);
-  sWebFsStatBridge.received = false;
-  memset(&sWebFsStatBridge.reply, 0, sizeof(sWebFsStatBridge.reply));
 
   uint32_t reqId = fsStatSendRequest(peerMac, pathBuf, webFsStatReplyCallback);
+  bool recorded = false;
+  {
+    WebFsLock lock(kWebFsHandlerLockWait);
+    if (lock.held) {
+      (void)bond_fs_poll::sent(sWebFsStatBridge.slot, reqId);
+      recorded = true;
+    }
+  }
+  if (!recorded) {
+    if (reqId) fsListCancel(reqId);
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge busy\"}");
+  }
   if (reqId == 0) {
-    xSemaphoreGive(sWebFsStatMutex);
     return sendJsonResponse(req, "{\"success\":false,\"error\":\"send failed\"}");
   }
-  sWebFsStatBridge.expectedReqId = reqId;
-
-  if (xSemaphoreTake(sWebFsStatBridge.done, pdMS_TO_TICKS(6000)) != pdTRUE) {
-    fsListCancel(reqId);
-    xSemaphoreGive(sWebFsStatMutex);
-    return sendJsonResponse(req, "{\"success\":false,\"error\":\"timeout\"}");
-  }
-
-  uint8_t status = sWebFsStatBridge.reply.status;
-  uint64_t total = sWebFsStatBridge.reply.totalBytes;
-  uint64_t used  = sWebFsStatBridge.reply.usedBytes;
-  uint64_t freeB = sWebFsStatBridge.reply.freeBytes;
-  uint16_t pct10 = sWebFsStatBridge.reply.percentUsedX10;
-  char echoPath[sizeof(sWebFsStatBridge.reply.path)];
-  strlcpy(echoPath, sWebFsStatBridge.reply.path, sizeof(echoPath));
-  xSemaphoreGive(sWebFsStatMutex);
-
-  if (status != FS_LIST_STATUS_OK) {
-    char err[160];
-    snprintf(err, sizeof(err),
-             "{\"success\":false,\"error\":\"%s\",\"path\":\"%s\"}",
-             fsStatusTag(status), echoPath);
-    return sendJsonResponse(req, err);
-  }
-
-  char body[256];
-  // Doubles for the JSON output — 64-bit ints are fine numerically but JS
-  // loses precision past 2^53. For storage sizes (< 1 EB) we're nowhere
-  // near that limit so plain JSON numbers are safe.
-  snprintf(body, sizeof(body),
-           "{\"success\":true,\"path\":\"%s\","
-           "\"total\":%llu,\"used\":%llu,\"free\":%llu,"
-           "\"usagePercent\":%u.%u}",
-           echoPath,
-           (unsigned long long)total,
-           (unsigned long long)used,
-           (unsigned long long)freeB,
-           pct10 / 10, pct10 % 10);
-  return sendJsonResponse(req, body);
+  return webFsSendPending(req, reqId);
 }
 
 // =============================================================================
 // /api/bond/fs/get — structured peer file pull via FS_GET_REQ
 // =============================================================================
 // Replaces the BondFs.exec('espnowsendfile') CLI trigger. Two stages:
-//   1. Synchronous: send FS_GET_REQ, wait for FS_GET_ACK, return ack status
-//      + fileSize to the client.
+//   1. Start and poll: send FS_GET_REQ; the page asks with ?id=N until the
+//      FS_GET_ACK is there and gets the ack status + fileSize.
 //   2. If ACK was OK: the peer is now sending the file via FILE_START/DATA
 //      /END (existing transfer pipeline). The file lands at
 //      /espnow/received/<MAC>/<basename> via the standard inbound path —
 //      same place BondFs.pull's polling expects to find it.
+//
+// An OK ack means the transfer is already running on the peer. Dropping an
+// ack nobody collected does not stop it, and a second start for the same file
+// would send it twice: the page starts once and never starts again after a
+// failed poll.
 //
 // We don't wait for the file to fully transfer here; the client polls for
 // the file to appear. That polling logic lives on the JS side because it
@@ -2248,14 +2380,61 @@ static esp_err_t handleBondFsStat(httpd_req_t* req) {
 // tie up an httpd worker for seconds with no value over client polling).
 static esp_err_t handleBondFsGet(httpd_req_t* req) {
   WEB_AUTH_JSON_OR_RETURN(req, ctx);
-  // Same local admin gate as /api/bond/fs/list (and `remote:files`).
+  // Same local admin gate as /api/bond/fs/list (and `remote:files`), on the
+  // start and on every poll.
   if (!hasAdminPrivilege(ctx)) return sendJsonResponse(req, "{\"success\":false,\"error\":\"admin required\"}");
-  webFsBridgeEnsureInit();
+  if (!webFsBridgeEnsureInit()) {
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge init failed\"}");
+  }
 
   char qbuf[300];
   if (httpd_req_get_url_query_str(req, qbuf, sizeof(qbuf)) != ESP_OK) {
     return sendJsonResponse(req, "{\"success\":false,\"error\":\"missing query\"}");
   }
+
+  uint32_t pollId = 0;
+  const WebFsQueryId idKind = webFsQueryId(qbuf, pollId);
+  if (idKind == WebFsQueryId::Invalid) {
+    return webFsSendNoAnswer(req, bond_fs_poll::Poll::Unknown, 0);
+  }
+  if (idKind == WebFsQueryId::Valid) {
+    uint32_t cancelId = 0;
+    bond_fs_poll::Poll outcome;
+    V4PayloadFsGetAck ack = {};
+    {
+      WebFsLock lock(kWebFsHandlerLockWait);
+      if (!lock.held) return webFsSendPending(req, pollId);  // ask again
+      outcome = bond_fs_poll::poll(sWebFsGetBridge.slot, pollId, millis(), cancelId);
+      if (outcome == bond_fs_poll::Poll::Ready) {
+        memcpy(&ack, &sWebFsGetBridge.ack, sizeof(ack));
+        bond_fs_poll::collected(sWebFsGetBridge.slot);
+      }
+    }
+    if (cancelId) fsListCancel(cancelId);
+    if (outcome != bond_fs_poll::Poll::Ready) return webFsSendNoAnswer(req, outcome, pollId);
+
+    uint8_t status = ack.status;
+    uint32_t size = ack.fileSize;
+    char echoPath[sizeof(ack.path)];
+    strlcpy(echoPath, ack.path, sizeof(echoPath));
+
+    if (status != FS_LIST_STATUS_OK) {
+      char err[160];
+      snprintf(err, sizeof(err),
+               "{\"success\":false,\"error\":\"%s\",\"path\":\"%s\"}",
+               fsStatusTag(status), echoPath);
+      return sendJsonResponse(req, err);
+    }
+
+    // OK — peer is now sending the file. Tell the client what to expect.
+    char body[256];
+    snprintf(body, sizeof(body),
+             "{\"success\":true,\"path\":\"%s\",\"size\":%u,"
+             "\"message\":\"transfer initiated; poll local FS for file landing\"}",
+             echoPath, (unsigned)size);
+    return sendJsonResponse(req, body);
+  }
+
   char pathBuf[FILE_MANAGER_MAX_PATH] = {0};
   if (httpd_query_key_value(qbuf, "path", pathBuf, sizeof(pathBuf)) != ESP_OK
       || pathBuf[0] == '\0') {
@@ -2270,49 +2449,35 @@ static esp_err_t handleBondFsGet(httpd_req_t* req) {
     return sendJsonResponse(req, "{\"success\":false,\"error\":\"not bonded\"}");
   }
 
-  if (xSemaphoreTake(sWebFsGetMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+  uint32_t cancelId = 0;
+  bond_fs_poll::Begin begun = bond_fs_poll::Begin::Busy;
+  {
+    WebFsLock lock(kWebFsHandlerLockWait);
+    if (lock.held) begun = bond_fs_poll::begin(sWebFsGetBridge.slot, millis(), cancelId);
+  }
+  if (cancelId) fsListCancel(cancelId);
+  if (begun != bond_fs_poll::Begin::Started) {
     return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge busy\"}");
   }
-  xSemaphoreTake(sWebFsGetBridge.done, 0);
-  sWebFsGetBridge.received = false;
-  memset(&sWebFsGetBridge.ack, 0, sizeof(sWebFsGetBridge.ack));
 
   uint32_t reqId = fsGetSendRequest(peerMac, path.c_str(), webFsGetAckCallback);
+  bool recorded = false;
+  {
+    WebFsLock lock(kWebFsHandlerLockWait);
+    if (lock.held) {
+      (void)bond_fs_poll::sent(sWebFsGetBridge.slot, reqId);
+      recorded = true;
+    }
+  }
+  if (!recorded) {
+    // Not cancelled: the peer may already be sending the file, and its ack
+    // then finds the slot Starting and is stored for nobody.
+    return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge busy\"}");
+  }
   if (reqId == 0) {
-    xSemaphoreGive(sWebFsGetMutex);
     return sendJsonResponse(req, "{\"success\":false,\"error\":\"send failed\"}");
   }
-  sWebFsGetBridge.expectedReqId = reqId;
-
-  // The ACK is supposed to be fast (single-frame reply from the peer's
-  // request handler). 6s timeout matches the protocol module's own.
-  if (xSemaphoreTake(sWebFsGetBridge.done, pdMS_TO_TICKS(6000)) != pdTRUE) {
-    fsListCancel(reqId);
-    xSemaphoreGive(sWebFsGetMutex);
-    return sendJsonResponse(req, "{\"success\":false,\"error\":\"timeout\"}");
-  }
-
-  uint8_t status = sWebFsGetBridge.ack.status;
-  uint32_t size = sWebFsGetBridge.ack.fileSize;
-  char echoPath[sizeof(sWebFsGetBridge.ack.path)];
-  strlcpy(echoPath, sWebFsGetBridge.ack.path, sizeof(echoPath));
-  xSemaphoreGive(sWebFsGetMutex);
-
-  if (status != FS_LIST_STATUS_OK) {
-    char err[160];
-    snprintf(err, sizeof(err),
-             "{\"success\":false,\"error\":\"%s\",\"path\":\"%s\"}",
-             fsStatusTag(status), echoPath);
-    return sendJsonResponse(req, err);
-  }
-
-  // OK — peer is now sending the file. Tell the client what to expect.
-  char body[256];
-  snprintf(body, sizeof(body),
-           "{\"success\":true,\"path\":\"%s\",\"size\":%u,"
-           "\"message\":\"transfer initiated; poll local FS for file landing\"}",
-           echoPath, (unsigned)size);
-  return sendJsonResponse(req, body);
+  return webFsSendPending(req, reqId);
 }
 #endif // ENABLE_BONDED_MODE
 

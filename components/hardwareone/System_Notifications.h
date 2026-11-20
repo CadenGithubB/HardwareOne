@@ -58,7 +58,10 @@ struct NotifRule {
   uint8_t sinks;       // NSINK_* mask
   uint8_t level;       // 0=info 1=success 2=warning 3=error
   uint16_t durMs;      // banner/toast duration
-  uint16_t cooldownMs; // min gap between renders of this kind (0 = none)
+  // Min gap between interrupt renders (banner, toast, glasses, app) of this
+  // kind; 0 = none. The queue row is written for every post. 32 bits: a
+  // 16-bit field stops at 65 s and heap_low/fs_low_space use 10 minutes.
+  uint32_t cooldownMs;
 };
 
 // ============================================================================

@@ -154,6 +154,15 @@ static NotifRule notifDefaultRuleFor(uint8_t kind) {
     case SYSEVT_COMPANION_RESTARTED:  return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 2500, 10000};
     case SYSEVT_COMPANION_LOW_MEMORY: return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 2, 3000, 60000};
     case SYSEVT_COMPANION_UPDATED:    return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 1, 3000, 0};
+    // Low internal heap and low flash space: a queue row for every post and a
+    // toast (which also grants the glasses card and the app card) at most once
+    // in 10 minutes. heap_low is posted once per low episode with a 60 s
+    // cooldown of its own (System_HeapLowCore.h); a device that hovers at the
+    // line would otherwise interrupt every minute. fs_low_space is posted once
+    // per boot, so its cooldown never bites. No OLED banner: the row in the
+    // notification centre is the local record.
+    case SYSEVT_HEAP_LOW:             return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 2, 3000, 600000};
+    case SYSEVT_FS_LOW_SPACE:         return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 2, 3000, 600000};
     // QuickNote outcomes: queue-only, never an interrupt. A banner/toast rule
     // would also grant the G2 card sink, which draws a firmware card over HW1's
     // own lens page mid-note. note_started stays event-only.
@@ -1029,6 +1038,10 @@ void notifFormatEvent(const SystemEvent& e, char* out, size_t outLen) {
     case SYSEVT_FILE_DELETED: snprintf(out, outLen, "Deleted: %s", e.subject[0] ? e.subject : "file"); return;
     case SYSEVT_VOICE_WAKE:    snprintf(out, outLen, "Listening..."); return;
     case SYSEVT_VOICE_COMMAND: snprintf(out, outLen, "Voice: %s", e.subject[0] ? e.subject : "cmd"); return;
+    // subject = free bytes (internal heap; LittleFS). snprintf only: this
+    // function is compiled on its own by host tests.
+    case SYSEVT_HEAP_LOW:     snprintf(out, outLen, "Memory low: %s B free", e.subject[0] ? e.subject : "?"); return;
+    case SYSEVT_FS_LOW_SPACE: snprintf(out, outLen, "Storage low: %s B free", e.subject[0] ? e.subject : "?"); return;
     default:
       // Generic fallback for any kind promoted to a visible sink later.
       if (e.subject[0]) snprintf(out, outLen, "%s: %s", systemEventKindName(e.kind), e.subject);

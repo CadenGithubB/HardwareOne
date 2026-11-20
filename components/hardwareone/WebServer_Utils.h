@@ -1068,11 +1068,73 @@ window.BondFs = (function(){
       }, iv);
     }).catch(function(e){ if(opts.onResult) opts.onResult(null,e.message); });
   }
+  // One request to a /api/bond/fs route. The device answers the first GET at
+  // once with {success:true,pending:true,id:N} and the same route with ?id=N
+  // answers pending again, the result, or an error; the web server no longer
+  // waits for the peer inside the request. done(reply|null, err): reply is the
+  // route's final JSON (success true or false), err a transport problem.
+  //   - Busy is retried until FS_LIMIT_MS after the call began, with a new
+  //     start each time: "bridge busy" on the start (another request to this
+  //     route is in flight on this device) and the peer's own "busy" as the
+  //     polled answer (the peer holds one waiting request for all three
+  //     routes, and they are no longer sent one after the other). Both mean
+  //     the request was not taken, so a second start cannot transfer a file
+  //     twice.
+  //   - abandoned (optional) is asked before every start. When it says true
+  //     the call ends there without done: nobody wants the answer, so the
+  //     request is not sent. It is never asked while a request is in flight.
+  //   - A poll that fails on the network is polled again; the start is never
+  //     sent twice once the device has accepted it. For /get that matters:
+  //     an accepted start means the peer is already sending the file.
+  //   - The device gives up on a request after 7 s and answers "timeout"
+  //     itself (it normally has the peer's answer or the protocol's own
+  //     error within 5 s). The page stops polling one second after that,
+  //     counted from the accepted start, in case that answer never comes.
+  var FS_POLL_MS = 250, FS_LIMIT_MS = 7000, FS_POLL_LIMIT_MS = FS_LIMIT_MS + 1000;
+  function fsCall(route, query, done, abandoned){
+    var first = Date.now(), began = first;
+    function retryBusy(d){
+      if (!d || d.success !== false || (d.error !== 'bridge busy' && d.error !== 'busy')) return false;
+      if (Date.now() - first >= FS_LIMIT_MS) return false;
+      setTimeout(start, FS_POLL_MS);
+      return true;
+    }
+    function poll(id){
+      setTimeout(function(){
+        hw.fetchJSON(route + '?id=' + id).then(function(d){
+          if (d && d.success === true && d.pending === true) {
+            if (Date.now() - began >= FS_POLL_LIMIT_MS) done(null, 'timeout'); else poll(id);
+            return;
+          }
+          if (!retryBusy(d)) done(d, null);
+        }).catch(function(e){
+          if (Date.now() - began >= FS_POLL_LIMIT_MS) done(null, (e && e.message) || 'network'); else poll(id);
+        });
+      }, FS_POLL_MS);
+    }
+    function start(){
+      if (abandoned && abandoned()) return;
+      hw.fetchJSON(route + '?' + query).then(function(d){
+        if (d && d.success === true && d.pending === true && d.id) { began = Date.now(); poll(d.id); return; }
+        if (!retryBusy(d)) done(d, null);
+      }).catch(function(e){ done(null, (e && e.message) || 'network'); });
+    }
+    start();
+  }
   // List a directory on the peer. done(entries|null, err).
   // entries shape: [{name, isDir, size, perms}] sorted folders-first, alpha.
+  // A newer list() call supersedes an older one that has not answered yet. An
+  // older request the device has accepted is still polled to its end (that
+  // frees the device's slot) but its done is not called, so a slow answer for
+  // a folder the user has left cannot be drawn over the folder they are in.
+  // An older call still waiting for the busy route is not sent at all.
+  var listSeq = 0;
   function list(path, done){
-    var qp = '/api/bond/fs/list?path=' + encodeURIComponent(path||'/');
-    hw.fetchJSON(qp).then(function(d){
+    var mine = ++listSeq;
+    function superseded(){ return mine !== listSeq; }
+    fsCall('/api/bond/fs/list', 'path=' + encodeURIComponent(path||'/'), function(d, err){
+      if (superseded()) return;
+      if (err) { done(null, err); return; }
       if (!d || d.success !== true) {
         done(null, (d && d.error) || 'failed');
         return;
@@ -1085,29 +1147,27 @@ window.BondFs = (function(){
         return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0);
       });
       done(entries, null);
-    }).catch(function(e){
-      done(null, (e && e.message) || 'network');
-    });
+    }, superseded);
   }
   // Storage stats for a path on the peer. done({total,used,free,usagePercent}|null, err).
   // Replaces the prior `exec('fsusage')` 4-line text scrape.
   function stat(path, done){
-    var qp = '/api/bond/fs/stat?path=' + encodeURIComponent(path||'/');
-    hw.fetchJSON(qp).then(function(d){
+    fsCall('/api/bond/fs/stat', 'path=' + encodeURIComponent(path||'/'), function(d, err){
+      if (err) { done(null, err); return; }
       if (!d || d.success !== true) { done(null, (d && d.error) || 'failed'); return; }
       done({
         total: d.total, used: d.used, free: d.free,
         usagePercent: d.usagePercent,
         path: d.path
       }, null);
-    }).catch(function(e){ done(null, (e && e.message) || 'network'); });
+    });
   }
   // Pull a file from the peer onto THIS device.
   // done({localPath, localUrl, base, size}|null, err).
   //
-  // Two-stage: structured FS_GET_REQ kicks the transfer (returns size + ack
-  // status synchronously), then we poll the local landing directory for the
-  // file to appear. File content rides the existing FILE_START/DATA/END
+  // Two-stage: structured FS_GET_REQ kicks the transfer (fsCall returns the
+  // peer's ack: size + status), then we poll the local landing directory for
+  // the file to appear. File content rides the existing FILE_START/DATA/END
   // pipeline so behavior is identical to the legacy path — just a
   // deterministic trigger instead of a CLI scrape.
   function pull(remotePath, done){
@@ -1120,8 +1180,8 @@ window.BondFs = (function(){
     // [STORAGE] Cannot open directory until the first chunk lands.
     function mk(p, next){ hw.postFormText('/api/cli', { cmd: 'mkdir "'+p+'"' }).then(function(){next();}).catch(function(){next();}); }
     mk('/espnow/received', function(){ mk(dir, function(){
-      var qp = '/api/bond/fs/get?path=' + encodeURIComponent(remotePath);
-      hw.fetchJSON(qp).then(function(d){
+      fsCall('/api/bond/fs/get', 'path=' + encodeURIComponent(remotePath), function(d, err){
+        if (err) { done(null, err); return; }
         if (!d || d.success !== true) {
           done(null, (d && d.error) || 'get failed');
           return;
@@ -1146,7 +1206,7 @@ window.BondFs = (function(){
             if (polls >= 30) { clearInterval(t); done(null,'timed out pulling '+base); }
           }).catch(function(){ if (polls >= 30) clearInterval(t); });
         }, 600);
-      }).catch(function(e){ done(null, (e && e.message) || 'network'); });
+      });
     }); });
   }
   // Render a directory explorer into containerId.
