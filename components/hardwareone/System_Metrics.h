@@ -6,7 +6,8 @@
 #include "System_MetricsCore.h"
 
 // System metrics sampler: one snapshot and a 185-point history per metric
-// (one point every 20 s on the sampler's own clock, about an hour), for the
+// (one point per history step on the sampler's own clock: 10, 20 or 60 s,
+// default 20 s = about an hour; systemMetricsSetHistoryStep), for the
 // glasses' stock widget feed (stock-feed plan, phase 3) and any other reader.
 // systemMetricsTick() runs on the main loop next to periodicMemorySample(); it
 // does nothing until a consumer opens it.
@@ -46,8 +47,8 @@ void systemMetricsTick();
 // sampler, runs only while at least one consumer is open. The value shown is
 // refreshed at the fastest open consumer's interval
 // (system_metrics_core::kFastIntervalMs 10 s, kSlowIntervalMs 60 s; clamped
-// to 1 s..10 min); the history takes one point every 20 s
-// (kHistoryStepMs) whatever the intervals. Returns a handle 1..4, or 0 when
+// to 1 s..10 min); the history takes one point per history step whatever
+// the intervals. Returns a handle 1..4, or 0 when
 // every slot is taken. Reopening after everyone closed starts the histories
 // afresh; as long as one consumer stays open they are kept.
 uint8_t systemMetricsOpen(uint32_t intervalMs);
@@ -59,10 +60,20 @@ void systemMetricsClose(uint8_t handle);
 // metric had a value. systemMetricsHistory copies the newest min(cap, count)
 // history points, oldest first, and returns how many. systemMetricsGeneration counts
 // samples taken (0 = none yet). systemMetricsPointGeneration counts the
-// history points of the current run (one per 20 s step taken; 0 = none yet),
+// history points of the current run (one per history step taken, 0 = none
+// yet; a step change starts it over),
 // so a chart feed can resend when its line has moved although the shown
 // values did not.
 bool systemMetricsRead(SystemMetricId id, SystemMetricReading& out);
 uint8_t systemMetricsHistory(SystemMetricId id, float* out, size_t cap);
 uint32_t systemMetricsGeneration();
 uint32_t systemMetricsPointGeneration();
+
+// History step (any task): one of system_metrics_core::kHistoryStepChoicesMs
+// (10, 20 or 60 s; the default before any call is kHistoryStepMs, 20 s).
+// Returns true when it changed the step. A change during a run drops every
+// metric's history at once (the shown values and change baselines stay) and
+// the next sample starts a new grid at the new step, so a chart never mixes
+// two spacings; with no run it applies to the next one. A step not in the
+// list is refused (false, nothing changes).
+bool systemMetricsSetHistoryStep(uint32_t stepMs);

@@ -932,14 +932,19 @@ everything user-visible since the v0.99.99.1 tag.
 ### Changed
 - G2 stock widget chart: always the glasses' full 185-point window, newest point at the right edge
   so the line scrolls left (the glasses place points at a fixed step, so 60 points filled only the
-  left third). The history takes one point every 20 s on its own clock (about an hour), whatever
-  the send cadence, instead of one per sample; a new point counts as a change, so the chart
-  scrolls even when every shown value is steady (still at most one set per interval). The change
-  and arrow are the change over the refresh interval, not over the last 20 s point. While `g2 stats feed` is on, sampling continues with
-  the glasses disconnected, so a reconnect sends the whole last hour; only feed off or a reboot
-  drops it. Until an hour exists the left part is padded: new setting `g2StockPad` and command
+  left third). The history takes one point per chart step on its own clock, whatever the send
+  cadence, instead of one per sample: new setting `g2StockStepSec` and command
+  `g2 stats step 10|20|60` (admin, saved; default 20 s; the window is 185 steps: about 31 min,
+  1 h 2 min or 3 h 5 min; other values are refused; a change drops the history, restarts its grid
+  and sends a full set; `g2 stats status` shows the step and window). A new point counts as a
+  change, so the chart scrolls even when every shown value is steady (still at most one set per
+  interval). The change and arrow are the change over the refresh interval, not over the last
+  chart point. While `g2 stats feed` is on, sampling continues with
+  the glasses disconnected, so a reconnect sends the whole window; only feed off or a reboot
+  drops it. Until the window is full the left part is padded: new setting `g2StockPad` and command
   `g2 stats pad gap|flat` (admin, saved; default gap = NaN points, which the whitelist accepts only
-  as that prefix; flat = the oldest point repeated). The page-open cadence is 10 s instead of 5 s
+  as that prefix; flat = the oldest point repeated; it also takes 0/1, which the settings editors'
+  Gap/Flat choice sends). The page-open cadence is 10 s instead of 5 s
   (a set is 9 stocks of about 840 B, 4 fragments each). PSRAM for the sampler and feed grows from
   about 7.7 KB to about 15 KB; internal RAM unchanged. Host-tested; not yet seen on the lens.
 - Wi-Fi wins over the mesh on a worker: joined to Wi-Fi on another channel than its master, the

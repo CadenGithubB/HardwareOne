@@ -39,6 +39,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "G2_FeedCore.h"
@@ -355,7 +356,8 @@ inline bool isGapPoint(float f) {
 inline Pad padFromSetting(int v) { return v == 1 ? Pad::Flat : Pad::Gap; }
 inline const char* padName(Pad p) { return p == Pad::Flat ? "flat" : "gap"; }
 
-// "gap" or "flat" (any case, surrounding spaces). False otherwise.
+// "gap" or "flat" (any case, surrounding spaces), or the setting values "0"
+// / "1" the settings editors send for the g2StockPad row. False otherwise.
 inline bool parsePad(const char* text, Pad& out) {
   if (!text) return false;
   while (*text == ' ') text++;
@@ -370,7 +372,8 @@ inline bool parsePad(const char* text, Pad& out) {
   word[n] = '\0';
   while (*text == ' ') text++;
   if (*text) return false;
-  if (strcmp(word, "gap") == 0) { out = Pad::Gap; return true; }
+  if (strcmp(word, "gap") == 0 || strcmp(word, "0") == 0) { out = Pad::Gap; return true; }
+  if (strcmp(word, "1") == 0) { out = Pad::Flat; return true; }
   if (strcmp(word, "flat") == 0) { out = Pad::Flat; return true; }
   return false;
 }
@@ -708,6 +711,71 @@ inline uint32_t clampIntervalSec(int v) {
   if (v < (int)kMinIntervalSec) return kDefaultIntervalSec;
   if (v > (int)kMaxIntervalSec) return kMaxIntervalSec;
   return (uint32_t)v;
+}
+
+// Chart step in seconds (`g2 stats step`, saved): one history point per step,
+// 185 points, so the window is 185 x step. Only these three; the setting row
+// lists the same values for the settings editors.
+static constexpr uint32_t kDefaultStepSec = system_metrics_core::kHistoryStepMs / 1000u;  // 20
+static constexpr uint32_t kStepChoicesSec[] = {10, 20, 60};
+static constexpr char kStepChoicesText[] = "10, 20 or 60";
+static_assert(sizeof kStepChoicesSec / sizeof kStepChoicesSec[0] ==
+                  sizeof system_metrics_core::kHistoryStepChoicesMs /
+                      sizeof system_metrics_core::kHistoryStepChoicesMs[0],
+              "the command's steps are the sampler's");
+
+inline bool stepAllowedSec(uint32_t sec) {
+  return sec <= UINT32_MAX / 1000u && system_metrics_core::historyStepAllowed(sec * 1000u);
+}
+
+// "10", "20" or "60" (digits only, surrounding spaces). False otherwise.
+inline bool parseStepSec(const char* text, uint32_t& out) {
+  if (!text) return false;
+  while (*text == ' ') text++;
+  uint32_t v = 0;
+  size_t digits = 0;
+  for (; *text >= '0' && *text <= '9'; text++) {
+    if (++digits > 3) return false;
+    v = v * 10 + (uint32_t)(*text - '0');
+  }
+  while (*text == ' ') text++;
+  if (!digits || *text || !stepAllowedSec(v)) return false;
+  out = v;
+  return true;
+}
+
+// The saved setting as a step: an allowed value as is, anything else (a hand
+// edit, an old file) the default.
+inline uint32_t stepFromSetting(int v) {
+  return v > 0 && stepAllowedSec((uint32_t)v) ? (uint32_t)v : kDefaultStepSec;
+}
+
+// The time the full chart covers at `stepSec`, to the nearest minute:
+// "31 min" (10 s), "1 h 2 min" (20 s), "3 h 5 min" (60 s).
+inline size_t formatWindow(uint32_t stepSec, char* out, size_t cap) {
+  if (!out || cap == 0) return 0;
+  const uint32_t min = (system_metrics_core::historyWindowMs(stepSec * 1000u) / 1000u + 30u) / 60u;
+  int n;
+  if (min < 60) n = snprintf(out, cap, "%u min", (unsigned)min);
+  else if (min % 60 == 0) n = snprintf(out, cap, "%u h", (unsigned)(min / 60));
+  else n = snprintf(out, cap, "%u h %u min", (unsigned)(min / 60), (unsigned)(min % 60));
+  if (n < 0) return 0;
+  return (size_t)n < cap ? (size_t)n : cap - 1;
+}
+
+// The chart line of `g2 stats status`: step, points, the window they cover,
+// and the padding.
+inline size_t formatChartLine(uint32_t stepSec, const char* padName, char* out, size_t cap) {
+  if (!out || cap == 0) return 0;
+  char window[24];
+  formatWindow(stepSec, window, sizeof window);
+  const int n = snprintf(out, cap,
+                         "Chart: a point every %u s (saved), %u points = the last %s, left "
+                         "padding %s (saved)",
+                         (unsigned)stepSec, (unsigned)kFeedPoints, window,
+                         padName ? padName : "?");
+  if (n < 0) return 0;
+  return (size_t)n < cap ? (size_t)n : cap - 1;
 }
 
 // Send policy: settle a moment after connect (the app's first batch went out

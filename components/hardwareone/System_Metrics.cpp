@@ -61,11 +61,18 @@ struct MetricsState {
   Raw sd;
   Raw lfs;
   bool running;  // a run is in progress (smc::runStep)
+  // The history step changed during this run (systemMetricsSetHistoryStep
+  // already dropped the histories): the tick restarts the grid. Under
+  // sMetricsMux.
+  bool stepRestart;
 };
 
 MetricsState* sMetrics = nullptr;  // PSRAM, allocated by the tick, never freed
 portMUX_TYPE sMetricsMux = portMUX_INITIALIZER_UNLOCKED;
 smc::Consumers sConsumers = {};    // under sMetricsMux
+// The history step in ms, under sMetricsMux; 0 = never set (the default).
+// PSRAM (.ext_ram.bss, zeroed at boot): internal RAM is scarce.
+EXT_RAM_BSS_ATTR uint32_t sHistoryStepMs;
 uint32_t sAllocRetryMs = 0;        // main loop only
 
 Raw unavailable() { return Raw{0.0f, 0.0f, 0.0f, false}; }
@@ -201,10 +208,13 @@ void takeSample(MetricsState& s, uint32_t nowMs, const smc::Plan& plan) {
   raw[smc::index(SystemMetricId::Ring)] = readRing();
 
   portENTER_CRITICAL(&sMetricsMux);
+  // A step change since this tick planned: the histories were just dropped
+  // and the grid restarts next tick, so this sample is no point on either grid.
+  const bool point = plan.point && !s.stepRestart;
   for (size_t i = 0; i < smc::kMetricCount; ++i) {
     SystemMetricReading& r = s.current[i];
     smc::Series& series = s.series[i];
-    const smc::Change c = smc::seriesSample(series, raw[i].available, raw[i].value, plan.point,
+    const smc::Change c = smc::seriesSample(series, raw[i].available, raw[i].value, point,
                                             plan.refresh, smc::kMetrics[i].trendDeadband);
     r.sampledAtMs = nowMs;
     r.available = raw[i].available;
@@ -225,7 +235,7 @@ void takeSample(MetricsState& s, uint32_t nowMs, const smc::Plan& plan) {
   }
   ++s.generation;
   if (s.generation == 0) s.generation = 1;  // 0 means "no sample yet"
-  if (plan.point && ++s.points == 0) s.points = 1;
+  if (point && ++s.points == 0) s.points = 1;
   portEXIT_CRITICAL(&sMetricsMux);
 }
 
@@ -274,11 +284,17 @@ void systemMetricsTick() {
     s.generation = 0;
     s.points = 0;
   }
+  const bool restartGrid = s.stepRestart;
+  s.stepRestart = false;
+  const uint32_t stepMs = smc::historyStepOrDefault(sHistoryStepMs);
   portEXIT_CRITICAL(&sMetricsMux);
   if (step == smc::RunStep::Start) {
     s.sampler = smc::Sampler{};
     s.storageRead = false;
   }
+  // A new run, or a step change in this one (its histories already dropped):
+  // a new grid at the current step, its first point with the next sample.
+  if (step == smc::RunStep::Start || restartGrid) smc::historyRestart(s.sampler, stepMs);
 
   // Keep the shared 500 ms task-CPU sampler interested only around a sample:
   // within kCpuWarmMs of it (the whole time at the fast interval).
@@ -345,6 +361,25 @@ uint32_t systemMetricsGeneration() {
   const uint32_t g = (sMetrics && sMetrics->running) ? sMetrics->generation : 0;
   portEXIT_CRITICAL(&sMetricsMux);
   return g;
+}
+
+bool systemMetricsSetHistoryStep(uint32_t stepMs) {
+  if (!smc::historyStepAllowed(stepMs)) return false;
+  portENTER_CRITICAL(&sMetricsMux);
+  const bool changed = smc::historyStepOrDefault(sHistoryStepMs) != stepMs;
+  sHistoryStepMs = stepMs;
+  if (changed && sMetrics && sMetrics->running) {
+    // Drop the histories now, so no reader sees the old spacing after this
+    // returns; the tick restarts the grid (it owns the sampler schedule).
+    for (size_t i = 0; i < smc::kMetricCount; ++i) {
+      smc::historyClear(sMetrics->series[i].history);
+      sMetrics->current[i].historyCount = 0;
+    }
+    sMetrics->points = 0;
+    sMetrics->stepRestart = true;
+  }
+  portEXIT_CRITICAL(&sMetricsMux);
+  return changed;
 }
 
 uint32_t systemMetricsPointGeneration() {

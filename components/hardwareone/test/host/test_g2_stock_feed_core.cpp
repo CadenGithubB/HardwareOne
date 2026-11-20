@@ -539,7 +539,10 @@ static void testGapWhitelist() {
   CHECK(parsePad("gap", pad) && pad == Pad::Gap);
   CHECK(parsePad(" FLAT ", pad) && pad == Pad::Flat);
   CHECK(!parsePad("", pad) && !parsePad("gaps", pad) && !parsePad("flat x", pad));
-  CHECK(!parsePad(nullptr, pad) && !parsePad("0", pad));
+  CHECK(!parsePad(nullptr, pad) && !parsePad("2", pad) && !parsePad("01", pad));
+  // The settings editors send the row's option value.
+  CHECK(parsePad("1", pad) && pad == Pad::Flat);
+  CHECK(parsePad(" 0 ", pad) && pad == Pad::Gap);
   CHECK(padFromSetting(0) == Pad::Gap && padFromSetting(1) == Pad::Flat &&
         padFromSetting(7) == Pad::Gap);
   CHECK(std::strcmp(padName(Pad::Gap), "gap") == 0 && std::strcmp(padName(Pad::Flat), "flat") == 0);
@@ -696,6 +699,42 @@ static void testHelpers() {
         clampIntervalSec(99999) == kMaxIntervalSec);
   CHECK(timing(false, 60).minIntervalMs == 60000 && timing(true, 60).minIntervalMs == 10000);
   CHECK(timing(false, 120).minIntervalMs == 120000 && timing(false, 1).minIntervalMs == 60000);
+
+  // Chart step (`g2 stats step`): 10, 20 or 60 s only.
+  uint32_t step = 0;
+  for (uint32_t ok : kStepChoicesSec) CHECK(parseStepSec(std::to_string(ok).c_str(), step) && step == ok);
+  CHECK(parseStepSec(" 60 ", step) && step == 60);
+  step = 7;
+  CHECK(!parseStepSec("0", step) && !parseStepSec("15", step) && !parseStepSec("30", step));
+  CHECK(!parseStepSec("abc", step) && !parseStepSec("", step) && !parseStepSec(nullptr, step));
+  CHECK(!parseStepSec("10s", step) && !parseStepSec("-10", step) && !parseStepSec("600", step));
+  CHECK(!parseStepSec("20 60", step) && !parseStepSec("99999999999", step) && step == 7);
+  CHECK(kDefaultStepSec == 20);
+  CHECK(stepFromSetting(10) == 10 && stepFromSetting(20) == 20 && stepFromSetting(60) == 60);
+  CHECK(stepFromSetting(0) == 20 && stepFromSetting(30) == 20 && stepFromSetting(-10) == 20 &&
+        stepFromSetting(600) == 20);
+  CHECK(std::strstr(kStepChoicesText, "10") && std::strstr(kStepChoicesText, "20") &&
+        std::strstr(kStepChoicesText, "60"));
+  // The window each step covers (185 points), as status prints it.
+  char window[24];
+  CHECK(formatWindow(10, window, sizeof window) == 6 && std::strcmp(window, "31 min") == 0);
+  formatWindow(20, window, sizeof window);
+  CHECK(std::strcmp(window, "1 h 2 min") == 0);
+  formatWindow(60, window, sizeof window);
+  CHECK(std::strcmp(window, "3 h 5 min") == 0);
+  char tiny[4];
+  CHECK(formatWindow(60, tiny, sizeof tiny) == 3 && std::strcmp(tiny, "3 h") == 0);  // truncated
+  CHECK(formatWindow(60, nullptr, 8) == 0);
+  // `g2 stats status`'s chart line: the step, the points and the window.
+  char line[112];
+  formatChartLine(20, padName(Pad::Gap), line, sizeof line);
+  CHECK(std::strcmp(line, "Chart: a point every 20 s (saved), 185 points = the last 1 h 2 min, "
+                          "left padding gap (saved)") == 0);
+  formatChartLine(60, padName(Pad::Flat), line, sizeof line);
+  CHECK(std::strcmp(line, "Chart: a point every 60 s (saved), 185 points = the last 3 h 5 min, "
+                          "left padding flat (saved)") == 0);
+  formatChartLine(10, padName(Pad::Gap), line, sizeof line);
+  CHECK(std::strstr(line, "every 10 s") && std::strstr(line, "the last 31 min"));
 
   // The digest follows what the tile shows, not the chart.
   Slot a, b;

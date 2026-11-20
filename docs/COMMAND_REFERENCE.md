@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1053 commands across 59 modules (1053 registry entries).
+1054 commands across 59 modules (1054 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -67,7 +67,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`cm5`](#cm5) — 15 commands
 - [`ota`](#ota) — 9 commands
 - [`setpattern`](#setpattern) — 1 commands
-- [`even_g2`](#even-g2) — 65 commands
+- [`even_g2`](#even-g2) — 66 commands
 - [`ring`](#ring) — 19 commands
 - [`llm`](#llm) — 36 commands
 - [`settingsedit`](#settingsedit) — 75 commands
@@ -1327,7 +1327,7 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 
 ## even_g2
 
-> This subsystem drives Even Reality G2 smart glasses in the Glasses mode (blemode client or glasses: the glasses, plus the phone link whenever a phone secret is set, with the app console on that link); the two temples are addressed as left/right/auto. openg2 starts scan-and-connect IN THE BACKGROUND and returns immediately -- it does not block, so poll g2status (or g2info for firmware/MAC/battery) to see when the link is up, and nearly every other command here requires that connection first. Display commands render to the lens: g2show prints text, g2ai/g2ainoask/g2aidirect push a front-pane AI answer card through the EvenAI pipeline, g2bmp shows a BMP file, and g2sensors/g2network/g2files/g2settingspage show built-in info pages; g2nav [on|off] enables menu-navigation mode and g2clear blanks the display. For audio, use the shared Microphone controls: micsource selects auto, pdm or g2; openmic/closemic start and stop the selected source; micrecord controls WAV recording. g2micon/g2micoff are low-level stream probes; g2micrec and g2micwav remain SD-backed raw-LC3 and decoded-WAV diagnostics. closeg2 disconnects but keeps the GATT cache for fast reconnect; closeg2 full also frees the cache to recover about 30 KB. The glasses' own stock widget can show system metrics instead of share prices: g2 stats status and g2 stats preview show the rows and bytes; g2 stats send (admin) sends one batch; g2 stats feed [on|off] (admin, saved, off by default) feeds it on change, g2 stats metrics <labels> and g2 stats interval <seconds> (admin, saved) choose what and how often; the chart is the last hour (a point every 20 s, kept while the glasses are away) and g2 stats pad [gap|flat] (admin, saved) fills its left part until an hour exists. The remaining g2* commands are low-level protocol probes and diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).
+> This subsystem drives Even Reality G2 smart glasses in the Glasses mode (blemode client or glasses: the glasses, plus the phone link whenever a phone secret is set, with the app console on that link); the two temples are addressed as left/right/auto. openg2 starts scan-and-connect IN THE BACKGROUND and returns immediately -- it does not block, so poll g2status (or g2info for firmware/MAC/battery) to see when the link is up, and nearly every other command here requires that connection first. Display commands render to the lens: g2show prints text, g2ai/g2ainoask/g2aidirect push a front-pane AI answer card through the EvenAI pipeline, g2bmp shows a BMP file, and g2sensors/g2network/g2files/g2settingspage show built-in info pages; g2nav [on|off] enables menu-navigation mode and g2clear blanks the display. For audio, use the shared Microphone controls: micsource selects auto, pdm or g2; openmic/closemic start and stop the selected source; micrecord controls WAV recording. g2micon/g2micoff are low-level stream probes; g2micrec and g2micwav remain SD-backed raw-LC3 and decoded-WAV diagnostics. closeg2 disconnects but keeps the GATT cache for fast reconnect; closeg2 full also frees the cache to recover about 30 KB. The glasses' own stock widget can show system metrics instead of share prices: g2 stats status and g2 stats preview show the rows and bytes; g2 stats send (admin) sends one batch; g2 stats feed [on|off] (admin, saved, off by default) feeds it on change, g2 stats metrics <labels> and g2 stats interval <seconds> (admin, saved) choose what and how often; the chart is the last 185 points (kept while the glasses are away), one every g2 stats step [10|20|60] seconds (admin, saved; default 20, about an hour; a change starts the chart over), and g2 stats pad [gap|flat] (admin, saved) fills its left part until the window is full. The remaining g2* commands are low-level protocol probes and diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -1335,10 +1335,11 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 | `g2 stats feed` | A | Feed the stock widget with system metrics (saved; off by default).<br/>`Usage: g2 stats feed [on\|off] (off clears the widget)` |
 | `g2 stats interval` | A | How often the stock widget feed may send changed values (saved).<br/>`Usage: g2 stats interval [seconds 30-3600] (default 60; 10 s while the stock page is open)` |
 | `g2 stats metrics` | A | Which metrics the stock widget shows, in order (saved).<br/>`Usage: g2 stats metrics [label,label,...\|default] (up to 9 of CPU CPU0 CPU1 HEAP HBLK PSRM SD LFS TEMP LINK MESH RING; default CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING)` |
-| `g2 stats pad` | A | How the stock chart's left part is filled before an hour of history exists (saved).<br/>`Usage: g2 stats pad [gap\|flat] (default gap: empty; flat: the oldest point repeated)` |
+| `g2 stats pad` | A | How the stock chart's left part is filled before its 185 points exist (saved).<br/>`Usage: g2 stats pad [gap\|flat] (default gap: empty; flat: the oldest point repeated)` |
 | `g2 stats preview` |  | Show the stock rows and the first message's bytes without sending.<br/>`Usage: g2 stats preview` |
 | `g2 stats send` | A | Send one batch of the saved metrics to the stock widget now.<br/>`Usage: g2 stats send (right temple, glasses firmware 2.3.2.14)` |
 | `g2 stats status` |  | Stock widget feed: state, metrics shown now, sends and acks. |
+| `g2 stats step` | A | Seconds between stock chart points; the chart is 185 points (saved; a change starts it over).<br/>`Usage: g2 stats step [10\|20\|60] (default 20: about 1 h; 10: 31 min; 60: 3 h 5 min)` |
 | `g2ai` |  | Front-pane AI card (full pipeline): g2ai <text><br/>`Usage: g2ai <text>` |
 | `g2ai-direct` |  | Alias of g2aidirect. |
 | `g2ai-noask` |  | Alias of g2ainoask. |

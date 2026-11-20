@@ -6,7 +6,8 @@
 #include <string.h>
 
 // Dependency-free core of the system metrics sampler (System_Metrics.cpp):
-// the metric table, the 185-point history ring on a fixed 20 s clock, change
+// the metric table, the 185-point history ring on a fixed clock (a point every
+// 10, 20 or 60 s; `g2 stats step`, default 20), change
 // over the last refresh interval and trend, the consumer table that sets how often
 // the shown value is refreshed, the run bookkeeping, and the due/warm
 // schedule. No Arduino, ESP-IDF or FreeRTOS types, so the host test
@@ -32,11 +33,30 @@ enum class SystemMetricId : uint8_t {
 namespace system_metrics_core {
 
 inline constexpr size_t kMetricCount = 12;
-// History: one point per metric every kHistoryStepMs on the sampler's own
-// clock, whatever the consumers' intervals; kHistoryLen points = about an
-// hour (the glasses' stock chart takes at most 185).
+// History: one point per metric every history step on the sampler's own
+// clock, whatever the consumers' intervals. kHistoryLen points (the glasses'
+// stock chart takes at most 185), so the window is kHistoryLen x step: 10 s
+// about 31 min, 20 s (the default, kHistoryStepMs) about 1 h 2 min, 60 s
+// 3 h 5 min. Only the steps in kHistoryStepChoicesMs are accepted.
 inline constexpr uint8_t kHistoryLen = 185;
 inline constexpr uint32_t kHistoryStepMs = 20000;
+inline constexpr uint32_t kHistoryStepChoicesMs[] = {10000, 20000, 60000};
+
+inline constexpr bool historyStepAllowed(uint32_t stepMs) {
+  for (uint32_t ms : kHistoryStepChoicesMs)
+    if (ms == stepMs) return true;
+  return false;
+}
+
+// An allowed step as is; anything else (0 = unset) the default.
+inline constexpr uint32_t historyStepOrDefault(uint32_t stepMs) {
+  return historyStepAllowed(stepMs) ? stepMs : kHistoryStepMs;
+}
+
+// The time a full history covers at `stepMs` (kHistoryLen points).
+inline constexpr uint32_t historyWindowMs(uint32_t stepMs) {
+  return (uint32_t)kHistoryLen * historyStepOrDefault(stepMs);
+}
 
 // Refresh intervals a consumer may ask for (the value it shows). Fast: the
 // expanded stock page is open; slow: the tile only. Requests are clamped to
@@ -112,7 +132,7 @@ inline bool idFromLabel(const char* label, SystemMetricId& out) {
 }
 
 // ── History ring ────────────────────────────────────────────────────────────
-// The last kHistoryLen history points of one metric, one per kHistoryStepMs
+// The last kHistoryLen history points of one metric, one per history step
 // (HistoryClock below). A point the sampler could not read is not pushed (no
 // fake fill-ins), so a metric's history can hold fewer points than another's
 // and its time axis then runs slightly short of kHistoryLen steps.
@@ -297,16 +317,21 @@ inline uint32_t msUntilDue(const Schedule& s, uint32_t nowMs, uint32_t intervalM
 }
 
 // ── History clock ───────────────────────────────────────────────────────────
-// History points fall on a fixed grid of kHistoryStepMs that starts with the
-// first sample of a run, independent of the consumers' refresh intervals and
-// of how unevenly the main loop ticks. A point taken late (a slow lap, the
-// CPU settle wait) keeps the grid: the next one is due at the next grid step
-// after it. Steps missed entirely (a main-loop stall longer than a step) are
-// skipped, not filled in, so the grid never drifts.
+// History points fall on a fixed grid of the history step that starts with
+// the first sample of a run, independent of the consumers' refresh intervals
+// and of how unevenly the main loop ticks. A point taken late (a slow lap,
+// the CPU settle wait) keeps the grid: the next one is due at the next grid
+// step after it. Steps missed entirely (a main-loop stall longer than a step)
+// are skipped, not filled in, so the grid never drifts. A step change does
+// not bend the grid: the sampler drops the histories and starts a new clock
+// (historyRestart), so one history never mixes two spacings.
 struct HistoryClock {
   uint32_t nextMs;  // the next grid step
   bool started;     // nextMs is meaningful
+  uint32_t stepMs;  // the grid step; 0 (or any step not allowed) = kHistoryStepMs
 };
+
+inline uint32_t clockStep(const HistoryClock& c) { return historyStepOrDefault(c.stepMs); }
 
 inline bool pointDue(const HistoryClock& c, uint32_t nowMs) {
   return !c.started || (int32_t)(nowMs - c.nextMs) >= 0;
@@ -317,13 +342,14 @@ inline uint32_t msUntilPoint(const HistoryClock& c, uint32_t nowMs) {
 }
 
 inline void pointTaken(HistoryClock& c, uint32_t nowMs) {
+  const uint32_t step = clockStep(c);
   if (!c.started) {
     c.started = true;
-    c.nextMs = nowMs + kHistoryStepMs;
+    c.nextMs = nowMs + step;
     return;
   }
   const uint32_t late = nowMs - c.nextMs;  // pointDue: >= 0
-  c.nextMs += (late / kHistoryStepMs + 1) * kHistoryStepMs;
+  c.nextMs += (late / step + 1) * step;
 }
 
 // ── Sampler schedule ────────────────────────────────────────────────────────
@@ -331,7 +357,11 @@ inline void pointTaken(HistoryClock& c, uint32_t nowMs) {
 // last refresh sample (the value and change the consumers show). History: the
 // fixed grid above. A sample is taken when either is due; only a history
 // point pushes into the histories, only a refresh sample moves the change
-// baseline and the refresh schedule.
+// baseline and the refresh schedule. A step at or above the refresh interval
+// (60 s step, 60 s tile) changes nothing: a sample due on both clocks is both
+// a point and a refresh; once lap lateness has moved the refresh schedule off
+// the grid, the point comes as its own sample just before the refresh and
+// moves neither the refresh schedule nor the baseline.
 struct Sampler {
   Schedule refresh;    // the last refresh sample, for the consumers' interval
   HistoryClock clock;  // the history grid
@@ -352,6 +382,13 @@ inline Plan plan(const Sampler& s, uint32_t nowMs, uint32_t refreshMs) {
 inline void sampleTaken(Sampler& s, const Plan& p, uint32_t nowMs) {
   if (p.refresh) s.refresh = Schedule{nowMs, true};
   if (p.point) pointTaken(s.clock, nowMs);
+}
+
+// A new history grid at `stepMs` (a run start, or a step change during a
+// run): the next sample is a point and the grid starts there. The refresh
+// schedule (and so the change baseline) is left alone.
+inline void historyRestart(Sampler& s, uint32_t stepMs) {
+  s.clock = HistoryClock{0, false, historyStepOrDefault(stepMs)};
 }
 
 inline uint32_t msUntilSample(const Sampler& s, uint32_t nowMs, uint32_t refreshMs) {

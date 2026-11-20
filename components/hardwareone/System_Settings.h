@@ -341,6 +341,7 @@ struct Settings {
       g2StockIntervalSec(60),             // its send interval on the tile (10 s while the stock page is open)
       g2StockMetrics("CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING"),  // its metrics, in order
       g2StockPad(0),                      // its chart's left padding: 0 = gap (NaN), 1 = flat
+      g2StockStepSec(20),                 // its chart step: a point every 10, 20 or 60 s (185 points)
       ringHealthCollectionDesired(0),     // Preserve: do not change the ring at first boot
       ringLowPowerDesired(0),             // Preserve: do not change the ring at first boot
       captureEncryptMode(1),            // seal LOG_R1 capture sessions at rest by default
@@ -1064,12 +1065,14 @@ struct Settings {
   bool g2HealthPanelFeed;
   int  g2HealthPanelHistoryMin;
   // Stock G2 stock widget fed with system metrics (G2_StockFeed): on/off, the
-  // send interval in seconds, the metric labels shown, in order, and how the
-  // chart's left part is padded before an hour of history exists (0 gap, 1 flat).
+  // send interval in seconds, the metric labels shown, in order, how the
+  // chart's left part is padded before its window is full (0 gap, 1 flat), and
+  // the chart step in seconds (10, 20 or 60; the window is 185 points).
   bool g2StockFeed;
   int  g2StockIntervalSec;
   String g2StockMetrics;
   int  g2StockPad;
+  int  g2StockStepSec;
   // Persisted policy, not observed ring state. Values are the G2_Ring.h
   // G2RingDesiredState wire-control contract: 0=Preserve, 1=Off, 2=On.
   // These remain plain int fields because SETTING_INT writes through int*.

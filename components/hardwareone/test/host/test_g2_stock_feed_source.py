@@ -19,7 +19,11 @@ compiled; comments and string literals are blanked first):
   setFeed (feed off) and g2StockFeedOwnerStopped (feed off), never from a
   link-gated branch of g2StockFeedTick;
 - the owner's exit path calls g2StockFeedOwnerStopped() once, after the lap
-  loop (nothing else would drop the page-open cadence while it is stopped).
+  loop (nothing else would drop the page-open cadence while it is stopped);
+- the chart step reaches the sampler from both sides: `g2 stats step` hands it
+  over at once (works while the owner is stopped) and asks for a full batch,
+  and every owner lap syncs the saved step (boot, a hand edit) before the
+  resync check; its setting row defaults to 20 s and binds the command.
 
 --component points the suite at another component directory.
 """
@@ -164,12 +168,32 @@ def check(component: Path) -> list[str]:
         errors.append("G2_Glasses.cpp: g2StockFeedOwnerStopped() is not on the owner's exit path "
                       "(after the lap loop, before vTaskDelete)")
 
+    step_cmd = function_body(feed, "const char* cmd_g2statsstep(")
+    if not step_cmd:
+        errors.append("G2_StockFeed.cpp: cmd_g2statsstep is missing")
+    else:
+        if "systemMetricsSetHistoryStep(" not in step_cmd:
+            errors.append("G2_StockFeed.cpp: g2 stats step does not hand the step to the sampler")
+        if not re.search(r"\bsResync\.store\(\s*true", step_cmd):
+            errors.append("G2_StockFeed.cpp: g2 stats step does not ask for a full batch")
+    sync = tick.find("systemMetricsSetHistoryStep(")
+    resync = tick.find("sResync.exchange(")
+    if sync < 0 or resync < 0 or sync > resync:
+        errors.append("G2_StockFeed.cpp: g2StockFeedTick does not sync the saved step into the "
+                      "sampler before the resync check")
+
     settings = (component / "System_Settings.h").read_text(encoding="utf-8")
     if not re.search(r"\bg2StockFeed\s*\(\s*false\s*\)", settings):
         errors.append("System_Settings.h: g2StockFeed is not off by default")
     rows = (component / "System_SensorLogging.cpp").read_text(encoding="utf-8")
     if not re.search(r'\{\s*"g2StockFeed"\s*,\s*SETTING_BOOL\s*,\s*&gSettings\.g2StockFeed\s*,\s*0\s*,', rows):
         errors.append("System_SensorLogging.cpp: the g2StockFeed row is not off by default")
+    if not re.search(r"\bg2StockStepSec\s*\(\s*20\s*\)", settings):
+        errors.append("System_Settings.h: g2StockStepSec does not default to 20")
+    if not re.search(r'\{\s*"g2StockStepSec"\s*,\s*SETTING_INT\s*,\s*&gSettings\.g2StockStepSec\s*,'
+                     r'\s*20\s*,[^}]*"10\|[^"]*,20\|[^"]*,60\|[^"]*"[^}]*"g2 stats step"\s*\}', rows):
+        errors.append("System_SensorLogging.cpp: the g2StockStepSec row is not 20 by default with the "
+                      "10/20/60 choices bound to g2 stats step")
 
     cmake = (component / "CMakeLists.txt").read_text(encoding="utf-8")
     if not re.search(r"^\s+G2_StockFeed\.cpp\s*$", cmake, re.MULTILINE):

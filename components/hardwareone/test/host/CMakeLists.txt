@@ -164,8 +164,8 @@ target_include_directories(heap_low_core_tests PRIVATE ../..)
 target_compile_options(heap_low_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
 # System metrics sampler core (System_MetricsCore.h, stock-feed phase 3): the
-# metric table, 185-point history ring and wrap, the fixed 20 s history clock
-# under uneven ticks, change/trend, consumer intervals, the run and the CPU
+# metric table, 185-point history ring and wrap, the fixed history clock at
+# each step (10/20/60 s) under uneven ticks, step changes, change/trend, consumer intervals, the run and the CPU
 # warm-up schedule.
 add_executable(system_metrics_core_tests test_system_metrics_core.cpp)
 set_target_properties(system_metrics_core_tests PROPERTIES

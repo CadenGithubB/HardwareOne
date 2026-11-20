@@ -5,9 +5,10 @@
 // HardwareOne's own system metrics (System_Metrics.h) instead of share
 // prices: one stock per metric, label as the ticker, long name as the
 // company, the value as the price, the change since the previous sample as
-// the change, the last hour as the chart (185 points, one every 20 s, newest
-// at the right edge; padded on the left per `g2 stats pad gap|flat` until an
-// hour exists). Wire, clamps, whitelist and
+// the change, the history as the chart (185 points, one per `g2 stats step`
+// of 10, 20 or 60 s, default 20 s = about an hour; newest at the right edge;
+// padded on the left per `g2 stats pad gap|flat` until the window is full;
+// a step change starts the chart over). Wire, clamps, whitelist and
 // timing live in G2_StockFeedCore.h; the send policy is the shared dashboard
 // feed core (G2_FeedCore.h), the second instance next to the Health panel.
 //
@@ -17,7 +18,7 @@
 // at most once per `g2 stats interval` (default 60 s), every 10 s while the
 // glasses report the expanded stock page open. While it is on, the sampler
 // keeps sampling whether or not the glasses are connected, so a reconnect
-// sends the full last hour; feed off (or a reboot) drops the history. Paused
+// sends the whole chart window; feed off (or a reboot) drops the history. Paused
 // while Even AI,
 // Conversate, the native terminal, a native note or QuickNote own the
 // glasses. Only glasses firmware with a captured fixture (2.3.2.14) is fed.
@@ -70,6 +71,7 @@ const char* cmd_g2statsfeed(const String& args);
 const char* cmd_g2statsmetrics(const String& args);
 const char* cmd_g2statsinterval(const String& args);
 const char* cmd_g2statspad(const String& args);
+const char* cmd_g2statsstep(const String& args);
 
 #else
 

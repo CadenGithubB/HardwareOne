@@ -2782,6 +2782,7 @@ static const SettingEntry sensorLogSettingEntries[] = {
   { "g2StockIntervalSec", SETTING_INT, &gSettings.g2StockIntervalSec, 60, 0, nullptr, 30, 3600, "Glasses stock widget feed interval (sec)", nullptr, false, nullptr, "g2 stats interval" },
   { "g2StockMetrics", SETTING_STRING, &gSettings.g2StockMetrics, 0, 0, "CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING", 0, 0, "Glasses stock widget metrics (in order)", nullptr, false, nullptr, "g2 stats metrics" },
   { "g2StockPad", SETTING_INT, &gSettings.g2StockPad, 0, 0, nullptr, 0, 1, "Glasses stock widget chart padding", "0|Gap,1|Flat", false, nullptr, "g2 stats pad" },
+  { "g2StockStepSec", SETTING_INT, &gSettings.g2StockStepSec, 20, 0, nullptr, 10, 60, "Glasses stock widget chart step (sec)", "10|10 s (31 min),20|20 s (1 h 2 min),60|60 s (3 h 5 min)", false, nullptr, "g2 stats step" },
 #endif
 #if ENABLE_R1_HEALTH
   // These persisted desires are intentionally read-only in the generic

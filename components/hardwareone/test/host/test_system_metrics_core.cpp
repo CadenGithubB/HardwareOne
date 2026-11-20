@@ -1,10 +1,11 @@
 // System metrics sampler core (System_MetricsCore.h): the metric table, the
-// 185-point history ring and its wrap, the fixed 20 s history clock under
-// uneven ticks, change and trend, the consumer table that sets the refresh
+// 185-point history ring and its wrap, the fixed history clock (10, 20 or
+// 60 s step) under uneven ticks, step changes, change and trend, the consumer table that sets the refresh
 // interval, the run bookkeeping, and the due/CPU-warm schedule.
 #include "System_MetricsCore.h"
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,6 +24,20 @@ static void metricTable() {
   static_assert(smc::kHistoryLen == 185, "185-point history (the glasses' chart)");
   static_assert(smc::kHistoryStepMs == 20000, "a point every 20 s");
   static_assert(smc::kHistoryLen * smc::kHistoryStepMs / 60000 >= 60, "about an hour");
+  // The steps `g2 stats step` offers, and the window each covers (185 x step).
+  static_assert(smc::historyStepAllowed(10000) && smc::historyStepAllowed(20000) &&
+                    smc::historyStepAllowed(60000),
+                "10, 20 and 60 s");
+  static_assert(!smc::historyStepAllowed(0) && !smc::historyStepAllowed(15000) &&
+                    !smc::historyStepAllowed(30000) && !smc::historyStepAllowed(10),
+                "nothing else");
+  static_assert(smc::historyStepOrDefault(0) == smc::kHistoryStepMs &&
+                    smc::historyStepOrDefault(30000) == smc::kHistoryStepMs &&
+                    smc::historyStepOrDefault(60000) == 60000,
+                "unset or unknown = the default");
+  static_assert(smc::historyWindowMs(10000) == 1850000u, "10 s: 30 min 50 s");
+  static_assert(smc::historyWindowMs(20000) == 3700000u, "20 s: 1 h 1 min 40 s");
+  static_assert(smc::historyWindowMs(60000) == 11100000u, "60 s: 3 h 5 min");
   for (size_t i = 0; i < smc::kMetricCount; ++i) {
     const smc::MetricInfo& m = smc::kMetrics[i];
     CHECK(smc::index(m.id) == i);                 // table order is the id order
@@ -266,6 +281,31 @@ static void historyClock() {
   CHECK(!smc::pointDue(c, 0xFFFFFFFFu));
   CHECK(!smc::pointDue(c, c.nextMs - 1) && smc::pointDue(c, c.nextMs));
   CHECK(smc::msUntilPoint(c, 0xFFFFFFFFu) == c.nextMs + 1);
+  // Other steps: the same grid arithmetic at 10 s and 60 s.
+  for (uint32_t step : {10000u, 60000u}) {
+    c = smc::HistoryClock{0, false, step};
+    CHECK(smc::clockStep(c) == step);
+    smc::pointTaken(c, 1000);
+    CHECK(c.nextMs == 1000 + step);
+    smc::pointTaken(c, 1000 + step + 900);                      // late
+    CHECK(c.nextMs == 1000 + 2 * step);
+    smc::pointTaken(c, 1000 + 2 * step + 2 * step + 5);         // a stall over 2 steps
+    CHECK(c.nextMs == 1000 + 5 * step);
+  }
+  // A step that is not allowed runs at the default.
+  c = smc::HistoryClock{0, false, 15000};
+  smc::pointTaken(c, 0);
+  CHECK(c.nextMs == smc::kHistoryStepMs);
+  // historyRestart: a new clock at the step, due at once; the refresh
+  // schedule is kept.
+  smc::Sampler sm{};
+  sm.refresh = smc::Schedule{5000, true};
+  smc::pointTaken(sm.clock, 5000);
+  smc::historyRestart(sm, 60000);
+  CHECK(!sm.clock.started && sm.clock.stepMs == 60000 && smc::pointDue(sm.clock, 6000));
+  CHECK(sm.refresh.sampled && sm.refresh.lastSampleMs == 5000);
+  smc::historyRestart(sm, 12345);
+  CHECK(sm.clock.stepMs == smc::kHistoryStepMs);
 }
 
 static void seriesAndRun() {
@@ -338,18 +378,38 @@ static void changeOverRefreshInterval() {
 // warm-up (poke at most every second while wanted), the plan, the settle
 // wait, the sample (a point only on the history grid). Laps are uneven: the
 // next lap comes after lapMs(i), and the refresh interval may change.
+// The history step as systemMetricsSetHistoryStep and the tick apply it: a
+// change during a run drops the history at once and the next tick restarts
+// the grid at the new step; the change baseline stays.
 struct Model {
   smc::Consumers consumers{};
   smc::Sampler sampler{};
   smc::CpuWarm warm{};
   smc::Series series{};
   bool running = false;
+  uint32_t stepMs = 0;       // the requested step (0 = default)
+  bool stepRestart = false;  // set by setStep during a run
   uint32_t lastPoke = 0;
   int samples = 0;
   int points = 0;
   int pokeRuns = 0;
+  int refreshes = 0;
+  uint32_t lastRefreshAt = 0;
+  uint32_t minRefreshGap = UINT32_MAX;
   uint32_t pointAt[4096];
   float nextValue = 0.0f;
+
+  bool setStep(uint32_t ms) {
+    if (!smc::historyStepAllowed(ms)) return false;
+    const bool changed = smc::historyStepOrDefault(stepMs) != ms;
+    stepMs = ms;
+    if (changed && running) {
+      smc::historyClear(series.history);
+      points = 0;
+      stepRestart = true;
+    }
+    return changed;
+  }
 
   void tick(uint32_t now) {
     const uint32_t refresh = smc::effectiveInterval(consumers);
@@ -358,7 +418,10 @@ struct Model {
     if (step == smc::RunStep::Start) {
       smc::seriesClear(series);
       sampler = smc::Sampler{};
+      points = 0;
     }
+    if (step == smc::RunStep::Start || stepRestart) smc::historyRestart(sampler, stepMs);
+    stepRestart = false;
     if (smc::cpuWarmWanted(sampler, now, refresh) && (!warm.poked || now - lastPoke >= 1000)) {
       const uint32_t before = warm.sinceMs;
       const bool had = warm.poked;
@@ -369,7 +432,16 @@ struct Model {
     const smc::Plan p = smc::plan(sampler, now, refresh);
     if (!p.sample || !smc::cpuSettled(warm, now)) return;
     smc::sampleTaken(sampler, p, now);
+    const bool hadBaseline = series.haveLast;
+    const float baseline = series.last;
     (void)smc::seriesSample(series, true, nextValue, p.point, p.refresh, 0.0f);
+    // Only a refresh sample (or the very first value) moves the baseline.
+    if (!p.refresh && hadBaseline) CHECK(series.last == baseline);
+    if (p.refresh) {
+      if (refreshes > 0 && now - lastRefreshAt < minRefreshGap) minRefreshGap = now - lastRefreshAt;
+      lastRefreshAt = now;
+      ++refreshes;
+    }
     ++samples;
     if (p.point && points < 4096) pointAt[points++] = now;
     nextValue += 1.0f;
@@ -475,6 +547,153 @@ static void historyKeptWhileAConsumerStays() {
   delete m;
 }
 
+// The grid at every step over uneven laps (1 ms .. 2.5 s), with the refresh
+// interval switching between the tile (60 s) and the page (10 s): one point
+// per step on the first point's grid, none skipped or doubled; the refresh
+// samples keep their own interval (never closer than the fastest refresh)
+// and only they move the change baseline (Model::tick checks it), also when
+// the step equals or exceeds the refresh interval. The window, once full, is
+// 185 points spanning 184 steps.
+static void gridAtEachStep() {
+  for (uint32_t stepMs : smc::kHistoryStepChoicesMs) {
+    auto* m = new Model();
+    CHECK(m->setStep(stepMs) == (stepMs != smc::kHistoryStepMs));  // no run: nothing dropped
+    const uint8_t h = smc::consumerOpen(m->consumers, smc::kSlowIntervalMs);
+    uint32_t seed = 777 + stepMs;
+    const uint32_t start = 0xFFF00000u;                          // across the millis() wrap
+    const uint32_t duration = (uint32_t)(smc::kHistoryLen + 15) * stepMs;
+    uint32_t t = 0;
+    while (t < duration) {
+      const bool fast = (t / 420000u) % 2 == 1;
+      smc::consumerSetInterval(m->consumers, h, fast ? smc::kFastIntervalMs : smc::kSlowIntervalMs);
+      m->tick(start + t);
+      t += lap(seed);
+    }
+    const int expected = (int)(duration / stepMs);
+    CHECK(m->points >= expected - 1 && m->points <= expected + 1);
+    const uint32_t t0 = m->pointAt[0];
+    for (int k = 0; k < m->points; ++k) {
+      const uint32_t since = m->pointAt[k] - t0;
+      CHECK(since / stepMs == (uint32_t)k);
+      CHECK(since % stepMs <= 2500 + smc::kCpuSettleMs);
+    }
+    CHECK(m->refreshes > 0 && m->minRefreshGap >= smc::kFastIntervalMs);
+    // The window: full at 185, its span 184 steps (each point within its lap).
+    CHECK(m->series.history.count == smc::kHistoryLen);
+    const uint32_t span = m->pointAt[m->points - 1] - m->pointAt[m->points - smc::kHistoryLen];
+    CHECK(span / stepMs == (uint32_t)smc::kHistoryLen - 1 ||
+          span / stepMs == (uint32_t)smc::kHistoryLen - 2);
+    CHECK(span <= (uint32_t)smc::kHistoryLen * stepMs);
+    CHECK(smc::historyWindowMs(stepMs) == (uint32_t)smc::kHistoryLen * stepMs);
+    delete m;
+  }
+}
+
+// Step at or above the refresh: the 60 s step at the 60 s tile on a regular
+// 10 ms loop. The first samples are both a point and a refresh; the refresh
+// samples stay 60 s apart, the points stay on their grid, and a point that
+// comes on its own does not move the baseline. The change shown is the
+// change over the last refresh: 40 -> 45 at 5 s shows +5 until the 60 s
+// refresh, then 0, whatever the points in between.
+static void stepAtOrAboveRefresh() {
+  for (uint32_t refreshMs : {smc::kSlowIntervalMs, smc::kFastIntervalMs}) {
+    smc::Sampler sm{};
+    smc::historyRestart(sm, 60000);
+    smc::Series series{};
+    smc::seriesClear(series);
+    smc::Change shown{0.0f, 0};
+    int refreshes = 0, points = 0, both = 0;
+    uint32_t lastPoint = 0;
+    for (uint32_t t = 1; t <= 600001; t += 10) {
+      const smc::Plan p = smc::plan(sm, t, refreshMs);
+      if (!p.sample) continue;
+      smc::sampleTaken(sm, p, t);
+      const float before = series.last;
+      const bool had = series.haveLast;
+      shown = smc::seriesSample(series, true, t < 5000 ? 40.0f : 45.0f, p.point, p.refresh, 0.1f);
+      if (had && !p.refresh) CHECK(series.last == before);
+      if (p.point) {
+        if (points) CHECK(t - lastPoint == 60000);
+        lastPoint = t;
+        ++points;
+      }
+      refreshes += p.refresh;
+      both += p.point && p.refresh;
+      if (refreshMs == smc::kSlowIntervalMs && t >= 60001 && t < 120001) CHECK(near(shown.delta, 5.0f));
+      if (t >= 120001) CHECK(near(shown.delta, 0.0f));
+    }
+    CHECK(points == 11);                                          // 0..600 s every 60 s
+    CHECK(refreshes == (int)(600000 / refreshMs) + 1);
+    CHECK(both == 11);                                            // every point is a refresh too
+    CHECK(series.history.count == 11);
+  }
+  // Lap lateness moves the refresh off the grid: the point then comes first,
+  // on its own, and the refresh follows; neither moves the other's clock.
+  smc::Sampler sm{};
+  smc::historyRestart(sm, 60000);
+  smc::Plan p = smc::plan(sm, 1000, smc::kSlowIntervalMs);
+  CHECK(p.point && p.refresh);
+  smc::sampleTaken(sm, p, 1000);
+  p = smc::plan(sm, 61500, smc::kSlowIntervalMs);                // both due, 0.5 s late
+  CHECK(p.point && p.refresh);
+  smc::sampleTaken(sm, p, 61500);
+  CHECK(sm.clock.nextMs == 121000 && sm.refresh.lastSampleMs == 61500);
+  p = smc::plan(sm, 121000, smc::kSlowIntervalMs);
+  CHECK(p.sample && p.point && !p.refresh);                       // the point alone
+  smc::sampleTaken(sm, p, 121000);
+  CHECK(sm.refresh.lastSampleMs == 61500);
+  p = smc::plan(sm, 121499, smc::kSlowIntervalMs);
+  CHECK(!p.sample);
+  p = smc::plan(sm, 121500, smc::kSlowIntervalMs);
+  CHECK(p.sample && !p.point && p.refresh);                       // then the refresh
+  smc::sampleTaken(sm, p, 121500);
+  CHECK(sm.clock.nextMs == 181000);
+}
+
+// A step change during a run: the history is dropped at once (the baseline
+// and the run stay), the next sample is the first point of a new grid at the
+// new step, and no point of the old spacing follows. The same step again
+// changes nothing; a step not offered is refused.
+static void stepChangeClearsHistory() {
+  auto* m = new Model();
+  smc::consumerOpen(m->consumers, smc::kSlowIntervalMs);
+  uint32_t t = 1;
+  for (; t <= 300000; t += 10) m->tick(t);
+  CHECK(m->series.history.count == 15 && m->points == 15);
+  const float baseline = m->series.last;
+  CHECK(!m->setStep(20000));                                      // unchanged: kept
+  CHECK(m->series.history.count == 15);
+  CHECK(!m->setStep(30000) && !m->setStep(0) && m->series.history.count == 15);
+  CHECK(m->setStep(60000));
+  CHECK(m->series.history.count == 0 && m->points == 0);
+  CHECK(m->running && m->series.haveLast && m->series.last == baseline);
+  const uint32_t changedAt = t;
+  for (; t <= changedAt + 600000; t += 10) m->tick(t);
+  CHECK(m->points == 11 && m->series.history.count == 11);
+  CHECK(m->pointAt[0] - changedAt <= smc::kCpuSettleMs + 10);     // at once, on a new grid
+  for (int k = 1; k < m->points; ++k) CHECK(m->pointAt[k] - m->pointAt[k - 1] == 60000);
+  // Down to 10 s: dropped again, a point every 10 s from there.
+  CHECK(m->setStep(10000));
+  CHECK(m->series.history.count == 0);
+  const uint32_t again = t;
+  for (; t <= again + 100000; t += 10) m->tick(t);
+  CHECK(m->points == 11);
+  for (int k = 1; k < m->points; ++k) CHECK(m->pointAt[k] - m->pointAt[k - 1] == 10000);
+  // A change between runs only applies to the next run (which starts empty
+  // anyway).
+  smc::Consumers none{};
+  m->consumers = none;
+  m->tick(t);
+  CHECK(!m->running);
+  CHECK(m->setStep(20000) && !m->stepRestart);
+  smc::consumerOpen(m->consumers, smc::kSlowIntervalMs);
+  const uint32_t runAt = t + 10;
+  for (t = runAt; t <= runAt + 100000; t += 10) m->tick(t);
+  CHECK(m->points >= 5 && m->points <= 6);                        // the first after the CPU settle
+  for (int k = 1; k < m->points; ++k) CHECK(m->pointAt[k] - m->pointAt[k - 1] == 20000);
+  delete m;
+}
+
 int main() {
   metricTable();
   historyRing();
@@ -487,6 +706,9 @@ int main() {
   changeOverRefreshInterval();
   fixedClockUnevenTicks();
   historyKeptWhileAConsumerStays();
+  gridAtEachStep();
+  stepAtOrAboveRefresh();
+  stepChangeClearsHistory();
   std::puts("system_metrics_core_tests: ok");
   return 0;
 }

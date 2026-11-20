@@ -47,6 +47,7 @@ static_assert(kRowsBytes >= 1024, "room for the status header and 9 rows");
 bool feedOn() { return gSettings.g2StockFeed; }
 uint32_t intervalSec() { return sf::clampIntervalSec(gSettings.g2StockIntervalSec); }
 sf::Pad padMode() { return sf::padFromSetting(gSettings.g2StockPad); }
+uint32_t stepSec() { return sf::stepFromSetting(gSettings.g2StockStepSec); }
 
 // One PSRAM block, allocated on first use by the feed or by `g2 stats
 // status|preview|send`, and kept: the owner's slot and payload, and the
@@ -217,7 +218,7 @@ struct Current {
 
 // The batch the tile should show now: the saved metrics that have a value,
 // in the saved order, and its send-on-change digest (the shown values and the
-// history-point count, so a new 20 s point scrolls the chart).
+// history-point count, so a new chart point scrolls the chart).
 Current currentBatch(sf::Slot& slot) {
   Current cur;
   const sf::Selection sel = selection();
@@ -258,7 +259,7 @@ void releaseConsumer() {
 // not, so the history survives a glasses disconnect; and for a while after
 // `g2 stats preview` / `send`. The page-open cadence while the expanded page
 // is open on a connected temple (or a preview/send warms it), the feed
-// interval otherwise; the history takes a point every 20 s either way.
+// interval otherwise; the history takes a point per chart step either way.
 void updateConsumer(uint32_t now, bool on, bool linkOpen) {
   const bool warm = warmActive(now) || sForce.load(std::memory_order_acquire);
   if (!warm && sWarm.load(std::memory_order_acquire) &&
@@ -285,7 +286,7 @@ void updateConsumer(uint32_t now, bool on, bool linkOpen) {
 // The G2 control owner is stopping (closeg2): no lap runs until the next
 // openg2, so nothing would expire the page-open cadence or a preview's
 // warm-up. Keep only the feed's own interest: the feed interval if it is on
-// (the history keeps its 20 s clock), nothing if it is off.
+// (the history keeps its clock), nothing if it is off.
 void g2StockFeedOwnerStopped() {
   sPageOpen = false;
   sFastLapOk = false;
@@ -442,15 +443,19 @@ void g2StockFeedTick() {
     DEBUG_G2F("[G2-STOCK] stock page: no page state for %u s, treated as closed",
               (unsigned)(sf::kPageOpenHoldMs / 1000));
   }
+  // The saved chart step into the sampler (`g2 stats step` already did; this
+  // covers boot and a hand edit). A change drops the history and restarts
+  // its grid there, and the glasses get the new chart in full.
+  if (systemMetricsSetHistoryStep(stepSec() * 1000u)) sResync.store(true, std::memory_order_release);
   if (sResync.exchange(false, std::memory_order_acq_rel)) {
-    // Feed switched on, the metric list or the pad changed: a full batch, not
-    // a diff.
+    // Feed switched on, the metric list, the pad or the step changed: a full
+    // batch, not a diff.
     abortBatch();
     sPolicy.sentThisLink = false;
     sPolicy.haveAttempted = false;
   }
-  // Not gated on the link or the firmware: the sampler (and the hour of
-  // history the next connect sends) keeps going while the glasses are away.
+  // Not gated on the link or the firmware: the sampler (and the chart history
+  // the next connect sends) keeps going while the glasses are away.
   updateConsumer(now, on, g == feed::Gate::Open);
 
   switch (g) {
@@ -672,8 +677,8 @@ const char* setFeed(bool on) {
     g2StockFeedWake();
     return "Glasses stock widget feed ON (saved): system metrics replace the stocks on the "
            "right temple after connect, then on change (g2 stats interval; every 10 s while the "
-           "stock page is open). The chart keeps the last hour, also while the glasses are "
-           "away. The stock tile must be in the glasses' dashboard layout.";
+           "stock page is open). The chart keeps its 185 points (g2 stats step), also while the "
+           "glasses are away. The stock tile must be in the glasses' dashboard layout.";
   }
   sClearPending.store(true, std::memory_order_release);
   // End the sampler run now (it clears the history), also while the G2 owner
@@ -705,16 +710,17 @@ const char* cmd_g2statsstatus(const String& /*args*/) {
   const char* fwNote = s.firmware[0] ? (s.firmwareOk ? " (has a fixture)" : " (no fixture: nothing is sent)")
                        : s.firmwareAsked ? " (asked the glasses; nothing is sent until it is known)"
                                          : " (nothing is sent until it is known)";
+  char chart[128];  // the longest line is 113 B
+  sf::formatChartLine(stepSec(), sf::padName(padMode()), chart, sizeof chart);
   char* buf = sc->cmd;
   size_t off = written(snprintf(
       buf, kRowsBytes,
       "Glasses stock widget feed: %s (saved), every %u s on change, 10 s while the stock page is open\n"
-      "Chart: last hour, a point every 20 s, %u points, left padding %s (saved)\n"
+      "%s\n"
       "Right temple: %s%s; firmware %s%s\n"
       "Stock page: %s (opened %u times)\n"
       "Metrics (saved): %s\n",
-      feedOn() ? "ON" : "off", (unsigned)intervalSec(), (unsigned)sf::kFeedPoints,
-      sf::padName(padMode()),
+      feedOn() ? "ON" : "off", (unsigned)intervalSec(), chart,
       f.linkReady ? "ready" : "not ready",
       f.busy ? " (paused: another glasses session is active)" : "",
       s.firmware[0] ? s.firmware : "unknown", fwNote,
@@ -916,7 +922,7 @@ const char* cmd_g2statspad(const String& args) {
   if (!a.length()) {
     snprintf(sReply, sizeof sReply,
              "Stock widget chart padding: %s (saved). gap = empty left part, flat = the oldest "
-             "point repeated, until an hour of history exists",
+             "point repeated, until the chart's 185 points exist",
              sf::padName(padMode()));
     return sReply;
   }
@@ -928,6 +934,50 @@ const char* cmd_g2statspad(const String& args) {
   if (feedOn()) g2StockFeedWake();
   snprintf(sReply, sizeof sReply, "Stock widget chart padding: %s (saved)%s", sf::padName(pad),
            feedOn() ? "; a full batch follows" : "");
+  return sReply;
+}
+
+const char* cmd_g2statsstep(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String a = args;
+  a.trim();
+  char window[24];
+  if (!a.length()) {
+    const uint32_t cur = stepSec();
+    sf::formatWindow(cur, window, sizeof window);
+    snprintf(sReply, sizeof sReply,
+             "Stock widget chart step: %u s (saved): %u points = the last %s. Choices: %s "
+             "seconds (default %u)",
+             (unsigned)cur, (unsigned)sf::kFeedPoints, window, sf::kStepChoicesText,
+             (unsigned)sf::kDefaultStepSec);
+    return sReply;
+  }
+  uint32_t v = 0;
+  if (!sf::parseStepSec(a.c_str(), v)) {
+    snprintf(sReply, sizeof sReply,
+             "Error: invalid arguments — the chart step must be %s seconds (got \"%.12s\"). Usage: "
+             "g2 stats step [10|20|60]  (default 20)",
+             sf::kStepChoicesText, a.c_str());
+    return sReply;
+  }
+  const bool settingChanged = v != stepSec();
+  setSetting(gSettings.g2StockStepSec, (int)v);
+  // Into the sampler now, also while the G2 owner is stopped: the history is
+  // dropped at once and its grid restarts at the new step (no mixed spacing).
+  // The sampler can still run another step than the setting (a hand edit or
+  // generic set while the owner was stopped), so either change counts.
+  const bool samplerChanged = systemMetricsSetHistoryStep(v * 1000u);
+  const bool changed = settingChanged || samplerChanged;
+  sf::formatWindow(v, window, sizeof window);
+  if (changed) {
+    sResync.store(true, std::memory_order_release);
+    if (feedOn()) g2StockFeedWake();
+  }
+  snprintf(sReply, sizeof sReply, "Stock widget chart step: %u s (saved): %u points = the last %s%s",
+           (unsigned)v, (unsigned)sf::kFeedPoints, window,
+           !changed ? " (unchanged)"
+           : feedOn() ? ". The chart starts over; a full batch follows"
+                      : ". The chart starts over");
   return sReply;
 }
 
