@@ -256,6 +256,12 @@ bool requestSensorStop(I2cDeviceType device);
 // renders the outcome into cmd_exec's debug buffer, so other tasks can call
 // this without touching that buffer. True only when the start was queued and
 // the status bumped; `why` names the refusal otherwise.
+//
+// A sensor whose <x>enabled setting is off is refused first (Disabled), before
+// the bus is looked at and without a probe: `<x>enabled 0` blocks every open,
+// from a command, a menu, a voice phrase, an automation or a peer. One case is
+// let through: the input device while first-time setup runs, so the on-device
+// keyboard works on a device whose kept settings have input disabled.
 enum class SensorStartRefusal : uint8_t {
   None,
   BusDisabled,
@@ -266,9 +272,18 @@ enum class SensorStartRefusal : uint8_t {
   NoAck,
   ProbeFailed,
   NotQueued,
+  Disabled,
 };
 bool requestSensorStart(I2cDeviceType sensor, const char* eventTag, SensorStartRefusal* why);
 const char* sensorStartRefusalText(SensorStartRefusal why);
+
+// A sensor task reports that it switched itself off after repeated bus errors
+// or invalid reads (never for a stack bailout, a failed init or a requested
+// stop). Call it before clearing the running flag. It only sets a flag; the
+// sensor queue worker then starts the sensor again with a growing wait
+// (System_SensorRestartCore.h) while its <x>enabled and <x>autostart are on.
+// Safe from any task.
+void noteSensorAutoDisabled(I2cDeviceType sensor);
 
 // `hint` is a next-step line printed only when the start was queued.
 const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName,
@@ -332,6 +347,10 @@ inline void i2cDeviceError(uint8_t address, uint8_t bus) {
 
 // Check if sensor should auto-disable based on consecutive I2C failures
 // Uses existing I2cDevice health tracking - no local counters needed in sensor tasks
+// A task that acts on this (or on its own invalid-read count) calls
+// noteSensorAutoDisabled(<its device type>) first, then stops: the sensor is
+// then started again with a growing wait while it is set to auto-start
+// (test_sensor_auto_disable_sites.py checks every site).
 inline bool i2cShouldAutoDisable(uint8_t address, uint8_t bus,
                                  uint8_t maxConsecutiveErrors = 5) {
   I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
@@ -584,6 +603,7 @@ const char* cmd_gpsstop(const String& argsInput);
 const char* cmd_gps(const String& argsInput);
 const char* cmd_imuactions(const String& argsInput);
 const char* cmd_sensorlog(const String& argsInput);
+const char* cmd_sensorlog_autostart(const String& argsInput);
 const char* cmd_i2cscan(const String& argsInput);
 const char* cmd_i2cstats(const String& argsInput);
 const char* cmd_i2cmetrics(const String& argsInput);

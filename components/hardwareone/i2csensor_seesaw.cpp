@@ -629,6 +629,7 @@ void inputTask(void* parameter) {
           
           if (i2cShouldAutoDisable(I2C_ADDR_GAMEPAD, (uint8_t)gSettings.inputBus)) {
             ERROR_INPUTF("[GAMEPAD_TASK] Too many consecutive failures - auto-disabling");
+            noteSensorAutoDisabled(I2C_DEVICE_INPUT);  // before the stop: see System_I2C.h
             requestSensorStop(I2C_DEVICE_INPUT);
             DEBUG_INPUT_LIFECYCLEF("Gamepad auto-disabled: %u consecutive I2C failures", errors);
             sensorStatusBumpWith("gamepad@auto_disabled");
@@ -644,6 +645,7 @@ void inputTask(void* parameter) {
           }
           if (consecutiveInvalidReads >= INVALID_READ_AUTO_DISABLE_THRESHOLD) {
             ERROR_INPUTF("[GAMEPAD_TASK] %u consecutive invalid reads - auto-disabling gamepad", consecutiveInvalidReads);
+            noteSensorAutoDisabled(I2C_DEVICE_INPUT);  // before the stop: see System_I2C.h
             requestSensorStop(I2C_DEVICE_INPUT);
             sensorStatusBumpWith("gamepad@invalid_data_disabled");
             logSystemEvent("SENSOR", "Gamepad auto-disabled after %u consecutive invalid reads (device likely disconnected)", consecutiveInvalidReads);

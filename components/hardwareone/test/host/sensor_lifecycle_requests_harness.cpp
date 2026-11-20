@@ -16,6 +16,8 @@
 #define private public
 #include "System_I2C_Manager.h"
 #undef private
+#include "System_SensorRestartCore.h"  // the real backoff policy
+#define EXT_RAM_BSS_ATTR
 #define ENABLE_GPIO_ENCODER 0
 #define ENABLE_ANO_ENCODER 0
 #define ENABLE_GAMEPAD_SENSOR 1
@@ -82,7 +84,53 @@ static unsigned long& gPresenceLastStopTime = stopTimes[I2C_DEVICE_PRESENCE];
 static struct {
   int thermalBus = 0, tofBus = 0, imuBus = 0, inputBus = 0, gpsBus = 0;
   int fmRadioBus = 0, apdsBus = 0, rtcBus = 0, presenceBus = 0;
+  // The two saved switches per device, at the firmware's defaults.
+  bool thermalEnabled = true, tofEnabled = true, imuEnabled = true, inputEnabled = true, gpsEnabled = true;
+  bool fmRadioEnabled = true, apdsEnabled = true, rtcEnabled = true, presenceEnabled = true;
+  bool thermalAutoStart = false, tofAutoStart = false, imuAutoStart = false, inputAutoStart = false;
+  bool gpsAutoStart = false, fmRadioAutoStart = false, apdsAutoStart = false, rtcAutoStart = true;
+  bool presenceAutoStart = false;
 } gSettings;
+static bool& enabledSetting(I2cDeviceType sensor) {
+  switch (sensor) {
+    case I2C_DEVICE_THERMAL: return gSettings.thermalEnabled;
+    case I2C_DEVICE_TOF: return gSettings.tofEnabled;
+    case I2C_DEVICE_IMU: return gSettings.imuEnabled;
+    case I2C_DEVICE_INPUT: return gSettings.inputEnabled;
+    case I2C_DEVICE_GPS: return gSettings.gpsEnabled;
+    case I2C_DEVICE_FMRADIO: return gSettings.fmRadioEnabled;
+    case I2C_DEVICE_APDS: return gSettings.apdsEnabled;
+    case I2C_DEVICE_RTC: return gSettings.rtcEnabled;
+    default: return gSettings.presenceEnabled;
+  }
+}
+static bool& autoStartSetting(I2cDeviceType sensor) {
+  switch (sensor) {
+    case I2C_DEVICE_THERMAL: return gSettings.thermalAutoStart;
+    case I2C_DEVICE_TOF: return gSettings.tofAutoStart;
+    case I2C_DEVICE_IMU: return gSettings.imuAutoStart;
+    case I2C_DEVICE_INPUT: return gSettings.inputAutoStart;
+    case I2C_DEVICE_GPS: return gSettings.gpsAutoStart;
+    case I2C_DEVICE_FMRADIO: return gSettings.fmRadioAutoStart;
+    case I2C_DEVICE_APDS: return gSettings.apdsAutoStart;
+    case I2C_DEVICE_RTC: return gSettings.rtcAutoStart;
+    default: return gSettings.presenceAutoStart;
+  }
+}
+// First-time setup state (System_FirstTimeSetup.h).
+enum FirstTimeSetupState { SETUP_NOT_NEEDED = 0, SETUP_REQUIRED = 1, SETUP_IN_PROGRESS = 2, SETUP_COMPLETE = 3 };
+static volatile FirstTimeSetupState gFirstTimeSetupState = SETUP_NOT_NEEDED;
+// RAM-flush boundary: ids numbered as the device types; the resume overlay can
+// override a start-at-boot intent, and "failed, not switched off" marks are kept.
+using RamFlushFeatureId = int;
+static std::array<int, I2C_DEVICE_COUNT> flushOverride;  // -1 = no overlay, else 0/1
+static std::array<bool, I2C_DEVICE_COUNT> flushFailedMark;
+static RamFlushFeatureId ramFlushIdForDevice(I2cDeviceType sensor) { return static_cast<int>(sensor); }
+static bool ramFlushResolve(RamFlushFeatureId id, bool intent) {
+  return flushOverride[id] < 0 ? intent : flushOverride[id] != 0;
+}
+static void ramFlushMarkAutostartFailed(RamFlushFeatureId id) { flushFailedMark[id] = true; }
+static void ramFlushClearAutostartFailed(RamFlushFeatureId id) { flushFailedMark[id] = false; }
 
 enum { DEBUG_MEMORY, SYSEVT_SENSOR_STARTED, SYSEVT_SENSOR_START_FAILED, SYSEVT_SENSOR_STOPPED };
 // Numbered as the I2C device types here, so a notice names its device. RTC
@@ -194,6 +242,12 @@ struct Fixture {
     takes = gives = probeCalls = pauseCalls = resumeCalls = pauseDepth = taskDeletes = 0;
     fmDeinitCalls = rtcStopCalls = 0; fmHardwareReady = false;
     hints.clear(); gRtcConnected = false; managerInits = 0;
+    gFirstTimeSetupState = SETUP_NOT_NEEDED; flushOverride.fill(-1); flushFailedMark.fill(false);
+    for (int i = 0; i < I2C_DEVICE_COUNT; ++i) {
+      sSensorRestart[i] = {}; sSensorRestartNoted[i] = false;
+      sSensorRestartByHand[i] = kRestartHandNone; sSensorRestartPending[i] = false;
+    }
+    sSensorRestartLastTickMs = now - 1000;  // The first worker pass of a case ticks.
 #if HAS_START_OUTSTANDING
     for (auto& outstanding : sSensorStartOutstanding) outstanding = false;
 #endif
@@ -216,6 +270,11 @@ struct Fixture {
     assert(pauseCalls == resumeCalls && pauseDepth == beforeDepth);
     assert(!mutex.held && takes == gives);
   }
+  std::string close(I2cDeviceType sensor = I2C_DEVICE_GPS) {
+    return cmd_sensorstop_queued(sensor, deviceTypeDisplayName(sensor));
+  }
+  // Time passes, then the worker runs (its restart tick first, the queue after).
+  void after(uint32_t ms) { now += ms; worker(); worker(); }
 };
 static bool contains(const std::string& text, const char* token) { return text.find(token) != std::string::npos; }
 static unsigned eventCount(int type) {
@@ -415,7 +474,344 @@ static void cleanupCases() {
     assert(eventCount(SYSEVT_SENSOR_STOPPED) == 1 && !sSensorStopAwaitingCleanup[I2C_DEVICE_RTC]); }
 }
 
+// SEN-6: `<x>enabled 0` blocks every open of that sensor with one sentence,
+// before the bus is looked at; nothing is probed, queued or bumped.
+static void enableGateCases() {
+  static const struct { I2cDeviceType sensor; const char* reply; } expected[] = {
+    { I2C_DEVICE_THERMAL,  "Error: Thermal camera is disabled - run 'thermalenabled 1' first" },
+    { I2C_DEVICE_TOF,      "Error: ToF is disabled - run 'tofenabled 1' first" },
+    { I2C_DEVICE_IMU,      "Error: IMU is disabled - run 'imuenabled 1' first" },
+    { I2C_DEVICE_INPUT,    "Error: Gamepad is disabled - run 'inputenabled 1' first" },
+    { I2C_DEVICE_GPS,      "Error: GPS is disabled - run 'gpsenabled 1' first" },
+    { I2C_DEVICE_FMRADIO,  "Error: FM Radio is disabled - run 'fmradioenabled 1' first" },
+    { I2C_DEVICE_APDS,     "Error: APDS is disabled - run 'apdsenabled 1' first" },
+    { I2C_DEVICE_RTC,      "Error: RTC is disabled - run 'rtcenabled 1' first" },
+    { I2C_DEVICE_PRESENCE, "Error: Presence is disabled - run 'presenceenabled 1' first" },
+  };
+  assert(sizeof(expected) / sizeof(expected[0]) == I2C_DEVICE_COUNT);
+  for (const auto& row : expected) {
+    // Disabled: the same sentence, and nothing happened.
+    { Fixture f; enabledSetting(row.sensor) = false;
+      assert(f.open(row.sensor) == row.reply);
+      assert(probeCalls == 0 && f.manager.getQueueDepth() == 0 && statuses.empty() && hints.empty());
+      f.worker(); assert(starts[row.sensor] == 0 && events.empty());
+      SensorStartRefusal why = SensorStartRefusal::None;
+      assert(!requestSensorStart(row.sensor, "menu@auto", &why) && why == SensorStartRefusal::Disabled);
+      assert(probeCalls == 0 && statuses.empty() && contains(sensorStartRefusalText(why), "disabled"));
+      // It comes before the bus-disabled refusal, as the thermal check did.
+      gI2cBusRunning = false; assert(f.open(row.sensor) == row.reply); }
+    // Every other sensor still opens while this one is disabled.
+    { Fixture f; enabledSetting(row.sensor) = false;
+      for (const auto& other : expected) {
+        if (other.sensor == row.sensor) continue;
+        assert(contains(f.open(other.sensor), "queued for start"));
+        f.worker(); assert(starts[other.sensor] == 1);
+      }
+      assert(starts[row.sensor] == 0); }
+    // Enabled again: it opens.
+    { Fixture f; enabledSetting(row.sensor) = false; assert(f.open(row.sensor) == row.reply);
+      enabledSetting(row.sensor) = true; assert(contains(f.open(row.sensor), "queued for start")); }
+  }
+  // First-time setup starts the input device whatever the kept setting says
+  // (HardwareOne.cpp's "input@setup" and the OLED menu auto-start), in every
+  // setup state; no other sensor gets that exception.
+  for (auto state : {SETUP_REQUIRED, SETUP_IN_PROGRESS, SETUP_COMPLETE}) {
+    { Fixture f; gSettings.inputEnabled = false; gFirstTimeSetupState = state;
+      assert(contains(cmd_sensorstart_queued(I2C_DEVICE_INPUT, "Input", "input@setup", nullptr), "queued for start"));
+      f.worker(); assert(starts[I2C_DEVICE_INPUT] == 1); }
+    { Fixture f; gSettings.inputEnabled = false; gFirstTimeSetupState = state;
+      SensorStartRefusal why = SensorStartRefusal::Disabled;
+      assert(requestSensorStart(I2C_DEVICE_INPUT, "input@menu", &why) && why == SensorStartRefusal::None); }
+    { Fixture f; gSettings.gpsEnabled = false; gFirstTimeSetupState = state;
+      assert(contains(f.open(), "GPS is disabled")); assert(probeCalls == 0); }
+  }
+  // Outside setup the menu auto-start is refused quietly: nothing queued.
+  { Fixture f; gSettings.inputEnabled = false;
+    SensorStartRefusal why = SensorStartRefusal::None;
+    assert(!requestSensorStart(I2C_DEVICE_INPUT, "input@menu", &why) && why == SensorStartRefusal::Disabled);
+    assert(f.manager.getQueueDepth() == 0 && statuses.empty() && probeCalls == 0); }
+}
+
+// UP-05: a sensor that switched itself off is started again by the worker.
+static unsigned logCount(const char* token) {
+  unsigned count = 0; for (const auto& line : logs) if (contains(line, token)) ++count; return count;
+}
+// What an auto-disable site does: report, then clear its running flag (the
+// task then exits and clears its handle).
+static void autoDisable(I2cDeviceType sensor) {
+  noteSensorAutoDisabled(sensor); running[sensor] = false; handles[sensor] = nullptr;
+}
+static void restartCases() {
+  using sensor_restart::Phase;
+  const auto gps = I2C_DEVICE_GPS;
+  // Not set to start by itself: it stays off, silently, as before this change.
+  { Fixture f; running[gps] = true; autoDisable(gps); f.after(0); f.after(3600000);
+    assert(starts[gps] == 0 && logs.empty() && events.empty() && probeCalls == 0);
+    assert(sSensorRestart[gps].phase == Phase::Idle && !flushFailedMark[gps]); }
+  { Fixture f; gSettings.gpsAutoStart = true; gSettings.gpsEnabled = false;
+    running[gps] = true; autoDisable(gps); f.after(0); f.after(3600000);
+    assert(starts[gps] == 0 && logs.empty() && probeCalls == 0); }
+  // The RAM-flush resume decides start-at-boot, here as at boot.
+  { Fixture f; gSettings.gpsAutoStart = true; flushOverride[gps] = 0;
+    running[gps] = true; autoDisable(gps); f.after(0); f.after(3600000);
+    assert(starts[gps] == 0 && logs.empty()); }
+  // A sensor that stopped without the report (stack bailout, failed init,
+  // close) is never restarted.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = false; f.after(0); f.after(3600000);
+    assert(starts[gps] == 0 && logs.empty() && probeCalls == 0); }
+
+  // The plain case: wait 30 s, start, run cleanly for five minutes.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps);
+    f.after(0);
+    assert(sSensorRestart[gps].phase == Phase::Waiting && sSensorRestartPending[gps] && flushFailedMark[gps]);
+    assert((logs == std::vector<std::string>{"GPS automatic restart: next try in 30 s"}));
+    assert(events.empty() && probeCalls == 0);
+    f.after(29000); assert(starts[gps] == 0 && probeCalls == 0);
+    f.after(1000);
+    assert(starts[gps] == 1 && running[gps] && probeCalls == 1);
+    assert(eventCount(SYSEVT_SENSOR_STARTED) == 1 && eventCount(SYSEVT_SENSOR_START_FAILED) == 0);
+    assert(statuses.size() == 1 && statuses[0] == "restart@enqueue");
+    assert(sSensorRestart[gps].phase == Phase::Proving && !sSensorRestartPending[gps] && !flushFailedMark[gps]);
+    assert(logs.size() == 2 && logs[1] == "GPS online");
+    f.after(299000); assert(sSensorRestart[gps].phase == Phase::Proving);
+    f.after(1000); assert(sSensorRestart[gps].phase == Phase::Idle && sSensorRestart[gps].rung == 0);
+    // The next failure starts at the first rung again.
+    autoDisable(gps); f.after(1000);
+    assert(logs.back() == "GPS automatic restart: next try in 30 s"); }
+
+  // Failing again before the clean run: the next wait is one rung longer, up
+  // to the last rung, which repeats.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    const uint32_t waits[] = {30000, 120000, 600000, 1800000, 1800000, 1800000};
+    for (size_t i = 0; i < sizeof(waits) / sizeof(waits[0]); ++i) {
+      f.after(waits[i] - 1000); assert(starts[gps] == i);
+      f.after(1000); assert(starts[gps] == i + 1 && running[gps]);
+      f.after(20000); autoDisable(gps); f.after(1000);
+      assert(sSensorRestart[gps].phase == Phase::Waiting && flushFailedMark[gps]);
+    }
+    assert(eventCount(SYSEVT_SENSOR_START_FAILED) == 0 && eventCount(SYSEVT_SENSOR_STARTED) == 6);
+    assert(logCount("restart: next try in 30 s") == 1 && logCount("restart: next try in 120 s") == 1);
+    assert(logCount("restart: next try in 600 s") == 1 && logCount("restart: next try in 1800 s") == 4); }
+
+  // An absent device: one address probe and one log line per try. No driver
+  // init, no event (so no toast), and the ladder climbs.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    probeResult = 2;
+    const uint32_t waits[] = {30000, 120000, 600000, 1800000, 1800000};
+    for (size_t i = 0; i < sizeof(waits) / sizeof(waits[0]); ++i) {
+      f.after(waits[i] - 1000); assert(probeCalls == i);
+      f.after(1000); assert(probeCalls == i + 1);
+    }
+    assert(starts[gps] == 0 && events.empty() && statuses.empty() && graceResets.empty());
+    assert(logs.size() == 6 && logCount("no acknowledgement from device on I2C bus, next try in") == 5);
+    assert(contains(logs[1], "next try in 120 s") && contains(logs[5], "next try in 1800 s"));
+    assert(flushFailedMark[gps] && sSensorRestartPending[gps]);
+    // It answers again: started, announced once.
+    probeResult = 0; f.after(1800000);
+    assert(starts[gps] == 1 && eventCount(SYSEVT_SENSOR_STARTED) == 1 && !flushFailedMark[gps]); }
+
+  // The device answers but its init fails: the start-failed event (a toast)
+  // is posted for the first failure of the episode only; later ones are a log line.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    startResult[gps] = false; runningAfterStart[gps] = false;
+    f.after(30000);
+    assert(starts[gps] == 1 && eventCount(SYSEVT_SENSOR_START_FAILED) == 1 && logs.back() == "GPS start FAILED");
+    assert(sSensorRestart[gps].phase == Phase::Waiting && sSensorRestartPending[gps]);
+    f.after(120000);
+    assert(starts[gps] == 2 && eventCount(SYSEVT_SENSOR_START_FAILED) == 1);
+    assert(logs.back() == "GPS automatic restart failed again, next try in 600 s");
+    f.after(600000);
+    assert(starts[gps] == 3 && eventCount(SYSEVT_SENSOR_START_FAILED) == 1);
+    assert(logs.back() == "GPS automatic restart failed again, next try in 1800 s");
+    // It comes back: the normal started event, once.
+    startResult[gps] = true; runningAfterStart[gps] = true; f.after(1800000);
+    assert(starts[gps] == 4 && eventCount(SYSEVT_SENSOR_STARTED) == 1 && meshStatuses.size() == ENABLE_ESPNOW); }
+
+  // A busy bus is not an absent device: the try is repeated on the next
+  // ticks, and only five in a row use the rung.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    probeResult = 4; f.after(30000);
+    for (int i = 0; i < 3; ++i) f.after(1000);
+    assert(probeCalls == 4 && logs.size() == 1 && sSensorRestart[gps].rung == 0);
+    probeResult = 0; f.after(1000); assert(starts[gps] == 1 && probeCalls == 5); }
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    probeResult = 4; f.after(30000);
+    for (int i = 0; i < 4; ++i) f.after(1000);
+    assert(probeCalls == 5 && sSensorRestart[gps].rung == 1);
+    assert(logs.back() == "GPS automatic restart: I2C probe could not complete, next try in 120 s");
+    f.after(60000); assert(probeCalls == 5); }
+
+  // A close by hand while a try waits: its own reply, and the sensor stays off.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    assert(f.close() == "[GPS] Automatic restart cancelled; the sensor stays off until 'opengps'");
+    f.after(1000);
+    assert(sSensorRestart[gps].phase == Phase::Idle && !sSensorRestartPending[gps] && !flushFailedMark[gps]);
+    assert(logs.back() == "GPS automatic restart ended: opened or closed by hand");
+    f.after(3600000); assert(starts[gps] == 0 && probeCalls == 0 && events.empty());
+    // With nothing waiting, the not-running reply is unchanged.
+    assert(f.close() == "Error: GPS sensor is not running. Start it with 'opengps'."); }
+  { Fixture f; assert(f.close() == "Error: GPS sensor is not running. Start it with 'opengps'."); }
+  // The same without the reply buffer.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    bufferAvailable = false; assert(contains(f.close(), "Automatic restart cancelled")); }
+  // A close of the restarted, running sensor ends the episode too.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    f.after(30000); assert(running[gps] && sSensorRestart[gps].phase == Phase::Proving);
+    assert(contains(f.close(), "Stop requested")); f.after(1000);
+    assert(sSensorRestart[gps].phase == Phase::Idle && !running[gps]); }
+  // A close while the automatic start is still queued removes it.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    now += 30000; f.worker();  // The tick queued the start; the queue has not run yet.
+    assert(sSensorRestart[gps].phase == Phase::Starting && f.manager.getQueueDepth() == 1);
+    assert(contains(f.close(), "Stop requested")); f.after(1000);
+    assert(starts[gps] == 0 && sSensorRestart[gps].phase == Phase::Idle && !sSensorRestartPending[gps]);
+    f.after(3600000); assert(starts[gps] == 0); }
+
+  // `<x>enabled 0` or `<x>autostart 0` while a try waits: no hook is needed,
+  // the worker reads both when it looks.
+  for (int which = 0; which < 2; ++which) {
+    Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    f.after(10000);
+    (which ? gSettings.gpsEnabled : gSettings.gpsAutoStart) = false;
+    f.after(1000);
+    assert(sSensorRestart[gps].phase == Phase::Idle && !sSensorRestartPending[gps] && !flushFailedMark[gps]);
+    assert(logs.back() == "GPS automatic restart ended: disabled or auto-start off");
+    gSettings.gpsEnabled = gSettings.gpsAutoStart = true;
+    f.after(3600000); assert(starts[gps] == 0 && probeCalls == 0);
+  }
+
+  // An open by hand while a try waits starts it at once and ends the episode.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    f.after(5000); assert(contains(f.open(), "queued for start")); f.after(1000);
+    assert(starts[gps] == 1 && running[gps] && sSensorRestart[gps].phase == Phase::Idle);
+    assert(!sSensorRestartPending[gps] && !flushFailedMark[gps]);
+    f.after(3600000); assert(starts[gps] == 1 && probeCalls == 1); }
+  // A refused open by hand (device still absent) leaves the automatic tries alone.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    probeResult = 2; assert(contains(f.open(), "No acknowledgement")); f.after(1000);
+    assert(sSensorRestart[gps].phase == Phase::Waiting && sSensorRestartPending[gps]);
+    probeResult = 0; f.after(29000); assert(starts[gps] == 1); }
+
+  // An open by hand, then the sensor fails again before the worker's next
+  // look (its tick runs once a second, and only with an empty queue): the
+  // report is about the sensor that open started, so the restart follows.
+  { Fixture f; gSettings.gpsAutoStart = true; f.after(0);
+    now += 300; assert(contains(f.open(), "queued for start")); f.worker();
+    assert(starts[gps] == 1 && running[gps] && sSensorRestartByHand[gps] == kRestartHandOpened);
+    now += 500; autoDisable(gps); f.after(200);
+    assert(sSensorRestart[gps].phase == Phase::Waiting && sSensorRestartPending[gps] && flushFailedMark[gps]);
+    assert(logs.back() == "GPS automatic restart: next try in 30 s");
+    f.after(30000); assert(starts[gps] == 2 && running[gps]); }
+  // The same while a try was waiting: the old episode ends, a new one begins
+  // at the first rung.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    f.after(30000); f.after(20000); autoDisable(gps); f.after(1000);
+    assert(sSensorRestart[gps].phase == Phase::Waiting && sSensorRestart[gps].rung == 1 && starts[gps] == 1);
+    now += 300; assert(contains(f.open(), "queued for start")); f.worker();
+    assert(starts[gps] == 2 && running[gps] && sSensorRestartByHand[gps] == kRestartHandOpened);
+    now += 500; autoDisable(gps); f.after(200);
+    assert(sSensorRestart[gps].phase == Phase::Waiting && sSensorRestart[gps].rung == 0);
+    assert(sSensorRestartPending[gps] && flushFailedMark[gps]);
+    assert(logCount("ended: opened or closed by hand") == 1);
+    assert(logs.back() == "GPS automatic restart: next try in 30 s");
+    f.after(30000); assert(starts[gps] == 3 && running[gps]); }
+  // A report from before the open is void: the user's start supersedes it.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; f.after(0);
+    now += 300; autoDisable(gps); assert(contains(f.open(), "queued for start")); f.worker();
+    assert(starts[gps] == 1 && running[gps]);
+    f.after(1000);
+    assert(sSensorRestart[gps].phase == Phase::Idle && !sSensorRestartPending[gps] && !flushFailedMark[gps]);
+    assert(logCount("automatic restart") == 0);
+    f.after(3600000); assert(starts[gps] == 1 && probeCalls == 1); }
+  // A close by hand wins over a report the worker has not looked at yet.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; handles[gps] = &f; f.after(0);
+    now += 300; noteSensorAutoDisabled(gps); assert(contains(f.close(), "Stop requested"));
+    f.after(700); handles[gps] = nullptr; f.after(1000);
+    assert(!running[gps] && sSensorRestart[gps].phase == Phase::Idle && !sSensorRestartPending[gps]);
+    assert(logCount("automatic restart") == 0 && !flushFailedMark[gps]);
+    f.after(3600000); assert(starts[gps] == 0 && probeCalls == 0); }
+  // A close that lands while the worker makes its try (after it looked for a
+  // close, before the start is queued) finds nothing to stop and says the
+  // restart is cancelled. The start queued a moment later is dropped, not run.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
+    std::string reply;
+    duringProbe = [&] { reply = f.close(); };
+    now += 30000; f.worker();
+    assert(reply == "[GPS] Automatic restart cancelled; the sensor stays off until 'opengps'");
+    assert(sSensorRestart[gps].phase == Phase::Starting && f.manager.getQueueDepth() == 1);
+    f.worker();
+    assert(starts[gps] == 0 && !running[gps] && f.manager.getQueueDepth() == 0);
+    f.after(1000);
+    assert(sSensorRestart[gps].phase == Phase::Idle && !sSensorRestartPending[gps] && !flushFailedMark[gps]);
+    assert(events.empty() && logs.back() == "GPS automatic restart ended: opened or closed by hand");
+    assert(f.close() == "Error: GPS sensor is not running. Start it with 'opengps'.");
+    f.after(3600000); assert(starts[gps] == 0 && probeCalls == 1); }
+
+  // The input drivers report and then queue their own stop while the running
+  // flag is still set: the report is kept, the stop is published, and the
+  // restart follows. requestSensorStop() itself must not cancel.
+  { Fixture f; gSettings.inputAutoStart = true; const auto input = I2C_DEVICE_INPUT;
+    running[input] = true; handles[input] = &f;
+    noteSensorAutoDisabled(input); assert(requestSensorStop(input));
+    noteSensorAutoDisabled(input);  // A second failed read before the stop is applied.
+    f.after(0);
+    assert(!running[input] && sSensorRestart[input].phase == Phase::Waiting);
+    handles[input] = nullptr; f.after(1000);
+    assert(eventCount(SYSEVT_SENSOR_STOPPED) == 1 && logCount("automatic restart: next try in 30 s") == 1);
+    f.after(30000);
+    assert(starts[input] == 1 && running[input] && eventCount(SYSEVT_SENSOR_STARTED) == 1); }
+  // The old task has not finished cleaning up when the try is due: no rung is
+  // used and no line is written; it starts as soon as the task is gone.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; handles[gps] = &f;
+    noteSensorAutoDisabled(gps); running[gps] = false; f.after(0);
+    f.after(30000); f.after(5000);
+    assert(starts[gps] == 0 && probeCalls == 0 && logs.size() == 1 && sSensorRestart[gps].rung == 0);
+    handles[gps] = nullptr; f.after(1000); assert(starts[gps] == 1); }
+  // Started by someone else while a try waits (the OLED menu's input
+  // auto-start calls requestSensorStart directly): watched like our own.
+  { Fixture f; gSettings.inputAutoStart = true; const auto input = I2C_DEVICE_INPUT;
+    running[input] = true; autoDisable(input); f.after(0);
+    SensorStartRefusal why = SensorStartRefusal::None;
+    assert(requestSensorStart(input, "input@menu", &why)); f.after(1000);
+    assert(starts[input] == 1 && sSensorRestart[input].phase == Phase::Waiting);
+    f.after(29000);
+    assert(starts[input] == 1 && sSensorRestart[input].phase == Phase::Proving && !flushFailedMark[input]); }
+  // Every device type reads its own two switches (the table's rows).
+  for (int index = 0; index < I2C_DEVICE_COUNT; ++index) {
+    const auto sensor = static_cast<I2cDeviceType>(index);
+    { Fixture f; gSettings.rtcAutoStart = false; autoStartSetting(sensor) = true;
+      running[sensor] = true; autoDisable(sensor); f.after(0); f.after(30000);
+      assert(starts[sensor] == 1 && running[sensor]);
+      for (int other = 0; other < I2C_DEVICE_COUNT; ++other) {
+        if (other != index) assert(sSensorRestart[other].phase == Phase::Idle);
+      } }
+    { Fixture f; gSettings.rtcAutoStart = false; autoStartSetting(sensor) = true; enabledSetting(sensor) = false;
+      running[sensor] = true; autoDisable(sensor); f.after(0); f.after(30000);
+      assert(starts[sensor] == 0); }
+    { Fixture f; gSettings.rtcAutoStart = false;
+      running[sensor] = true; autoDisable(sensor); f.after(0); f.after(30000);
+      assert(starts[sensor] == 0); }
+  }
+  // Two sensors fail independently.
+  { Fixture f; gSettings.gpsAutoStart = gSettings.imuAutoStart = true;
+    running[gps] = running[I2C_DEVICE_IMU] = true;
+    autoDisable(gps); f.after(0); f.after(20000); autoDisable(I2C_DEVICE_IMU); f.after(1000);
+    f.after(10000); assert(starts[gps] == 1 && starts[I2C_DEVICE_IMU] == 0);
+    f.after(20000); assert(starts[I2C_DEVICE_IMU] == 1); }
+  // The tick runs once a second however often the idle worker loops.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; f.after(0);
+    autoDisable(gps); now += 500; f.worker();
+    assert(sSensorRestart[gps].phase == Phase::Idle);  // Not looked at yet.
+    now += 500; f.worker(); assert(sSensorRestart[gps].phase == Phase::Waiting); }
+  // millis() rollover during a wait.
+  { Fixture f; gSettings.gpsAutoStart = true; running[gps] = true;
+    now = 0xFFFFFFFFu - 10000u; sSensorRestartLastTickMs = now - 1000;
+    autoDisable(gps); f.after(0); f.after(20000); assert(starts[gps] == 0);
+    f.after(10000); assert(starts[gps] == 1); now = 100; }
+}
+
 int main() {
   admissionCases(); hintCases(); workerOutcomeCases(); closeOrderingCases(); cleanupCases();
+  enableGateCases(); restartCases();
   std::printf("Sensor lifecycle requests passed (production controller + manager; mesh=%d)\n", ENABLE_ESPNOW);
 }

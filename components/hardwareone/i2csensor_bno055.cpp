@@ -1146,7 +1146,7 @@ const CommandEntry imuCommands[] = {
   { "imuyawoffset", "IMU yaw offset in degrees: <-180..180>", true, cmd_imuyawoffset, "Usage: imuyawoffset <-180..180>" },
   
   // Auto-start
-  { "imuautostart", "Enable/disable IMU auto-start after boot [on|off]", false, cmd_imuautostart, "Usage: imuautostart [on|off]" },
+  { "imuautostart", "Enable/disable IMU auto-start after boot [on|off]", true, cmd_imuautostart, "Usage: imuautostart [on|off]" },
   { "imubus",      "Route BNO055 IMU to bus: <0|1> (reboot required)",   true, cmd_imubus,      "Usage: imuBus <0|1>" },
 };
 
@@ -1266,6 +1266,7 @@ void imuTask(void* parameter) {
         if (!result) {
           if (i2cShouldAutoDisable(I2C_ADDR_IMU, (uint8_t)gSettings.imuBus)) {
             ERROR_IMUF("Too many consecutive IMU failures - auto-disabling");
+            noteSensorAutoDisabled(I2C_DEVICE_IMU);  // before the flag: see System_I2C.h
             gImuRunning = false;
             sensorStatusBumpWith("imu@auto_disabled");
             logSystemEvent("SENSOR", "IMU auto-disabled after too many consecutive I2C failures");

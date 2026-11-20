@@ -210,6 +210,10 @@ static struct { int apdsBus = 0; } gSettings;
 static constexpr uint8_t I2C_ADDR_APDS = 0x39;
 static bool busAdmit = true, busHeld = false, autoDisable = false, gApdsPresent = false;
 static int busCalls, healthyTransactions, failedTransactions, healthChecks, statusBumps;
+// The auto-disable report to the sensor queue worker's automatic restart
+// (System_I2C.cpp). It comes before the mode flags are cleared.
+static constexpr int I2C_DEVICE_APDS = 6;
+static int restartNotes;
 static bool deviceColorReady = true;
 static uint8_t deviceProximity = 220, deviceGesture = APDS9960_UP;
 struct APDSDriver {
@@ -252,6 +256,11 @@ static uint8_t i2cGetConsecutiveErrors(uint8_t address, uint8_t bus) {
   return 7;
 }
 static void sensorStatusBumpWith(const char*) { assert(!busHeld && !semaphore.held); ++statusBumps; }
+static void noteSensorAutoDisabled(int sensor) {
+  assert(sensor == I2C_DEVICE_APDS && !busHeld && !semaphore.held);
+  assert(gApdsColorRunning && gApdsConnected && statusBumps == 0);
+  ++restartNotes;
+}
 static void logSystemEvent(const char*, const char*, ...) { assert(!busHeld && !semaphore.held); }
 #define DEBUG_APDS_LIFECYCLEF(...) do {} while (0)
 
@@ -268,6 +277,7 @@ static void samplingReset() {
   busAdmit = deviceColorReady = true;
   busHeld = autoDisable = gApdsPresent = false;
   busCalls = healthyTransactions = failedTransactions = healthChecks = statusBumps = 0;
+  restartNotes = 0;
   deviceProximity = 220;
   deviceGesture = APDS9960_UP;
   lastGestureRead = 0;
@@ -407,6 +417,7 @@ static void samplingTests() {
   sampleOnce(1000, lastRead);
   assert(!gApdsColorRunning && !gApdsProximityRunning && !gApdsGestureRunning && !gApdsConnected);
   assert(statusBumps == 1 && events.size() == 1 && std::get<0>(events[0]) == SYSEVT_SENSOR_FAULT);
+  assert(restartNotes == 1);
   assert(lastRead == 0); // Production continue leaves timestamp for the shutdown path.
 }
 #endif

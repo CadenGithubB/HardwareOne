@@ -353,9 +353,7 @@ bool thermalStartInternal() {
 // Public command - uses centralized queue
 const char* cmd_thermalstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gSettings.thermalEnabled) {
-    return "Error: Thermal camera is disabled - run 'thermalenabled 1' first";
-  }
+  // The enable check (thermalenabled) is in requestSensorStart(), for every sensor.
   return cmd_sensorstart_queued(I2C_DEVICE_THERMAL, "Thermal", "openthermal@enqueue");
 }
 
@@ -1409,7 +1407,7 @@ const CommandEntry thermalCommands[] = {
   { "thermaldiag", "Run thermal sensor diagnostics.", false, cmd_thermaldiag },
   
   // Auto-start
-  { "thermalautostart", "Enable/disable thermal auto-start after boot [on|off]", false, cmd_thermalautostart, "Usage: thermalautostart [on|off]" },
+  { "thermalautostart", "Enable/disable thermal auto-start after boot [on|off]", true, cmd_thermalautostart, "Usage: thermalautostart [on|off]" },
   { "thermalbus",  "Route MLX90640 thermal to bus: <0|1> (reboot required)", true, cmd_thermalbus, "Usage: thermalBus <0|1>" },
 };
 
@@ -1525,6 +1523,7 @@ void thermalTask(void* parameter) {
         if (!ok) {
           if (i2cShouldAutoDisable(I2C_ADDR_THERMAL, (uint8_t)gSettings.thermalBus)) {
             ERROR_THERMALF("Too many consecutive thermal failures - auto-disabling");
+            noteSensorAutoDisabled(I2C_DEVICE_THERMAL);  // before the flag: see System_I2C.h
             gThermalRunning = false;
             sensorStatusBumpWith("thermal@auto_disabled");
             logSystemEvent("SENSOR", "Thermal auto-disabled after too many consecutive I2C failures");

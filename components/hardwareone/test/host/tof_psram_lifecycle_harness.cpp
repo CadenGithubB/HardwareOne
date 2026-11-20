@@ -26,6 +26,7 @@ static constexpr uint8_t VL53L4CX_DEFAULT_DEVICE_ADDRESS = 0x52;
 static constexpr int VL53L4CX_DISTANCEMODE_LONG = 3;
 static constexpr int DEBUG_PERFORMANCE = 1, TOF_STACK_WORDS = 3072;
 static constexpr int SYSEVT_SENSOR_FAULT = 1;
+static constexpr int I2C_DEVICE_TOF = 1;
 struct Scenario {
   bool managerPresent = true, wirePresent = true, ping = true;
   bool transaction = true, allocation = true, inTransaction = false;
@@ -179,6 +180,9 @@ template <class F>
 static bool i2cTaskWithTimeout(uint8_t, uint8_t, uint32_t, unsigned, F&& operation) { return operation(); }
 static bool i2cShouldAutoDisable(uint8_t, uint8_t) { return false; }
 static void sensorStatusBumpWith(const char*) {}
+// The auto-disable report to the sensor queue worker's automatic restart
+// (System_I2C.cpp); this harness never reaches an auto-disable.
+static void noteSensorAutoDisabled(int) {}
 static void logSystemEvent(const char*, const char*) {}
 static void systemEventPost(int, const char*, const char*) {}
 static unsigned pdMS_TO_TICKS(unsigned value) { return value; }

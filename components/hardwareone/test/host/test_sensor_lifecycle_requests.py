@@ -4,6 +4,10 @@
 Only owner startup, RTOS scheduling, hardware probes and output are controlled.
 The complete worker and manager methods are extracted without rewriting their
 logic. One-shot boundary callbacks inject close/cleanup races deterministically.
+
+Also covered here, on the same production code: the <x>enabled gate of every
+open (requestSensorStart) and the automatic restart of a sensor that switched
+itself off (the worker's tick with System_SensorRestartCore.h).
 """
 from __future__ import annotations
 
@@ -55,14 +59,34 @@ def main() -> None:
     )]
     controller_definitions += [extract_block(header, "enum class SensorStartRefusal") + ";"]
     controller_definitions += [re.search(r"^static bool sSensorStopAwaitingCleanup[^\n]+", controller, re.M)[0]]
+    # The <x>enabled gate and the automatic restart (state, flags, tick).
+    restart_state = re.findall(r"^EXT_RAM_BSS_ATTR static [^\n]*sSensorRestart[^\n]+", controller, re.M)
+    require(len(restart_state) == 5, "expected the five automatic-restart state lines in PSRAM")
+    controller_definitions += [
+        "const char* deviceTypeDisplayName(I2cDeviceType sensor);",
+        "bool requestSensorStop(I2cDeviceType sensor);",
+        extract_block(controller, "struct SensorSwitchRow") + ";",
+        extract_block(controller, "static const SensorSwitchRow kSensorSwitches[]") + ";",
+        re.search(r"^enum : uint8_t \{ kRestartHandNone[^\n]+", controller, re.M)[0],
+        *restart_state,
+    ]
     controller_definitions += [extract_block(controller, marker) for marker in (
+        "static const SensorSwitchRow* sensorSwitchRow(", "static bool sensorEnabledForStart(",
+        "void noteSensorAutoDisabled(", "static bool sensorRestartClosedByHand(",
+        "static void sensorRestartOpenedByHand(",
         "static uint8_t i2cAddressForDeviceType(", "static uint8_t i2cBusForDeviceType(",
         "static bool sensorIsRunning(", "static bool sensorHasTask(",
         "bool requestSensorStart(", "const char* sensorStartRefusalText(",
-        "const char* cmd_sensorstart_queued(", "const char* deviceTypeDisplayName(",
+        "const char* cmd_sensorstart_queued(", "static const char* sensorOpenCommand(",
+        "static bool sensorStopHasWork(", "const char* cmd_sensorstop_queued(",
+        "const char* deviceTypeDisplayName(",
         "bool requestSensorStop(", "static void applySensorStop(", "static void finishSensorStops()",
         "static bool startSensorInternal(", "static void broadcastStartedSensor(",
-        "static void announceSensorStart(", "void sensorQueueProcessorTask(",
+        "static void announceSensorStart(",
+        "static bool sensorRestartGateOpen(", "static bool sensorRestartStartSettled(",
+        "static bool sensorRestartStartWithdrawn(",
+        "static void sensorRestartAttempt(", "static void sensorRestartTick(",
+        "void sensorQueueProcessorTask(",
     )]
     # A real start command, for the hint-only-after-acceptance contract.
     controller_definitions.append(extract_block((COMPONENT / "i2csensor_pa1010d.cpp").read_text(),

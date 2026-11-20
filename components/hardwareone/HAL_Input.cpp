@@ -452,6 +452,12 @@ static const char* inputDeviceLabel() {
 static const char* cmd_openinput(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 #if ENABLE_GPIO_ENCODER
+  // The master switch, as for every I2C input backend (requestSensorStart()).
+  // Only this command checks it: boot, the menu auto-start and first-time
+  // setup call inputStartInternal() and keep their own rules.
+  if (!gSettings.inputEnabled) {
+    return "Error: GPIO encoder is disabled - run 'inputenabled 1' first";
+  }
   // gpioEncoderStart() reports a running encoder as Started; the command
   // answers it as a refusal.
   if (gInputRunning) {
@@ -576,7 +582,7 @@ const CommandEntry inputCommands[] = {
 #endif
   { "openinput",         "Start the configured input device.",              false, cmd_openinput },
   { "closeinput",        "Stop the input device.",                            false, cmd_closeinput },
-  { "inputautostart",    "Enable/disable input device auto-start [on|off]",   false, cmd_inputautostart,    "Usage: inputautostart [on|off]" },
+  { "inputautostart",    "Enable/disable input device auto-start [on|off]",   true, cmd_inputautostart,    "Usage: inputautostart [on|off]" },
   { "inputdevicepollms", "Set input device poll interval ms [10-1000]",       true,  cmd_inputdevicepollms, "Usage: inputdevicepollms <10-1000>" },
 #if ENABLE_GPIO_ENCODER
   { "gpioencoderread",   "Read GPIO wheel position, switch and pending input as JSON.", false, cmd_gpioencoderread },

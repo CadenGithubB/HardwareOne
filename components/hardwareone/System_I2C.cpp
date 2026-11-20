@@ -28,6 +28,7 @@
 #include "System_MemUtil.h"
 #include "System_Notifications.h"
 #include "System_SensorRegistry.h"
+#include "System_SensorRestartCore.h"  // backoff policy for auto-disabled sensors
 #include "System_Events.h"          // systemEventPost — sensor lifecycle events
 
 #if ENABLE_ESPNOW
@@ -378,6 +379,51 @@ static bool sensorHasTask(I2cDeviceType sensor) {
   }
 }
 
+// The two saved switches of each queue-managed device, in one table: the
+// master switch (<x>enabled) that every open obeys, and start-at-boot
+// (<x>autostart) that the automatic restart also obeys. `enableCmd` is the
+// command a refused open names. `disabledName` is the noun of that refusal;
+// nullptr uses the name the open command passed. Read-only pointers: nothing
+// writes a setting through this table.
+struct SensorSwitchRow {
+  I2cDeviceType sensor;
+  const bool* enabled;
+  const bool* autoStart;
+  const char* enableCmd;
+  const char* disabledName;
+};
+static const SensorSwitchRow kSensorSwitches[] = {
+  { I2C_DEVICE_THERMAL,  &gSettings.thermalEnabled,  &gSettings.thermalAutoStart,  "thermalenabled",  "Thermal camera" },
+  { I2C_DEVICE_TOF,      &gSettings.tofEnabled,      &gSettings.tofAutoStart,      "tofenabled",      nullptr },
+  { I2C_DEVICE_IMU,      &gSettings.imuEnabled,      &gSettings.imuAutoStart,      "imuenabled",      nullptr },
+  { I2C_DEVICE_INPUT,    &gSettings.inputEnabled,    &gSettings.inputAutoStart,    "inputenabled",    nullptr },
+  { I2C_DEVICE_GPS,      &gSettings.gpsEnabled,      &gSettings.gpsAutoStart,      "gpsenabled",      nullptr },
+  { I2C_DEVICE_FMRADIO,  &gSettings.fmRadioEnabled,  &gSettings.fmRadioAutoStart,  "fmradioenabled",  nullptr },
+  { I2C_DEVICE_APDS,     &gSettings.apdsEnabled,     &gSettings.apdsAutoStart,     "apdsenabled",     nullptr },
+  { I2C_DEVICE_RTC,      &gSettings.rtcEnabled,      &gSettings.rtcAutoStart,      "rtcenabled",      nullptr },
+  { I2C_DEVICE_PRESENCE, &gSettings.presenceEnabled, &gSettings.presenceAutoStart, "presenceenabled", nullptr },
+};
+static_assert(sizeof(kSensorSwitches) / sizeof(kSensorSwitches[0]) == (size_t)I2C_DEVICE_COUNT,
+              "every queue-managed device type needs its switch row");
+
+static const SensorSwitchRow* sensorSwitchRow(I2cDeviceType sensor) {
+  for (const SensorSwitchRow& row : kSensorSwitches) {
+    if (row.sensor == sensor) return &row;
+  }
+  return nullptr;
+}
+
+// The master switch, as an open sees it. First-time setup starts the input
+// device whatever the kept settings say (HardwareOne.cpp and the OLED menu
+// auto-start do so on purpose): without it a device whose users were removed
+// but whose settings still hold inputenabled 0 could not be set up on its own
+// screen.
+static bool sensorEnabledForStart(I2cDeviceType sensor) {
+  const SensorSwitchRow* row = sensorSwitchRow(sensor);
+  if (!row || *row->enabled) return true;
+  return sensor == I2C_DEVICE_INPUT && gFirstTimeSetupState != SETUP_NOT_NEEDED;
+}
+
 // Admitted starts the queue worker has not settled yet. A stop that cancels
 // one (queued, or dropped while starting) still closes it with the stop event;
 // a stop with nothing running, starting or queued publishes nothing.
@@ -393,6 +439,53 @@ bool enqueueDeviceStart(I2cDeviceType device) {
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// Automatic restart of a sensor that switched itself off (bus errors or
+// invalid reads). Policy: System_SensorRestartCore.h. The queue worker owns
+// the ladder position and makes every try; other tasks only set flags.
+// All of it lives in PSRAM: 27 flag bytes + 72 bytes of ladder position +
+// 4 bytes of tick time (about 104 bytes; internal on a board without PSRAM,
+// where the attribute does nothing).
+// ---------------------------------------------------------------------------
+// Set by a sensor task at its auto-disable site; consumed by the worker.
+EXT_RAM_BSS_ATTR static std::atomic<bool> sSensorRestartNoted[I2C_DEVICE_COUNT];
+// Set by a manual open or close; consumed by the worker, which ends the episode.
+// Which of the two it was decides a report the worker has not looked at yet:
+// a close wins over it (the sensor stays off), an open does not (the report is
+// about the sensor that open started).
+enum : uint8_t { kRestartHandNone = 0, kRestartHandOpened = 1, kRestartHandClosed = 2 };
+EXT_RAM_BSS_ATTR static std::atomic<uint8_t> sSensorRestartByHand[I2C_DEVICE_COUNT];
+// Published by the worker: a try is waiting or queued (read by the close command).
+EXT_RAM_BSS_ATTR static std::atomic<bool> sSensorRestartPending[I2C_DEVICE_COUNT];
+// Ladder position per device type. Queue worker only.
+EXT_RAM_BSS_ATTR static sensor_restart::State sSensorRestart[I2C_DEVICE_COUNT];
+EXT_RAM_BSS_ATTR static uint32_t sSensorRestartLastTickMs;
+
+void noteSensorAutoDisabled(I2cDeviceType sensor) {
+  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return;
+  sSensorRestartNoted[sensor].store(true);
+}
+
+// A close by hand ends the automatic restart. True when a try was waiting or
+// queued, so the close command can say what it cancelled.
+static bool sensorRestartClosedByHand(I2cDeviceType sensor) {
+  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return false;
+  sSensorRestartByHand[sensor].store(kRestartHandClosed);
+  return sSensorRestartPending[sensor].exchange(false);
+}
+
+// An accepted open by hand replaces a waiting try. A report from before the
+// open is void: the user's start supersedes it. A report that arrives after
+// this call is about the sensor that open started, and the worker keeps it
+// (it ends the old episode first, then begins a new one), so a sensor that
+// fails again right after a manual open is still started again.
+static void sensorRestartOpenedByHand(I2cDeviceType sensor) {
+  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return;
+  sSensorRestartNoted[sensor].store(false);
+  sSensorRestartByHand[sensor].store(kRestartHandOpened);
+  sSensorRestartPending[sensor].store(false);
+}
+
 // Externally linkable so HAL_Input.cpp's unified cmd_openinput can dispatch
 // through the same queue as the other sensor start commands.
 bool requestSensorStart(I2cDeviceType sensor, const char* eventTag, SensorStartRefusal* why) {
@@ -400,6 +493,8 @@ bool requestSensorStart(I2cDeviceType sensor, const char* eventTag, SensorStartR
     if (why) *why = reason;
     return false;
   };
+  // The master switch first: a disabled sensor is neither probed nor queued.
+  if (!sensorEnabledForStart(sensor)) return refuse(SensorStartRefusal::Disabled);
   // Reject immediately if the I2C bus is disabled at runtime (distinct from hardware not connected)
   if (!gI2cBusRunning) return refuse(SensorStartRefusal::BusDisabled);
 
@@ -436,6 +531,7 @@ const char* sensorStartRefusalText(SensorStartRefusal why) {
     case SensorStartRefusal::NoAck:            return "no acknowledgement from device on I2C bus";
     case SensorStartRefusal::ProbeFailed:      return "I2C probe could not complete";
     case SensorStartRefusal::NotQueued:        return "could not queue (queue unavailable/full or stop pending)";
+    case SensorStartRefusal::Disabled:         return "disabled in settings";
   }
   return "unknown";
 }
@@ -451,6 +547,8 @@ const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName
 
   SensorStartRefusal why = SensorStartRefusal::None;
   if (requestSensorStart(sensor, eventTag, &why)) {
+    // An open by hand replaces any automatic restart that was waiting.
+    sensorRestartOpenedByHand(sensor);
     snprintf(getDebugBuffer(), 1024, "%s sensor queued for start (position %d, queue depth: %d)",
              displayName, getQueuePosition(sensor), getQueueDepth());
     // A refusal is its own answer; the next step only follows a queued start.
@@ -458,6 +556,14 @@ const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName
     return getDebugBuffer();
   }
   switch (why) {
+    case SensorStartRefusal::Disabled: {
+      // One sentence for every sensor; the row names the command that undoes it.
+      const SensorSwitchRow* row = sensorSwitchRow(sensor);
+      snprintf(getDebugBuffer(), 1024, "Error: %s is disabled - run '%s 1' first",
+               (row && row->disabledName) ? row->disabledName : displayName,
+               row ? row->enableCmd : "its enable command");
+      break;
+    }
     case SensorStartRefusal::BusDisabled:
       snprintf(getDebugBuffer(), 1024, "Error: [%s] I2C bus is disabled — enable it in settings and reboot", displayName);
       break;
@@ -545,8 +651,15 @@ static bool sensorStopHasWork(I2cDeviceType sensor) {
 // A sensor that is not running (the bus disabled at boot, or nothing open,
 // starting or queued) answers an Error naming the command that starts it.
 // After that a refused request means the manager or its queue does not exist.
+//
+// A close by hand also ends an automatic restart. That happens before the
+// idle test: a sensor that switched itself off and waits for its next try is
+// not running, and without this it would come back minutes after the close.
+// Here and not in requestSensorStop(), which the input drivers call for their
+// own auto-disable.
 const char* cmd_sensorstop_queued(I2cDeviceType sensor, const char* displayName) {
   const bool busDisabled = !gI2cBusRunning;
+  const bool restartCancelled = !busDisabled && sensorRestartClosedByHand(sensor);
   const bool idle = !busDisabled && !sensorStopHasWork(sensor);
   const bool queued = !busDisabled && !idle && requestSensorStop(sensor);
   if (!ensureDebugBuffer()) {
@@ -554,6 +667,7 @@ const char* cmd_sensorstop_queued(I2cDeviceType sensor, const char* displayName)
       return "Error: The sensor is not running: the I2C bus is disabled. "
              "Enable it with 'i2cbusenabled 1', then reboot.";
     }
+    if (idle && restartCancelled) return "Automatic restart cancelled; the sensor stays off until it is opened again";
     if (idle) return "Error: The sensor is not running. Start it with its open command.";
     return queued ? "Stop requested; cleanup will complete asynchronously"
                   : "Error: Sensor request queue is unavailable. Reboot the device and retry.";
@@ -562,6 +676,10 @@ const char* cmd_sensorstop_queued(I2cDeviceType sensor, const char* displayName)
     snprintf(getDebugBuffer(), 1024,
              "Error: %s sensor is not running: the I2C bus is disabled. "
              "Enable it with 'i2cbusenabled 1', then reboot.", displayName);
+  } else if (idle && restartCancelled) {
+    snprintf(getDebugBuffer(), 1024,
+             "[%s] Automatic restart cancelled; the sensor stays off until '%s'",
+             displayName, sensorOpenCommand(sensor));
   } else if (idle) {
     snprintf(getDebugBuffer(), 1024, "Error: %s sensor is not running. Start it with '%s'.",
              displayName, sensorOpenCommand(sensor));
@@ -2845,6 +2963,156 @@ static void announceSensorStart(const char* name, bool ok) {
   logSystemEvent("SENSOR", "%s %s", name, ok ? "online" : "start FAILED");
 }
 
+// --- Automatic restart: the worker's side (see the state near requestSensorStart) ---
+
+// The boot rule: the master switch on, and start-at-boot on as the RAM-flush
+// resume resolved it. Read each time it matters, so `<x>enabled 0`,
+// `<x>autostart 0`, the setup wizard and a settings import all end a restart
+// without a hook in any of them.
+static bool sensorRestartGateOpen(I2cDeviceType sensor) {
+  const SensorSwitchRow* row = sensorSwitchRow(sensor);
+  return gI2cBusRunning && row && *row->enabled &&
+         ramFlushResolve(ramFlushIdForDevice(sensor), *row->autoStart);
+}
+
+// The worker settled a start. For a start the automatic restart queued, a
+// repeated failure is only logged: one start-failed event (a toast) per
+// episode, however many tries follow. Returns true when the worker should
+// announce the outcome as usual.
+static bool sensorRestartStartSettled(I2cDeviceType sensor, bool started) {
+  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return true;
+  sensor_restart::State& state = sSensorRestart[sensor];
+  const bool ours = state.phase == sensor_restart::Phase::Starting;
+  const bool announce = sensor_restart::startSettled(state, started, millis());
+  if (!ours) return announce;
+  sSensorRestartPending[sensor].store(sensor_restart::pending(state));
+  if (started) {
+    // Running again: it is no longer "off because it failed" for a RAM flush.
+    ramFlushClearAutostartFailed(ramFlushIdForDevice(sensor));
+  } else if (!announce) {
+    logSystemEvent("SENSOR", "%s automatic restart failed again, next try in %lu s",
+                   deviceTypeDisplayName(sensor),
+                   (unsigned long)(sensor_restart::delayForRung(state.rung) / 1000u));
+  }
+  return announce;
+}
+
+// A close by hand that found nothing to stop, because the worker queued the
+// automatic start just after the close looked, still wins: the worker drops
+// that start instead of running it, and its next tick ends the episode. (A
+// close that arrives later finds the start outstanding and queues a stop,
+// which the worker honours as for any start.)
+static bool sensorRestartStartWithdrawn(I2cDeviceType sensor) {
+  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return false;
+  return sSensorRestart[sensor].phase == sensor_restart::Phase::Starting &&
+         sSensorRestartByHand[sensor].load() == kRestartHandClosed;
+}
+
+// One try, made when its wait is over. Goes through requestSensorStart(): the
+// device is probed first, so an absent sensor costs one address probe and one
+// log line, with no driver init, no event and no error on its health record.
+static void sensorRestartAttempt(I2cDeviceType sensor, sensor_restart::State& state, uint32_t nowMs) {
+  SensorStartRefusal why = SensorStartRefusal::None;
+  if (requestSensorStart(sensor, "restart@enqueue", &why)) {
+    sensor_restart::attemptQueued(state, nowMs);  // The outcome is reported when the start settles.
+    return;
+  }
+  // A used try: one line saying why and when the next one is due.
+  auto logUsedTry = [&]() {
+    logSystemEvent("SENSOR", "%s automatic restart: %s, next try in %lu s",
+                   deviceTypeDisplayName(sensor), sensorStartRefusalText(why),
+                   (unsigned long)(sensor_restart::delayForRung(state.rung) / 1000u));
+  };
+  switch (why) {
+    case SensorStartRefusal::AlreadyRunning:
+      // Started by someone else (the menu's input auto-start): watch it too.
+      sensor_restart::attemptFoundRunning(state, nowMs);
+      ramFlushClearAutostartFailed(ramFlushIdForDevice(sensor));
+      break;
+    case SensorStartRefusal::Disabled:
+      sensor_restart::cancel(state);
+      ramFlushClearAutostartFailed(ramFlushIdForDevice(sensor));
+      break;
+    case SensorStartRefusal::ProbeFailed:
+      // The bus was busy (another sensor's long read) or the transfer failed.
+      // Ask again on the next ticks; only a run of them counts as a used try.
+      if (sensor_restart::attemptBusBusy(state, nowMs)) logUsedTry();
+      break;
+    case SensorStartRefusal::NoAck:
+    case SensorStartRefusal::BusDisabled:
+      sensor_restart::attemptRefused(state, nowMs);
+      logUsedTry();
+      break;
+    case SensorStartRefusal::StopPending:
+    case SensorStartRefusal::AlreadyQueued:
+    case SensorStartRefusal::QueueUnavailable:
+    case SensorStartRefusal::NotQueued:
+    case SensorStartRefusal::None:
+      break;  // Not possible yet. The wait stays due; the next tick asks again.
+  }
+}
+
+// Runs on the queue worker whenever its queue is empty (every 100 ms); the
+// body runs once a second.
+static void sensorRestartTick(I2cDeviceManager* mgr) {
+  const uint32_t nowMs = millis();
+  if (sensor_restart::elapsedMs(nowMs, sSensorRestartLastTickMs) < 1000u) return;
+  sSensorRestartLastTickMs = nowMs;
+
+  for (int index = 0; index < I2C_DEVICE_COUNT; ++index) {
+    const auto sensor = static_cast<I2cDeviceType>(index);
+    sensor_restart::State& state = sSensorRestart[index];
+    // Read order: an auto-disable site reports before it clears its running
+    // flag, so "not running" read here means its report is already visible.
+    const bool running = sensorIsRunning(sensor);
+    const uint8_t byHand = sSensorRestartByHand[index].exchange(kRestartHandNone);
+    bool noted = sSensorRestartNoted[index].exchange(false);
+    // A close by hand wins over a report from the same second: the sensor
+    // stays off. After an open by hand the report stands: the open voided any
+    // earlier one, so this one is about the sensor that open started.
+    if (byHand == kRestartHandClosed) noted = false;
+    if (state.phase == sensor_restart::Phase::Idle && !noted) continue;
+
+    const char* name = deviceTypeDisplayName(sensor);
+    const RamFlushFeatureId flushId = ramFlushIdForDevice(sensor);
+    const bool gateOpen = sensorRestartGateOpen(sensor);
+    if (byHand != kRestartHandNone && state.phase != sensor_restart::Phase::Idle) {
+      // A close or open by hand ends the episode that was running.
+      sensor_restart::cancel(state);
+      ramFlushClearAutostartFailed(flushId);
+      logSystemEvent("SENSOR", "%s automatic restart ended: opened or closed by hand", name);
+    }
+    if (noted && gateOpen && sensor_restart::noteAutoDisabled(state, nowMs)) {
+      // (With the gate closed the sensor is not set to start by itself: it
+      // stays off, as before, and nothing is logged.)
+      // Off because it failed, not because the user closed it: a RAM flush
+      // taken now must not record it as switched off (as at boot).
+      ramFlushMarkAutostartFailed(flushId);
+      logSystemEvent("SENSOR", "%s automatic restart: next try in %lu s", name,
+                     (unsigned long)(sensor_restart::delayForRung(state.rung) / 1000u));
+    }
+
+    const bool startPending = state.phase == sensor_restart::Phase::Starting &&
+                              (sSensorStartOutstanding[index].load() || mgr->isInQueue(sensor));
+    switch (sensor_restart::tick(state, nowMs, gateOpen, startPending, running)) {
+      case sensor_restart::Tick::Attempt:
+        sensorRestartAttempt(sensor, state, nowMs);
+        break;
+      case sensor_restart::Tick::GateClosed:
+        ramFlushClearAutostartFailed(flushId);
+        logSystemEvent("SENSOR", "%s automatic restart ended: disabled or auto-start off", name);
+        break;
+      case sensor_restart::Tick::Stopped:
+        ramFlushClearAutostartFailed(flushId);
+        break;
+      case sensor_restart::Tick::RunProven:
+      case sensor_restart::Tick::None:
+        break;
+    }
+    sSensorRestartPending[index].store(sensor_restart::pending(state));
+  }
+}
+
 void sensorQueueProcessorTask(void* param) {
   DEBUG_CLIF("[QUEUE] Queue processor task started");
   static unsigned long lastSensorStartTime = 0;
@@ -2945,16 +3213,22 @@ void sensorQueueProcessorTask(void* param) {
       // A close may arrive after dequeue or while waiting for the previous
       // device. Do not initialize a request that has since been cancelled.
       if (mgr->hasPendingDeviceStop(req.device)) continue;
+      if (sensorRestartStartWithdrawn(req.device)) {
+        sSensorStartOutstanding[req.device] = false;  // Settled: closed by hand.
+        continue;
+      }
       if (sensorIsRunning(req.device)) {
         sSensorStartOutstanding[req.device] = false;  // Settled: nothing to start.
         sensorStatusBumpWith("queue@already_running");
         continue;
       }
       if (sensorHasTask(req.device)) {
-        BROADCAST_PRINTF("Error: [%s] Previous task is still cleaning up; retry open shortly",
-                         deviceTypeDisplayName(req.device));
         sSensorStartOutstanding[req.device] = false;
-        announceSensorStart(deviceTypeDisplayName(req.device), false);
+        if (sensorRestartStartSettled(req.device, false)) {
+          BROADCAST_PRINTF("Error: [%s] Previous task is still cleaning up; retry open shortly",
+                           deviceTypeDisplayName(req.device));
+          announceSensorStart(deviceTypeDisplayName(req.device), false);
+        }
         continue;
       }
 
@@ -2968,7 +3242,10 @@ void sensorQueueProcessorTask(void* param) {
       // success output and let that stop trigger owner-task cleanup.
       if (!mgr->hasPendingDeviceStop(req.device)) {
         sSensorStartOutstanding[req.device] = false;  // Settled by its outcome.
-        announceSensorStart(deviceTypeDisplayName(req.device), started);
+        // A repeated failure of an automatic restart is logged, not announced.
+        if (sensorRestartStartSettled(req.device, started)) {
+          announceSensorStart(deviceTypeDisplayName(req.device), started);
+        }
         if (started) broadcastStartedSensor(req.device);
       }
 
@@ -3008,7 +3285,8 @@ void sensorQueueProcessorTask(void* param) {
       pollResume();
       INFO_I2C_AUTOSTARTF("Resumed sensor polling after initialization batch");
     } else {
-      // Queue empty, sleep for a bit
+      // Queue empty: see to sensors that switched themselves off, then sleep.
+      sensorRestartTick(mgr);
       vTaskDelay(pdMS_TO_TICKS(100));
     }
   }

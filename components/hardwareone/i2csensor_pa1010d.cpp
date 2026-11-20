@@ -434,6 +434,7 @@ void gpsTask(void* parameter) {
         if (!probeResult) {
           if (i2cShouldAutoDisable(I2C_ADDR_GPS, (uint8_t)gSettings.gpsBus)) {
             ERROR_GPSF("Too many consecutive GPS failures - auto-disabling");
+            noteSensorAutoDisabled(I2C_DEVICE_GPS);  // before the flag: see System_I2C.h
             gGpsRunning = false;
             sensorStatusBumpWith("gps@auto_disabled");
             logSystemEvent("SENSOR", "GPS auto-disabled after too many consecutive I2C failures");
@@ -704,7 +705,7 @@ const char* cmd_gpslog(const String& argsInput) {
   // report that failure without claiming a running logger or newly enabling
   // boot startup. Previously enabled auto-start preferences remain unchanged.
   if (const char* error = gpsLogStepError(cmd_gpsautostart("on"))) return error;
-  if (const char* error = gpsLogStepError(cmd_sensorlog("autostart on"))) return error;
+  if (const char* error = gpsLogStepError(cmd_sensorlog_autostart("on"))) return error;
 
   EXT_RAM_BSS_ATTR static char result[384];
   snprintf(result, sizeof(result),
@@ -730,7 +731,7 @@ const CommandEntry gpsCommands[] = {
   { "gpsread", "Read GPS location and time data. (add 'json' for JSON output)", false, cmd_gps },
   
   // Auto-start
-  { "gpsautostart", "Enable/disable GPS auto-start after boot [on|off]", false, cmd_gpsautostart, "Usage: gpsautostart [on|off]" },
+  { "gpsautostart", "Enable/disable GPS auto-start after boot [on|off]", true, cmd_gpsautostart, "Usage: gpsautostart [on|off]" },
 
   // One-shot GPS logging setup; receiver initialization remains asynchronous.
   { "gpslog", "Set up and start GPS track logging now (persists across boots). Usage: gpslog [interval_ms]", false, cmd_gpslog,

@@ -12,6 +12,7 @@
 #include <esp_attr.h>
 #include <esp_system.h>
 #include <string.h>
+#include <atomic>
 
 #include "System_AuthIdentity.h"
 #include "System_BuildConfig.h"
@@ -80,7 +81,9 @@ static_assert(RF_FEATURE_COUNT <= 32, "RamFlushFeatureId overflows the uint32_t 
 static bool     sOverlayActive     = false;
 static uint32_t sDivergeMask       = 0;
 static uint32_t sLiveMask          = 0;
-static uint32_t sAutostartFailed   = 0;
+// Written by more than one task (boot, the camera power task, the sensor queue
+// worker's automatic restart), so each change is one atomic step.
+static std::atomic<uint32_t> sAutostartFailed{0};
 
 static uint16_t ramFlushCrc(uint32_t diverge, uint32_t live, uint16_t layout) {
   // Not a checksum for integrity against an attacker — just enough to reject RTC
@@ -181,7 +184,7 @@ static bool ramFlushReadLive(RamFlushFeatureId f) {
 
 #if ENABLE_OLED_DISPLAY
     // gOledRunning, not oledConnected: the latter is "a panel answered on I2C",
-    // which stays true after oledstop. gOledRunning is what oledAutoStart
+    // which stays true after closeoled. gOledRunning is what oledAutoStart
     // actually controls.
     case RF_OLED:       return gOledRunning;
 #else
@@ -275,7 +278,7 @@ void ramFlushCaptureOverlay(void) {
     // A feature that failed to autostart this session is not the user's doing.
     // Recording it would read as "turned off" and suppress a configured autostart
     // on every future boot, with replugging the hardware doing nothing to fix it.
-    if (sAutostartFailed & (1u << i)) continue;
+    if (sAutostartFailed.load() & (1u << i)) continue;
 
     const bool isLive = ramFlushReadLive(f);
     const bool intent = ramFlushReadIntent(f);
@@ -367,11 +370,11 @@ RamFlushFeatureId ramFlushIdForDevice(I2cDeviceType device) {
 }
 
 void ramFlushMarkAutostartFailed(RamFlushFeatureId f) {
-  if (f < RF_FEATURE_COUNT) sAutostartFailed |= (1u << (uint8_t)f);
+  if (f < RF_FEATURE_COUNT) sAutostartFailed.fetch_or(1u << (uint8_t)f);
 }
 
 void ramFlushClearAutostartFailed(RamFlushFeatureId f) {
-  if (f < RF_FEATURE_COUNT) sAutostartFailed &= ~(1u << (uint8_t)f);
+  if (f < RF_FEATURE_COUNT) sAutostartFailed.fetch_and(~(1u << (uint8_t)f));
 }
 
 // ---------------------------------------------------------------------------

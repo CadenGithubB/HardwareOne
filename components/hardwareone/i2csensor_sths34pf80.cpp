@@ -507,7 +507,7 @@ const CommandEntry presenceCommands[] = {
   { "presencestatus", "Show STHS34PF80 sensor status. (add 'json' for JSON output)", false, cmd_presencestatus },
   
   // Auto-start
-  { "presenceautostart", "Enable/disable presence auto-start after boot [on|off]", false, cmd_presenceautostart, "Usage: presenceautostart [on|off]" },
+  { "presenceautostart", "Enable/disable presence auto-start after boot [on|off]", true, cmd_presenceautostart, "Usage: presenceautostart [on|off]" },
   { "presencebus", "Route STHS34PF80 presence to bus: <0|1> (reboot required)", true, cmd_presencebus, "Usage: presenceBus <0|1>" },
 };
 
@@ -608,6 +608,7 @@ void presenceTask(void* parameter) {
                                    (uint8_t)gSettings.presenceBus)) {
             uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_PRESENCE,
                                                      (uint8_t)gSettings.presenceBus);
+            noteSensorAutoDisabled(I2C_DEVICE_PRESENCE);  // before the flag: see System_I2C.h
             gPresenceRunning = false;
             gPresenceConnected = false;
             sensorStatusBumpWith("presence@auto_disabled");

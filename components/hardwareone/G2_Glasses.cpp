@@ -28295,10 +28295,12 @@ static const char* cmd_g2battery(const String& /*argsInput*/) {
 // g2MicStreamEnable(), driven by HAL_Audio capture start/stop. Low-level probing
 // stays available via g2micon/g2micoff/g2micstats.)
 
-// Stream dims live in gSettings.g2StreamWidth/Height (persisted across
-// reboots, set via this CLI command or via the Camera Settings lens page).
-// The stream worker reads them at session start; mid-stream changes apply
-// on the next stream restart.
+// Stream dims live in gSettings.g2StreamWidth/Height. They are saved: the two
+// display-only rows in g2DeviceSettingEntries below name them (before those
+// rows existed the values were back at 96x96 after every reboot). This command
+// is the only writer; the Camera Settings lens page submits it. The stream
+// worker reads the values at session start; mid-stream changes apply on the
+// next stream restart.
 
 static const char* cmd_g2streamres(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -28547,6 +28549,18 @@ static const SettingEntry g2DeviceSettingEntries[] = {
   { "notificationsDesired", SETTING_U8, &gSettings.g2NotificationsDesired,
     0, 0, nullptr, 0, 2, "Native notifications desired",
     "0|Preserve,1|Off (unsupported),2|On", false, nullptr, nullptr, true },
+  // Camera stream size on the lens. Display-only rows (readOnly, no cmdKey):
+  // they make the values load and save, and no generic settings editor offers
+  // them as two separate number fields. `g2streamres <W>x<H>` is the writer.
+  // Defaults repeat the Settings constructor's (96x96); bounds are the
+  // command's. An odd width from a hand-edited file is rounded down where the
+  // stream reads it (G2_ImageViewers.cpp).
+  { "streamWidth", SETTING_INT, &gSettings.g2StreamWidth,
+    96, 0, nullptr, 16, 288, "Camera stream width (set with g2streamres)", nullptr,
+    false, nullptr, nullptr, true },
+  { "streamHeight", SETTING_INT, &gSettings.g2StreamHeight,
+    96, 0, nullptr, 16, 144, "Camera stream height (set with g2streamres)", nullptr,
+    false, nullptr, nullptr, true },
 };
 
 extern const SettingsModule g2DeviceSettingsModule = {
@@ -28572,9 +28586,6 @@ extern const CommandEntry g2Commands[] = {
   { "g2ai",         "Front-pane AI card (full pipeline): g2ai <text>", false, cmd_g2ai, "Usage: g2ai <text>" },
   { "g2ainoask",    "Variant: skip ASK step: g2ainoask <text>",        false, cmd_g2ai_noask, "Usage: g2ainoask <text>" },
   { "g2aidirect",   "Variant: CTRL+REPLY only: g2aidirect <text>",     false, cmd_g2ai_direct, "Usage: g2aidirect <text>" },
-  // Names from before 1.0, kept for one release (CONTRIBUTING.md, "Command names").
-  { "g2ai-noask",   "Alias of g2ainoask.",                             false, cmd_g2ai_noask },
-  { "g2ai-direct",  "Alias of g2aidirect.",                            false, cmd_g2ai_direct },
   { "g2terminal", "Native Terminal voice/chat (firmware 2.3.2.14)", false, cmd_g2terminal, "Usage: g2terminal open | status | close. Browse Mingus host sessions and recent history; no automatic submission." },
   { "g2evenai",     "Push into the matching live Hey-Even exchange (strict 16-hex ID required)", false, cmd_g2evenai, "Usage: g2evenai <askid|replyid|replypartid|replyendid|exitid> <16hex-id> [text]\n  status:       show active exchange ID/arm/generation\n  capabilities: show guarded command contract\n  replypartid:  stream one delta (leading glue preserved)\n  legacy ask/reply/replypart/replyend/exit fail closed; use g2ai for deliberate bench cards" },
   { "g2aih",        "Front-pane card with custom heading: g2aih <heading>|<body>", false, cmd_g2aih, "Usage: g2aih <heading>|<body>  (no | = whole text as body)" },

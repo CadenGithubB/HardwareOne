@@ -475,6 +475,16 @@ static uint8_t gSrAutoTuneStep = 0;
 static uint32_t gSrAutoTuneStartMs = 0;
 static uint32_t gSrAutoTuneStepStartMs = 0;
 static const uint32_t kAutoTuneStepDurationMs = 8000;  // 8 seconds per config
+// The AFE gain auto-tune is trying. Kept out of gSettings.srAfeGain, which is
+// a saved setting: a trial value written there would be stored by the next
+// settings save. 4 bytes in PSRAM.
+EXT_RAM_BSS_ATTR static float gSrAfeGainTrial;
+
+// The AFE gain in effect: the auto-tune trial while auto-tune runs, the saved
+// setting otherwise. Read where the AFE is configured and where it is shown.
+static float srEffectiveAfeGain() {
+  return (gSrAutoTuneActive && gSrAfeGainTrial > 0.0f) ? gSrAfeGainTrial : gSettings.srAfeGain;
+}
 
 // Tiers 1-2 carry session/lifecycle plumbing, tiers 3-4 the audio chain, so a
 // tier routes to the gate for its family. gSrDebugLevel picks the verbosity,
@@ -1736,8 +1746,10 @@ static void srAutoTuneCheck() {
     gSrAutoTuneStep++;
     
     if (gSrAutoTuneStep >= kAutoTuneConfigCount) {
-      // All steps complete
+      // All steps complete. The gain is the saved setting again; the user
+      // applies the best one with srtuninggain (the message below says so).
       gSrAutoTuneActive = false;
+      gSrAfeGainTrial = 0.0f;
       gSrRawOutputEnabled = false;
       broadcastOutput("");
       broadcastOutput("=== AUTO-TUNE COMPLETE ===");
@@ -1749,7 +1761,7 @@ static void srAutoTuneCheck() {
     // Apply next config
     gSrAutoTuneStepStartMs = now;
     const AutoTuneConfig& cfg = kAutoTuneConfigs[gSrAutoTuneStep];
-    gSettings.srAfeGain = cfg.afeGain;
+    gSrAfeGainTrial = cfg.afeGain;
     gSrDynGainMax = cfg.dynGainMax;
     gSrDynGainEnabled = cfg.dynGainEnabled;
     gSrDynGainCurrent = 1.0f;
@@ -2283,7 +2295,7 @@ static bool initAfe() {
   config->vad_init = true;
   config->wakenet_init = true;
   config->afe_ringbuf_size = 50;
-  config->afe_linear_gain = clampFloat(gSettings.srAfeGain, 0.1f, 10.0f);
+  config->afe_linear_gain = clampFloat(srEffectiveAfeGain(), 0.1f, 10.0f);
   config->memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
   // Preserve the existing setting's target levels, using the new AGC fields.
   config->agc_init = gSettings.srAgcMode != 0;
@@ -3056,7 +3068,7 @@ void buildEspSrStatusJson(String& output) {
     doc["srTaskStackHwmBytes"] = 0;
     doc["srTaskStackPeakUsedBytesEst"] = 0;
     doc["srTaskStackHwmNote"] =
-        "Run srstart; HWM resets when task is created. Sample after stress.";
+        "Run opensr; HWM resets when task is created. Sample after stress.";
   }
   // Measured into one PSRAM block, then one assignment: the String writer
   // would free `output` and regrow it every 31 characters. An output that
@@ -3081,7 +3093,7 @@ static const char* setEnabledFromArgs(const String& argsInput) {
 const char* cmd_sr(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  return "Error: sr is not a command by itself. Use srstart, srstop, srstatus, srcmdslist, srdebuglevel, srconfidence, srtimeout, srtuning, sraccept, srdyngain, srraw, srautotune or srsnipstatus.";
+  return "Error: sr is not a command by itself. Use opensr, closesr, srstatus, srcmdslist, srdebuglevel, srconfidence, srtimeout, srtuning, sraccept, srdyngain, srraw, srautotune or srsnipstatus.";
 }
 
 const char* cmd_sr_enable(const String& argsInput) {
@@ -3096,11 +3108,11 @@ const char* cmd_sr_start(const String& argsInput) {
     return "Error: Speech recognition is disabled - run 'srenabled 1' first";
   }
   // A running pipeline is not started again. Its arming is the part of
-  // srstart that may still be missing: the boot autostart runs as the system
+  // opensr that may still be missing: the boot autostart runs as the system
   // and cannot arm, and the web page's Start is how a user arms it then.
   const bool alreadyRunning = gEspSrRunning.load(std::memory_order_acquire);
   if (alreadyRunning && gVoiceArmed) {
-    return "Error: Speech recognition is already running. Stop it first with 'srstop' to restart it.";
+    return "Error: Speech recognition is already running. Stop it first with 'closesr' to restart it.";
   }
   if (!alreadyRunning && !startEspSr()) {
     static String error;
@@ -3150,8 +3162,8 @@ const char* cmd_sr_stop(const String& argsInput) {
   const bool wasActive = gEspSrRunning.load(std::memory_order_acquire) || gSrTaskHandle ||
                          gSrFeedTaskHandle || gAfeData || gSrModels;
   // stopEspSr() disarms voice under gVoiceArmMutex before it stops the workers.
-  if (!stopEspSr()) return "Error: speech stop incomplete; resources retained, retry srstop";
-  if (!wasActive) return "Error: Speech recognition is not running. Start it with 'srstart'.";
+  if (!stopEspSr()) return "Error: speech stop incomplete; resources retained, retry closesr";
+  if (!wasActive) return "Error: Speech recognition is not running. Start it with 'opensr'.";
   broadcastOutput("[VOICE] Disarmed (sr stopped)");
   return "OK";
 }
@@ -3233,7 +3245,7 @@ static const char* cmd_sr_stack(const String& argsInput) {
   (void)argsInput;
   static char buf[224];
   if (!gSrTaskHandle || !gEspSrRunning) {
-    return "Error: sr_main: not running — use srstart first";
+    return "Error: sr_main: not running — use opensr first";
   }
   const UBaseType_t hwm = gSrStackHwm.load(std::memory_order_relaxed);
   const uint32_t allocB = (uint32_t)SR_STACK_WORDS;
@@ -3281,7 +3293,7 @@ static const char* cmd_sr_cmds_list(const String& argsInput) {
   out = "";
 
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: srstart";
+    return "Error: MultiNet not initialized. Run: opensr";
   }
 
   if (!lockMn(2000)) {
@@ -3323,7 +3335,7 @@ static const char* cmd_sr_cmds_add(const String& argsInput) {
   if (id <= 0 || id > kSrMaxCommandId) return "Error: id must be 1-1023";
 
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: srstart";
+    return "Error: MultiNet not initialized. Run: opensr";
   }
   if (!lockMn(4000)) {
     return kSrCommandTableBusy;
@@ -3360,7 +3372,7 @@ static const char* cmd_sr_cmds_del(const String& argsInput) {
   if (byId && !parseIntArg(arg, 1, kSrMaxCommandId, id)) return "Error: id must be 1-1023";
 
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: srstart";
+    return "Error: MultiNet not initialized. Run: opensr";
   }
   if (!lockMn(4000)) {
     return kSrCommandTableBusy;
@@ -3404,7 +3416,7 @@ static const char* cmd_sr_cmds_clear(const String& argsInput) {
   if (arg != "confirm") return "Error: invalid arguments — Usage: srcmdsclear confirm";
 
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: srstart";
+    return "Error: MultiNet not initialized. Run: opensr";
   }
   if (!lockMn(4000)) {
     return kSrCommandTableBusy;
@@ -3420,7 +3432,7 @@ static const char* cmd_sr_cmds_clear(const String& argsInput) {
   if (err != ESP_OK) {
     static char buf[128];
     snprintf(buf, sizeof(buf),
-             "Error: MultiNet could not clear its command table (%s). Restart recognition with srstop and srstart.",
+             "Error: MultiNet could not clear its command table (%s). Restart recognition with closesr and opensr.",
              esp_err_to_name(err));
     return buf;
   }
@@ -3432,7 +3444,7 @@ static const char* cmd_sr_cmds_reload(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: srstart";
+    return "Error: MultiNet not initialized. Run: opensr";
   }
   if (!lockMn(6000)) {
     return kSrCommandTableBusy;
@@ -3463,7 +3475,7 @@ static const char* cmd_sr_cmds_save(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: srstart";
+    return "Error: MultiNet not initialized. Run: opensr";
   }
   if (!lockMn(6000)) {
     return kSrCommandTableBusy;
@@ -3486,7 +3498,7 @@ static const char* cmd_sr_cmds_sync(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!mnCommandsReady()) {
-    return "Error: MultiNet not initialized. Run: srstart";
+    return "Error: MultiNet not initialized. Run: opensr";
   }
   
   // Reset hierarchical state machine
@@ -3845,7 +3857,7 @@ static const char* cmd_sr_autotune(const String& argsInput) {
     gSrRawOutputEnabled = true;  // Enable raw output during tuning
     
     // Apply first config
-    gSettings.srAfeGain = kAutoTuneConfigs[0].afeGain;
+    gSrAfeGainTrial = kAutoTuneConfigs[0].afeGain;
     gSrDynGainMax = kAutoTuneConfigs[0].dynGainMax;
     gSrDynGainEnabled = kAutoTuneConfigs[0].dynGainEnabled;
     gSrDynGainCurrent = 1.0f;
@@ -3856,7 +3868,7 @@ static const char* cmd_sr_autotune(const String& argsInput) {
                       (int)(kAutoTuneStepDurationMs / 1000) + " sec each.");
     broadcastOutput("Say test phrases (system, battery, cancel, help) during each step.");
     broadcastOutput(String("Step 1/") + (int)kAutoTuneConfigCount + ": " + kAutoTuneConfigs[0].description);
-    broadcastOutput("NOTE: AFE gain change requires SR restart. Run 'srstop' then 'srstart'.");
+    broadcastOutput("NOTE: AFE gain change requires SR restart. Run 'closesr' then 'opensr'.");
     
     return "Auto-tune started. Restart SR to apply AFE gain change.";
   }
@@ -3866,6 +3878,7 @@ static const char* cmd_sr_autotune(const String& argsInput) {
       return "Error: Auto-tune is not running. Start it with 'srautotune start'.";
     }
     gSrAutoTuneActive = false;
+    gSrAfeGainTrial = 0.0f;
     gSrRawOutputEnabled = false;
     broadcastOutput("");
     broadcastOutput("=== AUTO-TUNE STOPPED ===");
@@ -3945,7 +3958,7 @@ static const char* cmd_sr_tuning(const String& argsInput) {
     "Usage: srtuning <gain|agc|vad|filters> <value>\n"
     "Usage: srtuning swgain <1.0-50.0> (sets micgain)",
     mg, swgain, (int)getMicDcOffset(), gSrFiltersEnabled ? "ON" : "OFF",
-    gSettings.srAfeGain, gSettings.srAgcMode, gSettings.srVadMode,
+    srEffectiveAfeGain(), gSettings.srAgcMode, gSettings.srVadMode,
     gSrMinCommandConfidence, gSettings.srCommandTimeout);
   return buf;
 }
@@ -4086,7 +4099,7 @@ static const char* cmd_sr_snip_on(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!gEspSrRunning) {
-    return "Error: SR not running. Run: srstart";
+    return "Error: SR not running. Run: opensr";
   }
   if (!srSnipInit()) {
     return "Error: Snippet writer could not start. Free memory and run srsnipon again.";
@@ -4110,7 +4123,7 @@ static const char* cmd_sr_snip_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
   if (!gEspSrRunning) {
-    return "Error: SR not running. Run: srstart";
+    return "Error: SR not running. Run: opensr";
   }
   // A running session (manual or wake-word) would be ended and replaced.
   if (gSrSnipSessionActive) {
@@ -4220,14 +4233,12 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry espsrCommands[] = {
-  { "sr", "ESP-SR speech recognition commands.", false, cmd_sr, "Usage: srstart | srstop | srstatus | srstack | srcmdslist | srdebuglevel | srconfidence | srtimeout | srtuning | sraccept | srdyngain | srraw | srautotune | srsnipstatus" },
+  { "sr", "ESP-SR speech recognition commands.", false, cmd_sr, "Usage: opensr | closesr | srstatus | srstack | srcmdslist | srdebuglevel | srconfidence | srtimeout | srtuning | sraccept | srdyngain | srraw | srautotune | srsnipstatus" },
   { "srenable", "ESP-SR enable is a compile-time flag (cannot be toggled at runtime).", true, cmd_sr_enable, "Usage: srenable   (informational; runtime switch is srenabled 0|1)" },
   { "opensr", "Start ESP-SR pipeline and arm voice as the current user.", false, cmd_sr_start, "Usage: opensr" },
   { "closesr", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: closesr" },
   { "srstatus", "Show ESP-SR status.", false, cmd_sr_status, "Usage: srstatus" },
   { "srstack", "Show sr_main stack high-water mark (run after voice stress test).", false, cmd_sr_stack, "Usage: srstack" },
-  { "srstart", "Start ESP-SR pipeline and arm voice as the current user.", false, cmd_sr_start, "Usage: srstart" },
-  { "srstop", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: srstop" },
   { "voicearm", "Arm voice command execution as the current authenticated user.", false, cmd_voice_arm_cli, "Usage: voicearm" },
   { "voicedisarm", "Disarm voice command execution.", false, cmd_voice_disarm_cli, "Usage: voicedisarm" },
   { "voicestatus", "Show voice arming status.", false, cmd_voice_status_cli, "Usage: voicestatus" },
@@ -4285,6 +4296,15 @@ static const SettingEntry espsrSettingsEntries[] = {
   { "srAutoStart", SETTING_BOOL, &gSettings.srAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "srautostart" },
   { "srModelSource", SETTING_INT, &gSettings.srModelSource, 0, 0, nullptr, 0, 2, "Model source (0=partition, 1=SD, 2=LittleFS)", "0|Partition,1|SD,2|LittleFS", false, nullptr, "srmodelsource" },
   { "srCommandTimeout", SETTING_INT, &gSettings.srCommandTimeout, 6000, 0, nullptr, 1000, 30000, "Command timeout (ms)", nullptr, false, nullptr, "srtimeout" },
+  // Front-end tuning, saved since these rows exist (before, the three commands
+  // changed RAM only and the values were back at their defaults after a
+  // reboot). The defaults repeat the Settings constructor's exactly:
+  // applyRegisteredDefaults() writes a row's default over the constructor's at
+  // boot. Row bounds are whole numbers, so the gain row says 0..10; the command
+  // keeps its 0.1 floor and the AFE setup clamps to 0.1..10 where it is used.
+  { "srAfeGain", SETTING_FLOAT, &gSettings.srAfeGain, 0, 1.0f, nullptr, 0, 10, "AFE gain 0.1-10.0 (restart SR to apply)", nullptr, false, nullptr, "srtuninggain" },
+  { "srAgcMode", SETTING_INT, &gSettings.srAgcMode, 2, 0, nullptr, 0, 3, "AGC target (restart SR to apply)", "0|Off,1|-9 dB,2|-6 dB,3|-3 dB", false, nullptr, "srtuningagc" },
+  { "srVadMode", SETTING_INT, &gSettings.srVadMode, 3, 0, nullptr, 0, 4, "VAD mode 0-4 (restart SR to apply)", nullptr, false, nullptr, "srtuningvad" },
 };
 
 // Columns: name, jsonSection, entries, count, isConnected, description

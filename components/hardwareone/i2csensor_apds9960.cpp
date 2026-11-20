@@ -508,7 +508,7 @@ const CommandEntry apdsCommands[] = {
   { "apdsgesture", "Show latest sampled APDS9960 gesture (does not consume events).", false, cmd_apdsgesture },
   
   // Auto-start
-  { "apdsautostart", "Enable/disable APDS auto-start after boot [on|off]", false, cmd_apdsautostart, "Usage: apdsautostart [on|off]" },
+  { "apdsautostart", "Enable/disable APDS auto-start after boot [on|off]", true, cmd_apdsautostart, "Usage: apdsautostart [on|off]" },
   { "apdsbus",     "Route APDS9960 gesture to bus: <0|1> (reboot required)", true, cmd_apdsbus, "Usage: apdsBus <0|1>" },
 };
 
@@ -640,6 +640,7 @@ static bool apdsPollDevice(unsigned long nowMs, unsigned long pollMs,
     // Note: I2cDevice::recordError() called automatically by transaction;
     // the centralized health tracking decides on auto-disable.
     uint8_t errors = i2cGetConsecutiveErrors(I2C_ADDR_APDS, apdsBus);
+    noteSensorAutoDisabled(I2C_DEVICE_APDS);  // before the flags: see System_I2C.h
     gApdsColorRunning = false;
     gApdsProximityRunning = false;
     gApdsGestureRunning = false;

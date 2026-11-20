@@ -638,7 +638,7 @@ const CommandEntry tofCommands[] = {
   { "tofdevicepollms", "ToF device poll: <100..2000>", true, cmd_tofdevicepollms, "Usage: tofDevicePollMs <100..2000>" },
   
   // Auto-start
-  { "tofautostart", "Enable/disable ToF auto-start after boot [on|off]", false, cmd_tofautostart, "Usage: tofautostart [on|off]" },
+  { "tofautostart", "Enable/disable ToF auto-start after boot [on|off]", true, cmd_tofautostart, "Usage: tofautostart [on|off]" },
   { "tofbus",      "Route VL53L4CX ToF to bus: <0|1> (reboot required)", true, cmd_tofbus,      "Usage: tofBus <0|1>" },
 };
 
@@ -730,6 +730,7 @@ void tofTask(void* parameter) {
         if (!ok && gTofRunning) {
           if (i2cShouldAutoDisable(I2C_ADDR_TOF, (uint8_t)gSettings.tofBus)) {
             ERROR_TOFF("Too many consecutive ToF failures - auto-disabling");
+            noteSensorAutoDisabled(I2C_DEVICE_TOF);  // before the flag: see System_I2C.h
             gTofRunning = false;
             sensorStatusBumpWith("tof@auto_disabled");
             logSystemEvent("SENSOR", "ToF auto-disabled after too many consecutive I2C failures");

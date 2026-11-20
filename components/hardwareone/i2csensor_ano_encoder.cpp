@@ -665,6 +665,7 @@ void inputTask(void* parameter) {
           WARN_ANO_ENCODERF("[ANO_TASK] I2C read failure (consecutive: %u)", errors);
           if (i2cShouldAutoDisable(anoI2cAddr(), (uint8_t)gSettings.inputBus)) {
             ERROR_ANO_ENCODERF("[ANO_TASK] Too many failures - auto-disabling");
+            noteSensorAutoDisabled(I2C_DEVICE_INPUT);  // before the stop: see System_I2C.h
             requestSensorStop(I2C_DEVICE_INPUT);
             logSystemEvent("SENSOR", "ANO Encoder auto-disabled after %u consecutive I2C failures", errors);
             { char det[24]; snprintf(det, sizeof(det), "%u I2C errors", errors);
@@ -674,6 +675,7 @@ void inputTask(void* parameter) {
           consecutiveInvalidReads++;
           if (consecutiveInvalidReads >= INVALID_READ_AUTO_DISABLE_THRESHOLD) {
             ERROR_ANO_ENCODERF("[ANO_TASK] %u invalid reads - auto-disabling", consecutiveInvalidReads);
+            noteSensorAutoDisabled(I2C_DEVICE_INPUT);  // before the stop: see System_I2C.h
             requestSensorStop(I2C_DEVICE_INPUT);
             logSystemEvent("SENSOR", "ANO Encoder auto-disabled after %u consecutive invalid reads (device likely disconnected)", consecutiveInvalidReads);
             { char det[24]; snprintf(det, sizeof(det), "%u invalid reads", (unsigned)consecutiveInvalidReads);

@@ -62,6 +62,14 @@ def generate(component: Path) -> str:
     constants = [re.search(r"(?m)^#define I2C_WIRE1_DEFAULT_FREQ[^\n]+", manager)[0],
                  re.search(r"(?m)^static constexpr uint32_t CACHE_MUTEX_TIMEOUT_MS[^\n]+", mutex)[0],
                  re.search(r"(?m)^#define SENSOR_TASK_EXIT\([^\n]+\n(?:[^\n]*\\\n)*[^\n]*", task)[0]]
+    # The task reports its auto-disable to the sensor queue worker's automatic
+    # restart (System_I2C.cpp). The report comes before the running flag is
+    # cleared: the worker reads the flag first, so it never sees "stopped"
+    # without the report. A pre-change --baseline has no such call.
+    note = ("static void noteSensorAutoDisabled(I2cDeviceType sensor) {\n"
+            "  assert(sensor == I2C_DEVICE_TOF && gTofRunning);\n}")
+    if "noteSensorAutoDisabled(" in extract_block(owner, "void tofTask(void* parameter)"):
+        definitions.insert(0, note)
     harness = (HERE / "tof_poll_outcomes_harness.cpp").read_text()
     for marker, text in {"// INSERT_CONSTANTS": "\n".join(constants),
                          "// INSERT_TYPES": "\n".join(types),
