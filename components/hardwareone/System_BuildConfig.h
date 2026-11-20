@@ -426,6 +426,15 @@
 // Auto-disabled if ESP-NOW is off.
 #define ENABLE_BONDED_MODE      1
 
+// Back-capture over ESP-NOW (docs/BACKCAPTURE_FILES.md, design 2026-11-19).
+// SEND: this device serves its whitelisted logs to the masters named on it
+// (file catch-up, CATCHUP_* 82-85; sets the session caps bit files_serve).
+// COLLECT: this device pulls them onto its SD card (sets the caps bit
+// collect). Each has a runtime setting (espnowcatchupserve, collect). Both
+// need ESP-NOW; COLLECT needs an SD card.
+#define ENABLE_ESPNOW_SEND      0
+#define ENABLE_ESPNOW_COLLECT   0
+
 
 // =============================================================================
 // 5. USER-FACING APPS  —  Composed features shipped as products
@@ -1063,6 +1072,14 @@
   #define ENABLE_BONDED_MODE 0
 #endif
 
+// File catch-up (both sides) rides on ESP-NOW.
+#if !ENABLE_ESPNOW
+  #undef ENABLE_ESPNOW_SEND
+  #define ENABLE_ESPNOW_SEND 0
+  #undef ENABLE_ESPNOW_COLLECT
+  #define ENABLE_ESPNOW_COLLECT 0
+#endif
+
 // Note: ENABLE_LLM_SOURCE_ONBOARD needs PSRAM. CMake gates its source files on
 // this flag alone (no target or PSRAM check); a build without PSRAM must set it
 // to 0 in its feature header or saved configuration.
@@ -1483,6 +1500,14 @@
   #else
     #define ENABLE_SD_CARD 0
   #endif
+#endif
+// The collector stores what it pulls on the SD card.
+#if ENABLE_ESPNOW_COLLECT && !ENABLE_SD_CARD
+  #if defined(HW1_FEATURE_CONFIG_HEADER)
+    #error "ENABLE_ESPNOW_COLLECT needs an SD card (ENABLE_SDMMC_CARD or the board's SD) in the saved configuration"
+  #endif
+  #undef ENABLE_ESPNOW_COLLECT
+  #define ENABLE_ESPNOW_COLLECT 0
 #endif
 #if ENABLE_SD_CARD && ENABLE_SDMMC_CARD && (!(HW_BOARD_P4X_EYE || HW_BOARD_WAVESHARE_P4_TOUCH) || !defined(CONFIG_IDF_TARGET_ESP32P4))
   #error "SDMMC card requires a supported ESP32-P4 board profile"

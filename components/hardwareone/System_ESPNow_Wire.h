@@ -59,7 +59,8 @@
 //     of that frame alone. The header msgId of every frame, answers included,
 //     is the sender's own fresh number: no frame borrows the request's msgId.
 //     The answers are TOPO_START, TOPO_PEER, CMD_RESP, FS_LIST_REPLY,
-//     FS_STAT_REPLY, FS_GET_ACK, STREAM and FILE_CANCEL.
+//     FS_STAT_REPLY, FS_GET_ACK, STREAM, FILE_CANCEL, CATCHUP_LIST_RESP and
+//     CATCHUP_READ_RESP.
 //   - METADATA is exactly the 202-byte sealed budget, so it cannot grow (to a
 //     peer behind a relay it goes as sealed fragments: sendMetadata);
 //     FS_STAT_REPLY (164) has 38 bytes left, the routed frames their margins
@@ -79,6 +80,7 @@
 #include "System_ESPNow_ForwardCore.h"     // the forward-link frame's size
 #include "System_ESPNow_TimeCore.h"    // the TIME_SYNC frame's size and source numbers
 #include "System_ESPNow_AnswerCore.h"  // the answer header {reqId, status} and the status table (rule F3)
+#include "System_ESPNow_CatchupCore.h" // the CATCHUP_* frames' sizes, opcodes and status bytes
 #include "System_DeviceName.h"        // the device-name rule and its 32-byte wire field
 
 #if ENABLE_ESPNOW
@@ -143,7 +145,7 @@ static_assert(ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT == 202, "group-signed pay
 //   50–69    App unicast   (CMD, CMD_RESP, TEXT, METADATA_*, USER_SYNC)
 //   70–89    Remote FS     (FS_* read side live 70–75; 76–81 earmarked write
 //                           side: DELETE_REQ/ACK, PUT_REQ/ACK, MKDIR, RENAME;
-//                           82–85 earmarked file catch-up (back-capture, 1.x):
+//                           82–85 live file catch-up (back-capture, 2026-11-19):
 //                           CATCHUP_LIST_REQ=82, CATCHUP_LIST_RESP=83,
 //                           CATCHUP_READ_REQ=84, CATCHUP_READ_RESP=85; 86–89 free)
 //   90–109   Streaming     (STREAM; 91–93 earmarked MEDIA_START/DATA/END)
@@ -268,8 +270,13 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_FS_GET_ACK      = 75,  // Synchronous ack for FS_GET_REQ (status + fileSize)
   // 76–81 earmarked write side: FS_DELETE_REQ/ACK, FS_PUT_REQ/ACK, FS_MKDIR,
   // FS_RENAME (V4PayloadFsEntry.perms already carries WRITE/DELETE bits)
-  // 82–85 earmarked file catch-up: CATCHUP_LIST_REQ/RESP, CATCHUP_READ_REQ/RESP
-  // (back-capture design 2026-11-19, built in 1.x); 86–89 free
+  // File catch-up (back-capture, 2026-11-19; System_ESPNow_CatchupCore.h): a
+  // master named on a worker lists the files it offers and reads byte ranges.
+  ESPNOW_V4_TYPE_CATCHUP_LIST_REQ  = 82,  // collector → device: one LIST page (V4PayloadCatchupListReq)
+  ESPNOW_V4_TYPE_CATCHUP_LIST_RESP = 83,  // device → collector: header + self-sized entries
+  ESPNOW_V4_TYPE_CATCHUP_READ_REQ  = 84,  // collector → device: a window of one file (V4PayloadCatchupReadReq)
+  ESPNOW_V4_TYPE_CATCHUP_READ_RESP = 85,  // device → collector: 1-8 frames, header + data
+  // 86–89 free
 
   // --- Streaming (90–109) ---
   ESPNOW_V4_TYPE_STREAM          = 90,
@@ -1609,6 +1616,120 @@ static_assert(sizeof(V4PayloadHeartbeat::deviceName) == ESPNOW_V4_NAME_LEN &&
 static_assert(ESPNOW_V4_NAME_LEN == devicename::kFieldLen,
               "the wire name width is the device-name field (System_DeviceName.h)");
 
+// ---- File catch-up (CATCHUP_*, opcodes 82-85, 2026-11-19) --------------------
+//
+// A master or backup master named on a worker (by key) lists the files the
+// worker offers and reads byte ranges of them (docs/BACKCAPTURE_FILES.md;
+// System_ESPNow_CatchupCore.h packs and parses these bytes, never by a cast).
+// Single frames, session unicast, no ACK, ttl 1; correlation by reqId. The two
+// requests grow at their end (minLen never rises). The two answers carry
+// headerLen and a reader skips to it, so they grow too; LIST entries are
+// self-sized (entryLen) and the name sits at the header's entryFixed.
+struct __attribute__((packed)) V4PayloadCatchupListReq {
+  uint32_t reqId;          // nonzero
+  uint32_t fromFileId;     // list ids >= this, ascending; 0 starts a full run
+  uint16_t kindMask;       // bit (kind-1); 0 = all
+  uint8_t  link;           // 0 = own files; other values answer 16 no_link
+  uint8_t  maxEntries;     // 0 = as many as fit one frame
+  uint8_t  maxFrame;       // largest answer payload; 0 = the path cap (floor 64)
+  uint8_t  reserved[3];
+};
+static_assert(sizeof(V4PayloadCatchupListReq) == 16, "V4PayloadCatchupListReq layout");
+static_assert(offsetof(V4PayloadCatchupListReq, reqId) == 0 && offsetof(V4PayloadCatchupListReq, fromFileId) == 4 &&
+              offsetof(V4PayloadCatchupListReq, kindMask) == 8 && offsetof(V4PayloadCatchupListReq, link) == 10 &&
+              offsetof(V4PayloadCatchupListReq, maxEntries) == 11 && offsetof(V4PayloadCatchupListReq, maxFrame) == 12 &&
+              offsetof(V4PayloadCatchupListReq, reserved) == 13, "V4PayloadCatchupListReq layout");
+
+struct __attribute__((packed)) V4PayloadCatchupListRespHeader {
+  uint32_t reqId;
+  uint8_t  status;         // 0 ok, 1 busy (u16 retryAfterS at headerLen), 2, 3, 7, 16 no_link
+  uint8_t  link;           // echoed
+  uint8_t  entryCount;
+  uint8_t  headerLen;      // 24
+  uint32_t nextFileId;     // 0 = end of the list
+  uint32_t ledgerGen;      // stepped on add, rename, trim or remove
+  uint32_t ledgerId;       // random, new when the ledger is created
+  uint16_t bootTag;
+  uint8_t  flags;          // 0 a file is sealed, 1 files withheld, 2 older files beyond the horizon
+  uint8_t  entryFixed;     // 24: the name's offset in each entry
+};
+static_assert(sizeof(V4PayloadCatchupListRespHeader) == 24, "V4PayloadCatchupListRespHeader layout");
+static_assert(offsetof(V4PayloadCatchupListRespHeader, reqId) == 0 &&
+              offsetof(V4PayloadCatchupListRespHeader, status) == 4 &&
+              offsetof(V4PayloadCatchupListRespHeader, link) == 5 &&
+              offsetof(V4PayloadCatchupListRespHeader, entryCount) == 6 &&
+              offsetof(V4PayloadCatchupListRespHeader, headerLen) == 7 &&
+              offsetof(V4PayloadCatchupListRespHeader, nextFileId) == 8 &&
+              offsetof(V4PayloadCatchupListRespHeader, ledgerGen) == 12 &&
+              offsetof(V4PayloadCatchupListRespHeader, ledgerId) == 16 &&
+              offsetof(V4PayloadCatchupListRespHeader, bootTag) == 20 &&
+              offsetof(V4PayloadCatchupListRespHeader, flags) == 22 &&
+              offsetof(V4PayloadCatchupListRespHeader, entryFixed) == 23, "V4PayloadCatchupListRespHeader layout");
+
+struct __attribute__((packed)) V4PayloadCatchupReadReq {
+  uint32_t reqId;          // nonzero
+  uint32_t fileId;
+  uint32_t offset;         // logical
+  uint32_t maxBytes;       // 0 = to the end (capped at 8 frames, or 1 MiB for a digest)
+  uint8_t  link;           // as LIST
+  uint8_t  mode;           // 0 data, 1 digest
+  uint8_t  maxFrame;       // as LIST
+  uint8_t  flags;          // bit 0 storedBefore: every byte before offset is stored (Q8)
+  uint32_t ledgerId;       // must equal the device's, else 16 gone
+};
+static_assert(sizeof(V4PayloadCatchupReadReq) == 24, "V4PayloadCatchupReadReq layout");
+static_assert(offsetof(V4PayloadCatchupReadReq, reqId) == 0 && offsetof(V4PayloadCatchupReadReq, fileId) == 4 &&
+              offsetof(V4PayloadCatchupReadReq, offset) == 8 && offsetof(V4PayloadCatchupReadReq, maxBytes) == 12 &&
+              offsetof(V4PayloadCatchupReadReq, link) == 16 && offsetof(V4PayloadCatchupReadReq, mode) == 17 &&
+              offsetof(V4PayloadCatchupReadReq, maxFrame) == 18 && offsetof(V4PayloadCatchupReadReq, flags) == 19 &&
+              offsetof(V4PayloadCatchupReadReq, ledgerId) == 20, "V4PayloadCatchupReadReq layout");
+
+struct __attribute__((packed)) V4PayloadCatchupReadRespHeader {
+  uint32_t reqId;
+  uint8_t  status;         // 0 ok, 1-8 shared, 16 gone, 17 trimmed, 18 past_end
+  uint8_t  flags;          // 0 last, 1 atEnd, 2 digest, 3 growing, 4 sealed on send
+  uint8_t  link;           // echoed
+  uint8_t  headerLen;      // 20; data starts here
+  uint32_t fileId;
+  uint32_t offset;         // logical offset of the first plaintext byte
+  uint32_t end;            // the file's current logical end
+};
+static_assert(sizeof(V4PayloadCatchupReadRespHeader) == 20, "V4PayloadCatchupReadRespHeader layout");
+static_assert(offsetof(V4PayloadCatchupReadRespHeader, reqId) == 0 &&
+              offsetof(V4PayloadCatchupReadRespHeader, status) == 4 &&
+              offsetof(V4PayloadCatchupReadRespHeader, flags) == 5 &&
+              offsetof(V4PayloadCatchupReadRespHeader, link) == 6 &&
+              offsetof(V4PayloadCatchupReadRespHeader, headerLen) == 7 &&
+              offsetof(V4PayloadCatchupReadRespHeader, fileId) == 8 &&
+              offsetof(V4PayloadCatchupReadRespHeader, offset) == 12 &&
+              offsetof(V4PayloadCatchupReadRespHeader, end) == 16, "V4PayloadCatchupReadRespHeader layout");
+// The core reads and writes these offsets; its numbers are this file's.
+static_assert(espnowcatchup::kOpListReq == ESPNOW_V4_TYPE_CATCHUP_LIST_REQ &&
+              espnowcatchup::kOpListResp == ESPNOW_V4_TYPE_CATCHUP_LIST_RESP &&
+              espnowcatchup::kOpReadReq == ESPNOW_V4_TYPE_CATCHUP_READ_REQ &&
+              espnowcatchup::kOpReadResp == ESPNOW_V4_TYPE_CATCHUP_READ_RESP,
+              "System_ESPNow_CatchupCore.h names the CATCHUP opcodes of this file");
+static_assert(espnowcatchup::kListReqLen == sizeof(V4PayloadCatchupListReq) &&
+              espnowcatchup::kListRespHeaderLen == sizeof(V4PayloadCatchupListRespHeader) &&
+              espnowcatchup::kReadReqLen == sizeof(V4PayloadCatchupReadReq) &&
+              espnowcatchup::kReadRespHeaderLen == sizeof(V4PayloadCatchupReadRespHeader) &&
+              espnowcatchup::kEntryFixedLen == 24,
+              "System_ESPNow_CatchupCore.h sizes are this file's structs");
+static_assert(espnowcatchup::kStOk == espnowanswer::kOk && espnowcatchup::kStBusy == espnowanswer::kBusy &&
+              espnowcatchup::kStRefused == espnowanswer::kRefused &&
+              espnowcatchup::kStUnsupported == espnowanswer::kUnsupported &&
+              espnowcatchup::kStTooLarge == espnowanswer::kTooLarge &&
+              espnowcatchup::kStBadRequest == espnowanswer::kBadRequest &&
+              espnowcatchup::kStNotReady == espnowanswer::kNotReady &&
+              espnowcatchup::kStIoError == espnowanswer::kIoError &&
+              espnowcatchup::kStNoLink == espnowanswer::kCatchupNoLink &&
+              espnowcatchup::kStGone == espnowanswer::kCatchupGone &&
+              espnowcatchup::kStTrimmed == espnowanswer::kCatchupTrimmed &&
+              espnowcatchup::kStPastEnd == espnowanswer::kCatchupPastEnd,
+              "the CATCHUP status bytes are the shared table's (rule F3)");
+static_assert(espnowcatchup::kDirectPayload <= ESPNOW_V4_MAX_PLAINTEXT,
+              "a CATCHUP frame fits one SESSION_FRAME");
+
 // ---- Answer frames (rule F3) --------------------------------------------------
 // The opcodes System_ESPNow_AnswerCore.h names are these, and every answer
 // struct starts with the answer header {reqId u32 at 0, status u8 at 4}.
@@ -1619,7 +1740,9 @@ static_assert(espnowanswer::kOpTopoStart == ESPNOW_V4_TYPE_TOPO_START &&
               espnowanswer::kOpFsStatReply == ESPNOW_V4_TYPE_FS_STAT_REPLY &&
               espnowanswer::kOpFsGetAck == ESPNOW_V4_TYPE_FS_GET_ACK &&
               espnowanswer::kOpStream == ESPNOW_V4_TYPE_STREAM &&
-              espnowanswer::kOpFileCancel == ESPNOW_V4_TYPE_FILE_CANCEL,
+              espnowanswer::kOpFileCancel == ESPNOW_V4_TYPE_FILE_CANCEL &&
+              espnowanswer::kOpCatchupListResp == ESPNOW_V4_TYPE_CATCHUP_LIST_RESP &&
+              espnowanswer::kOpCatchupReadResp == ESPNOW_V4_TYPE_CATCHUP_READ_RESP,
               "System_ESPNow_AnswerCore.h names the answer opcodes of this file");
 #define ESPNOW_V4_ANSWER_HEADER_AT_START(T) \
   (offsetof(T, reqId) == offsetof(V4PayloadAnswerHeader, reqId) && \
@@ -1632,7 +1755,9 @@ static_assert(ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadTopoStart) &&
               ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFsListReplyHeader) &&
               ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFsStatReply) &&
               ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFsGetAck) &&
-              ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFileCancel),
+              ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFileCancel) &&
+              ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadCatchupListRespHeader) &&
+              ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadCatchupReadRespHeader),
               "every answer starts {u32 reqId, u8 status} (rule F3)");
 #undef ESPNOW_V4_ANSWER_HEADER_AT_START
 static_assert(FS_LIST_STATUS_OK == espnowanswer::kOk && FS_LIST_STATUS_NOT_FOUND == espnowanswer::kNotFound &&
@@ -1701,6 +1826,10 @@ static_assert(FILE_CANCEL_TIMEOUT == espnowanswer::kTimeout && FILE_CANCEL_WRITE
 #define ESPNOW_V4_MINLEN_FS_STAT_REPLY       164
 #define ESPNOW_V4_MINLEN_FS_GET_REQ          140
 #define ESPNOW_V4_MINLEN_FS_GET_ACK          140
+#define ESPNOW_V4_MINLEN_CATCHUP_LIST_REQ    16
+#define ESPNOW_V4_MINLEN_CATCHUP_LIST_RESP   24   // header; entries follow (self-sized)
+#define ESPNOW_V4_MINLEN_CATCHUP_READ_REQ    24
+#define ESPNOW_V4_MINLEN_CATCHUP_READ_RESP   20   // header; data follows
 #define ESPNOW_V4_MINLEN_BOND_HEARTBEAT      24
 #define ESPNOW_V4_MINLEN_BOND_STREAM_CTRL    4
 #define ESPNOW_V4_MINLEN_BOND_CAP_REQ        0    // senders send no payload
@@ -1758,6 +1887,10 @@ static_assert(sizeof(V4PayloadSessionUnknown) == ESPNOW_V4_MINLEN_SESSION_UNKNOW
               sizeof(V4PayloadFsStatReply) == ESPNOW_V4_MINLEN_FS_STAT_REPLY &&
               sizeof(V4PayloadFsGetReq) == ESPNOW_V4_MINLEN_FS_GET_REQ &&
               sizeof(V4PayloadFsGetAck) == ESPNOW_V4_MINLEN_FS_GET_ACK &&
+              sizeof(V4PayloadCatchupListReq) == ESPNOW_V4_MINLEN_CATCHUP_LIST_REQ &&
+              sizeof(V4PayloadCatchupListRespHeader) == ESPNOW_V4_MINLEN_CATCHUP_LIST_RESP &&
+              sizeof(V4PayloadCatchupReadReq) == ESPNOW_V4_MINLEN_CATCHUP_READ_REQ &&
+              sizeof(V4PayloadCatchupReadRespHeader) == ESPNOW_V4_MINLEN_CATCHUP_READ_RESP &&
               sizeof(CapabilitySummary) == ESPNOW_V4_MINLEN_BOND_CAP_RESP &&
               sizeof(V4PayloadSensorReading) + 1 == ESPNOW_V4_MINLEN_BOND_SENSOR_DATA &&
               sizeof(V4PayloadPowerStatus) == ESPNOW_V4_MINLEN_BOND_POWER_STATUS &&

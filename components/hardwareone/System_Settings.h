@@ -255,6 +255,14 @@ struct Settings {
       bondForwardToMesh(false),
       bondForwardSensors(0x07EF),
 #endif
+#if ENABLE_ESPNOW_SEND
+      catchupServe(true),
+#endif
+#if ENABLE_ESPNOW_COLLECT
+      collectEnabled(true),
+      collectRateFps(40),
+      collectQuotaMb(2048),
+#endif
       automationEnabled(true),   // unconditional — see the field declaration
       i2cEnabled(true),
       i2c2Enabled(I2C2_BUS_ENABLED_DEFAULT),  // auto-on for boards with valid I2C2 pins
@@ -885,6 +893,19 @@ struct Settings {
   // (bit i: sensor i; default every sensor but input).
   bool bondForwardToMesh;
   uint32_t bondForwardSensors;  // espnowsensor::SensorMask (32 bits)
+#endif
+#if ENABLE_ESPNOW_SEND
+  // File catch-up, device side: serve the whitelisted logs to the masters
+  // named on this device (espnowcatchupserve; System_ESPNow_Catchup.cpp).
+  bool catchupServe;
+#endif
+#if ENABLE_ESPNOW_COLLECT
+  // File catch-up, collector side (System_Collect.cpp): pull on its own
+  // (collect), the frame rate cap (collectrate, 5-100 frames/s) and the card
+  // space it may use under /sd/collect (collectquota, MB).
+  bool collectEnabled;
+  uint8_t collectRateFps;
+  uint16_t collectQuotaMb;
 #endif
   // ESP-NOW buffer size settings (runtime tuning)
   // NOTE: kept OUTSIDE the #if ENABLE_AUTOMATION block so the always-compiled
@@ -1641,6 +1662,8 @@ extern const SettingsModule cliSettingsModule;
 extern const SettingsModule wifiSettingsModule;
 extern const SettingsModule httpSettingsModule;
 extern const SettingsModule espnowSettingsModule;
+extern const SettingsModule catchupSettingsModule;
+extern const SettingsModule collectSettingsModule;
 extern const SettingsModule mqttSettingsModule;
 extern const SettingsModule automationSettingsModule;
 extern const SettingsModule powerSettingsModule;

@@ -47,6 +47,8 @@
 #include "System_ESPNow_PowerEvents.h" // POWER_STATUS, EVENT_PUSH: handlers, send tick, commands
 #include "System_ESPNow_ForwardRx.h"   // FORWARD_LINK: the mesh master's side of forwarding for a bond partner
 #include "System_ESPNow_BondForward.h" // the bond master's side: bondforward, the forward tick
+#include "System_ESPNow_Catchup.h"     // CATCHUP_LIST_REQ / READ_REQ: the device's file catch-up server
+#include "System_Collect.h"            // CATCHUP_LIST_RESP / READ_RESP: the collector's client
 #include "System_ESPNow_Identity.h"  // Phase 3.0: long-term Ed25519 identity load/store
 #include "System_ESPNow_MeshKeys.h"  // Phase 3.1: per-mesh PBKDF2 hash + bootstrap/group key cache
 #include "System_ESPNow_SessionCapsCore.h"  // the session capability word (bond gate, espnowsessions)
@@ -7026,6 +7028,12 @@ static bool v4_routed_type_allowed(uint8_t type) {
     case ESPNOW_V4_TYPE_POWER_STATUS:
     case ESPNOW_V4_TYPE_EVENT_PUSH:
     case ESPNOW_V4_TYPE_FORWARD_LINK:
+    // File catch-up: single frames (never fragmented), sealed end to end, so a
+    // named master one hop away can pull through a relay.
+    case ESPNOW_V4_TYPE_CATCHUP_LIST_REQ:
+    case ESPNOW_V4_TYPE_CATCHUP_LIST_RESP:
+    case ESPNOW_V4_TYPE_CATCHUP_READ_REQ:
+    case ESPNOW_V4_TYPE_CATCHUP_READ_RESP:
       return true;
     default:
       // Everything else is excluded for a reason worth stating once:
@@ -7889,6 +7897,14 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // session, no bond gate: the receiver is not the sender's bond partner, and
   // a mesh master built without bond mode still keeps forwarded data.
   { ESPNOW_V4_TYPE_FORWARD_LINK,     V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FORWARD_LINK, v4hForwardLink        },
+  // File catch-up (System_ESPNow_Catchup.cpp: the device's server; System_Collect.cpp:
+  // the collector). Paired + session, no bond gate: who may read is the reader
+  // rule (a master named on the device, by key), decided in the handler. A
+  // build without the side answers unsupported once (requests) or drops (answers).
+  { ESPNOW_V4_TYPE_CATCHUP_LIST_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_CATCHUP_LIST_REQ,  v4hCatchupListReq  },
+  { ESPNOW_V4_TYPE_CATCHUP_LIST_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_CATCHUP_LIST_RESP, v4hCatchupListResp },
+  { ESPNOW_V4_TYPE_CATCHUP_READ_REQ,  V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_CATCHUP_READ_REQ,  v4hCatchupReadReq  },
+  { ESPNOW_V4_TYPE_CATCHUP_READ_RESP, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_CATCHUP_READ_RESP, v4hCatchupReadResp },
   // Keep the topology opcodes compatible with the existing plaintext V4 wire
   // format. Their handlers enforce request IDs, deadlines, bounds and sender
   // stream ownership before accepting any data.
@@ -13792,6 +13808,13 @@ void processMeshHeartbeats() {
 #if ENABLE_BONDED_MODE
   bondForwardTick(now);
 #endif
+
+  // 9f2e. File catch-up, device side: send the next paced frame of a ready
+  // window (a build without ENABLE_ESPNOW_SEND has an empty tick).
+  catchupServeTick(now);
+  // 9f2f. File catch-up, collector side: the scheduler and the client, one
+  // request at a time (empty without ENABLE_ESPNOW_COLLECT).
+  collectTick(now);
 
   // 9f3. Mesh secure fetcher: deferred SENSOR_REQ — worker applies the leased
   // subscription off the RX critical path (startSensorDataStreaming creates a task).

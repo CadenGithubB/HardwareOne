@@ -941,6 +941,10 @@ namespace Scopes {
   constexpr const char* ESPSR           = "/ESPSR";
   constexpr const char* ESPSR_SD        = "/sd/ESPSR";
   constexpr const char* PICTURES_SD     = "/sd/PICTURES";
+  constexpr const char* TRANSCRIPTS     = "/stt";
+  constexpr const char* TRANSCRIPTS_SD  = "/sd/stt";
+  constexpr const char* CATCHUP_STATE   = "/system/catchup";
+  constexpr const char* COLLECT_SD      = "/sd/collect";
 }
 inline const char* captureScopeFor(const String& path) {
   return std::strncmp(path.c_str(), "/sd/", 4) == 0 ? Scopes::CAPTURES_SD : Scopes::CAPTURES;
@@ -959,6 +963,9 @@ inline const char* recordingScopeFor(const String& path) {
 }
 inline const char* sysLogScopeFor(const String& path) {
   return std::strncmp(path.c_str(), "/sd/", 4) == 0 ? Scopes::SYS_LOGS_SD : Scopes::SYS_LOGS;
+}
+inline const char* transcriptScopeFor(const String& path) {
+  return std::strncmp(path.c_str(), "/sd/", 4) == 0 ? Scopes::TRANSCRIPTS_SD : Scopes::TRANSCRIPTS;
 }
 inline bool pathInCaptureTree(const String& path) {
   const std::string p = path.c_str();

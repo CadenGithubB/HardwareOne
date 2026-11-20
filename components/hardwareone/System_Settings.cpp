@@ -3021,6 +3021,12 @@ void registerAllSettingsModules() {
 #if ENABLE_ESPNOW
   registerSettingsModule(&espnowSettingsModule);
 #endif
+#if ENABLE_ESPNOW_SEND
+  registerSettingsModule(&catchupSettingsModule);   // file catch-up, device side
+#endif
+#if ENABLE_ESPNOW_COLLECT
+  registerSettingsModule(&collectSettingsModule);   // file catch-up, collector side
+#endif
 #if ENABLE_MQTT
   registerSettingsModule(&mqttSettingsModule);
 #endif

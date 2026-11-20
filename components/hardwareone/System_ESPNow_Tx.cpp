@@ -639,6 +639,14 @@ void getStats(Stats* out) {
   taskEXIT_CRITICAL(&sStatsLock);
 }
 
+uint8_t queueDepth() {
+  QueueHandle_t queue = nullptr;
+  if (!claimRunningQueue(&queue)) return 0;
+  const UBaseType_t depth = uxQueueMessagesWaiting(queue);
+  releaseQueueClaim();
+  return depth > 255 ? 255 : (uint8_t)depth;
+}
+
 bool getTaskStackSnapshot(TaskHandle_t* outHandle, UBaseType_t* outWatermark) {
   if (!outHandle || !outWatermark || !sStopOwner ||
       xSemaphoreTake(sStopOwner, portMAX_DELAY) != pdTRUE) {

@@ -205,6 +205,23 @@ static std::string clockPrefix;
 static void getTimestampPrefixMsCached(char* out, size_t size) { std::snprintf(out, size, "%s", clockPrefix.c_str()); }
 static unsigned long millis() { return 123456; }
 
+#ifndef HAVE_CATCHUP_NOTES
+#define HAVE_CATCHUP_NOTES 0
+#endif
+// File catch-up hooks (System_CatchupLedger.h): recorded only. The production
+// hooks do no I/O, logging or allocation (test_catchup_ledger.py checks that).
+static std::vector<std::string> catchupNotes;
+[[maybe_unused]] static void catchupNoteTrim(const char* dest, size_t tailStart) {
+  check(lockDepth == 1, "the trim note is taken inside the writer's lock");
+  catchupNotes.push_back("trim:" + std::string(dest) + ":" + std::to_string(tailStart));
+  events.push_back("catchup:trim");
+}
+[[maybe_unused]] static void catchupNoteRestart(const char* dest) {
+  check(lockDepth == 1, "the restart note is taken inside the writer's lock");
+  catchupNotes.push_back("restart:" + std::string(dest));
+  events.push_back("catchup:restart");
+}
+
 // INSERT_PRODUCTION
 
 // INSERT_LOG_LINE
@@ -222,7 +239,7 @@ static void reset(bool onSd = false) {
   failAppendOpen = failReadOpen = failTempOpen = false;
   failAppendWrite = appendWrites = failCopyWrite = copyWrites = failCopyRead = copyReads = failScanRead = scanReads = 0;
   shortCount = bytesNoted = requestedSpace = maxRead = tempSizeOffset = inputSizeOffset = 0;
-  readLimit = 1024; refuseRemove.clear();
+  readLimit = 1024; refuseRemove.clear(); catchupNotes.clear();
 }
 static std::string rows(int begin, int end) {
   std::string out;
@@ -261,9 +278,12 @@ static void restartedRotation(const std::string& original, const char* line = "n
   check(disk.at(destination()).size() <= cap + std::strlen(line) + 2, "restarted log within cap plus one line");
   check(!disk.count(destination() + ".tmp"), "failed rotation temp removed");
   check(!seen("rename") && seen("serial"), "restart is reported and never promotes the incomplete copy");
+  if (HAVE_CATCHUP_NOTES)
+    check(catchupNotes == std::vector<std::string>{"restart:" + destination()}, "a restart leaves one restart note for its path");
 }
 static void normalCases(bool onSd) {
   reset(onSd); check(append("hello", 20), "ordinary append succeeds");
+  check(catchupNotes.empty(), "an append without rotation leaves no note");
   check(disk.at(destination()) == "hello\r\n" && bytesNoted == 7, "real Print appends CRLF and accounts seven bytes");
   check(!seen("flush:a") && !seen("open:r") && !seen("size:a"), "append fast path avoids extra flush/read/stat");
   normalResult("append", true);
@@ -272,6 +292,10 @@ static void normalCases(bool onSd) {
   reset(onSd); check(append("", 2), "empty line succeeds"); check(disk.at(destination()) == "\r\n", "empty line keeps CRLF"); normalResult("empty-line", true);
   reset(onSd); disk[destination()] = rows(0, 20); disk[destination() + ".tmp"] = "stale";
   check(append(), "rotation succeeds"); check(disk.at(destination()) == rows(11, 20) + "new\r\n", "85 percent target advances to next whole line");
+  if (HAVE_CATCHUP_NOTES) {
+    check(catchupNotes == std::vector<std::string>{"trim:" + destination() + ":88"}, "one trim note with the dropped byte count");
+    check(eventIndex("rename") < eventIndex("catchup:trim"), "the trim note follows the successful promotion");
+  }
   check(!disk.count(destination() + ".tmp") && maxRead <= 1024, "rotation promotes temp with bounded buffer");
   if (!BASELINE) { check(seen("flush:w"), "rotation flush checked before promotion"); check(eventIndex("flush:w") < eventIndex("rename"), "flush precedes promotion"); }
   normalResult("rotate", true);

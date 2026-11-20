@@ -32,17 +32,22 @@ int main() {
   // Values on the air: never renumbered.
   CHECK(kBond == 0x01 && kRemoteFs == 0x02 && kFileReceive == 0x04 && kSensorSend == 0x08);
   CHECK(kCollect == 0x10 && kRelayForward == 0x20 && kTimeMaster == 0x40 && kSessionUnknown == 0x80);
-  // Back-capture (1.0 earmark W5): bits 8 and 9 are named, never set by 1.0.
+  // Back-capture: bits 8 and 9 are named; bit 9 (files_serve) is set by an
+  // ENABLE_ESPNOW_SEND build since 2026-11-19, bit 8 is never set yet.
   CHECK(kBacklogServe == 0x100 && kFilesServe == 0x200);
-  CHECK(kKnownMask == 0x3FFu && kSentMask == 0xFFu);
+  CHECK(kKnownMask == 0x3FFu && kSentMask == (0xFFu | 0x200u));
   CHECK(kBitCount == 10);
   CHECK(is(bitName(0), "bond") && is(bitName(3), "sensor_send") && is(bitName(7), "session_unknown"));
   CHECK(is(bitName(8), "backlog_serve") && is(bitName(9), "files_serve"));
   CHECK(bitName(10) == nullptr);
 
   // buildCaps.
-  static_assert(buildCaps(true, true, true) == kSentMask, "every 1.0 bit");
+  static_assert(buildCaps(true, true, true, true) == kSentMask, "every bit this image may set");
+  static_assert(buildCaps(true, true, true) == 0xFFu, "filesServe defaults off");
   CHECK(!has(buildCaps(true, true, true), kBacklogServe) && !has(buildCaps(true, true, true), kFilesServe));
+  CHECK(has(buildCaps(false, false, false, true), kFilesServe));
+  CHECK(!has(buildCaps(true, true, true, true), kBacklogServe));   // bit 8 is never set
+  CHECK(has(buildCaps(false, false, true), kCollect));
   CHECK(!has(buildCaps(false, true, false), kBond));
   CHECK(has(buildCaps(true, false, false), kBond));
   CHECK(!has(buildCaps(true, false, false), kSensorSend));
@@ -51,7 +56,7 @@ int main() {
   const uint32_t always = kRemoteFs | kFileReceive | kRelayForward | kTimeMaster | kSessionUnknown;
   CHECK((buildCaps(false, false, false) & always) == always);
   CHECK(buildCaps(false, false, false) == always);
-  CHECK((buildCaps(true, true, true) & ~kSentMask) == 0);   // reserved and earmarked bits are sent 0
+  CHECK((buildCaps(true, true, true, true) & ~kSentMask) == 0);   // reserved and earmarked bits are sent 0
 
   // capsText.
   char buf[128];
@@ -66,7 +71,8 @@ int main() {
   n = capsText(0x400u, buf, sizeof buf);
   CHECK(is(buf, "+0x400"));
   n = capsText(kSentMask, buf, sizeof buf);
-  CHECK(is(buf, "bond,remote_fs,file_receive,sensor_send,collect,relay_forward,time_master,session_unknown"));
+  CHECK(is(buf, "bond,remote_fs,file_receive,sensor_send,collect,relay_forward,time_master,session_unknown,"
+                "files_serve"));
   const size_t full = n;
   char small[8];
   std::memset(small, 'X', sizeof small);

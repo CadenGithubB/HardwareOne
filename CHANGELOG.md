@@ -14,6 +14,23 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Added
+- File catch-up over ESP-NOW (back-capture packages 4 and 5; docs/BACKCAPTURE_FILES.md). A device
+  built with `ENABLE_ESPNOW_SEND` (on in `configurations/p4-portable.json`) offers its logs to the
+  masters named on it, by key: sensor captures, `events.log`, `battery.csv`, health files sealed at
+  rest, `errors.log`, `crash-history.log`, the system log and saved transcripts (at most 32 files).
+  The system log, transcripts, `events.log` and any sensor capture that is not a plain sensor CSV
+  are sealed on send with the capture key; unsealed health is withheld; login logs, the command
+  audit, QuickNotes and keys are never offered. A file keeps its id across rotation, trims and a
+  card taken out (`/system/catchup/ledger.json`). A hub built with `ENABLE_ESPNOW_COLLECT` (on in
+  `configurations/p4-home-node.json`) pulls them onto its card under `/sd/collect/<mac12>/files/`
+  (index.json in UTC, segments named from ids) when the device's session comes back, every 15
+  minutes and on `collectnow`, only with a writable card and a set clock; a backup master pulls as
+  the master does, and a byte counts as delivered once one named master stored it (the other skips
+  it and shows it as at the other master). New commands: `espnowcatchup`, `espnowcatchupserve`
+  (device); `collectstatus`, `collectnow`, `collect`, `collectrate`, `collectquota` (hub); all
+  admin. New ESP-NOW frames CATCHUP_LIST_REQ/RESP and CATCHUP_READ_REQ/RESP (opcodes 82-85,
+  docs/COMPATIBILITY.md); a SEND build sets the session capability `files_serve`, a COLLECT build
+  `collect`. Host-tested; not yet run on hardware.
 - ESP-NOW session capabilities (1.0 wire format): each side of a session handshake states what its
   firmware build can do in a 32-bit word inside the signed SESSION_OPEN and SESSION_CONFIRM, which grow
   to 130 and 146 bytes: bond mode, remote file access, file receive, sensor sending, collector,

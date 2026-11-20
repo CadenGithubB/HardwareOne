@@ -204,6 +204,69 @@ bool captureCryptoPseudonym(const char* domain, const char* value,
   return true;
 }
 
+int captureCryptoSealChunk(const uint8_t* aad, size_t aadLen, const uint8_t* in, size_t inLen,
+                           uint8_t* out, size_t outCap) {
+  if (!out || (!in && inLen) || (!aad && aadLen)) return -1;
+  if (inLen > (size_t)INT_MAX - CAPCRYPT_CHUNK_OVERHEAD) return -1;
+  const size_t total = inLen + CAPCRYPT_CHUNK_OVERHEAD;
+  if (outCap < total) return -1;
+  // The ciphertext lands at out + 12; an input inside [out, out + total)
+  // would be overwritten before it is read.
+  const uintptr_t inAt = (uintptr_t)in, outAt = (uintptr_t)out;
+  if (inLen && inAt < outAt + total && outAt < inAt + inLen) return -1;
+  if (!captureCryptoEnsureKey()) return -1;
+  ScratchGuard lock;   // the key is read under the module's one mutex
+  unsigned char* nonce = (unsigned char*)out;
+  unsigned char* ct    = nonce + kNonceLen;
+  unsigned char* tag   = ct + inLen;
+  randombytes_buf(nonce, kNonceLen);
+  unsigned long long tagLen = 0;
+  if (crypto_aead_chacha20poly1305_ietf_encrypt_detached(
+          ct, tag, &tagLen, (const unsigned char*)in, inLen,
+          (const unsigned char*)aad, aadLen, nullptr, nonce, sKey) != 0 ||
+      tagLen != kTagLen) {
+    sodium_memzero(out, total);
+    return -1;
+  }
+  return (int)total;
+}
+
+int captureCryptoOpenChunk(const uint8_t* aad, size_t aadLen, const uint8_t* in, size_t inLen,
+                           uint8_t* out, size_t outCap) {
+  if (!in || !out || (!aad && aadLen) || inLen < CAPCRYPT_CHUNK_OVERHEAD) return -1;
+  const size_t plainLen = inLen - CAPCRYPT_CHUNK_OVERHEAD;
+  if (plainLen > (size_t)INT_MAX || outCap < plainLen) return -1;
+  if (!captureCryptoEnsureKey()) return -1;
+  ScratchGuard lock;
+  const unsigned char* nonce = (const unsigned char*)in;
+  const unsigned char* ct    = nonce + kNonceLen;
+  const unsigned char* tag   = ct + plainLen;
+  if (crypto_aead_chacha20poly1305_ietf_decrypt_detached(
+          (unsigned char*)out, nullptr, ct, plainLen, tag,
+          (const unsigned char*)aad, aadLen, nonce, sKey) != 0) {
+    sodium_memzero(out, plainLen);
+    return -1;
+  }
+  return (int)plainLen;
+}
+
+bool captureCryptoKeyId(uint8_t out[8]) {
+  if (!out) return false;
+  char hex[33];
+  if (!captureCryptoPseudonym("hw1-capture-key-id-v1", "k1", hex, sizeof(hex))) return false;
+  for (int i = 0; i < 8; ++i) {
+    uint8_t v = 0;
+    for (int h = 0; h < 2; ++h) {
+      const char c = hex[2 * i + h];
+      const int d = (c >= '0' && c <= '9') ? c - '0' : (c >= 'a' && c <= 'f') ? c - 'a' + 10 : -1;
+      if (d < 0) return false;
+      v = (uint8_t)((v << 4) | d);
+    }
+    out[i] = v;
+  }
+  return true;
+}
+
 int captureCryptoSealLine(const char* in, size_t inLen, char* out, size_t outCap) {
   if (!in || !out) return -1;
   if (inLen > CAPCRYPT_MAX_ROW) return -1;

@@ -81,6 +81,10 @@
      "summary": "Direct links to other Hardware One devices: pairing, messages and file transfer.", "needs": ["CUSTOM_ENABLE_NET_WIFI"]},
     {"switch": "ENABLE_BONDED_MODE", "group": "network", "title": "Bonded pair",
      "summary": "Two devices paired over ESP-NOW, one showing the other's features.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_ESPNOW"]},
+    {"switch": "ENABLE_ESPNOW_SEND", "group": "network", "title": "File catch-up: serve logs to the home hub",
+     "summary": "A worker offers its logs, health files, system log and transcripts to the masters named on it, which pull them over ESP-NOW when it is back in range.", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_ESPNOW"]},
+    {"switch": "ENABLE_ESPNOW_COLLECT", "group": "network", "title": "File catch-up: collect logs onto this hub's card",
+     "summary": "A mesh master pulls the files its workers offer onto its microSD card (needs a card).", "needs": ["CUSTOM_ENABLE_NET_WIFI", "CUSTOM_ENABLE_NET_ESPNOW"]},
     {"switch": "ENABLE_MQTT", "group": "network", "title": "MQTT (Home Assistant)",
      "summary": "Publishes to an MQTT broker for Home Assistant.", "needs": ["CUSTOM_ENABLE_NET_WIFI"]},
 

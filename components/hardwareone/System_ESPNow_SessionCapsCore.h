@@ -15,10 +15,11 @@
 //     can keep it, and the glare re-send of an OPEN signs the same value.
 //   * No negotiation: each side only reads the other's word. Frames sent
 //     without a session (handshake, group-signed, plaintext) never depend on it.
-//   * Bits 8 and 9 are named for back-capture (built in 1.x) and never set by
-//     a 1.0 image: backlog_serve (serves its outbox, BACKLOG_* 156-158) and
-//     files_serve (serves file catch-up, CATCHUP_* 82-85). The puller is the
-//     existing kCollect. A 1.0 image shows them by name when a peer sets them.
+//   * Bits 8 and 9 are named for back-capture: backlog_serve (serves its
+//     outbox, BACKLOG_* 156-158; never set until that package is built) and
+//     files_serve (serves file catch-up, CATCHUP_* 82-85; set by an
+//     ENABLE_ESPNOW_SEND build since 2026-11-19). The puller is kCollect, set
+//     by an ENABLE_ESPNOW_COLLECT build. Both sides show them by name.
 //   * Bits 10-31 are reserved: sent 0, ignored on receipt, kept as received and
 //     shown as "+0x..." so a later firmware's bits stay visible.
 //   * "Known" caps exist only for an ACTIVE or REKEYING session. The responder
@@ -44,15 +45,15 @@ constexpr uint32_t kBond           = 1u << 0;  // built with bond mode (ENABLE_B
 constexpr uint32_t kRemoteFs       = 1u << 1;  // answers FS_LIST / FS_STAT / FS_GET
 constexpr uint32_t kFileReceive    = 1u << 2;  // accepts FILE_START .. FILE_END
 constexpr uint32_t kSensorSend     = 1u << 3;  // built with at least one sensor whose readings it can send
-constexpr uint32_t kCollect        = 1u << 4;  // a collector build (0 until that build toggle exists)
+constexpr uint32_t kCollect        = 1u << 4;  // a collector build (ENABLE_ESPNOW_COLLECT)
 constexpr uint32_t kRelayForward   = 1u << 5;  // can forward routed and flooded frames
 constexpr uint32_t kTimeMaster     = 1u << 6;  // can send TIME_SYNC
 constexpr uint32_t kSessionUnknown = 1u << 7;  // understands SESSION_UNKNOWN (opcode 18); informational:
                                                // the sender of SESSION_UNKNOWN holds no session to read it from
-constexpr uint32_t kBacklogServe   = 1u << 8;  // serves its outbox (BACKLOG_*); named, never set by 1.0
-constexpr uint32_t kFilesServe     = 1u << 9;  // serves file catch-up (CATCHUP_*); named, never set by 1.0
+constexpr uint32_t kBacklogServe   = 1u << 8;  // serves its outbox (BACKLOG_*); named, not set yet
+constexpr uint32_t kFilesServe     = 1u << 9;  // serves file catch-up (CATCHUP_*): an ENABLE_ESPNOW_SEND build
 constexpr uint32_t kKnownMask      = 0x3FFu;   // the named bits
-constexpr uint32_t kSentMask       = 0xFFu;    // the bits a 1.0 image may set (buildCaps)
+constexpr uint32_t kSentMask       = 0xFFu | kFilesServe;  // the bits this image may set (buildCaps)
 
 constexpr unsigned kBitCount = 10;  // named bits, from bit 0
 
@@ -66,12 +67,13 @@ inline const char* bitName(unsigned bit) {
   return bit < kBitCount ? kNames[bit] : nullptr;
 }
 
-// This image's word. The bits every 1.0 image has are always set; the three
-// build-dependent ones come from the caller. Never kBacklogServe or
-// kFilesServe (nothing serves them at 1.0).
-constexpr uint32_t buildCaps(bool bond, bool sensors, bool collect) {
+// This image's word. The bits every 1.0 image has are always set; the four
+// build-dependent ones come from the caller. Never kBacklogServe (its outbox
+// is not built yet).
+constexpr uint32_t buildCaps(bool bond, bool sensors, bool collect, bool filesServe = false) {
   return (bond ? kBond : 0u) | kRemoteFs | kFileReceive | (sensors ? kSensorSend : 0u) |
-         (collect ? kCollect : 0u) | kRelayForward | kTimeMaster | kSessionUnknown;
+         (collect ? kCollect : 0u) | kRelayForward | kTimeMaster | kSessionUnknown |
+         (filesServe ? kFilesServe : 0u);
 }
 
 inline bool has(uint32_t caps, uint32_t bit) { return (caps & bit) != 0; }

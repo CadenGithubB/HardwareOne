@@ -62,6 +62,34 @@ bool captureCryptoEnsureKey();
 bool captureCryptoPseudonym(const char* domain, const char* value,
                             char* outHex, size_t outCap);
 
+// ---- File catch-up: sealing on send (System_ESPNow_Catchup) -----------------
+// The system log, saved transcripts and some sensor captures are plain at rest
+// but leave the device sealed with this same key (owner decisions Q10/Q11,
+// 2026-11-19). One chunk is one ESP-NOW frame's data:
+//
+//   out = nonce12 || ct[inLen] || tag16      (inLen + CAPCRYPT_CHUNK_OVERHEAD)
+//
+// ChaCha20-Poly1305-IETF with a random nonce (never derived from the offset)
+// and the caller's additional data (espnowcatchup::buildSealAad binds the
+// ledger, file and logical offset). Binary, no base64, no scratch: `in` and
+// `out` are the caller's (PSRAM) buffers and must not overlap. Returns the
+// bytes written, or -1 on a key failure, bad arguments or a small buffer.
+// Callers fail CLOSED: a -1 never falls back to sending plaintext.
+#define CAPCRYPT_CHUNK_OVERHEAD 28
+int captureCryptoSealChunk(const uint8_t* aad, size_t aadLen, const uint8_t* in, size_t inLen,
+                           uint8_t* out, size_t outCap);
+// Opens one chunk sealed above (host tests, a later reveal tool): plaintext
+// length, or -1 on a short input, a small buffer, a key failure or a tag
+// mismatch (wrong AAD, wrong key, damaged bytes). `out` is zeroed on failure.
+int captureCryptoOpenChunk(const uint8_t* aad, size_t aadLen, const uint8_t* in, size_t inLen,
+                           uint8_t* out, size_t outCap);
+// The key's public id: the first 8 bytes of
+// captureCryptoPseudonym("hw1-capture-key-id-v1", "k1"). It tells which key
+// sealed something, never the key itself (a keyed one-way hash). Shown by
+// espnowcatchup; the health key share (package 7) carries it. False on a key
+// failure. Mints the key on first use, like every other sealing call.
+bool captureCryptoKeyId(uint8_t out[8]);
+
 // Seal one row (no trailing newline in/out). Returns bytes written to out
 // (NUL-terminated), or -1 on key failure / oversize row / small buffer.
 int captureCryptoSealLine(const char* in, size_t inLen, char* out, size_t outCap);

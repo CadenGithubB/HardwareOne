@@ -6,6 +6,8 @@
     "versions|versionsCommands|0|-",
     "wifi|wifiCommands|0|-",
     "espnow|espNowCommands|0|-",
+    "catchup|catchupCommands|0|-",
+    "collect|collectCommands|0|-",
     "c6|companionCommands|0|radio",
     "mqtt|mqttCommands|0|-",
     "bluetooth|bluetoothCommands|0|-",
@@ -68,11 +70,12 @@
       "enabled": [
         "ENABLE_WIFI",
         "ENABLE_ESPNOW",
+        "ENABLE_ESPNOW_SEND",
         "ENABLE_MQTT",
         "ENABLE_BLUETOOTH",
         "HW1_RADIO_COMPANION"
       ],
-      "modules": "cli system versions wifi espnow c6 mqtt bluetooth phone relay filesystem oled debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
+      "modules": "cli system versions wifi espnow catchup c6 mqtt bluetooth phone relay filesystem oled debug settings sensorlog users features power liveaudio cm5 ota settingsedit"
     },
     "gamepad_peripherals": {
       "enabled": [
@@ -137,6 +140,7 @@
         "ENABLE_DICTATION",
         "ENABLE_EDGE_IMPULSE",
         "ENABLE_ESPNOW",
+        "ENABLE_ESPNOW_COLLECT",
         "ENABLE_ESP_SR",
         "ENABLE_FM_RADIO",
         "ENABLE_G2_GLASSES",
@@ -164,7 +168,7 @@
         "ENABLE_WIFI",
         "HW1_RADIO_COMPANION"
       ],
-      "modules": "cli system versions wifi espnow c6 mqtt bluetooth phone relay filesystem sd oled neopixel led matrix servo thermal tof imu input gamepad apds gps fmradio rtc presence camera microphone edgeimpulse transcription note stt espsr i2c automation battery debug settings sensorlog health users features image map mapsettings power liveaudio cm5 ota setpattern even_g2 ring llm settingsedit"
+      "modules": "cli system versions wifi espnow collect c6 mqtt bluetooth phone relay filesystem sd oled neopixel led matrix servo thermal tof imu input gamepad apds gps fmradio rtc presence camera microphone edgeimpulse transcription note stt espsr i2c automation battery debug settings sensorlog health users features image map mapsettings power liveaudio cm5 ota setpattern even_g2 ring llm settingsedit"
     },
     "speaker": {
       "enabled": [

@@ -18,9 +18,10 @@
 // could mark the answerer's own unrelated send as delivered; a FILE_CANCEL
 // could be dropped as a duplicate of the canceller's own frame).
 //
-// Answer frames in 1.0: TOPO_START (33), TOPO_PEER (34), CMD_RESP (51),
-// FS_LIST_REPLY (71), FS_STAT_REPLY (73), FS_GET_ACK (75), STREAM (90) and
-// FILE_CANCEL (115). The shared code 1 (busy) lets a later firmware answer
+// Answer frames: TOPO_START (33), TOPO_PEER (34), CMD_RESP (51),
+// FS_LIST_REPLY (71), FS_STAT_REPLY (73), FS_GET_ACK (75), STREAM (90),
+// FILE_CANCEL (115), and since 2026-11-19 CATCHUP_LIST_RESP (83) and
+// CATCHUP_READ_RESP (85) (file catch-up, System_ESPNow_CatchupCore.h). The shared code 1 (busy) lets a later firmware answer
 // "not now" in any answer, which is the NACK shape (opcode 2 stays reserved).
 //
 // A receiver that meets a status it does not know treats it as "not ok" and
@@ -60,6 +61,10 @@ constexpr uint8_t kCmdFailed        = 16;  // CMD_RESP: the command ran and repo
 constexpr uint8_t kFsNotADir        = 16;  // FS_*: the path is a file, a directory was asked for
 constexpr uint8_t kFileIncomplete   = 16;  // FILE_CANCEL: FILE_END came with chunks missing
 constexpr uint8_t kFileCrcMismatch  = 17;  // FILE_CANCEL: every chunk came; the file's CRC32 did not match
+constexpr uint8_t kCatchupNoLink    = 16;  // CATCHUP_LIST_RESP: link != 0 (the bond proxy is not built)
+constexpr uint8_t kCatchupGone      = 16;  // CATCHUP_READ_RESP: no such file id, other ledger, or the file is gone
+constexpr uint8_t kCatchupTrimmed   = 17;  // CATCHUP_READ_RESP: the offset was trimmed off; offset = the new start
+constexpr uint8_t kCatchupPastEnd   = 18;  // CATCHUP_READ_RESP: the offset is past the file's end
 
 // The answer opcodes (System_ESPNow_Wire.h asserts that these are its numbers).
 constexpr uint8_t kOpTopoStart   = 33;
@@ -70,11 +75,14 @@ constexpr uint8_t kOpFsStatReply = 73;
 constexpr uint8_t kOpFsGetAck    = 75;
 constexpr uint8_t kOpStream      = 90;
 constexpr uint8_t kOpFileCancel  = 115;
+constexpr uint8_t kOpCatchupListResp = 83;
+constexpr uint8_t kOpCatchupReadResp = 85;
 
 inline bool isAnswerOpcode(uint8_t opcode) {
   switch (opcode) {
     case kOpTopoStart: case kOpTopoPeer: case kOpCmdResp: case kOpFsListReply:
     case kOpFsStatReply: case kOpFsGetAck: case kOpStream: case kOpFileCancel:
+    case kOpCatchupListResp: case kOpCatchupReadResp:
       return true;
     default:
       return false;
@@ -110,6 +118,11 @@ inline const char* statusName(uint8_t opcode, uint8_t status) {
       return status == kFsNotADir ? "not_a_dir" : nullptr;
     case kOpFileCancel:
       return status == kFileIncomplete ? "incomplete" : status == kFileCrcMismatch ? "crc_mismatch" : nullptr;
+    case kOpCatchupListResp:
+      return status == kCatchupNoLink ? "no_link" : nullptr;
+    case kOpCatchupReadResp:
+      return status == kCatchupGone ? "gone" : status == kCatchupTrimmed ? "trimmed"
+           : status == kCatchupPastEnd ? "past_end" : nullptr;
     default:
       return nullptr;
   }

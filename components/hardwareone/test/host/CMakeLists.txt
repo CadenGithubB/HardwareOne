@@ -338,6 +338,29 @@ target_include_directories(espnow_answer_core_tests PRIVATE ../..)
 target_compile_options(espnow_answer_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# File catch-up (System_ESPNow_CatchupCore.h, the production dependency-free
+# header shared by the device and the collector): the CATCHUP_* frames 82-85
+# byte by byte, who may read, the kind whitelist and sealing rule, the ledger
+# (stable file ids across rotation, trims, restarts and a missing card), LIST
+# pages and READ checks, windows, the digest range, the serve pacer, the
+# sealing AAD, the on-card sealed record and the collector's names.
+add_executable(espnow_catchup_core_tests test_espnow_catchup_core.cpp)
+set_target_properties(espnow_catchup_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_catchup_core_tests PRIVATE ../..)
+target_compile_options(espnow_catchup_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
+# File catch-up, the collector's pure rules (System_CollectCore.h): plans from
+# a listing (gaps, elsewhere, full), the window assembler, read statuses, the
+# scheduler and its pacing, progress, range merges and the size cap.
+add_executable(collect_core_tests test_collect_core.cpp)
+set_target_properties(collect_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(collect_core_tests PRIVATE ../..)
+target_compile_options(collect_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # Projection and pan math shared by MapCore::renderMap and the G2 map page.
 # The production header is dependency-light so geometry can be verified here
 # without Arduino, ESP-IDF, filesystem, or BLE mocks.
@@ -581,6 +604,14 @@ if(HW1_SANITIZE)
   target_compile_options(espnow_answer_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(espnow_answer_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(espnow_catchup_core_tests PRIVATE
+    -fsanitize=address,undefined -fno-sanitize-recover=undefined -g)
+  target_link_options(espnow_catchup_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(collect_core_tests PRIVATE
+    -fsanitize=address,undefined -fno-sanitize-recover=undefined -g)
+  target_link_options(collect_core_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(espnow_session_caps_core_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -1567,6 +1598,8 @@ add_test(NAME espnow_sensor_core_tests COMMAND espnow_sensor_core_tests)
 add_test(NAME espnow_session_caps_core_tests COMMAND espnow_session_caps_core_tests)
 add_test(NAME espnow_time_core_tests COMMAND espnow_time_core_tests)
 add_test(NAME espnow_answer_core_tests COMMAND espnow_answer_core_tests)
+add_test(NAME espnow_catchup_core_tests COMMAND espnow_catchup_core_tests)
+add_test(NAME collect_core_tests COMMAND collect_core_tests)
 add_test(NAME espnow_power_event_core_tests COMMAND espnow_power_event_core_tests)
 add_test(NAME espnow_forward_core_tests COMMAND espnow_forward_core_tests)
 add_test(NAME map_viewport_core_tests COMMAND map_viewport_core_tests)
@@ -1924,7 +1957,8 @@ foreach(test_name IN ITEMS fileread_psram g2_files_psram filesystem_psram_listin
                            image_storage image_writes capture_stitching capped_log_writes
                            log_row_writes log_overflow_latch r1_history_store mic_wav_completion mic_wav_repair
                            g2_mic_wav_checkpoint
-                           boot_temp_cleanup filedelete_storage_figure)
+                           boot_temp_cleanup filedelete_storage_figure
+                           catchup_ledger espnow_catchup_serve collect_store)
   add_test(
     NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE}

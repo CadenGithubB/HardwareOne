@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1039 commands across 57 modules (1039 registry entries).
+1046 commands across 59 modules (1046 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -17,6 +17,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`versions`](#versions) — 1 commands
 - [`wifi`](#wifi) — 21 commands
 - [`espnow`](#espnow) — 128 commands
+- [`catchup`](#catchup) — 2 commands
+- [`collect`](#collect) — 5 commands
 - [`c6`](#c6) — 10 commands
 - [`mqtt`](#mqtt) — 27 commands
 - [`bluetooth`](#bluetooth) — 22 commands
@@ -286,6 +288,27 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `testconcurrent` | A | Test concurrent topology streams (simulated). |
 | `testfilelock` |  | Test file transfer lock acquire/release. |
 | `teststreams` | A | Test topology stream management functions. |
+
+## catchup
+
+> A worker that names a master (espnowmasterfingerprint, and the backup) offers its whitelisted files to them over ESP-NOW: sensor captures, events.log, battery.csv, health files sealed at rest, errors and crash history, and the system log and saved transcripts sealed on send with the capture key. Login logs, the command audit, QuickNotes and keys are never offered. The masters pull on their own when the device is back in range; a file counts as delivered once one of them has it. espnowcatchup lists the offered files and what was taken; espnowcatchupserve turns serving off.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `espnowcatchup` | A | Files this device offers its named masters, and what they took [json] [from <n>]<br/>`Usage: espnowcatchup [json] [from <n>]` |
+| `espnowcatchupserve` | A | Serve file catch-up to the named masters [on\|off]<br/>`Usage: espnowcatchupserve [on\|off]` |
+
+## collect
+
+> A mesh master or backup master built as a collector pulls the files each device that names it offers (file catch-up) onto its SD card under /sd/collect/<mac>/files/, when the device's session comes back, every 15 minutes and on collectnow. It needs a writable card and a set clock. collectstatus shows each device and its files, collectnow starts a pull, collect on|off stops or starts pulling, collectrate and collectquota set the frame rate and the card space per device.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `collect` | A | Pull files from the devices that name this hub (shows why not with no argument). |
+| `collectnow` | A | Pull a device's files now (full: also what the other master has). |
+| `collectquota` | A | Card quota per device in MB (64-65535). |
+| `collectrate` | A | Frames per second the collector asks for (5-100). |
+| `collectstatus` | A | File catch-up: what this hub pulled from each device that names it. |
 
 ## c6
 

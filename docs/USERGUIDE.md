@@ -788,6 +788,38 @@ What was accepted is stored on this device and survives a restart. It is cleared
 ### File Transfer
 Files can be transferred between paired devices via the web UI or CLI (`espnowsendfile <name_or_mac> "<filepath>"`). Used for syncing automations, settings, and manifests.
 
+### File catch-up (device)
+A build with `ENABLE_ESPNOW_SEND` (the portable) offers its logs to the masters named on it
+(`espnowmasterfingerprint`, `espnowbackupfingerprint`), which pull them over ESP-NOW when the device
+is back in range: sensor captures, `events.log`, `battery.csv`, health files sealed at rest,
+`errors.log` and `crash-history.log`, the system log and saved transcripts, at most 32 files. The
+system log, transcripts, `events.log` and any sensor capture that is not a plain sensor CSV (GPS
+columns, TEXT or TRACK captures) are sealed on send with the capture key; health files go only when
+sealed at rest. Nothing else is offered (no login logs, command audit, QuickNotes, keys). Only a
+named master whose firmware collects may read, by its key; no password travels. A byte counts as
+delivered once one named master stored it.
+```
+espnowcatchup [json] [from <n>]   - The files offered, how far a master took each, the last request (admin)
+espnowcatchupserve [on|off]       - Serve file catch-up to the named masters (default on) (admin)
+```
+Details: `docs/BACKCAPTURE_FILES.md`.
+
+### Collector
+A mesh master or backup master built with `ENABLE_ESPNOW_COLLECT` (the home node) pulls the files of
+each device that names it onto its SD card under `/sd/collect/<mac12>/files/` (an `index.json` in
+UTC and segment files named from ids), when the device's session comes back, every 15 minutes,
+after it starts or a card is put in, and on `collectnow`. It pulls only with a writable card and a
+set clock, one device at a time, and keeps live traffic first. What the other master already has
+is skipped and shown as "at the other master"; bytes the device dropped before they were fetched are
+shown as gaps with their reason.
+```
+collectstatus [json] [<device>] [from <n>]  - Each device: fetching, up to date, waiting and why; one device: its files (admin)
+collectnow <device> [full]        - Pull a device now; full also fetches what the other master has (admin)
+collect [on|off]                  - Pull on its own (default on); no argument shows why it is not pulling (admin)
+collectrate [<5..100>]            - Frames per second the hub asks for (default 40) (admin)
+collectquota [<64..65535>]        - Card space per device in MB (default 2048) (admin)
+```
+
 ---
 
 ## Automations

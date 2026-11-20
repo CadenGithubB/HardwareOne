@@ -77,7 +77,8 @@ static void one_name_table() {
   const char* shared[] = {"ok", "busy", "refused", "unsupported", "too_large", "no_slot",
                           "bad_request", "not_ready", "io_error", "not_found", "timeout", "cancelled"};
   const uint8_t answers[] = {kOpTopoStart, kOpTopoPeer, kOpCmdResp, kOpFsListReply,
-                             kOpFsStatReply, kOpFsGetAck, kOpStream, kOpFileCancel};
+                             kOpFsStatReply, kOpFsGetAck, kOpStream, kOpFileCancel,
+                             kOpCatchupListResp, kOpCatchupReadResp};
   for (uint8_t st = 0; st < 12; ++st) {
     CHECK(is(sharedStatusName(st), shared[st]));
     // The same word in every answer.
@@ -102,6 +103,14 @@ static void one_name_table() {
   CHECK(statusName(kOpTopoPeer, 16) == nullptr);
   CHECK(statusName(kOpFileCancel, 18) == nullptr);
   CHECK(statusName(kOpCmdResp, 255) == nullptr);
+  // File catch-up (2026-11-19).
+  CHECK(is(statusName(kOpCatchupListResp, kCatchupNoLink), "no_link"));
+  CHECK(statusName(kOpCatchupListResp, 17) == nullptr);
+  CHECK(is(statusName(kOpCatchupReadResp, kCatchupGone), "gone"));
+  CHECK(is(statusName(kOpCatchupReadResp, kCatchupTrimmed), "trimmed"));
+  CHECK(is(statusName(kOpCatchupReadResp, kCatchupPastEnd), "past_end"));
+  CHECK(statusName(kOpCatchupReadResp, 19) == nullptr);
+  CHECK(kCatchupNoLink == 16 && kCatchupGone == 16 && kCatchupTrimmed == 17 && kCatchupPastEnd == 18);
   // A frame code is never read as another frame's: 16 differs by frame.
   CHECK(!is(statusName(kOpCmdResp, 16), statusName(kOpFileCancel, 16)));
 }
@@ -111,7 +120,8 @@ static void answer_opcodes() {
   for (unsigned op = 0; op < 256; ++op) {
     if (isAnswerOpcode((uint8_t)op)) ++count;
   }
-  CHECK(count == 8);
+  CHECK(count == 10);
+  CHECK(kOpCatchupListResp == 83 && kOpCatchupReadResp == 85 && !isAnswerOpcode(82) && !isAnswerOpcode(84));
   CHECK(kOpTopoStart == 33 && kOpTopoPeer == 34 && kOpCmdResp == 51 && kOpFsListReply == 71 &&
         kOpFsStatReply == 73 && kOpFsGetAck == 75 && kOpStream == 90 && kOpFileCancel == 115);
   // Requests are not answers.

@@ -236,6 +236,10 @@ struct Stats {
 };
 void getStats(Stats* out);
 
+// Jobs waiting in the TX queue now; 0 when the TX task is stopped. Any task.
+// File catch-up sends only while this is under 16, so live traffic goes first.
+uint8_t queueDepth();
+
 // Atomically sample the task handle and stack high-water mark while holding the
 // stable lifecycle-owner mutex, so stop() cannot delete the task between handle
 // lookup and the FreeRTOS query. The returned handle is an opaque snapshot key

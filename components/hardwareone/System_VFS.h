@@ -423,6 +423,15 @@ namespace Scopes {
   constexpr const char* ESPSR_SD        = "/sd/ESPSR";
   // Lens camera snapshots (G2_Glasses cam snapshot), SD only.
   constexpr const char* PICTURES_SD     = "/sd/PICTURES";
+  // Saved transcripts (sttsavetranscripts: /stt/u<id>/...), either tier. File
+  // catch-up reads them (System_CatchupLedger); QuickNotes under them are
+  // never offered.
+  constexpr const char* TRANSCRIPTS     = "/stt";
+  constexpr const char* TRANSCRIPTS_SD  = "/sd/stt";
+  // File catch-up, device side: the ledger (System_CatchupLedger).
+  constexpr const char* CATCHUP_STATE   = "/system/catchup";
+  // File catch-up, collector side: what this hub pulled (System_CollectStore).
+  constexpr const char* COLLECT_SD      = "/sd/collect";
   // NOTE: domains with user-configurable folders (images → gSettings.cameraCaptureFolder)
   // or dual SD+LittleFS locations (LLM models) can't use a static constant — they need a
   // computed scope at the call site. Add those when those domains are scoped.
@@ -445,6 +454,11 @@ inline const char* espsrScopeFor(const String& path) {
 }
 inline const char* sttModelScopeFor(const String& path) {
   return path.startsWith("/sd/") ? Scopes::STT_MODELS_SD : Scopes::STT_MODELS;
+}
+
+// Pick the saved-transcripts scope matching the tier `path` names.
+inline const char* transcriptScopeFor(const String& path) {
+  return path.startsWith("/sd/") ? Scopes::TRANSCRIPTS_SD : Scopes::TRANSCRIPTS;
 }
 
 // Pick the recordings scope matching the tier `path` names.

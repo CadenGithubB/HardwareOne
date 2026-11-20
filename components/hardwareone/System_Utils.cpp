@@ -7,6 +7,7 @@
  */
 
 #include <Arduino.h>
+#include "System_CatchupLedger.h"  // catchupLedgerFlush at a reboot intent
 #include <atomic>
 #include <ctype.h>
 #include <utility>
@@ -2138,6 +2139,9 @@ void recordRebootIntent(const char* reason, const char* auditDetail) {
   // so the last couple seconds of history isn't lost to the restart. The
   // caller's flush delay then lets the background writer drain to flash.
   systemEventLogFlush();
+  // File catch-up: persist what the named masters said they stored (Q8), so
+  // a restart does not hand those bytes to a master again.
+  catchupLedgerFlush();
 }
 
 static bool finalizeMicRecordingForRestart(const char* reason) {

@@ -303,6 +303,7 @@ volatile unsigned long gWebMirrorSeq = 0;
 #include "System_Settings.h"
 #include "System_Power.h"  // Shared CPU transitions, power-save policy and cooldown
 #include "System_MemDiag.h"
+#include "System_Collect.h"  // collectWriteTick (file catch-up, collector side)
 Settings gSettings;
 
 String gSerialCli = "";
@@ -2594,6 +2595,9 @@ void hardwareone_loop() {
   // ========================================================================
 
   sensorLogTick();
+#if ENABLE_ESPNOW_COLLECT
+  collectWriteTick();  // file catch-up: the collector's card job (append a window, save index.json)
+#endif
   timeAnchorsTick();   // retro-date boot-named captures once the clock syncs
   g2RingTimeSyncTick(); // ring-clock custody: adopt when dark / correct ring after sync
   cm5TimeSyncTick();    // CM5 carrier RTC: adopt when dark / correct after sync (authoritative)

@@ -2,6 +2,7 @@
   "board": "p4x_eye",
   "features": {
     "ENABLE_CAMERA_SENSOR": 0,
+    "ENABLE_ESPNOW_COLLECT": 1,
     "ENABLE_ESP_SR": 0,
     "ENABLE_G2_GLASSES": 0,
     "ENABLE_LOCAL_STT": 0,

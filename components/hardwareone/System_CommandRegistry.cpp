@@ -90,6 +90,27 @@ static constexpr CommandModule gCommandModules[] = {
     "with espnowdeviceinfo locally or espnowrequestmeta for a peer.",
     espNowCommands,       &espNowCommandsCount, 0, nullptr },
 #endif
+#if ENABLE_ESPNOW_SEND
+  { "catchup",    "File catch-up: logs this device offers its named masters",
+    "A worker that names a master (espnowmasterfingerprint, and the backup) offers its "
+    "whitelisted files to them over ESP-NOW: sensor captures, events.log, battery.csv, "
+    "health files sealed at rest, errors and crash history, and the system log and saved "
+    "transcripts sealed on send with the capture key. Login logs, the command audit, "
+    "QuickNotes and keys are never offered. The masters pull on their own when the device "
+    "is back in range; a file counts as delivered once one of them has it. espnowcatchup "
+    "lists the offered files and what was taken; espnowcatchupserve turns serving off.",
+    catchupCommands,      &catchupCommandsCount, 0, nullptr },
+#endif
+#if ENABLE_ESPNOW_COLLECT
+  { "collect",    "File catch-up: pull the files of the devices that name this hub",
+    "A mesh master or backup master built as a collector pulls the files each device "
+    "that names it offers (file catch-up) onto its SD card under /sd/collect/<mac>/files/, "
+    "when the device's session comes back, every 15 minutes and on collectnow. It needs a "
+    "writable card and a set clock. collectstatus shows each device and its files, "
+    "collectnow starts a pull, collect on|off stops or starts pulling, collectrate and "
+    "collectquota set the frame rate and the card space per device.",
+    collectCommands,      &collectCommandsCount, 0, nullptr },
+#endif
 #if HW1_RADIO_COMPANION
   { "c6",         "ESP32-C6 radio companion (ESP-Hosted)",
     "On the ESP32-P4X-EYE the Wi-Fi, Bluetooth and ESP-NOW radio is a separate ESP32-C6 "

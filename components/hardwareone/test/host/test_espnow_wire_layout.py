@@ -27,10 +27,11 @@ Source rules:
   * sensor masks are 32 bits: no 16-bit field or variable named *mask/*Mask in
     the sensor and forwarding code (the peer bitmap receivedPeerMask, which is
     not a sensor mask and never on the wire, is allowed);
-  * back-capture earmarks (1.0, W5): 82-85 file catch-up and 156-158
-    BACKLOG_* are named in the opcode map and at the enum and stay
-    unallocated, 86 and 159 stay free, the wire stream-id table (0-127 sensor
-    type, 0xF0 battery, 0xF1 events) is in the header, and
+  * back-capture: 82-85 file catch-up are allocated (2026-11-19) with the
+    four CATCHUP_* layouts pinned above, their minLens and the core's
+    numbers; 156-158 BACKLOG_* stay earmarked (named in the opcode map and at
+    the enum, unallocated); 86 and 159 stay free; the wire stream-id table
+    (0-127 sensor type, 0xF0 battery, 0xF1 events) is in the header, and
     docs/COMPATIBILITY.md states them.
 
 Options: --cxx <compiler>, --component <dir> (--sanitize is accepted and unused).
@@ -128,6 +129,17 @@ GOLDEN = {
     'V4PayloadFsGetReq': (140, [('reqId', 0), ('path', 4), ('reserved', 132)]),
     'V4PayloadFsGetAck': (140, [('reqId', 0), ('status', 4), ('reserved', 5), ('fileSize', 8), ('path', 12)]),
     'V4PayloadSessionUnknown': (12, [('sessionId', 0), ('reserved', 2), ('frameSeq', 4), ('msgId', 8)]),
+    # File catch-up (82-85, 2026-11-19). The two answers carry headerLen (and
+    # LIST entries entryLen / entryFixed), so they grow; not fixed-header.
+    'V4PayloadCatchupListReq': (16, [('reqId', 0), ('fromFileId', 4), ('kindMask', 8), ('link', 10),
+                                     ('maxEntries', 11), ('maxFrame', 12), ('reserved', 13)]),
+    'V4PayloadCatchupListRespHeader': (24, [('reqId', 0), ('status', 4), ('link', 5), ('entryCount', 6),
+                                            ('headerLen', 7), ('nextFileId', 8), ('ledgerGen', 12),
+                                            ('ledgerId', 16), ('bootTag', 20), ('flags', 22), ('entryFixed', 23)]),
+    'V4PayloadCatchupReadReq': (24, [('reqId', 0), ('fileId', 4), ('offset', 8), ('maxBytes', 12), ('link', 16),
+                                     ('mode', 17), ('maxFrame', 18), ('flags', 19), ('ledgerId', 20)]),
+    'V4PayloadCatchupReadRespHeader': (20, [('reqId', 0), ('status', 4), ('flags', 5), ('link', 6),
+                                            ('headerLen', 7), ('fileId', 8), ('offset', 12), ('end', 16)]),
 }
 
 # Status values on the wire (rule F3: answers share one status table, 0 ok,
@@ -143,10 +155,13 @@ STATUS_GOLDEN = {
     'espnowanswer::kBadRequest': 6, 'espnowanswer::kNotReady': 7, 'espnowanswer::kIoError': 8,
     'espnowanswer::kNotFound': 9, 'espnowanswer::kTimeout': 10, 'espnowanswer::kCancelled': 11,
     'espnowanswer::kCmdFailed': 16,
+    'espnowanswer::kCatchupNoLink': 16, 'espnowanswer::kCatchupGone': 16, 'espnowanswer::kCatchupTrimmed': 17,
+    'espnowanswer::kCatchupPastEnd': 18,
 }
 
 CORE_HEADERS = ('System_ESPNow_SensorCore.h', 'System_ESPNow_PowerEventCore.h', 'System_ESPNow_ForwardCore.h',
-                'System_ESPNow_TimeCore.h', 'System_ESPNow_AnswerCore.h', 'System_DeviceName.h')
+                'System_ESPNow_TimeCore.h', 'System_ESPNow_AnswerCore.h', 'System_ESPNow_CatchupCore.h',
+                'System_DeviceName.h')
 
 # Receive code may read FS list entries in place (V4PayloadFsEntry is packed,
 # alignment 1, and the count is checked first).
@@ -154,7 +169,8 @@ CAST_ALLOWED = ('reinterpret_cast<const V4PayloadFsEntry*>(payload + sizeof(hdr)
 MASK_FILES = ('System_ESPNow_ForwardCore.h', 'System_ESPNow_SensorCore.h', 'System_ESPNow_ForwardRx.cpp',
               'System_ESPNow_BondForward.cpp', 'System_ESPNow_Sensors.cpp', 'OLED_Mode_Remote.cpp', 'WebPage_Bond.cpp',
               'System_ESPNow.h', 'System_ESPNow.cpp', 'System_ESPNow_Wire.h', 'System_Settings.h')
-MASK_ALLOWED = ('receivedPeerMask',)  # one bit per validated peer index, RAM only
+MASK_ALLOWED = ('receivedPeerMask',  # one bit per validated peer index, RAM only
+                'kindMask')          # CATCHUP_LIST_REQ: file kinds 1-7, not sensors
 
 # Fixed-header frames: the payload ends in data running to the end or in a run
 # of fixed-size entries, so an appended field would be read as data by an older
@@ -358,11 +374,13 @@ def check_sources(component: Path) -> None:
            'System_Settings.h: bondForwardSensors is 32 bits')
 
 
-# Back-capture earmarks (1.0, design W5): the numbers are named in the map and
-# at the enum, and stay unallocated until their frames land with their rows.
-EARMARKS = {82: 'CATCHUP_LIST_REQ', 83: 'CATCHUP_LIST_RESP', 84: 'CATCHUP_READ_REQ', 85: 'CATCHUP_READ_RESP',
-            156: 'BACKLOG_REQ', 157: 'BACKLOG_RESP', 158: 'BACKLOG_DATA'}
-EARMARK_FREE = (86, 159)
+# Back-capture (design W5): the outbox numbers are named in the map and at the
+# enum, and stay unallocated until their frames land with their rows. File
+# catch-up landed on 2026-11-19: 82-85 are allocated with their layouts.
+EARMARKS = {156: 'BACKLOG_REQ', 157: 'BACKLOG_RESP', 158: 'BACKLOG_DATA'}
+ALLOCATED = {82: 'CATCHUP_LIST_REQ', 83: 'CATCHUP_LIST_RESP', 84: 'CATCHUP_READ_REQ', 85: 'CATCHUP_READ_RESP'}
+CATCHUP_MINLEN = {'CATCHUP_LIST_REQ': 16, 'CATCHUP_LIST_RESP': 24, 'CATCHUP_READ_REQ': 24, 'CATCHUP_READ_RESP': 20}
+EARMARK_FREE = (86, 87, 88, 89, 159)
 
 
 def check_earmarks(component: Path) -> None:
@@ -373,16 +391,21 @@ def check_earmarks(component: Path) -> None:
     taken = {int(v) for v in re.findall(r'ESPNOW_V4_TYPE_\w+\s*=\s*(\d+)', enum)}
     for number in sorted(set(EARMARKS) | set(EARMARK_FREE)):
         expect(number not in taken, f'opcode {number} is earmarked for back-capture or kept free, not allocated')
+    named = dict(re.findall(r'ESPNOW_V4_TYPE_(\w+)\s*=\s*(\d+)', enum))
+    for number, name in ALLOCATED.items():
+        expect(named.get(name) == str(number), f'opcode {number} is allocated as ESPNOW_V4_TYPE_{name}')
+        expect(re.search(rf'#define ESPNOW_V4_MINLEN_{name}\s+{CATCHUP_MINLEN[name]}\b', code) is not None,
+               f'ESPNOW_V4_MINLEN_{name} is {CATCHUP_MINLEN[name]}')
     ranges = wire[wire.index('// Ranges:'):wire.index('// Allocation policy')]
-    for number, name in EARMARKS.items():
+    for number, name in list(EARMARKS.items()) + list(ALLOCATED.items()):
         expect(f'{name}={number}' in ranges, f'the opcode map names {name}={number}')
-    expect('82–85 earmarked file catch-up' in ranges and '86–89 free' in ranges,
-           'the opcode map earmarks 82–85 for file catch-up and keeps 86–89 free')
+    expect('82–85 live file catch-up' in ranges and '86–89 free' in ranges,
+           'the opcode map shows 82–85 live for file catch-up and keeps 86–89 free')
     expect('156–158 earmarked device outbox' in ranges and '159 free' in ranges,
            'the opcode map earmarks 156–158 for the device outbox and keeps 159 free')
     enum_text = wire[wire.index('enum EspNowV4Type'):]
     enum_text = enum_text[:enum_text.index('};')]
-    expect('82–85 earmarked file catch-up' in enum_text and '156–158 earmarked device outbox' in enum_text,
+    expect('156–158 earmarked device outbox' in enum_text and '86–89 free' in enum_text,
            'the enum marks the earmarked numbers where they would go')
     streams = wire[wire.index('// ---- Wire stream ids'):wire.index('// ---- Flag bits')]
     for row in ('0–127   the sensor type', '0xF0    battery', '0xF1    events'):
@@ -390,6 +413,15 @@ def check_earmarks(component: Path) -> None:
     compat = (component.parents[1] / 'docs' / 'COMPATIBILITY.md').read_text()
     expect('82-85' in compat and '156-158' in compat and 'backlog_serve' in compat and '0xF0' in compat,
            'docs/COMPATIBILITY.md states the back-capture earmarks')
+    expect('CATCHUP_LIST_REQ' in compat and 'files_serve' in compat,
+           'docs/COMPATIBILITY.md states the CATCHUP_* layouts and the files_serve bit')
+    # The rows: paired + session, outside any bond block, with the W minLens.
+    espnow = strip_comments((component / 'System_ESPNow.cpp').read_text())
+    for name, handler in (('CATCHUP_LIST_REQ', 'v4hCatchupListReq'), ('CATCHUP_LIST_RESP', 'v4hCatchupListResp'),
+                          ('CATCHUP_READ_REQ', 'v4hCatchupReadReq'), ('CATCHUP_READ_RESP', 'v4hCatchupReadResp')):
+        expect(re.search(rf'\{{\s*ESPNOW_V4_TYPE_{name},\s*V4_OPC_FLAG_REQ_PAIRED \| V4_OPC_FLAG_REQ_SESSION_ENC,'
+                         rf'\s*ESPNOW_V4_MINLEN_{name},\s*{handler}\s*\}}', espnow) is not None,
+               f'System_ESPNow.cpp: the {name} row is paired + session with its minLen')
 
 
 def main() -> int:

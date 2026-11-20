@@ -63,7 +63,8 @@ def generate(overlay: Path | None, baseline: bool | None = None) -> str:
     harness = (HERE / "capped_log_writes_harness.cpp").read_text()
     require(harness.count("// INSERT_PRODUCTION") == 1, "one production insertion marker")
     require(harness.count("// INSERT_LOG_LINE") == 1, "one log line insertion marker")
-    return (f"#define BASELINE {int(baseline)}\n" +
+    notes = int("catchupNoteTrim(" in production)
+    return (f"#define BASELINE {int(baseline)}\n#define HAVE_CATCHUP_NOTES {notes}\n" +
             harness.replace("// INSERT_PRODUCTION", functions).replace("// INSERT_LOG_LINE", line_code))
 
 
@@ -82,6 +83,24 @@ def source_contract() -> None:
     body = extract_block(fs, "bool appendLineWithCap(const char* path, const char* line, size_t lineLength,")
     require("String(dest)" not in body and "String(tmpPath)" not in body,
             "appendLineWithCap makes the resolved path's String once per tier")
+    # File catch-up (System_CatchupLedger.h): one trim note after the promoted
+    # rename, one restart note after the restarted log opened; the hooks do no
+    # I/O, logging or allocation (they run inside this writer).
+    require(body.count("catchupNoteTrim(dest, tailStart);") == 1 and
+            body.index("catchupNoteTrim(") > body.index("renameGuarded(tmpName, destPath, ctx)") and
+            body.index("catchupNoteTrim(") > body.index('STACK_TRACEF("appendLineWithCap.rename_failed")'),
+            "appendLineWithCap notes the trim once, after the successful rename")
+    restart = extract_block(fs, "static bool restartCappedLog(")
+    require(restart.count("catchupNoteRestart(dest.c_str());") == 1 and
+            restart.index("catchupNoteRestart(") > restart.index("restart_open_failed"),
+            "restartCappedLog notes the restart once, after the new log opened")
+    ledger_path = COMPONENT / "System_CatchupLedger.cpp"
+    if ledger_path.exists():
+        ledger = ledger_path.read_text()
+        for hook in ("void catchupNoteTrim(", "void catchupNoteRestart("):
+            hook_body = re.sub(r"//[^\n]*", "", extract_block(ledger, hook))
+            for banned in ("VFS::", "File ", "WARN_", "DEBUG_", "CL_WARN", "CL_DEBUG", "alloc", "Serial", "printf"):
+                require(banned not in hook_body, f"{hook.strip('(')} must not use {banned}")
 
 
 def main() -> None:

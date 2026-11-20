@@ -818,7 +818,8 @@ uint32_t espnowLocalSessionCaps() {
   for (int t = 0; t < REMOTE_SENSOR_MAX && !sensors; t++) {
     sensors = sensorTypeInThisBuild(static_cast<RemoteSensorType>(t));
   }
-  return sessioncaps::buildCaps(ENABLE_BONDED_MODE != 0, sensors, /*collect=*/false);
+  return sessioncaps::buildCaps(ENABLE_BONDED_MODE != 0, sensors, /*collect=*/ENABLE_ESPNOW_COLLECT != 0,
+                                /*filesServe=*/ENABLE_ESPNOW_SEND != 0);
 }
 
 namespace {

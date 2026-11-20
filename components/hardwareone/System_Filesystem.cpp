@@ -36,6 +36,7 @@
 #include "System_JsonPretty.h"    // fileview re-indents JSON like the web/OLED/G2 viewers
 #include "System_FileKind.h" // which files fileview treats as JSON
 #include "System_CaptureCrypto.h" // reveal sealed captures for display (fileview is a presentation surface)
+#include "System_CatchupLedger.h"  // catchupNoteTrim/Restart: file catch-up ids survive capped-log trims
 #include "System_CommandRegistry.h"
 #if ENABLE_BLUETOOTH
 #include "BLE_Server.h"  // bleSessionConfidential/bleSendBinaryToSession — raw-binary `fileread ... bin`
@@ -2422,6 +2423,8 @@ static bool restartCappedLog(const String& dest, const char* line, size_t lineLe
   if (!VFS::removeGuarded(dest, ctx)) { STACK_TRACEF("appendLineWithCap.restart_remove_failed"); return false; }
   File t = VFS::openGuarded(dest, "w", ctx, true);
   if (!t) { STACK_TRACEF("appendLineWithCap.restart_open_failed"); return false; }
+  // File catch-up: the path now holds a new file (a new id); only notes it.
+  catchupNoteRestart(dest.c_str());
   char marker[80];
   snprintf(marker, sizeof(marker), "[LOG] rotation blocked (low space): %u older bytes dropped",
            (unsigned)droppedBytes);
@@ -2590,6 +2593,9 @@ bool appendLineWithCap(const char* path, const char* line, size_t lineLength, si
     STACK_TRACEF("appendLineWithCap.rename_failed");
     return false;
   }
+  // File catch-up: the first tailStart bytes are gone, the file keeps its id
+  // (System_CatchupLedger: no I/O, no logging, a spinlock only).
+  catchupNoteTrim(dest, tailStart);
   STACK_TRACEF("appendLineWithCap.rotate_complete");
   return true;
 }

@@ -3,14 +3,24 @@
 
 Only ESP_ERR_NVS_NOT_FOUND (namespace or blob missing) may mint a new key. Any
 other read-only open failure, or an unreadable stored blob, must fail closed
-without calling nvs_set_blob. Sealing, opening and the PSRAM scratch are not
-covered; the NVS fake models return codes, not flash wear or encryption.
+without calling nvs_set_blob.
+
+File catch-up chunks (captureCryptoSealChunk/OpenChunk/KeyId, sealing on send):
+round trip, a wrong AAD or key or a damaged byte fails and wipes the output, a
+random nonce per seal, bounds, no key -> -1 with nothing written, the key id
+stable, per key, and not the key. Source rules: the key is read only inside the
+AEAD call under the module mutex, with no new copy. libsodium is a toy double
+with the real call shapes (not the real cipher).
+
+Line sealing, line opening and the PSRAM scratch are not covered; the NVS fake
+models return codes, not flash wear or encryption.
 """
 from __future__ import annotations
 
 import argparse
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -21,6 +31,26 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
 
+CHUNK_FUNCTIONS = ("bool captureCryptoPseudonym(", "int captureCryptoSealChunk(",
+                   "int captureCryptoOpenChunk(", "bool captureCryptoKeyId(")
+
+
+def chunk_rules(source: str) -> None:
+    """The chunk API reads the key only inside the AEAD call and keeps no copy."""
+    seal = extract_block(source, "int captureCryptoSealChunk(")
+    open_ = extract_block(source, "int captureCryptoOpenChunk(")
+    key_id = extract_block(source, "bool captureCryptoKeyId(")
+    for name, body in (("seal", seal), ("open", open_)):
+        require(body.count("sKey") == 1, f"{name}: sKey appears once, as the AEAD key argument")
+        require("ScratchGuard" in body, f"{name}: the key is read under the module mutex")
+        require("base64" not in body and "ps_alloc" not in body, f"{name}: no base64, no scratch")
+    require("sKey" not in key_id, "the key id comes from the keyed pseudonym, never the key bytes")
+    require(not re.search(r"(uint8_t|unsigned char)\s+\w+\[32\]", seal + open_ + key_id),
+            "no new 32-byte key copy")
+    require("return -1" in seal and "sodium_memzero(out" in seal and "sodium_memzero(out" in open_,
+            "seal and open fail closed and wipe their output")
+
+
 def generate() -> str:
     source = (COMPONENT / "System_CaptureCrypto.cpp").read_text()
     marker = "bool captureCryptoEnsureKey("
@@ -28,6 +58,13 @@ def generate() -> str:
     loader = extract_block(source, marker)
     harness = (HERE / "capture_crypto_key_harness.cpp").read_text()
     require(harness.count("// INSERT_PRODUCTION") == 1, "one insertion marker")
+    if "int captureCryptoSealChunk(" in source:
+        chunk_rules(source)
+        header = (COMPONENT / "System_CaptureCrypto.h").read_text()
+        overhead = re.search(r"^#define CAPCRYPT_CHUNK_OVERHEAD \d+$", header, re.M)
+        require(overhead is not None, "System_CaptureCrypto.h defines CAPCRYPT_CHUNK_OVERHEAD")
+        loader = "\n\n".join(["#define HAVE_CATCHUP_CHUNKS 1", overhead.group(0), loader] +
+                              [extract_block(source, marker) for marker in CHUNK_FUNCTIONS])
     return harness.replace("// INSERT_PRODUCTION", loader)
 
 

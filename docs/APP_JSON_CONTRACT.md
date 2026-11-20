@@ -446,6 +446,32 @@ identified by its address **and** the device that forwarded it:
   set earlier, by a partner's choice since given up or before `bondrole auto`, and stays until the next
   `bondconnect`).
 
+### 8.0.2 File catch-up (2026-11-19, additive; admin only)
+Two new commands, one per side (docs/BACKCAPTURE_FILES.md); neither exists on a build without its
+switch (`Error: unknown command`).
+- Device (`ENABLE_ESPNOW_SEND`): `espnowcatchup json [from <n>]`: `schema` (1), `serve` (the
+  setting), `built`, `named` (`{"primary","backup"}`: the masters named on this device, or `null`),
+  `keyReady`, `keyId` (16 hex, a pseudonym of the capture key, never the key; `null` without a key),
+  `ledgerId` (8 hex), `ledgerGen`, `from`, `files` (each: `fileId`, `kind` (`sensor`, `events`,
+  `battery`, `health`, `errors`, `system_log`, `transcript`), `name` (relative to its kind's
+  folder), `onSd`, `seal` (`none`, `at_rest`, `on_send`), `start`, `end`, `delivered` (how far some
+  named master said it stored the file), `growing`), `withheld` (`unsealedHealth`, `noKey`),
+  `lastRequest` (`null` or `peer`, `utc`, `op`, `fileId`, `frames`, `bytes`), `reconcileMs`,
+  `refused`, `refusedSilent`, `busy`, `next` (`null`, or the number to pass as `from`).
+- Hub (`ENABLE_ESPNOW_COLLECT`): `collectstatus json [from <n>]`: `schema` (1), `collect` (the
+  setting), `built`, `whyNot` (`null`, `off`, `not_master`, `no_card`, `clock_not_set`), `card`
+  (`mounted`, `writable`, `freeBytes`), `clock` (`set`, `source`), `role`, `rateFps`, `quotaMb`,
+  `devices` (each: `mac`, `name`, `state` (`idle`, `listing`, `fetching`, `verifying`, `current`,
+  `suspended`, `waiting`, `refused`, `unsupported`), `whyNot` (`null`, `no_session`,
+  `session_settling`, `no_file_catchup`, `no_answer`, `busy`, `not_ready`, `refused`, `unsupported`,
+  `card_error`, `yielded`, `ledger_reset`), `files`, `filesLeft`, `bytesLeft`, `pct`, `etaS`,
+  `lastCaughtUpUtc`, `bytesOnCard`, `lastHeardAgoMs`, `gaps` (bytes per reason: `beforeFirstFetch`,
+  `trimmed`, `lostOnDevice`, `noLongerOffered`), `elsewhereBytes` (bytes at the other master)),
+  `next`. `collectstatus json <device> [from <n>]`: `device` and `files` (each with the index.json
+  fields: `fileId`, `kind`, `name`, `onSd`, `seal`, `deviceStart`, `lastSeenEnd`,
+  `lastSeenDelivered`, `held`, `pos`, `segments`, `gaps` (`from`, `to`, `why`), `elsewhere`,
+  `digest`, `firstSeenUtc`, `createdBoot`, `evicted`), `next`. Replies are paged under 4 KB.
+
 ### 8.1 Remote-device list - `sensors` changed from strings to objects (breaking)
 Returned by web `GET /api/sensors/remote` (no params) **and** nested verbatim under
 `devices` in the BLE/CLI `espnowsensorstatus json` (master role):

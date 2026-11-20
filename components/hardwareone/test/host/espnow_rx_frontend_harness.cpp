@@ -958,6 +958,12 @@ static void testTimeAndSensorFramesThroughRelay() {
     { ESPNOW_V4_TYPE_FORWARD_LINK,    "v4hForwardLink",      96 },
     { ESPNOW_V4_TYPE_POWER_STATUS,    "v4hPowerStatus",      24 },
     { ESPNOW_V4_TYPE_EVENT_PUSH,      "v4hEventPush",        128 },
+    // File catch-up (2026-11-19): single frames, a named master may pull
+    // through a relay; each at the routed budget.
+    { ESPNOW_V4_TYPE_CATCHUP_LIST_REQ,  "v4hCatchupListReq",  16 },
+    { ESPNOW_V4_TYPE_CATCHUP_LIST_RESP, "v4hCatchupListResp", ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT },
+    { ESPNOW_V4_TYPE_CATCHUP_READ_REQ,  "v4hCatchupReadReq",  24 },
+    { ESPNOW_V4_TYPE_CATCHUP_READ_RESP, "v4hCatchupReadResp", ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT },
   };
   uint32_t id = 300;
   for (const Row& row : rows) {
