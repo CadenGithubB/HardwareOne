@@ -252,6 +252,35 @@ everything user-visible since the v0.99.99.1 tag.
   run on hardware.
 
 ### Fixed
+
+- Photos never overwrite each other: a taken name gets `_1` .. `_99`, the saved-photo event carries
+  the final name, and the no-clock counter continues past the highest `img_NNNNNN` in the folder.
+- Web uploads no longer hold the filesystem lock for the whole transfer: only around the staged
+  open, each write and the commit or discard. Each staged write owns its temporary name, and an SD
+  upload marks the card in use, so `sdunmount`, a remount or a format refuses until it ends.
+- Transcript phrases after the first, and QuickNote saves on internal flash, check free space
+  against the cached LittleFS figure instead of a full volume walk (about 1.3 s on the P4X-EYE).
+- The web CLI no longer keeps typed secrets (login, useradd, wifiadd, passphrases, tokens) in the
+  browser: the device returns a redacted command line and the page stores only that. The sign-in
+  page clears the CLI history, and the CLI page drops a history saved by older firmware once.
+- Web: camera and microphone recording lists show names only as text, encode file URLs, and send
+  the exact name on Delete (a name with a quote is refused on the page) (WEB-4).
+- Web: the bond page escapes the bonded peer's name, remote-sensor rows escape nested keys, and
+  load errors on the Automations and Settings pages are escaped (D-29).
+- Web: `hw.fetchJSON`/`hw.fetchText` show the device's reason instead of "HTTP 400";
+  `/api/bond/cli/batch` returns `failed[]` (WEB-1, CMD-1).
+- WiFi: a failed boot connect (and the radio companion's restore, and `radiopower on`) is retried
+  with `wifiautoreconnect` on: first hunt 60 s later, then 60 s, 120 s and every 300 s.
+- WiFi: a join after boot starts NTP when it is not running, and the web server when `httpenabled`
+  and `httpautostart` are on; `closehttp` keeps it off across later joins until `openhttp`.
+- WiFi: during a console-owned connect, arrow and function keys no longer cancel; a lone Esc or
+  Ctrl-C still does.
+- Boot no longer waits for Bluetooth peers (about 13 s before): the boot reconnect only arms the
+  saved phone, ring and glasses, and the reconnect loop opens them 2 s after the stack, 2 s apart.
+- Quoted command values read `\\` as one backslash as well as `\"` as a quote, and the
+  automation page escapes backslashes, so a backslash typed there is no longer stored doubled.
+- Host test: the phone-link handshake disconnect vector sends the phone's address again, so the
+  X2 negative fixture matches production (`phone_secure_channel` passes).
 - Local speech (Citrinet): transcription stopped working after one or two sessions with "No contiguous PSRAM
   block for speech model". The in-place trim of the 22.7 MB model image left a ~1.3 MB hole that other
   allocations filled, so a freed model left a block too small to reload. The model block is now reserved once

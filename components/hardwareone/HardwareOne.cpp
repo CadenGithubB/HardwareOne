@@ -1272,6 +1272,7 @@ static void bootNetConnectAndSync(bool background) {
 #if ENABLE_HTTP_SERVER
 static void bootAutostartHttp(bool httpWanted) {
   if (httpWanted && WiFi.isConnected()) {
+    if (isHttpServerRunning()) return;  // a post-join reconcile already started it
     runUnifiedSystemCommand("openhttp");
     BROADCAST_PRINTF("%s%s", gServerIsHttps ? "HTTPS server started. Try: https://" : "HTTP server started. Try: http://", WiFi.localIP().toString().c_str());
   } else if (!httpWanted) {
@@ -2133,14 +2134,13 @@ void hardwareone_setup() {
     if (bootBleMode == BLE_MODE_G2_CLIENT) {
       // The shared client stack only: no device opens here. If
       // wantClientForAutoReconnect is true, bleBootReconnect iterates the
-      // peer registry and each admitted peer opens its own device (saved-MAC
-      // connects with paced 2 s gaps). The boot block is peer-agnostic —
+      // peer registry and arms each saved peer (bleBootReconnect only arms
+      // them; the main-loop reconnect tick opens each one, the first 2 s after
+      // the stack and the next 2 s apart, so setup does not wait). The boot block is peer-agnostic —
       // adding a peer means adding a registry entry, not touching this code.
       if (bleStackUp()) {
         broadcastOutput("Bluetooth client stack up (openg2 / openring / openphone open a device)");
         if (wantClientForAutoReconnect) {
-          // Give the BLE stack ~2 s to settle before kicking off scans.
-          vTaskDelay(pdMS_TO_TICKS(2000));
           broadcastOutput("[BLE] Auto-reconnect: iterating peer registry");
           bleBootReconnect();
         }

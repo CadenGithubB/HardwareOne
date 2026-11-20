@@ -2134,6 +2134,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_quicknote_store.py
           ${QUICKNOTE_STORE_TEST_ARGS})
+# The transcript writer's free-space check (cached LittleFS figure after the
+# first write of a session). Same sanitizer switch as quicknote_store.
+add_test(
+  NAME transcript
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_transcript.py
+          ${QUICKNOTE_STORE_TEST_ARGS})
 # The production QuickNote service and `note` CLI (authority matrix, one note
 # at a time, save/discard/fail, revocation, limits, private replies) against
 # fakes, once per transcription backend, plus its event/settings/CLI wiring.

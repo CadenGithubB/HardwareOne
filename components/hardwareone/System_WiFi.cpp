@@ -2923,7 +2923,7 @@ const CommandEntry wifiCommands[] = {
   { "wifilist", "List saved WiFi networks. (add 'json' for JSON output)", false, cmd_wifilist },
   { "wifiadd", "Add WiFi network: <ssid> <pass> [priority] [hidden]", true, cmd_wifiadd, "Usage: wifiadd <ssid> <pass> [priority] [hidden0|1]" },
   { "wifirm", "Remove WiFi network: <ssid>", true, cmd_wifirm, "Usage: wifirm <ssid>" },
-  { "wifirmid", "Remove a saved WiFi entry by its saved id (ids come from a screen's saved list and are valid for this boot only)", true, cmd_wifirmid, "Usage: wifirmid <saved-id>" },
+  { "wifirmid", "Remove a saved WiFi entry by its saved id (ids come from a screen's saved list and are valid for this boot only). Ctrl-C or a lone Esc cancels; arrow keys do not.", true, cmd_wifirmid, "Usage: wifirmid <saved-id>" },
   { "wifipromote", "Promote WiFi to top priority: <ssid> [newPriority]", true, cmd_wifipromote, "Usage: wifipromote <ssid> [newPriority]" },
   
   // Connection Control — lifecycle open/close is admin-only (status/scan stay open)
@@ -2939,7 +2939,7 @@ const CommandEntry wifiCommands[] = {
   { "ntpstatus", "Show NTP configuration and sync state.",   false, cmd_ntpstatus },
 #if ENABLE_HTTP_SERVER
   { "openhttp", "Start HTTP server.", true, cmd_httpstart },
-  { "closehttp", "Stop HTTP server.", true, cmd_httpstop },
+  { "closehttp", "Stop HTTP server; it stays off across later WiFi joins until openhttp.", true, cmd_httpstop },
   { "httpread", "Read HTTP server status. (add 'json' for JSON output)", false, cmd_httpstatus },
   { "httpstatus", "Show HTTP server status. (add 'json' for JSON output)", false, cmd_httpstatus },
 #endif

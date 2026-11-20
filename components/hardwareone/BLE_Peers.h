@@ -225,9 +225,11 @@ bool bleAnyPeerWantsAutoReconnect(void);
 
 // Iterate the registry and request saved-target admission for every peer whose
 // autoReconnect flag is set, whose owner authority already exists, and that
-// has at least one usable saved target. Requests are non-blocking and newly
-// STARTED attempts are paced by 2 s. Failed/coalesced admissions remain
-// scheduled for the periodic tick; boot recovery never manufactures peer
+// has at least one usable saved target. Arms only and returns at once:
+// each eligible peer that is not already connected gets a fresh
+// auto-reconnect episode due 2 s from now, the next ones 2 s apart, and
+// bleAutoReconnectTick admits it when due (two first attempts never start in
+// one tick). Boot recovery never manufactures peer
 // ownership. Call AFTER initG2Client() so peer modules have registered.
 void bleBootReconnect(void);
 

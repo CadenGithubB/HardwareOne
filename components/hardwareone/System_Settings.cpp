@@ -678,7 +678,7 @@ const CommandEntry settingsCommands[] = {
 #if ENABLE_WIFI
   // ---- WiFi Network Settings ----
   { "wifitxpower", "Set WiFi TX power: <dBm>", true, cmd_wifitxpower, "Usage: wifitxpower <2..21>" },
-  { "wifiautoreconnect", "Keep hunting for the AP after an unexpected drop: <0|1>", true, cmd_wifiautoreconnect,
+  { "wifiautoreconnect", "Keep hunting for the AP after an unexpected drop, and retry a failed boot connect (first hunt 60 s later, then 60 s, 120 s, every 300 s): <0|1>", true, cmd_wifiautoreconnect,
     "Usage: wifiautoreconnect <0|1>\n  Separate from wifiautostart: this is about recovering a dropped link, not connecting at boot." },
   
   // ---- System Time Settings ----
@@ -693,7 +693,7 @@ const CommandEntry settingsCommands[] = {
   // espnowenabled (handler cmd_espnowenabled below) is registered by the
   // espnow module (System_ESPNow.cpp), which registers before this one.
 #if ENABLE_HTTP_SERVER
-  { "httpautostart", "Auto-start HTTP server at boot: <0|1>", true, cmd_httpAutoStart, "Usage: httpautostart <0|1>" },
+  { "httpautostart", "Auto-start HTTP server at boot and on any later WiFi join (unless closehttp was run since the last openhttp): <0|1>", true, cmd_httpAutoStart, "Usage: httpautostart <0|1>" },
 #endif
 #if ENABLE_HTTPS
   { "httpsenabled", "Enable/disable HTTPS: <0|1> (reboot required)", true, cmd_httpsEnabled, "Usage: httpsenabled <0|1>" },

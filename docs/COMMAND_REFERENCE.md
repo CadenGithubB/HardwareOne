@@ -134,7 +134,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | ------- | :-: | ----------- |
 | `certgen` | S | Generate self-signed HTTPS certificate: [rsa] (default: ECDSA P-256)<br/>`Usage: certgen [rsa] Default: ECDSA P-256 (~1s). Use 'certgen rsa' for RSA-2048 (~30-60s).` |
 | `certinfo` |  | Show HTTPS certificate details. |
-| `closehttp` | A | Stop HTTP server. |
+| `closehttp` | A | Stop HTTP server; it stays off across later WiFi joins until openhttp. |
 | `closewifi` | A | Disconnect from WiFi (also stops HTTP server + web output to free heap). |
 | `httpread` |  | Read HTTP server status. (add 'json' for JSON output) |
 | `httpstatus` |  | Show HTTP server status. (add 'json' for JSON output) |
@@ -150,7 +150,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `wifipromote` | A | Promote WiFi to top priority: <ssid> [newPriority]<br/>`Usage: wifipromote <ssid> [newPriority]` |
 | `wifiread` |  | Read current WiFi connection info. (add 'json' for JSON output) |
 | `wifirm` | A | Remove WiFi network: <ssid><br/>`Usage: wifirm <ssid>` |
-| `wifirmid` | A | Remove a saved WiFi entry by its saved id (ids come from a screen's saved list and are valid for this boot only)<br/>`Usage: wifirmid <saved-id>` |
+| `wifirmid` | A | Remove a saved WiFi entry by its saved id (ids come from a screen's saved list and are valid for this boot only). Ctrl-C or a lone Esc cancels; arrow keys do not.<br/>`Usage: wifirmid <saved-id>` |
 | `wifiscan` |  | Scan for available WiFi networks. (add 'json' for JSON output) |
 | `wifistatus` |  | Show current WiFi connection info. (add 'json' for JSON output) |
 
@@ -1145,7 +1145,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `controls` |  | Per-module control descriptor (JSON): controls json [module]<br/>`Usage: controls json <module> (e.g. 'controls json imu'); 'controls json' lists modules` |
 | `devicename` | A | Get/set the device name (ESP-NOW name, Bluetooth name, Wi-Fi hostname): 'devicename [name\|clear]'.<br/>`Usage: devicename [<name>\|clear] (1-31 letters, digits and '-'; not starting or ending with '-'; not clear/all/json/none or a MAC address; 'clear' while ESP-NOW is stopped)` |
 | `displayrequireauth` | S | Require auth for display: <0\|1><br/>`Usage: displayrequireauth <0\|1>` |
-| `httpautostart` | A | Auto-start HTTP server at boot: <0\|1><br/>`Usage: httpautostart <0\|1>` |
+| `httpautostart` | A | Auto-start HTTP server at boot and on any later WiFi join (unless closehttp was run since the last openhttp): <0\|1><br/>`Usage: httpautostart <0\|1>` |
 | `httpsenabled` | A | Enable/disable HTTPS: <0\|1> (reboot required)<br/>`Usage: httpsenabled <0\|1>` |
 | `ntpserver` | A | Set NTP server: <hostname><br/>`Usage: ntpserver <host>` |
 | `oledclihistorysize` | A | Set OLED CLI history size: <10..100><br/>`Usage: oledclihistorysize <10..100>` |
@@ -1157,7 +1157,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `uartlinkbaud` | A | Set UART link baud (0=board default)<br/>`Usage: uartlinkbaud <0\|9600-max>` |
 | `uartrequireauth` | S | Require auth for UART link: <0\|1><br/>`Usage: uartrequireauth <0\|1>` |
 | `webclihistorysize` | A | Set web CLI history size: <1..100><br/>`Usage: webclihistorysize <1..100>` |
-| `wifiautoreconnect` | A | Keep hunting for the AP after an unexpected drop: <0\|1><br/>`Usage: wifiautoreconnect <0\|1> Separate from wifiautostart: this is about recovering a dropped link, not connecting at boot.` |
+| `wifiautoreconnect` | A | Keep hunting for the AP after an unexpected drop, and retry a failed boot connect (first hunt 60 s later, then 60 s, 120 s, every 300 s): <0\|1><br/>`Usage: wifiautoreconnect <0\|1> Separate from wifiautostart: this is about recovering a dropped link, not connecting at boot.` |
 | `wifitxpower` | A | Set WiFi TX power: <dBm><br/>`Usage: wifitxpower <2..21>` |
 
 ## sensorlog
