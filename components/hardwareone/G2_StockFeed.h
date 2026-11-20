@@ -5,15 +5,20 @@
 // HardwareOne's own system metrics (System_Metrics.h) instead of share
 // prices: one stock per metric, label as the ticker, long name as the
 // company, the value as the price, the change since the previous sample as
-// the change, the last 60 samples as the chart. Wire, clamps, whitelist and
+// the change, the last hour as the chart (185 points, one every 20 s, newest
+// at the right edge; padded on the left per `g2 stats pad gap|flat` until an
+// hour exists). Wire, clamps, whitelist and
 // timing live in G2_StockFeedCore.h; the send policy is the shared dashboard
 // feed core (G2_FeedCore.h), the second instance next to the Health panel.
 //
 // Off by default in every build; `g2 stats feed on` starts it and saves that
 // (gSettings.g2StockFeed). While it runs and the right temple is connected:
 // a full batch after every connect, then a batch when a shown value changed,
-// at most once per `g2 stats interval` (default 60 s), every 5 s while the
-// glasses report the expanded stock page open. Paused while Even AI,
+// at most once per `g2 stats interval` (default 60 s), every 10 s while the
+// glasses report the expanded stock page open. While it is on, the sampler
+// keeps sampling whether or not the glasses are connected, so a reconnect
+// sends the full last hour; feed off (or a reboot) drops the history. Paused
+// while Even AI,
 // Conversate, the native terminal, a native note or QuickNote own the
 // glasses. Only glasses firmware with a captured fixture (2.3.2.14) is fed.
 // `g2 stats feed off` clears the widget (stock_total 0). The glasses keep the
@@ -31,6 +36,11 @@ void g2StockFeedTick();
 // G2 control owner only: the longest the owner may sleep before the next
 // lap so a waiting request or batch is served on time (UINT32_MAX: no limit).
 uint32_t g2StockFeedOwnerWaitMs();
+// G2 control owner only, once as it exits (closeg2): drops the page-open
+// cadence and any preview warm-up that no later lap would expire; keeps the
+// sampler consumer (and its history) at the feed interval while the feed is
+// on, releases it otherwise.
+void g2StockFeedOwnerStopped();
 // sid 0x01 envelope from temple `side` ('L'/'R') at `generation` (same task):
 // acks from the right temple, page-state pushes from either.
 void g2StockFeedOnRx(char side, uint32_t generation, const uint8_t* pb, size_t len);
@@ -41,9 +51,10 @@ void g2StockFeedOnRx(char side, uint32_t generation, const uint8_t* pb, size_t l
 // not known yet).
 bool g2StockFeedRightLink(uint32_t* generation, bool* busy, char* firmware, size_t firmwareCap);
 // Re-validates `pb` against the stock whitelist and writes it to the right
-// temple at exactly `generation` (sid 0x01). False if invalid, not ready or
-// the write failed.
-bool g2StockFeedWireSend(uint32_t generation, const uint8_t* pb, size_t len);
+// temple at exactly `generation` (sid 0x01). `gapPrefix`: the chart was
+// padded in gap mode, so a NaN prefix is allowed (and nowhere else). False if
+// invalid, not ready or the write failed.
+bool g2StockFeedWireSend(uint32_t generation, const uint8_t* pb, size_t len, bool gapPrefix);
 // Asks the right temple at exactly `generation` for its settings (a BASIC
 // request); the reply fills the firmware string. False if not sent.
 bool g2StockFeedRequestFirmware(uint32_t generation);
@@ -58,11 +69,13 @@ const char* cmd_g2statssend(const String& args);
 const char* cmd_g2statsfeed(const String& args);
 const char* cmd_g2statsmetrics(const String& args);
 const char* cmd_g2statsinterval(const String& args);
+const char* cmd_g2statspad(const String& args);
 
 #else
 
 inline void g2StockFeedTick() {}
 inline uint32_t g2StockFeedOwnerWaitMs() { return UINT32_MAX; }
+inline void g2StockFeedOwnerStopped() {}
 inline void g2StockFeedOnRx(char, uint32_t, const uint8_t*, size_t) {}
 
 #endif

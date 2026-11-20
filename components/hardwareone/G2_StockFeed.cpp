@@ -34,34 +34,27 @@ constexpr uint8_t kClearMaxTries = 5;
 constexpr uint32_t kRequestLapMs = 500;
 constexpr uint32_t kBatchLapMs = 1000;
 
-constexpr size_t kTextBytes = 1792;
-constexpr size_t kHistoryBytes = sizeof(float) * sf::kFeedPoints;
-// Rows stop short of the tail, where the history of the metric being
-// formatted sits.
-constexpr size_t kRowsBytes = kTextBytes - kHistoryBytes;
-static_assert(kTextBytes % sizeof(float) == 0 && kRowsBytes % sizeof(float) == 0,
-              "the history tail must be float-aligned");
+// The command side's reply text. Its tail (the last sizeof(Slot) bytes) holds
+// the slot of the row being formatted, so rows stop at kRowsBytes; the
+// preview then builds slot 0 there, encodes it right after the text, moves the
+// payload to the end (over the slot) and prints its hex in place. Sized for
+// the preview: 9 rows (~80 B each) + a 185-point slot 0 as hex (~1.7 KB).
+constexpr size_t kTextBytes = 2688;
+constexpr size_t kRowsBytes = kTextBytes - sizeof(sf::Slot);
+static_assert(kRowsBytes % alignof(sf::Slot) == 0, "the slot tail must be aligned");
+static_assert(kRowsBytes >= 1024, "room for the status header and 9 rows");
 
 bool feedOn() { return gSettings.g2StockFeed; }
 uint32_t intervalSec() { return sf::clampIntervalSec(gSettings.g2StockIntervalSec); }
-
-// The command side's reply text. While rows are formatted, its last
-// kFeedPoints floats hold the history of the metric being formatted; the
-// preview then encodes slot 0 into the tail and prints it in place.
-union CmdText {
-  char text[kTextBytes];
-  float words[kTextBytes / sizeof(float)];
-};
+sf::Pad padMode() { return sf::padFromSetting(gSettings.g2StockPad); }
 
 // One PSRAM block, allocated on first use by the feed or by `g2 stats
 // status|preview|send`, and kept: the owner's slot and payload, and the
-// command task's slot and reply text.
+// command task's reply text with its slot tail (about 4.3 KB in all).
 struct Scratch {
   sf::Slot ownerSlot;
-  float ownerHistory[sf::kFeedPoints];
   uint8_t ownerPb[sf::kFeedPbBytes];
-  sf::Slot cmdSlot;
-  CmdText cmd;
+  alignas(sf::Slot) char cmd[kTextBytes];
 };
 std::atomic<Scratch*> sScratch{nullptr};
 
@@ -77,7 +70,8 @@ Scratch* scratch() {
   return expected;
 }
 
-float* cmdHistory(Scratch& sc) { return sc.cmd.words + kRowsBytes / sizeof(float); }
+// The command task's slot, in the reply text's tail (see kRowsBytes).
+sf::Slot& cmdSlot(Scratch& sc) { return *new (sc.cmd + kRowsBytes) sf::Slot(); }
 
 // Short replies (`g2 stats interval|metrics`) that need no scratch block.
 EXT_RAM_BSS_ATTR static char sReply[192];
@@ -91,8 +85,10 @@ bool sBatchManual = false;
 sf::GlassesCount sCount;
 bool sPageOpen = false;
 uint32_t sPageOpenAtMs = 0;
-uint8_t sMetricsHandle = 0;
-uint32_t sMetricsIntervalMs = 0;
+// The sampler consumer: the owner opens it; the owner or `g2 stats feed off`
+// (which must end the run even while the owner is stopped) closes it.
+std::atomic<uint8_t> sMetricsHandle{0};
+uint32_t sMetricsIntervalMs = 0;  // owner only
 bool sFastLapOk = false;  // last lap: right temple open and firmware supported
 // The `feed off` clear.
 uint8_t sClearMagic = 0;
@@ -182,17 +178,19 @@ bool takeForce() {
   return sForce.exchange(false, std::memory_order_acq_rel);
 }
 
-// A metric as the sampler has it. `stale` allows the last history value for
-// a metric that is unavailable this sample (a slot already counted into the
-// batch's stock_total must still be sent).
-bool readSlot(SystemMetricId id, sf::Slot& slot, float* hist, bool withHistory, bool stale) {
+// A metric as the sampler has it, its chart window filled straight from the
+// sampler's history into slot.points (sf::makeSlot moves it in place).
+// `stale` allows the last history point for a metric that is unavailable this
+// sample (a slot already counted into the batch's stock_total must still be
+// sent).
+bool readSlot(SystemMetricId id, sf::Slot& slot, bool withHistory, bool stale, sf::Pad pad) {
   SystemMetricReading r{};
   const bool have = systemMetricsRead(id, r) && r.available;
   sf::MetricInput in;
   in.id = id;
   in.available = true;
   uint8_t n = 0;
-  if (withHistory || (!have && stale)) n = systemMetricsHistory(id, hist, sf::kFeedPoints);
+  if (withHistory || (!have && stale)) n = systemMetricsHistory(id, slot.points, sf::kFeedPoints);
   if (have) {
     in.value = r.value;
     in.delta = r.delta;
@@ -202,13 +200,13 @@ bool readSlot(SystemMetricId id, sf::Slot& slot, float* hist, bool withHistory, 
   } else {
     if (!stale) return false;
     const mc::MetricInfo* m = mc::info(id);
-    in.value = n ? hist[n - 1] : 0.0f;
+    in.value = n ? slot.points[n - 1] : 0.0f;
     in.rangeLow = m ? m->rangeLow : 0.0f;
     in.rangeHigh = m ? m->rangeHigh : 0.0f;
   }
-  in.history = withHistory || !have ? hist : nullptr;
+  in.history = withHistory || !have ? slot.points : nullptr;
   in.historyCount = in.history ? n : 0;
-  return sf::makeSlot(in, slot);
+  return sf::makeSlot(in, pad, slot);
 }
 
 struct Current {
@@ -218,17 +216,18 @@ struct Current {
 };
 
 // The batch the tile should show now: the saved metrics that have a value,
-// in the saved order, and its send-on-change digest.
-Current currentBatch(sf::Slot& slot, float* hist) {
+// in the saved order, and its send-on-change digest (the shown values and the
+// history-point count, so a new 20 s point scrolls the chart).
+Current currentBatch(sf::Slot& slot) {
   Current cur;
   const sf::Selection sel = selection();
   uint32_t h = sf::digestStart();
   for (uint8_t i = 0; i < sel.count; i++) {
-    if (!readSlot(sel.ids[i], slot, hist, false, false)) continue;
+    if (!readSlot(sel.ids[i], slot, false, false, sf::Pad::Gap)) continue;
     cur.ids[cur.count++] = sel.ids[i];
     h = sf::digestSlot(h, sel.ids[i], slot);
   }
-  cur.digest = sf::digestAdd(h, cur.count);
+  cur.digest = sf::digestPoints(sf::digestAdd(h, cur.count), systemMetricsPointGeneration());
   return cur;
 }
 
@@ -250,29 +249,58 @@ void publishStatus(bool ready, bool busy, bool fwOk, const char* fw) {
   portEXIT_CRITICAL(&sStatusMux);
 }
 
-// Sampler interest: while the feed runs on a connected right temple, and for a
-// while after `g2 stats preview` / `send`. 5 s while the expanded page is open
-// (or a preview/send warms it), the feed interval otherwise.
-void updateConsumer(uint32_t now, bool feedWants) {
+void releaseConsumer() {
+  const uint8_t h = sMetricsHandle.exchange(0, std::memory_order_acq_rel);
+  if (h) systemMetricsClose(h);
+}
+
+// Sampler interest (sf::samplerWanted): whenever the feed is on, connected or
+// not, so the history survives a glasses disconnect; and for a while after
+// `g2 stats preview` / `send`. The page-open cadence while the expanded page
+// is open on a connected temple (or a preview/send warms it), the feed
+// interval otherwise; the history takes a point every 20 s either way.
+void updateConsumer(uint32_t now, bool on, bool linkOpen) {
   const bool warm = warmActive(now) || sForce.load(std::memory_order_acquire);
   if (!warm && sWarm.load(std::memory_order_acquire) &&
       (int32_t)(sWarmUntilMs.load(std::memory_order_acquire) - now) <= 0)
     sWarm.store(false, std::memory_order_release);
-  const bool want = feedWants || warm;
-  if (!want) {
-    if (sMetricsHandle) systemMetricsClose(sMetricsHandle);
-    sMetricsHandle = 0;
+  if (!sf::samplerWanted(on, warm)) {
+    releaseConsumer();
     sMetricsIntervalMs = 0;
     return;
   }
-  const uint32_t ms = (sPageOpen || warm) ? sf::kPageOpenIntervalMs : intervalSec() * 1000u;
-  if (!sMetricsHandle) {
-    sMetricsHandle = systemMetricsOpen(ms);
-    sMetricsIntervalMs = sMetricsHandle ? ms : 0;
-  } else if (ms != sMetricsIntervalMs && systemMetricsSetInterval(sMetricsHandle, ms)) {
+  const uint32_t ms = sf::samplerIntervalMs(sPageOpen && linkOpen, warm, intervalSec());
+  const uint8_t h = sMetricsHandle.load(std::memory_order_acquire);
+  if (!h) {
+    const uint8_t opened = systemMetricsOpen(ms);
+    sMetricsIntervalMs = opened ? ms : 0;
+    if (opened) sMetricsHandle.store(opened, std::memory_order_release);  // only the owner opens
+  } else if (ms != sMetricsIntervalMs && systemMetricsSetInterval(h, ms)) {
     sMetricsIntervalMs = ms;
   }
 }
+
+}  // namespace
+
+// The G2 control owner is stopping (closeg2): no lap runs until the next
+// openg2, so nothing would expire the page-open cadence or a preview's
+// warm-up. Keep only the feed's own interest: the feed interval if it is on
+// (the history keeps its 20 s clock), nothing if it is off.
+void g2StockFeedOwnerStopped() {
+  sPageOpen = false;
+  sFastLapOk = false;
+  sWarm.store(false, std::memory_order_release);
+  if (!feedOn()) {
+    releaseConsumer();
+    sMetricsIntervalMs = 0;
+    return;
+  }
+  const uint32_t ms = sf::samplerIntervalMs(false, false, intervalSec());
+  const uint8_t h = sMetricsHandle.load(std::memory_order_acquire);
+  if (h && ms != sMetricsIntervalMs && systemMetricsSetInterval(h, ms)) sMetricsIntervalMs = ms;
+}
+
+namespace {
 
 // The version gate needs the right temple's firmware string. If no settings
 // push brought it a few seconds after the link came up, ask once per link.
@@ -296,14 +324,17 @@ void abortBatch() {
 }
 
 bool writeSlot(Scratch& sc, uint8_t index, uint32_t generation) {
-  if (!readSlot(sBatchIds[index], sc.ownerSlot, sc.ownerHistory, true, true)) return false;
+  const sf::Pad pad = padMode();
+  if (!readSlot(sBatchIds[index], sc.ownerSlot, true, true, pad)) return false;
   const uint8_t magic = sf::magicAt(sBatch.first, index);
   const size_t n = sf::encodeSlot(sc.ownerSlot, sBatch.count, index, magic, sc.ownerPb,
                                   sizeof sc.ownerPb);
-  const bool ok = n && sf::validateMessagePb(sc.ownerPb, n) &&
-                  g2StockFeedWireSend(generation, sc.ownerPb, n);
-  DEBUG_G2F("[G2-STOCK] slot %u/%u %s %.2f magic=%u len=%u %s", (unsigned)index,
+  const bool gap = pad == sf::Pad::Gap;
+  const bool ok = n && sf::validateMessagePb(sc.ownerPb, n, nullptr, gap) &&
+                  g2StockFeedWireSend(generation, sc.ownerPb, n, gap);
+  DEBUG_G2F("[G2-STOCK] slot %u/%u %s %.2f %u/%u pts magic=%u len=%u %s", (unsigned)index,
             (unsigned)sBatch.count, sc.ownerSlot.code, (double)sc.ownerSlot.value,
+            (unsigned)sc.ownerSlot.realPoints, (unsigned)sc.ownerSlot.pointCount,
             (unsigned)magic, (unsigned)n, ok ? "sent" : "NOT sent");
   return ok;
 }
@@ -321,7 +352,7 @@ void runBatch(Scratch& sc, uint32_t generation, uint32_t now) {
   bool ok = false;
   if (step == sf::Step::Clear) {
     const size_t n = sf::encodeClear(sBatch.clearMagic, sc.ownerPb, sizeof sc.ownerPb);
-    ok = n && g2StockFeedWireSend(generation, sc.ownerPb, n);
+    ok = n && g2StockFeedWireSend(generation, sc.ownerPb, n, false);
     DEBUG_G2F("[G2-STOCK] clear before the batch (last one unfinished) magic=%u %s",
               (unsigned)sBatch.clearMagic, ok ? "sent" : "NOT sent");
   } else {
@@ -371,7 +402,7 @@ bool sendClear(Scratch& sc, uint32_t generation, uint32_t now) {
   sClearMagic = sf::unitMagic(sMagic, 1);
   sMagic = sClearMagic;
   const size_t n = sf::encodeClear(sClearMagic, sc.ownerPb, sizeof sc.ownerPb);
-  const bool ok = n && g2StockFeedWireSend(generation, sc.ownerPb, n);
+  const bool ok = n && g2StockFeedWireSend(generation, sc.ownerPb, n, false);
   sClearTried = true;
   sClearLastMs = now;
   sClearAwaiting = ok;
@@ -385,7 +416,7 @@ bool sendClear(Scratch& sc, uint32_t generation, uint32_t now) {
 }
 
 constexpr char kAvailableLabels[] = "CPU CPU0 CPU1 HEAP HBLK PSRM SD LFS TEMP LINK MESH RING";
-constexpr char kNoPsram[] = "Error: No PSRAM for the stock widget feed (it needs about 3 KB)";
+constexpr char kNoPsram[] = "Error: No PSRAM for the stock widget feed (it needs about 4.5 KB)";
 
 }  // namespace
 
@@ -412,12 +443,15 @@ void g2StockFeedTick() {
               (unsigned)(sf::kPageOpenHoldMs / 1000));
   }
   if (sResync.exchange(false, std::memory_order_acq_rel)) {
-    // Feed switched on or the metric list changed: a full batch, not a diff.
+    // Feed switched on, the metric list or the pad changed: a full batch, not
+    // a diff.
     abortBatch();
     sPolicy.sentThisLink = false;
     sPolicy.haveAttempted = false;
   }
-  updateConsumer(now, on && g != feed::Gate::Down && fwOk);
+  // Not gated on the link or the firmware: the sampler (and the hour of
+  // history the next connect sends) keeps going while the glasses are away.
+  updateConsumer(now, on, g == feed::Gate::Open);
 
   switch (g) {
     case feed::Gate::Down:
@@ -482,9 +516,9 @@ void g2StockFeedTick() {
 
   runBatch(*sc, generation, now);
 
-  const Current cur = currentBatch(sc->ownerSlot, sc->ownerHistory);
+  const Current cur = currentBatch(sc->ownerSlot);
   // Only a sample of the run this feed holds open (never one left over).
-  const bool hasData = cur.count > 0 && sMetricsHandle != 0;
+  const bool hasData = cur.count > 0 && sMetricsHandle.load(std::memory_order_acquire) != 0;
   const feed::Action action = feed::tick(sPolicy, sf::timing(sPageOpen, intervalSec()), on,
                                          hasData, true, generation, now, cur.digest);
   if (sForce.load(std::memory_order_acquire)) {
@@ -604,22 +638,23 @@ size_t written(int n, size_t room) {
 }
 
 // One line per saved metric at out[0..cap): what the tile shows now, or why
-// it is left out. Returns the length written. Must end at or before the
-// history tail (kRowsBytes), which readSlot fills for each metric.
+// it is left out. Returns the length written. Must end at or before the slot
+// tail (kRowsBytes), which readSlot fills for each metric.
 size_t formatRows(Scratch& sc, char* out, size_t cap, const sf::Selection& sel) {
   if (!cap) return 0;
   out[0] = '\0';
   size_t off = 0;
-  float* hist = cmdHistory(sc);
+  sf::Slot& slot = cmdSlot(sc);
+  const sf::Pad pad = padMode();
   for (uint8_t i = 0; i < sel.count && off + 1 < cap; i++) {
     const mc::MetricInfo* m = mc::info(sel.ids[i]);
     if (!m) continue;
     int n;
-    if (readSlot(sel.ids[i], sc.cmdSlot, hist, true, false)) {
-      const sf::Slot& s = sc.cmdSlot;
+    if (readSlot(sel.ids[i], slot, true, false, pad)) {
+      const sf::Slot& s = slot;
       n = snprintf(out + off, cap - off, "  %-4s %-20s %9.2f %-5s %+8.2f %-4s chart %.0f-%.0f, %u pts\n",
                    s.code, s.name, (double)s.value, m->unit, (double)s.change,
-                   trendWord(s.trend), (double)s.low, (double)s.high, (unsigned)s.pointCount);
+                   trendWord(s.trend), (double)s.low, (double)s.high, (unsigned)s.realPoints);
     } else {
       n = snprintf(out + off, cap - off, "  %-4s %-20s (no value on this device or yet; not shown)\n",
                    m->label, m->longName);
@@ -636,13 +671,18 @@ const char* setFeed(bool on) {
     sResync.store(true, std::memory_order_release);
     g2StockFeedWake();
     return "Glasses stock widget feed ON (saved): system metrics replace the stocks on the "
-           "right temple after connect, then on change (g2 stats interval; every 5 s while the "
-           "stock page is open). The stock tile must be in the glasses' dashboard layout.";
+           "right temple after connect, then on change (g2 stats interval; every 10 s while the "
+           "stock page is open). The chart keeps the last hour, also while the glasses are "
+           "away. The stock tile must be in the glasses' dashboard layout.";
   }
   sClearPending.store(true, std::memory_order_release);
+  // End the sampler run now (it clears the history), also while the G2 owner
+  // is stopped; a preview's warm-up no longer holds it.
+  sWarm.store(false, std::memory_order_release);
+  releaseConsumer();
   g2StockFeedWake();
-  return "Glasses stock widget feed off (saved). The widget is cleared (stock_total 0) on the "
-         "right temple now, or when it next connects";
+  return "Glasses stock widget feed off (saved). The chart history is dropped; the widget is "
+         "cleared (stock_total 0) on the right temple now, or when it next connects";
 }
 
 }  // namespace
@@ -665,22 +705,24 @@ const char* cmd_g2statsstatus(const String& /*args*/) {
   const char* fwNote = s.firmware[0] ? (s.firmwareOk ? " (has a fixture)" : " (no fixture: nothing is sent)")
                        : s.firmwareAsked ? " (asked the glasses; nothing is sent until it is known)"
                                          : " (nothing is sent until it is known)";
-  char* buf = sc->cmd.text;
+  char* buf = sc->cmd;
   size_t off = written(snprintf(
       buf, kRowsBytes,
-      "Glasses stock widget feed: %s (saved), every %u s on change, 5 s while the stock page is open\n"
+      "Glasses stock widget feed: %s (saved), every %u s on change, 10 s while the stock page is open\n"
+      "Chart: last hour, a point every 20 s, %u points, left padding %s (saved)\n"
       "Right temple: %s%s; firmware %s%s\n"
       "Stock page: %s (opened %u times)\n"
       "Metrics (saved): %s\n",
-      feedOn() ? "ON" : "off", (unsigned)intervalSec(),
+      feedOn() ? "ON" : "off", (unsigned)intervalSec(), (unsigned)sf::kFeedPoints,
+      sf::padName(padMode()),
       f.linkReady ? "ready" : "not ready",
       f.busy ? " (paused: another glasses session is active)" : "",
       s.firmware[0] ? s.firmware : "unknown", fwNote,
       s.pageOpen ? "open" : "closed", (unsigned)s.pageOpens, list), kRowsBytes);
   if (systemMetricsGeneration() == 0) {
     off += written(snprintf(buf + off, kRowsBytes - off,
-                            "  (no sample yet: the sampler runs while the feed is on and connected, "
-                            "or after g2 stats preview)\n"),
+                            "  (no sample yet: the sampler runs while the feed is on, from the "
+                            "first glasses connect after boot, or after g2 stats preview)\n"),
                    kRowsBytes - off);
   } else {
     off += formatRows(*sc, buf + off, kRowsBytes - off, sel);
@@ -711,7 +753,7 @@ const char* cmd_g2statspreview(const String& args) {
     return "No sample yet: the metrics sampler is starting. Run g2 stats preview again in a few "
            "seconds.";
   const sf::Selection sel = selection();
-  char* buf = sc->cmd.text;
+  char* buf = sc->cmd;
   size_t off = written(snprintf(buf, kRowsBytes,
                                 "Stock widget rows (code, name, value, change, trend, chart):\n"),
                        kRowsBytes);
@@ -725,31 +767,37 @@ const char* cmd_g2statspreview(const String& args) {
       total++;
     }
   }
-  if (firstShown == 0xFF ||
-      !readSlot(sel.ids[firstShown], sc->cmdSlot, cmdHistory(*sc), true, false)) {
+  const sf::Pad pad = padMode();
+  sf::Slot& slot = cmdSlot(*sc);
+  if (firstShown == 0xFF || !readSlot(sel.ids[firstShown], slot, true, false, pad)) {
     snprintf(buf + off, kTextBytes - off, "Nothing to send: no saved metric has a value yet.");
     return buf;
   }
-  // Encode right after the text (the slot holds its own copy of the history),
-  // move the payload to the end of the buffer and print its hex in place:
-  // two characters out per byte consumed, so it fits whenever the finished
-  // text does.
+  // Encode right after the text, short of the slot in the tail; then move the
+  // payload to the end of the buffer (over the slot, no longer needed) and
+  // print its hex in place: two characters out per byte consumed, so it fits
+  // whenever the finished text does.
   uint8_t* raw = reinterpret_cast<uint8_t*>(buf);
-  const size_t room = kTextBytes - off - 1;
-  const size_t n = sf::encodeSlot(sc->cmdSlot, total, 0, 0x01, raw + off + 1,
-                                  room < sf::kFeedPbBytes ? room : sf::kFeedPbBytes);
+  const size_t room = off + 1 < kRowsBytes ? kRowsBytes - off - 1 : 0;
+  const size_t n = room ? sf::encodeSlot(slot, total, 0, 0x01, raw + off + 1,
+                                         room < sf::kFeedPbBytes ? room : sf::kFeedPbBytes)
+                        : 0;
   if (!n) {
     snprintf(buf + off, kTextBytes - off, "Slot 0 does not encode (whitelist FAIL).");
     return buf;
   }
+  const unsigned realPoints = slot.realPoints, pointCount = slot.pointCount;
   uint8_t* pb = raw + kTextBytes - n;
   memmove(pb, raw + off + 1, n);
-  const bool valid = sf::validateMessagePb(pb, n);
-  char line[112];
+  const bool valid = sf::validateMessagePb(pb, n, nullptr, pad == sf::Pad::Gap);
+  char line[160];
   const size_t lineLen = written(
       snprintf(line, sizeof line,
-               "%u slots; slot 0: sid 0x01, %u B, %u fragment(s), whitelist %s (not sent):\n",
-               (unsigned)total, (unsigned)n, (unsigned)(n / 232 + 1), valid ? "pass" : "FAIL"),
+               "%u slots; slot 0: sid 0x01, %u B, %u fragment(s), chart %u points (%u real, "
+               "%u %s padding), whitelist %s (not sent):\n",
+               (unsigned)total, (unsigned)n, (unsigned)(n / 232 + 1), pointCount, realPoints,
+               pointCount > realPoints && realPoints ? pointCount - realPoints : 0u,
+               sf::padName(pad), valid ? "pass" : "FAIL"),
       sizeof line);
   if (off + lineLen + 2 * n + 1 > kTextBytes) {
     snprintf(buf + off, kTextBytes - off, "%s(the bytes do not fit this reply)", line);
@@ -780,10 +828,10 @@ const char* cmd_g2statssend(const String& args) {
   Scratch* sc = scratch();
   if (!sc) return kNoPsram;
   if (!sf::firmwareSupported(fw)) {
-    snprintf(sc->cmd.text, kTextBytes,
+    snprintf(sc->cmd, kTextBytes,
              "Error: Glasses firmware %s has no stock fixture (only 2.3.2.14 is fed), nothing sent.",
              fw[0] ? fw : "unknown");
-    return sc->cmd.text;
+    return sc->cmd;
   }
   const Status s = statusCopy();
   const uint32_t now = millis();
@@ -849,7 +897,7 @@ const char* cmd_g2statsinterval(const String& args) {
   a.trim();
   if (!a.length()) {
     snprintf(sReply, sizeof sReply,
-             "Stock widget feed interval: %u s (5 s while the stock page is open)",
+             "Stock widget feed interval: %u s (10 s while the stock page is open)",
              (unsigned)intervalSec());
     return sReply;
   }
@@ -858,6 +906,28 @@ const char* cmd_g2statsinterval(const String& args) {
     return "Error: invalid arguments — Usage: g2 stats interval [seconds 30-3600]  (default 60)";
   setSetting(gSettings.g2StockIntervalSec, (int)v);
   snprintf(sReply, sizeof sReply, "Stock widget feed interval: %u s (saved)", (unsigned)v);
+  return sReply;
+}
+
+const char* cmd_g2statspad(const String& args) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String a = args;
+  a.trim();
+  if (!a.length()) {
+    snprintf(sReply, sizeof sReply,
+             "Stock widget chart padding: %s (saved). gap = empty left part, flat = the oldest "
+             "point repeated, until an hour of history exists",
+             sf::padName(padMode()));
+    return sReply;
+  }
+  sf::Pad pad = sf::Pad::Gap;
+  if (!sf::parsePad(a.c_str(), pad))
+    return "Error: invalid arguments — Usage: g2 stats pad [gap|flat]  (default gap)";
+  setSetting(gSettings.g2StockPad, (int)pad);
+  sResync.store(true, std::memory_order_release);
+  if (feedOn()) g2StockFeedWake();
+  snprintf(sReply, sizeof sReply, "Stock widget chart padding: %s (saved)%s", sf::padName(pad),
+           feedOn() ? "; a full batch follows" : "");
   return sReply;
 }
 

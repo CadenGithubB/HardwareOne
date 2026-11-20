@@ -47,19 +47,20 @@ struct Raw {
 };
 
 struct MetricsState {
-  smc::History history[smc::kMetricCount];
+  smc::Series series[smc::kMetricCount];
   SystemMetricReading current[smc::kMetricCount];
   TaskCpuShare cpuRows[kCpuRows];
-  smc::Schedule schedule;
+  smc::Sampler sampler;
   smc::CpuWarm cpuWarm;
   uint32_t lastCpuPokeMs;
   uint32_t generation;
+  uint32_t points;  // history points taken this run
   // Storage figures, re-read at most every kStorageRefreshMs.
   uint32_t storageReadMs;
   bool storageRead;
   Raw sd;
   Raw lfs;
-  bool running;  // a run is in progress (some consumer open since the last start)
+  bool running;  // a run is in progress (smc::runStep)
 };
 
 MetricsState* sMetrics = nullptr;  // PSRAM, allocated by the tick, never freed
@@ -169,7 +170,10 @@ Raw readRing() {
   return Raw{(float)t.battery, 0.0f, 100.0f, true};
 }
 
-void takeSample(MetricsState& s, uint32_t nowMs) {
+// One sample of every metric. `plan.point`: this sample is on the history
+// grid and goes into the histories. `plan.refresh`: it is a refresh sample and
+// becomes the change baseline. Either way it updates the values shown.
+void takeSample(MetricsState& s, uint32_t nowMs, const smc::Plan& plan) {
   Raw raw[smc::kMetricCount];
   readCpu(s, raw[smc::index(SystemMetricId::Cpu)], raw[smc::index(SystemMetricId::Cpu0)],
           raw[smc::index(SystemMetricId::Cpu1)]);
@@ -199,15 +203,12 @@ void takeSample(MetricsState& s, uint32_t nowMs) {
   portENTER_CRITICAL(&sMetricsMux);
   for (size_t i = 0; i < smc::kMetricCount; ++i) {
     SystemMetricReading& r = s.current[i];
-    smc::History& h = s.history[i];
+    smc::Series& series = s.series[i];
+    const smc::Change c = smc::seriesSample(series, raw[i].available, raw[i].value, plan.point,
+                                            plan.refresh, smc::kMetrics[i].trendDeadband);
     r.sampledAtMs = nowMs;
     r.available = raw[i].available;
     if (raw[i].available) {
-      float previous = 0.0f;
-      const bool havePrevious = smc::historyLatest(h, previous);
-      const smc::Change c =
-          smc::changeSince(havePrevious, previous, raw[i].value, smc::kMetrics[i].trendDeadband);
-      smc::historyPush(h, raw[i].value);
       r.value = raw[i].value;
       r.delta = c.delta;
       r.trend = c.trend;
@@ -220,10 +221,11 @@ void takeSample(MetricsState& s, uint32_t nowMs) {
       r.rangeLow = smc::kMetrics[i].rangeLow;
       r.rangeHigh = smc::kMetrics[i].rangeHigh;
     }
-    r.historyCount = h.count;
+    r.historyCount = series.history.count;
   }
   ++s.generation;
   if (s.generation == 0) s.generation = 1;  // 0 means "no sample yet"
+  if (plan.point && ++s.points == 0) s.points = 1;
   portEXIT_CRITICAL(&sMetricsMux);
 }
 
@@ -232,15 +234,16 @@ void takeSample(MetricsState& s, uint32_t nowMs) {
 void systemMetricsTick() {
   const uint32_t nowMs = millis();
   portENTER_CRITICAL(&sMetricsMux);
-  const uint32_t intervalMs = smc::effectiveInterval(sConsumers);
+  const uint32_t refreshMs = smc::effectiveInterval(sConsumers);
   portEXIT_CRITICAL(&sMetricsMux);
 
-  if (intervalMs == 0) {
-    // Nobody is looking: stop. The task-CPU sampler idles on its own once
-    // the pokes stop (TASK_CPU_INTEREST_MS).
+  if (refreshMs == 0) {
+    // Nobody is looking: the run ends (the next one starts afresh). The
+    // task-CPU sampler idles on its own once the pokes stop
+    // (TASK_CPU_INTEREST_MS).
     if (sMetrics && sMetrics->running) {
       portENTER_CRITICAL(&sMetricsMux);
-      sMetrics->running = false;
+      (void)smc::runStep(sMetrics->running, false);
       portEXIT_CRITICAL(&sMetricsMux);
     }
     return;
@@ -250,7 +253,7 @@ void systemMetricsTick() {
     if (sAllocRetryMs != 0 && (uint32_t)(nowMs - sAllocRetryMs) < 10000UL) return;
     sAllocRetryMs = nowMs;
     // PSRAM only: on a board without it the sampler stays off (reads false)
-    // rather than taking ~5 KB of internal RAM.
+    // rather than taking ~11 KB of internal RAM.
     auto* block = static_cast<MetricsState*>(
         ps_alloc(sizeof(MetricsState), AllocPolicy::RequirePsram, "sysmetrics"));
     if (!block) return;
@@ -261,34 +264,37 @@ void systemMetricsTick() {
   }
   MetricsState& s = *sMetrics;
 
-  if (!s.running) {
-    // A new run: histories and change baselines start afresh, so a chart never
-    // joins samples across a stretch nobody sampled.
-    portENTER_CRITICAL(&sMetricsMux);
-    for (smc::History& h : s.history) smc::historyClear(h);
+  portENTER_CRITICAL(&sMetricsMux);
+  const smc::RunStep step = smc::runStep(s.running, true);
+  if (step == smc::RunStep::Start) {
+    // A new run: histories, change baselines and the history grid start
+    // afresh, so a chart never joins points across a stretch nobody sampled.
+    for (smc::Series& series : s.series) smc::seriesClear(series);
     memset(s.current, 0, sizeof(s.current));
     s.generation = 0;
-    s.running = true;
-    portEXIT_CRITICAL(&sMetricsMux);
-    s.schedule = smc::Schedule{0, false};
+    s.points = 0;
+  }
+  portEXIT_CRITICAL(&sMetricsMux);
+  if (step == smc::RunStep::Start) {
+    s.sampler = smc::Sampler{};
     s.storageRead = false;
   }
 
   // Keep the shared 500 ms task-CPU sampler interested only around a sample:
-  // within kCpuWarmMs of it (the whole time at the 5 s interval).
-  if (smc::cpuWarmWanted(s.schedule, nowMs, intervalMs) &&
+  // within kCpuWarmMs of it (the whole time at the fast interval).
+  if (smc::cpuWarmWanted(s.sampler, nowMs, refreshMs) &&
       (!s.cpuWarm.poked || (uint32_t)(nowMs - s.lastCpuPokeMs) >= kCpuPokeEveryMs)) {
     (void)taskCpuShares(nullptr, 0, nullptr, nullptr);  // registers interest only
     smc::cpuPoke(s.cpuWarm, nowMs);
     s.lastCpuPokeMs = nowMs;
   }
 
-  if (!smc::sampleDue(s.schedule, nowMs, intervalMs)) return;
+  const smc::Plan plan = smc::plan(s.sampler, nowMs, refreshMs);
+  if (!plan.sample) return;
   // Wait (at most kCpuSettleMs) until the CPU sampler has a share to serve.
   if (!smc::cpuSettled(s.cpuWarm, nowMs)) return;
-  s.schedule.lastSampleMs = nowMs;
-  s.schedule.sampled = true;
-  takeSample(s, nowMs);
+  smc::sampleTaken(s.sampler, plan, nowMs);
+  takeSample(s, nowMs, plan);
   // The read in takeSample also registered interest.
   smc::cpuPoke(s.cpuWarm, nowMs);
   s.lastCpuPokeMs = nowMs;
@@ -328,7 +334,8 @@ uint8_t systemMetricsHistory(SystemMetricId id, float* out, size_t cap) {
   const size_t i = smc::index(id);
   if (i >= smc::kMetricCount || !out || cap == 0) return 0;
   portENTER_CRITICAL(&sMetricsMux);
-  const uint8_t n = (sMetrics && sMetrics->running) ? smc::historyCopy(sMetrics->history[i], out, cap) : 0;
+  const uint8_t n =
+      (sMetrics && sMetrics->running) ? smc::historyCopy(sMetrics->series[i].history, out, cap) : 0;
   portEXIT_CRITICAL(&sMetricsMux);
   return n;
 }
@@ -338,4 +345,11 @@ uint32_t systemMetricsGeneration() {
   const uint32_t g = (sMetrics && sMetrics->running) ? sMetrics->generation : 0;
   portEXIT_CRITICAL(&sMetricsMux);
   return g;
+}
+
+uint32_t systemMetricsPointGeneration() {
+  portENTER_CRITICAL(&sMetricsMux);
+  const uint32_t p = (sMetrics && sMetrics->running) ? sMetrics->points : 0;
+  portEXIT_CRITICAL(&sMetricsMux);
+  return p;
 }

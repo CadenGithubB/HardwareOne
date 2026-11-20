@@ -6,8 +6,9 @@
 #include <string.h>
 
 // Dependency-free core of the system metrics sampler (System_Metrics.cpp):
-// the metric table, the 60-sample history ring, change-since-last-sample and
-// trend, the consumer table that sets the sample interval, and the due/warm
+// the metric table, the 185-point history ring on a fixed 20 s clock, change
+// over the last refresh interval and trend, the consumer table that sets how often
+// the shown value is refreshed, the run bookkeeping, and the due/warm
 // schedule. No Arduino, ESP-IDF or FreeRTOS types, so the host test
 // (test_system_metrics_core.cpp) runs the same arithmetic the device runs.
 
@@ -31,12 +32,17 @@ enum class SystemMetricId : uint8_t {
 namespace system_metrics_core {
 
 inline constexpr size_t kMetricCount = 12;
-inline constexpr uint8_t kHistoryLen = 60;
+// History: one point per metric every kHistoryStepMs on the sampler's own
+// clock, whatever the consumers' intervals; kHistoryLen points = about an
+// hour (the glasses' stock chart takes at most 185).
+inline constexpr uint8_t kHistoryLen = 185;
+inline constexpr uint32_t kHistoryStepMs = 20000;
 
-// Sample intervals a consumer may ask for. Fast: the expanded stock page is
-// open; slow: the tile only. Requests are clamped to [kMinIntervalMs,
-// kMaxIntervalMs]; the sampler runs at the fastest open consumer's interval.
-inline constexpr uint32_t kFastIntervalMs = 5000;
+// Refresh intervals a consumer may ask for (the value it shows). Fast: the
+// expanded stock page is open; slow: the tile only. Requests are clamped to
+// [kMinIntervalMs, kMaxIntervalMs]. The sampler samples at the fastest open
+// consumer's interval and at every history point, whichever comes first.
+inline constexpr uint32_t kFastIntervalMs = 10000;
 inline constexpr uint32_t kSlowIntervalMs = 60000;
 inline constexpr uint32_t kMinIntervalMs = 1000;
 inline constexpr uint32_t kMaxIntervalMs = 600000;
@@ -106,9 +112,10 @@ inline bool idFromLabel(const char* label, SystemMetricId& out) {
 }
 
 // ── History ring ────────────────────────────────────────────────────────────
-// The last kHistoryLen available samples of one metric. A sample the sampler
-// could not read is not pushed (no fake fill-ins), so a metric's history can
-// hold fewer samples than another's.
+// The last kHistoryLen history points of one metric, one per kHistoryStepMs
+// (HistoryClock below). A point the sampler could not read is not pushed (no
+// fake fill-ins), so a metric's history can hold fewer points than another's
+// and its time axis then runs slightly short of kHistoryLen steps.
 struct History {
   float v[kHistoryLen];
   uint8_t head;   // next write slot
@@ -155,6 +162,40 @@ inline Change changeSince(bool havePrevious, float previous, float current, floa
   if (d > deadband) return Change{d, 1};
   if (d < -deadband) return Change{d, -1};
   return Change{d, 0};
+}
+
+// ── One metric's series ────────────────────────────────────────────────────
+// The history ring plus the change baseline: the value at the last refresh
+// sample (the consumers' interval, Plan::refresh), so the change shown is the
+// change over the last refresh interval, as the wearer sees it from one
+// refresh of the tile to the next. A history-only sample (Plan::point without
+// Plan::refresh) updates the value and the change against that baseline but
+// does not move it. Only a sample on a history point is pushed into the ring.
+struct Series {
+  History history;
+  float last;     // the change baseline (value at the last refresh sample)
+  bool haveLast;  // `last` is meaningful
+};
+
+inline void seriesClear(Series& s) {
+  historyClear(s.history);
+  s.last = 0.0f;
+  s.haveLast = false;
+}
+
+// One sample of one metric. Unavailable: nothing is pushed and the baseline
+// stays (the change is 0, flat). Returns the change since the baseline; a
+// refresh sample (or the first available one) then becomes the baseline.
+inline Change seriesSample(Series& s, bool available, float value, bool point, bool refresh,
+                           float deadband) {
+  if (!available) return Change{0.0f, 0};
+  const Change c = changeSince(s.haveLast, s.last, value, deadband);
+  if (refresh || !s.haveLast) {
+    s.last = value;
+    s.haveLast = true;
+  }
+  if (point) historyPush(s.history, value);
+  return c;
 }
 
 // ── Value helpers ───────────────────────────────────────────────────────────
@@ -255,10 +296,94 @@ inline uint32_t msUntilDue(const Schedule& s, uint32_t nowMs, uint32_t intervalM
   return intervalMs - (uint32_t)(nowMs - s.lastSampleMs);
 }
 
+// ── History clock ───────────────────────────────────────────────────────────
+// History points fall on a fixed grid of kHistoryStepMs that starts with the
+// first sample of a run, independent of the consumers' refresh intervals and
+// of how unevenly the main loop ticks. A point taken late (a slow lap, the
+// CPU settle wait) keeps the grid: the next one is due at the next grid step
+// after it. Steps missed entirely (a main-loop stall longer than a step) are
+// skipped, not filled in, so the grid never drifts.
+struct HistoryClock {
+  uint32_t nextMs;  // the next grid step
+  bool started;     // nextMs is meaningful
+};
+
+inline bool pointDue(const HistoryClock& c, uint32_t nowMs) {
+  return !c.started || (int32_t)(nowMs - c.nextMs) >= 0;
+}
+
+inline uint32_t msUntilPoint(const HistoryClock& c, uint32_t nowMs) {
+  return pointDue(c, nowMs) ? 0 : c.nextMs - nowMs;
+}
+
+inline void pointTaken(HistoryClock& c, uint32_t nowMs) {
+  if (!c.started) {
+    c.started = true;
+    c.nextMs = nowMs + kHistoryStepMs;
+    return;
+  }
+  const uint32_t late = nowMs - c.nextMs;  // pointDue: >= 0
+  c.nextMs += (late / kHistoryStepMs + 1) * kHistoryStepMs;
+}
+
+// ── Sampler schedule ────────────────────────────────────────────────────────
+// Two independent clocks. Refresh: the fastest consumer's interval since the
+// last refresh sample (the value and change the consumers show). History: the
+// fixed grid above. A sample is taken when either is due; only a history
+// point pushes into the histories, only a refresh sample moves the change
+// baseline and the refresh schedule.
+struct Sampler {
+  Schedule refresh;    // the last refresh sample, for the consumers' interval
+  HistoryClock clock;  // the history grid
+};
+
+struct Plan {
+  bool sample;   // take a sample now
+  bool point;    // and push it into the histories
+  bool refresh;  // and it is a refresh sample (moves the change baseline)
+};
+
+inline Plan plan(const Sampler& s, uint32_t nowMs, uint32_t refreshMs) {
+  const bool point = pointDue(s.clock, nowMs);
+  const bool refresh = sampleDue(s.refresh, nowMs, refreshMs);
+  return Plan{point || refresh, point, refresh};
+}
+
+inline void sampleTaken(Sampler& s, const Plan& p, uint32_t nowMs) {
+  if (p.refresh) s.refresh = Schedule{nowMs, true};
+  if (p.point) pointTaken(s.clock, nowMs);
+}
+
+inline uint32_t msUntilSample(const Sampler& s, uint32_t nowMs, uint32_t refreshMs) {
+  const uint32_t a = msUntilDue(s.refresh, nowMs, refreshMs);
+  const uint32_t b = msUntilPoint(s.clock, nowMs);
+  return a < b ? a : b;
+}
+
 // True while the task-CPU sampler should be kept interested: within
 // kCpuWarmMs of the next sample (always, at the fast interval).
-inline bool cpuWarmWanted(const Schedule& s, uint32_t nowMs, uint32_t intervalMs) {
-  return msUntilDue(s, nowMs, intervalMs) <= kCpuWarmMs;
+inline bool cpuWarmWanted(const Sampler& s, uint32_t nowMs, uint32_t refreshMs) {
+  return msUntilSample(s, nowMs, refreshMs) <= kCpuWarmMs;
+}
+
+// ── Run ─────────────────────────────────────────────────────────────────────
+// A run lasts while at least one consumer is open. The histories live for the
+// run: the tick that sees the first consumer of a new run starts it afresh
+// (every series and the history grid cleared), so a chart never joins points
+// across a stretch nobody sampled. A consumer that stays open (the stock feed
+// while it is on, connected or not) keeps the run, and so the history, going.
+enum class RunStep : uint8_t { Idle, Start, Continue };
+
+inline RunStep runStep(bool& running, bool anyConsumer) {
+  if (!anyConsumer) {
+    running = false;
+    return RunStep::Idle;
+  }
+  if (!running) {
+    running = true;
+    return RunStep::Start;
+  }
+  return RunStep::Continue;
 }
 
 // Whether the task-CPU sampler has been interested long enough to serve a

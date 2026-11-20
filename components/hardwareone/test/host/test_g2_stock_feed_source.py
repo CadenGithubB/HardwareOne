@@ -12,7 +12,14 @@ compiled; comments and string literals are blanked first):
 - the wire boundary re-validates every payload against the whitelist before
   sendPbFragmented, and only on the right temple;
 - the dispatcher hands it sid 0x01 envelopes and still runs handleEnvelope;
-- the feed is off by default (settings constructor and settings row).
+- the feed is off by default (settings constructor and settings row);
+- the sampler consumer is not gated on the glasses link or firmware (a
+  disconnect must not end the sampler run and so clear the chart history):
+  the consumer is released only by updateConsumer (feed off and no warm-up),
+  setFeed (feed off) and g2StockFeedOwnerStopped (feed off), never from a
+  link-gated branch of g2StockFeedTick;
+- the owner's exit path calls g2StockFeedOwnerStopped() once, after the lap
+  loop (nothing else would drop the page-open cadence while it is stopped).
 
 --component points the suite at another component directory.
 """
@@ -114,6 +121,48 @@ def check(component: Path) -> list[str]:
     if rx < 0 or handle < 0 or rx > handle:
         errors.append("G2_Glasses.cpp: g2DispatchCompleteEnvelope must hand sid 0x01 to "
                       "g2StockFeedOnRx and then still run handleEnvelope")
+
+    feed = text(component / "G2_StockFeed.cpp")
+    tick = function_body(feed, "void g2StockFeedTick(")
+    calls = re.findall(r"\bupdateConsumer\s*\(([^;]*)\)\s*;", tick)
+    if len(calls) != 1:
+        errors.append(f"G2_StockFeed.cpp: g2StockFeedTick calls updateConsumer {len(calls)} times, want 1")
+    elif re.search(r"\bfwOk\b|Gate::Down|\bready\b", calls[0].split(",")[1] if "," in calls[0] else ""):
+        errors.append("G2_StockFeed.cpp: the sampler consumer is gated on the link or firmware")
+    consumer = function_body(feed, "void updateConsumer(")
+    if "samplerWanted(" not in consumer:
+        errors.append("G2_StockFeed.cpp: updateConsumer no longer asks sf::samplerWanted")
+    # Every releaseConsumer() call must sit in one of the allowed functions
+    # (and only there: the release helper's own definition aside).
+    allowed = []
+    for sig in ("void updateConsumer(", "const char* setFeed(", "void g2StockFeedOwnerStopped("):
+        body = function_body(feed, sig)
+        if not body:
+            errors.append(f"G2_StockFeed.cpp: {sig.rstrip('(')} is missing")
+            continue
+        start = feed.find(body)
+        allowed.append((start, start + len(body)))
+    for m in re.finditer(r"\breleaseConsumer\s*\(\s*\)\s*;", feed):
+        if not any(a <= m.start() < b for a, b in allowed):
+            errors.append(f"G2_StockFeed.cpp:{line_of(feed, m.start())}: releaseConsumer() outside "
+                          "updateConsumer / setFeed / g2StockFeedOwnerStopped (a link-gated close "
+                          "would clear the chart history on disconnect)")
+    stopped = function_body(feed, "void g2StockFeedOwnerStopped(")
+    if stopped and not re.search(r"if\s*\(\s*!\s*feedOn\s*\(\s*\)\s*\)\s*\{[^}]*releaseConsumer\s*\(",
+                                 stopped):
+        errors.append("G2_StockFeed.cpp: g2StockFeedOwnerStopped releases the consumer other than "
+                      "on feed off")
+
+    stops = [m.start() for m in re.finditer(r"\bg2StockFeedOwnerStopped\s*\(\s*\)\s*;", glasses)]
+    owner_start = glasses.find(owner) if owner else -1
+    loop = function_body(owner, "while (!gBeatTaskStop)") if owner else ""
+    loop_end = owner_start + owner.find(loop) + len(loop) if loop else -1
+    exit_at = owner_start + owner.rfind("vTaskDelete(") if owner else -1
+    if len(stops) != 1:
+        errors.append(f"G2_Glasses.cpp: g2StockFeedOwnerStopped() called {len(stops)} times, want 1")
+    elif not (owner_start >= 0 and loop and loop_end <= stops[0] < exit_at):
+        errors.append("G2_Glasses.cpp: g2StockFeedOwnerStopped() is not on the owner's exit path "
+                      "(after the lap loop, before vTaskDelete)")
 
     settings = (component / "System_Settings.h").read_text(encoding="utf-8")
     if not re.search(r"\bg2StockFeed\s*\(\s*false\s*\)", settings):

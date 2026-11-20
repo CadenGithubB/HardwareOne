@@ -755,7 +755,9 @@ static constexpr CommandModule gCommandModules[] = {
     "about 30 KB. The glasses' own stock widget can show system metrics instead of share prices: "
     "g2 stats status and g2 stats preview show the rows and bytes; g2 stats send (admin) sends one "
     "batch; g2 stats feed [on|off] (admin, saved, off by default) feeds it on change, g2 stats "
-    "metrics <labels> and g2 stats interval <seconds> (admin, saved) choose what and how often. "
+    "metrics <labels> and g2 stats interval <seconds> (admin, saved) choose what and how often; "
+    "the chart is the last hour (a point every 20 s, kept while the glasses are away) and g2 stats "
+    "pad [gap|flat] (admin, saved) fills its left part until an hour exists. "
     "The remaining g2* commands are low-level protocol probes and "
     "diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).", g2Commands,           &g2CommandsCount, 0, nullptr },
   { "ring",       "Even R1 ring link, health and controls", "The Even R1 smart ring over BLE, through a serialized, "

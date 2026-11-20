@@ -164,8 +164,9 @@ target_include_directories(heap_low_core_tests PRIVATE ../..)
 target_compile_options(heap_low_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
 # System metrics sampler core (System_MetricsCore.h, stock-feed phase 3): the
-# metric table, 60-sample history ring and wrap, change/trend, consumer
-# intervals and the CPU warm-up schedule.
+# metric table, 185-point history ring and wrap, the fixed 20 s history clock
+# under uneven ticks, change/trend, consumer intervals, the run and the CPU
+# warm-up schedule.
 add_executable(system_metrics_core_tests test_system_metrics_core.cpp)
 set_target_properties(system_metrics_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
@@ -416,8 +417,10 @@ target_compile_options(g2_feed_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
 # Stock widget fed with system metrics (G2_StockFeedCore.h): byte-exact
-# against the Even app capture fixtures (test values), clamps, whitelist
-# re-parse, acks and page-state pushes, command arguments, feed gating.
+# against the Even app capture fixtures (test values), the 185-point
+# right-anchored chart window with gap/flat padding, clamps, whitelist
+# re-parse (NaN only as a gap prefix), acks and page-state pushes, command
+# arguments, feed gating, history kept across a glasses disconnect.
 add_executable(g2_stock_feed_core_tests test_g2_stock_feed_core.cpp)
 set_target_properties(g2_stock_feed_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

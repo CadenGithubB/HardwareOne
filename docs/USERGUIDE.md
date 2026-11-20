@@ -1980,20 +1980,33 @@ g2 stats send                   - Admin: send one batch of the saved metrics now
 g2 stats feed [on|off]          - Admin: feed the stock widget with system metrics (saved, off by default)
 g2 stats metrics [list|default] - Admin: up to 9 metrics, in order (saved)
 g2 stats interval [seconds]     - Admin: least time between sends of changed values, 30-3600 (default 60)
+g2 stats pad [gap|flat]         - Admin: how the chart's left part is filled before an hour exists (saved, default gap)
 ```
 
 **Stock widget as a system-stats display.** The glasses' own stock widget (dashboard tile and
 expanded stock page, stock firmware 2.3.2.14 only) can show HardwareOne's system metrics in place of
 share prices: each metric is one "stock" with its label as the ticker (row 1), its long name as the
-company (row 2), the value as the price, the change since the previous sample as the change with an
-up/down/flat arrow, and its last 60 samples as the chart (percentages on a fixed 0-100 scale).
+company (row 2), the value as the price, the change over the last refresh interval (60 s on the tile,
+10 s with the page open) as the change with an up/down/flat arrow, and its last hour as the chart (percentages on a fixed 0-100 scale).
 `g2 stats feed on` (admin, saved, off by default) sends a full set to the right temple after every
-connect, then whenever a shown value changed, at most once per `g2 stats interval` (default 60 s)
-and every 5 s while the glasses report the expanded stock page open. It pauses while Even AI,
+connect, then whenever a shown value changed or a new chart point was taken (so the chart scrolls
+even when every value is steady), at most once per `g2 stats interval` (default 60 s)
+and every 10 s while the glasses report the expanded stock page open. It pauses while Even AI,
 Conversate, the native terminal, a native note or QuickNote use the glasses, and waits for the
-glasses' ack to each stock before sending the next (one retry after 3 s). The 5 s cadence ends when
+glasses' ack to each stock before sending the next (one retry after 3 s). The 10 s cadence ends when
 the glasses report the page closed, or 90 s after their last page update (a display that times out
-does not report it). A set that was cut short (a lost ack or a failed write) goes again after a
+does not report it).
+
+The chart is always the glasses' full 185 points: one point every 20 s (about an hour), taken on
+the portable's own clock whatever the send cadence, newest point at the right edge, so the line
+scrolls left as time passes; the rightmost point is the value shown. While the feed is on the
+portable keeps sampling when the glasses are off or out of range, so a reconnect shows the whole last
+hour. `g2 stats feed off` and a reboot of the portable drop the history (it is not saved). Until an
+hour has been collected the left part is padded, chosen with `g2 stats pad` (admin, saved):
+`gap` (default) leaves it empty (sent as NaN points; how the lens draws them is not yet confirmed)
+and `flat` repeats the oldest point. A sample a metric cannot read adds no point, so its time axis
+then runs slightly short of the hour. A full set is 9 stocks of about 840 bytes each (4 BLE
+fragments), sent one at a time, which is why the page-open cadence is 10 s rather than 5 s. A set that was cut short (a lost ack or a failed write) goes again after a
 clear, so the tile can be blank for a second or two. `g2 stats feed off` clears the widget. The default metrics, in order, are `CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING` (CPU load,
 internal RAM used, PSRAM used, SD card used, flash storage used, chip temperature, BLE links in use,
 ESP-NOW peers up, R1 ring battery); `CPU0`, `CPU1` (per core) and `HBLK` (largest internal RAM block,

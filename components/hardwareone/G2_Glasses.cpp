@@ -10493,9 +10493,10 @@ bool g2StockFeedRightLink(uint32_t* generation, bool* busy, char* firmware, size
   return link.rightReady && link.rightGeneration != 0;
 }
 
-bool g2StockFeedWireSend(uint32_t generation, const uint8_t* pb, size_t len) {
-  // Last gate before the radio: only a whitelisted stock or clear message.
-  if (!generation || !hw1_g2_stock_feed::validateMessagePb(pb, len)) return false;
+bool g2StockFeedWireSend(uint32_t generation, const uint8_t* pb, size_t len, bool gapPrefix) {
+  // Last gate before the radio: only a whitelisted stock or clear message
+  // (a NaN chart prefix only for a gap-padded window).
+  if (!generation || !hw1_g2_stock_feed::validateMessagePb(pb, len, nullptr, gapPrefix)) return false;
   return sendPbFragmented(gR, allocSeq(), hw1_g2_stock_feed::kSid, G2_FLAG_REQUEST,
                           pb, len, generation);
 }
@@ -15547,6 +15548,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
   portENTER_CRITICAL(&gConversateMux);
   gConversateRequest = 0;
   portEXIT_CRITICAL(&gConversateMux);
+  g2StockFeedOwnerStopped();  // no lap would drop the page-open cadence now
   portENTER_CRITICAL(&gControlLifecycleMux);
   gBeatTaskHandle = nullptr;
   portEXIT_CRITICAL(&gControlLifecycleMux);
@@ -28612,7 +28614,9 @@ extern const CommandEntry g2Commands[] = {
   { "g2 stats metrics",  "Which metrics the stock widget shows, in order (saved).", true, cmd_g2statsmetrics,
     "Usage: g2 stats metrics [label,label,...|default]  (up to 9 of CPU CPU0 CPU1 HEAP HBLK PSRM SD LFS TEMP LINK MESH RING; default CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING)" },
   { "g2 stats interval", "How often the stock widget feed may send changed values (saved).", true, cmd_g2statsinterval,
-    "Usage: g2 stats interval [seconds 30-3600]  (default 60; 5 s while the stock page is open)" },
+    "Usage: g2 stats interval [seconds 30-3600]  (default 60; 10 s while the stock page is open)" },
+  { "g2 stats pad",      "How the stock chart's left part is filled before an hour of history exists (saved).", true, cmd_g2statspad,
+    "Usage: g2 stats pad [gap|flat]  (default gap: empty; flat: the oldest point repeated)" },
   { "g2sensors",    "Show device's sensor list on the G2 lens",        false, cmd_g2sensors },
   { "g2network",    "Show Network info page on the G2 lens",           false, cmd_g2network },
   { "g2settingspage","Show Settings inspector page on the G2 lens",    false, cmd_g2settingspage },

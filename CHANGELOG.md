@@ -16,13 +16,13 @@ everything user-visible since the v0.99.99.1 tag.
 ### Added
 - The G2 glasses' own stock widget can show system metrics instead of share prices (stock glasses
   firmware 2.3.2.14). Each metric is one stock: label as the ticker, long name as the company, value
-  as the price, change since the previous sample with its arrow, the last 60 samples as the chart.
+  as the price, change over the last refresh interval with its arrow, the last hour as the chart.
   New commands `g2 stats status`, `g2 stats preview`, and (admin) `g2 stats send`,
   `g2 stats feed [on|off]`, `g2 stats metrics <labels|default>`, `g2 stats interval <seconds>`;
   settings `g2StockFeed` (off by default in every build), `g2StockMetrics` (default
   `CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING`) and `g2StockIntervalSec` (default 60, 30-3600). The
   feed writes the right temple only: a full set after every connect, then on change at most once
-  per interval, every 5 s while the glasses report the expanded stock page open (until they report
+  per interval, every 10 s while the glasses report the expanded stock page open (until they report
   it closed or 90 s pass without a page update), paused during voice sessions and QuickNote, each
   stock acked by its magic before the next, one retry; feed off clears the widget. Encoder byte-exact against the Even app's messages (test fixtures); host-tested, not
   yet run on the glasses.
@@ -930,6 +930,18 @@ everything user-visible since the v0.99.99.1 tag.
   counters (`blerecords`) are kept as before. Host-tested; not yet run on hardware.
 
 ### Changed
+- G2 stock widget chart: always the glasses' full 185-point window, newest point at the right edge
+  so the line scrolls left (the glasses place points at a fixed step, so 60 points filled only the
+  left third). The history takes one point every 20 s on its own clock (about an hour), whatever
+  the send cadence, instead of one per sample; a new point counts as a change, so the chart
+  scrolls even when every shown value is steady (still at most one set per interval). The change
+  and arrow are the change over the refresh interval, not over the last 20 s point. While `g2 stats feed` is on, sampling continues with
+  the glasses disconnected, so a reconnect sends the whole last hour; only feed off or a reboot
+  drops it. Until an hour exists the left part is padded: new setting `g2StockPad` and command
+  `g2 stats pad gap|flat` (admin, saved; default gap = NaN points, which the whitelist accepts only
+  as that prefix; flat = the oldest point repeated). The page-open cadence is 10 s instead of 5 s
+  (a set is 9 stocks of about 840 B, 4 fragments each). PSRAM for the sampler and feed grows from
+  about 7.7 KB to about 15 KB; internal RAM unchanged. Host-tested; not yet seen on the lens.
 - Wi-Fi wins over the mesh on a worker: joined to Wi-Fi on another channel than its master, the
   worker pauses the mesh and `espnowstatus` says so (for example "master on 6, me on 11 (joined to
   <ssid>)"); it resumes by itself when the Wi-Fi link ends. While a worker has a live, sealed session

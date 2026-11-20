@@ -329,55 +329,302 @@ static MetricInput metric(SystemMetricId id, float value, float delta, int8_t tr
   return in;
 }
 
+static constexpr int kLast = kFeedPoints - 1;  // the window's newest point
+
 static void testClamps() {
   Slot s;
-  float hist[75];
-  for (int i = 0; i < 75; i++) hist[i] = (float)i;
-  // History is cut to the newest 60; the last point is the value shown.
-  CHECK(makeSlot(metric(SystemMetricId::Cpu, 42.5f, 1.25f, 1, hist, 75), s));
-  CHECK(s.pointCount == 60 && s.points[0] == 15.0f && s.points[59] == 42.5f);
+  float hist[200];
+  for (int i = 0; i < 200; i++) hist[i] = (float)(i % 100);
+  // The window is the newest 185; the last point is the value shown.
+  CHECK(makeSlot(metric(SystemMetricId::Cpu, 42.5f, 1.25f, 1, hist, 200), Pad::Gap, s));
+  CHECK(s.pointCount == kFeedPoints && s.realPoints == kFeedPoints);
+  CHECK(s.points[0] == 15.0f && s.points[kLast - 1] == 98.0f && s.points[kLast] == 42.5f);
   CHECK(std::strcmp(s.code, "CPU") == 0 && std::strcmp(s.name, "CPU load") == 0);
   CHECK(s.low == 0.0f && s.high == 100.0f && s.trend == 1 && s.change == 1.25f);
   // 0 -> 0.01 (the glasses draw exactly 0 as "-"), NaN and negatives too.
-  CHECK(makeSlot(metric(SystemMetricId::Heap, 0.0f, -0.5f, -1, hist, 3), s));
-  CHECK(s.value == kMinShownValue && s.trend == 2 && s.points[2] == kMinShownValue);
-  CHECK(makeSlot(metric(SystemMetricId::Heap, NAN, NAN, 0, hist, 3), s));
+  CHECK(makeSlot(metric(SystemMetricId::Heap, 0.0f, -0.5f, -1, hist, 3), Pad::Gap, s));
+  CHECK(s.value == kMinShownValue && s.trend == 2 && s.points[kLast] == kMinShownValue);
+  CHECK(makeSlot(metric(SystemMetricId::Heap, NAN, NAN, 0, hist, 3), Pad::Gap, s));
   CHECK(s.value == kMinShownValue && s.change == 0.0f && s.trend == 0);
-  CHECK(makeSlot(metric(SystemMetricId::Temp, -12.0f, 0.0f, 0, hist, 3, -40.0f, 125.0f), s));
+  CHECK(makeSlot(metric(SystemMetricId::Temp, -12.0f, 0.0f, 0, hist, 3, -40.0f, 125.0f), Pad::Gap, s));
   CHECK(s.value == kMinShownValue && s.low == 0.0f);
   // Percentages: fixed 0-100 whatever the sampler says, value capped at 100.
-  CHECK(makeSlot(metric(SystemMetricId::Psram, 130.0f, 0.0f, 0, hist, 0, 5.0f, 50.0f), s));
-  CHECK(s.value == 100.0f && s.low == 0.0f && s.high == 100.0f && s.pointCount == 1);
+  // No history yet: the chart is the value alone, not padded.
+  CHECK(makeSlot(metric(SystemMetricId::Psram, 130.0f, 0.0f, 0, hist, 0, 5.0f, 50.0f), Pad::Gap, s));
+  CHECK(s.value == 100.0f && s.low == 0.0f && s.high == 100.0f);
+  CHECK(s.pointCount == 1 && s.realPoints == 0 && s.points[0] == 100.0f);
   // Negative and out-of-range points are pulled into the chart range.
   const float wild[] = {-5.0f, 250.0f, NAN, 50.0f};
-  CHECK(makeSlot(metric(SystemMetricId::Sd, 50.0f, 0.0f, 0, wild, 4), s));
-  CHECK(s.points[0] == 0.0f && s.points[1] == 100.0f && s.points[2] == 0.0f && s.points[3] == 50.0f);
+  CHECK(makeSlot(metric(SystemMetricId::Sd, 50.0f, 0.0f, 0, wild, 4), Pad::Gap, s));
+  CHECK(s.points[kLast - 3] == 0.0f && s.points[kLast - 2] == 100.0f &&
+        s.points[kLast - 1] == 0.0f && s.points[kLast] == 50.0f);
   // Count metrics: range from the sampler, grown to fit the value.
-  CHECK(makeSlot(metric(SystemMetricId::Links, 3.0f, 1.0f, 1, nullptr, 0, 0.0f, 0.0f), s));
+  CHECK(makeSlot(metric(SystemMetricId::Links, 3.0f, 1.0f, 1, nullptr, 0, 0.0f, 0.0f), Pad::Gap, s));
   CHECK(s.low == 0.0f && s.high == 3.0f && s.value == 3.0f);
-  CHECK(makeSlot(metric(SystemMetricId::Mesh, 0.0f, 0.0f, 0, nullptr, 0, 0.0f, 0.0f), s));
+  CHECK(makeSlot(metric(SystemMetricId::Mesh, 0.0f, 0.0f, 0, nullptr, 0, 0.0f, 0.0f), Pad::Gap, s));
   CHECK(s.high > s.low && s.value == kMinShownValue);
   // Change bounded.
-  CHECK(makeSlot(metric(SystemMetricId::HeapBlock, 10.0f, 1.0e7f, 1, nullptr, 0, 0.0f, 512.0f), s));
+  CHECK(makeSlot(metric(SystemMetricId::HeapBlock, 10.0f, 1.0e7f, 1, nullptr, 0, 0.0f, 512.0f), Pad::Gap, s));
   CHECK(s.change == kMaxChange && s.high == 512.0f);
   // Unavailable metrics are never shown.
   MetricInput off = metric(SystemMetricId::Cpu1, 5.0f, 0.0f, 0, nullptr, 0);
   off.available = false;
-  CHECK(!makeSlot(off, s));
-  // Every metric's slot fits the feed buffer and passes the whitelist, labels <= 4.
+  CHECK(!makeSlot(off, Pad::Gap, s));
+  // Every metric's slot fits the feed buffer and passes the whitelist, labels
+  // <= 4: a part-filled window in either pad mode, and a full one.
   for (const auto& m : system_metrics_core::kMetrics) {
-    float h[60];
-    for (int i = 0; i < 60; i++) h[i] = (float)(i % 7) * 3.0f;
-    Slot slot;
-    CHECK(makeSlot(metric(m.id, 12.345f, -0.5f, -1, h, 60, 0.0f, 64.0f), slot));
-    CHECK(std::strlen(slot.code) <= kFeedCodeBytes && std::strlen(slot.code) > 0);
-    uint8_t buf[kFeedPbBytes];
-    const size_t n = encodeSlot(slot, kMaxSlots, kMaxSlots - 1, 255, buf, sizeof buf);
-    CHECK(n > 0 && n <= kFeedPbBytes);
-    Parsed p;
-    CHECK(validateMessagePb(buf, n, &p) && p.pointCount == 60 && p.total == 9 && p.num == 8);
-    CHECK(std::strcmp(p.code, m.label) == 0);
+    float h[kFeedPoints];
+    for (int i = 0; i < kFeedPoints; i++) h[i] = (float)(i % 7) * 3.0f;
+    for (uint8_t real : {(uint8_t)60, (uint8_t)kFeedPoints}) {
+      for (Pad pad : {Pad::Gap, Pad::Flat}) {
+        Slot slot;
+        CHECK(makeSlot(metric(m.id, 12.345f, -0.5f, -1, h, real, 0.0f, 64.0f), pad, slot));
+        CHECK(std::strlen(slot.code) <= kFeedCodeBytes && std::strlen(slot.code) > 0);
+        uint8_t buf[kFeedPbBytes];
+        const size_t n = encodeSlot(slot, kMaxSlots, kMaxSlots - 1, 255, buf, sizeof buf);
+        CHECK(n > 0 && n <= kFeedPbBytes);
+        CHECK(n > 3 * 232 && n < 4 * 232);  // 4 fragments
+        Parsed p;
+        CHECK(validateMessagePb(buf, n, &p, pad == Pad::Gap) && p.pointCount == kFeedPoints &&
+              p.total == 9 && p.num == 8);
+        CHECK(p.padCount == (pad == Pad::Gap ? kFeedPoints - real : 0));
+        CHECK(std::strcmp(p.code, m.label) == 0);
+        // A gap-padded window passes only with the gap flag.
+        CHECK(validateMessagePb(buf, n) == (pad == Pad::Flat || real == kFeedPoints));
+      }
+    }
   }
+  // The largest slot the feed can build (31-byte name, magic >= 128) fits.
+  Slot big;
+  float h[kFeedPoints];
+  for (int i = 0; i < kFeedPoints; i++) h[i] = 1.0f;
+  CHECK(makeSlot(metric(SystemMetricId::Cpu, 50.0f, 0.0f, 0, h, kFeedPoints), Pad::Gap, big));
+  std::memcpy(big.code, "ABCD", 5);
+  std::memset(big.name, 'N', kFeedNameBytes);
+  big.name[kFeedNameBytes] = '\0';
+  uint8_t buf[kFeedPbBytes];
+  const size_t bigLen = encodeSlot(big, kMaxSlots, 0, 200, buf, sizeof buf);
+  CHECK(bigLen == 837 && bigLen <= kFeedPbBytes && validateMessagePb(buf, bigLen));
+}
+
+// ------------------------------------------------------------- window
+
+static Slot slotOf(const float* hist, uint8_t n, float value, Pad pad) {
+  Slot s;
+  CHECK(makeSlot(metric(SystemMetricId::Cpu, value, 0.0f, 0, hist, n), pad, s));
+  return s;
+}
+
+static Bytes encoded(const Slot& s, uint8_t magic = 7) {
+  uint8_t buf[kFeedPbBytes];
+  const size_t n = encodeSlot(s, 3, 0, magic, buf, sizeof buf);
+  return Bytes(buf, buf + n);
+}
+
+static void putPoint(Bytes& b, int index, uint32_t bits) {
+  const size_t at = b.size() - 4u * kFeedPoints + 4u * (size_t)index;
+  for (int i = 0; i < 4; i++) b[at + i] = (uint8_t)(bits >> (8 * i));
+}
+
+static void testWindow() {
+  // Gap: one real point, 184 canonical NaN on the left, the value at the right.
+  const float one[] = {40.0f};
+  Slot s = slotOf(one, 1, 42.0f, Pad::Gap);
+  CHECK(s.pointCount == kFeedPoints && s.realPoints == 1);
+  for (int i = 0; i < kLast; i++) CHECK(isGapPoint(s.points[i]));
+  CHECK(s.points[kLast] == 42.0f);
+  Bytes pb = encoded(s);
+  CHECK(pb == hex(kWindowGap1Pb));  // pinned: this encoder, 2026-11-20
+  Parsed p;
+  CHECK(valid(pb) == false);
+  CHECK(validateMessagePb(pb.data(), pb.size(), &p, true) && p.padCount == kLast &&
+        p.pointCount == kFeedPoints && p.price == 42.0f);
+  // The packed points are the window's last bytes: 184 x 0000c07f, then 42.0.
+  for (int i = 0; i < kLast; i++) {
+    const size_t at = pb.size() - 4u * kFeedPoints + 4u * (size_t)i;
+    CHECK(pb[at] == 0x00 && pb[at + 1] == 0x00 && pb[at + 2] == 0xC0 && pb[at + 3] == 0x7F);
+  }
+  CHECK(frames(pb, 7, kSid, 0x20).size() == 4);
+
+  // Flat: the oldest real point repeated on the left; no NaN anywhere.
+  const float three[] = {10.0f, 20.0f, 30.0f};
+  s = slotOf(three, 3, 35.0f, Pad::Flat);
+  CHECK(s.pointCount == kFeedPoints && s.realPoints == 3);
+  for (int i = 0; i < kFeedPoints - 3; i++) CHECK(s.points[i] == 10.0f);
+  CHECK(s.points[kLast - 2] == 10.0f && s.points[kLast - 1] == 20.0f && s.points[kLast] == 35.0f);
+  pb = encoded(s);
+  CHECK(pb == hex(kWindowFlat3Pb));  // pinned: this encoder, 2026-11-20
+  CHECK(valid(pb, &p) && p.padCount == 0 && p.pointCount == kFeedPoints);
+  // Gap with the same history: same bytes up to the points.
+  const Bytes gap = encoded(slotOf(three, 3, 35.0f, Pad::Gap));
+  CHECK(gap.size() == pb.size());
+  CHECK(Bytes(gap.begin(), gap.end() - 4 * kFeedPoints) == Bytes(pb.begin(), pb.end() - 4 * kFeedPoints));
+  CHECK(validateMessagePb(gap.data(), gap.size(), &p, true) && p.padCount == kFeedPoints - 3);
+
+  // A full window is what encodeMessage (byte-exact against the capture)
+  // writes for those 185 points: no padding, no NaN, either mode.
+  float full[kFeedPoints];
+  for (int i = 0; i < kFeedPoints; i++) full[i] = (float)(i % 50) + 0.5f;
+  const Slot f = slotOf(full, kFeedPoints, 77.0f, Pad::Gap);
+  CHECK(f.realPoints == kFeedPoints);
+  StockInfo info = slotInfo(f);
+  float expectPts[kFeedPoints];
+  std::memcpy(expectPts, full, sizeof full);
+  expectPts[kLast] = 77.0f;
+  info.points = expectPts;
+  CHECK(encoded(f) == encode(info, 3, 0, 7));
+  CHECK(encoded(f) == encoded(slotOf(full, kFeedPoints, 77.0f, Pad::Flat)));
+
+  // In place: the history read straight into slot.points gives the same slot.
+  for (uint8_t n : {(uint8_t)1, (uint8_t)3, (uint8_t)100, (uint8_t)kFeedPoints}) {
+    for (Pad pad : {Pad::Gap, Pad::Flat}) {
+      const Slot ref = slotOf(full, n, 33.0f, pad);
+      Slot in;
+      std::memcpy(in.points, full, sizeof(float) * n);
+      CHECK(makeSlot(metric(SystemMetricId::Cpu, 33.0f, 0.0f, 0, in.points, n), pad, in));
+      CHECK(encoded(in) == encoded(ref));
+      CHECK(in.realPoints == n && in.pointCount == kFeedPoints);
+    }
+  }
+}
+
+static void testGapWhitelist() {
+  const float three[] = {10.0f, 20.0f, 30.0f};
+  const Bytes good = encoded(slotOf(three, 3, 35.0f, Pad::Gap));
+  CHECK(validateMessagePb(good.data(), good.size(), nullptr, true));
+  CHECK(!valid(good));                                       // NaN prefix needs the gap flag
+  auto ok = [](const Bytes& b) { return validateMessagePb(b.data(), b.size(), nullptr, true); };
+  // A gap after a real point.
+  Bytes b = good;
+  putPoint(b, kLast - 1, kGapBits);
+  CHECK(!ok(b));
+  // Another NaN, a negative NaN, infinity in the prefix.
+  b = good;
+  putPoint(b, 0, 0x7FC00001u);
+  CHECK(!ok(b));
+  b = good;
+  putPoint(b, 5, 0xFFC00000u);
+  CHECK(!ok(b));
+  b = good;
+  putPoint(b, 0, 0x7F800000u);
+  CHECK(!ok(b));
+  // A real point inside the prefix ends it: a gap after it is refused.
+  b = good;
+  putPoint(b, 10, 0x41200000u);  // 10.0
+  CHECK(!ok(b));
+  b = good;
+  putPoint(b, 0, 0x41200000u);   // a real first point, then gaps
+  CHECK(!ok(b));
+  // Every point a gap: nothing real to draw.
+  b = good;
+  for (int i = kLast - 2; i <= kLast; i++) putPoint(b, i, kGapBits);
+  CHECK(!ok(b));
+  // A gap prefix on a window shorter than 185.
+  StockInfo t;
+  float pts[4] = {gapPoint(), gapPoint(), 5.0f, 6.0f};
+  t.code = "CPU";
+  t.price = 6.0f;
+  t.high = 100.0f;
+  t.points = pts;
+  t.pointCount = 4;
+  const Bytes shortGap = encode(t, 1, 0, 1);
+  CHECK(!shortGap.empty() && !ok(shortGap) && !valid(shortGap));
+  // Flat windows and the fixtures still pass without the flag.
+  CHECK(valid(encoded(slotOf(three, 3, 35.0f, Pad::Flat))));
+  CHECK(valid(hex(kSlot0Pb)) && valid(hex(kSmallUpPb)) && valid(hex(kSmallDownPb)));
+  CHECK(ok(hex(kSlot0Pb)) && ok(hex(kSmallUpPb)));
+
+  // `g2 stats pad`.
+  Pad pad = Pad::Flat;
+  CHECK(parsePad("gap", pad) && pad == Pad::Gap);
+  CHECK(parsePad(" FLAT ", pad) && pad == Pad::Flat);
+  CHECK(!parsePad("", pad) && !parsePad("gaps", pad) && !parsePad("flat x", pad));
+  CHECK(!parsePad(nullptr, pad) && !parsePad("0", pad));
+  CHECK(padFromSetting(0) == Pad::Gap && padFromSetting(1) == Pad::Flat &&
+        padFromSetting(7) == Pad::Gap);
+  CHECK(std::strcmp(padName(Pad::Gap), "gap") == 0 && std::strcmp(padName(Pad::Flat), "flat") == 0);
+}
+
+// ------------------------------------------------------------- history across links
+
+// The feed's sampler consumer (sf::samplerWanted) against the sampler core's
+// run and history clock: a glasses disconnect keeps the run (and the hour of
+// history the reconnect sends); feed off ends it, and the next start is empty.
+struct FeedSampler {
+  system_metrics_core::Consumers consumers{};
+  system_metrics_core::Sampler sampler{};
+  system_metrics_core::Series series{};
+  bool running = false;
+  uint8_t handle = 0;
+  float v = 1.0f;
+
+  void lap(uint32_t now, bool feedOn, bool warm, bool pageOpen, bool linkOpen) {
+    namespace smc = system_metrics_core;
+    // updateConsumer (G2_StockFeed.cpp): the link is not an input to wanting.
+    if (!samplerWanted(feedOn, warm)) {
+      if (handle) smc::consumerClose(consumers, handle);
+      handle = 0;
+    } else {
+      const uint32_t ms = samplerIntervalMs(pageOpen && linkOpen, warm, 60);
+      if (!handle) handle = smc::consumerOpen(consumers, ms);
+      else smc::consumerSetInterval(consumers, handle, ms);
+    }
+    // systemMetricsTick (CPU warm-up left out).
+    const uint32_t refresh = smc::effectiveInterval(consumers);
+    const smc::RunStep step = smc::runStep(running, refresh != 0);
+    if (step == smc::RunStep::Idle) return;
+    if (step == smc::RunStep::Start) {
+      smc::seriesClear(series);
+      sampler = smc::Sampler{};
+    }
+    const smc::Plan p = smc::plan(sampler, now, refresh);
+    if (!p.sample) return;
+    smc::sampleTaken(sampler, p, now);
+    smc::seriesSample(series, true, v, p.point, p.refresh, 0.0f);
+    v += 1.0f;
+  }
+};
+
+static void testHistoryAcrossLinks() {
+  auto* f = new FeedSampler();
+  uint32_t t = 0;
+  // 30 min on and connected: 90 points.
+  for (; t < 30u * 60000u; t += 500) f->lap(t, true, false, false, true);
+  CHECK(f->series.history.count == 90);
+  // The glasses go away for 20 min (gate Down): the sampler keeps going.
+  for (; t < 50u * 60000u; t += 500) f->lap(t, true, false, false, false);
+  CHECK(f->running && f->series.history.count == 150);
+  // Back: the window the reconnect sends holds all 150, padded on the left.
+  float pts[kFeedPoints];
+  uint8_t n = system_metrics_core::historyCopy(f->series.history, pts, kFeedPoints);
+  Slot s;
+  CHECK(makeSlot(metric(SystemMetricId::Links, 500.0f, 0.0f, 0, pts, n, 0.0f, 1000.0f), Pad::Gap, s));
+  CHECK(s.realPoints == 150 && s.pointCount == kFeedPoints && isGapPoint(s.points[kFeedPoints - 151]));
+  // A page open while disconnected does not speed it up; connected it does
+  // (the refresh only: still a point per 20 s).
+  f->lap(t, true, false, true, false);
+  CHECK(system_metrics_core::effectiveInterval(f->consumers) == 60000);
+  for (; t < 60u * 60000u; t += 500) f->lap(t, true, false, true, true);
+  CHECK(system_metrics_core::effectiveInterval(f->consumers) == kPageOpenIntervalMs);
+  CHECK(f->series.history.count == 180);
+  // Past the hour the ring wraps: always the newest 185.
+  for (; t < 90u * 60000u; t += 500) f->lap(t, true, false, false, true);
+  CHECK(f->series.history.count == kFeedPoints);
+  n = system_metrics_core::historyCopy(f->series.history, pts, kFeedPoints);
+  CHECK(makeSlot(metric(SystemMetricId::Links, 5000.0f, 0.0f, 0, pts, n, 0.0f, 10000.0f), Pad::Gap, s));
+  CHECK(s.realPoints == kFeedPoints);
+  for (int i = 1; i < kLast; i++) CHECK(s.points[i] > s.points[i - 1]);
+  // Feed off: the consumer closes and the run ends; on again starts empty.
+  f->lap(t, false, false, false, true);
+  CHECK(!f->running && f->handle == 0);
+  t += 500;
+  f->lap(t, true, false, false, true);
+  CHECK(f->running && f->series.history.count == 1);
+  // A preview's warm-up alone keeps a run too; feed off with no warm-up ends it.
+  CHECK(samplerWanted(false, true) && samplerWanted(true, false) && !samplerWanted(false, false));
+  CHECK(samplerIntervalMs(false, true, 60) == kPageOpenIntervalMs);
+  CHECK(samplerIntervalMs(false, false, 120) == 120000 && samplerIntervalMs(false, false, 1) == 60000);
+  delete f;
 }
 
 // ------------------------------------------------------------- helpers
@@ -447,21 +694,26 @@ static void testHelpers() {
   CHECK(!parseIntervalSec("000000060", v));
   CHECK(clampIntervalSec(0) == kDefaultIntervalSec && clampIntervalSec(90) == 90 &&
         clampIntervalSec(99999) == kMaxIntervalSec);
-  CHECK(timing(false, 60).minIntervalMs == 60000 && timing(true, 60).minIntervalMs == 5000);
+  CHECK(timing(false, 60).minIntervalMs == 60000 && timing(true, 60).minIntervalMs == 10000);
   CHECK(timing(false, 120).minIntervalMs == 120000 && timing(false, 1).minIntervalMs == 60000);
 
   // The digest follows what the tile shows, not the chart.
   Slot a, b;
   const float h1[] = {1.0f, 2.0f}, h2[] = {7.0f, 2.0f};
-  makeSlot(metric(SystemMetricId::Cpu, 2.0f, 1.0f, 1, h1, 2), a);
-  makeSlot(metric(SystemMetricId::Cpu, 2.0f, 1.0f, 1, h2, 2), b);
+  makeSlot(metric(SystemMetricId::Cpu, 2.0f, 1.0f, 1, h1, 2), Pad::Gap, a);
+  makeSlot(metric(SystemMetricId::Cpu, 2.0f, 1.0f, 1, h2, 2), Pad::Gap, b);
   CHECK(digestSlot(digestStart(), SystemMetricId::Cpu, a) ==
         digestSlot(digestStart(), SystemMetricId::Cpu, b));
-  makeSlot(metric(SystemMetricId::Cpu, 2.01f, 1.0f, 1, h1, 2), b);
+  makeSlot(metric(SystemMetricId::Cpu, 2.01f, 1.0f, 1, h1, 2), Pad::Gap, b);
   CHECK(digestSlot(digestStart(), SystemMetricId::Cpu, a) !=
         digestSlot(digestStart(), SystemMetricId::Cpu, b));
   CHECK(digestSlot(digestStart(), SystemMetricId::Cpu, a) !=
         digestSlot(digestStart(), SystemMetricId::Heap, a));
+  // ... plus the history-point count: with every shown value steady, a new
+  // 20 s point still changes the digest, so the chart scrolls.
+  const uint32_t steady = digestAdd(digestSlot(digestStart(), SystemMetricId::Cpu, a), 1);
+  CHECK(digestPoints(steady, 41) != digestPoints(steady, 42));
+  CHECK(digestPoints(steady, 42) == digestPoints(steady, 42));
 }
 
 // ------------------------------------------------------------- gating
@@ -506,12 +758,12 @@ static void testPolicy() {
   CHECK(feed::tick(p, t, true, true, true, gen, now, 0xBBu) == feed::Action::None);
   now += 70000;
   CHECK(feed::tick(p, t, true, true, true, gen, now, 0xBBu) == feed::Action::None);
-  // Expanded page open: 5 s cadence for changed data.
+  // Expanded page open: 10 s cadence for changed data.
   const feed::Timing fast = timing(true, 60);
   CHECK(feed::tick(p, fast, true, true, true, gen, now, 0xCCu) == feed::Action::Send);
   feed::sent(p, now, 9, 1);
   CHECK(feed::onAck(p, gen, kCmdAck, kCmdAck, 9) == feed::AckResult::Complete);
-  now += 4000;
+  now += 9000;
   CHECK(feed::tick(p, fast, true, true, true, gen, now, 0xDDu) == feed::Action::None);
   CHECK(feed::tick(p, t, true, true, true, gen, now + 1000, 0xDDu) == feed::Action::None);
   CHECK(feed::tick(p, fast, true, true, true, gen, now + 1000, 0xDDu) == feed::Action::Send);
@@ -701,6 +953,9 @@ int main() {
   testWhitelist();
   testAckAndPageState();
   testClamps();
+  testWindow();
+  testGapWhitelist();
+  testHistoryAcrossLinks();
   testHelpers();
   testPolicy();
   testBatch();

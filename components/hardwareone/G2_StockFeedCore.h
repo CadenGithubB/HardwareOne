@@ -19,6 +19,10 @@
 //     12 copy of tag 4             13 trend (1 up, 2 down, other flat)
 //     14 point_total               15 previous close f32 (dashed line)
 //     16 points, packed f32, 4 x point_total bytes, <= 185
+//   The glasses draw point i at a fixed step from the left edge, sized for
+//   185 points, so the feed always sends a full 185-point window: the newest
+//   point at the right edge, padded on the left until an hour of history
+//   exists (Pad below).
 //   One stock per message, stock_total first, stock_num 0..total-1, the next
 //   one only after the previous ack. stock_total 0 clears the widget.
 //   Ack (glasses -> phone, right temple): {1 command_id = 1, 2 magic echoed,
@@ -62,8 +66,14 @@ static constexpr size_t kMaxPbBytes = 1024;    // whitelist ceiling (185 points 
 // The feed's own, tighter shape.
 static constexpr size_t kFeedCodeBytes = 4;    // owner: labels of 4 characters at most
 static constexpr size_t kFeedNameBytes = 31;
-static constexpr uint8_t kFeedPoints = system_metrics_core::kHistoryLen;  // 60
-static constexpr size_t kFeedPbBytes = 512;    // 60 points + names ~ 330 B
+// The chart window: always the glasses' full 185 points (one per history
+// point of the sampler, 20 s apart, about an hour).
+static constexpr uint8_t kFeedPoints = system_metrics_core::kHistoryLen;  // 185
+static_assert(kFeedPoints == kMaxPoints, "the window is the glasses' full chart");
+// One slot with a 185-point window: at most 837 B (a 31-byte name, magic >=
+// 128), 4 fragments of 232 B.
+static constexpr size_t kFeedPbBytes = 848;
+static_assert(kFeedPbBytes <= kMaxPbBytes, "inside the whitelist ceiling");
 static constexpr float kMinShownValue = 0.01f; // exactly 0 shows "-"
 static constexpr float kMaxShownValue = 999999.0f;
 static constexpr float kMaxChange = 9999.0f;
@@ -318,6 +328,53 @@ struct Reader {
   }
 };
 
+// ------------------------------------------------------------------ padding
+
+// How the left of the chart window is filled before kFeedPoints real points
+// exist (`g2 stats pad`, saved): Gap = NaN points, which pass the glasses'
+// negative-point check (how they draw is unverified until it is seen on the
+// lens); Flat = the oldest real point repeated.
+enum class Pad : uint8_t { Gap = 0, Flat = 1 };
+
+// The one NaN the feed writes (canonical quiet NaN); the whitelist accepts no
+// other.
+static constexpr uint32_t kGapBits = 0x7FC00000u;
+
+inline float gapPoint() {
+  float f;
+  memcpy(&f, &kGapBits, sizeof f);
+  return f;
+}
+
+inline bool isGapPoint(float f) {
+  uint32_t bits;
+  memcpy(&bits, &f, sizeof bits);
+  return bits == kGapBits;
+}
+
+inline Pad padFromSetting(int v) { return v == 1 ? Pad::Flat : Pad::Gap; }
+inline const char* padName(Pad p) { return p == Pad::Flat ? "flat" : "gap"; }
+
+// "gap" or "flat" (any case, surrounding spaces). False otherwise.
+inline bool parsePad(const char* text, Pad& out) {
+  if (!text) return false;
+  while (*text == ' ') text++;
+  char word[6];
+  size_t n = 0;
+  for (; *text && *text != ' '; text++) {
+    if (n + 1 >= sizeof word) return false;
+    char c = *text;
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    word[n++] = c;
+  }
+  word[n] = '\0';
+  while (*text == ' ') text++;
+  if (*text) return false;
+  if (strcmp(word, "gap") == 0) { out = Pad::Gap; return true; }
+  if (strcmp(word, "flat") == 0) { out = Pad::Flat; return true; }
+  return false;
+}
+
 inline bool printableAscii(const uint8_t* s, size_t n) {
   for (size_t i = 0; i < n; i++)
     if (s[i] < 0x20 || s[i] > 0x7E) return false;
@@ -332,6 +389,7 @@ struct Parsed {
   float price = 0.0f, changePercent = 0.0f, high = 0.0f, low = 0.0f;
   uint32_t trend = 0;
   uint16_t pointCount = 0;
+  uint16_t padCount = 0;  // leading gap (NaN) points
   char code[kMaxCodeBytes + 1] = {};
 };
 
@@ -340,8 +398,12 @@ struct Parsed {
 // types, printable strings within the limits, finite numbers, price > 0,
 // 0 <= low < high, trend <= 2, point_total <= 185 and matching the packed
 // points, every point inside [low, high]. Fields 1, 5, 7, 8, 13 and 14 are
-// required.
-inline bool validateMessagePb(const uint8_t* pb, size_t len, Parsed* out = nullptr) {
+// required. `gapPrefix` (the feed's Pad::Gap): the window may start with
+// gap points (exactly kGapBits) when it is the full 185 points and at least
+// its last point is real; a gap point anywhere after a real one, or any
+// other non-finite point, is refused either way.
+inline bool validateMessagePb(const uint8_t* pb, size_t len, Parsed* out = nullptr,
+                              bool gapPrefix = false) {
   if (!pb || len == 0 || len > kMaxPbBytes) return false;
   Reader r{pb, len, 0};
   Parsed res;
@@ -430,10 +492,20 @@ inline bool validateMessagePb(const uint8_t* pb, size_t len, Parsed* out = nullp
   if (haveCopy && memcmp(&copy, &res.changePercent, sizeof copy) != 0) return false;
   if (pointsBytes / 4 != res.pointCount) return false;
   Reader pr{pb, pointsAt + pointsBytes, pointsAt};
+  bool inPrefix = true;
   for (uint16_t i = 0; i < res.pointCount; i++) {
     float p = 0.0f;
-    if (!pr.f32(p) || !isfinite(p) || p < res.low || p > res.high) return false;
+    if (!pr.f32(p)) return false;
+    if (isGapPoint(p)) {
+      if (!gapPrefix || !inPrefix) return false;
+      res.padCount++;
+      continue;
+    }
+    inPrefix = false;
+    if (!isfinite(p) || p < res.low || p > res.high) return false;
   }
+  if (res.padCount && (res.pointCount != kMaxPoints || res.padCount >= res.pointCount))
+    return false;
   if (out) *out = res;
   return true;
 }
@@ -607,8 +679,15 @@ inline size_t formatMetricList(const Selection& s, char* out, size_t cap) {
 static constexpr uint32_t kDefaultIntervalSec = 60;
 static constexpr uint32_t kMinIntervalSec = 30;
 static constexpr uint32_t kMaxIntervalSec = 3600;
-// While the expanded stock page is open (the glasses report it).
+// While the expanded stock page is open (the glasses report it). 10 s, not
+// 5: a full batch is 9 slots of about 840 B (4 fragments each), written one
+// at a time with an ack round trip in between, a few seconds on the air; at
+// 5 s batches could run back to back. Sending only the 3 visible slots would
+// be lighter but cannot work: the glasses redraw only after stock_total
+// messages and a different stock_total restarts their count, and the page
+// state does not say which page is shown.
 static constexpr uint32_t kPageOpenIntervalMs = system_metrics_core::kFastIntervalMs;
+static_assert(kPageOpenIntervalMs >= 10000, "page-open cadence >= 10 s (airtime)");
 
 inline bool parseIntervalSec(const char* text, uint32_t& out) {
   if (!text) return false;
@@ -641,6 +720,20 @@ static constexpr uint8_t kMaxRetries = 1;
 inline hw1_g2_feed::Timing timing(bool pageOpen, uint32_t intervalSec) {
   const uint32_t ms = pageOpen ? kPageOpenIntervalMs : clampIntervalSec((int)intervalSec) * 1000u;
   return hw1_g2_feed::Timing{kConnectSettleMs, ms, kAckTimeoutMs, kMaxRetries};
+}
+
+// The feed's sampler consumer. Wanted whenever the feed is on (saved),
+// whatever the glasses link does: a disconnect must not end the sampler run,
+// which would clear the history, so a reconnect sends the last hour. Only
+// feed off (and no preview/send warm-up) lets the run end. The link state is
+// deliberately not an input.
+inline bool samplerWanted(bool feedOn, bool warm) { return feedOn || warm; }
+
+// Its refresh interval: the page-open cadence while the expanded page is open
+// on a connected temple or a preview/send warms it, the feed interval
+// otherwise. The history clock (20 s) runs independently of it.
+inline uint32_t samplerIntervalMs(bool pageOpen, bool warm, uint32_t intervalSec) {
+  return (pageOpen || warm) ? kPageOpenIntervalMs : clampIntervalSec((int)intervalSec) * 1000u;
 }
 
 // First magic of a unit of `count` messages after `prev`: consecutive by
@@ -691,7 +784,8 @@ struct Slot {
   float low = 0.0f;
   float high = 100.0f;
   uint8_t trend = 0;
-  uint8_t pointCount = 0;
+  uint8_t pointCount = 0;  // kFeedPoints, or 1 with no history yet
+  uint8_t realPoints = 0;  // history points in the window (the rest is padding)
   float points[kFeedPoints] = {};
 };
 
@@ -707,16 +801,22 @@ inline void copyText(char* dst, size_t cap, const char* src) {
 inline float finiteOr(float f, float fallback) { return isfinite(f) ? f : fallback; }
 
 // Clamps for the glasses: price >= 0.01 (exactly 0 shows "-"), a fixed 0-100
-// chart for the percentage metrics, 0 <= low < high, at most kFeedPoints
-// points, each inside [low, high] (a negative point or one outside the range
-// would drop the chart), the last point = the value shown, change finite and
-// bounded, trend 1 up / 2 down / 0 flat, label <= 4 characters.
-inline bool makeSlot(const MetricInput& in, Slot& out) {
+// chart for the percentage metrics, 0 <= low < high, each real point inside
+// [low, high] (a negative point or one outside the range would drop the
+// chart), the last point = the value shown, change finite and bounded, trend
+// 1 up / 2 down / 0 flat, label <= 4 characters.
+//
+// The chart is the full kFeedPoints window, right-anchored: the newest
+// min(historyCount, kFeedPoints) history points at the right end (the last
+// one replaced by the value shown), the left padded per `pad`. With no
+// history yet the chart is the value alone (one point, no padding).
+//
+// `in.history` may point into `out.points` (the feed reads the sampler's
+// history straight into the slot): the points are moved in place, and no
+// field is reset before they are read.
+inline bool makeSlot(const MetricInput& in, Pad pad, Slot& out) {
   const system_metrics_core::MetricInfo* m = system_metrics_core::info(in.id);
   if (!m || !in.available) return false;
-  out = Slot{};
-  copyText(out.code, sizeof out.code, m->label);
-  copyText(out.name, sizeof out.name, m->longName);
   const bool percent = m->unit[0] == '%' && m->unit[1] == '\0';
   float low = percent ? 0.0f : finiteOr(in.rangeLow, 0.0f);
   float high = percent ? 100.0f : finiteOr(in.rangeHigh, 0.0f);
@@ -729,6 +829,32 @@ inline bool makeSlot(const MetricInput& in, Slot& out) {
   if (value > high) high = value;
   if (low > value) low = 0.0f;
   if (!(high > low)) high = low + 1.0f;
+
+  // Points first: in.history may alias out.points.
+  const uint16_t count = in.history ? in.historyCount : 0;
+  const uint8_t n = (uint8_t)(count < kFeedPoints ? count : kFeedPoints);
+  if (n == 0) {
+    out.points[0] = value;
+    out.pointCount = 1;
+    out.realPoints = 0;
+  } else {
+    float* dst = out.points + (kFeedPoints - n);
+    memmove(dst, in.history + (count - n), (size_t)n * sizeof(float));
+    for (uint8_t i = 0; i < n; i++) {
+      float p = finiteOr(dst[i], low);
+      if (p < low) p = low;
+      if (p > high) p = high;
+      dst[i] = p;
+    }
+    dst[n - 1] = value;
+    const float fill = pad == Pad::Flat ? dst[0] : gapPoint();
+    for (uint8_t i = 0; i < kFeedPoints - n; i++) out.points[i] = fill;
+    out.pointCount = kFeedPoints;
+    out.realPoints = n;
+  }
+
+  copyText(out.code, sizeof out.code, m->label);
+  copyText(out.name, sizeof out.name, m->longName);
   out.value = value;
   out.low = low;
   out.high = high;
@@ -737,18 +863,6 @@ inline bool makeSlot(const MetricInput& in, Slot& out) {
   if (change < -kMaxChange) change = -kMaxChange;
   out.change = change;
   out.trend = in.trend > 0 ? 1 : in.trend < 0 ? 2 : 0;
-  uint8_t n = in.history ? in.historyCount : 0;
-  const uint8_t skip = n > kFeedPoints ? (uint8_t)(n - kFeedPoints) : 0;
-  n = (uint8_t)(n - skip);
-  for (uint8_t i = 0; i < n; i++) {
-    float p = finiteOr(in.history[skip + i], low);
-    if (p < low) p = low;
-    if (p > high) p = high;
-    out.points[i] = p;
-  }
-  if (n == 0) n = 1;
-  out.points[n - 1] = value;
-  out.pointCount = n;
   return true;
 }
 
@@ -772,9 +886,11 @@ inline size_t encodeSlot(const Slot& s, uint8_t total, uint8_t num, uint32_t mag
   return encodeMessage(slotInfo(s), total, num, magic, out, cap);
 }
 
-// Send-on-change key: the batch's metric list and the values the tile shows
-// (value and change to two decimals, trend). The chart history is left out,
-// so a steady metric is not re-sent only because its chart moved.
+// Send-on-change key: the batch's metric list, the values the tile shows
+// (value and change to two decimals, trend) and the sampler's history-point
+// count (digestPoints), so the chart scrolls left with each 20 s point even
+// while every shown value is steady. The send interval still caps how often a
+// batch goes (one per `g2 stats interval`, 10 s with the page open).
 inline uint32_t digestStart() { return 2166136261u; }
 inline uint32_t digestAdd(uint32_t h, uint32_t v) {
   for (int i = 0; i < 4; i++) {
@@ -795,6 +911,10 @@ inline uint32_t digestSlot(uint32_t h, SystemMetricId id, const Slot& s) {
   h = digestAdd(h, (uint32_t)hundredths(s.change));
   return digestAdd(h, s.trend);
 }
+// The current run's history-point count (systemMetricsPointGeneration).
+inline uint32_t digestPoints(uint32_t h, uint32_t pointGeneration) {
+  return digestAdd(h, pointGeneration);
+}
 
 
 // ------------------------------------------------------------------ page and version
@@ -802,7 +922,7 @@ inline uint32_t digestSlot(uint32_t h, SystemMetricId id, const Slot& s) {
 // The expanded stock page counts as open this long after the last type-3
 // page-state push. The glasses repeat type 3 after each scroll and report
 // leaving only when it is closed by a tap; a time-out of the display or a
-// head-down does not report it, and the 5 s cadence must not outlive that.
+// head-down does not report it, and the 10 s cadence must not outlive that.
 static constexpr uint32_t kPageOpenHoldMs = 90000;
 
 inline bool pageOpenCurrent(bool open, uint32_t openedAtMs, uint32_t nowMs) {
