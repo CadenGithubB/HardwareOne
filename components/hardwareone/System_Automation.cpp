@@ -261,6 +261,8 @@ static int findAutomationKeywordOutsideQuotes(const String& line,
 static String redactAutomationCommandForAuditImpl(const String& command,
                                                    unsigned depth) {
   CommandArgs outer(command);
+  // automationadd and validate-conditions are removed names; a stale nested
+  // line that still uses them is masked all the same.
   if (outer.count() > 0 &&
       (outer.arg(0).equalsIgnoreCase("automationadd") ||
        outer.arg(0).equalsIgnoreCase("validateconditions") ||
@@ -826,6 +828,128 @@ static bool loadAutomationsStoreForEdit(String& json, bool persistSeed) {
 }
 
 // ============================================================================
+// automations.json mutation owner
+// ============================================================================
+// Every read-modify-write of automations.json goes through
+// mutateAutomationsJson (the shape of mutateUsersJson in System_User.cpp). It
+// holds the filesystem lock from the read through parse, mutation,
+// serialization and the atomic write, so a writer on another task is neither
+// overwritten by a stale copy nor interleaved with the temp-file promotion.
+// The filesystem lock is the one lock: it is reentrant per task, every VFS
+// call below reuses it, and no second mutex (or lock order) is introduced. No
+// caller may hold AutomationStateGuard here: file work never runs under it.
+//
+// The mutator edits the parsed document (ArduinoJson, PSRAM) and addresses an
+// automation by its numeric id, never by a text offset. A document that
+// overflowed, serialized short, does not parse back or lost or gained entries
+// the mutator did not account for is never published over the live file. The
+// file-version refusal stays: a newer file is not loaded (readAutomationsFile)
+// and a newer document is not written (automationsStoreWrite).
+//
+// Stored layout: ArduinoJson pretty output, which the post-fire writebacks
+// have always produced ("id": <n> with one space, as automationIdPosInJson
+// and the text scanners in runAutomationsOnBoot, schedulerTickMinute and
+// cmd_automation_run read it). Object members keep their order, so "id" stays
+// the first member of every automation.
+enum class AutomationsMutation : uint8_t { Failed, Unchanged, Changed };
+typedef AutomationsMutation (*AutomationsMutator)(JsonDocument& doc, JsonArray automations,
+                                                  void* context, String& errorOut);
+enum class AutomationsMutateResult : uint8_t {
+  Changed,      // the mutator changed the document and it was written
+  Unchanged,    // the mutator changed nothing; the file was not touched
+  Refused,      // the mutator failed and set errorOut; the file was not touched
+  ReadFailed,   // missing (without Seed), unreadable, or a newer format
+  Malformed,    // the stored file does not parse or has no "automations" array
+  WriteFailed,  // out of memory for the document, or the atomic write failed
+};
+constexpr uint8_t kAutomationsMutateNotify = 0x01;  // wake the scheduler after the write
+constexpr uint8_t kAutomationsMutateSeed = 0x02;    // a missing file starts as the empty store
+constexpr uint8_t kAutomationsMutateDryRun = 0x04;  // run the mutator, write nothing
+
+static bool automationsStoreWrite(const String& json, bool notify, bool verified);
+
+static AutomationsMutateResult mutateAutomationsJson(const char* tag, AutomationsMutator mutator,
+                                                     void* context, uint8_t flags,
+                                                     String& errorOut) {
+  // One lock for the whole read-modify-write. Blocking: this is the command
+  // path and the scheduler's post-fire writeback (a missed writeback would
+  // fire the automation again). The scheduler claims a pass only after a
+  // try-lock (automationTick).
+  FsLockGuard guard(tag);
+  String json;
+  if (flags & kAutomationsMutateSeed) {
+    // The empty store is not written on its own: it reaches the file with the
+    // mutator's change, in one write.
+    if (!loadAutomationsStoreForEdit(json, false)) {
+      errorOut = "failed to read automations.json";
+      return AutomationsMutateResult::ReadFailed;
+    }
+  } else if (readAutomationsFile(json) != AutomationsRead::Ok) {
+    errorOut = "failed to read automations.json";
+    return AutomationsMutateResult::ReadFailed;
+  }
+  PSRAM_JSON_DOC(doc);
+  if (deserializeJson(doc, json)) {
+    errorOut = "malformed automations.json";
+    return AutomationsMutateResult::Malformed;
+  }
+  JsonArray automations = doc["automations"].as<JsonArray>();
+  if (automations.isNull()) {
+    errorOut = "malformed automations.json";
+    return AutomationsMutateResult::Malformed;
+  }
+  json = "";  // the text is not needed again; the document holds its own copy
+  const AutomationsMutation outcome = mutator(doc, automations, context, errorOut);
+  if (outcome == AutomationsMutation::Failed) return AutomationsMutateResult::Refused;
+  if (outcome == AutomationsMutation::Unchanged) return AutomationsMutateResult::Unchanged;
+  if (doc.overflowed()) {
+    errorOut = "out of memory for automations.json";
+    return AutomationsMutateResult::WriteFailed;
+  }
+  if (flags & kAutomationsMutateDryRun) return AutomationsMutateResult::Changed;
+  const size_t expectedLength = measureJsonPretty(doc);
+  const size_t expectedEntries = automations.size();
+  serializeJsonPretty(doc, json);
+  bool sound = expectedLength > 0 && json.length() == expectedLength;
+  if (sound) {
+    // What is about to replace the live file must read back as the document
+    // that was just built.
+    PSRAM_JSON_DOC(verify);
+    sound = !deserializeJson(verify, json) && !verify.overflowed();
+    if (sound) {
+      JsonArrayConst written = verify["automations"].as<JsonArrayConst>();
+      sound = !written.isNull() && written.size() == expectedEntries;
+    }
+  }
+  if (!sound) {
+    ERROR_SYSTEMF("[automations] %s: the rebuilt automations.json did not verify; file left unchanged", tag);
+    errorOut = "out of memory for automations.json";
+    return AutomationsMutateResult::WriteFailed;
+  }
+  if (!automationsStoreWrite(json, (flags & kAutomationsMutateNotify) != 0, true)) {
+    errorOut = "failed to write automations.json";
+    return AutomationsMutateResult::WriteFailed;
+  }
+  return AutomationsMutateResult::Changed;
+}
+
+// The automation with this id in a parsed store, and its place in the array.
+// The id is compared as a number: 12 never matches 123456, and text inside a
+// name or command is never taken for an id.
+static JsonObject findAutomationById(JsonArray automations, long id, size_t* indexOut = nullptr) {
+  size_t index = 0;
+  for (JsonObject automation : automations) {
+    JsonVariantConst stored = automation["id"];
+    if (stored.is<long>() && stored.as<long>() == id) {
+      if (indexOut) *indexOut = index;
+      return automation;
+    }
+    ++index;
+  }
+  return JsonObject();
+}
+
+// ============================================================================
 // In-RAM cache of per-automation scheduling metadata
 // ============================================================================
 // The scheduler runs every main-loop iteration. Without a cache it would have
@@ -1294,6 +1418,44 @@ static void automationUptimeSweep(bool begin) {
 // missed-run rule, as without the uptime schedule. Then the table is empty.
 // Called by the scheduler pass before it reads the file, so it writes without
 // notifying: the pass's trailing rebuild reads the result.
+struct AutomationCarryContext {
+  time_t now;
+  time_t upNow;
+};
+
+static AutomationsMutation automationCarryMutation(JsonDocument& doc, JsonArray automations,
+                                                   void* opaque, String& errorOut) {
+  (void)doc;
+  (void)errorOut;
+  const AutomationCarryContext* ctx = static_cast<const AutomationCarryContext*>(opaque);
+  bool changed = false;
+  for (JsonObject automation : automations) {
+    const long id = automation["id"] | 0L;
+    int slot = -1;
+    // A named array, not the member proxy's temporary: GCC's
+    // -Werror=dangling-reference rejects a range-for over the latter.
+    JsonArray triggers = automation["triggers"].as<JsonArray>();
+    for (JsonObject t : triggers) {
+      if (++slot >= 255) break;
+      AutomationUptimeSchedule::Entry e{};
+      taskENTER_CRITICAL(&sUptimeScheduleMux);
+      AutomationUptimeSchedule::Entry* held = sUptimeSchedule.find(id, (uint8_t)slot);
+      if (held) {
+        e = *held;
+        *held = AutomationUptimeSchedule::Entry{};
+      }
+      taskEXIT_CRITICAL(&sUptimeScheduleMux);
+      if (!AutomationUptimeSchedule::carries(e)) continue;
+      const time_t left = (time_t)e.nextAt > ctx->upNow ? (time_t)e.nextAt - ctx->upNow : 0;
+      const time_t at = ctx->now + left;
+      if (e.intervalMs != 0 && automationVolatileSet(id, (uint8_t)slot, e.intervalMs, at)) continue;
+      t["nextAt"] = (unsigned long)at;
+      changed = true;
+    }
+  }
+  return changed ? AutomationsMutation::Changed : AutomationsMutation::Unchanged;
+}
+
 static void automationCarryUptimeSchedule(time_t now) {
   // Nothing to carry (the table is empty, or holds only first countdowns):
   // no file read; the table is emptied.
@@ -1302,45 +1464,15 @@ static void automationCarryUptimeSchedule(time_t now) {
   if (!any) sUptimeSchedule.clear();
   taskEXIT_CRITICAL(&sUptimeScheduleMux);
   if (!any) return;
-  const time_t upNow = automationUptimeNow();
-  bool changed = false;
-  String json;
-  PSRAM_JSON_DOC(doc);
-  if (readAutomationsJson(json) && !deserializeJson(doc, json)) {
-    for (JsonObject automation : doc["automations"].as<JsonArray>()) {
-      const long id = automation["id"] | 0L;
-      int slot = -1;
-      // A named array, not the member proxy's temporary: GCC's
-      // -Werror=dangling-reference rejects a range-for over the latter.
-      JsonArray triggers = automation["triggers"].as<JsonArray>();
-      for (JsonObject t : triggers) {
-        if (++slot >= 255) break;
-        AutomationUptimeSchedule::Entry e{};
-        taskENTER_CRITICAL(&sUptimeScheduleMux);
-        AutomationUptimeSchedule::Entry* held = sUptimeSchedule.find(id, (uint8_t)slot);
-        if (held) {
-          e = *held;
-          *held = AutomationUptimeSchedule::Entry{};
-        }
-        taskEXIT_CRITICAL(&sUptimeScheduleMux);
-        if (!AutomationUptimeSchedule::carries(e)) continue;
-        const time_t left = (time_t)e.nextAt > upNow ? (time_t)e.nextAt - upNow : 0;
-        const time_t at = now + left;
-        if (e.intervalMs != 0 && automationVolatileSet(id, (uint8_t)slot, e.intervalMs, at)) continue;
-        t["nextAt"] = (unsigned long)at;
-        changed = true;
-      }
-    }
-  }
+  AutomationCarryContext ctx{now, automationUptimeNow()};
+  String unused;
+  // One locked read-modify-write; no notification (see above).
+  (void)mutateAutomationsJson("automation.carry", automationCarryMutation, &ctx, 0, unused);
   // Entries no trigger in the file holds any more, or a file that did not
   // read: nothing is left to carry.
   taskENTER_CRITICAL(&sUptimeScheduleMux);
   sUptimeSchedule.clear();
   taskEXIT_CRITICAL(&sUptimeScheduleMux);
-  if (!changed) return;
-  json = "";
-  serializeJsonPretty(doc, json);
-  writeTextAtomic(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"));
 }
 
 // An automation as a client should see it: a short interval shows the next
@@ -1546,18 +1678,41 @@ static bool automationsAnyDue(time_t now) {
   return false;
 }
 
-// Notify only after a successful save. The next owner tick refreshes the cache;
-// a failed replacement leaves both the previous file and schedule intact.
-bool writeAutomationsJsonAtomic(const String& json) {
+// The one place automations.json is written. Refuses a document in a newer
+// format, and (unless the caller has just verified it) one that does not parse
+// or has no "automations" array, so no caller can publish a broken store over
+// the live one. The write runs under the filesystem lock (reentrant: the
+// mutation owner already holds it). Notify only after a successful save: the
+// next owner tick refreshes the cache; a failed replacement leaves both the
+// previous file and schedule intact.
+static bool automationsStoreWrite(const String& json, bool notify, bool verified) {
   if (automationsNewerFileVersion(json)) {
     ERROR_SYSTEMF("[automations] Refused to write %s with a format newer than %lu",
                   AUTOMATIONS_JSON_FILE, (unsigned long)kAutomationsFileVersion);
     return false;
   }
+  if (!verified) {
+    PSRAM_JSON_DOC(check);
+    if (deserializeJson(check, json) || check["automations"].as<JsonArrayConst>().isNull()) {
+      ERROR_SYSTEMF("[automations] Refused to write %s: the document is not a valid automations store",
+                    AUTOMATIONS_JSON_FILE);
+      return false;
+    }
+  }
+  FsLockGuard guard("automation.write");
   if (!writeTextAtomic(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) return false;
-  notifyAutomationScheduler();
+  if (notify) notifyAutomationScheduler();
   return true;
 }
+
+// The public writer, for a whole document a caller built (the empty store, an
+// import). It cannot make a caller's earlier read current: code that reads,
+// changes and writes back goes through mutateAutomationsJson or
+// automationsSanitizeStore, which hold the lock across all three.
+bool writeAutomationsJsonAtomic(const String& json) {
+  return automationsStoreWrite(json, true, false);
+}
+
 
 // Deployment-profile migration: a provisioned device may have completed its
 // first-time setup while Automations was compiled out, so the normal setup
@@ -1583,27 +1738,22 @@ static bool ensureAutomationsFile() {
 // Phase 1: `triggerIdx=-1` is an alias for "first schedulable trigger" (the
 // behavior legacy callers that used to pass only an id+nextAt expect).
 // Phase 1B will remove the alias and force an explicit trigger index.
-bool updateAutomationTriggerNextAt(long automationId, int triggerIdx, time_t newNextAt) {
-  String json;
-  if (!readAutomationsJson(json)) return false;
+struct AutomationNextAtContext {
+  long automationId;
+  int triggerIdx;
+  time_t newNextAt;
+};
 
-  PSRAM_JSON_DOC(doc);
-  DeserializationError error = deserializeJson(doc, json);
-  if (error) {
-    DEBUG_AUTOMATIONSF("[updateNextAt] JSON parse error: %s", error.c_str());
-    return false;
-  }
-
-  JsonArray automations = doc["automations"].as<JsonArray>();
-  if (automations.isNull()) return false;
-
-  bool found = false;
+static AutomationsMutation automationNextAtMutation(JsonDocument& doc, JsonArray automations,
+                                                    void* opaque, String& errorOut) {
+  (void)doc;
+  const AutomationNextAtContext* ctx = static_cast<const AutomationNextAtContext*>(opaque);
   for (JsonObject automation : automations) {
-    if (automation["id"].as<long>() != automationId) continue;
+    if (automation["id"].as<long>() != ctx->automationId) continue;
     JsonArray triggers = automation["triggers"].as<JsonArray>();
     if (triggers.isNull()) break;
     // Pick the trigger to update.
-    int chosen = triggerIdx;
+    int chosen = ctx->triggerIdx;
     if (chosen < 0) {
       // Legacy: first schedulable (non-boot/manual) trigger; else first.
       int idx = 0;
@@ -1617,26 +1767,45 @@ bool updateAutomationTriggerNextAt(long automationId, int triggerIdx, time_t new
     int idx = 0;
     for (JsonVariant t : triggers) {
       if (idx == chosen) {
-        t["nextAt"] = (unsigned long)newNextAt;
-        found = true;
-        break;
+        t["nextAt"] = (unsigned long)ctx->newNextAt;
+        return AutomationsMutation::Changed;
       }
       idx++;
     }
     break;
   }
+  errorOut = "automation trigger not found";
+  return AutomationsMutation::Failed;
+}
 
-  if (!found) return false;
-
-  json = "";
-  serializeJsonPretty(doc, json);
-  return writeAutomationsJsonAtomic(json);
+bool updateAutomationTriggerNextAt(long automationId, int triggerIdx, time_t newNextAt) {
+  AutomationNextAtContext ctx{automationId, triggerIdx, newNextAt};
+  String error;
+  return mutateAutomationsJson("automation.nextAt", automationNextAtMutation, &ctx,
+                               kAutomationsMutateNotify, error) == AutomationsMutateResult::Changed;
 }
 
 // Legacy shim: writes nextAt into the first schedulable trigger. Callers that
 // pre-dated the trigger-array refactor still work unchanged.
 bool updateAutomationNextAt(long automationId, time_t newNextAt) {
   return updateAutomationTriggerNextAt(automationId, -1, newNextAt);
+}
+
+// Read, sanitize the ids and write back under one lock (the one-call form of
+// readAutomationsJson + sanitizeAutomationsJson + writeAutomationsJsonAtomic).
+// False when the file could not be read (missing, unreadable, newer format) or
+// the repaired document could not be written; *changedOut says whether
+// anything was repaired, `counts` what.
+bool automationsSanitizeStore(AutomationSanitizeCounts* counts, bool* changedOut) {
+  if (changedOut) *changedOut = false;
+  if (counts) *counts = AutomationSanitizeCounts{};
+  FsLockGuard guard("automation.sanitize");
+  String json;
+  if (!readAutomationsJson(json)) return false;
+  if (!sanitizeAutomationsJson(json, counts)) return true;
+  if (!writeAutomationsJsonAtomic(json)) return false;
+  if (changedOut) *changedOut = true;
+  return true;
 }
 
 // A command's reply to a read error: names the newer format when the file was
@@ -2047,6 +2216,61 @@ static const char* automationAddNumber(const char* key, const String& text, long
   return reply;
 }
 
+// automationMutateErrorReply and automationCallerMayChange are defined with
+// the enable/disable command below.
+static const char* automationMutateErrorReply(AutomationsMutateResult result, const char* refusal);
+static bool automationCallerMayChange(JsonObjectConst automation, const String& caller, bool callerIsAdmin);
+
+struct AutomationAddContext {
+  JsonObjectConst entry;  // the built automation; its "id" is set below
+  bool hasOverrideId;     // id=<n> was given: replace that entry if it is stored
+  long id;                // in: the id= value; out: the id the entry was stored under
+  String caller;
+  bool callerIsAdmin;
+  const char* reply;      // the refusal, when the mutator fails
+};
+
+// Adds the built automation to the parsed store. With id=<n>: an entry that
+// holds that id is removed first, after the creator-or-admin check (an edit),
+// and the new entry takes its id. Without: the entry gets a new id that no
+// stored automation has. "id" stays the first member of the stored object.
+static AutomationsMutation automationAddMutation(JsonDocument& doc, JsonArray automations,
+                                                 void* opaque, String& errorOut) {
+  (void)doc;
+  (void)errorOut;
+  AutomationAddContext* ctx = static_cast<AutomationAddContext*>(opaque);
+  if (ctx->hasOverrideId) {
+    size_t index = 0;
+    JsonObject existing = findAutomationById(automations, ctx->id, &index);
+    if (!existing.isNull()) {
+      DEBUG_AUTOMATIONSF("[autos add/edit] Editing existing id=%ld createdBy='%s' requestedBy='%s' isAdmin=%d",
+             ctx->id, existing["createdBy"] | "", ctx->caller.c_str(), ctx->callerIsAdmin);
+      if (!automationCallerMayChange(existing, ctx->caller, ctx->callerIsAdmin)) {
+        ctx->reply = "Error: You do not have permission to edit this automation. Only the creator or an admin can edit it.";
+        return AutomationsMutation::Failed;
+      }
+      automations.remove(index);
+    }
+  } else {
+    // From the uptime, kept inside 1..kAutomationIdMax: after 24.9 days of
+    // uptime millis() itself is a number no reader of the id can take.
+    unsigned long id = automationIdSeed((uint32_t)millis());
+    int guard = 0;
+    while (!findAutomationById(automations, (long)id).isNull() && guard < 100) {
+      id = automationIdAdvance((uint32_t)id, 1 + (uint32_t)random(1, 100000));
+      guard++;
+    }
+    ctx->id = (long)id;
+  }
+  JsonObject added = automations.add<JsonObject>();
+  if (added.isNull() || !added.set(ctx->entry)) {
+    ctx->reply = "Error: out of memory for automations.json";
+    return AutomationsMutation::Failed;
+  }
+  added["id"] = ctx->id;  // the member exists (first in the entry); only its value changes
+  return AutomationsMutation::Changed;
+}
+
 const char* cmd_automation_add(const String& argsInput) {
   // Do not early-return on validate; we want to perform full argument checks
   bool validateOnly = gCliValidateOnly;
@@ -2286,99 +2510,14 @@ const char* cmd_automation_add(const String& argsInput) {
     }
   }
   
-  String json;
-  if (!loadAutomationsStoreForEdit(json, !validateOnly)) {
-    return automationsReadErrorReply();
-  }
-  
-  // If a specific id= was provided and that entry already exists, remove it first
-  if (idOverrideStr.length() > 0) {
-    unsigned long overrideId = strtoul(idOverrideStr.c_str(), nullptr, 10);
-    const int idPos = automationIdPosInJson(json, overrideId);
-    if (idPos >= 0) {
-      int aS = json.indexOf('[');
-      int aE = json.lastIndexOf(']');
-      if (idPos >= 0 && aS >= 0 && aE >= 0) {
-        int oS = json.lastIndexOf('{', idPos);
-        int oE = (oS >= 0) ? findJsonObjectEnd(json, oS) : -1;
-        if (oS >= 0 && oE >= 0) {
-          // Authorization check for edit: extract createdBy from existing automation
-          String existingObj = json.substring(oS, oE + 1);
-          char existingCreatedByBuf[64];
-          extractJsonString(existingObj.c_str(), "\"createdBy\"", existingCreatedByBuf, sizeof(existingCreatedByBuf));
-          String existingCreatedBy = existingCreatedByBuf;
-          
-          DEBUG_AUTOMATIONSF("[autos add/edit] Editing existing id=%lu createdBy='%s' requestedBy='%s' isAdmin=%d",
-                 overrideId, existingCreatedBy.c_str(), currentExecUser().c_str(), currentExecIsAdmin());
+  // The store is read, changed and written in one locked step at the end
+  // (automationAddMutation): an id= that names a stored automation replaces
+  // that entry (after the creator-or-admin check), and a new automation gets
+  // an id no stored automation has. The entry is built here first, with the
+  // id it was asked for, or 0 until the mutation settles it.
+  const bool hasOverrideId = idOverrideStr.length() > 0;
+  unsigned long id = hasOverrideId ? strtoul(idOverrideStr.c_str(), nullptr, 10) : 0;
 
-          if (!currentExecIsAdmin() && existingCreatedBy != currentExecUser()) {
-            DEBUG_AUTOMATIONSF("[autos add/edit] AUTHORIZATION DENIED: non-admin '%s' cannot edit automation created by '%s'",
-                   currentExecUser().c_str(), existingCreatedBy.c_str());
-            return "Error: You do not have permission to edit this automation. Only the creator or an admin can edit it.";
-          }
-          DEBUG_AUTOMATIONSF("[autos add/edit] AUTHORIZATION OK for edit");
-          String arrTmp = json.substring(aS + 1, aE); arrTmp.trim();
-          if (arrTmp.indexOf('{') == arrTmp.lastIndexOf('{')) {
-            json = json.substring(0, aS + 1) + json.substring(aE);
-          } else {
-            int dS = oS, dE = oE + 1;
-            int cs = dE;
-            while (cs < (int)json.length() &&
-                   (json[cs]==' '||json[cs]=='\n'||json[cs]=='\r'||json[cs]=='\t')) cs++;
-            if (cs < (int)json.length() && json[cs] == ',') {
-              dE = cs + 1;
-            } else {
-              int cp = json.lastIndexOf(',', oS);
-              if (cp > aS) dS = cp;
-            }
-            json = json.substring(0, dS) + json.substring(dE);
-          }
-        }
-      }
-    }
-  }
-
-  int arrStart = json.indexOf("\"automations\"");
-  int bracket = (arrStart >= 0) ? json.indexOf('[', arrStart) : -1;
-  int lastBracket = -1;
-  if (bracket >= 0) {
-    int depth = 0;
-    for (int i = bracket; i < (int)json.length(); ++i) {
-      char c = json[i];
-      if (c == '[') depth++;
-      else if (c == ']') {
-        depth--;
-        if (depth == 0) {
-          lastBracket = i;
-          break;
-        }
-      }
-    }
-  }
-  
-  if (lastBracket < 0) {
-    return "Error: malformed automations.json";
-  }
-  
-  String between = json.substring(bracket + 1, lastBracket);
-  between.trim();
-  bool empty = (between.length() == 0);
-  
-  // Use provided id= if given, otherwise generate a unique one
-  unsigned long id;
-  if (idOverrideStr.length() > 0) {
-    id = strtoul(idOverrideStr.c_str(), nullptr, 10);
-  } else {
-    // From the uptime, kept inside 1..kAutomationIdMax: after 24.9 days of
-    // uptime millis() itself is a number no reader of the id can take.
-    id = automationIdSeed((uint32_t)millis());
-    int guard = 0;
-    while (automationIdExistsInJson(json, id) && guard < 100) {
-      id = automationIdAdvance((uint32_t)id, 1 + (uint32_t)random(1, 100000));
-      guard++;
-    }
-  }
-  
   // Build commands array
   auto buildCommandsArray = [&](const String& csv) {
     String arr = "[";
@@ -2526,16 +2665,32 @@ const char* cmd_automation_add(const String& argsInput) {
   obj += triggersJson + ",\n";
   obj += "  \"commands\": " + commandsJson + "\n";
   obj += "}";
-  String insert = empty ? ("\n" + obj + "\n") : (",\n" + obj + "\n");
-  json = json.substring(0, lastBracket) + insert + json.substring(lastBracket);
-  
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  if (!writeAutomationsJsonAtomic(json)) {
-    return "Error: failed to write automations.json";
+  // The built entry has to be one JSON object before it may go near the
+  // store: text that does not parse is refused here, never spliced in.
+  PSRAM_JSON_DOC(entryDoc);
+  if (deserializeJson(entryDoc, obj) || entryDoc.overflowed() || !entryDoc.is<JsonObject>()) {
+    return "Error: the automation could not be built from these arguments";
   }
-  
-  DEBUG_AUTOMATIONSF("[autos add] wrote automations.json (len=%d) id=%lu", json.length(), id);
+  obj = "";
+
+  // One locked read-modify-write. In validate mode the mutation runs (so a
+  // refused file or a missing permission is still reported) and nothing is
+  // written, not even the empty store of a first add.
+  AutomationAddContext ctx{entryDoc.as<JsonObjectConst>(), hasOverrideId, (long)id,
+                           currentExecUser(), currentExecIsAdmin(), nullptr};
+  String error;
+  const AutomationsMutateResult result = mutateAutomationsJson(
+      "automation.add", automationAddMutation, &ctx,
+      (uint8_t)(kAutomationsMutateNotify | kAutomationsMutateSeed |
+                (validateOnly ? kAutomationsMutateDryRun : 0)),
+      error);
+  if (result == AutomationsMutateResult::Malformed) return "Error: malformed automations.json";
+  if (const char* reply = automationMutateErrorReply(result, ctx.reply)) return reply;
+  id = (unsigned long)ctx.id;
+
+  RETURN_VALID_IF_VALIDATE_CSTR();
+
+  DEBUG_AUTOMATIONSF("[autos add] wrote automations.json id=%lu", id);
   // The stored triggers were rebuilt with fresh next runs: an uptime arm or
   // interval phase of the old ones goes too (AutomationUptimeSchedule).
   automationUptimeForget((long)id);
@@ -2557,6 +2712,119 @@ static_assert(kAutomationIdMax == 2147483647u, "the reply below names the id ran
 static const char kAutomationIdArgReply[] =
     "Error: id must be a whole number from 1 to 2147483647. List the ids with 'automation list'.";
 
+// What a command replies when its mutation did not go through: the mutator's
+// own refusal (a fixed reply text), else the reason the owner stopped.
+// nullptr when the mutation was applied or changed nothing.
+static const char* automationMutateErrorReply(AutomationsMutateResult result, const char* refusal) {
+  switch (result) {
+    case AutomationsMutateResult::Changed:
+    case AutomationsMutateResult::Unchanged:
+      return nullptr;
+    case AutomationsMutateResult::Refused:
+      return refusal ? refusal : "Error: automation not changed";
+    case AutomationsMutateResult::ReadFailed:
+      return automationsReadErrorReply();
+    case AutomationsMutateResult::Malformed:
+      return "Error: malformed JSON";
+    case AutomationsMutateResult::WriteFailed:
+      break;
+  }
+  return "Error: failed to write automations.json";
+}
+
+// Only the creator or an admin changes an automation. The creator comes from
+// the parsed "createdBy", so a quote or brace in a name or command cannot
+// move it.
+static bool automationCallerMayChange(JsonObjectConst automation, const String& caller, bool callerIsAdmin) {
+  if (callerIsAdmin) return true;
+  const char* createdBy = automation["createdBy"] | "";
+  return caller == createdBy;
+}
+
+struct AutomationEnableContext {
+  long id;
+  bool enable;
+  String caller;
+  bool callerIsAdmin;
+  const char* reply;  // the refusal, when the mutator fails
+};
+
+static AutomationsMutation automationEnableMutation(JsonDocument& doc, JsonArray automations,
+                                                    void* opaque, String& errorOut) {
+  (void)doc;
+  (void)errorOut;
+  AutomationEnableContext* ctx = static_cast<AutomationEnableContext*>(opaque);
+  JsonObject automation = findAutomationById(automations, ctx->id);
+  if (automation.isNull()) {
+    ctx->reply = "Error: automation id not found";
+    return AutomationsMutation::Failed;
+  }
+  DEBUG_AUTOMATIONSF("[autos %s] id=%ld createdBy='%s' requestedBy='%s' isAdmin=%d",
+         ctx->enable ? "enable" : "disable", ctx->id, automation["createdBy"] | "",
+         ctx->caller.c_str(), ctx->callerIsAdmin);
+  if (!automationCallerMayChange(automation, ctx->caller, ctx->callerIsAdmin)) {
+    ctx->reply = "Error: You do not have permission to modify this automation. Only the creator or an admin can modify it.";
+    return AutomationsMutation::Failed;
+  }
+  // The flag of this automation only: an entry stored without one is refused
+  // as before, and never answered from the next automation's flag.
+  JsonVariant enabled = automation["enabled"];
+  if (!enabled.is<bool>()) {
+    ctx->reply = "Error: malformed automation";
+    return AutomationsMutation::Failed;
+  }
+  if (enabled.as<bool>() == ctx->enable) return AutomationsMutation::Unchanged;
+  automation["enabled"] = ctx->enable;
+  return AutomationsMutation::Changed;
+}
+
+struct AutomationDisableOwnedContext {
+  const char* owner;
+  int disabled;
+};
+
+static AutomationsMutation automationDisableOwnedMutation(JsonDocument& doc, JsonArray automations,
+                                                          void* opaque, String& errorOut) {
+  (void)doc;
+  (void)errorOut;
+  AutomationDisableOwnedContext* ctx = static_cast<AutomationDisableOwnedContext*>(opaque);
+  for (JsonObject automation : automations) {
+    const char* createdBy = automation["createdBy"] | "";
+    // Exact, case-sensitive, as steps are run (the stored name is the
+    // identity the step executes under). An entry with no creator is nobody's.
+    if (!createdBy[0] || strcmp(createdBy, ctx->owner) != 0) continue;
+    if (!(automation["enabled"] | false)) continue;
+    automation["enabled"] = false;
+    ctx->disabled++;
+  }
+  return ctx->disabled > 0 ? AutomationsMutation::Changed : AutomationsMutation::Unchanged;
+}
+
+// Disables every enabled automation whose createdBy is `username` (exact
+// match), in one locked write. For `userdelete`: automation steps run as their
+// creator, so a later account with the same name would otherwise inherit the
+// deleted user's automations. They stay in the file, disabled, and nothing
+// re-enables them. Returns how many were disabled, or -1 when automations.json
+// could not be read, parsed or written (nothing was changed then).
+int automationDisableOwnedBy(const String& username) {
+  if (username.length() == 0) return 0;
+  AutomationDisableOwnedContext ctx{username.c_str(), 0};
+  String error;
+  const AutomationsMutateResult result = mutateAutomationsJson(
+      "automation.ownerRemoved", automationDisableOwnedMutation, &ctx, kAutomationsMutateNotify, error);
+  if (result == AutomationsMutateResult::Changed) {
+    logSystemEvent("AUTO", "%d automation(s) of removed user '%s' disabled", ctx.disabled, username.c_str());
+    return ctx.disabled;
+  }
+  if (result == AutomationsMutateResult::Unchanged) return 0;
+  // No file at all is "no automations", not a failure.
+  if (result == AutomationsMutateResult::ReadFailed && sAutomationsRefusedVersion.load() == 0 &&
+      !VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"))) {
+    return 0;
+  }
+  return -1;
+}
+
 const char* cmd_automation_enable_disable(const String& argsInput, bool enable) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -2567,63 +2835,48 @@ const char* cmd_automation_enable_disable(const String& argsInput, bool enable) 
   }
   long id = 0;
   if (!parseIntArg(idStr, 1, kAutomationIdMax, id)) return kAutomationIdArgReply;
-  
-  String json;
-  if (!readAutomationsJson(json)) {
-    return automationsReadErrorReply();
-  }
-  
-  // The automation with exactly this id, not the first whose id starts with it.
-  int idPos = automationIdPosInJson(json, (unsigned long)id);
-  if (idPos < 0) {
-    return "Error: automation id not found";
-  }
-  
-  // Authorization check: extract createdBy and verify user can modify this automation
-  char createdByBuf[64];
-  int objStart = json.lastIndexOf('{', idPos);
-  if (objStart < 0) {
-    return "Error: malformed JSON";
-  }
-  int objEnd = findJsonObjectEnd(json, objStart);
-  if (objEnd < 0) {
-    return "Error: malformed JSON";
-  }
-  String automationObj = json.substring(objStart, objEnd + 1);
-  extractJsonString(automationObj.c_str(), "\"createdBy\"", createdByBuf, sizeof(createdByBuf));
-  String createdBy = createdByBuf;
-  
-  DEBUG_AUTOMATIONSF("[autos %s] id=%s createdBy='%s' requestedBy='%s' isAdmin=%d",
-         enable ? "enable" : "disable", idStr.c_str(), createdBy.c_str(), currentExecUser().c_str(), currentExecIsAdmin());
 
-  if (!currentExecIsAdmin() && createdBy != currentExecUser()) {
-    DEBUG_AUTOMATIONSF("[autos %s] AUTHORIZATION DENIED: non-admin '%s' cannot modify automation created by '%s'",
-           enable ? "enable" : "disable", currentExecUser().c_str(), createdBy.c_str());
-    return "Error: You do not have permission to modify this automation. Only the creator or an admin can modify it.";
-  }
-  DEBUG_AUTOMATIONSF("[autos %s] AUTHORIZATION OK", enable ? "enable" : "disable");
-  
-  int enabledPos = json.indexOf("\"enabled\":", idPos);
-  if (enabledPos < 0) {
-    return "Error: malformed automation";
-  }
-  
-  int valueStart = json.indexOf(':', enabledPos) + 1;
-  while (valueStart < (int)json.length() && json[valueStart] == ' ') valueStart++;
-  int valueEnd = json.indexOf(',', valueStart);
-  if (valueEnd < 0) valueEnd = json.indexOf('}', valueStart);
-  if (valueEnd < 0) {
-    return "Error: malformed JSON";
-  }
-  
-  json = json.substring(0, valueStart) + (enable ? "true" : "false") + json.substring(valueEnd);
-  
-  if (!writeAutomationsJsonAtomic(json)) {
-    return "Error: failed to write automations.json";
-  }
-  
+  // One locked read-modify-write, the automation found by its numeric id.
+  AutomationEnableContext ctx{id, enable, currentExecUser(), currentExecIsAdmin(), nullptr};
+  String error;
+  const AutomationsMutateResult result = mutateAutomationsJson(
+      enable ? "automation.enable" : "automation.disable", automationEnableMutation, &ctx,
+      kAutomationsMutateNotify, error);
+  if (const char* reply = automationMutateErrorReply(result, ctx.reply)) return reply;
+
   BROADCAST_PRINTF("%s automation id=%ld", enable ? "Enabled" : "Disabled", id);
   return "OK";
+}
+
+struct AutomationDeleteContext {
+  long id;
+  String caller;
+  bool callerIsAdmin;
+  const char* reply;  // the refusal, when the mutator fails
+  char name[64];      // the removed automation's display name, for its event
+};
+
+static AutomationsMutation automationDeleteMutation(JsonDocument& doc, JsonArray automations,
+                                                    void* opaque, String& errorOut) {
+  (void)doc;
+  (void)errorOut;
+  AutomationDeleteContext* ctx = static_cast<AutomationDeleteContext*>(opaque);
+  size_t index = 0;
+  JsonObject automation = findAutomationById(automations, ctx->id, &index);
+  if (automation.isNull()) {
+    ctx->reply = "Error: automation id not found";
+    return AutomationsMutation::Failed;
+  }
+  DEBUG_AUTOMATIONSF("[autos delete] id=%ld createdBy='%s' requestedBy='%s' isAdmin=%d",
+         ctx->id, automation["createdBy"] | "", ctx->caller.c_str(), ctx->callerIsAdmin);
+  if (!automationCallerMayChange(automation, ctx->caller, ctx->callerIsAdmin)) {
+    ctx->reply = "Error: You do not have permission to delete this automation. Only the creator or an admin can delete it.";
+    return AutomationsMutation::Failed;
+  }
+  // The display name, copied before the entry goes, is the event's subject.
+  snprintf(ctx->name, sizeof(ctx->name), "%s", automation["name"] | "");
+  automations.remove(index);
+  return AutomationsMutation::Changed;
 }
 
 const char* cmd_automation_delete(const String& argsInput) {
@@ -2636,99 +2889,20 @@ const char* cmd_automation_delete(const String& argsInput) {
   }
   long id = 0;
   if (!parseIntArg(idStr, 1, kAutomationIdMax, id)) return kAutomationIdArgReply;
-  
-  String json;
-  if (!readAutomationsJson(json)) {
-    return automationsReadErrorReply();
-  }
 
-  // The automation with exactly this id, not the first whose id starts with it.
-  int idPos = automationIdPosInJson(json, (unsigned long)id);
-  if (idPos < 0) {
-    return "Error: automation id not found";
-  }
+  // One locked read-modify-write, the automation found by its numeric id and
+  // removed from the parsed array.
+  AutomationDeleteContext ctx{id, currentExecUser(), currentExecIsAdmin(), nullptr, {0}};
+  String error;
+  const AutomationsMutateResult result = mutateAutomationsJson(
+      "automation.delete", automationDeleteMutation, &ctx, kAutomationsMutateNotify, error);
+  if (const char* reply = automationMutateErrorReply(result, ctx.reply)) return reply;
 
-  // Authorization check: extract createdBy and verify user can delete this automation
-  char createdByBuf[64];
-  int objStart = json.lastIndexOf('{', idPos);
-  if (objStart < 0) {
-    return "Error: malformed JSON";
-  }
-  int objEnd = findJsonObjectEnd(json, objStart);
-  if (objEnd < 0) {
-    return "Error: malformed JSON";
-  }
-  String automationObj = json.substring(objStart, objEnd + 1);
-  // The id of the object that matched (read from it, not from the argument).
-  const long deletedId = strtol(json.c_str() + idPos + (sizeof("\"id\": ") - 1), nullptr, 10);
-  extractJsonString(automationObj.c_str(), "\"createdBy\"", createdByBuf, sizeof(createdByBuf));
-  String createdBy = createdByBuf;
-  // Capture the display name before the object is spliced out of the JSON,
-  // so the delete system-event can carry it as its subject.
-  char deletedNameBuf[64];
-  extractJsonString(automationObj.c_str(), "\"name\"", deletedNameBuf, sizeof(deletedNameBuf));
-
-  DEBUG_AUTOMATIONSF("[autos delete] id=%s createdBy='%s' requestedBy='%s' isAdmin=%d",
-         idStr.c_str(), createdBy.c_str(), currentExecUser().c_str(), currentExecIsAdmin());
-
-  if (!currentExecIsAdmin() && createdBy != currentExecUser()) {
-    DEBUG_AUTOMATIONSF("[autos delete] AUTHORIZATION DENIED: non-admin '%s' cannot delete automation created by '%s'",
-           currentExecUser().c_str(), createdBy.c_str());
-    return "Error: You do not have permission to delete this automation. Only the creator or an admin can delete it.";
-  }
-  DEBUG_AUTOMATIONSF("[autos delete] AUTHORIZATION OK");
-  
-  // Find array bounds
-  int arrayStart = json.indexOf('[');
-  if (arrayStart < 0) {
-    return "Error: malformed JSON - no array";
-  }
-  int arrayEnd = json.lastIndexOf(']');
-  if (arrayEnd < 0) {
-    return "Error: malformed JSON - no array end";
-  }
-  
-  // Check if this is the only object in the array
-  String arrayContent = json.substring(arrayStart + 1, arrayEnd);
-  arrayContent.trim();
-  bool isOnlyObject = (arrayContent.indexOf('{') == arrayContent.lastIndexOf('{'));
-  
-  if (isOnlyObject) {
-    // If it's the only object, replace with empty array
-    json = json.substring(0, arrayStart + 1) + json.substring(arrayEnd);
-  } else {
-    // Multiple objects - handle comma removal
-    int delStart = objStart, delEnd = objEnd + 1;
-    
-    // Look for comma after the object, skipping whitespace/newlines
-    int commaSearch = delEnd;
-    while (commaSearch < (int)json.length() &&
-           (json[commaSearch] == ' ' || json[commaSearch] == '\n' ||
-            json[commaSearch] == '\r' || json[commaSearch] == '\t')) {
-      commaSearch++;
-    }
-    if (commaSearch < (int)json.length() && json[commaSearch] == ',') {
-      delEnd = commaSearch + 1;  // Include trailing comma (and whitespace before it)
-    } else {
-      // No trailing comma, look for leading comma
-      int commaPos = json.lastIndexOf(',', objStart);
-      if (commaPos > arrayStart) {
-        delStart = commaPos;  // Include leading comma
-      }
-    }
-    
-    json = json.substring(0, delStart) + json.substring(delEnd);
-  }
-  
-  if (!writeAutomationsJsonAtomic(json)) {
-    return "Error: failed to write automations.json";
-  }
-  
   // Its uptime arm or interval phase goes with it (AutomationUptimeSchedule).
-  automationUptimeForget(deletedId);
+  automationUptimeForget(id);
 
   // SYSTEM-EVENT: automation removed and the change persisted.
-  systemEventPost(SYSEVT_AUTOMATION_DELETED, deletedNameBuf);
+  systemEventPost(SYSEVT_AUTOMATION_DELETED, ctx.name);
 
   BROADCAST_PRINTF("Deleted automation id=%ld", id);
   return "OK";
@@ -2763,19 +2937,9 @@ const char* cmd_automation_run(const String& argsInput) {
     return "Error: malformed automations.json (objStart)";
   }
   
-  int depth = 0, objEnd = -1;
-  for (int i = objStart; i < (int)json.length(); ++i) {
-    char c = json[i];
-    if (c == '{') depth++;
-    else if (c == '}') {
-      depth--;
-      if (depth == 0) {
-        objEnd = i;
-        break;
-      }
-    }
-  }
-  
+  // The same string-aware matcher the boot pass and the scheduler use: a
+  // brace inside a name or command does not end the object.
+  const int objEnd = findJsonObjectEnd(json, objStart);
   if (objEnd < 0) {
     return "Error: malformed automations.json (objEnd)";
   }
@@ -3179,13 +3343,19 @@ const char* cmd_automation(const String& argsInput) {
   } else if (subCmd == "delete") {
     return cmd_automation_delete(subArgs);
   } else if (subCmd == "sanitize") {
-    String json;
-    if (!readAutomationsJson(json)) {
-      return automationsReadErrorReply();
-    }
+    // Read, repair and write back under one lock.
     AutomationSanitizeCounts fixed;
-    if (sanitizeAutomationsJson(json, &fixed)) {
-      if (!writeAutomationsJsonAtomic(json)) return "Error: failed to write automations.json";
+    bool repaired = false;
+    {
+      FsLockGuard storeLock("automation.sanitize");
+      String probe;
+      if (!readAutomationsJson(probe)) {
+        return automationsReadErrorReply();
+      }
+      probe = "";
+      if (!automationsSanitizeStore(&fixed, &repaired)) return "Error: failed to write automations.json";
+    }
+    if (repaired) {
       DEBUG_AUTOMATIONSF("[autos] CLI sanitize: fixed duplicate IDs; scheduler refresh queued");
       return automationSanitizeReply(fixed);
     } else {
@@ -3737,6 +3907,40 @@ static bool onFired(Trigger& s, time_t firedAt) {
   return false;
 }
 
+struct AutomationRescheduleContext {
+  long id;
+  const Trigger* triggers;
+  int count;
+};
+
+// The triggers array of one automation gets the next runs the caller worked
+// out. An automation that is gone (deleted since the pass read the file) is
+// left alone: nothing is written.
+static AutomationsMutation automationRescheduleMutation(JsonDocument& doc, JsonArray automations,
+                                                        void* opaque, String& errorOut) {
+  (void)doc;
+  (void)errorOut;
+  const AutomationRescheduleContext* ctx = static_cast<const AutomationRescheduleContext*>(opaque);
+  for (JsonObject automation : automations) {
+    if (automation["id"].as<long>() != ctx->id) continue;
+    JsonArray arr = automation["triggers"].as<JsonArray>();
+    if (arr.isNull()) break;
+    int idx = 0;
+    for (JsonVariant t : arr) {
+      if (idx >= ctx->count) break;
+      JsonObject tobj = t.as<JsonObject>();
+      tobj["nextAt"] = (unsigned long)ctx->triggers[idx].nextAt;
+      if (ctx->triggers[idx].type == Trigger::TIME && ctx->triggers[idx].weekInterval > 1 &&
+          ctx->triggers[idx].anchor > 0) {
+        tobj["anchor"] = (unsigned long)ctx->triggers[idx].anchor;
+      }
+      idx++;
+    }
+    return AutomationsMutation::Changed;
+  }
+  return AutomationsMutation::Unchanged;
+}
+
 // Unified post-fire helper. For each trigger whose nextAt was at or before
 // `firedAt`, compute a new nextAt (and maybe update anchor). A short interval
 // keeps its new value in RAM; anything else is saved by writing the whole
@@ -3772,36 +3976,16 @@ static void rescheduleAfterFire(long id, const char* automationJson, time_t fire
     return;
   }
 
-  // Rewrite the triggers array in the file. A short interval's entry carries
-  // its current RAM value along.
-  String json;
-  if (!readAutomationsJson(json)) return;
-  PSRAM_JSON_DOC(doc);
-  if (deserializeJson(doc, json)) return;
-  JsonArray autos = doc["automations"].as<JsonArray>();
-  if (autos.isNull()) return;
-  for (JsonObject automation : autos) {
-    if (automation["id"].as<long>() != id) continue;
-    JsonArray arr = automation["triggers"].as<JsonArray>();
-    if (arr.isNull()) break;
-    int idx = 0;
-    for (JsonVariant t : arr) {
-      if (idx >= n) break;
-      JsonObject tobj = t.as<JsonObject>();
-      tobj["nextAt"] = (unsigned long)triggers[idx].nextAt;
-      if (triggers[idx].type == Trigger::TIME && triggers[idx].weekInterval > 1 && triggers[idx].anchor > 0) {
-        tobj["anchor"] = (unsigned long)triggers[idx].anchor;
-      }
-      idx++;
-    }
-    break;
-  }
-  json = "";
-  serializeJsonPretty(doc, json);
+  // Rewrite the triggers array in the file, in one locked read-modify-write
+  // (a short interval's entry carries its current RAM value along). The lock
+  // is taken blocking: a missed write here would leave the old next run in
+  // the file and fire the automation again on the next pass.
   // Inside a pass the trailing rebuild picks this write up; a notification
   // would only schedule a second full pass. Other callers notify as usual.
-  if (notify) writeAutomationsJsonAtomic(json);
-  else writeTextAtomic(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "automation.state"));
+  AutomationRescheduleContext ctx{id, triggers, n};
+  String unused;
+  (void)mutateAutomationsJson("automation.reschedule", automationRescheduleMutation, &ctx,
+                              notify ? kAutomationsMutateNotify : 0, unused);
 }
 
 // Force-recompute every clock trigger of every enabled automation.
@@ -3818,17 +4002,19 @@ static void rescheduleAfterFire(long id, const char* automationJson, time_t fire
 // MANUAL / BOOT / EVENT triggers are left strictly alone: nextFire() returns 0
 // for them, and an ARMED afterDelay (stored as type "manual" with a real
 // nextAt, see cmd_automation_trigger) would be silently disarmed.
-static int automationRecomputeAllClockTriggers(time_t now, int* outSkipped) {
+struct AutomationRecomputeContext {
+  time_t now;
+  int rewritten;
+  int skipped;
+};
+
+static AutomationsMutation automationRecomputeMutation(JsonDocument& doc, JsonArray autos,
+                                                       void* opaque, String& errorOut) {
+  (void)doc;
+  (void)errorOut;
+  AutomationRecomputeContext* ctx = static_cast<AutomationRecomputeContext*>(opaque);
+  const time_t now = ctx->now;
   int rewritten = 0, skipped = 0;
-  if (outSkipped) *outSkipped = 0;
-
-  String json;
-  if (!readAutomationsJson(json)) return -1;
-  PSRAM_JSON_DOC(doc);
-  if (deserializeJson(doc, json)) return -1;
-  JsonArray autos = doc["automations"].as<JsonArray>();
-  if (autos.isNull()) return -1;
-
   for (JsonObject automation : autos) {
     if (!(automation["enabled"] | false)) { skipped++; continue; }
     JsonArray arr = automation["triggers"].as<JsonArray>();
@@ -3866,12 +4052,21 @@ static int automationRecomputeAllClockTriggers(time_t now, int* outSkipped) {
       idx++;
     }
   }
+  ctx->rewritten = rewritten;
+  ctx->skipped = skipped;
+  return rewritten > 0 ? AutomationsMutation::Changed : AutomationsMutation::Unchanged;
+}
 
-  json = "";
-  serializeJsonPretty(doc, json);
-  if (!writeAutomationsJsonAtomic(json)) return -1;  // ONE write for the lot
-  if (outSkipped) *outSkipped = skipped;
-  return rewritten;
+static int automationRecomputeAllClockTriggers(time_t now, int* outSkipped) {
+  if (outSkipped) *outSkipped = 0;
+  AutomationRecomputeContext ctx{now, 0, 0};
+  String error;
+  // ONE locked read-modify-write for the lot; nothing to rewrite, no write.
+  const AutomationsMutateResult result = mutateAutomationsJson(
+      "automation.recompute", automationRecomputeMutation, &ctx, kAutomationsMutateNotify, error);
+  if (result != AutomationsMutateResult::Changed && result != AutomationsMutateResult::Unchanged) return -1;
+  if (outSkipped) *outSkipped = ctx.skipped;
+  return ctx.rewritten;
 }
 
 // The min nextAt across the triggers of the automation, or 0 if none is
@@ -5526,15 +5721,11 @@ static void schedulerTickMinute() {
   if (queueSanitize) {
     unsigned long nowMs = millis();
     if (nowMs - s_lastAutoSanitizeMs > 5000UL) {
-      String fix;
-      if (readAutomationsJson(fix)) {
-        if (sanitizeAutomationsJson(fix)) {
-          if (writeAutomationsJsonAtomic(fix)) {
-            DEBUG_AUTOMATIONSF("[autos] Runtime sanitize applied after duplicate detection; scheduler refresh queued");
-          }
-        } else {
-          DEBUG_AUTOMATIONSF("[autos] Runtime sanitize: no changes needed");
-        }
+      bool repaired = false;
+      if (automationsSanitizeStore(nullptr, &repaired) && repaired) {
+        DEBUG_AUTOMATIONSF("[autos] Runtime sanitize applied after duplicate detection; scheduler refresh queued");
+      } else {
+        DEBUG_AUTOMATIONSF("[autos] Runtime sanitize: no changes needed");
       }
       s_lastAutoSanitizeMs = nowMs;
     } else {
@@ -5548,6 +5739,16 @@ static void schedulerTickMinute() {
 }
 
 bool automationSchedulerRunning() { return sAutomationRunning.load(); }
+
+// True when the filesystem lock is free for this task right now (or this task
+// already holds it, or there is no lock yet). A probe: the lock is released
+// again at once, so it is never held across condition evaluation, sensor
+// cache locks or command dispatch; each file step of the pass takes it for
+// itself. Called by automationTick before it claims a pass.
+static bool automationPassFilesystemFree() {
+  FsLockGuard probe("automation.pass", 0);
+  return probe.held || isFsLockedByCurrentTask() || gFsMutex == nullptr;
+}
 
 // Called only by the main task. Keep the cadence and pending-work consumption
 // with the cache owner; other tasks merely notify, start or stop the scheduler.
@@ -5564,12 +5765,37 @@ void automationTick() {
   const uint32_t nowMs = millis();
   const time_t now = time(nullptr);
   {
+    // Is a pass wanted? Nothing is consumed yet: the refresh flag, the pending
+    // events and the due entries all stay as they are until the pass is
+    // claimed below.
     AutomationStateGuard guard;
     if (!sAutomationRunning) return;
-    const bool refresh = sAutomationRefreshPending.exchange(false);
-    if (!refresh && !automationsAnyDue(now) &&
+    if (!sAutomationRefreshPending.load() && !automationsAnyDue(now) &&
         !(gAutomationEventsPending && (nowMs - lastAutoCheck >= 250)) &&
         nowMs - lastAutoCheck < 60000) return;
+  }
+  // A pass starts with file work (the uptime carry and the read of
+  // automations.json). The main loop never queues behind another task's
+  // filesystem work for it: try the filesystem lock, and when it is busy leave
+  // everything pending and come back on the next lap. A miss is never taken
+  // for a missing or unreadable file (the cache, the refresh flag and the
+  // event cursor are untouched). No state lock is held here: file work and the
+  // filesystem lock stay outside AutomationStateGuard.
+  if (!automationPassFilesystemFree()) {
+    static uint32_t sPassLockMisses = 0;
+    static uint32_t sPassLockNoteMs = 0;
+    ++sPassLockMisses;
+    if (everyMs(&sPassLockNoteMs, 10000)) {
+      DEBUG_AUTOMATIONSF("[automations] pass deferred, filesystem busy (%lu deferral(s) so far)",
+                         (unsigned long)sPassLockMisses);
+    }
+    (void)sPassLockMisses;  // read only by the debug line above
+    return;
+  }
+  {
+    AutomationStateGuard guard;
+    if (!sAutomationRunning) return;
+    sAutomationRefreshPending.exchange(false);
     // Subscription reads stay conservative until publication completes. Do
     // not clear refresh again after the tick: a concurrent save may have
     // replaced the file after we read it, even if this rebuild succeeds.
@@ -5654,17 +5880,13 @@ const CommandEntry automationCommands[] = {
   { "automation", "Automation system: automation <subcommand> [args].", true, cmd_automation,
     "Usage: automation <system enable|disable|status | list | add | enable | disable | delete | run | trigger | sanitize | recompute>" },
 
-  // Single-word aliases for common operations (follow naming convention)
+  // Open to every signed-in user (the phone app reads `automationlist json`);
+  // 'automation list' is the same list behind the admin row above.
   { "automationlist", "List all automations.", false, cmd_automation_list },
-  { "automationadd", "Add automation (same as 'automation add').", true, cmd_automation_add },
-  { "automationrun", "Run automation by ID: automationrun id=<id>.", true, cmd_automation_run },
-  { "automationtrigger", "Arm afterDelay automation timer: automationtrigger id=<id>.", true, cmd_automation_trigger },
 
   // Utility commands
   { "autolog", "Automation logging: autolog start <file> | stop | status.", false, cmd_autolog, "Usage: autolog start <filename> | autolog stop | autolog status" },
   { "validateconditions", "Validate conditional automation syntax: validateconditions IF temp>75 THEN ledcolor red.", true, cmd_validate_conditions },
-  // Name from before 1.0, kept for one release (CONTRIBUTING.md, "Command names").
-  { "validate-conditions", "Alias of validateconditions.", true, cmd_validate_conditions },
   { "print", "Broadcast a message to all outputs: print <message>.", false, cmd_print },
   
   // NOTE: downloadautomation and if/conditional commands are registered

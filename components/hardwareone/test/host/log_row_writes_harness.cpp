@@ -38,16 +38,34 @@ static time_t fixedEpoch = 1800000000;
 static unsigned long millis() { return nowMs; }
 static time_t controlledTime(time_t* output) { if (output) *output = fixedEpoch; return fixedEpoch; }
 #define time controlledTime
+static bool mutexExists();
 static void io(const std::string& operation) {
-  check(lockDepth == 1, "I/O held under filesystem lock");
+  // Before the mutex exists (early boot) there is nothing to hold.
+  check(lockDepth == 1 || !mutexExists(), "I/O held under filesystem lock");
   operations.push_back(operation);
 }
 using TickType_t = unsigned;
 static constexpr TickType_t portMAX_DELAY = ~TickType_t(0);
-static constexpr int gFsMutex = 1, pdTRUE = 1;
-static bool isHeldByCurrentTask(int) { return lockDepth == 1; }
-static int xSemaphoreTake(int, TickType_t) { check(lockDepth == 0, "acquire exactly one owner lock"); ++lockDepth; return pdTRUE; }
-static void xSemaphoreGive(int) { check(lockDepth == 1 && liveFiles == 0, "close files before unlock"); --lockDepth; }
+static constexpr int pdTRUE = 1, pdFALSE = 0;
+// The filesystem mutex: a handle that can be absent (before it is created) and
+// can be held by another task. A wait without limit on a lock another task
+// holds would hang the harness, so it is a failure here; a try-lock misses.
+static int fsMutexStorage = 0;
+static int* gFsMutex = &fsMutexStorage;
+static bool heldElsewhere = false;
+static unsigned blockingWaitsOnBusyLock = 0, tryLockMisses = 0;
+static bool mutexExists() { return gFsMutex != nullptr; }
+static bool isHeldByCurrentTask(int* mutex) { return mutex && lockDepth == 1; }
+static bool isFsLockedByCurrentTask() { return isHeldByCurrentTask(gFsMutex); }
+static int xSemaphoreTake(int*, TickType_t timeout) {
+  check(lockDepth == 0, "acquire exactly one owner lock");
+  if (heldElsewhere) {
+    if (timeout == portMAX_DELAY) { ++blockingWaitsOnBusyLock; heldElsewhere = false; }  // "waited", then got it
+    else { ++tryLockMisses; return pdFALSE; }
+  }
+  ++lockDepth; return pdTRUE;
+}
+static void xSemaphoreGive(int*) { check(lockDepth == 1 && liveFiles == 0, "close files before unlock"); --lockDepth; }
 // INSERT_LOCKS
 static constexpr int DEBUG_STORAGE = 1, DEBUG_LOGGER = 2;
 static bool isDebugFlagSet(int) { return true; }
@@ -164,10 +182,21 @@ static const unsigned long truncateCooldownMs = 5000;
 static uint32_t log_writes = 0, log_open_fail = 0, log_trunc = 0;
 enum class AllocPref { PreferPsram };
 static char sealStorage[CAPCRYPT_MAX_SEALED];
+static char pendingStorage[1024];
+static bool pendingAllocFailure = false;
+static unsigned pendingAllocations = 0;
 static void* ps_alloc(size_t count, AllocPref, const char* tag) {
+  if (std::string(tag) == "sensor.log.pending") {
+    // The waiting row's own copy: one PSRAM block, the size of the largest row buffer.
+    check(count == sizeof(pendingStorage), "the waiting row has one fixed-size PSRAM buffer");
+    ++pendingAllocations;
+    return pendingAllocFailure ? nullptr : pendingStorage;
+  }
   check(count == sizeof(sealStorage) && std::string(tag) == "sensor.log.seal", "seal keeps original buffer policy");
   return allocFailure ? nullptr : sealStorage;
 }
+static uint32_t sessionId = 1;
+static uint32_t sensorLogCurrentSessionId() { return sessionId; }
 static int captureCryptoSealLine(const char* line, size_t length, char* out, size_t capacity) {
   if (sealFailure) return -1;
   std::string sealed = "SEALED[" + std::string(line, length) + "]";
@@ -202,6 +231,12 @@ static void reset(bool onSd = false) {
   gSensorLogSealed = false; gSealBuf = nullptr; gApproxSizeBytes = 0; gSensorLogMaxSize = 100000;
   gSensorLogMaxRotations = 2; gSensorLogLastWrite = 25; lastTruncateMs = 0; log_writes = log_open_fail = log_trunc = 0;
   gSettings.batteryLogEnabled = true; gSettings.batteryLogIntervalMs = 60000; batteryState = {};
+  heldElsewhere = false; blockingWaitsOnBusyLock = tryLockMisses = 0; gFsMutex = &fsMutexStorage;
+  pendingAllocFailure = false; sessionId = 1;
+#if TRY_LOCK_WRITERS
+  sPendingRowHeld = false; sAppendLockMisses = sPendingRowsDropped = 0; sBatteryLogLockMisses = 0;
+  sBatteryLogSampleWaiting = false;
+#endif
 }
 static void transcript(const char* name) {
   released(); std::cout << name << ':' << overflow << ':' << log_writes << ':' << gSensorLogLastWrite << ':' << log_trunc << '\n';
@@ -493,8 +528,122 @@ static void reserveRefusedCases() {
 }
 #endif
 
+#if TRY_LOCK_WRITERS
+// S-5: the loop's writers never wait for the filesystem lock.
+static void busyLockCases() {
+  for (bool onSd : {false, true}) {
+    // Held by another task: the append returns at once, opens and writes
+    // nothing, and the row waits.
+    reset(onSd); disk[sensorPath()] = "prefix\n"; gApproxSizeBytes = 7;
+    heldElsewhere = true;
+    sensorAppend("row-1"); released();
+    check(operations.empty() && disk.at(sensorPath()) == "prefix\n" && log_writes == 0, "a busy lock writes nothing");
+    check(blockingWaitsOnBusyLock == 0 && tryLockMisses == 1, "the append tries the lock and does not wait");
+    check(sPendingRowHeld && sAppendLockMisses == 1 && sPendingRowsDropped == 0, "the row is kept and the miss counted");
+    // Every later lap tries again and still does not wait.
+    for (int lap = 0; lap < 3; ++lap) sensorRetry();
+    released();
+    check(operations.empty() && sPendingRowHeld && tryLockMisses == 4 && blockingWaitsOnBusyLock == 0,
+          "every lap tries again without waiting");
+    check(sAppendLockMisses == 1, "the waiting row counts once, not once a lap");
+    // Released: the same row is written once, and only once.
+    heldElsewhere = false;
+    sensorRetry(); released();
+    check(disk.at(sensorPath()) == "prefix\nrow-1\n" && log_writes == 1 && !sPendingRowHeld, "the kept row is written after release");
+    sensorRetry(); sensorRetry(); released();
+    check(disk.at(sensorPath()) == "prefix\nrow-1\n" && log_writes == 1, "the kept row is written exactly once");
+    check(sAppendLockMisses == 1 && sPendingRowsDropped == 0, "no further misses or drops");
+    check(pendingAllocations >= 1, "the waiting row lives in its own buffer");
+
+    // The row buffer of the builders is reused by the next sample: the kept
+    // row is a copy.
+    reset(onSd); heldElsewhere = true;
+    char shared[32] = "first";
+    sensorAppend(shared);
+    std::snprintf(shared, sizeof(shared), "overwritten");
+    heldElsewhere = false; sensorRetry(); released();
+    check(disk.at(sensorPath()) == "first\n", "the kept row does not alias the builders' buffer");
+
+    // Still busy when the next sample is ready: the older row gives way and
+    // is counted; the newer one is written after release.
+    reset(onSd); heldElsewhere = true;
+    sensorAppend("older"); sensorAppend("newer"); released();
+    check(sPendingRowHeld && sPendingRowsDropped == 1 && sAppendLockMisses == 2, "one row waits; the older one is dropped and counted");
+    heldElsewhere = false; sensorRetry(); released();
+    check(disk.at(sensorPath()) == "newer\n" && log_writes == 1, "the newest row is the one written");
+
+    // A waiting row goes first when the lock is free again at the next sample.
+    reset(onSd); heldElsewhere = true; sensorAppend("one");
+    heldElsewhere = false; sensorAppend("two"); released();
+    check(disk.at(sensorPath()) == "one\ntwo\n" && log_writes == 2 && sPendingRowsDropped == 0, "rows keep their order");
+
+    // A row never reaches a later session, and a session that ended drops it.
+    reset(onSd); heldElsewhere = true; sensorAppend("old session");
+    heldElsewhere = false; sessionId = 2; sensorRetry(); released();
+    check(disk.empty() && !sPendingRowHeld && sPendingRowsDropped == 1, "a row of an earlier session is not written into a later one");
+    reset(onSd); heldElsewhere = true; sensorAppend("stopped");
+    heldElsewhere = false; sessionId = 0; sensorRetry(); released();
+    check(disk.empty() && !sPendingRowHeld && sPendingRowsDropped == 1, "a stopped session's waiting row is dropped");
+
+    // No memory for the copy, or a row too long to keep: dropped and counted.
+    reset(onSd); heldElsewhere = true; sPendingRow = nullptr; pendingAllocFailure = true;
+    sensorAppend("no memory"); released();
+    check(!sPendingRowHeld && sPendingRowsDropped == 1 && operations.empty(), "a row that cannot be kept is counted as dropped");
+    pendingAllocFailure = false; sPendingRow = nullptr;
+    const std::string longRow(sizeof(pendingStorage), 'x');
+    sensorAppend(longRow.c_str()); released();
+    check(!sPendingRowHeld && sPendingRowsDropped == 2, "a row longer than the buffer is not cut");
+
+    // This task's own hold and a device without the mutex are not "busy".
+    reset(onSd); fsLock("outer"); sensorAppend("nested");
+    check(lockDepth == 1 && liveFiles == 0 && disk.at(sensorPath()) == "nested\n" && !sPendingRowHeld, "reentry writes under the caller's lock");
+    fsUnlock(); released();
+    reset(onSd); gFsMutex = nullptr; sensorAppend("no mutex");
+    check(disk.at(sensorPath()) == "no mutex\n" && !sPendingRowHeld && sAppendLockMisses == 0, "no mutex yet: the row is written");
+    gFsMutex = &fsMutexStorage;
+  }
+
+  // Battery: the periodic sample is deferred without moving its cadence.
+  reset(); gSettings.batteryLogIntervalMs = 5000; nowMs = 100000;
+  batteryLogTick(); released();
+  const size_t first = disk.at(kBatteryLogPath).size();
+  nowMs = 105000; heldElsewhere = true;
+  batteryLogTick(); released();
+  check(disk.at(kBatteryLogPath).size() == first && blockingWaitsOnBusyLock == 0 && sBatteryLogLockMisses == 1,
+        "a busy lock defers the periodic battery sample");
+  const unsigned triesBefore = tryLockMisses;
+  nowMs = 105001; batteryLogTick(); nowMs = 105002; batteryLogTick(); released();
+  check(disk.at(kBatteryLogPath).size() == first && tryLockMisses == triesBefore + 2, "it is due again on every lap while busy");
+  check(sBatteryLogLockMisses == 1, "the waiting sample counts once, not once a lap");
+  heldElsewhere = false; nowMs = 105003; batteryLogTick(); released();
+  const size_t second = disk.at(kBatteryLogPath).size();
+  check(second > first && disk.at(kBatteryLogPath).find(",105003,") != std::string::npos,
+        "the deferred sample is taken once the lock is free, with the reading of that moment");
+  nowMs = 105004; batteryLogTick(); released();
+  check(disk.at(kBatteryLogPath).size() == second, "and the cadence starts from that sample");
+  // The next sample that has to wait is counted as its own.
+  nowMs = 111000; heldElsewhere = true; batteryLogTick(); batteryLogTick(); released();
+  check(sBatteryLogLockMisses == 2, "a later deferred sample counts again");
+  heldElsewhere = false; batteryLogTick(); released();
+  // An event keeps the blocking lock: it waits and is written.
+  heldElsewhere = true; batteryLogEvent("sleep:deep"); released();
+  check(blockingWaitsOnBusyLock == 1 && disk.at(kBatteryLogPath).find(",sleep:deep\n") != std::string::npos,
+        "a power event is never deferred");
+  // Reentry and a missing mutex still sample.
+  reset(); nowMs = 200000; fsLock("outer"); batteryLogTick();
+  check(lockDepth == 1 && disk.count(kBatteryLogPath) && sBatteryLogLockMisses == 0, "the tick under the caller's lock samples");
+  fsUnlock(); released();
+  reset(); nowMs = 300000; gFsMutex = nullptr; batteryLogTick();
+  check(disk.count(kBatteryLogPath) && sBatteryLogLockMisses == 0, "no mutex yet: the battery sample is written");
+  gFsMutex = &fsMutexStorage;
+}
+#endif
+
 int main() {
   tzset();
+#if TRY_LOCK_WRITERS
+  busyLockCases();
+#endif
 #if !BASELINE
   reserveRefusedCases();
 #endif

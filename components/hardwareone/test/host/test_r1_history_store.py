@@ -33,6 +33,21 @@ def between(source: str, start: str, end: str) -> str:
     return source[begin:source.index(end, begin)]
 
 
+FS_BUSY_SEAM = r"""
+static bool isFsLockedByCurrentTask() { return isHeldByCurrentTask(gFsMutex); }
+static bool fsHeldElsewhere = false;
+static unsigned fsTryMisses = 0, fsBlockingWaitsWhileBusy = 0;
+static int harnessSemaphoreTake(SemaphoreHandle_t mutex, TickType_t timeout) {
+  if (mutex == gFsMutex && fsHeldElsewhere) {
+    if (timeout != portMAX_DELAY) { ++fsTryMisses; return 0; }
+    ++fsBlockingWaitsWhileBusy;  // the main loop would be waiting here
+  }
+  return xSemaphoreTake(mutex, timeout);
+}
+#define xSemaphoreTake harnessSemaphoreTake
+"""
+
+
 def model(root: Path) -> tuple[str, str]:
     """Public types and the production Health history model that drives the store."""
     strip = re.compile(r'^#include [<"](?:System_BuildConfig|Arduino|R1_HealthHistoryStore|'
@@ -76,6 +91,19 @@ def generate(overlay: Path | None, component: Path = COMPONENT) -> str:
     harness = (HERE / "r1_history_store_harness.cpp").read_text()
     for marker in ("// INSERT_TYPES", "// INSERT_LOCKS", "// INSERT_PRODUCTION", "// INSERT_MODEL"):
         require(harness.count(marker) == 1, f"exactly one {marker} required")
+    busy_probe = "bool filesystemBusyElsewhere()" in source
+    if busy_probe and not overlay:
+        # The store's main-loop entry points try the filesystem lock before
+        # they start (S-5). The harness's semaphore double always grants; the
+        # seam below lets a case say another task holds the filesystem lock: a
+        # try-lock then misses, and a wait without limit is counted. The cases
+        # themselves are appended after the harness's own (its main runs first).
+        locks = FS_BUSY_SEAM + locks
+        require(harness.count("\nint main() {") == 1, "the harness has one main")
+        harness = harness.replace("\nint main() {", "\nstatic int harnessMain() {")
+        tail = ' assertions passed\\n";\n}'
+        require(harness.rstrip().endswith(tail), "the harness main ends with its summary line")
+        harness = harness.rstrip()[:-1] + "  return 0;\n}\n" + (HERE / "r1_history_store_busy_cases.cpp").read_text()
     return (f"#define BASELINE {int(overlay is not None)}\n" + harness
             .replace("// INSERT_TYPES", types + "\n" + model_types)
             .replace("// INSERT_LOCKS", locks)

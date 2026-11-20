@@ -22,6 +22,9 @@ static size_t gSensorLogMaxSize = 256000;
 static uint8_t gSensorLogMaxRotations = 3;
 static unsigned long gSensorLogLastWrite = 1000;
 [[maybe_unused]] static size_t gApproxSizeBytes = 0;
+// Rows that waited for the filesystem lock and rows given up while waiting:
+// read by the status the selection test compiles, zero here.
+[[maybe_unused]] static uint32_t sAppendLockMisses = 0, sPendingRowsDropped = 0;
 static unsigned long millis() { return 6000; }
 static struct { int sensorLogMask; int unrelated; bool sensorLogAutoStart; } gSettings;
 static bool bufferAvailable;

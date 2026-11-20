@@ -166,12 +166,35 @@ for path in COMPONENT.glob("*.cpp"):
         continue
     assert "VFS::getStatsSnapshot(" not in path.read_text(encoding="utf-8"), path
 
-# The cache-only read has one caller, the main-loop metrics sampler, which must
-# not take the filesystem lock at all.
+# The cache-only read has two callers, both on the main loop: the metrics
+# sampler, which must not take the filesystem lock at all, and the log
+# retention pass in System_TimeAnchors.cpp, which must not walk LittleFS to
+# learn the internal flash's free space: there it acts only on the cached
+# figure, and only on a recent one. The card it reads itself, with the
+# authoritative VFS::getStats, once per pass decision: nothing renews the
+# card's cached figure on a device nobody is looking at (the log writer that
+# fills the card never samples it). The pass stops by the sizes of the files
+# it removed and marks the figure stale after removing.
 for path in COMPONENT.glob("*.cpp"):
-    if path.name == "System_Metrics.cpp":
+    if path.name in {"System_Metrics.cpp", "System_TimeAnchors.cpp"}:
         continue
     assert "VFS::peekStatsSnapshot(" not in path.read_text(encoding="utf-8"), path
+anchors = (COMPONENT / "System_TimeAnchors.cpp").read_text(encoding="utf-8")
+figure = function_body(
+    anchors, "static bool retentionFreeFigure(bool card, VFS::CapacitySnapshot& capacity)")
+assert figure.count("VFS::peekStatsSnapshot(VFS::INTERNAL, capacity)") == 1
+assert anchors.count("VFS::peekStatsSnapshot(") == 1
+assert figure.count("VFS::getStats(VFS::SDCARD, total, used, freeBytes)") == 1
+assert anchors.count("VFS::getStats(") == 1
+assert (figure.index("if (card) {") < figure.index("VFS::getStats(")
+        < figure.index("VFS::peekStatsSnapshot(")
+        < figure.index("LogRetention::kFreeFigureMaxAgeMs"))
+consider = function_body(anchors, "static bool retentionConsiderPass(uint32_t today)")
+assert consider.index("retentionFreeFigure(card, capacity)") < consider.index("gRetentionPass.begin(")
+assert "getStatsSnapshot(" not in anchors
+assert "getCachedLittleFsFree" not in anchors
+step = function_body(anchors, "static void retentionStep()")
+assert "VFS::invalidateStatsSnapshot(card ? VFS::SDCARD : VFS::INTERNAL);" in step
 
 # The overflow decision never reads presentation snapshots. Its free-space walk
 # hands a usable reading to the INTERNAL snapshot (fenced by the generation

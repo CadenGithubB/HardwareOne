@@ -101,6 +101,8 @@ def production(user: str) -> str:
         # Forward declarations of the roster parsers through isSuperAdminUser.
         between(user, "static bool readRosterJson(const char* tag, String& out);", "bool isSuperAdminUser(")
         + extract_block(user[user.index("bool isSuperAdminUser("):], "bool isSuperAdminUser("),
+        unique_block(user, "bool getUserRoleAndSuper("),
+        unique_block(user, "bool getUserAuthorizationRole("),
         unique_block(user, "bool isValidUser("),
         unique_block(user, "bool getUserIdByUsername("),
         unique_block(user, "bool getUserRole("),
@@ -179,7 +181,25 @@ def source_contract() -> None:
     lister = unique_block(user, "const char* cmd_user_list(")
     require("visitUserRoster(" in lister and ".set(users)" not in lister,
             "userlist uses the roster snapshot and no longer copies whole records")
+    explicit_roles_only(user)
     privilege_declarations()
+
+
+def explicit_roles_only(user: str) -> None:
+    """G-55: no parser infers authority from an account's position in the roster."""
+    for marker in ("static bool adminFromRosterJson(const String& json, const String& who) {",
+                   "static bool superFromRosterJson(const String& json, const String& who) {",
+                   "static bool roleFromRosterJson(const String& json, const String& username,",
+                   "static RosterReadResult visitUserRoster("):
+        body = last_block(user, marker)
+        for word in ("firstUser", "firstAccount", "wasFirst", "anyExplicitSuper"):
+            require(word not in body, f"{marker.split('(')[0].split()[-1]} still has a first-account rule: {word}")
+    # One line in the system log at boot when a roster has accounts and no super
+    # admin; never the alerting database-fault event, and boot is not blocked.
+    boot = unique_block(user, "void loadAndIncrementBootSeq() {")
+    require("no superadmin role" in boot and "logSystemEvent(\"USERS\"" in boot,
+            "the boot pass logs a roster without a super admin")
+    require("SYSEVT_AUTH_DB_FAULT" not in boot, "the boot notice is a log line, not the database-fault event")
 
 
 def privilege_declarations() -> None:

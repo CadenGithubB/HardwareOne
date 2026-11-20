@@ -17,11 +17,12 @@ compiled from the firmware): duplicate ids, out-of-range ids or both, with
 counts. automationIdTextInRange is what `automation add id=<n>` accepts.
 An id is found in the stored text only as a whole number (automationIdPosInJson):
 id 12 is not the automation 123456.
-Source rules: both places that make an id use the owner, the scheduler pass
-leaves an automation whose id is above the range out and queues the
-sanitizer, `automation add` refuses an id= outside 1..2147483647 with an error
-naming the range before it loads or writes anything, and `automation sanitize`
-replies with what was fixed.
+Source rules: both places that make an id use the owner (the sanitizer and the
+add mutation of the store, automationAddMutation), the scheduler pass leaves an
+automation whose id is above the range out and queues the sanitizer,
+`automation add` refuses an id= outside 1..2147483647 with an error naming the
+range before it loads or writes anything (before the store mutation), and
+`automation sanitize` replies with what was fixed (automationsSanitizeStore).
 
 Options: --cxx <compiler>, --sanitize (ASan + UBSan), --component <dir> to run
 the same cases against another components/hardwareone directory.
@@ -77,11 +78,11 @@ def rule_failures(automation: str) -> list[str]:
                         r"\s*return " + re.escape(ID_REPLY) + r";\s*\}", add)
     if not refusal:
         failures.append("System_Automation.cpp: automation add refuses an id= outside the range with " + ID_REPLY)
-    elif refusal.start() > add.index("loadAutomationsStoreForEdit("):
+    elif refusal.start() > add.index("mutateAutomationsJson("):
         failures.append("System_Automation.cpp: automation add refuses the id before it loads the store")
     dispatcher = re.sub(r"//[^\n]*", "", definition(automation, "const char* cmd_automation(const String& argsInput)"))
     if "return automationSanitizeReply(fixed);" not in dispatcher or \
-            "sanitizeAutomationsJson(json, &fixed)" not in dispatcher or \
+            "automationsSanitizeStore(&fixed, &repaired)" not in dispatcher or \
             '"Sanitized automations.json: fixed duplicate IDs"' in dispatcher:
         failures.append("System_Automation.cpp: automation sanitize replies with what it fixed (automationSanitizeReply)")
     return failures

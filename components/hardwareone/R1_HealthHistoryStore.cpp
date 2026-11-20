@@ -73,6 +73,26 @@ class StoreIoLock {
   bool locked_;
 };
 
+// The store's entry points run on the main loop. They do not queue behind
+// another task's filesystem work: before a recovery, a commit or a load starts
+// they try the shared filesystem lock, and when another task holds it the
+// whole operation is put off to a later lap (the staged day stays staged, a
+// load answers R1_HISTORY_STORE_BUSY). This is a probe: the lock is released
+// again at once, because the store keeps the filesystem guard per VFS call
+// (see StoreIoLock above) so a whole commit never holds other filesystem
+// users off. `held` is also false on this task's own reentry and before the
+// mutex exists; neither is "busy".
+bool filesystemBusyElsewhere() {
+  FsLockGuard probe("r1.history.probe", 0);
+  return !probe.held && !isFsLockedByCurrentTask() && gFsMutex != nullptr;
+}
+
+// Counts a lap that was put off. Not an error: sStatus.error is left alone.
+void noteFilesystemBusy() {
+  StoreLock lock;
+  if (lock.locked()) ++sStatus.fsBusyDeferrals;
+}
+
 uint32_t fnvBytes(uint32_t h, const void* data, size_t len) {
   const uint8_t* p = static_cast<const uint8_t*>(data);
   for (size_t i = 0; i < len; ++i) {
@@ -822,6 +842,7 @@ const char* r1HealthHistoryStoreErrorName(R1HealthHistoryStoreError error) {
     case R1_HISTORY_STORE_NOT_FOUND: return "not_found";
     case R1_HISTORY_STORE_SCHEMA_MISMATCH: return "schema_mismatch";
     case R1_HISTORY_STORE_DECRYPT_FAILED: return "decrypt_failed";
+    case R1_HISTORY_STORE_BUSY: return "busy";
     default: return "unknown";
   }
 }
@@ -996,6 +1017,11 @@ bool r1HealthHistoryStoreStage(const R1HealthHistoryDay& day,
 void r1HealthHistoryStoreTick(void) {
   static bool initialized = false;
   if (!initialized) {
+    // The first-run recovery scan waits for a lap on which the filesystem is free.
+    if (filesystemBusyElsewhere()) {
+      noteFilesystemBusy();
+      return;
+    }
     // trusted: recover only the confined R1 history subtree.
     const AuthContext auth = VFS::systemAuth(VFS::Scopes::CAPTURES,
                                              "R1 history recovery");
@@ -1030,6 +1056,18 @@ void r1HealthHistoryStoreTick(void) {
       sStatus.commitPending = true;
       return;
     }
+  }
+  // A commit is due. It does not start while another task holds the
+  // filesystem: the staged day stays staged (it is the row that waits), no
+  // failure is recorded and no retry delay is added, so the commit is due
+  // again on the next lap.
+  if (filesystemBusyElsewhere()) {
+    noteFilesystemBusy();
+    return;
+  }
+  {
+    StoreLock lock;
+    if (!lock.locked() || !sCommitPending) return;
     memcpy(&sCommitSnapshot, &sStagedDay, sizeof(sCommitSnapshot));
     generation = sStagedGeneration;
   }
@@ -1090,6 +1128,14 @@ R1HealthHistoryStoreError r1HealthHistoryStoreLoadExact(
   if (!makePath(peerId, dayStart, timezoneMinutes, pathBuf, sizeof(pathBuf))) {
     setStatusError(R1_HISTORY_STORE_BAD_IDENTITY);
     return R1_HISTORY_STORE_BAD_IDENTITY;
+  }
+  // The load runs on the main loop too. Busy is neither "not stored" (the
+  // caller would start an empty day over the stored one) nor a read failure
+  // (the caller would count it and give the day up): it says nothing about
+  // the stored day, and the status error is left as it was.
+  if (filesystemBusyElsewhere()) {
+    noteFilesystemBusy();
+    return R1_HISTORY_STORE_BUSY;
   }
   // trusted: restore exact health-history key into the in-RAM health model.
   const AuthContext auth = VFS::systemAuth(VFS::Scopes::CAPTURES,

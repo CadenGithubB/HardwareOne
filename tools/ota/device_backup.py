@@ -90,7 +90,12 @@ def validate_file_read(path: str, content: bytes, expected_size: int) -> None:
 
 
 def restore_username_is_superadmin(users_json: bytes, username: str) -> bool:
-    """Mirror the firmware's explicit-super/legacy-owner role resolution."""
+    """Mirror the firmware's role resolution: super admin is an explicit role only.
+
+    The firmware no longer treats the first account as super admin when no
+    account is explicitly superadmin, so a backup without an explicit
+    superadmin has none and cannot authorize its own restore.
+    """
     try:
         document = json.loads(users_json.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -133,16 +138,7 @@ def restore_username_is_superadmin(users_json: bytes, username: str) -> bool:
         for item_username, role_present, role in parsed_users
         if role_present and role == "superadmin"
     }
-    if explicit_supers:
-        return username in explicit_supers
-
-    # With no explicit superadmin, current firmware treats the first user as the
-    # legacy superadmin fallback. The file endpoints also call isAdminUser(), so
-    # that owner must have role=admin or omit the pre-role-era field entirely.
-    owner_username, owner_role_present, owner_role = parsed_users[0]
-    return username == owner_username and (
-        not owner_role_present or owner_role == "admin"
-    )
+    return username in explicit_supers
 
 
 def join_device_path(parent: str, child: str) -> str:

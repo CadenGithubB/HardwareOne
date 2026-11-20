@@ -23,6 +23,7 @@
 #include "System_Filesystem.h"    // For writeText, readText
 #include "System_VFS.h"    // For VFS::*Guarded + VFS::systemAuth
 #include "System_AuthIdentity.h"   // currentAuthContext (createdBy stamp, admin sync)
+#include "System_Automation.h"     // automationDisableOwnedBy (userdelete)
 #include "System_CLIConfirm.h"     // cliRequestConfirm — yes/no gate for destructive userdelete
 #include "System_Settings.h"
 #include "System_StatePaths.h"  // users.json, pending_users.json, boot_anchors.json
@@ -817,9 +818,9 @@ static bool accountAuthority(const String& who, authority_cache::Entry& out) {
 
 bool isAdminUser(const String& who) {
   // An empty identity is nobody — never admin. Checked before anything else so the
-  // invariant holds regardless of how the roster parses below: a users.json with no
-  // "username" key leaves firstUser empty, and "" == "" would otherwise satisfy the
-  // first-user fallback. resolveRole() and isGuestUser() already guard the same way.
+  // invariant holds regardless of how the roster parses below (an account stored
+  // with an empty "username" must never match the empty caller). resolveRole()
+  // and isGuestUser() already guard the same way.
   if (who.length() == 0) return false;
   // A bonded master that presented a valid bond session token runs commands under
   // kBondAdminUser. The bare name grants admin only while the calling task runs
@@ -847,33 +848,23 @@ bool isAdminUser(const String& who) {
   return adminFromRosterJson(json, who);
 }
 
-// Verbatim body of the old isAdminUser, from the point the file contents were
-// in hand — a THIRD parser over the same bytes, kept separate for the same
-// reason as the other two. Its first-user fallback is STRICTER than
-// superFromRosterJson's: it fires only when the first account has no role field
-// at all (firstUserHasRole), whereas the super fallback ignores the first
-// user's own role entirely. Those two rules genuinely disagree; do not merge
-// them, only the read is shared.
+// The body of the old isAdminUser, from the point the file contents were in
+// hand — a THIRD parser over the same bytes, kept separate for the same reason
+// as the other two (only the read is shared).
+//
+// Authority comes ONLY from an explicit role in users.json. The first account
+// is not special here: a roster entry without a "role" field is an ordinary
+// user whatever its position, and an account is admin only when its own stored
+// role is "admin" or "superadmin". (Earlier firmware treated a role-less first
+// account as admin; that fallback is gone.)
 static bool adminFromRosterJson(const String& json, const String& who) {
   AuthPerfScope _perf("roster.scanAdmin");
   {
     int usersIdx = json.indexOf("\"users\"");
     if (usersIdx < 0) return false;
-    int firstUKey = json.indexOf("\"username\"", usersIdx);
-    // No account in the roster at all — nobody is admin. Bail rather than fall
-    // through with an empty firstUser, matching getDeviceOwnerUsername()'s
-    // discipline directly above.
-    if (firstUKey < 0) return false;
-    String firstUser = "";
-    {
-      int uq1 = json.indexOf('"', json.indexOf(':', firstUKey) + 1);
-      int uq2 = json.indexOf('"', uq1 + 1);
-      if (uq1 > 0 && uq2 > uq1) firstUser = json.substring(uq1 + 1, uq2);
-    }
-    if (firstUser.length() == 0) return false;  // unparseable owner — fail closed
-    // Search for target user and role. An explicit role always wins — never
-    // elevate via the first-user fallback when role is user/guest/etc.
-    bool firstUserHasRole = false;
+    // No account in the roster at all — nobody is admin.
+    if (json.indexOf("\"username\"", usersIdx) < 0) return false;
+    // Search for the target user and its role.
     int pos = usersIdx;
     while (true) {
       int uKey = json.indexOf("\"username\"", pos);
@@ -885,7 +876,6 @@ static bool adminFromRosterJson(const String& json, const String& who) {
       int rKey = json.indexOf("\"role\"", uKey);
       int nextU = json.indexOf("\"username\"", uKey + 1);
       if (rKey > 0 && (nextU < 0 || rKey < nextU)) {
-        if (uname == firstUser) firstUserHasRole = true;
         int rq1 = json.indexOf('"', json.indexOf(':', rKey) + 1);
         int rq2 = json.indexOf('"', rq1 + 1);
         String role = (rq1 > 0 && rq2 > rq1) ? json.substring(rq1 + 1, rq2) : String("");
@@ -897,12 +887,10 @@ static bool adminFromRosterJson(const String& json, const String& who) {
       }
       pos = uq2 + 1;
     }
-    // Fallback: first user with no role field is admin (pre-role backups).
-    // Matches isSuperAdminUser's "only elevate when the roster lacks the
-    // explicit tier" spirit — never override an explicit non-admin role.
-    return (who == firstUser && !firstUserHasRole);
+    // Not in the roster, or stored without a role: not admin. Nothing is
+    // inferred from an account's position in the file.
+    return false;
   }
-  return false;
 }
 
 // Determine if the given username is a super-admin (role == "superadmin").
@@ -951,25 +939,21 @@ static bool readRosterJson(const char* tag, String& out) {
   return true;
 }
 
-// Verbatim body of the old isSuperAdminUser, from the point the file contents
-// were in hand. Do not "clean up" the string scanning — see the note above.
+// The body of the old isSuperAdminUser, from the point the file contents were
+// in hand. Do not "clean up" the string scanning — see the note above.
+//
+// Super admin comes ONLY from an explicit "role": "superadmin" on the account's
+// own entry. A roster in which no account carries that role has NO super admin:
+// nothing is inferred for the first account. (Earlier firmware made the first
+// account super whenever no entry was explicitly superadmin; that fallback is
+// gone, and the boot pass in loadAndIncrementBootSeq logs one line when a
+// roster has accounts and no super admin.)
 static bool superFromRosterJson(const String& json, const String& who) {
   AuthPerfScope _perf("roster.scanSuper");
+  // An empty name is nobody (the public predicates refuse it before the read).
+  if (who.length() == 0) return false;
   int usersIdx = json.indexOf("\"users\"");
   if (usersIdx < 0) return false;
-  // First user (device owner) — for the no-explicit-super fallback below.
-  String firstUser = "";
-  {
-    int fk = json.indexOf("\"username\"", usersIdx);
-    // No account in the roster at all — nobody is super. Bail rather than fall
-    // through with an empty firstUser (see isAdminUser()).
-    if (fk < 0) return false;
-    int q1 = json.indexOf('"', json.indexOf(':', fk) + 1);
-    int q2 = json.indexOf('"', q1 + 1);
-    if (q1 > 0 && q2 > q1) firstUser = json.substring(q1 + 1, q2);
-  }
-  if (firstUser.length() == 0) return false;  // unparseable owner — fail closed
-  bool anyExplicitSuper = false;
   int pos = usersIdx;
   while (true) {
     int uKey = json.indexOf("\"username\"", pos);
@@ -984,21 +968,35 @@ static bool superFromRosterJson(const String& json, const String& who) {
       int rq1 = json.indexOf('"', json.indexOf(':', rKey) + 1);
       int rq2 = json.indexOf('"', rq1 + 1);
       String role = (rq1 > 0 && rq2 > rq1) ? json.substring(rq1 + 1, rq2) : String("");
-      if (role == kRoleSuperAdmin) {
-        anyExplicitSuper = true;
-        if (uname == who) return true;
-      }
+      if (role == kRoleSuperAdmin && uname == who) return true;
     }
     pos = uq2 + 1;
   }
-  // Fallback: ONLY when no account is explicitly superadmin, treat the owner
-  // (first user) as super so super-only recovery (e.g. factoryreset) can never
-  // be permanently locked out — e.g. on a users.json restored from before this
-  // tier existed. On a normally-created device the owner is explicitly
-  // superadmin and returns above. Guarded by anyExplicitSuper so a real super
-  // roster is never silently widened, and it grants super to the first user
-  // only — never anyone else.
-  return (!anyExplicitSuper && who == firstUser);
+  // No explicit superadmin entry for this account: fail closed.
+  return false;
+}
+
+// True when at least one account in this roster text is super admin by the
+// rule the command gate uses. It asks superFromRosterJson about every stored
+// name, so the roster-wide answer cannot drift from the per-account one.
+// Rosters are a handful of accounts; this runs for `userlist` only.
+static bool rosterHasExplicitSuper(const String& json) {
+  int usersIdx = json.indexOf("\"users\"");
+  if (usersIdx < 0) return false;
+  int pos = usersIdx;
+  while (true) {
+    int uKey = json.indexOf("\"username\"", pos);
+    if (uKey < 0) return false;
+    int uq1 = json.indexOf('"', json.indexOf(':', uKey) + 1);
+    int uq2 = json.indexOf('"', uq1 + 1);
+    if (uq1 < 0 || uq2 <= uq1) return false;
+    if (superFromRosterJson(json, json.substring(uq1 + 1, uq2))) return true;
+    pos = uq2 + 1;
+  }
+}
+
+bool usersJsonTextHasSuperAdmin(const String& usersJson) {
+  return rosterHasExplicitSuper(usersJson);
 }
 
 // Verbatim body of getUserRole, from the point the file contents were in hand.
@@ -1038,25 +1036,21 @@ static bool roleFromRosterJson(const String& json, const String& username,
   if (err) return false;
   const JsonArray users = doc["users"].as<JsonArray>();
   if (!users) return false;
-  bool firstAccount = true;
   for (JsonObject user : users) {
     const char* storedName = user["username"] | "";
     // Usernames are currently exact/case-sensitive in credential and role
     // lookup. Do not let a case-colliding ordinary account authorize a Guest
     // whose name differs only by case.
-    if (username != storedName) {
-      firstAccount = false;
-      continue;
-    }
+    if (username != storedName) continue;
     if (user["banned"] | false) return false;
     const JsonVariantConst roleField = user["role"];
     String role;
     if (roleField.isNull()) {
-      // Compatibility with pre-role rosters is deliberate elsewhere in this
-      // module: the first account remains the recovery owner, while another
-      // account with no legacy role is an ordinary user. Missing is distinct
-      // from a present-but-malformed/unknown role, which stays fail-closed.
-      role = firstAccount ? kRoleSuperAdmin : kRoleUser;
+      // An account stored without a role is an ordinary user, whatever its
+      // position in the roster: authority comes only from an explicit role
+      // (see superFromRosterJson). Missing is distinct from a
+      // present-but-malformed/unknown role, which stays fail-closed.
+      role = kRoleUser;
     } else if (roleField.is<const char*>()) {
       role = String(roleField.as<const char*>());
     } else {
@@ -1072,8 +1066,7 @@ static bool roleFromRosterJson(const String& json, const String& username,
 
 bool isSuperAdminUser(const String& who) {
   AuthPerfScope _perf("isSuperAdminUser");
-  // An empty identity is nobody — never super. See isAdminUser() for why this
-  // guards the first-user fallback below.
+  // An empty identity is nobody — never super (see isAdminUser()).
   if (who.length() == 0) return false;
   // Same rule as isAdminUser: the bare bond name is super only on the task
   // running the live ESP-NOW bond identity.
@@ -2877,10 +2870,11 @@ bool getUserRole(const String& username, String& outRole) {
   return false;
 }
 
-// Effective privilege rank for a username. Bond/owner fallbacks live in
-// isSuperAdminUser/isAdminUser — use those first so a restored-backup owner
-// rates the same whether you ask about the caller or the target. Guest is
-// only reachable when those predicates are false and users.json says so.
+// Effective privilege rank for a username. The bond identity is answered by
+// isSuperAdminUser/isAdminUser; every stored account rates by its explicit
+// role only (no first-account fallback), the same whether you ask about the
+// caller or the target. Guest is only reachable when those predicates are
+// false and users.json says so.
 int userAccountRank(const String& username) {
   AuthPerfScope _perf("userAccountRank");
   // ONE read of users.json, three parsers over the same bytes.
@@ -2891,8 +2885,8 @@ int userAccountRank(const String& username) {
   // load, and separately calls isAdminUser again beside it.
   //
   // The three predicates are NOT collapsed into one rule: each keeps its own
-  // parser and its own first-user fallback, which genuinely disagree (see the
-  // note above adminFromRosterJson). The guest branch uses
+  // parser (they differ on case, key order and "banned"; see the roster-access
+  // note above readRosterJson). The guest branch uses
   // legacyRoleFromRosterJson — getUserRole's parser, NOT roleFromRosterJson;
   // they differ on "banned" and on case, and swapping them changes an account's
   // rank. Evaluation order and short-circuiting match the original call
@@ -3166,10 +3160,9 @@ AccountRequestResult submitAccountRequest(const String& usernameInput, const Str
 // newRoleRank is the rank being granted, or kRoleRankNoGrant for delete/ban.
 // Caller identity is the per-task exec identity (currentExecUser()); a live
 // bond session resolves to kBondAdminUser which isSuperAdminUser() rates super.
-// Both caller AND target rank come from userAccountRank() so the owner/bond
-// fallbacks and guest detection apply uniformly — otherwise a restored-backup
-// owner can read as super for the caller but only admin for the target. The
-// founder (id==1) also has hard protection inside the mutators as a second layer.
+// Both caller AND target rank come from userAccountRank() so the bond identity
+// and guest detection apply uniformly to both sides. The founder (id==1) also
+// has hard protection inside the mutators as a second layer.
 static bool userMutationAllowed(const String& targetUser, int newRoleRank, String& errOut) {
   const String caller = currentExecUser();
   const int callerRank = userAccountRank(caller);
@@ -3434,8 +3427,24 @@ static const char* doUserDelete(const String& username) {
     snprintf(respBuf, sizeof(respBuf), "Error: %s", err.c_str());
     return respBuf;
   }
-  snprintf(respBuf, sizeof(respBuf), "Deleted user '%s'",
-           username.c_str());
+  // Automation steps run as the automation's creator, so a later account with
+  // this name would inherit them. Disable every automation the deleted user
+  // created; nothing re-enables them when the name is added again. The user
+  // is gone either way: a store that could not be read or written is reported
+  // in the reply, it does not undo the delete.
+  const int disabled = automationDisableOwnedBy(username);
+  if (disabled < 0) {
+    snprintf(respBuf, sizeof(respBuf),
+             "Deleted user '%s'; their automations were not checked (automations.json unreadable)",
+             username.c_str());
+    logSystemEvent("USERS", "user '%s' deleted; automations.json could not be checked for their automations",
+                   username.c_str());
+  } else if (disabled > 0) {
+    snprintf(respBuf, sizeof(respBuf), "Deleted user '%s'; %d automation%s disabled",
+             username.c_str(), disabled, disabled == 1 ? "" : "s");
+  } else {
+    snprintf(respBuf, sizeof(respBuf), "Deleted user '%s'", username.c_str());
+  }
   return respBuf;
 }
 
@@ -3782,7 +3791,11 @@ typedef void (*UserRosterVisitor)(const UserRosterEntry& entry, const char* crea
 // One locked read of users.json, then calls visit once per account in file
 // order with a normalized row (see UserRosterEntry in System_User.h). The
 // filesystem lock covers only the read, so a visitor may print.
-static RosterReadResult visitUserRoster(UserRosterVisitor visit, void* context) {
+// anySuperOut, when given, is whether any account is super admin by the rule
+// the command gate uses (rosterHasExplicitSuper over the same bytes).
+static RosterReadResult visitUserRoster(UserRosterVisitor visit, void* context,
+                                        bool* anySuperOut = nullptr) {
+  if (anySuperOut) *anySuperOut = false;
   if (!filesystemReady) return RosterReadResult::Unreadable;
   String json;
   {
@@ -3794,11 +3807,9 @@ static RosterReadResult visitUserRoster(UserRosterVisitor visit, void* context) 
   }
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json)) return RosterReadResult::Malformed;
+  if (anySuperOut) *anySuperOut = rosterHasExplicitSuper(json);
   JsonArrayConst users = doc["users"].as<JsonArrayConst>();
-  bool firstAccount = true;
   for (JsonObjectConst user : users) {
-    const bool wasFirst = firstAccount;
-    firstAccount = false;
     const char* name = user["username"] | "";
     const size_t nameLen = strlen(name);
     if (nameLen == 0 || nameLen > kPublicUsernameMaxLen) continue;
@@ -3807,10 +3818,11 @@ static RosterReadResult visitUserRoster(UserRosterVisitor visit, void* context) 
     memcpy(entry.username, name, nameLen + 1);
     // Same normalization as the authorization lookup (roleFromRosterJson),
     // except that an unknown or malformed role reads as "user" for display.
+    // A missing role is "user" for every account, the first one included.
     const JsonVariantConst roleField = user["role"];
     String role;
     if (roleField.isNull()) {
-      role = wasFirst ? kRoleSuperAdmin : kRoleUser;
+      role = kRoleUser;
     } else if (roleField.is<const char*>()) {
       role = roleField.as<const char*>();
       role.toLowerCase();
@@ -3884,6 +3896,13 @@ static void userListJsonVisit(const UserRosterEntry& entry, const char* createdA
   if (createdAt && createdAt[0]) row["createdAt"] = createdAt;
 }
 
+// Printed by `userlist` (text form) and logged once at boot when the roster has
+// accounts and none of them is explicitly superadmin. Such a device has no
+// super admin at all: nothing is inferred for the first account.
+static constexpr char kNoSuperAdminNotice[] =
+    "No account has the superadmin role: super-admin commands (factoryreset, certgen, "
+    "pairing secrets, sdformat) are unavailable on this device.";
+
 static void userListTextVisit(const UserRosterEntry& entry, const char*, void* context) {
   int& count = *static_cast<int*>(context);
   if (count++ == 0) broadcastOutput("Users:");
@@ -3928,7 +3947,8 @@ const char* cmd_user_list(const String& argsInput) {
   // Stream human-readable format (the visitor prints the "Users:" header
   // before the first row).
   int userCount = 0;
-  const RosterReadResult read = visitUserRoster(userListTextVisit, &userCount);
+  bool anySuper = false;
+  const RosterReadResult read = visitUserRoster(userListTextVisit, &userCount, &anySuper);
   if (read == RosterReadResult::Missing) return "No users found";
   if (read != RosterReadResult::Ok) {
     return read == RosterReadResult::Malformed ? kUsersFileMalformed : kUsersFileUnreadable;
@@ -3936,6 +3956,9 @@ const char* cmd_user_list(const String& argsInput) {
   if (userCount == 0) {
     broadcastOutput("Users:");
     broadcastOutput("No users found");
+  } else if (!anySuper) {
+    // Text form only; the JSON reply is unchanged (each row carries its role).
+    broadcastOutput(kNoSuperAdminNotice);
   }
   return "OK";
 }
@@ -4945,6 +4968,26 @@ void loadAndIncrementBootSeq() {
         JsonArray users = doc["users"];
         if (users && !bootStateRaiseAccountIdHighWater(rosterIssuedIdHighWater(doc, users))) {
           ERROR_SYSTEMF("BootSeqInit: could not record the account id mark");
+        }
+        // A roster with accounts and no explicit superadmin has no super admin
+        // (the first-account fallback is gone). Say so once per boot in the
+        // system log; boot continues and nothing is rewritten. The document is
+        // already parsed here, so this costs no extra read. Exact,
+        // case-sensitive role text, as the command gate (superFromRosterJson)
+        // requires.
+        size_t accounts = 0;
+        bool anySuper = false;
+        for (JsonObject account : users) {
+          const char* name = account["username"] | "";
+          if (!name[0]) continue;
+          ++accounts;
+          const char* role = account["role"] | "";
+          if (strcmp(role, kRoleSuperAdmin) == 0) anySuper = true;
+        }
+        if (accounts > 0 && !anySuper) {
+          logSystemEvent("USERS", "users.json has %u account(s) and no superadmin role: "
+                         "super-admin commands are unavailable until an account is stored as superadmin",
+                         (unsigned)accounts);
         }
       }
     }

@@ -4,8 +4,15 @@
 // Runs entirely on the main loop task (same context as sensorLogTick's file
 // writes). Sweep work is bounded per tick (kMaxRenamesPerPass) so a folder
 // full of dark-boot captures promotes over a few seconds instead of stalling
-// one loop pass.
+// one loop pass. The tick never waits for the filesystem lock: it tries it
+// once for all of its file work and comes back on the next lap when another
+// task holds it.
+//
+// The same tick steps the log retention pass (System_LogRetentionCore.h): the
+// policy is there, the directory listing, removal, clock and free-space
+// figures are below.
 #include "System_TimeAnchors.h"
+#include "System_LogRetentionCore.h"
 
 #include "System_BuildConfig.h"   // CAPTURE_DIR_SENSORS
 #include "System_Clock.h"         // Clock::isSynced / isValidEpoch
@@ -207,15 +214,10 @@ static bool writeAnchorLine() {
   return true;
 }
 
-// Parse "boot-<N>" folder names. Returns false for anything else.
-static bool parseBootFolder(const char* name, uint32_t* bootOut) {
-  if (strncmp(name, "boot-", 5) != 0) return false;
-  char* end = nullptr;
-  unsigned long v = strtoul(name + 5, &end, 10);
-  if (!end || *end != '\0' || end == name + 5) return false;
-  *bootOut = (uint32_t)v;
-  return true;
-}
+// "boot-<N>" folder names are parsed by LogRetention::parseBootFolder
+// (System_LogRetentionCore.h), so the promote sweep and retention agree on
+// which folders are boot folders.
+using LogRetention::parseBootFolder;
 
 // Parse "<base>-boot<N>-<M><ext>" capture names. On success fills the boot,
 // the ms stamp, and copies "<base>" + "<ext>" out.
@@ -446,6 +448,193 @@ static bool sweepPass() {
   return sawAll && allClear && renames == 0;
 }
 
+// ===========================================================================
+// Log retention: the device side of System_LogRetentionCore.h
+// ===========================================================================
+// The pass object (its listing scratch included) lives in PSRAM; a zeroed
+// object is an idle pass.
+EXT_RAM_BSS_ATTR static LogRetention::Pass gRetentionPass;
+static uint32_t gRetentionLastPassMs = 0;   // millis() of the last pass decision (0: none yet)
+static uint32_t gRetentionWaitMs = LogRetention::kPassIntervalMs;  // from that decision to the next one
+static bool gRetentionPruning[2] = {false, false};  // per volume: below the low-water mark until the high one
+static uint32_t gRetentionFloorDay = 0;     // the local day the pass's "nothing here" memory is from
+static uint64_t gRetentionFreeAtStart = 0;
+static uint64_t gRetentionLowWater = 0;
+static uint32_t gTickLockMisses = 0;        // tick laps that found the filesystem lock busy
+
+static AuthContext retentionAuth(const char* path) {
+  const String p(path);
+  const bool card = p.startsWith("/sd/");
+  if (p.startsWith(card ? "/sd/stt" : "/stt")) {
+    return VFS::systemAuth(card ? VFS::Scopes::TRANSCRIPTS_SD : VFS::Scopes::TRANSCRIPTS, "retention");
+  }
+  return VFS::systemAuth(card ? VFS::Scopes::CAPTURES_SD : VFS::Scopes::CAPTURES, "retention");
+}
+
+struct RetentionVfsPort final : LogRetention::Port {
+  // The entries are named from the directory itself (File::getNextFileName):
+  // none is opened, so one call costs at most skip + capacity directory reads,
+  // and the pass keeps skip below LogRetention::kWalkMaxEntries. (openNextFile
+  // would stat and open every entry it passes, each a path lookup through the
+  // folder.) An entry that is neither a file nor a folder ends the listing
+  // there, which the pass treats like any shorter listing.
+  bool list(const char* directory, size_t skip, LogRetention::Entry* out, size_t capacity,
+            size_t* count, bool* end) override {
+    *count = 0;
+    *end = false;
+    if (skip >= LogRetention::kWalkMaxEntries) {
+      *end = true;
+      return true;
+    }
+    File dir = VFS::openGuarded(directory, "r", retentionAuth(directory));
+    if (!dir || !dir.isDirectory()) {
+      if (dir) dir.close();
+      return false;
+    }
+    for (size_t index = 0; index < skip + capacity; ++index) {
+      bool isDirectory = false;
+      const String path = dir.getNextFileName(&isDirectory);
+      if (path.length() == 0) {
+        *end = true;
+        break;
+      }
+      if (index < skip) continue;
+      const char* nm = path.c_str();
+      const char* slash = strrchr(nm, '/');
+      if (slash) nm = slash + 1;
+      LogRetention::Entry& entry = out[*count];
+      // A name that does not fit is reported empty, which the pass never removes.
+      if (strlen(nm) < sizeof(entry.name)) snprintf(entry.name, sizeof(entry.name), "%s", nm);
+      else entry.name[0] = '\0';
+      entry.directory = isDirectory;
+      ++*count;
+    }
+    dir.close();
+    return true;
+  }
+  // The one file a step removes is the only one that is opened: for its size,
+  // which is what the pass counts towards the high-water mark.
+  bool removeFile(const char* path, uint32_t* freedBytes) override {
+    *freedBytes = 0;
+    const AuthContext auth = retentionAuth(path);
+    File file = VFS::openGuarded(path, "r", auth);
+    if (file) {
+      const bool isDirectory = file.isDirectory();
+      if (!isDirectory) *freedBytes = (uint32_t)file.size();
+      file.close();
+      if (isDirectory) return false;  // never a folder, whatever the listing said
+    }
+    return VFS::removeGuarded(path, auth);
+  }
+  bool removeEmptyDirectory(const char* path) override {
+    return VFS::rmdirGuarded(path, retentionAuth(path));
+  }
+  bool bootIsAnchored(uint32_t boot) override { return registryFind(boot) != nullptr; }
+};
+
+static uint32_t dayKeyOf(const struct tm& t) {
+  return (uint32_t)(t.tm_year + 1900) * 10000u + (uint32_t)(t.tm_mon + 1) * 100u + (uint32_t)t.tm_mday;
+}
+
+// The free-space figure a pass decision acts on; false when there is none.
+// The card is read at the decision (VFS::getStats, the authoritative reading:
+// one free-cluster query under the tick's lock). Nothing renews the card's
+// cached figure by itself: the log writer that fills the card never samples
+// it, only a status page, the glasses' Files page and a transcript write do,
+// so a cache-only read would find no figure on a device nobody is looking at.
+// The internal flash is never sampled here (a fresh LittleFS reading walks the
+// whole volume, about 1.3 s on the P4X-EYE): only the figure that is already
+// cached, and only a recent one. A device that is filling its flash is
+// writing, and its log writer renews that figure every few seconds; on a
+// quiet device it may be old or missing, and nothing is removed.
+static bool retentionFreeFigure(bool card, VFS::CapacitySnapshot& capacity) {
+  if (card) {
+    uint64_t total = 0, used = 0, freeBytes = 0;
+    if (!VFS::getStats(VFS::SDCARD, total, used, freeBytes)) return false;
+    capacity.totalBytes = total;
+    capacity.usedBytes = used;
+    capacity.freeBytes = freeBytes;
+    capacity.sampledAtMs = millis();
+    return true;
+  }
+  if (!VFS::peekStatsSnapshot(VFS::INTERNAL, capacity)) return false;
+  return (uint32_t)(millis() - capacity.sampledAtMs) <= LogRetention::kFreeFigureMaxAgeMs;
+}
+
+// Decides whether a pass starts on one of the volumes, and starts it. False
+// when no usable free-space figure was there to decide on. The internal flash
+// is pruned only while no card can take the capture overflow: with a writable
+// card new rows go to the card and the days on flash stay, as before.
+static bool retentionConsiderPass(uint32_t today) {
+  // The card when it is writable, else the internal flash: never both.
+  const bool card = VFS::isSdWritable();
+  VFS::CapacitySnapshot capacity{};
+  if (!retentionFreeFigure(card, capacity)) return false;
+  uint64_t need = 0;
+  if (!LogRetention::passWanted(capacity.freeBytes, capacity.totalBytes, VFS::logReserveBytes(),
+                                &gRetentionPruning[card ? 1 : 0], &need)) {
+    return true;
+  }
+  gRetentionFreeAtStart = capacity.freeBytes;
+  gRetentionLowWater = LogRetention::lowWaterBytes(capacity.totalBytes, VFS::logReserveBytes());
+  // What earlier passes learned about folders with nothing to remove holds
+  // for the rest of the local day (and the volume: begin() checks that).
+  gRetentionPass.begin(card ? "/sd" : "", need, today != gRetentionFloorDay);
+  gRetentionFloorDay = today;
+  return true;
+}
+
+// A pass is running, or the next pass decision is due.
+static bool retentionHasWork() {
+  if (gRetentionPass.active()) return true;
+  const uint32_t nowMs = millis();
+  return gRetentionLastPassMs == 0 ? nowMs >= LogRetention::kFirstPassDelayMs
+                                   : (uint32_t)(nowMs - gRetentionLastPassMs) >= gRetentionWaitMs;
+}
+
+// One bounded step of the pass, under the tick's filesystem lock.
+static void retentionStep() {
+  const time_t now = time(nullptr);
+  struct tm local {};
+  localtime_r(&now, &local);
+  const uint32_t today = dayKeyOf(local);
+  if (!gRetentionPass.active()) {
+    // Never in the first minutes after boot, then one pass decision an hour.
+    // A decision that had no usable free-space figure does not cost the hour:
+    // it is taken again a minute later.
+    if (!retentionHasWork()) return;
+    const uint32_t nowMs = millis();
+    gRetentionLastPassMs = nowMs ? nowMs : 1;
+    gRetentionWaitMs = retentionConsiderPass(today) ? LogRetention::kPassIntervalMs
+                                                    : LogRetention::kFreeFigureRetryMs;
+    if (!gRetentionPass.active()) return;
+  }
+  const time_t cutoffTime = now - (time_t)LogRetention::kTranscriptDaysKept * 24 * 3600;
+  struct tm cutoff {};
+  gmtime_r(&cutoffTime, &cutoff);
+  char openFile[128] = "";
+  if (gSensorLoggingRunning) snprintf(openFile, sizeof(openFile), "%s", gSensorLogPath.c_str());
+  const LogRetention::Limits limits = {today, dayKeyOf(cutoff), gBootCounter, openFile};
+  RetentionVfsPort port;
+  if (gRetentionPass.step(port, limits) != LogRetention::Step::Finished) return;
+  const bool card = gRetentionPass.root()[0] != '\0';
+  if (gRetentionPass.removedFiles() == 0) {
+    // Nothing on this volume may go: no line, and no further pass until free
+    // space has fallen below the low-water mark anew.
+    gRetentionPruning[card ? 1 : 0] = false;
+    return;
+  }
+  // The cached free-space figure is older than these removals.
+  VFS::invalidateStatsSnapshot(card ? VFS::SDCARD : VFS::INTERNAL);
+  char day[16] = "boot folder";
+  if (gRetentionPass.lastDay() != 0) LogRetention::formatDayFolder(gRetentionPass.lastDay(), day, sizeof(day));
+  logSystemEvent("STORAGE", "retention: removed %u capture file(s) of %s, %lu KB, on %s "
+                 "(free was %lu KB, below the %lu KB low-water mark)",
+                 gRetentionPass.removedFiles(), day,
+                 (unsigned long)(gRetentionPass.freedBytes() / 1024), card ? "the SD card" : "internal flash",
+                 (unsigned long)(gRetentionFreeAtStart / 1024), (unsigned long)(gRetentionLowWater / 1024));
+}
+
 }  // namespace
 
 void timeAnchorsTick() {
@@ -461,7 +650,32 @@ void timeAnchorsTick() {
   if (!Clock::isSynced()) return;
 
   static uint32_t sLastMs = 0;
+  const uint32_t lastBefore = sLastMs;
   if (!everyMs(&sLastMs, 5000)) return;
+
+  // Anchored, swept and no retention step due: no file work, no lock.
+  if (gAnchoredThisBoot && gSweepDone && !retentionHasWork()) return;
+
+  // All of this tick's file work (the anchor row, the promote sweep and one
+  // retention step) runs under one filesystem lock, and the main loop does not
+  // wait for it: a try-lock, and when another task holds the lock the cadence
+  // stamp goes back so the tick is due again on the next lap. Nothing is
+  // recorded as failed and nothing is taken for "nothing to do": the anchor
+  // stays unwritten, the sweep stays armed and the retention pass keeps its
+  // place. `held` is also false on this task's own reentry and before the
+  // mutex exists; neither is "busy". The guards further down are reentrant
+  // under this one.
+  FsLockGuard tickGuard("timeAnchors.tick", 0);
+  if (!tickGuard.held && !isFsLockedByCurrentTask() && gFsMutex != nullptr) {
+    sLastMs = lastBefore;
+    ++gTickLockMisses;
+    static uint32_t sBusyNoteMs = 0;
+    if (everyMs(&sBusyNoteMs, 60000)) {
+      DEBUG_SYSTEMF("[TimeAnchors] filesystem busy: tick deferred (%lu deferral(s) this boot)",
+                    (unsigned long)gTickLockMisses);
+    }
+    return;
+  }
 
   if (!gAnchoredThisBoot) {
     // Guard against double-append across a same-boot soft restart path:
@@ -483,4 +697,7 @@ void timeAnchorsTick() {
   }
 
   if (!gSweepDone) gSweepDone = sweepPass();
+
+  // Log retention: at most one bounded step per tick (System_LogRetentionCore.h).
+  retentionStep();
 }

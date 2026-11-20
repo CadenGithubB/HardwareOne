@@ -167,18 +167,37 @@ assert "constexpr uint32_t kAutomationsFileVersion = 2;" in header
 assert automation.count("readText(AUTOMATIONS_JSON_FILE") == 1
 reader = function_body(automation, "static AutomationsRead readAutomationsFile(String& json, uint32_t* newerVersion = nullptr)")
 assert "readText(AUTOMATIONS_JSON_FILE" in reader and "automationsNewerFileVersion(json)" in reader
-writer = function_body(automation, "bool writeAutomationsJsonAtomic(const String& json)")
+# One writer: automationsStoreWrite refuses a newer document (and, unless the
+# mutation owner has just verified it, one that does not parse) before the
+# write; the public writeAutomationsJsonAtomic is that writer with a notify.
+assert code_only(automation).count("writeTextAtomic(AUTOMATIONS_JSON_FILE") == 1
+writer = function_body(automation, "static bool automationsStoreWrite(const String& json, bool notify, bool verified) {")
 assert writer.index("automationsNewerFileVersion(json)") < writer.index("writeTextAtomic(")
-# The add command loads through loadAutomationsStoreForEdit (behavior in the
-# scheduler harness) and stops when it refuses: its first statement after the
-# load is that refusal, which returns. It never seeds or reads on its own.
+assert writer.index("deserializeJson(check, json)") < writer.index("writeTextAtomic(")
+public_writer = function_body(automation, "bool writeAutomationsJsonAtomic(const String& json)")
+assert "return automationsStoreWrite(json, true, false);" in public_writer
+# Every read-modify-write goes through mutateAutomationsJson (behavior in
+# automation_store_mutations). With the seed flag it loads through
+# loadAutomationsStoreForEdit without writing the empty store, and stops when
+# that refuses. The add command changes the store only through it: it never
+# seeds, reads or writes on its own, and a refused read is its read error.
+mutate = code_only(function_body(
+    automation,
+    "static AutomationsMutateResult mutateAutomationsJson(const char* tag, AutomationsMutator mutator,\n"
+    "                                                     void* context, uint8_t flags,\n"
+    "                                                     String& errorOut)"))
+seed_load = "if (!loadAutomationsStoreForEdit(json, false))"
+assert mutate.count(seed_load) == 1 and mutate.count("loadAutomationsStoreForEdit(") == 1
+assert "return AutomationsMutateResult::ReadFailed;" in function_body(mutate, seed_load)
+assert mutate.index("FsLockGuard guard(tag);") < mutate.index(seed_load) < mutate.index("automationsStoreWrite(")
 add = code_only(function_body(automation, "const char* cmd_automation_add(const String& argsInput)"))
-load_guard = "if (!loadAutomationsStoreForEdit(json, !validateOnly))"
-assert add.count(load_guard) == 1 and add.count("loadAutomationsStoreForEdit(") == 1
-refusal = " ".join(function_body(add, load_guard)[1:-1].split())
-assert refusal == 'return automationsReadErrorReply();', refusal
-for forbidden in ("readText(", "readAutomationsFile(", "readAutomationsJson(", "automationsEmptyStoreJson()"):
-    assert forbidden not in add, f"cmd_automation_add must load only through loadAutomationsStoreForEdit ({forbidden})"
+assert add.count("mutateAutomationsJson(") == 1
+assert "kAutomationsMutateSeed" in add and "validateOnly ? kAutomationsMutateDryRun : 0" in add
+for forbidden in ("readText(", "readAutomationsFile(", "readAutomationsJson(", "automationsEmptyStoreJson()",
+                  "loadAutomationsStoreForEdit(", "writeAutomationsJsonAtomic(", "json.substring("):
+    assert forbidden not in add, f"cmd_automation_add must change the store only through mutateAutomationsJson ({forbidden})"
+read_failed = function_body(automation, "static const char* automationMutateErrorReply(AutomationsMutateResult result, const char* refusal) {")
+assert " ".join(read_failed.split()).count("case AutomationsMutateResult::ReadFailed: return automationsReadErrorReply();") == 1
 edit_load = code_only(function_body(automation, "static bool loadAutomationsStoreForEdit(String& json, bool persistSeed)"))
 assert edit_load.index("if (read == AutomationsRead::Refused) return false;") < edit_load.index(
     "automationsEmptyStoreJson()")
@@ -229,8 +248,9 @@ assert allocation < failure < release < result
 reschedule = function_body(
     automation,
     "static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt, bool notify) {")
-assert "if (notify) writeAutomationsJsonAtomic(json);" in reschedule
-assert "else writeTextAtomic(AUTOMATIONS_JSON_FILE, json, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, \"automation.state\"));" in reschedule
+assert reschedule.count("mutateAutomationsJson(") == 1
+assert "notify ? kAutomationsMutateNotify : 0" in reschedule
+assert "writeTextAtomic(" not in reschedule and "writeAutomationsJsonAtomic(" not in reschedule
 assert tick.count("rescheduleAfterFire(") == 3
 assert tick.count("rescheduleAfterFire(id, obj.c_str(), now, false)") == 3
 assert "rescheduleAfterFire(id, obj.c_str(), now, true);" in automation
@@ -270,15 +290,18 @@ assert "gAutomationsCacheOnUptime = " in code_only(empty)
 # uptime entries once the file is written, so without a clock an armed delay
 # does not survive the edit and an interval starts again, as with a clock
 # (behavior of automationUptimeForget in automation_scheduler).
-add_write = "if (!writeAutomationsJsonAtomic(json))"
+# The store mutation comes first; a failed or dry (validate) run returns before
+# the forget.
+store_change = "mutateAutomationsJson("
 assert add.count("automationUptimeForget((long)id);") == 1
-assert add.index("RETURN_VALID_IF_VALIDATE_CSTR();") < add.index(add_write) < add.index(
+assert add.index(store_change) < add.rindex("RETURN_VALID_IF_VALIDATE_CSTR();") < add.index(
     "automationUptimeForget((long)id);")
 delete = code_only(function_body(automation, "const char* cmd_automation_delete(const String& argsInput)"))
-assert delete.count("automationUptimeForget(deletedId);") == 1
-assert delete.index("const long deletedId = strtol(json.c_str() + idPos") < delete.index(
-    "json = json.substring(0, arrayStart + 1)")
-assert delete.index(add_write) < delete.index("automationUptimeForget(deletedId);")
+assert delete.count("automationUptimeForget(id);") == 1 and delete.count(store_change) == 1
+assert delete.index(store_change) < delete.index(
+    "if (const char* reply = automationMutateErrorReply(result, ctx.reply)) return reply;") < delete.index(
+    "automationUptimeForget(id);")
+assert "json.substring(" not in delete
 
 # The main loop ticks unconditionally; the owner checks permission itself and
 # stops when another writer revoked it (automationSchedulerRunning stays true
@@ -286,6 +309,10 @@ assert delete.index(add_write) < delete.index("automationUptimeForget(deletedId)
 assert "if (gSettings.automationEnabled) {\n    automationTick();" not in main
 owner_tick = function_body(automation, "void automationTick() {")
 assert owner_tick.index("if (!gSettings.automationEnabled)") < owner_tick.index("AutomationStateGuard guard;")
+# A pass is claimed only after the filesystem try-lock: a busy lock leaves the
+# refresh flag, the pending events and the cache as they were.
+assert owner_tick.index("if (!automationPassFilesystemFree())") < owner_tick.index(
+    "sAutomationRefreshPending.exchange(false);") < owner_tick.index("schedulerTickMinute();")
 assert "stopAutomationScheduler();" in owner_tick
 system = function_body(automation, "const char* automationSetSystemEnabled(bool enable) {")
 assert "startAutomationScheduler()" in system and "stopAutomationScheduler();" in system

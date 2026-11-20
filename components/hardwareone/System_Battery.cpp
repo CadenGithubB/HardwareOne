@@ -602,6 +602,12 @@ static void batteryLogAppend(const char* event) {
   }
 }
 
+// Periodic samples that found the filesystem lock busy this boot (each was
+// taken on a later lap instead, and counts once however many laps it waited).
+// Shown by `batterylog status` when not zero.
+static uint32_t sBatteryLogLockMisses = 0;
+static bool sBatteryLogSampleWaiting = false;  // the due sample has been counted
+
 void batteryLogTick() {
   if (!gSettings.batteryLogEnabled) return;
   static unsigned long lastLogMs = 0;
@@ -609,8 +615,25 @@ void batteryLogTick() {
   uint32_t interval = gSettings.batteryLogIntervalMs;
   if (interval < 5000) interval = 5000;  // floor: never hammer the flash
   if (lastLogMs != 0 && (nowMs - lastLogMs) < interval) return;
+  // The periodic sample runs on the main loop and does not wait for the
+  // filesystem: a try-lock, taken before the row is built. When another task
+  // holds the lock the cadence stamp stays as it was, so the sample is due
+  // again on the next lap and is built then, with the reading of that moment
+  // (nothing to keep meanwhile). `held` is also false on this task's own
+  // reentry and before the mutex exists; neither is "busy". Events
+  // (batteryLogEvent) keep the blocking lock: a `sleep:deep` row has no later
+  // lap to be retried on.
+  FsLockGuard tickGuard("batlog.tick", 0);
+  if (!tickGuard.held && !isFsLockedByCurrentTask() && gFsMutex != nullptr) {
+    if (!sBatteryLogSampleWaiting) {
+      sBatteryLogSampleWaiting = true;
+      ++sBatteryLogLockMisses;
+    }
+    return;
+  }
+  sBatteryLogSampleWaiting = false;
   lastLogMs = nowMs;
-  batteryLogAppend("");  // periodic sample — empty event column
+  batteryLogAppend("");  // periodic sample — empty event column (its lock is reentrant here)
 }
 
 void batteryLogEvent(const char* event) {
@@ -719,13 +742,20 @@ const char* cmd_batterylog(const String& argsInput) {
   else if (state.voltageValid)
     snprintf(reading, sizeof(reading), "%.3fV, SOC unknown", state.voltage);
   else snprintf(reading, sizeof(reading), "Measurement unavailable%s", state.stale ? " (stale)" : "");
+  // The deferral line appears only when a periodic sample had to wait for the
+  // filesystem this boot.
+  char deferred[64] = "";
+  if (sBatteryLogLockMisses != 0) {
+    snprintf(deferred, sizeof(deferred), "\n  filesystem busy: %lu sample(s) deferred",
+             (unsigned long)sBatteryLogLockMisses);
+  }
   snprintf(getDebugBuffer(), 1024,
            "Battery log: %s | file %s (%u B) | interval %lu s\n"
-           "  now: %s\n"
+           "  now: %s%s\n"
            "  cmds: batterylog [on|off|interval <s>|tail|clear]",
            gSettings.batteryLogEnabled ? "ON" : "OFF",
            kBatteryLogPath, (unsigned)sz,
-           (unsigned long)(gSettings.batteryLogIntervalMs / 1000), reading);
+           (unsigned long)(gSettings.batteryLogIntervalMs / 1000), reading, deferred);
   return getDebugBuffer();
 }
 

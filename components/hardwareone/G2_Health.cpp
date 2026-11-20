@@ -1090,6 +1090,11 @@ static void processPendingHistoryMainTask() {
   if (needLoad) {
     const R1HealthHistoryStoreError loadError = r1HealthHistoryStoreLoadExact(
         peer, dayStart, timezoneMinutes, sHistoryWorkDay);
+    // The filesystem was busy on another task: nothing is known about the
+    // stored day yet. Not an empty day (it would replace the stored one), not
+    // a load failure (those are counted and end the sweep), no retry delay:
+    // the pending history stays as it is and the next lap asks again.
+    if (loadError == R1_HISTORY_STORE_BUSY) return;
     if (loadError == R1_HISTORY_STORE_NOT_FOUND) {
       r1HealthHistoryDayClear(sHistoryWorkDay);
       memcpy(sHistoryWorkDay.peerId, peer, sizeof(sHistoryWorkDay.peerId));

@@ -24,6 +24,9 @@ static size_t gSensorLogMaxSize = 256000;
 static uint8_t gSensorLogMaxRotations = 3;
 static unsigned long gSensorLogLastWrite = 1000;
 static size_t gApproxSizeBytes = 4321;
+// Rows that waited for the filesystem lock, and rows given up while waiting
+// (the status text names them only when they are not zero).
+static uint32_t sAppendLockMisses = 0, sPendingRowsDropped = 0;
 static unsigned long nowMs = 6000;
 static unsigned long millis() { return nowMs; }
 static struct { bool sensorLogAutoStart; } gSettings;
@@ -150,6 +153,24 @@ static void statusForms() {
         "{\"schema\":1,\"running\":false,\"intervalMs\":5000,\"format\":\"text\",\"maxSizeBytes\":256000,"
         "\"rotations\":3,\"sensors\":[],\"autoStart\":false}",
         "inactive json changed: " + command("status json"));
+
+  // Rows that waited for the filesystem lock this boot add one text line, in
+  // both states; the json form is the same with or without them.
+  for (bool running : {true, false}) {
+    reset(LOG_THERMAL, running, SENSOR_LOG_CSV);
+    const std::string plain = command("status");
+    const std::string plainJson = command("status json");
+    sAppendLockMisses = 7; sPendingRowsDropped = 2;
+    context = "deferred writes";
+    check(command("status") == plain + "\n  Filesystem busy: 7 deferred write(s), 2 row(s) dropped",
+          "the deferred-write line changed: " + command("status"));
+    check(command("status json") == plainJson, "the json form does not carry the deferred-write counters");
+    sAppendLockMisses = 0; sPendingRowsDropped = 1;
+    check(command("status") == plain + "\n  Filesystem busy: 0 deferred write(s), 1 row(s) dropped",
+          "a dropped row alone is shown");
+    sAppendLockMisses = sPendingRowsDropped = 0;
+    check(command("status") == plain, "no line when nothing waited");
+  }
 
   // No reply buffer: each form answers in its own shape.
   bufferAvailable = false;

@@ -43,4 +43,17 @@
 // then drives the promote sweep to completion. Also re-arms the sweep when
 // it observes sensor logging stop (so the just-closed boot-named file
 // promotes promptly).
+//
+// The tick never waits for the filesystem lock: its file work runs under one
+// try-lock, and a tick that finds the lock held by another task is due again
+// on the next lap.
+//
+// It also steps the log retention pass (System_LogRetentionCore.h has the
+// rule and the constants): no sooner than ten minutes after boot and then
+// once an hour it looks at the free space of the capture volume (the SD card
+// when one is writable, read at that moment; else the internal flash, by its
+// cached figure only, and again a minute later when there is none) and, only
+// when that is below the low-water mark, removes the oldest secondary capture
+// files, one bounded step per tick. A step names directory entries without
+// opening them. Needs a set clock, like the rest of the tick.
 void timeAnchorsTick();

@@ -517,8 +517,9 @@ static bool webGuestApiAllowed(const char* path) {
 // UI-oriented helper deliberately falls back to ordinary User when an account
 // cannot be resolved.  A live web session whose account was deleted, banned,
 // or became unreadable must lose access rather than escape the Guest
-// allowlist.  getUserAuthorizationRole() also preserves pre-role rosters
-// (first account = recovery owner, later missing-role accounts = User).
+// allowlist.  getUserAuthorizationRole() reads the role the account's own
+// entry states; an entry with no role is an ordinary User (G-55: the first
+// account gets no special rule).
 static bool webResolveGuestRole(const AuthContext& ctx, bool& guestRole) {
   bool roleVerified = false;
   guestRole = false;
@@ -526,7 +527,7 @@ static bool webResolveGuestRole(const AuthContext& ctx, bool& guestRole) {
   if (roleGuard.held || isFsLockedByCurrentTask()) {
     String role;
     roleVerified = getUserAuthorizationRole(ctx.user, role);
-    // Preserve the legacy device-owner recovery rule only after the account
+    // A super admin is never treated as Guest; decided only after the account
     // was resolved positively from the same locked roster snapshot.
     guestRole = roleVerified && role == kRoleGuest &&
                 !isSuperAdminUser(ctx.user);

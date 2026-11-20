@@ -240,6 +240,12 @@ String getDeviceOwnerUsername();
 // identity/crypto/destructive/auth-posture command set (the requiresSuperAdmin
 // column of each command row).
 bool isSuperAdminUser(const String& who);
+// True when this users.json text names at least one account with the explicit
+// "superadmin" role, by the same rule isSuperAdminUser applies per account. A
+// roster without one has no super admin at all (nothing is inferred for the
+// first account), so code that installs a roster from outside (a restore) can
+// ask before it does. Reads no file and takes no lock.
+bool usersJsonTextHasSuperAdmin(const String& usersJson);
 // Bottom tier — role=="guest". Authenticated view-only: caller-local
 // login/logout and whoami only; filesystem reads use the user column masked
 // to PERM_READ.
@@ -268,8 +274,9 @@ constexpr int kRoleRankNoGrant    = -1;
 // Map a role name ("guest"|"user"|"admin"|"superadmin") to a rank.
 // Unrecognised names collapse to kRoleRankUser.
 int userRoleRank(const String& role);
-// Effective rank for a live account — applies bond/owner fallbacks via
-// isSuperAdminUser/isAdminUser, then guest detection. Prefer this over
+// Effective rank for a live account — the live bond identity via
+// isSuperAdminUser/isAdminUser, a stored account by its explicit role only
+// (no first-account fallback), then guest detection. Prefer this over
 // hand-decoding admin/super booleans when comparing privileges.
 int userAccountRank(const String& username);
 // True for the four grantable role names (caller should lowercase first).
@@ -493,9 +500,9 @@ AccountRequestResult submitAccountRequest(const String& username, const String& 
 // users.json account in file order. username is the full stored name (an
 // account whose stored name is longer than kPublicUsernameMaxLen is left out
 // rather than cut). role is normalized to guest|user|admin|superadmin by the
-// rule the authorization lookup uses: lower-cased, a missing role is
-// superadmin for the first account and user otherwise, and an unknown or
-// malformed role reads as user.
+// rule the authorization lookup uses: lower-cased, a missing role is user for
+// every account (the first one included), and an unknown or malformed role
+// reads as user.
 struct UserRosterEntry {
   uint32_t id;
   char username[kPublicUsernameMaxLen + 1];

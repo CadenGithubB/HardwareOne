@@ -124,7 +124,11 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
   ctx.scope = folder;
   uint64_t total = 0, used = 0, free = 0;
   constexpr uint64_t reserve = 100 * 1024;
-  // No tier switching and no automatic deletion/rotation. The session's first
+  // No tier switching, and this writer never deletes or rotates: a full volume
+  // refuses the write. (Old dated transcripts are removed only by the log
+  // retention pass, System_LogRetentionCore.h, when their volume is below its
+  // low-water mark; never the last two days', never one of the eight newest
+  // stored, never one named "boot".) The session's first
   // write and every SD write take a fresh reading. Later LittleFS phrases read
   // the shared cached figure instead: a fresh one walks the whole volume under
   // the FS mutex (about 1.3 s on the P4X-EYE) before every phrase. The cache

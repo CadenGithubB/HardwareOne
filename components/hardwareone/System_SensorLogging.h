@@ -163,6 +163,11 @@ struct SensorLogStatus {
   bool autoStart;
   unsigned long lastWriteAgoSec;  // while running
   uint32_t approxSizeBytes;  // while running: the logger's own running estimate
+  // This boot: rows that found the filesystem lock busy (each counted once;
+  // the row waited and was retried on later laps), and rows given up while
+  // waiting. Text form only, and only when not zero.
+  uint32_t lockMisses;
+  uint32_t rowsDropped;
 };
 
 // Boot-local identity of the active capture (0 when stopped). A new successful
@@ -245,6 +250,8 @@ void sensorLogRequestSample(bool bypassR1Dedup);
 
 // Command handler
 const char* cmd_sensorlog(const String& originalCmd);
+// `sensorlog autostart [on|off]`: the admin row that saves the boot autostart.
+const char* cmd_sensorlog_autostart(const String& argsInput);
 // Admin-only numeric editors retain their settings registry entries.
 const char* cmd_sensorlogmask(const String& args);
 const char* cmd_sensorlogformat(const String& args);

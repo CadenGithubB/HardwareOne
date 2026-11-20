@@ -67,6 +67,12 @@ enum R1HealthHistoryStoreError : uint8_t {
   R1_HISTORY_STORE_NOT_FOUND,
   R1_HISTORY_STORE_SCHEMA_MISMATCH,
   R1_HISTORY_STORE_DECRYPT_FAILED,
+  // Another task holds the filesystem lock right now: nothing was read or
+  // written, nothing is known about the stored day, ask again on a later lap.
+  // Only r1HealthHistoryStoreLoadExact returns it; it is never the store's
+  // status error and never counts as a load failure. Added at the end: the
+  // values above keep their numbers.
+  R1_HISTORY_STORE_BUSY,
 };
 
 struct R1HealthHourlyBucket {
@@ -196,6 +202,10 @@ struct R1HealthHistoryStoreStatus {
   uint32_t stagedGeneration;
   uint32_t committedGeneration;
   R1HealthHistoryStoreError error;
+  // This boot: main-loop laps on which the store found the filesystem lock
+  // held by another task and put its recovery, commit or load off to a later
+  // lap. Not an error.
+  uint32_t fsBusyDeferrals;
 };
 
 static_assert(R1_HEALTH_HOURLY_SLOTS == 24, "R1 history hourly schema is fixed");

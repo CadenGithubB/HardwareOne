@@ -4,12 +4,20 @@
 Real Arduino String/Print and battery state types are used. Sensor snapshot and
 row formatting precede the extracted append block and are outside this test;
 crypto, time, VFS and locks are observable boundaries, not hardware emulations.
+
+The loop writers do not wait for the filesystem lock (S-5): with the lock held
+by another task the sensor append returns at once and writes nothing, the row
+is kept and written once after the lock is free, a newer row replaces a waiting
+one (counted), and a row never reaches a later session; the periodic battery
+sample is deferred without moving its cadence while battery events keep the
+blocking lock. The task's own hold and a missing mutex are not "busy".
 """
 from __future__ import annotations
 
 import argparse
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -46,6 +54,14 @@ def generate(overlay: Path | None) -> str:
     replacement = (extract_block(vfs, "bool replaceFileGuarded(") if "bool replaceFileGuarded(" in vfs else
                    "static bool replaceFileGuarded(const String& from, const String& to, const Context& ctx) {\n"
                    "  return renameGuarded(from, to, ctx);\n}")
+    append_row = "static SensorLogAppend sensorLogAppendRow(const char* line)"
+    if append_row in sensor:
+        # The append is its own function, with the row kept for a busy
+        # filesystem lock; sensorAppend is what the tick does with a built row
+        # and sensorRetry what it does at the top of every lap.
+        begin = sensor.index("enum class SensorLogAppend : uint8_t {")
+        functions.append(sensor[begin:sensor.index("void sensorLogTick() {", begin)])
+        functions.append("static void sensorRetry() { (void)sensorLogFlushPendingRow(); }")
     functions.append("static void sensorAppend(const char* line) {\n" +
                      extract_block(sensor, "if (line && line[0] != '\\0')") + "\n}")
     functions.extend(extract_block(battery, marker) for marker in (
@@ -54,6 +70,9 @@ def generate(overlay: Path | None) -> str:
     start = battery.index("static const char*  kBatteryLogPath")
     end = battery.index("// Build + append one CSV row.", start)
     functions.append(battery[start:end])
+    misses = re.findall(r"^static uint32_t sBatteryLogLockMisses = 0;$|"
+                        r"^static bool sBatteryLogSampleWaiting = false;[^\n]*$", battery, re.M)
+    functions.extend(misses)
     functions.extend(extract_block(battery, marker) for marker in (
         "static void batteryLogAppend(", "void batteryLogTick()", "void batteryLogEvent("))
     mutex = (COMPONENT / "System_Mutex.cpp").read_text()
@@ -65,7 +84,9 @@ def generate(overlay: Path | None) -> str:
     harness = (HERE / "log_row_writes_harness.cpp").read_text()
     require(harness.count("// INSERT_TYPES") == harness.count("// INSERT_PRODUCTION") == 1,
             "one types and one production marker required")
-    return (f"#define BASELINE {int(overlay is not None)}\n#define LEGACY_ROWS {int(legacy_rows)}\n" + harness
+    try_lock = int(append_row in sensor and bool(misses))
+    return (f"#define BASELINE {int(overlay is not None)}\n#define LEGACY_ROWS {int(legacy_rows)}\n"
+            f"#define TRY_LOCK_WRITERS {try_lock}\n" + harness
             .replace("// INSERT_TYPES", types)
             .replace("// INSERT_LOCKS", lock_code)
             .replace("// INSERT_REPLACE", replacement)

@@ -107,7 +107,8 @@ constexpr int kLedgerSchema = 1;
 constexpr size_t kLedgerFileMax = 32768;             // a larger ledger.json is not read
 constexpr uint32_t kDeliveredSaveMs = 5u * 60u * 1000u;
 // Directory entries (names) one reconcile may list: in all, per root folder
-// (the sensors root and /stt, whose day and owner folders are never pruned)
+// (the sensors root and /stt; retention never prunes the three newest day
+// folders or the eight newest transcripts, the picks offered here)
 // and per file folder. Only the picks below are opened and their heads read.
 constexpr uint16_t kNameBudget = 2048;
 constexpr uint16_t kRootNameMax = 768;
@@ -379,7 +380,8 @@ long bootFolderNumber(const char* name) {
 // The sensors folder of one tier: the 3 newest day folders and the 2 newest
 // boot folders (TimeAnchors moves a boot folder's files into a day folder
 // once the clock is set), chosen by name over the whole root listing (its
-// own, larger budget: day folders are never pruned), then their files.
+// own, larger budget: older day folders stay until retention prunes them),
+// then their files.
 void walkSensors(WalkScratch& w, const char* tier) {
   char root[48];
   snprintf(root, sizeof(root), "%s/logging_captures/sensors", tier);

@@ -232,6 +232,8 @@ bool getUserIdByUsername(const String& username, uint32_t& outUserId);
 bool getUserRole(const String& username, String& outRole);
 int userRoleRank(const String& role);
 bool isKnownUserRole(const String& role);
+bool getUserAuthorizationRole(const String& username, String& roleOut);
+bool getUserRoleAndSuper(const String& who, String& roleOut, bool& isSuperOut);
 // INSERT_PROTOTYPES
 // Referenced here so a tree whose list handlers do not use them still builds.
 static_assert(kPublicUsernameMaxLen > 0 && CMD_RESULT_MAX > 0, "account and reply limits");
@@ -569,7 +571,8 @@ static void rosterSnapshotKeepsFullNames() {
   size_t count = 0, total = 0;
   check(readUserRoster(rows, 16, count, &total));
   check(count == 5 && total == 5);
-  check(std::string(rows[0].username) == "owner" && std::string(rows[0].role) == "superadmin" && rows[0].id == 1);
+  // A stored account without a role is a user, the first one included.
+  check(std::string(rows[0].username) == "owner" && std::string(rows[0].role) == "user" && rows[0].id == 1);
   check(std::string(rows[1].username) == longName && std::string(rows[1].role) == "admin" && rows[1].id == 2);
   check(std::string(rows[2].username) == prefix && rows[2].id == 3);
   check(std::string(rows[3].role) == "guest" && rows[3].banned);
@@ -596,6 +599,121 @@ static void rosterSnapshotKeepsFullNames() {
 #endif
 }
 
+// Every view of one account must agree: the authorization role, the admin and
+// super predicates, the rank, the role-and-super pair the file tier reads, the
+// executor's privilege gates and the row `userlist` shows.
+struct Verdict { const char* role; bool admin; bool super; int rank; };
+static void checkVerdict(const char* name, const Verdict& want) {
+  bumpIdentityGeneration("test.verdict");  // every parser runs on a fresh read
+  String role;
+  check(getUserAuthorizationRole(name, role) && std::string(role.c_str()) == want.role);
+  check(isAdminUser(name) == want.admin);
+  check(isSuperAdminUser(name) == want.super);
+  check(userAccountRank(name) == want.rank);
+  String pairRole;
+  bool pairSuper = !want.super;
+  check(getUserRoleAndSuper(name, pairRole, pairSuper));
+  check(std::string(pairRole.c_str()) == want.role && pairSuper == want.super);
+  check(hasAdminPrivilege(contextOf(SOURCE_SERIAL, name)) == want.admin);
+  check(hasSuperAdminPrivilege(contextOf(SOURCE_WEB, name)) == want.super);
+  // The same answers once more from the authority cache.
+  check(isAdminUser(name) == want.admin && isSuperAdminUser(name) == want.super);
+  check(userAccountRank(name) == want.rank);
+#if HW1_HAS_ROSTER_SNAPSHOT
+  UserRosterEntry rows[16];
+  size_t count = 0;
+  check(readUserRoster(rows, 16, count));
+  bool seen = false;
+  for (size_t i = 0; i < count; ++i) {
+    if (std::string(rows[i].username) != name) continue;
+    seen = true;
+    check(std::string(rows[i].role) == want.role);
+  }
+  check(seen);
+#endif
+}
+
+static bool userListSaysNoSuperAdmin() {
+  output.clear();
+  check(std::string(cmd_user_list("")) == "OK");
+  bool said = false;
+  for (const auto& line : output) said = said || line.find("No account has the superadmin role") == 0;
+  return said;
+}
+
+// G-55: authority comes only from an explicit role. A roster without an
+// explicit super admin has none; the first account is not special.
+static void authorityNeedsAnExplicitRole() {
+  auto& fs = resetStore();
+
+  // (a) No role fields at all: everybody is a user, the first account included.
+  putRoster(fs, {record(1, "owner", nullptr), record(2, "alice", nullptr)});
+  checkVerdict("owner", {"user", false, false, kRoleRankUser});
+  checkVerdict("alice", {"user", false, false, kRoleRankUser});
+  check(userListSaysNoSuperAdmin());
+  {
+    String err;
+    runAs(SOURCE_SERIAL, "owner");
+    check(!userMutationAllowed("alice", kRoleRankAdmin, err));
+    check(!userMutationAllowed("alice", kRoleRankSuperAdmin, err));
+  }
+
+  // (b) First account explicitly admin (first-time setup before v0.99.0), no
+  // super admin anywhere: it stays admin and is not super.
+  putRoster(fs, {record(1, "owner", "admin"), record(2, "alice", "user"), record(3, "carol", "admin")});
+  checkVerdict("owner", {"admin", true, false, kRoleRankAdmin});
+  checkVerdict("alice", {"user", false, false, kRoleRankUser});
+  checkVerdict("carol", {"admin", true, false, kRoleRankAdmin});
+  check(userListSaysNoSuperAdmin());
+  {
+    // An admin owner cannot create or raise a super admin.
+    String err;
+    runAs(SOURCE_SERIAL, "owner");
+    check(userMutationAllowed("alice", kRoleRankAdmin, err));
+    check(!userMutationAllowed("alice", kRoleRankSuperAdmin, err));
+  }
+
+  // (c) First account stored as guest or user, no super admin: it is exactly
+  // what it is stored as.
+  putRoster(fs, {record(1, "owner", "guest"), record(2, "alice", "admin")});
+  checkVerdict("owner", {"guest", false, false, kRoleRankGuest});
+  checkVerdict("alice", {"admin", true, false, kRoleRankAdmin});
+  check(userListSaysNoSuperAdmin());
+  putRoster(fs, {record(1, "owner", "user"), record(2, "alice", nullptr)});
+  checkVerdict("owner", {"user", false, false, kRoleRankUser});
+  checkVerdict("alice", {"user", false, false, kRoleRankUser});
+  check(userListSaysNoSuperAdmin());
+
+  // (d) The explicit super admin is a later account: only that account is
+  // super, and the role-less first account gains nothing from its position.
+  putRoster(fs, {record(1, "owner", nullptr), record(2, "root", "superadmin"), record(3, "alice", "user")});
+  checkVerdict("owner", {"user", false, false, kRoleRankUser});
+  checkVerdict("root", {"superadmin", true, true, kRoleRankSuperAdmin});
+  checkVerdict("alice", {"user", false, false, kRoleRankUser});
+  check(!userListSaysNoSuperAdmin());
+
+  // (e) The normal roster: an explicit superadmin owner keeps every tier.
+  putRoster(fs, {record(1, "owner", "superadmin"), record(2, "alice", "user")});
+  checkVerdict("owner", {"superadmin", true, true, kRoleRankSuperAdmin});
+  check(!userListSaysNoSuperAdmin());
+
+  // Nobody and unknown names stay nobody on a roster without a super admin.
+  putRoster(fs, {record(1, "owner", nullptr)});
+  check(!isAdminUser("") && !isSuperAdminUser("") && !isAdminUser("ghost") && !isSuperAdminUser("ghost"));
+  String role;
+  check(!getUserAuthorizationRole("ghost", role) && !getUserAuthorizationRole("", role));
+  // The JSON list is unchanged in shape: rows only, the role on each row.
+  {
+    JsonDocument doc;
+    check(!deserializeJson(doc, cmd_user_list("json")));
+    check(doc["users"].as<JsonArray>().size() == 1 && doc["users"][0]["role"] == "user");
+    check(doc.as<JsonObject>().size() == 2);
+  }
+  // An empty roster prints no notice (first-time setup has not run).
+  putRoster(fs, {});
+  check(!userListSaysNoSuperAdmin());
+}
+
 struct Case { const char* name; void (*run)(); };
 static const Case kCases[] = {
   {"reservedBondNameIsNeverAnAccount", reservedBondNameIsNeverAnAccount},
@@ -604,6 +722,7 @@ static const Case kCases[] = {
   {"accountBansWorkWithoutHttp", accountBansWorkWithoutHttp},
   {"listRepliesAreTerminatedOrRefused", listRepliesAreTerminatedOrRefused},
   {"rosterSnapshotKeepsFullNames", rosterSnapshotKeepsFullNames},
+  {"authorityNeedsAnExplicitRole", authorityNeedsAnExplicitRole},
 };
 
 int main(int argc, char** argv) {

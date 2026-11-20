@@ -34,6 +34,38 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 SUMMARY_API = "bool automationCopySummaries("
 
+# The filesystem lock, as the store's mutation owner and the scheduler's pass
+# entry use it (System_Mutex.h): reentrant per task, `held` false on reentry
+# and on a missed try-lock, one real mutex so two threads exclude each other.
+# It is never taken under the scheduler's state lock.
+FS_LOCK_DOUBLE = r"""
+static std::timed_mutex fsMutexDouble;
+static thread_local unsigned fsLockDepth = 0;
+static int fsMutexToken = 0;
+static void* gFsMutex = &fsMutexToken;
+static std::atomic<unsigned> fsTryMisses{0};
+static bool isFsLockedByCurrentTask() { return fsLockDepth != 0; }
+struct FsLockGuard {
+  bool held = false;
+  explicit FsLockGuard(const char* owner = nullptr) : FsLockGuard(owner, portMAX_DELAY) {}
+  FsLockGuard(const char*, TickType_t timeoutTicks) {
+    CHECK(stateLockDepth == 0);
+    if (!gFsMutex || fsLockDepth != 0) return;
+    if (timeoutTicks == portMAX_DELAY) fsMutexDouble.lock();
+    else if (!fsMutexDouble.try_lock()) { ++fsTryMisses; return; }
+    held = true;
+    fsLockDepth = 1;
+  }
+  ~FsLockGuard() {
+    if (!held) return;
+    fsLockDepth = 0;
+    fsMutexDouble.unlock();
+  }
+  FsLockGuard(const FsLockGuard&) = delete;
+  FsLockGuard& operator=(const FsLockGuard&) = delete;
+};
+"""
+
 
 def owner_summary(component: Path) -> str:
     """The header's summary types plus the owner's trigger parser and summaries.
@@ -78,6 +110,10 @@ def generated(component: Path) -> str:
     functions = "\n".join(extract_block(owner, signature) for signature in (
         "void notifyAutomationScheduler()", "bool startAutomationScheduler()",
         "void stopAutomationScheduler()", "bool automationSchedulerRunning()",
+        # The pass-entry filesystem try-lock (a tree without it claims a pass
+        # without looking at the lock).
+        *(("static bool automationPassFilesystemFree()",)
+          if "static bool automationPassFilesystemFree()" in owner else ()),
         "void automationTick()"))
     tick = extract_block(owner, "static void schedulerTickMinute()")
     begin = tick.index("  static uint32_t sEventCursor")
@@ -95,9 +131,13 @@ def generated(component: Path) -> str:
     # The next run with the clock owner's answer; a tree without it has the
     # public function only, and the clock cases then do not compile.
     next_run = "static time_t automationNextRunTime(const char* automationJson, time_t fromTime, bool clockSet) "
+    # The post-fire writeback goes through the store's mutation owner on a
+    # tree that has one (mutateAutomationsJson, in the cache section).
+    reschedule_mutation = "static AutomationsMutation automationRescheduleMutation("
     reschedule = "\n".join(extract_block(owner, signature) for signature in (
         "static time_t nextFire(const Trigger& s, time_t from)",
         "static bool onFired(Trigger& s, time_t firedAt)",
+        *((reschedule_mutation,) if reschedule_mutation in owner else ()),
         "static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt, bool notify) ",
         *((next_run,) if next_run in owner else ()),
         "time_t computeNextRunTime(const char* automationJson, time_t fromTime) "))
@@ -122,8 +162,10 @@ def generated(component: Path) -> str:
     require(bool(summary), "System_Automation.cpp has no owner automation summary "
             "(automationCopySummaries); pages still parse automations.json themselves")
     harness = (HERE / "automation_scheduler_harness.cpp").read_text()
+    if reschedule_mutation in owner:
+        reschedule = extract_block(owner, "struct AutomationRescheduleContext") + ";\n" + reschedule
     for marker, replacement in {"// INSERT_CLOCK_OWNER": clock_owner,
-                                "// INSERT_CACHE_OWNER": cache,
+                                "// INSERT_CACHE_OWNER": FS_LOCK_DOUBLE + cache,
                                 "// INSERT_SCHEDULER_API": functions,
                                 "// INSERT_EVENT_RING": ring,
                                 "// INSERT_PENDING_EVENT_DRAIN": drain,

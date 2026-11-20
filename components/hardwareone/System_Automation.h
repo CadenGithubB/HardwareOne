@@ -81,7 +81,24 @@ bool readAutomationsJson(String& json);
 // read did not refuse one (missing, unreadable or loaded). For callers that
 // report why, such as the web Automations page.
 bool readAutomationsJson(String& json, uint32_t* newerVersion);
+// Writes a whole automations document a caller built (the empty store, an
+// import). Refuses a newer format and a document that does not parse or has no
+// "automations" array. It cannot make an earlier read current: do not pair it
+// with readAutomationsJson to change the store; use automationsSanitizeStore
+// or a command.
 bool writeAutomationsJsonAtomic(const String& json);
+// Read, sanitize the ids and write back under one lock: the one-call form of
+// readAutomationsJson + sanitizeAutomationsJson + writeAutomationsJsonAtomic.
+// False when the file could not be read (missing, unreadable, newer format)
+// or the repaired document could not be written. *changedOut says whether
+// anything was repaired, `counts` what.
+bool automationsSanitizeStore(AutomationSanitizeCounts* counts = nullptr, bool* changedOut = nullptr);
+// Disables every enabled automation whose createdBy is exactly `username`, in
+// one locked write (userdelete calls it: steps run as their creator, so a
+// re-added name would otherwise inherit them). Nothing re-enables them.
+// Returns how many were disabled, or -1 when automations.json could not be
+// read, parsed or written.
+int automationDisableOwnedBy(const String& username);
 // An empty store in the current format (the first-time setup seed).
 String automationsEmptyStoreJson();
 bool updateAutomationNextAt(long automationId, time_t newNextAt);
@@ -167,6 +184,10 @@ inline void automationOnSystemEvent(uint8_t) {}
 inline bool sanitizeAutomationsJson(String&) { return false; }
 inline String redactAutomationsJsonForResponse(const String&) { return String(); }
 inline bool writeAutomationsJsonAtomic(const String&) { return false; }
+struct AutomationSanitizeCounts;
+inline bool automationsSanitizeStore(AutomationSanitizeCounts* = nullptr, bool* = nullptr) { return false; }
+// No automations in this build: nothing to disable.
+inline int automationDisableOwnedBy(const String&) { return 0; }
 inline const char* executeConditionalCommand(const char*, const char*) { return "disabled"; }
 inline bool evaluateCondition(const char*) { return false; }
 inline bool automationLogActive() { return false; }

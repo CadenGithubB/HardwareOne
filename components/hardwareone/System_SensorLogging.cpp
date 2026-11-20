@@ -430,6 +430,259 @@ static String resolveSessionTarget(const String& shaped) {
   return stem + "-" + stamp + ext;
 }
 
+// ---------------------------------------------------------------------------
+// The append: one row to the active file, with rollover, tier routing, sealing
+// and rotation. Its own function so a row the loop could not write (filesystem
+// lock busy) can be kept and tried again on a later lap.
+// ---------------------------------------------------------------------------
+// Diagnostics counters of the append path (logger debug summary).
+static uint32_t log_writes = 0;
+static uint32_t log_open_fail = 0;
+static uint32_t log_trunc = 0;
+// Size accounting lives at file scope (gApproxSizeBytes) so start/rollover
+// can seed it from the existing day file's on-disk size.
+static unsigned long lastTruncateMs = 0;
+static const unsigned long truncateCooldownMs = 5000;
+
+enum class SensorLogAppend : uint8_t {
+  Done,  // written, or dropped for a reason of its own (reserve, seal, open failure)
+  Busy,  // another task holds the filesystem lock: nothing was touched
+};
+
+static SensorLogAppend sensorLogAppendRow(const char* line) {
+  // RAII lock: later branches in this section (rollover, header-on-create)
+  // return/skip early — a manual fsLock/fsUnlock pair here would leak the
+  // FS mutex on any early exit and deadlock all filesystem access. The
+  // nested VFS::*Guarded calls are reentrancy-safe under this guard.
+  // Helpers called inside this scope must never call raw fsUnlock().
+  //
+  // The main loop does not wait for the filesystem here: a try-lock, and when
+  // another task holds the lock the row is handed back (Busy) for the caller
+  // to keep and retry on a later lap. `held` is also false on this task's own
+  // reentry and before the mutex exists; neither is "busy".
+  FsLockGuard appendGuard("sensorlog.append", 0);
+  if (!appendGuard.held && !isFsLockedByCurrentTask() && gFsMutex != nullptr) {
+    return SensorLogAppend::Busy;
+  }
+
+  // Quiet rollover — re-point BEFORE this sample lands so no row is ever
+  // written into the wrong day (or into the boot file after the clock
+  // synced). MANUAL (literal-path) sessions never roll. DAY sessions roll
+  // at midnight; BOOT_SHAPED sessions roll the moment the clock syncs —
+  // pre-sync rows stay behind in the boot file (no longer active, so the
+  // time-anchor sweep retro-dates it) and day files stay pure epoch-ms.
+  // One events.log line for auditability; deliberately NO SYSEVT, no
+  // notification, no settings write — a nightly SYSEVT_SENSOR_STARTED
+  // would spam the notification/automation pipeline.
+  if (gSensorLogFormat == SENSOR_LOG_CSV && Clock::isSynced() &&
+      gSensorLogPathMode != SensorLogPathMode::MANUAL) {
+    char today[11];
+    time_t nowT = time(nullptr);
+    struct tm lt;
+    localtime_r(&nowT, &lt);
+    strftime(today, sizeof(today), "%Y-%m-%d", &lt);
+    const bool roll =
+        (gSensorLogPathMode == SensorLogPathMode::BOOT_SHAPED) ||
+        (strcmp(today, gSensorLogDayStr) != 0);
+    if (roll) {
+      String target =
+          resolveSessionTarget(shapeSessionPath(stripSessionShaping(gSensorLogPath)));
+      gSensorLogPath = target;
+      sensorLogClassifyActivePath(target.c_str());
+      gApproxSizeBytes = sensorLogResolvedSize(target);
+      // Sealing tracks the mode at each file boundary: a capturecrypt
+      // change mid-session takes effect here (or at the next start),
+      // never inside a file. resolveSessionTarget above already probed
+      // with the same sessionWantsSealing() answer.
+      gSensorLogSealed = sessionWantsSealing(gSensorLogMask);
+      logSystemEvent("SENSOR", "sensor-log rolled to %s", target.c_str());
+    }
+  }
+
+  // Route to LittleFS primary, or /sd overflow mirror if flash is full.
+  // The active path for this write cycle is resolved per-write so a hot
+  // card plug-in can start working immediately; the overflow latch holds
+  // until free space recovers past its re-arm level (see
+  // VFS::resolveLogPath).
+  char activePath[128];
+  const VFS::LogTier tier = VFS::resolveLogPath(gSensorLogPath.c_str(),
+                                                (size_t)gSensorLogMaxSize,
+                                                activePath, sizeof(activePath));
+  if (tier == VFS::LogTier::Refused) {
+    // G-39: LittleFS is below the 100 KB floor and no card takes the
+    // overflow. Appending would spend the reserve settings and user
+    // saves depend on, so the row is dropped and counted; the session
+    // keeps running and resumes writing once space or a card returns.
+    VFS::noteLogReserveDrop();
+    if (isDebugFlagSet(DEBUG_LOGGER)) {
+      DEBUG_LOGGERF("logger: LittleFS below reserve, no SD — row dropped");
+    }
+    return SensorLogAppend::Done;
+  }
+  const bool onSd = tier == VFS::LogTier::Overflow;
+  File f = openSensorLogForAppend(String(activePath));
+  if (f) {
+    size_t len = strlen(line);
+    const uint8_t* rowBytes = (const uint8_t*)line;
+    if (gSensorLogSealed) {
+      // Never write plaintext into a file that carries the magic. A seal
+      // failure (key unavailable, oversize row) drops this one row —
+      // fail closed, matching the session-start key check.
+      if (!gSealBuf)
+        gSealBuf = (char*)ps_alloc(CAPCRYPT_MAX_SEALED,
+                                   AllocPref::PreferPsram, "sensor.log.seal");
+      int sl = gSealBuf ? captureCryptoSealLine(line, len, gSealBuf,
+                                                CAPCRYPT_MAX_SEALED)
+                        : -1;
+      if (sl < 0) {
+        f.close();
+        if (isDebugFlagSet(DEBUG_LOGGER)) {
+          DEBUG_LOGGERF("logger: seal failed, row dropped");
+        }
+        return SensorLogAppend::Done;
+      }
+      rowBytes = (const uint8_t*)gSealBuf;
+      len = (size_t)sl;
+    }
+    size_t written = 0;
+    const bool complete = writeLineChecked(f, rowBytes, len, written);
+    f.close();
+    if (complete) {
+      gSensorLogLastWrite = millis();
+      log_writes++;
+    }
+    // Partial rows still consume space and must not prevent rotation.
+    // On failure, refresh from the exact tier we wrote; a failed reopen
+    // keeps the estimate rather than resetting it or resolving a new tier.
+    gApproxSizeBytes += written;
+    if (!complete) {
+      File sizeFile = VFS::openGuarded(String(activePath), "r", VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.size"));
+      if (sizeFile) {
+        gApproxSizeBytes = sizeFile.size();
+        sizeFile.close();
+      }
+      if (isDebugFlagSet(DEBUG_STORAGE)) {
+        DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: row write failed (%u/%u bytes)",
+                         (unsigned)written, (unsigned)(len + 1));
+      }
+      if (isDebugFlagSet(DEBUG_LOGGER)) {
+        DEBUG_LOGGERF("logger: row write failed (%u/%u bytes), approxSize=%uB",
+                      (unsigned)written, (unsigned)(len + 1), (unsigned)gApproxSizeBytes);
+      }
+    }
+
+    // Handle log rotation. Rotation runs on whichever tier we're writing
+    // to. When overflow is active we rotate inside `/sd/...` and the
+    // LittleFS copies are preserved (never touched again).
+    if (gApproxSizeBytes > gSensorLogMaxSize && (lastTruncateMs == 0 || (uint32_t)(millis() - lastTruncateMs) >= truncateCooldownMs)) {
+      lastTruncateMs = millis();
+
+      if (gSensorLogMaxRotations > 0) {
+        // Remove the oldest generation first, including .1 when it is the
+        // only one: every rename below must land on a free name, because
+        // FAT (the SD tier) refuses to rename over an existing file.
+        {
+          char oldestFile[128];
+          snprintf(oldestFile, sizeof(oldestFile), "%s.%d", activePath, gSensorLogMaxRotations);
+          if (VFS::existsGuarded(String(oldestFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"))) {
+            VFS::removeGuarded(String(oldestFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
+          }
+        }
+
+        // Shift existing rotations up: .i -> .(i+1) for i = N-1..1. The base
+        // file is moved to .1 separately AFTER this loop, so the loop must
+        // operate on the numbered files only — never on the base path.
+        for (int i = gSensorLogMaxRotations - 1; i >= 1; i--) {
+          char fromFile[128], toFile[128];
+          snprintf(fromFile, sizeof(fromFile), "%s.%d", activePath, i);
+          snprintf(toFile, sizeof(toFile), "%s.%d", activePath, i + 1);
+          if (VFS::existsGuarded(String(fromFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"))) {
+            VFS::renameGuarded(String(fromFile), String(toFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
+          }
+        }
+
+        if (VFS::existsGuarded(String(activePath), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"))) {
+          String rotatedFile = String(activePath) + ".1";
+          VFS::renameGuarded(String(activePath), rotatedFile, VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
+        }
+      } else {
+        VFS::removeGuarded(String(activePath), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
+      }
+
+      gApproxSizeBytes = 0;
+      log_trunc++;
+      if (isDebugFlagSet(DEBUG_STORAGE)) {
+        DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: rotated file on %s (max size=%u bytes)",
+                         onSd ? "SD" : "LittleFS", (unsigned)gSensorLogMaxSize);
+      }
+      if (isDebugFlagSet(DEBUG_LOGGER)) {
+        DEBUG_LOGGERF("logger: rotated at approxSize=%u tier=%s",
+                      (unsigned)gSensorLogMaxSize, onSd ? "sd" : "little");
+      }
+    }
+
+    if (complete && isDebugFlagSet(DEBUG_STORAGE)) {
+      DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: wrote %d bytes", (int)len);
+    }
+    if (complete && isDebugFlagSet(DEBUG_LOGGER)) {
+      DEBUG_LOGGERF("logger: wrote %dB, approxSize=%uB, writes=%u", (int)len, (unsigned)gApproxSizeBytes, (unsigned)log_writes);
+    }
+  } else {
+    if (isDebugFlagSet(DEBUG_STORAGE)) {
+      DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: failed to open file");
+    }
+    log_open_fail++;
+    if (isDebugFlagSet(DEBUG_LOGGER)) {
+      DEBUG_LOGGERF("logger: open fail #%u", (unsigned)log_open_fail);
+    }
+  }
+  return SensorLogAppend::Done;
+}
+
+// One row waiting for the filesystem lock. The row text comes from the
+// builders' shared buffer, which the next sample overwrites, so the waiting
+// row has its own copy (PSRAM, allocated on the first miss and kept). It is
+// retried at the top of every tick. The slot holds one row: when the next
+// sample is ready and the lock is still busy, the older row is dropped and
+// counted, so at most one sample interval of rows waits. A row belongs to the
+// session it was sampled in and is never written into a later one.
+static constexpr size_t kSensorLogPendingRowMax = 1024;  // the largest builder buffer (CSV)
+static char* sPendingRow = nullptr;        // PSRAM
+static bool sPendingRowHeld = false;
+static uint32_t sPendingRowSession = 0;
+static uint32_t sAppendLockMisses = 0;     // rows that found the lock busy (once a row, however many laps it waits)
+static uint32_t sPendingRowsDropped = 0;   // rows given up: replaced by a newer one, too long, no memory, session ended
+
+static void sensorLogKeepPendingRow(const char* line) {
+  if (sPendingRowHeld) ++sPendingRowsDropped;  // the older row gives way to this one
+  sPendingRowHeld = false;
+  const size_t len = strlen(line);
+  if (!sPendingRow) {
+    sPendingRow = (char*)ps_alloc(kSensorLogPendingRowMax, AllocPref::PreferPsram, "sensor.log.pending");
+  }
+  if (!sPendingRow || len >= kSensorLogPendingRowMax) {
+    ++sPendingRowsDropped;
+    return;
+  }
+  memcpy(sPendingRow, line, len + 1);
+  sPendingRowSession = sensorLogCurrentSessionId();
+  sPendingRowHeld = true;
+}
+
+// Tries the waiting row, if there is one. True when no row is waiting any more.
+static bool sensorLogFlushPendingRow() {
+  if (!sPendingRowHeld) return true;
+  if (sPendingRowSession != sensorLogCurrentSessionId()) {
+    // Its session stopped (or another started) while it waited.
+    sPendingRowHeld = false;
+    ++sPendingRowsDropped;
+    return true;
+  }
+  if (sensorLogAppendRow(sPendingRow) == SensorLogAppend::Busy) return false;  // counted when it was kept
+  sPendingRowHeld = false;
+  return true;
+}
+
 void sensorLogTick() {
 #if ENABLE_R1_HEALTH
   // Main-task half of typed history persistence. Ring notifications only
@@ -439,6 +692,10 @@ void sensorLogTick() {
   // Health logging mine runs even between sensorlog intervals (and while logging
   // is on). Must be called before the early-return below.
   healthLoggingTick();
+
+  // A row that waited for the filesystem lock is tried on every lap, before
+  // the cadence check; one whose session has ended is dropped here.
+  (void)sensorLogFlushPendingRow();
 
   if (!gSensorLoggingRunning) return;
 
@@ -468,16 +725,10 @@ void sensorLogTick() {
   const bool bypassR1Dedup = sBypassR1Dedup;
   sBypassR1Dedup = false;
 
-  // Diagnostics counters
-  static uint32_t log_writes = 0;
-  static uint32_t log_open_fail = 0;
+  // Diagnostics counters (the append path's own are at file scope, with
+  // sensorLogAppendRow).
   static uint32_t log_idle_skips = 0;
-  static uint32_t log_trunc = 0;
   static unsigned long lastSummaryMs = 0;
-  // Size accounting lives at file scope (gApproxSizeBytes) so start/rollover
-  // can seed it from the existing day file's on-disk size.
-  static unsigned long lastTruncateMs = 0;
-  const unsigned long truncateCooldownMs = 5000;
 
   // Local builder - respects sensor selection mask
   auto buildFromSnap = [](const SensorCacheSnapshot& s) -> const char* {
@@ -1014,183 +1265,11 @@ void sensorLogTick() {
       line = buildFromSnap(snap);
     }
     if (line && line[0] != '\0') {
-      // RAII lock: later branches in this section (rollover, header-on-create)
-      // return/skip early — a manual fsLock/fsUnlock pair here would leak the
-      // FS mutex on any early exit and deadlock all filesystem access. The
-      // nested VFS::*Guarded calls are reentrancy-safe under this guard.
-      // Helpers called inside this scope must never call raw fsUnlock().
-      FsLockGuard appendGuard("sensorlog.append");
-
-      // Quiet rollover — re-point BEFORE this sample lands so no row is ever
-      // written into the wrong day (or into the boot file after the clock
-      // synced). MANUAL (literal-path) sessions never roll. DAY sessions roll
-      // at midnight; BOOT_SHAPED sessions roll the moment the clock syncs —
-      // pre-sync rows stay behind in the boot file (no longer active, so the
-      // time-anchor sweep retro-dates it) and day files stay pure epoch-ms.
-      // One events.log line for auditability; deliberately NO SYSEVT, no
-      // notification, no settings write — a nightly SYSEVT_SENSOR_STARTED
-      // would spam the notification/automation pipeline.
-      if (gSensorLogFormat == SENSOR_LOG_CSV && Clock::isSynced() &&
-          gSensorLogPathMode != SensorLogPathMode::MANUAL) {
-        char today[11];
-        time_t nowT = time(nullptr);
-        struct tm lt;
-        localtime_r(&nowT, &lt);
-        strftime(today, sizeof(today), "%Y-%m-%d", &lt);
-        const bool roll =
-            (gSensorLogPathMode == SensorLogPathMode::BOOT_SHAPED) ||
-            (strcmp(today, gSensorLogDayStr) != 0);
-        if (roll) {
-          String target =
-              resolveSessionTarget(shapeSessionPath(stripSessionShaping(gSensorLogPath)));
-          gSensorLogPath = target;
-          sensorLogClassifyActivePath(target.c_str());
-          gApproxSizeBytes = sensorLogResolvedSize(target);
-          // Sealing tracks the mode at each file boundary: a capturecrypt
-          // change mid-session takes effect here (or at the next start),
-          // never inside a file. resolveSessionTarget above already probed
-          // with the same sessionWantsSealing() answer.
-          gSensorLogSealed = sessionWantsSealing(gSensorLogMask);
-          logSystemEvent("SENSOR", "sensor-log rolled to %s", target.c_str());
-        }
-      }
-
-      // Route to LittleFS primary, or /sd overflow mirror if flash is full.
-      // The active path for this write cycle is resolved per-write so a hot
-      // card plug-in can start working immediately; the overflow latch holds
-      // until free space recovers past its re-arm level (see
-      // VFS::resolveLogPath).
-      char activePath[128];
-      const VFS::LogTier tier = VFS::resolveLogPath(gSensorLogPath.c_str(),
-                                                    (size_t)gSensorLogMaxSize,
-                                                    activePath, sizeof(activePath));
-      if (tier == VFS::LogTier::Refused) {
-        // G-39: LittleFS is below the 100 KB floor and no card takes the
-        // overflow. Appending would spend the reserve settings and user
-        // saves depend on, so the row is dropped and counted; the session
-        // keeps running and resumes writing once space or a card returns.
-        VFS::noteLogReserveDrop();
-        if (isDebugFlagSet(DEBUG_LOGGER)) {
-          DEBUG_LOGGERF("logger: LittleFS below reserve, no SD — row dropped");
-        }
-        return;
-      }
-      const bool onSd = tier == VFS::LogTier::Overflow;
-      File f = openSensorLogForAppend(String(activePath));
-      if (f) {
-        size_t len = strlen(line);
-        const uint8_t* rowBytes = (const uint8_t*)line;
-        if (gSensorLogSealed) {
-          // Never write plaintext into a file that carries the magic. A seal
-          // failure (key unavailable, oversize row) drops this one row —
-          // fail closed, matching the session-start key check.
-          if (!gSealBuf)
-            gSealBuf = (char*)ps_alloc(CAPCRYPT_MAX_SEALED,
-                                       AllocPref::PreferPsram, "sensor.log.seal");
-          int sl = gSealBuf ? captureCryptoSealLine(line, len, gSealBuf,
-                                                    CAPCRYPT_MAX_SEALED)
-                            : -1;
-          if (sl < 0) {
-            f.close();
-            if (isDebugFlagSet(DEBUG_LOGGER)) {
-              DEBUG_LOGGERF("logger: seal failed, row dropped");
-            }
-            return;
-          }
-          rowBytes = (const uint8_t*)gSealBuf;
-          len = (size_t)sl;
-        }
-        size_t written = 0;
-        const bool complete = writeLineChecked(f, rowBytes, len, written);
-        f.close();
-        if (complete) {
-          gSensorLogLastWrite = millis();
-          log_writes++;
-        }
-        // Partial rows still consume space and must not prevent rotation.
-        // On failure, refresh from the exact tier we wrote; a failed reopen
-        // keeps the estimate rather than resetting it or resolving a new tier.
-        gApproxSizeBytes += written;
-        if (!complete) {
-          File sizeFile = VFS::openGuarded(String(activePath), "r", VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.size"));
-          if (sizeFile) {
-            gApproxSizeBytes = sizeFile.size();
-            sizeFile.close();
-          }
-          if (isDebugFlagSet(DEBUG_STORAGE)) {
-            DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: row write failed (%u/%u bytes)",
-                             (unsigned)written, (unsigned)(len + 1));
-          }
-          if (isDebugFlagSet(DEBUG_LOGGER)) {
-            DEBUG_LOGGERF("logger: row write failed (%u/%u bytes), approxSize=%uB",
-                          (unsigned)written, (unsigned)(len + 1), (unsigned)gApproxSizeBytes);
-          }
-        }
-
-        // Handle log rotation. Rotation runs on whichever tier we're writing
-        // to. When overflow is active we rotate inside `/sd/...` and the
-        // LittleFS copies are preserved (never touched again).
-        if (gApproxSizeBytes > gSensorLogMaxSize && (lastTruncateMs == 0 || (uint32_t)(millis() - lastTruncateMs) >= truncateCooldownMs)) {
-          lastTruncateMs = millis();
-
-          if (gSensorLogMaxRotations > 0) {
-            // Remove the oldest generation first, including .1 when it is the
-            // only one: every rename below must land on a free name, because
-            // FAT (the SD tier) refuses to rename over an existing file.
-            {
-              char oldestFile[128];
-              snprintf(oldestFile, sizeof(oldestFile), "%s.%d", activePath, gSensorLogMaxRotations);
-              if (VFS::existsGuarded(String(oldestFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"))) {
-                VFS::removeGuarded(String(oldestFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
-              }
-            }
-
-            // Shift existing rotations up: .i -> .(i+1) for i = N-1..1. The base
-            // file is moved to .1 separately AFTER this loop, so the loop must
-            // operate on the numbered files only — never on the base path.
-            for (int i = gSensorLogMaxRotations - 1; i >= 1; i--) {
-              char fromFile[128], toFile[128];
-              snprintf(fromFile, sizeof(fromFile), "%s.%d", activePath, i);
-              snprintf(toFile, sizeof(toFile), "%s.%d", activePath, i + 1);
-              if (VFS::existsGuarded(String(fromFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"))) {
-                VFS::renameGuarded(String(fromFile), String(toFile), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
-              }
-            }
-
-            if (VFS::existsGuarded(String(activePath), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"))) {
-              String rotatedFile = String(activePath) + ".1";
-              VFS::renameGuarded(String(activePath), rotatedFile, VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
-            }
-          } else {
-            VFS::removeGuarded(String(activePath), VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.rotate"));
-          }
-
-          gApproxSizeBytes = 0;
-          log_trunc++;
-          if (isDebugFlagSet(DEBUG_STORAGE)) {
-            DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: rotated file on %s (max size=%u bytes)",
-                             onSd ? "SD" : "LittleFS", (unsigned)gSensorLogMaxSize);
-          }
-          if (isDebugFlagSet(DEBUG_LOGGER)) {
-            DEBUG_LOGGERF("logger: rotated at approxSize=%u tier=%s",
-                          (unsigned)gSensorLogMaxSize, onSd ? "sd" : "little");
-          }
-        }
-        
-        if (complete && isDebugFlagSet(DEBUG_STORAGE)) {
-          DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: wrote %d bytes", (int)len);
-        }
-        if (complete && isDebugFlagSet(DEBUG_LOGGER)) {
-          DEBUG_LOGGERF("logger: wrote %dB, approxSize=%uB, writes=%u", (int)len, (unsigned)gApproxSizeBytes, (unsigned)log_writes);
-        }
-      } else {
-        if (isDebugFlagSet(DEBUG_STORAGE)) {
-          DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: failed to open file");
-        }
-        log_open_fail++;
-        if (isDebugFlagSet(DEBUG_LOGGER)) {
-          DEBUG_LOGGERF("logger: open fail #%u", (unsigned)log_open_fail);
-        }
+      // A row still waiting from an earlier lap goes first, so rows stay in
+      // order; if the lock is still busy the new row takes the slot.
+      if (!sensorLogFlushPendingRow() || sensorLogAppendRow(line) == SensorLogAppend::Busy) {
+        ++sAppendLockMisses;  // this row has to wait: counted once, not on every lap it waits
+        sensorLogKeepPendingRow(line);
       }
     }
 
@@ -1241,6 +1320,8 @@ static void sensorLogReadStatus(SensorLogStatus& st) {
   st.autoStart = gSettings.sensorLogAutoStart;
   st.lastWriteAgoSec = st.running ? (millis() - gSensorLogLastWrite) / 1000 : 0;
   st.approxSizeBytes = st.running ? (uint32_t)gApproxSizeBytes : 0;
+  st.lockMisses = sAppendLockMisses;
+  st.rowsDropped = sPendingRowsDropped;
 }
 
 // 'sensorlog status' as text. The wording is read by people, shown as-is by
@@ -1283,6 +1364,17 @@ static void sensorLogFormatStatusText(const SensorLogStatus& st, char* buf, size
       (unsigned)st.rotations,
       sensors.c_str(),
       st.autoStart ? "ON" : "OFF");
+  }
+  // Only when it happened this boot: rows that had to wait for the filesystem
+  // (written on a later lap; each row counts once, however long it waited)
+  // and rows given up while waiting. The text is otherwise unchanged; the
+  // json form does not carry these.
+  if (st.lockMisses != 0 || st.rowsDropped != 0) {
+    const size_t used = strnlen(buf, cap);
+    if (used < cap) {
+      snprintf(buf + used, cap - used, "\n  Filesystem busy: %lu deferred write(s), %lu row(s) dropped",
+               (unsigned long)st.lockMisses, (unsigned long)st.rowsDropped);
+    }
   }
 }
 
@@ -1637,6 +1729,30 @@ const char* sensorLogStartLiveTrack(const char* path, uint32_t intervalMs) {
   return result;
 }
 
+// The saved boot autostart: no argument toggles it, otherwise on/off.
+static const char* sensorLogAutoStartSet(bool hasValue, const String& value) {
+  bool enable = !gSettings.sensorLogAutoStart;
+  if (hasValue) {
+    const int v = parseBoolArg(value);
+    if (v < 0) return kCommandReplyNotOnOff;
+    enable = (v == 1);
+  }
+  setSetting(gSettings.sensorLogAutoStart, enable);
+  return enable ? "Sensor logging auto-start ENABLED" : "Sensor logging auto-start DISABLED";
+}
+
+// `sensorlog autostart` has its own admin row: a saved autostart is admin-only
+// (CONTRIBUTING.md, "Command names"), the rest of sensorlog stays open. This
+// handler is the only command path that writes the setting: cmd_sensorlog's
+// `autostart` branch only answers with an error, because a line the admin row
+// does not match byte for byte (two spaces, a tab, a quoted word) resolves to
+// the open `sensorlog` row. gpslog calls this handler directly.
+const char* cmd_sensorlog_autostart(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  CommandArgs a(argsInput);
+  return sensorLogAutoStartSet(a.has(0), a.arg(0));
+}
+
 const char* cmd_sensorlog(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -1825,19 +1941,11 @@ const char* cmd_sensorlog(const String& argsInput) {
     return getDebugBuffer();
   }
 
-  // Handle 'autostart' subcommand
+  // The saved autostart is its own admin row, `sensorlog autostart`; this open
+  // row never writes it (see cmd_sensorlog_autostart).
   if (subCmd == "autostart") {
-    if (!a.has(1)) {
-      // Toggle
-      bool newVal = !gSettings.sensorLogAutoStart;
-      setSetting(gSettings.sensorLogAutoStart, newVal);
-      return newVal ? "Sensor logging auto-start ENABLED" : "Sensor logging auto-start DISABLED";
-    }
-    const int v = parseBoolArg(a.arg(1));
-    if (v < 0) return kCommandReplyNotOnOff;
-    const bool enable = (v == 1);
-    setSetting(gSettings.sensorLogAutoStart, enable);
-    return enable ? "Sensor logging auto-start ENABLED" : "Sensor logging auto-start DISABLED";
+    return "Error: The boot autostart has its own command: sensorlog autostart [on|off] (admin). "
+           "Type it with one space between the words.";
   }
 
   return "Error: Unknown subcommand. Use: start, stop, status, format, maxsize, rotations, sensors, interval, or autostart";
@@ -2018,7 +2126,10 @@ const char* buildHealthStatusJson(char* buf, size_t cap, bool* complete) {
    .kv("historyStoreEncrypted", (bool)store.lastCommitEncrypted)
    .kv("historyStoreStagedGeneration", (unsigned long)store.stagedGeneration)
    .kv("historyStoreCommittedGeneration", (unsigned long)store.committedGeneration)
-   .kv("historyStoreError", r1HealthHistoryStoreErrorName(store.error));
+   .kv("historyStoreError", r1HealthHistoryStoreErrorName(store.error))
+   // Laps on which the store put its file work off because another task held
+   // the filesystem lock (this boot). A count, not an error.
+   .kv("historyStoreDeferrals", (unsigned long)store.fsBusyDeferrals);
   if (!j.ok()) {
     snprintf(buf, cap, "{\"schema\":1,\"error\":\"status_overflow\"}");
     return buf;
@@ -2810,7 +2921,9 @@ const CommandEntry sensorLoggingCommands[] = {
     "  sensors <thermal|tof|imu|gamepad|apds|gps|presence|r1|all|none>: Select sensors to log\n"
     "  sensors toggle <sensor>: Toggle one sensor in the current selection\n"
     "  interval <ms>: Set poll interval 100-3600000 (default 5000)\n"
-    "  autostart [on|off]: Auto-start logging on boot (bare = toggle)" },
+    "  autostart [on|off]: Auto-start logging on boot (bare = toggle; admin)" },
+  { "sensorlog autostart", "Auto-start sensor logging on boot with the last-used parameters (saved).", true,
+    cmd_sensorlog_autostart, "Usage: sensorlog autostart [on|off]  (bare = toggle)" },
   { "capturecrypt", "Capture at-rest encryption: status, mode (off/health/all), plaintext export", true, cmd_capturecrypt,
     "Usage: capturecrypt [status|off|health|all|export \"<in>\" \"<out>\"]\n"
     "  Sealed sessions write '#HW1ENC' on line 1 + per-row ciphertext; filenames\n"

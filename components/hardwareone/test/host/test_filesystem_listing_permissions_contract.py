@@ -120,7 +120,10 @@ assert "deserializeJson" not in super_parser
 assert 'json.indexOf("\\\"username\\\""' in super_parser
 assert 'json.indexOf("\\\"role\\\""' in super_parser
 assert 'role == kRoleSuperAdmin' in super_parser
-assert "anyExplicitSuper" in super_parser
+# Super admin is an explicit stored role only: no first-account fallback.
+for fallback_word in ("anyExplicitSuper", "firstUser"):
+    assert fallback_word not in super_parser, fallback_word
+assert "firstAccount" not in role_parser
 
 # Construction owns/reuses the filesystem lock before resolving a named role.
 # The live bond tuple is marked dynamic regardless of current token state.

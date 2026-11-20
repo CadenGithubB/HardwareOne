@@ -328,7 +328,7 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(client.created, [])
             self.assertEqual(client.uploaded, [])
 
-    def test_role_resolution_matches_safe_explicit_and_legacy_cases(self) -> None:
+    def test_role_resolution_needs_an_explicit_superadmin(self) -> None:
         explicit = users_json(
             [
                 {"username": "admin", "role": "admin"},
@@ -341,13 +341,10 @@ class RestoreTests(unittest.TestCase):
         legacy_no_role = users_json([{"username": "owner"}])
         legacy_admin = users_json([{"username": "owner", "role": "admin"}])
         unsafe_legacy_user = users_json([{"username": "owner", "role": "user"}])
-        self.assertTrue(
-            device_backup.restore_username_is_superadmin(legacy_no_role, "owner")
-        )
-        self.assertTrue(device_backup.restore_username_is_superadmin(legacy_admin, "owner"))
-        self.assertFalse(
-            device_backup.restore_username_is_superadmin(unsafe_legacy_user, "owner")
-        )
+        # No first-account fallback: a roster without an explicit superadmin
+        # has no super admin, whatever the first account's own role is.
+        for roster in (legacy_no_role, legacy_admin, unsafe_legacy_user):
+            self.assertFalse(device_backup.restore_username_is_superadmin(roster, "owner"))
         with self.assertRaisesRegex(RuntimeError, "invalid explicit role"):
             device_backup.restore_username_is_superadmin(
                 users_json([{"username": "owner", "role": None}]), "owner"
