@@ -394,6 +394,12 @@ Rules that hold everywhere:
 - **You cannot grant a role above your own.** Granting or removing `superadmin` requires a super-admin caller.
 - A command marked super-admin-only is refused for an ordinary admin - `blerequireauth`, `serialrequireauth`, and `displayrequireauth` are examples, since they change whether the device demands a login at all.
 - An unrecognised role name collapses to `user`.
+- A role is what `users.json` says for that account; an account stored without a role is a `user`,
+  the first account included. A device without a `superadmin` entry has no super admin, and the
+  super-admin commands (`factoryreset`, `certgen`, pairing secrets, `sdformat`) are unavailable;
+  `userlist` and the boot log say so. A device first set up before v0.99.0 may be in that state:
+  before updating, check `/system/users/users.json` for `"role": "superadmin"` and, if none is
+  there, add one on the old firmware (`useradd <name> <password> 0 superadmin`).
 - The stored `guest` role is not a username and is not the internal `AuthBypass` sentinel. `AuthBypass` appears only when a transport's require-auth policy is disabled; it is not an account and never grants cross-transport session control.
 
 Set roles with `useradd ... [role]`, `userpromote`, and `userdemote` - see the
@@ -903,8 +909,8 @@ setting, regardless of which setting it was.
 | `power_save_enter` / `power_save_exit` | display power-save engaged / woke | idle minutes / - |
 | `sd_mounted` / `sd_unmounted` | SD card mounted / unmounted | free MB / - |
 | `sd_write_failed` | SD went unwritable (once per episode) | hint |
-| `fs_low_space` | flash below the log reserve (once per boot) | free bytes |
-| `heap_low` | internal RAM free under 25 KB or its largest block under 16 KB (once per low spell, at most once a minute) | free bytes / `largest <bytes>` |
+| `fs_low_space` | flash below the log reserve (once per boot); shown in the notification centre and as a toast | free bytes |
+| `heap_low` | internal RAM free under 25 KB or its largest block under 16 KB (once per low spell, at most once a minute); shown in the notification centre, and as a toast at most once in 10 minutes | free bytes / `largest <bytes>` |
 | `setting_changed` | a setting was saved | key / value |
 | `settings_save_failed` | settings.json write failed | stage / file |
 | `sensor_started` / `sensor_stopped` | sensor came up / stopped (includes Camera) | sensor name |
@@ -1184,7 +1190,6 @@ Available debug modules (type `help debug` on device for full list):
 | ------- | -------- |
 | `debughttp` | HTTP request/response logging |
 | `debugwifi` | WiFi connection events |
-| `debugespnow` | Alias of `debugespnowcore` - ESP-NOW core messages |
 | `debugespnowcore` | custom ESP-NOW v1 frame layer |
 | `debugespnowmesh` | Mesh peer management |
 | `debugespnowrouter` | Message routing |
@@ -1236,7 +1241,7 @@ leaves help. Type `help all` to include disconnected sensors.
 
 Two things about lookup that explain most surprises:
 
-- Matching is **case-insensitive**, so `MQTTHOST` and `mqtthost` are the same command. Every command is registered in lower case without separators (`mqtthost`, `httpautostart`); a family of sub-commands puts a space between its words (`phone pair new`, `ring panel on`).
+- Matching is **case-insensitive**, so `MQTTHOST` and `mqtthost` are the same command. Every command is registered in lower case without separators (`mqtthost`, `httpautostart`); a family of sub-commands puts a space between its words (`phone pair new`, `ring panel feed`).
 - Lookup is **longest-prefix**, so `automation list` resolves to the `automation` dispatcher with `list` as an argument rather than needing its own entry. This is why some features appear as one command with subcommands and others as a family of single words.
 
 A command that cannot do what it was asked answers `Error: <reason>. <next step>.`, and the web
@@ -1263,7 +1268,6 @@ bootcount [reset|json]          - Boot count (NVS), crash count, last reset reas
 clear                           - Clear CLI history
 broadcast <message>             - Send message to all users (admin)
 wait <ms>                       - Delay execution for N milliseconds
-sleep <ms>                      - Alias for wait
 lightsleep [seconds]            - Enter ESP32 light sleep (default 20s)
 temperature                     - Read ESP32 internal temperature
 voltage                         - Read supply voltage
@@ -1527,6 +1531,10 @@ sdformat confirm                - Format SD card as FAT32 (erases the card; with
 sdinfo                          - Show SD card information
 sddiag                          - SD card hardware diagnostics
 ```
+
+On the P4X-EYE a card is mounted on its own 1 to 2 s after it is put in; `sdunmount` keeps it
+unmounted until `sdmount` or until it is taken out. `sdmount` right after putting a card in may
+answer that the card is already mounted: the board mounted it.
 </details>
 
 <details>
@@ -1588,6 +1596,13 @@ sensorautostart [sensor] [on|off]  - Configure auto-start for a sensor
 devices                         - Show discovered I2C device registry
 discover                        - Re-scan and register I2C devices
 ```
+
+A sensor whose `<x>enabled` is off cannot be opened: `open<x>` answers
+`Error: <name> is disabled - run '<x>enabled 1' first`. A sensor that switches itself off after
+repeated I2C errors is started again by itself while its `<x>enabled` and `<x>autostart` are on
+(after 30 s, 2 min, 10 min, then every 30 min). `close<x>` ends that. The commands that save an
+autostart or enabled setting (`<x>autostart`, `<x>enabled`, `micautostart`, `oledenabled`,
+`ledstartupenabled`, `eienable`, `sensorlog autostart`) are admin-only.
 </details>
 
 <details>
@@ -1596,8 +1611,8 @@ discover                        - Re-scan and register I2C devices
 ```
 automation                      - Show automation system status
 automationlist                  - List all automations
-automationadd                   - Add an automation (JSON)
-automationrun id=<id>           - Run automation immediately by ID
+automation add <args>           - Add an automation
+automation run id=<id>          - Run automation immediately by ID
 automation add type=event on=<kind> [match=<text>] - Event-triggered automation
 autolog start <file>            - Start automation execution log
 autolog stop                    - Stop automation log
@@ -1646,7 +1661,7 @@ userlist                        - List all users
 useradd <user> <pass> [0|1] [role]  - Create user
                                   [0|1]: 1 = force password change at next login (default 0)
                                   [role]: guest|user|admin|superadmin (default user)
-userdelete <user>               - Delete user
+userdelete <user>               - Delete user (also disables the automations that user created)
 userchangepassword <cur> <new> <confirm>  - Change own password
 userresetpassword <user> <pass> [0|1]     - Reset another user's password (admin)
                                             1 = force password change at next login
@@ -1709,6 +1724,20 @@ sensorlog autostart [on|off]              - Auto-start on boot with last-used pa
 
 CSV rows always carry every selected column: a selected sensor without a reading leaves its
 fields empty, so the later columns stay under their header names.
+
+**Old capture data is removed before a volume fills.** Below a low-water mark (20 % of the volume,
+at most 64 MB, at least twice the 100 KB log reserve) the oldest day's sensor-log files go first,
+one day an hour, then old transcripts, and last health files older than the 14 newest stored days,
+until 5 % (at most 16 MB) above the mark is free. Today's folder, the open session, the three newest
+days, the eight newest transcripts, system logs, GPS tracks, notes and everything under `/system`
+are never removed. The internal flash is left alone while a writable SD card takes the overflow.
+Each pass that removed something writes one line to the system log. `sensorlog status` shows how
+many rows had to wait for the filesystem.
+
+**System logs** (`/system/sys_logs`): most logs are two files, `<name>.log.1` (older) and
+`<name>.log`; the web Logging viewer shows them as one. Together they use at most a quarter of the
+internal flash data partition. Error, event, I2C and command-audit lines are written in batches
+(within 2 s); a power loss or crash can lose up to 2 s of them.
 
 **R1 health logging (preferred):** `healthlogging on` (or the **Health Logging** row on
 Apps -> Health, the OLED R1 Health page, or the **Health logging** button on Web
@@ -1938,9 +1967,9 @@ srcmdssync                      - Sync voice commands from CLI registry
 
 --- Audio tuning ---
 srtuningswgain <1.0-50.0>       - Set software gain
-srtuninggain <0.1-10.0>         - Set AFE linear gain
-srtuningagc <0-3>               - Set AGC mode (0=off)
-srtuningvad <0-4>               - Set VAD sensitivity
+srtuninggain <0.1-10.0>         - Set AFE linear gain (saved; restart SR to apply)
+srtuningagc <0-3>               - Set AGC mode (0=off) (saved; restart SR to apply)
+srtuningvad <0-4>               - Set VAD sensitivity (saved; restart SR to apply)
 srtuningfilters                 - Toggle high-pass + pre-emphasis filters
 srdyngain                       - Configure dynamic gain normalization
 

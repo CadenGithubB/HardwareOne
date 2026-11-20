@@ -471,6 +471,14 @@ set_target_properties(settings_write_batch_core_tests PROPERTIES
 target_compile_options(settings_write_batch_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# Wait ladder of the automatic sensor restart (System_SensorRestartCore.h).
+add_executable(sensor_restart_core_tests test_sensor_restart_core.cpp)
+set_target_properties(sensor_restart_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(sensor_restart_core_tests PRIVATE ../..)
+target_compile_options(sensor_restart_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # Allocation-free grammar and list mutation semantics used by personal
 # notification preferences in every UI.
 add_executable(notification_kind_list_tests test_notification_kind_list.cpp)
@@ -708,6 +716,10 @@ if(HW1_SANITIZE)
   target_compile_options(settings_write_batch_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(settings_write_batch_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(sensor_restart_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(sensor_restart_core_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(notification_kind_list_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -1377,7 +1389,7 @@ add_test(
           ${OLED_POWER_SETTINGS_TEST_ARGS})
 
 # OLED automation wizard (README "OLED automation wizard"): names and commands up to the
-# keyboard cap reach automationadd whole; the confirm screen shows the whole command.
+# keyboard cap reach automation add whole; the confirm screen shows the whole command.
 set(OLED_AUTOMATION_WIZARD_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND OLED_AUTOMATION_WIZARD_TEST_ARGS --sanitize)
@@ -2047,6 +2059,14 @@ foreach(test_name IN ITEMS fileread_psram g2_files_psram filesystem_psram_listin
             ${CMAKE_CURRENT_LIST_DIR}/test_${test_name}.py
             ${FILESYSTEM_PSRAM_TEST_ARGS})
 endforeach()
+# UP-03: capped-log sizes by LittleFS size (System_LogCapsCore.h) for every
+# partition table, the per-log write/rotation policy, and that the call sites'
+# caps add up to the header's total.
+add_test(
+  NAME log_caps
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_log_caps.py
+          ${FILESYSTEM_PSRAM_TEST_ARGS})
 add_test(
   NAME http_feature_gates
   COMMAND ${Python3_EXECUTABLE}
@@ -2283,6 +2303,24 @@ add_test(
   NAME sensor_start_outcomes
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_sensor_start_outcomes.py
+          ${I2C_PROBE_TEST_ARGS})
+# Automatic restart of a sensor that switched itself off (UP-05): the wait
+# ladder, every driver's auto-disable site, the <x>enabled gate on every open
+# (SEN-6) and the saved ESP-SR / G2 stream tuning (SET-2).
+add_test(NAME sensor_restart_core_tests COMMAND sensor_restart_core_tests)
+add_test(
+  NAME sensor_auto_disable_sites
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_sensor_auto_disable_sites.py)
+add_test(
+  NAME openinput_enable_gate
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_openinput_enable_gate.py
+          ${I2C_PROBE_TEST_ARGS})
+add_test(
+  NAME tuning_settings_saved
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_tuning_settings_saved.py
           ${I2C_PROBE_TEST_ARGS})
 set(TOF_PSRAM_LIFECYCLE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
@@ -2628,8 +2666,8 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_logging_routes.py)
 
-# Command names are lower-case words without separators; old public names stay
-# as listed alias rows (CONTRIBUTING.md, "Command names").
+# Command names are lower-case words without separators, one name per command; removed names
+# stay removed (CONTRIBUTING.md, "Command names").
 add_test(
   NAME command_name_form
   COMMAND ${Python3_EXECUTABLE}
@@ -3501,6 +3539,21 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_time_anchor_persistence.py
           ${SETUP_MQTT_TEST_ARGS})
+# automations.json mutation owner: every change is one locked read-modify-write
+# by numeric id; userdelete disables the removed user's automations; the
+# scheduler claims a pass only after a filesystem try-lock.
+add_test(
+  NAME automation_store_mutations
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_automation_store_mutations.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Log retention: the rule, its water marks and the bounded step machine
+# (System_LogRetentionCore.h) on an in-memory volume.
+add_test(
+  NAME log_retention
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_log_retention.py
+          ${SETUP_MQTT_TEST_ARGS})
 # rebootDevice() and the factory-reset restart idle the SDMMC host first (C6
 # silenced, filesystem lock, drain), and a companion start waits for the slave
 # after Hosted's spent retry counter gives up at once (bench 2026-11-08).
@@ -3515,6 +3568,55 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_companion_reboot_contract.py
           ${SETUP_MQTT_TEST_ARGS})
+# The C6 console mirror is off unless a companion fault or a saved `c6console on` wants it, and
+# companion faults are counted across restarts (UP-14): the shipping fault service, mirror
+# procedure, dispatch, boot init and c6console over the real Radio_CompanionCore.h.
+add_test(
+  NAME companion_fault_mirror
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_companion_fault_mirror.py
+          ${SETUP_MQTT_TEST_ARGS})
+# The portable P4X-EYE configuration compiles Wi-Fi and the HTTP server in, and openwifi/openhttp
+# bring the web server up on demand.
+add_test(
+  NAME portable_web_on_demand
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_portable_web_on_demand.py)
+# The within-phrase leveler for speech-to-text is off by default (struct initialiser and settings
+# row), with one saved setting and one admin command, sttphraselevel.
+add_test(
+  NAME stt_phrase_level_default
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_stt_phrase_level_default.py)
+# Web server task placement (S-6): both server configs pin httpd to core 0 at priority 3.
+add_test(
+  NAME web_server_task_placement
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_server_task_placement.py)
+# Bond file routes (S-15): start and poll; no handler waits for the peer.
+add_test(
+  NAME bond_fs_poll
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_bond_fs_poll.py
+          ${SETUP_MQTT_TEST_ARGS})
+# heap_low and fs_low_space (EVT-2): queue + toast, one interrupt per 10 minutes.
+add_test(
+  NAME notification_low_resource_rules
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_notification_low_resource_rules.py
+          ${SETUP_MQTT_TEST_ARGS})
+# memreport (U4): one snapshot and one field table behind the text and json forms.
+add_test(
+  NAME memreport_table
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_memreport_table.py
+          --cxx ${CMAKE_CXX_COMPILER})
+# Internal page polls (S-8): no audit line; user, automation and system commands still audited.
+add_test(
+  NAME internal_poll_audit
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_internal_poll_audit.py
+          --cxx ${CMAKE_CXX_COMPILER})
 # users.json and pending_users.json writers on the shared fake VFS: one locked
 # parsed-document owner, credential-first account creation, whole-file resolve.
 add_test(

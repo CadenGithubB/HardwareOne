@@ -23,7 +23,7 @@ Note (2026-11-08, readiness P1-8): the figures below are from before three stack
 | `r1_owner` | 4 | 0 | 3028 / 6144 | the ring owner: transactions, vitals polls (G2_Ring.cpp:5367) | wake semaphore |
 | `phone_pipe` | 1 | any | 4152 / 8192 | phone relay pipe runtime; self-retires when idle (BLE_PhonePipe.cpp:926) | 10 ms tick |
 | `ble_setup` | 5 | 1 | 1740 / 5120 | the one serialized BLE connect/setup worker for glasses, ring and phone (BLE_SetupWorker.cpp:120) | wake semaphore |
-| `c6_console` | 3 | any | **740 / 3072** | mirrors the C6's UART console (HAL_Radio.cpp:294) | UART bytes |
+| `c6_console` | 3 | any | **740 / 3072** (stack now 4096) | mirrors the C6's UART console; exists only while the mirror runs (after a companion fault, or `c6console on`) (HAL_Radio.cpp:414) | UART bytes |
 
 Transient (seen in creation sites, not resident at idle): `g2_net_scan`, `g2_wifi_pending`, `g2_ring_pending`, `g2_ai_test`, `g2_img_probe`, `boot_net`, `mapRender`, `cam_power`, `espnow_tx`, `mic_viz`, `stt`, `stt_capture`, `stt_fe`, `stt_warm`, `sr_*`, `llm_gen`, `llm_http`, `sensor_queue`, `i2c0_begin`, the I2C sensor pollers.
 

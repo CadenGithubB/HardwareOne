@@ -236,6 +236,19 @@ each log's `/sd` mirror whenever a card is mounted, so an orphan left by a
 rotation that ran while overflow was latched on an earlier boot is promoted or
 discarded like a primary one, and left alone without a card.
 
+Batching (S-8): with the batch buffers set up, 20 lines within 2 s take no
+filesystem lock and reach the file in one append when the log task's tick finds
+the oldest 1.5 s old; 2 KB pending, a line that does not fit, a 2 s old batch
+and an announced restart flush at once; login and crash-history lines are never
+held; a refused batch counts one drop per line. Two generations: a rotation is
+one rename (one remove more on the SD mirror) and copies nothing; a file older
+firmware left above its cap is cut to its newest half once, and not before the
+main loop runs; the three logs file catch-up follows keep the copy rotation in a
+build that serves it. UP-03: the writer scales the caller's cap to the
+partition. `log_caps` (`test_log_caps.py`) runs `System_LogCapsCore.h` for every
+partition table and checks that the call sites' caps add up to the header's
+total.
+
 Lines of 0, 1, 255, 256, 257 and 302 bytes (a 47-character prefix and the
 longest log text) are appended with and without a rotation on both tiers. The
 log task's line, `appendTimestampedLine` (`System_Debug.cpp`), runs against the
@@ -293,7 +306,26 @@ change nothing. Its source checks pin the wiring and the rest of the
 2026-11-18 field-log fixes: the boot apply after the firmware's own levels,
 heartbeat RSSI asked only while joined, the `BLE_COEX` scan lines following
 their tag's level, the G2 scans' skipped stop after a scan that ended itself,
-`rpc_utils` among the quiet Hosted tags and `c6console` persisting.
+`rpc_utils` among the quiet Hosted tags and `c6console` persisting (off by
+default; the fault service follows the saved setting).
+
+`companion_fault_mirror` compiles the shipping fault service, mirror procedure,
+dispatch, boot init and `c6console` of `System_RadioCompanion.cpp` against the
+real `Radio_CompanionCore.h`: the mirror starts on a fault ahead of the
+recovery, stops after ten healthy minutes, is started and stopped only on the
+command executor, and the lifetime fault counts are plain assignments saved from
+the executor, never in boot or before a reboot.
+
+`portable_web_on_demand` resolves `configurations/p4-portable.json` and checks
+that Wi-Fi and the HTTP server are compiled in and that `openwifi` and
+`openhttp` are registered and refuse only for the three stated reasons.
+
+`stt_phrase_level_default` checks that the within-phrase leveler is off in both
+places that hold its default (the struct initialiser and the `sttphraselevel`
+settings row, which is the one a boot applies), that the row, the editor line
+and the admin command sit in the speech `#if` block, and that the two readers in
+`System_STT.cpp` still gate it on the setting and on that microphone's automatic
+gain.
 
 `radio_stack_logs` runs the shipping `System_RadioLogCore.h`, the esplog block
 and `applyRadioStackLogLevels` of `System_Debug.cpp` and HAL_Radio's
@@ -655,8 +687,22 @@ folder still promotes; and that a working prune drops the row. Source checks
 require no unchecked rename of the registry and an anchor latch that follows the
 append result. Not covered: power loss, LittleFS durability, the clock sources
 and the 32-row cap. On a tree with the unchecked writers the same harness builds
-and the cases fail behaviourally. Run with
+and the cases fail behaviourally. The same harness runs log retention through
+`timeAnchorsTick`: the card's free space is read at the hourly decision, a
+decision without a usable figure is retried after one minute, and the directory
+is listed by name (`getNextFileName`), opening only the file it removes. Run with
 `ctest --test-dir build -R '^time_anchor_persistence$' --output-on-failure`.
+
+`log_retention` compiles `System_LogRetentionCore.h` as it is and runs it on an
+in-memory volume: the water marks and the low/high latch; secondary files of the
+oldest day first, one day a pass; the three newest stored days, the eight newest
+transcripts, the open session, today's folder, dot, `.tmp` and `.bak` files,
+notes and everything outside the two capture trees never removed; health files
+of the fourteen newest stored days kept; earlier unanchored boot folders before
+transcripts; a transcript that cannot be removed passed over; the "recent"
+horizons at least the catch-up ledger's (read from `System_CatchupLedger.cpp`);
+and the per-step bounds on listing and removal. Run with
+`ctest --test-dir build -R '^log_retention$' --output-on-failure`.
 
 ## C6 companion reboot escalation
 
@@ -890,6 +936,9 @@ build. A second source check requires `hasAdminPrivilege` and
 `hasSuperAdminPrivilege` to be declared in `System_User.h` and nowhere else
 (no local `extern` or forward declaration in any component source), and the
 gate's comment to stop calling `authorizeCommand` its only caller (A1).
+Since G-55 a role comes only from the account's own entry: no parser treats the
+first account as admin or super admin, and `userlist` names a roster with no
+super admin.
 The ban writer, session fan-out, web session tables, hashing and the
 per-user settings loader are doubles; the OLED and lens pages themselves are
 not compiled. Run with
@@ -2142,6 +2191,9 @@ beside an empty destination, including one a failed cleanup left behind, is repl
 freshly staged header, also after a simulated runtime reset. Sealed magic/schema lines remain
 complete before sealed data is appended. Existing empty battery files receive
 their header; nonempty legacy files retain the previous append policy.
+With the filesystem lock held by another task the sensor and battery writers
+skip the lap and write on a later one; a waiting row or sample counts once in
+`sensorlog status` and `batterylog status`, not once per lap.
 
 ```sh
 python3 components/hardwareone/test/host/test_log_row_writes.py --sanitize
@@ -2172,6 +2224,8 @@ or recovery backup and leave the new generation pending. The store's own
 temporary writes run under its private I/O mutex without the shared filesystem
 guard, while every publish or recovery rename happens inside one guard that
 spans its sequence, so other filesystem users wait only for those spans.
+A sweep commit started from the main loop while another task holds the
+filesystem lock is put off to a later lap and counted (`historyStoreDeferrals`).
 
 ```sh
 python3 components/hardwareone/test/host/test_r1_history_store.py --sanitize
@@ -3063,7 +3117,7 @@ Wire timeout behavior; each underlying I/O call must still return.
 
 ```sh
 ctest --test-dir /path/to/host-build --output-on-failure \
-  -R '^(i2c_device_queue|sensor_lifecycle_requests|sensor_start_outcomes|sensor_task_restart|tof_psram_lifecycle)$'
+  -R '^(i2c_device_queue|sensor_lifecycle_requests|sensor_start_outcomes|sensor_task_restart|tof_psram_lifecycle|sensor_restart_core_tests|sensor_auto_disable_sites|openinput_enable_gate)$'
 ```
 
 `i2c_device_queue` compiles the production manager queue methods. It covers
@@ -3082,6 +3136,20 @@ admitted start still closes with its stop event, a stop with the bus disabled
 is refused without allocating the manager, and start hints follow only an
 accepted start (helper and the real GPS command). ESP-NOW enabled
 and disabled variants run separately.
+
+`sensor_lifecycle_requests` also covers the `<x>enabled` switch of every open
+(one sentence, nothing probed or queued, first-time setup still starts the input
+device) and the automatic restart of a sensor that switched itself off, through
+the production worker. `sensor_restart_core_tests` is the restart's wait ladder
+on its own (System_SensorRestartCore.h). `sensor_auto_disable_sites` reads the
+drivers: each of the ten auto-disable sites reports before it stops, and nothing
+else reports. `openinput_enable_gate` compiles the production `openinput` for
+the GPIO encoder and the three I2C input backends.
+
+`tuning_settings_saved` checks that every setting the ESP-SR and G2 commands
+write has a settings row, that the five tuning rows' defaults equal the
+constructor's, and that the values survive a save and a load with the
+production code; auto-tune's trial gain is never what a save writes.
 
 `sensor_start_outcomes` executes all nine production sensor starters, including
 both I2C input backends. Cleanup guards must run before initialization or cache
@@ -4745,6 +4813,15 @@ before it loads the store (validate-only included), and the `automation sanitize
 commands that take `id=<n>` use to find their automation, finds an id only as a whole number: 12 is not found
 inside 123456, and the exact id is found behind a longer one that starts with the same digits.
 
+`automation_store_mutations` compiles the store's mutation owner (`mutateAutomationsJson`) and the commands and
+writebacks on it and runs them on the scheduler harness's fake store with the real ArduinoJson: enable, disable
+and delete act on exactly the automation with that id, found in the parsed document; a quote or brace inside a
+name, command or condition survives a toggle; `"id"` stays the first member of every stored object; an add is one
+write and a dry run writes nothing; two mutations started at the same moment both land; a document that does not
+parse, has no `automations` array or is in a newer format is never written; `userdelete` disables every
+automation the deleted user created and reports the count; and the scheduler claims a pass only after a
+filesystem try-lock. Source rule: the only writer of automations.json is `automationsStoreWrite`.
+
 `command_args_keys` compiles the production `CommandArgs` (`System_Command.h`) with its constructor, `parse`,
 `nextKeyToken`, `value` and `hasKey` and their helpers (`System_Command.cpp`) on a small String. A key is read
 only at the start of a token (the start of the line or after white space) and outside a quoted value:
@@ -5200,7 +5277,7 @@ verbs over them by `ble_server_stop`, `ble_info_status`, `ble_recycle_phone`,
 
 It also runs the production `bledisconnect` command and its owner functions (`bleDisconnectConnection`, `bleDisconnectAppClients`) against a recording GATT-server double. `bledisconnect <connId>` closes exactly that app client. The bare form, which the page-level button and the OLED and G2 items use, closes every app client and never a paired R1 ring or G2 temple link. Unknown ids, peer links and malformed ids (`abc`, `-1`, `1x`, `0x1`, `70000`) are refused without a close. The close is issued with the lifecycle guard released, and a missing BLE state, server or lifecycle lock closes nothing. A Node-free check reads `WebPage_Bluetooth.h`: each client's Kick button must pass that client's `connId` to `bledisconnect`. `--component <dir>` also points these reads at another tree; the pre-fix tree fails at the first per-id case.
 
-`ble_info_status` also runs the production `blestatus`/`bleread` command against the same connection table: a logged-in user named "Unknown", a logged-in user and an anonymous peer. Both forms render the guarded snapshot that `bleinfo json` uses. The checks: the JSON views list the same client set (connId, authed, MAC, age, commands, slot index, with the display user "Unknown" only for a peer that has not logged in); each call takes the lifecycle guard once with the 100 ms budget (the console view only tries it, without waiting) and reads connection age inside it; a busy guard gives an explicit unavailable reply; a change published as the guard is released does not appear; the text form starts with the link lines (`Role: App console`, `App console: app signed in`, `  Clients: 3/4, advertising off`, and the `Phone link:` block in a pipe build) and keeps the client lines; outside the app console both forms answer with the role (`Role: Glasses`, `Role: Glasses+pipe`, `Role: Phone pipe (saved: App console)`, `Role: Off (saved: App console)`), `App console: not available in this mode` or `off`, the phone link block (`Phone link: ready`, `fail: not found`, ...) and how to reach the console (a `Hint:` line, or `hint` in JSON: with only the glasses that `openble` switches to server mode and what it stops; with the pipe running that the console stream needs a device code from `phone pair new`, or `bleconsole on`, or that it opens when the app asks for it), with a `link` JSON object, a `phoneLink` block and no address; in phone-client mode the console stream's row is the console (opening, signed in with five sessions ended and their reasons named in text and JSON, then open and signed out after the idle logout), and `bleinfo` carries the same block; on the G2 client host the console on the phone pipe's link reads `set blesecret first`, `waiting for the phone link` (also once the pipe left READY, when a slot it left is not counted), `app signed in` with its one slot in `consoleClients` and `off`, never with a `Clients:` line or advertising, and its hint says what attaches it (`blesecret`, `phone status`, `bleconsole on`; none once attached), never `openble`; the console view reports that host registered, attachable and attached without claiming the server role; a saved mode that differs, a waiting console and a ring link that is no app are named; four 64-character usernames give complete JSON; and every JSON allocation failure gives the oom reply.
+`ble_info_status` also runs the production `blestatus` command against the same connection table: a logged-in user named "Unknown", a logged-in user and an anonymous peer. It renders the guarded snapshot that `bleinfo json` uses. The checks: the JSON views list the same client set (connId, authed, MAC, age, commands, slot index, with the display user "Unknown" only for a peer that has not logged in); each call takes the lifecycle guard once with the 100 ms budget (the console view only tries it, without waiting) and reads connection age inside it; a busy guard gives an explicit unavailable reply; a change published as the guard is released does not appear; the text form starts with the link lines (`Role: App console`, `App console: app signed in`, `  Clients: 3/4, advertising off`, and the `Phone link:` block in a pipe build) and keeps the client lines; outside the app console both forms answer with the role (`Role: Glasses`, `Role: Glasses+pipe`, `Role: Phone pipe (saved: App console)`, `Role: Off (saved: App console)`), `App console: not available in this mode` or `off`, the phone link block (`Phone link: ready`, `fail: not found`, ...) and how to reach the console (a `Hint:` line, or `hint` in JSON: with only the glasses that `openble` switches to server mode and what it stops; with the pipe running that the console stream needs a device code from `phone pair new`, or `bleconsole on`, or that it opens when the app asks for it), with a `link` JSON object, a `phoneLink` block and no address; in phone-client mode the console stream's row is the console (opening, signed in with five sessions ended and their reasons named in text and JSON, then open and signed out after the idle logout), and `bleinfo` carries the same block; on the G2 client host the console on the phone pipe's link reads `set blesecret first`, `waiting for the phone link` (also once the pipe left READY, when a slot it left is not counted), `app signed in` with its one slot in `consoleClients` and `off`, never with a `Clients:` line or advertising, and its hint says what attaches it (`blesecret`, `phone status`, `bleconsole on`; none once attached), never `openble`; the console view reports that host registered, attachable and attached without claiming the server role; a saved mode that differs, a waiting console and a ring link that is no app are named; four 64-character usernames give complete JSON; and every JSON allocation failure gives the oom reply.
 
 ## BLE area cleanup coverage
 
@@ -5612,7 +5689,7 @@ does: name keyboard, Interval, "5 min", command keyboard, confirm.
 The checks:
 
 - A 40-character command (with a quoted path) and a 40-character name reach the
-  `automationadd ... enabled=1` line whole, and so does a command of the keyboard's full
+  `automation add ... enabled=1` line whole, and so does a command of the keyboard's full
   length; every wizard keyboard admits no more than the wizard keeps.
 - Text that does not fit is refused: the step's keyboard re-opens, nothing is stored and
   nothing is sent.
@@ -7373,3 +7450,37 @@ ctest --test-dir <build> \
 Not covered: the radio, the real registry file on flash, and two real tasks at a device record at the same moment
 (the lock is a FreeRTOS mutex on the device; here its use is checked in one thread, with the other task's step run
 just before a critical section).
+
+## Web server and reports (2026-11-20)
+
+```sh
+ctest --test-dir <build> --output-on-failure \
+  -R '^(web_server_task_placement|bond_fs_poll|notification_low_resource_rules|memreport_table|internal_poll_audit)$'
+```
+
+`web_server_task_placement` reads `WebServer_Server.cpp`: the HTTPS and the plain-HTTP server configs each set
+`core_id = PRO_CORE` and `task_priority = TASK_PRIORITY_NORMAL` (core 0, priority 3) once before their start
+call, and the stack sizes are unchanged. The restore-only server of first-time setup keeps the defaults.
+
+`bond_fs_poll` compiles the shipping bond file handlers, reply callbacks and bridges of `WebPage_Bond.cpp` with
+the real `WebBondFsPollCore.h`: `/api/bond/fs/list`, `/stat` and `/get` start a request and answer
+`{success:true,pending:true,id}`; the answer comes with a poll, once; the bridge mutex is never held across the
+ESP-NOW send or a socket write and no take waits longer than 100 ms; a reply that arrives before the send returns
+is kept; busy, send failure, not bonded, the 7 s timeout, an uncollected answer (dropped after 2 s), a foreign id
+and the admin gate on every poll are covered. The page script is `tools/webui/tests/test_bond_fs_poll_page.py`.
+
+`notification_low_resource_rules` compiles the rule switch, tiers, message formatter and cooldown check of
+`System_Notifications.cpp`: `heap_low` and `fs_low_space` have the queue and toast sinks at level 2, a
+10-minute cooldown that the (now 32-bit) rule field holds, and texts that fit the 64-byte buffer.
+
+`memreport_table` compiles `System_MemReportCore.h` with the real ArduinoJson: every row of the field table
+appears in the text and the JSON form, a zero total prints 0 % without a division, the heading says MEMORY REPORT
+for the command and BOOT MEMORY REPORT at boot, the documented JSON keys keep their values and
+`tools/p4/ram_monitor.py` accepts the reply. Source checks keep `cmd_memreport` and the OLED Memory page on the
+shared walks.
+
+`internal_poll_audit` compiles `executeInternalStatusCommand`, the suppression check and both audit entry points
+with the real `CommandContextBehavior` enum: a web page's own status poll (bit
+`COMMAND_CONTEXT_INTERNAL_STATUS_POLL`) writes no `command-audit.log` line and no `[CMD]` echo; the same command
+from a user, an automation or a trusted system command is audited. Its `READ_ONLY_POLLS` list is the review
+point: a command added there runs unaudited, so it must be a read-only status command.

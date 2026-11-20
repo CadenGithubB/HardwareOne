@@ -14,6 +14,20 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Added
+- A sensor that switched itself off after repeated I2C errors is started again by itself when its
+  `<x>enabled` and `<x>autostart` are both on: after 30 s, 2 min, 10 min, then every 30 min. Five
+  minutes of clean running reset the waits. `close<x>`, `<x>enabled 0` or `<x>autostart 0` end it;
+  `open<x>` starts it at once. A missing sensor costs one address probe and one log line per try and
+  shows no toast. Boards without I2C sensors are not affected. Host-tested, not yet run on a board.
+- Low internal memory (`heap_low`) and low flash space (`fs_low_space`) now appear in the
+  notification centre and, at most once in 10 minutes per kind, as a web toast, a G2 card and a
+  phone-app notification. They were recorded as events only.
+- `c6status` counts companion faults across restarts: the number of outages, the number of restarts
+  of the device made to recover the companion, and the time of the last one. A fault that happens
+  while the clock is not set is counted and shown as "time not recorded" (`null` in json).
+  `c6status json` carries them as `recovery.lifetime_outages`, `recovery.lifetime_reboots` and
+  `recovery.last_fault_epoch_ms`, with this boot's `recovery.outages`. The counts begin at the
+  update and are zeroed by a factory reset. Host-tested; not yet run on hardware.
 - The G2 glasses' own stock widget can show system metrics instead of share prices (stock glasses
   firmware 2.3.2.14). Each metric is one stock: label as the ticker, long name as the company, value
   as the price, change over the last refresh interval with its arrow, the last hour as the chart.
@@ -267,12 +281,22 @@ everything user-visible since the v0.99.99.1 tag.
   top. `HTTP_CLIENT` stays at warn or below, as its debug lines print request headers. Debug and verbose
   lines exist only in builds that compile them (the shipped configurations stop at info). Host-tested; not
   yet run on hardware.
-- `c6console on|off` is saved (companion setting `c6ConsoleMirror`, on by default). The mirror still starts
-  with the companion at boot and stops once the settings load when it was turned off. Host-tested; not yet
+- `c6console on|off` is saved (companion setting `c6ConsoleMirror`). Since 2026-11-20 the mirror is off by
+  default and starts only after a companion fault or with `c6console on` (see Changed). Host-tested; not yet
   run on hardware.
 
 ### Fixed
 
+- `srtuninggain`, `srtuningagc`, `srtuningvad` and `g2streamres` are saved: their values were back at
+  the defaults after every reboot. New settings keys `apps.espsr.srAfeGain`, `srAgcMode`, `srVadMode`
+  and `network.bluetooth.g2.streamWidth`, `streamHeight`; defaults unchanged (1.0, 2, 3, 96x96).
+- ESP-SR auto-tune no longer leaves its last trial gain in effect: when it completes or is stopped,
+  the AFE gain is the saved `srtuninggain` value again.
+- `memreport` and the OLED Memory page no longer divide by a memory total that reads 0.
+- A streaming ESP-NOW file receive whose staging file could not be opened or written left the command
+  task in an endless loop.
+- A system log kept on the SD card (`log start` with an `/sd` path) kept its file handle across
+  `sdunmount`, `sdmount` and `sdformat`.
 - Photos never overwrite each other: a taken name gets `_1` .. `_99`, the saved-photo event carries
   the final name, and the no-clock counter continues past the highest `img_NNNNNN` in the folder.
 - Web uploads no longer hold the filesystem lock for the whole transfer: only around the staged
@@ -964,6 +988,119 @@ everything user-visible since the v0.99.99.1 tag.
   ESP-NOW cached at start. Not measured on hardware.
 
 ### Changed
+- Accounts: a user is admin or super admin only by an explicit role in users.json. The first account
+  is no longer treated as admin when its entry has no role, or as super admin when no account is one.
+  A device first set up before v0.99.0 and never set up again has an `admin` owner and no super admin
+  after this update: check `/system/users/users.json` for `"role": "superadmin"` before updating, and
+  add a super admin (`useradd <name> <password> 0 superadmin`) on the old firmware if there is none.
+  `userlist` and one line in the system log at boot say when a device has no super admin.
+- `userdelete` disables every automation the deleted user created and reports how many. They stay in
+  the file and are not re-enabled when the name is added again.
+- `automation add`, `enable`, `disable`, `delete`, `recompute`, `sanitize` and the scheduler's own
+  next-run updates change automations.json in one locked step by numeric id. A change can no longer
+  be lost to a second writer, a quote or brace in a name or command no longer moves the edit, and a
+  document that does not parse is never written. `automation run` no longer stops at a `}` inside a
+  command.
+- Commands that save an autostart or enabled setting are admin-only: `inputautostart`,
+  `micautostart`, `oledenabled`, `ledstartupenabled`, `apdsautostart`, `imuautostart`,
+  `rtcautostart`, `thermalautostart`, `gpsautostart`, `fmradioautostart`, `presenceautostart`,
+  `tofautostart`, `eienable` and `sensorlog autostart` (the rest of `sensorlog` stays open). A
+  non-admin gets "Error: Admin access required for command '<name>'. Contact an administrator.";
+  the G2 Sensors and Microphone pages then change only the running state. Saved values are kept. A
+  `sensorlog autostart` line typed with two spaces, a tab or quotes reaches `sensorlog`, which now
+  answers with an error naming `sensorlog autostart` instead of saving.
+  `tools/command_registry.py audit` fails on a non-admin command that saves such a setting,
+  including through its handler's own code.
+- `<x>enabled 0` now blocks a manual open of every I2C sensor and of the input device, not only the
+  thermal camera: `open<x>` (typed, from a menu, a voice phrase, an automation or a peer) answers
+  `Error: <name> is disabled - run '<x>enabled 1' first`. First-time setup still starts the input
+  device so the on-device keyboard works.
+- The main loop's file writers (sensor log, periodic battery sample, time anchors, the ring's health
+  history, the start of an automation pass) no longer wait for the filesystem lock: when another task
+  holds it the write is done on a later lap. `sensorlog status` and `batterylog status` show how many
+  rows and samples had to wait.
+- Old capture data is removed before a volume fills. Below a low-water mark (20 % of the volume, at
+  most 64 MB, at least twice the 100 KB log reserve) the oldest day's sensor-log files go first, one
+  day an hour, then old transcripts, and last health files older than the 14 newest stored days, until
+  5 % (at most 16 MB) above the mark is free. Today's folder, the open session, the three newest days,
+  the eight newest transcripts, system logs, GPS tracks, notes and everything under /system are never
+  removed. The internal flash is left alone while a writable SD card takes the overflow; the card's
+  free space is read once an hour. Each pass that removed something writes one line to the system log.
+- The system logs under `/system/sys_logs` together use at most a quarter of the LittleFS partition.
+  Their sizes were fixed and added up to 2.7 MB, more than the whole data partition of the 8 MB
+  layouts. Each log now gets its share of the quarter: on the P4X-EYE 82 % of the old size, on the
+  8 MB layouts about a sixth. A log above its new size is cut at its first write once the device has
+  finished booting; nothing more is cut during boot than older firmware rotated.
+- Most system logs are kept as two files, `<log>.1` (older) and `<log>`. When the current file
+  reaches half the log's size it becomes `<log>.1` in one rename; before, 85 % of the log was copied
+  under the filesystem lock at every rotation. The web Logging viewer shows both files as one log. On
+  a device that offers its logs to a collector (`ENABLE_ESPNOW_SEND`), `events.log`, `errors.log` and
+  `crash-history.log` stay one file as before.
+- Error, event, I2C and command-audit lines are written in batches (within 2 s, or when 2 KB is
+  pending) instead of one flash write per line. They are written at once before a restart, before
+  deep and light sleep, and when a log is opened for reading. Login and crash-history lines are still
+  written immediately. Up to 2 s of the batched lines are lost if the device loses power or crashes.
+- The ESP-NOW and Logging web pages' own status polls no longer write `command-audit.log` lines or
+  `[CMD]` console lines (11 commands per poll that nobody ran). Commands a user, an automation or
+  another device runs are audited as before.
+- A file received over ESP-NOW is refused when flash has less than the file plus the 100 KB reserve
+  free (the sender sees "rejected by receiver"). A microphone recording to flash needs room for 5 s
+  above the reserve and ends early when the room runs out. Recordings to the SD card are unchanged.
+- P4X-EYE: an SD card put in after boot, or taken out and put back, is mounted on its own after 1 to
+  2 s. `sdunmount` keeps it unmounted until `sdmount` or until the card is taken out. `sddiag` shows
+  the state. Taking the card out posts the SD-unmounted event; a brief contact bounce does not. No
+  mount starts while a recording, a video, an upload or a transcription uses the card.
+- LittleFS lookahead raised from 128 to 320 bytes, so the allocator's window covers the whole volume
+  on the 16 MB layouts (192 bytes more internal RAM). Applies to images built from a fresh build
+  folder.
+- The web server task runs on core 0 at priority 3 in both the HTTP and the HTTPS server (it used the
+  IDF defaults: priority 5, any core), so a web request no longer competes with ESP-NOW, microphone
+  capture and speech recognition at their priority. Handler CPU time still runs before the main
+  loop, which is priority 1 on the same core. Not yet measured on a device.
+- Browsing the bonded device's files in the web UI no longer blocks the web server while the peer
+  answers. `/api/bond/fs/list`, `/stat` and `/get` start the request and return
+  `{"success":true,"pending":true,"id":N}`; the page asks the same route with `?id=N` until the
+  answer is there (every 250 ms, up to about 7 s). Before, each of these requests could hold every
+  other web request for up to 6 s. The page also retries for up to 7 s when the peer answers `busy`,
+  and a folder the user has already left is no longer requested. A reply that arrived before the
+  request had finished sending is no longer dropped. ESP-NOW frames are unchanged. Host-tested, not
+  yet run on a bonded pair.
+- `memreport` and `memreport json` print the same numbers from one reading of the heaps. The JSON
+  form gains `dram.allocatorMeta`, `heapCaps.internalFragPct`, `heapCaps.spiramFree`,
+  `heapCaps.spiramLargest` and a `sections` object; existing keys keep their meaning. The text
+  report's heading says "MEMORY REPORT" when run as a command and "BOOT MEMORY REPORT" only at boot,
+  and its summary lines are laid out one number per row. The OLED Memory page no longer walks the
+  heap for two numbers it never showed.
+- The C6 companion's console mirror is off by default and no longer started at boot, which returns
+  about 6 KB of the P4's internal memory. It starts by itself when a companion fault is seen (an
+  outage, a failed start or recovery, a boot attempt that failed, a restart made for the companion)
+  and stops once the companion has been healthy for 10 minutes. `c6console on` keeps it on all the
+  time, as before; `c6console off` returns to the automatic behaviour. The C6's messages from the
+  moment it fails, before the P4 has noticed, are not captured unless the mirror was already on. A
+  device whose saved settings hold `c6ConsoleMirror: true` (builds from 2026-11-19 stored the old
+  default) keeps the mirror on until `c6console off` is run once. `c6status` shows why the mirror is
+  on or off (`console_mirror_reason` in `c6status json`). Host-tested; not yet run on hardware.
+- The phrase leveler for speech-to-text is off by default (it raised word errors in steady hiss on
+  the Citrinet bench). It has a saved setting and an admin command now: `sttphraselevel [0|1]`.
+  Devices run with it off after the update, because nothing was saved before.
+- `versions` shows the mesh format as `custom ESP-NOW v1` (was `ESPNOW V1 (1.0)`); the `espnow` value
+  in `versions json` and `status json` changes with it. The frame version byte is unchanged.
+- HTTPS for the web interface, the bonded pair and the assistant (LLM) are off in the shared build
+  defaults. A build from a board's defaults has none of them; the guided setup
+  (`python3 tools/build_config.py new`) offers each, starting at off. The saved configurations keep
+  what they had: the QT Py and XIAO ones now write those switches themselves, and all thirteen
+  resolve to the same features as before. A device built from bare board defaults and rebuilt after
+  this change serves plain HTTP and has no bond commands and no assistant. A saved configuration of
+  your own from before 2026-11-20 that does not name these switches loses the three features in the
+  same way, without a message: add them to its `features` (for example
+  `python3 tools/build_config.py edit <name> --set ENABLE_HTTPS=1`) or switch them on in the guided
+  setup.
+- The handheld deployment for the ESP32-P4X-EYE contains the microSD card and local speech-to-text
+  (Citrinet-384, speaker labels). Its image has not been built or run on hardware with this
+  selection yet.
+- Memory on the P4X-EYE builds (portable and home node): 128 bytes more internal static RAM and about
+  2.2 KB more PSRAM for this set of changes; the LittleFS lookahead above adds 192 bytes of internal
+  heap. With the C6 console mirror off, about 6 KB of internal RAM comes back.
 - G2 stock widget chart: always the glasses' full 185-point window, newest point at the right edge
   so the line scrolls left (the glasses place points at a fixed step, so 60 points filled only the
   left third). The history takes one point per chart step on its own clock, whatever the send
@@ -1384,11 +1521,10 @@ everything user-visible since the v0.99.99.1 tag.
 - Command names have one form: lower-case letters and digits. The 22 camelCase `mqtt*` commands and
   `httpAutoStart` / `httpsEnabled` are now `mqtthost`, `mqttpublishgps`, `httpautostart`,
   `httpsenabled` and so on. Command lookup ignores case, so the earlier spelling still runs; help,
-  usage text and the documents show the new one. `validate-conditions`, `g2ai-noask` and
-  `g2ai-direct` are now `validateconditions`, `g2ainoask` and `g2aidirect`; the hyphen names stay
-  as aliases for one release, as `c6_console` does for `c6console`. Setting keys in saved settings
-  and in JSON are unchanged. Sub-command families keep their spaces (`phone pair new`,
-  `ring panel on`).
+  usage text and the documents show the new one. `validate-conditions`, `g2ai-noask`,
+  `g2ai-direct` and `c6_console` are now `validateconditions`, `g2ainoask`, `g2aidirect` and
+  `c6console`; the old names are removed (see Removed). Setting keys in saved settings and in JSON
+  are unchanged. Sub-command families keep their spaces (`phone pair new`, `ring panel feed`).
 
 - Command arguments: a number must be a whole decimal number inside its range. `abc` used to be read
   as 0 and `12x` as 12; the command now answers "Error: Not a whole number". `i2crecover` and
@@ -1507,6 +1643,21 @@ everything user-visible since the v0.99.99.1 tag.
   64), so a command filled in from Device Config always fits it. `espnowremote` still refuses a
   line too long for one frame, with its reason. Host-tested; not yet run on hardware.
 
+### Removed
+- One name per command: every command alias is removed. Removed name -> name to use: `bleread` ->
+  `blestatus`, `wifiread` -> `wifistatus`, `httpread` -> `httpstatus`, `espnowread` ->
+  `espnowstatus`, `oledstart` -> `openoled`, `oledstop` -> `closeoled`, `oledread` -> `oledstatus`,
+  `srstart` -> `opensr`, `srstop` -> `closesr`, `sleep <ms>` -> `wait <ms>`, `debugespnow` ->
+  `debugespnowcore`, `c6_console` -> `c6console`, `g2ai-noask` -> `g2ainoask`, `g2ai-direct` ->
+  `g2aidirect`, `validate-conditions` -> `validateconditions`, `automationadd` -> `automation add`,
+  `automationrun` -> `automation run`, `automationtrigger` -> `automation trigger`,
+  `ring panel on` / `ring panel off` -> `ring panel feed on` / `ring panel feed off`. A saved
+  automation, script or shortcut that still uses a removed name gets "Unknown command"
+  (`ring panel on`/`off`: the `ring` usage text). Before updating, run `automationlist json` on the
+  device and look for these names. Audit-log masking still covers `automationadd` and
+  `validate-conditions` lines. `tools/command_registry.py audit` now fails on a handler registered
+  under two names or a removed name registered again.
+
 ### Security
 - ESP-NOW room and tag commands: `espnowroomcmd` and `espnowtagcmd` send a command together with an
   account name and password to every device in a room or with a tag, and room and tags are what each
@@ -1582,6 +1733,13 @@ everything user-visible since the v0.99.99.1 tag.
 - ESP-NOW test commands that rewrite live topology state (`teststreams`, `testconcurrent`,
   `testcleanup`) and `espnowhbmode` now need an admin account.
 ### Docs
+- USERGUIDE: removed command names dropped from the command lists; notes on SD auto-mount, system log
+  generations and batching, capture retention, roles coming only from users.json, `userdelete`
+  disabling automations, the sensor enable gate and automatic restart, saved ESP-SR tuning and the
+  two new notification toasts. COMPATIBILITY: the new settings keys, the role and system-log upgrade
+  notes, the removed aliases and the `custom ESP-NOW v1` name. APP_JSON_CONTRACT: the `memreport`
+  keys, a `c6status` row, the `espnow` version string, and `blestatus` / `wifistatus` without
+  aliases. P4X_EYE_PERIPHERALS: a card put back is mounted on its own.
 - Release gate, tracked-tree hygiene: the `git grep` in `RELEASING.md` could never come back empty,
   because the firmware and the tools use example and SoftAP addresses on purpose. It is now the host
   suite `tree_hygiene_gate`, which fails on an account home path or a `192.168.x` address outside a

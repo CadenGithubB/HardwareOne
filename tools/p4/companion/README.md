@@ -43,9 +43,11 @@ Neither check is fatal, and a C6 that does not answer at all is not fatal
 either: the P4 boots without its radio features and retries in the
 background. From then on the companion is monitored (heartbeat, Hosted
 transport events, C6 reset notifications) and recovered in place when it
-stops answering; `c6status` shows all of it, and the C6's own console is
-mirrored into the P4 log as `C6>` lines (`c6console`), which is how a crash
-in the companion shows up without the programmer. The P4 side is described in
+stops answering; `c6status` shows all of it, including fault counts kept
+across restarts. The C6's own console is mirrored into the P4 log as `C6>`
+lines for 10 minutes after a companion fault, or all the time after
+`c6console on`; the output of the first crash itself is shown only when the
+mirror was already on. The P4 side is described in
 [docs/P4X_EYE_PERIPHERALS.md](../../../docs/P4X_EYE_PERIPHERALS.md#radio-companion-esp32-c6).
 The bridge lowers the Hosted slave's `slave_rpc` log tag to warnings at
 startup. That tag logs three info lines for every host RPC, and the P4 makes

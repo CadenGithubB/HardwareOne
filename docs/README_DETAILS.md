@@ -220,11 +220,12 @@ run time; the file is not part of the firmware image or of this repository.
   the model's embedded checksum before using it. `meeting.lm` (in the 15x5 release)
   is optional and serves both models: copied into the same folder it is used as
   the language model; without it decoding is greedy.
-- **The plain `p4x_eye` board build and the `handheld` deployment** keep
-  microSD off, so they build without local transcription. Local STT on an
-  ESP32-P4 always runs its model from the card: enable it with
-  `ENABLE_SDMMC_CARD=1` and `ENABLE_LOCAL_STT=1` (in the handheld deployment
-  also `ENABLE_SD_CARD=1`); the build refuses local STT without the card.
+- **The plain `p4x_eye` board build** keeps microSD off, so it builds without
+  local transcription. The `handheld` deployment turns on microSD and local
+  STT (Citrinet-384 with speaker labels). Local STT on an ESP32-P4 always runs
+  its model from the card: enable it with `ENABLE_SDMMC_CARD=1` and
+  `ENABLE_LOCAL_STT=1` (with `ENABLE_SD_CARD=1` as in the handheld
+  deployment); the build refuses local STT without the card.
 - **Speaker labels** (on by default on `p4x_eye`) also read
   `/sd/STT Models/speaker.spk`, which is not published either. Without it,
   transcription still works and transcripts carry no speaker labels.
