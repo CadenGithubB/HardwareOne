@@ -21,6 +21,7 @@ static uint32_t gSensorLogIntervalMs = 5000;
 static size_t gSensorLogMaxSize = 256000;
 static uint8_t gSensorLogMaxRotations = 3;
 static unsigned long gSensorLogLastWrite = 1000;
+[[maybe_unused]] static size_t gApproxSizeBytes = 0;
 static unsigned long millis() { return 6000; }
 static struct { int sensorLogMask; int unrelated; bool sensorLogAutoStart; } gSettings;
 static bool bufferAvailable;
@@ -172,6 +173,18 @@ static void statusFormatting() {
         if (running) {
           check(result.find("  File: /logs/test.txt\n  Interval: 5000ms\n") != std::string::npos, "status path or interval changed");
           check(result.find("  Last write: 5s ago") != std::string::npos, "status elapsed time changed");
+        }
+        // The json form reads the same selection (names as an array). A
+        // --baseline source without the json form answers with the text.
+        const std::string json = sensorLogStatusForTest("status json");
+        if (json.rfind("{", 0) == 0) {
+          std::string array;
+          for (size_t i = 0; i < names.size(); ++i) {
+            if (!(mask & (1u << i))) continue;
+            if (!array.empty()) array += ",";
+            array += std::string("\"") + names[i] + "\"";
+          }
+          check(json.find(",\"sensors\":[" + array + "],") != std::string::npos, "status json sensor names differ from the text");
         }
         unchanged(static_cast<uint8_t>(mask), running, format);
       }

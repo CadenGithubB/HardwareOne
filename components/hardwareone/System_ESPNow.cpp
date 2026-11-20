@@ -4655,7 +4655,7 @@ static void v4FillHeartbeat(V4PayloadHeartbeat& hb) {
   hb.role      = gSettings.meshRole;
   hb.rssi      = heartbeatStaRssi();
   hb.uptimeSec = SelfDevice::uptimeSeconds();
-  hb.freeHeap  = (uint32_t)ESP.getFreeHeap();
+  hb.freeHeap  = (uint32_t)hw1InternalFreeBytes();
   // Byte 3: the sender's channel. gEspNow->channel is the verified applied
   // channel (or a sweep dwell), never an RPC per heartbeat.
   hb.chanInfo  = espnowfollow::packChanInfo(gEspNow ? gEspNow->channel : 0, false, false);
@@ -9619,8 +9619,9 @@ void buildLocalBondStatus(BondPeerStatus& status) {
   memset(&status, 0, sizeof(BondPeerStatus));
   
   status.uptimeSec = SelfDevice::uptimeSeconds();
-  status.freeHeap = (uint32_t)ESP.getFreeHeap();
-  status.minFreeHeap = (uint32_t)ESP.getMinFreeHeap();
+  // Internal byte-addressable RAM, the same figure every other surface shows.
+  status.freeHeap = (uint32_t)hw1InternalFreeBytes();
+  status.minFreeHeap = (uint32_t)hw1InternalMinFreeBytes();
   
   // Build sensor enabled mask from runtime booleans
   uint32_t enabled = 0;
@@ -13616,7 +13617,7 @@ void processMeshHeartbeats() {
         V4PayloadBondHeartbeat phb = {};
         phb.role      = gSettings.bondRole;
         phb.uptimeSec = SelfDevice::uptimeSeconds();
-        phb.freeHeap  = (uint32_t)ESP.getFreeHeap();
+        phb.freeHeap  = (uint32_t)hw1InternalFreeBytes();
         phb.seqNum    = gBondHeartbeatSeqNum + 1;
         phb.bootCounter = gBootCounter;
         phb.settingsHash = gEspNow ? gEspNow->bondLocalSettingsHash : 0;
@@ -15662,6 +15663,11 @@ const char* cmd_espnow_status(const String& argsInput) {
       }
     }
     if (startError) doc["lastInitError"] = startError;
+    // A document that lost keys or does not fit is refused whole: the web page
+    // decides from these fields, and a cut reply cannot be parsed.
+    if (doc.overflowed() || measureJson(doc) + 1 > 1024) {
+      return "{\"schema\":1,\"ok\":false,\"error\":\"response too large\"}";
+    }
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
   }
@@ -17474,23 +17480,22 @@ static const char* metaGetSet(const String& args, String& field, const char* fie
 
 const char* cmd_espnow_room(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return metaGetSet(argsInput, gSettings.espnowRoom, "Room", 31);
+  return metaGetSet(argsInput, gSettings.espnowRoom, "Room", sizeof(V4PayloadMetadata::room) - 1);
 }
 
 const char* cmd_espnow_zone(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return metaGetSet(argsInput, gSettings.espnowZone, "Zone", 31);
+  return metaGetSet(argsInput, gSettings.espnowZone, "Zone", sizeof(V4PayloadMetadata::zone) - 1);
 }
 
 const char* cmd_espnow_tags(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  // V4PayloadMetadata::tags is 54 bytes including its NUL terminator.
-  return metaGetSet(argsInput, gSettings.espnowTags, "Tags", 53);
+  return metaGetSet(argsInput, gSettings.espnowTags, "Tags", sizeof(V4PayloadMetadata::tags) - 1);
 }
 
 const char* cmd_espnow_friendlyname(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return metaGetSet(argsInput, gSettings.espnowFriendlyName, "Friendly name", 47);
+  return metaGetSet(argsInput, gSettings.espnowFriendlyName, "Friendly name", sizeof(V4PayloadMetadata::friendlyName) - 1);
 }
 
 const char* cmd_espnow_stationary(const String& argsInput) {
@@ -17515,6 +17520,9 @@ const char* cmd_espnow_deviceinfo(const String& argsInput) {
     PSRAM_JSON_DOC(doc);
     doc["schema"]       = 1;
     doc["name"]         = gSettings.espnowDeviceName;
+    // False when no usable name is saved (empty, or one the name rule refuses),
+    // the state 'devicename' reports as "(not set)".
+    doc["nameValid"]    = devicename::valid(gSettings.espnowDeviceName.c_str());
     doc["friendlyName"] = gSettings.espnowFriendlyName;
     doc["room"]         = gSettings.espnowRoom;
     doc["zone"]         = gSettings.espnowZone;

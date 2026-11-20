@@ -170,6 +170,13 @@ static void commonContracts() {
     const auto snap = loggingGps(LOG_GPS); waited(10);
     assert(snap.gpsFix == (state == 0));
     assert(snap.gpsHasTime == (state == 0));
+#if !TEST_BASELINE
+    // Satellites and fix quality reach the log without a fix (the no-fix rows
+    // print them); position stays fix-only. Without data, or without the
+    // snapshot, they stay zero.
+    if (state == 1) assert(snap.gpsSatellites == 9 && snap.gpsFixQuality == 2 && snap.gpsLatitude == 0.0f);
+    if (state >= 2) assert(snap.gpsSatellites == 0 && snap.gpsFixQuality == 0);
+#endif
     if (state == 0) {
       assert(snap.gpsLatitude == -12.25f && snap.gpsLongitude == 130.5f);
       assert(snap.gpsAltitude == 81.25f && snap.gpsSpeed == 12.5f);

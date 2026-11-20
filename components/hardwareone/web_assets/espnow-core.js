@@ -9,12 +9,29 @@
         return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
       });
     };
+    // One command reply as a json object, or null. A reply can be plain text (a
+    // build without the command, a refusal, an out-of-memory text) or a json
+    // error ({"ok":false,...}); both mean "no data", and the caller keeps its
+    // "nothing known" display. The page decides from these fields only and never
+    // matches on the wording of a text reply.
+    window.espnowParseReply = function(text) {
+      var parsed = null;
+      try { parsed = JSON.parse(text); } catch(_) { return null; }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      if (parsed.ok === false) return null;
+      return parsed;
+    };
+    // A MAC in display form (AA:BB:CC:DD:EE:FF).
+    window.espnowIsMacText = function(value) {
+      return typeof value === 'string' && /^[A-Fa-f0-9]{2}(:[A-Fa-f0-9]{2}){5}$/.test(value);
+    };
     console.log('[ESP-NOW] Chunk 3A: listDevices function start');
     window.listDevices = function(preloadedBondStatus, preloadedList) {
+      // bondStatus: the 'bondstatus json' reply; its 'peer' is the partner's MAC.
       function applyBondStatus(bondStatus) {
         window.__bondedPeerMac = null;
-        const bondMatch = bondStatus.match(/Peer MAC:\s*([A-Fa-f0-9:]{17})/);
-        if (bondMatch) { window.__bondedPeerMac = bondMatch[1].toUpperCase(); }
+        const bond = window.espnowParseReply(bondStatus);
+        if (bond && window.espnowIsMacText(bond.peer)) { window.__bondedPeerMac = bond.peer.toUpperCase(); }
       }
       function applyList(output) {
         try { console.log('[ESP-NOW][DEV] listDevices: output length', output ? output.length : -1); } catch(_){}
@@ -31,7 +48,7 @@
         return;
       }
       // First get bond status to identify bonded device
-      hw.postFormText('/api/cli', { cmd: 'bondstatus' })
+      hw.postFormText('/api/cli', { cmd: 'bondstatus json' })
       .then(bondStatus => {
         applyBondStatus(bondStatus);
         // Now fetch device list

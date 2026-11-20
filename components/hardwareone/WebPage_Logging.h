@@ -458,17 +458,58 @@ console.log('[LOGGING] Section 2c: Window onload registered');
 </script>
 
 <script>
+console.log('[LOGGING] Section 2d: Status reply helpers');
+// The page decides from parsed json replies only; it never matches on the
+// wording of a text reply. /api/logging/status slots (handleLoggingStatus):
+//   0 'time json', 1 'sensorlog status json', 2 the system log status json.
+
+// One reply as a json object, or null. A reply can be plain text (a build
+// without the command, a refusal, an out-of-memory text) or a json error
+// ({"ok":false,...}); both mean "no data".
+function loggingParseReply(text) {
+  let parsed = null;
+  try { parsed = JSON.parse(text); } catch (_) { return null; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  if (parsed.ok === false) return null;
+  return parsed;
+}
+
+// One status slot, fresh from the device. The endpoint runs the status
+// commands as the system, so guests and non-admin users can refresh too; the
+// CLI json form is the fallback when the endpoint cannot be read.
+function loggingFetchStatusSlot(index, cliCommand) {
+  return hw.fetchJSON('/api/logging/status')
+    .then(function(data) {
+      if (data && Array.isArray(data.results) && typeof data.results[index] === 'string') return data.results[index];
+      throw new Error('status reply incomplete');
+    })
+    .catch(function() {
+      return hw.postFormText('/api/cli', { cmd: cliCommand });
+    });
+}
+
+// The device's local time from a 'time json' reply as a file-name stamp
+// (YYYY-MM-DDTHH-MM-SS). '' when the clock is not set or the reply is not json;
+// the caller then uses the browser's clock.
+function loggingDeviceTimestamp(text) {
+  const reply = loggingParseReply(text);
+  const iso = (reply && typeof reply.time === 'string') ? reply.time.match(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/) : null;
+  return iso ? iso[0].replace(/:/g, '-') : '';
+}
+console.log('[LOGGING] Section 2e: Status reply helpers defined');
+</script>
+
+<script>
 console.log('[LOGGING] Section 3: Filename generation function');
 function generateDefaultFilename(preloadedTimeText) {
   console.log('[LOGGING] Section 3a: generateDefaultFilename called');
   function applyTime(text) {
     console.log('[LOGGING] Section 3b: Time response:', text);
     let filename = '/logging_captures/sensors/sensors-';
-    const isoMatch = text.match(/Time:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
-    if (isoMatch) {
-      console.log('[LOGGING] Section 3c: Using NTP time:', isoMatch[1]);
-      const timestamp = isoMatch[1].replace(/:/g, '-');
-      filename += timestamp;
+    const deviceStamp = loggingDeviceTimestamp(text);
+    if (deviceStamp) {
+      console.log('[LOGGING] Section 3c: Using device time:', deviceStamp);
+      filename += deviceStamp;
     } else {
       const now = new Date();
       const timestamp = now.getFullYear() + '-' +
@@ -489,7 +530,7 @@ function generateDefaultFilename(preloadedTimeText) {
     applyTime(preloadedTimeText);
     return;
   }
-  hw.postFormText('/api/cli', { cmd: 'time' })
+  loggingFetchStatusSlot(0, 'time json')
   .then(applyTime)
   .catch(e => {
     console.warn('[LOGGING] Section 3f: Failed to get time, using browser time:', e);
@@ -512,69 +553,61 @@ console.log('[LOGGING] Section 3g: generateDefaultFilename defined');
 console.log('[LOGGING] Section 4: Status refresh function');
 function refreshStatus(preloadedStatusText) {
   console.log('[LOGGING] Section 4a: refreshStatus called');
+  // text: the 'sensorlog status json' reply.
   function applyStatus(text) {
     console.log('[LOGGING] Section 4c: Status response text:', text);
-    if (text.includes('Unknown command') || text.includes('not found')) {
-      console.log('[LOGGING] Section 4d: sensorlog command not available');
-      const statusDot = hw.$('status-dot');
-      const statusText = hw.$('status-text');
-      statusDot.style.background = '#ffc107';
-      statusText.textContent = 'Not Available';
-      statusText.style.color = '#ffc107';
-      hw.$('btn-start').style.display = 'none';
-      hw.$('btn-stop').style.display = 'none';
-      return;
-    }
-    const isActive = text.includes('logging ACTIVE');
-    console.log('[LOGGING] Section 4d: Logging active:', isActive);
+    const status = loggingParseReply(text);
     const statusDot = hw.$('status-dot');
     const statusText = hw.$('status-text');
     const btnStart = hw.$('btn-start');
     const btnStop = hw.$('btn-stop');
+    if (!status) {
+      // Not json: the status could not be read this time (the device was busy,
+      // or the reply did not fit). The state is unknown, so Start and Stop stay
+      // as the last good reply left them; Refresh Status asks again.
+      console.log('[LOGGING] Section 4d: sensorlog status not available');
+      statusDot.style.background = '#ffc107';
+      statusText.textContent = 'Not Available';
+      statusText.style.color = '#ffc107';
+      return;
+    }
+    const isActive = status.running === true;
+    console.log('[LOGGING] Section 4d: Logging active:', isActive);
+    const isNumber = function(v) { return typeof v === 'number' && isFinite(v); };
+    const format = (typeof status.format === 'string') ? status.format.toLowerCase() : '';
+    const sensors = Array.isArray(status.sensors) ? status.sensors.filter(function(n) { return typeof n === 'string'; }) : null;
     if (isActive) {
       statusDot.style.background = 'var(--success)';
       statusText.textContent = 'ACTIVE';
       statusText.style.color = 'var(--success)';
       btnStart.style.display = 'none';
       btnStop.style.display = 'inline-block';
-      const fileMatch = text.match(/File:\s*(.+)/);
-      const intervalMatch = text.match(/Interval:\s*(\d+)ms/);
-      const formatMatch = text.match(/Format:\s*(\w+)/);
-      const maxsizeMatch = text.match(/Max size:\s*(\d+)\s*bytes/);
-      const rotationsMatch = text.match(/Rotations:\s*(\d+)/);
-      const sensorsMatch = text.match(/Sensors:\s*(.+)/);
-      const lastwriteMatch = text.match(/Last write:\s*(.+)/);
-      console.log('[LOGGING] Section 4e: Parsed active status - File:', fileMatch?.[1], 'Interval:', intervalMatch?.[1], 'Format:', formatMatch?.[1], 'Sensors:', sensorsMatch?.[1]);
-      hw.$('detail-file').textContent = fileMatch ? fileMatch[1] : '—';
-      hw.$('detail-interval').textContent = intervalMatch ? intervalMatch[1] + 'ms' : '—';
-      hw.$('detail-format').textContent = formatMatch ? formatMatch[1] : '—';
-      hw.$('detail-maxsize').textContent = maxsizeMatch ? parseInt(maxsizeMatch[1]).toLocaleString() + ' bytes' : '—';
-      hw.$('detail-rotations').textContent = rotationsMatch ? rotationsMatch[1] : '—';
-      hw.$('detail-sensors').textContent = sensorsMatch ? sensorsMatch[1].trim() : '—';
-      hw.$('detail-lastwrite').textContent = lastwriteMatch ? lastwriteMatch[1] : '—';
-      if (fileMatch) hw.$('config-path').value = fileMatch[1].trim();
-      if (intervalMatch) hw.$('config-interval').value = intervalMatch[1];
-      if (formatMatch) hw.$('config-format').value = formatMatch[1].toLowerCase();
-      if (maxsizeMatch) hw.$('config-maxsize').value = maxsizeMatch[1];
-      if (rotationsMatch) hw.$('config-rotations').value = rotationsMatch[1];
+      const file = (typeof status.file === 'string') ? status.file.trim() : '';
+      hw.$('detail-file').textContent = file ? file : '—';
+      hw.$('detail-interval').textContent = isNumber(status.intervalMs) ? status.intervalMs + 'ms' : '—';
+      hw.$('detail-format').textContent = format ? format.toUpperCase() : '—';
+      hw.$('detail-maxsize').textContent = isNumber(status.maxSizeBytes) ? status.maxSizeBytes.toLocaleString() + ' bytes' : '—';
+      hw.$('detail-rotations').textContent = isNumber(status.rotations) ? String(status.rotations) : '—';
+      hw.$('detail-sensors').textContent = sensors ? (sensors.length ? sensors.join(' ') : '(none)') : '—';
+      hw.$('detail-lastwrite').textContent = isNumber(status.lastWriteAgoSec) ? status.lastWriteAgoSec + 's ago' : '—';
+      if (file) hw.$('config-path').value = file;
+      if (isNumber(status.intervalMs)) hw.$('config-interval').value = String(status.intervalMs);
+      if (format) hw.$('config-format').value = format;
+      if (isNumber(status.maxSizeBytes)) hw.$('config-maxsize').value = String(status.maxSizeBytes);
+      if (isNumber(status.rotations)) hw.$('config-rotations').value = String(status.rotations);
     } else {
       statusDot.style.background = '#6c757d';
       statusText.textContent = 'INACTIVE';
       statusText.style.color = 'var(--panel-fg)';
       btnStart.style.display = 'inline-block';
       btnStop.style.display = 'none';
-      const formatMatch = text.match(/Format:\s*(\w+)/);
-      const maxsizeMatch = text.match(/Max size:\s*(\d+)\s*bytes/);
-      const rotationsMatch = text.match(/Rotations:\s*(\d+)/);
-      const sensorsMatch = text.match(/Sensors:\s*(.+)/);
-      console.log('[LOGGING] Section 4f: Parsed inactive settings - Format:', formatMatch?.[1], 'MaxSize:', maxsizeMatch?.[1], 'Sensors:', sensorsMatch?.[1]);
-      if (formatMatch) hw.$('config-format').value = formatMatch[1].toLowerCase();
-      if (maxsizeMatch) hw.$('config-maxsize').value = maxsizeMatch[1];
-      if (rotationsMatch) hw.$('config-rotations').value = rotationsMatch[1];
-      if (sensorsMatch) {
-        const sensorStr = sensorsMatch[1].toLowerCase();
+      if (format) hw.$('config-format').value = format;
+      if (isNumber(status.maxSizeBytes)) hw.$('config-maxsize').value = String(status.maxSizeBytes);
+      if (isNumber(status.rotations)) hw.$('config-rotations').value = String(status.rotations);
+      if (sensors) {
+        // Exact names from the json array ('r1' is not matched by another name).
         hw.qsa('#sensors-pane input[type=checkbox]').forEach(function(cb) {
-          cb.checked = sensorStr.includes(cb.value);
+          cb.checked = sensors.indexOf(cb.value) >= 0;
         });
       }
     }
@@ -584,24 +617,27 @@ function refreshStatus(preloadedStatusText) {
     updateAutoStartStatus(preloadedStatusText);
     return;
   }
-  hw.postFormText('/api/cli', { cmd: 'sensorlog status' })
-  .then(applyStatus)
+  // One request serves the status and the auto-start line.
+  loggingFetchStatusSlot(1, 'sensorlog status json')
+  .then(function(text) {
+    applyStatus(text);
+    updateAutoStartStatus(text);
+  })
   .catch(e => {
     console.error('[LOGGING] Section 4g: Status refresh error:', e);
     hw.$('status-text').textContent = 'Error: ' + e.message;
     hw.$('status-text').style.color = 'var(--danger)';
   });
-  // Also update auto-start status
-  updateAutoStartStatus();
 }
 console.log('[LOGGING] Section 4h: refreshStatus defined');
 
 function updateAutoStartStatus(preloadedText) {
+  // text: the 'sensorlog status json' reply.
   function applyAutoStart(text) {
-    const autostartMatch = text.match(/Auto-start:\s*(ON|OFF)/i);
+    const status = loggingParseReply(text);
     const statusSpan = hw.$('autostart-status');
-    if (autostartMatch) {
-      const isOn = autostartMatch[1].toUpperCase() === 'ON';
+    if (status && typeof status.autoStart === 'boolean') {
+      const isOn = status.autoStart;
       statusSpan.textContent = isOn ? 'ON' : 'OFF';
       statusSpan.style.color = isOn ? 'var(--success)' : 'var(--panel-fg)';
     } else {
@@ -612,7 +648,7 @@ function updateAutoStartStatus(preloadedText) {
     applyAutoStart(preloadedText);
     return;
   }
-  hw.postFormText('/api/cli', { cmd: 'sensorlog status' })
+  loggingFetchStatusSlot(1, 'sensorlog status json')
   .then(applyAutoStart)
   .catch(e => console.error('[LOGGING] Auto-start status error:', e));
 }
@@ -793,10 +829,9 @@ function generateSystemFilename(preloadedTimeText) {
   function applyTime(text) {
     console.log('[LOGGING] System time response:', text);
     let filename = '/logging_captures/system/system-';
-    const isoMatch = text.match(/Time:\s*(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})/);
-    if (isoMatch) {
-      const timestamp = isoMatch[1].replace(/:/g, '-');
-      filename += timestamp;
+    const deviceStamp = loggingDeviceTimestamp(text);
+    if (deviceStamp) {
+      filename += deviceStamp;
     } else {
       const now = new Date();
       const timestamp = now.getFullYear() + '-' +
@@ -814,7 +849,7 @@ function generateSystemFilename(preloadedTimeText) {
     applyTime(preloadedTimeText);
     return;
   }
-  hw.postFormText('/api/cli', { cmd: 'time' })
+  loggingFetchStatusSlot(0, 'time json')
   .then(applyTime)
   .catch(e => {
     console.warn('[LOGGING] Failed to get time, using browser time:', e);
@@ -832,43 +867,54 @@ function generateSystemFilename(preloadedTimeText) {
 
 function refreshSystemStatus(preloadedStatusText) {
   console.log('[LOGGING] refreshSystemStatus called');
+  // text: the system log status json (slot 2; 'log status json' on the CLI).
+  // state is active | configured | inactive; running is the flag that
+  // 'log start' and 'log stop' check, so the buttons follow it.
   function applySystemStatus(text) {
     console.log('[LOGGING] System status response:', text);
-    if (text.includes('Unknown command') || text.includes('not found')) {
-      console.log('[LOGGING] log command not available');
-      const statusDot = hw.$('sys-status-dot');
-      const statusText = hw.$('sys-status-text');
-      statusDot.style.background = '#ffc107';
-      statusText.textContent = 'Not Available';
-      statusText.style.color = '#ffc107';
-      hw.$('sys-btn-start').style.display = 'none';
-      hw.$('sys-btn-stop').style.display = 'none';
-      return;
-    }
-    const isActive = text.includes('logging ACTIVE');
+    const status = loggingParseReply(text);
     const statusDot = hw.$('sys-status-dot');
     const statusText = hw.$('sys-status-text');
     const btnStart = hw.$('sys-btn-start');
     const btnStop = hw.$('sys-btn-stop');
+    if (!status) {
+      // Not json: the status could not be read this time. The state is unknown,
+      // so Start and Stop stay as the last good reply left them.
+      console.log('[LOGGING] system log status not available');
+      statusDot.style.background = '#ffc107';
+      statusText.textContent = 'Not Available';
+      statusText.style.color = '#ffc107';
+      return;
+    }
+    const isActive = status.state === 'active';
+    const isRunning = status.running === true;
+    const file = (typeof status.file === 'string') ? status.file.trim() : '';
+    btnStart.style.display = isRunning ? 'none' : 'inline-block';
+    btnStop.style.display = isRunning ? 'inline-block' : 'none';
     if (isActive) {
       statusDot.style.background = 'var(--success)';
       statusText.textContent = 'ACTIVE';
       statusText.style.color = 'var(--success)';
-      btnStart.style.display = 'none';
-      btnStop.style.display = 'inline-block';
-      const fileMatch = text.match(/File:\s*(.+)/);
-      const lastwriteMatch = text.match(/Last write:\s*(\d+)s ago/);
-      const flagsMatch = text.match(/Output flags:\s*0x([0-9A-Fa-f]+)/);
-      hw.$('sys-detail-file').textContent = fileMatch ? fileMatch[1].trim() : '—';
-      hw.$('sys-detail-lastwrite').textContent = lastwriteMatch ? lastwriteMatch[1] + 's ago' : '—';
-      hw.$('sys-detail-flags').textContent = flagsMatch ? '0x' + flagsMatch[1] : '—';
-      if (fileMatch) hw.$('sys-config-path').value = fileMatch[1].trim();
+      const isNumber = function(v) { return typeof v === 'number' && isFinite(v); };
+      hw.$('sys-detail-file').textContent = file ? file : '—';
+      hw.$('sys-detail-lastwrite').textContent = isNumber(status.lastWriteAgoSec) ? status.lastWriteAgoSec + 's ago' : '—';
+      // Same form as the text's "0x%02X".
+      const flagsHex = isNumber(status.outputFlags) ? status.outputFlags.toString(16).toUpperCase() : '';
+      hw.$('sys-detail-flags').textContent = flagsHex ? '0x' + (flagsHex.length < 2 ? '0' + flagsHex : flagsHex) : '—';
+      if (file) hw.$('sys-config-path').value = file;
+    } else if (status.state === 'configured') {
+      // The running flag is set but nothing is routed to the file: the same
+      // third state the CLI text and the OLED show. Stop clears it.
+      statusDot.style.background = '#ffc107';
+      statusText.textContent = 'NOT ROUTED';
+      statusText.style.color = '#ffc107';
+      hw.$('sys-detail-file').textContent = file ? file : '—';
+      hw.$('sys-detail-lastwrite').textContent = '—';
+      hw.$('sys-detail-flags').textContent = '—';
     } else {
       statusDot.style.background = '#6c757d';
       statusText.textContent = 'INACTIVE';
       statusText.style.color = 'var(--panel-fg)';
-      btnStart.style.display = 'inline-block';
-      btnStop.style.display = 'none';
       hw.$('sys-detail-file').textContent = '—';
       hw.$('sys-detail-lastwrite').textContent = '—';
       hw.$('sys-detail-flags').textContent = '—';
@@ -879,15 +925,18 @@ function refreshSystemStatus(preloadedStatusText) {
     updateSystemAutoStartStatus(preloadedStatusText);
     return;
   }
-  hw.postFormText('/api/cli', { cmd: 'log status' })
-  .then(applySystemStatus)
+  // One request serves the status and the auto-start line. 'log status' is an
+  // admin command on the CLI; the endpoint serves every signed-in user.
+  loggingFetchStatusSlot(2, 'log status json')
+  .then(function(text) {
+    applySystemStatus(text);
+    updateSystemAutoStartStatus(text);
+  })
   .catch(e => {
     console.error('[LOGGING] System status refresh error:', e);
     hw.$('sys-status-text').textContent = 'Error: ' + e.message;
     hw.$('sys-status-text').style.color = 'var(--danger)';
   });
-  // Also update auto-start status
-  updateSystemAutoStartStatus();
 }
 
 function startSystemLogging() {
@@ -1102,11 +1151,12 @@ function populateFlagsPane() {
 }
 
 function updateSystemAutoStartStatus(preloadedText) {
+  // text: the system log status json.
   function applySysAutoStart(text) {
-    const autostartMatch = text.match(/Auto-start:\s*(ON|OFF)/i);
+    const status = loggingParseReply(text);
     const statusSpan = hw.$('sys-autostart-status');
-    if (autostartMatch) {
-      const isOn = autostartMatch[1].toUpperCase() === 'ON';
+    if (status && typeof status.autoStart === 'boolean') {
+      const isOn = status.autoStart;
       statusSpan.textContent = isOn ? 'ON' : 'OFF';
       statusSpan.style.color = isOn ? 'var(--success)' : 'var(--panel-fg)';
     } else {
@@ -1117,7 +1167,7 @@ function updateSystemAutoStartStatus(preloadedText) {
     applySysAutoStart(preloadedText);
     return;
   }
-  hw.postFormText('/api/cli', { cmd: 'log status' })
+  loggingFetchStatusSlot(2, 'log status json')
   .then(applySysAutoStart)
   .catch(e => console.error('[LOGGING] System auto-start status error:', e));
 }

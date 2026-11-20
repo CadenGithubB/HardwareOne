@@ -349,11 +349,11 @@ static void displayLoggingMode() {
     
     case LOG_MENU_SYSTEM: {
       oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
-      if (gSystemLogRunning) {
-        oledDisplay->print("Status: ACTIVE");
-      } else {
-        oledDisplay->print("Status: STOPPED");
-      }
+      // The state `log status` and the web page report (active, configured
+      // but not routed to the file, stopped); the rows below keep following
+      // the running flag, which is what `log start` / `log stop` check.
+      oledDisplay->print("Status: ");
+      oledDisplay->print(systemLogStateLabel(systemLogState()));
       
       int startY = 22;
       for (int i = 0; i < loggingSystemMenuCount; i++) {

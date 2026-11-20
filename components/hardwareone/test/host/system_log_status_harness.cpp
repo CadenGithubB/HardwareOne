@@ -1,6 +1,7 @@
-// Executes the shipping system-log status/flags formatters and the persisted
-// flag restore from System_Debug.cpp over host globals. Only millis() and the
-// globals the formatters read are host-provided.
+// Executes the shipping system-log status reading, its text and json forms, the
+// flags formatters and the persisted flag restore from System_Debug.cpp over
+// host globals. Only millis() and the globals the formatters read are
+// host-provided.
 #include "Arduino.h"
 #include <cstdint>
 #include <cstdio>
@@ -41,6 +42,7 @@ String formatSystemLogFlags(DebugFlagMask mask);
 bool systemLogApplyPersistedFlags();
 bool systemLogFollowFlagChange(DebugFlagMask touched);
 void formatSystemLogStatus(char* out, size_t outSize);
+bool formatSystemLogStatusJson(char* out, size_t outSize);
 // Production setSetting also requests a save; the harness counts the writes.
 static int settingWrites = 0;
 static void setSetting(String& field, const String& value) {
@@ -60,8 +62,11 @@ void applyDebugMaskLogLevels(DebugFlagMask before) {
 // INSERT_PRODUCTION
 
 static constexpr size_t kCliStatus = HW1_CLI_STATUS_BYTES;
-static constexpr size_t kWebStatus = HW1_WEB_STATUS_BYTES;
+static constexpr size_t kWebStatus = HW1_WEB_STATUS_BYTES;  // the web endpoint's json buffer
 static constexpr size_t kFlagsText = HW1_FLAGS_TEXT_BYTES;
+// A caller with a small buffer gets the text cut at its size (no caller is this
+// small today; the web endpoint sends the json form).
+static constexpr size_t kSmallText = 512;
 
 static std::string status(size_t size) {
   std::string buffer(size + 8, '\x7e');
@@ -70,6 +75,19 @@ static std::string status(size_t size) {
   CHECK(std::memchr(buffer.data(), '\0', size) != nullptr);
   return std::string(buffer.c_str());
 }
+
+// The json form: never writes past outSize, always NUL-terminated, and the
+// return value says whether the document is the status (true) or the error
+// object (false).
+static std::string statusJson(size_t size, bool expectFits = true) {
+  std::string buffer(size + 8, '\x7e');
+  const bool fits = formatSystemLogStatusJson(&buffer[0], size);
+  CHECK(fits == expectFits);
+  CHECK(buffer.compare(size, 8, std::string(8, '\x7e')) == 0);
+  CHECK(std::memchr(buffer.data(), '\0', size) != nullptr);
+  return std::string(buffer.c_str());
+}
+static const std::string kTooLarge = "{\"schema\":1,\"ok\":false,\"error\":\"response too large\"}";
 
 static std::string hex64(uint64_t value) {
   char text[17];
@@ -81,10 +99,21 @@ int main() {
   // Three states, identical in the CLI and web buffers when they fit.
   gSystemLogRunning = false;
   gSettings.systemLogAutoStart = false;
-  for (size_t size : {kCliStatus, kWebStatus})
+  for (size_t size : {kCliStatus, kSmallText})
     CHECK(status(size) == "System logging is INACTIVE\n  Auto-start: OFF");
+  // The json form of the same reading, identical in the CLI and web buffers.
+  CHECK(systemLogState() == SystemLogState::Inactive);
+  const std::string limits = ",\"maxSizeKb\":1024,\"keep\":3,\"rotations\":0,\"reserveSkips\":0,\"reserveKb\":100}";
+  for (size_t size : {kCliStatus, kWebStatus})
+    CHECK(statusJson(size) == "{\"schema\":1,\"state\":\"inactive\",\"running\":false,\"autoStart\":false" + limits);
   gSettings.systemLogAutoStart = true;
-  CHECK(status(kWebStatus) == "System logging is INACTIVE\n  Auto-start: ON");
+  CHECK(status(kSmallText) == "System logging is INACTIVE\n  Auto-start: ON");
+  CHECK(statusJson(kWebStatus) == "{\"schema\":1,\"state\":\"inactive\",\"running\":false,\"autoStart\":true" + limits);
+  // A stale route flag without the running flag is still inactive.
+  gOutputFlags = MSG_ROUTE_FILE;
+  CHECK(systemLogState() == SystemLogState::Inactive);
+  CHECK(status(kCliStatus) == "System logging is INACTIVE\n  Auto-start: ON");
+  gOutputFlags = 0;
 
   gSystemLogRunning = true;
   gSystemLogPath = "/logging_captures/system/debug.log";
@@ -96,12 +125,20 @@ int main() {
   const std::string cap = "\n  Rotation: at 1024 KB, keep 3 old file(s); rotated 0 time(s) this boot";
   const std::string active = std::string("System logging ACTIVE\n  File: /logging_captures/system/debug.log\n"
                                          "  Last write: 62s ago\n  Output flags: ") + routes + "\n  Auto-start: ON" + cap;
-  for (size_t size : {kCliStatus, kWebStatus}) CHECK(status(size) == active);
+  for (size_t size : {kCliStatus, kSmallText}) CHECK(status(size) == active);
+  CHECK(systemLogState() == SystemLogState::Active);
+  const std::string activeJson =
+      "{\"schema\":1,\"state\":\"active\",\"running\":true,\"file\":\"/logging_captures/system/debug.log\","
+      "\"lastWriteAgoSec\":62,\"outputFlags\":" +
+      std::to_string(static_cast<unsigned>(MSG_ROUTE_SERIAL | MSG_ROUTE_FILE)) + ",\"autoStart\":true";
+  for (size_t size : {kCliStatus, kWebStatus}) CHECK(statusJson(size) == activeJson + limits);
   gSystemLogRotations = 3;  // the writer's rotation count reaches the status line
   CHECK(status(kCliStatus).find("rotated 3 time(s) this boot") != std::string::npos);
+  CHECK(statusJson(kWebStatus).find(",\"rotations\":3,") != std::string::npos);
   gSystemLogRotations = 0;
   gSettings.systemLogMaxSize = 20480; gSettings.systemLogMaxRotations = 0;  // settings drive the line
   CHECK(status(kCliStatus).find("Rotation: at 20 KB, keep 0 old file(s)") != std::string::npos);
+  CHECK(statusJson(kWebStatus).find(",\"maxSizeKb\":20,\"keep\":0,") != std::string::npos);
   gSettings.systemLogMaxSize = 99; gSettings.systemLogMaxRotations = 42;    // out of range reads as default
   CHECK(status(kCliStatus).find("Rotation: at 1024 KB, keep 3 old file(s)") != std::string::npos);
   gSettings.systemLogMaxSize = 1048576; gSettings.systemLogMaxRotations = 3;
@@ -117,6 +154,7 @@ int main() {
   littleFsFree = 1024 * 1024;
   gSystemLogReserveSkips = 7;
   CHECK(status(kCliStatus) == active + "\n  Skipped: 7 line(s) while flash was below its 100 KB reserve");
+  CHECK(statusJson(kWebStatus).find(",\"reserveSkips\":7,\"reserveKb\":100}") != std::string::npos);
   gSystemLogReserveSkips = 0;
 
   gOutputFlags = MSG_ROUTE_SERIAL;
@@ -124,21 +162,68 @@ int main() {
   const std::string configured = "System logging CONFIGURED but MSG_ROUTE_FILE flag not set\n"
                                  "  File: /logging_captures/system/debug.log\n"
                                  "  Use 'log start' to enable\n  Auto-start: OFF";
-  for (size_t size : {kCliStatus, kWebStatus}) CHECK(status(size) == configured);
+  for (size_t size : {kCliStatus, kSmallText}) CHECK(status(size) == configured);
+  // The third state: the running flag is set, nothing is routed to the file.
+  // The json carries both, so a reader's Start/Stop can follow `running`
+  // (`log start` refuses here, `log stop` clears it) while its label follows `state`.
+  CHECK(systemLogState() == SystemLogState::Configured);
+  for (size_t size : {kCliStatus, kWebStatus})
+    CHECK(statusJson(size) == "{\"schema\":1,\"state\":\"configured\",\"running\":true,"
+                              "\"file\":\"/logging_captures/system/debug.log\",\"autoStart\":false" + limits);
 
-  // A long path fills the web buffer to 511 bytes plus NUL; the CLI keeps all of it.
+  // The state's json value and its small-screen label (OLED: "Status: " + label in 21 columns).
+  CHECK(std::string(systemLogStateKey(SystemLogState::Active)) == "active");
+  CHECK(std::string(systemLogStateKey(SystemLogState::Configured)) == "configured");
+  CHECK(std::string(systemLogStateKey(SystemLogState::Inactive)) == "inactive");
+  CHECK(std::string(systemLogStateLabel(SystemLogState::Active)) == "ACTIVE");
+  CHECK(std::string(systemLogStateLabel(SystemLogState::Configured)) == "NOT ROUTED");
+  CHECK(std::string(systemLogStateLabel(SystemLogState::Inactive)) == "STOPPED");
+  for (SystemLogState state : {SystemLogState::Active, SystemLogState::Configured, SystemLogState::Inactive})
+    CHECK(std::strlen("Status: ") + std::strlen(systemLogStateLabel(state)) <= 21);
+
+  // A path with characters JSON must escape stays one valid string value.
   gOutputFlags = MSG_ROUTE_FILE;
+  gSystemLogPath = "/logs/a\"b\\c\n.log";
+  CHECK(statusJson(kWebStatus).find(",\"file\":\"/logs/a\\\"b\\\\c\\n.log\",") != std::string::npos);
+
+  // A long path: the text is cut at the caller's size, the CLI keeps all of it.
   gSystemLogPath = String(std::string("/logging_captures/system/") + std::string(600, 'p') + ".log");
   const std::string full = status(kCliStatus);
-  CHECK(full.size() > kWebStatus && full.size() < kCliStatus);
-  const std::string web = status(kWebStatus);
-  CHECK(web.size() == kWebStatus - 1 && full.compare(0, web.size(), web) == 0);
+  CHECK(full.size() > kSmallText && full.size() < kCliStatus);
+  const std::string small = status(kSmallText);
+  CHECK(small.size() == kSmallText - 1 && full.compare(0, small.size(), small) == 0);
+  // The json is never cut: it fits whole (and still ends the object), or the
+  // reply is the error object.
+  const std::string longJson = statusJson(kWebStatus);
+  CHECK(longJson.size() > 700 && longJson.back() == '}' &&
+        longJson.find(std::string(600, 'p') + ".log\"") != std::string::npos);
+  CHECK(statusJson(kSmallText, false) == kTooLarge);
+  gSystemLogPath = String(std::string("/") + std::string(1100, 'p'));
+  for (size_t size : {kCliStatus, kWebStatus}) CHECK(statusJson(size, false) == kTooLarge);
+  // Exactly at the edge: the largest path that fits, then one byte more.
+  for (size_t length = 800; length < 1100; ++length) {
+    gSystemLogPath = String(std::string("/") + std::string(length, 'p'));
+    std::string probe(kWebStatus, '\0');
+    if (formatSystemLogStatusJson(&probe[0], kWebStatus)) {
+      CHECK(std::strlen(probe.c_str()) < kWebStatus && probe[std::strlen(probe.c_str()) - 1] == '}');
+    } else {
+      CHECK(std::string(probe.c_str()) == kTooLarge);
+      gSystemLogPath = String(std::string("/") + std::string(length - 1, 'p'));
+      const std::string last = statusJson(kWebStatus);
+      CHECK(last.size() == kWebStatus - 1 && last.back() == '}');
+      break;
+    }
+  }
+  CHECK(std::string(gSystemLogPath.c_str()).size() < 1100);  // the edge was found
+  gSystemLogPath = String(std::string("/logging_captures/system/") + std::string(600, 'p') + ".log");
 
   // Null and zero-size outputs write nothing.
   formatSystemLogStatus(nullptr, kCliStatus);
+  CHECK(!formatSystemLogStatusJson(nullptr, kCliStatus));
   formatSystemLogFlags(DebugFlagMask(1), nullptr, kFlagsText);
   char canary[4] = {'x', 'y', 'z', '\0'};
   formatSystemLogStatus(canary, 0);
+  CHECK(!formatSystemLogStatusJson(canary, 0));
   formatSystemLogFlags(DebugFlagMask(1), canary, 0);
   CHECK(std::strcmp(canary, "xyz") == 0);
 

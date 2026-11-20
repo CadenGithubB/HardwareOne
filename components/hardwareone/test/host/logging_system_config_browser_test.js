@@ -128,8 +128,15 @@ function ticked(p) {
   return p.boxes().filter(box => box.checked).map(box => box.value);
 }
 
-const STATUS = (systemLog) => ({success: true, results: ['time', 'sensorlog', 'System logging is INACTIVE'],
-                                ...(systemLog ? {systemLog} : {})});
+// /api/logging/status slots as handleLoggingStatus sends them: 'time json',
+// 'sensorlog status json' and the system log status json.
+const STATUS = (systemLog) => ({success: true, results: [
+  JSON.stringify({schema: 1, synced: false, source: 'none', time: '', uptime_ms: 1000}),
+  JSON.stringify({schema: 1, running: false, intervalMs: 5000, format: 'text', maxSizeBytes: 256000, rotations: 3,
+                  sensors: [], autoStart: false}),
+  JSON.stringify({schema: 1, state: 'inactive', running: false, autoStart: false, maxSizeKb: 1024, keep: 3,
+                  rotations: 0, reserveSkips: 0, reserveKb: 100}),
+], ...(systemLog ? {systemLog} : {})});
 
 async function load(order, systemLog) {
   const p = page();

@@ -516,8 +516,10 @@ static esp_err_t handleEspNowRemoteManifest(httpd_req_t* req) {
 #include "System_Utils.h"
 #include "System_CommandTypes.h"
 
-// GET /api/espnow/status — same result slots as the old CLI batch, so the
-// page can keep its apply logic. Runs as internal system (not the caller),
+// GET /api/espnow/status — one reply string per command, in this order (the
+// page's espnowApplyStatusSlots reads them by slot). Slots 0-7 are json and
+// are what the page decides from; slot 8 is the human status text, shown in the
+// status box and never matched on. Runs as internal system (not the caller),
 // so guests can load the page without /api/cli. Each command is submitted to
 // the executor (executeInternalStatusCommand), never run on httpd.
 static esp_err_t handleEspNowStatus(httpd_req_t* req) {
@@ -525,14 +527,15 @@ static esp_err_t handleEspNowStatus(httpd_req_t* req) {
   httpd_resp_set_type(req, "application/json");
 
   static const char* CMDS[] = {
-    "espnowstatus",
-    "espnowmode",
-    "bondstatus",
+    "espnowstatus json",
+    "espnowmode json",
+    "bondstatus json",
     "espnowlist",
     "espnowmeshes listjson",
-    "espnowdeviceinfo",
-    "espnowmeshrole",
+    "espnowdeviceinfo json",
+    "espnowmeshrole json",
     "espnowmeshstatus",
+    "espnowstatus",
   };
 
   PSRAM_JSON_DOC(doc);

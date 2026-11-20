@@ -961,9 +961,43 @@ const char* cmd_log(const String& argsInput);
 // System log auto-start (called from boot)
 void systemLogAutoStart();
 
-// Read-only status text in caller-owned storage. Callers retain access policy
-// and buffer size; the CLI and web page share the same labels and state rules.
+// The system log's state. One definition for the CLI text, the web page's json
+// and the OLED label, so the three cannot disagree.
+enum class SystemLogState : uint8_t {
+  Inactive,    // not running
+  Configured,  // the running flag is set, but output is not routed to the file
+  Active,      // running and routed to the file
+};
+// Two flag reads and nothing else; callable from any task (the OLED render).
+SystemLogState systemLogState();
+// The json value of a state.
+inline const char* systemLogStateKey(SystemLogState state) {
+  switch (state) {
+    case SystemLogState::Active:     return "active";
+    case SystemLogState::Configured: return "configured";
+    default:                         return "inactive";
+  }
+}
+// A label for small screens, at most 10 characters ("Status: " + label fits
+// the OLED's 21 columns).
+inline const char* systemLogStateLabel(SystemLogState state) {
+  switch (state) {
+    case SystemLogState::Active:     return "ACTIVE";
+    case SystemLogState::Configured: return "NOT ROUTED";
+    default:                         return "STOPPED";
+  }
+}
+
+// Read-only status in caller-owned storage. Callers retain access policy and
+// buffer size; the text and json forms print from one status reading, so the
+// CLI, the web page and the OLED share the same state rules.
 void formatSystemLogStatus(char* out, size_t outSize);
+// One JSON object: schema, state (systemLogStateKey), running, file (while
+// running), lastWriteAgoSec and outputFlags (while active), autoStart,
+// maxSizeKb, keep, rotations, reserveSkips, reserveKb. A reply that does not fit
+// is replaced whole by {"schema":1,"ok":false,"error":"response too large"}
+// (returns false): a cut document cannot be parsed.
+bool formatSystemLogStatusJson(char* out, size_t outSize);
 
 // Parse / format the persisted systemLogFlags hex mask (also used by Settings UI save).
 bool parseSystemLogFlags(const String& flagsStr, DebugFlagMask& out);

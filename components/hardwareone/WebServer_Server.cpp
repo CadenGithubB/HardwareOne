@@ -2163,7 +2163,8 @@ esp_err_t handleFileWrite(httpd_req_t* req) {
   DEBUG_STORAGEF("[handleFileWrite] File closed, wrote %d bytes in %d chunks", content.length(), writeChunks);
 
   // Post-save hooks — shared with the web upload path and the BLE filewrite
-  // command (no-ops unless this is automations.json).
+  // command (the automations part no-ops unless this is automations.json; the
+  // hook also marks the internal storage reading stale).
   runFileWritePostSaveHooks(name);
 
   sendJsonResponse(req, "{\"success\":true}");
@@ -2244,14 +2245,16 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     FsLockGuard fsGuard("handleFileUpload.stats");
     VFS::getStats(uploadStorage, totalBytes64, usedBytes64, freeBytes64);
   }
-  size_t freeBytes = (size_t)freeBytes64;
+  // Sizes stay in 64 bits: size_t is 32 bits on the device, where a narrowed
+  // free-space figure wraps above 4 GiB and "free * 9" wraps above ~477 MiB.
   // Estimate actual file size from content length (remove ~33% base64 + URL-encoding overhead)
-  size_t estimatedFileSize = rawBody ? contentLen : (contentLen * 3) / 4;
+  const uint64_t estimatedFileSize = rawBody ? (uint64_t)contentLen : ((uint64_t)contentLen * 3) / 4;
   // Dynamic limit: 90% of free space (leave headroom for filesystem metadata)
-  size_t maxFileSize = (freeBytes * 9) / 10;
+  const uint64_t maxFileSize = (freeBytes64 * 9) / 10;
 
-  DEBUG_STORAGEF("[handleFileUpload] Content-Length: %d bytes (est file: %d), free space: %d, max: %d, heap=%u",
-                 contentLen, estimatedFileSize, freeBytes, maxFileSize, (unsigned)ESP.getFreeHeap());
+  DEBUG_STORAGEF("[handleFileUpload] Content-Length: %u bytes (est file: %llu), free space: %llu, max: %llu, heap=%u",
+                 (unsigned)contentLen, (unsigned long long)estimatedFileSize, (unsigned long long)freeBytes64,
+                 (unsigned long long)maxFileSize, (unsigned)ESP.getFreeHeap());
 
   // Check if estimated file size exceeds available space
   if (estimatedFileSize > maxFileSize) {
@@ -2260,7 +2263,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     char errBuf[128];
     snprintf(errBuf, sizeof(errBuf),
              "{\"success\":false,\"error\":\"File too large (~%.1fMB). Free: %.1fMB\"}",
-             estimatedFileSize / (1024.0 * 1024.0), freeBytes / (1024.0 * 1024.0));
+             estimatedFileSize / (1024.0 * 1024.0), freeBytes64 / (1024.0 * 1024.0));
     httpd_resp_send(req, errBuf, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
@@ -2297,7 +2300,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   size_t totalWritten = 0;
 
   // Track free space to abort if we exceed available FS space (already computed above)
-  size_t freeLimit = freeBytes;
+  const uint64_t freeLimit = freeBytes64;
   bool outOfSpace = false;
 
   // No filesystem lock is held across the network receive: a slow or stalled
@@ -2668,7 +2671,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     } else if (VFS::getStorageType(path) != VFS::SDCARD) {
       // Status polls show the newest internal capacity reading at any age, and
       // the admission check above took one from before this file. Mark it
-      // stale so the next reader (the Files page's own fresh stats requests,
+      // stale so the next reader (the Files page's own stats request,
       // the log writer, or a status poll) takes one fresh reading. No walk
       // here: the Files page already re-reads storage after an upload.
       VFS::invalidateStatsSnapshot(VFS::INTERNAL);
@@ -2682,7 +2685,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   uploadRecvBuf.reset();
 
   if (uploadError) {
-    DEBUG_STORAGEF("[handleFileUpload] ERROR: %s (wrote %d / free %d)", uploadError, (int)totalWritten, (int)freeLimit);
+    DEBUG_STORAGEF("[handleFileUpload] ERROR: %s (wrote %u / free %llu)", uploadError, (unsigned)totalWritten, (unsigned long long)freeLimit);
     char errBuf[128];
     snprintf(errBuf, sizeof(errBuf), "{\"success\":false,\"error\":\"%s\"}", uploadError);
     sendJsonResponse(req, errBuf);
@@ -2694,7 +2697,8 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   INFO_WEBF("[UPLOAD] %s: %d bytes written in %u ms", path.c_str(), (int)totalWritten, (unsigned)(millis() - tStart));
 
   // Post-save hook: automations.json sanitize — shared with the web write path
-  // and the BLE filewrite command (no-ops unless this is automations.json).
+  // and the BLE filewrite command (the automations part no-ops unless this is
+  // automations.json; the hook also marks the internal storage reading stale).
   runFileWritePostSaveHooks(path);
 
  #if ENABLE_WEB_MAPS
@@ -3429,15 +3433,19 @@ static esp_err_t handleLoggingStatus(httpd_req_t* req) {
   // Read-only status commands run on the executor as the internal system
   // identity (System_Utils executeInternalStatusCommand), so guests can load
   // the page without /api/cli and the handlers never run on httpd.
+  // results[] holds one json reply per slot, and the page decides from the
+  // parsed fields only: 0 'time json', 1 'sensorlog status json', 2 the system
+  // log status json (the object 'log status json' prints).
   EXT_RAM_BSS_ATTR static char timeBuf[CMD_RESULT_MAX];
   EXT_RAM_BSS_ATTR static char sensorBuf[CMD_RESULT_MAX];
-  executeInternalStatusCommand("time", timeBuf, sizeof(timeBuf));
-  executeInternalStatusCommand("sensorlog status", sensorBuf, sizeof(sensorBuf));
+  executeInternalStatusCommand("time json", timeBuf, sizeof(timeBuf));
+  executeInternalStatusCommand("sensorlog status json", sensorBuf, sizeof(sensorBuf));
 
   // `log status` is admin-gated on the CLI. Reuse its read-only formatter so
   // guests/users retain access to this page's status without executing it.
-  char logBuf[512];
-  formatSystemLogStatus(logBuf, sizeof(logBuf));
+  // PSRAM, not the httpd stack; a reply that does not fit is an error object.
+  EXT_RAM_BSS_ATTR static char logBuf[1024];
+  formatSystemLogStatusJson(logBuf, sizeof(logBuf));
 
   PSRAM_JSON_DOC(doc);
   doc["success"] = true;
@@ -4255,7 +4263,8 @@ esp_err_t handleFilesStats(httpd_req_t* req) {
   // Optional ?path= query param — use SD stats when path is under /sd/
   // httpd_query_key_value does NOT percent-decode, so urlDecode() is required.
   // buildFilesStatsJson() maps the path to its tier, handles the SD-not-mounted
-  // case, and is shared with the `files stats json` CLI command.
+  // case, and shares its reply shape with `files stats` (the command reads
+  // fresh; this handler shows the shared reading).
   String statsPath = "/";
   char query[256];
   if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {

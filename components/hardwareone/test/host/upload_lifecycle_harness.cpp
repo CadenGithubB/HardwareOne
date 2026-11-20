@@ -566,6 +566,18 @@ int main(int argc, char** argv) {
     check(metrics.allocations == 0, "size rejected before allocation"); });
   add("raw body that fits 90 % of free space is admitted", "raw", [] {
     control.freeBytes = 1000; auto req = rawRequest("/user/upload.bin", std::string(900, 'r')); succeeded(req, "/user/upload.bin", std::string(900, 'r')); });
+  // Free space above 4 GiB (an SD card). The handler keeps these sizes in 64
+  // bits; on the device size_t is 32 bits, where a narrowed figure left 5000
+  // bytes here and stopped the stream ("Insufficient storage space"), and
+  // "free * 9" wrapped from about 477 MiB. The host's size_t is 64 bits, so
+  // this run cannot see that wrap: test_sensorlog_status_rows.py pins the
+  // 64-bit arithmetic in the source.
+  add("raw body with more than 4 GiB free is admitted and streamed", "raw", [] {
+    control.freeBytes = (static_cast<size_t>(4) << 30) + 5000; const std::string bytes(6000, 'r');
+    auto req = rawRequest("/user/upload.bin", bytes); succeeded(req, "/user/upload.bin", bytes); });
+  add("the 90 % rule holds at 1 GiB free", "raw", [] {
+    control.freeBytes = static_cast<size_t>(1) << 30; const std::string bytes(200000, 'r');
+    auto req = rawRequest("/user/upload.bin", bytes); succeeded(req, "/user/upload.bin", bytes); });
   add("raw empty body creates an empty file", "raw", [] {
     auto req = rawRequest("/user/empty.bin", ""); succeeded(req, "/user/empty.bin", ""); check(metrics.writes == 0 && metrics.receives == 0, "nothing to receive or write"); });
   add("raw body denied path never opens", "raw", [] {

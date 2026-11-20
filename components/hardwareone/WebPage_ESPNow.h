@@ -197,7 +197,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <button class='btn' id='btn-set-zone'>Set Zone</button>
 </div>
 <div class='en-form-row'>
-<input type='text' id='tags-input' placeholder='Tags (comma-separated)' maxlength='63'>
+<input type='text' id='tags-input' placeholder='Tags (comma-separated)' maxlength='53'>
 <button class='btn' id='btn-set-tags'>Set Tags</button>
 </div>
 <label style='display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:4px'>
@@ -336,175 +336,130 @@ inline void streamEspNowInner(httpd_req_t* req) {
 (function() {
   try {
     console.log('[ESP-NOW] Chunk 2: Status functions start');
-    window.refreshStatus = function() {
-      hw.postFormText('/api/cli', { cmd: 'espnowstatus' })
-      .then(output => {
-        console.log('[ESP-NOW] Status response:', output);
-        console.log('[ESP-NOW] Response length:', output.length);
-        const indicator = hw.$('espnow-status-indicator');
-        // Check for initialization - be flexible with whitespace and case
-        const isInitialized = output.match(/Initialized:\s*Yes/i) !== null;
-        console.log('[ESP-NOW] Checking for initialization...');
-        console.log('[ESP-NOW] isInitialized:', isInitialized);
-        const chMatch = output.match(/Channel:\s*(\d+)/);
-        const channel = chMatch ? chMatch[1] : '?';
-        console.log('[ESP-NOW] Channel:', channel);
-        // Display full status output instead of just friendly summary
-        hw.$('espnow-status-data').textContent = output;
-        if (isInitialized) {
-          indicator.className = 'status-indicator status-enabled';
-          hw.$('btn-espnow-init').style.display = 'none';
-          hw.$('btn-espnow-disable').style.display = '';
-          hw.$('btn-espnow-toggle-mode').style.display = '';
-          hw.$('en-not-init').style.display = 'none';
-          hw.$('en-panels').style.display = 'block';
-          hw.$('espnow-status-data').style.display = 'block';
-          /* Load device list */
-          try { if (typeof listDevices === 'function') { listDevices(); } } catch(_) { console.warn('[ESP-NOW] listDevices not defined yet'); }
-          /* Load meshes now that ESP-NOW is initialized */
-          try { if (typeof window.loadMeshes === 'function') { window.loadMeshes(); } } catch(e) { console.warn('[ESP-NOW] loadMeshes call error:', e); }
-          /* Load device metadata */
-          try { if (typeof window.loadLocalDeviceMetadata === 'function') { window.loadLocalDeviceMetadata(); } } catch(e) { console.warn('[ESP-NOW] loadLocalDeviceMetadata call error:', e); }
-          /* Load preferred radio channel */
-          try { if (typeof window.refreshChannel === 'function') { window.refreshChannel(); } } catch(e) { console.warn('[ESP-NOW] refreshChannel call error:', e); }
-          /* Start message polling now that ESP-NOW is initialized */
-          if (typeof window.espnowStartPolling === 'function') { window.espnowStartPolling(); }
+    // The page decides from parsed json replies only (window.espnowParseReply,
+    // espnow-core.js); the human status text is shown but never matched on.
+    //   statusObj   'espnowstatus json' (null when the reply was not json)
+    //   statusText  'espnowstatus' as text, for the status box
+    //   modeObj     'espnowmode json'
+    // Returns { initialized, mesh }.
+    window.espnowApplyStatus = function(statusObj, statusText, modeObj) {
+      const indicator = hw.$('espnow-status-indicator');
+      const box = hw.$('espnow-status-data');
+      const isInitialized = !!(statusObj && statusObj.initialized === true);
+      box.textContent = statusText || '';
+      if (isInitialized) {
+        indicator.className = 'status-indicator status-enabled';
+        hw.$('btn-espnow-init').style.display = 'none';
+        hw.$('btn-espnow-disable').style.display = '';
+        hw.$('btn-espnow-toggle-mode').style.display = '';
+        hw.$('en-not-init').style.display = 'none';
+        hw.$('en-panels').style.display = 'block';
+        box.style.display = 'block';
+        if (typeof window.espnowStartPolling === 'function') window.espnowStartPolling();
+      } else {
+        indicator.className = 'status-indicator status-disabled';
+        hw.$('btn-espnow-init').style.display = '';
+        hw.$('btn-espnow-disable').style.display = 'none';
+        hw.$('btn-espnow-toggle-mode').style.display = 'none';
+        hw.$('en-not-init').style.display = 'flex';
+        hw.$('en-panels').style.display = 'none';
+        // The status text stays visible when it says why the last start failed.
+        box.style.display = (statusObj && statusObj.lastInitError) ? 'block' : 'none';
+        if (typeof window.espnowStopPolling === 'function') window.espnowStopPolling();
+      }
+      const isMesh = !!(modeObj && modeObj.mode === 'mesh');
+      try {
+        hw.setText(hw.$('btn-espnow-toggle-mode'), 'Mode: ' + (isMesh ? 'Mesh' : 'Direct'));
+        hw.toggle(hw.$('mesh-views-card'), (isMesh && isInitialized));
+        hw.toggle(hw.$('mesh-role-card'), (isMesh && isInitialized));
+        window.espnowIsMesh = isMesh;
+        if (isMesh && isInitialized) {
+          if (typeof window.startMeshStatusPolling === 'function') window.startMeshStatusPolling();
         } else {
-          indicator.className = 'status-indicator status-disabled';
-          hw.$('btn-espnow-init').style.display = '';
-          hw.$('btn-espnow-disable').style.display = 'none';
-          hw.$('btn-espnow-toggle-mode').style.display = 'none';
-          hw.$('en-not-init').style.display = 'flex';
-          hw.$('en-panels').style.display = 'none';
-          // The status text stays visible when it says why the last start failed.
-          hw.$('espnow-status-data').style.display = /Last start error:/.test(output) ? 'block' : 'none';
-          if (typeof window.espnowStopPolling === 'function') { window.espnowStopPolling(); }
+          if (typeof window.stopMeshStatusPolling === 'function') window.stopMeshStatusPolling();
+        }
+      } catch(e) { console.error('[ESP-NOW] Error setting mode:', e); }
+      return { initialized: isInitialized, mesh: isMesh };
+    };
+
+    // Applies one /api/espnow/status reply. Slot order is handleEspNowStatus's
+    // CMDS[] (WebPage_ESPNow.cpp): 0 espnowstatus json, 1 espnowmode json,
+    // 2 bondstatus json, 3 espnowlist, 4 espnowmeshes listjson,
+    // 5 espnowdeviceinfo json, 6 espnowmeshrole json, 7 espnowmeshstatus,
+    // 8 espnowstatus (text, status box only).
+    window.espnowApplyStatusSlots = function(results) {
+      var parse = window.espnowParseReply;
+      var statusObj = parse(results[0]);
+      var st = window.espnowApplyStatus(statusObj, results[8] || '', parse(results[1]));
+      if (!st.initialized) return st;
+      try { if (typeof listDevices === 'function') listDevices(results[2], results[3]); } catch(e) { console.warn('[ESP-NOW] listDevices error:', e); }
+      try { if (typeof window.loadMeshes === 'function') window.loadMeshes(results[4]); } catch(e) { console.warn('[ESP-NOW] loadMeshes error:', e); }
+      try { if (typeof window.loadLocalDeviceMetadata === 'function') window.loadLocalDeviceMetadata(results[5]); } catch(e) { console.warn('[ESP-NOW] deviceinfo error:', e); }
+      try { if (typeof window.refreshChannel === 'function') window.refreshChannel(statusObj); } catch(e) { console.warn('[ESP-NOW] channel error:', e); }
+      if (st.mesh) {
+        try { if (typeof window.refreshMeshRole === 'function') window.refreshMeshRole(results[6]); } catch(e) { console.warn('[ESP-NOW] meshrole error:', e); }
+        try { if (typeof window.refreshMeshStatus === 'function') window.refreshMeshStatus(results[7]); } catch(e) { console.warn('[ESP-NOW] meshstatus error:', e); }
+      }
+      return st;
+    };
+
+    // Fallback when /api/espnow/status cannot be fetched: the same json forms,
+    // one CLI request each. 'espnowmode' is an admin command; a refusal leaves
+    // the mode unknown (shown as Direct) instead of failing the refresh.
+    window.espnowRefreshStatusFromCli = function() {
+      var parse = window.espnowParseReply;
+      var statusObj = null;
+      var statusText = '';
+      return hw.postFormText('/api/cli', { cmd: 'espnowstatus json' })
+      .then(function(text) {
+        statusObj = parse(text);
+        return hw.postFormText('/api/cli', { cmd: 'espnowstatus' });
+      })
+      .then(function(text) {
+        statusText = text;
+        return hw.postFormText('/api/cli', { cmd: 'espnowmode json' }).catch(function() { return ''; });
+      })
+      .then(function(modeText) {
+        var st = window.espnowApplyStatus(statusObj, statusText, parse(modeText));
+        if (!st.initialized) return;
+        try { if (typeof listDevices === 'function') listDevices(); } catch(e) { console.warn('[ESP-NOW] listDevices error:', e); }
+        try { if (typeof window.loadMeshes === 'function') window.loadMeshes(); } catch(e) { console.warn('[ESP-NOW] loadMeshes error:', e); }
+        try { if (typeof window.loadLocalDeviceMetadata === 'function') window.loadLocalDeviceMetadata(); } catch(e) { console.warn('[ESP-NOW] deviceinfo error:', e); }
+        try { if (typeof window.refreshChannel === 'function') window.refreshChannel(statusObj); } catch(e) { console.warn('[ESP-NOW] channel error:', e); }
+        if (st.mesh) {
+          try { if (typeof window.refreshMeshRole === 'function') window.refreshMeshRole(); } catch(e) { console.warn('[ESP-NOW] meshrole error:', e); }
+          try { if (typeof window.refreshMeshStatus === 'function') window.refreshMeshStatus(); } catch(e) { console.warn('[ESP-NOW] meshstatus error:', e); }
         }
       })
-      .then(() => {
-        return hw.postFormText('/api/cli', { cmd: 'espnowmode' });
-      })
-      .then(modeOut => {
-        try {
-          console.log('[ESP-NOW] Mode response:', modeOut);
-          var btn = hw.$('btn-espnow-toggle-mode');
-          if (!btn) return;
-          var m = (modeOut || '').toLowerCase();
-          var isMesh = m.indexOf('mesh') >= 0;
-          console.log('[ESP-NOW] Detected mode:', isMesh ? 'MESH' : 'DIRECT');
-          btn.textContent = 'Mode: ' + (isMesh ? 'Mesh' : 'Direct');
-          // Show/hide mesh panels based on mode + init state
-          var indicator = hw.$('espnow-status-indicator');
-          var isInitialized = indicator && indicator.className.indexOf('status-enabled') >= 0;
-          var meshViewsCard = hw.$('mesh-views-card');
-          var meshRoleCard = hw.$('mesh-role-card');
-          hw.toggle(meshViewsCard, (isMesh && isInitialized));
-          hw.toggle(meshRoleCard, (isMesh && isInitialized));
-          
-          if (isMesh && isInitialized && typeof window.refreshMeshRole === 'function') {
-            window.refreshMeshRole();
-          }
-          
-          window.espnowIsMesh = !!isMesh;
-          console.log('[ESP-NOW] window.espnowIsMesh set to:', window.espnowIsMesh);
-          
-          // Only start mesh polling if initialized
-          if (isMesh && isInitialized) {
-            if (typeof window.refreshMeshStatus === 'function') {
-              window.refreshMeshStatus();
-            }
-            if (typeof window.startMeshStatusPolling === 'function') {
-              window.startMeshStatusPolling();
-            }
-          } else {
-            if (typeof window.stopMeshStatusPolling === 'function') {
-              window.stopMeshStatusPolling();
-            }
-          }
-        } catch(e) {
-          console.error('[ESP-NOW] Error setting mode:', e);
-        }
-      })
-      .catch(error => {
+      .catch(function(error) {
         hw.$('espnow-status-data').textContent = 'Error: ' + (error && error.message ? error.message : error);
       });
     };
 
-    // Batch version: loads all 8 ESP-NOW CLI commands in a single HTTPS request on page load.
-    // Falls back to individual refreshStatus() if the batch endpoint is unavailable.
-    window.refreshStatusBatch = function() {
-      hw.fetchJSON('/api/espnow/status')
-      .then(data => {
+    // Page load and every Refresh: one request for all status slots. The endpoint
+    // runs the commands as the system, so a guest's page and Refresh both work.
+    window.refreshStatus = function() {
+      return hw.fetchJSON('/api/espnow/status')
+      .then(function(data) {
         if (!data || !Array.isArray(data.results) || data.results.length < 2) {
           console.warn('[ESP-NOW] Status response invalid, falling back to individual requests');
-          refreshStatus();
-          return;
+          return window.espnowRefreshStatusFromCli();
         }
-        var results = data.results;
-        var output  = results[0] || '';
-        var modeOut = results[1] || '';
-
-        // --- apply espnowstatus (same logic as refreshStatus) ---
-        console.log('[ESP-NOW] Batch status:', output);
-        const indicator = hw.$('espnow-status-indicator');
-        const isInitialized = output.match(/Initialized:\s*Yes/i) !== null;
-        hw.$('espnow-status-data').textContent = output;
-        if (isInitialized) {
-          indicator.className = 'status-indicator status-enabled';
-          hw.$('btn-espnow-init').style.display = 'none';
-          hw.$('btn-espnow-disable').style.display = '';
-          hw.$('btn-espnow-toggle-mode').style.display = '';
-          hw.$('en-not-init').style.display = 'none';
-          hw.$('en-panels').style.display = 'block';
-          hw.$('espnow-status-data').style.display = 'block';
-          if (typeof window.espnowStartPolling === 'function') window.espnowStartPolling();
-        } else {
-          indicator.className = 'status-indicator status-disabled';
-          hw.$('btn-espnow-init').style.display = '';
-          hw.$('btn-espnow-disable').style.display = 'none';
-          hw.$('btn-espnow-toggle-mode').style.display = 'none';
-          hw.$('en-not-init').style.display = 'flex';
-          hw.$('en-panels').style.display = 'none';
-          // The status text stays visible when it says why the last start failed.
-          hw.$('espnow-status-data').style.display = /Last start error:/.test(output) ? 'block' : 'none';
-          if (typeof window.espnowStopPolling === 'function') window.espnowStopPolling();
-        }
-
-        // --- apply espnow mode ---
-        try {
-          var m = (modeOut || '').toLowerCase();
-          var isMesh = m.indexOf('mesh') >= 0;
-          var btn = hw.$('btn-espnow-toggle-mode');
-          hw.setText(btn, 'Mode: ' + (isMesh ? 'Mesh' : 'Direct'));
-          var meshViewsCard = hw.$('mesh-views-card');
-          var meshRoleCard = hw.$('mesh-role-card');
-          hw.toggle(meshViewsCard, (isMesh && isInitialized));
-          hw.toggle(meshRoleCard, (isMesh && isInitialized));
-          window.espnowIsMesh = !!isMesh;
-          if (isMesh && isInitialized) {
-            if (typeof window.startMeshStatusPolling === 'function') window.startMeshStatusPolling();
-          } else {
-            if (typeof window.stopMeshStatusPolling === 'function') window.stopMeshStatusPolling();
-          }
-        } catch(e) { console.error('[ESP-NOW] Batch mode parse error:', e); }
-
-        // --- distribute remaining results to sub-functions ---
-        if (isInitialized) {
-          try { if (typeof listDevices === 'function') listDevices(results[2], results[3]); } catch(e) { console.warn('[ESP-NOW] Batch listDevices error:', e); }
-          try { if (typeof window.loadMeshes === 'function') window.loadMeshes(results[4]); } catch(e) { console.warn('[ESP-NOW] Batch loadMeshes error:', e); }
-          try { if (typeof window.loadLocalDeviceMetadata === 'function') window.loadLocalDeviceMetadata(results[5]); } catch(e) { console.warn('[ESP-NOW] Batch deviceinfo error:', e); }
-          var isMeshInit = window.espnowIsMesh;
-          if (isMeshInit) {
-            try { if (typeof window.refreshMeshRole === 'function') window.refreshMeshRole(results[6]); } catch(e) { console.warn('[ESP-NOW] Batch meshrole error:', e); }
-            try { if (typeof window.refreshMeshStatus === 'function') window.refreshMeshStatus(results[7]); } catch(e) { console.warn('[ESP-NOW] Batch meshstatus error:', e); }
-          }
-        }
+        window.espnowApplyStatusSlots(data.results);
+      }, function(error) {
+        console.warn('[ESP-NOW] Status fetch failed, falling back to individual requests:', error);
+        return window.espnowRefreshStatusFromCli();
       })
-      .catch(error => {
-        console.warn('[ESP-NOW] Batch fetch failed, falling back to individual requests:', error);
-        refreshStatus();
+      .catch(function(error) {
+        // The reply could not be applied (for example /assets/espnow-core.js
+        // did not load): say so instead of leaving the page on "Loading...".
+        console.error('[ESP-NOW] Status apply error:', error);
+        var box = hw.$('espnow-status-data');
+        box.textContent = 'Error: ' + (error && error.message ? error.message : error);
+        box.style.display = 'block';
       });
     };
+    window.refreshStatusBatch = window.refreshStatus;
 
     console.log('[ESP-NOW] Chunk 2: Status functions ready');
   } catch(e) { console.error('[ESP-NOW] Chunk 2 error:', e); }
@@ -849,18 +804,17 @@ inline void streamEspNowInner(httpd_req_t* req) {
       // Fetch both direct peers and current device status
       Promise.all([
         hw.postFormText('/api/cli', { cmd: 'espnowmeshstatus' }),
-        hw.postFormText('/api/cli', { cmd: 'espnowstatus' })
+        hw.postFormText('/api/cli', { cmd: 'espnowstatus json' })
       ])
       .then(function(results) {
         var meshStatus = results[0];
-        var deviceStatus = results[1];
+        var deviceStatus = window.espnowParseReply(results[1]);
         
-        // Extract current device name and MAC
+        // Current device name and MAC (the json 'mac' field, shape-checked)
         var deviceName = 'THIS DEVICE';
         var deviceMac = '';
-        var macMatch = deviceStatus.match(/MAC:\s*([A-Fa-f0-9:]{17})/i);
-        if (macMatch) {
-          deviceMac = macMatch[1];
+        if (deviceStatus && window.espnowIsMacText(deviceStatus.mac)) {
+          deviceMac = deviceStatus.mac;
           // Try to get device name from page title
           var titleElem = hw.qs('h1');
           if (titleElem && titleElem.textContent) {
@@ -877,7 +831,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
         var selfDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:6px;"></span>';
         html += '<div style="color:var(--success);font-weight:bold;">' + selfDot + window.topologyEscapeHtml(deviceName);
         if (deviceMac) {
-          html += ' (' + deviceMac + ')';
+          html += ' (' + window.topologyEscapeHtml(deviceMac) + ')';
         }
         html += '</div>';
         
@@ -942,22 +896,23 @@ inline void streamEspNowInner(httpd_req_t* req) {
     console.log('[ESP-NOW] Chunk 4c: Mesh role functions start');
     window.refreshMeshRole = function(preloadedText) {
       console.log('[ESP-NOW] Refreshing mesh role...');
+      // output: the 'espnowmeshrole json' reply. Role and MACs are settings
+      // strings: shape-checked here and escaped before they reach innerHTML.
       function applyMeshRole(output) {
         console.log('[ESP-NOW] Mesh role response:', output);
         var statusDiv = hw.$('mesh-role-status');
         if (!statusDiv) return;
-        var roleMatch = output.match(/Mesh role:\s*(\w+)/i);
-        var masterMatch = output.match(/Master MAC:\s*([A-Fa-f0-9:]{17})/i);
-        var backupEnabledMatch = output.match(/Backup enabled:\s*(yes|no)/i);
-        var backupMatch = output.match(/Backup MAC:\s*([A-Fa-f0-9:]{17})/i);
-        var role = roleMatch ? roleMatch[1] : 'unknown';
-        var masterMAC = masterMatch ? masterMatch[1] : 'Not set';
-        var backupEnabled = backupEnabledMatch ? backupEnabledMatch[1].toLowerCase() === 'yes' : false;
-        var backupMAC = backupMatch ? backupMatch[1] : 'Not set';
-        var html = '<strong>Current Role:</strong> ' + role.charAt(0).toUpperCase() + role.slice(1);
-        html += '<br><strong>Master MAC:</strong> ' + masterMAC;
+        var esc = window.topologyEscapeHtml;
+        var isMac = window.espnowIsMacText;
+        var j = window.espnowParseReply(output);
+        var role = (j && typeof j.role === 'string' && /^\w+$/.test(j.role)) ? j.role : 'unknown';
+        var masterMAC = (j && isMac(j.masterMac)) ? j.masterMac : 'Not set';
+        var backupEnabled = !!(j && j.backupEnabled === true);
+        var backupMAC = (j && isMac(j.backupMac)) ? j.backupMac : 'Not set';
+        var html = '<strong>Current Role:</strong> ' + esc(role.charAt(0).toUpperCase() + role.slice(1));
+        html += '<br><strong>Master MAC:</strong> ' + esc(masterMAC);
         if (backupEnabled) {
-          html += '<br><strong>Backup MAC:</strong> ' + backupMAC;
+          html += '<br><strong>Backup MAC:</strong> ' + esc(backupMAC);
         }
         statusDiv.innerHTML = html;
         var backupCheckbox = hw.$('backup-master-enabled');
@@ -995,7 +950,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
         applyMeshRole(preloadedText);
         return;
       }
-      hw.postFormText('/api/cli', { cmd: 'espnowmeshrole' })
+      hw.postFormText('/api/cli', { cmd: 'espnowmeshrole json' })
       .then(applyMeshRole)
       .catch(error => {
         console.error('[ESP-NOW] Mesh role fetch error:', error);
@@ -1145,10 +1100,13 @@ inline void streamEspNowInner(httpd_req_t* req) {
       };
       hw.$('btn-espnow-init').addEventListener('click', function() {
         // Check if first-time setup is needed
-        hw.postFormText('/api/cli', { cmd: 'devicename' })
+        hw.postFormText('/api/cli', { cmd: 'espnowdeviceinfo json' })
         .then(text => {
-          // If device name is not set, show setup modal
-          if (text.indexOf('(not set)') >= 0) {
+          // If the device name is not set (empty or not a valid saved name), show
+          // the setup modal. A reply that is not json goes on to init, whose own
+          // reply says what is wrong.
+          var info = window.espnowParseReply(text);
+          if (info && (!info.name || info.nameValid === false)) {
             hw.$('setup-modal').classList.add('show');
             hw.$('setup-device-name').focus();
           } else {
@@ -1183,9 +1141,11 @@ inline void streamEspNowInner(httpd_req_t* req) {
       hw.$('btn-espnow-refresh').addEventListener('click', refreshStatus);
       hw.$('btn-espnow-toggle-mode').addEventListener('click', function() {
         /* Fetch current mode, then toggle to the other */
-        hw.postFormText('/api/cli', { cmd: 'espnowmode' })
+        hw.postFormText('/api/cli', { cmd: 'espnowmode json' })
           .then(curr => {
-            var isMesh = (curr || '').toLowerCase().indexOf('mesh') >= 0;
+            var modeObj = window.espnowParseReply(curr);
+            if (!modeObj || typeof modeObj.mode !== 'string') throw new Error('could not read the current mode');
+            var isMesh = modeObj.mode === 'mesh';
             var next = isMesh ? 'direct' : 'mesh';
             // Update global flag immediately based on what we're switching TO
             window.espnowIsMesh = (next === 'mesh');
@@ -1374,73 +1334,68 @@ inline void streamEspNowInner(httpd_req_t* req) {
   try {
     console.log('[ESP-NOW] Chunk 5c: Device metadata functions');
     window.loadLocalDeviceMetadata = function(preloadedText) {
+      // text: the 'espnowdeviceinfo json' reply. An unset field is an empty
+      // string; a reply that is not json leaves the inputs alone.
       function applyMetadata(text) {
-        const friendlyMatch = text.match(/Friendly Name:\s*(.+)/);
-        const roomMatch = text.match(/Room:\s*(.+)/);
-        const zoneMatch = text.match(/Zone:\s*(.+)/);
-        const tagsMatch = text.match(/Tags:\s*(.+)/);
-        const stationaryMatch = text.match(/Stationary:\s*(true|false|yes|no)/i);
+        const j = window.espnowParseReply(text);
+        if (!j) return;
         const friendlyInput = hw.$('friendly-name');
         const roomInput = hw.$('room-name');
         const zoneInput = hw.$('zone-name');
         const tagsInput = hw.$('tags-input');
         const stationaryCheckbox = hw.$('stationary-checkbox');
-        if (friendlyInput && friendlyMatch) {
-          const val = friendlyMatch[1].trim();
-          friendlyInput.value = (val === '(not set)') ? '' : val;
-        }
-        if (roomInput && roomMatch) {
-          const val = roomMatch[1].trim();
-          roomInput.value = (val === '(not set)') ? '' : val;
-        }
-        if (zoneInput && zoneMatch) {
-          const val = zoneMatch[1].trim();
-          zoneInput.value = (val === '(not set)') ? '' : val;
-        }
-        if (tagsInput && tagsMatch) {
-          const val = tagsMatch[1].trim();
-          tagsInput.value = (val === '(none)') ? '' : val;
-        }
-        if (stationaryCheckbox && stationaryMatch) {
-          const sv = stationaryMatch[1].toLowerCase();
-          stationaryCheckbox.checked = (sv === 'yes' || sv === 'true');
-        }
+        if (friendlyInput && typeof j.friendlyName === 'string') friendlyInput.value = j.friendlyName;
+        if (roomInput && typeof j.room === 'string') roomInput.value = j.room;
+        if (zoneInput && typeof j.zone === 'string') zoneInput.value = j.zone;
+        if (tagsInput && typeof j.tags === 'string') tagsInput.value = j.tags;
+        if (stationaryCheckbox && typeof j.stationary === 'boolean') stationaryCheckbox.checked = j.stationary;
       }
       if (preloadedText !== undefined) {
         applyMetadata(preloadedText);
         return;
       }
-      hw.postFormText('/api/cli', { cmd: 'espnowdeviceinfo' })
+      hw.postFormText('/api/cli', { cmd: 'espnowdeviceinfo json' })
       .then(applyMetadata)
       .catch(error => {
         console.error('[ESP-NOW] Error loading device metadata:', error);
       });
     };
 
-    /* Preferred ESP-NOW radio channel: read via 'espnowchannel' (no arg) and
-       populate the select + status. The select is filled once (Auto + 1-13). */
-    window.refreshChannel = function() {
+    /* Preferred ESP-NOW radio channel, from the 'espnowstatus json' fields
+       channelPref (0 = auto, 1-13 = pinned) and channel (the applied channel).
+       statusObj is the parsed reply when the caller already has it (null when
+       that reply was not json); without it the reply is fetched here. The select
+       is filled once (Auto + 1-13). */
+    window.refreshChannel = function(statusObj) {
       var sel = hw.$('channel-select');
       if (sel && sel.options.length === 0) {
         var opts = '<option value="auto">Auto (follow Wi-Fi)</option>';
         for (var c = 1; c <= 13; c++) opts += '<option value="' + c + '">Channel ' + c + '</option>';
         sel.innerHTML = opts;
       }
-      hw.postFormText('/api/cli', { cmd: 'espnowchannel' })
-      .then(function(text) {
+      // Both values are coerced to whole numbers in range before they are shown.
+      function channelNumber(v, max) {
+        var n = (typeof v === 'number') ? v : NaN;
+        return (n >= 1 && n <= max && Math.floor(n) === n) ? n : 0;
+      }
+      function applyChannel(s) {
         var statusDiv = hw.$('channel-status');
-        var prefMatch = text.match(/channel preference:\s*(auto|\d+)/i);
-        var radioMatch = text.match(/Radio channel now:\s*(\d+)/i);
-        var pref = prefMatch ? prefMatch[1].toLowerCase() : 'auto';
-        if (sel) sel.value = (pref === 'auto') ? 'auto' : pref;
+        var prefNum = s ? channelNumber(s.channelPref, 13) : 0;
+        var radioNum = s ? channelNumber(s.channel, 14) : 0;
+        if (sel) sel.value = prefNum ? String(prefNum) : 'auto';
         if (statusDiv) {
-          var radio = radioMatch ? radioMatch[1] : '?';
           statusDiv.innerHTML =
-            '<strong>Preference:</strong> ' + (pref === 'auto' ? 'Auto (follow Wi-Fi)' : ('Channel ' + pref)) +
-            '<br><strong>Radio now:</strong> channel ' + radio +
+            '<strong>Preference:</strong> ' + (prefNum ? ('Channel ' + prefNum) : 'Auto (follow Wi-Fi)') +
+            '<br><strong>Radio now:</strong> channel ' + (radioNum ? radioNum : '?') +
             '<br><span style="color:var(--muted)">Set the same value on both devices to pair off-grid.</span>';
         }
-      })
+      }
+      if (statusObj !== undefined) {
+        applyChannel(statusObj);
+        return;
+      }
+      hw.postFormText('/api/cli', { cmd: 'espnowstatus json' })
+      .then(function(text) { applyChannel(window.espnowParseReply(text)); })
       .catch(function(error) {
         var statusDiv = hw.$('channel-status');
         hw.setHTML(statusDiv, '<span style="color:var(--danger);">Error: ' + window.topologyEscapeHtml(error && error.message ? error.message : String(error)) + '</span>');

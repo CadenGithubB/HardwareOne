@@ -14,8 +14,9 @@ A source check confirms nothing but clearing the output buffer runs before the
 refusal.
 
 The ESP-NOW status endpoint (WebPage_ESPNow.cpp handleEspNowStatus), the last
-direct caller off the executor, now submits each of its eight fixed status
-commands through executeInternalStatusCommand in the same order, after the
+direct caller off the executor, now submits each of its nine fixed status
+commands (eight json replies the page decides from, then the status text for
+display) through executeInternalStatusCommand in the same order, after the
 same guest-loadable WEB_AUTH_OR_RETURN, and the file has no executeCommand call.
 
 --component / --source-dir point the suite at another copy of the production
@@ -41,8 +42,9 @@ HARNESS = HERE / "command_executor_admission_harness.cpp"
 EXECUTE = "bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize)"
 GUARD = "if (!executeCommandCallerAdmitted())"
 STATUS_COMMANDS = [
-    "espnowstatus", "espnowmode", "bondstatus", "espnowlist",
-    "espnowmeshes listjson", "espnowdeviceinfo", "espnowmeshrole", "espnowmeshstatus",
+    "espnowstatus json", "espnowmode json", "bondstatus json", "espnowlist",
+    "espnowmeshes listjson", "espnowdeviceinfo json", "espnowmeshrole json", "espnowmeshstatus",
+    "espnowstatus",
 ]
 
 

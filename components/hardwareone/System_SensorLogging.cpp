@@ -624,19 +624,26 @@ void sensorLogTick() {
     pos += written;
     remaining -= written;
 
-    if ((gSensorLogMask & LOG_THERMAL) && s.thermalValid && remaining > 0) {
-      written = snprintf(pos, remaining, ",%d,%d,%d",
-                         (int)s.thermalMin, (int)s.thermalMax, (int)s.thermalAvg);
+    // A selected sensor always fills its columns: buildCsvHeader lists them
+    // whether or not the sensor has a reading, so a row without one writes the
+    // same number of empty fields and the later columns stay under their names.
+    if ((gSensorLogMask & LOG_THERMAL) && remaining > 0) {
+      written = s.thermalValid
+                    ? snprintf(pos, remaining, ",%d,%d,%d",
+                               (int)s.thermalMin, (int)s.thermalMax, (int)s.thermalAvg)
+                    : snprintf(pos, remaining, ",,,");
       pos += written;
       remaining -= written;
     }
 
-    if ((gSensorLogMask & LOG_TOF) && s.tofValid && remaining > 0) {
-      written = snprintf(pos, remaining, ",%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
-                         s.tof[0].distance_mm, s.tof[0].valid ? 1 : 0, s.tof[0].status,
-                         s.tof[1].distance_mm, s.tof[1].valid ? 1 : 0, s.tof[1].status,
-                         s.tof[2].distance_mm, s.tof[2].valid ? 1 : 0, s.tof[2].status,
-                         s.tof[3].distance_mm, s.tof[3].valid ? 1 : 0, s.tof[3].status);
+    if ((gSensorLogMask & LOG_TOF) && remaining > 0) {
+      written = s.tofValid
+                    ? snprintf(pos, remaining, ",%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d",
+                               s.tof[0].distance_mm, s.tof[0].valid ? 1 : 0, s.tof[0].status,
+                               s.tof[1].distance_mm, s.tof[1].valid ? 1 : 0, s.tof[1].status,
+                               s.tof[2].distance_mm, s.tof[2].valid ? 1 : 0, s.tof[2].status,
+                               s.tof[3].distance_mm, s.tof[3].valid ? 1 : 0, s.tof[3].status)
+                    : snprintf(pos, remaining, ",,,,,,,,,,,,");
       pos += written;
       remaining -= written;
     }
@@ -651,17 +658,21 @@ void sensorLogTick() {
       remaining -= written;
     }
 
-    if ((gSensorLogMask & LOG_GAMEPAD) && s.inputValid && remaining > 0) {
-      written = snprintf(pos, remaining, ",%d,%d,%lu",
-                         s.joyX, s.joyY, (unsigned long)s.buttons);
+    if ((gSensorLogMask & LOG_GAMEPAD) && remaining > 0) {
+      written = s.inputValid
+                    ? snprintf(pos, remaining, ",%d,%d,%lu",
+                               s.joyX, s.joyY, (unsigned long)s.buttons)
+                    : snprintf(pos, remaining, ",,,");
       pos += written;
       remaining -= written;
     }
 
-    if ((gSensorLogMask & LOG_APDS) && s.apdsValid && remaining > 0) {
-      written = snprintf(pos, remaining, ",%u,%u,%u,%u,%u,%u",
-                         s.apdsRed, s.apdsGreen, s.apdsBlue, s.apdsClear,
-                         s.apdsProximity, s.apdsGesture);
+    if ((gSensorLogMask & LOG_APDS) && remaining > 0) {
+      written = s.apdsValid
+                    ? snprintf(pos, remaining, ",%u,%u,%u,%u,%u,%u",
+                               s.apdsRed, s.apdsGreen, s.apdsBlue, s.apdsClear,
+                               s.apdsProximity, s.apdsGesture)
+                    : snprintf(pos, remaining, ",,,,,,");
       pos += written;
       remaining -= written;
     }
@@ -852,14 +863,18 @@ void sensorLogTick() {
       snap.gGpsConnected = gGpsConnected;
       GpsCache gps{};
       if (gpsCacheSnapshot(gps)) {
+        // Satellites and fix quality are reported without a fix too (the
+        // no-fix log row prints them); position, speed and time need a fix.
+        if (gps.dataValid) {
+          snap.gpsSatellites = gps.satellites;
+          snap.gpsFixQuality = gps.fixQuality;
+        }
         if (gps.dataValid && gps.hasFix) {
           snap.gpsFix = true;
           snap.gpsLatitude = gps.latitude;
           snap.gpsLongitude = gps.longitude;
           snap.gpsAltitude = gps.altitude;
           snap.gpsSpeed = gps.speed;
-          snap.gpsSatellites = gps.satellites;
-          snap.gpsFixQuality = gps.fixQuality;
           snap.gpsHour = gps.hour;
           snap.gpsMinute = gps.minute;
           snap.gpsSecond = gps.second;
@@ -1214,6 +1229,115 @@ static String sensorLogSensorNames(uint8_t mask) {
   return names;
 }
 
+// Reads the status once for both output forms.
+static void sensorLogReadStatus(SensorLogStatus& st) {
+  st.running = gSensorLoggingRunning;
+  st.file = gSensorLogPath.c_str();
+  st.intervalMs = gSensorLogIntervalMs;
+  st.format = gSensorLogFormat;
+  st.maxSizeBytes = (uint32_t)gSensorLogMaxSize;
+  st.rotations = gSensorLogMaxRotations;
+  st.sensorMask = sensorLogSelectedMask();
+  st.autoStart = gSettings.sensorLogAutoStart;
+  st.lastWriteAgoSec = st.running ? (millis() - gSensorLogLastWrite) / 1000 : 0;
+  st.approxSizeBytes = st.running ? (uint32_t)gApproxSizeBytes : 0;
+}
+
+// 'sensorlog status' as text. The wording is read by people, shown as-is by
+// the bond remote panel and pinned by the host tests; programs read the json.
+static void sensorLogFormatStatusText(const SensorLogStatus& st, char* buf, size_t cap) {
+  String sensors = sensorLogSensorNames(st.sensorMask);
+  if (sensors.length() == 0) sensors = "(none)";
+
+  const char* fmtName = (st.format == SENSOR_LOG_CSV) ? "CSV" :
+                         (st.format == SENSOR_LOG_TRACK) ? "TRACK" : "TEXT";
+  if (st.running) {
+    snprintf(buf, cap,
+      "Sensor logging ACTIVE\n"
+      "  File: %s\n"
+      "  Interval: %lums\n"
+      "  Format: %s\n"
+      "  Max size: %u bytes\n"
+      "  Rotations: %u\n"
+      "  Sensors: %s\n"
+      "  Auto-start: %s\n"
+      "  Last write: %lus ago",
+      st.file,
+      (unsigned long)st.intervalMs,
+      fmtName,
+      (unsigned)st.maxSizeBytes,
+      (unsigned)st.rotations,
+      sensors.c_str(),
+      st.autoStart ? "ON" : "OFF",
+      st.lastWriteAgoSec);
+  } else {
+    snprintf(buf, cap,
+      "Sensor logging is INACTIVE\n"
+      "  Format: %s\n"
+      "  Max size: %u bytes\n"
+      "  Rotations: %u\n"
+      "  Sensors: %s\n"
+      "  Auto-start: %s",
+      fmtName,
+      (unsigned)st.maxSizeBytes,
+      (unsigned)st.rotations,
+      sensors.c_str(),
+      st.autoStart ? "ON" : "OFF");
+  }
+}
+
+// 'sensorlog status json': one object.
+//   {"schema":1,"running":bool,"file":"..."?,"intervalMs":n,"format":"text|csv|track",
+//    "maxSizeBytes":n,"rotations":n,"sensors":["thermal",...],"autoStart":bool,
+//    "lastWriteAgoSec":n?,"approxSizeBytes":n?}
+// file, lastWriteAgoSec and approxSizeBytes are present only while running.
+// format uses the words the 'sensorlog format' argument takes. A reply that
+// does not fit `cap` is replaced whole by a short error object (returns
+// false): a cut document cannot be parsed.
+static bool sensorLogFormatStatusJson(const SensorLogStatus& st, char* buf, size_t cap) {
+  if (!buf || cap == 0) return false;
+  const char* fmtKey = (st.format == SENSOR_LOG_CSV) ? "csv" :
+                        (st.format == SENSOR_LOG_TRACK) ? "track" : "text";
+  size_t pos = 0;
+  bool fits = true;
+  // Accounts one snprintf result; a write that does not fit ends the document.
+  auto wrote = [&](int n) {
+    if (!fits) return;
+    if (n < 0 || (size_t)n >= cap - pos) fits = false;
+    else pos += (size_t)n;
+  };
+  wrote(snprintf(buf + pos, cap - pos, "{\"schema\":1,\"running\":%s", st.running ? "true" : "false"));
+  if (fits && st.running) {
+    wrote(snprintf(buf + pos, cap - pos, ",\"file\":\""));
+    if (fits) {
+      // jsonEscapeInto stops at what fits; a shortened path is refused here.
+      if (jsonEscapedLength(st.file, strlen(st.file)) >= cap - pos) fits = false;
+      else pos += jsonEscapeInto(buf + pos, cap - pos, st.file);
+    }
+    if (fits) wrote(snprintf(buf + pos, cap - pos, "\""));
+  }
+  if (fits) {
+    wrote(snprintf(buf + pos, cap - pos,
+                   ",\"intervalMs\":%lu,\"format\":\"%s\",\"maxSizeBytes\":%lu,\"rotations\":%u,\"sensors\":[",
+                   (unsigned long)st.intervalMs, fmtKey, (unsigned long)st.maxSizeBytes,
+                   (unsigned)st.rotations));
+  }
+  bool first = true;
+  for (const auto& sensor : kSensorLogSensors) {
+    if (!fits || !(st.sensorMask & sensor.bit)) continue;
+    wrote(snprintf(buf + pos, cap - pos, "%s\"%s\"", first ? "" : ",", sensor.name));
+    first = false;
+  }
+  if (fits) wrote(snprintf(buf + pos, cap - pos, "],\"autoStart\":%s", st.autoStart ? "true" : "false"));
+  if (fits && st.running) {
+    wrote(snprintf(buf + pos, cap - pos, ",\"lastWriteAgoSec\":%lu,\"approxSizeBytes\":%lu",
+                   st.lastWriteAgoSec, (unsigned long)st.approxSizeBytes));
+  }
+  if (fits) wrote(snprintf(buf + pos, cap - pos, "}"));
+  if (!fits) snprintf(buf, cap, "{\"schema\":1,\"ok\":false,\"error\":\"response too large\"}");
+  return fits;
+}
+
 static const char* sensorLogSelectionChangeError() {
   // Selection edits cannot change a running CSV file's column set. Health
   // logging manages its own schema transition by restarting the session.
@@ -1521,7 +1645,7 @@ const char* cmd_sensorlog(const String& argsInput) {
     return "Error: invalid arguments — Usage: sensorlog <start|stop|status|format|maxsize|rotations|sensors|interval|autostart> [args...]\n"
            "  start <filepath> [interval_ms]: Begin logging (default 5000ms)\n"
            "  stop: Stop logging\n"
-           "  status: Show current logging status\n"
+           "  status [json]: Show current logging status (json: one JSON object)\n"
            "  format <text|csv|track>: Set log format (default: text)\n"
            "    track = GPS-only compact format with signal loss dedup;\n"
            "            NOTE: also OVERWRITES the sensor mask to GPS-only and persists it\n"
@@ -1536,48 +1660,21 @@ const char* cmd_sensorlog(const String& argsInput) {
   String subCmd = a.arg(0);
   subCmd.toLowerCase();
 
-  // Handle 'status' subcommand
+  // Handle 'status' subcommand: the text, or one JSON object with
+  // 'status json'. Both print from one SensorLogStatus reading.
   if (subCmd == "status") {
-    if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-    String sensors = sensorLogSensorNames(sensorLogSelectedMask());
-    if (sensors.length() == 0) sensors = "(none)";
-    
-    const char* fmtName = (gSensorLogFormat == SENSOR_LOG_CSV) ? "CSV" :
-                           (gSensorLogFormat == SENSOR_LOG_TRACK) ? "TRACK" : "TEXT";
-    char* buf = getDebugBuffer();
-    if (gSensorLoggingRunning) {
-      snprintf(buf, 1024,
-        "Sensor logging ACTIVE\n"
-        "  File: %s\n"
-        "  Interval: %lums\n"
-        "  Format: %s\n"
-        "  Max size: %u bytes\n"
-        "  Rotations: %u\n"
-        "  Sensors: %s\n"
-        "  Auto-start: %s\n"
-        "  Last write: %lus ago",
-        gSensorLogPath.c_str(),
-        (unsigned long)gSensorLogIntervalMs,
-        fmtName,
-        (unsigned)gSensorLogMaxSize,
-        (unsigned)gSensorLogMaxRotations,
-        sensors.c_str(),
-        gSettings.sensorLogAutoStart ? "ON" : "OFF",
-        (millis() - gSensorLogLastWrite) / 1000);
-    } else {
-      snprintf(buf, 1024,
-        "Sensor logging is INACTIVE\n"
-        "  Format: %s\n"
-        "  Max size: %u bytes\n"
-        "  Rotations: %u\n"
-        "  Sensors: %s\n"
-        "  Auto-start: %s",
-        fmtName,
-        (unsigned)gSensorLogMaxSize,
-        (unsigned)gSensorLogMaxRotations,
-        sensors.c_str(),
-        gSettings.sensorLogAutoStart ? "ON" : "OFF");
+    String form = a.arg(1);
+    form.toLowerCase();
+    const bool wantJson = (form == "json");
+    if (!ensureDebugBuffer()) {
+      return wantJson ? "{\"schema\":1,\"ok\":false,\"error\":\"buffer\"}"
+                      : "Error: Debug buffer unavailable";
     }
+    SensorLogStatus st;
+    sensorLogReadStatus(st);
+    char* buf = getDebugBuffer();
+    if (wantJson) (void)sensorLogFormatStatusJson(st, buf, 1024);
+    else sensorLogFormatStatusText(st, buf, 1024);
     return buf;
   }
 
@@ -2703,7 +2800,7 @@ const CommandEntry sensorLoggingCommands[] = {
     "Usage: sensorlog <start|stop|status|format|maxsize|rotations|sensors|interval|autostart> [args...]\n"
     "  start <filepath> [interval_ms]: Begin logging (default 5000ms)\n"
     "  stop: Stop logging\n"
-    "  status: Show current logging status\n"
+    "  status [json]: Show current logging status (json: one JSON object)\n"
     "  format <text|csv|track>: Set log format (default: text)\n"
     "    track = GPS-only compact format with signal loss dedup;\n"
     "            NOTE: also OVERWRITES the sensor mask to GPS-only and persists it\n"

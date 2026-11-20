@@ -128,9 +128,13 @@ class EspNowRemoteContractTests(unittest.TestCase):
         for fragment in (r'"\"seq\":%lu,"', r'"\"reqId\":%lu,"', r'"\"piece\":%u,\"of\":%u,"', r'"\"mac\":\"%s\","',
                          r'",\"msg\":"', r'",\"sent\":%s"'):
             self.assertIn(fragment, page, f"/api/espnow/messages no longer writes {fragment}")
-        espnow = (COMPONENT / "System_ESPNow.cpp").read_text(encoding="utf-8")
-        self.assertRegex(espnow, r"const size_t FRAG = 200;",
+        # The piece size lives in the history core; the store cuts with it.
+        history = (COMPONENT / "System_ESPNow_HistoryCore.h").read_text(encoding="utf-8")
+        self.assertRegex(history, r"constexpr uint32_t kChunkText\s*=\s*200;",
                          "a stored answer is no longer cut into 200-byte pieces (harness pieces())")
+        espnow = (COMPONENT / "System_ESPNow.cpp").read_text(encoding="utf-8")
+        self.assertIn("const size_t kFrag = espnowhist::kChunkText;", espnow,
+                      "the answer store no longer cuts with espnowhist::kChunkText")
         listing = json.loads(peer_listing())
         self.assertGreater(len(peer_listing()), 600, "the fixture listing must span several pieces")
         self.assertEqual(11, len(listing["files"]))

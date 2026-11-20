@@ -33,6 +33,7 @@ def generated(baseline: Path | None) -> str:
              extract_block(header, "struct SensorLogSensor") + ";",
              extract_block(header, "inline constexpr SensorLogSensor kSensorLogSensors[]") + ";",
              extract_block(header, "enum SensorLogFormat") + ";",
+             (COMPONENT / "System_JsonText.h").read_text().replace("#pragma once\n", ""),
              extract_block((COMPONENT / "System_Command.h").read_text(), "class CommandArgs") + ";"]
     count_start = header.index("inline constexpr size_t kSensorLogSensorCount")
     types.append(header[count_start:header.index(";", count_start) + 1])
@@ -56,7 +57,15 @@ def generated(baseline: Path | None) -> str:
             '  const String subCmd = "sensors";\n' +
             extract_block(owner, 'if (subCmd == "sensors")') +
             '\n  return "Error: unreachable";\n}']
-    definitions.append('static const char* sensorLogStatusForTest() {\n'
+    if "static void sensorLogReadStatus(" in owner:
+        # The status branch prints from one SensorLogStatus reading (text, or
+        # json with `status json`); test_sensorlog_status_rows covers the json.
+        types.append(extract_block(header, "struct SensorLogStatus") + ";")
+        definitions += [extract_block(owner, marker) for marker in (
+            "static void sensorLogReadStatus(", "static void sensorLogFormatStatusText(",
+            "static bool sensorLogFormatStatusJson(")]
+    definitions.append('static const char* sensorLogStatusForTest(const char* line = "status") {\n'
+                       '  const CommandArgs a{String(line)};\n'
                        '  const String subCmd = "status";\n' +
                        extract_block(owner, 'if (subCmd == "status")') +
                        '\n  return "Error: unreachable";\n}')

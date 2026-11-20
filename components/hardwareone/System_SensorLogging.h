@@ -148,6 +148,23 @@ enum SensorLogFormat {
 SensorLogFormat sensorLogCurrentFormat();
 uint32_t sensorLogIntervalMs();
 
+// One reading of the logger's status. 'sensorlog status' (text) and 'sensorlog
+// status json' both print from it, so the two forms cannot disagree. Scalar
+// reads, not a synchronized snapshot. `file` is borrowed from the logger and
+// valid only inside the command that read it.
+struct SensorLogStatus {
+  bool running;
+  const char* file;          // the active file (meaningful while running)
+  uint32_t intervalMs;
+  SensorLogFormat format;
+  uint32_t maxSizeBytes;     // the file rotates at this size
+  uint8_t rotations;         // old generations kept
+  uint8_t sensorMask;        // LOG_* bits of the selection
+  bool autoStart;
+  unsigned long lastWriteAgoSec;  // while running
+  uint32_t approxSizeBytes;  // while running: the logger's own running estimate
+};
+
 // Boot-local identity of the active capture (0 when stopped). A new successful
 // start gets a new ID, even at the same path; rotation retains it. The guarded
 // stop checks identity and stops together, so a consumer cannot stop a

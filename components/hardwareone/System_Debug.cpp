@@ -26,6 +26,7 @@
 #include "System_TaskUtils.h"
 #include "System_User.h"  // CommandSource — recordLoginAttempt maps it to an audit path
 #include "System_Utils.h"
+#include "System_JsonText.h"  // jsonEscapeInto: the log path in the status json
 #include "System_AuthIdentity.h"  // currentCommandContext / currentCaptureState
 #include "WebServer_Utils.h"
 #include "System_ESPSR.h"  // srSyncDebugLevel()
@@ -2240,10 +2241,44 @@ DebugFlagMask systemLogConfiguredFlags() {
   return gDebugFlags;  // nothing saved: `log start` keeps the live mask
 }
 
-void formatSystemLogStatus(char* out, size_t outSize) {
-  if (!out || outSize == 0) return;
-  if (gSystemLogRunning && (gOutputFlags & MSG_ROUTE_FILE)) {
-    unsigned long ageSeconds = (millis() - gSystemLogLastWrite) / 1000;
+SystemLogState systemLogState() {
+  if (!gSystemLogRunning) return SystemLogState::Inactive;
+  return (gOutputFlags & MSG_ROUTE_FILE) ? SystemLogState::Active : SystemLogState::Configured;
+}
+
+// One reading of the system-log status; the text and json forms print from it.
+// `path` is borrowed from the logger and valid only inside the call that read
+// it (the formatters below read and print in one call).
+struct SystemLogStatus {
+  SystemLogState state;
+  bool running;              // the flag `log start` / `log stop` check
+  const char* path;
+  unsigned long lastWriteAgoSec;
+  unsigned outputFlags;
+  bool autoStart;
+  unsigned maxSizeKb;
+  int keep;                  // old files kept at rotation
+  unsigned long rotations;   // this boot
+  unsigned long reserveSkips;
+  unsigned reserveKb;
+};
+
+static void systemLogReadStatus(SystemLogStatus& st) {
+  st.state = systemLogState();
+  st.running = gSystemLogRunning;
+  st.path = gSystemLogPath.c_str();
+  st.lastWriteAgoSec = (millis() - gSystemLogLastWrite) / 1000;
+  st.outputFlags = (unsigned)gOutputFlags;
+  st.autoStart = gSettings.systemLogAutoStart;
+  st.maxSizeKb = (unsigned)(systemLogMaxSizeBytes() / 1024u);
+  st.keep = systemLogMaxRotations();
+  st.rotations = (unsigned long)gSystemLogRotations;
+  st.reserveSkips = (unsigned long)gSystemLogReserveSkips;
+  st.reserveKb = (unsigned)(VFS::logReserveBytes() / 1024u);
+}
+
+static void systemLogFormatStatusText(const SystemLogStatus& st, char* out, size_t outSize) {
+  if (st.state == SystemLogState::Active) {
     snprintf(out, outSize,
              "System logging ACTIVE\n"
              "  File: %s\n"
@@ -2251,28 +2286,76 @@ void formatSystemLogStatus(char* out, size_t outSize) {
              "  Output flags: 0x%02X\n"
              "  Auto-start: %s\n"
              "  Rotation: at %u KB, keep %d old file(s); rotated %lu time(s) this boot",
-             gSystemLogPath.c_str(), ageSeconds, (unsigned)gOutputFlags,
-             gSettings.systemLogAutoStart ? "ON" : "OFF",
-             (unsigned)(systemLogMaxSizeBytes() / 1024u), systemLogMaxRotations(),
-             (unsigned long)gSystemLogRotations);
-    if (gSystemLogReserveSkips > 0) {
+             st.path, st.lastWriteAgoSec, st.outputFlags,
+             st.autoStart ? "ON" : "OFF",
+             st.maxSizeKb, st.keep, st.rotations);
+    if (st.reserveSkips > 0) {
       const size_t used = strnlen(out, outSize);
       snprintf(out + used, outSize - used,
                "\n  Skipped: %lu line(s) while flash was below its %u KB reserve",
-               (unsigned long)gSystemLogReserveSkips, (unsigned)(VFS::logReserveBytes() / 1024u));
+               st.reserveSkips, st.reserveKb);
     }
-  } else if (gSystemLogRunning) {
+  } else if (st.state == SystemLogState::Configured) {
     snprintf(out, outSize,
              "System logging CONFIGURED but MSG_ROUTE_FILE flag not set\n"
              "  File: %s\n"
              "  Use 'log start' to enable\n"
              "  Auto-start: %s",
-             gSystemLogPath.c_str(),
-             gSettings.systemLogAutoStart ? "ON" : "OFF");
+             st.path,
+             st.autoStart ? "ON" : "OFF");
   } else {
     snprintf(out, outSize, "System logging is INACTIVE\n  Auto-start: %s",
-             gSettings.systemLogAutoStart ? "ON" : "OFF");
+             st.autoStart ? "ON" : "OFF");
   }
+}
+
+void formatSystemLogStatus(char* out, size_t outSize) {
+  if (!out || outSize == 0) return;
+  SystemLogStatus st;
+  systemLogReadStatus(st);
+  systemLogFormatStatusText(st, out, outSize);
+}
+
+static bool systemLogFormatStatusJson(const SystemLogStatus& st, char* out, size_t outSize) {
+  size_t pos = 0;
+  bool fits = true;
+  // Accounts one snprintf result; a write that does not fit ends the document.
+  auto wrote = [&](int n) {
+    if (!fits) return;
+    if (n < 0 || (size_t)n >= outSize - pos) fits = false;
+    else pos += (size_t)n;
+  };
+  wrote(snprintf(out + pos, outSize - pos, "{\"schema\":1,\"state\":\"%s\",\"running\":%s",
+                 systemLogStateKey(st.state), st.running ? "true" : "false"));
+  if (fits && st.running) {
+    wrote(snprintf(out + pos, outSize - pos, ",\"file\":\""));
+    if (fits) {
+      // jsonEscapeInto stops at what fits; a shortened path is refused here.
+      if (jsonEscapedLength(st.path, strlen(st.path)) >= outSize - pos) fits = false;
+      else pos += jsonEscapeInto(out + pos, outSize - pos, st.path);
+    }
+    if (fits) wrote(snprintf(out + pos, outSize - pos, "\""));
+  }
+  if (fits && st.state == SystemLogState::Active) {
+    wrote(snprintf(out + pos, outSize - pos, ",\"lastWriteAgoSec\":%lu,\"outputFlags\":%u",
+                   st.lastWriteAgoSec, st.outputFlags));
+  }
+  if (fits) {
+    wrote(snprintf(out + pos, outSize - pos,
+                   ",\"autoStart\":%s,\"maxSizeKb\":%u,\"keep\":%d,\"rotations\":%lu,"
+                   "\"reserveSkips\":%lu,\"reserveKb\":%u}",
+                   st.autoStart ? "true" : "false", st.maxSizeKb, st.keep, st.rotations,
+                   st.reserveSkips, st.reserveKb));
+  }
+  if (!fits) snprintf(out, outSize, "{\"schema\":1,\"ok\":false,\"error\":\"response too large\"}");
+  return fits;
+}
+
+bool formatSystemLogStatusJson(char* out, size_t outSize) {
+  if (!out || outSize == 0) return false;
+  SystemLogStatus st;
+  systemLogReadStatus(st);
+  return systemLogFormatStatusJson(st, out, outSize);
 }
 
 const char* cmd_log(const String& argsInput) {
@@ -2287,7 +2370,7 @@ const char* cmd_log(const String& argsInput) {
            "           or colon-separated 64-bit words high to low: 0xW3:0xW2:0xW1:0xW0\n"
            "    tags: Enable category tags (default: 1)\n"
            "  stop: Stop system logging\n"
-           "  status: Show current logging status\n"
+           "  status [json]: Show current logging status (json: one JSON object)\n"
            "  maxsize <bytes> | rotations <0-9>: Rotate the file at this size, keeping that many old files\n"
            "  autostart: Toggle auto-start system logging on boot\n"
            "Examples:\n"
@@ -2302,8 +2385,14 @@ const char* cmd_log(const String& argsInput) {
   
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
   
-  // Handle 'status' subcommand
+  // Handle 'status' subcommand: text, or one JSON object with 'status json'.
   if (subCmd == "status") {
+    String form = ca.arg(1);
+    form.toLowerCase();
+    if (form == "json") {
+      (void)formatSystemLogStatusJson(gDebugBuffer, 1024);
+      return gDebugBuffer;
+    }
     formatSystemLogStatus(gDebugBuffer, 1024);
     return gDebugBuffer;
   }
@@ -2761,7 +2850,7 @@ const CommandEntry debugCommands[] = {
     "    any other tag gets the firmware's level back at the next reboot)\n"
     "  * <level>: every tag, the firmware's quieted ones too; tag entries go on top\n"
     "  clear: remove every saved level" },
-  { "log", "System-wide logging to file.", true, cmd_log, "Usage: log <start|stop|status|autostart>\n  start [\"filepath\"] [flags=0x...] [tags=0|1]: Begin system logging\n    filepath: Log file path, quoted (auto-generated if omitted)\n    flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h)\n    tags: Prefix lines with category tags (0|1, default 1)\n  stop / status: Stop logging / show logging status\n  maxsize <bytes> / rotations <0-9>: Rotate the file at this size, keeping that many old files (.1, .2, ...)\n  autostart [on|off]: Toggle logging auto-start on boot (bare = toggle)" },
+  { "log", "System-wide logging to file.", true, cmd_log, "Usage: log <start|stop|status|autostart>\n  start [\"filepath\"] [flags=0x...] [tags=0|1]: Begin system logging\n    filepath: Log file path, quoted (auto-generated if omitted)\n    flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h)\n    tags: Prefix lines with category tags (0|1, default 1)\n  stop / status [json]: Stop logging / show logging status (json: one JSON object)\n  maxsize <bytes> / rotations <0-9>: Rotate the file at this size, keeping that many old files (.1, .2, ...)\n  autostart [on|off]: Toggle logging auto-start on boot (bare = toggle)" },
   { "webconsole", "Enable/disable browser-side debug console output in the web UI.", true, cmd_webconsole, "Usage: webconsole <0|1>" },
 };
 
