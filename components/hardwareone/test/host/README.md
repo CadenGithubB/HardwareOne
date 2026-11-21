@@ -1144,12 +1144,15 @@ httpd. Run with
 ## MQTT discovery and external-sensor bounds
 
 `test_mqtt_json_bounds.py` extracts the shipping `publishDiscoveryConfig`,
-`publishPeerDiscoveryConfig`, their shared 1 KB discovery buffer and bounded
-`MqttJsonWriter`, `updateExternalSensor` with its sensor-table state
-(`System_MQTT.cpp`) and `macToPathToken` (`System_MacText.h`), and compiles them
-against a recording `esp_mqtt_client_publish`. Cases: a short base topic
-publishes the same retained discovery document byte for byte (local and mesh
-peer); a 400-character base topic skips the publish with one warning instead
+`publishPeerDiscoveryConfig` with `mqttLocalDiscovery` and `meshPeerDeviceId`,
+their shared 1 KB discovery buffer, `updateExternalSensor` with its sensor-table
+state (`System_MQTT.cpp`) and `macToPathToken` (`System_MacText.h`), and compiles
+them with `System_MQTTPayloadCore.h` and the vendored ArduinoJson against a
+recording `esp_mqtt_client_publish`. Cases: a short base topic publishes the
+expected retained discovery document byte for byte (local with the board as
+`model` and `sw_version`; mesh peer without a model, an unnamed one under the
+unknown-peer label); a quote and a backslash in the friendly name and room come
+out escaped; an unnamed device is named by its fallback; a 400-character base topic skips the publish with one warning instead
 of writing past the buffer; a sweep of base-topic lengths across the capacity
 publishes every document of at most 1023 bytes exactly and skips every longer
 one; esp-mqtt's topic and payload, given in exactly-sized buffers with no NUL
@@ -1160,11 +1163,12 @@ stores only that prefix; the client's own `<base>/command` and
 topic of the live subscription and for the one in the settings, while their
 neighbours (`.../command/extra`, another device's command topic) still are.
 Source guards: no unchecked `sizeof(configJson) - pos`
-remains, the periodic state document is checked before it is published, the
+remains, the periodic state document is checked by `serializeBounded` before
+it is published, the
 two topic words are spelled only through the header, and the filter runs
 inside `updateExternalSensor` before the table is touched.
-Not covered: the state document's sensor sections, JSON escaping of setting
-text, and the real esp-mqtt client. `--case discovery|peer|sensor` runs one
+Not covered here: the state document's sensor sections (`mqtt_payload_core_tests`)
+and the real esp-mqtt client. `--case discovery|peer|sensor` runs one
 group. Run with
 `ctest --test-dir build -R '^mqtt_json_bounds$' --output-on-failure`
 (or the runner directly with `--sanitize`).
@@ -2949,7 +2953,8 @@ python3 -B components/hardwareone/test/host/test_gps_snapshot.py --sanitize
 
 `gps_snapshot` compiles the production snapshot/JSON/invalidation functions,
 startup reset and task publication/shutdown blocks, the real cache guard, and
-the GPS portions of G2, web, MQTT and sensor logging. It checks independent
+the GPS portions of G2, web and sensor logging (MQTT sends `gpsBuildDataJson`'s
+text, pinned by `mqtt_payload_sources`). It checks independent
 copies, cleared failed reads, 5/10/50 ms consumer budgets, all JSON buffer
 capacities, disabled-header behavior, failed startup reset, and deferred stop
 cleanup. Publication holds the cache lock only for the copy; JSON formatting,
@@ -2958,9 +2963,7 @@ track/event callbacks and destruction run after its release. ASan/UBSan follow
 
 The output fixture was captured from the pre-refactor production functions.
 An optional `--baseline /path/to/old/components/hardwareone` also executes that
-source and compares its output directly. MQTT timeout now omits GPS data; its
-successful wire format, raw speed units, and existing no-fix behavior remain
-covered. OLED has a narrow source-boundary check; its full renderer is not
+source and compares its output directly. OLED has a narrow source-boundary check; its full renderer is not
 compiled because an existing glyph escape is rejected by desktop Clang.
 
 The host semaphore, driver and transport substitutes do not exercise real RTOS
@@ -2976,7 +2979,8 @@ python3 -B components/hardwareone/test/host/test_presence_snapshot.py --sanitize
 
 `presence_snapshot` extracts the production snapshot, JSON, CLI, startup reset,
 shutdown and complete polling functions, the real cache guard, and the presence
-portions of G2, web, MQTT, OLED and logging. It verifies independent copies,
+portions of G2, web, OLED and logging (MQTT sends `presenceBuildDataJson`'s text,
+pinned by `mqtt_payload_sources`). It verifies independent copies,
 cleared unavailable reads, 5/10/50/100 ms budgets, JSON buffer boundaries,
 disabled-header behavior, reset failure and deferred shutdown retry. Formatting
 and callbacks must run outside the cache lock; cache waits must follow release
@@ -3338,9 +3342,9 @@ status and allocation errors, and accept ring JSON larger than the CLI
 buffer; the BLE-disabled public header is compiled and executed separately. `--baseline <component-dir>`
 compares successful CLI output against saved pre-change source. The phone link
 block (phone link v2): `bleinfo` ends its text with it and adds `phoneLink`
-beside buildBleInfoJson's 13 keys in a pipe build only (the identical-output
+beside buildBleInfoJson's 14 keys in a pipe build only (the identical-output
 rule across the glasses x pipe builds compares the CLI without the block, and
-`/api/ble/status` `ble` keeps exactly 13 keys); `blestatus` puts it after the
+`/api/ble/status` `ble` keeps exactly 14 keys); `blestatus` puts it after the
 link lines, with `phoneLink` (full form, end reasons by name) beside `link` in
 JSON; `/api/ble/status` adds it from its one link reading. The console view
 counts the console stream's own row in any client role (phone-client mode
@@ -4220,7 +4224,9 @@ that record every `ps_alloc`. Both keep one `RequirePsram` block (8 KB for the
 logs reply, 16 KB for the state document) made by the first call and reused by
 the next ones; when PSRAM refuses, a call borrows a `PreferPsram` block and
 frees it, as every call did before; with no memory at all the old error reply
-and warning stand. The replies and documents are those of before. The kept
+and warning stand. The logs replies are those of before; the state document
+is built with `System_MQTTPayloadCore.h` and carries `deviceName`,
+`deviceNameSet` and `system.psram_free`/`psram_total`. The kept
 logs block keeps its own size: after a larger `gWebMirrorCap`, a poll fills it
 only to that size. Source
 contract: `stopMqttNow` releases the state buffer on both of its finished
@@ -4273,7 +4279,26 @@ renames a running station; a new name is handed on in one place (`deviceNameAppl
 "same name" warning), by `devicename` on set and clear and by the setup wizards' save after it applies the
 settings, and no other file does it itself; Bluetooth's server and client roles use the device name as their GAP
 name and a cut name is advertised as shortened; every frame field that carries the name is written with
-`putField` and read with `getField`; `espnow pair` and `espnowpairsecure` return the peer-name refusal.
+`putField` and read with `getField`; `espnow pair` and `espnowpairsecure` return the peer-name refusal. The
+unnamed fallback and the unknown-peer label use the last two address bytes (`HardwareOne-B2C3`, `peer-B2C3`);
+"(default)" is written in one place and never reaches the hostname, the GAP or advertised name or a frame
+field; the screens and text replies that show the name use the one wording, and the OLED setup wizard row,
+whose value column holds twelve glyphs, shows `(default)` alone; `deviceNameSet` sits beside the name in
+`bleinfo json`, `status json` (top level and `connectivity.espnow`) and `espnowdeviceinfo json`.
+
+## MQTT state document and Home Assistant discovery
+
+`mqtt_payload_core_tests` (`test_mqtt_payload_core.cpp`) runs `System_MQTTPayloadCore.h` with the vendored
+ArduinoJson: an SSID, friendly name or room with quotes, backslashes and control bytes parses back unchanged and
+invalid UTF-8 becomes `?`; every Home Assistant template, and every key it guards on, resolves in a state
+document built from the sensor builders' text (ToF nearest target, IMU `accel`/`gyro`, GPS `sats` and the `fix`
+guard, presence ON/OFF, RTC `temp`); GPS speed is `kn` with the speed class, gyro `rad/s`; the local device
+carries the board as model and `sw_version`, a peer neither, and an unnamed peer the unknown-peer label; `time`
+and `rtc.datetime` end in `Z` and are absent for an unset clock or an invalid or pre-2020 RTC; a section that is
+not one JSON object (`nan`, cut) is dropped alone; documents that do not fit are refused, never cut; the object
+ids and retirements are pinned. `mqtt_payload_sources` (`test_mqtt_payload_sources.py`) checks that each
+fixture has only keys its production builder writes and that System_MQTT.cpp builds both documents through the
+core (no "ESP32-S3", the thermal summary builder, no hand-written JSON, `MqttClientUse` first).
 
 ## ESP-NOW answers (rule F3)
 

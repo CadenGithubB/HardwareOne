@@ -742,12 +742,17 @@ device started. A peer's name given to
 
 Bluetooth takes a new name at its next start and Wi-Fi at its next connection (a name chosen in the
 setup wizard is already used for the connection the wizard makes). Without a stored name, Bluetooth and
-Wi-Fi use `HardwareOne-XXXXXX` (the last three bytes of the chip's address; on a P4 board that is the
-P4's own address, not the radio address of its C6 that ESP-NOW shows); ESP-NOW does not start until a
-name is set. A Bluetooth advertisement carries up to 29 bytes of the name (a longer
-name is advertised shortened); a connected phone reads the whole name. A received name that breaks the
-rule is not used or cleaned: the sender is shown by its address (an unpaired sender in the pairing list
-as `peer-XXXXXX`). The free-text display label is separate: `espnowfriendlyname` (up to 47 bytes).
+Wi-Fi use `HardwareOne-B2C3` (the last two bytes of the chip's address, so the name does not carry the
+whole address; on a P4 board that is the P4's own address, not the radio address of its C6 that ESP-NOW
+shows). Screens and text replies show it as `HardwareOne-B2C3 (default)` (the OLED setup wizard's row
+shows `(default)` alone, and Edit opens on the name), JSON replies give `deviceNameSet` false beside it,
+and the Bluetooth name and the hostname carry it without the mark. Two unnamed devices can share this
+name: give each its own. ESP-NOW does not start until a name is set. A Bluetooth advertisement carries
+up to 29 bytes of the name (a longer name is advertised shortened); a connected phone reads the whole
+name. A received name that breaks the rule is not used or cleaned: the sender is shown by its address
+(an unpaired sender in the pairing list as `peer-B2C3`; when two discovered devices show the same name,
+`espnowpairrequest` refuses it and asks for the MAC). The free-text display label is separate:
+`espnowfriendlyname` (up to 47 bytes).
 
 A device updated from a build before the one device name (which had `espnowsetname` and a separate
 Bluetooth name) keeps its name: the first start after the update takes its old ESP-NOW name, or, when
@@ -1035,6 +1040,29 @@ openmqtt                     - Connect to broker
 closemqtt                    - Disconnect
 mqttstatus                   - Show connection status
 ```
+
+### What is published
+
+The device publishes one JSON state document to `<base>/state` every `mqttpublishintervalms`, and
+Home Assistant discovery configs under the discovery prefix when it connects. The state document has
+`timestamp` (uptime in ms), `time` (UTC, `YYYY-MM-DDTHH:MM:SSZ`, only while the clock is set),
+`deviceName` (the name in use; the fallback `HardwareOne-B2C3` when none is stored) and
+`deviceNameSet`, then one section per reading switched on with its `mqttpublish*` setting: `system`
+(`uptime`, `heap_free`, `heap_min`, and `psram_free`/`psram_total` on boards with PSRAM), `wifi`,
+and the sensor sections `thermal` (min/avg/max), `tof`, `imu`, `presence`, `gps`, `apds`, `rtc` and
+`input`, each written by that sensor's own reading builder. `rtc.datetime` is the RTC's reading in UTC with `Z`.
+A section that cannot be read as JSON is left out of that publish (with a warning when that
+changes); a document that does not fit is not sent.
+
+Home Assistant shows a sensor as unknown while its section is missing or not valid, and GPS
+position, altitude and speed also while there is no fix. Units: GPS speed in knots (`kn`, which
+Home Assistant converts for display), gyro in rad/s, acceleration in m/s², ToF distance in mm (the
+nearest target). The device names its board as model and its firmware as software version. A mesh
+peer bridged by the master has neither, shows Last Seen, and appears as `peer-B2C3` when it has no
+name.
+Entities an earlier build declared and this one does not (Presence Object Temp, a peer's Uptime and
+thermal entities, and the gamepad entities on encoder and touch builds) are removed from Home
+Assistant on connect.
 
 ---
 

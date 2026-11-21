@@ -29,7 +29,11 @@ fleet together. The `SYSEVT_SETTING_CHANGED` key for the name is now `deviceName
 `espnowDeviceName`), its settings path `system.device.deviceName` (was `espnow.deviceName`), and the
 `bluetoothDeviceName` setting is gone (a settings file with the old keys gives its name to the new one
 once at load, converted to the rule when needed, and loses the old keys: `System_DeviceNameLegacy.h`);
-`bleinfo json` keeps `deviceName`, now the device name.
+`bleinfo json` keeps `deviceName`, now the device name. Without a stored name the device uses
+`HardwareOne-` and the last two bytes of its address (`HardwareOne-B2C3`; builds before 2026-11-20 used
+three), and replies with the name gain `deviceNameSet` (false for that fallback); a name stored earlier,
+the old three-byte fallback included, is kept as it is. No frame changes: frame name fields carry the
+stored name only.
 
 `versions` on the device lists these, as this image carries them, in one place: the firmware, the
 recovery updater and OTA layout, the ESP-NOW format and stack, the BLE console channel, the phone
@@ -79,6 +83,21 @@ bundle formats and the ESP-IDF and Arduino core it was built with (`versions jso
   - System logs (2026-11-20) are kept as `<name>.log.1` and `<name>.log` and together use at most a
     quarter of the LittleFS partition; a log above its new size loses its older part at its first
     write after the update.
+  - Unnamed device (2026-11-20): a board with no stored device name advertises over Bluetooth and
+    gives its Wi-Fi router the hostname `HardwareOne-` plus the last two address bytes
+    (`HardwareOne-B2C3`; it was three, `HardwareOne-A1B2C3`), so after the update a phone that
+    looked for the old name, a DHCP reservation or a router rule by hostname needs the new name;
+    the master's pairing list and its Home Assistant bridge show an unnamed sender as `peer-B2C3`.
+    Set a name with `devicename <name>` to keep one across updates. A stored name, the old
+    three-byte fallback stored by a setup wizard included, is kept as it is.
+  - MQTT / Home Assistant (2026-11-20): unique ids, topics and the device id are kept. In Home
+    Assistant, GPS Speed changes unit to knots and IMU Gyro to rad/s, RTC DateTime becomes a UTC timestamp, Presence Object Temp and a
+    mesh peer's Uptime and thermal entities are removed, and the gamepad entities are removed on
+    encoder and touch builds. Automations or dashboards that read the state document by key need
+    the new keys (`input` for `gamepad`, `gps.sats`, `rtc.temp`, `apds.r/g/b/c`, the presence
+    builder's keys; CHANGELOG "Changed"). The device's name in Home Assistant, when no friendly name
+    is set, becomes its fallback name (`HardwareOne-B2C3`); Home Assistant keeps entity ids it
+    already made.
 - **1.0.0 is a full-erase install** for boards coming from 0.99.x: `idf.py erase-flash` first, then
   the first-time setup. Settings from 0.99.x are not promised to carry over. On a recovery OTA
   layout (`HW_OTA_LAYOUT=1`) the erase also removes the recovery updater and the recovery

@@ -221,6 +221,18 @@ target_include_directories(device_name_migration_tests PRIVATE ../..)
 target_include_directories(device_name_migration_tests SYSTEM PRIVATE ../../../hardwareone_libs/ArduinoJson/src)
 target_compile_options(device_name_migration_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# The MQTT state document and Home Assistant discovery configs
+# (System_MQTTPayloadCore.h) with the vendored ArduinoJson: free text escaped
+# and UTF-8, every HA template reads a key the sensor builders send, units
+# (GPS knots, gyro rad/s), model and sw_version, UTC times with Z, a bad
+# section dropped alone, size bounds, pinned unique ids and retirements.
+add_executable(mqtt_payload_core_tests test_mqtt_payload_core.cpp)
+set_target_properties(mqtt_payload_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(mqtt_payload_core_tests PRIVATE ../..)
+target_include_directories(mqtt_payload_core_tests SYSTEM PRIVATE ../../../hardwareone_libs/ArduinoJson/src)
+target_compile_options(mqtt_payload_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # The ESP-NOW channel for the Wi-Fi state and the 'espnowchannel' checker
 # (System_ESPNow_ChannelCore.h): the AP's channel while joined whether or not
 # ESP-NOW runs, the setting or fallback offline, no mismatch while nothing pins.
@@ -1668,6 +1680,7 @@ add_test(NAME system_metrics_core_tests COMMAND system_metrics_core_tests)
 add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
 add_test(NAME device_name_core_tests COMMAND device_name_core_tests)
 add_test(NAME device_name_migration_tests COMMAND device_name_migration_tests)
+add_test(NAME mqtt_payload_core_tests COMMAND mqtt_payload_core_tests)
 add_test(NAME espnow_channel_core_tests COMMAND espnow_channel_core_tests
          ${CMAKE_CURRENT_LIST_DIR}/../../System_ESPNow.cpp
          ${CMAKE_CURRENT_LIST_DIR}/../../System_WiFi.cpp)
@@ -3094,6 +3107,15 @@ add_test(
   NAME device_name_sources
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_device_name_sources.py)
+
+# The MQTT payload core's builder fixtures carry only keys the production
+# builders write, and System_MQTT.cpp builds both documents through the core:
+# no "ESP32-S3", BOARD_NAME and sw_version, the thermal summary builder, no
+# hand-written JSON, MqttClientUse first.
+add_test(
+  NAME mqtt_payload_sources
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_mqtt_payload_sources.py)
 
 # The mesh id derivation is a cross-device contract (System_ESPNow_MeshIdCore.h):
 # known answers for KDF subkey 3 / "esp-mid1" and pick, reproduced with Python's

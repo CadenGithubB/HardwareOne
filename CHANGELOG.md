@@ -987,6 +987,19 @@ everything user-visible since the v0.99.99.1 tag.
   device's address on each repaint (a round trip to the C6 on the P4X-EYE); they use the address
   ESP-NOW cached at start. Not measured on hardware.
 
+- MQTT / Home Assistant: the state document and the discovery configs are built as JSON documents, so
+  an SSID, friendly name, room, peer name or base topic with a quote, backslash or control byte no
+  longer makes them invalid (invalid UTF-8 becomes `?`), and a document that does not fit is skipped,
+  never cut. Entities that never got a value now read the keys the sensors send: Thermal Min/Max/Avg
+  (`thermal.min/max/avg`; the thermal section was never published), ToF Distance (the nearest of
+  `tof.objects[].distance_mm`), IMU Accel X/Y/Z and Gyro X/Y/Z (`imu.accel.*`, `imu.gyro.*`), GPS
+  Satellites (`gps.sats`), RTC Temperature (`rtc.temp`), and on mesh peers ToF and IMU Accel. Presence
+  Detected and Motion Detected send `ON`/`OFF` and turn on (they sent `True`/`False`). A sensor
+  reading that is not valid JSON drops only its own section, with a warning. The publish no longer
+  holds about 4 KB of stack arrays, and the device id no longer asks the radio for its address per
+  entity (a round trip to the C6 on the P4X-EYE). Host-tested; not run on a board or with Home
+  Assistant.
+
 ### Changed
 - `features` only lists; it no longer switches anything. The list shows, for each feature, whether it
   is built in, running now, set to start at boot and allowed, with `-` where a feature has no such
@@ -1235,15 +1248,19 @@ everything user-visible since the v0.99.99.1 tag.
   every build; `espnowsetname`, `blename` and the Bluetooth-only `bluetoothDeviceName` setting are gone,
   and the settings row moved from `espnow.deviceName` to `system.device.deviceName` (a device updated
   from an earlier build takes its old name into it once: see Fixed). Without a stored
-  name Bluetooth and Wi-Fi use `HardwareOne-XXXXXX` (on a P4 board from the P4's own address, not the
-  radio address of its C6). `devicename` and the setup wizard warn when another device this one knows has
+  name Bluetooth and Wi-Fi use `HardwareOne-B2C3`, the last two bytes of the address (on a P4 board from
+  the P4's own address, not the radio address of its C6); screens and text replies show it as
+  `HardwareOne-B2C3 (default)`, and `bleinfo json`, `status json` (`/api/system`, with new top-level
+  `deviceName`), its `connectivity.espnow` and `espnowdeviceinfo json` gain `deviceNameSet`, false for
+  the fallback. `devicename` and the setup wizard warn when another device this one knows has
   the name (both are then shown by address); a name chosen in the setup wizard is the Wi-Fi hostname of
   the connection the wizard makes and reaches ESP-NOW at once, as one set with `devicename` does. The
   Bluetooth client roles (glasses, ring, phone central) use the name as their GAP name too, not the fixed
   "HardwareOne". Every frame that carries the name has a 32-byte field
   with the NUL always present (HEARTBEAT 32 -> 44 bytes, PAIR_BEACON 24 -> 36, PAIR_REQUEST/ACCEPT/REJECT
   28 -> 40, BOND_CAP_RESP's name 20 -> 32 bytes); a received name that breaks the rule is shown by address
-  (`peer-XXXXXX` in the pairing list) instead of being cut or cleaned, and TOPO_PEER no longer sends the
+  (`peer-B2C3` in the pairing list; `espnowpairrequest <name>` refuses a name two discovered devices
+  share and asks for the MAC) instead of being cut or cleaned, and TOPO_PEER no longer sends the
   word "Unknown" for a peer without a name. Peer names given to the pair commands follow the same rule.
   The setup wizard asks the display label and the device name separately (the name is offered from the
   label). The Bluetooth scan response carries up to 29 bytes of the name.
@@ -1652,6 +1669,47 @@ everything user-visible since the v0.99.99.1 tag.
 - OLED ESP-NOW remote form: the Command field takes 128 characters (the keyboard's limit; it took
   64), so a command filled in from Device Config always fits it. `espnowremote` still refuses a
   line too long for one frame, with its reason. Host-tested; not yet run on hardware.
+- MQTT / Home Assistant entities (object ids kept unless named new or removed; host-tested, not run
+  with Home Assistant):
+  - GPS Speed is declared in knots (`kn`, device class speed); the value always was knots but was
+    labelled km/h. IMU Gyro X/Y/Z are rad/s (were labelled °/s; the driver reports rad/s).
+  - Every sensor entity is unknown while its section is missing or not valid; GPS Latitude,
+    Longitude, Altitude and Speed also while there is no fix (they showed 0).
+  - Presence Ambient Temp reads `presence.ambient` (was `presence.ambient_temp`); Proximity and Color
+    Red/Green/Blue read `apds.proximity` and `apds.r/g/b` (were `apds.color.*`), from the sensor's
+    builder instead of single getters.
+  - RTC DateTime is UTC with `Z` (`YYYY-MM-DDTHH:MM:SSZ`) from one reading, unknown when the reading
+    is not valid or before 2020 (it was a time without zone from seven reads).
+  - Input X/Y and Input Buttons (object ids `gamepad_x`, `gamepad_y`, `gamepad_buttons`) read the
+    build's input reading under `input` (was `gamepad`); X/Y only on gamepad builds, Buttons on
+    gamepad and encoder builds, with the same button bits as every other surface (they were the
+    logical layout, "Input Buttons (logical)").
+  - New: PSRAM Free (`system.psram_free`, boards with PSRAM), Input Position and Input Axis (ANO and
+    GPIO encoder builds), and a peer's Last Seen (`system.last_seen`).
+  - Removed from Home Assistant on connect (an empty retained config): Presence Object Temp (raw
+    register counts shown as °C), a peer's Uptime (never had a value) and thermal entities (the mesh
+    does not carry thermal), and the gamepad entities on encoder and touch builds.
+  - The device block names the board (`BOARD_NAME`) as model and adds `sw_version` (the firmware); it
+    said "ESP32-S3" on every board. Peers carry no model (it was "ESP32-S3"). An unnamed device is
+    named by its fallback name (`HardwareOne-B2C3`, was "HardwareOne"), an unnamed peer `peer-B2C3`
+    (was its 12-digit address).
+- MQTT state document (`<base>/state`): new top-level `time` (UTC with `Z`, only while the clock is
+  set), `deviceName` and `deviceNameSet`, and `system.psram_free`/`psram_total` on boards with PSRAM.
+  Sensor sections are the sensors' own readings: `thermal` is published (`valid`, `connected`, `ts`,
+  `min`, `avg`, `max`); `presence` has `ambient`, `presence`, `presenceDetected`, `motion`,
+  `motionDetected`, `tempShock`, `tempShockDetected` (gone: `detected`, `presence_raw`, `motion_raw`,
+  `ambient_temp`, `object_temp`); `gps.satellites` -> `gps.sats`; `apds.color.{r,g,b,c}` -> `apds.r/g/b/c`;
+  `rtc.temperature` -> `rtc.temp`, and `rtc.datetime` ends in `Z`; `gamepad` -> `input`. Peer state
+  documents are unchanged.
+- Device name wording, with the two-byte fallback (see the device-name entry above): `devicename`
+  without a name answers `Device name: HardwareOne-B2C3 (default). Set one with 'devicename <name>'.`
+  (was "(not set)"); `bleinfo`, `espnowdeviceinfo`, the OLED ESP-NOW status and settings rows and the
+  G2 network and status pages show `HardwareOne-B2C3 (default)` (were "(not set)", "(none)",
+  "(unset)" or a fixed "HardwareOne"); `status` gains a `Device name:` line; the OLED Bluetooth page shows up to 15
+  characters of the name (was 11), and for an unnamed device `Name: (default)` with the name on the
+  next row; the OLED setup wizard's row shows `(default)`; the web Bluetooth page leaves the name box
+  empty with the fallback as placeholder, so Save cannot store it by accident. The Bluetooth name,
+  the hostname and ESP-NOW name fields carry no mark. Host-tested; not yet run on hardware.
 
 ### Removed
 - One name per command: every command alias is removed. Removed name -> name to use: `bleread` ->

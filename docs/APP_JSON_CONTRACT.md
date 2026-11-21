@@ -102,6 +102,14 @@ entry "Command replies" under Unreleased states what changed.
    with an `Error:` naming that feature's own commands and writes nothing; switch a
    feature with `open<x>`/`close<x>`, `<x>autostart` and `<x>enabled` instead. The
    `feature_toggled` event is no longer posted (sec. 10).
+14. **Device name default (2026-11-20, additive)** - `bleinfo json` and the
+   `GET /api/ble/status` `ble` object gain `deviceNameSet` (14 keys); `status json`,
+   `GET /api/system` and the SSE `system` event gain top-level `deviceName` and
+   `deviceNameSet`, and `connectivity.espnow` gains `deviceNameSet`; `espnowdeviceinfo json`
+   gains `deviceNameSet` (sec. 4). The fallback name of an unnamed device is
+   `HardwareOne-` and the last two address bytes (`HardwareOne-B2C3`, was three), and an
+   unnamed sender in the pairing list is `peer-B2C3`. Tell an unnamed device by
+   `deviceNameSet`, never by comparing names.
 
 ---
 
@@ -125,7 +133,7 @@ Note: read the global on/off via `automation system status json`, not from
 | Command (+`json`) | Reply shape |
 |---|---|
 | `blestatus` | `{"schema":1,"initialized","state","activeConnections","maxConnections","totalConnections","commandsReceived","responsesSent","connections":[{"index","connId","authed","user","mac","connectedSec","commands"}],"link":{...},"phoneLink"?:{...},"hint"?}`; the console keys from `state` to `connections` are present only while `initialized` (the app console server runs; the console on the phone link shows only in `link` and `phoneLink`). `link` and `hint`: sec. 11.3; `phoneLink` (pipe builds): sec. 11.9 |
-| `bleinfo` | `buildBleInfoJson`'s 13 keys (`schema`, `deviceName` (the one device name, `devicename`; `HardwareOne-XXXXXX` when none is set), `txPower`, `autoStart`, `requireAuth`, `secureChannelRequired`, `initialized`, `state`, `connections`, `maxConnections`, `totalConnections`, `commandsReceived`, `clients`), plus `phoneLink` (full form, sec. 11.9) in pipe builds. Errors: `{"error":"oom"}`, `"unavailable"`, `"status too large"` |
+| `bleinfo` | `buildBleInfoJson`'s 14 keys (`schema`, `deviceName` (the one device name, `devicename`; `HardwareOne-B2C3`, the last two address bytes, when none is set), `deviceNameSet` (false when `deviceName` is that fallback: show it with "(default)" and never save it as the name), `txPower`, `autoStart`, `requireAuth`, `secureChannelRequired`, `initialized`, `state`, `connections`, `maxConnections`, `totalConnections`, `commandsReceived`, `clients`), plus `phoneLink` (full form, sec. 11.9) in pipe builds. Errors: `{"error":"oom"}`, `"unavailable"`, `"status too large"` |
 | `wifistatus` | `{"schema":1,"connected","ssid","ip","rssi","mac"}` or `{"schema":1,"connected":false,"savedSsid"?,"mac"}` (`savedSsid` is omitted when the saved list cannot be read) |
 | `wifilist` | `{"schema":1,"networks":[{"index","priority","ssid","hidden","primary"}],"count"}` |
 | `mqttstatus` | `{"schema":1,"enabled","connected","host","port","user","baseTopic","publishIntervalMs","lastError"?}` |
@@ -152,6 +160,11 @@ Note: read the global on/off via `automation system status json`, not from
 internal storage reading is unavailable (they were 0); `storage` itself is always present, and `storage.sd` is
 absent without a readable card.
 
+`status json` / `GET /api/system` / the SSE `system` event, device name: top-level `deviceName` (the name in use:
+the stored name, else the fallback `HardwareOne-B2C3`; never empty, never with "(default)") and `deviceNameSet`
+(false when `deviceName` is the fallback), in every build. In ESP-NOW builds `connectivity.espnow` keeps
+`deviceName` as the stored name (`""` when none) and gains `deviceNameSet` beside it.
+
 ---
 
 ## 5. Lists / media / ESP-NOW
@@ -169,7 +182,7 @@ absent without a readable card.
 | **ESP-NOW** | |
 | `espnowstatus` | `{"schema":1,"initialized","channel"?,"channelPref"?,"masterChannel"?,"follow"?,"masterSilentMs"?,"sweepFailures"?,"nextSweepMs"?,"mac"?,"pairedDevices"?,"lastInitError"?}`. Before the first start of a boot only `initialized:false` (plus `lastInitError` after a failed start). `channel` and `channelPref` (0 = auto, 1-13 = pinned when offline) appear once a start has set up the ESP-NOW state and stay after `closeespnow`; `mac` and `pairedDevices` are present only while `initialized`; `masterChannel` (0 = unknown), `follow` (the channel-follow phase), `masterSilentMs`, `sweepFailures` and `nextSweepMs` are present only while `initialized`; `lastInitError` is the reason the last start failed, present only while ESP-NOW is down. A reply that does not fit is `{"schema":1,"ok":false,"error":"response too large"}` |
 | `espnowdevices` *(v0.95.10)* | all peers: `{"schema":1,"devices":[{"mac","deviceName","friendlyName","room","zone","tags","pendingRoom"?,"pendingTags"?,"stationary","online","lastSeenSec","source"}],"count","notShown"?}` |
-| `espnowdeviceinfo` *(v0.95.10)* | this device (self): `{"schema":1,"name","nameValid","friendlyName","room","zone","tags","stationary","meshRole","mac","hint"}`; `nameValid` is false when no usable device name is saved |
+| `espnowdeviceinfo` *(v0.95.10)* | this device (self): `{"schema":1,"name","nameValid","deviceNameSet","friendlyName","room","zone","tags","stationary","meshRole","mac","hint"}`; `nameValid` is false when no usable device name is saved, and `deviceNameSet` has the same value (the key the other replies use); `name` is `""` then (ESP-NOW never uses the fallback name) |
 | `espnowmode` (admin) | `{"schema":1,"enabled","mode"}`; `mode` is `direct` or `mesh` |
 | `espnowmeshrole` (admin) | `{"schema":1,"role","masterMac","backupEnabled","backupMac"}`; `role` is `worker`, `master` or `backup`; the MACs are `""` when unset |
 | `espnowrooms` | `{"schema":1,"rooms":[{"room","devices":[{"name","tags","online","accepted","pendingTags"?}]}],"count","notShown"?}` |
