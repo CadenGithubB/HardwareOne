@@ -32,7 +32,6 @@ def generated(component: Path, baseline: bool) -> str:
     owner = (component / "i2csensor_pa1010d.cpp").read_text()
     header = (component / "i2csensor_pa1010d.h").read_text()
     g2 = (component / "G2_Page_Sensors.cpp").read_text()
-    mqtt = (component / "System_MQTT.cpp").read_text()
     web = (component / "WebPage_Sensors.cpp").read_text()
     logging = (component / "System_SensorLogging.cpp").read_text()
     mutex_header = (COMPONENT / "System_Mutex.h").read_text()
@@ -58,13 +57,9 @@ def generated(component: Path, baseline: bool) -> str:
                  extract_block(owner, "int gpsBuildDataJson("),
                  extract_block(g2, "static void gpsG2FormatValue("),
                  extract_block(g2, "static void g2BuildGpsReadout(")]
-    mqtt_pos = mqtt.index("if (gSettings.mqttPublishGps && gGpsRunning")
-    mqtt_branch = mqtt[mqtt.rindex("#if ENABLE_GPS_SENSOR", 0, mqtt_pos):
-                       mqtt.index("#endif", mqtt_pos) + len("#endif")]
     web_branch = extract_block(web, 'if (sensorType == "gps")')
     log_branch = extract_block(logging, "\n    if (mask & LOG_GPS)")
     functions += [
-        "static int mqttGps(char* jsonBuf) { int pos = 0;\n" + mqtt_branch + "\nreturn pos; }",
         "static int webGps() { void* req = nullptr; const std::string sensorType = \"gps\";\n" +
         web_branch + "\nreturn -1; }",
         "static SensorCacheSnapshot loggingGps(unsigned mask) { SensorCacheSnapshot snap{};\n" +

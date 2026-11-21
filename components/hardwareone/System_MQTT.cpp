@@ -38,6 +38,9 @@
 #include "System_Utils.h"
 #include <ArduinoJson.h>
 #include "System_CommandRegistry.h"
+#include "System_Clock.h"            // the state document's "time" (UTC)
+#include "System_MQTTPayloadCore.h"  // state and discovery documents, HA entity table
+#include <esp_heap_caps.h>          // PSRAM total for the state document
 
 #if ENABLE_ESPNOW
 #include "System_ESPNow.h"
@@ -60,7 +63,7 @@
 #include "i2csensor_ds3231.h"
 
 #if ENABLE_OLED_INPUT
-#include "HAL_Input.h"   // inputGetX/Y/ButtonsLogical — works for gamepad OR ANO
+#include "HAL_Input.h"   // gInputRunning/gInputConnected and the input builders
 #endif
 
 // Forward declarations
@@ -374,10 +377,12 @@ extern const SettingsModule mqttSettingsModule = {
 // Home Assistant MQTT Discovery
 // ============================================================================
 
-// Get device identifier (MAC-based)
+// Get device identifier (MAC-based): "hardwareone_<12 hex>" from the station
+// address, kept per boot by SelfDevice (on the P4X a WiFi.macAddress() call is
+// a round trip to the C6, and discovery asks once per entity).
 static String getDeviceId() {
-  uint8_t mac[6];
-  WiFi.macAddress(mac);
+  uint8_t mac[6] = {0, 0, 0, 0, 0, 0};
+  (void)SelfDevice::macBytes(mac);
   char macStr[13];
   macToPathToken(mac, macStr);  // no-separator UPPER (System_Utils.h)
   char idBuf[26];
@@ -385,21 +390,13 @@ static String getDeviceId() {
   return String(idBuf);
 }
 
-// Publish a single HA discovery config message
-// component: "sensor", "binary_sensor", etc.
-// objectId: unique suffix like "heap_free", "wifi_rssi"
-// name: friendly name shown in HA
-// valueTemplate: Jinja template to extract value from JSON state
-// unit: unit of measurement (nullptr if none)
-// deviceClass: HA device class (nullptr if none)
-// icon: MDI icon (nullptr for default)
 // PSRAM staging buffer shared by publishDiscoveryConfig() and
 // publishPeerDiscoveryConfig(). ONE buffer serves both because they can never be
 // live at the same time:
 //
-//   MQTT_EVENT_CONNECTED (:817 — the ONLY caller of publishMqttDiscovery)
+//   MQTT_EVENT_CONNECTED (the ONLY caller of publishMqttDiscovery)
 //     └─ publishMqttDiscovery()
-//          ├─ publishDiscoveryConfig(...)      x~40, each frame opens and closes
+//          ├─ publishDiscoveryConfig(...)      once per entity, each frame opens and closes
 //          └─ publishMeshPeerDiscovery()       runs only AFTER all of the above returned
 //               └─ publishPeerDiscoveryConfig(...)  x(peers x sensors)
 //
@@ -412,110 +409,139 @@ static String getDeviceId() {
 // Static rather than per-call heap: publishDiscoveryConfig runs ~40x back-to-back,
 // so a malloc/free per call would be pure overhead. Keeps 1 KB off the esp-mqtt
 // task's stack (and costs 1 KB of PSRAM, not 2).
-static constexpr size_t kMqttDiscoveryJsonCap = 1024;
+static constexpr size_t kMqttDiscoveryJsonCap = mqttpayload::kDiscoveryCap;
 EXT_RAM_BSS_ATTR static char sMqttDiscoveryConfigJson[kMqttDiscoveryJsonCap];
 
-// Bounded text builder for the discovery documents. Once a piece does not fit
-// the writer stays failed, and the caller skips the publish instead of sending
-// a truncated document (a long mqttBaseTopic appears twice in each config).
-class MqttJsonWriter final {
- public:
-  MqttJsonWriter(char* buffer, size_t capacity)
-      : buf_(buffer), cap_(capacity), len_(0), ok_(buffer && capacity > 0) {
-    if (ok_) buf_[0] = '\0';
-  }
-
-  __attribute__((format(printf, 2, 3)))
-  void appendf(const char* fmt, ...) {
-    if (!ok_) return;
-    va_list args;
-    va_start(args, fmt);
-    const int written = vsnprintf(buf_ + len_, cap_ - len_, fmt, args);
-    va_end(args);
-    if (written < 0 || (size_t)written >= cap_ - len_) {
-      ok_ = false;
-      buf_[len_] = '\0';
-      return;
-    }
-    len_ += (size_t)written;
-  }
-
-  bool ok() const { return ok_; }
-
- private:
-  char* buf_;
-  size_t cap_;
-  size_t len_;
-  bool ok_;
+// What every discovery config of this device shares, worked out once per
+// connect by publishMqttDiscovery.
+struct MqttLocalDiscovery {
+  String deviceId;
+  String stateTopic;
+  String availTopic;
+  String deviceName;  // the HA device name
 };
 
-static void publishDiscoveryConfig(const char* component, const char* objectId,
-                                    const char* name, const char* valueTemplate,
-                                    const char* unit, const char* deviceClass,
-                                    const char* icon) {
+static MqttLocalDiscovery mqttLocalDiscovery() {
+  MqttLocalDiscovery local;
+  local.deviceId = getDeviceId();
+  local.stateTopic = gSettings.mqttBaseTopic + "/state";
+  local.availTopic = gSettings.mqttBaseTopic + "/availability";
+  // The friendly name when one is set, else the device name in use: the
+  // stored name, or the fallback "HardwareOne-B2C3" (bare: HA makes entity
+  // ids from the device name the first time it sees it).
+  local.deviceName = gSettings.espnowFriendlyName.length() > 0 ? gSettings.espnowFriendlyName
+                                                               : SelfDevice::deviceName();
+  return local;
+}
+
+// Publish one HA discovery config (retained, so HA picks it up after a
+// restart). The document is built with ArduinoJson (System_MQTTPayloadCore.h),
+// so names and rooms are escaped; one that does not fit the 1 KB buffer (a
+// long mqttBaseTopic appears twice in it) is skipped, never cut.
+static void publishDiscoveryConfig(const mqttpayload::HaEntity& entity,
+                                   const MqttLocalDiscovery& local) {
   if (!mqttClient ||
       !mqttTofConnected.load(std::memory_order_acquire)) return;
-  
-  String deviceId = getDeviceId();
-  String stateTopic = gSettings.mqttBaseTopic + "/state";
-  String availTopic = gSettings.mqttBaseTopic + "/availability";
-  String uniqueId = deviceId + "_" + objectId;
-  
-  // Build discovery topic: homeassistant/<component>/<device_id>/<object_id>/config
-  String discoveryTopic = gSettings.mqttDiscoveryPrefix + "/" + component + "/" + 
-                          deviceId + "/" + objectId + "/config";
-  
-  // Build config JSON in the shared PSRAM buffer — see
-  // sMqttDiscoveryConfigJson for why sharing is safe.
-  char* configJson = sMqttDiscoveryConfigJson;
-  MqttJsonWriter json(configJson, kMqttDiscoveryJsonCap);
-  
-  json.appendf(
-    "{\"name\":\"%s\",\"unique_id\":\"%s\",\"state_topic\":\"%s\",\"value_template\":\"%s\"",
-    name, uniqueId.c_str(), stateTopic.c_str(), valueTemplate);
-  
-  if (unit && strlen(unit) > 0) {
-    json.appendf(",\"unit_of_measurement\":\"%s\"", unit);
-  }
-  if (deviceClass && strlen(deviceClass) > 0) {
-    json.appendf(",\"device_class\":\"%s\"", deviceClass);
-  }
-  if (icon && strlen(icon) > 0) {
-    json.appendf(",\"icon\":\"%s\"", icon);
-  }
-  
-  // Add availability
-  json.appendf(
-    ",\"availability_topic\":\"%s\",\"payload_available\":\"online\",\"payload_not_available\":\"offline\"",
-    availTopic.c_str());
-  
-  // Add device info (groups all sensors under one device in HA)
-  // Use friendly name if set, otherwise espnowDeviceName, otherwise "HardwareOne"
-  const char* haDeviceName = "HardwareOne";
-  if (gSettings.espnowFriendlyName.length() > 0) haDeviceName = gSettings.espnowFriendlyName.c_str();
-  else if (gSettings.espnowDeviceName.length() > 0) haDeviceName = gSettings.espnowDeviceName.c_str();
-  
-  json.appendf(
-    ",\"device\":{\"identifiers\":[\"%s\"],\"name\":\"%s\",\"model\":\"ESP32-S3\",\"manufacturer\":\"Custom\"",
-    deviceId.c_str(), haDeviceName);
-  
-  // Add suggested_area from espnowRoom (HA auto-assigns device to this room)
-  if (gSettings.espnowRoom.length() > 0) {
-    json.appendf(",\"suggested_area\":\"%s\"", gSettings.espnowRoom.c_str());
-  }
-  json.appendf("}");
-  
-  json.appendf("}");
 
-  if (!json.ok()) {
+  String uniqueId = local.deviceId + "_" + entity.objectId;
+
+  // Build discovery topic: homeassistant/<component>/<device_id>/<object_id>/config
+  String discoveryTopic = gSettings.mqttDiscoveryPrefix + "/" + entity.component + "/" +
+                          local.deviceId + "/" + entity.objectId + "/config";
+
+  mqttpayload::DeviceInfo device;
+  device.id = local.deviceId.c_str();
+  device.name = local.deviceName.c_str();
+  device.model = BOARD_NAME;
+  device.swVersion = SelfDevice::firmwareVersion();
+  device.area = gSettings.espnowRoom.c_str();  // HA auto-assigns the device to this room
+
+  // Built in the shared PSRAM buffer — see sMqttDiscoveryConfigJson for why
+  // sharing is safe.
+  PSRAM_JSON_DOC(doc);
+  const size_t len =
+      mqttpayload::buildDiscovery(entity, uniqueId.c_str(), local.stateTopic.c_str(),
+                                  local.availTopic.c_str(), device, doc)
+          ? mqttpayload::serializeBounded(doc, sMqttDiscoveryConfigJson, kMqttDiscoveryJsonCap)
+          : 0;
+  if (len == 0) {
     WARN_MQTTF("Discovery config for %s exceeds %u bytes; not published",
-               objectId, (unsigned)kMqttDiscoveryJsonCap);
+               entity.objectId, (unsigned)kMqttDiscoveryJsonCap);
     return;
   }
-  
-  // Publish with retain so HA picks it up even if it restarts
-  esp_mqtt_client_publish(mqttClient, discoveryTopic.c_str(), configJson, 0, 1, true);
-  DEBUG_MQTT_DISCOVERYF("Discovery: %s", objectId);
+
+  esp_mqtt_client_publish(mqttClient, discoveryTopic.c_str(), sMqttDiscoveryConfigJson,
+                          (int)len, 1, true);
+  DEBUG_MQTT_DISCOVERYF("Discovery: %s", entity.objectId);
+}
+
+// Clear the retained config of an entity this firmware no longer declares
+// (an empty retained payload), so HA removes it. `deviceId` is this device's
+// or a peer's id.
+static void publishRetiredDiscovery(const mqttpayload::RetiredEntity& retired,
+                                    const String& deviceId) {
+  if (!mqttClient ||
+      !mqttTofConnected.load(std::memory_order_acquire)) return;
+  String discoveryTopic = gSettings.mqttDiscoveryPrefix + "/" + retired.component + "/" +
+                          deviceId + "/" + retired.objectId + "/config";
+  esp_mqtt_client_publish(mqttClient, discoveryTopic.c_str(), "", 0, 1, true);
+  DEBUG_MQTT_DISCOVERYF("Discovery retired: %s", retired.objectId);
+}
+
+// The state sections this build has (mqttpayload::Section bits).
+static uint16_t mqttCompiledSections() {
+  uint16_t sections = mqttpayload::kSystem | mqttpayload::kWifi;
+  if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) sections |= mqttpayload::kPsram;
+#if ENABLE_THERMAL_SENSOR
+  sections |= mqttpayload::kThermal;
+#endif
+#if ENABLE_TOF_SENSOR
+  sections |= mqttpayload::kTof;
+#endif
+#if ENABLE_IMU_SENSOR
+  sections |= mqttpayload::kImu;
+#endif
+#if ENABLE_PRESENCE_SENSOR
+  sections |= mqttpayload::kPresence;
+#endif
+#if ENABLE_GPS_SENSOR
+  sections |= mqttpayload::kGps;
+#endif
+#if ENABLE_APDS_SENSOR
+  sections |= mqttpayload::kApds;
+#endif
+#if ENABLE_RTC_SENSOR
+  sections |= mqttpayload::kRtc;
+#endif
+  // The input builder ladder of System_ESPNow_Sensors.cpp (one device per
+  // build; GT911 touch has no builder).
+#if ENABLE_GAMEPAD_SENSOR
+  sections |= mqttpayload::kInputPad;
+#elif ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER
+  sections |= mqttpayload::kInputEncoder;
+#endif
+#if ENABLE_OLED_INPUT
+  sections |= mqttpayload::kInputLegacy;
+#endif
+  return sections;
+}
+
+// The sections the mqttPublish* settings switch on.
+static uint16_t mqttSwitchedOnSections() {
+  uint16_t sections = 0;
+  if (gSettings.mqttPublishSystem) sections |= mqttpayload::kSystem | mqttpayload::kPsram;
+  if (gSettings.mqttPublishWifi) sections |= mqttpayload::kWifi;
+  if (gSettings.mqttPublishThermal) sections |= mqttpayload::kThermal;
+  if (gSettings.mqttPublishTof) sections |= mqttpayload::kTof;
+  if (gSettings.mqttPublishImu) sections |= mqttpayload::kImu;
+  if (gSettings.mqttPublishPresence) sections |= mqttpayload::kPresence;
+  if (gSettings.mqttPublishGps) sections |= mqttpayload::kGps;
+  if (gSettings.mqttPublishApds) sections |= mqttpayload::kApds;
+  if (gSettings.mqttPublishRtc) sections |= mqttpayload::kRtc;
+  if (gSettings.mqttPublishInput) {
+    sections |= mqttpayload::kInputPad | mqttpayload::kInputEncoder | mqttpayload::kInputLegacy;
+  }
+  return sections;
 }
 
 // Subscribe to command topic for receiving commands from HA
@@ -811,99 +837,30 @@ static void handleMqttCommand(const char* topic, int topicLen, const char* data,
 static void publishMeshPeerDiscovery();
 #endif
 
-// Publish all discovery configs for enabled sensors
+// Publish all discovery configs for enabled sensors: every row of the entity
+// table (System_MQTTPayloadCore.h) whose section this build has and the
+// mqttPublish* settings switch on, then clear the configs of retired entities.
 static void publishMqttDiscovery() {
   if (!mqttTofConnected.load(std::memory_order_acquire) ||
       gSettings.mqttDiscoveryPrefix.length() == 0) return;
   
   INFO_MQTT_DISCOVERYF("Publishing Home Assistant discovery configs...");
-  
-  // System sensors (always available)
-  if (gSettings.mqttPublishSystem) {
-    publishDiscoveryConfig("sensor", "uptime", "Uptime", "{{ value_json.system.uptime }}", "s", "duration", "mdi:timer-outline");
-    publishDiscoveryConfig("sensor", "heap_free", "Heap Free", "{{ value_json.system.heap_free }}", "B", nullptr, "mdi:memory");
-    publishDiscoveryConfig("sensor", "heap_min", "Heap Min", "{{ value_json.system.heap_min }}", "B", nullptr, "mdi:memory");
-  }
-  
-  // WiFi sensors
-  if (gSettings.mqttPublishWifi) {
-    publishDiscoveryConfig("sensor", "wifi_rssi", "WiFi RSSI", "{{ value_json.wifi.rssi }}", "dBm", "signal_strength", nullptr);
-    publishDiscoveryConfig("sensor", "wifi_ssid", "WiFi SSID", "{{ value_json.wifi.ssid }}", nullptr, nullptr, "mdi:wifi");
-    publishDiscoveryConfig("sensor", "wifi_ip", "WiFi IP", "{{ value_json.wifi.ip }}", nullptr, nullptr, "mdi:ip-network");
-  }
-  
-#if ENABLE_THERMAL_SENSOR
-  if (gSettings.mqttPublishThermal) {
-    publishDiscoveryConfig("sensor", "thermal_min", "Thermal Min", "{{ value_json.thermal.min_temp }}", "°C", "temperature", nullptr);
-    publishDiscoveryConfig("sensor", "thermal_max", "Thermal Max", "{{ value_json.thermal.max_temp }}", "°C", "temperature", nullptr);
-    publishDiscoveryConfig("sensor", "thermal_avg", "Thermal Avg", "{{ value_json.thermal.avg_temp }}", "°C", "temperature", nullptr);
-  }
-#endif
 
-#if ENABLE_TOF_SENSOR
-  if (gSettings.mqttPublishTof) {
-    publishDiscoveryConfig("sensor", "tof_distance", "ToF Distance", "{{ value_json.tof.distance }}", "mm", "distance", nullptr);
+  const MqttLocalDiscovery local = mqttLocalDiscovery();
+  const uint16_t compiled = mqttCompiledSections();
+  const uint16_t active = compiled & mqttSwitchedOnSections();
+  for (size_t i = 0; i < mqttpayload::kEntityCount; ++i) {
+    const mqttpayload::HaEntity& entity = mqttpayload::kEntities[i];
+    if (mqttpayload::entityActive(entity, mqttpayload::kLocal, active)) {
+      publishDiscoveryConfig(entity, local);
+    }
   }
-#endif
-
-#if ENABLE_IMU_SENSOR
-  if (gSettings.mqttPublishImu) {
-    publishDiscoveryConfig("sensor", "imu_accel_x", "IMU Accel X", "{{ value_json.imu.accel_x }}", "m/s²", nullptr, "mdi:axis-x-arrow");
-    publishDiscoveryConfig("sensor", "imu_accel_y", "IMU Accel Y", "{{ value_json.imu.accel_y }}", "m/s²", nullptr, "mdi:axis-y-arrow");
-    publishDiscoveryConfig("sensor", "imu_accel_z", "IMU Accel Z", "{{ value_json.imu.accel_z }}", "m/s²", nullptr, "mdi:axis-z-arrow");
-    publishDiscoveryConfig("sensor", "imu_gyro_x", "IMU Gyro X", "{{ value_json.imu.gyro_x }}", "°/s", nullptr, "mdi:rotate-3d-variant");
-    publishDiscoveryConfig("sensor", "imu_gyro_y", "IMU Gyro Y", "{{ value_json.imu.gyro_y }}", "°/s", nullptr, "mdi:rotate-3d-variant");
-    publishDiscoveryConfig("sensor", "imu_gyro_z", "IMU Gyro Z", "{{ value_json.imu.gyro_z }}", "°/s", nullptr, "mdi:rotate-3d-variant");
+  for (size_t i = 0; i < mqttpayload::kRetiredCount; ++i) {
+    const mqttpayload::RetiredEntity& retired = mqttpayload::kRetired[i];
+    if (mqttpayload::retiredApplies(retired, mqttpayload::kLocal, compiled)) {
+      publishRetiredDiscovery(retired, local.deviceId);
+    }
   }
-#endif
-
-#if ENABLE_PRESENCE_SENSOR
-  if (gSettings.mqttPublishPresence) {
-    publishDiscoveryConfig("binary_sensor", "presence_detected", "Presence Detected", "{{ value_json.presence.detected }}", nullptr, "presence", nullptr);
-    publishDiscoveryConfig("binary_sensor", "motion_detected", "Motion Detected", "{{ value_json.presence.motion }}", nullptr, "motion", nullptr);
-    publishDiscoveryConfig("sensor", "presence_ambient", "Presence Ambient Temp", "{{ value_json.presence.ambient_temp }}", "°C", "temperature", nullptr);
-    publishDiscoveryConfig("sensor", "presence_object", "Presence Object Temp", "{{ value_json.presence.object_temp }}", "°C", "temperature", nullptr);
-  }
-#endif
-
-#if ENABLE_GPS_SENSOR
-  if (gSettings.mqttPublishGps) {
-    publishDiscoveryConfig("sensor", "gps_latitude", "GPS Latitude", "{{ value_json.gps.lat }}", "°", nullptr, "mdi:crosshairs-gps");
-    publishDiscoveryConfig("sensor", "gps_longitude", "GPS Longitude", "{{ value_json.gps.lon }}", "°", nullptr, "mdi:crosshairs-gps");
-    publishDiscoveryConfig("sensor", "gps_altitude", "GPS Altitude", "{{ value_json.gps.alt }}", "m", nullptr, "mdi:altimeter");
-    publishDiscoveryConfig("sensor", "gps_speed", "GPS Speed", "{{ value_json.gps.speed }}", "km/h", nullptr, "mdi:speedometer");
-    publishDiscoveryConfig("sensor", "gps_satellites", "GPS Satellites", "{{ value_json.gps.satellites }}", nullptr, nullptr, "mdi:satellite-variant");
-  }
-#endif
-
-#if ENABLE_APDS_SENSOR
-  if (gSettings.mqttPublishApds) {
-    publishDiscoveryConfig("sensor", "apds_proximity", "Proximity", "{{ value_json.apds.proximity }}", nullptr, nullptr, "mdi:hand-wave");
-    publishDiscoveryConfig("sensor", "apds_color_r", "Color Red", "{{ value_json.apds.color.r }}", nullptr, nullptr, "mdi:palette");
-    publishDiscoveryConfig("sensor", "apds_color_g", "Color Green", "{{ value_json.apds.color.g }}", nullptr, nullptr, "mdi:palette");
-    publishDiscoveryConfig("sensor", "apds_color_b", "Color Blue", "{{ value_json.apds.color.b }}", nullptr, nullptr, "mdi:palette");
-  }
-#endif
-
-#if ENABLE_RTC_SENSOR
-  if (gSettings.mqttPublishRtc) {
-    publishDiscoveryConfig("sensor", "rtc_datetime", "RTC DateTime", "{{ value_json.rtc.datetime }}", nullptr, "timestamp", "mdi:clock-outline");
-    publishDiscoveryConfig("sensor", "rtc_temperature", "RTC Temperature", "{{ value_json.rtc.temperature }}", "°C", "temperature", nullptr);
-  }
-#endif
-
-#if ENABLE_OLED_INPUT  // applies whether the input device is gamepad or ANO encoder
-  if (gSettings.mqttPublishInput) {
-    // JSON keys retained as "gamepad.*" for HA backwards compat (existing
-    // automations / dashboards reference them). The button bits are now in
-    // the canonical logical layout (bit 0=A, 1=B, 2=X, 3=Y, 4=START, 5=SELECT)
-    // so the meaning of those bits is consistent regardless of which physical
-    // input device produced them.
-    publishDiscoveryConfig("sensor", "gamepad_x", "Input X", "{{ value_json.gamepad.x }}", nullptr, nullptr, "mdi:gamepad-variant");
-    publishDiscoveryConfig("sensor", "gamepad_y", "Input Y", "{{ value_json.gamepad.y }}", nullptr, nullptr, "mdi:gamepad-variant");
-    publishDiscoveryConfig("sensor", "gamepad_buttons", "Input Buttons (logical)", "{{ value_json.gamepad.buttons }}", nullptr, nullptr, "mdi:gamepad");
-  }
-#endif
 
   INFO_MQTT_DISCOVERYF("Discovery configs published");
   
@@ -918,78 +875,69 @@ static void publishMqttDiscovery() {
 // ============================================================================
 #if ENABLE_ESPNOW
 
-// Publish a single HA discovery config for a remote peer device
-// Similar to publishDiscoveryConfig but with peer-specific device identity
-static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
-                                        const char* component, const char* objectId,
-                                        const char* name, const char* valueTemplate,
-                                        const char* unit, const char* deviceClass,
-                                        const char* icon) {
-  if (!mqttClient ||
-      !mqttTofConnected.load(std::memory_order_acquire)) return;
-
-  // Build peer device ID from MAC
+// The HA id of a mesh peer: "hardwareone_<12 hex>".
+static String meshPeerDeviceId(const MeshPeerMeta& peer) {
   char macCompact[13];
   macToPathToken(peer.mac, macCompact);  // no-separator UPPER
   char peerIdBuf[26];
   snprintf(peerIdBuf, sizeof(peerIdBuf), "hardwareone_%s", macCompact);
-  String peerId = peerIdBuf;
-  String masterDeviceId = getDeviceId();
+  return String(peerIdBuf);
+}
+
+// Publish a single HA discovery config for a remote peer device
+// Similar to publishDiscoveryConfig but with peer-specific device identity
+static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
+                                       const mqttpayload::HaEntity& entity,
+                                       const String& masterDeviceId) {
+  if (!mqttClient ||
+      !mqttTofConnected.load(std::memory_order_acquire)) return;
+
+  String peerId = meshPeerDeviceId(peer);
 
   // Peer state topic: <baseTopic>/devices/<peerId>/state
   String peerStateTopic = gSettings.mqttBaseTopic + "/devices/" + peerId + "/state";
   String peerAvailTopic = gSettings.mqttBaseTopic + "/devices/" + peerId + "/availability";
-  String uniqueId = peerId + "_" + objectId;
+  String uniqueId = peerId + "_" + entity.objectId;
 
-  String discoveryTopic = gSettings.mqttDiscoveryPrefix + "/" + component + "/" +
-                          peerId + "/" + objectId + "/config";
+  String discoveryTopic = gSettings.mqttDiscoveryPrefix + "/" + entity.component + "/" +
+                          peerId + "/" + entity.objectId + "/config";
+
+  // Device info — the peer's friendly name, else its device name, else the
+  // unknown-peer label; its room. No model or sw_version: the master does not
+  // know a peer's board or firmware.
+  char unknownPeer[devicename::kFieldLen];
+  mqttpayload::DeviceInfo device;
+  device.id = peerId.c_str();
+  device.name = mqttpayload::peerDisplayName(peer.friendlyName, peer.name, peer.mac, unknownPeer);
+  device.area = peer.room;
+  device.viaDevice = masterDeviceId.c_str();
 
   // Shares the same PSRAM buffer as publishDiscoveryConfig — this function only
   // runs after every publishDiscoveryConfig frame has returned. See
   // sMqttDiscoveryConfigJson.
-  char* configJson = sMqttDiscoveryConfigJson;
-  MqttJsonWriter json(configJson, kMqttDiscoveryJsonCap);
-
-  json.appendf(
-    "{\"name\":\"%s\",\"unique_id\":\"%s\",\"state_topic\":\"%s\",\"value_template\":\"%s\"",
-    name, uniqueId.c_str(), peerStateTopic.c_str(), valueTemplate);
-
-  if (unit && strlen(unit) > 0) {
-    json.appendf(",\"unit_of_measurement\":\"%s\"", unit);
-  }
-  if (deviceClass && strlen(deviceClass) > 0) {
-    json.appendf(",\"device_class\":\"%s\"", deviceClass);
-  }
-  if (icon && strlen(icon) > 0) {
-    json.appendf(",\"icon\":\"%s\"", icon);
-  }
-
-  // Availability
-  json.appendf(
-    ",\"availability_topic\":\"%s\",\"payload_available\":\"online\",\"payload_not_available\":\"offline\"",
-    peerAvailTopic.c_str());
-
-  // Device info — use peer's friendly name and room
-  const char* peerName = peer.friendlyName[0] ? peer.friendlyName :
-                         (peer.name[0] ? peer.name : macCompact);
-
-  json.appendf(
-    ",\"device\":{\"identifiers\":[\"%s\"],\"name\":\"%s\",\"model\":\"ESP32-S3\",\"manufacturer\":\"Custom\""
-    ",\"via_device\":\"%s\"",
-    peerId.c_str(), peerName, masterDeviceId.c_str());
-
-  if (peer.room[0]) {
-    json.appendf(",\"suggested_area\":\"%s\"", peer.room);
-  }
-  json.appendf("}}");
-
-  if (!json.ok()) {
+  PSRAM_JSON_DOC(doc);
+  const size_t len =
+      mqttpayload::buildDiscovery(entity, uniqueId.c_str(), peerStateTopic.c_str(),
+                                  peerAvailTopic.c_str(), device, doc)
+          ? mqttpayload::serializeBounded(doc, sMqttDiscoveryConfigJson, kMqttDiscoveryJsonCap)
+          : 0;
+  if (len == 0) {
     WARN_MQTTF("Peer discovery config for %s/%s exceeds %u bytes; not published",
-               peerId.c_str(), objectId, (unsigned)kMqttDiscoveryJsonCap);
+               peerId.c_str(), entity.objectId, (unsigned)kMqttDiscoveryJsonCap);
     return;
   }
 
-  esp_mqtt_client_publish(mqttClient, discoveryTopic.c_str(), configJson, 0, 1, true);
+  esp_mqtt_client_publish(mqttClient, discoveryTopic.c_str(), sMqttDiscoveryConfigJson,
+                          (int)len, 1, true);
+}
+
+// The state sections a peer's readings fill (its sensorMask); system always.
+static uint16_t meshPeerSections(const MeshPeerMeta& peer) {
+  uint16_t sections = mqttpayload::kSystem;
+  if (peer.sensorMask & (1 << REMOTE_SENSOR_TOF)) sections |= mqttpayload::kTof;
+  if (peer.sensorMask & (1 << REMOTE_SENSOR_IMU)) sections |= mqttpayload::kImu;
+  if (peer.sensorMask & (1 << REMOTE_SENSOR_GPS)) sections |= mqttpayload::kGps;
+  return sections;
 }
 
 // Publish HA discovery for all known mesh peers based on their sensor capabilities
@@ -999,48 +947,34 @@ static void publishMeshPeerDiscovery() {
   if (gSettings.meshRole != MESH_ROLE_MASTER) return;  // Only master bridges
   if (!gMeshPeerMeta) return;  // Not yet allocated
 
+  const String masterDeviceId = getDeviceId();
   int peerCount = 0;
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (!gMeshPeerMeta[i].isActive) continue;
     const MeshPeerMeta& peer = gMeshPeerMeta[i];
     peerCount++;
 
-    // Always publish system sensors for each peer
-    publishPeerDiscoveryConfig(peer, "sensor", "uptime", "Uptime",
-      "{{ value_json.system.uptime }}", "s", "duration", "mdi:timer-outline");
-
-    // Publish sensor-specific discovery based on sensorMask
-    if (peer.sensorMask & (1 << REMOTE_SENSOR_THERMAL)) {
-      publishPeerDiscoveryConfig(peer, "sensor", "thermal_min", "Thermal Min",
-        "{{ value_json.thermal.min_temp }}", "°C", "temperature", nullptr);
-      publishPeerDiscoveryConfig(peer, "sensor", "thermal_max", "Thermal Max",
-        "{{ value_json.thermal.max_temp }}", "°C", "temperature", nullptr);
-      publishPeerDiscoveryConfig(peer, "sensor", "thermal_avg", "Thermal Avg",
-        "{{ value_json.thermal.avg_temp }}", "°C", "temperature", nullptr);
+    // The peer rows of the entity table: system always, the sensors by the
+    // peer's sensorMask.
+    const uint16_t sections = meshPeerSections(peer);
+    for (size_t e = 0; e < mqttpayload::kEntityCount; ++e) {
+      const mqttpayload::HaEntity& entity = mqttpayload::kEntities[e];
+      if (mqttpayload::entityActive(entity, mqttpayload::kPeer, sections)) {
+        publishPeerDiscoveryConfig(peer, entity, masterDeviceId);
+      }
     }
-    if (peer.sensorMask & (1 << REMOTE_SENSOR_TOF)) {
-      publishPeerDiscoveryConfig(peer, "sensor", "tof_distance", "ToF Distance",
-        "{{ value_json.tof.distance }}", "mm", "distance", nullptr);
-    }
-    if (peer.sensorMask & (1 << REMOTE_SENSOR_IMU)) {
-      publishPeerDiscoveryConfig(peer, "sensor", "imu_accel_x", "IMU Accel X",
-        "{{ value_json.imu.accel_x }}", "m/s²", nullptr, "mdi:axis-x-arrow");
-      publishPeerDiscoveryConfig(peer, "sensor", "imu_accel_y", "IMU Accel Y",
-        "{{ value_json.imu.accel_y }}", "m/s²", nullptr, "mdi:axis-y-arrow");
-      publishPeerDiscoveryConfig(peer, "sensor", "imu_accel_z", "IMU Accel Z",
-        "{{ value_json.imu.accel_z }}", "m/s²", nullptr, "mdi:axis-z-arrow");
-    }
-    if (peer.sensorMask & (1 << REMOTE_SENSOR_GPS)) {
-      publishPeerDiscoveryConfig(peer, "sensor", "gps_latitude", "GPS Latitude",
-        "{{ value_json.gps.lat }}", "°", nullptr, "mdi:crosshairs-gps");
-      publishPeerDiscoveryConfig(peer, "sensor", "gps_longitude", "GPS Longitude",
-        "{{ value_json.gps.lon }}", "°", nullptr, "mdi:crosshairs-gps");
+    // Clear the peer entities earlier firmware declared (uptime, thermal).
+    const String peerId = meshPeerDeviceId(peer);
+    for (size_t r = 0; r < mqttpayload::kRetiredCount; ++r) {
+      const mqttpayload::RetiredEntity& retired = mqttpayload::kRetired[r];
+      if (mqttpayload::retiredApplies(retired, mqttpayload::kPeer,
+                                      sections | mqttpayload::kThermal)) {
+        publishRetiredDiscovery(retired, peerId);
+      }
     }
 
     // Publish availability for this peer
-    char macCompact[13];
-    macToPathToken(peer.mac, macCompact);  // no-separator UPPER
-    String peerAvailTopic = gSettings.mqttBaseTopic + "/devices/hardwareone_" + macCompact + "/availability";
+    String peerAvailTopic = gSettings.mqttBaseTopic + "/devices/" + peerId + "/availability";
     
     const char* status = MeshPeers::isHealthy(peer.mac) ? "online" : "offline";
     esp_mqtt_client_publish(mqttClient, peerAvailTopic.c_str(), status, 0, 1, true);
@@ -1484,6 +1418,25 @@ bool stopMqtt() {
 // MQTT Publishing
 // ============================================================================
 
+// The sensor sections of the state document, for the dropped-section report.
+static const char* const kMqttSectionNames[] = {"thermal", "tof", "imu", "presence",
+                                                "gps", "apds", "rtc", "input"};
+// Sections whose builder text did not parse at the last publish (bit i =
+// kMqttSectionNames[i]); a change is reported once, not every publish.
+static uint8_t sMqttDroppedSections = 0;
+
+// One builder reading into the state document. The builder writes into
+// `scratch` (the state buffer, idle until the document is serialized); the
+// document copies the text. Returns whether the section is in the document.
+// (Unused in a build with no sensor compiled.)
+[[maybe_unused]] static bool mqttAddBuilt(JsonDocument& doc, const char* key, int (*builder)(char*, size_t),
+                         char* scratch, size_t cap) {
+  const int len = builder(scratch, cap);
+  if (len <= 0 || (size_t)len >= cap) return false;
+  return strcmp(key, "rtc") == 0 ? mqttpayload::addRtcSection(doc, scratch, (size_t)len)
+                                 : mqttpayload::addSection(doc, key, scratch, (size_t)len);
+}
+
 void publishMqttSensorData() {
   MqttClientUse publishUse;
   if (!publishUse.admitted()) return;
@@ -1492,143 +1445,122 @@ void publishMqttSensorData() {
     return;
   }
   
-  // Build sensor data JSON blob from caches, in the kept PSRAM buffer. When
-  // PSRAM refuses it, this publish borrows a PreferPsram block and frees it,
-  // as every publish did before.
+  // The state document's text, in the kept PSRAM buffer. When PSRAM refuses
+  // it, this publish borrows a PreferPsram block and frees it, as every
+  // publish did before. Until the document is serialized the same buffer is
+  // the sensor builders' scratch.
   if (!sMqttStateJson) {
-    sMqttStateJson = (char*)ps_alloc(16384, AllocPref::RequirePsram, "mqtt.json");
+    sMqttStateJson = (char*)ps_alloc(mqttpayload::kStateCap, AllocPref::RequirePsram, "mqtt.json");
   }
   char* jsonBuf = sMqttStateJson;
-  if (!jsonBuf) jsonBuf = (char*)ps_alloc(16384, AllocPref::PreferPsram, "mqtt.json");
+  if (!jsonBuf) jsonBuf = (char*)ps_alloc(mqttpayload::kStateCap, AllocPref::PreferPsram, "mqtt.json");
   if (!jsonBuf) {
     WARN_MQTTF("Failed to allocate JSON buffer");
     return;
   }
-  
-  // Start JSON object
-  int pos = snprintf(jsonBuf, 16384, "{");
-  
-  // Add timestamp
-  pos += snprintf(jsonBuf + pos, 16384 - pos, "\"timestamp\":%lu", millis());
-  
-  // Add system info (uptime, heap, etc.)
+  const size_t cap = mqttpayload::kStateCap;
+
+  // Plain values: each source read once.
+  mqttpayload::StateInput in;
+  in.uptimeMs = (uint32_t)millis();
+  in.hasTime = Clock::isSynced();
+  if (in.hasTime) in.epochUtc = (int64_t)Clock::epochSeconds();
+  const String deviceName = SelfDevice::deviceName();
+  in.deviceName = deviceName.c_str();
+  in.deviceNameSet = SelfDevice::deviceNameSet();
   if (gSettings.mqttPublishSystem) {
-    pos += snprintf(jsonBuf + pos, 16384 - pos,
-      ",\"system\":{\"uptime\":%lu,\"heap_free\":%lu,\"heap_min\":%lu}",
-      (unsigned long)SelfDevice::uptimeSeconds(),
-      (unsigned long)SelfDevice::freeHeapBytes(),
-      (unsigned long)SelfDevice::minFreeHeapBytes());
+    in.hasSystem = true;
+    in.uptimeS = SelfDevice::uptimeSeconds();
+    in.heapFree = SelfDevice::freeHeapBytes();
+    in.heapMin = SelfDevice::minFreeHeapBytes();
+    const uint32_t psramTotal = (uint32_t)heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    if (psramTotal > 0) {
+      in.hasPsram = true;
+      in.psramTotal = psramTotal;
+      in.psramFree = SelfDevice::psramFreeBytes();
+    }
   }
-  
-  // Add WiFi info
+  String ssid, ip;
   if (gSettings.mqttPublishWifi && WiFi.isConnected()) {
-    pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"wifi\":{\"ssid\":\"%s\",\"rssi\":%d,\"ip\":\"%s\"}",
-                    WiFi.SSID().c_str(), WiFi.RSSI(), WiFi.localIP().toString().c_str());
+    in.hasWifi = true;
+    ssid = WiFi.SSID();
+    ip = WiFi.localIP().toString();
+    in.ssid = ssid.c_str();
+    in.ip = ip.c_str();
+    in.rssi = WiFi.RSSI();
   }
-  
-  // Add sensor data from caches (only if sensors are enabled and configured to publish)
+
+  PSRAM_JSON_DOC(doc);
+  const bool built = mqttpayload::beginState(in, doc);
+
+  // Sensor sections, each from its builder (the same text `sensors json` and
+  // ESP-NOW carry), only while the sensor runs and its publishing is on.
+  uint8_t dropped = 0;
 #if ENABLE_THERMAL_SENSOR
-  if (gSettings.mqttPublishThermal && gThermalRunning) {
-    char thermalJson[2048];
-    int len = thermalBuildDataJson(thermalJson, sizeof(thermalJson));
-    if (len > 0) {
-      pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"thermal\":%s", thermalJson);
-    }
-  }
+  // The summary (min/avg/max), not the 768-pixel frame.
+  if (gSettings.mqttPublishThermal && gThermalRunning &&
+      !mqttAddBuilt(doc, "thermal", thermalBuildSummaryJson, jsonBuf, cap)) dropped |= 1u << 0;
 #endif
-
 #if ENABLE_TOF_SENSOR
-  if (gSettings.mqttPublishTof && gTofRunning) {
-    char tofJson[1024];
-    int len = tofBuildDataJson(tofJson, sizeof(tofJson));
-    if (len > 0) {
-      pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"tof\":%s", tofJson);
-    }
-  }
+  if (gSettings.mqttPublishTof && gTofRunning &&
+      !mqttAddBuilt(doc, "tof", tofBuildDataJson, jsonBuf, cap)) dropped |= 1u << 1;
 #endif
-
 #if ENABLE_IMU_SENSOR
-  if (gSettings.mqttPublishImu && gImuRunning) {
-    char imuJson[1024];
-    int len = imuBuildDataJson(imuJson, sizeof(imuJson));
-    if (len > 0) {
-      pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"imu\":%s", imuJson);
-    }
-  }
+  if (gSettings.mqttPublishImu && gImuRunning &&
+      !mqttAddBuilt(doc, "imu", imuBuildDataJson, jsonBuf, cap)) dropped |= 1u << 2;
 #endif
-
 #if ENABLE_PRESENCE_SENSOR
-  PresenceCache presence{};
   if (gSettings.mqttPublishPresence && gPresenceRunning &&
-      presenceCacheSnapshot(presence) && presence.dataValid) {
-    pos += snprintf(jsonBuf + pos, 16384 - pos, 
-      ",\"presence\":{\"detected\":%s,\"motion\":%s,\"presence_raw\":%d,\"motion_raw\":%d,\"ambient_temp\":%.1f,\"object_temp\":%d}",
-      presence.presenceDetected ? "true" : "false",
-      presence.motionDetected ? "true" : "false",
-      presence.presenceValue, presence.motionValue,
-      presence.ambientTemp, presence.objectTemp);
-  }
+      !mqttAddBuilt(doc, "presence", presenceBuildDataJson, jsonBuf, cap)) dropped |= 1u << 3;
 #endif
-
 #if ENABLE_GPS_SENSOR
-  GpsCache gps{};
-  if (gSettings.mqttPublishGps && gGpsRunning && gGpsConnected && gpsCacheSnapshot(gps)) {
-    if (gps.hasFix) {
-      pos += snprintf(jsonBuf + pos, 16384 - pos,
-        ",\"gps\":{\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.1f,\"speed\":%.1f,\"satellites\":%d}",
-        gps.latitude, gps.longitude, gps.altitude, gps.speed, gps.satellites);
-    } else {
-      pos += snprintf(jsonBuf + pos, 16384 - pos, ",\"gps\":{\"fix\":false,\"satellites\":%d}", gps.satellites);
-    }
-  }
+  if (gSettings.mqttPublishGps && gGpsRunning && gGpsConnected &&
+      !mqttAddBuilt(doc, "gps", gpsBuildDataJson, jsonBuf, cap)) dropped |= 1u << 4;
 #endif
-
 #if ENABLE_APDS_SENSOR
-  if (gSettings.mqttPublishApds && gApdsColorRunning && gApdsConnected) {
-    pos += snprintf(jsonBuf + pos, 16384 - pos,
-      ",\"apds\":{\"proximity\":%u,\"color\":{\"r\":%u,\"g\":%u,\"b\":%u,\"c\":%u}}",
-      apdsGetProximity(), apdsGetColorR(), apdsGetColorG(), apdsGetColorB(), apdsGetColorC());
-  }
+  if (gSettings.mqttPublishApds && gApdsColorRunning && gApdsConnected &&
+      !mqttAddBuilt(doc, "apds", apdsBuildDataJson, jsonBuf, cap)) dropped |= 1u << 5;
 #endif
-
 #if ENABLE_RTC_SENSOR
-  if (gSettings.mqttPublishRtc && gRtcRunning && gRtcConnected) {
-    char timeBuf[32];
-    snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
-             rtcGetYear(), rtcGetMonth(), rtcGetDay(),
-             rtcGetHour(), rtcGetMinute(), rtcGetSecond());
-    pos += snprintf(jsonBuf + pos, 16384 - pos,
-      ",\"rtc\":{\"datetime\":\"%s\",\"temperature\":%.1f}",
-      timeBuf, rtcGetTemperature());
-  }
+  // "datetime" (UTC, with Z) is made from the same reading's fields.
+  if (gSettings.mqttPublishRtc && gRtcRunning && gRtcConnected &&
+      !mqttAddBuilt(doc, "rtc", rtcBuildDataJson, jsonBuf, cap)) dropped |= 1u << 6;
+#endif
+  // The build's input builder, as System_ESPNow_Sensors.cpp picks it (GT911
+  // touch has none).
+#if ENABLE_GAMEPAD_SENSOR
+  int (*const inputBuilder)(char*, size_t) = gamepadBuildDataJson;
+#elif ENABLE_ANO_ENCODER
+  int (*const inputBuilder)(char*, size_t) = anoEncoderBuildDataJson;
+#elif ENABLE_GPIO_ENCODER
+  int (*const inputBuilder)(char*, size_t) = gpioEncoderBuildDataJson;
+#endif
+#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER
+  if (gSettings.mqttPublishInput && gInputRunning && gInputConnected &&
+      !mqttAddBuilt(doc, "input", inputBuilder, jsonBuf, cap)) dropped |= 1u << 7;
 #endif
 
-#if ENABLE_OLED_INPUT  // gamepad OR ANO encoder — same JSON shape, same wire schema
-  if (gSettings.mqttPublishInput && gInputRunning && gInputConnected) {
-    // inputGetButtonsLogical() emits the canonical bit layout (bit 0=A, 1=B,
-    // 2=X, 3=Y, 4=START, 5=SELECT) so HA / downstream consumers see the same
-    // bits regardless of the underlying physical device.
-    pos += snprintf(jsonBuf + pos, 16384 - pos,
-      ",\"gamepad\":{\"x\":%d,\"y\":%d,\"buttons\":%lu}",
-      inputGetX(), inputGetY(), (unsigned long)inputGetButtonsLogical());
+  if (dropped != sMqttDroppedSections) {
+    const uint8_t newlyDropped = dropped & (uint8_t)~sMqttDroppedSections;
+    for (size_t i = 0; i < sizeof(kMqttSectionNames) / sizeof(kMqttSectionNames[0]); ++i) {
+      if (newlyDropped & (1u << i)) {
+        WARN_MQTTF("State section %s not sent: its reading is not valid JSON", kMqttSectionNames[i]);
+      }
+    }
+    sMqttDroppedSections = dropped;
   }
-#endif
-  
-  // Close JSON object
-  pos += snprintf(jsonBuf + pos, 16384 - pos, "}");
 
-  // Every section above is bounded (the largest, thermal, by its 2 KB
-  // buffer), so the document stays far below 16 KB; still never send a
-  // truncated document if a future section breaks that bound.
-  if (pos <= 0 || pos >= 16384) {
-    WARN_MQTTF("State document did not fit in 16384 bytes; not published");
+  // Never send a cut document: one that does not fit is skipped.
+  const size_t len = built ? mqttpayload::serializeBounded(doc, jsonBuf, cap) : 0;
+  if (len == 0) {
+    WARN_MQTTF("State document did not fit in %u bytes; not published", (unsigned)cap);
   } else {
     // Publish to state topic
     String stateTopic = gSettings.mqttBaseTopic + "/state";
-    int msg_id = esp_mqtt_client_publish(mqttClient, stateTopic.c_str(), jsonBuf, 0, 0, false);
+    int msg_id = esp_mqtt_client_publish(mqttClient, stateTopic.c_str(), jsonBuf, (int)len, 0, false);
 
     if (msg_id >= 0) {
-      DEBUG_MQTT_PUBSUBF("Published %d bytes to %s", pos, stateTopic.c_str());
+      DEBUG_MQTT_PUBSUBF("Published %u bytes to %s", (unsigned)len, stateTopic.c_str());
     } else {
       WARN_MQTTF("Publish failed");
     }

@@ -4,9 +4,11 @@
 // test_reused_reply_buffers.py splices the production functions in at the
 // markers: handleLogs with the production WebMirrorBuf::snapshotTo, and
 // publishMqttSensorData with its kept buffer and release helper, built with
-// every sensor section and ESP-NOW off. The request, the auth helpers, the
-// mirror's mutex, the MQTT client and ps_alloc are doubles; ps_alloc records
-// the policy and size of every block and can refuse PSRAM or everything.
+// every sensor section and ESP-NOW off (the document is built by
+// System_MQTTPayloadCore.h with the vendored ArduinoJson). The request, the
+// auth helpers, the mirror's mutex, the MQTT client, the clock, the heap
+// figures and ps_alloc are doubles; ps_alloc records the policy and size of
+// every block and can refuse PSRAM or everything.
 #include <Arduino.h>
 #include <atomic>
 #include <cassert>
@@ -170,6 +172,8 @@ int main() {
 #define ENABLE_RTC_SENSOR 0
 #define ENABLE_OLED_INPUT 0
 #define ENABLE_ESPNOW 0
+#include "System_MQTTPayloadCore.h"
+#define PSRAM_JSON_DOC(name) JsonDocument name
 struct MqttClientUse { bool admitted() const { return true; } };
 static std::atomic<bool> mqttTofConnected{true};
 using esp_mqtt_client_handle_t = void*;
@@ -182,15 +186,26 @@ namespace SelfDevice {
 uint64_t uptimeSeconds() { return 3600; }
 uint32_t freeHeapBytes() { return 150000; }
 uint32_t minFreeHeapBytes() { return 120000; }
+uint32_t psramFreeBytes() { return 6000000; }
+String deviceName() { return "HardwareOne-B2C3"; }
+bool deviceNameSet() { return false; }
 }
+namespace Clock {
+bool isSynced() { return false; }
+long long epochSeconds() { return 0; }
+}
+#define MALLOC_CAP_SPIRAM 1024
+static size_t heap_caps_get_total_size(unsigned) { return 8388608; }
 struct HostIp { String toString() const { return "0"; } };
 struct { bool isConnected() const { return false; } String SSID() const { return "x"; }
          int RSSI() const { return 0; } HostIp localIP() const { return {}; } } WiFi;
 static std::vector<std::string> gWarnings;
-#define WARN_MQTTF(...) gWarnings.push_back(__VA_ARGS__)
+#define WARN_MQTTF(...) \
+  do { char w_[256]; std::snprintf(w_, sizeof(w_), __VA_ARGS__); gWarnings.push_back(w_); } while (0)
 #define DEBUG_MQTT_PUBSUBF(...) hostLogSink(__VA_ARGS__)
 static std::vector<std::string> gPublished;
-static int esp_mqtt_client_publish(esp_mqtt_client_handle_t, const char* topic, const char* data, int, int, bool) {
+static int esp_mqtt_client_publish(esp_mqtt_client_handle_t, const char* topic, const char* data, int len, int, bool) {
+  check(len > 0 && std::strlen(data) == (size_t)len, "the state document is published with its length");
   gPublished.push_back(std::string(topic) + " " + data);
   return 1;
 }
@@ -199,8 +214,12 @@ static int esp_mqtt_client_publish(esp_mqtt_client_handle_t, const char* topic, 
 #undef free
 
 int main() {
+  // U6 (2026-11-20): deviceName / deviceNameSet and system.psram_free /
+  // psram_total join the document; "time" only once the clock is set.
   const std::string expected =
-      "hw1/test/state {\"timestamp\":123456,\"system\":{\"uptime\":3600,\"heap_free\":150000,\"heap_min\":120000}}";
+      "hw1/test/state {\"timestamp\":123456,\"deviceName\":\"HardwareOne-B2C3\",\"deviceNameSet\":false,"
+      "\"system\":{\"uptime\":3600,\"heap_free\":150000,\"heap_min\":120000,\"psram_free\":6000000,"
+      "\"psram_total\":8388608}}";
   // PSRAM refuses: the publish borrows a PreferPsram block and frees it.
   gRefusePsram = true; resetRequests();
   publishMqttSensorData();
@@ -226,8 +245,10 @@ int main() {
     check(gRequests.empty() && gLive.size() == 1, "later publishes: no allocation");
   }
   check(gPublished.size() == 4 && gPublished[0] == expected &&
-        gPublished[3] == "hw1/test/state {\"timestamp\":153456,\"system\":{\"uptime\":3600,\"heap_free\":150000,"
-                         "\"heap_min\":120000}}", "kept buffer: the same documents");
+        gPublished[3] == "hw1/test/state {\"timestamp\":153456,\"deviceName\":\"HardwareOne-B2C3\","
+                         "\"deviceNameSet\":false,\"system\":{\"uptime\":3600,\"heap_free\":150000,"
+                         "\"heap_min\":120000,\"psram_free\":6000000,\"psram_total\":8388608}}",
+        "kept buffer: the same documents");
   // The client stop releases it; the next client makes it again.
   releaseMqttStateJson();
   check(gLive.empty(), "stop releases the kept buffer");

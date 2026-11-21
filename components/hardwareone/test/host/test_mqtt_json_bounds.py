@@ -2,8 +2,9 @@
 """Execute the MQTT discovery builders and external-sensor copy on a host.
 
 publishDiscoveryConfig, publishPeerDiscoveryConfig (with their shared PSRAM
-buffer and bounded writer), updateExternalSensor (with its table state) and
-macToPathToken are taken intact from the production sources on every run.
+buffer; the documents come from System_MQTTPayloadCore.h with the vendored
+ArduinoJson), updateExternalSensor (with its table state) and macToPathToken
+are taken intact from the production sources on every run.
 A 400-character base topic must skip the discovery publish instead of writing
 past the 1 KB buffer, a sweep across the capacity checks that every document
 that fits is sent byte-exact, and esp-mqtt's length-delimited topic/payload
@@ -34,7 +35,7 @@ def require(condition, message):
 
 def definitions(mqtt: str, mac_helpers: str, control_topic: str) -> str:
     buffer_lines = re.search(
-        r"(?m)^static constexpr size_t kMqttDiscoveryJsonCap = \d+;\n"
+        r"(?m)^static constexpr size_t kMqttDiscoveryJsonCap = (?:\d+|mqttpayload::kDiscoveryCap);\n"
         r"EXT_RAM_BSS_ATTR static char sMqttDiscoveryConfigJson\[kMqttDiscoveryJsonCap\];",
         mqtt)
     require(buffer_lines is not None, "discovery buffer declaration not found")
@@ -48,7 +49,10 @@ def definitions(mqtt: str, mac_helpers: str, control_topic: str) -> str:
     # The bounded writer is part of the fix; the pre-fix builders do not use it.
     if "class MqttJsonWriter final" in mqtt:
         parts.append(extract_block(mqtt, "class MqttJsonWriter final") + ";")
-    parts += [extract_block(mqtt, "static void publishDiscoveryConfig("),
+    parts += [extract_block(mqtt, "struct MqttLocalDiscovery") + ";",
+              extract_block(mqtt, "static MqttLocalDiscovery mqttLocalDiscovery("),
+              extract_block(mqtt, "static void publishDiscoveryConfig("),
+              extract_block(mqtt, "static String meshPeerDeviceId("),
               extract_block(mqtt, "static void publishPeerDiscoveryConfig("),
               extract_block(mqtt, "static void updateExternalSensor(")]
     return "\n\n".join(parts)
@@ -70,7 +74,7 @@ def source_guards(mqtt: str) -> None:
     require("sizeof(configJson) - pos" not in mqtt,
             "discovery builders still advance an unchecked snprintf position")
     state = extract_block(mqtt, "void publishMqttSensorData(")
-    guard = state.index("if (pos <= 0 || pos >= 16384)")
+    guard = state.index("mqttpayload::serializeBounded(doc, jsonBuf, cap)")
     require(guard < state.index("esp_mqtt_client_publish(mqttClient, stateTopic"),
             "the state document is checked before it is published")
 
@@ -105,6 +109,8 @@ def main():
             marker, definitions(mqtt, mac_helpers, control_topic)))
         executable = Path(temp) / "mqtt_json_bounds"
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
+                   "-I", str(source_dir),
+                   "-isystem", str(COMPONENT.parent / "hardwareone_libs/ArduinoJson/src"),
                    str(unit), "-o", str(executable)]
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]

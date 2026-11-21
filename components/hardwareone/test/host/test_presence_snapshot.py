@@ -56,16 +56,11 @@ def generated(component: Path, baseline: bool) -> str:
     ]]
     functions.append(extract_block((component / "i2csensor_sths34pf80_oled.h").read_text(),
                                    "void displayPresenceData()"))
-    mqtt = (component / "System_MQTT.cpp").read_text()
-    mqtt_pos = mqtt.index("if (gSettings.mqttPublishPresence && gPresenceRunning")
-    mqtt_block = mqtt[mqtt.rindex("#if ENABLE_PRESENCE_SENSOR", 0, mqtt_pos):
-                      mqtt.index("#endif", mqtt_pos) + len("#endif")]
     web_block = extract_block((component / "WebPage_Sensors.cpp").read_text(),
                               'if (sensorType == "presence")')
     log_block = extract_block((component / "System_SensorLogging.cpp").read_text(),
                               "\n    if (mask & LOG_PRESENCE)")
     functions += [
-        "static int mqttPresence(char* jsonBuf) { int pos = 0;\n" + mqtt_block + "\nreturn pos; }",
         "static int webPresence() { void* req = nullptr; const std::string sensorType = \"presence\";\n" +
         web_block + "\nreturn -1; }",
         "static SensorCacheSnapshot loggingPresence(unsigned mask) { SensorCacheSnapshot snap{};\n" +

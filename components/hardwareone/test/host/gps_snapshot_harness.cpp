@@ -51,7 +51,6 @@ struct FakeGPS {
   uint8_t hour = 23, minute = 58, seconds = 59;
 } driver;
 static FakeGPS* gPA1010D = &driver;
-static struct { bool mqttPublishGps = true; } gSettings;
 static std::string response;
 static void sendJsonResponse(void*, const char* text, int len = -1) {
   assert(!semaphore.held);
@@ -117,7 +116,6 @@ static void reset() {
   DATA.hour = 19; DATA.minute = 5; DATA.second = 7;
   DATA.dataValid = true; DATA.lastUpdate = 12345;
   gGpsRunning = true; gGpsConnected = true; driver = {}; gPA1010D = &driver;
-  gSettings.mqttPublishGps = true;
   admit = memoryAvailable = createMutex = true;
   waits.clear(); response.clear();
   destroyed = exited = delays = 0; stopAfterDelay = false;
@@ -183,26 +181,12 @@ static void commonContracts() {
       assert(snap.gpsSatellites == 9 && snap.gpsFixQuality == 2);
       assert(snap.gpsHour == 19 && snap.gpsMinute == 5 && snap.gpsSecond == 7);
     }
-    // Legacy MQTT had no lock; the new timeout omission is tested separately.
-    if (state != 3) {
-      char mqtt[16384]{};
-      const int n = mqttGps(mqtt);
-      assert(n == static_cast<int>(std::strlen(mqtt)));
-#if !TEST_BASELINE
-      waited(10);
-#endif
-      const std::string expected = state == 1 ? ",\"gps\":{\"fix\":false,\"satellites\":9}" :
-          ",\"gps\":{\"lat\":-12.250000,\"lon\":130.500000,\"alt\":81.2,\"speed\":12.5,\"satellites\":9}";
-      assert(mqtt == expected); emit(mqtt);
-    }
+    // MQTT sends gpsBuildDataJson's text (U6, test_mqtt_payload_sources.py),
+    // covered by json() above; it no longer reads the snapshot itself.
   }
   reset(); gGpsRunning = false;
   assert(webGps() == ESP_OK && response == "{\"error\":\"not_enabled\"}");
   assert(waits.empty()); emit(response);
-  char mqtt[16384]{};
-  assert(mqttGps(mqtt) == 0 && waits.empty());
-  reset(); gSettings.mqttPublishGps = false;
-  assert(mqttGps(mqtt) == 0 && waits.empty());
   (void)loggingGps(0); assert(waits.empty());
 }
 
@@ -226,9 +210,6 @@ static void ownerContracts() {
   char jsonOut[512];
   assert(gpsBuildDataJson(jsonOut, sizeof(jsonOut)) > 0 && waits.empty());
   assert(std::string(jsonOut).find("\"valid\":false") != std::string::npos);
-  reset(); admit = false;
-  char mqtt[16384]{};
-  assert(mqttGps(mqtt) == 0); waited(10);
 
   reset(); const auto old = fields(DATA); admit = false;
   assert(!gpsInvalidateCache()); waited(50);

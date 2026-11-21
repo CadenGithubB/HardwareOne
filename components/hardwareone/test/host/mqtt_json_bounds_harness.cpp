@@ -1,7 +1,9 @@
 // Host harness for the MQTT discovery builders and the external-sensor copy.
-// The runner inserts the production definitions from System_MQTT.cpp; only
-// String, the settings fields, the client publish call, the sensor-table mutex
-// and diagnostics are host boundaries.
+// The runner inserts the production definitions from System_MQTT.cpp; the
+// documents are built by System_MQTTPayloadCore.h (included as it ships, with
+// the vendored ArduinoJson). Only String, the settings fields, the board name,
+// SelfDevice, the client publish call, the sensor-table mutex and diagnostics
+// are host boundaries.
 #include <atomic>
 #include <cstdarg>
 #include <cstdint>
@@ -10,6 +12,8 @@
 #include <cstring>
 #include <string>
 #include <vector>
+
+#include "System_MQTTPayloadCore.h"
 
 class String : public std::string {
  public:
@@ -30,6 +34,8 @@ class String : public std::string {
 };
 
 #define EXT_RAM_BSS_ATTR
+#define PSRAM_JSON_DOC(name) JsonDocument name
+#define BOARD_NAME "Seeed XIAO ESP32S3"
 static int warnings = 0;
 #define WARN_MQTTF(...) (++warnings)
 #define DEBUG_MQTT_DISCOVERYF(...) ((void)0)
@@ -68,6 +74,12 @@ static int esp_mqtt_client_publish(esp_mqtt_client_handle_t client,
 
 static String getDeviceId() { return String("hardwareone_0123456789AB"); }
 
+namespace SelfDevice {
+static String gDeviceName = "HardwareOne-B2C3";  // the name in use (fallback here)
+static const char* firmwareVersion() { return "0.99.99.1"; }
+static String deviceName() { return gDeviceName; }
+}  // namespace SelfDevice
+
 struct MeshPeerMeta {
   uint8_t mac[6];
   char name[32];
@@ -99,8 +111,27 @@ static void check(bool condition, const std::string& message) {
   if (failures <= 30) std::fprintf(stderr, "FAIL: %s\n", message.c_str());
 }
 
-// The exact document the builders produced before the bounded writer, for a
-// document that fits: the wire format must not change.
+// The entity table row of `objectId` (System_MQTTPayloadCore.h).
+static const mqttpayload::HaEntity& row(const char* objectId, uint8_t scope) {
+  for (size_t i = 0; i < mqttpayload::kEntityCount; ++i) {
+    const mqttpayload::HaEntity& e = mqttpayload::kEntities[i];
+    if ((e.scope & scope) && std::strcmp(e.objectId, objectId) == 0) return e;
+  }
+  std::abort();
+}
+
+// JSON string text of `value` (only what these fixtures contain needs escaping).
+static std::string escaped(const std::string& value) {
+  std::string out;
+  for (char c : value) {
+    if (c == '"' || c == '\\') out += '\\';
+    out += c;
+  }
+  return out;
+}
+
+// The exact document for a config that fits: the layout the builders always
+// sent, with the model from the board and sw_version (U6, 2026-11-20).
 static std::string expectedLocal(const char* objectId, const char* name,
                                  const char* tmpl, const char* unit,
                                  const char* deviceClass, const char* icon) {
@@ -114,19 +145,19 @@ static std::string expectedLocal(const char* objectId, const char* name,
   if (icon && *icon) out += ",\"icon\":\"" + std::string(icon) + "\"";
   out += ",\"availability_topic\":\"" + base +
          "/availability\",\"payload_available\":\"online\",\"payload_not_available\":\"offline\"";
-  std::string deviceName = "HardwareOne";
+  std::string deviceName = SelfDevice::deviceName();
   if (!gSettings.espnowFriendlyName.empty()) deviceName = gSettings.espnowFriendlyName;
-  else if (!gSettings.espnowDeviceName.empty()) deviceName = gSettings.espnowDeviceName;
   out += ",\"device\":{\"identifiers\":[\"hardwareone_0123456789AB\"],\"name\":\"" +
-         deviceName + "\",\"model\":\"ESP32-S3\",\"manufacturer\":\"Custom\"";
-  if (!gSettings.espnowRoom.empty()) out += ",\"suggested_area\":\"" + gSettings.espnowRoom + "\"";
+         escaped(deviceName) + "\",\"model\":\"" BOARD_NAME "\",\"sw_version\":\"0.99.99.1\""
+         ",\"manufacturer\":\"Custom\"";
+  if (!gSettings.espnowRoom.empty()) out += ",\"suggested_area\":\"" + escaped(gSettings.espnowRoom) + "\"";
   out += "}}";
   return out;
 }
 
 static std::string expectedPeer(const MeshPeerMeta& peer, const char* objectId,
                                 const char* name, const char* tmpl,
-                                const char* unit) {
+                                const char* unit, const char* deviceClass) {
   char mac[13];
   macToPathToken(peer.mac, mac);
   const std::string peerId = std::string("hardwareone_") + mac;
@@ -135,12 +166,17 @@ static std::string expectedPeer(const MeshPeerMeta& peer, const char* objectId,
                     "_" + objectId + "\",\"state_topic\":\"" + base + "/devices/" + peerId +
                     "/state\",\"value_template\":\"" + tmpl + "\"";
   if (unit && *unit) out += ",\"unit_of_measurement\":\"" + std::string(unit) + "\"";
+  if (deviceClass && *deviceClass) out += ",\"device_class\":\"" + std::string(deviceClass) + "\"";
   out += ",\"availability_topic\":\"" + base + "/devices/" + peerId +
          "/availability\",\"payload_available\":\"online\",\"payload_not_available\":\"offline\"";
+  // No model or sw_version: the master does not know a peer's board or
+  // firmware. An unnamed peer gets the unknown-peer label, not its address.
+  char label[devicename::kFieldLen];
+  devicename::formatWithMacSuffix(devicename::kPeerPrefix, peer.mac, label);
   const std::string peerName = peer.friendlyName[0] ? peer.friendlyName
-                               : (peer.name[0] ? peer.name : mac);
-  out += ",\"device\":{\"identifiers\":[\"" + peerId + "\"],\"name\":\"" + peerName +
-         "\",\"model\":\"ESP32-S3\",\"manufacturer\":\"Custom\",\"via_device\":\"hardwareone_0123456789AB\"";
+                               : (peer.name[0] ? peer.name : label);
+  out += ",\"device\":{\"identifiers\":[\"" + peerId + "\"],\"name\":\"" + escaped(peerName) +
+         "\",\"manufacturer\":\"Custom\",\"via_device\":\"hardwareone_0123456789AB\"";
   if (peer.room[0]) out += ",\"suggested_area\":\"" + std::string(peer.room) + "\"";
   out += "}}";
   return out;
@@ -152,14 +188,14 @@ static void resetSettings(const std::string& base) {
   gSettings.espnowFriendlyName = "Bench Board";
   gSettings.espnowDeviceName = "bench";
   gSettings.espnowRoom = "Lab";
+  SelfDevice::gDeviceName = "HardwareOne-B2C3";
   published.clear();
   warnings = 0;
 }
 
 static void test_local_discovery_fits_unchanged() {
   resetSettings("hardwareone/bench");
-  publishDiscoveryConfig("sensor", "uptime", "Uptime", "{{ value_json.system.uptime }}",
-                         "s", "duration", "mdi:timer-outline");
+  publishDiscoveryConfig(row("uptime", mqttpayload::kLocal), mqttLocalDiscovery());
   check(published.size() == 1, "short base topic: one discovery config published");
   if (published.size() == 1) {
     check(published[0].topic == "homeassistant/sensor/hardwareone_0123456789AB/uptime/config",
@@ -170,12 +206,34 @@ static void test_local_discovery_fits_unchanged() {
     check(published[0].qos == 1 && published[0].retain, "discovery stays retained QoS 1");
   }
   check(warnings == 0, "no warning for a document that fits");
+
+  // Free text is escaped: a quote or backslash in the friendly name or room
+  // cannot break the document (it used to be printed with "%s").
+  resetSettings("hardwareone/bench");
+  gSettings.espnowFriendlyName = "Kid's \"Lab\" \\ desk";
+  gSettings.espnowRoom = "Room \"7\"";
+  publishDiscoveryConfig(row("heap_free", mqttpayload::kLocal), mqttLocalDiscovery());
+  check(published.size() == 1 &&
+            published[0].payload == expectedLocal("heap_free", "Heap Free",
+                "{{ value_json.system.heap_free }}", "B", nullptr, "mdi:memory"),
+        "a quote in the friendly name and room is escaped");
+  JsonDocument parsed;
+  check(published.size() == 1 && !deserializeJson(parsed, published[0].payload) &&
+            std::string(parsed["device"]["name"] | "") == gSettings.espnowFriendlyName,
+        "the escaped document parses back to the friendly name");
+
+  // No friendly name: the device name in use (here the fallback), bare.
+  resetSettings("hardwareone/bench");
+  gSettings.espnowFriendlyName = "";
+  publishDiscoveryConfig(row("uptime", mqttpayload::kLocal), mqttLocalDiscovery());
+  check(published.size() == 1 &&
+            published[0].payload.find("\"name\":\"HardwareOne-B2C3\",\"model\"") != std::string::npos,
+        "unnamed device: HA device name is the fallback name");
 }
 
 static void test_local_discovery_long_base_topic_skipped() {
   resetSettings(std::string(400, 't'));
-  publishDiscoveryConfig("sensor", "uptime", "Uptime", "{{ value_json.system.uptime }}",
-                         "s", "duration", "mdi:timer-outline");
+  publishDiscoveryConfig(row("uptime", mqttpayload::kLocal), mqttLocalDiscovery());
   check(published.empty(),
         "400-character base topic: a document that cannot fit is not published");
   for (const auto& message : published) {
@@ -190,12 +248,11 @@ static void test_local_discovery_long_base_topic_skipped() {
 // is skipped rather than sent truncated.
 static void test_local_discovery_boundary() {
   bool sawFit = false, sawSkip = false;
-  for (size_t length = 280; length <= 360; ++length) {
+  for (size_t length = 260; length <= 360; ++length) {
     resetSettings(std::string(length, 'b'));
     const std::string expected = expectedLocal("heap_free", "Heap Free",
         "{{ value_json.system.heap_free }}", "B", nullptr, "mdi:memory");
-    publishDiscoveryConfig("sensor", "heap_free", "Heap Free",
-                           "{{ value_json.system.heap_free }}", "B", nullptr, "mdi:memory");
+    publishDiscoveryConfig(row("heap_free", mqttpayload::kLocal), mqttLocalDiscovery());
     const bool fits = expected.size() < sizeof(sMqttDiscoveryConfigJson);
     sawFit |= fits;
     sawSkip |= !fits;
@@ -222,20 +279,35 @@ static MeshPeerMeta makePeer() {
 }
 
 static void test_peer_discovery() {
-  const MeshPeerMeta peer = makePeer();
+  MeshPeerMeta peer = makePeer();
+  const mqttpayload::HaEntity& tof = row("tof_distance", mqttpayload::kPeer);
   resetSettings("hardwareone/bench");
-  publishPeerDiscoveryConfig(peer, "sensor", "tof_distance", "ToF Distance",
-                             "{{ value_json.tof.distance }}", "mm", nullptr, nullptr);
+  publishPeerDiscoveryConfig(peer, tof, getDeviceId());
   check(published.size() == 1, "peer: short base topic publishes");
   if (published.size() == 1) {
-    check(published[0].payload == expectedPeer(peer, "tof_distance", "ToF Distance",
-                                                "{{ value_json.tof.distance }}", "mm"),
-          "peer discovery document unchanged");
+    check(published[0].payload == expectedPeer(peer, "tof_distance", tof.name,
+                                                tof.valueTemplate, "mm", "distance"),
+          "peer discovery document");
+    check(published[0].topic ==
+              "homeassistant/sensor/hardwareone_020000000001/tof_distance/config",
+          "peer discovery topic unchanged");
   }
 
+  // An unnamed peer: the unknown-peer label, never the whole address.
+  peer.friendlyName[0] = '\0';
+  peer.name[0] = '\0';
+  resetSettings("hardwareone/bench");
+  publishPeerDiscoveryConfig(peer, tof, getDeviceId());
+  check(published.size() == 1 &&
+            published[0].payload == expectedPeer(peer, "tof_distance", tof.name,
+                                                 tof.valueTemplate, "mm", "distance") &&
+            published[0].payload.find("\"name\":\"peer-") != std::string::npos &&
+            published[0].payload.find("\"name\":\"020000000001\"") == std::string::npos,
+        "unnamed peer gets the unknown-peer label");
+  peer = makePeer();
+
   resetSettings(std::string(400, 'p'));
-  publishPeerDiscoveryConfig(peer, "sensor", "tof_distance", "ToF Distance",
-                             "{{ value_json.tof.distance }}", "mm", nullptr, nullptr);
+  publishPeerDiscoveryConfig(peer, tof, getDeviceId());
   check(published.empty(), "peer: 400-character base topic is not published");
   check(warnings == 1, "peer: the skip is reported once");
 }

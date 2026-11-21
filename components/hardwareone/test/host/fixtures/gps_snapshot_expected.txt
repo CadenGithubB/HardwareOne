@@ -8,18 +8,15 @@ Sats: 9
 130.5000
 Alt:81m Sp:12.5
 {"fix":true,"quality":2,"satellites":9,"latitude":-12.250000,"longitude":130.500000,"altitude":81.2,"speed":12.5,"angle":42.2,"time":"19:05:07","date":"2026-10-08"}
-,"gps":{"lat":-12.250000,"lon":130.500000,"alt":81.2,"speed":12.5,"satellites":9}
 no fix 9
 Fix: no
 Sats: 9
 (acquiring...)
 {"fix":false,"quality":2,"satellites":9,"latitude":-12.250000,"longitude":130.500000,"altitude":81.2,"speed":12.5,"angle":42.2,"time":"19:05:07","date":"2026-10-08"}
-,"gps":{"fix":false,"satellites":9}
 ...
 GPS
 (reading...)
 {"error":"no_data"}
-,"gps":{"lat":-12.250000,"lon":130.500000,"alt":81.2,"speed":12.5,"satellites":9}
 busy
 GPS
 (reading...)

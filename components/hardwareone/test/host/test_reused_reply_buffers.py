@@ -38,6 +38,14 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
 
+def dropped_report(mqtt: str) -> str:
+    """The section names and the dropped-section state publishMqttSensorData reports with."""
+    names = re.search(r"(?ms)^static const char\* const kMqttSectionNames\[\] = \{.*?\};", mqtt)
+    state = re.search(r"(?m)^static uint8_t sMqttDroppedSections = 0;$", mqtt)
+    require(names is not None and state is not None, "System_MQTT.cpp reports dropped state sections")
+    return names[0] + "\n" + state[0]
+
+
 def production(component: Path) -> dict[str, str]:
     server = (component / "WebServer_Server.cpp").read_text()
     utils = (component / "WebServer_Utils.cpp").read_text()
@@ -50,6 +58,8 @@ def production(component: Path) -> dict[str, str]:
         "// INSERT_LOGS": extract_block(utils, "size_t WebMirrorBuf::snapshotTo(") + "\n\n" +
                           extract_block(server, "esp_err_t handleLogs("),
         "// INSERT_MQTT": kept[0] + "\n" + extract_block(mqtt, "static void releaseMqttStateJson(") + "\n\n" +
+                          dropped_report(mqtt) + "\n\n" +
+                          extract_block(mqtt, "static bool mqttAddBuilt(") + "\n\n" +
                           extract_block(mqtt, "void publishMqttSensorData("),
     }
 
@@ -87,6 +97,8 @@ def main() -> None:
         for case in ("TEST_LOGS", "TEST_MQTT"):
             binary = Path(directory) / case.lower()
             subprocess.run([args.cxx, *flags, f"-D{case}=1", "-I", str(HERE / "web_batch_stubs"),
+                            "-I", str(component),
+                            "-isystem", str(component.parent / "hardwareone_libs/ArduinoJson/src"),
                             str(unit), "-o", str(binary)], check=True, timeout=180)
             subprocess.run([str(binary)], check=True, timeout=30)
     source_contract(component)

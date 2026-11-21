@@ -47,7 +47,6 @@ static bool checkMemoryAvailable(const char*, void*) { return memoryAvailable; }
 
 bool gPresenceRunning = true, gPresenceConnected = true;
 static void* gPresenceTaskHandle = reinterpret_cast<void*>(0x1234);
-static struct { bool mqttPublishPresence = true; } gSettings;
 static bool validationOnly = false, debugAvailable = true;
 static char debugBuffer[1024];
 static bool argWantsJson(const String& arg) { return arg == "json"; }
@@ -150,7 +149,7 @@ static void reset() {
   DATA.presenceValue = 321; DATA.motionValue = -44; DATA.tempShockValue = 7;
   DATA.presenceDetected = DATA.motionDetected = DATA.tempShockDetected = true;
   DATA.lastUpdate = 12345; DATA.dataValid = true;
-  gPresenceRunning = gPresenceConnected = gSettings.mqttPublishPresence = true;
+  gPresenceRunning = gPresenceConnected = true;
   gPresenceTaskHandle = reinterpret_cast<void*>(0x1234);
   admit = memoryAvailable = createMutex = debugAvailable = true;
   validationOnly = busHeld = stopAfterDelay = false;
@@ -220,12 +219,8 @@ static void outputContracts() {
 #if !TEST_BASELINE
       waited(10);
 #endif
-      char mqtt[16384]{}; const int n = mqttPresence(mqtt);
-      assert(n == static_cast<int>(std::strlen(mqtt)));
-#if !TEST_BASELINE
-      waited(10);
-#endif
-      assert((n != 0) == (state != 3)); emit(mqtt);
+      // MQTT sends presenceBuildDataJson's text (U6,
+      // test_mqtt_payload_sources.py); it no longer reads the snapshot itself.
     }
   }
   reset(); emit(cmd_presenceread("json")); waited(50);
@@ -233,10 +228,7 @@ static void outputContracts() {
   reset(); gPresenceRunning = false;
   assert(webPresence() == ESP_OK); emit(response);
   emit(cmd_presenceread("")); displayPresenceData(); emit(display.text);
-  char mqtt[16384]{};
-  assert(mqttPresence(mqtt) == 0 && waits.empty());
-  reset(); gSettings.mqttPublishPresence = false;
-  assert(mqttPresence(mqtt) == 0 && waits.empty());
+  reset();
   (void)loggingPresence(0); assert(waits.empty());
   debugAvailable = false;
   assert(std::string(cmd_presenceread("")) == "Error: [PRESENCE] Debug buffer unavailable");
@@ -308,7 +300,6 @@ static void ownerContracts() {
   assert(std::string(jsonOut).find("\"ambient\":0,") != std::string::npos);
   reset(); admit = false;
   assert(std::string(cmd_presencestatus("")).find("dataValid=0") != std::string::npos); waited(10);
-  char mqtt[16384]{}; assert(mqttPresence(mqtt) == 0); waited(10);
 
   reset(); const auto old = fields(DATA); admit = false;
   assert(!presenceInvalidateCache()); waited(50); assert(fields(DATA) == old);
