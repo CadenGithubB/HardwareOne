@@ -149,13 +149,16 @@ const char* const* getLedEffects();
 size_t getLedEffectCount();
 const char* getWizardDeviceName();
 char* getWizardDeviceNameBuf();
+// The name buffer still holds the fallback the wizard started from (no name
+// stored or chosen): shown as "HardwareOne-B2C3 (default)".
+bool wizardDeviceNameIsDefault();
 // Put a typed device name into the wizard's buffer when it passes the rule
 // (System_DeviceName.h). nullptr on success, else the one wording of the fault
 // (the buffer is unchanged).
 const char* wizardSetDeviceName(const char* typed);
 // The device name the ESP-NOW page offers for a display label: the label made
 // into a name (spaces to '-', other characters dropped), else the draft's
-// name, else the name in use (HardwareOne-XXXXXX).
+// name, else the name in use (HardwareOne-B2C3).
 void wizardSuggestDeviceName(const char* label, char (&out)[32]);
 
 // ============================================================================

@@ -22,7 +22,7 @@ have them. The bluetoothMode setting names each mode by the role it starts.
 
 The phone link block (phone link v2): bleinfo and blestatus end their link
 lines with it and carry `phoneLink` in JSON in pipe builds only (bleinfo's
-13 buildBleInfoJson keys unchanged; the identical-output rule across builds
+14 buildBleInfoJson keys unchanged; the identical-output rule across builds
 compares the CLI without the block); /api/ble/status adds it from its one link
 reading; the console view counts the console stream's own row.
 
@@ -310,6 +310,8 @@ def main() -> None:
 
         shutil.copyfile(args.component / "BLE_LinkStatusCore.h", work / "BLE_LinkStatusCore.h")
         shutil.copyfile(args.component / "BLE_ConsoleAttachCore.h", work / "BLE_ConsoleAttachCore.h")
+        # The device-name rule's pure header: kDisplayCap and the advertised-name buffer.
+        shutil.copyfile(args.component / "System_DeviceName.h", work / "System_DeviceName.h")
         output = None
         for g2, pipe in ((0, 0), (1, 0), (1, 1)):
             result = run(f"ble-{g2}-{pipe}", generated(args.component, False),

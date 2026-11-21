@@ -176,7 +176,8 @@ static const char* paintAfterTransition() {
 
     case WizardSubMode::PAGE_DEVICE_NAME: {
       static char prompt[80];
-      snprintf(prompt, sizeof(prompt), "Device Name [%s]: ", getWizardDeviceName());
+      snprintf(prompt, sizeof(prompt), "Device Name [%s%s]: ", getWizardDeviceName(),
+               wizardDeviceNameIsDefault() ? devicename::kDefaultMark : "");
       return prompt;
     }
 

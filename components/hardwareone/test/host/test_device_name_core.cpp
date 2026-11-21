@@ -114,9 +114,37 @@ static void testHelpers() {
   char fb[devicename::kFieldLen];
   const uint8_t mac[6] = {0x10, 0x20, 0x30, 0xA1, 0xB2, 0xC3};
   devicename::formatWithMacSuffix(devicename::kFallbackPrefix, mac, fb);
-  CHECK(std::string(fb) == "HardwareOne-A1B2C3" && devicename::valid(fb), "D3 fallback name is valid: %s", fb);
+  CHECK(std::string(fb) == "HardwareOne-B2C3" && devicename::valid(fb),
+        "D3 fallback name is valid and carries only the last two address bytes: %s", fb);
   devicename::formatWithMacSuffix(devicename::kPeerPrefix, mac, fb);
-  CHECK(std::string(fb) == "peer-A1B2C3" && devicename::valid(fb), "R3 peer fallback uses '-' and is valid: %s", fb);
+  CHECK(std::string(fb) == "peer-B2C3" && devicename::valid(fb),
+        "R3 peer fallback uses '-', the last two address bytes, and is valid: %s", fb);
+  devicename::formatWithMacSuffix(devicename::kFallbackPrefix, nullptr, fb);
+  CHECK(std::string(fb) == "HardwareOne-0000" && devicename::valid(fb), "D3 no address gives the 0000 suffix: %s", fb);
+  const uint8_t allHex[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF};
+  devicename::formatWithMacSuffix(devicename::kFallbackPrefix, allHex, fb);
+  CHECK(std::string(fb) == "HardwareOne-EEFF" && devicename::valid(fb), "D3 an all-letter suffix is still valid: %s", fb);
+  CHECK(chk("B2C3") == Fault::None && chk("HardwareOne-B2C3") == Fault::None,
+        "D3 a name that is only a short suffix is a name, not an address");
+
+  // What a person reads: the fallback carries " (default)", a set name does not.
+  char shown[devicename::kDisplayCap];
+  CHECK(devicename::displayText("HardwareOne-B2C3", false, shown, sizeof(shown)) == 26 &&
+            std::string(shown) == "HardwareOne-B2C3 (default)",
+        "D5 the fallback reads 'HardwareOne-B2C3 (default)' (got '%s')", shown);
+  CHECK(devicename::displayText("Kitchen-Cam", true, shown, sizeof(shown)) == 11 &&
+            std::string(shown) == "Kitchen-Cam",
+        "D5 a set name reads as it is (got '%s')", shown);
+  const std::string n31name(31, 'n');
+  CHECK(devicename::displayText(n31name.c_str(), false, shown, sizeof(shown)) == 41 &&
+            std::string(shown) == n31name + " (default)",
+        "D5 kDisplayCap holds the longest name and the mark");
+  char small[8];
+  CHECK(devicename::displayText("HardwareOne-B2C3", false, small, sizeof(small)) == 7 &&
+            std::string(small) == "Hardwar",
+        "D5 a small buffer is cut, never overrun (got '%s')", small);
+  CHECK(devicename::displayText(nullptr, true, shown, sizeof(shown)) == 0 && shown[0] == '\0',
+        "D5 a null name reads as empty");
 
   char sug[devicename::kFieldLen];
   devicename::suggestFromLabel("My Kitchen", sug);

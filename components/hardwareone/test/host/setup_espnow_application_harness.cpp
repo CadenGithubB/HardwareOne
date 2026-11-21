@@ -115,7 +115,7 @@ static void wizardSuggestDeviceName(const char* label, char (&out)[32]) {
   if (devicename::valid(draftValues.deviceName.c_str())) {
     std::snprintf(out, sizeof(out), "%s", draftValues.deviceName.c_str());
   } else {
-    std::snprintf(out, sizeof(out), "HardwareOne-A1B2C3");
+    std::snprintf(out, sizeof(out), "HardwareOne-B2C3");
   }
 }
 static void delay(int) { unchanged(); assert(++drawLoops < 20); }
@@ -309,7 +309,7 @@ static void cliCases() {
   // No label and no valid name in the draft: the offer is the name in use.
   reset(); draftValues.deviceName = ""; draftValues.espnowFriendlyName = "";
   cli("c"); cli(""); cli(""); cli(""); cli(""); cli("");
-  patch("", "HardwareOne-A1B2C3");
+  patch("", "HardwareOne-B2C3");
   reset(); stageSucceeds = false;
   for (const char* value : {"c", "new-label", "new-device", "new-room", "new-zone", "s"}) cli(value);
   patch("new-label", "new-device", "new-room", "new-zone"); assert(nextCalls == 0);

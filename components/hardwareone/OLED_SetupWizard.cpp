@@ -158,6 +158,13 @@ void renderWizardPage() {
     const int y = startY + row * lineHeight;
     char label[64], value[64];
     if (!wizardFormatMenuItem(page, index, label, sizeof(label), value, sizeof(value))) continue;
+    // "HardwareOne-B2C3 (default)" does not fit the twelve-glyph value column
+    // and would read "HardwareO...": the unnamed row shows the mark alone
+    // ("(default)"); Edit opens on the full fallback name.
+    const WizardMenuItem* rowItem = getWizardMenuItem(page, index);
+    if (rowItem && rowItem->type == WIZARD_ITEM_DEVICE_NAME && wizardDeviceNameIsDefault()) {
+      snprintf(value, sizeof(value), "%s", devicename::kDefaultMark + 1);  // skip the leading space
+    }
     if (index == selection) {
       oledDisplay->fillRect(0, y - 1, 126, lineHeight, SSD1306_WHITE);
       oledDisplay->setTextColor(SSD1306_BLACK, SSD1306_WHITE);

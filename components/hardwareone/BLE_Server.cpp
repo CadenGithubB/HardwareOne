@@ -2166,7 +2166,8 @@ bool initBluetooth() {
   BLE_DEBUGF(DEBUG_BLE_CORE, "Initializing ESP32 BLE...");
   
   // Initialize ESP32 BLE with the device name (System_DeviceName.h: the one
-  // name, or HardwareOne-XXXXXX when none is set). The GAP device name holds
+  // name, or HardwareOne-B2C3 when none is set; always the bare name, never
+  // with " (default)"). The GAP device name holds
   // all of it, up to 31 bytes; the advertisement below carries up to 29.
   const String deviceName = SelfDevice::deviceName();
   const bool stackReady = bluetoothHalInit(deviceName.c_str());
@@ -2634,7 +2635,15 @@ bool startBleAdvertising() {
     return false;
   }
   BLE_DEBUGF(DEBUG_BLE_CORE, "Advertising started");
-  broadcastOutput("[BLE] Advertising started - device visible as 'HardwareOne'");
+  {
+    // The name a scan shows: the bare device name (no " (default)"), cut to
+    // the 29 bytes the scan response carries, as advertised above.
+    char advName[devicename::kAdvertMax + 1];
+    devicename::advertisedName(SelfDevice::deviceName().c_str(), advName, sizeof(advName), nullptr);
+    char line[48 + devicename::kAdvertMax + 2];  // the text, the name and "'" + NUL
+    snprintf(line, sizeof(line), "[BLE] Advertising started - device visible as '%s'", advName);
+    broadcastOutput(line);
+  }
   return true;
 }
 
@@ -4335,6 +4344,7 @@ bool buildBleInfoJson(JsonObject out) {
   if (out.isNull()) return false;
   out["schema"]              = 1;
   out["deviceName"]     = SelfDevice::deviceName();  // the device name (set with 'devicename')
+  out["deviceNameSet"]  = SelfDevice::deviceNameSet();  // false: deviceName is the fallback
   out["txPower"]        = gSettings.bleTxPower;
   out["autoStart"]      = gSettings.bleAutoStart;
   out["requireAuth"]    = gSettings.bleRequireAuth;
@@ -4394,7 +4404,11 @@ static const char* cmd_bleinfo(const String& argsInput) {
   int w;
 
   w = snprintf(buf + pos, rem, "=== BLE Configuration ===\n"); if (w > 0) { pos += w; rem -= w; }
-  w = snprintf(buf + pos, rem, "Device Name:  %s\n", SelfDevice::deviceName().c_str());                    if (w > 0) { pos += w; rem -= w; }
+  {
+    char shown[devicename::kDisplayCap];
+    (void)SelfDevice::deviceNameDisplay(shown, sizeof(shown));
+    w = snprintf(buf + pos, rem, "Device Name:  %s\n", shown);                                          if (w > 0) { pos += w; rem -= w; }
+  }
   w = snprintf(buf + pos, rem, "TX Power:     %d (0=min/-12dBm, 7=max/+9dBm)\n", gSettings.bleTxPower);  if (w > 0) { pos += w; rem -= w; }
   w = snprintf(buf + pos, rem, "Auto-Start:   %s\n", gSettings.bleAutoStart  ? "Yes" : "No");       if (w > 0) { pos += w; rem -= w; }
   w = snprintf(buf + pos, rem, "Require Auth: %s\n", gSettings.bleRequireAuth ? "Yes" : "No");      if (w > 0) { pos += w; rem -= w; }

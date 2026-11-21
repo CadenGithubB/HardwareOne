@@ -734,7 +734,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
             "var en=c.espnow;"
             "window.Dash.setIndicator('conn-espnow-dot',!!en.running);"
             "window.Dash.setText('conn-espnow-status',en.running?'Running':(en.enabled?'Stopped':'Disabled'));"
-            "window.Dash.setText('conn-espnow-name',en.deviceName||'--');"
+            "window.Dash.setText('conn-espnow-name',d.deviceName?(d.deviceName+(d.deviceNameSet===false?' (default)':'')):(en.deviceName||'--'));"
             "window.Dash.setText('conn-espnow-mesh',en.mesh?'Mesh':'Direct');"
           "window.Dash.setText('conn-espnow-encrypted',en.passphraseSet?'Set':'Not Set');"
           "}"

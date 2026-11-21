@@ -124,10 +124,16 @@ String macString() {
   return String(buf);
 }
 
-String deviceName() {
+// The name in use into `out`; returns whether it is the stored name (true)
+// or the fallback (false). No String, no heap: the display helpers below and
+// deviceName() share it.
+static bool nameInUse(char (&out)[devicename::kFieldLen]) {
   const char* stored = gSettings.espnowDeviceName.c_str();
   const devicename::Fault fault = devicename::check(stored);
-  if (fault == devicename::Fault::None) return gSettings.espnowDeviceName;
+  if (fault == devicename::Fault::None) {
+    strlcpy(out, stored, sizeof(out));
+    return true;
+  }
   if (stored[0]) {
     static bool sWarned = false;
     if (!sWarned) {
@@ -138,9 +144,24 @@ String deviceName() {
   }
   uint8_t mac[6] = {0};
   (void)esp_efuse_mac_get_default(mac);
-  char fallback[devicename::kFieldLen];
-  devicename::formatWithMacSuffix(devicename::kFallbackPrefix, mac, fallback);
-  return String(fallback);
+  devicename::formatWithMacSuffix(devicename::kFallbackPrefix, mac, out);
+  return false;
+}
+
+String deviceName() {
+  if (devicename::valid(gSettings.espnowDeviceName.c_str())) return gSettings.espnowDeviceName;
+  char name[devicename::kFieldLen];
+  (void)nameInUse(name);
+  return String(name);
+}
+
+bool deviceNameSet() { return devicename::valid(gSettings.espnowDeviceName.c_str()); }
+
+bool deviceNameDisplay(char* out, size_t cap) {
+  char name[devicename::kFieldLen];
+  const bool set = nameInUse(name);
+  devicename::displayText(name, set, out, cap);
+  return set;
 }
 
 void applyHostname() {

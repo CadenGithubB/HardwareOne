@@ -91,14 +91,24 @@ String macString();
 
 // This device's name as Bluetooth and Wi-Fi use it (System_DeviceName.h has
 // the rule): the stored name (gSettings.espnowDeviceName, set with
-// 'devicename') when it passes the rule, else "HardwareOne-XXXXXX" from the
-// last three bytes of the chip's base MAC (eFuse; available from boot, before
+// 'devicename') when it passes the rule, else "HardwareOne-B2C3" from the
+// last two bytes of the chip's base MAC (eFuse; available from boot, before
 // any radio). On S3 and classic ESP32 that is the station MAC macBytes()
 // reports; on a P4 it is the P4's own address, not the C6 radio's address
 // that macBytes() and ESP-NOW show. A stored name that breaks the rule (settings.json is
 // loaded without the setter's check) gives the fallback and one WARN. Never
-// empty, at most 31 bytes.
+// empty, at most 31 bytes. The bare name: what the Bluetooth name, the
+// hostname and JSON "deviceName" values carry.
 String deviceName();
+
+// Whether a name is stored that passes the rule, i.e. deviceName() is not the
+// fallback. The JSON replies carry it as "deviceNameSet".
+bool deviceNameSet();
+
+// The name as a person reads it, for screens and text replies: deviceName(),
+// followed by " (default)" when no name is set ("HardwareOne-B2C3 (default)").
+// devicename::kDisplayCap bytes always fit. Returns deviceNameSet().
+bool deviceNameDisplay(char* out, size_t cap);
 
 // Hand the name to the Wi-Fi stack as the station hostname: the stack applies
 // it when the station interface starts (and, when it is already up, to the

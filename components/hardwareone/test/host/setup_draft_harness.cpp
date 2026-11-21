@@ -35,7 +35,7 @@ class String : public std::string {
 #define WARN_STORAGEF(...) operations.emplace_back("storage.warn")
 #include "System_DeviceName.h"  // the device-name rule the wizard checks
 // The name in use when none valid is stored (System_SelfDevice.cpp's fallback).
-namespace SelfDevice { static String deviceName() { return String("HardwareOne-A1B2C3"); } }
+namespace SelfDevice { static String deviceName() { return String("HardwareOne-B2C3"); } }
 // INSERT_TYPES
 
 static struct SettingsBoundary {
@@ -351,6 +351,7 @@ static void editDeviceName(const char* name) {
     check(!wizardActivateCurrentItem()); // The ordinary action does not cycle text.
     check(std::strlen(name) <= 31);
     check(wizardSetDeviceName(name) == nullptr);
+    check(!wizardDeviceNameIsDefault());  // a typed name is the user's, never "(default)"
     char label[32], value[64];
     check(wizardFormatMenuItem(WIZARD_PAGE_SYSTEM, static_cast<int>(index),
                               label, sizeof(label), value, sizeof(value)));
@@ -463,8 +464,18 @@ static void untouchedLongDeviceName() {
   // untouched unless the user edits it.
   gSettings.espnowDeviceName = "device-name-longer-than-thirty-one-bytes";
   const auto original = liveValues(); initSetupWizard();
-  check(std::string(getWizardDeviceName()) == "HardwareOne-A1B2C3");
+  check(std::string(getWizardDeviceName()) == "HardwareOne-B2C3");
   check(getWizardDraftValues().deviceName == gSettings.espnowDeviceName);
+  // The fallback the field starts from reads "(default)" on the menu row.
+  check(wizardDeviceNameIsDefault());
+  for (size_t index = 0; index < getWizardMenuItemCount(WIZARD_PAGE_SYSTEM); ++index) {
+    const auto* row = getWizardMenuItem(WIZARD_PAGE_SYSTEM, static_cast<int>(index));
+    if (std::strcmp(row->id, "device_name")) continue;
+    char label[32], value[64];
+    check(wizardFormatMenuItem(WIZARD_PAGE_SYSTEM, static_cast<int>(index), label, sizeof(label), value,
+                               sizeof(value)));
+    check(std::strcmp(value, "HardwareOne-B2C3 (default)") == 0);
+  }
   setWizardCurrentPage(WIZARD_PAGE_SYSTEM);
   check(wizardPrevPage());
   SetupWizardResult result;

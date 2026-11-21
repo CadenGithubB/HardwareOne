@@ -63,6 +63,7 @@ bool isEspNowInitialized() { return false; }
 #include "System_FactoryWipe.h"   // factoryWipeArm / factoryWipeDisarm (`factoryreset all`)
 #include "System_CrashRecord.h"   // crashRecord* — RTC post-mortem record for `crashlog`
 #include "System_OTASafety.h"     // pending trial images must finish probation before power-off
+#include "System_DeviceName.h"   // devicename::kDisplayCap
 #include "System_SelfDevice.h"   // SelfDevice:: — local identity/heap/uptime/firmware (Stage 1 consolidation)
 #include "System_Versions.h"     // versionsAddJson — the "versions" object of status json
 #include "System_Clock.h"        // Clock:: — epoch/sync/tz/format helpers (Stage 2)
@@ -1553,6 +1554,10 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
   doc["schema"]     = 1;
   doc["fw"]    = SelfDevice::firmwareVersion();
   doc["board"] = BOARD_NAME;
+  // The name in use (bare: the stored name or the HardwareOne-B2C3 fallback)
+  // and whether one is set; in every build, with or without ESP-NOW.
+  doc["deviceName"]    = SelfDevice::deviceName();
+  doc["deviceNameSet"] = SelfDevice::deviceNameSet();
   {
     uint32_t reason = gSettings.lastResetReason;
     doc["reset_reason"]      = resetReasonLabel(reason);
@@ -1675,7 +1680,8 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
     espnow["enabled"] = gSettings.espnowEnabled;
     espnow["running"] = (gEspNow && gEspNow->initialized);
     espnow["mesh"] = gSettings.espnowmesh;
-    espnow["deviceName"] = gSettings.espnowDeviceName;
+    espnow["deviceName"] = gSettings.espnowDeviceName;  // the stored name; "" when none is set
+    espnow["deviceNameSet"] = SelfDevice::deviceNameSet();
     espnow["encrypted"] = (gEspNow && gEspNow->encryptionEnabled);
     espnow["passphraseSet"] = (gSettings.meshes[0].passphrase.length() > 0);
 #if ENABLE_BONDED_MODE
@@ -1841,6 +1847,11 @@ const char* cmd_status(const String& argsInput) {
   // ---- Human path: live lines via broadcastOutput, short status return.
   BROADCAST_PRINTF("HardwareOne v%s (%s)", SelfDevice::firmwareVersion(), BOARD_NAME);
   broadcastOutput("System Status:");
+  {
+    char shown[devicename::kDisplayCap];
+    (void)SelfDevice::deviceNameDisplay(shown, sizeof(shown));
+    BROADCAST_PRINTF("  Device name: %s", shown);
+  }
 #if ENABLE_WIFI
   BROADCAST_PRINTF("  WiFi: %s", WiFi.isConnected() ? "Connected" : "Disconnected");
   BROADCAST_PRINTF("  IP: %s", WiFi.localIP().toString().c_str());

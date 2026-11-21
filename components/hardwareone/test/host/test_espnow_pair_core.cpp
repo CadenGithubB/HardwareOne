@@ -402,7 +402,7 @@ static void sourceContract() {
   CHECK(!has(crypto, "espnowPairNoteKeyExHello") && !has(owner, "espnowPairNoteKeyExHello"));
   CHECK(has(oled, "espnowGetPairRequestOutcome(outName, sizeof(outName))"));
   // Received pairing names go through the device-name rule, never a cleaner:
-  // an invalid name becomes "peer-XXXXXX" from the sender's address.
+  // an invalid name becomes "peer-B2C3" from the last two bytes of the sender's address.
   CHECK(!has(owner, "pairModeSanitizeName") && !has(owner, "peer_%02X"));
   CHECK(has(owner, "pairModeNameFromField(b.deviceName, mac, name);"));
   CHECK(has(owner, "pairModeNameFromField(p.deviceName, senderMac, nameOut);"));

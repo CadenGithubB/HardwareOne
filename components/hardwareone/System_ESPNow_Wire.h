@@ -563,7 +563,7 @@ static_assert(sizeof(V4PayloadHeartbeat::deviceName) == devicename::kFieldLen, "
 // from the header meshFingerprint gate (RX drops beacons whose mesh id matches
 // no enabled local mesh) and the tag, so no mesh id is carried here. The
 // receiver reads deviceName with devicename::getField (an invalid name is
-// absent and shown as "peer-XXXXXX") and never trusts it beyond a display
+// absent and shown as "peer-B2C3") and never trusts it beyond a display
 // label; real trust comes from the subsequent KEY_EX (mesh-passphrase HMAC).
 struct __attribute__((packed)) V4PayloadPairBeacon {
   uint8_t  role;            // 0  sender MESH_ROLE_* (informational)

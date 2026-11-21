@@ -1102,11 +1102,11 @@ inline void streamEspNowInner(httpd_req_t* req) {
         // Check if first-time setup is needed
         hw.postFormText('/api/cli', { cmd: 'espnowdeviceinfo json' })
         .then(text => {
-          // If the device name is not set (empty or not a valid saved name), show
-          // the setup modal. A reply that is not json goes on to init, whose own
-          // reply says what is wrong.
+          // If the device name is not set (empty or not a valid saved name:
+          // deviceNameSet / nameValid false), show the setup modal. A reply
+          // that is not json goes on to init, whose own reply says what is wrong.
           var info = window.espnowParseReply(text);
-          if (info && (!info.name || info.nameValid === false)) {
+          if (info && (!info.name || info.nameValid === false || info.deviceNameSet === false)) {
             hw.$('setup-modal').classList.add('show');
             hw.$('setup-device-name').focus();
           } else {

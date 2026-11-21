@@ -37,12 +37,20 @@ constexpr size_t kFieldLen = 32;  // bytes of every wire field that carries it (
 // A BLE advertisement's name element holds 29 bytes (31-byte scan response
 // minus the 2-byte AD header); a longer name is advertised shortened.
 constexpr size_t kAdvertMax = 29;
-// The fallback when no name is stored: "HardwareOne-" + the last three
-// address bytes in hex (18 bytes, valid under the rule).
+// The fallback when no name is stored: "HardwareOne-" + the last two
+// address bytes in hex (16 bytes, valid under the rule). Two bytes, not the
+// whole address: the name travels in router lists, DHCP and Bluetooth scan
+// lists, and it should not hand out more of the address than it needs.
 constexpr const char* kFallbackPrefix = "HardwareOne";
 // What a receiver shows for a sender whose name field is absent or invalid,
-// where it needs a name rather than the address ("peer-A1B2C3").
+// where it needs a name rather than the address ("peer-B2C3").
 constexpr const char* kPeerPrefix = "peer";
+// What a human-read surface adds after the fallback name, so it does not read
+// as a name someone chose: "HardwareOne-B2C3 (default)". Never on the wire,
+// in the Bluetooth (GAP or advertised) name or in the Wi-Fi hostname.
+constexpr const char* kDefaultMark = " (default)";
+// Bytes a display text needs: the longest name, the mark and the NUL (42).
+constexpr size_t kDisplayCap = kFieldLen + 10;
 
 enum class Fault : uint8_t {
   None = 0,
@@ -177,12 +185,26 @@ inline bool getField(const char* field, size_t len, char (&out)[kFieldLen]) {
   return true;
 }
 
-// "<prefix>-A1B2C3" from the last three bytes of `mac`. With no address the
-// suffix is "000000".
+// "<prefix>-B2C3" from the last two bytes of `mac` (m[4], m[5]). With no
+// address the suffix is "0000".
 inline void formatWithMacSuffix(const char* prefix, const uint8_t* mac, char (&out)[kFieldLen]) {
   const uint8_t zero[6] = {0, 0, 0, 0, 0, 0};
   const uint8_t* m = mac ? mac : zero;
-  snprintf(out, sizeof(out), "%s-%02X%02X%02X", prefix ? prefix : kFallbackPrefix, m[3], m[4], m[5]);
+  snprintf(out, sizeof(out), "%s-%02X%02X", prefix ? prefix : kFallbackPrefix, m[4], m[5]);
+}
+
+// The device name as a person reads it: `name`, followed by kDefaultMark when
+// no name is stored (`isSet` false, so `name` is the fallback). Null `name`
+// reads as "". The result is cut to fit `cap` (kDisplayCap always fits).
+// Returns the bytes written.
+inline size_t displayText(const char* name, bool isSet, char* out, size_t cap) {
+  if (!out || cap == 0) return 0;
+  const int n = snprintf(out, cap, "%s%s", name ? name : "", isSet ? "" : kDefaultMark);
+  if (n < 0) {
+    out[0] = '\0';
+    return 0;
+  }
+  return (size_t)n < cap ? (size_t)n : cap - 1;
 }
 
 // Index of the first of `names` equal to `name` ignoring case, or -1. Null and

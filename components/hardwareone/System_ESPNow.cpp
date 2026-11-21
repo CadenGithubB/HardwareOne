@@ -7734,8 +7734,8 @@ static bool pairModeIsPaired(const uint8_t* mac) {
 // The name a pairing frame's sender gives (attacker-controlled): the field is
 // read by the one device-name rule (devicename::getField: NUL inside the 32
 // bytes, valid under the rule), never cut or cleaned. An absent or invalid name
-// becomes "peer-XXXXXX" from the sender's address, which is itself a valid name,
-// so it stays one espnowpairsecure argument.
+// becomes "peer-B2C3" from the last two bytes of the sender's address, which
+// is itself a valid name, so it stays one espnowpairsecure argument.
 static void pairModeNameFromField(const char (&field)[devicename::kFieldLen], const uint8_t* mac,
                                   char (&out)[devicename::kFieldLen]) {
   if (!devicename::getField(field, sizeof(field), out)) {
@@ -7851,7 +7851,7 @@ static void v4h_pair_beacon(const V4RxCtx& ctx) {
   V4PayloadPairBeacon b;
   ctx.read(b);
   char name[devicename::kFieldLen];
-  pairModeNameFromField(b.deviceName, mac, name);   // attacker-controlled: the name rule or "peer-XXXXXX"
+  pairModeNameFromField(b.deviceName, mac, name);   // attacker-controlled: the name rule or "peer-B2C3"
   int rssi = (ctx.recv_info && ctx.recv_info->rx_ctrl) ? ctx.recv_info->rx_ctrl->rssi : 0;
   addOrUpdateCandidate(mac, name, rssi, (uint32_t)millis());
 }
@@ -17519,10 +17519,14 @@ const char* cmd_espnow_deviceinfo(const String& argsInput) {
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
     doc["schema"]       = 1;
+    // The stored name as ESP-NOW uses it: "" when none is set (ESP-NOW never
+    // uses the fallback; Bluetooth and Wi-Fi do, see 'devicename').
     doc["name"]         = gSettings.espnowDeviceName;
     // False when no usable name is saved (empty, or one the name rule refuses),
-    // the state 'devicename' reports as "(not set)".
+    // the state 'devicename' shows as "HardwareOne-B2C3 (default)".
     doc["nameValid"]    = devicename::valid(gSettings.espnowDeviceName.c_str());
+    // The same answer under the key every JSON reply with the name carries.
+    doc["deviceNameSet"] = SelfDevice::deviceNameSet();
     doc["friendlyName"] = gSettings.espnowFriendlyName;
     doc["room"]         = gSettings.espnowRoom;
     doc["zone"]         = gSettings.espnowZone;
@@ -17542,8 +17546,11 @@ const char* cmd_espnow_deviceinfo(const String& argsInput) {
   char* buf = getDebugBuffer();
   int pos = 0;
   pos += snprintf(buf + pos, 1024 - pos, "=== Device Metadata ===\n");
-  pos += snprintf(buf + pos, 1024 - pos, "Name:          %s\n",
-                  gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName.c_str() : "(not set)");
+  {
+    char shown[devicename::kDisplayCap];
+    (void)SelfDevice::deviceNameDisplay(shown, sizeof(shown));
+    pos += snprintf(buf + pos, 1024 - pos, "Name:          %s\n", shown);
+  }
   pos += snprintf(buf + pos, 1024 - pos, "Friendly Name: %s\n",
                   gSettings.espnowFriendlyName.length() > 0 ? gSettings.espnowFriendlyName.c_str() : "(not set)");
   pos += snprintf(buf + pos, 1024 - pos, "Room:          %s\n",
@@ -23116,7 +23123,14 @@ const char* cmd_espnow_pairrequest(const String& argsInput) {
   for (int i = 0; i < gEspNow->unpairedDeviceCount; i++) {
     if ((haveMac && memcmp(gEspNow->unpairedDevices[i].mac, tmpMac, 6) == 0) ||
         (!haveMac && gEspNow->unpairedDevices[i].name.equalsIgnoreCase(target))) {
-      found = i; break;
+      if (found >= 0) {
+        // Two candidates share the name (two devices with one name, or two
+        // "peer-B2C3" labels from the same last two address bytes): only the
+        // MAC tells them apart.
+        return "Error: more than one discovered device has that name. Use its MAC from 'espnowdiscovered'.";
+      }
+      found = i;
+      if (haveMac) break;
     }
   }
   uint8_t mac[6];
@@ -23124,7 +23138,7 @@ const char* cmd_espnow_pairrequest(const String& argsInput) {
   name[0] = '\0';
   if (found >= 0) {
     memcpy(mac, gEspNow->unpairedDevices[found].mac, 6);
-    // Candidates hold a name already read by the rule (or "peer-XXXXXX").
+    // Candidates hold a name already read by the rule (or "peer-B2C3").
     const char* cand = gEspNow->unpairedDevices[found].name.c_str();
     if (devicename::valid(cand)) snprintf(name, sizeof(name), "%s", cand);
   } else if (haveMac) {

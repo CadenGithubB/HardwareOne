@@ -1,5 +1,6 @@
 #include "OLED_ESPNow.h"
-#include "System_DeviceName.h"  // devicename::kMaxLen (the device name's 31 bytes)
+#include "System_DeviceName.h"  // devicename::kMaxLen (the device name's 31 bytes), kDisplayCap
+#include "System_SelfDevice.h"  // SelfDevice::deviceNameDisplay
 #include "System_CommandReply.h"  // the reply words and how to read them
 
 #if ENABLE_OLED_DISPLAY && ENABLE_ESPNOW
@@ -433,9 +434,11 @@ void oledEspNowDisplayStatus(Adafruit_SSD1306* display) {
   // Device name on the rest of the row, bounded (OLED_TextField.h).
   display->print("Name: ");
   {
-    const String name = gSettings.espnowDeviceName.length() > 0 ? gSettings.espnowDeviceName : "(none)";
+    // The name in use, "HardwareOne-B2C3 (default)" when none is set.
+    char name[devicename::kDisplayCap];
+    (void)SelfDevice::deviceNameDisplay(name, sizeof(name));
     const int nameY = display->getCursorY();
-    oledTextFieldDraw(display, 36, nameY, SCREEN_WIDTH - 36, name.c_str(), DISPLAY_COLOR_WHITE,
+    oledTextFieldDraw(display, 36, nameY, SCREEN_WIDTH - 36, name, DISPLAY_COLOR_WHITE,
                       DISPLAY_COLOR_WHITE, false, &gOledEspNowState);
     display->println();
   }
@@ -2154,10 +2157,12 @@ void oledEspNowDisplaySettings(Adafruit_SSD1306* display) {
     const bool selected = i == gOledEspNowState.settingsMenuIndex;
     String value;
     switch (i) {
-      case 0: // Device Name
-        value = gSettings.espnowDeviceName;
-        if (value.length() == 0) value = "(not set)";
+      case 0: { // Device Name: "HardwareOne-B2C3 (default)" when none is set
+        char name[devicename::kDisplayCap];
+        (void)SelfDevice::deviceNameDisplay(name, sizeof(name));
+        value = name;
         break;
+      }
       case 1: // Room
         value = gSettings.espnowRoom;
         if (value.length() == 0) value = "(not set)";

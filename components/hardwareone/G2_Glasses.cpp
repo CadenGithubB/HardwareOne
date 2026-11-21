@@ -49,7 +49,8 @@
 #include "System_Notifications.h"
 #include "System_MemUtil.h"
 #include "System_MemoryMonitor.h"   // checkMemoryAvailable() — g2client gate
-#include "System_SelfDevice.h"      // SelfDevice::uptimeSeconds — the status page
+#include "System_SelfDevice.h"      // SelfDevice::uptimeSeconds, deviceNameDisplay — the status page
+#include "System_DeviceName.h"      // devicename::kDisplayCap
 #include "System_VFS.h"
 #include "System_Mutex.h"       // FsLockGuard — serialize long-lived File handles
 #include "System_Battery.h"   // Valid battery snapshot for ESP corner widget
@@ -6744,7 +6745,7 @@ static bool parseAndDispatchDevEvent(G2Temple& t,
 // still produces a coherent page.
 //
 // Example output:
-//   HardwareOne
+//   Kitchen-Cam              ("HardwareOne-B2C3 (default)" with no name set)
 //   Up 2h15m - 42C          ("Up 2h15m" when the chip has no reading)
 //   IP: 192.168.1.42
 //   ESPNow: 3/5 up
@@ -6760,10 +6761,12 @@ buildG2StatusSnapshot(char* out, size_t cap) {
   String s;
   s.reserve(256);
 
-  const char* name = gSettings.espnowDeviceName.length() > 0
-                     ? gSettings.espnowDeviceName.c_str()
-                     : "HardwareOne";
-  s += name;
+  {
+    // The name in use; "HardwareOne-B2C3 (default)" when none is set.
+    char name[devicename::kDisplayCap];
+    (void)SelfDevice::deviceNameDisplay(name, sizeof(name));
+    s += name;
+  }
   s += '\n';
 
   unsigned long seconds = SelfDevice::uptimeSeconds();

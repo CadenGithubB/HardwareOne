@@ -284,17 +284,26 @@ static void displayBluetoothStatusDetail() {
   if (s.pipeBuilt) btRow("Pipe: ", hw1link::pipeLine(s.pipe, pipe, sizeof(pipe)));
 
   if (!gBleState || !gBleState->initialized) return;  // stopped since the snapshot
-  // Device name (truncate if needed)
-  const String deviceName = SelfDevice::deviceName();  // the device name, as Bluetooth uses it
+  // Device name, as Bluetooth uses it. "Name: " leaves 15 of the 21 columns;
+  // a longer name is cut with a tilde. With no name set the fallback
+  // ("HardwareOne-B2C3", 16 bytes) does not fit beside the label, so it gets
+  // its own row under "Name: (default)".
+  const String deviceName = SelfDevice::deviceName();
   const char* name = deviceName.c_str();
-  char truncated[13];
-  if (strlen(name) > 12) {
-    memcpy(truncated, name, 11);
-    truncated[11] = '~';
-    truncated[12] = '\0';
-    name = truncated;
+  if (!SelfDevice::deviceNameSet()) {
+    btDetail("Name: (default)");
+    btDetail("  %s", name);
+  } else {
+    char cut[16];
+    const size_t n = strlen(name);
+    if (n > 15) {
+      memcpy(cut, name, 14);
+      cut[14] = '~';
+      cut[15] = '\0';
+      name = cut;
+    }
+    btDetail("Name: %s", name);
   }
-  btDetail("Name: %s", name);
 
   if (gBleState->connectionState == BLE_STATE_CONNECTED) {
     btDetail("Rx:%lu Tx:%lu", (unsigned long)gBleState->commandsReceived,

@@ -111,12 +111,12 @@ const char* cmd_devicename(const String& argsInput) {
   CommandArgs a(argsInput);
 
   if (a.count() == 0) {
-    if (gSettings.espnowDeviceName.length() > 0 && devicename::valid(gSettings.espnowDeviceName.c_str())) {
-      snprintf(getDebugBuffer(), 1024, "Device name: %s", gSettings.espnowDeviceName.c_str());
-    } else {
-      snprintf(getDebugBuffer(), 1024, "Device name: (not set). Bluetooth and Wi-Fi use %s.",
-               SelfDevice::deviceName().c_str());
-    }
+    // One wording on every surface: the name in use, with " (default)" when
+    // none is set (SelfDevice::deviceNameDisplay).
+    char shown[devicename::kDisplayCap];
+    const bool set = SelfDevice::deviceNameDisplay(shown, sizeof(shown));
+    snprintf(getDebugBuffer(), 1024, "Device name: %s%s", shown,
+             set ? "" : ". Set one with 'devicename <name>'.");
     return getDebugBuffer();
   }
   // The name is one token; a second one would be dropped without a word.
@@ -130,16 +130,22 @@ const char* cmd_devicename(const String& argsInput) {
 #if ENABLE_ESPNOW
     if (const char* refused = espnowDeviceNameClearRefusal()) return refused;
 #endif
-    if (gSettings.espnowDeviceName.length() == 0) return "Device name: (not set)";
+    char shown[devicename::kDisplayCap];
+    if (gSettings.espnowDeviceName.length() == 0) {
+      (void)SelfDevice::deviceNameDisplay(shown, sizeof(shown));
+      snprintf(getDebugBuffer(), 1024, "Device name: %s. Nothing to clear.", shown);
+      return getDebugBuffer();
+    }
     setSetting(gSettings.espnowDeviceName, String(""));
     deviceNameApply(String(""), nullptr, 0);
+    (void)SelfDevice::deviceNameDisplay(shown, sizeof(shown));
     snprintf(getDebugBuffer(), 1024,
              "Device name cleared. Bluetooth and Wi-Fi use %s from their next start"
 #if ENABLE_ESPNOW
              "; ESP-NOW will not start until a name is set with 'devicename <name>'"
 #endif
              ".",
-             SelfDevice::deviceName().c_str());
+             shown);
     return getDebugBuffer();
   }
 

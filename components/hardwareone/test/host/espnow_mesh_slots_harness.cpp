@@ -223,7 +223,13 @@ static std::vector<std::string> gBroadcasts;
 namespace SelfDevice {
 static String deviceName() {
   return devicename::valid(gSettings.espnowDeviceName.c_str()) ? gSettings.espnowDeviceName
-                                                                : String("HardwareOne-A1B2C3");
+                                                                : String("HardwareOne-B2C3");
+}
+[[maybe_unused]] static bool deviceNameSet() { return devicename::valid(gSettings.espnowDeviceName.c_str()); }
+[[maybe_unused]] static bool deviceNameDisplay(char* out, size_t cap) {
+  const bool set = deviceNameSet();
+  devicename::displayText(deviceName().c_str(), set, out, cap);
+  return set;
 }
 static void applyHostname() { ++gHostnameApplies; }
 }  // namespace SelfDevice
@@ -1042,14 +1048,16 @@ static void testNameCanBeCleared() {
   gEvents.clear();
   gMetadataChanged = false;
   const char* r = cmd_devicename(String("clear"));
-  CHECK(!isError(r) && has(r, "cleared"), "N1 clear refused: %s", r);
+  CHECK(!isError(r) && has(r, "cleared") && has(r, "use HardwareOne-B2C3 (default) from"), "N1 clear refused: %s", r);
   CHECK(gSettings.espnowDeviceName.length() == 0, "N1 the name is still '%s'", gSettings.espnowDeviceName.c_str());
   CHECK(!gSettings.espnowFirstTimeSetup, "N1 the setup-done flag stayed set with no name");
   CHECK(gState.devices[0].name.length() == 0, "N1 the stopped instance kept the name");
   CHECK(gMetadataChanged, "N1 metadata not marked changed");
   CHECK(gEvents.size() == 1 && gEvents[0].kind == SYSEVT_SETTING_CHANGED && gEvents[0].subject == "deviceName",
         "N1 no setting-changed event");
-  CHECK(has(cmd_devicename(String("")), "(not set)"), "N1 the query still shows a name");
+  r = cmd_devicename(String(""));
+  CHECK(has(r, "Device name: HardwareOne-B2C3 (default)") && !has(r, "(not set)"),
+        "N1 the query shows the fallback with (default): %s", r);
 
   // N2: refused while ESP-NOW runs or is still shutting down; the name stays.
   resetAll();
@@ -1067,7 +1075,9 @@ static void testNameCanBeCleared() {
   resetAll();
   const int persistsBefore = gPersists;
   r = cmd_devicename(String("clear"));
-  CHECK(!isError(r) && has(r, "(not set)") && gPersists == persistsBefore && gEvents.empty(), "N3 unset name: %s", r);
+  CHECK(!isError(r) && has(r, "HardwareOne-B2C3 (default)") && has(r, "Nothing to clear") &&
+            gPersists == persistsBefore && gEvents.empty(),
+        "N3 unset name: %s", r);
 
   // N4: ordinary names still work and validate-only still answers without acting.
   resetAll();

@@ -1030,7 +1030,14 @@ R"JS(
     setText('bt-cfg-status', 'Loading…');
     hw.fetchJSON('/api/ble/status').then(function(d){
       var info = (d && d.ble) || {};
-      var nameInp = el('bt-cfg-name');    if(nameInp) nameInp.value = info.deviceName || '';
+      // No name set (deviceNameSet false): deviceName is the fallback. The box
+      // stays empty with the fallback as its hint, so Save never stores it.
+      var nameInp = el('bt-cfg-name');
+      if(nameInp){
+        var nameSet = info.deviceNameSet !== false;
+        nameInp.value = nameSet ? (info.deviceName || '') : '';
+        nameInp.placeholder = (!nameSet && info.deviceName) ? (info.deviceName + ' (default)') : 'e.g. Kitchen-Cam';
+      }
       var txInp   = el('bt-cfg-txpower'); if(txInp && info.txPower != null) txInp.value = info.txPower;
       autoStartState   = !!info.autoStart;
       requireAuthState = !!info.requireAuth;

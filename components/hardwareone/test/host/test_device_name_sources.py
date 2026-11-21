@@ -21,6 +21,11 @@ in one place. What cannot run on the host is pinned in the source:
   - every frame field that carries this device's name is written with
     devicename::putField and every received one is read with devicename::getField;
   - the setter is registered with its settings row in an always-compiled module;
+  - with no name set the fallback is "HardwareOne-B2C3" (the last two address
+    bytes only); every screen and text reply that shows the name marks it
+    "(default)" through SelfDevice::deviceNameDisplay, while the Bluetooth (GAP
+    and advertised) name, the hostname and the ESP-NOW fields carry the bare
+    name; the JSON replies with the name carry "deviceNameSet" beside it;
   - a settings file from before the one device name keeps its name: the boot
     load moves the old ESP-NOW (else a chosen Bluetooth) name into the setting
     after the registered read and before ESP-NOW's start gate, Bluetooth and the
@@ -71,10 +76,24 @@ def main():
          'applyHostname does not give the Wi-Fi stack the device name')
     need('if (WiFi.STA.started()) (void)WiFi.STA.setHostname(name.c_str());' in apply,
          'applyHostname does not give a running station the new name')
-    name_fn = selfdev[selfdev.find('String deviceName() {'):]
+    name_fn = selfdev[selfdev.find('static bool nameInUse('):]
     name_fn = name_fn[:name_fn.find('\n}\n')]
     need('devicename::check(stored)' in name_fn and 'devicename::kFallbackPrefix' in name_fn,
-         'SelfDevice::deviceName does not check the stored name or fall back to HardwareOne-XXXXXX')
+         'SelfDevice::nameInUse does not check the stored name or fall back to HardwareOne-B2C3')
+    public_fn = selfdev[selfdev.find('String deviceName() {'):]
+    public_fn = public_fn[:public_fn.find('\n}\n')]
+    need('nameInUse(name)' in public_fn and 'devicename::valid(gSettings.espnowDeviceName.c_str())' in public_fn,
+         'SelfDevice::deviceName does not return the stored name, else the fallback from nameInUse')
+    need('bool deviceNameSet() { return devicename::valid(gSettings.espnowDeviceName.c_str()); }' in selfdev,
+         'SelfDevice::deviceNameSet is not the rule check of the stored name')
+    shown_fn = selfdev[selfdev.find('bool deviceNameDisplay('):]
+    shown_fn = shown_fn[:shown_fn.find('\n}\n')]
+    need('devicename::displayText(name, set, out, cap)' in shown_fn,
+         'SelfDevice::deviceNameDisplay does not use the one wording (devicename::displayText)')
+    header = text('System_DeviceName.h')
+    need('"%s-%02X%02X", prefix ? prefix : kFallbackPrefix, m[4], m[5]' in header,
+         'the fallback and peer label do not use the last two address bytes')
+    need('constexpr const char* kDefaultMark = " (default)";' in header, 'the "(default)" wording is not in one place')
 
     # One hand-on of a new name (deviceNameApply): the setter on set and clear,
     # and the setup wizards' save, which writes the setting directly.
@@ -120,6 +139,64 @@ def main():
     need('const String hostName = SelfDevice::deviceName();' in central and
          'bluetoothHalInit(hostName.c_str())' in central,
          'the Bluetooth client roles do not use the device name as their GAP name')
+
+    # "(default)" is for people: never in the GAP or advertised name, the
+    # hostname or a frame field. Those paths read the bare deviceName().
+    for name, body in (('System_SelfDevice.cpp applyHostname', apply),
+                       ('BLE_CentralStack.cpp', central)):
+        need('deviceNameDisplay' not in body and 'kDefaultMark' not in body and '(default)' not in body,
+             f'{name} puts the "(default)" mark into a Bluetooth or Wi-Fi name')
+    init = ble[ble.find('const String deviceName = SelfDevice::deviceName();'):]
+    init = init[:init.find('setScanResponseData(scanResponse)')]
+    need(init and 'deviceNameDisplay' not in init and 'kDefaultMark' not in init,
+         'the Bluetooth GAP or advertised name carries the "(default)" mark')
+    need('deviceNameDisplay' not in text('System_ESPNow_Wire.h') and
+         not re.search(r'putField\([^;]*(deviceNameDisplay|kDefaultMark|shown)', text('System_ESPNow.cpp')),
+         'an ESP-NOW frame field carries the "(default)" mark')
+    need('out["deviceNameSet"]  = SelfDevice::deviceNameSet();' in ble, 'bleinfo json has no deviceNameSet')
+    need("device visible as 'HardwareOne'" not in ble, 'the advertising line still names a fixed HardwareOne')
+
+    # The screens and text replies that show the name: one wording, no old ones.
+    shown_in = {
+        'System_DeviceName.cpp': ('SelfDevice::deviceNameDisplay(shown', 'Device name: (not set)'),
+        'BLE_Server.cpp': ('SelfDevice::deviceNameDisplay(shown', None),
+        'System_ESPNow.cpp': ('SelfDevice::deviceNameDisplay(shown', None),
+        'System_Utils.cpp': ('SelfDevice::deviceNameDisplay(shown', None),
+        'OLED_ESPNow.cpp': ('SelfDevice::deviceNameDisplay(name', 'gSettings.espnowDeviceName : "(none)"'),
+        'G2_Page_Network.cpp': ('SelfDevice::deviceNameDisplay(shown', '"(unset)"'),
+        'G2_Glasses.cpp': ('SelfDevice::deviceNameDisplay(name', ': "HardwareOne";'),
+        'OLED_Mode_Bluetooth.cpp': ('SelfDevice::deviceNameSet()', None),
+    }
+    for name, (must, gone) in shown_in.items():
+        body = text(name)
+        need(must in body, f'{name} does not show the name through the one wording ({must})')
+        if gone:
+            need(gone not in body, f'{name} still has the old unnamed wording {gone}')
+    need('wizardDeviceNameIsDefault()' in wizard and
+         'wizardDeviceNameIsDefault()' in text('System_SetupWizardMode.cpp'),
+         'the setup wizard does not mark the fallback name (default)')
+    # The OLED wizard's value column holds twelve glyphs: the unnamed row shows
+    # the mark alone, or "HardwareOne-B2C3 (default)" would be cut to "HardwareO...".
+    oled_wizard = text('OLED_SetupWizard.cpp')
+    rows = oled_wizard[oled_wizard.find('void renderWizardPage() {'):]
+    rows = rows[:rows.find('\n}\n')]
+    need('rowItem->type == WIZARD_ITEM_DEVICE_NAME && wizardDeviceNameIsDefault()' in rows and
+         'devicename::kDefaultMark + 1' in rows and
+         rows.find('devicename::kDefaultMark + 1') < rows.find('oledTextFieldDraw('),
+         'the OLED setup wizard row cuts "(default)" off the fallback name')
+
+    # JSON replies with the name carry deviceNameSet beside it.
+    utils = text('System_Utils.cpp')
+    info = utils[utils.find('void buildSystemInfoJson('):]
+    info = info[:info.find('\n}\n')]
+    need('doc["deviceName"]    = SelfDevice::deviceName();' in info and
+         'doc["deviceNameSet"] = SelfDevice::deviceNameSet();' in info and
+         'espnow["deviceNameSet"] = SelfDevice::deviceNameSet();' in info,
+         'status json / /api/system do not carry deviceName and deviceNameSet')
+    devinfo = espnow[espnow.find('const char* cmd_espnow_deviceinfo('):]
+    devinfo = devinfo[:devinfo.find('\n}\n')]
+    need('doc["deviceNameSet"] = SelfDevice::deviceNameSet();' in devinfo and 'doc["nameValid"]' in devinfo,
+         'espnowdeviceinfo json does not carry deviceNameSet beside nameValid')
 
     # Wire writers and readers of the device name.
     raw_copies = re.findall(r'strncpy\([^;]*deviceName[^;]*gSettings\.espnowDeviceName', espnow)

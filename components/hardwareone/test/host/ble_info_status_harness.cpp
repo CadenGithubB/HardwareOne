@@ -76,7 +76,16 @@ static struct {
 // The device name as Bluetooth uses it (System_SelfDevice.cpp); the harness sets
 // it. Escaping is still checked although the rule never lets quotes in.
 static String gEffectiveDeviceName = "Bench \"Bluetooth\"\\unit\n";
-namespace SelfDevice { [[maybe_unused]] static String deviceName() { return gEffectiveDeviceName; } }
+#include "System_DeviceName.h"  // devicename::kDisplayCap, kFieldLen (pure header)
+static bool gEffectiveDeviceNameSet = true;  // false: deviceName is the fallback
+namespace SelfDevice {
+[[maybe_unused]] static String deviceName() { return gEffectiveDeviceName; }
+[[maybe_unused]] static bool deviceNameSet() { return gEffectiveDeviceNameSet; }
+[[maybe_unused]] static bool deviceNameDisplay(char* out, size_t cap) {
+  std::snprintf(out, cap, "%s%s", gEffectiveDeviceName.c_str(), gEffectiveDeviceNameSet ? "" : " (default)");
+  return gEffectiveDeviceNameSet;
+}
+}  // namespace SelfDevice
 static bool secureRequired = true;
 static std::atomic<unsigned> secureCalls{0};
 static bool bleScRequired() { ++secureCalls; return secureRequired; }
@@ -444,17 +453,19 @@ static void populate() {
   state.connections[0].authed = true; state.connections[0].user = "Unknown";
   state.connections[2].authed = false; state.connections[2].user = "";
 }
-// bleinfo json adds the phone link block beside buildBleInfoJson's 13 keys in a
+// bleinfo json adds the phone link block beside buildBleInfoJson's 14 keys in a
 // pipe build; buildBleInfoJson itself (also /api/ble/status `ble`) never has it.
 static constexpr bool kPhoneBlock = ENABLE_BLE_PHONE_PIPE && !TEST_BASELINE;
 static void checkSchema(JsonVariantConst doc, bool initialized, bool cli = false) {
   const bool block = cli && kPhoneBlock;
   check(doc["phoneLink"].is<JsonObjectConst>() == block,
         "the phone link block is bleinfo json's own, in pipe builds only");
-  check(doc.as<JsonObjectConst>().size() == 13u + (block ? 1u : 0u),
+  check(doc.as<JsonObjectConst>().size() == 14u + (block ? 1u : 0u),
         "BLE schema contains exactly the characterized fields");
   check(doc["schema"] == 1 && doc["deviceName"] == gEffectiveDeviceName,
         "schema version and escaped device name (the device name in use, not a Bluetooth-only setting) preserved");
+  check(doc["deviceNameSet"].is<bool>() && doc["deviceNameSet"] == gEffectiveDeviceNameSet,
+        "deviceNameSet says whether deviceName is a set name or the fallback");
   check(doc["txPower"] == 5 && doc["autoStart"] == true && doc["requireAuth"] == true &&
         doc["secureChannelRequired"] == secureRequired, "configuration facts preserved");
   check(doc["initialized"] == initialized && doc["maxConnections"] == BLE_MAX_CONNECTIONS,
@@ -506,6 +517,22 @@ static void characterize() {
     std::cout << sameInEveryBuild(doc) << '\n';
   }
   std::cout << sameInEveryBuild(cmd_bleinfo("")) << '\n';
+  {
+    // No name set: JSON carries the bare fallback with deviceNameSet false;
+    // the text a person reads marks it "(default)".
+    const String keep = gEffectiveDeviceName;
+    gEffectiveDeviceName = "HardwareOne-B2C3";
+    gEffectiveDeviceNameSet = false;
+    JsonDocument unnamed = parsed(cmd_bleinfo("json"));
+    checkSchema(unnamed.as<JsonVariantConst>(), true, true);
+    check(unnamed["deviceName"] == "HardwareOne-B2C3" && unnamed["deviceNameSet"] == false,
+          "bleinfo json: an unnamed board reports the bare fallback and deviceNameSet false");
+    check(std::strstr(cmd_bleinfo(""), "Device Name:  HardwareOne-B2C3 (default)\n") != nullptr,
+          "bleinfo text marks the fallback name (default)");
+    gEffectiveDeviceName = keep;
+    gEffectiveDeviceNameSet = true;
+    check(std::strstr(cmd_bleinfo(""), "(default)") == nullptr, "bleinfo text: a set name carries no mark");
+  }
   populate(); state.connections[0].user = "user \"quote\"\\slash\n";
   nowMs = 30; state.connections[0].connectedSince = 0xfffffc18u;
   JsonDocument wrap = parsed(cmd_bleinfo("json"));
@@ -1159,7 +1186,7 @@ static void blestatusChecks() {
     JsonDocument infoDoc;
     const std::string infoJson = cmd_bleinfo("json");
     statusExpect(!deserializeJson(infoDoc, infoJson) && infoDoc["phoneLink"] == doc["phoneLink"] &&
-                 infoDoc.as<JsonObjectConst>().size() == 14,
+                 infoDoc.as<JsonObjectConst>().size() == 15,  // buildBleInfoJson's 14 keys + phoneLink
                  "S9 phone link: bleinfo json block differs from blestatus json; got " + infoJson);
   }
   // The idle logout signs the row out: the stream stays open, the relay as it was.

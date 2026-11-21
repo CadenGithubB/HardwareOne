@@ -460,7 +460,8 @@ bool wizardFormatMenuItem(SetupWizardPage page, int index,
       snprintf(value, valueCap, "%s", draft.ledStartupEffect.c_str());
       break;
     case WIZARD_ITEM_DEVICE_NAME:
-      snprintf(value, valueCap, "%s", wizardDeviceName);
+      // The fallback the wizard starts from reads "HardwareOne-B2C3 (default)".
+      devicename::displayText(wizardDeviceName, !wizardDeviceNameIsDefault(), value, valueCap);
       break;
   }
   return true;
@@ -502,6 +503,13 @@ size_t getLedEffectCount() { return ledEffectCount; }
 
 const char* getWizardDeviceName() { return wizardDeviceName; }
 char* getWizardDeviceNameBuf() { return wizardDeviceName; }
+
+bool wizardDeviceNameIsDefault() {
+  // No valid name in the draft (none stored, none chosen on an earlier page)
+  // and the buffer still the fallback it was started with.
+  return wizardDeviceName[0] && !devicename::valid(sWizardDraft.values.deviceName.c_str()) &&
+         strcmp(wizardDeviceName, sWizardDraft.deviceNameBaseline) == 0;
+}
 
 // ============================================================================
 // Heap Bar Helper
@@ -621,7 +629,8 @@ void initSetupWizard() {
 
   const auto& draft = getWizardDraftValues();
   // The device name the wizard starts from: the stored one when it passes the
-  // rule, else the name in use (HardwareOne-XXXXXX).
+  // rule, else the name in use (the fallback HardwareOne-B2C3, which is
+  // stored only when it is chosen or when the ESP-NOW page needs a name).
   const String inUse = SelfDevice::deviceName();
   const char* curName = devicename::valid(draft.deviceName.c_str()) ? draft.deviceName.c_str() : inUse.c_str();
   strlcpy(wizardDeviceName, curName, sizeof(wizardDeviceName));
@@ -743,7 +752,7 @@ bool wizardStageEspNowSettings(const SetupWizardResult& result) {
   // The device name and the display label are separate: the name is the one
   // the page confirmed (it passed the rule there), never derived from the
   // label here. A page finished early keeps the name it had, and a draft with
-  // no valid name gets the one in use (HardwareOne-XXXXXX), so ESP-NOW can start.
+  // no valid name gets the one in use (HardwareOne-B2C3), so ESP-NOW can start.
   if (result.deviceName.length() > 0) {
     if (!devicename::valid(result.deviceName.c_str())) return false;
     copyWizardString(draft.deviceName, result.deviceName);
@@ -1726,7 +1735,8 @@ SetupWizardResult runSetupWizard() {
           const WizardMenuItem* item = getWizardMenuItem(currentPage, (int)number - 1);
           setWizardCurrentSelection((int)number - 1);
           if (item->type == WIZARD_ITEM_DEVICE_NAME) {
-            Serial.printf("Device Name (1-31 letters, digits, '-') [%s]: ", wizardDeviceName);
+            Serial.printf("Device Name (1-31 letters, digits, '-') [%s%s]: ", wizardDeviceName,
+                          wizardDeviceNameIsDefault() ? devicename::kDefaultMark : "");
             String newName = waitForWizardInput();
             newName.trim();
             if (!isWizardCancelRequested() && newName.length() > 0) {

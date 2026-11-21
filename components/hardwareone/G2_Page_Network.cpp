@@ -7,7 +7,8 @@
 // (e.g. wifiadd <ssid> <password>, devicename) is omitted.
 
 #include "WebServer_Handle.h"
-#include "System_DeviceName.h"  // devicename::kMaxLen (the device name's 31 bytes)
+#include "System_DeviceName.h"  // devicename::kMaxLen (the device name's 31 bytes), kDisplayCap
+#include "System_SelfDevice.h"  // SelfDevice::deviceNameDisplay
 #include "G2_Page_Network.h"
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
@@ -705,11 +706,14 @@ static void showEspNowMenu() {
   rows.add("<- WiFi", ESPNOW_ROW_BACK);  // WiFi submenu is ESP-NOW's parent
 
 #if ENABLE_ESPNOW
+  // "Name: " + the name as a person reads it (up to kDisplayCap - 1 = 41
+  // bytes: "HardwareOne-B2C3 (default)" when none is set) fits the 48 bytes.
   EXT_RAM_BSS_ATTR static char nameLine[48];  // PSRAM: deep-copied by g2ShowListPage
-  snprintf(nameLine, sizeof(nameLine), "Name: %s",
-           gSettings.espnowDeviceName.length() > 0
-               ? gSettings.espnowDeviceName.c_str()
-               : "(unset)");
+  {
+    char shown[devicename::kDisplayCap];
+    (void)SelfDevice::deviceNameDisplay(shown, sizeof(shown));
+    snprintf(nameLine, sizeof(nameLine), "Name: %s", shown);
+  }
   snprintf(autoLine, sizeof(autoLine), "Auto Start: %s",
            gSettings.espnowEnabled ? "ON" : "OFF");
   bool running = (gEspNow && gEspNow->initialized);

@@ -163,6 +163,16 @@ struct Settings {
   bool httpAutoStart = false;
 } gSettings;
 
+// System_SelfDevice.h: the name as a person reads it, the fallback marked
+// "(default)" when no valid name is stored.
+namespace SelfDevice {
+[[maybe_unused]] static bool deviceNameDisplay(char* out, size_t cap) {
+  const bool set = devicename::valid(gSettings.espnowDeviceName.c_str());
+  devicename::displayText(set ? gSettings.espnowDeviceName.c_str() : "HardwareOne-B2C3", set, out, cap);
+  return set;
+}
+}  // namespace SelfDevice
+
 // INSERT_STATE
 
 // ---- Views and callbacks outside the row-bound menus ---------------------------
@@ -303,7 +313,7 @@ static void espnow_rows_unchanged_state() {
   espnowState.initialized = false;
   gSettings.espnowDeviceName = String("");
   showEspNowMenu();
-  const char* off[] = {"<- WiFi", "ESP-NOW: OFF", "View Devices", "Name: (unset)",
+  const char* off[] = {"<- WiFi", "ESP-NOW: OFF", "View Devices", "Name: HardwareOne-B2C3 (default)",
                        "Auto Start: ON"};
   CHECK(shownCount == 5);
   for (size_t i = 0; i < 5; ++i) CHECK(std::strcmp(shownRows[i], off[i]) == 0);

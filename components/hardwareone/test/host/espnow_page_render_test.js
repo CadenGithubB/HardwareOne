@@ -199,7 +199,7 @@ function statusSlots() {
     JSON.stringify({ schema: 1, enabled: true, role: 'master', peer: BOND_MAC, peerName: 'partner', online: true }),
     JSON.stringify({ schema: 1, devices: [{ mac: BOND_MAC.toUpperCase(), name: 'partner', encrypted: true, meshId: 0 }], count: 1 }),
     JSON.stringify({ schema: 1, meshes: [] }),
-    JSON.stringify({ schema: 1, name: 'node1', nameValid: true, friendlyName: 'Küche "A"', room: 'Living-Room 2', zone: '',
+    JSON.stringify({ schema: 1, name: 'node1', nameValid: true, deviceNameSet: true, friendlyName: 'Küche "A"', room: 'Living-Room 2', zone: '',
                      tags: '', stationary: true, meshRole: 'master', mac: SELF_MAC }),
     JSON.stringify({ schema: 1, role: 'backup', masterMac: '02:00:00:00:00:0c', backupEnabled: true, backupMac: '' }),
     JSON.stringify({ peers: [], unpaired: [] }),
@@ -545,7 +545,7 @@ settle(function () {
   check(!el('setup-modal').classList.contains('show') && cliCommands.indexOf('openespnow') === 2,
         'B3 a name without nameValid starts ESP-NOW', cliCommands.join(','));
   // The old 'devicename' text wording decides nothing: start, and let its reply say what is wrong.
-  return clickInit('Device name: (not set)');
+  return clickInit('Device name: HardwareOne-B2C3 (default)');
 }).then(function () {
   check(!el('setup-modal').classList.contains('show') && cliCommands.indexOf('openespnow') === 2,
         'B4 a text deviceinfo reply is not matched', cliCommands.join(','));
