@@ -8,6 +8,8 @@
 #include <freertos/FreeRTOS.h>
 
 #include "G2_Health.h"
+#include "G2_HealthInsights.h"      // insights page (sid 0x0E cmd 4), same link and magic
+#include "G2_HealthInsightsCore.h"
 #include "G2_HealthPushCore.h"
 #include "G2_Ring.h"
 #include "R1_HealthHistoryStore.h"
@@ -47,7 +49,7 @@ uint32_t historyIntervalMs() {
 
 // Owned by the G2 control task: link, send policy, writes and echoes.
 hp::Policy sPolicy;
-uint8_t sMagic = 0;
+uint8_t sMagic = 0;  // the last sid 0x0E magic (snapshot or insights); see g2HealthSid0eNextMagic
 
 // Owned by the main loop (g2HealthPushMainTick): building the snapshot from
 // the R1 data and scheduling ring history refreshes. The G2 task never takes
@@ -197,7 +199,7 @@ void countFailure() {
 
 bool sendSnapshot(const hp::Snapshot& s, uint32_t generation, uint32_t now, bool test) {
   uint8_t pb[hp::kMaxPbBytes];
-  sMagic = hp::nextMagic(sMagic);
+  sMagic = hp::nextMagic(sMagic);  // shared with the insights page (g2HealthSid0eNextMagic)
   const size_t n = hp::encodeSnapshot(s, sMagic, pb, sizeof pb);
   sPolicy.pending = s;
   const bool ok = n && hp::validateSnapshotPb(pb, n) && g2HealthWireSend(generation, pb, n);
@@ -277,6 +279,13 @@ bool linkReadyPublished() {
 
 bool g2HealthPushWantsRingData() { return feedOn() && linkReadyPublished(); }
 
+// One counter for every sid 0x0E message (MULT_DATA snapshot and insights), so
+// two consecutive messages on the service never share a magic.
+uint8_t g2HealthSid0eNextMagic() {
+  sMagic = hp::nextMagic(sMagic);
+  return sMagic;
+}
+
 void g2HealthPushMainTick(bool vitalsReadActive) {
   const uint32_t now = millis();
   const bool ready = linkReadyPublished();
@@ -297,6 +306,8 @@ void g2HealthPushMainTick(bool vitalsReadActive) {
     portEXIT_CRITICAL(&sStatusMux);
   }
   historyTick(now, vitalsReadActive);
+  // Insights page: reads the history here on the main loop, never on g2_owner.
+  g2HealthInsightsMainTick(ready);
 }
 
 void g2HealthPushTick() {
@@ -310,11 +321,13 @@ void g2HealthPushTick() {
       if (sForce.exchange(0, std::memory_order_acq_rel)) countFailure();
       feed::linkDown(sPolicy);
       publishStatus(false, busy);
+      g2HealthInsightsOwnerTick(feed::Gate::Down, 0, now, false);
       return;
     case feed::Gate::Paused:
       // Exclusive glasses sessions pause the feed without resetting the link
       // state, so nothing bursts out when they end.
       publishStatus(true, true);
+      g2HealthInsightsOwnerTick(feed::Gate::Paused, generation, now, false);
       return;
     case feed::Gate::Open:
       break;
@@ -326,8 +339,13 @@ void g2HealthPushTick() {
   have = sStatus.haveCurrent;
   portEXIT_CRITICAL(&sStatusMux);
   const uint8_t force = sForce.exchange(0, std::memory_order_acq_rel);
+  // One automatic sid 0x0E message in flight at a time: hold the snapshot
+  // while an insights message on this link waits for its echo (unless a
+  // snapshot is itself in flight: its timeout and retry still run).
+  const bool snapshotInFlight = sPolicy.awaitingAck && sPolicy.generation == generation;
+  const bool hold = g2HealthInsightsInFlight(generation) && !snapshotInFlight;
   const hp::Action action =
-      hp::policyTick(sPolicy, feedOn() && have, true, generation, now, current);
+      hp::policyTick(sPolicy, feedOn() && have && !hold, true, generation, now, current);
   if (force && feed::tooSoon(sPolicy, now, kManualFloorMs)) {
     countFailure();  // manual sends are bounded too
   } else if (force == 1 && (!have || !hp::hasRingData(current))) {
@@ -338,11 +356,20 @@ void g2HealthPushTick() {
     (void)sendSnapshot(sPolicy.pending, generation, now, false);
   }
   publishStatus(true, false);
+  // Insights after the snapshot's own decision: on a connect the snapshot
+  // goes first (2 s settle, insights 5 s) and insights wait for its echo.
+  g2HealthInsightsOwnerTick(feed::Gate::Open, generation, now,
+                            sPolicy.awaitingAck && sPolicy.generation == generation);
 }
 
 void g2HealthPushOnRx(uint32_t rightGeneration, const uint8_t* pb, size_t len) {
   uint8_t cmd = 0, magic = 0;
-  if (rightGeneration != sPolicy.generation || !hp::parseAck(pb, len, cmd, magic)) return;
+  if (!hp::parseAck(pb, len, cmd, magic)) return;
+  if (cmd == hw1_g2_health_insights::kCmdHighlight) {
+    g2HealthInsightsOnRx(rightGeneration, pb, len);
+    return;
+  }
+  if (rightGeneration != sPolicy.generation) return;
   const bool matched = feed::onAck(sPolicy, rightGeneration, hp::kCmdMultData, cmd, magic) ==
                        feed::AckResult::Complete;
   DEBUG_G2F("[G2-HEALTH] echo cmd=%u magic=%u %s", (unsigned)cmd, (unsigned)magic,

@@ -1112,29 +1112,32 @@ void r1HealthHistoryStoreTick(void) {
 
 R1HealthHistoryStoreError r1HealthHistoryStoreLoadExact(
     const char* peerId, uint32_t dayStart, int16_t timezoneMinutes,
-    R1HealthHistoryDay& out) {
+    R1HealthHistoryDay& out, bool reportStatus) {
   r1HealthHistoryDayClear(out);
+  // A read-only consumer (reportStatus false) leaves the store's status and
+  // its busy counter alone: they describe the store's own restores/commits.
+  auto fail = [&](R1HealthHistoryStoreError error) {
+    if (reportStatus) setStatusError(error);
+    return error;
+  };
   if (!canonicalPeerId(peerId) || dayStart == 0 ||
       timezoneMinutes < R1_HEALTH_TIMEZONE_MINUTES_MIN ||
       timezoneMinutes > R1_HEALTH_TIMEZONE_MINUTES_MAX) {
-    setStatusError(R1_HISTORY_STORE_BAD_IDENTITY);
-    return R1_HISTORY_STORE_BAD_IDENTITY;
+    return fail(R1_HISTORY_STORE_BAD_IDENTITY);
   }
   if (!captureCryptoEnsureKey()) {
-    setStatusError(R1_HISTORY_STORE_KEY_UNAVAILABLE);
-    return R1_HISTORY_STORE_KEY_UNAVAILABLE;
+    return fail(R1_HISTORY_STORE_KEY_UNAVAILABLE);
   }
   char pathBuf[160];
   if (!makePath(peerId, dayStart, timezoneMinutes, pathBuf, sizeof(pathBuf))) {
-    setStatusError(R1_HISTORY_STORE_BAD_IDENTITY);
-    return R1_HISTORY_STORE_BAD_IDENTITY;
+    return fail(R1_HISTORY_STORE_BAD_IDENTITY);
   }
   // The load runs on the main loop too. Busy is neither "not stored" (the
   // caller would start an empty day over the stored one) nor a read failure
   // (the caller would count it and give the day up): it says nothing about
   // the stored day, and the status error is left as it was.
   if (filesystemBusyElsewhere()) {
-    noteFilesystemBusy();
+    if (reportStatus) noteFilesystemBusy();
     return R1_HISTORY_STORE_BUSY;
   }
   // trusted: restore exact health-history key into the in-RAM health model.
@@ -1149,11 +1152,11 @@ R1HealthHistoryStoreError r1HealthHistoryStoreLoadExact(
     }
   }
   if (loadError != R1_HISTORY_STORE_OK) {
-    if (loadError != R1_HISTORY_STORE_NOT_FOUND) setStatusError(loadError);
+    if (reportStatus && loadError != R1_HISTORY_STORE_NOT_FOUND) setStatusError(loadError);
     r1HealthHistoryDayClear(out);
     return loadError;
   }
-  {
+  if (reportStatus) {
     StoreLock lock;
     if (lock.locked()) {
       sStatus.error = R1_HISTORY_STORE_OK;

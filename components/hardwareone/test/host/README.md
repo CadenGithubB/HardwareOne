@@ -6342,11 +6342,21 @@ Without a staged override (`tools/p4/prepare_sdk.sh`) it exits 77 (skipped).
 
 `test_g2_settings_protocol.py --sanitize` checks the complete production settings
 codec, golden vectors, malformed/truncated payloads, exact version strings,
-correlated oneof bodies, explicit zero and nanopb-elided wear OFF.
+correlated oneof bodies, explicit zero and nanopb-elided wear OFF, the
+captured 2.3.2.14 silent-mode frames (write, ACK with the zero left out, BASIC
+f14, cmd 3 change push), auto-brightness frames (write, ACK with the explicit
+zero, BASIC f18) and the brightness-level and head-up frames (writes and ACKs,
+BASIC f2 and f7). ctest runs it as `g2_settings_protocol`.
 `test_g2_settings_command.py --sanitize` exercises the production command,
 RX owner and exact-generation sender with simulated BLE boundaries: request IDs,
 fresh reads, qualified default OFF, idle renderer/native readiness, ACK matching,
 connection rollover, cold discovery, and preservation of other firmware guards.
+It also runs the G2_QuickList boundary (the typed read of all five rows, the
+wear, silent, auto-brightness and head-up writes, the two-write Brightness step
+with its wire bytes, the FULL_UPDATE wire gate) against the
+same fixtures, including the resent read: unanswered and late replies (a reply
+scheduled on the simulated clock), a late reply to an earlier read, and the
+attempt, latency and other-frame numbers each read records.
 Real G2 settings acceptance is tracked separately in
 `docs/G2_WEAR_DETECTION_23214.md`.
 

@@ -592,12 +592,20 @@ inline bool parsePageState(const uint8_t* pb, size_t len, uint32_t& type) {
 
 // ------------------------------------------------------------------ metrics
 
-// Default order (owner, 2026-11-19): CPU, internal RAM, PSRAM, then the rest.
+// Default order (owner, 2026-11-19): CPU, internal RAM, PSRAM, then the rest;
+// the CPU clock in the chip temperature's place (owner, 2026-11-21; TEMP can
+// still be chosen).
 static constexpr SystemMetricId kDefaultMetrics[kMaxSlots] = {
     SystemMetricId::Cpu,  SystemMetricId::Heap,  SystemMetricId::Psram,
-    SystemMetricId::Sd,   SystemMetricId::Lfs,   SystemMetricId::Temp,
+    SystemMetricId::Sd,   SystemMetricId::Lfs,   SystemMetricId::Clk,
     SystemMetricId::Links, SystemMetricId::Mesh, SystemMetricId::Ring};
-static constexpr const char* kDefaultMetricsText = "CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING";
+static constexpr const char* kDefaultMetricsText = "CPU,HEAP,PSRM,SD,LFS,CLK,LINK,MESH,RING";
+// The default before CLK. The setting holds a label list, never "default"
+// (`g2 stats metrics default` saves the list it stands for), and every
+// settings save writes it out, so a device that never chose its own list has
+// this text saved: savedSelection reads it as the current default.
+static constexpr const char* kPreviousDefaultMetricsText =
+    "CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING";
 
 struct Selection {
   SystemMetricId ids[kMaxSlots];
@@ -660,6 +668,17 @@ inline bool parseMetricList(const char* text, Selection& out, char* error, size_
   return true;
 }
 
+// The saved setting (g2StockMetrics) as a selection: the previous default's
+// exact text is the current default, and so is anything parseMetricList
+// refuses (a hand edit, an empty string). Any other list is kept as saved.
+inline Selection savedSelection(const char* saved) {
+  if (!saved || strcmp(saved, kPreviousDefaultMetricsText) == 0) return defaultSelection();
+  Selection s;
+  char err[48];
+  if (!parseMetricList(saved, s, err, sizeof err)) return defaultSelection();
+  return s;
+}
+
 // "CPU,HEAP,PSRM" (labels joined by commas). Returns the length written.
 inline size_t formatMetricList(const Selection& s, char* out, size_t cap) {
   if (!out || cap == 0) return 0;
@@ -675,6 +694,18 @@ inline size_t formatMetricList(const Selection& s, char* out, size_t cap) {
     n += l;
     out[n] = '\0';
   }
+  return n;
+}
+
+// The list as `g2 stats metrics` saves it: formatMetricList, except that the
+// one list savedSelection would read as the current default (the previous
+// default, chosen again on purpose) is saved space-separated, so it stays as
+// chosen after a reboot. Returns the length written.
+inline size_t formatSavedMetricList(const Selection& s, char* out, size_t cap) {
+  const size_t n = formatMetricList(s, out, cap);
+  if (n && strcmp(out, kPreviousDefaultMetricsText) == 0)
+    for (size_t i = 0; i < n; i++)
+      if (out[i] == ',') out[i] = ' ';
   return n;
 }
 

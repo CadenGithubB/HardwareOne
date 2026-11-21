@@ -20,7 +20,7 @@ namespace smc = system_metrics_core;
 static bool near(float a, float b) { return std::fabs(a - b) < 1e-4f; }
 
 static void metricTable() {
-  static_assert(smc::kMetricCount == 12, "twelve metrics");
+  static_assert(smc::kMetricCount == 13, "thirteen metrics");
   static_assert(smc::kHistoryLen == 185, "185-point history (the glasses' chart)");
   static_assert(smc::kHistoryStepMs == 20000, "a point every 20 s");
   static_assert(smc::kHistoryLen * smc::kHistoryStepMs / 60000 >= 60, "about an hour");
@@ -55,18 +55,34 @@ static void metricTable() {
   CHECK(smc::index(SystemMetricId::Heap) == 3);
   CHECK(smc::index(SystemMetricId::Psram) == 5);
   CHECK(smc::index(SystemMetricId::Ring) == 11);
+  CHECK(smc::index(SystemMetricId::Clk) == 12);  // appended: the earlier ids keep theirs
+  CHECK(smc::index(SystemMetricId::Temp) == 8);
   // The owner's first tickers.
   CHECK(std::strcmp(smc::info(SystemMetricId::Cpu)->label, "CPU") == 0);
   CHECK(std::strcmp(smc::info(SystemMetricId::Heap)->label, "HEAP") == 0);
   CHECK(std::strcmp(smc::info(SystemMetricId::Psram)->label, "PSRM") == 0);
+  // The CPU clock: whole MHz, its chart range set per reading (the chip's
+  // top clock), any 1 MHz step a trend.
+  const smc::MetricInfo* clk = smc::info(SystemMetricId::Clk);
+  CHECK(clk && clk->id == SystemMetricId::Clk);
+  CHECK(std::strcmp(clk->label, "CLK") == 0 && std::strcmp(clk->longName, "CPU clock") == 0);
+  CHECK(std::strcmp(clk->unit, "MHz") == 0);
+  CHECK(clk->rangeLow == 0.0f && clk->rangeHigh == 0.0f);
+  CHECK(clk->trendDeadband > 0.0f && clk->trendDeadband < 1.0f);
+  CHECK(smc::changeSince(true, 400.0f, 360.0f, clk->trendDeadband).trend == -1);
+  CHECK(smc::changeSince(true, 160.0f, 400.0f, clk->trendDeadband).trend == 1);
+  CHECK(smc::changeSince(true, 400.0f, 400.0f, clk->trendDeadband).trend == 0);
   SystemMetricId id{};
   CHECK(smc::idFromLabel("heap", id) && id == SystemMetricId::Heap);
   CHECK(smc::idFromLabel("Psrm", id) && id == SystemMetricId::Psram);
+  CHECK(smc::idFromLabel("clk", id) && id == SystemMetricId::Clk);
+  CHECK(smc::idFromLabel("TEMP", id) && id == SystemMetricId::Temp);
+  CHECK(!smc::idFromLabel("CLOCK", id));
   CHECK(!smc::idFromLabel("PSRAM", id));
   CHECK(!smc::idFromLabel("CP", id));
   CHECK(!smc::idFromLabel("", id));
   CHECK(!smc::idFromLabel(nullptr, id));
-  CHECK(smc::info(static_cast<SystemMetricId>(12)) == nullptr);
+  CHECK(smc::info(static_cast<SystemMetricId>(13)) == nullptr);
 }
 
 static void historyRing() {

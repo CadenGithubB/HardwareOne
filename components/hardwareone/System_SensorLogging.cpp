@@ -2985,14 +2985,21 @@ static const SettingEntry sensorLogSettingEntries[] = {
   // Stock G2 Health panel feed (G2_HealthPush.cpp); the commands are the only writers.
   { "g2HealthPanelFeed", SETTING_BOOL, &gSettings.g2HealthPanelFeed, 1, 0, nullptr, 0, 1, "Glasses Health panel feed", nullptr, false, nullptr, "ring panel feed" },
   { "g2HealthPanelHistoryMin", SETTING_INT, &gSettings.g2HealthPanelHistoryMin, 30, 0, nullptr, 10, 1440, "Glasses Health panel history refresh (min)", nullptr, false, nullptr, "ring panel history" },
+  // Its insights page (G2_HealthInsights.cpp); the commands are the only writers.
+  { "g2HealthInsightsFeed", SETTING_BOOL, &gSettings.g2HealthInsightsFeed, 1, 0, nullptr, 0, 1, "Glasses Health insights page", nullptr, false, nullptr, "ring insights feed" },
+  { "g2HealthInsightsDays", SETTING_INT, &gSettings.g2HealthInsightsDays, 3, 0, nullptr, 1, 7, "Glasses Health insights window (days)", nullptr, false, nullptr, "ring insights days" },
 #endif
   // Stock G2 stock widget fed with system metrics (G2_StockFeed.cpp); the
   // commands are the only writers. Off by default in every build for now.
   { "g2StockFeed", SETTING_BOOL, &gSettings.g2StockFeed, 0, 0, nullptr, 0, 1, "Glasses stock widget feed (system metrics)", nullptr, false, nullptr, "g2 stats feed" },
   { "g2StockIntervalSec", SETTING_INT, &gSettings.g2StockIntervalSec, 60, 0, nullptr, 30, 3600, "Glasses stock widget feed interval (sec)", nullptr, false, nullptr, "g2 stats interval" },
-  { "g2StockMetrics", SETTING_STRING, &gSettings.g2StockMetrics, 0, 0, "CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING", 0, 0, "Glasses stock widget metrics (in order)", nullptr, false, nullptr, "g2 stats metrics" },
+  { "g2StockMetrics", SETTING_STRING, &gSettings.g2StockMetrics, 0, 0, "CPU,HEAP,PSRM,SD,LFS,CLK,LINK,MESH,RING", 0, 0, "Glasses stock widget metrics (in order)", nullptr, false, nullptr, "g2 stats metrics" },
   { "g2StockPad", SETTING_INT, &gSettings.g2StockPad, 0, 0, nullptr, 0, 1, "Glasses stock widget chart padding", "0|Gap,1|Flat", false, nullptr, "g2 stats pad" },
   { "g2StockStepSec", SETTING_INT, &gSettings.g2StockStepSec, 20, 0, nullptr, 10, 60, "Glasses stock widget chart step (sec)", "10|10 s (31 min),20|20 s (1 h 2 min),60|60 s (3 h 5 min)", false, nullptr, "g2 stats step" },
+#if ENABLE_G2_QUICKLIST
+  // G2 QuickList control rows (G2_QuickList.cpp); the command is the only writer.
+  { "g2QuickListFeed", SETTING_BOOL, &gSettings.g2QuickListFeed, 0, 0, nullptr, 0, 1, "Glasses QuickList control rows", nullptr, false, nullptr, "g2 list feed" },
+#endif
 #endif
 #if ENABLE_R1_HEALTH
   // These persisted desires are intentionally read-only in the generic

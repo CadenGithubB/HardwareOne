@@ -20,6 +20,75 @@ static const Bytes kBasicState = {
   0x32,0x08,'2','.','3','.','2','.','1','4',0x50,0x00,0x60,0x18
 };
 
+static Bytes hx(const char* h) {
+  Bytes out;
+  for (size_t i = 0; h[i] && h[i + 1]; i += 2) {
+    unsigned v = 0;
+    sscanf(h + i, "%2x", &v);
+    out.push_back((uint8_t)v);
+  }
+  return out;
+}
+
+// Silent mode on 2.3.2.14, literal captures (g2-quicklist capture-2026-11-21-silent
+// and -silent2, Even app <-> the app-services/right arm).
+static const char* kSilentOnWrite  = "080110631a0432020801";   // app write, flag 0x20; ACK echoes it
+static const char* kSilentOffWrite = "0801106f1a0432020800";
+static const char* kSilentOffAck   = "0801106f1a023200";       // the zero is left out of the ACK
+// Correlated BASIC replies (flag 0x00, f1 settingInfoType 1, both 2.3.2.14 strings).
+static const char* kBasicSilentOn =
+    "0802100522270801100f20022a08322e332e322e31343208322e332e322e3134380140325001603e7001900101";
+static const char* kBasicSilentOff =
+    "0802104122270801100f180820022a08322e332e322e31343208322e332e322e3134380140325001603e900101";
+// The glasses' own BASIC push (flag 0x01, no f1) while silent was ON: no f14.
+static const char* kBasicPushSilentOn =
+    "08021089152225100f180820022a08322e332e322e31343208322e332e322e3134380140325001603e900101";
+// Change pushes (flag 0x01, cmd 3 deviceSendInfoToApp f5{f2}); the zero is explicit.
+static const char* kSilentPushOn  = "08031083152a021001";
+static const char* kSilentPushOff = "08031086152a021000";
+
+// Auto brightness on 2.3.2.14, literal captures (capture-2026-11-21-autobright,
+// the app toggled it off then on). Unlike wear and silent, the OFF ACK echoes
+// the explicit zero; each ACK is byte-identical to its write.
+static const char* kAutoOffWrite = "080110741a040a020800";   // f3{f1{f1:0}}, flag 0x20; ACK the same
+static const char* kAutoOnWrite  = "080110751a040a020801";
+// The app's correlated full BASIC reply (flag 0x00, magic 7) with f18 = 1.
+static const char* kBasicAutoOn =
+    "0802100722270801100f180820022a08322e332e322e31343208322e332e322e31343801403250016044900101";
+// COMPUTED, not captured: the same reply with f18 left out. No full reply with
+// auto brightness OFF has been captured; HW1 reads this as off (nanopb omits
+// a zero scalar, as for f10/f14). To confirm on the device test.
+static const char* kBasicAutoOffComputed =
+    "0802100722240801100f180820022a08322e332e322e31343208322e332e322e31343801403250016044";
+// The glasses' own BASIC push (flag 0x01, no f1), captured with f18 = 1 ...
+static const char* kBasicPushAutoOn =
+    "08021089142225100f180820022a08322e332e322e31343208322e332e322e31343801403250016044900101";
+// ... and COMPUTED without f18: what such a push means is unknown (never captured).
+static const char* kBasicPushNoF18Computed =
+    "08021089142222100f180820022a08322e332e322e31343208322e332e322e31343801403250016044";
+
+// Brightness level and head-up switch on 2.3.2.14, literal captures
+// (capture-2026-11-21-brightness, Even app, right arm). Every write was ACKed
+// with the same bytes, including head-up OFF's explicit zero.
+static const char* kLevel100Write = "080110bd011a040a021064";   // f3{f1{f2: 100}}, magic 189
+static const char* kLevel2Write   = "080110b9011a040a021002";   // the slider's lowest point
+static const char* kAutoOffWriteBe = "080110be011a040a020800";  // auto OFF before the manual run
+static const char* kHeadUpOffWrite = "080110d0011a0422020800";  // f3{f4{f1: 0}}, magic 208
+static const char* kHeadUpOnWrite  = "080110d1011a0422020801";  // magic 209
+// The app's correlated full BASIC reply (flag 0x00): f2 15, f7 1 (head-up on),
+// f8 50 (angle), f10 1, f18 1.
+static const char* kBasicBrightFull =
+    "0802106222250801100f20022a08322e332e322e31343208322e332e322e31343801403250016035900101";
+// COMPUTED, not captured: the same reply with f7 left out. No full reply with
+// head-up OFF was captured; HW1 reads this as off (nanopb omits a zero
+// scalar, as for f10/f14/f18). To confirm on the device test.
+static const char* kBasicHeadUpOffComputed =
+    "0802106222230801100f20022a08322e332e322e31343208322e332e322e3134403250016035900101";
+// The glasses' own push (flag 0x01, no f1) with auto brightness off at level
+// 80: f2 = 80 (0x50), no f18.
+static const char* kBasicPushLevel80 =
+    "080210db152220105020022a08322e332e322e31343208322e332e322e31343801403250016035";
+
 static void rejectedEcho(const Bytes& input) {
   G2SettingsEcho echo;
   memset(&echo, 0xa5, sizeof(echo));
@@ -189,5 +258,163 @@ int main() {
   assert(magic == 0 && value == 1);
   assert(!g2ParseSettingEcho(nullptr, 0, &echo, &magic, &command));
   assert(!g2ParseSettingWriteAck(nullptr, 0, &magic, nullptr, nullptr, &value));
+  // ---- silent mode (2.3.2.14 captures) ----
+  for (uint32_t on : {1u, 0u}) {
+    const Bytes write = hx(on ? kSilentOnWrite : kSilentOffWrite);
+    checkBuilder(g2BuildSettingInfoWrite(42, on ? 0x63 : 0x6f, G2_SETW_F_SILENT,
+        G2_SETW_SILENT_F_SWITCH, on, wire, sizeof(wire)), wire, write);
+  }
+  {
+    uint8_t inner = 0, leaf = 0;
+    uint32_t v = 9;
+    const Bytes onAck = hx(kSilentOnWrite);   // the ON ACK is the write's own bytes
+    assert(g2ParseSettingWriteAck(onAck.data(), onAck.size(), &magic, &inner, &leaf, &v));
+    assert(magic == 0x63 && inner == G2_SETW_F_SILENT && leaf == G2_SETW_SILENT_F_SWITCH && v == 1);
+    const Bytes offAck = hx(kSilentOffAck);   // empty f6 = leaf 1 left out = off
+    v = 9;
+    assert(g2ParseSettingWriteAck(offAck.data(), offAck.size(), &magic, &inner, &leaf, &v));
+    assert(magic == 0x6f && inner == G2_SETW_F_SILENT && leaf == G2_SETW_SILENT_F_SWITCH && v == 0);
+    const Bytes explicitOff = hx(kSilentOffWrite);
+    assert(g2ParseSettingWriteAck(explicitOff.data(), explicitOff.size(), &magic, &inner, &leaf, &v));
+    assert(magic == 0x6f && inner == 6 && leaf == 1 && v == 0);
+    for (size_t end = 0; end < offAck.size(); ++end)
+      rejectedAck(Bytes(offAck.begin(), offAck.begin() + end));
+    rejectedAck(joined(offAck, {0xff}));
+    rejectedAck(joined(offAck, {0x1a,0x02,0x32,0x00}));      // two setting bodies
+    rejectedAck({0x08,0x01,0x10,0x6f,0x1a,0x04,0x32,0x00,0x2a,0x00});  // two settings in one body
+    // The change push is not a write ACK.
+    const Bytes push = hx(kSilentPushOn);
+    rejectedAck(push);
+  }
+  {
+    // Full correlated reply with silent ON: f14 = 1 (and the rest of the captured state).
+    const Bytes on = hx(kBasicSilentOn);
+    assert(g2ParseSettingEcho(on.data(), on.size(), &echo, &magic, &command));
+    assert(command == 2 && magic == 5 && G2_ECHO_HAS(echo, 1) && echo.settingInfoType == 1);
+    assert(G2_ECHO_HAS(echo, 14) && echo.silentMode == 1);
+    assert(echo.brightness == 15 && !G2_ECHO_HAS(echo, 3) && echo.xCoord == 2 && echo.headUpSwitch == 1 &&
+           echo.headUpAngle == 50 && echo.wearDetect == 1 && echo.battery == 62 && echo.autoBrightness == 1);
+    assert(g2ParseSettingVersions(on.data(), on.size(), &versions) && versions.hasLeft && versions.hasRight);
+    assert(strcmp(versions.left, "2.3.2.14") == 0 && strcmp(versions.right, "2.3.2.14") == 0);
+    // Silent OFF: the same full reply shape with f14 left out.
+    const Bytes off = hx(kBasicSilentOff);
+    assert(g2ParseSettingEcho(off.data(), off.size(), &echo, &magic, &command));
+    assert(command == 2 && magic == 0x41 && echo.settingInfoType == 1 && G2_ECHO_HAS(echo, 10));
+    assert(!G2_ECHO_HAS(echo, 14) && echo.silentMode == 0);
+    // The glasses' own push (no f1) never carries f14, even while silent is on.
+    const Bytes pushed = hx(kBasicPushSilentOn);
+    assert(g2ParseSettingEcho(pushed.data(), pushed.size(), &echo, &magic, &command));
+    assert(command == 2 && !G2_ECHO_HAS(echo, 1) && !G2_ECHO_HAS(echo, 14));
+    // None of the BASIC frames is a silent change push.
+    uint8_t flag = 9;
+    assert(!g2ParseSettingSilentMode(on.data(), on.size(), &flag));
+    assert(!g2ParseSettingSilentMode(pushed.data(), pushed.size(), &flag));
+  }
+  {
+    uint8_t flag = 9;
+    const Bytes on = hx(kSilentPushOn), off = hx(kSilentPushOff);
+    assert(g2ParseSettingSilentMode(on.data(), on.size(), &flag) && flag == 1);
+    assert(g2ParseSettingSilentMode(off.data(), off.size(), &flag) && flag == 0);
+    rejectedEcho(on);   // no f4 state body
+  }
+
+  // ---- auto brightness (2.3.2.14 captures) ----
+  for (uint32_t on : {1u, 0u}) {
+    const Bytes write = hx(on ? kAutoOnWrite : kAutoOffWrite);
+    checkBuilder(g2BuildSettingInfoWrite(42, on ? 0x75 : 0x74, G2_SETW_F_BRIGHTNESS,
+        G2_SETW_BRIGHT_F_AUTO, on, wire, sizeof(wire)), wire, write);
+  }
+  {
+    uint8_t inner = 0, leaf = 0;
+    uint32_t v = 9;
+    const Bytes onAck = hx(kAutoOnWrite);
+    assert(g2ParseSettingWriteAck(onAck.data(), onAck.size(), &magic, &inner, &leaf, &v));
+    assert(magic == 0x75 && inner == G2_SETW_F_BRIGHTNESS && leaf == G2_SETW_BRIGHT_F_AUTO && v == 1);
+    // The captured OFF ACK keeps the explicit zero.
+    const Bytes offAck = hx(kAutoOffWrite);
+    v = 9;
+    assert(g2ParseSettingWriteAck(offAck.data(), offAck.size(), &magic, &inner, &leaf, &v));
+    assert(magic == 0x74 && inner == G2_SETW_F_BRIGHTNESS && leaf == G2_SETW_BRIGHT_F_AUTO && v == 0);
+    for (size_t end = 0; end < offAck.size(); ++end)
+      rejectedAck(Bytes(offAck.begin(), offAck.begin() + end));
+    // An empty brightness body stays ambiguous (level or auto): never an ACK.
+    rejectedAck({0x08,0x01,0x10,0x74,0x1a,0x02,0x0a,0x00});
+  }
+  {
+    // Full correlated reply with auto brightness ON: f18 = 1.
+    const Bytes on = hx(kBasicAutoOn);
+    assert(g2ParseSettingEcho(on.data(), on.size(), &echo, &magic, &command));
+    assert(command == 2 && magic == 7 && G2_ECHO_HAS(echo, 1) && echo.settingInfoType == 1);
+    assert(G2_ECHO_HAS(echo, 18) && echo.autoBrightness == 1 && echo.brightness == 15 && echo.wearDetect == 1);
+    assert(g2ParseSettingVersions(on.data(), on.size(), &versions) && versions.hasLeft && versions.hasRight);
+    // Computed full reply without f18 (to confirm on the device): parsed, f18 absent.
+    const Bytes off = hx(kBasicAutoOffComputed);
+    assert(off.size() + 3 == on.size());
+    assert(g2ParseSettingEcho(off.data(), off.size(), &echo, &magic, &command));
+    assert(command == 2 && magic == 7 && echo.settingInfoType == 1 && !G2_ECHO_HAS(echo, 18) && echo.autoBrightness == 0);
+    // The glasses' own push carries f18 while on; one without it is no full reply.
+    const Bytes pushed = hx(kBasicPushAutoOn);
+    assert(g2ParseSettingEcho(pushed.data(), pushed.size(), &echo, &magic, &command));
+    assert(command == 2 && !G2_ECHO_HAS(echo, 1) && G2_ECHO_HAS(echo, 18) && echo.autoBrightness == 1);
+    const Bytes bare = hx(kBasicPushNoF18Computed);
+    assert(bare.size() + 3 == pushed.size());
+    assert(g2ParseSettingEcho(bare.data(), bare.size(), &echo, &magic, &command));
+    assert(command == 2 && !G2_ECHO_HAS(echo, 1) && !G2_ECHO_HAS(echo, 18));
+  }
+
+  // ---- brightness level and head-up switch (2.3.2.14 captures) ----
+  {
+    struct W { const char* hex; uint32_t magic; uint8_t inner, leaf; uint32_t value; };
+    const W writes[] = {
+      {kLevel100Write, 0xbd, G2_SETW_F_BRIGHTNESS, G2_SETW_BRIGHT_F_LEVEL, 100},
+      {kLevel2Write, 0xb9, G2_SETW_F_BRIGHTNESS, G2_SETW_BRIGHT_F_LEVEL, 2},
+      {kAutoOffWriteBe, 0xbe, G2_SETW_F_BRIGHTNESS, G2_SETW_BRIGHT_F_AUTO, 0},
+      {kHeadUpOffWrite, 0xd0, G2_SETW_F_HEAD_UP, G2_SETW_HEADUP_F_SWITCH, 0},
+      {kHeadUpOnWrite, 0xd1, G2_SETW_F_HEAD_UP, G2_SETW_HEADUP_F_SWITCH, 1},
+    };
+    for (const W& c : writes) {
+      const Bytes write = hx(c.hex);
+      // HW1's builder makes the app's bytes (magic aside, which is ours).
+      checkBuilder(g2BuildSettingInfoWrite(42, c.magic, c.inner, c.leaf, c.value, wire, sizeof(wire)), wire, write);
+      // The ACK is the same bytes, explicit zero included, and parses as this write.
+      uint8_t inner = 0, leaf = 0;
+      uint32_t v = 9;
+      assert(g2ParseSettingWriteAck(write.data(), write.size(), &magic, &inner, &leaf, &v));
+      assert(magic == c.magic && inner == c.inner && leaf == c.leaf && v == c.value);
+      for (size_t end = 0; end < write.size(); ++end) rejectedAck(Bytes(write.begin(), write.begin() + end));
+    }
+    // HW1's head-up builder (g2BuildHeadUpSwitch) is the same shape.
+    checkBuilder(g2BuildHeadUpSwitch(42, 0xd0, false, wire, sizeof(wire)), wire, hx(kHeadUpOffWrite));
+    checkBuilder(g2BuildHeadUpSwitch(42, 0xd1, true, wire, sizeof(wire)), wire, hx(kHeadUpOnWrite));
+    // The levels HW1's Brightness row writes, in the captured shape.
+    for (uint32_t level : {25u, 50u, 75u, 100u}) {
+      const size_t n = g2BuildSettingInfoWrite(42, 0xbd, G2_SETW_F_BRIGHTNESS, G2_SETW_BRIGHT_F_LEVEL, level,
+                                               wire, sizeof(wire));
+      Bytes want = hx(kLevel100Write);
+      want.back() = (uint8_t)level;
+      checkBuilder(n, wire, want);
+    }
+    // An empty head-up body stays ambiguous (switch or angle): never an ACK.
+    rejectedAck({0x08,0x01,0x10,0xd0,0x01,0x1a,0x02,0x22,0x00});
+  }
+  {
+    // Full correlated reply: f2 15, f7 1, f8 50, f18 1.
+    const Bytes full = hx(kBasicBrightFull);
+    assert(g2ParseSettingEcho(full.data(), full.size(), &echo, &magic, &command));
+    assert(command == 2 && magic == 0x62 && G2_ECHO_HAS(echo, 1) && echo.settingInfoType == 1);
+    assert(G2_ECHO_HAS(echo, 2) && echo.brightness == 15 && G2_ECHO_HAS(echo, 7) && echo.headUpSwitch == 1);
+    assert(echo.headUpAngle == 50 && G2_ECHO_HAS(echo, 18) && echo.autoBrightness == 1);
+    // Computed: f7 left out of a full reply (head-up off, to confirm on the device).
+    const Bytes off = hx(kBasicHeadUpOffComputed);
+    assert(off.size() + 2 == full.size());
+    assert(g2ParseSettingEcho(off.data(), off.size(), &echo, &magic, &command));
+    assert(echo.settingInfoType == 1 && !G2_ECHO_HAS(echo, 7) && echo.headUpSwitch == 0 && echo.headUpAngle == 50);
+    // The glasses' own push with auto brightness off: the level in effect, no f18.
+    const Bytes push = hx(kBasicPushLevel80);
+    assert(g2ParseSettingEcho(push.data(), push.size(), &echo, &magic, &command));
+    assert(command == 2 && !G2_ECHO_HAS(echo, 1) && echo.brightness == 80 && !G2_ECHO_HAS(echo, 18));
+    assert(G2_ECHO_HAS(echo, 7) && echo.headUpSwitch == 1);
+  }
+
   puts("G2 settings: golden codecs, exact read/write bytes, presence, strict ACKs, full-frame bounds and truncation passed");
 }

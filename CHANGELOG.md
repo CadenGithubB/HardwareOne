@@ -14,6 +14,18 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Added
+- The G2 glasses' Health panel insights page (its second page, glasses firmware 2.3.2.14) shows
+  up to three lines from R1 ring history over the most recent days with data (`ring insights days`,
+  1-7, default 3): heart rate range and average with HRV under the same icon, steps per complete day
+  (today left out), and sleep per night, or SpO2 when there is no sleep; a note ("Averages of the past 3 days")
+  ends the last line under two blank rows. With no history it shows the
+  glasses' own "gathering insights". Sent to the right temple after the Health panel snapshot on
+  each connect and when the lines change (at most once a minute), one retry without an echo, paused
+  during voice sessions and QuickNote; it runs while `ring panel feed` is on. New commands
+  `ring insights status`, `ring insights preview` and (admin) `ring insights send`,
+  `ring insights feed [on|off]`, `ring insights days [1-7]`; settings `g2HealthInsightsFeed` (on by
+  default) and `g2HealthInsightsDays` (default 3). The message is the phone's captured layout (cmd 4,
+  at most three items); host-tested against the capture, not yet run from the firmware on the glasses.
 - A sensor that switched itself off after repeated I2C errors is started again by itself when its
   `<x>enabled` and `<x>autostart` are both on: after 30 s, 2 min, 10 min, then every 30 min. Five
   minutes of clean running reset the waits. `close<x>`, `<x>enabled 0` or `<x>autostart 0` end it;
@@ -34,12 +46,80 @@ everything user-visible since the v0.99.99.1 tag.
   New commands `g2 stats status`, `g2 stats preview`, and (admin) `g2 stats send`,
   `g2 stats feed [on|off]`, `g2 stats metrics <labels|default>`, `g2 stats interval <seconds>`;
   settings `g2StockFeed` (off by default in every build), `g2StockMetrics` (default
-  `CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING`) and `g2StockIntervalSec` (default 60, 30-3600). The
+  `CPU,HEAP,PSRM,SD,LFS,CLK,LINK,MESH,RING`) and `g2StockIntervalSec` (default 60, 30-3600). The
   feed writes the right temple only: a full set after every connect, then on change at most once
   per interval, every 10 s while the glasses report the expanded stock page open (until they report
   it closed or 90 s pass without a page update), paused during voice sessions and QuickNote, each
   stock acked by its magic before the next, one retry; feed off clears the widget. Encoder byte-exact against the Even app's messages (test fixtures); host-tested, not
   yet run on the glasses.
+- A CPU clock metric, `CLK` (MHz, read from the clock registers each sample; chart 0 to the chip's
+  top clock: 400 on the P4, 240 on the ESP32/S3, 160 on the C6), shows a power-mode change on the
+  glasses' stock widget. It takes `TEMP`'s place in the stock widget's default list; `TEMP` can
+  still be chosen with `g2 stats metrics`. A saved list equal to the earlier default reads as the new
+  default (choosing that list again keeps it); any other saved list is kept. Host-tested; not yet
+  run on the glasses.
+- A "Wear Detection: On/Off" row in the G2 glasses' own QuickList (glasses firmware 2.3.2.14, both
+  temples): tick it and leave the list, and HardwareOne switches wear detection, reads it back and
+  replaces the row with the new state (at most one switch every 5 s). New commands
+  `g2 list status` and (admin) `g2 list preview`, `g2 list push`, `g2 list feed [on|off]`; setting
+  `g2QuickListFeed` (off by default); build switch `ENABLE_G2_QUICKLIST` (on in builds with the
+  glasses). HardwareOne sends nothing on `g2 list feed off`, so the last list stays on the
+  glasses. Host-tested; protocol captured on 2.3.2.14.
+- A second QuickList row, "Silent Mode: On/Off" (same feed and `g2 list push`): read from the same
+  fresh settings read (2.3.2.14 reports silent mode as BASIC f14), switched by a tick, and updated
+  when silent mode changes on the glasses or in the Even app. `g2glasses silent on|off` is now
+  allowed on the 2.3.2.14 pair and confirmed by that read-back; `g2glasses` shows silent on/off
+  there. New `g2glasses help` lists each setting; `y`/`x` give the captured ranges (height 0-12,
+  distance 0-2). Host-tested; the silent row (list index 1) is not yet checked on the lens.
+- A third QuickList row, "Auto Brightness: On/Off" (list index 2, same feed, read and tick handling;
+  read back as BASIC f18). `g2glasses autobright on|off` is now allowed on the 2.3.2.14 pair and
+  confirmed by that read-back. Host-tested; the row and
+  the "off" read-back (f18 left out of a full reply) are not yet checked on the glasses.
+- Two more QuickList rows (same feed, `g2 list push` and tick handling; glasses firmware 2.3.2.14).
+  "Head-Up Display: On/Off" (list index 3, uid 0x48310004) switches the head-up display with the
+  captured write `f3{f4{f1}}` (its ACK keeps an explicit zero) and reads it back as BASIC f7.
+  "Brightness: Auto", "Brightness: 25%" ... "100%" or the level the glasses hold, e.g. "60%"
+  (list index 4, uid 0x48310005): a tick with auto brightness on turns it off, waits for the ACK
+  and writes level 25 in the same job (no level write when that ACK does not come; the read-back then still checks auto brightness); with it off it
+  writes the next of 25, 50, 75, 100 (100 goes back to 25). The read-back confirms the level (BASIC
+  f2; the glasses keep only even levels, so 25 reads back 24 and 75 reads back 74, which counts as
+  confirmed, shows as "25%"/"75%" and steps on to 50/100) and, when it was turned off, auto brightness, and both brightness rows are re-sent with the
+  read values; an Auto Brightness tick now refreshes the Brightness row too (off shows the level
+  auto brightness last chose). HardwareOne writes only the levels 25, 50, 75 and 100 from the
+  QuickList. `g2glasses headup on|off` and `g2glasses brightness <2-100>` are now allowed on the
+  2.3.2.14 pair and confirmed by the read-back (an odd level read back one lower reports "stored as
+  <level-1> (the glasses keep even levels)"; the head-up angle stays refused there). A full
+  settings read on 2.3.2.14 that leaves f7 out now reads as head-up off, as for f18 (to confirm on
+  the glasses). The QuickList job backstop is 30 s (was 25 s) for the two-write Brightness job,
+  and `g2 list status` (now up to about 2.5 KB) has a 4 KB reply buffer in PSRAM. Host-tested; the
+  two rows are not yet checked on the lens.
+- QuickList settings reads wait up to 1 s for the glasses' reply and resend the same captured read
+  up to twice, so one slow reply no longer turns the rows into "?" (a write still sends nothing when
+  its first read gets no answer). Rows left at "?" are read again after 2 s, 5 s, 15 s, 30 s, then
+  every 60 s while the feed is on (or after `g2 list push`) and no voice or QuickNote session runs;
+  a re-read that fails changes nothing on the lens, one that succeeds re-sends only the rows whose
+  state changed, and it does not count toward the 5 s switch limit. `g2 list status` shows the settings reads (unanswered, answered only after a resend, the last
+  one's attempts, reply time and other settings frames during its wait) and the next re-read. Bare
+  `g2glasses` and `g2glasses refresh` use the same read; the `g2glasses` writes wait 1 s for their
+  reads without resending. A QuickList switch now reads its setting back 0.5 s after the write and,
+  only if that still shows the old state, once more 1.5 s later (`g2 list status`: "readback on after
+  recheck"); the glasses answered a read-back 0.14 s after a silent write with the old state.
+  Host-tested; not yet run on the glasses.
+- QuickList rows keep a fixed order on the lens, top to bottom: Wear Detection, Silent Mode, Auto
+  Brightness, Head-Up Display, Brightness. The 2.3.2.14 lens moved a row whose text changed to the
+  top when it was sent on its own, so every update now sends the whole list in one message (the Even
+  app's own list update, cmd 2 FULL_UPDATE): all five rows with their current text, in that order.
+  It replaces the glasses' list as a whole, so items added in the Even app are removed from the lens.
+  The glasses acknowledge the list once; ticks keep working on it (both checked on the owner's
+  glasses with the same bytes). A failed send or an acknowledgement missing for 1 s (counted from
+  when the send went out) sends the list again after 1 s, unless the late acknowledgement still
+  comes first; after three failures in a row the settings are read again after 2 s, 5 s, 15 s,
+  30 s, then every minute (same holds as the "?" re-reads), and each answered read sends the list
+  again until one is acknowledged. A re-read that changes nothing otherwise still sends nothing.
+  `g2 list status` shows the list updates (sent, acknowledged, retries, given up; the last one's
+  reason, size and acknowledgement time, and "the lens may be stale" while a resend waits), and
+  `g2 list preview` shows the next update's bytes. Sending stops when the glasses reject a switch
+  write as another firmware. Host-tested; this firmware's own sends not yet run on the glasses.
 - Mesh workers follow their master's radio channel. Every heartbeat now states its sender's channel
   (byte 3, which older firmware sends as 0 and ignores). A worker on `espnowchannel auto` uses the
   channel its master last announced, remembered across reboots (setting `masterChannel`, read-only).

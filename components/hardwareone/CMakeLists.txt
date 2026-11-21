@@ -174,7 +174,9 @@ set(hardwareone_srcs
         G2_ImageViewers.cpp
         G2_NativeNotes.cpp
         G2_HealthPush.cpp
+        G2_HealthInsights.cpp
         G2_StockFeed.cpp
+        G2_QuickList.cpp
         G2_Ring.cpp
         BLE_CentralTx.cpp
         BLE_CentralCoordinator.cpp

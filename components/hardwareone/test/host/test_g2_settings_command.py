@@ -31,21 +31,25 @@ def main():
         'static bool g2TempleTransportAtGeneration(',
         'bool isG2Connected(',
         'static uint8_t g2NextSettingsMagic(',
-        'static void g2SettingsEchoPublish(',
+        'static bool g2SettingsEchoPublish(',
         'static bool g2SettingsEchoSnapshot(',
         'static void g2SettingsEchoInvalidateFreshness(',
         'static void g2SettingsAckArm(',
         'static void g2SettingsAckClear(',
         'static void g2SettingsAckPublish(',
         'static bool g2SettingsAckSnapshot(',
+        'static void g2SettingsReadNoteFrame(',
         'static bool g2SettingsReceive(',
         'static bool sendEnvelopeNoMutex(',
         'static bool sendEnvelopeExactGeneration(',
         'static bool g2GlassesEchoValue(',
+        'static bool g2SettingsReadFreshEx(',
         'static bool g2SettingsReadFresh(',
+        'static bool g2SettingsReadFreshRetried(',
         'static void g2SettingsPrimeIfNeeded(',
         'static bool g2SettingsFirmwareKnown(',
         'static bool g2BothFirmwareExact(',
+        'static bool g2GlassesHasReadback(',
         'static const char* cmd_g2glasses(',
     )]
     # cmd_g2glasses reads on/off with the shared argument helpers.
@@ -61,10 +65,17 @@ def main():
     # (The sixth is the stock widget feed's version query, g2StockFeedRequestFirmware.)
     assert len(basic_calls) == 6
     assert sum('g2NextSettingsMagic()' in call for call in basic_calls) == 5
+    # The G2_QuickList boundary (typed settings read and the row writes)
+    # runs on the same simulated glasses; its link state comes from G2_QuickList.h.
+    begin = owner.index('#if ENABLE_G2_QUICKLIST\n// QuickList row boundary')
+    end = owner.index('#endif  // ENABLE_G2_QUICKLIST', begin)
+    quicklist = owner[begin:end].replace('#if ENABLE_G2_QUICKLIST\n', '', 1)
+    link_state = extract_block((COMPONENT / 'G2_QuickList.h').read_text(), 'struct G2QuickListLinkState') + ';\n'
     template = (HERE / 'g2_settings_command_harness.cpp').read_text()
     source = template.replace('// INSERT_PROTOCOL', header + '\n' + protocol)
     source = source.replace('// INSERT_TYPES_STATE', types + '\n' + state)
     source = source.replace('// INSERT_OWNER', '\n\n'.join(functions))
+    source = source.replace('// INSERT_QUICKLIST', link_state + '\n' + quicklist)
     with tempfile.TemporaryDirectory(prefix='hw1-g2-settings-command-') as tmp:
         unit = Path(tmp) / 'test.cpp'
         unit.write_text(source)

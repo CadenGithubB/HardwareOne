@@ -28,11 +28,12 @@ enum class SystemMetricId : uint8_t {
   Links = 9,   // C6 companion BLE links in use (range high = the limit)
   Mesh = 10,   // ESP-NOW peers with an active session (range high = paired)
   Ring = 11,   // R1 ring battery (cached telemetry)
+  Clk = 12,    // CPU clock in MHz (range high = the chip's top clock)
 };
 
 namespace system_metrics_core {
 
-inline constexpr size_t kMetricCount = 12;
+inline constexpr size_t kMetricCount = 13;
 // History: one point per metric every history step on the sampler's own
 // clock, whatever the consumers' intervals. kHistoryLen points (the glasses'
 // stock chart takes at most 185), so the window is kHistoryLen x step: 10 s
@@ -100,6 +101,8 @@ inline constexpr MetricInfo kMetrics[kMetricCount] = {
     {SystemMetricId::Links, "LINK", "BLE links in use", "links", 0.0f, 0.0f, 0.0f},
     {SystemMetricId::Mesh, "MESH", "ESP-NOW peers up", "peers", 0.0f, 0.0f, 0.0f},
     {SystemMetricId::Ring, "RING", "R1 ring battery", "%", 0.0f, 100.0f, 0.0f},
+    // Whole MHz: any step of the clock (a power mode change) reads as up/down.
+    {SystemMetricId::Clk, "CLK", "CPU clock", "MHz", 0.0f, 0.0f, 0.5f},
 };
 
 inline constexpr size_t index(SystemMetricId id) { return static_cast<size_t>(id); }

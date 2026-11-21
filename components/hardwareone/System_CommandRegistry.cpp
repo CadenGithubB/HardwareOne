@@ -763,6 +763,13 @@ static constexpr CommandModule gCommandModules[] = {
     "the chart is the last 185 points (kept while the glasses are away), one every g2 stats step "
     "[10|20|60] seconds (admin, saved; default 20, about an hour; a change starts the chart over), "
     "and g2 stats pad [gap|flat] (admin, saved) fills its left part until the window is full. "
+    "The glasses' QuickList can carry Wear Detection, Silent Mode, Auto Brightness, Head-Up Display "
+    "and Brightness rows (firmware 2.3.2.14): g2 list "
+    "status shows them; g2 list feed [on|off] (admin, saved, off by default) sends them after each "
+    "connect, g2 list push (admin) sends them now, each time replacing the glasses' whole list (items "
+    "added in the Even app are removed), g2 list preview (admin) shows their bytes; ticking a "
+    "row and leaving the list switches that setting (Brightness turns auto brightness off and steps "
+    "through 25, 50, 75 and 100 percent). "
     "The remaining g2* commands are low-level protocol probes and "
     "diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).", g2Commands,           &g2CommandsCount, 0, nullptr },
   { "ring",       "Even R1 ring link, health and controls", "The Even R1 smart ring over BLE, through a serialized, "
@@ -777,7 +784,11 @@ static constexpr CommandModule gCommandModules[] = {
     "refresh reads low power back. The G2's own Health panel is fed the way the Even app feeds it: "
     "ring panel status and ring panel preview [test] show the snapshot and its bytes; ring panel send "
     "[test] (admin) sends one; ring panel feed [on|off] (admin) feeds it automatically, saved and on by default, refreshing ring history every "
-    "ring panel history [minutes] (admin, default 30).", g2RingCommands, &g2RingCommandsCount, 0, nullptr },
+    "ring panel history [minutes] (admin, default 30). Its insights page gets up to three lines from "
+    "ring history (heart rate and HRV, steps, sleep or SpO2): ring insights status and ring insights "
+    "preview show them and their bytes; ring insights send (admin) sends them; ring insights feed "
+    "[on|off] (admin, saved, on by default, runs with the panel feed) and ring insights days [1-7] "
+    "(admin, default 3) set the feed and its window.", g2RingCommands, &g2RingCommandsCount, 0, nullptr },
 #endif
 #if ENABLE_LLM_BACKEND
   { "llm",        "On-device LLM text generation", "On-device large language model that runs a quantized model file entirely on the "

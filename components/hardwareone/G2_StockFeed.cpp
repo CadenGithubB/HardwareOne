@@ -142,10 +142,7 @@ sf::Selection selection() {
   s = sStatus.selection;
   portEXIT_CRITICAL(&sStatusMux);
   if (loaded) return s;
-  s = sf::defaultSelection();
-  char err[48];
-  if (!sf::parseMetricList(gSettings.g2StockMetrics.c_str(), s, err, sizeof err))
-    s = sf::defaultSelection();
+  s = sf::savedSelection(gSettings.g2StockMetrics.c_str());
   portENTER_CRITICAL(&sStatusMux);
   if (!sStatus.selectionLoaded) {
     sStatus.selection = s;
@@ -416,7 +413,7 @@ bool sendClear(Scratch& sc, uint32_t generation, uint32_t now) {
   return ok;
 }
 
-constexpr char kAvailableLabels[] = "CPU CPU0 CPU1 HEAP HBLK PSRM SD LFS TEMP LINK MESH RING";
+constexpr char kAvailableLabels[] = "CPU CPU0 CPU1 HEAP HBLK PSRM SD LFS TEMP LINK MESH RING CLK";
 constexpr char kNoPsram[] = "Error: No PSRAM for the stock widget feed (it needs about 4.5 KB)";
 
 }  // namespace
@@ -886,10 +883,12 @@ const char* cmd_g2statsmetrics(const String& args) {
   }
   char list[64];
   sf::formatMetricList(sel, list, sizeof list);
+  char saved[64];
+  sf::formatSavedMetricList(sel, saved, sizeof saved);
   // Publish before saving: once a selection is published the G2 task never
   // reads the settings string, so it cannot read it while setSetting writes.
   publishSelection(sel);
-  setSetting(gSettings.g2StockMetrics, list);
+  setSetting(gSettings.g2StockMetrics, saved);
   sResync.store(true, std::memory_order_release);
   if (feedOn()) g2StockFeedWake();
   snprintf(sReply, sizeof sReply, "Stock widget metrics: %s (saved)%s", list,

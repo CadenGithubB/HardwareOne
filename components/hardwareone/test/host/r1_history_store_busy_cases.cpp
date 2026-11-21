@@ -51,6 +51,12 @@ static void busyLoadIsNeitherAbsentNorFailed() {
   released();
   check(operations.empty() && fsBlockingWaitsWhileBusy == 0, "the busy load touches nothing and does not wait");
   check(status().error == R1_HISTORY_STORE_OK && status().fsBusyDeferrals == 1, "BUSY is counted and never becomes the store's error");
+  fsHeldElsewhere = true;
+  check(r1HealthHistoryStoreLoadExact(day.peerId, day.dayStart, day.timezoneMinutes, loaded, false) == R1_HISTORY_STORE_BUSY,
+        "a quiet load answers BUSY too");
+  released();
+  check(status().fsBusyDeferrals == 1, "a quiet (read-only consumer) load does not count the store's deferrals");
+  fsHeldElsewhere = false;
   check(std::string(r1HealthHistoryStoreErrorName(R1_HISTORY_STORE_BUSY)) == "busy", "BUSY has its own name");
   check(loaded.dayStart == 0, "the output day is cleared");
   fsHeldElsewhere = false;

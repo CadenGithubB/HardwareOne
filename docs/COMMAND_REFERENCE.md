@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1036 commands across 59 modules (1036 registry entries).
+1045 commands across 59 modules (1045 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -67,8 +67,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`cm5`](#cm5) — 15 commands
 - [`ota`](#ota) — 9 commands
 - [`setpattern`](#setpattern) — 1 commands
-- [`even_g2`](#even-g2) — 64 commands
-- [`ring`](#ring) — 17 commands
+- [`even_g2`](#even-g2) — 68 commands
+- [`ring`](#ring) — 22 commands
 - [`llm`](#llm) — 36 commands
 - [`settingsedit`](#settingsedit) — 76 commands
 
@@ -1312,14 +1312,18 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 
 ## even_g2
 
-> This subsystem drives Even Reality G2 smart glasses in the Glasses mode (blemode client or glasses: the glasses, plus the phone link whenever a phone secret is set, with the app console on that link); the two temples are addressed as left/right/auto. openg2 starts scan-and-connect IN THE BACKGROUND and returns immediately -- it does not block, so poll g2status (or g2info for firmware/MAC/battery) to see when the link is up, and nearly every other command here requires that connection first. Display commands render to the lens: g2show prints text, g2ai/g2ainoask/g2aidirect push a front-pane AI answer card through the EvenAI pipeline, g2bmp shows a BMP file, and g2sensors/g2network/g2files/g2settingspage show built-in info pages; g2nav [on|off] enables menu-navigation mode and g2clear blanks the display. For audio, use the shared Microphone controls: micsource selects auto, pdm or g2; openmic/closemic start and stop the selected source; micrecord controls WAV recording. g2micon/g2micoff are low-level stream probes; g2micrec and g2micwav remain SD-backed raw-LC3 and decoded-WAV diagnostics. closeg2 disconnects but keeps the GATT cache for fast reconnect; closeg2 full also frees the cache to recover about 30 KB. The glasses' own stock widget can show system metrics instead of share prices: g2 stats status and g2 stats preview show the rows and bytes; g2 stats send (admin) sends one batch; g2 stats feed [on|off] (admin, saved, off by default) feeds it on change, g2 stats metrics <labels> and g2 stats interval <seconds> (admin, saved) choose what and how often; the chart is the last 185 points (kept while the glasses are away), one every g2 stats step [10|20|60] seconds (admin, saved; default 20, about an hour; a change starts the chart over), and g2 stats pad [gap|flat] (admin, saved) fills its left part until the window is full. The remaining g2* commands are low-level protocol probes and diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).
+> This subsystem drives Even Reality G2 smart glasses in the Glasses mode (blemode client or glasses: the glasses, plus the phone link whenever a phone secret is set, with the app console on that link); the two temples are addressed as left/right/auto. openg2 starts scan-and-connect IN THE BACKGROUND and returns immediately -- it does not block, so poll g2status (or g2info for firmware/MAC/battery) to see when the link is up, and nearly every other command here requires that connection first. Display commands render to the lens: g2show prints text, g2ai/g2ainoask/g2aidirect push a front-pane AI answer card through the EvenAI pipeline, g2bmp shows a BMP file, and g2sensors/g2network/g2files/g2settingspage show built-in info pages; g2nav [on|off] enables menu-navigation mode and g2clear blanks the display. For audio, use the shared Microphone controls: micsource selects auto, pdm or g2; openmic/closemic start and stop the selected source; micrecord controls WAV recording. g2micon/g2micoff are low-level stream probes; g2micrec and g2micwav remain SD-backed raw-LC3 and decoded-WAV diagnostics. closeg2 disconnects but keeps the GATT cache for fast reconnect; closeg2 full also frees the cache to recover about 30 KB. The glasses' own stock widget can show system metrics instead of share prices: g2 stats status and g2 stats preview show the rows and bytes; g2 stats send (admin) sends one batch; g2 stats feed [on|off] (admin, saved, off by default) feeds it on change, g2 stats metrics <labels> and g2 stats interval <seconds> (admin, saved) choose what and how often; the chart is the last 185 points (kept while the glasses are away), one every g2 stats step [10|20|60] seconds (admin, saved; default 20, about an hour; a change starts the chart over), and g2 stats pad [gap|flat] (admin, saved) fills its left part until the window is full. The glasses' QuickList can carry Wear Detection, Silent Mode, Auto Brightness, Head-Up Display and Brightness rows (firmware 2.3.2.14): g2 list status shows them; g2 list feed [on|off] (admin, saved, off by default) sends them after each connect, g2 list push (admin) sends them now, each time replacing the glasses' whole list (items added in the Even app are removed), g2 list preview (admin) shows their bytes; ticking a row and leaving the list switches that setting (Brightness turns auto brightness off and steps through 25, 50, 75 and 100 percent). The remaining g2* commands are low-level protocol probes and diagnostics (g2probe, g2protostats, g2devcfg, g2dumpframes).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `closeg2` | A | Close the G2 glasses: drop both links and release the glasses runtime (ring, phone and Bluetooth stay up). |
+| `g2 list feed` | A | Replace the glasses' QuickList with Wear Detection, Silent Mode, Auto Brightness, Head-Up Display and Brightness rows after each connect (saved; off by default).<br/>`Usage: g2 list feed [on\|off]` |
+| `g2 list preview` | A | Show the next QuickList rows' bytes without sending.<br/>`Usage: g2 list preview` |
+| `g2 list push` | A | Read the glasses' settings and replace their QuickList with the five control rows now (items added in the Even app are removed).<br/>`Usage: g2 list push (both temples, glasses firmware 2.3.2.14)` |
+| `g2 list status` |  | QuickList rows (wear detection, silent mode, auto brightness, head-up display, brightness): feed, row text, ticks and writes. |
 | `g2 stats feed` | A | Feed the stock widget with system metrics (saved; off by default).<br/>`Usage: g2 stats feed [on\|off] (off clears the widget)` |
 | `g2 stats interval` | A | How often the stock widget feed may send changed values (saved).<br/>`Usage: g2 stats interval [seconds 30-3600] (default 60; 10 s while the stock page is open)` |
-| `g2 stats metrics` | A | Which metrics the stock widget shows, in order (saved).<br/>`Usage: g2 stats metrics [label,label,...\|default] (up to 9 of CPU CPU0 CPU1 HEAP HBLK PSRM SD LFS TEMP LINK MESH RING; default CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING)` |
+| `g2 stats metrics` | A | Which metrics the stock widget shows, in order (saved).<br/>`Usage: g2 stats metrics [label,label,...\|default] (up to 9 of CPU CPU0 CPU1 HEAP HBLK PSRM SD LFS TEMP LINK MESH RING CLK; default CPU,HEAP,PSRM,SD,LFS,CLK,LINK,MESH,RING)` |
 | `g2 stats pad` | A | How the stock chart's left part is filled before its 185 points exist (saved).<br/>`Usage: g2 stats pad [gap\|flat] (default gap: empty; flat: the oldest point repeated)` |
 | `g2 stats preview` |  | Show the stock rows and the first message's bytes without sending.<br/>`Usage: g2 stats preview` |
 | `g2 stats send` | A | Send one batch of the saved metrics to the stock widget now.<br/>`Usage: g2 stats send (right temple, glasses firmware 2.3.2.14)` |
@@ -1341,7 +1345,7 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 | `g2envgap` | A | Image inter-envelope gap override: g2envgap [<5..500>\|auto] (bare = report)<br/>`Usage: g2envgap [<5..500>\|auto] (runtime only; bare = report)` |
 | `g2evenai` |  | Push into the matching live Hey-Even exchange (strict 16-hex ID required)<br/>`Usage: g2evenai <askid\|replyid\|replypartid\|replyendid\|exitid> <16hex-id> [text] status: show active exchange ID/arm/generation capabilities: show guarded command contract replypartid: stream one delta (leading glue preserved) legacy ask/reply/replypart/replyend/exit fail closed; use g2ai for deliberate bench cards` |
 | `g2files` |  | Show Files browser page on the G2 lens |
-| `g2glasses` | A | Change glasses-device settings (including capture-proven HeadUp on fw 2.2.6.10)<br/>`Usage: g2glasses [show\|refresh] \| g2glasses <brightness\|autobright\|weardetect\|x\|y\|headup\|headangle\|silent\|unitformat\|distunit\|timeformat\|dateformat\|tempunit> [value]` |
+| `g2glasses` | A | Change glasses-device settings (including capture-proven HeadUp on fw 2.2.6.10 and 2.3.2.14)<br/>`Usage: g2glasses [show\|refresh\|help] \| g2glasses <brightness\|autobright\|weardetect\|x\|y\|headup\|headangle\|silent\|unitformat\|distunit\|timeformat\|dateformat\|tempunit> [value]` |
 | `g2health` |  | Open the Health (R1 vitals + graphs) app on the G2 lens<br/>`Usage: g2health (Overview/HR/HRV/SpO2/Battery on the lens; Back to exit)` |
 | `g2hijacktest` |  | Simulate a Blocks tap (status-page hijack) |
 | `g2hold` |  | Long-press (hold) input: firmware profile, pairing, routes and last 16 hold records<br/>`Usage: g2hold [status\|clear\|sim <press [ring\|right\|left\|unknown]\|release\|abort>] bare = status; clear empties the record ring and counters sim (admin; press only by the paired wearer): synthetic right-arm hold through the real pairing and dispatcher (default source ring)` |
@@ -1365,7 +1369,7 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 | `g2notifenable` | A | Prime native notifications on sid 0x04 (enable + whitelist-disable) before g2nativenotify<br/>`Usage: g2notifenable (sends NOTIF_CTRL enable + WHITELIST_CTRL disable to the right arm)` |
 | `g2notify` |  | Transient text (placeholder): g2notify [secs] <text><br/>`Usage: g2notify [<seconds>] <text> (seconds 1..599, default 5)` |
 | `g2packrate` |  | SD-pack animation cadence: g2packrate [<ms>] (range 20..2000, default 80)<br/>`Usage: g2packrate [<ms>] (20..2000; bare = report)` |
-| `g2probe` |  | Fire arbitrary pb cmd on non-mutation sids: g2probe <sid_hex> <cmd_dec> [body_hex]<br/>`Usage: g2probe <sid_hex> <cmd_dec> [body_hex] (sids 01/03/04/09/80 blocked)` |
+| `g2probe` |  | Fire arbitrary pb cmd on non-mutation sids: g2probe <sid_hex> <cmd_dec> [body_hex] [R\|L]<br/>`Usage: g2probe <sid_hex> <cmd_dec> [body_hex] [R\|L] (R/L forces a temple; sids 01/03/04/09/80 blocked)` |
 | `g2protostats` |  | Show G2 protocol stats per sid: g2protostats [verbose]<br/>`Usage: g2protostats [verbose]` |
 | `g2recover` |  | Try to reconnect a missing G2 temple without tearing down the connected one |
 | `g2reopen` |  | Re-open the hijacked Blocks app after an abnormal exit |
@@ -1383,18 +1387,23 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 
 ## ring
 
-> The Even R1 smart ring over BLE, through a serialized, profile-gated transaction owner. ring scan [seconds] finds it and openring [saved|reconnect|<mac>] connects (scanning first when no argument is given); ring status [json] shows the link and closering ends it. ring health [json] reads vitals, ring controls and typed history; ring poll refreshes the vitals and ring history the history (ring history force, admin, skips the freshness window). ring query requests one reading; its raw form is admin-only, confirms every SET and refuses user-profile writes. ring control <collection|lowpower> <preserve|on|off> (admin) saves a desired state applied asynchronously, which the OLED and web Health controls also use; ring control refresh reads low power back. The G2's own Health panel is fed the way the Even app feeds it: ring panel status and ring panel preview [test] show the snapshot and its bytes; ring panel send [test] (admin) sends one; ring panel feed [on|off] (admin) feeds it automatically, saved and on by default, refreshing ring history every ring panel history [minutes] (admin, default 30).
+> The Even R1 smart ring over BLE, through a serialized, profile-gated transaction owner. ring scan [seconds] finds it and openring [saved|reconnect|<mac>] connects (scanning first when no argument is given); ring status [json] shows the link and closering ends it. ring health [json] reads vitals, ring controls and typed history; ring poll refreshes the vitals and ring history the history (ring history force, admin, skips the freshness window). ring query requests one reading; its raw form is admin-only, confirms every SET and refuses user-profile writes. ring control <collection|lowpower> <preserve|on|off> (admin) saves a desired state applied asynchronously, which the OLED and web Health controls also use; ring control refresh reads low power back. The G2's own Health panel is fed the way the Even app feeds it: ring panel status and ring panel preview [test] show the snapshot and its bytes; ring panel send [test] (admin) sends one; ring panel feed [on|off] (admin) feeds it automatically, saved and on by default, refreshing ring history every ring panel history [minutes] (admin, default 30). Its insights page gets up to three lines from ring history (heart rate and HRV, steps, sleep or SpO2): ring insights status and ring insights preview show them and their bytes; ring insights send (admin) sends them; ring insights feed [on|off] (admin, saved, on by default, runs with the panel feed) and ring insights days [1-7] (admin, default 3) set the feed and its window.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `closering` | A | Close the R1 ring: drop its link and release its owner task (glasses, phone and Bluetooth stay up). |
 | `openring` | A | Open the R1 ring on the Bluetooth client stack and connect (scan, the saved address, reconnect, or a MAC).<br/>`Usage: openring [saved\|reconnect\|<mac>] (none = scan then connect; saved = the saved address; reconnect = drop, settle, connect)` |
-| `ring` |  | Even R1 ring.<br/>`Usage: ring <status\|scan\|health\|poll\|history\|query\|control\|panel> (openring / closering connect and disconnect)` |
+| `ring` |  | Even R1 ring.<br/>`Usage: ring <status\|scan\|health\|poll\|history\|query\|control\|panel\|insights> (openring / closering connect and disconnect)` |
 | `ring control` | A | Set the ring's health collection or low power.<br/>`Usage: ring control <collection\|lowpower> <preserve\|on\|off> (saved, applied asynchronously; ring health shows desired/observed)` |
 | `ring control refresh` |  | Read the ring's low-power state back. |
 | `ring health` |  | R1 vitals, ring controls and typed history. (add 'json' for JSON output) |
 | `ring history` |  | Refresh R1 typed history. |
 | `ring history force` | A | Refresh R1 typed history past the freshness window. |
+| `ring insights days` | A | Days of ring history the insights cover (saved).<br/>`Usage: ring insights days [1-7] (default 3; the most recent days with data)` |
+| `ring insights feed` | A | Fill the Health panel's insights page from ring history (saved; on by default, runs with ring panel feed).<br/>`Usage: ring insights feed [on\|off]` |
+| `ring insights preview` |  | Show the insight lines and their bytes without sending.<br/>`Usage: ring insights preview` |
+| `ring insights send` | A | Send the insight lines to the glasses' Health panel now.<br/>`Usage: ring insights send` |
+| `ring insights status` |  | Glasses Health insights: state, window, current lines, last send and echo. |
 | `ring panel feed` | A | Feed the glasses' Health panel from the ring (saved; on by default).<br/>`Usage: ring panel feed [on\|off]` |
 | `ring panel history` | A | How often the feed refreshes ring history (steps, kcal, sleep).<br/>`Usage: ring panel history [minutes 10-1440] (default 30)` |
 | `ring panel preview` |  | Show the snapshot and its bytes without sending.<br/>`Usage: ring panel preview [test]` |

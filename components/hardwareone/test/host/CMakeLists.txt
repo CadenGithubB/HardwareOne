@@ -420,6 +420,15 @@ set_target_properties(g2_health_push_core_tests PROPERTIES
 target_compile_options(g2_health_push_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# Health panel insights page (sid 0x0E cmd 4): golden encode against the phone
+# capture, two-byte varint lengths, the 3-item cap, the no-insights message,
+# strict whitelist, ACK parse, and the ring-history aggregation and text layout.
+add_executable(g2_health_insights_core_tests test_g2_health_insights_core.cpp)
+set_target_properties(g2_health_insights_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(g2_health_insights_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 # Shared glasses dashboard-feed policy (Health panel, stock widget): gates,
 # settle, send on change, ack timeout + retry, multi-message units, counters.
 add_executable(g2_feed_core_tests test_g2_feed_core.cpp)
@@ -437,6 +446,17 @@ add_executable(g2_stock_feed_core_tests test_g2_stock_feed_core.cpp)
 set_target_properties(g2_stock_feed_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_compile_options(g2_stock_feed_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
+# QuickList control rows (wear detection, silent mode, auto brightness, head-up
+# display, brightness): FULL_UPDATE bytes and whitelist, ACK and tick-report
+# parsing against the 2.3.2.14 captures, the push/retry/give-up policy, dedup,
+# rate limit, the apply/refresh policy, the Brightness step and write
+# whitelist, and silent change-push coalescing.
+add_executable(g2_quicklist_core_tests test_g2_quicklist_core.cpp)
+set_target_properties(g2_quicklist_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(g2_quicklist_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
 # Bounds-safe bit operations shared by the notification policy and OLED. The
@@ -701,6 +721,10 @@ if(HW1_SANITIZE)
     -fsanitize=address,undefined -g)
   target_link_options(g2_health_push_core_tests PRIVATE
     -fsanitize=address,undefined)
+  target_compile_options(g2_health_insights_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(g2_health_insights_core_tests PRIVATE
+    -fsanitize=address,undefined)
   target_compile_options(g2_feed_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(g2_feed_core_tests PRIVATE
@@ -708,6 +732,10 @@ if(HW1_SANITIZE)
   target_compile_options(g2_stock_feed_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(g2_stock_feed_core_tests PRIVATE
+    -fsanitize=address,undefined)
+  target_compile_options(g2_quicklist_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(g2_quicklist_core_tests PRIVATE
     -fsanitize=address,undefined)
   target_compile_options(event_kind_mask_tests PRIVATE
     -fsanitize=address,undefined -g)
@@ -1700,8 +1728,10 @@ add_test(NAME espnow_forward_core_tests COMMAND espnow_forward_core_tests)
 add_test(NAME map_viewport_core_tests COMMAND map_viewport_core_tests)
 add_test(NAME g2_health_graph_core_tests COMMAND g2_health_graph_core_tests)
 add_test(NAME g2_health_push_core_tests COMMAND g2_health_push_core_tests)
+add_test(NAME g2_health_insights_core_tests COMMAND g2_health_insights_core_tests)
 add_test(NAME g2_feed_core_tests COMMAND g2_feed_core_tests)
 add_test(NAME g2_stock_feed_core_tests COMMAND g2_stock_feed_core_tests)
+add_test(NAME g2_quicklist_core_tests COMMAND g2_quicklist_core_tests)
 add_test(NAME g2_stock_feed_source COMMAND ${Python3_EXECUTABLE}
   ${CMAKE_CURRENT_LIST_DIR}/test_g2_stock_feed_source.py)
 add_test(NAME event_kind_mask_tests COMMAND event_kind_mask_tests)
@@ -2128,6 +2158,14 @@ add_test(
   NAME g2_settings_command
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_g2_settings_command.py
+          ${SETUP_MQTT_TEST_ARGS})
+# The production settings codec against golden vectors, including the
+# 2.3.2.14 silent-mode, auto-brightness, brightness-level and head-up captures
+# (writes, ACKs, BASIC f14/f18/f2/f7, cmd 3 change push). Documented in README.md; it had no ctest entry before.
+add_test(
+  NAME g2_settings_protocol
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_settings_protocol.py
           ${SETUP_MQTT_TEST_ARGS})
 # Recorder and microphone source choice for a requested source: it is used or
 # refused, never swapped for another microphone.

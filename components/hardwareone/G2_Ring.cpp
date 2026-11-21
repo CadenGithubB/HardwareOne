@@ -33,6 +33,7 @@
 #include "BLE_CentralTx.h"     // controller-level TX gate (shared with G2)
 #include "G2_Glasses.h"        // g2SetAllTemplesConnPriority, g2WaitForBothConnected
 #include "G2_HealthPush.h"     // `ring panel` rows: stock Health panel feed
+#include "G2_HealthInsights.h" // `ring insights` rows: its insights page
 #if ENABLE_MICROPHONE
 #include "HAL_Audio.h"         // audioGetSource/audioCaptureOwnedBy — audio arbitration
 #include "System_Microphone.h" // micRecordingBusy — real recording lifecycle
@@ -7523,7 +7524,7 @@ static const char* cmd_ringcontrolrefresh(const String& /*args*/) {
 }
 
 static const char* cmd_ring(const String& /*args*/) {
-  return "Error: invalid arguments — Usage: ring <status|scan|health|poll|history|query|control|panel> "
+  return "Error: invalid arguments — Usage: ring <status|scan|health|poll|history|query|control|panel|insights> "
          "(openring / closering connect and disconnect)";
 }
 
@@ -7560,9 +7561,20 @@ extern const CommandEntry g2RingCommands[] = {
     "Usage: ring panel feed [on|off]" },
   { "ring panel history", "How often the feed refreshes ring history (steps, kcal, sleep).", true, cmd_ringpanelhistory,
     "Usage: ring panel history [minutes 10-1440]  (default 30)" },
+  // Its insights page (G2_HealthInsights): sid 0x0E cmd 4, up to three lines
+  // from ring history. Writes are admin; status/preview are not.
+  { "ring insights status", "Glasses Health insights: state, window, current lines, last send and echo.", false, cmd_ringinsightsstatus },
+  { "ring insights preview", "Show the insight lines and their bytes without sending.", false, cmd_ringinsightspreview,
+    "Usage: ring insights preview" },
+  { "ring insights send", "Send the insight lines to the glasses' Health panel now.", true, cmd_ringinsightssend,
+    "Usage: ring insights send" },
+  { "ring insights feed", "Fill the Health panel's insights page from ring history (saved; on by default, runs with ring panel feed).", true, cmd_ringinsightsfeed,
+    "Usage: ring insights feed [on|off]" },
+  { "ring insights days", "Days of ring history the insights cover (saved).", true, cmd_ringinsightsdays,
+    "Usage: ring insights days [1-7]  (default 3; the most recent days with data)" },
 #endif
   { "ring",            "Even R1 ring.",                                false, cmd_ring,
-    "Usage: ring <status|scan|health|poll|history|query|control|panel>  (openring / closering connect and disconnect)" },
+    "Usage: ring <status|scan|health|poll|history|query|control|panel|insights>  (openring / closering connect and disconnect)" },
   // The glasses' built-in Health panel is fed by the phone, not the ring: the
   // Even app pushes a sid 0x0E HealthDataPackage to the right temple, which
   // `ring panel` reproduces. The earlier sid 0x90 RingDataPackage push and

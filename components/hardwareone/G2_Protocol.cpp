@@ -2687,13 +2687,15 @@ bool g2ParseSettingWriteAck(const uint8_t* payload, size_t payloadLen,
         setting > UINT8_MAX || settingWire != G2_PB_WIRE_LEN_DELIM ||
         !g2PbReadDelimited(body, bodyLen, &bodyPos, &leaf, &leafLen) ||
         bodyPos != bodyLen) return false;
-    // The stock nanopb descriptor makes wearDetectionSwitch a default-
-    // eliding scalar. Presence of its single-leaf sub-message with no bytes
-    // therefore means OFF; an absent setting body never confirms anything.
-    // Other settings may have several leaves, so their empty body is ambiguous.
-    if (!leafLen && setting == G2_SETW_F_WEAR_DETECT) {
-      innerField = G2_SETW_F_WEAR_DETECT;
-      leafField = G2_SETW_WEAR_F_SWITCH;
+    // The stock nanopb descriptor makes wearDetectionSwitch and
+    // silentModeSwitch default-eliding scalars. Presence of their single-leaf
+    // sub-message with no bytes therefore means OFF (silent OFF ACK captured
+    // on 2.3.2.14: 1a 02 32 00); an absent setting body never confirms
+    // anything. Other settings may have several leaves, so their empty body is
+    // ambiguous.
+    if (!leafLen && (setting == G2_SETW_F_WEAR_DETECT || setting == G2_SETW_F_SILENT)) {
+      innerField = (uint8_t)setting;
+      leafField = setting == G2_SETW_F_SILENT ? G2_SETW_SILENT_F_SWITCH : G2_SETW_WEAR_F_SWITCH;
       value = 0;
       continue;
     }

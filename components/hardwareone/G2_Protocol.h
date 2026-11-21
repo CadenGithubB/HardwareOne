@@ -1167,7 +1167,8 @@ size_t g2BuildHeadUpAngle(uint8_t seq, uint32_t magic, uint32_t angle,
 //
 // Never observed on 2.2.4.34: f13 chargingStatus, f14 silentMode,
 // f15/f16 lens calibration, f17, f19. Those members stay 0 with their
-// presence bit clear.
+// presence bit clear. On 2.3.2.14 a full correlated BASIC reply carries
+// f14=1 while silent mode is on and leaves it out while off (2026-11-21).
 typedef struct {
   uint32_t have;            // bit N set => field N was present in this frame
   uint8_t  settingInfoType; // f1
@@ -1208,8 +1209,9 @@ bool g2ParseSettingEcho(const uint8_t* payload, size_t payloadLen,
 
 // Recognise one unambiguous write-ack: exactly one commandId=1, one magic,
 // and one wrapper-f3 body, containing exactly one setting sub-message with
-// exactly one varint leaf. An empty wear-detection sub-message is the stock
-// nanopb scalar-default encoding of leaf1=0; other empty settings are rejected.
+// exactly one varint leaf. An empty wear-detection (f5) or silent-mode (f6)
+// sub-message is the stock nanopb scalar-default encoding of leaf1=0; other
+// empty settings are rejected.
 // Order is immaterial; duplicates, extra fields,
 // truncated/trailing data and values outside the output types are rejected.
 // Writes back the echoed magic and (innerField, leafField, value) so the owner

@@ -41,8 +41,8 @@ echo -e "variant\tbytes" > $OUT
 echo -e "BASELINE_full\t$(build baseline)" >> $OUT
 run(){ name=$1; shift; restore_all; eval "$*"; echo -e "$name\t$(build $name)" >> $OUT; restore_all; }
 run BASELINE_saved_config 'saved_config ""'
-run BT_family_off       'set_flag ENABLE_BLUETOOTH 0; set_flag ENABLE_G2_GLASSES 0; set_flag ENABLE_R1_HEALTH 0; set_flag ENABLE_G2_TESTSUITE 0; saved_config "\"CONFIG_BT_ENABLED\": false"'
-run G2_glasses_off      'set_flag ENABLE_G2_GLASSES 0; set_flag ENABLE_G2_TESTSUITE 0'
+run BT_family_off       'set_flag ENABLE_BLUETOOTH 0; set_flag ENABLE_G2_GLASSES 0; set_flag ENABLE_R1_HEALTH 0; set_flag ENABLE_G2_TESTSUITE 0; set_flag ENABLE_G2_QUICKLIST 0; saved_config "\"CONFIG_BT_ENABLED\": false"'
+run G2_glasses_off      'set_flag ENABLE_G2_GLASSES 0; set_flag ENABLE_G2_TESTSUITE 0; set_flag ENABLE_G2_QUICKLIST 0'
 run G2_testsuite_off    'set_flag ENABLE_G2_TESTSUITE 0'
 run R1_health_off       'set_flag ENABLE_R1_HEALTH 0'
 run NETWORK_family_off  'set_flag NETWORK_FEATURE_LEVEL 0; set_flag WEB_FEATURE_LEVEL 0; set_flag ENABLE_HTTPS 0; set_flag ENABLE_BONDED_MODE 0'

@@ -363,6 +363,15 @@ static void testClamps() {
   CHECK(s.low == 0.0f && s.high == 3.0f && s.value == 3.0f);
   CHECK(makeSlot(metric(SystemMetricId::Mesh, 0.0f, 0.0f, 0, nullptr, 0, 0.0f, 0.0f), Pad::Gap, s));
   CHECK(s.high > s.low && s.value == kMinShownValue);
+  // CPU clock: MHz, the chart 0..the chip's top clock from the sampler (not
+  // the fixed 0-100 of the percentages), grown if the clock is above it.
+  const float clkHist[] = {400.0f, 360.0f, 360.0f};
+  CHECK(makeSlot(metric(SystemMetricId::Clk, 360.0f, -40.0f, -1, clkHist, 3, 0.0f, 400.0f), Pad::Gap, s));
+  CHECK(std::strcmp(s.code, "CLK") == 0 && std::strcmp(s.name, "CPU clock") == 0);
+  CHECK(s.value == 360.0f && s.low == 0.0f && s.high == 400.0f);
+  CHECK(s.change == -40.0f && s.trend == 2 && s.points[kLast - 2] == 400.0f && s.points[kLast] == 360.0f);
+  CHECK(makeSlot(metric(SystemMetricId::Clk, 240.0f, 0.0f, 0, nullptr, 0, 0.0f, 160.0f), Pad::Gap, s));
+  CHECK(s.value == 240.0f && s.high == 240.0f);
   // Change bounded.
   CHECK(makeSlot(metric(SystemMetricId::HeapBlock, 10.0f, 1.0e7f, 1, nullptr, 0, 0.0f, 512.0f), Pad::Gap, s));
   CHECK(s.change == kMaxChange && s.high == 512.0f);
@@ -676,6 +685,48 @@ static void testHelpers() {
   Selection fromText;
   CHECK(parseMetricList(kDefaultMetricsText, fromText, err, sizeof err) && fromText.count == 9);
   for (uint8_t i = 0; i < 9; i++) CHECK(fromText.ids[i] == kDefaultMetrics[i]);
+  // The default (owner, 2026-11-21): the CPU clock in the temperature's place.
+  CHECK(std::strcmp(kDefaultMetricsText, "CPU,HEAP,PSRM,SD,LFS,CLK,LINK,MESH,RING") == 0);
+  CHECK(kDefaultMetrics[5] == SystemMetricId::Clk);
+  for (uint8_t i = 0; i < kMaxSlots; i++) CHECK(kDefaultMetrics[i] != SystemMetricId::Temp);
+  CHECK(parseMetricList("clk,temp", fromText, err, sizeof err) && fromText.count == 2 &&
+        fromText.ids[0] == SystemMetricId::Clk && fromText.ids[1] == SystemMetricId::Temp);
+  // The saved setting: the earlier default's exact text (what a device that
+  // never chose a list has saved) reads as the new default; any other list is
+  // kept, also one with TEMP; nothing usable is the default.
+  auto sameAsDefault = [](const Selection& sel) {
+    if (sel.count != kMaxSlots) return false;
+    for (uint8_t i = 0; i < kMaxSlots; i++)
+      if (sel.ids[i] != kDefaultMetrics[i]) return false;
+    return true;
+  };
+  CHECK(std::strcmp(kPreviousDefaultMetricsText, "CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING") == 0);
+  CHECK(sameAsDefault(savedSelection(kPreviousDefaultMetricsText)));
+  CHECK(sameAsDefault(savedSelection(kDefaultMetricsText)));
+  CHECK(sameAsDefault(savedSelection(nullptr)));
+  CHECK(sameAsDefault(savedSelection("")));
+  CHECK(sameAsDefault(savedSelection("cpu,foo")));
+  CHECK(sameAsDefault(savedSelection("default")));
+  Selection custom = savedSelection("CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH");  // 8: the owner's own
+  CHECK(custom.count == 8 && custom.ids[5] == SystemMetricId::Temp);
+  custom = savedSelection("TEMP,CPU");
+  CHECK(custom.count == 2 && custom.ids[0] == SystemMetricId::Temp && custom.ids[1] == SystemMetricId::Cpu);
+  custom = savedSelection("CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,RING,MESH");  // reordered: kept
+  CHECK(custom.count == 9 && custom.ids[5] == SystemMetricId::Temp && custom.ids[8] == SystemMetricId::Mesh);
+  // Saving: any list as formatMetricList writes it, except the previous
+  // default chosen again on purpose, saved so that it reads back as chosen.
+  char saved[64];
+  CHECK(formatSavedMetricList(defaultSelection(), saved, sizeof saved) > 0 &&
+        std::strcmp(saved, kDefaultMetricsText) == 0);
+  CHECK(sameAsDefault(savedSelection(saved)));
+  CHECK(parseMetricList(kPreviousDefaultMetricsText, fromText, err, sizeof err) && fromText.count == 9);
+  CHECK(formatSavedMetricList(fromText, saved, sizeof saved) > 0 &&
+        std::strcmp(saved, kPreviousDefaultMetricsText) != 0);
+  custom = savedSelection(saved);
+  CHECK(custom.count == 9 && custom.ids[5] == SystemMetricId::Temp);
+  for (uint8_t i = 0; i < 9; i++) CHECK(custom.ids[i] == fromText.ids[i]);
+  CHECK(parseMetricList("temp,cpu", fromText, err, sizeof err));
+  CHECK(formatSavedMetricList(fromText, saved, sizeof saved) == 8 && std::strcmp(saved, "TEMP,CPU") == 0);
   Selection keep = s;
   CHECK(!parseMetricList("cpu,foo", keep, err, sizeof err) && std::strstr(err, "foo"));
   CHECK(keep.count == kMaxSlots);  // unchanged on failure

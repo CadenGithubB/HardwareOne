@@ -89,8 +89,12 @@ static_assert(g2repair::kHostEstablishTimeoutMs ==
 #include "G2_Ring.h"  // g2RingInit (eager registration in initG2Client)
 #include "G2_HealthPush.h"      // stock Health panel feed (sid 0x0E)
 #include "G2_HealthPushCore.h"  // its whitelist, re-checked at the wire
+#include "G2_HealthInsights.h"       // Health panel insights page (sid 0x0E cmd 4)
+#include "G2_HealthInsightsCore.h"   // its whitelist, re-checked at the wire
 #include "G2_StockFeed.h"       // stock widget fed with system metrics (sid 0x01)
 #include "G2_StockFeedCore.h"   // its whitelist, re-checked at the wire
+#include "G2_QuickList.h"       // QuickList control rows (sid 0x0C)
+#include "G2_QuickListCore.h"   // its whitelist, re-checked at the wire
 #include "G2_Page_Common.h"    // TextPager + paging ops (g2TextPagerRender)
 #include "G2_Page_Sensors.h"   // g2ShowSensorList() (per-page module)
 #include "G2_Page_Network.h"   // g2ShowNetworkMenu / g2NetworkHandleTap
@@ -1223,11 +1227,35 @@ static char gFwVersion[32] = {0};
 static G2SettingsEcho gSettingsEcho;
 static bool gSettingsEchoSeen = false, gSettingsEchoFullWearProfile = false;
 static uint32_t gSettingsEchoMs = 0, gSettingsEchoGeneration = 0;
+// One fresh settings read may resend the captured BASIC read (a new magic per
+// attempt); a reply to any of its attempts answers it, and the attempt whose
+// magic the reply carries is recorded.
+#define G2_SETTINGS_READ_ATTEMPTS_MAX 3
+// Wait per attempt: the short default (priming, the cold version read) and the
+// long one. The long, resent read serves the QuickList reads and `g2glasses`
+// show/refresh; the CLI write paths use one long attempt. No new attempt
+// starts later than G2_SETTINGS_READ_RETRY_WINDOW_MS into the read, so one
+// read ends within window + one send (TX gate 1.5 s + write mutex 1.5 s) +
+// one wait, about 6.75 s (G2_QuickListCore.h kJobBackstopMs).
+#define G2_SETTINGS_READ_WAIT_MS         250
+#define G2_SETTINGS_READ_LONG_WAIT_MS    1000
+#define G2_SETTINGS_READ_RETRY_WINDOW_MS 2500
 struct G2SettingsRead {
   uint32_t generation = 0, atMs = 0;
-  uint8_t magic = 0;
+  uint8_t magics[G2_SETTINGS_READ_ATTEMPTS_MAX] = {};
+  uint8_t magicCount = 0, matchedIndex = 0;
   bool active = false, matched = false, fullWearProfile = false;
+  uint16_t otherReplies = 0, otherFrames = 0;   // right-temple settings frames that did not match
   G2SettingsEcho echo{};
+};
+// What one fresh settings read did (g2SettingsReadFreshEx), for diagnostics.
+struct G2SettingsReadStats {
+  uint8_t attempts = 0;          // BASIC reads sent
+  uint8_t answeredAttempt = 0;   // 1-based attempt whose magic the reply carried; 0 = no reply
+  uint16_t otherReplies = 0;     // settings replies with another magic during the wait
+  uint16_t otherFrames = 0;      // other right-temple settings frames (the glasses' own updates)
+  uint32_t replyMs = 0;          // that attempt's send to the reply
+  uint32_t totalMs = 0;          // the whole read
 };
 struct G2SettingsWrite {
   uint32_t generation = 0, value = 0;
@@ -1235,6 +1263,15 @@ struct G2SettingsWrite {
   bool active = false, matched = false;
 };
 static G2SettingsRead gSettingsRead;
+// The magics of the last read that was answered. A reply to one of its other
+// attempts can still arrive after it ended (even after a write that followed);
+// it carries no newer state, so it never refreshes the cache.
+struct G2SettingsReadRetired {
+  uint32_t generation = 0;
+  uint8_t magics[G2_SETTINGS_READ_ATTEMPTS_MAX] = {};
+  uint8_t magicCount = 0;
+};
+static G2SettingsReadRetired gSettingsReadRetired;
 static G2SettingsWrite gSettingsWrite;
 static uint8_t gSettingsRequestMagic = 0;
 static portMUX_TYPE gSettingsStateMux = portMUX_INITIALIZER_UNLOCKED;
@@ -1361,26 +1398,65 @@ static uint8_t g2NextSettingsMagic() {
   return magic;
 }
 
-static void g2SettingsEchoPublish(const G2SettingsEcho& echo, uint32_t generation,
+// Returns true when this reply answered the active fresh read. *duplicate:
+// a settings reply to another attempt of a read that was already answered
+// (the current one or the last one); it is not published.
+static bool g2SettingsEchoPublish(const G2SettingsEcho& echo, uint32_t generation,
                                   uint8_t flag, uint32_t magic, uint32_t atMs,
-                                  bool fullWearProfile) {
+                                  bool fullWearProfile, bool* duplicate = nullptr) {
+  bool answered = false, dup = false;
   portENTER_CRITICAL(&gTopologyMux);
   portENTER_CRITICAL(&gSettingsStateMux);
-  if (generation && gR.connected && gR.writeChar &&
+  if (generation && flag == G2_FLAG_RESPONSE && G2_ECHO_HAS(echo, 1) && echo.settingInfoType == 1) {
+    // The current read's magics come first: only a magic it does not carry is
+    // looked up among the last answered read's.
+    bool current = false, retired = false;
+    if (gSettingsRead.generation == generation) {
+      for (uint8_t i = 0; i < gSettingsRead.magicCount && i < G2_SETTINGS_READ_ATTEMPTS_MAX; ++i)
+        if (gSettingsRead.magics[i] == magic) current = true;
+    }
+    if (gSettingsReadRetired.generation == generation) {
+      for (uint8_t i = 0; i < gSettingsReadRetired.magicCount && i < G2_SETTINGS_READ_ATTEMPTS_MAX; ++i)
+        if (gSettingsReadRetired.magics[i] == magic) retired = true;
+    }
+    dup = current ? gSettingsRead.matched : retired;
+  }
+  if (!dup && generation && gR.connected && gR.writeChar &&
       gR.connectionGeneration == generation && gR.sessionReadyGeneration == generation) {
     gSettingsEcho = echo; gSettingsEchoSeen = true;
     gSettingsEchoMs = atMs; gSettingsEchoGeneration = generation;
     gSettingsEchoFullWearProfile = false;
-    if (flag == G2_FLAG_RESPONSE && gSettingsRead.active &&
-        gSettingsRead.generation == generation && gSettingsRead.magic == magic &&
+    if (flag == G2_FLAG_RESPONSE && gSettingsRead.active && !gSettingsRead.matched &&
+        gSettingsRead.generation == generation &&
         G2_ECHO_HAS(echo, 1) && echo.settingInfoType == 1) {
-      gSettingsRead.echo = echo; gSettingsRead.atMs = atMs; gSettingsRead.matched = true;
-      gSettingsRead.fullWearProfile = fullWearProfile;
-      gSettingsEchoFullWearProfile = fullWearProfile;
+      for (uint8_t i = 0; i < gSettingsRead.magicCount && i < G2_SETTINGS_READ_ATTEMPTS_MAX; ++i) {
+        if (gSettingsRead.magics[i] != magic) continue;
+        gSettingsRead.echo = echo; gSettingsRead.atMs = atMs; gSettingsRead.matched = true;
+        gSettingsRead.matchedIndex = i;
+        gSettingsRead.fullWearProfile = fullWearProfile;
+        gSettingsEchoFullWearProfile = fullWearProfile;
+        answered = true;
+        break;
+      }
     }
   }
   portEXIT_CRITICAL(&gSettingsStateMux);
   portEXIT_CRITICAL(&gTopologyMux);
+  if (duplicate) *duplicate = dup;
+  return answered;
+}
+
+// Counts a right-temple settings frame that did not answer the active fresh
+// read: a settings reply with another magic, or any other frame (the glasses'
+// own updates). g2_owner; one short critical section.
+static void g2SettingsReadNoteFrame(uint32_t generation, bool otherReply) {
+  portENTER_CRITICAL(&gSettingsStateMux);
+  if (generation && gSettingsRead.active && !gSettingsRead.matched &&
+      gSettingsRead.generation == generation) {
+    uint16_t& n = otherReply ? gSettingsRead.otherReplies : gSettingsRead.otherFrames;
+    if (n < UINT16_MAX) ++n;
+  }
+  portEXIT_CRITICAL(&gSettingsStateMux);
 }
 
 static bool g2SettingsEchoSnapshot(G2SettingsEcho* out, uint32_t* atMs,
@@ -1405,6 +1481,7 @@ static void g2SettingsEchoInvalidateFreshness() {
   gSettingsEchoFullWearProfile = false;
   gSettingsEchoMs = gSettingsEchoGeneration = 0;
   gSettingsRead = G2SettingsRead{}; gSettingsWrite = G2SettingsWrite{};
+  gSettingsReadRetired = G2SettingsReadRetired{};
   portEXIT_CRITICAL(&gSettingsStateMux);
 }
 
@@ -1450,6 +1527,7 @@ static bool g2SettingsReceive(G2Temple& temple, const G2EnvelopeView& env,
                                uint32_t generation) {
   uint32_t magic = 0, command = 0;
   G2SettingsEcho echo;
+  bool readAnswered = false, basicReply = false;
   if (g2ParseSettingEcho(env.payload, env.payloadLen, &echo, &magic, &command) &&
       command == 2 && temple.side == 'R' &&
       (env.flag == G2_FLAG_RESPONSE || env.flag == G2_FLAG_NOTIFY)) {
@@ -1461,9 +1539,15 @@ static bool g2SettingsReceive(G2Temple& temple, const G2EnvelopeView& env,
         g2ParseSettingVersions(env.payload, env.payloadLen, &versions) &&
         versions.hasLeft && versions.hasRight &&
         strcmp(versions.left, "2.3.2.14") == 0 && strcmp(versions.right, "2.3.2.14") == 0;
-    g2SettingsEchoPublish(echo, generation, env.flag, magic, millis(), fullWearProfile);
-    if (generation && g2TempleReadyAtGeneration(gR, generation)) g2ControlNoteEcho(echo, generation);
+    bool duplicate = false;
+    readAnswered = g2SettingsEchoPublish(echo, generation, env.flag, magic, millis(), fullWearProfile,
+                                         &duplicate);
+    basicReply = env.flag == G2_FLAG_RESPONSE && G2_ECHO_HAS(echo, 1) && echo.settingInfoType == 1;
+    // A duplicate reply to an answered read carries no newer state.
+    if (!duplicate && generation && g2TempleReadyAtGeneration(gR, generation))
+      g2ControlNoteEcho(echo, generation);
   }
+  if (temple.side == 'R' && !readAnswered) g2SettingsReadNoteFrame(generation, basicReply);
   uint32_t value = 0;
   uint8_t inner = 0, leaf = 0;
   if (!g2ParseSettingWriteAck(env.payload, env.payloadLen, &magic, &inner, &leaf, &value)) return false;
@@ -5259,6 +5343,12 @@ static void g2DispatchCompleteEnvelope(G2Temple& t, const G2EnvelopeView& env,
   // ordinary handler still runs.
   if (env.sid == hw1_g2_stock_feed::kSid)
     g2StockFeedOnRx(t.side, generation, env.payload, env.payloadLen);
+  // QuickList (sid 0x0C) from the right temple: our row's ACK and the wearer's
+  // tick reports. Counted above (g2statsRecordRx) and consumed here, so the
+  // default unknown-sid hex log in handleEnvelope does not print them.
+  if (env.sid == hw1_g2_quicklist::kSid && t.side == 'R' &&
+      g2QuickListOnRx(generation, env.flag, env.payload, env.payloadLen))
+    return;
   handleEnvelope(t, env, generation, lifecycleEpoch, presentationEpoch);
 }
 
@@ -9582,6 +9672,10 @@ static void handleEnvelope(G2Temple& t, const G2EnvelopeView& env,
           g2PushStatusEvent(newSilent ? "silent-on" : "silent-off");
           systemEventPost(SYSEVT_G2_SILENT_MODE, newSilent ? "on" : "off");
         }
+        // The QuickList silent row follows every change push (cmd 3 f5{f2},
+        // captured on the right temple, flag 0x01); it drops repeats itself.
+        if (t.side == 'R' && env.flag == G2_FLAG_NOTIFY)
+          g2QuickListOnSilentPush(rxGeneration ? rxGeneration : t.connectionGeneration, silentFlag != 0);
       }
 
       // Firmware versions are a fused pair snapshot: inner f5 is LEFT and f6
@@ -10480,6 +10574,14 @@ bool g2HealthWireSend(uint32_t generation, const uint8_t* pb, size_t len) {
   // Last gate before the radio: only the exact whitelisted snapshot shape.
   if (!generation || !hw1_g2_health_push::validateSnapshotPb(pb, len)) return false;
   return sendPbFragmented(gR, allocSeq(), hw1_g2_health_push::kSid, G2_FLAG_REQUEST,
+                          pb, len, generation);
+}
+
+bool g2HealthInsightsWireSend(uint32_t generation, const uint8_t* pb, size_t len) {
+  // Last gate before the radio: only the captured insights shape (cmd 4,
+  // 0..3 lines of ASCII text under a drawn icon, or the no-insights message).
+  if (!generation || !hw1_g2_health_insights::validateMessagePb(pb, len)) return false;
+  return sendPbFragmented(gR, allocSeq(), hw1_g2_health_insights::kSid, G2_FLAG_REQUEST,
                           pb, len, generation);
 }
 #endif
@@ -15359,6 +15461,9 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     // The stock widget feed: a queued `g2 stats` request or a batch in flight.
     const uint32_t stockWaitMs = g2StockFeedOwnerWaitMs();
     if (stockWaitMs < ownerWaitMs) ownerWaitMs = stockWaitMs;
+    // The QuickList row: settle timer, a job on cmd_exec, a push retry.
+    const uint32_t listWaitMs = g2QuickListOwnerWaitMs();
+    if (listWaitMs < ownerWaitMs) ownerWaitMs = listWaitMs;
     const bool signalled =
         xSemaphoreTake(gBeatSem, pdMS_TO_TICKS(ownerWaitMs)) == pdTRUE;
     if (gBeatTaskStop) break;
@@ -15479,6 +15584,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
     g2NativeNotesTick();
     g2HealthPushTick();      // stock Health panel feed; pauses for the sessions above
     g2StockFeedTick();       // stock widget fed with system metrics; pauses the same way
+    g2QuickListTick();       // QuickList control rows; pushes pause the same way
 
     // Process native EXIT/ACK first, then renew only a still-live lease.
     g2ConversateTick();
@@ -15558,6 +15664,7 @@ static void heartbeatWorkerTask(void* /*arg*/) {
   gConversateRequest = 0;
   portEXIT_CRITICAL(&gConversateMux);
   g2StockFeedOwnerStopped();  // no lap would drop the page-open cadence now
+  g2QuickListOwnerStopped();
   portENTER_CRITICAL(&gControlLifecycleMux);
   gBeatTaskHandle = nullptr;
   portEXIT_CRITICAL(&gControlLifecycleMux);
@@ -26538,7 +26645,7 @@ static const char* cmd_g2probe(const String& argsInput) {
   EXT_RAM_BSS_ATTR static char ret[160];
   CommandArgs ca(argsInput);
   if (ca.count() < 2) {
-    return "Error: invalid arguments — Usage: g2probe <sid_hex> <cmd_dec> [body_hex]\n"
+    return "Error: invalid arguments — Usage: g2probe <sid_hex> <cmd_dec> [body_hex] [R|L]\n"
            "  Fires `08 <cmd> 10 <magic> [body]` on the given sid (flag=0x20).\n"
            "  Example: g2probe 07 9              -- EvenAI HEARTBEAT\n"
            "           g2probe 07 10 6A07080010A0012000 -- EvenAI CONFIG voice=0,speed=160,duplex=0\n"
@@ -26553,6 +26660,15 @@ static const char* cmd_g2probe(const String& argsInput) {
     return "Error: sid must be 1 or 2 hex digits. Example: g2probe 07 9.";
   }
   const uint8_t sid = (uint8_t)((sidHi << 4) | sidLo);
+  // Optional trailing temple: R or L forces that arm (test builds; the Health
+  // panel only listens on the right temple). Default: pickEvenAiArm.
+  size_t argc = ca.count();
+  char wantArm = 0;
+  if (argc >= 3) {
+    String last = ca.arg(argc - 1);
+    last.toUpperCase();
+    if (last == "R" || last == "L") { wantArm = last.charAt(0); --argc; }
+  }
   uint32_t cmd = 0;
   if (!parseIntArg(ca.arg(1), 0, 0x7FFFFFFF, cmd)) {
     return "Error: cmd must be a whole number from 0 to 2147483647. Example: g2probe 07 9.";
@@ -26566,7 +26682,7 @@ static const char* cmd_g2probe(const String& argsInput) {
   // One byte more than the limit, so a longer body is seen and not cut short.
   uint8_t body[201];
   size_t bodyLen = 0;
-  if (ca.count() >= 3) {
+  if (argc >= 3) {
     String hex = ca.arg(2);
     bodyLen = parseHexBytes(hex.c_str(), body, sizeof(body));
     if (bodyLen == SIZE_MAX) return "Error: G2: probe — bad hex body (need pairs of nibbles)";
@@ -26575,11 +26691,16 @@ static const char* cmd_g2probe(const String& argsInput) {
     }
   }
 
-  // Build pb: f1 cmd, f2 magic=250, then raw body.
+  // Build pb: f1 cmd, f2 magic, then raw body. The magic counts up from 250
+  // (1..255, skipping 0): the glasses drop a repeated magic on a service as
+  // already handled (seen on the Health insights page, 2026-11-21).
+  static uint8_t sProbeMagic = 250;
+  const uint8_t probeMagic = sProbeMagic;
+  sProbeMagic = (uint8_t)(sProbeMagic == 255 ? 1 : sProbeMagic + 1);
   uint8_t pb[256];
   size_t pos = 0;
   if (!g2PbWriteUint32(pb, sizeof(pb), &pos, /*field*/ 1, cmd)) return "Error: G2: probe build failed (cmd)";
-  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, /*field*/ 2, 250)) return "Error: G2: probe build failed (magic)";
+  if (!g2PbWriteUint32(pb, sizeof(pb), &pos, /*field*/ 2, probeMagic)) return "Error: G2: probe build failed (magic)";
   if (bodyLen) {
     if (pos + bodyLen > sizeof(pb)) return "Error: G2: probe — body too large for single fragment";
     memcpy(pb + pos, body, bodyLen);
@@ -26590,13 +26711,16 @@ static const char* cmd_g2probe(const String& argsInput) {
   size_t n = g2BuildEnvelope(allocSeq(), sid, G2_FLAG_REQUEST, pb, pos, env, sizeof(env));
   if (n == 0) return "Error: G2: probe — envelope build failed";
 
-  G2Temple* arm = pickEvenAiArm("g2probe");
+  G2Temple* arm = nullptr;
+  if (wantArm == 'R')      arm = gR.connected ? &gR : nullptr;
+  else if (wantArm == 'L') arm = gL.connected ? &gL : nullptr;
+  else                     arm = pickEvenAiArm("g2probe");
   if (!arm) return "Error: G2: probe — no reachable temple";
   if (!sendEnvelope(*arm, env, n)) return "Error: G2: probe — send failed (mutex timeout?)";
 
   snprintf(ret, sizeof(ret),
-           "G2: probe sid=0x%02X (%s) cmd=%u body=%u B sent — watch logs for response",
-           sid, g2sidName(sid), (unsigned)cmd, (unsigned)bodyLen);
+           "G2: probe sid=0x%02X (%s) cmd=%u magic=%u body=%u B sent — watch logs for response",
+           sid, g2sidName(sid), (unsigned)cmd, (unsigned)probeMagic, (unsigned)bodyLen);
   return ret;
 }
 #endif  // ENABLE_G2_TESTSUITE
@@ -26740,31 +26864,33 @@ struct G2GlassesKnob {
   const char* help;
 };
 
-// echoField 0 means there is no read-back on this firmware — silent mode
-// (f14) is the notable case, so its only confirmation is the ack. The
-// universe-settings block (units/time/date/temperature) has no *Restored
+// echoField 0 means there is no read-back. Silent mode's f14 is read back
+// only on the exact 2.3.2.14 pair (g2GlassesHasReadback): a full correlated
+// BASIC reply carries f14=1 when silent is on and leaves it out when off
+// (2026-11-21 capture); earlier firmware never reported it, so there its only
+// confirmation is the ack. The universe-settings block (units/time/date/temperature) has no *Restored
 // mirror for any of its five fields, and their value encodings are
 // unknown — they take a raw integer and report only what the ack says.
 static const G2GlassesKnob kG2GlassesKnobs[] = {
   { "brightness",  G2_SETW_F_BRIGHTNESS,   G2_SETW_BRIGHT_F_LEVEL,       0, 100, false, 2,
-    "brightness <0-100>   display brightness" },
+    "brightness <0-100>   display brightness (2-100 on 2.3.2.14, read back there)" },
   { "autobright",  G2_SETW_F_BRIGHTNESS,   G2_SETW_BRIGHT_F_AUTO,        0,   1, true, 18,
-    "autobright <on|off>  ambient-light auto brightness" },
+    "autobright <on|off>  ambient-light auto brightness (read back on 2.3.2.14)" },
   { "weardetect",  G2_SETW_F_WEAR_DETECT,  G2_SETW_WEAR_F_SWITCH,        0,   1, true, 10,
     "weardetect <on|off>  on-head detection" },
   { "y",           G2_SETW_F_Y_COORD,      G2_SETW_COORD_F_LEVEL,        0, 255, false, 3,
-    "y <level>            display vertical position" },
+    "y <level>            display height 0-12 (12 = top)" },
   { "x",           G2_SETW_F_X_COORD,      G2_SETW_COORD_F_LEVEL,        0, 255, false, 4,
-    "x <level>            display horizontal/depth position" },
+    "x <level>            display distance 0 close, 1 medium, 2 far" },
   { "headup",      G2_SETW_F_HEAD_UP,      G2_SETW_HEADUP_F_SWITCH,      0,   1, true,  7,
-    "headup <on|off>      head-up wake/display" },
+    "headup <on|off>      head-up wake/display (read back on 2.3.2.14)" },
   // The wire value is u8 and the official app wrote 19 while the device
   // restored 40. The app's full supported range is not established, so keep
   // this explicitly labelled raw and never reconcile it automatically.
   { "headangle",   G2_SETW_F_HEAD_UP,      G2_SETW_HEADUP_F_ANGLE,       0, 255, false, 8,
     "headangle <0-255>    raw HeadUp angle (range unverified; no auto-apply)" },
-  { "silent",      G2_SETW_F_SILENT,       G2_SETW_SILENT_F_SWITCH,      0,   1, true,  0,
-    "silent <on|off>      silent / DND  (no read-back on 2.2.4.34)" },
+  { "silent",      G2_SETW_F_SILENT,       G2_SETW_SILENT_F_SWITCH,      0,   1, true, 14,
+    "silent <on|off>      silent / DND (read back on 2.3.2.14)" },
   { "unitformat",  G2_SETW_F_UNIVERSE,     G2_SETW_UNIV_F_UNIT_FORMAT,   0, 255, false, 0,
     "unitformat <n>       units          (encoding unknown)" },
   { "distunit",    G2_SETW_F_UNIVERSE,     G2_SETW_UNIV_F_DISTANCE_UNIT, 0, 255, false, 0,
@@ -26787,8 +26913,20 @@ static bool g2GlassesEchoValue(const G2SettingsEcho& echo,
                                bool fullWearProfile = false) {
   if (k.echoField == 0) return false;
   if (!G2_ECHO_HAS(echo, k.echoField)) {
-    if (k.echoField != 10 || !fullWearProfile) return false;
-    *out = 0; // Qualified full wear response uses nanopb's omitted-zero scalar.
+    // Wear (f10), silent (f14), auto brightness (f18) and the head-up switch
+    // (f7) are omitted-zero scalars: only a qualified full 2.3.2.14 response
+    // (correlated reply, both exact version strings) turns a missing field
+    // into off.
+    // TO CONFIRM ON THE DEVICE TEST: f18 = 1 is captured in full replies
+    // while auto brightness is on, but no full reply with it off has been
+    // captured yet; the omitted-zero rule for f18 is inferred from f10/f14.
+    // The same holds for f7: present (= 1) in every captured reply and push
+    // while head-up was on, never captured in a full reply while it was off
+    // (capture-2026-11-21-brightness); off = omitted is inferred.
+    if ((k.echoField != 7 && k.echoField != 10 && k.echoField != 14 && k.echoField != 18) ||
+        !fullWearProfile)
+      return false;
+    *out = 0;
     return true;
   }
   switch (k.echoField) {
@@ -26798,6 +26936,7 @@ static bool g2GlassesEchoValue(const G2SettingsEcho& echo,
     case 7:  *out = echo.headUpSwitch;   return true;
     case 8:  *out = echo.headUpAngle;    return true;
     case 10: *out = echo.wearDetect;     return true;
+    case 14: *out = echo.silentMode;     return true;
     case 18: *out = echo.autoBrightness; return true;
     default: return false;
   }
@@ -26817,35 +26956,118 @@ static bool g2GlassesEchoValue(const G2SettingsEcho& echo,
 // candidate writes and readback use a separate request-correlated read instead.
 #define G2_SETTINGS_FRESH_MS  30000
 
-static bool g2SettingsReadFresh(G2Temple& arm, uint32_t generation,
-                                 G2SettingsEcho* out = nullptr, bool* fullWearProfile = nullptr) {
+// One fresh, request-correlated BASIC read: up to `attempts` sends of the
+// captured BASIC read, each with a new magic, each followed by up to `waitMs`
+// for the reply. A late reply to an earlier attempt of this read answers it
+// (recorded as that attempt); a reply to any other read never does.
+static bool g2SettingsReadFreshEx(G2Temple& arm, uint32_t generation, G2SettingsEcho* out,
+                                  bool* fullWearProfile, unsigned attempts, uint32_t waitMs,
+                                  G2SettingsReadStats* stats) {
   if (out) *out = G2SettingsEcho{};
   if (fullWearProfile) *fullWearProfile = false;
+  G2SettingsReadStats st{};
+  if (stats) *stats = st;
   if (!generation || arm.side != 'R' || !g2TempleReadyAtGeneration(arm, generation)) return false;
-  const uint8_t magic = g2NextSettingsMagic();
-  portENTER_CRITICAL(&gSettingsStateMux);
-  gSettingsRead = G2SettingsRead{}; gSettingsRead.active = true;
-  gSettingsRead.generation = generation; gSettingsRead.magic = magic;
-  portEXIT_CRITICAL(&gSettingsStateMux);
-  uint8_t env[64];
-  const size_t n = g2BuildSettingBasicRequest(allocSeq(), magic, env, sizeof(env));
+  if (attempts < 1) attempts = 1;
+  if (attempts > G2_SETTINGS_READ_ATTEMPTS_MAX) attempts = G2_SETTINGS_READ_ATTEMPTS_MAX;
+  const uint32_t startMs = millis();
+  uint32_t sentMs[G2_SETTINGS_READ_ATTEMPTS_MAX] = {};
+  uint8_t firstMagic = 0, matchedIndex = 0;
+  uint32_t matchedAtMs = 0;
   bool matched = false;
-  if (n && sendEnvelopeAtGeneration(arm, env, n, generation)) {
-    for (unsigned i = 0; i < 25 && g2TempleReadyAtGeneration(arm, generation); ++i) {
+  // Takes this read's correlated reply once one has arrived (caller holds
+  // gSettingsStateMux). Checked during every wait, before every new attempt
+  // (a reply that came during a failed send, or just after a wait ran out,
+  // answers the read and no further attempt is sent) and when the read ends.
+  auto takeReply = [&]() {
+    if (matched || !gSettingsRead.matched || gSettingsRead.generation != generation ||
+        !gSettingsRead.magicCount || gSettingsRead.magics[0] != firstMagic) return;
+    matched = true;
+    if (out) *out = gSettingsRead.echo;
+    if (fullWearProfile) *fullWearProfile = gSettingsRead.fullWearProfile;
+    matchedIndex = gSettingsRead.matchedIndex;
+    matchedAtMs = gSettingsRead.atMs;
+  };
+  for (unsigned a = 0; a < attempts && !matched; ++a) {
+    if (a) {
+      portENTER_CRITICAL(&gSettingsStateMux);
+      takeReply();
+      portEXIT_CRITICAL(&gSettingsStateMux);
+      if (matched) break;
+      if (!g2TempleReadyAtGeneration(arm, generation) ||
+          (uint32_t)(millis() - startMs) >= G2_SETTINGS_READ_RETRY_WINDOW_MS) break;
+    }
+    const uint8_t magic = g2NextSettingsMagic();
+    bool ours = true;
+    portENTER_CRITICAL(&gSettingsStateMux);
+    if (a == 0) {
+      // The last answered read's magics stay known, so its late duplicate
+      // replies are not taken as news (g2SettingsEchoPublish).
+      if (gSettingsRead.matched) {
+        gSettingsReadRetired.generation = gSettingsRead.generation;
+        gSettingsReadRetired.magicCount = gSettingsRead.magicCount;
+        memcpy(gSettingsReadRetired.magics, gSettingsRead.magics, sizeof gSettingsReadRetired.magics);
+      } else {
+        gSettingsReadRetired = G2SettingsReadRetired{};
+      }
+      gSettingsRead = G2SettingsRead{}; gSettingsRead.active = true;
+      gSettingsRead.generation = generation;
+      firstMagic = magic;
+    } else {
+      // Another read replaced this one (never expected: every caller runs on cmd_exec).
+      ours = gSettingsRead.active && gSettingsRead.generation == generation &&
+             gSettingsRead.magicCount && gSettingsRead.magics[0] == firstMagic;
+    }
+    if (ours) gSettingsRead.magics[gSettingsRead.magicCount++] = magic;
+    portEXIT_CRITICAL(&gSettingsStateMux);
+    if (!ours) break;
+    uint8_t env[64];
+    const size_t n = g2BuildSettingBasicRequest(allocSeq(), magic, env, sizeof(env));
+    st.attempts = (uint8_t)(a + 1);
+    if (!n || !sendEnvelopeAtGeneration(arm, env, n, generation)) continue;
+    sentMs[a] = millis();
+    while (g2TempleReadyAtGeneration(arm, generation) && (uint32_t)(millis() - sentMs[a]) < waitMs) {
       vTaskDelay(pdMS_TO_TICKS(10));
       portENTER_CRITICAL(&gSettingsStateMux);
-      matched = gSettingsRead.active && gSettingsRead.matched &&
-          gSettingsRead.generation == generation && gSettingsRead.magic == magic;
-      if (matched && out) *out = gSettingsRead.echo;
-      if (matched && fullWearProfile) *fullWearProfile = gSettingsRead.fullWearProfile;
+      takeReply();
       portEXIT_CRITICAL(&gSettingsStateMux);
       if (matched) break;
     }
   }
   portENTER_CRITICAL(&gSettingsStateMux);
-  if (gSettingsRead.generation == generation && gSettingsRead.magic == magic) gSettingsRead.active = false;
+  if (gSettingsRead.generation == generation && gSettingsRead.magicCount &&
+      gSettingsRead.magics[0] == firstMagic) {
+    takeReply();   // a reply parsed after the last wait ran out still counts
+    gSettingsRead.active = false;
+    st.otherReplies = gSettingsRead.otherReplies;
+    st.otherFrames = gSettingsRead.otherFrames;
+  }
   portEXIT_CRITICAL(&gSettingsStateMux);
-  return matched && g2TempleReadyAtGeneration(arm, generation);
+  const bool ok = matched && g2TempleReadyAtGeneration(arm, generation);
+  if (ok && matchedIndex < G2_SETTINGS_READ_ATTEMPTS_MAX) {
+    st.answeredAttempt = (uint8_t)(matchedIndex + 1);
+    // sentMs is taken when the send returns, so a reply parsed while the send
+    // was still returning reads as 0 ms, never as a wrapped value.
+    const uint32_t sent = sentMs[matchedIndex];
+    st.replyMs = (sent && (int32_t)(matchedAtMs - sent) > 0) ? matchedAtMs - sent : 0;
+  }
+  st.totalMs = millis() - startMs;
+  if (stats) *stats = st;
+  return ok;
+}
+
+// One attempt, the short wait (priming and the cold-session version read).
+static bool g2SettingsReadFresh(G2Temple& arm, uint32_t generation,
+                                 G2SettingsEcho* out = nullptr, bool* fullWearProfile = nullptr) {
+  return g2SettingsReadFreshEx(arm, generation, out, fullWearProfile, 1, G2_SETTINGS_READ_WAIT_MS, nullptr);
+}
+
+// Up to three attempts with the long wait: a single slow reply no longer reads
+// as "no answer" (QuickList reads, `g2glasses` show/refresh).
+static bool g2SettingsReadFreshRetried(G2Temple& arm, uint32_t generation, G2SettingsEcho* out,
+                                       bool* fullWearProfile, G2SettingsReadStats* stats = nullptr) {
+  return g2SettingsReadFreshEx(arm, generation, out, fullWearProfile, G2_SETTINGS_READ_ATTEMPTS_MAX,
+                               G2_SETTINGS_READ_LONG_WAIT_MS, stats);
 }
 
 static void g2SettingsPrimeIfNeeded(G2Temple& arm, uint32_t generation) {
@@ -26862,6 +27084,13 @@ static bool g2SettingsFirmwareKnown(const char* version) {
 }
 
 static bool g2BothFirmwareExact(const char* expected);
+
+// True when the glasses report this knob's value back. Silent mode's f14 is
+// reported only by the exact 2.3.2.14 pair.
+static bool g2GlassesHasReadback(const G2GlassesKnob& k) {
+  if (k.echoField == 0) return false;
+  return k.echoField != 14 || g2BothFirmwareExact("2.3.2.14");
+}
 
 static const char* cmd_g2glasses(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -26887,15 +27116,41 @@ static const char* cmd_g2glasses(const String& argsInput) {
     if (sub == "refresh") {
       // Keep this request's response even if an async push replaces the cache
       // before formatting. Only its correlated full reply can supply default OFF.
-      if (!g2SettingsReadFresh(*arm, generation, &echo, &fullWearProfile))
+      // Resent up to three times: one slow reply is not a failed refresh.
+      if (!g2SettingsReadFreshRetried(*arm, generation, &echo, &fullWearProfile))
         return "Error: G2 glasses: the glasses did not answer the settings read. "
                "Run g2glasses refresh again.";
       echoMs = millis();
     } else {
       g2SettingsPrimeIfNeeded(*arm, generation);
-      if (!g2SettingsEchoSnapshot(&echo, &echoMs, generation, &fullWearProfile))
-        return "Error: G2 glasses: no settings snapshot yet, the glasses did not answer the read. "
-               "Run g2glasses refresh.";
+      if (!g2SettingsEchoSnapshot(&echo, &echoMs, generation, &fullWearProfile)) {
+        // The short priming read went unanswered and nothing is cached: read
+        // again with the long, resent read before giving up.
+        if (!g2SettingsReadFreshRetried(*arm, generation, &echo, &fullWearProfile))
+          return "Error: G2 glasses: no settings snapshot yet, the glasses did not answer the read. "
+                 "Run g2glasses refresh.";
+        echoMs = millis();
+      }
+      // The glasses leave a zero (off) scalar out of every reply, and only a
+      // correlated full read may turn a missing wear (f10), silent (f14,
+      // 2.3.2.14 only), auto-brightness (f18, 2.3.2.14 only) or head-up (f7,
+      // 2.3.2.14 only) field into "off". When the cached snapshot came from
+      // the glasses' own updates, read again (once) instead of printing an
+      // unknown. Only the 2.3.2.14 pair ever gives a full reply, so other
+      // firmware is not re-read.
+      const bool fullReadable = g2BothFirmwareExact("2.3.2.14");
+      if (!fullWearProfile && fullReadable &&
+          (!G2_ECHO_HAS(echo, 10) || !G2_ECHO_HAS(echo, 14) || !G2_ECHO_HAS(echo, 18) ||
+           !G2_ECHO_HAS(echo, 7))) {
+        G2SettingsEcho fresh;
+        bool freshFull = false;
+        // The long, resent read: one slow reply must not leave silent "unknown".
+        if (g2SettingsReadFreshRetried(*arm, generation, &fresh, &freshFull)) {
+          echo = fresh;
+          fullWearProfile = freshFull;
+          echoMs = millis();
+        }
+      }
     }
     BROADCAST_PRINTF("G2 glasses settings (device-reported, %lu ms old):",
                      (unsigned long)(millis() - echoMs));
@@ -26905,6 +27160,14 @@ static const char* cmd_g2glasses(const String& argsInput) {
       if (g2GlassesEchoValue(echo, k, &v, fullWearProfile)) {
         if (k.isBool) BROADCAST_PRINTF("  %-11s %s", k.name, v ? "on" : "off");
         else          BROADCAST_PRINTF("  %-11s %u", k.name, (unsigned)v);
+      } else if (k.echoField == 14 && g2GlassesHasReadback(k)) {
+        // The glasses' own updates never carry f14, even while silent is on;
+        // only a full correlated read can say on or off.
+        BROADCAST_PRINTF("  %-11s (unknown: only a full settings read reports it; g2glasses refresh reads it)",
+                         k.name);
+      } else if (g2GlassesHasReadback(k)) {
+        // Reported when non-zero; this reply left it out (off on a full read).
+        BROADCAST_PRINTF("  %-11s (left out of this reply: the glasses omit zero/off values)", k.name);
       } else {
         BROADCAST_PRINTF("  %-11s (not reported by this firmware)", k.name);
       }
@@ -26922,6 +27185,14 @@ static const char* cmd_g2glasses(const String& argsInput) {
     return ret;
   }
 
+  // `help` lists every setting with its range or note (the knob table's help).
+  if (sub == "help") {
+    for (size_t i = 0; i < kG2GlassesKnobCount; i++)
+      BROADCAST_PRINTF("  %s", kG2GlassesKnobs[i].help);
+    snprintf(ret, sizeof(ret), "G2 glasses: %u settings listed", (unsigned)kG2GlassesKnobCount);
+    return ret;
+  }
+
   // Resolve the knob.
   const G2GlassesKnob* knob = nullptr;
   for (size_t i = 0; i < kG2GlassesKnobCount; i++) {
@@ -26933,7 +27204,7 @@ static const char* cmd_g2glasses(const String& argsInput) {
     for (size_t i = 0; i < kG2GlassesKnobCount && used < sizeof(ret); i++) {
       used += (size_t)snprintf(ret + used, sizeof(ret) - used, "%s, ", kG2GlassesKnobs[i].name);
     }
-    if (used < sizeof(ret)) snprintf(ret + used, sizeof(ret) - used, "show or refresh.");
+    if (used < sizeof(ret)) snprintf(ret + used, sizeof(ret) - used, "show, refresh or help.");
     return ret;
   }
 
@@ -26944,14 +27215,42 @@ static const char* cmd_g2glasses(const String& argsInput) {
     bool fullWearProfile = false;
     const bool haveEcho =
         g2SettingsEchoSnapshot(&echo, nullptr, generation, &fullWearProfile);
+    // Same rule as the bare show: on the 2.3.2.14 pair a missing wear (f10),
+    // silent (f14), auto-brightness (f18) or head-up (f7) field in a snapshot
+    // from the glasses' own updates is read again, since only a correlated
+    // full reply can turn it into "off".
+    if (haveEcho && !fullWearProfile &&
+        (knob->echoField == 7 || knob->echoField == 10 || knob->echoField == 14 || knob->echoField == 18) &&
+        !G2_ECHO_HAS(echo, knob->echoField) && g2BothFirmwareExact("2.3.2.14")) {
+      G2SettingsEcho fresh;
+      bool freshFull = false;
+      if (g2SettingsReadFreshRetried(*arm, generation, &fresh, &freshFull)) {
+        echo = fresh;
+        fullWearProfile = freshFull;
+      }
+    }
     if (haveEcho && g2GlassesEchoValue(echo, *knob, &cur, fullWearProfile)) {
       if (knob->isBool)
         snprintf(ret, sizeof(ret), "G2 glasses: %s = %s", knob->name, cur ? "on" : "off");
       else
         snprintf(ret, sizeof(ret), "G2 glasses: %s = %u", knob->name, (unsigned)cur);
-    } else if (!haveEcho && knob->echoField != 0) {
+    } else if (!haveEcho && g2GlassesHasReadback(*knob)) {
       // The setting has a read-back, but nothing has been read yet.
       return "Error: G2 glasses: no settings snapshot yet. Run g2glasses refresh first.";
+    } else if (knob->echoField == 14 && g2GlassesHasReadback(*knob)) {
+      // The glasses' own updates never carry silent mode (f14), even while
+      // it is on, so a missing f14 here says nothing about off.
+      snprintf(ret, sizeof(ret),
+               "G2 glasses: %s — unknown: the glasses' own updates never carry silent mode; "
+               "g2glasses refresh reads it",
+               knob->name);
+    } else if (g2GlassesHasReadback(*knob)) {
+      // A field with a read-back that the last reply left out: the glasses
+      // omit zero (off) values, and only a fresh full read can say "off".
+      snprintf(ret, sizeof(ret),
+               "G2 glasses: %s — not reported in the last settings reply (the glasses omit zero/off "
+               "values); g2glasses refresh reads it fresh",
+               knob->name);
     } else {
       snprintf(ret, sizeof(ret),
                "G2 glasses: %s — not reported by this firmware; set it to see the ack",
@@ -27004,21 +27303,45 @@ static const char* cmd_g2glasses(const String& argsInput) {
     firmware[sizeof(firmware) - 1] = '\0';
     portEXIT_CRITICAL(&gRxPacketMux);
   }
-  const bool candidateWear = strcmp(firmware, "2.3.2.14") == 0 &&
-      knob->innerField == G2_SETW_F_WEAR_DETECT && g2BothFirmwareExact("2.3.2.14");
-  if (!g2SettingsFirmwareKnown(firmware) && !candidateWear) {
-    snprintf(ret, sizeof(ret), "Error: G2 glasses: %s is not enabled on firmware '%s' (2.3.2.14 candidate is wear-only, exact pair)",
+  // 2.3.2.14 admits only the captured writes on the exact pair: the switches
+  // wear (f5), silent (f6), auto brightness (f1 leaf 1) and head-up (f4 leaf
+  // 1), and the brightness level (f1 leaf 2, captured 2..100 on the 0-100
+  // scale). The switches are read back from the full BASIC reply, the level
+  // from BASIC f2. The head-up angle (f4 leaf 2) stays refused here.
+  const bool candidateSwitch = strcmp(firmware, "2.3.2.14") == 0 &&
+      (knob->innerField == G2_SETW_F_WEAR_DETECT || knob->innerField == G2_SETW_F_SILENT ||
+       knob->innerField == G2_SETW_F_BRIGHTNESS ||
+       (knob->innerField == G2_SETW_F_HEAD_UP && knob->leafField == G2_SETW_HEADUP_F_SWITCH)) &&
+      g2BothFirmwareExact("2.3.2.14");
+  if (!g2SettingsFirmwareKnown(firmware) && !candidateSwitch) {
+    snprintf(ret, sizeof(ret), "Error: G2 glasses: %s is not enabled on firmware '%s' (2.3.2.14 candidates are weardetect, silent, autobright, headup and brightness only, exact pair)",
              knob->name, firmware[0] ? firmware : "unknown");
     return ret;
   }
-  const bool isHeadUpWrite = knob->innerField == G2_SETW_F_HEAD_UP;
+  // The app's slider never sent less than 2 on 2.3.2.14, so 0 and 1 are not
+  // captured bytes there. A level of 0 would also be left out of BASIC f2
+  // (nanopb omits a zero), and the Brightness QuickList row would stay "?".
+  if (candidateSwitch && knob->innerField == G2_SETW_F_BRIGHTNESS && knob->leafField == G2_SETW_BRIGHT_F_LEVEL &&
+      value < 2)
+    return "Error: G2 glasses: brightness on 2.3.2.14 must be 2..100 (the app's captured range)";
+  const bool isHeadUpWrite = knob->innerField == G2_SETW_F_HEAD_UP && !candidateSwitch;
   if (isHeadUpWrite && !g2BothFirmwareExact("2.2.6.10"))
     return "Error: G2 glasses: HeadUp writes require both temples on exact captured firmware 2.2.6.10";
 
-  if (candidateWear) {
+  if (candidateSwitch) {
     bool fullWearProfile = false;
-    if (!g2SettingsReadFresh(*arm, generation, nullptr, &fullWearProfile) || !fullWearProfile)
-      return "Error: G2 glasses: no matching fresh RIGHT BASIC response with exact pair versions; wear write not sent";
+    // One attempt with the long wait: the console user retries a refused write.
+    if (!g2SettingsReadFreshEx(*arm, generation, nullptr, &fullWearProfile, 1,
+                               G2_SETTINGS_READ_LONG_WAIT_MS, nullptr) || !fullWearProfile) {
+      if (knob->innerField == G2_SETW_F_SILENT)
+        return "Error: G2 glasses: no matching fresh RIGHT BASIC response with exact pair versions; silent write not sent";
+      if (knob->innerField == G2_SETW_F_WEAR_DETECT)
+        return "Error: G2 glasses: no matching fresh RIGHT BASIC response with exact pair versions; wear write not sent";
+      snprintf(ret, sizeof(ret),
+               "Error: G2 glasses: no matching fresh RIGHT BASIC response with exact pair versions; %s write not sent",
+               knob->name);
+      return ret;
+    }
   } else g2SettingsPrimeIfNeeded(*arm, generation);
 
   const uint8_t writeMagic = g2NextSettingsMagic();
@@ -27035,9 +27358,9 @@ static const char* cmd_g2glasses(const String& argsInput) {
              knob->name, (unsigned)knob->innerField, (unsigned)knob->leafField);
     return ret;
   }
-  const bool sent = (candidateWear || isHeadUpWrite)
+  const bool sent = (candidateSwitch || isHeadUpWrite)
       ? sendEnvelopeExactGeneration(*arm, env, n, generation,
-                                    candidateWear ? "2.3.2.14" : "2.2.6.10")
+                                    candidateSwitch ? "2.3.2.14" : "2.2.6.10")
       : sendEnvelopeAtGeneration(*arm, env, n, generation);
   if (!sent) {
     g2SettingsAckClear();
@@ -27055,25 +27378,35 @@ static const char* cmd_g2glasses(const String& argsInput) {
            "Reconnect and run g2glasses refresh to check.";
 
   // A correlated readback can confirm a no-op even when firmware omits its
-  // write ACK. Missing scalars remain unknown except wear's qualified full
-  // 2.3.2.14 BASIC response, whose nanopb schema omits an OFF value.
+  // write ACK. Missing scalars remain unknown except wear's, silent's and
+  // auto brightness's qualified full 2.3.2.14 BASIC response, which omits an
+  // OFF value (f18: to confirm on the device test).
   G2SettingsEcho afterEcho;
   bool fullWearProfile = false;
   uint8_t observed = 0;
   // readOk: the glasses answered this read. haveAfter: the answer also carries
   // the setting. The two differ when the glasses leave the field out.
-  const bool readOk = g2SettingsReadFresh(*arm, generation, &afterEcho, &fullWearProfile);
+  const bool readOk = g2SettingsReadFreshEx(*arm, generation, &afterEcho, &fullWearProfile, 1,
+                                            G2_SETTINGS_READ_LONG_WAIT_MS, nullptr);
   const bool haveAfter = readOk &&
-      g2GlassesEchoValue(afterEcho, *knob, &observed, candidateWear && fullWearProfile);
+      g2GlassesEchoValue(afterEcho, *knob, &observed, candidateSwitch && fullWearProfile);
   if (!g2TempleReadyAtGeneration(*arm, generation))
     return "Error: G2 glasses: connection changed during readback; result unconfirmed. "
            "Reconnect and run g2glasses refresh to check.";
+  // The 2.3.2.14 glasses keep only even brightness levels: an odd level reads
+  // back one lower (25 -> 24, 75 -> 74; hw1_g2_quicklist::brightnessLevelMatches).
+  const bool levelKnob = knob->innerField == G2_SETW_F_BRIGHTNESS && knob->leafField == G2_SETW_BRIGHT_F_LEVEL;
+  const bool evenLevel = haveAfter && candidateSwitch && levelKnob && observed != value &&
+      !(G2_ECHO_HAS(afterEcho, 18) && afterEcho.autoBrightness) &&
+      hw1_g2_quicklist::brightnessLevelMatches((uint8_t)value, observed);
   if (haveAfter && observed == value) {
     snprintf(ret, sizeof(ret), "G2 glasses: %s = %u confirmed by fresh RIGHT readback%s",
              knob->name, (unsigned)value, acked ? " and matching ACK" : " (no matching ACK)");
-  } else if (haveAfter && acked && knob->innerField == G2_SETW_F_BRIGHTNESS &&
-             knob->leafField == G2_SETW_BRIGHT_F_LEVEL &&
-             G2_ECHO_HAS(afterEcho, 18) && afterEcho.autoBrightness) {
+  } else if (evenLevel) {
+    snprintf(ret, sizeof(ret),
+             "G2 glasses: %s = %u stored as %u (the glasses keep even levels), confirmed by fresh RIGHT readback%s",
+             knob->name, (unsigned)value, (unsigned)observed, acked ? " and matching ACK" : " (no matching ACK)");
+  } else if (haveAfter && acked && levelKnob && G2_ECHO_HAS(afterEcho, 18) && afterEcho.autoBrightness) {
     // The glasses took the level (matching ACK). With auto brightness on they
     // move it again on their own, so another level in the readback is not a
     // failed write.
@@ -27095,7 +27428,7 @@ static const char* cmd_g2glasses(const String& argsInput) {
   } else if (acked) {
     snprintf(ret, sizeof(ret), "G2 glasses: %s = %u acked by RIGHT glasses; fresh readback unavailable",
              knob->name, (unsigned)value);
-  } else if (knob->echoField == 0) {
+  } else if (!g2GlassesHasReadback(*knob)) {
     // No read-back exists for this setting, and the glasses do not acknowledge
     // a value they already have, so this is also the answer for a no-op.
     snprintf(ret, sizeof(ret), "G2 glasses: %s = %u sent without matching ACK or fresh readback; unconfirmed",
@@ -27143,6 +27476,362 @@ static bool g2BothFirmwareExact(const char* expected) {
   portEXIT_CRITICAL(&gRxPacketMux);
   return match;
 }
+
+#if ENABLE_G2_QUICKLIST
+// QuickList row boundary (G2_QuickList: wear detection, silent mode, auto
+// brightness, head-up display, brightness). The read and the row writes replay
+// cmd_g2glasses' 2.3.2.14 path with typed results; cmd_exec only, because the
+// replies they wait for are parsed on g2_owner.
+static const G2GlassesKnob* g2QuickListKnob(uint8_t innerField, uint8_t leafField = 1) {
+  for (size_t i = 0; i < kG2GlassesKnobCount; i++)
+    if (kG2GlassesKnobs[i].innerField == innerField && kG2GlassesKnobs[i].leafField == leafField &&
+        kG2GlassesKnobs[i].isBool == (leafField == 1)) return &kG2GlassesKnobs[i];
+  return nullptr;
+}
+static_assert(G2_SETW_WEAR_F_SWITCH == 1 && G2_SETW_SILENT_F_SWITCH == 1 && G2_SETW_BRIGHT_F_AUTO == 1 &&
+              G2_SETW_HEADUP_F_SWITCH == 1, "QuickList switches are leaf 1");
+// G2_QuickListCore.h names the same fields (rowWriteAllowed) without this header.
+static_assert(hw1_g2_quicklist::kSetwBrightness == G2_SETW_F_BRIGHTNESS &&
+              hw1_g2_quicklist::kSetwHeadUp == G2_SETW_F_HEAD_UP &&
+              hw1_g2_quicklist::kSetwWear == G2_SETW_F_WEAR_DETECT &&
+              hw1_g2_quicklist::kSetwSilent == G2_SETW_F_SILENT &&
+              hw1_g2_quicklist::kSetwLeafSwitch == G2_SETW_WEAR_F_SWITCH &&
+              hw1_g2_quicklist::kSetwLeafLevel == G2_SETW_BRIGHT_F_LEVEL,
+              "the QuickList write whitelist uses the G2_SETW_* field numbers");
+static void g2QuickListDiag(const G2SettingsReadStats& st, hw1_g2_quicklist::ReadDiag* d) {
+  d->attempts = st.attempts;
+  d->answeredAttempt = st.answeredAttempt;
+  d->otherReplies = st.otherReplies;
+  d->otherFrames = st.otherFrames;
+  d->replyMs = st.replyMs;
+  d->totalMs = st.totalMs;
+}
+
+bool g2QuickListLink(G2QuickListLinkState* out) {
+  *out = G2QuickListLinkState{};
+  const G2LinkSnapshot link = g2LinkSnapshot();
+  out->bothReady = link.leftReady && link.rightReady && link.leftGeneration && link.rightGeneration;
+  out->leftGeneration = link.leftGeneration;
+  out->rightGeneration = link.rightGeneration;
+  out->busy = g2NativeVoiceActive() || quickNoteActive();
+  portENTER_CRITICAL(&gRxPacketMux);
+  strlcpy(out->leftFw, gL.firmwareVersion, sizeof(out->leftFw));
+  strlcpy(out->rightFw, gR.firmwareVersion, sizeof(out->rightFw));
+  portEXIT_CRITICAL(&gRxPacketMux);
+  out->firmwareKnown = out->leftFw[0] && out->rightFw[0];
+  out->firmwareExact = g2BothFirmwareExact(hw1_g2_quicklist::kFirmware);
+  return out->bothReady;
+}
+
+bool g2QuickListWireSend(uint32_t rightGeneration, const uint8_t* pb, size_t len) {
+  // Last gate before the radio: the exact whitelisted FULL_UPDATE of the five rows, exact pair.
+  if (!rightGeneration || !hw1_g2_quicklist::validateFullUpdatePb(pb, len) ||
+      !g2BothFirmwareExact(hw1_g2_quicklist::kFirmware)) return false;
+  return sendPbFragmented(gR, allocSeq(), hw1_g2_quicklist::kSid, G2_FLAG_REQUEST,
+                          pb, len, rightGeneration);
+}
+
+void g2QuickListWake() { g2ControlWake(); }
+
+// One answered read's echo into the brightness fields every write result
+// carries: the level (f2) and auto brightness (f18; omitted = off only on a
+// full reply).
+static void g2QuickListBrightnessFields(const G2SettingsEcho& echo, bool full, hw1_g2_quicklist::WearResult* r) {
+  const G2GlassesKnob* autoKnob = g2QuickListKnob(G2_SETW_F_BRIGHTNESS, G2_SETW_BRIGHT_F_AUTO);
+  const G2GlassesKnob* levelKnob = g2QuickListKnob(G2_SETW_F_BRIGHTNESS, G2_SETW_BRIGHT_F_LEVEL);
+  uint8_t v = 0;
+  r->levelKnown = levelKnob && g2GlassesEchoValue(echo, *levelKnob, &v, full);
+  r->level = r->levelKnown ? v : 0;
+  v = 0;
+  r->autoKnown = autoKnob && g2GlassesEchoValue(echo, *autoKnob, &v, full);
+  r->autoOn = r->autoKnown && v != 0;
+}
+
+bool g2QuickListSettingsRead(uint32_t rightGeneration, hw1_g2_quicklist::ReadResult* out) {
+  namespace ql = hw1_g2_quicklist;
+  *out = ql::ReadResult{};
+  G2_ASSERT_NOT_ACK_OWNER_TASK("g2QuickListSettingsRead");
+  // [rowSlot(Control)] for the four switch rows: wear, silent, auto brightness
+  // (f1 leaf 1), head-up (f4 leaf 1). The Brightness row (slot 4) is made from
+  // auto brightness and the level (f1 leaf 2).
+  const G2GlassesKnob* knobs[ql::kRowCount - 1] = {
+      g2QuickListKnob(G2_SETW_F_WEAR_DETECT), g2QuickListKnob(G2_SETW_F_SILENT),
+      g2QuickListKnob(G2_SETW_F_BRIGHTNESS), g2QuickListKnob(G2_SETW_F_HEAD_UP)};
+  const G2GlassesKnob* levelKnob = g2QuickListKnob(G2_SETW_F_BRIGHTNESS, G2_SETW_BRIGHT_F_LEVEL);
+  static_assert(ql::kRowCount == 5 && (uint8_t)ql::Control::HeadUp == 3 && (uint8_t)ql::Control::Brightness == 4,
+                "one knob per QuickList switch row, then the Brightness row");
+  for (const G2GlassesKnob* k : knobs)
+    if (!k) return false;
+  if (!levelKnob) return false;
+  if (!rightGeneration || !g2TempleReadyAtGeneration(gR, rightGeneration)) return false;
+  G2SettingsEcho echo;
+  bool full = false;
+  G2SettingsReadStats st;
+  const bool answered = g2SettingsReadFreshRetried(gR, rightGeneration, &echo, &full, &st);
+  g2QuickListDiag(st, &out->diag);
+  if (!answered) return false;
+  out->readOk = true;
+  out->fullProfile = full;
+  for (uint8_t i = 0; i < ql::kRowCount - 1; ++i) {
+    uint8_t v = 0;
+    // A missing field is OFF only in the full correlated 2.3.2.14 reply
+    // (f18 off and f7 off: to confirm on the device test).
+    out->sw[i].known = g2GlassesEchoValue(echo, *knobs[i], &v, full);
+    out->sw[i].on = out->sw[i].known && v != 0;
+  }
+  uint8_t level = 0;
+  const bool levelKnown = g2GlassesEchoValue(echo, *levelKnob, &level, full);
+  out->sw[ql::rowSlot(ql::Control::Brightness)] =
+      ql::brightnessRowState(out->sw[ql::rowSlot(ql::Control::AutoBright)], levelKnown, level);
+  return true;
+}
+
+// Waits `ms` in kReadbackSliceMs slices. False as soon as the right temple is
+// no longer ready at `rightGeneration` (the write then reports the link lost).
+static bool g2QuickListWaitReady(uint32_t rightGeneration, uint32_t ms) {
+  for (uint32_t waited = 0; waited < ms;) {
+    if (!g2TempleReadyAtGeneration(gR, rightGeneration)) return false;
+    const uint32_t left = ms - waited;
+    const uint32_t step = left < hw1_g2_quicklist::kReadbackSliceMs ? left : hw1_g2_quicklist::kReadbackSliceMs;
+    vTaskDelay(pdMS_TO_TICKS(step));
+    waited += step;
+  }
+  return g2TempleReadyAtGeneration(gR, rightGeneration);
+}
+
+// The pre-read every row write starts with: the same precondition as the CLI,
+// a correlated BASIC reply carrying both exact versions. Done = go on (the echo
+// in *before); otherwise the stage to report.
+static hw1_g2_quicklist::WearStage g2QuickListPreRead(uint32_t rightGeneration, G2SettingsEcho* before,
+                                                      hw1_g2_quicklist::WearResult* r) {
+  using hw1_g2_quicklist::WearStage;
+  bool full = false;
+  G2SettingsReadStats st;
+  const bool preReadOk = g2SettingsReadFreshRetried(gR, rightGeneration, before, &full, &st);
+  g2QuickListDiag(st, &r->preRead);
+  if (!preReadOk) return WearStage::PreReadFailed;
+  if (!full) return g2BothFirmwareExact(hw1_g2_quicklist::kFirmware) ? WearStage::PreReadFailed : WearStage::FwRejected;
+  // The version strings are stored just after the matched echo is published
+  // (handleEnvelope G2_SID_SETTINGS); give g2_owner a moment on a cold link.
+  for (unsigned i = 0; i < hw1_g2_quicklist::kVersionWaitMs / 10 && !g2BothFirmwareExact(hw1_g2_quicklist::kFirmware); ++i)
+    vTaskDelay(pdMS_TO_TICKS(10));
+  return WearStage::Done;
+}
+
+// One settings write (sid 0x09, flag 0x20) to the exact pair and its ACK wait
+// (kAckWaitMs). Only the writes rowWriteAllowed names are ever built. Done =
+// sent (*acked = the matching ACK came); otherwise BuilderRejected or SendFailed.
+static hw1_g2_quicklist::WearStage g2QuickListWriteOnce(uint32_t rightGeneration, uint8_t innerField,
+                                                        uint8_t leafField, uint32_t value, bool* acked) {
+  using hw1_g2_quicklist::WearStage;
+  *acked = false;
+  if (!hw1_g2_quicklist::rowWriteAllowed(innerField, leafField, value)) return WearStage::BuilderRejected;
+  const uint8_t magic = g2NextSettingsMagic();
+  g2SettingsAckArm(rightGeneration, magic, innerField, leafField, value);
+  uint8_t env[64];
+  const size_t n = g2BuildSettingInfoWrite(allocSeq(), magic, innerField, leafField, value, env, sizeof(env));
+  if (!n) { g2SettingsAckClear(); return WearStage::BuilderRejected; }
+  if (!sendEnvelopeExactGeneration(gR, env, n, rightGeneration, hw1_g2_quicklist::kFirmware)) {
+    g2SettingsAckClear();
+    return WearStage::SendFailed;
+  }
+  for (unsigned i = 0; i < hw1_g2_quicklist::kAckWaitMs / 10 && g2TempleReadyAtGeneration(gR, rightGeneration); ++i) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+    if (g2SettingsAckSnapshot(rightGeneration, magic)) { *acked = true; break; }
+  }
+  g2SettingsAckClear();
+  return WearStage::Done;
+}
+
+// The delayed read-back after a write (G2_QuickListCore.h kReadbackDelayMs: at
+// most two read-backs, never a poll). `fill(echo, full, into)` sets the
+// written row's known/on from one answered read (the brightness fields are
+// filled for every row); `confirmed(r)` says whether it shows what was
+// written. Sets r->stage to Done, LostAfterSend or LostDuringReadback.
+template <typename Fill, typename Confirmed>
+static void g2QuickListReadBack(uint32_t rightGeneration, uint32_t startMs, hw1_g2_quicklist::WearResult* r,
+                                Fill fill, Confirmed confirmed) {
+  using hw1_g2_quicklist::WearStage;
+  namespace ql = hw1_g2_quicklist;
+  // Read back after kReadbackDelayMs, not at once: a read-back 139 ms after an
+  // ACKed silent write still said off. Lost before the first read-back = lost
+  // after send.
+  if (!g2QuickListWaitReady(rightGeneration, ql::kReadbackDelayMs)) {
+    r->stage = WearStage::LostAfterSend;
+    return;
+  }
+  // One read-back into `into` (readOk/known/on/fullProfile and the brightness fields) and `diag`.
+  auto readBack = [&](ql::WearResult* into, ql::ReadDiag* diag) {
+    G2SettingsEcho after;
+    bool fullAfter = false;
+    G2SettingsReadStats rs;
+    into->readOk = g2SettingsReadFreshRetried(gR, rightGeneration, &after, &fullAfter, &rs);
+    g2QuickListDiag(rs, diag);
+    into->fullProfile = fullAfter;
+    if (into->readOk) {
+      g2QuickListBrightnessFields(after, fullAfter, into);
+      fill(after, fullAfter, into);
+    } else {
+      into->known = into->on = into->levelKnown = into->autoKnown = into->autoOn = false;
+      into->level = 0;
+    }
+  };
+  readBack(r, &r->readBack);
+  if (!g2TempleReadyAtGeneration(gR, rightGeneration)) {
+    r->stage = WearStage::LostDuringReadback;
+    r->known = false;
+    return;
+  }
+  // Not the written state, or unanswered: once more, kReadbackRecheckMs later,
+  // unless the write already ran so long that the recheck could outlast the
+  // owner's job backstop (kReadbackRecheckBudgetMs).
+  if (!confirmed(*r)) {
+    if ((uint32_t)(millis() - startMs) > ql::kReadbackRecheckBudgetMs) {
+      r->recheckSkipped = true;
+    } else {
+      if (!g2QuickListWaitReady(rightGeneration, ql::kReadbackRecheckMs)) {
+        r->stage = WearStage::LostDuringReadback;
+        r->known = false;
+        return;
+      }
+      r->rechecked = true;
+      ql::WearResult second{};
+      readBack(&second, &r->recheck);
+      // The newer answer wins; an unanswered recheck keeps the first
+      // read-back's answer (a real reply, even if it said the other state).
+      if (second.readOk || !r->readOk) ql::takeReadBack(*r, second);
+      if (!g2TempleReadyAtGeneration(gR, rightGeneration)) {
+        r->stage = WearStage::LostDuringReadback;
+        r->known = false;
+        return;
+      }
+    }
+  }
+  r->stage = WearStage::Done;
+}
+
+// The switch write: pre-read, write, ACK wait, then the delayed read-back.
+static bool g2QuickListSwitchWrite(uint8_t innerField, uint32_t rightGeneration, bool on,
+                                   hw1_g2_quicklist::WearResult* r) {
+  using hw1_g2_quicklist::WearStage;
+  namespace ql = hw1_g2_quicklist;
+  *r = ql::WearResult{};
+  G2_ASSERT_NOT_ACK_OWNER_TASK("g2QuickListSwitchWrite");    // stage stays NotReady
+  const uint32_t startMs = millis();
+  const G2GlassesKnob* knob = g2QuickListKnob(innerField);
+  if (!knob || !rightGeneration || !g2TempleReadyAtGeneration(gR, rightGeneration)) return false;
+  G2SettingsEcho before;
+  const WearStage pre = g2QuickListPreRead(rightGeneration, &before, r);
+  if (pre != WearStage::Done) { r->stage = pre; return false; }
+  uint8_t cur = 0;
+  if (g2GlassesEchoValue(before, *knob, &cur, true) && (cur != 0) == on) {
+    r->stage = WearStage::AlreadySet;
+    r->readOk = r->known = r->fullProfile = true;
+    r->on = on;
+    g2QuickListBrightnessFields(before, true, r);   // an Auto Brightness row tick refreshes Brightness
+    return true;
+  }
+  const WearStage sent = g2QuickListWriteOnce(rightGeneration, knob->innerField, knob->leafField, on ? 1 : 0,
+                                              &r->acked);
+  if (sent != WearStage::Done) { r->stage = sent; return false; }
+  g2QuickListReadBack(
+      rightGeneration, startMs, r,
+      [knob](const G2SettingsEcho& after, bool fullAfter, ql::WearResult* into) {
+        uint8_t observed = 0;
+        into->known = g2GlassesEchoValue(after, *knob, &observed, fullAfter);
+        into->on = into->known && observed != 0;
+      },
+      [on](const ql::WearResult& x) { return x.known && x.on == on; });
+  if (r->stage != WearStage::Done) return false;
+  return r->known && r->on == on;
+}
+
+bool g2QuickListWearWrite(uint32_t rightGeneration, bool on, hw1_g2_quicklist::WearResult* r) {
+  return g2QuickListSwitchWrite(G2_SETW_F_WEAR_DETECT, rightGeneration, on, r);
+}
+
+bool g2QuickListSilentWrite(uint32_t rightGeneration, bool on, hw1_g2_quicklist::WearResult* r) {
+  return g2QuickListSwitchWrite(G2_SETW_F_SILENT, rightGeneration, on, r);
+}
+
+// Auto brightness, f1 leaf 1 (g2QuickListKnob's default leaf; never the level).
+// The captured ACK echoes the explicit zero (1a 04 0a 02 08 00), which the
+// generic ACK parser matches; the read-back is BASIC f18. The result also
+// carries the level (f2), so the Brightness row follows the tick.
+bool g2QuickListAutoBrightWrite(uint32_t rightGeneration, bool on, hw1_g2_quicklist::WearResult* r) {
+  return g2QuickListSwitchWrite(G2_SETW_F_BRIGHTNESS, rightGeneration, on, r);
+}
+
+// Head-up display switch, f4 leaf 1 (never the angle, leaf 2). Captured on
+// 2.3.2.14: 1a 04 22 02 08 0v, and the ACK echoes the explicit zero (like auto
+// brightness); the read-back is BASIC f7 (off = omitted from a full reply, to
+// confirm on the device test).
+bool g2QuickListHeadUpWrite(uint32_t rightGeneration, bool on, hw1_g2_quicklist::WearResult* r) {
+  return g2QuickListSwitchWrite(G2_SETW_F_HEAD_UP, rightGeneration, on, r);
+}
+
+// The Brightness row's tick: pre-read; with auto brightness on, write it OFF
+// (captured 0a 02 08 00), wait for its ACK, then write level 25; with it off,
+// write the next of 25/50/75/100 after the current level (100 -> 25; 24 counts
+// as 25 and 74 as 75, brightnessStep). No level write when the auto-off write
+// was not ACKed. Then the delayed read-back confirms f2 matches the level (an
+// odd level reads back one lower, brightnessLevelMatches) and, when auto was
+// turned off, f18 off. Both writes
+// run in this one job (kBrightnessWriteWorstMs).
+bool g2QuickListBrightnessWrite(uint32_t rightGeneration, hw1_g2_quicklist::WearResult* r) {
+  using hw1_g2_quicklist::WearStage;
+  namespace ql = hw1_g2_quicklist;
+  *r = ql::WearResult{};
+  G2_ASSERT_NOT_ACK_OWNER_TASK("g2QuickListBrightnessWrite");    // stage stays NotReady
+  const uint32_t startMs = millis();
+  if (!rightGeneration || !g2TempleReadyAtGeneration(gR, rightGeneration)) return false;
+  G2SettingsEcho before;
+  const WearStage pre = g2QuickListPreRead(rightGeneration, &before, r);
+  if (pre != WearStage::Done) { r->stage = pre; return false; }
+  ql::WearResult now{};
+  g2QuickListBrightnessFields(before, true, &now);
+  if (!now.autoKnown) { r->stage = WearStage::PreReadFailed; return false; }   // never on a full reply
+  r->autoWasOn = now.autoOn;
+  // Auto off and no level in the reply: nothing to step from, so the first step.
+  r->target = ql::brightnessTarget(now.autoOn, now.levelKnown ? now.level : 0);
+  bool levelWrite = true;
+  if (now.autoOn) {
+    const WearStage sent = g2QuickListWriteOnce(rightGeneration, G2_SETW_F_BRIGHTNESS, G2_SETW_BRIGHT_F_AUTO, 0,
+                                                &r->autoAcked);
+    if (sent != WearStage::Done) { r->stage = sent; return false; }
+    r->autoWritten = true;
+    // No ACK: the glasses may not have taken it, and a level written while
+    // auto brightness is on is overridden within seconds. Read back only.
+    if (!r->autoAcked) levelWrite = false;
+    if (!g2TempleReadyAtGeneration(gR, rightGeneration)) { r->stage = WearStage::LostAfterSend; return false; }
+  }
+  if (levelWrite) {
+    const WearStage sent = g2QuickListWriteOnce(rightGeneration, G2_SETW_F_BRIGHTNESS, G2_SETW_BRIGHT_F_LEVEL,
+                                                r->target, &r->acked);
+    // A refused level send after an ACKed auto-off write: the owner reads
+    // every row again (afterApply ReadThenPush), so both rows show it.
+    if (sent != WearStage::Done) { r->stage = sent; return false; }
+    r->levelWritten = true;
+  }
+  g2QuickListReadBack(
+      rightGeneration, startMs, r,
+      [](const G2SettingsEcho&, bool, ql::WearResult* into) {
+        const ql::SwitchState s = ql::brightnessRowState(ql::SwitchState{into->autoKnown, into->autoOn, 0},
+                                                         into->levelKnown, into->level);
+        into->known = s.known;
+        into->on = s.on;
+      },
+      // Without the level write (auto-off not ACKed in time) only auto off is
+      // checked: an ACK noted late or a slow apply leaves the first read-back
+      // still "on", so that gets the one recheck like every other row write.
+      [levelWrite](const ql::WearResult& x) {
+        return levelWrite ? ql::brightnessConfirmed(x) : (x.readOk && x.autoKnown && !x.autoOn);
+      });
+  if (r->stage != WearStage::Done) return false;
+  if (!levelWrite) { r->stage = WearStage::AutoOffUnacked; return false; }
+  return ql::brightnessConfirmed(*r);
+}
+#endif  // ENABLE_G2_QUICKLIST
 
 static const char* cmd_g2notifenable(const String& /*argsInput*/) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -28606,7 +29295,7 @@ extern const CommandEntry g2Commands[] = {
   { "g2micwav",     "G2 mic decode: g2micwav start [\"path\"] | stop | status — decodes LC3 → 16k mono WAV on SD", false, cmd_g2micwav, "Usage: g2micwav start [\"path\"] | stop | status  (bare = status)" },
   { "g2protostats", "Show G2 protocol stats per sid: g2protostats [verbose]",      false, cmd_g2protostats, "Usage: g2protostats [verbose]" },
 #if ENABLE_G2_TESTSUITE
-  { "g2probe",      "Fire arbitrary pb cmd on non-mutation sids: g2probe <sid_hex> <cmd_dec> [body_hex]", false, cmd_g2probe, "Usage: g2probe <sid_hex> <cmd_dec> [body_hex]  (sids 01/03/04/09/80 blocked)" },
+  { "g2probe",      "Fire arbitrary pb cmd on non-mutation sids: g2probe <sid_hex> <cmd_dec> [body_hex] [R|L]", false, cmd_g2probe, "Usage: g2probe <sid_hex> <cmd_dec> [body_hex] [R|L]  (R/L forces a temple; sids 01/03/04/09/80 blocked)" },
 #endif
   { "g2devcfg",     "Typed sid=0x80 sender: g2devcfg <heartbeat|auth|role|time|ring> [args]", false, cmd_g2devcfg, "Usage: g2devcfg <heartbeat|auth|role <both|right|left>|time [tzQuarterHours]|ring <mac> <name>>" },
   { "g2notifenable","Prime native notifications on sid 0x04 (enable + whitelist-disable) before g2nativenotify", true, cmd_g2notifenable, "Usage: g2notifenable  (sends NOTIF_CTRL enable + WHITELIST_CTRL disable to the right arm)" },
@@ -28632,13 +29321,23 @@ extern const CommandEntry g2Commands[] = {
   { "g2 stats feed",     "Feed the stock widget with system metrics (saved; off by default).", true, cmd_g2statsfeed,
     "Usage: g2 stats feed [on|off]  (off clears the widget)" },
   { "g2 stats metrics",  "Which metrics the stock widget shows, in order (saved).", true, cmd_g2statsmetrics,
-    "Usage: g2 stats metrics [label,label,...|default]  (up to 9 of CPU CPU0 CPU1 HEAP HBLK PSRM SD LFS TEMP LINK MESH RING; default CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING)" },
+    "Usage: g2 stats metrics [label,label,...|default]  (up to 9 of CPU CPU0 CPU1 HEAP HBLK PSRM SD LFS TEMP LINK MESH RING CLK; default CPU,HEAP,PSRM,SD,LFS,CLK,LINK,MESH,RING)" },
   { "g2 stats interval", "How often the stock widget feed may send changed values (saved).", true, cmd_g2statsinterval,
     "Usage: g2 stats interval [seconds 30-3600]  (default 60; 10 s while the stock page is open)" },
   { "g2 stats pad",      "How the stock chart's left part is filled before its 185 points exist (saved).", true, cmd_g2statspad,
     "Usage: g2 stats pad [gap|flat]  (default gap: empty; flat: the oldest point repeated)" },
   { "g2 stats step",     "Seconds between stock chart points; the chart is 185 points (saved; a change starts it over).", true, cmd_g2statsstep,
     "Usage: g2 stats step [10|20|60]  (default 20: about 1 h; 10: 31 min; 60: 3 h 5 min)" },
+#if ENABLE_G2_QUICKLIST
+  // Control rows in the glasses' own QuickList (G2_QuickList).
+  { "g2 list status",  "QuickList rows (wear detection, silent mode, auto brightness, head-up display, brightness): feed, row text, ticks and writes.", false, cmd_g2liststatus },
+  { "g2 list preview", "Show the next QuickList rows' bytes without sending.", true, cmd_g2listpreview,
+    "Usage: g2 list preview" },
+  { "g2 list push",    "Read the glasses' settings and replace their QuickList with the five control rows now (items added in the Even app are removed).", true, cmd_g2listpush,
+    "Usage: g2 list push  (both temples, glasses firmware 2.3.2.14)" },
+  { "g2 list feed",    "Replace the glasses' QuickList with Wear Detection, Silent Mode, Auto Brightness, Head-Up Display and Brightness rows after each connect (saved; off by default).", true, cmd_g2listfeed,
+    "Usage: g2 list feed [on|off]" },
+#endif
   { "g2sensors",    "Show device's sensor list on the G2 lens",        false, cmd_g2sensors },
   { "g2network",    "Show Network info page on the G2 lens",           false, cmd_g2network },
   { "g2settingspage","Show Settings inspector page on the G2 lens",    false, cmd_g2settingspage },
@@ -28653,8 +29352,8 @@ extern const CommandEntry g2Commands[] = {
   { "g2envgap",     "Image inter-envelope gap override: g2envgap [<5..500>|auto] (bare = report)", true, cmd_g2envgap, "Usage: g2envgap [<5..500>|auto]  (runtime only; bare = report)" },
   { "g2connpri",    "Probe the BLE conn-interval admission boundary: g2connpri [<min> <max>|default] (bare = report)", true, cmd_g2connpri, "Usage: g2connpri [<min> <max>|default]  (ticks of 1.25 ms; runtime only; bare = report)" },
   { "g2battery",    "Query G2 battery % on connected temples",         false, cmd_g2battery },
-  { "g2glasses",    "Change glasses-device settings (including capture-proven HeadUp on fw 2.2.6.10)", true, cmd_g2glasses,
-    "Usage: g2glasses [show|refresh] | g2glasses <brightness|autobright|weardetect|x|y|headup|headangle|silent|unitformat|distunit|timeformat|dateformat|tempunit> [value]" },
+  { "g2glasses",    "Change glasses-device settings (including capture-proven HeadUp on fw 2.2.6.10 and 2.3.2.14)", true, cmd_g2glasses,
+    "Usage: g2glasses [show|refresh|help] | g2glasses <brightness|autobright|weardetect|x|y|headup|headangle|silent|unitformat|distunit|timeformat|dateformat|tempunit> [value]" },
   { "g2verbose",    "Scan-verbose logging: g2verbose [on|off|toggle] (bare = report state)", false, cmd_g2verbose, "Usage: g2verbose [on|off|toggle]  (bare = report state)" },
   { "g2hijacktest", "Simulate a Blocks tap (status-page hijack)",      false, cmd_g2hijacktest },
   { "g2reopen",     "Re-open the hijacked Blocks app after an abnormal exit", false, cmd_g2reopen },

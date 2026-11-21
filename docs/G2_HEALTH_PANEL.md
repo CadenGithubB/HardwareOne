@@ -107,4 +107,90 @@ Ring data the feed keeps fresh while it is on and the right temple is connected:
 
 Both settings are also in the settings registry (`g2HealthPanelFeed`, `g2HealthPanelHistoryMin`).
 
-Not sent: health highlights (insight text) and the productivity score. Both come from Even's cloud.
+Not sent: the productivity score (it comes from Even's cloud).
+
+## Insights page (`ring insights`)
+
+The expanded Health page has a second page, "insights": up to three lines, each under one of the
+glasses' health icons. The Even app fills it with text from Even's cloud; HardwareOne fills it with
+ranges from the R1 ring history instead.
+
+### What it shows
+
+Over the most recent `ring insights days` days that have any ring data (1–7, default 3; today
+counts when it has data):
+
+| Line | Icon | Text |
+|---|---|---|
+| 1 | heart rate | `HR 48-142 bpm, avg 69`, a blank row, `HRV 22-95 ms, avg 45` |
+| 2 | steps | `Steps 4,200-9,800/day, avg 7,000` over complete days (today is partial and left out) |
+| 3 | sleep | `Sleep 6h10-7h40, avg 6h58` from each night's time asleep, two blank rows, `Averages of the past 3 days` |
+
+- Heart rate, HRV and SpO2 come from the ring's hourly buckets: the low is the lowest hourly
+  minimum, the high the highest hourly maximum, the average the mean of the hourly averages (each
+  hour counts once). Buckets outside 30–220 bpm, 1–300 ms or 70–100 % are left out.
+- A note ends the last line, under two blank rows, so it stays out of the data:
+  `Averages of the past 3 days` (`... past 2 days` when only two exist, `... past day`), or
+  `So far today` when today is the only one. It goes on line 3;
+  without a line 3 it ends the last line there is. It is left out (never the data cut) if that line
+  would pass 255 bytes.
+- Without HRV, line 1 is heart rate only; with HRV but no heart rate it is HRV under the HRV icon.
+- Only today has steps: `Steps today 3,100`. One value only: `Steps 6,400/day`, `Sleep 7h05`.
+- No sleep in the window: line 3 is `SpO2 92-99%, avg 96` under the SpO2 icon.
+- A line without data is left out; with no ring data at all the glasses show their own
+  "gathering insights".
+- The glasses add a fixed footer, "For daily reference only. Not medical advice.".
+
+### Wire
+
+sid 0x0E to the right temple, flag 0x20, the shape the Even app sends (captured on 2.3.2.14):
+`{1 cmd=4, 2 magic, 6 {1 item {1 type, 2 text, 3 0} (1 to 3 times), 2 0, 3 1}}`, or, with
+nothing to show, `{1 4, 2 magic, 6 {2 0, 3 3}}`. The glasses answer `{1 4, 2 magic, 6 {1 {1 type}
+per stored line, 3 status}}`. Rules the encoder (`G2_HealthInsightsCore.h`) keeps:
+
+- at most three items: the glasses reject a message with four (no echo);
+- every length is a protobuf varint, two bytes from 128 up (a one-byte length is dropped);
+- text is ASCII (`-`, not an en dash), at most 255 bytes, no NUL; a newline starts a new row
+  under the same icon, and a row with one space gives the gap in line 1;
+- icon types 2 steps, 3 calories, 4 sleep, 5 heart rate, 6 SpO2, 7 temperature, 8 HRV; others are
+  not drawn and never sent;
+- the magic comes from the same counter as the snapshot above, so two sid 0x0E messages in a row
+  never share one.
+
+A strict parser re-reads the bytes before the write, in `G2_HealthInsights.cpp` and again at the wire
+in `G2_Glasses.cpp`. The glasses keep the lines in RAM only; each message replaces all of them, and
+the Even app overwrites them when it connects.
+
+### Timing
+
+- once 5 s after the right temple is ready (the snapshot goes at 2 s, and insights wait until its
+  echo is in), then when the lines change, at most once a minute;
+- one retry if no echo arrives within 3 s, then nothing until the lines change;
+- paused while Even AI, Conversate, the native terminal or a note is active;
+- only while `ring panel feed` is on and `ring insights feed` is on (both default on);
+- nothing is sent before the ring has delivered a history day in this boot: the ring's identity
+  and day are not known until then.
+
+### Where the work runs
+
+The main loop (`g2HealthInsightsMainTick`, from `g2HealthPushMainTick`) re-reads today's day from
+the in-RAM history every 30 s while the right temple is connected, and searches the history store
+for the older days (up to 14 calendar days back, one day per pass, an hour either way for a
+daylight-saving change) whenever a history day was saved, the day changed, the ring's latest
+history day moved or the ring changed. That search is read-only: it never changes the store's
+reported status. The day in RAM counts once (a stored copy of it is dropped), and today's copy,
+whichever it is, is the partial day whose steps are left out of the range. It
+builds the message body and publishes it in PSRAM. The G2 glasses task only adds the magic, writes
+it and matches the echo; it never takes the history lock.
+
+### Commands
+
+| Command | Effect |
+|---|---|
+| `ring insights status` | Feed state, window, current lines, last send and echo |
+| `ring insights preview` | The lines and the exact message bytes (shown with magic 1); nothing is sent |
+| `ring insights send` | (admin) Send the current lines now; lines older than about 45 s (the feed is off, so nothing refreshed them) are recomputed first: run it again a few seconds later |
+| `ring insights feed [on\|off]` | (admin) Send automatically; saved, on by default, runs only with `ring panel feed` |
+| `ring insights days [1-7]` | (admin) Days in the window, default 3; saved |
+
+Settings: `g2HealthInsightsFeed`, `g2HealthInsightsDays`.

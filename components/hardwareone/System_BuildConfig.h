@@ -287,6 +287,14 @@
 // Requires Bluetooth + G2; auto-forced off in DERIVED rules below.
 #define ENABLE_G2_TESTSUITE     0
 
+// G2 QuickList control rows (G2_QuickList): "Wear Detection: On/Off",
+// "Silent Mode: On/Off", "Auto Brightness: On/Off", "Head-Up Display: On/Off"
+// and "Brightness: Auto/<level>%" rows in the glasses' own QuickList (sid
+// 0x0C) that switch (Brightness: step) that setting when ticked.
+// Firmware 2.3.2.14 pair only; runtime opt-in `g2 list feed on` (saved, off by
+// default). Requires Bluetooth + G2; auto-forced off in DERIVED rules below.
+#define ENABLE_G2_QUICKLIST     1
+
 // VFS root for G2 animated icon packs (BMP frames): SD card (`/sd/...`).
 // Keeps pack data off LittleFS; requires SD mounted (web + lens picker use VFS).
 #define G2_ICON_ANIMATIONS_VFS_PATH "/sd/g2_icon_animations"
@@ -1068,6 +1076,12 @@
 #if !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
   #undef ENABLE_G2_TESTSUITE
   #define ENABLE_G2_TESTSUITE 0
+#endif
+
+// The QuickList row is a G2 feature: same rule as the Tests page.
+#if !(ENABLE_BLUETOOTH && ENABLE_G2_GLASSES)
+  #undef ENABLE_G2_QUICKLIST
+  #define ENABLE_G2_QUICKLIST 0
 #endif
 
 // MQTT subsystem itself requires WiFi (broker is over TCP).

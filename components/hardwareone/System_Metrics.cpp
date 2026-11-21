@@ -13,6 +13,7 @@
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <sdkconfig.h>
 #include <string.h>
 
 #include "System_BuildConfig.h"
@@ -39,6 +40,29 @@ namespace {
 constexpr size_t kCpuRows = 80;
 // How often the warm-up pokes the task-CPU sampler (any closer is wasted).
 constexpr uint32_t kCpuPokeEveryMs = 1000;
+
+// The chip's top CPU clock in MHz: the CLK chart runs 0..this. IDF has no
+// such constant (only the build's default, CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ),
+// so it is the top of each target's CPU clock choices (esp_system
+// Kconfig.cpu). Another target falls back to the build's default clock; the
+// reading raises the range if the clock is ever above it.
+#if defined(CONFIG_IDF_TARGET_ESP32P4)
+constexpr uint32_t kChipMaxCpuMhz = 400;
+#elif defined(CONFIG_IDF_TARGET_ESP32) || defined(CONFIG_IDF_TARGET_ESP32S2) || \
+    defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C5)
+constexpr uint32_t kChipMaxCpuMhz = 240;
+#elif defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32C6) || \
+    defined(CONFIG_IDF_TARGET_ESP32C61)
+constexpr uint32_t kChipMaxCpuMhz = 160;
+#elif defined(CONFIG_IDF_TARGET_ESP32C2)
+constexpr uint32_t kChipMaxCpuMhz = 120;
+#elif defined(CONFIG_IDF_TARGET_ESP32H2)
+constexpr uint32_t kChipMaxCpuMhz = 96;
+#else
+constexpr uint32_t kChipMaxCpuMhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+#endif
+static_assert(kChipMaxCpuMhz >= CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+              "the CLK chart must reach the build's default clock");
 
 struct Raw {
   float value;
@@ -138,6 +162,17 @@ Raw readTemperature() {
   return Raw{c, 0.0f, 100.0f, true};
 }
 
+// CPU clock: getCpuFrequencyMhz() reads the clock tree registers
+// (rtc_clk_cpu_freq_get_config), O(1), no lock and no allocation; the
+// sampler runs on the main loop (task context). It reads the clock the power
+// mode set (System_Power), the actual clock rather than the saved setting.
+// Always available.
+Raw readClock() {
+  const uint32_t mhz = getCpuFrequencyMhz();
+  const uint32_t high = mhz > kChipMaxCpuMhz ? mhz : kChipMaxCpuMhz;
+  return Raw{(float)mhz, 0.0f, (float)high, true};
+}
+
 Raw readLinks() {
 #if HW1_RADIO_COMPANION && ENABLE_BLUETOOTH
   const uint8_t limit = bleCentralLinkLimit();
@@ -205,6 +240,7 @@ void takeSample(MetricsState& s, uint32_t nowMs, const smc::Plan& plan) {
   raw[smc::index(SystemMetricId::Links)] = readLinks();
   raw[smc::index(SystemMetricId::Mesh)] = readMesh();
   raw[smc::index(SystemMetricId::Ring)] = readRing();
+  raw[smc::index(SystemMetricId::Clk)] = readClock();
 
   portENTER_CRITICAL(&sMetricsMux);
   // A step change since this tick planned: the histories were just dropped
@@ -262,7 +298,7 @@ void systemMetricsTick() {
     if (sAllocRetryMs != 0 && (uint32_t)(nowMs - sAllocRetryMs) < 10000UL) return;
     sAllocRetryMs = nowMs;
     // PSRAM only: on a board without it the sampler stays off (reads false)
-    // rather than taking ~11 KB of internal RAM.
+    // rather than taking ~11.5 KB of internal RAM.
     auto* block = static_cast<MetricsState*>(
         ps_alloc(sizeof(MetricsState), AllocPolicy::RequirePsram, "sysmetrics"));
     if (!block) return;

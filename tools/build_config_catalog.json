@@ -120,6 +120,9 @@
      "summary": "Connects to Even Realities G2 glasses: display pages, glasses microphone and the R1 ring.", "needs": ["ENABLE_BLUETOOTH"]},
     {"switch": "ENABLE_R1_HEALTH", "group": "wearables", "title": "R1 ring health",
      "summary": "Vitals from the R1 ring, with health logging.", "needs": ["ENABLE_BLUETOOTH", "ENABLE_G2_GLASSES"]},
+    {"switch": "ENABLE_G2_QUICKLIST", "group": "wearables", "title": "Glasses QuickList control rows",
+     "summary": "Wear Detection, Silent Mode, Auto Brightness, Head-Up Display and Brightness rows in the glasses' QuickList (firmware 2.3.2.14) that switch the setting when ticked; opt in with g2 list feed on.",
+     "needs": ["ENABLE_BLUETOOTH", "ENABLE_G2_GLASSES"]},
     {"switch": "ENABLE_BLE_PHONE_PIPE", "group": "wearables", "title": "Phone link",
      "summary": "A link to the Android app over Bluetooth.", "needs": ["ENABLE_BLUETOOTH"]},
 

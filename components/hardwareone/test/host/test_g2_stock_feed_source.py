@@ -23,7 +23,14 @@ compiled; comments and string literals are blanked first):
 - the chart step reaches the sampler from both sides: `g2 stats step` hands it
   over at once (works while the owner is stopped) and asks for a full batch,
   and every owner lap syncs the saved step (boot, a hand edit) before the
-  resync check; its setting row defaults to 20 s and binds the command.
+  resync check; its setting row defaults to 20 s and binds the command;
+- the metric names agree everywhere: `g2 stats metrics`' available list is
+  every label of the metric table in table order; the g2StockMetrics default
+  (settings constructor and settings row) is kDefaultMetricsText; the command's
+  usage line lists the same labels and default; the saved list is read through
+  sf::savedSelection (the earlier default reads as the current one) and
+  written through sf::formatSavedMetricList (the earlier default chosen again
+  stays as chosen).
 
 --component points the suite at another component directory.
 """
@@ -195,9 +202,56 @@ def check(component: Path) -> list[str]:
         errors.append("System_SensorLogging.cpp: the g2StockStepSec row is not 20 by default with the "
                       "10/20/60 choices bound to g2 stats step")
 
+    errors += check_metric_names(component)
+
     cmake = (component / "CMakeLists.txt").read_text(encoding="utf-8")
     if not re.search(r"^\s+G2_StockFeed\.cpp\s*$", cmake, re.MULTILINE):
         errors.append("CMakeLists.txt: G2_StockFeed.cpp is not in the source list")
+    return errors
+
+
+def check_metric_names(component: Path) -> list[str]:
+    errors: list[str] = []
+    core = (component / "System_MetricsCore.h").read_text(encoding="utf-8")
+    table = re.search(r"kMetrics\[kMetricCount\]\s*=\s*\{(.*?)\n\};", core, re.S)
+    labels = re.findall(r"\{SystemMetricId::\w+,\s*\"([A-Z0-9]+)\"", table.group(1)) if table else []
+    if not labels:
+        return ["System_MetricsCore.h: metric table not found"]
+    feed_core = (component / "G2_StockFeedCore.h").read_text(encoding="utf-8")
+    m = re.search(r'\bkDefaultMetricsText\s*=\s*"([^"]*)"', feed_core)
+    default = m.group(1) if m else ""
+    if not default:
+        errors.append("G2_StockFeedCore.h: kDefaultMetricsText not found")
+    elif any(x not in labels for x in default.split(",")):
+        errors.append(f"G2_StockFeedCore.h: kDefaultMetricsText names an unknown label: {default}")
+    feed_raw = (component / "G2_StockFeed.cpp").read_text(encoding="utf-8")
+    m = re.search(r'\bkAvailableLabels\[\]\s*=\s*"([^"]*)"', feed_raw)
+    if not m or m.group(1).split() != labels:
+        errors.append("G2_StockFeed.cpp: kAvailableLabels is not every metric label in table "
+                      f"order ({' '.join(labels)})")
+    sel = function_body(text(component / "G2_StockFeed.cpp"), "sf::Selection selection(")
+    if "sf::savedSelection(gSettings.g2StockMetrics" not in sel.replace(" ", ""):
+        errors.append("G2_StockFeed.cpp: selection() does not read the saved list through "
+                      "sf::savedSelection")
+    metrics_cmd = function_body(text(component / "G2_StockFeed.cpp"), "const char* cmd_g2statsmetrics(")
+    if not re.search(r"sf::formatSavedMetricList\s*\(\s*sel\s*,\s*saved\b", metrics_cmd) or \
+            not re.search(r"setSetting\s*\(\s*gSettings\.g2StockMetrics\s*,\s*saved\s*\)", metrics_cmd):
+        errors.append("G2_StockFeed.cpp: g2 stats metrics does not save the list through "
+                      "sf::formatSavedMetricList")
+    settings = (component / "System_Settings.h").read_text(encoding="utf-8")
+    if not re.search(r'\bg2StockMetrics\s*\(\s*"' + re.escape(default) + r'"\s*\)', settings):
+        errors.append("System_Settings.h: g2StockMetrics does not default to kDefaultMetricsText")
+    rows = (component / "System_SensorLogging.cpp").read_text(encoding="utf-8")
+    if not re.search(r'\{\s*"g2StockMetrics"\s*,\s*SETTING_STRING\s*,\s*&gSettings\.g2StockMetrics\s*,'
+                     r'\s*0\s*,\s*0\s*,\s*"' + re.escape(default) + r'"', rows):
+        errors.append("System_SensorLogging.cpp: the g2StockMetrics row does not default to "
+                      "kDefaultMetricsText")
+    glasses = (component / "G2_Glasses.cpp").read_text(encoding="utf-8")
+    m = re.search(r'"Usage: g2 stats metrics [^"]*\(up to 9 of ([A-Z0-9 ]+); default ([A-Z0-9,]+)\)"',
+                  glasses)
+    if not m or m.group(1).split() != labels or m.group(2) != default:
+        errors.append("G2_Glasses.cpp: the g2 stats metrics usage does not list the metric labels "
+                      "and kDefaultMetricsText")
     return errors
 
 

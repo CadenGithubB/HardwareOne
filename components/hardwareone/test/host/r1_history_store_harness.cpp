@@ -378,7 +378,12 @@ static void firstSaveFailures() {
   reset(); const auto day = fixture(); const auto path = primary(day); save(day, 1);
   disk[path][disk[path].find("I,") + 2] = 'f';
   R1HealthHistoryDay loaded;
-  check(r1HealthHistoryStoreLoadExact(day.peerId, day.dayStart, day.timezoneMinutes, loaded) == R1_HISTORY_STORE_READ_FAILED,
+  check(status().error == R1_HISTORY_STORE_OK, "store healthy before the bad read");
+  check(r1HealthHistoryStoreLoadExact(day.peerId, day.dayStart, day.timezoneMinutes, loaded, false) == R1_HISTORY_STORE_READ_FAILED &&
+        status().error == R1_HISTORY_STORE_OK,
+        "a quiet (read-only consumer) load of a bad day leaves the store's status error alone"); released();
+  check(r1HealthHistoryStoreLoadExact(day.peerId, day.dayStart, day.timezoneMinutes, loaded) == R1_HISTORY_STORE_READ_FAILED &&
+        status().error == R1_HISTORY_STORE_READ_FAILED,
         "real parser rejects modified integrity metadata");
   check(loaded.peerId[0] == 0 && loaded.dayStart == 0 && loaded.schemaVersion == R1_HEALTH_HISTORY_SCHEMA_VERSION,
         "failed restore clears output instead of publishing partial parse"); released();

@@ -2043,6 +2043,10 @@ g2 stats metrics [list|default] - Admin: up to 9 metrics, in order (saved)
 g2 stats interval [seconds]     - Admin: least time between sends of changed values, 30-3600 (default 60)
 g2 stats pad [gap|flat]         - Admin: how the chart's left part is filled before its window is full (saved, default gap)
 g2 stats step [10|20|60]        - Admin: seconds between chart points (saved, default 20); a change starts the chart over
+g2 list status                  - QuickList rows (wear, silent, auto brightness, head-up, brightness): feed, row text, ticks and writes
+g2 list preview                 - Admin: the next rows' bytes, not sent
+g2 list push                    - Admin: read the glasses' settings and replace the QuickList with the five rows now
+g2 list feed [on|off]           - Admin: replace the QuickList with the five rows after each connect (saved, off by default)
 ```
 
 **Stock widget as a system-stats display.** The glasses' own stock widget (dashboard tile and
@@ -2082,15 +2086,48 @@ saved): `gap` (default) leaves it empty (sent as NaN points; how the lens draws 
 confirmed) and `flat` repeats the oldest point. A sample a metric cannot read adds no point, so its
 time axis then runs slightly short of the window. A full set is 9 stocks of about 840 bytes each (4 BLE
 fragments), sent one at a time, which is why the page-open cadence is 10 s rather than 5 s. A set that was cut short (a lost ack or a failed write) goes again after a
-clear, so the tile can be blank for a second or two. `g2 stats feed off` clears the widget. The default metrics, in order, are `CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING` (CPU load,
-internal RAM used, PSRAM used, SD card used, flash storage used, chip temperature, BLE links in use,
-ESP-NOW peers up, R1 ring battery); `CPU0`, `CPU1` (per core) and `HBLK` (largest internal RAM block,
-KB) can be chosen too, e.g. `g2 stats metrics cpu,heap,psrm`. A metric this device cannot read is
+clear, so the tile can be blank for a second or two. `g2 stats feed off` clears the widget. The default metrics, in order, are `CPU,HEAP,PSRM,SD,LFS,CLK,LINK,MESH,RING` (CPU load,
+internal RAM used, PSRAM used, SD card used, flash storage used, CPU clock in MHz with a chart up to
+the chip's top clock (400 on the P4, 240 on the ESP32 and S3), BLE links in use, ESP-NOW peers up,
+R1 ring battery); `TEMP` (chip temperature), `CPU0`, `CPU1` (per core) and `HBLK` (largest internal
+RAM block, KB) can be chosen too, e.g. `g2 stats metrics cpu,heap,psrm,temp`. A device whose saved
+list is still the earlier default (`TEMP` in the place of `CLK`) shows the new default; any other
+saved list is kept, and so is the earlier default when it is chosen again with `g2 stats metrics`. A metric this device cannot read is
 left out rather than shown as 0; SD and flash use come from the storage readings the firmware already
 keeps, so right after boot or a card change they are left out until one exists. The stock tile has to be in the glasses' dashboard layout (set in
 the Even app); HardwareOne does not change the layout, and the Even app replaces the rows with real
 stocks when it next sends its own. Real share prices are added in the Even app's stock watchlist;
 `g2 stats metrics` only chooses system metrics.
+
+**QuickList control rows.** On glasses firmware 2.3.2.14
+(both temples), `g2 list feed on` replaces the glasses' QuickList with "Wear Detection: On/Off",
+"Silent Mode: On/Off", "Auto Brightness: On/Off", "Head-Up Display: On/Off" and "Brightness: Auto"
+(or the level, e.g. "Brightness: 50%") rows after each connect (items added in the Even app are
+removed). After `g2 list feed off` HardwareOne sends nothing more, so the last list stays. Tick one and double-tap out of the list: HardwareOne switches that
+setting, reads it back half a second later (once more 1.5 s after that if it still shows the old
+state) and replaces the row with the new state. The Brightness row steps instead of switching:
+with auto brightness on, a tick turns it off and sets 25%; after that each tick goes 25% -> 50%
+-> 75% -> 100% -> 25% (a level set elsewhere, e.g. 60%, goes to the next step, 75%). The glasses
+keep only even levels, so 25% and 75% read back as 24 and 74; the row still shows 25% or 75% and
+the next tick goes on to 50% or 100%. Both
+brightness rows then show what the glasses read back, and ticking Auto Brightness also updates the
+Brightness row (turning auto brightness off keeps the level it last chose). If the glasses do not
+acknowledge turning auto brightness off, no level is written and the rows show the state read
+back. Silent mode switched another way
+(two-temple long-press, the Even app, `g2glasses silent on|off`) updates its row too. At most one
+switch every 5 s; a row ending in "?" means the state could not be read, and ticking it just
+refreshes the rows. The rows keep a fixed order (Wear Detection on top, Brightness at the bottom):
+any change sends the whole list again, all five rows in that order, and it replaces the glasses'
+QuickList as a whole, so items added in the Even app are removed from the lens (if sending keeps
+failing, it is tried again on the re-read schedule below). HardwareOne also reads "?" rows again by itself after 2 s, 5 s, 15 s, 30 s,
+then every minute, until they show the state (a failed re-read leaves the rows as they are and does
+not count toward the 5 s limit); `g2 list status` shows the settings reads (how many
+went unanswered or needed a resend, the last one's reply time) and when the next re-read is due. `g2glasses silent on|off`, `g2glasses autobright on|off`,
+`g2glasses headup on|off` and `g2glasses brightness <2-100>` also work on 2.3.2.14 and read the
+result back (an odd brightness is stored one lower, e.g. 25 as 24, and reported as confirmed with
+that note; the head-up angle stays refused there). Auto brightness, head-up or brightness changed
+in the Even app or with `g2glasses` shows on its row only after the next read (a tick, `g2 list
+push` or the next connect).
 
 **Apps -> Health** (lens, `ENABLE_R1_HEALTH`): left list (Overview / Activity / Trends / Heart Rate /
 HRV / SpO2 / Temperature / Battery / Poll Now / Health Logging). **Overview** shows native-text
@@ -2109,7 +2146,14 @@ The glasses' own **Health** tile (stock firmware) can show the same R1 data with
 `ring panel feed on` (admin, saved, on by default) pushes steps, active kcal, sleep score and
 duration, heart rate and SpO2 to the right temple on connect and when values change (at most once a
 minute), and keeps the ring data fresh while it runs (`ring panel history <min>`, default 30).
-`ring panel status` shows what was sent. Details: [G2_HEALTH_PANEL.md](G2_HEALTH_PANEL.md).
+`ring panel status` shows what was sent. The panel's second page (insights) gets up to three lines
+from ring history over the most recent days with data: heart rate and HRV ranges, steps per day,
+and sleep (SpO2 when there is no sleep), e.g. "HR 48-142 bpm, avg 69"; a note ("Averages of the past 3 days")
+ends the last line. It is sent after
+each connect and when the lines change, while `ring panel feed` is on; `ring insights feed off`
+(admin, saved) stops it, `ring insights days <1-7>` (admin, default 3) sets the window, and
+`ring insights status`, `ring insights preview` and `ring insights send` (admin) show or send it.
+Details: [G2_HEALTH_PANEL.md](G2_HEALTH_PANEL.md).
 3-pane list+text+image experiments: Tests -> Image -> Com2 (LZ4 multi) -> Q30*.
 </details>
 

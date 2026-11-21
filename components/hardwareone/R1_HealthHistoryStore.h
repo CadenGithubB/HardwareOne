@@ -245,9 +245,11 @@ void r1HealthHistoryStoreTick(void);
 // NOT_FOUND only when no stored day exists (neither the file nor a backup
 // left by an interrupted publish); a stored day that cannot be opened or read
 // returns an error such as READ_FAILED, never NOT_FOUND.
+// reportStatus false: a read-only consumer's load (the G2 Health insights
+// scan) that never changes the store's status error or busy counter.
 R1HealthHistoryStoreError r1HealthHistoryStoreLoadExact(
     const char* peerId, uint32_t dayStart, int16_t timezoneMinutes,
-    R1HealthHistoryDay& out);
+    R1HealthHistoryDay& out, bool reportStatus = true);
 
 void r1HealthHistoryStoreGetStatus(R1HealthHistoryStoreStatus& out);
 
@@ -278,7 +280,7 @@ inline void r1HealthHistorySleepSummary(const R1HealthHistoryDay&,
 inline bool r1HealthHistoryStoreStage(const R1HealthHistoryDay&, uint32_t) { return false; }
 inline void r1HealthHistoryStoreTick(void) {}
 inline R1HealthHistoryStoreError r1HealthHistoryStoreLoadExact(
-    const char*, uint32_t, int16_t, R1HealthHistoryDay&) {
+    const char*, uint32_t, int16_t, R1HealthHistoryDay&, bool = true) {
   return R1_HISTORY_STORE_NOT_READY;
 }
 inline void r1HealthHistoryStoreGetStatus(R1HealthHistoryStoreStatus& out) {

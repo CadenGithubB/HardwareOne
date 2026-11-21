@@ -337,11 +337,14 @@ struct Settings {
       healthLoggingPollIntervalSec(900),  // 15 min — local R1 vitals logging cadence
       g2HealthPanelFeed(true),            // G2 Health panel feed on by default (R1 + G2 builds; ring panel feed off to stop)
       g2HealthPanelHistoryMin(30),        // ring history refresh while the feed runs
+      g2HealthInsightsFeed(true),         // Health panel insights page (runs while the panel feed runs)
+      g2HealthInsightsDays(3),            // its window: most recent days with ring data, 1-7
       g2StockFeed(false),                 // G2 stock widget fed with system metrics: off by default (g2 stats feed on)
       g2StockIntervalSec(60),             // its send interval on the tile (10 s while the stock page is open)
-      g2StockMetrics("CPU,HEAP,PSRM,SD,LFS,TEMP,LINK,MESH,RING"),  // its metrics, in order
+      g2StockMetrics("CPU,HEAP,PSRM,SD,LFS,CLK,LINK,MESH,RING"),  // its metrics, in order
       g2StockPad(0),                      // its chart's left padding: 0 = gap (NaN), 1 = flat
       g2StockStepSec(20),                 // its chart step: a point every 10, 20 or 60 s (185 points)
+      g2QuickListFeed(false),             // G2 QuickList control rows: off by default (g2 list feed on)
       ringHealthCollectionDesired(0),     // Preserve: do not change the ring at first boot
       ringLowPowerDesired(0),             // Preserve: do not change the ring at first boot
       captureEncryptMode(1),            // seal LOG_R1 capture sessions at rest by default
@@ -1067,6 +1070,11 @@ struct Settings {
   // sleep) while it runs and the right temple is connected.
   bool g2HealthPanelFeed;
   int  g2HealthPanelHistoryMin;
+  // Its insights page (G2_HealthInsights): up to three lines from ring history
+  // over the most recent g2HealthInsightsDays days with data (1-7). Runs only
+  // while g2HealthPanelFeed is on.
+  bool g2HealthInsightsFeed;
+  int  g2HealthInsightsDays;
   // Stock G2 stock widget fed with system metrics (G2_StockFeed): on/off, the
   // send interval in seconds, the metric labels shown, in order, how the
   // chart's left part is padded before its window is full (0 gap, 1 flat), and
@@ -1076,6 +1084,10 @@ struct Settings {
   String g2StockMetrics;
   int  g2StockPad;
   int  g2StockStepSec;
+  // G2 QuickList control rows (G2_QuickList: wear detection, silent mode, auto
+  // brightness, head-up display, brightness): keep the rows in
+  // the glasses' QuickList after each connect and act on their ticks.
+  bool g2QuickListFeed;
   // Persisted policy, not observed ring state. Values are the G2_Ring.h
   // G2RingDesiredState wire-control contract: 0=Preserve, 1=Off, 2=On.
   // These remain plain int fields because SETTING_INT writes through int*.

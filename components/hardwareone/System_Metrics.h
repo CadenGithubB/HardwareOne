@@ -15,15 +15,15 @@
 // Every figure comes from a cached or O(1) read: the task-CPU sampler's shares,
 // heap_caps free/total counters, the Tier 1 memory watch's largest block
 // (memoryMonitorInternalLargestBlock), the VFS capacity snapshots (cache only,
-// VFS::peekStatsSnapshot), the chip temperature register, the BLE central link
-// table, the ESP-NOW session table and the R1 telemetry cache. Never the C6
-// memory RPC, a fresh filesystem stat or WiFi.RSSI() (host test
-// system_metrics_source pins it). A metric that cannot be read is marked
+// VFS::peekStatsSnapshot), the chip temperature register, the CPU clock
+// registers (getCpuFrequencyMhz), the BLE central link table, the ESP-NOW
+// session table and the R1 telemetry cache. Never the C6 memory RPC, a fresh
+// filesystem stat or WiFi.RSSI() (host test system_metrics_source pins it). A metric that cannot be read is marked
 // unavailable, never filled in. Left out on purpose: Wi-Fi and phone RSSI, log
 // sizes, the P4X-EYE battery, the G2 battery (needs a sid 0x09 request).
 //
 // State: the snapshot, histories and the CPU scratch rows live in one PSRAM
-// block (about 10.7 KB) allocated on first use and kept (no churn); internal
+// block (about 11.5 KB) allocated on first use and kept (no churn); internal
 // RAM holds a pointer, a spinlock and the consumer table. No task of its own.
 // Nothing is persisted: a reboot starts with empty histories.
 
