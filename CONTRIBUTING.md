@@ -73,8 +73,8 @@ deferred; memory slimming resumed in 0.99.98.5.)
 | A user's build choices | `configurations/<name>.json`, managed by `tools/build_config.py` |
 | Feature prerequisites and conflicts | Derived rules in `System_BuildConfig.h`; SDK prerequisites resolve through Kconfig |
 | Release identity, partitions, signing and provisioning | Existing deployment/OTA contracts |
-| Runtime feature availability and toggles | `System_FeatureRegistry`, using compiled predicates and persisted settings |
-| Ordinary runtime setting mutation, persistence requests and change events | `setSetting` in `System_Settings`; generic commands validate their `SettingEntry` before using it. Feature toggles use the same path; service owners retain their live actions. |
+| Runtime feature availability (read-only list) | `System_FeatureRegistry`, using compiled predicates, persisted settings and live state; switching stays with each feature's own commands |
+| Ordinary runtime setting mutation, persistence requests and change events | `setSetting` in `System_Settings`; generic commands validate their `SettingEntry` before using it. Service owners retain their live actions. |
 | On-device wizard drafts, page choices and completion | `System_SetupWizard`; serial and local-display adapters edit its draft. `wizardSaveAndApplySettings` is the sole commit boundary; cancellation discards the draft. |
 | Initial admin creation | `System_FirstTimeSetup`'s shared `createInitialAdminUser`; Basic/Advanced and post-restore setup require success before completion. Store credentials before publishing `users.json`, which boot uses to detect completed setup. |
 | Command module grouping, help order and availability callbacks | `System_CommandRegistry.cpp`; command tables stay with their owning modules |

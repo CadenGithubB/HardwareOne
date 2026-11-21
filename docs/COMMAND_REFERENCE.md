@@ -1194,11 +1194,11 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## features
 
-> The features subsystem enables or disables compiled-in capabilities at runtime and reports their memory cost. features with no argument lists every feature grouped by category (Network, Display, Sensors, System) with an approximate heap estimate and a status of ON, OFF, or N/C (not compiled in this build); features <id> shows one feature details and features <id> <on|off> toggles it, persisting the change immediately. Only features that are compiled and marked runtime-toggleable can be changed; a few are compile-time only, and some (wifi, oled, i2c, https) are flagged reboot required so the toggle persists but the capability does not actually start or stop until the next restart. featuresetup launches an interactive, admin-only wizard that walks through the same toggles and works from any CLI transport.
+> The features subsystem lists the compiled-in capabilities and their memory cost; it changes nothing. features with no argument lists every feature grouped by category (Network, Display, Sensors, System) with an approximate heap estimate and four states: built in, running now, start at boot and allowed (- when the feature has no such switch or state). features <id> shows one feature and names the commands that switch it: open<x>/close<x> start or stop it now, <x>autostart sets start at boot and <x>enabled sets whether it is allowed at all (a few use other names, such as mqttclientenabled, eienable, i2cbusenabled and automation system enable|disable). i2c takes an allowed change only at the next restart, and a few rows are fixed when the firmware is built. features <id> <on|off> is refused with those command names. features json is the capability list for the app. featuresetup launches an interactive, admin-only wizard that sets which features are allowed and start at boot, and works from any CLI transport.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `features` | A | Show/toggle system features with heap estimates. |
+| `features` | A | List system features: built in, running now, start at boot, allowed. |
 | `featuresetup` | A | Run the interactive feature configuration wizard. |
 
 ## image

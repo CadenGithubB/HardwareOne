@@ -1,5 +1,6 @@
-// test_settings_mutation.py inserts shipping mutators, parsing, notification,
-// feature commands and the persistence adapter. Only platform boundaries and
+// test_settings_mutation.py inserts shipping mutators, parsing, notification
+// and the persistence adapter. (`features` only lists since 2026-11-20; its
+// read-only contract is test_features_list_only.py.) Only platform boundaries and
 // registry fixtures are supplied here; the batch bookkeeping is also real.
 #define ARDUINOJSON_ENABLE_ARDUINO_STRING 1
 #define ARDUINOJSON_ENABLE_ARDUINO_STREAM 0
@@ -72,42 +73,12 @@ static const SettingsModule settingsModule = {"fixture", "fixture", entries,
   sizeof(entries) / sizeof(entries[0]), nullptr, "host fixture"};
 static const SettingsModule* gSettingsModules[] = {nullptr, &settingsModule};
 static constexpr size_t gSettingsModuleCount = sizeof(gSettingsModules) / sizeof(gSettingsModules[0]);
-static bool compiledOut() { return false; }
-// An owner that keeps runtime state beside its permission flag (Automations).
-#define ENABLE_AUTOMATION 1
 static struct {
-  bool automationEnabled = false;
   bool oledEnabled = false;  // `oledenabled` (dedicated command, OLED builds)
   String oledDefaultMode = "status";
 } gSettings;
-static std::vector<bool> ownerToggles;
-static const char* ownerToggleError = nullptr;
-[[maybe_unused]] static const char* automationSetSystemEnabled(bool enable) {
-  ownerToggles.push_back(enable);
-  if (ownerToggleError) return ownerToggleError;
-  gSettings.automationEnabled = enable;  // the owner applies permission + runtime
-  return nullptr;
-}
-static const FeatureEntry featureRegistry[] = {
-  {"runtime", "Runtime", FEATURE_CAT_SENSOR, 8, FEATURE_FLAG_RUNTIME_TOGGLE,
-   &featureField, nullptr, "runtime fixture"},
-  {"reboot", "Reboot", FEATURE_CAT_SYSTEM, 3,
-   FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_REQUIRES_REBOOT,
-   &featureField, nullptr, "reboot fixture"},
-  {"unavailable", "Unavailable", FEATURE_CAT_SENSOR, 3, FEATURE_FLAG_RUNTIME_TOGGLE,
-   &disabledFeatureField, compiledOut, "compiled-out fixture"},
-  {"fixed", "Fixed", FEATURE_CAT_CORE, 1, FEATURE_FLAG_COMPILE_TIME,
-   nullptr, nullptr, "compile-time fixture"},
-  {"automation", "Automations", FEATURE_CAT_SYSTEM, 8, FEATURE_FLAG_RUNTIME_TOGGLE,
-   &gSettings.automationEnabled, nullptr, "owner-applied fixture"},
-};
-static constexpr size_t featureRegistryCount = sizeof(featureRegistry) / sizeof(featureRegistry[0]);
-static constexpr size_t kFeaturesJsonBuf = 4096;
-static uint32_t hw1InternalFreeBytes() { return 65536; }
-static bool argWantsJson(const String& arg) { return arg == "json"; }
-static void emitListingTrailer(const char*, const char*) {}
 
-enum { SYSEVT_SETTING_CHANGED = 1, SYSEVT_FEATURE_TOGGLED = 2 };
+enum { SYSEVT_SETTING_CHANGED = 1 };
 struct Event { int kind; std::string subject, value; };
 static std::vector<Event> events;
 static std::vector<std::string> broadcasts, stopRequests;
@@ -119,7 +90,7 @@ static uint8_t retainedRetryMask;
 static unsigned criticalDepth;
 static void systemEventPost(int kind, const char* subject, const char* value) {
   events.push_back({kind, subject ? subject : "", value ? value : ""});
-  effectOrder.emplace_back(kind == SYSEVT_SETTING_CHANGED ? "setting event" : "feature event");
+  effectOrder.emplace_back(kind == SYSEVT_SETTING_CHANGED ? "setting event" : "other event");
 }
 void oledMarkDirty() { ++oledDirtyCount; }
 static void broadcastPrintf(const char* format, ...) {
@@ -410,51 +381,6 @@ static void stringsPrivacyAndPreflight() {
   noMutationEffects();
 }
 
-static void featureCommands() {
-  for (const char* value : {"on", "true", "1", "enable", "off", "false", "0", "disable"}) {
-    reset(); context = std::string("feature ") + value;
-    const bool expected = value[0] == '1' || value[0] == 't' || value[0] == 'e' || std::strcmp(value, "on") == 0;
-    featureField = !expected;
-    const std::string input = std::string("runtime ") + value;
-    check(!error(cmd_features(input.c_str())) && featureField == expected, "feature toggle failed");
-    changedOnce();
-    check(eventCount(SYSEVT_FEATURE_TOGGLED) == 1, "feature-specific event missing/duplicated");
-    check(stopRequests.empty(), "feature policy changed to runtime teardown");
-    clearEffects();
-    check(std::string(cmd_features(input.c_str())).find("already") != std::string::npos, "feature no-op reply changed");
-    noMutationEffects();
-  }
-  for (const char* input : {"unavailable on", "fixed on", "runtime nonsense", "runtime on extra", "runtime \"on"}) {
-    reset(); context = input;
-    check(error(cmd_features(input)), "invalid/unavailable toggle accepted");
-    noMutationEffects();
-  }
-  reset(); context = "feature queries and validation";
-  for (const char* input : {"", "runtime", "unavailable", "json"}) {
-    check(!error(cmd_features(input)), "feature query failed"); noMutationEffects();
-  }
-  check(std::string(cmd_features("reboot on")).find("reboot required") != std::string::npos, "reboot note lost");
-  clearEffects(); gCliValidateOnly = true;
-  check(std::string(cmd_features("runtime off")) == "VALID" && featureField, "feature validation changed setting");
-  noMutationEffects();
-
-  // A feature whose owner keeps runtime state is toggled through that owner
-  // (same transition as `automation system enable|disable`), never written raw.
-  reset(); context = "owner-applied feature";
-  gSettings.automationEnabled = false; ownerToggles.clear(); ownerToggleError = nullptr;
-  check(!error(cmd_features("automation on")) && gSettings.automationEnabled, "owner toggle not applied");
-  check((ownerToggles == std::vector<bool>{true}), "owner transition not used");
-  check(eventCount(SYSEVT_FEATURE_TOGGLED) == 1 && eventCount(SYSEVT_SETTING_CHANGED) == 0 && writeCalls == 0,
-        "registry wrote the owner's flag itself or lost the feature event");
-  clearEffects(); ownerToggleError = "Error: owner refused";
-  check(std::string(cmd_features("automation off")) == "Error: owner refused" && gSettings.automationEnabled,
-        "owner refusal not returned");
-  check(eventCount(SYSEVT_FEATURE_TOGGLED) == 0, "refused toggle posted an event");
-  ownerToggleError = nullptr;
-  check(!error(cmd_features("automation off")) && !gSettings.automationEnabled && ownerToggles.size() == 3,
-        "owner disable not applied");
-}
-
 static void persistenceBoundaries() {
   reset(); context = "owner-scoped persistence";
   const SettingsBatchOwner owner{1, 101}, other{1, 102};
@@ -464,7 +390,7 @@ static void persistenceBoundaries() {
   check(sSettingsWriteBatches.finish(owner).dirtyMask == 0, "no-op dirtied owner batch");
   check(sSettingsWriteBatches.begin(owner, hw1_settings_batch::BeginMode::Idempotent, millis()), "batch restart failed");
   check(!error(command(0, "9")), "owned mutation failed");
-  check(!error(cmd_features("runtime on")), "owned feature mutation failed");
+  check(!error(command(5, "on")), "second owned mutation failed");
   check(writeCalls == 0 && eventCount(SYSEVT_SETTING_CHANGED) == 2, "owned writes did not coalesce or events lost");
   currentOwner = other;
   check(!error(command(1, "9")) && writeCalls == 1, "other owner's change inherited batch");
@@ -570,7 +496,7 @@ static void optionNames() {
 
 int main() {
   numericValues(); booleanAndStopPolicy(); stringsPrivacyAndPreflight();
-  featureCommands(); persistenceBoundaries(); optionNames();
+  persistenceBoundaries(); optionNames();
 #if ENABLE_OLED_DISPLAY
   oledEnabledCommand();
 #endif

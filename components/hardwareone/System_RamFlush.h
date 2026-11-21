@@ -112,5 +112,10 @@ void ramFlushClearAutostartFailed(RamFlushFeatureId f);
 enum I2cDeviceType : int;
 RamFlushFeatureId ramFlushIdForDevice(I2cDeviceType device);
 
+// Is the feature running right now (its owner's live flag, not a setting)? false
+// for a feature this build does not have. The `features` list reads its "run"
+// column from here (System_FeatureRegistry.cpp), so the list and a capture agree.
+bool ramFlushReadLive(RamFlushFeatureId f);
+
 // Registered in systemCommands[] next to `reboot`, which it is a sibling of.
 const char* cmd_ramflush(const String& argsInput);

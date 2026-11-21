@@ -104,7 +104,7 @@ static uint16_t ramFlushCrc(uint32_t diverge, uint32_t live, uint16_t layout) {
 // the aliasing hazard that blocks consting FeatureEntry::enabledSetting.
 // Returns false for features not compiled into this build — paired with an intent
 // that is likewise false, so they never diverge and never enter the overlay.
-static bool ramFlushReadLive(RamFlushFeatureId f) {
+bool ramFlushReadLive(RamFlushFeatureId f) {
   switch (f) {
     case RF_THERMAL:    return gThermalRunning;
     case RF_TOF:        return gTofRunning;

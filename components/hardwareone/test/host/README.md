@@ -2348,8 +2348,9 @@ as a set clock (`clockForcedSet`); the clock and uptime cases ask
 `Clock::isValidEpoch` itself. The actual disabled
 public header is compiled independently. `automation_scheduler_contract`
 retains the main-loop integration and full-tick early-exit/source guards, plus
-the quiet in-pass reschedule writes, the unconditional main-loop tick and the
-owner transition shared with `features automation`, and that every owner read
+the quiet in-pass reschedule writes, the unconditional main-loop tick, that the
+feature registry no longer calls the owner transition (`features` only lists),
+and that every owner read
 goes through the format check and no writer spells the version as a literal.
 With comments removed, the add command loads only through
 `loadAutomationsStoreForEdit` and returns on its refusal, and the web
@@ -3625,7 +3626,7 @@ this independent suite verifies its real persistence behavior with controlled
 RTOS and file-writer boundaries. ASan/UBSan follow `HW1_SANITIZE`.
 
 `settings_mutation` executes the production generic setting handler, all three
-`setSetting` overloads, shared change finalization/notification, feature command,
+`setSetting` overloads, shared change finalization/notification
 and persistence adapter with the real owner-scoped batch core and ArduinoJson.
 OLED-enabled and disabled variants cover full integer widths and adjacent-field
 canaries, complete-token parsing, malformed/overflow/nonfinite values, metadata
@@ -3633,15 +3634,35 @@ ranges, read-only and validation-only requests, bool aliases, repeated-off servi
 reconciliation, publication/persistence/stop/event order, explicit and first-row
 alias labels, long string event values and secret redaction.
 Changed values notify and request persistence once; no-ops leave batching clean.
-Feature tests preserve compiled/toggle gates, owner-applied toggles (Automations
-goes through its owner transition, never a raw write), reboot notes, feature-specific
-events and settings notifications. Controlled argument-copy/reserve failures
+Controlled argument-copy/reserve failures
 leave the old String intact; failed persistence retains live RAM changes and
 retry intent. Foreign-owner/background writes remain independent of an open
 batch. Registry contents, task identity, filesystem writers, lifecycle commands,
 OLED and String allocation failures are host boundaries, so this does not qualify
 device concurrency or physical flash durability. ASan/UBSan follow
 `HW1_SANITIZE`, and sanitizer diagnostics fail the test.
+
+`features_list_only` pins the 2026-11-20 rule that `features` only lists. It
+compiles the production `cmd_features`, its listing, detail and refusal views
+and the registry helpers they read (System_FeatureRegistry.cpp), with
+CommandArgs and `argWantsJson`, against fixture rows, a fixture switch table
+and a fixture live-state reader. The unit defines no setting writer, event
+poster or owner transition, so a call to one does not compile. Every query
+(`features`, `features <id>`, `features json`) and every refused
+`features <id> <on|off>` leaves each row's flags unchanged; the refusal names
+the row's own commands (now, at boot, allowed, the reboot note, one shared
+command named once) or says the row is not built in, has no switch, or is
+unknown; the validate pass refuses the same form; the listing and detail show
+built in, running now, start at boot and allowed; `features json` stays schema 1
+byte for byte; a full buffer is reported, not cut off. A source half checks
+that the registry posts no event and calls no owner, that nothing in the
+firmware posts SYSEVT_FEATURE_TOGGLED, that every command the shipping
+kFeatureSwitches table names is registered (tools/command_registry.py), that
+each flag it pairs with a command is the flag that command's settings row
+writes, that the "after a reboot" note sits exactly on the rows whose allowed
+command itself says a reboot is required (today only i2cbusenabled; wifienabled
+and oledenabled act at once), and that the help row no longer offers the on/off
+form.
 
 `sensorlog_settings` compiles the production numeric logger handlers, complete
 generic settings editor, shared argument parser and changed-only settings

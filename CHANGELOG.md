@@ -988,6 +988,16 @@ everything user-visible since the v0.99.99.1 tag.
   ESP-NOW cached at start. Not measured on hardware.
 
 ### Changed
+- `features` only lists; it no longer switches anything. The list shows, for each feature, whether it
+  is built in, running now, set to start at boot and allowed, with `-` where a feature has no such
+  switch or state. `features <id>` names the commands that switch it: `open<x>`/`close<x>` (now),
+  `<x>autostart` (at boot) and `<x>enabled` (allowed); a few use other names (`mqttclientenabled`,
+  `eienable`, `i2cbusenabled`, `automation system enable|disable`, `ledstartupenabled`).
+  `features <id> on|off` is refused with that row's commands and writes nothing. Before, it set the
+  start-at-boot flag on some features and the allowed flag on others, and its "(+N KB freed)" reply
+  was printed even when nothing stopped. `features json` is unchanged (schema 1, same keys and
+  values). The `feature_toggled` event is no longer posted; the switching commands post
+  `setting_changed`. Host-tested; not yet run on a board.
 - Accounts: a user is admin or super admin only by an explicit role in users.json. The first account
   is no longer treated as admin when its entry has no role, or as super admin when no account is one.
   A device first set up before v0.99.0 and never set up again has an `admin` owner and no super admin

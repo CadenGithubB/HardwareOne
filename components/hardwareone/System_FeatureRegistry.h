@@ -35,8 +35,8 @@ enum FeatureCategory {
 //     canToggleFeature() on every one of them.
 enum FeatureFlags {
   FEATURE_FLAG_NONE           = 0,         // sentinel; no row uses it
-  FEATURE_FLAG_RUNTIME_TOGGLE = (1 << 0),  // `features <id> on|off` is accepted (read by canToggleFeature)
-  FEATURE_FLAG_REQUIRES_REBOOT = (1 << 1), // takes effect next boot (read by the toggle reply + System_I2C.cpp)
+  FEATURE_FLAG_RUNTIME_TOGGLE = (1 << 0),  // the row has a saved switch (read by canToggleFeature -> JSON `toggleable`)
+  FEATURE_FLAG_REQUIRES_REBOOT = (1 << 1), // a direct write of enabledSetting takes effect next boot (read by System_I2C.cpp detect apply)
   FEATURE_FLAG_COMPILE_TIME   = (1 << 2),  // no enable setting exists; == !RUNTIME_TOGGLE
   FEATURE_FLAG_ESSENTIAL      = (1 << 3),  // read by the setup wizard; set by no row today
 };

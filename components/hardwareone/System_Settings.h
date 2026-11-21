@@ -1016,8 +1016,8 @@ struct Settings {
   //   if (xEnabled && ramFlushResolve(RF_X, xAutoStart)) startX();
   // which is the shape MQTT has shipped with since it grew a second flag
   // (HardwareOne.cpp:1800). Before this there was a single PERSISTED setting per
-  // feature and it WAS the boot flag, so `features <id> off` and the settings
-  // toggle could not express "keep this available, just do not start it on its
+  // feature and it WAS the boot flag, so the then-writable `features <id> off`
+  // and the settings toggle could not express "keep this available, just do not start it on its
   // own". Note the runtime open/close commands were always separate from the
   // boot setting and are unchanged - closewifi, for one, says so explicitly
   // (System_WiFi.cpp: "a reboot brings WiFi back exactly as configured").

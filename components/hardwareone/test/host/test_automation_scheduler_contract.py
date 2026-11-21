@@ -305,7 +305,7 @@ assert "json.substring(" not in delete
 
 # The main loop ticks unconditionally; the owner checks permission itself and
 # stops when another writer revoked it (automationSchedulerRunning stays true
-# to the permission). Both permission writers go through the owner transition.
+# to the permission). The permission command goes through the owner transition.
 assert "if (gSettings.automationEnabled) {\n    automationTick();" not in main
 owner_tick = function_body(automation, "void automationTick() {")
 assert owner_tick.index("if (!gSettings.automationEnabled)") < owner_tick.index("AutomationStateGuard guard;")
@@ -316,8 +316,10 @@ assert owner_tick.index("if (!automationPassFilesystemFree())") < owner_tick.ind
 assert "stopAutomationScheduler();" in owner_tick
 system = function_body(automation, "const char* automationSetSystemEnabled(bool enable) {")
 assert "startAutomationScheduler()" in system and "stopAutomationScheduler();" in system
+# `features` only lists since 2026-11-20, so the owner transition has one writer
+# left (`automation system enable|disable`); the registry must not call it.
 features = (COMPONENT / "System_FeatureRegistry.cpp").read_text(encoding="utf-8")
-assert "return automationSetSystemEnabled;" in features
+assert "automationSetSystemEnabled" not in features
 
 # The OLED and G2 automation pages show the owner's summary copies
 # (automationCopySummaries / automationFindSummary). They never open or parse

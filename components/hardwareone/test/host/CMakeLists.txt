@@ -1764,6 +1764,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_settings_mutation.py
           ${SETTINGS_MUTATION_TEST_ARGS})
+# `features` only lists (2026-11-20): queries and refusals change nothing, the
+# refusal names the row's own commands, `features json` keeps schema 1.
+add_test(
+  NAME features_list_only
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_features_list_only.py
+          ${SETTINGS_MUTATION_TEST_ARGS})
 add_test(
   NAME settings_write_scope
   COMMAND ${Python3_EXECUTABLE}

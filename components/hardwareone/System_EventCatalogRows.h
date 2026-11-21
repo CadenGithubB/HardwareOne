@@ -164,7 +164,7 @@ HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_COMMAND_DENIED,      "command_denied", SYSEVT_
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_AUTH_DB_FAULT,       "auth_db_fault", SYSEVT_FAM_AUTH)        /* the user/credential database failed to load or is corrupt */
   /* --- Config / device lifecycle (tier 2) --- */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_FACTORY_RESET,       "factory_reset", SYSEVT_FAM_SYSTEM)        /* accounts wiped, device reset to setup  subject=actor */
-HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_FEATURE_TOGGLED,     "feature_toggled", SYSEVT_FAM_SYSTEM)      /* a subsystem/feature enabled or disabled  subject=feature detail=on|off */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_FEATURE_TOGGLED,     "feature_toggled", SYSEVT_FAM_SYSTEM)      /* retired 2026-11-20, nothing posts it: `features` only lists. Kept so the frozen v1 catalog keeps its order; setting writes post setting_changed. Was subject=feature detail=on|off */
   /* --- Signed recovery OTA (tier 2) --- */
   /* One kind per distinct ACTION, matching the auth/security families. The
    * subsystem previously had a single ota_result carrying an 11-value state

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Exercise shipping settings mutation and feature-command paths on the host.
+"""Exercise shipping settings mutation paths on the host.
 
 The generic handler, three mutator overloads, shared notification/finalization,
-feature command, persistence adapter and (OLED builds) the dedicated
-`oledenabled` command are extracted intact; --component points at another
+persistence adapter and (OLED builds) the dedicated `oledenabled` command are
+extracted intact (`features` only lists since 2026-11-20 and writes no setting;
+test_features_list_only.py pins that); --component points at another
 tree. The batching core and ArduinoJson are production headers; registry
 entries are controlled fixtures.
 Host String allocation-failure controls model failed operations, not ESP heap
@@ -39,11 +40,7 @@ def generic_setting_definitions(source: str, utils: str) -> list[str]:
 def generated(component: Path = COMPONENT) -> str:
     settings_h = (component / "System_Settings.h").read_text()
     settings_cpp = (component / "System_Settings.cpp").read_text()
-    feature_h = (component / "System_FeatureRegistry.h").read_text()
-    feature_cpp = (component / "System_FeatureRegistry.cpp").read_text()
     utils = (component / "System_Utils.h").read_text()
-    command_h = (component / "System_Command.h").read_text()
-    command_cpp = (component / "System_Command.cpp").read_text()
     types = [extract_block(settings_h, marker) + ";" for marker in
              ("enum SettingType", "struct SettingEntry ")]
     detail_limit = re.search(r"(?m)^#define SYSEVT_DETAIL_LEN .+$",
@@ -52,14 +49,7 @@ def generated(component: Path = COMPONENT) -> str:
     types.append(detail_limit.group())
     types += ["typedef bool (*ConnectionCheckFunc)();",
               extract_block(settings_h, "struct SettingsModule") + ";"]
-    types += [extract_block(feature_h, marker) + ";" for marker in
-              ("enum FeatureCategory", "enum FeatureFlags", "struct FeatureEntry")]
-    types += [extract_block(command_h, "class CommandArgs") + ";"]
     definitions = [extract_macro(utils, "RETURN_VALID_IF_VALIDATE_CSTR"),
-                   "const String CommandArgs::empty_;", *[
-        extract_block(command_cpp, marker) for marker in
-        ("CommandArgs::CommandArgs(", "void CommandArgs::parse()",
-         "const String& CommandArgs::arg(", "String CommandArgs::remaining(")],
         extract_block(settings_cpp, "bool requestSettingsPersist("),
         extract_block(settings_cpp, "static void applyMasterEnableDisable("),
         "bool settingOptionLabel(const SettingEntry*, long long, char*, size_t);",
@@ -69,19 +59,6 @@ def generated(component: Path = COMPONENT) -> str:
         extract_block(settings_h, "inline void setSetting(String& field, const String&"),
         extract_block(settings_h, "inline void setSetting(String& field, const char*"),
         *generic_setting_definitions(settings_cpp, utils)]
-    definitions += [extract_block(feature_cpp, marker) for marker in
-                    ("const FeatureEntry* getFeatureById(",
-                     "bool isFeatureCompiled(", "bool isFeatureEnabled(",
-                     "bool canToggleFeature(",
-                     "uint32_t getEnabledFeaturesHeapEstimate(",
-                     "uint32_t getTotalPossibleHeapCost(",
-                     "static constexpr const char* getCategoryName(",
-                     "static inline uint16_t reportedHeapKb(")]
-    # Owner-applied toggles (Automations) go through the owner's transition.
-    owner_toggle = re.search(r"(?m)^using FeatureOwnerToggle[^\n]+", feature_cpp)
-    if owner_toggle:
-        definitions += [owner_toggle.group(), extract_block(feature_cpp, "static FeatureOwnerToggle featureOwnerToggle(")]
-    definitions += [extract_block(feature_cpp, "const char* cmd_features(")]
     # The dedicated OLED command shares the boolean token contract (OLED builds).
     oled_command = extract_block((component / "OLED_Utils.cpp").read_text(), "const char* cmd_oled_enabled(")
     harness = (HERE / "settings_mutation_harness.cpp").read_text()

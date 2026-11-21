@@ -97,6 +97,11 @@ entry "Command replies" under Unreleased states what changed.
    `retryInS` and `attempt` (sec. 11.6); `llmgenerate json`, `llmretry`, `llmload`
    and `llmask json` gain an optional `reason`, and `llmstatus json` can be `READY`
    with a non-empty `error` (sec. 11.10). The `phone-status` SSE event is unchanged.
+13. **`features` only lists (2026-11-20)** - `features json` is unchanged (schema 1,
+   same keys and values; now listed in sec. 4). `features <id> on|off` is refused
+   with an `Error:` naming that feature's own commands and writes nothing; switch a
+   feature with `open<x>`/`close<x>`, `<x>autostart` and `<x>enabled` instead. The
+   `feature_toggled` event is no longer posted (sec. 10).
 
 ---
 
@@ -140,6 +145,7 @@ Note: read the global on/off via `automation system status json`, not from
 | `blepeers` | `{"schema":1,"peers":[{"name","displayName","connectable","connected","autoReconnect","mac1","mac2"?,"pairedBy"}],"count"}`. Errors (text, not JSON): `Error: Out of memory. Free memory and retry the command.`, `Error: Peer list too large for the reply. Run blepeers without json.` |
 | `banlist` | `{"schema":1,"bans":[{"ip","reason"}],"count"}` (stub: `available:false`). IP bans are web-only. |
 | `versions` | `{"schema":1,"firmware",...,"idf","arduino"}`: every value a string, keys in this order and present only where the build compiles that part. `firmware`; OTA layouts: `ota_layout`, `updater` (`unavailable` without a factory updater), `ota_manifest_format`, `ota_data_schema`; ESP-NOW: `espnow` (`custom ESP-NOW v1`), `espnow_wire` (the frame version byte, JSON only), `espnow_stack` (`v1`/`v2`, `unknown` until ESP-NOW has started), `espnow_identity_file`, `espnow_peer_file`; automations: `automations_file`; migration tool: `backup_format`; Bluetooth: `ble_console_channel`; phone pipe: `phone_link`, `phone_pipe_channel`, `phone_console_records`; CM5 host control: `cm5_control`; C6 companion: `c6_hosted`, `c6_hosted_qualified`, `c6_bridge_wire`, `c6_bridge_wire_expected` (reported values `unknown` until the companion answers); local STT: `stt_model`; then `idf`, `arduino`. `status json` carries the same keys, without `schema`, as `versions`. Errors (text, not JSON): `Error: Out of memory. Free memory and retry the command.`, `Error: The version list does not fit one reply. Run versions without json.` |
+| `features json` (admin) | `{"schema":1,"features":[{"id","name","category","heapKB","compiled","enabled","toggleable"}]}`, one object per feature, every feature in one reply (a missing id means old firmware: assume present). `heapKB` is 0 when `compiled` is false. `enabled` is the feature's saved flag as before: start at boot on some features (http, bluetooth, led, input, the I2C sensors, camera, microphone, espsr, llm), allowed on others (wifi, espnow, mqtt, oled, edgeimpulse, i2c, automation), and `true` for a built-in feature with no switch; it is not "running now". `toggleable` is true when the feature is built in and has a saved switch. Unchanged when `features` became list-only (2026-11-20): `features <id> on\|off` is refused, so `toggleable` says the feature has a switch, not that `features` can set it; the text `features <id>` names the commands that do. Error (text): `Error: feature list outgrew the response buffer` |
 | `c6status` | P4X-EYE builds. `{"schema":1,"backend","state","transport_up","held","operation","outage","auto_recover","auto_hold","reboot_escalation","console_mirror","firmware":{"hosted"?,"match"?,"expected","project"?,"version"?,"idf"?,"built"?},"bridge":{"state","wire"?,"image_state"?,"slot"?,"build"?,"ble_max_connections"?},"ble_links","heartbeat":{"interval_sec","seen","age_ms","missed"},"boot_count","last_reset_reason","chip"?:{"id","name"},"companion"?:{"uptime_ms","free_heap","min_free_heap","cpu_mhz","reset_reason","native_espnow"},"memory"?:{"total","free","min_free","internal_free","internal_largest","age_ms"},"bridge_counters":{"timeouts","transport_errors","events_dropped","malformed","stale","hci_tx_down_drops"},"recovery":{"start_attempts","start_failures","soft","failed","hard_requested","outages","lifetime_outages","lifetime_reboots","last_fault_epoch_ms","outage_age_ms","next_retry_ms","online_age_ms","events_dropped"},"console_mirror_reason","last_result"}`. `recovery.outages` counts this boot's incidents; `lifetime_outages` and `lifetime_reboots` survive restarts (saved after a fault, 0 after a factory reset); `last_fault_epoch_ms` is the UTC milliseconds of the last fault, or `null` (none yet, or the clock was not set at the last fault). `console_mirror_reason` is `off`, `saved` (`c6console on`), `fault` (on for 10 minutes after a companion fault) or `unsupported`. The `companion` object of `status json` is this reply up to `last_reset_reason` and is unchanged. Errors (text, not JSON): `Error: Out of memory. Free memory and retry the command.`, `Error: Companion status too large for the reply. Run c6status without json.` |
 
 `status json` / `GET /api/system`, `storage` object: `total_kb`, `used_kb` and `free_kb` are absent when the
@@ -643,6 +649,12 @@ five board/gate rows, rebuilds ordinary FeatherS3 and XIAO-S3 artifacts, and
 restores the source config exactly. The physical Secure-BLE client run and
 deterministic live HTTP sink-failure test remain pending and are not implied by
 those automated results.
+
+`feature_toggled` (System family) stays in the v1 catalog so the frozen order
+holds, but nothing posts it since 2026-11-20: `features` only lists. A change to
+a feature's switch arrives as `setting_changed` from the command that made it
+(`<x>enabled`, `<x>autostart`, `automation system enable|disable`). An app
+automation or mute rule on `feature_toggled` never fires.
 
 ## 11. Bluetooth link status: role, relay pipe, app console
 

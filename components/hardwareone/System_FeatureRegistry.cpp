@@ -6,6 +6,8 @@
 
 #include "System_FeatureRegistry.h"
 #include <esp_attr.h>
+#include <stdarg.h>
+#include <string.h>
 #include "System_Settings.h"
 #include "System_Command.h"
 #include "System_Debug.h"        // emitListingTrailer() for agent-facing listing trailer
@@ -15,9 +17,13 @@
 #include "System_AuthIdentity.h"  // currentAuthContext() for cmd_featuresetup transport check
 #include "System_User.h"          // CommandSource enum
 #include "System_SetupWizardMode.h"  // Phase 5: new CLIMode-based wizard for cmd_featuresetup
-#include "System_Events.h"        // systemEventPost() — SYSEVT_FEATURE_TOGGLED
-#include "System_Automation.h"    // automationSetSystemEnabled() — owner-applied toggle
 #include "System_CommandRegistry.h"
+// Live state for the "run" column of `features` (featureRunningNow below).
+// Each header has a branch for a build without its feature.
+#include "System_RamFlush.h"      // ramFlushReadLive()
+#include "BLE_Server.h"           // bleSubsystemActive()
+#include "System_I2C.h"           // gI2cBusRunning
+#include "System_EdgeImpulse.h"   // isContinuousInferenceRunning()
 
 // External settings
 
@@ -591,6 +597,145 @@ static const size_t featureRegistryCount = sizeof(featureRegistry) / sizeof(feat
 static constexpr size_t kFeaturesJsonBuf = 4096;
 
 // ============================================================================
+// Feature switches: what each row runs, and which commands switch it
+// ============================================================================
+// `features` only lists (owner decision 2026-11-20). Switching stays with each
+// feature's own commands: open<x>/close<x> (now), <x>autostart (at boot) and
+// <x>enabled (allowed). This table names them, so the listing can show the
+// three states and a `features <id> on|off` refusal can name the right command.
+//
+// A parallel table, not new FeatureEntry columns: FeatureEntry::enabledSetting is
+// read and written by the setup wizard, detect apply, sensorautostart and the G2
+// sensors page, and must keep pointing where it points today. Flash only
+// (constexpr .rodata, about 32 B a row); no internal RAM.
+// `live`: a RamFlushFeatureId (System_RamFlush.h), or one of the values below.
+enum : uint8_t {
+  FEATURE_LIVE_BLE  = 0xF0,  // bleSubsystemActive(): server OR G2/phone client
+  FEATURE_LIVE_I2C  = 0xF1,  // gI2cBusRunning
+  FEATURE_LIVE_EI   = 0xF2,  // continuous Edge Impulse inference
+  FEATURE_LIVE_NONE = 0xFF,  // the row has no runtime state ("-")
+};
+static_assert((unsigned)RF_FEATURE_COUNT < (unsigned)FEATURE_LIVE_BLE, "RamFlushFeatureId ran into the FEATURE_LIVE_* values");
+
+struct FeatureSwitches {
+  const char* id;          // equals featureRegistry[i].id (checked below)
+  const bool* allowed;     // master <x>enabled flag; nullptr = the row has none
+  const bool* autoStart;   // start-at-boot flag; nullptr = none
+  uint8_t live;            // where "running now" comes from (see above)
+  const char* nowCmd;      // starts/stops it now; nullptr = none
+  const char* bootCmd;     // sets start at boot; nullptr = none
+  const char* allowCmd;    // sets allowed; nullptr = none
+  // allowCmd only saves the flag and acts at the next boot (i2cbusenabled
+  // replies "reboot required"). Not FEATURE_FLAG_REQUIRES_REBOOT: wifienabled
+  // and oledenabled act at once, though their rows carry that flag for detect.
+  bool allowAtReboot = false;
+};
+
+#define FEATURE_SENSOR_SWITCHES(id, field, rf) \
+  { id, &gSettings.field##Enabled, &gSettings.field##AutoStart, rf, \
+    "open" id " / close" id, id "autostart <0|1>", id "enabled <0|1>" }
+
+// Same order as featureRegistry[]. Every command named here is checked against
+// the command tables by test_features_list_only.py.
+static constexpr FeatureSwitches kFeatureSwitches[] = {
+  { "wifi", &gSettings.wifiEnabled, &gSettings.wifiAutoStart, RF_WIFI,
+    "openwifi / closewifi", "wifiautostart <0|1>", "wifienabled <0|1>" },
+  { "http", &gSettings.httpEnabled, &gSettings.httpAutoStart, RF_HTTP,
+    "openhttp / closehttp", "httpautostart <0|1>", "httpenabled <0|1>" },
+  { "bluetooth", &gSettings.bleEnabled, &gSettings.bleAutoStart, FEATURE_LIVE_BLE,
+    "openble / closeble", "bleautostart <0|1>", "bleenabled <0|1>" },
+  { "espnow", &gSettings.espnowEnabled, &gSettings.espnowAutoStart, RF_ESPNOW,
+    "openespnow / closeespnow", "espnowautostart <0|1>", "espnowenabled <0|1>" },
+  { "bond", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
+  { "mqtt", &gSettings.mqttEnabled, &gSettings.mqttAutoStart, RF_MQTT,
+    "openmqtt / closemqtt", "mqttautostart <0|1>", "mqttclientenabled <0|1>" },
+  { "oled", &gSettings.oledEnabled, &gSettings.oledAutoStart, RF_OLED,
+    "openoled / closeoled", "oledautostart <0|1>", "oledenabled <0|1>" },
+  // The start-up effect only; the LED has no master switch and no running state.
+  { "led", nullptr, &gSettings.ledStartupEnabled, FEATURE_LIVE_NONE,
+    nullptr, "ledstartupenabled <0|1>", nullptr },
+  { "g2", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
+  FEATURE_SENSOR_SWITCHES("input",    input,    RF_INPUT),
+  FEATURE_SENSOR_SWITCHES("thermal",  thermal,  RF_THERMAL),
+  FEATURE_SENSOR_SWITCHES("tof",      tof,      RF_TOF),
+  FEATURE_SENSOR_SWITCHES("imu",      imu,      RF_IMU),
+  FEATURE_SENSOR_SWITCHES("gps",      gps,      RF_GPS),
+  FEATURE_SENSOR_SWITCHES("fmradio",  fmRadio,  RF_FMRADIO),
+  FEATURE_SENSOR_SWITCHES("apds",     apds,     RF_APDS),
+  FEATURE_SENSOR_SWITCHES("rtc",      rtc,      RF_RTC),
+  FEATURE_SENSOR_SWITCHES("presence", presence, RF_PRESENCE),
+  { "servo", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
+  { "matrix", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
+  { "battery", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
+  { "r1health", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
+  FEATURE_SENSOR_SWITCHES("camera",   camera,   RF_CAMERA),
+  { "microphone", &gSettings.micEnabled, &gSettings.micAutoStart, RF_MICROPHONE,
+    "openmic / closemic", "micautostart <0|1>", "micenabled <0|1>" },
+  { "espsr", &gSettings.srEnabled, &gSettings.srAutoStart, RF_SR,
+    "opensr / closesr", "srautostart <0|1>", "srenabled <0|1>" },
+  { "edgeimpulse", &gSettings.eiEnabled, &gSettings.eiAutoStart, FEATURE_LIVE_EI,
+    "eicontinuous <0|1>", "eiautostart <0|1>", "eienable <0|1>" },
+  { "llm", &gSettings.llmEnabled, &gSettings.llmAutoStart, RF_LLM,
+    "llmload / llmunload", "llmautostart <0|1>", "llmenabled <0|1>" },
+  // Bus 0 has no start-at-boot flag and no open/close: the bus comes up at boot
+  // when it is allowed.
+  { "i2c", &gSettings.i2cEnabled, nullptr, FEATURE_LIVE_I2C,
+    nullptr, nullptr, "i2cbusenabled <0|1>", true },
+  // One owner transition (System_Automation.cpp) sets the permission and
+  // starts or stops the scheduler, so "now" and "allowed" share one command.
+  { "automation", &gSettings.automationEnabled, &gSettings.automationAutoStart, RF_AUTOMATION,
+    "automation system enable|disable", "automationautostart <0|1>",
+    "automation system enable|disable" },
+  { "maps", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
+  { "games", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
+};
+#undef FEATURE_SENSOR_SWITCHES
+
+constexpr bool ceStrEq(const char* a, const char* b) {
+  size_t i = 0;
+  while (a[i] && a[i] == b[i]) ++i;
+  return a[i] == b[i];
+}
+constexpr bool kFeatureSwitchesMatchRegistry() {
+  if (sizeof(kFeatureSwitches) / sizeof(kFeatureSwitches[0]) != featureRegistryCount) return false;
+  for (size_t i = 0; i < featureRegistryCount; i++) {
+    if (!ceStrEq(kFeatureSwitches[i].id, featureRegistry[i].id)) return false;
+    // A row with a saved switch (RUNTIME_TOGGLE) names at least one command;
+    // a compile-time row names none.
+    const bool named = kFeatureSwitches[i].nowCmd || kFeatureSwitches[i].bootCmd ||
+                       kFeatureSwitches[i].allowCmd;
+    if (named != ((featureRegistry[i].flags & FEATURE_FLAG_RUNTIME_TOGGLE) != 0)) return false;
+    if (kFeatureSwitches[i].allowAtReboot && !kFeatureSwitches[i].allowCmd) return false;
+  }
+  return true;
+}
+static_assert(kFeatureSwitchesMatchRegistry(),
+  "kFeatureSwitches must list every featureRegistry row, in the same order, and "
+  "name a command for every runtime-switchable row (and an allowed command for "
+  "every allowAtReboot row)");
+
+static const FeatureSwitches* featureSwitchesFor(const FeatureEntry* f) {
+  if (!f || f < featureRegistry || f >= featureRegistry + featureRegistryCount) return nullptr;
+  return &kFeatureSwitches[f - featureRegistry];
+}
+
+// 1 = running now, 0 = not running, -1 = the row has no runtime state.
+static int featureRunningNow(const FeatureSwitches* s) {
+  if (!s || s->live == FEATURE_LIVE_NONE) return -1;
+  if (s->live < (unsigned)RF_FEATURE_COUNT) return ramFlushReadLive((RamFlushFeatureId)s->live) ? 1 : 0;
+  switch (s->live) {
+    case FEATURE_LIVE_BLE: return bleSubsystemActive() ? 1 : 0;
+#if ENABLE_I2C_SYSTEM
+    case FEATURE_LIVE_I2C: return gI2cBusRunning ? 1 : 0;
+#endif
+#if ENABLE_EDGE_IMPULSE
+    case FEATURE_LIVE_EI:  return isContinuousInferenceRunning() ? 1 : 0;
+#endif
+    default:               return 0;
+  }
+}
+
+// ============================================================================
 // Registry Access Functions
 // ============================================================================
 
@@ -748,26 +893,180 @@ static_assert(kFeaturesJsonWorstCase() + 256 <= kFeaturesJsonBuf - 2,
   "the list behind a dedicated endpoint instead - see /api/devices -> "
   "buildDeviceRegistryJson for the shape.");
 
-// Features whose owner keeps runtime state beside the permission flag apply a
-// toggle through that owner, so `features <id> on|off` and the owner's own
-// command leave the same state. nullptr = a plain permission flag.
-using FeatureOwnerToggle = const char* (*)(bool enable);
-static FeatureOwnerToggle featureOwnerToggle(const FeatureEntry* f) {
-#if ENABLE_AUTOMATION
-  if (f->enabledSetting == &gSettings.automationEnabled) return automationSetSystemEnabled;
-#endif
-  (void)f;
-  return nullptr;
+// ---------------------------------------------------------------------------
+// `features` text views. They only read: the command writes no setting, posts
+// no event and starts or stops nothing (owner decision 2026-11-20).
+// ---------------------------------------------------------------------------
+static bool featuresAppend(char* buf, size_t size, size_t& pos, const char* fmt, ...)
+    __attribute__((format(printf, 4, 5)));
+static bool featuresAppend(char* buf, size_t size, size_t& pos, const char* fmt, ...) {
+  if (pos >= size) return false;
+  va_list ap;
+  va_start(ap, fmt);
+  const int n = vsnprintf(buf + pos, size - pos, fmt, ap);
+  va_end(ap);
+  if (n < 0 || (size_t)n >= size - pos) {
+    pos = size;
+    return false;
+  }
+  pos += (size_t)n;
+  return true;
+}
+
+static const char* featureOnOff(const bool* flag) {
+  return flag ? (*flag ? "on" : "off") : "-";
+}
+
+// `features`: one row per feature. "-" = the row has no such switch or state.
+static const char* featuresListing() {
+  PSRAM_STATIC_BUF(buf, 3072);
+  size_t pos = 0;
+  uint32_t runningKb = 0;
+  bool ok = featuresAppend(buf, buf_SIZE, pos,
+    "[Features] built in, running now, start at boot, allowed (heap estimates)\n"
+    "═══════════════════════════════════════════\n"
+    " id           heap   built run  boot allow\n");
+
+  int lastCat = -1;
+  for (size_t i = 0; ok && i < featureRegistryCount; i++) {
+    const FeatureEntry* f = &featureRegistry[i];
+    if (f->category != lastCat) {
+      lastCat = f->category;
+      ok = featuresAppend(buf, buf_SIZE, pos, "\n[%s]\n", getCategoryName(f->category));
+    }
+    const bool built = isFeatureCompiled(f);
+    const FeatureSwitches* s = built ? featureSwitchesFor(f) : nullptr;
+    const int running = s ? featureRunningNow(s) : -1;
+    // A built-in row with no runtime state (bond, led, maps, ...) is counted as
+    // present: there is nothing to stop.
+    if (built && running != 0) runningKb += f->heapCostKb;
+    ok = ok && featuresAppend(buf, buf_SIZE, pos, " %-12s ~%2uKB  %-5s %-4s %-4s %s\n",
+      f->id, (unsigned)reportedHeapKb(f), built ? "yes" : "no",
+      running < 0 ? "-" : (running ? "yes" : "no"),
+      s ? featureOnOff(s->autoStart) : "-",
+      s ? featureOnOff(s->allowed) : "-");
+  }
+
+  ok = ok && featuresAppend(buf, buf_SIZE, pos,
+    "═══════════════════════════════════════════\n"
+    "Running now: ~%luKB | Free: %luKB | All built in: ~%luKB\n"
+    "'-' = no such switch or state. 'features <id>' names the commands that switch it.",
+    (unsigned long)runningKb, (unsigned long)(hw1InternalFreeBytes() / 1024),
+    (unsigned long)getTotalPossibleHeapCost());
+  if (!ok) return "Error: feature list outgrew the response buffer";
+
+  emitListingTrailer("compiled-in features: built in, running now, start at boot, allowed",
+    "sensor/battery DATA: use the read command ('batterystatus', or 'open<sensor>' then '<sensor>read'); to switch a feature: 'features <id>' names its commands");
+  return buf;
+}
+
+// One "Start at boot" / "Allowed" line: the state and the command that sets it.
+static bool featureSwitchLine(char* buf, size_t size, size_t& pos, const char* label,
+                              const bool* flag, const char* cmd, const char* note) {
+  if (!flag) return featuresAppend(buf, size, pos, "%s: -\n", label);
+  return featuresAppend(buf, size, pos, "%s: %s%s%s%s\n", label, featureOnOff(flag),
+                        cmd ? " - " : "", cmd ? cmd : "", note);
+}
+
+// `features <id>`.
+static const char* featureDetail(const FeatureEntry* f, char* buf, size_t size) {
+  const bool built = isFeatureCompiled(f);
+  // A compiled-out feature reports 0 KB (it cannot consume heap), but the
+  // build-planning number is still useful — keep it as prose, not as the field.
+  char heapNote[40];
+  if (built) heapNote[0] = '\0';
+  else snprintf(heapNote, sizeof(heapNote), " (~%uKB if built in)", (unsigned)f->heapCostKb);
+
+  size_t pos = 0;
+  bool ok = featuresAppend(buf, size, pos,
+    "[%s] %s\nCategory: %s\nHeap cost: ~%uKB%s\nBuilt in: %s\n",
+    f->id, f->name, getCategoryName(f->category),
+    (unsigned)reportedHeapKb(f), heapNote, built ? "yes" : "no");
+
+  const FeatureSwitches* s = built ? featureSwitchesFor(f) : nullptr;
+  if (built && (!s || !canToggleFeature(f))) {
+    ok = ok && featuresAppend(buf, size, pos, "Switch: none, fixed when the firmware is built\n");
+  } else if (s) {
+    const int running = featureRunningNow(s);
+    const char* reboot = s->allowAtReboot ? " (takes effect after a reboot)" : "";
+    ok = ok && featuresAppend(buf, size, pos, "Running now: %s\n",
+                              running < 0 ? "-" : (running ? "yes" : "no"));
+    ok = ok && featureSwitchLine(buf, size, pos, "Start at boot", s->autoStart, s->bootCmd, "");
+    ok = ok && featureSwitchLine(buf, size, pos, "Allowed", s->allowed, s->allowCmd, reboot);
+    ok = ok && featuresAppend(buf, size, pos, "Start/stop now: %s\n", s->nowCmd ? s->nowCmd : "-");
+  }
+  ok = ok && featuresAppend(buf, size, pos, "%s", f->description);
+  if (!ok) return "Error: feature details outgrew the response buffer";
+  return buf;
+}
+
+// `features <id> <anything>`: the two-argument form that used to write a setting.
+// It writes nothing, posts no event and calls no owner; the reply names the
+// commands that do switch the row.
+static const char* featureSwitchRefusal(const CommandArgs& a, char* buf, size_t size) {
+  if (a.count() > 2 || a.unterminatedQuote()) {
+    return "Error: Usage: features [<id> | json]. The features command only lists.";
+  }
+  String id = a.arg(0);
+  id.toLowerCase();
+  const FeatureEntry* f = getFeatureById(id.c_str());
+  if (!f) return "Error: Unknown feature. Run 'features' to see list.";
+  if (!isFeatureCompiled(f)) {
+    snprintf(buf, size, "Error: features only lists, and %s is not built into this firmware.", f->id);
+    return buf;
+  }
+  const FeatureSwitches* s = featureSwitchesFor(f);
+  if (!s || !canToggleFeature(f)) {
+    snprintf(buf, size, "Error: features only lists, and %s has no switch: it is fixed when "
+             "the firmware is built.", f->id);
+    return buf;
+  }
+
+  size_t pos = 0;
+  bool ok = featuresAppend(buf, size, pos, "Error: features only lists. Switch %s with:", f->id);
+  const char* sep = " ";
+  // automation: one command sets both, so it is named once.
+  const bool shared = s->nowCmd && s->allowCmd && strcmp(s->nowCmd, s->allowCmd) == 0;
+  if (s->nowCmd) {
+    ok = ok && featuresAppend(buf, size, pos, "%s%s (%s)", sep, s->nowCmd,
+                              shared ? "now and allowed" : "now");
+    sep = ", ";
+  }
+  if (s->bootCmd) {
+    ok = ok && featuresAppend(buf, size, pos, "%s%s (at boot)", sep, s->bootCmd);
+    sep = ", ";
+  }
+  if (s->allowCmd && !shared) {
+    ok = ok && featuresAppend(buf, size, pos, "%s%s (allowed%s)", sep, s->allowCmd,
+      s->allowAtReboot ? ", after a reboot" : "");
+  }
+  ok = ok && featuresAppend(buf, size, pos, ".");
+  if (!ok) return "Error: features only lists. 'features <id>' names the commands that switch it.";
+  return buf;
 }
 
 const char* cmd_features(const String& argsInput) {
+  // `features` only lists (owner decision 2026-11-20). A second argument is
+  // refused before the validate return, so `automation add` rejects a saved
+  // `features <id> on` step when it is saved rather than when it runs.
+  const bool wantsJson = argWantsJson(argsInput);
+  CommandArgs a(argsInput);
+  PSRAM_STATIC_BUF(text, 512);
+  if (!wantsJson && (a.count() >= 2 || a.unterminatedQuote())) {
+    return featureSwitchRefusal(a, text, text_SIZE);
+  }
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  // Structured path: full capability list (what this build supports + runtime
-  // state), one verbatim JSON blob via the return value. No broadcastOutput.
-  // Lets the app gate UI on what the device actually has.
+  // Structured path: full capability list (what this build supports), one
+  // verbatim JSON blob via the return value. No broadcastOutput. Lets the app
+  // gate UI on what the device actually has.
   // Schema: {"schema":1,"features":[{"id","name","category","heapKb","compiled",
   //          "enabled","toggleable"}, ...]}
+  // Kept byte for byte when `features` became list-only: `enabled` is still the
+  // row's enabledSetting (autostart on some rows, the master flag on others)
+  // and `toggleable` is canToggleFeature (the row has a saved switch). The text
+  // views show the three states apart; there is no room here for more keys
+  // (see the static_assert above).
   //
   // No "hint" field here on purpose. It used to carry 161 B of agent-facing
   // prose ("...use the read command..."), which is dead weight in a machine
@@ -777,7 +1076,7 @@ const char* cmd_features(const String& argsInput) {
   // NOT bump `schema`: a client pinned to schema==1 would reject the bump and
   // lose the whole capability list, which is a far worse outcome than a field
   // it was ignoring. Reserve the bump for changes that alter what survives.
-  if (argWantsJson(argsInput)) {
+  if (wantsJson) {
     PSRAM_JSON_DOC(doc);
     doc["schema"] = 1;
     JsonArray arr = doc["features"].to<JsonArray>();
@@ -790,7 +1089,7 @@ const char* cmd_features(const String& argsInput) {
       o["heapKB"]     = reportedHeapKb(f);
       o["compiled"]   = isFeatureCompiled(f);
       o["enabled"]    = isFeatureEnabled(f);
-      // Same expression the text detail path uses, so the two can never drift.
+      // Same expression the text detail and refusal paths use, so they never drift.
       // NOT the raw RUNTIME_TOGGLE bit: that ignores whether the feature is even
       // compiled, so it used to answer "toggleable":true for features that
       // reply "Feature not compiled in this build."
@@ -828,153 +1127,13 @@ const char* cmd_features(const String& argsInput) {
     return jbuf;
   }
 
-  CommandArgs a(argsInput);
+  if (a.count() == 0) return featuresListing();
 
-  // No args - show all features with heap estimates
-  if (a.count() == 0) {
-    PSRAM_STATIC_BUF(buf, 2048);
-    uint32_t freeHeapKb = hw1InternalFreeBytes() / 1024;
-    uint32_t enabledCost = getEnabledFeaturesHeapEstimate();
-    
-    int pos = snprintf(buf, buf_SIZE,
-      "[Feature Manager] (heap estimates)\n"
-      "═══════════════════════════════════════════\n");
-    
-    int lastCat = -1;
-    
-    for (size_t i = 0; i < featureRegistryCount; i++) {
-      const FeatureEntry* f = &featureRegistry[i];
-      
-      // Print category header
-      if (f->category != lastCat) {
-        lastCat = f->category;
-        pos += snprintf(buf + pos, buf_SIZE - pos, "\n[%s]\n", getCategoryName(f->category));
-      }
-      
-      bool compiled = isFeatureCompiled(f);
-      bool enabled = isFeatureEnabled(f);
-      
-      const char* status;
-      if (!compiled) {
-        status = "[N/C]";
-      } else if (enabled) {
-        status = "[ON]";
-      } else {
-        status = "[OFF]";
-      }
-
-      pos += snprintf(buf + pos, buf_SIZE - pos,
-        " %-12s ~%2dKB  %s\n",
-        f->id, reportedHeapKb(f), status);
-    }
-    
-    pos += snprintf(buf + pos, buf_SIZE - pos,
-      "\n[ON] = active | [OFF] = disabled | [N/C] = not compiled\n"
-      "═══════════════════════════════════════════\n"
-      "Enabled: ~%luKB | Free: %luKB | Max: ~%luKB\n"
-      "Usage: features <id> <on|off>",
-      (unsigned long)enabledCost, (unsigned long)freeHeapKb,
-      (unsigned long)getTotalPossibleHeapCost());
-
-    emitListingTrailer("compiled-in features and their on/off state",
-      "sensor/battery DATA: use the read command ('batterystatus', or 'open<sensor>' then '<sensor>read'); to enable/disable a feature: 'features <id> on|off'");
-    return buf;
-  }
-
-  // Parse args: <id> [on|off]
-  if (!a.has(1)) {
-    // Single arg - show feature details
-    const FeatureEntry* f = getFeatureById(a.arg(0).c_str());
-    if (!f) {
-      return "Error: Unknown feature. Run 'features' to see list.";
-    }
-    
-    EXT_RAM_BSS_ATTR static char buf[512];
-    bool compiled = isFeatureCompiled(f);
-    bool enabled = isFeatureEnabled(f);
-    
-    // A compiled-out feature reports 0 KB (it cannot consume heap), but the
-    // build-planning number is still useful — keep it as prose, not as the field.
-    char heapNote[40];
-    if (compiled) heapNote[0] = '\0';
-    else snprintf(heapNote, sizeof(heapNote), " (~%dKB if built in)", f->heapCostKb);
-
-    snprintf(buf, sizeof(buf),
-      "[%s] %s\n"
-      "Category: %s\n"
-      "Heap cost: ~%dKB%s\n"
-      "Compiled: %s\n"
-      "Enabled: %s\n"
-      "Toggleable: %s\n"
-      "%s",
-      f->id, f->name,
-      getCategoryName(f->category),
-      reportedHeapKb(f), heapNote,
-      compiled ? "yes" : "no",
-      enabled ? "yes" : "no",
-      canToggleFeature(f) ? "yes" : "no",
-      f->description);
-    
-    return buf;
-  }
-  
-  // Two args - toggle feature
-  if (a.count() != 2 || a.unterminatedQuote()) return "Error: Usage: features <id> <on|off>";
-  String featureId = a.arg(0);
-  String value = a.arg(1);
-  featureId.toLowerCase();
-  value.toLowerCase();
-  
-  const FeatureEntry* f = getFeatureById(featureId.c_str());
-  if (!f) {
-    return "Error: Unknown feature. Run 'features' to see list.";
-  }
-  
-  if (!canToggleFeature(f)) {
-    if (!isFeatureCompiled(f)) {
-      return "Error: Feature not compiled in this build.";
-    }
-    return "Error: Feature cannot be toggled (compile-time only).";
-  }
-  
-  const int parsed = parseBoolArg(value);
-  if (parsed < 0) {
-    return "Error: Value must be on/off, true/false, 1/0, or enable/disable";
-  }
-  const bool enable = parsed != 0;
-  
-  bool wasEnabled = *f->enabledSetting;
-  if (FeatureOwnerToggle applyToggle = featureOwnerToggle(f)) {
-    if (const char* error = applyToggle(enable)) return error;
-  } else {
-    setSetting(*f->enabledSetting, enable);
-  }
-
-  // Runtime enable/disable — post only on an actual state transition (a no-op
-  // re-set to the same value must not post). subject=feature name, detail=on|off.
-  if (enable != wasEnabled) {
-    systemEventPost(SYSEVT_FEATURE_TOGGLED, f->name, enable ? "on" : "off");
-  }
-
-  EXT_RAM_BSS_ATTR static char result[128];
-  
-  if (enable && !wasEnabled) {
-    const char* rebootNote = (f->flags & FEATURE_FLAG_REQUIRES_REBOOT) ? " (reboot required)" : "";
-    snprintf(result, sizeof(result), 
-      "[Feature] %s enabled (~%dKB)%s",
-      f->name, f->heapCostKb, rebootNote);
-  } else if (!enable && wasEnabled) {
-    const char* rebootNote = (f->flags & FEATURE_FLAG_REQUIRES_REBOOT) ? " (reboot required)" : "";
-    snprintf(result, sizeof(result), 
-      "[Feature] %s disabled (+%dKB freed)%s",
-      f->name, f->heapCostKb, rebootNote);
-  } else {
-    snprintf(result, sizeof(result), 
-      "[Feature] %s already %s",
-      f->name, enable ? "enabled" : "disabled");
-  }
-  
-  return result;
+  String id = a.arg(0);
+  id.toLowerCase();
+  const FeatureEntry* f = getFeatureById(id.c_str());
+  if (!f) return "Error: Unknown feature. Run 'features' to see list.";
+  return featureDetail(f, text, text_SIZE);
 }
 
 // ============================================================================
@@ -1013,10 +1172,9 @@ static const char* cmd_featuresetup(const String& argsInput) {
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 extern const CommandEntry featureCommands[] = {
-  { "features", "Show/toggle system features with heap estimates.", true, cmd_features,
-    "features              - List all features\n"
-    "features <id>         - Show feature details\n"
-    "features <id> <on|off> - Enable/disable feature\n"
+  { "features", "List system features: built in, running now, start at boot, allowed.", true, cmd_features,
+    "features              - List all features with heap estimates\n"
+    "features <id>         - Show one feature and the commands that switch it\n"
     "features json         - JSON capability list" },
   { "featuresetup", "Run the interactive feature configuration wizard.", true, cmd_featuresetup,
     "featuresetup  - Launch the feature config wizard (any CLI transport; navigate with n/b/numbers, 'cancel' to abort)" }

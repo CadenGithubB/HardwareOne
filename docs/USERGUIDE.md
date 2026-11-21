@@ -1635,7 +1635,7 @@ webclihistorysize <1-100>       - Web CLI history buffer size
 oledclihistorysize <10-100>     - OLED CLI history buffer size
 beginwrite                      - Coalesce this source's settings-file writes
 savesettings                    - Flush changed files and end write coalescing
-features                        - Show/toggle system features with heap estimates
+features                        - Show system features: built in, running, start at boot, allowed
 featuresetup                    - Run interactive feature configuration wizard
 ```
 </details>

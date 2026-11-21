@@ -5840,7 +5840,7 @@ void stopAutomationScheduler() {
 }
 
 // Owner transition for permission + runtime: `automation system enable|disable`
-// and `features automation on|off` both land here. A failed start withdraws
+// lands here (`features` only lists since 2026-11-20). A failed start withdraws
 // the permission again. Returns nullptr, or an error reply.
 const char* automationSetSystemEnabled(bool enable) {
   if (!enable) {

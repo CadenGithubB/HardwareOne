@@ -3024,8 +3024,7 @@ duplicate-ID repair changed the uploaded rules.
 `automationTick()` on every loop; the owner checks the enabled setting itself
 and stops the scheduler when another writer (settings page or import) revoked
 it, so `automationSchedulerRunning()` stays true to the permission. A later
-grant stays idle until `automation system enable` (or `features automation on`,
-which goes through the same owner transition) starts it. Boot
+grant stays idle until `automation system enable` starts it. Boot
 and RamFlush query `automationSchedulerRunning()`; start, stop and notification
 remain the other integration points. Due checks and full ticks are private.
 Unused memo arrays and their exported declarations are removed. Filesystem and
