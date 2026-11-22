@@ -9429,6 +9429,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
 // Heartbeats (HEARTBEAT / BOND_HEARTBEAT) dominate volume and are skipped by
 // default via gSettings.espnowCaptureSkipHeartbeats. A reasonable session
 // capture stays well under the 16 MB per-file cap even over several hours.
+// UP-13: a file is followed by capture-<bootTs>-part<k>.log, and one boot's
+// capture stops at 256 MB (16 parts), so a capture left on cannot fill the
+// card; turning the setting off and on does not restart it before a reboot.
 //
 // Called from the recv callback (onEspNowRawRecv) and each esp_now_send path.
 
@@ -9453,28 +9456,38 @@ static size_t espnowCaptureBase64(const uint8_t* src, size_t srcLen, char* out, 
 }
 
 // Session-scoped capture file path. Built on first write of each boot.
-// Format: /sd/espnow/capture-<unixBootSeconds>.log
-static String gEspNowCapturePath;
-static size_t gEspNowCaptureWritten = 0;
+// Format: /sd/espnow/capture-<unixBootSeconds>.log, then
+// /sd/espnow/capture-<unixBootSeconds>-part<k>.log. Every name is built from
+// the stamp kept at the first write, never from the previous part's name.
+// All of this state changes only under the filesystem lock (captureEspNowFrame).
+static char   gEspNowCapturePath[48];
+static unsigned long gEspNowCaptureStamp = 0;
+static size_t gEspNowCaptureWritten = 0;   // bytes in the current part
+static size_t gEspNowCaptureTotal   = 0;   // bytes this boot, all parts
 static int    gEspNowCapturePart    = 0;
+static bool   gEspNowCaptureFull    = false;  // the boot's budget is spent
 static constexpr size_t ESPNOW_CAPTURE_MAX_BYTES = 16 * 1024 * 1024;  // 16 MB per file
+static constexpr size_t ESPNOW_CAPTURE_MAX_TOTAL_BYTES = 256u * 1024u * 1024u;  // per boot
 static bool   gEspNowCaptureMkdirTried = false;
 
 static bool ensureCaptureFile(time_t now) {
-  if (!gEspNowCapturePath.length()) {
-    char buf[96];
-    snprintf(buf, sizeof(buf), "/sd/espnow/capture-%lu.log", (unsigned long)now);
-    gEspNowCapturePath = buf;
+  if (gEspNowCaptureFull) return false;
+  if (!gEspNowCapturePath[0]) {
+    gEspNowCaptureStamp = (unsigned long)now;
+    snprintf(gEspNowCapturePath, sizeof(gEspNowCapturePath), "/sd/espnow/capture-%lu.log", gEspNowCaptureStamp);
     gEspNowCaptureWritten = 0;
     gEspNowCapturePart = 0;
   }
+  if (gEspNowCaptureTotal >= ESPNOW_CAPTURE_MAX_TOTAL_BYTES) {
+    gEspNowCaptureFull = true;
+    WARN_ESPNOWF("ESP-NOW capture stopped: %u MB written this boot (the limit); it resumes after a reboot",
+                 (unsigned)(gEspNowCaptureTotal / (1024u * 1024u)));
+    return false;
+  }
   if (gEspNowCaptureWritten >= ESPNOW_CAPTURE_MAX_BYTES) {
     gEspNowCapturePart++;
-    char buf[112];
-    int dot = gEspNowCapturePath.lastIndexOf('.');
-    String stem = (dot > 0) ? gEspNowCapturePath.substring(0, dot) : gEspNowCapturePath;
-    snprintf(buf, sizeof(buf), "%s-part%d.log", stem.c_str(), gEspNowCapturePart);
-    gEspNowCapturePath = buf;
+    snprintf(gEspNowCapturePath, sizeof(gEspNowCapturePath), "/sd/espnow/capture-%lu-part%d.log",
+             gEspNowCaptureStamp, gEspNowCapturePart);
     gEspNowCaptureWritten = 0;
   }
   if (!gEspNowCaptureMkdirTried) {
@@ -9489,7 +9502,7 @@ static bool ensureCaptureFile(time_t now) {
 static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
                                int rssi, const uint8_t* data, int len) {
   if (!gSettings.espnowCaptureToSd) return;
-  if (!VFS::isSdAvailable()) return;
+  if (gEspNowCaptureFull) return;
   if (!data || len < (int)sizeof(EspNowV4Header)) return;
 
   const EspNowV4Header* h = (const EspNowV4Header*)data;
@@ -9507,7 +9520,6 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
 
   time_t now = time(nullptr);
   if (now <= 0) now = (time_t)(millis() / 1000);  // fallback if NTP not synced yet
-  if (!ensureCaptureFile(now)) return;
 
   // Resolve peer name (meta first, paired registry fallback).
   String peerName = peerMac ? getEspNowDeviceName(peerMac) : String();
@@ -9536,13 +9548,18 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
 
   // This runs on the Wi-Fi callback path. Never block radio processing behind
   // an unrelated long FS operation; capture is diagnostic and may drop a line.
+  // UP-13: the try-lock comes first. The card check, the folder and the part
+  // name below take the filesystem lock too, and under it they only re-enter.
   FsLockGuard fsGuard("espnow.capture_append", 0);
   if (!fsGuard.held && !isFsLockedByCurrentTask()) return;
-  File f = VFS::openGuarded(gEspNowCapturePath, "a", VFS::systemAuth(VFS::Scopes::ESPNOW_CAPTURES, "espnow.capture_append"), true);
+  if (!VFS::isSdAvailable()) return;
+  if (!ensureCaptureFile(now)) return;
+  File f = VFS::openGuarded(String(gEspNowCapturePath), "a", VFS::systemAuth(VFS::Scopes::ESPNOW_CAPTURES, "espnow.capture_append"), true);
   if (!f) return;
-  f.write((const uint8_t*)line, (size_t)n);
+  const size_t wrote = f.write((const uint8_t*)line, (size_t)n);
   f.close();
-  gEspNowCaptureWritten += (size_t)n;
+  gEspNowCaptureWritten += wrote;
+  gEspNowCaptureTotal += wrote;
 }
 
 static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* incomingData, int len) {

@@ -369,13 +369,26 @@ bool isLittleFsReady() {
 static bool probeSdWriteInternal() {
 #if ENABLE_SD_CARD
   if (!isSdAvailable()) return false;
-  // A user may already have a similarly named file on a removable card.
-  // Pick a vacant 8.3 name; never truncate or delete existing card contents.
+  // Pick a vacant 8.3 name; never truncate an existing file. UP-15: the
+  // /HWPRnnnn.TMP names are this probe's own. A probe interrupted by a power
+  // cut or a flaky card can leave one behind, and once all 16 were taken
+  // every probe failed and the card read as unwritable for good. So when none
+  // is free the leftovers are removed and the names tried once more.
   char kProbePath[16];
   bool found = false;
-  for (unsigned i = 0; i < 16; ++i) {
-    snprintf(kProbePath, sizeof(kProbePath), "/HWPR%04u.TMP", i);
-    if (!SD.exists(kProbePath)) { found = true; break; }
+  for (int attempt = 0; attempt < 2 && !found; ++attempt) {
+    if (attempt == 1) {
+      unsigned removed = 0;
+      for (unsigned i = 0; i < 16; ++i) {
+        snprintf(kProbePath, sizeof(kProbePath), "/HWPR%04u.TMP", i);
+        if (SD.remove(kProbePath)) ++removed;
+      }
+      INFO_STORAGEF("[SD probe] all 16 probe names taken; removed %u leftover probe file(s)", removed);
+    }
+    for (unsigned i = 0; i < 16; ++i) {
+      snprintf(kProbePath, sizeof(kProbePath), "/HWPR%04u.TMP", i);
+      if (!SD.exists(kProbePath)) { found = true; break; }
+    }
   }
   if (!found) return false;
   const char* kProbeData = "hwone-sdtest\n";  // 13 bytes
@@ -406,6 +419,7 @@ static bool probeSdWriteInternal() {
   File r = SD.open(kProbePath, FILE_READ);
   if (!r) {
     INFO_STORAGEF("[SD probe] FAIL stage=open_read path=%s — write succeeded but file vanished", kProbePath);
+    SD.remove(kProbePath);  // UP-15: in case it is there but did not open
     return false;
   }
   char buf[16] = {0};

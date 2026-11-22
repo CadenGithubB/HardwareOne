@@ -588,7 +588,10 @@ The migration tool exports the device's configuration to a `.hwbackup` file and
 imports it onto another device. Requires WiFi and the HTTP server
 (`ENABLE_MIGRATION_TOOL` follows `ENABLE_HTTP_SERVER`).
 
-- **Export** - `/api/backup` from the web UI.
+- **Export** - `/api/backup` from the web UI. The settings category carries `settings.json`,
+  `debug.json` and, once a notification level was changed, `notifications.json`; the others
+  carry the accounts (with `boot_anchors.json` and the per-user settings), the automations, the
+  ESP-NOW device list, the TLS certificates and the maps.
 - **Import** - `/api/restore`, or choose **Import from Backup** at first boot. In the first-boot flow the device brings up WiFi, prints its IP, and waits for you to send the `.hwbackup` from another device's migration tool; you then confirm on the OLED or serial.
   Before the Yes/No prompt (default No) the device shows the bundle's claimed hostname and board, the bytes it received, the first 8 hex of their SHA-256, and whether the bundle's fingerprint matched this board ("this device"), did not ("other device", credentials skipped), or was missing ("no fingerprint (unverified)", credentials still restored). Compare with your file: `wc -c <file>.hwbackup` and the first 8 hex of `shasum -a 256 <file>.hwbackup`. They match only if the file was sent unchanged; a forced cross-device upload has a `force` flag added, so the device says they will not match and you check the source and board instead.
   A bundle exported by newer firmware (`formatVersion` above 1) is refused before anything is staged; update this device's firmware first. A bundle without `formatVersion` is read as format 1. `versions` shows the format this firmware writes (`Backup bundle format`).

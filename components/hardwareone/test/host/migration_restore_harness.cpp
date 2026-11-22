@@ -119,6 +119,7 @@ static std::string bundle(const char* fingerprint = nullptr) {
           "{\"id\":2,\"username\":\"alice\"}]},"
           "\"/system/settings.json\":{\"device\":\"new\"},"
           "\"/system/automations.json\":{\"automations\":[{\"id\":1}]},"
+          "\"/system/notifications.json\":{\"kinds\":{\"login_fail\":\"admin\"}},"
           "\"/system/users/user_settings/2.json\":{\"password\":\"hash\"}"
           "}}";
   return json;
@@ -191,6 +192,8 @@ static void caseAllWritesSucceed() {
   check(fs.text(kSettings).find("new") != std::string::npos);
   check(fs.text(kAutomations).find("\"id\"") != std::string::npos);
   check(fs.exists(kUsers) && fs.exists(kUserSettings));
+  // G-31: the device notification policy travels with the configuration.
+  check(fs.text("/system/notifications.json").find("login_fail") != std::string::npos);
   check(noStagingLeft(fs));
   // users.json is the last file moved into place.
   std::string lastRename;

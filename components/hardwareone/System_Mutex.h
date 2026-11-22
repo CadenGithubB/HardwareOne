@@ -82,6 +82,13 @@ struct FsLockGuard {
   // Non-copyable
   FsLockGuard(const FsLockGuard&) = delete;
   FsLockGuard& operator=(const FsLockGuard&) = delete;
+
+  // S-14: who holds the lock, and the longest hold this boot (fsLockHolder).
+  // Each take and release of the mutex itself (not a same-task reentry), by
+  // the guard and by fsLock/fsUnlock, is reported here. initMutexes() points
+  // these at System_Mutex.cpp's bookkeeping; unset, nothing is recorded.
+  static inline void (*noteTaken)(const char* owner) = nullptr;
+  static inline void (*noteReleased)() = nullptr;
 };
 
 /**
@@ -249,6 +256,18 @@ void fsUnlock();
 // starts or is running when esp_restart() resets the host. Never released.
 // True when this task holds it.
 bool fsLockForRestart(uint32_t timeoutMs);
+
+// S-14: the filesystem lock's holder now and the longest hold since boot.
+// `owner` is the tag the taker passed ("?" without one, "" when free);
+// heldMs is how long it has held the lock. Torn reads are possible (no lock
+// is taken to read): a diagnostic figure for perftop, never for decisions.
+struct FsLockHolderInfo {
+  char     owner[24];
+  uint32_t heldMs;
+  char     longestOwner[24];
+  uint32_t longestMs;
+};
+void fsLockHolder(FsLockHolderInfo* out);
 
 // Check if current task holds a mutex (for debugging/assertions)
 bool isFsLockedByCurrentTask();

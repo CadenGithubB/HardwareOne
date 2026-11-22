@@ -123,7 +123,7 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
   ctx.user = options_.user;
   ctx.scope = folder;
   uint64_t total = 0, used = 0, free = 0;
-  constexpr uint64_t reserve = 100 * 1024;
+  const uint64_t reserve = VFS::logReserveBytes();  // the shared LittleFS reserve (FILE-3)
   // No tier switching, and this writer never deletes or rotates: a full volume
   // refuses the write. (Old dated transcripts are removed only by the log
   // retention pass, System_LogRetentionCore.h, when their volume is below its

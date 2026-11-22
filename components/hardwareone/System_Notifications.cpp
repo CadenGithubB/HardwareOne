@@ -9,6 +9,7 @@
  */
 
 #include "System_Notifications.h"
+#include "System_StatePaths.h"  // HW1_NOTIFICATIONS_JSON_PATH
 
 #include <Arduino.h>
 #include <atomic>
@@ -194,7 +195,7 @@ static NotifRule notifDefaultRuleFor(uint8_t kind) {
 // persisted form is name-keyed JSON — kind numbers are internal-only and free
 // to move between builds, so the masks are rebuilt from names at boot and on
 // every edit.
-#define NOTIF_POLICY_FILE "/system/notifications.json"
+#define NOTIF_POLICY_FILE HW1_NOTIFICATIONS_JSON_PATH
 
 static volatile uint32_t gNotifOffMask[NOTIF_KIND_MASK_WORDS]   = {0};  // level: off
 static volatile uint32_t gNotifAdminMask[NOTIF_KIND_MASK_WORDS] = {0};  // level: admin

@@ -25,7 +25,6 @@ namespace QuickNoteStore {
 // paired G2 connects and after card availability changes, outside BLE callbacks.
 // cleanInterrupted sweeps only this native folder, under the same lock as saves.
 bool ensureG2Folders(const AuthContext& ctx, bool sd, const char** why, bool cleanInterrupted = false);
-constexpr uint64_t kReserveBytes = 100 * 1024;  // free space a note never eats into
 constexpr size_t kPageRows = 8;
 constexpr size_t kMaxNames = 500;               // newest names a listing considers
 constexpr size_t kReadWindow = 512;

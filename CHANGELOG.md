@@ -44,6 +44,25 @@ everything user-visible since the v0.99.99.1 tag.
   popup. Host-tested (`web_guest_gate`, `web_guest_view_browser`,
   `remote_command_authority`); not checked on a device.
 
+### Fixed (storage, files and the web worker)
+- One free-space reserve on flash (FILE-3, UP-16): web uploads to flash may now use what is free
+  above the shared 100 KB reserve (not 90 % of free space), and the refusal shows that figure;
+  an upload to the card may use all of its free space. Photos, transcripts and QuickNotes check
+  the same reserve instead of their own copies. The battery log skips a row while flash is below
+  the reserve and `batterylog status` counts the skipped rows.
+- ESP-NOW SD capture (UP-13): the capture no longer waits for the filesystem on the Wi-Fi path,
+  later parts are named `capture-<stamp>-part<k>.log` (no more growing names), and one boot's
+  capture stops at 256 MB with a warning.
+- The SD write probe (UP-15) removes its file when the read-back open fails, and removes leftover
+  `HWPRnnnn.TMP` files when all 16 names are taken, so the card no longer reads as unwritable.
+- Backups (G-31) include `/system/notifications.json` (the device notification levels) in the
+  settings category when it exists, and a restore accepts it.
+- The Log Viewer (FILE-5) has a View SD Card button when a card is in, so logs that moved to the
+  card when flash ran low can be opened.
+- `perftop` (S-14) shows who holds the filesystem lock now and the longest hold since boot.
+- The live-events request (S-7) leaves as soon as its event queue is empty instead of holding the
+  only web worker for 600 ms. Host-tested; not checked on a device.
+
 ### Added
 - Boot debug file (owner decision B13): every boot runs with every debug flag on and every log
   level shown until boot finishes (or the buffer fills), into a 56 KB PSRAM buffer (4 KB of internal memory on a board without PSRAM) instead

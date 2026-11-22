@@ -227,8 +227,8 @@ String ImageManager::captureAndSave(ImageStorageLocation location, ImageSaveRepo
 #endif
 }
 
-// Minimum free space required before saving (100KB safety margin)
-#define MIN_FREE_SPACE_BYTES (100 * 1024)
+// Free space a photo never eats into: the shared LittleFS reserve (FILE-3).
+#define MIN_FREE_SPACE_BYTES (VFS::logReserveBytes())
 
 String ImageManager::saveImage(const uint8_t* data, size_t len, ImageStorageLocation location,
                                ImageSaveReport* report) {
