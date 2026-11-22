@@ -35,6 +35,8 @@ def main() -> None:
         "servo": ("pca9685", "gPwmDriver", "Adafruit_PWMServoDriver", "servo.obj", 1, 1),
         "gamepad": ("seesaw", "gGamepadSeesaw", "Adafruit_seesaw", "input.gamepad.obj", 2, 0),
         "ano": ("ano_encoder", "gAnoSeesaw", "Adafruit_seesaw", "input.ano.obj", 1, 0),
+        # Static checks only: PSRAM placement new, retained across stops.
+        "encoder": ("encoder", "sPixels", "EncoderPixels", "encoder.obj", 1, 0),
     }
     sources = {}
     for name, (file, pointer, driver, tag, allocations, releases) in modules.items():
@@ -87,7 +89,7 @@ def main() -> None:
         executable = Path(temp) / "sensor_parent_lifecycle"
         generated.write_text(harness)
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-                   str(generated), "-o", str(executable)]
+                   "-I", str(COMPONENT), str(generated), "-o", str(executable)]
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-g"]
         subprocess.run(command, check=True)

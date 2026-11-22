@@ -134,6 +134,29 @@ class XiaoPeripheralConfig(unittest.TestCase):
                                      "INPUT_DEVICE_TYPE": input_device,
                                      "I2C_FEATURE_LEVEL": level}, error=error)
 
+    def test_encoder_is_an_ordinary_opt_in_device(self):
+        # Off in the ordinary profile and at every level but a configuration's own (4).
+        # The XIAO has no onboard NeoPixel, so without it there is no LED command.
+        self.compile_config(checks=["ENABLE_ENCODER == 0", "ENABLE_NEOPIXEL == 0",
+                                    "ENABLE_LED_LIGHTS == 0"])
+        for level in (1, 2, 3):
+            with self.subTest(level=level):
+                self.compile_config({"ENABLE_CAMERA_SENSOR": 0, "I2C_FEATURE_LEVEL": level},
+                                    checks=["ENABLE_ENCODER == 0"])
+        # Selected on its own: no display, no input device, the sensor queue runs,
+        # and the LED commands exist for its pixels (the encoder is the default target).
+        self.compile_config({"ENABLE_CAMERA_SENSOR": 0, "I2C_FEATURE_LEVEL": 4,
+                             "CUSTOM_ENABLE_ENCODER": 1, "CUSTOM_ENABLE_OLED": 0,
+                             "CUSTOM_ENABLE_GAMEPAD": 0, "CUSTOM_ENABLE_LED_MATRIX": 0},
+                            checks=["ENABLE_ENCODER == 1", "ENABLE_I2C_SYSTEM == 1",
+                                    "ENABLE_I2C_SENSOR_QUEUE == 1", "ENABLE_OLED_DISPLAY == 0",
+                                    "ENABLE_OLED_INPUT == 0", "ENABLE_ANO_ENCODER == 0",
+                                    "ENABLE_LED_MATRIX == 0", "ENABLE_NEOPIXEL == 0",
+                                    "ENABLE_LED_LIGHTS == 1"])
+        # Its own I2C pins like any external device: the camera keeps the other controller.
+        self.compile_config({"I2C_FEATURE_LEVEL": 4, "CUSTOM_ENABLE_ENCODER": 1},
+                            error="reserved by camera SCCB")
+
     def test_unintegrated_display_backends_are_not_advertised(self):
         for display in (2, 3):
             with self.subTest(display=display):

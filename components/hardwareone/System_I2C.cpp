@@ -61,6 +61,8 @@
 #include "i2csensor_vl53l4cx.h"
 #include "i2csensor_ds3231.h"
 #include "i2csensor_sths34pf80.h"
+#include "i2csensor_encoder.h"
+#include "System_SeesawIdentity.h"
 
 // ============================================================================
 // Unified I2C Manager Initialization
@@ -169,16 +171,24 @@ int discoveryCount = 0;
 // I2C Sensor Database - Sensors actually used/detected in this system
 // Entry format: { address, name, description, manufacturer, multiAddress, altAddress,
 //                libraryHeapBytes, libraryName, headerGuard, moduleName, i2cClockHz, i2cTimeoutMs,
-//                compiled, configuredBus, configuredAddress, deviceType }
+//                compiled, configuredBus, configuredAddress, deviceType[, seesawProductId] }
 // The second line of a row is what the row is: whether its driver is in this
 // build, the setting that routes it to a bus, its address when that is a
-// setting, and its id in the start/stop queue.
+// setting, its id in the start/stop queue and, for a seesaw board, the product
+// id that names it.
 #if ENABLE_LED_MATRIX
 #define MATRIX_BUS     []() -> int { return matrixDeviceBus(); }
 #define MATRIX_ADDRESS []() -> uint8_t { return matrixDeviceAddress(); }
 #else
 #define MATRIX_BUS     nullptr
 #define MATRIX_ADDRESS nullptr
+#endif
+#if ENABLE_ENCODER
+#define ENCODER_BUS     []() -> int { return encoderDeviceBus(); }
+#define ENCODER_ADDRESS []() -> uint8_t { return encoderDeviceAddress(); }
+#else
+#define ENCODER_BUS     nullptr
+#define ENCODER_ADDRESS nullptr
 #endif
 const I2cSensorEntry i2cSensors[] = {
   // Sensors with CLI Modules
@@ -201,14 +211,14 @@ const I2cSensorEntry i2cSensors[] = {
     (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT },
 #elif ENABLE_ANO_ENCODER
   { 0x49, "Seesaw", "ANO Rotary Encoder (default)", "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200,
-    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT },
+    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT, kSeesawProductAnoEncoder },
   { 0x50, "Seesaw", "ANO Rotary Encoder (alt addr)", "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200,
-    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT },
+    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT, kSeesawProductAnoEncoder },
 #else
   { 0x50, "Seesaw", "Mini I2C Gamepad",              "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200,
-    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT },
+    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT, kSeesawProductGamepad },
   { 0x49, "Seesaw", "Mini I2C Gamepad (alt addr)",   "Adafruit", false, 0x00, 800, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "input", 400000, 200,
-    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT },
+    (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH), []() -> int { return gSettings.inputBus; }, nullptr, I2C_DEVICE_INPUT, kSeesawProductGamepad },
 #endif
   { 0x33, "MLX90640", "32x24 Thermal Camera", "Adafruit", false, 0x00, 2000, "Adafruit_MLX90640", "_ADAFRUIT_MLX90640_H_", "thermal", 100000, 500,
     ENABLE_THERMAL_SENSOR, []() -> int { return gSettings.thermalBus; }, nullptr, I2C_DEVICE_THERMAL },
@@ -243,10 +253,22 @@ const I2cSensorEntry i2cSensors[] = {
     ENABLE_SERVO, []() -> int { return gSettings.servoBus; }, nullptr, I2C_DEVICE_COUNT },
   { 0x70, "HT16K33", "Monochrome 16x8 LED Matrix", "Adafruit", false, 0x00, 0, "Adafruit_LEDBackpack", "Adafruit_LEDBackpack_h", "matrix", 100000, 200,
     ENABLE_LED_MATRIX, MATRIX_BUS, MATRIX_ADDRESS, I2C_DEVICE_COUNT },
+  // The encoder device: either Adafruit seesaw encoder board, used for its
+  // RGB pixels. Both rows claim the one configured address and the product id
+  // the board reports names it (0x49 is also the ANO default and the gamepad
+  // alternate; 0x36 is also the MAX17048 fuel gauge). Last in the table, so an
+  // address-only label prefers the rows above. Without the device, each row
+  // keeps its board's default address for the scan's label.
+  { 0x49, "Encoder", "Adafruit 5752 Quad Rotary Encoder, 4 RGB pixels", "Adafruit", false, 0x00, 300, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "encoder", 400000, 200,
+    ENABLE_ENCODER, ENCODER_BUS, ENCODER_ADDRESS, I2C_DEVICE_ENCODER, kSeesawProductQuadEncoder },
+  { 0x36, "Encoder", "Adafruit 4991 Rotary Encoder, 1 RGB pixel", "Adafruit", false, 0x00, 300, "Adafruit_seesaw", "_ADAFRUIT_SEESAW_H_", "encoder", 400000, 200,
+    ENABLE_ENCODER, ENCODER_BUS, ENCODER_ADDRESS, I2C_DEVICE_ENCODER, kSeesawProductRotaryEncoder },
 };
 
 #undef MATRIX_BUS
 #undef MATRIX_ADDRESS
+#undef ENCODER_BUS
+#undef ENCODER_ADDRESS
 
 // Export array size for use in .ino file
 const size_t i2cSensorsCount = sizeof(i2cSensors) / sizeof(i2cSensors[0]);
@@ -319,6 +341,7 @@ static uint8_t i2cAddressForDeviceType(I2cDeviceType sensor) {
     case I2C_DEVICE_APDS:     return I2C_ADDR_APDS;
     case I2C_DEVICE_RTC:      return I2C_ADDR_DS3231;
     case I2C_DEVICE_PRESENCE: return I2C_ADDR_PRESENCE;
+    case I2C_DEVICE_ENCODER: return encoderDeviceAddress();
     default:                  return 0;
   }
 }
@@ -338,6 +361,7 @@ static uint8_t i2cBusForDeviceType(I2cDeviceType sensor) {
     case I2C_DEVICE_APDS:     return (uint8_t)gSettings.apdsBus;
     case I2C_DEVICE_RTC:      return (uint8_t)gSettings.rtcBus;
     case I2C_DEVICE_PRESENCE: return (uint8_t)gSettings.presenceBus;
+    case I2C_DEVICE_ENCODER: return encoderDeviceBus();
     default:                  return 0;
   }
 }
@@ -360,6 +384,7 @@ static bool sensorIsRunning(I2cDeviceType sensor) {
 #endif
     case I2C_DEVICE_RTC: return gRtcRunning;
     case I2C_DEVICE_PRESENCE: return gPresenceRunning;
+    case I2C_DEVICE_ENCODER: return encoderRunning();
     default: return false;
   }
 }
@@ -375,6 +400,7 @@ static bool sensorHasTask(I2cDeviceType sensor) {
     case I2C_DEVICE_APDS: return gApdsTaskHandle != nullptr;
     case I2C_DEVICE_RTC: return gRtcTaskHandle != nullptr;
     case I2C_DEVICE_PRESENCE: return gPresenceTaskHandle != nullptr;
+    case I2C_DEVICE_ENCODER: return false;  // no task: the main loop ticks its frames
     default: return false;
   }
 }
@@ -397,6 +423,7 @@ static const SensorSwitchRow kSensorSwitches[] = {
   { I2C_DEVICE_APDS,     &gSettings.apdsAutoStart },
   { I2C_DEVICE_RTC,      &gSettings.rtcAutoStart },
   { I2C_DEVICE_PRESENCE, &gSettings.presenceAutoStart },
+  { I2C_DEVICE_ENCODER, &gSettings.encoderAutoStart },
 };
 static_assert(sizeof(kSensorSwitches) / sizeof(kSensorSwitches[0]) == (size_t)I2C_DEVICE_COUNT,
               "every queue-managed device type needs its switch row");
@@ -559,6 +586,7 @@ const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName
         case I2C_DEVICE_APDS:     closeCmd = "closeapds"; break;
         case I2C_DEVICE_RTC:      closeCmd = "closertc"; break;
         case I2C_DEVICE_PRESENCE: closeCmd = "closepresence"; break;
+        case I2C_DEVICE_ENCODER: closeCmd = "closeencoder"; break;
         default: break;
       }
       snprintf(getDebugBuffer(), 1024,
@@ -598,6 +626,7 @@ static const char* sensorOpenCommand(I2cDeviceType sensor) {
     case I2C_DEVICE_APDS:     return "openapds";
     case I2C_DEVICE_RTC:      return "openrtc";
     case I2C_DEVICE_PRESENCE: return "openpresence";
+    case I2C_DEVICE_ENCODER: return "openencoder";
     default:                  return "the open command";
   }
 }
@@ -988,8 +1017,94 @@ static int findSensorIndexByAddress(uint8_t address) {
   return -1;  // Not found
 }
 
-String identifySensor(uint8_t address) {
-  const int index = findSensorIndexByAddress(address);
+bool i2cReadSeesawProductId(uint8_t bus, uint8_t address, uint16_t& productId) {
+  I2cDeviceManager* mgr = gI2cBusRunning ? I2cDeviceManager::getInstance() : nullptr;
+  if (!mgr) return false;
+  const uint8_t command[2] = { kSeesawStatusBase, kSeesawStatusVersion };
+  uint8_t reply[4] = {};
+  if (mgr->identityRead(bus, address, command, sizeof(command), kSeesawReadSettleUs,
+                        reply, sizeof(reply), I2cTransactionOptions{100000, 50}) != 0) {
+    return false;
+  }
+  productId = seesawProductFromVersion(seesawVersionFromBytes(reply));
+  return true;
+}
+
+bool seesawReadProductIdOnHeldBus(TwoWire* wire, uint8_t address, uint16_t& productId) {
+  const uint8_t command[2] = { kSeesawStatusBase, kSeesawStatusVersion };
+  uint8_t reply[4] = {};
+  if (i2cWriteThenReadHeld(wire, address, command, sizeof(command), kSeesawReadSettleUs,
+                           reply, sizeof(reply)) != 0) {
+    return false;
+  }
+  productId = seesawProductFromVersion(seesawVersionFromBytes(reply));
+  return true;
+}
+
+// Whether a compiled row can claim `address` on `bus`: its (configured)
+// address or alternate, on its configured bus (a row without a bus setting
+// claims either bus).
+static bool rowClaims(const I2cSensorEntry& row, uint8_t address, uint8_t bus) {
+  if (!row.compiled) return false;
+  const I2cSensorEntry sensor = configuredSensor(row);
+  if (sensor.address != address && !(sensor.multiAddress && sensor.altAddress == address)) return false;
+  return !row.configuredBus || row.configuredBus() == (int)bus;
+}
+
+// A scan reads the product id only where two compiled rows of different
+// products can claim the address on that bus (System_SeesawIdentity.h). Both
+// encoder rows claim the encoder's configured address, so that address is
+// always one of them; a build without a second seesaw driver makes no
+// identity read anywhere else.
+static bool seesawIdentityNeededAt(uint8_t address, uint8_t bus) {
+  uint16_t claiming[8] = {};
+  size_t count = 0;
+  for (size_t i = 0; i < i2cSensorsCount && count < 8; i++) {
+    if (rowClaims(i2cSensors[i], address, bus)) claiming[count++] = i2cSensors[i].seesawProductId;
+  }
+  return seesawIdentityNeeded(claiming, count);
+}
+
+// The address-only label among the rows that are not seesaw boards: the
+// device at an ambiguous address that reported no product a row names (the
+// fuel gauge at an encoder address, for instance).
+static int findPlainSensorIndexByAddress(uint8_t address) {
+  for (size_t i = 0; i < i2cSensorsCount; i++) {
+    if (i2cSensors[i].seesawProductId == 0 && configuredSensor(i2cSensors[i]).address == address) return i;
+  }
+  return -1;
+}
+
+// Whether some row of the table names the board that reported `product`.
+static bool productNamedByARow(uint16_t product) {
+  for (size_t i = 0; i < i2cSensorsCount; i++) {
+    if (product != 0 && i2cSensors[i].seesawProductId == product) return true;
+  }
+  return false;
+}
+
+// What answered at `address` on `bus`: a row index, or -1.
+static int identifyRowAt(uint8_t address, uint8_t bus) {
+  if (!seesawIdentityNeededAt(address, bus)) return findSensorIndexByAddress(address);
+  uint16_t product = 0;
+  if (i2cReadSeesawProductId(bus, address, product)) {
+    // A compiled row first: a build names its own board before the label of
+    // another build's driver.
+    uint16_t products[32] = {};
+    const size_t count = i2cSensorsCount < 32 ? i2cSensorsCount : 32;
+    for (int pass = 0; pass < 2; ++pass) {
+      for (size_t i = 0; i < count; i++) {
+        products[i] = (pass == 1 || i2cSensors[i].compiled) ? i2cSensors[i].seesawProductId : 0;
+      }
+      const int index = seesawRowForProduct(products, count, product);
+      if (index >= 0) return index;
+    }
+  }
+  return findPlainSensorIndexByAddress(address);
+}
+
+String identifySensor(uint8_t address, uint8_t bus) {
+  const int index = identifyRowAt(address, bus);
   if (index < 0) return "Unknown Device";
   const I2cSensorEntry sensor = configuredSensor(i2cSensors[index]);
   String result = sensor.name;
@@ -1174,7 +1289,7 @@ const char* cmd_i2cscan(const String& originalCmd) {
     int count = 0;
     for (uint8_t addr = 1; addr < 127; addr++) {
       if (i2cPingAddress(addr, 100000, 50, 0)) {
-        String identification = identifySensor(addr);
+        String identification = identifySensor(addr, 0);
         BROADCAST_PRINTF("  0x%02X (%d) - %s", addr, addr, identification.c_str());
         count++;
       }
@@ -1196,8 +1311,7 @@ const char* cmd_i2cscan(const String& originalCmd) {
     int count = 0;
     for (uint8_t addr = 1; addr < 127; addr++) {
       if (i2cPingAddress(addr, 100000, 50, 1)) {
-        // identifySensor() looks up by address only — same name on either bus.
-        String identification = identifySensor(addr);
+        String identification = identifySensor(addr, 1);
         BROADCAST_PRINTF("  0x%02X (%d) - %s", addr, addr, identification.c_str());
         count++;
       }
@@ -1312,7 +1426,7 @@ static void addDiscoveredDevice(uint8_t address, uint8_t bus) {
   // MAX_CONNECTED_DEVICES is now a #define in i2c_system.h
   if (connectedDeviceCount >= MAX_CONNECTED_DEVICES) return;
 
-  int sensorIndex = findSensorIndexByAddress(address);
+  const int sensorIndex = identifyRowAt(address, bus);
   unsigned long now = millis();
 
   ConnectedDevice& device = connectedDevices[connectedDeviceCount++];
@@ -1375,11 +1489,21 @@ void detectHardware(DetectionResult& out) {
     for (size_t i = 0; i < n && i < MAXSENS; i++) {
       if (found[i]) continue;                   // already located on the other bus
       const I2cSensorEntry s = configuredSensor(i2cSensors[i]);
-      // Discovery checks address replies only; initialization belongs to the driver.
-      bool hit = i2cPingAddress(s.address, kProbeClockHz, s.i2cTimeoutMs, bus);
-      if (!hit && s.multiAddress) {
-        hit = i2cPingAddress(s.altAddress, kProbeClockHz, s.i2cTimeoutMs, bus);
-      }
+      // A seesaw row another build compiles: its board is not looked for.
+      if (s.seesawProductId != 0 && !s.compiled) continue;
+      // Discovery checks address replies; initialization belongs to the driver.
+      // Where boards of different products share the address, the row also
+      // needs its product id (the only identity read; see identifySensor).
+      auto answers = [&](uint8_t address) {
+        if (!i2cPingAddress(address, kProbeClockHz, s.i2cTimeoutMs, bus)) return false;
+        if (!seesawIdentityNeededAt(address, bus)) return true;
+        uint16_t product = 0;
+        const bool read = i2cReadSeesawProductId(bus, address, product);
+        return s.seesawProductId != 0 ? (read && product == s.seesawProductId)
+                                       : !(read && productNamedByARow(product));
+      };
+      bool hit = answers(s.address);
+      if (!hit && s.multiAddress) hit = answers(s.altAddress);
       if (hit) { found[i] = true; foundBus[i] = bus; }
     }
   }
@@ -1572,10 +1696,13 @@ void discoverI2cDevices() {
     // gauge-only build still probed unrelated addresses at every boot.
     if (!isSensorCompiled(i2cSensors[i])) continue;
 
-    scanAddresses[scanCount++] = configuredSensor(i2cSensors[i]).address;
-    if (i2cSensors[i].multiAddress && scanCount < 32) {
-      scanAddresses[scanCount++] = i2cSensors[i].altAddress;
-    }
+    // Two rows can name one address (the seesaw boards): probe it once.
+    auto addAddress = [&](uint8_t address) {
+      for (int k = 0; k < scanCount; k++) if (scanAddresses[k] == address) return;
+      if (scanCount < 32) scanAddresses[scanCount++] = address;
+    };
+    addAddress(configuredSensor(i2cSensors[i]).address);
+    if (i2cSensors[i].multiAddress) addAddress(i2cSensors[i].altAddress);
   }
   
   INFO_I2C_DISCOVERYF("[Discovery] Smart scan: %d addresses on I2C1 (bus 0, SDA=%d SCL=%d)",
@@ -2145,6 +2272,9 @@ static const SensorHeapCost sensorHeapCosts[] = {
 #endif
   { "RTC Clock",      "rtc",     &gSettings.rtcAutoStart,      2 },  // DS3231: minimal
   { "Presence",       "presence",&gSettings.presenceAutoStart, 2 },  // STHS34PF80: minimal
+#if ENABLE_ENCODER
+  { "Encoder",        "encoder", &gSettings.encoderAutoStart,  1 },  // seesaw encoder pixels: no task
+#endif
 };
 static const size_t sensorHeapCostCount = sizeof(sensorHeapCosts) / sizeof(sensorHeapCosts[0]);
 
@@ -2246,7 +2376,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   }
   
   if (!found) {
-    return "Error: Unknown sensor. Use thermal, tof, imu, gps, fmradio, apds, input, rtc, presence or all.";
+    return "Error: Unknown sensor. Use thermal, tof, imu, gps, fmradio, apds, input, rtc, presence, encoder or all.";
   }
 
   // A sensor whose driver is not compiled in can never start, so enabling it
@@ -2442,7 +2572,7 @@ const CommandEntry i2cCommands[] = {
   { "devicefile", "Show device registry JSON file.", false, cmd_devicefile },
   
   // Sensor Auto-Start
-  { "sensorautostart", "Sensor auto-start: [sensor] [on|off]", true, cmd_sensorautostart, "Usage: sensorautostart [sensor] [on|off]\n       sensorautostart all [on|off]\nSensors: thermal, tof, imu, gps, fmradio, apds, input, rtc, presence" }
+  { "sensorautostart", "Sensor auto-start: [sensor] [on|off]", true, cmd_sensorautostart, "Usage: sensorautostart [sensor] [on|off]\n       sensorautostart all [on|off]\nSensors: thermal, tof, imu, gps, fmradio, apds, input, rtc, presence, encoder" }
 };
 
 const size_t i2cCommandsCount = sizeof(i2cCommands) / sizeof(i2cCommands[0]);
@@ -2473,6 +2603,7 @@ const char* deviceTypeDisplayName(I2cDeviceType sensor) {
     case I2C_DEVICE_APDS:     return "APDS";
     case I2C_DEVICE_RTC:      return "RTC";
     case I2C_DEVICE_PRESENCE: return "Presence";
+    case I2C_DEVICE_ENCODER: return "Encoder";
     default:              return "Unknown";
   }
 }
@@ -2573,6 +2704,9 @@ static void applySensorStop(I2cDeviceType sensor) {
       gPresenceRunning = false;
       gPresenceLastStopTime = millis();
 #endif
+      break;
+    case I2C_DEVICE_ENCODER:
+      encoderStop();  // no task: the owner darkens the pixels and stops now
       break;
     default: return;
   }
@@ -2901,6 +3035,7 @@ static bool startSensorInternal(I2cDeviceType sensor) {
 #if ENABLE_PRESENCE_SENSOR
     case I2C_DEVICE_PRESENCE: return presenceStartInternal();
 #endif
+    case I2C_DEVICE_ENCODER: return encoderStartInternal();  // false without the device
     default: return false;
   }
 }
@@ -3517,6 +3652,19 @@ void processAutoStartSensors() {
       enqueueDeviceStart(I2C_DEVICE_PRESENCE); autoStartQueued++;
     } else {
       INFO_I2C_AUTOSTARTF("[AutoStart] Skipping Presence sensor (not detected on I2C bus)");
+    }
+  }
+  #endif
+
+  #if ENABLE_ENCODER
+  if (ramFlushResolve(RF_ENCODER, gSettings.encoderAutoStart)) {
+    // Missing at boot: one "autostart skipped" line and boot goes on; an
+    // LED command to the encoder target reconnects it later.
+    if (isSensorAvailableForAutoStart(I2C_DEVICE_ENCODER)) {
+      INFO_I2C_AUTOSTARTF("[AutoStart] Queuing encoder board");
+      enqueueDeviceStart(I2C_DEVICE_ENCODER); autoStartQueued++;
+    } else {
+      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping encoder board (not detected on I2C bus)");
     }
   }
   #endif

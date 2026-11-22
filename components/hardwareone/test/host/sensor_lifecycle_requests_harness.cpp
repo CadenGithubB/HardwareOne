@@ -29,6 +29,7 @@
 #define ENABLE_APDS_SENSOR 1
 #define ENABLE_RTC_SENSOR 1
 #define ENABLE_PRESENCE_SENSOR 1
+#define ENABLE_ENCODER 1
 
 struct FakeSemaphore { bool available = true, held = false; };
 static constexpr TickType_t portMAX_DELAY = UINT32_MAX;
@@ -83,11 +84,11 @@ static unsigned long& gRtcLastStopTime = stopTimes[I2C_DEVICE_RTC];
 static unsigned long& gPresenceLastStopTime = stopTimes[I2C_DEVICE_PRESENCE];
 static struct {
   int thermalBus = 0, tofBus = 0, imuBus = 0, inputBus = 0, gpsBus = 0;
-  int fmRadioBus = 0, apdsBus = 0, rtcBus = 0, presenceBus = 0;
+  int fmRadioBus = 0, apdsBus = 0, rtcBus = 0, presenceBus = 0, encoderBus = 0;
   // The one saved switch per device (start at boot), at the firmware's defaults.
   bool thermalAutoStart = false, tofAutoStart = false, imuAutoStart = false, inputAutoStart = false;
   bool gpsAutoStart = false, fmRadioAutoStart = false, apdsAutoStart = false, rtcAutoStart = true;
-  bool presenceAutoStart = false;
+  bool presenceAutoStart = false, encoderAutoStart = false;
 } gSettings;
 static bool& autoStartSetting(I2cDeviceType sensor) {
   switch (sensor) {
@@ -99,6 +100,7 @@ static bool& autoStartSetting(I2cDeviceType sensor) {
     case I2C_DEVICE_FMRADIO: return gSettings.fmRadioAutoStart;
     case I2C_DEVICE_APDS: return gSettings.apdsAutoStart;
     case I2C_DEVICE_RTC: return gSettings.rtcAutoStart;
+    case I2C_DEVICE_ENCODER: return gSettings.encoderAutoStart;
     default: return gSettings.presenceAutoStart;
   }
 }
@@ -202,6 +204,18 @@ static bool fmRadioStartInternal() { return startOwner(I2C_DEVICE_FMRADIO); }
 static bool apdsStartInternal() { return startOwner(I2C_DEVICE_APDS); }
 static bool rtcStartInternal() { return startOwner(I2C_DEVICE_RTC); }
 static bool presenceStartInternal() { return startOwner(I2C_DEVICE_PRESENCE); }
+// The encoder board has no task: its owner reports running, and its stop
+// darkens the pixels and returns (the worker publishes the stop at once).
+static unsigned encoderStopCalls;
+static bool encoderRunning() { return running[I2C_DEVICE_ENCODER]; }
+static uint8_t encoderDeviceAddress() { return 0x49; }
+static uint8_t encoderDeviceBus() { return static_cast<uint8_t>(gSettings.encoderBus); }
+static bool encoderStartInternal() {
+  const bool started = startOwner(I2C_DEVICE_ENCODER);
+  handles[I2C_DEVICE_ENCODER] = nullptr;  // no task
+  return started;
+}
+static void encoderStop() { assert(pauseDepth > 0); ++encoderStopCalls; running[I2C_DEVICE_ENCODER] = false; }
 static void fmRadioDeinit() {
   assert(pauseDepth > 0 && gFmRadioTaskHandle == nullptr);
   ++fmDeinitCalls; fmHardwareReady = false; gFmRadioRunning = false;
@@ -225,7 +239,7 @@ struct Fixture {
     gApdsColorRunning = gApdsProximityRunning = gApdsGestureRunning = false;
     std::memset(sSensorStopAwaitingCleanup, 0, sizeof(sSensorStopAwaitingCleanup));
     takes = gives = probeCalls = pauseCalls = resumeCalls = pauseDepth = taskDeletes = 0;
-    fmDeinitCalls = rtcStopCalls = 0; fmHardwareReady = false;
+    fmDeinitCalls = rtcStopCalls = encoderStopCalls = 0; fmHardwareReady = false;
     hints.clear(); gRtcConnected = false; managerInits = 0;
     gFirstTimeSetupState = SETUP_NOT_NEEDED; flushOverride.fill(-1); flushFailedMark.fill(false);
     for (int i = 0; i < I2C_DEVICE_COUNT; ++i) {
@@ -333,7 +347,9 @@ static void workerOutcomeCases() {
     assert(eventCount(SYSEVT_SENSOR_STARTED) == 1 && eventCount(SYSEVT_SENSOR_START_FAILED) == 0);
     assert(pauseCalls == 1 && pauseDepth == 1 && graceResets.size() == 1);
 #if ENABLE_ESPNOW
-    assert(meshStatuses.size() == static_cast<size_t>(sensor != I2C_DEVICE_APDS));
+    // The APDS and the encoder board have no remote sensor type.
+    assert(meshStatuses.size() ==
+           static_cast<size_t>(sensor != I2C_DEVICE_APDS && sensor != I2C_DEVICE_ENCODER));
     if (!meshStatuses.empty()) assert(meshStatuses[0].first == index && meshStatuses[0].second);
 #else
     assert(meshStatuses.empty());
@@ -398,6 +414,7 @@ static void closeOrderingCases() {
 
 static void cleanupCases() {
   for (int index = 0; index < I2C_DEVICE_COUNT; ++index) {
+    if (index == I2C_DEVICE_ENCODER) continue;  // no task: its own case below
     Fixture f; const auto sensor = static_cast<I2cDeviceType>(index);
     running[sensor] = true; handles[sensor] = &f;
     if (sensor == I2C_DEVICE_APDS) gApdsColorRunning = gApdsProximityRunning = gApdsGestureRunning = true;
@@ -430,6 +447,15 @@ static void cleanupCases() {
     assert(requestSensorStop(sensor)); f.worker(); f.worker();
     assert(!sSensorStopAwaitingCleanup[sensor] && statuses.empty() && events.empty() && meshStatuses.empty());
   }
+  // The encoder board has no task: its owner stops at once, so the stop
+  // is published on the same worker pass and a new open needs no cleanup wait.
+  { Fixture f; const auto sensor = I2C_DEVICE_ENCODER;
+    running[sensor] = true;
+    assert(requestSensorStop(sensor)); f.worker();
+    assert(!running[sensor] && encoderStopCalls == 1);
+    assert(eventCount(SYSEVT_SENSOR_STOPPED) == 1 && !sSensorStopAwaitingCleanup[sensor]);
+    assert(enqueueDeviceStart(sensor)); f.worker();
+    assert(starts[sensor] == 1 && running[sensor] && eventCount(SYSEVT_SENSOR_STARTED) == 1); }
   // Connected without a task still counts (RTC; FM tune/boot is below).
   { Fixture f; gRtcConnected = true;
     assert(requestSensorStop(I2C_DEVICE_RTC)); f.worker();

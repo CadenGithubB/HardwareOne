@@ -1,5 +1,7 @@
 /**
- * NeoPixel LED control for boards with an addressable RGB LED
+ * NeoPixel LED control for boards with an addressable RGB LED, and the LED
+ * commands every light shares (the onboard pixel, the encoder board's pixels:
+ * System_LedTarget.h).
  */
 
 #ifndef SYSTEM_NEOPIXEL_H
@@ -11,27 +13,14 @@
 #include "System_BuildConfig.h"
 #include <Arduino.h>
 
-// RGB color structure
-struct RGB {
-  uint8_t r;
-  uint8_t g;
-  uint8_t b;
-};
+// RGB, EffectType, rainbowColor and the effect frame math are shared with the
+// encoder board's pixels; they live in one header.
+#include "System_LedEffectCore.h"
 
 // Color entry for lookup table
 struct ColorEntry {
   const char* name;
   RGB rgb;
-};
-
-// LED Effect types
-enum EffectType {
-  EFFECT_NONE = 0,
-  EFFECT_FADE = 1,
-  EFFECT_PULSE = 2,
-  EFFECT_RAINBOW = 3,
-  EFFECT_BLINK = 4,
-  EFFECT_STROBE = 5
 };
 
 // 75-color palette (PROGMEM; enumerate via memcpy_P per entry — the name
@@ -47,6 +36,24 @@ extern const char* const ledEffectNames[];
 extern const int ledEffectNameCount;
 // Name -> EFFECT_* code (case-insensitive); EFFECT_NONE (0) if unknown.
 int ledEffectCodeForName(const String& name);
+
+// The ledeffect grammar after its optional target (System_LedTarget.h), the
+// same for every light:
+// <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100..60000].
+// Defaults: red, blue, 3000 ms.
+enum class LedEffectArgsError : uint8_t {
+  None, Missing, TooMany, UnknownColor, NotANumber, DurationRange, UnknownEffect
+};
+struct LedEffectArgs {
+  bool off = false;                 // "off" or "none": cancel
+  String effectName;                // lower case, as typed
+  int effect = EFFECT_NONE;         // EFFECT_* code
+  RGB color1 = {255, 0, 0};         // Red
+  RGB color2 = {0, 0, 255};         // Blue
+  unsigned long durationMs = 3000;  // 3 seconds
+  String badToken;                  // the unknown color or effect name
+};
+LedEffectArgsError parseLedEffectArgs(const String& argsInput, LedEffectArgs& out);
 
 // Brightness preset ladder shared by the OLED/G2 "tap to cycle" rows:
 // 10 -> 25 -> 50 -> 75 -> 100 -> 10; an off-ladder value lands on the next
@@ -92,7 +99,6 @@ bool getRgbFromName(const String& colorName, RGB& color);
 // Color utility functions
 RGB blendColors(RGB a, RGB b, float ratio);
 RGB adjustBrightness(RGB color, float brightness);
-RGB rainbowColor(int step, int maxSteps);
 String getClosestColorName(uint16_t r, uint16_t g, uint16_t b, RGB& closestRgb);
 
 #endif // SYSTEM_NEOPIXEL_H

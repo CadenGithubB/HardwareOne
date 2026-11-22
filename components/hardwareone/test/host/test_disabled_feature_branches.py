@@ -45,6 +45,7 @@ OWNERS: dict[str, str] = {
     "i2csensor_sths34pf80.h": "ENABLE_PRESENCE_SENSOR",
     "i2csensor_ds3231.h": "ENABLE_RTC_SENSOR",
     "i2csensor_seesaw.h": "ENABLE_GAMEPAD_SENSOR",
+    "i2csensor_encoder.h": "ENABLE_ENCODER",
     "System_Microphone.h": "ENABLE_MICROPHONE",
     "System_Camera_DVP.h": "ENABLE_CAMERA_SENSOR",
     "System_WiFi.h": "ENABLE_WIFI",

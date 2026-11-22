@@ -7,6 +7,17 @@ add_executable(ht16k33_geometry_tests test_ht16k33_geometry.cpp)
 set_target_properties(ht16k33_geometry_tests PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 target_compile_options(ht16k33_geometry_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# The LED targets and the encoder board's light (Adafruit 5752 / 4991): target
+# parsing, seesaw product-id detection, changed-frame writes, the 30 fps cap,
+# busy-bus frame skips, the failure stop and the not-connected replies, from
+# the production headers. The colour and effect tables are read from
+# System_NeoPixel.cpp to check that no name is a target word.
+add_executable(encoder_light_tests test_encoder_light.cpp)
+set_target_properties(encoder_light_tests PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+target_compile_options(encoder_light_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+target_compile_definitions(encoder_light_tests PRIVATE
+  HW1_NEOPIXEL_SOURCE="${CMAKE_CURRENT_LIST_DIR}/../../System_NeoPixel.cpp")
+
 # Compiles the REAL header from the firmware tree, not a copy of it — the same
 # rule updater/test/host/CMakeLists.txt states. System_LLMUtf8.h is kept
 # dependency-free so this is possible; if it ever gains an Arduino or ESP-IDF
@@ -1701,6 +1712,7 @@ endif()
 add_test(NAME sdmmc_lifecycle
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_sdmmc.py ${SDMMC_TEST_ARGS})
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
+add_test(NAME encoder_light_tests COMMAND encoder_light_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
 add_test(NAME factory_wipe_policy_tests COMMAND factory_wipe_policy_tests)

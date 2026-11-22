@@ -70,7 +70,8 @@ def measure(component: Path) -> tuple[int, list[str]]:
     start = source.find("const I2cSensorEntry i2cSensors[] = {")
     table = source[start:source.find("\n};", start)] if start >= 0 else ""
     rows = len(re.findall(r"^\s*\{ 0x", table, re.M))
-    typed = len(re.findall(r"I2C_DEVICE_\w+ \}", table))
+    # A row ends with its I2cDeviceType, a seesaw row with its product id after it.
+    typed = len(re.findall(r"I2C_DEVICE_\w+(?:, kSeesawProduct\w+)? \}", table))
     if rows == 0 or rows != typed:
         failures.append(f"System_I2C.cpp: {rows} i2cSensors[] rows, {typed} end with their I2cDeviceType")
 

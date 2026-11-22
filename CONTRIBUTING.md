@@ -90,7 +90,7 @@ deferred; memory slimming resumed in 0.99.98.5.)
 | Embedded icon availability and file-extension mapping; icon drawing | `System_Icons` owns lookup policy beside the generated assets; `OLED_UI` owns rendering on the shared graphics canvas. |
 | List-row label bounds, the static ellipsis and the selected label's scrolling | `OLED_TextField` (policy and timing in `OLED_TextFieldCore.h`); shared renderers and custom rows draw labels through `oledTextFieldDraw`, keep markers, values and scrollbars in their own fixed columns, and never shorten the stored text. See [OLED list text](docs/OLED_LIST_TEXT.md). |
 | CPU clock changes and I2C draining during a change | `System_Power`; commands and idle/wake choose frequencies through its existing policy functions and check the operation's result. |
-| NeoPixel colors, effects, brightness, startup settings and driver access | `System_NeoPixel`; screens use the existing authorized commands, and the driver instance stays private. |
+| NeoPixel colors, effects, brightness, startup settings and driver access; the LED commands and their target argument | `System_NeoPixel` (targets parsed by `System_LedTarget.h`); the `encoder` target's pixels belong to the encoder device (`i2csensor_encoder`). Screens use the existing authorized commands, and the driver instances stay private. |
 | Directory entry order, backend name translation and virtual mounts | `VFS::DirectoryReader` in `System_VFS`; callers retain guarded opens, filesystem lock ownership, visibility, permission metadata, caching and output formats. |
 | Storage-path routing, capacity sampling and sample validity | `System_VFS`; consumers use `getStorageType` and check capacity-query results. Admission uses fresh `getStats`; presentation may explicitly opt into bounded-age snapshots. |
 | A service's behavior, resources and lifecycle | Its owning module, exposed through a small public interface |
@@ -108,6 +108,10 @@ attachment should report unavailable without breaking unrelated services.
 - I2C discovery uses the manager's address probes, locking and clock handling.
   A scan result is an address match; the driver owns protocol initialization
   and identity checks. Do not read arbitrary device data to confirm presence.
+  The one identity read is the seesaw product id (`System_SeesawIdentity.h`),
+  made only where two compiled rows of different products can claim the
+  address on that bus (the boards that share 0x49, the encoder's configured
+  address); a driver makes it before it begins or resets a board.
 - Keep a module's state and resource lifetime with its implementation. Use its
   existing settings/command registries for integration; avoid exporting mutable
   globals merely to make another module work.
@@ -277,10 +281,9 @@ the phone app send it as text.
   `tools/command_registry.py`, so it cannot come back and no code string still
   sends it. Rows that match on the command text to mask secrets in the audit
   log (`System_Utils.cpp`, `System_Automation.cpp`) keep a removed name: a stale
-  typed or saved line still reaches the log as an unknown command. Two
-  forwarding forms remain until the owner decides on them: `fmradiounmute`
-  (forwards to `fmradiomute off`) and the `srtuning <gain|agc|vad|swgain|filters>
-  <value>` sub-form (the same as the one-word setters).
+  typed or saved line still reaches the log as an unknown command. No
+  forwarding form remains (`fmradiounmute` and the `srtuning` sub-form were
+  removed on 2026-11-21).
 - Which name stays: `open<x>` and `close<x>` for a lifecycle, `<x>status` for a
   status, the form without a hyphen or underscore, and the full sub-command form
   (`automation add`, `ring panel feed on`). A `<sensor>read` that returns the

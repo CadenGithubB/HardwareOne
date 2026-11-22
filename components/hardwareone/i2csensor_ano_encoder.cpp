@@ -19,6 +19,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
+#include "System_SeesawIdentity.h"
 #include "System_SensorJsonKeys.h"  // inter-device sensor JSON key names (receivers read the same)
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
@@ -182,6 +183,21 @@ bool anoEncoderInit() {
 
   const uint8_t addr = anoI2cAddr();
   bool ok = i2cDeviceTransaction(bus, addr, 100000, 3000, [&]() -> bool {
+    // The product id first, before any begin or reset: 0x49 is also the
+    // encoder board's default and the gamepad's alternate, and a board of
+    // another product is left exactly as it was.
+    uint16_t product = 0;
+    if (!seesawReadProductIdOnHeldBus(wire, addr, product)) {
+      ERROR_ANO_ENCODERF("ANO seesaw not found at 0x%02X on bus %u", addr, bus);
+      return false;
+    }
+    INFO_ANO_ENCODER_LIFECYCLEF("ANO seesaw product id: %u", (unsigned)product);
+    if (product != kSeesawProductAnoEncoder) {
+      ERROR_ANO_ENCODERF("Seesaw at 0x%02X reports product %u, not the ANO encoder (%u); not claiming it",
+                         addr, (unsigned)product, (unsigned)kSeesawProductAnoEncoder);
+      return false;
+    }
+
     if (!gAnoSeesaw->begin(addr)) {
       ERROR_ANO_ENCODERF("ANO seesaw not found at 0x%02X on bus %u", addr, bus);
       return false;
@@ -194,9 +210,6 @@ bool anoEncoderInit() {
       ERROR_ANO_ENCODERF("ANO seesaw not responding after soft reset");
       return false;
     }
-
-    uint32_t version = (gAnoSeesaw->getVersion() >> 16) & 0xFFFF;
-    INFO_ANO_ENCODER_LIFECYCLEF("ANO seesaw version: %lu", (unsigned long)version);
 
     // Configure buttons as pullups + enable interrupts (matches gamepad init).
     gAnoSeesaw->pinModeBulk(SS_BUTTON_MASK, INPUT_PULLUP);

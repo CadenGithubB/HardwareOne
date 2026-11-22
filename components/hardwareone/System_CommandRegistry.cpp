@@ -233,24 +233,26 @@ static constexpr CommandModule gCommandModules[] = {
 #if ENABLE_SPEAKER
   { "speaker", "Onboard ES8311 speaker", "speakertone plays a short test tone; frequency, duration and volume are optional.", speakerCommands, &speakerCommandsCount, 0, nullptr },
 #endif
+#if ENABLE_LED_LIGHTS
+  { "neopixel",   "RGB LEDs: colours, effects, brightness", "One set of commands for every RGB LED this "
+    "build has, the LED named by an optional first word: onboard (the board's own NeoPixel), encoder "
+    "(every pixel of the encoder board) or encoder:<n> (one pixel, 1-based). Left out, it is onboard, or "
+    "the encoder on a board without an onboard LED. ledcolor [target] <colour> lights it a named colour "
+    "(red, green, blue, yellow, magenta, cyan, white, orange, purple, pink and ~70 more, or off); ledclear "
+    "[target] turns it off. ledeffect [target] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] "
+    "[duration 100-60000ms] runs an effect (defaults: red/blue, 3000 ms) and returns at once; the onboard "
+    "LED goes dark when it ends, the encoder's pixels show their colour again. ledbrightness [onboard|encoder] "
+    "<0-100> is saved per LED and applies at once (admin). ledstatus [json] lists every LED of the build, "
+    "connected or not, and what it shows. Colours and effects are live and not saved; the onboard "
+    "startup effect lives in the led module.", neopixelCommands,     &neopixelCommandsCount, 0, nullptr },
+#endif  // ENABLE_LED_LIGHTS
 #if ENABLE_NEOPIXEL
-  { "neopixel",   "RGB LED strip and effects", "Controls the addressable RGB status LED (WS2812/NeoPixel). ledcolor <name> lights "
-    "it a solid color from a fixed palette (red, green, blue, yellow, magenta, cyan, "
-    "white, orange, purple, pink), and ledclear turns it off. ledeffect "
-    "<fade|blink|pulse|strobe> [color] [color2] [duration 100-60000ms] runs an animated "
-    "effect (defaults: red/blue, 3000 ms; ledeffect off clears it). These commands "
-    "change the LED immediately and are not saved -- the persistent power-on brightness "
-    "and startup animation live in the led settings module, not here. Note the effect "
-    "call runs synchronously for its full duration before returning.", neopixelCommands,     &neopixelCommandsCount, 0, nullptr },
-  { "led",        "LED brightness and startup effects", "Configures the board onboard single LED -- its brightness and the one-shot effect "
-    "played at startup. These are persistent settings written to flash, not live "
-    "controls: ledbrightness <0-100> sets the global brightness, ledstartupenabled "
-    "<0|1> toggles the boot effect, and ledstartupeffect "
-    "<none|rainbow|pulse|fade|blink|strobe> with ledstartupcolor, ledstartupcolor2, and "
-    "ledstartupduration <100-10000ms> define what plays on power-up. (The live, "
-    "immediate RGB controls are the separate ledcolor/ledeffect commands in the "
-    "neopixel module.)", ledCommands,           &ledCommandsCount, 0, nullptr },
-#endif  // ENABLE_NEOPIXEL (neopixel + led modules)
+  { "led",        "Onboard LED startup effect", "Configures the effect the board's onboard LED plays at "
+    "startup. These are persistent settings written to flash: ledstartupenabled <0|1> toggles the boot "
+    "effect, and ledstartupeffect <none|rainbow|pulse|fade|blink|strobe> with ledstartupcolor, "
+    "ledstartupcolor2, and ledstartupduration <100-10000ms> define what plays on power-up. (The live "
+    "colour, effect and brightness commands are in the neopixel module.)", ledCommands,           &ledCommandsCount, 0, nullptr },
+#endif  // ENABLE_NEOPIXEL (led module)
 #if ENABLE_LED_MATRIX
   { "matrix", "HT16K33 monochrome LED matrix", "matrix test draws an orientation pattern. matrix text HI, matrix pixel 3 2 on, "
     "matrix clear/fill and matrix on/off control the display. matrix brightness <0-15> and matrix rotation <0-3> persist; "
@@ -259,6 +261,19 @@ static constexpr CommandModule gCommandModules[] = {
     "matrixbrightness/matrixrotation/matrixsquare/matrixpanel save without applying (used by the settings editors). "
     "Use an unused non-0x70 address when sharing a bus with a PCA9685. Static text clips at the display edge.",
     matrixCommands, &matrixCommandsCount, 0, nullptr },
+#endif
+#if ENABLE_ENCODER
+  { "encoder", "Encoder board (Adafruit 5752 or 4991)", "An Adafruit seesaw encoder board on I2C, used for "
+    "its RGB pixels: the 5752 Quad Rotary Encoder (4 pixels, address 0x49, jumpers to 0x50) or the 4991 "
+    "Rotary Encoder with NeoPixel (1 pixel, address 0x36, jumpers to 0x3D), told apart by the product id "
+    "the board reports. The knobs and switches are not used. openencoder and closeencoder open and close "
+    "it (a closed board goes dark); encoderautostart [on|off] opens it after boot. Its pixels take the LED "
+    "commands with the encoder target: ledcolor encoder <colour>, ledcolor encoder:2 red, ledeffect encoder "
+    "pulse red, ledbrightness encoder <0-100>, ledclear encoder. encoderstatus [json] shows the connection, "
+    "product, pixel count, address, bus and brightness. encoderaddress applies at the next open, encoderbus "
+    "<0|1> after a reboot. A board that stops answering closes itself and restarts on the sensor retry "
+    "schedule; an LED command to it reconnects a board that is meant to be open.",
+    encoderCommands, &encoderCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("encoder"); } },
 #endif
 #if ENABLE_SERVO
   { "servo",      "PCA9685 servo motor control", "The PCA9685 is a 16-channel I2C PWM driver used to control hobby servos (and "

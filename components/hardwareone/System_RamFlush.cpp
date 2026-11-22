@@ -25,6 +25,7 @@
 // obvious-looking getters are wrong and were pinned deliberately.
 #include "System_Automation.h"
 #include "System_I2C.h"
+#include "i2csensor_encoder.h"
 #include "WebServer_Handle.h"
 #include "OLED_Display.h"
 
@@ -123,6 +124,7 @@ bool ramFlushReadLive(RamFlushFeatureId f) {
     case RF_INPUT:      return gInputRunning;
     case RF_RTC:        return gRtcRunning;
     case RF_PRESENCE:   return gPresenceRunning;
+    case RF_ENCODER: return encoderRunning();
 
 #if ENABLE_CAMERA_SENSOR
     case RF_CAMERA:     return gCameraRunning;
@@ -229,6 +231,7 @@ static bool ramFlushReadIntent(RamFlushFeatureId f) {
     case RF_WIFI:       return gSettings.wifiAutoStart;
     case RF_OLED:       return gSettings.oledAutoStart;
     case RF_AUTOMATION: return gSettings.automationAutoStart;
+    case RF_ENCODER: return gSettings.encoderAutoStart;
     default:            return false;
   }
 }
@@ -257,6 +260,7 @@ static const char* ramFlushFeatureName(RamFlushFeatureId f) {
     case RF_WIFI:       return "wifi";
     case RF_OLED:       return "oled";
     case RF_AUTOMATION: return "automation";
+    case RF_ENCODER:    return "encoder";
     default:            return "?";
   }
 }
@@ -361,6 +365,7 @@ RamFlushFeatureId ramFlushIdForDevice(I2cDeviceType device) {
     case I2C_DEVICE_APDS:     return RF_APDS;
     case I2C_DEVICE_RTC:      return RF_RTC;
     case I2C_DEVICE_PRESENCE: return RF_PRESENCE;
+    case I2C_DEVICE_ENCODER: return RF_ENCODER;
     case I2C_DEVICE_COUNT:    break;
   }
   return RF_FEATURE_COUNT;

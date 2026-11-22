@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1022 commands across 59 modules (1022 registry entries).
+1029 commands across 60 modules (1029 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -28,9 +28,10 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`sd`](#sd) — 5 commands
 - [`oled`](#oled) — 15 commands
 - [`speaker`](#speaker) — 1 commands
-- [`neopixel`](#neopixel) — 3 commands
-- [`led`](#led) — 6 commands
+- [`neopixel`](#neopixel) — 5 commands
+- [`led`](#led) — 5 commands
 - [`matrix`](#matrix) — 7 commands
+- [`encoder`](#encoder) — 6 commands
 - [`servo`](#servo) — 6 commands
 - [`thermal`](#thermal) — 23 commands
 - [`tof`](#tof) — 10 commands
@@ -473,21 +474,22 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## neopixel
 
-> Controls the addressable RGB status LED (WS2812/NeoPixel). ledcolor <name> lights it a solid color from a fixed palette (red, green, blue, yellow, magenta, cyan, white, orange, purple, pink), and ledclear turns it off. ledeffect <fade|blink|pulse|strobe> [color] [color2] [duration 100-60000ms] runs an animated effect (defaults: red/blue, 3000 ms; ledeffect off clears it). These commands change the LED immediately and are not saved -- the persistent power-on brightness and startup animation live in the led settings module, not here. Note the effect call runs synchronously for its full duration before returning.
+> One set of commands for every RGB LED this build has, the LED named by an optional first word: onboard (the board's own NeoPixel), encoder (every pixel of the encoder board) or encoder:<n> (one pixel, 1-based). Left out, it is onboard, or the encoder on a board without an onboard LED. ledcolor [target] <colour> lights it a named colour (red, green, blue, yellow, magenta, cyan, white, orange, purple, pink and ~70 more, or off); ledclear [target] turns it off. ledeffect [target] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100-60000ms] runs an effect (defaults: red/blue, 3000 ms) and returns at once; the onboard LED goes dark when it ends, the encoder's pixels show their colour again. ledbrightness [onboard|encoder] <0-100> is saved per LED and applies at once (admin). ledstatus [json] lists every LED of the build, connected or not, and what it shows. Colours and effects are live and not saved; the onboard startup effect lives in the led module.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `ledclear` |  | Turn off LED. |
-| `ledcolor` |  | Set LED color: <color><br/>`Usage: ledcolor <red\|green\|blue\|yellow\|magenta\|cyan\|white\|orange\|purple\|pink>` |
-| `ledeffect` |  | Run LED effect: <effect><br/>`Usage: ledeffect <fade\|pulse\|blink\|rainbow\|strobe\|off> [color] [color2] [duration 100..60000]` |
+| `ledbrightness` | A | Save an LED brightness 0-100: [onboard\|encoder] <0..100>.<br/>`Usage: ledbrightness [onboard\|encoder] <0..100>` |
+| `ledclear` |  | Turn an LED off: [onboard\|encoder\|encoder:<n>].<br/>`Usage: ledclear [onboard\|encoder\|encoder:<n>]` |
+| `ledcolor` |  | Set an LED colour: [onboard\|encoder\|encoder:<n>] <colour>.<br/>`Usage: ledcolor [onboard\|encoder\|encoder:<n>] <red\|green\|blue\|yellow\|magenta\|cyan\|white\|orange\|purple\|pink>` |
+| `ledeffect` |  | Run an LED effect: [onboard\|encoder\|encoder:<n>] <effect>.<br/>`Usage: ledeffect [onboard\|encoder\|encoder:<n>] <fade\|pulse\|blink\|rainbow\|strobe\|off> [color] [color2] [duration 100..60000]` |
+| `ledstatus` |  | Show every LED this build has and what it shows. (add 'json' for JSON output)<br/>`Usage: ledstatus [json]` |
 
 ## led
 
-> Configures the board onboard single LED -- its brightness and the one-shot effect played at startup. These are persistent settings written to flash, not live controls: ledbrightness <0-100> sets the global brightness, ledstartupenabled <0|1> toggles the boot effect, and ledstartupeffect <none|rainbow|pulse|fade|blink|strobe> with ledstartupcolor, ledstartupcolor2, and ledstartupduration <100-10000ms> define what plays on power-up. (The live, immediate RGB controls are the separate ledcolor/ledeffect commands in the neopixel module.)
+> Configures the effect the board's onboard LED plays at startup. These are persistent settings written to flash: ledstartupenabled <0|1> toggles the boot effect, and ledstartupeffect <none|rainbow|pulse|fade|blink|strobe> with ledstartupcolor, ledstartupcolor2, and ledstartupduration <100-10000ms> define what plays on power-up. (The live colour, effect and brightness commands are in the neopixel module.)
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `ledbrightness` | A | Set LED brightness 0-100.<br/>`Usage: ledbrightness <0..100>` |
 | `ledstartupcolor` | A | Set LED startup primary color (any of ~80 named colors or 'off'; an unknown name is refused).<br/>`Usage: ledstartupcolor <color name\|off> (any of ~80 named colors)` |
 | `ledstartupcolor2` | A | Set LED startup secondary color (any of ~80 named colors or 'off'; an unknown name is refused).<br/>`Usage: ledstartupcolor2 <color name\|off> (any of ~80 named colors)` |
 | `ledstartupduration` | A | Set LED startup effect duration in ms.<br/>`Usage: ledstartupduration <100..10000>` |
@@ -507,6 +509,19 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `matrixpanel` | A | Save which 8x8 square is used (applied on next matrix command)<br/>`Usage: matrixpanel <0\|1>` |
 | `matrixrotation` | A | Save matrix rotation (applied on next matrix command)<br/>`Usage: matrixrotation <0-3>` |
 | `matrixsquare` | A | Save single 8x8 square mode (applied on next matrix command)<br/>`Usage: matrixsquare <0\|1>` |
+
+## encoder
+
+> An Adafruit seesaw encoder board on I2C, used for its RGB pixels: the 5752 Quad Rotary Encoder (4 pixels, address 0x49, jumpers to 0x50) or the 4991 Rotary Encoder with NeoPixel (1 pixel, address 0x36, jumpers to 0x3D), told apart by the product id the board reports. The knobs and switches are not used. openencoder and closeencoder open and close it (a closed board goes dark); encoderautostart [on|off] opens it after boot. Its pixels take the LED commands with the encoder target: ledcolor encoder <colour>, ledcolor encoder:2 red, ledeffect encoder pulse red, ledbrightness encoder <0-100>, ledclear encoder. encoderstatus [json] shows the connection, product, pixel count, address, bus and brightness. encoderaddress applies at the next open, encoderbus <0|1> after a reboot. A board that stops answering closes itself and restarts on the sensor retry schedule; an LED command to it reconnects a board that is meant to be open.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `closeencoder` | A | Close the encoder board (its pixels go dark). |
+| `encoderaddress` | A | Save the encoder board's I2C address (next open).<br/>`Usage: encoderaddress <0x49..0x50\|0x36..0x3D>` |
+| `encoderautostart` | A | Open the encoder board after boot [on\|off].<br/>`Usage: encoderautostart [on\|off]` |
+| `encoderbus` | A | Route the encoder board to bus <0\|1> (reboot required).<br/>`Usage: encoderbus <0\|1>` |
+| `encoderstatus` |  | Show the encoder board: connection, product, pixels, address, brightness. (add 'json' for JSON output)<br/>`Usage: encoderstatus [json]` |
+| `openencoder` | A | Open the encoder board (its pixels light with 'ledcolor encoder'). |
 
 ## servo
 
@@ -900,7 +915,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `i2cstats` |  | I2C bus statistics and errors. |
 | `inputbus` | A | Route input device to bus: <0\|1> (reboot required)<br/>`Usage: inputBus <0\|1>` |
 | `oledbus` | A | Route OLED to bus: <0\|1> (reboot required)<br/>`Usage: oledBus <0\|1>` |
-| `sensorautostart` | A | Sensor auto-start: [sensor] [on\|off]<br/>`Usage: sensorautostart [sensor] [on\|off] sensorautostart all [on\|off] Sensors: thermal, tof, imu, gps, fmradio, apds, input, rtc, presence` |
+| `sensorautostart` | A | Sensor auto-start: [sensor] [on\|off]<br/>`Usage: sensorautostart [sensor] [on\|off] sensorautostart all [on\|off] Sensors: thermal, tof, imu, gps, fmradio, apds, input, rtc, presence, encoder` |
 | `sensorinfo` |  | Sensor details: <name><br/>`Usage: sensorinfo <sensor_name> Example: sensorinfo BNO055` |
 | `sensors` |  | List I2C sensors [filter]<br/>`Usage: sensors [filter] - filter by name, description, or manufacturer sensors json [brief] - live state (+readings; 'brief' = state only, no data) Example: sensors temperature, sensors json brief` |
 

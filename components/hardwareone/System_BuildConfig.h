@@ -153,6 +153,7 @@
   #define CUSTOM_ENABLE_PRESENCE    0   // STHS34PF80 IR presence/motion — disabled 2026-06-07 (not used)
   #define CUSTOM_ENABLE_SERVO       0   // PCA9685 servo controller — not installed
   #define CUSTOM_ENABLE_LED_MATRIX  1   // HT16K33 monochrome 16x8 backpack
+  #define CUSTOM_ENABLE_ENCODER     0   // Adafruit seesaw encoder board (5752 or 4991): its RGB pixels
 #endif
 
 // Display: hardware display selection. 0 forces all OLED_*.cpp out of the
@@ -701,6 +702,21 @@
   #define ENABLE_LED_MATRIX 0
 #endif
 
+// The encoder device: an Adafruit seesaw encoder board (5752 Quad Rotary
+// Encoder, four RGB pixels, or 4991 Rotary Encoder with NeoPixel, one), used
+// for its pixels through the LED commands' `encoder` target; the knobs and
+// switches are not used. An independent optional I2C device like the matrix,
+// but off at every level unless a configuration selects it (level 4): its
+// addresses are shared with the ANO encoder, the gamepad and the MAX17048.
+#if I2C_FEATURE_LEVEL == I2C_LEVEL_CUSTOM
+  #ifndef CUSTOM_ENABLE_ENCODER
+    #define CUSTOM_ENABLE_ENCODER 0
+  #endif
+  #define ENABLE_ENCODER CUSTOM_ENABLE_ENCODER
+#else
+  #define ENABLE_ENCODER 0
+#endif
+
 // The legacy OLED UI can also render to the SPI EYE backend without I2C.
 #if DISPLAY_TYPE == DISPLAY_TYPE_ST7789_P4_EYE
   #undef ENABLE_OLED_DISPLAY
@@ -790,7 +806,7 @@
 #define ENABLE_I2C_SENSOR_QUEUE \
   (ENABLE_THERMAL_SENSOR || ENABLE_TOF_SENSOR || ENABLE_IMU_SENSOR || \
    ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH || ENABLE_APDS_SENSOR || ENABLE_GPS_SENSOR || \
-   ENABLE_FM_RADIO || ENABLE_RTC_SENSOR || ENABLE_PRESENCE_SENSOR)
+   ENABLE_FM_RADIO || ENABLE_RTC_SENSOR || ENABLE_PRESENCE_SENSOR || ENABLE_ENCODER)
 
 // =============================================================================
 // DERIVED NETWORK FLAGS (based on NETWORK_FEATURE_LEVEL)
@@ -1639,6 +1655,12 @@
 #if ENABLE_NEOPIXEL && (NEOPIXEL_PIN_DEFAULT < 0)
   #error "ENABLE_NEOPIXEL=1 requires a board with NEOPIXEL_PIN_DEFAULT >= 0."
 #endif
+
+// Some RGB light the LED commands can drive: the board's own NeoPixel, or the
+// pixels of an attached encoder board (ENABLE_ENCODER). The commands take the
+// light as an optional target (System_LedTarget.h); an omitted target is the
+// onboard pixel, or the encoder on a board that has none.
+#define ENABLE_LED_LIGHTS (ENABLE_NEOPIXEL || ENABLE_ENCODER)
 
 // Sanity: at most one backend selected. If the board didn't define either
 // flag (out-of-tree board file), fall back to 0/0 so System_Battery seeds the

@@ -327,7 +327,7 @@ static void i2cDiagRunScan() {
         I2cDiagEntry& e = sI2cDiagResults[sI2cDiagCount++];
         e.bus  = bus;
         e.addr = addr;
-        String id = identifySensor(addr);
+        String id = identifySensor(addr, bus);
         strncpy(e.name, id.c_str(), sizeof(e.name) - 1);
         e.name[sizeof(e.name) - 1] = '\0';
       }

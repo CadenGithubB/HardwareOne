@@ -522,6 +522,54 @@ uint8_t I2cDeviceManager::probeAddress(uint8_t busIdx, uint8_t address,
   return status;
 }
 
+uint8_t i2cWriteThenReadHeld(TwoWire* wire, uint8_t address, const uint8_t* command,
+                             size_t commandLen, uint32_t settleUs, uint8_t* reply,
+                             size_t replyLen) {
+  if (!wire || !command || commandLen == 0 || !reply || replyLen == 0 || replyLen > 32) return 4;
+  wire->beginTransmission(address);
+  const size_t written = wire->write(command, commandLen);
+  uint8_t status = wire->endTransmission(true);
+  if (status == 0 && written != commandLen) status = 4;
+  if (status != 0) return status;
+  delayMicroseconds(settleUs);
+  const size_t got = wire->requestFrom(static_cast<uint16_t>(address), replyLen, true);
+  if (got != replyLen) {
+    while (wire->available()) wire->read();
+    return 4;
+  }
+  for (size_t i = 0; i < replyLen; ++i) reply[i] = (uint8_t)wire->read();
+  return 0;
+}
+
+uint8_t I2cDeviceManager::identityRead(uint8_t busIdx, uint8_t address, const uint8_t* command,
+                                       size_t commandLen, uint32_t settleUs, uint8_t* reply,
+                                       size_t replyLen, const I2cTransactionOptions& options) {
+  if (busIdx >= NUM_BUSES || !busInitialized[busIdx] || !wires[busIdx] ||
+      !busMutexes[busIdx] || !command || commandLen == 0 || !reply || replyLen == 0 ||
+      replyLen > 32) {
+    return 4;
+  }
+
+  SemaphoreHandle_t mutex = busMutexes[busIdx];
+  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(options.lockWaitMs)) != pdTRUE) {
+    return 4;
+  }
+
+  const uint32_t clockHz = options.clockHz > 0 ? options.clockHz : 100000;
+  if (!clockStackPush(busIdx, clockHz)) {
+    xSemaphoreGive(mutex);
+    return 4;
+  }
+
+  setBusClock(busIdx, clockHz);
+  const uint8_t status = i2cWriteThenReadHeld(wires[busIdx], address, command, commandLen,
+                                              settleUs, reply, replyLen);
+  clockStackPop(busIdx);
+  setBusClock(busIdx, clockStackTopOrDefault(busIdx));
+  xSemaphoreGive(mutex);
+  return status;
+}
+
 void I2cDeviceManager::checkBusRecoveryNeeded() {
   // Evaluate each bus independently. Each has its own mutex, Wire instance and
   // clock stack, so a degradation cascade on one says nothing about the other.

@@ -111,6 +111,8 @@ extern const CommandEntry ledCommands[];
 extern const size_t ledCommandsCount;
 extern const CommandEntry matrixCommands[];
 extern const size_t matrixCommandsCount;
+extern const CommandEntry encoderCommands[];
+extern const size_t encoderCommandsCount;
 extern const CommandEntry servoCommands[];
 extern const size_t servoCommandsCount;
 extern const CommandEntry thermalCommands[];

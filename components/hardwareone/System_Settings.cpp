@@ -3047,6 +3047,10 @@ void registerAllSettingsModules() {
   registerSettingsModule(&matrixSettingsModule);
 #endif
 
+#if ENABLE_ENCODER
+  registerSettingsModule(&encoderSettingsModule);
+#endif
+
 #if ENABLE_CAMERA_SENSOR
   registerSettingsModule(&cameraSettingsModule);
 #endif

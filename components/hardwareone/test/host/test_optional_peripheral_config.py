@@ -316,6 +316,17 @@ class PeripheralConfig(unittest.TestCase):
     def test_ano_needs_i2c(self):
         self.check_profile(self.profile(wheel=2), ['ENABLE_OLED_INPUT == 0'])
 
+    def test_encoder_device_is_independent_of_inputs(self):
+        # The encoder board (its pixels) never replaces or needs an input device; it is off unless chosen.
+        for wheel in (0, 1, 2):
+            with self.subTest(wheel=wheel):
+                profile = self.profile(wheel=wheel)
+                self.check_profile(profile, ['ENABLE_ENCODER == 0'])
+                profile.update(I2C_FEATURE_LEVEL=4, CUSTOM_ENABLE_ENCODER=1)
+                self.check_profile(profile, ['ENABLE_ENCODER == 1',
+                                             f'ENABLE_ANO_ENCODER == {int(wheel == 2)}',
+                                             'ENABLE_I2C_SENSOR_QUEUE == 1'])
+
     def test_generic_p4_is_not_eye(self):
         profile = self.profile(display=4)
         profile['HW_BOARD_P4X_EYE'] = 0

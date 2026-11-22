@@ -274,6 +274,9 @@ static bool isServoCompiled() {
 }
 
 static bool isMatrixCompiled() { return ENABLE_LED_MATRIX; }
+#if ENABLE_ENCODER
+static bool isEncoderCompiled() { return true; }
+#endif
 
 // NOTE: ENABLE_R1_HEALTH is force-set to 0 unless BOTH Bluetooth and G2 are
 // compiled (the ring rides the G2 BLE transport — System_BuildConfig.h "R1
@@ -352,7 +355,7 @@ static constexpr FeatureEntry featureRegistry[] = {
     &gSettings.oledAutoStart, isOledCompiled,
     "Local display interface (selected display backend)" },
     
-  { "led", "NeoPixel LED", FEATURE_CAT_DISPLAY, 2,
+  { "led", "Onboard LED", FEATURE_CAT_DISPLAY, 2,
     FEATURE_FLAG_RUNTIME_TOGGLE,
     &gSettings.ledStartupEnabled, isNeoPixelCompiled,
     "RGB LED strip/ring effects" },
@@ -452,6 +455,20 @@ static constexpr FeatureEntry featureRegistry[] = {
   { "matrix", "LED Matrix", FEATURE_CAT_SENSOR, 1,
     FEATURE_FLAG_COMPILE_TIME, nullptr, isMatrixCompiled,
     "HT16K33 monochrome 16x8 LED matrix" },
+
+#if ENABLE_ENCODER
+  // Output only, no task: the main loop ticks its frames (heap ~0, 1 is the
+  // floor). Listed only in a build that has it: this row spends the last of
+  // the `features json` runway (the static_assert below; 2026-11-21: a build
+  // with it and the ANO input keeps 1 byte, with the gamepad 5; with the P4
+  // boards' touch or wheel input it would not fit, and the build catalogue
+  // offers the device on the five boards with an I2C port only). The next row
+  // needs the dedicated endpoint the assert names.
+  { "encoder", "Encoder", FEATURE_CAT_SENSOR, 1,
+    FEATURE_FLAG_RUNTIME_TOGGLE,
+    &gSettings.encoderAutoStart, isEncoderCompiled,
+    "Adafruit seesaw encoder board (5752 or 4991): its RGB pixels" },
+#endif
 
   // Battery monitor has no enable/AutoStart setting of its own — the board's
   // BATTERY_MONITOR_AVAILABLE decides, so it's compile-time only (nullptr
@@ -666,6 +683,9 @@ static constexpr FeatureSwitches kFeatureSwitches[] = {
   FEATURE_SENSOR_SWITCHES("presence", presence, RF_PRESENCE),
   { "servo", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
   { "matrix", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
+#if ENABLE_ENCODER
+  FEATURE_SENSOR_SWITCHES("encoder", encoder, RF_ENCODER),
+#endif
   { "battery", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
   { "r1health", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
   FEATURE_SENSOR_SWITCHES("camera",   camera,   RF_CAMERA),

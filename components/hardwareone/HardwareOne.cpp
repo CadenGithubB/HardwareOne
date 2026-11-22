@@ -125,6 +125,7 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "i2csensor_rda5807.h"
 #include "OLED_Display.h"  // Always include - wrapper functions are safe to call when disabled
 #include "System_NeoPixel.h"
+#include "i2csensor_encoder.h"
 #include "System_MemoryMonitor.h"
 #include "System_Metrics.h"
 #if ENABLE_WIFI
@@ -2713,6 +2714,9 @@ void hardwareone_loop() {
   // Advance a running (non-blocking) LED effect one frame. Cheap no-op while
   // idle; ~20 ms pacing while active. See ledEffectStart in System_NeoPixel.
   ledEffectTick();
+  // The encoder board's pixels: one frame when due (changed colours only,
+  // about 30 fps at most, a busy bus skips the frame). No-op when closed.
+  encoderTick();
 
   // ESP32-C6 radio companion (P4X-EYE): drain transport events, run the
   // heartbeat watchdog and the retry/recovery policy. No-op elsewhere.

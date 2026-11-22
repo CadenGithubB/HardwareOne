@@ -78,6 +78,7 @@ When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABL
 | `CUSTOM_ENABLE_PRESENCE` | STHS34PF80 IR presence sensor |
 | `CUSTOM_ENABLE_FM_RADIO` | RDA5807 FM radio |
 | `CUSTOM_ENABLE_SERVO` | PCA9685 servo controller |
+| `CUSTOM_ENABLE_ENCODER` | Adafruit seesaw encoder board (5752 Quad Rotary Encoder or 4991 Rotary Encoder with NeoPixel), used for its RGB pixels (off by default on every board) |
 
 > If a module is enabled in the config but not physically connected, its commands will fail gracefully - the rest of the system is unaffected.
 
@@ -1593,20 +1594,35 @@ setgamepadpassword              - Set gamepad joystick unlock pattern
 </details>
 
 <details>
-<summary><strong>led - NeoPixel & startup effects</strong></summary>
+<summary><strong>led - RGB LEDs (onboard and encoder board) & startup effects</strong></summary>
+
+Every RGB LED takes the same commands. The LED is named by an optional first word, the target:
+`onboard` (the board's own NeoPixel), `encoder` (every pixel of the
+[encoder board](#encoder-board-adafruit-5752--4991)) or `encoder:<n>` (one of its pixels, from 1).
+Left out, the target is `onboard`, so `ledcolor red` and every saved automation, MQTT command,
+voice command and screen keep working as before. On a board without an onboard NeoPixel (the
+XIAO ESP32-S3, the P4 boards) the target left out is the encoder board, and `onboard` answers that
+the board has none.
 
 ```
-ledcolor <color>                - Set NeoPixel color (name or hex)
-ledcolor off                    - Turn off NeoPixel
-ledclear                        - Turn off NeoPixel
-ledeffect <effect>              - Run a NeoPixel effect
-ledbrightness <0-100>           - Set LED brightness
+ledcolor [target] <color>       - Set a named color (red, green, orange, ~80 names, or off)
+ledcolor encoder:2 red          - One pixel of the encoder board
+ledclear [target]               - Turn it off (and stop its effect)
+ledeffect [target] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100-60000]
+                                - Run an effect; the onboard LED goes dark when it ends,
+                                  the encoder's pixels show their color again
+ledbrightness [onboard|encoder] <0-100>  - Brightness, saved per LED (admin)
+ledstatus [json]                - Every LED this build has, connected or not, and what it shows
 ledstartupenabled [0|1]         - Enable/disable startup effect
 ledstartupeffect <none|rainbow|pulse|fade|blink|strobe>  - Set startup effect
 ledstartupcolor <color>         - Set startup primary color (an unknown name is refused)
 ledstartupcolor2 <color>        - Set startup secondary color (an unknown name is refused)
 ledstartupduration <ms>         - Startup effect duration
 ```
+
+The startup effect plays on the onboard LED only: it runs before the I2C devices open.
+The OLED and G2 LED pages and the web Live Control panel drive the onboard LED (they send the
+commands without a target); the encoder board is set with commands, automations or MQTT.
 </details>
 
 <details>
@@ -2350,6 +2366,20 @@ servocalibrate <channel>        - Enter calibration mode for a channel
 </details>
 
 <details>
+<summary><strong>encoder - Adafruit seesaw encoder board (5752 / 4991)</strong></summary>
+
+```
+openencoder                     - Open the board (admin)
+closeencoder                    - Close it; the pixels go dark (admin)
+encoderstatus [json]            - Connection, product, pixel count, address, bus, brightness
+encoderautostart [on|off]       - Open after boot (admin)
+encoderaddress <address>        - I2C address 0x49-0x50 (5752) or 0x36-0x3D (4991), at the next open (admin)
+encoderbus <0|1>                - I2C bus, after a reboot (admin)
+```
+Its pixels take the LED commands with the `encoder` target (`ledcolor encoder red`).
+</details>
+
+<details>
 <summary><strong>input - Gamepad / ANO encoder</strong></summary>
 
 The physical input controller is chosen at build time with `INPUT_DEVICE_TYPE`
@@ -2403,6 +2433,55 @@ NMEA output parsed for lat/lon/speed/heading. Track logging to LittleFS. Offline
 
 ### FM Radio (RDA5807)
 Tune, seek up/down, set volume, mute. `fmradiotune <frequency>` - e.g., `fmradiotune 101.5`.
+
+### Encoder board (Adafruit 5752 / 4991)
+An Adafruit seesaw encoder board on I2C, used for its RGB pixels, for example as a meeting-room
+status sign. Two boards are supported, told apart by the product id the board reports:
+
+| Board | Pixels | Default address | A0/A1/A2 jumpers |
+|---|---|---|---|
+| 5752 I2C Quad Rotary Encoder | 4 (one under each knob) | 0x49 | 0x49 to 0x50 |
+| 4991 Rotary Encoder with NeoPixel | 1 | 0x36 | 0x36 to 0x3D |
+
+The knobs, push switches and INT pin are not used. Build it in with `CUSTOM_ENABLE_ENCODER=1` at
+`I2C_FEATURE_LEVEL 4` (`tools/build_config.py` offers it as "Encoder board" on the FeatherS3,
+FeatherS3 FE, Feather ESP32 V2, QT Py ESP32 and XIAO ESP32-S3; the P4 boards' `features json` has no
+room for its row; it is off by default everywhere).
+
+Wiring: a STEMMA QT cable from the board's I2C port. Power it from 3V3 (VIN takes 3-5 V); both
+breakouts have their own 10K pull-ups. On the XIAO ESP32-S3 the external I2C bus is D4/D5, and the
+camera keeps the other I2C controller, so a XIAO build with the camera needs the camera's SCCB on
+controller 0 (or the camera off). The A0, A1 and A2 jumpers add 1, 2 and 4 to the default address.
+The device opens the address `encoderaddress` saves (0x49 unless changed), so a 4991 needs
+`encoderaddress 0x36` (or its jumpered address) before `openencoder`.
+
+0x36 is also the MAX17048 fuel gauge on the FeatherS3 and FeatherS3[D]'s I2C1. A 4991 on those
+boards goes on I2C2 (`encoderbus 1`, then a reboot) or gets its A0 jumper closed (0x37,
+`encoderaddress 0x37`); `encoderaddress 0x36` on the fuel gauge's bus is refused, and the device
+never opens that address there. Before it claims a board the device reads the product id (one
+register read, no reset), so a fuel gauge, an ANO encoder or a gamepad at the same address is left
+alone. `i2cscan` reads the product id only where two devices of different products can share the
+address (the encoder's configured address, 0x49 with an ANO or gamepad build), and names the
+board "Encoder (Adafruit 5752 ...)" or "Encoder (Adafruit 4991 ...)".
+
+`openencoder` (or `encoderautostart on` and a reboot) opens it. Then the LED commands reach it:
+`ledcolor encoder green`, `ledcolor encoder:3 red`, `ledclear encoder`, `ledeffect encoder pulse
+red`, `ledbrightness encoder 30` (saved). A pixel number past the board's count is refused with a
+reply naming the count. An effect shows the pixel's color again when it ends. The device writes to
+the board only when the colors change, at most about 30 times a second, and skips a frame instead of
+waiting when the bus is busy. A board that is missing at boot logs one line and boot goes on; a
+board that stops answering closes itself and is started again on the sensor retry schedule. While
+it is not connected, LED commands to it answer that it is not connected and, for a board that is
+meant to be open, start a reconnect (at most every 2 s). `ledstatus` shows every pixel.
+
+As a status sign from automations (here a presence sensor in the room):
+```
+automation add name=roombusy type=event on=presence_detected commands="ledcolor encoder red" enabled=1
+automation add name=roomfree type=event on=presence_cleared commands="ledcolor encoder green" enabled=1
+```
+From MQTT, publish the command envelope
+`{"user":"<user>","pass":"<password>","cmd":"ledcolor encoder green"}` to `<base>/command` (with an
+account allowed to run the command); the reply arrives on `<base>/response`.
 
 ### Even Realities G2 Glasses
 BLE client for Even G2 temples (`openg2` / hijack menus / Apps -> Health). Requires

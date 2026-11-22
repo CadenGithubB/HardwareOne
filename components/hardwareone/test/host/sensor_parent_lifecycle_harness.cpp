@@ -12,6 +12,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "System_SeesawIdentity.h"  // the real product ids and the claim check
+
 static unsigned assertions = 0;
 static void check(bool condition, const char* message) {
   ++assertions;
@@ -29,6 +31,11 @@ struct Scenario {
   uint8_t resolvedBus = 255, transactionBus = 255;
   unsigned long now = 10000;
   std::vector<bool> beginResults;
+  uint16_t productOverride = 0;  // a board of another product at the address (0 = the expected one)
+  bool idAnswers = true;         // false: nothing answers the product-id read
+  unsigned idReads = 0;
+  uint8_t lastIdAddress = 0;     // the last product-id read: where, and what it reported
+  uint16_t lastIdProduct = 0;
 };
 static Scenario scenario;
 struct TwoWire {};
@@ -132,12 +139,21 @@ class Adafruit_seesaw {
     check(bus == &wire, "Seesaw constructor retains configured wire");
   }
   ~Adafruit_seesaw() { destroyed(this); }
+  // A board is begun (the library resets it) or reset only after the product
+  // id read at its address reported this driver's own board.
   bool begin(uint8_t address) {
     check(address == I2C_ADDR_GAMEPAD || address == 0x49, "Seesaw begins with configured device address");
+    checkClaimed(address);
+    address_ = address;
     return beginResult(this);
   }
-  void SWReset() { ++scenario.resets; }
-  uint32_t getVersion() { return 5743UL << 16; }
+  void SWReset() { checkClaimed(address_); ++scenario.resets; }
+  // The gamepad answers at 0x50 and the ANO at 0x49, each with its product id.
+  uint32_t getVersion() {
+    const uint16_t product = scenario.productOverride ? scenario.productOverride
+        : (address_ == I2C_ADDR_GAMEPAD ? kSeesawProductGamepad : kSeesawProductAnoEncoder);
+    return ((uint32_t)product << 16) | 0x1234u;
+  }
   void pinModeBulk(uint32_t mask, int mode) {
     check((mask == GAMEPAD_BUTTON_MASK || mask == SS_BUTTON_MASK) && mode == INPUT_PULLUP,
           "Seesaw button configuration unchanged");
@@ -149,7 +165,26 @@ class Adafruit_seesaw {
   }
   void enableEncoderInterrupt(int encoder) { check(encoder == 0, "ANO encoder interrupt unchanged"); }
   int analogRead(int) { return 512; }
+ private:
+  static void checkClaimed(uint8_t address) {
+    const uint16_t own = address == I2C_ADDR_GAMEPAD ? kSeesawProductGamepad : kSeesawProductAnoEncoder;
+    check(scenario.lastIdAddress == address && scenario.lastIdProduct == own,
+          "seesaw begin/reset only after its product id read named the driver's own board");
+  }
+  uint8_t address_ = 0;
 };
+// The product-id read the drivers make on the held bus, before any begin.
+static bool seesawReadProductIdOnHeldBus(TwoWire* bus, uint8_t address, uint16_t& product) {
+  check(bus == &wire, "product id read uses the configured wire");
+  ++scenario.idReads;
+  scenario.lastIdAddress = address;
+  scenario.lastIdProduct = 0;
+  if (!scenario.idAnswers) return false;
+  product = scenario.productOverride ? scenario.productOverride
+      : (address == I2C_ADDR_GAMEPAD ? kSeesawProductGamepad : kSeesawProductAnoEncoder);
+  scenario.lastIdProduct = product;
+  return true;
+}
 static Adafruit_BNO055* gBNO055 = nullptr;
 static Adafruit_APDS9960* gAPDS9960 = nullptr;
 static Adafruit_PWMServoDriver* gPwmDriver = nullptr;
@@ -368,9 +403,36 @@ static void testRetainedAno() {
   check(!anoEncoderInit() && gAnoSeesaw && stats["input.ano.obj"].frees == 0,
         "ANO transaction rejection keeps preallocated parent");
 }
+// A seesaw of another product at the address is not claimed, and is never
+// begun or reset (the mock's begin/SWReset check that): 0x49 is the default of
+// the ANO and the quad encoder board and the gamepad's alternate. The
+// reconnect paths check too.
+static void testOtherSeesawProductsRefused() {
+  for (uint16_t other : {kSeesawProductQuadEncoder, kSeesawProductRotaryEncoder, kSeesawProductAnoEncoder}) {
+    resetScenario(); scenario.productOverride = other;
+    check(!gamepadInit() && !gInputConnected && scenario.pinConfigs == 0 && scenario.resets == 0 &&
+          scenario.idReads == 1, "gamepad driver refuses a seesaw that reports another product id");
+    scenario.now += 2001;
+    check(!gamepadInitConnection() && !gInputConnected && scenario.resets == 0 && scenario.idReads == 2,
+          "gamepad reconnect refuses another product once, without a reset or a retry");
+  }
+  for (uint16_t other : {kSeesawProductQuadEncoder, kSeesawProductRotaryEncoder, kSeesawProductGamepad}) {
+    resetScenario(); scenario.productOverride = other;
+    check(!anoEncoderInit() && !gAnoEncoderConnected && scenario.encoderZeroes == 0 && scenario.resets == 0,
+          "ANO driver refuses a seesaw that reports another product id");
+    scenario.now += 2001;
+    check(!anoEncoderInitConnection() && !gAnoEncoderConnected && scenario.resets == 0,
+          "ANO reconnect refuses another product without a reset");
+  }
+  // Nothing (or a device that is not a seesaw board) answers the id read.
+  resetScenario(); scenario.idAnswers = false;
+  check(!gamepadInit() && !anoEncoderInit() && scenario.resets == 0 && stats["input.gamepad.obj"].begins == 0 &&
+        stats["input.ano.obj"].begins == 0, "a failed product id read begins and resets nothing");
+}
 int main() {
   try {
     testAllocationAndBusFailure(); testFreedFailureParents(); testRetainedGamepad(); testRetainedAno();
+    testOtherSeesawProductsRefused();
     fixtureCleanup();
     std::cout << "sensor parent extracted lifecycle tests passed (" << assertions
               << " assertions; mock driver/I2C/allocator/task boundaries)\n";

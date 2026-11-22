@@ -295,7 +295,7 @@ network feature compiled in.
 | 4 | **Bluetooth Mode** | Bluetooth enabled and the G2 client compiled in | `App console` (the phone/app server) or `Glasses` (`Glasses+pipe` on phone-pipe builds; ~10 KB more RAM) |
 | 5 | **ESP-NOW Identity** | ESP-NOW enabled on page 1 | Display label (free text), then the device name (ESP-NOW name, Bluetooth name and Wi-Fi hostname; 1-31 letters, digits and `-`), offered from the label so Enter accepts it; room, zone, mobile/stationary. All optional |
 | 6 | **MQTT Broker** | MQTT set to start at boot on page 1 | Broker host, port, username, password |
-| 7 | **Display & Controls** | a display, LED, G2, input or I2C feature is compiled in | Local display, NeoPixel LED (with its startup effect), G2 Glasses, the input device and the I2C bus |
+| 7 | **Display & Controls** | a display, LED, G2, input or I2C feature is compiled in | Local display, Onboard LED (with its startup effect), G2 Glasses, the input device and the I2C bus |
 | 8 | **Sensors** | a sensor feature is compiled in | Each compiled sensor and audio/camera feature; most rows are auto-start choices |
 | 9 | **System** | always | Remaining features (for example Automations, LLM), then device name, timezone, NTP server (when WiFi is compiled in) and log level |
 

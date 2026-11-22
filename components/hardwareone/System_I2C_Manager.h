@@ -146,6 +146,7 @@ enum I2cDeviceType : int {
   I2C_DEVICE_APDS = 6,
   I2C_DEVICE_RTC = 7,
   I2C_DEVICE_PRESENCE = 8,
+  I2C_DEVICE_ENCODER = 9,  // Adafruit 5752/4991 encoder board pixels: no task, ticked by the main loop
   I2C_DEVICE_COUNT
 };
 
@@ -299,6 +300,15 @@ public:
   // the normal device-transaction metrics.
   uint8_t probeAddress(uint8_t busIdx, uint8_t address,
                        const I2cTransactionOptions& options);
+  // Identity read for discovery: write `command`, wait `settleUs`, read
+  // `replyLen` bytes. Same mutex/clock handling and no health record as
+  // probeAddress(). Used only where a board names itself by a register a scan
+  // may select (the seesaw product id, System_SeesawIdentity.h). Returns 0 on
+  // success, else an endTransmission() status (4 = bus unavailable/busy or a
+  // short reply).
+  uint8_t identityRead(uint8_t busIdx, uint8_t address, const uint8_t* command,
+                       size_t commandLen, uint32_t settleUs, uint8_t* reply,
+                       size_t replyLen, const I2cTransactionOptions& options);
 
   // I2C device lifecycle. The existing sensor worker is the sole consumer:
   // it applies a dequeued stop before dispatching another start. Pending stops
@@ -347,6 +357,13 @@ public:
     return (busIdx < NUM_BUSES) && busInitialized[busIdx];
   }
 };
+
+// Write `command`, wait `settleUs`, read `replyLen` (at most 32) bytes, on a
+// bus the caller already holds (inside a transaction, or identityRead()).
+// Returns 0 on success, else an endTransmission() status (4 = a short reply).
+uint8_t i2cWriteThenReadHeld(TwoWire* wire, uint8_t address, const uint8_t* command,
+                             size_t commandLen, uint32_t settleUs, uint8_t* reply,
+                             size_t replyLen);
 
 // Global accessor
 inline I2cDeviceManager* i2c() {

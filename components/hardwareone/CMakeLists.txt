@@ -412,6 +412,7 @@ if(HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
         i2csensor_sths34pf80.cpp
         i2csensor_pca9685.cpp
         i2csensor_ht16k33.cpp
+        i2csensor_encoder.cpp
         i2csensor_max17048.cpp
     )
     # Input device: exactly one of the two drivers compiles in. Both own the

@@ -136,6 +136,7 @@
     {"switch": "CUSTOM_ENABLE_FM_RADIO", "group": "sensors", "title": "FM radio (RDA5807)", "summary": "An FM receiver."},
     {"switch": "CUSTOM_ENABLE_SERVO", "group": "sensors", "title": "Servo driver (PCA9685)", "summary": "Sixteen servo or PWM outputs."},
     {"switch": "CUSTOM_ENABLE_LED_MATRIX", "group": "sensors", "title": "LED matrix (HT16K33)", "summary": "A 16 x 8 single-colour matrix."},
+    {"switch": "CUSTOM_ENABLE_ENCODER", "group": "sensors", "title": "Encoder board (Adafruit 5752 / 4991)", "summary": "The RGB pixels of a seesaw rotary encoder board, set with the LED commands' encoder target.", "boards": ["feathers3", "feathers3_fe", "feather_esp32_v2", "qtpy_esp32", "xiao_s3"]},
 
     {"switch": "ENABLE_CAMERA_SENSOR", "group": "hardware", "title": "Camera",
      "summary": "The board's camera.", "boards": ["p4x_eye", "waveshare_p4_touch_lcd_5", "xiao_s3"]},

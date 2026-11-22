@@ -18,6 +18,7 @@
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
+#include "System_SeesawIdentity.h"
 #include "System_SensorJsonKeys.h"  // inter-device sensor JSON key names (receivers read the same)
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
@@ -201,7 +202,22 @@ bool gamepadInit() {
 
   // Use bus-aware device transaction wrapper for safe mutex + clock + health tracking
   bool initSuccess = i2cDeviceTransaction(gpBus, I2C_ADDR_GAMEPAD, 100000, 3000, [&]() -> bool {
-    // Library's wire is already bound from construction above
+    // Library's wire is already bound from construction above.
+    // The product id first, before any begin or reset: the ANO and encoder
+    // boards answer in the same addresses (System_SeesawIdentity.h), and a
+    // board of another product is left exactly as it was.
+    uint16_t product = 0;
+    if (!seesawReadProductIdOnHeldBus(gpWire, I2C_ADDR_GAMEPAD, product)) {
+      ERROR_INPUTF("Seesaw (Gamepad) not found at 0x%02X on bus %u", I2C_ADDR_GAMEPAD, gpBus);
+      return false;
+    }
+    INFO_INPUT_LIFECYCLEF("Seesaw product id: %u (expected %u)", (unsigned)product,
+                          (unsigned)kSeesawProductGamepad);
+    if (product != kSeesawProductGamepad) {
+      ERROR_INPUTF("Seesaw at 0x%02X reports product %u, not the Mini I2C Gamepad (%u); not claiming it",
+                   I2C_ADDR_GAMEPAD, (unsigned)product, (unsigned)kSeesawProductGamepad);
+      return false;
+    }
 
     if (!gGamepadSeesaw->begin(I2C_ADDR_GAMEPAD)) {
       ERROR_INPUTF("Seesaw (Gamepad) not found at 0x%02X on bus %u", I2C_ADDR_GAMEPAD, gpBus);
@@ -217,14 +233,6 @@ bool gamepadInit() {
     if (!gGamepadSeesaw->begin(I2C_ADDR_GAMEPAD)) {
       ERROR_INPUTF("Seesaw not responding after soft reset");
       return false;
-    }
-
-    // Verify product ID (upper 16 bits of getVersion()) should be 5743
-    uint32_t version = ((gGamepadSeesaw->getVersion() >> 16) & 0xFFFF);
-    INFO_INPUT_LIFECYCLEF("Seesaw version: %lu (expected 5743)", (unsigned long)version);
-    if (version != 5743) {
-      WARN_INPUTF("Seesaw product mismatch: got %lu, expected 5743 (Mini I2C Gamepad)", (unsigned long)version);
-      // Not fatal: continue, as other seesaw variants may still be usable
     }
 
     // Configure gamepad button inputs with pullups and enable GPIO interrupts
@@ -305,9 +313,24 @@ bool gamepadInitConnection() {
     char msg[48];
     snprintf(msg, sizeof(msg), "Gamepad: re-init attempt %d", attempt);
     broadcastOutput(msg);
+    // The product id first, as gamepadInit: a board of another product is
+    // never begun or reset, and is not retried.
+    uint16_t product = 0;
+    bool otherProduct = false;
     bool began = i2cDeviceTransaction(gpBus, I2C_ADDR_GAMEPAD, 100000, 500, [&]() -> bool {
+      if (!seesawReadProductIdOnHeldBus(gpWire, I2C_ADDR_GAMEPAD, product)) return false;
+      if (product != kSeesawProductGamepad) {
+        otherProduct = true;
+        return false;
+      }
       return gGamepadSeesaw->begin(I2C_ADDR_GAMEPAD);
     });
+    if (otherProduct) {
+      WARN_INPUTF("Gamepad: the seesaw at 0x%02X reports product %u, not the Mini I2C Gamepad (%u); "
+                  "not claiming it", I2C_ADDR_GAMEPAD, (unsigned)product, (unsigned)kSeesawProductGamepad);
+      broadcastOutput("Gamepad: another seesaw board answers at 0x50");
+      return false;
+    }
     if (began) {
       // Soft reset for clean state, then reconfigure
       i2cDeviceTransactionVoid(gpBus, I2C_ADDR_GAMEPAD, 100000, 500, [&]() {

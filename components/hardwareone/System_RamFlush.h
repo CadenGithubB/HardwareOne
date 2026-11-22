@@ -67,6 +67,7 @@ typedef enum : uint8_t {
   RF_WIFI       = 19,
   RF_OLED       = 20,
   RF_AUTOMATION = 21,
+  RF_ENCODER = 22,
   RF_FEATURE_COUNT
 } RamFlushFeatureId;
 

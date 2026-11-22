@@ -14,6 +14,31 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Added
+- The LED commands take the light as an optional first word: `ledcolor [target] <colour>`,
+  `ledeffect [target] <effect> ...`, `ledbrightness [target] <0..100>` (admin, saved per light),
+  `ledclear [target]`, with the targets `onboard` (the board's NeoPixel), `encoder` (every pixel of
+  the encoder board) and `encoder:<n>` (one pixel). Left out, the target is `onboard` (the encoder
+  on a board without an onboard LED), so automations, MQTT, voice, the web, the app, the OLED and G2
+  pages and the startup effect keep driving the light they drove. New `ledstatus [json]` (anyone)
+  lists every light of the build, connected or not, and what it shows. The onboard LED's colours,
+  effects and timing are unchanged; a malformed `encoder:<n>`, a pixel past the board's count and a
+  light the build or board does not have are refused, and `ledclear` with extra words is refused.
+- The encoder board as an ordinary optional I2C device named `encoder`: an Adafruit 5752 I2C Quad
+  Rotary Encoder (four RGB pixels, address 0x49-0x50) or 4991 Rotary Encoder with NeoPixel (one,
+  0x36-0x3D), told apart by the product id the board reports and used for its pixels (the knobs and
+  switches are not used). `openencoder` / `closeencoder` and `encoderautostart` (admin) through the
+  sensor queue, start at boot and automatic restart; `encoderstatus [json]`, `encoderaddress` and
+  `encoderbus` (admin, saved). Frames are written only when the colours change, at most about 30 a
+  second, and a busy bus skips the frame. A board missing at boot logs one line; an LED command to
+  it reconnects a board meant to be open (at most every 2 s). On the FeatherS3[D] the device never
+  opens 0x36 on the fuel gauge's bus. Build option `CUSTOM_ENABLE_ENCODER` (off on every board,
+  offered by `tools/build_config.py` on the FeatherS3, FeatherS3 FE, Feather ESP32 V2, QT Py ESP32
+  and XIAO ESP32-S3). Built, not yet run on either board.
+- Seesaw boards are known by their product id: a driver reads it before it begins or resets a
+  board (the gamepad's reconnect path too), so the gamepad and ANO drivers no longer take, or reset,
+  a seesaw board of another product. `i2cscan`, discovery and `detect` read it only where two
+  compiled devices of different products can share the address (the encoder's configured address,
+  0x49 with an ANO or gamepad build), and name the board by it.
 - The G2 glasses' Health panel insights page (its second page, glasses firmware 2.3.2.14) shows
   up to three lines from R1 ring history over the most recent days with data (`ring insights days`,
   1-7, default 3): heart rate range and average with HRV under the same icon, steps per complete day

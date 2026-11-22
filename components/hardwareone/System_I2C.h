@@ -428,6 +428,10 @@ struct I2cSensorEntry {
   int (*configuredBus)();         // reads the setting that routes the device to a bus
   uint8_t (*configuredAddress)(); // the address when it is a setting, else nullptr
   I2cDeviceType deviceType;       // the start/stop queue's id; I2C_DEVICE_COUNT when the queue does not manage it
+  // A seesaw board's product id (System_SeesawIdentity.h), 0 for every other
+  // row. A row that has one is named only when the board reports that id:
+  // several seesaw boards share addresses.
+  uint16_t seesawProductId = 0;
 };
 
 // The module name of a queue-managed device (its feature id), from i2cSensors[].
@@ -518,8 +522,20 @@ void initSensorQueue();
 // ============================================================================
 void discoverI2cDevices();
 bool isSensorConnected(const char* name);
-// Address-table label only; driver initialization validates the actual hardware.
-String identifySensor(uint8_t address);
+// The label of the device that answered at `address` on `bus`. Where two
+// compiled rows of different products can claim the address (the seesaw
+// boards that share 0x49, the encoder board at its configured address), the
+// product id the board reports names it; every other address keeps its
+// address-only label and sees no identity read.
+String identifySensor(uint8_t address, uint8_t bus);
+// Read the product id of a seesaw board (no device-health record). False when
+// it did not answer the identity read.
+bool i2cReadSeesawProductId(uint8_t bus, uint8_t address, uint16_t& productId);
+// The same read by a driver that already holds the bus (inside
+// i2cDeviceTransaction), before it resets or configures anything: the status
+// VERSION register select is its only write. A device that is not a seesaw
+// board fails the read or reports a product no driver claims.
+bool seesawReadProductIdOnHeldBus(TwoWire* wire, uint8_t address, uint16_t& productId);
 
 // Shared sensor-reading envelope: every <x>BuildDataJSON opens its payload with
 // this so all interfaces (BLE/web/OLED/serial/MQTT/ESP-NOW) parse ONE shape.
