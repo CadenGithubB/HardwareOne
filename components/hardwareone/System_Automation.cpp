@@ -4548,7 +4548,10 @@ bool evaluateCondition(const char* condition) {
     // Free PSRAM/SPIRAM in KB (0 on boards without PSRAM)
     currentValue = (float)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024);
   } else if (strcmp(sensor, "FSFREE") == 0) {
-    // Free LittleFS space in KB (cached read, scheduler-safe)
+    // Free LittleFS space in KB. The reading is the log-overflow check's
+    // stored figure while it is fresh (2-15 s); when it is stale, after a
+    // write burst or after a remove, this call takes the filesystem lock and
+    // walks the volume (esp_littlefs_info), so it can wait on other flash work.
     currentValue = (float)(VFS::getCachedLittleFsFree() / 1024);
   } else if (strcmp(sensor, "UPTIME") == 0) {
     // Minutes since boot, from the uptime owner (it does not restart at 49.7 days)

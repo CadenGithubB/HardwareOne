@@ -112,8 +112,9 @@ _DIRECTIVE = re.compile(
 )
 
 # Step 4 asks "does this delimiter look like it carries script?". Deliberately
-# loose: it must catch EARLYJS, LEDRENDERJS and FBSCRIPT, not just JS.
-_JS_DELIM = re.compile(r"JS|SCRIPT", re.IGNORECASE)
+# loose: it must catch EARLYJS, LEDRENDERJS and FBSCRIPT, not just JS. A JSON
+# fixture (R"json(, the host tests' payload literals) is data, not script.
+_JS_DELIM = re.compile(r"JS(?!ON)|SCRIPT", re.IGNORECASE)
 
 
 class ExtractionError(Exception):

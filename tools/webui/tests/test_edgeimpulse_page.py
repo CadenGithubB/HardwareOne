@@ -67,7 +67,11 @@ var document = {
   addEventListener: function () {}
 };
 var window = {};
-var console = {log: function () {}, warn: function () {}, error: function () {}};
+// Quiet log, but warnings and errors are kept and fail the run (G-18).
+var consoleProblems = [];
+var console = {log: function () {},
+               warn: function () { consoleProblems.push('console.warn: ' + Array.prototype.join.call(arguments, ' ')); },
+               error: function () { consoleProblems.push('console.error: ' + Array.prototype.join.call(arguments, ' ')); }};
 function setTimeout() { return 0; }
 function setInterval() { return 0; }
 function clearInterval() {}
@@ -136,6 +140,7 @@ r = rects();
 check(r.length === 1 && near(r[0][2], 16 * 2 * 4) && near(r[0][3], 16 * 1.5 * 4),
       'square fallback: ' + JSON.stringify(r));
 
+failures = failures.concat(consoleProblems);
 if (failures.length) { __out('FAIL ' + failures.join('\nFAIL ')); }
 else { __out('EI_PAGE PASS'); }
 """

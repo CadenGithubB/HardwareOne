@@ -38,7 +38,9 @@ snapshot of all of the above.
 **Vendoring from scratch:** `tools/vendor_arduino.sh` clones upstream 3.3.5
 (`11bc7ac1a`) into `components/arduino` as a nested git checkout, applies every
 patch below in order and runs the verifier; `--check` verifies an existing copy,
-`--force` re-vendors over one. No board uses an untracked variant directory
+`--compare` vendors and patches a fresh copy in a temporary folder and lists every
+file where the existing copy differs from it (network needed), and `--force`
+re-vendors over one. No board uses an untracked variant directory
 (each `boards/*.defaults` names an upstream `CONFIG_ARDUINO_VARIANT`).
 
 ## Verify (run any time, especially after anything touched components/arduino)

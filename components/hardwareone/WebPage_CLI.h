@@ -183,6 +183,10 @@ historyIndex = -1; currentCommand = '';
 try{ inHelp = JSON.parse(localStorage.getItem('cliInHelp') || 'false'); }catch(_){ inHelp=false; }
 try{ outputBackup = localStorage.getItem('cliOutputHistoryBackup') || ''; }catch(_){ outputBackup=''; }
 var cliResponseGeneration=0; var cliLogRequestGeneration=0; var cliCommandPending=false; var cliLogRequestPending=false;
+// Change counter (X-HW1-Log-Seq) of the mirror text on screen. Polls send it as
+// ?since= and an unchanged mirror answers 204 with no body. '' whenever the
+// screen holds anything else (a command reply, help, bonded output).
+var cliLogSeq='';
 function __stripAnsi(s){ try{ return (s||'').replace(/\x1B\[[0-9;]*[A-Za-z]/g, ''); }catch(_){ return s; } }
 function __applyClear(s){ try{ var ESC=String.fromCharCode(27); var clearSeq=ESC+'[2J'+ESC+'[H'; var idx=(s||'').lastIndexOf(clearSeq); if(idx!==-1){ return s.substring(idx+clearSeq.length); } return s; }catch(_){ return s; } }
 function __helpStateFromResponse(r){ try{ var v=r&&r.headers?r.headers.get('X-HW1-CLI-Help'):null; return v==='active'?true:(v==='inactive'?false:null); }catch(_){ return null; } }
@@ -194,6 +198,7 @@ try{ if(cliOutput){ cliOutput.textContent=localStorage.getItem('cliOutputHistory
 function __applyCliLogReply(reply,responseGeneration,logGeneration){
   if(cliBondMode || !reply || responseGeneration!==cliResponseGeneration || logGeneration!==cliLogRequestGeneration || cliCommandPending){ return; }
   var wasInHelp=inHelp;
+  if(reply.unchanged && reply.helpState!==true){ if(reply.helpState===false){ __storeHelpState(false); } return; }
   var cleanText=__stripAnsi(__applyClear(reply.text||''));
   if(reply.helpState===true){
     if(!wasInHelp){
@@ -208,10 +213,12 @@ function __applyCliLogReply(reply,responseGeneration,logGeneration){
     } else {
       __storeHelpState(true);
     }
+    cliLogSeq='';
     return; // metadata may update; active help output must never be overwritten
   }
   if(reply.helpState===false){ __storeHelpState(false); outputBackup=''; }
-  if(inHelp){ return; } // no metadata is safer than destroying an active page
+  if(inHelp){ cliLogSeq=''; return; } // no metadata is safer than destroying an active page
+  cliLogSeq=reply.seq||'';
   if(cliOutput){ cliOutput.textContent=cleanText||''; try{ localStorage.setItem('cliOutputHistory',cliOutput.textContent); }catch(_){} try{ if(!scrolledOnce){ cliOutput.scrollTop=cliOutput.scrollHeight; scrolledOnce=true; } }catch(_){} }
 }
 function __requestCliLogs(){
@@ -219,10 +226,11 @@ function __requestCliLogs(){
   var responseGeneration=cliResponseGeneration;
   var logGeneration=++cliLogRequestGeneration;
   cliLogRequestPending=true;
-  try{ fetch('/api/cli/logs', { credentials:'same-origin', cache:'no-store' })
-  .then(function(r){ if(r.status===401){ cliStopLogPoller(); return null; } var helpState=__helpStateFromResponse(r); return r.text().then(function(text){ return {text:text,helpState:helpState}; }); })
+  var logUrl='/api/cli/logs'+((cliLogSeq && !inHelp)?('?since='+encodeURIComponent(cliLogSeq)):'');
+  try{ fetch(logUrl, { credentials:'same-origin', cache:'no-store' })
+  .then(function(r){ if(r.status===401){ cliStopLogPoller(); return null; } var helpState=__helpStateFromResponse(r); if(r.status===204){ return {unchanged:true,helpState:helpState}; } var seq=''; try{ seq=(r.headers&&r.headers.get('X-HW1-Log-Seq'))||''; }catch(_){ seq=''; } return r.text().then(function(text){ return {text:text,helpState:helpState,seq:seq}; }); })
   .then(function(reply){ cliLogRequestPending=false; __applyCliLogReply(reply,responseGeneration,logGeneration); })
-  .catch(function(e){ cliLogRequestPending=false; try{ console.debug('[CLI] logs fetch error: '+e.message); }catch(_){} }); }catch(_){ cliLogRequestPending=false; }
+  .catch(function(e){ cliLogRequestPending=false; cliLogSeq=''; try{ console.debug('[CLI] logs fetch error: '+e.message); }catch(_){} }); }catch(_){ cliLogRequestPending=false; }
 }
 // Always ask once. Periodic calls below retry a transient failure and continue
 // reading metadata while help is active without applying the mirrored body.
@@ -264,6 +272,7 @@ function executeCommand(){
   var pendingDisplay = __cliPendingDisplay(command);
   var responseGeneration=++cliResponseGeneration;
   ++cliLogRequestGeneration; // invalidate bootstrap/poll replies already in flight
+  cliLogSeq=''; // the reply changes the screen: the next poll fetches the whole mirror
   cliCommandPending=true;
   var outputBeforeCommand = cliOutput ? cliOutput.textContent : '';
   historyIndex = -1; currentCommand = '';
@@ -309,6 +318,7 @@ function clearHistory() {
   localStorage.removeItem('cliOutputHistory');
   commandHistory = [];
   cliOutput.textContent = '';
+  cliLogSeq = '';
   historyIndex = -1;
 }
 
@@ -329,6 +339,7 @@ function cliInitBondToggle(){
 
 function cliSetTarget(bonded){
   cliBondMode = !!bonded;
+  cliLogSeq = '';
   if(cliBondMode){ ++cliLogRequestGeneration; }
   // Free up a socket for the bonded fetches; resume local log polling when back
   // on "This Device". See cliStartLogPoller() for why this matters.

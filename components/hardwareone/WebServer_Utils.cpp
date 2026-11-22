@@ -29,13 +29,14 @@ size_t gWebMirrorCap = 8192;  // 8KB default capacity (reduced from 14KB)
 
 // Constructor
 WebMirrorBuf::WebMirrorBuf()
-  : buf(nullptr), cap(0), len(0), mutex(nullptr) {}
+  : buf(nullptr), cap(0), len(0), seq(0), mutex(nullptr) {}
 
 // Initialize buffer with given capacity
 void WebMirrorBuf::init(size_t capacity) {
   if (buf || capacity == 0) return;
   cap = capacity;
   len = 0;
+  seq = 1;
   buf = (char*)ps_alloc(cap, AllocPref::PreferPsram, "gWebMirror.buf");
   if (buf) buf[0] = '\0';
   // Create mutex for thread-safe access
@@ -49,6 +50,7 @@ void WebMirrorBuf::clear() {
   if (mutex && xSemaphoreTake(mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
     len = 0;
     if (buf) buf[0] = '\0';
+    bumpSeq();
     xSemaphoreGive(mutex);
   }
 }
@@ -69,6 +71,7 @@ void WebMirrorBuf::append(const String& s, bool needNewline) {
     memcpy(buf, src, cap - 1);
     len = cap - 1;
     buf[len] = '\0';
+    bumpSeq();
     xSemaphoreGive(mutex);
     return;
   }
@@ -99,7 +102,8 @@ void WebMirrorBuf::append(const String& s, bool needNewline) {
   memcpy(buf + len, s.c_str(), slen);
   len += slen;
   buf[len] = '\0';
-  
+  bumpSeq();
+
   xSemaphoreGive(mutex);
 }
 
@@ -124,6 +128,7 @@ void WebMirrorBuf::appendDirect(const char* s, size_t slen, bool needNewline) {
     memcpy(buf, src, cap - 1);
     len = cap - 1;
     buf[len] = '\0';
+    bumpSeq();
     xSemaphoreGive(mutex);
     return;
   }
@@ -150,7 +155,8 @@ void WebMirrorBuf::appendDirect(const char* s, size_t slen, bool needNewline) {
   memcpy(buf + len, s, slen);
   len += slen;
   buf[len] = '\0';
-  
+  bumpSeq();
+
   xSemaphoreGive(mutex);
 }
 
@@ -169,7 +175,8 @@ void WebMirrorBuf::assignFrom(const String& s) {
     len = sl;
     buf[len] = '\0';
   }
-  
+  bumpSeq();
+
   xSemaphoreGive(mutex);
 }
 
@@ -185,7 +192,8 @@ String WebMirrorBuf::snapshot() {
 
 // Zero-copy snapshot to caller-provided buffer (hot path optimization)
 // Returns actual bytes copied (excluding null terminator)
-size_t WebMirrorBuf::snapshotTo(char* dest, size_t destSize) {
+size_t WebMirrorBuf::snapshotTo(char* dest, size_t destSize, uint32_t* seqOut) {
+  if (seqOut) *seqOut = 0;
   if (!dest || destSize == 0) return 0;
   if (!buf) {
     dest[0] = '\0';
@@ -199,7 +207,8 @@ size_t WebMirrorBuf::snapshotTo(char* dest, size_t destSize) {
   size_t copyLen = (len < destSize - 1) ? len : (destSize - 1);
   memcpy(dest, buf, copyLen);
   dest[copyLen] = '\0';
-  
+  if (seqOut) *seqOut = seq;
+
   xSemaphoreGive(mutex);
   return copyLen;
 }

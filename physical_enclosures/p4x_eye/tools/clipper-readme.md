@@ -41,8 +41,8 @@ Algorithms, Graphics
 
 ## Links
 
-- [Documentation](./Documentation.md)
-- [ChangeLog](./ChangeLog.txt)
+- Documentation and ChangeLog: in the upstream project (not copied here),
+  <https://sourceforge.net/projects/jsclipper/>
 
 ## License
 

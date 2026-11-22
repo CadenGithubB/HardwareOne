@@ -34,7 +34,7 @@ LOGIN_PAGE = REPO_ROOT / "components" / "hardwareone" / "WebPage_Login.h"
 SERVER = REPO_ROOT / "components" / "hardwareone" / "WebServer_Server.cpp"
 CLI_STORAGE_KEYS = ("cliHistory", "cliOutputHistory", "cliOutputHistoryBackup", "cliInHelp", "cliStoreV")
 HARNESS = REPO_ROOT / "tools" / "webui" / "harness" / "cli_page_harness.js"
-EXPECTED_CHECKS = 78
+EXPECTED_CHECKS = 82
 
 
 class CliPageExtractionTests(unittest.TestCase):

@@ -137,6 +137,12 @@ Node.js is required for the four browser suites (`map_live_browser`,
 time if it is outside PATH. Without it they stay registered but are reported as
 not run (disabled), so a green run then covers the remaining suites only.
 
+The Python tool suites run in ctest as well: `tools_ota_unittests`,
+`tools_webui_unittests` and `tools_model_unittests` each run
+`python3 -m unittest discover -s tools/<suite>/tests -t .` from the repository
+root. The web UI page harnesses use the first JavaScript engine they find
+(`tools/webui/js_engine.py`); with `HW1_NODE_EXECUTABLE` set, that is Node.js.
+
 ## Map live recording
 
 `map_live_tracking` executes the production Map owner, argument parser and
@@ -1866,6 +1872,29 @@ reason). Each hit is printed as `file:line: match`.
 It does not look for a Wi-Fi network name or a password, because a tracked
 test cannot name them. `--repo <dir>` checks another checkout; the tree before
 this gate fails with one hit (a home subnet quoted in the readiness appendix).
+
+## Markdown link check
+
+```sh
+python3 components/hardwareone/test/host/test_doc_links.py
+```
+
+`doc_links` reads every tracked Markdown file (not `components/hardwareone_libs`,
+managed components or `experiments/`), skips fenced code, and fails on a
+`[text](target)` link that is an absolute path (`/private/tmp/...`) or a
+relative path with no tracked file or folder behind it. URLs and in-page
+anchors are not checked. A file a tool makes (not tracked) is named in code
+text, not linked. Readiness G-22; the tree before it had ten such links.
+
+## Licence notice check
+
+```sh
+python3 components/hardwareone/test/host/test_notice_components.py
+```
+
+`notice_components` reads every `dependencies.lock*` and fails when a locked
+registry component (`  <owner>/<name>:`) is not named in `NOTICE.md`, so a new
+managed component cannot ship without its licence row. Readiness G-05/DELTA-6.
 
 ## Repository tool pins
 
@@ -4282,7 +4311,9 @@ and warning stand. The logs replies are those of before; the state document
 is built with `System_MQTTPayloadCore.h` and carries `deviceName`,
 `deviceNameSet` and `system.psram_free`/`psram_total`. The kept
 logs block keeps its own size: after a larger `gWebMirrorCap`, a poll fills it
-only to that size. Source
+only to that size. A poll that sends `?since=` with the mirror's current change
+counter gets 204 with no body and no copy; any other poll gets the whole mirror
+and its counter in `X-HW1-Log-Seq` (S-13). Source
 contract: `stopMqttNow` releases the state buffer on both of its finished
 paths. It takes `--cxx`, `--sanitize` and `--component <directory>`.
 

@@ -346,7 +346,11 @@ RtcDateTime rtcLocalTime(const RtcDateTime* utc) {
   RtcDateTime local = *utc;
 
   int offsetMinutes = Clock::tzOffsetMinutes();
-  if (offsetMinutes == 0) return local;  // UTC, nothing to do
+  if (offsetMinutes == 0) {
+    // UTC: the date stands; derive the weekday from it like the shifted path.
+    local.dayOfWeek = rtcDayOfWeek(local.year, local.month, local.day) + 1;
+    return local;
+  }
 
   int totalMinutes = local.hour * 60 + local.minute + offsetMinutes;
 

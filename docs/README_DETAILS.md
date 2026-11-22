@@ -46,7 +46,7 @@ by its attached hardware, implemented backends and available resources. Use
 
 ### 3) Hardware One (Standard Handheld)
 - The intended full build: board + SSD1306 OLED + Seesaw gamepad (or ANO rotary encoder) + a selection of I2C sensors.
-- Can be used from USB power or as a battery-powered handheld.
+- Can be used from USB power or as a battery-powered handheld. Battery runtime and current draw have not been measured for any board or mode, so no runtime figure is given (`KNOWN_ISSUES.md`).
 - Best fit when you want both the local OLED/gamepad UI and the web UI.
 - The ESP32-P4X-EYE is this configuration with its own LCD, wheel, camera and microphone; its reproducible profile lives under [`deployments/handheld/`](../deployments/handheld/README.md) as a factory-only (cable-flashed) deployment.
 

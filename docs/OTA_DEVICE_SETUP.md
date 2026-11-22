@@ -26,14 +26,16 @@ What it costs, measured rather than estimated:
 | OTA code in the app | ~800 B flash, 0 B RAM | ~64 KiB flash, ~3.9 KiB RAM |
 
 The flash layout cost is the part that matters, and it comes out of the
-filesystem. The original 16 MB FeatherS3 layout is:
+filesystem. The 16 MB FeatherS3 layouts
+(`partitions/partitions_no_sr_16mb.csv` and
+`partitions/partitions_ota_no_sr_16mb.csv`) are:
 
 | Partition | Non-OTA 16 MB | OTA 16 MB |
 | --- | ---: | ---: |
-| `factory` | 5,716 KiB (the app) | 1,336 KiB (recovery updater) |
+| `factory` | 6,228 KiB (the app) | 1,336 KiB (recovery updater) |
 | `otadata` | - | 8 KiB |
-| `ota_0` | - | 5,760 KiB (the app) |
-| `littlefs` | 10,604 KiB | 9,216 KiB |
+| `ota_0` | - | 6,272 KiB (the app) |
+| `littlefs` | 10,092 KiB | 8,704 KiB |
 
 LittleFS gives up 1,388 KiB. In exchange the app slot gains 44 KiB and you get
 a recovery updater that cannot be bricked. The arithmetic balances exactly.
@@ -78,7 +80,7 @@ export HW1_KEY=/absolute/path/to/hw1-ota-signing.pem
 export HW1_PORT=/dev/cu.YOUR_PORT
 export ESPPORT="$HW1_PORT"   # see the note below - idf.py -p does NOT reach these targets
 export HW1_MAIN_BUILD=build-ota
-export HW1_UPDATER_BUILD=/private/tmp/hw1-updater-migration
+export HW1_UPDATER_BUILD="$PWD/build-updater-migration"
 ```
 
 For the paired Headless Node images, the deployment wrapper replaces the two

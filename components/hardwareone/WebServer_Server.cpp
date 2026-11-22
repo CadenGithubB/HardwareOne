@@ -3189,6 +3189,24 @@ esp_err_t handleLogs(httpd_req_t* req) {
       return ESP_OK;
     }
   }
+  // The page sends ?since=<seq> with the change counter of the text it shows
+  // (the X-HW1-Log-Seq header of its last full reply). When the mirror has not
+  // changed since, the reply is 204 with no body instead of the whole mirror.
+  // The peek reads one aligned word without the lock: a change that lands
+  // just after it is caught by the next poll.
+  {
+    char query[32];
+    char sinceText[16];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "since", sinceText, sizeof(sinceText)) == ESP_OK) {
+      const uint32_t since = (uint32_t)strtoul(sinceText, nullptr, 10);
+      if (since != 0 && since == gWebMirror.seq) {
+        httpd_resp_set_status(req, "204 No Content");
+        httpd_resp_send(req, nullptr, 0);
+        return ESP_OK;
+      }
+    }
+  }
   // Use zero-copy snapshotTo() to avoid String allocation on every poll (500ms).
   // The response buffer is made once and kept for the next poll: every handler
   // runs on the one httpd task, so it has one user at a time, and
@@ -3214,8 +3232,14 @@ esp_err_t handleLogs(httpd_req_t* req) {
     httpd_resp_sendstr(req, "[ERROR] Memory allocation failed");
     return ESP_OK;
   }
-  size_t copied = gWebMirror.snapshotTo(responseBuf, responseCap);
-  DEBUG_HTTPF("[LOGS_DEBUG] Sending %zu bytes, seq=%lu", copied, gWebMirrorSeq);
+  uint32_t sentSeq = 0;
+  size_t copied = gWebMirror.snapshotTo(responseBuf, responseCap, &sentSeq);
+  char seqText[12];
+  if (sentSeq != 0) {
+    snprintf(seqText, sizeof(seqText), "%lu", (unsigned long)sentSeq);
+    httpd_resp_set_hdr(req, "X-HW1-Log-Seq", seqText);
+  }
+  DEBUG_HTTPF("[LOGS_DEBUG] Sending %zu bytes, seq=%lu", copied, (unsigned long)sentSeq);
   httpd_resp_send(req, responseBuf, copied);
   if (responseBuf != sLogsResponseBuf) free(responseBuf);
   DEBUG_HTTPF("[LOGS_DEBUG] Response sent");

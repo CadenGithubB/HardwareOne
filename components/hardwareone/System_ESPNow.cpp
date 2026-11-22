@@ -7634,8 +7634,8 @@ static void v4_send_route_adverts() {
 // the slow work runs on cmd_exec and never stalls RX.
 //
 // Handlers that DEFER today (heavy crypto / FS+JSON): USER_SYNC, SESSION_OPEN,
-// SESSION_CONFIRM, SESSION_REKEY, PAIR_BEACON (auto-pair mutates the device
-// registry), and the FS_LIST / FS_STAT / FS_GET shims (via captureDeferred in
+// SESSION_CONFIRM, SESSION_REKEY, PAIR_BEACON (recording a discovered candidate
+// touches the device registry), and the FS_LIST / FS_STAT / FS_GET shims (via captureDeferred in
 // System_ESPNow_FsList.cpp). (v4h_cmd also "defers" by snapshotting into
 // gEspNow->deferredCmd* and letting the command run off-task; v4h_file_end
 // defers its writer finalize/abort jobs.)
@@ -7743,37 +7743,36 @@ static void pairModeNameFromField(const char (&field)[devicename::kFieldLen], co
   }
 }
 
-// Per-MAC cooldown so a beacon stream (one every ~1.5s) can't flood the 6-deep
-// cmd_exec queue with duplicate auto-pair jobs before the first one completes.
-static uint8_t  gAutoPairSeenMac[4][6] = {};
-static uint32_t gAutoPairSeenAt[4]     = {};
-static const uint32_t AUTOPAIR_COOLDOWN_MS = 8000;
+// Per-MAC cooldown so a beacon stream (one every ~1.5s) refreshes a discovered
+// candidate at most once per window instead of on every beacon.
+static uint8_t  gBeaconSeenMac[4][6] = {};
+static uint32_t gBeaconSeenAt[4]     = {};
+static const uint32_t BEACON_SEEN_COOLDOWN_MS = 8000;
 static bool pairModeRecentlySeen(const uint8_t* mac) {
   uint32_t now = (uint32_t)millis();
   for (int i = 0; i < 4; i++) {
-    if (gAutoPairSeenAt[i] != 0 &&
-        (uint32_t)(now - gAutoPairSeenAt[i]) < AUTOPAIR_COOLDOWN_MS &&
-        memcmp(gAutoPairSeenMac[i], mac, 6) == 0) return true;
+    if (gBeaconSeenAt[i] != 0 &&
+        (uint32_t)(now - gBeaconSeenAt[i]) < BEACON_SEEN_COOLDOWN_MS &&
+        memcmp(gBeaconSeenMac[i], mac, 6) == 0) return true;
   }
   return false;
 }
 static void pairModeMarkSeen(const uint8_t* mac) {
   uint32_t now = (uint32_t)millis();
-  int slot = 0; uint32_t oldest = gAutoPairSeenAt[0];
+  int slot = 0; uint32_t oldest = gBeaconSeenAt[0];
   for (int i = 0; i < 4; i++) {
-    if (gAutoPairSeenAt[i] == 0) { slot = i; break; }
-    if (gAutoPairSeenAt[i] < oldest) { oldest = gAutoPairSeenAt[i]; slot = i; }
+    if (gBeaconSeenAt[i] == 0) { slot = i; break; }
+    if (gBeaconSeenAt[i] < oldest) { oldest = gBeaconSeenAt[i]; slot = i; }
   }
-  memcpy(gAutoPairSeenMac[slot], mac, 6);
-  gAutoPairSeenAt[slot] = (now == 0) ? 1 : now;
+  memcpy(gBeaconSeenMac[slot], mac, 6);
+  gBeaconSeenAt[slot] = (now == 0) ? 1 : now;
 }
 
 // ---------------------------------------------------------------------------
 // Discovered-candidate list (discover-then-confirm pairing)
 // ---------------------------------------------------------------------------
 // A device in discovery mode records every same-mesh peer whose PAIR_BEACON it
-// hears into gEspNow->unpairedDevices[] — it does NOT pair automatically (the
-// old WPS instant auto-pair is removed). The user then explicitly requests a
+// hears into gEspNow->unpairedDevices[] — it does NOT pair by itself. The user then explicitly requests a
 // pair from that list, and the peer being paired with shows an accept screen
 // (Stage 2/3). Entries expire CANDIDATE_TTL_MS after their last beacon; the
 // whole list is cleared when our window closes.
@@ -7838,7 +7837,7 @@ static void addOrUpdateCandidate(const uint8_t* mac, const char* name, int rssi,
 
 // RX handler for PAIR_BEACON. Inline on espnow_task — cheap only; all beacon
 // fields are untrusted. Discover-then-confirm: record the sender as an available
-// candidate; NEVER auto-pair (removed). The recentlySeen throttle bounds how
+// candidate; never pair from a beacon. The recentlySeen throttle bounds how
 // often we refresh a candidate to the flood-guard window.
 static void v4h_pair_beacon(const V4RxCtx& ctx) {
   if (!espnowPairModeActive()) return;              // our discovery window must be open
@@ -7858,7 +7857,7 @@ static void v4h_pair_beacon(const V4RxCtx& ctx) {
 
 // Broadcast one pairing beacon to FF. BROADCAST_AUTH appends a mesh-group-key
 // (passphrase-derived) HMAC so ONLY devices holding the same passphrase can
-// trigger our auto-pair — the handler row is REQ_AUTHENTICATED, so an outsider's
+// list us as a discovered candidate — the handler row is REQ_AUTHENTICATED, so an outsider's
 // forged/plaintext beacon is dropped after one cheap HMAC verify, before it can
 // mutate the device registry. No ACK_REQ (a broadcast would ACK-storm). Fresh
 // msgId each call or dedup eats it.
@@ -8115,7 +8114,7 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // tagged origin against the source before it lets a frame create a slot.
   { ESPNOW_V4_TYPE_HEARTBEAT,        V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED, ESPNOW_V4_MINLEN_HEARTBEAT, v4h_heartbeat         },
   // Discovery beacon carries a mesh-group-key BROADCAST_AUTH HMAC (see sendPairBeacon).
-  // REQ_AUTHENTICATED gates auto-pair to same-passphrase devices so an outsider cannot
+  // REQ_AUTHENTICATED limits discovery to same-passphrase devices so an outsider cannot
   // forge a beacon to pollute our registry. NOT REQ_PAIRED — the sender is unpaired by
   // definition (pairing is what this establishes).
   { ESPNOW_V4_TYPE_PAIR_BEACON,      V4_OPC_FLAG_REQ_AUTHENTICATED, ESPNOW_V4_MINLEN_PAIR_BEACON, v4h_pair_beacon       },
@@ -13498,8 +13497,8 @@ void processMeshHeartbeats() {
   static const uint32_t HB_INTERVAL_MS = 5000;
   uint32_t now = (uint32_t)millis();
 
-  // 2a. WPS pairing beacon — while a pairing window is open, broadcast a plaintext
-  // FF beacon so same-mesh devices in pairing mode can discover + auto-pair us.
+  // 2a. Pairing beacon — while a pairing window is open, broadcast an FF beacon
+  // (mesh-key HMAC) so same-mesh devices in pairing mode list us as a candidate.
   // Deliberately NOT gated on having peers (the heartbeat below is): this is the
   // open discovery signal a fresh, peer-less device otherwise never emits.
   static const uint32_t PAIR_BEACON_INTERVAL_MS = 1500;
@@ -21032,8 +21031,8 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
   bool devicesOk = saveEspNowDevices();
 
   // Registry pairing is committed (radio peer + name/key saved) — announce it.
-  // Covers manual espnowpairsecure AND the pairing-mode auto-pair path, which
-  // routes through this handler (so the auto-pair site no longer double-posts).
+  // Covers espnowpairsecure, whether typed or picked from the discovered list
+  // (an accepted pair request routes through this handler too).
   systemEventPost(SYSEVT_PEER_PAIRED, deviceName.c_str(), macStr.c_str());
 
   // 2026-05-19 — auto-trigger KEY_EX so "pairsecure" actually delivers a
@@ -23345,7 +23344,7 @@ const char* cmd_espnow_pairmode(const String& argsInput) {
   snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
            "Discovery ON for %lus on channel %u. Open discovery on the other device too "
            "(same mesh, same channel), then run 'espnowdiscovered' to see it and pair. "
-           "Devices no longer auto-pair.",
+           "Pairing always needs a confirmation.",
            (unsigned long)secs, (unsigned)gEspNow->channel);
   return getDebugBuffer();
 }
@@ -23468,7 +23467,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsetpassphrase", "Set encryption passphrase on a mesh: 'espnowsetpassphrase <mesh> <phrase>'.", true, cmd_espnow_setpassphrase, "Usage: espnowsetpassphrase <mesh> <passphrase>\n       espnowsetpassphrase <mesh> clear", /*requiresSuperAdmin=*/true },
   { "espnowencstatus", "Show ESP-NOW encryption status and key fingerprint.", true, cmd_espnow_encstatus },
   { "espnowpairsecure", "Pair device with encryption: 'espnowpairsecure <mac> <name> [mesh]'. (local pair is synchronous; secure channel completes async - see espnowsessions)", true, cmd_espnow_pairsecure, "Usage: espnowpairsecure <mac_address> <device_name> [mesh]\n       Requires a mesh passphrase first - run 'espnowsetpassphrase <mesh> <passphrase>'.\n       The device is added synchronously; KEY_EX then runs asynchronously (~100ms) so the encrypted channel becomes usable shortly after - inspect with 'espnowsessions' / 'espnowencstatus'." },
-  { "espnowpairmode", "Open the discovery window: 'espnowpairmode [seconds|off|status]'. Open on BOTH same-mesh devices, then 'espnowdiscovered' to see + pair. No auto-pair.", true, cmd_espnow_pairmode, "Usage: espnowpairmode [<seconds>|off|status]\n       Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh).\n       While open, the device broadcasts a discovery beacon and RECORDS other same-mesh\n       devices it hears (see 'espnowdiscovered') — it no longer auto-pairs. Pair from the\n       list with 'espnowpairsecure <mac> <name>'." },
+  { "espnowpairmode", "Open the discovery window: 'espnowpairmode [seconds|off|status]'. Open on BOTH same-mesh devices, then 'espnowdiscovered' to see + pair. Nothing pairs by itself.", true, cmd_espnow_pairmode, "Usage: espnowpairmode [<seconds>|off|status]\n       Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh).\n       While open, the device broadcasts a discovery beacon and RECORDS other same-mesh\n       devices it hears (see 'espnowdiscovered'); it does not pair by itself. Pair from the\n       list with 'espnowpairsecure <mac> <name>'." },
   { "espnowdiscovered", "List devices found during discovery: 'espnowdiscovered [clear]'. Pair one with 'espnowpairrequest <mac_or_name>'.", true, cmd_espnow_discovered, "Usage: espnowdiscovered [clear]\n       Lists same-mesh devices heard while your discovery window ('espnowpairmode') is open." },
   { "espnowpairrequest", "Request a pair with a discovered device: 'espnowpairrequest <mac_or_name>'. The other device must Accept.", true, cmd_espnow_pairrequest, "Usage: espnowpairrequest <mac_or_name>  (name/MAC from 'espnowdiscovered')\n       Sends a request; the target shows an Accept prompt (or run 'espnowaccept' there)." },
   { "espnowaccept", "Accept a pending incoming pair request: 'espnowaccept [<mac_or_name>]'.", true, cmd_espnow_accept, "Usage: espnowaccept [<mac_or_name>]  (no arg = the sole pending request)" },

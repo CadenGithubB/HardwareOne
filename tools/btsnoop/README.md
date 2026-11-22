@@ -3,8 +3,8 @@
 Read-only tools for Android `btsnoop_hci.log` captures and offline firmware
 images. **Never MitM. Never send `otaStart` / DFU from Hardware One.**
 
-Full workflow: [`docs/OTA_PASSIVE_CAPTURE.md`](../../docs/OTA_PASSIVE_CAPTURE.md)  
-Research summary: [`docs/OTA_RESEARCH_FINDINGS_2026-07-31.md`](../../docs/OTA_RESEARCH_FINDINGS_2026-07-31.md)
+The full capture workflow and the research summary were private notes and are
+not in the repository; the tools below are described here.
 
 ## Tools
 

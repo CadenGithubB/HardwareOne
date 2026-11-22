@@ -3,8 +3,9 @@
 HardwareOne is licensed under the PolyForm Noncommercial License 1.0.0
 ([LICENSE.md](LICENSE.md)). The firmware also contains code written by others.
 That code keeps its own licence, listed below, and the licence text sits in each
-component's folder unless a link is given. Binary release downloads ship this
-file together with those licence texts.
+component's folder unless a link is given. Releases are source-only
+(`RELEASING.md`); anyone who passes on a built image passes on this file and
+those licence texts with it.
 
 ## Built into the firmware
 
@@ -21,7 +22,9 @@ These come from the ESP Component Registry at the versions pinned in `dependenci
 
 | Component | Licence |
 |---|---|
-| esp-dsp, esp-nn, esp-tflite-micro, esp_jpeg, mdns, esp_hosted, esp_cam_sensor, esp_sccb_intf, esp_serial_slave_link, esp_wifi_remote, eppp_link, wifi_remote_over_eppp, usb_host_uvc, cmake_utilities | Apache-2.0 |
+| esp-dsp, esp-nn, esp-tflite-micro, esp_jpeg, mdns, esp_hosted, esp_cam_sensor, esp_sccb_intf, esp_serial_slave_link, esp_wifi_remote, eppp_link, wifi_remote_over_eppp, usb_host_uvc, cmake_utilities, esp32-camera | Apache-2.0 |
+| esp_h264 (ESP32-P4, required by esp_video) | Apache-2.0. Its software encoder comes from Cisco openh264 v2.2.0 (BSD-2-Clause) and its decoder from tinyH264; see the component's README. |
+| esp-libhelix-mp3 (chmorgan, required by arduino-esp32 for `ESP_I2S`) | Apache-2.0 for the component; the Helix MP3 decoder inside it is RealNetworks code under the RPSL (or the RCSL), whose texts sit in its `libhelix-mp3/` folder. |
 | esp-dl, dl_fft | MIT |
 | esp-sr, esp_new_jpeg, esp_video, esp_ipa | Espressif MIT (use limited to Espressif chips) |
 | cJSON | MIT (Dave Gamble and contributors) |
