@@ -46,7 +46,7 @@ extern EncoderInstanceSettings gEncoderInst[kEncoderMaxInstances];
 
 // Instance n is open and answered (set by the sensor queue worker).
 bool encoderRunning(uint8_t n = 1);
-// Any instance is open (the RAM flush keeps one switch for the device).
+// Any instance is open (the `features` list shows one row for the device).
 bool encoderAnyRunning();
 // Instance n's start-at-boot setting; false for an n the device does not have.
 bool encoderAutoStartOf(uint8_t n);

@@ -303,6 +303,18 @@ const char* cmd_sensorstop_queued(I2cDeviceType sensor, const char* displayName,
 // n >= 2 is "<name> <n>" ("Encoder 2"). The text stays valid for the session.
 const char* deviceTypeDisplayName(I2cDeviceType device, uint8_t n = 1);
 
+// Instance n as the RAM flush records and checks it (System_RamFlush.cpp):
+// whether it runs, its start-at-boot switch, and the bus and address its
+// start uses (address 0: none set, or a driver that probes more than one).
+// False for an instance the type does not have.
+struct I2cInstanceResumeState {
+  bool running = false;
+  bool autoStart = false;
+  uint8_t bus = 0;
+  uint8_t address = 0;
+};
+bool i2cInstanceResumeState(I2cDeviceType device, uint8_t n, I2cInstanceResumeState& out);
+
 // Queue functions
 // Queues a start and marks it outstanding until the queue worker settles it
 // (started, failed, or closed by a stop).

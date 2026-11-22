@@ -570,6 +570,16 @@ static bool sensorAutoStartFor(I2cDeviceType sensor, uint8_t n) {
   return row && *row->autoStart;
 }
 
+bool i2cInstanceResumeState(I2cDeviceType device, uint8_t n, I2cInstanceResumeState& out) {
+  out = {};
+  if (i2cSlot(device, n) == kI2cNoSlot) return false;
+  out.running = sensorIsRunning(device, n);
+  out.autoStart = sensorAutoStartFor(device, n);
+  out.bus = i2cBusForDeviceType(device, n);
+  out.address = i2cAddressForDeviceType(device, n);
+  return true;
+}
+
 // Admitted starts the queue worker has not settled yet. A stop that cancels
 // one (queued, or dropped while starting) still closes it with the stop event;
 // a stop with nothing running, starting or queued publishes nothing.
@@ -3409,16 +3419,13 @@ static void announceSensorStart(const char* name, bool ok) {
 
 // --- Automatic restart: the worker's side (see the state near requestSensorStart) ---
 
-// The boot rule: start-at-boot on as the RAM-flush resume resolved it. Read
-// each time it matters, so `<x>autostart 0`, the setup wizard and a settings
-// import all end a restart without a hook in any of them (close<x> ends it
-// through sensorRestartClosedByHand).
+// The boot rule: start-at-boot on as the RAM-flush resume resolved it (its
+// device list, per instance). Read each time it matters, so `<x>autostart 0`,
+// the setup wizard and a settings import all end a restart without a hook in
+// any of them (close<x> ends it through sensorRestartClosedByHand).
 static bool sensorRestartGateOpen(I2cDeviceType sensor, uint8_t n) {
   const SensorSwitchRow* row = sensorSwitchRow(sensor);
-  // An instance n >= 2 without its own start-at-boot switch stays closed.
-  if (n != 1) return gI2cBusRunning && row && sensorAutoStartFor(sensor, n);
-  return gI2cBusRunning && row &&
-         ramFlushResolve(ramFlushIdForDevice(sensor), sensorAutoStartFor(sensor, n));
+  return gI2cBusRunning && row && ramFlushResolveDevice(sensor, n, sensorAutoStartFor(sensor, n));
 }
 
 // The worker settled a start. For a start the automatic restart queued, a
@@ -3940,7 +3947,7 @@ void processAutoStartSensors() {
   int autoStartQueued = 0;
   
   #if ENABLE_THERMAL_SENSOR
-  if (ramFlushResolve(RF_THERMAL, gSettings.thermalAutoStart)) {
+  if (ramFlushResolveDevice(I2C_DEVICE_THERMAL, 1, gSettings.thermalAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_THERMAL)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing thermal sensor");
       if (autoStartEnqueue(I2C_DEVICE_THERMAL, 1)) autoStartQueued++;
@@ -3951,7 +3958,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_TOF_SENSOR
-  if (ramFlushResolve(RF_TOF, gSettings.tofAutoStart)) {
+  if (ramFlushResolveDevice(I2C_DEVICE_TOF, 1, gSettings.tofAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_TOF)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing ToF sensor");
       if (autoStartEnqueue(I2C_DEVICE_TOF, 1)) autoStartQueued++;
@@ -3962,7 +3969,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_IMU_SENSOR
-  if (ramFlushResolve(RF_IMU, gSettings.imuAutoStart)) {
+  if (ramFlushResolveDevice(I2C_DEVICE_IMU, 1, gSettings.imuAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_IMU)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing IMU sensor");
       if (autoStartEnqueue(I2C_DEVICE_IMU, 1)) autoStartQueued++;
@@ -3973,7 +3980,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_GPS_SENSOR
-  if (ramFlushResolve(RF_GPS, gSettings.gpsAutoStart)) {
+  if (ramFlushResolveDevice(I2C_DEVICE_GPS, 1, gSettings.gpsAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_GPS)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing GPS sensor");
       if (autoStartEnqueue(I2C_DEVICE_GPS, 1)) autoStartQueued++;
@@ -3984,7 +3991,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_FM_RADIO
-  if (ramFlushResolve(RF_FMRADIO, gSettings.fmRadioAutoStart)) {
+  if (ramFlushResolveDevice(I2C_DEVICE_FMRADIO, 1, gSettings.fmRadioAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_FMRADIO)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing FM Radio sensor");
       if (autoStartEnqueue(I2C_DEVICE_FMRADIO, 1)) autoStartQueued++;
@@ -3995,7 +4002,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_APDS_SENSOR
-  if (ramFlushResolve(RF_APDS, gSettings.apdsAutoStart)) {
+  if (ramFlushResolveDevice(I2C_DEVICE_APDS, 1, gSettings.apdsAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_APDS)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing APDS sensor");
       if (autoStartEnqueue(I2C_DEVICE_APDS, 1)) autoStartQueued++;
@@ -4006,7 +4013,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_GAMEPAD_SENSOR || ENABLE_GT911_TOUCH
-  if (ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
+  if (ramFlushResolveDevice(I2C_DEVICE_INPUT, 1, gSettings.inputAutoStart)) {
     // The device type is the identity. Its module name comes from its
     // i2cSensors[] row, so the registry lookup and the ramflush id cannot
     // disagree. (A hand-typed "gamepad" here once missed the registry, fell
@@ -4022,7 +4029,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_RTC_SENSOR
-  if (ramFlushResolve(RF_RTC, gSettings.rtcAutoStart)) {
+  if (ramFlushResolveDevice(I2C_DEVICE_RTC, 1, gSettings.rtcAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_RTC)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing RTC sensor");
       if (autoStartEnqueue(I2C_DEVICE_RTC, 1)) autoStartQueued++;
@@ -4033,7 +4040,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_PRESENCE_SENSOR
-  if (ramFlushResolve(RF_PRESENCE, gSettings.presenceAutoStart)) {
+  if (ramFlushResolveDevice(I2C_DEVICE_PRESENCE, 1, gSettings.presenceAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_PRESENCE)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Presence sensor");
       if (autoStartEnqueue(I2C_DEVICE_PRESENCE, 1)) autoStartQueued++;
@@ -4044,7 +4051,7 @@ void processAutoStartSensors() {
   #endif
 
   #if ENABLE_ENCODER
-  if (ramFlushResolve(RF_ENCODER, gEncoderInst[0].autoStart)) {
+  if (ramFlushResolveDevice(I2C_DEVICE_ENCODER, 1, gEncoderInst[0].autoStart)) {
     // Missing at boot: one "autostart skipped" line and boot goes on; an
     // LED command to the encoder target reconnects it later.
     if (isSensorAvailableForAutoStart(I2C_DEVICE_ENCODER)) {
@@ -4063,7 +4070,7 @@ void processAutoStartSensors() {
     I2cDeviceType type = I2C_DEVICE_COUNT;
     uint8_t n = 1;
     if (!i2cSlotToRef(slot, type, n)) continue;
-    if (!ramFlushResolve(ramFlushIdForDevice(type), sensorAutoStartFor(type, n))) continue;
+    if (!ramFlushResolveDevice(type, n, sensorAutoStartFor(type, n))) continue;
     if (i2cAddressForDeviceType(type, n) == 0) {
       // Start-at-boot on, but no address set: nothing to look for.
       INFO_I2C_AUTOSTARTF("[AutoStart] Skipping %s (no address set)", deviceTypeDisplayName(type, n));

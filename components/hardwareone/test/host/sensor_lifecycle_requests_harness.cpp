@@ -110,14 +110,16 @@ static bool& autoStartSetting(I2cDeviceType sensor) {
 // First-time setup state (System_FirstTimeSetup.h).
 enum FirstTimeSetupState { SETUP_NOT_NEEDED = 0, SETUP_REQUIRED = 1, SETUP_IN_PROGRESS = 2, SETUP_COMPLETE = 3 };
 static volatile FirstTimeSetupState gFirstTimeSetupState = SETUP_NOT_NEEDED;
-// RAM-flush boundary: ids numbered as the device types; the resume overlay can
-// override a start-at-boot intent, and "failed, not switched off" marks are kept.
+// RAM-flush boundary: ids numbered as the device types; the resume's device
+// list can override instance 1's start-at-boot intent (here: the cases only
+// set instance 1), and "failed, not switched off" marks are kept.
 using RamFlushFeatureId = int;
 static std::array<int, I2C_DEVICE_COUNT> flushOverride;  // -1 = no overlay, else 0/1
 static std::array<bool, I2C_DEVICE_COUNT> flushFailedMark;
 static RamFlushFeatureId ramFlushIdForDevice(I2cDeviceType sensor) { return static_cast<int>(sensor); }
-static bool ramFlushResolve(RamFlushFeatureId id, bool intent) {
-  return flushOverride[id] < 0 ? intent : flushOverride[id] != 0;
+static bool ramFlushResolveDevice(I2cDeviceType sensor, uint8_t n, bool intent) {
+  if (n != 1 || flushOverride[sensor] < 0) return intent;
+  return flushOverride[sensor] != 0;
 }
 static void ramFlushMarkAutostartFailed(RamFlushFeatureId id) { flushFailedMark[id] = true; }
 static void ramFlushClearAutostartFailed(RamFlushFeatureId id) { flushFailedMark[id] = false; }
