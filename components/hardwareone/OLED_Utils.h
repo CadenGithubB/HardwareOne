@@ -502,6 +502,7 @@ void oledLlmModeInit();
 
 #if ENABLE_OLED_DISPLAY && ENABLE_MAPS
 extern bool gMapMenuOpen;
+const char* oledMapFooterHint();  // the map view, its menu, or the names/routes viewer
 #endif
 
 #if ENABLE_OLED_DISPLAY && ENABLE_NEOPIXEL

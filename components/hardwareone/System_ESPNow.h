@@ -7,6 +7,7 @@
 
 #include "System_BuildConfig.h"
 #include "System_MacText.h"   // MAC_FMT, MAC_ARGS, macToDisplay, macEquals, macParse
+#include "System_ESPNow_PeerStateCore.h"  // EspNowPeerState: online / connecting / offline
 
 // ESP-NOW type definitions (always available for type-safe references)
 enum MeshRole {
@@ -1309,6 +1310,27 @@ MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing = f
 // Compare against the checked STA identity cached for this ESP-NOW instance.
 // While stopped, a checked driver query preserves the existing helper behavior.
 bool isSelfMac(const uint8_t* mac);
+// A peer's state (System_ESPNow_PeerStateCore.h): its mesh heartbeat
+// (isMeshPeerAlive) and its encrypted session (espnowSessionUp), as every
+// surface reads them. Reads only, any task (the reader risk of gMeshPeers).
+inline EspNowPeerState espnowPeerState(const uint8_t mac[6]) {
+  const MeshPeerHealth* health = getMeshPeerHealth(mac, false);
+  return espnowPeerStateOf(health && isMeshPeerAlive(health), espnowSessionUp(mac));
+}
+// The paired peers (gEspNow->devices[] without this device) by state; all
+// zero while ESP-NOW is stopped.
+inline EspNowPeerCounts espnowPeerCounts() {
+  EspNowPeerCounts counts;
+  if (!gEspNow || !gEspNow->initialized) return counts;
+  const int cap = (int)(sizeof(gEspNow->devices) / sizeof(gEspNow->devices[0]));
+  const int n = gEspNow->deviceCount < cap ? gEspNow->deviceCount : cap;
+  for (int i = 0; i < n; i++) {
+    const uint8_t* mac = gEspNow->devices[i].mac;
+    if (isSelfMac(mac)) continue;
+    counts.add(espnowPeerState(mac));
+  }
+  return counts;
+}
 void macFromHexString(const String& s, uint8_t out[6]);
 // Zero-allocation MAC formatter for debug log call sites.
 // Uses a GCC statement expression + a function-static char[18] — no heap, no

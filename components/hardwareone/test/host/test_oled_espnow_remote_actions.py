@@ -26,6 +26,19 @@ acknowledgement printed by the production formatter, the JSON one, and every
 refusal, as the executor stamps them. A refusal must be shown as one, also
 where the reply does not lead with "Error".
 
+Part three (same harness) draws the production Device Config menu at the
+64 px OLED's and the 128 px P4X-EYE canvas's content heights: the window holds
+as many rows as fit above the footer (3, then all 7), follows the cursor both
+ways, and the selected row is always one that is drawn (the menu used to draw
+rows 0-3 only, so Set Zone, Set Friendly Name and Unpair could be selected
+unseen). The discovery screen's candidate list is drawn the same way (2 rows
+under its two status lines on the OLED, 8 on the canvas; it was a fixed 3,
+the third under the 64 px footer). It also runs the shared peer state (System_ESPNow_PeerStateCore.h and
+the espnowPeerState / espnowPeerCounts accessors of System_ESPNow.h) over
+doubles of the heartbeat table, the session table and the paired registry,
+and checks in the sources that the ESP-NOW screens, the OLED mesh screen and
+the automation PEERS value read it instead of counting heartbeats.
+
 --component points the suite at another component directory (the pre-fix tree
 fails part one and is not compiled).
 """
@@ -152,6 +165,20 @@ def static_failures(component: Path) -> list[str]:
         for name, text in (("OLED_ESPNow.cpp", oled), ("OLED_ESPNow.h", header)):
             if symbol in text:
                 failures.append(f"{name} still has {symbol} (unused remote file view)")
+    # The peer state every surface shows (online / connecting / offline).
+    for symbol in ("MeshPeers::isHealthy", "MeshPeers::countHealthy", "MeshPeers::countActive",
+                   "isMeshPeerAlive("):
+        if symbol in oled:
+            failures.append(f"OLED_ESPNow.cpp counts peers by heartbeat ({symbol}), not espnowPeerState")
+    network = (component / "OLED_Mode_Network.cpp").read_text(encoding="utf-8")
+    mesh = extract_block(network, "void prepareMeshStatusData(")
+    if "espnowPeerCounts()" not in mesh or "isMeshPeerAlive(" in mesh:
+        failures.append("the OLED mesh screen does not read espnowPeerCounts()")
+    automation = (component / "System_Automation.cpp").read_text(encoding="utf-8")
+    start = automation.index('strcmp(sensor, "PEERS") == 0')
+    peers = automation[start:automation.index("} else if", start)]
+    if "espnowPeerCounts().online" not in peers:
+        failures.append("the automation PEERS value is not espnowPeerCounts().online")
     for path in sorted(component.glob("*.cpp")) + sorted(component.glob("*.h")):
         if path.name.startswith("OLED_ESPNow"):
             continue
@@ -219,9 +246,21 @@ def generated(component: Path, cxx: str, workdir: Path) -> str:
     production.append(extract_block(oled, "struct DeviceConfigAction") + ";")
     production.append(extract_block(oled, TABLE) + ";")
     production.append(count[0])
+    window = re.findall(r"(?m)^static constexpr int kDeviceConfig(?:TitleH|RowH) = \d+;", oled)
+    require(len(window) == 2, "OLED_ESPNow.cpp: the Device Config row geometry is missing")
+    production += window
     production += [extract_block(oled, marker) for marker in (
+        "static int oledEspNowDeviceConfigRows(",
+        "static void oledEspNowDeviceConfigFollow(",
+        "void oledEspNowDisplayDeviceConfig(",
         "bool oledEspNowHandleDeviceConfigInput(",
         "void oledEspNowApplyDeviceConfigEdit(")]
+    selection = re.search(r"(?m)^static int sPairingSel = 0;", oled)
+    require(selection is not None, "OLED_ESPNow.cpp: the pairing screen's selection is missing")
+    pairing = selection[0] + "\n\n" + extract_block(oled, "void oledEspNowDisplayPairing(")
+    espnow = (component / "System_ESPNow.h").read_text(encoding="utf-8")
+    peer_state = "\n\n".join(extract_block(espnow, marker) for marker in (
+        "inline EspNowPeerState espnowPeerState(", "inline EspNowPeerCounts espnowPeerCounts("))
     # ApplyDeviceConfigEdit is called by the keyboard arm before its definition.
     production.insert(0, "void oledEspNowApplyDeviceConfigEdit(const String& value);")
     handler = extract_block(oled, "bool oledEspNowHandleInput(")
@@ -230,6 +269,8 @@ def generated(component: Path, cxx: str, workdir: Path) -> str:
     for marker, body in (("// INSERT_TYPES", "\n\n".join(types)),
                          ("// INSERT_PRODUCTION", "\n\n".join(production)),
                          ("// INSERT_CONFIG_KEYBOARD_ARM", arm),
+                         ("// INSERT_PEER_STATE", peer_state),
+                         ("// INSERT_PAIRING", pairing),
                          ("// INSERT_OWNER_REPLIES", owner_replies(component, cxx, workdir))):
         require(harness.count(marker) == 1, f"missing/duplicate marker: {marker}")
         harness = harness.replace(marker, body)
@@ -261,7 +302,8 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="hw1-oled-espnow-remote-") as directory:
         work = Path(directory)
         unit, executable = work / "test.cpp", work / "test"
-        (work / "System_MacText.h").write_text((args.component / "System_MacText.h").read_text())
+        for header in ("System_MacText.h", "OLED_Layout.h", "System_ESPNow_PeerStateCore.h"):
+            (work / header).write_text((args.component / header).read_text())
         unit.write_text(reply_prelude(args.component) + generated(args.component, args.cxx, work))
         subprocess.run([args.cxx, *flags, str(unit), "-o", str(executable)], check=True, timeout=120)
         subprocess.run([str(executable)], check=True, timeout=60)

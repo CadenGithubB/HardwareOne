@@ -179,6 +179,26 @@ def main() -> None:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                   "-fno-omit-frame-pointer", "-g"]
     component = args.component.resolve()
+    # The names and routes viewers are lists under the global header: title on
+    # the content's first line, rows as many as end above the footer, the same
+    # count in the draw and in the scroll, and their controls in the footer
+    # (they used to start at y=0 under the header with a fixed 5 rows running
+    # into an in-list hint line and the 64 px footer).
+    map_source = (component / 'OLED_Mode_Map.cpp').read_text()
+    if 'const char* oledMapFooterHint(' in map_source:
+        handler = extract_block(map_source, 'static bool gpsMapInputHandler(')
+        hint = extract_block(map_source, 'const char* oledMapFooterHint(')
+        for draw, scroll, words in (('static void drawFeatures(', 'gFeaturesScrollOffset < map.nameCount - ',
+                                     '</>:Cat ^v:Scrl B:OK'),
+                                    ('static void drawRoutes(', 'gRoutesScrollOffset + ', '^v:Sel A:Go X:Hl B:X')):
+            body = extract_block(map_source, draw)
+            assert 'setCursor(0, 0)' not in body and 'OLED_CONTENT_HEIGHT + 2' not in body, \
+                f'{draw} draws under the header or a hint line inside its list'
+            assert 'const int itemsPerPage = oledVisibleRows(10, 10);' in body, f'{draw}: row count'
+            assert scroll + 'oledVisibleRows(10, 10)' in handler, f'{draw}: the scroll does not use the draw count'
+            assert f'"{words}"' in hint and words not in body, f'{draw}: its controls are not in the footer'
+        assert 'hints = oledMapFooterHint();' in (component / 'OLED_Utils.cpp').read_text(), \
+            'the footer does not read oledMapFooterHint()'
     # MAP_TEST_DEVICE: 0 seesaw gamepad, 1 ANO encoder, 2 GPIO wheel + P4X-EYE keys.
     map_unit = map_actions_unit(component)
     if 'oledVisibleRows(' in (component / 'OLED_Mode_Map.cpp').read_text():

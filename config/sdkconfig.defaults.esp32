@@ -41,3 +41,11 @@ CONFIG_FREERTOS_PLACE_FUNCTIONS_INTO_FLASH=y
 # NOTE: the image will then only boot on rev-3+ ESP32 silicon (the QT Py qualifies).
 CONFIG_ESP32_REV_MIN_3=y
 CONFIG_SPIRAM_CACHE_WORKAROUND=n
+
+# LittleFS stays on esp_partition_read here (CONFIG_LITTLEFS_MMAP_PARTITION is
+# set for the S3 and P4 only). The classic ESP32 maps data into a 4 MB window
+# that also holds the app's rodata, and LittleFS takes 36-37 of its 64 pages
+# (8 MB tables, headless Feather V2). Rodata measured 2026-11-21: qtpy-sensors
+# 1165 KiB (19 pages); S3 builds with ESP-NOW, Bluetooth or MQTT carry
+# 1.8-2.1 MB, and a classic image that fills its 5.7 MB app slot would need more
+# pages than are left, so the mount would fail.

@@ -85,6 +85,7 @@ struct OledEspNowState {
   // Device config menu state (remote device)
   int deviceConfigMenuIndex;  // Selected config item
   int deviceConfigEditField;  // Which field is being edited (-1 = none)
+  int deviceConfigScrollOffset;  // First config row on screen (the window follows the cursor)
   
   // Device list filtering and sorting
   int filterMode;             // 0=All, 1=By Room, 2=By Zone

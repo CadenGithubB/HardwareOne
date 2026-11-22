@@ -138,13 +138,11 @@ Each device in your setup runs one board. Multiple boards can coexist on the sam
 | Espressif ESP32-P4X-EYE | 16 / 32 MB | ✅ (MIPI) | ✅ | ✅ (voltage) | 240×240 LCD, wheel + 3 buttons; radio via onboard ESP32-C6; local speech-to-text (needs a separately installed model file: the saved P4 configurations read the published model from microSD; the plain board build keeps microSD off and expects an unpublished model, see [Local speech-to-text model](#local-speech-to-text-model-esp32-p4)). [Notes](P4X_EYE_PERIPHERALS.md), [enclosure](../physical_enclosures/p4x_eye/README.md) |
 | Waveshare ESP32-P4 Touch LCD 5 | 32 / 32 MB | ✅ (MIPI, saved profile) | ✅ (ES7210) | ✅ (ADC) | Experimental. 5-inch 720×1280 HX8394 DSI panel with GT911 touch; radio via onboard ESP32-C6; ES8311 speaker output (driver-tested only). [Notes](WAVESHARE_P4_SUPPORT.md) |
 
-> A **generic ESP32** fallback build also exists for unlisted boards - it compiles, but verify the I2C pins match your hardware.
-
 ### Support matrix
 
 What each row promises, how it updates, and the last dated hardware record behind it. "Stable" rows
-build from a clean clone at every release and are checked on hardware before a tag (`RELEASING.md`,
-gate); "experimental" rows build and have been run, but are not held to the release checks.
+build from a clean clone at every release (`RELEASING.md`, gate); "experimental" rows build and
+have been run, but are not held to the release checks.
 
 | Board | Build | Tier | Update path | Last dated hardware record |
 |---|---|---|---|---|
@@ -155,7 +153,6 @@ gate); "experimental" rows build and have been run, but are not held to the rele
 | Espressif ESP32-P4X-EYE | `p4x_eye` (needs `tools/p4/prepare_sdk.sh`); release: `tools/build_deployment.sh handheld p4x_eye` | stable, cable-only | cable (app-only write; no OTA layout) | multi-hour STT bench runs and BLE investigations 2026-11-07/08 (`docs/P4X_PANIC_HUNT_20261107.md`) |
 | FeatherS3 flash-encrypted (`feathers3_fe`) | `feathers3_fe` | experimental | `hw1-f3fe-ota-v1` | flash-encryption trial 2026-07-30 |
 | Waveshare ESP32-P4 Touch LCD 5 | `waveshare_p4_touch_lcd_5` (needs `prepare_sdk.sh`) | experimental | cable | bring-up acceptance records 2026-10/11 (`docs/WAVESHARE_P4_*.md`) |
-| generic ESP32 | default target | experimental | cable | none |
 
 Automations are compiled out of the P4 handheld deployment contract (`deployments/handheld`); the
 `p4x_eye` board build keeps them. Peers and upgrade promises: [docs/COMPATIBILITY.md](COMPATIBILITY.md);

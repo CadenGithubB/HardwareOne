@@ -34,6 +34,12 @@ def run(component, output, baseline=False, sanitize=False):
     # The old packer only handles 64px; compare its OLED output, and test the
     # current packer at both heights in either run.
     harness = harness.replace('// INSERT_MAP_PACK', extract_block((COMPONENT/'OLED_Mode_Map.cpp').read_text(), 'static void packShadeBufTo1Bit('))
+    # The ESP-NOW device list's row count, as OLED_ESPNow.cpp initialises it.
+    rows = re.search(r'oledScrollInit\(&sEspNowDeviceListScroll, "ESP-NOW Devices", (oledVisibleRows\([^;]*\))\);',
+                     (component/'OLED_ESPNow.cpp').read_text())
+    assert rows, 'the ESP-NOW device list row count is missing'
+    harness = harness.replace('// INSERT_ESPNOW_DEVICE_ROWS',
+                              'static int espnowDeviceListRows() { return ' + rows.group(1) + '; }')
     perf = (component/'OLED_Mode_System.cpp').read_text()
     perf_code = '\n'.join(re.findall(r'(?m)^#define PERF_(?:MAX_TASKS|VISIBLE_ROWS|SAMPLE_MS) .+$', perf))
     if 'TASK_CPU_SAMPLE_MS' in perf_code:

@@ -134,7 +134,6 @@ them goes through the wrapper.
 | Seeed XIAO ESP32S3 Sense | ESP32-S3 | `XIAO_ESP32S3` + `XIAO_ESP32S3_SENSE_ENABLED 1` (default) | Camera, mic, SD slot |
 | Unexpected Maker FeatherS3[D] | ESP32-S3 | `um_feathers3` | 2× STEMMA QT, MAX17048G fuel gauge, **Quad** PSRAM |
 | Espressif ESP32-P4X-EYE | ESP32-P4 | `esp32p4` + `boards/p4x_eye.features.h` | LCD, wheel + 3 buttons, MIPI camera, PDM mic, battery; Wi-Fi/BLE via onboard C6 - see [P4X_EYE_PERIPHERALS.md](P4X_EYE_PERIPHERALS.md) |
-| Generic ESP32 | ESP32 | `esp32` | Fallback — verify pins manually |
 
 ---
 

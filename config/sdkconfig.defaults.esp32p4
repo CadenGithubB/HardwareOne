@@ -109,3 +109,10 @@ CONFIG_ESP_VIDEO_ENABLE_USB_UVC_VIDEO_DEVICE=n
 CONFIG_ESP_VIDEO_ENABLE_HW_H264_VIDEO_DEVICE=n
 CONFIG_ESP_VIDEO_ENABLE_HW_JPEG_ENC_VIDEO_DEVICE=n
 CONFIG_ESP_VIDEO_ENABLE_HW_JPEG_DEC_VIDEO_DEVICE=n
+
+# LittleFS reads through the flash memory map (S-1; the reasons are in
+# sdkconfig.defaults.esp32s3). The P4 maps flash into its own 64 MB window
+# (PSRAM has another); the largest table uses 32 MB of it. A build folder made
+# before this line keeps its saved "is not set": use a fresh folder or change
+# that line once.
+CONFIG_LITTLEFS_MMAP_PARTITION=y

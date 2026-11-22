@@ -1044,7 +1044,7 @@ static void displayWebStatusRendered() {
 }
 
 // ============================================================================
-// OLED_MESH_STATUS — mesh role + peer count (read-only, two-phase rendering)
+// OLED_MESH_STATUS — mesh role + peer states (read-only, two-phase rendering)
 // ============================================================================
 
 struct MeshStatusRenderData {
@@ -1054,7 +1054,7 @@ struct MeshStatusRenderData {
   char masterName[12];
   int meshRole;
   bool isWorker;
-  int activePeers;
+  EspNowPeerCounts peers;   // paired peers by state (System_ESPNow_PeerStateCore.h)
   bool valid;
 };
 static MeshStatusRenderData meshStatusRenderData = {};
@@ -1096,13 +1096,7 @@ void prepareMeshStatusData() {
       meshStatusRenderData.masterName[11] = '\0';
     }
 
-    int activePeers = 0;
-    for (int i = 0; i < gMeshPeerSlots; i++) {
-      if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac) && isMeshPeerAlive(&gMeshPeers[i])) {
-        activePeers++;
-      }
-    }
-    meshStatusRenderData.activePeers = activePeers;
+    meshStatusRenderData.peers = espnowPeerCounts();
   }
 
   meshStatusRenderData.valid = true;
@@ -1157,13 +1151,24 @@ void displayMeshStatusRendered() {
     }
   }
 
-  if (meshStatusRenderData.activePeers == 0) {
+  // Peers by state: online (heartbeat and session), connecting (heartbeat,
+  // no session yet), offline. A state with no peer gets no row.
+  const EspNowPeerCounts& peers = meshStatusRenderData.peers;
+  if (peers.paired() == 0) {
     oledDisplay->println("  No peers");
   } else {
-    String indent = meshStatusRenderData.isWorker ? "    " : "  ";
-    oledDisplay->print(indent);
-    oledDisplay->print(meshStatusRenderData.activePeers);
-    oledDisplay->println(" peer(s)");
+    const char* indent = meshStatusRenderData.isWorker ? "    " : "  ";
+    const struct { int count; EspNowPeerState state; } rows[] = {
+      {peers.online, EspNowPeerState::Online},
+      {peers.connecting, EspNowPeerState::Connecting},
+      {peers.offline, EspNowPeerState::Offline},
+    };
+    for (const auto& row : rows) {
+      if (row.count == 0) continue;
+      char line[22];
+      snprintf(line, sizeof(line), "%s%d %s", indent, row.count, espnowPeerStateName(row.state));
+      oledDisplay->println(line);
+    }
   }
 #else
   oledDisplay->println("ESP-NOW disabled");

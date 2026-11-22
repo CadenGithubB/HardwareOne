@@ -46,3 +46,16 @@ CONFIG_COMPILER_OPTIMIZATION_PERF=y
 # Panic/log output was ALREADY mirrored to USB (secondary console) before
 # this change; the only observable delta is UART0 going quiet.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# LittleFS reads through the flash memory map (S-1): the component maps the
+# whole LittleFS partition at mount and reads with memcpy, instead of an
+# esp_partition_read per read (which stops the cache and parks the other core).
+# Writes and erases are unchanged. The mapping holds window pages while mounted:
+# the S3 has one 32 MB window for flash code and data, all of PSRAM and every
+# mapping; ESP-SR maps its model partition after LittleFS and aborts if that
+# fails. Worst S3 table: app 6 MB + LittleFS 9.9 MB + PSRAM 8 MB = 24 MB. Set
+# for the S3 and the P4 only: the classic ESP32 maps data into a 4 MB window
+# that also holds rodata (see sdkconfig.defaults.esp32). The host test
+# sdkconfig_policy checks every table. A build folder made before this line
+# keeps its saved "is not set": use a fresh folder or change that line once.
+CONFIG_LITTLEFS_MMAP_PARTITION=y

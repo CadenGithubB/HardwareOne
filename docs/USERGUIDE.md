@@ -980,7 +980,7 @@ Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum vari
 | System | `CHIPTEMP` | numeric | SoC temperature, C; the condition is false when the chip has no reading |
 | Network | `WIFI` `BLE` | enum | `CONNECTED` / `NONE` |
 | Network | `RSSI` | numeric | WiFi signal, dBm (negative; only while connected) |
-| Network | `PEERS` | numeric | live ESP-NOW mesh peers (heartbeat within 30s) |
+| Network | `PEERS` | numeric | paired ESP-NOW peers that are online: a mesh heartbeat within 30 s and an encrypted session up (a peer with a heartbeat but no session yet is connecting and not counted) |
 | Location | `GPS` | enum | `FIX` / `NOFIX` |
 | Location | `SPEED` `SATS` | numeric | GPS ground speed (knots) / satellites in view |
 | Location | `WP_DIST:<name>` | numeric | meters from current GPS fix to a named map waypoint (case-insensitive name; fail-closed if no fix, maps off, or waypoint missing) |

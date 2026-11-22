@@ -17,11 +17,10 @@
 
 #include "i2csensor_seesaw.h"
 
-// Mesh health data for online/offline status display
-// gMeshPeers, gMeshPeerMeta, gMeshPeerSlots, isMeshPeerAlive, getMeshPeerHealth,
-// getMeshPeerMeta are all declared in System_ESPNow.h (already included above).
-// Compound queries (MeshPeers::isHealthy / displayName / ...) live in
-// System_MeshPeers.h.
+// A peer's state on these screens (online / connecting / offline) is
+// espnowPeerState / espnowPeerCounts (System_ESPNow.h, the rule in
+// System_ESPNow_PeerStateCore.h); gMeshPeerMeta and getMeshPeerMeta are
+// declared there too. Names come from MeshPeers::displayName (System_MeshPeers.h).
 
 // =============================================================================
 // OLED ESP-NOW Interface Implementation
@@ -169,7 +168,9 @@ void oledEspNowInit() {
   oledEspNowScrubRemoteForm();
   
   // Initialize scrolling lists
-  oledScrollInit(&sEspNowDeviceListScroll, "ESP-NOW Devices", oledVisibleRows(16, 10, 3));
+  // Two-line (16 px) items under the 10 px title, as many as end above the
+  // footer: 2 on the 64 px OLED (a fixed 3 put the third under the footer).
+  oledScrollInit(&sEspNowDeviceListScroll, "ESP-NOW Devices", oledVisibleRows(16, 10));
   oledScrollInit(&sEspNowMessageListScroll, nullptr, 3);
   // Truthful visible-row count (footer-aware) so the shared scroll helpers and the
   // follow-tail restore never push the selection into/below the footer.
@@ -182,6 +183,7 @@ void oledEspNowInit() {
   // Device config menu state (remote)
   gOledEspNowState.deviceConfigMenuIndex = 0;
   gOledEspNowState.deviceConfigEditField = -1;
+  gOledEspNowState.deviceConfigScrollOffset = 0;
   
   // Device list filtering and sorting
   gOledEspNowState.filterMode = 0;  // All devices
@@ -329,8 +331,16 @@ void oledEspNowDisplayMainMenu(Adafruit_SSD1306* display) {
   // Status line in content area (header shows "ESP-NOW")
   display->setCursor(0, OLED_CONTENT_START_Y);
   if (gEspNow && gEspNow->initialized) {
-    display->print("Online: ");
-    display->println(MeshPeers::countHealthy());
+    // Paired peers online (heartbeat and session); those still connecting
+    // follow in brackets (System_ESPNow_PeerStateCore.h).
+    const EspNowPeerCounts peers = espnowPeerCounts();
+    char line[22];
+    if (peers.connecting > 0) {
+      snprintf(line, sizeof(line), "Online: %d (+%d conn)", peers.online, peers.connecting);
+    } else {
+      snprintf(line, sizeof(line), "Online: %d", peers.online);
+    }
+    display->println(line);
   } else {
     display->println("Status: OFF");
   }
@@ -411,17 +421,20 @@ void oledEspNowDisplayStatus(Adafruit_SSD1306* display) {
   display->print("Role: ");
   display->println(roleStr);
   
-  // Device count: online / total. Both pulled from the SAME gMeshPeers
-  // health array so the ratio is always sensible (numerator <= denominator).
-  // Previously the denominator counted gMeshPeerMeta[i].isActive — a
-  // different array populated by a different code path. When they got out
-  // of sync (e.g. peer sent heartbeat before meta was registered) the
-  // display rendered "1/0", which is nonsense as a ratio. countActive()
-  // and countHealthy() walk the same slots so the math always works.
-  display->print("Devices: ");
-  display->print(MeshPeers::countHealthy());
-  display->print("/");
-  display->println(MeshPeers::countActive());
+  // Paired peers online / paired, and how many are still connecting. All
+  // three come from one walk of the paired registry (espnowPeerCounts), so
+  // the numerator never exceeds the denominator.
+  {
+    const EspNowPeerCounts peers = espnowPeerCounts();
+    char line[22];
+    if (peers.connecting > 0) {
+      snprintf(line, sizeof(line), "Online: %d/%d +%d conn", peers.online, peers.paired(),
+               peers.connecting);
+    } else {
+      snprintf(line, sizeof(line), "Online: %d/%d", peers.online, peers.paired());
+    }
+    display->println(line);
+  }
   
   // Encryption status
   display->print("Encrypt: ");
@@ -446,6 +459,12 @@ void oledEspNowDisplayStatus(Adafruit_SSD1306* display) {
   // Note: Footer is drawn by global render loop
 }
 
+// A peer row's state glyph: '+' online, '~' connecting (heartbeat, no
+// session yet), '-' offline (System_ESPNow_PeerStateCore.h).
+static const char* oledEspNowPeerGlyph(EspNowPeerState state) {
+  return state == EspNowPeerState::Online ? "+" : state == EspNowPeerState::Connecting ? "~" : "-";
+}
+
 // Max rooms we can track on the OLED
 #define ROOMS_MAX 16
 #define ROOMS_DEVICES_MAX 16
@@ -462,7 +481,7 @@ static int sRoomCount = 0;
 struct RoomDeviceEntry {
   char name[32];  // a device name (31 bytes) + NUL
   uint8_t mac[6];
-  bool alive;
+  EspNowPeerState state;
   bool pending;  // says it is in this room; not accepted here, so room commands skip it
 };
 EXT_RAM_BSS_ATTR static RoomDeviceEntry sRoomDevices[ROOMS_DEVICES_MAX];
@@ -516,7 +535,7 @@ static void rebuildRoomDeviceList(const char* room) {
       strncpy(sRoomDevices[sRoomDeviceCount].name, name, 23);
       sRoomDevices[sRoomDeviceCount].name[23] = '\0';
       memset(sRoomDevices[sRoomDeviceCount].mac, 0, 6);
-      sRoomDevices[sRoomDeviceCount].alive = true;  // Local device is always alive
+      sRoomDevices[sRoomDeviceCount].state = EspNowPeerState::Online;  // this device
       sRoomDevices[sRoomDeviceCount].pending = false;  // its own room needs no acceptance
       sRoomDeviceCount++;
     }
@@ -532,7 +551,7 @@ static void rebuildRoomDeviceList(const char* room) {
     strncpy(sRoomDevices[sRoomDeviceCount].name, displayName.c_str(), 23);
     sRoomDevices[sRoomDeviceCount].name[23] = '\0';
     memcpy(sRoomDevices[sRoomDeviceCount].mac, gMeshPeerMeta[i].mac, 6);
-    sRoomDevices[sRoomDeviceCount].alive = MeshPeers::isHealthy(gMeshPeerMeta[i].mac);
+    sRoomDevices[sRoomDeviceCount].state = espnowPeerState(gMeshPeerMeta[i].mac);
     // The rooms shown are the ones peers announce. A peer whose room was not
     // accepted on this device gets a '?' in its row; one without a room has
     // nothing to accept.
@@ -656,7 +675,7 @@ void oledEspNowDisplayRooms(Adafruit_SSD1306* display) {
       }
       
       display->setCursor(2, y + 1);
-      display->print(sRoomDevices[idx].alive ? "+" : "-");
+      display->print(oledEspNowPeerGlyph(sRoomDevices[idx].state));
       if (sRoomDevices[idx].pending) display->print("?");
       // Device name in a bounded field after the fixed status glyph.
       {
@@ -777,7 +796,10 @@ void oledEspNowDisplayPairing(Adafruit_SSD1306* display) {
       default:                        snprintf(head, sizeof(head), "Select to pair:"); break;
     }
     display->setCursor(0, y); display->println(head); y += 11;
-    const int maxRows = 3;
+    // Candidate rows below the two status lines, as many as fit above the
+    // footer (2 on the 64 px OLED, 8 on the P4X-EYE canvas); the window ends
+    // on the selected one.
+    const int maxRows = oledVisibleRows(10, y - OLED_CONTENT_START_Y);
     int start = (sPairingSel >= maxRows) ? sPairingSel - maxRows + 1 : 0;
     for (int i = start; i < n && i < start + maxRows; i++) {
       char nm[32]; uint8_t mac[6]; int rssi = 0;
@@ -1517,7 +1539,7 @@ struct DeviceEntry {
   EspNowDevice* device;
   MeshPeerMeta* meta;
   MeshPeerHealth* health;
-  bool alive;
+  EspNowPeerState state;
   const char* displayName;
 };
 
@@ -1543,14 +1565,14 @@ static int compareByRoom(const void* a, const void* b) {
   return strcasecmp(da->displayName, db->displayName);
 }
 
-// Comparison function for sorting by status (online first)
+// Comparison function for sorting by status (online, connecting, offline)
 static int compareByStatus(const void* a, const void* b) {
   const DeviceEntry* da = (const DeviceEntry*)a;
   const DeviceEntry* db = (const DeviceEntry*)b;
   
-  // Online devices first
-  if (da->alive != db->alive) {
-    return db->alive - da->alive;  // true (1) before false (0)
+  // Online first, then connecting, then offline (the enum's reverse order)
+  if (da->state != db->state) {
+    return (int)db->state - (int)da->state;
   }
   
   // Same status, sort by name
@@ -1596,7 +1618,7 @@ void oledEspNowRefreshDeviceList() {
     // stored in entries[] for the sort + render passes below.
     MeshPeerMeta* meta = getMeshPeerMeta(device->mac);
     MeshPeerHealth* health = getMeshPeerHealth(device->mac, false);
-    bool alive = MeshPeers::isHealthy(device->mac);
+    const EspNowPeerState state = espnowPeerState(device->mac);
     
     // Apply filter
     if (gOledEspNowState.filterMode == 1) {  // Filter by room
@@ -1623,7 +1645,7 @@ void oledEspNowRefreshDeviceList() {
     entries[entryCount].device = device;
     entries[entryCount].meta = meta;
     entries[entryCount].health = health;
-    entries[entryCount].alive = alive;
+    entries[entryCount].state = state;
     entries[entryCount].displayName = displayName;
     entryCount++;
   }
@@ -1643,9 +1665,9 @@ void oledEspNowRefreshDeviceList() {
   for (int i = 0; i < entryCount; i++) {
     DeviceEntry* entry = &entries[i];
     
-    // Line 1: status indicator + display name
+    // Line 1: state glyph + display name
     snprintf(line1Bufs[i], sizeof(line1Bufs[0]), "%s %s",
-             entry->alive ? "+" : "-", entry->displayName);
+             oledEspNowPeerGlyph(entry->state), entry->displayName);
     
     // Line 2: room + encrypted flag, or MAC if no room
     if (entry->meta && entry->meta->room[0]) {
@@ -2419,6 +2441,26 @@ void oledEspNowOpenDeviceConfig() {
   gOledEspNowState.currentView = ESPNOW_VIEW_DEVICE_CONFIG;
   gOledEspNowState.deviceConfigMenuIndex = 0;
   gOledEspNowState.deviceConfigEditField = -1;
+  gOledEspNowState.deviceConfigScrollOffset = 0;
+}
+
+// The menu below its title line (the peer's name over a rule): one 10 px row
+// per action, as many as the content area holds (3 on the 64 px OLED, every
+// row on the P4X-EYE's 128 px canvas). The window follows the cursor.
+static constexpr int kDeviceConfigTitleH = 11;   // title row + rule + 1 px gap
+static constexpr int kDeviceConfigRowH = 10;
+static int oledEspNowDeviceConfigRows() {
+  return oledVisibleRows(kDeviceConfigRowH, kDeviceConfigTitleH);
+}
+static void oledEspNowDeviceConfigFollow() {
+  const int rows = oledEspNowDeviceConfigRows();
+  const int selected = gOledEspNowState.deviceConfigMenuIndex;
+  int& top = gOledEspNowState.deviceConfigScrollOffset;
+  if (selected < top) top = selected;
+  if (selected >= top + rows) top = selected - rows + 1;
+  const int maxTop = DEVICE_CONFIG_COUNT > rows ? DEVICE_CONFIG_COUNT - rows : 0;
+  if (top > maxTop) top = maxTop;
+  if (top < 0) top = 0;
 }
 
 void oledEspNowDisplayDeviceConfig(Adafruit_SSD1306* display) {
@@ -2427,31 +2469,34 @@ void oledEspNowDisplayDeviceConfig(Adafruit_SSD1306* display) {
   display->setTextSize(1);
   display->setTextColor(DISPLAY_COLOR_WHITE);
   
-  // Header with device name
-  display->setCursor(0, 0);
-  display->print("Config: ");
-  String name = gOledEspNowState.selectedDeviceName;
-  if (name.length() > 14) { name = name.substring(0, 13); name += '~'; }
-  display->println(name);
+  // Title: the peer being configured, under the global "ESP-NOW" header.
+  const int titleY = OLED_CONTENT_START_Y;
+  display->setCursor(0, titleY);
+  display->print("Config:");
+  oledTextFieldDraw(display, 48, titleY, SCREEN_WIDTH - 48, gOledEspNowState.selectedDeviceName.c_str(),
+                    DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, false, &gOledEspNowState);
+  display->drawFastHLine(0, titleY + 9, SCREEN_WIDTH, DISPLAY_COLOR_WHITE);
   
-  display->drawFastHLine(0, 9, 128, DISPLAY_COLOR_WHITE);
-  
-  // Menu items
-  int startY = 12;
-  int lineHeight = 10;
-  
-  for (int i = 0; i < DEVICE_CONFIG_COUNT; i++) {
-    int y = startY + i * lineHeight;
-    if (y > 48) break;
-    
-    // Selection indicator
-    if (i == gOledEspNowState.deviceConfigMenuIndex) {
-      display->fillRect(0, y, 2, lineHeight - 1, DISPLAY_COLOR_WHITE);
-    }
-    
-    oledTextFieldDraw(display, 4, y, SCREEN_WIDTH - 4, kDeviceConfigActions[i].label,
-                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
-                      i == gOledEspNowState.deviceConfigMenuIndex, kDeviceConfigActions);
+  // The visible window of the menu; the label field ends before the arrows.
+  oledEspNowDeviceConfigFollow();
+  const int rows = oledEspNowDeviceConfigRows();
+  const int top = gOledEspNowState.deviceConfigScrollOffset;
+  const int listY = OLED_CONTENT_START_Y + kDeviceConfigTitleH;
+  for (int row = 0; row < rows && top + row < DEVICE_CONFIG_COUNT; row++) {
+    const int i = top + row;
+    const int y = listY + row * kDeviceConfigRowH;
+    const bool selected = i == gOledEspNowState.deviceConfigMenuIndex;
+    if (selected) display->fillRect(0, y, 2, kDeviceConfigRowH - 1, DISPLAY_COLOR_WHITE);
+    oledTextFieldDraw(display, 4, y, 118 - 4, kDeviceConfigActions[i].label,
+                      DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, selected, kDeviceConfigActions);
+  }
+  if (top > 0) {
+    display->setCursor(120, listY);
+    display->print("\x18");
+  }
+  if (top + rows < DEVICE_CONFIG_COUNT) {
+    display->setCursor(120, listY + (rows - 1) * kDeviceConfigRowH);
+    display->print("\x19");
   }
   
   // Note: Footer is drawn by global render loop
@@ -2461,10 +2506,12 @@ bool oledEspNowHandleDeviceConfigInput(int deltaX, int deltaY, uint32_t newlyPre
   // Navigation
   if (gNavEvents.up && gOledEspNowState.deviceConfigMenuIndex > 0) {
     gOledEspNowState.deviceConfigMenuIndex--;
+    oledEspNowDeviceConfigFollow();
     return true;
   }
   if (gNavEvents.down && gOledEspNowState.deviceConfigMenuIndex < DEVICE_CONFIG_COUNT - 1) {
     gOledEspNowState.deviceConfigMenuIndex++;
+    oledEspNowDeviceConfigFollow();
     return true;
   }
   

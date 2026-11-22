@@ -223,9 +223,10 @@ static void displayBondSensors() {
   if (bondSensorSelection >= rowCount) bondSensorSelection = rowCount - 1;
   if (bondSensorSelection < 0) bondSensorSelection = 0;
 
-  // Visible window — up to 6 rows fit in the content area (no column header
-  // needed anymore, the field name is on every row).
-  const int maxVisible = 6;
+  // Visible window: one 8 px row each, as many as fit above the footer (5 on
+  // the 64 px OLED, 13 on the P4X-EYE canvas; no column header, the field
+  // name is on every row).
+  const int maxVisible = oledVisibleRows(8);
   int scrollOffset = 0;
   if (rowCount > maxVisible) {
     scrollOffset = bondSensorSelection - maxVisible / 2;

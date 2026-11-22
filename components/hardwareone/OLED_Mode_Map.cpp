@@ -417,13 +417,14 @@ static void drawFeatures() {
   
   const char* catNames[] = {"Highways", "Roads", "Water", "Parks", "Railways", "Subways"};
   
-  oledDisplay->setCursor(0, 0);
+  // Under the global header (drawn over y 0-9 after this screen); the
+  // controls are in the footer (oledMapFooterHint).
+  const int titleY = OLED_CONTENT_START_Y;
+  oledDisplay->setCursor(0, titleY);
   if (!map.valid || map.nameCount == 0) {
     oledDisplay->print("No names");
-    oledDisplay->setCursor(0, 10);
+    oledDisplay->setCursor(0, titleY + 10);
     oledDisplay->print("(map has no names)");
-    oledDisplay->setCursor(90, OLED_CONTENT_HEIGHT + 2);
-    oledDisplay->print("B:OK");
     return;
   }
   
@@ -433,23 +434,20 @@ static void drawFeatures() {
   snprintf(header, sizeof(header), "Names (%d)", nameCount);
   oledDisplay->print(header);
   
-  // Title starts at 0, rows at 10; the custom hint line starts at contentHeight + 2.
-  const int itemsPerPage = oledVisibleRows(10, 8, 5);
+  // 10 px rows under the title line, as many as end above the footer (3 on
+  // the 64 px OLED, 9 on the P4X-EYE canvas). The title used to sit at y=0
+  // under the header and a fixed 5 rows ran into the hint line and footer.
+  const int itemsPerPage = oledVisibleRows(10, 10);
   int displayIdx = 0;
-  int itemIdx = 0;
   
   for (int i = gFeaturesScrollOffset; i < map.nameCount && displayIdx < itemsPerPage; i++) {
-    oledDisplay->setCursor(0, 10 + displayIdx * 10);
+    oledDisplay->setCursor(0, titleY + 10 + displayIdx * 10);
     char nameBuf[22];
     strncpy(nameBuf, map.names[i].name, 21);
     nameBuf[21] = '\0';
     oledDisplay->print(nameBuf);
     displayIdx++;
   }
-  
-  // Footer hints at proper Y position
-  oledDisplay->setCursor(0, OLED_CONTENT_HEIGHT + 2);
-  oledDisplay->print("</>:Cat ^v:Scrl B:OK");
 }
 
 // Route info structure for transit viewer
@@ -472,14 +470,14 @@ static void drawRoutes() {
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
-  oledDisplay->setCursor(0, 0);
+  // Under the global header; the controls are in the footer (oledMapFooterHint).
+  const int titleY = OLED_CONTENT_START_Y;
+  oledDisplay->setCursor(0, titleY);
   oledDisplay->print("Transit Routes");
   
   if (!map.valid) {
-    oledDisplay->setCursor(0, 16);
+    oledDisplay->setCursor(0, titleY + 10);
     oledDisplay->print("No map loaded");
-    oledDisplay->setCursor(100, OLED_CONTENT_HEIGHT + 2);
-    oledDisplay->print("B:OK");
     return;
   }
   
@@ -533,19 +531,19 @@ static void drawRoutes() {
   }
   
   if (routeCount == 0) {
-    oledDisplay->setCursor(0, 16);
+    oledDisplay->setCursor(0, titleY + 10);
     oledDisplay->print("No routes found");
-    oledDisplay->setCursor(100, OLED_CONTENT_HEIGHT + 2);
-    oledDisplay->print("B:OK");
     return;
   }
   
   // Display routes with type indicator
-  // Title starts at 0, rows at 10; the custom hint line starts at contentHeight + 2.
-  const int itemsPerPage = oledVisibleRows(10, 8, 5);
+  // 10 px rows under the title line, as many as end above the footer (3 on
+  // the 64 px OLED, 9 on the P4X-EYE canvas); the input handler scrolls by
+  // the same count.
+  const int itemsPerPage = oledVisibleRows(10, 10);
   for (int i = 0; i < itemsPerPage && (i + gRoutesScrollOffset) < routeCount; i++) {
     int idx = i + gRoutesScrollOffset;
-    oledDisplay->setCursor(0, 10 + i * 10);
+    oledDisplay->setCursor(0, titleY + 10 + i * 10);
     
     if (idx == gRoutesSelectedIdx) {
       oledDisplay->setTextColor(DISPLAY_COLOR_BLACK, DISPLAY_COLOR_WHITE);
@@ -564,10 +562,7 @@ static void drawRoutes() {
     oledDisplay->print(nameBuf);
   }
   
-  // Footer hints at proper Y position
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(0, OLED_CONTENT_HEIGHT + 2);
-  oledDisplay->print("^v:Sel A:Go X:Hl B:X");
 }
 
 // Draw waypoint selection submenu
@@ -936,7 +931,8 @@ static void drawMapMenu() {
     oledDisplay->print("^");
   }
   if (gMapMenuScrollOffset + maxVisible < menuItemCount) {
-    oledDisplay->setCursor(112, 44);
+    // Beside the last visible row (y=44 on the 64 px OLED), not at a fixed y.
+    oledDisplay->setCursor(112, startY + (maxVisible - 1) * itemHeight - 1);
     oledDisplay->print("v");
   }
 }
@@ -2013,7 +2009,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
         gFeaturesScrollOffset--;
         return true;
       }
-      if (gNavEvents.down && gFeaturesScrollOffset < map.nameCount - oledVisibleRows(10, 8, 5)) {
+      if (gNavEvents.down && gFeaturesScrollOffset < map.nameCount - oledVisibleRows(10, 10)) {
         gFeaturesScrollOffset++;
         return true;
       }
@@ -2144,7 +2140,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
     }
     if (gNavEvents.down && gRoutesSelectedIdx < routeCount - 1) {
       gRoutesSelectedIdx++;
-      if (gRoutesSelectedIdx >= gRoutesScrollOffset + oledVisibleRows(10, 8, 5)) gRoutesScrollOffset = gRoutesSelectedIdx - oledVisibleRows(10, 8, 5) + 1;
+      if (gRoutesSelectedIdx >= gRoutesScrollOffset + oledVisibleRows(10, 10)) gRoutesScrollOffset = gRoutesSelectedIdx - oledVisibleRows(10, 10) + 1;
       return true;
     }
 
@@ -2438,6 +2434,16 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   }
   
   return panned;
+}
+
+// The footer's hints for the map and its menu screens (drawOledFooter). The
+// names and routes viewers carry their own controls here instead of a hint
+// line inside their list.
+const char* oledMapFooterHint() {
+  if (!gMapMenuOpen) return "X/Y:Zoom A+J:Rot B:Back";
+  if (gShowFeatures) return "</>:Cat ^v:Scrl B:OK";
+  if (gShowRoutes) return "^v:Sel A:Go X:Hl B:X";
+  return "A:Select B:Close";
 }
 
 // Map OLED mode entry

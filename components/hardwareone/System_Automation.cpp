@@ -4614,15 +4614,10 @@ bool evaluateCondition(const char* condition) {
     return false;
  #endif
   } else if (strcmp(sensor, "PEERS") == 0) {
-    // Count of live ESP-NOW mesh peers (V3 heartbeat within 30s, excluding self)
+    // Paired ESP-NOW peers that are online: a mesh heartbeat within 30 s and
+    // an encrypted session up (espnowPeerCounts, the state every surface uses).
  #if ENABLE_ESPNOW
-    int alive = 0;
-    if (gMeshPeers) {
-      for (int i = 0; i < gMeshPeerSlots; i++) {
-        if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac) && isMeshPeerAlive(&gMeshPeers[i])) alive++;
-      }
-    }
-    currentValue = (float)alive;
+    currentValue = (float)espnowPeerCounts().online;
  #else
     return false;
  #endif

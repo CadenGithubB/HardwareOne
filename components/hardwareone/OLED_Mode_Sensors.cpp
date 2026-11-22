@@ -375,8 +375,10 @@ static void displayI2cDiag() {
     oledDisplay->print("No devices found");
     return;
   }
+  // 9 px rows under the "Found" line, as many as end above the footer (3 on
+  // the 64 px OLED; a fixed 4 put the last row under the footer at y=49).
   const int rowH = 9;
-  const int visible = oledVisibleRows(9, 11, 4);
+  const int visible = oledVisibleRows(rowH, 11);
   for (int i = 0; i < visible; i++) {
     int idx = sI2cDiagScroll + i;
     if (idx >= sI2cDiagCount) break;
@@ -398,7 +400,7 @@ static bool i2cDiagInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
     return true;
   }
   if (sI2cDiagPhase == 3) {
-    if (gNavEvents.down && sI2cDiagScroll + oledVisibleRows(9, 11, 4) < sI2cDiagCount) { sI2cDiagScroll++; return true; }
+    if (gNavEvents.down && sI2cDiagScroll + oledVisibleRows(9, 11) < sI2cDiagCount) { sI2cDiagScroll++; return true; }
     if (gNavEvents.up   && sI2cDiagScroll > 0)                 { sI2cDiagScroll--; return true; }
   }
   return false;  // B falls through to the central back handler

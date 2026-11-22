@@ -131,7 +131,9 @@ void displaySpeechStatus() {
 
 static void populateSpeechMenu() {
   if (!sSpeechMenuInit) {
-    oledScrollInit(&sSpeechMenuScroll, nullptr, 4);
+    // 8 px rows below the status line, as many as fit above the footer (all
+    // four on the 64 px OLED; the window grows with a taller canvas).
+    oledScrollInit(&sSpeechMenuScroll, nullptr, oledVisibleRows(8, 8));
     sSpeechMenuInit = true;
   }
   oledScrollClearKeepSelection(&sSpeechMenuScroll);
@@ -146,8 +148,10 @@ void displaySpeechInfo() {
   if (!oledDisplay || !oledConnected) return;
 
   oledDisplay->setTextSize(1);
+  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 
-  // Header with running status
+  // Status line above the menu
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->print("SPEECH ");
   bool running = isEspSrRunning();
   if (running) {
@@ -158,18 +162,10 @@ void displaySpeechInfo() {
 
   populateSpeechMenu();
 
-  // Inverse-bar menu render (the mode's established look) — selection/items now
-  // come from the scroll state instead of a raw int + options[] array.
-  for (int i = 0; i < sSpeechMenuScroll.itemCount; i++) {
-    const bool selected = i == sSpeechMenuScroll.selectedIndex;
-    if (selected) oledDisplay->fillRect(0, 10 + i * 10, 128, 10, DISPLAY_COLOR_WHITE);
-    // Bounded label on the inverse bar (OLED_TextField.h).
-    oledTextFieldDraw(oledDisplay, 2, 11 + i * 10, SCREEN_WIDTH - 2, sSpeechMenuScroll.items[i].line1,
-                      selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
-                      selected, &sSpeechMenuScroll);
-  }
-
-  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+  // The shared single-line list one row below the status line (the Power and
+  // Network menus' look). It used to draw fixed 10 px bars from y=10, over the
+  // status line and without a scroll window.
+  oledScrollRenderSimple(oledDisplay, &sSpeechMenuScroll, true, OLED_CONTENT_START_Y + 8);
   // Footer handled by global drawOledFooter()
 }
 

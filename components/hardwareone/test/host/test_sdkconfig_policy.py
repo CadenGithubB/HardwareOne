@@ -270,5 +270,159 @@ class LittleFsLookahead(unittest.TestCase):
             self.assertEqual(littlefs_bytes(REPO / "partitions" / name), kib * 1024, name)
 
 
+MMAP_KEY = "CONFIG_LITTLEFS_MMAP_PARTITION"
+MMU_PAGE = 64 * 1024
+MIB = 1024 * 1024
+# Address windows a mapping takes pages from (ESP-IDF soc/<chip>/ext_mem_defs.h).
+# S3: one 32 MB window holds flash code, flash data, all of PSRAM and every
+# esp_partition_mmap. P4: flash has its own 64 MB window; PSRAM has another.
+S3_WINDOW = 32 * MIB
+S3_PSRAM = 8 * MIB  # every S3 board: XIAO S3 Sense (octal), FeatherS3 / FeatherS3-FE (quad)
+P4_FLASH_WINDOW = 64 * MIB
+APP_SPLIT_PAGES = 2 * MMU_PAGE  # the running app maps code and rodata as two regions
+# The option is set in these chip-family files and nowhere else. The classic
+# ESP32 keeps esp_partition_read: its 4 MB data window also holds the app's
+# rodata, and LittleFS takes 36-37 of its 64 pages (config/sdkconfig.defaults.esp32).
+MMAP_FAMILIES = ("esp32s3", "esp32p4")
+
+
+def partition_rows(table: Path):
+    """(name, type, subtype, offset, size) rows from the table's columns (never its comments)."""
+    rows = []
+    for line in table.read_text().splitlines():
+        fields = [field.strip() for field in line.split("#", 1)[0].split(",")]
+        if len(fields) >= 5 and fields[0]:
+            rows.append((fields[0], fields[1], fields[2], int(fields[3], 0), int(fields[4], 0)))
+    return rows
+
+
+def mapped_bytes(offset: int, size: int) -> int:
+    """Window bytes one esp_partition_mmap of a whole partition takes (whole MMU pages)."""
+    first, last = offset // MMU_PAGE, (offset + size - 1) // MMU_PAGE
+    return (last - first + 1) * MMU_PAGE
+
+
+def round_pages(size: int) -> int:
+    return -(-size // MMU_PAGE) * MMU_PAGE
+
+
+def board_targets():
+    """{board: (target, flash size name)} from the board files' markers."""
+    found = {}
+    for path in sorted((REPO / "boards").glob("*.defaults")):
+        if path.name.count(".") != 1:
+            continue
+        text = path.read_text()
+        target = next((line.split(":", 1)[1].strip() for line in text.splitlines()
+                       if line.startswith("# HW_TARGET:")), None)
+        found[path.stem] = (target, config_value(path, "CONFIG_ESPTOOLPY_FLASHSIZE").lower())
+    return found
+
+
+def table_users():
+    """(table, [boards]) for every partition table a build can select.
+
+    partitions/partitions_<sr>_<flash>[_<board>].csv serve the named board, or
+    every board of that flash size; deployments/<name>/boards/<board>/partitions.csv
+    serve that board.
+    """
+    boards = board_targets()
+    result = []
+    for table in sorted((REPO / "partitions").glob("partitions_*.csv")):
+        parts = table.stem.split("_")
+        flash_at = next(i for i, part in enumerate(parts) if part.endswith("mb"))
+        flash, board = parts[flash_at], "_".join(parts[flash_at + 1:])
+        users = [board] if board else [name for name, (_, size) in boards.items() if size == flash]
+        result.append((table, users))
+    for table in sorted((REPO / "deployments").glob("*/boards/*/partitions.csv")):
+        result.append((table, [table.parent.name]))
+    return boards, result
+
+
+class LittleFsMmap(unittest.TestCase):
+    """S-1: LittleFS reads go through the flash memory map (CONFIG_LITTLEFS_MMAP_PARTITION).
+
+    The component maps the whole LittleFS partition at mount. Running out of
+    window fails the mount; on SR layouts ESP-SR maps its model partition
+    afterwards under ESP_ERROR_CHECK, so running out there aborts at boot.
+    """
+
+    def test_option_is_set_by_the_s3_and_p4_family_files_only(self):
+        for family in MMAP_FAMILIES:
+            self.assertEqual(config_value(REPO / f"config/sdkconfig.defaults.{family}", MMAP_KEY), "y", family)
+        # Every other layer leaves it alone: the shared file (it would reach the
+        # classic ESP32), the classic family file, OTA/soak overlays, board files,
+        # the feature presets and the deployment overlays.
+        others = [REPO / "config/sdkconfig.defaults",
+                  *[path for path in sorted((REPO / "config").glob("sdkconfig.defaults.*"))
+                    if path.suffix.lstrip(".") not in MMAP_FAMILIES],
+                  *sorted((REPO / "config").glob("sdkconfig.*.defaults")),
+                  *sorted((REPO / "boards").glob("*.defaults")),
+                  *sorted((REPO / "presets").glob("*sdkconfig.defaults")),
+                  *sorted((REPO / "deployments").glob("*/boards/*/sdkconfig.defaults"))]
+        for path in others:
+            self.assertNotIn(f"{MMAP_KEY}=", path.read_text(), path.relative_to(REPO).as_posix())
+            self.assertNotIn(f"# {MMAP_KEY} is not set", path.read_text(), path.relative_to(REPO).as_posix())
+
+    def test_tracked_sdkconfig_matches_the_default(self):
+        # A saved value is never overridden by a default: config/sdkconfig (the
+        # bare idf.py S3 build) is kept equal by hand, and an existing build
+        # folder needs the line changed (or a fresh sdkconfig) once.
+        self.assertEqual(config_value(REPO / "config/sdkconfig", MMAP_KEY), "y")
+        self.assertNotIn(f"# {MMAP_KEY} is not set", (REPO / "config/sdkconfig").read_text())
+
+    def check_tables(self, target):
+        boards, tables = table_users()
+        checked = 0
+        for table, users in tables:
+            users = [name for name in users if boards.get(name, (None,))[0] == target]
+            if not users:
+                continue
+            rows = partition_rows(table)
+            littlefs = [row for row in rows if row[0] == "littlefs"]
+            self.assertEqual(len(littlefs), 1, table.name)
+            models = [row for row in rows if row[1] == "data" and row[0] == "model"]
+            apps = [row for row in rows if row[1] == "app"]
+            self.assertTrue(apps, table.name)
+            yield table, users, littlefs[0], models, max(row[4] for row in apps)
+            checked += 1
+        self.assertGreater(checked, 0, f"no partition table serves a {target} board")
+
+    def test_s3_window_holds_littlefs_model_app_and_psram(self):
+        # Upper bound: the largest app partition stands in for the mapped code
+        # and rodata of whatever image it holds; code and rodata are mapped
+        # separately, so each can end in a part page (APP_SPLIT_PAGES).
+        names = []
+        for table, users, littlefs, models, app in self.check_tables("esp32s3"):
+            used = (mapped_bytes(littlefs[3], littlefs[4]) +
+                    sum(mapped_bytes(row[3], row[4]) for row in models) +
+                    round_pages(app) + APP_SPLIT_PAGES + S3_PSRAM)
+            names.append(table.name)
+            with self.subTest(table=table.name, boards=users):
+                self.assertLessEqual(
+                    used, S3_WINDOW,
+                    f"{table.name}: LittleFS {littlefs[4] // 1024} KiB + model "
+                    f"{sum(row[4] for row in models) // 1024} KiB + app {app // 1024} KiB + PSRAM "
+                    f"{S3_PSRAM // MIB} MB = {used / MIB:.2f} MB of the {S3_WINDOW // MIB} MB S3 window")
+        for name in ("partitions_ota_no_sr_16mb.csv", "partitions_ota_sr_16mb.csv",
+                     "partitions_sr_8mb.csv", "partitions_sr_16mb.csv"):
+            self.assertIn(name, names)
+
+    def test_p4_flash_window_holds_littlefs_model_and_app(self):
+        for table, users, littlefs, models, app in self.check_tables("esp32p4"):
+            used = (mapped_bytes(littlefs[3], littlefs[4]) +
+                    sum(mapped_bytes(row[3], row[4]) for row in models) + round_pages(app) +
+                    APP_SPLIT_PAGES)
+            with self.subTest(table=table.name, boards=users):
+                self.assertLessEqual(used, P4_FLASH_WINDOW, f"{table.name}: {used / MIB:.2f} MB")
+
+    def test_page_arithmetic(self):
+        self.assertEqual(mapped_bytes(0x10000, 0x10000), MMU_PAGE)
+        self.assertEqual(mapped_bytes(0x7E0000, 0x20000), 2 * MMU_PAGE)
+        self.assertEqual(mapped_bytes(0x5000, 0x10000), 2 * MMU_PAGE)  # starts 20 KiB into a page
+        self.assertEqual(mapped_bytes(0x5C5000, 0x23B000), 36 * MMU_PAGE)
+        self.assertEqual(round_pages(1), MMU_PAGE)
+
+
 if __name__ == "__main__":
     unittest.main()

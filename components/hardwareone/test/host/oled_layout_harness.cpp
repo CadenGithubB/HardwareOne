@@ -91,6 +91,7 @@ static OledScrollState sMainScroll;
 static bool sMainScrollInit=false;
 // INSERT_MENU_INIT
 // INSERT_MAP_PACK
+// INSERT_ESPNOW_DEVICE_ROWS
 static Adafruit_SSD1306* oledDisplay=nullptr;
 static bool oledConnected=true;
 static struct {bool up=false,down=false;} gNavEvents;
@@ -268,20 +269,40 @@ int main(int argc,char** argv) {
       assert(litIn(s0,67,11,74,11+OLED_CONTENT_HEIGHT)==0);                   // between the bar and the separator
       assert(litIn(s0,75,11,128,11+OLED_CONTENT_HEIGHT)==0);                   // the icon pane (no icon here)
       assert(litIn(s0,2,13,67,21)>0);                                         // the selected row's glyphs are there
-      // Two-line full-width rows (items start at y=0, so the second item is the
-      // first one fully inside the content area): each declared line is
-      // bounded, the selected item's two long lines both draw, and nothing
-      // spills into a third line below the visible window.
+      // Two-line full-width rows (items start at the content top, y=11):
+      // each declared line is bounded, the selected item's two long lines
+      // both draw, and nothing spills into a third line below the window.
       OledScrollState two;oledScrollInit(&two,nullptr,2);
       oledScrollAddItem(&two,"short","and short",true,nullptr);
       oledScrollAddItem(&two,longLabel,longLabel,true,nullptr);
       oledScrollAddItem(&two,"third","row",true,nullptr);
       two.selectedIndex=1;
       Adafruit_SSD1306 t0;oledTextFieldFrameBegin();oledScrollRender(&t0,&two,true,true,nullptr);oledTextFieldFrameEnd();
-      assert(litIn(t0,0,16,3,32)>0);                                           // selection bar on the second item
-      assert(litIn(t0,5,16,126,24)>0 && litIn(t0,5,24,126,32)>0);              // both lines drawn
-      assert(litIn(t0,0,32,126,48)==0);                                        // no third line, nothing below the window
-      assert(litIn(t0,126,16,128,32)==litIn(t0,126,16,128,32));                // scrollbar columns are the bar's
+      assert(litIn(t0,0,0,128,11)==0);                                         // nothing under the header
+      assert(litIn(t0,0,27,3,43)>0);                                           // selection bar on the second item
+      assert(litIn(t0,5,27,126,35)>0 && litIn(t0,5,35,126,43)>0);              // both lines drawn
+      assert(litIn(t0,0,43,126,59)==0);                                        // no third line, nothing below the window
+#ifndef BASELINE_LAYOUT
+      // The titled full-width list (the ESP-NOW device list, its production
+      // row count): the title on the content's first line, every item's two
+      // lines between it and the footer, at both panel heights; the selected
+      // item is always one of them.
+      {
+        const int rows=espnowDeviceListRows();
+        assert(rows==(height==64?2:6));
+        OledScrollState list;oledScrollInit(&list,"ESP-NOW Devices",rows);
+        for(int i=0;i<9;++i) oledScrollAddItem(&list,"+ peer","Room E",true,nullptr);
+        for(int selected=0;selected<9;++selected) {
+          list.selectedIndex=selected;oledScrollClampSelection(&list);
+          assert(selected>=list.scrollOffset && selected<list.scrollOffset+rows);
+          Adafruit_SSD1306 d;oledTextFieldFrameBegin();oledScrollRender(&d,&list,true,true,nullptr);oledTextFieldFrameEnd();
+          assert(litIn(d,0,0,128,11)==0);                                      // the title is not under the header
+          assert(litIn(d,0,11,100,19)>0);                                      // the title line
+          assert(litIn(d,0,canvasHeight-11,128,canvasHeight)==0);              // nothing in the footer band
+          assert(litIn(d,0,21+(selected-list.scrollOffset)*16,3,37+(selected-list.scrollOffset)*16)>0);  // its bar
+        }
+      }
+#endif
       if(argc>1){
         Adafruit_SSD1306 pc;chrome(pc);oledScrollRenderSimple(&pc,&compact,true,11);
         save(pc,std::string(argv[1])+"/overflow-compact-"+std::to_string(height)+".pgm");

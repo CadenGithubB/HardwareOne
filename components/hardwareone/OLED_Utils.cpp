@@ -525,7 +525,9 @@ static void ncDraw() {
 
   int y = OLED_CONTENT_START_Y;
   const int lineH = 10;
-  const int visible = oledVisibleRows(10, 10, 4);
+  // Rows below the title line, as many as end above the footer: 3 on the
+  // 64 px OLED (a fourth row at y=51 sat under the footer), 9 on the P4X-EYE.
+  const int visible = oledVisibleRows(lineH, lineH);
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 
@@ -1288,8 +1290,10 @@ void oledScrollRender(Adafruit_SSD1306* display, OledScrollState* state,
   int lineHeight = 8;  // For text size 1
   int itemHeight = splitPane ? 10 : (lineHeight * 2);  // Single-line or two-line
   
-  // Starting Y position
-  int yPos = splitPane ? (OLED_CONTENT_START_Y + 1) : 0;
+  // Starting Y position: the content area, under the global header (drawn
+  // over y 0-9 after the mode). The full-width title used to start at y=0,
+  // hidden by the header, with its items running into the footer.
+  int yPos = OLED_CONTENT_START_Y + (splitPane ? 1 : 0);
   
   // Draw title if present (full-width mode only; split-pane uses global header)
   if (!splitPane && state->title && state->title[0] != '\0') {
@@ -1391,8 +1395,10 @@ void oledScrollRender(Adafruit_SSD1306* display, OledScrollState* state,
       // Scrollbar for full-width mode
       int scrollbarX = SCREEN_WIDTH - 1;
       bool hasTitle = (state->title && state->title[0] != '\0');
-      int scrollbarHeight = OLED_CONTENT_HEIGHT - (hasTitle ? 10 : 0);
-      int scrollbarY = hasTitle ? 10 : 0;
+      // From under the title to the footer's top edge (drawOledFooter's
+      // OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT, one above the content end).
+      int scrollbarY = OLED_CONTENT_START_Y + (hasTitle ? 10 : 0);
+      int scrollbarHeight = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 1 - scrollbarY;
       
       display->drawFastVLine(scrollbarX, scrollbarY, scrollbarHeight, DISPLAY_COLOR_WHITE);
       
@@ -2902,11 +2908,7 @@ void drawOledFooter() {
     case OLED_GPS_MAP:
       {
 #if ENABLE_MAPS
-        if (gMapMenuOpen) {
-          hints = "A:Select B:Close";
-        } else {
-          hints = "X/Y:Zoom A+J:Rot B:Back";
-        }
+        hints = oledMapFooterHint();
 #else
         hints = "B:Back";
 #endif
