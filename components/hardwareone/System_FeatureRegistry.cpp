@@ -23,6 +23,7 @@
 #include "System_RamFlush.h"      // ramFlushReadLive()
 #include "BLE_Server.h"           // bleSubsystemActive()
 #include "System_I2C.h"           // gI2cBusRunning
+#include "i2csensor_encoder.h"     // gEncoderInst: the encoder row's switch
 #include "System_EdgeImpulse.h"   // isContinuousInferenceRunning()
 
 // External settings
@@ -466,7 +467,7 @@ static constexpr FeatureEntry featureRegistry[] = {
   // needs the dedicated endpoint the assert names.
   { "encoder", "Encoder", FEATURE_CAT_SENSOR, 1,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.encoderAutoStart, isEncoderCompiled,
+    &gEncoderInst[0].autoStart, isEncoderCompiled,  // instance 1's switch (i2csensor_encoder.h)
     "Adafruit seesaw encoder board (5752 or 4991): its RGB pixels" },
 #endif
 
@@ -684,7 +685,9 @@ static constexpr FeatureSwitches kFeatureSwitches[] = {
   { "servo", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
   { "matrix", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
 #if ENABLE_ENCODER
-  FEATURE_SENSOR_SWITCHES("encoder", encoder, RF_ENCODER),
+  // Instance 1's switch: the encoder's settings live in gEncoderInst.
+  { "encoder", nullptr, &gEncoderInst[0].autoStart, RF_ENCODER,
+    "openencoder / closeencoder", "encoderautostart <0|1>", nullptr },
 #endif
   { "battery", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
   { "r1health", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },

@@ -563,8 +563,9 @@ const char* cmd_ledeffect(const String& argsInput) {
 #endif
 }
 
-// Saved per light: ledBrightness for the onboard pixel, encoderBrightness for
-// the encoder board (both apply at once).
+// Saved per light: ledBrightness for the onboard pixel, each encoder
+// instance's own brightness for its board (both apply at once). The `encoder`
+// target is instance 1.
 const char* cmd_ledbrightness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -579,7 +580,7 @@ const char* cmd_ledbrightness(const String& argsInput) {
   if (!parseIntArg(arg, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 100) return "Error: LED brightness must be 0..100";
   if (target.kind == LedTargetKind::Encoder) {
-    encoderLightSetBrightness(v);
+    encoderLightSetBrightness(v, 1);
     snprintf(getDebugBuffer(), 1024, "Encoder LED brightness set to %d%%", v);
     return getDebugBuffer();
   }

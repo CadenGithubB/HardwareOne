@@ -2369,14 +2369,15 @@ servocalibrate <channel>        - Enter calibration mode for a channel
 <summary><strong>encoder - Adafruit seesaw encoder board (5752 / 4991)</strong></summary>
 
 ```
-openencoder                     - Open the board (admin)
-closeencoder                    - Close it; the pixels go dark (admin)
-encoderstatus [json]            - Connection, product, pixel count, address, bus, brightness
-encoderautostart [on|off]       - Open after boot (admin)
-encoderaddress <address>        - I2C address 0x49-0x50 (5752) or 0x36-0x3D (4991), at the next open (admin)
-encoderbus <0|1>                - I2C bus, after a reboot (admin)
+openencoder [n]                 - Open the board (admin)
+closeencoder [n]                - Close it; the pixels go dark (admin)
+encoderstatus [n] [json]        - Connection, product, pixel count, address, bus, brightness
+encoderautostart [n] [on|off]   - Open after boot (admin)
+encoderaddress [n] <address>    - I2C address 0x49-0x50 (5752) or 0x36-0x3D (4991), at the next open (admin)
+encoderbus [n] <0|1>            - I2C bus, after a reboot (admin)
 ```
-Its pixels take the LED commands with the `encoder` target (`ledcolor encoder red`).
+Its pixels take the LED commands with the `encoder` target (`ledcolor encoder red`). `n` is the
+board, 1-4 (left out: board 1).
 </details>
 
 <details>
@@ -2467,6 +2468,26 @@ register read, no reset), so a fuel gauge, an ANO encoder or a gamepad at the sa
 alone. `i2cscan` reads the product id only where two devices of different products can share the
 address (the encoder's configured address, 0x49 with an ANO or gamepad build), and names the
 board "Encoder (Adafruit 5752 ...)" or "Encoder (Adafruit 4991 ...)".
+
+Up to four boards can be used at once. Board 1 is the one every command above reaches without a
+number; boards 2-4 take their number right after the command word, and a setter takes it before
+the value:
+```
+encoderaddress 0x36          # board 1 (one word: board 1's value, as before)
+encoderaddress 2 0x37        # board 2
+openencoder
+openencoder 2
+encoderstatus 2 json
+closeencoder 2               # board 1 stays lit
+encoderautostart 2 on        # board 2 opens after boot too
+```
+Boards 2-4 have no address until one is set, and are not opened before (`openencoder 2` says to
+set one first; `encoderaddress 2 0` unsets it again). Two boards cannot share an address on one
+bus: the second is refused with `Error: 0x36 on bus 0 is in use by Encoder (instance 1).` Each
+board has its own connection, colours, brightness and start at boot, and its events are named
+`Encoder 2`. An event trigger on `Encoder` also fires for `Encoder 2` (triggers match by
+substring). The web settings page lists every board's settings in the encoder module. The LED
+commands reach board 1 through `encoder`.
 
 `openencoder` (or `encoderautostart on` and a reboot) opens it. Then the LED commands reach it:
 `ledcolor encoder green`, `ledcolor encoder:3 red`, `ledclear encoder`, `ledeffect encoder pulse

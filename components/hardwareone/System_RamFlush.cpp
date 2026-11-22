@@ -141,7 +141,7 @@ bool ramFlushReadLive(RamFlushFeatureId f) {
     case RF_INPUT:      return gInputRunning;
     case RF_RTC:        return gRtcRunning;
     case RF_PRESENCE:   return gPresenceRunning;
-    case RF_ENCODER: return encoderRunning();
+    case RF_ENCODER:    return encoderAnyRunning();  // one switch for every instance (Q7)
 
 #if ENABLE_CAMERA_SENSOR
     case RF_CAMERA:     return gCameraRunning;
@@ -248,7 +248,13 @@ static bool ramFlushReadIntent(RamFlushFeatureId f) {
     case RF_WIFI:       return gSettings.wifiAutoStart;
     case RF_OLED:       return gSettings.oledAutoStart;
     case RF_AUTOMATION: return gSettings.automationAutoStart;
-    case RF_ENCODER: return gSettings.encoderAutoStart;
+    case RF_ENCODER: {
+      // Any instance set to open after boot (one switch for every instance, Q7).
+      for (uint8_t n = 1; n <= kEncoderMaxInstances; ++n) {
+        if (encoderAutoStartOf(n)) return true;
+      }
+      return false;
+    }
     default:            return false;
   }
 }

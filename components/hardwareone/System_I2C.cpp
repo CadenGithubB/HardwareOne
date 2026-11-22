@@ -350,14 +350,21 @@ void initSensorQueue() {
 // gThermalRunning / gTofRunning / gImuRunning provided by their i2csensor_*.h headers
 
 // Instances (System_I2CInstanceCore.h): the per-type switches below take the
-// instance n. No type drives a second instance yet, so each answers for
-// instance 1 only (the encoder's n >= 2 comes with multi-instance phase 1c);
-// the manager refuses an instance a type does not have before any of them runs.
+// instance n. Only the encoder's driver keeps one state per instance
+// (i2csensor_encoder.h); every other branch serves instance 1, the only one
+// its type has. The manager refuses an instance a type does not have before
+// any of them runs.
+
+// Whether the type's driver serves instance n: instance 1 of every type, and
+// every instance of a type whose driver keeps per-instance state.
+static bool driverServesInstance(I2cDeviceType sensor, uint8_t n) {
+  return n == 1 || (sensor == I2C_DEVICE_ENCODER && i2cSlot(sensor, n) != kI2cNoSlot);
+}
 
 // Map I2cDeviceType → I2C address for pre-start hardware presence checks.
 // Returns 0 if the device type has no single fixed address (or should skip the check).
 static uint8_t i2cAddressForDeviceType(I2cDeviceType sensor, uint8_t n = 1) {
-  if (n != 1) return 0;
+  if (!driverServesInstance(sensor, n)) return 0;
   switch (sensor) {
     case I2C_DEVICE_THERMAL:  return I2C_ADDR_THERMAL;
     case I2C_DEVICE_TOF:      return I2C_ADDR_TOF;
@@ -376,7 +383,7 @@ static uint8_t i2cAddressForDeviceType(I2cDeviceType sensor, uint8_t n = 1) {
     case I2C_DEVICE_APDS:     return I2C_ADDR_APDS;
     case I2C_DEVICE_RTC:      return I2C_ADDR_DS3231;
     case I2C_DEVICE_PRESENCE: return I2C_ADDR_PRESENCE;
-    case I2C_DEVICE_ENCODER: return encoderDeviceAddress();
+    case I2C_DEVICE_ENCODER:  return encoderInstanceAddress(n);  // 0: instance n has none set
     default:                  return 0;
   }
 }
@@ -386,7 +393,7 @@ static uint8_t i2cAddressForDeviceType(I2cDeviceType sensor, uint8_t n = 1) {
 // configured bus-1 sensor was rejected before its start request reached the
 // driver.
 static uint8_t i2cBusForDeviceType(I2cDeviceType sensor, uint8_t n = 1) {
-  if (n != 1) return 0;
+  if (!driverServesInstance(sensor, n)) return 0;
   switch (sensor) {
     case I2C_DEVICE_THERMAL:  return (uint8_t)gSettings.thermalBus;
     case I2C_DEVICE_TOF:      return (uint8_t)gSettings.tofBus;
@@ -397,7 +404,7 @@ static uint8_t i2cBusForDeviceType(I2cDeviceType sensor, uint8_t n = 1) {
     case I2C_DEVICE_APDS:     return (uint8_t)gSettings.apdsBus;
     case I2C_DEVICE_RTC:      return (uint8_t)gSettings.rtcBus;
     case I2C_DEVICE_PRESENCE: return (uint8_t)gSettings.presenceBus;
-    case I2C_DEVICE_ENCODER: return encoderDeviceBus();
+    case I2C_DEVICE_ENCODER:  return encoderInstanceBus(n);
     default:                  return 0;
   }
 }
@@ -487,7 +494,7 @@ bool i2cAddressTakenBy(uint8_t bus, uint8_t address, I2cDeviceType exceptType, u
 // Lifecycle state stays with the sensor owners. These reads coordinate queue
 // admission; the owner repeats the cleanup guard immediately before startup.
 static bool sensorIsRunning(I2cDeviceType sensor, uint8_t n = 1) {
-  if (n != 1) return false;
+  if (!driverServesInstance(sensor, n)) return false;
   switch (sensor) {
     case I2C_DEVICE_THERMAL: return gThermalRunning;
     case I2C_DEVICE_TOF: return gTofRunning;
@@ -503,13 +510,13 @@ static bool sensorIsRunning(I2cDeviceType sensor, uint8_t n = 1) {
 #endif
     case I2C_DEVICE_RTC: return gRtcRunning;
     case I2C_DEVICE_PRESENCE: return gPresenceRunning;
-    case I2C_DEVICE_ENCODER: return encoderRunning();
+    case I2C_DEVICE_ENCODER: return encoderRunning(n);
     default: return false;
   }
 }
 
 static bool sensorHasTask(I2cDeviceType sensor, uint8_t n = 1) {
-  if (n != 1) return false;
+  if (!driverServesInstance(sensor, n)) return false;
   switch (sensor) {
     case I2C_DEVICE_THERMAL: return gThermalTaskHandle != nullptr;
     case I2C_DEVICE_TOF: return gTofTaskHandle != nullptr;
@@ -543,7 +550,7 @@ static const SensorSwitchRow kSensorSwitches[] = {
   { I2C_DEVICE_APDS,     &gSettings.apdsAutoStart },
   { I2C_DEVICE_RTC,      &gSettings.rtcAutoStart },
   { I2C_DEVICE_PRESENCE, &gSettings.presenceAutoStart },
-  { I2C_DEVICE_ENCODER, &gSettings.encoderAutoStart },
+  { I2C_DEVICE_ENCODER, encoderAutoStartSetting(1) },  // gEncoderInst (instance 1)
 };
 static_assert(sizeof(kSensorSwitches) / sizeof(kSensorSwitches[0]) == (size_t)I2C_DEVICE_COUNT,
               "every queue-managed device type needs its switch row");
@@ -556,10 +563,9 @@ static const SensorSwitchRow* sensorSwitchRow(I2cDeviceType sensor) {
 }
 
 // Start-at-boot of instance n. Instance 1 is the table above; an instance
-// n >= 2 has no switch until its type keeps per-instance settings (the
-// encoder: multi-instance phase 1c), so it never starts by itself.
+// n >= 2 reads its own switch (the encoder's, i2csensor_encoder.h).
 static bool sensorAutoStartFor(I2cDeviceType sensor, uint8_t n) {
-  if (n != 1) return false;
+  if (n != 1) return sensor == I2C_DEVICE_ENCODER && encoderAutoStartOf(n);
   const SensorSwitchRow* row = sensorSwitchRow(sensor);
   return row && *row->autoStart;
 }
@@ -2454,7 +2460,7 @@ static const SensorHeapCost sensorHeapCosts[] = {
   { "RTC Clock",      "rtc",     &gSettings.rtcAutoStart,      2 },  // DS3231: minimal
   { "Presence",       "presence",&gSettings.presenceAutoStart, 2 },  // STHS34PF80: minimal
 #if ENABLE_ENCODER
-  { "Encoder",        "encoder", &gSettings.encoderAutoStart,  1 },  // seesaw encoder pixels: no task
+  { "Encoder",        "encoder", &gEncoderInst[0].autoStart,   1 },  // seesaw encoder pixels: no task
 #endif
 };
 static const size_t sensorHeapCostCount = sizeof(sensorHeapCosts) / sizeof(sensorHeapCosts[0]);
@@ -2506,12 +2512,66 @@ static const char* cmd_sensorautostart(const String& argsInput) {
   }
   
   if (!a.hasMinArgs(2)) {
-    return "Error: invalid arguments — Usage: sensorautostart <sensor> <on|off>";
+    return "Error: invalid arguments — Usage: sensorautostart <sensor> [n] <on|off>";
   }
 
   String sensor = a.arg(0);
   String value = a.arg(1);
   sensor.toLowerCase();
+
+  // G4 (System_I2CInstanceCore.h): sensorautostart <sensor> <n> <on|off>.
+  // Instance 1 is accepted for every type and means what the two-word form
+  // does; an instance n >= 2 exists only for a type that has several.
+  if (a.count() > 3) {
+    return "Error: invalid arguments — Usage: sensorautostart <sensor> [n] <on|off>";
+  }
+  if (a.count() == 3) {
+    if (sensor == "all") return "Error: 'all' takes no instance. Usage: sensorautostart all <on|off>";
+    I2cDeviceType type = I2C_DEVICE_COUNT;
+    for (int i = 0; i < I2C_DEVICE_COUNT; ++i) {
+      if (sensor == kI2cTypes[i].id || (sensor == "fm" && kI2cTypes[i].type == I2C_DEVICE_FMRADIO)) {
+        type = kI2cTypes[i].type;
+      }
+    }
+    if (type == I2C_DEVICE_COUNT) {
+      return "Error: Unknown sensor. Use thermal, tof, imu, gps, fmradio, apds, input, rtc, presence, encoder or all.";
+    }
+    const String token = a.arg(1);
+    I2cInstanceArg instance;
+    if (!i2cInstanceNumber(token.c_str(), token.length(), instance.n)) {
+      instance.error = I2cInstanceError::NotAnInstance;
+    } else {
+      i2cInstanceInRange(type, instance.n, instance);
+    }
+    if (instance.error != I2cInstanceError::None) {
+      instance.token = token.c_str();
+      instance.tokenLen = token.length();
+      EXT_RAM_BSS_ATTR static char refused[160];
+      return i2cInstanceErrorText(type, instance, "sensorautostart <sensor> [n] <on|off>", refused,
+                                  sizeof(refused));
+    }
+    value = a.arg(2);
+    value.toLowerCase();
+    if (instance.n >= 2) {
+      const bool on = argIsOn(value);
+      if (!on && !argIsOff(value)) return kCommandReplyNotOnOff;
+      const FeatureEntry* feature = getFeatureById(kI2cTypes[type].id);
+      if (on && feature && !isFeatureCompiled(feature)) {
+        return "Error: That sensor is not in this build. Run 'sensors json brief' to list the sensors this firmware has.";
+      }
+      // Only the encoder has instances n >= 2 (i2cInstanceInRange refused the rest).
+      bool* setting = encoderAutoStartSetting(instance.n);
+      if (!setting) return "Error: That sensor is not in this build.";
+      bool& flag = *setting;
+      const bool was = flag;
+      setSetting(flag, on);
+      EXT_RAM_BSS_ATTR static char instanceResult[96];
+      snprintf(instanceResult, sizeof(instanceResult), "[AutoStart] %s %s%s",
+               deviceTypeDisplayName(type, instance.n), was == on ? "already " : "",
+               on ? "enabled" : "disabled");
+      return instanceResult;
+    }
+  }
   value.toLowerCase();
   
   bool enable = argIsOn(value);
@@ -2753,7 +2813,7 @@ const CommandEntry i2cCommands[] = {
   { "devicefile", "Show device registry JSON file.", false, cmd_devicefile },
   
   // Sensor Auto-Start
-  { "sensorautostart", "Sensor auto-start: [sensor] [on|off]", true, cmd_sensorautostart, "Usage: sensorautostart [sensor] [on|off]\n       sensorautostart all [on|off]\nSensors: thermal, tof, imu, gps, fmradio, apds, input, rtc, presence, encoder" }
+  { "sensorautostart", "Sensor auto-start: [sensor] [n] [on|off]", true, cmd_sensorautostart, "Usage: sensorautostart [sensor] [n] [on|off]\n       sensorautostart all [on|off]\nSensors: thermal, tof, imu, gps, fmradio, apds, input, rtc, presence, encoder (n: encoder 1..4)" }
 };
 
 const size_t i2cCommandsCount = sizeof(i2cCommands) / sizeof(i2cCommands[0]);
@@ -2847,9 +2907,8 @@ static void applySensorStop(I2cDeviceType sensor, uint8_t n) {
 #endif
       ;
   // Set enabled flag to false and record stop time (common boilerplate).
-  // An instance n >= 2 has no driver stop before its type keeps per-instance
-  // state (the encoder: multi-instance phase 1c); only the latch below applies.
-  switch (n == 1 ? sensor : I2C_DEVICE_COUNT) {
+  // Only the encoder's driver has instances n >= 2 (driverServesInstance).
+  switch (driverServesInstance(sensor, n) ? sensor : I2C_DEVICE_COUNT) {
     case I2C_DEVICE_COUNT:
       break;
     case I2C_DEVICE_THERMAL:
@@ -2918,7 +2977,7 @@ static void applySensorStop(I2cDeviceType sensor, uint8_t n) {
 #endif
       break;
     case I2C_DEVICE_ENCODER:
-      encoderStop();  // no task: the owner darkens the pixels and stops now
+      encoderStop(n);  // no task: the owner darkens the pixels and stops now
       break;
     default: return;
   }
@@ -3230,7 +3289,7 @@ const char* buildSensorStatusJson() {
 // ============================================================================
 
 static bool startSensorInternal(I2cDeviceType sensor, uint8_t n) {
-  if (n != 1) return false;  // no driver starts an instance n >= 2 yet (encoder: phase 1c)
+  if (!driverServesInstance(sensor, n)) return false;  // only the encoder has instances n >= 2
   switch (sensor) {
     case I2C_DEVICE_THERMAL: return thermalStartInternal();
     case I2C_DEVICE_TOF: return tofStartInternal();
@@ -3251,7 +3310,7 @@ static bool startSensorInternal(I2cDeviceType sensor, uint8_t n) {
 #if ENABLE_PRESENCE_SENSOR
     case I2C_DEVICE_PRESENCE: return presenceStartInternal();
 #endif
-    case I2C_DEVICE_ENCODER: return encoderStartInternal();  // false without the device
+    case I2C_DEVICE_ENCODER: return encoderStartInternal(n);  // false without the device
     default: return false;
   }
 }
@@ -3815,7 +3874,7 @@ void processAutoStartSensors() {
             gSettings.inputAutoStart ? 1 : 0,
             gSettings.rtcAutoStart ? 1 : 0,
             gSettings.presenceAutoStart ? 1 : 0,
-            gSettings.encoderAutoStart ? 1 : 0);
+            encoderAutoStartOf(1) ? 1 : 0);
   INFO_I2C_AUTOSTARTF("[AutoStart] Processing sensor auto-start settings...");
   int autoStartQueued = 0;
   
@@ -3924,7 +3983,7 @@ void processAutoStartSensors() {
   #endif
 
   #if ENABLE_ENCODER
-  if (ramFlushResolve(RF_ENCODER, gSettings.encoderAutoStart)) {
+  if (ramFlushResolve(RF_ENCODER, gEncoderInst[0].autoStart)) {
     // Missing at boot: one "autostart skipped" line and boot goes on; an
     // LED command to the encoder target reconnects it later.
     if (isSensorAvailableForAutoStart(I2C_DEVICE_ENCODER)) {
@@ -3944,6 +4003,11 @@ void processAutoStartSensors() {
     uint8_t n = 1;
     if (!i2cSlotToRef(slot, type, n)) continue;
     if (!ramFlushResolve(ramFlushIdForDevice(type), sensorAutoStartFor(type, n))) continue;
+    if (i2cAddressForDeviceType(type, n) == 0) {
+      // Start-at-boot on, but no address set: nothing to look for.
+      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping %s (no address set)", deviceTypeDisplayName(type, n));
+      continue;
+    }
     if (isSensorAvailableForAutoStart(type, n)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing %s", deviceTypeDisplayName(type, n));
       if (autoStartEnqueue(type, n)) autoStartQueued++;

@@ -32,9 +32,11 @@ constexpr EncoderBoard kEncoderBoards[] = {
 };
 constexpr uint8_t kEncoderMaxPixels = 4;
 constexpr uint8_t kEncoderDefaultAddress = 0x49;  // the quad board's default
-// Encoder boards the device can drive at once (System_I2CInstanceCore.h).
-// 1 until the driver keeps one state per instance (multi-instance phase 1c).
-constexpr uint8_t kEncoderMaxInstances = 1;
+// Encoder boards the device can drive at once (System_I2CInstanceCore.h):
+// instance 1 is `encoder`, instances 2..4 are `encoder2`..`encoder4` (owner
+// question Q1 of the multi-instance design: 4 keeps the health registry and
+// the connected-device list in budget).
+constexpr uint8_t kEncoderMaxInstances = 4;
 
 // The board a product id names, or nullptr: another seesaw product (the ANO
 // encoder, the gamepad) or a device that is not a seesaw board is never
@@ -53,6 +55,63 @@ inline bool encoderAddressValid(int address) {
   }
   return false;
 }
+
+// ---------------------------------------------------------------------------
+// Saved settings of every instance (multi-instance design sections 1.4 and 2)
+// ---------------------------------------------------------------------------
+// One struct per instance, instance 1 included, in one PSRAM array
+// (gEncoderInst, i2csensor_encoder.cpp). The fields stay int and bool: the
+// OLED editor edits only INT, BOOL and STRING rows.
+struct EncoderInstanceSettings {
+  int address;     // 0x49..0x50 (5752) or 0x36..0x3D (4991); instances 2..4: 0 = not set
+  int bus;         // 0 = I2C1, 1 = I2C2; at the next open (the pixels keep their first bus)
+  int brightness;  // 0..100 %
+  bool autoStart;  // open after boot
+};
+constexpr int kEncoderDefaultBrightness = 50;
+
+// The address an instance's next open uses, from its saved value: instance 1
+// falls back to the quad board's default (it always has one, as before);
+// instances 2..4 read an unset or invalid value as 0, "not configured" (not
+// opened, scanned as itself or pre-registered).
+inline uint8_t encoderSavedAddress(int saved, uint8_t n) {
+  if (encoderAddressValid(saved)) return (uint8_t)saved;
+  return n == 1 ? kEncoderDefaultAddress : 0;
+}
+
+// The bus a saved value names: 1 is I2C2, anything else I2C1.
+inline uint8_t encoderSavedBus(int saved) { return saved == 1 ? 1 : 0; }
+
+// The address options of the settings editors: the 5752's jumpers
+// (0x49..0x50) and the 4991's (0x36..0x3D). Instances 2..4 can also be unset.
+#define ENCODER_ADDRESS_OPTIONS                                                  \
+  "73|0x49 (5752),74|0x4A,75|0x4B,76|0x4C,77|0x4D,78|0x4E,79|0x4F,80|0x50,"      \
+  "54|0x36 (4991),55|0x37,56|0x38,57|0x39,58|0x3A,59|0x3B,60|0x3C,61|0x3D"
+constexpr const char kEncoderAddressOptions[] = ENCODER_ADDRESS_OPTIONS;
+constexpr const char kEncoderAddressOptionsUnset[] = "0|not set," ENCODER_ADDRESS_OPTIONS;
+constexpr const char kEncoderBusOptions[] = "0|I2C1,1|I2C2";
+
+// The settings rows of instance N (a literal 2..4), flat in the encoder's
+// module: jsonKey encoder<N>Address, cmdKey "encoderaddress <N>" (G3: the
+// instance, then the value), label "Encoder <N>: ...". Instance 1's rows are
+// written out by hand in i2csensor_encoder.cpp and keep their keys. This
+// macro is the only place that spells the keys of instances 2..4; it expands
+// to SettingEntry initializers (System_Settings.h) that point into
+// gEncoderInst[N - 1], so the table stays constant.
+// Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
+#define ENCODER_INSTANCE_ROWS(N)                                                                  \
+  { "encoder" #N "AutoStart", SETTING_BOOL, &gEncoderInst[N - 1].autoStart, 0, 0, nullptr, 0, 1,  \
+    "Encoder " #N ": Open after boot", nullptr, false, nullptr, "encoderautostart " #N },        \
+  { "encoder" #N "Brightness", SETTING_INT, &gEncoderInst[N - 1].brightness,                     \
+    kEncoderDefaultBrightness, 0, nullptr, 0, 100, "Encoder " #N ": Brightness (%)", nullptr,     \
+    false, nullptr, "ledbrightness encoder" #N },                                                 \
+  { "encoder" #N "Address", SETTING_INT, &gEncoderInst[N - 1].address, 0, 0, nullptr, 0, 0x50,   \
+    "Encoder " #N ": I2C address (next open)", kEncoderAddressOptionsUnset, false, nullptr,       \
+    "encoderaddress " #N },                                                                       \
+  { "encoder" #N "Bus", SETTING_INT, &gEncoderInst[N - 1].bus, 0, 0, nullptr, 0, 1,               \
+    "Encoder " #N ": I2C bus (reboot required)", kEncoderBusOptions, false, nullptr,              \
+    "encoderbus " #N }
+constexpr uint8_t kEncoderSettingFields = 4;  // rows per instance
 
 // About 30 frames a second at most: one write attempt per interval.
 constexpr uint32_t kEncoderFrameIntervalMs = 33;

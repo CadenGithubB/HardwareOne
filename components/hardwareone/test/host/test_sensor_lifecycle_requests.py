@@ -86,6 +86,7 @@ def main() -> None:
         "static const SensorSwitchRow* sensorSwitchRow(", "static bool sensorAutoStartFor(",
         "void noteSensorAutoDisabled(", "static bool sensorRestartClosedByHand(",
         "static void sensorRestartOpenedByHand(",
+        "static bool driverServesInstance(",
         "static uint8_t i2cAddressForDeviceType(", "static uint8_t i2cBusForDeviceType(",
         "static bool sensorIsRunning(", "static bool sensorHasTask(",
         "bool requestSensorStart(", "const char* sensorStartRefusalText(",

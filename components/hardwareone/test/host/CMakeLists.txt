@@ -2425,6 +2425,14 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_tuning_settings_saved.py
           ${I2C_PROBE_TEST_ARGS})
+# The encoder's settings rows of every instance (ENCODER_INSTANCE_ROWS):
+# defaults, save/load round trip, schema rows whose cmdKeys bind and have the
+# name form.
+add_test(
+  NAME encoder_instance_settings
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_encoder_instance_settings.py
+          ${I2C_PROBE_TEST_ARGS})
 set(TOF_PSRAM_LIFECYCLE_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND TOF_PSRAM_LIFECYCLE_TEST_ARGS --sanitize)

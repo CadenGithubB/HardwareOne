@@ -42,6 +42,20 @@ everything user-visible since the v0.99.99.1 tag.
   opens 0x36 on the fuel gauge's bus. Build option `CUSTOM_ENABLE_ENCODER` (off on every board,
   offered by `tools/build_config.py` on the FeatherS3, FeatherS3 FE, Feather ESP32 V2, QT Py ESP32
   and XIAO ESP32-S3). Built, not yet run on either board.
+- Up to four encoder boards at once. Instance 1 is `encoder` as before (same commands, settings
+  keys and replies); instances 2-4 take their number after the command word: `openencoder 2`,
+  `closeencoder 2`, `encoderstatus 2 [json]`, and the setters take the instance before the value,
+  `encoderaddress 2 0x37`, `encoderautostart 2 on`, `encoderbus 2 1` (one word is still instance
+  1's value, so `encoderautostart 1` still means on). Instances 2-4 start with no address and are
+  not opened, scanned as themselves or pre-registered until one is set (`encoderaddress 2 0`
+  unsets it again); `openencoder 2` without one says so. Each board has its own connection,
+  colours, brightness, start at boot, automatic restart and failure count, and its events and log
+  lines are named `Encoder 2`. `sensorautostart encoder 2 on` works too; `sensorautostart <sensor>
+  1 <on|off>` is accepted for every sensor. New settings keys `hardware.encoder.encoder2Address`,
+  `encoder2Bus`, `encoder2Brightness`, `encoder2AutoStart` (and 3, 4), all admin-only through their
+  commands; `encoderstatus 2 json` adds `"instance":2`. The LED target `encoder2` (and
+  `ledbrightness encoder2`) comes with the LED-target phase; until then the LED commands reach
+  instance 1. Every instance's settings live in PSRAM. Built, not yet run with two boards.
 - Seesaw boards are known by their product id: a driver reads it before it begins or resets a
   board (the gamepad's reconnect path too), so the gamepad and ANO drivers no longer take, or reset,
   a seesaw board of another product. `i2cscan`, discovery and `detect` read it only where two

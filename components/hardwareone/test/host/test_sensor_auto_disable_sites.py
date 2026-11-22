@@ -27,7 +27,8 @@ HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
 FAULT = "systemEventPost(SYSEVT_SENSOR_FAULT"
-NOTE = re.compile(r"\bnoteSensorAutoDisabled\(\s*(\w+)\s*\)")
+# The device type, then (for a driver with instances) the instance.
+NOTE = re.compile(r"\bnoteSensorAutoDisabled\(\s*(\w+)\s*(?:,\s*\w+\s*)?\)")
 
 # file -> (device type, number of auto-disable sites, what the site does to stop)
 EXPECTED = {
@@ -39,7 +40,7 @@ EXPECTED = {
     "i2csensor_sths34pf80.cpp":   ("I2C_DEVICE_PRESENCE", 1, "gPresenceRunning = false"),
     "i2csensor_seesaw.cpp":       ("I2C_DEVICE_INPUT", 2, "requestSensorStop(I2C_DEVICE_INPUT)"),
     "i2csensor_ano_encoder.cpp":  ("I2C_DEVICE_INPUT", 2, "requestSensorStop(I2C_DEVICE_INPUT)"),
-    "i2csensor_encoder.cpp":  ("I2C_DEVICE_ENCODER", 1, "requestSensorStop(I2C_DEVICE_ENCODER)"),
+    "i2csensor_encoder.cpp":  ("I2C_DEVICE_ENCODER", 1, "requestSensorStop(I2C_DEVICE_ENCODER, n)"),
 }
 # The site is one small block; the report and the stop sit a few lines above
 # the event.

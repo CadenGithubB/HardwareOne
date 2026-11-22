@@ -4,9 +4,10 @@
 // default light, encoder, encoder:<n>, a pixel past the board's count, a bad
 // target), detection by seesaw product id, the scan's identity-read rule,
 // writes of changed frames only, the 30 fps cap, a skipped frame on a busy
-// bus, the failure count that closes the board, and the not-connected
-// replies.
+// bus, the failure count that closes the board, the not-connected replies,
+// and each instance's saved address (several boards, multi-instance phase 1c).
 #include "../../i2csensor_encoder_light.h"
+#include "../../System_I2CInstanceCore.h"
 #include "../../System_CommandReply.h"
 #include "../../System_LedTarget.h"
 #include "../../System_SeesawIdentity.h"
@@ -393,6 +394,51 @@ static void notConnectedReplies() {
   CHECK(kEncoderReconnectIntervalMs == 2000);
 }
 
+// Several boards (multi-instance phase 1c): each instance's saved address
+// and bus, the unset address of instances 2..4, and the clash between two
+// instances or with the fuel gauge.
+static void instanceSettings() {
+  CHECK(kEncoderMaxInstances == 4 && i2cMaxInstances(I2C_DEVICE_ENCODER) == kEncoderMaxInstances);
+  // Instance 1 always has an address: an unset or invalid value is the quad
+  // board's default, as before instances existed.
+  CHECK(encoderSavedAddress(0x36, 1) == 0x36 && encoderSavedAddress(0x50, 1) == 0x50);
+  for (int bad : {0, 0x35, 0x40, 0x51, -1, 255}) CHECK(encoderSavedAddress(bad, 1) == kEncoderDefaultAddress);
+  // Instances 2..4: the saved address when valid, else 0 ("not set").
+  for (uint8_t n = 2; n <= kEncoderMaxInstances; ++n) {
+    CHECK(encoderSavedAddress(0x37, n) == 0x37 && encoderSavedAddress(0x4A, n) == 0x4A);
+    for (int bad : {0, 0x35, 0x40, 0x51, -1}) CHECK(encoderSavedAddress(bad, n) == 0);
+  }
+  CHECK(encoderSavedBus(1) == 1 && encoderSavedBus(0) == 0 && encoderSavedBus(7) == 0 && encoderSavedBus(-1) == 0);
+  // The options of instances 2..4 offer "not set" first, then instance 1's list.
+  CHECK(strncmp(kEncoderAddressOptionsUnset, "0|not set,", 10) == 0);
+  CHECK(strcmp(kEncoderAddressOptionsUnset + 10, kEncoderAddressOptions) == 0);
+
+  // The owner's case: two 4991 boards at 0x36 and 0x37 on bus 0, on a board
+  // whose fuel gauge sits at 0x36 on bus 1.
+  const I2cAddressUse uses[] = {
+    { 1, 0x36, I2C_DEVICE_COUNT, 0, "MAX17048", "LiPo Fuel Gauge" },
+    { 0, 0x36, I2C_DEVICE_ENCODER, 1, "Encoder", nullptr },
+    { 0, 0x37, I2C_DEVICE_ENCODER, 2, "Encoder", nullptr },
+  };
+  const size_t count = sizeof(uses) / sizeof(uses[0]);
+  char why[128];
+  // Each instance may keep its own address; the other instance's is refused.
+  CHECK(!i2cAddressTakenBy(uses, count, 0, 0x36, I2C_DEVICE_ENCODER, 1));
+  CHECK(!i2cAddressTakenBy(uses, count, 0, 0x37, I2C_DEVICE_ENCODER, 2));
+  const I2cAddressUse* clash = i2cAddressTakenBy(uses, count, 0, 0x36, I2C_DEVICE_ENCODER, 2);
+  CHECK(clash && std::string(i2cAddressClashText(*clash, why, sizeof(why))) ==
+                     "Error: 0x36 on bus 0 is in use by Encoder (instance 1).");
+  clash = i2cAddressTakenBy(uses, count, 0, 0x37, I2C_DEVICE_ENCODER, 3);
+  CHECK(clash && clash->n == 2);
+  // The fuel gauge's bus refuses 0x36 for every instance; a free address is free.
+  clash = i2cAddressTakenBy(uses, count, 1, 0x36, I2C_DEVICE_ENCODER, 2);
+  CHECK(clash && std::string(i2cAddressClashText(*clash, why, sizeof(why))) ==
+                     "Error: 0x36 on bus 1 is in use by MAX17048 (LiPo Fuel Gauge).");
+  CHECK(!i2cAddressTakenBy(uses, count, 0, 0x38, I2C_DEVICE_ENCODER, 3));
+  // An unset instance (address 0) never clashes.
+  CHECK(!i2cAddressTakenBy(uses, count, 0, 0, I2C_DEVICE_ENCODER, 4));
+}
+
 int main() {
   targetParsing();
   namesAreNotTargets();
@@ -403,6 +449,7 @@ int main() {
   busyBusSkipsTheFrame();
   failedWritesStopTheLightOnce();
   notConnectedReplies();
+  instanceSettings();
   printf("LED targets and encoder light: %u checks passed\n", checks);
   return 0;
 }

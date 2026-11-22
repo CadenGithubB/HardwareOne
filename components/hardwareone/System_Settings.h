@@ -272,7 +272,6 @@ struct Settings {
       presenceBus(0), imuBus(0), thermalBus(0), tofBus(0), apdsBus(0), servoBus(0),
       matrixBus(0), matrixAddress(0x70), matrixBrightness(4), matrixRotation(1),
       matrixSquare(false), matrixPanel(0),
-      encoderBus(0), encoderAddress(0x49), encoderBrightness(50),
       fuelGaugeBus(0),
       ledStartupEnabled(true),
 #if ENABLE_NEOPIXEL
@@ -305,7 +304,6 @@ struct Settings {
       rtcTimeHasBeenSet(false),  // Track if RTC time has been set by NTP or manual
       presenceAutoStart(false),
       presenceDevicePollMs(100),
-      encoderAutoStart(false),
       wifiAutoReconnect(true),
       // Off: ESP-NOW and the local display come up only when the user turns
       // them on (setup wizard, espnowautostart / oledautostart, or open<x>).
@@ -937,9 +935,8 @@ struct Settings {
   int matrixRotation;       // GFX rotation 0..3; 1/3 give landscape 16x8
   bool matrixSquare;        // Use just one 8x8 square, keeping the other blank
   int matrixPanel;          // Physical square 0/1, unaffected by rotation
-  int encoderBus;           // Encoder board (Adafruit 5752/4991): 0 = I2C1, 1 = I2C2; at the next open
-  int encoderAddress;       // 0x49..0x50 (5752) or 0x36..0x3D (4991), the A0..A2 jumpers; at the next open
-  int encoderBrightness;    // Its pixels' brightness 0..100 % (ledbrightness encoder)
+  // The encoder boards' settings (every instance) live in gEncoderInst
+  // (i2csensor_encoder.h), in PSRAM.
   int fuelGaugeBus;         // MAX17048G LiPo fuel gauge (FeatherS3[D] on-board)
   // Hardware settings (LED). ledStartupEnabled stays unconditional: the
   // deliberately-unconditional FeatureRegistry `led` row points at it
@@ -977,7 +974,6 @@ struct Settings {
   bool rtcTimeHasBeenSet;       // Has RTC time been set by NTP or manual? (false = trust NTP first at boot)
   bool presenceAutoStart;       // Auto-start STHS34PF80 presence/motion sensor after boot
   int presenceDevicePollMs;     // STHS34PF80 polling interval (default: 100ms)
-  bool encoderAutoStart;    // Open the encoder board after boot
 
   // ---------------------------------------------------------------------
   // One saved switch per feature: <thing>AutoStart says whether it starts at

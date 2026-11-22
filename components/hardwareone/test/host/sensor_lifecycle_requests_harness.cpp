@@ -84,12 +84,15 @@ static unsigned long& gRtcLastStopTime = stopTimes[I2C_DEVICE_RTC];
 static unsigned long& gPresenceLastStopTime = stopTimes[I2C_DEVICE_PRESENCE];
 static struct {
   int thermalBus = 0, tofBus = 0, imuBus = 0, inputBus = 0, gpsBus = 0;
-  int fmRadioBus = 0, apdsBus = 0, rtcBus = 0, presenceBus = 0, encoderBus = 0;
+  int fmRadioBus = 0, apdsBus = 0, rtcBus = 0, presenceBus = 0;
   // The one saved switch per device (start at boot), at the firmware's defaults.
   bool thermalAutoStart = false, tofAutoStart = false, imuAutoStart = false, inputAutoStart = false;
   bool gpsAutoStart = false, fmRadioAutoStart = false, apdsAutoStart = false, rtcAutoStart = true;
-  bool presenceAutoStart = false, encoderAutoStart = false;
+  bool presenceAutoStart = false;
 } gSettings;
+// The encoder's saved settings of every instance (i2csensor_encoder.h): its
+// start-at-boot switches live here, not in gSettings.
+static EncoderInstanceSettings gEncoderInst[kEncoderMaxInstances];
 static bool& autoStartSetting(I2cDeviceType sensor) {
   switch (sensor) {
     case I2C_DEVICE_THERMAL: return gSettings.thermalAutoStart;
@@ -100,7 +103,7 @@ static bool& autoStartSetting(I2cDeviceType sensor) {
     case I2C_DEVICE_FMRADIO: return gSettings.fmRadioAutoStart;
     case I2C_DEVICE_APDS: return gSettings.apdsAutoStart;
     case I2C_DEVICE_RTC: return gSettings.rtcAutoStart;
-    case I2C_DEVICE_ENCODER: return gSettings.encoderAutoStart;
+    case I2C_DEVICE_ENCODER: return gEncoderInst[0].autoStart;
     default: return gSettings.presenceAutoStart;
   }
 }
@@ -216,16 +219,35 @@ static bool rtcStartInternal() { return startOwner(I2C_DEVICE_RTC); }
 static bool presenceStartInternal() { return startOwner(I2C_DEVICE_PRESENCE); }
 // The encoder board has no task: its owner reports running, and its stop
 // darkens the pixels and returns (the worker publishes the stop at once).
+// Instance 1 is the type's slot in the arrays above; instances n >= 2 keep
+// their own state below (index n).
 static unsigned encoderStopCalls;
-static bool encoderRunning() { return running[I2C_DEVICE_ENCODER]; }
-static uint8_t encoderDeviceAddress() { return 0x49; }
-static uint8_t encoderDeviceBus() { return static_cast<uint8_t>(gSettings.encoderBus); }
-static bool encoderStartInternal() {
+static std::array<bool, kEncoderMaxInstances + 1> encoderExtraRunning;
+static std::array<unsigned, kEncoderMaxInstances + 1> encoderExtraStarts, encoderExtraStops;
+static bool encoderRunning(uint8_t n = 1) {
+  return n == 1 ? running[I2C_DEVICE_ENCODER] : encoderExtraRunning[n];
+}
+static bool encoderAutoStartOf(uint8_t n) { return gEncoderInst[n - 1].autoStart; }
+static bool* encoderAutoStartSetting(uint8_t n) { return &gEncoderInst[n - 1].autoStart; }
+static uint8_t encoderInstanceAddress(uint8_t n) {
+  return n == 1 ? 0x49 : static_cast<uint8_t>(gEncoderInst[n - 1].address);
+}
+static uint8_t encoderInstanceBus(uint8_t n) { return static_cast<uint8_t>(gEncoderInst[n - 1].bus); }
+static bool encoderStartInternal(uint8_t n = 1) {
+  if (n != 1) {
+    assert(pauseDepth > 0); ++encoderExtraStarts[n];
+    encoderExtraRunning[n] = true;
+    return true;
+  }
   const bool started = startOwner(I2C_DEVICE_ENCODER);
   handles[I2C_DEVICE_ENCODER] = nullptr;  // no task
   return started;
 }
-static void encoderStop() { assert(pauseDepth > 0); ++encoderStopCalls; running[I2C_DEVICE_ENCODER] = false; }
+static void encoderStop(uint8_t n = 1) {
+  assert(pauseDepth > 0); ++encoderStopCalls;
+  if (n == 1) running[I2C_DEVICE_ENCODER] = false;
+  else { ++encoderExtraStops[n]; encoderExtraRunning[n] = false; }
+}
 static void fmRadioDeinit() {
   assert(pauseDepth > 0 && gFmRadioTaskHandle == nullptr);
   ++fmDeinitCalls; fmHardwareReady = false; gFmRadioRunning = false;
@@ -244,6 +266,8 @@ struct Fixture {
     now += 10000;  // Prior worker static timestamps remain valid between cases.
     manager.queueMutex = &mutex; I2cDeviceManager::instance = &manager;
     gI2cBusRunning = bufferAvailable = true; debugEnabled = false; gSettings = {};
+    for (auto& instance : gEncoderInst) instance = {};
+    encoderExtraRunning.fill(false); encoderExtraStarts.fill(0); encoderExtraStops.fill(0);
     running.fill(false); handles.fill(nullptr); stopTimes.fill(0); starts.fill(0);
     startResult.fill(true); runningAfterStart.fill(true);
     gApdsColorRunning = gApdsProximityRunning = gApdsGestureRunning = false;
@@ -797,8 +821,7 @@ static void restartCases() {
 #ifdef HW1_HOST_I2C_TEST_ENCODER_MAX
 // Several instances (System_I2CInstanceCore.h), built with the encoder at two
 // instances: each instance has its own queue entry, stop, start mark, cleanup
-// latch and restart ladder. Instance 2 has no driver or start-at-boot switch
-// yet (multi-instance phase 1c), so it never starts and its ladder stays idle.
+// latch, driver state, start-at-boot switch and restart ladder.
 static void instanceCases() {
   using sensor_restart::Phase;
   const auto enc = I2C_DEVICE_ENCODER;
@@ -828,17 +851,30 @@ static void instanceCases() {
     for (const auto& event : events) {
       assert(event.second == (event.first == SYSEVT_SENSOR_STOPPED ? "Encoder 2" : "Encoder"));
     } }
-  // Instance 2 has no driver yet: its admitted start fails under its own name.
+  // Instance 2 starts through its own driver state, under its own name, and
+  // instance 1 stays as it was.
   { Fixture f; resetSecond(); assert(enqueueDeviceStart(enc, 2)); f.worker();
-    assert(starts[enc] == 0 && !running[enc] && !sensorStartOutstanding(slot2));
-    assert(eventCount(SYSEVT_SENSOR_START_FAILED) == 1 && events.back().second == "Encoder 2"); }
+    assert(encoderExtraStarts[2] == 1 && encoderExtraRunning[2] && starts[enc] == 0 && !running[enc]);
+    assert(!sensorStartOutstanding(slot2) && eventCount(SYSEVT_SENSOR_STARTED) == 1);
+    assert(events.back().second == "Encoder 2");
+    // Running: a second open of instance 2 is refused, one of instance 1 is not.
+    SensorStartRefusal why = SensorStartRefusal::None;
+    assert(!requestSensorStart(enc, "test@enqueue", &why, 2) && why == SensorStartRefusal::AlreadyRunning);
+    assert(requestSensorStart(enc, "test@enqueue", &why, 1));
+    f.worker(); assert(starts[enc] == 1 && running[enc]);
+    // Closing instance 2 stops only its board.
+    assert(contains(cmd_sensorstop_queued(enc, deviceTypeDisplayName(enc, 2), 2),
+                    "[Encoder 2] Stop requested"));
+    f.worker();
+    assert(encoderExtraStops[2] == 1 && !encoderExtraRunning[2] && running[enc]);
+    assert(eventCount(SYSEVT_SENSOR_STOPPED) == 1 && events.back().second == "Encoder 2"); }
   // Closing an idle instance 2 names its own open command.
   { Fixture f; resetSecond();
     assert(contains(cmd_sensorstop_queued(enc, deviceTypeDisplayName(enc, 2), 2),
                     "Start it with 'openencoder 2'")); }
   // A restart report of instance 2 never touches instance 1's ladder, and
-  // without a start-at-boot switch of its own instance 2 stays off.
-  { Fixture f; resetSecond(); gSettings.encoderAutoStart = true; running[enc] = true;
+  // with its own start-at-boot switch off instance 2 stays off.
+  { Fixture f; resetSecond(); gEncoderInst[0].autoStart = true; running[enc] = true;
     noteSensorAutoDisabled(enc, 2); f.after(0); f.after(3600000);
     assert(sSensorRestart[enc].phase == Phase::Idle && sSensorRestart[slot2].phase == Phase::Idle);
     assert(starts[enc] == 0 && !flushFailedMark[enc] && !flushFailedSlot[slot2] && logs.empty());
@@ -849,6 +885,14 @@ static void instanceCases() {
     // Closing instance 2 by hand does not cancel instance 1's waiting try.
     cmd_sensorstop_queued(enc, deviceTypeDisplayName(enc, 2), 2);
     f.after(30000); assert(starts[enc] == 1 && running[enc]); }
+  // With its own switch on, instance 2 is started again by its own ladder;
+  // instance 1 (switch off) is left alone.
+  { Fixture f; resetSecond(); gEncoderInst[1].autoStart = true; encoderExtraRunning[2] = true;
+    noteSensorAutoDisabled(enc, 2); encoderExtraRunning[2] = false; f.after(1000);
+    assert(sSensorRestart[slot2].phase == Phase::Waiting && sSensorRestart[enc].phase == Phase::Idle);
+    assert(flushFailedSlot[slot2] && !flushFailedMark[enc]);
+    f.after(30000);
+    assert(encoderExtraStarts[2] == 1 && encoderExtraRunning[2] && starts[enc] == 0); }
 }
 #endif
 

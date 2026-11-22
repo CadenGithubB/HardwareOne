@@ -516,12 +516,12 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closeencoder` | A | Close the encoder board (its pixels go dark). |
-| `encoderaddress` | A | Save the encoder board's I2C address (next open).<br/>`Usage: encoderaddress <0x49..0x50\|0x36..0x3D>` |
-| `encoderautostart` | A | Open the encoder board after boot [on\|off].<br/>`Usage: encoderautostart [on\|off]` |
-| `encoderbus` | A | Route the encoder board to bus <0\|1> (reboot required).<br/>`Usage: encoderbus <0\|1>` |
-| `encoderstatus` |  | Show the encoder board: connection, product, pixels, address, brightness. (add 'json' for JSON output)<br/>`Usage: encoderstatus [json]` |
-| `openencoder` | A | Open the encoder board (its pixels light with 'ledcolor encoder'). |
+| `closeencoder` | A | Close an encoder board (its pixels go dark); n is instance 2..4.<br/>`Usage: closeencoder [n]` |
+| `encoderaddress` | A | Save an encoder board's I2C address (next open); 0 unsets instance 2..4.<br/>`Usage: encoderaddress [n] <0x49..0x50\|0x36..0x3D>` |
+| `encoderautostart` | A | Open an encoder board after boot [n] [on\|off].<br/>`Usage: encoderautostart [n] [on\|off]` |
+| `encoderbus` | A | Route an encoder board to bus <0\|1> (reboot required).<br/>`Usage: encoderbus [n] <0\|1>` |
+| `encoderstatus` |  | Show an encoder board: connection, product, pixels, address, brightness. (add 'json' for JSON output)<br/>`Usage: encoderstatus [n] [json]` |
+| `openencoder` | A | Open an encoder board (its pixels light with 'ledcolor encoder'); n is instance 2..4.<br/>`Usage: openencoder [n]` |
 
 ## servo
 
@@ -915,7 +915,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `i2cstats` |  | I2C bus statistics and errors. |
 | `inputbus` | A | Route input device to bus: <0\|1> (reboot required)<br/>`Usage: inputBus <0\|1>` |
 | `oledbus` | A | Route OLED to bus: <0\|1> (reboot required)<br/>`Usage: oledBus <0\|1>` |
-| `sensorautostart` | A | Sensor auto-start: [sensor] [on\|off]<br/>`Usage: sensorautostart [sensor] [on\|off] sensorautostart all [on\|off] Sensors: thermal, tof, imu, gps, fmradio, apds, input, rtc, presence, encoder` |
+| `sensorautostart` | A | Sensor auto-start: [sensor] [n] [on\|off]<br/>`Usage: sensorautostart [sensor] [n] [on\|off] sensorautostart all [on\|off] Sensors: thermal, tof, imu, gps, fmradio, apds, input, rtc, presence, encoder (n: encoder 1..4)` |
 | `sensorinfo` |  | Sensor details: <name><br/>`Usage: sensorinfo <sensor_name> Example: sensorinfo BNO055` |
 | `sensors` |  | List I2C sensors [filter]<br/>`Usage: sensors [filter] - filter by name, description, or manufacturer sensors json [brief] - live state (+readings; 'brief' = state only, no data) Example: sensors temperature, sensors json brief` |
 

@@ -3,9 +3,9 @@
 // claims) and address collisions (System_I2CInstanceCore.h, design sections
 // 1.1, 1.3, 3).
 //
-// Built twice: with the firmware's maxima (every type has one instance, so
-// every slot is the type value) and with HW1_HOST_I2C_TEST_ENCODER_MAX=4, which
-// gives the encoder four instances as the multi-instance phases will.
+// Built twice: with the firmware's maxima (the encoder four instances since
+// phase 1c, every other type one) and with HW1_HOST_I2C_TEST_ENCODER_MAX=4,
+// which runs the cases written for four encoder instances.
 
 #include <cassert>
 #include <cstdio>
@@ -74,13 +74,22 @@ static void testSlotsRoundTrip() {
 
 static void testFirmwareMaxima() {
 #ifndef HW1_HOST_I2C_TEST_ENCODER_MAX
-  // Phase 1a: no type has a second instance yet, so nothing grows.
-  assert(kEncoderMaxInstances == 1);
-  assert(kI2cExtraSlots == 0 && kI2cSlotCount == I2C_DEVICE_COUNT);
-  assert(i2cSlot(I2C_DEVICE_ENCODER, 2) == kI2cNoSlot);
-  const I2cInstanceArg arg = i2cParseInstanceArg(I2C_DEVICE_ENCODER, "2", I2cInstanceForm::OpenClose);
-  assert(arg.error == I2cInstanceError::SingleInstance);
-  assert(errorText(I2C_DEVICE_ENCODER, arg, "openencoder") == "Error: encoder has one instance.");
+  // Phase 1c: the encoder has four instances (owner question Q1), every
+  // other type one; instance 1's slots are still the type values.
+  assert(kEncoderMaxInstances == 4 && i2cMaxInstances(I2C_DEVICE_ENCODER) == 4);
+  assert(kI2cExtraSlots == 3 && kI2cSlotCount == I2C_DEVICE_COUNT + 3);
+  assert(i2cSlot(I2C_DEVICE_ENCODER, 2) == I2C_DEVICE_COUNT);
+  assert(i2cSlot(I2C_DEVICE_ENCODER, 5) == kI2cNoSlot);
+  for (int t = 0; t < I2C_DEVICE_COUNT; ++t) {
+    if (t != I2C_DEVICE_ENCODER) assert(i2cMaxInstances(static_cast<I2cDeviceType>(t)) == 1);
+  }
+  I2cInstanceArg arg = i2cParseInstanceArg(I2C_DEVICE_ENCODER, "2", I2cInstanceForm::OpenClose);
+  assert(arg.error == I2cInstanceError::None && arg.n == 2);
+  arg = i2cParseInstanceArg(I2C_DEVICE_ENCODER, "5", I2cInstanceForm::OpenClose);
+  assert(errorText(I2C_DEVICE_ENCODER, arg, "openencoder [n]") ==
+         "Error: encoder has instances 1-4. Usage: openencoder [n]");
+  arg = i2cParseInstanceArg(I2C_DEVICE_IMU, "2", I2cInstanceForm::OpenClose);
+  assert(errorText(I2C_DEVICE_IMU, arg, "openimu") == "Error: imu has one instance.");
 #endif
 }
 
