@@ -37,7 +37,8 @@ from test_web_batch_handlers import extract_block, require  # noqa: E402
 RUN_COMMAND = "bool oledRunCommand("
 REPLY_TEXT = "void oledCommandReplyText("
 REPORT_REPLY = "static bool oledReportCommandReply("  # oledRunCommand's verdict and toast
-POWER_SLEEP = ("static void executePowerSleepAction(", "static bool powerSleepInputHandler(")
+POWER_SLEEP = ("static void powerLightSleepConfirmed(", "static void executePowerSleepAction(",
+               "static bool powerSleepInputHandler(")
 CMD_POWERSAVE = "static const char* cmd_powersave("
 POWERSAVE_ROW = re.compile(
     r'\{\s*"powersave"\s*,\s*"(?:[^"\\]|\\.)*"\s*,\s*(true|false)\s*,\s*cmd_powersave\b')

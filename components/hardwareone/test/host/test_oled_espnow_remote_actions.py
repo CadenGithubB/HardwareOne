@@ -61,7 +61,7 @@ import espnow_remote_replies as replies
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[3]
 
-EXECUTORS = ("executeOledCommand", "executeOledCommandWithResult", "oledEspNowRunOwnerCommand",
+EXECUTORS = ("executeOledCommand", "executeOledCommandShowResult", "executeOledCommandWithResult", "oledEspNowRunOwnerCommand",
              "oledRunCommand")
 # File-local functions whose first argument is the command name of the line
 # they build ("%s <MAC>"); the names are checked at their calls.

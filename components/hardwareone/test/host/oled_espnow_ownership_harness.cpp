@@ -46,6 +46,7 @@ static bool pairModeActive = false;
 static int candidateCount = 0;
 
 [[maybe_unused]] static void executeOledCommand(const String& line) { commands.push_back(line); }
+[[maybe_unused]] static void executeOledCommandShowResult(const String& line) { commands.push_back(line); }
 // Mirrors OLED_Utils.cpp: the reply is copied (truncated) into out; a replaced
 // display session returns false with out[0] == '\0'. The executor reports an
 // "Error..." reply as a failed command.

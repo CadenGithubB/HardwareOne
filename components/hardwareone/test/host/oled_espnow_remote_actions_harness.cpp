@@ -50,6 +50,7 @@ static std::string execReply;               // the reply it copies out
 static int scrubs = 0;
 
 [[maybe_unused]] static void executeOledCommand(const String& line) { commands.push_back(line); }
+[[maybe_unused]] static void executeOledCommandShowResult(const String& line) { commands.push_back(line); }
 // Mirrors OLED_Utils.cpp: the reply is copied (truncated) into out; the
 // executor reports a reply that is a failure by the reply rule as false.
 [[maybe_unused]] static bool executeOledCommandWithResult(const String& line, char* out, size_t outSize) {

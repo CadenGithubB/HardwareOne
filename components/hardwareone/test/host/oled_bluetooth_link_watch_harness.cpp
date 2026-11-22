@@ -156,6 +156,7 @@ static int gMarks = 0;
 static void oledMarkDirty() { ++gMarks; }
 static bool oledRunCommand(const char* cmd) { gCommands.push_back(cmd); return true; }
 static void executeOledCommand(const char* cmd) { gCommands.push_back(cmd); }
+[[maybe_unused]] static void executeOledCommandShowResult(const char* cmd) { gCommands.push_back(cmd); }
 // A refusal the next command answers with (nullptr: the command succeeds).
 static const char* gCommandRefusal = nullptr;
 static bool executeOledCommandWithResult(const char* cmd, char* out, size_t n) {

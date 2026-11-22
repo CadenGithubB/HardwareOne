@@ -5737,18 +5737,32 @@ The checks:
   over-long reply stays bounded.
 - The background `executeOledCommand` (OLED background commands, step 1): the press queues
   at once and sets the busy flag; a second press, or an `oledRunCommandAsync`, is refused
-  with "Busy" and queues nothing; success toasts the reply without its `OK:`/`SUCCESS:` lead
-  ("Done" for a bare OK, nothing or JSON; the first line or sentence of a long one); admin,
+  with "Busy" and queues nothing; a success shows no toast (owner 2026-11-22: failures
+  only), while `executeOledCommandShowResult` (screens that do not show the result) toasts
+  the reply without its `OK:`/`SUCCESS:` lead ("Done" for a bare OK, nothing or JSON; the
+  first line or sentence of a long one); admin,
   super-admin and other refusals keep their short reason; 60 s without a reply toasts the
   timeout and the late reply shows nothing (its mailbox freed); a replaced session sees
   nothing; an empty line is refused at the press; the line is wiped when it ends; off the
   display task the action waits on the checked executor as before.
+- The value-scroll rows (OLED background commands, step 2: FM tune, LED brightness;
+  `oledValueScrollStep` on the production `OLED_ValueScroll.h`): a step is shown at once and
+  sent at once when the slot is free; steps while it runs are neither sent nor refused
+  "Busy", and only the newest goes out on the frame the running one ends (four steps, two
+  commands); a step while another screen's command runs waits silently and goes out after
+  it; a refusal toasts its reason and gives the row back to the device, unless a newer value
+  waits (that one is still sent); after a success the row keeps its value until the device
+  shows it or 1.5 s pass, then follows the device; a replaced session's step shows nothing,
+  and a value still waiting at a display session boundary (behind the row's own command or
+  another screen's) is dropped, never sent as the new user (statically:
+  `oledResetLocalDisplaySessionTransients` calls `oledValueScrollSessionBoundary`).
 - Static: the Automations, Logging and Network screens, the Quick Settings section and the
   unavailable-page / Web Stats actions (`handleOledActionButton`) no longer fire commands
   whose reply is dropped, and their `broadcastOutput` success lines are conditional. The
   Quick Settings section never calls the waiting `oledRunCommand`; `executeOledCommand`
   runs in the background; `oledUpdate` delivers the command in flight whether the panel
-  runs or not and `updateOledDisplay` draws its busy mark; every `oledRunCommand` call on an
+  runs or not, then sends a value-scroll row's waiting value, and `updateOledDisplay` draws
+  its busy mark; every `oledRunCommand` call on an
   OLED screen (`OLED_*.cpp`, `i2csensor_*_oled.h`) uses its verdict or is a
   `(void)oledRunCommand(...);  // waits: <why>` line (the step-2 list).
 
@@ -5777,7 +5791,8 @@ The checks:
 - "Power Saving" submits `powersave <next step>`: a non-admin is refused ("Admin required"
   toast, value kept); an admin moves along the ladder (10 -> 15, 60 -> Off, Off -> 1, an
   off-ladder value -> 1) with one audit record and no direct write.
-- A guest is still blocked ("View-only"); Sleep 20s and Screen Off run their commands as before.
+- A guest is still blocked ("View-only"); Sleep 20s asks first, defaulting to No (G-49), and runs
+  `lightsleep 20` only on Yes; Screen Off runs its command as before.
 - Static: no `OLED_Mode_*.cpp` calls `setSetting`, and the `powersave` row is admin-only.
 
 `--component`/`--source-dir` point it at another tree; the f4cc542 sources fail it (the row

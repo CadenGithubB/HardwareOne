@@ -1234,6 +1234,13 @@ everything user-visible since the v0.99.99.1 tag.
   speech and the other single-copy features work as before. `ramflush status` lists the devices.
   The RTC record changed, so an overlay saved by older firmware is ignored once. Host-tested
   (`ramflush_device_list_tests`); not checked on a device.
+- OLED actions: a background action now toasts only when it fails (its reason) or, on screens
+  that do not show the result themselves, what it did (bond connect, remote sensor on/off, the
+  role swap, Advertising, G2/ring Reconnect, an ESP-NOW pair request, the mesh passphrase, the CPU
+  mode, Map's Toggle GPS, Force History). Rows that show their own state no longer add a second
+  "done" message. FM tune (left/right) and the LED brightness nudge and preset no longer hold the
+  screen per step or answer "Busy": the value moves at once and only the newest one is sent.
+  Power > Sleep 20s now asks first, defaulting to No. Host-tested; not checked on a device.
 - The UART host link (the CM5 / Raspberry Pi co-processor) speaks link protocol 3, a framed command
   channel. A line `@<id> <command>` (the id 1-8 lowercase hex digits the host picks) is answered
   `@<id> ok <len>` or `@<id> err <len>`, then exactly `<len>` bytes of reply (newlines included)

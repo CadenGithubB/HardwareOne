@@ -361,6 +361,7 @@ static void requestOledMode(OledMode mode, const char*, bool = true, bool = fals
 }
 static std::vector<std::string> commands;
 static void executeOledCommand(const String& line) { commands.emplace_back(line.c_str()); }
+[[maybe_unused]] static void executeOledCommandShowResult(const String& line) { executeOledCommand(line); }
 static bool executeOledCommandWithResult(const String& line, char* out, size_t length) {
   commands.emplace_back(line.c_str());
   std::snprintf(out, length, "%s", "OK: GPS track cleared");

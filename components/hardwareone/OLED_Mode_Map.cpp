@@ -1599,8 +1599,9 @@ static void executeSubmenuAction(int submenuType, int action) {
           break;
         case 1:  // Toggle GPS
           {
-            if (gGpsRunning) executeOledCommand("closegps");
-            else executeOledCommand("opengps");
+            // The row says "Toggle GPS" without a state: toast the result.
+            if (gGpsRunning) executeOledCommandShowResult("closegps");
+            else executeOledCommandShowResult("opengps");
           }
           break;
         case 2: goBackToMainMenu(); break;  // Back

@@ -7,6 +7,11 @@
 #include "OLED_UI.h"
 #include "OLED_Utils.h"
 #include <Adafruit_SSD1306.h>
+#include <esp_attr.h>  // EXT_RAM_BSS_ATTR
+
+// The L/R tune row's own wanted frequency (10 kHz units; OLED background
+// commands, step 2): a step moves it at once, only the newest goes out.
+EXT_RAM_BSS_ATTR static OledValueScroll sFmTuneScroll;
 
 // FM Radio OLED display function - shows radio data
 static void displayFmRadio() {
@@ -38,7 +43,8 @@ static void displayFmRadio() {
   if (snap.seekInProgress) {
     oledDisplay->printf("Seek %s...", snap.seekDirUp ? "up" : "dn");
   } else {
-    oledDisplay->printf("%.1f MHz", snap.frequency / 100.0);
+    // The tune steps' wanted frequency while they lead, else the tuner's.
+    oledDisplay->printf("%.1f MHz", oledValueScrollShown(sFmTuneScroll, (int32_t)snap.frequency) / 100.0);
   }
   oledDisplay->setTextSize(1);
   y += 18;
@@ -96,8 +102,8 @@ static void fmRadioToggleConfirmed(void* userData) {
 // Input handler for FM Radio OLED mode. Full tuner controls (all dispatched
 // through the OLED command helpers so they carry the [CMD] audit line and the
 // OLED auth identity — same stance as the LED screen; presses run in the
-// background, the tune steps still wait until step 2 of the OLED background
-// plan):
+// background; a tune step never waits: the screen moves at once and only the
+// newest frequency is sent, OLED background commands step 2):
 //   L/R      tune -/+ 0.1 MHz        Up/Down  seek down/up (async core)
 //   A        mute/unmute             Y        volume ladder 0>3>6>9>12>15>0
 //   X        open/close (confirm)    B        back (falls through)
@@ -120,15 +126,16 @@ static bool fmRadioInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
   FmRadioCache snap;
   if (!fmRadioCacheSnapshot(snap, 10)) return false;
 
-  // L/R: step tune ±0.1 MHz (10 kHz-unit command form), clamped to the band.
+  // L/R: step tune ±0.1 MHz (10 kHz-unit command form), clamped to the band,
+  // from the frequency the screen shows. Steps coalesce: while one tune runs
+  // the newest waits and replaces any older one; nothing is refused "Busy".
   if (gNavEvents.left || gNavEvents.right) {
     if (oledGuestBlocksMutate()) return true;
-    int f = (int)snap.frequency + (gNavEvents.right ? 10 : -10);
+    const int32_t shown = oledValueScrollShown(sFmTuneScroll, (int32_t)snap.frequency);
+    int32_t f = shown + (gNavEvents.right ? 10 : -10);
     if (f < 7600)  f = 7600;
     if (f > 10800) f = 10800;
-    char cmd[28];
-    snprintf(cmd, sizeof(cmd), "fmradiotune %d", f);
-    (void)oledRunCommand(cmd);  // waits: step 2 (value scroll, one command per step)
+    if (f != shown) oledValueScrollStep(sFmTuneScroll, "fmradiotune %ld", f);
     return true;
   }
 
