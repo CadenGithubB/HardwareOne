@@ -125,6 +125,12 @@ static esp_err_t radioHalConsoleMirror(bool on) {
 }
 static bool radioHalConsoleMirrorOn() { return gMirror.running; }
 static bool radioHalConsoleMirrorSupported() { return gMirror.supported; }
+// radioHalPrepare's first attempt failed (HAL_Radio.cpp).
+static bool gBootRetried = false;
+static bool radioHalBootRetried() { return gBootRetried; }
+// The boot window (System_BootDebug.cpp): true until setup() ends.
+static bool gBooting = false;
+static bool bootDebugInProgress() { return gBooting; }
 
 // Settings: the fields the code under test reads and writes.
 struct FakeSettings {
@@ -290,6 +296,8 @@ static void powerOn(bool keepMarker = false) {
   gSetSettingCalls = 0;
   gReboots = 0;
   gBootTransportUp = true;
+  gBootRetried = false;
+  gBooting = false;
   gMillis = 1000;
   Clock::gNow = 1763640000;  // 2025-11-20T12:00:00Z
 }
@@ -468,7 +476,8 @@ static void the_reboot_escalation_counts_at_the_next_boot() {
 static void a_companion_that_does_not_come_up_at_boot_counts_and_mirrors() {
   factoryNew();
   gBootTransportUp = false;
-  gMirror.running = true;  // radioHalPrepare started it after the failed first attempt
+  gMirror.running = true;  // radioHalPrepare started it for the boot
+  gBootRetried = true;     // and its first attempt failed
   Clock::gNow = 37;        // no clock yet at boot: an unset clock reads its uptime, not 0
   radioCompanionBootInit();
   CHECK(gSettings.c6OutageCount == 1 && gSettings.c6LastFaultEpochSec == 0);
@@ -492,13 +501,64 @@ static void a_companion_that_does_not_come_up_at_boot_counts_and_mirrors() {
 
 static void a_boot_retry_that_worked_still_earns_the_mirror_its_ten_minutes() {
   factoryNew();
-  gMirror.running = true;  // attempt 1 failed, attempt 2 came up
+  gMirror.running = true;  // radioHalPrepare started it for the boot
+  gBootRetried = true;     // attempt 1 failed, attempt 2 came up
   radioCompanionBootInit();
   CHECK(sMirror.armed() && gSettings.c6OutageCount == 0);  // not an outage: the companion is up
   runHealthy(9 * 60 * 1000);
   CHECK(gMirror.running);
   runHealthy(2 * 60 * 1000);
   CHECK(!gMirror.running && gPersists == 0);
+}
+
+// B13: radioHalPrepare starts the mirror on every boot; it stays while setup()
+// runs and stops on the first tick after boot ends, unless the setting or a
+// fault wants it.
+static void the_boot_window_keeps_the_mirror_until_boot_ends() {
+  factoryNew();
+  gBooting = true;
+  gMirror.running = true;  // radioHalPrepare started it for the boot
+  radioCompanionBootInit();
+  CHECK(gTrace.empty() && !sMirror.armed());
+  CHECK(std::strcmp(mirrorReason(), "boot") == 0);
+  CHECK(std::strstr(mirrorText(), "on for the boot") != nullptr);
+  for (int i = 0; i < 20; ++i) {
+    gMillis += 1000;
+    CHECK(loopTick() == CompanionAction::None);
+    runCmdExec();
+  }
+  CHECK(gMirror.running && gMirror.stops == 0);
+  gBooting = false;  // setup() ended
+  gMillis += 1000;
+  CHECK(loopTick() == CompanionAction::None);
+  CHECK((gTrace == std::vector<std::string>{"mirror-stop"}));
+  runCmdExec();
+  CHECK(!gMirror.running && gMirror.stops == 1 && logged("console mirror off: boot ended"));
+  runHealthy(60000);
+  CHECK(gMirror.stops == 1 && gMirror.starts == 0 && gPersists == 0);
+  CHECK(std::strcmp(mirrorReason(), "off") == 0);
+
+  // The saved setting keeps it past the boot.
+  powerOn();
+  gSettings.c6ConsoleMirror = true;
+  gBooting = true;
+  gMirror.running = true;
+  radioCompanionBootInit();
+  gBooting = false;
+  runHealthy(60000);
+  CHECK(gMirror.running && gMirror.stops == 0 && gTrace.empty());
+  gSettings.c6ConsoleMirror = false;
+
+  // A mirror the HAL could not start is tried once for the boot, on cmd_exec.
+  powerOn();
+  gBooting = true;
+  radioCompanionBootInit();
+  CHECK((gTrace == std::vector<std::string>{"mirror-start"}));
+  runCmdExec();
+  CHECK(gMirror.running && gMirror.starts == 1 && logged("console mirror on for the boot"));
+  gBooting = false;
+  runHealthy(5000);
+  CHECK(!gMirror.running && gMirror.stops == 1);
 }
 
 static void c6console_off_ends_a_fault_mirror_and_on_keeps_it() {
@@ -633,6 +693,7 @@ int main() {
   the_reboot_escalation_counts_at_the_next_boot();
   a_companion_that_does_not_come_up_at_boot_counts_and_mirrors();
   a_boot_retry_that_worked_still_earns_the_mirror_its_ten_minutes();
+  the_boot_window_keeps_the_mirror_until_boot_ends();
   c6console_off_ends_a_fault_mirror_and_on_keeps_it();
   a_fault_between_the_stop_request_and_the_stop_keeps_the_mirror();
   a_full_command_queue_delays_nothing_for_good();

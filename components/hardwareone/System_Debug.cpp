@@ -38,6 +38,8 @@
 #include "i2csensor_rda5807.h"
 #include "i2csensor_vl53l4cx.h"
 #include "System_ESPNow.h"
+#include "System_BootDebug.h"
+#include <esp_timer.h>
 
 // External dependencies from .ino
 
@@ -114,6 +116,7 @@ static DebugPoolGrowthState gDebugPoolGrowthState = DEBUG_POOL_FULL;
 static constexpr int DEBUG_POOL_GROW_THRESHOLD = 24;
 
 volatile bool gDebugVerbose = false;
+volatile bool gDebugLineForce = false;  // debugverbose, or the boot capture (System_BootDebug.cpp)
 
 // Low-level stack/heap trace toggle — see STACK_TRACEF in System_Debug.h.
 // Runtime-only: not persisted, resets to false on reboot.
@@ -972,9 +975,17 @@ static bool enqueueChunk(const char* text, size_t len, uint8_t routing,
   return true;
 }
 
-void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...) {
+// The line path of both entry points. `shownWithoutCapture` matters only
+// during the boot debug capture (System_BootDebug.h): the saved flags (and log
+// level, for a DEBUG line) would have shown this line. Every line of the boot
+// is copied into the boot buffer; a line only the capture's force made goes
+// nowhere else, so the console and the normal logs see what they always saw.
+// Inlined into both, so a line costs the stack one frame, as before.
+static inline __attribute__((always_inline)) void debugQueueVPrintf(DebugFlagMask flag, bool shownWithoutCapture,
+                                                                    const char* fmt, va_list args) {
   if (!fmt) return;
-  if (!getDebugQueue() || !getDebugFreeQueue()) return;
+  const bool capturing = gBootDebugCapturing;
+  if (!capturing && (!getDebugQueue() || !getDebugFreeQueue())) return;
 
   // CRITICAL: Check if we're in a sensor task that's shutting down
   TaskHandle_t currentTask = xTaskGetCurrentTaskHandle();
@@ -988,14 +999,38 @@ void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...) {
   // layer — by design, see the note at the enqueueChunk call in
   // broadcastOutputCore: callers prove their line fits 255 B and pack multiple
   // lines with '\n' themselves. Nothing splits at runtime.
+  const int64_t formatStartUs = (capturing && !shownWithoutCapture) ? esp_timer_get_time() : 0;
   char line[DEBUG_MSG_SIZE];
-  va_list args;
-  va_start(args, fmt);
   int wn = vsnprintf(line, sizeof(line), fmt, args);
-  va_end(args);
   if (wn < 0) return;
   size_t llen = (wn < (int)sizeof(line)) ? (size_t)wn : (sizeof(line) - 1);
+  if (capturing) {
+    bootDebugCaptureLine(line, llen, shownWithoutCapture, formatStartUs);
+    if (!shownWithoutCapture) return;
+    if (!getDebugQueue() || !getDebugFreeQueue()) return;
+  }
   enqueueChunk(line, llen, MSG_ROUTE_ALL, flag, wn >= (int)DEBUG_MSG_SIZE);
+}
+
+// DEBUGF_QUEUE and the INFO/WARN/ERROR macros: shown by the flag (or ALWAYS).
+void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...) {
+  const bool shown = !gBootDebugCapturing || gDebugVerbose ||
+                     (flag & DEBUG_ALWAYS) != (DebugFlagMask)0 || (gDebugFlags & flag) != (DebugFlagMask)0;
+  va_list args;
+  va_start(args, fmt);
+  debugQueueVPrintf(flag, shown, fmt, args);
+  va_end(args);
+}
+
+// DEBUGF_QUEUE_DEBUG: shown by the flag and the DEBUG log level.
+void debugQueuePrintfDebug(DebugFlagMask flag, const char* fmt, ...) {
+  const bool shown = !gBootDebugCapturing || gDebugVerbose ||
+                     (gLogLevel >= LOG_LEVEL_DEBUG &&
+                      ((flag & DEBUG_ALWAYS) != (DebugFlagMask)0 || (gDebugFlags & flag) != (DebugFlagMask)0));
+  va_list args;
+  va_start(args, fmt);
+  debugQueueVPrintf(flag, shown, fmt, args);
+  va_end(args);
 }
 
 // ── System event log (always-on) ─────────────────────────────────────────────
@@ -1701,6 +1736,7 @@ const char* cmd_debugverbose(const String& argsInput) {
   const int v = parseBoolArg(ca.arg(0));
   if (v < 0) return kCommandReplyNotOnOff;
   gDebugVerbose = (v == 1);
+  gDebugLineForce = gDebugVerbose || gBootDebugCapturing;
   applyRadioStackLogLevels();  // verbose shows the radio stacks' routine lines too
   return gDebugVerbose ? "debugVerbose enabled" : "debugVerbose disabled";
 }

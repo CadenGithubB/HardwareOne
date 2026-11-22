@@ -302,6 +302,12 @@ void debugQueueBackpressure(int minFree = 32, uint32_t maxWaitMs = 200);
 void debugWaitOutputDrained(uint32_t maxWaitMs);
 extern volatile unsigned long gDebugDropped;
 extern volatile bool gDebugVerbose;
+// Every debug line passes its flag and level gate: debugverbose, or the boot
+// debug capture (System_BootDebug.h) from the top of setup() until setup()
+// ends. Read by the line macros only; isDebugFlagSet() and getLogLevel() keep
+// answering for the saved flags (plus debugverbose), so code that acts on a
+// flag (the ESP-IDF tag levels, for one) is not changed by the boot capture.
+extern volatile bool gDebugLineForce;
 
 // ── Low-level stack/heap diagnostic trace (runtime-only) ────────────────────
 // Emits directly to Serial — bypasses the log_out queue and the broadcast
@@ -340,6 +346,8 @@ inline void setDebugFlags(DebugFlagMask flags) { DEBUG_MANAGER.setDebugFlags(fla
 inline void setDebugFlag(DebugFlagMask flag) { setDebugFlags(getDebugFlags() | flag); }
 inline void clearDebugFlag(DebugFlagMask flag) { setDebugFlags(getDebugFlags() & ~flag); }
 inline bool isDebugFlagSet(DebugFlagMask flag) { return gDebugVerbose || ((getDebugFlags() & flag) != (DebugFlagMask)0); }
+// The line macros' flag gate: isDebugFlagSet, with the boot capture's force.
+inline bool debugLineGate(DebugFlagMask flag) { return gDebugLineForce || ((getDebugFlags() & flag) != (DebugFlagMask)0); }
 
 // Apply a validated LOG_LEVEL_* severity to DebugManager and the Wi-Fi/PHY
 // framework tags. Callers own validation and settings persistence. HTTPS tags
@@ -448,6 +456,7 @@ void deliverCommandResult(const String& result, const CommandContext& ctx);
 // broadcasts into whichever buffer cmd_exec had set.
 
 void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...);
+void debugQueuePrintfDebug(DebugFlagMask flag, const char* fmt, ...);
 
 // Print summary (and tail) of output suppressed during help; resets counters
 void helpSuppressedPrintAndReset();
@@ -477,9 +486,11 @@ inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : gLogLeve
 // diagnostics from running when the eventual log line would be suppressed.
 // DEBUG_ALWAYS retains the same semantics it has in DEBUGF_QUEUE(), while the
 // DEBUG log-level requirement still applies to DEBUGF_QUEUE_DEBUG() callers.
+// gDebugLineForce (debugverbose, the boot capture) passes every DEBUG line.
 inline bool isDebugOutputEnabled(DebugFlagMask flag) {
-  return getLogLevel() >= LOG_LEVEL_DEBUG &&
-         ((((flag) & DEBUG_ALWAYS) != (DebugFlagMask)0) || isDebugFlagSet(flag));
+  return gDebugLineForce ||
+         (gLogLevel >= LOG_LEVEL_DEBUG &&
+          ((((flag) & DEBUG_ALWAYS) != (DebugFlagMask)0) || ((getDebugFlags() & flag) != (DebugFlagMask)0)));
 }
 // ============================================================================
 // Debug Macros - Safe for use from any context
@@ -494,15 +505,17 @@ inline bool isDebugOutputEnabled(DebugFlagMask flag) {
 // flag rides along so the message still tags as its real subsystem.
 #define DEBUGF_QUEUE(flag, fmt, ...) \
   do { \
-    if (((flag) & DEBUG_ALWAYS) != (DebugFlagMask)0 || isDebugFlagSet(flag)) { \
+    if (((flag) & DEBUG_ALWAYS) != (DebugFlagMask)0 || debugLineGate(flag)) { \
       debugQueuePrintf(flag, fmt, ##__VA_ARGS__); \
     } \
   } while (0)
 
+// debugQueuePrintfDebug: the same line path, but during the boot capture it
+// knows the line also needed the DEBUG log level to be shown normally.
 #define DEBUGF_QUEUE_DEBUG(flag, fmt, ...) \
   do { \
     if (isDebugOutputEnabled(flag)) { \
-      debugQueuePrintf(flag, fmt, ##__VA_ARGS__); \
+      debugQueuePrintfDebug(flag, fmt, ##__VA_ARGS__); \
     } \
   } while (0)
 

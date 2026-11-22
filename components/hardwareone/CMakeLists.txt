@@ -281,6 +281,7 @@ set(hardwareone_srcs
         System_SetupWizard.cpp
         System_FeatureRegistry.cpp
         System_BootState.cpp
+        System_BootDebug.cpp
         System_FactoryWipe.cpp
         System_TimeAnchors.cpp
         System_Utils.cpp

@@ -137,6 +137,7 @@ constexpr uint32_t kHostedTxFlushMs = 100;
 
 bool sBoardPrepared = false;
 bool sPrepared = false;        // radioHalPrepare() ran and the transport came up at least once
+bool sBootRetried = false;     // radioHalPrepare()'s first attempt failed
 bool sUpdateOnly = false;     // Explicit legacy OTA session; unavailable to radio users.
 bool sTransportUp = false;     // last TRANSPORT_UP without a DOWN/FAILURE since
 bool sHostedLinkUp = false;    // Hosted posted TRANSPORT_UP in this session (cleared before each start)
@@ -438,6 +439,10 @@ esp_err_t radioHalPrepare() {
   quietHostedLogs();
   ESP_RETURN_ON_ERROR(prepareBoard(), kTag, "Board preparation failed");
   ESP_RETURN_ON_ERROR(registerEvents(), kTag, "Hosted events");
+  // The mirror runs for the boot (owner decision B13): the companion's own
+  // boot messages are seen on every boot, and System_RadioCompanion stops it
+  // when setup() ends unless `c6console on` or a fault wants it. Not fatal.
+  radioHalConsoleMirror(true);
   esp_err_t err = ESP_FAIL;
   for (int attempt = 1; attempt <= kBootAttempts; attempt++) {
     // A failed start leaves Hosted initialised (Arduino's hostedInit keeps its
@@ -447,11 +452,10 @@ esp_err_t radioHalPrepare() {
     // (bench log 2026-11-08: attempts 1 and 2 both failed at 26756 ms). Close
     // it first, as the companion's Recover does before every retry.
     if (attempt > 1) {
-      // The first start failed, which is a companion fault: mirror the C6's
-      // console from here on, so the retry's own boot messages are seen. Not
-      // fatal; radioCompanionBootInit finds the mirror on and keeps it for
-      // the time a fault earns (System_RadioCompanion.cpp).
-      radioHalConsoleMirror(true);
+      // The first start failed, which is a companion fault: radioCompanionBootInit
+      // reads it (radioHalBootRetried) and keeps the mirror for the time a
+      // fault earns (System_RadioCompanion.cpp).
+      sBootRetried = true;
       radioHalStopTransport();
     }
     err = radioHalStartTransport();
@@ -463,6 +467,7 @@ esp_err_t radioHalPrepare() {
 }
 
 bool radioHalPrepared() { return sPrepared; }
+bool radioHalBootRetried() { return sBootRetried; }
 
 static bool updateTransportUp() {
   portENTER_CRITICAL(&sLock);

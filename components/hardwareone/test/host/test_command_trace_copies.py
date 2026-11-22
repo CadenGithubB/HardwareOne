@@ -88,7 +88,7 @@ def source_contract(component: Path) -> None:
             "DEBUG_CMD_FLOWF is DEBUGF_QUEUE_DEBUG on DEBUG_CMD_FLOW")
     queue = re.search(r"(?ms)^#define DEBUGF_QUEUE_DEBUG\(flag, fmt, \.\.\.\) \\\n(.*?)\n\n", debug)
     body = " ".join(queue.group(1).replace("\\", " ").split()) if queue else ""
-    require(body == "do { if (isDebugOutputEnabled(flag)) { debugQueuePrintf(flag, fmt, ##__VA_ARGS__); } } while (0)",
+    require(body == "do { if (isDebugOutputEnabled(flag)) { debugQueuePrintfDebug(flag, fmt, ##__VA_ARGS__); } } while (0)",
             "DEBUGF_QUEUE_DEBUG evaluates its arguments only inside if (isDebugOutputEnabled(flag))")
 
 

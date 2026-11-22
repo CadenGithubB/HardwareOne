@@ -212,8 +212,8 @@ def source_checks() -> None:
     require("radioHalConsoleMirror(" not in re.sub(r"//[^\n]*", "", boot),
             "boot init neither starts nor stops the mirror itself")
     service = extract_block(companion, "void serviceFaults(uint32_t now, bool quiet)")
-    require("sMirror.tick(now, state, gSettings.c6ConsoleMirror, running)" in service,
-            "the fault service follows the saved setting")
+    require("sMirror.tick(now, state, gSettings.c6ConsoleMirror || bootDebugInProgress(), running)" in service,
+            "the fault service follows the saved setting (and the boot window, B13)")
     require("c6ConsoleMirror(false)," in settings_h, "the mirror is off by default")
     print("esplog wiring, joined-only AP lookups, BLE_COEX scan lines, G2 scan stop, rpc_utils, c6console: OK")
 

@@ -26,7 +26,12 @@ reboot is counted at the next boot from the RTC marker.
 Source checks cover what the harness does not compile: the defaults (the
 struct initialiser and the settings row must both be off, because the row's
 default is what a boot applies), the read-only counter rows, the status keys,
-and radioHalPrepare, which may start the mirror only after a failed attempt.
+and radioHalPrepare, which starts the mirror before its first attempt.
+
+B13 (2026-11-21): the mirror now runs on every boot. radioHalPrepare starts
+it; the boot window (bootDebugInProgress) counts as the setting being on, so
+the policy stops it on the first tick after setup() ends unless the setting or
+a fault wants it. A failed first attempt is read through radioHalBootRetried.
 The policy's timing is in test_radio_companion_core.cpp.
 """
 from __future__ import annotations
@@ -110,14 +115,20 @@ def source_checks(src: Path) -> None:
                       "setSetting("):
         require(forbidden not in reboot, f"the reboot case must not call {forbidden}")
 
-    # The HAL: no mirror before the first attempt has failed.
+    # The HAL: the mirror runs for the boot (B13), started before the first
+    # attempt; a failed first attempt is reported as a fault, not by the mirror.
     prepare = extract_block(hal, "esp_err_t radioHalPrepare()")
     require(prepare.count("radioHalConsoleMirror(true);") == 1, "radioHalPrepare has one mirror start")
+    require(prepare.index("radioHalConsoleMirror(true);") < prepare.index("for (int attempt = 1;"),
+            "radioHalPrepare starts the mirror before its first attempt")
     loop = prepare[prepare.index("for (int attempt = 1;"):]
     retry = loop[loop.index("if (attempt > 1) {"):loop.index("err = radioHalStartTransport();")]
-    require("radioHalConsoleMirror(true);" in retry and
-            prepare.index("radioHalConsoleMirror(true);") > prepare.index("for (int attempt = 1;"),
-            "radioHalPrepare starts the mirror only before a retry, never on a first attempt")
+    require("sBootRetried = true;" in retry, "a retry is recorded for radioHalBootRetried")
+    require("radioHalBootRetried()" in boot and "radioHalConsoleMirrorOn()" not in boot,
+            "boot init arms the mirror for a failed boot attempt, not for the boot's own mirror")
+    service = strip_comments(one(companion, "void serviceFaults(uint32_t now, bool quiet)"))
+    require("gSettings.c6ConsoleMirror || bootDebugInProgress()" in service,
+            "the boot window counts as the setting being on until setup() ends")
     require(re.search(r"bool radioHalConsoleMirrorSupported\(\) \{ return true; \}", hal) is not None and
             re.search(r"bool radioHalConsoleMirrorSupported\(\) \{ return false; \}", hal) is not None,
             "the HAL says whether this assembly has the companion console")
@@ -157,6 +168,7 @@ def main() -> None:
     blocks = {
         "/*@CONSTANTS@*/": "\n".join([constant(companion, "kMirrorHealthyMs"), constant(companion, "kRebootMarker")]),
         "/*@SERVICE@*/": "\n\n".join(one(companion, marker) for marker in (
+            "bool mirrorArmed()",
             "const char* mirrorReason()",
             "const char* mirrorText()",
             "void consoleMirrorProc(void* arg)",

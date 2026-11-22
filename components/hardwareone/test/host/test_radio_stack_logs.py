@@ -208,12 +208,12 @@ def source_checks() -> None:
             "esp_hosted_init sets exactly the three RPC tags to WARN (the harness's model)")
 
     # HAL: quiet before anything of Hosted's runs; the C6 console by level.
-    # The mirror is no longer started on every boot (UP-14, 2026-11-20): only
-    # before the retry of a failed first attempt, still after the quieting.
+    # The mirror runs for every boot (B13, 2026-11-21): started before the
+    # first attempt, still after the quieting.
     prepare = extract_block(radio, "esp_err_t radioHalPrepare()")
-    order(prepare, "quietHostedLogs();", "prepareBoard()", "if (attempt > 1) {", "radioHalConsoleMirror(true);",
+    order(prepare, "quietHostedLogs();", "prepareBoard()", "radioHalConsoleMirror(true);", "for (int attempt = 1;",
           "radioHalStartTransport();")
-    require(prepare.count("radioHalConsoleMirror(") == 1, "radioHalPrepare has one mirror start, in the retry")
+    require(prepare.count("radioHalConsoleMirror(") == 1, "radioHalPrepare has one mirror start, for the boot")
     require("quietRpcLogs" not in radio and radio.count('"C6>"') == 0, "the C6 tag comes from the table")
     task = extract_block(radio, "void consoleTask(void*)")
     order(task, "radiolog::C6ConsoleLevels levels;", "if (n) logC6Line(levels, line, split);", "split = c != '\\n';")

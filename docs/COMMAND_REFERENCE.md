@@ -315,7 +315,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `c6autohold` | A | Hold the companion in reset while no radio feature runs: c6autohold [on\|off] (persists). |
 | `c6autorecover` | A | Auto-recover the companion after an outage: c6autorecover [on\|off] (persists). |
 | `c6confirm` | S | Confirm the companion's running image so it cannot roll back. |
-| `c6console` | A | Keep the C6's own console mirrored into the P4 log: c6console [on\|off] (persists). Off: only for 10 minutes after a companion fault.<br/>`Usage: c6console [on\|off] on - mirror the companion's console as C6> lines all the time (uses about 6 KB of internal memory) off - mirror it only after a companion fault, until the companion has been healthy for 10 minutes (the default)` |
+| `c6console` | A | Keep the C6's own console mirrored into the P4 log: c6console [on\|off] (persists). Off: only during boot and for 10 minutes after a companion fault.<br/>`Usage: c6console [on\|off] on - mirror the companion's console as C6> lines all the time (uses about 6 KB of internal memory) off - mirror it only during boot and after a companion fault, until the companion has been healthy for 10 minutes (the default)` |
 | `c6heartbeat` | A | Companion heartbeat interval in seconds, 0 disables the watchdog: c6heartbeat <0..60> (persists). |
 | `c6hold` | S | Hold the C6 in reset (radio fully off) or release it: c6hold [on\|off].<br/>`Usage: c6hold [on\|off] on - stop Wi-Fi, Bluetooth and ESP-NOW and hold the companion in reset off - release it and restore what was running` |
 | `c6restart` | A | Restart the C6 companion in place (radio features stop and come back). |

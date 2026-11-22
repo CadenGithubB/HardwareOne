@@ -363,6 +363,7 @@ bool sRestartLatched = false;
 bool sUpdateOnly = false;
 bool sHostedLinkUp = false;
 bool sPrepared = false;
+bool sBootRetried = false;
 bool sEventsRegistered = false;
 RadioHalEventFn sEventFn = nullptr;
 RadioCompanionMemory sMemory = {};
@@ -758,6 +759,7 @@ static void reset_world() {
   hal::sHeld = false;
   hal::sRestartLatched = false;
   hal::sPrepared = false;
+  hal::sBootRetried = false;
   hal::sEventsRegistered = false;
   hal::sEventFn = nullptr;
   hal::sSessionBleLinks = 0;

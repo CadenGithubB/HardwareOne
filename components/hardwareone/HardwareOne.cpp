@@ -30,6 +30,7 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
   #include <esp_http_server.h>
 #endif
 #include "System_VFS.h"
+#include "System_BootDebug.h"  // B13: every debug flag on during boot, into its own file
 #include <time.h>
 #include <esp_timer.h>
 #include <freertos/semphr.h>
@@ -1436,6 +1437,11 @@ static bool bootNetHandOffServices() {
 
 void hardwareone_setup() {
 
+  // B13: every debug flag on for the boot, into the boot buffer (not the
+  // console or the normal logs); bootDebugFinish() at the end of setup()
+  // restores the saved flags and writes /system/sys_logs/boot-debug-1.log.
+  bootDebugBegin();
+
   // ========================================================================
   // 1. PRE-SERIAL — crash tracking from RTC memory (no Serial yet)
   // ========================================================================
@@ -2428,6 +2434,10 @@ void hardwareone_setup() {
     snprintf(bootDetail, sizeof(bootDetail), "boot #%lu", (unsigned long)gBootCounter);
     systemEventPost(SYSEVT_BOOT_FINISHED, resetReasonName(rtcLastResetReason), bootDetail);
   }
+
+  // Boot is over: the saved debug flags rule again, the boot buffer goes to
+  // its file on cmd_exec, and the C6 console mirror's boot window closes.
+  bootDebugFinish();
 }
 
 
@@ -2550,6 +2560,7 @@ void hardwareone_loop() {
   // section[0] timing start here. Always-on stall WARN (with section attribution);
   // verbose period + section distribution self-gate on DEBUG_PERFORMANCE inside.
   loopHealthTick();
+  bootDebugLoopTick();   // the boot debug file's write, when cmd_exec was full at the end of setup
   taskCpuSampleTick();   // shared task-CPU sampler: 500 ms cadence while anyone reads it, idle otherwise
 
   // periodicMemorySample() now does an always-on DRAM-pressure check before

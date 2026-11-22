@@ -9,7 +9,8 @@
  * companion that never came up, recovers one that stops answering, and
  * escalates to a reboot only when soft recovery keeps failing.
  *
- * It also owns the companion's console mirror (HAL_Radio.h): off unless
+ * It also owns the companion's console mirror (HAL_Radio.h): on during boot
+ * (radioHalPrepare starts it; stopped when setup() ends), then off unless
  * `c6console on` is saved, started on a companion fault and stopped after ten
  * healthy minutes; and the fault history that survives restarts (settings
  * rows c6OutageCount, c6RebootCount, c6LastFaultEpochSec; `c6status`).

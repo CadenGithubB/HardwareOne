@@ -896,6 +896,19 @@ if(HW1_SANITIZE)
   target_link_options(radio_companion_core_tests PRIVATE -fsanitize=address,undefined)
 endif()
 
+# The boot debug capture (owner decision B13, System_BootDebugCore.h): whole
+# stamped lines, the first lines kept once the buffer is full, the truncation
+# counted and marked, the header's measurements, three kept boots.
+add_executable(boot_debug_core_tests test_boot_debug_core.cpp)
+set_target_properties(boot_debug_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_compile_options(boot_debug_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+if(HW1_SANITIZE)
+  target_compile_options(boot_debug_core_tests PRIVATE -fsanitize=address,undefined -g)
+  target_link_options(boot_debug_core_tests PRIVATE -fsanitize=address,undefined)
+endif()
+
 # What an intentional restart does to the P4's SDMMC host first
 # (System_RestartQuiesceCore.h): silence the C6, take the filesystem lock,
 # drain for the SDMMC timeout, every step bounded.
@@ -913,6 +926,7 @@ enable_testing()
 
 add_test(NAME esp_now_hosted_protocol COMMAND esp_now_hosted_protocol_tests)
 add_test(NAME radio_companion_core COMMAND radio_companion_core_tests)
+add_test(NAME boot_debug_core COMMAND boot_debug_core_tests)
 add_test(NAME restart_quiesce_core COMMAND restart_quiesce_core_tests)
 # The real HAL_Bluetooth.cpp under native and Hosted (P4 + C6) controller
 # substitutes, with the app console's teardown hooks around every stop; see

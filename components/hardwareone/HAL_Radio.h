@@ -108,8 +108,13 @@ inline RadioHalBackend radioHalBackend() { return RadioHalBackend::Hosted; }
 // of attempts, each of which resets the companion), fetches its identity and
 // probes the bridge. Never fatal: on failure the application boots with the
 // radio offline and System_RadioCompanion retries in the background.
+// The companion's console mirror is started first, for the boot (B13): the
+// companion's own boot messages are seen, and System_RadioCompanion stops it
+// when boot ends unless `c6console on` or a fault wants it.
 esp_err_t radioHalPrepare();
 bool radioHalPrepared();
+// True when radioHalPrepare's first attempt failed (a companion fault).
+bool radioHalBootRetried();
 
 // True while the Hosted transport is up (TRANSPORT_UP seen, no failure since).
 bool radioHalTransportUp();
@@ -167,9 +172,9 @@ void radioHalSilenceForRestart();
 // task); reported with "SDMMC quiesced".
 uint32_t radioHalRestartTxDrops();
 // Mirror the companion's UART console into the P4 log (tag "C6>"): the only
-// view of the C6's own boot log and crashes while HardwareOne is running. Off
-// unless something starts it: radioHalPrepare() after a failed boot attempt,
-// System_RadioCompanion after a companion fault or for a saved `c6console on`.
+// view of the C6's own boot log and crashes while HardwareOne is running. On
+// during boot (radioHalPrepare starts it), then off unless System_RadioCompanion
+// keeps or restarts it after a companion fault or for a saved `c6console on`.
 // While on it holds about 6 KB of internal SRAM (UART buffer and task stack).
 // No lock: after boot only the command executor task calls it. Stopping waits
 // for the mirror task to leave its read (up to about 220 ms).
