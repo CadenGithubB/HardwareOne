@@ -34,6 +34,17 @@ everything user-visible since the v0.99.99.1 tag.
   (GPIO41 high at boot, reboot required). Off by default, and the pin is then never driven, so an
   original FeatherS3 on the same build is untouched.
 
+### Changed (display header bar)
+- The header bar on the OLED and the P4 screens is laid out by one set of rules
+  (`OLED_HeaderCore.h`): nothing overlaps any more; a long title ends in a small `…` mark
+  instead of running under the battery, and a deep folder keeps `Files>` and the folder you
+  are in. The busy hourglass of an OLED command moved into the bar, left of the bell and
+  battery: it no longer covers the scroll arrow or the first row, and nothing else in the bar
+  moves when it comes or goes. The bell is a real bell icon and the `|` before the battery is
+  gone. Boards with no battery measurement no longer show `--%`. The Automations page counter
+  (`3/12`) shows in the bar (it was erased every frame). The bar now updates by itself when the
+  battery, USB or unread count changes, also on a still screen.
+
 ### Changed (guest web view)
 - A guest (owner decision B6: guests view interfaces only) now sees every web page and every
   control. A control that changes the device answers with the refusal popup ("Guest accounts are

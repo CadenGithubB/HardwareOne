@@ -131,9 +131,15 @@ def static_checks(read, component: Path) -> list[str]:
     if ASYNC[3] in utils and "oledDeliverCommandReply();" not in strip_comments(
             extract_block(utils, "void oledUpdate(")):
         failures.append("oledUpdate never delivers the OLED command in flight")
-    if ASYNC[3] in utils and "oledCommandBusyRender();" not in strip_comments(
-            extract_block(utils, "void updateOledDisplay(")):
-        failures.append("the frame never draws the busy mark of the OLED command in flight")
+    # The busy mark of the OLED command in flight is the hourglass in the
+    # header bar (OLED_HeaderCore.h): the header collects oledCommandBusy();
+    # the old box over the content area is gone.
+    if ASYNC[3] in utils and ("static void oledHeaderCollect(" not in utils or
+                              "oledCommandBusy()" not in strip_comments(
+                                  extract_block(utils, "static void oledHeaderCollect("))):
+        failures.append("the header bar never shows the busy mark of the OLED command in flight")
+    if "oledCommandBusyRender" in strip_comments(utils):
+        failures.append("the content-area busy box is back: the hourglass belongs to the header bar")
 
     action = strip_comments(extract_block(read("OLED_Utils.cpp"), "void handleOledActionButton("))
     for command in ('"automation system enable"', '"openhttp"', '"closehttp"', '"openble"'):

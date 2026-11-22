@@ -25,6 +25,20 @@ and logging-UI suites run those renderers through the same primitive
 (`oled_text_field_op_double.h` for op-recording canvases). See
 [OLED list text](../../../../docs/OLED_LIST_TEXT.md).
 
+## OLED header status bar
+
+`python3 components/hardwareone/test/host/test_oled_header.py` compiles the
+shipping `OLED_HeaderCore.h` unchanged over a GFX double with the shipping
+`glcdfont.c` (ASan/UBSan). It checks the layout rules for every combination of
+Power, Notify, Rec, Busy and Context widths and title lengths 0-24 (slots
+packed 3 px apart inside 0-127, only Context drops, a dropped item never
+outranks a shown one, nothing moves and the title never grows when Busy comes),
+the title cut (one-cell `…` mark, `KeepPrefix` for paths, the shared
+sanitizer), the Power text from the shared battery backend (hidden on a board
+with no battery measurement), the staleness signature, that every lit pixel in
+rows 1-8 belongs to exactly one region, and seven golden frames byte for byte.
+The `oledIsDirty` side of the staleness poll is in `test_millis_deadlines.py`.
+
 ## OLED CLI Output and its console history
 
 `python3 components/hardwareone/test/host/test_oled_console_buffer.py` executes

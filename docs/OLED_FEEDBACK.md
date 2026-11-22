@@ -22,8 +22,10 @@ or terminal-result footer messages.
   the background (2026-11-22): the line goes to cmd_exec through a
   `PendingCommand` and the frame loop keeps running. One OLED command is in
   flight at a time (shared with `oledRunCommandAsync`); a press while it runs
-  shows "Busy" and runs nothing. A small hourglass shows at the top right of
-  the content area while it runs. A failure is the toast when it ends: the
+  shows "Busy" and runs nothing. A small hourglass shows in the header bar,
+  left of the bell and the battery, while it runs (2026-11-22: it no longer
+  covers the content area; nothing else in the bar moves when it comes or
+  goes, only the title gives up room, `OLED_HeaderCore.h`). A failure is the toast when it ends: the
   refusal's reason, a full queue after 2 s or the 60 s timeout. A success
   shows no toast, because the screen shows the new state (owner, 2026-11-22),
   except where it does not: those call sites use

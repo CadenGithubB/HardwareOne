@@ -12,6 +12,7 @@
 #include "System_Settings.h"
 #include "System_EventCatalog.h"  // shared indexed event picker
 #include "OLED_Utils.h"   // oledRunCommand, executeOledCommandWithResult
+#include "OLED_HeaderCore.h"  // OledHeaderSpec: the page counter in the header bar
 #include "OLED_TextField.h"
 #include "OLED_UI.h"
 
@@ -701,15 +702,13 @@ void displayAutomations() {
     oledDisplay->setCursor(78, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 9);
     oledDisplay->print("v");
   }
+}
 
-  // Page indicator in header area
-  char pageStr[8];
-  snprintf(pageStr, sizeof(pageStr), "%d/%d", autoRenderData.selectedIdx + 1, totalRows);
-  int pageStrWidth = strlen(pageStr) * 6;
-  oledDisplay->setCursor(128 - pageStrWidth, 0);
-  oledDisplay->print(pageStr);
-
-
+// The list's page counter ("3/12") in the header bar, while the list shows.
+static void automationsHeader(OledHeaderSpec& spec) {
+  if (sWizStep != AW_NONE || !automationSchedulerRunning() || !autoRenderData.valid) return;
+  snprintf(spec.context, sizeof(spec.context), "%d/%d", autoRenderData.selectedIdx + 1,
+           autoRenderData.count + 1);
 }
 
 // ============================================================================
@@ -877,9 +876,9 @@ static void automationsOnEnter(bool isForward) {
   if (isForward) wizResetAll();
 }
 
-// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints, onEnter
+// Columns: mode, name, iconName, displayFunc, availFunc, inputFunc, showInMenu, menuOrder, hints, onEnter, header
 static const OledModeEntry sAutomationsModes[] = {
-  { OLED_AUTOMATIONS, "Automations", "notify_automation", displayAutomations, nullptr, automationsInputHandler, false, -1, "A:Run X:On/Off Y:Del", automationsOnEnter },
+  { OLED_AUTOMATIONS, "Automations", "notify_automation", displayAutomations, nullptr, automationsInputHandler, false, -1, "A:Run X:On/Off Y:Del", automationsOnEnter, automationsHeader },
 };
 
 REGISTER_OLED_MODE_MODULE(sAutomationsModes, sizeof(sAutomationsModes) / sizeof(sAutomationsModes[0]), "Automations");
