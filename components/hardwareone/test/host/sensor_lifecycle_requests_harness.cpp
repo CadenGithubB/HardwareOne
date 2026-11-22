@@ -893,6 +893,29 @@ static void instanceCases() {
     assert(flushFailedSlot[slot2] && !flushFailedMark[enc]);
     f.after(30000);
     assert(encoderExtraStarts[2] == 1 && encoderExtraRunning[2] && starts[enc] == 0); }
+  // Instance 2 climbs its own ladder: failing again before its clean run
+  // waits one rung longer, five clean minutes end the episode at the first
+  // rung, and instance 1's ladder never moves.
+  { Fixture f; resetSecond(); gEncoderInst[1].autoStart = true;
+    auto secondFails = [&] {
+      encoderExtraRunning[2] = true; noteSensorAutoDisabled(enc, 2); encoderExtraRunning[2] = false;
+    };
+    secondFails(); f.after(1000);
+    assert(sSensorRestart[slot2].phase == Phase::Waiting && sSensorRestart[slot2].rung == 0);
+    f.after(29000); assert(encoderExtraStarts[2] == 0);
+    f.after(1000);
+    assert(encoderExtraStarts[2] == 1 && sSensorRestart[slot2].phase == Phase::Proving);
+    assert(!sSensorRestartPending[slot2] && !flushFailedSlot[slot2]);
+    f.after(20000); secondFails(); f.after(1000);
+    assert(sSensorRestart[slot2].phase == Phase::Waiting && sSensorRestartPending[slot2] && flushFailedSlot[slot2]);
+    assert(logCount("next try in 30 s") == 1 && logCount("next try in 120 s") == 1);
+    f.after(119000); assert(encoderExtraStarts[2] == 1);
+    f.after(1000); assert(encoderExtraStarts[2] == 2 && encoderExtraRunning[2]);
+    f.after(299000); assert(sSensorRestart[slot2].phase == Phase::Proving);
+    f.after(1000);
+    assert(sSensorRestart[slot2].phase == Phase::Idle && sSensorRestart[slot2].rung == 0);
+    assert(sSensorRestart[enc].phase == Phase::Idle && !sSensorRestartPending[enc]);
+    assert(starts[enc] == 0 && !flushFailedMark[enc]); }
 }
 #endif
 

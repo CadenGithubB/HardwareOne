@@ -476,20 +476,6 @@ static void uartTxEnsureMutex() {
   if (sTxMutex == nullptr) sTxMutex = xSemaphoreCreateMutex();
 }
 
-// One serialized port write. Returns false if the link is down or the mutex
-// is unavailable within timeoutMs (a full TX ring drains in ~45ms at 921600,
-// so 1000ms means something is genuinely wrong, not slow).
-static bool uartTxLocked(const uint8_t* data, size_t len, uint32_t timeoutMs = 1000) {
-  if (!sStarted.load(std::memory_order_acquire) || sTxMutex == nullptr)
-    return false;
-  if (xSemaphoreTake(sTxMutex, pdMS_TO_TICKS(timeoutMs)) != pdTRUE) return false;
-  bool ok = sStarted.load(std::memory_order_acquire);
-  // Re-check under the mutex (stop() takes it too).
-  if (ok) ok = UART_LINK_PORT.write(data, len) == len;
-  xSemaphoreGive(sTxMutex);
-  return ok;
-}
-
 // One piece of a reply written under a single TX-lock hold.
 struct UartTxSegment {
   const uint8_t* data;
@@ -537,21 +523,17 @@ static bool uartTxSegmentsForTransportSession(const UartTxSegment* segments,
   return ok;
 }
 
-// Single-write text line (small status/refusal strings; command replies go
-// through uartDeliverReply). `reqId` is the request id of the line answered,
-// "" or null for an unframed line; `ok` is the verdict a framed header carries.
-static bool uartWriteLine(const char* s, bool ok, const char* reqId) {
-  char buf[256 + kUartFrameHeaderMax];
-  const size_t n = uartFrameComposeLine(buf, sizeof(buf), reqId, ok, s);
-  if (n == 0) return false;
-  return uartTxLocked((const uint8_t*)buf, n);
-}
-
+// Single-write text line (status, refusal and control-plane replies; command
+// replies go through uartDeliverReply). `reqId` is the request id of the line
+// answered, "" or null for an unframed line; `replyOk` is the verdict a framed
+// header carries. Every line, refusals included, is fenced to the transport
+// incarnation that admitted the line it answers, so no reply (framed or not)
+// lands in a later session.
 static bool uartWriteLineForTransportSession(const char* s, bool replyOk,
                                              const char* reqId,
                                              uint32_t expectedEpoch,
                                              uint32_t timeoutMs = 1000) {
-  // This helper is loop-task-only (all call sites are in uartProcessLine), so
+  // This helper is loop-task-only (uartProcessLine and the drain), so
   // fixed storage avoids putting a worst-case fan-report/usage reply on the
   // loop stack while preserving the one-write, non-interleaving guarantee.
   //
@@ -572,16 +554,18 @@ static bool uartWriteLineForTransportSession(const char* s, bool replyOk,
 // (break noise from an unpowered host looks like an endless byte flood). A
 // framed request is a host waiting for its answer, not noise: it is always
 // answered, with its id, so the host can act (log in again) instead of
-// waiting out its deadline.
-static void uartWriteLineNagLimited(const char* s, const char* reqId) {
+// waiting out its deadline. `expectedEpoch` is the transport incarnation of
+// the line refused.
+static void uartWriteLineNagLimited(const char* s, const char* reqId,
+                                    uint32_t expectedEpoch) {
   if (reqId && reqId[0]) {
-    (void)uartWriteLine(s, false, reqId);
+    (void)uartWriteLineForTransportSession(s, false, reqId, expectedEpoch);
     return;
   }
   unsigned long now = millis();
   if (now - sLastNagMs < 2000UL) return;
   sLastNagMs = now;
-  (void)uartWriteLine(s, false, nullptr);
+  (void)uartWriteLineForTransportSession(s, false, nullptr, expectedEpoch);
 }
 
 bool uartLinkIsRunning() {
@@ -820,7 +804,8 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
           char msg[80];
           snprintf(msg, sizeof(msg), "Error: login locked out. Retry in %lu seconds.",
                    lockoutRemainingMs / 1000UL);
-          uartWriteLine(msg, false, sUartLineReqId);
+          (void)uartWriteLineForTransportSession(msg, false, sUartLineReqId,
+                                                 admittedTransportEpoch);
           recordLoginAttempt(SOURCE_UART, u, kUartLockoutKey, false, "Locked out");
         } else {
           bool loginSucceeded = false;
@@ -864,19 +849,22 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
                                     false);
             recordLoginAttempt(SOURCE_UART, u, kUartLockoutKey, false, "Invalid credentials");
             systemEventPost(SYSEVT_LOGIN_FAIL, u.c_str(), "uart");
-            uartWriteLine("Error: authentication failed", false, sUartLineReqId);
+            (void)uartWriteLineForTransportSession(
+                "Error: authentication failed", false, sUartLineReqId,
+                admittedTransportEpoch);
           }
         }
     } else if (loginVerb) {
-      uartWriteLine("Error: sign in first with bare: login <username> <password>",
-                    false, sUartLineReqId);
+      (void)uartWriteLineForTransportSession(
+          "Error: sign in first with bare: login <username> <password>",
+          false, sUartLineReqId, admittedTransportEpoch);
     } else if (cmd.length() > 0 || sUartLineReqId[0]) {
       // Rate-limited: break/garbage from an unpowered or resetting host
       // arrives as a line flood; one nag per window is plenty for a machine.
       // A framed request is always answered (uartWriteLineNagLimited).
       uartWriteLineNagLimited(
           "Error: authentication required. Use: login <username> <password>",
-          sUartLineReqId);
+          sUartLineReqId, admittedTransportEpoch);
     }
     return;  // unauthenticated lines never fall through to the registry
   }
@@ -1344,10 +1332,13 @@ void uartLinkTick() {
         char tooLongId[kUartFrameIdStorage];
         (void)uartFramedRequestPrefix(sUartCli.c_str(), sUartCli.length(),
                                       tooLongId);
+        // Answered within the incarnation that received the line.
+        const uint32_t tooLongEpoch = sUartLineTransportEpoch;
         sUartCli = "";
         sUartLineTransportEpoch = 0;
         sDiscardingLine = true;   // swallow the rest, including the newline
-        uartWriteLineNagLimited("Error: line too long — discarded", tooLongId);
+        uartWriteLineNagLimited("Error: line too long — discarded", tooLongId,
+                                tooLongEpoch);
         continue;
       }
       if (sUartLineTransportEpoch == 0)

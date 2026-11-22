@@ -3267,6 +3267,14 @@ bool oledRunCommand(const String& cmd) {
 // and its reply (up to 60 s). One command at a time: a press while one runs
 // is refused with a short "Busy" toast, never queued. Display (owner) task
 // only, like everything the input handlers touch.
+//
+// Across a logout or a replaced display session the command keeps the slot
+// until it ends: it is still running on cmd_exec (which runs one command at a
+// time anyway), so the hourglass and a "Busy" refusal are true for the new
+// session too and name nothing of the old one. What belongs to the old session
+// is dropped when it ends (oledDeliverCommandReply): its reply, refusal reason
+// (admin gates included) and success toast are not shown, and its done
+// callback gets false.
 namespace {
 struct OledCommandInFlight {
   PendingCommand pending;

@@ -750,10 +750,12 @@ const char* cmd_ledstatus(const String& argsInput) {
 
 #if ENABLE_ENCODER
   for (uint8_t n = 1; n <= kEncoderMaxInstances; ++n) {
+    // Board 1 is always listed; boards 2..4 have no light until an address is
+    // set. Checked before the read: the read takes the board's light lock, and
+    // a board never used must not create one.
+    if (n > 1 && !encoderRunning(n) && encoderInstanceAddress(n) == 0) continue;
     EncoderLightStatus enc;
     if (!encoderLightReadStatus(enc, n)) return "Error: The encoder light state is busy. Retry.";
-    // Board 1 is always listed; boards 2..4 have no light until an address is set.
-    if (n > 1 && !enc.connected && enc.address == 0) continue;
     char id[12];
     ledEncoderTargetId(n, id, sizeof(id));
     if (json) {

@@ -2601,6 +2601,18 @@ static const char* cmd_sensorautostart(const String& argsInput) {
       if (enable && rowFeature && !isFeatureCompiled(rowFeature)) continue;
       *sensorHeapCosts[i].autoStartFlag = enable;
       if (enable) totalCost += sensorHeapCosts[i].heapCostKb;
+#if ENABLE_ENCODER
+      // The encoder row holds board 1's switch only; boards 2..max keep their
+      // own (gEncoderInst). Disabling clears every board; enabling sets each
+      // board that has an address (one without is never opened at boot).
+      if (sensorHeapCosts[i].autoStartFlag == encoderAutoStartSetting(1)) {
+        for (uint8_t n = 2; n <= kEncoderMaxInstances; ++n) {
+          if (enable && encoderInstanceAddress(n) == 0) continue;
+          *encoderAutoStartSetting(n) = enable;
+          if (enable) totalCost += sensorHeapCosts[i].heapCostKb;
+        }
+      }
+#endif
     }
     (void)requestSettingsPersist();
     

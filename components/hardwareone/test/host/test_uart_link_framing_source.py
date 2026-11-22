@@ -16,8 +16,12 @@ This checks the wiring in System_UartLink.cpp that the host suite cannot run
 - an over-long line that opened with a valid prefix is answered with its id;
 - a framed refusal of an unauthenticated line is always answered (the rate
   limit stays for unframed noise);
+- every reply, refusals included (failed login, lockout, sign-in-first,
+  auth-required, over-long line), is fenced to the transport incarnation that
+  admitted its line: no unfenced text writer is left, so a framed reply can
+  never land in a later session;
 - the login reply and `uartlink status` carry link=<kUartLinkProtocolVersion>;
-- unframed lines keep the unframed writers (no id: body and newline).
+- unframed lines are written without an id (body and newline).
 """
 from __future__ import annotations
 
@@ -71,15 +75,20 @@ def main() -> None:
         parts = [a.strip() for a in args.split(",")]
         require(len(parts) >= 4 and parts[2] == "sUartLineReqId",
                 f"a fenced reply in uartProcessLine without the line's id: ({args.strip()})")
-    plain = calls(code, "uartWriteLine")
-    require(len(plain) >= 3, f"uartProcessLine has its unfenced refusals ({len(plain)})")
-    for args in plain:
-        parts = [a.strip() for a in args.split(",")]
-        require(len(parts) == 3 and parts[1] == "false" and parts[2] == "sUartLineReqId",
-                f"an unfenced refusal without the line's id or with an ok verdict: ({args.strip()})")
+    # The refusals of the login gate are fenced to the admitted incarnation.
+    flat = re.sub(r"\s+", " ", code)
+    for refusal in ("msg, false, sUartLineReqId, admittedTransportEpoch",
+                    '"Error: authentication failed", false, sUartLineReqId, admittedTransportEpoch',
+                    '"Error: sign in first with bare: login <username> <password>", false, '
+                    "sUartLineReqId, admittedTransportEpoch"):
+        require(refusal in flat, f"a login-gate refusal is not fenced: {refusal}")
+    require(not calls(strip_comments(uart), "uartWriteLine")
+            and "uartTxLocked(" not in strip_comments(uart),
+            "no unfenced text writer is left in the link")
     nag = calls(code, "uartWriteLineNagLimited")
-    require(len(nag) == 1 and nag[0].strip().endswith("sUartLineReqId"),
-            "the auth-required nag carries the line's id")
+    require(len(nag) == 1 and re.sub(r"\s+", " ", nag[0]).strip().endswith(
+                "sUartLineReqId, admittedTransportEpoch"),
+            "the auth-required nag carries the line's id and its incarnation")
     require("cmd.length() > 0 || sUartLineReqId[0]" in code,
             "a framed unauthenticated line is answered even when its command is empty")
 
@@ -151,24 +160,29 @@ def main() -> None:
     too_long = too_long[:too_long.index("continue;")]
     require(too_long.index("uartFramedRequestPrefix(sUartCli.c_str()") < too_long.index('sUartCli = "";'),
             "the over-long line's id is read before the line is dropped")
-    require('uartWriteLineNagLimited("Error: line too long — discarded", tooLongId)' in too_long,
-            "the over-long refusal carries the line's id")
+    require(re.search(r'uartWriteLineNagLimited\("Error: line too long — discarded", tooLongId,\s*'
+                      r"tooLongEpoch\)", too_long),
+            "the over-long refusal carries the line's id and its incarnation")
+    require(too_long.index("const uint32_t tooLongEpoch = sUartLineTransportEpoch;")
+            < too_long.index("sUartLineTransportEpoch = 0;"),
+            "the over-long line's incarnation is read before it is forgotten")
 
-    nag_body = strip_comments(extract_block(uart, "static void uartWriteLineNagLimited(const char* s, const char* reqId)"))
+    nag_body = strip_comments(extract_block(
+        uart, "static void uartWriteLineNagLimited(const char* s, const char* reqId,\n"
+              "                                    uint32_t expectedEpoch) "))
     framed_branch = nag_body[:nag_body.index("sLastNagMs")]
-    require("uartWriteLine(s, false, reqId)" in framed_branch,
-            "a framed refusal is written before the rate limit is consulted")
-    require("uartWriteLine(s, false, nullptr)" in nag_body,
-            "an unframed refusal stays unframed and rate-limited")
+    require("uartWriteLineForTransportSession(s, false, reqId, expectedEpoch)" in framed_branch,
+            "a framed refusal is written, fenced, before the rate limit is consulted")
+    require("uartWriteLineForTransportSession(s, false, nullptr, expectedEpoch)" in nag_body,
+            "an unframed refusal stays unframed, fenced and rate-limited")
 
     # Every text write goes through the composer: framed with an id, the
     # unframed body + newline without one.
-    for sig in ("static bool uartWriteLine(const char* s, bool ok, const char* reqId)",
-                "static bool uartWriteLineForTransportSession(const char* s, bool replyOk,"):
+    for sig in ("static bool uartWriteLineForTransportSession(const char* s, bool replyOk,",):
         body = strip_comments(extract_block(uart, sig))
         require("uartFrameComposeLine(" in body, f"{sig.split('(')[0]} composes through the framing rules")
     writes = re.findall(r"UART_LINK_PORT\.write\(", strip_comments(uart))
-    require(len(writes) == 3, f"the link port has its three locked writers only ({len(writes)})")
+    require(len(writes) == 2, f"the link port has its two locked writers only ({len(writes)})")
 
     print("uart_link_framing_source: ok")
 
