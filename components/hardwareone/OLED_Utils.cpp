@@ -3340,15 +3340,28 @@ bool oledRunCommandAsync(const char* cmd, OledCommandDoneFn done, const void* co
 }
 
 // For an action whose caller needs no verdict: the line runs in the
-// background, and its reply (a refusal's reason, or what the command did)
-// is the toast when it ends. A caller on another task than the display's
-// (none today) cannot share the in-flight slot and waits as before.
-void executeOledCommand(const String& argsInput) {
+// background, and a refusal's reason is the toast when it ends; a success
+// shows nothing, as the screen shows the new state (owner, 2026-11-22). A
+// caller on another task than the display's (none today) cannot share the
+// in-flight slot and waits as before.
+static void oledRunBackgroundAction(const String& argsInput, bool toastSuccess) {
   if (!oledIsOwnerTask()) {
-    (void)oledRunCommand(argsInput);  // waits: another task cannot share the slot
+    if (oledRunCommand(argsInput) && toastSuccess) {  // waits: another task cannot share the slot
+      oledToastShow("Done", kOledResultToastMs, OledUiIcon::SUCCESS);
+    }
     return;
   }
-  (void)oledStartBackgroundCommand(argsInput, nullptr, nullptr, true);
+  (void)oledStartBackgroundCommand(argsInput, nullptr, nullptr, toastSuccess);
+}
+
+void executeOledCommand(const String& argsInput) {
+  oledRunBackgroundAction(argsInput, false);
+}
+
+// An action whose result the screen does not show: a success also toasts
+// what the command did.
+void executeOledCommandShowResult(const String& argsInput) {
+  oledRunBackgroundAction(argsInput, true);
 }
 
 // Display task, every pass of oledUpdate, panel running or not.
@@ -3380,6 +3393,61 @@ static void oledDeliverCommandReply() {
     }
   }
   if (done) done(ok, context);
+}
+
+// The value-scroll rows (OLED background commands, step 2, 2026-11-22): FM
+// tune and the LED brightness nudge. A row registers on its first step; the
+// frame loop sends each row's newest waiting value once the slot is free
+// (oledValueScrollPump, right after oledDeliverCommandReply, so a value that
+// waited on the row's own command goes out on the frame that command ended).
+namespace {
+struct OledValueScrollRow {
+  OledValueScroll* row;
+  const char* format;  // one %ld
+};
+constexpr size_t kOledValueScrollRows = 4;
+OledValueScrollRow sOledValueScrollRows[kOledValueScrollRows] = {};
+}  // namespace
+
+static void oledValueScrollDone(bool ok, const void* context) {
+  for (OledValueScrollRow& entry : sOledValueScrollRows) {
+    if (entry.row && entry.row == context) entry.row->finished(ok, (uint32_t)millis());
+  }
+  oledMarkDirty();  // the row may follow the device again
+}
+
+static void oledValueScrollPump() {
+  for (OledValueScrollRow& entry : sOledValueScrollRows) {
+    if (!entry.row) continue;
+    int32_t value = 0;
+    if (!entry.row->takeSend(sOledCommand.pending.busy(), value)) continue;
+    char line[48];
+    snprintf(line, sizeof(line), entry.format, (long)value);
+    // The slot is free here, so this never says "Busy"; a line the executor
+    // refuses at once has shown its reason and ends the row's send.
+    if (!oledStartBackgroundCommand(String(line), oledValueScrollDone, entry.row, false)) {
+      entry.row->finished(false, (uint32_t)millis());
+    }
+  }
+}
+
+void oledValueScrollStep(OledValueScroll& row, const char* format, int32_t value) {
+  OledValueScrollRow* slot = nullptr;
+  for (OledValueScrollRow& entry : sOledValueScrollRows) {
+    if (entry.row == &row) { slot = &entry; break; }
+    if (!slot && !entry.row) slot = &entry;
+  }
+  if (!slot || !format) return;  // more rows than slots: a build-time mistake
+  slot->row = &row;
+  slot->format = format;
+  row.want(value);
+  oledMarkDirty();  // the row shows the new value at once
+  oledValueScrollPump();
+}
+
+int32_t oledValueScrollShown(OledValueScroll& row, int32_t device) {
+  if (row.follow(device, (uint32_t)millis())) oledMarkDirty();
+  return row.shown(device);
 }
 
 // A small hourglass at the top right of the content area while the OLED
@@ -6733,6 +6801,7 @@ void oledUpdate() {
   // So does the OLED command in flight: a reply, a full queue's retry or the
   // 60 s limit never waits for the panel to come back.
   oledDeliverCommandReply();
+  oledValueScrollPump();  // a value-scroll row's newest value, once the slot is free
   prepareCameraPreviewData();
   if (gOledRunning && oledConnected) {
 #if ENABLE_ESPNOW

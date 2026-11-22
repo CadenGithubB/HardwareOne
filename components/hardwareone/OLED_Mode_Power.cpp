@@ -172,8 +172,16 @@ static void executePowerCpuAction() {
   if (sel >= 0 && sel < (int)(sizeof(cmds) / sizeof(cmds[0]))) {
     DEBUG_SYSTEMF("[POWER_OLED] Executing: %s (selection=%d)", cmds[sel], sel);
     DEBUG_SYSTEMF("[POWER_OLED] Current CPU freq before command: %lu MHz", (unsigned long)getCpuFrequencyMhz());
-    executeOledCommand(cmds[sel]);  // runs in the background; its reply is the toast
+    // In the background; the rows do not mark the mode in use, so the reply
+    // is the toast.
+    executeOledCommandShowResult(cmds[sel]);
   }
+}
+
+// Sleep 20s puts the whole device in light sleep for 20 s, so it asks first,
+// defaulting to "No", like Restart and RAM Flush (G-49).
+static void powerLightSleepConfirmed(void* /*userData*/) {
+  executeOledCommand("lightsleep 20");
 }
 
 static void executePowerSleepAction() {
@@ -195,7 +203,9 @@ static void executePowerSleepAction() {
       executeOledCommand(cmd);
       break;
     }
-    case 1: executeOledCommand("lightsleep 20"); break;
+    case 1:
+      oledConfirmRequest("Sleep for 20 s?", nullptr, powerLightSleepConfirmed, nullptr, false);
+      break;
     case 2: executeOledCommand("oledmode off"); break;
   }
 }

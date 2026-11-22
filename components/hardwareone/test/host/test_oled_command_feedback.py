@@ -20,9 +20,16 @@ and the reply is delivered by the display-task poll (one request at a time, a
 full queue ends as a refusal after 2 s, a reply from a replaced display session is dropped).
 The background executeOledCommand (OLED background commands, step 1,
 2026-11-22) is run too: a press while a command runs shows "Busy" and queues
-nothing, the busy flag clears when it ends, and the toast carries the reply on
-success, the refusal's reason (admin gates included), a full queue or the
-60 s timeout. Static checks cover the call sites the harness does not run:
+nothing, the busy flag clears when it ends, and the toast carries the
+refusal's reason (admin gates included), a full queue or the 60 s timeout; a
+success shows no toast (owner: failures only), except through
+executeOledCommandShowResult, which toasts the reply. The value-scroll rows
+(step 2: oledValueScrollStep on the production OLED_ValueScroll.h) are run on
+the same slot: a step is shown at once and never waits or says "Busy", steps
+while one runs coalesce into the newest value, which is sent when the slot
+frees (also after another screen's command), a refusal gives the row back to
+the device, and the row follows the device once the last command ended.
+Static checks cover the call sites the harness does not run:
 executeOledCommand runs in the background, every OLED screen either uses
 oledRunCommand's verdict or runs the action in the background (a remaining
 wait says why and that step 2 moves it), the frame loop delivers the reply
@@ -58,7 +65,13 @@ REPORT_REPLY = "static bool oledReportCommandReply("
 ASYNC_STATE = "namespace {\nstruct OledCommandInFlight {"
 ASYNC = ("bool oledCommandBusy(", "static void oledCommandSuccessText(",
          "static bool oledStartBackgroundCommand(", "bool oledRunCommandAsync(",
-         "void executeOledCommand(", "static void oledDeliverCommandReply(")
+         "static void oledRunBackgroundAction(", "void executeOledCommand(",
+         "void executeOledCommandShowResult(", "static void oledDeliverCommandReply(")
+# The value-scroll rows (OLED background commands, step 2): their registry, the
+# done callback, the frame-loop send, the step and the shown value.
+VALUE_SCROLL_STATE = "namespace {\nstruct OledValueScrollRow {"
+VALUE_SCROLL = ("static void oledValueScrollDone(", "static void oledValueScrollPump(",
+                "void oledValueScrollStep(", "int32_t oledValueScrollShown(")
 # Every OLED screen source whose actions run commands.
 OLED_SOURCES_GLOB = ("OLED_*.cpp", "i2csensor_*_oled.h")
 # A wait that stays (value scroll, a chained or completion-dependent action)
@@ -91,12 +104,15 @@ def static_checks(read, component: Path) -> list[str]:
     failures = []
     utils = read("OLED_Utils.cpp")
     # An action that needs no verdict runs in the background and still toasts
-    # its reply.
-    execute = "void executeOledCommand("
-    if execute in utils and "oledStartBackgroundCommand(" not in strip_comments(
-            extract_block(utils, execute)):
+    # a refusal.
+    execute = "static void oledRunBackgroundAction("
+    if "void executeOledCommand(" in utils and (execute not in utils or "oledStartBackgroundCommand(" not in
+                                                strip_comments(extract_block(utils, execute))):
         failures.append("executeOledCommand does not run in the background: "
                         "every action that ignores its verdict holds the frame loop")
+    if VALUE_SCROLL[1] in utils and "oledValueScrollPump();" not in strip_comments(
+            extract_block(utils, "void oledUpdate(")):
+        failures.append("oledUpdate never sends a value-scroll row's waiting value")
     failures += wait_sites(read, component)
     editor = read("OLED_SettingsEditor.cpp")
     start = editor.index("// Quick Settings - Dynamic item registry")
@@ -168,17 +184,22 @@ def wait_sites(read, component: Path) -> list[str]:
     return failures
 
 
-def generated(read) -> tuple[str, bool, bool, bool]:
+def generated(read) -> tuple[str, bool, bool, bool, bool]:
     utils = read("OLED_Utils.cpp")
     have_helper = RUN_COMMAND in utils
     have_reply_text = REPLY_TEXT in utils
     have_async = all(marker in utils for marker in (ASYNC_STATE, *ASYNC))
+    have_scroll = have_async and all(marker in utils for marker in (VALUE_SCROLL_STATE, *VALUE_SCROLL))
     helpers = [extract_block(utils, marker)
                for marker in (REPLY_TEXT, REPORT_REPLY, RUN_COMMAND) if marker in utils]
     if have_async:
         start = utils.index(ASYNC_STATE)
         helpers.append(utils[start:utils.index(ASYNC[0], start)])
         helpers.extend(extract_block(utils, marker) for marker in ASYNC)
+    if have_scroll:
+        start = utils.index(VALUE_SCROLL_STATE)
+        helpers.append(utils[start:utils.index(VALUE_SCROLL[0], start)])
+        helpers.extend(extract_block(utils, marker) for marker in VALUE_SCROLL)
     pending = ""
     if have_async:
         # System_PendingCommand as is, its includes replaced by the harness's doubles.
@@ -203,7 +224,7 @@ def generated(read) -> tuple[str, bool, bool, bool]:
     for marker, body in inserts:
         require(harness.count(marker) == 1, f"harness marker missing/duplicated: {marker}")
         harness = harness.replace(marker, body)
-    return harness, have_helper, have_reply_text, have_async
+    return harness, have_helper, have_reply_text, have_async, have_scroll
 
 
 def main() -> None:
@@ -221,11 +242,12 @@ def main() -> None:
         overlay = args.source_dir / name if args.source_dir else None
         return (overlay if overlay and overlay.exists() else args.component / name).read_text()
 
-    unit_text, have_helper, have_reply_text, have_async = generated(read)
+    unit_text, have_helper, have_reply_text, have_async, have_scroll = generated(read)
     flags = ["-I", str(args.component), "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-Wno-unused-function",
              f"-DHW1_HAVE_RUN_COMMAND={1 if have_helper else 0}",
              f"-DHW1_HAVE_REPLY_TEXT={1 if have_reply_text else 0}",
-             f"-DHW1_HAVE_ASYNC_COMMAND={1 if have_async else 0}"]
+             f"-DHW1_HAVE_ASYNC_COMMAND={1 if have_async else 0}",
+             f"-DHW1_HAVE_VALUE_SCROLL={1 if have_scroll else 0}"]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
     with tempfile.TemporaryDirectory(prefix="hw1-oled-command-feedback-") as directory:
@@ -237,6 +259,9 @@ def main() -> None:
     if not have_reply_text:
         failures.insert(0, "OLED_Utils.cpp has no oledCommandReplyText(): OLED screens have no shared "
                            "reply-to-toast mapping (mapping cases not compiled)")
+    if have_async and not have_scroll:
+        failures.insert(0, "OLED_Utils.cpp has no oledValueScrollStep(): value-scroll rows wait on "
+                           "cmd_exec one step at a time (value-scroll cases not compiled)")
     if not have_async:
         failures.insert(0, "OLED_Utils.cpp has no oledRunCommandAsync(): long OLED actions block "
                            "the frame loop (async cases not compiled)")

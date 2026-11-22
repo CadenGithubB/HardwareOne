@@ -7,6 +7,7 @@
 #include "System_Notifications.h"  // NotificationSource enum (defined there, not here)
 #include "System_CommandTypes.h"
 #include "System_User.h"           // AuthContext (returned by oledAuthContext)
+#include "OLED_ValueScroll.h"      // value-scroll rows (oledValueScrollStep)
 
 #if ENABLE_OLED_DISPLAY
 
@@ -386,11 +387,17 @@ void oledBluetoothLinkWatch();
 // Run a user-initiated OLED action whose caller needs no verdict, in the
 // background (OLED background commands, step 1): the line goes to cmd_exec at
 // once and the frame loop keeps running; a small busy mark shows at the top
-// right while it runs, and the reply is a toast when it ends (a refusal's
-// reason as oledRunCommand shows it, otherwise what the command did, "Done"
-// when it says nothing). One OLED command at a time: a press while one runs
-// shows "Busy" and runs nothing. Display task; another task waits as before.
+// right while it runs. A refusal's reason is the toast when it ends (as
+// oledRunCommand shows it); a success shows nothing, because the screen shows
+// the new state itself (owner, 2026-11-22: toasts on failure only). One OLED
+// command at a time: a press while one runs shows "Busy" and runs nothing.
+// Display task; another task waits as before.
 void executeOledCommand(const String& argsInput);
+// executeOledCommand for an action whose result the screen does not show (a
+// request sent to another device, a row without a state, a reconnect): a
+// success also toasts what the command did, without its "OK:"/"SUCCESS:"
+// lead, "Done" when it says nothing.
+void executeOledCommandShowResult(const String& argsInput);
 // True while executeOledCommand's or oledRunCommandAsync's command runs.
 bool oledCommandBusy();
 // Execute a CLI command and return success status + output (for callers that need the result)
@@ -430,6 +437,17 @@ bool oledRunCommand(const String& cmd);
 // says "Busy"); done is not called then.
 typedef void (*OledCommandDoneFn)(bool ok, const void* context);
 bool oledRunCommandAsync(const char* cmd, OledCommandDoneFn done, const void* context);
+// A value-scroll row (FM tune, LED brightness; OLED background commands,
+// step 2): a step moves the row's own wanted value at once and never waits or
+// says "Busy"; only the newest value is sent (`format` holds one %ld), when
+// none of the row's commands runs and the OLED command slot is free, and the
+// row follows the device again once the last one ended (OLED_ValueScroll.h).
+// A refusal is the toast; a success shows nothing (the row shows the value).
+// `row` must have static storage. Display task only.
+void oledValueScrollStep(OledValueScroll& row, const char* format, int32_t value);
+// The value the row shows now, and the base of its next step: the wanted value
+// while it leads, otherwise `device`. Keeps the screen redrawing while it leads.
+int32_t oledValueScrollShown(OledValueScroll& row, int32_t device);
 // The command that starts or stops the BLE role this device runs, or is set to
 // run: the server, the G2 client (with any phone pipe attached to it) or the
 // phone-only pipe. The Quick Settings Bluetooth row uses it so it never

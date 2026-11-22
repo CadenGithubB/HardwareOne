@@ -1469,8 +1469,9 @@ add_test(NAME oled_dead_paths
 # command's reply; success texts only on success; no dropped replies on the listed screens.
 # OLED background commands, step 1 (2026-11-22): an action that ignores the verdict runs
 # in the background on System_PendingCommand (one in flight, "Busy" refusal, busy mark,
-# result toast on done/refusal/full queue/timeout); every remaining OLED wait uses the
-# verdict or is tagged "// waits:" for step 2.
+# refusal toast on refusal/full queue/timeout, success toast only for
+# executeOledCommandShowResult); every remaining OLED wait uses the verdict or is tagged
+# "// waits:". Step 2: the value-scroll rows coalesce (OLED_ValueScroll.h).
 set(OLED_COMMAND_FEEDBACK_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND OLED_COMMAND_FEEDBACK_TEST_ARGS --sanitize)

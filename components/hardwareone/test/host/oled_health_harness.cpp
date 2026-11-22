@@ -34,6 +34,7 @@ static bool g2RingRequestHistoryRefresh(bool){return true;}
 static bool oledGuestBlocksMutate(){return guest;}
 static bool oledRunCommand(const char* line){commands.emplace_back(line);return true;}
 static void executeOledCommand(const char* line){(void)oledRunCommand(line);}  // background; lands at once here
+[[maybe_unused]] static void executeOledCommandShowResult(const char* line){executeOledCommand(line);}
 static void oledMarkDirty(){}
 static bool oledScrollHandleNav(OledScrollState* s){if(gNavEvents.up){oledScrollUp(s);return true;}if(gNavEvents.down){oledScrollDown(s);return true;}return false;}
 // INSERT_PAGE

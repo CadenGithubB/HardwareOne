@@ -154,6 +154,7 @@ static FakeDisplay gFakeDisplay;
 static FakeDisplay* oledDisplay = &gFakeDisplay;
 static void prepareCameraPreviewData() {}
 static void oledDeliverCommandReply() {}  // the OLED command in flight (oled_command_feedback)
+static void oledValueScrollPump() {}      // value-scroll rows' waiting values (oled_command_feedback)
 static bool displayIsReady() { return true; }
 #define OLED_TRANSACTION(code) do { if (displayIsReady()) { code; } } while (0)
 
