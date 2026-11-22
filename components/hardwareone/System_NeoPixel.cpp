@@ -565,17 +565,58 @@ const char* cmd_ledeffect(const String& argsInput) {
 
 // Saved per light: ledBrightness for the onboard pixel, each encoder
 // instance's own brightness for its board (both apply at once). The `encoder`
-// target is instance 1.
+// target is instance 1; `encoder<n>` is instance n >= 2 (the command the
+// settings rows of instances 2..4 run).
 const char* cmd_ledbrightness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
+  static constexpr const char kUsage[] = "Usage: ledbrightness [onboard|encoder|encoder<n>] <0..100>";
+  {
+    const char* args = argsInput.c_str();
+    size_t start = 0;
+    while (ledIsSpace(args[start])) ++start;
+    size_t end = start;
+    while (args[end] && !ledIsSpace(args[end])) ++end;
+    uint8_t n = 0;
+    const LedEncoderInstanceWord word =
+        ledParseEncoderInstanceWord(args + start, end - start, kEncoderMaxInstances, n);
+    if (word == LedEncoderInstanceWord::InstanceOne) {
+      return "Error: 'encoder1' is not a target; instance 1 is 'encoder'.";
+    }
+    if (word == LedEncoderInstanceWord::OutOfRange) {
+      snprintf(getDebugBuffer(), 1024, "Error: encoder has instances 1-%u. %s",
+               (unsigned)kEncoderMaxInstances, kUsage);
+      return getDebugBuffer();
+    }
+    if (word == LedEncoderInstanceWord::Instance) {
+#if !ENABLE_ENCODER
+      return kEncoderReplyNotBuilt;
+#else
+      String value = argsInput.substring(end);
+      value.trim();
+      if (value.length() == 0) {
+        snprintf(getDebugBuffer(), 1024, "Error: invalid arguments — %s", kUsage);
+        return getDebugBuffer();
+      }
+      int v = 0;
+      if (!parseIntArg(value, v)) return kCommandReplyNotANumber;
+      if (v < 0 || v > 100) return "Error: LED brightness must be 0..100";
+      encoderLightSetBrightness(v, n);
+      snprintf(getDebugBuffer(), 1024, "Encoder %u LED brightness set to %d%%", (unsigned)n, v);
+      return getDebugBuffer();
+#endif
+    }
+  }
   LedTarget target;
   String arg;
   if (const char* refused = takeLedTarget(argsInput, target, arg)) return refused;
   if (target.kind == LedTargetKind::EncoderPixel) {
     return "Error: Brightness is one setting for the whole encoder board. Usage: ledbrightness encoder <0..100>";
   }
-  if (arg.length() == 0) return "Error: invalid arguments — Usage: ledbrightness [onboard|encoder] <0..100>";
+  if (arg.length() == 0) {
+    snprintf(getDebugBuffer(), 1024, "Error: invalid arguments — %s", kUsage);
+    return getDebugBuffer();
+  }
   int v = 0;
   if (!parseIntArg(arg, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 100) return "Error: LED brightness must be 0..100";
@@ -706,7 +747,7 @@ const CommandEntry neopixelCommands[] = {
   { "ledcolor", "Set an LED colour: [onboard|encoder|encoder:<n>] <colour>.", false, cmd_ledcolor, "Usage: ledcolor [onboard|encoder|encoder:<n>] <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>" },
   { "ledclear", "Turn an LED off: [onboard|encoder|encoder:<n>].", false, cmd_ledclear, "Usage: ledclear [onboard|encoder|encoder:<n>]" },
   { "ledeffect", "Run an LED effect: [onboard|encoder|encoder:<n>] <effect>.", false, cmd_ledeffect, "Usage: ledeffect [onboard|encoder|encoder:<n>] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100..60000]" },
-  { "ledbrightness", "Save an LED brightness 0-100: [onboard|encoder] <0..100>.", true, cmd_ledbrightness, "Usage: ledbrightness [onboard|encoder] <0..100>" },
+  { "ledbrightness", "Save an LED brightness 0-100: [onboard|encoder|encoder<n>] <0..100>.", true, cmd_ledbrightness, "Usage: ledbrightness [onboard|encoder|encoder<n>] <0..100>" },
   { "ledstatus", "Show every LED this build has and what it shows. (add 'json' for JSON output)", false, cmd_ledstatus, "Usage: ledstatus [json]" },
 };
 

@@ -93,6 +93,37 @@ inline LedTargetWord ledParseTargetWord(const char* word, size_t length, LedTarg
   return LedTargetWord::Target;
 }
 
+// The word `encoder<n>`, encoder instance n (multi-instance design, G5).
+// Multi-instance phase 1c reads it in `ledbrightness` only, the command the
+// settings rows of instances 2..4 run ("ledbrightness encoder2 30"); phase 1d
+// folds it into ledParseTargetWord for every LED command.
+enum class LedEncoderInstanceWord : uint8_t {
+  NotAnInstance,  // not `encoder` followed by digits only
+  Instance,       // encoder<n>, 2 <= n <= the maximum
+  InstanceOne,    // encoder1: instance 1 is `encoder`
+  OutOfRange,     // encoder<n> with n 0 or past the maximum
+};
+
+inline LedEncoderInstanceWord ledParseEncoderInstanceWord(const char* word, size_t length,
+                                                          uint8_t maxInstances, uint8_t& n) {
+  n = 0;
+  constexpr size_t kEncoderLength = sizeof(kLedTargetEncoderName) - 1;
+  if (!word || length <= kEncoderLength || !ledWordEquals(word, kEncoderLength, kLedTargetEncoderName)) {
+    return LedEncoderInstanceWord::NotAnInstance;
+  }
+  const char* digits = word + kEncoderLength;
+  const size_t count = length - kEncoderLength;
+  unsigned value = 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (digits[i] < '0' || digits[i] > '9') return LedEncoderInstanceWord::NotAnInstance;
+    if (value < 1000) value = value * 10 + (unsigned)(digits[i] - '0');
+  }
+  if (value == 1) return LedEncoderInstanceWord::InstanceOne;
+  if (value < 2 || value > maxInstances) return LedEncoderInstanceWord::OutOfRange;
+  n = (uint8_t)value;
+  return LedEncoderInstanceWord::Instance;
+}
+
 inline bool ledIsSpace(char c) { return c == ' ' || c == '\t'; }
 
 // Split a target off the front of `args` (NUL-terminated). `rest` is the

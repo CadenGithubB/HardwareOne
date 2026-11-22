@@ -241,7 +241,7 @@ static constexpr CommandModule gCommandModules[] = {
     "(red, green, blue, yellow, magenta, cyan, white, orange, purple, pink and ~70 more, or off); ledclear "
     "[target] turns it off. ledeffect [target] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] "
     "[duration 100-60000ms] runs an effect (defaults: red/blue, 3000 ms) and returns at once; the onboard "
-    "LED goes dark when it ends, the encoder's pixels show their colour again. ledbrightness [onboard|encoder] "
+    "LED goes dark when it ends, the encoder's pixels show their colour again. ledbrightness [onboard|encoder|encoder<n>] "
     "<0-100> is saved per LED and applies at once (admin). ledstatus [json] lists every LED of the build, "
     "connected or not, and what it shows. Colours and effects are live and not saved; the onboard "
     "startup effect lives in the led module.", neopixelCommands,     &neopixelCommandsCount, 0, nullptr },

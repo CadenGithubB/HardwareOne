@@ -1611,7 +1611,7 @@ ledclear [target]               - Turn it off (and stop its effect)
 ledeffect [target] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100-60000]
                                 - Run an effect; the onboard LED goes dark when it ends,
                                   the encoder's pixels show their color again
-ledbrightness [onboard|encoder] <0-100>  - Brightness, saved per LED (admin)
+ledbrightness [onboard|encoder|encoder<n>] <0-100>  - Brightness, saved per LED (admin)
 ledstatus [json]                - Every LED this build has, connected or not, and what it shows
 ledstartupenabled [0|1]         - Enable/disable startup effect
 ledstartupeffect <none|rainbow|pulse|fade|blink|strobe>  - Set startup effect

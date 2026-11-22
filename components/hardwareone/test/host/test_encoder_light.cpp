@@ -59,6 +59,30 @@ static LedTargetWord split(const char* args, bool hasOnboard, LedTarget& target,
   return word;
 }
 
+// `encoder<n>`, the brightness target of encoder instances 2..4 (the
+// command their settings rows run: "ledbrightness encoder2 30").
+static LedEncoderInstanceWord instanceWord(const char* word, uint8_t& n) {
+  return ledParseEncoderInstanceWord(word, strlen(word), kEncoderMaxInstances, n);
+}
+
+static void encoderInstanceWords() {
+  uint8_t n = 9;
+  CHECK(instanceWord("encoder2", n) == LedEncoderInstanceWord::Instance && n == 2);
+  CHECK(instanceWord("ENCODER4", n) == LedEncoderInstanceWord::Instance && n == 4);
+  CHECK(instanceWord("encoder1", n) == LedEncoderInstanceWord::InstanceOne && n == 0);
+  CHECK(instanceWord("encoder5", n) == LedEncoderInstanceWord::OutOfRange);
+  CHECK(instanceWord("encoder0", n) == LedEncoderInstanceWord::OutOfRange);
+  CHECK(instanceWord("encoder99999", n) == LedEncoderInstanceWord::OutOfRange);
+  for (const char* other : {"encoder", "encoder:2", "encoderx", "encoder2x", "encoder2:3", "onboard", "red", "50", ""}) {
+    CHECK(instanceWord(other, n) == LedEncoderInstanceWord::NotAnInstance);
+  }
+  // Every instance's settings row runs a command this parser accepts.
+  for (uint8_t i = 2; i <= kEncoderMaxInstances; ++i) {
+    const std::string word = "encoder" + std::to_string(i);
+    CHECK(instanceWord(word.c_str(), n) == LedEncoderInstanceWord::Instance && n == i);
+  }
+}
+
 static void targetParsing() {
   LedTarget t;
   std::string rest;
@@ -441,6 +465,7 @@ static void instanceSettings() {
 
 int main() {
   targetParsing();
+  encoderInstanceWords();
   namesAreNotTargets();
   detection();
   changedFramesOnly();
