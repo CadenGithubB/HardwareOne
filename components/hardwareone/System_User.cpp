@@ -2244,6 +2244,12 @@ bool isValidPublicPassword(const String& password, String* errorOut) {
   return true;
 }
 
+const char* publicPasswordRuleReply(const String& password) {
+  if (isValidPublicPassword(password, nullptr)) return nullptr;
+  return (password.length() < kPublicPasswordMinLen) ? "Error: Password must be at least 6 characters"
+                                                     : "Error: Password is too long";
+}
+
 // ============================================================================
 // users.json mutation owner
 // ============================================================================
@@ -3572,8 +3578,8 @@ bool userChangePasswordCore(const String& currentPassword,
     return fail(kPasswordReplyMismatch);
   }
 
-  if (newPassword.length() < 6) {
-    return fail("Error: Password must be at least 6 characters");
+  if (const char* rule = publicPasswordRuleReply(newPassword)) {
+    return fail(rule);
   }
 
   if (newPassword == currentPassword) {
@@ -3679,8 +3685,8 @@ const char* cmd_user_resetpassword(const String& argsInput) {
     }
   }
 
-  if (rest.length() < 6) {
-    return "Error: Password must be at least 6 characters";
+  if (const char* rule = publicPasswordRuleReply(rest)) {
+    return rule;
   }
 
   if (mustChange && accountIsGuestForPasswordChange(username)) {
@@ -3746,8 +3752,8 @@ const char* cmd_user_add(const String& argsInput) {
     }
   }
 
-  if (rest.length() < 6) {
-    return "Error: Password must be at least 6 characters";
+  if (const char* rule = publicPasswordRuleReply(rest)) {
+    return rule;
   }
 
   // Same gate promote/demote use: you cannot create an account ranked above

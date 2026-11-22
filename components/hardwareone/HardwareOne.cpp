@@ -2929,6 +2929,9 @@ void hardwareone_loop() {
           credentialAttemptRecord(SOURCE_SERIAL, serialIp, u.c_str(), false);
           recordLoginAttempt(SOURCE_SERIAL, u, serialIp, false,
                              "Invalid credentials");
+          // Same event as the web, BLE, UART and `login` command failures
+          // (user name only; the notifier applies the shared rate limit).
+          systemEventPost(SYSEVT_LOGIN_FAIL, u.c_str(), "serial");
           broadcastOutput("[serial] Authentication failed.");
         }
       };

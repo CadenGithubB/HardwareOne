@@ -2255,6 +2255,9 @@ static esp_err_t handleBondFsList(httpd_req_t* req) {
 // reply is there. Query: ?path=/sd (or omit for /).
 static esp_err_t handleBondFsStat(httpd_req_t* req) {
   WEB_AUTH_JSON_OR_RETURN(req, ctx);
+  // Same local admin gate as /api/bond/fs/list and /api/bond/fs/get, on the
+  // start and on every poll.
+  if (!hasAdminPrivilege(ctx)) return sendJsonResponse(req, "{\"success\":false,\"error\":\"admin required\"}");
   if (!webFsBridgeEnsureInit()) {
     return sendJsonResponse(req, "{\"success\":false,\"error\":\"bridge init failed\"}");
   }

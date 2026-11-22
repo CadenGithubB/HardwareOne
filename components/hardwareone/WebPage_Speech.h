@@ -505,32 +505,24 @@ inline void streamSpeechInner(httpd_req_t* req) {
     hw.setText(el, msg);
   }
   
+  var SR_MODEL_DIR = '/sd/ESP-SR Models';
+
   function refreshModelList(){
     setFileStatus('Loading files...');
-    postCli('ls /sd/ESP-SR Models').then(function(out){
-      var lines = out.split('\n').filter(function(l){ return l.trim().length > 0; });
-      var select = hw.$('sr-model-select');
-      var fileList = hw.$('sr-file-list');
-      
-      // Parse file entries
-      var files = [];
-      /* The guard below tested uppercase 'ERROR', but the uniform return
-         contract emits "Error: ". So an error line was NOT skipped — it was
-         split on whitespace and its last token pushed as a filename:
-         "Error: Permission denied" became a selectable model called "denied",
-         reported as "Found 1 file(s)" and offered in the model list.
-         Bail on a failed response instead of parsing it as a listing. */
-      if(out && /^\s*(Error|ERROR)\b/.test(out)){
-        setFileStatus(out.trim());
+    // The structured listing ({success,files:[{name,type,...}]}), read under the
+    // viewer's own file permissions. File names come from the card and are
+    // untrusted: the dropdown takes them as text and the list escapes them.
+    hw.fetchJSON('/api/files/list?path=' + encodeURIComponent(SR_MODEL_DIR)).then(function(d){
+      if(!d || d.success === false){
+        setFileStatus('Error: ' + ((d && d.error) || 'listing failed'));
         return;
       }
-      for(var i=0; i<lines.length; i++){
-        var line = lines[i].trim();
-        if(/^(Error|ERROR)\b/.test(line) || line.indexOf('not found') >= 0) continue;
-        // Extract filename from ls output (format varies)
-        var parts = line.split(/\s+/);
-        var fname = parts[parts.length - 1];
-        if(fname && fname !== '.' && fname !== '..') files.push(fname);
+      var select = hw.$('sr-model-select');
+      var fileList = hw.$('sr-file-list');
+      var files = [];
+      var rows = Array.isArray(d.files) ? d.files : [];
+      for(var i=0; i<rows.length; i++){
+        if(rows[i] && rows[i].type === 'file' && rows[i].name) files.push(String(rows[i].name));
       }
       
       // Update dropdown
@@ -551,12 +543,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
         } else {
           var html = '';
           for(var k=0; k<files.length; k++){
-            var f = files[k];
-            var icon = '';
-            if(f.endsWith('.wn')) icon = '';
-            else if(f.endsWith('.txt')) icon = '';
-            else if(f.endsWith('.bin')) icon = '';
-            html += '<div style="padding:6px 8px;border-bottom:1px solid var(--border)">' + icon + ' ' + f + '</div>';
+            html += '<div style="padding:6px 8px;border-bottom:1px solid var(--border)">' + hw.esc(files[k]) + '</div>';
           }
           fileList.innerHTML = html;
         }
@@ -598,18 +585,17 @@ inline void streamSpeechInner(httpd_req_t* req) {
     var file = fileInput.files[0];
     setUploadStatus('Uploading ' + file.name + '...');
     
-    var formData = new FormData();
-    formData.append('file', file);
-    formData.append('path', '/sd/ESP-SR Models/' + file.name);
-    
-    fetch('/api/upload', {
+    // The file manager's upload route: the raw bytes, the destination in ?path=.
+    fetch('/api/files/upload?path=' + encodeURIComponent(SR_MODEL_DIR + '/' + file.name), {
       method: 'POST',
       credentials: 'same-origin',
-      body: formData
-    }).then(function(r){
-      if(!r.ok) throw new Error('Upload failed: ' + r.status);
-      return r.text();
-    }).then(function(out){
+      cache: 'no-store',
+      headers: {'Content-Type': 'application/octet-stream'},
+      body: file
+    }).then(hw._auth401).then(function(r){
+      return r.json().catch(function(){ throw new Error('Upload failed: ' + r.status); });
+    }).then(function(d){
+      if(!d || !d.success) throw new Error((d && d.error) || 'Upload failed');
       setUploadStatus('Upload complete: ' + file.name);
       fileInput.value = '';
       setTimeout(refreshModelList, 500);

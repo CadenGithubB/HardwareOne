@@ -206,6 +206,16 @@ int main() {
   CHECK(message == "Error: New passwords do not match");
   CHECK(!change("oldpass1", "short", "short", message));
   CHECK(message == "Error: Password must be at least 6 characters");
+  // The same rule as add and request: 64 characters at most (UA-6).
+  {
+    const std::string longest(64, 'p'), tooLong(65, 'p');
+    CHECK(!change("oldpass1", tooLong.c_str(), tooLong.c_str(), message));
+    CHECK(message == "Error: Password is too long");
+    CHECK(storedPassword == "oldpass1");
+    CHECK(change("oldpass1", longest.c_str(), longest.c_str(), message));
+    CHECK(storedPassword == longest);
+    storedPassword = "oldpass1";
+  }
   CHECK(!change("oldpass1", "oldpass1", "oldpass1", message));
   CHECK(message == "Error: New password must differ from current password");
   CHECK(!change("wrongpass", "newpass1", "newpass1", message));

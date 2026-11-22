@@ -11,7 +11,7 @@
 #include <ArduinoJson.h>
 #include "WebServer_Handle.h"
 #include "System_Utils.h"   // rebootDevice()
-#include "System_User.h"    // isReservedUsername, isValidPublicUsername, kPublicPasswordMinLen
+#include "System_User.h"    // isReservedUsername, isValidPublicUsername, isValidPublicPassword
 #include "System_VFS.h"   // VFS::*Guarded + systemAuth (Phase 2 perm refactor)
 #include "System_StatePaths.h"  // the state file paths the setup replies quote
 
@@ -289,9 +289,10 @@ static bool createInitialAdminUser(const String& username, const String& plainte
     broadcastOutput(msg);
     return false;
   }
-  if (plaintextPassword.length() < kPublicPasswordMinLen) {
+  if (!isValidPublicPassword(plaintextPassword)) {
     char msg[96];
-    snprintf(msg, sizeof(msg), "Error: Admin password must be at least %u characters", (unsigned)kPublicPasswordMinLen);
+    snprintf(msg, sizeof(msg), "Error: Admin password must be %u to %u characters",
+             (unsigned)kPublicPasswordMinLen, (unsigned)kPublicPasswordMaxLen);
     broadcastOutput(msg);
     return false;
   }
@@ -438,9 +439,10 @@ static bool setOwnerCredentialAgain() {
     }
 #endif
     p.trim();
-    if (p.length() < kPublicPasswordMinLen) {
+    if (!isValidPublicPassword(p)) {
       char msg[96];
-      snprintf(msg, sizeof(msg), "Error: Owner password must be at least %u characters", (unsigned)kPublicPasswordMinLen);
+      snprintf(msg, sizeof(msg), "Error: Owner password must be %u to %u characters",
+               (unsigned)kPublicPasswordMinLen, (unsigned)kPublicPasswordMaxLen);
       broadcastOutput(msg);
       continue;
     }

@@ -17,6 +17,9 @@ built from nodes (no inline onclick, encoded file URLs, delete commands that
 quote the name), the bond page escapes the peer name and /api/bond/status
 JSON-escapes it, and the generic remote-sensor rows escape nested keys. WEB-1:
 hw.fetchJSON/fetchText reject with the reply's reason, not 'HTTP <n>'.
+CMD-8/WEB-3: the Speech page (ESP-SR boards) lists /sd/ESP-SR Models through
+/api/files/list, shows the card's file names escaped (hw.esc) or as option
+text, and uploads to /api/files/upload, the route that exists.
 
 Static source contracts run first and need no engine: the renderers must escape
 names, path segments, peer labels and SSIDs, and must not splice a path between
@@ -48,6 +51,9 @@ BOND = 'WebPage_Bond.cpp'
 SETTINGS = 'WebPage_Settings.h'
 MAPS = 'WebPage_Maps.h'
 ESPNOW_CORE = 'web_assets/espnow-core.js'
+SPEECH = 'WebPage_Speech.h'
+SPEECH_FUNCTIONS = ('function setFileStatus(', 'function setUploadStatus(',
+                    'function refreshModelList(', 'function uploadModelFile(')
 SCAN_MARKER = 'window.scanNetworks = function'
 SKIP_RETURN_CODE = 77  # CTest SKIP_RETURN_CODE for the registered test
 
@@ -155,6 +161,16 @@ def bond_script(bond):
     return bond[start:bond.index(')JS"', start)]
 
 
+def speech_model_script(speech):
+    """The Speech page's model-folder functions with the folder constant."""
+    start = speech.index('R"JS(') + len('R"JS(')
+    script = speech[start:speech.index(')JS"', start)]
+    folder = re.findall(r"(?m)^\s*var SR_MODEL_DIR = '[^']*';$", script)
+    if len(folder) != 1:
+        raise AssertionError('the Speech page does not name its model folder once (SR_MODEL_DIR)')
+    return '\n'.join([folder[0].strip()] + [js_function(script, marker) for marker in SPEECH_FUNCTIONS])
+
+
 def page_sources(read):
     """The decoded page scripts the WEB-4/D-29/WEB-1 checks look at; a missing
     marker is reported as a failure, not an exception."""
@@ -168,6 +184,7 @@ def page_sources(read):
         'sensor': lambda: js_slice(concat_script(read.path(SENSORS), 'window.hwRenderGenericSensor=function'),
                                    'window.hwRenderGenericSensor=function', 'window.hwRenderGenericSensor=function'),
         'bond': lambda: bond_script(read(BOND)),
+        'speech': lambda: speech_model_script(read(SPEECH)),
     }
     for key, make in specs.items():
         try:
@@ -222,6 +239,15 @@ def page_contract_failures(pages, bond_cpp):
         failures.append('/api/bond/status prints peerName with %s and no JSON escaping')
     if 'jsonQuote(peerNameStr)' not in bond_cpp:
         failures.append('/api/bond/status does not JSON-quote peerName')
+    speech = pages['speech']
+    if speech:
+        if "postCli('ls " in speech or "'/api/upload'" in speech:
+            failures.append("Speech page still runs the non-command 'ls' or posts to /api/upload")
+        for line in speech.splitlines():
+            if 'innerHTML' in line and '+ f +' in line.replace("' + f + '", '+ f +'):
+                failures.append('Speech page puts a file name into innerHTML unescaped: ' + line.strip()[:120])
+        if "'/api/files/list?path='" not in speech or "'/api/files/upload?path='" not in speech:
+            failures.append('Speech page does not use /api/files/list and /api/files/upload')
     return failures
 
 
@@ -235,10 +261,10 @@ def run_behavior(utils, settings, pages):
     with tempfile.TemporaryDirectory(prefix='hw1-web-untrusted-names-') as tmp:
         paths = [Path(tmp) / name for name in (
             'file-browser.js', 'bondfs.js', 'settings-scan.js', 'hw-runtime.js', 'camera-recordings.js',
-            'mic-recordings.js', 'generic-sensor.js', 'bond-progress.js')]
+            'mic-recordings.js', 'generic-sensor.js', 'bond-progress.js', 'speech-models.js')]
         texts = blocks + [scan_chunk(settings)] + [
             pages[key] or "throw new Error('script not found');"
-            for key in ('runtime', 'camera', 'mic', 'sensor', 'bond_progress')]
+            for key in ('runtime', 'camera', 'mic', 'sensor', 'bond_progress', 'speech')]
         for path, text in zip(paths, texts):
             path.write_text(text, encoding='utf-8')
         try:

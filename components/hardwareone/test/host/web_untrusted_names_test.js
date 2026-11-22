@@ -12,6 +12,8 @@
  *   __argv[5]  System_Microphone_Web.h loadMicRecordings + deleteMicRecording
  *   __argv[6]  WebPage_Sensors.h hwRenderGenericSensor
  *   __argv[7]  WebPage_Bond.cpp renderBondProgress
+ *   __argv[8]  WebPage_Speech.h model-folder functions (SR_MODEL_DIR,
+ *              setFileStatus, setUploadStatus, refreshModelList, uploadModelFile)
  *
  * The recording lists (R), remote-sensor rows (G) and bond progress card (P)
  * run on the REAL hw runtime over a small node DOM: a recording name holding
@@ -378,7 +380,73 @@ function recordingsAndRuntime() {
     if (render) render(hostile, clean);
     check(clean.innerHTML.indexOf('Kitchen &middot;') >= 0 && clean.innerHTML.indexOf('Kitchen ended the bond') >= 0,
           'P a clean peer name renders unchanged');
-    return undefined;
+    return speechModels(rw, rhw);
+  });
+}
+
+/* SP: the Speech page's model folder (ESP-SR boards, CMD-8/WEB-3). The names
+ * come off the SD card; the list goes through /api/files/list (no 'ls'
+ * command, which does not exist) and an upload through /api/files/upload. */
+function speechModels(rw, rhw) {
+  var SP_NAME = '<img src=x onerror=alert(1)>.wn';
+  var listUrl = '/api/files/list?path=' + encodeURIComponent('/sd/ESP-SR Models');
+  routes[listUrl] = [200, JSON.stringify({ success: true, dirPerms: 49, files: [
+    { name: SP_NAME, type: 'file', size: '10 bytes', perms: 49 },
+    { name: 'snips', type: 'folder', size: '2 items', count: 2, perms: 49 },
+    { name: 'srmodels.bin', type: 'file', size: '99 bytes', perms: 49 }] })];
+  var select = domEl('sr-model-select');
+  var list = domEl('sr-file-list');
+  var status = domEl('sr-file-status');
+  var upStatus = domEl('sr-upload-status');
+  var fileInput = domEl('sr-model-file');
+  var uploads = [];
+  var timers = [];
+  function speechFetch(url, opts) {
+    uploads.push({ url: String(url), opts: opts || {} });
+    return Promise.resolve(reply(200, '{"success":true,"path":"/sd/ESP-SR Models/x.wn"}'));
+  }
+  var api = null;
+  try {
+    api = Function('hw', 'document', 'fetch', 'setTimeout', 'console',
+                   slurp(__argv[8]) + '\nreturn { refresh: refreshModelList, upload: uploadModelFile };')(
+      rhw, fakeDoc, speechFetch, function (f) { timers.push(f); return 0; }, fakeConsole);
+  } catch (e) {
+    check(false, 'load Speech page model functions', e);
+  }
+  if (!api) return undefined;
+  var postsBefore = cliPosts.length;
+  api.refresh();
+  return settle(function () { return /Found|Error/.test(status.textContent); }, 60).then(function () {
+    var html = list.innerHTML;
+    check(cliPosts.length === postsBefore, 'SP the listing runs no CLI command', JSON.stringify(cliPosts.slice(postsBefore)));
+    check(nodesBy(list, function (n) { return n.tagName === 'IMG'; }).length === 0 && html.indexOf('<img src=x') < 0,
+          'SP a file name is not rendered as an element', html.slice(0, 300));
+    check(html.indexOf('&lt;img src=x onerror=alert(1)&gt;.wn') >= 0 && html.indexOf('srmodels.bin') >= 0,
+          'SP file names are shown as literal text', html.slice(0, 300));
+    var options = select.children.map(function (o) { return o.textContent; });
+    check(JSON.stringify(options) === JSON.stringify([SP_NAME, 'srmodels.bin']) &&
+          select.children[0].value === SP_NAME,
+          'SP the model list offers the files (not folders) by their original names', JSON.stringify(options));
+    check(status.textContent === 'Found 2 file(s)', 'SP the status counts the files', status.textContent);
+    routes[listUrl] = [200, JSON.stringify({ success: false, error: 'SD card not available' })];
+    api.refresh();
+    return settle(function () { return /^Error/.test(status.textContent); }, 60);
+  }).then(function () {
+    check(status.textContent === 'Error: SD card not available', 'SP a refused listing shows the reason', status.textContent);
+    var file = { name: 'x y.wn', size: 3 };
+    fileInput.files = [file];
+    api.upload();
+    return settle(function () { return /complete|Error/.test(upStatus.textContent); }, 60).then(function () {
+      var u = uploads[0] || { opts: {} };
+      check(uploads.length === 1 && u.url === '/api/files/upload?path=' + encodeURIComponent('/sd/ESP-SR Models/x y.wn'),
+            'SP an upload goes to /api/files/upload with the folder path', u.url);
+      check(u.opts.method === 'POST' && u.opts.body === file &&
+            (u.opts.headers || {})['Content-Type'] === 'application/octet-stream',
+            'SP an upload posts the raw file bytes');
+      check(upStatus.textContent === 'Upload complete: x y.wn' && timers.length === 1,
+            'SP a stored upload says so and refreshes the list', upStatus.textContent);
+      return undefined;
+    });
   });
 }
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -63,7 +64,17 @@ def generate() -> str:
     require("ownerCredentialSetupPending()" in detect, "boot detection must check the owner credential (G-38)")
     types = "\n".join(extract_block(header, marker) + ";" for marker in
                        ("enum FirstTimeSetupState", "enum SetupProgressStage", "enum SetupMode "))
-    types += "\n" + identity_constants((COMPONENT / "System_User.h").read_text())
+    user_h = (COMPONENT / "System_User.h").read_text()
+    types += "\n" + identity_constants(user_h)
+    # The one password rule the first admin meets too, as production states it (UA-6).
+    limits = re.findall(r"(?m)^static constexpr size_t kPublicPassword(?:Min|Max)Len = \d+;$", user_h)
+    require(len(limits) == 2, "System_User.h states the password length limits")
+    declaration = re.findall(r"(?m)^bool isValidPublicPassword\(.*\);$", user_h)
+    require(len(declaration) == 1, "System_User.h declares isValidPublicPassword")
+    types += "\n" + "\n".join(limits + declaration) + "\n" + extract_block(
+        (COMPONENT / "System_User.cpp").read_text(), "bool isValidPublicPassword(")
+    require(owner_and_restore.count("isValidPublicPassword(") == 2,
+            "the admin and owner password prompts use the shared rule")
     # The setup replies quote the state paths through their owner on a tree that has it.
     paths = COMPONENT / "System_StatePaths.h"
     if paths.exists():

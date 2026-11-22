@@ -213,6 +213,16 @@ def check_contracts() -> None:
     require_not_http_gated("HardwareOne.cpp", main, "credentialAttemptAllowed(SOURCE_SERIAL")
     require("isLoginLocked(" not in serial and "ENABLE_HTTP_SERVER" not in serial,
             "serial lockout must not depend on the web server")
+    # EVT-3: a wrong serial password posts login_fail like web/BLE/UART, with
+    # the user name only; a lockout refusal and the success path do not.
+    wrong = serial[serial.index("credentialAttemptRecord(SOURCE_SERIAL, serialIp, u.c_str(), false)"):]
+    require('systemEventPost(SYSEVT_LOGIN_FAIL, u.c_str(), "serial")' in wrong,
+            "a wrong serial password posts login_fail (user name, transport serial)")
+    require(serial.count("SYSEVT_LOGIN_FAIL") == 1, "one login_fail post on the serial login")
+    for line in serial.splitlines():
+        if "systemEventPost(" in line:
+            require("p.c_str()" not in line and ", p," not in line and ", p)" not in line,
+                    f"no event carries the serial password: {line.strip()}")
 
     uart = (COMPONENT / "System_UartLink.cpp").read_text()
     require_before("UART login", uart, "credentialAttemptAllowed(SOURCE_UART",

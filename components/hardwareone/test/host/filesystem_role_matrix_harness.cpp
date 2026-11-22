@@ -166,7 +166,11 @@ int main() {
     // rename or delete an existing file (owner decision for 1.0).
     expect("alice", "/notes/todo.txt",                      true,  false, true,  false);
     expect("alice", "/recordings/take.wav",                 true,  false, true,  false);
-    expect("alice", "/espnow/peer.txt",                     true,  true,  false, true);
+    // /espnow/ follows the same user rule (it used to give users write and
+    // delete); admins keep write and delete there.
+    expect("alice", "/espnow/peer.txt",                     true,  false, true,  false);
+    expect("guest", "/espnow/peer.txt",                     true,  false, false, false);
+    expect("admin", "/espnow/peer.txt",                     true,  true,  true,  true);
     expect("alice", "/battery.csv",                         true,  false, false, false);
     expect("alice", "/battery.csv.1",                       true,  false, false, false);
     expect("alice", "/battery.csv.header.tmp",              true,  false, false, false);
@@ -184,14 +188,14 @@ int main() {
     expect("admin", "/sd/system/sys_logs/events.log",       true,  false, false, false);
     expect("admin", "/sd/logging_captures/sensors/s.csv",   true,  true,  true,  true);
     // The ESP-NOW inbox (pushed files and the bonded peer's pulled files, e.g.
-    // its users.json) is admin tier; the rest of /espnow/ is unchanged.
+    // its users.json) is admin tier; the rest of /espnow/ is user data.
     expect("alice", "/espnow/received",                     false, false, false, false);
     expect("alice", "/espnow/received/peer01/users.json",   false, false, false, false);
     expect("alice", "/espnow/received/peer01/photo.txt",    false, false, false, false);
     expect("guest", "/espnow/received/peer01/users.json",   false, false, false, false);
     expect("admin", "/espnow/received",                     true,  true,  false, true);
     expect("admin", "/espnow/received/peer01/users.json",   true,  true,  false, true);
-    expect("alice", "/espnow/receivedX.txt",                true,  true,  false, true);
+    expect("alice", "/espnow/receivedX.txt",                true,  false, true,  false);
     // The battery logger writes, stages and rotates as the system identity.
     AuthContext system;system.transport=SOURCE_INTERNAL;system.user="system";
     for(const char* p:{"/battery.csv","/battery.csv.1","/battery.csv.header.tmp"}){

@@ -52,8 +52,11 @@ COMPONENT = HERE.parents[1]
 # sha256 of the report on the host. Recorded first at 1cea1a79; changed
 # 2026-11-21 only by the 1.0 user-rights rule (accounts below admin no longer
 # append, write over, remove or rmdir on catch-all paths: 23 user columns of
-# case and double-slash variants, checked with --baseline against 3076e0c6).
-REPORT_SHA256 = "07a3b8b106776f93566b771156fdff5e3efcfaa675089df1fc80cee93921eb07"
+# case and double-slash variants, checked with --baseline against 3076e0c6);
+# changed 2026-11-22 only by the same rule on /espnow/ (M-espnowfs: the user
+# and admin columns of the /espnow/ paths, checked with --baseline against
+# d7522e16).
+REPORT_SHA256 = "e5aa0f4b51eafb0959e377d85458c341cc1c15f18cb9c207fe99c495647920c8"
 
 # Helpers the new code calls; an older tree has none of them.
 OPTIONAL = ("static bool alreadyNormalized(", "static const String& normalizedView(")

@@ -72,8 +72,8 @@ static String hashUserPassword(const String& plaintext) {
   return hashOk ? "fixture-password-hash" : "";
 }
 static void broadcastOutput(const String& message) { output.emplace_back(message.c_str()); }
-// Public account rules the first admin must also meet (System_User.h).
-static constexpr size_t kPublicPasswordMinLen = 6;
+// Public account rules the first admin must also meet (System_User.h; the
+// password rule is the production one, inserted with the types).
 static bool isReservedUsername(const String& username) {
   String u = username; u.trim();
   return u.equalsIgnoreCase("system") || u.equalsIgnoreCase("AuthBypass") || u.equalsIgnoreCase("bond-admin");
@@ -287,6 +287,9 @@ static void helperCases() {
   reset(); check(!createInitialAdminUser("AuthBypass", "fixture-secret", false)); rejectedBeforePublication();
   reset(); check(!createInitialAdminUser("fixture-owner", "short", false)); rejectedBeforePublication();
   check(hashCalls == 0); rejectedBeforePublication();
+  // The same 64-character ceiling as every other password (UA-6).
+  reset(); check(!createInitialAdminUser("fixture-owner", String(std::string(65, 'p').c_str()), false));
+  check(hashCalls == 0); rejectedBeforePublication();
   reset(); hashOk = false; check(!createInitialAdminUser("fixture-owner", "fixture-secret", false));
   check(hashCalls == 1); rejectedBeforePublication();
   reset(); setupTestReserveFails = true;
@@ -413,7 +416,7 @@ static void ownerRecoveryCases() {
     check(gFirstTimeSetupState == SETUP_NOT_NEEDED && gSetupProgressStage == SETUP_FINISHED);
     check(!gFirstTimeSetupPerformed && !events.empty());
     bool refusedShort = false;
-    for (const auto& line : output) refusedShort = refusedShort || line.find("at least 6 characters") != std::string::npos;
+    for (const auto& line : output) refusedShort = refusedShort || line.find("must be 6 to 64 characters") != std::string::npos;
     check(refusedShort);
     ownerRecoveredOnly();
     // The next boot finds a readable owner file and no marker.

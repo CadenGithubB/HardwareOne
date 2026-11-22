@@ -1847,9 +1847,13 @@ static const PathRule sPathRules[] = {
   {"/espnow/received",                  0,         PERM_READ | PERM_WRITE | PERM_DELETE,          PERM_ALL,  true,  false},
   {"/espnow/received/",                 0,         PERM_READ | PERM_WRITE | PERM_DELETE,          PERM_ALL,  false, false},
 
-  // ---- ESP-NOW data: user can read+write+delete; admin same; system full ----
-  {"/espnow/",                          PERM_READ | PERM_WRITE | PERM_DELETE,
-                                        PERM_READ | PERM_WRITE | PERM_DELETE,                          PERM_ALL,  false, false},
+  // ---- ESP-NOW data: users read, create and upload like any user data
+  // (owner rule for 1.0: never delete, rename or overwrite); admins keep read,
+  // write and delete and may create and upload too; system full. Nothing
+  // writes here on a user's behalf: inbound files land in /espnow/received/
+  // above, written by the system identity confined to that folder.
+  {"/espnow/",                          PERM_READ | PERM_CREATE | PERM_IMPORT,
+                                        PERM_READ | PERM_WRITE | PERM_DELETE | PERM_CREATE | PERM_IMPORT, PERM_ALL, false, false},
 
   // ---- Device logs at the root: the battery logger owns /battery.csv, its
   // rotations (.1, .2) and its header staging file. Everyone signed in reads

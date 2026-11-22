@@ -74,9 +74,9 @@ def source_contracts(bond: str, region: str) -> None:
     require(code.count("xSemaphoreTake(") == 1, "one take site: the scoped lock")
     require(code.count("xSemaphoreCreateMutex()") == 1, "one mutex for the three bridges")
 
-    # The sends stay in their handlers, after the admin gate where there is one.
+    # The sends stay in their handlers, after the admin gate (all three are admin-only).
     for handler, send, gated in (("handleBondFsList", "fsListSendRequest(", True),
-                                 ("handleBondFsStat", "fsStatSendRequest(", False),
+                                 ("handleBondFsStat", "fsStatSendRequest(", True),
                                  ("handleBondFsGet", "fsGetSendRequest(", True)):
         body = extract_block(bond, f"static esp_err_t {handler}(httpd_req_t* req)")
         require(code.count(send) == 1 and body.count(send) == 1, f"{send} is called once, in {handler}")

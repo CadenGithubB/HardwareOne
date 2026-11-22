@@ -238,8 +238,8 @@ static bool handleChangePasswordModeInput(int deltaX, int deltaY, uint32_t newly
         oledToastShow("Enter current pass", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         return true;
       }
-      if (newPassBuffer.length() < 6) {
-        oledToastShow("New: min 6 chars", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
+      if (!isValidPublicPassword(newPassBuffer)) {
+        oledToastShow("New: 6-64 chars", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
         return true;
       }
       if (confirmPassBuffer.length() == 0) {

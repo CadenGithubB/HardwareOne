@@ -1960,6 +1960,22 @@ everything user-visible since the v0.99.99.1 tag.
   start-at-boot switch on every row except `led` and `i2c`.
 
 ### Security
+- Review fixes (host-tested; not checked on a device):
+  - `/api/bond/fs/stat` (the bonded peer's storage figures) now needs an admin, like the peer
+    file list and file pull.
+  - `/espnow/` follows the user-data rule: accounts below admin read, create and upload there,
+    and no longer overwrite, rename or delete (admins keep write and delete). `/espnow/received/`
+    stays admin-only.
+  - One password rule everywhere: changing, resetting and setting a password (`userchangepassword`,
+    `userresetpassword`, `useradd`, the OLED change form, first-time setup) now refuse a password
+    over 64 characters as adding a user and account requests already did; still 6 at least.
+  - A wrong password at the serial console login now posts the `login_fail` event (user name and
+    `serial`; never the password), as the web, Bluetooth and UART logins do, so automations and
+    notifications see it.
+  - Speech page (ESP-SR boards): the model folder list shows SD file names as text (they went into
+    the page as markup), lists the folder through the file API instead of the non-existent `ls`
+    command, and uploads to `/api/files/upload` (it posted to `/api/upload`, which does not exist,
+    so model upload from the page never worked).
 - ESP-NOW room and tag commands: `espnowroomcmd` and `espnowtagcmd` send a command together with an
   account name and password to every device in a room or with a tag, and room and tags are what each
   device says about itself. Any paired device that set its own room to `Kitchen` therefore got the

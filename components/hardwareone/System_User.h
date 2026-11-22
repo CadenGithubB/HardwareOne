@@ -467,11 +467,17 @@ bool setUserPassword(const String& username, const String& newPasswordRaw, bool 
 // login/logout and whoami while this holds.
 bool userMustChangePassword(const String& username);
 
-// Public username/password intake rules (register + admin create). Username:
-// 1..64 chars of [A-Za-z0-9._-], not a reserved sentinel. Password: 6..64 chars.
+// Public username/password intake rules. Username: 1..64 chars of
+// [A-Za-z0-9._-], not a reserved sentinel. Password: 6..64 chars, the one rule
+// for every password a person sets (register, user request, add, change,
+// reset, first-time setup, the OLED and G2 forms).
 // errorOut (optional) gets a short fixed reason string — safe to show on public pages.
 bool isValidPublicUsername(const String& username, String* errorOut = nullptr);
 bool isValidPublicPassword(const String& password, String* errorOut = nullptr);
+// The same password rule as a command reply: nullptr when the password passes,
+// else "Error: Password must be at least 6 characters" or "Error: Password is
+// too long" (static text; never contains the password).
+const char* publicPasswordRuleReply(const String& password);
 static constexpr size_t kPublicUsernameMaxLen = 64;
 static constexpr size_t kPublicPasswordMaxLen = 64;
 static constexpr size_t kPublicPasswordMinLen = 6;
