@@ -109,6 +109,12 @@ EXT_RAM_BSS_ATTR static uint8_t sDevices[kRamFlushDeviceMax * kRamFlushDeviceEnt
 // Entries whose bus/address mismatch was logged (bit = entry index).
 static std::atomic<uint32_t> sDeviceSkipLogged{0};
 static_assert(kRamFlushDeviceMax <= 32, "one log bit per device list entry");
+// Each instance's start-at-boot when this boot consumed the list (bit = its
+// slot, System_I2CInstanceCore.h). The list overrides only where it differs
+// from this (ramFlushDeviceVerdictOpens), so a later change to the setting
+// still applies. Written once in ramFlushConsumeOverlay, read-only after.
+static uint32_t sDeviceIntentAtBoot = 0;
+static_assert(kI2cSlotCount <= 32, "one start-at-boot bit per instance slot");
 // Written by more than one task (boot, the camera power task, the sensor queue
 // worker's automatic restart), so each change is one atomic step.
 static std::atomic<uint32_t> sAutostartFailed{0};
@@ -328,9 +334,10 @@ static const char* ramFlushFeatureName(RamFlushFeatureId f) {
 // Capture / consume / resolve
 // ---------------------------------------------------------------------------
 
-// Instance n against this boot's device list: whether to open it. With
-// `logSkip`, a listed instance whose bus or address changed since the capture
-// gets one log line (once per entry for the session).
+// Instance n against this boot's device list: whether to open it, `intent`
+// being its start-at-boot now. With `logSkip`, a listed instance whose bus or
+// address changed since the capture gets one log line (once per entry for the
+// session).
 static bool ramFlushDeviceDecide(I2cDeviceType type, uint8_t n, const I2cInstanceResumeState& now,
                                  bool intent, bool logSkip) {
   RamFlushDevice saved;
@@ -350,7 +357,9 @@ static bool ramFlushDeviceDecide(I2cDeviceType type, uint8_t n, const I2cInstanc
       }
     }
   }
-  return ramFlushDeviceVerdictOpens(v, intent);
+  const uint8_t slot = i2cSlot(type, n);
+  const bool intentAtBoot = slot < 32 && (sDeviceIntentAtBoot & (1u << slot)) != 0;
+  return ramFlushDeviceVerdictOpens(v, intentAtBoot, intent);
 }
 
 void ramFlushCaptureOverlay(void) {
@@ -453,9 +462,20 @@ void ramFlushConsumeOverlay(void) {
     memcpy(sDevices, rtcRfDevices, (size_t)count * kRamFlushDeviceEntryBytes);
     sDeviceCount      = count;
     // A flush always carries its device list, an empty one included: the I2C
-    // devices it does not name stay closed.
+    // devices it does not name stay closed (unless start-at-boot changes later).
     sDeviceListActive = true;
     sOverlayActive    = true;
+    // Settings are loaded by now (HardwareOne.cpp reads them first).
+    uint32_t intentAtBoot = 0;
+    for (uint8_t slot = 0; slot < kI2cSlotCount; ++slot) {
+      I2cDeviceType type = I2C_DEVICE_COUNT;
+      uint8_t n = 1;
+      I2cInstanceResumeState state;
+      if (i2cSlotToRef(slot, type, n) && i2cInstanceResumeState(type, n, state) && state.autoStart) {
+        intentAtBoot |= (1u << slot);
+      }
+    }
+    sDeviceIntentAtBoot = intentAtBoot;
   } else {
     sDivergeMask      = 0;
     sLiveMask         = 0;

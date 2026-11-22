@@ -7,7 +7,9 @@
 // maximum, under the overlay's CRC (System_RamFlush.cpp). The boot after it
 // reopens exactly the listed devices, each only when its saved bus and address
 // still match its settings; every other I2C device stays closed for that boot,
-// whatever its start-at-boot says.
+// whatever its start-at-boot says. After boot the list only holds where it
+// differed from start-at-boot; a later change to the setting applies
+// (ramFlushDeviceVerdictOpens).
 //
 // An entry names (type, instance n, bus, 7-bit address):
 //
@@ -128,10 +130,17 @@ inline RamFlushDeviceVerdict ramFlushDeviceCheck(bool listActive, const uint8_t*
   return RamFlushDeviceVerdict::Listed;
 }
 
-// Open it this boot? `intent` is its start-at-boot.
-inline bool ramFlushDeviceVerdictOpens(RamFlushDeviceVerdict v, bool intent) {
-  if (v == RamFlushDeviceVerdict::NoList) return intent;
-  return v == RamFlushDeviceVerdict::Listed;
+// Open it? `intentAtBoot` is its start-at-boot when this boot consumed the
+// list, `intentNow` the setting at this call. The list is a boot decision:
+// it overrides only where it differs from the boot's start-at-boot (the
+// instance diverged at the flush, as the bit masks work). Where it agrees,
+// the setting decides, so a later `<x>autostart 0/1`, the setup wizard or a
+// settings import still applies to the session-long callers (the automatic
+// restart gate, the OLED input re-resolve, the encoder's reconnect).
+inline bool ramFlushDeviceVerdictOpens(RamFlushDeviceVerdict v, bool intentAtBoot, bool intentNow) {
+  if (v == RamFlushDeviceVerdict::NoList) return intentNow;
+  const bool listOpens = (v == RamFlushDeviceVerdict::Listed);
+  return listOpens == intentAtBoot ? intentNow : listOpens;
 }
 
 // The overlay's check value over its masks, layout version and device list.

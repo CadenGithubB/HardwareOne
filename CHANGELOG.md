@@ -1193,7 +1193,10 @@ everything user-visible since the v0.99.99.1 tag.
   running (type, board number, bus and address; up to 24), and the boot after it reopens exactly
   those, each only while its bus and address settings are unchanged (otherwise it stays closed and
   the system log says why). An I2C device that was not running stays closed for that boot even when
-  its start-at-boot is on. Encoder boards 2-4 now come back on their own instead of all together.
+  its start-at-boot is on. After boot a later change to a device's start-at-boot applies again (to
+  the automatic restart, the OLED menu's input start and the encoder's reconnect), where the list
+  had agreed with it; an encoder board the flush left closed is not reconnected by an LED command.
+  Encoder boards 2-4 now come back on their own instead of all together.
   A sensor that failed to start (not plugged in) is still tried again after the flush when its
   start-at-boot is on. Wi-Fi, Bluetooth, the web server, logging, ESP-NOW, the OLED, the camera,
   speech and the other single-copy features work as before. `ramflush status` lists the devices.

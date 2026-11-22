@@ -116,28 +116,58 @@ static void testCheck() {
   // No flush this boot: start-at-boot decides, the list is not looked at.
   auto v = ramFlushDeviceCheck(false, bytes, count, I2C_DEVICE_TOF, 1, 0, 0x29);
   assert(v == RamFlushDeviceVerdict::NoList);
-  assert(ramFlushDeviceVerdictOpens(v, true) && !ramFlushDeviceVerdictOpens(v, false));
+  assert(ramFlushDeviceVerdictOpens(v, true, true) && !ramFlushDeviceVerdictOpens(v, true, false));
+  assert(ramFlushDeviceVerdictOpens(v, false, true) && !ramFlushDeviceVerdictOpens(v, false, false));
 
-  // Listed, same bus and address: reopened, whatever its start-at-boot says.
+  // Listed, same bus and address: reopened at boot, whatever its start-at-boot says.
   RamFlushDevice saved;
   v = ramFlushDeviceCheck(true, bytes, count, I2C_DEVICE_ENCODER, 2, 1, 0x38, &saved);
   assert(v == RamFlushDeviceVerdict::Listed && saved.bus == 1 && saved.address == 0x38);
-  assert(ramFlushDeviceVerdictOpens(v, false) && ramFlushDeviceVerdictOpens(v, true));
+  assert(ramFlushDeviceVerdictOpens(v, false, false) && ramFlushDeviceVerdictOpens(v, true, true));
 
   // Not listed: stays closed even with start-at-boot on (board 1 here).
   v = ramFlushDeviceCheck(true, bytes, count, I2C_DEVICE_ENCODER, 1, 0, 0x49);
-  assert(v == RamFlushDeviceVerdict::NotListed && !ramFlushDeviceVerdictOpens(v, true));
+  assert(v == RamFlushDeviceVerdict::NotListed && !ramFlushDeviceVerdictOpens(v, true, true));
 
   // Listed, but its bus or address setting changed: stays closed.
   v = ramFlushDeviceCheck(true, bytes, count, I2C_DEVICE_ENCODER, 2, 0, 0x38, &saved);
-  assert(v == RamFlushDeviceVerdict::BusChanged && saved.bus == 1 && !ramFlushDeviceVerdictOpens(v, true));
+  assert(v == RamFlushDeviceVerdict::BusChanged && saved.bus == 1 && !ramFlushDeviceVerdictOpens(v, true, true));
   v = ramFlushDeviceCheck(true, bytes, count, I2C_DEVICE_ENCODER, 2, 1, 0x39, &saved);
   assert(v == RamFlushDeviceVerdict::AddressChanged && saved.address == 0x38);
-  assert(!ramFlushDeviceVerdictOpens(v, true));
+  assert(!ramFlushDeviceVerdictOpens(v, true, true));
 
   // An empty list (nothing ran) keeps every I2C device closed.
   v = ramFlushDeviceCheck(true, bytes, 0, I2C_DEVICE_THERMAL, 1, 0, 0x33);
-  assert(v == RamFlushDeviceVerdict::NotListed && !ramFlushDeviceVerdictOpens(v, true));
+  assert(v == RamFlushDeviceVerdict::NotListed && !ramFlushDeviceVerdictOpens(v, true, true));
+}
+
+// The list is a boot decision. Past boot (the session-long callers: the
+// automatic restart gate, the OLED input re-resolve, the encoder reconnect)
+// it holds only where it differed from start-at-boot as the boot read it;
+// where it agreed, a later change to the setting applies.
+static void testBootDecisionThenSetting() {
+  using V = RamFlushDeviceVerdict;
+  // Listed and start-at-boot on (nothing diverged): `autostart 0` later ends it.
+  assert(ramFlushDeviceVerdictOpens(V::Listed, true, true));
+  assert(!ramFlushDeviceVerdictOpens(V::Listed, true, false));
+  // Not listed, start-at-boot off (nothing diverged): `autostart 1` later opens it.
+  assert(!ramFlushDeviceVerdictOpens(V::NotListed, false, false));
+  assert(ramFlushDeviceVerdictOpens(V::NotListed, false, true));
+  // Listed while start-at-boot was off (opened by hand before the flush): it
+  // stays open for the session, as a diverged bit did.
+  assert(ramFlushDeviceVerdictOpens(V::Listed, false, false));
+  assert(ramFlushDeviceVerdictOpens(V::Listed, false, true));
+  // Not listed while start-at-boot was on (closed by hand before the flush):
+  // it stays closed for the session even with start-at-boot on.
+  assert(!ramFlushDeviceVerdictOpens(V::NotListed, true, true));
+  assert(!ramFlushDeviceVerdictOpens(V::NotListed, true, false));
+  // Listed but its address or bus changed, start-at-boot on: stays closed
+  // (no reconnect at the new address either).
+  assert(!ramFlushDeviceVerdictOpens(V::AddressChanged, true, true));
+  assert(!ramFlushDeviceVerdictOpens(V::BusChanged, true, true));
+  // ... with start-at-boot off at boot: the setting decides from then on.
+  assert(!ramFlushDeviceVerdictOpens(V::AddressChanged, false, false));
+  assert(ramFlushDeviceVerdictOpens(V::AddressChanged, false, true));
 }
 
 // Who a capture lists: what runs, and what failed while meant to be on.
@@ -176,6 +206,7 @@ int main() {
   testManyInstancesOneType();
   testListValid();
   testCheck();
+  testBootDecisionThenSetting();
   testShouldList();
   testCrc();
   std::puts("ramflush_device_list_tests: all passed");

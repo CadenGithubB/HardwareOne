@@ -49,7 +49,10 @@
 // boot after it reopens exactly the listed instances, each only while its bus
 // and address settings still match the saved ones (else it stays closed and
 // one log line says why). An I2C device that is not listed stays closed for
-// that boot even when its start-at-boot is on. A type with several instances
+// that boot even when its start-at-boot is on. Past boot the list holds only
+// where it differs from start-at-boot as the boot read it, like the bits: a
+// later `<x>autostart`, setup wizard or settings import applies to the
+// session-long callers again. A type with several instances
 // (the encoder boards; PCA9685 and HT16K33 later) needs no layout change. The
 // single-copy features (Wi-Fi, Bluetooth, HTTP, LLM, MQTT, logging, ESP-NOW,
 // OLED, automation, camera, SR, microphone, and the GPIO input wheel) keep
@@ -114,9 +117,11 @@ bool ramFlushResolve(RamFlushFeatureId f, bool intent);
 
 // The same answer for instance n (1-based) of a queue-managed I2C device:
 // `intent` (its start-at-boot) when no flush list is in force this boot;
-// otherwise true only when the instance is listed and its bus and address
-// settings still equal the saved ones. A listed instance whose bus or address
-// changed is logged once and stays closed. Session-long, like ramFlushResolve.
+// otherwise the list's answer (listed, with its bus and address settings still
+// equal to the saved ones) where it differs from the instance's start-at-boot
+// at this boot, and `intent` where it agrees, so a later change to the
+// setting applies. A listed instance whose bus or address changed is logged
+// once. Session-long, like ramFlushResolve.
 enum I2cDeviceType : int;
 bool ramFlushResolveDevice(I2cDeviceType device, uint8_t n, bool intent);
 

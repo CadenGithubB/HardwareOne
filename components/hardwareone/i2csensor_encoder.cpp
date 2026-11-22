@@ -20,6 +20,7 @@ EXT_RAM_BSS_ATTR EncoderInstanceSettings gEncoderInst[kEncoderMaxInstances];
 #include "System_I2C.h"
 #include "System_I2CInstanceCore.h"  // the instance argument (G1-G3), names
 #include "System_MemUtil.h"          // ps_alloc: the seesaw objects live in PSRAM
+#include "System_RamFlush.h"         // ramFlushResolveDevice: the reconnect follows the flush
 #include "System_Mutex.h"            // SensorCacheGuard
 #include "System_SeesawIdentity.h"
 #include "System_Settings.h"
@@ -152,7 +153,9 @@ bool boardWanted(EncoderInstance& e, uint8_t n) {
     case HandState::Closed: return false;
     case HandState::FollowAutoStart: break;
   }
-  return saved(n).autoStart;
+  // Start-at-boot as the RAM flush resolved it: a board a flush left closed
+  // (not on its device list, or its bus/address changed) is not reconnected.
+  return ramFlushResolveDevice(I2C_DEVICE_ENCODER, n, saved(n).autoStart);
 }
 
 uint8_t brightnessSetting(uint8_t n) {
