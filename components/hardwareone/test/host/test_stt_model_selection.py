@@ -30,13 +30,13 @@ HEADERS = (
     '4857315354543100010000000000000000e3320100e33201803e000000530700'
     '47e58faa01470d32dad88f1faa46e3f61dff0fd605aa542103aefd11502dae72'
     'ca91eb9683f7151b8be1a01532a6790c6eb7d515f67169a207751e3fc48cc58b',
-    '4857315354543100010000000000000070605a0170605a01803e000000530700'
-    'a9dbce5bcf9ba039b3a3ca31dc30e6de1d6cf56ad2d7c091d30110c65784623b'
+    '48573153545431000100000000000000d0615a01d0615a01803e000000530700'
+    'a135f830e978dec823f5374f892a58a675aabefecd5b601d1515c8431ccf71e2'
     '4b00ac087270695e7bbc56f0867c995b30bc29323bdda6ca073b03bb5dbb8cc3',
 )
 PATHS = ('/STT Models/quartznet5x5.p4.stt',
          '/sd/STT Models/quartznet15x5-gen2-25397.p4.stt',
-         '/sd/STT Models/citrinet384-2000h.p4.stt')
+         '/sd/STT Models/citrinet384-2000h-c90.p4.stt')
 
 HARNESS = r'''
 #ifdef TEST_FIRMWARE
@@ -50,7 +50,7 @@ HARNESS = r'''
 int main() {
   using namespace hw1::stt;
   constexpr int nodes[] = {71, 201, 395}, exponents[] = {-2, -1, -1};
-  constexpr size_t raw[] = {7171984, 20112128, 22700144}, sizes[] = {5487504, 20112224, 22700240};
+  constexpr size_t raw[] = {7171984, 20112128, 22700496}, sizes[] = {5487504, 20112224, 22700592};
   constexpr unsigned codecs[] = {1, 0, 0};
   const char* outputs[] = {"189", "529", "913"};
   static_assert(identity::kNodeCount == nodes[EXPECT_MODEL]);
@@ -60,7 +60,7 @@ int main() {
   static_assert(HW1_STT_CITRINET == (EXPECT_MODEL == 2));
 #if HW1_STT_CITRINET
   // The repacked image: what a built model still reads ends on a 16-byte boundary inside it.
-  static_assert(identity::kResidentKeepBytes == 21383888 && identity::kResidentKeepBytes % 16 == 0);
+  static_assert(identity::kResidentKeepBytes == 21384192 && identity::kResidentKeepBytes % 16 == 0);
   static_assert(identity::kResidentKeepBytes < identity::kRawBytes);
 #endif
   assert(std::strcmp(identity::kOutputName, outputs[EXPECT_MODEL]) == 0);

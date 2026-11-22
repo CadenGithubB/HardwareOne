@@ -10,6 +10,14 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 
 ## [Unreleased]
 
+### Changed (speech model)
+
+- Local speech-to-text uses the published Citrinet-384 c90 model
+  (`/sd/STT Models/citrinet384-2000h-c90.p4.stt`, SHA-256 `0b0fd358…`): the same file the
+  speech-to-text repository ships in `Pretrained Models/` and its v3.2 release, so one
+  file serves both projects. The identity header and compile requirements follow it.
+  Not yet run on a P4 with this file.
+
 The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this section collects
 everything user-visible since the v0.99.99.1 tag.
 

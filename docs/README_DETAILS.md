@@ -135,7 +135,7 @@ Each device in your setup runs one board. Multiple boards can coexist on the sam
 | Unexpected Maker FeatherS3 | 16 / 8 MB | ❌ | ❌ | ✅ | Quad PSRAM; dual STEMMA QT (second I2C bus); onboard RGB LED; MAX17048 fuel gauge. Also built as `feathers3_fe` (flash encryption; experimental, first boot burns eFuses) |
 | Adafruit Feather ESP32 V2 | 8 / 2 MB | ❌ | ❌ | ✅ (GPIO35) | Onboard NeoPixel + battery monitoring |
 | Adafruit QT Py ESP32 | 8 / 2 MB | ❌ | ❌ | ❌ | ESP32-PICO; STEMMA QT onboard; compact |
-| Espressif ESP32-P4X-EYE | 16 / 32 MB | ✅ (MIPI) | ✅ | ✅ (voltage) | 240×240 LCD, wheel + 3 buttons; radio via onboard ESP32-C6; local speech-to-text (needs a separately installed model file: the saved P4 configurations read the published model from microSD; the plain board build keeps microSD off and expects an unpublished model, see [Local speech-to-text model](#local-speech-to-text-model-esp32-p4)). [Notes](P4X_EYE_PERIPHERALS.md), [enclosure](../physical_enclosures/p4x_eye/README.md) |
+| Espressif ESP32-P4X-EYE | 16 / 32 MB | ✅ (MIPI) | ✅ | ✅ (voltage) | 240×240 LCD, wheel + 3 buttons; radio via onboard ESP32-C6; local speech-to-text (the saved P4 configurations read the published model file from microSD; the plain board build keeps microSD off and has no local speech-to-text, see [Local speech-to-text model](#local-speech-to-text-model-esp32-p4)). [Notes](P4X_EYE_PERIPHERALS.md), [enclosure](../physical_enclosures/p4x_eye/README.md) |
 | Waveshare ESP32-P4 Touch LCD 5 | 32 / 32 MB | ✅ (MIPI, saved profile) | ✅ (ES7210) | ✅ (ADC) | Experimental. 5-inch 720×1280 HX8394 DSI panel with GT911 touch; radio via onboard ESP32-C6; ES8311 speaker output (driver-tested only). [Notes](WAVESHARE_P4_SUPPORT.md) |
 
 ### Support matrix
@@ -197,12 +197,16 @@ run time; the file is not part of the firmware image or of this repository.
 
 - **Saved P4 configurations** (`p4-glasses-test`, `p4-phone-pipe`, `p4-openclaw` and `p4-portable`)
   run Citrinet-384, the default acoustic model (`ENABLE_STT_MODEL_CITRINET`), and
-  load `/sd/STT Models/citrinet384-2000h.p4.stt` from the microSD card:
-  22,700,240 bytes, SHA-256
-  `3781e173c3595ebb3e2087c7a0a4dfc1b85219135c57c8335930f7bc0658a70a`. That file
-  is not published yet; it is built by the speech-to-text repository's
-  `tools/stt_p4/package_citrinet.py` from the model's int8 export (repacked so
-  the firmware can return 1.3 MB of it to PSRAM once the model is built).
+  load `/sd/STT Models/citrinet384-2000h-c90.p4.stt` from the microSD card:
+  22,700,592 bytes, SHA-256
+  `0b0fd3581dd626dab65e7d86bc0a82cab7931200e9238d44e4eae32faf4efc03`. It is
+  published in the public speech-to-text repository's
+  [`Pretrained Models/STT Models`](https://github.com/CadenGithubB/ESP32_Onboard_Speech_To_Text/tree/main/Pretrained%20Models/STT%20Models)
+  folder and as an asset of its
+  [`v3.2`](https://github.com/CadenGithubB/ESP32_Onboard_Speech_To_Text/releases/tag/v3.2)
+  release, with the optional language model (`meeting.lm`) and speaker model
+  (`speaker.spk`): copy that `STT Models` folder to the top of the card. The
+  firmware refuses any other file at that path.
 - **QuartzNet instead** (`ENABLE_STT_MODEL_QUARTZNET=1` and `ENABLE_STT_MODEL_CITRINET=0` in a saved
   configuration) loads
   `/sd/STT Models/quartznet15x5-gen2-25397.p4.stt`, published as a release asset of
@@ -224,8 +228,9 @@ run time; the file is not part of the firmware image or of this repository.
   `ENABLE_LOCAL_STT=1` (with `ENABLE_SD_CARD=1` as in the handheld
   deployment); the build refuses local STT without the card.
 - **Speaker labels** (on by default on `p4x_eye`) also read
-  `/sd/STT Models/speaker.spk`, which is not published either. Without it,
-  transcription still works and transcripts carry no speaker labels.
+  `/sd/STT Models/speaker.spk`, published in the same `STT Models` folder and
+  release as the model. Without it, transcription still works and transcripts
+  carry no speaker labels.
 
 ---
 

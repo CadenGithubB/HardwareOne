@@ -125,7 +125,7 @@
 // Fully local transcription on the P4 (no Pi/UART, Wi-Fi or cloud). It runs
 // its acoustic model from the microSD card, so it needs the card switches
 // above (the build refuses local STT without them). One model per build: this
-// deployment builds Citrinet-384 ("/sd/STT Models/citrinet384-2000h.p4.stt"),
+// deployment builds Citrinet-384 ("/sd/STT Models/citrinet384-2000h-c90.p4.stt"),
 // the model the portable runs. CMake reads these switches as text to pick the
 // runtime sources, so each is a bare literal here. A QuartzNet build would
 // set ENABLE_STT_MODEL_QUARTZNET 1, ENABLE_STT_MODEL_CITRINET 0 and

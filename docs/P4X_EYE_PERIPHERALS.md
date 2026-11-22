@@ -241,15 +241,18 @@ off) builds without local STT; `ENABLE_SDMMC_CARD=1` with `ENABLE_LOCAL_STT=1`
 enables it, speaker labels follow, and the build refuses local STT without
 the card. The saved P4 speech configurations (`configurations/p4-*.json`) and
 the handheld deployment enable both. They build the default acoustic model,
-Citrinet-384, read from `/sd/STT Models/citrinet384-2000h.p4.stt`. A QuartzNet
+Citrinet-384, read from `/sd/STT Models/citrinet384-2000h-c90.p4.stt`. A QuartzNet
 build (`ENABLE_STT_MODEL_QUARTZNET=1`, `ENABLE_STT_MODEL_CITRINET=0`) runs the
 15×5 gen2 model at
 `/sd/STT Models/quartznet15x5-gen2-25397.p4.stt`, published as
 [`model-gen2-25397`](https://github.com/CadenGithubB/ESP32_Onboard_Speech_To_Text/releases/tag/model-gen2-25397)
 (`quartznet15x5-gen2-25397.p4.stt`, 20,112,224 bytes, SHA-256
 `dccef3a8cead069d97d780e0d08ddfc65d9f0870c0af4673b29327f00158f048`).
-Speaker labels (on in this profile) read `/sd/STT Models/speaker.spk`, which is
-not published; transcription works without it. Installation steps are in the
+The Citrinet file and the speaker-label model (`/sd/STT Models/speaker.spk`, on
+in this profile; transcription works without it) are published in the
+speech-to-text repository's `Pretrained Models/STT Models` folder and its
+[`v3.2`](https://github.com/CadenGithubB/ESP32_Onboard_Speech_To_Text/releases/tag/v3.2)
+release. Installation steps are in the
 [Local speech-to-text model](README_DETAILS.md#local-speech-to-text-model-esp32-p4)
 section.
 

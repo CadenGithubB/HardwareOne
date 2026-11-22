@@ -366,7 +366,7 @@
 
 // Local STT acoustic model: exactly one per build (stt/stt_model_selection.h).
 // Citrinet-384 (2000 h, WordPiece output with its own word-piece LM decoder,
-// stt/citrinet_runtime.cpp, "/sd/STT Models/citrinet384-2000h.p4.stt") is the
+// stt/citrinet_runtime.cpp, "/sd/STT Models/citrinet384-2000h-c90.p4.stt") is the
 // default. QuartzNet (stt/quartznet_runtime.cpp, the 15x5 gen2 with
 // ENABLE_STT_MODEL_15X5_GEN2) is built instead with ENABLE_STT_MODEL_QUARTZNET 1
 // and ENABLE_STT_MODEL_CITRINET 0. CMake reads both switches as text: the other

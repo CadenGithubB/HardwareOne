@@ -9,7 +9,7 @@
 #define HW1_STT_CITRINET 1
 #include "stt_model_identity_citrinet384.h"
 #ifndef HW1_STT_MODEL_PATH
-#define HW1_STT_MODEL_PATH "/sd/STT Models/citrinet384-2000h.p4.stt"
+#define HW1_STT_MODEL_PATH "/sd/STT Models/citrinet384-2000h-c90.p4.stt"
 #endif
 #elif defined(ENABLE_STT_MODEL_15X5_GEN2) && ENABLE_STT_MODEL_15X5_GEN2
 #define HW1_STT_CITRINET 0

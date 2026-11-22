@@ -49,7 +49,7 @@ microSD and local speech-to-text were switched on on 2026-11-20
 (`ENABLE_SDMMC_CARD`, `ENABLE_SD_CARD` and `ENABLE_LOCAL_STT` are 1). Local
 speech-to-text on the P4 reads its acoustic model from the card: this
 deployment builds Citrinet-384 and loads
-`/sd/STT Models/citrinet384-2000h.p4.stt`; the
+`/sd/STT Models/citrinet384-2000h-c90.p4.stt`; the
 [Local speech-to-text model](../../docs/README_DETAILS.md#local-speech-to-text-model-esp32-p4)
 section says where the file comes from. Without the card or the file the
 rest of the device works and speech-to-text reports that its model cannot be

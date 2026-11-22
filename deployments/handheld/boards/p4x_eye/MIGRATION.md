@@ -70,7 +70,7 @@ the web file manager (see `docs/P4X_EYE_PERIPHERALS.md`).
 ## microSD card and speech-to-text model (since 2026-11-20)
 
 This deployment now contains the microSD card and local speech-to-text. Fit a
-card and copy the acoustic model to `/sd/STT Models/citrinet384-2000h.p4.stt`
+card and copy the acoustic model to `/sd/STT Models/citrinet384-2000h-c90.p4.stt`
 (and, if you have them, `meeting.lm` and `speaker.spk` into the same folder);
 the
 [Local speech-to-text model](../../../../docs/README_DETAILS.md#local-speech-to-text-model-esp32-p4)
