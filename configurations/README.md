@@ -156,8 +156,14 @@ encoderautostart on
 encoderautostart 2 on
 oledautostart on
 wifiexternalantenna on
+powersave 0
 reboot
 ```
+
+`powersave 0` matters on this board: the OLED is on bus 1 (the vertical STEMMA QT, the [D]'s
+default OLED bus), and a power-save blank cuts LDO2 (GPIO39), which also powers off everything else on
+bus 1 (the 4991 pixels and any other sensor there). With power saving off the panel never blanks on its
+own; a deliberate sleep (light/deep sleep) still cuts the rail.
 
 `wifiexternalantenna` (FeatherS3[D] only, reboot required) drives GPIO41 high at boot, which turns
 the board's RF switch to the u.FL connector; off, the pin is left alone and the switch's pull-down
