@@ -85,6 +85,7 @@ function page() {
   });
   const requests = {};
   const batches = [];
+  const popups = [];  // hw.showCliError: the refusal popup (owner rule 2026-11-21)
   const window = {};
   const context = vm.createContext({
     window,
@@ -109,6 +110,7 @@ function page() {
         requests[url] = requests[url] || deferred();
         return requests[url].promise;
       },
+      showCliError(message) { popups.push(String(message)); },
       postJSON(url, body) {
         const reply = deferred();
         batches.push({url, body, reply});
@@ -121,7 +123,7 @@ function page() {
     context[name] = () => {};
   }
   vm.runInContext(script, context, {filename: 'WebPage_Logging.h'});
-  return {context, window, element, boxes: () => boxes, requests, batches};
+  return {context, window, element, boxes: () => boxes, requests, batches, popups};
 }
 
 function ticked(p) {
@@ -196,6 +198,9 @@ async function load(order, systemLog) {
     await flush();
     equal(status.textContent, 'Error: Admin access required', 'refusal shown');
     equal(status.style.color, 'var(--danger)', 'refusal colour');
+    equal(p.popups.length, 1, 'refusal pops up once');
+    assert.match(p.popups[0], /Admin access required/);
+    checks++;
 
     // A save that did not complete is an error even with no refusal text.
     p.context.applySystemConfig();
