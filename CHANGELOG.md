@@ -21,6 +21,13 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this section collects
 everything user-visible since the v0.99.99.1 tag.
 
+### Added (build configuration)
+- `xiao-status-sign`: a saved XIAO configuration for the meeting-room status sign. Two Adafruit
+  4991 encoder boards on STEMMA QT are lit green or red with the LED commands (`ledcolor encoder`,
+  `ledcolor encoder2`); Wi-Fi, the web interface and automations stay as in `xiao-default`;
+  camera, microphone, assistant, ESP-NOW, maps and the Raspberry Pi link are off. The boards'
+  addresses (0x36, 0x37) are device settings, set once after setup (`configurations/README.md`).
+
 ### Changed (guest web view)
 - A guest (owner decision B6: guests view interfaces only) now sees every web page and every
   control. A control that changes the device answers with the refusal popup ("Guest accounts are
