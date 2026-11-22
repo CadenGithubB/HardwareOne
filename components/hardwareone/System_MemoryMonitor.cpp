@@ -51,8 +51,8 @@
 // Re-tune them against measured usage if a feature is ever wrongly refused.
 static const MemoryRequirement gMemoryRequirements[] = {
   // Component       MinHeap   TaskStack              MinPSRAM
-  { "gamepad",       20480,    INPUT_STACK_WORDS,   0 },       // 14KB stack + overhead
-  { "anoencoder",    20480,    INPUT_STACK_WORDS,   0 },       // 14KB stack + overhead (same seesaw lib + INPUT_STACK_WORDS as gamepad)
+  { "gamepad",       20480,    INPUT_STACK_WORDS,   0 },       // 3.5KB stack (INPUT_STACK_WORDS) + overhead
+  { "anoencoder",    12288,    INPUT_STACK_WORDS,   0 },       // 3.5KB stack (INPUT_STACK_WORDS) + the seesaw's I2C device + headroom (its object is in PSRAM)
   { "thermal",       49152,    THERMAL_STACK_WORDS,   0 },       // 24KB stack + frame processing overhead
   { "imu",           24576,    IMU_STACK_WORDS,       0 },       // 16KB stack + overhead
   { "tof",           16384,    TOF_STACK_WORDS,       0 },       // 12KB stack + overhead

@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1030 commands across 60 modules (1030 registry entries).
+1031 commands across 60 modules (1031 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -38,7 +38,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`imu`](#imu) — 16 commands
 - [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
-- [`anoencoder`](#anoencoder) — 5 commands
+- [`anoencoder`](#anoencoder) — 6 commands
 - [`apds`](#apds) — 9 commands
 - [`gps`](#gps) — 6 commands
 - [`fmradio`](#fmradio) — 9 commands
@@ -629,13 +629,14 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## anoencoder
 
-> Adafruit ANO directional navigation rotary encoder on Seesaw I2C: a click wheel with a center IN press and UP/DOWN/LEFT/RIGHT buttons, used as the OLED navigation input. This module provides debug and remap commands; the actual open/close/autostart/poll lifecycle lives under the input module. anoencoderread dumps raw state -- encoder position, the currently selected rotary axis, and the button bitmask. Remap commands persist to settings: anoencoderi2caddr <1-127> changes the device address (reboot required), anoencoderinvert [on|off] reverses rotation direction, and anoencoderswapud / anoencoderswaplr [on|off|toggle] swap the UP/DOWN and LEFT/RIGHT button pairs. A polling task accumulates encoder detents so fast spins do not drop clicks. Mutually exclusive at build time with the Seesaw gamepad.
+> Adafruit ANO directional navigation rotary encoder (5740) on seesaw I2C: a click wheel with a center IN press and UP/DOWN/LEFT/RIGHT buttons, used as the OLED navigation input. The wheel scrolls up and down; IN is A, LEFT is B, DOWN is X, UP is Y, a RIGHT tap is SELECT (sent when RIGHT is released) and RIGHT held with IN is START. The open/close/autostart/poll lifecycle lives under the input module and the bus is set with inputbus. anoencoderstatus [json] shows the bus, address, settings and whether it is open; anoencoderread [json] gives the wheel position and buttons. anoencoderi2caddr <0x49..0x50> sets the address (A0-A2 jumpers; refused when another device of this build uses it on the input bus; applies at the next openinput), anoencoderinvert [on|off] reverses rotation, and anoencoderswapud / anoencoderswaplr [on|off|toggle] swap the UP/DOWN and LEFT/RIGHT button pairs. The polling task reads the buttons, the seesaw's change flags (so taps shorter than one poll are kept) and the wheel's detents in one checked transaction. Mutually exclusive at build time with the Seesaw gamepad.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `anoencoderi2caddr` | A | Set ANO I2C address [1-127]<br/>`Usage: anoencoderi2caddr <1-127>` |
+| `anoencoderi2caddr` | A | Set the ANO I2C address [0x49-0x50] (next openinput)<br/>`Usage: anoencoderi2caddr <0x49..0x50>` |
 | `anoencoderinvert` | A | Invert rotation direction [on\|off]<br/>`Usage: anoencoderinvert [on\|off]` |
-| `anoencoderread` |  | Read ANO encoder state. (add 'json' for JSON output) |
+| `anoencoderread` |  | Read the ANO encoder: wheel position and buttons. (add 'json' for JSON output) |
+| `anoencoderstatus` |  | ANO encoder status: bus, address, settings. (add 'json' for JSON output)<br/>`Usage: anoencoderstatus [json]` |
 | `anoencoderswaplr` | A | Swap LEFT/RIGHT buttons [on\|off\|toggle]<br/>`Usage: anoencoderswaplr [on\|off\|toggle]` |
 | `anoencoderswapud` | A | Swap UP/DOWN buttons [on\|off\|toggle]<br/>`Usage: anoencoderswapud [on\|off\|toggle]` |
 

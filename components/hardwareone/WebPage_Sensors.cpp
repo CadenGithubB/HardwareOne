@@ -199,20 +199,16 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         return ESP_OK;
       } else if (sensorType == "anoencoder") {
 #if !ENABLE_ANO_ENCODER
-        sendJsonResponse(req, "{\"val\":0, \"error\":\"not_compiled\"}");
+        sendJsonResponse(req, SENSOR_JSON_UNAVAILABLE);
         return ESP_OK;
 #else
-        // ANO-shaped JSON: {val, pos, axis, buttons}. Built from the native
-        // ANO reading (encoder position + per-mode axis) so the sensor
-        // card shows the real driver state, not the gamepad-shaped proxy.
-        if (!gAnoEncoderEnabled || !gAnoEncoderConnected) {
-          sendJsonResponse(req, "{\"val\":0, \"error\":\"not_connected\"}");
-          return ESP_OK;
-        }
+        // The shared reading envelope in every case, from the native ANO
+        // reading: {valid,connected,ts,pos,axis,buttons}. A closed encoder
+        // answers valid/connected false; a builder failure the bare envelope.
         char anoBuf[160];
         int jsonLen = anoEncoderBuildDataJson(anoBuf, sizeof(anoBuf));
         if (jsonLen <= 0) {
-          sendJsonResponse(req, "{\"val\":0, \"error\":\"no_data\"}");
+          sendJsonResponse(req, SENSOR_JSON_UNAVAILABLE);
           return ESP_OK;
         }
         httpd_resp_set_type(req, "application/json");

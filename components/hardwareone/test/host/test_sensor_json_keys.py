@@ -80,7 +80,7 @@ SENDERS = [
      [b',"x":0,"y":0,"buttons":0}', b',"x":%d,"y":%d,"buttons":%lu}']),
     ('i2csensor_ano_encoder.cpp', 'int anoEncoderBuildDataJson(',
      {'POS': 2, 'AXIS': 2, 'BUTTONS': 2},
-     [b',"pos":0,"axis":0,"buttons":0}', b',"pos":%ld,"axis":%u,"buttons":%lu}']),
+     [b',"pos":0,"axis":0,"buttons":0}', b',"pos":%ld,"axis":0,"buttons":%lu}']),
     ('Input_GPIOEncoder.cpp', 'int gpioEncoderBuildDataJson(',
      {'POS': 1, 'AXIS': 1, 'BUTTONS': 1},
      [b'{"connected":false,"valid":false}', b'{"connected":false,"valid":false}',
@@ -92,7 +92,7 @@ RECEIVERS = [
     ('System_ESPNow_Sensors.cpp', 'bool getRemoteGpsData(',
      ['fix', 'quality', 'sats', 'lat', 'lon', 'alt', 'speed']),
     ('OLED_Mode_Network.cpp', 'void displayRemoteSensors(',
-     ['pos', 'pos', 'axis', 'buttons', 'x', 'y', 'buttons', 'ori', 'roll', 'pitch', 'yaw',
+     ['pos', 'pos', 'buttons', 'x', 'y', 'buttons', 'ori', 'roll', 'pitch', 'yaw',
       'lat', 'lon', 'sats', 'fix', 'objects', 'distance_mm', 'status', 'frequency', 'rssi',
       'station']),
 ]

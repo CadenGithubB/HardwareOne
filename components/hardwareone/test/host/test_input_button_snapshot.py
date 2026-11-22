@@ -64,7 +64,7 @@ int main() {
         reading = re.search(r"struct AnoEncoderCache \{.*?\n\};", header, re.S).group()
         functions = []
         for name in ("anoEncoderCacheSnapshot", "invalidateAnoCache", "inputStartInternal",
-                     "anoEncoderResetAxisForMode", "anoEncoderConsumeOneDetent"):
+                     "anoEncoderConsumeOneDetent"):
             match = re.search(r"^(?:static )?(?:bool|int|void) " + name + r"\([^\n]*\) \{\n.*?^\}",
                               source, re.S | re.M)
             self.assertIsNotNone(match, name)

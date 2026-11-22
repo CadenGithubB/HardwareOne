@@ -34,7 +34,7 @@
 #include "System_Utils.h"
 #include "System_User.h"
 #include "i2csensor_seesaw.h"      // For JOYSTICK_DEADZONE
-#include "i2csensor_ano_encoder.h" // ANO_BTN_*/ANO_AXIS_* bit defines (live outside the
+#include "i2csensor_ano_encoder.h" // ANO_BTN_* bit defines (live outside the
                                    // ENABLE_ANO_ENCODER guard) — the master decodes a
                                    // remote peer's ANO input regardless of its own input HW
 #include <math.h>                  // cosf/sinf for the remote ANO rotary dial
@@ -1329,7 +1329,7 @@ void displayRemoteSensors() {
         case REMOTE_SENSOR_INPUT: {
           // Two distinct input devices both stream as REMOTE_SENSOR_INPUT:
           //   gamepad : {"x":N,"y":N,"buttons":B}        (buttons active-LOW)
-          //   ANO enc : {"pos":N,"axis":0|1,"buttons":B} (buttons active-HIGH)
+          //   ANO enc : {"pos":N,"axis":0,"buttons":B}   (buttons active-HIGH)
           // Detect the ANO shape by the presence of "pos" (gamepad never sends it)
           // and render the matching widget. Before this split, ANO data fell into
           // the gamepad joystick layout below: x/y defaulted to 512 (dead-center
@@ -1337,16 +1337,12 @@ void displayRemoteSensors() {
           if (!doc[HW1_SK_POS].isNull()) {
             // ---- ANO rotary encoder widget ----
             long     pos  = doc[HW1_SK_POS]     | 0L;
-            int      axis = doc[HW1_SK_AXIS]    | 0;
             uint32_t b    = doc[HW1_SK_BUTTONS] | 0u;   // active-HIGH: set bit = pressed
 
-            // Left column: position + active axis.
+            // Left column: position ("axis" stays in the reading, always 0).
             oledDisplay->setCursor(0, 24);
             oledDisplay->print("Pos: ");
             oledDisplay->print(pos);
-            oledDisplay->setCursor(0, 36);
-            oledDisplay->print("Axis: ");
-            oledDisplay->print(axis == ANO_AXIS_HORIZONTAL ? "Horiz" : "Vert");
 
             // Right side: a rotary dial whose needle tracks pos folded into one
             // revolution. encoderPosition is a monotonic absolute count, so we

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "System_SeesawIdentity.h"  // the real product ids and the claim check
+#include "i2csensor_ano_encoder_core.h"  // the ANO's pins and address rule
 
 static unsigned assertions = 0;
 static void check(bool condition, const char* message) {
@@ -27,7 +28,8 @@ static std::unordered_map<void*, Allocation> allocations;
 struct Scenario {
   bool bus = true, transaction = true, ping = true, defaultBegin = true;
   unsigned failAllocationAt = 0, allocationAttempts = 0, beginIndex = 0, taskExits = 0;
-  unsigned resets = 0, pinConfigs = 0, encoderZeroes = 0, crystalEnables = 0;
+  unsigned resets = 0, pinConfigs = 0, encoderZeroes = 0, crystalEnables = 0, rebinds = 0, flagReads = 0;
+  bool addressTaken = false;     // another device of the build holds the ANO's address
   uint8_t resolvedBus = 255, transactionBus = 255;
   unsigned long now = 10000;
   std::vector<bool> beginResults;
@@ -46,10 +48,10 @@ static constexpr uint8_t I2C_ADDR_IMU = 0x28, I2C_ADDR_APDS = 0x39;
 static constexpr uint8_t APDS9960_ADDRESS = 0x39, PCA9685_I2C_ADDRESS = 0x40;
 static constexpr uint8_t I2C_ADDR_GAMEPAD = 0x50;
 static constexpr int APDS9960_AGAIN_4X = 1, INPUT_PULLUP = 2;
-static constexpr uint32_t GAMEPAD_BUTTON_MASK = 0x3f, SS_BUTTON_MASK = 0x1f;
+static constexpr uint32_t GAMEPAD_BUTTON_MASK = 0x3f;
 static constexpr int MAX_SERVO_CHANNELS = 16;
-static unsigned long gLastGamepadInitMs = 0, gLastAnoInitMs = 0;
-static constexpr unsigned long kGamepadInitMinIntervalMs = 2000, kAnoInitMinIntervalMs = 2000;
+static unsigned long gLastGamepadInitMs = 0;
+static constexpr unsigned long kGamepadInitMinIntervalMs = 2000;
 static bool gImuConnected = false, gApdsConnected = false, gPwmDriverConnected = false;
 static bool gInputConnected = false, gInputRunning = false, gAnoEncoderConnected = false;
 static bool gAnoEncoderEnabled = false, gImuRunning = false;
@@ -155,7 +157,7 @@ class Adafruit_seesaw {
     return ((uint32_t)product << 16) | 0x1234u;
   }
   void pinModeBulk(uint32_t mask, int mode) {
-    check((mask == GAMEPAD_BUTTON_MASK || mask == SS_BUTTON_MASK) && mode == INPUT_PULLUP,
+    check((mask == GAMEPAD_BUTTON_MASK || mask == kAnoPinMask) && mode == INPUT_PULLUP,
           "Seesaw button configuration unchanged");
     ++scenario.pinConfigs;
   }
@@ -173,6 +175,13 @@ class Adafruit_seesaw {
   }
   uint8_t address_ = 0;
 };
+// The ANO driver's subclass: rebinding to another bus and the change-flag read.
+class AnoSeesaw : public Adafruit_seesaw {
+ public:
+  explicit AnoSeesaw(TwoWire* bus) : Adafruit_seesaw(bus) {}
+  void bindWire(TwoWire* bus) { check(bus == &wire, "ANO rebinds to the configured wire"); ++scenario.rebinds; }
+  bool readIntFlags(uint32_t& flags) { flags = 0; ++scenario.flagReads; return true; }
+};
 // The product-id read the drivers make on the held bus, before any begin.
 static bool seesawReadProductIdOnHeldBus(TwoWire* bus, uint8_t address, uint16_t& product) {
   check(bus == &wire, "product id read uses the configured wire");
@@ -189,13 +198,14 @@ static Adafruit_BNO055* gBNO055 = nullptr;
 static Adafruit_APDS9960* gAPDS9960 = nullptr;
 static Adafruit_PWMServoDriver* gPwmDriver = nullptr;
 static Adafruit_seesaw* gGamepadSeesaw = nullptr;
-static Adafruit_seesaw* gAnoSeesaw = nullptr;
+static AnoSeesaw* gAnoSeesaw = nullptr;
+static uint8_t sAnoSeesawBus = 0xFF, sAnoBus = 0, sAnoAddress = 0;
 static void* ps_alloc(size_t size, AllocPref preference, const char* tag) {
   check(preference == AllocPref::PreferPsram, "parent allocation requests PSRAM preference");
   const std::map<std::string, size_t> expected = {
     {"imu.obj", sizeof(Adafruit_BNO055)}, {"apds.obj", sizeof(Adafruit_APDS9960)},
     {"servo.obj", sizeof(Adafruit_PWMServoDriver)}, {"input.gamepad.obj", sizeof(Adafruit_seesaw)},
-    {"input.ano.obj", sizeof(Adafruit_seesaw)}};
+    {"input.ano.obj", sizeof(AnoSeesaw)}};
   check(expected.count(tag) && expected.at(tag) == size, "parent allocation tag and sizeof match driver");
   ++stats[tag].allocations;
   if (++scenario.allocationAttempts == scenario.failAllocationAt) return nullptr;
@@ -227,7 +237,14 @@ static bool resolveBus(uint8_t* bus, TwoWire** output) {
 }
 static bool gamepadResolveBus(uint8_t* bus, TwoWire** output) { return resolveBus(bus, output); }
 static bool anoResolveBus(uint8_t* bus, TwoWire** output) { return resolveBus(bus, output); }
-static uint8_t anoI2cAddr() { return 0x49; }
+static uint8_t anoEncoderAddress() { return 0x49; }
+enum I2cDeviceType { I2C_DEVICE_INPUT = 3 };
+static bool i2cAddressTakenBy(uint8_t, uint8_t address, I2cDeviceType type, uint8_t n, char* why, size_t len) {
+  check(address == 0x49 && type == I2C_DEVICE_INPUT && n == 1 && why && len > 0,
+        "ANO asks for its own address as input instance 1");
+  if (scenario.addressTaken) std::snprintf(why, len, "Error: 0x49 on bus 1 is in use by Encoder (instance 1).");
+  return scenario.addressTaken;
+}
 static bool i2cPingAddress(uint8_t, uint32_t, unsigned, uint8_t) { return scenario.ping; }
 static bool i2cPing(uint8_t bus, uint8_t address) { return i2cPingAddress(address, 100000, 200, bus); }
 template<class F>
@@ -275,7 +292,7 @@ static void resetScenario() {
   gImuConnected = false; gApdsConnected = false; gPwmDriverConnected = false;
   gInputConnected = false; gInputRunning = false; gAnoEncoderConnected = false;
   gImuRunning = false; gAnoEncoderEnabled = false;
-  gLastGamepadInitMs = 0; gLastAnoInitMs = 0;
+  gLastGamepadInitMs = 0; sAnoSeesawBus = 0xFF; sAnoBus = 0; sAnoAddress = 0; gSettings.inputBus = 1;
   gImuInitRequested = true; gImuInitDone = true; gImuInitResult = true;
   sImuCache.imuDataValid = true; sImuCache.imuSeq = 4;
   sApdsCache.apdsDataValid = true; gInputCache.dataValid = true; sAnoEncoderCache.dataValid = true;
@@ -283,7 +300,7 @@ static void resetScenario() {
 }
 static void testAllocationAndBusFailure() {
   const std::vector<bool(*)()> initializers = {imuInit, apdsInit, servoInit, gamepadInit,
-                                             gamepadInitConnection, anoEncoderInit, anoEncoderInitConnection};
+                                             gamepadInitConnection, anoEncoderInit};
   for (auto initialize : initializers) {
     resetScenario(); scenario.failAllocationAt = 1;
     check(!initialize(), "parent allocation failure is reported");
@@ -382,26 +399,33 @@ static void testRetainedGamepad() {
         "gamepad transaction rejection keeps preallocated parent");
 }
 static void testRetainedAno() {
-  for (bool failAfterReset : {false, true}) {
-    resetScenario(); scenario.beginResults = failAfterReset ? std::vector<bool>{true, false} : std::vector<bool>{false};
-    check(!anoEncoderInit() && gAnoSeesaw && !gAnoEncoderConnected,
-          "failed ANO begin keeps parent for retry");
-    auto* retained = gAnoSeesaw;
-    check(anoEncoderInitConnection() && gAnoSeesaw == retained && gAnoEncoderConnected && gInputConnected &&
-          stats["input.ano.obj"].allocations == 1 && scenario.encoderZeroes == 1,
-          "ANO reconnect reuses failed-init parent and initializes encoder/proxy");
-    stopAnoBranch();
-    check(gAnoSeesaw == retained && !gAnoEncoderConnected && !gInputConnected &&
-          !sAnoEncoderCache.dataValid && !gInputCache.dataValid && stats["input.ano.obj"].frees == 0,
-          "actual ANO stop retains parent and invalidates own/proxy cache");
-    check(!anoEncoderInitConnection(), "ANO reconnect preserves backoff window");
-    scenario.now += 2001;
-    check(anoEncoderInitConnection() && gAnoSeesaw == retained && stats["input.ano.obj"].allocations == 1,
-          "ANO restarts after backoff without allocating another parent");
-  }
+  resetScenario(); scenario.beginResults = std::vector<bool>{false};
+  check(!anoEncoderInit() && gAnoSeesaw && !gAnoEncoderConnected,
+        "failed ANO begin keeps parent for retry");
+  auto* retained = gAnoSeesaw;
+  check(anoEncoderInit() && gAnoSeesaw == retained && gAnoEncoderConnected && gInputConnected &&
+        stats["input.ano.obj"].allocations == 1 && stats["input.ano.obj"].begins == 2 &&
+        scenario.encoderZeroes == 1 && scenario.flagReads == 1 && sAnoBus == 1 && sAnoAddress == 0x49,
+        "ANO retry reuses the failed-init parent, begins once, clears stale flags and latches bus/address");
+  stopAnoBranch();
+  check(gAnoSeesaw == retained && !gAnoEncoderConnected && !gInputConnected &&
+        !sAnoEncoderCache.dataValid && !gInputCache.dataValid && stats["input.ano.obj"].frees == 0,
+        "actual ANO stop retains parent and invalidates own/proxy cache");
+  // Reopened on the other bus: the retained object moves to that bus's Wire.
+  gSettings.inputBus = 0;
+  check(anoEncoderInit() && gAnoSeesaw == retained && stats["input.ano.obj"].allocations == 1 &&
+        scenario.rebinds == 1 && scenario.transactionBus == 0 && sAnoBus == 0,
+        "ANO reopened on another bus rebinds the retained parent to that bus");
+  stopAnoBranch();
+  check(anoEncoderInit() && scenario.rebinds == 1, "ANO reopened on the same bus does not rebind");
+
   resetScenario(); scenario.transaction = false;
   check(!anoEncoderInit() && gAnoSeesaw && stats["input.ano.obj"].frees == 0,
         "ANO transaction rejection keeps preallocated parent");
+  // An address another device of the build holds: refused before any I2C.
+  resetScenario(); scenario.addressTaken = true;
+  check(!anoEncoderInit() && !gAnoSeesaw && scenario.idReads == 0 && scenario.allocationAttempts == 0,
+        "ANO refuses an address in use before allocating or touching the bus");
 }
 // A seesaw of another product at the address is not claimed, and is never
 // begun or reset (the mock's begin/SWReset check that): 0x49 is the default of
@@ -420,9 +444,8 @@ static void testOtherSeesawProductsRefused() {
     resetScenario(); scenario.productOverride = other;
     check(!anoEncoderInit() && !gAnoEncoderConnected && scenario.encoderZeroes == 0 && scenario.resets == 0,
           "ANO driver refuses a seesaw that reports another product id");
-    scenario.now += 2001;
-    check(!anoEncoderInitConnection() && !gAnoEncoderConnected && scenario.resets == 0,
-          "ANO reconnect refuses another product without a reset");
+    check(!anoEncoderInit() && !gAnoEncoderConnected && scenario.resets == 0 && scenario.idReads == 2,
+          "ANO retry refuses another product again, without a reset");
   }
   // Nothing (or a device that is not a seesaw board) answers the id read.
   resetScenario(); scenario.idAnswers = false;

@@ -37,6 +37,17 @@ struct String {};
 #define RETURN_VALID_IF_VALIDATE_CSTR() do {} while (0)
 static struct { bool inputAutoStart = false; } gSettings;
 static bool gInputRunning = false;
+enum I2cDeviceType : int { I2C_DEVICE_INPUT = 3 };
+// The single-instance argument check (System_I2C.cpp): every backend asks it
+// first, as the input type with its own usage; an argument it refuses is the
+// reply.
+static unsigned argChecks;
+static const char* argError = nullptr;
+static const char* i2cOpenCloseArgError(I2cDeviceType type, const String&, const char* usage) {
+  assert(type == I2C_DEVICE_INPUT && std::strcmp(usage, "openinput") == 0);
+  ++argChecks;
+  return argError;
+}
 
 #if ENABLE_GPIO_ENCODER
 // INSERT_START_ENUM
@@ -44,7 +55,6 @@ static unsigned startCalls;
 static GpioEncoderStart startResult = GpioEncoderStart::Started;
 static GpioEncoderStart gpioEncoderStart() { ++startCalls; return startResult; }
 #else
-enum I2cDeviceType : int { I2C_DEVICE_INPUT = 3 };
 static unsigned queuedOpens;
 static std::string openLabel, openTag, openHint;
 static const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName,
@@ -76,6 +86,9 @@ int main() {
   assert(std::strstr(cmd_openinput(String{}), "busy"));
   startResult = GpioEncoderStart::TaskNotCreated;
   assert(std::strstr(cmd_openinput(String{}), "task could not be created"));
+  argError = "Error: input has one instance."; startCalls = 0;
+  assert(std::strcmp(cmd_openinput(String{}), argError) == 0 && startCalls == 0);
+  argError = nullptr;
   std::puts("openinput backends passed (GPIO encoder)");
 #else
   // I2C backends: the command itself decides nothing; the shared start is
@@ -85,6 +98,9 @@ int main() {
     assert(std::strcmp(cmd_openinput(String{}), "from the shared start") == 0 && queuedOpens == 1);
     assert(openLabel == BACKEND_LABEL && openTag == "openinput@enqueue" && !openHint.empty());
   }
+  argError = "Error: input has one instance."; queuedOpens = 0;
+  assert(std::strcmp(cmd_openinput(String{}), argError) == 0 && queuedOpens == 0 && argChecks == 3);
+  argError = nullptr;
   (void)gInputRunning;
   std::printf("openinput backends passed (%s via the shared start)\n", BACKEND_LABEL);
 #endif

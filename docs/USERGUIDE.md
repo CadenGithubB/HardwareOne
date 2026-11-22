@@ -2431,12 +2431,23 @@ inputdevicepollms <10-1000>     - Poll interval
 gamepadread                     - Read joystick axes and button states
 
 --- ANO rotary encoder (INPUT_DEVICE_TYPE=2) ---
-anoencoderread                  - Read encoder position and button state
-anoencoderi2caddr <1-127>       - Set I2C address
+anoencoderstatus [json]         - Bus, address, settings and whether it is open
+anoencoderread [json]           - Read the wheel position and the buttons held
+anoencoderi2caddr <0x49..0x50>  - Set the I2C address (applies at the next openinput)
 anoencoderinvert [on|off]       - Invert rotation direction
 anoencoderswapud [on|off|toggle]  - Swap UP/DOWN buttons
 anoencoderswaplr [on|off|toggle]  - Swap LEFT/RIGHT buttons
+inputbus <0|1>                  - The bus the input device is on (reboot required)
 ```
+
+ANO buttons on the OLED: the wheel scrolls up and down, IN is A (select), LEFT is B (back),
+DOWN is X and UP is Y. A RIGHT tap is SELECT (Quick Settings outside the menu, autocomplete in
+the keyboard), sent when RIGHT is released; holding RIGHT and pressing IN is START, with no
+SELECT first. A tap shorter than one poll (`inputdevicepollms`, 90 ms by default) still counts.
+The address is the A0-A2 jumpers' (0x49..0x50, hex or decimal); an address or a bus that another
+device of this build uses there is refused (`anoencoderi2caddr`, `inputbus` and the open), and
+`anoencoderread` answers an error until the encoder is open (`openinput`, or `inputautostart on`
+for every boot, with or without the OLED).
 
 > `opengamepad`, `closegamepad`, and `gamepadautostart` no longer exist - they
 > were replaced by the device-agnostic `openinput` / `closeinput` /

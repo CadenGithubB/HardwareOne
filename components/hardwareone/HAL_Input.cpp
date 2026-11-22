@@ -218,25 +218,25 @@ static const uint32_t gGpioEncoderMapping[] = {
   1u, 2u, 4u, 8u, ENABLE_GPIO_ENCODER_BUTTONS ? 16u : 0u, 32u
 };
 
-// ANO rotary encoder button mappings. The 4 directional buttons are PURE
-// action buttons — they never navigate the keyboard cursor (the wheel does
-// that). Layout matches typical text-entry intuition:
+// ANO rotary encoder button mappings. The 4 directional buttons are action
+// buttons; the wheel does the up/down navigation. Layout:
 //   IN     → A (primary / type char)
 //   LEFT   → B (back / cancel)
 //   UP     → Y (keyboard "backspace" — top button erases)
 //   DOWN   → X (keyboard "submit" — bottom button enters)
-//   RIGHT  → SELECT (the "function" key — currently bound to keyboard
-//                    autocomplete / mode-toggle by oledKeyboardHandleInput;
-//                    other modes may consume it for quick-settings open)
-//   RIGHT+IN chord → START (synthesized by the driver as ANO_VIRT_START)
+//   RIGHT  → SELECT at its release (ANO_VIRT_SELECT, an edge the driver makes
+//            for a RIGHT tap: keyboard autocomplete / mode toggle, Quick
+//            Settings outside the menu)
+//   RIGHT held + IN → START only (ANO_VIRT_START; no SELECT, no A)
+// The rules are anoPoll()'s (i2csensor_ano_encoder_core.h, host-tested).
 #if ENABLE_ANO_ENCODER
 static const uint32_t gAnoEncoderMapping[] = {
-  ANO_BTN_IN,      // INPUT_BUTTON_A      (center = type / select)
-  ANO_BTN_LEFT,    // INPUT_BUTTON_B      (back / cancel)
-  ANO_BTN_DOWN,    // INPUT_BUTTON_X      (submit / complete)
-  ANO_BTN_UP,      // INPUT_BUTTON_Y      (backspace)
-  ANO_VIRT_START,  // INPUT_BUTTON_START  (synthesized by RIGHT+IN chord)
-  ANO_BTN_RIGHT    // INPUT_BUTTON_SELECT (the "function" button)
+  ANO_BTN_IN,       // INPUT_BUTTON_A      (center = type / select)
+  ANO_BTN_LEFT,     // INPUT_BUTTON_B      (back / cancel)
+  ANO_BTN_DOWN,     // INPUT_BUTTON_X      (submit / complete)
+  ANO_BTN_UP,       // INPUT_BUTTON_Y      (backspace)
+  ANO_VIRT_START,   // INPUT_BUTTON_START  (RIGHT held + IN)
+  ANO_VIRT_SELECT   // INPUT_BUTTON_SELECT (RIGHT tap, at its release)
 };
 #else
 static const uint32_t gAnoEncoderMapping[] = { 0, 0, 0, 0, 0, 0 };
@@ -451,6 +451,7 @@ static const char* inputDeviceLabel() {
 
 static const char* cmd_openinput(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_INPUT, argsInput, "openinput")) return error;
 #if ENABLE_GPIO_ENCODER
   // gpioEncoderStart() reports a running encoder as Started; the command
   // answers it as a refusal.
@@ -489,6 +490,7 @@ static const char* cmd_openinput(const String& argsInput) {
 
 static const char* cmd_closeinput(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_INPUT, argsInput, "closeinput")) return error;
   INFO_INPUT_LIFECYCLEF("cmd_closeinput: Stop requested");
 #if ENABLE_GPIO_ENCODER
   if (!gInputRunning) {
@@ -510,15 +512,10 @@ static const char* cmd_inputautostart(const String& argsInput) {
   if (arg.length() == 0) {
     return gSettings.inputAutoStart ? "[Input] Auto-start: enabled" : "[Input] Auto-start: disabled";
   }
-  arg.toLowerCase();
-  if (argIsOn(arg)) {
-    setSetting(gSettings.inputAutoStart, true);
-    return "[Input] Auto-start enabled";
-  } else if (argIsOff(arg)) {
-    setSetting(gSettings.inputAutoStart, false);
-    return "[Input] Auto-start disabled";
-  }
-  return "Error: invalid arguments — Usage: inputautostart [on|off]";
+  const int parsed = parseBoolArg(arg);
+  if (parsed < 0) return kCommandReplyNotOnOff;
+  setSetting(gSettings.inputAutoStart, parsed == 1);
+  return parsed == 1 ? "[Input] Auto-start enabled" : "[Input] Auto-start disabled";
 }
 
 static const char* cmd_inputdevicepollms(const String& argsInput) {
@@ -540,8 +537,9 @@ static const char* cmd_inputdevicepollms(const String& argsInput) {
     snprintf(buf, sizeof(buf), "[Input] Poll interval: %d ms", gSettings.inputDevicePollMs);
     return buf;
   }
-  int ms = a.argInt(0, 0);
-  if (ms < 10 || ms > 1000) return "Error: invalid arguments — Usage: inputdevicepollms <10-1000>";
+  int ms = 0;
+  if (!parseIntArg(a.arg(0), ms)) return kCommandReplyNotANumber;
+  if (ms < 10 || ms > 1000) return "Error: The poll interval must be 10..1000 ms.";
   setSetting(gSettings.inputDevicePollMs, ms);
   return "[Input] Poll interval updated";
 #endif
@@ -584,9 +582,9 @@ const CommandEntry inputCommands[] = {
 };
 const size_t inputCommandsCount = sizeof(inputCommands) / sizeof(inputCommands[0]);
 
-// Settings module — JSON section `hardware.input` holds the device-agnostic
-// settings. Driver-specific entries (anoEncoderI2cAddr, anoEncoderInvert)
-// live in anoEncoderSettingsModule.
+// Settings module — JSON section `hardware.sensors.input` holds the
+// device-agnostic settings. Driver-specific entries (the ANO's address,
+// rotation and swaps) live in anoEncoderSettingsModule.
 static const SettingEntry inputSettingEntries[] = {
   { "inputAutoStart",    SETTING_BOOL, &gSettings.inputAutoStart,     0, 0, nullptr, 0,  1,    "Auto-start after boot", nullptr, false, nullptr, "inputautostart" },
 #if !ENABLE_GPIO_ENCODER && !ENABLE_GT911_TOUCH

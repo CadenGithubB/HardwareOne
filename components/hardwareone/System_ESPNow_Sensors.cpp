@@ -292,7 +292,7 @@ static const SensorBroadcastSpec gSensorSpecs[REMOTE_SENSOR_MAX] = {
   // ANO rotary encoder is the OTHER input device (mutually exclusive with the
   // gamepad — INPUT_DEVICE_TYPE picks exactly one). Same REMOTE_SENSOR_INPUT
   // slot, same 10 Hz cadence + 128 B budget; anoEncoderBuildDataJson emits
-  // {"valid":..,"connected":..,"ts":..,"pos":N,"axis":0|1,"buttons":B}
+  // {"valid":..,"connected":..,"ts":..,"pos":N,"axis":0,"buttons":B}
   // (~90 B typical, still under the 128 B budget). Without this branch an
   // ANO build left the input builder nullptr, so the broadcaster's
   // `if (!spec.builder) continue;` silently dropped every input frame —

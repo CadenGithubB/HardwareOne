@@ -21,6 +21,7 @@
 #include "System_PollPause.h"        // PollPauseGuard — quiesce a bus during the detect scan
 #include "System_AuthIdentity.h"     // currentExecIsAdmin — gate 'detect apply'
 #include "System_I2C.h"
+#include "i2csensor_ano_encoder_core.h"  // anoAddressFromSetting: the ANO address rule
 #include "System_RamFlush.h"
 #include "System_Logging.h"
 #include "System_SelfDevice.h"        // SelfDevice::uptimeSeconds — i2cmetrics rates
@@ -347,8 +348,7 @@ static uint8_t i2cAddressForDeviceType(I2cDeviceType sensor, uint8_t n = 1) {
 #if ENABLE_GT911_TOUCH
       return 0; // Backend probes 0x5d and 0x14 through the shared manager.
 #elif ENABLE_ANO_ENCODER
-      return (gSettings.anoEncoderI2cAddr > 0 && gSettings.anoEncoderI2cAddr < 0x80)
-               ? (uint8_t)gSettings.anoEncoderI2cAddr : I2C_ADDR_ANO_ENCODER;
+      return anoAddressFromSetting(gSettings.anoEncoderI2cAddr);  // the driver's rule
 #else
       return I2C_ADDR_GAMEPAD;
 #endif
@@ -4066,7 +4066,10 @@ void processAutoStartSensors() {
   }
   #endif
   
-  #if ENABLE_GAMEPAD_SENSOR || ENABLE_GT911_TOUCH
+  #if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GT911_TOUCH
+  // Every I2C input device starts here at boot, with or without the OLED UI;
+  // the OLED's menu path (tryAutoStartInputForMenu) then finds it started or
+  // queued and asks for nothing.
   if (ramFlushResolveDevice(I2C_DEVICE_INPUT, 1, gSettings.inputAutoStart)) {
     // The device type is the identity. Its module name comes from its
     // i2cSensors[] row, so the registry lookup and the ramflush id cannot
