@@ -215,7 +215,7 @@ deeper still: **Camera settings** is reached from Hardware -> sensor list -> `CA
 
 | App | Notes |
 | --- | ----- |
-| **ESP-NOW** | Peer messaging. Distinct from Connect -> ESP-NOW, which owns the settings. `Peers (2/3 up)` counts the paired devices other than this one and how many hold an encrypted session, as the status line's `ESPNow: 2/3 up` |
+| **ESP-NOW** | Peer messaging. Distinct from Connect -> ESP-NOW, which owns the settings. `Peers (2/3 up)` counts the paired devices other than this one and how many are online (a mesh heartbeat within 30 s and an encrypted session up); `Peers (2/3 up +1 conn)` adds the peers still connecting (heartbeat, no session yet), and the rest are offline. The status line's `ESPNow: 2/3 up` and the other Peers rows count the same way |
 | **Files** | Browse, view, rename, delete. Folders carry an item-count badge |
 | **Notes** | Private spoken notes (QuickNote): `● New note`, your newest notes, read and delete (requires `ENABLE_QUICKNOTE`) - see [QUICKNOTE.md](QUICKNOTE.md) |
 | **Maps** | Pan/zoom offline map viewer. Row reads `Maps (none)` when no map files are present (requires `ENABLE_MAPS`) |
@@ -1060,6 +1060,12 @@ Home Assistant converts for display), gyro in rad/s, acceleration in m/s², ToF 
 nearest target). The device names its board as model and its firmware as software version. A mesh
 peer bridged by the master has neither, shows Last Seen, and appears as `peer-B2C3` when it has no
 name.
+A bridged peer is available in Home Assistant (`<base>/devices/hardwareone_<MAC>/availability` is
+`online`, retained) only while it is online: a mesh heartbeat within 30 s and an encrypted session
+up. A peer still connecting (heartbeat, no session yet) and a silent one are `offline`, so its
+entities show unavailable; the master refreshes the availability of every known peer each publish
+interval, also when the peer sent no new reading. The peer's state document has `system.online`
+(`true` only while online) and `system.state` (`online`, `connecting` or `offline`).
 Entities an earlier build declared and this one does not (Presence Object Temp, a peer's Uptime and
 thermal entities, and the gamepad entities on encoder and touch builds) are removed from Home
 Assistant on connect.
@@ -2088,7 +2094,8 @@ time axis then runs slightly short of the window. A full set is 9 stocks of abou
 fragments), sent one at a time, which is why the page-open cadence is 10 s rather than 5 s. A set that was cut short (a lost ack or a failed write) goes again after a
 clear, so the tile can be blank for a second or two. `g2 stats feed off` clears the widget. The default metrics, in order, are `CPU,HEAP,PSRM,SD,LFS,CLK,LINK,MESH,RING` (CPU load,
 internal RAM used, PSRAM used, SD card used, flash storage used, CPU clock in MHz with a chart up to
-the chip's top clock (400 on the P4, 240 on the ESP32 and S3), BLE links in use, ESP-NOW peers up,
+the chip's top clock (400 on the P4, 240 on the ESP32 and S3), BLE links in use, ESP-NOW peers online
+(heartbeat and encrypted session; a peer still connecting is not counted) out of the paired peers,
 R1 ring battery); `TEMP` (chip temperature), `CPU0`, `CPU1` (per core) and `HBLK` (largest internal
 RAM block, KB) can be chosen too, e.g. `g2 stats metrics cpu,heap,psrm,temp`. A device whose saved
 list is still the earlier default (`TEMP` in the place of `CLK`) shows the new default; any other

@@ -6,11 +6,6 @@
 
 namespace MeshPeers {
 
-bool isHealthy(const uint8_t mac[6]) {
-  MeshPeerHealth* h = getMeshPeerHealth(mac, false);
-  return h && isMeshPeerAlive(h);
-}
-
 bool isReachable(const uint8_t mac[6]) {
   MeshPeerHealth* h = getMeshPeerHealth(mac, false);
   return h && isMeshPeerRecentlyActive(h);
@@ -33,24 +28,6 @@ String displayName(const uint8_t mac[6]) {
   String regName = getEspNowDeviceName(mac);
   if (regName.length() > 0) return regName;
   return "Unknown";
-}
-
-int countHealthy() {
-  if (!gMeshPeers) return 0;
-  int n = 0;
-  for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (gMeshPeers[i].isActive && isMeshPeerAlive(&gMeshPeers[i])) n++;
-  }
-  return n;
-}
-
-int countActive() {
-  if (!gMeshPeers) return 0;
-  int n = 0;
-  for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (gMeshPeers[i].isActive) n++;
-  }
-  return n;
 }
 
 int countByRoom(const char* room) {

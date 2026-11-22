@@ -41,7 +41,7 @@ COMPONENT = HERE.parents[1]
 # G2 Network functions under test, in source order; located by name so a
 # changed signature still matches, skipping forward declarations.
 NETWORK_ROW_FUNCTIONS = (
-    "bluetoothClientRoleForUi", "showWifiMenu", "showEspNowMenu",
+    "g2FormatPeerCounts", "bluetoothClientRoleForUi", "showWifiMenu", "showEspNowMenu",
     "showBluetoothG2Menu", "showBluetoothR1Menu", "showBluetoothPhoneMenu", "showBluetoothMenu",
     "handleWifiTap", "espnowNameCommit", "espnowNameCancel",
     "beginEspNowNameEntry", "espnowNameThenOpenCommit", "handleEspNowTap",

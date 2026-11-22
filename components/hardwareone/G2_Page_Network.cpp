@@ -305,31 +305,29 @@ static void queuePendingViewRedraw(uint32_t* viewGen, NetworkSubMode sub,
 // Info text (used by the CLI direct-invocation path)
 // -----------------------------------------------------------------------------
 
-// The peers of this device and how many of them are up, for every "Peers" row
-// on the lens (this page and the ESP-NOW app). The rule and the loop are the
-// status line's (G2_Glasses.cpp, "ESPNow: %d/%d up") and the mesh metric's
-// (System_Metrics.cpp readMesh): devices[] also holds this device's own entry,
-// which is not a peer, and a peer is up while it holds an ACTIVE encrypted
-// session (espnowSessionUp). A third copy of that loop, kept here because the
-// ESP-NOW owner has no shared count yet. While ESP-NOW runs isSelfMac is a
-// compare against the cached address (no radio query); both counts are 0 while
-// it is stopped or not compiled in. Defined after the local-state block on
-// purpose: the host suites lift that block without the ESP-NOW registry.
-void g2EspNowPeerCounts(int* up, int* paired) {
-  int nUp = 0, nPaired = 0;
+// The paired peers by state for the lens status line (G2_Glasses.cpp) and
+// every "Peers" row (this page and the ESP-NOW app): espnowPeerCounts, the
+// one rule (online = heartbeat within 30 s and session up, connecting =
+// heartbeat without a session yet, offline = no recent heartbeat; this
+// device's own registry entry is not a peer). This wrapper only adds the
+// build without ESP-NOW, where System_ESPNow.h has no accessor. Defined after
+// the local-state block on purpose: the host suites lift that block without
+// the ESP-NOW registry.
+EspNowPeerCounts g2EspNowPeerCounts() {
 #if ENABLE_ESPNOW
-  if (gEspNow && gEspNow->initialized) {
-    const int n = gEspNow->deviceCount < 16 ? gEspNow->deviceCount : 16;
-    for (int i = 0; i < n; i++) {
-      const uint8_t* mac = gEspNow->devices[i].mac;
-      if (isSelfMac(mac)) continue;
-      ++nPaired;
-      if (espnowSessionUp(mac)) ++nUp;
-    }
-  }
+  return espnowPeerCounts();
+#else
+  return EspNowPeerCounts{};
 #endif
-  if (up) *up = nUp;
-  if (paired) *paired = nPaired;
+}
+
+void g2FormatPeerCounts(const EspNowPeerCounts& peers, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  if (peers.connecting > 0) {
+    snprintf(out, cap, "%d/%d up +%d conn", peers.online, peers.paired(), peers.connecting);
+  } else {
+    snprintf(out, cap, "%d/%d up", peers.online, peers.paired());
+  }
 }
 
 void g2BuildNetworkInfo(char* out, size_t cap) {
@@ -368,11 +366,11 @@ void g2BuildNetworkInfo(char* out, size_t cap) {
     char line[80];
     snprintf(line, sizeof(line), "ESPNow %s\n", getEspNowModeString());
     s += line;
-    // Up / paired without this device, as the status line counts them. (It
-    // used to show peerHistoryCount, the peers with message history.)
-    int peersUp = 0, peersPaired = 0;
-    g2EspNowPeerCounts(&peersUp, &peersPaired);
-    snprintf(line, sizeof(line), "Peers %d/%d up\n", peersUp, peersPaired);
+    // Online / paired without this device, as the status line counts them.
+    // (It used to show peerHistoryCount, the peers with message history.)
+    char peers[24];
+    g2FormatPeerCounts(g2EspNowPeerCounts(), peers, sizeof(peers));
+    snprintf(line, sizeof(line), "Peers %s\n", peers);
     s += line;
   } else {
     s += "ESPNow: off\n";
@@ -727,10 +725,10 @@ static void showEspNowMenu() {
   if (running) {
     snprintf(stateLine, sizeof(stateLine), "ESP-NOW: ON");
     snprintf(modeLine, sizeof(modeLine), "Mode: %s", getEspNowModeString());
-    // Up / paired without this device, as the status line counts them.
-    int peersUp = 0, peersPaired = 0;
-    g2EspNowPeerCounts(&peersUp, &peersPaired);
-    snprintf(devsLine, sizeof(devsLine), "Peers: %d/%d up", peersUp, peersPaired);
+    // Online / paired without this device, as the status line counts them.
+    char peers[24];
+    g2FormatPeerCounts(g2EspNowPeerCounts(), peers, sizeof(peers));
+    snprintf(devsLine, sizeof(devsLine), "Peers: %s", peers);
     rows.add(stateLine, ESPNOW_ROW_POWER, /*on=*/false);
     rows.add(modeLine, ESPNOW_ROW_INFO);
     rows.add(devsLine, ESPNOW_ROW_INFO);

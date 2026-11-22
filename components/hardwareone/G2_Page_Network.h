@@ -26,6 +26,7 @@
 
 #include "System_BuildConfig.h"
 #include <Arduino.h>
+#include "System_ESPNow_PeerStateCore.h"  // EspNowPeerCounts: online / connecting / offline
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -43,11 +44,16 @@ void g2ShowNetworkMenu();
 // Caller passes the index of the tapped item in the current list.
 void g2NetworkHandleTap(uint32_t idx);
 
-// ESP-NOW peers for the lens "Peers" rows (this page and the ESP-NOW app), by
-// the status line's rule: *paired = every registry entry except this device,
-// *up = those with an ACTIVE encrypted session. Both 0 while ESP-NOW is
-// stopped or not compiled in. Either pointer may be null.
-void g2EspNowPeerCounts(int* up, int* paired);
+// The paired ESP-NOW peers by state (espnowPeerCounts, the rule every surface
+// uses: System_ESPNow_PeerStateCore.h) for the lens status line and every
+// "Peers" row (this page and the ESP-NOW app). All zero while ESP-NOW is
+// stopped or not compiled in.
+EspNowPeerCounts g2EspNowPeerCounts();
+
+// The lens wording of those counts: "<online>/<paired> up", then
+// " +<n> conn" while peers are connecting ("2/3 up +1 conn"); the rest of the
+// paired peers are offline. At most 17 characters ("16/16 up +16 conn").
+void g2FormatPeerCounts(const EspNowPeerCounts& peers, char* out, size_t cap);
 
 #else
 inline void g2BuildNetworkInfo(char* out, size_t cap) {
@@ -55,10 +61,6 @@ inline void g2BuildNetworkInfo(char* out, size_t cap) {
 }
 inline void g2ShowNetworkMenu() {}
 inline void g2NetworkHandleTap(uint32_t idx) { (void)idx; }
-inline void g2EspNowPeerCounts(int* up, int* paired) {
-  if (up) *up = 0;
-  if (paired) *paired = 0;
-}
 #endif
 
 #endif  // G2_PAGE_NETWORK_H

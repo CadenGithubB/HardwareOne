@@ -5459,18 +5459,33 @@ pre-fix tree. Commands, lens, RTOS and settings-registry calls are host doubles;
 
 ## Lens Peers rows
 
-`g2_espnow_peer_rows` compiles the production `g2EspNowPeerCounts`, `g2BuildNetworkInfo` and
-`showEspNowDevices` (G2_Page_Network.cpp) and the ESP-NOW app's row table, `g2BuildEspNowAppInfo`,
-`showMainMenu`, `showPeersMenu`, `showStatsMenu` and `handlePeersTap` (G2_Page_ESPNow.cpp) against doubles of
-the registry, the session test and the lens list page: a peer is every registry entry except this device, up
-while it holds an ACTIVE session; the five rows print up/paired; neither peer list has a row for this device;
-a tap selects the peer its row named, also after the registry changed or a redraw was refused. Built again
-with ENABLE_ESPNOW=0. Its source part checks that the lens RTC texts go through rtcLocalTime, that the OLED G2
+`g2_espnow_peer_rows` compiles the production `g2EspNowPeerCounts`, `g2FormatPeerCounts`,
+`g2BuildNetworkInfo` and `showEspNowDevices` (G2_Page_Network.cpp), the ESP-NOW app's row table,
+`g2BuildEspNowAppInfo`, `showMainMenu`, `showPeersMenu`, `showStatsMenu` and `handlePeersTap`
+(G2_Page_ESPNow.cpp) and `espnowPeerState` / `espnowPeerCounts` (System_ESPNow.h) against doubles of the
+registry, the heartbeat table, the session test and the lens list page: a peer is every registry entry except
+this device; it is online with a recent heartbeat and an ACTIVE session, connecting with the heartbeat alone
+(never counted online), offline otherwise; the rows print online/paired as "up" and the connecting peers after
+it ("2/3 up +1 conn"), and the lens status line prints the same text; neither peer list has a row for this
+device; a tap selects the peer its row named, also after the registry changed or a redraw was refused. Built
+again with ENABLE_ESPNOW=0. Its source part checks that the lens RTC texts go through rtcLocalTime, that the OLED G2
 status screen reads one g2ConnectionStatusSnapshot, that the OLED ESP-NOW editors take their limits from
 devicename::kMaxLen / V4PayloadMetadata, and that the OLED ESP-NOW screens do not call esp_wifi_get_mac.
 `--component` runs it against another tree.
 
     python3 components/hardwareone/test/host/test_g2_espnow_peer_rows.py --sanitize
+
+## Peer state on the metric and MQTT
+
+`espnow_peer_state_surfaces` compiles the production `espnowPeerState` / `espnowPeerCounts`, `readMesh`
+(System_Metrics.cpp) and `meshPeerAvailability` (System_MQTT.cpp) against doubles of the registry, the
+heartbeat table and the session table: the MESH metric is the online peers out of the paired ones (connecting,
+a session without a heartbeat, this device and unpaired peers never count online); a peer's Home Assistant
+availability is "online" for an online peer only. Its source part checks that MQTT asks neither table nor
+MeshPeers, publishes availability before it skips a peer without a fresh reading, and writes `system.online`
+and `system.state` from the state, and that MeshPeers has no `isHealthy` / `countHealthy` / `countActive`.
+
+    python3 components/hardwareone/test/host/test_espnow_peer_state_surfaces.py --sanitize
 
 ## G2 Network row bindings
 

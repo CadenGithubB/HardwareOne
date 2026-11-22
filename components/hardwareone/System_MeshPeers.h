@@ -18,9 +18,11 @@
 //
 // This namespace exists for the *compound* queries — the ones currently
 // inlined across OLED / MQTT / Web modules:
-//   - "is this MAC a healthy peer right now?" (getHealth + isAlive)
 //   - "what's the human name for this MAC?" (friendlyName > name > "Unknown")
-//   - "how many peers in this room are healthy?" (loop + filter)
+//   - "how many paired peers are in this room?" (loop + filter)
+// Whether a peer is online, connecting or offline, and how many are, is not
+// asked here: espnowPeerState / espnowPeerCounts (System_ESPNow.h) are the
+// one rule every surface uses.
 //
 // Same rationale as BondedPeer: each UI (OLED status, MQTT publish, web JSON
 // builder) was open-coding the same 4-6 line pattern. Consolidating means
@@ -35,20 +37,14 @@ namespace MeshPeers {
 
 // ----- Compound state queries ---------------------------------------------
 
-// True if the peer has an active health slot AND a mesh heartbeat within the
-// timeout window. Equivalent to the inline pattern:
-//   MeshPeerHealth* h = getMeshPeerHealth(mac, false);
-//   if (h && isMeshPeerAlive(h)) { ... }
-bool isHealthy(const uint8_t mac[6]);
-
 // True if the peer is active AND any RX activity (not just heartbeat) is
-// recent. Looser than isHealthy — useful for "have we heard anything from
-// this MAC lately" checks (e.g., relay candidate selection).
+// recent — useful for "have we heard anything from this MAC lately" checks
+// (e.g., relay candidate selection). Not the peer's online state.
 bool isReachable(const uint8_t mac[6]);
 
 // True if the peer has an active metadata slot. Independent of health —
 // metadata persists even when heartbeats time out, so a peer can be known
-// (isKnown=true) but not currently healthy (isHealthy=false).
+// (isKnown=true) while it is offline.
 bool isKnown(const uint8_t mac[6]);
 
 // ----- Display / identity -------------------------------------------------
@@ -64,18 +60,6 @@ bool isKnown(const uint8_t mac[6]);
 String displayName(const uint8_t mac[6]);
 
 // ----- Aggregations -------------------------------------------------------
-
-// Count of mesh peers with an active health slot AND a recent heartbeat.
-// O(slots) — cheap (slots is typically ≤16). Use for status bars / counters.
-int countHealthy();
-
-// Count of mesh peers with an active health slot regardless of heartbeat
-// recency. Always >= countHealthy(). Use as the denominator when displaying
-// "online/total" so the ratio is always sensible — counting the denominator
-// from a different array (e.g. gMeshPeerMeta) can produce a smaller number
-// than countHealthy() when health and metadata get out of sync, which shows
-// up as nonsense like "1/0 devices" on the OLED status page.
-int countActive();
 
 // Count of paired peers that are members of `room` for a room command: the
 // room was accepted on this device, not merely announced by the peer. Forwards

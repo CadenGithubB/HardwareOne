@@ -1,12 +1,14 @@
 // Host boundaries around the lens "Peers" rows, compiled with the production
 // code test_g2_espnow_peer_rows.py lifts from G2_Page_Network.cpp
-// (g2EspNowPeerCounts, g2BuildNetworkInfo, showEspNowDevices) and
-// G2_Page_ESPNow.cpp (the row table, g2BuildEspNowAppInfo, showMainMenu,
-// showPeersMenu, showStatsMenu, handlePeersTap). The ESP-NOW registry, the
-// session test, the self-address test and the lens list page are doubles.
+// (g2EspNowPeerCounts, g2FormatPeerCounts, g2BuildNetworkInfo,
+// showEspNowDevices), G2_Page_ESPNow.cpp (the row table, g2BuildEspNowAppInfo,
+// showMainMenu, showPeersMenu, showStatsMenu, handlePeersTap) and
+// System_ESPNow.h (espnowPeerState, espnowPeerCounts: the peer-state rule of
+// System_ESPNow_PeerStateCore.h). The ESP-NOW registry, the heartbeat table,
+// the session test, the self-address test and the lens list page are doubles.
 // Built twice: ENABLE_ESPNOW=1 (the cases below) and ENABLE_ESPNOW=0, where no
-// registry, session or self-address double exists, so the lifted code may not
-// name one outside its #if.
+// registry, heartbeat, session or self-address double exists, so the lifted
+// code may not name one outside its #if.
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -16,6 +18,7 @@
 #include <vector>
 
 #include "System_MacText.h"  // production macToDisplay (the list's last-resort label)
+#include "System_ESPNow_PeerStateCore.h"  // production: online / connecting / offline
 
 #ifndef ENABLE_ESPNOW
 #define ENABLE_ESPNOW 1
@@ -97,6 +100,23 @@ static bool espnowSessionUp(const uint8_t* mac, uint32_t* = nullptr) {
   for (uint8_t id : sessionsUp) if (mac[5] == id) return true;
   return false;
 }
+// The heartbeat table: a slot per peer heard, by the last address byte, and
+// whether its heartbeat is within the 30 s window (isMeshPeerAlive).
+struct MeshPeerHealth { uint8_t id; bool recent; };
+static std::vector<MeshPeerHealth> heartbeats;
+static MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing) {
+  CHECK(!createIfMissing);  // a read never creates a slot
+  CHECK(std::memcmp(mac, selfMac, 6) != 0);
+  for (auto& slot : heartbeats) if (slot.id == mac[5]) return &slot;
+  return nullptr;
+}
+static bool isMeshPeerAlive(const MeshPeerHealth* slot) { return slot && slot->recent; }
+static void heard(std::initializer_list<uint8_t> ids) {  // recent heartbeats from these peers only
+  heartbeats.clear();
+  for (uint8_t id : ids) heartbeats.push_back({id, true});
+}
+
+// INSERT_PEER_STATE
 static std::vector<uint8_t> roomsPending;  // peers whose announced room is not accepted
 static bool espnowGroupRoomAccepted(const uint8_t mac[6], const char*) {
   for (uint8_t id : roomsPending) if (mac[5] == id) return false;
@@ -118,9 +138,14 @@ static void showPeersMenu();
 // INSERT_PRODUCTION
 
 // ---- Cases -------------------------------------------------------------------------
-static void counts(int* up, int* paired) {
-  *up = *paired = -7;
-  g2EspNowPeerCounts(up, paired);
+static bool same(const EspNowPeerCounts& peers, int online, int connecting, int offline) {
+  return peers.online == online && peers.connecting == connecting && peers.offline == offline;
+}
+static std::string formatted(const EspNowPeerCounts& peers) {
+  char out[24];
+  std::memset(out, 'x', sizeof(out));
+  g2FormatPeerCounts(peers, out, sizeof(out));
+  return out;
 }
 
 #if ENABLE_ESPNOW
@@ -159,50 +184,84 @@ static std::string textOf(void (*build)(char*, size_t)) {
   return out;
 }
 
-// The count: every registry entry except this device is a peer; one is up
-// while it holds an ACTIVE session. The status line's rule.
+// The count: every registry entry except this device is a peer. One is
+// online with a recent heartbeat AND an ACTIVE session, connecting with the
+// heartbeat alone, offline without a recent heartbeat (a session that outlived
+// the heartbeats does not make it online). The rule of every surface.
 static void countRule() {
-  int up, paired;
   espnow = EspNowState();  // not running
+  heard({1, 2});
   sessionsUp = {1, 2};
-  counts(&up, &paired);
-  CHECK(up == 0 && paired == 0);
+  CHECK(same(g2EspNowPeerCounts(), 0, 0, 0));
   setDevices({0xEE, 1, 2, 3});
-  counts(&up, &paired);
-  CHECK(up == 2 && paired == 3);
+  heard({1, 2, 3});
+  sessionsUp = {1, 2};
+  CHECK(same(g2EspNowPeerCounts(), 2, 1, 0) && g2EspNowPeerCounts().paired() == 3);
   setDevices({1, 2, 0xEE, 3});  // this device's entry anywhere in the registry
   sessionsUp = {3};
-  counts(&up, &paired);
-  CHECK(up == 1 && paired == 3);
+  CHECK(same(g2EspNowPeerCounts(), 1, 2, 0));
+  // Connecting is never online: heartbeats without sessions count none.
+  sessionsUp.clear();
+  CHECK(same(g2EspNowPeerCounts(), 0, 3, 0));
+  // A session without a recent heartbeat is offline, not online.
+  heard({1});
+  sessionsUp = {1, 2, 3};
+  CHECK(same(g2EspNowPeerCounts(), 1, 0, 2));
+  heartbeats = {{1, true}, {2, false}, {3, false}};  // slots whose heartbeat timed out
+  CHECK(same(g2EspNowPeerCounts(), 1, 0, 2));
+  // Unpaired peers (heard, session up, not in the registry) are not counted.
+  setDevices({0xEE, 1});
+  heard({1, 4, 5});
+  sessionsUp = {1, 4, 5};
+  CHECK(same(g2EspNowPeerCounts(), 1, 0, 0));
   setDevices({0xEE});  // only this device: no peer
-  counts(&up, &paired);
-  CHECK(up == 0 && paired == 0);
+  CHECK(same(g2EspNowPeerCounts(), 0, 0, 0));
   setDevices({1, 2});  // no own entry yet (name not applied)
+  heard({1, 2});
   sessionsUp = {1, 2};
-  counts(&up, &paired);
-  CHECK(up == 2 && paired == 2);
+  CHECK(same(g2EspNowPeerCounts(), 2, 0, 0));
   // A count past the 16 entries the registry holds reads 16, never beyond.
   setDevices({0xEE, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15});
   espnow.deviceCount = 40;
+  heard({14, 15});
   sessionsUp = {15};
-  counts(&up, &paired);
-  CHECK(up == 1 && paired == 15);
-  // Either result may be left out.
-  g2EspNowPeerCounts(nullptr, &paired);
-  g2EspNowPeerCounts(&up, nullptr);
-  g2EspNowPeerCounts(nullptr, nullptr);
-  CHECK(up == 1 && paired == 15);
+  CHECK(same(g2EspNowPeerCounts(), 1, 1, 13));
   // Stopped: nothing is counted from a registry that is still filled.
   espnow.initialized = false;
-  counts(&up, &paired);
-  CHECK(up == 0 && paired == 0);
+  CHECK(same(g2EspNowPeerCounts(), 0, 0, 0));
+
+  // The lens wording: online/paired "up", connecting appended, whole in 24 bytes.
+  EspNowPeerCounts peers;
+  CHECK(formatted(peers) == "0/0 up");
+  peers.online = 2; peers.offline = 1;
+  CHECK(formatted(peers) == "2/3 up");
+  peers.connecting = 1;
+  CHECK(formatted(peers) == "2/4 up +1 conn");
+  peers.online = 16; peers.connecting = 16; peers.offline = 0;
+  CHECK(formatted(peers) == "16/32 up +16 conn");
+  char small[8];
+  g2FormatPeerCounts(peers, small, sizeof(small));
+  CHECK(std::strlen(small) == 7);  // cut, terminated
+  g2FormatPeerCounts(peers, nullptr, 8);
+  small[0] = 'x';
+  g2FormatPeerCounts(peers, small, 0);
+  CHECK(small[0] == 'x');
 }
 
-// The five rows that print the count show up/paired, and none shows the
-// registry size (4 here) or the peers with message history (9).
+// The five rows that print the count show online/paired (and the connecting
+// peers when there are some), and none shows the registry size (4 here) or
+// the peers with message history (9).
 static void countRows() {
   setDevices({0xEE, 1, 2, 3});
+  heard({1, 2, 3});
   sessionsUp = {1, 3};
+  showMainMenu();
+  CHECK(shown.size() == 7 && shown[2] == "Peers (2/3 up +1 conn) >>");
+  showStatsMenu();
+  CHECK(anyRowHas("Peers: 2/3 up +1 conn"));
+  CHECK(textOf(g2BuildEspNowAppInfo).find("Peers: 2/3 up +1 conn\n") != std::string::npos);
+  CHECK(textOf(g2BuildNetworkInfo).find("ESPNow mesh\nPeers 2/3 up +1 conn\n") != std::string::npos);
+  heard({1, 3});  // peer 2 went silent: offline, no longer connecting
   showMainMenu();
   CHECK(shown.size() == 7 && shown[2] == "Peers (2/3 up) >>" && shown[3] == "Inbox (4) >>");
   showStatsMenu();
@@ -214,11 +273,18 @@ static void countRows() {
         net.find("Peers 9") == std::string::npos && net.find("Peers 4") == std::string::npos);
   // The widest counts fit their row buffers whole.
   setDevices({0xEE, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15});
+  heard({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15});
   sessionsUp = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
   showMainMenu();
   CHECK(shown[2] == "Peers (15/15 up) >>");
   showStatsMenu();
   CHECK(anyRowHas("Peers: 15/15 up"));
+  sessionsUp = {1, 2, 3, 4, 5, 6, 7};
+  showMainMenu();
+  CHECK(shown[2] == "Peers (7/15 up +8 conn) >>");
+  showStatsMenu();
+  CHECK(anyRowHas("Peers: 7/15 up +8 conn"));
+
   // Not running: 0/0, and the text builders print no Peers line at all.
   espnow.initialized = false;
   showMainMenu();
@@ -238,9 +304,7 @@ static void peersList() {
   CHECK(shown.size() == 4 && shown[0] == "<- Back" && shown[1] == "peer-1" && shown[2] == "Bench Two" &&
         shown[3] == "02:00:00:00:00:03");
   CHECK(!anyRowHas("this-device") && gPeerRowCount == 3);
-  int up, paired;
-  counts(&up, &paired);
-  CHECK(paired == int(shown.size()) - 1);
+  CHECK(g2EspNowPeerCounts().paired() == int(shown.size()) - 1);
   setDevices({0xEE, 1, 2});  // this device's entry first, then last
   showPeersMenu();
   CHECK(shown.size() == 3 && shown[1] == "peer-1" && shown[2] == "peer-2" && gPeerRowCount == 2);
@@ -406,9 +470,7 @@ int main() {
 #else
   // Without ESP-NOW the count is 0/0 and the lists say so; nothing above
   // compiled a registry, a session test or a self-address test.
-  int up, paired;
-  counts(&up, &paired);
-  CHECK(up == 0 && paired == 0);
+  CHECK(same(g2EspNowPeerCounts(), 0, 0, 0));
   showMainMenu();
   CHECK(shown.size() == 7 && shown[2] == "Peers (0/0 up) >>");
   showPeersMenu();

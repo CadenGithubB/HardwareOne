@@ -15,6 +15,7 @@
 #include <string>
 
 #include "System_DeviceName.h"  // devicename::kMaxLen (the glasses name editor's limit)
+#include "System_ESPNow_PeerStateCore.h"  // EspNowPeerCounts (the Peers row's counts)
 
 #ifndef ENABLE_WIFI
 #define ENABLE_WIFI 1
@@ -137,13 +138,11 @@ static FakeEspNow espnowState;
 static FakeEspNow* gEspNow = &espnowState;
 static const char* getEspNowModeString() { return "mesh"; }
 // G2_Page_Network.cpp's g2EspNowPeerCounts (defined outside the lifted
-// functions; test_g2_espnow_peer_rows runs the production one): peers up /
-// paired without this device, which the "Peers" row shows.
-static int peersUp = 0, peersPaired = 0;
-static void g2EspNowPeerCounts(int* up, int* paired) {
-  if (up) *up = peersUp;
-  if (paired) *paired = peersPaired;
-}
+// functions; test_g2_espnow_peer_rows runs the production one): the paired
+// peers without this device by state, which the "Peers" row shows through
+// the production g2FormatPeerCounts.
+static EspNowPeerCounts peerCounts;
+static EspNowPeerCounts g2EspNowPeerCounts() { return peerCounts; }
 
 static int serverObject = 0;
 static void* server = nullptr;
@@ -254,10 +253,11 @@ static void espnow_view_devices_after_stop() {
 
 static void espnow_peers_row_after_stop() {
   espnowState = FakeEspNow{true, 3};  // this device's entry and two peers
-  peersUp = 1;
-  peersPaired = 2;
+  peerCounts = EspNowPeerCounts{};
+  peerCounts.online = 1;
+  peerCounts.connecting = 1;
   showEspNowMenu();
-  const size_t row = rowOf("Peers: 1/2 up");
+  const size_t row = rowOf("Peers: 1/2 up +1 conn");
   espnowState.initialized = false;
   handleEspNowTap(tapRow(row));
   EXPECT(keyboards == 0 && submits == 0,
@@ -312,11 +312,13 @@ static void refusal_shows_in_back_row() {
 }
 
 static void espnow_rows_unchanged_state() {
-  // The Peers row is up / paired without this device (the lens status line's
-  // count), not the registry size, which also holds this device's own entry.
+  // The Peers row is online / paired without this device (the lens status
+  // line's count), not the registry size, which also holds this device's own
+  // entry.
   espnowState = FakeEspNow{true, 4};
-  peersUp = 2;
-  peersPaired = 3;
+  peerCounts = EspNowPeerCounts{};
+  peerCounts.online = 2;
+  peerCounts.offline = 1;
   showEspNowMenu();
   const char* on[] = {"<- WiFi", "ESP-NOW: ON", "Mode: mesh", "Peers: 2/3 up",
                       "View Devices", "Name: lab", "Auto Start: ON"};

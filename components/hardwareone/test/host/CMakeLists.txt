@@ -1285,6 +1285,20 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_g2_espnow_peer_rows.py
           ${G2_ESPNOW_PEER_ROWS_TEST_ARGS})
 
+# The MESH system metric and the MQTT / Home Assistant peer availability and
+# system.online / system.state use the one peer state (online / connecting /
+# offline, espnowPeerState / espnowPeerCounts); MeshPeers keeps no health or
+# count queries.
+set(ESPNOW_PEER_STATE_SURFACES_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_PEER_STATE_SURFACES_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_peer_state_surfaces
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_peer_state_surfaces.py
+          ${ESPNOW_PEER_STATE_SURFACES_TEST_ARGS})
+
 # Sensors completions (cam_power post-hook, openmic/closemic on cmd_exec) queue a
 # generation-checked Redraw instead of rendering on their own task (README
 # "G2 Sensors completion redraws").

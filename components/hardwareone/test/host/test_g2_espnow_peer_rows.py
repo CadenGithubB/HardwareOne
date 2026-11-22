@@ -1,27 +1,37 @@
 #!/usr/bin/env python3
 """The lens "Peers" rows count and list this device's peers, never this device.
 
-A peer is every ESP-NOW registry entry except this device's own; it is up
-while it holds an ACTIVE encrypted session (espnowSessionUp). The lens status
-line already counted that way ("ESPNow: 2/3 up"); the ESP-NOW app and the
-Network page printed the registry size (one high: the registry holds this
-device too) or the number of peers with message history, and both peer lists
-had a row for this device (in the app, a row whose detail page offered Ping,
-Send and Forget on this device itself).
+A peer is every ESP-NOW registry entry except this device's own. Its state is
+the one every surface shows (System_ESPNow_PeerStateCore.h, owner decision
+2026-11-20): online with a mesh heartbeat within 30 s AND an ACTIVE encrypted
+session, connecting with the heartbeat alone, offline without a recent
+heartbeat. The lens prints online/paired as "up" and the connecting peers
+after it ("ESPNow: 2/3 up +1 conn"); it used to count a session alone as up.
+The ESP-NOW app and the Network page once printed the registry size (one high:
+the registry holds this device too) or the number of peers with message
+history, and both peer lists had a row for this device (in the app, a row
+whose detail page offered Ping, Send and Forget on this device itself).
 
-Part one compiles the production g2EspNowPeerCounts, g2BuildNetworkInfo and
-showEspNowDevices (G2_Page_Network.cpp) and the row table, g2BuildEspNowAppInfo,
-showMainMenu, showPeersMenu, showStatsMenu and handlePeersTap
-(G2_Page_ESPNow.cpp) against doubles of the registry, the session test and the
-lens list page (g2_espnow_peer_rows_harness.cpp): the count rule, the five
-rows that print it, the two lists without this device, and a tap selecting
-the peer its row named, also after the registry changed under the list. It is
-built again with ENABLE_ESPNOW=0, where no registry double exists.
+Part one compiles the production g2EspNowPeerCounts, g2FormatPeerCounts,
+g2BuildNetworkInfo and showEspNowDevices (G2_Page_Network.cpp), the row table,
+g2BuildEspNowAppInfo, showMainMenu, showPeersMenu, showStatsMenu and
+handlePeersTap (G2_Page_ESPNow.cpp) and the accessors espnowPeerState /
+espnowPeerCounts (System_ESPNow.h) against doubles of the registry, the
+heartbeat table, the session test and the lens list page
+(g2_espnow_peer_rows_harness.cpp): the count rule (connecting is never
+online, a session without a heartbeat is offline, this device and unpaired
+peers are not counted), the lens wording, the rows that print it, the two
+lists without this device, and a tap selecting the peer its row named, also
+after the registry changed under the list. It is built again with
+ENABLE_ESPNOW=0, where no registry double exists.
 
 Part two reads sources (comments stripped), for what part one cannot run and
 for the other screen rules that landed with it:
-- neither lens page reads peerHistoryCount, and every "Peers" format with a
-  number is an up/paired one;
+- neither lens page reads peerHistoryCount, and every "Peers" row prints the
+  g2FormatPeerCounts text;
+- the lens status line (G2_Glasses.cpp) prints g2FormatPeerCounts of
+  g2EspNowPeerCounts, and no G2_*.cpp file counts peers by espnowSessionUp or
+  the heartbeat table itself (the rule is espnowPeerCounts);
 - g2EspNowPeerCounts sits outside the two blocks of G2_Page_Network.cpp that
   the Network host suites lift as local state (they have no registry);
 - the lens RTC row and RTC readout convert with rtcLocalTime (screens show
@@ -85,6 +95,7 @@ def line_of(source: str, pattern: str) -> str:
 def unit(component: Path) -> str:
     network = (component / "G2_Page_Network.cpp").read_text()
     app = (component / "G2_Page_ESPNow.cpp").read_text()
+    espnow = (component / "System_ESPNow.h").read_text()
     production = [
         extract_block(app, "enum EspNowAppSub") + ";",
         line_of(app, r"^static EspNowAppSub gSub = [^;\n]*;"),
@@ -98,7 +109,12 @@ def unit(component: Path) -> str:
         extract_block(app, "enum class EspNowAppPhase") + ";",
         definition(app, "currentPhase"),
         definition(app, "phaseLabel"),
+        "#if ENABLE_ESPNOW",
+        extract_block(espnow, "inline EspNowPeerState espnowPeerState("),
+        extract_block(espnow, "inline EspNowPeerCounts espnowPeerCounts("),
+        "#endif",
         definition(network, "g2EspNowPeerCounts"),
+        definition(network, "g2FormatPeerCounts"),
         definition(network, "g2BuildNetworkInfo"),
         definition(network, "showEspNowDevices"),
         definition(app, "g2BuildEspNowAppInfo"),
@@ -117,7 +133,7 @@ def source_failures(component: Path) -> list[str]:
     network_text = (component / "G2_Page_Network.cpp").read_text()
     pages = {"G2_Page_Network.cpp": network_text,
              "G2_Page_ESPNow.cpp": (component / "G2_Page_ESPNow.cpp").read_text()}
-    wanted = {"Peers: %d/%d up\\n", "Peers: %d/%d up", "Peers %d/%d up\\n", "Peers (%d/%d up) >>"}
+    wanted = {"Peers: %s\\n", "Peers: %s", "Peers %s\\n", "Peers (%s) >>"}
     seen = set()
     for name, text in pages.items():
         code = code_of(text)
@@ -127,14 +143,27 @@ def source_failures(component: Path) -> list[str]:
             if literal in wanted:
                 seen.add(literal)
             else:
-                failures.append(f'{name} prints "{literal}": a Peers count is up/paired (%d/%d up)')
+                failures.append(f'{name} prints "{literal}": a Peers row prints the g2FormatPeerCounts text')
     if seen != wanted:
-        failures.append(f"lens Peers rows found: {sorted(seen)}; expected the five up/paired rows")
+        failures.append(f"lens Peers rows found: {sorted(seen)}; expected the five rows printing "
+                        "g2FormatPeerCounts")
+    glasses = code_of((component / "G2_Glasses.cpp").read_text())
+    status = re.search(r'"ESPNow: (%[^"\n]*)\\n"', glasses)
+    if status is None or status[1] != "%s" or \
+            "g2FormatPeerCounts(g2EspNowPeerCounts()" not in glasses:
+        failures.append("G2_Glasses.cpp: the status line does not print g2FormatPeerCounts of "
+                        "g2EspNowPeerCounts() (\"ESPNow: %s\")")
+    for path in sorted(component.glob("G2_*.cpp")):
+        code = code_of(path.read_text())
+        if re.search(r"\bespnowSessionUp\(|\bisMeshPeerAlive\(|\bgMeshPeers\b", code):
+            failures.append(f"{path.name} reads the session or heartbeat table; a peer's state comes "
+                            "from espnowPeerState / espnowPeerCounts")
     # The two blocks the Network host suites lift as the page's local state.
     lifted = (network_text[network_text.index("enum NetworkSubMode"):network_text.index("// Info text")] +
               network_text[network_text.index("enum WifiMenuAction"):
                            network_text.index("static void showWifiMenu() {")])
-    for name in ("g2EspNowPeerCounts", "espnowSessionUp", "isSelfMac"):
+    for name in ("g2EspNowPeerCounts", "g2FormatPeerCounts", "espnowPeerCounts", "espnowSessionUp",
+                 "isSelfMac"):
         if name in code_of(lifted):
             failures.append(f"G2_Page_Network.cpp: {name} is inside the local-state block the Network "
                             "host suites lift (they have no ESP-NOW registry)")
@@ -210,7 +239,7 @@ def main() -> int:
     if failures:
         print(f"g2_espnow_peer_rows: {len(failures)} source failure(s)")
         return 1
-    print(f"g2_espnow_peer_rows: up/paired counts, both peer lists without this device, taps by the "
+    print(f"g2_espnow_peer_rows: online/connecting/paired counts, both peer lists without this device, taps by the "
           f"row's peer ({total} checks, 2 builds); screen source rules hold")
     return 0
 

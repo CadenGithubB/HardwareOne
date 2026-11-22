@@ -269,10 +269,10 @@ void g2BuildEspNowAppInfo(char* out, size_t cap) {
     char line[64];
     snprintf(line, sizeof(line), "Mode: %s\n", getEspNowModeString());
     s += line;
-    // Up / paired without this device, as the lens status line counts them.
-    int peersUp = 0, peersPaired = 0;
-    g2EspNowPeerCounts(&peersUp, &peersPaired);
-    snprintf(line, sizeof(line), "Peers: %d/%d up\n", peersUp, peersPaired);
+    // Online / paired without this device, as the lens status line counts them.
+    char peers[24];
+    g2FormatPeerCounts(g2EspNowPeerCounts(), peers, sizeof(peers));
+    snprintf(line, sizeof(line), "Peers: %s\n", peers);
     s += line;
     snprintf(line, sizeof(line), "TX %lu  RX %lu\n",
              (unsigned long)gEspNow->routerMetrics.messagesSent,
@@ -304,17 +304,18 @@ static void showMainMenu() {
 
   snprintf(stateLine, sizeof(stateLine), "%s", phaseLabel(currentPhase()));
 
-  // Peers up / paired without this device, the status line's rule (0/0 while
-  // ESP-NOW is off). Drawn once per render: it follows a session change on
-  // the next redraw of this menu, not while it stays open.
-  int nPeersUp = 0, nPeers = 0;
-  g2EspNowPeerCounts(&nPeersUp, &nPeers);
+  // Peers online / paired without this device, the status line's rule (0/0
+  // while ESP-NOW is off). Drawn once per render: it follows a session change
+  // on the next redraw of this menu, not while it stays open.
+  const EspNowPeerCounts peers = g2EspNowPeerCounts();
+  char peersText[24];
+  g2FormatPeerCounts(peers, peersText, sizeof(peersText));
 #if ENABLE_ESPNOW
   int nInbox = countInboxAll();
 #else
   int nInbox = 0;
 #endif
-  snprintf(peersLine, sizeof(peersLine), "Peers (%d/%d up) >>", nPeersUp, nPeers);
+  snprintf(peersLine, sizeof(peersLine), "Peers (%s) >>", peersText);
   snprintf(inboxLine, sizeof(inboxLine), "Inbox (%d) >>", nInbox);
 
   const char* items[] = {
@@ -327,8 +328,8 @@ static void showMainMenu() {
     "Bonded Device >>", // 6 — remote sensors streamed across the bond/mesh
   };
   g2ShowListPage(items, sizeof(items) / sizeof(items[0]));
-  DEBUG_G2F("[G2-ESP-NOW-APP] main menu shown (phase=%d, peers=%d/%d up, inbox=%d)",
-            (int)currentPhase(), nPeersUp, nPeers, nInbox);
+  DEBUG_G2F("[G2-ESP-NOW-APP] main menu shown (phase=%d, peers=%d online/%d connecting/%d paired, inbox=%d)",
+            (int)currentPhase(), peers.online, peers.connecting, peers.paired(), nInbox);
 }
 
 void g2ShowEspNowAppMenu() {
@@ -523,10 +524,10 @@ static void showStatsMenu() {
   if (gEspNow && gEspNow->initialized) {
     snprintf(rows[n], sizeof(rows[n]), "Mode: %s", getEspNowModeString());
     ptrs[n] = rows[n]; n++;
-    // Up / paired without this device, as the lens status line counts them.
-    int peersUp = 0, peersPaired = 0;
-    g2EspNowPeerCounts(&peersUp, &peersPaired);
-    snprintf(rows[n], sizeof(rows[n]), "Peers: %d/%d up", peersUp, peersPaired);
+    // Online / paired without this device, as the lens status line counts them.
+    char peers[24];
+    g2FormatPeerCounts(g2EspNowPeerCounts(), peers, sizeof(peers));
+    snprintf(rows[n], sizeof(rows[n]), "Peers: %s", peers);
     ptrs[n] = rows[n]; n++;
     snprintf(rows[n], sizeof(rows[n]), "TX: %lu",
              (unsigned long)gEspNow->routerMetrics.messagesSent);

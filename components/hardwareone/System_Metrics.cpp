@@ -187,18 +187,15 @@ Raw readLinks() {
 #endif
 }
 
+// The paired peers that are online (a mesh heartbeat within 30 s and an
+// encrypted session up) out of all paired peers, by the rule every surface
+// uses (espnowPeerCounts); a peer still connecting is not counted.
 Raw readMesh() {
 #if ENABLE_ESPNOW
   if (!gEspNow || !gEspNow->initialized) return unavailable();
-  int paired = 0, up = 0;
-  const int n = gEspNow->deviceCount < 16 ? gEspNow->deviceCount : 16;
-  for (int i = 0; i < n; ++i) {
-    const uint8_t* mac = gEspNow->devices[i].mac;
-    if (isSelfMac(mac)) continue;
-    ++paired;
-    if (espnowSessionUp(mac)) ++up;
-  }
-  return Raw{(float)up, 0.0f, (float)(paired > 0 ? paired : 1), true};
+  const EspNowPeerCounts peers = espnowPeerCounts();
+  const int paired = peers.paired();
+  return Raw{(float)peers.online, 0.0f, (float)(paired > 0 ? paired : 1), true};
 #else
   return unavailable();
 #endif

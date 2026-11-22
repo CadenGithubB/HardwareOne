@@ -43,8 +43,7 @@
 #include <esp_heap_caps.h>          // PSRAM total for the state document
 
 #if ENABLE_ESPNOW
-#include "System_ESPNow.h"
-#include "System_MeshPeers.h"
+#include "System_ESPNow.h"   // espnowPeerState: the peer states every surface shows
 #include "System_ESPNow_Sensors.h"
 #endif
 
@@ -929,6 +928,16 @@ static void publishPeerDiscoveryConfig(const MeshPeerMeta& peer,
                           (int)len, 1, true);
 }
 
+// A mesh peer's Home Assistant availability (<base>/devices/<peer id>/
+// availability, retained): "online" only while the peer is online - a mesh
+// heartbeat within 30 s and an encrypted session up (espnowPeerState, the
+// rule every surface uses). A peer still connecting (heartbeat, no session
+// yet) is "offline" like a silent one: commands to it would not get through,
+// so Home Assistant shows its entities unavailable.
+static const char* meshPeerAvailability(EspNowPeerState state) {
+  return state == EspNowPeerState::Online ? "online" : "offline";
+}
+
 // The state sections a peer's readings fill (its sensorMask); system always.
 static uint16_t meshPeerSections(const MeshPeerMeta& peer) {
   uint16_t sections = mqttpayload::kSystem;
@@ -973,8 +982,7 @@ static void publishMeshPeerDiscovery() {
 
     // Publish availability for this peer
     String peerAvailTopic = gSettings.mqttBaseTopic + "/devices/" + peerId + "/availability";
-    
-    const char* status = MeshPeers::isHealthy(peer.mac) ? "online" : "offline";
+    const char* status = meshPeerAvailability(espnowPeerState(peer.mac));
     esp_mqtt_client_publish(mqttClient, peerAvailTopic.c_str(), status, 0, 1, true);
   }
 
@@ -1005,6 +1013,13 @@ static void publishMeshPeerSensorData() {
     macToPathToken(peer.mac, macCompact);  // no-separator UPPER
 
     String peerStateTopic = gSettings.mqttBaseTopic + "/devices/hardwareone_" + macCompact + "/state";
+
+    // Availability every pass, also for a peer without a fresh reading: a
+    // peer that went silent (or is only connecting) turns "offline" here
+    // instead of keeping the retained "online" until the next discovery.
+    const EspNowPeerState state = espnowPeerState(peer.mac);
+    String peerAvailTopic = gSettings.mqttBaseTopic + "/devices/hardwareone_" + macCompact + "/availability";
+    esp_mqtt_client_publish(mqttClient, peerAvailTopic.c_str(), meshPeerAvailability(state), 0, 1, true);
 
     // Build JSON state from remote sensor cache
     PSRAM_JSON_DOC(doc);
@@ -1046,13 +1061,13 @@ static void publishMeshPeerSensorData() {
 
     if (!hasData) continue;
 
-    // Add system info — need the health pointer for last_seen field access,
-    // but the bool comes from the shared MeshPeers::isHealthy so the answer
-    // matches every other UI's notion of "online".
+    // System info: the peer's state as every surface shows it (online /
+    // connecting / offline, espnowPeerState), "online" true only for online,
+    // and how long ago anything was heard (the health slot's stamps).
     MeshPeerHealth* health = getMeshPeerHealth(peer.mac, false);
-    bool alive = MeshPeers::isHealthy(peer.mac);
     JsonObject sys = doc["system"].to<JsonObject>();
-    sys["online"] = alive;
+    sys["online"] = state == EspNowPeerState::Online;
+    sys["state"] = espnowPeerStateName(state);
     if (health) {
       uint32_t lastContact = health->lastMeshHeartbeatMs;
       if (health->lastRxActivityMs > lastContact) lastContact = health->lastRxActivityMs;
@@ -1065,9 +1080,6 @@ static void publishMeshPeerSensorData() {
       esp_mqtt_client_publish(mqttClient, peerStateTopic.c_str(), output.c_str(), 0, 0, false);
     }
 
-    // Update availability
-    String peerAvailTopic = gSettings.mqttBaseTopic + "/devices/hardwareone_" + macCompact + "/availability";
-    esp_mqtt_client_publish(mqttClient, peerAvailTopic.c_str(), alive ? "online" : "offline", 0, 1, true);
   }
   free(remoteText);
 }
