@@ -1138,6 +1138,21 @@ everything user-visible since the v0.99.99.1 tag.
   Assistant.
 
 ### Changed
+- The UART host link (the CM5 / Raspberry Pi co-processor) speaks link protocol 2, a framed command
+  channel. A line `@<id> <command>` (the id 1-8 lowercase hex digits the host picks) is answered
+  `@<id> ok <len>` or `@<id> err <len>`, then exactly `<len>` bytes of reply (newlines included)
+  and a newline, written under one hold of the link's transmit lock. `ok`/`err` is the executor's
+  own verdict, not a reading of the text, so a refusal such as `Error: Unknown command: <verb>` is
+  told apart from a reply that only mentions one. login, logout, whoami, the CM5 heartbeat, clock,
+  link-health, power, fan, LLM and dictation callbacks, `liveaudio ready`, the authentication and
+  lockout refusals, the idle sign-out, an over-long line and an empty framed command answer the
+  same way with the id echoed; a framed line that is not signed in is always answered (the
+  2-second limit stays for unframed noise). The login reply ends ` link=2` and `uartlink status`
+  reports `link=2`. A line without the prefix (a person at a terminal) gets the unframed reply as
+  before; events and voicefetch / live audio frames carry no id. The Pi service must be the
+  matching framed release (HardwareOne_RaspPi_CoProcessor 4bbb4d8 or later): it refuses firmware
+  whose login reply lacks `link=2`, and this firmware's replies are not what an older service
+  expects. No Pi + XIAO bench run yet.
 - The encoder's address is checked against every device of the build on that bus, not only the
   FeatherS3 fuel gauge: `encoderaddress`, `encoderbus` and the open refuse an address the OLED
   (0x3C/0x3D), the APDS9960 (0x39), the gamepad (0x50), the ANO encoder (its address setting) or

@@ -1112,7 +1112,7 @@ On the device:
 
 1. Create an account for the daemon - it logs in over the link like any other user. The co-processor README currently documents `useradd cm5svc <password> 0 admin`; use the role its release asks for (it is the account the Pi will hold, so keep the password in the daemon's credentials file only).
 2. Turn the link on: `uartlink on` (persisted as `uartLinkEnabled`; it is off by default). Optionally `uartlinkbaud <n>` (0 = the board default above). `uartrequireauth` is on by default - leave it on.
-3. Check it: `uartlink` prints the link state, the session epoch, the last session event and the CM5 lease (`cm5=… cm5_fresh=… cm5_age_ms=…`).
+3. Check it: `uartlink` prints the link state, the session epoch, the last session event, the CM5 lease (`cm5=… cm5_fresh=… cm5_age_ms=…`) and the link protocol (`link=2`).
 
 On the Pi: follow the install steps in the co-processor repository (overlay, Python venv, `~/.config/hw1-ai-service/credentials`, `config.yaml`, llama.cpp), then run its `probe` command - it connects, logs in, and prints status. Once the daemon is up, `cm5 status` on the device should show a fresh `ready` lease.
 
@@ -1121,11 +1121,12 @@ Notes:
 - The Pi's session is an ordinary named session with its own login epoch; a re-login, `uartrequireauth` flip, or idle timeout fences any in-flight transfer at the next frame boundary. Sign in with the bare `login <user> <password>` (quote a password that contains spaces - unquoted spaces are refused); the targeted `login … serial|display` forms only work once the link session itself is signed in.
 - Heartbeats, time pushes, `liveaudio ready` renewals and the power/fan ACK callbacks are handled on the link's control plane - they never enter the command queue, never appear in command history, and never extend a CLI session.
 - The daemon cannot open or answer interactive prompts (help, confirm, the setup wizard); those belong to a human session.
+- The link is framed (link protocol 2): the daemon sends each command as `@<id> <command>` and the device answers `@<id> ok <len>` or `@<id> err <len>`, then the reply's `<len>` bytes and a newline, so a late reply is never taken for the next command's and the verdict is the device's own, not a guess from the text. The login reply ends ` link=2`; a daemon older than the framed release (HardwareOne_RaspPi_CoProcessor 4bbb4d8) cannot read these replies, and the framed daemon refuses firmware without ` link=2`, so update both together. Typing at the link by hand still works: a line without `@<id> ` gets the plain reply.
 
 ### Commands
 
 ```
-uartlink [status|on|off]            - UART host link on/off; status shows session + CM5 lease
+uartlink [status|on|off]            - UART host link on/off; status shows session, CM5 lease, link=2
 uartlinkbaud <0|9600-max>           - baud (0 = board default); persisted
 uartrequireauth <0|1>               - require login on the link (super admin; default 1)
 cm5 [status|capabilities]           - presence lease / protocol (cm5-presence-v1)

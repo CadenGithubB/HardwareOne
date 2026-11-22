@@ -356,7 +356,7 @@ against its source literal when writing the file):
 |---|---|
 | C6 companion firmware (P4X-EYE, Waveshare) | 2.12.13 exact; stock or Waveshare factory C6 needs `c6update` before radio use |
 | Android app (phone link) | Phone-link protocol v2; name the minimum app build |
-| Raspberry Pi / CM5 service | Protocol 1 |
+| Raspberry Pi / CM5 service | Protocol 1 (since 2026-11-22 the UART link itself is framed, link protocol 2, and needs the HardwareOne_RaspPi_CoProcessor service at 4bbb4d8 or later; `cm5_control` stays v1; see `COMPATIBILITY.md`) |
 | G2 glasses | Supported G2 profile versions as checked in code |
 | R1 ring | The identification strings the firmware matches |
 | ESP-IDF / arduino-esp32 | IDF 5.5.5 (P4 speaker-label builds need the q3 patch); arduino-esp32 3.3.5 at `11bc7ac1a` plus the tracked patches |

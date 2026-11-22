@@ -61,6 +61,18 @@ set_target_properties(espnow_pending_queue_tests PROPERTIES
 target_include_directories(espnow_pending_queue_tests PRIVATE ../..)
 target_compile_options(espnow_pending_queue_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# The UART host link's framed command channel, link protocol 2
+# (System_UartLinkFraming.h, owner decision 2026-11-21 "Full framing now"): the
+# "@<id> " request prefix (valid, invalid, too long), the "@<id> ok|err <len>"
+# header and its exact length for multi-line and empty bodies, the ok/err flag,
+# framed intrinsic replies and unframed lines unchanged, read back the way the
+# Pi daemon reads them. The production dependency-free header.
+add_executable(uart_link_framing_tests test_uart_link_framing.cpp)
+set_target_properties(uart_link_framing_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(uart_link_framing_tests PRIVATE ../..)
+target_compile_options(uart_link_framing_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # When a peer restarted, the session with it ends (System_ESPNow_PeerRestartCore.h):
 # the BOOT notice's counter (newer, same, older/erased, 0, across the wrap), the
 # SESSION_UNKNOWN hint (live id, sealed sequence), one forced close per peer per
@@ -1736,6 +1748,7 @@ add_test(NAME factory_wipe_policy_tests COMMAND factory_wipe_policy_tests)
 add_test(NAME clock_confirm_policy_tests COMMAND clock_confirm_policy_tests)
 add_test(NAME espnow_pending_queue_tests COMMAND espnow_pending_queue_tests)
 add_test(NAME espnow_peer_restart_tests COMMAND espnow_peer_restart_tests)
+add_test(NAME uart_link_framing_tests COMMAND uart_link_framing_tests)
 add_test(NAME arg_parse_tests COMMAND arg_parse_tests)
 add_test(NAME config_load_tests COMMAND config_load_tests)
 add_test(NAME g2_hold_gesture_tests COMMAND g2_hold_gesture_tests)
@@ -3926,6 +3939,16 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_pending_command.py
           ${PENDING_COMMAND_TEST_ARGS})
+
+# The UART host link's framing wiring in System_UartLink.cpp (link protocol 2):
+# the drain takes "@<id> " off before anything reads the line, every reply of
+# uartProcessLine carries the line's id, the command in flight keeps it and its
+# header carries the executor's ok flag, header + body + newline under one TX
+# lock hold, link=2 at login and in `uartlink status`.
+add_test(
+  NAME uart_link_framing_source
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_uart_link_framing_source.py)
 
 # The glasses' refusal notice (G2_ReplyNotice.h, 2026-11-21 controls pass): a
 # refused command keeps its row and says why ("Needs an admin", the recording

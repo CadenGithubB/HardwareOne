@@ -1,6 +1,7 @@
 // System_UartLink.cpp — UART host link drain. See System_UartLink.h for the
 // design charter and docs/UART_HOST_LINK_PLAN.md for the verified plan.
 #include "System_UartLink.h"
+#include "System_UartLinkFraming.h"  // link protocol 2: @<id> requests, framed replies
 #include "System_PendingCommand.h"  // the link's command in flight (S-11)
 #include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_Cm5HostControl.h"
@@ -427,6 +428,12 @@ static bool uartControlReplyOk() {
   return commandReplyHasOkStamp(sUartControlReply);
 }
 
+// Link protocol 2 (System_UartLinkFraming.h): the request id of the line
+// uartProcessLine is answering ("" for an unframed line), and the id the
+// link's command in flight answers once cmd_exec returns. Loop-task only.
+static char sUartLineReqId[kUartFrameIdStorage] = {};
+static char sUartPendingReqId[kUartFrameIdStorage] = {};
+
 // Deferred lifecycle request. Command handlers run on cmd_exec, which
 // ticks concurrently with the loop task that owns the drain — calling
 // end()/begin() there would free the port and the line accumulator underneath
@@ -483,9 +490,31 @@ static bool uartTxLocked(const uint8_t* data, size_t len, uint32_t timeoutMs = 1
   return ok;
 }
 
+// One piece of a reply written under a single TX-lock hold.
+struct UartTxSegment {
+  const uint8_t* data;
+  size_t len;
+};
+
+static bool uartTxSegmentsForTransportSession(const UartTxSegment* segments,
+                                              size_t count,
+                                              uint32_t expectedEpoch,
+                                              uint32_t timeoutMs);
+
 static bool uartTxLockedForTransportSession(const uint8_t* data, size_t len,
                                             uint32_t expectedEpoch,
                                             uint32_t timeoutMs = 1000) {
+  const UartTxSegment one{data, len};
+  return uartTxSegmentsForTransportSession(&one, 1, expectedEpoch, timeoutMs);
+}
+
+// The pieces of one reply (a framed reply's header, its body, its newline)
+// written back to back under ONE hold of the TX mutex, so no frame, EVT push
+// or other reply can land between them: on the wire they are one message.
+static bool uartTxSegmentsForTransportSession(const UartTxSegment* segments,
+                                              size_t count,
+                                              uint32_t expectedEpoch,
+                                              uint32_t timeoutMs) {
   UartLifecycleGuard lifecycle(pdMS_TO_TICKS(timeoutMs));
   if (!lifecycle) return false;
   // This helper is specifically for a command bound to an admitted transport
@@ -499,22 +528,27 @@ static bool uartTxLockedForTransportSession(const uint8_t* data, size_t len,
       sStarted.load(std::memory_order_acquire) &&
       uartLinkTransportSessionEpoch() == expectedEpoch;
   bool ok = sessionMatches;
-  if (ok) ok = UART_LINK_PORT.write(data, len) == len;
+  for (size_t i = 0; ok && i < count; ++i) {
+    if (segments[i].len == 0) continue;
+    ok = UART_LINK_PORT.write(segments[i].data, segments[i].len) ==
+         segments[i].len;
+  }
   xSemaphoreGive(sTxMutex);
   return ok;
 }
 
-static bool uartWriteLine(const char* s) {
-  // Single-write text line (≤ small status/nag strings; replies go via the
-  // String path in uartProcessLine).
-  char buf[256];
-  size_t n = strlcpy(buf, s, sizeof(buf) - 1);
-  if (n > sizeof(buf) - 2) n = sizeof(buf) - 2;
-  buf[n] = '\n';
-  return uartTxLocked((const uint8_t*)buf, n + 1);
+// Single-write text line (small status/refusal strings; command replies go
+// through uartDeliverReply). `reqId` is the request id of the line answered,
+// "" or null for an unframed line; `ok` is the verdict a framed header carries.
+static bool uartWriteLine(const char* s, bool ok, const char* reqId) {
+  char buf[256 + kUartFrameHeaderMax];
+  const size_t n = uartFrameComposeLine(buf, sizeof(buf), reqId, ok, s);
+  if (n == 0) return false;
+  return uartTxLocked((const uint8_t*)buf, n);
 }
 
-static bool uartWriteLineForTransportSession(const char* s,
+static bool uartWriteLineForTransportSession(const char* s, bool replyOk,
+                                             const char* reqId,
                                              uint32_t expectedEpoch,
                                              uint32_t timeoutMs = 1000) {
   // This helper is loop-task-only (all call sites are in uartProcessLine), so
@@ -526,23 +560,28 @@ static bool uartWriteLineForTransportSession(const char* s,
   // (interrupts masked on the writing core). Same decision as sFrameWire below
   // — PSRAM there is correct but adds interrupt latency per reply line, for
   // 258 B. Not worth it. (Reviewed 2026-08-19.)
-  static char buf[sizeof(sUartControlReply) + 2];
-  size_t n = strlcpy(buf, s, sizeof(buf) - 1);
-  if (n > sizeof(buf) - 2) n = sizeof(buf) - 2;
-  buf[n] = '\n';
-  buf[n + 1] = '\0';
+  // Sized for a whole control reply plus a framed header and the newline.
+  static char buf[sizeof(sUartControlReply) + kUartFrameHeaderMax + 2];
+  const size_t n = uartFrameComposeLine(buf, sizeof(buf), reqId, replyOk, s);
+  if (n == 0) return false;
   return uartTxLockedForTransportSession(
-      reinterpret_cast<const uint8_t*>(buf), n + 1, expectedEpoch,
-      timeoutMs);
+      reinterpret_cast<const uint8_t*>(buf), n, expectedEpoch, timeoutMs);
 }
 
-// Rate-limited variant for replies a garbage stream could trigger per-line
-// (break noise from an unpowered host looks like an endless byte flood).
-static void uartWriteLineNagLimited(const char* s) {
+// Rate-limited variant for refusals a garbage stream could trigger per-line
+// (break noise from an unpowered host looks like an endless byte flood). A
+// framed request is a host waiting for its answer, not noise: it is always
+// answered, with its id, so the host can act (log in again) instead of
+// waiting out its deadline.
+static void uartWriteLineNagLimited(const char* s, const char* reqId) {
+  if (reqId && reqId[0]) {
+    (void)uartWriteLine(s, false, reqId);
+    return;
+  }
   unsigned long now = millis();
   if (now - sLastNagMs < 2000UL) return;
   sLastNagMs = now;
-  uartWriteLine(s);
+  (void)uartWriteLine(s, false, nullptr);
 }
 
 bool uartLinkIsRunning() {
@@ -661,7 +700,7 @@ void uartLinkInitFromSettings() {
 }
 
 const char* uartLinkStatusLine() {
-  EXT_RAM_BSS_ATTR static char buf[384];  // PSRAM: cmd_exec-only, copied into the executor's result String
+  EXT_RAM_BSS_ATTR static char buf[416];  // PSRAM: cmd_exec-only, copied into the executor's result String
   char sessionUser[kUartSessionUserMax + 1];
   const bool sessionAuthed = uartLinkSessionSnapshot(
       sessionUser, sizeof(sessionUser));
@@ -672,7 +711,7 @@ const char* uartLinkStatusLine() {
   snprintf(buf, sizeof(buf),
            "UART link: %s enabled=%d epoch=%lu last_epoch=%lu last_event=%s "
            "uart%d tx=%d rx=%d baud=%d auth=%s user=%s idle=%lumin "
-           "cm5=%s cm5_fresh=%d cm5_age_ms=%lu cm5_task=%s",
+           "cm5=%s cm5_fresh=%d cm5_age_ms=%lu cm5_task=%s link=%d",
            sStarted.load(std::memory_order_acquire) ? "running" : "stopped",
            gSettings.uartLinkEnabled ? 1 : 0,
            (unsigned long)session.activeEpoch,
@@ -684,7 +723,8 @@ const char* uartLinkStatusLine() {
            (unsigned long)gSettings.sessionIdleUart,
            cm5PresenceModeName(cm5.mode), cm5.fresh ? 1 : 0,
            (unsigned long)cm5.ageMs,
-           cm5.taskRunning ? "running" : "dormant");
+           cm5.taskRunning ? "running" : "dormant",
+           kUartLinkProtocolVersion);
   return buf;
 }
 
@@ -716,8 +756,8 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
                                admittedTransportEpoch);
     if (clearedTransportEpoch == 0) return;
     (void)uartWriteLineForTransportSession(
-        "[uart] Signed out due to inactivity. Please log in again.",
-        clearedTransportEpoch);
+        "[uart] Signed out due to inactivity. Please log in again.", false,
+        sUartLineReqId, clearedTransportEpoch);
     return;  // the completed line belonged to the expired incarnation
   }
 
@@ -746,7 +786,8 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
     // renewal.  The stored lease remains bound to the old named epoch, while
     // this exact transport fence prevents its ACK crossing into the new one.
     const bool sent = uartWriteLineForTransportSession(
-        sUartControlReply, liveTransportEpoch);
+        sUartControlReply, uartControlReplyOk(), sUartLineReqId,
+        liveTransportEpoch);
     DEBUG_UART_CONTROLF("[UART-CTRL] RX liveaudio.ready epoch=%lu -> %s reply=%s",
                         static_cast<unsigned long>(liveNamedEpoch),
                         uartControlReplyOk() ? "OK" : "ERROR",
@@ -779,7 +820,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
           char msg[80];
           snprintf(msg, sizeof(msg), "Error: login locked out. Retry in %lu seconds.",
                    lockoutRemainingMs / 1000UL);
-          uartWriteLine(msg);
+          uartWriteLine(msg, false, sUartLineReqId);
           recordLoginAttempt(SOURCE_UART, u, kUartLockoutKey, false, "Locked out");
         } else {
           bool loginSucceeded = false;
@@ -810,25 +851,32 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
           // depend on the web server being compiled in.
           recordLoginAttempt(SOURCE_UART, u, kUartLockoutKey, true, "Login successful");
           systemEventPost(SYSEVT_LOGIN_OK, u.c_str(), "uart");
-          char msg[96];
-          snprintf(msg, sizeof(msg), "OK: logged in as %s%s", u.c_str(),
-                   isAdminUser(u) ? " (admin)" : "");
+          // " link=<n>": the framed protocol version this firmware speaks
+          // (System_UartLinkFraming.h); the host refuses a firmware without
+          // the one it speaks.
+          char msg[160];
+          snprintf(msg, sizeof(msg), "OK: logged in as %s%s link=%d", u.c_str(),
+                   isAdminUser(u) ? " (admin)" : "", kUartLinkProtocolVersion);
           (void)uartWriteLineForTransportSession(
-              msg, loginTransportEpoch);
+              msg, true, sUartLineReqId, loginTransportEpoch);
           } else {
             credentialAttemptRecord(SOURCE_UART, kUartLockoutKey, u.c_str(),
                                     false);
             recordLoginAttempt(SOURCE_UART, u, kUartLockoutKey, false, "Invalid credentials");
             systemEventPost(SYSEVT_LOGIN_FAIL, u.c_str(), "uart");
-            uartWriteLine("Error: authentication failed");
+            uartWriteLine("Error: authentication failed", false, sUartLineReqId);
           }
         }
     } else if (loginVerb) {
-      uartWriteLine("Error: sign in first with bare: login <username> <password>");
-    } else if (cmd.length() > 0) {
+      uartWriteLine("Error: sign in first with bare: login <username> <password>",
+                    false, sUartLineReqId);
+    } else if (cmd.length() > 0 || sUartLineReqId[0]) {
       // Rate-limited: break/garbage from an unpowered or resetting host
       // arrives as a line flood; one nag per window is plenty for a machine.
-      uartWriteLineNagLimited("Error: authentication required. Use: login <username> <password>");
+      // A framed request is always answered (uartWriteLineNagLimited).
+      uartWriteLineNagLimited(
+          "Error: authentication required. Use: login <username> <password>",
+          sUartLineReqId);
     }
     return;  // unauthenticated lines never fall through to the registry
   }
@@ -841,7 +889,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
                                admittedTransportEpoch);
     if (logoutTransportEpoch == 0) return;
     (void)uartWriteLineForTransportSession(
-        "OK: logged out", logoutTransportEpoch);
+        "OK: logged out", true, sUartLineReqId, logoutTransportEpoch);
     return;
   }
   if (uartLineArgs.count() == 1 &&
@@ -858,7 +906,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
     snprintf(msg, sizeof(msg), "OK: %s%s", name,
              (sessionAuthed && isAdminUser(userName)) ? " (admin)" : "");
     (void)uartWriteLineForTransportSession(
-        msg, whoamiTransportEpoch);
+        msg, true, sUartLineReqId, whoamiTransportEpoch);
     return;
   }
   char heartbeatUser[kUartSessionUserMax + 1];
@@ -878,7 +926,8 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
     // comparison; this second fence also prevents its ACK from crossing into
     // the replacement physical command session.
     const bool sent = uartWriteLineForTransportSession(
-        sUartControlReply, heartbeatTransportEpoch);
+        sUartControlReply, uartControlReplyOk(), sUartLineReqId,
+        heartbeatTransportEpoch);
     DEBUG_UART_CONTROLF("[UART-CTRL] RX cm5.heartbeat epoch=%lu -> %s reply=%s",
                         static_cast<unsigned long>(heartbeatNamedEpoch),
                         uartControlReplyOk() ? "OK" : "ERROR",
@@ -894,7 +943,8 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
           sUartControlReply, sizeof(sUartControlReply)) ==
       Cm5TimeIntrinsicResult::Handled) {
     const bool sent = uartWriteLineForTransportSession(
-        sUartControlReply, heartbeatTransportEpoch);
+        sUartControlReply, uartControlReplyOk(), sUartLineReqId,
+        heartbeatTransportEpoch);
     DEBUG_UART_CONTROLF("[UART-CTRL] RX cm5.time epoch=%lu -> %s reply=%s",
                         static_cast<unsigned long>(heartbeatNamedEpoch),
                         uartControlReplyOk() ? "OK" : "ERROR",
@@ -911,7 +961,8 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
           sUartControlReply, sizeof(sUartControlReply)) ==
       Cm5LinkHealthIntrinsicResult::Handled) {
     const bool sent = uartWriteLineForTransportSession(
-        sUartControlReply, heartbeatTransportEpoch);
+        sUartControlReply, uartControlReplyOk(), sUartLineReqId,
+        heartbeatTransportEpoch);
     DEBUG_UART_CONTROLF("[UART-CTRL] RX cm5.linkhealth epoch=%lu -> %s reply=%s",
                         static_cast<unsigned long>(heartbeatNamedEpoch),
                         uartControlReplyOk() ? "OK" : "ERROR",
@@ -945,7 +996,8 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
                "Error: dictation protocol is not available");
     }
     const bool sent = uartWriteLineForTransportSession(
-        sUartControlReply, dictationTransportEpoch);
+        sUartControlReply, uartControlReplyOk(), sUartLineReqId,
+        dictationTransportEpoch);
     uartLinkTransportSessionEndUse();
     DEBUG_UART_CONTROLF(
         "[UART-CTRL] RX dictate epoch=%lu -> %s reply=%s",
@@ -996,7 +1048,8 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
       return;
     }
     const bool llmSent = uartWriteLineForTransportSession(
-        sUartControlReply, llmTransportEpoch, 5000);
+        sUartControlReply, uartControlReplyOk(), sUartLineReqId,
+        llmTransportEpoch, 5000);
     uartLinkTransportSessionEndUse();
     DEBUG_UART_CONTROLF("[UART-CTRL] RX cm5.llm epoch=%lu -> %s reply=%s",
                         static_cast<unsigned long>(llmNamedEpoch),
@@ -1037,7 +1090,8 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
     // the exact named epoch. The physical transport fence keeps its ACK from
     // crossing a concurrent re-login, just like heartbeat and ready above.
     const bool sent = uartWriteLineForTransportSession(
-        sUartControlReply, callbackTransportEpoch, 5000);
+        sUartControlReply, uartControlReplyOk(), sUartLineReqId,
+        callbackTransportEpoch, 5000);
     uartLinkTransportSessionEndUse();
     const char* callbackName =
         powerCallback
@@ -1052,7 +1106,16 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
                         sent ? "sent" : "dropped");
     return;
   }
-  if (cmd.length() == 0) return;
+  if (cmd.length() == 0) {
+    // An unframed blank line stays unanswered; a framed one is a host waiting
+    // for its answer: the executor's own refusal of an empty line.
+    if (sUartLineReqId[0]) {
+      (void)uartWriteLineForTransportSession(
+          kCommandReplyEmptyCommand, false, sUartLineReqId,
+          admittedTransportEpoch);
+    }
+    return;
+  }
 
   // CM5 and live-audio status/capabilities are read-only machine
   // housekeeping. They remain ordinary registry commands, but do not extend
@@ -1108,12 +1171,16 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
   sUartPendingHousekeeping = hostHousekeeping;
   sUartPendingSessionEpoch = commandSessionEpoch;
   sUartPendingTransportEpoch = commandTransportEpoch;
+  memcpy(sUartPendingReqId, sUartLineReqId, sizeof(sUartPendingReqId));
   (void)sUartPending.start(uc, millis());
   (void)uartPendingTick();  // queue it on this lap
 }
 
-// Writes the reply of the link's pending command: one write per reply, the
-// verdict leading, exactly as when the loop waited for it in place.
+// Writes the reply of the link's pending command: one message per reply, the
+// verdict leading, exactly as when the loop waited for it in place. A framed
+// request (sUartPendingReqId) is answered "@<id> ok|err <len>\n" + the body +
+// "\n", ok/err being the executor's flag; an unframed one gets the body and
+// its newline, as before link protocol 2.
 static void uartDeliverReply(bool ok, String& out) {
   bool replyAdmitted = false;
   // A failure goes out as one status line that leads with Error, the framing
@@ -1127,27 +1194,32 @@ static void uartDeliverReply(bool ok, String& out) {
       out = String(kCommandReplyErrorLead) + out;
     }
   }
-  if (out.length()) {
-    // ONE write call for blob + newline: with cross-task frame writers live
-    // (voicefetch), a two-call reply could be split mid-message.
-    // concat() reports allocation failure; without the newline the peer has
-    // no complete reply, so do not write it or grant post-command grace.
-    if (out.concat('\n')) {
-      replyAdmitted = uartTxLockedForTransportSession(
-          (const uint8_t*)out.c_str(), out.length(),
-          sUartPendingTransportEpoch,
-          5000);  // replies are load-bearing; wait out a slow frame
-    }
-  } else {
-    // Never leave the host hanging: an empty result still gets a status line.
-    char fallback[32];
-    size_t n = strlcpy(fallback, ok ? "OK" : "Error: command failed",
-                       sizeof(fallback) - 1);
-    fallback[n++] = '\n';
-    replyAdmitted = uartTxLockedForTransportSession(
-        reinterpret_cast<const uint8_t*>(fallback), n,
-        sUartPendingTransportEpoch, 1000);
+  // Never leave the host hanging: an empty result still gets a status line.
+  const char* body = out.c_str();
+  size_t bodyLen = out.length();
+  const bool fallback = bodyLen == 0;
+  if (fallback) {
+    body = ok ? "OK" : "Error: command failed";
+    bodyLen = strlen(body);
   }
+  char header[kUartFrameHeaderMax + 1];
+  size_t headerLen = 0;
+  if (sUartPendingReqId[0]) {
+    headerLen = uartFrameHeader(header, sizeof(header), sUartPendingReqId, ok,
+                                bodyLen);
+  }
+  // Header, body and newline under ONE hold of the TX mutex: with cross-task
+  // frame writers live (voicefetch, EVT), nothing can land inside the reply.
+  // No copy of the body is made for the newline or the header.
+  const UartTxSegment segments[3] = {
+      {reinterpret_cast<const uint8_t*>(header), headerLen},
+      {reinterpret_cast<const uint8_t*>(body), bodyLen},
+      {reinterpret_cast<const uint8_t*>("\n"), 1},
+  };
+  replyAdmitted = uartTxSegmentsForTransportSession(
+      segments, 3, sUartPendingTransportEpoch,
+      fallback ? 1000 : 5000);  // replies are load-bearing; wait out a slow frame
+  sUartPendingReqId[0] = '\0';
   // Keep the bounded command extension through physical reply admission.
   // The post-command grace begins only now, giving the CM5 heartbeat actor a
   // chance to acquire its own serialized Session lock after this reply lands.
@@ -1250,8 +1322,15 @@ void uartLinkTick() {
       sUartCli = "";
       const uint32_t admittedTransportEpoch = sUartLineTransportEpoch;
       sUartLineTransportEpoch = 0;
+      // Link protocol 2: "@<id> " is removed before anything reads the line
+      // (login, the auth gate, the intrinsics, the registry, the audit feed);
+      // the id goes with the line's answer. Any other line is unframed.
+      const size_t framedPrefix = uartFramedRequestPrefix(
+          cmd.c_str(), cmd.length(), sUartLineReqId);
+      if (framedPrefix) cmd.remove(0, framedPrefix);
       cmd.trim();
       uartProcessLine(cmd, admittedTransportEpoch);
+      sUartLineReqId[0] = '\0';
       // Refresh the idle clock on any completed line while authenticated —
       // one stamp covers both a fresh login and a subsequent command.
       if (uartLinkSessionEpoch() != 0)
@@ -1261,10 +1340,14 @@ void uartLinkTick() {
     } else {
       if (sDiscardingLine) continue;
       if (sUartCli.length() >= kUartLineCap) {
+        // A line that opened with "@<id> " is answered with its id.
+        char tooLongId[kUartFrameIdStorage];
+        (void)uartFramedRequestPrefix(sUartCli.c_str(), sUartCli.length(),
+                                      tooLongId);
         sUartCli = "";
         sUartLineTransportEpoch = 0;
         sDiscardingLine = true;   // swallow the rest, including the newline
-        uartWriteLineNagLimited("Error: line too long — discarded");
+        uartWriteLineNagLimited("Error: line too long — discarded", tooLongId);
         continue;
       }
       if (sUartLineTransportEpoch == 0)
@@ -1276,7 +1359,8 @@ void uartLinkTick() {
 
 // ---------------------------------------------------------------------------
 // P2 binary frame layer. Wire format in System_UartLink.h — the CM5 client
-// (cm5/ai-service link/protocol.py) mirrors it byte-for-byte.
+// (HardwareOne_RaspPi_CoProcessor ai-service/hw1_ai_service/link/protocol.py)
+// mirrors it byte-for-byte.
 
 // CRC16-CCITT-FALSE: poly 0x1021, init 0xFFFF, no reflection, no xor-out.
 // Implemented bitwise here AND in the Python client from the same spec —

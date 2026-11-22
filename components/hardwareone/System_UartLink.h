@@ -8,6 +8,13 @@
 // outputMask carries MSG_ROUTE_FILE only, so no broadcast/debug line can ever
 // reach the channel; the reply is the one and only thing the host receives.
 //
+// Link protocol 2 (System_UartLinkFraming.h): a host line "@<id> <command>"
+// is answered "@<id> ok|err <len>\n" + the <len>-byte body + "\n", the id
+// echoed and ok/err the executor's verdict; the in-band intrinsics (login,
+// logout, whoami, the CM5 control plane, refusals) answer the same way. A
+// line without the prefix keeps the unframed reply. The login reply carries
+// " link=2".
+//
 // Session model mirrors the serial console but is fully separate:
 // a private synchronized auth/user snapshot (never gSerial*), brute-force key
 // "uart" (never "local"), idle window sessionIdleUart. ORIGIN_UART is never
@@ -150,7 +157,8 @@ const char* uartLinkStatusLine();
 // ---------------------------------------------------------------------------
 // P2 binary frame layer (docs/../cm5/CM5_AI_SERVICE_PLAN.md §Gap A1).
 //
-// Wire format — the CM5 client (cm5/ai-service link/protocol.py) implements
+// Wire format — the CM5 client (HardwareOne_RaspPi_CoProcessor,
+// ai-service/hw1_ai_service/link/protocol.py) implements
 // the exact mirror of this; change BOTH or neither:
 //
 //   0x00  COBS(body)  0x00        one frame; 0x00 never occurs inside COBS
