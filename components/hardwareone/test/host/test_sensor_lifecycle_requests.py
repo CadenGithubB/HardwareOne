@@ -101,6 +101,14 @@ def main() -> None:
         "static void sensorRestartAttempt(", "static void sensorRestartTick(",
         "void sensorQueueProcessorTask(",
     )]
+    # Boot autostart's enqueue and the OLED menu's input auto-start, which
+    # leaves an outstanding start alone (boot then menu: one start).
+    controller_definitions += [extract_block(controller, marker) for marker in (
+        "bool i2cSensorStartOutstanding(", "static bool autoStartEnqueue(",
+    )]
+    oled = (COMPONENT / "OLED_Utils.cpp").read_text()
+    menu_start = oled.index("void tryAutoStartInputForMenu() {")
+    controller_definitions.append(extract_block(oled[menu_start:], "void tryAutoStartInputForMenu()"))
     # A real start command, for the hint-only-after-acceptance contract.
     controller_definitions.append(extract_block((COMPONENT / "i2csensor_pa1010d.cpp").read_text(),
                                                 "const char* cmd_gpsstart("))

@@ -2479,6 +2479,11 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_sensor_auto_disable_sites.py)
 add_test(
+  NAME i2c_address_walk
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_i2c_address_walk.py
+          ${I2C_PROBE_TEST_ARGS})
+add_test(
   NAME openinput_backends
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_openinput_backends.py

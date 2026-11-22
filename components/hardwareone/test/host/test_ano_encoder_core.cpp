@@ -103,24 +103,24 @@ void testRightIsSelectAtRelease() {
   assert(r.edges == 0 && r.presses == ANO_BTN_RIGHT && r.buttons == ANO_BTN_RIGHT && r.level == 0);
   r = poll(s, reads(ANO_BTN_RIGHT));
   assert(r.edges == 0 && r.level == 0);
-  // Released with no chord: SELECT and RIGHT, once.
+  // Released with no chord: SELECT only (RIGHT is no direction), once.
   r = poll(s, reads(0, ANO_BTN_RIGHT));
-  assert(r.edges == (ANO_VIRT_SELECT | ANO_BTN_RIGHT) && r.presses == 0 && r.buttons == 0);
+  assert(r.edges == ANO_VIRT_SELECT && r.presses == 0 && r.buttons == 0);
   r = poll(s, reads(0));
   assert(r.edges == 0);
-  // A RIGHT tap inside one window: SELECT and RIGHT at once.
+  // A RIGHT tap inside one window: SELECT at once.
   r = poll(s, reads(0, ANO_BTN_RIGHT));
-  assert(r.edges == (ANO_VIRT_SELECT | ANO_BTN_RIGHT) && r.presses == ANO_BTN_RIGHT);
+  assert(r.edges == ANO_VIRT_SELECT && r.presses == ANO_BTN_RIGHT);
   // A long hold, no IN: still SELECT at its release (no timeout).
   poll(s, reads(ANO_BTN_RIGHT, ANO_BTN_RIGHT));
   for (int i = 0; i < 50; ++i) assert(poll(s, reads(ANO_BTN_RIGHT)).edges == 0);
-  assert(poll(s, reads(0, ANO_BTN_RIGHT)).edges == (ANO_VIRT_SELECT | ANO_BTN_RIGHT));
+  assert(poll(s, reads(0, ANO_BTN_RIGHT)).edges == ANO_VIRT_SELECT);
   // IN held first, then RIGHT: no chord (RIGHT must lead).
   poll(s, reads(ANO_BTN_IN, ANO_BTN_IN));
   r = poll(s, reads(ANO_BTN_IN | ANO_BTN_RIGHT, ANO_BTN_RIGHT));
   assert(r.edges == 0 && r.level == ANO_BTN_IN);
   r = poll(s, reads(ANO_BTN_IN, ANO_BTN_RIGHT));
-  assert(r.edges == (ANO_VIRT_SELECT | ANO_BTN_RIGHT));
+  assert(r.edges == ANO_VIRT_SELECT);
   poll(s, reads(0, ANO_BTN_IN));
 }
 
@@ -153,7 +153,70 @@ void testRightInChordIsStartOnly() {
   r = poll(s, reads(0, ANO_BTN_RIGHT));
   assert(r.edges == 0);
   // After a chord, a plain RIGHT tap is SELECT again.
-  assert(poll(s, reads(0, ANO_BTN_RIGHT)).edges == (ANO_VIRT_SELECT | ANO_BTN_RIGHT));
+  assert(poll(s, reads(0, ANO_BTN_RIGHT)).edges == ANO_VIRT_SELECT);
+}
+
+// The press lands between the buttons read and the flags read: released
+// with its flag set at poll k (a tap), held with no flag at k+1.
+void testTapRaceCountsOnce() {
+  AnoPollState s;
+  AnoPollResult r = poll(s, reads(0, ANO_BTN_UP));
+  assert(r.presses == ANO_BTN_UP && r.edges == ANO_BTN_UP);
+  r = poll(s, reads(ANO_BTN_UP));
+  assert(r.presses == 0 && r.edges == 0 && r.buttons == ANO_BTN_UP && r.level == ANO_BTN_UP);
+  r = poll(s, reads(ANO_BTN_UP));
+  assert(r.presses == 0 && r.edges == 0);
+  r = poll(s, reads(0, ANO_BTN_UP));
+  assert(r.presses == 0 && r.edges == 0);
+  poll(s, reads(0));
+  // The same race, released again before k+1: the release's flag is no
+  // second tap.
+  r = poll(s, reads(0, ANO_BTN_DOWN));
+  assert(r.presses == ANO_BTN_DOWN);
+  r = poll(s, reads(0, ANO_BTN_DOWN));
+  assert(r.presses == 0 && r.edges == 0);
+  // Then a real tap a window later counts.
+  poll(s, reads(0));
+  r = poll(s, reads(0, ANO_BTN_DOWN));
+  assert(r.presses == ANO_BTN_DOWN && r.edges == ANO_BTN_DOWN);
+  poll(s, reads(0));
+  // A tap at k, then a flagged press at k+1: two presses.
+  r = poll(s, reads(0, ANO_BTN_LEFT));
+  assert(r.presses == ANO_BTN_LEFT);
+  r = poll(s, reads(ANO_BTN_LEFT, ANO_BTN_LEFT));
+  assert(r.presses == ANO_BTN_LEFT && r.edges == ANO_BTN_LEFT);
+  poll(s, reads(0, ANO_BTN_LEFT));
+  // A press held across reads with no tap before it is a normal press.
+  poll(s, reads(0));
+  r = poll(s, reads(ANO_BTN_IN));
+  assert(r.presses == ANO_BTN_IN && r.edges == ANO_BTN_IN);
+  poll(s, reads(0, ANO_BTN_IN));
+}
+
+// The race on RIGHT: exactly one SELECT, and the held RIGHT still chords.
+void testRightTapRaceSelectsOnce() {
+  AnoPollState s;
+  unsigned selects = 0;
+  auto count = [&](const AnoPollResult& r) {
+    if (r.edges & ANO_VIRT_SELECT) ++selects;
+    assert(!(r.edges & ANO_BTN_RIGHT));
+    return r;
+  };
+  count(poll(s, reads(0, ANO_BTN_RIGHT)));            // k: counted as a tap
+  AnoPollResult r = count(poll(s, reads(ANO_BTN_RIGHT)));  // k+1: held, no flag
+  assert(r.presses == 0 && r.level == 0 && r.navHidden == ANO_BTN_RIGHT);
+  count(poll(s, reads(ANO_BTN_RIGHT)));
+  count(poll(s, reads(0, ANO_BTN_RIGHT)));            // the real release
+  count(poll(s, reads(0)));
+  assert(selects == 1);
+  // Held on after the race, IN is still the chord: START, no A, no SELECT.
+  selects = 0;
+  count(poll(s, reads(0, ANO_BTN_RIGHT)));
+  count(poll(s, reads(ANO_BTN_RIGHT)));
+  r = count(poll(s, reads(ANO_BTN_RIGHT | ANO_BTN_IN, ANO_BTN_IN)));
+  assert(r.edges == ANO_VIRT_START && r.navHidden == (ANO_BTN_RIGHT | ANO_BTN_IN));
+  count(poll(s, reads(0, ANO_BTN_RIGHT | ANO_BTN_IN)));
+  assert(selects == 1);
 }
 
 void testWheel() {
@@ -192,7 +255,7 @@ void testFailedAndImplausibleReads() {
   out = poll(s, reads(ANO_BTN_ALL, ANO_BTN_ALL));
   assert(!out.buttonsValid && out.edges == 0 && out.buttons == ANO_BTN_RIGHT);
   // The state survived: the real release still sends SELECT.
-  assert(poll(s, reads(0, ANO_BTN_RIGHT)).edges == (ANO_VIRT_SELECT | ANO_BTN_RIGHT));
+  assert(poll(s, reads(0, ANO_BTN_RIGHT)).edges == ANO_VIRT_SELECT);
 }
 
 }  // namespace
@@ -203,9 +266,11 @@ int main() {
   testPressesAndTaps();
   testRightIsSelectAtRelease();
   testRightInChordIsStartOnly();
+  testTapRaceCountsOnce();
+  testRightTapRaceSelectsOnce();
   testWheel();
   testFailedAndImplausibleReads();
   std::puts("ANO encoder core tests passed (pins and swaps, address rule, taps, RIGHT = SELECT at "
-            "release, RIGHT+IN = START only, wheel, failed reads)");
+            "release, RIGHT+IN = START only, the tap race, wheel, failed reads)");
   return 0;
 }

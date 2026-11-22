@@ -8,7 +8,9 @@ GT911 touch), which hand the open to cmd_sensorstart_queued()
 (test_sensor_lifecycle_requests).
 
 GPIO build: with start at boot off or on, every reply is the driver start's
-answer. Since 2026-11-21 a feature has no "allowed" switch: inputautostart
+answer. Every backend first runs the real single-instance argument check
+(System_I2CInstanceCore.h), which the GPIO build reaches without System_I2C.h.
+Since 2026-11-21 a feature has no "allowed" switch: inputautostart
 only decides boot, and an open by hand always reaches the driver.
 """
 from __future__ import annotations
@@ -33,21 +35,21 @@ HARNESS = r'''
 #include <string>
 #include "System_CommandReply.h"
 
-struct String {};
+#include "System_I2CInstanceCore.h"
+
+struct String {
+  const char* text = "";
+  const char* c_str() const { return text; }
+};
 #define RETURN_VALID_IF_VALIDATE_CSTR() do {} while (0)
 static struct { bool inputAutoStart = false; } gSettings;
 static bool gInputRunning = false;
-enum I2cDeviceType : int { I2C_DEVICE_INPUT = 3 };
-// The single-instance argument check (System_I2C.cpp): every backend asks it
-// first, as the input type with its own usage; an argument it refuses is the
-// reply.
-static unsigned argChecks;
-static const char* argError = nullptr;
-static const char* i2cOpenCloseArgError(I2cDeviceType type, const String&, const char* usage) {
-  assert(type == I2C_DEVICE_INPUT && std::strcmp(usage, "openinput") == 0);
-  ++argChecks;
-  return argError;
-}
+// The argument check is the real one (System_I2CInstanceCore.h) on every
+// backend, the GPIO encoder included: that build has no System_I2C.h.
+static char debugBuffer[1024];
+static bool debugBufferOk = true;
+static bool ensureDebugBuffer() { return debugBufferOk; }
+static char* getDebugBuffer() { return debugBuffer; }
 
 #if ENABLE_GPIO_ENCODER
 // INSERT_START_ENUM
@@ -66,6 +68,22 @@ static const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* disp
 #endif
 
 // INSERT_PRODUCTION
+
+// A refused argument is the reply and nothing starts; the reply says why,
+// with or without the debug buffer.
+template <typename Starts>
+static void checkArgumentRefusals(Starts starts) {
+  const unsigned before = starts();
+  assert(std::strcmp(cmd_openinput(String{"2"}), "Error: input has one instance.") == 0);
+  assert(std::strstr(cmd_openinput(String{"foo"}), "'foo' is not an instance number. Usage: openinput"));
+  assert(std::strstr(cmd_openinput(String{"1 2"}), "one argument too many. Usage: openinput"));
+  debugBufferOk = false;
+  assert(std::strcmp(cmd_openinput(String{"2"}), "Error: That device has one instance.") == 0);
+  assert(std::strcmp(cmd_openinput(String{"foo"}), "Error: That argument is not an instance number.") == 0);
+  assert(std::strcmp(cmd_openinput(String{"1 2"}), "Error: That command takes at most one argument.") == 0);
+  debugBufferOk = true;
+  assert(starts() == before);
+}
 
 int main() {
 #if ENABLE_GPIO_ENCODER
@@ -86,9 +104,8 @@ int main() {
   assert(std::strstr(cmd_openinput(String{}), "busy"));
   startResult = GpioEncoderStart::TaskNotCreated;
   assert(std::strstr(cmd_openinput(String{}), "task could not be created"));
-  argError = "Error: input has one instance."; startCalls = 0;
-  assert(std::strcmp(cmd_openinput(String{}), argError) == 0 && startCalls == 0);
-  argError = nullptr;
+  startResult = GpioEncoderStart::Started; startCalls = 0;
+  checkArgumentRefusals([&] { return startCalls; });
   std::puts("openinput backends passed (GPIO encoder)");
 #else
   // I2C backends: the command itself decides nothing; the shared start is
@@ -98,9 +115,8 @@ int main() {
     assert(std::strcmp(cmd_openinput(String{}), "from the shared start") == 0 && queuedOpens == 1);
     assert(openLabel == BACKEND_LABEL && openTag == "openinput@enqueue" && !openHint.empty());
   }
-  argError = "Error: input has one instance."; queuedOpens = 0;
-  assert(std::strcmp(cmd_openinput(String{}), argError) == 0 && queuedOpens == 0 && argChecks == 3);
-  argError = nullptr;
+  queuedOpens = 0;
+  checkArgumentRefusals([&] { return queuedOpens; });
   (void)gInputRunning;
   std::printf("openinput backends passed (%s via the shared start)\n", BACKEND_LABEL);
 #endif
@@ -116,7 +132,11 @@ def main() -> None:
     require(bool(args.cxx), "a host C++17 compiler is required")
     source = (COMPONENT / "HAL_Input.cpp").read_text()
     production = (extract_block(source, "static const char* inputDeviceLabel()") + "\n#endif\n\n"
+                  + extract_block(source, "static const char* inputOpenCloseArgError(") + "\n\n"
                   + extract_block(source, "static const char* cmd_openinput("))
+    # The GPIO build has no System_I2C.h: the check must not need it.
+    require("i2cOpenCloseArgError(" not in source,
+            "HAL_Input.cpp must use the pure i2cOpenCloseArgErrorText, not System_I2C.h")
     production = "#if !ENABLE_GPIO_ENCODER\n" + production
     start_enum = extract_block((COMPONENT / "Input_GPIOEncoder.h").read_text(),
                                "enum class GpioEncoderStart") + ";"

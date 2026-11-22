@@ -16,11 +16,14 @@ class InputButtonSnapshotTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="hardwareone-input-") as work:
             work = Path(work)
             header = (here.parents[1] / "HAL_Input.h").read_text()
-            reading = re.search(r"struct InputCache \{.*?\n\};", header, re.S)
+            reading = re.search(r"struct InputCache \{.*?\n\};.*?inline uint32_t inputNavButtons[^\n]*\n",
+                                header, re.S)
             self.assertIsNotNone(reading)
             owner = source[source.index("// Shared input readings"):source.index("// Static State")]
             # Default argument normally comes from HAL_Input.h.
-            declarations = "bool inputConsumeSnapshot(InputCache&, uint32_t timeoutMs = 10);\n"
+            declarations = ("bool inputConsumeSnapshot(InputCache&, uint32_t timeoutMs = 10);\n"
+                            "bool inputPublishState(uint32_t, int, int, uint32_t, bool, unsigned long,"
+                            " uint32_t navHidden = 0);\n")
             (work / "input_snapshot_under_test.h").write_text(
                 reading.group() + "\n" + declarations + owner + "\n" + function.group())
             binary = work / "snapshot"
@@ -33,7 +36,11 @@ class InputButtonSnapshotTest(unittest.TestCase):
         here = Path(__file__).parent
         source = (here.parents[1] / "HAL_Input.cpp").read_text()
         header = (here.parents[1] / "HAL_Input.h").read_text()
-        reading = re.search(r"struct InputCache \{.*?\n\};", header, re.S).group()
+        reading = re.search(r"struct InputCache \{.*?\n\};.*?inline uint32_t inputNavButtons[^\n]*\n",
+                            header, re.S).group()
+        # The navHidden default normally comes from HAL_InputInternal.h.
+        reading += ("bool inputPublishState(uint32_t, int, int, uint32_t, bool, unsigned long,"
+                    " uint32_t navHidden = 0);\n")
         owner = source[source.index("// Shared input readings"):source.index("// Static State")]
         with tempfile.TemporaryDirectory(prefix="hardwareone-no-input-") as work:
             work = Path(work)

@@ -696,9 +696,12 @@ const char* cmd_devicefile(const String& argsInput);
 // address it holds (both chips of a two-chip device, an OLED's alternate) is
 // already used by another device is refused with the clash reply. Does NOT
 // contain RETURN_VALID_IF_VALIDATE_CSTR — that must stay at each cmd_* entry
-// point, because it returns from its caller.
+// point, because it returns from its caller. `applies` says when the new bus
+// takes effect in the replies ("reboot required" for a driver that binds its
+// bus at boot; the ANO takes it at the next openinput).
 const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput,
-                                     const char* settingName, const I2cAddressOwner& owner);
+                                     const char* settingName, const I2cAddressOwner& owner,
+                                     const char* applies = "reboot required");
 
 // ============================================================================
 // Bus State

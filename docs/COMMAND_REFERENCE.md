@@ -914,7 +914,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `i2csclpin` | A | Set I2C1 SCL pin: <0..> (max GPIO for this board)<br/>`Usage: i2cSclPin <0..> (max GPIO for this board)` |
 | `i2csdapin` | A | Set I2C1 SDA pin: <0..> (max GPIO for this board)<br/>`Usage: i2cSdaPin <0..> (max GPIO for this board)` |
 | `i2cstats` |  | I2C bus statistics and errors. |
-| `inputbus` | A | Route input device to bus: <0\|1> (reboot required)<br/>`Usage: inputBus <0\|1>` |
+| `inputbus` | A | Route input device to bus: <0\|1> (reboot required; the ANO: next openinput)<br/>`Usage: inputBus <0\|1>` |
 | `oledbus` | A | Route OLED to bus: <0\|1> (reboot required)<br/>`Usage: oledBus <0\|1>` |
 | `sensorautostart` | A | Sensor auto-start: [sensor] [n] [on\|off]<br/>`Usage: sensorautostart [sensor] [n] [on\|off] sensorautostart all [on\|off] Sensors: thermal, tof, imu, gps, fmradio, apds, input, rtc, presence, encoder (n: encoder 1..4)` |
 | `sensorinfo` |  | Sensor details: <name><br/>`Usage: sensorinfo <sensor_name> Example: sensorinfo BNO055` |

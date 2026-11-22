@@ -434,6 +434,11 @@ contract in sec. 6 is **unchanged**.)
   `sensorMask`, `sensorConnectedMask` and `sensorEnabledMask` changed to the one sensor numbering
   (thermal 1, tof 2, imu 4, gps 8, input 16, fmradio 32, rtc 256, presence 512, apds 1024): read
   the masks through `sensorBits`, not through numbers of your own.
+- The ESP-NOW capability manifest's `sensorStatus` object (`thermal`, `tof`, `imu`, `input`,
+  `apds`, `gps`, `rtc`, `presence`; keys unchanged) is stricter since 2026-11-22: a value is `true`
+  only when this build has that sensor and the last bus scan found it at the bus and address the
+  build uses for it (a configured address counts; `presence` looks at the presence sensor's own
+  address, not 0x61). Before, any device answering at a matching name counted, whatever the build.
 - `espnowtimestatus json`: `schema`, `meshTime`, `role`, `masterNamed` (`false`: no master is named
   on this device, so it takes no mesh time), `clockSet`, `clockSource`, `clockSetAgoS`,
   `epoch`, `sends`, `sendsWhyNot`, `lastSentAgoS`, `framesSent`, `peersSent`, `peersReady`,

@@ -18,6 +18,9 @@
 #endif
 #include "System_Utils.h"
 #include "System_CommandRegistry.h"
+// The open/close argument check is pure (no System_I2C.h): the GPIO encoder
+// build has no I2C input and may have no I2C system at all.
+#include "System_I2CInstanceCore.h"
 #endif
 
 // Shared input readings and edge ownership, independent of the selected driver.
@@ -100,6 +103,7 @@ bool inputCacheReset(uint32_t buttons, int joyX, int joyY, bool clearPresses) {
   SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(100), "input.reset");
   if (!guard.held) return false;
   sInputCache.buttons = buttons;
+  sInputCache.navHidden = 0;
   sInputCache.joyX = joyX;
   sInputCache.joyY = joyY;
   sInputCache.dataValid = false;
@@ -113,8 +117,10 @@ bool inputCacheReset(uint32_t buttons, int joyX, int joyY, bool clearPresses) {
 
 #if ENABLE_OLED_INPUT
 static void publishInputLocked(uint32_t buttons, int joyX, int joyY,
-                               uint32_t pressedEdges, bool activity, unsigned long stamp) {
+                               uint32_t pressedEdges, bool activity, unsigned long stamp,
+                               uint32_t navHidden) {
   sInputCache.buttons = buttons;
+  sInputCache.navHidden = navHidden;
   sInputCache.joyX = joyX;
   sInputCache.joyY = joyY;
   sInputCache.buttonPressedAccum |= pressedEdges;
@@ -125,14 +131,16 @@ static void publishInputLocked(uint32_t buttons, int joyX, int joyY,
 #endif
 
 bool inputPublishState(uint32_t buttons, int joyX, int joyY,
-                       uint32_t pressedEdges, bool activity, unsigned long stamp) {
+                       uint32_t pressedEdges, bool activity, unsigned long stamp,
+                       uint32_t navHidden) {
 #if ENABLE_OLED_INPUT
   SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(50), "input.publish");
   if (!guard.held) return false;
-  publishInputLocked(buttons, joyX, joyY, pressedEdges, activity, stamp);
+  publishInputLocked(buttons, joyX, joyY, pressedEdges, activity, stamp, navHidden);
   return true;
 #else
   (void)buttons; (void)joyX; (void)joyY; (void)pressedEdges; (void)activity; (void)stamp;
+  (void)navHidden;
   return false;
 #endif
 }
@@ -146,7 +154,7 @@ bool inputPublishGamepadState(uint32_t buttons, int joyX, int joyY,
                         abs(sInputCache.joyX - joyX) > 1 || abs(sInputCache.joyY - joyY) > 1;
   // Active-low transitions plus the hardware latch preserve short completed taps.
   const uint32_t presses = (sInputCache.buttons & ~buttons) | interruptPresses;
-  publishInputLocked(buttons, joyX, joyY, presses, activity, stamp);
+  publishInputLocked(buttons, joyX, joyY, presses, activity, stamp, 0);
   return true;
 #else
   (void)buttons; (void)joyX; (void)joyY; (void)interruptPresses; (void)stamp;
@@ -226,7 +234,9 @@ static const uint32_t gGpioEncoderMapping[] = {
 //   DOWN   → X (keyboard "submit" — bottom button enters)
 //   RIGHT  → SELECT at its release (ANO_VIRT_SELECT, an edge the driver makes
 //            for a RIGHT tap: keyboard autocomplete / mode toggle, Quick
-//            Settings outside the menu)
+//            Settings outside the menu). SELECT only: no right step.
+//            The cache keeps RIGHT held (the physical state); the navigation
+//            ignores it through InputCache::navHidden.
 //   RIGHT held + IN → START only (ANO_VIRT_START; no SELECT, no A)
 // The rules are anoPoll()'s (i2csensor_ano_encoder_core.h, host-tested).
 #if ENABLE_ANO_ENCODER
@@ -394,7 +404,7 @@ uint32_t inputButtonsToLogical(uint32_t deviceCacheButtonsActiveLow) {
 uint32_t inputGetButtonsLogical() {
   InputCache reading;
   if (!gInputConnected || !inputCacheSnapshot(reading) || !reading.dataValid) return 0;
-  return inputButtonsToLogical(reading.buttons);
+  return inputButtonsToLogical(inputNavButtons(reading));
 }
 
 bool inputHasPendingDetents() {
@@ -421,9 +431,11 @@ int inputConsumeOneDetent() {
 uint32_t inputConsumeButtonPresses(uint32_t& previousActiveLow, bool& initialized) {
   InputCache reading;
   if (!inputConsumeSnapshot(reading)) return 0;
+  // The navigation's view: the ANO's RIGHT and chord IN are not held here.
+  const uint32_t buttons = inputNavButtons(reading);
   uint32_t pressed = reading.buttonPressedAccum;
-  if (initialized) pressed |= ~reading.buttons & previousActiveLow;
-  previousActiveLow = reading.buttons;
+  if (initialized) pressed |= ~buttons & previousActiveLow;
+  previousActiveLow = buttons;
   initialized = true;
   return pressed;
 }
@@ -449,9 +461,15 @@ static const char* inputDeviceLabel() {
 
 #endif
 
+// "openinput 2" and the like: the input has one instance on every backend.
+static const char* inputOpenCloseArgError(const String& argsInput, const char* usage) {
+  char* buf = ensureDebugBuffer() ? getDebugBuffer() : nullptr;
+  return i2cOpenCloseArgErrorText(I2C_DEVICE_INPUT, argsInput.c_str(), usage, buf, buf ? 1024 : 0);
+}
+
 static const char* cmd_openinput(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_INPUT, argsInput, "openinput")) return error;
+  if (const char* error = inputOpenCloseArgError(argsInput, "openinput")) return error;
 #if ENABLE_GPIO_ENCODER
   // gpioEncoderStart() reports a running encoder as Started; the command
   // answers it as a refusal.
@@ -490,7 +508,7 @@ static const char* cmd_openinput(const String& argsInput) {
 
 static const char* cmd_closeinput(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_INPUT, argsInput, "closeinput")) return error;
+  if (const char* error = inputOpenCloseArgError(argsInput, "closeinput")) return error;
   INFO_INPUT_LIFECYCLEF("cmd_closeinput: Stop requested");
 #if ENABLE_GPIO_ENCODER
   if (!gInputRunning) {

@@ -2437,7 +2437,7 @@ anoencoderi2caddr <0x49..0x50>  - Set the I2C address (applies at the next openi
 anoencoderinvert [on|off]       - Invert rotation direction
 anoencoderswapud [on|off|toggle]  - Swap UP/DOWN buttons
 anoencoderswaplr [on|off|toggle]  - Swap LEFT/RIGHT buttons
-inputbus <0|1>                  - The bus the input device is on (reboot required)
+inputbus <0|1>                  - The bus the input device is on (applies at the next openinput)
 ```
 
 ANO buttons on the OLED: the wheel scrolls up and down, IN is A (select), LEFT is B (back),

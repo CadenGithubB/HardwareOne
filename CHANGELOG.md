@@ -25,9 +25,11 @@ everything user-visible since the v0.99.99.1 tag.
 - A RIGHT tap is SELECT, sent when RIGHT is released; holding RIGHT and pressing IN is START only.
   RIGHT used to fire SELECT the moment it was pressed, so outside the menu every RIGHT press
   jumped to Quick Settings and the START chord always opened Quick Settings first (and the chord's
-  IN also counted as A). Owner decision 2026-11-22.
+  IN also counted as A). RIGHT is SELECT only: it no longer also moves right in the modes that read
+  a right step (one tap did two things there). Owner decision 2026-11-22.
 - Taps shorter than one poll (90 ms) are no longer lost: the poll reads the seesaw's change flags
-  and counts a button that was released at both reads with its flag set as one press.
+  and counts a button that was released at both reads with its flag set as one press. A press
+  that lands between the buttons read and the flags read is still counted once, not twice.
 - An unplugged or failing board is now seen: every read is checked (buttons, change flags, the
   wheel's delta), so the I2C health records and the auto-disable after repeated failures work,
   and a failed read no longer turns into phantom buttons or a burst of scroll steps.
@@ -63,8 +65,10 @@ everything user-visible since the v0.99.99.1 tag.
   `openimu 2` answers "Error: imu has one instance." (they ignored arguments).
 - A device counts as connected (command help, `sensors`, the ESP-NOW capability report) when the
   last bus scan found something at the bus and address this build uses for it, not when any
-  scanned device's name matched. The ESP-NOW report's `presence` flag looked at 0x61 and now
-  looks at the presence sensor's real address.
+  scanned device's name matched. The ESP-NOW manifest's `sensorStatus` flags follow it: true only
+  for a sensor this build has, found at its configured bus and address (before, a device at the
+  address counted whatever the build). Its `presence` flag looked at 0x61 and now looks at the
+  presence sensor's real address.
 
 ### Added (build configuration)
 - `xiao-status-sign`: a saved XIAO configuration for the meeting-room status sign. Two Adafruit

@@ -19,6 +19,7 @@
 #define ANO_BTN_ALL    (ANO_BTN_IN | ANO_BTN_UP | ANO_BTN_DOWN | ANO_BTN_LEFT | ANO_BTN_RIGHT)
 // Edge-only bits the poll makes (never in a level): START is the RIGHT+IN
 // chord (bit 16, as the gamepad's START), SELECT a RIGHT tap at its release.
+// RIGHT itself is never an edge: its only role is SELECT.
 #define ANO_VIRT_START  (1u << 16)
 #define ANO_VIRT_SELECT (1u << 17)
 
@@ -86,6 +87,7 @@ struct AnoPollState {
   bool rightDown = false; // RIGHT is held and its release decides SELECT
   bool chorded = false;   // IN was pressed while RIGHT was held (START sent)
   bool inMasked = false;  // the chord's IN is still held: hidden from the level
+  uint32_t tappedLast = 0; // the buttons counted as taps at the last good read
 };
 
 struct AnoPollResult {
@@ -94,6 +96,7 @@ struct AnoPollResult {
   uint32_t presses = 0;        // physical presses this poll, taps included (button events)
   uint32_t edges = 0;          // the presses the navigation sees (ANO_BTN_*, START, SELECT)
   uint32_t level = 0;          // the held buttons the navigation sees (no RIGHT, no chord IN)
+  uint32_t navHidden = 0;      // buttons & ~level: held, but not for the navigation
   int32_t rawDelta = 0;        // the chip's turns (the reading's position follows them)
   int32_t detents = 0;         // the turns as the navigation sees them (inverted on request)
 };
@@ -104,8 +107,22 @@ struct AnoPollResult {
 //   set was pressed and released between the reads: one press (a tap). A
 //   flag on a button held at either read is not a press (the flags mark
 //   every change, releases too).
+// - The reads race the switch: the buttons are read before the flags, and
+//   reading the flags clears them. A press that lands between the two reads
+//   shows released with its flag set (counted as a tap), and held at the next
+//   read with no flag. That held button is the same press, not a second one:
+//   a button counted as a tap at the last read and held now without a new
+//   flag is not pressed again. A flag at this read is a new change, so a real
+//   second press still counts. The same press released again before the
+//   next read shows released with its flag set (the release) at that read:
+//   a button counted as a tap at the last read is not a tap again at this
+//   one. Two real taps of one button in back-to-back windows (faster than
+//   about 11 a second at the 90 ms poll) count as one.
 // - RIGHT sends nothing when pressed. Released with no chord, it sends
-//   SELECT and RIGHT (a tap inside one window, too). IN pressed while RIGHT is
+//   SELECT only (a tap inside one window, too); RIGHT is no navigation
+//   direction. A RIGHT tap whose press runs on into the next read (the race
+//   above) already sent its SELECT: its release sends nothing, and IN pressed
+//   while it is held is still the chord. IN pressed while RIGHT is
 //   held is the chord: START only, never SELECT, never A (IN); that IN stays
 //   out of the level until it is released.
 // - All five switches pressed at once reads as a bus held low: not plausible,
@@ -123,20 +140,31 @@ inline AnoPollResult anoPoll(AnoPollState& state, const AnoPollReads& reads, boo
   if (!plausible) {
     out.buttons = state.buttons;
     out.level = state.buttons & ~ANO_BTN_RIGHT & ~(state.inMasked ? ANO_BTN_IN : 0u);
+    out.navHidden = state.buttons & ~out.level;
     return out;
   }
   out.buttonsValid = true;
   const uint32_t now = anoPinsToButtons(~reads.bulk & kAnoPinMask, swapUpDown, swapLeftRight);
   const uint32_t flagged = anoPinsToButtons(reads.intFlags & kAnoPinMask, swapUpDown, swapLeftRight);
   const uint32_t prev = state.buttons;
-  const uint32_t newly = now & ~prev;
-  const uint32_t taps = flagged & ~prev & ~now;
+  // Held now after a tap at the last read, with no change since: that tap's
+  // own press, already counted.
+  const uint32_t continued = now & ~prev & state.tappedLast & ~flagged;
+  const uint32_t newly = now & ~prev & ~continued;
+  const uint32_t taps = flagged & ~prev & ~now & ~state.tappedLast;
   out.presses = newly | taps;
+  state.tappedLast = taps;
 
   uint32_t edges = 0;
   if (newly & ANO_BTN_RIGHT) {
     state.rightDown = true;
     state.chorded = false;
+  }
+  if (continued & ANO_BTN_RIGHT) {
+    // Its SELECT went out with the tap: held on, it can still chord, and its
+    // release sends nothing more (chorded stands for "SELECT is not owed").
+    state.rightDown = true;
+    state.chorded = true;
   }
   const uint32_t inPress = (newly | taps) & ANO_BTN_IN;
   if (inPress && state.rightDown) {
@@ -147,9 +175,9 @@ inline AnoPollResult anoPoll(AnoPollState& state, const AnoPollReads& reads, boo
     edges |= inPress;
   }
   edges |= (newly | taps) & (ANO_BTN_UP | ANO_BTN_DOWN | ANO_BTN_LEFT);
-  if ((taps & ANO_BTN_RIGHT) && !state.rightDown) edges |= ANO_VIRT_SELECT | ANO_BTN_RIGHT;
+  if ((taps & ANO_BTN_RIGHT) && !state.rightDown) edges |= ANO_VIRT_SELECT;
   if (state.rightDown && !(now & ANO_BTN_RIGHT)) {
-    if (!state.chorded) edges |= ANO_VIRT_SELECT | ANO_BTN_RIGHT;
+    if (!state.chorded) edges |= ANO_VIRT_SELECT;
     state.rightDown = false;
     state.chorded = false;
   }
@@ -159,5 +187,6 @@ inline AnoPollResult anoPoll(AnoPollState& state, const AnoPollReads& reads, boo
   out.buttons = now;
   out.edges = edges;
   out.level = now & ~ANO_BTN_RIGHT & ~(state.inMasked ? ANO_BTN_IN : 0u);
+  out.navHidden = now & ~out.level;
   return out;
 }

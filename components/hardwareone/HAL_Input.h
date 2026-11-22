@@ -27,7 +27,18 @@ struct InputCache {
   bool dataValid = false;
   uint32_t seq = 0;
   uint32_t buttonPressedAccum = 0;  // Latched press edges — OR'd in by task, read+cleared by UI
+  // Held buttons the OLED navigation treats as released (active high, a
+  // subset of the pressed bits of `buttons`). `buttons` stays the physical
+  // state for every other reader (sensor log, G2 page); the navigation applies
+  // this mask itself (inputNavButtons). The ANO sets RIGHT (its role is the
+  // SELECT edge at release) and the IN of a RIGHT+IN chord while it is held
+  // (that IN is START, never A). Every other backend leaves it 0.
+  uint32_t navHidden = 0;
 };
+
+// The buttons as the OLED navigation sees them (active low like `buttons`):
+// the physical state with the navHidden buttons released.
+inline uint32_t inputNavButtons(const InputCache& c) { return c.buttons | c.navHidden; }
 
 // =============================================================================
 // Input Type Selection (compile-time default)

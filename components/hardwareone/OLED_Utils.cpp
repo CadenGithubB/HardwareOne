@@ -5994,7 +5994,7 @@ void updateInputState() {
   if (inputConsumeSnapshot(input)) {
     gCurrentJoyX = input.joyX;
     gCurrentJoyY = input.joyY;
-    gCurrentButtons = input.buttons;
+    gCurrentButtons = inputNavButtons(input);
     gHelperPressedAccum |= input.buttonPressedAccum;
     gInputStateValid = true;
   }
@@ -6193,7 +6193,7 @@ bool processOledInput() {
   const bool snapshotAvailable = inputCacheSnapshot(input);
   const bool dataValid = snapshotAvailable && input.dataValid;
   int joyX = input.joyX, joyY = input.joyY;
-  uint32_t buttons = input.buttons;
+  uint32_t buttons = inputNavButtons(input);
   uint32_t latchedPresses = input.buttonPressedAccum;
 
   if (!dataValid) {
@@ -6269,7 +6269,7 @@ bool processOledInput() {
   if (!inputConsumeSnapshot(input)) return false;
   // Pair the latch with the same raw sample so a newly arrived press is
   // delivered once, even if it arrived after the peek above.
-  buttons = input.buttons;
+  buttons = inputNavButtons(input);
   latchedPresses = input.buttonPressedAccum;
 
   // Reset auto-repeat state when mode changes to prevent stuck joystick
@@ -6359,15 +6359,15 @@ bool processOledInput() {
   // / auto-repeat directional input use the wheel; modes that want a single
   // nav step per press read the booleans here. The press also lands in
   // newlyPressed downstream, where INPUT_CHECK maps it to its logical
-  // INPUT_BUTTON_* role (LEFT=B, UP=Y, DOWN=X). RIGHT's edge comes at its
-  // release, together with SELECT (none after a RIGHT+IN chord).
+  // INPUT_BUTTON_* role (LEFT=B, UP=Y, DOWN=X). RIGHT is no direction: its
+  // only edge is SELECT at its release (none after a RIGHT+IN chord), so no
+  // right step comes from the ANO.
   {
-    uint32_t dpadEdge = latchedPresses & (ANO_BTN_UP | ANO_BTN_DOWN | ANO_BTN_LEFT | ANO_BTN_RIGHT);
+    uint32_t dpadEdge = latchedPresses & (ANO_BTN_UP | ANO_BTN_DOWN | ANO_BTN_LEFT);
     if (dpadEdge) {
       if (dpadEdge & ANO_BTN_UP)    gNavEvents.up    = true;
       if (dpadEdge & ANO_BTN_DOWN)  gNavEvents.down  = true;
       if (dpadEdge & ANO_BTN_LEFT)  gNavEvents.left  = true;
-      if (dpadEdge & ANO_BTN_RIGHT) gNavEvents.right = true;
       DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] dpad     edge=0x%02lX", (unsigned long)dpadEdge);
     }
   }

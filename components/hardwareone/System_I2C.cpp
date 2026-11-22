@@ -619,10 +619,8 @@ bool i2cSensorStartOutstanding(I2cDeviceType type, uint8_t n) {
 }
 
 const char* i2cOpenCloseArgError(I2cDeviceType type, const String& argsInput, const char* usage) {
-  const I2cInstanceArg arg = i2cParseInstanceArg(type, argsInput.c_str(), I2cInstanceForm::OpenClose);
-  if (arg.error == I2cInstanceError::None) return nullptr;
-  if (!ensureDebugBuffer()) return "Error: That device has one instance.";
-  return i2cInstanceErrorText(type, arg, usage, getDebugBuffer(), 1024);
+  char* buf = ensureDebugBuffer() ? getDebugBuffer() : nullptr;
+  return i2cOpenCloseArgErrorText(type, argsInput.c_str(), usage, buf, buf ? 1024 : 0);
 }
 
 bool enqueueDeviceStart(I2cDeviceType device, uint8_t n) {
@@ -1437,16 +1435,17 @@ const char* cmd_i2c2sclpin(const String& argsInput) {
 // RETURN_VALID_IF_VALIDATE_CSTR macro because that returns from its caller
 // — must stay at each cmd_* entry point.
 const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput, const char* settingName,
-                                     const I2cAddressOwner& owner) {
+                                     const I2cAddressOwner& owner, const char* applies) {
+  if (!applies) applies = "reboot required";
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) {
     if (ensureDebugBuffer()) {
-      snprintf(getDebugBuffer(), 1024, "Usage: %s <0..%d> (reboot required)",
-               settingName, (int)(I2cDeviceManager::NUM_BUSES - 1));
+      snprintf(getDebugBuffer(), 1024, "Usage: %s <0..%d> (%s)",
+               settingName, (int)(I2cDeviceManager::NUM_BUSES - 1), applies);
       return getDebugBuffer();
     }
-    return "Error: invalid arguments — Usage: <bus> (reboot required)";
+    return "Error: invalid arguments — Usage: <bus>";
   }
   int v = 0;
   if (!parseIntArg(valStr, v)) return kCommandReplyNotANumber;
@@ -1470,10 +1469,10 @@ const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput, const
   }
   setSetting(target, v);
   if (ensureDebugBuffer()) {
-    snprintf(getDebugBuffer(), 1024, "%s set to %d (reboot required)", settingName, v);
+    snprintf(getDebugBuffer(), 1024, "%s set to %d (%s)", settingName, v, applies);
     return getDebugBuffer();
   }
-  return "set (reboot required)";
+  return "set";
 }
 
 const char* cmd_oledbus(const String& a) {
@@ -1482,7 +1481,13 @@ const char* cmd_oledbus(const String& a) {
 }
 const char* cmd_inputbus(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+#if ENABLE_ANO_ENCODER
+  // The ANO takes its bus at openinput (i2csensor_ano_encoder.cpp).
+  return i2cSetDeviceBusAndReport(gSettings.inputBus, a, "inputBus", i2cInstanceOwner(I2C_DEVICE_INPUT, 1),
+                                  "applies at the next openinput");
+#else
   return i2cSetDeviceBusAndReport(gSettings.inputBus, a, "inputBus", i2cInstanceOwner(I2C_DEVICE_INPUT, 1));
+#endif
 }
 const char* cmd_fuelgaugebus(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -2913,7 +2918,7 @@ const CommandEntry i2cCommands[] = {
   // the driver instead of needing a guard here — same move the sensor-specific
   // I2C clock commands already made.
   { "oledbus",     "Route OLED to bus: <0|1> (reboot required)",         true, cmd_oledbus,     "Usage: oledBus <0|1>" },
-  { "inputbus",    "Route input device to bus: <0|1> (reboot required)",  true, cmd_inputbus,    "Usage: inputBus <0|1>" },
+  { "inputbus",    "Route input device to bus: <0|1> (reboot required; the ANO: next openinput)",  true, cmd_inputbus,    "Usage: inputBus <0|1>" },
   { "fuelgaugebus","Route MAX17048 fuel gauge to bus: <0|1> (reboot required)", true, cmd_fuelgaugebus, "Usage: fuelGaugeBus <0|1>" },
   // Note: Sensor-specific I2C clock commands (thermalI2cClockHz, tofI2cClockHz) are in their respective sensor modules
   
@@ -3842,7 +3847,7 @@ static const SettingEntry i2cSettingEntries[] = {
   // so their JSON identity — and therefore the persisted settings keys — is
   // unchanged.
   { "oledBus",     SETTING_INT, &gSettings.oledBus,     OLED_BUS_DEFAULT, 0, nullptr, 0, 1, "OLED bus (reboot required)",            "0|I2C1,1|I2C2", false, nullptr, "oledbus" },
-  { "inputBus",    SETTING_INT, &gSettings.inputBus,    0, 0, nullptr, 0, 1, "Input device bus (reboot required)",     "0|I2C1,1|I2C2", false, nullptr, "inputbus" },
+  { "inputBus",    SETTING_INT, &gSettings.inputBus,    0, 0, nullptr, 0, 1, "Input device bus (reboot required; the ANO: next openinput)",     "0|I2C1,1|I2C2", false, nullptr, "inputbus" },
 #if ENABLE_GPS_SENSOR
   { "gpsBus",      SETTING_INT, &gSettings.gpsBus,      0, 0, nullptr, 0, 1, "GPS bus (reboot required)",             "0|I2C1,1|I2C2", false, nullptr, "gpsbus" },
 #endif

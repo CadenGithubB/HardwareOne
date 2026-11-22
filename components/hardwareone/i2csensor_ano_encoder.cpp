@@ -626,12 +626,15 @@ void inputTask(void* parameter) {
           }
 
           // ----- Gamepad-shaped proxy for the OLED -----
-          // Active-low like the gamepad (~level): the navigation's level has no
-          // RIGHT (its SELECT comes at release) and no chord IN. The edges carry
-          // the presses, taps, START and SELECT. Joystick X/Y stay at CENTER:
-          // the wheel reaches the OLED as detents, not joystick math.
-          inputPublishState(~r.level, JOYSTICK_CENTER, JOYSTICK_CENTER, r.edges,
-                            r.edges != 0 || r.presses != 0 || r.detents != 0, nowMs);
+          // Active-low like the gamepad: the physical buttons (~buttons), so
+          // the sensor log and the G2 page see RIGHT and the chord's IN. The
+          // navigation hides r.navHidden itself (RIGHT, whose SELECT comes at
+          // release, and the chord's IN), published under the same lock. The
+          // edges carry the presses, taps, START and SELECT. Joystick X/Y stay
+          // at CENTER: the wheel reaches the OLED as detents, not joystick math.
+          inputPublishState(~r.buttons, JOYSTICK_CENTER, JOYSTICK_CENTER, r.edges,
+                            r.edges != 0 || r.presses != 0 || r.detents != 0, nowMs,
+                            r.navHidden);
         }
 
         if (!readOk) {

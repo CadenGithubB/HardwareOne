@@ -377,6 +377,29 @@ inline const char* i2cInstanceErrorText(I2cDeviceType t, const I2cInstanceArg& a
   return buf;
 }
 
+// The open/close argument check of a single-instance type ("openimu 2"):
+// nullptr when the argument is taken, else the error reply. The reply is
+// written to buf; without a buffer (out of memory) it is a fixed text chosen
+// from the error, so the reply still says why. Pure: callers without the I2C
+// system (the GPIO encoder's openinput) use it too.
+inline const char* i2cOpenCloseArgErrorText(I2cDeviceType t, const char* args, const char* usage,
+                                            char* buf, size_t len) {
+  const I2cInstanceArg arg = i2cParseInstanceArg(t, args ? args : "", I2cInstanceForm::OpenClose);
+  if (arg.error == I2cInstanceError::None) return nullptr;
+  if (buf && len > 0) {
+    i2cInstanceErrorText(t, arg, usage, buf, len);
+    if (buf[0]) return buf;
+  }
+  switch (arg.error) {
+    case I2cInstanceError::SingleInstance: return "Error: That device has one instance.";
+    case I2cInstanceError::OutOfRange: return "Error: That instance number is out of range.";
+    case I2cInstanceError::NotAnInstance: return "Error: That argument is not an instance number.";
+    case I2cInstanceError::TooMany: return "Error: That command takes at most one argument.";
+    case I2cInstanceError::None: break;
+  }
+  return "Error: That argument is not taken.";
+}
+
 // A setter's single token was not a valid value but names an instance:
 // "Error: '2' is not on or off. To set instance 2: encoderautostart 2 on".
 // `expected` says what the value should be ("on or off"), `example` is a valid
