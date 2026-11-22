@@ -680,6 +680,8 @@ const CommandEntry settingsCommands[] = {
   { "wifitxpower", "Set WiFi TX power: <dBm>", true, cmd_wifitxpower, "Usage: wifitxpower <2..21>" },
   { "wifiautoreconnect", "Keep hunting for the AP after an unexpected drop, and retry a failed boot connect (first hunt 60 s later, then 60 s, 120 s, every 300 s): <0|1>", true, cmd_wifiautoreconnect,
     "Usage: wifiautoreconnect <0|1>\n  Separate from wifiautostart: this is about recovering a dropped link, not connecting at boot." },
+  { "wifiexternalantenna", "Use the external u.FL antenna instead of the on-board one (boards with an RF switch, the FeatherS3[D]; reboot required): [0|1]", true, cmd_wifiexternalantenna,
+    "Usage: wifiexternalantenna [0|1]\n  No argument shows the saved choice. Takes effect at the next boot." },
   
   // ---- System Time Settings ----
   { "ntpserver", "Set NTP server: <hostname>", true, cmd_ntpserver, "Usage: ntpserver <host>" },

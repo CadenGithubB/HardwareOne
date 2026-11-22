@@ -217,6 +217,7 @@ class Catalogue(unittest.TestCase):
     # the configuration it describes (the owner decides which of them really lose a feature).
     SAVED_OPT_IN = {
         "p4-glasses-test": (0, 0, 0, 0, 0, 0),
+        "feathers3-status-sign": (1, 0, 0, 0, 0, 0),  # added 2026-11-22: HTTPS only
         "p4-home-node":    (0, 0, 0, 0, 0, 0),
         "p4-openclaw":     (0, 0, 1, 0, 0, 1),
         "p4-phone-pipe":   (0, 0, 1, 0, 0, 1),
