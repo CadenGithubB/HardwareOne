@@ -131,12 +131,25 @@ void bootDebugCaptureLine(const char* text, size_t len, bool shown, int64_t form
   const uint32_t ms = millis();
   char prefix[bootdebug::kPrefixMax + 1];
   const size_t plen = bootdebug::LineBuffer::formatPrefix(prefix, sizeof(prefix), ms);
+  bool full = false;
   portENTER_CRITICAL(&sLock);
   if (gBootDebugCapturing && sMem) {
     sBuf.appendPrefixed(prefix, plen, ms, text, len, !shown);
     sCaptureUs += static_cast<uint64_t>(esp_timer_get_time() - start);
+    full = sBuf.truncated();
   }
   portEXIT_CRITICAL(&sLock);
+  // A full buffer keeps nothing more: stop forcing, so the rest of the boot
+  // does not build and format every flag's lines only to count them. Lines
+  // the saved flags show are still counted (the truncation mark says so).
+  if (full) gDebugLineForce = gDebugVerbose;
+}
+
+bool bootDebugForceWanted() {
+  portENTER_CRITICAL(&sLock);
+  const bool wanted = gBootDebugCapturing && sMem && !sBuf.truncated();
+  portEXIT_CRITICAL(&sLock);
+  return wanted;
 }
 
 void bootDebugFinish() {

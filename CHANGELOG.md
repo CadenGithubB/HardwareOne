@@ -22,15 +22,16 @@ The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this se
 everything user-visible since the v0.99.99.1 tag.
 
 ### Added
-- Boot debug file (owner decision B13): every boot runs with every debug flag on until boot
-  finishes, into a 56 KB PSRAM buffer (4 KB of internal memory on a board without PSRAM) instead
+- Boot debug file (owner decision B13): every boot runs with every debug flag on and every log
+  level shown until boot finishes (or the buffer fills), into a 56 KB PSRAM buffer (4 KB of internal memory on a board without PSRAM) instead
   of the console or the normal logs; lines the saved flags would show still appear as usual. The
   saved flags (the defaults on a first boot) apply again after boot. The buffer is saved as
   `/system/sys_logs/boot-debug-1.log`, keeping the last three boots (`-2`, `-3`), with a header
   that records the capture's start and end uptime, the bytes kept and dropped and the CPU time
   spent capturing, and a `[TRUNCATED]` line when the buffer filled. Admin-only to read
-  (`fileview`, web file browser). P4X-EYE: the C6 console mirror now runs during every boot and
-  stops when boot finishes unless `c6console on` or a companion fault keeps it.
+  (`fileview`, web file browser). P4X-EYE: the C6 console mirror now runs during every boot, with
+  the C6's boot messages shown at INFO, and stops when boot finishes unless `c6console on` or a
+  companion fault keeps it.
 - The LED commands take the light as an optional first word: `ledcolor [target] <colour>`,
   `ledeffect [target] <effect> ...`, `ledbrightness [target] <0..100>` (admin, saved per light),
   `ledclear [target]`, with the targets `onboard` (the board's NeoPixel), `encoder` (every pixel of

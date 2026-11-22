@@ -975,12 +975,12 @@ static bool enqueueChunk(const char* text, size_t len, uint8_t routing,
   return true;
 }
 
-// The line path of both entry points. `shownWithoutCapture` matters only
-// during the boot debug capture (System_BootDebug.h): the saved flags (and log
-// level, for a DEBUG line) would have shown this line. Every line of the boot
+// The line path of every entry point. `shownWithoutCapture` matters only
+// during the boot debug capture (System_BootDebug.h): the saved flags and log
+// level would have shown this line. Every line of the boot
 // is copied into the boot buffer; a line only the capture's force made goes
 // nowhere else, so the console and the normal logs see what they always saw.
-// Inlined into both, so a line costs the stack one frame, as before.
+// Inlined into each, so a line costs the stack one frame, as before.
 static inline __attribute__((always_inline)) void debugQueueVPrintf(DebugFlagMask flag, bool shownWithoutCapture,
                                                                     const char* fmt, va_list args) {
   if (!fmt) return;
@@ -993,6 +993,10 @@ static inline __attribute__((always_inline)) void debugQueueVPrintf(DebugFlagMas
   if (currentTask == gImuTaskHandle && !gImuRunning) return;
   if (currentTask == gTofTaskHandle && !gTofRunning) return;
   if (currentTask == gFmRadioTaskHandle && !gFmRadioRunning) return;
+
+  // A forced line that passed its gate just before the full buffer stopped
+  // the force: nothing would keep it, so it is not formatted.
+  if (capturing && !shownWithoutCapture && !gDebugLineForce) return;
 
   // Format into a stack line, then hand to the shared enqueue primitive
   // (ISR-safe; centralizes slot grab / send / drop + [CUT]). There is no split
@@ -1012,10 +1016,17 @@ static inline __attribute__((always_inline)) void debugQueueVPrintf(DebugFlagMas
   enqueueChunk(line, llen, MSG_ROUTE_ALL, flag, wn >= (int)DEBUG_MSG_SIZE);
 }
 
-// DEBUGF_QUEUE and the INFO/WARN/ERROR macros: shown by the flag (or ALWAYS).
+// Whether the saved flags and log level (or debugverbose) would show a line
+// of this flag at this level; always true outside the boot capture.
+static inline bool lineShownWithoutCapture(DebugFlagMask flag, uint8_t level) {
+  return !gBootDebugCapturing || gDebugVerbose ||
+         (gLogLevel >= level &&
+          ((flag & DEBUG_ALWAYS) != (DebugFlagMask)0 || (gDebugFlags & flag) != (DebugFlagMask)0));
+}
+
+// DEBUGF_QUEUE and the ERROR macros: shown by the flag (or ALWAYS).
 void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...) {
-  const bool shown = !gBootDebugCapturing || gDebugVerbose ||
-                     (flag & DEBUG_ALWAYS) != (DebugFlagMask)0 || (gDebugFlags & flag) != (DebugFlagMask)0;
+  const bool shown = lineShownWithoutCapture(flag, LOG_LEVEL_ERROR);
   va_list args;
   va_start(args, fmt);
   debugQueueVPrintf(flag, shown, fmt, args);
@@ -1024,9 +1035,16 @@ void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...) {
 
 // DEBUGF_QUEUE_DEBUG: shown by the flag and the DEBUG log level.
 void debugQueuePrintfDebug(DebugFlagMask flag, const char* fmt, ...) {
-  const bool shown = !gBootDebugCapturing || gDebugVerbose ||
-                     (gLogLevel >= LOG_LEVEL_DEBUG &&
-                      ((flag & DEBUG_ALWAYS) != (DebugFlagMask)0 || (gDebugFlags & flag) != (DebugFlagMask)0));
+  const bool shown = lineShownWithoutCapture(flag, LOG_LEVEL_DEBUG);
+  va_list args;
+  va_start(args, fmt);
+  debugQueueVPrintf(flag, shown, fmt, args);
+  va_end(args);
+}
+
+// DEBUGF_QUEUE_LEVEL (the INFO and WARN macros): shown by the flag and `level`.
+void debugQueuePrintfLevel(DebugFlagMask flag, uint8_t level, const char* fmt, ...) {
+  const bool shown = lineShownWithoutCapture(flag, level);
   va_list args;
   va_start(args, fmt);
   debugQueueVPrintf(flag, shown, fmt, args);
@@ -1736,7 +1754,7 @@ const char* cmd_debugverbose(const String& argsInput) {
   const int v = parseBoolArg(ca.arg(0));
   if (v < 0) return kCommandReplyNotOnOff;
   gDebugVerbose = (v == 1);
-  gDebugLineForce = gDebugVerbose || gBootDebugCapturing;
+  gDebugLineForce = gDebugVerbose || bootDebugForceWanted();
   applyRadioStackLogLevels();  // verbose shows the radio stacks' routine lines too
   return gDebugVerbose ? "debugVerbose enabled" : "debugVerbose disabled";
 }

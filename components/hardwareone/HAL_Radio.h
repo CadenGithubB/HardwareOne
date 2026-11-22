@@ -108,8 +108,9 @@ inline RadioHalBackend radioHalBackend() { return RadioHalBackend::Hosted; }
 // of attempts, each of which resets the companion), fetches its identity and
 // probes the bridge. Never fatal: on failure the application boots with the
 // radio offline and System_RadioCompanion retries in the background.
-// The companion's console mirror is started first, for the boot (B13): the
-// companion's own boot messages are seen, and System_RadioCompanion stops it
+// The companion's console mirror is started first, for the boot (B13), with
+// C6> at INFO until applySettings sets the saved levels: the companion's own
+// boot messages are seen, and System_RadioCompanion stops it
 // when boot ends unless `c6console on` or a fault wants it.
 esp_err_t radioHalPrepare();
 bool radioHalPrepared();

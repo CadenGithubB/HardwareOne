@@ -73,9 +73,9 @@ constexpr gpio_num_t kC6UartTx = static_cast<gpio_num_t>(RADIO_C6_UART_TX_PIN);
 // backtraces while HardwareOne drives it (the programmer service is the
 // alternative, and it replaces the application). It costs internal SRAM (the
 // 2048 B UART buffer, the 4096 B task stack and the driver's own objects), so
-// it is not started at every boot: radioHalPrepare starts it once a boot
-// attempt has failed, and System_RadioCompanion starts it after a companion
-// fault or when `c6console on` is saved, and stops it again.
+// it runs only for the boot (radioHalPrepare starts it, B13) and then when
+// System_RadioCompanion starts it after a companion fault or when
+// `c6console on` is saved, and stops it again.
 #if defined(RADIO_C6_UART_TX_PIN)
 constexpr uart_port_t kConsoleUart = UART_NUM_1;
 TaskHandle_t sConsoleTask = nullptr;
@@ -442,6 +442,13 @@ esp_err_t radioHalPrepare() {
   // The mirror runs for the boot (owner decision B13): the companion's own
   // boot messages are seen on every boot, and System_RadioCompanion stops it
   // when setup() ends unless `c6console on` or a fault wants it. Not fatal.
+  // quietHostedLogs left C6> at ERROR, which would drop the C6's ROM,
+  // bootloader and app I lines, so C6> shows INFO for the companion's boot
+  // here; applySettings (applyRadioStackLogLevels) sets it from the saved
+  // flags and esplog levels once the settings have loaded.
+#if defined(RADIO_C6_UART_TX_PIN)
+  esp_log_level_set(radiolog::kC6ConsoleTag, static_cast<esp_log_level_t>(radiolog::kInfo));
+#endif
   radioHalConsoleMirror(true);
   esp_err_t err = ESP_FAIL;
   for (int attempt = 1; attempt <= kBootAttempts; attempt++) {

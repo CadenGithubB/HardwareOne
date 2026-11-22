@@ -14,7 +14,8 @@
 // The buffer keeps the FIRST lines of the boot: once a line does not fit, it
 // and every later line are counted, not kept, so the file is one unbroken
 // stretch from the start of boot plus a truncation mark that says how much
-// was left out.
+// was left out. The force stops when the buffer fills (System_BootDebug.cpp),
+// so after that only the lines the saved flags show are made and counted.
 #ifndef SYSTEM_BOOT_DEBUG_CORE_H
 #define SYSTEM_BOOT_DEBUG_CORE_H
 
@@ -128,7 +129,7 @@ struct BootInfo {
 };
 
 // The header: '#' lines a reader can grep. Returns the length written (the
-// text is cut to outSize - 1 like snprintf; 512 bytes always hold it).
+// text is cut to outSize - 1 like snprintf; 768 bytes always hold it).
 inline size_t formatHeader(char* out, size_t outSize, const BootInfo& info, const LineBuffer& buf) {
   if (!out || outSize == 0) return 0;
   const unsigned long bootMs = info.endMs >= info.startMs ? static_cast<unsigned long>(info.endMs - info.startMs) : 0UL;
@@ -139,7 +140,8 @@ inline size_t formatHeader(char* out, size_t outSize, const BootInfo& info, cons
                    "# buffer: %lu B in %s, %lu B used\n"
                    "# lines: %lu kept (%lu shown only because of the boot capture), %lu dropped\n"
                    "# output: %lu B in all (%lu B kept, %lu B dropped)\n"
-                   "# capture cost: %llu us of CPU in the capture path (formatting the forced lines, copying every line)\n",
+                   "# capture cost: %llu us of CPU in the capture path (formatting the forced lines, copying every line;\n"
+                   "#   not the callers' own work building a forced line's arguments)\n",
                    static_cast<unsigned long>(info.bootNumber), info.resetReason ? info.resetReason : "unknown",
                    static_cast<unsigned long>(info.startMs), static_cast<unsigned long>(info.endMs), bootMs,
                    static_cast<unsigned long>(buf.capacity()), info.psram ? "PSRAM" : "internal RAM",
@@ -163,7 +165,8 @@ inline size_t formatTruncationMark(char* out, size_t outSize, const LineBuffer& 
   out[0] = '\0';
   if (!buf.truncated()) return 0;
   const int n = snprintf(out, outSize,
-                         "[TRUNCATED] %lu more line(s), %lu B, did not fit in the %lu B buffer (full at %lu ms)\n",
+                         "[TRUNCATED] %lu more line(s), %lu B, did not fit in the %lu B buffer (full at %lu ms); "
+                         "later lines counted only where the saved flags show them\n",
                          static_cast<unsigned long>(buf.droppedLines()), static_cast<unsigned long>(buf.droppedBytes()),
                          static_cast<unsigned long>(buf.capacity()), static_cast<unsigned long>(buf.fullAtMs()));
   if (n < 0) return 0;

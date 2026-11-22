@@ -12,7 +12,9 @@
 // the previous two boots moving to -2 and -3 (admin-only to read, like every
 // file there: `fileview "/system/sys_logs/boot-debug-1.log"` or the web file
 // browser). The file's header records the capture's start and end uptime, the
-// bytes kept and dropped, and the CPU time spent in the capture path.
+// bytes kept and dropped, and the CPU time spent in the capture path. When the
+// buffer fills the force stops early (nothing more would be kept), and the
+// rest of the boot counts only the lines the saved flags show.
 //
 // Also the boot window for the C6 console mirror (System_RadioCompanion.cpp):
 // on during boot, off when boot ends unless `c6console on` or a fault wants it.
@@ -35,6 +37,9 @@ void bootDebugFinish();
 // Main loop: retries the file write's hand-off when the executor queue was
 // full at the end of setup. One flag read otherwise.
 void bootDebugLoopTick();
+// True while the capture still wants every line forced: capturing, and the
+// buffer has not filled (the force stops when it fills). For debugverbose off.
+bool bootDebugForceWanted();
 // True until bootDebugFinish() ran (also on a board whose buffer could not be
 // allocated): the C6 console mirror's boot window.
 bool bootDebugInProgress();

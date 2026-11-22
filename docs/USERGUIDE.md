@@ -1257,20 +1257,25 @@ Available debug modules (type `help debug` on device for full list):
 
 ### Boot debug file
 
-Every boot runs with every debug flag on, from the start of setup until boot
-finishes; the saved flags are not changed and apply again once boot has
-finished (the defaults on a first boot). The debug lines of the boot go to a
+Every boot runs with every debug flag on and every log level shown (the
+DEBUG, INFO and WARN lines included, whatever `loglevel` is saved), from the
+start of setup until boot finishes; the saved flags and log level are not
+changed and apply again once boot has finished (the defaults on a first
+boot). The debug lines of the boot go to a
 buffer, not to the console or the normal logs: a line your saved flags would
 show still appears as usual, the rest only in the buffer. When boot finishes
 the buffer is saved as `/system/sys_logs/boot-debug-1.log`; the two boots
 before it move to `boot-debug-2.log` and `boot-debug-3.log`. The buffer is
 56 KB in PSRAM (4 KB of internal memory on a board without PSRAM, freed after
 the save); a boot that writes more keeps its first lines and ends the file with
-a `[TRUNCATED]` line saying how much was left out.
+a `[TRUNCATED]` line saying how much was left out. Once the buffer is full the
+forcing stops for the rest of that boot (nothing more could be kept), so the
+`[TRUNCATED]` count covers only the lines your saved flags show.
 
 The file starts with `#` lines: the boot number and reset reason, the uptime at
 the start and end of the capture, the bytes kept and dropped, and the CPU time
-spent in the capture. Read it as an administrator with
+spent in the capture (formatting and copying; the work of building each
+forced line's values is not included). Read it as an administrator with
 `fileview "/system/sys_logs/boot-debug-1.log"` (one page at a time) or in the
 web file browser. `system-events.log` records each save (size and time taken).
 

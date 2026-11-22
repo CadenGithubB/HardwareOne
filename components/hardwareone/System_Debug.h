@@ -304,7 +304,7 @@ extern volatile unsigned long gDebugDropped;
 extern volatile bool gDebugVerbose;
 // Every debug line passes its flag and level gate: debugverbose, or the boot
 // debug capture (System_BootDebug.h) from the top of setup() until setup()
-// ends. Read by the line macros only; isDebugFlagSet() and getLogLevel() keep
+// ends or the boot buffer fills. Read by the line macros only; isDebugFlagSet() and getLogLevel() keep
 // answering for the saved flags (plus debugverbose), so code that acts on a
 // flag (the ESP-IDF tag levels, for one) is not changed by the boot capture.
 extern volatile bool gDebugLineForce;
@@ -457,6 +457,7 @@ void deliverCommandResult(const String& result, const CommandContext& ctx);
 
 void debugQueuePrintf(DebugFlagMask flag, const char* fmt, ...);
 void debugQueuePrintfDebug(DebugFlagMask flag, const char* fmt, ...);
+void debugQueuePrintfLevel(DebugFlagMask flag, uint8_t level, const char* fmt, ...);
 
 // Print summary (and tail) of output suppressed during help; resets counters
 void helpSuppressedPrintAndReset();
@@ -516,6 +517,19 @@ inline bool isDebugOutputEnabled(DebugFlagMask flag) {
   do { \
     if (isDebugOutputEnabled(flag)) { \
       debugQueuePrintfDebug(flag, fmt, ##__VA_ARGS__); \
+    } \
+  } while (0)
+
+// The INFO_ and WARN_ macros: shown by the log level and the flag (or
+// ALWAYS). gDebugLineForce passes the level too, so the boot capture holds
+// the boot's INFO and WARN lines whatever the saved log level;
+// debugQueuePrintfLevel knows the level, so a line the saved level would
+// filter goes only to the boot buffer.
+#define DEBUGF_QUEUE_LEVEL(level, flag, fmt, ...) \
+  do { \
+    if (gDebugLineForce || \
+        (getLogLevel() >= (level) && (((flag) & DEBUG_ALWAYS) != (DebugFlagMask)0 || debugLineGate(flag)))) { \
+      debugQueuePrintfLevel(flag, level, fmt, ##__VA_ARGS__); \
     } \
   } while (0)
 
@@ -699,47 +713,47 @@ inline bool isDebugOutputEnabled(DebugFlagMask flag) {
 #define ERROR_MQTTF(fmt, ...)         DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_MQTT,         "[ERROR][MQTT] "      fmt, ##__VA_ARGS__)
 
 // WARN macros - Always visible (cannot be disabled)
-#define WARN_I2CF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_I2C, "[WARN][I2C] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_ESPNOWF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_ESPNOW_CORE, "[WARN][ESP-NOW] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_AUTOMATIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_AUTOMATIONS, "[WARN][AUTO] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_SESSIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_AUTH, "[WARN][SESSION] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_USERF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_USERS, "[WARN][USER] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_LOGGINGF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_LOGGER, "[WARN][LOG] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_RINGF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_RING, "[WARN][RING] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_WEBF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_HTTP, "[WARN][WEB] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_COMMANDF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_CLI, "[WARN][CMD] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_SYSTEMF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_SYSTEM, "[WARN][SYS] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_STORAGEF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_STORAGE, "[WARN][STORAGE] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_WIFIF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_WIFI, "[WARN][WIFI] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_MEMORYF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_MEMORY, "[WARN][MEM] " fmt, ##__VA_ARGS__); } while (0)
+#define WARN_I2CF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_I2C, "[WARN][I2C] " fmt, ##__VA_ARGS__)
+#define WARN_ESPNOWF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_ESPNOW_CORE, "[WARN][ESP-NOW] " fmt, ##__VA_ARGS__)
+#define WARN_AUTOMATIONF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_AUTOMATIONS, "[WARN][AUTO] " fmt, ##__VA_ARGS__)
+#define WARN_SESSIONF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_AUTH, "[WARN][SESSION] " fmt, ##__VA_ARGS__)
+#define WARN_USERF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_USERS, "[WARN][USER] " fmt, ##__VA_ARGS__)
+#define WARN_LOGGINGF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_LOGGER, "[WARN][LOG] " fmt, ##__VA_ARGS__)
+#define WARN_RINGF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_RING, "[WARN][RING] " fmt, ##__VA_ARGS__)
+#define WARN_WEBF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_HTTP, "[WARN][WEB] " fmt, ##__VA_ARGS__)
+#define WARN_COMMANDF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_CLI, "[WARN][CMD] " fmt, ##__VA_ARGS__)
+#define WARN_SYSTEMF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_SYSTEM, "[WARN][SYS] " fmt, ##__VA_ARGS__)
+#define WARN_STORAGEF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_STORAGE, "[WARN][STORAGE] " fmt, ##__VA_ARGS__)
+#define WARN_WIFIF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_WIFI, "[WARN][WIFI] " fmt, ##__VA_ARGS__)
+#define WARN_MEMORYF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_MEMORY, "[WARN][MEM] " fmt, ##__VA_ARGS__)
 // Per-sensor WARN macros — added during DEBUG_SENSORS umbrella removal.
 // Only added for subsystems that actually use WARN_SENSORSF today.
-#define WARN_INPUTF(fmt, ...)        do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_INPUT,        "[WARN][INPUT] "  fmt, ##__VA_ARGS__); } while (0)
-#define WARN_ANO_ENCODERF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_ANO_ENCODER,  "[WARN][ANO] "    fmt, ##__VA_ARGS__); } while (0)
-#define WARN_MAPSF(fmt, ...)         do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_MAPS,         "[WARN][MAPS] "   fmt, ##__VA_ARGS__); } while (0)
-#define WARN_IMUF(fmt, ...)          do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_IMU,          "[WARN][IMU] "    fmt, ##__VA_ARGS__); } while (0)
-#define WARN_MQTTF(fmt, ...)         do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_MQTT,         "[WARN][MQTT] "   fmt, ##__VA_ARGS__); } while (0)
-#define WARN_BLUETOOTHF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_BLUETOOTH,    "[WARN][BT] "     fmt, ##__VA_ARGS__); } while (0)
+#define WARN_INPUTF(fmt, ...)        DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_INPUT,        "[WARN][INPUT] "  fmt, ##__VA_ARGS__)
+#define WARN_ANO_ENCODERF(fmt, ...)  DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_ANO_ENCODER,  "[WARN][ANO] "    fmt, ##__VA_ARGS__)
+#define WARN_MAPSF(fmt, ...)         DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_MAPS,         "[WARN][MAPS] "   fmt, ##__VA_ARGS__)
+#define WARN_IMUF(fmt, ...)          DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_IMU,          "[WARN][IMU] "    fmt, ##__VA_ARGS__)
+#define WARN_MQTTF(fmt, ...)         DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_MQTT,         "[WARN][MQTT] "   fmt, ##__VA_ARGS__)
+#define WARN_BLUETOOTHF(fmt, ...)    DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_BLUETOOTH,    "[WARN][BT] "     fmt, ##__VA_ARGS__)
 
 // INFO macros - Optional (controlled by debug flags)
-#define INFO_CAMERAF(fmt, ...)       do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_CAMERA | DEBUG_CAMERA_LIFECYCLE, "[INFO][CAMERA] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_CAMERA_VIDEOF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_CAMERA | DEBUG_CAMERA_VIDEO,     "[INFO][VIDEO] "  fmt, ##__VA_ARGS__); } while (0)
+#define INFO_CAMERAF(fmt, ...)       DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_CAMERA | DEBUG_CAMERA_LIFECYCLE, "[INFO][CAMERA] " fmt, ##__VA_ARGS__)
+#define INFO_CAMERA_VIDEOF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_CAMERA | DEBUG_CAMERA_VIDEO,     "[INFO][VIDEO] "  fmt, ##__VA_ARGS__)
 // Per-sensor INFO macros — added during DEBUG_SENSORS umbrella removal.
 // Each gates on its own per-sensor flag so the sensor's UI toggle actually
 // controls its INFO output (previously these all funneled through DEBUG_SENSORS).
-#define INFO_THERMALF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_THERMAL,    "[INFO][THERMAL] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_TOFF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_TOF,        "[INFO][TOF] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_IMUF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_IMU,        "[INFO][IMU] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_RINGF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_RING, "[INFO][RING] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_INPUTF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_INPUT,    "[INFO][INPUT] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_ANO_ENCODERF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ANO_ENCODER, "[INFO][ANO] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_APDSF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_APDS,       "[INFO][APDS] "     fmt, ##__VA_ARGS__); } while (0)
-#define INFO_PRESENCEF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_PRESENCE,   "[INFO][PRESENCE] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_GPSF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_GPS,        "[INFO][GPS] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_RTCF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_RTC,        "[INFO][RTC] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_FMRADIOF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_FMRADIO,    "[INFO][FMRADIO] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_MAPSF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MAPS,       "[INFO][MAPS] "     fmt, ##__VA_ARGS__); } while (0)
-#define INFO_MICF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MICROPHONE, "[INFO][MIC] "      fmt, ##__VA_ARGS__); } while (0)
+#define INFO_THERMALF(fmt, ...)  DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_THERMAL,    "[INFO][THERMAL] "  fmt, ##__VA_ARGS__)
+#define INFO_TOFF(fmt, ...)      DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_TOF,        "[INFO][TOF] "      fmt, ##__VA_ARGS__)
+#define INFO_IMUF(fmt, ...)      DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_IMU,        "[INFO][IMU] "      fmt, ##__VA_ARGS__)
+#define INFO_RINGF(fmt, ...)     DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_ALWAYS | DEBUG_RING, "[INFO][RING] " fmt, ##__VA_ARGS__)
+#define INFO_INPUTF(fmt, ...)  DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_INPUT,    "[INFO][INPUT] "  fmt, ##__VA_ARGS__)
+#define INFO_ANO_ENCODERF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_ANO_ENCODER, "[INFO][ANO] " fmt, ##__VA_ARGS__)
+#define INFO_APDSF(fmt, ...)     DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_APDS,       "[INFO][APDS] "     fmt, ##__VA_ARGS__)
+#define INFO_PRESENCEF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_PRESENCE,   "[INFO][PRESENCE] " fmt, ##__VA_ARGS__)
+#define INFO_GPSF(fmt, ...)      DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_GPS,        "[INFO][GPS] "      fmt, ##__VA_ARGS__)
+#define INFO_RTCF(fmt, ...)      DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_RTC,        "[INFO][RTC] "      fmt, ##__VA_ARGS__)
+#define INFO_FMRADIOF(fmt, ...)  DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_FMRADIO,    "[INFO][FMRADIO] "  fmt, ##__VA_ARGS__)
+#define INFO_MAPSF(fmt, ...)     DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_MAPS,       "[INFO][MAPS] "     fmt, ##__VA_ARGS__)
+#define INFO_MICF(fmt, ...)      DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_MICROPHONE, "[INFO][MIC] "      fmt, ##__VA_ARGS__)
 // Per-sensor INFO sub-flag macros (Option β). Mirror the DEBUG_*_LIFECYCLEF /
 // _POLLINGF / _VALUESF sub-flag-aware variants but at INFO severity. Each gates
 // on (parent_flag | sub_flag) so the user can:
@@ -747,61 +761,61 @@ inline bool isDebugOutputEnabled(DebugFlagMask flag) {
 //   - enable just the sub-flag ("GPS Lifecycle") → see only LIFE-tagged INFO
 // Tag uses short suffix (LIFE / POLL / VAL) to keep log columns tight, matching
 // the existing MQTT/I2C INFO sub-flag tag style (e.g. [INFO][MQTT_CONN]).
-#define INFO_THERMAL_LIFECYCLEF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_THERMAL    | DEBUG_THERMAL_LIFECYCLE,  "[INFO][THERMAL_LIFE] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_THERMAL_POLLINGF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_THERMAL    | DEBUG_THERMAL_POLLING,    "[INFO][THERMAL_POLL] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_THERMAL_VALUESF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_THERMAL    | DEBUG_THERMAL_VALUES,     "[INFO][THERMAL_VAL] "   fmt, ##__VA_ARGS__); } while (0)
-#define INFO_TOF_LIFECYCLEF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_TOF        | DEBUG_TOF_LIFECYCLE,      "[INFO][TOF_LIFE] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_TOF_POLLINGF(fmt, ...)        do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_TOF        | DEBUG_TOF_POLLING,        "[INFO][TOF_POLL] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_TOF_VALUESF(fmt, ...)         do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_TOF        | DEBUG_TOF_VALUES,         "[INFO][TOF_VAL] "       fmt, ##__VA_ARGS__); } while (0)
-#define INFO_IMU_LIFECYCLEF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_IMU        | DEBUG_IMU_LIFECYCLE,      "[INFO][IMU_LIFE] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_IMU_POLLINGF(fmt, ...)        do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_IMU        | DEBUG_IMU_POLLING,        "[INFO][IMU_POLL] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_IMU_VALUESF(fmt, ...)         do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_IMU        | DEBUG_IMU_VALUES,         "[INFO][IMU_VAL] "       fmt, ##__VA_ARGS__); } while (0)
-#define INFO_INPUT_LIFECYCLEF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_INPUT    | DEBUG_INPUT_LIFECYCLE,  "[INFO][INPUT_LIFE] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_INPUT_POLLINGF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_INPUT    | DEBUG_INPUT_POLLING,    "[INFO][INPUT_POLL] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_INPUT_VALUESF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_INPUT    | DEBUG_INPUT_VALUES,     "[INFO][INPUT_VAL] "   fmt, ##__VA_ARGS__); } while (0)
-#define INFO_ANO_ENCODER_LIFECYCLEF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ANO_ENCODER | DEBUG_ANO_ENCODER_LIFECYCLE, "[INFO][ANO_LIFE] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_ANO_ENCODER_POLLINGF(fmt, ...)   do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ANO_ENCODER | DEBUG_ANO_ENCODER_POLLING,   "[INFO][ANO_POLL] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_ANO_ENCODER_VALUESF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ANO_ENCODER | DEBUG_ANO_ENCODER_VALUES,    "[INFO][ANO_VAL] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_APDS_LIFECYCLEF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_APDS       | DEBUG_APDS_LIFECYCLE,     "[INFO][APDS_LIFE] "     fmt, ##__VA_ARGS__); } while (0)
-#define INFO_APDS_POLLINGF(fmt, ...)       do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_APDS       | DEBUG_APDS_POLLING,       "[INFO][APDS_POLL] "     fmt, ##__VA_ARGS__); } while (0)
-#define INFO_APDS_VALUESF(fmt, ...)        do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_APDS       | DEBUG_APDS_VALUES,        "[INFO][APDS_VAL] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_PRESENCE_LIFECYCLEF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_PRESENCE   | DEBUG_PRESENCE_LIFECYCLE, "[INFO][PRESENCE_LIFE] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_PRESENCE_POLLINGF(fmt, ...)   do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_PRESENCE   | DEBUG_PRESENCE_POLLING,   "[INFO][PRESENCE_POLL] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_PRESENCE_VALUESF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_PRESENCE   | DEBUG_PRESENCE_VALUES,    "[INFO][PRESENCE_VAL] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_GPS_LIFECYCLEF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_GPS        | DEBUG_GPS_LIFECYCLE,      "[INFO][GPS_LIFE] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_GPS_POLLINGF(fmt, ...)        do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_GPS        | DEBUG_GPS_POLLING,        "[INFO][GPS_POLL] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_GPS_VALUESF(fmt, ...)         do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_GPS        | DEBUG_GPS_VALUES,         "[INFO][GPS_VAL] "       fmt, ##__VA_ARGS__); } while (0)
-#define INFO_RTC_LIFECYCLEF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_RTC        | DEBUG_RTC_LIFECYCLE,      "[INFO][RTC_LIFE] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_RTC_POLLINGF(fmt, ...)        do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_RTC        | DEBUG_RTC_POLLING,        "[INFO][RTC_POLL] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_RTC_VALUESF(fmt, ...)         do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_RTC        | DEBUG_RTC_VALUES,         "[INFO][RTC_VAL] "       fmt, ##__VA_ARGS__); } while (0)
-#define INFO_FMRADIO_LIFECYCLEF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_FMRADIO    | DEBUG_FMRADIO_LIFECYCLE,  "[INFO][FMRADIO_LIFE] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_FMRADIO_POLLINGF(fmt, ...)    do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_FMRADIO    | DEBUG_FMRADIO_POLLING,    "[INFO][FMRADIO_POLL] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_FMRADIO_VALUESF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_FMRADIO    | DEBUG_FMRADIO_VALUES,     "[INFO][FMRADIO_VAL] "   fmt, ##__VA_ARGS__); } while (0)
-#define INFO_MIC_LIFECYCLEF(fmt, ...)      do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MICROPHONE | DEBUG_MIC_LIFECYCLE,      "[INFO][MIC_LIFE] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_MIC_POLLINGF(fmt, ...)        do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MICROPHONE | DEBUG_MIC_POLLING,        "[INFO][MIC_POLL] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_MIC_VALUESF(fmt, ...)         do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MICROPHONE | DEBUG_MIC_VALUES,         "[INFO][MIC_VAL] "       fmt, ##__VA_ARGS__); } while (0)
-#define INFO_DISPLAYF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_DISPLAY,    "[INFO][DISPLAY] "  fmt, ##__VA_ARGS__); } while (0)
-#define INFO_I2CF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_I2C, "[INFO][I2C] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_I2C_BUSF(fmt, ...)       do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_I2C | DEBUG_I2C_BUS,       "[INFO][I2C_BUS] "       fmt, ##__VA_ARGS__); } while (0)
-#define INFO_I2C_DISCOVERYF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_I2C | DEBUG_I2C_DISCOVERY, "[INFO][I2C_DISCOVERY] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_I2C_AUTOSTARTF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_I2C | DEBUG_I2C_AUTOSTART, "[INFO][I2C_AUTOSTART] " fmt, ##__VA_ARGS__); } while (0)
+#define INFO_THERMAL_LIFECYCLEF(fmt, ...)  DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_THERMAL    | DEBUG_THERMAL_LIFECYCLE,  "[INFO][THERMAL_LIFE] "  fmt, ##__VA_ARGS__)
+#define INFO_THERMAL_POLLINGF(fmt, ...)    DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_THERMAL    | DEBUG_THERMAL_POLLING,    "[INFO][THERMAL_POLL] "  fmt, ##__VA_ARGS__)
+#define INFO_THERMAL_VALUESF(fmt, ...)     DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_THERMAL    | DEBUG_THERMAL_VALUES,     "[INFO][THERMAL_VAL] "   fmt, ##__VA_ARGS__)
+#define INFO_TOF_LIFECYCLEF(fmt, ...)      DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_TOF        | DEBUG_TOF_LIFECYCLE,      "[INFO][TOF_LIFE] "      fmt, ##__VA_ARGS__)
+#define INFO_TOF_POLLINGF(fmt, ...)        DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_TOF        | DEBUG_TOF_POLLING,        "[INFO][TOF_POLL] "      fmt, ##__VA_ARGS__)
+#define INFO_TOF_VALUESF(fmt, ...)         DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_TOF        | DEBUG_TOF_VALUES,         "[INFO][TOF_VAL] "       fmt, ##__VA_ARGS__)
+#define INFO_IMU_LIFECYCLEF(fmt, ...)      DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_IMU        | DEBUG_IMU_LIFECYCLE,      "[INFO][IMU_LIFE] "      fmt, ##__VA_ARGS__)
+#define INFO_IMU_POLLINGF(fmt, ...)        DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_IMU        | DEBUG_IMU_POLLING,        "[INFO][IMU_POLL] "      fmt, ##__VA_ARGS__)
+#define INFO_IMU_VALUESF(fmt, ...)         DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_IMU        | DEBUG_IMU_VALUES,         "[INFO][IMU_VAL] "       fmt, ##__VA_ARGS__)
+#define INFO_INPUT_LIFECYCLEF(fmt, ...)  DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_INPUT    | DEBUG_INPUT_LIFECYCLE,  "[INFO][INPUT_LIFE] "  fmt, ##__VA_ARGS__)
+#define INFO_INPUT_POLLINGF(fmt, ...)    DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_INPUT    | DEBUG_INPUT_POLLING,    "[INFO][INPUT_POLL] "  fmt, ##__VA_ARGS__)
+#define INFO_INPUT_VALUESF(fmt, ...)     DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_INPUT    | DEBUG_INPUT_VALUES,     "[INFO][INPUT_VAL] "   fmt, ##__VA_ARGS__)
+#define INFO_ANO_ENCODER_LIFECYCLEF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_ANO_ENCODER | DEBUG_ANO_ENCODER_LIFECYCLE, "[INFO][ANO_LIFE] " fmt, ##__VA_ARGS__)
+#define INFO_ANO_ENCODER_POLLINGF(fmt, ...)   DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_ANO_ENCODER | DEBUG_ANO_ENCODER_POLLING,   "[INFO][ANO_POLL] " fmt, ##__VA_ARGS__)
+#define INFO_ANO_ENCODER_VALUESF(fmt, ...)    DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_ANO_ENCODER | DEBUG_ANO_ENCODER_VALUES,    "[INFO][ANO_VAL] "  fmt, ##__VA_ARGS__)
+#define INFO_APDS_LIFECYCLEF(fmt, ...)     DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_APDS       | DEBUG_APDS_LIFECYCLE,     "[INFO][APDS_LIFE] "     fmt, ##__VA_ARGS__)
+#define INFO_APDS_POLLINGF(fmt, ...)       DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_APDS       | DEBUG_APDS_POLLING,       "[INFO][APDS_POLL] "     fmt, ##__VA_ARGS__)
+#define INFO_APDS_VALUESF(fmt, ...)        DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_APDS       | DEBUG_APDS_VALUES,        "[INFO][APDS_VAL] "      fmt, ##__VA_ARGS__)
+#define INFO_PRESENCE_LIFECYCLEF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_PRESENCE   | DEBUG_PRESENCE_LIFECYCLE, "[INFO][PRESENCE_LIFE] " fmt, ##__VA_ARGS__)
+#define INFO_PRESENCE_POLLINGF(fmt, ...)   DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_PRESENCE   | DEBUG_PRESENCE_POLLING,   "[INFO][PRESENCE_POLL] " fmt, ##__VA_ARGS__)
+#define INFO_PRESENCE_VALUESF(fmt, ...)    DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_PRESENCE   | DEBUG_PRESENCE_VALUES,    "[INFO][PRESENCE_VAL] "  fmt, ##__VA_ARGS__)
+#define INFO_GPS_LIFECYCLEF(fmt, ...)      DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_GPS        | DEBUG_GPS_LIFECYCLE,      "[INFO][GPS_LIFE] "      fmt, ##__VA_ARGS__)
+#define INFO_GPS_POLLINGF(fmt, ...)        DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_GPS        | DEBUG_GPS_POLLING,        "[INFO][GPS_POLL] "      fmt, ##__VA_ARGS__)
+#define INFO_GPS_VALUESF(fmt, ...)         DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_GPS        | DEBUG_GPS_VALUES,         "[INFO][GPS_VAL] "       fmt, ##__VA_ARGS__)
+#define INFO_RTC_LIFECYCLEF(fmt, ...)      DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_RTC        | DEBUG_RTC_LIFECYCLE,      "[INFO][RTC_LIFE] "      fmt, ##__VA_ARGS__)
+#define INFO_RTC_POLLINGF(fmt, ...)        DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_RTC        | DEBUG_RTC_POLLING,        "[INFO][RTC_POLL] "      fmt, ##__VA_ARGS__)
+#define INFO_RTC_VALUESF(fmt, ...)         DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_RTC        | DEBUG_RTC_VALUES,         "[INFO][RTC_VAL] "       fmt, ##__VA_ARGS__)
+#define INFO_FMRADIO_LIFECYCLEF(fmt, ...)  DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_FMRADIO    | DEBUG_FMRADIO_LIFECYCLE,  "[INFO][FMRADIO_LIFE] "  fmt, ##__VA_ARGS__)
+#define INFO_FMRADIO_POLLINGF(fmt, ...)    DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_FMRADIO    | DEBUG_FMRADIO_POLLING,    "[INFO][FMRADIO_POLL] "  fmt, ##__VA_ARGS__)
+#define INFO_FMRADIO_VALUESF(fmt, ...)     DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_FMRADIO    | DEBUG_FMRADIO_VALUES,     "[INFO][FMRADIO_VAL] "   fmt, ##__VA_ARGS__)
+#define INFO_MIC_LIFECYCLEF(fmt, ...)      DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_MICROPHONE | DEBUG_MIC_LIFECYCLE,      "[INFO][MIC_LIFE] "      fmt, ##__VA_ARGS__)
+#define INFO_MIC_POLLINGF(fmt, ...)        DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_MICROPHONE | DEBUG_MIC_POLLING,        "[INFO][MIC_POLL] "      fmt, ##__VA_ARGS__)
+#define INFO_MIC_VALUESF(fmt, ...)         DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_MICROPHONE | DEBUG_MIC_VALUES,         "[INFO][MIC_VAL] "       fmt, ##__VA_ARGS__)
+#define INFO_DISPLAYF(fmt, ...)  DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_DISPLAY,    "[INFO][DISPLAY] "  fmt, ##__VA_ARGS__)
+#define INFO_I2CF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_I2C, "[INFO][I2C] " fmt, ##__VA_ARGS__)
+#define INFO_I2C_BUSF(fmt, ...)       DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_I2C | DEBUG_I2C_BUS,       "[INFO][I2C_BUS] "       fmt, ##__VA_ARGS__)
+#define INFO_I2C_DISCOVERYF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_I2C | DEBUG_I2C_DISCOVERY, "[INFO][I2C_DISCOVERY] " fmt, ##__VA_ARGS__)
+#define INFO_I2C_AUTOSTARTF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_I2C | DEBUG_I2C_AUTOSTART, "[INFO][I2C_AUTOSTART] " fmt, ##__VA_ARGS__)
 // MQTT INFO macros — parent + 4 sub-flag-aware variants.
-#define INFO_MQTTF(fmt, ...)            do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MQTT,                       "[INFO][MQTT] "            fmt, ##__VA_ARGS__); } while (0)
-#define INFO_MQTT_CONNECTIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MQTT | DEBUG_MQTT_CONNECTION, "[INFO][MQTT_CONN] "      fmt, ##__VA_ARGS__); } while (0)
-#define INFO_MQTT_PUBSUBF(fmt, ...)     do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MQTT | DEBUG_MQTT_PUBSUB,     "[INFO][MQTT_PUBSUB] "    fmt, ##__VA_ARGS__); } while (0)
-#define INFO_MQTT_DISCOVERYF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MQTT | DEBUG_MQTT_DISCOVERY,  "[INFO][MQTT_DISCOVERY] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_MQTT_COMMANDSF(fmt, ...)   do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MQTT | DEBUG_MQTT_COMMANDS,   "[INFO][MQTT_CMD] "       fmt, ##__VA_ARGS__); } while (0)
-#define INFO_ESPNOWF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ESPNOW_CORE, "[INFO][ESP-NOW] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_AUTOMATIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_AUTOMATIONS, "[INFO][AUTO] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_SESSIONF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_AUTH, "[INFO][SESSION] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_USERF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_USERS, "[INFO][USER] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_LOGGINGF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_LOGGER, "[INFO][LOG] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_WEBF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_HTTP, "[INFO][WEB] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_COMMANDF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_CLI, "[INFO][CMD] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_SYSTEMF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_SYSTEM, "[INFO][SYS] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_STORAGEF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_STORAGE, "[INFO][STORAGE] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_WIFIF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_WIFI, "[INFO][WIFI] " fmt, ##__VA_ARGS__); } while (0)
-#define INFO_MEMORYF(fmt, ...) do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_MEMORY, "[INFO][MEM] " fmt, ##__VA_ARGS__); } while (0)
+#define INFO_MQTTF(fmt, ...)            DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_MQTT,                       "[INFO][MQTT] "            fmt, ##__VA_ARGS__)
+#define INFO_MQTT_CONNECTIONF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_MQTT | DEBUG_MQTT_CONNECTION, "[INFO][MQTT_CONN] "      fmt, ##__VA_ARGS__)
+#define INFO_MQTT_PUBSUBF(fmt, ...)     DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_MQTT | DEBUG_MQTT_PUBSUB,     "[INFO][MQTT_PUBSUB] "    fmt, ##__VA_ARGS__)
+#define INFO_MQTT_DISCOVERYF(fmt, ...)  DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_MQTT | DEBUG_MQTT_DISCOVERY,  "[INFO][MQTT_DISCOVERY] " fmt, ##__VA_ARGS__)
+#define INFO_MQTT_COMMANDSF(fmt, ...)   DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_MQTT | DEBUG_MQTT_COMMANDS,   "[INFO][MQTT_CMD] "       fmt, ##__VA_ARGS__)
+#define INFO_ESPNOWF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_ESPNOW_CORE, "[INFO][ESP-NOW] " fmt, ##__VA_ARGS__)
+#define INFO_AUTOMATIONF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_AUTOMATIONS, "[INFO][AUTO] " fmt, ##__VA_ARGS__)
+#define INFO_SESSIONF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_AUTH, "[INFO][SESSION] " fmt, ##__VA_ARGS__)
+#define INFO_USERF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_USERS, "[INFO][USER] " fmt, ##__VA_ARGS__)
+#define INFO_LOGGINGF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_LOGGER, "[INFO][LOG] " fmt, ##__VA_ARGS__)
+#define INFO_WEBF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_HTTP, "[INFO][WEB] " fmt, ##__VA_ARGS__)
+#define INFO_COMMANDF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_CLI, "[INFO][CMD] " fmt, ##__VA_ARGS__)
+#define INFO_SYSTEMF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_SYSTEM, "[INFO][SYS] " fmt, ##__VA_ARGS__)
+#define INFO_STORAGEF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_STORAGE, "[INFO][STORAGE] " fmt, ##__VA_ARGS__)
+#define INFO_WIFIF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_WIFI, "[INFO][WIFI] " fmt, ##__VA_ARGS__)
+#define INFO_MEMORYF(fmt, ...) DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_MEMORY, "[INFO][MEM] " fmt, ##__VA_ARGS__)
 
 // ============================================================================
 // Broadcast Printf Macros (for memory-efficient output)

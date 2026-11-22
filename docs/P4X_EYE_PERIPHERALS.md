@@ -114,8 +114,11 @@ in P4 images; every other board compiles it to nothing.
   can be mirrored into the P4 log as `C6>` lines. The mirror holds about 6 KB
   of the P4's internal memory while it runs, so after boot it is off by
   default. It runs during every boot: the P4 starts it before the C6's first
-  start, so the C6's own boot messages are shown, and stops it when boot
-  finishes unless `c6console on` or a fault wants it. It starts by itself when
+  start, with `C6>` at INFO for that start, so the C6's own boot messages
+  (ROM, bootloader and application lines) are shown; once the settings have
+  loaded, `C6>` follows `debugwifidriver`, `debugbluetoothcore` and `esplog`
+  (errors only by default). The P4 stops the mirror when boot finishes unless
+  `c6console on` or a fault wants it. It starts by itself when
   a companion fault is seen (an
   outage, a failed start or recovery, a boot attempt that failed, a restart
   made for the companion) and stops once the companion has been healthy for

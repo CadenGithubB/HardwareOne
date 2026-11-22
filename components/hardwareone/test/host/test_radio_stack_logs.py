@@ -214,6 +214,10 @@ def source_checks() -> None:
     order(prepare, "quietHostedLogs();", "prepareBoard()", "radioHalConsoleMirror(true);", "for (int attempt = 1;",
           "radioHalStartTransport();")
     require(prepare.count("radioHalConsoleMirror(") == 1, "radioHalPrepare has one mirror start, for the boot")
+    # The C6's boot lines are I lines: C6> shows INFO for the boot's first
+    # start (applySettings sets the saved levels after it).
+    order(prepare, "quietHostedLogs();", "esp_log_level_set(radiolog::kC6ConsoleTag, "
+          "static_cast<esp_log_level_t>(radiolog::kInfo));", "radioHalConsoleMirror(true);")
     require("quietRpcLogs" not in radio and radio.count('"C6>"') == 0, "the C6 tag comes from the table")
     task = extract_block(radio, "void consoleTask(void*)")
     order(task, "radiolog::C6ConsoleLevels levels;", "if (n) logC6Line(levels, line, split);", "split = c != '\\n';")
