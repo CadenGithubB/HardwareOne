@@ -3933,6 +3933,11 @@ add_test(NAME oled_cli_output
 # the shared renderers through the same production primitive.
 add_test(NAME oled_text_field
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_text_field.py)
+# The header status bar (OLED_HeaderCore.h): the layout rules exhaustively,
+# the title cut, the Power text, the staleness signature, pixel regions and the
+# golden frames, drawn with the shipping font.
+add_test(NAME oled_header
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_header.py)
 
 add_test(NAME wifi_command_errors
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_wifi_command_errors.py)

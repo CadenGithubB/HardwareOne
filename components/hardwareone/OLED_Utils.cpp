@@ -31,6 +31,7 @@
 #include "System_Dictation.h"  // KEYBOARD_MODE_MIC: dictation state + control
 #include "OLED_ConsoleBuffer.h"
 #include "OLED_TextField.h"
+#include "OLED_HeaderCore.h"  // the header status bar: layout, title cut, drawing
 #include "OLED_Mode_Transcription.h"
 #include "OLED_Mode_Camera.h"
 
@@ -201,9 +202,6 @@ void oledDrawBar(Adafruit_SSD1306* display, int x, int y, int width, int height,
 // Forward declaration for mode name lookup
 static const char* getOledModeName(OledMode mode);
 
-// Default header config
-const OledHeaderInfo HEADER_DEFAULT = { nullptr, true, true, true, 0 };
-
 // Notification-center view — ring-backed since the Phase-1 cutover.
 // There is no separate queue storage anymore: the view materializes the
 // newest OLED_NOTIFICATION_MAX queue-enabled events straight from the event
@@ -297,143 +295,94 @@ const char* oledGetCurrentModeName() {
   return getOledModeName(currentOledMode);
 }
 
-int oledRenderHeader(Adafruit_SSD1306* display, const OledHeaderInfo* info) {
-  if (!display) return OLED_HEADER_HEIGHT;
-  
-  // Use default if no info provided
-  OledHeaderInfo headerInfo = info ? *info : HEADER_DEFAULT;
-  
-  // Clear header area
-  display->fillRect(0, 0, DISPLAY_WIDTH, OLED_HEADER_HEIGHT, DISPLAY_COLOR_BLACK);
-  
-  display->setTextSize(1);
-  display->setTextColor(DISPLAY_COLOR_WHITE);
-  
-  // Left side: Mode title with breadcrumb for menu submenus
-  const char* title = headerInfo.title;
-  if (!title) {
-    // Build breadcrumb for menu category submenus
-    static char breadcrumbBuf[22];  // "Menu > " (7) + name (up to 14) + null
-    
-    if (currentOledMode == OLED_MENU && oledMenuCategorySelected >= 0) {
-      // In a category submenu - show "Menu>CategoryName"
-      snprintf(breadcrumbBuf, sizeof(breadcrumbBuf), "Menu>%s", 
-               oledMenuCategories[oledMenuCategorySelected].name);
-      title = breadcrumbBuf;
-    } else if (currentOledMode == OLED_SETTINGS) {
-      // Settings breadcrumb - show "Set>ModuleName" when in a submenu
-      if (gSettingsEditor.currentModule && gSettingsEditor.state != SETTINGS_CATEGORY_SELECT) {
-        snprintf(breadcrumbBuf, sizeof(breadcrumbBuf), "Set>%s", 
-                 gSettingsEditor.currentModule->name);
-        title = breadcrumbBuf;
-      } else {
-        title = oledGetCurrentModeName();
-      }
-    } else if (currentOledMode == OLED_FILE_BROWSER) {
-      // Picker-mode header takes priority: the picker title tells the user
-      // WHAT they're picking (e.g. "Pick model") and is more useful at a
-      // glance than the current path. The path is visible in the file
-      // listing itself when navigation matters.
-      const char* pickerTitle = oledFilePickerTitle();
-      if (pickerTitle && pickerTitle[0]) {
-        title = pickerTitle;
-      } else {
-        // Viewer mode: show "Files>folder/sub" breadcrumb.
-        if (gOledFileManager) {
-          const char* path = gOledFileManager->getCurrentPath();
-          if (path && strcmp(path, "/") != 0) {
-            snprintf(breadcrumbBuf, sizeof(breadcrumbBuf), "Files>%s", path);
-            title = breadcrumbBuf;
-          } else {
-            title = "Files";
-          }
-        } else {
-          title = "Files";
-        }
-      }
-    } else if (currentOledMode == OLED_UNAVAILABLE && unavailableOledTitle.length() > 0) {
-      // Unavailable overlay uses mode OLED_UNAVAILABLE but body shows unavailableOledTitle;
-      // use the same semantic title in the header (e.g. "Automations") instead of "Unavail".
-      static char unavailHeaderBuf[16];
-      strncpy(unavailHeaderBuf, unavailableOledTitle.c_str(), 15);
-      unavailHeaderBuf[15] = '\0';
-      title = unavailHeaderBuf;
+// The header is shown on every screen except the logo, the animations, the
+// display-off mode and the on-screen keyboard (which owns the whole display).
+static bool oledHeaderVisible() {
+  return currentOledMode != OLED_ANIMATION &&
+         currentOledMode != OLED_LOGO &&
+         currentOledMode != OLED_OFF &&
+         !oledKeyboardIsActive();
+}
+
+// What the bar shows besides the title. The frame and the staleness poll
+// (oledIsDirty) both collect through here, so whatever the bar shows is
+// exactly what is watched. Display task only (the unread count refreshes the
+// notification view cache).
+static void oledHeaderCollect(OledHeaderStatus& status) {
+  status = OledHeaderStatus{};
+  const BatteryState battery = getBatterySnapshot();
+  oled_header::formatPower(battery.usbKnown && battery.usbPresent, battery.voltageAvailable,
+                           battery.percentageValid, battery.percentageEstimated,
+                           battery.percentage, status.power);
+  const int unread = oledNotificationUnreadCount();
+  status.unread = (uint8_t)(unread > 255 ? 255 : (unread < 0 ? 0 : unread));
+  status.busy = oledCommandBusy();
+  status.rec = false;  // the capture dot (microphone or camera) is a later step
+}
+
+// Signature of the status the last drawn bar showed.
+static uint32_t sHeaderDrawnSig = 0;
+
+static uint32_t oledHeaderSignatureNow() {
+  OledHeaderStatus status;
+  oledHeaderCollect(status);
+  return oled_header::signature(status);
+}
+
+// The default title chain: menu, settings and file breadcrumbs, the picker,
+// unavailable and ESP-NOW titles; anything else is the mode name (text left
+// nullptr). The mode's headerFunc runs after this and may change any of it.
+static void oledHeaderDefaultSpec(OledHeaderSpec& spec) {
+  spec = OledHeaderSpec{};
+  if (currentOledMode == OLED_MENU && oledMenuCategorySelected >= 0) {
+    spec.prefix = "Menu>";
+    spec.text = oledMenuCategories[oledMenuCategorySelected].name;
+  } else if (currentOledMode == OLED_SETTINGS) {
+    if (gSettingsEditor.currentModule && gSettingsEditor.state != SETTINGS_CATEGORY_SELECT) {
+      spec.prefix = "Set>";
+      spec.text = gSettingsEditor.currentModule->name;
+    }
+  } else if (currentOledMode == OLED_FILE_BROWSER) {
+    // Picker-mode header takes priority: the picker title tells the user
+    // WHAT they're picking (e.g. "Pick model"). Otherwise "Files>path", cut so
+    // that the folder you are in stays visible.
+    const char* pickerTitle = oledFilePickerTitle();
+    const char* path = gOledFileManager ? gOledFileManager->getCurrentPath() : nullptr;
+    if (pickerTitle && pickerTitle[0]) {
+      spec.text = pickerTitle;
+    } else if (path && path[0] && strcmp(path, "/") != 0) {
+      spec.prefix = "Files>";
+      spec.text = path;
+      spec.cut = OledTitleCut::KeepPrefix;
+    } else {
+      spec.text = "Files";
+    }
+  } else if (currentOledMode == OLED_UNAVAILABLE && unavailableOledTitle.length() > 0) {
+    // The unavailable overlay shows the semantic title (e.g. "Automations").
+    spec.text = unavailableOledTitle.c_str();
 #if ENABLE_ESPNOW
-    } else if (currentOledMode == OLED_ESPNOW) {
-      // The conversation (device-detail) view surfaces the interaction mode in
-      // the header ("ESPNOW: Text/Remote/File") instead of a separate in-body
-      // "Mode:" line; other ESP-NOW views return nullptr and keep "ESP-NOW".
-      const char* espnowTitle = oledEspNowHeaderTitle();
-      title = (espnowTitle && espnowTitle[0]) ? espnowTitle : oledGetCurrentModeName();
+  } else if (currentOledMode == OLED_ESPNOW) {
+    // The conversation view shows the interaction mode ("ESPNOW: Text").
+    const char* espnowTitle = oledEspNowHeaderTitle();
+    if (espnowTitle && espnowTitle[0]) spec.text = espnowTitle;
 #endif
-    } else {
-      title = oledGetCurrentModeName();
-    }
   }
-  
-  display->setCursor(0, 1);
-  if (title) {
-    // Truncate to fit available space (leave room for status icons)
-    char titleBuf[16];
-    strncpy(titleBuf, title, 15);
-    titleBuf[15] = '\0';
-    display->print(titleBuf);
-  }
-  
-  // Right side: Status icons (right-aligned). Each char is 6 px wide at
-  // textSize 1; the layout below allocates a multiple of 6 per element so
-  // strings don't wrap mid-glyph to the next OLED row.
-  int iconX = DISPLAY_WIDTH;
-  bool drewRightSide = false;  // tracks whether to draw a "|" separator before notifications
+}
 
-  // Battery / USB indicator
-  if (headerInfo.showBattery || headerInfo.showUsb) {
-    const BatteryState battery = getBatterySnapshot();
-    if (battery.usbKnown && battery.usbPresent && headerInfo.showUsb) {
-      iconX -= 18;  // "USB": three 6-pixel characters
-      display->setCursor(iconX, 1);
-      display->print("USB");
-      drewRightSide = true;
-    } else if (headerInfo.showBattery) {
-      char label[8];
-      if (battery.percentageValid) {
-        snprintf(label, sizeof(label), "%s%d%%",
-                 battery.percentageEstimated ? "~" : "",
-                 (int)battery.percentage);
-      } else {
-        snprintf(label, sizeof(label), "--%%");
-      }
-      iconX -= strlen(label) * 6;
-      display->setCursor(iconX, 1);
-      display->print(label);
-      drewRightSide = true;
-    }
-  }
-
-  // Notification indicator (bell icon with count)
-  int unreadCount = headerInfo.showNotifications ? oledNotificationUnreadCount() : 0;
-  if (unreadCount > 0) {
-    // Visual separator between notifications and battery/USB so the two
-    // status groups don't run together visually. Only drawn when both are
-    // present — otherwise a stray "|" hangs in space at the right edge.
-    if (drewRightSide) {
-      iconX -= 8;  // 6 px for the pipe + 2 px of breathing room on its right
-      display->setCursor(iconX + 2, 1);
-      display->print('|');
-    }
-    iconX -= 12;  // Space for bell + count
-    display->setCursor(iconX, 1);
-    display->print((char)0x07);  // Bell character
-    if (unreadCount < 10) {
-      display->print(unreadCount);
-    } else {
-      display->print('+');
-    }
-  }
-  
-  // Draw separator line at bottom of header
-  display->drawFastHLine(0, OLED_HEADER_HEIGHT - 1, DISPLAY_WIDTH, DISPLAY_COLOR_WHITE);
-  
+int oledRenderHeader(Adafruit_SSD1306* display) {
+  static_assert(DISPLAY_WIDTH == oled_header::kWidth && OLED_HEADER_HEIGHT == oled_header::kHeight,
+                "the header bar is laid out for a 128 x 10 band");
+  if (!display) return OLED_HEADER_HEIGHT;
+  OledHeaderSpec spec;
+  oledHeaderDefaultSpec(spec);
+  const OledModeEntry* entry = findOledMode(currentOledMode);
+  if (entry && entry->headerFunc) entry->headerFunc(spec);
+  OledHeaderStatus status;
+  oledHeaderCollect(status);
+  oled_header::Frame frame;
+  oled_header::compose(spec, status, oledGetCurrentModeName(), frame);
+  oled_header::draw(*display, frame, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_BLACK);
+  sHeaderDrawnSig = oled_header::signature(status);
   return OLED_HEADER_HEIGHT;
 }
 
@@ -3458,19 +3407,6 @@ static void oledValueScrollSessionBoundary() {
   }
 }
 
-// A small hourglass at the top right of the content area while the OLED
-// command runs; drawn over the mode's content, under the toast.
-static void oledCommandBusyRender() {
-  if (!sOledCommand.pending.busy() || !gDisplay) return;
-  const int x = SCREEN_WIDTH - 9, y = OLED_CONTENT_START_Y;
-  gDisplay->fillRect(x, y, 9, 9, DISPLAY_BG);
-  gDisplay->drawRect(x, y, 9, 9, DISPLAY_FG);
-  gDisplay->drawLine(x + 2, y + 2, x + 6, y + 2, DISPLAY_FG);
-  gDisplay->drawLine(x + 2, y + 6, x + 6, y + 6, DISPLAY_FG);
-  gDisplay->drawLine(x + 2, y + 2, x + 6, y + 6, DISPLAY_FG);
-  gDisplay->drawLine(x + 6, y + 2, x + 2, y + 6, DISPLAY_FG);
-}
-
 const char* oledBluetoothToggleCommand() {
 #if ENABLE_BLUETOOTH
   // The quick toggle is the whole radio: `closeble` closes every device and
@@ -3584,6 +3520,9 @@ bool oledIsDirty() {
     if (deadlinePending(untilMs, (uint32_t)millis())) return true;
     oledDirtyUntilMs.compare_exchange_strong(untilMs, 0);
   }
+  // The header's battery, USB, unread count or busy mark changed since the bar
+  // was drawn: repaint even a still screen. Producers never mark dirty for it.
+  if (oledHeaderVisible() && oledHeaderSignatureNow() != sHeaderDrawnSig) return true;
   return false;
 }
 
@@ -4288,10 +4227,7 @@ void updateOledDisplay() {
     oledTextFieldFrameBegin();  // scrolling labels claim their slots while this frame draws
     
     // Determine if header should be shown (drawn after content, like footer)
-    bool showHeader = (currentOledMode != OLED_ANIMATION && 
-                       currentOledMode != OLED_LOGO &&
-                       currentOledMode != OLED_OFF &&
-                       !oledKeyboardIsActive());
+    const bool showHeader = oledHeaderVisible();
     
     // Set cursor to content area start
     gDisplay->setCursor(0, showHeader ? OLED_CONTENT_START_Y : 0);
@@ -4375,13 +4311,12 @@ void updateOledDisplay() {
 
     // Draw persistent header bar (after content, so it's always on top - same pattern as footer)
     if (showHeader) {
-      oledRenderHeader(gDisplay, nullptr);
+      oledRenderHeader(gDisplay);  // the busy hourglass is part of the bar
     }
 
     // Draw persistent footer with button hints (always last, in same frame)
     drawOledFooter();
     
-    oledCommandBusyRender();  // the OLED command in flight
     // Draw shared feedback only when the confirmation does not own the screen
     oledUiRender();
     oledTextFieldFrameEnd();  // labels this frame did not draw stop animating

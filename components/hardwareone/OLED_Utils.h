@@ -28,21 +28,11 @@ bool submitOledCommandForSession(const String& command, TransportSessionEpoch ep
 
 // ============= Standardized Header System =============
 
-// Header display options
-struct OledHeaderInfo {
-  const char* title;          // Mode/menu title (nullptr = auto from current mode)
-  bool showBattery;           // Show battery icon and percentage
-  bool showNotifications;     // Show notification indicator if queue not empty
-  bool showUsb;               // Show USB indicator when connected
-  uint8_t notificationCount;  // Number of unread notifications (0 = none)
-};
-
-// Default header config (shows battery, notifications, auto title)
-extern const OledHeaderInfo HEADER_DEFAULT;
-
-// Render standardized header bar at top of display
-// Returns the Y position where content should start (after header)
-int oledRenderHeader(Adafruit_SSD1306* display, const OledHeaderInfo* info = nullptr);
+// The header status bar (rows 0-9): the title (the mode name, a breadcrumb or
+// the mode's headerFunc), then from the right edge Power, Notify, Rec,
+// Context and Busy, laid out by OLED_HeaderCore.h. Drawn by the frame after
+// the content whenever the header is shown. Returns the height of the bar.
+int oledRenderHeader(Adafruit_SSD1306* display);
 
 // Get current mode name for header (from currentOledMode)
 const char* oledGetCurrentModeName();

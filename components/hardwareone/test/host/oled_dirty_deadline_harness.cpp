@@ -28,6 +28,13 @@ static uint32_t oledConsumedDirtySeq = 1;
 static uint32_t oledLastRenderedGamepadSeq = 0;
 static unsigned long oledLastRenderedSensorSeq = 0;
 static unsigned long gSensorStatusSeq = 0;
+// The header staleness poll: the bar's visibility and the signature of its
+// collected status (battery, USB, unread count, busy), against the drawn one.
+static bool gHeaderVisible = false;
+static uint32_t gHeaderSig = 0;
+static uint32_t sHeaderDrawnSig = 0;
+static bool oledHeaderVisible() { return gHeaderVisible; }
+static uint32_t oledHeaderSignatureNow() { return gHeaderSig; }
 
 // INSERT_STATE
 
@@ -131,6 +138,21 @@ int main() {
   oledMarkDirtyUntil(49000);
   oledMarkDirtyUntil(0);
   check(!dirtyAt(50000) && oledDirtyUntilMs == 0u, "a deadline that is already reached is not stored");
+
+  // The header status changed since the bar was drawn (USB plugged on a still
+  // screen): dirty on the next check, and only while the bar is shown.
+  reset();
+  gHeaderVisible = true;
+  gHeaderSig = sHeaderDrawnSig = 0x1234u;
+  check(!dirtyAt(60000), "an unchanged header status is not dirty");
+  gHeaderSig = 0x5678u;
+  check(dirtyAt(60000), "a changed header status is dirty on the next check");
+  gHeaderVisible = false;
+  check(!dirtyAt(60000), "a hidden header is not watched");
+  gHeaderVisible = true;
+  sHeaderDrawnSig = gHeaderSig;  // the frame drew it
+  check(!dirtyAt(60000), "drawn: clean again");
+  gHeaderVisible = false;
 
   if (failures != 0) {
     std::fprintf(stderr, "%d of %d OLED dirty deadline checks failed\n", failures, checks);

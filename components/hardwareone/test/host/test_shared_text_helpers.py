@@ -105,7 +105,7 @@ STRNCPY_ALLOWED: dict[str, int] = {
     "OLED_Mode_Remote.cpp": 1,
     "OLED_Mode_Sensors.cpp": 1,
     "OLED_Mode_System.cpp": 5,
-    "OLED_Utils.cpp": 10,
+    "OLED_Utils.cpp": 8,
     "System_Automation.cpp": 10,
     "System_CLIConfirm.cpp": 1,
     "System_Cm5Presence.cpp": 1,
