@@ -2465,13 +2465,32 @@ static const SensorHeapCost sensorHeapCosts[] = {
 };
 static const size_t sensorHeapCostCount = sizeof(sensorHeapCosts) / sizeof(sensorHeapCosts[0]);
 
-// Calculate total estimated heap for enabled sensors
+// A row whose driver is not compiled in can never start at boot, whatever
+// its saved flag says (a settings file from another build can leave it on).
+static bool sensorHeapRowBuilt(size_t i) {
+  const FeatureEntry* feature = getFeatureById(sensorHeapCosts[i].shortName);
+  return !feature || isFeatureCompiled(feature);
+}
+
+// Calculate total estimated heap for the sensors that will start at boot:
+// built rows that are on, plus encoder boards 2..max that are on and have an
+// address (the same rule 'sensorautostart all on' uses for its total).
 static uint32_t getEnabledSensorHeapEstimate() {
   uint32_t total = 0;
   for (size_t i = 0; i < sensorHeapCostCount; i++) {
+    if (!sensorHeapRowBuilt(i)) continue;
     if (*sensorHeapCosts[i].autoStartFlag) {
       total += sensorHeapCosts[i].heapCostKb;
     }
+#if ENABLE_ENCODER
+    if (sensorHeapCosts[i].autoStartFlag == encoderAutoStartSetting(1)) {
+      for (uint8_t n = 2; n <= kEncoderMaxInstances; ++n) {
+        if (*encoderAutoStartSetting(n) && encoderInstanceAddress(n) != 0) {
+          total += sensorHeapCosts[i].heapCostKb;
+        }
+      }
+    }
+#endif
   }
   return total;
 }
@@ -2499,7 +2518,7 @@ static const char* cmd_sensorautostart(const String& argsInput) {
         "%-12s ~%2dKB  %s\n",
         sensorHeapCosts[i].shortName,
         sensorHeapCosts[i].heapCostKb,
-        enabled ? "[ON]" : "off");
+        !sensorHeapRowBuilt(i) ? "not built" : (enabled ? "[ON]" : "off"));
     }
     
     pos += snprintf(buf + pos, buf_SIZE - pos,

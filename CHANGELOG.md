@@ -418,6 +418,10 @@ everything user-visible since the v0.99.99.1 tag.
 
 ### Fixed
 
+- `sensorautostart` (no arguments) marks a sensor that is not in the build as `not built` instead of
+  on/off, and its "Enabled total" counts only sensors that can start at boot (built rows that are on,
+  plus encoder boards 2-4 that are on and have an address). A start-at-boot flag left on by another
+  build had been listed as on and counted in the total.
 - A sensor whose start at boot could not be queued is now reported like one that was not found (one
   log line, a start-failed event, and it is not recorded as switched off by a `ramflush`); before, it
   was counted as queued and nothing said why it did not start. The boot auto-start flags line in the
