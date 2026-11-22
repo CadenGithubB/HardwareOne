@@ -556,6 +556,11 @@ void initSensorQueue();
 // Discovery and Helper Functions
 // ============================================================================
 void discoverI2cDevices();
+// Whether the last bus scan found the device of a module ("imu", "input",
+// "encoder", ...) where this build looks for it: some compiled row of that
+// module has an address use (the walk i2cAddressTakenBy makes) at a
+// (bus, address) the scan answered. A device at another product's address,
+// or on the other bus, does not count.
 bool isSensorConnected(const char* name);
 // The label of the device that answered at `address` on `bus`. Where two
 // compiled rows of different products can claim the address (the seesaw
@@ -572,6 +577,17 @@ String identifySensor(uint8_t address, uint8_t bus);
 // ..."). Address and bus setters check it, and an open checks it again.
 bool i2cAddressTakenBy(uint8_t bus, uint8_t address, I2cDeviceType exceptType, uint8_t exceptN,
                        char* why = nullptr, size_t whyLen = 0);
+// The owner of a device without a queue type: its compiled row by name
+// ("SSD1306", "MAX17048", "HT16K33", "PCA9685"); row -1 when it is not in
+// this build.
+I2cAddressOwner i2cRowOwnerByName(const char* rowName);
+// Whether a start of instance n of `type` was admitted and has not settled
+// yet (queued, or being started by the queue worker).
+bool i2cSensorStartOutstanding(I2cDeviceType type, uint8_t n = 1);
+// The reply for arguments an open or close of a single-instance type does not
+// take ("openimu 2" -> "Error: imu has one instance."), or nullptr when the
+// arguments are empty or name instance 1. `usage` is the command's usage.
+const char* i2cOpenCloseArgError(I2cDeviceType type, const String& argsInput, const char* usage);
 // Read the product id of a seesaw board (no device-health record). False when
 // it did not answer the identity read.
 bool i2cReadSeesawProductId(uint8_t bus, uint8_t address, uint16_t& productId);
@@ -675,11 +691,14 @@ const char* cmd_devicefile(const String& argsInput);
 // Shared bus-routing helper for the per-device `<device>bus` commands. Each
 // sensor module's own cmd_<sensor>bus calls this so the parse/range check/
 // persist/report behaviour stays in one place (a bus that does not exist is
-// refused). Does NOT contain
-// RETURN_VALID_IF_VALIDATE_CSTR — that must stay at each cmd_* entry point,
-// because it returns from its caller.
+// refused). `owner` is the device the setting moves (i2cInstanceOwner for a
+// queue type, i2cRowOwnerByName for a device without one): a bus where any
+// address it holds (both chips of a two-chip device, an OLED's alternate) is
+// already used by another device is refused with the clash reply. Does NOT
+// contain RETURN_VALID_IF_VALIDATE_CSTR — that must stay at each cmd_* entry
+// point, because it returns from its caller.
 const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput,
-                                     const char* settingName);
+                                     const char* settingName, const I2cAddressOwner& owner);
 
 // ============================================================================
 // Bus State

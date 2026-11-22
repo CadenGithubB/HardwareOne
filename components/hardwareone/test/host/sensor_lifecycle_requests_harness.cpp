@@ -171,6 +171,9 @@ static void sensorStatusBumpWith(const char* cause) { statuses.emplace_back(caus
 static std::vector<std::string> hints;
 static void cliHint(const char* text) { hints.emplace_back(text); }
 struct String {};  // Command handlers only pass it through.
+// The single-instance argument check of the open/close commands
+// (System_I2C.cpp, test_i2c_instance_core): the handlers here get no argument.
+static const char* i2cOpenCloseArgError(I2cDeviceType, const String&, const char*) { return nullptr; }
 #define RETURN_VALID_IF_VALIDATE_CSTR() do {} while (0)
 [[maybe_unused]] static void sensorPresenceChanged(int sensor, bool online) { meshStatuses.emplace_back(sensor, online); }
 static void systemEventPost(int event, const char* name) { events.emplace_back(event, name); }

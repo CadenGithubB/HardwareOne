@@ -310,32 +310,6 @@ const char* i2cModuleNameForDeviceType(I2cDeviceType type) {
   return nullptr;
 }
 
-// Helper: Check if a sensor is connected by name (used by help system)
-// Uses sensor database to map module name to device name dynamically
-bool isSensorConnected(const char* moduleName) {
-  if (!moduleName) return false;
-  
-  // Find sensor in database by module name
-  const char* deviceName = nullptr;
-  for (size_t i = 0; i < i2cSensorsCount; i++) {
-    if (i2cSensors[i].moduleName && strcmp(i2cSensors[i].moduleName, moduleName) == 0) {
-      deviceName = i2cSensors[i].name;
-      break;
-    }
-  }
-  
-  if (!deviceName) return false;  // Module name not in sensor database
-  
-  // Check if device is in the connected device registry
-  for (int i = 0; i < connectedDeviceCount; i++) {
-    if (strstr(connectedDevices[i].name, deviceName) != nullptr) {
-      return true;  // Found in registry
-    }
-  }
-  
-  return false;  // Not found in registry
-}
-
 // Initialize queue mutex (called from setup())
 // Now managed by I2cDeviceManager - this is a no-op
 void initSensorQueue() {
@@ -420,15 +394,18 @@ static uint8_t i2cBusForDeviceType(I2cDeviceType sensor, uint8_t n = 1) {
 //   (i2cAddressForDeviceType: the gamepad's 0x50, the ANO encoder's setting,
 //   the encoder's setting); a driver without one address (the GT911 probes
 //   two) at each of its rows' addresses;
+// - instance 1 also at each other row of its type that has its own address
+//   setting (i2cForEachExtraRowAddress: the second chip of a two-chip device);
 // - each configured instance n >= 2 at its row's busAt(n)/addressAt(n).
-// Nothing is allocated; the uses are read from the table and the settings.
+// Each use carries the index of the row that names it. Nothing is allocated;
+// the uses are read from the table and the settings.
 template <typename Visit>
 static void forEachI2cAddressUse(Visit&& visit) {
   for (size_t i = 0; i < i2cSensorsCount; i++) {
     const I2cSensorEntry& row = i2cSensors[i];
     if (!row.compiled || row.deviceType != I2C_DEVICE_COUNT) continue;
     I2cAddressUse use{configuredBusForSensor(row), i2cRowAddressAt(row, 1), I2C_DEVICE_COUNT, 0,
-                      row.name, row.description};
+                      row.name, row.description, (int16_t)i};
     if (use.address != 0 && visit(use)) return;
     if (row.multiAddress) {
       use.address = row.altAddress;
@@ -437,17 +414,18 @@ static void forEachI2cAddressUse(Visit&& visit) {
   }
   for (int t = 0; t < I2C_DEVICE_COUNT; t++) {
     const I2cDeviceType type = static_cast<I2cDeviceType>(t);
-    const I2cSensorEntry* first = nullptr;
-    for (size_t i = 0; i < i2cSensorsCount && !first; i++) {
-      if (i2cSensors[i].compiled && i2cSensors[i].deviceType == type) first = &i2cSensors[i];
+    size_t firstIndex = i2cSensorsCount;
+    for (size_t i = 0; i < i2cSensorsCount && firstIndex == i2cSensorsCount; i++) {
+      if (i2cSensors[i].compiled && i2cSensors[i].deviceType == type) firstIndex = i;
     }
-    if (!first) continue;  // not in this build
+    if (firstIndex == i2cSensorsCount) continue;  // not in this build
+    const I2cSensorEntry* first = &i2cSensors[firstIndex];
     const uint8_t instances = i2cRowInstances(*first);
     for (uint8_t k = 1; k <= instances; k++) {
       if (k >= 2) {
         // Instance n >= 2 at its own settings, from the type's rows.
         const I2cAddressUse use{configuredBusForSensor(*first, k), i2cRowAddressAt(*first, k), type,
-                                k, first->name, first->description};
+                                k, first->name, first->description, (int16_t)firstIndex};
         if (use.address != 0 && visit(use)) return;
         continue;
       }
@@ -455,28 +433,71 @@ static void forEachI2cAddressUse(Visit&& visit) {
       if (address != 0) {
         // Named by the row at that address when there is one (the gamepad's
         // 0x50 row), else by the type's first row.
-        const I2cSensorEntry* named = first;
+        size_t named = firstIndex;
         for (size_t i = 0; i < i2cSensorsCount; i++) {
           if (i2cSensors[i].compiled && i2cSensors[i].deviceType == type &&
               i2cRowAddressAt(i2cSensors[i], 1) == address) {
-            named = &i2cSensors[i];
+            named = i;
             break;
           }
         }
-        const I2cAddressUse use{i2cBusForDeviceType(type, k), address, type, k, named->name,
-                                named->description};
+        const I2cAddressUse use{i2cBusForDeviceType(type, k), address, type, k,
+                                i2cSensors[named].name, i2cSensors[named].description,
+                                (int16_t)named};
         if (visit(use)) return;
+        // The type's other rows with their own address setting.
+        bool stop = false;
+        i2cForEachExtraRowAddress(i2cSensors, i2cSensorsCount, t, address,
+                                  [&](size_t i, uint8_t extra) {
+          const I2cSensorEntry& row = i2cSensors[i];
+          const I2cAddressUse more{configuredBusForSensor(row), extra, type, k, row.name,
+                                   row.description, (int16_t)i};
+          stop = visit(more);
+          return stop;
+        });
+        if (stop) return;
       } else {
         for (size_t i = 0; i < i2cSensorsCount; i++) {
           const I2cSensorEntry& row = i2cSensors[i];
           if (!row.compiled || row.deviceType != type) continue;
           const I2cAddressUse use{configuredBusForSensor(row), i2cRowAddressAt(row, 1), type, 1,
-                                  row.name, row.description};
+                                  row.name, row.description, (int16_t)i};
           if (use.address != 0 && visit(use)) return;
         }
       }
     }
   }
+}
+
+// isSensorConnected(): see System_I2C.h. The scan's list is read as the scan
+// left it; nothing probes the bus here.
+bool isSensorConnected(const char* moduleName) {
+  if (!moduleName || !moduleName[0]) return false;
+  bool found = false;
+  forEachI2cAddressUse([&](const I2cAddressUse& use) {
+    if (use.row < 0 || (size_t)use.row >= i2cSensorsCount) return false;
+    const char* module = i2cSensors[use.row].moduleName;
+    if (!module || strcmp(module, moduleName) != 0) return false;
+    for (int i = 0; i < connectedDeviceCount; i++) {
+      const ConnectedDevice& device = connectedDevices[i];
+      if (device.isConnected && device.address == use.address && device.bus == use.bus) {
+        found = true;
+        return true;
+      }
+    }
+    return false;
+  });
+  return found;
+}
+
+I2cAddressOwner i2cRowOwnerByName(const char* rowName) {
+  for (size_t i = 0; rowName && i < i2cSensorsCount; i++) {
+    const I2cSensorEntry& row = i2cSensors[i];
+    if (row.compiled && row.deviceType == I2C_DEVICE_COUNT && row.name && strcmp(row.name, rowName) == 0) {
+      return i2cRowOwner((int16_t)i);
+    }
+  }
+  return i2cRowOwner(-1);
 }
 
 bool i2cAddressTakenBy(uint8_t bus, uint8_t address, I2cDeviceType exceptType, uint8_t exceptN,
@@ -590,6 +611,18 @@ EXT_RAM_BSS_ATTR static std::atomic<bool> sSensorStartOutstandingExtra[kI2cExtra
 static std::atomic<bool>& sensorStartOutstanding(uint8_t slot) {
   return slot < I2C_DEVICE_COUNT ? sSensorStartOutstanding[slot]
                                  : sSensorStartOutstandingExtra[slot - I2C_DEVICE_COUNT];
+}
+
+bool i2cSensorStartOutstanding(I2cDeviceType type, uint8_t n) {
+  const uint8_t slot = i2cSlot(type, n);
+  return slot != kI2cNoSlot && sensorStartOutstanding(slot).load();
+}
+
+const char* i2cOpenCloseArgError(I2cDeviceType type, const String& argsInput, const char* usage) {
+  const I2cInstanceArg arg = i2cParseInstanceArg(type, argsInput.c_str(), I2cInstanceForm::OpenClose);
+  if (arg.error == I2cInstanceError::None) return nullptr;
+  if (!ensureDebugBuffer()) return "Error: That device has one instance.";
+  return i2cInstanceErrorText(type, arg, usage, getDebugBuffer(), 1024);
 }
 
 bool enqueueDeviceStart(I2cDeviceType device, uint8_t n) {
@@ -1403,7 +1436,8 @@ const char* cmd_i2c2sclpin(const String& argsInput) {
 // per-command stub is one line. The helper does NOT include the
 // RETURN_VALID_IF_VALIDATE_CSTR macro because that returns from its caller
 // — must stay at each cmd_* entry point.
-const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput, const char* settingName) {
+const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput, const char* settingName,
+                                     const I2cAddressOwner& owner) {
   String valStr = argsInput;
   valStr.trim();
   if (valStr.length() == 0) {
@@ -1423,6 +1457,17 @@ const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput, const
              settingName, (int)(I2cDeviceManager::NUM_BUSES - 1));
     return getDebugBuffer();
   }
+  // Every address the device holds must be free on the new bus (a same-bus
+  // "move" finds only its own uses there).
+  I2cAddressUse clash{};
+  if (i2cOwnerBusClash([](auto&& visit) { forEachI2cAddressUse(visit); }, owner, (uint8_t)v, clash)) {
+    char why[112];
+    i2cAddressClashText(clash, why, sizeof(why));
+    if (!ensureDebugBuffer()) return "Error: An address of this device is in use on that bus.";
+    snprintf(getDebugBuffer(), 1024, "%s %s stays %d; free that address first or change this device's address.",
+             why, settingName, target);
+    return getDebugBuffer();
+  }
   setSetting(target, v);
   if (ensureDebugBuffer()) {
     snprintf(getDebugBuffer(), 1024, "%s set to %d (reboot required)", settingName, v);
@@ -1431,9 +1476,18 @@ const char* i2cSetDeviceBusAndReport(int& target, const String& argsInput, const
   return "set (reboot required)";
 }
 
-const char* cmd_oledbus(const String& a)     { RETURN_VALID_IF_VALIDATE_CSTR(); return i2cSetDeviceBusAndReport(gSettings.oledBus,     a, "oledBus"); }
-const char* cmd_inputbus(const String& a)    { RETURN_VALID_IF_VALIDATE_CSTR(); return i2cSetDeviceBusAndReport(gSettings.inputBus,  a, "inputBus"); }
-const char* cmd_fuelgaugebus(const String& a){ RETURN_VALID_IF_VALIDATE_CSTR(); return i2cSetDeviceBusAndReport(gSettings.fuelGaugeBus, a, "fuelGaugeBus"); }
+const char* cmd_oledbus(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return i2cSetDeviceBusAndReport(gSettings.oledBus, a, "oledBus", i2cRowOwnerByName("SSD1306"));
+}
+const char* cmd_inputbus(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return i2cSetDeviceBusAndReport(gSettings.inputBus, a, "inputBus", i2cInstanceOwner(I2C_DEVICE_INPUT, 1));
+}
+const char* cmd_fuelgaugebus(const String& a) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return i2cSetDeviceBusAndReport(gSettings.fuelGaugeBus, a, "fuelGaugeBus", i2cRowOwnerByName("MAX17048"));
+}
 
 // Sensor-specific I2C clock commands moved to their respective sensor modules:
 // - thermalI2cClockHz -> i2csensor_mlx90640.cpp (thermal module)
@@ -4020,10 +4074,10 @@ void processAutoStartSensors() {
     // through to the raw 0x50 ping and poisoned the ramflush bit for a
     // gamepad on the alt address 0x49.)
     if (isSensorAvailableForAutoStart(I2C_DEVICE_INPUT)) {
-      INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Gamepad sensor");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Queuing input device");
       if (autoStartEnqueue(I2C_DEVICE_INPUT, 1)) autoStartQueued++;
     } else {
-      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping Gamepad sensor (not detected on I2C bus)");
+      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping input device (not detected on I2C bus)");
     }
   }
   #endif

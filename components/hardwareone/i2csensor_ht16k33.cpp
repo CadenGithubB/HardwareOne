@@ -192,7 +192,7 @@ const char* cmdMatrix(const String& input) {
 
 const char* cmdMatrixBus(const String& args) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return i2cSetDeviceBusAndReport(gSettings.matrixBus, args, "matrixBus");
+  return i2cSetDeviceBusAndReport(gSettings.matrixBus, args, "matrixBus", i2cRowOwnerByName("HT16K33"));
 }
 
 const char* cmdMatrixAddress(const String& args) {

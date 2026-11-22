@@ -2493,7 +2493,9 @@ never opens that address there. The same holds for every other device built into
 that bus: the OLED (0x3C/0x3D), the APDS9960 (0x39), the gamepad (0x50) or the ANO encoder (its
 address setting). `encoderaddress`, `encoderbus` and the open refuse the address with one line that
 names the device using it, for example `Error: 0x36 on bus 0 is in use by MAX17048 (LiPo Fuel
-Gauge).` Before it claims a board the device reads the product id (one
+Gauge).` Every other bus command (`oledbus`, `fuelgaugebus`, `inputbus`, `imubus`, `tofbus`, ...)
+checks the same way: a bus where any address the device uses (both of the OLED's, each chip of a
+two-chip board) is taken by another device is refused, and the setting keeps its value. Before it claims a board the device reads the product id (one
 register read, no reset), so a fuel gauge, an ANO encoder or a gamepad at the same address is left
 alone. `i2cscan` reads the product id only where two devices of different products can share the
 address (the encoder's configured address, 0x49 with an ANO or gamepad build), and names the

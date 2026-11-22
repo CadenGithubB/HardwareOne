@@ -21,6 +21,20 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this section collects
 everything user-visible since the v0.99.99.1 tag.
 
+### Changed (I2C buses and addresses)
+- Every `<device>bus` command (`oledbus`, `fuelgaugebus`, `inputbus`, `imubus`, `tofbus`,
+  `thermalbus`, `apdsbus`, `gpsbus`, `fmradiobus`, `rtcbus`, `presencebus`, `matrixbus`,
+  `servobus`, `encoderbus`) refuses a bus where an address the device uses is already taken by
+  another device of this build, with the same one-line reply as the address setters (for example
+  `Error: 0x36 on bus 1 is in use by Encoder (instance 1). fuelGaugeBus stays 0; ...`). Both of the
+  OLED's addresses and each chip of a two-chip device are checked.
+- `open<sensor>` / `close<sensor>` of a device with one instance refuse an instance number:
+  `openimu 2` answers "Error: imu has one instance." (they ignored arguments).
+- A device counts as connected (command help, `sensors`, the ESP-NOW capability report) when the
+  last bus scan found something at the bus and address this build uses for it, not when any
+  scanned device's name matched. The ESP-NOW report's `presence` flag looked at 0x61 and now
+  looks at the presence sensor's real address.
+
 ### Added (build configuration)
 - `xiao-status-sign`: a saved XIAO configuration for the meeting-room status sign. Two Adafruit
   4991 encoder boards on STEMMA QT are lit green or red with the LED commands (`ledcolor encoder`,
