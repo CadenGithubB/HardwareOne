@@ -45,6 +45,11 @@ void ps_free(void* p) {
   ::operator delete(p);
 }
 void broadcastOutput(const String& line) { gBroadcasts.push_back(line.c_str()); }
+std::vector<std::string> gWiped;  // lines secureClearString wiped, in order
+void secureClearString(String& s) {
+  gWiped.push_back(s.c_str());
+  s = "";
+}
 bool commandQueueFull() { return gQueueFull; }
 
 // --- helpers -------------------------------------------------------------------
@@ -61,6 +66,7 @@ static void reset() {
   gAllocFails = false;
   gRequestAllocFails = false;
   gBroadcasts.clear();
+  gWiped.clear();
 }
 static void runQueued(size_t i, bool ok, const char* reply) {
   gQueued[i].cb(ok, reply, gQueued[i].user);
@@ -84,6 +90,8 @@ int main() {
     assert(ok && std::string(out.c_str()) == "OK: up 5 s");
     assert(!p.busy() && p.poll(1502, out, ok) == PendingCommand::Poll::Idle);
     assert(std::string(p.context().auth.user.c_str()) == "alice");  // for delivery
+    // The line (it may carry a secret) is wiped once the command ends.
+    assert(gWiped.size() == 1 && gWiped[0] == "status");
     assert(gLiveAllocs == 0);
   }
   // A failed command reports ok=false with its own reply.

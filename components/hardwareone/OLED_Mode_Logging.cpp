@@ -275,7 +275,7 @@ static bool handleSystemConfigInput(uint32_t newlyPressed) {
     handled = true;
     if (loggingCurrentState == LOG_MENU_SYSTEM_CONFIG) {
       if (row == sysCfgTagsRow) {
-        oledRunCommand(gSettings.systemLogCategoryTags ? "logcategorytags 0" : "logcategorytags 1");
+        executeOledCommand(gSettings.systemLogCategoryTags ? "logcategorytags 0" : "logcategorytags 1");
       } else if (row == sysCfgCategoriesRow) {
         sysOpenList(LOG_MENU_SYSTEM_BANKS, 0);
       } else if (row == sysCfgPathRow) {
@@ -297,7 +297,7 @@ static bool handleSystemConfigInput(uint32_t newlyPressed) {
       if (flag >= 0) {
         char mask[80];
         formatSystemLogFlags(systemLogConfiguredFlags() ^ kDbgMask[flag], mask, sizeof(mask));
-        oledRunCommand(String("systemlogflags ") + mask);
+        executeOledCommand(String("systemlogflags ") + mask);
       } else {
         sysConfigBack();
       }
@@ -449,9 +449,9 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
     } else if (loggingCurrentState == LOG_MENU_SENSOR) {
       if (loggingMenuSelection == 0 && !gSensorLoggingRunning) {
         String startCmd = String("sensorlog start \"") + gSettings.sensorLogPath + "\"";
-        oledRunCommand(startCmd);
+        executeOledCommand(startCmd);
       } else if (loggingMenuSelection == 1 && gSensorLoggingRunning) {
-        oledRunCommand("sensorlog stop");
+        executeOledCommand("sensorlog stop");
       } else if (loggingMenuSelection == 2) {
         loggingCurrentState = LOG_MENU_SENSOR_CONFIG;
         loggingSensorConfigSelection = 0;
@@ -460,17 +460,17 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
       }
     } else if (loggingCurrentState == LOG_MENU_SYSTEM) {
       if (loggingMenuSelection == 0 && !gSystemLogRunning) {
-        oledRunCommand("log start");
+        executeOledCommand("log start");
       } else if (loggingMenuSelection == 1 && gSystemLogRunning) {
-        oledRunCommand("log stop");
+        executeOledCommand("log stop");
       } else if (loggingMenuSelection == 2) {
         openSystemConfig();
       }
     } else if (loggingCurrentState == LOG_MENU_SENSOR_CONFIG) {
       if (loggingSensorConfigSelection >= 0 &&
           loggingSensorConfigSelection < loggingIntervalRow) {
-        oledRunCommand(String("sensorlog sensors toggle ") +
-                       kSensorLogSensors[loggingSensorConfigSelection].name);
+        executeOledCommand(String("sensorlog sensors toggle ") +
+                           kSensorLogSensors[loggingSensorConfigSelection].name);
       } else if (loggingSensorConfigSelection == loggingIntervalRow) {
         uint32_t newInterval;
         const uint32_t interval = sensorLogIntervalMs();
@@ -479,14 +479,14 @@ static bool handleLoggingModeInput(int deltaX, int deltaY, uint32_t newlyPressed
         else if (interval == 10000) newInterval = 30000;
         else if (interval == 30000) newInterval = 60000;
         else newInterval = 1000;
-        oledRunCommand("sensorlog interval " + String(newInterval));
+        executeOledCommand("sensorlog interval " + String(newInterval));
       } else if (loggingSensorConfigSelection == loggingFormatRow) {
         const char* newFmt;
         const SensorLogFormat format = sensorLogCurrentFormat();
         if (format == SENSOR_LOG_TEXT) newFmt = "csv";
         else if (format == SENSOR_LOG_CSV) newFmt = "track";
         else newFmt = "text";
-        oledRunCommand(String("sensorlog format ") + newFmt);
+        executeOledCommand(String("sensorlog format ") + newFmt);
       } else if (loggingSensorConfigSelection == loggingBackRow) {
         loggingCurrentState = LOG_MENU_SENSOR;
         loggingMenuSelection = 2;

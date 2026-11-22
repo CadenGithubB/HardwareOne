@@ -477,7 +477,7 @@ static void swapRolesConfirmed(void* userData) {
   if (!oledRunCommand(cmd)) return;
   // Then local
   snprintf(cmd, sizeof(cmd), "bondrole %s", wasMaster ? "worker" : "master");
-  (void)oledRunCommand(cmd);
+  executeOledCommand(cmd);  // the last step: nothing reads its verdict
 }
 
 static void executeBondAction() {

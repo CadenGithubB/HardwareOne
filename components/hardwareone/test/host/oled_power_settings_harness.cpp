@@ -108,7 +108,6 @@ bool executeOledCommandWithResult(const String& line, char* out, size_t outSize)
   if (out && outSize) std::snprintf(out, outSize, "%s", reply.c_str());
   return ok;
 }
-void executeOledCommand(const String& line) { gFireAndForget.emplace_back(line.c_str()); }
 
 // ---- global toast (OLED_UI.h) -------------------------------------------------------
 enum class OledUiIcon : uint8_t { NONE, INFO, SUCCESS, WARNING, ERROR, QUESTION };
@@ -123,6 +122,16 @@ static void oledToastShow(const char* message, uint32_t = 3000, OledUiIcon = Ole
 #if HW1_HAVE_RUN_COMMAND
 // INSERT_RUN_COMMAND
 #endif
+
+// executeOledCommand runs a row's action in the background (OLED background
+// commands, step 1); oled_command_feedback runs that path. Here its command
+// lands at once: the checked executor above, the reply on the shared toast.
+void executeOledCommand(const String& line) {
+  gFireAndForget.emplace_back(line.c_str());
+#if HW1_HAVE_RUN_COMMAND
+  (void)oledRunCommand(line);
+#endif
+}
 
 // ---- Power screen doubles -------------------------------------------------------------
 struct OledScrollState { int selectedIndex = 0; };
@@ -244,7 +253,9 @@ static void caseOtherRowsUnchanged() {
   EXPECT(gFireAndForget.size() == 2 && gFireAndForget[0] == "lightsleep 20" &&
              gFireAndForget[1] == "oledmode off",
          "Sleep 20s / Screen Off still run their commands, ran: " + joined(gFireAndForget));
-  EXPECT(gSubmitted.empty() && gWrites.empty(), "the other rows do not touch the power-save timeout");
+  bool powersave = false;
+  for (const std::string& line : gSubmitted) powersave = powersave || line.rfind("powersave", 0) == 0;
+  EXPECT(!powersave && gWrites.empty(), "the other rows do not touch the power-save timeout");
 }
 
 int main() {

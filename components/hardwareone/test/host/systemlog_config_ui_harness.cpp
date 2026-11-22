@@ -112,6 +112,9 @@ bool oledRunCommand(const String& command) {
   }
   return true;
 }
+// The rows run in the background (OLED background commands, step 1); here the
+// command lands at once through the same boundary.
+static void executeOledCommand(const String& command) { (void)oledRunCommand(command); }
 
 // The flag hooks after a whole-mask change (System_Debug.cpp; run by
 // test_radio_stack_logs and system_log_status). Counted only.

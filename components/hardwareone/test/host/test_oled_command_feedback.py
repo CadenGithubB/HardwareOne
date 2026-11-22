@@ -2,8 +2,9 @@
 """Execute the OLED action helper and its callers against a scripted executor.
 
 Splices in the production OLED action helpers (OLED_Utils.cpp oledRunCommand,
-its reply-to-toast mapping oledCommandReplyText, and oledRunCommandAsync with
-its frame-loop delivery) and real callers: the
+its reply-to-toast mapping oledCommandReplyText, and the one OLED command in
+flight behind oledRunCommandAsync and the background executeOledCommand, built
+on System_PendingCommand, with its frame-loop delivery) and real callers: the
 Automations toggle/delete actions with their shared toast
 (OLED_Mode_Automations.cpp), the Quick Settings radio, Wi-Fi, Bluetooth and HTTP
 rows (OLED_SettingsEditor.cpp) and the Web menu's server confirm callbacks
@@ -16,9 +17,16 @@ first sentence without its error token, "Failed" when empty) and that the caller
 only when the command succeeded. The Quick Settings rows submit without
 waiting: the executor double finishes each command only when a case says so,
 and the reply is delivered by the display-task poll (one request at a time, a
-refused queue toasts, a reply from a replaced display session is dropped). Static checks cover the call sites the harness
-does not run: executeOledCommand reports through oledRunCommand, so no screen
-drops a reply; the Quick Settings section never waits on a command; the
+full queue ends as a refusal after 2 s, a reply from a replaced display session is dropped).
+The background executeOledCommand (OLED background commands, step 1,
+2026-11-22) is run too: a press while a command runs shows "Busy" and queues
+nothing, the busy flag clears when it ends, and the toast carries the reply on
+success, the refusal's reason (admin gates included), a full queue or the
+60 s timeout. Static checks cover the call sites the harness does not run:
+executeOledCommand runs in the background, every OLED screen either uses
+oledRunCommand's verdict or runs the action in the background (a remaining
+wait says why and that step 2 moves it), the frame loop delivers the reply
+whether the panel runs or not; the Quick Settings section never waits on a command; the
 unavailable-page actions (OLED_Utils.cpp handleOledActionButton) print their
 success lines only when the command succeeded; the
 Bluetooth menu's on/off row runs openble, not the role-aware Quick Settings
@@ -44,11 +52,18 @@ from reply_words_source import reply_prelude
 RUN_COMMAND = "bool oledRunCommand("
 REPLY_TEXT = "void oledCommandReplyText("
 REPORT_REPLY = "static bool oledReportCommandReply("
-# oledRunCommandAsync: its one-request mailbox, the executor callback, the
-# submit and the display-task delivery, in source order.
-ASYNC_STATE = "namespace {\nstruct OledCommandReply {"
-ASYNC = ("static void oledCommandReplyArrived(", "bool oledRunCommandAsync(",
-         "static void oledDeliverCommandReply(")
+# The one OLED command in flight: its state, the busy flag, the success text,
+# the start, oledRunCommandAsync, the background executeOledCommand and the
+# display-task delivery, in source order.
+ASYNC_STATE = "namespace {\nstruct OledCommandInFlight {"
+ASYNC = ("bool oledCommandBusy(", "static void oledCommandSuccessText(",
+         "static bool oledStartBackgroundCommand(", "bool oledRunCommandAsync(",
+         "void executeOledCommand(", "static void oledDeliverCommandReply(")
+# Every OLED screen source whose actions run commands.
+OLED_SOURCES_GLOB = ("OLED_*.cpp", "i2csensor_*_oled.h")
+# A wait that stays (value scroll, a chained or completion-dependent action)
+# carries this tag on its line; step 2 of the OLED background plan moves them.
+WAIT_TAG = "// waits:"
 QUICK_RUNNER = ("static void quickCommandDone(", "static void runQuickCommand(")
 TOGGLE_COMMAND = "const char* oledBluetoothToggleCommand("
 AUTOMATIONS = ("static void autoShowToast(", "static void autoToggleSelected(",
@@ -72,15 +87,17 @@ def strip_comments(text: str) -> str:
     return re.sub(r"(?m)(^|\s)//[^\n]*", r"\1", text)
 
 
-def static_checks(read) -> list[str]:
+def static_checks(read, component: Path) -> list[str]:
     failures = []
     utils = read("OLED_Utils.cpp")
-    # An action that needs no verdict still toasts a refusal: executeOledCommand
-    # reports as oledRunCommand does.
+    # An action that needs no verdict runs in the background and still toasts
+    # its reply.
     execute = "void executeOledCommand("
-    if execute in utils and "oledRunCommand(" not in strip_comments(extract_block(utils, execute)):
-        failures.append("executeOledCommand does not report through oledRunCommand: "
-                        "its callers drop the reply")
+    if execute in utils and "oledStartBackgroundCommand(" not in strip_comments(
+            extract_block(utils, execute)):
+        failures.append("executeOledCommand does not run in the background: "
+                        "every action that ignores its verdict holds the frame loop")
+    failures += wait_sites(read, component)
     editor = read("OLED_SettingsEditor.cpp")
     start = editor.index("// Quick Settings - Dynamic item registry")
     quick = editor[start:editor.index("static void initQuickItems(", start)]
@@ -89,9 +106,12 @@ def static_checks(read) -> list[str]:
     if waits:
         failures.append("Quick Settings waits on cmd_exec in the frame loop for: " +
                         ", ".join(" ".join(w.split()) for w in waits))
-    if ASYNC[1] in utils and "oledDeliverCommandReply();" not in strip_comments(
+    if ASYNC[3] in utils and "oledDeliverCommandReply();" not in strip_comments(
+            extract_block(utils, "void oledUpdate(")):
+        failures.append("oledUpdate never delivers the OLED command in flight")
+    if ASYNC[3] in utils and "oledCommandBusyRender();" not in strip_comments(
             extract_block(utils, "void updateOledDisplay(")):
-        failures.append("updateOledDisplay never delivers oledRunCommandAsync replies")
+        failures.append("the frame never draws the busy mark of the OLED command in flight")
 
     action = strip_comments(extract_block(read("OLED_Utils.cpp"), "void handleOledActionButton("))
     for command in ('"automation system enable"', '"openhttp"', '"closehttp"', '"openble"'):
@@ -109,8 +129,42 @@ def static_checks(read) -> list[str]:
     if not power:
         failures.append("the Bluetooth menu has no on/off row")
     elif any(call not in power.group(1) for call in
-             ('oledRunCommand("openble")', 'oledRunCommand("openconsole")')):
-        failures.append("the Bluetooth menu's on/off row must report both client and server-only starts")
+             ('executeOledCommand("openble")', 'executeOledCommand("openconsole")')):
+        failures.append("the Bluetooth menu's on/off row must run both client and server-only "
+                        "starts in the background")
+    return failures
+
+
+def wait_sites(read, component: Path) -> list[str]:
+    """Every oledRunCommand call on an OLED screen uses its verdict or says why it waits.
+
+    A bare statement throws the verdict away and still holds the frame loop:
+    such an action belongs on the background executeOledCommand. The remaining
+    waits (value scroll, chained or completion-dependent actions) carry the
+    WAIT_TAG comment naming the reason, the list step 2 works through.
+    """
+    failures = []
+    names = sorted({path.name for pattern in OLED_SOURCES_GLOB for path in component.glob(pattern)})
+    verdict = re.compile(r"(?:\bif\s*\(\s*!?\s*|=\s*|&&\s*|\|\|\s*|return\s+)$")
+    tagged = 0
+    for name in names:
+        lines = read(name).splitlines()
+        for number, line in enumerate(lines, 1):
+            code = line.split("//", 1)[0]
+            for match in re.finditer(r"\boledRunCommand\s*\(", code):
+                before = code[:match.start()]
+                if re.search(r"\bbool\s+$", before):
+                    continue  # the definition
+                if verdict.search(before):
+                    continue  # the caller reads the verdict
+                if before.rstrip().endswith("(void)") and WAIT_TAG in line:
+                    tagged += 1
+                    continue
+                failures.append(f"{name}:{number}: oledRunCommand's verdict is ignored but the "
+                                "frame loop still waits; use executeOledCommand, or tag the line "
+                                f"'(void)oledRunCommand(...);  {WAIT_TAG} <why>'")
+    if tagged == 0 and names:
+        failures.append("no tagged OLED waits found; is the source glob right?")
     return failures
 
 
@@ -125,10 +179,18 @@ def generated(read) -> tuple[str, bool, bool, bool]:
         start = utils.index(ASYNC_STATE)
         helpers.append(utils[start:utils.index(ASYNC[0], start)])
         helpers.extend(extract_block(utils, marker) for marker in ASYNC)
+    pending = ""
+    if have_async:
+        # System_PendingCommand as is, its includes replaced by the harness's doubles.
+        pending = "\n".join(
+            "\n".join(line for line in read(name).splitlines()
+                      if not line.startswith(("#include", "#pragma once")))
+            for name in ("System_PendingCommand.h", "System_PendingCommand.cpp"))
     editor = read("OLED_SettingsEditor.cpp")
     quick = [m for m in QUICK_RUNNER if m in editor] + list(QUICK_SETTINGS[1:])
     harness = (HERE / "oled_command_feedback_harness.cpp").read_text()
     inserts = (
+        ("// INSERT_PENDING_COMMAND", pending),
         ("// INSERT_RUN_COMMAND", "\n\n".join(helpers)),
         ("// INSERT_AUTOMATIONS", functions(read("OLED_Mode_Automations.cpp"),
                                             "OLED_Mode_Automations.cpp", AUTOMATIONS)),
@@ -171,7 +233,7 @@ def main() -> None:
         unit.write_text(reply_prelude(args.component) + unit_text)
         subprocess.run([args.cxx, *flags, str(unit), "-o", str(executable)], check=True, timeout=300)
         run = subprocess.run([str(executable)], timeout=60)
-    failures = static_checks(read)
+    failures = static_checks(read, args.component)
     if not have_reply_text:
         failures.insert(0, "OLED_Utils.cpp has no oledCommandReplyText(): OLED screens have no shared "
                            "reply-to-toast mapping (mapping cases not compiled)")
@@ -186,7 +248,7 @@ def main() -> None:
     if run.returncode != 0 or failures:
         raise SystemExit("oled_command_feedback: FAILED")
     print("oled_command_feedback: refusals toasted, success text only on success, no dropped replies, "
-          "quick rows never wait")
+          "quick rows never wait, fire-and-forget actions run in the background")
 
 
 if __name__ == "__main__":

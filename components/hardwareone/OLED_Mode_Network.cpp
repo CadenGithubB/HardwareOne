@@ -231,11 +231,11 @@ void displayNetworkInfoRendered() {
 }
 
 // The radio carries WiFi and ESP-NOW, so turning it off asks first. Network
-// actions run through oledRunCommand, which toasts a refusal; the rows then
-// show the new state.
+// actions run in the background (executeOledCommand), which toasts the
+// outcome; the rows then show the new state.
 static void radioOffConfirmed(void* userData) {
   (void)userData;
-  oledRunCommand("radiopower off");
+  executeOledCommand("radiopower off");
 }
 
 static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed) {
@@ -256,15 +256,15 @@ static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t new
           oledConfirmRequest("Turn radio off?", "Stops WiFi + ESP-NOW", radioOffConfirmed,
                              nullptr, false);
         } else {
-          oledRunCommand("radiopower on");
+          executeOledCommand("radiopower on");
         }
         break;
       case NET_ACT_CONNECT_BEST:
-        oledRunCommand("openwifi --best");
+        executeOledCommand("openwifi --best");
         break;
       case NET_ACT_DISCONNECT:
         // Drop the AP but keep the radio (and the web server) up.
-        oledRunCommand("wifidisconnect");
+        executeOledCommand("wifidisconnect");
         break;
       case NET_ACT_VIEW_STATUS:
         requestOledMode(OLED_NETWORK_STATUS, "network.status");
@@ -282,7 +282,7 @@ static bool networkMainInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t new
         requestOledMode(OLED_NETWORK_WIFI_REMOVE, "network.wifi.remove");
         break;
       case NET_ACT_AUTO_START:
-        oledRunCommand(gSettings.wifiAutoStart ? "wifiautostart 0" : "wifiautostart 1");
+        executeOledCommand(gSettings.wifiAutoStart ? "wifiautostart 0" : "wifiautostart 1");
         break;
       case NET_ACT_SETTINGS:
         if (openSettingsEditorForModule("wifi")) {
@@ -620,7 +620,7 @@ static bool networkWifiListInputHandler(int /*dx*/, int /*dy*/, uint32_t newlyPr
     if (sSavedNetSnapshotValid && sel >= 0 && sel < sSavedNetSnapshot.count) {
       // The command resolves this boot-local identity when it executes. A
       // removed entry fails instead of connecting a different network by index.
-      oledRunCommand("openwifi --saved-id " + String(sSavedNetSnapshot.entries[sel].id));
+      executeOledCommand("openwifi --saved-id " + String(sSavedNetSnapshot.entries[sel].id));
       oledMenuBack();  // pop back to the WiFi menu after kicking off the connect
     }
     return true;
@@ -630,7 +630,7 @@ static bool networkWifiListInputHandler(int /*dx*/, int /*dy*/, uint32_t newlyPr
 
 static void onWifiRemoveConfirmed(void* /*ud*/) {
   if (sPendingRemoveId != 0) {
-    oledRunCommand("wifirmid " + String(sPendingRemoveId));
+    (void)oledRunCommand("wifirmid " + String(sPendingRemoveId));  // waits: step 2 (list reread next)
     sPendingRemoveId = 0;
     populateSavedNetScroll();
     oledMarkDirty();
@@ -959,15 +959,16 @@ void displayWebStatsRendered() {
 }
 
 #if ENABLE_HTTP_SERVER
-// oledRunCommand toasts a refusal; the menu's rows show the new state.
+// The command runs in the background and toasts its outcome; the menu's rows
+// show the new state.
 static void webServerStartConfirmed(void* userData) {
   (void)userData;
-  oledRunCommand("openhttp");
+  executeOledCommand("openhttp");
 }
 
 static void webServerStopConfirmed(void* userData) {
   (void)userData;
-  oledRunCommand("closehttp");
+  executeOledCommand("closehttp");
 }
 #endif
 
@@ -989,7 +990,7 @@ static bool webMenuInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
 #endif
         break;
       case WEB_ACT_AUTO_START:
-        oledRunCommand(gSettings.httpAutoStart ? "httpautostart 0" : "httpautostart 1");
+        executeOledCommand(gSettings.httpAutoStart ? "httpautostart 0" : "httpautostart 1");
         break;
       case WEB_ACT_HTTPS:
 #if ENABLE_HTTPS

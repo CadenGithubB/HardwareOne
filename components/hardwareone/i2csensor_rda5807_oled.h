@@ -94,8 +94,10 @@ static void fmRadioToggleConfirmed(void* userData) {
 }
 
 // Input handler for FM Radio OLED mode. Full tuner controls (all dispatched
-// through executeOledCommand so they carry the [CMD] audit line and the OLED
-// auth identity — same stance as the LED screen):
+// through the OLED command helpers so they carry the [CMD] audit line and the
+// OLED auth identity — same stance as the LED screen; presses run in the
+// background, the tune steps still wait until step 2 of the OLED background
+// plan):
 //   L/R      tune -/+ 0.1 MHz        Up/Down  seek down/up (async core)
 //   A        mute/unmute             Y        volume ladder 0>3>6>9>12>15>0
 //   X        open/close (confirm)    B        back (falls through)
@@ -126,7 +128,7 @@ static bool fmRadioInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
     if (f > 10800) f = 10800;
     char cmd[28];
     snprintf(cmd, sizeof(cmd), "fmradiotune %d", f);
-    executeOledCommand(cmd);
+    (void)oledRunCommand(cmd);  // waits: step 2 (value scroll, one command per step)
     return true;
   }
 

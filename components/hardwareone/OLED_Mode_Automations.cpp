@@ -841,7 +841,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
   // X = Start the scheduler if stopped, or toggle selected automation
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
     if (!automationSchedulerRunning()) {
-      oledRunCommand("automation system enable");
+      (void)oledRunCommand("automation system enable");  // waits: step 2 (refresh follows it)
       autoForceRefresh = true;
       return true;
     }

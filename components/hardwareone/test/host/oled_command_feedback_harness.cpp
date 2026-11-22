@@ -1,15 +1,19 @@
 #include "OLED_MessageText.h"
 // Host harness for test_oled_command_feedback.py. The driver splices production
 // code in at the INSERT_* markers: the OLED action helpers (OLED_Utils.cpp
-// oledRunCommand, oledCommandReplyText and oledRunCommandAsync with its
-// frame-loop delivery, when the tree has them) and real callers: the Automations
-// toggle/delete actions and their shared toast, the Quick Settings rows and
-// the Network screen's HTTP confirm callbacks. Everything else is a double:
-// the OLED command executor, the global toast, the Automations list rows and
-// the radio / Wi-Fi / Bluetooth / HTTP state.
+// oledRunCommand, oledCommandReplyText, and the one OLED command in flight
+// behind oledRunCommandAsync and the background executeOledCommand, with its
+// frame-loop delivery, when the tree has them), System_PendingCommand as is,
+// and real callers: the Automations toggle/delete actions and their shared
+// toast, the Quick Settings rows and the Network screen's HTTP confirm
+// callbacks. Everything else is a double: the OLED command executor and queue,
+// the global toast, the Automations list rows and the radio / Wi-Fi /
+// Bluetooth / HTTP state.
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -60,7 +64,10 @@ bool executeOledCommandWithResult(const String& cmd, char* out, size_t outSize) 
   if (out && outSize) std::snprintf(out, outSize, "%s", gExecText.c_str());
   return gExecOk;
 }
+#if !HW1_HAVE_ASYNC_COMMAND
+// A tree without the background path: the reply is dropped.
 void executeOledCommand(const String& cmd) { gFireAndForget.emplace_back(cmd.c_str()); }
+#endif
 
 // ---- global toast (OLED_UI.h) -------------------------------------------------------
 enum class OledUiIcon : uint8_t { NONE, INFO, SUCCESS, WARNING, ERROR, QUESTION };
@@ -74,22 +81,32 @@ static void oledToastShow(const char* message, uint32_t duration = 3000, OledUiI
   ++gToastCount;
 }
 
-// ---- async executor doubles (oledRunCommandAsync) -------------------------------------
+// ---- the command in flight: executor and queue doubles ------------------------------
 // submitCommandAsync queues; the executor runs a queued line only when a case
 // calls finishCommand(), on the case's own schedule, as cmd_exec would.
+// System_PendingCommand.h/.cpp are spliced in unchanged below, against these
+// doubles.
 #if HW1_HAVE_ASYNC_COMMAND
 using TransportSessionEpoch = uint32_t;
 inline constexpr TransportSessionEpoch kNoTransportSessionEpoch = 0;
 typedef void (*ExecAsyncCallback)(bool ok, const char* result, void* userData);
 typedef void (*OledCommandDoneFn)(bool ok, const void* context);
+struct CommandContext { TransportSessionEpoch transportSessionEpoch = kNoTransportSessionEpoch; };
 struct Command {
   String line;
-  struct { TransportSessionEpoch transportSessionEpoch = kNoTransportSessionEpoch; } ctx;
+  CommandContext ctx;
 };
-typedef int portMUX_TYPE;
-#define portMUX_INITIALIZER_UNLOCKED 0
-#define portENTER_CRITICAL(mux) ((void)(mux))
-#define portEXIT_CRITICAL(mux) ((void)(mux))
+#include "System_CommandLimits.h"
+#define DEBUG_CMD_FLOWF(...) do {} while (0)
+#define ERROR_COMMANDF(...) do {} while (0)
+enum class AllocPolicy { PreferPsram };
+static long gLiveAllocs = 0;
+void* ps_alloc(size_t size, AllocPolicy, const char*) { ++gLiveAllocs; return ::operator new(size); }
+void ps_free(void* p) { if (p) { --gLiveAllocs; ::operator delete(p); } }
+static std::vector<std::string> gBroadcasts;
+void broadcastOutput(const String& line) { gBroadcasts.emplace_back(line.c_str()); }
+static std::vector<std::string> gWiped;  // lines the in-flight slot wiped when it ended
+void secureClearString(String& s) { gWiped.emplace_back(s.c_str()); s = String(); }
 static TransportSessionEpoch gUiEpoch = 7;    // the display session a command is built for
 static TransportSessionEpoch gLiveEpoch = 7;  // the display session live now
 static Command buildOledCommand(const String& line) {
@@ -108,11 +125,15 @@ bool submitCommandAsync(const Command& command, ExecAsyncCallback callback, void
   gQueued.push_back({command.line.c_str(), callback, userData});
   return true;
 }
+bool commandQueueFull() { return !gQueueAccepts; }
 static bool oledDisplayEpochLiveUnderWriter(TransportSessionEpoch epoch) {
   return epoch != kNoTransportSessionEpoch && epoch == gLiveEpoch;
 }
+static bool gOwnerTask = true;  // the caller is the display (owner) task
+static bool oledIsOwnerTask() { return gOwnerTask; }
 static int gDirtyMarks = 0;
 static void oledMarkDirty() { ++gDirtyMarks; }
+// INSERT_PENDING_COMMAND
 #endif
 
 // ---- production: the OLED action helper ---------------------------------------------
@@ -185,12 +206,30 @@ static void resetWorld() {
   server = nullptr;
   gNowMs += 10000;
 #if HW1_HAVE_ASYNC_COMMAND
-  gQueued.clear();
+  // A case leaves nothing in flight: whatever is still queued finishes (a
+  // late reply frees its abandoned slot) and the reply is taken, then the
+  // world is reset.
   gQueueAccepts = true;
+  for (int i = 0; i < 8; ++i) {
+    while (!gQueued.empty()) {
+      const QueuedCommand next = gQueued.front();
+      gQueued.erase(gQueued.begin());
+      next.callback(true, "OK", next.userData);
+    }
+    if (!sOledCommand.pending.busy()) break;
+    gNowMs += PendingCommand::kQueueTryEveryMs;
+    oledDeliverCommandReply();
+  }
+  EXPECT(!sOledCommand.pending.busy() && gLiveAllocs == 0, "the previous case left a command in flight");
+  gQueued.clear();
   gUiEpoch = gLiveEpoch = 7;
   gDirtyMarks = 0;
-  sOledCommandInFlight = false;
-  sOledReply = OledCommandReply();
+  gOwnerTask = true;
+  gBroadcasts.clear();
+  gWiped.clear();
+  gToast.clear();
+  gToastCount = 0;
+  gChecked.clear();
 #endif
 }
 
@@ -519,18 +558,19 @@ static void case_quick_async() {
 
   // One request at a time: another row is refused locally and queues nothing.
   toggleQuickWifi();
-  EXPECT(gQueued.size() == 1 && gChecked.size() == 1 && gToast == "Please wait",
-         "a second row while one runs toasts 'Please wait', ran: " + ran() + ", toast: '" + gToast + "'");
+  EXPECT(gQueued.size() == 1 && gChecked.size() == 1 && gToast == "Busy",
+         "a second row while one runs toasts 'Busy', ran: " + ran() + ", toast: '" + gToast + "'");
 
+  const int marks = gDirtyMarks;
   finishCommand();
-  EXPECT(gDirtyMarks == 2 && std::string(quickStatusMsg) == "Working...",
-         "the executor only stores the reply and asks for a frame");
+  EXPECT(gDirtyMarks == marks && std::string(quickStatusMsg) == "Working..." && gToast == "Busy",
+         "the executor only stores the reply; the frame loop picks it up");
   nextFrame();
   EXPECT(gToast == "Radio OFF" && quickStatusMsg[0] == '\0',
          "the next frame shows the result, status: '" + std::string(quickStatusMsg) + "'");
   nextFrame();
-  EXPECT(gToast == "Radio OFF" && gToastCount == 2,
-         "a reply is delivered once");
+  EXPECT(gToast == "Radio OFF" && gToastCount == 2 && !oledCommandBusy(),
+         "a reply is delivered once and the slot is free");
 
   // After it lands the next row runs.
   WiFi.connected = false;
@@ -540,13 +580,21 @@ static void case_quick_async() {
   land();
   EXPECT(gToast == "WiFi ON", "and shows its own result");
 
-  // A full command queue: told at once, nothing in flight, the next press works.
+  // A full command queue is retried for 2 s without holding the frame loop,
+  // then ends as a refusal: its reason on the toast, the row free again.
   resetWorld();
   gQueueAccepts = false;
   toggleQuickRadio();
-  EXPECT(gQueued.empty() && quickStatusMsg[0] == '\0' && gToast == "Busy - try again",
-         "a refused queue toasts 'Busy - try again', status: '" + std::string(quickStatusMsg) +
-             "', toast: '" + gToast + "'");
+  EXPECT(gQueued.empty() && std::string(quickStatusMsg) == "Working..." && oledCommandBusy(),
+         "a full queue keeps the press waiting for room, status: '" + std::string(quickStatusMsg) + "'");
+  gNowMs += PendingCommand::kQueueRetryMs - 1;
+  nextFrame();
+  EXPECT(oledCommandBusy() && gToastCount == 0, "still retrying inside 2 s");
+  gNowMs += PendingCommand::kQueueTryEveryMs;  // the next try after 2 s
+  nextFrame();
+  EXPECT(!oledCommandBusy() && quickStatusMsg[0] == '\0' &&
+             gToast == "Command queue full. Try again in a few seconds." && gToastIcon == OledUiIcon::ERROR,
+         "after 2 s the full queue is the refusal, toast: '" + gToast + "'");
   gQueueAccepts = true;
   toggleQuickRadio();
   land();
@@ -586,17 +634,137 @@ static void case_quick_async() {
 }
 #endif
 
+
+#if HW1_HAVE_ASYNC_COMMAND
+// The background executeOledCommand (OLED background commands, step 1): the
+// press returns at once, the busy flag shows while it runs, a second press is
+// refused with "Busy" and queues nothing, and the reply is the toast when it
+// ends: what the command did on success, the refusal's reason otherwise.
+static void case_background_actions() {
+  gCase = "background_actions";
+  resetWorld();
+  gExecText = "OK: Radio powered off";
+  executeOledCommand("radiopower off");
+  EXPECT(gQueued.size() == 1 && gQueued[0].line == "radiopower off" && oledCommandBusy() &&
+             gToastCount == 0 && gDirtyMarks == 1,
+         "the press queues the line at once and the busy mark asks for a frame, ran: " + ran());
+  nextFrame();
+  EXPECT(oledCommandBusy() && gToastCount == 0, "a frame before the reply changes nothing");
+
+  // Busy: refused at once, nothing queued, for both entry points.
+  executeOledCommand("ledclear");
+  EXPECT(gQueued.size() == 1 && gChecked.size() == 1 && gToast == "Busy" && gToastCount == 1,
+         "a press while one runs toasts 'Busy' and queues nothing, ran: " + ran());
+  static int doneCalls = 0;
+  doneCalls = 0;
+  EXPECT(!oledRunCommandAsync("openwifi --best", [](bool, const void*) { ++doneCalls; }, nullptr) &&
+             gQueued.size() == 1 && gToastCount == 2 && doneCalls == 0,
+         "oledRunCommandAsync shares the one slot: refused, done not called");
+
+  land();
+  EXPECT(!oledCommandBusy() && gToast == "Radio powered off" && gToastIcon == OledUiIcon::SUCCESS &&
+             gToastCount == 3,
+         "success shows the reply without its OK stamp, toast: '" + gToast + "'");
+  EXPECT(gWiped.size() == 1 && gWiped[0] == "radiopower off", "the line is wiped when it ends");
+  nextFrame();
+  EXPECT(gToastCount == 3, "a reply is shown once");
+
+  // Admin and super-admin refusals keep their short reason.
+  resetWorld();
+  refuse(kAdminRefusal);
+  executeOledCommand("radiopower off");
+  land();
+  EXPECT(gToast == "Needs an admin" && gToastIcon == OledUiIcon::ERROR && gToastCount == 1,
+         "an admin refusal toasts 'Needs an admin', toast: '" + gToast + "'");
+  resetWorld();
+  refuse("Error: Super-admin access required for command 'espnowsetpassphrase'.");
+  executeOledCommand("espnowsetpassphrase primary \"x\"");
+  land();
+  EXPECT(gToast == "Needs a super admin", "a super-admin refusal, toast: '" + gToast + "'");
+  resetWorld();
+  refuse("Error: Not connected to WiFi");
+  executeOledCommand("openhttp");
+  land();
+  EXPECT(gToast == "Not connected to WiFi", "any other refusal keeps its reason, toast: '" + gToast + "'");
+
+  // What a success says.
+  const struct { const char* reply; const char* toast; } kSuccess[] = {
+    {"OK", "Done"},
+    {"", "Done"},
+    {"OK: ", "Done"},
+    {"SUCCESS: Sensor logging started", "Sensor logging started"},
+    {"{\"schema\":1,\"ok\":true}", "Done"},
+    {"OK: Wi-Fi connected\nIP 10.0.0.2", "Wi-Fi connected"},
+    {"Thermal camera opened. Frames every 500 ms on the OLED and the web page while it runs.",
+     "Thermal camera opened."},
+  };
+  for (const auto& c : kSuccess) {
+    resetWorld();
+    gExecText = c.reply;
+    executeOledCommand("cmd");
+    land();
+    EXPECT(gToast == c.toast && gToastIcon == OledUiIcon::SUCCESS,
+           std::string("success reply '") + c.reply + "' toasts '" + c.toast + "', got '" + gToast + "'");
+  }
+
+  // No reply in 60 s: the timeout is the toast, the slot is free, and the late
+  // reply is dropped (its mailbox freed by the executor).
+  resetWorld();
+  executeOledCommand("openwifi --best");
+  gNowMs += PendingCommand::kReplyWaitMs - 1;
+  nextFrame();
+  EXPECT(oledCommandBusy() && gToastCount == 0, "still waiting inside 60 s");
+  gNowMs += 1;
+  nextFrame();
+  EXPECT(!oledCommandBusy() && gToast == "Command timed out after 60 s." &&
+             gToastIcon == OledUiIcon::ERROR,
+         "after 60 s the timeout is the toast, toast: '" + gToast + "'");
+  gExecText = "OK: Connected";
+  land();
+  EXPECT(gToastCount == 1 && gLiveAllocs == 0, "the late reply shows nothing and frees its mailbox");
+  executeOledCommand("ledclear");
+  EXPECT(gQueued.size() == 1 && gQueued[0].line == "ledclear", "the next press runs");
+  land();
+
+  // The display session changed while it ran: nothing is shown.
+  resetWorld();
+  refuse(kAdminRefusal);
+  executeOledCommand("radiopower off");
+  gLiveEpoch = 8;
+  land();
+  EXPECT(gToastCount == 0 && !oledCommandBusy(), "a replaced session's reply shows nothing");
+
+  // A line the executor can never take ends at the press with its reason.
+  resetWorld();
+  executeOledCommand("");
+  EXPECT(!oledCommandBusy() && gQueued.empty() && gToastIcon == OledUiIcon::ERROR &&
+             gToast == "Empty command. Type a command, or help for the list.",
+         "an empty line is refused at once, toast: '" + gToast + "'");
+
+  // Another task than the display's waits on the checked executor as before.
+  resetWorld();
+  gOwnerTask = false;
+  refuse(kAdminRefusal);
+  executeOledCommand("radiopower off");
+  EXPECT(gQueued.empty() && !oledCommandBusy() && gToast == "Needs an admin" &&
+             gChecked.size() == 1 && gChecked[0] == "radiopower off",
+         "off the display task the action waits and toasts its refusal, ran: " + ran());
+}
+#endif
+
 static void case_network_http_callbacks() {
   gCase = "network_http_callbacks";
   resetWorld();
   refuse(kAdminRefusal);
   webServerStartConfirmed(nullptr);
+  land();
   EXPECT(ran() == "openhttp" && gToast == "Needs an admin",
          "a refused HTTP start from the Web menu shows the refusal, ran: " + ran() +
              ", toast: '" + gToast + "'");
   resetWorld();
   refuse(kAdminRefusal);
   webServerStopConfirmed(nullptr);
+  land();
   EXPECT(ran() == "closehttp" && gToast == "Needs an admin",
          "a refused HTTP stop from the Web menu shows the refusal, toast: '" + gToast + "'");
 }
@@ -616,8 +784,10 @@ int main() {
   case_quick_bluetooth_http();
 #if HW1_HAVE_ASYNC_COMMAND
   case_quick_async();
+  case_background_actions();
 #endif
   case_network_http_callbacks();
+  resetWorld();  // checks the last case left nothing in flight
   if (gFailures) {
     std::fprintf(stderr, "%d check(s) failed\n", gFailures);
     return 1;

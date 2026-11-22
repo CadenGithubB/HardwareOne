@@ -168,9 +168,11 @@ attachment should report unavailable without breaking unrelated services.
   a command failed; the executor applies it, so a caller that has the
   executor's result uses that result and compares no prefixes itself. The host
   test `command_reply_contract` checks both sides.
-  Display command actions use `oledRunCommand`/`oledRunCommandAsync` and the shared reply
-  mapping so failures share an error icon, wrapping and an eight-second minimum
-  toast. Event notifications and local feedback share the OLED_UI queue and
+  Display command actions use `executeOledCommand` (background, for an action
+  that ignores the verdict), `oledRunCommandAsync` (background with a done
+  callback) or `oledRunCommand` (waits; only where the screen uses the verdict)
+  and the shared reply mapping so failures share an error icon, wrapping and an
+  eight-second minimum toast. Event notifications and local feedback share the OLED_UI queue and
   renderer; local validation uses explicit error severity. Confirmations pause
   feedback, and session replacement clears it. See [OLED feedback](docs/OLED_FEEDBACK.md).
   Toasts dismiss automatically and do not capture input. Do not replace a

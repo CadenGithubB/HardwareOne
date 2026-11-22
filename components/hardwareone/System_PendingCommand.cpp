@@ -53,7 +53,10 @@ void PendingCommand::onDone(bool ok, const char* result, void* userData) {
 void PendingCommand::finish() {
   state_ = State::Idle;
   slot_ = nullptr;
-  // command_ keeps its context for context() until the next start().
+  // The line may carry a secret (a passphrase typed on the OLED keyboard);
+  // nothing reads it after the end, so it is wiped here rather than kept
+  // until the next start(). command_ keeps its context for context().
+  secureClearString(command_.line);
 }
 
 PendingCommand::Poll PendingCommand::poll(uint32_t nowMs, String& out, bool& ok) {

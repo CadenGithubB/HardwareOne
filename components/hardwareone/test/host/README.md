@@ -5666,15 +5666,16 @@ python3 components/hardwareone/test/host/test_oled_command_feedback.py --sanitiz
 ```
 
 `oled_command_feedback` compiles the shipping OLED action helpers (`oledRunCommand`, its
-reply-to-toast mapping `oledCommandReplyText` and `oledRunCommandAsync`, all from
-`OLED_Utils.cpp`) and real callers:
+reply-to-toast mapping `oledCommandReplyText`, and the one OLED command in flight behind
+`oledRunCommandAsync` and the background `executeOledCommand`, all from `OLED_Utils.cpp`,
+with `System_PendingCommand.h/.cpp` spliced in unchanged) and real callers:
 
 - the Automations toggle and delete actions with shared feedback (`OLED_Mode_Automations.cpp`);
 - the Quick Settings radio, Wi-Fi, Bluetooth and HTTP rows (`OLED_SettingsEditor.cpp`);
 - the Network menu's HTTP confirm callbacks (`OLED_Mode_Network.cpp`).
 
-The OLED command executor (scripted verdict and reply), the global toast, the Automations
-rows and the radio/BLE/HTTP state are doubles.
+The OLED command executor and queue (scripted verdict and reply), the global toast, the
+Automations rows and the radio/BLE/HTTP state are doubles.
 
 The checks:
 
@@ -5689,16 +5690,27 @@ The checks:
   only on success; local refusals ("Radio is off. Turn it on first.", "Connect Wi-Fi first.") still run no command.
 - The Quick Settings rows never wait for cmd_exec (the P4 radio toggle held the display
   task for 637 ms). The executor double finishes a queued command only when a case says so.
-  The row shows "Working..." and returns at once; the executor only stores the reply and asks
-  for a frame; the next frame shows the row's result, once. A second row while one runs
-  toasts "Please wait" and queues nothing; a refused queue toasts "Busy - try again" and
-  leaves nothing in flight; a reply from a replaced display session shows nothing; an
-  over-long reply stays inside the mailbox.
+  The row shows "Working..." and returns at once; the executor only stores the reply; the
+  next frame shows the row's result, once. A second row while one runs toasts "Busy" and
+  queues nothing; a full queue is retried for 2 s and then ends as a refusal ("Command queue
+  full...", the row free again); a reply from a replaced display session shows nothing; an
+  over-long reply stays bounded.
+- The background `executeOledCommand` (OLED background commands, step 1): the press queues
+  at once and sets the busy flag; a second press, or an `oledRunCommandAsync`, is refused
+  with "Busy" and queues nothing; success toasts the reply without its `OK:`/`SUCCESS:` lead
+  ("Done" for a bare OK, nothing or JSON; the first line or sentence of a long one); admin,
+  super-admin and other refusals keep their short reason; 60 s without a reply toasts the
+  timeout and the late reply shows nothing (its mailbox freed); a replaced session sees
+  nothing; an empty line is refused at the press; the line is wiped when it ends; off the
+  display task the action waits on the checked executor as before.
 - Static: the Automations, Logging and Network screens, the Quick Settings section and the
   unavailable-page / Web Stats actions (`handleOledActionButton`) no longer fire commands
   whose reply is dropped, and their `broadcastOutput` success lines are conditional. The
-  Quick Settings section never calls the waiting `oledRunCommand`, and `updateOledDisplay`
-  delivers `oledRunCommandAsync` replies.
+  Quick Settings section never calls the waiting `oledRunCommand`; `executeOledCommand`
+  runs in the background; `oledUpdate` delivers the command in flight whether the panel
+  runs or not and `updateOledDisplay` draws its busy mark; every `oledRunCommand` call on an
+  OLED screen (`OLED_*.cpp`, `i2csensor_*_oled.h`) uses its verdict or is a
+  `(void)oledRunCommand(...);  // waits: <why>` line (the step-2 list).
 
 `--component`/`--source-dir` point it at another tree; the f4cc542 sources fail it (no
 helper; "Disabled"/"Deleted"/"Radio OFF" shown for refused commands). ASan/UBSan follow

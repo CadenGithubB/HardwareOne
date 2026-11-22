@@ -61,7 +61,7 @@ class PendingCommand {
 
   // The context the started command carries, for delivering its reply.
   // Meaningful from start() until poll() reports an end, and after that until
-  // the next start().
+  // the next start(). The line itself is wiped when the command ends.
   const CommandContext& context() const { return command_.ctx; }
 
  private:

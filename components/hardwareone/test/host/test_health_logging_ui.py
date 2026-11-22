@@ -109,6 +109,11 @@ def generated(component: Path = COMPONENT, source_dir: Path | None = None,
                   extract_block(read("OLED_Utils.cpp"), "void oledCommandReplyText("),
                   extract_block(read("OLED_Utils.cpp"), "static bool oledReportCommandReply("),
                   extract_block(read("OLED_Utils.cpp"), "bool oledRunCommand("),
+                  # The rows run in the background (OLED background commands,
+                  # step 1, oled_command_feedback); here the command lands at
+                  # once through the same reply-to-toast path.
+                  "[[maybe_unused]] static void executeOledCommand(const String& line) "
+                  "{ (void)oledRunCommand(line); }",
                   *optional(oled, "static void healthRunCommand("),
                   extract_block(oled, "static bool healthInputHandler(")]
     production.append("namespace disabled {\n" + extract_block(

@@ -119,7 +119,7 @@ static bool btRoleRuns(const BtRoleRow& r, hw1link::Role running) {
 // init/deinit Bluetooth on the OLED input task.
 static const char* sBtRoleCommand = nullptr;
 static void btRoleConfirmed(void* /*userData*/) {
-  if (sBtRoleCommand) (void)oledRunCommand(sBtRoleCommand);
+  if (sBtRoleCommand) executeOledCommand(sBtRoleCommand);
 }
 
 // Stopping, or switching away from a running role, defaults to No.
@@ -191,7 +191,7 @@ static void populateBtMenu() {
 
 // `closeble` closes every device and the app console and stops the host.
 static void btStopConfirmed(void* /*userData*/) {
-  (void)oledRunCommand("closeble");
+  executeOledCommand("closeble");
 }
 
 // ---- OLED_BLUETOOTH_STATUS: BT status detail (read-only, pushed) -----------
@@ -444,9 +444,9 @@ static bool bluetoothInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newly
                              nullptr, false);
         } else {
 #if ENABLE_G2_GLASSES || ENABLE_BLE_PHONE_PIPE
-          (void)oledRunCommand("openble");
+          executeOledCommand("openble");
 #else
-          (void)oledRunCommand("openconsole");
+          executeOledCommand("openconsole");
 #endif
         }
         break;
@@ -461,7 +461,7 @@ static bool bluetoothInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newly
         }
         break;
       case BT_ACT_AUTO_START:
-        (void)oledRunCommand(gSettings.bleAutoStart ? "bleautostart off" : "bleautostart on");
+        executeOledCommand(gSettings.bleAutoStart ? "bleautostart off" : "bleautostart on");
         break;
       case BT_ACT_SETTINGS:
         if (openSettingsEditorForModule("bluetooth")) {
@@ -581,15 +581,15 @@ static bool g2InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         if (!isG2Connected()) executeOledCommand("openg2");
         break;
       case G2_ACT_RECONNECT:  // the saved pair, as the glasses' "Reconnect G2"
-        (void)oledRunCommand("openg2 saved");
+        executeOledCommand("openg2 saved");
         break;
       case G2_ACT_DISCONNECT:
         if (isG2Connected()) executeOledCommand("closeg2");
         break;
       case G2_ACT_AUTORECON:  // dispatch the opposite of the current state
-        (void)oledRunCommand(blePeerAutoReconnectEnabled(BLE_PEER_G2_GLASSES)
-                             ? "bleautoreconnect g2-glasses off"
-                             : "bleautoreconnect g2-glasses on");
+        executeOledCommand(blePeerAutoReconnectEnabled(BLE_PEER_G2_GLASSES)
+                           ? "bleautoreconnect g2-glasses off"
+                           : "bleautoreconnect g2-glasses on");
         break;
       case G2_ACT_STATUS:
         requestOledMode(OLED_BLUETOOTH_G2_STATUS, "bluetooth.g2.status");
@@ -756,7 +756,7 @@ static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         }
         break;
       case R1_ACT_RECONNECT:  // as the glasses' "Reconnect Ring"
-        (void)oledRunCommand("openring reconnect");
+        executeOledCommand("openring reconnect");
         break;
       case R1_ACT_DISCONNECT:  // async, admin-gated
         if (g2RingIsConnected()) executeOledCommand("closering");
@@ -917,13 +917,13 @@ static bool phoneInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPres
   const bool ready = phoneReady(s);
   switch (sPhoneActions[idx]) {
     case PH_ACT_PIPE:  // the pipe on the shared stack; a paired phone is connected on open
-      if (btPipeRunning(s)) { (void)oledRunCommand("closephone"); break; }
+      if (btPipeRunning(s)) { executeOledCommand("closephone"); break; }
       if (oledRunCommand("openphone"))
         oledToastShow(s.pipePaired ? "Connecting phone" : "Phone open; pair it", 2000);
       break;
     case PH_ACT_AUTO:  // the direction the row showed
-      (void)oledRunCommand(s.pipeAutoReconnect ? "bleautoreconnect phone off"
-                                           : "bleautoreconnect phone on");
+      executeOledCommand(s.pipeAutoReconnect ? "bleautoreconnect phone off"
+                                         : "bleautoreconnect phone on");
       break;
     case PH_ACT_LABEL:
       break;

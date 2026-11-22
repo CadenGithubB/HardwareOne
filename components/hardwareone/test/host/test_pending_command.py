@@ -65,6 +65,7 @@ void ps_free(void* p);
 bool submitCommandAsync(const Command& cmd, ExecAsyncCallback cb, void* userData);
 bool commandQueueFull();
 void broadcastOutput(const String& line);
+void secureClearString(String& s);
 """,
 }
 

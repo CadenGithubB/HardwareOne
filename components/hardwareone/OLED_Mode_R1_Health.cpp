@@ -182,8 +182,9 @@ static const char* healthNextDesiredToken(G2RingDesiredState current) {
        : "preserve";
 }
 
-// Preserve the command owner's explanation through shared OLED feedback.
-static void healthRunCommand(const char* line) { (void)oledRunCommand(line); }
+// The row's command runs in the background; the owner's explanation (or what
+// it did) is the toast when it ends.
+static void healthRunCommand(const char* line) { executeOledCommand(line); }
 
 static void healthOnEnter(bool isForward) {
   if (!isForward) return;

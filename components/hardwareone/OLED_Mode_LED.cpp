@@ -190,7 +190,7 @@ static bool ledInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPresse
     if (next != gSettings.ledBrightness) {
       char cmd[24];
       snprintf(cmd, sizeof(cmd), "ledbrightness %d", next);
-      executeOledCommand(cmd);
+      (void)oledRunCommand(cmd);  // waits: step 2 (value scroll, one command per step)
     }
     return true;
   }

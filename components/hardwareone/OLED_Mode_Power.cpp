@@ -172,9 +172,7 @@ static void executePowerCpuAction() {
   if (sel >= 0 && sel < (int)(sizeof(cmds) / sizeof(cmds[0]))) {
     DEBUG_SYSTEMF("[POWER_OLED] Executing: %s (selection=%d)", cmds[sel], sel);
     DEBUG_SYSTEMF("[POWER_OLED] Current CPU freq before command: %lu MHz", (unsigned long)getCpuFrequencyMhz());
-    executeOledCommand(cmds[sel]);
-    delay(50);
-    DEBUG_SYSTEMF("[POWER_OLED] Current CPU freq after command: %lu MHz", (unsigned long)getCpuFrequencyMhz());
+    executeOledCommand(cmds[sel]);  // runs in the background; its reply is the toast
   }
 }
 
@@ -183,8 +181,9 @@ static void executePowerSleepAction() {
     case 0: {
       // Cycle the power-save timeout through a preset ladder. The next step is
       // submitted as the admin-only `powersave <n>` command (admin check, [CMD]
-      // audit; System_Power applies and persists it). A refusal shows on the
-      // toast and leaves the value; the row label shows the value every frame.
+      // audit; System_Power applies and persists it) in the background. A
+      // refusal shows on the toast and leaves the value; the row label shows
+      // the value every frame.
       // A value set off-ladder (e.g. via web) lands back on the first step.
       static const uint32_t presets[] = { 0, 1, 2, 5, 10, 15, 30, 60 };
       const int n = (int)(sizeof(presets) / sizeof(presets[0]));
@@ -193,7 +192,7 @@ static void executePowerSleepAction() {
       for (int i = 0; i < n; i++) { if (presets[i] == cur) { idx = i; break; } }
       char cmd[24];
       snprintf(cmd, sizeof(cmd), "powersave %lu", (unsigned long)presets[(idx + 1) % n]);
-      oledRunCommand(cmd);
+      executeOledCommand(cmd);
       break;
     }
     case 1: executeOledCommand("lightsleep 20"); break;

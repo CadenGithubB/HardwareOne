@@ -24,6 +24,7 @@
 #include "System_ESPNow.h"
 #include "System_Utils.h"  // For AuthContext
 #include "System_CommandTypes.h"  // For Command, CommandContext
+#include "System_PendingCommand.h"  // the OLED command in flight
 #include "System_EventKindMask.h"
 #include "System_FirstTimeSetup.h"
 #include <algorithm>
@@ -512,7 +513,7 @@ static void ncCycleDeviceLevel(const SystemEventCatalogKindInfo& kind) {
   const uint8_t kindId = static_cast<uint8_t>(kind.id);
   uint8_t next = (uint8_t)((notifDeviceKindLevel(kindId) + 1) % 3);  // all→admin→off→all
   String cmd = String("notifydevicekind ") + kind.name + " " + notifLevelToken(next);
-  oledRunCommand(cmd);
+  executeOledCommand(cmd);
   // cmd_notifydevicekind updates the RAM masks before persisting, so the
   // very next notifDeviceKindLevel read renders the new value.
 }
@@ -3150,12 +3151,6 @@ bool submitOledCommandForSession(const String& line, TransportSessionEpoch epoch
   return submitCommandAsync(command, callback, context);
 }
 
-// For an action whose caller needs no verdict: a refused or failed command
-// still shows its reason on the toast, as oledRunCommand does.
-void executeOledCommand(const String& argsInput) {
-  (void)oledRunCommand(argsInput);
-}
-
 // True when `epoch` is still the live display session, checked under the
 // display lifecycle writer (linearized with login, logout and replacement).
 // The writer is released before this returns: it covers the check only, never
@@ -3262,64 +3257,134 @@ bool oledRunCommand(const String& cmd) {
   return oledReportCommandReply(executed, out);
 }
 
-// One oledRunCommandAsync request at a time. cmd_exec only copies the
-// reply here and asks for a frame; the verdict, the toast and done() run on the
-// display task in oledDeliverCommandReply().
+// The one OLED command in flight, for oledRunCommandAsync and the
+// fire-and-forget executeOledCommand (OLED background commands, step 1,
+// 2026-11-22). The line goes to cmd_exec through a PendingCommand, the serial
+// console's and UART link's mechanism (S-11), and the call returns at once:
+// the frame loop polls it in oledDeliverCommandReply(), so the screen, sensor
+// logging, Bluetooth and glasses upkeep, the scheduler and the OTA probation
+// heartbeat keep running while the command waits for queue room (up to 2 s)
+// and its reply (up to 60 s). One command at a time: a press while one runs
+// is refused with a short "Busy" toast, never queued. Display (owner) task
+// only, like everything the input handlers touch.
 namespace {
-struct OledCommandReply {
-  bool ready;
-  bool executed;
-  char text[oled_message::kMessageBytes];
+struct OledCommandInFlight {
+  PendingCommand pending;
+  OledCommandDoneFn done = nullptr;
+  const void* context = nullptr;
+  bool toastSuccess = false;  // executeOledCommand: success shows the reply
 };
-portMUX_TYPE sOledReplyMux = portMUX_INITIALIZER_UNLOCKED;
-OledCommandReply sOledReply = {};  // guarded by sOledReplyMux
-bool sOledCommandInFlight = false;  // display task only, like the fields below
-TransportSessionEpoch sOledCommandEpoch = kNoTransportSessionEpoch;
-OledCommandDoneFn sOledCommandDone = nullptr;
-const void* sOledCommandContext = nullptr;
+OledCommandInFlight sOledCommand;
+constexpr uint32_t kOledBusyToastMs = 1500;
+constexpr uint32_t kOledResultToastMs = 2500;
 }  // namespace
 
-static void oledCommandReplyArrived(bool executed, const char* result, void*) {
-  OledCommandReply reply = {true, executed, {}};
-  snprintf(reply.text, sizeof(reply.text), "%s", result ? result : "");
-  portENTER_CRITICAL(&sOledReplyMux);
-  sOledReply = reply;
-  portEXIT_CRITICAL(&sOledReplyMux);
-  oledMarkDirty();
+bool oledCommandBusy() { return sOledCommand.pending.busy(); }
+
+// The result toast of a background action that succeeded: the reply without
+// the executor's "OK: " stamp or a handler's "SUCCESS:", its whole first line
+// when that fits the toast, otherwise its first sentence; "Done" for a bare
+// "OK", a structured (JSON) reply or nothing at all.
+static void oledCommandSuccessText(const char* reply, char* out, size_t outSize) {
+  if (!out || outSize == 0) return;
+  const char* body = oled_message::trim(commandReplyBody(reply));
+  if (commandReplyConfirms(body)) {
+    body += 7;  // "SUCCESS"
+    while (*body == ':' || *body == ' ' || *body == '\t') ++body;
+  }
+  if (commandReplyIsBareOk(body)) body = "";
+  constexpr size_t kWholeLineMax = 64;  // as oledCommandReplyText
+  const size_t line = *body == '{' || *body == '[' ? 0 : strcspn(body, "\r\n");
+  const size_t length = line <= kWholeLineMax ? line : oled_message::firstSentenceLength(body);
+  if (length == 0) {
+    snprintf(out, outSize, "Done");
+  } else {
+    snprintf(out, outSize, "%.*s", (int)length, body);
+  }
 }
 
-bool oledRunCommandAsync(const char* cmd, OledCommandDoneFn done, const void* context) {
-  if (sOledCommandInFlight) {
-    oledToastShow("Please wait", 1500);
+static bool oledStartBackgroundCommand(const String& line, OledCommandDoneFn done,
+                                       const void* context, bool toastSuccess) {
+  if (sOledCommand.pending.busy()) {
+    oledToastShow("Busy", kOledBusyToastMs);
     return false;
   }
-  const Command command = buildOledCommand(String(cmd));
-  if (!submitCommandAsync(command, oledCommandReplyArrived, nullptr)) {
-    oledToastShow("Busy - try again", 2500);
+  const uint32_t now = (uint32_t)millis();
+  if (!sOledCommand.pending.start(buildOledCommand(line), now)) return false;
+  // The first try queues the line at once. A line the executor can never take
+  // (empty, over the limit, no memory) ends here: its reason is the toast and
+  // nothing was started. A full queue is retried by the frame loop.
+  String reply;
+  bool executed = false;
+  if (sOledCommand.pending.poll(now, reply, executed) != PendingCommand::Poll::Waiting) {
+    (void)oledReportCommandReply(false, reply.c_str());
     return false;
   }
-  sOledCommandInFlight = true;
-  sOledCommandEpoch = command.ctx.transportSessionEpoch;
-  sOledCommandDone = done;
-  sOledCommandContext = context;
+  sOledCommand.done = done;
+  sOledCommand.context = context;
+  sOledCommand.toastSuccess = toastSuccess;
+  oledMarkDirty();  // the busy indicator
   return true;
 }
 
-// Display task, every frame.
+bool oledRunCommandAsync(const char* cmd, OledCommandDoneFn done, const void* context) {
+  return oledStartBackgroundCommand(String(cmd ? cmd : ""), done, context, false);
+}
+
+// For an action whose caller needs no verdict: the line runs in the
+// background, and its reply (a refusal's reason, or what the command did)
+// is the toast when it ends. A caller on another task than the display's
+// (none today) cannot share the in-flight slot and waits as before.
+void executeOledCommand(const String& argsInput) {
+  if (!oledIsOwnerTask()) {
+    (void)oledRunCommand(argsInput);  // waits: another task cannot share the slot
+    return;
+  }
+  (void)oledStartBackgroundCommand(argsInput, nullptr, nullptr, true);
+}
+
+// Display task, every pass of oledUpdate, panel running or not.
 static void oledDeliverCommandReply() {
-  if (!sOledCommandInFlight) return;
-  OledCommandReply reply;
-  portENTER_CRITICAL(&sOledReplyMux);
-  reply = sOledReply;
-  sOledReply.ready = false;
-  portEXIT_CRITICAL(&sOledReplyMux);
-  if (!reply.ready) return;
-  sOledCommandInFlight = false;
+  if (!sOledCommand.pending.busy()) return;
+  String reply;
+  bool executed = false;
+  const PendingCommand::Poll state =
+      sOledCommand.pending.poll((uint32_t)millis(), reply, executed);
+  if (state == PendingCommand::Poll::Waiting || state == PendingCommand::Poll::Idle) return;
+  // Done, Refused (queue full for 2 s, out of memory) or TimedOut (60 s): the
+  // reply carries the executor's text for each, and the slot is free again.
+  const OledCommandDoneFn done = sOledCommand.done;
+  const void* const context = sOledCommand.context;
+  const bool toastSuccess = sOledCommand.toastSuccess;
+  sOledCommand.done = nullptr;
+  sOledCommand.context = nullptr;
+  sOledCommand.toastSuccess = false;
+  oledMarkDirty();  // the busy indicator goes
   // A reply that outlived its display session (logout, or someone else logged
   // in) is not shown to whoever holds the display now.
-  const bool ok = oledDisplayEpochLiveUnderWriter(sOledCommandEpoch) &&
-                  oledReportCommandReply(reply.executed, reply.text);
-  if (sOledCommandDone) sOledCommandDone(ok, sOledCommandContext);
+  bool ok = false;
+  if (oledDisplayEpochLiveUnderWriter(sOledCommand.pending.context().transportSessionEpoch)) {
+    ok = oledReportCommandReply(executed, reply.c_str());
+    if (ok && toastSuccess) {
+      char text[oled_message::kMessageBytes];
+      oledCommandSuccessText(reply.c_str(), text, sizeof(text));
+      oledToastShow(text, kOledResultToastMs, OledUiIcon::SUCCESS);
+    }
+  }
+  if (done) done(ok, context);
+}
+
+// A small hourglass at the top right of the content area while the OLED
+// command runs; drawn over the mode's content, under the toast.
+static void oledCommandBusyRender() {
+  if (!sOledCommand.pending.busy() || !gDisplay) return;
+  const int x = SCREEN_WIDTH - 9, y = OLED_CONTENT_START_Y;
+  gDisplay->fillRect(x, y, 9, 9, DISPLAY_BG);
+  gDisplay->drawRect(x, y, 9, 9, DISPLAY_FG);
+  gDisplay->drawLine(x + 2, y + 2, x + 6, y + 2, DISPLAY_FG);
+  gDisplay->drawLine(x + 2, y + 6, x + 6, y + 6, DISPLAY_FG);
+  gDisplay->drawLine(x + 2, y + 2, x + 6, y + 6, DISPLAY_FG);
+  gDisplay->drawLine(x + 6, y + 2, x + 2, y + 6, DISPLAY_FG);
 }
 
 const char* oledBluetoothToggleCommand() {
@@ -3967,7 +4032,6 @@ void updateOledDisplay() {
   // blanking), in post order, against the session that is now current.
   oledApplyPendingOwnerRequests();
   prepareTranscriptionData();
-  oledDeliverCommandReply();
 
   if (!gOledRunning || !oledConnected || !displayIsReady() || oledDisplay == nullptr) {
     return;
@@ -4233,6 +4297,7 @@ void updateOledDisplay() {
     // Draw persistent footer with button hints (always last, in same frame)
     drawOledFooter();
     
+    oledCommandBusyRender();  // the OLED command in flight
     // Draw shared feedback only when the confirmation does not own the screen
     oledUiRender();
     oledTextFieldFrameEnd();  // labels this frame did not draw stop animating
@@ -6350,15 +6415,15 @@ bool processOledInput() {
             // First set the name via command system
             char setnameCmd[48];
             snprintf(setnameCmd, sizeof(setnameCmd), "devicename %s", deviceName);
-            executeOledCommand(setnameCmd);
+            (void)oledRunCommand(setnameCmd);  // waits: step 2 (the next lines read its effect)
             if (gSettings.espnowDeviceName.length() > 0) {
               // Then initialize ESP-NOW via command system
               broadcastOutput("[OLED] Initializing ESP-NOW...");
-              executeOledCommand("openespnow");
+              (void)oledRunCommand("openespnow");  // waits: step 2 (reads gEspNow next)
               if (gEspNow && gEspNow->initialized) {
                 broadcastOutput("[OLED] ESP-NOW initialized successfully");
                 // Start it at boot from now on, as set up here
-                executeOledCommand("espnowautostart 1");
+                (void)oledRunCommand("espnowautostart 1");  // waits: step 2 (chained setup)
                 // Initialize the OLED ESP-NOW interface now that ESP-NOW is ready
                 oledEspNowInit();
                 oledKeyboardReset();
@@ -6388,7 +6453,7 @@ bool processOledInput() {
             oledEspNowShowNameKeyboard();
           } else {
             DEBUG_DISPLAYF("[ESPNOW_INIT] Y button pressed - initializing ESP-NOW (name already set)");
-            executeOledCommand("openespnow");
+            (void)oledRunCommand("openespnow");  // waits: step 2 (reads gEspNow next)
             if (gEspNow && gEspNow->initialized) {
               oledEspNowInit();
             }
@@ -6657,6 +6722,9 @@ void oledUpdate() {
   oledApplyPendingSessionBoundary();
   // Posted display commands drain on every pass, panel running or not.
   oledApplyPendingOwnerRequests();
+  // So does the OLED command in flight: a reply, a full queue's retry or the
+  // 60 s limit never waits for the panel to come back.
+  oledDeliverCommandReply();
   prepareCameraPreviewData();
   if (gOledRunning && oledConnected) {
 #if ENABLE_ESPNOW

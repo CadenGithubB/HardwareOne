@@ -383,8 +383,16 @@ void oledEspNowPollPairRequest();
 void oledBluetoothLinkWatch();
 
 // ============= Shared Command Execution =============
-// Execute a CLI command with OLED display authentication context
+// Run a user-initiated OLED action whose caller needs no verdict, in the
+// background (OLED background commands, step 1): the line goes to cmd_exec at
+// once and the frame loop keeps running; a small busy mark shows at the top
+// right while it runs, and the reply is a toast when it ends (a refusal's
+// reason as oledRunCommand shows it, otherwise what the command did, "Done"
+// when it says nothing). One OLED command at a time: a press while one runs
+// shows "Busy" and runs nothing. Display task; another task waits as before.
 void executeOledCommand(const String& argsInput);
+// True while executeOledCommand's or oledRunCommandAsync's command runs.
+bool oledCommandBusy();
 // Execute a CLI command and return success status + output (for callers that need the result)
 bool executeOledCommandWithResult(const String& argsInput, char* out, size_t outSize);
 // Session-bound variant for stateful OLED UI flows. `expectedEpoch` is the
@@ -402,19 +410,24 @@ bool executeOledCommandWithResultForSession(
 // asks this one function. out is always NUL-terminated (outSize > 0).
 void oledCommandReplyText(bool ok, const char* reply, const char* okText,
                           const char* failText, char* out, size_t outSize);
-// Run a user-initiated OLED action. A refused or failed command shows its
-// reply on the global toast (oledCommandReplyText, "Failed" when empty) and
-// returns false; true only when the command succeeded, so the caller shows its
-// own success text only then.
+// Run a user-initiated OLED action and wait for its verdict. A refused or
+// failed command shows its reply on the global toast (oledCommandReplyText,
+// "Failed" when empty) and returns false; true only when the command
+// succeeded, so the caller shows its own success text only then. The frame
+// loop stands still while it waits (up to 2 s + 60 s): only screens that use
+// the verdict and the value-scroll rows still call it (step 2 of the OLED
+// background plan moves them); an action that ignores the verdict calls
+// executeOledCommand.
 bool oledRunCommand(const String& cmd);
 // oledRunCommand for an action that can take a while (radio, Wi-Fi, Bluetooth,
 // HTTP): returns at once and the frame loop never waits on cmd_exec. When
 // the command finishes, the display task reports it as oledRunCommand would (a
 // refusal toast) and then calls done(ok, context), ok true only on success. A
-// reply that outlives its display session is dropped (done gets false). One
-// request at a time: false means nothing was queued, and a toast already says
-// why ("Please wait" while one is running, "Busy - try again" if the queue
-// refused it); done is not called then.
+// reply that outlives its display session is dropped (done gets false), and
+// a queue that stays full for 2 s or a reply that takes over 60 s ends it as a
+// refusal (toast, done(false)). It shares executeOledCommand's one command in
+// flight: false means nothing was started because one is running (the toast
+// says "Busy"); done is not called then.
 typedef void (*OledCommandDoneFn)(bool ok, const void* context);
 bool oledRunCommandAsync(const char* cmd, OledCommandDoneFn done, const void* context);
 // The command that starts or stops the BLE role this device runs, or is set to

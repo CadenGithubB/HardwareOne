@@ -13,10 +13,23 @@ or terminal-result footer messages.
   `NSINK_BANNER` name remain supported; the OLED now presents these events as
   wrapped feedback rather than an animated scrolling ribbon. `NSINK_TOAST`
   continues to mean web SSE toast.
-- Local command actions use `oledRunCommand` / `oledRunCommandAsync`. Their
-  shared reply mapping preserves the service refusal, removes the error prefix
-  and shortens administrator denials. Success feedback is emitted only after
-  acceptance. Async acceptance is distinct from operation completion.
+- Local command actions use `executeOledCommand`, `oledRunCommandAsync` or
+  `oledRunCommand`. Their shared reply mapping preserves the service refusal,
+  removes the error prefix and shortens administrator denials. Success feedback
+  is emitted only after acceptance. Async acceptance is distinct from operation
+  completion.
+- An action that ignores the verdict calls `executeOledCommand`, which runs in
+  the background (2026-11-22): the line goes to cmd_exec through a
+  `PendingCommand` and the frame loop keeps running. One OLED command is in
+  flight at a time (shared with `oledRunCommandAsync`); a press while it runs
+  shows "Busy" and runs nothing. A small hourglass shows at the top right of
+  the content area while it runs, and the reply is the toast when it ends:
+  the refusal's reason, a full queue after 2 s, the 60 s timeout, or on
+  success the reply without its `OK:`/`SUCCESS:` lead ("Done" when it says
+  nothing). A reply that outlives its display session shows nothing.
+- `oledRunCommand` waits (up to 2 s + 60 s) and is left only where the screen
+  uses the verdict, plus a few value-scroll and chained actions tagged
+  `// waits: <why>`; step 2 of the OLED background plan moves them.
 - Local form validation uses `oledToastShow` with explicit `ERROR` severity.
   Local feedback is independent of notification preferences and creates no
   system event or notification-history entry merely because it was displayed.
