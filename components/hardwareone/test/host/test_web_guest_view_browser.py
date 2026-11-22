@@ -13,7 +13,8 @@ WebServer_Utils.cpp unchanged and run against a fake DOM and a fake fetch:
 - the command line's guest refusal (a 403 from POST /api/cli) is shown once as
   the refusal popup and rejects with the reply's reason;
 - the web gate's guest refusal (403, code "guest_forbidden") of a POST is shown
-  as the popup with its sentence, not raw JSON, and rejects with that sentence;
+  as the popup with its sentence, not raw JSON, and rejects with that sentence,
+  also through hw.postFormText when the page's catch shows the error again;
 - the same refusal of a GET (a page loading data) is not a popup: the page
   shows its own state from the rejection, which carries the sentence and 403;
 - another 403 on a non-command POST, and a CLI read sent with hwQuietRefusal,
@@ -165,6 +166,20 @@ ticks(4).then(function() {
     check(r.ok && r.value.status === 403, 'postForm hands the page the refused response');
     check(popups.length === 1 && popups[0] === 'error:Guest accounts are view-only',
           'postForm shows the gate refusal of a control: ' + JSON.stringify(popups));
+    fresh();
+    respond(403, GATE);
+    // A page control posted with postFormText whose catch also shows the
+    // error (the R1 Health page): one popup with the sentence, no raw JSON.
+    return settle(hw.postFormText('/api/health/action', {action: 'poll'}).catch(function(e) {
+      hw.showCliError(e && e.message); throw e;
+    }));
+  });
+}).then(function(r) {
+  return ticks(6).then(function() {
+    check(!r.ok && r.error.status === 403 && r.error.message === 'Guest accounts are view-only',
+          'postFormText rejects a gate refusal with the sentence, not raw JSON');
+    check(popups.length === 1 && popups[0] === 'error:Guest accounts are view-only',
+          'a refused postFormText control is one popup even when the page also shows the error: ' + JSON.stringify(popups));
     fresh();
     respond(403, GATE);
     return settle(hw.fetchJSON('/api/files/list?path=/maps'));

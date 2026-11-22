@@ -32,7 +32,9 @@ everything user-visible since the v0.99.99.1 tag.
   now say so on the page (they used to stay empty, show `guest_forbidden`, or pop up raw JSON). A
   signed-in guest gets its name and Logout in the menu bar instead of a Login button. The
   command reply for a guest is now "Error: Guest accounts are view-only. This command is not
-  available to a guest." Host-tested (`web_guest_gate`, `web_guest_view_browser`,
+  available to a guest." A refused form post (`hw.postFormText`) now rejects with the reply's
+  reason instead of its raw JSON, so a page that also shows the error (R1 Health) still gives one
+  popup. Host-tested (`web_guest_gate`, `web_guest_view_browser`,
   `remote_command_authority`); not checked on a device.
 
 ### Added
