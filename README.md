@@ -84,6 +84,7 @@ To skip the questions, build a saved configuration by name: `python3 tools/build
 - [Command Reference](docs/COMMAND_REFERENCE.md): every command, generated from source
 - [Compatibility](docs/COMPATIBILITY.md): what a version expects from its peers and what an upgrade keeps
 - [Known Issues](KNOWN_ISSUES.md): open problems and their workarounds
+- [Troubleshooting](docs/TROUBLESHOOTING.md): what to check after a crash, a restart or a hang, and what to put in a report
 - [Security Policy](SECURITY.md): reporting a vulnerability privately, and the known security limits
 - [Contributing](CONTRIBUTING.md): development guidelines
 

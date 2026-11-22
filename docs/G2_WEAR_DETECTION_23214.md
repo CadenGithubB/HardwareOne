@@ -21,11 +21,8 @@ read with the same magic 208 received no response within the wait. Further
 reads with magic 208 also received no response. The failed refresh cleared the
 cached snapshot; its missing result was not proof of a changed protobuf schema.
 
-Private local evidence (not committed):
-
-- `/private/tmp/hw1-wear-reconnect-1791747865238529000/serial.log`
-- `/private/tmp/hw1-g2-control-1791748948591192000/reply.txt`
-- `/private/tmp/hw1-settings-read-1791748983259879000/settings-read.txt`
+Private local evidence (not committed): the serial log of the reconnect, the
+control reply and the settings read, kept on the bench machine.
 
 ## Primary archived firmware evidence
 
@@ -124,6 +121,5 @@ Wear detection is OFF. ON-to-OFF transition, matching ACK, repeated fresh reads,
 zero omission, and operation with the renderer idle were verified. The reverse
 ON write and survival through a glasses power cycle were not exercised.
 
-Private capture: `/private/tmp/hw1-wear-validate-1791749709028093000/`.
-Durable private copies use prefix `wear-detection-23214-` in
+The capture is private (not committed). Durable private copies use prefix `wear-detection-23214-` in
 `~/Documents/Codex/Scratch/hardwareone-p4-backup-20261011/`.

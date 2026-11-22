@@ -29,7 +29,7 @@ HW1_EVENT_CATALOG_FAMILY_ROW(SYSEVT_FAM_COMPANION,  "Radio companion")
   /* --- ESP-NOW mesh / bond / pairing --- */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PEER_ONLINE,         "peer_online", SYSEVT_FAM_MESH)          /* mesh peer heartbeat appeared     subject=name  detail=mac */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PEER_OFFLINE,        "peer_offline", SYSEVT_FAM_MESH)         /* mesh peer heartbeat timed out    subject=name  detail=mac */
-HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PEER_PAIRED,         "peer_paired", SYSEVT_FAM_MESH)          /* pairing-mode auto-pair ran       subject=name  detail=mac */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PEER_PAIRED,         "peer_paired", SYSEVT_FAM_MESH)          /* a peer was saved as paired      subject=name  detail=mac */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_TEXT_RX,             "text_rx", SYSEVT_FAM_MESH)              /* ESP-NOW text message received    subject=sender detail=text */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_FILE_RX,             "file_rx", SYSEVT_FAM_MESH)              /* ESP-NOW file received            subject=sender detail=filename */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_BOND_ONLINE,         "bond_online", SYSEVT_FAM_MESH)          /* bond peer session/heartbeat up   subject=name  detail=mac */

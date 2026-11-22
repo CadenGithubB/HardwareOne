@@ -134,8 +134,15 @@ def trimmed_langs_js(src):
 
 def patched_engine_js(src):
     """Rewire the dark-theme toggle to inject inlined CSS instead of fetching
-    css/dark.css (dark mode is on by default, so this matters on first load)."""
+    css/dark.css (dark mode is on by default, so this matters on first load).
+    Restart removes only the game's own save: the page shares its origin (and
+    so its localStorage) with every other device page, and upstream's
+    localStorage.clear() wiped their saved state too."""
     code = read(os.path.join(src, "script", "engine.js"))
+    clear_needle = "localStorage.clear();"
+    if code.count(clear_needle) != 1:
+        fail("localStorage.clear() in deleteSave not found in engine.js (upstream drift?)")
+    code = code.replace(clear_needle, "localStorage.removeItem('gameState');")
     needle = (
         "$('head').append('<link rel=\"stylesheet\" href=\"css/dark.css\" "
         "type=\"text/css\" title=\"darkenLights\" />');"
@@ -343,7 +350,7 @@ def write_header(path, html):
     out.append("//")
     out.append("// A Dark Room (https://github.com/doublespeakgames/adarkroom)")
     out.append("//   pinned commit %s" % PINNED_COMMIT)
-    out.append("//   License: Mozilla Public License 2.0 (see third_party/adarkroom/LICENSE.md)")
+    out.append("//   License: Mozilla Public License 2.0 (https://mozilla.org/MPL/2.0/; see NOTICE.md)")
     out.append("// Languages: en, es, fr, zh_cn. Audio / Dropbox / analytics removed.")
     out.append("// Saves use the browser's localStorage (plus in-game export/import).")
     out.append("")

@@ -89,8 +89,8 @@ Firmware checks use disposable source/config snapshots:
 | FeatherS3 HTTP/Bluetooth off | Full compile/link/image passes after the web Power dependency fix; OLED/MQTT/ESP-NOW/UART retained |
 | ESP32 headless, genuine PSRAM-off Kconfig | Changed filesystem/crypto/web/allocator translation units compile; this is not a full no-PSRAM firmware link |
 
-See the [build verification record](/private/tmp/hw1-filesystem-build.31tUL2/README.md)
-for exact source/configuration hashes, compiler macros, artifacts, initial
+The build verification record (kept on the build machine, not in the repository)
+lists exact source/configuration hashes, compiler macros, artifacts, initial
 sandbox/cache failures and successful retries. No live build configuration or
 release key was changed for the matrix.
 
@@ -129,8 +129,8 @@ existing main firmware's external BSS/noinit configuration already requires
 working PSRAM at boot; this check does not claim runtime survival of a failed
 PSRAM chip.
 
-Detailed artifacts: [ordinary XIAO report](/private/tmp/hw1-xiao-filesystem-check.yTfXkn/README.md)
-and [Pocket Assistant paired-build report](/private/tmp/hw1-xiao-deployment-check-20260905.Y9XNQJ/README.md).
+The detailed ordinary XIAO and Pocket Assistant paired-build reports were kept on
+the build machine and are not in the repository.
 
 ## Remaining device validation / separate follow-ups
 

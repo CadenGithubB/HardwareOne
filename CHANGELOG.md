@@ -63,6 +63,25 @@ everything user-visible since the v0.99.99.1 tag.
 - The live-events request (S-7) leaves as soon as its event queue is empty instead of holding the
   only web worker for 600 ms. Host-tested; not checked on a device.
 
+### Fixed (web pages, tests and docs)
+- The CLI page (S-13) no longer downloads the whole log mirror twice a second: each poll sends
+  the change counter of the text it shows and an unchanged mirror answers 204 with no body.
+- The Sensors page RTC card (SEN-4) uses the same local-time conversion as the display, and the
+  weekday always follows the local date.
+- A Dark Room's restart removes only its own save, not every page's saved browser state.
+- `otastatus` and the OTA commands on a build without recovery OTA name every board that has it
+  (qtpy_esp32 and the xiao_s3 deployment were missing). `espnowpairmode` help and reply say
+  pairing never happens by itself instead of "no longer auto-pairs".
+- The OTA tools, web UI page harnesses and model tools now run in the host ctest suite
+  (P0-1c); two stale web UI checks and a JSON fixture read as script were fixed on the way. Five
+  page harnesses now fail on a console warning or error instead of hiding it (G-18). New host
+  checks: every Markdown link resolves (G-22) and NOTICE.md names every locked component.
+- Docs: `docs/TROUBLESHOOTING.md` (diagnostic commands, a serial console without a reset);
+  battery runtime and current draw are stated as unmeasured (G-47); NOTICE.md lists
+  esp32-camera, esp_h264 and esp-libhelix-mp3; current OTA partition sizes (G-29); release builds
+  use `tools/build_board.sh` (G-03); dead links and temporary paths removed (G-22);
+  `tools/vendor_arduino.sh --compare` (G-25).
+
 ### Added
 - Boot debug file (owner decision B13): every boot runs with every debug flag on and every log
   level shown until boot finishes (or the buffer fills), into a 56 KB PSRAM buffer (4 KB of internal memory on a board without PSRAM) instead

@@ -22,8 +22,9 @@ in `LICENSE`; source headers identify the derivation and local changes. The host
 implementation is plain ESP-IDF C and has no ESPHome dependency.
 
 The actual CustomRpc declarations used are the pinned upstream
-[`host/esp_hosted_misc.h`](../private/esp-hosted-mcu/host/esp_hosted_misc.h) and
-[`slave/main/esp_hosted_peer_data.h`](../private/esp-hosted-mcu/slave/main/esp_hosted_peer_data.h).
+`host/esp_hosted_misc.h` and `slave/main/esp_hosted_peer_data.h`, in
+`tools/p4/companion/private/esp-hosted-mcu/` once `prepare.py` has fetched it
+(not tracked).
 Both use the callback `(uint32_t, const uint8_t *, size_t, void *)` and the
 three-argument `esp_hosted_register_custom_callback(id, callback, context)`.
 

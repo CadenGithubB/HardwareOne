@@ -137,7 +137,7 @@ Element.prototype.focus = function () { this.focusCount++; };
 
 /* `display` is the device's X-Cmd-Display header: the audit-redacted command
  * line, percent-encoded. Absent (undefined) means the reply carried none. */
-function response(body, helpState, headerReads, status, display) {
+function response(body, helpState, headerReads, status, display, seq) {
     status = status || 200;
     return {
         ok: status >= 200 && status < 300,
@@ -148,6 +148,9 @@ function response(body, helpState, headerReads, status, display) {
                 var lower = String(name).toLowerCase();
                 if (lower === 'x-cmd-display') {
                     return display === undefined ? null : display;
+                }
+                if (lower === 'x-hw1-log-seq') {
+                    return seq === undefined ? null : seq;
                 }
                 return lower === 'x-hw1-cli-help' ? helpState : null;
             }
@@ -181,6 +184,7 @@ function boot(seed, logBodies, commandReplies) {
     var consoleMessages = [];
     var postFormTextCalls = 0;
     var logFetches = 0;
+    var logUrls = [];
     var logIndex = 0;
     var replyIndex = 0;
     var deferredLogs = [];
@@ -205,11 +209,12 @@ function boot(seed, logBodies, commandReplies) {
     }
 
     function fetchStub(url) {
-        if (url !== '/api/cli/logs') {
+        if (!/^\/api\/cli\/logs(\?since=\d+)?$/.test(url)) {
             absorbed.push('unexpected fetch URL: ' + url);
             return P(new Error('unexpected fetch URL'), true);
         }
         logFetches++;
+        logUrls.push(url);
         var scripted = logBodies[Math.min(logIndex, logBodies.length - 1)] || '';
         logIndex++;
         var body = typeof scripted === 'object' ? scripted.body : scripted;
@@ -223,7 +228,8 @@ function boot(seed, logBodies, commandReplies) {
         if (typeof scripted === 'object' && scripted.error) {
             return P(new Error(scripted.error), true);
         }
-        return P(response(body || '', help, [], status), false);
+        var seq = typeof scripted === 'object' ? scripted.seq : undefined;
+        return P(response(body || '', help, [], status, undefined, seq), false);
     }
 
     var windowStub = {
@@ -314,6 +320,7 @@ function boot(seed, logBodies, commandReplies) {
         probes: probes,
         runPollers: runPollers,
         getLogFetches: function () { return logFetches; },
+        logUrls: logUrls,
         getPostFormTextCalls: function () { return postFormTextCalls; },
         repliesConsumed: function () { return replyIndex; },
         deferredLogCount: function () { return deferredLogs.length; },
@@ -790,6 +797,29 @@ check('a store in the current format is kept',
 check('every typed command still reaches the device exactly',
       JSON.stringify(wifi.posts.map(function (post) { return post.form.cmd; })) ===
       JSON.stringify(['wifiadd net secretpass', 'login bob hunter2', 'useradd carol pw-fixture']));
+
+/* S-13: a poll sends the change counter of the mirror text on screen; an
+ * unchanged mirror answers 204 with no body and the screen stays as it is.
+ * A command reply changes the screen, so the next poll asks for everything. */
+var seqPage = boot({}, [
+    {body: 'mirror one\n', help: 'inactive', seq: '7'},
+    {body: '', help: 'inactive', status: 204},
+    {body: 'mirror two\n', help: 'inactive', seq: '9'}
+], [{command: 'status', help: 'inactive', body: 'ok\n'}]);
+check('first poll asks for the whole mirror', seqPage.logUrls[0] === '/api/cli/logs',
+      seqPage.logUrls.join(','));
+seqPage.runPollers();
+check('later polls send the counter of the text on screen',
+      seqPage.logUrls[1] === '/api/cli/logs?since=7', seqPage.logUrls.join(','));
+check('a 204 poll leaves the terminal and its saved copy as they were',
+      seqPage.probes.state().output === 'mirror one\n' &&
+      seqPage.storage.getItem('cliOutputHistory') === 'mirror one\n',
+      JSON.stringify(seqPage.probes.state().output));
+seqPage.command('status');
+seqPage.runPollers();
+check('after a command the next poll asks for the whole mirror again',
+      seqPage.logUrls[2] === '/api/cli/logs' && seqPage.probes.state().output === 'mirror two\n',
+      seqPage.logUrls.join(',') + ' ' + JSON.stringify(seqPage.probes.state().output));
 
 check('page callbacks threw no exceptions', absorbed.length === 0,
       absorbed.join(' | '));

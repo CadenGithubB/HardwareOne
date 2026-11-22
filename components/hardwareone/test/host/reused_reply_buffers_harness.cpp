@@ -59,7 +59,7 @@ template <typename... Args> static void hostLogSink(const char*, const Args&...)
 using CommandSource = int;
 using TransportSessionEpoch = uint32_t;
 struct AuthContext { CommandSource transport = 1; String user = "admin"; String ip = "local"; };
-struct httpd_req_t { std::string type, headers, body; unsigned sends = 0; };
+struct httpd_req_t { std::string type, headers, body, query, status; unsigned sends = 0; };
 static AuthContext makeWebAuthCtx(httpd_req_t*) { return AuthContext{}; }
 static bool tgRequireAuth(AuthContext&) { return true; }
 static bool webGuestAccessAllowed(httpd_req_t*, const AuthContext&) { return true; }
@@ -69,6 +69,7 @@ static int httpd_resp_set_hdr(httpd_req_t* r, const char* k, const char* v) {
   r->headers += std::string(k) + ": " + v + "\n"; return 0;
 }
 static int httpd_resp_set_type(httpd_req_t* r, const char* type) { r->type = type; return 0; }
+static int httpd_resp_set_status(httpd_req_t* r, const char* status) { r->status = status; return 0; }
 static int httpd_resp_send(httpd_req_t* r, const char* body, size_t length) {
   r->body.assign(body, length); ++r->sends; return 0;
 }
@@ -77,6 +78,22 @@ static int httpd_resp_sendstr(httpd_req_t* r, const char* body) {
 }
 using esp_err_t = int;
 constexpr esp_err_t ESP_OK = 0;
+constexpr esp_err_t ESP_FAIL = -1;
+static esp_err_t httpd_req_get_url_query_str(httpd_req_t* r, char* buf, size_t len) {
+  if (r->query.empty() || r->query.size() >= len) return ESP_FAIL;
+  std::memcpy(buf, r->query.c_str(), r->query.size() + 1);
+  return ESP_OK;
+}
+// Single key=value pairs are enough for these polls.
+static esp_err_t httpd_query_key_value(const char* query, const char* key, char* val, size_t len) {
+  const std::string q(query), prefix = std::string(key) + "=";
+  if (q.compare(0, prefix.size(), prefix) != 0) return ESP_FAIL;
+  const std::string v = q.substr(prefix.size(), q.find('&') == std::string::npos ? std::string::npos
+                                                                                : q.find('&') - prefix.size());
+  if (v.size() >= len) return ESP_FAIL;
+  std::memcpy(val, v.c_str(), v.size() + 1);
+  return ESP_OK;
+}
 #define DEBUG_HTTPF(...) hostLogSink(__VA_ARGS__)
 #define ERROR_WEBF(...) hostLogSink(__VA_ARGS__)
 using SemaphoreHandle_t = int*;
@@ -88,13 +105,13 @@ static int gMutex = 0;
 struct WebMirrorBuf {
   char* buf = nullptr;
   size_t cap = 0, len = 0;
+  uint32_t seq = 0;
   SemaphoreHandle_t mutex = &gMutex;
-  void init(size_t capacity) { cap = capacity; buf = static_cast<char*>(std::malloc(cap)); buf[0] = 0; }
-  size_t snapshotTo(char* dest, size_t destSize);
+  void init(size_t capacity) { cap = capacity; seq = 1; buf = static_cast<char*>(std::malloc(cap)); buf[0] = 0; }
+  size_t snapshotTo(char* dest, size_t destSize, uint32_t* seqOut = nullptr);
 };
 static WebMirrorBuf gWebMirror;
 static size_t gWebMirrorCap = 8192;
-static volatile unsigned long gWebMirrorSeq = 0;
 #define free trackedFree
 // INSERT_LOGS
 #undef free
@@ -128,8 +145,9 @@ int main() {
   // PSRAM available: the first poll makes the buffer, later polls reuse it.
   resetRequests();
   { httpd_req_t r; handleLogs(&r);
-    check(r.body == text && r.type == "text/plain" && r.headers == "X-HW1-CLI-Help: inactive\n",
-          "first kept poll: same reply"); }
+    check(r.body == text && r.type == "text/plain" &&
+          r.headers == "X-HW1-CLI-Help: inactive\nX-HW1-Log-Seq: 1\n",
+          "first kept poll: same reply, with the mirror's change counter"); }
   check(gRequests.size() == 1 && gRequests[0].policy == AllocPref::RequirePsram &&
         gRequests[0].size == gWebMirrorCap && gRequests[0].tag == "handleLogs.resp" && gLive.size() == 1,
         "first kept poll: one RequirePsram block of the mirror capacity, kept");
@@ -139,6 +157,19 @@ int main() {
     httpd_req_t r; handleLogs(&r);
     check(r.body == text.substr(0, gWebMirror.len), "later polls: the current mirror text");
     check(gRequests.empty() && gLive.size() == 1, "later polls: no allocation, the kept block reused");
+  }
+  // ?since= the current counter: 204, no body, nothing copied or allocated.
+  gWebMirror.seq = 42; resetRequests();
+  { httpd_req_t r; r.query = "since=42"; handleLogs(&r);
+    check(r.status == "204 No Content" && r.body.empty() && r.sends == 1 && gRequests.empty() &&
+          r.headers == "X-HW1-CLI-Help: inactive\n", "unchanged mirror: 204 with the help header only"); }
+  // A stale or zero counter gets the whole mirror and the new counter.
+  for (const char* q : {"since=41", "since=0", "since=", "other=42"}) {
+    resetRequests();
+    httpd_req_t r; r.query = q; handleLogs(&r);
+    check(r.status.empty() && r.body == text.substr(0, gWebMirror.len) &&
+          r.headers == "X-HW1-CLI-Help: inactive\nX-HW1-Log-Seq: 42\n",
+          "changed or unknown counter: the whole mirror and its counter");
   }
   // An empty mirror sends an empty body from the kept buffer.
   gWebMirror.len = 0; resetRequests();

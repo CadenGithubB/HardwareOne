@@ -296,8 +296,6 @@ void sensorStatusBump() {
 httpd_handle_t server = NULL;
 #endif
 
-volatile unsigned long gWebMirrorSeq = 0;
-
 // Per-task identity (formerly gExecUser / gExecIsAdmin / gExecAuthContext) now
 // lives in each task's TLS slot via System_AuthIdentity. Use currentAuthContext()
 // / currentExecUser() / currentExecIsAdmin() for reads, ExecIdentityGuard or

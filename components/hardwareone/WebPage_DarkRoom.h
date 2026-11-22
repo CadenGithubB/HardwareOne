@@ -3,7 +3,7 @@
 //
 // A Dark Room (https://github.com/doublespeakgames/adarkroom)
 //   pinned commit 1fada4620b6c66bd07bf15a3f1eb8223df8bc1d7
-//   License: Mozilla Public License 2.0 (see third_party/adarkroom/LICENSE.md)
+//   License: Mozilla Public License 2.0 (https://mozilla.org/MPL/2.0/; see NOTICE.md)
 // Languages: en, es, fr, zh_cn. Audio / Dropbox / analytics removed.
 // Saves use the browser's localStorage (plus in-game export/import).
 
@@ -1739,7 +1739,7 @@ var AudioEngine = {
       if(typeof Storage != 'undefined' && localStorage) {
         var prestige = Prestige.get();
         window.State = {};
-        localStorage.clear();
+        localStorage.removeItem('gameState');
         Prestige.set(prestige);
       }
       if(!noReload) {

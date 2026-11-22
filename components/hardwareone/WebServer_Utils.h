@@ -18,6 +18,9 @@ struct WebMirrorBuf {
   char* buf;
   size_t cap;  // maximum bytes stored (excluding null)
   size_t len;  // current length
+  // Change counter, bumped by every change so a poll can skip unchanged text.
+  // Never 0 once the buffer exists: 0 means "unknown" to the poll handler.
+  uint32_t seq;
   SemaphoreHandle_t mutex;  // Protects concurrent access
 
   WebMirrorBuf();
@@ -27,12 +30,14 @@ struct WebMirrorBuf {
   void append(const char* s, bool needNewline);
   void appendDirect(const char* s, size_t slen, bool needNewline);
   String snapshot();
-  size_t snapshotTo(char* dest, size_t destSize);
+  // seqOut (optional) receives the change counter of the copied text, or 0
+  // when the copy failed.
+  size_t snapshotTo(char* dest, size_t destSize, uint32_t* seqOut = nullptr);
+  void bumpSeq() { if (++seq == 0) seq = 1; }
   void assignFrom(const String& s);
 };
 
 extern WebMirrorBuf gWebMirror;
-extern volatile unsigned long gWebMirrorSeq;  // defined in HardwareOne.cpp
 extern size_t gWebMirrorCap;
 
 // Adds one executed command to the web command feed (HardwareOne.cpp).
@@ -1672,14 +1677,17 @@ inline void streamCommonDialogs(httpd_req_t* req) {
 #else  // !ENABLE_HTTP_SERVER
 
 // No-op stub implementations (real implementations in WebServer_Utils.cpp)
-inline WebMirrorBuf::WebMirrorBuf() : buf(nullptr), cap(0), len(0), mutex(nullptr) {}
+inline WebMirrorBuf::WebMirrorBuf() : buf(nullptr), cap(0), len(0), seq(0), mutex(nullptr) {}
 inline void WebMirrorBuf::init(size_t) {}
 inline void WebMirrorBuf::clear() {}
 inline void WebMirrorBuf::append(const String&, bool) {}
 inline void WebMirrorBuf::append(const char*, bool) {}
 inline void WebMirrorBuf::appendDirect(const char*, size_t, bool) {}
 inline String WebMirrorBuf::snapshot() { return String(); }
-inline size_t WebMirrorBuf::snapshotTo(char*, size_t) { return 0; }
+inline size_t WebMirrorBuf::snapshotTo(char*, size_t, uint32_t* seqOut) {
+  if (seqOut) *seqOut = 0;
+  return 0;
+}
 inline void WebMirrorBuf::assignFrom(const String&) {}
 inline WebMirrorBuf gWebMirror;
 inline size_t gWebMirrorCap = 0;

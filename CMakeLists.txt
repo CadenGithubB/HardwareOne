@@ -108,10 +108,10 @@ endif()
 # must agree. We validate that below and fail with a fix-it hint rather than
 # silently mis-building (e.g. an S3 PSRAM mode baked onto an ESP32 bootloader).
 #
-# Usage:
-#   # ESP32-S3 boards (default feathers3):
+# Usage: tools/build_board.sh <board> builds each board in its own build-<board>/
+# directory with its own target, so switching boards never needs a fullclean
+# (docs/BOARD_SWITCHING.md). Plain idf.py on the shared build/ directory:
 #   HW_BOARD=xiao_s3          idf.py set-target esp32s3 && idf.py fullclean && idf.py build
-#   # ESP32 boards (default qtpy_esp32):
 #   HW_BOARD=feather_esp32_v2 idf.py set-target esp32   && idf.py fullclean && idf.py build
 #
 # Default board per target: esp32s3 → feathers3, esp32 → qtpy_esp32. Any other
@@ -164,7 +164,9 @@ if(_hw_board)
             message(FATAL_ERROR
                 "HW_BOARD=${_hw_board} targets '${_board_target}', but the active chip is "
                 "'${_inferred_target}'. HW_BOARD only layers board settings — it does not "
-                "switch chips. Run:\n"
+                "switch chips. Build it with:\n"
+                "    tools/build_board.sh ${_hw_board}\n"
+                "(its own build directory and target), or on this directory run\n"
                 "    idf.py set-target ${_board_target} && idf.py fullclean\n"
                 "then rebuild with HW_BOARD=${_hw_board}.")
         endif()

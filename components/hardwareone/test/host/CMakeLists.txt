@@ -2091,6 +2091,22 @@ if(NOT HW1_NODE_EXECUTABLE)
                   "and logging_system_config_browser are registered but disabled; "
                   "pass -DHW1_NODE_EXECUTABLE=/path/to/node")
 endif()
+# The Python tool suites run here too (P0-1c): the OTA tools, the web UI page
+# harnesses and the model tools, each `python3 -m unittest discover` from the
+# repository root. The web UI harnesses use the first JavaScript engine on
+# PATH (tools/webui/js_engine.py); with Node.js found, its folder goes first.
+foreach(hw1_tool_suite ota webui model)
+  add_test(
+    NAME tools_${hw1_tool_suite}_unittests
+    COMMAND ${Python3_EXECUTABLE} -m unittest discover
+            -s tools/${hw1_tool_suite}/tests -t .
+    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/../../../..)
+endforeach()
+if(HW1_NODE_EXECUTABLE)
+  get_filename_component(HW1_NODE_DIR "${HW1_NODE_EXECUTABLE}" DIRECTORY)
+  set_tests_properties(tools_webui_unittests PROPERTIES
+                       ENVIRONMENT "PATH=${HW1_NODE_DIR}:$ENV{PATH}")
+endif()
 # Guest view-only web (owner decision B6): the web guest gate, and the page
 # helpers' refusal popups run in Node.js or macOS jsc (77 = skipped without).
 add_test(
@@ -2783,8 +2799,11 @@ add_test(
 # "Command-registry drift gate": `command_registry.py audit` and
 # `reference --check` both exit 0) and the tracked-tree hygiene gate (README
 # "Tracked-tree hygiene gate": no home path, no private LAN address outside the
-# allowed ranges). Source text and Python only; nothing is compiled.
-foreach(test_name IN ITEMS module_overview_text tool_pins command_registry_gate tree_hygiene_gate)
+# allowed ranges), the Markdown link check (every relative link resolves, no
+# absolute file links) and the licence notice check (NOTICE.md names every
+# locked component). Source text and Python only; nothing is compiled.
+foreach(test_name IN ITEMS module_overview_text tool_pins command_registry_gate tree_hygiene_gate doc_links
+                            notice_components)
   add_test(
     NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE}

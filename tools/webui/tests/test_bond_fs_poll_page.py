@@ -74,7 +74,11 @@ var hw = {
 };
 var window = this;
 var document = {getElementById: function () { return null; }};
-var console = {log: function () {}, warn: function () {}, error: function () {}};
+// Quiet log, but warnings and errors are kept and fail the run (G-18).
+var consoleProblems = [];
+var console = {log: function () {},
+               warn: function () { consoleProblems.push('console.warn: ' + Array.prototype.join.call(arguments, ' ')); },
+               error: function () { consoleProblems.push('console.error: ' + Array.prototype.join.call(arguments, ' ')); }};
 eval(slurp(__argv[0]));
 var BondFs = window.BondFs;
 
@@ -381,6 +385,7 @@ drive().then(function () {
     check(timers.length === 0, 'peer busy for good: no timer left running');
   });
 }).then(function () {
+  failures = failures.concat(consoleProblems);
   if (failures.length) { __out('BOND_FS_POLL_PAGE FAIL\n' + failures.join('\n')); }
   else { __out('BOND_FS_POLL_PAGE PASS'); }
 }).catch(function (e) {

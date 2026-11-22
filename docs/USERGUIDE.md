@@ -892,7 +892,7 @@ setting, regardless of which setting it was.
 | Kind | Fires when | subject / detail |
 |---|---|---|
 | `peer_online` / `peer_offline` | mesh peer heartbeat appears / times out (30s) | peer name / MAC |
-| `peer_paired` | a peer is saved as paired (`espnowpair`, `espnowpairsecure`, or an accepted `espnowpairrequest`); pairing mode only discovers, it no longer auto-pairs | peer name / MAC |
+| `peer_paired` | a peer is saved as paired (`espnowpair`, `espnowpairsecure`, or an accepted `espnowpairrequest`); pairing mode only discovers; it does not pair by itself | peer name / MAC |
 | `text_rx` | ESP-NOW text message received | sender / text preview |
 | `file_rx` | ESP-NOW file received (not the bond's own sync files: the partner's settings, manifest, schema and automation list) | sender / filename |
 | `bond_online` / `bond_offline` | bonded peer session up / heartbeat timeout, or the peer answered that it has no bond with this device | peer name / MAC |
