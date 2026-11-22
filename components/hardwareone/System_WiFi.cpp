@@ -1821,6 +1821,21 @@ const char* cmd_wifiautoreconnect(const String& argsInput) {
   return gSettings.wifiAutoReconnect ? "wifiAutoReconnect set to 1" : "wifiAutoReconnect set to 0";
 }
 
+const char* cmd_wifiexternalantenna(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!wifiHasAntennaSwitch()) return "Error: this board has no antenna switch.";
+  String valStr = argsInput;
+  valStr.trim();
+  if (valStr.length() == 0) {
+    return gSettings.wifiExternalAntenna ? "Antenna: external (u.FL)" : "Antenna: on-board";
+  }
+  const int v = parseBoolArg(valStr);
+  if (v < 0) return kCommandReplyNotOnOff;
+  setSetting(gSettings.wifiExternalAntenna, v == 1);
+  return gSettings.wifiExternalAntenna ? "wifiExternalAntenna set to 1 (external u.FL antenna after reboot)"
+                                       : "wifiExternalAntenna set to 0 (on-board antenna after reboot)";
+}
+
 // ============================================================================
 // WiFi Helper Functions
 // ============================================================================
@@ -3460,6 +3475,24 @@ void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin) {
 }
 
 // ============================================================================
+// Antenna switch (boards with WIFI_ANTENNA_SWITCH_PIN)
+// ============================================================================
+
+bool wifiHasAntennaSwitch() { return WIFI_ANTENNA_SWITCH_PIN >= 0; }
+
+void wifiApplyAntennaSelection() {
+#if WIFI_ANTENNA_SWITCH_PIN >= 0
+  // Drive the pin only when the external antenna is chosen: the board's
+  // pull-down already selects the on-board antenna, and leaving the pin
+  // alone keeps an original FeatherS3 (no switch, same variant) untouched.
+  if (!gSettings.wifiExternalAntenna) return;
+  pinMode(WIFI_ANTENNA_SWITCH_PIN, OUTPUT);
+  digitalWrite(WIFI_ANTENNA_SWITCH_PIN, HIGH);
+  DEBUG_WIFIF("[WiFi] External antenna selected (GPIO%d high)", WIFI_ANTENNA_SWITCH_PIN);
+#endif
+}
+
+// ============================================================================
 // WiFi Settings Module
 // ============================================================================
 
@@ -3469,6 +3502,8 @@ static const SettingEntry wifiSettingsEntries[] = {
   // restore forces these three on by the same names.
   { hw1wifijson::kAutoStart,     SETTING_BOOL,   &gSettings.wifiAutoStart,     true, 0, nullptr, 0, 1, "Connect at boot", nullptr, false, nullptr, "wifiautostart" },
   { hw1wifijson::kAutoReconnect, SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect after drop", nullptr, false, nullptr, "wifiautoreconnect" },
+  // Only on a board with an antenna switch (wifiHasAntennaSwitch).
+  { "wifiExternalAntenna", SETTING_BOOL, &gSettings.wifiExternalAntenna, false, 0, nullptr, 0, 1, "Use the external (u.FL) antenna (reboot required)", nullptr, false, nullptr, "wifiexternalantenna", false, false, wifiHasAntennaSwitch },
   // The legacy single-network "ssid"/"password" rows are gone (removed
   // 2026-07-20): they were frozen at "" for the device's whole life — no
   // command could reach them (cmdKey=nullptr + readOnly) and real credentials

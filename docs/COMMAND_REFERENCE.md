@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1029 commands across 60 modules (1029 registry entries).
+1030 commands across 60 modules (1030 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -55,7 +55,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`automation`](#automation) — 5 commands
 - [`battery`](#battery) — 3 commands
 - [`debug`](#debug) — 181 commands
-- [`settings`](#settings) — 18 commands
+- [`settings`](#settings) — 19 commands
 - [`sensorlog`](#sensorlog) — 3 commands
 - [`health`](#health) — 2 commands
 - [`users`](#users) — 22 commands
@@ -1152,6 +1152,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `uartrequireauth` | S | Require auth for UART link: <0\|1><br/>`Usage: uartrequireauth <0\|1>` |
 | `webclihistorysize` | A | Set web CLI history size: <1..100><br/>`Usage: webclihistorysize <1..100>` |
 | `wifiautoreconnect` | A | Keep hunting for the AP after an unexpected drop, and retry a failed boot connect (first hunt 60 s later, then 60 s, 120 s, every 300 s): <0\|1><br/>`Usage: wifiautoreconnect <0\|1> Separate from wifiautostart: this is about recovering a dropped link, not connecting at boot.` |
+| `wifiexternalantenna` | A | Use the external u.FL antenna instead of the on-board one (boards with an RF switch, the FeatherS3[D]; reboot required): [0\|1]<br/>`Usage: wifiexternalantenna [0\|1] No argument shows the saved choice. Takes effect at the next boot.` |
 | `wifitxpower` | A | Set WiFi TX power: <dBm><br/>`Usage: wifitxpower <2..21>` |
 
 ## sensorlog

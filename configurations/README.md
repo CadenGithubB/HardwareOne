@@ -10,7 +10,7 @@ python3 tools/build_config.py build xiao-default
 python3 tools/build_config.py new
 ```
 
-Fourteen configurations are kept, each a board and a job:
+Fifteen configurations are kept, each a board and a job:
 
 | Board | Configuration | What it is for |
 |---|---|---|
@@ -25,12 +25,13 @@ Fourteen configurations are kept, each a board and a job:
 | | `xiao-openclaw` | Assistant over HTTP or from a Raspberry Pi; Bluetooth and the on-board model off |
 | | `xiao-display` | An SSD1306 display on external I2C; camera, maps and the on-board model off |
 | | `xiao-status-sign` | Meeting-room status sign: two Adafruit 4991 encoder boards lit by the LED commands; Wi-Fi, web interface and automations only |
+| FeatherS3[D] | `feathers3-status-sign` | Meeting-room status sign: two Adafruit 4991 encoder boards on I2C bus 1, the OLED, battery gauge and u.FL antenna; Wi-Fi, web interface and automations only |
 | QT Py ESP32 | `qtpy-sensors` | Sensor node: GPS, distance and presence sensors with a gamepad |
 | | `qtpy-oled` | Sensor node with an SSD1306 display and a gesture sensor |
 | | `qtpy-espnow` | The OLED sensor node plus the ESP-NOW mesh |
 
 Each file carries that line as its `title` and `summary`; the lists and the guided setup show them.
-The other boards (FeatherS3, Feather ESP32 V2, Waveshare ESP32-P4 Touch LCD 5) have no saved
+The other boards (Feather ESP32 V2, Waveshare ESP32-P4 Touch LCD 5) have no saved
 configuration: the guided setup starts them from the board's defaults.
 
 **Off unless chosen (since 2026-11-20).** HTTPS for the web interface, the bonded pair and the
@@ -138,6 +139,29 @@ encoderautostart 2 on
 Then `ledcolor encoder green` and `ledcolor encoder2 red` (or `ledeffect`, `ledbrightness`,
 `ledclear` with the same targets) light the cells, by hand or from an automation. The image
 builds; it has not been run on the sign.
+
+`feathers3-status-sign` is the same sign on an Unexpected Maker FeatherS3[D] (16 MB, no flash
+encryption: board `feathers3`, not `feathers3_fe`), with the handheld's SSD1306 OLED, a LiPo and
+an external antenna on the u.FL. It is `xiao-status-sign` with the board changed and the OLED and
+the Power page left on. The [D]'s MAX17048 fuel gauge sits at 0x36 on bus 0 (the horizontal STEMMA
+QT, with the OLED), the same address as the first 4991, so the two encoder boards go on bus 1 (the
+vertical STEMMA QT, I2C2), the second with its A0 pad bridged (0x37). Once after the first setup:
+
+```text
+encoderbus 1
+encoderbus 2 1
+encoderaddress 0x36
+encoderaddress 2 0x37
+encoderautostart on
+encoderautostart 2 on
+oledautostart on
+wifiexternalantenna on
+reboot
+```
+
+`wifiexternalantenna` (FeatherS3[D] only, reboot required) drives GPIO41 high at boot, which turns
+the board's RF switch to the u.FL connector; off, the pin is left alone and the switch's pull-down
+keeps the on-board antenna.
 
 `qtpy-sensors` targets the **Adafruit QT Py ESP32 Pico** (classic ESP32). It
 enables VL53L4CX ToF, the Seesaw gamepad, STHS34PF80 presence and PA1010D GPS,

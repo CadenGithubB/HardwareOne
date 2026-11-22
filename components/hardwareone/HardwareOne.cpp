@@ -1767,6 +1767,9 @@ void hardwareone_setup() {
   // Debug system must be up before applySettings() (debug queue/task needed for flag writes)
   initDebugSystem();
   applySettings();
+#if ENABLE_WIFI
+  wifiApplyAntennaSelection();  // before any radio start (Wi-Fi or ESP-NOW)
+#endif
   // Notification device policy (per-kind levels) — name-keyed JSON, loaded
   // after the filesystem + settings are up, before render tasks start.
   notifPolicyLoad();

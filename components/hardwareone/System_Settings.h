@@ -305,6 +305,7 @@ struct Settings {
       presenceAutoStart(false),
       presenceDevicePollMs(100),
       wifiAutoReconnect(true),
+      wifiExternalAntenna(false),
       // Off: ESP-NOW and the local display come up only when the user turns
       // them on (setup wizard, espnowautostart / oledautostart, or open<x>).
       espnowAutoStart(false),
@@ -991,6 +992,10 @@ struct Settings {
   // registry (System_FeatureRegistry.cpp) names them in every build.
   // ---------------------------------------------------------------------
   bool wifiAutoReconnect;
+  // Boards with a software RF switch (WIFI_ANTENNA_SWITCH_PIN, the
+  // FeatherS3[D]): use the u.FL connector instead of the on-board antenna.
+  // Read once at boot; off on every other board.
+  bool wifiExternalAntenna;
   bool espnowAutoStart;         // Start ESP-NOW at boot
   bool oledAutoStart;           // Bring up the local display at boot
   bool eiAutoStart;             // Load the default Edge Impulse model at boot
@@ -1520,6 +1525,7 @@ String getDeviceFingerprint();
 // WiFi Settings
 const char* cmd_wifitxpower(const String& argsInput);
 const char* cmd_wifiautoreconnect(const String& argsInput);
+const char* cmd_wifiexternalantenna(const String& argsInput);
 const char* cmd_tzoffsetminutes(const String& argsInput);
 const char* cmd_ntpserver(const String& argsInput);
 
