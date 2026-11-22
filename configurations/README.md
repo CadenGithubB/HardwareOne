@@ -10,7 +10,7 @@ python3 tools/build_config.py build xiao-default
 python3 tools/build_config.py new
 ```
 
-Thirteen configurations are kept, each a board and a job:
+Fourteen configurations are kept, each a board and a job:
 
 | Board | Configuration | What it is for |
 |---|---|---|
@@ -24,6 +24,7 @@ Thirteen configurations are kept, each a board and a job:
 | | `xiao-mqtt` | Home Assistant node: MQTT and its settings page; offline maps off to fit |
 | | `xiao-openclaw` | Assistant over HTTP or from a Raspberry Pi; Bluetooth and the on-board model off |
 | | `xiao-display` | An SSD1306 display on external I2C; camera, maps and the on-board model off |
+| | `xiao-status-sign` | Meeting-room status sign: two Adafruit 4991 encoder boards lit by the LED commands; Wi-Fi, web interface and automations only |
 | QT Py ESP32 | `qtpy-sensors` | Sensor node: GPS, distance and presence sensors with a gamepad |
 | | `qtpy-oled` | Sensor node with an SSD1306 display and a gesture sensor |
 | | `qtpy-espnow` | The OLED sensor node plus the ESP-NOW mesh |
@@ -39,7 +40,8 @@ offers each under its plain name (groups Network and Assistant), starting at off
 configurations above were not changed by this: each one that had HTTPS, the bonded pair or the
 assistant through the old defaults now writes the switch itself (`ENABLE_HTTPS`,
 `ENABLE_BONDED_MODE`, `ENABLE_LLM_BACKEND`, `ENABLE_LLM_SOURCE_ONBOARD`, `ENABLE_LLM_SOURCE_CM5`
-in the three QT Py and five XIAO files), and all thirteen resolve to the same features as before.
+in the three QT Py and five XIAO files), and all thirteen resolve to the same features as before
+(`xiao-status-sign`, added on 2026-11-22, writes HTTPS on and the others off).
 The five P4X-EYE configurations already had them off or written, in the file or in
 `boards/p4x_eye.features.h`.
 
@@ -112,6 +114,30 @@ board: `XIAO_ESP32S3_SENSE_ENABLED`, `ENABLE_CAMERA_SENSOR` and
 `ENABLE_MICROPHONE_SENSOR` are 0, so the image has no camera, microphone or SD
 card and the user LED on GPIO21 is available. Every other XIAO configuration is
 for the Sense assembly. The image builds; it has not been run on a base board.
+
+`xiao-status-sign` is the 3D-printed meeting-room status sign: a XIAO ESP32S3 with two
+Adafruit 4991 Rotary Encoder with NeoPixel boards on the STEMMA QT bus (I2C1, SDA GPIO5,
+SCL GPIO6), used only for their pixels (green cell and red cell). It starts from `xiao-default`
+and keeps Wi-Fi, the web interface with HTTPS and automations; it adds the encoder board device
+(`CUSTOM_ENABLE_ENCODER`) and turns off the camera (it would hold I2C controller 1), the
+microphone, the assistant, ESP-NOW and the bonded pair, the Raspberry Pi link, offline maps and
+the Sensors, Maps, ESP-NOW and Power pages. Bluetooth and MQTT stay off as in `xiao-default`. No
+OLED and no fuel gauge are compiled in, so the address-collision check leaves 0x36..0x3D to the
+encoder boards. The Sense selection is kept (microSD stays available).
+
+A saved configuration holds build switches only, not settings, so the boards' addresses are set
+once on the device after the first setup (Settings page, or the console):
+
+```text
+encoderaddress 0x36
+encoderaddress 2 0x37
+encoderautostart on
+encoderautostart 2 on
+```
+
+Then `ledcolor encoder green` and `ledcolor encoder2 red` (or `ledeffect`, `ledbrightness`,
+`ledclear` with the same targets) light the cells, by hand or from an automation. The image
+builds; it has not been run on the sign.
 
 `qtpy-sensors` targets the **Adafruit QT Py ESP32 Pico** (classic ESP32). It
 enables VL53L4CX ToF, the Seesaw gamepad, STHS34PF80 presence and PA1010D GPS,

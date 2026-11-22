@@ -229,6 +229,7 @@ class Catalogue(unittest.TestCase):
         "xiao-display":    (1, 1, 1, 0, 1, 0),
         "xiao-mqtt":       (1, 1, 1, 1, 1, 0),
         "xiao-openclaw":   (1, 1, 1, 0, 1, 1),
+        "xiao-status-sign": (1, 0, 0, 0, 0, 0),  # added 2026-11-22: HTTPS only
     }
 
     @HAVE_COMPILER
