@@ -1164,8 +1164,8 @@ LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
         gLogOverflowWarned = true;
         WARN_SYSTEMF("[LOG] LittleFS low on free space (%u < %u bytes); new log writes will route to SD overflow",
                      (unsigned)gLogFreeCheckCached, (unsigned)want);
-        // Once per boot (the catalogue row says so); the [EVENT] line above
-        // records each later episode.
+        // Once per low episode (B10): the latch clears only when free space
+        // is back a reserve above the trip level, which re-arms this post.
         char freeB[16], wantB[24];
         snprintf(freeB, sizeof(freeB), "%u", (unsigned)gLogFreeCheckCached);
         snprintf(wantB, sizeof(wantB), "reserve %u", (unsigned)want);
@@ -1176,6 +1176,7 @@ LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
     gLogOverflowRearmCheckMs = millis();
     if (refreshLittleFsFreeCached() >= gLogOverflowRearmFree) {
       gLogOverflowActive = false;
+      gLogOverflowWarned = false;  // the episode is over: the next one warns again
       logSystemEvent("FS", "LittleFS free back to %u bytes (>= %u) — log overflow latch re-armed, logs return to flash",
                      (unsigned)gLogFreeCheckCached, (unsigned)gLogOverflowRearmFree);
     }

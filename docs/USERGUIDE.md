@@ -674,6 +674,8 @@ header flag this firmware must understand and does not (`RX Must-Understand Drop
 that device).
 
 ### Bonding (Master/Worker)
+**Experimental in 1.0.** Bond mode works, but it is not a promised 1.0 feature: its behaviour and wire format may change in a later release.
+
 With `ENABLE_BONDED_MODE=1`, two devices can bond into a master/worker pair. The master gains a **Remote** tab in its web UI showing the worker's features, even if those features aren't compiled into the master.
 
 A bond is a setting on each device, so `bondconnect <mac_or_name>` is run on **both**. The two devices then tell each other how the bond stands, and `bondstatus` shows it on the `Agreement:` line:
@@ -902,11 +904,11 @@ setting, regardless of which setting it was.
 | `mesh_promoted` / `mesh_demoted` | backup-master failover / master returned | device name / reason |
 | `remote_cmd_rx` | an authenticated remote command ran on THIS device (mesh or MQTT) | sender / command |
 | `wifi_connected` / `wifi_disconnected` | WiFi got IP / dropped | IP / - |
-| `wifi_connect_failed` | all connect attempts to a network failed | SSID / attempts |
+| `wifi_connect_failed` | all connect attempts to a network failed; shown in the notification centre, and as a toast at most once in 10 minutes | SSID / attempts |
 | `wifi_net_added` / `wifi_net_removed` | saved WiFi network added / removed | SSID |
 | `mqtt_connected` / `mqtt_disconnected` | broker link up / lost (once per transition) | broker / seconds up |
 | `ble_connected` / `ble_disconnected` | companion BLE device connected / dropped | device type / MAC |
-| `g2_connected` / `g2_disconnected` | glasses link up / temple dropped | sides / side |
+| `g2_connected` / `g2_disconnected` | glasses link up / temple dropped (`g2_disconnected` is shown in the notification centre, and as a toast at most once in 30 s) | sides / side |
 | `g2_plugin_alive` / `g2_plugin_silent` | the temple's app plugin answering / not answering renderer heartbeats (app idle or set down; not a wear sensor). RIGHT temple only: on stock firmware LEFT is silent by design (it sends only mic audio and acks) | side |
 | `ring_connected` / `ring_disconnected` | R1 ring GATT up (after setup) / link lost | name / MAC |
 | `ring_worn` / `ring_not_worn` | R1 on / off finger (wearStatus edge) | name |
@@ -917,14 +919,14 @@ setting, regardless of which setting it was.
 | `charging_started` / `charging_stopped` | actually charging vs merely USB-powered | percent |
 | `power_save_enter` / `power_save_exit` | display power-save engaged / woke | idle minutes / - |
 | `sd_mounted` / `sd_unmounted` | SD card mounted / unmounted | free MB / - |
-| `sd_write_failed` | SD went unwritable (once per episode) | hint |
-| `fs_low_space` | flash below the log reserve (once per boot); shown in the notification centre and as a toast | free bytes |
+| `sd_write_failed` | SD went unwritable (once per episode); shown in the notification centre, and as a toast at most once a minute | hint |
+| `fs_low_space` | flash below the log reserve (once per low episode); shown in the notification centre and as a toast | free bytes |
 | `heap_low` | internal RAM free under 25 KB or its largest block under 16 KB (once per low spell, at most once a minute); shown in the notification centre, and as a toast at most once in 10 minutes | free bytes / `largest <bytes>` |
-| `setting_changed` | a setting was saved | key / value |
-| `settings_save_failed` | settings.json write failed | stage / file |
+| `setting_changed` | a setting was saved (debug settings included) | the setting's command name (e.g. `bleautostart`) / value |
+| `settings_save_failed` | settings.json write failed; shown in the notification centre, and as a toast at most once a minute | stage / file |
 | `sensor_started` / `sensor_stopped` | sensor came up / stopped (includes Camera) | sensor name |
 | `sensor_start_failed` | sensor failed to start | sensor name |
-| `sensor_fault` | sensor auto-disabled after repeated I2C errors | sensor name / errors |
+| `sensor_fault` | sensor auto-disabled after repeated I2C errors; shown in the notification centre, and as a toast at most once a minute | sensor name / errors |
 | `sensor_unresponsive` / `sensor_recovered` | a sensor that answered since boot stopped responding / answered again (once per outage) | sensor name / address, bus, nack\|timeout |
 | `presence_detected` / `presence_cleared` | IR presence trip / cleared (held ~2s) | value |
 | `gesture` | APDS swipe detected | UP\|DOWN\|LEFT\|RIGHT |
@@ -1807,10 +1809,11 @@ fields empty, so the later columns stay under their header names.
 
 **Old capture data is removed before a volume fills.** Below a low-water mark (20 % of the volume,
 at most 64 MB, at least twice the 100 KB log reserve) the oldest day's sensor-log files go first,
-one day an hour, then old transcripts, and last health files older than the 14 newest stored days,
-until 5 % (at most 16 MB) above the mark is free. Today's folder, the open session, the three newest
-days, the eight newest transcripts, system logs, GPS tracks, notes and everything under `/system`
-are never removed. The internal flash is left alone while a writable SD card takes the overflow.
+one day an hour, and last health files older than the 14 newest stored days, until 5 % (at most
+16 MB) above the mark is free. Today's folder, the open session, the three newest days, transcripts,
+system logs, GPS tracks, notes and everything under `/system` are never removed. A volume too full
+for a transcript refuses it (`stt status` reports "Transcript storage full or unavailable"); delete old
+transcripts yourself to free the space. The internal flash is left alone while a writable SD card takes the overflow.
 Each pass that removed something writes one line to the system log. `sensorlog status` shows how
 many rows had to wait for the filesystem.
 

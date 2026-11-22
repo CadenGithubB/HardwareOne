@@ -130,6 +130,7 @@ void streamBondInner(httpd_req_t* req) {
   // HTML Structure
   httpd_resp_send_chunk(req, R"HTML(
 <div class='remote-container'>
+<p class='remote-description' id='bond-experimental'><strong>Experimental in 1.0.</strong> Bond mode works but is not a promised 1.0 feature: its behaviour and wire format may change in a later release.</p>
 <div id='remote-content'>
 </div>
 </div>
@@ -970,7 +971,7 @@ void streamBondInner(httpd_req_t* req) {
 }
 
 static void streamBondContent(httpd_req_t* req, const String& username) {
-  streamCardPage(req, "Bonded Device", username, "bond", [&] { streamBondInner(req); });
+  streamCardPage(req, "Bonded Device (Experimental)", username, "bond", [&] { streamBondInner(req); });
 }
 
 static esp_err_t handleBondPage(httpd_req_t* req) {

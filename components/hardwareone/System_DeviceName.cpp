@@ -20,16 +20,14 @@
 
 #include "System_Command.h"     // CommandArgs
 #include "System_Debug.h"       // getDebugBuffer, ensureDebugBuffer
-#include "System_Events.h"      // systemEventPost, SYSEVT_SETTING_CHANGED
 #include "System_Settings.h"    // gSettings, setSetting, SettingEntry
 #include "System_Utils.h"       // RETURN_VALID_IF_VALIDATE_CSTR
 #include "System_ESPNow.h"      // espnowDeviceNameApplied, espnowDeviceNameClearRefusal, espnowNameInUseBy (ESPNOW builds)
 
 void deviceNameApply(const String& name, char* warn, size_t warnCap) {
   if (warn && warnCap) warn[0] = '\0';
-  // Raw setSetting bypasses handleSettingCommand, which is where
-  // notifySettingChanged normally fires — post the parity notification here.
-  systemEventPost(SYSEVT_SETTING_CHANGED, "deviceName", name.length() ? name.c_str() : "(cleared)");
+  // setting_changed is posted by the caller's setSetting (SET-6: a second post
+  // here doubled it).
 #if ENABLE_ESPNOW
   espnowDeviceNameApplied(name);
 #endif

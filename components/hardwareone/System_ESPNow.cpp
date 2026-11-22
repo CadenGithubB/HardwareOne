@@ -23447,9 +23447,9 @@ extern const CommandEntry espNowCommands[] = {
   
 #if ENABLE_BONDED_MODE
   // ---- Bond Mode Commands (1:1 handshake relationship) ----
-  { "bondconnect", "Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)", true, cmd_bond_connect, "Usage: bondconnect <mac_or_name>\n       Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'.\n       The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so.\n       A role chosen with 'bondrole' is kept; else the other than the one the peer's user chose; else the higher address is master.\n       Refused when the peer's session shows its build has no bond mode (espnowsessions caps)." },
+  { "bondconnect", "EXPERIMENTAL in 1.0. Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)", true, cmd_bond_connect, "Usage: bondconnect <mac_or_name>\n       Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'.\n       The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so.\n       A role chosen with 'bondrole' is kept; else the other than the one the peer's user chose; else the higher address is master.\n       Refused when the peer's session shows its build has no bond mode (espnowsessions caps)." },
   { "bonddisconnect", "Disconnect from bonded peer device. The peer is told that the bond ended.", true, cmd_bond_disconnect },
-  { "bondstatus", "Show bond mode status and configuration, with what the peer answered about the bond (Agreement) and whether its data is forwarded to the mesh.", false, cmd_bond_status },
+  { "bondstatus", "EXPERIMENTAL in 1.0. Show bond mode status and configuration, with what the peer answered about the bond (Agreement) and whether its data is forwarded to the mesh.", false, cmd_bond_status },
   { "bondforward", "Bond master: forward the bond partner's readings, battery state and events to the mesh master named on this device: 'bondforward [on|off|sensors <all|default|name,name,...>]'.", true, cmd_bond_forward, "Usage: bondforward [on | off | sensors <all | default | name,name,...>]\n       No argument shows whether the partner's data is forwarded, and why not. Off by default.\n       Only to the master named here, when it is paired in this device's primary mesh. Input is not forwarded unless named.\n       That master may ask for the partner's readings (espnowsensorreq <partner> via <this device> there)." },
   { "bondrole", "Get/choose bond mode role: 'bondrole [master|worker|auto]' (no arg shows the role and whether it was chosen).", true, cmd_bond_role, "Usage: bondrole [master|worker|auto]   (no arg shows the role and how it was decided)\n       master or worker: your choice, kept by bondconnect; a partner whose role is automatic takes the other one.\n       auto: give the choice up (the role stays until the partner chooses or the next bondconnect)." },
   { "bondshowcap", "Show local device capability summary.", false, cmd_bond_showcap },
@@ -23494,7 +23494,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowhistorykb", "Message history per peer and direction in KB: [<0-32>] (0 = board default; no argument shows saved and active; reboot required)", true, cmd_espnow_historykb, "Usage: espnowhistorykb [<0..32>]" },
   { "espnowsensorbroadcastinterval", "Set sensor broadcast interval: <100-10000 ms>", true, cmd_espnow_sensorbroadcastinterval, "Usage: espnowsensorbroadcastinterval <100..10000>" },
 #if ENABLE_BONDED_MODE
-  { "espnowbondmodeenabled",         "Enable/disable bond mode: <0|1>", true, cmd_espnow_bondmodeenabled, "Usage: espnowbondmodeenabled <0|1>" },
+  { "espnowbondmodeenabled",         "EXPERIMENTAL in 1.0. Enable/disable bond mode: <0|1>", true, cmd_espnow_bondmodeenabled, "Usage: espnowbondmodeenabled <0|1>" },
   { "espnowbondpeermac",             "Set bond peer MAC address", true, cmd_espnow_bondpeermac, "Usage: espnowbondpeermac <AA:BB:CC:DD:EE:FF>" },
   { "bondstreamthermal",             "Set auto-stream thermal: <0|1>", true, cmd_espnow_bondstreamthermal, "Usage: bondstreamthermal <0|1>" },
   { "bondstreamtof",                 "Set auto-stream ToF: <0|1>", true, cmd_espnow_bondstreamtof, "Usage: bondstreamtof <0|1>" },
@@ -23573,7 +23573,7 @@ static const SettingEntry espnowSettingEntries[] = {
   { "masterFingerprint", SETTING_STRING, &gSettings.espnowMasterFingerprint, 0, 0, "", 0, 0, "Master Fingerprint", nullptr, false, "mesh", "espnowmasterfingerprint" },
   { "backupMasterFingerprint", SETTING_STRING, &gSettings.espnowBackupMasterFingerprint, 0, 0, "", 0, 0, "Backup Master Fingerprint", nullptr, false, "mesh", "espnowbackupfingerprint" },
 #if ENABLE_BONDED_MODE
-  { "bondModeEnabled", SETTING_BOOL, &gSettings.bondModeEnabled, false, 0, nullptr, 0, 1, "Bond Mode Enabled", nullptr, false, "bond", "espnowbondmodeenabled" },
+  { "bondModeEnabled", SETTING_BOOL, &gSettings.bondModeEnabled, false, 0, nullptr, 0, 1, "Bond Mode Enabled (experimental)", nullptr, false, "bond", "espnowbondmodeenabled" },
   { "bondRole", SETTING_U8, &gSettings.bondRole, 0, 0, nullptr, 0, 1, "Bond Role", "0:Worker (compute/network),1:Master (display/gamepad)", false, "bond", "bondrole" },
   // The user chose bondRole (set by 'bondrole master|worker', cleared by
   // 'bondrole auto'; an edit of bondRole goes through bondrole and sets it).

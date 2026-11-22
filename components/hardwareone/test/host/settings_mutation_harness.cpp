@@ -289,13 +289,19 @@ static void stringsPrivacyAndPreflight() {
   reset(); context = "explicit descriptor alias";
   SettingEntry alias = entries[0]; alias.jsonKey = "alternate"; alias.label = "Alternate label";
   check(!error(handleSettingCommand(&alias, "5")), "alias update failed");
-  check(events.size() == 1 && events[0].subject == "Alternate label" && events[0].value == "5",
-        "descriptor alias notification lost its label or duplicated");
+  // SET-6: the subject is the row's key (cmdKey, else jsonKey), not its label.
+  check(events.size() == 1 && events[0].subject == "alternate" && events[0].value == "5",
+        "descriptor alias notification lost its key or duplicated");
   reset(); context = "typed setter first registered descriptor";
   setSetting(signedField.value, 5);
   changedOnce();
-  check(events.size() == 1 && events[0].subject == "Signed" && events[0].value == "5",
+  check(events.size() == 1 && events[0].subject == "signed" && events[0].value == "5",
         "typed setter did not use the first registered alias exactly once");
+  reset(); context = "subject is the command name";
+  setSetting(boolField, !boolField);
+  changedOnce();
+  check(events.size() == 1 && events[0].subject == "tofautostart",
+        "a row with a command name did not post it as the subject");
   reset(); context = "long string event";
   const std::string longValue(79, 'x');
   check(!error(command(6, longValue.c_str())), "long string rejected");

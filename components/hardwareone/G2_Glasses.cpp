@@ -25723,11 +25723,10 @@ static const char* cmd_g2connect(const String& argsInput) {
                          arg == "right" || arg == "saved" || arg == "mac";
   if (!knownWord) return "Usage: openg2 [left|right|auto|saved]";
 
-  // `openg2` means "be a G2 central." Record client as the desired BLE role so
-  // the loop's reconnect tick keeps the radio in client mode (and never yanks it
-  // to server) — this is the settings arbiter the tick reads. Eager like the
-  // pair-intent stamp below: intent is captured even if the connect later fails.
-  setSetting(gSettings.bleMode, (int)BLE_MODE_G2_CLIENT);
+  // `openg2` means "be a G2 central": the saved Bluetooth mode becomes client
+  // (boot and the radio companion's restore read it), but only once a connect
+  // has started (RAD-6). A refused openg2 leaves the saved mode as it was.
+  auto saveClientMode = []() { setSetting(gSettings.bleMode, (int)BLE_MODE_G2_CLIENT); };
 
   // Pair-intent stamp from the CALLING task's identity. `openg2` from a
   // logged-in CLI session IS the natural pairing gesture — the user is
@@ -25759,6 +25758,7 @@ static const char* cmd_g2connect(const String& argsInput) {
       return "Error: G2 saved-MAC connect could not start: no saved glasses, or Bluetooth is busy. "
              "Run openg2 to scan for them, or check blestatus and retry.";
     }
+    saveClientMode();
     return "G2: saved-MAC connect started in background — use g2status to watch";
   }
 
@@ -25775,6 +25775,7 @@ static const char* cmd_g2connect(const String& argsInput) {
     return "Error: G2 connect could not start. Check Bluetooth with blestatus, "
            "wait a few seconds and run openg2 again.";
   }
+  saveClientMode();
   return "G2: scan/connect started in background — use g2status to watch";
 }
 

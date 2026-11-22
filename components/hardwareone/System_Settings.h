@@ -1478,6 +1478,7 @@ inline void setDebugSetting(T& field, const T& value) {
   if (field != value) {
     field = value;
     (void)requestDebugSettingsPersist();
+    notifySettingChanged(&field);  // SET-6: setting_changed like setSetting
   }
 }
 

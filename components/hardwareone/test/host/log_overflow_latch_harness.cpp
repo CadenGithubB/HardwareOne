@@ -163,11 +163,14 @@ int main() {
   CHECK(!VFS::isLogOverflowActive() && traverses == traversesBefore + 1);
   CHECK(eventLines.back().find("re-armed") != std::string::npos);
 
-  // A second episode latches again; the once-per-boot event is not re-posted
-  // but the [EVENT] line records it.
+  // A second episode latches again and warns again (B10: once per low
+  // episode, not once per boot), with its own [EVENT] line.
   setFree(50 * 1024); advance(20000);
   CHECK(resolve(out) == LogTier::Refused && VFS::isLogOverflowActive());
-  CHECK(lowSpacePosts == 1 && warnings == 1 && eventLines.size() == 3);
+  CHECK(lowSpacePosts == 2 && warnings == 2 && eventLines.size() == 3);
+  // Still inside that episode: no further post.
+  advance(6000);
+  CHECK(resolve(out) == LogTier::Refused && lowSpacePosts == 2 && warnings == 2);
 
   // A caller with a large margin (the sensor log asks for its whole rotation
   // size) trips the latch far above the floor. Refusal is decided against the

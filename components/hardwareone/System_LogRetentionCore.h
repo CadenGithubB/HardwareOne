@@ -6,9 +6,10 @@
 // System_TimeAnchors.cpp, which steps it from timeAnchorsTick.
 // =============================================================================
 // Owner's rule: several days of system logs and health statistics come first
-// and are protected; other dated capture data (sensor logs, transcripts) is
-// secondary and is removed oldest first before the volume fills; system files
-// are never removed.
+// and are protected; other dated capture data (sensor logs) is secondary and
+// is removed oldest first before the volume fills; system files and
+// transcripts are never removed (B12: a full volume refuses a new transcript
+// with "Transcript storage full or unavailable", System_Transcript.cpp).
 //
 // What a pass may remove, in this order, and only while the volume is below
 // its low-water mark:
@@ -19,10 +20,7 @@
 //   2. Secondary files in the boot-named folder of the lowest earlier boot
 //      that has no time anchor (boot-<N>/, N below this boot). A folder with
 //      an anchor is left to the anchor sweep, which gives its files a date.
-//   3. Dated transcripts (<root>/stt/u<id>/<YYYYMMDD>T<HHMMSS>Z-...txt), the
-//      oldest day first, only days before `transcriptCutoffDay`, and never one
-//      of the kRecentTranscriptsKept newest stored on the volume.
-//   4. Last, and only when 1-3 found nothing: "health-" files in dated folders
+//   3. Last, and only when 1-2 found nothing: "health-" files in dated folders
 //      that are not among the kProtectedDays newest stored days.
 // A pass ends after the files of ONE day (or one boot folder) are gone, or
 // earlier when the freed bytes reach the high-water mark; the next pass starts
@@ -38,20 +36,19 @@
 // Never removed, whatever the free space: the open session's file and its
 // rotations, today's folder, files whose name starts with "." (.anchors.csv)
 // or ends in ".tmp"/".bak", anything directly in the sensors folder (literal
-// path sessions), sub-folders of a day folder, transcripts whose name starts
-// with "boot" (no date) and everything else under stt/u<id>/ that is not a
-// dated transcript (notes/). The pass never looks at /system,
-// /logging_captures/system, /logging_captures/tracks, r1-health-history (its
-// own budget, R1_HealthHistoryStore.cpp) or the collector's store.
+// path sessions) and sub-folders of a day folder. The pass never looks at
+// /system, <root>/stt (transcripts and notes), /logging_captures/system,
+// /logging_captures/tracks, r1-health-history (its own budget,
+// R1_HealthHistoryStore.cpp) or the collector's store.
 //
 // "Newest stored days" are counted from the day folders that exist, as the R1
 // history store does, not from the clock: a clock that jumps forward removes
 // nothing.
 //
-// The two "recent" horizons follow the catch-up ledger
+// The "recent" day horizon follows the catch-up ledger
 // (System_CatchupLedger.cpp), which offers a peer the files of the three
-// newest day folders and the eight newest transcripts: a file the ledger may
-// have offered is not removed before the peer could fetch it. (The ledger also
+// newest day folders: a file the ledger may have offered is not removed before
+// the peer could fetch it. (The ledger also
 // offers the two newest boot folders; an earlier boot's folder without an
 // anchor can still be pruned here.)
 #pragma once
@@ -82,15 +79,6 @@ constexpr unsigned kLowWaterReserveMultiple = 2;
 // volume (capped) and one log reserve.
 constexpr unsigned kHighWaterStepPercent = 5;
 constexpr uint64_t kHighWaterStepCapBytes = 16ull * 1024 * 1024;
-// Transcripts of the last two days are never removed (no accessor names an
-// open transcript, so recent ones are protected by date).
-constexpr unsigned kTranscriptDaysKept = 2;
-// Nor are the newest stored dated transcripts of a volume, whatever their age:
-// the catch-up ledger's transcript horizon (kPickCap in System_CatchupLedger.cpp).
-constexpr unsigned kRecentTranscriptsKept = 8;
-// A transcript that cannot be removed is passed over; after this many in one
-// pass the pass leaves the transcripts alone (each one costs a survey).
-constexpr unsigned kTranscriptFailuresPerPass = 2;
 // Pace: never in the first minutes after boot, one pass an hour, a bounded
 // amount of work per step.
 constexpr uint32_t kFirstPassDelayMs = 10u * 60u * 1000u;
@@ -185,39 +173,6 @@ inline bool parseBootFolder(const char* name, uint32_t* bootOut) {
   return digits(name + 5, count, bootOut);
 }
 
-// A saved transcript with a date: "<YYYYMMDD>T<HHMMSS>Z-<local|pi>-<16 hex>.txt"
-// (System_Transcript.cpp). A transcript started without a clock is named
-// "boot-..." and has no date: it is never one of these.
-inline bool parseTranscriptDay(const char* name, DayKey* out) {
-  if (!name) return false;
-  const size_t length = strlen(name);
-  uint32_t y = 0, m = 0, d = 0, clock = 0;
-  if (length < 17 || name[8] != 'T' || name[15] != 'Z' || name[16] != '-') return false;
-  if (!digits(name, 4, &y) || !digits(name + 4, 2, &m) || !digits(name + 6, 2, &d) ||
-      !digits(name + 9, 6, &clock) || !validDay(y, m, d)) return false;
-  const char* rest = name + 17;
-  size_t provider = 0;
-  if (strncmp(rest, "local-", 6) == 0) provider = 6;
-  else if (strncmp(rest, "pi-", 3) == 0) provider = 3;
-  else return false;
-  rest += provider;
-  if (strlen(rest) != 16 + 4 || strcmp(rest + 16, ".txt") != 0) return false;
-  for (size_t i = 0; i < 16; ++i) {
-    const char c = rest[i];
-    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
-  }
-  *out = y * 10000 + m * 100 + d;
-  return true;
-}
-
-// "u<digits>": one account's transcript folder.
-inline bool isTranscriptUserFolder(const char* name) {
-  uint32_t id = 0;
-  if (!name || name[0] != 'u') return false;
-  const size_t count = strlen(name + 1);
-  return count > 0 && count <= 10 && digits(name + 1, count, &id);
-}
-
 inline bool endsWith(const char* name, const char* suffix) {
   const size_t n = strlen(name), s = strlen(suffix);
   return n >= s && strcmp(name + n - s, suffix) == 0;
@@ -271,34 +226,6 @@ struct NewestDays {
   }
 };
 
-// A dated transcript's name is at most 43 characters (parseTranscriptDay).
-constexpr size_t kTranscriptNameMax = 48;
-
-// The newest dated transcripts seen so far, newest first. The names start
-// with the UTC stamp, so the larger name is the newer transcript.
-struct NewestTranscripts {
-  char names[kRecentTranscriptsKept][kTranscriptNameMax];
-  unsigned count;
-
-  void clear() { count = 0; }
-  void add(const char* name) {
-    const size_t length = strlen(name);
-    if (length >= kTranscriptNameMax) return;  // a strictly named transcript is shorter
-    unsigned at = 0;
-    while (at < count && strcmp(names[at], name) >= 0) ++at;
-    if (at >= kRecentTranscriptsKept) return;
-    const unsigned last = count < kRecentTranscriptsKept ? count : kRecentTranscriptsKept - 1;
-    for (unsigned i = last; i > at; --i) memcpy(names[i], names[i - 1], sizeof(names[i]));
-    memcpy(names[at], name, length + 1);
-    if (count < kRecentTranscriptsKept) ++count;
-  }
-  // `name` is one of the kRecentTranscriptsKept newest (all of them are, while
-  // fewer than that are stored).
-  bool holds(const char* name) const {
-    return count < kRecentTranscriptsKept || strcmp(name, names[kRecentTranscriptsKept - 1]) >= 0;
-  }
-};
-
 // ---------------------------------------------------------------------------
 // The device side of a pass
 // ---------------------------------------------------------------------------
@@ -327,7 +254,6 @@ struct Port {
 // What the pass may not touch, and where "now" is.
 struct Limits {
   DayKey today;                // local date: today's sensor folder is never touched
-  DayKey transcriptCutoffDay;  // only transcripts of days before this one may go
   uint32_t currentBoot;        // only boot folders of earlier boots may be looked at
   const char* openSessionFile; // the sensor log's active file as a path on this volume, or ""
 };
@@ -348,7 +274,6 @@ class Pass {
     if (forgetFloors || strcmp(root_, root ? root : "") != 0) {
       dayFloor_[0] = dayFloor_[1] = 0;
       bootFloor_ = 0;
-      transcriptFloor_[0] = '\0';
     }
     snprintf(root_, sizeof(root_), "%s", root ? root : "");
     need_ = needBytes;
@@ -357,7 +282,6 @@ class Pass {
     removedHere_ = 0;
     healthRound_ = false;
     lastDay_ = 0;
-    transcriptFailures_ = 0;
     startSurvey(Phase::SurveyDays);
   }
 
@@ -373,9 +297,6 @@ class Pass {
       case Phase::SurveyDays: return surveyDays(port, limits);
       case Phase::PruneFolder: return pruneFolder(port, limits);
       case Phase::SurveyBoots: return surveyBoots(port, limits);
-      case Phase::SurveyTranscriptUsers: return surveyTranscriptUsers(port);
-      case Phase::SurveyTranscriptFiles: return surveyTranscriptFiles(port, limits);
-      case Phase::RemoveTranscript: return removeTranscript(port);
       case Phase::Idle: break;
     }
     return Step::Finished;
@@ -383,14 +304,12 @@ class Pass {
 
  private:
   enum class Phase : uint8_t {
-    Idle = 0, SurveyDays, PruneFolder, SurveyBoots, SurveyTranscriptUsers, SurveyTranscriptFiles,
-    RemoveTranscript,
+    Idle = 0, SurveyDays, PruneFolder, SurveyBoots,
   };
 
   void sensorsDirectory(char* out, size_t cap) const {
     snprintf(out, cap, "%s/logging_captures/sensors", root_);
   }
-  void transcriptsDirectory(char* out, size_t cap) const { snprintf(out, cap, "%s/stt", root_); }
 
   void startSurvey(Phase phase) {
     phase_ = phase;
@@ -444,7 +363,7 @@ class Pass {
     size_t count = 0;
     bool end = false;
     if (!port.list(directory, cursor_, scratch_, kEntriesPerStep, &count, &end)) {
-      // No capture tree on this volume: transcripts are still looked at.
+      // No capture tree on this volume.
       return afterDays();
     }
     for (size_t i = 0; i < count; ++i) {
@@ -593,115 +512,14 @@ class Pass {
     return Step::Working;
   }
 
+  // Nothing (more) secondary may go in this pass.
   Step afterBoots() {
-    transcriptDay_ = 0;
-    return startTranscriptSurvey();
-  }
-
-  // One survey over every account folder: the oldest transcript that may go,
-  // and the newest stored ones, which may not.
-  Step startTranscriptSurvey() {
-    userCursor_ = 0;
-    oldestTranscript_[0] = '\0';
-    oldestTranscriptName_[0] = '\0';
-    oldestTranscriptDay_ = 0;
-    newestTranscripts_.clear();
-    phase_ = Phase::SurveyTranscriptUsers;
-    return Step::Working;
-  }
-
-  // Transcripts: one account folder at a time, looking for the oldest dated
-  // transcript before the cutoff (once a day is chosen, only that day's).
-  Step surveyTranscriptUsers(Port& port) {
-    char directory[64];
-    transcriptsDirectory(directory, sizeof(directory));
-    size_t count = 0;
-    bool end = false;
-    // One account folder per step.
-    if (userCursor_ >= kWalkMaxEntries ||
-        !port.list(directory, userCursor_, scratch_, 1, &count, &end) || count == 0) {
-      return transcriptSurveyDone();
-    }
-    ++userCursor_;
-    if (!scratch_[0].directory || !isTranscriptUserFolder(scratch_[0].name)) return Step::Working;
-    const int n = snprintf(folder_, sizeof(folder_), "%s/%s", directory, scratch_[0].name);
-    if (n <= 0 || (size_t)n >= sizeof(folder_)) return Step::Working;  // never a cut path
-    cursor_ = 0;
-    phase_ = Phase::SurveyTranscriptFiles;
-    return Step::Working;
-  }
-
-  Step surveyTranscriptFiles(Port& port, const Limits& limits) {
-    size_t count = 0;
-    bool end = false;
-    if (!port.list(folder_, cursor_, scratch_, kEntriesPerStep, &count, &end)) {
-      count = 0;
-      end = true;
-    }
-    for (size_t i = 0; i < count; ++i) {
-      DayKey day = 0;
-      if (scratch_[i].directory || !parseTranscriptDay(scratch_[i].name, &day)) continue;
-      newestTranscripts_.add(scratch_[i].name);
-      if (day >= limits.transcriptCutoffDay) continue;
-      if (transcriptDay_ != 0 && day != transcriptDay_) continue;  // only the chosen day
-      // One that could not be removed earlier, and everything before it, is not tried again.
-      if (transcriptFloor_[0] != '\0' && strcmp(scratch_[i].name, transcriptFloor_) <= 0) continue;
-      // The name starts with the UTC stamp: the smaller name is the older one.
-      char path[192];
-      const int n = snprintf(path, sizeof(path), "%s/%s", folder_, scratch_[i].name);
-      if (n <= 0 || (size_t)n >= sizeof(path)) continue;
-      if (oldestTranscript_[0] == '\0' || strcmp(scratch_[i].name, oldestTranscriptName_) < 0) {
-        snprintf(oldestTranscript_, sizeof(oldestTranscript_), "%s", path);
-        static_assert(sizeof(oldestTranscriptName_) == sizeof(Entry::name), "same name size");
-        memcpy(oldestTranscriptName_, scratch_[i].name, sizeof(oldestTranscriptName_));
-        oldestTranscriptDay_ = day;
-      }
-    }
-    cursor_ += count;
-    if (!listingDone(end, count)) return Step::Working;
-    phase_ = Phase::SurveyTranscriptUsers;  // the next account folder
-    return Step::Working;
-  }
-
-  Step transcriptSurveyDone() {
-    // The oldest one that may go is one of the newest stored: so is every
-    // other one, and nothing goes.
-    if (oldestTranscript_[0] != '\0' && newestTranscripts_.holds(oldestTranscriptName_)) {
-      oldestTranscript_[0] = '\0';
-    }
-    // No (further) transcript of the chosen day, or none old enough.
-    if (oldestTranscript_[0] == '\0') return afterTranscripts();
-    phase_ = Phase::RemoveTranscript;
-    return Step::Working;
-  }
-
-  // No (further) transcript may go in this pass.
-  Step afterTranscripts() {
     if (removed_ > 0 || healthRound_) return finish();
     // Nothing secondary could go anywhere on this volume: the last round,
     // health files of days that are no longer protected.
     healthRound_ = true;
     startSurvey(Phase::SurveyDays);
     return Step::Working;
-  }
-
-  Step removeTranscript(Port& port) {
-    uint32_t size = 0;
-    if (port.removeFile(oldestTranscript_, &size)) {
-      ++removed_;
-      freed_ += size;
-      lastDay_ = oldestTranscriptDay_;
-      transcriptDay_ = oldestTranscriptDay_;  // the rest of this day only
-      if (freed_ >= need_) return finish();
-    } else {
-      // It cannot be removed: remembered (from pass to pass, like the day
-      // floors), so the pass goes on to the next one instead of meeting this
-      // one again every hour and never reaching the last round.
-      memcpy(transcriptFloor_, oldestTranscriptName_, sizeof(transcriptFloor_));
-      if (++transcriptFailures_ >= kTranscriptFailuresPerPass) return afterTranscripts();
-    }
-    // The next transcript of the same day: survey again.
-    return startTranscriptSurvey();
   }
 
   // No default member initializers: a zeroed object (static storage, PSRAM
@@ -731,15 +549,6 @@ class Pass {
   DayKey folderDay_;
   uint32_t folderBoot_;
   bool folderIsBoot_;
-
-  size_t userCursor_;
-  DayKey transcriptDay_;   // once chosen, only this day's transcripts go
-  char oldestTranscript_[192];
-  char oldestTranscriptName_[64];
-  DayKey oldestTranscriptDay_;
-  NewestTranscripts newestTranscripts_;         // of this survey
-  char transcriptFloor_[sizeof(oldestTranscriptName_)];  // transcripts up to this name could not be removed
-  unsigned transcriptFailures_;                 // in this pass
 
   Entry scratch_[kEntriesPerStep];
 };
