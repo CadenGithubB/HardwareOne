@@ -63,6 +63,8 @@ Both return OK when the connection is *started*, not finished - give them a
 moment before expecting status to read connected.
 
 ### Bonded Microcontrollers
+**Experimental in 1.0.** Bond mode works, but it is not a promised 1.0 feature: its behaviour and wire format may change in a later release.
+
 Bonded mode is off unless you choose it for a build: turn on **Bonded pair** in the guided setup (`python3 tools/build_config.py new`, group Network) for both devices, or write `ENABLE_BONDED_MODE=1` in their saved configurations. With it, two devices can bond into a paired set. One acts as the local controller (typically with OLED + gamepad), the other as the remote endpoint. The controller gains a **Remote** tab in its web UI showing the paired device's features, even if those features aren't compiled into the controller. Command registries are shared between the two, so either device can execute commands on the other transparently.
 
 1. Set up the hardware for your specific needs, using the steps above. Do it twice, one for each of the bonded devices.

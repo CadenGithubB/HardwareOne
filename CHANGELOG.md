@@ -21,6 +21,26 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this section collects
 everything user-visible since the v0.99.99.1 tag.
 
+### Changed (events, notifications and retention)
+- A commanded Wi-Fi disconnect (`wifidisconnect`, `closewifi`, `radiopower off`) posts
+  `wifi_disconnected` once, from the radio's own event with the network name and reason; it used to
+  be posted twice (EVT-4). A stopped connect attempt with no link still posts it once.
+- `sd_write_failed`, `settings_save_failed`, `sensor_fault`, `wifi_connect_failed` and
+  `g2_disconnected` now reach the notification centre and show a toast, rate-limited (one a minute;
+  `wifi_connect_failed` one in 10 minutes, `g2_disconnected` one in 30 s) (EVT-2).
+- The low-storage notice (`fs_low_space`) comes once per low episode instead of once per boot: once
+  space is back it warns again the next time it runs low (B10).
+- `setting_changed` names the setting by its command name (for example `bleautostart`), not by its
+  label, which nine settings shared; renaming the device posts it once (it was posted twice), and
+  debug settings post it too (SET-6).
+- Transcripts are never removed by the storage clean-up any more (B12): only old sensor logs and
+  then old health files go. A volume too full for a transcript refuses it with "Transcript storage
+  full or unavailable".
+- A refused `openg2` (for example "already connected") no longer switches the saved Bluetooth mode
+  to client; it is saved only once a connect starts (RAD-6).
+- Bond mode is marked experimental for 1.0 in `bondconnect`, `bondstatus` and
+  `espnowbondmodeenabled` help, the Bonded Device web page and the docs (D3). No behaviour change.
+
 ### Added (build configuration)
 - `xiao-status-sign`: a saved XIAO configuration for the meeting-room status sign. Two Adafruit
   4991 encoder boards on STEMMA QT are lit green or red with the LED commands (`ledcolor encoder`,

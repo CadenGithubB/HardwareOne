@@ -695,12 +695,12 @@ is listed by name (`getNextFileName`), opening only the file it removes. Run wit
 
 `log_retention` compiles `System_LogRetentionCore.h` as it is and runs it on an
 in-memory volume: the water marks and the low/high latch; secondary files of the
-oldest day first, one day a pass; the three newest stored days, the eight newest
-transcripts, the open session, today's folder, dot, `.tmp` and `.bak` files,
-notes and everything outside the two capture trees never removed; health files
-of the fourteen newest stored days kept; earlier unanchored boot folders before
-transcripts; a transcript that cannot be removed passed over; the "recent"
-horizons at least the catch-up ledger's (read from `System_CatchupLedger.cpp`);
+oldest day first, one day a pass; the three newest stored days, every
+transcript and note (B12), the open session, today's folder, dot, `.tmp` and
+`.bak` files and everything outside the capture tree never removed; health
+files of the fourteen newest stored days kept; earlier unanchored boot folders
+before the health round; the "recent" day horizon at least the catch-up
+ledger's (read from `System_CatchupLedger.cpp`);
 and the per-step bounds on listing and removal. Run with
 `ctest --test-dir build -R '^log_retention$' --output-on-failure`.
 
@@ -7593,7 +7593,9 @@ and the admin gate on every poll are covered. The page script is `tools/webui/te
 
 `notification_low_resource_rules` compiles the rule switch, tiers, message formatter and cooldown check of
 `System_Notifications.cpp`: `heap_low` and `fs_low_space` have the queue and toast sinks at level 2, a
-10-minute cooldown that the (now 32-bit) rule field holds, and texts that fit the 64-byte buffer.
+10-minute cooldown that the (now 32-bit) rule field holds, and texts that fit the 64-byte buffer. The EVT-2
+faults (`sd_write_failed`, `settings_save_failed`, `sensor_fault`, `wifi_connect_failed`, `g2_disconnected`)
+have the queue and toast sinks, no banner, their cooldowns and their own sentences.
 
 `memreport_table` compiles `System_MemReportCore.h` with the real ArduinoJson: every row of the field table
 appears in the text and the JSON form, a zero total prints 0 % without a division, the heading says MEMORY REPORT

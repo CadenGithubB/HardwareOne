@@ -34,6 +34,8 @@ struct DebugManager {
 
 struct HostSettings { int logLevel = 2; } gSettings;
 bool requestDebugSettingsPersist() { events.push_back("persist"); return true; }
+// setDebugSetting's setting_changed post (SET-6); the settings_mutation suite runs the real one.
+void notifySettingChanged(const void*) {}
 // INSERT_SET_DEBUG_SETTING
 
 bool gCliValidateOnly = false;

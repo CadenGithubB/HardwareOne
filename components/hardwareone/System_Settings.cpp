@@ -3543,7 +3543,9 @@ void notifySettingChanged(const void* fieldPtr, const SettingEntry* entry) {
     char name[SYSEVT_DETAIL_LEN];
     if (settingOptionLabel(entry, strtoll(val, nullptr, 10), name, sizeof(name))) strlcpy(val, name, sizeof(val));
   }
-  systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, val);
+  // SET-6: the subject is the setting's command name (cmdKey, else jsonKey),
+  // which is unique, not its label: nine rows share "Auto-start at boot".
+  systemEventPost(SYSEVT_SETTING_CHANGED, entry->cmdKey ? entry->cmdKey : entry->jsonKey, val);
 #if ENABLE_OLED_DISPLAY
   // A remote setting change must repaint without waiting for physical input.
   { extern void oledMarkDirty(); oledMarkDirty(); }

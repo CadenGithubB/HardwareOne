@@ -526,6 +526,11 @@ int main() {
     gSettings.bleMode = BLE_MODE_SERVER;
     world.server = true;
     serverMinutes();
+    // RAD-6: an openg2 whose connect does not start (the scan path is refused
+    // here) and an unknown word leave the saved mode alone.
+    CHECK(std::strncmp(cmd_g2connect(String("left")), "Error:", 6) == 0);
+    CHECK(std::strncmp(cmd_g2connect(String("sideways")), "Usage:", 6) == 0);
+    CHECK(gSettings.bleMode == BLE_MODE_SERVER);
     const uint32_t back = gNow;
     openg2Saved();
     tick(20000);

@@ -1264,7 +1264,11 @@ const char* cmd_closewifi(const String& argsInput) {
   httpServerStopSafe();
  #endif
   // Note: Web mirror buffer clearing removed - handled by debug_system.cpp
-  systemEventPost(SYSEVT_WIFI_DISCONNECTED);
+  // EVT-4: an association that dropped posts wifi_disconnected from the
+  // driver's STA_DISCONNECTED edge (wifiEventLogDrain, with the SSID and
+  // reason); posting it here too doubled it. Only a radio that held no link
+  // (a stopped attempt) is reported here.
+  if (!wasAssociated) systemEventPost(SYSEVT_WIFI_DISCONNECTED);
 
   if (espnowHoldsRadio) {
  #if ENABLE_HTTP_SERVER
@@ -1405,6 +1409,7 @@ static RadioPowerOffResult radioPowerOff() {
     // finish the transaction after the scan/connection releases the radio.
     return RadioPowerOffResult::WIFI_BUSY;
   }
+  const bool wasAssociated = WiFi.isConnected();  // the driver posts its own disconnect
 
   // Stop the runtime reconnect hunt only after the fence succeeds. A BUSY
   // result must not partially alter the still-live WiFi runtime state.
@@ -1439,7 +1444,9 @@ static RadioPowerOffResult radioPowerOff() {
 
   gRadioPowerOffPending = false;
   gRadioForcedOff = true;  // completed off-state now owns the restore snapshot
-  systemEventPost(SYSEVT_WIFI_DISCONNECTED);
+  // EVT-4: a link that was up posts wifi_disconnected from the driver's edge
+  // (wifiEventLogDrain); only a radio without one is reported here.
+  if (!wasAssociated) systemEventPost(SYSEVT_WIFI_DISCONNECTED);
   return RadioPowerOffResult::OK;
 }
 
@@ -1621,7 +1628,8 @@ const char* cmd_wifidisconnect(const String& argsInput) {
     return hadAttempt ? "WiFi connect attempt stopped (radio still on)."
                       : "Error: WiFi is not connected. Connect with 'openwifi'.";
   }
-  systemEventPost(SYSEVT_WIFI_DISCONNECTED);
+  // EVT-4: wifi_disconnected comes from the driver's STA_DISCONNECTED edge
+  // (wifiEventLogDrain), once, with the SSID and reason.
   return wifiRadioOn() ? "WiFi disconnected (radio still on)." : "WiFi disconnected.";
 }
 

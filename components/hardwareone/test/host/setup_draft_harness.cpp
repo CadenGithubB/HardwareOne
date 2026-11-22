@@ -136,6 +136,8 @@ static bool requestDebugSettingsPersist() {
   operations.emplace_back("debug.change");
   return true;
 }
+// setDebugSetting's setting_changed post (SET-6).
+static void notifySettingChanged(const void*) {}
 // The separate settings_write_scope suite executes the real scope/adapter/core.
 // Here the scope is a boundary: observe entry/finish ordering and inject its
 // documented flush outcome without reimplementing persistence or retry logic.

@@ -12,7 +12,10 @@ check of systemEventsNotifyTick, with the real event catalog, and checks:
     is not rendered again and one 10 minutes later is;
   - the text of each fits the 64-byte message buffer the tick uses;
   - both kinds stay at the STANDARD tier (what the mesh event push carries);
-  - companion_low_memory and the QuickNote rows are unchanged.
+  - companion_low_memory and the QuickNote rows are unchanged;
+  - EVT-2 (owner: "toast, rate-limited"): sd_write_failed, settings_save_failed,
+    sensor_fault, wifi_connect_failed and g2_disconnected have the queue and
+    toast sinks, no banner, a cooldown, and their own sentence.
 
 Not covered: the tick's viewer resolution, the glasses and app sinks, the
 post sites (System_MemoryMonitor.cpp, System_VFS.cpp) or anything on a device.
@@ -117,8 +120,34 @@ int main() {
   assert(notifDefaultRuleFor(SYSEVT_BATTERY_LOW).cooldownMs == 30000u);
   assert(notifDefaultRuleFor(SYSEVT_BATTERY_CRITICAL).durMs == 4000);
 
+  // EVT-2 faults: queue + toast, no banner, rate-limited, own sentence.
+  struct Fault { uint8_t kind; const char* subject; const char* text; uint32_t cooldownMs; };
+  const Fault faults[] = {
+      {SYSEVT_SD_WRITE_FAILED, "log.append", "SD card write failed (log.append)", 60000u},
+      {SYSEVT_SETTINGS_SAVE_FAILED, "snapshot", "Settings not saved (snapshot)", 60000u},
+      {SYSEVT_SENSOR_FAULT, "Gamepad", "Gamepad fault: switched off", 60000u},
+      {SYSEVT_WIFI_CONNECT_FAILED, "home", "WiFi join failed: home", 600000u},
+      {SYSEVT_G2_DISCONNECTED, "LEFT", "Glasses off (LEFT)", 30000u},
+  };
+  for (const Fault& f : faults) {
+    const NotifRule rule = notifDefaultRuleFor(f.kind);
+    assert(rule.sinks == (NSINK_QUEUE | NSINK_TOAST));
+    assert(rule.cooldownMs == f.cooldownMs && rule.durMs > 0);
+    SystemEvent e{};
+    e.kind = f.kind;
+    std::snprintf(e.subject, sizeof(e.subject), "%s", f.subject);
+    char msg[64];
+    notifFormatEvent(e, msg, sizeof(msg));
+    assert(std::strcmp(msg, f.text) == 0);
+    std::memset(sKindLastShownMs, 0, sizeof(sKindLastShownMs));
+    assert(rendered(e, 1000));
+    assert(!rendered(e, 1000 + f.cooldownMs - 1));
+    assert(rendered(e, 1000 + f.cooldownMs));
+  }
+
   std::puts("heap_low and fs_low_space: queue + toast, warning level, one "
-            "interrupt per 10 minutes; text fits; tier unchanged");
+            "interrupt per 10 minutes; text fits; tier unchanged; EVT-2 faults "
+            "toast, rate-limited");
   return 0;
 }
 '''
@@ -133,7 +162,9 @@ def main() -> None:
     notifications = (COMPONENT / "System_Notifications.cpp").read_text()
 
     rules = extract_block(notifications, "static NotifRule notifDefaultRuleFor(")
-    for kind in ("SYSEVT_HEAP_LOW", "SYSEVT_FS_LOW_SPACE"):
+    for kind in ("SYSEVT_HEAP_LOW", "SYSEVT_FS_LOW_SPACE", "SYSEVT_SD_WRITE_FAILED",
+                 "SYSEVT_SETTINGS_SAVE_FAILED", "SYSEVT_SENSOR_FAULT", "SYSEVT_WIFI_CONNECT_FAILED",
+                 "SYSEVT_G2_DISCONNECTED"):
         require(rules.count(f"case {kind}:") == 1, f"one rule row for {kind}")
     tier = extract_block(notifications, "uint8_t notifKindTier(")
     require("SYSEVT_HEAP_LOW" not in tier and "SYSEVT_FS_LOW_SPACE" not in tier,
