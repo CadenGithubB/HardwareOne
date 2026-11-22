@@ -338,6 +338,19 @@ static void testScanLabelRows() {
   // The cap bounds the list.
   assert(i2cAddressLabelRows(rows, count, 0x36, 1, all, out, 1) == 1 && out[0] == 0);
   assert(i2cRowHasAddress(rows[1], 0x3C) && !i2cRowHasAddress(rows[0], 0x37));
+  // A row's own address before an earlier row's alternate: the ToF at 0x29
+  // is not the IMU (alternate 0x29), both on bus 0 (the I2C_LEVEL_FULL table
+  // order); with the ToF not in this build the IMU's alternate claims it.
+  const TestRow imuTof[] = {
+    {0x28, true, 0x29, true, imuBusAt, nullptr, 1},   // BNO055, alternate 0x29
+    {0x39, false, 0, true, imuBusAt, nullptr, 1},     // APDS9960
+    {0x29, false, 0, true, imuBusAt, nullptr, 1},     // VL53L4CX
+  };
+  assert(i2cAddressLabelRows(imuTof, 3, 0x29, 0, all, out, 4) == 1 && out[0] == 2);
+  assert(i2cAddressLabelRows(imuTof, 3, 0x28, 0, all, out, 4) == 1 && out[0] == 0);
+  TestRow imuOnly[3] = {imuTof[0], imuTof[1], imuTof[2]};
+  imuOnly[2].compiled = false;
+  assert(i2cAddressLabelRows(imuOnly, 3, 0x29, 0, all, out, 4) == 1 && out[0] == 0);
   gEncAddr[0] = 0x36;
   gEncAddr[1] = 0x37;
 }

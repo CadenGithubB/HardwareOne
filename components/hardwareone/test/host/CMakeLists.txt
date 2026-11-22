@@ -2680,8 +2680,8 @@ add_test(
 # Both variants drive real threads under the sanitizer. With other suites
 # running alongside (ctest -j6, 2026-11-06), about one run in six timed out at a
 # different wait each time, so they run alone rather than flake; the harness's
-# hang guard also counts its own polls, not only wall time, so a host loaded by
-# builds stretches it (2026-11-22).
+# hang guard counts the process's CPU time, not only wall time, so a host
+# loaded by builds stretches it (2026-11-22).
 # ENABLE_STT_LEVEL_ROBUST_ONSET 0 (a saved configuration sets it): the raw
 # level only in every session, whatever sttdecisionpre holds.
 add_test(

@@ -458,8 +458,9 @@ everything user-visible since the v0.99.99.1 tag.
 - `i2cscan` labels an address by its bus too: 0x36 is "MAX17048 (LiPo Fuel Gauge)" only on the bus
   the fuel gauge is wired to; on another bus it lists every device that uses the address ("MAX17048
   (LiPo Fuel Gauge) or Encoder (Adafruit 4991 Rotary Encoder, 1 RGB pixel)"), and the discovered-
-  device registry calls such a device unknown instead of the fuel gauge. Host-tested; not run on a
-  board.
+  device registry calls such a device unknown instead of the fuel gauge. A device's own address
+  wins over another device's alternate on the same bus, so the ToF at 0x29 is still "VL53L4CX", not
+  the IMU (BNO055, alternate 0x29). Host-tested; not run on a board.
 - `openencoder 2` (boards 2-4) points to the LED target, `ledcolor encoder2 <colour>`, like board 1
   does. The bare `sensorautostart` listing also shows encoder boards 2-4 that have an address
   (`encoder2` rows) and its usage line shows the board number (`sensorautostart <sensor> [n]

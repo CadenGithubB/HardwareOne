@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <ctime>
 #include <functional>
 #include <limits>
 #include <map>
@@ -688,20 +689,28 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
 
 static const SttOwner owner{SOURCE_SERIAL, 5}, other{SOURCE_WEB, 5}, successor{SOURCE_SERIAL, 6};
 // A hang guard, not a timing check: the broker runs on the fake millis()
-// clock, so nothing here depends on how fast the host is. The wait gives up
-// only after the waiter has polled kAwaitPolls times (100 us apart, about 10 s
-// on an idle host) and at least 10 s of wall time have passed. A loaded host
-// (builds alongside) schedules the waiter less often too, so the limit grows
-// with the time the process is actually given instead of failing a wait the
-// workers were never scheduled to finish.
+// clock, so nothing here depends on how fast the host is. The limit is the
+// work the process could do, not the time it waited: a wait gives up once the
+// whole process (waiter and workers) has used kAwaitCpuSeconds of CPU time
+// since it began, and at least 10 s of wall time have passed. A host loaded
+// by builds gives the process less CPU, so the limit stretches with it; the
+// longest healthy wait used about 0.3 s of CPU (ASan, 2026-11-22). A deadlock
+// uses no CPU, so kAwaitWallCap still ends it, naming the wait, before the
+// runner's 300 s backstop (test_stt_continuous.py).
+static double processCpuSeconds() { return static_cast<double>(std::clock()) / CLOCKS_PER_SEC; }
 static void await(const std::function<bool()>& predicate, const char* what) {
-  constexpr unsigned long kAwaitPolls = 100000;
+  constexpr double kAwaitCpuSeconds = 5.0;
+  constexpr auto kAwaitWallFloor = std::chrono::seconds(10);
+  constexpr auto kAwaitWallCap = std::chrono::seconds(240);
   const auto start = std::chrono::steady_clock::now();
-  unsigned long polls = 0;
+  const double cpuStart = processCpuSeconds();
   while (!predicate()) {
-    if (++polls >= kAwaitPolls &&
-        std::chrono::steady_clock::now() - start >= std::chrono::seconds(10)) {
-      fprintf(stderr, "Timed out waiting for %s (%lu polls)\n", what, polls); std::abort();
+    const auto waited = std::chrono::steady_clock::now() - start;
+    const double cpu = processCpuSeconds() - cpuStart;
+    if ((waited >= kAwaitWallFloor && cpu >= kAwaitCpuSeconds) || waited >= kAwaitWallCap) {
+      fprintf(stderr, "Timed out waiting for %s (%.1f s CPU, %.1f s wall)\n", what, cpu,
+              std::chrono::duration<double>(waited).count());
+      std::abort();
     }
     std::this_thread::sleep_for(std::chrono::microseconds(100));
   }
