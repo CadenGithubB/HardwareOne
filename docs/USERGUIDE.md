@@ -1598,8 +1598,9 @@ setgamepadpassword              - Set gamepad joystick unlock pattern
 
 Every RGB LED takes the same commands. The LED is named by an optional first word, the target:
 `onboard` (the board's own NeoPixel), `encoder` (every pixel of the
-[encoder board](#encoder-board-adafruit-5752--4991)) or `encoder:<n>` (one of its pixels, from 1).
-Left out, the target is `onboard`, so `ledcolor red` and every saved automation, MQTT command,
+[encoder board](#encoder-board-adafruit-5752--4991)) or `encoder:<p>` (one of its pixels, from 1).
+With more than one encoder board, board 2 is `encoder2` and `encoder2:<p>` (up to `encoder4`);
+board 1 is always `encoder` (`encoder1` is refused). Left out, the target is `onboard`, so `ledcolor red` and every saved automation, MQTT command,
 voice command and screen keep working as before. On a board without an onboard NeoPixel (the
 XIAO ESP32-S3, the P4 boards) the target left out is the encoder board, and `onboard` answers that
 the board has none.
@@ -1607,11 +1608,12 @@ the board has none.
 ```
 ledcolor [target] <color>       - Set a named color (red, green, orange, ~80 names, or off)
 ledcolor encoder:2 red          - One pixel of the encoder board
+ledcolor encoder2 blue          - Every pixel of encoder board 2
 ledclear [target]               - Turn it off (and stop its effect)
 ledeffect [target] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100-60000]
                                 - Run an effect; the onboard LED goes dark when it ends,
                                   the encoder's pixels show their color again
-ledbrightness [onboard|encoder|encoder<n>] <0-100>  - Brightness, saved per LED (admin)
+ledbrightness [onboard|encoder[<n>]] <0-100>  - Brightness, saved per LED (admin)
 ledstatus [json]                - Every LED this build has, connected or not, and what it shows
 ledstartupenabled [0|1]         - Enable/disable startup effect
 ledstartupeffect <none|rainbow|pulse|fade|blink|strobe>  - Set startup effect
@@ -2376,8 +2378,8 @@ encoderautostart [n] [on|off]   - Open after boot (admin)
 encoderaddress [n] <address>    - I2C address 0x49-0x50 (5752) or 0x36-0x3D (4991), at the next open (admin)
 encoderbus [n] <0|1>            - I2C bus, after a reboot (admin)
 ```
-Its pixels take the LED commands with the `encoder` target (`ledcolor encoder red`). `n` is the
-board, 1-4 (left out: board 1).
+Its pixels take the LED commands with the `encoder` target (`ledcolor encoder red`); board n is
+`encoder<n>` (`ledcolor encoder2 red`). `n` is the board, 1-4 (left out: board 1).
 </details>
 
 <details>
@@ -2487,7 +2489,9 @@ bus: the second is refused with `Error: 0x36 on bus 0 is in use by Encoder (inst
 board has its own connection, colours, brightness and start at boot, and its events are named
 `Encoder 2`. An event trigger on `Encoder` also fires for `Encoder 2` (triggers match by
 substring). The web settings page lists every board's settings in the encoder module. The LED
-commands reach board 1 through `encoder`.
+commands reach board 1 through `encoder` and board n through `encoder<n>`: `ledcolor encoder2 red`,
+`ledcolor encoder2:1 green`, `ledeffect encoder3 pulse red`, `ledclear encoder2`,
+`ledbrightness encoder2 30`. `ledstatus` lists board 1 and every board 2-4 that has an address.
 
 `openencoder` (or `encoderautostart on` and a reboot) opens it. Then the LED commands reach it:
 `ledcolor encoder green`, `ledcolor encoder:3 red`, `ledclear encoder`, `ledeffect encoder pulse

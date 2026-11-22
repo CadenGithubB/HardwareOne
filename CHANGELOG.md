@@ -53,9 +53,13 @@ everything user-visible since the v0.99.99.1 tag.
   lines are named `Encoder 2`. `sensorautostart encoder 2 on` works too; `sensorautostart <sensor>
   1 <on|off>` is accepted for every sensor. New settings keys `hardware.encoder.encoder2Address`,
   `encoder2Bus`, `encoder2Brightness`, `encoder2AutoStart` (and 3, 4), all admin-only through their
-  commands; `encoderstatus 2 json` adds `"instance":2`. The LED target `encoder2` (and
-  `ledbrightness encoder2`) comes with the LED-target phase; until then the LED commands reach
-  instance 1. Every instance's settings live in PSRAM. Built, not yet run with two boards.
+  commands; `encoderstatus 2 json` adds `"instance":2`. The LED commands reach board n through the target
+  `encoder<n>` (every pixel) and `encoder<n>:<p>` (one pixel): `ledcolor encoder2 red`,
+  `ledeffect encoder3 pulse red`, `ledclear encoder2:1`, `ledbrightness encoder2 30`; `encoder1`
+  is refused with a hint that board 1 is `encoder`, and a board past 4 with the range. `ledstatus
+  [json]` lists each board 2-4 that has an address (JSON: `"target":"encoder2","instance":2`);
+  board 1's lines and object are unchanged. Every instance's settings live in PSRAM. Built, not
+  yet run with two boards.
 - Seesaw boards are known by their product id: a driver reads it before it begins or resets a
   board (the gamepad's reconnect path too), so the gamepad and ANO drivers no longer take, or reset,
   a seesaw board of another product. `i2cscan`, discovery and `detect` read it only where two

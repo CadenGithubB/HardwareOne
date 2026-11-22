@@ -1,7 +1,8 @@
 // The LED commands' target argument and the encoder board's light (Adafruit
 // 5752 Quad Rotary Encoder, 4991 Rotary Encoder with NeoPixel): the production
 // headers the firmware runs, compiled on the host. Target parsing (the
-// default light, encoder, encoder:<n>, a pixel past the board's count, a bad
+// default light, encoder, encoder:<p>, encoder<n>[:<p>] for boards 2..4, encoder1,
+// a board past the maximum, a pixel past the board's count, a bad
 // target), detection by seesaw product id, the scan's identity-read rule,
 // writes of changed frames only, the 30 fps cap, a skipped frame on a busy
 // bus, the failure count that closes the board, the not-connected replies,
@@ -59,27 +60,64 @@ static LedTargetWord split(const char* args, bool hasOnboard, LedTarget& target,
   return word;
 }
 
-// `encoder<n>`, the brightness target of encoder instances 2..4 (the
-// command their settings rows run: "ledbrightness encoder2 30").
-static LedEncoderInstanceWord instanceWord(const char* word, uint8_t& n) {
-  return ledParseEncoderInstanceWord(word, strlen(word), kEncoderMaxInstances, n);
+// `encoder<n>` and `encoder<n>:<p>`: encoder board n >= 2 in every LED
+// command (multi-instance design, G5). Board 1 is `encoder`, never `encoder1`.
+static LedTargetWord word(const char* text, LedTarget& t, uint8_t maxEncoders = kEncoderMaxInstances) {
+  return ledParseTargetWord(text, strlen(text), t, maxEncoders);
 }
 
-static void encoderInstanceWords() {
-  uint8_t n = 9;
-  CHECK(instanceWord("encoder2", n) == LedEncoderInstanceWord::Instance && n == 2);
-  CHECK(instanceWord("ENCODER4", n) == LedEncoderInstanceWord::Instance && n == 4);
-  CHECK(instanceWord("encoder1", n) == LedEncoderInstanceWord::InstanceOne && n == 0);
-  CHECK(instanceWord("encoder5", n) == LedEncoderInstanceWord::OutOfRange);
-  CHECK(instanceWord("encoder0", n) == LedEncoderInstanceWord::OutOfRange);
-  CHECK(instanceWord("encoder99999", n) == LedEncoderInstanceWord::OutOfRange);
-  for (const char* other : {"encoder", "encoder:2", "encoderx", "encoder2x", "encoder2:3", "onboard", "red", "50", ""}) {
-    CHECK(instanceWord(other, n) == LedEncoderInstanceWord::NotAnInstance);
+static void encoderInstanceTargets() {
+  CHECK(kEncoderMaxInstances == 4);
+  LedTarget t;
+  CHECK(word("encoder2", t) == LedTargetWord::Target);
+  CHECK(t.kind == LedTargetKind::Encoder && t.instance == 2 && t.pixel == 0 && t.named);
+  CHECK(word("ENCODER4", t) == LedTargetWord::Target && t.kind == LedTargetKind::Encoder && t.instance == 4);
+  CHECK(word("encoder2:3", t) == LedTargetWord::Target);
+  CHECK(t.kind == LedTargetKind::EncoderPixel && t.instance == 2 && t.pixel == 3 && t.named);
+  CHECK(word("encoder4:12", t) == LedTargetWord::Target && t.instance == 4 && t.pixel == 12);
+  // Board 1 stays `encoder` / `encoder:<p>`, instance 1.
+  CHECK(word("encoder", t) == LedTargetWord::Target && t.kind == LedTargetKind::Encoder && t.instance == 1);
+  CHECK(word("encoder:3", t) == LedTargetWord::Target && t.instance == 1 && t.pixel == 3);
+  // encoder1 is refused with its own hint, never read as a colour.
+  CHECK(word("encoder1", t) == LedTargetWord::InstanceOne && !t.named);
+  CHECK(word("Encoder1:2", t) == LedTargetWord::InstanceOne);
+  // Past the maximum, zero, a leading zero, or absurdly long: refused.
+  for (const char* bad : {"encoder5", "encoder0", "encoder02", "encoder00", "encoder99999", "encoder5:1",
+                          "encoder0:1"}) {
+    CHECK(word(bad, t) == LedTargetWord::BadInstance && !t.named);
   }
-  // Every instance's settings row runs a command this parser accepts.
-  for (uint8_t i = 2; i <= kEncoderMaxInstances; ++i) {
-    const std::string word = "encoder" + std::to_string(i);
-    CHECK(instanceWord(word.c_str(), n) == LedEncoderInstanceWord::Instance && n == i);
+  CHECK(word("encoder3", t, 2) == LedTargetWord::BadInstance);  // the maximum is a parameter
+  CHECK(word("encoder2", t, 2) == LedTargetWord::Target && t.instance == 2);
+  // A malformed pixel after a valid board.
+  for (const char* bad : {"encoder2:", "encoder2:0", "encoder2:x", "encoder2:100", "encoder3:007", "encoder:0"}) {
+    CHECK(word(bad, t) == LedTargetWord::BadPixel && !t.named);
+  }
+  // Not a target word: anything but digits (and a colon) after `encoder`.
+  for (const char* other : {"encoderx", "encoder2x", "encoders", "encoder2red", "encoder-2", "encoder 2",
+                            "encode2", "onboard2"}) {
+    CHECK(word(other, t) == LedTargetWord::NotATarget);
+  }
+  // In a line: the rest is the colour / effect, and a refused word keeps the
+  // default target with no rest.
+  std::string rest;
+  size_t offset = 0;
+  CHECK(ledSplitTarget("encoder3 pulse red", true, t, offset) == LedTargetWord::Target);
+  rest = std::string("encoder3 pulse red").substr(offset);
+  CHECK(t.instance == 3 && t.kind == LedTargetKind::Encoder && rest == "pulse red");
+  CHECK(ledSplitTarget("encoder2:4 off", false, t, offset) == LedTargetWord::Target);
+  CHECK(t.instance == 2 && t.pixel == 4);
+  CHECK(ledSplitTarget("encoder1 red", true, t, offset) == LedTargetWord::InstanceOne);
+  CHECK(t.kind == LedTargetKind::Onboard && t.instance == 1 && !t.named);
+  CHECK(ledSplitTarget("encoder9 red", false, t, offset) == LedTargetWord::BadInstance);
+  CHECK(t.kind == LedTargetKind::Encoder && t.instance == 1 && !t.named);
+  // The id ledstatus prints for each board reads back as that board, and
+  // every board's settings row runs a brightness command on that word.
+  char id[16];
+  CHECK(strcmp(ledEncoderTargetId(1, id, sizeof(id)), "encoder") == 0);
+  for (uint8_t n = 1; n <= kEncoderMaxInstances; ++n) {
+    ledEncoderTargetId(n, id, sizeof(id));
+    CHECK(word(id, t) == LedTargetWord::Target && t.kind == LedTargetKind::Encoder && t.instance == n);
+    if (n >= 2) CHECK(strcmp(id, ("encoder" + std::to_string(n)).c_str()) == 0);
   }
 }
 
@@ -162,6 +200,7 @@ static void namesAreNotTargets() {
     const std::string name = (*it)[1];
     ++colours;
     CHECK(ledParseTargetWord(name.c_str(), name.size(), t) == LedTargetWord::NotATarget);
+    CHECK(name.rfind("encoder", 0) != 0);  // encoder<n> is a board, never a colour
   }
   CHECK(colours > 70);
   const size_t effects = source.find("const char* const ledEffectNames[] = {");
@@ -465,7 +504,7 @@ static void instanceSettings() {
 
 int main() {
   targetParsing();
-  encoderInstanceWords();
+  encoderInstanceTargets();
   namesAreNotTargets();
   detection();
   changedFramesOnly();

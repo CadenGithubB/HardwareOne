@@ -236,12 +236,13 @@ static constexpr CommandModule gCommandModules[] = {
 #if ENABLE_LED_LIGHTS
   { "neopixel",   "RGB LEDs: colours, effects, brightness", "One set of commands for every RGB LED this "
     "build has, the LED named by an optional first word: onboard (the board's own NeoPixel), encoder "
-    "(every pixel of the encoder board) or encoder:<n> (one pixel, 1-based). Left out, it is onboard, or "
+    "(every pixel of the encoder board) or encoder:<p> (one pixel, 1-based); encoder board n (2-4) is "
+    "encoder<n> and encoder<n>:<p>. Left out, it is onboard, or "
     "the encoder on a board without an onboard LED. ledcolor [target] <colour> lights it a named colour "
     "(red, green, blue, yellow, magenta, cyan, white, orange, purple, pink and ~70 more, or off); ledclear "
     "[target] turns it off. ledeffect [target] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] "
     "[duration 100-60000ms] runs an effect (defaults: red/blue, 3000 ms) and returns at once; the onboard "
-    "LED goes dark when it ends, the encoder's pixels show their colour again. ledbrightness [onboard|encoder|encoder<n>] "
+    "LED goes dark when it ends, the encoder's pixels show their colour again. ledbrightness [onboard|encoder[<n>]] "
     "<0-100> is saved per LED and applies at once (admin). ledstatus [json] lists every LED of the build, "
     "connected or not, and what it shows. Colours and effects are live and not saved; the onboard "
     "startup effect lives in the led module.", neopixelCommands,     &neopixelCommandsCount, 0, nullptr },
@@ -269,7 +270,8 @@ static constexpr CommandModule gCommandModules[] = {
     "the board reports. The knobs and switches are not used. openencoder and closeencoder open and close "
     "it (a closed board goes dark); encoderautostart [on|off] opens it after boot. Its pixels take the LED "
     "commands with the encoder target: ledcolor encoder <colour>, ledcolor encoder:2 red, ledeffect encoder "
-    "pulse red, ledbrightness encoder <0-100>, ledclear encoder. encoderstatus [json] shows the connection, "
+    "pulse red, ledbrightness encoder <0-100>, ledclear encoder; board n (2-4) is ledcolor encoder<n> red. "
+    "encoderstatus [json] shows the connection, "
     "product, pixel count, address, bus and brightness. encoderaddress applies at the next open, encoderbus "
     "<0|1> after a reboot. A board that stops answering closes itself and restarts on the sensor retry "
     "schedule; an LED command to it reconnects a board that is meant to be open.",

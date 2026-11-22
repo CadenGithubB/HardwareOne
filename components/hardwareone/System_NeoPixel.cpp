@@ -11,6 +11,7 @@
 #include "System_CommandRegistry.h"
 #include "System_LedTarget.h"
 #include "i2csensor_encoder.h"   // the `encoder` target's pixels
+#include "System_CommandLimits.h"  // CMD_RESULT_MAX
 
 #include <stdarg.h>
 
@@ -369,8 +370,9 @@ void runLedEffect(int effectType, RGB startColor, RGB endColor, unsigned long du
 // ledcolor [<target>] <colour>, ledeffect [<target>] <effect> ...,
 // ledbrightness [<target>] <0..100>, ledclear [<target>] and ledstatus
 // (System_LedTarget.h). `onboard` is this board's NeoPixel and runs the
-// engine above exactly as before; `encoder` and `encoder:<n>` reach the
-// encoder board's pixels (i2csensor_encoder.h). An omitted target is the
+// engine above exactly as before; `encoder` and `encoder:<p>` reach the
+// encoder board's pixels (i2csensor_encoder.h), `encoder<n>` and
+// `encoder<n>:<p>` those of encoder board n (2..kEncoderMaxInstances). An omitted target is the
 // onboard pixel, or the encoder on a board without one, so every existing
 // line (automations, MQTT, voice, the web, the app, the OLED and G2 pages,
 // the startup effect) keeps driving the light it drove.
@@ -395,14 +397,22 @@ void onboardShows(const char* colour, RGB rgb) {
 #endif
 
 // Split the target off the arguments. Returns nullptr and the remaining
-// arguments, or the reply that refuses the line: a malformed encoder:<n>, or a
-// light this build or board does not have.
-const char* takeLedTarget(const String& argsInput, LedTarget& target, String& rest) {
+// arguments, or the reply that refuses the line: a malformed encoder:<p>,
+// `encoder1`, an encoder board past the maximum (the reply ends with
+// `usage`), or a light this build or board does not have.
+const char* takeLedTarget(const String& argsInput, LedTarget& target, String& rest, const char* usage) {
   size_t restOffset = 0;
   const LedTargetWord word = ledSplitTarget(argsInput.c_str(), kHasOnboard, target, restOffset);
   if (word == LedTargetWord::BadPixel) {
-    return "Error: encoder:<n> takes a pixel number, for example encoder:1. Run 'ledstatus' to "
-           "see the encoder board's pixels.";
+    return "Error: encoder:<p> takes a pixel number, for example encoder:1 (encoder2:1 on board 2). "
+           "Run 'ledstatus' to see the encoder boards' pixels.";
+  }
+  if (word == LedTargetWord::InstanceOne) return "Error: 'encoder1' is not a target; instance 1 is 'encoder'.";
+  if (word == LedTargetWord::BadInstance) {
+    if (!ensureDebugBuffer()) return "Error: No such encoder board.";
+    snprintf(getDebugBuffer(), 1024, "Error: encoder has instances 1-%u. %s",
+             (unsigned)kEncoderMaxInstances, usage);
+    return getDebugBuffer();
   }
   rest = argsInput.substring(restOffset);
   rest.trim();
@@ -421,27 +431,39 @@ uint8_t encoderPixelOf(const LedTarget& target) {
   return target.kind == LedTargetKind::EncoderPixel ? target.pixel : 0;
 }
 
+// "Encoder" for board 1 (its replies are unchanged), "Encoder 2" for board 2.
+const char* encoderBoardLabel(const LedTarget& target, char* buf, size_t size) {
+  if (target.instance <= 1) snprintf(buf, size, "Encoder");
+  else snprintf(buf, size, "Encoder %u", (unsigned)target.instance);
+  return buf;
+}
+
 const char* encoderDoneReply(const LedTarget& target, const char* what, const char* value) {
   if (!ensureDebugBuffer()) return "Encoder LED set";
+  char board[16];
+  encoderBoardLabel(target, board, sizeof(board));
   if (target.kind == LedTargetKind::EncoderPixel) {
-    snprintf(getDebugBuffer(), 1024, "Encoder pixel %u %s %s", (unsigned)target.pixel, what, value);
+    snprintf(getDebugBuffer(), 1024, "%s pixel %u %s %s", board, (unsigned)target.pixel, what, value);
   } else {
-    snprintf(getDebugBuffer(), 1024, "Encoder LED %s %s", what, value);
+    snprintf(getDebugBuffer(), 1024, "%s LED %s %s", board, what, value);
   }
   return getDebugBuffer();
 }
 
 const char* cmd_ledcolor(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  static constexpr const char kUsage[] =
+      "Usage: ledcolor [onboard|encoder[<n>][:<p>]] <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>";
   LedTarget target;
   String colorName;
-  if (const char* refused = takeLedTarget(argsInput, target, colorName)) return refused;
+  if (const char* refused = takeLedTarget(argsInput, target, colorName, kUsage)) return refused;
   colorName.toLowerCase();
 
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   if (colorName.length() == 0) {
-    return "Error: invalid arguments — Usage: ledcolor [onboard|encoder|encoder:<n>] <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>";
+    snprintf(getDebugBuffer(), 1024, "Error: invalid arguments — %s", kUsage);
+    return getDebugBuffer();
   }
 
   RGB color;
@@ -451,7 +473,8 @@ const char* cmd_ledcolor(const String& argsInput) {
   }
 
   if (target.kind != LedTargetKind::Onboard) {
-    if (const char* refused = encoderLightSetColour(encoderPixelOf(target), color, colorName.c_str())) {
+    if (const char* refused = encoderLightSetColour(encoderPixelOf(target), color, colorName.c_str(),
+                                                    target.instance)) {
       return refused;
     }
     return encoderDoneReply(target, "set to", colorName.c_str());
@@ -471,14 +494,18 @@ const char* cmd_ledcolor(const String& argsInput) {
 
 const char* cmd_ledclear(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  static constexpr const char kUsage[] = "Usage: ledclear [onboard|encoder[<n>][:<p>]]";
   LedTarget target;
   String rest;
-  if (const char* refused = takeLedTarget(argsInput, target, rest)) return refused;
-  if (rest.length() > 0) return "Error: Too many arguments. Usage: ledclear [onboard|encoder|encoder:<n>]";
+  if (const char* refused = takeLedTarget(argsInput, target, rest, kUsage)) return refused;
+  if (rest.length() > 0) return "Error: Too many arguments. Usage: ledclear [onboard|encoder[<n>][:<p>]]";
   if (target.kind != LedTargetKind::Onboard) {
-    if (const char* refused = encoderLightSetColour(encoderPixelOf(target), {0, 0, 0}, "off")) return refused;
-    return target.kind == LedTargetKind::EncoderPixel ? encoderDoneReply(target, "cleared", "(turned off)")
-                                                      : "Encoder LED cleared (turned off)";
+    if (const char* refused = encoderLightSetColour(encoderPixelOf(target), {0, 0, 0}, "off", target.instance)) {
+      return refused;
+    }
+    return target.kind == LedTargetKind::EncoderPixel || target.instance > 1
+               ? encoderDoneReply(target, "cleared", "(turned off)")
+               : "Encoder LED cleared (turned off)";
   }
 #if ENABLE_NEOPIXEL
   ledEffectStop(false);  // cancel a running effect too, not just the color
@@ -493,18 +520,19 @@ const char* cmd_ledclear(const String& argsInput) {
 const char* cmd_ledeffect(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
+  static constexpr const char kUsage[] =
+      "Usage: ledeffect [onboard|encoder[<n>][:<p>]] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100..60000]";
   static const char* const kTooManyArgs =
-      "Error: Too many arguments. Usage: ledeffect [onboard|encoder|encoder:<n>] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100..60000]";
+      "Error: Too many arguments. Usage: ledeffect [onboard|encoder[<n>][:<p>]] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100..60000]";
 
   LedTarget target;
   String rest;
-  if (const char* refused = takeLedTarget(argsInput, target, rest)) return refused;
+  if (const char* refused = takeLedTarget(argsInput, target, rest, kUsage)) return refused;
 
   LedEffectArgs fx;
   switch (parseLedEffectArgs(rest, fx)) {
     case LedEffectArgsError::None: break;
-    case LedEffectArgsError::Missing:
-      return "Usage: ledeffect [onboard|encoder|encoder:<n>] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100..60000]";
+    case LedEffectArgsError::Missing: return kUsage;
     case LedEffectArgsError::TooMany: return kTooManyArgs;
     case LedEffectArgsError::UnknownColor:
       if (!ensureDebugBuffer()) return "Error: Unknown color";
@@ -523,16 +551,20 @@ const char* cmd_ledeffect(const String& argsInput) {
     // `off` stops it and darkens them, as on the onboard pixel.
     const uint8_t pixel = encoderPixelOf(target);
     if (fx.off) {
-      if (const char* refused = encoderLightSetColour(pixel, {0, 0, 0}, "off")) return refused;
+      if (const char* refused = encoderLightSetColour(pixel, {0, 0, 0}, "off", target.instance)) return refused;
       return encoderDoneReply(target, "effect:", "off");
     }
     if (const char* refused = encoderLightStartEffect(pixel, fx.effect, fx.color1, fx.color2,
-                                                      fx.durationMs, fx.effectName.c_str())) {
+                                                      fx.durationMs, fx.effectName.c_str(),
+                                                      target.instance)) {
       return refused;
     }
     if (!ensureDebugBuffer()) return "Encoder effect started";
-    snprintf(getDebugBuffer(), 1024, "%s effect started on the encoder%s (%lums), then its colour",
-             fx.effectName.c_str(), target.kind == LedTargetKind::EncoderPixel ? " pixel" : "",
+    char where[24];
+    if (target.instance <= 1) snprintf(where, sizeof(where), "the encoder");
+    else snprintf(where, sizeof(where), "encoder %u", (unsigned)target.instance);
+    snprintf(getDebugBuffer(), 1024, "%s effect started on %s%s (%lums), then its colour",
+             fx.effectName.c_str(), where, target.kind == LedTargetKind::EncoderPixel ? " pixel" : "",
              fx.durationMs);
     return getDebugBuffer();
   }
@@ -563,55 +595,24 @@ const char* cmd_ledeffect(const String& argsInput) {
 #endif
 }
 
-// Saved per light: ledBrightness for the onboard pixel, each encoder
-// instance's own brightness for its board (both apply at once). The `encoder`
-// target is instance 1; `encoder<n>` is instance n >= 2 (the command the
-// settings rows of instances 2..4 run).
+// Saved per light: ledBrightness for the onboard pixel, each encoder board's
+// own brightness for that board (both apply at once). `encoder` is board 1,
+// `encoder<n>` board n (the command the settings rows of boards 2..4 run).
 const char* cmd_ledbrightness(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  static constexpr const char kUsage[] = "Usage: ledbrightness [onboard|encoder|encoder<n>] <0..100>";
-  {
-    const char* args = argsInput.c_str();
-    size_t start = 0;
-    while (ledIsSpace(args[start])) ++start;
-    size_t end = start;
-    while (args[end] && !ledIsSpace(args[end])) ++end;
-    uint8_t n = 0;
-    const LedEncoderInstanceWord word =
-        ledParseEncoderInstanceWord(args + start, end - start, kEncoderMaxInstances, n);
-    if (word == LedEncoderInstanceWord::InstanceOne) {
-      return "Error: 'encoder1' is not a target; instance 1 is 'encoder'.";
-    }
-    if (word == LedEncoderInstanceWord::OutOfRange) {
-      snprintf(getDebugBuffer(), 1024, "Error: encoder has instances 1-%u. %s",
-               (unsigned)kEncoderMaxInstances, kUsage);
-      return getDebugBuffer();
-    }
-    if (word == LedEncoderInstanceWord::Instance) {
-#if !ENABLE_ENCODER
-      return kEncoderReplyNotBuilt;
-#else
-      String value = argsInput.substring(end);
-      value.trim();
-      if (value.length() == 0) {
-        snprintf(getDebugBuffer(), 1024, "Error: invalid arguments — %s", kUsage);
-        return getDebugBuffer();
-      }
-      int v = 0;
-      if (!parseIntArg(value, v)) return kCommandReplyNotANumber;
-      if (v < 0 || v > 100) return "Error: LED brightness must be 0..100";
-      encoderLightSetBrightness(v, n);
-      snprintf(getDebugBuffer(), 1024, "Encoder %u LED brightness set to %d%%", (unsigned)n, v);
-      return getDebugBuffer();
-#endif
-    }
-  }
+  static constexpr const char kUsage[] = "Usage: ledbrightness [onboard|encoder[<n>]] <0..100>";
   LedTarget target;
   String arg;
-  if (const char* refused = takeLedTarget(argsInput, target, arg)) return refused;
+  if (const char* refused = takeLedTarget(argsInput, target, arg, kUsage)) return refused;
   if (target.kind == LedTargetKind::EncoderPixel) {
-    return "Error: Brightness is one setting for the whole encoder board. Usage: ledbrightness encoder <0..100>";
+    if (target.instance <= 1) {
+      return "Error: Brightness is one setting for the whole encoder board. Usage: ledbrightness encoder <0..100>";
+    }
+    snprintf(getDebugBuffer(), 1024,
+             "Error: Brightness is one setting for the whole encoder board. Usage: ledbrightness "
+             "encoder%u <0..100>", (unsigned)target.instance);
+    return getDebugBuffer();
   }
   if (arg.length() == 0) {
     snprintf(getDebugBuffer(), 1024, "Error: invalid arguments — %s", kUsage);
@@ -621,8 +622,10 @@ const char* cmd_ledbrightness(const String& argsInput) {
   if (!parseIntArg(arg, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 100) return "Error: LED brightness must be 0..100";
   if (target.kind == LedTargetKind::Encoder) {
-    encoderLightSetBrightness(v, 1);
-    snprintf(getDebugBuffer(), 1024, "Encoder LED brightness set to %d%%", v);
+    encoderLightSetBrightness(v, target.instance);
+    char board[16];
+    snprintf(getDebugBuffer(), 1024, "%s LED brightness set to %d%%",
+             encoderBoardLabel(target, board, sizeof(board)), v);
     return getDebugBuffer();
   }
 #if ENABLE_NEOPIXEL
@@ -654,34 +657,87 @@ bool statusAppend(char* buf, size_t size, size_t& pos, const char* fmt, ...) {
   return true;
 }
 
-// Every light this build has, connected or not, and what it shows.
+// ledstatus formats. Macros, so each is a string literal both for printf's
+// format check and for the worst-case size below.
+#define LEDSTATUS_HEAD_JSON "{\"schema\":1,\"default\":\"%s\",\"lights\":["
+#define LEDSTATUS_HEAD_TEXT "LED lights (default target: %s)"
+#define LEDSTATUS_ONBOARD_JSON                                                                     \
+  "{\"target\":\"onboard\",\"present\":true,\"connected\":true,\"color\":\"%s\","                \
+  "\"rgb\":[%u,%u,%u],\"brightness\":%d,\"effect\":\"%s\"}"
+#define LEDSTATUS_ONBOARD_TEXT "\n  onboard: %s, brightness %d%%, effect %s"
+#define LEDSTATUS_ENCODER_JSON                                                                     \
+  ",{\"target\":\"%s\"%s,\"present\":true,\"connected\":%s,\"product\":%u,"                     \
+  "\"board\":\"%s\",\"bus\":%u,\"address\":%u,\"brightness\":%u,\"pixels\":["
+#define LEDSTATUS_INSTANCE_JSON ",\"instance\":%u"
+#define LEDSTATUS_PIXEL_JSON "%s{\"pixel\":%u,\"color\":\"%s\",\"rgb\":[%u,%u,%u],\"effect\":\"%s\"}"
+#define LEDSTATUS_ENCODER_TEXT "\n  %s: %s (%u) at I2C%u 0x%02X, %s, brightness %u%%"
+#define LEDSTATUS_ENCODER_UNSEEN_TEXT                                                              \
+  "\n  %s: not connected yet (I2C%u 0x%02X), brightness %u%%. Open it with '%s'."
+#define LEDSTATUS_PIXEL_TEXT "\n    %s:%u %s, effect %s"
+
+constexpr size_t ledMax(size_t a, size_t b) { return a > b ? a : b; }
+
+constexpr size_t encoderBoardNameMax() {
+  size_t longest = 0;
+  for (const EncoderBoard& board : kEncoderBoards) {
+    size_t length = 0;
+    while (board.name[length]) ++length;
+    longest = ledMax(longest, length);
+  }
+  return longest;
+}
+
+// The longest reply ledstatus can build: each format's own length (its
+// conversion specifiers count too, so this over-counts) plus the widest value
+// of every field. Text fields: a colour name 23, an effect 11, an id
+// "encoder<n>" 10, a number 11 for %d and 5 for %u of a uint16_t / 3 of a
+// uint8_t, "openencoder <n>" 15.
+constexpr size_t kLedStatusEncoders = ENABLE_ENCODER ? kEncoderMaxInstances : 0;
+constexpr size_t kLedStatusJsonWorst =
+    sizeof(LEDSTATUS_HEAD_JSON) + 7 +
+    sizeof(LEDSTATUS_ONBOARD_JSON) + 23 + 3 * 3 + 11 + 11 +
+    kLedStatusEncoders * (sizeof(LEDSTATUS_ENCODER_JSON) + 10 + sizeof(LEDSTATUS_INSTANCE_JSON) + 3 +
+                          5 + 5 + encoderBoardNameMax() + 3 + 3 + 3 + sizeof("]}") +
+                          kEncoderMaxPixels * (sizeof(LEDSTATUS_PIXEL_JSON) + 1 + 3 + 23 + 3 * 3 + 11)) +
+    sizeof("]}");
+constexpr size_t kLedStatusTextWorst =
+    sizeof(LEDSTATUS_HEAD_TEXT) + 7 +
+    sizeof(LEDSTATUS_ONBOARD_TEXT) + 23 + 11 + 11 +
+    kLedStatusEncoders * (ledMax(sizeof(LEDSTATUS_ENCODER_TEXT) + 10 + encoderBoardNameMax() + 5 + 3 + 3 + 13 + 3,
+                                 sizeof(LEDSTATUS_ENCODER_UNSEEN_TEXT) + 10 + 3 + 3 + 3 + 15) +
+                          kEncoderMaxPixels * (sizeof(LEDSTATUS_PIXEL_TEXT) + 10 + 3 + 23 + 11));
+constexpr size_t kLedStatusWorst = ledMax(kLedStatusJsonWorst, kLedStatusTextWorst);
+// The reply is built in the command scratch buffer (System_Debug.h, PSRAM),
+// whose 4 KB a reply may fill; four boards of four pixels need over 1 KB.
+static_assert(kLedStatusWorst <= GLOBAL_DEBUG_BUFFER_SIZE,
+              "ledstatus outgrows the command buffer: list fewer encoder boards or pixels");
+static_assert(kLedStatusWorst <= CMD_RESULT_MAX, "ledstatus outgrows a command reply");
+
+// Every light this build has, connected or not, and what it shows. Encoder
+// boards 2..4 are listed once they have an address (or are connected).
 const char* cmd_ledstatus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   char* buf = getDebugBuffer();
-  const size_t size = 1024;
+  const size_t size = GLOBAL_DEBUG_BUFFER_SIZE;
   size_t pos = 0;
   const bool json = argWantsJson(argsInput);
   const char* defaultTarget = kHasOnboard ? kLedTargetOnboardName : kLedTargetEncoderName;
 
   if (json) {
-    statusAppend(buf, size, pos, "{\"schema\":1,\"default\":\"%s\",\"lights\":[", defaultTarget);
+    statusAppend(buf, size, pos, LEDSTATUS_HEAD_JSON, defaultTarget);
   } else {
-    statusAppend(buf, size, pos, "LED lights (default target: %s)", defaultTarget);
+    statusAppend(buf, size, pos, LEDSTATUS_HEAD_TEXT, defaultTarget);
   }
 
 #if ENABLE_NEOPIXEL
   {
     const char* effect = ledEffectActive() ? sOnboardEffect : "off";
     if (json) {
-      statusAppend(buf, size, pos,
-                   "{\"target\":\"onboard\",\"present\":true,\"connected\":true,\"color\":\"%s\","
-                   "\"rgb\":[%u,%u,%u],\"brightness\":%d,\"effect\":\"%s\"}",
-                   sOnboardColour, sOnboardRgb.r, sOnboardRgb.g, sOnboardRgb.b,
-                   gSettings.ledBrightness, effect);
+      statusAppend(buf, size, pos, LEDSTATUS_ONBOARD_JSON, sOnboardColour, sOnboardRgb.r, sOnboardRgb.g,
+                   sOnboardRgb.b, gSettings.ledBrightness, effect);
     } else {
-      statusAppend(buf, size, pos, "\n  onboard: %s, brightness %d%%, effect %s", sOnboardColour,
-                   gSettings.ledBrightness, effect);
+      statusAppend(buf, size, pos, LEDSTATUS_ONBOARD_TEXT, sOnboardColour, gSettings.ledBrightness, effect);
     }
   }
 #else
@@ -693,39 +749,41 @@ const char* cmd_ledstatus(const String& argsInput) {
 #endif
 
 #if ENABLE_ENCODER
-  {
+  for (uint8_t n = 1; n <= kEncoderMaxInstances; ++n) {
     EncoderLightStatus enc;
-    if (!encoderLightReadStatus(enc)) return "Error: The encoder light state is busy. Retry.";
+    if (!encoderLightReadStatus(enc, n)) return "Error: The encoder light state is busy. Retry.";
+    // Board 1 is always listed; boards 2..4 have no light until an address is set.
+    if (n > 1 && !enc.connected && enc.address == 0) continue;
+    char id[12];
+    ledEncoderTargetId(n, id, sizeof(id));
     if (json) {
-      statusAppend(buf, size, pos,
-                   ",{\"target\":\"encoder\",\"present\":true,\"connected\":%s,\"product\":%u,"
-                   "\"board\":\"%s\",\"bus\":%u,\"address\":%u,\"brightness\":%u,\"pixels\":[",
+      char instanceKey[sizeof(LEDSTATUS_INSTANCE_JSON) + 3] = "";
+      if (n > 1) snprintf(instanceKey, sizeof(instanceKey), LEDSTATUS_INSTANCE_JSON, (unsigned)n);
+      statusAppend(buf, size, pos, LEDSTATUS_ENCODER_JSON, id, instanceKey,
                    enc.connected ? "true" : "false", (unsigned)enc.product,
                    enc.boardName ? enc.boardName : "", (unsigned)enc.bus, (unsigned)enc.address,
                    (unsigned)enc.brightness);
       for (uint8_t i = 0; i < enc.pixelCount; ++i) {
         const EncoderLightPixelStatus& px = enc.pixels[i];
-        statusAppend(buf, size, pos,
-                     "%s{\"pixel\":%u,\"color\":\"%s\",\"rgb\":[%u,%u,%u],\"effect\":\"%s\"}",
-                     i ? "," : "", (unsigned)(i + 1), px.colour, px.rgb.r, px.rgb.g, px.rgb.b,
-                     px.effect);
+        statusAppend(buf, size, pos, LEDSTATUS_PIXEL_JSON, i ? "," : "", (unsigned)(i + 1), px.colour,
+                     px.rgb.r, px.rgb.g, px.rgb.b, px.effect);
       }
       statusAppend(buf, size, pos, "]}");
     } else {
       if (enc.boardName) {
-        statusAppend(buf, size, pos, "\n  encoder: %s (%u) at I2C%u 0x%02X, %s, brightness %u%%",
-                     enc.boardName, (unsigned)enc.product, (unsigned)enc.bus + 1,
-                     (unsigned)enc.address, enc.connected ? "connected" : "not connected",
-                     (unsigned)enc.brightness);
+        statusAppend(buf, size, pos, LEDSTATUS_ENCODER_TEXT, id, enc.boardName, (unsigned)enc.product,
+                     (unsigned)enc.bus + 1, (unsigned)enc.address,
+                     enc.connected ? "connected" : "not connected", (unsigned)enc.brightness);
       } else {
-        statusAppend(buf, size, pos,
-                     "\n  encoder: not connected yet (I2C%u 0x%02X), brightness %u%%. "
-                     "Open it with 'openencoder'.",
-                     (unsigned)enc.bus + 1, (unsigned)enc.address, (unsigned)enc.brightness);
+        char open[16];
+        if (n == 1) snprintf(open, sizeof(open), "openencoder");
+        else snprintf(open, sizeof(open), "openencoder %u", (unsigned)n);
+        statusAppend(buf, size, pos, LEDSTATUS_ENCODER_UNSEEN_TEXT, id, (unsigned)enc.bus + 1,
+                     (unsigned)enc.address, (unsigned)enc.brightness, open);
       }
       for (uint8_t i = 0; i < enc.pixelCount; ++i) {
-        statusAppend(buf, size, pos, "\n    encoder:%u %s, effect %s", (unsigned)(i + 1),
-                     enc.pixels[i].colour, enc.pixels[i].effect);
+        statusAppend(buf, size, pos, LEDSTATUS_PIXEL_TEXT, id, (unsigned)(i + 1), enc.pixels[i].colour,
+                     enc.pixels[i].effect);
       }
     }
   }
@@ -736,6 +794,17 @@ const char* cmd_ledstatus(const String& argsInput) {
   return buf;
 }
 
+#undef LEDSTATUS_HEAD_JSON
+#undef LEDSTATUS_HEAD_TEXT
+#undef LEDSTATUS_ONBOARD_JSON
+#undef LEDSTATUS_ONBOARD_TEXT
+#undef LEDSTATUS_ENCODER_JSON
+#undef LEDSTATUS_INSTANCE_JSON
+#undef LEDSTATUS_PIXEL_JSON
+#undef LEDSTATUS_ENCODER_TEXT
+#undef LEDSTATUS_ENCODER_UNSEEN_TEXT
+#undef LEDSTATUS_PIXEL_TEXT
+
 }  // namespace
 
 // ============================================================================
@@ -744,10 +813,10 @@ const char* cmd_ledstatus(const String& argsInput) {
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry neopixelCommands[] = {
-  { "ledcolor", "Set an LED colour: [onboard|encoder|encoder:<n>] <colour>.", false, cmd_ledcolor, "Usage: ledcolor [onboard|encoder|encoder:<n>] <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>" },
-  { "ledclear", "Turn an LED off: [onboard|encoder|encoder:<n>].", false, cmd_ledclear, "Usage: ledclear [onboard|encoder|encoder:<n>]" },
-  { "ledeffect", "Run an LED effect: [onboard|encoder|encoder:<n>] <effect>.", false, cmd_ledeffect, "Usage: ledeffect [onboard|encoder|encoder:<n>] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100..60000]" },
-  { "ledbrightness", "Save an LED brightness 0-100: [onboard|encoder|encoder<n>] <0..100>.", true, cmd_ledbrightness, "Usage: ledbrightness [onboard|encoder|encoder<n>] <0..100>" },
+  { "ledcolor", "Set an LED colour: [onboard|encoder[<n>][:<p>]] <colour>.", false, cmd_ledcolor, "Usage: ledcolor [onboard|encoder[<n>][:<p>]] <red|green|blue|yellow|magenta|cyan|white|orange|purple|pink>" },
+  { "ledclear", "Turn an LED off: [onboard|encoder[<n>][:<p>]].", false, cmd_ledclear, "Usage: ledclear [onboard|encoder[<n>][:<p>]]" },
+  { "ledeffect", "Run an LED effect: [onboard|encoder[<n>][:<p>]] <effect>.", false, cmd_ledeffect, "Usage: ledeffect [onboard|encoder[<n>][:<p>]] <fade|pulse|blink|rainbow|strobe|off> [color] [color2] [duration 100..60000]" },
+  { "ledbrightness", "Save an LED brightness 0-100: [onboard|encoder[<n>]] <0..100>.", true, cmd_ledbrightness, "Usage: ledbrightness [onboard|encoder[<n>]] <0..100>" },
   { "ledstatus", "Show every LED this build has and what it shows. (add 'json' for JSON output)", false, cmd_ledstatus, "Usage: ledstatus [json]" },
 };
 

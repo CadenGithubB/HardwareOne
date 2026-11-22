@@ -7,7 +7,7 @@
 // push switches and INT pin are not. openencoder / closeencoder through the
 // sensor queue, encoderautostart opens it after boot, and the main loop
 // advances its frames. The LED commands (System_NeoPixel) reach its pixels
-// through the `encoder` and `encoder:<n>` targets and the functions below.
+// through the `encoder[<n>]` and `encoder[<n>]:<p>` targets and the functions below.
 //
 // Up to kEncoderMaxInstances boards at once (multi-instance design, phase
 // 1c): instance n (1-based) has its own saved settings, connection, colours
