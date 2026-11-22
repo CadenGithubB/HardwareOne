@@ -115,7 +115,7 @@ for call in registration_calls:
     if "clockHz" in call or "lockWaitMs" in call:
         fail(f"helper persisted execution policy during lazy registration: {call}")
 
-if "configuredBusForSensor(sensor)" not in system_cpp:
+if "configuredBusForSensor(sensor, n)" not in system_cpp:
     fail("boot pre-registration is not routed through the configured device bus")
 if not re.search(
     r"registerDevice\s*\(\s*sensor\.address\s*,\s*sensor\.name\s*,\s*bus\s*\)",

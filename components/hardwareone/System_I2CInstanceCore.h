@@ -403,3 +403,152 @@ inline const char* i2cInstanceNoAddressText(I2cDeviceType t, uint8_t n, const ch
            (unsigned)n, addressCommand ? addressCommand : "", (unsigned)n);
   return buf;
 }
+
+// ---------------------------------------------------------------------------
+// Rows of the device table (design section 1.3).
+//
+// An i2cSensors[] row (System_I2C.h) names each of its instances' bus and
+// address: busAt(n) and addressAt(n), with `instances` the number it can be
+// configured with (1 except on a multi-instance row). The functions below
+// read any row with the fields they use (address, multiAddress, altAddress,
+// compiled, busAt, addressAt, instances), so the host tests run them on rows
+// of their own.
+// ---------------------------------------------------------------------------
+
+// The most instances any type can have: the size of a per-row instance table.
+constexpr uint8_t i2cMaxInstancesOfAnyType() {
+  uint8_t most = 1;
+  for (int i = 0; i < I2C_DEVICE_COUNT; ++i) {
+    if (kI2cTypes[i].maxInstances > most) most = kI2cTypes[i].maxInstances;
+  }
+  return most;
+}
+constexpr uint8_t kI2cRowInstanceCap = i2cMaxInstancesOfAnyType();
+
+// The instances a row has, capped at kI2cRowInstanceCap (a row cannot have
+// more than its type).
+template <typename Row>
+inline uint8_t i2cRowInstances(const Row& row) {
+  if (row.instances < 1) return 1;
+  return row.instances > kI2cRowInstanceCap ? kI2cRowInstanceCap : row.instances;
+}
+
+// Instance n's address: its setting when the row has one (0 = not
+// configured), else the row's fixed address for instance 1. 0 for an n the
+// row does not have.
+template <typename Row>
+inline uint8_t i2cRowAddressAt(const Row& row, uint8_t n) {
+  if (n < 1 || n > i2cRowInstances(row)) return 0;
+  if (row.addressAt) return row.addressAt(n);
+  return n == 1 ? row.address : 0;
+}
+
+// Instance n's bus, or -1 for a row without a bus setting (it claims either
+// bus).
+template <typename Row>
+inline int i2cRowBusAt(const Row& row, uint8_t n) {
+  return row.busAt ? row.busAt(n) : -1;
+}
+
+// Which of the row's instances is configured at (address, bus): 1..instances,
+// or 0 when none is. Instance 1 also answers at the row's alternate address.
+template <typename Row>
+inline uint8_t i2cRowInstanceAt(const Row& row, uint8_t address, uint8_t bus) {
+  if (address == 0) return 0;
+  const uint8_t instances = i2cRowInstances(row);
+  for (uint8_t n = 1; n <= instances; ++n) {
+    const bool at = i2cRowAddressAt(row, n) == address ||
+                    (n == 1 && row.multiAddress && row.altAddress == address);
+    if (!at) continue;
+    const int rowBus = i2cRowBusAt(row, n);
+    if (rowBus < 0 || rowBus == static_cast<int>(bus)) return n;
+  }
+  return 0;
+}
+
+// A compiled row claims (address, bus) when one of its instances is
+// configured there.
+template <typename Row>
+inline bool i2cRowClaims(const Row& row, uint8_t address, uint8_t bus) {
+  return row.compiled && i2cRowInstanceAt(row, address, bus) != 0;
+}
+
+// The row an address is labelled with by address alone (a label is a hint;
+// drivers check identity): instance 1's address first in table order, then a
+// configured instance n >= 2, then an alternate address. -1 when no row has
+// the address.
+template <typename Row>
+inline int i2cRowIndexByAddress(const Row* rows, size_t count, uint8_t address) {
+  if (!rows || address == 0) return -1;
+  for (size_t i = 0; i < count; ++i) {
+    if (i2cRowAddressAt(rows[i], 1) == address) return static_cast<int>(i);
+  }
+  for (size_t i = 0; i < count; ++i) {
+    const uint8_t instances = i2cRowInstances(rows[i]);
+    for (uint8_t n = 2; n <= instances; ++n) {
+      if (i2cRowAddressAt(rows[i], n) == address) return static_cast<int>(i);
+    }
+  }
+  for (size_t i = 0; i < count; ++i) {
+    if (rows[i].multiAddress && rows[i].altAddress == address) return static_cast<int>(i);
+  }
+  return -1;
+}
+
+// ---------------------------------------------------------------------------
+// Address collisions (design section 1.3).
+//
+// One address in use on a bus: a configured instance of a queue type at the
+// address its driver uses, or a device without a queue type (fuel gauge,
+// OLED, PWM driver, ...) compiled into the build. A setter and an open refuse
+// an address another use already has on that bus (System_I2C.cpp lists the
+// uses, i2cAddressTakenBy()).
+// ---------------------------------------------------------------------------
+
+struct I2cAddressUse {
+  uint8_t bus;
+  uint8_t address;
+  I2cDeviceType type;  // the queue type of an instance; I2C_DEVICE_COUNT for a device without one
+  uint8_t n;           // the instance (1..max); 0 for a device without a queue type
+  const char* name;    // the device's name ("MAX17048")
+  const char* detail;  // what it is ("LiPo Fuel Gauge"), or nullptr
+};
+
+// Whether `use` holds (bus, address) for someone other than instance
+// (exceptType, exceptN), the one asking.
+inline bool i2cAddressUseClashes(const I2cAddressUse& use, uint8_t bus, uint8_t address,
+                                 I2cDeviceType exceptType, uint8_t exceptN) {
+  if (address == 0 || use.bus != bus || use.address != address) return false;
+  return !(use.type == exceptType && use.n == exceptN);
+}
+
+// The first use in `uses` that holds (bus, address) for someone else, or
+// nullptr when the address is free there.
+inline const I2cAddressUse* i2cAddressTakenBy(const I2cAddressUse* uses, size_t count, uint8_t bus,
+                                              uint8_t address, I2cDeviceType exceptType,
+                                              uint8_t exceptN) {
+  if (!uses) return nullptr;
+  for (size_t i = 0; i < count; ++i) {
+    if (i2cAddressUseClashes(uses[i], bus, address, exceptType, exceptN)) return &uses[i];
+  }
+  return nullptr;
+}
+
+// "Error: 0x37 on bus 0 is in use by Encoder (instance 1)." for an instance of
+// a type that can have several; "Error: 0x36 on bus 0 is in use by MAX17048
+// (LiPo Fuel Gauge)." for any other device. Returns buf.
+inline const char* i2cAddressClashText(const I2cAddressUse& use, char* buf, size_t len) {
+  if (!buf || len == 0) return "";
+  if (i2cTypeValid(use.type) && kI2cTypes[use.type].maxInstances > 1) {
+    snprintf(buf, len, "Error: 0x%02X on bus %u is in use by %s (instance %u).",
+             (unsigned)use.address, (unsigned)use.bus, kI2cTypes[use.type].displayName,
+             (unsigned)use.n);
+  } else if (use.detail && use.detail[0]) {
+    snprintf(buf, len, "Error: 0x%02X on bus %u is in use by %s (%s).", (unsigned)use.address,
+             (unsigned)use.bus, use.name ? use.name : "another device", use.detail);
+  } else {
+    snprintf(buf, len, "Error: 0x%02X on bus %u is in use by %s.", (unsigned)use.address,
+             (unsigned)use.bus, use.name ? use.name : "another device");
+  }
+  return buf;
+}

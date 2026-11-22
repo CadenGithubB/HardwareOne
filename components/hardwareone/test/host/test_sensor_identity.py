@@ -4,7 +4,7 @@
 The rule (CONTRIBUTING.md, "Display text and reply text"):
 
 1. An i2cSensors[] row (System_I2C.h) states what it is: `compiled`,
-   `configuredBus`, `configuredAddress` and `deviceType`. Code reads those
+   `busAt`, `addressAt`, `deviceType` and `instances`. Code reads those
    fields. `moduleName` is the word for commands, logs and the feature
    registry; nothing compares it with a literal.
 2. A queue-managed I2C device is an I2cDeviceType. ramFlushIdForDevice() maps
@@ -38,8 +38,8 @@ NAME_COMPARE = re.compile(
 # Files whose `moduleName` is not a sensor: a settings module named in a remote
 # edit request (remoteEditAllowed).
 OTHER_MODULE_NAMES = {"System_BondedPeer.cpp"}
-ROW_FIELDS = ("bool compiled;", "int (*configuredBus)();", "uint8_t (*configuredAddress)();",
-              "I2cDeviceType deviceType;")
+ROW_FIELDS = ("bool compiled;", "int (*busAt)(uint8_t n);", "uint8_t (*addressAt)(uint8_t n);",
+              "I2cDeviceType deviceType;", "uint8_t instances = 1;")
 STREAM_SETTING = re.compile(r"gSettings\.bondStream\w+")
 # Files that may name a bondStream setting: its owner, its settings rows and
 # reset, the page that prints all of them, and the OLED table of its rows.
@@ -70,8 +70,9 @@ def measure(component: Path) -> tuple[int, list[str]]:
     start = source.find("const I2cSensorEntry i2cSensors[] = {")
     table = source[start:source.find("\n};", start)] if start >= 0 else ""
     rows = len(re.findall(r"^\s*\{ 0x", table, re.M))
-    # A row ends with its I2cDeviceType, a seesaw row with its product id after it.
-    typed = len(re.findall(r"I2C_DEVICE_\w+(?:, kSeesawProduct\w+)? \}", table))
+    # A row ends with its I2cDeviceType, a seesaw row with its product id after
+    # it, a multi-instance row with its instance count after that.
+    typed = len(re.findall(r"I2C_DEVICE_\w+(?:, kSeesawProduct\w+(?:, \w+_INSTANCES)?)? \}", table))
     if rows == 0 or rows != typed:
         failures.append(f"System_I2C.cpp: {rows} i2cSensors[] rows, {typed} end with their I2cDeviceType")
 

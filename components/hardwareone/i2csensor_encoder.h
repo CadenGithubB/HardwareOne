@@ -38,6 +38,12 @@ bool encoderRunning();
 // Address and bus the next open uses (the bus is latched by the first open).
 uint8_t encoderDeviceAddress();
 uint8_t encoderDeviceBus();
+// Instance n's address (0 when instance n is not configured) and bus, for the
+// device table's scan, identify and pre-registration (System_I2C.cpp).
+// Instance 1 is encoderDeviceAddress()/encoderDeviceBus(); instances n >= 2
+// have no settings until multi-instance phase 1c.
+uint8_t encoderInstanceAddress(uint8_t n);
+uint8_t encoderInstanceBus(uint8_t n);
 
 // Sensor queue worker only.
 bool encoderStartInternal();
@@ -69,6 +75,8 @@ constexpr const char* kEncoderReplyNotBuilt =
 inline bool encoderRunning() { return false; }
 inline uint8_t encoderDeviceAddress() { return 0x49; }
 inline uint8_t encoderDeviceBus() { return 0; }
+inline uint8_t encoderInstanceAddress(uint8_t) { return 0; }
+inline uint8_t encoderInstanceBus(uint8_t) { return 0; }
 inline bool encoderStartInternal() { return false; }
 inline void encoderStop() {}
 inline void encoderTick() {}

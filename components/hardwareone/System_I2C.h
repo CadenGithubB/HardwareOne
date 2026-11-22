@@ -433,13 +433,21 @@ struct I2cSensorEntry {
   uint32_t i2cTimeoutMs;
   // What the row is, as values. Code branches on these, never on moduleName.
   bool compiled;                  // the row's driver is in this build (its ENABLE_ flag)
-  int (*configuredBus)();         // reads the setting that routes the device to a bus
-  uint8_t (*configuredAddress)(); // the address when it is a setting, else nullptr
+  // Instance n's bus setting (n = 1..instances); nullptr for a row without
+  // one, which claims either bus.
+  int (*busAt)(uint8_t n);
+  // Instance n's address when it is a setting, 0 when instance n is not
+  // configured; nullptr for a fixed address (`address`, instance 1 only).
+  uint8_t (*addressAt)(uint8_t n);
   I2cDeviceType deviceType;       // the start/stop queue's id; I2C_DEVICE_COUNT when the queue does not manage it
   // A seesaw board's product id (System_SeesawIdentity.h), 0 for every other
   // row. A row that has one is named only when the board reports that id:
   // several seesaw boards share addresses.
   uint16_t seesawProductId = 0;
+  // How many instances of the device the row can be configured with: 1
+  // except on a multi-instance row (System_I2CInstanceCore.h reads busAt,
+  // addressAt and instances).
+  uint8_t instances = 1;
 };
 
 // The module name of a queue-managed device (its feature id), from i2cSensors[].
@@ -466,6 +474,7 @@ enum class DetectStatus : uint8_t {
 
 struct DetectedEntry {
   uint8_t      address;     // device address (primary)
+  uint8_t      instance;    // 1, or the instance n >= 2 of a multi-instance device ("Encoder 2")
   uint8_t      bus;         // bus found on (0..POLL_NUM_BUSES-1), or 0xFF if MISSING
   const char*  name;        // device name from the sensor DB
   const char*  moduleName;  // feature id, or nullptr for infrastructure
@@ -514,6 +523,10 @@ struct ConnectedDevice {
   bool isConnected;
   unsigned long lastSeen;
   unsigned long firstDiscovered;
+  // The configured instance at this (address, bus): 1..max, or 0 when the
+  // address is not one (an unknown device, a label by address alone, a
+  // device on a bus it is not configured for).
+  uint8_t instance;
 };
 
 // Devices found by the last bus scan (System_I2C.cpp).
@@ -538,6 +551,15 @@ bool isSensorConnected(const char* name);
 // product id the board reports names it; every other address keeps its
 // address-only label and sees no identity read.
 String identifySensor(uint8_t address, uint8_t bus);
+
+// Address collisions (System_I2CInstanceCore.h): whether (bus, address) is
+// already used by someone other than instance (exceptType, exceptN): another
+// configured instance at the address its driver uses, or a device without a
+// queue type compiled into this build (fuel gauge, OLED, PWM driver, ...) on
+// that bus. `why` gets the one-line reply ("Error: 0x37 on bus 0 is in use by
+// ..."). Address and bus setters check it, and an open checks it again.
+bool i2cAddressTakenBy(uint8_t bus, uint8_t address, I2cDeviceType exceptType, uint8_t exceptN,
+                       char* why = nullptr, size_t whyLen = 0);
 // Read the product id of a seesaw board (no device-health record). False when
 // it did not answer the identity read.
 bool i2cReadSeesawProductId(uint8_t bus, uint8_t address, uint16_t& productId);

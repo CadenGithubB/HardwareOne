@@ -1120,6 +1120,15 @@ everything user-visible since the v0.99.99.1 tag.
   Assistant.
 
 ### Changed
+- The encoder's address is checked against every device of the build on that bus, not only the
+  FeatherS3 fuel gauge: `encoderaddress`, `encoderbus` and the open refuse an address the OLED
+  (0x3C/0x3D), the APDS9960 (0x39), the gamepad (0x50), the ANO encoder (its address setting) or
+  another compiled device uses there, with one line naming it (`Error: 0x36 on bus 0 is in use by
+  MAX17048 (LiPo Fuel Gauge). ...`). `encoderbus` now refuses a bus where the saved address is taken.
+  `detect` and the boot scan know each configured instance of a device type, and the I2C health
+  registry holds 24 devices (was 16; it lives in PSRAM). (Groundwork for several boards of one I2C
+  device type: the device table names every instance's bus and address; no type has a second
+  instance yet.)
 - `features` only lists; it no longer switches anything. The list shows, for each feature, whether it
   is built in, running now, set to start at boot and allowed, with `-` where a feature has no such
   switch or state. `features <id>` names the commands that switch it: `open<x>`/`close<x>` (now),

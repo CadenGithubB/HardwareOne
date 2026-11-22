@@ -175,8 +175,15 @@ struct I2cDeviceRequest {
 // with the cache disabled: every user is a task.
 class I2cDeviceManager {
 public:
-  // Device registry (public for direct access by commands)
-  static const int MAX_DEVICES = 16;
+  // Device registry (public for direct access by commands). Holds the
+  // pre-registered compiled rows (counted 2026-11-22: at most 15 distinct
+  // records with every driver built in, which with the OLED and the camera's
+  // SCCB passed the old 16; 4-5 on the feathers3_fe encoder test build, none
+  // on xiao-default), each configured instance n >= 2, and the records
+  // drivers add (the OLED at its probed address, the camera's SCCB).
+  // System_I2C.cpp asserts the table plus the extra instances fit. PSRAM: the
+  // manager object is placed there.
+  static const int MAX_DEVICES = 24;
   I2cDevice devices[MAX_DEVICES];
 
   // Number of physical I2C buses we can manage. Bus 0 = Wire1 (primary STEMMA

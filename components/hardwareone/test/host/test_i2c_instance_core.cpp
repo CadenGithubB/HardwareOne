@@ -1,5 +1,7 @@
-// Several instances of one I2C device type: the slot math, ids, names and the
-// instance argument rules (System_I2CInstanceCore.h, design sections 1.1, 3).
+// Several instances of one I2C device type: the slot math, ids, names, the
+// instance argument rules, the device-table rows per instance (identify and
+// claims) and address collisions (System_I2CInstanceCore.h, design sections
+// 1.1, 1.3, 3).
 //
 // Built twice: with the firmware's maxima (every type has one instance, so
 // every slot is the type value) and with HW1_HOST_I2C_TEST_ENCODER_MAX=4, which
@@ -209,19 +211,161 @@ static void testSingleInstanceTypes() {
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// Rows of the device table (phase 1b): identify and claims per instance.
+// A row with the fields the core reads, the way i2cSensors[] rows have them.
+struct TestRow {
+  uint8_t address;
+  bool multiAddress;
+  uint8_t altAddress;
+  bool compiled;
+  int (*busAt)(uint8_t n);
+  uint8_t (*addressAt)(uint8_t n);
+  uint8_t instances;
+};
+
+// The encoder instances' settings for the rows below (index n - 1); 0 = not set.
+static uint8_t gEncAddr[4] = {0x36, 0x37, 0, 0};
+static int gEncBus[4] = {0, 0, 0, 0};
+static uint8_t encAddressAt(uint8_t n) { return n >= 1 && n <= 4 ? gEncAddr[n - 1] : 0; }
+static int encBusAt(uint8_t n) { return n >= 1 && n <= 4 ? gEncBus[n - 1] : 0; }
+static int imuBusAt(uint8_t) { return 0; }
+
+static void testRowInstances() {
+  const uint8_t encoderInstances = i2cMaxInstances(I2C_DEVICE_ENCODER);
+  const TestRow rows[] = {
+    {0x28, true, 0x29, true, imuBusAt, nullptr, 1},                       // IMU, alternate 0x29
+    {0x3D, true, 0x3C, true, nullptr, nullptr, 1},                        // OLED, no bus setting
+    {0x49, false, 0, true, encBusAt, encAddressAt, encoderInstances},     // encoder 5752 row
+    {0x36, false, 0, true, encBusAt, encAddressAt, encoderInstances},     // encoder 4991 row
+  };
+  const size_t count = sizeof(rows) / sizeof(rows[0]);
+  assert(kI2cRowInstanceCap == encoderInstances);
+
+  // Instance 1 as before: fixed address, alternate, a row without a bus.
+  assert(i2cRowAddressAt(rows[0], 1) == 0x28 && i2cRowAddressAt(rows[0], 2) == 0);
+  assert(i2cRowInstanceAt(rows[0], 0x28, 0) == 1 && i2cRowInstanceAt(rows[0], 0x29, 0) == 1);
+  assert(i2cRowInstanceAt(rows[0], 0x28, 1) == 0);  // not configured on bus 1: a label only
+  assert(i2cRowInstanceAt(rows[1], 0x3C, 1) == 1);  // no bus setting: either bus
+  assert(i2cRowIndexByAddress(rows, count, 0x29) == 0);
+  assert(i2cRowIndexByAddress(rows, count, 0x00) == -1);
+
+  // The encoder's instance 1 at 0x36 on bus 0.
+  assert(i2cRowIndexByAddress(rows, count, 0x36) == 2);  // instance 1's address, table order
+  assert(i2cRowInstanceAt(rows[2], 0x36, 0) == 1 && i2cRowInstanceAt(rows[3], 0x36, 0) == 1);
+  assert(i2cRowClaims(rows[3], 0x36, 0) && !i2cRowClaims(rows[3], 0x36, 1));
+
+  // An unconfigured address is no instance and no row.
+  assert(i2cRowIndexByAddress(rows, count, 0x38) == -1);
+  assert(i2cRowInstanceAt(rows[2], 0x38, 0) == 0 && !i2cRowClaims(rows[2], 0x38, 0));
+
+  if (encoderInstances >= 2) {
+    // Two configured encoder addresses: (row, 1) and (row, 2).
+    assert(i2cRowAddressAt(rows[2], 2) == 0x37 && i2cRowAddressAt(rows[2], 3) == 0);
+    assert(i2cRowIndexByAddress(rows, count, 0x37) == 2);
+    assert(i2cRowInstanceAt(rows[3], 0x37, 0) == 2);
+    assert(i2cRowClaims(rows[2], 0x37, 0) && i2cRowClaims(rows[3], 0x37, 0));
+    // Instance 2 moved to bus 1: found on bus 0 it is a label, not instance 2.
+    gEncBus[1] = 1;
+    assert(i2cRowInstanceAt(rows[3], 0x37, 0) == 0 && i2cRowInstanceAt(rows[3], 0x37, 1) == 2);
+    // Instance 3 at instance 2's address on the other bus: each bus its own.
+    gEncAddr[2] = 0x37;
+    gEncBus[2] = 0;
+    assert(i2cRowInstanceAt(rows[3], 0x37, 0) == 3 && i2cRowInstanceAt(rows[3], 0x37, 1) == 2);
+    gEncAddr[2] = 0;
+    gEncBus[1] = 0;
+  } else {
+    // One instance: a second address never names the encoder.
+    assert(i2cRowIndexByAddress(rows, count, 0x37) == -1);
+    assert(i2cRowInstanceAt(rows[3], 0x37, 0) == 0);
+  }
+  // A row not in this build claims nothing.
+  TestRow absent = rows[2];
+  absent.compiled = false;
+  assert(!i2cRowClaims(absent, 0x36, 0));
+  // An instance count past the cap reads as the cap.
+  TestRow wide = rows[2];
+  wide.instances = 200;
+  assert(i2cRowInstances(wide) == kI2cRowInstanceCap);
+}
+
+// Address collisions: a pure search over a fixed list of uses (a FeatherS3
+// build: fuel gauge on bus 0, OLED, APDS9960, gamepad, two encoders).
+static std::string clashText(const I2cAddressUse* use) {
+  char buf[128];
+  return use ? i2cAddressClashText(*use, buf, sizeof(buf)) : std::string();
+}
+
+static void testAddressCollisions() {
+  static constexpr I2cAddressUse uses[] = {
+    {0, 0x36, I2C_DEVICE_COUNT, 0, "MAX17048", "LiPo Fuel Gauge"},
+    {0, 0x3D, I2C_DEVICE_COUNT, 0, "SSD1306", "OLED 128x64 Display"},
+    {0, 0x3C, I2C_DEVICE_COUNT, 0, "SSD1306", "OLED 128x64 Display"},
+    {0, 0x39, I2C_DEVICE_APDS, 1, "APDS9960", "RGB, Gesture & Proximity"},
+    {0, 0x50, I2C_DEVICE_INPUT, 1, "Seesaw", "Mini I2C Gamepad"},
+    {1, 0x49, I2C_DEVICE_ENCODER, 1, "Encoder", "Adafruit 5752 Quad Rotary Encoder, 4 RGB pixels"},
+    {0, 0x37, I2C_DEVICE_ENCODER, 2, "Encoder", "Adafruit 4991 Rotary Encoder, 1 RGB pixel"},
+    {0, 0x70, I2C_DEVICE_COUNT, 0, "HT16K33", nullptr},
+  };
+  const size_t count = sizeof(uses) / sizeof(uses[0]);
+  const auto taken = [&](uint8_t bus, uint8_t address, I2cDeviceType t, uint8_t n) {
+    return i2cAddressTakenBy(uses, count, bus, address, t, n);
+  };
+
+  // Fixed-address devices of the build, on their bus only.
+  assert(clashText(taken(0, 0x36, I2C_DEVICE_ENCODER, 1)) ==
+         "Error: 0x36 on bus 0 is in use by MAX17048 (LiPo Fuel Gauge).");
+  assert(taken(1, 0x36, I2C_DEVICE_ENCODER, 1) == nullptr);
+  assert(taken(0, 0x3C, I2C_DEVICE_ENCODER, 1) && taken(0, 0x3D, I2C_DEVICE_ENCODER, 1));
+  assert(taken(0, 0x39, I2C_DEVICE_ENCODER, 1)->type == I2C_DEVICE_APDS);
+  assert(clashText(taken(0, 0x50, I2C_DEVICE_ENCODER, 1)) ==
+         "Error: 0x50 on bus 0 is in use by Seesaw (Mini I2C Gamepad).");
+  // The gamepad's alternate address is not one its driver uses.
+  assert(taken(0, 0x49, I2C_DEVICE_ENCODER, 1) == nullptr);
+  assert(clashText(taken(0, 0x70, I2C_DEVICE_ENCODER, 1)) ==
+         "Error: 0x70 on bus 0 is in use by HT16K33.");
+  // A free address, and address 0 (never in use).
+  assert(taken(0, 0x38, I2C_DEVICE_ENCODER, 1) == nullptr);
+  assert(taken(0, 0x00, I2C_DEVICE_ENCODER, 1) == nullptr);
+
+  // Another instance of the same type is refused; the asking instance is not.
+  assert(taken(0, 0x37, I2C_DEVICE_ENCODER, 2) == nullptr);
+  assert(taken(1, 0x49, I2C_DEVICE_ENCODER, 1) == nullptr);
+  const I2cAddressUse* other = taken(0, 0x37, I2C_DEVICE_ENCODER, 1);
+  assert(other && other->type == I2C_DEVICE_ENCODER && other->n == 2);
+  if (i2cMaxInstances(I2C_DEVICE_ENCODER) > 1) {
+    assert(clashText(other) == "Error: 0x37 on bus 0 is in use by Encoder (instance 2).");
+    assert(clashText(taken(1, 0x49, I2C_DEVICE_ENCODER, 3)) ==
+           "Error: 0x49 on bus 1 is in use by Encoder (instance 1).");
+  } else {
+    // A type with one instance is named by its device.
+    assert(clashText(other) ==
+           "Error: 0x37 on bus 0 is in use by Encoder (Adafruit 4991 Rotary Encoder, 1 RGB pixel).");
+  }
+  // Another type asking: the encoder's addresses are taken.
+  assert(taken(1, 0x49, I2C_DEVICE_COUNT, 0)->type == I2C_DEVICE_ENCODER);
+  assert(i2cAddressTakenBy(nullptr, 3, 0, 0x36, I2C_DEVICE_ENCODER, 1) == nullptr);
+  char tiny[8];
+  assert(std::strlen(i2cAddressClashText(uses[0], tiny, sizeof(tiny))) == sizeof(tiny) - 1);
+}
+
 int main() {
   testInstanceOneIsTheType();
   testSlotsRoundTrip();
   testFirmwareMaxima();
+  testRowInstances();
+  testAddressCollisions();
 #ifdef HW1_HOST_I2C_TEST_ENCODER_MAX
   testEncoderFour();
   testOpenClose();
   testStatus();
   testSetter();
   testSingleInstanceTypes();
-  std::puts("I2C instance core tests passed (encoder with four instances: slots, names, G1-G7, errors)");
+  std::puts("I2C instance core tests passed (encoder with four instances: slots, names, G1-G7, errors, "
+            "identify, collisions)");
 #else
-  std::puts("I2C instance core tests passed (firmware maxima: instance 1 is the type)");
+  std::puts("I2C instance core tests passed (firmware maxima: instance 1 is the type, identify, "
+            "collisions)");
 #endif
   return 0;
 }

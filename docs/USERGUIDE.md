@@ -2458,7 +2458,11 @@ The device opens the address `encoderaddress` saves (0x49 unless changed), so a 
 0x36 is also the MAX17048 fuel gauge on the FeatherS3 and FeatherS3[D]'s I2C1. A 4991 on those
 boards goes on I2C2 (`encoderbus 1`, then a reboot) or gets its A0 jumper closed (0x37,
 `encoderaddress 0x37`); `encoderaddress 0x36` on the fuel gauge's bus is refused, and the device
-never opens that address there. Before it claims a board the device reads the product id (one
+never opens that address there. The same holds for every other device built into the firmware on
+that bus: the OLED (0x3C/0x3D), the APDS9960 (0x39), the gamepad (0x50) or the ANO encoder (its
+address setting). `encoderaddress`, `encoderbus` and the open refuse the address with one line that
+names the device using it, for example `Error: 0x36 on bus 0 is in use by MAX17048 (LiPo Fuel
+Gauge).` Before it claims a board the device reads the product id (one
 register read, no reset), so a fuel gauge, an ANO encoder or a gamepad at the same address is left
 alone. `i2cscan` reads the product id only where two devices of different products can share the
 address (the encoder's configured address, 0x49 with an ANO or gamepad build), and names the

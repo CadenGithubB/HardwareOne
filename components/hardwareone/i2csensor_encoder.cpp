@@ -156,16 +156,16 @@ const SettingEntry settings[] = {
 
 bool isConnected() { return sRunning.load(); }
 
-// The board's own fuel gauge answers at 0x36 on its bus (FeatherS3[D]): an
-// encoder there would share its address, so the device never opens it.
-bool clashesWithFuelGauge(uint8_t bus, uint8_t address) {
-#if BATTERY_BACKEND_FUEL_GAUGE
-  return address == I2C_ADDR_FUEL_GAUGE && bus == (uint8_t)gSettings.fuelGaugeBus;
-#else
-  (void)bus;
-  (void)address;
-  return false;
-#endif
+// The reply when (bus, address) is already used by another device of this
+// build (System_I2C.h, i2cAddressTakenBy): the board's own fuel gauge at 0x36
+// (FeatherS3[D]), an OLED, the APDS9960, the gamepad, another encoder
+// instance, ... `hint` says what to change. nullptr when it is free.
+const char* addressClashReply(uint8_t bus, uint8_t address, const char* hint) {
+  char why[112];
+  if (!i2cAddressTakenBy(bus, address, I2C_DEVICE_ENCODER, 1, why, sizeof(why))) return nullptr;
+  if (!ensureDebugBuffer()) return "Error: That address is in use on that bus.";
+  snprintf(getDebugBuffer(), 1024, "%s %s", why, hint);
+  return getDebugBuffer();
 }
 
 // ---------------------------------------------------------------------------
@@ -242,9 +242,10 @@ const char* cmd_encoderaddress(const String& argsInput) {
     return "Error: The encoder address must be 0x49..0x50 (5752) or 0x36..0x3D (4991). "
            "Read it with 'i2cscan'.";
   }
-  if (clashesWithFuelGauge(encoderDeviceBus(), (uint8_t)address)) {
-    return "Error: 0x36 is this board's fuel gauge on that bus. Put the encoder on the other bus "
-           "('encoderbus') or close its A0 jumper and use 0x37.";
+  if (const char* clash = addressClashReply(encoderDeviceBus(), (uint8_t)address,
+                                            "Use another address (its A0-A2 jumpers) or put the "
+                                            "encoder on the other bus ('encoderbus').")) {
+    return clash;
   }
   setSetting(gSettings.encoderAddress, address);
   return "[Encoder] Address saved; it applies at the next 'openencoder'";
@@ -252,6 +253,18 @@ const char* cmd_encoderaddress(const String& argsInput) {
 
 const char* cmd_encoderbus(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  // A bus where the saved address is already used is refused; the setter
+  // reports every other case (usage, not a number, out of range).
+  String text = argsInput;
+  text.trim();
+  int bus = 0;
+  if (!text.isEmpty() && parseIntArg(text, bus) && bus >= 0 &&
+      bus < (int)I2cDeviceManager::NUM_BUSES) {
+    if (const char* clash = addressClashReply((uint8_t)bus, encoderDeviceAddress(),
+                                              "Change 'encoderaddress' first.")) {
+      return clash;
+    }
+  }
   return i2cSetDeviceBusAndReport(gSettings.encoderBus, argsInput, "encoderBus");
 }
 
@@ -274,6 +287,10 @@ uint8_t encoderDeviceBus() {
   return gSettings.encoderBus == 1 ? 1 : 0;
 }
 
+uint8_t encoderInstanceAddress(uint8_t n) { return n == 1 ? encoderDeviceAddress() : 0; }
+
+uint8_t encoderInstanceBus(uint8_t n) { return n == 1 ? encoderDeviceBus() : 0; }
+
 bool encoderStartInternal() {
   if (sRunning.load()) return true;
   if (!lightMutex()) {
@@ -282,10 +299,12 @@ bool encoderStartInternal() {
   }
   const uint8_t bus = encoderDeviceBus();
   const uint8_t address = encoderDeviceAddress();
-  if (clashesWithFuelGauge(bus, address)) {
-    ERROR_I2CF("[Encoder] 0x%02X on I2C%u is the fuel gauge's address; not opening it there",
-               address, (unsigned)bus + 1);
-    return false;
+  {
+    char why[112];
+    if (i2cAddressTakenBy(bus, address, I2C_DEVICE_ENCODER, 1, why, sizeof(why))) {
+      ERROR_I2CF("[Encoder] %s Not opening it there.", why);
+      return false;
+    }
   }
   TwoWire* wire = i2c() ? i2c()->getWire(bus) : nullptr;
   if (!wire) {
