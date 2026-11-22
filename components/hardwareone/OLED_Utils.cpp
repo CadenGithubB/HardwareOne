@@ -3450,6 +3450,14 @@ int32_t oledValueScrollShown(OledValueScroll& row, int32_t device) {
   return row.shown(device);
 }
 
+// A display session boundary: no row sends a value the old session chose
+// (the pump would build it with the new session's identity).
+static void oledValueScrollSessionBoundary() {
+  for (OledValueScrollRow& entry : sOledValueScrollRows) {
+    if (entry.row) entry.row->dropWaiting();
+  }
+}
+
 // A small hourglass at the top right of the content area while the OLED
 // command runs; drawn over the mode's content, under the toast.
 static void oledCommandBusyRender() {
@@ -6915,6 +6923,7 @@ static void oledResetLocalDisplaySessionTransients() {
   // after a remote/local replacement, even if the new user presses A.
   oledConfirmResetForSessionBoundary();
   oledToastClear();
+  oledValueScrollSessionBoundary();  // no waiting scroll value reaches the new identity
 
   // A dictation armed by the departing identity must not keep recording, and
   // its transcript must never land in the new identity's field. Discards the

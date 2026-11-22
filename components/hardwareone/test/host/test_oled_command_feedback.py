@@ -28,7 +28,8 @@ executeOledCommandShowResult, which toasts the reply. The value-scroll rows
 the same slot: a step is shown at once and never waits or says "Busy", steps
 while one runs coalesce into the newest value, which is sent when the slot
 frees (also after another screen's command), a refusal gives the row back to
-the device, and the row follows the device once the last command ended.
+the device, the row follows the device once the last command ended, and a
+display session boundary drops a waiting value so it is never sent as the new user.
 Static checks cover the call sites the harness does not run:
 executeOledCommand runs in the background, every OLED screen either uses
 oledRunCommand's verdict or runs the action in the background (a remaining
@@ -71,7 +72,8 @@ ASYNC = ("bool oledCommandBusy(", "static void oledCommandSuccessText(",
 # done callback, the frame-loop send, the step and the shown value.
 VALUE_SCROLL_STATE = "namespace {\nstruct OledValueScrollRow {"
 VALUE_SCROLL = ("static void oledValueScrollDone(", "static void oledValueScrollPump(",
-                "void oledValueScrollStep(", "int32_t oledValueScrollShown(")
+                "void oledValueScrollStep(", "int32_t oledValueScrollShown(",
+                "static void oledValueScrollSessionBoundary(")
 # Every OLED screen source whose actions run commands.
 OLED_SOURCES_GLOB = ("OLED_*.cpp", "i2csensor_*_oled.h")
 # A wait that stays (value scroll, a chained or completion-dependent action)
@@ -113,6 +115,10 @@ def static_checks(read, component: Path) -> list[str]:
     if VALUE_SCROLL[1] in utils and "oledValueScrollPump();" not in strip_comments(
             extract_block(utils, "void oledUpdate(")):
         failures.append("oledUpdate never sends a value-scroll row's waiting value")
+    if VALUE_SCROLL[1] in utils and "oledValueScrollSessionBoundary();" not in strip_comments(
+            extract_block(utils, "static void oledResetLocalDisplaySessionTransients(")):
+        failures.append("a display session boundary keeps value-scroll rows' waiting values: "
+                        "the old session's step would be sent as the new user")
     failures += wait_sites(read, component)
     editor = read("OLED_SettingsEditor.cpp")
     start = editor.index("// Quick Settings - Dynamic item registry")

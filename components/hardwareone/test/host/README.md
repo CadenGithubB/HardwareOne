@@ -5752,7 +5752,10 @@ The checks:
   commands); a step while another screen's command runs waits silently and goes out after
   it; a refusal toasts its reason and gives the row back to the device, unless a newer value
   waits (that one is still sent); after a success the row keeps its value until the device
-  shows it or 1.5 s pass, then follows the device; a replaced session's step shows nothing.
+  shows it or 1.5 s pass, then follows the device; a replaced session's step shows nothing,
+  and a value still waiting at a display session boundary (behind the row's own command or
+  another screen's) is dropped, never sent as the new user (statically:
+  `oledResetLocalDisplaySessionTransients` calls `oledValueScrollSessionBoundary`).
 - Static: the Automations, Logging and Network screens, the Quick Settings section and the
   unavailable-page / Web Stats actions (`handleOledActionButton`) no longer fire commands
   whose reply is dropped, and their `broadcastOutput` success lines are conditional. The

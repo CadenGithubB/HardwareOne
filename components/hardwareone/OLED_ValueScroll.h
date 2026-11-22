@@ -61,6 +61,14 @@ struct OledValueScroll {
     if (!waiting && !ok) leading = false;
   }
 
+  // A display session boundary (logout, another user): a value that still
+  // waits was the old session's input and is never sent. A command in flight
+  // ends as a replaced session's (done false) and gives the row back then.
+  void dropWaiting() {
+    waiting = false;
+    if (!inFlight) leading = false;
+  }
+
   // Each look at the row: once nothing waits or runs, the row follows the
   // device again when the device shows the wanted value or kSettleMs passed.
   // True while the row still leads (the screen keeps redrawing).

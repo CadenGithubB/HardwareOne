@@ -880,6 +880,33 @@ static void case_value_scroll() {
   land();
   EXPECT(gToastCount == 0 && !oledCommandBusy() && oledValueScrollShown(gRow, gDevice) == 50,
          "a replaced session's step shows nothing and the row follows the device");
+
+  // A replaced session while a newer value waits behind the row's own command:
+  // the boundary drops it, so it is never sent under the new identity.
+  resetWorld();
+  gRow = OledValueScroll();
+  gDevice = 50;
+  scrollStep(+5);
+  scrollStep(+5);
+  gUiEpoch = gLiveEpoch = 8;  // another user holds the display now
+  oledValueScrollSessionBoundary();
+  land();
+  EXPECT(gQueued.empty() && gChecked.size() == 1 && !oledCommandBusy() && gToastCount == 0 &&
+             oledValueScrollShown(gRow, gDevice) == 50,
+         "the old session's waiting value is not sent and the row follows the device, ran: " + ran());
+
+  // The same while the value waits behind another screen's command.
+  resetWorld();
+  gRow = OledValueScroll();
+  gDevice = 50;
+  executeOledCommand("ledclear");
+  scrollStep(-5);
+  gUiEpoch = gLiveEpoch = 8;
+  oledValueScrollSessionBoundary();
+  EXPECT(oledValueScrollShown(gRow, gDevice) == 50, "the dropped value is no longer shown");
+  land();
+  EXPECT(gQueued.empty() && gChecked.size() == 1 && !oledCommandBusy(),
+         "nothing is sent once the other command ends, ran: " + ran());
 }
 #endif
 
