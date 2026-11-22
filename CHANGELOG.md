@@ -444,6 +444,26 @@ everything user-visible since the v0.99.99.1 tag.
 
 ### Fixed
 
+- A command whose JSON reply states a failure now counts as failed everywhere the executor's verdict
+  is used (the web CLI answers 400, the UART link `err`, automations, remote and MQTT command
+  replies): a top-level `"success":false` or `"ok":false`, or an error object such as
+  `{"error":"oom"}`. An `"error"` field later in a status object (a service's last error) and
+  nested or quoted values do not count. Host-tested.
+- 17 usage lines and hints named commands that do not exist (`espnow pair`, `user delete`,
+  `use 'changepassword'`, the OLED gamepad screen's `opengamepad`, ...); they name the real commands
+  (`espnowpair`, `userdelete`, `userchangepassword`, `openinput`). The unregistered `fmradio`
+  dispatcher, which nothing called, is removed. `tools/command_registry.py audit` (and the
+  `command_registry_gate` host test) now fails on a usage line or `run/use/type '<command>'` hint that
+  names no registered command.
+- `i2cscan` labels an address by its bus too: 0x36 is "MAX17048 (LiPo Fuel Gauge)" only on the bus
+  the fuel gauge is wired to; on another bus it lists every device that uses the address ("MAX17048
+  (LiPo Fuel Gauge) or Encoder (Adafruit 4991 Rotary Encoder, 1 RGB pixel)"), and the discovered-
+  device registry calls such a device unknown instead of the fuel gauge. Host-tested; not run on a
+  board.
+- `openencoder 2` (boards 2-4) points to the LED target, `ledcolor encoder2 <colour>`, like board 1
+  does. The bare `sensorautostart` listing also shows encoder boards 2-4 that have an address
+  (`encoder2` rows) and its usage line shows the board number (`sensorautostart <sensor> [n]
+  <on|off>`).
 - `sensorautostart` (no arguments) marks a sensor that is not in the build as `not built` instead of
   on/off, and its "Enabled total" counts only sensors that can start at boot (built rows that are on,
   plus encoder boards 2-4 that are on and have an address). A start-at-boot flag left on by another
@@ -1168,7 +1188,7 @@ everything user-visible since the v0.99.99.1 tag.
   Assistant.
 
 ### Changed
-- The UART host link (the CM5 / Raspberry Pi co-processor) speaks link protocol 2, a framed command
+- The UART host link (the CM5 / Raspberry Pi co-processor) speaks link protocol 3, a framed command
   channel. A line `@<id> <command>` (the id 1-8 lowercase hex digits the host picks) is answered
   `@<id> ok <len>` or `@<id> err <len>`, then exactly `<len>` bytes of reply (newlines included)
   and a newline, written under one hold of the link's transmit lock. `ok`/`err` is the executor's
@@ -1177,11 +1197,12 @@ everything user-visible since the v0.99.99.1 tag.
   link-health, power, fan, LLM and dictation callbacks, `liveaudio ready`, the authentication and
   lockout refusals, the idle sign-out, an over-long line and an empty framed command answer the
   same way with the id echoed; a framed line that is not signed in is always answered (the
-  2-second limit stays for unframed noise). The login reply ends ` link=2` and `uartlink status`
-  reports `link=2`. A line without the prefix (a person at a terminal) gets the unframed reply as
+  2-second limit stays for unframed noise). The login reply ends ` link=3`, `uartlink status`
+  reports `link=3` and `versions` (and `versions json`, key `uart_link`) lists `UART link protocol 3`
+  on builds with the link. A line without the prefix (a person at a terminal) gets the unframed reply as
   before; events and voicefetch / live audio frames carry no id. The Pi service must be the
-  matching framed release (HardwareOne_RaspPi_CoProcessor 4bbb4d8 or later): it refuses firmware
-  whose login reply lacks `link=2`, and this firmware's replies are not what an older service
+  matching release (HardwareOne_RaspPi_CoProcessor d7aff05 or later): it refuses firmware
+  whose login reply does not carry `link=3`, and this firmware's replies are not what an older service
   expects. No Pi + XIAO bench run yet.
 - The encoder's address is checked against every device of the build on that bus, not only the
   FeatherS3 fuel gauge: `encoderaddress`, `encoderbus` and the open refuse an address the OLED

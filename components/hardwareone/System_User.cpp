@@ -3469,7 +3469,7 @@ const char* cmd_user_delete(const String& argsInput) {
   if (!filesystemReady) return "Error: LittleFS not ready";
   String username = argsInput;
   username.trim();
-  if (username.length() == 0) return "Error: invalid arguments — Usage: user delete <username> [confirm]";
+  if (username.length() == 0) return "Error: invalid arguments — Usage: userdelete <username> [confirm]";
 
   // One-shot bypass token: `userdelete <username> confirm` (or yes/--yes/-y)
   // deletes immediately, skipping the interactive prompt. This is the form the
@@ -3491,7 +3491,7 @@ const char* cmd_user_delete(const String& argsInput) {
       }
     }
   }
-  if (username.length() == 0) return "Error: invalid arguments — Usage: user delete <username> [confirm]";
+  if (username.length() == 0) return "Error: invalid arguments — Usage: userdelete <username> [confirm]";
 
   // The tap UIs (OLED/G2 user manager) wrap the name in quotes so names with
   // spaces survive dispatch: `userdelete "b" confirm`. We hand-parse here
@@ -3502,7 +3502,7 @@ const char* cmd_user_delete(const String& argsInput) {
   if (username.length() >= 2 && username[0] == '"' && username[username.length() - 1] == '"') {
     username = username.substring(1, username.length() - 1);
     username.trim();
-    if (username.length() == 0) return "Error: invalid arguments — Usage: user delete <username> [confirm]";
+    if (username.length() == 0) return "Error: invalid arguments — Usage: userdelete <username> [confirm]";
   }
   DEBUG_USERSF("[users] CLI delete (%s) username=%s", oneShot ? "one-shot" : "prompt", username.c_str());
 
@@ -3628,7 +3628,7 @@ const char* cmd_user_changepassword(const String& argsInput) {
 
   // Parse: "currentPassword newPassword confirmPassword"
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: user changepassword <currentPassword> <newPassword> <confirmPassword>";
+  if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: userchangepassword <currentPassword> <newPassword> <confirmPassword>";
 
   // Handlers run on the executor, so the reply may live in the debug buffer.
   char message[USER_CHANGE_PASSWORD_MESSAGE_MAX];
@@ -3649,7 +3649,7 @@ const char* cmd_user_resetpassword(const String& argsInput) {
   // A fourth token means the password held a space and was not quoted.
   CommandArgs a(argsInput);
   if (!a.hasMinArgs(2) || a.count() > 3) {
-    return "Error: invalid arguments — Usage: user resetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login, 0 = omit";
+    return "Error: invalid arguments — Usage: userresetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login, 0 = omit";
   }
 
   String username = a.arg(0);
@@ -3670,7 +3670,7 @@ const char* cmd_user_resetpassword(const String& argsInput) {
   {
     uint32_t targetId = 0;
     if (getUserIdByUsername(username, targetId) && targetId == 1)
-      return "Error: the owner account manages its own password (use 'changepassword')";
+      return "Error: the owner account manages its own password (use 'userchangepassword')";
     String merr;
     if (!userMutationAllowed(username, kRoleRankNoGrant, merr)) {
       if (!ensureDebugBuffer()) return "Error: denied";
@@ -4350,7 +4350,7 @@ const char* cmd_unbanuser(const String& argsInput) {
 const char* cmd_user_request(const String& argsInput) {
   // Syntax: args = "<username> <password> [confirmPassword]"
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: user request <username> <password> [confirmPassword]";
+  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: userrequest <username> <password> [confirmPassword]";
 
   String username = a.arg(0);
   username.trim();

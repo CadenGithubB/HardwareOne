@@ -6,7 +6,8 @@ Runs the two release gates of tools/command_registry.py as a maintainer would:
 - `audit` exits 0: no duplicate command names (tables in mutually exclusive
   #if/#else branches, such as System_OTA.cpp's two otaCommands[], count as
   one), no unregistered or dangling arrays, no command string in code that
-  resolves to nothing, and every SettingEntry cmdKey binds to a command.
+  resolves to nothing, every SettingEntry cmdKey binds to a command, and
+  every reply's usage line and command hint names a registered command.
 - `reference --check` exits 0: docs/COMMAND_REFERENCE.md is byte-identical to
   a fresh render from the CommandEntry tables, so a registry change that was
   not followed by `python3 tools/command_registry.py reference` fails here.

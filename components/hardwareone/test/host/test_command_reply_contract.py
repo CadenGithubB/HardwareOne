@@ -57,7 +57,29 @@ int main() {
     assert(commandReplyIsFailure(failed));
   }
   for (const char* succeeded : {"", "OK", "OK: saved", "VALID", "error: lower case is data",
-                                "Unknown feature list", "{\"ok\":false}", " Error: leading space"}) {
+                                "Unknown feature list", " Error: leading space"}) {
+    assert(!commandReplyIsFailure(succeeded));
+  }
+  // A JSON reply's own verdict (CMD-3): "success":false or "ok":false at the
+  // top level, or an error object whose first key is "error", is a failure.
+  for (const char* failed : {"{\"ok\":false}", "{\"success\":false,\"error\":\"SD card not available\"}",
+                             "{\"error\":\"oom\"}", "{\"schema\":1,\"ok\":false,\"error\":\"buffer\"}",
+                             " { \"success\" : false }", "{\"ok\":true,\"success\":false}",
+                             "{\"success\":true,\"ok\":false}", "{\"error\":{\"code\":3}}",
+                             "{\"schema\":1,\"list\":[{\"a\":1}],\"ok\":false}"}) {
+    assert(commandReplyIsFailure(failed));
+    assert(commandReplyJsonStatesFailure(failed));
+  }
+  // Not a failure: a success, a nested or quoted false, a status object whose
+  // "error" field is the last error of a running service, a null error, text.
+  for (const char* succeeded : {"{\"schema\":1,\"ok\":true}", "{\"success\":true,\"error\":\"\"}",
+                                "{\"state\":\"idle\",\"error\":\"capture timeout\"}",
+                                "{\"error\":null,\"state\":\"idle\"}",
+                                "{\"results\":[{\"success\":false}],\"ok\":true}",
+                                "{\"peer\":{\"ok\":false},\"success\":true}",
+                                "{\"note\":\"\\\"ok\\\":false\"}", "{\"okay\":false}",
+                                "{\"success\":falsey}", "[{\"ok\":false}]", "{\"ok\":false",
+                                "Saved {\"ok\":false}", "{\"name\":\"x\"}"}) {
     assert(!commandReplyIsFailure(succeeded));
   }
   assert(!commandReplyIsFailure(nullptr));

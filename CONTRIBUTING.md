@@ -165,7 +165,8 @@ attachment should report unavailable without breaking unrelated services.
   The reason goes in the returned reply, not only in a live output line: most
   displays show the reply alone. `commandReplyIsFailure()` in
   `System_CommandReply.h` is the one place that decides from reply text whether
-  a command failed; the executor applies it, so a caller that has the
+  a command failed (a JSON reply fails with a top-level `"success":false` or
+  `"ok":false`, or as an `{"error":...}` object); the executor applies it, so a caller that has the
   executor's result uses that result and compares no prefixes itself. The host
   test `command_reply_contract` checks both sides.
   Display command actions use `executeOledCommand` (background, for an action

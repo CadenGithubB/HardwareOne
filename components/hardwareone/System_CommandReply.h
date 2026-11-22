@@ -64,11 +64,74 @@ inline bool commandReplyIsError(const char* reply) {
   return reply && (strncmp(reply, "Error", 5) == 0 || strncmp(reply, "ERROR", 5) == 0);
 }
 
+// A JSON object reply that states a failure in its own top-level fields:
+// "success":false or "ok":false (either one wins over the other), or an error
+// object, the object's first key being "error" with a value other than null
+// ({"error":"oom"}). A nested object, an array element or a string that only
+// contains those words does not count, and neither does an "error" field later
+// in a status object (the last error a running service reports).
+inline bool commandReplyJsonStatesFailure(const char* reply) {
+  if (!reply) return false;
+  auto skipSpace = [](const char* p) {
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') ++p;
+    return p;
+  };
+  auto keyIs = [](const char* key, size_t len, const char* word) {
+    return strlen(word) == len && strncmp(key, word, len) == 0;
+  };
+  auto literalIs = [](const char* p, const char* word) {
+    const size_t n = strlen(word);
+    if (strncmp(p, word, n) != 0) return false;
+    const char next = p[n];
+    return next == ',' || next == '}' || next == ' ' || next == '\t' || next == '\r' ||
+           next == '\n';
+  };
+  const char* p = skipSpace(reply);
+  if (*p != '{') return false;
+  int depth = 0;
+  bool expectKey = false;
+  bool firstKey = true;
+  for (; *p; ++p) {
+    const char c = *p;
+    if (c == '"') {
+      const char* text = p + 1;
+      const char* end = text;
+      while (*end && *end != '"') end += (end[0] == '\\' && end[1]) ? 2 : 1;
+      if (!*end) return false;  // unterminated string: not a JSON reply
+      if (depth == 1 && expectKey) {
+        const size_t len = (size_t)(end - text);
+        const char* value = skipSpace(end + 1);
+        if (*value == ':') {
+          value = skipSpace(value + 1);
+          if ((keyIs(text, len, "success") || keyIs(text, len, "ok")) && literalIs(value, "false")) {
+            return true;
+          }
+          if (firstKey && keyIs(text, len, "error") && !literalIs(value, "null")) return true;
+        }
+        expectKey = false;
+        firstKey = false;
+      }
+      p = end;
+      continue;
+    }
+    if (c == '{' || c == '[') {
+      ++depth;
+      if (depth == 1) expectKey = true;
+    } else if (c == '}' || c == ']') {
+      if (--depth <= 0) break;
+    } else if (c == ',' && depth == 1) {
+      expectKey = true;
+    }
+  }
+  return false;
+}
+
 inline bool commandReplyIsFailure(const char* reply) {
   if (!reply) return false;
   return commandReplyIsError(reply) ||        // the reply contract
          strncmp(reply, "Usage:", 6) == 0 ||  // refused: arguments it could not use
-         strncmp(reply, "Unknown command:", 16) == 0;  // no such command
+         strncmp(reply, "Unknown command:", 16) == 0 ||  // no such command
+         commandReplyJsonStatesFailure(reply);  // a JSON reply's own failure verdict
 }
 
 // The whole reply is "OK": a handler that printed its output on the way and
@@ -126,6 +189,8 @@ inline const char* commandReplyReason(const char* reply) {
 }
 
 // A structured reply states its own verdict: {"schema":1,"ok":true|false,...}.
+// commandReplyIsFailure() reads it too (commandReplyJsonStatesFailure), so the
+// executor's bool already says a JSON failure failed.
 inline bool commandReplyJsonOk(const char* reply) {
   return reply && strstr(reply, "\"ok\":true") != nullptr;
 }

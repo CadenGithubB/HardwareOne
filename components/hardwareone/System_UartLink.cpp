@@ -1,7 +1,7 @@
 // System_UartLink.cpp — UART host link drain. See System_UartLink.h for the
 // design charter and docs/UART_HOST_LINK_PLAN.md for the verified plan.
 #include "System_UartLink.h"
-#include "System_UartLinkFraming.h"  // link protocol 2: @<id> requests, framed replies
+#include "System_UartLinkFraming.h"  // link protocol 3: @<id> requests, framed replies
 #include "System_PendingCommand.h"  // the link's command in flight (S-11)
 #include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_Cm5HostControl.h"
@@ -1168,7 +1168,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
 // verdict leading, exactly as when the loop waited for it in place. A framed
 // request (sUartPendingReqId) is answered "@<id> ok|err <len>\n" + the body +
 // "\n", ok/err being the executor's flag; an unframed one gets the body and
-// its newline, as before link protocol 2.
+// its newline, as before the link was framed.
 static void uartDeliverReply(bool ok, String& out) {
   bool replyAdmitted = false;
   // A failure goes out as one status line that leads with Error, the framing

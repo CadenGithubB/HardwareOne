@@ -34,7 +34,7 @@ VERSIONS_OBJECT_BUDGET = 1024
 
 GATES = ("HW1_OTA_LAYOUT", "ENABLE_ESPNOW", "ENABLE_AUTOMATION", "ENABLE_MIGRATION_TOOL",
          "ENABLE_BLUETOOTH", "ENABLE_BLE_PHONE_PIPE",
-         "ENABLE_RASPBERRY_PI_HOST_POWER", "ENABLE_RASPBERRY_PI_HOST_FAN",
+         "ENABLE_UART_HOST_LINK", "ENABLE_RASPBERRY_PI_HOST_POWER", "ENABLE_RASPBERRY_PI_HOST_FAN",
          "HW1_RADIO_COMPANION", "ENABLE_LOCAL_STT")
 FIXTURES = ("ENABLE_STT_MODEL_15X5_GEN2", "FIXTURE_UPDATER_PRESENT", "FIXTURE_ESPNOW_STACK",
             "FIXTURE_COMPANION_KNOWN")
@@ -54,10 +54,13 @@ PROFILES = {
     "ota_no_updater": ({"HW1_OTA_LAYOUT": 1}, ["firmware"] + OTA + TAIL, {"updater": "unavailable"}),
     "s3_mesh": ({"HW1_OTA_LAYOUT": 1, "FIXTURE_UPDATER_PRESENT": 1, "ENABLE_ESPNOW": 1,
                  "FIXTURE_ESPNOW_STACK": 2, "ENABLE_AUTOMATION": 1, "ENABLE_MIGRATION_TOOL": 1,
-                 "ENABLE_BLUETOOTH": 1, "ENABLE_RASPBERRY_PI_HOST_FAN": 1},
-                ["firmware"] + OTA + ESPNOW + FILES + ["ble_console_channel", "cm5_control"] + TAIL,
+                 "ENABLE_BLUETOOTH": 1, "ENABLE_UART_HOST_LINK": 1, "ENABLE_RASPBERRY_PI_HOST_FAN": 1},
+                ["firmware"] + OTA + ESPNOW + FILES + ["ble_console_channel", "uart_link", "cm5_control"] + TAIL,
                 {"espnow": "custom ESP-NOW v1", "espnow_stack": "v2", "automations_file": "2",
-                 "backup_format": "1"}),
+                 "backup_format": "1", "uart_link": "3"}),
+    # The link alone (no CM5 power or fan control): its protocol line, no CM5 line.
+    "uart_link_only": ({"ENABLE_UART_HOST_LINK": 1}, ["firmware", "uart_link"] + TAIL,
+                       {"uart_link": "3"}),
     # Each persisted-file item is gated by its own feature alone.
     "automation_only": ({"ENABLE_AUTOMATION": 1}, ["firmware", "automations_file"] + TAIL,
                         {"automations_file": "2"}),
@@ -68,8 +71,9 @@ PROFILES = {
     "p4": ({"ENABLE_ESPNOW": 1, "FIXTURE_ESPNOW_STACK": 2, "ENABLE_AUTOMATION": 1,
             "ENABLE_MIGRATION_TOOL": 1, "ENABLE_BLUETOOTH": 1, "ENABLE_BLE_PHONE_PIPE": 1,
             "HW1_RADIO_COMPANION": 1, "FIXTURE_COMPANION_KNOWN": 1, "ENABLE_LOCAL_STT": 1,
-            "ENABLE_STT_MODEL_15X5_GEN2": 1, "ENABLE_RASPBERRY_PI_HOST_POWER": 1},
-           ["firmware"] + ESPNOW + FILES + ["ble_console_channel"] + PHONE + ["cm5_control"] + C6 +
+            "ENABLE_STT_MODEL_15X5_GEN2": 1, "ENABLE_UART_HOST_LINK": 1,
+            "ENABLE_RASPBERRY_PI_HOST_POWER": 1},
+           ["firmware"] + ESPNOW + FILES + ["ble_console_channel"] + PHONE + ["uart_link", "cm5_control"] + C6 +
            ["stt_model"] + TAIL,
            {"espnow_stack": "v2", "c6_hosted": "v2.12.13", "c6_bridge_wire": "1"}),
     # The companion answered at transport start, ESP-NOW has not started: the

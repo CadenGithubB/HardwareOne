@@ -298,6 +298,50 @@ static void testRowInstances() {
   assert(i2cRowInstances(wide) == kI2cRowInstanceCap);
 }
 
+// Scan labels by address and bus (i2cscan on the S3D: a 4991 encoder at 0x36
+// on bus 1 while the fuel gauge is wired to bus 0).
+static int gaugeBusAt(uint8_t) { return 0; }
+
+static void testScanLabelRows() {
+  const uint8_t encoderInstances = i2cMaxInstances(I2C_DEVICE_ENCODER);
+  gEncAddr[0] = 0x49;  // encoder board 1 at the 5752's default, bus 0
+  gEncAddr[1] = 0;
+  gEncBus[0] = 0;
+  const TestRow rows[] = {
+    {0x36, false, 0, true, gaugeBusAt, nullptr, 1},                        // fuel gauge, bus 0
+    {0x3D, true, 0x3C, true, nullptr, nullptr, 1},                         // OLED, no bus setting
+    {0x33, false, 0, false, imuBusAt, nullptr, 1},                         // a row not in this build
+    {0x49, false, 0, true, encBusAt, encAddressAt, encoderInstances},      // encoder 5752 row
+    {0x36, false, 0, true, encBusAt, nullptr, 1},                          // encoder 4991 row (default)
+  };
+  const size_t count = sizeof(rows) / sizeof(rows[0]);
+  const auto all = [](size_t) { return true; };
+  int out[4] = {};
+
+  // The bus the fuel gauge is wired to names it alone.
+  assert(i2cAddressLabelRows(rows, count, 0x36, 0, all, out, 4) == 1 && out[0] == 0);
+  // Another bus: every row with 0x36, the gauge and the 4991, in table order.
+  assert(i2cAddressLabelRows(rows, count, 0x36, 1, all, out, 4) == 2 && out[0] == 0 && out[1] == 4);
+  // Leaving the gauge out (a board that reported a product no row names is
+  // labelled among the plain rows; here the other way round) keeps the rest.
+  assert(i2cAddressLabelRows(rows, count, 0x36, 1, [](size_t i) { return i != 0; }, out, 4) == 1 &&
+         out[0] == 4);
+  // The configured encoder on its bus; on the other bus, by address alone.
+  assert(i2cAddressLabelRows(rows, count, 0x49, 0, all, out, 4) == 1 && out[0] == 3);
+  assert(i2cAddressLabelRows(rows, count, 0x49, 1, all, out, 4) == 1 && out[0] == 3);
+  // A row without a bus setting claims either bus, at its alternate too.
+  assert(i2cAddressLabelRows(rows, count, 0x3C, 1, all, out, 4) == 1 && out[0] == 1);
+  // A row not in this build still labels its address; an unknown address is none.
+  assert(i2cAddressLabelRows(rows, count, 0x33, 0, all, out, 4) == 1 && out[0] == 2);
+  assert(i2cAddressLabelRows(rows, count, 0x38, 0, all, out, 4) == 0);
+  assert(i2cAddressLabelRows(rows, count, 0x00, 0, all, out, 4) == 0);
+  // The cap bounds the list.
+  assert(i2cAddressLabelRows(rows, count, 0x36, 1, all, out, 1) == 1 && out[0] == 0);
+  assert(i2cRowHasAddress(rows[1], 0x3C) && !i2cRowHasAddress(rows[0], 0x37));
+  gEncAddr[0] = 0x36;
+  gEncAddr[1] = 0x37;
+}
+
 // Address collisions: a pure search over a fixed list of uses (a FeatherS3
 // build: fuel gauge on bus 0, OLED, APDS9960, gamepad, two encoders).
 static std::string clashText(const I2cAddressUse* use) {
@@ -363,6 +407,7 @@ int main() {
   testSlotsRoundTrip();
   testFirmwareMaxima();
   testRowInstances();
+  testScanLabelRows();
   testAddressCollisions();
 #ifdef HW1_HOST_I2C_TEST_ENCODER_MAX
   testEncoderFour();
@@ -371,10 +416,10 @@ int main() {
   testSetter();
   testSingleInstanceTypes();
   std::puts("I2C instance core tests passed (encoder with four instances: slots, names, G1-G7, errors, "
-            "identify, collisions)");
+            "identify, scan labels, collisions)");
 #else
   std::puts("I2C instance core tests passed (firmware maxima: instance 1 is the type, identify, "
-            "collisions)");
+            "scan labels, collisions)");
 #endif
   return 0;
 }

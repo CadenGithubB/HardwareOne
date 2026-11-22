@@ -21,7 +21,7 @@ static void displayGamepadVisual() {
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Gamepad not active");
     oledDisplay->println();
-    oledDisplay->println("Use 'opengamepad'");
+    oledDisplay->println("Use 'openinput'");
     oledDisplay->println("to enable");
     return;
   }

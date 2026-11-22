@@ -83,9 +83,11 @@ def main():
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
         elif args.thread_sanitize:
             cmd[1:1] = ['-fsanitize=thread', '-fno-omit-frame-pointer']
-        subprocess.run(cmd, check=True, timeout=120)
+        # Backstops for a hung compiler or run only (a run takes a few seconds);
+        # the harness's own waits stretch with load (await in the harness).
+        subprocess.run(cmd, check=True, timeout=300)
         for _ in range(args.repeat):
-            subprocess.run([str(exe)], check=True, timeout=90)
+            subprocess.run([str(exe)], check=True, timeout=300)
 
 
 if __name__ == '__main__':

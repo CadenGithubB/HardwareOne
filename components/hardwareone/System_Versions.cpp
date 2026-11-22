@@ -37,6 +37,9 @@
 #include "BLE_PhonePipeCore.h"
 #include "BLE_PhoneSecureChannel.h"
 #endif
+#if ENABLE_UART_HOST_LINK
+#include "System_UartLinkFraming.h"  // kUartLinkProtocolVersion
+#endif
 #if ENABLE_RASPBERRY_PI_HOST_POWER || ENABLE_RASPBERRY_PI_HOST_FAN
 #include "System_Cm5HostControl.h"
 #endif
@@ -106,6 +109,10 @@ void versionsCollect(hw1versions::List& out) {
   out.add("phone_console_records", "Phone console records", "v%u", (unsigned)hw1rec::kInfoVersion);
 #endif
 
+#if ENABLE_UART_HOST_LINK
+  // The framed UART host link the Pi daemon logs in over (link=<n> at login).
+  out.add("uart_link", "UART link protocol", "%d", kUartLinkProtocolVersion);
+#endif
 #if ENABLE_RASPBERRY_PI_HOST_POWER || ENABLE_RASPBERRY_PI_HOST_FAN
   out.add("cm5_control", "CM5 control protocol", "v%s", cm5HostControlProtocolVersion());
 #endif

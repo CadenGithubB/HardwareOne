@@ -481,9 +481,9 @@ static void llmMenuOpenViewerRender() {
     DEBUG_G2F("[G2-LLM] guided ask: viewer spawn declined (low RAM)");
 }
 
-// cmd_exec completion for `llmask json ...`. executeCommand returns true even
-// for a busy/stale reply (the JSON payload is exempt from OK:/Error: stamping),
-// so classify off the reply's own {"ok":...} field.
+// cmd_exec completion for `llmask json ...`. A busy/stale reply says
+// "ok":false, which the executor reports as a failure; a success still has to
+// say "ok":true (the JSON payload is exempt from OK:/Error: stamping).
 static void llmMenuAskDone(bool ok, const char* result, const G2CmdCookie& c, void* /*ud*/) {
   if (ok && commandReplyJsonOk(result)) {
     int guidedSession = 0;

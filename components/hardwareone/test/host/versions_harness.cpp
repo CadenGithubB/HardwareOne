@@ -24,6 +24,7 @@
 #include "esp_now_hosted_companion.h"
 #include "esp_now_hosted_rpc.h"
 #include "hw1_ota_protocol.h"
+#include "System_UartLinkFraming.h"
 #if ENABLE_LOCAL_STT
 #include "stt/stt_model_selection.h"
 #endif

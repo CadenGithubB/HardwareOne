@@ -56,7 +56,8 @@ static constexpr CommandModule gCommandModules[] = {
     "versions a separately built part must agree with: the recovery updater, OTA layout, manifest format and data schema "
     "(OTA layouts); the ESP-NOW format, the radio's ESP-NOW stack and the ESP-NOW identity files; the automations "
     "file and backup bundle formats; the BLE console "
-    "channel and the phone link, pipe channel and console records (phone-pipe builds); the CM5 control protocol; the "
+    "channel and the phone link, pipe channel and console records (phone-pipe builds); the UART link protocol and the CM5 control "
+    "protocol; the "
     "C6 companion's ESP-Hosted and bridge versions with the ones this image expects (P4); the local STT model; and the "
     "ESP-IDF and Arduino core it was built with. An item is shown only where the build includes that part. versions "
     "json returns the same as one object with stable keys, also carried as the versions object of status json.",

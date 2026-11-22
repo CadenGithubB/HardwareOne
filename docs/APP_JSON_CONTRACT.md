@@ -23,10 +23,13 @@ entry "Command replies" under Unreleased states what changed.
 - **Shape.** Most replies are `{"schema":1, ...}`. Some sensor replies use `"valid"`
   instead (see sec. 6).
 - **Failure detection.** A command failed if its result string starts with
-  `Error` / `ERROR`, `Usage:` or `Unknown command:` (`commandReplyIsFailure()` in
-  `System_CommandReply.h`; the firmware sets `ok=false` on these leads, and the
-  web `/api/cli` answers HTTP 400, or 403 for an admin refusal). Over BLE you get
-  only the text, so apply the same three leads there. On success, status/data
+  `Error` / `ERROR`, `Usage:` or `Unknown command:`, or if it is a JSON object
+  whose top level says `"success":false` or `"ok":false` or whose first key is
+  `"error"` (`{"error":"oom"}`) (`commandReplyIsFailure()` in
+  `System_CommandReply.h`; the firmware sets `ok=false` on these, and the
+  web `/api/cli` answers HTTP 400, or 403 for an admin refusal). An `"error"`
+  field further into a status object is that service's last error, not a failed
+  command. Over BLE you get only the text, so apply the same rule there. On success, status/data
   commands return their object; action commands return `OK`, `OK: <text>` or, where
   the handler confirms the action itself (sensor logging, health logging, live
   tracking), `SUCCESS: <text>`. Judge success by the absence of the three failure

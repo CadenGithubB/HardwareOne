@@ -13,7 +13,7 @@
 // echoed and ok/err the executor's verdict; the in-band intrinsics (login,
 // logout, whoami, the CM5 control plane, refusals) answer the same way. A
 // line without the prefix keeps the unframed reply. The login reply carries
-// " link=2".
+// " link=3".
 //
 // Session model mirrors the serial console but is fully separate:
 // a private synchronized auth/user snapshot (never gSerial*), brute-force key

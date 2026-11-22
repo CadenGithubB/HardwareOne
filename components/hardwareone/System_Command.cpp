@@ -190,7 +190,8 @@ String executeCommandThroughRegistry(const String& argsInput) {
     // If so, append the stored usage string if available
     if (result && found->usage) {
       String resultStr = String(result);
-      bool isError = commandReplyIsFailure(result);
+      // A JSON reply stays one JSON document: no usage text after it.
+      bool isError = commandReplyIsFailure(result) && result[0] != '{';
       
       if (isError) {
         // Handler returned an error - append stored usage if not already present

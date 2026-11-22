@@ -63,7 +63,7 @@ def main() -> None:
     uart = (COMPONENT / "System_UartLink.cpp").read_text()
     header = (COMPONENT / "System_UartLinkFraming.h").read_text()
     require('#include "System_UartLinkFraming.h"' in uart, "the link includes the framing rules")
-    require("constexpr int kUartLinkProtocolVersion = 2;" in header, "link protocol version is 2")
+    require("constexpr int kUartLinkProtocolVersion = 3;" in header, "link protocol version is 3")
 
     process = extract_block(uart, "static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch)")
     code = strip_comments(process)

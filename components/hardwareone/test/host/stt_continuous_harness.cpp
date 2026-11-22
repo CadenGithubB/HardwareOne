@@ -687,11 +687,21 @@ bool sttLocalTranscribe(const int16_t* pcm, size_t count, char* text, size_t cap
 }
 
 static const SttOwner owner{SOURCE_SERIAL, 5}, other{SOURCE_WEB, 5}, successor{SOURCE_SERIAL, 6};
+// A hang guard, not a timing check: the broker runs on the fake millis()
+// clock, so nothing here depends on how fast the host is. The wait gives up
+// only after the waiter has polled kAwaitPolls times (100 us apart, about 10 s
+// on an idle host) and at least 10 s of wall time have passed. A loaded host
+// (builds alongside) schedules the waiter less often too, so the limit grows
+// with the time the process is actually given instead of failing a wait the
+// workers were never scheduled to finish.
 static void await(const std::function<bool()>& predicate, const char* what) {
-  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  constexpr unsigned long kAwaitPolls = 100000;
+  const auto start = std::chrono::steady_clock::now();
+  unsigned long polls = 0;
   while (!predicate()) {
-    if (std::chrono::steady_clock::now() >= deadline) {
-      fprintf(stderr, "Timed out waiting for %s\n", what); std::abort();
+    if (++polls >= kAwaitPolls &&
+        std::chrono::steady_clock::now() - start >= std::chrono::seconds(10)) {
+      fprintf(stderr, "Timed out waiting for %s (%lu polls)\n", what, polls); std::abort();
     }
     std::this_thread::sleep_for(std::chrono::microseconds(100));
   }

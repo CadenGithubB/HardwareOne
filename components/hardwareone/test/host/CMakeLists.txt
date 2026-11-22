@@ -61,7 +61,7 @@ set_target_properties(espnow_pending_queue_tests PROPERTIES
 target_include_directories(espnow_pending_queue_tests PRIVATE ../..)
 target_compile_options(espnow_pending_queue_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
-# The UART host link's framed command channel, link protocol 2
+# The UART host link's framed command channel, link protocol 3
 # (System_UartLinkFraming.h, owner decision 2026-11-21 "Full framing now"): the
 # "@<id> " request prefix (valid, invalid, too long), the "@<id> ok|err <len>"
 # header and its exact length for multi-line and empty bodies, the ok/err flag,
@@ -2677,9 +2677,11 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_stt_continuous.py --full-phrase
           ${STT_CONTINUOUS_TEST_ARGS})
-# Both variants drive real threads against 10 s waits under the sanitizer. With
-# other suites running alongside (ctest -j6, 2026-11-06), about one run in six
-# timed out at a different wait each time, so they run alone rather than flake.
+# Both variants drive real threads under the sanitizer. With other suites
+# running alongside (ctest -j6, 2026-11-06), about one run in six timed out at a
+# different wait each time, so they run alone rather than flake; the harness's
+# hang guard also counts its own polls, not only wall time, so a host loaded by
+# builds stretches it (2026-11-22).
 # ENABLE_STT_LEVEL_ROBUST_ONSET 0 (a saved configuration sets it): the raw
 # level only in every session, whatever sttdecisionpre holds.
 add_test(
@@ -3971,11 +3973,11 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_pending_command.py
           ${PENDING_COMMAND_TEST_ARGS})
 
-# The UART host link's framing wiring in System_UartLink.cpp (link protocol 2):
+# The UART host link's framing wiring in System_UartLink.cpp (link protocol 3):
 # the drain takes "@<id> " off before anything reads the line, every reply of
 # uartProcessLine carries the line's id, the command in flight keeps it and its
 # header carries the executor's ok flag, header + body + newline under one TX
-# lock hold, link=2 at login and in `uartlink status`.
+# lock hold, link=3 at login and in `uartlink status`.
 add_test(
   NAME uart_link_framing_source
   COMMAND ${Python3_EXECUTABLE}

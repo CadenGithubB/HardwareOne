@@ -1156,13 +1156,6 @@ const char* cmd_i2cmetrics(const String& argsInput) {
 
 // ========== I2C Helper Functions ==========
 
-// Shared address-table lookup. Labels are hints; drivers validate identity.
-// Instance 1's address first, then a configured instance n >= 2, then an
-// alternate address (System_I2CInstanceCore.h).
-static int findSensorIndexByAddress(uint8_t address) {
-  return i2cRowIndexByAddress(i2cSensors, i2cSensorsCount, address);
-}
-
 // Which configured instance of row `index` is at (address, bus): 1..max, or 0
 // (no row, a row not in this build, or an address that is no instance's).
 static uint8_t rowInstanceAt(int index, uint8_t address, uint8_t bus) {
@@ -1215,16 +1208,6 @@ static bool seesawIdentityNeededAt(uint8_t address, uint8_t bus) {
   return seesawIdentityNeeded(claiming, count);
 }
 
-// The address-only label among the rows that are not seesaw boards: the
-// device at an ambiguous address that reported no product a row names (the
-// fuel gauge at an encoder address, for instance).
-static int findPlainSensorIndexByAddress(uint8_t address) {
-  for (size_t i = 0; i < i2cSensorsCount; i++) {
-    if (i2cSensors[i].seesawProductId == 0 && configuredSensor(i2cSensors[i]).address == address) return i;
-  }
-  return -1;
-}
-
 // Whether some row of the table names the board that reported `product`.
 static bool productNamedByARow(uint16_t product) {
   for (size_t i = 0; i < i2cSensorsCount; i++) {
@@ -1233,34 +1216,66 @@ static bool productNamedByARow(uint16_t product) {
   return false;
 }
 
-// What answered at `address` on `bus`: a row index, or -1.
-static int identifyRowAt(uint8_t address, uint8_t bus) {
-  if (!seesawIdentityNeededAt(address, bus)) return findSensorIndexByAddress(address);
-  uint16_t product = 0;
-  if (i2cReadSeesawProductId(bus, address, product)) {
-    // A compiled row first: a build names its own board before the label of
-    // another build's driver.
-    uint16_t products[32] = {};
-    const size_t count = i2cSensorsCount < 32 ? i2cSensorsCount : 32;
-    for (int pass = 0; pass < 2; ++pass) {
-      for (size_t i = 0; i < count; i++) {
-        products[i] = (pass == 1 || i2cSensors[i].compiled) ? i2cSensors[i].seesawProductId : 0;
+// What answered at `address` on `bus`, as table rows (up to cap indices in
+// rows; returns how many, 0 for an unknown device). Where rows of two seesaw
+// products claim the address on that bus, the product id the board reports
+// names its row; a board no row names is labelled among the plain rows only
+// (the fuel gauge at an encoder address, for instance). Otherwise the label
+// is by address and bus (i2cAddressLabelRows): the row configured there, or
+// every row with that address when none is.
+static size_t identifyRowsAt(uint8_t address, uint8_t bus, int* rows, size_t cap) {
+  if (!rows || cap == 0) return 0;
+  bool plainOnly = false;
+  if (seesawIdentityNeededAt(address, bus)) {
+    uint16_t product = 0;
+    if (i2cReadSeesawProductId(bus, address, product)) {
+      // A compiled row first: a build names its own board before the label of
+      // another build's driver.
+      uint16_t products[32] = {};
+      const size_t count = i2cSensorsCount < 32 ? i2cSensorsCount : 32;
+      for (int pass = 0; pass < 2; ++pass) {
+        for (size_t i = 0; i < count; i++) {
+          products[i] = (pass == 1 || i2cSensors[i].compiled) ? i2cSensors[i].seesawProductId : 0;
+        }
+        const int index = seesawRowForProduct(products, count, product);
+        if (index >= 0) {
+          rows[0] = index;
+          return 1;
+        }
       }
-      const int index = seesawRowForProduct(products, count, product);
-      if (index >= 0) return index;
     }
+    plainOnly = true;
   }
-  return findPlainSensorIndexByAddress(address);
+  return i2cAddressLabelRows(i2cSensors, i2cSensorsCount, address, bus,
+                             [plainOnly](size_t i) {
+                               return !plainOnly || i2cSensors[i].seesawProductId == 0;
+                             },
+                             rows, cap);
 }
 
+// One row for the discovered-device registry: -1 (unknown) when nothing or
+// more than one row could be at (address, bus).
+static int identifyRowAt(uint8_t address, uint8_t bus) {
+  int rows[2] = {-1, -1};
+  return identifyRowsAt(address, bus, rows, 2) == 1 ? rows[0] : -1;
+}
+
+// The scan label: "<name> (<description>)", several joined with " or " when
+// the address and bus cannot tell them apart ("MAX17048 (LiPo Fuel Gauge) or
+// Encoder (...)" at 0x36 on a bus the fuel gauge is not wired to).
 String identifySensor(uint8_t address, uint8_t bus) {
-  const int index = identifyRowAt(address, bus);
-  if (index < 0) return "Unknown Device";
-  const I2cSensorEntry sensor = configuredSensor(i2cSensors[index]);
-  String result = sensor.name;
-  result += " (";
-  result += sensor.description;
-  result += ")";
+  int rows[4] = {};
+  const size_t count = identifyRowsAt(address, bus, rows, 4);
+  if (count == 0) return "Unknown Device";
+  String result;
+  for (size_t k = 0; k < count; ++k) {
+    const I2cSensorEntry sensor = configuredSensor(i2cSensors[rows[k]]);
+    if (k) result += " or ";
+    result += sensor.name;
+    result += " (";
+    result += sensor.description;
+    result += ")";
+  }
   return result;
 }
 
@@ -2519,12 +2534,27 @@ static const char* cmd_sensorautostart(const String& argsInput) {
         sensorHeapCosts[i].shortName,
         sensorHeapCosts[i].heapCostKb,
         !sensorHeapRowBuilt(i) ? "not built" : (enabled ? "[ON]" : "off"));
+#if ENABLE_ENCODER
+      // Encoder boards 2..max follow board 1's row while they have an
+      // address (the rule ledstatus and 'sensorautostart all on' use).
+      if (sensorHeapCosts[i].autoStartFlag == encoderAutoStartSetting(1)) {
+        for (uint8_t n = 2; n <= kEncoderMaxInstances; ++n) {
+          if (encoderInstanceAddress(n) == 0) continue;
+          char rowName[12];
+          snprintf(rowName, sizeof(rowName), "encoder%u", (unsigned)n);
+          pos += snprintf(buf + pos, buf_SIZE - pos, "%-12s ~%2dKB  %s\n", rowName,
+                          sensorHeapCosts[i].heapCostKb,
+                          !sensorHeapRowBuilt(i) ? "not built"
+                                                 : (*encoderAutoStartSetting(n) ? "[ON]" : "off"));
+        }
+      }
+#endif
     }
     
     pos += snprintf(buf + pos, buf_SIZE - pos,
       "─────────────────────────────────\n"
       "Enabled total: ~%luKB | Free heap: %luKB\n"
-      "Usage: sensorautostart <sensor> <on|off>",
+      "Usage: sensorautostart <sensor> [n] <on|off>",
       (unsigned long)enabledCost, (unsigned long)freeHeapKb);
     
     return buf;

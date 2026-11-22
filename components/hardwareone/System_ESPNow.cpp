@@ -16899,7 +16899,7 @@ const char* cmd_espnow_pair(const String& argsInput) {
   }
 
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: espnow pair <mac> <name> [mesh]";
+  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: espnowpair <mac> <name> [mesh]";
 
   uint8_t mac[6];
   if (!a.argMac(0, mac)) {
@@ -17388,7 +17388,7 @@ const char* cmd_espnow_mode(const String& argsInput) {
     BROADCAST_PRINTF("[ESP-NOW] mode set to %s", getEspNowModeString());
     return "ESP-NOW mode set to mesh";
   }
-  return "Error: invalid arguments — Usage: espnow mode [direct|mesh]";
+  return "Error: invalid arguments — Usage: espnowmode [direct|mesh]";
 }
 
 // The device name's ESP-NOW side. The one setter is 'devicename'
@@ -17897,7 +17897,7 @@ const char* cmd_espnow_find(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String query = argsInput;
   query.trim();
-  if (query.length() == 0) return "Error: invalid arguments — Usage: espnow find <query> — search by name, room, or tag";
+  if (query.length() == 0) return "Error: invalid arguments — Usage: espnowfind <query> — search by name, room, or tag";
 
   query.toLowerCase();
   char* buf = getDebugBuffer();
@@ -18124,14 +18124,14 @@ static const char* groupCommandRun(GroupKind kind, const String& target, const S
 const char* cmd_espnow_roomcmd(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(4)) return "Error: invalid arguments — Usage: espnow roomcmd <room> <user> <pass> <command>";
+  if (!a.hasMinArgs(4)) return "Error: invalid arguments — Usage: espnowroomcmd <room> <user> <pass> <command>";
   return groupCommandRun(GroupKind::Room, a.arg(0), a.arg(1), a.arg(2), a.remaining(2));
 }
 
 const char* cmd_espnow_tagcmd(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   CommandArgs a(argsInput);
-  if (!a.hasMinArgs(4)) return "Error: invalid arguments — Usage: espnow tagcmd <tag> <user> <pass> <command>";
+  if (!a.hasMinArgs(4)) return "Error: invalid arguments — Usage: espnowtagcmd <tag> <user> <pass> <command>";
   return groupCommandRun(GroupKind::Tag, a.arg(0), a.arg(1), a.arg(2), a.remaining(2));
 }
 
@@ -18426,7 +18426,7 @@ const char* cmd_espnow_hbmode(const String& argsInput) {
     return "Heartbeat mode set to private (unicast). Only paired devices will receive heartbeats.";
   }
   
-  return "Error: invalid arguments — Usage: espnow hbmode [public|private]";
+  return "Error: invalid arguments — Usage: espnowhbmode [public|private]";
 }
 
 // Mesh role command
@@ -18476,7 +18476,7 @@ const char* cmd_espnow_meshrole(const String& argsInput) {
     return "Role set to backup master";
   }
 
-  return "Error: invalid arguments — Usage: espnow meshrole [worker|master|backup]";
+  return "Error: invalid arguments — Usage: espnowmeshrole [worker|master|backup]";
 }
 
 
@@ -18562,7 +18562,7 @@ const char* cmd_espnow_backupenable(const String& argsInput) {
   bool enable = argIsOn(args);
   bool disable = argIsOff(args);
   if (!enable && !disable) {
-    return "Error: invalid arguments — Usage: espnow backupenable [on|off]";
+    return "Error: invalid arguments — Usage: espnowbackupenable [on|off]";
   }
 
   setSetting(gSettings.meshBackupEnabled, enable);
@@ -21559,7 +21559,7 @@ const char* cmd_espnow_send(const String& argsInput) {
   int base = jsonMode ? 1 : 0;
   if (!a.hasMinArgs(base + 2)) {
     return jsonMode ? "{\"schema\":1,\"ok\":false,\"error\":\"usage\"}"
-                    : "Usage: espnow send [json] <name_or_mac> <message>";
+                    : "Usage: espnowsend [json] <name_or_mac> <message>";
   }
 
   String target = a.arg(base);

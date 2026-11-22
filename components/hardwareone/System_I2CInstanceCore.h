@@ -473,6 +473,42 @@ inline bool i2cRowClaims(const Row& row, uint8_t address, uint8_t bus) {
   return row.compiled && i2cRowInstanceAt(row, address, bus) != 0;
 }
 
+// Whether `address` is one of the row's addresses, on any bus: a configured
+// instance's address or instance 1's alternate address.
+template <typename Row>
+inline bool i2cRowHasAddress(const Row& row, uint8_t address) {
+  if (address == 0) return false;
+  const uint8_t instances = i2cRowInstances(row);
+  for (uint8_t n = 1; n <= instances; ++n) {
+    if (i2cRowAddressAt(row, n) == address) return true;
+  }
+  return row.multiAddress && row.altAddress == address;
+}
+
+// The rows a scan label names for what answered at (address, bus) when no
+// product id told it apart, in table order (up to cap indices in out; returns
+// how many): the first compiled row configured at that address on that bus,
+// alone; otherwise every row with that address on any bus, since the address
+// cannot tell them apart (a device wired to one bus, such as the fuel gauge,
+// names only that bus: at 0x36 on another bus it is one of several). 0 is an
+// unknown device. include(i) false leaves row i out.
+template <typename Row, typename Include>
+inline size_t i2cAddressLabelRows(const Row* rows, size_t count, uint8_t address, uint8_t bus,
+                                  Include include, int* out, size_t cap) {
+  if (!rows || !out || cap == 0 || address == 0) return 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (include(i) && i2cRowClaims(rows[i], address, bus)) {
+      out[0] = static_cast<int>(i);
+      return 1;
+    }
+  }
+  size_t found = 0;
+  for (size_t i = 0; i < count && found < cap; ++i) {
+    if (include(i) && i2cRowHasAddress(rows[i], address)) out[found++] = static_cast<int>(i);
+  }
+  return found;
+}
+
 // The row an address is labelled with by address alone (a label is a hint;
 // drivers check identity): instance 1's address first in table order, then a
 // configured instance n >= 2, then an alternate address. -1 when no row has

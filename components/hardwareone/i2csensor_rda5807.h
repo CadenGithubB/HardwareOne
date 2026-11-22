@@ -56,7 +56,6 @@ extern TaskHandle_t gFmRadioTaskHandle;
 bool fmRadioCacheSnapshot(FmRadioCache& out, uint32_t timeoutMs = 10);
 
 // Command handlers
-const char* cmd_fmradio(const String& argsInput);
 const char* cmd_fmradio_start(const String& argsInput);
 const char* cmd_fmradio_stop(const String& argsInput);
 const char* cmd_fmradio_tune(const String& argsInput);

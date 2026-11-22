@@ -15,6 +15,9 @@ Subcommands:
                - modules referencing an array with no definition
                - command strings invoked in code that resolve to nothing
                - SettingEntry cmdKey values that bind to no command
+               - a 'Usage: <command>' line or a "run/use/type '<command>'"
+                 hint that names no registered command (words that are
+                 not commands on purpose: USAGE_NON_COMMAND_WORDS)
                - a non-admin command that saves an *autostart/*enabled
                  setting (CONTRIBUTING.md, "Command names"): by its row or a
                  setting's cmdKey, or by a write to the setting's gSettings
@@ -101,6 +104,23 @@ RETIRED_NAMES = {
     "wifienabled": "wifiautostart",
     "wifiread": "wifistatus",
 }
+
+# A reply's usage line ("Usage: <command> ...") and its hints ("run
+# '<command>'", "use '<command>'", ...) name a registered command. These words
+# appear there on purpose and are not registry commands; each says why.
+USAGE_NON_COMMAND_WORDS = {
+    "dictate": "the UART link's in-band dictation protocol (System_Dictation.cpp), "
+               "answered before the registry",
+    "yes": "the answer to a confirmation prompt (System_CLIConfirm.cpp)",
+    "cancel": "leaves an interactive prompt (setup wizard, features)",
+    "n": "the 'no' answer of an interactive prompt",
+    "p": "help paging: p<N> (System_CLI.cpp)",
+    "rescan": "the first-time setup Wi-Fi prompt's retry word",
+    "color": "an apdsmode argument (apdsmode color|proximity|gesture)",
+}
+USAGE_LINE_RE = re.compile(r"Usage:\s+([A-Za-z][^\"\\|<\[\n]*)")
+USAGE_HINT_RE = re.compile(r"\b(?:[Rr]un|[Uu]se|[Tt]ry|[Tt]ype|[Ss]end|[Ss]ee|with) '([a-z][a-z0-9_]*)")
+
 
 # Handlers that serve several rows on purpose: stubs that answer "not built"
 # or "unavailable" for a whole family. Not aliases.
@@ -662,6 +682,31 @@ def persistent_switch_findings(by_array) -> list[tuple[str, str]]:
     return sorted(found.items())
 
 
+def usage_hint_findings(names: set[str]) -> dict[str, list[str]]:
+    """Words a usage line or a hint names that are neither a registered command
+    (multi-word names included) nor in USAGE_NON_COMMAND_WORDS: word -> sites."""
+    found = collections.defaultdict(list)
+    for path in sources():
+        for lineno, line in enumerate(read(path).splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith(("//", "*", "/*")):
+                continue
+            for m in USAGE_LINE_RE.finditer(line):
+                text = " ".join(m.group(1).lower().split())
+                first = text.split()[0] if text.split() else ""
+                if any(text == n or text.startswith(n + " ") for n in names):
+                    continue
+                if first in USAGE_NON_COMMAND_WORDS:
+                    continue
+                found[first].append(f"{path.name}:{lineno}  Usage: {m.group(1).strip()}")
+            for m in USAGE_HINT_RE.finditer(line):
+                word = m.group(1)
+                if word in names or word in USAGE_NON_COMMAND_WORDS:
+                    continue
+                found[word].append(f"{path.name}:{lineno}  {m.group(0)}'")
+    return found
+
+
 def cmd_audit(args) -> int:
     by_array, alternates = parse_commands_and_alternates()
     modules = parse_modules()
@@ -777,6 +822,17 @@ def cmd_audit(args) -> int:
         for h in dangling[k]:
             print(f"      {h}")
     if not dangling:
+        print("  (none)")
+
+    # -- usage lines and hints that name no command ------------------------
+    print(f"\n== usage lines and hints naming no command ==")
+    unknown = usage_hint_findings(names)
+    for word in sorted(unknown):
+        problems += 1
+        print(f"  {word}")
+        for h in unknown[word]:
+            print(f"      {h}")
+    if not unknown:
         print("  (none)")
 
     # -- settings cmdKey bindings -----------------------------------------

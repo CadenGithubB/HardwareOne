@@ -1,5 +1,5 @@
 // System_UartLinkFraming.h - the framed command channel of the UART host link
-// (link protocol 2, owner decision 2026-11-21: "Full framing now").
+// (link protocol 3, owner decision 2026-11-21: "Full framing now").
 //
 // A host frames every command line it writes and the link answers it with a
 // header that names the request, carries the executor's verdict and says how
@@ -16,7 +16,7 @@
 // the text. A line without the "@<id> " prefix keeps the unframed behaviour (a
 // human at a terminal): the reply text and its newline, nothing more.
 // Out-of-band traffic (EVT pushes, voicefetch and live PCM frames) carries no
-// id. The login reply advertises the version as " link=2" and `uartlink
+// id. The login reply advertises the version as " link=3" and `uartlink
 // status` reports it. The Pi daemon (HardwareOne_RaspPi_CoProcessor,
 // docs/ARCHITECTURE.md "Framed command channel") is the other half of this
 // contract; both ship together, so there is no unframed fallback for it.
@@ -30,8 +30,10 @@
 #include <stdio.h>
 #include <string.h>
 
-// The framed protocol version the login reply and `uartlink status` report.
-constexpr int kUartLinkProtocolVersion = 2;
+// The framed protocol version the login reply, `uartlink status` and
+// `versions` report. 3 since 2026-11-22 (owner: the wire changed, so the
+// version goes up); the Pi daemon requires exactly link=3.
+constexpr int kUartLinkProtocolVersion = 3;
 
 // Longest request id (hex digits) and the storage one needs with its NUL.
 constexpr size_t kUartFrameIdMax = 8;

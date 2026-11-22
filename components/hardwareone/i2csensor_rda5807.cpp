@@ -487,46 +487,6 @@ void updateFmRadio() {
 // Command Handlers
 // ============================================================================
 
-const char* cmd_fmradio(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Command received: '%s'", argsInput.c_str());
-  
-  // Parse subcommand
-  CommandArgs a(argsInput);
-
-  if (a.count() == 0) {
-    // No subcommand - show status
-    DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] No subcommand, showing status");
-    return cmd_fmradio_status(argsInput);
-  }
-
-  String subCmd = a.arg(0);
-  subCmd.toLowerCase();
-  String subArgs = a.remaining(0);
-  
-  DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Parsed subcommand: '%s'", subCmd.c_str());
-  
-  if (subCmd == "start") {
-    return cmd_fmradio_start(subArgs);
-  } else if (subCmd == "stop") {
-    return cmd_fmradio_stop(subArgs);
-  } else if (subCmd == "tune") {
-    return cmd_fmradio_tune(subArgs);
-  } else if (subCmd == "seek") {
-    return cmd_fmradio_seek(subArgs);
-  } else if (subCmd == "volume" || subCmd == "vol") {
-    return cmd_fmradio_volume(subArgs);
-  } else if (subCmd == "mute") {
-    return cmd_fmradio_mute(subArgs);
-  } else if (subCmd == "status") {
-    return cmd_fmradio_status(subArgs);
-  }
-  
-  DEBUG_FMRADIO_LIFECYCLEF("[FM_RADIO] Unknown subcommand: '%s'", subCmd.c_str());
-  return "Error: invalid arguments — Usage: fmradio [start|stop|tune <freq>|seek [up|down]|volume <0-15>|mute|status]";
-}
-
 const char* cmd_fmradio_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return cmd_sensorstart_queued(I2C_DEVICE_FMRADIO, "FM Radio", "openfmradio@enqueue",

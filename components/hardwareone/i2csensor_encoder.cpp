@@ -346,8 +346,8 @@ const char* cmd_openencoder(const String& argsInput) {
     return cmd_sensorstart_queued(I2C_DEVICE_ENCODER, displayName(n), "openencoder@enqueue",
                                   "the board opens in the background - light it with 'ledcolor encoder <colour>'");
   }
-  EXT_RAM_BSS_ATTR static char hint[80];
-  snprintf(hint, sizeof(hint), "the board opens in the background - 'encoderstatus %u' shows it",
+  EXT_RAM_BSS_ATTR static char hint[88];
+  snprintf(hint, sizeof(hint), "the board opens in the background - light it with 'ledcolor encoder%u <colour>'",
            (unsigned)n);
   return cmd_sensorstart_queued(I2C_DEVICE_ENCODER, displayName(n), "openencoder@enqueue", hint, n);
 }

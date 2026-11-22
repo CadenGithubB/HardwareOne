@@ -1820,7 +1820,10 @@ python3 components/hardwareone/test/host/test_command_registry_gate.py
 
 - `audit`: no duplicate command names, no unregistered or dangling
   `CommandEntry` arrays, no command string in code that resolves to nothing,
-  and every `SettingEntry` cmdKey binds to a command. A table defined in
+  every `SettingEntry` cmdKey binds to a command, and every reply's
+  `Usage: <command>` line and `run/use/type '<command>'` hint names a
+  registered command (or a word listed in `USAGE_NON_COMMAND_WORDS` with its
+  reason, such as the UART link's in-band `dictate`). A table defined in
   mutually exclusive `#if`/`#else` branches of one file (the two
   `otaCommands[]` in `System_OTA.cpp`) counts once; the first branch is read.
 - `reference --check`: `docs/COMMAND_REFERENCE.md` is byte-identical to a

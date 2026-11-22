@@ -512,6 +512,9 @@ def source_versions(enabled, firmware="", argv=None, companion=False):
             _match(r'kPipeLabel\[\]\s*=\s*"([^"]+)"', hw + "BLE_PhoneSecureChannel.h"))
         add("phone_console_records", "Phone console records",
             "v" + _match(r"\bkInfoVersion = (\d+);", hw + "BLE_PhonePipeConsoleCore.h"))
+    if enabled("ENABLE_UART_HOST_LINK"):
+        add("uart_link", "UART link protocol",
+            _match(r"^constexpr int kUartLinkProtocolVersion = (\d+);", hw + "System_UartLinkFraming.h"))
     if enabled("ENABLE_RASPBERRY_PI_HOST_POWER") or enabled("ENABLE_RASPBERRY_PI_HOST_FAN"):
         add("cm5_control", "CM5 control protocol",
             "v" + _match(r'kProtocolVersion = "(\d+)";', hw + "System_Cm5HostControl.cpp"))

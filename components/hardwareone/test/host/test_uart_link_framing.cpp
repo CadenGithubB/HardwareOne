@@ -1,4 +1,4 @@
-// The framed command channel of the UART host link, link protocol 2
+// The framed command channel of the UART host link, link protocol 3
 // (System_UartLinkFraming.h, owner decision 2026-11-21 "Full framing now"):
 // the "@<id> " request prefix, the "@<id> ok|err <len>" reply header and the
 // whole reply line the link's fixed-buffer replies use, on the production
@@ -164,10 +164,10 @@ static void testComposeLine() {
 
   // Framed: header, exact body length, body, newline; the host reads it back.
   {
-    const std::string w = compose("1f", true, "OK: logged in as admin (admin) link=2");
-    CHECK(w == "@1f ok 37\nOK: logged in as admin (admin) link=2\n");
+    const std::string w = compose("1f", true, "OK: logged in as admin (admin) link=3");
+    CHECK(w == "@1f ok 37\nOK: logged in as admin (admin) link=3\n");
     const HostReply r = hostRead(w);
-    CHECK(r.parsed && r.id == "1f" && r.ok && r.body == "OK: logged in as admin (admin) link=2");
+    CHECK(r.parsed && r.id == "1f" && r.ok && r.body == "OK: logged in as admin (admin) link=3");
     CHECK(r.consumed == w.size());
   }
   // A multi-line body: <len> counts its newlines; the reader takes them verbatim.
@@ -246,7 +246,7 @@ static void testComposeLine() {
     CHECK(uartFrameComposeLine(buf, 1, nullptr, true, "OK") == 0);
     CHECK(uartFrameComposeLine(buf, sizeof(buf), "1", true, nullptr) == 9);
   }
-  CHECK(kUartLinkProtocolVersion == 2);
+  CHECK(kUartLinkProtocolVersion == 3);
 }
 
 int main() {
