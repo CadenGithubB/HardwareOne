@@ -86,7 +86,8 @@ struct AnoPollState {
   uint32_t buttons = 0;   // the buttons at the last good read
   bool rightDown = false; // RIGHT is held and its release decides SELECT
   bool chorded = false;   // IN was pressed while RIGHT was held (START sent)
-  bool inMasked = false;  // the chord's IN is still held: hidden from the level
+  uint32_t navMasked = 0; // held buttons hidden from the level until released:
+                          // the chord's IN, and a raced tap's press (below)
   uint32_t tappedLast = 0; // the buttons counted as taps at the last good read
 };
 
@@ -112,7 +113,9 @@ struct AnoPollResult {
 //   shows released with its flag set (counted as a tap), and held at the next
 //   read with no flag. That held button is the same press, not a second one:
 //   a button counted as a tap at the last read and held now without a new
-//   flag is not pressed again. A flag at this read is a new change, so a real
+//   flag is not pressed again, and stays out of the level until released (the
+//   navigation would read released-then-held as a press). A flag at this read
+//   is a new change, so a real
 //   second press still counts. The same press released again before the
 //   next read shows released with its flag set (the release) at that read:
 //   a button counted as a tap at the last read is not a tap again at this
@@ -139,7 +142,7 @@ inline AnoPollResult anoPoll(AnoPollState& state, const AnoPollReads& reads, boo
   const bool plausible = reads.buttonsOk && reads.flagsOk && (reads.bulk & kAnoPinMask) != 0;
   if (!plausible) {
     out.buttons = state.buttons;
-    out.level = state.buttons & ~ANO_BTN_RIGHT & ~(state.inMasked ? ANO_BTN_IN : 0u);
+    out.level = state.buttons & ~ANO_BTN_RIGHT & ~state.navMasked;
     out.navHidden = state.buttons & ~out.level;
     return out;
   }
@@ -170,7 +173,7 @@ inline AnoPollResult anoPoll(AnoPollState& state, const AnoPollReads& reads, boo
   if (inPress && state.rightDown) {
     edges |= ANO_VIRT_START;
     state.chorded = true;
-    if (now & ANO_BTN_IN) state.inMasked = true;
+    if (now & ANO_BTN_IN) state.navMasked |= ANO_BTN_IN;
   } else {
     edges |= inPress;
   }
@@ -181,12 +184,16 @@ inline AnoPollResult anoPoll(AnoPollState& state, const AnoPollReads& reads, boo
     state.rightDown = false;
     state.chorded = false;
   }
-  if (state.inMasked && !(now & ANO_BTN_IN)) state.inMasked = false;
+  // The raced tap's press stays out of the level while it is held: the
+  // navigation already had its press as the tap's edge, and a level that went
+  // from released to held would be a second press there.
+  state.navMasked |= continued;
+  state.navMasked &= now;
 
   state.buttons = now;
   out.buttons = now;
   out.edges = edges;
-  out.level = now & ~ANO_BTN_RIGHT & ~(state.inMasked ? ANO_BTN_IN : 0u);
+  out.level = now & ~ANO_BTN_RIGHT & ~state.navMasked;
   out.navHidden = now & ~out.level;
   return out;
 }

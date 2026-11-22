@@ -162,12 +162,19 @@ void testTapRaceCountsOnce() {
   AnoPollState s;
   AnoPollResult r = poll(s, reads(0, ANO_BTN_UP));
   assert(r.presses == ANO_BTN_UP && r.edges == ANO_BTN_UP);
+  // Held on: no press, and out of the navigation's level (it had the press
+  // as the tap's edge) until released.
   r = poll(s, reads(ANO_BTN_UP));
-  assert(r.presses == 0 && r.edges == 0 && r.buttons == ANO_BTN_UP && r.level == ANO_BTN_UP);
+  assert(r.presses == 0 && r.edges == 0 && r.buttons == ANO_BTN_UP && r.level == 0);
+  assert(r.navHidden == ANO_BTN_UP);
   r = poll(s, reads(ANO_BTN_UP));
-  assert(r.presses == 0 && r.edges == 0);
+  assert(r.presses == 0 && r.edges == 0 && r.level == 0);
   r = poll(s, reads(0, ANO_BTN_UP));
-  assert(r.presses == 0 && r.edges == 0);
+  assert(r.presses == 0 && r.edges == 0 && r.navHidden == 0);
+  // The next press of it is a normal press, in the level again.
+  r = poll(s, reads(ANO_BTN_UP, ANO_BTN_UP));
+  assert(r.presses == ANO_BTN_UP && r.level == ANO_BTN_UP);
+  poll(s, reads(0, ANO_BTN_UP));
   poll(s, reads(0));
   // The same race, released again before k+1: the release's flag is no
   // second tap.
