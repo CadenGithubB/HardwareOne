@@ -320,9 +320,15 @@ void initSensorQueue() {
 
 // gThermalRunning / gTofRunning / gImuRunning provided by their i2csensor_*.h headers
 
+// Instances (System_I2CInstanceCore.h): the per-type switches below take the
+// instance n. No type drives a second instance yet, so each answers for
+// instance 1 only (the encoder's n >= 2 comes with multi-instance phase 1c);
+// the manager refuses an instance a type does not have before any of them runs.
+
 // Map I2cDeviceType → I2C address for pre-start hardware presence checks.
 // Returns 0 if the device type has no single fixed address (or should skip the check).
-static uint8_t i2cAddressForDeviceType(I2cDeviceType sensor) {
+static uint8_t i2cAddressForDeviceType(I2cDeviceType sensor, uint8_t n = 1) {
+  if (n != 1) return 0;
   switch (sensor) {
     case I2C_DEVICE_THERMAL:  return I2C_ADDR_THERMAL;
     case I2C_DEVICE_TOF:      return I2C_ADDR_TOF;
@@ -350,7 +356,8 @@ static uint8_t i2cAddressForDeviceType(I2cDeviceType sensor) {
 // driver.  The old default-argument calls always probed bus 0, so a correctly
 // configured bus-1 sensor was rejected before its start request reached the
 // driver.
-static uint8_t i2cBusForDeviceType(I2cDeviceType sensor) {
+static uint8_t i2cBusForDeviceType(I2cDeviceType sensor, uint8_t n = 1) {
+  if (n != 1) return 0;
   switch (sensor) {
     case I2C_DEVICE_THERMAL:  return (uint8_t)gSettings.thermalBus;
     case I2C_DEVICE_TOF:      return (uint8_t)gSettings.tofBus;
@@ -368,7 +375,8 @@ static uint8_t i2cBusForDeviceType(I2cDeviceType sensor) {
 
 // Lifecycle state stays with the sensor owners. These reads coordinate queue
 // admission; the owner repeats the cleanup guard immediately before startup.
-static bool sensorIsRunning(I2cDeviceType sensor) {
+static bool sensorIsRunning(I2cDeviceType sensor, uint8_t n = 1) {
+  if (n != 1) return false;
   switch (sensor) {
     case I2C_DEVICE_THERMAL: return gThermalRunning;
     case I2C_DEVICE_TOF: return gTofRunning;
@@ -389,7 +397,8 @@ static bool sensorIsRunning(I2cDeviceType sensor) {
   }
 }
 
-static bool sensorHasTask(I2cDeviceType sensor) {
+static bool sensorHasTask(I2cDeviceType sensor, uint8_t n = 1) {
+  if (n != 1) return false;
   switch (sensor) {
     case I2C_DEVICE_THERMAL: return gThermalTaskHandle != nullptr;
     case I2C_DEVICE_TOF: return gTofTaskHandle != nullptr;
@@ -435,18 +444,36 @@ static const SensorSwitchRow* sensorSwitchRow(I2cDeviceType sensor) {
   return nullptr;
 }
 
+// Start-at-boot of instance n. Instance 1 is the table above; an instance
+// n >= 2 has no switch until its type keeps per-instance settings (the
+// encoder: multi-instance phase 1c), so it never starts by itself.
+static bool sensorAutoStartFor(I2cDeviceType sensor, uint8_t n) {
+  if (n != 1) return false;
+  const SensorSwitchRow* row = sensorSwitchRow(sensor);
+  return row && *row->autoStart;
+}
+
 // Admitted starts the queue worker has not settled yet. A stop that cancels
 // one (queued, or dropped while starting) still closes it with the stop event;
 // a stop with nothing running, starting or queued publishes nothing.
+// Indexed by instance slot: instance 1 (slot = type) stays in internal RAM as
+// before, the extra instances' slots live in PSRAM.
 static std::atomic<bool> sSensorStartOutstanding[I2C_DEVICE_COUNT];
+EXT_RAM_BSS_ATTR static std::atomic<bool> sSensorStartOutstandingExtra[kI2cExtraSlotStorage];
+static std::atomic<bool>& sensorStartOutstanding(uint8_t slot) {
+  return slot < I2C_DEVICE_COUNT ? sSensorStartOutstanding[slot]
+                                 : sSensorStartOutstandingExtra[slot - I2C_DEVICE_COUNT];
+}
 
-bool enqueueDeviceStart(I2cDeviceType device) {
+bool enqueueDeviceStart(I2cDeviceType device, uint8_t n) {
   I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
-  if (!mgr || device < 0 || device >= I2C_DEVICE_COUNT) return false;
+  const uint8_t slot = i2cSlot(device, n);
+  if (!mgr || slot == kI2cNoSlot) return false;
   // Marked before the request is visible to the worker, which clears it.
-  const bool wasOutstanding = sSensorStartOutstanding[device].exchange(true);
-  if (mgr->enqueueDeviceStart(device)) return true;
-  if (!wasOutstanding) sSensorStartOutstanding[device] = false;
+  std::atomic<bool>& outstanding = sensorStartOutstanding(slot);
+  const bool wasOutstanding = outstanding.exchange(true);
+  if (mgr->enqueueDeviceStart(device, n)) return true;
+  if (!wasOutstanding) outstanding = false;
   return false;
 }
 
@@ -454,35 +481,38 @@ bool enqueueDeviceStart(I2cDeviceType device) {
 // Automatic restart of a sensor that switched itself off (bus errors or
 // invalid reads). Policy: System_SensorRestartCore.h. The queue worker owns
 // the ladder position and makes every try; other tasks only set flags.
-// All of it lives in PSRAM: 27 flag bytes + 72 bytes of ladder position +
-// 4 bytes of tick time (about 104 bytes; internal on a board without PSRAM,
-// where the attribute does nothing).
+// All of it lives in PSRAM, one entry per instance slot (System_I2CInstanceCore.h;
+// instance 1's slot is its type): 3 flag bytes + 8 bytes of ladder position
+// per slot, and 4 bytes of tick time (internal on a board without PSRAM, where
+// the attribute does nothing).
 // ---------------------------------------------------------------------------
 // Set by a sensor task at its auto-disable site; consumed by the worker.
-EXT_RAM_BSS_ATTR static std::atomic<bool> sSensorRestartNoted[I2C_DEVICE_COUNT];
+EXT_RAM_BSS_ATTR static std::atomic<bool> sSensorRestartNoted[kI2cSlotCount];
 // Set by a manual open or close; consumed by the worker, which ends the episode.
 // Which of the two it was decides a report the worker has not looked at yet:
 // a close wins over it (the sensor stays off), an open does not (the report is
 // about the sensor that open started).
 enum : uint8_t { kRestartHandNone = 0, kRestartHandOpened = 1, kRestartHandClosed = 2 };
-EXT_RAM_BSS_ATTR static std::atomic<uint8_t> sSensorRestartByHand[I2C_DEVICE_COUNT];
+EXT_RAM_BSS_ATTR static std::atomic<uint8_t> sSensorRestartByHand[kI2cSlotCount];
 // Published by the worker: a try is waiting or queued (read by the close command).
-EXT_RAM_BSS_ATTR static std::atomic<bool> sSensorRestartPending[I2C_DEVICE_COUNT];
-// Ladder position per device type. Queue worker only.
-EXT_RAM_BSS_ATTR static sensor_restart::State sSensorRestart[I2C_DEVICE_COUNT];
+EXT_RAM_BSS_ATTR static std::atomic<bool> sSensorRestartPending[kI2cSlotCount];
+// Ladder position per instance slot. Queue worker only.
+EXT_RAM_BSS_ATTR static sensor_restart::State sSensorRestart[kI2cSlotCount];
 EXT_RAM_BSS_ATTR static uint32_t sSensorRestartLastTickMs;
 
-void noteSensorAutoDisabled(I2cDeviceType sensor) {
-  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return;
-  sSensorRestartNoted[sensor].store(true);
+void noteSensorAutoDisabled(I2cDeviceType sensor, uint8_t n) {
+  const uint8_t slot = i2cSlot(sensor, n);
+  if (slot == kI2cNoSlot) return;
+  sSensorRestartNoted[slot].store(true);
 }
 
 // A close by hand ends the automatic restart. True when a try was waiting or
 // queued, so the close command can say what it cancelled.
-static bool sensorRestartClosedByHand(I2cDeviceType sensor) {
-  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return false;
-  sSensorRestartByHand[sensor].store(kRestartHandClosed);
-  return sSensorRestartPending[sensor].exchange(false);
+static bool sensorRestartClosedByHand(I2cDeviceType sensor, uint8_t n) {
+  const uint8_t slot = i2cSlot(sensor, n);
+  if (slot == kI2cNoSlot) return false;
+  sSensorRestartByHand[slot].store(kRestartHandClosed);
+  return sSensorRestartPending[slot].exchange(false);
 }
 
 // An accepted open by hand replaces a waiting try. A report from before the
@@ -490,16 +520,18 @@ static bool sensorRestartClosedByHand(I2cDeviceType sensor) {
 // this call is about the sensor that open started, and the worker keeps it
 // (it ends the old episode first, then begins a new one), so a sensor that
 // fails again right after a manual open is still started again.
-static void sensorRestartOpenedByHand(I2cDeviceType sensor) {
-  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return;
-  sSensorRestartNoted[sensor].store(false);
-  sSensorRestartByHand[sensor].store(kRestartHandOpened);
-  sSensorRestartPending[sensor].store(false);
+static void sensorRestartOpenedByHand(I2cDeviceType sensor, uint8_t n) {
+  const uint8_t slot = i2cSlot(sensor, n);
+  if (slot == kI2cNoSlot) return;
+  sSensorRestartNoted[slot].store(false);
+  sSensorRestartByHand[slot].store(kRestartHandOpened);
+  sSensorRestartPending[slot].store(false);
 }
 
 // Externally linkable so HAL_Input.cpp's unified cmd_openinput can dispatch
 // through the same queue as the other sensor start commands.
-bool requestSensorStart(I2cDeviceType sensor, const char* eventTag, SensorStartRefusal* why) {
+bool requestSensorStart(I2cDeviceType sensor, const char* eventTag, SensorStartRefusal* why,
+                        uint8_t n) {
   auto refuse = [&](SensorStartRefusal reason) {
     if (why) *why = reason;
     return false;
@@ -509,21 +541,21 @@ bool requestSensorStart(I2cDeviceType sensor, const char* eventTag, SensorStartR
 
   I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   if (!mgr) return refuse(SensorStartRefusal::QueueUnavailable);
-  if (mgr->hasPendingDeviceStop(sensor) ||
-      (!sensorIsRunning(sensor) && sensorHasTask(sensor))) {
+  if (mgr->hasPendingDeviceStop(sensor, n) ||
+      (!sensorIsRunning(sensor, n) && sensorHasTask(sensor, n))) {
     return refuse(SensorStartRefusal::StopPending);
   }
-  if (sensorIsRunning(sensor)) return refuse(SensorStartRefusal::AlreadyRunning);
-  if (isInQueue(sensor)) return refuse(SensorStartRefusal::AlreadyQueued);
+  if (sensorIsRunning(sensor, n)) return refuse(SensorStartRefusal::AlreadyRunning);
+  if (isInQueue(sensor, n)) return refuse(SensorStartRefusal::AlreadyQueued);
 
   // Verify hardware is physically present before attempting start
-  const uint8_t addr = i2cAddressForDeviceType(sensor);
-  const uint8_t bus = i2cBusForDeviceType(sensor);
+  const uint8_t addr = i2cAddressForDeviceType(sensor, n);
+  const uint8_t bus = i2cBusForDeviceType(sensor, n);
   const uint8_t probe = addr ? i2cProbeAddress(addr, 100000, 50, bus) : 0;
   if (probe == 2) return refuse(SensorStartRefusal::NoAck);
   if (probe != 0) return refuse(SensorStartRefusal::ProbeFailed);
 
-  if (!enqueueDeviceStart(sensor)) return refuse(SensorStartRefusal::NotQueued);
+  if (!enqueueDeviceStart(sensor, n)) return refuse(SensorStartRefusal::NotQueued);
   sensorStatusBumpWith(eventTag);
   if (why) *why = SensorStartRefusal::None;
   return true;
@@ -547,18 +579,21 @@ const char* sensorStartRefusalText(SensorStartRefusal why) {
 // Command wrapper: the only place that renders the admission outcome, into
 // cmd_exec's debug buffer. Message texts are unchanged.
 const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName, const char* eventTag,
-                                   const char* hint) {
+                                   const char* hint, uint8_t n) {
 #if ENABLE_GPIO_ENCODER
   if (sensor == I2C_DEVICE_INPUT) return "Error: GPIO input is not an I2C device; use openinput";
 #endif
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
   SensorStartRefusal why = SensorStartRefusal::None;
-  if (requestSensorStart(sensor, eventTag, &why)) {
+  // The instance a command names follows its command word ("closeencoder 2").
+  char instanceSuffix[6] = "";
+  if (n != 1) snprintf(instanceSuffix, sizeof(instanceSuffix), " %u", (unsigned)n);
+  if (requestSensorStart(sensor, eventTag, &why, n)) {
     // An open by hand replaces any automatic restart that was waiting.
-    sensorRestartOpenedByHand(sensor);
+    sensorRestartOpenedByHand(sensor, n);
     snprintf(getDebugBuffer(), 1024, "%s sensor queued for start (position %d, queue depth: %d)",
-             displayName, getQueuePosition(sensor), getQueueDepth());
+             displayName, getQueuePosition(sensor, n), getQueueDepth());
     // A refusal is its own answer; the next step only follows a queued start.
     if (hint) cliHint(hint);
     return getDebugBuffer();
@@ -590,15 +625,15 @@ const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName
         default: break;
       }
       snprintf(getDebugBuffer(), 1024,
-               "Error: %s sensor is already running. Stop it first with '%s' to restart it.",
-               displayName, closeCmd);
+               "Error: %s sensor is already running. Stop it first with '%s%s' to restart it.",
+               displayName, closeCmd, instanceSuffix);
       break;
     }
     case SensorStartRefusal::AlreadyQueued:
       snprintf(getDebugBuffer(), 1024,
                "Error: %s sensor is already queued for start (position %d). "
                "Check it in a moment with 'sensors json brief'.",
-               displayName, getQueuePosition(sensor));
+               displayName, getQueuePosition(sensor, n));
       break;
     case SensorStartRefusal::NoAck:
       snprintf(getDebugBuffer(), 1024, "Error: [%s] No acknowledgement from device on I2C bus", displayName);
@@ -634,12 +669,13 @@ static const char* sensorOpenCommand(I2cDeviceType sensor) {
 // A stop has something to do: the sensor runs, still has a task, has a start
 // admitted or queued, or was initialized without a task (FM tune/boot, RTC).
 // The same set applySensorStop() counts as active.
-static bool sensorStopHasWork(I2cDeviceType sensor) {
-  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return false;
+static bool sensorStopHasWork(I2cDeviceType sensor, uint8_t n) {
+  const uint8_t slot = i2cSlot(sensor, n);
+  if (slot == kI2cNoSlot) return false;
   // The outstanding mark first: the worker clears it only after the start
   // settled, so a start that completes between the reads is still seen.
-  if (sSensorStartOutstanding[sensor].load()) return true;
-  if (sensorIsRunning(sensor) || sensorHasTask(sensor) || isInQueue(sensor)) return true;
+  if (sensorStartOutstanding(slot).load()) return true;
+  if (sensorIsRunning(sensor, n) || sensorHasTask(sensor, n) || isInQueue(sensor, n)) return true;
 #if ENABLE_FM_RADIO
   if (sensor == I2C_DEVICE_FMRADIO && gRadioInitialized) return true;
 #endif
@@ -659,11 +695,14 @@ static bool sensorStopHasWork(I2cDeviceType sensor) {
 // not running, and without this it would come back minutes after the close.
 // Here and not in requestSensorStop(), which the input drivers call for their
 // own auto-disable.
-const char* cmd_sensorstop_queued(I2cDeviceType sensor, const char* displayName) {
+const char* cmd_sensorstop_queued(I2cDeviceType sensor, const char* displayName, uint8_t n) {
   const bool busDisabled = !gI2cBusRunning;
-  const bool restartCancelled = !busDisabled && sensorRestartClosedByHand(sensor);
-  const bool idle = !busDisabled && !sensorStopHasWork(sensor);
-  const bool queued = !busDisabled && !idle && requestSensorStop(sensor);
+  const bool restartCancelled = !busDisabled && sensorRestartClosedByHand(sensor, n);
+  const bool idle = !busDisabled && !sensorStopHasWork(sensor, n);
+  const bool queued = !busDisabled && !idle && requestSensorStop(sensor, n);
+  // The instance a command names follows its command word ("openencoder 2").
+  char instanceSuffix[6] = "";
+  if (n != 1) snprintf(instanceSuffix, sizeof(instanceSuffix), " %u", (unsigned)n);
   if (!ensureDebugBuffer()) {
     if (busDisabled) {
       return "Error: The sensor is not running: the I2C bus is disabled. "
@@ -680,11 +719,11 @@ const char* cmd_sensorstop_queued(I2cDeviceType sensor, const char* displayName)
              "Enable it with 'i2cbusenabled 1', then reboot.", displayName);
   } else if (idle && restartCancelled) {
     snprintf(getDebugBuffer(), 1024,
-             "[%s] Automatic restart cancelled; the sensor stays off until '%s'",
-             displayName, sensorOpenCommand(sensor));
+             "[%s] Automatic restart cancelled; the sensor stays off until '%s%s'",
+             displayName, sensorOpenCommand(sensor), instanceSuffix);
   } else if (idle) {
-    snprintf(getDebugBuffer(), 1024, "Error: %s sensor is not running. Start it with '%s'.",
-             displayName, sensorOpenCommand(sensor));
+    snprintf(getDebugBuffer(), 1024, "Error: %s sensor is not running. Start it with '%s%s'.",
+             displayName, sensorOpenCommand(sensor), instanceSuffix);
   } else if (!queued) {
     snprintf(getDebugBuffer(), 1024,
              "Error: [%s] Sensor request queue is unavailable. Reboot the device and retry.", displayName);
@@ -2586,7 +2625,26 @@ const size_t i2cCommandsCount = sizeof(i2cCommands) / sizeof(i2cCommands[0]);
 // Sensor Status System (moved from HardwareOne.ino)
 // ============================================================================
 
-const char* deviceTypeDisplayName(I2cDeviceType sensor) {
+const char* deviceTypeDisplayName(I2cDeviceType sensor, uint8_t n) {
+  if (n != 1) {
+    const uint8_t slot = i2cSlot(sensor, n);
+    if (slot == kI2cNoSlot) return "Unknown";
+    // One name per extra instance slot ("Encoder 2"), built once by a
+    // thread-safe static initialization, so the text stays valid.
+    EXT_RAM_BSS_ATTR static char names[kI2cExtraSlotStorage][24];
+    static const bool built = [] {
+      for (uint8_t extra = I2C_DEVICE_COUNT; extra < kI2cSlotCount; ++extra) {
+        I2cDeviceType type = I2C_DEVICE_COUNT;
+        uint8_t instance = 1;
+        if (i2cSlotToRef(extra, type, instance)) {
+          i2cInstanceName(type, instance, names[extra - I2C_DEVICE_COUNT], sizeof(names[0]));
+        }
+      }
+      return true;
+    }();
+    (void)built;
+    return names[slot - I2C_DEVICE_COUNT];
+  }
   switch (sensor) {
     case I2C_DEVICE_THERMAL:  return "Thermal";
     case I2C_DEVICE_TOF:      return "ToF";
@@ -2608,29 +2666,37 @@ const char* deviceTypeDisplayName(I2cDeviceType sensor) {
   }
 }
 
-bool requestSensorStop(I2cDeviceType sensor) {
+bool requestSensorStop(I2cDeviceType sensor, uint8_t n) {
   // Same admission as a start: with the bus disabled (fixed at boot) no queue
   // worker runs and nothing was started, so refuse instead of allocating the
   // manager for a request nothing would process.
   if (!gI2cBusRunning) return false;
   I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
-  return mgr && mgr->enqueueDeviceStop(sensor);
+  return mgr && mgr->enqueueDeviceStop(sensor, n);
 }
 
 // Written only by the queue worker; tasks publish cleanup completion by
 // clearing their handles. A stop event means that old task has finished.
+// Indexed by instance slot: instance 1 (slot = type) in internal RAM as
+// before, the extra instances' slots in PSRAM.
 static bool sSensorStopAwaitingCleanup[I2C_DEVICE_COUNT] = {};
+EXT_RAM_BSS_ATTR static bool sSensorStopAwaitingCleanupExtra[kI2cExtraSlotStorage];
+static bool& sensorStopAwaitingCleanup(uint8_t slot) {
+  return slot < I2C_DEVICE_COUNT ? sSensorStopAwaitingCleanup[slot]
+                                 : sSensorStopAwaitingCleanupExtra[slot - I2C_DEVICE_COUNT];
+}
 
 // Only the queue worker changes lifecycle flags in response to commands. A
 // close during initialization is applied after the owner returns, so teardown
 // cannot free resources still being used by the starter.
-static void applySensorStop(I2cDeviceType sensor) {
-  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return;
+static void applySensorStop(I2cDeviceType sensor, uint8_t n) {
+  const uint8_t slot = i2cSlot(sensor, n);
+  if (slot == kI2cNoSlot) return;
   // Only a sensor that was running, still has a task, was initialized without
   // one (FM tune/boot, RTC), or had an admitted start this stop cancels gets a
   // cleanup latch and a stop event. Stopping an idle sensor publishes nothing.
-  const bool startOutstanding = sSensorStartOutstanding[sensor].exchange(false);
-  const bool wasActive = startOutstanding || sensorIsRunning(sensor) || sensorHasTask(sensor)
+  const bool startOutstanding = sensorStartOutstanding(slot).exchange(false);
+  const bool wasActive = startOutstanding || sensorIsRunning(sensor, n) || sensorHasTask(sensor, n)
 #if ENABLE_FM_RADIO
       || (sensor == I2C_DEVICE_FMRADIO && gRadioInitialized)
 #endif
@@ -2638,8 +2704,12 @@ static void applySensorStop(I2cDeviceType sensor) {
       || (sensor == I2C_DEVICE_RTC && gRtcConnected)
 #endif
       ;
-  // Set enabled flag to false and record stop time (common boilerplate)
-  switch (sensor) {
+  // Set enabled flag to false and record stop time (common boilerplate).
+  // An instance n >= 2 has no driver stop before its type keeps per-instance
+  // state (the encoder: multi-instance phase 1c); only the latch below applies.
+  switch (n == 1 ? sensor : I2C_DEVICE_COUNT) {
+    case I2C_DEVICE_COUNT:
+      break;
     case I2C_DEVICE_THERMAL:
 #if ENABLE_THERMAL_SENSOR
       gThermalRunning = false;
@@ -2712,20 +2782,23 @@ static void applySensorStop(I2cDeviceType sensor) {
   }
 
   if (!wasActive) return;
-  sSensorStopAwaitingCleanup[sensor] = true;
+  sensorStopAwaitingCleanup(slot) = true;
   sensorStatusBumpWith("stop@requested");
 }
 
 static void finishSensorStops() {
-  for (int index = 0; index < I2C_DEVICE_COUNT; ++index) {
-    const auto sensor = static_cast<I2cDeviceType>(index);
-    if (!sSensorStopAwaitingCleanup[index] || sensorHasTask(sensor)) continue;
-    sSensorStopAwaitingCleanup[index] = false;
-    const char* name = deviceTypeDisplayName(sensor);
+  for (uint8_t slot = 0; slot < kI2cSlotCount; ++slot) {
+    I2cDeviceType sensor = I2C_DEVICE_COUNT;
+    uint8_t n = 1;
+    if (!i2cSlotToRef(slot, sensor, n)) continue;
+    bool& awaiting = sensorStopAwaitingCleanup(slot);
+    if (!awaiting || sensorHasTask(sensor, n)) continue;
+    awaiting = false;
+    const char* name = deviceTypeDisplayName(sensor, n);
 #if ENABLE_ESPNOW
     // Tell the receiver of this device's readings (SENSOR_STATUS) for sensors
-    // that have remote types
-    switch (sensor) {
+    // that have remote types. The wire carries instance 1 only (1.0).
+    switch (n == 1 ? sensor : I2C_DEVICE_COUNT) {
       case I2C_DEVICE_THERMAL:  sensorPresenceChanged(REMOTE_SENSOR_THERMAL, false);  break;
       case I2C_DEVICE_TOF:      sensorPresenceChanged(REMOTE_SENSOR_TOF, false);      break;
       case I2C_DEVICE_IMU:      sensorPresenceChanged(REMOTE_SENSOR_IMU, false);      break;
@@ -3014,7 +3087,8 @@ const char* buildSensorStatusJson() {
 // Sensor Queue Processor Task (moved from HardwareOne.ino)
 // ============================================================================
 
-static bool startSensorInternal(I2cDeviceType sensor) {
+static bool startSensorInternal(I2cDeviceType sensor, uint8_t n) {
+  if (n != 1) return false;  // no driver starts an instance n >= 2 yet (encoder: phase 1c)
   switch (sensor) {
     case I2C_DEVICE_THERMAL: return thermalStartInternal();
     case I2C_DEVICE_TOF: return tofStartInternal();
@@ -3040,9 +3114,10 @@ static bool startSensorInternal(I2cDeviceType sensor) {
   }
 }
 
-static void broadcastStartedSensor(I2cDeviceType sensor) {
+static void broadcastStartedSensor(I2cDeviceType sensor, uint8_t n) {
 #if ENABLE_ESPNOW
-  switch (sensor) {
+  // The ESP-NOW wire carries instance 1 only (1.0).
+  switch (n == 1 ? sensor : I2C_DEVICE_COUNT) {
     case I2C_DEVICE_THERMAL: sensorPresenceChanged(REMOTE_SENSOR_THERMAL, true); break;
     case I2C_DEVICE_TOF: sensorPresenceChanged(REMOTE_SENSOR_TOF, true); break;
     case I2C_DEVICE_IMU: sensorPresenceChanged(REMOTE_SENSOR_IMU, true); break;
@@ -3058,6 +3133,7 @@ static void broadcastStartedSensor(I2cDeviceType sensor) {
   }
 #else
   (void)sensor;
+  (void)n;
 #endif
 }
 
@@ -3075,29 +3151,32 @@ static void announceSensorStart(const char* name, bool ok) {
 // each time it matters, so `<x>autostart 0`, the setup wizard and a settings
 // import all end a restart without a hook in any of them (close<x> ends it
 // through sensorRestartClosedByHand).
-static bool sensorRestartGateOpen(I2cDeviceType sensor) {
+static bool sensorRestartGateOpen(I2cDeviceType sensor, uint8_t n) {
   const SensorSwitchRow* row = sensorSwitchRow(sensor);
+  // An instance n >= 2 without its own start-at-boot switch stays closed.
+  if (n != 1) return gI2cBusRunning && row && sensorAutoStartFor(sensor, n);
   return gI2cBusRunning && row &&
-         ramFlushResolve(ramFlushIdForDevice(sensor), *row->autoStart);
+         ramFlushResolve(ramFlushIdForDevice(sensor), sensorAutoStartFor(sensor, n));
 }
 
 // The worker settled a start. For a start the automatic restart queued, a
 // repeated failure is only logged: one start-failed event (a toast) per
 // episode, however many tries follow. Returns true when the worker should
 // announce the outcome as usual.
-static bool sensorRestartStartSettled(I2cDeviceType sensor, bool started) {
-  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return true;
-  sensor_restart::State& state = sSensorRestart[sensor];
+static bool sensorRestartStartSettled(I2cDeviceType sensor, uint8_t n, bool started) {
+  const uint8_t slot = i2cSlot(sensor, n);
+  if (slot == kI2cNoSlot) return true;
+  sensor_restart::State& state = sSensorRestart[slot];
   const bool ours = state.phase == sensor_restart::Phase::Starting;
   const bool announce = sensor_restart::startSettled(state, started, millis());
   if (!ours) return announce;
-  sSensorRestartPending[sensor].store(sensor_restart::pending(state));
+  sSensorRestartPending[slot].store(sensor_restart::pending(state));
   if (started) {
     // Running again: it is no longer "off because it failed" for a RAM flush.
-    ramFlushClearAutostartFailed(ramFlushIdForDevice(sensor));
+    ramFlushClearAutostartFailed(sensor, n);
   } else if (!announce) {
     logSystemEvent("SENSOR", "%s automatic restart failed again, next try in %lu s",
-                   deviceTypeDisplayName(sensor),
+                   deviceTypeDisplayName(sensor, n),
                    (unsigned long)(sensor_restart::delayForRung(state.rung) / 1000u));
   }
   return announce;
@@ -3108,32 +3187,34 @@ static bool sensorRestartStartSettled(I2cDeviceType sensor, bool started) {
 // that start instead of running it, and its next tick ends the episode. (A
 // close that arrives later finds the start outstanding and queues a stop,
 // which the worker honours as for any start.)
-static bool sensorRestartStartWithdrawn(I2cDeviceType sensor) {
-  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT) return false;
-  return sSensorRestart[sensor].phase == sensor_restart::Phase::Starting &&
-         sSensorRestartByHand[sensor].load() == kRestartHandClosed;
+static bool sensorRestartStartWithdrawn(I2cDeviceType sensor, uint8_t n) {
+  const uint8_t slot = i2cSlot(sensor, n);
+  if (slot == kI2cNoSlot) return false;
+  return sSensorRestart[slot].phase == sensor_restart::Phase::Starting &&
+         sSensorRestartByHand[slot].load() == kRestartHandClosed;
 }
 
 // One try, made when its wait is over. Goes through requestSensorStart(): the
 // device is probed first, so an absent sensor costs one address probe and one
 // log line, with no driver init, no event and no error on its health record.
-static void sensorRestartAttempt(I2cDeviceType sensor, sensor_restart::State& state, uint32_t nowMs) {
+static void sensorRestartAttempt(I2cDeviceType sensor, uint8_t n, sensor_restart::State& state,
+                                 uint32_t nowMs) {
   SensorStartRefusal why = SensorStartRefusal::None;
-  if (requestSensorStart(sensor, "restart@enqueue", &why)) {
+  if (requestSensorStart(sensor, "restart@enqueue", &why, n)) {
     sensor_restart::attemptQueued(state, nowMs);  // The outcome is reported when the start settles.
     return;
   }
   // A used try: one line saying why and when the next one is due.
   auto logUsedTry = [&]() {
     logSystemEvent("SENSOR", "%s automatic restart: %s, next try in %lu s",
-                   deviceTypeDisplayName(sensor), sensorStartRefusalText(why),
+                   deviceTypeDisplayName(sensor, n), sensorStartRefusalText(why),
                    (unsigned long)(sensor_restart::delayForRung(state.rung) / 1000u));
   };
   switch (why) {
     case SensorStartRefusal::AlreadyRunning:
       // Started by someone else (the menu's input auto-start): watch it too.
       sensor_restart::attemptFoundRunning(state, nowMs);
-      ramFlushClearAutostartFailed(ramFlushIdForDevice(sensor));
+      ramFlushClearAutostartFailed(sensor, n);
       break;
     case SensorStartRefusal::ProbeFailed:
       // The bus was busy (another sensor's long read) or the transfer failed.
@@ -3161,27 +3242,29 @@ static void sensorRestartTick(I2cDeviceManager* mgr) {
   if (sensor_restart::elapsedMs(nowMs, sSensorRestartLastTickMs) < 1000u) return;
   sSensorRestartLastTickMs = nowMs;
 
-  for (int index = 0; index < I2C_DEVICE_COUNT; ++index) {
-    const auto sensor = static_cast<I2cDeviceType>(index);
-    sensor_restart::State& state = sSensorRestart[index];
+  // One ladder per instance slot (instance 1's slot is its type).
+  for (uint8_t slot = 0; slot < kI2cSlotCount; ++slot) {
+    I2cDeviceType sensor = I2C_DEVICE_COUNT;
+    uint8_t n = 1;
+    if (!i2cSlotToRef(slot, sensor, n)) continue;
+    sensor_restart::State& state = sSensorRestart[slot];
     // Read order: an auto-disable site reports before it clears its running
     // flag, so "not running" read here means its report is already visible.
-    const bool running = sensorIsRunning(sensor);
-    const uint8_t byHand = sSensorRestartByHand[index].exchange(kRestartHandNone);
-    bool noted = sSensorRestartNoted[index].exchange(false);
+    const bool running = sensorIsRunning(sensor, n);
+    const uint8_t byHand = sSensorRestartByHand[slot].exchange(kRestartHandNone);
+    bool noted = sSensorRestartNoted[slot].exchange(false);
     // A close by hand wins over a report from the same second: the sensor
     // stays off. After an open by hand the report stands: the open voided any
     // earlier one, so this one is about the sensor that open started.
     if (byHand == kRestartHandClosed) noted = false;
     if (state.phase == sensor_restart::Phase::Idle && !noted) continue;
 
-    const char* name = deviceTypeDisplayName(sensor);
-    const RamFlushFeatureId flushId = ramFlushIdForDevice(sensor);
-    const bool gateOpen = sensorRestartGateOpen(sensor);
+    const char* name = deviceTypeDisplayName(sensor, n);
+    const bool gateOpen = sensorRestartGateOpen(sensor, n);
     if (byHand != kRestartHandNone && state.phase != sensor_restart::Phase::Idle) {
       // A close or open by hand ends the episode that was running.
       sensor_restart::cancel(state);
-      ramFlushClearAutostartFailed(flushId);
+      ramFlushClearAutostartFailed(sensor, n);
       logSystemEvent("SENSOR", "%s automatic restart ended: opened or closed by hand", name);
     }
     if (noted && gateOpen && sensor_restart::noteAutoDisabled(state, nowMs)) {
@@ -3189,29 +3272,29 @@ static void sensorRestartTick(I2cDeviceManager* mgr) {
       // stays off, as before, and nothing is logged.)
       // Off because it failed, not because the user closed it: a RAM flush
       // taken now must not record it as switched off (as at boot).
-      ramFlushMarkAutostartFailed(flushId);
+      ramFlushMarkAutostartFailed(sensor, n);
       logSystemEvent("SENSOR", "%s automatic restart: next try in %lu s", name,
                      (unsigned long)(sensor_restart::delayForRung(state.rung) / 1000u));
     }
 
     const bool startPending = state.phase == sensor_restart::Phase::Starting &&
-                              (sSensorStartOutstanding[index].load() || mgr->isInQueue(sensor));
+                              (sensorStartOutstanding(slot).load() || mgr->isInQueue(sensor, n));
     switch (sensor_restart::tick(state, nowMs, gateOpen, startPending, running)) {
       case sensor_restart::Tick::Attempt:
-        sensorRestartAttempt(sensor, state, nowMs);
+        sensorRestartAttempt(sensor, n, state, nowMs);
         break;
       case sensor_restart::Tick::GateClosed:
-        ramFlushClearAutostartFailed(flushId);
+        ramFlushClearAutostartFailed(sensor, n);
         logSystemEvent("SENSOR", "%s automatic restart ended: auto-start off", name);
         break;
       case sensor_restart::Tick::Stopped:
-        ramFlushClearAutostartFailed(flushId);
+        ramFlushClearAutostartFailed(sensor, n);
         break;
       case sensor_restart::Tick::RunProven:
       case sensor_restart::Tick::None:
         break;
     }
-    sSensorRestartPending[index].store(sensor_restart::pending(state));
+    sSensorRestartPending[slot].store(sensor_restart::pending(state));
   }
 }
 
@@ -3250,10 +3333,13 @@ void sensorQueueProcessorTask(void* param) {
                  req.device, req.queuedAt);
 
       if (req.action == I2cDeviceRequestAction::Stop) {
-        applySensorStop(req.device);
+        applySensorStop(req.device, req.n);
         continue;
       }
-      if (mgr->hasPendingDeviceStop(req.device)) continue;
+      // An admitted request always names an instance its type has.
+      const uint8_t slot = i2cSlot(req.device, req.n);
+      if (slot == kI2cNoSlot) continue;
+      if (mgr->hasPendingDeviceStop(req.device, req.n)) continue;
 
       // Stack instrumentation (do not assume any fixed stack size)
       if (isDebugFlagSet(DEBUG_MEMORY)) {
@@ -3314,41 +3400,41 @@ void sensorQueueProcessorTask(void* param) {
 
       // A close may arrive after dequeue or while waiting for the previous
       // device. Do not initialize a request that has since been cancelled.
-      if (mgr->hasPendingDeviceStop(req.device)) continue;
-      if (sensorRestartStartWithdrawn(req.device)) {
-        sSensorStartOutstanding[req.device] = false;  // Settled: closed by hand.
+      if (mgr->hasPendingDeviceStop(req.device, req.n)) continue;
+      if (sensorRestartStartWithdrawn(req.device, req.n)) {
+        sensorStartOutstanding(slot) = false;  // Settled: closed by hand.
         continue;
       }
-      if (sensorIsRunning(req.device)) {
-        sSensorStartOutstanding[req.device] = false;  // Settled: nothing to start.
+      if (sensorIsRunning(req.device, req.n)) {
+        sensorStartOutstanding(slot) = false;  // Settled: nothing to start.
         sensorStatusBumpWith("queue@already_running");
         continue;
       }
-      if (sensorHasTask(req.device)) {
-        sSensorStartOutstanding[req.device] = false;
-        if (sensorRestartStartSettled(req.device, false)) {
+      if (sensorHasTask(req.device, req.n)) {
+        sensorStartOutstanding(slot) = false;
+        if (sensorRestartStartSettled(req.device, req.n, false)) {
           BROADCAST_PRINTF("Error: [%s] Previous task is still cleaning up; retry open shortly",
-                           deviceTypeDisplayName(req.device));
-          announceSensorStart(deviceTypeDisplayName(req.device), false);
+                           deviceTypeDisplayName(req.device, req.n));
+          announceSensorStart(deviceTypeDisplayName(req.device, req.n), false);
         }
         continue;
       }
 
       finishSensorStops();  // Publish any old stop before announcing a fresh start.
-      const uint8_t devAddr = i2cAddressForDeviceType(req.device);
-      if (devAddr != 0) i2cResetGracePeriod(devAddr, i2cBusForDeviceType(req.device));
+      const uint8_t devAddr = i2cAddressForDeviceType(req.device, req.n);
+      if (devAddr != 0) i2cResetGracePeriod(devAddr, i2cBusForDeviceType(req.device, req.n));
 
-      const bool started = startSensorInternal(req.device);
+      const bool started = startSensorInternal(req.device, req.n);
       // An in-flight initialization cannot be interrupted safely. A close
       // received during it is the next request processed; suppress stale
       // success output and let that stop trigger owner-task cleanup.
-      if (!mgr->hasPendingDeviceStop(req.device)) {
-        sSensorStartOutstanding[req.device] = false;  // Settled by its outcome.
+      if (!mgr->hasPendingDeviceStop(req.device, req.n)) {
+        sensorStartOutstanding(slot) = false;  // Settled by its outcome.
         // A repeated failure of an automatic restart is logged, not announced.
-        if (sensorRestartStartSettled(req.device, started)) {
-          announceSensorStart(deviceTypeDisplayName(req.device), started);
+        if (sensorRestartStartSettled(req.device, req.n, started)) {
+          announceSensorStart(deviceTypeDisplayName(req.device, req.n), started);
         }
-        if (started) broadcastStartedSensor(req.device);
+        if (started) broadcastStartedSensor(req.device, req.n);
       }
 
       if (isDebugFlagSet(DEBUG_MEMORY)) {
@@ -3486,32 +3572,70 @@ extern const SettingsModule i2cSettingsModule = {
 // - gamepad (i2csensor_seesaw.cpp)
 // ============================================================================
 
+// Instance n of a type was found by the last scan at its own (address, bus).
+// isSensorConnected() answers for the type (any board of it found), so it
+// cannot tell a second instance from the first.
+static bool isInstancePresent(I2cDeviceType deviceType, uint8_t n) {
+  const uint8_t addr = i2cAddressForDeviceType(deviceType, n);
+  if (addr == 0) return false;
+  const uint8_t bus = i2cBusForDeviceType(deviceType, n);
+  for (int i = 0; i < connectedDeviceCount; i++) {
+    if (connectedDevices[i].isConnected && connectedDevices[i].address == addr &&
+        connectedDevices[i].bus == bus) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Check if a sensor is available for auto-start:
 // 1. Fast path: check connectedDevices[] registry (populated by discoverI2cDevices)
 // 2. Fallback: live I2C ping in case the scan missed the device (transient bus issue)
-static bool isSensorAvailableForAutoStart(I2cDeviceType deviceType) {
+// Instance 1 asks the registry by its module name as before; an instance
+// n >= 2 by its own (address, bus).
+static bool isSensorAvailableForAutoStart(I2cDeviceType deviceType, uint8_t n = 1) {
   const char* moduleName = i2cModuleNameForDeviceType(deviceType);
   if (!moduleName) moduleName = "?";
-  if (isSensorConnected(moduleName)) return true;
+  if (n == 1 ? isSensorConnected(moduleName) : isInstancePresent(deviceType, n)) return true;
+  // The id the lines below name: the module name, or "encoder2" for instance 2.
+  char instanceId[16];
+  const char* label = moduleName;
+  if (n != 1) label = i2cInstanceId(deviceType, n, instanceId, sizeof(instanceId));
   // Registry miss — try a direct I2C ping as fallback
-  uint8_t addr = i2cAddressForDeviceType(deviceType);
-  const uint8_t bus = i2cBusForDeviceType(deviceType);
+  uint8_t addr = i2cAddressForDeviceType(deviceType, n);
+  const uint8_t bus = i2cBusForDeviceType(deviceType, n);
   if (addr != 0 && i2cPingAddress(addr, 100000, 50, bus)) {
-    INFO_I2C_AUTOSTARTF("[AutoStart] %s not in registry but responds to I2C ping", moduleName);
+    INFO_I2C_AUTOSTARTF("[AutoStart] %s not in registry but responds to I2C ping", label);
     return true;
   }
   // Reached only when the sensor's autostart flag is set (every caller gates on
   // it), so a false return here means "enabled in settings but not detected" —
   // durable so a silently-absent sensor is attributable after reboot.
-  logSystemEvent("SENSOR", "%s autostart skipped: enabled in settings but not detected on I2C bus", moduleName);
-  systemEventPost(SYSEVT_SENSOR_START_FAILED, moduleName, "not detected on bus");
+  logSystemEvent("SENSOR", "%s autostart skipped: enabled in settings but not detected on I2C bus", label);
+  systemEventPost(SYSEVT_SENSOR_START_FAILED, n == 1 ? moduleName : deviceTypeDisplayName(deviceType, n),
+                  "not detected on bus");
 
   // Tell ramflush this sensor is off because it wasn't there, not because the user
   // turned it off. Without this, an unplugged sensor reads live=false against
   // intent=true and the next capture records "user turned it off" — which would
   // suppress the configured autostart on every later boot, with replugging the
-  // sensor doing nothing to undo it.
-  ramFlushMarkAutostartFailed(ramFlushIdForDevice(deviceType));
+  // sensor doing nothing to undo it. Per instance: a missing second board does
+  // not mark the first as failed.
+  ramFlushMarkAutostartFailed(deviceType, n);
+  return false;
+}
+
+// Queue an auto-start. The ring holds one start per instance slot, so a
+// refusal means a stop is pending or the manager is gone; it is reported like
+// a sensor that was not found (one log line, a start-failed event, and the
+// RAM-flush mark, so a capture does not read it as switched off).
+static bool autoStartEnqueue(I2cDeviceType deviceType, uint8_t n) {
+  if (enqueueDeviceStart(deviceType, n)) return true;
+  const char* name = deviceTypeDisplayName(deviceType, n);
+  ERROR_I2CF("[AutoStart] Could not queue %s (queue unavailable/full or stop pending)", name);
+  logSystemEvent("SENSOR", "%s autostart skipped: could not queue the start", name);
+  systemEventPost(SYSEVT_SENSOR_START_FAILED, name, "start not queued");
+  ramFlushMarkAutostartFailed(deviceType, n);
   return false;
 }
 
@@ -3539,7 +3663,7 @@ void processAutoStartSensors() {
   }
  #endif
   
-  INFO_I2C_AUTOSTARTF("[AutoStart] Flags: thermal=%d tof=%d imu=%d gps=%d fmradio=%d apds=%d gamepad=%d rtc=%d presence=%d",
+  INFO_I2C_AUTOSTARTF("[AutoStart] Flags: thermal=%d tof=%d imu=%d gps=%d fmradio=%d apds=%d gamepad=%d rtc=%d presence=%d encoder=%d",
             gSettings.thermalAutoStart ? 1 : 0,
             gSettings.tofAutoStart ? 1 : 0,
             gSettings.imuAutoStart ? 1 : 0,
@@ -3548,7 +3672,8 @@ void processAutoStartSensors() {
             gSettings.apdsAutoStart ? 1 : 0,
             gSettings.inputAutoStart ? 1 : 0,
             gSettings.rtcAutoStart ? 1 : 0,
-            gSettings.presenceAutoStart ? 1 : 0);
+            gSettings.presenceAutoStart ? 1 : 0,
+            gSettings.encoderAutoStart ? 1 : 0);
   INFO_I2C_AUTOSTARTF("[AutoStart] Processing sensor auto-start settings...");
   int autoStartQueued = 0;
   
@@ -3556,7 +3681,7 @@ void processAutoStartSensors() {
   if (ramFlushResolve(RF_THERMAL, gSettings.thermalAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_THERMAL)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing thermal sensor");
-      enqueueDeviceStart(I2C_DEVICE_THERMAL); autoStartQueued++;
+      if (autoStartEnqueue(I2C_DEVICE_THERMAL, 1)) autoStartQueued++;
     } else {
       INFO_I2C_AUTOSTARTF("[AutoStart] Skipping thermal sensor (not detected on I2C bus)");
     }
@@ -3567,7 +3692,7 @@ void processAutoStartSensors() {
   if (ramFlushResolve(RF_TOF, gSettings.tofAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_TOF)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing ToF sensor");
-      enqueueDeviceStart(I2C_DEVICE_TOF); autoStartQueued++;
+      if (autoStartEnqueue(I2C_DEVICE_TOF, 1)) autoStartQueued++;
     } else {
       INFO_I2C_AUTOSTARTF("[AutoStart] Skipping ToF sensor (not detected on I2C bus)");
     }
@@ -3578,7 +3703,7 @@ void processAutoStartSensors() {
   if (ramFlushResolve(RF_IMU, gSettings.imuAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_IMU)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing IMU sensor");
-      enqueueDeviceStart(I2C_DEVICE_IMU); autoStartQueued++;
+      if (autoStartEnqueue(I2C_DEVICE_IMU, 1)) autoStartQueued++;
     } else {
       INFO_I2C_AUTOSTARTF("[AutoStart] Skipping IMU sensor (not detected on I2C bus)");
     }
@@ -3589,7 +3714,7 @@ void processAutoStartSensors() {
   if (ramFlushResolve(RF_GPS, gSettings.gpsAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_GPS)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing GPS sensor");
-      enqueueDeviceStart(I2C_DEVICE_GPS); autoStartQueued++;
+      if (autoStartEnqueue(I2C_DEVICE_GPS, 1)) autoStartQueued++;
     } else {
       INFO_I2C_AUTOSTARTF("[AutoStart] Skipping GPS sensor (not detected on I2C bus)");
     }
@@ -3600,7 +3725,7 @@ void processAutoStartSensors() {
   if (ramFlushResolve(RF_FMRADIO, gSettings.fmRadioAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_FMRADIO)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing FM Radio sensor");
-      enqueueDeviceStart(I2C_DEVICE_FMRADIO); autoStartQueued++;
+      if (autoStartEnqueue(I2C_DEVICE_FMRADIO, 1)) autoStartQueued++;
     } else {
       INFO_I2C_AUTOSTARTF("[AutoStart] Skipping FM Radio sensor (not detected on I2C bus)");
     }
@@ -3611,7 +3736,7 @@ void processAutoStartSensors() {
   if (ramFlushResolve(RF_APDS, gSettings.apdsAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_APDS)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing APDS sensor");
-      enqueueDeviceStart(I2C_DEVICE_APDS); autoStartQueued++;
+      if (autoStartEnqueue(I2C_DEVICE_APDS, 1)) autoStartQueued++;
     } else {
       INFO_I2C_AUTOSTARTF("[AutoStart] Skipping APDS sensor (not detected on I2C bus)");
     }
@@ -3627,7 +3752,7 @@ void processAutoStartSensors() {
     // gamepad on the alt address 0x49.)
     if (isSensorAvailableForAutoStart(I2C_DEVICE_INPUT)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Gamepad sensor");
-      enqueueDeviceStart(I2C_DEVICE_INPUT); autoStartQueued++;
+      if (autoStartEnqueue(I2C_DEVICE_INPUT, 1)) autoStartQueued++;
     } else {
       INFO_I2C_AUTOSTARTF("[AutoStart] Skipping Gamepad sensor (not detected on I2C bus)");
     }
@@ -3638,7 +3763,7 @@ void processAutoStartSensors() {
   if (ramFlushResolve(RF_RTC, gSettings.rtcAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_RTC)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing RTC sensor");
-      enqueueDeviceStart(I2C_DEVICE_RTC); autoStartQueued++;
+      if (autoStartEnqueue(I2C_DEVICE_RTC, 1)) autoStartQueued++;
     } else {
       INFO_I2C_AUTOSTARTF("[AutoStart] Skipping RTC sensor (not detected on I2C bus)");
     }
@@ -3649,7 +3774,7 @@ void processAutoStartSensors() {
   if (ramFlushResolve(RF_PRESENCE, gSettings.presenceAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_PRESENCE)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Presence sensor");
-      enqueueDeviceStart(I2C_DEVICE_PRESENCE); autoStartQueued++;
+      if (autoStartEnqueue(I2C_DEVICE_PRESENCE, 1)) autoStartQueued++;
     } else {
       INFO_I2C_AUTOSTARTF("[AutoStart] Skipping Presence sensor (not detected on I2C bus)");
     }
@@ -3662,13 +3787,29 @@ void processAutoStartSensors() {
     // LED command to the encoder target reconnects it later.
     if (isSensorAvailableForAutoStart(I2C_DEVICE_ENCODER)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing encoder board");
-      enqueueDeviceStart(I2C_DEVICE_ENCODER); autoStartQueued++;
+      if (autoStartEnqueue(I2C_DEVICE_ENCODER, 1)) autoStartQueued++;
     } else {
       INFO_I2C_AUTOSTARTF("[AutoStart] Skipping encoder board (not detected on I2C bus)");
     }
   }
   #endif
   
+  // Instances 2..max of the types that have more than one (System_I2CInstanceCore.h).
+  // Instance 1 of each was handled above; each extra instance has its own
+  // start-at-boot switch, presence check and failure mark.
+  for (uint8_t slot = I2C_DEVICE_COUNT; slot < kI2cSlotCount; ++slot) {
+    I2cDeviceType type = I2C_DEVICE_COUNT;
+    uint8_t n = 1;
+    if (!i2cSlotToRef(slot, type, n)) continue;
+    if (!ramFlushResolve(ramFlushIdForDevice(type), sensorAutoStartFor(type, n))) continue;
+    if (isSensorAvailableForAutoStart(type, n)) {
+      INFO_I2C_AUTOSTARTF("[AutoStart] Queuing %s", deviceTypeDisplayName(type, n));
+      if (autoStartEnqueue(type, n)) autoStartQueued++;
+    } else {
+      INFO_I2C_AUTOSTARTF("[AutoStart] Skipping %s (not detected on I2C bus)", deviceTypeDisplayName(type, n));
+    }
+  }
+
   INFO_I2C_AUTOSTARTF("[AutoStart] Queued %d sensor(s) for startup", autoStartQueued);
   INFO_I2C_AUTOSTARTF("[AutoStart] Sensor auto-start processing complete");
 }

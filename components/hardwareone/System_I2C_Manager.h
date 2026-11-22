@@ -17,6 +17,7 @@
 
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
+#include "System_I2CInstanceCore.h"  // I2cDeviceType, instance slots
 // broadcastOutput provided by System_Debug.h
 
 // ============================================================================
@@ -60,6 +61,12 @@ public:
   uint8_t bus;            // 0 = primary (Wire1, I2C1), 1 = secondary (Wire, I2C2)
                           // Defaults to 0 so legacy single-bus callers work unchanged.
   const char* name;
+  // The queue device and instance a driver registered this record for
+  // (multi-instance health subjects): I2C_DEVICE_COUNT / 0 when none did.
+  // Instance 1 keeps `name` as its subject; instance n >= 2 is named
+  // i2cInstanceName() ("Encoder 2").
+  uint8_t typeId;
+  uint8_t instance;
   
   // Health tracking
   struct Health {
@@ -136,19 +143,7 @@ struct I2cBusMetrics {
 // I2C Device Lifecycle Management
 // ============================================================================
 
-enum I2cDeviceType : int {
-  I2C_DEVICE_THERMAL = 0,
-  I2C_DEVICE_TOF = 1,
-  I2C_DEVICE_IMU = 2,
-  I2C_DEVICE_INPUT = 3,
-  I2C_DEVICE_GPS = 4,
-  I2C_DEVICE_FMRADIO = 5,
-  I2C_DEVICE_APDS = 6,
-  I2C_DEVICE_RTC = 7,
-  I2C_DEVICE_PRESENCE = 8,
-  I2C_DEVICE_ENCODER = 9,  // Adafruit 5752/4991 encoder board pixels: no task, ticked by the main loop
-  I2C_DEVICE_COUNT
-};
+// I2cDeviceType and its instance slots: System_I2CInstanceCore.h.
 
 enum class I2cDeviceRequestAction { Start, Stop };
 
@@ -161,16 +156,23 @@ enum class I2cBusRecovery : uint8_t {
   InUse,           // a client (the camera) holds a lease on the bus
 };
 
+// A start or stop of instance `n` (1-based) of `device`. Plain data: the
+// manager clears its ring with memset and fills every field it queues.
 struct I2cDeviceRequest {
   I2cDeviceType device;
   unsigned long queuedAt;
   I2cDeviceRequestAction action;
+  uint8_t n;
 };
 
 // ============================================================================
 // I2C Device Manager - Singleton
 // ============================================================================
 
+// The one manager object lives in PSRAM (initialize() places it with
+// ps_alloc), so its registry, request ring and stop arrays, which grow with
+// the instance slots, cost no internal RAM. Nothing reads it from an ISR or
+// with the cache disabled: every user is a task.
 class I2cDeviceManager {
 public:
   // Device registry (public for direct access by commands)
@@ -209,14 +211,22 @@ private:
 
   // Shared (cross-bus) state — device registry mutex, request queue, etc.
   SemaphoreHandle_t managerMutex;
-  static const int DEVICE_QUEUE_SIZE = 8;
+  // Admission keeps one queued start per instance slot, so a ring one longer
+  // than the slot count can never be full (one entry stays empty to tell full
+  // from empty). A refusal is still checked by every caller.
+  static const int DEVICE_QUEUE_SIZE = kI2cSlotCount + 1;
   I2cDeviceRequest deviceQueue[DEVICE_QUEUE_SIZE];
   int queueHead;
   int queueTail;
-  // Stops cannot be refused because the start ring is full. Each device has
-  // one pending stop, which cancels its queued starts under the same mutex.
-  bool pendingDeviceStops[I2C_DEVICE_COUNT];
-  unsigned long deviceStopQueuedAt[I2C_DEVICE_COUNT];
+  // Stops cannot be refused because the start ring is full. Each instance
+  // slot (System_I2CInstanceCore.h) has one pending stop, which cancels that
+  // instance's queued starts under the same mutex.
+  bool pendingDeviceStops[kI2cSlotCount];
+  unsigned long deviceStopQueuedAt[kI2cSlotCount];
+  static_assert(DEVICE_QUEUE_SIZE >= kI2cSlotCount + 1,
+                "the start ring must hold one queued start per instance slot");
+  static_assert(kI2cSlotCount <= MAX_DEVICES,
+                "every queue instance needs room in the health registry");
   SemaphoreHandle_t queueMutex;
   volatile bool pollingPaused;
 
@@ -313,13 +323,16 @@ public:
   // I2C device lifecycle. The existing sensor worker is the sole consumer:
   // it applies a dequeued stop before dispatching another start. Pending stops
   // cancel queued starts, take priority and remain visible during initialization.
-  bool enqueueDeviceStart(I2cDeviceType sensor);
-  bool enqueueDeviceStop(I2cDeviceType sensor);
+  // Every request names an instance `n` (1-based, 1 when omitted); requests of
+  // two instances of one type are independent. An instance the type does not
+  // have (System_I2CInstanceCore.h) is refused like a type outside the enum.
+  bool enqueueDeviceStart(I2cDeviceType sensor, uint8_t n = 1);
+  bool enqueueDeviceStop(I2cDeviceType sensor, uint8_t n = 1);
   bool dequeueDeviceRequest(I2cDeviceRequest* req);
-  bool hasPendingDeviceStop(I2cDeviceType sensor);
+  bool hasPendingDeviceStop(I2cDeviceType sensor, uint8_t n = 1);
   // Queue status describes pending starts only; stops take dispatch priority.
-  bool isInQueue(I2cDeviceType sensor);
-  int getQueuePosition(I2cDeviceType sensor);
+  bool isInQueue(I2cDeviceType sensor, uint8_t n = 1);
+  int getQueuePosition(I2cDeviceType sensor, uint8_t n = 1);
   int getQueueDepth();
   void pausePolling();
   void resumePolling();

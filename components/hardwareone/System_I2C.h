@@ -247,9 +247,14 @@ inline bool i2cPingAddress(uint8_t address, uint32_t clockHz, uint32_t lockWaitM
   return (i2cProbeAddress(address, clockHz, lockWaitMs, bus) == 0);
 }
 
+// Instances (System_I2CInstanceCore.h): every lifecycle call below takes the
+// instance `n` last, 1-based and 1 when omitted, so a call without it means
+// instance 1 exactly as before. An instance the type does not have is refused
+// like a type outside the enum.
+
 // Queue a stop, cancelling pending starts. The worker applies it after any
 // active initialization; the sensor task then owns resource cleanup.
-bool requestSensorStop(I2cDeviceType device);
+bool requestSensorStop(I2cDeviceType device, uint8_t n = 1);
 
 // Admission for a queued sensor start, shared by the start commands and the
 // main loop's menu input auto-start. Formats nothing: the command wrapper
@@ -273,7 +278,8 @@ enum class SensorStartRefusal : uint8_t {
   ProbeFailed,
   NotQueued,
 };
-bool requestSensorStart(I2cDeviceType sensor, const char* eventTag, SensorStartRefusal* why);
+bool requestSensorStart(I2cDeviceType sensor, const char* eventTag, SensorStartRefusal* why,
+                        uint8_t n = 1);
 const char* sensorStartRefusalText(SensorStartRefusal why);
 
 // A sensor task reports that it switched itself off after repeated bus errors
@@ -282,37 +288,39 @@ const char* sensorStartRefusalText(SensorStartRefusal why);
 // sensor queue worker then starts the sensor again with a growing wait
 // (System_SensorRestartCore.h) while its <x>enabled and <x>autostart are on.
 // Safe from any task.
-void noteSensorAutoDisabled(I2cDeviceType sensor);
+void noteSensorAutoDisabled(I2cDeviceType sensor, uint8_t n = 1);
 
 // `hint` is a next-step line printed only when the start was queued.
 const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName,
-                                   const char* eventTag, const char* hint = nullptr);
+                                   const char* eventTag, const char* hint = nullptr,
+                                   uint8_t n = 1);
 
 // Command wrapper for requestSensorStop(): the stop commands return its reply.
 // `displayName` is the tag the reply carries in brackets ("ToF", "FM Radio").
-const char* cmd_sensorstop_queued(I2cDeviceType sensor, const char* displayName);
+const char* cmd_sensorstop_queued(I2cDeviceType sensor, const char* displayName, uint8_t n = 1);
 
-// Display name for I2cDeviceType (e.g., I2C_DEVICE_IMU → "IMU")
-const char* deviceTypeDisplayName(I2cDeviceType device);
+// Display name for I2cDeviceType (e.g., I2C_DEVICE_IMU → "IMU"); instance
+// n >= 2 is "<name> <n>" ("Encoder 2"). The text stays valid for the session.
+const char* deviceTypeDisplayName(I2cDeviceType device, uint8_t n = 1);
 
 // Queue functions
 // Queues a start and marks it outstanding until the queue worker settles it
 // (started, failed, or closed by a stop).
-bool enqueueDeviceStart(I2cDeviceType device);
+bool enqueueDeviceStart(I2cDeviceType device, uint8_t n = 1);
 
 inline bool dequeueDeviceRequest(I2cDeviceRequest* req) {
   I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
   return mgr ? mgr->dequeueDeviceRequest(req) : false;
 }
 
-inline bool isInQueue(I2cDeviceType device) {
+inline bool isInQueue(I2cDeviceType device, uint8_t n = 1) {
   I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
-  return mgr ? mgr->isInQueue(device) : false;
+  return mgr ? mgr->isInQueue(device, n) : false;
 }
 
-inline int getQueuePosition(I2cDeviceType device) {
+inline int getQueuePosition(I2cDeviceType device, uint8_t n = 1) {
   I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
-  return mgr ? mgr->getQueuePosition(device) : -1;
+  return mgr ? mgr->getQueuePosition(device, n) : -1;
 }
 
 inline int getQueueDepth() {
@@ -494,6 +502,8 @@ ApplyResult applyDetectedHardware(const DetectionResult& r);
 // Device Registry
 // ============================================================================
 #define MAX_CONNECTED_DEVICES 16
+static_assert(kI2cSlotCount <= MAX_CONNECTED_DEVICES,
+              "every queue instance needs room in the connected-device list");
 
 struct ConnectedDevice {
   uint8_t address;

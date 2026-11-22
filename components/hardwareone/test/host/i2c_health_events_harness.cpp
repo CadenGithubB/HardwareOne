@@ -202,6 +202,30 @@ int main() {
     assert(posted[3].kind == SYSEVT_SENSOR_RECOVERED && posted[3].subject == "BNO055");
   }
 
+#ifdef HW1_HOST_I2C_TEST_ENCODER_MAX
+  {  // a second instance of a type is named by its number; instance 1 keeps its name
+    reset();
+    I2cDevice first, second, unknown;
+    first.init(0x36, "Encoder", 0);
+    second.init(0x37, "Encoder", 0);
+    unknown.init(0x38, "Encoder", 0);
+    assert(first.typeId == I2C_DEVICE_COUNT && first.instance == 0);  // until a driver says
+    first.typeId = second.typeId = unknown.typeId = I2C_DEVICE_ENCODER;
+    first.instance = 1;
+    second.instance = 2;
+    unknown.instance = 9;  // beyond the type's instances: its registered name
+    for (I2cDevice* d : {&first, &second, &unknown}) {
+      d->recordSuccess();
+      failTimes(*d, I2cErrorType::NACK, 3);
+    }
+    assert(posted.size() == 3);
+    assert(posted[0].subject == "Encoder" && posted[1].subject == "Encoder 2");
+    assert(posted[2].subject == "Encoder");
+    assert(posted[1].detail == "0x37 bus 0 nack");
+  }
+  std::puts("I2C health event checks passed (instance subjects: encoder with four instances)");
+#else
   std::puts("I2C health event checks passed");
+#endif
   return 0;
 }

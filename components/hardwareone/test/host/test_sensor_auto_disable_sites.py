@@ -128,15 +128,16 @@ def main() -> int:
 
     # The worker side: requestSensorStop() itself must not cancel a restart
     # (the input drivers call it for their own auto-disable); the close command does.
+    # (Both take the instance after the sensor: System_I2CInstanceCore.h.)
     controller = strip_comments((COMPONENT / "System_I2C.cpp").read_text())
-    stop_fn = controller[controller.index("bool requestSensorStop(I2cDeviceType sensor) {"):]
+    stop_fn = controller[controller.index("bool requestSensorStop(I2cDeviceType sensor"):]
     stop_fn = stop_fn[:stop_fn.index("\n}\n")]
     if "Restart" in stop_fn:
         failures.append("System_I2C.cpp: requestSensorStop() must not touch the automatic restart")
     close_fn = controller[controller.index("const char* cmd_sensorstop_queued(I2cDeviceType sensor"):]
     close_fn = close_fn[:close_fn.index("\n}\n")]
-    cancel_at = close_fn.find("sensorRestartClosedByHand(sensor)")
-    idle_at = close_fn.find("sensorStopHasWork(sensor)")
+    cancel_at = close_fn.find("sensorRestartClosedByHand(sensor")
+    idle_at = close_fn.find("sensorStopHasWork(sensor")
     if cancel_at < 0 or idle_at < 0 or cancel_at > idle_at:
         failures.append("System_I2C.cpp: cmd_sensorstop_queued() must cancel the automatic restart "
                         "before its not-running test")

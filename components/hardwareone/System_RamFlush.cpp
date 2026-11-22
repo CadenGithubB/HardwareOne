@@ -85,6 +85,23 @@ static uint32_t sLiveMask          = 0;
 // Written by more than one task (boot, the camera power task, the sensor queue
 // worker's automatic restart), so each change is one atomic step.
 static std::atomic<uint32_t> sAutostartFailed{0};
+// The same marks for the extra instance slots of the I2C queue devices, bit
+// (slot - I2C_DEVICE_COUNT) (System_I2CInstanceCore.h; at most 32 slots).
+static std::atomic<uint32_t> sAutostartFailedExtra{0};
+
+// A feature is "failed" for a capture while its own mark or the mark of any
+// extra instance of its device is set.
+static bool ramFlushFeatureFailed(uint8_t feature) {
+  if (sAutostartFailed.load() & (1u << feature)) return true;
+  const uint32_t extra = sAutostartFailedExtra.load();
+  for (uint8_t slot = I2C_DEVICE_COUNT; extra && slot < kI2cSlotCount; ++slot) {
+    if (!(extra & (1u << (slot - I2C_DEVICE_COUNT)))) continue;
+    I2cDeviceType type = I2C_DEVICE_COUNT;
+    uint8_t n = 1;
+    if (i2cSlotToRef(slot, type, n) && ramFlushIdForDevice(type) == feature) return true;
+  }
+  return false;
+}
 
 static uint16_t ramFlushCrc(uint32_t diverge, uint32_t live, uint16_t layout) {
   // Not a checksum for integrity against an attacker — just enough to reject RTC
@@ -279,7 +296,7 @@ void ramFlushCaptureOverlay(void) {
     // A feature that failed to autostart this session is not the user's doing.
     // Recording it would read as "turned off" and suppress a configured autostart
     // on every future boot, with replugging the hardware doing nothing to fix it.
-    if (sAutostartFailed.load() & (1u << i)) continue;
+    if (ramFlushFeatureFailed(i)) continue;
 
     const bool isLive = ramFlushReadLive(f);
     const bool intent = ramFlushReadIntent(f);
@@ -377,6 +394,26 @@ void ramFlushMarkAutostartFailed(RamFlushFeatureId f) {
 
 void ramFlushClearAutostartFailed(RamFlushFeatureId f) {
   if (f < RF_FEATURE_COUNT) sAutostartFailed.fetch_and(~(1u << (uint8_t)f));
+}
+
+void ramFlushMarkAutostartFailed(I2cDeviceType device, uint8_t n) {
+  const uint8_t slot = i2cSlot(device, n);
+  if (slot == kI2cNoSlot) return;
+  if (slot < I2C_DEVICE_COUNT) {
+    ramFlushMarkAutostartFailed(ramFlushIdForDevice(device));
+    return;
+  }
+  sAutostartFailedExtra.fetch_or(1u << (slot - I2C_DEVICE_COUNT));
+}
+
+void ramFlushClearAutostartFailed(I2cDeviceType device, uint8_t n) {
+  const uint8_t slot = i2cSlot(device, n);
+  if (slot == kI2cNoSlot) return;
+  if (slot < I2C_DEVICE_COUNT) {
+    ramFlushClearAutostartFailed(ramFlushIdForDevice(device));
+    return;
+  }
+  sAutostartFailedExtra.fetch_and(~(1u << (slot - I2C_DEVICE_COUNT)));
 }
 
 // ---------------------------------------------------------------------------

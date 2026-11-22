@@ -39,17 +39,33 @@ def main() -> None:
     marker = "// INSERT_PRODUCTION_DEFINITIONS"
     require(harness.count(marker) == 1, "expected one production insertion point")
     harness = harness.replace(marker, "\n\n".join(definitions))
+    # Boot auto-start checks every queued start: a refused one is reported (log,
+    # start-failed event, RAM-flush mark), never counted as queued.
+    controller = (COMPONENT / "System_I2C.cpp").read_text()
+    autostart = extract_block(controller, "void processAutoStartSensors()")
+    require("enqueueDeviceStart(" not in autostart,
+            "processAutoStartSensors must queue through autoStartEnqueue (checked)")
+    require(len(re.findall(r"if \(autoStartEnqueue\(\w+, \w+\)\) autoStartQueued\+\+;", autostart)) >= 10,
+            "every auto-start counts only an accepted start")
+    report = extract_block(controller, "static bool autoStartEnqueue(")
+    for needed in ("enqueueDeviceStart(deviceType, n)", "logSystemEvent(", "SYSEVT_SENSOR_START_FAILED",
+                   "ramFlushMarkAutostartFailed(deviceType, n)"):
+        require(needed in report, f"autoStartEnqueue must report a refused start ({needed})")
     with tempfile.TemporaryDirectory(prefix="hw1-i2c-device-queue-") as directory:
         generated = Path(directory) / "test.cpp"
-        binary = Path(directory) / "test"
         generated.write_text(harness)
-        command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-                   "-Wno-keyword-macro", "-I", str(HERE / "i2c_stubs"),
-                   "-I", str(COMPONENT), str(generated), "-o", str(binary)]
-        if args.sanitize:
-            command[1:1] = ["-fsanitize=address,undefined", "-g"]
-        subprocess.run(command, check=True)
-        subprocess.run([str(binary)], check=True)
+        # The second build gives the encoder four instances (System_I2CInstanceCore.h).
+        for instances in (1, 4):
+            binary = Path(directory) / f"test-{instances}"
+            command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
+                       "-Wno-keyword-macro", "-I", str(HERE / "i2c_stubs"),
+                       "-I", str(COMPONENT), str(generated), "-o", str(binary)]
+            if instances > 1:
+                command.insert(1, f"-DHW1_HOST_I2C_TEST_ENCODER_MAX={instances}")
+            if args.sanitize:
+                command[1:1] = ["-fsanitize=address,undefined", "-g"]
+            subprocess.run(command, check=True)
+            subprocess.run([str(binary)], check=True)
 
 
 if __name__ == "__main__":

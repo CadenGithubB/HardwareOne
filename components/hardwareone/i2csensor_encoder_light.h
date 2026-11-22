@@ -32,6 +32,9 @@ constexpr EncoderBoard kEncoderBoards[] = {
 };
 constexpr uint8_t kEncoderMaxPixels = 4;
 constexpr uint8_t kEncoderDefaultAddress = 0x49;  // the quad board's default
+// Encoder boards the device can drive at once (System_I2CInstanceCore.h).
+// 1 until the driver keeps one state per instance (multi-instance phase 1c).
+constexpr uint8_t kEncoderMaxInstances = 1;
 
 // The board a product id names, or nullptr: another seesaw product (the ANO
 // encoder, the gamepad) or a device that is not a seesaw board is never

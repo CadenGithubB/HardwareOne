@@ -32,9 +32,10 @@ def main():
         r'^static constexpr uint32_t I2C_WIRE_IO_TIMEOUT_MS[^\n]+'))
     source = (HERE / 'camera_i2c_reservation_harness.cpp').read_text()
     insertions = {
-        '// INSERT_PRODUCTION_REQUEST_TYPES': '\n'.join(
+        # The device types and their instance slots come from the real core.
+        '// INSERT_PRODUCTION_REQUEST_TYPES': '#include "System_I2CInstanceCore.h"\n' + '\n'.join(
             extract_block(header, marker) + ';' for marker in (
-                'enum I2cDeviceType', 'enum class I2cDeviceRequestAction', 'struct I2cDeviceRequest')),
+                'enum class I2cDeviceRequestAction', 'struct I2cDeviceRequest')),
         '// INSERT_PRODUCTION_MANAGER_DECLARATION': declaration,
         '// INSERT_PRODUCTION_MANAGER_CONSTANTS': constants,
         '// INSERT_PRODUCTION_MANAGER_CONSTRUCTOR': extract_block(manager, 'I2cDeviceManager::I2cDeviceManager()'),

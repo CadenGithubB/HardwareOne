@@ -39,16 +39,20 @@ def main() -> None:
     harness = harness.replace("// INSERT_PRODUCTION_DEFINITIONS", "\n\n".join(definitions))
     with tempfile.TemporaryDirectory(prefix="hw1-i2c-health-") as directory:
         source = Path(directory) / "test.cpp"
-        binary = Path(directory) / "test"
         source.write_text(harness)
-        command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-                   "-Wno-keyword-macro", "-I", str(HERE / "i2c_stubs"),
-                   "-I", str(COMPONENT), str(source),
-                   str(COMPONENT / "System_EventCatalog.cpp"), "-o", str(binary)]
-        if args.sanitize:
-            command[1:1] = ["-fsanitize=address,undefined", "-g"]
-        subprocess.run(command, check=True)
-        subprocess.run([str(binary)], check=True)
+        # The second build gives the encoder four instances (System_I2CInstanceCore.h).
+        for instances in (1, 4):
+            binary = Path(directory) / f"test-{instances}"
+            command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
+                       "-Wno-keyword-macro", "-I", str(HERE / "i2c_stubs"),
+                       "-I", str(COMPONENT), str(source),
+                       str(COMPONENT / "System_EventCatalog.cpp"), "-o", str(binary)]
+            if instances > 1:
+                command.insert(1, f"-DHW1_HOST_I2C_TEST_ENCODER_MAX={instances}")
+            if args.sanitize:
+                command[1:1] = ["-fsanitize=address,undefined", "-g"]
+            subprocess.run(command, check=True)
+            subprocess.run([str(binary)], check=True)
 
 
 if __name__ == "__main__":

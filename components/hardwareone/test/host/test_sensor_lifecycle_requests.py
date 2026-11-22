@@ -48,8 +48,13 @@ def main() -> None:
     # sources had it inline in the header.
     outstanding = re.search(r"^static std::atomic<bool> sSensorStartOutstanding[^\n]+", controller, re.M)
     if outstanding:
+        # Indexed by instance slot (System_I2CInstanceCore.h): instance 1 in the
+        # array above, the extra instances in a PSRAM companion.
         controller_definitions += ["#define HAS_START_OUTSTANDING 1", outstanding[0],
-                                   extract_block(controller, "bool enqueueDeviceStart(I2cDeviceType device)")]
+                                   re.search(r"^EXT_RAM_BSS_ATTR static std::atomic<bool> "
+                                             r"sSensorStartOutstandingExtra[^\n]+", controller, re.M)[0],
+                                   extract_block(controller, "static std::atomic<bool>& sensorStartOutstanding("),
+                                   extract_block(controller, "bool enqueueDeviceStart(I2cDeviceType device")]
     else:
         controller_definitions += [extract_block(header, "inline bool enqueueDeviceStart(")]
     if re.search(r"const char\* eventTag,\s*const char\* hint", header):
@@ -58,20 +63,27 @@ def main() -> None:
         "inline bool isInQueue(", "inline int getQueuePosition(", "inline int getQueueDepth(",
     )]
     controller_definitions += [extract_block(header, "enum class SensorStartRefusal") + ";"]
-    controller_definitions += [re.search(r"^static bool sSensorStopAwaitingCleanup[^\n]+", controller, re.M)[0]]
+    # The production declarations, with their trailing instance argument (n = 1).
+    for name in ("enqueueDeviceStart", "requestSensorStop", "requestSensorStart", "noteSensorAutoDisabled",
+                 "cmd_sensorstart_queued", "cmd_sensorstop_queued", "deviceTypeDisplayName"):
+        declaration = re.search(rf"^(?:bool|void|const char\*) {name}\([^;]*\);", header, re.M | re.S)
+        require(declaration is not None, f"missing production declaration of {name}")
+        controller_definitions.append(declaration[0])
+    controller_definitions += [re.search(r"^static bool sSensorStopAwaitingCleanup[^\n]+", controller, re.M)[0],
+                               re.search(r"^EXT_RAM_BSS_ATTR static bool sSensorStopAwaitingCleanupExtra[^\n]+",
+                                         controller, re.M)[0],
+                               extract_block(controller, "static bool& sensorStopAwaitingCleanup(")]
     # The start-at-boot switch table and the automatic restart (state, flags, tick).
     restart_state = re.findall(r"^EXT_RAM_BSS_ATTR static [^\n]*sSensorRestart[^\n]+", controller, re.M)
     require(len(restart_state) == 5, "expected the five automatic-restart state lines in PSRAM")
     controller_definitions += [
-        "const char* deviceTypeDisplayName(I2cDeviceType sensor);",
-        "bool requestSensorStop(I2cDeviceType sensor);",
         extract_block(controller, "struct SensorSwitchRow") + ";",
         extract_block(controller, "static const SensorSwitchRow kSensorSwitches[]") + ";",
         re.search(r"^enum : uint8_t \{ kRestartHandNone[^\n]+", controller, re.M)[0],
         *restart_state,
     ]
     controller_definitions += [extract_block(controller, marker) for marker in (
-        "static const SensorSwitchRow* sensorSwitchRow(",
+        "static const SensorSwitchRow* sensorSwitchRow(", "static bool sensorAutoStartFor(",
         "void noteSensorAutoDisabled(", "static bool sensorRestartClosedByHand(",
         "static void sensorRestartOpenedByHand(",
         "static uint8_t i2cAddressForDeviceType(", "static uint8_t i2cBusForDeviceType(",
@@ -97,10 +109,13 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="hw1-sensor-lifecycle-") as directory:
         source = Path(directory) / "test.cpp"
         source.write_text(harness)
-        for mesh in (0, 1):
-            executable = Path(directory) / f"test-mesh-{mesh}"
+        # The third build gives the encoder two instances (System_I2CInstanceCore.h)
+        # and adds the per-instance cases.
+        for mesh, instances in ((0, 1), (1, 1), (0, 2)):
+            executable = Path(directory) / f"test-mesh-{mesh}-instances-{instances}"
+            extra = [f"-DHW1_HOST_I2C_TEST_ENCODER_MAX={instances}"] if instances > 1 else []
             command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-                       "-Wno-keyword-macro", "-Wno-unused-parameter", "-Wno-switch",
+                       "-Wno-keyword-macro", "-Wno-unused-parameter", "-Wno-switch", *extra,
                        f"-DENABLE_ESPNOW={mesh}", "-I", str(HERE / "i2c_stubs"),
                        "-I", str(COMPONENT), str(source), "-o", str(executable)]
             if args.sanitize:

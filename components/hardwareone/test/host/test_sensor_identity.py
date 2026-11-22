@@ -75,7 +75,8 @@ def measure(component: Path) -> tuple[int, list[str]]:
     if rows == 0 or rows != typed:
         failures.append(f"System_I2C.cpp: {rows} i2cSensors[] rows, {typed} end with their I2cDeviceType")
 
-    manager = texts.get("System_I2C_Manager.h", "")
+    # The device types live in the instance core (System_I2CInstanceCore.h).
+    manager = texts.get("System_I2CInstanceCore.h", "")
     devices = re.findall(r"^\s*(I2C_DEVICE_\w+)\b", extract_block(manager, "enum I2cDeviceType"), re.M) \
         if "enum I2cDeviceType" in manager else []
     ramflush = texts.get("System_RamFlush.cpp", "")
@@ -90,7 +91,7 @@ def measure(component: Path) -> tuple[int, list[str]]:
             if f"case {device}:" not in mapping:
                 failures.append(f"System_RamFlush.cpp: ramFlushIdForDevice has no case for {device}")
     if len(devices) < 9:
-        failures.append(f"System_I2C_Manager.h: found only {len(devices)} I2cDeviceType values")
+        failures.append(f"System_I2CInstanceCore.h: found only {len(devices)} I2cDeviceType values")
 
     remote = texts.get("System_ESPNow_Sensors.cpp", "")
     # The remote sensor names have one owner: the table of

@@ -514,6 +514,19 @@ set_target_properties(settings_write_batch_core_tests PROPERTIES
 target_compile_options(settings_write_batch_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
+# Several instances of one I2C device type (System_I2CInstanceCore.h): slot
+# math, ids, names and the instance argument rules. Built with the firmware's
+# maxima and again with the encoder at four instances.
+add_executable(i2c_instance_core_tests test_i2c_instance_core.cpp)
+add_executable(i2c_instance_core_four_tests test_i2c_instance_core.cpp)
+foreach(target i2c_instance_core_tests i2c_instance_core_four_tests)
+  set_target_properties(${target} PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+  target_include_directories(${target} PRIVATE ../..)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -pedantic)
+endforeach()
+target_compile_definitions(i2c_instance_core_four_tests PRIVATE HW1_HOST_I2C_TEST_ENCODER_MAX=4)
+
 # Wait ladder of the automatic sensor restart (System_SensorRestartCore.h).
 add_executable(sensor_restart_core_tests test_sensor_restart_core.cpp)
 set_target_properties(sensor_restart_core_tests PROPERTIES
@@ -772,6 +785,10 @@ if(HW1_SANITIZE)
     -fsanitize=address,undefined -g)
   target_link_options(sensor_restart_core_tests PRIVATE
     -fsanitize=address,undefined)
+  foreach(target i2c_instance_core_tests i2c_instance_core_four_tests)
+    target_compile_options(${target} PRIVATE -fsanitize=address,undefined -g)
+    target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+  endforeach()
   target_compile_options(notification_kind_list_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(notification_kind_list_tests PRIVATE
@@ -2392,6 +2409,8 @@ add_test(
 # ladder, every driver's auto-disable site, the <x>enabled gate on every open
 # (SEN-6) and the saved ESP-SR / G2 stream tuning (SET-2).
 add_test(NAME sensor_restart_core_tests COMMAND sensor_restart_core_tests)
+add_test(NAME i2c_instance_core_tests COMMAND i2c_instance_core_tests)
+add_test(NAME i2c_instance_core_four_tests COMMAND i2c_instance_core_four_tests)
 add_test(
   NAME sensor_auto_disable_sites
   COMMAND ${Python3_EXECUTABLE}

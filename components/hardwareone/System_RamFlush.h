@@ -113,6 +113,14 @@ void ramFlushClearAutostartFailed(RamFlushFeatureId f);
 enum I2cDeviceType : int;
 RamFlushFeatureId ramFlushIdForDevice(I2cDeviceType device);
 
+// The failed mark of one instance n (1-based) of a queue device
+// (System_I2CInstanceCore.h). Instance 1 is its feature's mark above; an
+// instance n >= 2 has its own bit, so a missing second board does not mark
+// the first as failed. The overlay itself stays per feature (owner question
+// Q7): a capture skips a feature while any of its instances is marked.
+void ramFlushMarkAutostartFailed(I2cDeviceType device, uint8_t n);
+void ramFlushClearAutostartFailed(I2cDeviceType device, uint8_t n);
+
 // Is the feature running right now (its owner's live flag, not a setting)? false
 // for a feature this build does not have. The `features` list reads its "run"
 // column from here (System_FeatureRegistry.cpp), so the list and a capture agree.

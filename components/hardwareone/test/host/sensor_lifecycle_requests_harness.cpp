@@ -118,6 +118,16 @@ static bool ramFlushResolve(RamFlushFeatureId id, bool intent) {
 }
 static void ramFlushMarkAutostartFailed(RamFlushFeatureId id) { flushFailedMark[id] = true; }
 static void ramFlushClearAutostartFailed(RamFlushFeatureId id) { flushFailedMark[id] = false; }
+// The per-instance marks (System_RamFlush.h): instance 1 is its feature's mark.
+static std::array<bool, kI2cSlotCount> flushFailedSlot;
+static void ramFlushMarkAutostartFailed(I2cDeviceType sensor, uint8_t n) {
+  if (n == 1) ramFlushMarkAutostartFailed(ramFlushIdForDevice(sensor));
+  else flushFailedSlot[i2cSlot(sensor, n)] = true;
+}
+static void ramFlushClearAutostartFailed(I2cDeviceType sensor, uint8_t n) {
+  if (n == 1) ramFlushClearAutostartFailed(ramFlushIdForDevice(sensor));
+  else flushFailedSlot[i2cSlot(sensor, n)] = false;
+}
 
 enum { DEBUG_MEMORY, SYSEVT_SENSOR_STARTED, SYSEVT_SENSOR_START_FAILED, SYSEVT_SENSOR_STOPPED };
 // Numbered as the I2C device types here, so a notice names its device. RTC
@@ -317,6 +327,13 @@ static void admissionCases() {
     for (auto sensor : {I2C_DEVICE_THERMAL, I2C_DEVICE_TOF, I2C_DEVICE_IMU, I2C_DEVICE_INPUT,
                         I2C_DEVICE_FMRADIO, I2C_DEVICE_APDS, I2C_DEVICE_RTC}) {
       assert(enqueueDeviceStart(sensor));
+    }
+    // Admission keeps one start per instance slot and the ring is one longer
+    // than the slot count, so admission alone cannot fill it; fill the rest by
+    // hand to keep the refusal covered.
+    while ((f.manager.queueTail + 1) % I2cDeviceManager::DEVICE_QUEUE_SIZE != f.manager.queueHead) {
+      f.manager.deviceQueue[f.manager.queueTail] = {I2C_DEVICE_COUNT, now, I2cDeviceRequestAction::Start, 0};
+      f.manager.queueTail = (f.manager.queueTail + 1) % I2cDeviceManager::DEVICE_QUEUE_SIZE;
     }
     assert(contains(f.open(), "Could not queue") && probeCalls == 1 && statuses.empty()); }
 }
@@ -777,8 +794,70 @@ static void restartCases() {
     f.after(10000); assert(starts[gps] == 1); now = 100; }
 }
 
+#ifdef HW1_HOST_I2C_TEST_ENCODER_MAX
+// Several instances (System_I2CInstanceCore.h), built with the encoder at two
+// instances: each instance has its own queue entry, stop, start mark, cleanup
+// latch and restart ladder. Instance 2 has no driver or start-at-boot switch
+// yet (multi-instance phase 1c), so it never starts and its ladder stays idle.
+static void instanceCases() {
+  using sensor_restart::Phase;
+  const auto enc = I2C_DEVICE_ENCODER;
+  const uint8_t slot2 = i2cSlot(enc, 2);
+  assert(slot2 == I2C_DEVICE_COUNT);
+  auto resetSecond = [&] {
+    sSensorRestart[slot2] = {}; sSensorRestartNoted[slot2] = false;
+    sSensorRestartByHand[slot2] = kRestartHandNone; sSensorRestartPending[slot2] = false;
+    sensorStartOutstanding(slot2) = false; sensorStopAwaitingCleanup(slot2) = false;
+    flushFailedSlot.fill(false);
+  };
+  // An instance the type does not have is refused everywhere.
+  { Fixture f; resetSecond();
+    assert(!enqueueDeviceStart(enc, 3) && !requestSensorStop(enc, 3) && !f.manager.hasPendingDeviceStop(enc, 3));
+    assert(f.manager.getQueueDepth() == 0); }
+  // Two instances queue independently; closing instance 2 keeps instance 1's start.
+  { Fixture f; resetSecond();
+    assert(enqueueDeviceStart(enc) && enqueueDeviceStart(enc, 2));
+    assert(f.manager.getQueueDepth() == 2 && getQueuePosition(enc) == 1 && getQueuePosition(enc, 2) == 2);
+    assert(contains(cmd_sensorstop_queued(enc, deviceTypeDisplayName(enc, 2), 2),
+                    "[Encoder 2] Stop requested"));
+    assert(isInQueue(enc) && !isInQueue(enc, 2) && f.manager.hasPendingDeviceStop(enc, 2));
+    assert(!f.manager.hasPendingDeviceStop(enc));
+    f.worker();
+    assert(starts[enc] == 1 && running[enc] && !sensorStartOutstanding(slot2));
+    assert(eventCount(SYSEVT_SENSOR_STOPPED) == 1 && eventCount(SYSEVT_SENSOR_STARTED) == 1);
+    for (const auto& event : events) {
+      assert(event.second == (event.first == SYSEVT_SENSOR_STOPPED ? "Encoder 2" : "Encoder"));
+    } }
+  // Instance 2 has no driver yet: its admitted start fails under its own name.
+  { Fixture f; resetSecond(); assert(enqueueDeviceStart(enc, 2)); f.worker();
+    assert(starts[enc] == 0 && !running[enc] && !sensorStartOutstanding(slot2));
+    assert(eventCount(SYSEVT_SENSOR_START_FAILED) == 1 && events.back().second == "Encoder 2"); }
+  // Closing an idle instance 2 names its own open command.
+  { Fixture f; resetSecond();
+    assert(contains(cmd_sensorstop_queued(enc, deviceTypeDisplayName(enc, 2), 2),
+                    "Start it with 'openencoder 2'")); }
+  // A restart report of instance 2 never touches instance 1's ladder, and
+  // without a start-at-boot switch of its own instance 2 stays off.
+  { Fixture f; resetSecond(); gSettings.encoderAutoStart = true; running[enc] = true;
+    noteSensorAutoDisabled(enc, 2); f.after(0); f.after(3600000);
+    assert(sSensorRestart[enc].phase == Phase::Idle && sSensorRestart[slot2].phase == Phase::Idle);
+    assert(starts[enc] == 0 && !flushFailedMark[enc] && !flushFailedSlot[slot2] && logs.empty());
+    autoDisable(enc); f.after(1000);  // the tick runs once a second
+    assert(sSensorRestart[enc].phase == Phase::Waiting && sSensorRestart[slot2].phase == Phase::Idle);
+    assert(sSensorRestartPending[enc] && !sSensorRestartPending[slot2]);
+    assert(flushFailedMark[enc] && !flushFailedSlot[slot2]);
+    // Closing instance 2 by hand does not cancel instance 1's waiting try.
+    cmd_sensorstop_queued(enc, deviceTypeDisplayName(enc, 2), 2);
+    f.after(30000); assert(starts[enc] == 1 && running[enc]); }
+}
+#endif
+
 int main() {
   admissionCases(); hintCases(); workerOutcomeCases(); closeOrderingCases(); cleanupCases();
   noGateCases(); restartCases();
-  std::printf("Sensor lifecycle requests passed (production controller + manager; mesh=%d)\n", ENABLE_ESPNOW);
+#ifdef HW1_HOST_I2C_TEST_ENCODER_MAX
+  instanceCases();
+#endif
+  std::printf("Sensor lifecycle requests passed (production controller + manager; mesh=%d, encoder "
+              "instances=%d)\n", ENABLE_ESPNOW, int(kI2cEncoderMaxInstances));
 }

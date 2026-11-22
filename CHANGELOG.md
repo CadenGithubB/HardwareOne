@@ -400,6 +400,12 @@ everything user-visible since the v0.99.99.1 tag.
 
 ### Fixed
 
+- A sensor whose start at boot could not be queued is now reported like one that was not found (one
+  log line, a start-failed event, and it is not recorded as switched off by a `ramflush`); before, it
+  was counted as queued and nothing said why it did not start. The boot auto-start flags line in the
+  I2C debug output now includes the encoder. (Groundwork for several boards of one I2C device type:
+  every lifecycle request, stop, start mark and automatic-restart ladder is now kept per instance,
+  with instance 1 unchanged; no type has a second instance yet.)
 - `srtuninggain`, `srtuningagc`, `srtuningvad` and `g2streamres` are saved: their values were back at
   the defaults after every reboot. New settings keys `apps.espsr.srAfeGain`, `srAgcMode`, `srVadMode`
   and `network.bluetooth.g2.streamWidth`, `streamHeight`; defaults unchanged (1.0, 2, 3, 96x96).

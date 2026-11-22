@@ -6,6 +6,7 @@
  * (secondary STEMMA QT / "I2C2", only used on boards like the FeatherS3[D]).
  */
 
+#include <new>
 #include <Wire.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -15,6 +16,7 @@
 #include "System_Events.h"      // systemEventPost — sensor_unresponsive / sensor_recovered
 #include "System_I2C_Manager.h"
 #include "System_Logging.h"
+#include "System_MemUtil.h"     // ps_alloc: the manager object lives in PSRAM
 #include "System_Settings.h"
 #include "System_PollPause.h"   // pollPause/pollResume — global sensor-poll pause
 #include "System_TaskUtils.h"   // taskStackRecord — taskstats stack-size registry
@@ -65,11 +67,15 @@ I2cDeviceManager::I2cDeviceManager()
 void I2cDeviceManager::initialize() {
   if (instance) return;
 
-  instance = new I2cDeviceManager();
-  if (!instance) {
+  // PSRAM at the source: the registry, request ring and per-instance stop
+  // arrays grow with the instance slots, and no ISR or cache-disabled path
+  // reads any of it.
+  void* storage = ps_alloc(sizeof(I2cDeviceManager), AllocPolicy::PreferPsram, "i2c.manager");
+  if (!storage) {
     Serial.println("[I2C_MGR] FATAL: Failed to allocate manager");
     while(1) delay(1000);
   }
+  instance = new (storage) I2cDeviceManager();
 
   // Create per-bus mutexes (cheap — single FreeRTOS mutex each, ~80 B).
   // Even if bus 1 is never used, the mutex sits idle costing little.
@@ -704,19 +710,20 @@ void I2cDeviceManager::updateHistogram(uint8_t bus, uint32_t txDurationUs) {
 // I2C Device Lifecycle Management
 // ============================================================================
 
-bool I2cDeviceManager::enqueueDeviceStart(I2cDeviceType sensor) {
+bool I2cDeviceManager::enqueueDeviceStart(I2cDeviceType sensor, uint8_t n) {
   // Refuse to enqueue if the bus is disabled — nothing will drain the queue
-  if (!gI2cBusRunning || sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
+  const uint8_t slot = i2cSlot(sensor, n);
+  if (!gI2cBusRunning || slot == kI2cNoSlot || !queueMutex) return false;
   
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
-    if (pendingDeviceStops[sensor]) {
+    if (pendingDeviceStops[slot]) {
       xSemaphoreGive(queueMutex);
       return false;
     }
     // Admission is idempotent even when callers race between their status
     // check and enqueue, or when the ring is already full.
     for (int i = queueHead; i != queueTail; i = (i + 1) % DEVICE_QUEUE_SIZE) {
-      if (deviceQueue[i].device == sensor) {
+      if (deviceQueue[i].device == sensor && deviceQueue[i].n == n) {
         xSemaphoreGive(queueMutex);
         return true;
       }
@@ -730,6 +737,7 @@ bool I2cDeviceManager::enqueueDeviceStart(I2cDeviceType sensor) {
     deviceQueue[queueTail].device = sensor;
     deviceQueue[queueTail].queuedAt = millis();
     deviceQueue[queueTail].action = I2cDeviceRequestAction::Start;
+    deviceQueue[queueTail].n = n;
     queueTail = nextTail;
     
     xSemaphoreGive(queueMutex);
@@ -739,23 +747,25 @@ bool I2cDeviceManager::enqueueDeviceStart(I2cDeviceType sensor) {
   return false;
 }
 
-bool I2cDeviceManager::enqueueDeviceStop(I2cDeviceType sensor) {
-  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
+bool I2cDeviceManager::enqueueDeviceStop(I2cDeviceType sensor, uint8_t n) {
+  const uint8_t slot = i2cSlot(sensor, n);
+  if (slot == kI2cNoSlot || !queueMutex) return false;
 
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) != pdTRUE) return false;
 
   // Compact in place from the head, retaining the order of other starts even
-  // when the ring wraps. Remove every matching entry, including old duplicates.
+  // when the ring wraps. Remove every matching entry of this instance only,
+  // including old duplicates; other instances of the type keep their starts.
   int write = queueHead;
   for (int read = queueHead; read != queueTail; read = (read + 1) % DEVICE_QUEUE_SIZE) {
-    if (deviceQueue[read].device != sensor) {
+    if (deviceQueue[read].device != sensor || deviceQueue[read].n != n) {
       deviceQueue[write] = deviceQueue[read];
       write = (write + 1) % DEVICE_QUEUE_SIZE;
     }
   }
   queueTail = write;
-  if (!pendingDeviceStops[sensor]) deviceStopQueuedAt[sensor] = millis();
-  pendingDeviceStops[sensor] = true;
+  if (!pendingDeviceStops[slot]) deviceStopQueuedAt[slot] = millis();
+  pendingDeviceStops[slot] = true;
   xSemaphoreGive(queueMutex);
   return true;
 }
@@ -764,12 +774,16 @@ bool I2cDeviceManager::dequeueDeviceRequest(I2cDeviceRequest* req) {
   if (!queueMutex || !req) return false;
   
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
-    for (int sensor = 0; sensor < I2C_DEVICE_COUNT; ++sensor) {
-      if (!pendingDeviceStops[sensor]) continue;
-      req->device = static_cast<I2cDeviceType>(sensor);
-      req->queuedAt = deviceStopQueuedAt[sensor];
+    for (uint8_t slot = 0; slot < kI2cSlotCount; ++slot) {
+      if (!pendingDeviceStops[slot]) continue;
+      I2cDeviceType sensor = I2C_DEVICE_COUNT;
+      uint8_t n = 1;
+      if (!i2cSlotToRef(slot, sensor, n)) continue;
+      req->device = sensor;
+      req->n = n;
+      req->queuedAt = deviceStopQueuedAt[slot];
       req->action = I2cDeviceRequestAction::Stop;
-      pendingDeviceStops[sensor] = false;
+      pendingDeviceStops[slot] = false;
       xSemaphoreGive(queueMutex);
       return true;
     }
@@ -788,21 +802,22 @@ bool I2cDeviceManager::dequeueDeviceRequest(I2cDeviceRequest* req) {
   return false;
 }
 
-bool I2cDeviceManager::hasPendingDeviceStop(I2cDeviceType sensor) {
-  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
+bool I2cDeviceManager::hasPendingDeviceStop(I2cDeviceType sensor, uint8_t n) {
+  const uint8_t slot = i2cSlot(sensor, n);
+  if (slot == kI2cNoSlot || !queueMutex) return false;
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) != pdTRUE) return false;
-  const bool pending = pendingDeviceStops[sensor];
+  const bool pending = pendingDeviceStops[slot];
   xSemaphoreGive(queueMutex);
   return pending;
 }
 
-bool I2cDeviceManager::isInQueue(I2cDeviceType sensor) {
-  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return false;
+bool I2cDeviceManager::isInQueue(I2cDeviceType sensor, uint8_t n) {
+  if (i2cSlot(sensor, n) == kI2cNoSlot || !queueMutex) return false;
   
   bool found = false;
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
     for (int i = queueHead; i != queueTail; i = (i + 1) % DEVICE_QUEUE_SIZE) {
-      if (deviceQueue[i].device == sensor) {
+      if (deviceQueue[i].device == sensor && deviceQueue[i].n == n) {
         found = true;
         break;
       }
@@ -813,14 +828,14 @@ bool I2cDeviceManager::isInQueue(I2cDeviceType sensor) {
   return found;
 }
 
-int I2cDeviceManager::getQueuePosition(I2cDeviceType sensor) {
-  if (sensor < 0 || sensor >= I2C_DEVICE_COUNT || !queueMutex) return -1;
+int I2cDeviceManager::getQueuePosition(I2cDeviceType sensor, uint8_t n) {
+  if (i2cSlot(sensor, n) == kI2cNoSlot || !queueMutex) return -1;
   
   int pos = -1;
   if (xSemaphoreTake(queueMutex, portMAX_DELAY) == pdTRUE) {
     int idx = 1;
     for (int i = queueHead; i != queueTail; i = (i + 1) % DEVICE_QUEUE_SIZE) {
-      if (deviceQueue[i].device == sensor) {
+      if (deviceQueue[i].device == sensor && deviceQueue[i].n == n) {
         pos = idx;
         break;
       }
@@ -916,7 +931,7 @@ I2cErrorType classifyI2cError(uint8_t wireStatus) {
 }
 
 I2cDevice::I2cDevice()
-  : address(0), bus(0), name(nullptr) {
+  : address(0), bus(0), name(nullptr), typeId(I2C_DEVICE_COUNT), instance(0) {
   memset(&health, 0, sizeof(health));
 }
 
@@ -924,6 +939,8 @@ void I2cDevice::init(uint8_t addr, const char* deviceName, uint8_t busIdx) {
   address = addr;
   bus = (busIdx < I2cDeviceManager::NUM_BUSES) ? busIdx : 0;
   name = deviceName;
+  typeId = I2C_DEVICE_COUNT;  // set by the driver that registered it, if any
+  instance = 0;
   
   // Initialize health
   health.consecutiveErrors = 0;
@@ -947,7 +964,12 @@ void I2cDevice::init(uint8_t addr, const char* deviceName, uint8_t busIdx) {
 // pre-registered whether or not it is plugged in.
 static void postDeviceHealthEvent(uint8_t kind, const I2cDevice& dev, const char* cause) {
   char subject[24];
-  if (dev.name && dev.name[0] && strcmp(dev.name, "Auto") != 0) {
+  if (dev.instance >= 2 &&
+      i2cSlot(static_cast<I2cDeviceType>(dev.typeId), dev.instance) != kI2cNoSlot) {
+    // A second instance of a type is named by its number ("Encoder 2");
+    // instance 1 keeps the name its driver registered.
+    i2cInstanceName(static_cast<I2cDeviceType>(dev.typeId), dev.instance, subject, sizeof(subject));
+  } else if (dev.name && dev.name[0] && strcmp(dev.name, "Auto") != 0) {
     snprintf(subject, sizeof(subject), "%s", dev.name);
   } else {
     snprintf(subject, sizeof(subject), "I2C 0x%02X", dev.address);
