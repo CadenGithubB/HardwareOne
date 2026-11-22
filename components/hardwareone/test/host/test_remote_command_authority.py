@@ -24,7 +24,9 @@ whoami, a setter, or a command this build lacks; that the sensor toggles the
 two senders use stay open to them; that administrators, the superadmin and the
 trusted internal identity keep the remote surface with the same CMD frame,
 "Remote command sent: <redacted> (reqId <msgId>)" reply and broadcast; that the
-guest gate, the registry's own admin/super refusals, the nested-wrapper
+guest gate (the guest's read-only status lines, B6: exactly the forms the web
+pages poll pass, every other line is the guest refusal), the registry's own
+admin/super refusals, the nested-wrapper
 refusal and the bond-readiness errors are unchanged; and that the refusal
 audit carries the redacted line.
 
@@ -62,6 +64,7 @@ CASES = (
     "sensor_toggles_need_admin",
     "administrators_keep_remote",
     "guest_and_unknown_account",
+    "guest_read_only_surface",
     "nested_refusal_first",
     "redaction",
     "local_lines_untouched",

@@ -3666,7 +3666,10 @@ esp_err_t handleCliCommand(httpd_req_t* req) {
   httpd_resp_set_type(req, "text/plain");
   if (!webSessionStillLive) {
     httpd_resp_set_status(req, "401 Unauthorized");
-  } else if (!ok && commandReplyIsAdminRefusal(redactedOut.c_str())) {
+  } else if (!ok && (commandReplyIsAdminRefusal(redactedOut.c_str()) ||
+                     commandReplyIsGuestRefusal(redactedOut.c_str()))) {
+    // A role refusal is a 403, which the page helpers show as the refusal
+    // popup (hw._cliRefusal in WebServer_Utils.cpp).
     httpd_resp_set_status(req, "403 Forbidden");
   } else if (!ok) {
     httpd_resp_set_status(req, "400 Bad Request");

@@ -156,7 +156,7 @@ static void streamBatteryContent(httpd_req_t* req, const String& username) {
     hw.fetchText('/api/files/view?name=battery.csv&mode=raw').then(function(text){
       var d=parseCSV(text);renderTable(d);drawChart(d);
       hw.setText(info,d.rows.length+' samples');
-    }).catch(function(e){hw.setText(info,'no log data yet');console.error('[BATTERY] log',e);});
+    }).catch(function(e){hw.setText(info,(e&&e.status===403)?('history not available: '+e.message):'no log data yet');console.error('[BATTERY] log',e);});
   }
   hw.on(hw.$('bat-refresh'),'click',loadLog);
   loadLog();

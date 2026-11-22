@@ -364,8 +364,13 @@ function __cameraLoadCapabilities() {
     "  updateToggleButtonStyle('btn-hmirror', (cameraAdjustmentStates.hmirror && !rotated));\n"
     "  updateToggleButtonStyle('btn-vflip', (cameraAdjustmentStates.vflip && !rotated));\n"
     "}\n"
+    // The state reads at load (camerafps, camerahmirror, cameravflip) are
+    // admin rows: below admin they are refused quietly (no refusal popup for
+    // a page the viewer only opened) and the controls keep their defaults.
+    // A press that changes the camera goes through __cameraAdjust and shows
+    // its refusal.
     "function __cameraCli(cmd) {\n"
-    "  return hw.postFormText('/api/cli', {cmd:cmd});\n"
+    "  return hw.postFormText('/api/cli', {cmd:cmd}, {hwQuietRefusal:true});\n"
     "}\n"
     "function __cameraIsOnText(t) {\n"
     "  try { return (/\\bon\\b/i).test(String(t || '')); } catch(_) { return false; }\n"
@@ -625,9 +630,16 @@ function __cameraLoadCapabilities() {
     "    });\n"
     "  }\n"
     "  \n"
+    // The frame endpoint refuses a guest (camera pictures are not on the
+    // guest surface); say so on the press instead of an image that never loads.
+    "  var guestRefused = function() {\n"
+    "    if (!hw.isGuest || !hw.isGuest()) return false;\n"
+    "    hw.showCliError('Guest accounts are view-only. The camera picture is not available to a guest.');\n"
+    "    return true;\n"
+    "  };\n"
     "  hw.on(captureBtn, 'click', function() {\n"
     "      console.log('[Camera] Capture requested');\n"
-    "      if (!img) return;\n"
+    "      if (!img || guestRefused()) return;\n"
     "      captureBtn.disabled = true;\n"
     "      img.onload = function(){\n"
     "        captureBtn.disabled = false;\n"
@@ -659,6 +671,7 @@ function __cameraLoadCapabilities() {
     "  \n"
     "  if (streamBtn && streamStopBtn && img) {\n"
     "    streamBtn.addEventListener('click', function() {\n"
+    "      if (guestRefused()) return;\n"
     "      console.log('[Camera] Starting stream');\n"
     "      __cameraStartStreamUi();\n"
     "      isStreaming = true;\n"

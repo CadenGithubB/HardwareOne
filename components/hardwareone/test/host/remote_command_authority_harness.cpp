@@ -112,6 +112,13 @@ static const CommandEntry kRegistry[] = {
     {"closepresence", false, false}, {"openfmradio", false, false}, {"closefmradio", false, false},
     {"oledbrightness", false, false}, {"imagedelete", true, false}, {"openwifi", true, false},
     {"bondrole", true, false},     {"userdelete", true, false},   {"factoryreset", true, true},
+    // The read-only status rows the web pages poll (guest surface, B6), and
+    // their neighbours that change state or need an administrator.
+    {"espnowstatus", false, false}, {"espnowmeshstatus", false, false}, {"espnowlist", false, false},
+    {"espnowdeviceinfo", false, false}, {"espnowtoporesults", false, false},
+    {"bondstatus", false, false},  {"g2nav", false, false},       {"g2verbose", false, false},
+    {"eistatus", false, false},    {"eimodellist", false, false}, {"srtuning", false, false},
+    {"eimodelload", false, false}, {"espnowmode", true, false},   {"espnowmeshrole", true, false},
 };
 static const size_t kRegistrySize = sizeof(kRegistry) / sizeof(kRegistry[0]);
 CommandResolution resolveCommand(const String& line) {
@@ -468,7 +475,7 @@ static void caseGuestAndUnknownAccount() {
     reset();
     const Outcome o = run(who(SOURCE_WEB, "gina"), line);
     checkd(o.result == 0 && gFrames.empty() &&
-               o.reply == "Error: Guest accounts are view-only. Only local login/logout and whoami are allowed." &&
+               o.reply == kCommandReplyGuestViewOnly &&
                gAudits.size() == 1 && gEvents.size() == 1,
            describe(line, o));
   }
@@ -508,6 +515,60 @@ static void caseRedaction() {
   // An administrator's remote login is sent; only the wire carries the secret.
   expectSent(who(SOURCE_SERIAL, "root", "cli"), "@login bob hunter2", "login bob hunter2", "login ***");
   check(!contains(gBroadcasts[0], "hunter2"));
+}
+
+// Owner decision B6: a guest views every interface. The read-only status
+// lines the pages load and poll their data with pass the guest gate in exactly
+// the form a page sends; any argument that could change state, any other
+// command and an admin row are refused with the guest reply, audited once.
+// The list is only the guest's: a user's lines are judged as before.
+struct Authorized { bool ok; std::string reply; };
+static Authorized authorize(const AuthContext& ctx, const char* line) {
+  char out[256] = {};
+  const String text = line;
+  const bool ok = authorizeCommand(ctx, text, resolveCommand(text), redactCmdForAudit(text, resolveCommand(text)),
+                                   out, sizeof(out));
+  return {ok, out};
+}
+static void caseGuestReadOnlySurface() {
+  const AuthContext gina = who(SOURCE_WEB, "gina", "/api/cli");
+  const char* allowed[] = {
+      "whoami",           "espnowstatus",          "espnowstatus json",       "ESPNOWSTATUS JSON",
+      "espnowmeshstatus", "espnowlist",            "espnowdeviceinfo",        "espnowdeviceinfo json",
+      "espnowtoporesults", "espnowtoporesults 2",  "espnowtoporesults 2 7f3a", "bondstatus",
+      "bondstatus json",  "g2nav",                 "g2verbose",               "eistatus",
+      "eimodellist",      "srtuning",              "  espnowlist  "};
+  for (const char* line : allowed) {
+    reset();
+    const Authorized a = authorize(gina, line);
+    checkd(a.ok && a.reply.empty() && gAudits.empty() && gEvents.empty(),
+           std::string("guest line '") + line + "' -> '" + a.reply + "'");
+  }
+  const char* refused[] = {
+      "g2nav on",            "g2nav toggle",          "g2verbose off",          "espnowstatus on",
+      "espnowstatus json x", "espnowlist all",        "espnowmeshstatus json",  "espnowtoporesults 1 2 3",
+      "bondstatus json x",   "srtuning 5",            "eistatus x",             "eimodelload \"m.tflite\"",
+      "espnowmode json",     "espnowmeshrole json",   "filedelete x",           "files",
+      "openthermal",         "espnowstatus \"json",  "remote:espnowstatus",    "@espnowlist",
+      "logout now x",        "whoami x",              "espnowstatusx",          "sensorlog status"};
+  for (const char* line : refused) {
+    reset();
+    const Authorized a = authorize(gina, line);
+    checkd(!a.ok && a.reply == kCommandReplyGuestViewOnly && commandReplyIsGuestRefusal(a.reply.c_str()) &&
+               !commandReplyIsAdminRefusal(a.reply.c_str()) && gAudits.size() == 1 && !gAudits[0].success &&
+               gEvents.size() == 1 && gEvents[0].subject == "gina",
+           std::string("guest line '") + line + "' -> '" + a.reply + "'");
+  }
+  // A user is judged by the rows, not by the guest list: a setter the guest is
+  // refused runs, an admin row is the admin refusal.
+  const AuthContext alice = who(SOURCE_WEB, "alice", "/api/cli");
+  reset();
+  Authorized a = authorize(alice, "g2nav on");
+  checkd(a.ok && a.reply.empty(), a.reply);
+  reset();
+  a = authorize(alice, "espnowmode json");
+  checkd(!a.ok && commandReplyIsAdminRefusal(a.reply.c_str()) && !commandReplyIsGuestRefusal(a.reply.c_str()),
+         a.reply);
 }
 
 // Not a remote line: the routing does not answer and sends nothing.
@@ -574,6 +635,7 @@ int main(int argc, char** argv) {
       {"sensor_toggles_need_admin", caseSensorTogglesNeedAdmin},
       {"administrators_keep_remote", caseAdministratorsKeepRemote},
       {"guest_and_unknown_account", caseGuestAndUnknownAccount},
+      {"guest_read_only_surface", caseGuestReadOnlySurface},
       {"nested_refusal_first", caseNestedRefusalFirst},
       {"redaction", caseRedaction},
       {"local_lines_untouched", caseLocalLinesUntouched},

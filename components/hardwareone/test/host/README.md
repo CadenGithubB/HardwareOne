@@ -2111,7 +2111,15 @@ and event sinks and the bond transport are doubles. It checks that:
   which the reply owner parses back (A13), and one redacted broadcast;
 - the guest gate, the registry's own admin and super refusals, the
   nested-wrapper refusal (first, for everyone), the bond-readiness errors and
-  local lines are unchanged.
+  local lines are unchanged;
+- `guest_read_only_surface` (owner decision B6): a guest may run, besides
+  `login`/`logout`/`whoami`, exactly the read-only status lines the web pages
+  load and poll (`espnowstatus [json]`, `espnowmeshstatus`, `espnowlist`,
+  `espnowdeviceinfo [json]`, `espnowtoporesults [page] [id]`,
+  `bondstatus [json]`, bare `g2nav`/`g2verbose`, `eistatus`, `eimodellist`,
+  `srtuning`). Any other argument, any other command, an admin row and a
+  wrapped line get `kCommandReplyGuestViewOnly` with one audit entry and one
+  denial event; a user's lines are judged by the rows as before.
 
 A source check confirms that `executeCommand`'s routing is the only caller of
 `buildBondedCommandPayload`, so no second sender bypasses the gate.
@@ -2119,6 +2127,35 @@ A source check confirms that `executeCommand`'s routing is the only caller of
 another tree. The pre-fix tree (af1ed97c) fails the user, unknown-command,
 guest-and-unknown-account and redaction cases. Not covered: the peer's
 `v4_handle_cmd`, the radio, and the bonded-only FS RPC (`espnow_fs_transcript_privacy`).
+
+## Guest view-only web (owner decision B6)
+
+```sh
+python3 components/hardwareone/test/host/test_web_guest_gate.py
+python3 components/hardwareone/test/host/test_web_guest_view_browser.py
+```
+
+`web_guest_gate` compiles, unchanged, the guest gate of `WebServer_Utils.cpp`
+(`webGuestSendForbidden`, `webGuestApiAllowed`, `webResolveGuestRole`,
+`webGuestMutationAllowed`, `webGuestAccessAllowed`) over a fake request and
+roster. For a guest every HTML page opens (`/cli` answers with its own
+view-only notice), the read-only status GETs pass, and `POST /api/cli` passes
+so the command guest surface decides. Every other POST (`/api/cli/batch`
+included) and the file, log, capture and admin GETs get one 403 whose JSON
+carries `code:"guest_forbidden"` and the sentence a page shows
+(`error:"Guest accounts are view-only"`). An unresolvable account is refused;
+users and administrators are never stopped by the gate.
+
+`web_guest_view_browser` runs the two shipping helper scripts every signed-in
+page gets (the role/theme script with `hw.applyGuestViewOnly`, the fetch
+helpers with `hw._cliRefusal`) against a fake DOM and fetch, under Node.js or,
+without it, macOS `jsc` (exit 77, skipped, with neither). A guest sees every
+`[data-guest-hide]` control; a refused press (the command line's guest reply,
+or the gate's refusal of a POST) is one refusal popup with the reason, not raw
+JSON; a refused page load (GET) is no popup and rejects with the sentence and
+403 for the page's own state; a non-guest 403 on a non-command POST and a
+`hwQuietRefusal` read are not popups. `--component <dir>` reads another tree;
+the pre-B6 sources fail both suites.
 
 ## Continuous STT trim default
 

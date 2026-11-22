@@ -21,6 +21,20 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this section collects
 everything user-visible since the v0.99.99.1 tag.
 
+### Changed (guest web view)
+- A guest (owner decision B6: guests view interfaces only) now sees every web page and every
+  control. A control that changes the device answers with the refusal popup ("Guest accounts are
+  view-only") instead of being hidden; the Command Line link is listed and its page says it is not
+  available to a guest. The pages that load their data with read-only status commands work for a
+  guest: ESP-NOW status, mesh health, the device list, device info, topology results and bond
+  status, the Bluetooth page's G2 toggles, the Edge Impulse card and the Speech tuning values.
+  Files, logs, recordings, camera pictures, transcripts and battery history are still refused and
+  now say so on the page (they used to stay empty, show `guest_forbidden`, or pop up raw JSON). A
+  signed-in guest gets its name and Logout in the menu bar instead of a Login button. The
+  command reply for a guest is now "Error: Guest accounts are view-only. This command is not
+  available to a guest." Host-tested (`web_guest_gate`, `web_guest_view_browser`,
+  `remote_command_authority`); not checked on a device.
+
 ### Added
 - Boot debug file (owner decision B13): every boot runs with every debug flag on and every log
   level shown until boot finishes (or the buffer fills), into a 56 KB PSRAM buffer (4 KB of internal memory on a board without PSRAM) instead

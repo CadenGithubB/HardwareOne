@@ -385,7 +385,7 @@ are what comparisons use.
 
 | Role | Rank | Can do |
 | ---- | :--: | ------ |
-| `guest` | 0 | A real, named account with view-only authorization. It may use caller-local `login`, `logout`, and `whoami`; filesystem access is masked to read |
+| `guest` | 0 | A real, named account with view-only authorization. It may use caller-local `login`, `logout`, and `whoami`, and the read-only status lines the web pages load (`espnowstatus [json]`, `espnowmeshstatus`, `espnowlist`, `espnowdeviceinfo [json]`, `espnowtoporesults`, `bondstatus [json]`, bare `g2nav`/`g2verbose`, `eistatus`, `eimodellist`, `srtuning`); anything else answers "Guest accounts are view-only." On the web a guest opens every page and sees every control; a control that changes the device answers with that refusal, and files, logs, recordings, camera pictures and transcripts say they are not available. Filesystem access is masked to read |
 | `user` | 1 | Ordinary commands; not admin-gated ones |
 | `admin` | 2 | Admin commands - user management, most settings, device control |
 | `superadmin` | 3 | Additionally the identity / crypto / destructive / auth-posture command set |

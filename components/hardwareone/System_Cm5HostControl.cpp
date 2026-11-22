@@ -1592,7 +1592,7 @@ Cm5HostCallbackIntrinsicResult cm5HostControlHandleCallbackIntrinsic(
         break;
     }
   } else if (!sessionMayControl) {
-    result = "Error: Guest accounts are view-only. Only local login/logout and whoami are allowed.";
+    result = kCommandReplyGuestViewOnly;
   } else {
     const String callbackArgs = args.remaining(2);
     switch (callback) {

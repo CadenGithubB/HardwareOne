@@ -1634,7 +1634,8 @@ function loadNotifPolicy() {
   // The policy is sparse precisely so it can never outgrow the response buffer.
   Promise.all([
     hw.getEventKindFamilies(),
-    hw.postFormText('/api/cli', { cmd: 'notifydevicekind list json' })
+    // Admin row: the refusal is this pane's own text below, not a popup.
+    hw.postFormText('/api/cli', { cmd: 'notifydevicekind list json' }, { hwQuietRefusal: true })
   ])
   .then(function(res) {
     var pm = res[1].match(/\{"kinds":\{[\s\S]*\}\}/);

@@ -3779,9 +3779,13 @@ const char* cmd_perftop(const String& originalCmd) {
 
 // Note: resolveRegistryCommandKey() is now defined in command_system.cpp
 
-// Guest accounts may authenticate, but the command surface is caller-local
-// login/logout plus whoami only. View-only UX lives in web/OLED; this is the
-// CLI chokepoint shared by every transport that funnels through executeCommand.
+// Guest accounts may authenticate and look, nothing more (owner decision B6:
+// "guests view interfaces only"). The command surface is caller-local
+// login/logout, whoami, and the exact read-only status forms the web pages
+// load and poll their data with. This is the CLI chokepoint shared by every
+// transport that funnels through executeCommand; the admin and super-admin
+// row checks still apply after it, so this list never lets a guest run what
+// an ordinary user may not.
 static bool commandAllowedForGuest(const String& line) {
   CommandArgs args(line);
   if (args.unterminatedQuote() || args.count() == 0) return false;
@@ -3798,6 +3802,38 @@ static bool commandAllowedForGuest(const String& line) {
   }
   if (args.arg(0).equalsIgnoreCase("whoami")) {
     return args.count() == 1;
+  }
+
+  // Read-only status forms. Each is the exact shape a page sends: the bare
+  // name, the name plus `json`, or (topology results) the page and request id
+  // of a snapshot. Any other argument may change state (`g2nav on`) and is
+  // refused. Nothing here reads users, files, logs, keys or credentials.
+  enum : uint8_t { kBare, kBareOrJson, kPaged };
+  static const struct { const char* name; uint8_t form; } kReadOnly[] = {
+      {"espnowstatus", kBareOrJson},      // ESP-NOW page status box
+      {"espnowmeshstatus", kBare},        // mesh peer health (10 s poll)
+      {"espnowlist", kBare},              // paired-device list
+      {"espnowdeviceinfo", kBareOrJson},  // this device's name/room/zone
+      {"espnowtoporesults", kPaged},      // a finished topology snapshot
+      {"bondstatus", kBareOrJson},        // bond role and link state
+      {"g2nav", kBare},                   // Bluetooth page toggle state
+      {"g2verbose", kBare},               // Bluetooth page toggle state
+      {"eistatus", kBare},                // Edge Impulse card status
+      {"eimodellist", kBare},             // Edge Impulse model picker
+      {"srtuning", kBare},                // Speech page tuning values
+  };
+  for (const auto& row : kReadOnly) {
+    if (!args.arg(0).equalsIgnoreCase(row.name)) continue;
+    switch (row.form) {
+      case kBare:
+        return args.count() == 1;
+      case kBareOrJson:
+        return args.count() == 1 ||
+               (args.count() == 2 && args.arg(1).equalsIgnoreCase("json"));
+      case kPaged:
+        return args.count() <= 3;  // espnowtoporesults [page] [request-id]
+    }
+    return false;
   }
   return false;
 }
@@ -4050,7 +4086,7 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
     String cmdName = line;
     int spacePos = line.indexOf(' ');
     if (spacePos > 0) cmdName = line.substring(0, spacePos);
-    snprintf(out, outSize, "Error: Guest accounts are view-only. Only local login/logout and whoami are allowed.");
+    snprintf(out, outSize, "%s", kCommandReplyGuestViewOnly);
     { char auditBuf[180]; snprintf(auditBuf, sizeof(auditBuf), "cmd=%.170s", redactedLine.c_str()); logAuthAttempt(false, ctx.path.c_str(), ctx.user, ctx.ip, auditBuf); }
     systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), cmdName.c_str());
     return false;

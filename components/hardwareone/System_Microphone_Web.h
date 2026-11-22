@@ -207,7 +207,16 @@ inline void streamMicrophoneSensorJs(httpd_req_t* req) {
     "        list.appendChild(item);\n"
     "      });\n"
     "    })\n"
-    "    .catch(function(e){console.error('Failed to load recordings',e);});\n"
+    // A refusal (a guest: recordings are files) is said in the list, not
+    // left as an empty panel.
+    "    .catch(function(e){\n"
+    "      console.error('Failed to load recordings',e);\n"
+    "      if(!e || e.status!==403) return;\n"
+    "      var list = hw.$('mic-recordings-list');\n"
+    "      hw.setText(hw.$('mic-rec-count'), '(-)');\n"
+    "      if(list) list.textContent = 'Recordings not available: ' + e.message;\n"
+    "      window.__lastRecCount = -1;\n"
+    "    });\n"
     "};"
     // micdelete takes the name as one positional quoted token, which
     // CommandArgs::parse ends at the first " and does not unescape: send the

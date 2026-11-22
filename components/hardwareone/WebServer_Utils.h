@@ -460,7 +460,8 @@ inline const char* getFileBrowserScript() {
             var color = 'var(--danger)';
             var errStr = ('' + (data.error || '')).toLowerCase();
             if (errStr.indexOf('guest') >= 0) {
-              // Guest gate (webGuestSendForbidden -> error:"guest_forbidden"):
+              // Guest gate (webGuestSendForbidden -> code:"guest_forbidden",
+              // error:"Guest accounts are view-only"):
               // the whole files surface is off-limits to view-only guests, not
               // an admin-vs-user thing — say so instead of "Admin required".
               msg = 'File browsing is not available in a view-only guest session';

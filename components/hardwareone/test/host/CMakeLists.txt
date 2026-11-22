@@ -2091,6 +2091,19 @@ if(NOT HW1_NODE_EXECUTABLE)
                   "and logging_system_config_browser are registered but disabled; "
                   "pass -DHW1_NODE_EXECUTABLE=/path/to/node")
 endif()
+# Guest view-only web (owner decision B6): the web guest gate, and the page
+# helpers' refusal popups run in Node.js or macOS jsc (77 = skipped without).
+add_test(
+  NAME web_guest_gate
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_guest_gate.py
+          --cxx ${CMAKE_CXX_COMPILER})
+add_test(
+  NAME web_guest_view_browser
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_guest_view_browser.py
+          --node ${HW1_NODE_CMD})
+set_tests_properties(web_guest_view_browser PROPERTIES SKIP_RETURN_CODE 77)
 add_test(
   NAME setup_espnow_application
   COMMAND ${Python3_EXECUTABLE}

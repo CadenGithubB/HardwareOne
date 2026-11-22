@@ -49,6 +49,10 @@ constexpr char kCommandReplyEmptyCommand[] =
 // needs. The executor appends the command name and the next action.
 constexpr char kCommandReplyAdminRequired[] = "Error: Admin access required";
 constexpr char kCommandReplySuperAdminRequired[] = "Error: Super-admin access required";
+// The executor's refusal of a guest (view-only) account for a line outside the
+// guest surface (commandAllowedForGuest, System_Utils.cpp).
+constexpr char kCommandReplyGuestViewOnly[] =
+    "Error: Guest accounts are view-only. This command is not available to a guest.";
 // Starting, stopping and setting up logging is an administrator's job; every
 // signed-in account may read the status and the logs it may read.
 constexpr char kCommandReplyLoggingAdminRequired[] =
@@ -97,6 +101,12 @@ inline bool commandReplyIsAdminRefusal(const char* reply) {
          (strncmp(reply, kCommandReplyAdminRequired, sizeof(kCommandReplyAdminRequired) - 1) == 0 ||
           strncmp(reply, kCommandReplySuperAdminRequired,
                   sizeof(kCommandReplySuperAdminRequired) - 1) == 0);
+}
+
+// The reply is the executor's guest (view-only) refusal.
+inline bool commandReplyIsGuestRefusal(const char* reply) {
+  return reply && strncmp(reply, kCommandReplyGuestViewOnly,
+                          sizeof(kCommandReplyGuestViewOnly) - 1) == 0;
 }
 
 // The text after the "OK: " stamp, for a row or a toast; the reply itself when

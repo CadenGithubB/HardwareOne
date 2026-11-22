@@ -295,9 +295,9 @@ window.refreshAutomationSystemStatus = function() {
       statusDot.className = 'status-indicator status-enabled';
       statusText.textContent = 'Automation system is enabled and running';
       enableBtn.style.display = 'none';
-      disableBtn.style.display = hw.isGuest() ? 'none' : 'inline-block';
+      disableBtn.style.display = 'inline-block';  // a guest's press gets the refusal popup
       warningDiv.style.display = 'none';
-      autoForm.style.display = hw.isGuest() ? 'none' : 'block';
+      autoForm.style.display = 'block';
       hw.show(autosList);
       if (typeof loadAutos === 'function') {
         loadAutos();
@@ -305,7 +305,7 @@ window.refreshAutomationSystemStatus = function() {
     } else {
       statusDot.className = 'status-indicator status-disabled';
       statusText.textContent = 'Automation system is disabled';
-      enableBtn.style.display = hw.isGuest() ? 'none' : 'inline-block';
+      enableBtn.style.display = 'inline-block';
       disableBtn.style.display = 'none';
       warningDiv.style.display = 'block';
       autoForm.style.display = 'none';

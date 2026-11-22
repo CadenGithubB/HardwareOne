@@ -455,16 +455,24 @@ bool webLoadHttpsCertPair(String& certOut, String& keyOut, const char* reason) {
 // Guest HTTP access gate
 // ============================================================================
 
+// The refusal a page shows as it is: "error" is the sentence (pages put
+// data.error in their status line or the refusal popup), "code" is the
+// machine-readable reason the page helpers match (hw._refusal).
 static void webGuestSendForbidden(httpd_req_t* req) {
   httpd_resp_set_status(req, "403 Forbidden");
   httpd_resp_set_type(req, "application/json");
   httpd_resp_sendstr(req,
-    "{\"success\":false,\"error\":\"guest_forbidden\","
+    "{\"success\":false,\"code\":\"guest_forbidden\","
+    "\"error\":\"Guest accounts are view-only\","
     "\"message\":\"Guest accounts are view-only\"}");
 }
 
-// Surface-level status / list APIs guests may poll. Not files, CLI, camera
-// capture, bond FS, admin, or other deep/control surfaces.
+// Surface-level status / list APIs guests may poll. Not files, camera
+// capture, bond FS, admin, or other deep/control surfaces. The command line
+// (POST /api/cli) is not on this list: it is let through by
+// webGuestAccessAllowed so the command chokepoint (commandAllowedForGuest)
+// runs the read-only status lines the pages poll and answers every other line
+// with the guest refusal.
 static bool webGuestApiAllowed(const char* path) {
   static const char* const kAllow[] = {
     "/api/ping",
@@ -570,17 +578,22 @@ bool webGuestAccessAllowed(httpd_req_t* req, const AuthContext& ctx) {
   }
   path[n] = '\0';
 
+  // The single command line: the executor decides, with the same guest
+  // surface every transport has (read-only status lines pass; any other line
+  // gets kCommandReplyGuestViewOnly, which handleCliCommand sends as a 403 the
+  // page shows as the refusal popup). /api/cli/batch stays refused here: the
+  // pages batch only settings writes and confirmations.
+  if (req->method == HTTP_POST && strcmp(path, "/api/cli") == 0) return true;
+
   if (req->method != HTTP_GET && req->method != HTTP_HEAD) {
     webGuestSendForbidden(req);
     return false;
   }
 
-  // HTML view pages + logout + browser chrome. Block the CLI page.
+  // HTML view pages + logout + browser chrome. Every page opens; one whose
+  // data a guest may not see says so itself (the /cli page answers with its
+  // view-only notice).
   if (strncmp(path, "/api/", 5) != 0) {
-    if (strcmp(path, "/cli") == 0) {
-      webGuestSendForbidden(req);
-      return false;
-    }
     return true;
   }
 
@@ -653,12 +666,10 @@ String generateNavigation(const String& activePage, const String& username, cons
     nav += text;
     nav += "</a>";
   };
-  const bool guestRole = username.length() > 0 && isGuestUser(username);
   link("/dashboard", "dashboard", "Dashboard");
-  // Guests are view-only — free-form CLI is not part of that surface.
-  if (!guestRole) {
-    link("/cli", "cli", "Command Line");
-  }
+  // Every page is listed for a guest too (owner rule: refuse, do not hide);
+  // the /cli page answers a guest with its view-only notice.
+  link("/cli", "cli", "Command Line");
 #if ENABLE_WEB_SENSORS
   link("/sensors", "sensors", "Sensors");
 #endif
@@ -709,10 +720,9 @@ String generateNavigation(const String& activePage, const String& username, cons
   link("/settings", "settings", "Settings");
   nav += "</div>";
   nav += "<div class=\"user-info\">";
-  String navRole;
-  const bool namedGuest =
-      getUserAuthorizationRole(username, navRole) && navRole == kRoleGuest;
-  if (username.length() == 0 || namedGuest) {
+  // A signed-in guest is a named account like any other: it sees its name and
+  // Logout (it used to get a Login button and no way to sign out).
+  if (username.length() == 0) {
     nav += "<a href=\"/login\" class=\"login-btn\">Login</a>";
   } else {
     nav += "<div class=\"username\">" + username + "</div>";
@@ -917,20 +927,22 @@ void streamBeginHtml(httpd_req_t* req,
       httpd_resp_send_chunk(req, s.c_str(), s.length());
     }
     streamChunkC(req,
-      "<style>.guest-view [data-guest-hide]{display:none!important}"
-      ".guest-view .guest-banner{display:block!important}</style>");
-    streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});function sysTheme(){try{return (w.matchMedia&&w.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}catch(_){return 'light'}}function dbg(){try{return !!(w.localStorage&&w.localStorage.getItem('hwDebugTheme')==='1')}catch(_){return false}}function log(){try{if(dbg())console.log.apply(console,arguments)}catch(_){}}hw.updateThemeIcon=function(){var btn=document.getElementById('theme-toggle-icon');if(btn){var t=document.documentElement.dataset.theme||'light';btn.textContent=(t==='dark')?'🌙':'☀️'}};hw.applyTheme=function(pref){var v=(pref==='system'||!pref)?sysTheme():pref;document.documentElement.dataset.theme=v;hw._themePref=pref||'light';if(document.body){document.body.style.background=(v==='dark')?'linear-gradient(135deg,#07070b 0%,#151520 100%)':'linear-gradient(135deg,#667eea 0%,#764ba2 100%)'}hw.updateThemeIcon();log('[theme] apply pref=',pref,'->',v)};hw.loadThemePref=function(){log('[theme] load pref from /api/user/settings');return (hw.fetchJSON?hw.fetchJSON('/api/user/settings') : fetch('/api/user/settings',{credentials:'include',cache:'no-store',headers:{'Accept':'application/json'}}).then(function(r){return r.json()})).then(function(d){var pref=(d&&d.settings&&d.settings.theme)?d.settings.theme:'light';log('[theme] loaded',pref,'raw=',d);return pref}).catch(function(e){log('[theme] load failed',e);return 'light'})};hw.saveThemePref=function(pref){var body={theme:pref};log('[theme] save',body);return (hw.postJSON?hw.postJSON('/api/user/settings',body) : fetch('/api/user/settings',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()})).then(function(d){log('[theme] save resp',d);return d}).catch(function(e){log('[theme] save failed',e);return null})};hw.initTheme=function(){var initial=document.documentElement.dataset.theme||'light';document.documentElement.dataset.theme=initial;log('[theme] init initial=',initial);hw.loadThemePref().then(function(pref){hw.applyTheme(pref)});try{var mq=w.matchMedia('(prefers-color-scheme: dark)');if(mq&&mq.addEventListener){mq.addEventListener('change',function(){if(hw._themePref==='system')hw.applyTheme('system')})}}catch(_){}};hw.cycleTheme=function(){var cur=hw._themePref||'light';var next=(cur==='light')?'dark':((cur==='dark')?'system':'light');hw.applyTheme(next);hw.saveThemePref(next)};hw.isGuest=function(){return !!(w.__hwUser&&w.__hwUser.isGuest)};hw.isAdmin=function(){return !!(w.__hwUser&&w.__hwUser.isAdmin)};hw.applyGuestViewOnly=function(){if(!hw.isGuest())return;try{document.documentElement.classList.add('guest-view');var nodes=document.querySelectorAll('[data-guest-hide]');for(var i=0;i<nodes.length;i++){nodes[i].style.display='none'}var ban=document.getElementById('hw-guest-banner');if(ban)ban.style.display='block'}catch(_){}};try{hw.initTheme();}catch(_){}})(window);</script>");
+      // Owner rule (2026-11-21): a guest sees every control; pressing one that
+      // changes the device answers with the refusal popup (hw._cliRefusal), so
+      // [data-guest-hide] only marks those controls and hides nothing.
+      "<style>.guest-view .guest-banner{display:block!important}</style>");
+    streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});function sysTheme(){try{return (w.matchMedia&&w.matchMedia('(prefers-color-scheme: dark)').matches)?'dark':'light'}catch(_){return 'light'}}function dbg(){try{return !!(w.localStorage&&w.localStorage.getItem('hwDebugTheme')==='1')}catch(_){return false}}function log(){try{if(dbg())console.log.apply(console,arguments)}catch(_){}}hw.updateThemeIcon=function(){var btn=document.getElementById('theme-toggle-icon');if(btn){var t=document.documentElement.dataset.theme||'light';btn.textContent=(t==='dark')?'🌙':'☀️'}};hw.applyTheme=function(pref){var v=(pref==='system'||!pref)?sysTheme():pref;document.documentElement.dataset.theme=v;hw._themePref=pref||'light';if(document.body){document.body.style.background=(v==='dark')?'linear-gradient(135deg,#07070b 0%,#151520 100%)':'linear-gradient(135deg,#667eea 0%,#764ba2 100%)'}hw.updateThemeIcon();log('[theme] apply pref=',pref,'->',v)};hw.loadThemePref=function(){log('[theme] load pref from /api/user/settings');return (hw.fetchJSON?hw.fetchJSON('/api/user/settings') : fetch('/api/user/settings',{credentials:'include',cache:'no-store',headers:{'Accept':'application/json'}}).then(function(r){return r.json()})).then(function(d){var pref=(d&&d.settings&&d.settings.theme)?d.settings.theme:'light';log('[theme] loaded',pref,'raw=',d);return pref}).catch(function(e){log('[theme] load failed',e);return 'light'})};hw.saveThemePref=function(pref){var body={theme:pref};log('[theme] save',body);return (hw.postJSON?hw.postJSON('/api/user/settings',body) : fetch('/api/user/settings',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify(body)}).then(function(r){return r.json()})).then(function(d){log('[theme] save resp',d);return d}).catch(function(e){log('[theme] save failed',e);return null})};hw.initTheme=function(){var initial=document.documentElement.dataset.theme||'light';document.documentElement.dataset.theme=initial;log('[theme] init initial=',initial);hw.loadThemePref().then(function(pref){hw.applyTheme(pref)});try{var mq=w.matchMedia('(prefers-color-scheme: dark)');if(mq&&mq.addEventListener){mq.addEventListener('change',function(){if(hw._themePref==='system')hw.applyTheme('system')})}}catch(_){}};hw.cycleTheme=function(){var cur=hw._themePref||'light';var next=(cur==='light')?'dark':((cur==='dark')?'system':'light');hw.applyTheme(next);hw.saveThemePref(next)};hw.isGuest=function(){return !!(w.__hwUser&&w.__hwUser.isGuest)};hw.isAdmin=function(){return !!(w.__hwUser&&w.__hwUser.isAdmin)};hw.applyGuestViewOnly=function(){if(!hw.isGuest())return;try{document.documentElement.classList.add('guest-view');var ban=document.getElementById('hw-guest-banner');if(ban)ban.style.display='block'}catch(_){}};try{hw.initTheme();}catch(_){}})(window);</script>");
     streamChunkC(req,
       "<div id=\"hw-guest-banner\" class=\"guest-banner\" style=\"display:none;margin:0.75rem 1rem 0;padding:0.6rem 0.9rem;"
       "background:rgba(113,128,150,0.15);border:1px solid var(--border);border-radius:6px;color:var(--panel-fg);font-size:0.9rem\">"
-      "View-only guest session — settings and commands that change the device are unavailable."
+      "View-only guest session — you can look at every page; a control that changes the device answers with a refusal."
       "</div>");
     streamChunkC(req,
       "<script>document.addEventListener('DOMContentLoaded',function(){"
       "try{if(window.hw&&hw.applyGuestViewOnly)hw.applyGuestViewOnly()}catch(_){}"
       "});</script>");
   }
-    streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});hw.qs=function(s,c){return (c||document).querySelector(s)};hw.qsa=function(s,c){return (c||document).querySelectorAll(s)};hw.on=function(e,v,f){if(e)e.addEventListener(v,f)};hw.$=function(x){return typeof x==='string'?document.getElementById(x):x};hw.setText=function(x,t){var el=hw.$(x);if(el)el.textContent=t};hw.setHTML=function(x,h){var el=hw.$(x);if(el)el.innerHTML=h};hw.show=function(x){var el=hw.$(x);if(el)el.style.display=''};hw.hide=function(x){var el=hw.$(x);if(el)el.style.display='none'};hw.toggle=function(x,sh){(sh?hw.show:hw.hide)(x)};hw._auth401=function(r){if(r.status!==401)return r;return r.json().then(function(d){if(d&&d.error==='auth_required'&&d.reload){w.location.href='/login'}throw new Error('auth_required')}).catch(function(){w.location.href='/login';throw new Error('auth_required')})};hw.esc=function(s){return String(s==null?'':s).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;'})};hw._httpError=function(r){return Promise.resolve().then(function(){return r.text()}).catch(function(){return ''}).then(function(t){var s=String(t||'').trim(),m=s;if(s){var d=null;try{d=JSON.parse(s)}catch(_){}if(d&&typeof d==='object'){var v=(d.error!=null&&d.error!=='')?d.error:d.message;m=(v==null)?'':String(v)}}m=m.trim().replace(/^Error:\\s*/,'');var e=new Error(m||('HTTP '+r.status));e.status=r.status;e.reply=t;throw e})};hw.fetchJSON=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';if(!o.headers)o.headers={};o.headers['Accept']='application/json';return fetch(u,o).then(hw._auth401).then(function(r){if(!r.ok)return hw._httpError(r);return r.json()})};hw.postJSON=function(u,b,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/json'},o.headers||{});o.body=JSON.stringify(b||{});return hw.fetchJSON(u,o)};hw.cliFailed=function(t){return /^(?:Error|ERROR|Usage:|Unknown command:)/.test(String(t||'').trim())};hw._shownErr={};hw.showCliError=function(t){var m=String(t||'').trim().replace(/^Error:\\s*/,'');if(!m||m==='auth_required')return;var n=Date.now(),last=hw._shownErr[m];if(last&&n-last<8000){var tw=document.getElementById('hw-toast-wrap');if(!tw||[].some.call(tw.children,function(c){return !c.classList.contains('out')&&String(c.textContent).indexOf(m)>=0}))return}hw._shownErr[m]=n;var dd=document.getElementById('hw-dlg'),dm=document.getElementById('hw-dlg-msg');if(dd&&dm&&dd.style.display!=='none'&&String(dm.textContent).indexOf(m)>=0)return;if(typeof hw.notify==='function')hw.notify('error',m,8000);else if(typeof w.hwAlert==='function')w.hwAlert(m);else w.alert(m)};hw._recentErr=function(t){t=String(t||'');var n=Date.now();for(var k in hw._shownErr){if(n-hw._shownErr[k]<8000&&t.indexOf(k)>=0)return true}return false};hw.showCliReply=function(t){if(hw.cliFailed(t))hw.showCliError(t);return t};hw._cliUrl=function(u){return /^\\/api\\/(?:bond\\/)?cli(?:\\?|$)/.test(String(u||''))};hw._cliRefusal=function(u,o){return function(r){if(r&&r.status===403&&!(o&&o.hwQuietRefusal)&&hw._cliUrl(u)){try{r.clone().text().then(hw.showCliError).catch(function(){})}catch(_){}}return r}};hw.postForm=function(u,form,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/x-www-form-urlencoded'},o.headers||{});var b=[];for(var k in (form||{})){if(Object.prototype.hasOwnProperty.call(form,k)){b.push(encodeURIComponent(k)+'='+encodeURIComponent(form[k]))}};o.body=b.join('&');if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401).then(hw._cliRefusal(u,o))};hw.fetchText=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401).then(function(r){if(!r.ok)return hw._httpError(r);return r.text()})};hw.postFormText=function(u,form,o){return hw.postForm(u,form,o).then(function(r){return r.text().then(function(t){if(r.ok)return t;var m=String(t||'').trim().replace(/^Error:\\s*/,'');var e=new Error(m||('HTTP '+r.status));e.status=r.status;e.reply=t;throw e})})};hw.cliConfirm=function(cliCmd,userPrompt,opts){opts=opts||{};var url=(opts.target==='bond')?'/api/bond/cli/batch':'/api/cli/batch';var ask=(typeof w.hwConfirm==='function')?w.hwConfirm(userPrompt):Promise.resolve(w.confirm(userPrompt));return ask.then(function(ok){if(!ok)return {cancelled:true,ok:false,pending:false,result:''};return hw.postJSON(url,{commands:[cliCmd,'yes'],interactive:true}).then(function(data){var rs=(data&&data.results)||[];var fl=(data&&Array.isArray(data.failed))?data.failed:null;var first=rs[0]||'';var bad=/^(?:Error|ERROR|Usage:|Unknown command:)/;var firstBad=bad.test(first)||(fl&&fl.indexOf(0)>=0);if(!data||firstBad)return {cancelled:false,ok:false,pending:false,result:first||(data&&data.error)||'Error: no response'};if(data.ok===false)return {cancelled:false,ok:false,pending:false,result:rs[1]||data.error||first||'Error: no response'};var result=rs[1]||'';var pending=/^Pending(?:\\s|:|$)/i.test(result);var failed=!result||(fl?fl.indexOf(1)>=0:(bad.test(result)||/^(?:Failed|Cancelled|\\[ERROR\\])(?:\\s|:|$)/i.test(result)));return {cancelled:false,ok:!failed,pending:pending,result:result};});});};try{console.log('[HW] helpers ready');}catch(_){} })(window);</script>");
+    streamChunkC(req, "<script>(function(w){'use strict';var hw=w.hw||(w.hw={});hw.qs=function(s,c){return (c||document).querySelector(s)};hw.qsa=function(s,c){return (c||document).querySelectorAll(s)};hw.on=function(e,v,f){if(e)e.addEventListener(v,f)};hw.$=function(x){return typeof x==='string'?document.getElementById(x):x};hw.setText=function(x,t){var el=hw.$(x);if(el)el.textContent=t};hw.setHTML=function(x,h){var el=hw.$(x);if(el)el.innerHTML=h};hw.show=function(x){var el=hw.$(x);if(el)el.style.display=''};hw.hide=function(x){var el=hw.$(x);if(el)el.style.display='none'};hw.toggle=function(x,sh){(sh?hw.show:hw.hide)(x)};hw._auth401=function(r){if(r.status!==401)return r;return r.json().then(function(d){if(d&&d.error==='auth_required'&&d.reload){w.location.href='/login'}throw new Error('auth_required')}).catch(function(){w.location.href='/login';throw new Error('auth_required')})};hw.esc=function(s){return String(s==null?'':s).replace(/[&<>\"']/g,function(c){return c==='&'?'&amp;':c==='<'?'&lt;':c==='>'?'&gt;':c==='\"'?'&quot;':'&#39;'})};hw._httpError=function(r){return Promise.resolve().then(function(){return r.text()}).catch(function(){return ''}).then(function(t){var s=String(t||'').trim(),m=s;if(s){var d=null;try{d=JSON.parse(s)}catch(_){}if(d&&typeof d==='object'){var v=(d.error!=null&&d.error!=='')?d.error:d.message;m=(v==null)?'':String(v)}}m=m.trim().replace(/^Error:\\s*/,'');var e=new Error(m||('HTTP '+r.status));e.status=r.status;e.reply=t;throw e})};hw.fetchJSON=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';if(!o.headers)o.headers={};o.headers['Accept']='application/json';return fetch(u,o).then(hw._auth401).then(hw._cliRefusal(u,o)).then(function(r){if(!r.ok)return hw._httpError(r);return r.json()})};hw.postJSON=function(u,b,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/json'},o.headers||{});o.body=JSON.stringify(b||{});return hw.fetchJSON(u,o)};hw.cliFailed=function(t){return /^(?:Error|ERROR|Usage:|Unknown command:)/.test(String(t||'').trim())};hw._shownErr={};hw.showCliError=function(t){var m=String(t||'').trim().replace(/^Error:\\s*/,'');if(!m||m==='auth_required')return;var n=Date.now(),last=hw._shownErr[m];if(last&&n-last<8000){var tw=document.getElementById('hw-toast-wrap');if(!tw||[].some.call(tw.children,function(c){return !c.classList.contains('out')&&String(c.textContent).indexOf(m)>=0}))return}hw._shownErr[m]=n;var dd=document.getElementById('hw-dlg'),dm=document.getElementById('hw-dlg-msg');if(dd&&dm&&dd.style.display!=='none'&&String(dm.textContent).indexOf(m)>=0)return;if(typeof hw.notify==='function')hw.notify('error',m,8000);else if(typeof w.hwAlert==='function')w.hwAlert(m);else w.alert(m)};hw._recentErr=function(t){t=String(t||'');var n=Date.now();for(var k in hw._shownErr){if(n-hw._shownErr[k]<8000&&t.indexOf(k)>=0)return true}return false};hw.showCliReply=function(t){if(hw.cliFailed(t))hw.showCliError(t);return t};hw._cliUrl=function(u){return /^\\/api\\/(?:bond\\/)?cli(?:\\?|$)/.test(String(u||''))};hw._refusalText=function(t){var s=String(t||'').trim();if(s.charAt(0)==='{'){try{var d=JSON.parse(s);var v=d&&(d.error||d.message);if(v)return String(v)}catch(_){}}return s};hw._cliRefusal=function(u,o){return function(r){if(r&&r.status===403&&!(o&&o.hwQuietRefusal)){var cli=hw._cliUrl(u),m=String((o&&o.method)||'GET').toUpperCase();if(cli||(m!=='GET'&&m!=='HEAD')){try{r.clone().text().then(function(t){if(!cli){var d=null;try{d=JSON.parse(t)}catch(_){}if(!d||d.code!=='guest_forbidden')return}hw.showCliError(hw._refusalText(t))}).catch(function(){})}catch(_){}}}return r}};hw.postForm=function(u,form,o){o=o||{};o.method='POST';o.headers=Object.assign({'Content-Type':'application/x-www-form-urlencoded'},o.headers||{});var b=[];for(var k in (form||{})){if(Object.prototype.hasOwnProperty.call(form,k)){b.push(encodeURIComponent(k)+'='+encodeURIComponent(form[k]))}};o.body=b.join('&');if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401).then(hw._cliRefusal(u,o))};hw.fetchText=function(u,o){o=o||{};if(!o.credentials)o.credentials='include';if(!o.cache)o.cache='no-store';return fetch(u,o).then(hw._auth401).then(function(r){if(!r.ok)return hw._httpError(r);return r.text()})};hw.postFormText=function(u,form,o){return hw.postForm(u,form,o).then(function(r){return r.text().then(function(t){if(r.ok)return t;var m=String(t||'').trim().replace(/^Error:\\s*/,'');var e=new Error(m||('HTTP '+r.status));e.status=r.status;e.reply=t;throw e})})};hw.cliConfirm=function(cliCmd,userPrompt,opts){opts=opts||{};var url=(opts.target==='bond')?'/api/bond/cli/batch':'/api/cli/batch';var ask=(typeof w.hwConfirm==='function')?w.hwConfirm(userPrompt):Promise.resolve(w.confirm(userPrompt));return ask.then(function(ok){if(!ok)return {cancelled:true,ok:false,pending:false,result:''};return hw.postJSON(url,{commands:[cliCmd,'yes'],interactive:true}).then(function(data){var rs=(data&&data.results)||[];var fl=(data&&Array.isArray(data.failed))?data.failed:null;var first=rs[0]||'';var bad=/^(?:Error|ERROR|Usage:|Unknown command:)/;var firstBad=bad.test(first)||(fl&&fl.indexOf(0)>=0);if(!data||firstBad)return {cancelled:false,ok:false,pending:false,result:first||(data&&data.error)||'Error: no response'};if(data.ok===false)return {cancelled:false,ok:false,pending:false,result:rs[1]||data.error||first||'Error: no response'};var result=rs[1]||'';var pending=/^Pending(?:\\s|:|$)/i.test(result);var failed=!result||(fl?fl.indexOf(1)>=0:(bad.test(result)||/^(?:Failed|Cancelled|\\[ERROR\\])(?:\\s|:|$)/i.test(result)));return {cancelled:false,ok:!failed,pending:pending,result:result};});});};try{console.log('[HW] helpers ready');}catch(_){} })(window);</script>");
     // One authoritative event-kind vocabulary for every page. Loading stays
     // lazy: pages that never expose an event picker do not spend an HTTP
     // request or hold a second copy of the catalog in their streamed HTML.
