@@ -1189,6 +1189,16 @@ everything user-visible since the v0.99.99.1 tag.
   Assistant.
 
 ### Changed
+- `ramflush` brings the I2C sensors back per device: it records a list of the I2C devices that were
+  running (type, board number, bus and address; up to 24), and the boot after it reopens exactly
+  those, each only while its bus and address settings are unchanged (otherwise it stays closed and
+  the system log says why). An I2C device that was not running stays closed for that boot even when
+  its start-at-boot is on. Encoder boards 2-4 now come back on their own instead of all together.
+  A sensor that failed to start (not plugged in) is still tried again after the flush when its
+  start-at-boot is on. Wi-Fi, Bluetooth, the web server, logging, ESP-NOW, the OLED, the camera,
+  speech and the other single-copy features work as before. `ramflush status` lists the devices.
+  The RTC record changed, so an overlay saved by older firmware is ignored once. Host-tested
+  (`ramflush_device_list_tests`); not checked on a device.
 - The UART host link (the CM5 / Raspberry Pi co-processor) speaks link protocol 3, a framed command
   channel. A line `@<id> <command>` (the id 1-8 lowercase hex digits the host picks) is answered
   `@<id> ok <len>` or `@<id> err <len>`, then exactly `<len>` bytes of reply (newlines included)

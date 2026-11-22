@@ -18,7 +18,8 @@
 //              deliberately does not touch it either (System_I2C.cpp:1708-1712),
 //              which is exactly what makes layer 2 derivable.
 //   overlay  = the features whose live state diverged from intent when `ramflush`
-//              ran. Applies to ONE boot, then it is gone.
+//              ran, plus the list of I2C devices that were running (see the
+//              device list below). Applies to ONE boot, then it is gone.
 //
 // Divergence IS touch. Live state can only differ from intent if someone toggled
 // it at runtime, precisely because the two are decoupled — so no per-toggle-site
@@ -30,7 +31,7 @@
 // erases itself, and resume works exactly once before silently dying.
 //
 // Storage is RTC_NOINIT: on-die SRAM in the ESP32-S3's always-on power domain —
-// NOT the DS3231 chip, despite the name. 20 bytes, zero flash writes. That makes
+// NOT the DS3231 chip, despite the name. 65 bytes, zero flash writes. That makes
 // "never trample settings.json" structural rather than a rule to remember: this
 // module has no flash writer, so it cannot leak into settings.json even by
 // mistake. Never route the overlay through gSettings — it is serialized whole
@@ -39,11 +40,28 @@
 //
 // Power loss clears RTC, so a cold boot returns to pure intent. That is intended,
 // not a limitation: an overlay is a statement about this session.
+//
+// I2C DEVICE LIST (owner decision 2026-11-22). The queue-managed I2C devices
+// (System_I2CInstanceCore.h) are not in the bit masks: a capture lists each
+// instance that is running (or failed to start while meant to be on) as one
+// 2-byte entry (type, instance, bus, 7-bit address;
+// System_RamFlushDeviceList.h), up to the device registry's 24. The
+// boot after it reopens exactly the listed instances, each only while its bus
+// and address settings still match the saved ones (else it stays closed and
+// one log line says why). An I2C device that is not listed stays closed for
+// that boot even when its start-at-boot is on. A type with several instances
+// (the encoder boards; PCA9685 and HT16K33 later) needs no layout change. The
+// single-copy features (Wi-Fi, Bluetooth, HTTP, LLM, MQTT, logging, ESP-NOW,
+// OLED, automation, camera, SR, microphone, and the GPIO input wheel) keep
+// their bits.
 
 // Stable feature ids. APPEND ONLY — never renumber, never reuse a retired slot.
 // Deliberately NOT the FeatureRegistry index: that array is build-config
 // dependent (the automation entry is #if-gated), so index N means different
-// features in different builds of the same firmware.
+// features in different builds of the same firmware. The ids of the I2C queue
+// devices (ramFlushIdForDevice) stay for their failed marks and the `features`
+// list's run column; their overlay bits are never set (the device list holds
+// them).
 typedef enum : uint8_t {
   RF_THERMAL    = 0,
   RF_TOF        = 1,
@@ -85,12 +103,22 @@ void ramFlushCaptureOverlay(void);
 void ramFlushConsumeOverlay(void);
 
 // The resolved answer to "should this feature be on?" — the overlay's value if it
-// diverged, else `intent`. This is the ONLY entry point the apply sites call.
+// diverged, else `intent`. This and ramFlushResolveDevice are the only entry
+// points the apply sites call. For the id of an I2C queue device it answers for
+// instance 1 from the device list (ramFlushResolveDevice).
 //
 // Valid for the WHOLE session, not just boot: gSettings.inputAutoStart is re-read
 // at runtime on OLED menu entry and login (OLED_Utils.cpp:6004), so a boot-scoped
 // overlay would let input silently resurrect minutes after resume.
 bool ramFlushResolve(RamFlushFeatureId f, bool intent);
+
+// The same answer for instance n (1-based) of a queue-managed I2C device:
+// `intent` (its start-at-boot) when no flush list is in force this boot;
+// otherwise true only when the instance is listed and its bus and address
+// settings still equal the saved ones. A listed instance whose bus or address
+// changed is logged once and stays closed. Session-long, like ramFlushResolve.
+enum I2cDeviceType : int;
+bool ramFlushResolveDevice(I2cDeviceType device, uint8_t n, bool intent);
 
 // True if a valid overlay was consumed this boot (for `ramflush status`).
 bool ramFlushOverlayActive(void);
@@ -110,14 +138,13 @@ void ramFlushClearAutostartFailed(RamFlushFeatureId f);
 
 // The ramflush id of a queue-managed I2C device (System_I2C_Manager.h). Returns
 // RF_FEATURE_COUNT for I2C_DEVICE_COUNT, which the two calls above no-op on.
-enum I2cDeviceType : int;
 RamFlushFeatureId ramFlushIdForDevice(I2cDeviceType device);
 
 // The failed mark of one instance n (1-based) of a queue device
 // (System_I2CInstanceCore.h). Instance 1 is its feature's mark above; an
 // instance n >= 2 has its own bit, so a missing second board does not mark
-// the first as failed. The overlay itself stays per feature (owner question
-// Q7): a capture skips a feature while any of its instances is marked.
+// the first as failed. A capture lists a marked instance whose start-at-boot
+// (as this boot resolved it) is on, so the flush tries it again.
 void ramFlushMarkAutostartFailed(I2cDeviceType device, uint8_t n);
 void ramFlushClearAutostartFailed(I2cDeviceType device, uint8_t n);
 

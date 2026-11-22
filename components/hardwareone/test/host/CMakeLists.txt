@@ -539,6 +539,14 @@ foreach(target i2c_instance_core_tests i2c_instance_core_four_tests)
 endforeach()
 target_compile_definitions(i2c_instance_core_four_tests PRIVATE HW1_HOST_I2C_TEST_ENCODER_MAX=4)
 
+# The RAM flush's I2C device list (System_RamFlushDeviceList.h): the 2-byte
+# entry, the capture's list, the per-instance check after the flush, the CRC.
+add_executable(ramflush_device_list_tests test_ramflush_device_list.cpp)
+set_target_properties(ramflush_device_list_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(ramflush_device_list_tests PRIVATE ../..)
+target_compile_options(ramflush_device_list_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # Wait ladder of the automatic sensor restart (System_SensorRestartCore.h).
 add_executable(sensor_restart_core_tests test_sensor_restart_core.cpp)
 set_target_properties(sensor_restart_core_tests PROPERTIES
@@ -797,7 +805,7 @@ if(HW1_SANITIZE)
     -fsanitize=address,undefined -g)
   target_link_options(sensor_restart_core_tests PRIVATE
     -fsanitize=address,undefined)
-  foreach(target i2c_instance_core_tests i2c_instance_core_four_tests)
+  foreach(target i2c_instance_core_tests i2c_instance_core_four_tests ramflush_device_list_tests)
     target_compile_options(${target} PRIVATE -fsanitize=address,undefined -g)
     target_link_options(${target} PRIVATE -fsanitize=address,undefined)
   endforeach()
@@ -2455,6 +2463,7 @@ add_test(
 add_test(NAME sensor_restart_core_tests COMMAND sensor_restart_core_tests)
 add_test(NAME i2c_instance_core_tests COMMAND i2c_instance_core_tests)
 add_test(NAME i2c_instance_core_four_tests COMMAND i2c_instance_core_four_tests)
+add_test(NAME ramflush_device_list_tests COMMAND ramflush_device_list_tests)
 add_test(
   NAME sensor_auto_disable_sites
   COMMAND ${Python3_EXECUTABLE}
