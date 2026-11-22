@@ -81,6 +81,17 @@ bool g2ShowListPage(const char* const* rows, size_t count) {
   return true;
 }
 bool g2EnqueueRedraw(const G2CmdCookie&, void (*)(), const char*) { return true; }
+// Lens notice boundary (G2_HijackCmd.cpp records it from every completion);
+// a case sets pendingNotice to stand for a refusal it completed.
+static char pendingNotice[48]{};
+void g2LensNoticeBackRow(G2HijackPage, const char* label, char* out, size_t cap) {
+  if (pendingNotice[0]) {
+    std::snprintf(out, cap, "<- %s", pendingNotice);
+    pendingNotice[0] = '\0';
+  } else if (label != out) {
+    std::snprintf(out, cap, "%s", label);
+  }
+}
 
 // ---- Commands, keyboard and tasks ----------------------------------------------
 static char lastCommand[64]{};
@@ -153,10 +164,9 @@ static bool g2RingIsConnected() { return ringUp; }
 static bool bleCentralRingShouldYield() { return false; }  // phone pipe off here
 
 struct Settings {
-  bool wifiEnabled = true;
   bool wifiAutoStart = false;
   String espnowDeviceName = String("lab");
-  bool espnowEnabled = true;
+  bool espnowAutoStart = true;
   bool bleAutoStart = false;
   int bleMode = BLE_MODE_G2_CLIENT;
   bool httpsEnabled = false;
@@ -238,7 +248,7 @@ static void espnow_view_devices_after_stop() {
   espnowState.initialized = false;
   handleEspNowTap(tapRow(row));
   EXPECT(submits == 0,
-         "'View Devices' submitted a command (espnowenabled) after ESP-NOW stopped");
+         "'View Devices' submitted a command (espnowautostart) after ESP-NOW stopped");
   EXPECT(gNetSub == NET_SUB_ESPNOW_DEVS, "'View Devices' did not open the device list");
 }
 
@@ -271,20 +281,34 @@ static void espnow_toggle_follows_label() {
 }
 
 static void espnow_auto_start_follows_label() {
-  gSettings.espnowEnabled = true;
+  gSettings.espnowAutoStart = true;
   showEspNowMenu();                          // OFF layout: Auto Start is row 4
   size_t row = rowOf("Auto Start: ON");
   espnowState.initialized = true;            // started meanwhile: ON layout row 4 = View Devices
   handleEspNowTap(tapRow(row));
-  EXPECT(sent("espnowenabled 0"),
+  EXPECT(sent("espnowautostart 0"),
          "'Auto Start: ON' (OFF layout) did not turn Auto Start off after ESP-NOW started");
 
   showEspNowMenu();
   row = rowOf("Auto Start: ON");
-  gSettings.espnowEnabled = false;           // turned off from the web meanwhile
+  gSettings.espnowAutoStart = false;           // turned off from the web meanwhile
   handleEspNowTap(tapRow(row));
-  EXPECT(sent("espnowenabled 0"),
-         "'Auto Start: ON' sent espnowenabled 1 after the setting changed");
+  EXPECT(sent("espnowautostart 0"),
+         "'Auto Start: ON' sent espnowautostart 1 after the setting changed");
+}
+
+// A refused toggle redraws its submenu with the reason in the back row; the
+// toggle keeps the live state and the back row still goes back.
+static void refusal_shows_in_back_row() {
+  espnowState = FakeEspNow{false, 0};
+  std::snprintf(pendingNotice, sizeof(pendingNotice), "%s", "Needs an admin");
+  showEspNowMenu();
+  CHECK(std::strcmp(shownRows[0], "<- Needs an admin") == 0);
+  CHECK(std::strcmp(shownRows[1], "ESP-NOW: OFF") == 0);
+  handleEspNowTap(tapRow(0));
+  CHECK(submits == 0 && gNetSub == NET_SUB_WIFI);
+  showEspNowMenu();
+  CHECK(std::strcmp(shownRows[0], "<- WiFi") == 0);  // shown once, then the label
 }
 
 static void espnow_rows_unchanged_state() {
@@ -306,7 +330,7 @@ static void espnow_rows_unchanged_state() {
   handleEspNowTap(tapRow(5));
   CHECK(keyboards == 1 && keyboardCommit == &espnowNameCommit && submits == 0);
   handleEspNowTap(tapRow(6));
-  CHECK(sent("espnowenabled 0"));
+  CHECK(sent("espnowautostart 0"));
   handleEspNowTap(tapRow(4));
   CHECK(gNetSub == NET_SUB_ESPNOW_DEVS && submits == 0);
 
@@ -326,7 +350,7 @@ static void espnow_rows_unchanged_state() {
   handleEspNowTap(tapRow(1));
   CHECK(sent("openespnow") && lastCallback == &onEspNowOpenDone);
   handleEspNowTap(tapRow(4));
-  CHECK(sent("espnowenabled 0"));
+  CHECK(sent("espnowautostart 0"));
   handleEspNowTap(tapRow(0));
   CHECK(gNetSub == NET_SUB_WIFI && submits == 0);
   showEspNowMenu();
@@ -477,12 +501,6 @@ static void wifi_rows_unchanged_state() {
   CHECK(gNetSub == NET_SUB_WIFI_STATUS);
 
   linkUp = false;
-  gSettings.wifiEnabled = false;
-  showWifiMenu();
-  const size_t disabled = rowOf("WiFi: Disabled in Settings");
-  handleWifiTap(tapRow(disabled));
-  CHECK(submits == 0 && gNetSub == NET_SUB_WIFI);
-  gSettings.wifiEnabled = true;
   showWifiMenu();
   handleWifiTap(tapRow(rowOf("WiFi: Disconnected")));
   CHECK(sent("openwifi") && lastCallback == &onWifiConnectRefreshDone);
@@ -892,6 +910,7 @@ static const Case kCases[] = {
   {"bluetooth_mode_follows_label", bluetooth_mode_follows_label},
   {"bluetooth_role_rows", bluetooth_role_rows},
   {"espnow_rows_unchanged_state", espnow_rows_unchanged_state},
+  {"refusal_shows_in_back_row", refusal_shows_in_back_row},
   {"http_rows_unchanged_state", http_rows_unchanged_state},
   {"wifi_rows_unchanged_state", wifi_rows_unchanged_state},
   {"bluetooth_rows_unchanged_state", bluetooth_rows_unchanged_state},

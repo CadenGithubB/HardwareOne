@@ -29,6 +29,9 @@ def main():
                       ('// INSERT_PAGER',read('System_TextPager.h').replace('#pragma once',''))]:
         assert harness.count(tag)==1
         harness=harness.replace(tag,value)
+    # The page words a refused command with G2_ReplyNotice.h (a pure header).
+    notice=component/'G2_ReplyNotice.h'
+    if notice.exists(): harness=f'#include "{notice}"\n'+harness
     with tempfile.TemporaryDirectory(prefix='hw1-g2-transcription-') as tmp:
         unit=Path(tmp)/'test.cpp';exe=Path(tmp)/'test';unit.write_text(harness)
         cmd=['clang++','-std=c++17','-Wall','-Wextra','-Werror','-I',str(component.parent/'hardwareone_libs/ArduinoJson/src'),str(unit),'-o',str(exe)]

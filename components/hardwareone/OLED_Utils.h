@@ -393,11 +393,13 @@ bool executeOledCommandWithResult(const String& argsInput, char* out, size_t out
 bool executeOledCommandWithResultForSession(
     const String& argsInput, TransportSessionEpoch expectedEpoch,
     char* out, size_t outSize);
-// Toast text for a command's outcome (the toast box fits ~17 columns). Success
-// gives okText (empty when nullptr). A refusal gives "Admin required" for an
-// admin or super-admin denial, otherwise the reply's first line without its
-// leading [ERROR]/Error/ERROR token and ": ", or failText when nothing is left.
-// out is always NUL-terminated (outSize > 0).
+// Toast text for a command's outcome (the toast box fits ~15 columns). Success
+// gives okText (empty when nullptr). A refusal gives "Needs an admin" for an
+// admin denial (logging's included), "Needs a super admin" for a super-admin
+// denial, otherwise the reply's first sentence (oled_message::
+// firstSentenceLength) without its leading [ERROR]/Error/ERROR token and ": ",
+// or failText when nothing is left. Every OLED screen that shows a refusal
+// asks this one function. out is always NUL-terminated (outSize > 0).
 void oledCommandReplyText(bool ok, const char* reply, const char* okText,
                           const char* failText, char* out, size_t outSize);
 // Run a user-initiated OLED action. A refused or failed command shows its

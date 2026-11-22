@@ -112,6 +112,11 @@ def generate() -> tuple[str, bool]:
     # The must-change allowlist; a tree without it has no command-side gate.
     if "static bool commandAllowedDuringPasswordChange(" in utils:
         pieces.append(unique(utils, "static bool commandAllowedDuringPasswordChange(", "System_Utils.cpp"))
+    # The role half authorizeCommand shares with automation save (since
+    # 2026-11-21); an older tree has it inline.
+    if "static CommandRoleRefusal commandRoleRefusal(" in utils:
+        pieces.append(unique(command_header, "enum class CommandRoleRefusal", "System_Command.h") + ";")
+        pieces.append(unique(utils, "static CommandRoleRefusal commandRoleRefusal(", "System_Utils.cpp"))
     pieces.append(unique(utils, "static bool authorizeCommand(", "System_Utils.cpp"))
     if "bool isReservedUsername(" in user:
         pieces.append(unique(user, "bool isReservedUsername(", "System_User.cpp"))

@@ -73,6 +73,13 @@ static G2CmdCookie completeCommand(bool ok,const char* result) {
   assert(command.done);command.done(ok,result,command.cookie,command.userData);
   return command.cookie;
 }
+// Lens notice boundary (G2_HijackCmd.cpp records it from every completion);
+// a case sets pendingNotice to stand for the refusal it completes.
+static std::string pendingNotice;
+void g2LensNoticeBackRow(G2HijackPage,const char* label,char* out,size_t cap) {
+  if(!pendingNotice.empty()){snprintf(out,cap,"<- %s",pendingNotice.c_str());pendingNotice.clear();}
+  else if(label!=out) snprintf(out,cap,"%s",label);
+}
 // This boundary explicitly delivers a queued renderer; the real generation
 // fence and queue/allocation ownership are covered by the g2_redraw suite.
 static void flushRedraws() {
@@ -184,10 +191,12 @@ int main() {
   // Completion redraws the current subpage, not the submitted command's level.
   g2CameraSettingsHandleTap(1);
   showSubMenu(CAM_CAT_TRANSFORM);
-  completeCommand(false,"Error: rejected");
+  pendingNotice="Needs an admin";  // what the completion records for this refusal
+  completeCommand(false,"Error: Admin access required for command 'cameraquality'. Contact an administrator.");
   assert(pendingRedraws.size()==1 && gSettings.cameraQuality==16);
   flushRedraws();
   assert(gLevel==CAM_LEVEL_SUB_TRANSFORM && shownRows[1]=="No supported controls");
+  assert(shownRows[0]=="<- Needs an admin");  // the refusal is named, the value unchanged
 
   // Redraw rejection has no inline fallback or optimistic settings mutation.
   showSubMenu(CAM_CAT_POSTPROC);g2CameraSettingsHandleTap(1);

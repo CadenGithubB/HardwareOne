@@ -111,8 +111,18 @@ struct NetRowList {
 // g2ShowListPage has claimed page-swap admission before returning true, so tap
 // dispatch is fenced while the bindings are published. A refused render binds
 // nothing: the rows still on the lens keep theirs.
+// Row 0 of every submenu is its back row. In the redraw after a refused
+// toggle it reads "<- Needs an admin" (the lens notice) instead of its label;
+// its binding, and so what a tap on it does, stays the same.
 static bool showNetRows(NetworkSubMode sub, const NetRowList& list) {
-  if (!g2ShowListPage(list.items, list.n)) return false;
+  EXT_RAM_BSS_ATTR static char backRow[48];  // PSRAM: deep-copied by g2ShowListPage
+  const char* items[kNetRowMax];
+  for (size_t i = 0; i < list.n; ++i) items[i] = list.items[i];
+  if (list.n > 0) {
+    g2LensNoticeBackRow(G2_HIJACK_PAGE_NETWORK, list.items[0], backRow, sizeof(backRow));
+    items[0] = backRow;
+  }
+  if (!g2ShowListPage(items, list.n)) return false;
   for (size_t i = 0; i < list.n; ++i) {
     __atomic_store_n(&gNetRows[i].action, list.rows[i].action, __ATOMIC_RELAXED);
     __atomic_store_n(&gNetRows[i].on, list.rows[i].on, __ATOMIC_RELAXED);
@@ -145,7 +155,7 @@ enum EspNowRowAction : uint8_t {
   ESPNOW_ROW_POWER,       // on: openespnow (name keyboard first if unset); off: closeespnow
   ESPNOW_ROW_DEVICES,     // paired-device list
   ESPNOW_ROW_NAME,        // on-glasses keyboard for the device name
-  ESPNOW_ROW_AUTO_START,  // espnowenabled 1|0
+  ESPNOW_ROW_AUTO_START,  // espnowautostart 1|0
 };
 enum HttpRowAction : uint8_t {
   HTTP_ROW_BACK = 0,      // -> WiFi submenu
@@ -455,8 +465,6 @@ static void showWifiMenu() {
     snprintf(wifiLine, sizeof(wifiLine), "WiFi: %s", shown.c_str());
   } else if (pending) {
     snprintf(wifiLine, sizeof(wifiLine), "WiFi: Pending...");
-  } else if (!gSettings.wifiEnabled) {
-    snprintf(wifiLine, sizeof(wifiLine), "WiFi: Disabled in Settings");
   } else if (!radioOn) {
     snprintf(wifiLine, sizeof(wifiLine),
              "WiFi: Disabled (tap to enable)");
@@ -500,16 +508,14 @@ static void showWifiMenu() {
 
   // With the whole radio down neither action is useful. The WiFi row above is
   // the deliberate way back in: it runs openwifi, after which the refreshed
-  // radio-on menu exposes Disconnect and Scan again. The persisted master
-  // switch still gates Scan; Disconnect remains available for a live/pending
-  // connection so the user can always stop it.
-  const bool showDisconnect = connected || pending ||
-                              (gSettings.wifiEnabled && radioOn);
+  // radio-on menu exposes Disconnect and Scan again. Disconnect remains
+  // available for a live/pending connection so the user can always stop it.
+  const bool showDisconnect = connected || pending || radioOn;
   if (showDisconnect)
     rows.add("Disconnect", WIFI_MENU_DISCONNECT);
 
   rows.add("Status", WIFI_MENU_STATUS);
-  if (gSettings.wifiEnabled && (radioOn || connected || pending))
+  if (radioOn || connected || pending)
     rows.add("Scan Networks", WIFI_MENU_SCAN);
 
   rows.add("List Saved", WIFI_MENU_SAVED);
@@ -637,7 +643,8 @@ static void showWifiSavedList() {
   WifiNetworkSnapshot snapshot;
   const bool available = wifiNetworkSnapshot(snapshot);
   static EXT_RAM_BSS_ATTR char rows[1 + MAX_WIFI_NETWORKS][48];  // PSRAM: deep-copied by g2ShowListPage
-  strlcpy(rows[0], "<- WiFi", sizeof(rows[0]));
+  // "<- WiFi", or why the last Forget was refused.
+  g2LensNoticeBackRow(G2_HIJACK_PAGE_NETWORK, "<- WiFi", rows[0], sizeof(rows[0]));
   const char* ptrs[1 + MAX_WIFI_NETWORKS];
   ptrs[0] = rows[0];
   size_t n = 1;
@@ -653,7 +660,7 @@ static void showWifiSavedList() {
   bool admitted;
   if (n == 1) {
     const char* empty[] = {
-      "<- WiFi", available ? "(no saved networks)" : "(saved list unavailable)"
+      rows[0], available ? "(no saved networks)" : "(saved list unavailable)"
     };
     admitted = g2ShowListPage(empty, 2);
   } else {
@@ -715,7 +722,7 @@ static void showEspNowMenu() {
     snprintf(nameLine, sizeof(nameLine), "Name: %s", shown);
   }
   snprintf(autoLine, sizeof(autoLine), "Auto Start: %s",
-           gSettings.espnowEnabled ? "ON" : "OFF");
+           gSettings.espnowAutoStart ? "ON" : "OFF");
   bool running = (gEspNow && gEspNow->initialized);
   if (running) {
     snprintf(stateLine, sizeof(stateLine), "ESP-NOW: ON");
@@ -735,13 +742,13 @@ static void showEspNowMenu() {
   }
   rows.add("View Devices", ESPNOW_ROW_DEVICES);
   rows.add(nameLine, ESPNOW_ROW_NAME);  // tap → on-glasses text entry
-  rows.add(autoLine, ESPNOW_ROW_AUTO_START, /*on=*/!gSettings.espnowEnabled);
+  rows.add(autoLine, ESPNOW_ROW_AUTO_START, /*on=*/!gSettings.espnowAutoStart);
 #else
   rows.add("ESP-NOW: not compiled", ESPNOW_ROW_INFO);
 #endif
   showNetRows(NET_SUB_ESPNOW, rows);
   DEBUG_G2F("[G2] ESP-NOW submenu shown (auto=%d)",
-            gSettings.espnowEnabled ? 1 : 0);
+            gSettings.espnowAutoStart ? 1 : 0);
 }
 
 static void showEspNowDevices() {
@@ -1339,7 +1346,9 @@ static void onEspNowOpenDone(bool ok,
     return;
   }
   // Still not running → the start failed. Show the captured reason on the lens
-  // instead of silently snapping back to OFF.
+  // instead of silently snapping back to OFF. That text replaces the lens
+  // notice, so the next menu's back row does not repeat it.
+  (void)g2LensNoticeTake(cookie.targetPage, nullptr, 0);
   strncpy(sEspNowOpenMsg, (result && result[0]) ? result : "ESP-NOW failed to start",
           sizeof(sEspNowOpenMsg) - 1);
   sEspNowOpenMsg[sizeof(sEspNowOpenMsg) - 1] = '\0';
@@ -1357,6 +1366,7 @@ static void onEspNowNameThenOpenDone(bool ok,
             (int)ok, result ? result : "",
             gSettings.espnowDeviceName.c_str());
   if (gSettings.espnowDeviceName.length() == 0) {
+    (void)g2LensNoticeTake(cookie.targetPage, nullptr, 0);  // shown in full below
     strncpy(sEspNowOpenMsg,
             (result && result[0]) ? result : "ESP-NOW needs a device name",
             sizeof(sEspNowOpenMsg) - 1);
@@ -1500,17 +1510,6 @@ static void handleWifiTap(uint32_t idx) {
       G2CmdCookie cookie{};
       cookie.targetPage   = g2GetHijackPage();
       cookie.targetNetSub = (uint8_t)gNetSub;
-
-      // The persisted master switch is intentionally stronger than the
-      // runtime radio toggle. Do not promise/animate a connection attempt that
-      // ensureWifiInitialized() must reject; the row already directs the user
-      // to Settings in this state.
-      if (connect && !gSettings.wifiEnabled) {
-        DEBUG_G2F("[G2] WiFi toggle ignored: WiFi disabled in Settings");
-        cancelWifiPendingOverlay();
-        showWifiMenu();
-        break;
-      }
 
       if (!connect) {
         // Disconnect path. Submit `closewifi`; callback re-renders the
@@ -1952,7 +1951,7 @@ static void handleEspNowTap(uint32_t idx) {
     case ESPNOW_ROW_AUTO_START: {
 #if ENABLE_ESPNOW
       char line[40];
-      snprintf(line, sizeof(line), "espnowenabled %d", row.on ? 1 : 0);
+      snprintf(line, sizeof(line), "espnowautostart %d", row.on ? 1 : 0);
       G2CmdCookie cookie{};
       cookie.targetPage   = g2GetHijackPage();
       cookie.targetNetSub = (uint8_t)gNetSub;

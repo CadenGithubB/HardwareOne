@@ -1,6 +1,7 @@
 // System_UartLink.cpp — UART host link drain. See System_UartLink.h for the
 // design charter and docs/UART_HOST_LINK_PLAN.md for the verified plan.
 #include "System_UartLink.h"
+#include "System_PendingCommand.h"  // the link's command in flight (S-11)
 #include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_Cm5HostControl.h"
 #include "System_Cm5Presence.h"
@@ -687,6 +688,14 @@ const char* uartLinkStatusLine() {
   return buf;
 }
 
+// The link's one command in flight (System_PendingCommand.h) and what its
+// reply needs once cmd_exec returns it.
+static PendingCommand sUartPending;
+static bool sUartPendingHousekeeping = false;
+static uint32_t sUartPendingSessionEpoch = 0;
+static uint32_t sUartPendingTransportEpoch = 0;
+static bool uartPendingTick();
+
 // Process one complete, trimmed line. Mirrors the serial drain
 // (HardwareOne.cpp loop section 6) with two deliberate differences: every
 // reply is written directly to the link port (this channel has no sink), and
@@ -1092,9 +1101,20 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
   uc.ctx.replyHandle = nullptr;
   uc.ctx.httpReq = nullptr;
 
-  String out;
   if (!hostHousekeeping) cm5PresenceCommandStarted(commandSessionEpoch);
-  bool ok = submitAndExecuteSync(uc, out);
+  // Queued, not waited for (S-11): the main loop keeps running while cmd_exec
+  // works, and uartLinkTick stops reading the link until the reply is written,
+  // so the host still gets one reply per line, in order.
+  sUartPendingHousekeeping = hostHousekeeping;
+  sUartPendingSessionEpoch = commandSessionEpoch;
+  sUartPendingTransportEpoch = commandTransportEpoch;
+  (void)sUartPending.start(uc, millis());
+  (void)uartPendingTick();  // queue it on this lap
+}
+
+// Writes the reply of the link's pending command: one write per reply, the
+// verdict leading, exactly as when the loop waited for it in place.
+static void uartDeliverReply(bool ok, String& out) {
   bool replyAdmitted = false;
   // A failure goes out as one status line that leads with Error, the framing
   // the host parses: a refused "Usage: ..." or "Unknown command: ..." reply has
@@ -1115,7 +1135,7 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
     if (out.concat('\n')) {
       replyAdmitted = uartTxLockedForTransportSession(
           (const uint8_t*)out.c_str(), out.length(),
-          commandTransportEpoch,
+          sUartPendingTransportEpoch,
           5000);  // replies are load-bearing; wait out a slow frame
     }
   } else {
@@ -1126,16 +1146,44 @@ static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch) {
     fallback[n++] = '\n';
     replyAdmitted = uartTxLockedForTransportSession(
         reinterpret_cast<const uint8_t*>(fallback), n,
-        commandTransportEpoch, 1000);
+        sUartPendingTransportEpoch, 1000);
   }
   // Keep the bounded command extension through physical reply admission.
   // The post-command grace begins only now, giving the CM5 heartbeat actor a
   // chance to acquire its own serialized Session lock after this reply lands.
-  if (!hostHousekeeping)
-    cm5PresenceCommandFinished(commandSessionEpoch, replyAdmitted);
+  if (!sUartPendingHousekeeping)
+    cm5PresenceCommandFinished(sUartPendingSessionEpoch, replyAdmitted);
+}
+
+// Advances the link's pending command and writes its reply when it ends.
+// True while it is still running: the drain reads no new line meanwhile.
+static bool uartPendingTick() {
+  if (!sUartPending.busy()) return false;
+  String out;
+  bool ok = false;
+  const PendingCommand::Poll state = sUartPending.poll(millis(), out, ok);
+  if (state == PendingCommand::Poll::Waiting) return true;
+  if (state != PendingCommand::Poll::Idle) {
+    uartDeliverReply(ok, out);
+    // The idle clock runs from the reply, as when the loop waited in place: a
+    // command that ran close to the idle window must not sign the host out
+    // on its next line.
+    const uint32_t liveSession = uartLinkSessionEpoch();
+    if (liveSession != 0 && liveSession == sUartPendingSessionEpoch)
+      sLastInteractionMs.store(sessionStampNow(), std::memory_order_release);
+  }
+  return false;
 }
 
 void uartLinkTick() {
+  // The command in flight first: its reply is written before a lifecycle
+  // request is applied or another line is read. `uartlinkbaud` and
+  // `uartlink off` post their request from cmd_exec before they return, and
+  // their OK must still reach the host on the old port and session, as it did
+  // when this loop waited for the command in place. A reply that can no longer
+  // be written (the session ended meanwhile) is refused by its epoch, and the
+  // CM5 busy accounting still ends.
+  if (uartPendingTick()) return;
   // Apply any lifecycle request from a command handler. Doing it here, on the
   // loop task that owns the drain, is what makes `uartlink off` / a baud
   // change safe while bytes are in flight.
@@ -1168,8 +1216,7 @@ void uartLinkTick() {
 
   if (!sStarted.load(std::memory_order_acquire)) return;
   // Park while the setup wizard owns the CLI: the wizard occupies cmd_exec
-  // for its whole run, so a submitted link command would stall this loop task
-  // in submitAndExecuteSync (up to 60s) and then time out anyway.
+  // for its whole run, so a link command would only wait out its 60 s there.
   if (gWizardOwnsSerial) return;
 
   while (UART_LINK_PORT.available()) {
@@ -1482,8 +1529,9 @@ const char* cmd_voicefetch(const String& argsInput) {
     }
     // Refuse a transfer that would outrun the 60s synchronous-wait window:
     // voicefetch streams synchronously on cmd_exec, and if it ran past
-    // ~60s the loop task's submitAndExecuteSync would time out and write its
-    // own reply INTO the middle of the frame stream (desync). At the classic
+    // ~60s the link's pending command (PendingCommand::kReplyWaitMs) would
+    // give up and write its timeout reply INTO the middle of the frame stream
+    // (desync). At the classic
     // 230400 ceiling a full 2MB file is ~87s, so this bites there. ~1% frame
     // overhead + 10 wire-bits/byte; 45s ceiling leaves margin.
     int effBaud = uartLinkEffectiveBaud();

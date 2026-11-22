@@ -6,7 +6,7 @@
  * every central connect, the central TX gate, the GAP/GATTC observers and the
  * scan object. The glasses, the ring and the phone are device owners on top of
  * it: `openg2` / `openring` / `openphone` call bleStackUp() when the stack is
- * down and never bring it down. Only `closeble` and `bleenabled 0`, the switch
+ * down and never bring it down. Only `closeble`, the switch
  * to the app-console server (`openconsole`) and the stack recoveries call
  * bleStackDown(). A soft disconnect (link loss, a device close) therefore never
  * powers Bluetooth down.

@@ -19,7 +19,7 @@ static unsigned hostStops=0,starts=0,acks=0,roleEvents=0;
 static uint32_t now=100;
 static std::vector<std::string> logs,operations;
 static std::vector<int> reseeks;
-static struct {bool bleEnabled=true;int bleMode=2;} gSettings;
+static struct {int bleMode=2;} gSettings;
 struct BleRoleTransitionClaim {
  explicit BleRoleTransitionClaim(BleRoleTransition){}
  explicit operator bool()const{return roleAvailable;}
@@ -55,7 +55,9 @@ static Status bluetoothHalStatus(){return {};}
 static bool bleStackDown(){
  assert(!logs.empty() && logs.back().find("last resort")!=std::string::npos);
  ++hostStops;operations.push_back("host-stop");
- if(changeIntent)gSettings.bleEnabled=false;
+ // A saved role change while the recovery runs (closeble cannot run: the
+ // recovery holds the role claim).
+ if(changeIntent)gSettings.bleMode=1;
  if(!halOk || !terminal){fault=true;return false;}
  operations.push_back("clients-release");operations.push_back("capacity-release");
  ++acks;operations.push_back("phone-release");

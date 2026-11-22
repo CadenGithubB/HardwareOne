@@ -98,6 +98,21 @@ bool g2EnqueueRedraw(const G2CmdCookie&, void (*render)(), const char*) {
   pendingRedraw = render;
   return true;
 }
+// The lens notice of the page (G2_HijackCmd): the real completion records a
+// refusal's short text before the page's callback runs; a scenario sets it.
+static std::string notice;
+bool g2LensNoticeTake(G2HijackPage, char* out, size_t cap) {
+  if (notice.empty()) return false;
+  if (out && cap) std::snprintf(out, cap, "%s", notice.c_str());
+  notice.clear();
+  return true;
+}
+void g2LensNoticeBackRow(G2HijackPage page, const char* backLabel, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  char text[80];
+  if (g2LensNoticeTake(page, text, sizeof(text))) std::snprintf(out, cap, "<- %s", text);
+  else if (backLabel != out) std::snprintf(out, cap, "%s", backLabel);
+}
 
 // INSERT_LIST_PUBLISH_HELPER
 
@@ -223,6 +238,31 @@ static void testDeletedWhileDetailShown() {
   CHECK(shown(0, "<- C"));
 }
 
+// A refused Enable/Disable keeps the real state and says why in the back row
+// (its tap still goes back); a Run's result page shows the whole reply, so its
+// notice is not repeated in the detail afterwards.
+static void testRefusalShowsWhy() {
+  openList(kThree);
+  g2AutomationsHandleTap(2);
+  CHECK(shown(0, "<- B") && shown(3, "Disable"));
+  g2AutomationsHandleTap(3);
+  pendingRedraw = nullptr;
+  notice = "Needs an admin";
+  if (lastDone) lastDone(false, "Error: Admin access required for command 'automation'.",
+                         G2CmdCookie{}, nullptr);
+  if (pendingRedraw) pendingRedraw();
+  CHECK(shown(0, "<- Needs an admin") && shown(3, "Disable"));
+  CHECK(notice.empty());
+  g2AutomationsHandleTap(2);   // Run now
+  pendingRedraw = nullptr;
+  notice = "Needs an admin";
+  if (lastDone) lastDone(false, "Error: Admin access required for command 'automation'.",
+                         G2CmdCookie{}, nullptr);
+  CHECK(notice.empty());
+  if (pendingRedraw) pendingRedraw();
+  CHECK(shownText.rfind("Error: Admin access required", 0) == 0);
+}
+
 static void testEmptyAndUnreadable() {
   openList(R"({"automations":[]})");
   CHECK(shownRows.size() == 2 && shown(1, "(no automations)"));
@@ -243,6 +283,7 @@ int main() {
   testRowsKeepTheirAutomation();
   testToggleMatchesVisibleRow();
   testDeletedWhileDetailShown();
+  testRefusalShowsWhy();
   testEmptyAndUnreadable();
   if (failures) {
     std::fprintf(stderr, "G2 automations page: %u of %u checks FAILED\n", failures, checks);

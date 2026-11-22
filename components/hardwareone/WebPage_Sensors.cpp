@@ -45,7 +45,7 @@
 #include "HAL_Audio.h"
 #include "System_TranscriptionUIPolicy.h"
 #endif
-#include "i2csensor_rda5807.h"             // fmRadioEnabled, radioInitialized, fmRadioBuildDataJSON
+#include "i2csensor_rda5807.h"             // radioInitialized, fmRadioBuildDataJSON
 #include "System_MemUtil.h"             // ps_alloc, AllocPref
 #include "System_PsramJson.h"            // PsramJsonText: the transcription replies
 #include "System_Camera_Video.h"

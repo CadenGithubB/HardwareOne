@@ -340,7 +340,7 @@ void restartHttpServer() {
 #else
   const bool linked = true;
 #endif
-  if (linked && !isHttpServerRunning()) cmd_httpstart("");  // `openhttp`; it checks httpenabled itself
+  if (linked && !isHttpServerRunning()) cmd_httpstart("");  // `openhttp`
   if (isHttpServerRunning()) {
     sHttpRestorePending.store(false);
   } else {
@@ -397,7 +397,7 @@ void restoreUsers(const RadioUsers& users) {
   // the companion reset and still reads true here.
   wifi_ap_record_t ap;
   const bool joinedNow = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
-  if (users.wifiJoined && gSettings.wifiEnabled && !joinedNow) {
+  if (users.wifiJoined && !joinedNow) {
     logSystemEvent("C6", "radio users: Wi-Fi not joined after the companion reset; joining again");
     setupWifi();
   }
@@ -425,13 +425,13 @@ void restoreUsers(const RadioUsers& users) {
 void bringUpConfiguredUsers() {
   RadioUsers wanted;
 #if ENABLE_WIFI
-  wanted.wifi = gSettings.wifiEnabled && gSettings.wifiAutoStart;
+  wanted.wifi = gSettings.wifiAutoStart;
 #endif
 #if ENABLE_ESPNOW
-  wanted.espnow = gSettings.espnowEnabled && gSettings.espnowAutoStart;
+  wanted.espnow = gSettings.espnowAutoStart;
 #endif
 #if ENABLE_BLUETOOTH
-  if (gSettings.bleEnabled && gSettings.bleAutoStart) {
+  if (gSettings.bleAutoStart) {
     wanted.bleServer = gSettings.bleMode == BLE_MODE_SERVER;
     wanted.g2Client = gSettings.bleMode == BLE_MODE_G2_CLIENT;
   }
@@ -1578,10 +1578,10 @@ const CommandEntry companionCommands[] = {
   { "c6status",      "ESP32-C6 companion status: firmware, bridge, heartbeat, memory, recovery (add 'json').", false, cmd_c6status },
   { "c6restart",     "Restart the C6 companion in place (radio features stop and come back).", true, cmd_c6restart },
   { "c6hold",        "Hold the C6 in reset (radio fully off) or release it: c6hold [on|off].", true, cmd_c6hold,
-    "Usage: c6hold [on|off]\n  on  - stop Wi-Fi, Bluetooth and ESP-NOW and hold the companion in reset\n  off - release it and restore what was running" },
+    "Usage: c6hold [on|off]\n  on  - stop Wi-Fi, Bluetooth and ESP-NOW and hold the companion in reset\n  off - release it and restore what was running", /*requiresSuperAdmin=*/true },
   { "c6update",      "Flash companion firmware from a file over SDIO: c6update \"<path>\".", true, cmd_c6update,
     "Usage: c6update \"/sd/firmware/network_adapter.bin\"\nThe file must be an ESP32-C6 image built by tools/p4/companion (it is checked for the ESP-NOW bridge marker before anything is sent).", true },
-  { "c6confirm",     "Confirm the companion's running image so it cannot roll back.", true, cmd_c6confirm },
+  { "c6confirm",     "Confirm the companion's running image so it cannot roll back.", true, cmd_c6confirm, nullptr, /*requiresSuperAdmin=*/true },
   { "c6console",     "Keep the C6's own console mirrored into the P4 log: c6console [on|off] (persists). Off: only for 10 minutes after a companion fault.", true, cmd_c6console,
     "Usage: c6console [on|off]\n  on  - mirror the companion's console as C6> lines all the time (uses about 6 KB of internal memory)\n  off - mirror it only after a companion fault, until the companion has been healthy for 10 minutes (the default)" },
   { "c6autorecover", "Auto-recover the companion after an outage: c6autorecover [on|off] (persists).", true, cmd_c6autorecover },

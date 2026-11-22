@@ -50,6 +50,7 @@
 #include "System_MemUtil.h"   // PSRAM_JSON_DOC
 #include "G2_Page_Common.h"
 #include "G2_HijackCmd.h"      // g2SubmitHijackCommand / G2CmdCookie
+#include "G2_ReplyNotice.h"    // g2ReplyNoticeText: the lens words of a refusal
 #include "G2_Page_TextEntry.h" // g2BeginTextEntry (string / numeric editing)
 #include <ArduinoJson.h>
 #include "esp_attr.h"   // EXT_RAM_BSS_ATTR
@@ -714,7 +715,11 @@ static void onSettingsCommitDone(bool ok, const char* result,
 
   const bool success = settingsCommitSucceeded(ok, result);
   const char* msg = (result && result[0]) ? result : "Save failed";
-  if (!success) msg = commandReplyReason(msg);
+  // A refusal reads as the shared lens text ("Needs an admin"); a reply that
+  // is neither a completion nor a failure keeps its own words.
+  char refusal[kG2NoticeMax];
+  if (!success && g2ReplyNoticeText(ok, result, refusal, sizeof(refusal))) msg = refusal;
+  else if (!success) msg = commandReplyReason(msg);
   if (!settingsPublishCommitResult(submitNavGen, success, msg)) return;
   if (!g2EnqueueRedraw(cookie,
                        success ? settingsRenderCommitSuccess : settingsRenderCommitFailure,

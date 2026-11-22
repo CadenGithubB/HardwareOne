@@ -110,6 +110,7 @@ def generated(component: Path) -> str:
     functions = "\n".join(extract_block(owner, signature) for signature in (
         "void notifyAutomationScheduler()", "bool startAutomationScheduler()",
         "void stopAutomationScheduler()", "bool automationSchedulerRunning()",
+        "const char* automationSetSystemEnabled(bool enable)",
         # The pass-entry filesystem try-lock (a tree without it claims a pass
         # without looking at the lock).
         *(("static bool automationPassFilesystemFree()",)

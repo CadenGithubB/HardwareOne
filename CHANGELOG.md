@@ -1805,6 +1805,26 @@ everything user-visible since the v0.99.99.1 tag.
   device and look for these names. Audit-log masking still covers `automationadd` and
   `validate-conditions` lines. `tools/command_registry.py audit` now fails on a handler registered
   under two names or a removed name registered again.
+- Every per-feature "allowed" switch (owner decision 2026-11-21). A feature now has one saved
+  switch, `<x>autostart` (start at boot); off means "not started", and `open<x>` (or the feature's
+  own start command) is never refused because of a setting. Removed commands, with the switch that
+  stays: `wifienabled`, `httpenabled`, `bleenabled`, `espnowenabled`, `mqttclientenabled`,
+  `oledenabled`, `cameraenabled`, `micenabled`, `thermalenabled`, `tofenabled`, `imuenabled`,
+  `gpsenabled`, `fmradioenabled`, `apdsenabled`, `rtcenabled`, `presenceenabled`, `inputenabled`,
+  `srenabled`, `llmenabled` -> `<x>autostart`; `sensorlogenabled` -> `sensorlog autostart`;
+  `systemlogenabled` -> `log autostart`; `eienable` -> `eiautostart` (loads the default model at
+  boot; `eimodelload` / `eimodelunload` by hand); the saved `automationsEnabled` switch is gone and
+  `automation system enable|disable` starts or stops the scheduler now without saving anything
+  (`automationautostart` decides boot). `espnowautostart`, `oledautostart` and `eiautostart` now
+  default to off, so a fresh board starts the same features as before. Saved Bluetooth peers
+  (glasses, ring, phone) reconnect at boot only with `bleautostart` on. The setup wizard's
+  Wi-Fi, ESP-NOW, MQTT and Local Display rows set start at boot; its separate "WiFi auto-connect"
+  and "MQTT auto-start" rows are gone. Stale keys of the removed switches in a saved settings file
+  are ignored. JSON: `/api/mqtt/status` drops `enabled`; the sensor status drops `eiEnabled`
+  (`eiModelLoaded` stays); `connectivity.espnow.enabled` and `espnowmode json` `enabled` now
+  report `espnowautostart`; `automation system ... json` `enabled` and `/api/automations`
+  `systemEnabled` report whether the scheduler runs now; in `features json`, `enabled` is the
+  start-at-boot switch on every row except `led` and `i2c`.
 
 ### Security
 - ESP-NOW room and tag commands: `espnowroomcmd` and `espnowtagcmd` send a command together with an

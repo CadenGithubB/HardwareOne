@@ -142,7 +142,10 @@ def main() -> None:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-g"]
     with tempfile.TemporaryDirectory(prefix="hw1-health-logging-ui-") as directory:
         unit, binary = Path(directory) / "test.cpp", Path(directory) / "test"
-        unit.write_text(reply_prelude(args.component) + generated(args.component, args.source_dir, args.baseline))
+        # G2_Health.cpp words a refused logging command with G2_ReplyNotice.h.
+        notice = args.component.resolve() / "G2_ReplyNotice.h"
+        prelude = reply_prelude(args.component) + (f'#include "{notice}"\n' if notice.exists() else "")
+        unit.write_text(prelude + generated(args.component, args.source_dir, args.baseline))
         subprocess.run([args.cxx, *flags, str(unit), "-o", str(binary)], check=True, timeout=120)
         subprocess.run([str(binary)], check=True, timeout=60)
 

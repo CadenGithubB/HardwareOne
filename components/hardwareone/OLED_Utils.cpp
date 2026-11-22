@@ -3218,19 +3218,28 @@ void oledCommandReplyText(bool ok, const char* reply, const char* okText,
     snprintf(out, outSize, "%s", okText ? okText : "");
     return;
   }
-  // The toast box shows ~17 columns: the admin gate's sentence becomes a fixed
-  // short text; any other reply loses its error token and keeps its first line.
+  // The toast box shows ~15 columns by a few lines: the executor's privilege
+  // refusals (logging's included) become a fixed short text; any other reply
+  // loses its error token, and a long one keeps its first sentence ("This
+  // recording belongs to alice." for a recording someone else started).
   if (!reply) reply = "";
   if (commandReplyIsAdminRefusal(reply)) {
-    snprintf(out, outSize, "Admin required");
+    snprintf(out, outSize, "%s",
+             commandReplyIsSuperAdminRefusal(reply) ? "Needs a super admin" : "Needs an admin");
     return;
   }
+  // A reply line that fits the toast is shown whole, so a short error keeps
+  // its next step ("ESP-NOW not initialized. Run 'openespnow' first."); a
+  // longer one keeps its first sentence.
+  constexpr size_t kWholeLineMax = 64;
   const char* reason = oled_message::reason(reply);
-  const size_t lineLength = strcspn(reason, "\r\n");
-  if (lineLength == 0) {
+  const size_t line = strcspn(reason, "\r\n");
+  const size_t sentenceLength =
+      line <= kWholeLineMax ? line : oled_message::firstSentenceLength(reason);
+  if (sentenceLength == 0) {
     snprintf(out, outSize, "%s", failText ? failText : "");
   } else {
-    snprintf(out, outSize, "%.*s", (int)lineLength, reason);
+    snprintf(out, outSize, "%.*s", (int)sentenceLength, reason);
   }
 }
 
@@ -4239,50 +4248,6 @@ void updateOledDisplay() {
 // OLED Settings Commands (migrated from .ino)
 // ============================================================================
 
-const char* cmd_oled_enabled(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  String _arg = argsInput; _arg.trim();
-  // Accept exactly what the generic settings path accepts; refuse anything
-  // else before the display is touched (so "on" cannot stop the panel).
-  const int parsed = parseBoolArg(_arg);
-  if (parsed < 0) return "Error: invalid arguments — Usage: oledenabled <0|1>";
-  const bool enabled = parsed != 0;
-  setSetting(gSettings.oledEnabled, enabled);
-
-  if (gSettings.oledEnabled) {
-    if (!oledConnected) {
-      if (initOledDisplay()) {
-        broadcastOutput("OLED display started");
-      } else {
-        // The setting was stored above and stays on; the reply says so.
-        return "Error: Failed to initialize OLED display. Check wiring, then run openoled. "
-               "The setting is stored as on.";
-      }
-    } else {
-      gOledRunning = true;
-    }
-
-    String defaultMode = gSettings.oledDefaultMode;
-    defaultMode.toLowerCase();
-    OledMode prevMode = currentOledMode;
-    OledMode defMode = savedDefaultOledMode();
-    requestOledMode(defMode, "cmd.oledenabled.forceDefault", false);
-
-    // Off the owner task the transition is still pending: log the requested mode.
-    { char dbgBuf[48]; snprintf(dbgBuf, sizeof(dbgBuf), "defaultMode=%s", defaultMode.c_str()); debugOledModeChange("cmd.oledenabled.forceDefault", prevMode, defMode, dbgBuf); }
-
-    updateOledDisplay();
-    snprintf(getDebugBuffer(), 1024, "OLED display enabled (mode: %s)", gSettings.oledDefaultMode.c_str());
-  } else {
-    // Full teardown (same as closeoled), not just blanking the panel.
-    stopOledDisplay();
-    gOledRunning = false;
-    snprintf(getDebugBuffer(), 1024, "OLED display disabled");
-  }
-  return getDebugBuffer();
-}
-
 // The mode words oleddefaultmode stores. Returns the stored
 // spelling for one whole word in any letter case, nullptr for anything else.
 static const char* oledStartModeWord(const String& arg) {
@@ -5146,17 +5111,12 @@ bool earlyOledInit() {
 #endif
 
   bool inFirstTimeSetup = (gFirstTimeSetupState != SETUP_NOT_NEEDED);
-  DEBUG_DISPLAYF("[OLED_INIT] fts=%d settings.oledEnabled=%d\n", inFirstTimeSetup ? 1 : 0,
-                gSettings.oledEnabled ? 1 : 0);
+  DEBUG_DISPLAYF("[OLED_INIT] fts=%d settings.oledAutoStart=%d\n", inFirstTimeSetup ? 1 : 0,
+                gSettings.oledAutoStart ? 1 : 0);
   if (!inFirstTimeSetup) {
-    if (!gSettings.oledEnabled) {
-      oledConnected = false;
-      gOledRunning = false;
-      return false;
-    }
-    // Boot intent, separate from the permission above: oledAutoStart decides
-    // whether the display comes up on its own. ramFlushResolve lets a
-    // reboot-and-resume session carry the live state across instead.
+    // oledAutoStart decides whether the display comes up on its own.
+    // ramFlushResolve lets a reboot-and-resume session carry the live state
+    // across instead.
     //
     // A dark screen is indistinguishable from a dead device, and first-time
     // setup does NOT re-trigger on a configured board — so the console line is
@@ -5175,7 +5135,7 @@ bool earlyOledInit() {
   if (!displayInit()) {
     oledConnected = false;
     gOledRunning = false;
-    if (gSettings.oledEnabled) {
+    if (!inFirstTimeSetup || gSettings.oledAutoStart) {
       logSystemEvent("DISPLAY", "%s initialization failed at boot", DISPLAY_NAME);
       systemEventPost(SYSEVT_DISPLAY_INIT_FAILED, DISPLAY_NAME);
     }
@@ -5269,7 +5229,7 @@ void processOledBootSequence() {
           }
           
           // Auto-start gamepad if setting is enabled and I2C bus is enabled
-          if (gSettings.inputEnabled && ramFlushResolve(RF_INPUT, gSettings.inputAutoStart) && gSettings.i2cEnabled) {
+          if (ramFlushResolve(RF_INPUT, gSettings.inputAutoStart) && gSettings.i2cEnabled) {
             tryAutoStartInputForMenu();
           }
         }
@@ -5500,10 +5460,6 @@ static MenuAvailability oledModeFeatureState(OledMode mode, String* outReason) {
 #endif
 #if ENABLE_AUTOMATION
     case OLED_AUTOMATIONS:
-      if (!gSettings.automationEnabled) {
-        if (outReason) *outReason = "Disabled\nRun: automation system enable";
-        return MenuAvailability::FEATURE_DISABLED;
-      }
       return MenuAvailability::AVAILABLE;
 #else
     case OLED_AUTOMATIONS:
@@ -5513,18 +5469,16 @@ static MenuAvailability oledModeFeatureState(OledMode mode, String* outReason) {
 
     case OLED_ESPNOW:
 #if ENABLE_ESPNOW
-      // Check if ESP-NOW is actually initialized, not just enabled in settings
       if (gEspNow && gEspNow->initialized) {
         return MenuAvailability::AVAILABLE;
       }
-      // If enabled but not initialized, show as unavailable with setup instructions
-      if (gSettings.espnowEnabled) {
-        if (outReason) *outReason = "Not initialized\nPress X to setup";
-        return MenuAvailability::UNINITIALIZED;
-      }
+      // Not started: X sets it up and opens it.
+      if (outReason) *outReason = "Not initialized\nPress X to setup";
+      return MenuAvailability::UNINITIALIZED;
+#else
+      if (outReason) *outReason = "Not built";
+      return MenuAvailability::NOT_BUILT;
 #endif
-      if (outReason) *outReason = "Disabled\nRun: espnowenabled 1\nReboot required";
-      return MenuAvailability::FEATURE_DISABLED;
     
     case OLED_REMOTE:
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
@@ -6006,38 +5960,34 @@ void handleOledActionButton() {
 
       // Start the feature the page stands for (unavailableOledTarget).
       // pushStack=false: we are replacing OLED_UNAVAILABLE, not stacking over it.
+      // Only a command that succeeded opens the screen: a refused one leaves
+      // this page up with the refusal on the toast (oledRunCommand).
       if (unavailableOledTarget == OLED_THERMAL_VISUAL) {
 #if ENABLE_THERMAL_SENSOR
-        executeOledCommand("openthermal");
-        requestOledMode(OLED_THERMAL_VISUAL, "unavail.start.thermal", false);
+        if (oledRunCommand("openthermal")) requestOledMode(OLED_THERMAL_VISUAL, "unavail.start.thermal", false);
 #endif
       } else if (unavailableOledTarget == OLED_TOF_DATA) {
 #if ENABLE_TOF_SENSOR
-        executeOledCommand("opentof");
-        requestOledMode(OLED_TOF_DATA, "unavail.start.tof", false);
+        if (oledRunCommand("opentof")) requestOledMode(OLED_TOF_DATA, "unavail.start.tof", false);
 #endif
       } else if (unavailableOledTarget == OLED_IMU_ACTIONS) {
 #if ENABLE_IMU_SENSOR
-        executeOledCommand("openimu");
-        requestOledMode(OLED_IMU_ACTIONS, "unavail.start.imu", false);
+        if (oledRunCommand("openimu")) requestOledMode(OLED_IMU_ACTIONS, "unavail.start.imu", false);
 #endif
       } else if (unavailableOledTarget == OLED_APDS_DATA) {
 #if ENABLE_APDS_SENSOR
-        executeOledCommand("openapds");
-        requestOledMode(OLED_APDS_DATA, "unavail.start.apds", false);
+        if (oledRunCommand("openapds")) requestOledMode(OLED_APDS_DATA, "unavail.start.apds", false);
 #endif
       } else if (unavailableOledTarget == OLED_GPS_DATA) {
 #if ENABLE_GPS_SENSOR
-        executeOledCommand("opengps");
-        requestOledMode(OLED_GPS_DATA, "unavail.start.gps", false);
+        if (oledRunCommand("opengps")) requestOledMode(OLED_GPS_DATA, "unavail.start.gps", false);
 #endif
       } else if (unavailableOledTarget == OLED_RTC_DATA) {
 #if ENABLE_RTC_SENSOR
         // Start RTC with confirmation
         static auto rtcOpenConfirmedUnavail = [](void* userData) {
           (void)userData;
-          executeOledCommand("openrtc");
-          requestOledMode(OLED_RTC_DATA, "unavail.confirm.rtc", false);
+          if (oledRunCommand("openrtc")) requestOledMode(OLED_RTC_DATA, "unavail.confirm.rtc", false);
         };
         oledConfirmRequest("Open RTC?", nullptr, rtcOpenConfirmedUnavail, nullptr);
 #endif
@@ -6046,21 +5996,19 @@ void handleOledActionButton() {
         // Start Presence with confirmation
         static auto presenceOpenConfirmedUnavail = [](void* userData) {
           (void)userData;
-          executeOledCommand("openpresence");
-          requestOledMode(OLED_PRESENCE_DATA, "unavail.confirm.presence", false);
+          if (oledRunCommand("openpresence")) requestOledMode(OLED_PRESENCE_DATA, "unavail.confirm.presence", false);
         };
         oledConfirmRequest("Open Presence?", nullptr, presenceOpenConfirmedUnavail, nullptr);
 #endif
       } else if (unavailableOledTarget == OLED_FM_RADIO) {
-        executeOledCommand("openfmradio");
-        requestOledMode(OLED_FM_RADIO, "unavail.start.fmradio", false);
+        if (oledRunCommand("openfmradio")) requestOledMode(OLED_FM_RADIO, "unavail.start.fmradio", false);
       } else if (unavailableOledTarget == OLED_ESPNOW) {
 #if ENABLE_ESPNOW
-        requestOledMode(OLED_ESPNOW, "unavail.start.espnow", false);
         if (gSettings.espnowDeviceName.length() == 0) {
+          requestOledMode(OLED_ESPNOW, "unavail.start.espnow", false);
           oledEspNowShowNameKeyboard();
-        } else {
-          executeOledCommand("openespnow");
+        } else if (oledRunCommand("openespnow")) {
+          requestOledMode(OLED_ESPNOW, "unavail.start.espnow", false);
           if (gEspNow && gEspNow->initialized) {
             oledEspNowInit();
           } else {
@@ -6072,8 +6020,8 @@ void handleOledActionButton() {
         // Enable automation system
         if (oledRunCommand("automation system enable")) {
           broadcastOutput("[OLED] Automation system enabled - restart required");
+          oledMenuBack();
         }
-        oledMenuBack();
       } else {
         DEBUG_DISPLAYF("[GAMEPAD_ACTION] No action for unavailable: %s\n", unavailableOledTitle.c_str());
       }
@@ -6407,8 +6355,8 @@ bool processOledInput() {
               executeOledCommand("openespnow");
               if (gEspNow && gEspNow->initialized) {
                 broadcastOutput("[OLED] ESP-NOW initialized successfully");
-                // Enable ESP-NOW in settings so it persists
-                executeOledCommand("espnowenabled 1");
+                // Start it at boot from now on, as set up here
+                executeOledCommand("espnowautostart 1");
                 // Initialize the OLED ESP-NOW interface now that ESP-NOW is ready
                 oledEspNowInit();
                 oledKeyboardReset();
@@ -6569,8 +6517,7 @@ void tryAutoStartInputForMenu() {
     // Resolved through ramflush because this runs on every menu entry and login,
     // long after boot — reading the setting directly would resurrect input that a
     // RAM-flush resume deliberately left off.
-    bool autoStart = gSettings.inputEnabled &&
-                     ramFlushResolve(RF_INPUT, gSettings.inputAutoStart);
+    bool autoStart = ramFlushResolve(RF_INPUT, gSettings.inputAutoStart);
     if (!autoStart) {
       return;
     }
@@ -6645,27 +6592,26 @@ static const char* cmd_oled_landscape(const String& args) {
 const CommandEntry oledCommands[] = {
   { "oledcameraread", "Read the local camera preview state (JSON)", false, cmd_oledcameraread },
 #if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
-  { "oledlandscape", "Landscape UI with right-side controls: [0|1]", false, cmd_oled_landscape, "Usage: oledlandscape [0|1]" },
+  { "oledlandscape", "Landscape UI with right-side controls: [0|1]", true, cmd_oled_landscape, "Usage: oledlandscape [0|1]" },
 #endif
-  { "openoled", "Start OLED display.", false, cmd_oledstart },
-  { "closeoled", "Stop OLED display.", false, cmd_oledstop },
-  { "oledmode", "Set display mode: <mode>", false, cmd_oledmode,
+  { "openoled", "Start OLED display.", true, cmd_oledstart },
+  { "closeoled", "Stop OLED display.", true, cmd_oledstop },
+  { "oledmode", "Set display mode: <mode>", true, cmd_oledmode,
     "Usage: oledmode <menu|status|sensordata|sensorlist|thermal|camera|network|mesh|gps|text|logo|anim|imuactions|fmradio|files|logging|automations|espnow|memory|off>\n"
     "Example: oledmode memory\n"
     "Example: oledmode off" },
-  { "oledtext", "Set custom text: <message>", false, cmd_oledtext, "Usage: oledtext <message>" },
-  { "oledanim", "Select animation: <name> or fps <1-60>", false, cmd_oledanim,
+  { "oledtext", "Set custom text: <message>", true, cmd_oledtext, "Usage: oledtext <message>" },
+  { "oledanim", "Select animation: <name> or fps <1-60>", true, cmd_oledanim,
     "Usage: oledanim <name>\n"
     "       oledanim fps <1-60>" },
-  { "oledclear", "Clear OLED display.", false, cmd_oledclear },
+  { "oledclear", "Clear OLED display.", true, cmd_oledclear },
   { "oledstatus", "Show OLED status. (add 'json' for JSON output)", false, cmd_oledstatus },
-  { "oledenabled", "Enable/disable OLED: <0|1>", true, cmd_oled_enabled, "Usage: oledenabled <0|1>" },
-  { "oleddefaultmode", "OLED default mode: <logo|status|sensors|thermal|network|mesh|off>", false, cmd_oled_defaultmode, "Usage: oleddefaultmode <logo|status|sensors|thermal|network|mesh|off>" },
-  { "oledbootduration", "Boot animation duration (ms): <500-10000>", false, cmd_oled_bootduration, "Usage: oledbootduration <500..10000>" },
-  { "oledupdateinterval", "Display update interval (ms): <10-1000>", false, cmd_oled_updateinterval, "Usage: oledupdateinterval <10..1000>" },
-  { "oledbrightness", "Display brightness: <0-255>", false, cmd_oled_brightness, "Usage: oledbrightness <0..255>" },
-  { "oledflip",       "Flip display 180°: [on|off|toggle]", false, cmd_oled_flip, "Usage: oledflip [on|off|toggle]" },
-  { "oledthermalscale", "Thermal image scale: <1.0-10.0>", false, cmd_oled_thermalscale, "Usage: oledthermalscale <1.0..10.0>" },
+  { "oleddefaultmode", "OLED default mode: <logo|status|sensors|thermal|network|mesh|off>", true, cmd_oled_defaultmode, "Usage: oleddefaultmode <logo|status|sensors|thermal|network|mesh|off>" },
+  { "oledbootduration", "Boot animation duration (ms): <500-10000>", true, cmd_oled_bootduration, "Usage: oledbootduration <500..10000>" },
+  { "oledupdateinterval", "Display update interval (ms): <10-1000>", true, cmd_oled_updateinterval, "Usage: oledupdateinterval <10..1000>" },
+  { "oledbrightness", "Display brightness: <0-255>", true, cmd_oled_brightness, "Usage: oledbrightness <0..255>" },
+  { "oledflip",       "Flip display 180°: [on|off|toggle]", true, cmd_oled_flip, "Usage: oledflip [on|off|toggle]" },
+  { "oledthermalscale", "Thermal image scale: <1.0-10.0>", true, cmd_oled_thermalscale, "Usage: oledthermalscale <1.0..10.0>" },
 };
 
 const size_t oledCommandsCount = sizeof(oledCommands) / sizeof(oledCommands[0]);

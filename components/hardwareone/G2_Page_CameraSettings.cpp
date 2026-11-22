@@ -160,6 +160,7 @@ static void redrawCurrentCameraSettings();
 // no-op rather than leaving an unpersisted optimistic value in RAM.
 static void onCameraSettingDone(bool ok, const char* result,
                                 const G2CmdCookie& cookie, void* /*userData*/) {
+  // A refusal is already this page's lens notice; the redraw's back row shows it.
   if (!ok) {
     DEBUG_G2F("[G2] Camera settings: command failed: %.80s",
               (result && result[0]) ? result : "no result");
@@ -323,6 +324,14 @@ static bool settingSupported(const CamSetting& setting, const CameraCapabilities
 // -----------------------------------------------------------------------------
 
 #define CAM_SETTINGS_ROW_LEN  32
+
+// The back row of every level: its label, or for the redraw after a refused
+// change, why it was refused ("<- Needs an admin"). The rows themselves are
+// read back from gSettings, so a refused value never shows as applied.
+static void cameraBackRow(char* row, const char* label) {
+  g2LensNoticeBackRow(G2_HIJACK_PAGE_CAMERA_SETTINGS, label, row, CAM_SETTINGS_ROW_LEN);
+}
+
 // 1 back row + N settings rows. Also covers all 13 resolution IDs and the
 // independent stream-size picker, with room for an unavailable-controls row.
 static EXT_RAM_BSS_ATTR char gRows[1 + 16][CAM_SETTINGS_ROW_LEN];  // PSRAM: deep-copied by g2ShowListPage
@@ -368,7 +377,7 @@ static size_t kSettingsIndexForSubRow(CamCategory cat, size_t displayRow) {
 
 static size_t buildTopRows() {
   size_t row = 0;
-  strlcpy(gRows[row], "<- Camera", CAM_SETTINGS_ROW_LEN);
+  cameraBackRow(gRows[row], "<- Camera");
   gRowPtrs[row] = gRows[row];
   row++;
 
@@ -410,7 +419,7 @@ static size_t buildSubRows(CamCategory cat) {
   gPendingCategory = cat;
   for (auto& index : gPendingSettingRowMap) index = SIZE_MAX;
   size_t row = 0;
-  strlcpy(gRows[row], "<- Settings", CAM_SETTINGS_ROW_LEN);
+  cameraBackRow(gRows[row], "<- Settings");
   gRowPtrs[row] = gRows[row];
   row++;
 
@@ -456,7 +465,7 @@ static size_t buildResolutionPickerRows() {
   const int current = (int)gSettings.cameraFramesize;
 
   size_t row = 0;
-  strlcpy(gRows[row], "<- Camera", CAM_SETTINGS_ROW_LEN);
+  cameraBackRow(gRows[row], "<- Camera");
   gRowPtrs[row] = gRows[row];
   row++;
 
@@ -517,7 +526,7 @@ static size_t buildStreamPickerRows() {
   const int curH = gSettings.g2StreamHeight;
 
   size_t row = 0;
-  strlcpy(gRows[row], "<- Settings", CAM_SETTINGS_ROW_LEN);
+  cameraBackRow(gRows[row], "<- Settings");
   gRowPtrs[row] = gRows[row];
   row++;
 

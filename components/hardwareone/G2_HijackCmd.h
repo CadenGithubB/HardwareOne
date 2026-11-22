@@ -288,5 +288,33 @@ bool g2EnqueueLensJob(
 // diagnostics and may be null.
 bool g2EnqueueRedraw(const G2CmdCookie& cookie, void (*render)(), const char* tag);
 
+// =============================================================================
+// Lens notice — why the last command from a page was refused.
+// =============================================================================
+// Every hijack command's completion records its outcome for the page that
+// submitted it (cookie.targetPage) before the page's own callback runs: a
+// refused or failed reply stores its short lens text (g2ReplyNoticeText in
+// G2_ReplyNotice.h: "Needs an admin", "Needs a super admin", or the reason's
+// first sentence); a completed command clears that page's notice. A notice
+// lasts a few seconds and belongs to one page.
+//
+// Pages show it where they already show results, so a refusal is never
+// silent:
+//   * a list page draws its back row through g2LensNoticeBackRow, which takes
+//     the notice ("<- Needs an admin") and otherwise writes the usual label;
+//   * a live page with a readout child peeks at it on every tick and shows it
+//     above the readout until it expires.
+// The page still has to redraw after a refusal (its completion callback
+// already does for most rows). Callable from any task.
+bool g2LensNoticeFromReply(G2HijackPage page, bool ok, const char* reply);
+// Copies the page's current notice into out (if out is not null) and clears
+// it. False when the page has none.
+bool g2LensNoticeTake(G2HijackPage page, char* out, size_t cap);
+// Copies the page's current notice without clearing it.
+bool g2LensNoticePeek(G2HijackPage page, char* out, size_t cap);
+// The back row of a list page: "<- <notice>" when the page has one (taken),
+// otherwise backLabel. out may be the buffer that holds backLabel.
+void g2LensNoticeBackRow(G2HijackPage page, const char* backLabel, char* out, size_t cap);
+
 #endif // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 #endif // G2_HIJACKCMD_H

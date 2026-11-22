@@ -23,6 +23,7 @@
 #include "System_Settings.h"            // setSetting, gSettings
 #include "G2_HijackCmd.h"               // g2SubmitHijackCommand — Group A migration
 #include "G2_Page_Common.h"             // g2ShowListPageAndPublish
+#include "G2_ReplyNotice.h"             // kG2NoticeMax (lens notice text)
 #include <freertos/FreeRTOS.h>
 #include <stdio.h>
 
@@ -598,7 +599,10 @@ static bool showSensorDetail(const G2SensorRow& r) {
               r.label);
   }
   size_t out = 0;
-  strlcpy(gSensorsRows[out], "<- Hardware", SENSORS_ROW_LEN);
+  // A refused toggle (or camera recording, see the stream's Rec row) shows
+  // its reason in the back row of the redraw that follows it.
+  g2LensNoticeBackRow(G2_HIJACK_PAGE_SENSORS, "<- Hardware",
+                      gSensorsRows[out], SENSORS_ROW_LEN);
   gSensorsRowPtrs[out] = gSensorsRows[out];
   out++;
 
@@ -752,9 +756,8 @@ static void sensorRuntimeCmd(const G2SensorRow& r, bool open, char* out, size_t 
 }
 
 // Build a sensor's PERSISTED auto-start command. The command + value format
-// vary by device: the input device uses inputautostart, camera/mic their own
-// autostart commands, OLED uses "oledenabled <1|0>" (it has no autostart cmd —
-// gSettings.oledEnabled IS the boot state), and the i2c data sensors use
+// vary by device: the input device uses inputautostart, camera/mic/OLED their
+// own autostart commands, and the i2c data sensors use
 // "sensorautostart <id> <on|off>". Using the generic form for OLED is what
 // produced "Unknown sensor".
 static void sensorAutostartCmd(const G2SensorRow& r, bool on, char* out, size_t cap) {
@@ -763,7 +766,7 @@ static void sensorAutostartCmd(const G2SensorRow& r, bool on, char* out, size_t 
     case G2SensorKind::Input:      snprintf(out, cap, "inputautostart %s", v); return;
     case G2SensorKind::Camera:     snprintf(out, cap, "cameraautostart %s", v); return;
     case G2SensorKind::Microphone: snprintf(out, cap, "micautostart %s", v); return;
-    case G2SensorKind::Oled:       snprintf(out, cap, "oledenabled %d", on ? 1 : 0); return;
+    case G2SensorKind::Oled:       snprintf(out, cap, "oledautostart %d", on ? 1 : 0); return;
     default:                       snprintf(out, cap, "sensorautostart %s %s", r.featureId, v); return;
   }
 }
@@ -1060,7 +1063,23 @@ static void g2BuildFmReadout(char* out, size_t cap) {
 // Gamepad gets a full multi-value readout; the other sensors currently
 // fall back to "<label>: <single value>" via their existing one-line
 // formatters until each gets a fleshed-out multi-line readout.
+static void buildSensorReadoutState(char* out, size_t cap);
+
+// The live readout child. The Run / Auto Start / Sync clock / Source rows keep
+// their labels until the page is drawn again, so a refused tap's reason
+// ("Needs an admin") shows on top of the readout for a few seconds.
 void g2BuildSensorReadout(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  char notice[kG2NoticeMax];
+  if (!g2LensNoticePeek(G2_HIJACK_PAGE_SENSORS, notice, sizeof(notice))) {
+    buildSensorReadoutState(out, cap);
+    return;
+  }
+  const int used = snprintf(out, cap, "%s\n", notice);
+  if (used > 0 && (size_t)used < cap) buildSensorReadoutState(out + used, cap - (size_t)used);
+}
+
+static void buildSensorReadoutState(char* out, size_t cap) {
   if (!out || cap == 0) return;
   out[0] = '\0';
 
@@ -1194,17 +1213,35 @@ void g2ReshowSensorsDetail() {
   showSensorDetail(rows[gSensorsDetailIdx]);
 }
 
-#if ENABLE_CAMERA_SENSOR || ENABLE_MICROPHONE
-// Render of the redraws queued by the camera power hook and the mic runtime
-// completion; runs on the lens applier. The applier has already dropped the
-// job if a page change moved the menu generation past its cookie. Moves
-// inside the Sensors page keep the generation, so the level is checked here.
+// Render of the redraws queued by the camera power hook, the mic runtime
+// completion and the Auto Start saves; runs on the lens applier. The applier
+// has already dropped the job if a page change moved the menu generation past
+// its cookie. Moves inside the Sensors page keep the generation, so the level
+// is checked here.
 // A tap that races this render either has its swap in flight (this render is
 // refused and publishes nothing) or has already published its page/level.
 static void redrawSensorsDetailIfCurrent() {
   if (gSensorsLevel != SENSORS_LEVEL_DETAIL) return;
   if (g2GetHijackPage() != G2_HIJACK_PAGE_SENSORS) return;
   g2ReshowSensorsDetail();
+}
+
+// Completion of a detail-level Auto Start save: redraw from the committed
+// setting, so the row shows the new value, or the old one with the refusal's
+// reason in the back row (g2LensNoticeBackRow).
+static void onSensorsDetailSaveDone(bool /*ok*/, const char* /*result*/,
+                                    const G2CmdCookie& cookie, void* /*userData*/) {
+  (void)g2EnqueueRedraw(cookie, redrawSensorsDetailIfCurrent, "Sensors auto-start save");
+}
+
+#if ENABLE_CAMERA_SENSOR || ENABLE_MICROPHONE
+// The save chained after an accepted camera/mic runtime change. Its success
+// needs no redraw of its own (the runtime completion or the camera post-hook
+// draws the new state); a refusal redraws so the back row shows its reason.
+static void onSensorsChainedSaveDone(bool ok, const char* result,
+                                     const G2CmdCookie& cookie, void* /*userData*/) {
+  if (!g2ReplyRefused(ok, result)) return;
+  (void)g2EnqueueRedraw(cookie, redrawSensorsDetailIfCurrent, "Sensors auto-start refused");
 }
 #endif
 
@@ -1219,7 +1256,7 @@ static void onMicAutostartRuntimeDone(bool ok, const char* result,
   if (ok) {
     char line[32];
     snprintf(line, sizeof(line), "micautostart %s", wantOn ? "on" : "off");
-    if (!g2SubmitHijackCommand(line, cookie, nullptr, nullptr)) {
+    if (!g2SubmitHijackCommand(line, cookie, onSensorsChainedSaveDone, nullptr)) {
       DEBUG_G2F("[G2] Sensors: %s submit FAILED after runtime ok", line);
     }
   } else {
@@ -1247,13 +1284,14 @@ static void onCameraRuntimeDone(bool ok, const char* result,
   if (ok) {
     char line[32];
     snprintf(line, sizeof(line), "cameraautostart %s", wantOn ? "on" : "off");
-    if (!g2SubmitHijackCommand(line, cookie, nullptr, nullptr)) {
+    if (!g2SubmitHijackCommand(line, cookie, onSensorsChainedSaveDone, nullptr)) {
       DEBUG_G2F("[G2] Sensors: %s submit FAILED after camera admission", line);
     }
     return;
   }
   // Refused: no power change and no post-hook follow, so a start is no longer
-  // pending and the rows are refreshed here, through the lens applier.
+  // pending and the rows are refreshed here, through the lens applier; the
+  // back row of that redraw carries the reason (lens notice).
   if (wantOn) sG2SensorsCamAsyncStartPending = false;
   DEBUG_G2F("[G2] Sensors: camera %s refused — skip cameraautostart (result='%s')",
             wantOn ? "start" : "stop", result ? result : "");
@@ -1371,8 +1409,8 @@ void g2SensorsHandleTap(uint32_t idx) {
       // RTC → system clock. Bare `rtcsync` is the SAFE direction: it writes
       // only the volatile system clock, never the battery-backed DS3231 (the
       // `from` direction, which we deliberately don't expose on a tap). Admin-
-      // gated, so a non-admin paired wearer gets a silent denial — matches the
-      // fire-and-forget Run/AutoStart rows above.
+      // gated: like the Run/AutoStart rows above, a refusal shows its reason
+      // at the top of the live readout (lens notice).
       BROADCAST_PRINTF("[G2] Sensors: rtcsync (RTC->system) from glasses");
       (void)g2SubmitHijackCommand("rtcsync", cookie, nullptr, nullptr);
       showSensorDetail(r);
@@ -1452,14 +1490,12 @@ void g2SensorsHandleTap(uint32_t idx) {
     // owner accepted the change. The camera uses the owner's asynchronous
     // form (`opencamera async`), which queues to cam_power and returns at once:
     // the synchronous `opencamera` would hold cmd_exec for up to 60 s.
-    bool skipImmediateRedraw = false;
 #if ENABLE_CAMERA_SENSOR
     // Only a change of the live state needs the owner; otherwise the toggle
     // just saves the preference below. Camera power then runs on cam_power and
     // its post-hook redraws when done.
     const bool cameraRuntime = r.kind == G2SensorKind::Camera &&
                                next != gCameraRunning;
-    if (cameraRuntime) skipImmediateRedraw = true;
 #endif
 #if ENABLE_MICROPHONE
     // Like the camera: only a change of the live state runs openmic/closemic
@@ -1471,19 +1507,12 @@ void g2SensorsHandleTap(uint32_t idx) {
     const bool micLive = gMicRunning || micRecordingBusy() || audioCaptureOwnedBy("mic");
     const bool micRuntime = r.kind == G2SensorKind::Microphone &&
                             (next ? !gMicRunning : micLive);
-    if (micRuntime) skipImmediateRedraw = true;
 #endif
 
-    // A preference-only toggle re-renders now; a runtime change redraws from
-    // its completion or the cam_power post-hook.
-    if (!skipImmediateRedraw) {
-      buildRows(rows, SENSORS_MAX_ROWS, &count, /*includeStubs=*/ false);
-      if (gSensorsDetailIdx < count) {
-        showSensorDetail(rows[gSensorsDetailIdx]);
-      } else {
-        showSensorDetail(r);
-      }
-    }
+    // Nothing is redrawn before the reply: a preference-only toggle redraws
+    // from its save's completion (onSensorsDetailSaveDone), a runtime change
+    // from its own completion or the cam_power post-hook. A refused change
+    // therefore never shows as applied; its reason lands in the back row.
 
     // Persist the auto-start flag via the per-feature CLI command
     // (route through cmd_exec). Each *autostart command is a thin
@@ -1542,13 +1571,12 @@ void g2SensorsHandleTap(uint32_t idx) {
                r.featureId, next ? "on" : "off");
     }
 
-    // No completion callback — the inline showSensorDetail() above
-    // already re-rendered. Persistence
-    // is fire-and-forget via cmd_exec only — never setSetting on the
-    // tap/BLE task (wrong stack + skips auth). Optimistic UI may lie
-    // until the next refresh if submit fails.
-    if (!g2SubmitHijackCommand(line, cookie, nullptr, nullptr)) {
+    // Persistence runs via cmd_exec only — never setSetting on the
+    // tap/BLE task (wrong stack + skips auth). The completion redraws the
+    // row from the committed value (or shows why it was refused).
+    if (!g2SubmitHijackCommand(line, cookie, onSensorsDetailSaveDone, nullptr)) {
       DEBUG_G2F("[G2] Sensors: %s submit FAILED — no inline mutate", line);
+      g2ReshowSensorsDetail();
     }
     return;
   }

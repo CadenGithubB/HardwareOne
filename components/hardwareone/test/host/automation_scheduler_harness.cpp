@@ -59,7 +59,6 @@ static bool everyMs(uint32_t* previous, uint32_t interval) {
   if (now - *previous < interval) return false;
   *previous = now; return true;
 }
-struct { bool automationEnabled = true; } gSettings;
 static constexpr int SYSEVT_COUNT = 8;
 static int systemEventKindFromName(const char* name) {
   return std::strcmp(name, "edge") == 0 ? 1 : std::strcmp(name, "other") == 0 ? 2 : 0;
@@ -189,7 +188,6 @@ static void reset(const char* json = emptyRules) {
 #ifdef HAVE_UPTIME_SCHEDULE
   sUptimeSchedule.clear();
 #endif
-  gSettings.automationEnabled = true;
   storeExists = json != nullptr;
   storeJson = json ? json : "";
   readSucceeds = writeSucceeds = true;
@@ -264,21 +262,20 @@ static void lifecycle() {
   }
 }
 
-// Permission revoked by a writer other than the owner (settings page, import)
-// stops the scheduler on its next tick; a later grant stays idle until the
-// owner starts it again (`automation system enable`).
-static void permissionRevoked() {
+// No saved setting stops a running scheduler (the automations "allowed"
+// switch was removed 2026-11-21; automationautostart only decides boot). Only
+// the owner's stop (`automation system disable`) does, and a start resumes it.
+static void runsUntilStopped() {
   reset(futureRules);
   CHECK(startAutomationScheduler() && automationSchedulerRunning());
   automationTick();
   CHECK(ticks == 1);
-  gSettings.automationEnabled = false;
+  CHECK(automationSetSystemEnabled(false) == nullptr);
   automationTick();
   CHECK(!automationSchedulerRunning() && ticks == 1 && allocations == releases);
-  gSettings.automationEnabled = true;
   automationTick();
   CHECK(!automationSchedulerRunning() && ticks == 1);
-  CHECK(startAutomationScheduler() && automationSchedulerRunning());
+  CHECK(automationSetSystemEnabled(true) == nullptr && automationSchedulerRunning());
   automationTick();
   CHECK(ticks == 2);
 }
@@ -1184,7 +1181,7 @@ int main() {
   eventDrainFromStart();
   summaries();
   lifecycle();
-  permissionRevoked();
+  runsUntilStopped();
   fileFormatVersion();
   timing();
   invalidationAndOverlap();

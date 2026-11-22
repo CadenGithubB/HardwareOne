@@ -41,11 +41,18 @@ constexpr char kCommandReplyNotADecimal[] =
 //   "Error: <reason>"  a failure
 constexpr char kCommandReplyOkStamp[] = "OK: ";
 constexpr char kCommandReplyErrorLead[] = "Error: ";
+// The executor's reply to a line with no command in it.
+constexpr char kCommandReplyEmptyCommand[] =
+    "Error: Empty command. Type a command, or help for the list.";
 
 // The executor's refusal of a caller without the privilege a command row
 // needs. The executor appends the command name and the next action.
 constexpr char kCommandReplyAdminRequired[] = "Error: Admin access required";
 constexpr char kCommandReplySuperAdminRequired[] = "Error: Super-admin access required";
+// Starting, stopping and setting up logging is an administrator's job; every
+// signed-in account may read the status and the logs it may read.
+constexpr char kCommandReplyLoggingAdminRequired[] =
+    "Error: Admin access required to start, stop or change logging. Contact an administrator.";
 
 // The reply leads with "Error" or "ERROR" (a peer on older firmware): a
 // failure that carries a reason. Narrower than commandReplyIsFailure().
@@ -76,6 +83,12 @@ inline bool commandReplyHasOkStamp(const char* reply) {
 // action it was asked for (a logger started, a track toggled).
 inline bool commandReplyConfirms(const char* reply) {
   return reply && strncmp(reply, "SUCCESS", 7) == 0;
+}
+
+// The reply is the executor's super-admin refusal.
+inline bool commandReplyIsSuperAdminRefusal(const char* reply) {
+  return reply && strncmp(reply, kCommandReplySuperAdminRequired,
+                          sizeof(kCommandReplySuperAdminRequired) - 1) == 0;
 }
 
 // The reply is the executor's admin or super-admin refusal.

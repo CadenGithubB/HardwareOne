@@ -717,17 +717,6 @@ const char* cmd_fmradio_mute(const String& argsInput) {
   return "OK";
 }
 
-// Dedicated unmute shares the same hardware operation and outcome handling.
-const char* cmd_fmradio_unmute(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = argsInput;
-  arg.trim();
-  if (arg.length()) {
-    return "Error: invalid arguments — Usage: fmradiounmute";
-  }
-  return cmd_fmradio_mute("off");
-}
-
 const char* cmd_fmradio_status(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -830,14 +819,13 @@ static const char* cmd_fmradiobus(const String& a) {
 
 const CommandEntry fmRadioCommands[] = {
   // 3-level voice: "sensor" -> "radio" -> "open/close"
-  { "openfmradio", "Start FM Radio sensor.", false, cmd_fmradio_start },
-  { "closefmradio", "Stop FM Radio sensor.", false, cmd_fmradio_stop },
+  { "openfmradio", "Start FM Radio sensor.", true, cmd_fmradio_start },
+  { "closefmradio", "Stop FM Radio sensor.", true, cmd_fmradio_stop },
   { "fmradioread", "Read FM Radio status. (add 'json' for JSON output)", false, cmd_fmradio_status },
-  { "fmradiotune", "Tune to frequency: <freq>", false, cmd_fmradio_tune, "Usage: fmradiotune <frequency> (e.g., 103.9 or 10390)" },
-  { "fmradioseek", "Start seeking the next station [up|down] (async; 'fmradioread' shows the result)", false, cmd_fmradio_seek, "Usage: fmradioseek [up|down]" },
-  { "fmradiovolume", "Set volume: <0-15>", false, cmd_fmradio_volume, "Usage: fmradiovolume <0-15>" },
-  { "fmradiomute", "Mute audio", false, cmd_fmradio_mute },
-  { "fmradiounmute", "Unmute audio", false, cmd_fmradio_unmute },
+  { "fmradiotune", "Tune to frequency: <freq>", true, cmd_fmradio_tune, "Usage: fmradiotune <frequency> (e.g., 103.9 or 10390)" },
+  { "fmradioseek", "Start seeking the next station [up|down] (async; 'fmradioread' shows the result)", true, cmd_fmradio_seek, "Usage: fmradioseek [up|down]" },
+  { "fmradiovolume", "Set volume: <0-15>", true, cmd_fmradio_volume, "Usage: fmradiovolume <0-15>" },
+  { "fmradiomute", "Mute or unmute audio: [on|off] (bare = mute)", true, cmd_fmradio_mute, "Usage: fmradiomute [on|off]" },
   
   // Auto-start
   { "fmradioautostart", "Enable/disable FM Radio auto-start after boot [on|off]", true, cmd_fmradioautostart, "Usage: fmradioautostart [on|off]" },
@@ -855,7 +843,6 @@ const size_t fmRadioCommandsCount = sizeof(fmRadioCommands) / sizeof(fmRadioComm
 // FM Radio settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry fmRadioSettingEntries[] = {
-  { "fmRadioEnabled", SETTING_BOOL, &gSettings.fmRadioEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "fmradioenabled" },
   { "fmRadioAutoStart", SETTING_BOOL, &gSettings.fmRadioAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "fmradioautostart" },
   { "fmRadioDevicePollMs", SETTING_INT, &gSettings.fmRadioDevicePollMs, 250, 0, nullptr, 100, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "fmradiodevicepollms" },
 };

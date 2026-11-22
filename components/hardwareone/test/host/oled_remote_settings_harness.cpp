@@ -278,7 +278,7 @@ static const char* kSchema = R"FIXTURE({"modules":[
   {"key":"tzOffsetMinutes","label":"TZ","type":"int","cmdKey":"tzoffsetminutes","options":"0|UTC,-300|EST,60|CET","default":-300},
   {"key":"ntpEnabled","label":"NTP","type":"bool","cmdKey":"ntpenabled","default":true}]},
  {"name":"wifi","section":"network.wifi","entries":[
-  {"key":"wifiEnabled","label":"WiFi","type":"bool","cmdKey":"wifienabled","default":true}]},
+  {"key":"wifiAutoStart","label":"WiFi","type":"bool","cmdKey":"wifiautostart","default":true}]},
  {"name":"users","section":"users","entries":[
   {"key":"x","label":"X","type":"string","cmdKey":"userx","default":""}]},
  {"name":"empty","section":"empty","entries":[
@@ -423,7 +423,7 @@ static void case_build_uses_schema_cmdkeys() {
   EXPECT(beep && beep->type == SETTING_BOOL && beep->minVal == 0 && beep->maxVal == 1 &&
              beep->valuePtr && *(const bool*)beep->valuePtr,
          "a bool row gets the slider's 0..1 range and the cached value");
-  for (const char* hidden : {"uptime", "apiKey", "gain", "rawCount", "ntpEnabled", "wifiEnabled", "x", "y",
+  for (const char* hidden : {"uptime", "apiKey", "gain", "rawCount", "ntpEnabled", "wifiAutoStart", "x", "y",
                              "firmwareVersion"}) {
     EXPECT(findRemote(hidden) == nullptr, std::string("row is not offered: ") + hidden);
   }
@@ -696,8 +696,13 @@ static void case_editor_commits_remote_in_remote_mode() {
   gExecOk = false;
   gExecText = "Error: No session token - bond not ready or passphrase mismatch";
   EXPECT(!setSettingValueStr(ntp, "y") &&
-             gToast == gExecText,
-         "a refused remote send shows the executor's error on the editor line");
+             gToast == "No session token - bond not ready or passphrase mismatch",
+         "a refused remote send shows the executor's reason on the editor line, shown: '" +
+             gToast + "'");
+  gExecText = "Error: Admin access required for command 'ntpserver'. Contact an administrator.";
+  EXPECT(!setSettingValueStr(ntp, "z") && gToast == "Needs an admin",
+         "a remote send the local admin gate refuses shows the shared short refusal, shown: '" +
+             gToast + "'");
 }
 
 static void case_editor_commits_local_otherwise() {
@@ -755,8 +760,8 @@ static void case_editor_local_int_refusal_shown() {
   gExecOk = false;
   gExecText = "Error: Admin access required for command 'oledbrightness'. Contact an administrator.";
   setSettingValue(&kLocalOledEntries[0], 5);
-  EXPECT(gToast == gExecText,
-         "a refused slider/pick-list save shows the executor's reply on the editor line, shown: '" +
+  EXPECT(gToast == "Needs an admin",
+         "a refused slider/pick-list save shows the shared short refusal on the editor line, shown: '" +
              gToast + "'");
   EXPECT(gLocal.empty(), "the INT save does not use the fire-and-forget executor, ran: " + joined(gLocal));
 }
@@ -869,8 +874,9 @@ static void case_adapter_reports_peer_answer() {
   EXPECT(gDirtyUntil >= gNowMs + 250, "frames keep coming while the commit is pending");
   peerReplies(kPeerMac, false, "Error: value out of range");
   displayRemoteSettingsMode();
-  EXPECT(gToast == "Peer: Error: value out of range",
-         "the peer's failure is shown on the editor line, not a local success");
+  EXPECT(gToast == "Peer: value out of range",
+         "the peer's failure is shown on the editor line, not a local success, shown: '" +
+             gToast + "'");
   EXPECT(gToast != "Applied" && intValue(b) == 128, "no 'Applied' and no value change on failure");
 
   setSettingValue(b, 10);

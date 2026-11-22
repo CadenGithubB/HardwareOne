@@ -42,6 +42,7 @@ bool filesystemReady = true;
 volatile bool gAcceptingRestore = true;
 volatile bool gRestoreComplete = false;
 const char* PENDING_CRED_SETUP_FILE = "/system/.pending_credential_setup";
+static constexpr const char* kRoleSuperAdmin = "superadmin";  // System_User.h
 
 static std::vector<std::string> output, events;
 static void broadcastOutput(const String& line) { output.emplace_back(line.c_str()); }
@@ -114,7 +115,8 @@ static std::string bundle(const char* fingerprint = nullptr) {
   std::string json = "{\"magic\":\"HWBACKUP\",\"formatVersion\":1,";
   if (fingerprint) json += std::string("\"device\":{\"fingerprint\":\"") + fingerprint + "\"},";
   json += "\"files\":{"
-          "\"/system/users/users.json\":{\"users\":[{\"id\":2,\"username\":\"alice\"}]},"
+          "\"/system/users/users.json\":{\"users\":[{\"id\":1,\"username\":\"owner\",\"role\":\"superadmin\"},"
+          "{\"id\":2,\"username\":\"alice\"}]},"
           "\"/system/settings.json\":{\"device\":\"new\"},"
           "\"/system/automations.json\":{\"automations\":[{\"id\":1}]},"
           "\"/system/users/user_settings/2.json\":{\"password\":\"hash\"}"
@@ -254,6 +256,25 @@ static void caseForeignPathRefused() {
   check(!fs.exists("/system/sys_logs/errors.log"));
   check(!fs.exists("/system/sys_logs/errors.log.restore.tmp"));
   check(noStagingLeft(fs));
+}
+
+// A roster with no super admin is refused whole (owner decision 1.0): the
+// Migration Tool asks for one before export, the firmware never repairs it.
+static void caseRosterWithoutSuperAdminRefused() {
+  for (const char* role : {"", ",\"role\":\"admin\"", ",\"role\":\"SuperAdmin\""}) {
+    auto& fs = resetDevice();
+    std::string json = bundle();
+    const std::string from = "{\"id\":1,\"username\":\"owner\",\"role\":\"superadmin\"},";
+    const size_t at = json.find(from);
+    check(at != std::string::npos);
+    json.replace(at, from.size(), std::string("{\"id\":1,\"username\":\"owner\"") + role + "},");
+    stage(json, true);
+    check(!applyStagedMigrationRestore());
+    check(!gRestoreComplete);
+    check(!fs.exists(kUsers));
+    check(fs.text(kSettings) == "{\"device\":\"old\"}");
+    check(noStagingLeft(fs));
+  }
 }
 
 // The map tree is the one place outside /system a backup carries; its files
@@ -401,6 +422,7 @@ int main(int argc, char** argv) {
       {"cross-device-success", caseCrossDeviceSuccess},
       {"backup-walk", caseBackupWalk},
       {"foreign-path-refused", caseForeignPathRefused},
+      {"roster-without-superadmin-refused", caseRosterWithoutSuperAdminRefused},
       {"map-file-restored", caseMapFileRestored},
       {"staged-summary", caseStagedSummary},
       {"hostile-claims", caseHostileClaims},

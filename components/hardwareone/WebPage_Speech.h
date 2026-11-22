@@ -656,7 +656,7 @@ inline void streamSpeechInner(httpd_req_t* req) {
       rawEnabled = !rawEnabled;
       updateRawButton();
       updateTuningStatus();
-    });
+    }).catch(function(e){ hw.showCliError(e && e.message); });
   };
   
   hw.$('btn-sr-autotune-toggle').onclick = function(){

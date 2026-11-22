@@ -43,11 +43,30 @@ G2HijackPage g2GetHijackPage() { return page; }
 void g2SetHijackPage(G2HijackPage value) { if (page != value) { page = value; ++menuGen; } }
 void g2ShowSensorsMenu() { ++sensorsMenus; page = G2_HIJACK_PAGE_SENSORS; }
 using Completion = void (*)(bool, const char*, const G2CmdCookie&, void*);
-bool g2SubmitHijackCommand(const char* line, const G2CmdCookie&, Completion, void*) {
+static Completion lastCompletion = nullptr;
+static G2CmdCookie lastCookie{};
+bool g2SubmitHijackCommand(const char* line, const G2CmdCookie& cookie, Completion done, void*) {
   submitted.emplace_back(line);
+  lastCompletion = done;
+  lastCookie = cookie;
   return true;
 }
-bool g2EnqueueRedraw(const G2CmdCookie&, void (*)(), const char*) { return true; }
+static void (*queuedRedraw)() = nullptr;
+bool g2EnqueueRedraw(const G2CmdCookie&, void (*render)(), const char*) {
+  queuedRedraw = render;
+  return true;
+}
+// Lens notice boundary (G2_HijackCmd.cpp records it from every completion;
+// here a scenario sets it before completing a refused command).
+static std::string pendingNotice;
+void g2LensNoticeBackRow(G2HijackPage, const char* label, char* out, size_t cap) {
+  if (!pendingNotice.empty()) {
+    std::snprintf(out, cap, "<- %s", pendingNotice.c_str());
+    pendingNotice.clear();
+  } else if (label != out) {
+    std::snprintf(out, cap, "%s", label);
+  }
+}
 
 // --- NeoPixel catalog and settings -----------------------------------------
 struct RGB { uint8_t r, g, b; };
@@ -128,8 +147,32 @@ static void testRefusedBack() {
   CHECK(submitted.size() == 1 && submitted.back() == "ledcolor green");
 }
 
+// A refused color keeps the list and its page; the redraw's back row says why
+// and the rows still pick colors. A completed color redraws nothing.
+static void testRefusedColorShowsReason() {
+  rootUp();
+  g2LedHandleTap(1);
+  g2LedHandleTap(3);
+  CHECK(submitted.size() == 1 && submitted.back() == "ledcolor green");
+  CHECK(lastCompletion != nullptr);
+  queuedRedraw = nullptr;
+  if (lastCompletion) lastCompletion(true, "OK: LED set to green", lastCookie, nullptr);
+  CHECK(queuedRedraw == nullptr);
+  pendingNotice = "Needs an admin";
+  if (lastCompletion) {
+    lastCompletion(false, "Error: Admin access required for command 'ledcolor'. Contact an administrator.",
+                   lastCookie, nullptr);
+  }
+  CHECK(queuedRedraw != nullptr);
+  if (queuedRedraw) queuedRedraw();
+  CHECK(shown(0, "<- Needs an admin") && shown(3, "green"));
+  g2LedHandleTap(3);
+  CHECK(submitted.size() == 2 && submitted.back() == "ledcolor green");
+}
+
 int main() {
   testRefusedEntry();
+  testRefusedColorShowsReason();
   testRefusedColors();
   testRefusedEffects();
   testRefusedBack();

@@ -89,6 +89,7 @@ def unit(component: Path) -> str:
         extract_block(app, "enum EspNowAppSub") + ";",
         line_of(app, r"^static EspNowAppSub gSub = [^;\n]*;"),
         definition(app, "setSub"),
+        definition(app, "espnBackRow"),
         line_of(app, r"^static int gSelectedPeer = -1;"),
         "#if ENABLE_ESPNOW",
         line_of(app, r"^static EXT_RAM_BSS_ATTR uint8_t gPeerRowMac\[16\]\[6\];"),

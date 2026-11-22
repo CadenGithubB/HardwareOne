@@ -138,9 +138,10 @@ def source_check(component: Path) -> None:
     main = (component / "HardwareOne.cpp").read_text()
     uart = (component / "System_UartLink.cpp").read_text()
     utils = (component / "System_Utils.cpp").read_text()
-    # The serial console: the block from its AuthContext to the delivery.
+    # The serial console: the block from its AuthContext to the hand-over to
+    # its command in flight (PendingCommand, S-11).
     start = main.index("          AuthContext actx;\n          actx.transport = SOURCE_SERIAL;")
-    end = main.index("deliverCommandResult(out, uc.ctx);", start)
+    end = main.index("sSerialPending.start(uc, millis());", start)
     serial = main[start:end]
     system = extract_block(utils, "void runUnifiedSystemCommand(const String& argsInput)")
     link = extract_block(uart, "static void uartProcessLine(String& cmd, uint32_t admittedTransportEpoch)")

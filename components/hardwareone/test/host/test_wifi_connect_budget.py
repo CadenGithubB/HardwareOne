@@ -178,8 +178,8 @@ def check_rehunt_and_services(component: Path = COMPONENT) -> None:
     require(note not in setup[cancelled_at:failed_at], "a console-cancelled connect does not arm the rehunt")
     failed = setup[failed_at:joined_at]
     require(failed.count(note) == 1, "setupWifi's failure branch arms the rehunt")
-    require("if (savedCount > 0 && gSettings.wifiEnabled && gSettings.wifiAutoReconnect)" in failed,
-            "only with saved networks, Wi-Fi enabled and auto-reconnect on")
+    require("if (savedCount > 0 && gSettings.wifiAutoReconnect)" in failed,
+            "only with saved networks and auto-reconnect on")
     require(note not in setup[joined_at:], "a join does not arm the rehunt")
     noter = extract_block(wifi, "static void wifiRehuntNoteConnectFailed(")
     require("portENTER_CRITICAL(&sRehuntMux);" in noter and "sRehunt.noteConnectFailed(millis());" in noter,
@@ -197,8 +197,8 @@ def check_rehunt_and_services(component: Path = COMPONENT) -> None:
     require(job.index("if (!WiFi.isConnected()) return;") < job.index("setupNtp();"),
             "the job does nothing once the link is gone")
     require("if (!getNtpRuntimeStatus().clientArmed) setupNtp();" in job, "the job arms NTP when nothing has")
-    for needle, what in (("in.httpEnabled = gSettings.httpEnabled;", "httpenabled"),
-                         ("in.autostart = ramFlushResolve(RF_HTTP, gSettings.httpAutoStart);", "autostart as boot resolves it"),
+    require("httpEnabled" not in job, "no saved setting other than httpautostart decides the start")
+    for needle, what in (("in.autostart = ramFlushResolve(RF_HTTP, gSettings.httpAutoStart);", "autostart as boot resolves it"),
                          ("in.running = isHttpServerRunning();", "a running server"),
                          ("in.userClosed = sHttpUserClosed;", "closehttp"),
                          ("in.bootConnectActive = sBackgroundConnectIsBoot.load(", "the boot connect"),

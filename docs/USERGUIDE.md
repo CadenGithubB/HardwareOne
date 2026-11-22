@@ -840,7 +840,7 @@ collectstatus [json] [<device>] [from <n>]  - Each device: fetching, up to date,
 collectnow <device> [full]        - Pull a device now; full also fetches what the other master has (admin)
 collect [on|off]                  - Pull on its own (default on); no argument shows why it is not pulling (admin)
 collectrate [<5..100>]            - Frames per second the hub asks for (default 40) (admin)
-collectquota [<64..65535>]        - Card space per device in MB (default 2048) (admin)
+collectquota [<64..65535>]        - Card space per device in MB (default 2048) (super admin)
 ```
 
 ---
@@ -1392,8 +1392,8 @@ espnowbattery [json] [<name_or_mac>] [from <n>]  - Master: the battery state oth
 espnowevents [json] [since <rx>]       - Master: the system events other devices sent (admin)
 espnowpowerinterval [0|10..3600]       - Seconds between this device's battery reports (0 = none, default 60)
 espnoweventpush [off|alert|standard|verbose]  - Which of this device's events go to the master (default alert)
-espnowmasterfingerprint [64 hex|clear] - Name the mesh master on this device (its key fingerprint) (admin)
-espnowbackupfingerprint [64 hex|clear] - Name the backup master on this device (admin)
+espnowmasterfingerprint [64 hex|clear] - Name the mesh master on this device (its key fingerprint) (super admin)
+espnowbackupfingerprint [64 hex|clear] - Name the backup master on this device (super admin)
 espnowforwardlinks [json] [from <n>]   - Master: who forwards for which bond partner
 
 --- Security ---
@@ -1580,7 +1580,7 @@ oledbrightness <0-255>          - Set brightness
 oledupdateinterval <ms>         - Display update interval (10-1000ms)
 oleddefaultmode <status|thermal|off>     - Mode after boot animation
 oledbootduration <ms>           - Boot animation duration (500-10000ms)
-oledenabled <0|1>               - Enable/disable OLED
+oledautostart <0|1>             - Bring the display up at boot
 oledthermalscale <1.0-10.0>     - Thermal image scale on OLED
 setgamepadpassword              - Set gamepad joystick unlock pattern
 ```
@@ -1625,12 +1625,12 @@ devices                         - Show discovered I2C device registry
 discover                        - Re-scan and register I2C devices
 ```
 
-A sensor whose `<x>enabled` is off cannot be opened: `open<x>` answers
-`Error: <name> is disabled - run '<x>enabled 1' first`. A sensor that switches itself off after
-repeated I2C errors is started again by itself while its `<x>enabled` and `<x>autostart` are on
-(after 30 s, 2 min, 10 min, then every 30 min). `close<x>` ends that. The commands that save an
-autostart or enabled setting (`<x>autostart`, `<x>enabled`, `micautostart`, `oledenabled`,
-`ledstartupenabled`, `eienable`, `sensorlog autostart`) are admin-only.
+A feature has one saved switch, `<x>autostart`: whether it starts at boot. Off means "not
+started"; `open<x>` still opens it by hand. A sensor that switches itself off after repeated I2C
+errors is started again by itself while its `<x>autostart` is on (after 30 s, 2 min, 10 min, then
+every 30 min). `close<x>` ends that. The commands that save an autostart or enabled setting
+(`<x>autostart`, `micautostart`, `oledautostart`, `ledstartupenabled`, `sensorlog autostart`) are
+admin-only.
 </details>
 
 <details>
@@ -1691,7 +1691,7 @@ useradd <user> <pass> [0|1] [role]  - Create user
                                   [role]: guest|user|admin|superadmin (default user)
 userdelete <user>               - Delete user (also disables the automations that user created)
 userchangepassword <cur> <new> <confirm>  - Change own password
-userresetpassword <user> <pass> [0|1]     - Reset another user's password (admin)
+userresetpassword <user> <pass> [0|1]     - Reset another user's password (super admin)
                                             1 = force password change at next login
 userpromote <user> [role]       - Raise role: user|admin|superadmin (default admin)
 userdemote <user> [role]        - Lower role: admin|user|guest (default user)
@@ -1708,7 +1708,7 @@ serialrequireauth [on|off]      - Require login on serial interface
 ban <ip> [reason]               - Permanently ban an IP address (admin)
 unban <ip>                      - Remove an IP ban (admin)
 banlist                         - List all banned IPs
-banuser <user> [reason]         - Ban a user account (admin)
+banuser <user> [reason]         - Ban a user account (super admin)
 unbanuser <user>                - Remove a user account ban (admin)
 login <user> <pass>             - Log in
 logout                          - Log out
@@ -2180,7 +2180,6 @@ owner and superadmins only. See [QUICKNOTE.md](QUICKNOTE.md).
 <summary><strong>edgeimpulse - Edge Impulse ML inference (requires ENABLE_EDGE_IMPULSE)</strong></summary>
 
 ```
-eienable                        - Enable/disable Edge Impulse inference
 eidetect                        - Run single object detection inference
 eifile                          - Run inference on a stored JPEG image
 eicontinuous                    - Start/stop continuous inference mode
@@ -2326,8 +2325,7 @@ fmradioread                     - Read tuner status
 fmradiotune <MHz>               - Tune to frequency (e.g. fmradiotune 101.5)
 fmradioseek [up|down]           - Seek next station
 fmradiovolume <0-15>            - Set volume
-fmradiomute                     - Mute audio
-fmradiounmute                   - Unmute audio
+fmradiomute [on|off]            - Mute (bare or on) or unmute (off) audio
 fmradioautostart [on|off]       - Auto-start on boot
 ```
 </details>

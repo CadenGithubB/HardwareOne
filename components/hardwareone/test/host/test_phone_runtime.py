@@ -130,7 +130,7 @@ def check_sources(phone: str) -> None:
     pair_new = extract_block(phone, 'static const char* phonePairNewCommand(')
     first_change = pair_new.index('liftVersionHold()')
     for refusal in ('RETURN_VALID_IF_VALIDATE_CSTR', 'localAdmin(auth)', 'oledPhonePairCodeSinkReady()',
-                    'serialCommandSecretSinkReady()', 'isBleServerInitialized()', 'gSettings.bleEnabled',
+                    'serialCommandSecretSinkReady()', 'isBleServerInitialized()',
                     'blePeerOwnerSessionSnapshot(', 'captureTransportSessionEpoch(', 'authCoolingDown('):
         assert pair_new.index(refusal) < first_change, refusal
     assert first_change < pair_new.index('esp_random()') < pair_new.index('phonePipeReplaceSecret(') < \

@@ -50,7 +50,7 @@ void stopCamera(bool isRecovery = false);
 
 // Stack-heavy power transitions run on a dedicated worker (see System_Camera_DVP.cpp).
 // UI adapters submit `opencamera async` / `closecamera async` through the
-// command executor (authorized, audited, cameraEnabled-gated); those use
+// command executor (authorized and audited); those use
 // *_Async and return once cam_power admitted the request. CLI / web use *_Sync
 // so callers block until done.
 typedef void (*CameraPowerPostHook)(void);

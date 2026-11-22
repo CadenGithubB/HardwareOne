@@ -16,6 +16,7 @@
 #include "G2_Page_Common.h"    // G2Paginator chrome
 #include "G2_Page_Sensors.h"   // g2ShowSensorsMenu — Back target
 #include "G2_HijackCmd.h"      // G2CmdCookie / g2SubmitHijackCommand / redraw plumbing
+#include "G2_ReplyNotice.h"    // g2ReplyRefused
 #include "System_NeoPixel.h"   // colorTable / ledEffectNames / ledBrightnessNextPreset
 #include "System_Settings.h"   // gSettings.ledBrightness (label)
 #include "System_Debug.h"
@@ -52,9 +53,11 @@ static void showRootMenu() {
   // Live brightness label — static buffer because g2ShowListPage expects the
   // row pointers to stay valid until it returns (same idiom everywhere).
   EXT_RAM_BSS_ATTR static char brightRow[28];  // PSRAM: deep-copied by g2ShowListPage
+  EXT_RAM_BSS_ATTR static char backRow[48];    // "<- Hardware", or why a tap was refused
   snprintf(brightRow, sizeof(brightRow), "Brightness: %d%%", gSettings.ledBrightness);
+  g2LensNoticeBackRow(G2_HIJACK_PAGE_LED, "<- Hardware", backRow, sizeof(backRow));
   const char* items[] = {
-    "<- Hardware",   // 0
+    backRow,         // 0
     "Color >",      // 1
     "Effect >",     // 2
     brightRow,      // 3 — tap cycles the shared preset ladder
@@ -73,13 +76,13 @@ static constexpr size_t kColorRowMax   = 1 + kColorsPerPage + 2;  // back + item
 static G2Paginator gColorPg;   // window of the color rows on the lens
 
 static void showColorsMenu() {
-  EXT_RAM_BSS_ATTR static char rows[kColorRowMax][20];
+  EXT_RAM_BSS_ATTR static char rows[kColorRowMax][32];
   EXT_RAM_BSS_ATTR static const char* ptrs[kColorRowMax];  // PSRAM: deep-copied by g2ShowListPage
   const size_t total = 1 + (size_t)numColors;   // "off" + palette
 
   G2Paginator pg = g2PaginatorPrepare(total, kColorsPerPage, gColorPage);
   size_t row = 0;
-  snprintf(rows[row], sizeof(rows[row]), "<- Back");
+  g2LensNoticeBackRow(G2_HIJACK_PAGE_LED, "<- Back", rows[row], sizeof(rows[row]));
   ptrs[row] = rows[row];
   row++;
   for (size_t i = pg.startIdx; i < pg.endIdx; i++) {
@@ -102,9 +105,11 @@ static void showColorsMenu() {
 }
 
 static void showEffectsMenu() {
+  EXT_RAM_BSS_ATTR static char backRow[48];    // "<- Back", or why a tap was refused
+  g2LensNoticeBackRow(G2_HIJACK_PAGE_LED, "<- Back", backRow, sizeof(backRow));
   const char* items[2 + 8];   // back + shared names + off (headroom)
   size_t n = 0;
-  items[n++] = "<- Back";
+  items[n++] = backRow;
   for (int i = 0; i < ledEffectNameCount && n < sizeof(items) / sizeof(items[0]) - 1; i++) {
     items[n++] = ledEffectNames[i];
   }
@@ -117,8 +122,29 @@ static void showEffectsMenu() {
 // -----------------------------------------------------------------------------
 static void ledBrightnessDone(bool /*ok*/, const char* /*result*/,
                               const G2CmdCookie& c, void* /*ud*/) {
-  // Re-render ROOT so the brightness label reflects the committed value.
+  // Re-render ROOT so the brightness label reflects the committed value; a
+  // refusal keeps the old value and names its reason in the back row.
   (void)g2EnqueueRedraw(c, showRootMenu, "LED brightness");
+}
+
+// Redraws the level the user is on (the applier already dropped the job if a
+// level change bumped the menu generation since the submit).
+static void redrawLedLevel() {
+  if (g2GetHijackPage() != G2_HIJACK_PAGE_LED) return;
+  switch (gSub) {
+    case LED_SUB_COLORS:  showColorsMenu();  return;
+    case LED_SUB_EFFECTS: showEffectsMenu(); return;
+    default:              showRootMenu();    return;
+  }
+}
+
+// Color / effect / Off: the LED itself is the feedback, so a success leaves
+// the list (and its scroll) alone. A refusal redraws the level so its back
+// row says why nothing changed.
+static void ledActionDone(bool ok, const char* result,
+                          const G2CmdCookie& c, void* /*ud*/) {
+  if (!g2ReplyRefused(ok, result)) return;
+  (void)g2EnqueueRedraw(c, redrawLedLevel, "LED refused");
 }
 
 static void rootHandleTap(uint32_t idx) {
@@ -138,7 +164,7 @@ static void rootHandleTap(uint32_t idx) {
       return;
     }
     case 4:
-      (void)g2SubmitHijackCommand("ledclear", buildCookie(), nullptr, nullptr);
+      (void)g2SubmitHijackCommand("ledclear", buildCookie(), ledActionDone, nullptr);
       return;
     default: return;
   }
@@ -168,9 +194,9 @@ static void colorsHandleTap(uint32_t idx) {
     memcpy_P(&entry, &colorTable[item - 1], sizeof(ColorEntry));
     snprintf(cmd, sizeof(cmd), "ledcolor %s", entry.name);
   }
-  // Fire-and-forget: the result is visible on the physical LED itself, and
-  // staying on the list lets the user flip through swatches.
-  (void)g2SubmitHijackCommand(cmd, buildCookie(), nullptr, nullptr);
+  // The result is visible on the physical LED itself, and staying on the
+  // list lets the user flip through swatches; only a refusal redraws.
+  (void)g2SubmitHijackCommand(cmd, buildCookie(), ledActionDone, nullptr);
 }
 
 static void effectsHandleTap(uint32_t idx) {
@@ -181,8 +207,8 @@ static void effectsHandleTap(uint32_t idx) {
   char cmd[32];
   snprintf(cmd, sizeof(cmd), "ledeffect %s", name);
   // Non-blocking engine: returns immediately; picking another effect replaces
-  // the running one, "off" cancels. Stay on the list.
-  (void)g2SubmitHijackCommand(cmd, buildCookie(), nullptr, nullptr);
+  // the running one, "off" cancels. Stay on the list (a refusal redraws).
+  (void)g2SubmitHijackCommand(cmd, buildCookie(), ledActionDone, nullptr);
 }
 
 void g2LedHandleTap(uint32_t idx) {

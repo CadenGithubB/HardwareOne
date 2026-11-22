@@ -49,7 +49,7 @@ def main():
         extract_block(utils, "inline int parseBoolArg("),
         extract_block(settings, "template<typename T>\ninline void setSetting("),
         *[extract_block(mqtt, f"const char* cmd_{name}(") for name in
-          ("mqttclientenabled", "mqttautostart", "mqttsubscribe")],
+          ("mqttautostart", "mqttsubscribe")],
         publish,
     ])
     harness = (HERE / "mqtt_boolean_commands_harness.cpp").read_text()

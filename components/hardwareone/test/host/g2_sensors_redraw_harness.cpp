@@ -173,15 +173,14 @@ static bool micRecording = false, micCaptureOwned = false;
 bool micRecordingBusy() { return micRecording; }
 bool audioCaptureOwnedBy(const char*) { return micCaptureOwned; }
 // Camera power requested by the page itself on the tap task (no command:
-// no authorization, enable gate or audit). Must stay zero.
+// no authorization or audit). Must stay zero.
 static unsigned camStarts = 0, camStops = 0;
 bool cameraPowerRequestStartAsync() { ++camStarts; return true; }
 bool cameraPowerRequestStopAsync() { ++camStops; return true; }
 // The camera owner behind `opencamera async` / `closecamera async`
-// (System_Camera_DVP): refused while the camera is disabled (start only),
-// admitted when cam_power accepts. It runs when a case executes the submitted
-// command on cmd_exec.
-static bool cameraEnabled = true, camPwrAccepts = true;
+// (System_Camera_DVP): admitted when cam_power accepts (no saved setting
+// refuses it). It runs when a case executes the submitted command on cmd_exec.
+static bool camPwrAccepts = true;
 static unsigned ownerStarts = 0, ownerStops = 0;
 typedef void (*CameraPowerPostHook)(void);
 static CameraPowerPostHook cameraHook = nullptr;
@@ -204,6 +203,23 @@ const FeatureEntry* getFeatureById(const char* id) {
 }
 static uint32_t nowMs = 10000;
 uint32_t millis() { return nowMs; }
+
+// Lens notice boundary (G2_HijackCmd.cpp records it from every completion).
+// A scenario sets pendingNotice before it completes a refused command.
+static std::string pendingNotice;
+void g2LensNoticeBackRow(G2HijackPage, const char* label, char* out, size_t cap) {
+  if (!pendingNotice.empty()) {
+    std::snprintf(out, cap, "<- %s", pendingNotice.c_str());
+    pendingNotice.clear();
+  } else if (label != out) {
+    std::snprintf(out, cap, "%s", label);
+  }
+}
+bool g2LensNoticePeek(G2HijackPage, char* out, size_t cap) {
+  if (pendingNotice.empty()) return false;
+  std::snprintf(out, cap, "%s", pendingNotice.c_str());
+  return true;
+}
 
 // INSERT_SENSORS_PROTOTYPES
 
@@ -254,14 +270,13 @@ static void reset() {
   camStarts = camStops = 0;
   viewers = 0;
   submitAccepts = true;
-  cameraEnabled = camPwrAccepts = true;
+  camPwrAccepts = true;
   ownerStarts = ownerStops = 0;
   sG2SensorsCamAsyncStartPending = false;
 }
 
 // cmd_exec runs the camera command the page submitted last: the registry
-// (authorized: the line reaches the owner), the owner's enable gate and
-// cam_power admission, then the page's completion with the owner's reply. The
+// (authorized: the line reaches the owner) and cam_power admission, then the page's completion with the owner's reply. The
 // executor reports every "Error: ..." reply as ok=false.
 static bool runCameraCommand(bool authorized = true) {
   if (submitted.empty() || !lastCallback) return false;
@@ -276,9 +291,6 @@ static bool runCameraCommand(bool authorized = true) {
   if (!authorized) {
     ok = false;
     reply = "Error: Guest accounts are view-only.";
-  } else if (start && !cameraEnabled) {
-    ok = false;
-    reply = "Error: Camera is disabled - run 'cameraenabled 1' first";
   } else if (!camPwrAccepts) {
     ok = false;
     reply = "Error: camera start not queued (camera power worker unavailable)";
@@ -539,12 +551,12 @@ static void testCameraToggleIsACommand() {
   CHECK(ownerStops == 1 && submitted.back() == "cameraautostart off" && !camAuto);
 }
 
-// A refused start (camera disabled, or the caller not authorized) persists
+// A refused start (cam_power did not take it, or the caller not authorized) persists
 // nothing, clears the pending start and redraws through the lens applier.
 static void testCameraRefusalPersistsNothing() {
   for (const bool authorized : {true, false}) {
     reset();
-    cameraEnabled = false;
+    camPwrAccepts = false;
     openCamDetail();
     tap(1);
     renders.clear();
@@ -580,6 +592,39 @@ static void testCameraSubmitRefused() {
   CHECK(renders.size() == 1 && renders[0].ctx == Ctx::Tap && shows(1, "CAM: OFF"));
 }
 
+// A refused change never shows as applied: nothing is redrawn before the
+// reply, and the redraw after a refusal keeps the state and names the reason
+// in the back row (the lens notice the completion recorded).
+static void testRefusalShowsReason() {
+  reset();
+  openCamDetail();
+  tap(1);
+  pendingNotice = "Needs an admin";
+  CHECK(runCameraCommand(/*authorized=*/false));
+  runApplier();
+  settle();
+  CHECK(shows(0, "<- Needs an admin") && shows(1, "CAM: OFF") && !camAuto);
+
+  reset();
+  openMicDetail();
+  gMicRunning = true;  // already on: the toggle only saves the preference
+  renders.clear();
+  tap(1);
+  CHECK(submitted == std::vector<std::string>{"micautostart on"} && lastCallback != nullptr);
+  CHECK(renders.empty());
+  pendingNotice = "Needs an admin";
+  ctx = Ctx::CmdExec;
+  if (lastCallback) {
+    lastCallback(false, "Error: Admin access required for command 'micautostart'. "
+                        "Contact an administrator.", lastCookie, lastUserData);
+  }
+  ctx = Ctx::Tap;
+  CHECK(!renderedOn(Ctx::CmdExec) && lensQueue.size() == 1);
+  runApplier();
+  settle();
+  CHECK(shows(0, "<- Needs an admin") && !micAuto);
+}
+
 int main() {
   g2RegisterSensorsCameraPowerHook();
   CHECK(cameraHook != nullptr);
@@ -597,6 +642,7 @@ int main() {
   testCameraToggleIsACommand();
   testCameraRefusalPersistsNothing();
   testCameraSubmitRefused();
+  testRefusalShowsReason();
   if (failures) {
     std::fprintf(stderr, "G2 Sensors redraw: %u of %u checks FAILED\n", failures, checks);
     return 1;

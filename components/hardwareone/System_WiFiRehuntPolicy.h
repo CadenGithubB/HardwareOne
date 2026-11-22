@@ -28,8 +28,7 @@
 //    the hunt is the only retry and runs with a single saved network too.
 //  - Failed hunts back off: kGapMs[0], kGapMs[1], then kGapMs[2] for good.
 //  - It ends when the link is back, or when reconnecting is no longer wanted
-//    (wifienabled 0, wifiautoreconnect 0, closewifi, radiopower off,
-//    wifidisconnect).
+//    (wifiautoreconnect 0, closewifi, radiopower off, wifidisconnect).
 struct WifiRehuntPolicy {
   static constexpr uint32_t kFirstDelayMs = 60000;
   static constexpr uint32_t kGapMs[3] = {60000, 120000, 300000};
@@ -39,7 +38,7 @@ struct WifiRehuntPolicy {
 
   struct Inputs {
     bool connected = false;  // associated with an address
-    bool armed = false;      // Wi-Fi enabled and auto-reconnect on
+    bool armed = false;      // auto-reconnect on and Wi-Fi started
     bool held = false;       // radio not ours right now (boot connect, a command connecting, companion busy, a mesh worker with a live master)
     int  savedCount = 0;
   };

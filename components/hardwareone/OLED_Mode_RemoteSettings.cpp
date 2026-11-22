@@ -64,10 +64,14 @@ static void displayRemoteSettingsMode() {
       oledToastShow("Applied", 1500);
       oledMarkDirty();
       break;
-    case REMOTE_OUTCOME_FAILED:
-      settingsEditorShowError(String("Peer: ") + text, 3000);
+    case REMOTE_OUTCOME_FAILED: {
+      // The peer's refusal, shortened the way every OLED screen shortens one.
+      char reason[160];
+      oledCommandReplyText(false, text.c_str(), nullptr, "Not applied", reason, sizeof(reason));
+      settingsEditorShowError(String("Peer: ") + reason, 3000);
       oledMarkDirtyUntil(millis() + 3200);
       break;
+    }
     case REMOTE_OUTCOME_TIMEOUT:
       settingsEditorShowError("No reply from peer", 3000);
       oledMarkDirtyUntil(millis() + 3200);

@@ -329,14 +329,8 @@ static void initWizardDraft() {
     const FeatureEntry* feature = getFeatureByIndex(i);
     if (feature && isFeatureCompiled(feature)) wizardBoolDraft(feature->enabledSetting);
   }
-#if ENABLE_WIFI
-  wizardBoolDraft(&gSettings.wifiAutoStart);
-#endif
 #if ENABLE_ESPNOW
   wizardBoolDraft(&gSettings.espnowmesh);
-#endif
-#if ENABLE_MQTT
-  wizardBoolDraft(&gSettings.mqttAutoStart);
 #endif
 }
 
@@ -356,15 +350,8 @@ void wizardSetFeatureEnabled(const char* featureId, bool enabled) {
   if (value) *value = enabled;
 }
 
-void wizardSetMqttAutoStart(bool enabled) {
-#if ENABLE_MQTT
-  bool* value = wizardBoolDraft(&gSettings.mqttAutoStart);
-  if (value) *value = enabled;
-#endif
-}
-
 void wizardSkipMqttPage() {
-  if (getWizardDraftValues().mqttHost.length() == 0) wizardSetMqttAutoStart(false);
+  if (getWizardDraftValues().mqttHost.length() == 0) wizardSetFeatureEnabled("mqtt", false);
 }
 
 bool wizardParseMqttPort(const String& input, int& port) {
@@ -590,12 +577,11 @@ static SetupWizardPage wizardFeaturePage(const FeatureEntry& feature) {
   return WIZARD_PAGE_SYSTEM;
 }
 
+// A feature row's switch is its start-at-boot setting. The I2C bus is the one
+// row whose switch says whether the hardware is used at all.
 static WizardMenuItemType wizardFeatureItemType(const FeatureEntry& feature) {
-  if ((feature.category == FEATURE_CAT_SENSOR && strcmp(feature.id, "edgeimpulse") != 0) ||
-      strcmp(feature.id, "http") == 0 || strcmp(feature.id, "bluetooth") == 0 ||
-      strcmp(feature.id, "led") == 0 || strcmp(feature.id, "llm") == 0)
-    return WIZARD_ITEM_STARTUP;
-  return WIZARD_ITEM_TOGGLE;
+  if (strcmp(feature.id, "i2c") == 0) return WIZARD_ITEM_TOGGLE;
+  return WIZARD_ITEM_STARTUP;
 }
 
 static bool wizardInsertItem(SetupWizardPage page, size_t index, const WizardMenuItem& item) {
@@ -654,17 +640,9 @@ void initSetupWizard() {
            strcasecmp(getWizardMenuItem(page, (int)index)->label, label) <= 0) ++index;
     wizardInsertItem(page, index, item);
   }
-#if ENABLE_WIFI
-  wizardInsertAfter(WIZARD_PAGE_CONNECTIONS, "wifi",
-                    {"wifi_autoconnect", "WiFi auto-connect", WIZARD_ITEM_STARTUP, wizardBoolDraft(&gSettings.wifiAutoStart), 0});
-#endif
 #if ENABLE_ESPNOW
   wizardInsertAfter(WIZARD_PAGE_CONNECTIONS, "espnow",
                     {"espnow_mesh", "ESP-NOW mesh", WIZARD_ITEM_TOGGLE, wizardBoolDraft(&gSettings.espnowmesh), 0});
-#endif
-#if ENABLE_MQTT
-  wizardInsertAfter(WIZARD_PAGE_CONNECTIONS, "mqtt",
-                    {"mqtt_autostart", "MQTT auto-start", WIZARD_ITEM_STARTUP, wizardBoolDraft(&gSettings.mqttAutoStart), 0});
 #endif
 #if ENABLE_NEOPIXEL
   wizardInsertAfter(WIZARD_PAGE_DISPLAY, "led",
@@ -721,8 +699,7 @@ bool wizardShouldShowEspNow() {
 bool wizardShouldShowMqtt() {
 #if ENABLE_MQTT
   const FeatureEntry* f = getFeatureById("mqtt");
-  const bool* autoStart = wizardBoolDraft(&gSettings.mqttAutoStart);
-  return f && wizardFeatureEnabled(f->id) && autoStart && *autoStart;
+  return f && wizardFeatureEnabled(f->id);
 #else
   return false;
 #endif
@@ -1032,7 +1009,6 @@ static void wizardCollectSystemChoices(SetupWizardResult& result) {
 bool wizardNextPage(SetupWizardResult& result) {
   if (!sWizardDraft.active) { result.completed = false; return false; }
   if (currentPage == WIZARD_PAGE_SYSTEM) wizardCollectSystemChoices(result);
-  result.wifiEnabled = wizardShouldShowWifi();
 
   const SetupWizardPage next = wizardAdvanceFrom(currentPage);
   if (next == WIZARD_PAGE_COUNT) {
@@ -1146,8 +1122,8 @@ static void handleSerialEspNowPage(SetupWizardResult& result, bool& running) {
     return;
   }
   if (introChoice.equalsIgnoreCase("n") || introChoice.equalsIgnoreCase("next") || introChoice.length() == 0) {
-    // Explicit skip (or blank/Enter) — disable ESP-NOW since it's unconfigured;
-    // it can't start without a name.
+    // Explicit skip (or blank/Enter) — ESP-NOW is unconfigured, so it does not
+    // start at boot (it can't start without a name).
     wizardSetFeatureEnabled("espnow", false);
     if (!wizardNextPage(result)) running = false;
     return;
@@ -1585,7 +1561,6 @@ static void handleSerialModePage(SetupWizardPage page, SetupWizardResult& result
 SetupWizardResult runSetupWizard() {
   SetupWizardResult result{};
   result.completed = false;
-  result.wifiEnabled = false;
   result.wifiConfigured = false;
   result.wifiSsid = "";
   result.wifiPassword = "";

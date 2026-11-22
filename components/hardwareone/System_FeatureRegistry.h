@@ -48,7 +48,7 @@ struct FeatureEntry {
   FeatureCategory category;    // Category for grouping
   uint16_t heapCostKb;         // Estimated heap usage in KB
   uint8_t flags;               // FeatureFlags
-  bool* enabledSetting;        // Pointer to gSettings.xxxEnabled/AutoStart (nullptr if compile-time only)
+  bool* enabledSetting;        // The saved switch: gSettings.xxxAutoStart (i2cEnabled, ledStartupEnabled; nullptr if compile-time only)
   bool (*isCompileEnabled)();  // Function to check if compiled in (nullptr = always compiled)
   const char* description;     // Brief description
 };

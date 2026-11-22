@@ -30,8 +30,10 @@ EXT_RAM_BSS_ATTR static char        gLogRows[2 + kSensorLogSensorCount][G2_LOG_R
 static const char* gLogRowPtrs[2 + kSensorLogSensorCount];
 
 // Rows: 0="<- System", 1=Start/Stop (live state), 2..N=[x] sensor toggles.
+// Starting, stopping and choosing sensors need an admin: after a refusal the
+// redraw keeps the live state and row 0 says why ("<- Needs an admin").
 static size_t g2BuildLoggingRows() {
-  snprintf(gLogRows[0], G2_LOG_ROW_LEN, "<- System");
+  g2LensNoticeBackRow(G2_HIJACK_PAGE_LOGGING, "<- System", gLogRows[0], G2_LOG_ROW_LEN);
   snprintf(gLogRows[1], G2_LOG_ROW_LEN, "%s",
            gSensorLoggingRunning ? "Stop logging" : "Start logging");
   const uint8_t selectedMask = sensorLogSelectedMask();

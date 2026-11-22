@@ -392,9 +392,9 @@ int main() {
   CHECK(g2Requests.back().done != nullptr && g2Requests.back().user == nullptr);
   CHECK(!loggerActive);
   const unsigned beforeDiagnostic = diagnosticMessages;
-  g2Requests.back().done(false, "Error: denied", g2Requests.back().cookie, nullptr);
+  g2Requests.back().done(false, kCommandReplyLoggingAdminRequired, g2Requests.back().cookie, nullptr);
   CHECK(!sLoggingCmdPending && g2HealthLoggingStatusLine() &&
-        std::string(g2HealthLoggingStatusLine()) == "Error: denied");  // the lens can say why
+        std::string(g2HealthLoggingStatusLine()) == "Needs an admin");  // the lens says why, briefly
   g2Requests.back().done(true, "SUCCESS: Health logging ON", g2Requests.back().cookie, nullptr);
   CHECK(!sLoggingCmdPending && g2HealthLoggingStatusLine() == nullptr);
   CHECK(diagnosticMessages == beforeDiagnostic + 2);

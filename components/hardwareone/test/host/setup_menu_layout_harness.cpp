@@ -48,9 +48,9 @@ static void verifyRowsAndActions() {
       check(previousFeatureLabel.empty() || previousFeatureLabel <= ordered);
       previousFeatureLabel = ordered;
       check(row->setting && row->setting != feature->enabledSetting);
-      const bool startup = (feature->category == FEATURE_CAT_SENSOR && std::strcmp(feature->id, "edgeimpulse")) ||
-          !std::strcmp(feature->id, "http") || !std::strcmp(feature->id, "bluetooth") ||
-          !std::strcmp(feature->id, "led") || !std::strcmp(feature->id, "llm");
+      // Every feature row is its start-at-boot switch; the I2C bus row is the
+      // one that says whether the hardware is used at all.
+      const bool startup = std::strcmp(feature->id, "i2c") != 0;
       check(row->type == (startup ? WIZARD_ITEM_STARTUP : WIZARD_ITEM_TOGGLE));
       const std::string before = value;
       if (startup) check(before.find("Boot") != std::string::npos);
@@ -78,8 +78,13 @@ static void verifyRowsAndActions() {
   std::printf("setup menu layout (%s): %zu compiled feature rows\n", TEST_PROFILE, toggles);
 }
 static void verifyExtraAdjacency() {
-  for (const auto& pair : {std::pair{"wifi", "wifi_autoconnect"}, {"espnow", "espnow_mesh"},
-                           {"mqtt", "mqtt_autostart"}, {"led", "led_effect"}}) {
+  // The feature rows of Wi-Fi and MQTT are their start-at-boot switches, so
+  // they have no second "auto-connect" / "auto-start" row any more.
+  for (const char* gone : {"wifi_autoconnect", "mqtt_autostart"}) {
+    SetupWizardPage group{}; int index = -1;
+    check(findRow(gone, group, index) == nullptr);
+  }
+  for (const auto& pair : {std::pair{"espnow", "espnow_mesh"}, {"led", "led_effect"}}) {
     SetupWizardPage parentGroup{}, extraGroup{}; int parentIndex = -1, extraIndex = -1;
     const auto* parent = findRow(pair.first, parentGroup, parentIndex);
     const auto* extra = findRow(pair.second, extraGroup, extraIndex);
@@ -101,7 +106,6 @@ static void verifyNavigation() {
   // Enable available network features to expose every optional middle page.
   for (const char* id : {"wifi", "http", "bluetooth", "espnow", "mqtt"})
     if (isFeatureCompiled(getFeatureById(id))) wizardSetFeatureEnabled(id, true);
-  if (isFeatureCompiled(getFeatureById("mqtt"))) wizardSetMqttAutoStart(true);
   std::vector<SetupWizardPage> visible;
   for (int page = 0; page < WIZARD_PAGE_COUNT; ++page)
     if (wizardIsPageVisible(static_cast<SetupWizardPage>(page))) visible.push_back(static_cast<SetupWizardPage>(page));

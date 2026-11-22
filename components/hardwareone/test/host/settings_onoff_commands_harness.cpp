@@ -1,11 +1,12 @@
-// Host harness for five <0|1> setting commands that had their own parser:
-// espnowenabled, httpautostart, httpsenabled (System_Settings.cpp),
+// Host harness for four <0|1> setting commands that had their own parser:
+// httpautostart, httpsenabled (System_Settings.cpp),
 // thermalrollingminmaxenabled and thermalinterpolationenabled
-// (i2csensor_mlx90640.cpp). test_settings_onoff_commands.py inserts the five
+// (i2csensor_mlx90640.cpp). test_settings_onoff_commands.py inserts the four
 // handlers, parseBoolArg, setSetting and the validate-only macro unchanged and
 // includes the real System_CommandReply.h. String storage, the reply buffer,
-// persistence/notification, the command executor and the broadcast line are
-// the host boundaries below.
+// persistence/notification and the broadcast line are the host boundaries
+// below. (The fifth, espnowenabled, was removed with the other <x>enabled
+// switches on 2026-11-21.)
 #include <algorithm>
 #include <cctype>
 #include <cstdarg>
@@ -34,14 +35,14 @@ class String : public std::string {
 };
 
 struct SettingsBoundary {
-  bool espnowEnabled, httpAutoStart, httpsEnabled;
+  bool httpAutoStart, httpsEnabled;
   bool thermalRollingMinMaxEnabled, thermalInterpolationEnabled;
 } gSettings;
 
 bool gCliValidateOnly;
 static int persistCalls, notifyCalls;
 static const void* notifiedField;
-static std::vector<std::string> executed, broadcasts;
+static std::vector<std::string> broadcasts;
 static bool bufferAvailable;
 static char debugBuffer[1024];
 
@@ -51,17 +52,6 @@ static void finishSettingChange(const void* field, const SettingEntry*) {
 }
 static bool ensureDebugBuffer() { return bufferAvailable; }
 static char* getDebugBuffer() { return debugBuffer; }
-static const char* stopReply;  // what closeespnow answers
-[[maybe_unused]] static String executeCommandThroughRegistry(const char* line) {
-  executed.emplace_back(line);
-  return String(stopReply);
-}
-// ESP-NOW state before closeespnow runs (System_ESPNow.cpp).
-static bool espNowRunning;
-[[maybe_unused]] static bool isEspNowInitialized() { return espNowRunning; }
-// An earlier stop that did not finish: no longer initialized, not stopped yet.
-static bool espNowStopPending;
-[[maybe_unused]] static bool espnowShutdownPending() { return espNowStopPending; }
 static void broadcastPrintf(const char* format, ...) {
   char line[256];
   va_list args; va_start(args, format);
@@ -82,31 +72,26 @@ struct Command {
   const char* usage;        // reply for no argument
   const char* broadcastOn;  // line printed on the way (nullptr: none)
   const char* broadcastOff;
-  bool stopsEspNow;         // off runs closeespnow (when ESP-NOW is compiled)
 };
 
 static const Command commands[] = {
-  {"espnowenabled", cmd_espnowenabled, &SettingsBoundary::espnowEnabled,
-   "espnowenabled set to 1 (use openespnow or reboot with autostart)",
-   "espnowenabled set to 0 (ESP-NOW stopped)",
-   "Error: invalid arguments \xe2\x80\x94 Usage: espnowenabled <0|1>", nullptr, nullptr, true},
   {"httpautostart", cmd_httpAutoStart, &SettingsBoundary::httpAutoStart,
    "httpautostart set to 1", "httpautostart set to 0",
-   "Error: invalid arguments \xe2\x80\x94 Usage: httpautostart <0|1>", nullptr, nullptr, false},
+   "Error: invalid arguments \xe2\x80\x94 Usage: httpautostart <0|1>", nullptr, nullptr},
   {"httpsenabled", cmd_httpsEnabled, &SettingsBoundary::httpsEnabled,
    "httpsenabled set to 1 (takes effect after reboot)",
    "httpsenabled set to 0 (takes effect after reboot)",
-   "Error: invalid arguments \xe2\x80\x94 Usage: httpsenabled <0|1>", nullptr, nullptr, false},
+   "Error: invalid arguments \xe2\x80\x94 Usage: httpsenabled <0|1>", nullptr, nullptr},
   {"thermalrollingminmaxenabled", cmd_thermalrollingminmaxenabled,
    &SettingsBoundary::thermalRollingMinMaxEnabled,
    "[Thermal] Setting updated", "[Thermal] Setting updated",
    "Error: invalid arguments \xe2\x80\x94 Usage: thermalrollingminmaxenabled <0|1>",
-   "thermalRollingMinMaxEnabled set to 1", "thermalRollingMinMaxEnabled set to 0", false},
+   "thermalRollingMinMaxEnabled set to 1", "thermalRollingMinMaxEnabled set to 0"},
   {"thermalinterpolationenabled", cmd_thermalinterpolationenabled,
    &SettingsBoundary::thermalInterpolationEnabled,
    "[Thermal] Setting updated", "[Thermal] Setting updated",
    "Error: invalid arguments \xe2\x80\x94 Usage: thermalinterpolationenabled <0|1>",
-   "thermalInterpolationEnabled set to 1", "thermalInterpolationEnabled set to 0", false},
+   "thermalInterpolationEnabled set to 1", "thermalInterpolationEnabled set to 0"},
 };
 
 static int cases, failures, checks;
@@ -134,13 +119,10 @@ static void reset(const Command& command, bool initial, const char* category,
   for (size_t i = 0; i < std::size(commands); ++i) gSettings.*commands[i].field = (i % 2) != 0;
   gSettings.*command.field = initial;
   gCliValidateOnly = false;
-  espNowRunning = false;
-  espNowStopPending = false;
-  stopReply = "OK";
   bufferAvailable = true;
   persistCalls = notifyCalls = 0;
   notifiedField = nullptr;
-  executed.clear(); broadcasts.clear();
+  broadcasts.clear();
   std::memset(debugBuffer, 0, sizeof(debugBuffer));
 }
 
@@ -150,7 +132,6 @@ static void noEffects(const Command& command, const SettingsBoundary& before) {
           other.field == command.field ? "the setting changed" : "an unrelated setting changed");
   }
   check(persistCalls == 0 && notifyCalls == 0, "a save or notification was requested");
-  check(executed.empty(), "a command was run");
   check(broadcasts.empty(), "a line was printed");
 }
 
@@ -210,12 +191,7 @@ static void acceptedWords() {
                 "a save is requested exactly when the value changes");
           check(notifiedField == (changes ? &(gSettings.*command.field) : nullptr),
                 "the wrong setting was notified");
-          // Live side effects: espnowenabled stops ESP-NOW on every off (also
-          // when the setting already was off); the thermal pair print a line.
-          const bool stops = command.stopsEspNow && !value.value && ENABLE_ESPNOW;
-          check(executed == (stops ? std::vector<std::string>{"closeespnow"}
-                                   : std::vector<std::string>{}),
-                "closeespnow runs on off, only for espnowenabled, only with ESP-NOW compiled");
+          // The thermal pair print a line.
           const char* line = value.value ? command.broadcastOn : command.broadcastOff;
           check(broadcasts == (line ? std::vector<std::string>{line} : std::vector<std::string>{}),
                 "the printed line changed");
@@ -231,9 +207,9 @@ static void acceptedWords() {
 }
 
 static void noReplyBuffer() {
-  // The three System_Settings handlers build their reply in the shared buffer
+  // The two System_Settings handlers build their reply in the shared buffer
   // and refuse before parsing when it is missing.
-  for (size_t i = 0; i < 3; ++i) {
+  for (size_t i = 0; i < 2; ++i) {
     const Command& command = commands[i];
     reset(command, false, "no reply buffer", "on");
     bufferAvailable = false;
@@ -244,49 +220,12 @@ static void noReplyBuffer() {
   }
 }
 
-static void espNowStopFailed() {
-  // espnowenabled off stores the setting either way. A running ESP-NOW, or
-  // one with an earlier stop still pending, whose stop failed is answered with
-  // an error that carries the stop's reason; an error from closeespnow with
-  // nothing running is a normal save.
-  const Command& command = commands[0];
-  struct Case { bool running; bool pending; const char* stop; bool fails; };
-  const Case stops[] = {
-    {true, false, "ESP-NOW deinitialized successfully", false},
-    {true, false, "Error: ESP-NOW shutdown did not finish: the TX dispatcher did not stop. Run 'closeespnow' again.", true},
-    {false, true, "ESP-NOW deinitialized successfully", false},
-    {false, true, "Error: ESP-NOW shutdown did not finish: the TX dispatcher did not stop. Run 'closeespnow' again.", true},
-    {false, false, "Error: ESP-NOW is not initialized", false},
-  };
-  for (const Case& stop : stops) {
-    reset(command, true, "stop outcome", stop.stop);
-    espNowRunning = stop.running;
-    espNowStopPending = stop.pending;
-    stopReply = stop.stop;
-    const std::string reply = command.handler("off");
-    check(!gSettings.espnowEnabled && persistCalls == 1, "the setting is stored as off");
-    if (!ENABLE_ESPNOW) {
-      check(executed.empty() && reply == command.setOff, "without ESP-NOW compiled there is nothing to stop");
-      continue;
-    }
-    check(executed == std::vector<std::string>{"closeespnow"}, "closeespnow runs");
-    if (stop.fails) {
-      check(reply == "Error: espnowenabled saved as 0, but ESP-NOW did not stop. ESP-NOW shutdown did not "
-                     "finish: the TX dispatcher did not stop. Run 'closeespnow' again.",
-            "a failed stop is not reported as stopped");
-    } else {
-      check(reply == command.setOff, "the reply for a stop that worked or had nothing to do changed");
-    }
-  }
-}
-
 int main() {
-  static_assert(std::size(commands) == 5, "the five commands that had their own parser");
+  static_assert(std::size(commands) == 4, "the four commands that had their own parser");
   acceptedWords();
   refusals();
   noReplyBuffer();
-  espNowStopFailed();
-  std::printf("settings on/off commands (ESP-NOW %s): %d cases, %d checks, %d failures\n",
-              ENABLE_ESPNOW ? "compiled" : "not compiled", cases, checks, failures);
+  std::printf("settings on/off commands: %d cases, %d checks, %d failures\n",
+              cases, checks, failures);
   return failures ? 1 : 0;
 }

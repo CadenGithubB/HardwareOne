@@ -243,13 +243,9 @@ inline void streamLlmInner(httpd_req_t* req, const String& username) {
   var metaEl    = hw.$('qa-meta');
   var modelSel  = hw.$('qa-model');
   var initMsg   = hw.$('qa-init-msg');
-  // Load and Unload run the admin-only llmload/llmunload commands on the
-  // device, so a non-admin is not offered buttons that can only be refused
-  // (the same rule as the /power page).
-  if (!hw.isAdmin()) {
-    hw.hide(hw.$('qa-load-btn'));
-    hw.hide(hw.$('qa-unload-btn'));
-  }
+  // Load and Unload run the admin-only llmload/llmunload commands. Every
+  // account sees them; a refusal prints its reason in the chat log
+  // ("Load failed: ..."), as on the /power page.
   var busy      = false;
   var abortCtrl = null;
   var currentCtx = null; // Track the most recent Q&A context

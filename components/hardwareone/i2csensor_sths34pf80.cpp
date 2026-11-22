@@ -102,7 +102,6 @@ TaskHandle_t gPresenceTaskHandle = nullptr;
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry presenceSettingEntries[] = {
-  { "presenceEnabled", SETTING_BOOL, &gSettings.presenceEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "presenceenabled" },
   { "presenceAutoStart", SETTING_BOOL, &gSettings.presenceAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "presenceautostart" },
   { "presenceDevicePollMs", SETTING_INT, &gSettings.presenceDevicePollMs, 100, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "presencedevicepollms" },
 };
@@ -501,8 +500,8 @@ static const char* cmd_presencebus(const String& a) {
 
 const CommandEntry presenceCommands[] = {
   // 3-level voice: "sensor" -> "presence" -> "open/close"
-  { "openpresence", "Start STHS34PF80 IR presence/motion sensor.", false, cmd_presencestart },
-  { "closepresence", "Stop STHS34PF80 sensor.", false, cmd_presencestop },
+  { "openpresence", "Start STHS34PF80 IR presence/motion sensor.", true, cmd_presencestart },
+  { "closepresence", "Stop STHS34PF80 sensor.", true, cmd_presencestop },
   { "presenceread", "Read STHS34PF80 presence/motion/temperature data. (add 'json' for JSON output)", false, cmd_presenceread },
   { "presencestatus", "Show STHS34PF80 sensor status. (add 'json' for JSON output)", false, cmd_presencestatus },
   

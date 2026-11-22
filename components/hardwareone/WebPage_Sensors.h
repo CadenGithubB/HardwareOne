@@ -222,7 +222,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   // Control helpers
   httpd_resp_send_chunk(req, "console.log('[SENSORS] Setting up control helpers');var setClass=function(id,enabled){var el=hw.$(id);if(!el)return;var c=enabled?'status-indicator status-enabled':'status-indicator status-disabled';if(el.className!==c)el.className=c};", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req,
-    "var bind=function(id,cmd){var el=hw.$(id);if(el){hw.on(el,'click',function(){console.log('[SENSORS] Button clicked:',id,'cmd:',cmd);hw.postForm('/api/cli',{cmd:cmd}).then(function(r){console.log('[SENSORS] Command result:',r);try{var action=(/start$/.test(cmd)||/^open/.test(cmd)?'start':(/stop$/.test(cmd)||/^close/.test(cmd)?'stop':''));var sensor='';var c=cmd.replace(/^(open|close)/,'');if(/^imu/i.test(c))sensor='imu';else if(/^thermal/i.test(c))sensor='thermal';else if(/^tof/i.test(c))sensor='tof';else if(/^gamepad/i.test(c))sensor='gamepad';else if(/^input/i.test(c))sensor='"
+    "var bind=function(id,cmd){var el=hw.$(id);if(el){hw.on(el,'click',function(){console.log('[SENSORS] Button clicked:',id,'cmd:',cmd);hw.postForm('/api/cli',{cmd:cmd}).then(function(r){console.log('[SENSORS] Command result:',r);if(!r.ok){return r.text().then(hw.showCliError)}try{var action=(/start$/.test(cmd)||/^open/.test(cmd)?'start':(/stop$/.test(cmd)||/^close/.test(cmd)?'stop':''));var sensor='';var c=cmd.replace(/^(open|close)/,'');if(/^imu/i.test(c))sensor='imu';else if(/^thermal/i.test(c))sensor='thermal';else if(/^tof/i.test(c))sensor='tof';else if(/^gamepad/i.test(c))sensor='gamepad';else if(/^input/i.test(c))sensor='"
 #if ENABLE_ANO_ENCODER
     "anoencoder"
 #else
@@ -271,24 +271,24 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   // Status poller - also toggle button visibility based on enabled state
   httpd_resp_send_chunk(req, "console.log('[SENSORS] Setting up status poller');var apply=function(s){console.log('[SENSORS] Status update:',s);try{setClass('gyro-status-indicator',!!s.imuRunning);setClass('thermal-status-indicator',!!s.thermalRunning);setClass('tof-status-indicator',!!s.tofRunning);setClass('gamepad-status-indicator',!!s.inputRunning);setClass('ano-status-indicator',!!s.inputRunning);setClass('gps-status-indicator',!!s.gpsRunning);setClass('rtc-status-indicator',!!s.rtcRunning);setClass('presence-status-indicator',!!s.presenceRunning);setClass('fmradio-status-indicator',!!s.fmRadioRunning);setClass('servo-status-indicator',!!s.pwmDriverConnected);setClass('camera-status-indicator',!!s.cameraRunning);setClass('camera-streaming-indicator',!!s.cameraStreaming);", HTTPD_RESP_USE_STRLEN);
 #if ENABLE_EDGE_IMPULSE
-  httpd_resp_send_chunk(req, "setClass('camera-ml-indicator',!!s.eiEnabled);", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "setClass('camera-ml-indicator',!!s.eiModelLoaded);", HTTPD_RESP_USE_STRLEN);
 #endif
   httpd_resp_send_chunk(req, "setClass('mic-status-indicator',!!s.micRunning);", HTTPD_RESP_USE_STRLEN);
 #if ENABLE_EDGE_IMPULSE
-  httpd_resp_send_chunk(req, "setClass('ei-status-indicator',!!s.eiEnabled);", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "setClass('ei-status-indicator',!!s.eiModelLoaded);", HTTPD_RESP_USE_STRLEN);
 #endif
   httpd_resp_send_chunk(req, "var rec=hw.$('mic-recording-indicator');if(rec){var cls=(s.micRecording?'status-indicator status-recording':'status-indicator status-disabled');if(rec.className!==cls)rec.className=cls}", HTTPD_RESP_USE_STRLEN);
   // Button visibility toggling
   httpd_resp_send_chunk(req, "var toggleBtns=function(startId,stopId,isOn){var startBtn=hw.$(startId);var stopBtn=hw.$(stopId);if(startBtn)startBtn.style.display=isOn?'none':'inline-block';if(stopBtn)stopBtn.style.display=isOn?'inline-block':'none';};toggleBtns('btn-gamepad-start','btn-gamepad-stop',!!s.inputRunning);toggleBtns('btn-ano-start','btn-ano-stop',!!s.inputRunning);toggleBtns('btn-gps-start','btn-gps-stop',!!s.gpsRunning);toggleBtns('btn-rtc-start','btn-rtc-stop',!!s.rtcRunning);toggleBtns('btn-presence-start','btn-presence-stop',!!s.presenceRunning);toggleBtns('btn-imu-start','btn-imu-stop',!!s.imuRunning);toggleBtns('btn-thermal-start','btn-thermal-stop',!!s.thermalRunning);toggleBtns('btn-tof-start','btn-tof-stop',!!s.tofRunning);toggleBtns('btn-camera-start','btn-camera-stop',!!s.cameraRunning);toggleBtns('btn-mic-start','btn-mic-stop',!!s.micRunning);", HTTPD_RESP_USE_STRLEN);
 #if ENABLE_EDGE_IMPULSE
-  httpd_resp_send_chunk(req, "toggleBtns('btn-ei-enable','btn-ei-disable',!!s.eiEnabled);", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "var eiUnload=hw.$('btn-ei-unload');if(eiUnload)eiUnload.style.display=s.eiModelLoaded?'inline-block':'none';", HTTPD_RESP_USE_STRLEN);
 #endif
   httpd_resp_send_chunk(req, "var camRec=hw.$('btn-camera-record');var camRecStop=hw.$('btn-camera-record-stop');var camRecHint=hw.$('camera-record-hint');if(camRec){camRec.style.display=(s.cameraRunning&&!s.cameraRecording)?'inline-block':'none';camRec.disabled=!s.sdWritable;if(camRec.title){if(s.sdWritable)camRec.title='Record stream to SD card as MJPEG AVI';else if(s.sdAvailable)camRec.title='SD mounted but writes are failing (card may be flaky)';else camRec.title='Requires SD card';}}if(camRecStop){camRecStop.style.display=(s.cameraRunning&&s.cameraRecording)?'inline-block':'none';}if(camRecHint){if(s.cameraRunning&&!s.sdWritable){camRecHint.style.display='block';camRecHint.textContent=s.sdAvailable?'SD card is mounted but writes are failing — card may be flaky, full, or write-protected.':'SD card required to record video.';}else{camRecHint.style.display='none';}}", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "if(s.fmRadioRunning){if(typeof startFMRadioPolling==='function')startFMRadioPolling()}else{if(typeof stopFMRadioPolling==='function')stopFMRadioPolling()}var servoStatus=hw.$('servo-connection-status');if(servoStatus){servoStatus.textContent=s.pwmDriverConnected?'Initialized & ready':'Not initialized (use servo command to start)';servoStatus.style.color=s.pwmDriverConnected?'#28a745':'#ffc107';}}catch(_){}};", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "hw.fetchJSON('/api/sensors/status').then(apply).catch(function(e){console.error('[SENSORS] Status fetch error:',e);})", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, ";hw.pollJSON('/api/sensors/status',1000,apply);console.log('[SENSORS] Status poller started');", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "}catch(e){console.error('[SENSORS] Init error:',e);}})();", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "window.sendCmd=function(cmd){hw.postForm('/api/cli',{cmd:cmd}).then(function(r){console.log('[SENSORS] sendCmd result:',r);}).catch(function(e){console.error('[SENSORS] sendCmd error:',e);});};", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "window.sendCmd=function(cmd){hw.postForm('/api/cli',{cmd:cmd}).then(function(r){console.log('[SENSORS] sendCmd result:',r);if(!r.ok)return r.text().then(hw.showCliError);}).catch(function(e){console.error('[SENSORS] sendCmd error:',e);});};", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "</script>", HTTPD_RESP_USE_STRLEN);
 
   // Step A: Port core JS behavior from legacy page (variables + settings + color maps + core fns + SSE + init)
@@ -390,6 +390,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "  })\n"
     "  .catch(function(e) {\n"
     "    console.error('Sensor control error:', e);\n"
+    "    hw.showCliError(e && e.message);\n"
     "    throw e;\n"
     "  });\n"
     "}\n", HTTPD_RESP_USE_STRLEN);
@@ -492,10 +493,8 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   // Update Edge Impulse UI when status changes
   httpd_resp_send_chunk(req,
     "    if (typeof window._eiUpdateStatus === 'function') {\n"
-    "      var btnEnable = hw.$('btn-ei-enable');\n"
-    "      var btnDisable = hw.$('btn-ei-disable');\n"
-    "      if(btnEnable) btnEnable.style.display = status.eiEnabled ? 'none' : 'inline-block';\n"
-    "      if(btnDisable) btnDisable.style.display = status.eiEnabled ? 'inline-block' : 'none';\n"
+    "      var btnUnload = hw.$('btn-ei-unload');\n"
+    "      if(btnUnload) btnUnload.style.display = status.eiModelLoaded ? 'inline-block' : 'none';\n"
     "    }\n"
     , HTTPD_RESP_USE_STRLEN);
 #endif
@@ -504,11 +503,11 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "};\n", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "function updateStatusIndicators(status){if(!status){console.warn('[Sensors] updateStatusIndicators called with null/undefined status');return}var t=hw.$('thermal-status-indicator');var f=hw.$('tof-status-indicator');var i=hw.$('gyro-status-indicator');var g=hw.$('gamepad-status-indicator');var r=hw.$('fmradio-status-indicator');var c=hw.$('camera-status-indicator');if(t){t.className=status.thermalRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(f){f.className=status.tofRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(i){i.className=status.imuRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(g){g.className=status.inputRunning?'status-indicator status-enabled':'status-indicator status-disabled'}var g2=hw.$('ano-status-indicator');if(g2){g2.className=status.inputRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(r){r.className=status.fmRadioRunning?'status-indicator status-enabled':'status-indicator status-disabled'}if(c){c.className=status.cameraRunning?'status-indicator status-enabled':'status-indicator status-disabled'}var cs=hw.$('camera-streaming-indicator');if(cs){cs.className=status.cameraStreaming?'status-indicator status-recording':'status-indicator status-disabled'}", HTTPD_RESP_USE_STRLEN);
 #if ENABLE_EDGE_IMPULSE
-  httpd_resp_send_chunk(req, "var cml=hw.$('camera-ml-indicator');if(cml){cml.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "var cml=hw.$('camera-ml-indicator');if(cml){cml.className=status.eiModelLoaded?'status-indicator status-enabled':'status-indicator status-disabled'}", HTTPD_RESP_USE_STRLEN);
 #endif
   httpd_resp_send_chunk(req, "var m=hw.$('mic-status-indicator');if(m){m.className=status.micRunning?'status-indicator status-enabled':'status-indicator status-disabled'}var mr=hw.$('mic-recording-indicator');if(mr){mr.className=status.micRecording?'status-indicator status-recording':'status-indicator status-disabled'}", HTTPD_RESP_USE_STRLEN);
 #if ENABLE_EDGE_IMPULSE
-  httpd_resp_send_chunk(req, "var ei=hw.$('ei-status-indicator');if(ei){ei.className=status.eiEnabled?'status-indicator status-enabled':'status-indicator status-disabled'}", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "var ei=hw.$('ei-status-indicator');if(ei){ei.className=status.eiModelLoaded?'status-indicator status-enabled':'status-indicator status-disabled'}", HTTPD_RESP_USE_STRLEN);
 #endif
   httpd_resp_send_chunk(req, "}", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req,

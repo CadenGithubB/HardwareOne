@@ -97,7 +97,7 @@ static std::vector<std::string> sDenyLines;
 // A path as the report shows it: NUL as \0, a backslash doubled, and a '/'
 // right after "Users" as \/, because the tracked tree holds no text shaped
 // like a home directory path (test_tree_hygiene_gate, the commit guard) and
-// the table has a "/Users" rule.
+// the corpus probes paths under the old "/Users" root.
 static std::string shown(const String& s) {
   std::string out;
   const char* p = s.c_str();

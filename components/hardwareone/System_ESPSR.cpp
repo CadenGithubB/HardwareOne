@@ -3083,9 +3083,9 @@ static const char* setEnabledFromArgs(const String& argsInput) {
   String arg = argsInput;
   arg.trim();
   if (arg.length() == 0) {
-    return "ESP-SR is in this build (compile-time flag). Switch recognition at runtime with srenabled 0|1.";
+    return "ESP-SR is in this build (compile-time flag). Start or stop recognition with opensr / closesr; srautostart starts it at boot.";
   }
-  return "Error: ESP-SR is a compile-time flag. Use srenabled 0|1 to switch speech recognition at runtime.";
+  return "Error: ESP-SR is a compile-time flag. Start or stop recognition with opensr / closesr.";
 }
 
 // The registry matches whole words, so "sr status" lands here; the commands
@@ -3104,9 +3104,6 @@ const char* cmd_sr_enable(const String& argsInput) {
 const char* cmd_sr_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   (void)argsInput;
-  if (!gSettings.srEnabled) {
-    return "Error: Speech recognition is disabled - run 'srenabled 1' first";
-  }
   // A running pipeline is not started again. Its arming is the part of
   // opensr that may still be missing: the boot autostart runs as the system
   // and cannot arm, and the web page's Start is how a user arms it then.
@@ -3912,32 +3909,17 @@ static const char* cmd_sr_timeout(const String& argsInput) {
   return buf;
 }
 
-// Forward declarations so cmd_sr_tuning can delegate "srtuning <sub> <value>"
-// to the dedicated single-param setters defined below.
-static const char* cmd_sr_tuning_swgain(const String& argsInput);
-static const char* cmd_sr_tuning_gain(const String& argsInput);
-static const char* cmd_sr_tuning_agc(const String& argsInput);
-static const char* cmd_sr_tuning_vad(const String& argsInput);
-static const char* cmd_sr_tuning_filters(const String& argsInput);
-
+// Shows the tuning values. Each one is set by its own command (srtuninggain,
+// srtuningagc, srtuningvad, srtuningswgain, srtuningfilters, micgain): one
+// name per setting.
 static const char* cmd_sr_tuning(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  // "srtuning <param> <value>" delegates to the matching setter; bare prints status.
   String args = argsInput;
   args.trim();
   if (args.length() > 0) {
-    int sp = args.indexOf(' ');
-    String sub = (sp < 0) ? args : args.substring(0, sp);
-    String rest = (sp < 0) ? String("") : args.substring(sp + 1);
-    sub.toLowerCase();
-    rest.trim();
-    if (sub == "gain")    return cmd_sr_tuning_gain(rest);
-    if (sub == "agc")     return cmd_sr_tuning_agc(rest);
-    if (sub == "vad")     return cmd_sr_tuning_vad(rest);
-    if (sub == "swgain")  return cmd_sr_tuning_swgain(rest);
-    if (sub == "filters") return cmd_sr_tuning_filters(rest);
-    return "Error: unknown tuning param. Use: srtuning [gain|agc|vad|swgain|filters] <value>";
+    return "Error: srtuning only shows the values. Set one with srtuninggain, srtuningagc, "
+           "srtuningvad, srtuningswgain or srtuningfilters <value>.";
   }
 
   EXT_RAM_BSS_ATTR static char buf[520];
@@ -3955,8 +3937,8 @@ static const char* cmd_sr_tuning(const String& argsInput) {
     "confidence: %.2f (command threshold)\n"
     "timeout: %d ms\n"
     "\nUsage: micgain <0-100>\n"
-    "Usage: srtuning <gain|agc|vad|filters> <value>\n"
-    "Usage: srtuning swgain <1.0-50.0> (sets micgain)",
+    "Usage: srtuninggain|srtuningagc|srtuningvad|srtuningfilters <value>\n"
+    "Usage: srtuningswgain <1.0-50.0> (sets micgain)",
     mg, swgain, (int)getMicDcOffset(), gSrFiltersEnabled ? "ON" : "OFF",
     srEffectiveAfeGain(), gSettings.srAgcMode, gSettings.srVadMode,
     gSrMinCommandConfidence, gSettings.srCommandTimeout);
@@ -4234,9 +4216,9 @@ static const char* cmd_sr_snip_config(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry espsrCommands[] = {
   { "sr", "ESP-SR speech recognition commands.", false, cmd_sr, "Usage: opensr | closesr | srstatus | srstack | srcmdslist | srdebuglevel | srconfidence | srtimeout | srtuning | sraccept | srdyngain | srraw | srautotune | srsnipstatus" },
-  { "srenable", "ESP-SR enable is a compile-time flag (cannot be toggled at runtime).", true, cmd_sr_enable, "Usage: srenable   (informational; runtime switch is srenabled 0|1)" },
-  { "opensr", "Start ESP-SR pipeline and arm voice as the current user.", false, cmd_sr_start, "Usage: opensr" },
-  { "closesr", "Stop ESP-SR pipeline.", false, cmd_sr_stop, "Usage: closesr" },
+  { "srenable", "ESP-SR enable is a compile-time flag (cannot be toggled at runtime).", true, cmd_sr_enable, "Usage: srenable   (informational; opensr / closesr start and stop recognition)" },
+  { "opensr", "Start ESP-SR pipeline and arm voice as the current user.", true, cmd_sr_start, "Usage: opensr" },
+  { "closesr", "Stop ESP-SR pipeline.", true, cmd_sr_stop, "Usage: closesr" },
   { "srstatus", "Show ESP-SR status.", false, cmd_sr_status, "Usage: srstatus" },
   { "srstack", "Show sr_main stack high-water mark (run after voice stress test).", false, cmd_sr_stack, "Usage: srstack" },
   { "voicearm", "Arm voice command execution as the current authenticated user.", false, cmd_voice_arm_cli, "Usage: voicearm" },
@@ -4246,34 +4228,34 @@ const CommandEntry espsrCommands[] = {
   { "srcmdslist", "List current MultiNet commands.", true, cmd_sr_cmds_list, "Usage: srcmdslist" },
   { "srcmdsadd", "Add or update a MultiNet command.", true, cmd_sr_cmds_add, "Usage: srcmdsadd <id> <phrase>" },
   { "srcmdsdel", "Delete a MultiNet command (by phrase or id).", true, cmd_sr_cmds_del, "Usage: srcmdsdel <phrase|id>" },
-  { "srcmdsclear", "Clear all MultiNet commands.", true, cmd_sr_cmds_clear, "Usage: srcmdsclear confirm" },
+  { "srcmdsclear", "Clear all MultiNet commands.", true, cmd_sr_cmds_clear, "Usage: srcmdsclear confirm", /*requiresSuperAdmin=*/true },
   { "srcmdsreload", "Reload commands from SD file.", true, cmd_sr_cmds_reload, "Usage: srcmdsreload" },
-  { "srcmdssave", "Save current commands to SD file.", true, cmd_sr_cmds_save, "Usage: srcmdssave" },
+  { "srcmdssave", "Save current commands to SD file.", true, cmd_sr_cmds_save, "Usage: srcmdssave", /*requiresSuperAdmin=*/true },
   { "srcmdssync", "Sync voice commands from CLI registry.", true, cmd_sr_cmds_sync, "Usage: srcmdssync" },
   { "srdebug", "SR debug/telemetry commands.", false, cmd_sr_debug, "Usage: srdebuglevel [0-4] | srdebugtelem [ms] | srdebugstats | srdebugreset" },
-  { "srdebuglevel", "Set debug verbosity (0-4).", false, cmd_sr_debug_level, "Usage: srdebuglevel [0-4]" },
-  { "srdebugtelem", "Set periodic telemetry interval (ms, 0=off).", false, cmd_sr_debug_telem, "Usage: srdebugtelem [ms]" },
+  { "srdebuglevel", "Set debug verbosity (0-4).", true, cmd_sr_debug_level, "Usage: srdebuglevel [0-4]" },
+  { "srdebugtelem", "Set periodic telemetry interval (ms, 0=off).", true, cmd_sr_debug_telem, "Usage: srdebugtelem [ms]" },
   { "srdebugstats", "Print current SR statistics.", false, cmd_sr_debug_stats, "Usage: srdebugstats" },
-  { "srdebugreset", "Reset SR debug counters.", false, cmd_sr_debug_reset, "Usage: srdebugreset" },
-  { "srconfidence", "Get/set command confidence threshold.", false, cmd_sr_confidence, "Usage: srconfidence [<0.0-1.0> | category <0.0-1.0> | target <0.0-1.0>]" },
-  { "sraccept", "Configure target acceptance policy (gap acceptance).", false, cmd_sr_accept, "Usage: sraccept [on|off|floor <0.0-1.0>|gap <0.0-1.0>|speech <0|1>]" },
-  { "srdyngain", "Configure dynamic gain normalization (MultiNet input only).", false, cmd_sr_dyngain, "Usage: srdyngain [on|off|min <0.1-10>|max <0.1-10>|target <1000-30000>|alpha <0.0-1.0>|reset]" },
-  { "srraw", "Toggle raw output mode (shows all MultiNet hypotheses).", false, cmd_sr_raw, "Usage: srraw [on|off]" },
-  { "srautotune", "Auto-cycle through gain configurations to find best settings.", false, cmd_sr_autotune, "Usage: srautotune [start|stop|status]" },
-  { "srtimeout", "Get/set command listening timeout.", false, cmd_sr_timeout, "Usage: srtimeout [1000-30000]" },
-  { "srtuning", "Show/set audio tuning parameters.", false, cmd_sr_tuning, "Usage: srtuning [<gain|agc|vad|swgain|filters> <value>]  (bare = show status)" },
-  { "srtuningswgain", "Set software gain (1.0-50.0) by updating shared micgain.", false, cmd_sr_tuning_swgain, "Usage: srtuningswgain <1.0-50.0>" },
-  { "srtuninggain", "Set AFE linear gain (0.1-10.0).", false, cmd_sr_tuning_gain, "Usage: srtuninggain <0.1-10.0>" },
-  { "srtuningagc", "Set AGC mode (0=off, 1-3=levels).", false, cmd_sr_tuning_agc, "Usage: srtuningagc <0-3>" },
-  { "srtuningvad", "Set VAD sensitivity (0-4).", false, cmd_sr_tuning_vad, "Usage: srtuningvad <0-4>" },
-  { "srtuningfilters", "Toggle audio filters (high-pass + pre-emphasis).", false, cmd_sr_tuning_filters, "Usage: srtuningfilters <on|off>" },
+  { "srdebugreset", "Reset SR debug counters.", true, cmd_sr_debug_reset, "Usage: srdebugreset" },
+  { "srconfidence", "Get/set command confidence threshold.", true, cmd_sr_confidence, "Usage: srconfidence [<0.0-1.0> | category <0.0-1.0> | target <0.0-1.0>]" },
+  { "sraccept", "Configure target acceptance policy (gap acceptance).", true, cmd_sr_accept, "Usage: sraccept [on|off|floor <0.0-1.0>|gap <0.0-1.0>|speech <0|1>]" },
+  { "srdyngain", "Configure dynamic gain normalization (MultiNet input only).", true, cmd_sr_dyngain, "Usage: srdyngain [on|off|min <0.1-10>|max <0.1-10>|target <1000-30000>|alpha <0.0-1.0>|reset]" },
+  { "srraw", "Toggle raw output mode (shows all MultiNet hypotheses).", true, cmd_sr_raw, "Usage: srraw [on|off]" },
+  { "srautotune", "Auto-cycle through gain configurations to find best settings.", true, cmd_sr_autotune, "Usage: srautotune [start|stop|status]" },
+  { "srtimeout", "Get/set command listening timeout.", true, cmd_sr_timeout, "Usage: srtimeout [1000-30000]" },
+  { "srtuning", "Show the audio tuning values.", false, cmd_sr_tuning, "Usage: srtuning" },
+  { "srtuningswgain", "Set software gain (1.0-50.0) by updating shared micgain.", true, cmd_sr_tuning_swgain, "Usage: srtuningswgain <1.0-50.0>" },
+  { "srtuninggain", "Set AFE linear gain (0.1-10.0).", true, cmd_sr_tuning_gain, "Usage: srtuninggain <0.1-10.0>" },
+  { "srtuningagc", "Set AGC mode (0=off, 1-3=levels).", true, cmd_sr_tuning_agc, "Usage: srtuningagc <0-3>" },
+  { "srtuningvad", "Set VAD sensitivity (0-4).", true, cmd_sr_tuning_vad, "Usage: srtuningvad <0-4>" },
+  { "srtuningfilters", "Toggle audio filters (high-pass + pre-emphasis).", true, cmd_sr_tuning_filters, "Usage: srtuningfilters <on|off>" },
   { "srsnip", "Voice snippet capture commands.", false, cmd_sr_snip, "Usage: srsnipon | srsnipoff | srsnipstart | srsnipstop | srsnipstatus | srsnipconfig" },
-  { "srsnipon", "Enable auto-capture on wake word.", false, cmd_sr_snip_on, "Usage: srsnipon" },
-  { "srsnipoff", "Disable auto-capture.", false, cmd_sr_snip_off, "Usage: srsnipoff" },
+  { "srsnipon", "Enable auto-capture on wake word.", true, cmd_sr_snip_on, "Usage: srsnipon" },
+  { "srsnipoff", "Disable auto-capture.", true, cmd_sr_snip_off, "Usage: srsnipoff" },
   { "srsnipstart", "Start manual snippet capture now.", false, cmd_sr_snip_start, "Usage: srsnipstart" },
   { "srsnipstop", "Stop manual snippet capture and save.", false, cmd_sr_snip_stop, "Usage: srsnipstop" },
   { "srsnipstatus", "Show snippet capture status.", false, cmd_sr_snip_status, "Usage: srsnipstatus" },
-  { "srsnipconfig", "Configure snippet capture params.", false, cmd_sr_snip_config, "Usage: srsnipconfig [pre_ms <100-5000> | max_ms <1000-30000> | dest <auto|sd|internal>]" },
+  { "srsnipconfig", "Configure snippet capture params.", true, cmd_sr_snip_config, "Usage: srsnipconfig [pre_ms <100-5000> | max_ms <1000-30000> | dest <auto|sd|internal>]" },
   // Voice-only helper commands; their "*" (all-stages) phrases live in kVoiceRoutes
   { "voicecancel", "Spoken only: say cancel (or nevermind) after the wake word. Typed, it answers an error.", false, cmd_voice_cancel },
   { "voicehelp", "Spoken only: say help after the wake word. Typed, it answers an error.", false, cmd_voice_help },
@@ -4292,7 +4274,6 @@ static bool isEspSrConnected() {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry espsrSettingsEntries[] = {
-  { "srEnabled", SETTING_BOOL, &gSettings.srEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "srenabled" },
   { "srAutoStart", SETTING_BOOL, &gSettings.srAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "srautostart" },
   { "srModelSource", SETTING_INT, &gSettings.srModelSource, 0, 0, nullptr, 0, 2, "Model source (0=partition, 1=SD, 2=LittleFS)", "0|Partition,1|SD,2|LittleFS", false, nullptr, "srmodelsource" },
   { "srCommandTimeout", SETTING_INT, &gSettings.srCommandTimeout, 6000, 0, nullptr, 1000, 30000, "Command timeout (ms)", nullptr, false, nullptr, "srtimeout" },

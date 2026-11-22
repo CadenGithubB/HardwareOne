@@ -9,6 +9,7 @@
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES && ENABLE_DICTATION
 #include "G2_Glasses.h"
 #include "G2_HijackCmd.h"
+#include "G2_ReplyNotice.h"
 #include "G2_Page_Common.h"
 #include "BLE_Peers.h"
 #include "System_MemUtil.h"
@@ -590,11 +591,19 @@ static void complete(bool ok, const char* result, const G2CmdCookie&, void* opaq
   const bool success = ok && parsed && (doc["success"] | false) &&
       !(op == Op::Status && state.recoveringStart && !doc["exchange"].is<const char*>());
   if (op == Op::Save || op == Op::Mic) {
-    if (!ok)
-      snprintf(state.message, sizeof(state.message), "Setting change denied or failed");
+    // A refused change keeps the row as the next status reports it; the
+    // sidebar says why ("Needs an admin"), also for a handler's own "Error:"
+    // reply, which the executor passes with ok set.
+    char why[kG2NoticeMax];
+    if (g2ReplyNoticeText(ok, result, why, sizeof(why)))
+      snprintf(state.message, sizeof(state.message), "%s", why);
     if (state.queued == Op::None) state.queued = Op::Status;
   } else if (!success) {
-    snprintf(state.message, sizeof(state.message), "%s", parsed ? (doc["error"] | "Request failed") : "Request failed");
+    // A JSON reply names its own error; anything else (a refusal before the
+    // command ran) is worded by the shared lens helper.
+    if (parsed) snprintf(state.message, sizeof(state.message), "%s", doc["error"] | "Request failed");
+    else if (!g2ReplyNoticeText(ok, result, state.message, sizeof(state.message)))
+      snprintf(state.message, sizeof(state.message), "Request failed");
     if (op == Op::Ack) { state.ackPending = false; state.queued = Op::Cancel; }
     if (op == Op::Start && (!ok || !parsed || !doc["success"].is<bool>())) {
       // Admission may have succeeded before its reply failed. Do not repeat

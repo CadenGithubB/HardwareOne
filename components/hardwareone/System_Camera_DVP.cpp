@@ -26,6 +26,7 @@
 #include "System_DebugJson.h"  // serializeJsonListToDebugBuffer (cameravideolist json)
 #include <atomic>
 #include "System_CommandRegistry.h"
+#include "System_AuthIdentity.h"  // currentExecUser / currentExecIsAdmin (recording stop rule)
 
 // Static storage prevents first-call races and never treats allocation failure
 // as permission to access a driver without the lifecycle lock.
@@ -793,14 +794,10 @@ const char* cmd_camera(const String& argsInput) {
   return status;
 }
 
-static const char* const kCameraDisabledError =
-    "Error: Camera is disabled - run 'cameraenabled 1' first";
-
 // `opencamera async` / `closecamera async`: the gated asynchronous power
 // change for UI adapters (the G2 Sensors page). It runs on cmd_exec under the
 // submitter's identity, so the registry authorizes it, the live-session fence
-// applies and the [CMD] audit records it. A start honours the cameraEnabled
-// master switch exactly as the synchronous start does. The reply says only
+// applies and the [CMD] audit records it. The reply says only
 // whether cam_power admitted the request; the power change and the post-hook
 // then run on cam_power, and nothing here waits for the camera.
 static bool cameraAsyncForm(const String& argsInput) {
@@ -811,7 +808,6 @@ static bool cameraAsyncForm(const String& argsInput) {
 }
 
 static const char* cameraPowerAsyncCommand(bool start) {
-  if (start && !gSettings.cameraEnabled) return kCameraDisabledError;
   // Same verdicts as the sync forms (the owner's 2026-11-18 rule). A stop is
   // still queued when the camera is not running: it holds the camera off and
   // ends a failed start that kept its resources.
@@ -852,9 +848,6 @@ const char* cmd_camerastart(const String& argsInput) {
   String extra = argsInput;
   extra.trim();
   if (!(extra == "")) return "Error: Unknown argument. Use opencamera or opencamera async.";
-  if (!gSettings.cameraEnabled) {
-    return kCameraDisabledError;
-  }
   if (gCameraRunning) {
     return "Error: Camera is already running. Stop it first with 'closecamera' to restart it.";
   }
@@ -1362,6 +1355,13 @@ const char* cmd_camerasave(const String& argsInput) {
 // These forward to System_Camera_Video. Kept here so they register alongside
 // the rest of the camera command table.
 
+// The account whose camerarecord start started a recording, and which one
+// (videoRecordingGeneration). An account below admin may stop only its own
+// recording (owner decision 1.0); one started any other way is an admin's
+// to stop.
+static String sVideoRecordStarter;
+static uint32_t sVideoRecordStarted = 0;
+
 const char* cmd_camerarecord(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gCameraRunning) return "Error: Camera not enabled - run opencamera first";
@@ -1379,7 +1379,11 @@ const char* cmd_camerarecord(const String& argsInput) {
     if (!VFS::isSdWritable()) return "Error: Recording not started: SD card not writable. Check sdinfo and retry.";
     // The recorder names the cause and the next action of a refused start.
     const char* why = nullptr;
-    if (startVideoRecording(&why)) return "Recording started";
+    if (startVideoRecording(&why)) {
+      sVideoRecordStarter = currentExecUser();
+      sVideoRecordStarted = videoRecordingGeneration();
+      return "Recording started";
+    }
     EXT_RAM_BSS_ATTR static char refused[160];
     snprintf(refused, sizeof(refused), "Error: Recording not started: %s",
              why ? why : "unknown cause. Check sdinfo and retry.");
@@ -1387,6 +1391,20 @@ const char* cmd_camerarecord(const String& argsInput) {
   }
   if (arg == "0" || arg.equalsIgnoreCase("stop")) {
     bool wasRecording = videoRecording;
+    if (wasRecording && !currentExecIsAdmin() &&
+        (currentExecUser().length() == 0 || currentExecUser() != sVideoRecordStarter ||
+         videoRecordingGeneration() != sVideoRecordStarted)) {
+      EXT_RAM_BSS_ATTR static char notYours[160];
+      if (sVideoRecordStarter.length() && videoRecordingGeneration() == sVideoRecordStarted) {
+        snprintf(notYours, sizeof(notYours),
+                 "Error: This recording belongs to %.40s. Only %.40s or an administrator can stop it.",
+                 sVideoRecordStarter.c_str(), sVideoRecordStarter.c_str());
+      } else {
+        snprintf(notYours, sizeof(notYours),
+                 "Error: The device started this recording; only an admin can stop it.");
+      }
+      return notYours;
+    }
     const VideoStopResult stopped = stopVideoRecording();
     if (stopped == VideoStopResult::StillFinishing) {
       return "Error: Recorder is still finishing. Run cameravideolist in a few seconds.";
@@ -1481,18 +1499,18 @@ const char* cmd_cameravideodelete(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry cameraCommands[] = {
   {"cameraread",       "Read camera status",              false, cmd_camera},
-  {"opencamera",       "Start camera sensor. [async: queue it and return at once]", false, cmd_camerastart},
-  {"closecamera",      "Stop camera sensor. [async: queue it and return at once]",  false, cmd_camerastop},
+  {"opencamera",       "Start camera sensor. [async: queue it and return at once]", true, cmd_camerastart},
+  {"closecamera",      "Stop camera sensor. [async: queue it and return at once]",  true, cmd_camerastop},
   {"cameracapture",    "Capture a single frame",          false, cmd_cameracapture},
   {"camerasave",       "Save current frame to storage",   false, cmd_camerasave},
-  {"camerares",        "Set camera resolution: <res>",    false, cmd_camerares, "Usage: camerares <96x96|qqvga|qcif|hqvga|240x240|qvga|cif|vga|svga|xga|sxga|uxga|hd>"},
+  {"camerares",        "Set camera resolution: <res>",    true, cmd_camerares, "Usage: camerares <96x96|qqvga|qcif|hqvga|240x240|qvga|cif|vga|svga|xga|sxga|uxga|hd>"},
   {"cameraframesize",  "Set resolution by index: <0-12>", true,  cmd_cameraframesize, "Usage: cameraframesize <0..12> (0-5: QVGA..UXGA, 6-10: small, 11: HD, 12: CIF; availability depends on backend)"},
-  {"cameraquality",    "Set JPEG quality: <0-63>",        false, cmd_cameraquality, "Usage: cameraquality <0..63> (lower = better quality, larger file)"},
+  {"cameraquality",    "Set JPEG quality: <0-63>",        true, cmd_cameraquality, "Usage: cameraquality <0..63> (lower = better quality, larger file)"},
   {"camerafps",            "Camera FPS: <1-20>",          true, cmd_camerafps, "Usage: camerafps <1..20>"},
   {"cameratiny",       "Capture tiny frame for ESP-NOW",  false, cmd_cameratiny},
-  {"camerabrightness", "Set brightness: <-2..2>",         false, cmd_camerabrightness, "Usage: camerabrightness <-2..2>"},
-  {"cameracontrast",   "Set contrast: <-2..2>",           false, cmd_cameracontrast, "Usage: cameracontrast <-2..2>"},
-  {"camerasaturation", "Set saturation: <-2..2>",         false, cmd_camerasaturation, "Usage: camerasaturation <-2..2>"},
+  {"camerabrightness", "Set brightness: <-2..2>",         true, cmd_camerabrightness, "Usage: camerabrightness <-2..2>"},
+  {"cameracontrast",   "Set contrast: <-2..2>",           true, cmd_cameracontrast, "Usage: cameracontrast <-2..2>"},
+  {"camerasaturation", "Set saturation: <-2..2>",         true, cmd_camerasaturation, "Usage: camerasaturation <-2..2>"},
   {"camerawb",         "White balance mode: <0-4>",       true,  cmd_camerawb, "Usage: camerawb <0..4> (0=Auto,1=Sunny,2=Cloudy,3=Office,4=Home)"},
   {"camerasharpness",  "Set sharpness: <-2..2>",          true,  cmd_camerasharpness, "Usage: camerasharpness <-2..2> (OV3660 only)"},
   {"cameradenoise",    "Set denoise level: <0-8>",        true,  cmd_cameradenoise, "Usage: cameradenoise <0..8>"},
@@ -1515,14 +1533,14 @@ const CommandEntry cameraCommands[] = {
   {"cameracolorbar",   "Color bar test pattern: <on|off>",true,  cmd_cameracolorbar, "Usage: cameracolorbar <on|off>"},
   {"camerareg",        "Direct register write: <addr_hex> <mask_hex> <value_hex>", true, cmd_camerareg, "Usage: camerareg <addr_hex> <mask_hex> <value_hex> (example: camerareg 0x3824 0x1f 0x04)"},
   {"cameradump",       "Print all current sensor values", false, cmd_cameradump},
-  {"camerafx",         "Set bri/con/sat together: <bri> <con> <sat> (-2..+2 each)", false, cmd_camerafx, "Usage: camerafx <bri> <con> <sat> (-2..+2 each)"},
-  {"camerahmirror",    "Horizontal mirror: <on|off>",     false, cmd_camerahmirror, "Usage: camerahmirror <on|off|1|0|true>"},
-  {"cameravflip",      "Vertical flip: <on|off>",         false, cmd_cameravflip, "Usage: cameravflip <on|off|1|0|true>"},
-  {"camerarotate",     "Rotate 180°: <on|off>",           false, cmd_camerarotate, "Usage: camerarotate <on|off|1|0|true|180>"},
+  {"camerafx",         "Set bri/con/sat together: <bri> <con> <sat> (-2..+2 each)", true, cmd_camerafx, "Usage: camerafx <bri> <con> <sat> (-2..+2 each)"},
+  {"camerahmirror",    "Horizontal mirror: <on|off>",     true, cmd_camerahmirror, "Usage: camerahmirror <on|off|1|0|true>"},
+  {"cameravflip",      "Vertical flip: <on|off>",         true, cmd_cameravflip, "Usage: cameravflip <on|off|1|0|true>"},
+  {"camerarotate",     "Rotate 180°: <on|off>",           true, cmd_camerarotate, "Usage: camerarotate <on|off|1|0|true|180>"},
   {"cameraautostart",  "Auto-start: <on|off>",            true,  cmd_cameraautostart, "Usage: cameraautostart <on|off|1|0|true|false>"},
   {"camerastoragelocation", "Storage location: <0-2>",    true,  cmd_camerastoragelocation, "Usage: camerastoragelocation <0..2> (0=LittleFS,1=SD,2=Both)"},
   {"cameracapturefolder",   "Photo folder: <path>",       true,  cmd_cameracapturefolder, "Usage: cameracapturefolder <path>"},
-  {"cameramaxstoredimages", "Max stored: <0-1000>",       true,  cmd_cameramaxstoredimages, "Usage: cameramaxstoredimages <0..1000> (0=unlimited)"},
+  {"cameramaxstoredimages", "Max stored: <0-1000>",       true,  cmd_cameramaxstoredimages, "Usage: cameramaxstoredimages <0..1000> (0=unlimited)", /*requiresSuperAdmin=*/true},
   {"camerarecord",          "Start/stop MJPEG-AVI recording (SD only): <start|stop>", false, cmd_camerarecord, "Usage: camerarecord <start|stop|1|0>"},
   {"cameravideolist",       "List AVI recordings on SD (add 'json' for JSON output)",  false, cmd_cameravideolist},
   {"cameravideodelete",     "Delete recording: \"<filename>\"", true, cmd_cameravideodelete, "Usage: cameravideodelete \"<filename>\""},
@@ -1584,7 +1602,6 @@ static const char* cameraResolutionOptions() {
 }
 
 static const SettingEntry cameraSettingEntries[] = {
-  { "cameraEnabled", SETTING_BOOL, &gSettings.cameraEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "cameraenabled" },
   { "cameraAutoStart", SETTING_BOOL, &gSettings.cameraAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "cameraautostart" },
   { "cameraFramesize", SETTING_INT, &gSettings.cameraFramesize, 10, 0, nullptr, 0, 12, "Resolution", "0:320x240 (QVGA),1:640x480 (VGA),2:800x600 (SVGA),3:1024x768 (XGA),4:1280x1024 (SXGA),5:1600x1200 (UXGA),"
     "6:96x96,7:160x120 (QQVGA),8:176x144 (QCIF),9:240x176 (HQVGA),10:240x240,11:1280x720 (HD),12:400x296 (CIF)", false, "image", "cameraframesize", false, false, nullptr, cameraResolutionOptions },

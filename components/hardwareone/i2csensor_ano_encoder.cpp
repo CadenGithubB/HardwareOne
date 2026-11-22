@@ -462,9 +462,9 @@ extern const SettingsModule anoEncoderSettingsModule = {
 const CommandEntry anoEncoderCommands[] = {
   { "anoencoderread",    "Read ANO encoder state. (add 'json' for JSON output)",                  false, cmd_anoencoder },
   { "anoencoderi2caddr", "Set ANO I2C address [1-127]",              true,  cmd_anoencoderi2caddr, "Usage: anoencoderi2caddr <1-127>" },
-  { "anoencoderinvert",  "Invert rotation direction [on|off]",       false, cmd_anoencoderinvert,  "Usage: anoencoderinvert [on|off]" },
-  { "anoencoderswapud",  "Swap UP/DOWN buttons [on|off|toggle]",     false, cmd_anoencoderswapud,  "Usage: anoencoderswapud [on|off|toggle]" },
-  { "anoencoderswaplr",  "Swap LEFT/RIGHT buttons [on|off|toggle]",  false, cmd_anoencoderswaplr,  "Usage: anoencoderswaplr [on|off|toggle]" },
+  { "anoencoderinvert",  "Invert rotation direction [on|off]",       true, cmd_anoencoderinvert,  "Usage: anoencoderinvert [on|off]" },
+  { "anoencoderswapud",  "Swap UP/DOWN buttons [on|off|toggle]",     true, cmd_anoencoderswapud,  "Usage: anoencoderswapud [on|off|toggle]" },
+  { "anoencoderswaplr",  "Swap LEFT/RIGHT buttons [on|off|toggle]",  true, cmd_anoencoderswaplr,  "Usage: anoencoderswaplr [on|off|toggle]" },
 };
 const size_t anoEncoderCommandsCount = sizeof(anoEncoderCommands) / sizeof(anoEncoderCommands[0]);
 

@@ -103,7 +103,7 @@ bool bleSubsystemActive();
 static BleRoleTransition bleRoleTransitionState() { return BleRoleTransition::IDLE; }
 static bool bleRoleTransitionHeldByCurrentTask() { return false; }
 static bool bleCentralRingShouldYield() { return false; }  // a four-link C6
-static struct Settings { bool bleEnabled = true; int bleMode = BLE_MODE_G2_CLIENT; } gSettings;
+static struct Settings { int bleMode = BLE_MODE_G2_CLIENT; } gSettings;
 static bool setSetting(int& field, int value) { field = value; return true; }
 
 // INSERT_PEERS

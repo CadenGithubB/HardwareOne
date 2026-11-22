@@ -73,7 +73,7 @@ struct BluetoothHalStatus {
   bool ready() const { return up; }
 };
 static BluetoothHalStatus bluetoothHalStatus() { BluetoothHalStatus s; s.up=halUp; return s; }
-static struct { bool bleEnabled=true; } gSettings;
+
 static bool initG2Client() { calls.emplace_back("g2-init"); clientRuntime=halUp=true; return true; }
 static void blePeerRequestReseek(BlePeerKind kind) { reseeks.push_back(kind); }
 // INSERT_PRODUCTION

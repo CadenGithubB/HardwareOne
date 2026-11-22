@@ -9774,7 +9774,9 @@ static void buildCapabilitySummary(CapabilitySummary& cap) {
   
   // Build service mask (runtime, using CAP_SERVICE_* constants)
   cap.serviceMask = 0;
-  if (gSettings.espnowEnabled) cap.serviceMask |= CAP_SERVICE_ESPNOW;
+  // Running now: the summary is sent over ESP-NOW, and a device opened by
+  // hand with espnowautostart off offers it all the same.
+  if (gEspNow && gEspNow->initialized) cap.serviceMask |= CAP_SERVICE_ESPNOW;
 #if ENABLE_WIFI
   if (WiFi.status() == WL_CONNECTED) cap.serviceMask |= CAP_SERVICE_WIFI_CONN;
 #endif
@@ -15258,9 +15260,6 @@ static void deferredEspNowInitFn(void* /*arg*/) {
 
 const char* cmd_espnow_init(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gSettings.espnowEnabled) {
-    return "Error: ESP-NOW is disabled - run 'espnowenabled 1' first";
-  }
   if (gEspNow && gEspNow->initialized) {
     return "Error: ESP-NOW is already running. Stop it first with 'closeespnow' to restart it.";
   }
@@ -17363,7 +17362,7 @@ const char* cmd_espnow_mode(const String& argsInput) {
   if (argWantsJson(argsInput)) {
     PSRAM_JSON_DOC(doc);
     doc["schema"]  = 1;
-    doc["enabled"] = gSettings.espnowEnabled;
+    doc["enabled"] = gSettings.espnowAutoStart;  // start at boot
     doc["mode"]    = getEspNowModeString();
     serializeJson(doc, getDebugBuffer(), 1024);
     return getDebugBuffer();
@@ -19837,6 +19836,16 @@ const char* cmd_espnow_meshes(const String& argsInput) {
 
   String sub = a.arg(0);
   sub.toLowerCase();
+
+  // Dropping a mesh or changing its key is super admin work, as the
+  // espnowsetpassphrase row is: the row itself stays open to administrators
+  // for list, add, enable, setdefault and rename.
+  if ((sub == "remove" || sub == "disable" || sub == "delete" || sub == "setpassphrase") &&
+      !hasSuperAdminPrivilege(currentAuthContext())) {
+    static const char kMeshesSuperReply[] =
+        "Error: Super-admin access required for espnowmeshes remove, delete and setpassphrase.";
+    return kMeshesSuperReply;
+  }
 
   if (sub == "list")     return meshesCmd_list();
   if (sub == "listjson") return meshesCmd_listjson();
@@ -23352,8 +23361,8 @@ extern const CommandEntry espNowCommands[] = {
   { "openespnow", "Initialize ESP-NOW communication.", true, cmd_espnow_init },
   { "closeespnow", "Deinitialize ESP-NOW and free resources.", true, cmd_espnow_deinit },
   { "espnowpair", "Pair ESP-NOW device: 'espnowpair <mac> <name> [mesh]'. (synchronous; local registry add, no remote handshake)", true, cmd_espnow_pair, "Usage: espnowpair <mac> <name> [mesh]" },
-  { "espnowunpair", "Unpair ESP-NOW device and remove what this device stored about it (crypto identity, bond caches, its cached manifest); unpairing the bond partner ends the bond too: 'espnowunpair <name_or_mac>'.", true, cmd_espnow_unpair, "Usage: espnowunpair <name_or_mac>" },
-  { "espnowforget", "Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.", true, cmd_espnow_forget, "Usage: espnowforget <name_or_mac>" },
+  { "espnowunpair", "Unpair ESP-NOW device and remove what this device stored about it (crypto identity, bond caches, its cached manifest); unpairing the bond partner ends the bond too: 'espnowunpair <name_or_mac>'.", true, cmd_espnow_unpair, "Usage: espnowunpair <name_or_mac>", /*requiresSuperAdmin=*/true },
+  { "espnowforget", "Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.", true, cmd_espnow_forget, "Usage: espnowforget <name_or_mac>", /*requiresSuperAdmin=*/true },
   { "espnowlist", "List all paired ESP-NOW devices.", false, cmd_espnow_list },
   { "espnowmessages", "Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch.", false, cmd_espnow_messages, "Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]" },
   
@@ -23392,7 +23401,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowtagcmd", "Run command on all devices accepted here as holders of a tag; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)", true, cmd_espnow_tagcmd, "Usage: espnowtagcmd <tag> <target-user> <target-pass> <command>\n       Credentials are checked ON EACH target device, not this one.\n       One tag per command: a tag list (a comma) is refused.\n       Goes only to peers whose tag was accepted on this device (espnowgroups, espnowgroupaccept);\n       a peer that only announces the tag is skipped and counted in the reply.\n       Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'." },
   { "espnowgroups", "List paired peers with the room and tags each announces, what was accepted here and what is pending: 'espnowgroups [json] [name_or_mac]'.", true, cmd_espnow_groups, "Usage: espnowgroups [json] [<name_or_mac>]\n       announced = what the peer says about itself; accepted = what room and tag commands go by;\n       pending = announced and not accepted, so not used.\n       A peer that stops announcing a room or tag leaves it at once; a new one waits for espnowgroupaccept." },
   { "espnowgroupaccept", "Accept the room and tags a paired peer announces right now, for room and tag commands: 'espnowgroupaccept [json] <name_or_mac|all>'.", true, cmd_espnow_groupaccept, "Usage: espnowgroupaccept [json] <name_or_mac|all>\n       Records exactly what the peer announces at this moment; the reply states what was accepted.\n       A name that more than one paired device has is refused: use the address espnowgroups shows.\n       From then on espnowroomcmd and espnowtagcmd send that room's and those tags' commands,\n       with the account password they carry, to this peer." },
-  { "espnowgroupdrop", "Take back the room and tags accepted for a paired peer: 'espnowgroupdrop [json] <name_or_mac|all>'.", true, cmd_espnow_groupdrop, "Usage: espnowgroupdrop [json] <name_or_mac|all>\n       The peer is no longer a target of room or tag commands; what it announces is pending again." },
+  { "espnowgroupdrop", "Take back the room and tags accepted for a paired peer: 'espnowgroupdrop [json] <name_or_mac|all>'.", true, cmd_espnow_groupdrop, "Usage: espnowgroupdrop [json] <name_or_mac|all>\n       The peer is no longer a target of room or tag commands; what it announces is pending again.", /*requiresSuperAdmin=*/true },
   
   // ---- ESP-NOW Communication ----
   { "espnowsend", "Send message to one peer, relayed over multiple hops if it is out of radio range: 'espnowsend [json] <name_or_mac> <message>'. Requires ESP-NOW encryption enabled. (async send; delivery only, no reply)", false, cmd_espnow_send, "Usage: espnowsend [json] <name_or_mac> <message>\n       Requires ESP-NOW encryption (set a mesh passphrase first); plaintext send was removed.\n       Leading 'json' flag returns {schema,ok,msgId} for delivery-status polling (\"queued\":true while it waits).\n       Returns OK when sent, or queued until the session with the peer opens (sent then, or failed after 5 s; up to 4 wait per peer); one-way message, no result comes back.\n       Out-of-range peers are reached via relays when a route exists ('espnowmeshroutes');\n       a relayed message is split at ~146 chars per piece instead of ~200." },
@@ -23412,9 +23421,9 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsensorbroadcast", "Enable/disable all sensor ESP-NOW communication: 'espnowsensorbroadcast <on|off>'.", false, cmd_espnow_sensorbroadcast, "Usage: espnowsensorbroadcast [on|off]" },
   // Secure sensor fetcher (worker settings + Phase 1b test harness) — docs/ESPNOW_SENSOR_FETCHER_DESIGN.md
   { "espnowacceptsensorcontrol", "Worker: opt in to honor SENSOR_REQ from the configured master/backup: 'espnowacceptsensorcontrol <on|off>'.", true, cmd_espnow_acceptsensorcontrol, "Usage: espnowacceptsensorcontrol <on|off>" },
-  { "espnowmasterfingerprint", "Name the mesh master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.", true, cmd_espnow_masterfingerprint, "Usage: espnowmasterfingerprint [<64-hex-pubkey>|clear]\n       No argument shows it. The master named here gives this device mesh time, gets its readings,\n       battery state and events, and may ask it for readings. clear: no master is named (the reply says what that stops)." },
+  { "espnowmasterfingerprint", "Name the mesh master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.", true, cmd_espnow_masterfingerprint, "Usage: espnowmasterfingerprint [<64-hex-pubkey>|clear]\n       No argument shows it. The master named here gives this device mesh time, gets its readings,\n       battery state and events, and may ask it for readings. clear: no master is named (the reply says what that stops).", /*requiresSuperAdmin=*/true },
   { "espnowforwardlinks", "Mesh master: show the devices that forward their bond partner's data to this device: 'espnowforwardlinks [json] [from <n>]'.", false, cmd_espnow_forwardlinks, "Usage: espnowforwardlinks [json] [from <n>]\n       json: 'next' is the number to pass as 'from' when not every link fitted one reply." },
-  { "espnowbackupfingerprint", "Name the backup master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.", true, cmd_espnow_backupfingerprint, "Usage: espnowbackupfingerprint [<64-hex-pubkey>|clear]\n       No argument shows it. The backup named here gets this device's battery state and events, may ask it for readings,\n       and gives it mesh time while it acts as master. clear: no backup master is named." },
+  { "espnowbackupfingerprint", "Name the backup master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.", true, cmd_espnow_backupfingerprint, "Usage: espnowbackupfingerprint [<64-hex-pubkey>|clear]\n       No argument shows it. The backup named here gets this device's battery state and events, may ask it for readings,\n       and gives it mesh time while it acts as master. clear: no backup master is named.", /*requiresSuperAdmin=*/true },
   { "espnowsensorreq", "Hand-send a SENSOR_REQ to a paired worker, or to a bond partner through the bond master that forwards for it ('<partner> via <bond master>').", true, cmd_espnow_sensorreq, "Usage: espnowsensorreq <MAC|name> [via <MAC|name>] <sensors> <mode> <intervalMs> <leaseMs>\n       sensors: names, comma separated (tof,imu), 'all', or a mask (0x6). mode: subscribe|sub|0, unsubscribe|unsub|1, oneshot|once|2.\n       A forwarded partner: its name and 'via' the bond master (espnowforwardlinks lists them); its name alone when it is not paired here.\n       The bond master needs 'bondforward on' and forwards only the sensors it names (bondforward sensors).\n       Refused when the session shows the device has no sensors in its build (or, 'via', no bond mode)." },
   { "espnowusersync", "Enable/disable user credential sync: 'espnowusersync [on|off]'.", true, cmd_espnow_usersync, "Usage: espnowusersync [on|off]", /*requiresSuperAdmin=*/true },
   { "espnowrequestmeta", "Request metadata from peer: 'espnowrequestmeta <name_or_mac>'. (async - updates cache; view with espnowdevices)", false, cmd_espnow_requestmeta, "Usage: espnowrequestmeta <name_or_mac>\n       Returns OK on delivery; the peer's name/room/zone/tags arrive later and update the local peer cache shown by 'espnowdevices' / 'espnowrooms' / 'espnowfind'." },
@@ -23456,8 +23465,6 @@ extern const CommandEntry espNowCommands[] = {
   { "testcleanup", "Test cleanup of stale topology streams.", true, cmd_test_cleanup },
   { "testfilelock", "Test file transfer lock acquire/release.", false, cmd_test_filelock },
   
-  // ---- ESP-NOW Settings ----
-  { "espnowenabled", "Enable/disable ESP-NOW (0|1, takes effect after reboot).", true, cmd_espnowenabled, "Usage: espnowenabled <0|1>" },
   // ---- ESP-NOW Settings (schema-driven, for web UI save) ----
   { "espnowfirsttimesetup",          "Set first time setup flag: <0|1>", true, cmd_espnow_firsttimesetup, "Usage: espnowfirsttimesetup <0|1>" },
   { "espnowheartbeatinterval",       "Set master heartbeat interval: <1000-60000 ms>", true, cmd_espnow_heartbeatinterval, "Usage: espnowheartbeatinterval <1000..60000>" },
@@ -23494,8 +23501,7 @@ extern const size_t espNowCommandsCount = sizeof(espNowCommands) / sizeof(espNow
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry espnowSettingEntries[] = {
-  { "espnowAutoStart", SETTING_BOOL, &gSettings.espnowAutoStart, 1, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "espnowautostart" },
-  { "enabled",                    SETTING_BOOL,   &gSettings.espnowEnabled,              false, 0, nullptr, 0, 1, "ESP-NOW Enabled", nullptr, false, nullptr, "espnowenabled" },
+  { "espnowAutoStart", SETTING_BOOL, &gSettings.espnowAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "espnowautostart" },
   { "mesh", SETTING_BOOL, &gSettings.espnowmesh, false, 0, nullptr, 0, 1, "Mesh Mode", nullptr, false, "mesh", "espnowmode" },
   { "userSyncEnabled",            SETTING_BOOL,   &gSettings.espnowUserSyncEnabled,      false, 0, nullptr, 0, 1, "User Sync Enabled", nullptr, false, nullptr, "espnowusersync" },
   { "captureToSd", SETTING_BOOL, &gSettings.espnowCaptureToSd, false, 0, nullptr, 0, 1, "Capture ESP-NOW traffic to SD card", nullptr, false, "capture", "espnowcapturetosd" },

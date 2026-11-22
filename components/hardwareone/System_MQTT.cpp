@@ -334,7 +334,6 @@ bool getExternalSensor(int index, String& topic, String& name, String& value, un
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry mqttSettingEntries[] = {
-  { "mqttClientEnabled", SETTING_BOOL, &gSettings.mqttEnabled, false, 0, nullptr, 0, 1, "MQTT Enabled", nullptr, false, nullptr, "mqttclientenabled" },
   { "mqttAutoStart", SETTING_BOOL, &gSettings.mqttAutoStart, false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, "broker", "mqttautostart" },
   { "mqttHost", SETTING_STRING, &gSettings.mqttHost, 0, 0, "", 0, 0, "Broker Host", nullptr, false, "broker", "mqtthost" },
   { "mqttPort", SETTING_INT, &gSettings.mqttPort, 1883, 0, nullptr, 1, 65535, "Broker Port", nullptr, false, "broker", "mqttport" },
@@ -576,8 +575,7 @@ struct MqttCommandReply {
 // The esp-mqtt task sends queued items at the top of its next loop pass (up
 // to its poll-read timeout later when the broker is idle).
 //
-// When a stop is already pending (closemqtt or "mqttclientenabled 0" sent over
-// MQTT, for example), mqttTick claims teardown as soon as this reply releases
+// When a stop is already pending (closemqtt sent over MQTT, for example), mqttTick claims teardown as soon as this reply releases
 // its admission, and the esp-mqtt task deletes every outbox item when it
 // exits, so a queued reply would be lost. Such a reply is published directly
 // instead: the event task no longer holds the API lock across a command, and
@@ -1192,12 +1190,6 @@ bool startMqtt() {
   }
   MqttStartAttempt startAttempt;
 
-  if (!gSettings.mqttEnabled) {
-    lastError = "MQTT disabled (mqttClientEnabled=false)";
-    // No event: MQTT being disabled by config is a no-op, not a start failure.
-    return false;
-  }
-  
   if (!WiFi.isConnected()) {
     lastError = "WiFi not connected";
     systemEventPost(SYSEVT_MQTT_START_FAILED, "wifi not connected");
@@ -1723,26 +1715,6 @@ const char* cmd_mqttstatus(const String& argsInput) {
 // MQTT Settings CLI Commands
 // ============================================================================
 
-const char* cmd_mqttclientenabled(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-
-  String arg = argsInput;
-  arg.trim();
-  if (arg.length() == 0) {
-    return gSettings.mqttEnabled ? "MQTT client: enabled" : "MQTT client: disabled";
-  }
-  const int parsed = parseBoolArg(arg);
-  if (parsed < 0) return kCommandReplyNotOnOff;
-  const bool enable = (parsed == 1);
-  setSetting(gSettings.mqttEnabled, enable);
-  if (!enable) {
-    return stopMqtt()
-               ? "MQTT client disabled; client stop scheduled"
-               : "MQTT client disabled";
-  }
-  return "MQTT client enabled";
-}
-
 const char* cmd_mqttautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   
@@ -2124,7 +2096,6 @@ MQTT_PUBLISH_CMD(input, mqttPublishInput, "Gamepad")
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry mqttCommands[] = {
   // debugmqtt is registered by the debug module (System_Debug.cpp) — see ODR note above.
-  { "mqttclientenabled", "Enable/disable MQTT [0|1]", true, cmd_mqttclientenabled, "Usage: mqttclientenabled [0|1]" },
   { "openmqtt", "Start MQTT client", true, cmd_openmqtt },
   { "closemqtt", "Stop MQTT client", true, cmd_closemqtt },
   { "mqttstatus", "Show MQTT status (add 'json' for JSON output)", false, cmd_mqttstatus },

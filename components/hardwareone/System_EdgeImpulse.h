@@ -29,9 +29,9 @@
 // Usage:
 //   1. Train a FOMO model on Edge Impulse Studio
 //   2. Export as TensorFlow Lite (.tflite) and upload to /littlefs/EI Models/
-//   3. Load model: eimodelload "mymodel.tflite"
-//   4. Enable: eienable 1
-//   5. Run inference: eidetect
+//   3. Load model: eimodelload "mymodel.tflite" (or eiautostart 1 to load
+//      the default model at boot)
+//   4. Run inference: eidetect
 // ============================================================================
 
 // Longest class label kept, including the terminator (longer lines in a
@@ -120,7 +120,6 @@ void setStateTrackingEnabled(bool enabled);
 
 // Command handlers
 const char* cmd_ei(const String& argsInput);
-const char* cmd_ei_enable(const String& argsInput);
 const char* cmd_ei_detect(const String& argsInput);
 const char* cmd_ei_continuous(const String& argsInput);
 const char* cmd_ei_confidence(const String& argsInput);

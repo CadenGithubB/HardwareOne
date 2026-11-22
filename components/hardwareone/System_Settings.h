@@ -19,8 +19,7 @@ struct CommandEntry;
 struct Settings {
   // Constructor to ensure all String members are initialized
   Settings()
-    : wifiEnabled(true),
-      wifiAutoStart(true),
+    : wifiAutoStart(true),
       webCliHistorySize(10),
       oledCliHistorySize(50),
       ntpServer("pool.ntp.org"),
@@ -209,7 +208,6 @@ struct Settings {
       logLevel(3),                    // Default: LOG_LEVEL_DEBUG (show everything)
       espLogLevels(""),               // No ESP-IDF tag overrides (esplog)
       memorySampleIntervalSec(30),
-      espnowEnabled(false),
       espnowmesh(false),
       espnowUserSyncEnabled(false),
       espnowCaptureToSd(false),
@@ -264,7 +262,6 @@ struct Settings {
       collectRateFps(40),
       collectQuotaMb(2048),
 #endif
-      automationEnabled(true),   // unconditional — see the field declaration
       i2cEnabled(true),
       i2c2Enabled(I2C2_BUS_ENABLED_DEFAULT),  // auto-on for boards with valid I2C2 pins
       // Per-device bus assignments — all default to bus 0 (primary), so an
@@ -284,7 +281,6 @@ struct Settings {
       ledStartupColor2("magenta"),
       ledStartupDuration(1000),
 #endif
-      oledEnabled(false),
       localDisplayRequireAuth(true),
       oledDefaultMode("status"),
       oledBootDuration(2000),
@@ -308,29 +304,12 @@ struct Settings {
       rtcTimeHasBeenSet(false),  // Track if RTC time has been set by NTP or manual
       presenceAutoStart(false),
       presenceDevicePollMs(100),
-      // Two-axis pairs — all TRUE so `enabled && autostart` reproduces the
-      // single pre-existing flag exactly. See the struct comment.
-      thermalEnabled(true),
-      tofEnabled(true),
-      imuEnabled(true),
-      gpsEnabled(true),
-      fmRadioEnabled(true),
-      apdsEnabled(true),
-      rtcEnabled(true),
-      presenceEnabled(true),
-      inputEnabled(true),
-      cameraEnabled(true),
-      micEnabled(true),
-      srEnabled(true),
-      llmEnabled(true),
-      httpEnabled(true),
-      bleEnabled(true),
-      sensorLogEnabled(true),
-      systemLogEnabled(true),
       wifiAutoReconnect(true),
-      espnowAutoStart(true),
-      oledAutoStart(true),
-      eiAutoStart(true),
+      // Off: ESP-NOW and the local display come up only when the user turns
+      // them on (setup wizard, espnowautostart / oledautostart, or open<x>).
+      espnowAutoStart(false),
+      oledAutoStart(false),
+      eiAutoStart(false),  // a model loads only when asked: eimodelload, or this at boot
       automationAutoStart(true),
       sensorLogAutoStart(false),
       healthLoggingEnabled(false),
@@ -413,7 +392,6 @@ struct Settings {
       cameraStorageLocation(1),  // 1 = SD card (default — LittleFS is too small for photos)
       cameraCaptureFolder("/photos"),
       cameraMaxStoredImages(100),
-      eiEnabled(false),
       edgeImpulseRequireLabels(true),
       edgeImpulseMinConfidence(0.6f),
       edgeImpulseMaxDetections(5),
@@ -457,7 +435,6 @@ struct Settings {
       srAfeGain(1.0f),
       srAgcMode(2),
       srVadMode(3),
-      mqttEnabled(false),
       mqttAutoStart(false),
       mqttHost(""),
       mqttPort(1883),
@@ -518,7 +495,6 @@ struct Settings {
 
   // wifiSsid / wifiPassword removed 2026-07-20 — dead legacy single-network
   // fields; System_WiFiNetworks owns saved credentials (network.wifi.networks).
-  bool wifiEnabled;        // Enable/disable WiFi at boot (default: true)
   bool wifiAutoStart;
   int webCliHistorySize;   // Web CLI history buffer size
   int oledCliHistorySize;  // OLED CLI history buffer size (lines)
@@ -782,7 +758,6 @@ struct Settings {
   String espLogLevels;                 // ESP-IDF log levels by tag, "tag:L,tag:L" (esplog; System_EspLogCore.h)
   int memorySampleIntervalSec;  // Periodic memory sampling interval in seconds (0=disabled, default: 30)
   // ESP-NOW settings
-  bool espnowEnabled;
   bool espnowmesh;
   bool espnowUserSyncEnabled;          // Enable user credential sync across devices (default: false, admin-only)
   // Capture incoming + outgoing ESP-NOW frames to /sd/espnow/capture-*.log when
@@ -920,15 +895,6 @@ struct Settings {
   uint8_t collectRateFps;
   uint16_t collectQuotaMb;
 #endif
-  // ESP-NOW buffer size settings (runtime tuning)
-  // NOTE: kept OUTSIDE the #if ENABLE_AUTOMATION block so the always-compiled
-  // feature registry can reference &gSettings.automationEnabled in any build.
-  // The registry row MUST stay unconditional: a consumer treats a missing id as
-  // "assume present" (so old firmware doesn't hide half the UI), which makes an
-  // #if'd row indistinguishable from old firmware — it would gate nothing.
-  // Same reason ledStartupEnabled and llmAutoStart are unconditional; the
-  // boot-flag pair automationAutoStart already was.
-  bool automationEnabled;  // Enable/disable automation scheduler (runs from main loop)
   // I2C Hardware system
   // bus 0 = primary STEMMA QT — Wire1 internally, "I2C1" in the UI.
   bool i2cEnabled;       // Enable/disable bus 0 hardware (Wire1 init and transactions)
@@ -982,7 +948,6 @@ struct Settings {
   int ledStartupDuration;   // Duration in ms
 #endif
   // OLED Display settings
-  bool oledEnabled;             // Enable/disable OLED at boot
   bool localDisplayRequireAuth; // Require login before accessing display modes
   String oledDefaultMode;       // Mode to switch to after boot completes
   int oledBootDuration;         // Milliseconds to show boot mode before switching to default
@@ -1009,58 +974,25 @@ struct Settings {
   int presenceDevicePollMs;     // STHS34PF80 polling interval (default: 100ms)
 
   // ---------------------------------------------------------------------
-  // Two-axis feature control. See docs/AUTOSTART_NAMING_UNIFICATION_PLAN.md.
+  // One saved switch per feature: <thing>AutoStart says whether it starts at
+  // boot. "Off" means "not started"; open<x> / close<x> (or the feature's own
+  // start command) still work by hand whatever the switch says, and nothing
+  // else refuses to start a feature because of a setting.
   //
-  // Every feature gets an independent pair:
-  //   <thing>Enabled    admission control - may ANYTHING start this at all?
-  //   <thing>AutoStart  does it start itself at boot?
-  //
-  // Boot is gated on BOTH:
-  //   if (xEnabled && ramFlushResolve(RF_X, xAutoStart)) startX();
-  // which is the shape MQTT has shipped with since it grew a second flag
-  // (HardwareOne.cpp:1800). Before this there was a single PERSISTED setting per
-  // feature and it WAS the boot flag, so the then-writable `features <id> off`
-  // and the settings toggle could not express "keep this available, just do not start it on its
-  // own". Note the runtime open/close commands were always separate from the
-  // boot setting and are unchanged - closewifi, for one, says so explicitly
-  // (System_WiFi.cpp: "a reboot brings WiFi back exactly as configured").
-  //
-  // EVERY new flag below defaults TRUE on purpose: `enabled && autostart` then
-  // collapses to exactly the single flag that already existed, so behaviour is
-  // unchanged until a user deliberately splits them.
-  // ---------------------------------------------------------------------
-  bool thermalEnabled;          // Master enable (pairs with thermalAutoStart)
-  bool tofEnabled;              // Master enable (pairs with tofAutoStart)
-  bool imuEnabled;              // Master enable (pairs with imuAutoStart)
-  bool gpsEnabled;              // Master enable (pairs with gpsAutoStart)
-  bool fmRadioEnabled;          // Master enable (pairs with fmRadioAutoStart)
-  bool apdsEnabled;             // Master enable (pairs with apdsAutoStart)
-  bool rtcEnabled;              // Master enable (pairs with rtcAutoStart)
-  bool presenceEnabled;         // Master enable (pairs with presenceAutoStart)
-  bool inputEnabled;            // Master enable (pairs with inputAutoStart)
-  bool cameraEnabled;           // Master enable (pairs with cameraAutoStart)
-  bool micEnabled;              // Master enable (pairs with micAutoStart)
-  bool srEnabled;               // Master enable (pairs with srAutoStart)
-  bool llmEnabled;              // Master enable (pairs with llmAutoStart)
-  bool httpEnabled;             // Master enable (pairs with httpAutoStart)
-  bool bleEnabled;              // Master enable (pairs with bleAutoStart)
-  // Counterparts for features that had only a master switch:
-  // WiFi is the one subsystem with a THIRD axis, and it earns it: "connect at
-  // boot" and "keep retrying after a drop" are genuinely different intents. A
-  // field device you expect to stay online wants reconnect ON even if you start
-  // it by hand; a device you only occasionally join wants the opposite.
-  //   wifiEnabled       - may WiFi run at all
-  //   wifiAutoStart     - connect at boot
-  //   wifiAutoReconnect - keep hunting for the AP after an unexpected drop
+  // WiFi keeps a second, different intent: wifiAutoReconnect says whether to
+  // keep hunting for the AP after an unexpected drop. A field device you
+  // expect to stay online wants it ON even if you start WiFi by hand.
   // Defaults true: WiFi.setAutoReconnect(true) was hardcoded on every connect
-  // path before this existed, so true reproduces the old behaviour exactly.
-  bool sensorLogEnabled;        // Master enable (pairs with sensorLogAutoStart)
-  bool systemLogEnabled;        // Master enable (pairs with systemLogAutoStart)
+  // path before the setting existed.
+  //
+  // These stay outside feature #if blocks because the always-compiled feature
+  // registry (System_FeatureRegistry.cpp) names them in every build.
+  // ---------------------------------------------------------------------
   bool wifiAutoReconnect;
-  bool espnowAutoStart;         // Boot flag (pairs with espnowEnabled)
-  bool oledAutoStart;           // Boot flag (pairs with oledEnabled)
-  bool eiAutoStart;             // Boot flag (pairs with eiEnabled)
-  bool automationAutoStart;     // Boot flag (pairs with automationEnabled)
+  bool espnowAutoStart;         // Start ESP-NOW at boot
+  bool oledAutoStart;           // Bring up the local display at boot
+  bool eiAutoStart;             // Load the default Edge Impulse model at boot
+  bool automationAutoStart;     // Run the automation scheduler from boot
   // Sensor Logging auto-start settings
   bool sensorLogAutoStart;      // Auto-start sensor logging after boot with last-used parameters
   bool healthLoggingEnabled;      // HardwareOne local logger: keep LOG_R1 on and resume at boot
@@ -1216,7 +1148,6 @@ struct Settings {
   String cameraCaptureFolder;   // Folder for saved images (default: "/photos")
   int cameraMaxStoredImages;    // Max images before rotation (0=unlimited, default: 100)
   // Edge Impulse ML settings
-  bool eiEnabled;      // Enable Edge Impulse inference
   bool edgeImpulseRequireLabels;
   float edgeImpulseMinConfidence; // Minimum confidence threshold (0.0-1.0)
   int edgeImpulseMaxDetections; // Max objects to report per frame (1-10)
@@ -1283,7 +1214,6 @@ struct Settings {
   int srAgcMode;                // AGC mode: 0=off, 1=-9dB, 2=-6dB, 3=-3dB (default: 2)
   int srVadMode;                // VAD sensitivity: 0-4, higher=more sensitive (default: 3)
   // MQTT Home Assistant Integration settings
-  bool mqttEnabled;       // Master enable/disable for MQTT subsystem (default: false)
   bool mqttAutoStart;           // Auto-start MQTT client at boot if WiFi connected (default: false)
   String mqttHost;              // MQTT broker hostname or IP (default: "")
   int mqttPort;                 // MQTT broker port (default: 1883, 8883 for TLS)
@@ -1602,11 +1532,7 @@ const char* cmd_thermalrollingminmaxguardc(const String& argsInput);
 const char* cmd_thermaltemporalalpha(const String& argsInput);
 const char* cmd_thermalrotation(const String& argsInput);
 
-// ESP-NOW Settings
-const char* cmd_espnowenabled(const String& argsInput);
-
 // OLED Settings
-const char* cmd_oled_enabled(const String& argsInput);
 const char* cmd_oled_defaultmode(const String& argsInput);
 const char* cmd_oled_bootduration(const String& argsInput);
 const char* cmd_oled_updateinterval(const String& argsInput);

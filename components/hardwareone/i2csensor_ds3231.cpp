@@ -898,7 +898,6 @@ float rtcGetTemperature() {
 // RTC settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry rtcSettingEntries[] = {
-  { "rtcEnabled", SETTING_BOOL, &gSettings.rtcEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "rtcenabled" },
   { "rtcAutoStart", SETTING_BOOL, &gSettings.rtcAutoStart, 1, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "rtcautostart" },
   { "rtcTimeHasBeenSet", SETTING_BOOL, &gSettings.rtcTimeHasBeenSet, 0, 0, nullptr, 0, 1, "RTC time has been set (NTP/manual)", nullptr, false, nullptr, nullptr, true },
 };
@@ -949,8 +948,8 @@ static const char* cmd_rtcbus(const String& a) {
 }
 
 const CommandEntry rtcCommands[] = {
-  { "openrtc",  "Start DS3231 RTC sensor.",                    false, cmd_rtcstart },
-  { "closertc", "Stop DS3231 RTC sensor.",                     false, cmd_rtcstop },
+  { "openrtc",  "Start DS3231 RTC sensor.",                    true, cmd_rtcstart },
+  { "closertc", "Stop DS3231 RTC sensor.",                     true, cmd_rtcstop },
   { "rtcread",   "Read RTC status [status|temp]",               false, cmd_rtc,      "Usage: rtcread [status|temp] [json]" },
   { "rtcset",   "Set RTC time: <datetime|timestamp>",          true,  cmd_rtcset,   "Usage: rtcset YYYY-MM-DD HH:MM:SS (UTC)  or  rtcset <unix_timestamp>" },
   { "rtcsync",  "Sync time: [to|from]",                        true,  cmd_rtcsync,  "Usage: rtcsync [to|from] (to=RTC->system, from=system->RTC)" },

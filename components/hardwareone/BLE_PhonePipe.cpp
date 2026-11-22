@@ -1155,7 +1155,7 @@ extern const BleSetupOps phonePipeSetupOps={setupLabel,setupReady,nullptr,setupR
 bool phoneLinkOpen() {
   Role role(BleRoleTransition::PHONE_START);if(!role)return false;
   if(active.load())return true;
-  if(!gSettings.bleEnabled || bleStackLifecycleFaulted())return false;
+  if(bleStackLifecycleFaulted())return false;
   const char* why=nullptr;if(radioCompanionBlocksRadio(&why))return false;
   // The pipe is a device on the shared client stack: bring the stack up when
   // it is down (it stays up until `closeble`); the pipe never owns a host.
@@ -1335,8 +1335,10 @@ void phonePipeTick(){if(active.load())g2RingYieldToPhonePipe();}
 // (isBleServerInitialized tries the lifecycle lock without waiting).
 PhonePathView phonePipePathView() {
   PhonePathView v;  // Off
-  if(!gSettings.bleEnabled)return v;
   if(isBleServerInitialized()){v.hint=PhonePathHint::ConsoleServer;return v;}
+  // Bluetooth off: the client stack is down (closeble, or not opened since a
+  // boot with bleautostart off) and the pipe holds no link of its own.
+  if(!active.load() && !bleStackReady())return v;
   if(ready.load()){v.state=relayOn.load()?PhonePathState::Up:PhonePathState::RelayOff;return v;}
   BlePeerReconnectSnapshot snap;(void)blePeerReconnectSnapshot(BLE_PEER_PHONE,snap);
   if(!snap.hasSavedTarget || status.load()==PipeStatus::NoSecret){v.state=PhonePathState::NotPaired;return v;}
@@ -1676,7 +1678,6 @@ static const char* phonePairNewCommand(const String& args) {
   if(!display && !serialCommandSecretSinkReady())
     return "Error: phone pair new prints its code once on this console; turn serial output on";
   if(isBleServerInitialized())return "Error: the app console server owns Bluetooth; run 'closeconsole', then this command again";
-  if(!active.load() && !gSettings.bleEnabled)return "Error: Bluetooth is disabled; run bleenabled on first";
   bleStampPairedByIfBlank(BLE_PEER_PHONE);
   BlePeerOwnerSession owner;
   if(!blePeerOwnerSessionSnapshot(BLE_PEER_PHONE,owner) || owner.user!=auth.user)return "Error: phone is owned by another account";
@@ -1793,7 +1794,7 @@ extern const CommandEntry phoneCommands[] = {
   { "phone pair",       "Open a 60 s pairing window (serial or OLED admin).", true, phonePairCommand },
   { "phone pair new",   "Make a new pairing code (the phone secret), show it once on serial or the OLED and pair for 3 min.", true,
     phonePairNewCommand, "Usage: phone pair new", /*requiresSuperAdmin=*/true },
-  { "phone forget",     "Forget the paired phone (serial or OLED admin).",    true, phoneForgetCommand },
+  { "phone forget",     "Forget the paired phone (super admin; serial or OLED).", true, phoneForgetCommand, nullptr, /*requiresSuperAdmin=*/true },
   { "phone scan",       "Show or set the phone reconnect scan.",     true, phoneScanCommand,
     "Usage: phone scan [default|legacy|<interval_ms> <window_ms> dup|nodup]" },
   { "phone stats",      "Phone link sessions, counters and setup timings.", true, phoneStatsCommand },

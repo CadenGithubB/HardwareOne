@@ -270,9 +270,6 @@ static const char* cmd_llm_status(const String& argsInput) {
 }
 
 static const char* cmd_llm_load(const String& args) {
-  if (!gSettings.llmEnabled) {
-    return "{\"schema\":1,\"ok\":false,\"error\":\"LLM disabled - run llmenabled 1 first\"}";
-  }
   CommandArgs ca(args);
   if (ca.unterminatedQuote()) {
     return "{\"schema\":1,\"ok\":false,\"error\":\"unterminated quote in the model id\"}";
@@ -375,9 +372,7 @@ static const char* cmd_llm_models(const String& argsInput) {
   }
   if (n == 0) {
     snprintf(llmCmdBuf, sizeof(llmCmdBuf),
-             "No models. %s",
-             gSettings.llmEnabled ? "Add a .bin under /system/llm, or connect the CM5."
-                                  : "The LLM is disabled - run llmenabled 1 first.");
+             "No models. Add a .bin under /system/llm, or connect the CM5.");
   }
   return llmCmdBuf;
 }
@@ -694,7 +689,6 @@ static const SettingEntry llmSettingEntries[] = {
   { "allowPlaintext", SETTING_BOOL, &gSettings.llmHttpAllowPlaintext, 0, 0, nullptr, 0, 1, "Allow HTTP for local testing", nullptr, false, "http", "llmhttpplaintext" },
   { "caPem", SETTING_STRING, &gSettings.llmHttpCaPem, 0, 0, "", 0, 0, "Private CA PEM (optional)", nullptr, false, "http", "llmhttpca" },
 #endif
-  { "llmEnabled", SETTING_BOOL, &gSettings.llmEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "llmenabled" },
   { "autoStart",     SETTING_BOOL,   &gSettings.llmAutoStart,     0, 0,    nullptr,    0,    1, "Auto-start at boot",   nullptr, false, nullptr, "llmautostart" },  // idx 1
   { "temperature",   SETTING_FLOAT,  &gSettings.llmTemperature,  0,   0.5f, nullptr,    0,    0, "Temperature",          nullptr, false, nullptr, "llmtemperature"   },
   { "topP",          SETTING_FLOAT,  &gSettings.llmTopP,         0,   0.8f, nullptr,    0,    1, "Top-P",                nullptr, false, nullptr, "llmtopp"          },
@@ -708,7 +702,7 @@ static const SettingEntry llmSettingEntries[] = {
   // Row order is free. LLM_SETTING_CMD resolves by cmdKey, not by position, so
   // rows may be inserted, reordered or removed anywhere without touching the
   // command handlers. (This was NOT always true: the macro used to index this
-  // array directly, and adding llmEnabled/autoStart at the top silently shifted
+  // array directly, and adding two rows at the top silently shifted
   // every setter by two — llmdefaultmodel wrote a string into repWindow — for as
   // long as the whole file stayed compiled out. Do not reintroduce index-based
   // dispatch. Mirostat + dynTemp rows were removed 2026-07-10.)

@@ -29,7 +29,7 @@ class String : public std::string {
 };
 
 struct SettingsBoundary {
-  bool mqttEnabled, mqttAutoStart, mqttSubscribeExternal;
+  bool mqttAutoStart, mqttSubscribeExternal;
   bool mqttPublishWifi, mqttPublishSystem, mqttPublishThermal, mqttPublishTof;
   bool mqttPublishImu, mqttPublishPresence, mqttPublishGps, mqttPublishApds;
   bool mqttPublishRtc, mqttPublishInput;
@@ -52,7 +52,9 @@ static void finishSettingChange(const void* field, const SettingEntry*) {
   (void)requestSettingsPersist();
   notifySettingChanged(field);
 }
-static bool stopMqtt() {
+// No toggle stops the client (mqttclientenabled, the one that did, was removed
+// 2026-11-21); a call would show in stopCalls.
+[[maybe_unused]] static bool stopMqtt() {
   ++stopCalls; events.push_back("stop"); return stopResult;
 }
 
@@ -74,8 +76,6 @@ struct Command {
    "MQTT publish " label " enabled", "MQTT publish " label " disabled"}
 
 static const Command commands[] = {
-  {"clientenabled", cmd_mqttclientenabled, &SettingsBoundary::mqttEnabled,
-   "MQTT client: enabled", "MQTT client: disabled", "MQTT client enabled", "MQTT client disabled"},
   {"autostart", cmd_mqttautostart, &SettingsBoundary::mqttAutoStart,
    "MQTT auto-start: ON", "MQTT auto-start: OFF", "MQTT auto-start enabled", "MQTT auto-start disabled"},
   {"subscribe", cmd_mqttsubscribe, &SettingsBoundary::mqttSubscribeExternal,
@@ -179,24 +179,21 @@ static void validAliases() {
         std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return std::toupper(c); });
         for (size_t i = 0; i < mixed.size(); i += 2) mixed[i] = std::toupper(static_cast<unsigned char>(mixed[i]));
         for (const std::string& input : {std::string(value.text), upper, " \t" + mixed + "\r\n"}) {
-          for (bool stopped : {false, true}) {
+          {
             for (bool persisted : {false, true}) {
               reset(command, initial, "valid", input);
-              stopResult = stopped; persistResult = persisted;
+              persistResult = persisted;
               const auto before = gSettings;
-              const bool stops = command.field == &SettingsBoundary::mqttEnabled && !value.value;
               const bool changes = initial != value.value;
-              const std::string expected = stops && stopped
-                  ? "MQTT client disabled; client stop scheduled" : value.value ? command.setOn : command.setOff;
+              const std::string expected = value.value ? command.setOn : command.setOff;
               check(std::string(command.handler(input)) == expected, "valid-input response changed");
               check(gSettings.*command.field == value.value, "valid alias stored wrong value");
               check(persistCalls == (changes ? 1 : 0), "changed-only persistence count differs");
               check(notifyCalls == (changes ? 1 : 0), "changed-only notification count differs");
               check(notifiedField == (changes ? &(gSettings.*command.field) : nullptr), "wrong setting notified");
-              check(stopCalls == (stops ? 1 : 0), "stop request differs (including already-disabled case)");
+              check(stopCalls == 0, "a toggle requested a client stop");
               std::vector<std::string> expectedEvents;
               if (changes) expectedEvents = {"persist", "notify"};
-              if (stops) expectedEvents.push_back("stop");
               check(events == expectedEvents, "persistence/notification/stop ordering differs");
               unchangedOthers(command, before);
             }
@@ -208,7 +205,7 @@ static void validAliases() {
 }
 
 int main() {
-  static_assert(std::size(commands) == 13, "exercise all thirteen MQTT toggles");
+  static_assert(std::size(commands) == 12, "exercise all twelve MQTT toggles");
   queryAndInvalid();
   validAliases();
   std::printf("MQTT boolean commands (%s): %d cases, %d checks, %d failures\n",

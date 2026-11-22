@@ -266,7 +266,13 @@ static void fbToastMutate(FbMutateResult result, const char* done, const char* f
     case FbMutateResult::Done:        oledToastShow(done, 2000); break;
     case FbMutateResult::Unresolved:  oledToastShow("Entry unavailable", oled_message::kErrorDurationMs, OledUiIcon::ERROR); break;
     case FbMutateResult::QuoteInName: oledToastShow("Quote in name", oled_message::kErrorDurationMs, OledUiIcon::ERROR); break;
-    case FbMutateResult::AdminOnly:   oledToastShow("Admin only", oled_message::kErrorDurationMs, OledUiIcon::ERROR); break;
+    case FbMutateResult::AdminOnly: {
+      // The shared short refusal: "Needs an admin" or "Needs a super admin".
+      char text[oled_message::kMessageBytes];
+      oledCommandReplyText(false, sFbMutateReply, nullptr, failed, text, sizeof(text));
+      oledToastShow(text, oled_message::kErrorDurationMs, OledUiIcon::ERROR);
+      break;
+    }
     case FbMutateResult::NoAccess:    oledToastShow("Not found or denied", oled_message::kErrorDurationMs, OledUiIcon::ERROR); break;
     case FbMutateResult::Failed: {
       // The handler's reason; the caller's text when the reply carries none.

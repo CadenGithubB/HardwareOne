@@ -688,6 +688,22 @@ static AuthContext restoreAuthFor(const String& destination) {
   return VFS::systemAuth(maps ? VFS::Scopes::MAPS : VFS::Scopes::SYSTEM_STATE, "migration.restore");
 }
 
+// A restored roster must name at least one super admin: account 1 is the
+// device owner and only a super admin can manage the others (owner decision
+// 1.0). The Migration Tool asks for one when a backup has none; a bundle that
+// still has none is refused here, not repaired. Exact, case-sensitive role
+// text, as the command gate reads it.
+static bool restoredRosterHasSuperAdmin(const String& json) {
+  PSRAM_JSON_DOC(roster);
+  if (deserializeJson(roster, json) || roster.overflowed()) return false;
+  for (JsonObjectConst account : roster["users"].as<JsonArrayConst>()) {
+    const char* name = account["username"] | "";
+    const char* role = account["role"] | "";
+    if (name[0] && strcmp(role, kRoleSuperAdmin) == 0) return true;
+  }
+  return false;
+}
+
 static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
                                      int* outWritten, int* outErrored) {
   const AuthContext restoreAuth = restoreAuthFor(HW1_SETTINGS_JSON_PATH);  // /system state
@@ -769,13 +785,10 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
       if (haveDeviceWifi && pathStr == HW1_SETTINGS_JSON_PATH) {
         using namespace hw1wifijson;  // network.wifi keys, owned with the wifi settings rows
         mergedDoc[kParent][kSection][kNetworks] = deviceSettingsDoc[kParent][kSection][kNetworks];
-        // Force this device back online after a cross-device restore. WiFi is
-        // three independent axes now, and ALL of them have to be on or the
-        // guarantee is hollow: enabled (may it run), autoStart (connect at
-        // boot), autoReconnect (keep trying after a drop). This used to be the
-        // single key "autoReconnect", which no longer exists; the names now
-        // come from the rows' owner, so a rename cannot leave them behind.
-        mergedDoc[kParent][kSection][kEnabled]       = true;
+        // Force this device back online after a cross-device restore. Both
+        // WiFi switches have to be on or the guarantee is hollow: autoStart
+        // (connect at boot) and autoReconnect (keep trying after a drop). The
+        // names come from the rows' owner, so a rename cannot leave them behind.
         mergedDoc[kParent][kSection][kAutoStart]     = true;
         mergedDoc[kParent][kSection][kAutoReconnect] = true;
       }
@@ -794,6 +807,13 @@ static bool writeRestoreFilesFromDoc(JsonDocument& doc, bool compatible,
         filesErrored++;
         continue;
       }
+    }
+
+    if (pathStr == HW1_USERS_JSON_PATH && !restoredRosterHasSuperAdmin(content)) {
+      ERROR_STORAGEF("[migrate] the backup's users.json has no superadmin account - restore refused. "
+                     "Pick a super admin in the Migration Tool and export again.");
+      filesErrored++;
+      continue;
     }
 
     if (writeText(restoreStagingPath(pathStr).c_str(), content, restoreAuthFor(pathStr))) {

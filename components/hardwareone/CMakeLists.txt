@@ -163,6 +163,7 @@ endif()
 
 set(hardwareone_srcs
         HardwareOne.cpp
+        System_PendingCommand.cpp
         BLE_Server.cpp
         HAL_Bluetooth.cpp
         HAL_Radio.cpp

@@ -62,7 +62,7 @@ static const SettingEntry entries[] = {
   {"short", SETTING_U16, &shortField.value, 0, 0, nullptr, 0, 0, "Short", nullptr},
   {"wide", SETTING_U32, &wideField.value, 0, 0, nullptr, 0, 0, "Wide", nullptr},
   {"float", SETTING_FLOAT, &floatField.value, 0, 0, nullptr, 0, 0, "Float", nullptr},
-  {"bool", SETTING_BOOL, &boolField, 0, 0, nullptr, 0, 1, "Boolean", nullptr, false, nullptr, "tofenabled"},
+  {"bool", SETTING_BOOL, &boolField, 0, 0, nullptr, 0, 1, "Boolean", nullptr, false, nullptr, "tofautostart"},
   {"string", SETTING_STRING, &stringField, 0, 0, "", 0, 0, "String", nullptr},
   {"secret", SETTING_STRING, &secretField, 0, 0, "", 0, 0, "Secret", nullptr, true},
   {"feature", SETTING_BOOL, &featureField, 0, 0, nullptr, 0, 1, "Feature setting", nullptr},
@@ -73,10 +73,6 @@ static const SettingsModule settingsModule = {"fixture", "fixture", entries,
   sizeof(entries) / sizeof(entries[0]), nullptr, "host fixture"};
 static const SettingsModule* gSettingsModules[] = {nullptr, &settingsModule};
 static constexpr size_t gSettingsModuleCount = sizeof(gSettingsModules) / sizeof(gSettingsModules[0]);
-static struct {
-  bool oledEnabled = false;  // `oledenabled` (dedicated command, OLED builds)
-  String oledDefaultMode = "status";
-} gSettings;
 
 enum { SYSEVT_SETTING_CHANGED = 1 };
 struct Event { int kind; std::string subject, value; };
@@ -102,11 +98,12 @@ static void broadcastPrintf(const char* format, ...) {
   broadcasts.emplace_back(buffer);
 }
 #define BROADCAST_PRINTF(...) broadcastPrintf(__VA_ARGS__)
-static const char* stopReply = "SUCCESS";
-static const char* executeCommandThroughRegistry(const char* command) {
+// No setting write runs a service command (the <x>enabled switches and their
+// stop table were removed 2026-11-21); a call would show up in stopRequests.
+[[maybe_unused]] static const char* executeCommandThroughRegistry(const char* command) {
   stopRequests.emplace_back(command);
   effectOrder.emplace_back("stop");
-  return stopReply;
+  return "SUCCESS";
 }
 using SettingsBatchCore = hw1_settings_batch::Core<16>;
 using SettingsBatchOwner = hw1_settings_batch::Owner;
@@ -134,42 +131,6 @@ static bool writeSettingsJson() {
 }
 // INSERT_PRODUCTION
 
-#if ENABLE_OLED_DISPLAY
-// Display boundaries of the dedicated `oledenabled` command (OLED_Utils.cpp).
-// The enum has a fixed underlying type because the command compares
-// modeFromSlug()'s (OledMode)-1 "unknown slug" result.
-enum OledMode : int { OLED_OFF, OLED_SYSTEM_STATUS, OLED_MENU };
-static OledMode currentOledMode = OLED_OFF;
-static bool oledConnected, gOledRunning, oledInitSucceeds;
-static char debugBuffer[1024];
-static bool ensureDebugBuffer() { return true; }
-static char* getDebugBuffer() { return debugBuffer; }
-static bool initOledDisplay() {
-  effectOrder.emplace_back("display init");
-  return oledInitSucceeds;
-}
-static void stopOledDisplay() { effectOrder.emplace_back("display stop"); }
-static void updateOledDisplay() { effectOrder.emplace_back("display update"); }
-static void broadcastOutput(const char* text) { effectOrder.emplace_back(std::string("output: ") + text); }
-static OledMode modeFromSlug(const String& slug) {
-  return slug == "status" ? OLED_SYSTEM_STATUS : slug == "menu" ? OLED_MENU : (OledMode)-1;
-}
-// savedDefaultOledMode() as shipped resolves gSettings.oledDefaultMode the same
-// way and also falls back for a mode the build cannot draw; every mode of this
-// small enum is drawable.
-static OledMode savedDefaultOledMode() {
-  String slug = gSettings.oledDefaultMode;
-  slug.toLowerCase();
-  const OledMode mode = modeFromSlug(slug);
-  return (int)mode == -1 ? OLED_SYSTEM_STATUS : mode;
-}
-static void requestOledMode(OledMode mode, const char*, bool) {
-  currentOledMode = mode;
-  effectOrder.emplace_back("display mode");
-}
-static void debugOledModeChange(const char*, OledMode, OledMode, const String&) {}
-// INSERT_OLED_COMMAND
-#endif
 
 static unsigned checks, failures;
 static std::string context;
@@ -181,7 +142,7 @@ static void check(bool good, const char* message) {
   }
 }
 static void clearEffects() {
-  events.clear(); broadcasts.clear(); stopRequests.clear(); stopReply = "SUCCESS";
+  events.clear(); broadcasts.clear(); stopRequests.clear();
   effectOrder.clear(); persistedBoolValues.clear();
   oledDirtyCount = writeCalls = retainedRetryMask = 0;
 }
@@ -271,51 +232,37 @@ static void numericValues() {
   }
 }
 
-static void booleanAndStopPolicy() {
+static void booleanPolicy() {
   for (const char* input : {"1", "true", "TRUE", "on", "enable", " On "}) {
     reset(); context = std::string("true alias ") + input;
     check(!error(command(5, input)) && boolField, "true alias rejected");
-    changedOnce(); check(stopRequests.empty(), "enable unexpectedly stopped a service");
+    changedOnce(); check(stopRequests.empty(), "enable ran a service command");
   }
+  // Off is a plain save: value, persistence request, event. A saved switch
+  // only says what starts at boot; it never stops a running service.
   for (const char* input : {"0", "false", "FALSE", "off", "disable", " OFF "}) {
     reset(); boolField = true; context = std::string("false alias ") + input;
     check(!error(command(5, input)) && !boolField, "false alias rejected");
-    changedOnce(); check(stopRequests == std::vector<std::string>{"closetof"}, "disable missed owner stop");
+    changedOnce(); check(stopRequests.empty(), "disable ran a service command");
     check(persistedBoolValues == std::vector<bool>{false}, "disable persisted before publishing false");
-    check(effectOrder == std::vector<std::string>{"persist", "stop", "setting event"},
-          "disable lost value/persistence/stop/event ordering");
+    check(effectOrder == std::vector<std::string>{"persist", "setting event"},
+          "disable lost value/persistence/event ordering");
     clearEffects();
     check(!error(command(5, input)), "repeated disable rejected");
     noMutationEffects();
-    check(stopRequests == std::vector<std::string>{"closetof"}, "repeated disable lost reconciliation");
+    check(stopRequests.empty(), "repeated disable ran a service command");
   }
   for (const char* input : {"trueish", "10", "false extra", "-1", "garbage"}) {
     reset(); boolField = true; context = std::string("invalid boolean ") + input;
     check(error(command(5, input)) && boolField, "invalid bool changed state");
-    noMutationEffects(); check(stopRequests.empty(), "invalid boolean stopped service");
+    noMutationEffects(); check(stopRequests.empty(), "invalid boolean ran a service command");
   }
-  // A service that is simply stopped: its stop answers the not-running Error
-  // (the owner's 2026-11-18 rule). The save is still a plain success with no
-  // warning; the stop still ran.
-  reset(); boolField = true; context = "disable of a stopped service";
-  stopReply = "Error: ToF sensor is not running. Start it with 'opentof'.";
-  {
-    const std::string reply = command(5, "0");
-    check(!error(reply) && !boolField, "save of a stopped service failed");
-    check(stopRequests == std::vector<std::string>{"closetof"}, "save of a stopped service skipped the stop");
-    bool warned = reply.find("not running") != std::string::npos;
-    for (const auto& line : broadcasts) {
-      if (line.find("Error") != std::string::npos || line.find("not running") != std::string::npos) warned = true;
-    }
-    check(!warned, "save of a stopped service warned about the stop");
+  // The removed switch names, were a row to carry one, stop nothing either.
+  for (const char* key : {"bleenabled", "wifienabled", "bleautostart"}) {
+    reset(); boolField = true; context = std::string("no stop table: ") + key;
+    SettingEntry row = entries[5]; row.cmdKey = key;
+    check(!error(handleSettingCommand(&row, "off")) && stopRequests.empty(), "a setting write ran a stop");
   }
-  reset(); context = "BLE dual teardown";
-  SettingEntry ble = entries[5]; ble.cmdKey = "bleenabled";
-  check(!error(handleSettingCommand(&ble, "off")), "BLE disable failed");
-  // One stop verb: closeble closes every device, the console server and the shared stack.
-  check(stopRequests == std::vector<std::string>{"closeble"}, "BLE teardown order changed");
-  clearEffects(); ble.cmdKey = "bleautostart";
-  check(!error(handleSettingCommand(&ble, "off")) && stopRequests.empty(), "autostart invoked runtime stop");
 }
 
 static void stringsPrivacyAndPreflight() {
@@ -407,64 +354,6 @@ static void persistenceBoundaries() {
   }
 }
 
-#if ENABLE_OLED_DISPLAY
-// `oledenabled` keeps its own live actions (start, default mode, full teardown)
-// but reads the same tokens as the generic boolean path and refuses anything
-// else before it persists or touches the panel.
-static void prepareOled(const char* input, bool enabled, bool connected, bool running) {
-  reset();
-  gSettings.oledEnabled = enabled;
-  oledConnected = connected; gOledRunning = running; oledInitSucceeds = true;
-  currentOledMode = OLED_OFF;
-  context = std::string("oledenabled '") + input + "' from " + (enabled ? "enabled" : "disabled");
-}
-
-static void oledEnabledCommand() {
-  using Effects = std::vector<std::string>;
-  const std::string usage = "Error: invalid arguments — Usage: oledenabled <0|1>";
-  const std::string enabledReply = "OLED display enabled (mode: status)";
-  for (const char* input : {"1", "true", "TRUE", "on", "enable", " On "}) {
-    prepareOled(input, true, true, true);
-    check(cmd_oled_enabled(input) == enabledReply, "true alias did not report the display enabled");
-    check(gSettings.oledEnabled && gOledRunning && writeCalls == 0, "true alias disabled or persisted the display");
-    check(effectOrder == Effects{"display mode", "display update"}, "true alias stopped the panel");
-    prepareOled(input, false, false, false);
-    check(cmd_oled_enabled(input) == enabledReply && gSettings.oledEnabled, "true alias did not enable");
-    check(effectOrder == Effects{"persist", "display init", "output: OLED display started",
-                                 "display mode", "display update"},
-          "enable lost persist/start/default-mode order");
-  }
-  for (const char* input : {"0", "false", "FALSE", "off", "disable", " OFF "}) {
-    prepareOled(input, true, true, true);
-    check(cmd_oled_enabled(input) == std::string("OLED display disabled"), "false alias reply changed");
-    check(!gSettings.oledEnabled && !gOledRunning, "false alias left the display enabled");
-    check(effectOrder == Effects{"persist", "display stop"}, "disable lost persist/full teardown");
-  }
-  for (const char* input : {"foo", "10", "truex", "1x", "onn", "yes", "-1", "on extra", "", "   "}) {
-    for (bool enabled : {true, false}) {
-      prepareOled(input, enabled, true, enabled);
-      check(cmd_oled_enabled(input) == usage, "unknown or missing token was not refused");
-      check(gSettings.oledEnabled == enabled && gOledRunning == enabled,
-            "unknown token changed the display state");
-      check(effectOrder.empty() && writeCalls == 0, "unknown token persisted or touched the panel");
-    }
-  }
-  prepareOled("1", false, false, false); oledInitSucceeds = false;
-  check(cmd_oled_enabled("1") == std::string("Error: Failed to initialize OLED display. Check wiring, "
-                                             "then run openoled. The setting is stored as on."),
-        "init failure reply changed");
-  check(effectOrder == Effects{"persist", "display init"}, "init failure lost persist/report order");
-  prepareOled("1", false, true, false);
-  check(cmd_oled_enabled("1") == enabledReply && gOledRunning && currentOledMode == OLED_SYSTEM_STATUS,
-        "connected panel did not resume in the default mode");
-  check(effectOrder == Effects{"persist", "display mode", "display update"}, "resume effects changed");
-  for (const char* input : {"on", "foo"}) {
-    prepareOled(input, true, true, true); gCliValidateOnly = true;
-    check(cmd_oled_enabled(input) == std::string("VALID") && effectOrder.empty() && writeCalls == 0,
-          "validation-only contract changed");
-  }
-}
-#endif
 
 // A select-style number is named in the reply and the event; a value its list
 // does not name, a bitmask list and a setting without a list keep the number.
@@ -495,11 +384,8 @@ static void optionNames() {
 }
 
 int main() {
-  numericValues(); booleanAndStopPolicy(); stringsPrivacyAndPreflight();
+  numericValues(); booleanPolicy(); stringsPrivacyAndPreflight();
   persistenceBoundaries(); optionNames();
-#if ENABLE_OLED_DISPLAY
-  oledEnabledCommand();
-#endif
   std::printf("settings mutation (oled=%d): %u checks, %u failures\n", ENABLE_OLED_DISPLAY, checks, failures);
   return failures ? 1 : 0;
 }

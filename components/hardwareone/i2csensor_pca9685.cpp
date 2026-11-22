@@ -293,9 +293,9 @@ static const char* cmd_servobus(const String& a) {
 const CommandEntry servoCommands[] = {
   { "servo", "Control servo motor: servo <channel> <angle>.", false, cmd_servo, "Usage: servo <channel> <angle>" },
   { "pwm", "Set PWM output: pwm <channel> <value> [freq].", false, cmd_pwm, "Usage: pwm <channel> <value> [freq]" },
-  { "servoprofile", "Configure servo profile: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>.", false, cmd_servoprofile, "Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>" },
+  { "servoprofile", "Configure servo profile: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>.", true, cmd_servoprofile, "Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>" },
   { "servolist", "List configured servo profiles. (add 'json' for JSON output)", false, cmd_servolist },
-  { "servocalibrate", "Enter calibration mode: servocalibrate <channel>.", false, cmd_servocalibrate, "Usage: servocalibrate <channel>" },
+  { "servocalibrate", "Enter calibration mode: servocalibrate <channel>.", true, cmd_servocalibrate, "Usage: servocalibrate <channel>" },
   { "servobus",    "Route PCA9685 servo to bus: <0|1> (reboot required)", true, cmd_servobus,  "Usage: servoBus <0|1>" },
 };
 

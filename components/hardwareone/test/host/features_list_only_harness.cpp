@@ -25,15 +25,14 @@ bool gCliValidateOnly = false;
 
 // Every flag a row points at. The command must leave all of them as they were.
 static struct Flags {
-  bool runtimeAllowed, runtimeAuto, rebootAllowed, unavailable, automationAllowed,
-       automationAuto, ledStartup;
+  bool runtimeAllowed, runtimeAuto, rebootAllowed, unavailable, automationAuto, ledStartup;
   bool operator==(const Flags& o) const { return std::memcmp(this, &o, sizeof(*this)) == 0; }
 } flags;
 
 static bool compiledOut() { return false; }
 static const FeatureEntry featureRegistry[] = {
-  // Carries REQUIRES_REBOOT like wifi and oled, whose <x>enabled acts at once:
-  // the flag alone must not add a reboot note (allowAtReboot does).
+  // Carries REQUIRES_REBOOT like wifi and oled: the flag alone must not add a
+  // reboot note (allowAtReboot does).
   {"runtime", "Runtime", FEATURE_CAT_SENSOR, 8,
    FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_REQUIRES_REBOOT,
    &flags.runtimeAuto, nullptr, "runtime fixture"},
@@ -45,7 +44,7 @@ static const FeatureEntry featureRegistry[] = {
   {"fixed", "Fixed", FEATURE_CAT_SYSTEM, 1, FEATURE_FLAG_COMPILE_TIME,
    nullptr, nullptr, "compile-time fixture"},
   {"automation", "Automations", FEATURE_CAT_SYSTEM, 8, FEATURE_FLAG_RUNTIME_TOGGLE,
-   &flags.automationAllowed, nullptr, "owner-applied fixture"},
+   &flags.automationAuto, nullptr, "start-at-boot only fixture"},
   {"led", "LED", FEATURE_CAT_SYSTEM, 2, FEATURE_FLAG_RUNTIME_TOGGLE,
    &flags.ledStartup, nullptr, "start-up effect fixture"},
 };
@@ -62,9 +61,10 @@ static FeatureSwitches switches[] = {
   {"unavailable", &flags.unavailable, nullptr, kLiveOff,
    "openunavailable / closeunavailable", nullptr, "unavailableenabled <0|1>"},
   {"fixed", nullptr, nullptr, kLiveNone, nullptr, nullptr, nullptr},
-  {"automation", &flags.automationAllowed, &flags.automationAuto, kLiveOff,
-   "automation system enable|disable", "automationautostart <0|1>",
-   "automation system enable|disable"},
+  // As shipped since 2026-11-21: a start/stop command and start at boot, no
+  // "allowed" switch.
+  {"automation", nullptr, &flags.automationAuto, kLiveOff,
+   "automation system enable|disable", "automationautostart <0|1>", nullptr},
   {"led", nullptr, &flags.ledStartup, kLiveNone, nullptr, "ledstartupenabled <0|1>", nullptr},
 };
 static const FeatureSwitches* featureSwitchesFor(const FeatureEntry* f) {
@@ -97,7 +97,7 @@ static bool has(const std::string& text, const char* part) { return text.find(pa
 
 static void setAll(bool value) {
   flags.runtimeAllowed = flags.runtimeAuto = flags.rebootAllowed = flags.unavailable =
-    flags.automationAllowed = flags.automationAuto = flags.ledStartup = value;
+    flags.automationAuto = flags.ledStartup = value;
 }
 
 // Runs one input and checks that it changed no flag.
@@ -126,9 +126,9 @@ static void refusals() {
                                           "rebootenabled <0|1> (allowed, after a reboot)."),
           "reboot row refusal changed");
     check(run("automation off") == std::string("Error: features only lists. Switch automation with: "
-                                               "automation system enable|disable (now and allowed), "
+                                               "automation system enable|disable (now), "
                                                "automationautostart <0|1> (at boot)."),
-          "automation refusal does not name the shared command once");
+          "automation refusal does not name its commands");
     check(run("led on") == std::string("Error: features only lists. Switch led with: "
                                        "ledstartupenabled <0|1> (at boot)."),
           "led refusal changed");
@@ -184,7 +184,7 @@ static void listing() {
   check(has(text, " unavailable  ~ 0KB  no    -    -    -\n"), "not-built row changed");
   check(has(text, "\n[Core]\n reboot       ~ 3KB  yes   no   -    off\n"), "reboot row changed");
   check(has(text, "\n[System]\n fixed        ~ 1KB  yes   -    -    -\n"), "compile-time row changed");
-  check(has(text, " automation   ~ 8KB  yes   no   off  off\n"), "automation row changed");
+  check(has(text, " automation   ~ 8KB  yes   no   off  -\n"), "automation row changed");
   check(has(text, " led          ~ 2KB  yes   -    on   -\n"), "led row changed");
   // Running now = runtime 8 + fixed 1 + led 2 (rows with no live state count as present).
   check(has(text, "Running now: ~11KB | Free: 64KB | All built in: ~22KB\n"), "totals changed");

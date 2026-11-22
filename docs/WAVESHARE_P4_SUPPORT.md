@@ -213,7 +213,7 @@ The normal UI and setup wizard share this adapter; changing owner/page discards
 pending contacts. Display wake discards the wake gesture. Raw coordinates and
 controls are in the panel's fixed portrait space; canvas rotation does not
 rotate the physical control bank. Start/stop goes through the existing I2C
-request queue, and `inputenabled` / `inputautostart` retain settings ownership.
+request queue, and `inputautostart` retains settings ownership.
 
 Host tests: `python3 components/hardwareone/test/host/test_touch_input.py`
 exercises the production queue, hit-testing and adapter with sanitizers and

@@ -107,6 +107,12 @@ static bool g2ShowListPage(const char* const* items, size_t count) {
 }
 struct G2CmdCookie { int targetPage = 0; int targetNetSub = 0; };
 static int g2GetHijackPage() { return 1; }
+// G2 lens notice boundary (G2_HijackCmd.h): no refusal is pending here, so
+// the saved list's back row keeps its label.
+static constexpr int G2_HIJACK_PAGE_NETWORK = 3;
+static void g2LensNoticeBackRow(int, const char* label, char* out, size_t cap) {
+  if (label != out) std::snprintf(out, cap, "%s", label);
+}
 static bool g2SubmitHijackCommand(const char* line, const G2CmdCookie&, void (*)(), void*) {
   commands.emplace_back(line);
   return true;

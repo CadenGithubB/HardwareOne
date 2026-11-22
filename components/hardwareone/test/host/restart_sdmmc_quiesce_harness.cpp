@@ -561,10 +561,6 @@ static esp_err_t esp_wifi_sta_get_ap_info(wifi_ap_record_t* ap) {
   std::memset(ap, 0, sizeof(*ap));
   return ESP_OK;
 }
-struct FakeSettings {
-  bool wifiEnabled = true;
-};
-FakeSettings gSettings;
 static void setupWifi() {  // System_WiFi.cpp: start the radio and join the saved networks
   note("setupWifi");
   gNet.wifiOn = true;
@@ -790,7 +786,6 @@ static void reset_world() {
   comp::gCompanionAnswers = true;
   comp::gLinkUp = true;
   comp::gLinkUpAfterStart = true;
-  comp::gSettings = comp::FakeSettings();
   comp::gUpdate = comp::FakeUpdate();
   comp::gLastResult.clear();
 }
@@ -1376,14 +1371,6 @@ static void off_network_or_wifi_disabled_is_not_joined() {
   comp::gNet.joinsOnPowerOn = false;
   comp::recoverProc(nullptr);
   CHECK(sawEvent("radiopower on") && !sawEvent("setupWifi") && !comp::gNet.linked);
-
-  // Joined before, but Wi-Fi is disabled in the settings.
-  reset_world();
-  wifi_and_http_running();
-  comp::gNet.joinsOnPowerOn = false;
-  comp::gSettings.wifiEnabled = false;
-  comp::recoverProc(nullptr);
-  CHECK(!sawEvent("setupWifi") && !comp::gNet.linked);
 
   // Wi-Fi was off: no radiopower, no join.
   reset_world();

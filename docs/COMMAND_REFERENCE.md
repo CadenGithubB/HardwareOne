@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1045 commands across 59 modules (1045 registry entries).
+1022 commands across 59 modules (1022 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -16,17 +16,17 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`system`](#system) — 25 commands
 - [`versions`](#versions) — 1 commands
 - [`wifi`](#wifi) — 19 commands
-- [`espnow`](#espnow) — 127 commands
+- [`espnow`](#espnow) — 126 commands
 - [`catchup`](#catchup) — 2 commands
 - [`collect`](#collect) — 5 commands
 - [`c6`](#c6) — 9 commands
-- [`mqtt`](#mqtt) — 27 commands
+- [`mqtt`](#mqtt) — 26 commands
 - [`bluetooth`](#bluetooth) — 21 commands
 - [`phone`](#phone) — 10 commands
 - [`relay`](#relay) — 2 commands
 - [`filesystem`](#filesystem) — 10 commands
 - [`sd`](#sd) — 5 commands
-- [`oled`](#oled) — 16 commands
+- [`oled`](#oled) — 15 commands
 - [`speaker`](#speaker) — 1 commands
 - [`neopixel`](#neopixel) — 3 commands
 - [`led`](#led) — 6 commands
@@ -40,12 +40,12 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`anoencoder`](#anoencoder) — 5 commands
 - [`apds`](#apds) — 9 commands
 - [`gps`](#gps) — 6 commands
-- [`fmradio`](#fmradio) — 10 commands
+- [`fmradio`](#fmradio) — 9 commands
 - [`rtc`](#rtc) — 7 commands
 - [`presence`](#presence) — 6 commands
 - [`camera`](#camera) — 45 commands
 - [`microphone`](#microphone) — 17 commands
-- [`edgeimpulse`](#edgeimpulse) — 16 commands
+- [`edgeimpulse`](#edgeimpulse) — 15 commands
 - [`transcription`](#transcription) — 2 commands
 - [`note`](#note) — 1 commands
 - [`stt`](#stt) — 5 commands
@@ -70,7 +70,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`even_g2`](#even-g2) — 68 commands
 - [`ring`](#ring) — 22 commands
 - [`llm`](#llm) — 36 commands
-- [`settingsedit`](#settingsedit) — 76 commands
+- [`settingsedit`](#settingsedit) — 58 commands
 
 ---
 
@@ -95,7 +95,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `broadcast` | A | Send a message to all connected output interfaces.<br/>`Usage: broadcast <message>` |
 | `cpufreq` | A | Get/set CPU frequency (admin).<br/>`Usage: cpufreq [MHz] (run without arguments to list supported values)` |
 | `crashlog` |  | Show the last recorded crash (panic text, core/PC, boot phase, repeat count). (add 'json')<br/>`Usage: crashlog [json]` |
-| `deepsleep` | A | Power off via deep sleep (no wake source — reset button to wake).<br/>`Usage: deepsleep (admin; wakes only via physical reset)` |
+| `deepsleep` | S | Power off via deep sleep (no wake source — reset button to wake).<br/>`Usage: deepsleep (super admin; wakes only via physical reset)` |
 | `events` |  | Show recent system events (the in-memory register that drives automation event triggers).<br/>`Usage: events [kinds [json]] (bare): show the recent-event ring kinds: list every valid event-kind name (json = machine form)` |
 | `factoryreset` | S | Wipe user accounts and their data (all: every stored setting and file) and reboot to setup wizard.<br/>`Usage: factoryreset [all] (confirmation required) Deletes /system/users/users.json, pending account requests, every user's settings file and every account's transcripts and notes (/stt/u*, /sd/stt/u*), so the first-time setup wizard runs on next boot. WiFi credentials and other settings are preserved. factoryreset all (serial console only): also erases the whole internal filesystem and NVS during the restart: saved networks, credentials, keys, Bluetooth bonds, the recovery credential and logs. For handing a device over.` |
 | `fsusage` |  | Show filesystem usage. (add 'json' for JSON output) |
@@ -186,7 +186,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowaccept` | A | Accept a pending incoming pair request: 'espnowaccept [<mac_or_name>]'.<br/>`Usage: espnowaccept [<mac_or_name>] (no arg = the sole pending request)` |
 | `espnowacceptsensorcontrol` | A | Worker: opt in to honor SENSOR_REQ from the configured master/backup: 'espnowacceptsensorcontrol <on\|off>'.<br/>`Usage: espnowacceptsensorcontrol <on\|off>` |
 | `espnowbackupenable` | A | Enable/disable backup master feature: 'espnowbackupenable [on\|off]'.<br/>`Usage: espnowbackupenable [on\|off]` |
-| `espnowbackupfingerprint` | A | Name the backup master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.<br/>`Usage: espnowbackupfingerprint [<64-hex-pubkey>\|clear] No argument shows it. The backup named here gets this device's battery state and events, may ask it for readings, and gives it mesh time while it acts as master. clear: no backup master is named.` |
+| `espnowbackupfingerprint` | S | Name the backup master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.<br/>`Usage: espnowbackupfingerprint [<64-hex-pubkey>\|clear] No argument shows it. The backup named here gets this device's battery state and events, may ask it for readings, and gives it mesh time while it acts as master. clear: no backup master is named.` |
 | `espnowbattery` |  | Mesh master: show the battery state other devices sent: 'espnowbattery [json] [<name_or_mac>] [from <n>]'.<br/>`Usage: espnowbattery [json] [<name_or_mac>] [from <n>] A device sends its battery state to the master named on it (espnowpowerinterval). json: 'next' is the number to pass as 'from' when not every device fitted one reply.` |
 | `espnowbondmodeenabled` | A | Enable/disable bond mode: <0\|1><br/>`Usage: espnowbondmodeenabled <0\|1>` |
 | `espnowbondpeermac` | A | Set bond peer MAC address<br/>`Usage: espnowbondpeermac <AA:BB:CC:DD:EE:FF>` |
@@ -197,7 +197,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowdeviceinfo` |  | Show all local device metadata. |
 | `espnowdevices` |  | List all mesh devices with the room/zone/tags they announce and their status; [pending] marks a room or tags not accepted here: espnowdevices [json].<br/>`Usage: espnowdevices [json] json: pendingRoom / pendingTags per device say what of its room and tags is not accepted here; devices that do not fit one reply are counted in notShown.` |
 | `espnowdiscovered` | A | List devices found during discovery: 'espnowdiscovered [clear]'. Pair one with 'espnowpairrequest <mac_or_name>'.<br/>`Usage: espnowdiscovered [clear] Lists same-mesh devices heard while your discovery window ('espnowpairmode') is open.` |
-| `espnowenabled` | A | Enable/disable ESP-NOW (0\|1, takes effect after reboot).<br/>`Usage: espnowenabled <0\|1>` |
 | `espnowencstatus` | A | Show ESP-NOW encryption status and key fingerprint. |
 | `espnoweventpush` | A | Which of this device's system events go to the mesh master: 'espnoweventpush [off\|alert\|standard\|verbose]'.<br/>`Usage: espnoweventpush [off\|alert\|standard\|verbose] alert: security, safety and faults only (the default). standard: also the everyday ones. verbose: all.` |
 | `espnowevents` | A | Mesh master: show the system events other devices sent: 'espnowevents [json] [since <rx>]'.<br/>`Usage: espnowevents [json] [since <rx>] A device sends its events to the master named on it (espnoweventpush). The master keeps the newest 24 per mesh. since <rx>: only events after that receive number. json: 'more' means ask again with since = the last rx.` |
@@ -205,11 +204,11 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowfetch` | A | Fetch a file from a peer; user/pass are an account ON THE TARGET: 'espnowfetch <target> <target-user> <target-pass> "<path>"'. (async - status via espnowmessages json; file saved on this device)<br/>`Usage: espnowfetch <target> <target-user> <target-pass> "<path>" Credentials are verified ON THE TARGET device, not this one. Returns OK on delivery; status lands in 'espnowmessages json'; the fetched file is written to this device's filesystem.` |
 | `espnowfind` |  | Find devices by name, room, or tag: 'espnowfind <query>'.<br/>`Usage: espnowfind <query>` |
 | `espnowfirsttimesetup` | A | Set first time setup flag: <0\|1><br/>`Usage: espnowfirsttimesetup <0\|1>` |
-| `espnowforget` | A | Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.<br/>`Usage: espnowforget <name_or_mac>` |
+| `espnowforget` | S | Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.<br/>`Usage: espnowforget <name_or_mac>` |
 | `espnowforwardlinks` |  | Mesh master: show the devices that forward their bond partner's data to this device: 'espnowforwardlinks [json] [from <n>]'.<br/>`Usage: espnowforwardlinks [json] [from <n>] json: 'next' is the number to pass as 'from' when not every link fitted one reply.` |
 | `espnowfriendlyname` |  | Get/set friendly display name: 'espnowfriendlyname [name]'.<br/>`Usage: espnowfriendlyname [<name>] (<=47 chars) espnowfriendlyname clear` |
 | `espnowgroupaccept` | A | Accept the room and tags a paired peer announces right now, for room and tag commands: 'espnowgroupaccept [json] <name_or_mac\|all>'.<br/>`Usage: espnowgroupaccept [json] <name_or_mac\|all> Records exactly what the peer announces at this moment; the reply states what was accepted. A name that more than one paired device has is refused: use the address espnowgroups shows. From then on espnowroomcmd and espnowtagcmd send that room's and those tags' commands, with the account password they carry, to this peer.` |
-| `espnowgroupdrop` | A | Take back the room and tags accepted for a paired peer: 'espnowgroupdrop [json] <name_or_mac\|all>'.<br/>`Usage: espnowgroupdrop [json] <name_or_mac\|all> The peer is no longer a target of room or tag commands; what it announces is pending again.` |
+| `espnowgroupdrop` | S | Take back the room and tags accepted for a paired peer: 'espnowgroupdrop [json] <name_or_mac\|all>'.<br/>`Usage: espnowgroupdrop [json] <name_or_mac\|all> The peer is no longer a target of room or tag commands; what it announces is pending again.` |
 | `espnowgroups` | A | List paired peers with the room and tags each announces, what was accepted here and what is pending: 'espnowgroups [json] [name_or_mac]'.<br/>`Usage: espnowgroups [json] [<name_or_mac>] announced = what the peer says about itself; accepted = what room and tag commands go by; pending = announced and not accepted, so not used. A peer that stops announcing a room or tag leaves it at once; a new one waits for espnowgroupaccept.` |
 | `espnowhbmode` | A | Get/set heartbeat mode: 'espnowhbmode [public\|private]'.<br/>`Usage: espnowhbmode [public\|private]` |
 | `espnowheartbeatbroadcast` | A | Set heartbeat broadcast: <0\|1><br/>`Usage: espnowheartbeatbroadcast <0\|1>` |
@@ -218,7 +217,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowidentity` |  | Show long-term Ed25519 identity (MAC, pub key, createdAtSec, regenCount). |
 | `espnowkeyex` | A | Initiate KEY_EX handshake with a peer (runs alongside legacy pairing). (async - handshake completes later; check espnowsessions)<br/>`Usage: espnowkeyex <name_or_mac> [<mesh>] Returns OK when KEY_EX_HELLO is sent; the handshake completes asynchronously - inspect with 'espnowsessions' / 'espnowencstatus'.` |
 | `espnowlist` |  | List all paired ESP-NOW devices. |
-| `espnowmasterfingerprint` | A | Name the mesh master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.<br/>`Usage: espnowmasterfingerprint [<64-hex-pubkey>\|clear] No argument shows it. The master named here gives this device mesh time, gets its readings, battery state and events, and may ask it for readings. clear: no master is named (the reply says what that stops).` |
+| `espnowmasterfingerprint` | S | Name the mesh master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.<br/>`Usage: espnowmasterfingerprint [<64-hex-pubkey>\|clear] No argument shows it. The master named here gives this device mesh time, gets its readings, battery state and events, and may ask it for readings. clear: no master is named (the reply says what that stops).` |
 | `espnowmeshbackup` | A | Get/set backup MAC: 'espnowmeshbackup [MAC]'.<br/>`Usage: espnowmeshbackup [<AA:BB:CC:DD:EE:FF>]` |
 | `espnowmeshes` | A | Manage multi-mesh slots: 'espnowmeshes [list\|add\|remove\|delete\|enable\|setdefault\|rename\|setpassphrase] ...'.<br/>`Usage: espnowmeshes list espnowmeshes add <label> (then set passphrase via 'espnowsetpassphrase <label> <pw>') espnowmeshes remove <label> (alias: disable) espnowmeshes delete <label> (frees the slot; unpair its devices first) espnowmeshes enable <label> espnowmeshes setdefault <label> espnowmeshes setpassphrase <label> <passphrase> espnowmeshes rename <oldLabel> <newLabel>` |
 | `espnowmeshmaster` | A | Get/set master MAC: 'espnowmeshmaster [MAC]'.<br/>`Usage: espnowmeshmaster [<AA:BB:CC:DD:EE:FF>]` |
@@ -275,7 +274,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowtopoautorefresh` | A | Set auto refresh topology: <0\|1><br/>`Usage: espnowtopoautorefresh <0\|1>` |
 | `espnowtopodiscoveryinterval` | A | Set topology discovery interval: <0-300000 ms><br/>`Usage: espnowtopodiscoveryinterval <0..300000>` |
 | `espnowtoporesults` |  | Get topology results: 'espnowtoporesults [page] [request-id]'. |
-| `espnowunpair` | A | Unpair ESP-NOW device and remove what this device stored about it (crypto identity, bond caches, its cached manifest); unpairing the bond partner ends the bond too: 'espnowunpair <name_or_mac>'.<br/>`Usage: espnowunpair <name_or_mac>` |
+| `espnowunpair` | S | Unpair ESP-NOW device and remove what this device stored about it (crypto identity, bond caches, its cached manifest); unpairing the bond partner ends the bond too: 'espnowunpair <name_or_mac>'.<br/>`Usage: espnowunpair <name_or_mac>` |
 | `espnowusersync` | S | Enable/disable user credential sync: 'espnowusersync [on\|off]'.<br/>`Usage: espnowusersync [on\|off]` |
 | `espnowzone` |  | Get/set device zone: 'espnowzone [name]'.<br/>`Usage: espnowzone [Counter\|Door\|Ceiling\|...] espnowzone clear` |
 | `openespnow` | A | Initialize ESP-NOW communication. |
@@ -302,7 +301,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | ------- | :-: | ----------- |
 | `collect` | A | Pull files from the devices that name this hub (shows why not with no argument). |
 | `collectnow` | A | Pull a device's files now (full: also what the other master has). |
-| `collectquota` | A | Card quota per device in MB (64-65535). |
+| `collectquota` | S | Card quota per device in MB (64-65535). |
 | `collectrate` | A | Frames per second the collector asks for (5-100). |
 | `collectstatus` | A | File catch-up: what this hub pulled from each device that names it. |
 
@@ -314,10 +313,10 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | ------- | :-: | ----------- |
 | `c6autohold` | A | Hold the companion in reset while no radio feature runs: c6autohold [on\|off] (persists). |
 | `c6autorecover` | A | Auto-recover the companion after an outage: c6autorecover [on\|off] (persists). |
-| `c6confirm` | A | Confirm the companion's running image so it cannot roll back. |
+| `c6confirm` | S | Confirm the companion's running image so it cannot roll back. |
 | `c6console` | A | Keep the C6's own console mirrored into the P4 log: c6console [on\|off] (persists). Off: only for 10 minutes after a companion fault.<br/>`Usage: c6console [on\|off] on - mirror the companion's console as C6> lines all the time (uses about 6 KB of internal memory) off - mirror it only after a companion fault, until the companion has been healthy for 10 minutes (the default)` |
 | `c6heartbeat` | A | Companion heartbeat interval in seconds, 0 disables the watchdog: c6heartbeat <0..60> (persists). |
-| `c6hold` | A | Hold the C6 in reset (radio fully off) or release it: c6hold [on\|off].<br/>`Usage: c6hold [on\|off] on - stop Wi-Fi, Bluetooth and ESP-NOW and hold the companion in reset off - release it and restore what was running` |
+| `c6hold` | S | Hold the C6 in reset (radio fully off) or release it: c6hold [on\|off].<br/>`Usage: c6hold [on\|off] on - stop Wi-Fi, Bluetooth and ESP-NOW and hold the companion in reset off - release it and restore what was running` |
 | `c6restart` | A | Restart the C6 companion in place (radio features stop and come back). |
 | `c6status` |  | ESP32-C6 companion status: firmware, bridge, heartbeat, memory, recovery (add 'json'). |
 | `c6update` | A | Flash companion firmware from a file over SDIO: c6update "<path>".<br/>`Usage: c6update "/sd/firmware/network_adapter.bin" The file must be an ESP32-C6 image built by tools/p4/companion (it is checked for the ESP-NOW bridge marker before anything is sent).` |
@@ -332,7 +331,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `mqttautostart` | A | MQTT auto-start [0\|1]<br/>`Usage: mqttautostart [0\|1]` |
 | `mqttbasetopic` | A | Base topic [topic\|auto]<br/>`Usage: mqttbasetopic [topic\|auto]` |
 | `mqttcacertpath` | A | CA cert path [path\|clear]<br/>`Usage: mqttcacertpath [path\|clear]` |
-| `mqttclientenabled` | A | Enable/disable MQTT [0\|1]<br/>`Usage: mqttclientenabled [0\|1]` |
 | `mqttdiscoveryprefix` | A | HA discovery prefix [prefix]<br/>`Usage: mqttdiscoveryprefix [prefix]` |
 | `mqttexternalsensors` |  | List external sensor data (add 'json' for JSON output) |
 | `mqtthost` | A | MQTT broker host [hostname]<br/>`Usage: mqtthost [hostname]` |
@@ -358,7 +356,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## bluetooth
 
-> The Bluetooth radio runs one role at a time. openble brings up the shared client stack (the host, its controller link and the setup worker; like openwifi) and closeble takes the whole radio down again; the stack stays up until closeble or bleenabled 0, never because the last device closed. On the stack each device opens and closes on its own: openg2/closeg2 for the Even G2 glasses (the even_g2 commands then apply), openring/closering for the R1 ring, openphone/closephone for the phone link; closing one leaves the others and the stack alone, and a device out of range stays open and reconnects. openconsole starts the app console server instead (legacy: the device advertises the App console and the HardwareOne app connects to it; it closes the three devices first and never coexists with the client stack) and closeconsole stops it. blemode stores the boot role only (client, the default, or server). The phone link carries the relay (the LLM fallback and the Terminal, while the app forwards) and the app console as a stream inside it, which the device offers when its phone secret is a device code from phone pair new and bleconsole is on (bleconsole on|off|status); every console session there signs in. Beside the glasses the console can also ride the link's own command service (Secure Channel only, never advertised). blestatus and bleinfo show the role running now, the host state, the app console and the Phone link block (state, console, relay, streams and session end reasons; phone status has the pipe's detail). blesend pushes a one-off message to the connected app (on the phone link too); in server mode bleevent sends an event and blestream toggles periodic pushes as a bitmask of sensors/system/events (blestream on/off/sensors/system/events, plus interval) -- all of which require an active connection. An app-layer Secure Channel (X25519 + passphrase + ChaCha20-Poly1305, independent of BLE bonding) is configured with blesecret and required with blesecure; both require super admin, as does blerequireauth. Boot reconnection to saved-MAC peers is per-peer via bleautoreconnect <name> [on|off] (see blepeers for names).
+> The Bluetooth radio runs one role at a time. openble brings up the shared client stack (the host, its controller link and the setup worker; like openwifi) and closeble takes the whole radio down again; the stack stays up until closeble, never because the last device closed. On the stack each device opens and closes on its own: openg2/closeg2 for the Even G2 glasses (the even_g2 commands then apply), openring/closering for the R1 ring, openphone/closephone for the phone link; closing one leaves the others and the stack alone, and a device out of range stays open and reconnects. openconsole starts the app console server instead (legacy: the device advertises the App console and the HardwareOne app connects to it; it closes the three devices first and never coexists with the client stack) and closeconsole stops it. blemode stores the boot role only (client, the default, or server). The phone link carries the relay (the LLM fallback and the Terminal, while the app forwards) and the app console as a stream inside it, which the device offers when its phone secret is a device code from phone pair new and bleconsole is on (bleconsole on|off|status); every console session there signs in. Beside the glasses the console can also ride the link's own command service (Secure Channel only, never advertised). blestatus and bleinfo show the role running now, the host state, the app console and the Phone link block (state, console, relay, streams and session end reasons; phone status has the pipe's detail). blesend pushes a one-off message to the connected app (on the phone link too); in server mode bleevent sends an event and blestream toggles periodic pushes as a bitmask of sensors/system/events (blestream on/off/sensors/system/events, plus interval) -- all of which require an active connection. An app-layer Secure Channel (X25519 + passphrase + ChaCha20-Poly1305, independent of BLE bonding) is configured with blesecret and required with blesecure; both require super admin, as does blerequireauth. Boot reconnection to saved-MAC peers is per-peer via bleautoreconnect <name> [on|off] (see blepeers for names).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -379,7 +377,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `blestatus` |  | Show the Bluetooth role, app console and relay pipe. (add 'json' for JSON output) |
 | `blestream` |  | Control streaming: <on\|off\|sensors\|system\|events\|interval>.<br/>`Usage: blestream [on\|off\|sensors\|system\|events\|interval] \| interval <sensor_ms> <system_ms>` |
 | `bletxpower` |  | Get/set BLE TX power [0-7].<br/>`Usage: bletxpower [0..7]` |
-| `closeble` | A | Bluetooth off: close the glasses, ring, phone and the app console, then stop the host (bleenabled 0 also persists it). |
+| `closeble` | A | Bluetooth off: close the glasses, ring, phone and the app console, then stop the host. |
 | `closeconsole` | A | Stop the app console server (saved boot role back to client; 'openble' brings the client stack back). |
 | `openble` | A | Bluetooth on: bring the shared client stack up; devices with auto-reconnect come back (openg2 / openring / openphone open one). |
 | `openconsole` | A | Start the app console server for a direct app connection (closes the glasses, ring and phone; saved boot role = server). |
@@ -393,7 +391,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `closephone` | A | Close the phone link (glasses, ring and Bluetooth stay up). |
 | `openphone` | A | Open the phone link on the Bluetooth client stack and connect to the paired phone. |
 | `phone` |  | Android phone link. |
-| `phone forget` | A | Forget the paired phone (serial or OLED admin). |
+| `phone forget` | S | Forget the paired phone (super admin; serial or OLED). |
 | `phone pair` | A | Open a 60 s pairing window (serial or OLED admin). |
 | `phone pair new` | S | Make a new pairing code (the phone secret), show it once on serial or the OLED and pair for 3 min.<br/>`Usage: phone pair new` |
 | `phone scan` | A | Show or set the phone reconnect scan.<br/>`Usage: phone scan [default\|legacy\|<interval_ms> <window_ms> dup\|nodup]` |
@@ -445,26 +443,25 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## oled
 
-> Drives the selected local display backend: its lifecycle, the live screen contents, and persistent appearance settings. openoled/closeoled power the display task on and off, and oledstatus reports its state. oledmode <mode> switches the live screen among the built-in views (menu, status, sensordata, thermal, network, mesh, gps, espnow, memory, off, and more); oledtext <message> shows custom text and oledanim <name>|fps <n> picks the animation -- both require the display to be running (run openoled first) and neither persists across reboot. Separately, the oled* config commands write settings to flash immediately: oleddefaultmode sets the idle default screen, while oledbrightness <0-255>, oledflip, oledbootduration, oledupdateinterval, oledthermalscale and oledenabled tune appearance and timing. Whether a user must log in at the display before interacting with it is set with displayrequireauth <0|1> (super admin, Settings module).
+> Drives the selected local display backend: its lifecycle, the live screen contents, and persistent appearance settings. openoled/closeoled power the display task on and off, and oledstatus reports its state. oledmode <mode> switches the live screen among the built-in views (menu, status, sensordata, thermal, network, mesh, gps, espnow, memory, off, and more); oledtext <message> shows custom text and oledanim <name>|fps <n> picks the animation -- both require the display to be running (run openoled first) and neither persists across reboot. Separately, the oled* config commands write settings to flash immediately: oleddefaultmode sets the idle default screen, while oledbrightness <0-255>, oledflip, oledbootduration, oledupdateinterval and oledthermalscale tune appearance and timing, and oledautostart says whether the display comes up at boot. Whether a user must log in at the display before interacting with it is set with displayrequireauth <0|1> (super admin, Settings module).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closeoled` |  | Stop OLED display. |
-| `oledanim` |  | Select animation: <name> or fps <1-60><br/>`Usage: oledanim <name> oledanim fps <1-60>` |
-| `oledbootduration` |  | Boot animation duration (ms): <500-10000><br/>`Usage: oledbootduration <500..10000>` |
-| `oledbrightness` |  | Display brightness: <0-255><br/>`Usage: oledbrightness <0..255>` |
+| `closeoled` | A | Stop OLED display. |
+| `oledanim` | A | Select animation: <name> or fps <1-60><br/>`Usage: oledanim <name> oledanim fps <1-60>` |
+| `oledbootduration` | A | Boot animation duration (ms): <500-10000><br/>`Usage: oledbootduration <500..10000>` |
+| `oledbrightness` | A | Display brightness: <0-255><br/>`Usage: oledbrightness <0..255>` |
 | `oledcameraread` |  | Read the local camera preview state (JSON) |
-| `oledclear` |  | Clear OLED display. |
-| `oleddefaultmode` |  | OLED default mode: <logo\|status\|sensors\|thermal\|network\|mesh\|off><br/>`Usage: oleddefaultmode <logo\|status\|sensors\|thermal\|network\|mesh\|off>` |
-| `oledenabled` | A | Enable/disable OLED: <0\|1><br/>`Usage: oledenabled <0\|1>` |
-| `oledflip` |  | Flip display 180°: [on\|off\|toggle]<br/>`Usage: oledflip [on\|off\|toggle]` |
-| `oledlandscape` |  | Landscape UI with right-side controls: [0\|1]<br/>`Usage: oledlandscape [0\|1]` |
-| `oledmode` |  | Set display mode: <mode><br/>`Usage: oledmode <menu\|status\|sensordata\|sensorlist\|thermal\|camera\|network\|mesh\|gps\|text\|logo\|anim\|imuactions\|fmradio\|files\|logging\|automations\|espnow\|memory\|off> Example: oledmode memory Example: oledmode off` |
+| `oledclear` | A | Clear OLED display. |
+| `oleddefaultmode` | A | OLED default mode: <logo\|status\|sensors\|thermal\|network\|mesh\|off><br/>`Usage: oleddefaultmode <logo\|status\|sensors\|thermal\|network\|mesh\|off>` |
+| `oledflip` | A | Flip display 180°: [on\|off\|toggle]<br/>`Usage: oledflip [on\|off\|toggle]` |
+| `oledlandscape` | A | Landscape UI with right-side controls: [0\|1]<br/>`Usage: oledlandscape [0\|1]` |
+| `oledmode` | A | Set display mode: <mode><br/>`Usage: oledmode <menu\|status\|sensordata\|sensorlist\|thermal\|camera\|network\|mesh\|gps\|text\|logo\|anim\|imuactions\|fmradio\|files\|logging\|automations\|espnow\|memory\|off> Example: oledmode memory Example: oledmode off` |
 | `oledstatus` |  | Show OLED status. (add 'json' for JSON output) |
-| `oledtext` |  | Set custom text: <message><br/>`Usage: oledtext <message>` |
-| `oledthermalscale` |  | Thermal image scale: <1.0-10.0><br/>`Usage: oledthermalscale <1.0..10.0>` |
-| `oledupdateinterval` |  | Display update interval (ms): <10-1000><br/>`Usage: oledupdateinterval <10..1000>` |
-| `openoled` |  | Start OLED display. |
+| `oledtext` | A | Set custom text: <message><br/>`Usage: oledtext <message>` |
+| `oledthermalscale` | A | Thermal image scale: <1.0-10.0><br/>`Usage: oledthermalscale <1.0..10.0>` |
+| `oledupdateinterval` | A | Display update interval (ms): <10-1000><br/>`Usage: oledupdateinterval <10..1000>` |
+| `openoled` | A | Start OLED display. |
 
 ## speaker
 
@@ -490,11 +487,11 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `ledbrightness` |  | Set LED brightness 0-100.<br/>`Usage: ledbrightness <0..100>` |
-| `ledstartupcolor` |  | Set LED startup primary color (any of ~80 named colors or 'off'; an unknown name is refused).<br/>`Usage: ledstartupcolor <color name\|off> (any of ~80 named colors)` |
-| `ledstartupcolor2` |  | Set LED startup secondary color (any of ~80 named colors or 'off'; an unknown name is refused).<br/>`Usage: ledstartupcolor2 <color name\|off> (any of ~80 named colors)` |
-| `ledstartupduration` |  | Set LED startup effect duration in ms.<br/>`Usage: ledstartupduration <100..10000>` |
-| `ledstartupeffect` |  | Set LED startup effect [none\|rainbow\|pulse\|fade\|blink\|strobe].<br/>`Usage: ledstartupeffect <none\|rainbow\|pulse\|fade\|blink\|strobe>` |
+| `ledbrightness` | A | Set LED brightness 0-100.<br/>`Usage: ledbrightness <0..100>` |
+| `ledstartupcolor` | A | Set LED startup primary color (any of ~80 named colors or 'off'; an unknown name is refused).<br/>`Usage: ledstartupcolor <color name\|off> (any of ~80 named colors)` |
+| `ledstartupcolor2` | A | Set LED startup secondary color (any of ~80 named colors or 'off'; an unknown name is refused).<br/>`Usage: ledstartupcolor2 <color name\|off> (any of ~80 named colors)` |
+| `ledstartupduration` | A | Set LED startup effect duration in ms.<br/>`Usage: ledstartupduration <100..10000>` |
+| `ledstartupeffect` | A | Set LED startup effect [none\|rainbow\|pulse\|fade\|blink\|strobe].<br/>`Usage: ledstartupeffect <none\|rainbow\|pulse\|fade\|blink\|strobe>` |
 | `ledstartupenabled` | A | Enable/disable LED startup effect [0\|1].<br/>`Usage: ledstartupenabled <0\|1>` |
 
 ## matrix
@@ -520,9 +517,9 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `pwm` |  | Set PWM output: pwm <channel> <value> [freq].<br/>`Usage: pwm <channel> <value> [freq]` |
 | `servo` |  | Control servo motor: servo <channel> <angle>.<br/>`Usage: servo <channel> <angle>` |
 | `servobus` | A | Route PCA9685 servo to bus: <0\|1> (reboot required)<br/>`Usage: servoBus <0\|1>` |
-| `servocalibrate` |  | Enter calibration mode: servocalibrate <channel>.<br/>`Usage: servocalibrate <channel>` |
+| `servocalibrate` | A | Enter calibration mode: servocalibrate <channel>.<br/>`Usage: servocalibrate <channel>` |
 | `servolist` |  | List configured servo profiles. (add 'json' for JSON output) |
-| `servoprofile` |  | Configure servo profile: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>.<br/>`Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>` |
+| `servoprofile` | A | Configure servo profile: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>.<br/>`Usage: servoprofile <ch> <minPulse> <maxPulse> <centerPulse> <name>` |
 
 ## thermal
 
@@ -530,8 +527,8 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closethermal` |  | Stop MLX90640 thermal sensor. |
-| `openthermal` |  | Start MLX90640 thermal sensor. |
+| `closethermal` | A | Stop MLX90640 thermal sensor. |
+| `openthermal` | A | Start MLX90640 thermal sensor. |
 | `thermalautostart` | A | Enable/disable thermal auto-start after boot [on\|off]<br/>`Usage: thermalautostart [on\|off]` |
 | `thermalbus` | A | Route MLX90640 thermal to bus: <0\|1> (reboot required)<br/>`Usage: thermalBus <0\|1>` |
 | `thermaldevicepollms` | A | Thermal device poll: <100..2000><br/>`Usage: thermalDevicePollMs <100..2000>` |
@@ -560,8 +557,8 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closetof` |  | Stop VL53L4CX ToF sensor. |
-| `opentof` |  | Start VL53L4CX ToF sensor. |
+| `closetof` | A | Stop VL53L4CX ToF sensor. |
+| `opentof` | A | Start VL53L4CX ToF sensor. |
 | `tofautostart` | A | Enable/disable ToF auto-start after boot [on\|off]<br/>`Usage: tofautostart [on\|off]` |
 | `tofbus` | A | Route VL53L4CX ToF to bus: <0\|1> (reboot required)<br/>`Usage: tofBus <0\|1>` |
 | `tofdevicepollms` | A | ToF device poll: <100..2000><br/>`Usage: tofDevicePollMs <100..2000>` |
@@ -577,7 +574,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closeimu` |  | Stop BNO055 IMU sensor. |
+| `closeimu` | A | Stop BNO055 IMU sensor. |
 | `imuactions` |  | Show IMU action detection state. |
 | `imuautostart` | A | Enable/disable IMU auto-start after boot [on\|off]<br/>`Usage: imuautostart [on\|off]` |
 | `imubus` | A | Route BNO055 IMU to bus: <0\|1> (reboot required)<br/>`Usage: imuBus <0\|1>` |
@@ -592,7 +589,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `imutransitionms` | A | IMU transition time: <0..1000><br/>`Usage: imutransitionms <0..1000>` |
 | `imuwebmaxfps` | A | IMU web max FPS: <1..30><br/>`Usage: imuwebmaxfps <1..30>` |
 | `imuyawoffset` | A | IMU yaw offset in degrees: <-180..180><br/>`Usage: imuyawoffset <-180..180>` |
-| `openimu` |  | Start BNO055 IMU sensor. |
+| `openimu` | A | Start BNO055 IMU sensor. |
 
 ## input
 
@@ -600,11 +597,11 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closeinput` |  | Stop the input device. |
+| `closeinput` | A | Stop the input device. |
 | `gpioencoderread` |  | Read GPIO wheel position, switch and pending input as JSON. |
 | `inputautostart` | A | Enable/disable input device auto-start [on\|off]<br/>`Usage: inputautostart [on\|off]` |
 | `inputdevicepollms` | A | Set input device poll interval ms [10-1000]<br/>`Usage: inputdevicepollms <10-1000>` |
-| `openinput` |  | Start the configured input device. |
+| `openinput` | A | Start the configured input device. |
 | `touchread` |  | Read the single-touch snapshot without consuming events. |
 
 ## gamepad
@@ -622,10 +619,10 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `anoencoderi2caddr` | A | Set ANO I2C address [1-127]<br/>`Usage: anoencoderi2caddr <1-127>` |
-| `anoencoderinvert` |  | Invert rotation direction [on\|off]<br/>`Usage: anoencoderinvert [on\|off]` |
+| `anoencoderinvert` | A | Invert rotation direction [on\|off]<br/>`Usage: anoencoderinvert [on\|off]` |
 | `anoencoderread` |  | Read ANO encoder state. (add 'json' for JSON output) |
-| `anoencoderswaplr` |  | Swap LEFT/RIGHT buttons [on\|off\|toggle]<br/>`Usage: anoencoderswaplr [on\|off\|toggle]` |
-| `anoencoderswapud` |  | Swap UP/DOWN buttons [on\|off\|toggle]<br/>`Usage: anoencoderswapud [on\|off\|toggle]` |
+| `anoencoderswaplr` | A | Swap LEFT/RIGHT buttons [on\|off\|toggle]<br/>`Usage: anoencoderswaplr [on\|off\|toggle]` |
+| `anoencoderswapud` | A | Swap UP/DOWN buttons [on\|off\|toggle]<br/>`Usage: anoencoderswapud [on\|off\|toggle]` |
 
 ## apds
 
@@ -637,11 +634,11 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `apdsbus` | A | Route APDS9960 gesture to bus: <0\|1> (reboot required)<br/>`Usage: apdsBus <0\|1>` |
 | `apdscolor` |  | Show latest cached APDS9960 color values. |
 | `apdsgesture` |  | Show latest sampled APDS9960 gesture (does not consume events). |
-| `apdsmode` |  | Control APDS modes: apdsmode <color\|proximity\|gesture> [on\|off].<br/>`Usage: apdsmode <color\|proximity\|gesture> [<on\|off>]` |
+| `apdsmode` | A | Control APDS modes: apdsmode <color\|proximity\|gesture> [on\|off].<br/>`Usage: apdsmode <color\|proximity\|gesture> [<on\|off>]` |
 | `apdsproximity` |  | Show latest cached APDS9960 proximity value. |
 | `apdsread` |  | Read APDS9960 sensor status and data. (add 'json' for JSON output) |
-| `closeapds` |  | Stop APDS9960 sensor. |
-| `openapds` |  | Start APDS9960 sensor. |
+| `closeapds` | A | Stop APDS9960 sensor. |
+| `openapds` | A | Start APDS9960 sensor. |
 
 ## gps
 
@@ -649,29 +646,28 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closegps` |  | Stop PA1010D GPS module. |
+| `closegps` | A | Stop PA1010D GPS module. |
 | `gpsautostart` | A | Enable/disable GPS auto-start after boot [on\|off]<br/>`Usage: gpsautostart [on\|off]` |
 | `gpsbus` | A | Route PA1010D GPS to bus: <0\|1> (reboot required)<br/>`Usage: gpsBus <0\|1>` |
-| `gpslog` |  | Set up and start GPS track logging now (persists across boots). Usage: gpslog [interval_ms]<br/>`Usage: gpslog [interval_ms] Requests GPS startup, selects GPS-only Track format, and starts the logger. GPS initializes in the background. Refuses while another log is running or health logging is enabled. Boot auto-start is enabled after the logger starts successfully. interval_ms: log interval in ms (default 1000, range 100..3600000) Example: gpslog (1-second logging) gpslog 500 (500ms logging)` |
+| `gpslog` | A | Set up and start GPS track logging now (persists across boots). Usage: gpslog [interval_ms]<br/>`Usage: gpslog [interval_ms] Requests GPS startup, selects GPS-only Track format, and starts the logger. GPS initializes in the background. Refuses while another log is running or health logging is enabled. Boot auto-start is enabled after the logger starts successfully. interval_ms: log interval in ms (default 1000, range 100..3600000) Example: gpslog (1-second logging) gpslog 500 (500ms logging)` |
 | `gpsread` |  | Read GPS location and time data. (add 'json' for JSON output) |
-| `opengps` |  | Start PA1010D GPS module. |
+| `opengps` | A | Start PA1010D GPS module. |
 
 ## fmradio
 
-> RDA5807M I2C FM radio receiver. Lifecycle: openfmradio starts it, fmradioread reports status, and closefmradio stops it; fmradioautostart [on|off] persists boot auto-start and the module shows in help only when detected. fmradiotune <freq> accepts either MHz (e.g. 103.9) or 10 kHz integer units (e.g. 10390) -- values under 200 are read as MHz, otherwise as raw units -- and rejects anything outside 76.0-108.0 MHz; tuning clears any decoded RDS station name and text. fmradioseek [up|down] STARTS a hunt for the next station (no band wrap) and returns immediately -- the radio task finalizes the result within a few seconds; watch 'fmradioread' (JSON field "seeking") or the OLED FM screen. fmradiovolume <0-15> sets output level, and fmradiomute / fmradiounmute toggle audio. The OLED FM screen drives all of this from the gamepad: L/R tune, Up/Down seek, A mute, Y volume, X power.
+> RDA5807M I2C FM radio receiver. Lifecycle: openfmradio starts it, fmradioread reports status, and closefmradio stops it; fmradioautostart [on|off] persists boot auto-start and the module shows in help only when detected. fmradiotune <freq> accepts either MHz (e.g. 103.9) or 10 kHz integer units (e.g. 10390) -- values under 200 are read as MHz, otherwise as raw units -- and rejects anything outside 76.0-108.0 MHz; tuning clears any decoded RDS station name and text. fmradioseek [up|down] STARTS a hunt for the next station (no band wrap) and returns immediately -- the radio task finalizes the result within a few seconds; watch 'fmradioread' (JSON field "seeking") or the OLED FM screen. fmradiovolume <0-15> sets output level, and fmradiomute on|off mutes and unmutes audio. The OLED FM screen drives all of this from the gamepad: L/R tune, Up/Down seek, A mute, Y volume, X power.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closefmradio` |  | Stop FM Radio sensor. |
+| `closefmradio` | A | Stop FM Radio sensor. |
 | `fmradioautostart` | A | Enable/disable FM Radio auto-start after boot [on\|off]<br/>`Usage: fmradioautostart [on\|off]` |
 | `fmradiobus` | A | Route RDA5807 FM radio to bus: <0\|1> (reboot required)<br/>`Usage: fmRadioBus <0\|1>` |
-| `fmradiomute` |  | Mute audio |
+| `fmradiomute` | A | Mute or unmute audio: [on\|off] (bare = mute)<br/>`Usage: fmradiomute [on\|off]` |
 | `fmradioread` |  | Read FM Radio status. (add 'json' for JSON output) |
-| `fmradioseek` |  | Start seeking the next station [up\|down] (async; 'fmradioread' shows the result)<br/>`Usage: fmradioseek [up\|down]` |
-| `fmradiotune` |  | Tune to frequency: <freq><br/>`Usage: fmradiotune <frequency> (e.g., 103.9 or 10390)` |
-| `fmradiounmute` |  | Unmute audio |
-| `fmradiovolume` |  | Set volume: <0-15><br/>`Usage: fmradiovolume <0-15>` |
-| `openfmradio` |  | Start FM Radio sensor. |
+| `fmradioseek` | A | Start seeking the next station [up\|down] (async; 'fmradioread' shows the result)<br/>`Usage: fmradioseek [up\|down]` |
+| `fmradiotune` | A | Tune to frequency: <freq><br/>`Usage: fmradiotune <frequency> (e.g., 103.9 or 10390)` |
+| `fmradiovolume` | A | Set volume: <0-15><br/>`Usage: fmradiovolume <0-15>` |
+| `openfmradio` | A | Start FM Radio sensor. |
 
 ## rtc
 
@@ -679,8 +675,8 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closertc` |  | Stop DS3231 RTC sensor. |
-| `openrtc` |  | Start DS3231 RTC sensor. |
+| `closertc` | A | Stop DS3231 RTC sensor. |
+| `openrtc` | A | Start DS3231 RTC sensor. |
 | `rtcautostart` | A | Enable/disable RTC auto-start after boot [on\|off]<br/>`Usage: rtcautostart [on\|off]` |
 | `rtcbus` | A | Route DS3231 RTC to bus: <0\|1> (reboot required)<br/>`Usage: rtcBus <0\|1>` |
 | `rtcread` |  | Read RTC status [status\|temp]<br/>`Usage: rtcread [status\|temp] [json]` |
@@ -693,8 +689,8 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closepresence` |  | Stop STHS34PF80 sensor. |
-| `openpresence` |  | Start STHS34PF80 IR presence/motion sensor. |
+| `closepresence` | A | Stop STHS34PF80 sensor. |
+| `openpresence` | A | Start STHS34PF80 IR presence/motion sensor. |
 | `presenceautostart` | A | Enable/disable presence auto-start after boot [on\|off]<br/>`Usage: presenceautostart [on\|off]` |
 | `presencebus` | A | Route STHS34PF80 presence to bus: <0\|1> (reboot required)<br/>`Usage: presenceBus <0\|1>` |
 | `presenceread` |  | Read STHS34PF80 presence/motion/temperature data. (add 'json' for JSON output) |
@@ -714,11 +710,11 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `cameraautostart` | A | Auto-start: <on\|off><br/>`Usage: cameraautostart <on\|off\|1\|0\|true\|false>` |
 | `cameraawbgain` | A | AWB gain: <on\|off><br/>`Usage: cameraawbgain <on\|off>` |
 | `camerabpc` | A | Black pixel correction: <on\|off><br/>`Usage: camerabpc <on\|off>` |
-| `camerabrightness` |  | Set brightness: <-2..2><br/>`Usage: camerabrightness <-2..2>` |
+| `camerabrightness` | A | Set brightness: <-2..2><br/>`Usage: camerabrightness <-2..2>` |
 | `cameracapture` |  | Capture a single frame |
 | `cameracapturefolder` | A | Photo folder: <path><br/>`Usage: cameracapturefolder <path>` |
 | `cameracolorbar` | A | Color bar test pattern: <on\|off><br/>`Usage: cameracolorbar <on\|off>` |
-| `cameracontrast` |  | Set contrast: <-2..2><br/>`Usage: cameracontrast <-2..2>` |
+| `cameracontrast` | A | Set contrast: <-2..2><br/>`Usage: cameracontrast <-2..2>` |
 | `cameradcw` | A | Downsize crop window: <on\|off><br/>`Usage: cameradcw <on\|off>` |
 | `cameradenoise` | A | Set denoise level: <0-8><br/>`Usage: cameradenoise <0..8>` |
 | `cameradump` |  | Print all current sensor values |
@@ -726,31 +722,31 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `cameraexposure` | A | Set AE level: <-2..2><br/>`Usage: cameraexposure <-2..2> (negative=darker)` |
 | `camerafps` | A | Camera FPS: <1-20><br/>`Usage: camerafps <1..20>` |
 | `cameraframesize` | A | Set resolution by index: <0-12><br/>`Usage: cameraframesize <0..12> (0-5: QVGA..UXGA, 6-10: small, 11: HD, 12: CIF; availability depends on backend)` |
-| `camerafx` |  | Set bri/con/sat together: <bri> <con> <sat> (-2..+2 each)<br/>`Usage: camerafx <bri> <con> <sat> (-2..+2 each)` |
+| `camerafx` | A | Set bri/con/sat together: <bri> <con> <sat> (-2..+2 each)<br/>`Usage: camerafx <bri> <con> <sat> (-2..+2 each)` |
 | `cameragainceiling` | A | Gainceiling: <0-6> (2X..128X)<br/>`Usage: cameragainceiling <0..6> (2X..128X)` |
 | `cameragamma` | A | Raw gamma: <on\|off><br/>`Usage: cameragamma <on\|off>` |
-| `camerahmirror` |  | Horizontal mirror: <on\|off><br/>`Usage: camerahmirror <on\|off\|1\|0\|true>` |
+| `camerahmirror` | A | Horizontal mirror: <on\|off><br/>`Usage: camerahmirror <on\|off\|1\|0\|true>` |
 | `cameralenc` | A | Lens shading correction: <on\|off><br/>`Usage: cameralenc <on\|off>` |
-| `cameramaxstoredimages` | A | Max stored: <0-1000><br/>`Usage: cameramaxstoredimages <0..1000> (0=unlimited)` |
-| `cameraquality` |  | Set JPEG quality: <0-63><br/>`Usage: cameraquality <0..63> (lower = better quality, larger file)` |
+| `cameramaxstoredimages` | S | Max stored: <0-1000><br/>`Usage: cameramaxstoredimages <0..1000> (0=unlimited)` |
+| `cameraquality` | A | Set JPEG quality: <0-63><br/>`Usage: cameraquality <0..63> (lower = better quality, larger file)` |
 | `cameraread` |  | Read camera status |
 | `camerarecord` |  | Start/stop MJPEG-AVI recording (SD only): <start\|stop><br/>`Usage: camerarecord <start\|stop\|1\|0>` |
 | `camerareg` | A | Direct register write: <addr_hex> <mask_hex> <value_hex><br/>`Usage: camerareg <addr_hex> <mask_hex> <value_hex> (example: camerareg 0x3824 0x1f 0x04)` |
-| `camerares` |  | Set camera resolution: <res><br/>`Usage: camerares <96x96\|qqvga\|qcif\|hqvga\|240x240\|qvga\|cif\|vga\|svga\|xga\|sxga\|uxga\|hd>` |
-| `camerarotate` |  | Rotate 180°: <on\|off><br/>`Usage: camerarotate <on\|off\|1\|0\|true\|180>` |
-| `camerasaturation` |  | Set saturation: <-2..2><br/>`Usage: camerasaturation <-2..2>` |
+| `camerares` | A | Set camera resolution: <res><br/>`Usage: camerares <96x96\|qqvga\|qcif\|hqvga\|240x240\|qvga\|cif\|vga\|svga\|xga\|sxga\|uxga\|hd>` |
+| `camerarotate` | A | Rotate 180°: <on\|off><br/>`Usage: camerarotate <on\|off\|1\|0\|true\|180>` |
+| `camerasaturation` | A | Set saturation: <-2..2><br/>`Usage: camerasaturation <-2..2>` |
 | `camerasave` |  | Save current frame to storage |
 | `camerasharpness` | A | Set sharpness: <-2..2><br/>`Usage: camerasharpness <-2..2> (OV3660 only)` |
 | `camerastoragelocation` | A | Storage location: <0-2><br/>`Usage: camerastoragelocation <0..2> (0=LittleFS,1=SD,2=Both)` |
 | `cameratiny` |  | Capture tiny frame for ESP-NOW |
-| `cameravflip` |  | Vertical flip: <on\|off><br/>`Usage: cameravflip <on\|off\|1\|0\|true>` |
+| `cameravflip` | A | Vertical flip: <on\|off><br/>`Usage: cameravflip <on\|off\|1\|0\|true>` |
 | `cameravideodelete` | A | Delete recording: "<filename>"<br/>`Usage: cameravideodelete "<filename>"` |
 | `cameravideolist` |  | List AVI recordings on SD (add 'json' for JSON output) |
 | `camerawb` | A | White balance mode: <0-4><br/>`Usage: camerawb <0..4> (0=Auto,1=Sunny,2=Cloudy,3=Office,4=Home)` |
 | `camerawhitebal` | A | AWB master: <on\|off><br/>`Usage: camerawhitebal <on\|off>` |
 | `camerawpc` | A | White pixel correction: <on\|off><br/>`Usage: camerawpc <on\|off>` |
-| `closecamera` |  | Stop camera sensor. [async: queue it and return at once] |
-| `opencamera` |  | Start camera sensor. [async: queue it and return at once] |
+| `closecamera` | A | Stop camera sensor. [async: queue it and return at once] |
+| `opencamera` | A | Start camera sensor. [async: queue it and return at once] |
 
 ## microphone
 
@@ -758,27 +754,27 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closemic` |  | Stop microphone sensor. |
+| `closemic` | A | Stop microphone sensor. |
 | `micautostart` | A | Enable/disable microphone auto-start after boot [on\|off]<br/>`Usage: micautostart [on\|off]` |
-| `micbitdepth` |  | Get/set bit depth.<br/>`Usage: micbitdepth [16\|32]` |
-| `micdelete` | A | Delete recording(s).<br/>`Usage: micdelete "<filename>" \| micdelete all` |
+| `micbitdepth` | A | Get/set bit depth.<br/>`Usage: micbitdepth [16\|32]` |
+| `micdelete` | S | Delete recording(s).<br/>`Usage: micdelete "<filename>" \| micdelete all` |
 | `micdeleteid` | A | Delete one owner-correlated recording.<br/>`Usage: micdeleteid <16hex> "<filename>"` |
-| `micgain` |  | Get/set microphone gain.<br/>`Usage: micgain [0-100]` |
+| `micgain` | A | Get/set microphone gain.<br/>`Usage: micgain [0-100]` |
 | `miclevel` |  | Get current audio level.<br/>`Usage: miclevel [json]` |
 | `miclist` |  | List saved recordings.<br/>`Usage: miclist [json]` |
 | `micread` |  | Read microphone sensor status.<br/>`Usage: micread [json]` |
 | `micrecord` |  | Start/stop recording to WAV file (bare = show recording status).<br/>`Usage: micrecord [start [vad [<200..10000>] [trim]] \| stop \| 1 \| 0] micrecord startid <16hex> [vad [<200..10000>] [trim]] micrecord statusid <16hex> micrecord stopid <16hex> [discard]` |
-| `micsamplerate` |  | Get/set sample rate.<br/>`Usage: micsamplerate [8000-48000]` |
-| `micsource` |  | Get/set mic source: onboard microphone or G2 glasses.<br/>`Usage: micsource [auto\|onboard\|pdm\|g2]` |
+| `micsamplerate` | A | Get/set sample rate.<br/>`Usage: micsamplerate [8000-48000]` |
+| `micsource` | A | Get/set mic source: onboard microphone or G2 glasses.<br/>`Usage: micsource [auto\|onboard\|pdm\|g2]` |
 | `micviz` |  | Real-time audio level visualizer.<br/>`Usage: micviz (press any key to stop)` |
-| `openmic` |  | Start microphone sensor. |
+| `openmic` | A | Start microphone sensor. |
 | `pdmamplify` | A | Get/set the onboard PDM hardware gain multiplier (applies at the next capture start).<br/>`Usage: pdmamplify [1-15]` |
 | `pdmhpf` | A | Get/set the onboard PDM high-pass cut-off in Hz, 0 = off (applies at the next capture start).<br/>`Usage: pdmhpf [0\|23-185]` |
 | `voicefetch` |  | Stream a recording to the UART host as binary frames (CM5 bulk pull).<br/>`Usage: voicefetch "<path>" - path must be under /recordings or /sd/recordings. Sends META+AUDIO frames on the UART link, then replies with byte/frame totals and crc16.` |
 
 ## edgeimpulse
 
-> On-device machine-learning image inference using TensorFlow Lite Micro models exported from Edge Impulse. Two things must be in place before inference: a model must be loaded with eimodelload "<file>" (models live in the models directory on LittleFS; eimodellist/eimodelinfo/eimodelunload manage them) and inference must be enabled with eienable 1 (which also initializes the inference buffers). eidetect runs a single detection on a live camera frame and so additionally requires the camera to be opened (see opencamera), returning detected objects with confidence and bounding boxes as JSON; eifile "<path>" runs the same inference against a stored JPEG instead of the camera. eicontinuous 1 runs detection repeatedly in the background, eiconfidence <0.0-1.0> sets the minimum confidence to report, and eistatus shows current state. The eitrack family (eitrackenable, eitrackstatus, eitrackclear) adds cross-frame state tracking of detected objects on top of raw detections.
+> On-device machine-learning image inference using TensorFlow Lite Micro models exported from Edge Impulse. Two things must be in place before inference: a model must be loaded with eimodelload "<file>" (models live in the models directory on LittleFS; eimodellist/eimodelinfo/eimodelunload manage them), or by the Edge Impulse start-at-boot setting, which loads the default model at boot. eidetect runs a single detection on a live camera frame and so additionally requires the camera to be opened (see opencamera), returning detected objects with confidence and bounding boxes as JSON; eifile "<path>" runs the same inference against a stored JPEG instead of the camera. eicontinuous 1 runs detection repeatedly in the background, eiconfidence <0.0-1.0> sets the minimum confidence to report, and eistatus shows current state. The eitrack family (eitrackenable, eitrackstatus, eitrackclear) adds cross-frame state tracking of detected objects on top of raw detections.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -786,7 +782,6 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `eiconfidence` |  | Set minimum detection confidence.<br/>`Usage: eiconfidence <0.0-1.0>` |
 | `eicontinuous` |  | Start/stop continuous inference mode.<br/>`Usage: eicontinuous <0\|1>` |
 | `eidetect` |  | Run single object detection inference.<br/>`Usage: eidetect` |
-| `eienable` | A | Enable/disable Edge Impulse inference.<br/>`Usage: eienable <0\|1>` |
 | `eifile` |  | Run inference on stored JPEG image.<br/>`Usage: eifile "<path>"` |
 | `eimodel` |  | List the model management commands.<br/>`Usage: eimodel` |
 | `eimodelinfo` |  | Show loaded model information.<br/>`Usage: eimodelinfo` |
@@ -830,48 +825,48 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## espsr
 
-> Offline voice control built on Espressif ESP-SR: a WakeNet wake-word stage gates a MultiNet command-phrase recognizer, so the device waits for the wake word and then listens for a known command phrase. Note that srenable only reports the compile-time build flag (the runtime switch is srenabled 0|1) and cannot toggle the feature at runtime; the real lifecycle commands are opensr to start the recognition pipeline and closesr to stop it. Starting the pipeline also arms voice command execution as the current authenticated user (and stopping it disarms); arming can be managed directly with voicearm/voicedisarm/voicestatus, and recognized phrases only execute commands while armed. The command vocabulary is managed with the srcmds family (list/add/del/clear plus save/reload to an SD file and srcmdssync to import phrases from the CLI registry). Recognition is tuned through srconfidence, srtimeout, the srtuning* audio controls (gain, AGC, VAD, filters), and srdebug* telemetry; the mic feed follows the device-wide source (set with `micsource auto|pdm|g2` — onboard PDM or the G2 glasses left-temple mic), and the srsnip* commands capture audio snippets (by default on the wake word) for debugging.
+> Offline voice control built on Espressif ESP-SR: a WakeNet wake-word stage gates a MultiNet command-phrase recognizer, so the device waits for the wake word and then listens for a known command phrase. Note that srenable only reports the compile-time build flag and cannot toggle the feature at runtime; the real lifecycle commands are opensr to start the recognition pipeline and closesr to stop it. Starting the pipeline also arms voice command execution as the current authenticated user (and stopping it disarms); arming can be managed directly with voicearm/voicedisarm/voicestatus, and recognized phrases only execute commands while armed. The command vocabulary is managed with the srcmds family (list/add/del/clear plus save/reload to an SD file and srcmdssync to import phrases from the CLI registry). Recognition is tuned through srconfidence, srtimeout, the srtuning* audio controls (gain, AGC, VAD, filters), and srdebug* telemetry; the mic feed follows the device-wide source (set with `micsource auto|pdm|g2` — onboard PDM or the G2 glasses left-temple mic), and the srsnip* commands capture audio snippets (by default on the wake word) for debugging.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closesr` |  | Stop ESP-SR pipeline.<br/>`Usage: closesr` |
-| `opensr` |  | Start ESP-SR pipeline and arm voice as the current user.<br/>`Usage: opensr` |
+| `closesr` | A | Stop ESP-SR pipeline.<br/>`Usage: closesr` |
+| `opensr` | A | Start ESP-SR pipeline and arm voice as the current user.<br/>`Usage: opensr` |
 | `sr` |  | ESP-SR speech recognition commands.<br/>`Usage: opensr \| closesr \| srstatus \| srstack \| srcmdslist \| srdebuglevel \| srconfidence \| srtimeout \| srtuning \| sraccept \| srdyngain \| srraw \| srautotune \| srsnipstatus` |
-| `sraccept` |  | Configure target acceptance policy (gap acceptance).<br/>`Usage: sraccept [on\|off\|floor <0.0-1.0>\|gap <0.0-1.0>\|speech <0\|1>]` |
-| `srautotune` |  | Auto-cycle through gain configurations to find best settings.<br/>`Usage: srautotune [start\|stop\|status]` |
+| `sraccept` | A | Configure target acceptance policy (gap acceptance).<br/>`Usage: sraccept [on\|off\|floor <0.0-1.0>\|gap <0.0-1.0>\|speech <0\|1>]` |
+| `srautotune` | A | Auto-cycle through gain configurations to find best settings.<br/>`Usage: srautotune [start\|stop\|status]` |
 | `srcmds` | A | Manage MultiNet command phrases.<br/>`Usage: srcmdslist \| srcmdsadd <id> <phrase> \| srcmdsdel <phrase\|id> \| srcmdsclear confirm \| srcmdssave \| srcmdsreload \| srcmdssync` |
 | `srcmdsadd` | A | Add or update a MultiNet command.<br/>`Usage: srcmdsadd <id> <phrase>` |
-| `srcmdsclear` | A | Clear all MultiNet commands.<br/>`Usage: srcmdsclear confirm` |
+| `srcmdsclear` | S | Clear all MultiNet commands.<br/>`Usage: srcmdsclear confirm` |
 | `srcmdsdel` | A | Delete a MultiNet command (by phrase or id).<br/>`Usage: srcmdsdel <phrase\|id>` |
 | `srcmdslist` | A | List current MultiNet commands.<br/>`Usage: srcmdslist` |
 | `srcmdsreload` | A | Reload commands from SD file.<br/>`Usage: srcmdsreload` |
-| `srcmdssave` | A | Save current commands to SD file.<br/>`Usage: srcmdssave` |
+| `srcmdssave` | S | Save current commands to SD file.<br/>`Usage: srcmdssave` |
 | `srcmdssync` | A | Sync voice commands from CLI registry.<br/>`Usage: srcmdssync` |
-| `srconfidence` |  | Get/set command confidence threshold.<br/>`Usage: srconfidence [<0.0-1.0> \| category <0.0-1.0> \| target <0.0-1.0>]` |
+| `srconfidence` | A | Get/set command confidence threshold.<br/>`Usage: srconfidence [<0.0-1.0> \| category <0.0-1.0> \| target <0.0-1.0>]` |
 | `srdebug` |  | SR debug/telemetry commands.<br/>`Usage: srdebuglevel [0-4] \| srdebugtelem [ms] \| srdebugstats \| srdebugreset` |
-| `srdebuglevel` |  | Set debug verbosity (0-4).<br/>`Usage: srdebuglevel [0-4]` |
-| `srdebugreset` |  | Reset SR debug counters.<br/>`Usage: srdebugreset` |
+| `srdebuglevel` | A | Set debug verbosity (0-4).<br/>`Usage: srdebuglevel [0-4]` |
+| `srdebugreset` | A | Reset SR debug counters.<br/>`Usage: srdebugreset` |
 | `srdebugstats` |  | Print current SR statistics.<br/>`Usage: srdebugstats` |
-| `srdebugtelem` |  | Set periodic telemetry interval (ms, 0=off).<br/>`Usage: srdebugtelem [ms]` |
-| `srdyngain` |  | Configure dynamic gain normalization (MultiNet input only).<br/>`Usage: srdyngain [on\|off\|min <0.1-10>\|max <0.1-10>\|target <1000-30000>\|alpha <0.0-1.0>\|reset]` |
-| `srenable` | A | ESP-SR enable is a compile-time flag (cannot be toggled at runtime).<br/>`Usage: srenable (informational; runtime switch is srenabled 0\|1)` |
-| `srraw` |  | Toggle raw output mode (shows all MultiNet hypotheses).<br/>`Usage: srraw [on\|off]` |
+| `srdebugtelem` | A | Set periodic telemetry interval (ms, 0=off).<br/>`Usage: srdebugtelem [ms]` |
+| `srdyngain` | A | Configure dynamic gain normalization (MultiNet input only).<br/>`Usage: srdyngain [on\|off\|min <0.1-10>\|max <0.1-10>\|target <1000-30000>\|alpha <0.0-1.0>\|reset]` |
+| `srenable` | A | ESP-SR enable is a compile-time flag (cannot be toggled at runtime).<br/>`Usage: srenable (informational; opensr / closesr start and stop recognition)` |
+| `srraw` | A | Toggle raw output mode (shows all MultiNet hypotheses).<br/>`Usage: srraw [on\|off]` |
 | `srsnip` |  | Voice snippet capture commands.<br/>`Usage: srsnipon \| srsnipoff \| srsnipstart \| srsnipstop \| srsnipstatus \| srsnipconfig` |
-| `srsnipconfig` |  | Configure snippet capture params.<br/>`Usage: srsnipconfig [pre_ms <100-5000> \| max_ms <1000-30000> \| dest <auto\|sd\|internal>]` |
-| `srsnipoff` |  | Disable auto-capture.<br/>`Usage: srsnipoff` |
-| `srsnipon` |  | Enable auto-capture on wake word.<br/>`Usage: srsnipon` |
+| `srsnipconfig` | A | Configure snippet capture params.<br/>`Usage: srsnipconfig [pre_ms <100-5000> \| max_ms <1000-30000> \| dest <auto\|sd\|internal>]` |
+| `srsnipoff` | A | Disable auto-capture.<br/>`Usage: srsnipoff` |
+| `srsnipon` | A | Enable auto-capture on wake word.<br/>`Usage: srsnipon` |
 | `srsnipstart` |  | Start manual snippet capture now.<br/>`Usage: srsnipstart` |
 | `srsnipstatus` |  | Show snippet capture status.<br/>`Usage: srsnipstatus` |
 | `srsnipstop` |  | Stop manual snippet capture and save.<br/>`Usage: srsnipstop` |
 | `srstack` |  | Show sr_main stack high-water mark (run after voice stress test).<br/>`Usage: srstack` |
 | `srstatus` |  | Show ESP-SR status.<br/>`Usage: srstatus` |
-| `srtimeout` |  | Get/set command listening timeout.<br/>`Usage: srtimeout [1000-30000]` |
-| `srtuning` |  | Show/set audio tuning parameters.<br/>`Usage: srtuning [<gain\|agc\|vad\|swgain\|filters> <value>] (bare = show status)` |
-| `srtuningagc` |  | Set AGC mode (0=off, 1-3=levels).<br/>`Usage: srtuningagc <0-3>` |
-| `srtuningfilters` |  | Toggle audio filters (high-pass + pre-emphasis).<br/>`Usage: srtuningfilters <on\|off>` |
-| `srtuninggain` |  | Set AFE linear gain (0.1-10.0).<br/>`Usage: srtuninggain <0.1-10.0>` |
-| `srtuningswgain` |  | Set software gain (1.0-50.0) by updating shared micgain.<br/>`Usage: srtuningswgain <1.0-50.0>` |
-| `srtuningvad` |  | Set VAD sensitivity (0-4).<br/>`Usage: srtuningvad <0-4>` |
+| `srtimeout` | A | Get/set command listening timeout.<br/>`Usage: srtimeout [1000-30000]` |
+| `srtuning` |  | Show the audio tuning values.<br/>`Usage: srtuning` |
+| `srtuningagc` | A | Set AGC mode (0=off, 1-3=levels).<br/>`Usage: srtuningagc <0-3>` |
+| `srtuningfilters` | A | Toggle audio filters (high-pass + pre-emphasis).<br/>`Usage: srtuningfilters <on\|off>` |
+| `srtuninggain` | A | Set AFE linear gain (0.1-10.0).<br/>`Usage: srtuninggain <0.1-10.0>` |
+| `srtuningswgain` | A | Set software gain (1.0-50.0) by updating shared micgain.<br/>`Usage: srtuningswgain <1.0-50.0>` |
+| `srtuningvad` | A | Set VAD sensitivity (0-4).<br/>`Usage: srtuningvad <0-4>` |
 | `voicearm` |  | Arm voice command execution as the current authenticated user.<br/>`Usage: voicearm` |
 | `voicecancel` |  | Spoken only: say cancel (or nevermind) after the wake word. Typed, it answers an error. |
 | `voicedisarm` |  | Disarm voice command execution.<br/>`Usage: voicedisarm` |
@@ -915,7 +910,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `autolog` |  | Automation logging: autolog start <file> \| stop \| status.<br/>`Usage: autolog start <filename> \| autolog stop \| autolog status` |
+| `autolog` | A | Automation logging: autolog start <file> \| stop \| status.<br/>`Usage: autolog start <filename> \| autolog stop \| autolog status` |
 | `automation` | A | Automation system: automation <subcommand> [args].<br/>`Usage: automation <system enable\|disable\|status \| list \| add \| enable \| disable \| delete \| run \| trigger \| sanitize \| recompute>` |
 | `automationlist` |  | List all automations. |
 | `print` |  | Broadcast a message to all outputs: print <message>. |
@@ -1121,7 +1116,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## settings
 
-> The settings subsystem holds the device persisted configuration and the commands that change it. Each setting command (for example outserial, serialrequireauth, displayrequireauth, tzoffsetminutes, ntpserver, wifitxpower, webclihistorysize) sets one value and normally requests an immediate settings-file write. Because flash writes are costly, beginwrite and savesettings can coalesce changes made by the same request or transport session: the final save writes each changed settings file at most once. This is write coalescing, not a RAM transaction; unrelated sources continue to persist immediately, and their full snapshot can include live values changed while a batch is open. Idle batches expire after two minutes. savesettings remains an explicit flush-now command when no batch is open. Most commands here are admin-gated. Some changes only take effect after a reboot (for example espnowenabled and httpsenabled are marked reboot required). The controls command emits a machine-readable JSON descriptor of a module's settable controls for UI use. Note that most subsystem settings (wifi, i2c, sensors, power, oled, bluetooth, espnow) are owned and registered by their own modules; this module hosts the cross-cutting CLI/output/auth/time settings plus the batch-write machinery.
+> The settings subsystem holds the device persisted configuration and the commands that change it. Each setting command (for example outserial, serialrequireauth, displayrequireauth, tzoffsetminutes, ntpserver, wifitxpower, webclihistorysize) sets one value and normally requests an immediate settings-file write. Because flash writes are costly, beginwrite and savesettings can coalesce changes made by the same request or transport session: the final save writes each changed settings file at most once. This is write coalescing, not a RAM transaction; unrelated sources continue to persist immediately, and their full snapshot can include live values changed while a batch is open. Idle batches expire after two minutes. savesettings remains an explicit flush-now command when no batch is open. Most commands here are admin-gated. Some changes only take effect after a reboot (for example httpsenabled is marked reboot required). The controls command emits a machine-readable JSON descriptor of a module's settable controls for UI use. Note that most subsystem settings (wifi, i2c, sensors, power, oled, bluetooth, espnow) are owned and registered by their own modules; this module hosts the cross-cutting CLI/output/auth/time settings plus the batch-write machinery.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -1171,7 +1166,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | ------- | :-: | ----------- |
 | `ban` | A | Permanently ban an IP: <ip> [reason]<br/>`Usage: ban <ip> [reason] Blocks all access from the IP until manually unbanned.` |
 | `banlist` | A | List all banned IPs. (add 'json' for JSON output) |
-| `banuser` | A | Permanently ban a user account: <username> [reason]<br/>`Usage: banuser <username> [reason] Prevents the account from logging in until manually unbanned.` |
+| `banuser` | S | Permanently ban a user account: <username> [reason]<br/>`Usage: banuser <username> [reason] Prevents the account from logging in until manually unbanned.` |
 | `login` |  | Login this interface, or target another session after signing in: <user> <pass> [serial\|uart\|display]<br/>`Usage: login <username> <password> [serial\|uart\|display] Bare login always targets the submitting interface. An explicit target requires a live named non-Guest Serial/UART/display session.` |
 | `logout` |  | Logout this interface, or target another session after signing in: [serial\|uart\|display]<br/>`Usage: logout [serial\|uart\|display] Bare logout always targets the submitting interface. An explicit target requires a live named non-Guest Serial/UART/display session.` |
 | `pendinglist` | A | List pending user requests. (add 'json' for JSON output) |
@@ -1182,19 +1177,19 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `useradd` | A | Create user: <username> <password> [0\|1] [role]<br/>`Usage: useradd <username> <password> [0\|1] [guest\|user\|admin\|superadmin] 0\|1: 1 = require a new password on next login (default 0) role: defaults to user; you cannot grant a role above your own The two optional tokens may appear in either order` |
 | `userapprove` | A | Approve pending request: <username><br/>`Usage: userapprove <username>` |
 | `userchangepassword` |  | Change own password: <currentPass> <newPass> <confirmPass><br/>`Usage: userchangepassword <currentPassword> <newPassword> <confirmPassword>` |
-| `userdelete` | A | Delete user: <username><br/>`Usage: userdelete <username>` |
-| `userdemote` | A | Lower a user's role: <username> [admin\|user\|guest]<br/>`Usage: userdemote <username> [admin\|user\|guest] (default user; demoting a super-admin requires a super-admin caller)` |
+| `userdelete` | S | Delete user: <username><br/>`Usage: userdelete <username>` |
+| `userdemote` | S | Lower a user's role: <username> [admin\|user\|guest]<br/>`Usage: userdemote <username> [admin\|user\|guest] (super admin; default user)` |
 | `userdeny` | A | Deny pending request: <username><br/>`Usage: userdeny <username>` |
 | `userlist` | A | List all users. (add 'json' for JSON output) |
 | `userpromote` | A | Promote a user: <username> [user\|admin\|superadmin]<br/>`Usage: userpromote <username> [user\|admin\|superadmin] (default admin; granting superadmin requires a super-admin caller)` |
 | `userrequest` |  | Request account: <user> <pass> [confirm]<br/>`Usage: userrequest <username> <password> [confirmPassword]` |
-| `userresetpassword` | A | Reset user password: <username> <newPassword> [0\|1]<br/>`Usage: userresetpassword <username> <newPassword> [0\|1] Optional: 1 = require password change on next login` |
+| `userresetpassword` | S | Reset user password: <username> <newPassword> [0\|1]<br/>`Usage: userresetpassword <username> <newPassword> [0\|1] Optional: 1 = require password change on next login` |
 | `usersync` | A | Sync a user to another device over ESP-NOW. (async; result only on the target device - check its userlist)<br/>`Usage: usersync <username> <userPass> <device> <targetAdminUser> <targetAdminPass> <yourAdminPass> Returns OK on delivery; the user is created on the TARGET device (no confirmation returns here) - verify on that device's userlist. targetAdminUser/targetAdminPass = an admin account on the RECEIVING device (validated there). yourAdminPass = your admin password on THIS device; userPass = the synced user's password.` |
 | `whoami` |  | Show the identity of the submitting interface.<br/>`Usage: whoami` |
 
 ## features
 
-> The features subsystem lists the compiled-in capabilities and their memory cost; it changes nothing. features with no argument lists every feature grouped by category (Network, Display, Sensors, System) with an approximate heap estimate and four states: built in, running now, start at boot and allowed (- when the feature has no such switch or state). features <id> shows one feature and names the commands that switch it: open<x>/close<x> start or stop it now, <x>autostart sets start at boot and <x>enabled sets whether it is allowed at all (a few use other names, such as mqttclientenabled, eienable, i2cbusenabled and automation system enable|disable). i2c takes an allowed change only at the next restart, and a few rows are fixed when the firmware is built. features <id> <on|off> is refused with those command names. features json is the capability list for the app. featuresetup launches an interactive, admin-only wizard that sets which features are allowed and start at boot, and works from any CLI transport.
+> The features subsystem lists the compiled-in capabilities and their memory cost; it changes nothing. features with no argument lists every feature grouped by category (Network, Display, Sensors, System) with an approximate heap estimate and four states: built in, running now, start at boot and allowed (- when the feature has no such switch or state; only the I2C bus has an allowed switch, i2cbusenabled, and takes it at the next restart). features <id> shows one feature and names the commands that switch it: open<x>/close<x> start or stop it now and <x>autostart sets start at boot (a few use other names, such as eicontinuous, llmload and automation system enable|disable). A few rows are fixed when the firmware is built. features <id> <on|off> is refused with those command names. features json is the capability list for the app. featuresetup launches an interactive, admin-only wizard that sets which features start at boot, and works from any CLI transport.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -1223,7 +1218,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `map` |  | Show current map info (add 'json' for JSON output) |
 | `maplist` |  | List available maps (add 'json' for JSON output) |
 | `mapload` |  | Load map file: "<path>"<br/>`Usage: mapload "<path>"` |
-| `maporganize` |  | Organize map files in /maps into subdirectories |
+| `maporganize` | A | Organize map files in /maps into subdirectories |
 | `mapunload` |  | Unload current map (free PSRAM on device) |
 | `search` |  | Search map features: <name><br/>`Usage: search <name>` |
 | `waypoint` |  | Manage waypoints: <list\|add\|del\|goto\|clear\|clearall\|rename\|notes><br/>`Usage: waypoint [list\|add <lat> <lon> [name]\|del <index>\|goto <index>\|clear\|clearall\|rename <index> <name>\|notes <index> <notes>]` |
@@ -1317,9 +1312,9 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `closeg2` | A | Close the G2 glasses: drop both links and release the glasses runtime (ring, phone and Bluetooth stay up). |
-| `g2 list feed` | A | Replace the glasses' QuickList with Wear Detection, Silent Mode, Auto Brightness, Head-Up Display and Brightness rows after each connect (saved; off by default).<br/>`Usage: g2 list feed [on\|off]` |
+| `g2 list feed` | S | Replace the glasses' QuickList with Wear Detection, Silent Mode, Auto Brightness, Head-Up Display and Brightness rows after each connect (saved; off by default).<br/>`Usage: g2 list feed [on\|off]` |
 | `g2 list preview` | A | Show the next QuickList rows' bytes without sending.<br/>`Usage: g2 list preview` |
-| `g2 list push` | A | Read the glasses' settings and replace their QuickList with the five control rows now (items added in the Even app are removed).<br/>`Usage: g2 list push (both temples, glasses firmware 2.3.2.14)` |
+| `g2 list push` | S | Read the glasses' settings and replace their QuickList with the five control rows now (items added in the Even app are removed).<br/>`Usage: g2 list push (both temples, glasses firmware 2.3.2.14)` |
 | `g2 list status` |  | QuickList rows (wear detection, silent mode, auto brightness, head-up display, brightness): feed, row text, ticks and writes. |
 | `g2 stats feed` | A | Feed the stock widget with system metrics (saved; off by default).<br/>`Usage: g2 stats feed [on\|off] (off clears the widget)` |
 | `g2 stats interval` | A | How often the stock widget feed may send changed values (saved).<br/>`Usage: g2 stats interval [seconds 30-3600] (default 60; 10 s while the stock page is open)` |
@@ -1464,11 +1459,8 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `apdsdevicepollms` | A | Set APDS poll interval (ms)<br/>`Usage: apdsdevicepollms <value>` |
-| `apdsenabled` | A | Enable/disable the APDS gesture sensor subsystem<br/>`Usage: apdsenabled <0\|1>` |
 | `automationautostart` | A | Start the automation scheduler at boot<br/>`Usage: automationautostart <0\|1>` |
-| `bleenabled` | A | Enable/disable the Bluetooth subsystem<br/>`Usage: bleenabled <0\|1>` |
-| `cameraenabled` | A | Enable/disable the camera subsystem<br/>`Usage: cameraenabled <0\|1>` |
-| `eiautostart` | A | Start Edge Impulse inference at boot<br/>`Usage: eiautostart <0\|1>` |
+| `eiautostart` | A | Load the default Edge Impulse model at boot<br/>`Usage: eiautostart <0\|1>` |
 | `eiinterval` | A | Set Edge Impulse inference interval (ms)<br/>`Usage: eiinterval <100-10000>` |
 | `eimaxdetections` | A | Set Edge Impulse max detections<br/>`Usage: eimaxdetections <value>` |
 | `eirequirelabels` | A | Set Edge Impulse require-labels flag<br/>`Usage: eirequirelabels <0\|1>` |
@@ -1477,18 +1469,11 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 | `espnowcapturetosd` | A | Capture ESP-NOW frames to the SD card<br/>`Usage: espnowcapturetosd <0\|1> Needs an SD card mounted; frames are appended as they arrive.` |
 | `eventlog` | A | Enable/disable the structured event-history log (events.log)<br/>`Usage: eventlog <0\|1> One line per system event, durable across reboots. Display/behavior unaffected.` |
 | `fmradiodevicepollms` | A | Set FM radio poll interval (ms)<br/>`Usage: fmradiodevicepollms <value>` |
-| `fmradioenabled` | A | Enable/disable the FM radio subsystem<br/>`Usage: fmradioenabled <0\|1>` |
 | `g2holdaction` | A | Set what a ring/temple hold on a HW1 lens page does<br/>`Usage: g2holdaction [0\|1] 0 = Off, 1 = QuickNote; a page with its own hold handler always gets the hold first` |
 | `g2holdsource` | A | Set which hold starts the hold action<br/>`Usage: g2holdsource [0\|1] 0 = ring only, 1 = ring + temples; glasses firmware that reports no hold source accepts any` |
 | `g2holdunprofiled` | A | Allow hold actions on unprofiled glasses firmware (testing)<br/>`Usage: g2holdunprofiled [0\|1] Profiled: both arms 2.2.9.22 or 2.3.2.14 (see g2hold status)` |
 | `gpsdevicepollms` | A | Set GPS poll interval (ms)<br/>`Usage: gpsdevicepollms <value>` |
-| `gpsenabled` | A | Enable/disable the GPS subsystem<br/>`Usage: gpsenabled <0\|1>` |
-| `httpenabled` | A | Enable/disable the web server subsystem<br/>`Usage: httpenabled <0\|1>` |
-| `imuenabled` | A | Enable/disable the IMU subsystem<br/>`Usage: imuenabled <0\|1>` |
-| `inputenabled` | A | Enable/disable the input device subsystem<br/>`Usage: inputenabled <0\|1>` |
-| `llmenabled` | A | Enable/disable the on-device LLM subsystem<br/>`Usage: llmenabled <0\|1>` |
 | `logcategorytags` | A | Set log category-tags flag (persist only)<br/>`Usage: logcategorytags <0\|1>` |
-| `micenabled` | A | Enable/disable the microphone subsystem<br/>`Usage: micenabled <0\|1>` |
 | `notemaxsec` | A | Set the longest QuickNote, in seconds<br/>`Usage: notemaxsec [10-120] Default 60 with on-device transcription, 30 with the Pi (which caps every note at 30)` |
 | `notemic` | A | Set the microphone for CLI and web QuickNotes<br/>`Usage: notemic [0\|1\|2] 0 = Auto (the paired wearer's glasses if connected, else the board mic), 1 = Glasses, 2 = Board mic Notes started from the glasses always use the glasses mic` |
 | `notifydeviceapp` | A | Enable/disable Android app notification cards<br/>`Usage: notifydeviceapp <0\|1> Cards go only to BLE sessions that are logged in; an unauthenticated app sees none.` |
@@ -1502,9 +1487,6 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 | `notifyusershow` |  | Force event kinds through YOUR importance floor<br/>`Usage: notifyusershow [<kind,kind,...>\|set <kind> <on\|off>\|patch <+kind,-kind>\|all\|none] Bare: show; legacy list: replace; set: change one; patch: change several all/none: force every current kind/clear; overrides your notifylevel List valid kinds with 'events kinds'` |
 | `oledautostart` | A | Start the OLED display at boot<br/>`Usage: oledautostart <0\|1>` |
 | `presencedevicepollms` | A | Set presence sensor poll interval (ms)<br/>`Usage: presencedevicepollms <50-5000>` |
-| `presenceenabled` | A | Enable/disable the presence sensor subsystem<br/>`Usage: presenceenabled <0\|1>` |
-| `rtcenabled` | A | Enable/disable the RTC subsystem<br/>`Usage: rtcenabled <0\|1>` |
-| `sensorlogenabled` | A | Enable/disable sensor logging entirely: <0\|1><br/>`Usage: sensorlogenabled <0\|1>` |
 | `sensorlogformat` | A | Set sensor-log format (0=text,1=csv,2=track)<br/>`Usage: sensorlogformat <0\|1\|2> Track (2) replaces the saved sensor selection with GPS-only.` |
 | `sensorlogmask` | A | Set sensor-log sensor bitmask<br/>`Usage: sensorlogmask <0-255>` |
 | `sensorlogpath` | A | Set default sensor-log file path<br/>`Usage: sensorlogpath <"/path">` |
@@ -1514,7 +1496,6 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 | `sessionidleuart` | A | Set UART link session idle-logout (min)<br/>`Usage: sessionidleuart <0-1440>` |
 | `sessionidleweb` | A | Set web CLI session idle-logout (min)<br/>`Usage: sessionidleweb <0-1440>` |
 | `srautostart` | A | Set ESP-SR auto-start flag<br/>`Usage: srautostart <0\|1>` |
-| `srenabled` | A | Enable/disable the speech-recognition subsystem<br/>`Usage: srenabled <0\|1>` |
 | `srmodelsource` | A | Set ESP-SR model source<br/>`Usage: srmodelsource <value>` |
 | `sttautogain` | A | STT picks its own onboard-mic gain (changed only when several sessions agree) and a 120 Hz high-pass; 0 = use pdmamplify/pdmhpf. Applies to the next session.<br/>`Usage: sttautogain [0\|1]` |
 | `sttdecisionhold` | A | Continuous-STT onset noise control: a phrase only the pre-emphasised level opened needs the raw level to reach its onset rule before raw votes hold it open (0 = off, the default); applies to the next session.<br/>`Usage: sttdecisionhold [0\|1]` |
@@ -1532,11 +1513,7 @@ _`otaCommands` has `#if` alternatives in `System_OTA.cpp`; this table is the fir
 | `sttsavetranscripts` | A | Save recognized text; changes apply to the next STT session.<br/>`Usage: sttsavetranscripts [0\|1]` |
 | `sttsilencefloor` | A | Continuous-STT silence floor in frame-RMS counts; applies to the next session.<br/>`Usage: sttsilencefloor [1-32767]` |
 | `sttspeechfloor` | A | Continuous-STT speech onset floor in frame-RMS counts; applies to the next session.<br/>`Usage: sttspeechfloor [1-32767]` |
-| `systemlogenabled` | A | Enable/disable system logging entirely: <0\|1><br/>`Usage: systemlogenabled <0\|1>` |
 | `systemlogflags` | A | Set system-log debug category mask (hex)<br/>`Usage: systemlogflags <0x...>` |
-| `thermalenabled` | A | Enable/disable the thermal camera subsystem<br/>`Usage: thermalenabled <0\|1>` |
-| `tofenabled` | A | Enable/disable the ToF distance sensor subsystem<br/>`Usage: tofenabled <0\|1>` |
 | `tofi2cclockhz` | A | Set ToF I2C clock (Hz)<br/>`Usage: tofi2cclockhz <50000-400000>` |
 | `wifiautostart` | A | Connect to a saved WiFi network at boot: <0\|1><br/>`Usage: wifiautostart <0\|1>` |
-| `wifienabled` | A | Enable/disable WiFi entirely (ESP-NOW unaffected): <0\|1><br/>`Usage: wifienabled <0\|1>` |
 

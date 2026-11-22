@@ -12,7 +12,7 @@
 // whose jsonSection is kModuleSection) and the saved-network array that
 // wifiNetworksWriteJson/ReadJson keep. The backup restore
 // (WebServer_MigrationTool.cpp) keeps this device's networks and forces the
-// three switches on by these names, so a renamed key cannot silently stop
+// two switches on by these names, so a renamed key cannot silently stop
 // matching (it once forced "autoReconnect" after that key was gone). Char
 // arrays, so ArduinoJson takes each key as the string literal it replaces.
 // Every build, also with Wi-Fi compiled out: the restore and the settings
@@ -22,7 +22,6 @@ inline constexpr char kParent[] = "network";
 inline constexpr char kSection[] = "wifi";
 inline constexpr char kModuleSection[] = "network.wifi";  // SettingsModule::jsonSection
 inline constexpr char kNetworks[] = "networks";
-inline constexpr char kEnabled[] = "wifiEnabled";
 inline constexpr char kAutoStart[] = "wifiAutoStart";
 inline constexpr char kAutoReconnect[] = "wifiAutoReconnect";
 

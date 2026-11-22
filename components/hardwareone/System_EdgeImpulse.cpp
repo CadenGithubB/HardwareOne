@@ -402,8 +402,7 @@ void setStateTrackingEnabled(bool enabled) {
 // loader only reads the keys listed here.
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry edgeImpulseSettingEntries[] = {
-  { "eiAutoStart", SETTING_BOOL, &gSettings.eiAutoStart, 1, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "eiautostart" },
-  { "enabled", SETTING_BOOL, &gSettings.eiEnabled, 0, 0, nullptr, 0, 1, "Enable Inference", nullptr, false, nullptr, "eienable" },
+  { "eiAutoStart", SETTING_BOOL, &gSettings.eiAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "eiautostart" },
   { "requireLabels", SETTING_BOOL, &gSettings.edgeImpulseRequireLabels, 1, 0, nullptr, 0, 1, "Require Labels", nullptr, false, nullptr, "eirequirelabels" },
   { "minConfidence", SETTING_FLOAT, &gSettings.edgeImpulseMinConfidence, 0, 0.6f, nullptr, 0, 1, "Min Confidence", nullptr, false, nullptr, "eiconfidence" },
   { "maxDetections", SETTING_INT, &gSettings.edgeImpulseMaxDetections, 5, 0, nullptr, 1, 10, "Max Detections", nullptr, false, nullptr, "eimaxdetections" },
@@ -1211,10 +1210,10 @@ static void inferRgb(const uint8_t* rgb, int width, int height, EiResults& resul
 }
 
 // Checks every entry point applies before it acquires a frame.
+// With no model there is nothing to run: a model loads with eimodelload, or
+// with eiautostart at boot.
 static const char* inferencePreflight() {
-  if (!gEiInitialized) return "Edge Impulse not initialized";
-  if (!gSettings.eiEnabled) return "Edge Impulse disabled";
-  if (!gEiModelLoaded) return "No model loaded";
+  if (!gEiInitialized || !gEiModelLoaded) return "No model loaded. Load one with eimodelload \"<file>\"";
   return nullptr;
 }
 
@@ -1364,7 +1363,7 @@ static void continuousInferenceTask(void* param) {
     // Held for one frame, capture to results. A detect command may hold it
     // for one frame too; load and unload stop this task before taking it.
     xSemaphoreTake(eiInferenceMutex(), portMAX_DELAY);
-    if (gEiContinuousRunning && gSettings.eiEnabled && gEiModelLoaded) {
+    if (gEiContinuousRunning && gEiModelLoaded) {
       inferenceCount++;
       const EiResults results = runCameraInferenceLocked();
 
@@ -1391,8 +1390,7 @@ static void continuousInferenceTask(void* param) {
                       (unsigned long)(psramFound() ? ESP.getFreePsram() : 0));
       }
     } else if (gEiContinuousRunning) {
-      DEBUG_SYSTEMF("[EI_DEBUG] [Continuous] Skipping - enabled=%d modelLoaded=%d",
-                    gSettings.eiEnabled, gEiModelLoaded);
+      DEBUG_SYSTEMF("[EI_DEBUG] [Continuous] Skipping - no model loaded");
     }
     xSemaphoreGive(eiInferenceMutex());
 
@@ -1573,6 +1571,13 @@ static void appendTrackedObjectsJson(JsonDocument& doc) {
 // Organize EI model files: move loose .tflite and .labels.txt into proper /EI Models/<name>/ folders
 static esp_err_t handleEiOrganize(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
+  // Moving model files is a rename: administrators only (accounts below admin
+  // never rename or delete files).
+  if (!hasAdminPrivilege(ctx)) {
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, "{\"success\":false,\"error\":\"admin required\"}", HTTPD_RESP_USE_STRLEN);
+    return ESP_OK;
+  }
 
   if (!filesystemReady) {
     httpd_resp_set_type(req, "application/json");
@@ -1714,7 +1719,7 @@ static const char* eiHelpArgumentRefusal(const String& argsInput) {
   trimmed.trim();
   if (trimmed.length() == 0) return nullptr;
   return "Error: Unknown Edge Impulse subcommand. The commands are single words, for example "
-         "eienable 1, eidetect, eimodelload \"<file>\". Run ei for the list.";
+         "eidetect, eimodelload \"<file>\". Run ei for the list.";
 }
 
 const char* cmd_ei(const String& argsInput) {
@@ -1723,7 +1728,6 @@ const char* cmd_ei(const String& argsInput) {
   
   snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer),
     "Edge Impulse Commands:\n"
-    "  eienable <0|1>      - Enable/disable inference\n"
     "  eidetect            - Run single inference (from camera)\n"
     "  eifile \"<path>\"     - Run inference on stored JPEG file\n"
     "  eicontinuous <0|1>  - Start/stop continuous mode\n"
@@ -1747,38 +1751,6 @@ static const char* detectionReply(const EiResults& results) {
   char* reply = getDebugBuffer();
   serializeJson(doc, reply, GLOBAL_DEBUG_BUFFER_SIZE);
   return reply;
-}
-
-const char* cmd_ei_enable(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  String trimmed = argsInput;
-  trimmed.trim();
-  
-  if (trimmed.length() == 0) {
-    snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Edge Impulse: %s", 
-      gSettings.eiEnabled ? "enabled" : "disabled");
-    return gEiCmdBuffer;
-  }
-  
-  const int val = parseBoolArg(trimmed);
-  if (val < 0) return kCommandReplyNotOnOff;
-  setSetting(gSettings.eiEnabled, val == 1);
-
-  if (gSettings.eiEnabled && !gEiInitialized) {
-    initEdgeImpulse();
-  } else if (!gSettings.eiEnabled) {
-    // Stop live inference + unload model so Enabled off frees the subsystem.
-    // Both wait for an inference in progress to finish before freeing.
-    stopContinuousInference();
-    if (gEiModelLoaded) unloadModel();
-  }
-
-  sensorStatusBumpWith(gSettings.eiEnabled ? "ei_enable" : "ei_disable");
-  
-  snprintf(gEiCmdBuffer, sizeof(gEiCmdBuffer), "Edge Impulse %s", 
-    gSettings.eiEnabled ? "enabled" : "disabled");
-  return gEiCmdBuffer;
 }
 
 const char* cmd_ei_detect(const String& argsInput) {
@@ -1901,7 +1873,6 @@ const char* cmd_ei_status(const String& argsInput) {
     "  Initialized: %s\n"
     "  Model loaded: %s\n"
     "  Model path: %s\n"
-    "  Enabled: %s\n"
     "  Continuous: %s\n"
     "  Min confidence: %.2f\n"
     "  Input size: %dx%d\n"
@@ -1909,7 +1880,6 @@ const char* cmd_ei_status(const String& argsInput) {
     gEiInitialized ? "yes" : "no",
     gEiModelLoaded ? "yes" : "no",
     gLoadedModelPath.length() > 0 ? gLoadedModelPath.c_str() : "(none)",
-    gSettings.eiEnabled ? "yes" : "no",
     gEiContinuousRunning ? "running" : "stopped",
     gSettings.edgeImpulseMinConfidence,
     gModelInputWidth, gModelInputHeight,
@@ -2158,7 +2128,6 @@ const char* cmd_ei_track_clear(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry edgeImpulseCommands[] = {
   { "ei", "List the Edge Impulse commands.", false, cmd_ei, "Usage: ei" },
-  { "eienable", "Enable/disable Edge Impulse inference.", true, cmd_ei_enable, "Usage: eienable <0|1>" },
   { "eidetect", "Run single object detection inference.", false, cmd_ei_detect, "Usage: eidetect" },
   { "eifile", "Run inference on stored JPEG image.", false, cmd_ei_file, "Usage: eifile \"<path>\"" },
   { "eicontinuous", "Start/stop continuous inference mode.", false, cmd_ei_continuous, "Usage: eicontinuous <0|1>" },

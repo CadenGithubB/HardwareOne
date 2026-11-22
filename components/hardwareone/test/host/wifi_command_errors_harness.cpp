@@ -21,7 +21,7 @@ struct CommandArgs {
  size_t count()const{return args.size();} int argInt(size_t n,int fallback)const{return n<args.size()?arg(n).toInt():fallback;}
 };
 #define RETURN_VALID_IF_VALIDATE_CSTR() do {}while(0)
-struct {bool wifiEnabled=true,wifiAutoReconnect=true;} gSettings;
+struct {bool wifiAutoReconnect=true;} gSettings;
 bool initOk=true,connectOk=false,snapshotOk=true,supersedeOk=true;
 int savedCount=0,initCalls=0,connectCalls=0;
 const char* companionReason=nullptr;
@@ -55,9 +55,9 @@ bool connectWifiIndex(int,int){return attempt();}
 bool connectWifiSsid(const String&,int){++rollbackCalls;return false;}
 // INSERT_COMMANDS
 int main(){
- gSettings.wifiEnabled=false;initOk=false;
- assert(std::strstr(cmd_wificonnect(""),"Wi-Fi is disabled. Enable Wi-Fi in Settings."));
- gSettings.wifiEnabled=true;companionReason="C6 restarting; retry shortly";
+ // No saved setting refuses a connect: a failed start names the companion,
+ // else the start failure itself.
+ initOk=false;companionReason="C6 restarting; retry shortly";
  assert(std::strstr(cmd_wificonnect(""),"C6 restarting"));
  companionReason=nullptr;
  assert(std::strstr(cmd_wificonnect(""),"radio could not start"));

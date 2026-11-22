@@ -79,7 +79,7 @@ IDF_LOG_ALLOWED: dict[str, int] = {
     "stt/stt_internal_memory.cpp": 1,
 }
 SERIAL_WRITE_ALLOWED: dict[str, int] = {
-    "HardwareOne.cpp": 19,
+    "HardwareOne.cpp": 17,
     "OLED_FirstTimeSetup.cpp": 20,
     "OLED_SetupWizard.cpp": 37,
     "System_Debug.cpp": 11,

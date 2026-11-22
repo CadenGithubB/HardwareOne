@@ -51,9 +51,8 @@ esp_err_t handlePowerStatus(httpd_req_t* req) {
 // ===========================================================================
 // Every mutation goes through /api/cli, so authorizeCommand applies the same
 // admin gate the CLI, OLED and G2 surfaces get — the page never pokes
-// gSettings or calls setCpuFrequencyMhz itself. The controls are additionally
-// hidden for non-admins so a user who cannot run them isn't handed buttons
-// that only ever return "Error:".
+// gSettings or calls setCpuFrequencyMhz itself. Every account sees every
+// control; when the firmware refuses one, the page shows the reason.
 static void streamPowerContent(httpd_req_t* req, const String& username) {
   streamBeginHtml(req, "Power", false, username, "power");
 
@@ -84,9 +83,6 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
     </div>
   </div>
   <div id='pw-sleepblock' class='alert alert-warning' style='display:none;margin-top:1rem'></div>
-  <div id='pw-readonly' class='alert alert-info' style='display:none;margin-top:1rem'>
-    Power controls require an admin account. This page is read-only for you.
-  </div>
 </div>
 
 <div class='card' data-guest-hide id='pw-card-mode'>
@@ -139,7 +135,6 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
 
   httpd_resp_send_chunk(req, R"JS(
 <script>(function(){
-  var admin = hw.isAdmin();
   var last = null;          // most recent status snapshot
   var stopPoll = null;      // poller canceller, so actions can quiet the page
   var editing = {};         // field id -> true while the user is mid-edit
@@ -157,7 +152,7 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
   // nothing, then re-read status so the UI shows what actually took effect.
   function apply(cmd){
     return cli(cmd).then(function(r){
-      if (failed(r)) { alert(r.trim()); }
+      if (failed(r)) { hw.showCliError(r); }
       return refresh();
     }).catch(function(e){ alert('Command failed: ' + (e && e.message ? e.message : cmd)); });
   }
@@ -217,8 +212,7 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
       button.className = 'btn';
       button.setAttribute('data-freq', String(mhz));
       button.textContent = mhz + ' MHz';
-      button.disabled = !admin;
-      if (admin) hw.on(button, 'click', function(){
+      hw.on(button, 'click', function(){
         apply('cpufreq ' + this.getAttribute('data-freq'));
       });
       wrap.appendChild(button);
@@ -295,19 +289,12 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
       .catch(function(e){ console.error('[POWER] status', e); });
   }
 
-  // Non-admins keep the live status but lose every control — the commands
-  // behind them are admin-gated, so the buttons could only ever fail.
-  if (!admin) {
-    hw.hide('pw-card-mode');
-    hw.hide('pw-card-tuning');
-    hw.hide('pw-card-actions');
-    hw.show('pw-readonly');
-  }
-
   refresh();
   stopPoll = hw.pollJSON('/api/power/status', 2000, applyStatus);
 
-  if (admin) {
+  // Every control stays visible to every signed-in account: the firmware
+  // decides who may run each command, and a refusal shows its reason.
+  {
     // --- tuning fields ---
     function bindField(id){
       var el = hw.$(id);
@@ -343,7 +330,7 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
           if (!ok) return;
           note('Sending ' + cmd + '…');
           cli(cmd).then(function(r){
-            if (failed(r)) { note(''); alert(r.trim()); return; }
+            if (failed(r)) { note(''); hw.showCliError(r); return; }
             if (stopPoll) stopPoll();
             document.body.innerHTML = "<div style='text-align:center;padding:4rem;color:var(--panel-fg)'><h2>" +
               banner + "</h2><p>The device is restarting. Please wait and then reconnect.</p></div>";
@@ -369,7 +356,7 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
           if (!ok) return;
           note('Sleeping for ' + secs + 's… the page will catch up on wake.');
           cli('lightsleep ' + secs).then(function(r){
-            note(failed(r) ? r.trim() : 'Awake.');
+            if (failed(r)) { note(''); hw.showCliError(r); } else note('Awake.');
             refresh();
           }).catch(function(){
             // Expected when the browser gives up before the device wakes.
@@ -379,6 +366,15 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
         });
     });
 
+    // Power Off (deepsleep) is a super-admin command (1.0 role tiers): grayed
+    // out with the reason below super admin. The firmware still decides.
+    (function(){
+      var R = window.__hwRoleRank || { guest: 0, user: 1, admin: 2, superadmin: 3 };
+      var b = hw.$('pw-act-deepsleep');
+      if (b && typeof window.__hwRank === 'number' && window.__hwRank < R.superadmin) {
+        b.disabled = true; b.title = 'Super admin only';
+      }
+    })();
     // Deep sleep never returns: esp_deep_sleep_start() cuts the rails, so the
     // request dies mid-flight. A network error here is the SUCCESS path.
     hw.on(hw.$('pw-act-deepsleep'), 'click', function(){
@@ -394,7 +390,7 @@ static void streamPowerContent(httpd_req_t* req, const String& username) {
           cli('deepsleep').then(function(r){
             // A response only comes back if the command was REFUSED (cooldown,
             // OTA probation, permissions) — it never returns on success.
-            if (failed(r)) { note(''); alert(r.trim()); return; }
+            if (failed(r)) { note(''); hw.showCliError(r); return; }
             offScreen();
           }).catch(offScreen);
         });

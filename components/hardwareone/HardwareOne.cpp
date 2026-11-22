@@ -82,6 +82,7 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 #include "System_I2C.h"
 #include "System_Logging.h"
 #include "System_Debug.h"
+#include "System_EdgeImpulse.h"     // initEdgeImpulse for eiautostart (empty without Edge Impulse)
 #include "System_WiFi.h"
 #if ENABLE_MQTT
   #include "System_MQTT.h"
@@ -305,9 +306,14 @@ volatile unsigned long gWebMirrorSeq = 0;
 #include "System_Power.h"  // Shared CPU transitions, power-save policy and cooldown
 #include "System_MemDiag.h"
 #include "System_Collect.h"  // collectWriteTick (file catch-up, collector side)
+#include "System_PendingCommand.h"  // serial console command in flight (S-11)
 Settings gSettings;
 
 String gSerialCli = "";
+// The console's command in flight (S-11; System_PendingCommand.h).
+static PendingCommand sSerialPending;
+// The console prompt, printed after each completed line or reply.
+static void printSerialPrompt() { Serial.print("$ "); }
 static bool gSerialCliOverflow = false;  // the line being assembled exceeded CMD_INPUT_MAX; discarded whole at newline
 static TransportSessionEpoch gSerialCliEpoch = 0;
 
@@ -1300,12 +1306,11 @@ static void bootAutostartMqtt() {
 // Calls the init handler directly, so it runs where no other command can: in
 // setup, or on cmd_exec after a hand-off (bootAutostartEspNowDeferred).
 static void bootAutostartEspNow(bool wanted) {
-  // espnowEnabled used to serve as BOTH the master switch and the boot flag.
-  // It is now the master switch only; espnowAutoStart is the boot flag.
+  if (!wanted) return;  // espnowautostart off: ESP-NOW waits for openespnow
   const char* espnowCompanionReason = nullptr;
-  if (gSettings.espnowEnabled && radioCompanionBlocksRadio(&espnowCompanionReason)) {
+  if (radioCompanionBlocksRadio(&espnowCompanionReason)) {
     BROADCAST_PRINTF("[ESP-NOW] Auto-start skipped: %s", espnowCompanionReason);
-  } else if (gSettings.espnowEnabled && wanted) {
+  } else {
     broadcastOutput("[ESP-NOW] Auto-initialization enabled in settings");
     const char* setupError = checkEspNowFirstTimeSetup();
     if (setupError && strlen(setupError) > 0) {
@@ -1348,7 +1353,7 @@ static void bootStartHandedOffServices() {
   if (sBootNetServices.mqtt) bootAutostartMqtt();
 #endif
 #if ENABLE_ESPNOW
-  if (gSettings.espnowEnabled &&
+  if (sBootNetServices.espnow &&
       !submitDeferredToCmdExec(bootAutostartEspNowDeferred, nullptr)) {
     broadcastOutput("[ESP-NOW] Auto-start not queued (command executor full); use 'openespnow'");
   }
@@ -1761,17 +1766,14 @@ void hardwareone_setup() {
   heapLogSummary("boot.after_debugbuf");
 
 #if ENABLE_AUTOMATION
-  // Both axes: automationEnabled is permission, automationAutoStart is boot
-  // intent. The scheduler can still be brought up later with
-  // `automation system enable`, which starts the scheduler through its owner.
-  if (gSettings.automationEnabled && ramFlushResolve(RF_AUTOMATION, gSettings.automationAutoStart)) {
+  // automationAutoStart is the boot intent. The scheduler can still be brought
+  // up later with `automation system enable`, which starts it through its owner.
+  if (ramFlushResolve(RF_AUTOMATION, gSettings.automationAutoStart)) {
     if (!initAutomationSystem()) {
       ERROR_SYSTEMF("FATAL: Failed to initialize automation system");
       while (1) delay(1000);
     }
     DEBUG_SYSTEMF("Automation system initialized at boot");
-  } else if (!gSettings.automationEnabled) {
-    DEBUG_SYSTEMF("Automation system disabled - skipping initialization");
   } else {
     DEBUG_SYSTEMF("Automation autostart off - scheduler idle until 'automation system enable'");
   }
@@ -2039,11 +2041,12 @@ void hardwareone_setup() {
 
   // Always attempt WiFi connection if credentials exist (controlled by wifiAutoStart setting)
   const char* wifiCompanionReason = nullptr;
-  if (gSettings.wifiEnabled && radioCompanionBlocksRadio(&wifiCompanionReason)) {
+  const bool wantWifiAtBoot = ramFlushResolve(RF_WIFI, gSettings.wifiAutoStart);
+  if (wantWifiAtBoot && radioCompanionBlocksRadio(&wifiCompanionReason)) {
     BROADCAST_PRINTF("[WiFi] Auto-start skipped: %s", wifiCompanionReason);
     oledSetBootProgress(40, "Skipping WiFi");
     oledSetBootProgress(50, "Continuing offline");
-  } else if (gSettings.wifiEnabled && ramFlushResolve(RF_WIFI, gSettings.wifiAutoStart)) {  // Controlled by first-time setup or settings
+  } else if (wantWifiAtBoot) {  // Controlled by first-time setup or settings
     // The connect and NTP run beside the rest of setup (see "Boot network
     // bring-up" above); setup waits for them only if that task can't start.
     if (bootNetStartBackground()) {
@@ -2093,13 +2096,13 @@ void hardwareone_setup() {
   // Apply OLED settings if display was initialized early
   oledApplySettings();
 
-  // Bluetooth - auto-start if enabled in settings.
-  // Two triggers can bring up BT at boot:
-  //   1. bleAutoStart=true   → start whichever role bleMode says
-  //   2. The client role has an authorized saved reconnect target: the shared
-  //      stack comes up and each peer with auto-reconnect on (glasses, ring,
-  //      phone) opens itself. Saved peers never override Server selection.
-  // BLE_Peers owns paced reconnect admission after the stack starts.
+  // Bluetooth - bleAutoStart alone decides whether it comes up at boot. With it
+  // on, the role bleMode says starts; in the client role each saved peer with
+  // auto-reconnect on (glasses, ring, phone) then opens itself. With it off,
+  // Bluetooth stays off at boot even with saved peers: their reconnect runs
+  // once the user opens Bluetooth (openble, openg2, openring, openphone).
+  // Saved peers never override Server selection. BLE_Peers owns paced
+  // reconnect admission after the stack starts.
 #if ENABLE_BLUETOOTH
   // Make sure built-in metadata-only peers (phone) are registered so
   // bleAnyPeerWantsAutoReconnect can see them. bleStackUp() registers the
@@ -2109,23 +2112,14 @@ void hardwareone_setup() {
   // Persisted mode is authoritative. Saved accessory intents never turn an
   // explicitly selected Server into a central role.
   const int bootBleMode = gSettings.bleMode;
-  bool wantClientForAutoReconnect = false;
-  if (bootBleMode == BLE_MODE_G2_CLIENT) wantClientForAutoReconnect = bleAnyPeerWantsAutoReconnect();
-
-  // Substitute only the setting read, not the whole condition: a G2/ring peer
-  // brings the radio up in client mode independently of bleAutoStart.
-  // NOTE the parentheses: bleEnabled gates BOTH reasons to come up. Without
-  // them this reads `(enabled && autostart) || wantClient`, so a peer set to
-  // auto-reconnect would start the radio on a device where Bluetooth is
-  // explicitly disabled. Disabled has to mean disabled.
-  const bool wantBleServerAtBoot = ramFlushResolve(RF_BLUETOOTH, gSettings.bleAutoStart);
+  const bool wantBleAtBoot = ramFlushResolve(RF_BLUETOOTH, gSettings.bleAutoStart);
+  const bool wantClientForAutoReconnect =
+      wantBleAtBoot && bootBleMode == BLE_MODE_G2_CLIENT && bleAnyPeerWantsAutoReconnect();
 
   const char* bleCompanionReason = nullptr;
-  if (gSettings.bleEnabled && (wantBleServerAtBoot || wantClientForAutoReconnect) &&
-      radioCompanionBlocksRadio(&bleCompanionReason)) {
+  if (wantBleAtBoot && radioCompanionBlocksRadio(&bleCompanionReason)) {
     BROADCAST_PRINTF("[BLE] Auto-start skipped: %s", bleCompanionReason);
-  } else if (gSettings.bleEnabled &&
-      (wantBleServerAtBoot || wantClientForAutoReconnect)) {
+  } else if (wantBleAtBoot) {
     oledSetBootProgress(85, "Starting Bluetooth");
 
     // Pause sensor polling during BLE init to avoid interrupt contention
@@ -2149,7 +2143,7 @@ void hardwareone_setup() {
         BROADCAST_PRINTF("Bluetooth client stack failed to start: %s", bleStackLastRefusal());
       }
     } else
-    if (bootBleMode == BLE_MODE_SERVER && wantBleServerAtBoot) {
+    if (bootBleMode == BLE_MODE_SERVER) {
       // Server-mode path only runs when the user *explicitly* asked for BT
       // at boot, or when this boot is resuming the transport that just
       // delivered an OTA. We never coerce to server from auto-reconnect flags.
@@ -2166,7 +2160,7 @@ void hardwareone_setup() {
 
     pollResume();
   } else {
-    broadcastOutput("Bluetooth disabled by default. Use quick settings (SELECT button) or 'openble' to enable.");
+    broadcastOutput("Bluetooth not started (bleautostart is off). Run 'openble' or use quick settings (SELECT button).");
   }
 #endif
 
@@ -2176,16 +2170,16 @@ void hardwareone_setup() {
   processAutoStartSensors();
 #endif
 #if ENABLE_GPIO_ENCODER
-  // GPIO input has no I2C start queue. Preserve the shared enable/autostart
-  // policy and RAM-flush resume decision used by the other input backends.
-  if (gSettings.inputEnabled && ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
+  // GPIO input has no I2C start queue. Preserve the shared autostart policy
+  // and RAM-flush resume decision used by the other input backends.
+  if (ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
     inputStartInternal();
   }
 #endif
 
 #if ENABLE_CAMERA_SENSOR
   // Camera auto-start (independent of I2C sensor queue)
-  if (gSettings.cameraEnabled && ramFlushResolve(RF_CAMERA, gSettings.cameraAutoStart)) {
+  if (ramFlushResolve(RF_CAMERA, gSettings.cameraAutoStart)) {
     runUnifiedSystemCommand("opencamera");
   }
 #endif
@@ -2202,15 +2196,15 @@ void hardwareone_setup() {
   #if ENABLE_ESP_SR
   // Resolve both through this same if/else — SR takes the mic, so resolving them
   // independently would double-claim the I2S channel.
-  if (gSettings.srEnabled && ramFlushResolve(RF_SR, gSettings.srAutoStart)) {
+  if (ramFlushResolve(RF_SR, gSettings.srAutoStart)) {
     broadcastOutput("Starting ESP-SR speech recognition...");
     runUnifiedSystemCommand("opensr");
-  } else if (gSettings.micEnabled && ramFlushResolve(RF_MICROPHONE, gSettings.micAutoStart)) {
+  } else if (ramFlushResolve(RF_MICROPHONE, gSettings.micAutoStart)) {
     broadcastOutput("Starting microphone sensor...");
     runUnifiedSystemCommand("openmic");
   }
   #else
-  if (gSettings.micEnabled && ramFlushResolve(RF_MICROPHONE, gSettings.micAutoStart)) {
+  if (ramFlushResolve(RF_MICROPHONE, gSettings.micAutoStart)) {
     broadcastOutput("Starting microphone sensor...");
     runUnifiedSystemCommand("openmic");
   }
@@ -2228,7 +2222,7 @@ void hardwareone_setup() {
 #if ENABLE_HTTP_SERVER
   oledSetBootProgress(90, "Starting HTTP");
 
-  sBootNetServices.http = gSettings.httpEnabled && ramFlushResolve(RF_HTTP, gSettings.httpAutoStart);
+  sBootNetServices.http = ramFlushResolve(RF_HTTP, gSettings.httpAutoStart);
   if (!netHandedOff) bootAutostartHttp(sBootNetServices.http);
 #else
   oledSetBootProgress(90, "Skipping HTTP");
@@ -2238,7 +2232,7 @@ void hardwareone_setup() {
   // Mirrors the sensor/SR auto-start pattern (gSettings.<x>AutoStart -> runtime
   // start command). Loading is heavy (PSRAM + time), so it's opt-in (default off).
 #if ENABLE_LLM_SOURCE_ONBOARD
-  if (gSettings.llmEnabled && ramFlushResolve(RF_LLM, gSettings.llmAutoStart)) {
+  if (ramFlushResolve(RF_LLM, gSettings.llmAutoStart)) {
     // The model id travels as one quoted token, so a name with a space stays whole.
     char llmAutoCmd[160];
     if (llmBuildLoadCommand(gSettings.llmDefaultModel.c_str(), 0, llmAutoCmd, sizeof(llmAutoCmd))) {
@@ -2251,11 +2245,15 @@ void hardwareone_setup() {
   }
 #endif
 
+#if ENABLE_EDGE_IMPULSE
+  // Edge Impulse: eiautostart loads the default model at boot; otherwise a
+  // model loads only by hand (eimodelload).
+  if (gSettings.eiAutoStart) initEdgeImpulse();
+#endif
+
   // MQTT client - auto-start if enabled in settings and WiFi is connected
 #if ENABLE_MQTT
-  // mqttEnabled stays a hard master gate — the overlay resolves the
-  // autostart intent, it does not override whether MQTT is configured at all.
-  sBootNetServices.mqtt = gSettings.mqttEnabled && ramFlushResolve(RF_MQTT, gSettings.mqttAutoStart);
+  sBootNetServices.mqtt = ramFlushResolve(RF_MQTT, gSettings.mqttAutoStart);
   if (sBootNetServices.mqtt) {
     oledSetBootProgress(92, "Starting MQTT");
     if (!netHandedOff) bootAutostartMqtt();
@@ -2404,8 +2402,8 @@ void hardwareone_setup() {
   memDiagBootInit();  // bench builds only (HW1_BENCH_MEMDIAG)
   // Gated at the call site: both helpers read their own autostart flag internally,
   // so the overlay has to decide here rather than inside them.
-  if (gSettings.sensorLogEnabled && ramFlushResolve(RF_SENSORLOG, gSettings.sensorLogAutoStart)) sensorLogAutoStart();
-  if (gSettings.systemLogEnabled && ramFlushResolve(RF_SYSTEMLOG, gSettings.systemLogAutoStart)) systemLogAutoStart();
+  if (ramFlushResolve(RF_SENSORLOG, gSettings.sensorLogAutoStart)) sensorLogAutoStart();
+  if (ramFlushResolve(RF_SYSTEMLOG, gSettings.systemLogAutoStart)) systemLogAutoStart();
 
   broadcastOutput("[Boot] Setup complete");
 
@@ -2758,9 +2756,33 @@ void hardwareone_loop() {
   // makes this drain a no-op while the wizard is active, so every byte
   // reaches waitForSerialInputBlocking() instead. See declaration in
   // System_SetupWizard.h.
+  // The console's command in flight (S-11): cmd_exec runs it while this loop
+  // keeps going, and the console reads no new keys until its reply is printed.
+  // A command that reads the console itself (openwifi's Ctrl-C/Esc) therefore
+  // still owns the keystrokes while it runs, and the inline login, logout and
+  // whoami below never overtake a queued command.
+  bool serialCommandRunning = false;
+  if (sSerialPending.busy()) {
+    String reply;
+    bool replyOk = false;
+    const PendingCommand::Poll state = sSerialPending.poll(millis(), reply, replyOk);
+    if (state == PendingCommand::Poll::Waiting) {
+      serialCommandRunning = true;
+    } else if (state != PendingCommand::Poll::Idle) {
+      const CommandContext& done = sSerialPending.context();
+      deliverCommandResult(reply, done);
+      String completedSerialUser;
+      bool completedSerialAuthed = false;
+      if (serialTransportSessionSnapshot(completedSerialUser, completedSerialAuthed) ==
+              done.transportSessionEpoch &&
+          completedSerialAuthed)
+        gSerialLastInteractionMs.store(sessionStampNow(), std::memory_order_release);
+      printSerialPrompt();
+    }
+  }
   // Keys typed while an openwifi (or the boot connect) watched the console for
   // Ctrl-C/Esc were kept by it; they come first, then Serial.
-  while (!gWizardOwnsSerial) {
+  while (!gWizardOwnsSerial && !serialCommandRunning) {
     char c;
     if (!wifiConsoleTypeaheadPop(c)) {
       if (!Serial.available()) break;
@@ -2784,7 +2806,7 @@ void hardwareone_loop() {
         gSerialCli = "";
         gSerialCliEpoch = 0;
         Serial.printf("Serial - line too long (limit %u bytes), discarded\n", (unsigned)CMD_INPUT_MAX);
-        Serial.print("$ ");
+        printSerialPrompt();
         break;
       }
       if (gSerialCliEpoch == 0 ||
@@ -2794,6 +2816,7 @@ void hardwareone_loop() {
         continue;
       }
       const TransportSessionEpoch admittedSerialEpoch = gSerialCliEpoch;
+      bool serialPromptLater = false;  // a queued command prints it with its reply
       String cmd = gSerialCli;
       cmd.trim();
       String admittedSerialUser;
@@ -2823,7 +2846,7 @@ void hardwareone_loop() {
         }
         gSerialCli = "";
         gSerialCliEpoch = 0;
-        Serial.print("$ ");
+        printSerialPrompt();
         break;
       }
 
@@ -2972,9 +2995,10 @@ void hardwareone_loop() {
           uc.ctx.replyHandle = nullptr;
           uc.ctx.httpReq = nullptr;
 
-          String out;
-          (void)submitAndExecuteSync(uc, out);
-          deliverCommandResult(out, uc.ctx);
+          // Queued, not waited for: the reply and the next prompt are
+          // printed by the poll above once cmd_exec returns it.
+          (void)sSerialPending.start(uc, millis());
+          serialPromptLater = true;
         }
       }
       // Every serial line is a real keystroke-driven interaction; refresh the
@@ -2993,7 +3017,7 @@ void hardwareone_loop() {
 
       gSerialCli = "";
       gSerialCliEpoch = 0;
-      Serial.print("$ ");
+      if (!serialPromptLater) printSerialPrompt();
       break;  // Process at most one command per loop() iteration to avoid starving WDT
     } else {
       if (gSerialCliEpoch == 0) gSerialCliEpoch = liveSerialInputEpoch;

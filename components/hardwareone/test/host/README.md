@@ -1107,7 +1107,7 @@ on the same fakes as `test_edge_impulse_jpeg.py`, with the continuous task on a
 `std::thread`, FreeRTOS semaphores on `std::mutex`, and a fake interpreter that
 can hold one Invoke open. Scenarios: `eicontinuous 0` then `1` inside one
 interval leaves exactly one task, and a stop returns with the task gone;
-`eienable 0`, a model load and an unload during a running Invoke wait for that
+`eimodelunload`, a model load and an unload during a running Invoke wait for that
 frame before freeing (a load resumes continuous mode on the new model); camera,
 `eidetect`, file and web detect during a continuous frame report busy and run
 no Invoke, and a detect between frames runs. Not modelled: FreeRTOS priorities,
@@ -2016,9 +2016,9 @@ python3 components/hardwareone/test/host/test_camera_async_power.py --sanitize
 
 UI adapters submit `opencamera async` / `closecamera async`
 (System_Camera_DVP.cpp) through the command executor. The registry authorizes
-them, the live-session fence applies and the `[CMD]` audit records them. A
-start honours the `cameraEnabled` master switch as the synchronous
-`opencamera` does; a stop is allowed while the camera is disabled. Both report
+them, the live-session fence applies and the `[CMD]` audit records them. No
+saved setting refuses a start of either form (`cameraautostart` only decides
+boot). Both report
 only whether cam_power admitted the request and never wait for the camera.
 
 `camera_async_power` compiles the production `cmd_camerastart` /
@@ -2324,9 +2324,9 @@ stores, clock due times, event throttling, safety polling and millisecond wrap.
 Controlled overlap verifies that refreshes during a rebuild survive and that
 stopping during a read cannot restore a freed cache. Failed file writes leave
 the cached schedule intact. Threaded polling, notifications, event posts and
-start/stop exercise cache lifetime under ThreadSanitizer. Permission revoked by
-another writer stops the scheduler on its next tick; a later grant stays idle
-until the owner starts it. A newer automations.json format (`"version"` above
+start/stop exercise cache lifetime under ThreadSanitizer. No saved setting
+stops a running scheduler: only `automation system disable` does, and
+`automation system enable` resumes it. A newer automations.json format (`"version"` above
 `kAutomationsFileVersion`) is refused: nothing is cached or listed, the store is
 never written and keeps its text, and the add command's load
 (`loadAutomationsStoreForEdit`) refuses without seeding an empty store over it;
@@ -3122,7 +3122,7 @@ Wire timeout behavior; each underlying I/O call must still return.
 
 ```sh
 ctest --test-dir /path/to/host-build --output-on-failure \
-  -R '^(i2c_device_queue|sensor_lifecycle_requests|sensor_start_outcomes|sensor_task_restart|tof_psram_lifecycle|sensor_restart_core_tests|sensor_auto_disable_sites|openinput_enable_gate)$'
+  -R '^(i2c_device_queue|sensor_lifecycle_requests|sensor_start_outcomes|sensor_task_restart|tof_psram_lifecycle|sensor_restart_core_tests|sensor_auto_disable_sites|openinput_backends)$'
 ```
 
 `i2c_device_queue` compiles the production manager queue methods. It covers
@@ -3142,14 +3142,14 @@ is refused without allocating the manager, and start hints follow only an
 accepted start (helper and the real GPS command). ESP-NOW enabled
 and disabled variants run separately.
 
-`sensor_lifecycle_requests` also covers the `<x>enabled` switch of every open
-(one sentence, nothing probed or queued, first-time setup still starts the input
-device) and the automatic restart of a sensor that switched itself off, through
+`sensor_lifecycle_requests` also covers that no saved setting refuses an open
+(every sensor opens with its start-at-boot switch off, in and out of first-time
+setup) and the automatic restart of a sensor that switched itself off, through
 the production worker. `sensor_restart_core_tests` is the restart's wait ladder
 on its own (System_SensorRestartCore.h). `sensor_auto_disable_sites` reads the
 drivers: each of the ten auto-disable sites reports before it stops, and nothing
-else reports. `openinput_enable_gate` compiles the production `openinput` for
-the GPIO encoder and the three I2C input backends.
+else reports. `openinput_backends` compiles the production `openinput` for
+the GPIO encoder and the three I2C input backends; no saved setting refuses it.
 
 `tuning_settings_saved` checks that every setting the ESP-SR and G2 commands
 write has a settings row, that the five tuning rows' defaults equal the
@@ -3664,9 +3664,9 @@ firmware posts SYSEVT_FEATURE_TOGGLED, that every command the shipping
 kFeatureSwitches table names is registered (tools/command_registry.py), that
 each flag it pairs with a command is the flag that command's settings row
 writes, that the "after a reboot" note sits exactly on the rows whose allowed
-command itself says a reboot is required (today only i2cbusenabled; wifienabled
-and oledenabled act at once), and that the help row no longer offers the on/off
-form.
+command itself says a reboot is required (today only i2cbusenabled, the one
+allowed switch left), that only the I2C bus row has an allowed switch, and that
+the help row no longer offers the on/off form.
 
 `sensorlog_settings` compiles the production numeric logger handlers, complete
 generic settings editor, shared argument parser and changed-only settings
@@ -5571,11 +5571,10 @@ command, and that every OLED row names an existing command. `--component`/`--sou
 point it at another tree; ASan/UBSan follow `--sanitize`. Table metadata only:
 `authorizeCommand`, the web UI and device behavior are not run.
 
-Suggested one-sentence addition to the existing `settings_mutation` paragraph: In the
-OLED-enabled variant it also runs the dedicated `oledenabled` command with display
-boundaries: the generic on/off/true/false/1/0/enable/disable tokens start or tear down
-the panel as before, and any other token (or none) is refused before it persists or
-touches the display. `--component` points the suite at another tree.
+`settings_mutation` also checks that no setting write runs a service command: a
+boolean off is a plain save (value, persistence request, event), also for a row
+that carries a removed `<x>enabled` name. `--component` points the suite at
+another tree.
 
 ## OLED session role cache
 
@@ -6112,7 +6111,7 @@ real `HAL_JPEG.cpp` front end with a faked codec backend. Scenarios: a
 `eiinputsize` value after load, a non-square 64x48 model, float32 and int8
 fills, a 12-class output (label table sized from the model, each detection
 owning its label, distinct `class_N` names for unnamed classes), camera/file
-parity (same input tensor, same results, same eiEnabled and no-model errors;
+parity (same input tensor, same results, same no-model errors;
 only the camera updates tracked objects) and the web detect JSON
 (`modelInputSize`, `lastSeenMs`, `stateChangeMs`). The decode unit checks the
 module's VGA cap and rejections before the codec; the link build checks that an
@@ -7157,7 +7156,7 @@ both writers of the heartbeat mode. `espnow_history_depth` compiles the two `#if
 history budget (default, maximum and total KB per ring, refs per on-device view) and the web poll: they follow
 `CONFIG_SPIRAM`, so the ESP32-P4 gets the PSRAM budget; it also checks that ESP-NOW start allocates no history,
 decides the budget from the PSRAM found at runtime and says it in one line.
-`settings_onoff_commands` runs five `<0|1>` setting commands: every word the shared parser accepts, any other word
+`settings_onoff_commands` runs four `<0|1>` setting commands: every word the shared parser accepts, any other word
 refused, side effects kept. `espnow_user_credentials` (extended) refuses a remote command whose user name or
 password does not fit.
 

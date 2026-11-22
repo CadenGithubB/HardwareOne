@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Exercise shipping settings mutation paths on the host.
 
-The generic handler, three mutator overloads, shared notification/finalization,
-persistence adapter and (OLED builds) the dedicated `oledenabled` command are
-extracted intact (`features` only lists since 2026-11-20 and writes no setting;
+The generic handler, three mutator overloads, shared notification/finalization
+and persistence adapter are extracted intact (no setting write runs a service
+command since the <x>enabled switches went, 2026-11-21) (`features` only lists since 2026-11-20 and writes no setting;
 test_features_list_only.py pins that); --component points at another
 tree. The batching core and ArduinoJson are production headers; registry
 entries are controlled fixtures.
@@ -51,7 +51,6 @@ def generated(component: Path = COMPONENT) -> str:
               extract_block(settings_h, "struct SettingsModule") + ";"]
     definitions = [extract_macro(utils, "RETURN_VALID_IF_VALIDATE_CSTR"),
         extract_block(settings_cpp, "bool requestSettingsPersist("),
-        extract_block(settings_cpp, "static void applyMasterEnableDisable("),
         "bool settingOptionLabel(const SettingEntry*, long long, char*, size_t);",
         extract_block(settings_cpp, "void notifySettingChanged("),
         extract_block(settings_cpp, "void finishSettingChange("),
@@ -59,12 +58,9 @@ def generated(component: Path = COMPONENT) -> str:
         extract_block(settings_h, "inline void setSetting(String& field, const String&"),
         extract_block(settings_h, "inline void setSetting(String& field, const char*"),
         *generic_setting_definitions(settings_cpp, utils)]
-    # The dedicated OLED command shares the boolean token contract (OLED builds).
-    oled_command = extract_block((component / "OLED_Utils.cpp").read_text(), "const char* cmd_oled_enabled(")
     harness = (HERE / "settings_mutation_harness.cpp").read_text()
     for marker, body in (("// INSERT_TYPES", "\n\n".join(types)),
-                         ("// INSERT_PRODUCTION", "\n\n".join(definitions)),
-                         ("// INSERT_OLED_COMMAND", oled_command)):
+                         ("// INSERT_PRODUCTION", "\n\n".join(definitions))):
         require(harness.count(marker) == 1, f"bad harness marker: {marker}")
         harness = harness.replace(marker, body)
     return harness

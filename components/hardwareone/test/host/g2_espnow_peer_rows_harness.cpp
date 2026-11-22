@@ -50,6 +50,12 @@ static bool g2ShowListPage(const char* const* items, size_t count) {
 }
 static unsigned menuGen = 0;
 static void g2BumpMenuGen() { ++menuGen; }
+// Lens notice boundary (G2_HijackCmd.h): no refusal is pending here, so each
+// back row keeps its label.
+static constexpr int G2_HIJACK_PAGE_ESPNOW_APP = 10;
+static void g2LensNoticeBackRow(int, const char* label, char* out, size_t cap) {
+  if (label != out) std::snprintf(out, cap, "%s", label);
+}
 
 // ---- ESP-NOW (System_ESPNow.h), as far as the lifted code reads it ------------------
 #if ENABLE_ESPNOW

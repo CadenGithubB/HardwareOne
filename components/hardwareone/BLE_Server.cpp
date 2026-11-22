@@ -3381,7 +3381,9 @@ void bleRecoverStuckPhone() {
     logSystemEvent("BLE", "Stuck phone host restart failed terminal teardown; Bluetooth remains blocked");
     return;
   }
-  if(!gSettings.bleEnabled || gSettings.bleMode!=wantedMode) {
+  // The RECOVERING claim held since the start keeps closeble out, so only a
+  // saved role change can have moved the user's intent meanwhile.
+  if(gSettings.bleMode!=wantedMode) {
     logSystemEvent("BLE", "Stuck phone host retired; changed user intent prevents role restart");
     return;
   }
@@ -3505,9 +3507,6 @@ const char* getBleStateString() {
 // switch is not a user disconnect), takes the client stack down and brings the
 // server host up. `closeconsole` returns the saved role to client.
 static const char* cmd_openconsole(const String& argsInput) {
-  if (!gSettings.bleEnabled) {
-    return "Error: Bluetooth is disabled - run 'bleenabled 1' first";
-  }
   if (isBleServerInitialized()) {
     return "Error: App console server is already running. Stop it first with 'closeconsole' to restart it.";
   }
@@ -3590,11 +3589,8 @@ static const char* cmd_closeconsole(const String& argsInput) {
 // device (their reconnect intent is kept for the next `openble`), the console
 // server, and stops the stack: the host, its controller link and the setup
 // worker go, and the device workers went with their devices. Runtime only;
-// `bleenabled 0` is `closeble` plus the persisted master switch.
+// whether Bluetooth comes up at boot is bleautostart.
 static const char* cmd_openble(const String& /*argsInput*/) {
-  if (!gSettings.bleEnabled) {
-    return "Error: Bluetooth is disabled - run 'bleenabled 1' first";
-  }
   if (isBleServerInitialized()) {
     return "Error: the app console server owns the Bluetooth host; run 'closeconsole' first";
   }
@@ -4595,7 +4591,7 @@ static const char* cmd_blemode(const String& argsInput) {
 const CommandEntry bluetoothCommands[] = {
   // Start/Stop (voice phrases live in kVoiceRoutes, System_ESPSR.cpp)
   { "openble",      "Bluetooth on: bring the shared client stack up; devices with auto-reconnect come back (openg2 / openring / openphone open one).", true, cmd_openble },
-  { "closeble",     "Bluetooth off: close the glasses, ring, phone and the app console, then stop the host (bleenabled 0 also persists it).", true, cmd_closeble },
+  { "closeble",     "Bluetooth off: close the glasses, ring, phone and the app console, then stop the host.", true, cmd_closeble },
   { "openconsole",  "Start the app console server for a direct app connection (closes the glasses, ring and phone; saved boot role = server).", true, cmd_openconsole },
   { "closeconsole", "Stop the app console server (saved boot role back to client; 'openble' brings the client stack back).", true, cmd_closeconsole },
   { "blestatus",    "Show the Bluetooth role, app console and relay pipe. (add 'json' for JSON output)", false, cmd_blestatus },
@@ -4659,7 +4655,6 @@ static constexpr const char* kBleModeChoices = "0|App console"
   ;
 static constexpr int kBleModeMaximum = (ENABLE_G2_GLASSES || ENABLE_BLE_PHONE_PIPE) ? 1 : 0;
 const SettingEntry bluetoothSettingsEntries[] = {
-  { "bleEnabled", SETTING_BOOL, &gSettings.bleEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "bleenabled" },
   { "bluetoothAutoStart",    SETTING_BOOL,   &gSettings.bleAutoStart,    false, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "bleautostart" },
   { "bluetoothRequireAuth",  SETTING_BOOL,   &gSettings.bleRequireAuth,  true, 0, nullptr, 0, 1, "Require Authentication", nullptr, false, nullptr, "blerequireauth" },
   { "bluetoothTxPower",      SETTING_INT,    &gSettings.bleTxPower,            3, 0, nullptr, 0, 7, "TX Power (0-7)", nullptr, false, nullptr, "bletxpower" },

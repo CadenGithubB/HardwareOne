@@ -281,7 +281,7 @@ static void oledRefusalToast() {
   gReplies = {{false, "Error: Admin access required for command 'wifiadd'. Contact an administrator."}};
   oledManualAdd("HomeNet", "secret12");
   EXPECT(oledRan({"wifiadd \"HomeNet\" \"secret12\""}), "ran: " + joined(gOledLines));
-  EXPECT(gToast == "Admin required",
+  EXPECT(gToast == "Needs an admin",
          "an admin refusal of wifiadd is toasted, toast: '" + gToast + "'");
 
   oledBegin("oled_refusal_toast");
@@ -295,21 +295,20 @@ static void oledRefusalToast() {
   oledScanPick("HomeNet", "secret12");
   EXPECT(oledRan({"wifiadd \"HomeNet\" \"secret12\""}),
          "a refused add never connects, ran: " + joined(gOledLines));
-  EXPECT(gToast == "Admin required", "scan-pick refusal toasted, toast: '" + gToast + "'");
+  EXPECT(gToast == "Needs an admin", "scan-pick refusal toasted, toast: '" + gToast + "'");
 
   // The same mapping as every other OLED action (OLED_Utils oledCommandReplyText).
   oledBegin("oled_refusal_toast");
   gReplies = {{false, "Error: Super-admin access required for command 'wifiadd'."}};
   oledManualAdd("HomeNet", "secret12");
-  EXPECT(gToast == "Admin required",
-         "a super-admin refusal is toasted as 'Admin required', toast: '" + gToast + "'");
+  EXPECT(gToast == "Needs a super admin",
+         "a super-admin refusal is toasted as 'Needs a super admin', toast: '" + gToast + "'");
 
   oledBegin("oled_refusal_toast");
   gReplies = {{false, "Error: Command timed out after 60 s. It may still finish; check the result "
                       "before repeating it."}};
   oledManualAdd("HomeNet", "secret12");
-  EXPECT(gToast == "Command timed out after 60 s. It may still finish; check the result before "
-                   "repeating it.",
+  EXPECT(gToast == "Command timed out after 60 s.",
          "the executor's timeout is toasted without its token, toast: '" + gToast + "'");
 
   oledBegin("oled_refusal_toast");

@@ -170,6 +170,10 @@ EDITOR_FUNCTIONS = (
 def editor(read) -> str:
     source = read("OLED_SettingsEditor.cpp")
     parts = []
+    # A refused local save shows the shared short refusal (OLED_Utils.cpp).
+    utils = read("OLED_Utils.cpp")
+    if "void oledCommandReplyText(" in utils:
+        parts.append(extract_block(utils, "void oledCommandReplyText("))
     for markers, standin in EDITOR_FUNCTIONS:
         if isinstance(markers, str):
             markers = (markers,)

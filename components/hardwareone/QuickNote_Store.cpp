@@ -112,6 +112,14 @@ __attribute__((noinline)) AuthContext ownerContext(CommandSource source, const c
   return ctx;
 }
 
+// The system identity confined to the folder that holds `path`: for the
+// store's own rename and cleanup steps after the owner's create.
+static AuthContext noteMover(const String& path) {
+  const int slash = path.lastIndexOf('/');
+  const String folder = slash > 0 ? path.substring(0, slash) : String("/");
+  return VFS::systemAuth(folder.c_str(), "note save");
+}
+
 // The write every note file takes (create, restamp): `head`, then the text
 // (`text`, or the rest of `source` copied through `head` once that is
 // written) into `tmp`, renamed to `path` only when complete, and kept only if
@@ -120,6 +128,14 @@ __attribute__((noinline)) AuthContext ownerContext(CommandSource source, const c
 bool writeNote(const AuthContext& ctx, bool sd, const String& tmp, const String& path,
                char* head, size_t headLength, const char* text, File* source, size_t bytes,
                const char** why) {
+  // Accounts below admin create files but never rename, overwrite or delete
+  // them (the path rules). The owner creates `tmp`; clearing a crash's
+  // leftover tmp, moving the new one into place and removing a failed copy
+  // are this store's own steps, so they run as the system confined to the
+  // note's folder.
+  const AuthContext mover = noteMover(path);
+  if (VFS::existsGuarded(tmp, ctx) && !VFS::removeGuarded(tmp, mover))
+    return fail(why, "Cannot open note file");
   File file = VFS::openGuarded(tmp, "w", ctx, true);
   if (!file || file.isDirectory()) {
     if (file) file.close();
@@ -141,18 +157,18 @@ bool writeNote(const AuthContext& ctx, bool sd, const String& tmp, const String&
   if (sd && !ok) VFS::noteSdWriteFailure("note write");
   if (!sd) VFS::noteLittleFsBytesWritten(written);
   if (!ok) {
-    VFS::removeGuarded(tmp, ctx);
+    VFS::removeGuarded(tmp, mover);
     return fail(why, "Note write incomplete");
   }
-  if (!VFS::renameGuarded(tmp, path, ctx)) {
-    VFS::removeGuarded(tmp, ctx);
+  if (VFS::existsGuarded(path, ctx) || !VFS::renameGuarded(tmp, path, mover)) {
+    VFS::removeGuarded(tmp, mover);
     return fail(why, "Cannot save note");
   }
   File check = VFS::openGuarded(path, "r", ctx);
   const bool verified = check && !check.isDirectory() && check.size() == bytes;
   if (check) check.close();
   if (!verified) {
-    VFS::removeGuarded(path, ctx);
+    VFS::removeGuarded(path, mover);
     return fail(why, "Note verification failed");
   }
   return true;
@@ -407,7 +423,9 @@ bool restamp(CommandSource source, const char* user, const char* path, const cha
   }
   file.close();
   if (!ok) return false;
-  if (!VFS::removeGuarded(boot, ctx)) {
+  // The boot copy is replaced by the stamped one: the store's step, not a
+  // delete by the owner (see noteMover).
+  if (!VFS::removeGuarded(boot, noteMover(boot))) {
     *retry = true;
     return fail(why, "Cannot remove boot note");
   }

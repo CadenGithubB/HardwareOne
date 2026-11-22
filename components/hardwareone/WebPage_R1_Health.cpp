@@ -323,7 +323,7 @@ static void streamR1HealthContent(httpd_req_t* req, const String& username) {
     var form={action:name};if(value!=null)form.value=value;
     return hw.postFormText('/api/health/action',form).then(function(t){
       setMsg(t||'queued');return hw.fetchJSON('/api/health/status');
-    }).then(apply).catch(function(e){setMsg(String(e));});
+    }).then(apply).catch(function(e){setMsg(String(e));hw.showCliError(e&&e.message);});
   }
   hw.fetchJSON('/api/health/status').then(apply).catch(function(e){console.error('[R1H]',e);});
   hw.pollJSON('/api/health/status',2000,apply);

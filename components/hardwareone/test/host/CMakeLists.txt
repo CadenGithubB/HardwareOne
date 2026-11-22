@@ -2371,9 +2371,9 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_sensor_auto_disable_sites.py)
 add_test(
-  NAME openinput_enable_gate
+  NAME openinput_backends
   COMMAND ${Python3_EXECUTABLE}
-          ${CMAKE_CURRENT_LIST_DIR}/test_openinput_enable_gate.py
+          ${CMAKE_CURRENT_LIST_DIR}/test_openinput_backends.py
           ${I2C_PROBE_TEST_ARGS})
 add_test(
   NAME tuning_settings_saved
@@ -3858,3 +3858,26 @@ add_test(NAME camera_oled_preview
 # policy, fake slot store); registering it here puts it under the same ctest gate
 # instead of a separate build nobody runs (readiness P0-4, G-19).
 add_subdirectory("${CMAKE_CURRENT_LIST_DIR}/../../../hw1_ota_protocol/test/host" hw1_ota_protocol_host)
+
+# The serial console's and the UART host link's command in flight (S-11,
+# 2026-11-21): System_PendingCommand.cpp compiled as is against doubles for the
+# executor and allocator (queue, reply, refusals, full-queue retry, 60 s
+# timeout, a late reply, the reply/timeout race), plus a source contract that
+# neither channel waits in submitAndExecuteSync any more.
+set(PENDING_COMMAND_TEST_ARGS)
+if(HW1_SANITIZE)
+  list(APPEND PENDING_COMMAND_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME pending_command
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_pending_command.py
+          ${PENDING_COMMAND_TEST_ARGS})
+
+# The glasses' refusal notice (G2_ReplyNotice.h, 2026-11-21 controls pass): a
+# refused command keeps its row and says why ("Needs an admin", the recording
+# owner) instead of failing silently.
+add_test(
+  NAME g2_reply_notice
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_g2_reply_notice.py)

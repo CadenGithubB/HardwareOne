@@ -192,7 +192,7 @@ static void caseNonAdminRefused() {
   EXPECT(gSettings.powerSaveTimeoutMinutes == 10,
          "a non-admin's press is refused and leaves the timeout at 10, value now: " +
              std::to_string(gSettings.powerSaveTimeoutMinutes));
-  EXPECT(gToast == "Admin required",
+  EXPECT(gToast == "Needs an admin",
          "a non-admin's press shows the refusal, toast: '" + gToast + "'");
   EXPECT(gAudit.empty(), "a refused command does not run the handler, audit: " + joined(gAudit));
 }

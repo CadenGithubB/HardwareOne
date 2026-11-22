@@ -2440,8 +2440,17 @@ bool WaypointManager::saveWaypoints() {
   String mapPath = String(map.filepath);
   int slash = mapPath.lastIndexOf('/');
   String mapDir = (slash > 0) ? mapPath.substring(0, slash) : String("/maps");
-  if (!VFS::existsGuarded(mapDir, currentAuthContext())) {
-    VFS::mkdirGuarded(mapDir, currentAuthContext());
+  // Waypoints are one file rewritten on every change. Accounts below admin
+  // never write to an existing file (the path rules), so a map under /maps has
+  // its waypoints file written by the system confined to the map's folder,
+  // after the waypoint command's own check. A map loaded from anywhere else
+  // keeps the caller's own rights.
+  const bool inMaps = mapDir == "/maps" || mapDir.startsWith("/maps/") ||
+                      mapDir == "/sd/maps" || mapDir.startsWith("/sd/maps/");
+  const AuthContext wpWriter =
+      inMaps ? VFS::systemAuth(mapDir.c_str(), "waypoints save") : currentAuthContext();
+  if (!VFS::existsGuarded(mapDir, wpWriter)) {
+    VFS::mkdirGuarded(mapDir, wpWriter);
   }
   
   // Extract map base name and save with pattern: waypoints_<mapbase>.json
@@ -2454,7 +2463,7 @@ bool WaypointManager::saveWaypoints() {
   char wpPath[128];
   snprintf(wpPath, sizeof(wpPath), "%s/waypoints_%s.json", mapDir.c_str(), mapBase.c_str());
   
-  File f = VFS::openGuarded(wpPath, "w", currentAuthContext(), true);
+  File f = VFS::openGuarded(wpPath, "w", wpWriter, true);
   if (!f) {
     ERROR_MAPSF("Failed to write waypoints file: %s", wpPath);
     return false;
@@ -3230,7 +3239,6 @@ const char* GpsTrackManager::startLiveTracking() {
   if (isLiveTracking()) {
     return "Error: Live tracking is already running. Stop it first with 'gpstrack live stop' to restart it.";
   }
-  if (!gSettings.sensorLogEnabled) return "Error: Sensor logging is disabled";
   if (gSensorLoggingRunning) return "Error: Stop the existing sensor log before starting a live track";
   if (gSettings.healthLoggingEnabled) return "Error: Disable health logging before starting a live track";
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
@@ -3522,6 +3530,8 @@ const char* cmd_gpstrack(const String& argsInput) {
     if (a.unterminatedQuote() || a.count() != 2) return "Error: Usage: gpstrack live <start|stop|toggle>";
     String action = a.arg(1);
     action.toLowerCase();
+    // Live tracking is logging: administrators start and stop it.
+    if (!currentExecIsAdmin()) return kCommandReplyLoggingAdminRequired;
     if (action == "start") return GpsTrackManager::startLiveTracking();
     if (action == "stop") return GpsTrackManager::stopLiveTracking();
     if (action == "toggle") {
@@ -4171,7 +4181,7 @@ const CommandEntry mapCommands[] = {
   {"gpstrackmerge", "Stitch GPS logs in order: \"<out>\" \"<in1>\" \"<in2>\" ...", true, cmd_gpstrackmerge, "Usage: gpstrackmerge \"<output>\" \"<in1>\" \"<in2>\" [...]  (output first, then inputs in stitch order; max 9 inputs)"},
   {"waypointfile", "Link file to waypoint: \"<file>\" <wpName>", false, cmd_waypointfile, "Usage: waypointfile \"<file>\" <wpName> | waypointfile \"<file>\" <lat> <lon> [wpName]"},
   {"waypointfiles", "Waypoint files: <name> [del <idx>]", false, cmd_waypointfiles, "Usage: waypointfiles <wpName> [del <index>]"},
-  {"maporganize", "Organize map files in /maps into subdirectories", false, cmd_maporganize, nullptr}
+  {"maporganize", "Organize map files in /maps into subdirectories", true, cmd_maporganize, nullptr}
 };
 const size_t mapCommandsCount = sizeof(mapCommands) / sizeof(mapCommands[0]);
 

@@ -29,7 +29,7 @@ import subprocess
 import sys
 import tempfile
 
-from test_g2_page_publish import boundary_types, fill, list_publish_helper
+from test_g2_page_publish import boundary_types, fill, list_publish_helper, notice_include
 from test_web_batch_handlers import require
 
 HERE = Path(__file__).resolve().parent
@@ -53,7 +53,7 @@ def sensors_unit(component: Path) -> str:
                    "void g2RegisterSensorsCameraPowerHook("):
         require(page.count(marker) == 1, f"G2_Page_Sensors.cpp: one {marker}")
     production = re.sub(r"^#include[^\n]*\n", "", page, flags=re.M)
-    return fill(HARNESS, {
+    return notice_include(component) + fill(HARNESS, {
         "// INSERT_BOUNDARY_TYPES": boundary_types(component),
         "// INSERT_SENSORS_PROTOTYPES": sensors_prototypes(component),
         "// INSERT_LIST_PUBLISH_HELPER": list_publish_helper(component),

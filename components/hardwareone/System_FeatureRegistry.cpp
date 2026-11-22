@@ -300,7 +300,7 @@ static constexpr FeatureEntry featureRegistry[] = {
   // === NETWORK FEATURES ===
   { "wifi", "WiFi", FEATURE_CAT_NETWORK, 24,
     FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_REQUIRES_REBOOT,
-    &gSettings.wifiEnabled, isWifiCompiled,
+    &gSettings.wifiAutoStart, isWifiCompiled,
     "WiFi connectivity and network stack" },
     
   { "http", "HTTP Server", FEATURE_CAT_NETWORK, 18,
@@ -315,7 +315,7 @@ static constexpr FeatureEntry featureRegistry[] = {
     
   { "espnow", "ESP-NOW", FEATURE_CAT_NETWORK, 8,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.espnowEnabled, isEspNowCompiled,
+    &gSettings.espnowAutoStart, isEspNowCompiled,
     "Device-to-device mesh communication" },
 
   // Bonded mode sits right after espnow because it rides it: BuildConfig
@@ -343,13 +343,13 @@ static constexpr FeatureEntry featureRegistry[] = {
 
   { "mqtt", "MQTT", FEATURE_CAT_NETWORK, 6,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.mqttEnabled, isMqttCompiled,
+    &gSettings.mqttAutoStart, isMqttCompiled,
     "Home Assistant integration via MQTT broker" },
 
   // === DISPLAY FEATURES ===
   { "oled", "Local Display", FEATURE_CAT_DISPLAY, 4,
     FEATURE_FLAG_RUNTIME_TOGGLE | FEATURE_FLAG_REQUIRES_REBOOT,
-    &gSettings.oledEnabled, isOledCompiled,
+    &gSettings.oledAutoStart, isOledCompiled,
     "Local display interface (selected display backend)" },
     
   { "led", "NeoPixel LED", FEATURE_CAT_DISPLAY, 2,
@@ -507,7 +507,7 @@ static constexpr FeatureEntry featureRegistry[] = {
 
   { "edgeimpulse", "Edge Impulse ML", FEATURE_CAT_SENSOR, 32,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.eiEnabled, isEdgeImpulseCompiled,
+    &gSettings.eiAutoStart, isEdgeImpulseCompiled,
     "ML inference for object detection (requires camera)" },
 
   // On-device LLM is pure compute (no device/sensor), so it's filed under
@@ -515,7 +515,7 @@ static constexpr FeatureEntry featureRegistry[] = {
   // Always listed (NOT #if'd) so `features json` reports compiled:false on
   // builds without it — discoverable like a disconnected sensor. The runtime
   // toggle (gSettings.llmAutoStart) controls auto-loading the default model at
-  // boot, matching every other feature's AutoStart/Enabled setting.
+  // boot, matching every other feature's AutoStart setting.
   //
   // Name/cost/description follow the compiled SOURCE, not the feature flag.
   // ENABLE_LLM_BACKEND only says the feature exists; it says nothing about
@@ -551,12 +551,11 @@ static constexpr FeatureEntry featureRegistry[] = {
   // build without the feature, and a consumer treats a missing id as "assume
   // present" so that older firmware doesn't hide half the UI. That made the
   // wrapped row indistinguishable from old firmware, so it gated nothing on
-  // exactly the builds it needed to. gSettings.automationEnabled is hoisted
-  // out of its own #if in System_Settings.h to let this row compile in any
-  // build — same treatment as ledStartupEnabled and llmAutoStart.
+  // exactly the builds it needed to. gSettings.automationAutoStart sits
+  // outside any #if in System_Settings.h so this row compiles in any build.
   { "automation", "Automations", FEATURE_CAT_SYSTEM, 8,
     FEATURE_FLAG_RUNTIME_TOGGLE,
-    &gSettings.automationEnabled, isAutomationCompiled,
+    &gSettings.automationAutoStart, isAutomationCompiled,
     "Scheduled tasks and conditional logic" },
 
   // === USER-FACING APPS ===
@@ -600,9 +599,11 @@ static constexpr size_t kFeaturesJsonBuf = 4096;
 // Feature switches: what each row runs, and which commands switch it
 // ============================================================================
 // `features` only lists (owner decision 2026-11-20). Switching stays with each
-// feature's own commands: open<x>/close<x> (now), <x>autostart (at boot) and
-// <x>enabled (allowed). This table names them, so the listing can show the
-// three states and a `features <id> on|off` refusal can name the right command.
+// feature's own commands: open<x>/close<x> (now) and <x>autostart (at boot).
+// Features have no "allowed" switch (owner decision 2026-11-21); only the I2C
+// bus keeps one (i2cbusenabled), because it is hardware the board may not
+// wire. This table names them, so the listing can show the states and a
+// `features <id> on|off` refusal can name the right command.
 //
 // A parallel table, not new FeatureEntry columns: FeatureEntry::enabledSetting is
 // read and written by the setup wizard, detect apply, sensorautostart and the G2
@@ -619,38 +620,37 @@ static_assert((unsigned)RF_FEATURE_COUNT < (unsigned)FEATURE_LIVE_BLE, "RamFlush
 
 struct FeatureSwitches {
   const char* id;          // equals featureRegistry[i].id (checked below)
-  const bool* allowed;     // master <x>enabled flag; nullptr = the row has none
+  const bool* allowed;     // bus allowed (i2c only); nullptr = the row has none
   const bool* autoStart;   // start-at-boot flag; nullptr = none
   uint8_t live;            // where "running now" comes from (see above)
   const char* nowCmd;      // starts/stops it now; nullptr = none
   const char* bootCmd;     // sets start at boot; nullptr = none
   const char* allowCmd;    // sets allowed; nullptr = none
   // allowCmd only saves the flag and acts at the next boot (i2cbusenabled
-  // replies "reboot required"). Not FEATURE_FLAG_REQUIRES_REBOOT: wifienabled
-  // and oledenabled act at once, though their rows carry that flag for detect.
+  // replies "reboot required").
   bool allowAtReboot = false;
 };
 
 #define FEATURE_SENSOR_SWITCHES(id, field, rf) \
-  { id, &gSettings.field##Enabled, &gSettings.field##AutoStart, rf, \
-    "open" id " / close" id, id "autostart <0|1>", id "enabled <0|1>" }
+  { id, nullptr, &gSettings.field##AutoStart, rf, \
+    "open" id " / close" id, id "autostart <0|1>", nullptr }
 
 // Same order as featureRegistry[]. Every command named here is checked against
 // the command tables by test_features_list_only.py.
 static constexpr FeatureSwitches kFeatureSwitches[] = {
-  { "wifi", &gSettings.wifiEnabled, &gSettings.wifiAutoStart, RF_WIFI,
-    "openwifi / closewifi", "wifiautostart <0|1>", "wifienabled <0|1>" },
-  { "http", &gSettings.httpEnabled, &gSettings.httpAutoStart, RF_HTTP,
-    "openhttp / closehttp", "httpautostart <0|1>", "httpenabled <0|1>" },
-  { "bluetooth", &gSettings.bleEnabled, &gSettings.bleAutoStart, FEATURE_LIVE_BLE,
-    "openble / closeble", "bleautostart <0|1>", "bleenabled <0|1>" },
-  { "espnow", &gSettings.espnowEnabled, &gSettings.espnowAutoStart, RF_ESPNOW,
-    "openespnow / closeespnow", "espnowautostart <0|1>", "espnowenabled <0|1>" },
+  { "wifi", nullptr, &gSettings.wifiAutoStart, RF_WIFI,
+    "openwifi / closewifi", "wifiautostart <0|1>", nullptr },
+  { "http", nullptr, &gSettings.httpAutoStart, RF_HTTP,
+    "openhttp / closehttp", "httpautostart <0|1>", nullptr },
+  { "bluetooth", nullptr, &gSettings.bleAutoStart, FEATURE_LIVE_BLE,
+    "openble / closeble", "bleautostart <0|1>", nullptr },
+  { "espnow", nullptr, &gSettings.espnowAutoStart, RF_ESPNOW,
+    "openespnow / closeespnow", "espnowautostart <0|1>", nullptr },
   { "bond", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
-  { "mqtt", &gSettings.mqttEnabled, &gSettings.mqttAutoStart, RF_MQTT,
-    "openmqtt / closemqtt", "mqttautostart <0|1>", "mqttclientenabled <0|1>" },
-  { "oled", &gSettings.oledEnabled, &gSettings.oledAutoStart, RF_OLED,
-    "openoled / closeoled", "oledautostart <0|1>", "oledenabled <0|1>" },
+  { "mqtt", nullptr, &gSettings.mqttAutoStart, RF_MQTT,
+    "openmqtt / closemqtt", "mqttautostart <0|1>", nullptr },
+  { "oled", nullptr, &gSettings.oledAutoStart, RF_OLED,
+    "openoled / closeoled", "oledautostart <0|1>", nullptr },
   // The start-up effect only; the LED has no master switch and no running state.
   { "led", nullptr, &gSettings.ledStartupEnabled, FEATURE_LIVE_NONE,
     nullptr, "ledstartupenabled <0|1>", nullptr },
@@ -669,23 +669,20 @@ static constexpr FeatureSwitches kFeatureSwitches[] = {
   { "battery", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
   { "r1health", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
   FEATURE_SENSOR_SWITCHES("camera",   camera,   RF_CAMERA),
-  { "microphone", &gSettings.micEnabled, &gSettings.micAutoStart, RF_MICROPHONE,
-    "openmic / closemic", "micautostart <0|1>", "micenabled <0|1>" },
-  { "espsr", &gSettings.srEnabled, &gSettings.srAutoStart, RF_SR,
-    "opensr / closesr", "srautostart <0|1>", "srenabled <0|1>" },
-  { "edgeimpulse", &gSettings.eiEnabled, &gSettings.eiAutoStart, FEATURE_LIVE_EI,
-    "eicontinuous <0|1>", "eiautostart <0|1>", "eienable <0|1>" },
-  { "llm", &gSettings.llmEnabled, &gSettings.llmAutoStart, RF_LLM,
-    "llmload / llmunload", "llmautostart <0|1>", "llmenabled <0|1>" },
+  { "microphone", nullptr, &gSettings.micAutoStart, RF_MICROPHONE,
+    "openmic / closemic", "micautostart <0|1>", nullptr },
+  { "espsr", nullptr, &gSettings.srAutoStart, RF_SR,
+    "opensr / closesr", "srautostart <0|1>", nullptr },
+  { "edgeimpulse", nullptr, &gSettings.eiAutoStart, FEATURE_LIVE_EI,
+    "eicontinuous <0|1>", "eiautostart <0|1>", nullptr },
+  { "llm", nullptr, &gSettings.llmAutoStart, RF_LLM,
+    "llmload / llmunload", "llmautostart <0|1>", nullptr },
   // Bus 0 has no start-at-boot flag and no open/close: the bus comes up at boot
   // when it is allowed.
   { "i2c", &gSettings.i2cEnabled, nullptr, FEATURE_LIVE_I2C,
     nullptr, nullptr, "i2cbusenabled <0|1>", true },
-  // One owner transition (System_Automation.cpp) sets the permission and
-  // starts or stops the scheduler, so "now" and "allowed" share one command.
-  { "automation", &gSettings.automationEnabled, &gSettings.automationAutoStart, RF_AUTOMATION,
-    "automation system enable|disable", "automationautostart <0|1>",
-    "automation system enable|disable" },
+  { "automation", nullptr, &gSettings.automationAutoStart, RF_AUTOMATION,
+    "automation system enable|disable", "automationautostart <0|1>", nullptr },
   { "maps", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
   { "games", nullptr, nullptr, FEATURE_LIVE_NONE, nullptr, nullptr, nullptr },
 };
@@ -1025,18 +1022,15 @@ static const char* featureSwitchRefusal(const CommandArgs& a, char* buf, size_t 
   size_t pos = 0;
   bool ok = featuresAppend(buf, size, pos, "Error: features only lists. Switch %s with:", f->id);
   const char* sep = " ";
-  // automation: one command sets both, so it is named once.
-  const bool shared = s->nowCmd && s->allowCmd && strcmp(s->nowCmd, s->allowCmd) == 0;
   if (s->nowCmd) {
-    ok = ok && featuresAppend(buf, size, pos, "%s%s (%s)", sep, s->nowCmd,
-                              shared ? "now and allowed" : "now");
+    ok = ok && featuresAppend(buf, size, pos, "%s%s (now)", sep, s->nowCmd);
     sep = ", ";
   }
   if (s->bootCmd) {
     ok = ok && featuresAppend(buf, size, pos, "%s%s (at boot)", sep, s->bootCmd);
     sep = ", ";
   }
-  if (s->allowCmd && !shared) {
+  if (s->allowCmd) {
     ok = ok && featuresAppend(buf, size, pos, "%s%s (allowed%s)", sep, s->allowCmd,
       s->allowAtReboot ? ", after a reboot" : "");
   }
@@ -1062,11 +1056,11 @@ const char* cmd_features(const String& argsInput) {
   // gate UI on what the device actually has.
   // Schema: {"schema":1,"features":[{"id","name","category","heapKb","compiled",
   //          "enabled","toggleable"}, ...]}
-  // Kept byte for byte when `features` became list-only: `enabled` is still the
-  // row's enabledSetting (autostart on some rows, the master flag on others)
-  // and `toggleable` is canToggleFeature (the row has a saved switch). The text
-  // views show the three states apart; there is no room here for more keys
-  // (see the static_assert above).
+  // Kept byte for byte when `features` became list-only: `enabled` is the
+  // row's enabledSetting (the start-at-boot switch; the bus switch for i2c,
+  // the start-up effect for led) and `toggleable` is canToggleFeature (the row
+  // has a saved switch). The text views show the states apart; there is no
+  // room here for more keys (see the static_assert above).
   //
   // No "hint" field here on purpose. It used to carry 161 B of agent-facing
   // prose ("...use the read command..."), which is dead weight in a machine

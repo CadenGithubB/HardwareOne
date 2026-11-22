@@ -536,18 +536,18 @@ settle(function () {
   return clickInit(JSON.stringify({ schema: 1, name: 'node1', nameValid: true }));
 }).then(function () {
   check(!el('setup-modal').classList.contains('show') &&
-        cliCommands.join(',') === 'espnowdeviceinfo json,espnowenabled 1,openespnow' &&
+        cliCommands.join(',') === 'espnowdeviceinfo json,openespnow' &&
         fetchedUrls.join(',') === '/api/espnow/status', 'B3 a valid name starts ESP-NOW and refreshes the status',
         cliCommands.join(',') + ' | ' + fetchedUrls.join(','));
   // A reply without the key (nothing says the name is invalid) starts as well.
   return clickInit(JSON.stringify({ schema: 1, name: 'node1' }));
 }).then(function () {
-  check(!el('setup-modal').classList.contains('show') && cliCommands.indexOf('openespnow') === 2,
+  check(!el('setup-modal').classList.contains('show') && cliCommands.indexOf('openespnow') === 1,
         'B3 a name without nameValid starts ESP-NOW', cliCommands.join(','));
   // The old 'devicename' text wording decides nothing: start, and let its reply say what is wrong.
   return clickInit('Device name: HardwareOne-B2C3 (default)');
 }).then(function () {
-  check(!el('setup-modal').classList.contains('show') && cliCommands.indexOf('openespnow') === 2,
+  check(!el('setup-modal').classList.contains('show') && cliCommands.indexOf('openespnow') === 1,
         'B4 a text deviceinfo reply is not matched', cliCommands.join(','));
   return clickToggle('{"schema":1,"enabled":true,"mode":"mesh"}');
 }).then(function () {

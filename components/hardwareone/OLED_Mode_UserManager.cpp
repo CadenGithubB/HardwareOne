@@ -11,7 +11,6 @@
 // label is shortened.
 
 #include "OLED_Display.h"
-#include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_BuildConfig.h"
 
 #if ENABLE_OLED_DISPLAY
@@ -108,9 +107,12 @@ static void umDispatch(const String& cmd) {
   }
   FsLockGuard fsGuard("oled.user_manager.result");
   if (!ok) {
-    const char* m = out[0] ? out : "Failed";
-    m = commandReplyReason(m);
-    umShowError(m);
+    // The shared short refusal ("Needs a super admin" for userdelete,
+    // userdemote and userresetpassword under an admin).
+    char text[sizeof(out)];
+    oledCommandReplyText(false, out, nullptr, "Failed", text, sizeof(text));
+    umShowError(text);
+    umWipe(text, sizeof(text));
   }
   loadUsers();
   gUmLevel = UM_LIST;

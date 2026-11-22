@@ -113,9 +113,6 @@ static size_t onboardEnumerate(LlmModelDesc* out, size_t cap) {
 
 size_t llmEnumerateModels(LlmModelDesc* out, size_t cap) {
   if (!out || cap == 0) return 0;
-  // Runtime master switch. Off means every picker is empty rather than every
-  // picker being full of models that would refuse to load.
-  if (!gSettings.llmEnabled) return 0;
 
   size_t w = 0;
 #if ENABLE_LLM_SOURCE_ONBOARD
@@ -164,7 +161,6 @@ static bool onboardFindByName(const char* name, LlmModelDesc* out) {
 
 bool llmResolveModelId(const char* id, LlmModelDesc* out) {
   if (!id || !*id || !out) return false;
-  if (!gSettings.llmEnabled) return false;
 
   const char* colon = strchr(id, ':');
   if (colon) {
@@ -241,7 +237,6 @@ bool llmBackendSelect(const char* id, char* errOut, size_t errCap, int maxCtx) {
     return false;
   };
   if (!id || !*id) return bail("no model given");
-  if (!gSettings.llmEnabled) return bail("the LLM is disabled (llmenabled 0)");
 
   LlmModelDesc d;
 #if ENABLE_LLM_SOURCE_HTTP
@@ -428,7 +423,6 @@ size_t llmHomeMenuRowsNow(bool terminal, size_t width, llmhome::Row* out, size_t
 #endif
 
 bool llmBackendIsReady() {
-  if (!gSettings.llmEnabled) return false;
   switch (sActiveKind) {
     LLM_ONBOARD_CASE(llmIsReady())
     LLM_CM5_CASE(cm5LlmIsReady())
@@ -592,10 +586,10 @@ int llmBackendTokenize(const char* text, int* outTokens, int maxTokens) {
 
 #if ENABLE_LLM_SOURCE_HTTP
 // The default model is an http: id and nothing stops selecting it on its own:
-// LLM on, autostart on (after a RAM flush's override), nothing selected and no
+// autostart on (after a RAM flush's override), nothing selected and no
 // llmunload this boot.
 static bool httpDefaultWanted() {
-  return gSettings.llmEnabled && ramFlushResolve(RF_LLM, gSettings.llmAutoStart) &&
+  return ramFlushResolve(RF_LLM, gSettings.llmAutoStart) &&
          !strncasecmp(gSettings.llmDefaultModel.c_str(), "http:", 5) &&
          sActiveKind == LlmBackendKind::None && !sUserUnloadedThisBoot;
 }
@@ -621,7 +615,6 @@ size_t llmBackendNotReadyReason(char* out, size_t cap) {
     const size_t n = strlcpy(out, text, cap);
     return n < cap ? n : cap - 1;
   };
-  if (!gSettings.llmEnabled) return put("LLM disabled (llmenabled 0)");
   if (sActiveKind == LlmBackendKind::None) {
 #if ENABLE_LLM_SOURCE_HTTP
     // The lazy select of the http: default failed for a configuration reason:
@@ -681,7 +674,7 @@ void llmBackendTick() {
   static bool sRemoteAutostartTried = false;
   if (!sRemoteAutostartTried &&
       sActiveKind == LlmBackendKind::None &&
-      gSettings.llmEnabled && gSettings.llmAutoStart &&
+      gSettings.llmAutoStart &&
       gSettings.llmDefaultModel.startsWith("cm5:")) {
     LlmModelDesc d;
     if (llmResolveModelId(gSettings.llmDefaultModel.c_str(), &d) && d.available) {

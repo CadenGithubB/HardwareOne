@@ -49,7 +49,6 @@ typedef int esp_err_t;
 #define PSRAM_JSON_DOC(name) JsonDocument name
 
 struct Settings {
-  bool llmEnabled = true;
   int llmMaxContext = 0;
   String llmDefaultModel = "onboard:tiny.bin";
 };

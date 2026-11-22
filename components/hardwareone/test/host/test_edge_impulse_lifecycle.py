@@ -9,8 +9,8 @@ it. Each scenario runs in its own process:
 
   stop_start                `eicontinuous 0` then `1` inside one interval
                             leaves exactly one task; stop joins the task;
-  enable_off_during_invoke  `eienable 0` while the continuous task is inside
-                            Invoke waits for the frame before freeing;
+  unload_during_invoke      `eimodelunload` while the continuous task is
+                            inside Invoke waits for the frame before freeing;
   load_during_invoke        a model load during a continuous frame waits for
                             it, then continuous mode resumes on the new model;
   detect_during_continuous  camera, CLI, file and web detect report busy while
@@ -29,7 +29,7 @@ from pathlib import Path
 
 from test_edge_impulse_jpeg import HERE, FIXTURES, Report, compile_unit, module_text, run_binary
 
-SCENARIOS = ('stop_start', 'enable_off_during_invoke', 'load_during_invoke',
+SCENARIOS = ('stop_start', 'unload_during_invoke', 'load_during_invoke',
              'detect_during_continuous', 'unload_during_detect')
 
 

@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import tempfile
 
-from test_g2_page_publish import list_publish_helper
+from test_g2_page_publish import list_publish_helper, notice_include
 from test_web_batch_handlers import extract_block, require
 from g2_client_source import g2_client_text
 from reply_words_source import reply_prelude
@@ -74,7 +74,8 @@ def main() -> None:
         flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]
     with tempfile.TemporaryDirectory(prefix="hw1-g2-power-") as directory:
         unit, executable = Path(directory) / "test.cpp", Path(directory) / "test"
-        unit.write_text(reply_prelude(args.component) + generated(args.component.resolve()))
+        unit.write_text(reply_prelude(args.component) + notice_include(args.component)
+                        + generated(args.component.resolve()))
         subprocess.run([args.cxx, *flags, str(unit), "-o", str(executable)],
                        check=True, timeout=120)
         subprocess.run([str(executable)], check=True, timeout=60)

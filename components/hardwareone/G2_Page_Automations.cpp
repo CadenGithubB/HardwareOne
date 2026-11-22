@@ -116,6 +116,9 @@ static void showDetailMenu(long id) {
   }
   char backRow[40];
   snprintf(backRow, sizeof(backRow), "<- %.28s", r.name);
+  // After a refused Enable/Disable the redraw keeps the real state and the
+  // back row says why ("<- Needs an admin"); its tap still goes back.
+  g2LensNoticeBackRow(G2_HIJACK_PAGE_AUTOMATIONS, backRow, backRow, sizeof(backRow));
   // Inert trigger row: WHAT fires this automation, in the owner's words
   // ("on peer_online", "every 5m", "monthly 15 07:30", ...). Tap is a no-op
   // (detailHandleTap ignores idx 1) — it's information, not an action.
@@ -160,6 +163,9 @@ static void autoRunDone(bool ok, const char* result,
                         const G2CmdCookie& c, void* /*ud*/) {
   snprintf(gRunResult, sizeof(gRunResult), "%s",
            (result && result[0]) ? result : (ok ? "OK" : "Error"));
+  // The run result page shows the whole reply, so a refusal must not also
+  // come back as a notice in the detail's back row.
+  (void)g2LensNoticeTake(c.targetPage, nullptr, 0);
   (void)g2EnqueueRedraw(c, showRunResult, "Automation run");
 }
 

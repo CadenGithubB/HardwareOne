@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""`inputenabled 0` blocks `openinput` on every input backend.
+"""`openinput` on every input backend; no saved setting refuses it.
 
 The production cmd_openinput (HAL_Input.cpp) is extracted and compiled four
-times: the onboard GPIO encoder (which has no I2C start queue and so checks
-the switch itself) and the three I2C backends (Seesaw gamepad, ANO encoder,
-GT911 touch), which hand the open to cmd_sensorstart_queued() where
-requestSensorStart() applies the same switch (test_sensor_lifecycle_requests).
+times: the onboard GPIO encoder (which has no I2C start queue and starts the
+driver itself) and the three I2C backends (Seesaw gamepad, ANO encoder,
+GT911 touch), which hand the open to cmd_sensorstart_queued()
+(test_sensor_lifecycle_requests).
 
-GPIO build: with the switch off the reply is the one-sentence refusal, the
-driver start is not called, and that holds whether or not the wheel runs.
-With it on, every reply is what it was before.
+GPIO build: with start at boot off or on, every reply is the driver start's
+answer. Since 2026-11-21 a feature has no "allowed" switch: inputautostart
+only decides boot, and an open by hand always reaches the driver.
 """
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ HARNESS = r'''
 
 struct String {};
 #define RETURN_VALID_IF_VALIDATE_CSTR() do {} while (0)
-static struct { bool inputEnabled = true; } gSettings;
+static struct { bool inputAutoStart = false; } gSettings;
 static bool gInputRunning = false;
 
 #if ENABLE_GPIO_ENCODER
@@ -59,18 +59,13 @@ static const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* disp
 
 int main() {
 #if ENABLE_GPIO_ENCODER
-  const char* const disabled = "Error: GPIO encoder is disabled - run 'inputenabled 1' first";
-  // Switch off: refused before anything else, running or not; the driver is not asked.
-  gSettings.inputEnabled = false;
-  for (bool running : {false, true}) {
-    gInputRunning = running; startCalls = 0;
-    assert(std::strcmp(cmd_openinput(String{}), disabled) == 0 && startCalls == 0);
+  // Start at boot off or on: the open reaches the driver either way.
+  for (bool autoStart : {false, true}) {
+    gSettings.inputAutoStart = autoStart; gInputRunning = true; startCalls = 0;
+    assert(std::strstr(cmd_openinput(String{}), "already running") && startCalls == 0);
+    gInputRunning = false;
+    assert(std::strcmp(cmd_openinput(String{}), "[Input] GPIO encoder started") == 0 && startCalls == 1);
   }
-  // Switch on: the replies are unchanged.
-  gSettings.inputEnabled = true; gInputRunning = true; startCalls = 0;
-  assert(std::strstr(cmd_openinput(String{}), "already running") && startCalls == 0);
-  gInputRunning = false;
-  assert(std::strcmp(cmd_openinput(String{}), "[Input] GPIO encoder started") == 0 && startCalls == 1);
   startResult = GpioEncoderStart::PinsInvalid;
   assert(std::strstr(cmd_openinput(String{}), "pins are not valid"));
   startResult = GpioEncoderStart::CacheMissing;
@@ -81,17 +76,17 @@ int main() {
   assert(std::strstr(cmd_openinput(String{}), "busy"));
   startResult = GpioEncoderStart::TaskNotCreated;
   assert(std::strstr(cmd_openinput(String{}), "task could not be created"));
-  std::puts("openinput enable gate passed (GPIO encoder)");
+  std::puts("openinput backends passed (GPIO encoder)");
 #else
-  // I2C backends: the command itself decides nothing; the shared start (which
-  // holds the switch) is always asked, with this backend's name.
-  for (bool enabled : {true, false}) {
-    gSettings.inputEnabled = enabled; queuedOpens = 0;
+  // I2C backends: the command itself decides nothing; the shared start is
+  // always asked, with this backend's name.
+  for (bool autoStart : {true, false}) {
+    gSettings.inputAutoStart = autoStart; queuedOpens = 0;
     assert(std::strcmp(cmd_openinput(String{}), "from the shared start") == 0 && queuedOpens == 1);
     assert(openLabel == BACKEND_LABEL && openTag == "openinput@enqueue" && !openHint.empty());
   }
   (void)gInputRunning;
-  std::printf("openinput enable gate passed (%s via the shared start)\n", BACKEND_LABEL);
+  std::printf("openinput backends passed (%s via the shared start)\n", BACKEND_LABEL);
 #endif
 }
 '''
@@ -109,21 +104,10 @@ def main() -> None:
     production = "#if !ENABLE_GPIO_ENCODER\n" + production
     start_enum = extract_block((COMPONENT / "Input_GPIOEncoder.h").read_text(),
                                "enum class GpioEncoderStart") + ";"
-    # The GPIO branch holds the switch itself, ahead of the running test.
-    gpio_branch = production[production.index("#if ENABLE_GPIO_ENCODER\n", production.index("cmd_openinput(")):]
-    gpio_branch = gpio_branch[:gpio_branch.index("#else")]
-    require(gpio_branch.find("!gSettings.inputEnabled") != -1, "the GPIO openinput lost its inputenabled check")
-    require(gpio_branch.find("!gSettings.inputEnabled") < gpio_branch.find("if (gInputRunning)"),
-            "the GPIO openinput must check inputenabled before the already-running reply")
-    # Boot, the menu auto-start and first-time setup start the wheel through
-    # inputStartInternal(); the switch must not move into the driver start.
-    encoder = (COMPONENT / "Input_GPIOEncoder.cpp")
-    if encoder.exists():
-        text = encoder.read_text()
-        for marker in ("GpioEncoderStart gpioEncoderStart()", "bool inputStartInternal()"):
-            if marker in text:
-                require("inputEnabled" not in extract_block(text, marker),
-                        f"{marker} must not read inputEnabled (setup starts the wheel regardless)")
+    # No saved setting decides an open by hand: the open does not read the
+    # start-at-boot switch (boot and the menu auto-start read it themselves).
+    require("gSettings" not in extract_block(source, "static const char* cmd_openinput("),
+            "openinput must not read a saved setting")
     unit = HARNESS.replace("// INSERT_START_ENUM", start_enum).replace("// INSERT_PRODUCTION", production)
     builds = (
         ("gpio", ["-DENABLE_GPIO_ENCODER=1", "-DENABLE_GT911_TOUCH=0", "-DENABLE_ANO_ENCODER=0"]),
@@ -134,7 +118,7 @@ def main() -> None:
         ("touch", ["-DENABLE_GPIO_ENCODER=0", "-DENABLE_GT911_TOUCH=1", "-DENABLE_ANO_ENCODER=0",
                    '-DBACKEND_LABEL="GT911 Touch"']),
     )
-    with tempfile.TemporaryDirectory(prefix="hw1-openinput-gate-") as directory:
+    with tempfile.TemporaryDirectory(prefix="hw1-openinput-backends-") as directory:
         unit_path = Path(directory) / "test.cpp"
         unit_path.write_text(unit)
         for name, flags in builds:

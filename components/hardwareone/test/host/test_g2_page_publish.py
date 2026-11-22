@@ -35,6 +35,13 @@ COMPONENT = HERE.parents[1]
 HELPER_MARKER = "template <typename Publish>"
 
 
+def notice_include(component: Path) -> str:
+    """G2_ReplyNotice.h (a pure header: the lens words of a refused reply) by
+    absolute path, or "" on a tree without it. Pages strip their includes."""
+    path = (Path(component) / "G2_ReplyNotice.h").resolve()
+    return f'#include "{path}"\n' if path.exists() else ""
+
+
 def list_publish_helper(component: Path) -> str:
     """G2_Page_Common.h's g2ShowListPageAndPublish, or "" on a tree without it.
 
@@ -188,7 +195,7 @@ def main() -> None:
                             ("led", led_unit)):
             unit = Path(directory) / f"{name}.cpp"
             executable = Path(directory) / name
-            unit.write_text(reply_prelude(COMPONENT) + build(component))
+            unit.write_text(reply_prelude(COMPONENT) + notice_include(component) + build(component))
             compiled = subprocess.run([args.cxx, *flags, str(unit), "-o", str(executable)],
                                       timeout=180)
             if compiled.returncode != 0:

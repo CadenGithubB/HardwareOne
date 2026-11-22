@@ -98,6 +98,9 @@ static uint8_t perms(const std::string& path, const AuthContext& ctx) {
   uint8_t mask = TranscriptPathPolicy::permissionMask(
       TranscriptPathPolicy::classify(path.c_str()), found->second.id, unrestricted);
   if (!std::strcmp(found->second.role, "guest")) mask &= PERM_READ;
+  // The catch-all path row: an account below admin reads, creates and
+  // uploads, and never writes over, renames or deletes (System_Filesystem.cpp).
+  if (!std::strcmp(found->second.role, "user")) mask &= PERM_READ | PERM_CREATE;  // (import is not modelled here)
   return mask;
 }
 struct Node { bool dir = false; std::string data; };
@@ -256,7 +259,8 @@ static File openGuarded(const String& p, const char* mode, const AuthContext& ct
   return File(path, true);
 }
 static AuthContext systemAuth(const char* scope, const char* reason) {
-  assert(!std::strcmp(reason, "note root") || !std::strcmp(reason, "note sweep"));
+  assert(!std::strcmp(reason, "note root") || !std::strcmp(reason, "note sweep") ||
+         !std::strcmp(reason, "note save"));
   ++systemAuths;
   AuthContext ctx;
   ctx.transport = SOURCE_INTERNAL;
@@ -362,12 +366,18 @@ static void test_create() {
   assert(save(0x6f1c9a2e00000007ull, &path));
   assert(path == "/stt/u7/notes/20261004T153012Z-6f1c9a2e00000007.txt");
   assert(dirExists("/stt") && dirExists("/stt/u7") && dirExists("/stt/u7/notes"));
-  // Only the protected root uses the trusted context (one context, used for
-  // the probe and the create); everything else is the named owner, confined
-  // to her own folder.
-  assert(VFS::systemAuths == 1);
-  for (size_t i = 0; i < VFS::contexts.size(); ++i)
-    assert(VFS::contexts[i] == (i < 2 ? "system|/stt" : "alice|/stt/u7"));
+  // The protected root uses a trusted context (one, for the probe and the
+  // create). The owner, confined to her own folder, creates the folders and
+  // the tmp file; moving the tmp into place is the store's own step, as the
+  // system confined to the notes folder (accounts below admin never rename).
+  assert(VFS::systemAuths == 2);
+  size_t moverCalls = 0;
+  for (size_t i = 0; i < VFS::contexts.size(); ++i) {
+    if (i < 2) { assert(VFS::contexts[i] == "system|/stt"); continue; }
+    if (VFS::contexts[i] == "system|/stt/u7/notes") { ++moverCalls; continue; }
+    assert(VFS::contexts[i] == "alice|/stt/u7");
+  }
+  assert(moverCalls == 2);  // the rename's source and destination checks
   // tmp then rename, then nothing but the note.
   assert(VFS::renames.size() == 1 &&
          VFS::renames[0].first == "/stt/u7/notes/20261004T153012Z-6f1c9a2e00000007.tmp" &&
@@ -419,8 +429,9 @@ static void test_create() {
          countFiles(".tmp") == 0 && header.words == 2 && !std::strcmp(header.title, "hi there"));
   assert(header.boot == 0 && header.uptimeS == 0);  // stamped by the caller: left as given
   // Probing the protected root is itself a guarded read, so one context
-  // confined to that root is minted even when nothing needs creating.
-  assert(VFS::systemAuths == 1);
+  // confined to that root is minted even when nothing needs creating; the
+  // second moves the note into place.
+  assert(VFS::systemAuths == 2);
 }
 
 static void test_create_refusals() {
@@ -719,10 +730,12 @@ static void test_read_and_remove() {
     assert(reading("guest", guestPath.c_str(), 0, &text) && text == "guest note");
     assert(!QuickNoteStore::remove(actor("guest"), guestPath.c_str(), &reason) &&
            !std::strcmp(reason, "Cannot delete note") && tree.count(guestPath));
-    assert(QuickNoteStore::remove(actor("alice"), path.c_str(), &reason) && !reason && !tree.count(path));
-    assert(!QuickNoteStore::remove(actor("alice"), path.c_str(), &reason) && !std::strcmp(reason, "Note unavailable"));
-    tree[path] = Node{false, "again"};
+    // Accounts below admin never delete, their own notes included (owner
+    // decision 1.0): the path rules refuse it.
+    assert(!QuickNoteStore::remove(actor("alice"), path.c_str(), &reason) &&
+           !std::strcmp(reason, "Cannot delete note") && tree.count(path));
     assert(QuickNoteStore::remove(actor("super"), path.c_str(), &reason) && !tree.count(path));
+    assert(!QuickNoteStore::remove(actor("super"), path.c_str(), &reason) && !std::strcmp(reason, "Note unavailable"));
     assert(!locks && !filesOpen);
   }
 
@@ -831,13 +844,16 @@ static void test_restamp() {
     assert(restamping("alice", boot, kLater, &target));
     assert(target == folder + "20261004T153017Z-0000000000000051.txt" && !tree.count(boot));
     assert(countFiles(".tmp") == 0 && countFiles(".txt") == 1 && lockTakes == 1 && idLookups == 1);
-    // Copy to tmp, rename into place, and only then the boot file goes; all as
-    // the owner confined to her own folder, never the trusted context.
+    // Copy to tmp, rename into place, and only then the boot file goes. The
+    // owner, confined to this one notes folder, reads and creates; the rename
+    // and the boot file's removal are the store's steps, as the system
+    // confined to the same folder (accounts below admin never rename or delete).
     assert(VFS::renames.size() == 1 && VFS::renames[0].second == target &&
            VFS::renames[0].first == folder + "20261004T153017Z-0000000000000051.tmp");
-    assert(!VFS::systemAuths);
-    // Confined tighter than create: to this one notes folder.
-    for (const auto& c : VFS::contexts) assert(c == (sd ? "alice|/sd/stt/u7/notes" : "alice|/stt/u7/notes"));
+    assert(VFS::systemAuths == 2);
+    const std::string notesFolder = sd ? "/sd/stt/u7/notes" : "/stt/u7/notes";
+    for (const auto& c : VFS::contexts)
+      assert(c == "alice|" + notesFolder || c == "system|" + notesFolder);
     const std::string& after = tree.at(target).data;
     NoteHeader was, now;
     size_t wasBody = 0, nowBody = 0;

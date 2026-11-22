@@ -316,11 +316,12 @@ bool initFilesystem() {
                    (unsigned long long)freeBytes);
 
 #if ENABLE_AUTOMATION
-  // Boot-time automations.json sanitation: ensure no duplicate IDs persist from manual edits
-  // Skip if automation system is disabled
+  // Boot-time automations.json sanitation: ensure no duplicate IDs persist from
+  // manual edits. Whether the scheduler starts does not matter: the file is
+  // also read by the automation commands and the web page.
   DebugFlagMask _dbgSaved = getDebugFlags();
   setDebugFlag(DEBUG_AUTO_SCHEDULER);
-  if (gSettings.automationEnabled && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "fs.init.automations_check"))) {
+  if (VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "fs.init.automations_check"))) {
     String json;
     if (readAutomationsJson(json)) {
       bool modified = false;
@@ -1416,7 +1417,45 @@ const char* cmd_filewrite(const String& argsInput) {
   FsLockGuard _g("filewrite");
   // offset 0 -> "w" (truncate/create); else "a" (append).
   const char* mode = (offset == 0) ? "w" : "a";
-  File f = VFS::openGuarded(path, mode, ctx, /*create=*/true);
+  // Accounts below admin create files but never write to an existing one (the
+  // path rules). A chunked upload writes into the file its own first chunk
+  // created, so the uploads accounts started here are remembered: the same
+  // account may append the next chunk (at the size the file reached), or
+  // restart its own unfinished file at offset 0, as the system confined to
+  // that one file. Anything else (another account, a file someone else
+  // replaced meanwhile, an upload idle for 10 minutes) uses the caller's own
+  // rights.
+  struct UploadRecord { String user, path; long size; uint32_t lastMs; };
+  static UploadRecord sUploads[4];
+  constexpr uint32_t kUploadIdleMs = 10UL * 60UL * 1000UL;
+  const uint32_t nowMs = millis();
+  UploadRecord* record = nullptr;
+  for (UploadRecord& r : sUploads) {
+    if (r.path.length() && nowMs - r.lastMs > kUploadIdleMs) r = UploadRecord{};
+    if (ctx.user.length() > 0 && r.user == ctx.user && r.path == path) record = &r;
+  }
+  AuthContext writer = ctx;
+  if (record && !canEdit(path, ctx)) {
+    // Only while the file is still the one this upload left behind: its size
+    // is the one the last chunk produced (a file replaced meanwhile, by an
+    // administrator or another upload, is not this account's to write).
+    File probe = VFS::openGuarded(path, "r", ctx);
+    const bool unchanged = probe && !probe.isDirectory() && (long)probe.size() == record->size;
+    if (probe) probe.close();
+    if (unchanged && (offset == 0 || offset == record->size))
+      writer = VFS::systemAuth(path.c_str(), "filewrite upload");
+  }
+  File f = VFS::openGuarded(path, mode, writer, /*create=*/true);
+  if (f && offset == 0 && !record) {
+    // A new upload: take a free (or the oldest) record.
+    UploadRecord* slot = &sUploads[0];
+    for (UploadRecord& r : sUploads) {
+      if (!r.path.length()) { slot = &r; break; }
+      if (nowMs - r.lastMs > nowMs - slot->lastMs) slot = &r;
+    }
+    *slot = UploadRecord{ctx.user, path, 0, nowMs};
+    record = slot;
+  }
   if (!f) {
     snprintf(respBuf, sizeof(respBuf),
              "{\"success\":false,\"error\":\"Writes to this path are not allowed\"}");
@@ -1438,12 +1477,19 @@ const char* cmd_filewrite(const String& argsInput) {
   long newSize = (long)f.size();
   f.close();
 
+  if (record) {
+    // The size the file now has: the next chunk starts there, and a restart
+    // finds the file as this upload left it, also after a short write.
+    record->size = newSize;
+    record->lastMs = nowMs;
+  }
   if (written != toWrite) {
     snprintf(respBuf, sizeof(respBuf),
              "{\"success\":false,\"error\":\"Write failed — storage full?\",\"size\":%ld}", newSize);
     return respBuf;
   }
-
+  // A finished upload is forgotten: no later chunk may write into it.
+  if (record && isFinal) *record = UploadRecord{};
   if (isFinal) runFileWritePostSaveHooks(path);
 
   snprintf(respBuf, sizeof(respBuf),
@@ -1773,10 +1819,17 @@ static const PathRule sPathRules[] = {
   {"/espnow",                           PERM_READ, PERM_READ,                                          PERM_ALL,  true,  false},
   {"/maps",                             PERM_READ, PERM_READ,                                          PERM_ALL,  true,  false},
   {"/sd",                               PERM_READ, PERM_READ,                                          PERM_ALL,  true,  false},
-  {"/Users",                            PERM_READ, PERM_READ,                                          PERM_ALL,  true,  false},
 
   // ---- General system paths: admin read-only; system full ----
   {"/system/",                          0,         PERM_READ,                                          PERM_ALL,  false, false},
+
+  // ---- The card's twins of /system and /logging_captures ----
+  // Auth does not fold /sd paths onto their primary (System_VFS.h Scopes), so
+  // the system logs and captures that overflow to the card need their own
+  // rows; without them they fell to the catch-all below.
+  {"/sd/system",                        0,         PERM_READ,                                          PERM_ALL,  true,  false},
+  {"/sd/system/",                       0,         PERM_READ,                                          PERM_ALL,  false, false},
+  {"/sd/logging_captures",              0,         PERM_READ,                                          PERM_ALL,  true,  false},
 
   // ---- Logging captures: admin gets full run of the tree; system full ----
   // This is user CAPTURE data, not system config: admins could already read and
@@ -1784,6 +1837,7 @@ static const PathRule sPathRules[] = {
   // GpsTrackManager::saveTrack has to impersonate system just to write a track,
   // and why an admin could not hand-make a folder to drop a file into.
   {"/logging_captures/",                0,         PERM_READ | PERM_WRITE | PERM_DELETE | PERM_RENAME | PERM_CREATE | PERM_IMPORT, PERM_ALL, false, false},
+  {"/sd/logging_captures/",             0,         PERM_READ | PERM_WRITE | PERM_DELETE | PERM_RENAME | PERM_CREATE | PERM_IMPORT, PERM_ALL, false, false},
 
   // ---- ESP-NOW inbox: admin tier; system full ----
   // Files a peer pushes (espnowsendfile, imagesend) and files an admin pulls
@@ -1804,8 +1858,14 @@ static const PathRule sPathRules[] = {
   // admin battery page renders.
   {"/battery.csv",                      PERM_READ, PERM_READ | PERM_DELETE,                            PERM_ALL,  false, false},
 
-  // ---- Default: user data (maps, photos, recordings, etc.) — full for everyone authenticated ----
-  {nullptr,                             PERM_ALL,  PERM_ALL,                                           PERM_ALL,  false, false},
+  // ---- Default: user data (maps, photos, recordings, etc.) ----
+  // Accounts below admin read, create and upload new files, and never delete,
+  // rename or overwrite an existing one (owner decision for 1.0): one rule
+  // instead of per-user folders. A feature that rewrites its own file for any
+  // account (waypoints, note save, transcript appends, a chunked upload's
+  // later chunks) does that step as the system after its command's check.
+  // Admins keep the full set; super admins and the system are unrestricted.
+  {nullptr,                             PERM_READ | PERM_CREATE | PERM_IMPORT, PERM_ALL,              PERM_ALL,  false, false},
 };
 
 // Look up the first matching rule for a path. A prefix is compared in place:

@@ -3,9 +3,9 @@
 
 `opencamera async` / `closecamera async` (System_Camera_DVP.cpp) are the form
 UI adapters submit through the command executor, so the registry authorizes
-the change, the live-session fence applies and the [CMD] audit records it. A
-start honours the cameraEnabled master switch exactly as the synchronous
-`opencamera` does; both forms only report whether cam_power admitted the request
+the change, the live-session fence applies and the [CMD] audit records it. No
+saved setting refuses a start of either form (cameraautostart only decides
+boot); both forms only report whether cam_power admitted the request
 and never wait for the camera. The production handlers are compiled unchanged
 against power-request doubles; the synchronous forms must behave as before.
 
@@ -54,7 +54,7 @@ class String {
 };
 static bool gCliValidateOnly = false;
 #define RETURN_VALID_IF_VALIDATE_CSTR() do { if (gCliValidateOnly) return "VALID"; } while (0)
-static struct { bool cameraEnabled = true; } gSettings;
+static struct { bool cameraAutoStart = false; } gSettings;
 // The synchronous forms refuse a start of a running camera and answer a stop
 // of a stopped one with the not-running Error (the owner's 2026-11-18 rule).
 static bool gCameraRunning = false;
@@ -78,7 +78,7 @@ static void unlockCameraMutex(){}
 
 static void reset() {
   gCliValidateOnly = false;
-  gSettings.cameraEnabled = true;
+  gSettings.cameraAutoStart = false;
   queueAccepts = syncResult = true;
   gCameraRunning = false;
   startAsync = stopAsync = startSync = stopSync = 0;
@@ -98,11 +98,13 @@ int main() {
   reset();
   reply = cmd_camerastart("  ASYNC ");
   CHECK(startAsync == 1 && requests() == 1);
-  // The master switch gates the asynchronous start like the synchronous one.
-  reset();
-  gSettings.cameraEnabled = false;
-  reply = cmd_camerastart("async");
-  CHECK(requests() == 0 && startsWith(reply, "Error: Camera is disabled"));
+  // Start at boot on or off: an open by hand is never refused for it.
+  for (bool autoStart : {false, true}) {
+    reset();
+    gSettings.cameraAutoStart = autoStart;
+    reply = cmd_camerastart("async");
+    CHECK(startAsync == 1 && requests() == 1 && !startsWith(reply, "Error"));
+  }
   // cam_power could not take it (worker or queue unavailable): an error reply.
   reset();
   queueAccepts = false;
@@ -114,9 +116,8 @@ int main() {
   reply = cmd_camerastart("async");
   CHECK(requests() == 0 &&
         std::strcmp(reply, "Error: Camera is already running. Stop it first with 'closecamera' to restart it.") == 0);
-  // Asynchronous stop: allowed while disabled, refused only by admission.
+  // Asynchronous stop: refused only by admission.
   reset();
-  gSettings.cameraEnabled = false;
   gCameraRunning = true;
   reply = cmd_camerastop("async");
   CHECK(stopAsync == 1 && requests() == 1 && !startsWith(reply, "Error"));
@@ -141,8 +142,8 @@ int main() {
   CHECK(std::strcmp(cmd_camerastart(""), "Camera started successfully") == 0);
   CHECK(startSync == 1 && lastWaitMs == 60000 && requests() == 1);
   reset();
-  gSettings.cameraEnabled = false;
-  CHECK(startsWith(cmd_camerastart(""), "Error: Camera is disabled") && requests() == 0);
+  gSettings.cameraAutoStart = true;
+  CHECK(std::strcmp(cmd_camerastart(""), "Camera started successfully") == 0 && startSync == 1);
   reset();
   syncResult = false;
   CHECK(std::strcmp(cmd_camerastart(""), "Error: Camera not detected. Check the cable and retry.") == 0);
@@ -173,9 +174,8 @@ OPTIONAL_HELPERS = ("static const char* cameraCommandFailure(", "static bool cam
 
 def production(camera: str) -> str:
     pieces = []
-    constant = re.search(r"(?m)^static const char\* const kCameraDisabledError =[^;]*;", camera)
-    if constant:
-        pieces.append(constant[0])
+    require("kCameraDisabledError" not in camera and "gSettings" not in extract_block(
+        camera, "const char* cmd_camerastart("), "opencamera reads no saved setting")
     pieces += [extract_block(camera, marker) for marker in OPTIONAL_HELPERS if marker in camera]
     for marker in ("const char* cmd_camerastart(", "const char* cmd_camerastop("):
         require(camera.count(marker) == 1, f"System_Camera_DVP.cpp: one {marker}")

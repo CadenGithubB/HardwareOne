@@ -134,8 +134,8 @@ remain in effect until explicitly changed.
 SSD1306 OLED in place of the gamepad and an APDS9960 at `0x39`. Both display
 addresses (`0x3D`, `0x3C`) are supported. Physical input is disabled; serial
 commands control the bench test. Use `openoled`, `closeoled`, `oledbrightness <0..255>` and `oledstatus`.
-For startup on reboot, enable `oledenabled 1` and `oledautostart 1`; these are
-saved device settings, independent of compiling the display into the image.
+For startup on reboot, run `oledautostart 1`; it is a
+saved device setting, independent of compiling the display into the image.
 Start APDS with `openapds` (color mode by default); `apdscolor` and
 `apdsread json` show cached samples. `apdsmode proximity on` enables proximity
 sampling, read with `apdsproximity`. These runtime mode commands do not change

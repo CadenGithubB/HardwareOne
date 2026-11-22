@@ -162,8 +162,10 @@ static void expect(const char* who,const char* path,bool r,bool w,bool c,bool d)
 
 int main() {
     //       who      path                                   read   write  create delete
-    expect("alice", "/notes/todo.txt",                      true,  true,  true,  true);
-    expect("alice", "/recordings/take.wav",                 true,  true,  true,  true);
+    // Accounts below admin read, create and upload; they never overwrite,
+    // rename or delete an existing file (owner decision for 1.0).
+    expect("alice", "/notes/todo.txt",                      true,  false, true,  false);
+    expect("alice", "/recordings/take.wav",                 true,  false, true,  false);
     expect("alice", "/espnow/peer.txt",                     true,  true,  false, true);
     expect("alice", "/battery.csv",                         true,  false, false, false);
     expect("alice", "/battery.csv.1",                       true,  false, false, false);
@@ -175,6 +177,12 @@ int main() {
     expect("admin", "/battery.csv.2",                       true,  false, false, true);
     expect("admin", "/system/settings.json",                true,  false, false, false);
     expect("admin", "/logging_captures/sensors/s.csv",      true,  true,  true,  true);
+    // The card's twins follow the same rules (they used to fall to the
+    // catch-all, which gave every account the full set).
+    expect("alice", "/sd/system/sys_logs/events.log",       false, false, false, false);
+    expect("alice", "/sd/logging_captures/sensors/s.csv",   false, false, false, false);
+    expect("admin", "/sd/system/sys_logs/events.log",       true,  false, false, false);
+    expect("admin", "/sd/logging_captures/sensors/s.csv",   true,  true,  true,  true);
     // The ESP-NOW inbox (pushed files and the bonded peer's pulled files, e.g.
     // its users.json) is admin tier; the rest of /espnow/ is unchanged.
     expect("alice", "/espnow/received",                     false, false, false, false);

@@ -106,7 +106,6 @@ TaskHandle_t gApdsTaskHandle = nullptr;
 // APDS settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry apdsSettingEntries[] = {
-  { "apdsEnabled", SETTING_BOOL, &gSettings.apdsEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "apdsenabled" },
   { "apdsAutoStart", SETTING_BOOL, &gSettings.apdsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "apdsautostart" },
   { "apdsDevicePollMs", SETTING_INT, &gSettings.apdsDevicePollMs, 200, 0, nullptr, 50, 5000, "Poll Interval (ms)", nullptr, false, nullptr, "apdsdevicepollms" },
 };
@@ -497,10 +496,10 @@ static const char* cmd_apdsbus(const String& a) {
 
 const CommandEntry apdsCommands[] = {
   // Primary commands (3-level voice: "sensor" -> "gesture" -> "open/close")
-  { "openapds", "Start APDS9960 sensor.", false, cmd_apdsstart },
-  { "closeapds", "Stop APDS9960 sensor.", false, cmd_apdsstop },
+  { "openapds", "Start APDS9960 sensor.", true, cmd_apdsstart },
+  { "closeapds", "Stop APDS9960 sensor.", true, cmd_apdsstop },
   { "apdsread", "Read APDS9960 sensor status and data. (add 'json' for JSON output)", false, cmd_apdsread },
-  { "apdsmode", "Control APDS modes: apdsmode <color|proximity|gesture> [on|off].", false, cmd_apdsmode, "Usage: apdsmode <color|proximity|gesture> [<on|off>]" },
+  { "apdsmode", "Control APDS modes: apdsmode <color|proximity|gesture> [on|off].", true, cmd_apdsmode, "Usage: apdsmode <color|proximity|gesture> [<on|off>]" },
   
   // Read commands (per-mode)
   { "apdscolor", "Show latest cached APDS9960 color values.", false, cmd_apdscolor },

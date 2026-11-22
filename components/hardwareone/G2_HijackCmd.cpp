@@ -16,6 +16,8 @@
 #include "System_Debug.h"  // WARN_COMMANDF, ERROR_MEMORYF
 #include "System_Utils.h"  // redactCmdForAudit
 #include "BLE_Peers.h"     // synchronized G2 paired-owner authority
+#include "G2_ReplyNotice.h"  // g2ReplyNoticeText: the lens words of a refusal
+#include "System_Deadline.h"  // deadlineAfter / deadlinePending: wrap-safe expiry
 
 // =============================================================================
 // Auth identity for hijack-submitted commands.
@@ -80,6 +82,12 @@ void g2HijackInternalCallback(bool ok, const char* result, void* userData) {
   // prior owner must not redraw or disclose data to the replacement session.
   const bool ownerStillCurrent = blePeerOwnerSessionIsCurrent(
       BLE_PEER_G2_GLASSES, ctx->owner);
+  // Record why the command was refused (or clear the page's notice) before
+  // the page's callback redraws, so that redraw can show it. Fire-and-forget
+  // submissions are covered too.
+  if (ownerStillCurrent) {
+    (void)g2LensNoticeFromReply(ctx->cookie.targetPage, ok, result);
+  }
   if (ctx->userCallback && ownerStillCurrent) {
     ctx->userCallback(ok, result ? result : "", ctx->cookie, ctx->userData);
   } else if (!ownerStillCurrent) {
@@ -282,6 +290,81 @@ G2HijackCtxGuard::G2HijackCtxGuard()
 
 bool G2HijackCtxGuard::stillCurrent() const {
   return blePeerOwnerSessionIsCurrent(BLE_PEER_G2_GLASSES, owner_);
+}
+
+// =============================================================================
+// Lens notice (see G2_HijackCmd.h). One slot: the latest refusal of any page.
+// Written on cmd_exec, read by the lens applier, g2_taps and the live-text
+// worker, so every access holds the spinlock for a short copy only.
+// =============================================================================
+namespace {
+constexpr uint32_t kLensNoticeMs = 6000;
+portMUX_TYPE gLensNoticeMux = portMUX_INITIALIZER_UNLOCKED;
+struct LensNotice {
+  bool         set = false;
+  G2HijackPage page = G2_HIJACK_PAGE_MAIN;
+  uint32_t     untilMs = 0;   // deadlineAfter(); never 0 while set
+  char         text[kG2NoticeMax] = {};
+};
+LensNotice gLensNotice;
+
+bool lensNoticeRead(G2HijackPage page, char* out, size_t cap, bool take) {
+  char copy[kG2NoticeMax];
+  bool found = false;
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&gLensNoticeMux);
+  // A notice recorded on the other core after `now` was read is still
+  // pending here (the deadline compares a signed difference).
+  if (gLensNotice.set && !deadlinePending(gLensNotice.untilMs, now)) {
+    gLensNotice.set = false;  // expired
+  }
+  if (gLensNotice.set && gLensNotice.page == page) {
+    memcpy(copy, gLensNotice.text, sizeof(copy));
+    if (take) gLensNotice.set = false;
+    found = true;
+  }
+  portEXIT_CRITICAL(&gLensNoticeMux);
+  if (found && out && cap) snprintf(out, cap, "%s", copy);
+  return found;
+}
+}  // namespace
+
+bool g2LensNoticeFromReply(G2HijackPage page, bool ok, const char* reply) {
+  char text[kG2NoticeMax];
+  const bool refused = g2ReplyNoticeText(ok, reply, text, sizeof(text));
+  const uint32_t now = millis();
+  portENTER_CRITICAL(&gLensNoticeMux);
+  if (refused) {
+    gLensNotice.set = true;
+    gLensNotice.page = page;
+    gLensNotice.untilMs = deadlineAfter(now, kLensNoticeMs);
+    memcpy(gLensNotice.text, text, sizeof(text));
+  } else if (gLensNotice.set && gLensNotice.page == page) {
+    gLensNotice.set = false;  // a later command from the page went through
+  }
+  portEXIT_CRITICAL(&gLensNoticeMux);
+  if (refused) {
+    DEBUG_G2F("[G2-Hijack] lens notice page=%u: %s", (unsigned)page, text);
+  }
+  return refused;
+}
+
+bool g2LensNoticeTake(G2HijackPage page, char* out, size_t cap) {
+  return lensNoticeRead(page, out, cap, /*take=*/true);
+}
+
+bool g2LensNoticePeek(G2HijackPage page, char* out, size_t cap) {
+  return lensNoticeRead(page, out, cap, /*take=*/false);
+}
+
+void g2LensNoticeBackRow(G2HijackPage page, const char* backLabel, char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  char text[kG2NoticeMax];
+  if (g2LensNoticeTake(page, text, sizeof(text))) {
+    snprintf(out, cap, "<- %s", text);
+  } else if (backLabel != out) {  // a caller may pass its own label buffer
+    snprintf(out, cap, "%s", backLabel ? backLabel : "<- Back");
+  }
 }
 
 #endif // ENABLE_BLUETOOTH && ENABLE_G2_GLASSES

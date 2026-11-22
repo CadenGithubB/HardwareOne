@@ -10,6 +10,7 @@
 
 #include "BLE_Server.h"
 #include "G2_HijackCmd.h"
+#include "G2_ReplyNotice.h"
 
 #include "G2_Page_Sensors.h"
 #include "i2csensor_rda5807.h"
@@ -26,8 +27,9 @@
 // Row labels are STATIC by design (list rows can't UPDATE_TEXT and a
 // REBUILD blanks the sibling text child) — all state (frequency or seek
 // progress, RDS, volume/mute, signal) lives in the readout. Actions
-// dispatch the real fmradio* commands (all non-admin) via cmd_exec;
-// the async-seek core means every command returns in milliseconds.
+// dispatch the real fmradio* commands via cmd_exec, which decides who may
+// run them (most need an admin); a refusal shows at the top of the readout.
+// The async-seek core means every command returns in milliseconds.
 // ─────────────────────────────────────────────────────────────────────
 static constexpr G2ContainerGeom kFmListGeom    = {   8,   8, 200, 270 };
 static constexpr G2ContainerGeom kFmReadoutGeom = { 216,   8, 352, 270 };
@@ -77,6 +79,21 @@ static void buildFmTunerReadout(char* out, size_t cap) {
            (unsigned)snap.rssi, (unsigned)snap.snr);
 }
 
+// The text of the readout child: a refused tap's reason ("Needs an admin") on
+// top for a few seconds, then the radio state. Row labels are static, so the
+// readout is where the lens answers a tap.
+static void buildFmTunerLensText(char* out, size_t cap) {
+  if (!out || cap == 0) return;
+  char notice[kG2NoticeMax];
+  if (!g2LensNoticePeek(G2_HIJACK_PAGE_FMRADIO, notice, sizeof(notice))) {
+    buildFmTunerReadout(out, cap);
+    return;
+  }
+  char state[160];
+  buildFmTunerReadout(state, sizeof(state));
+  snprintf(out, cap, "%s\n%s", notice, state);
+}
+
 // Live render fn driven by liveTextWorker. First call: CREATE the compound
 // (7-row action list + 1 text child). Subsequent ticks: UPDATE_TEXT on the
 // readout child only, gated by a byte-identical cache. Mirrors other live-text pages.
@@ -90,7 +107,7 @@ static bool renderFmTunerLive() {
   }
 
   char readout[160];
-  buildFmTunerReadout(readout, sizeof(readout));
+  buildFmTunerLensText(readout, sizeof(readout));
 
   if (!g2LensGetState().containerReady) {
     const uint32_t createLifecycleEpoch =
@@ -129,7 +146,9 @@ static bool renderFmTunerLive() {
 // Command completion — just kick an immediate re-render so the readout
 // reflects the action within ~100 ms instead of waiting out the 1 s tick
 // (the cache is already updated by the time the handler returns; seek shows
-// its progress flag the same way). Semaphore give is safe from cmd_exec.
+// its progress flag the same way). A refusal was already recorded as this
+// page's lens notice, which the readout shows. Semaphore give is safe from
+// cmd_exec.
 static void onFmTunerCmdDone(bool ok, const char* result,
                              const G2CmdCookie& /*cookie*/, void* /*userData*/) {
   DEBUG_G2F("[G2] fmtuner cmd done: ok=%d result='%s'", (int)ok,
@@ -180,7 +199,7 @@ static void g2FmTunerHandleTap(uint32_t idx) {
       return;
     }
     case 5:   // Mute toggle — static label, conditional dispatch
-      g2FmTunerSubmit(radio.muted ? "fmradiounmute" : "fmradiomute");
+      g2FmTunerSubmit(radio.muted ? "fmradiomute off" : "fmradiomute on");
       return;
     default:
       return;

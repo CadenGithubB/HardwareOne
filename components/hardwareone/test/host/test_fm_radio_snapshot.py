@@ -53,7 +53,7 @@ def generated(component: Path, baseline: bool) -> str:
     if not baseline:
         functions += [extract_block(owner, marker) for marker in [
             'void updateFmRadio() ', 'const char* cmd_fmradio_tune(', 'const char* cmd_fmradio_seek(',
-            'const char* cmd_fmradio_volume(', 'const char* cmd_fmradio_mute(', 'const char* cmd_fmradio_unmute(']]
+            'const char* cmd_fmradio_volume(', 'const char* cmd_fmradio_mute(']]
     unit = ((HERE / 'fm_radio_snapshot_harness.cpp').read_text()
             .replace('// INSERT_TYPES', types).replace('// INSERT_STATE', state)
             .replace('// INSERT_FUNCTIONS', '\n\n'.join(functions)))

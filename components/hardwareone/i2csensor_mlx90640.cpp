@@ -32,7 +32,6 @@
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry thermalSettingEntries[] = {
-  { "thermalEnabled", SETTING_BOOL, &gSettings.thermalEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "thermalenabled" },
   { "thermalAutoStart", SETTING_BOOL, &gSettings.thermalAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "thermalautostart" },
   { "thermalPollingMs", SETTING_INT, &gSettings.thermalPollingMs, 250, 0, nullptr, 50, 5000, "Polling (ms)", nullptr, false, "timing", "thermalpollingms" },
   { "thermalPaletteDefault", SETTING_STRING, &gSettings.thermalPaletteDefault, 0, 0, "grayscale", 0, 0, "Default Palette", "grayscale,iron,rainbow,hot,coolwarm", false, "display", "thermalpalettedefault" },
@@ -353,7 +352,7 @@ bool thermalStartInternal() {
 // Public command - uses centralized queue
 const char* cmd_thermalstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  // The enable check (thermalenabled) is in requestSensorStart(), for every sensor.
+  // The bus and queue checks are in requestSensorStart(), for every sensor.
   return cmd_sensorstart_queued(I2C_DEVICE_THERMAL, "Thermal", "openthermal@enqueue");
 }
 
@@ -1376,8 +1375,8 @@ static const char* cmd_thermalbus(const String& a) {
 
 const CommandEntry thermalCommands[] = {
   // Start/Stop (3-level voice: "sensor" -> "thermal camera" -> "open/close")
-  { "openthermal", "Start MLX90640 thermal sensor.", false, cmd_thermalstart },
-  { "closethermal", "Stop MLX90640 thermal sensor.", false, cmd_thermalstop },
+  { "openthermal", "Start MLX90640 thermal sensor.", true, cmd_thermalstart },
+  { "closethermal", "Stop MLX90640 thermal sensor.", true, cmd_thermalstop },
   { "thermalread", "Read thermal frame; min/max/avg broadcast to output. (add 'json' for JSON output)", false, cmd_thermalread },
   
   // UI Settings (client-side visualization)

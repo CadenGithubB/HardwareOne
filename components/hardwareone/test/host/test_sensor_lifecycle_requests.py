@@ -59,7 +59,7 @@ def main() -> None:
     )]
     controller_definitions += [extract_block(header, "enum class SensorStartRefusal") + ";"]
     controller_definitions += [re.search(r"^static bool sSensorStopAwaitingCleanup[^\n]+", controller, re.M)[0]]
-    # The <x>enabled gate and the automatic restart (state, flags, tick).
+    # The start-at-boot switch table and the automatic restart (state, flags, tick).
     restart_state = re.findall(r"^EXT_RAM_BSS_ATTR static [^\n]*sSensorRestart[^\n]+", controller, re.M)
     require(len(restart_state) == 5, "expected the five automatic-restart state lines in PSRAM")
     controller_definitions += [
@@ -71,7 +71,7 @@ def main() -> None:
         *restart_state,
     ]
     controller_definitions += [extract_block(controller, marker) for marker in (
-        "static const SensorSwitchRow* sensorSwitchRow(", "static bool sensorEnabledForStart(",
+        "static const SensorSwitchRow* sensorSwitchRow(",
         "void noteSensorAutoDisabled(", "static bool sensorRestartClosedByHand(",
         "static void sensorRestartOpenedByHand(",
         "static uint8_t i2cAddressForDeviceType(", "static uint8_t i2cBusForDeviceType(",

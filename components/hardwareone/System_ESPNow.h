@@ -1238,7 +1238,6 @@ void onEspNowDataSent(const esp_now_send_info_t* tx_info, esp_now_send_status_t 
 
 // ESP-NOW command functions (cmd_espnow_stopstream implemented in espnow_system.cpp)
 const char* cmd_espnow_send(const String& argsInput);
-const char* cmd_espnowenabled(const String& argsInput);
 
 // Global state (defined in espnow_system.cpp)
 extern EspNowState* gEspNow;

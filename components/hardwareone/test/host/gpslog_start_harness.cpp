@@ -21,7 +21,7 @@ bool gCliValidateOnly = false;
 // INSERT_TYPES
 
 static struct {
-  bool sensorLogEnabled, sensorLogAutoStart, healthLoggingEnabled, gpsAutoStart;
+  bool sensorLogAutoStart, healthLoggingEnabled, gpsAutoStart;
   int sensorLogMask, sensorLogFormat, sensorLogIntervalMs;
   int sensorLogMaxSize, sensorLogMaxRotations;
   String sensorLogPath;
@@ -230,7 +230,7 @@ static void check(bool ok, const char* message) {
 }
 static bool error(const std::string& text) { return text.rfind("Error", 0) == 0; }
 static void reset() {
-  gSettings = {true, false, false, false, LOG_GPS, SENSOR_LOG_TRACK,
+  gSettings = {false, false, false, LOG_GPS, SENSOR_LOG_TRACK,
                1000, 256000, 3, String("/logging_captures/logs/saved track.track")};
   gSensorLogMask = LOG_TOF;
   gSensorLogFormat = SENSOR_LOG_CSV;
@@ -289,15 +289,14 @@ static void invalidAndGuards() {
     check(error(cmd_gpslog(arg)), "invalid interval accepted");
     untouched();
   }
-  for (int guard = 0; guard < 3; ++guard) {
+  for (int guard = 1; guard < 3; ++guard) {
     context = "startup preflight " + std::to_string(guard);
     reset();
-    if (guard == 0) gSettings.sensorLogEnabled = false;
     if (guard == 1) gSensorLoggingRunning = true;
     if (guard == 2) gSettings.healthLoggingEnabled = true;
     const std::string result = cmd_gpslog("");
     check(error(result), "policy conflict accepted");
-    check(result.find(guard == 0 ? "disabled" : guard == 1 ? "already running" : "Health") != std::string::npos,
+    check(result.find(guard == 1 ? "already running" : "Health") != std::string::npos,
           "policy conflict lost useful reason");
     untouched();
     check(gSensorLoggingRunning == (guard == 1), "preflight stopped/started existing logger");
@@ -402,12 +401,11 @@ static void manualAndBootPaths() {
       check(!gSettings.gpsAutoStart && gSettings.sensorLogAutoStart == boot, "manual start changed boot enable policy");
     }
   }
-  for (bool disabled : {false, true}) {
+  {
     context = "manual preflight preserves divergent state";
     reset();
-    gSettings.sensorLogEnabled = !disabled;
-    gSensorLoggingRunning = !disabled;
-    check(error(sensorLogStartConfiguredSession()), "disabled/running manual start accepted");
+    gSensorLoggingRunning = true;
+    check(error(sensorLogStartConfiguredSession()), "running manual start accepted");
     check(gSensorLogMask == LOG_TOF && gSensorLogFormat == SENSOR_LOG_CSV &&
           gSensorLogIntervalMs == 5000 && shapedCalls == 0 && resolvedCalls == 0 && persistCalls == 0,
           "manual preflight changed existing session parameters");
@@ -553,9 +551,6 @@ static void admissionFailuresAndAdapter() {
     check(gSensorLogIntervalMs == (*interval ? 777u : 5000u), "explicit command interval changed");
   }
   context = "explicit command error precedence";
-  reset();
-  gSettings.sensorLogEnabled = false;
-  check(std::string(commandStart("start")).find("disabled") != std::string::npos, "missing args bypassed master guard");
   reset();
   gSensorLoggingRunning = true;
   check(std::string(commandStart("start")).find("already running") != std::string::npos, "missing args bypassed running guard");

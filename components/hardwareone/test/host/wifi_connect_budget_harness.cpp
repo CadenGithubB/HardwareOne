@@ -254,7 +254,6 @@ static int gEnsureInitCalls = 0;
 bool ensureWifiInitialized() { ++gEnsureInitCalls; return gWifiInitOk; }
 struct FakeSettings {
   bool wifiAutoReconnect = true;
-  bool wifiEnabled = true;
 };
 static FakeSettings gSettings;
 // The rehunt's side of a failed setupWifi connect (System_WiFi.cpp arms the
@@ -833,12 +832,6 @@ int main() {
     gSettings.wifiAutoReconnect = false;
     setupWifi(budget, WifiConnectOrigin::BOOT);
     require(gRehuntConnectFailedNotes == 0, "setupWiFi with wifiautoreconnect 0: no rehunt");
-  }
-  {
-    reset(missing(1), nullptr, 0);
-    gSettings.wifiEnabled = false;
-    setupWifi(budget, WifiConnectOrigin::BOOT);
-    require(gRehuntConnectFailedNotes == 0, "setupWiFi with wifienabled 0: no rehunt");
   }
   {
     // radiopower on and the companion's restore run setupWifi() as a command.

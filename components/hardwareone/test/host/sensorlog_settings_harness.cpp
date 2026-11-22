@@ -25,7 +25,6 @@ static bool gSensorLoggingRunning;
 static struct {
   int sensorLogMask;
   int sensorLogFormat;
-  bool sensorLogEnabled;
   bool healthLoggingEnabled;
   bool sensorLogAutoStart;
   String sensorLogPath;
@@ -135,7 +134,6 @@ static void reset(uint8_t mask = LOG_TOF, SensorLogFormat format = SENSOR_LOG_TE
   gSensorLoggingRunning = running;
   gSettings.sensorLogMask = mask;
   gSettings.sensorLogFormat = format;
-  gSettings.sensorLogEnabled = true;
   gSettings.healthLoggingEnabled = false;
   gSettings.sensorLogAutoStart = false;
   gSettings.sensorLogPath = "/logs/old.txt";
@@ -383,10 +381,6 @@ static void healthTransitions() {
     }
   }
   context = "health startup boundaries";
-  reset();
-  gSettings.sensorLogEnabled = false;
-  check(std::string(healthLoggingSet(true)).find("sensor logging is disabled") != std::string::npos, "disabled logger accepted health start");
-  noEffects(LOG_TOF, LOG_TOF, SENSOR_LOG_TEXT, SENSOR_LOG_TEXT, false);
   reset();
   bufferAvailable = false;
   check(std::string(healthLoggingSet(true)) == "Error: Debug buffer unavailable", "buffer error changed");

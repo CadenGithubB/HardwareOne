@@ -37,6 +37,21 @@ inline const char* reason(const char* text) {
   while (*text == ':' || *text == ' ' || *text == '\t') ++text;
   return text;
 }
+// Length of the first sentence of a reason, for a toast: up to the first line
+// break, and up to and including a '.', '!' or '?' that a space and a capital
+// letter follow. "This recording belongs to alice. Only alice or an
+// administrator can stop it." keeps "This recording belongs to alice.".
+inline size_t firstSentenceLength(const char* text) {
+  if (!text) return 0;
+  const size_t line = strcspn(text, "\r\n");
+  for (size_t i = 0; i + 2 < line; ++i) {
+    const char c = text[i];
+    if ((c == '.' || c == '!' || c == '?') && text[i + 1] == ' ' &&
+        text[i + 2] >= 'A' && text[i + 2] <= 'Z')
+      return i + 1;
+  }
+  return line;
+}
 struct Lines { char text[6][32]{}; int count = 0; };
 // Word-wrap within the available toast rectangle; mark omitted text explicitly.
 inline Lines wrap(const char* message, int columns, int maxLines) {

@@ -95,8 +95,7 @@ inline void streamCameraSensorCard(httpd_req_t* req) {
       </div>
       <div id='camera-ml-section' style='display:none;margin-top:10px;padding:10px;background:var(--panel-bg);border:1px solid #dee2e6;border-radius:4px'>
         <div class='sensor-controls' style='margin-bottom:10px'>
-          <button class='btn' id='btn-ei-enable'>Enable ML</button>
-          <button class='btn' id='btn-ei-disable' style='display:none'>Disable ML</button>
+          <button class='btn' id='btn-ei-unload' style='display:none'>Unload model</button>
           <button class='btn' id='btn-ei-detect'>Detect</button>
           <button class='btn' id='btn-ei-continuous-start'>Continuous</button>
           <button class='btn' id='btn-ei-continuous-stop' style='display:none'>Stop</button>

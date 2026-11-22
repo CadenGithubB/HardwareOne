@@ -38,6 +38,28 @@ struct CommandResolution {
 
 CommandResolution resolveCommand(const String& line);
 const CommandEntry* findCommand(const String& name);
+
+// The role half of the command policy (System_Utils.cpp): the guest view-only
+// surface, the admin and super-admin rows, and the remote:/@ wrapper rule.
+// authorizeCommand applies it to the account submitting a line; automation
+// save applies it to the automation's owner, so a step its owner may not run
+// is refused when it is stored, not first when it fires. One function, so the
+// two can never disagree about who may run a line.
+enum class CommandRoleRefusal : uint8_t {
+  None,            // the role may run the line
+  Guest,           // the account is a guest: view-only
+  Admin,           // the row needs an administrator
+  SuperAdmin,      // the row needs a super admin
+  RemoteAdmin,     // remote:/@ needs a local administrator for this line
+  NestedRemote,    // remote:/@ inside remote:/@ is never allowed
+  RoleUnavailable, // the account's role could not be read (fail closed)
+};
+// May `user` run `line` by role alone? Session, transport and password-change
+// rules are not part of this: they belong to a live submission. `rowName`
+// receives the matched command row's name (the unwrapped line's for remote:/@)
+// when there is one.
+CommandRoleRefusal commandRoleRefusalFor(const String& user, const String& line,
+                                         String* rowName = nullptr);
 String executeCommandThroughRegistry(const String& argsInput);
 String resolveRegistryCommandKey(const String& command);
 

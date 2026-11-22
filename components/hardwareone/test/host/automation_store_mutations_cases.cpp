@@ -62,6 +62,16 @@ static String currentExecUser() { return gCaller; }
 static bool currentExecIsAdmin() { return gCallerIsAdmin; }
 static void runAs(const char* user, bool admin) { gCaller = user; gCallerIsAdmin = admin; }
 
+// The role half of the command policy (System_Utils.cpp), reduced to what the
+// save-time owner check asks: "adminthing" rows need an administrator and
+// "superthing" rows a super admin. A remote:/@ wrapper and roles are not
+// modelled beyond that.
+static const std::map<std::string, std::string> kRoles = {
+    {"alice", "user"}, {"admin", "admin"}, {"root", "superadmin"}, {"guest", "guest"}};
+enum class CommandRoleRefusal : uint8_t;
+static std::vector<std::string> roleChecks;  // "owner|step" per check
+static CommandRoleRefusal commandRoleRefusalFor(const String& user, const String& line, String* rowName);
+
 // key=value arguments, as the automation commands read them.
 class CommandArgs {
  public:
@@ -79,6 +89,19 @@ class CommandArgs {
 };
 
 // INSERT_STORE_PRODUCTION
+
+static CommandRoleRefusal commandRoleRefusalFor(const String& user, const String& line, String* rowName) {
+  roleChecks.push_back(std::string(user.c_str()) + "|" + line.c_str());
+  const auto found = kRoles.find(user.c_str());
+  if (found == kRoles.end()) return CommandRoleRefusal::RoleUnavailable;
+  const std::string role = found->second, text = line.c_str();
+  const std::string verb = text.substr(0, text.find(' '));
+  if (rowName) *rowName = String(verb.c_str());
+  if (role == "guest") return CommandRoleRefusal::Guest;
+  if (verb == "superthing" && role != "superadmin") return CommandRoleRefusal::SuperAdmin;
+  if (verb == "adminthing" && role != "admin" && role != "superadmin") return CommandRoleRefusal::Admin;
+  return CommandRoleRefusal::None;
+}
 
 // userdelete (System_User.cpp): the account delete is a double, the automation
 // sweep behind it is the production one above.
@@ -278,10 +301,12 @@ static void quotesAndBracesSurvive() {
 }
 
 static AutomationsMutateResult add(const char* entryJson, bool hasId, long& id, uint8_t extraFlags = 0,
-                                   const char** replyOut = nullptr) {
+                                   const char** replyOut = nullptr, const char* stepsText = "echo x") {
   JsonDocument built;
   CHECK(!deserializeJson(built, entryJson));
-  AutomationAddContext ctx{built.as<JsonObjectConst>(), hasId, id, currentExecUser(), currentExecIsAdmin(), nullptr};
+  const String steps(stepsText);
+  AutomationAddContext ctx{built.as<JsonObjectConst>(), hasId, id, currentExecUser(), currentExecIsAdmin(),
+                           nullptr, &steps};
   String error;
   const AutomationsMutateResult result = mutateAutomationsJson(
       "automation.add", automationAddMutation, &ctx,
@@ -341,6 +366,73 @@ static void addIsOneWriteAndIdStaysFirst() {
   long fresh = 4242;
   CHECK(add(edited, true, fresh) == AutomationsMutateResult::Changed && fresh == 4242 && storedCount() == 3);
   checkReadersFind(4242);
+}
+
+// B2 (owner decision 2026-11-21): every step, THEN/ELSE branches included, is
+// checked against the OWNER's role when an automation is saved, and an edit
+// never changes the owner, also when an administrator edits it.
+static void ownerRoleCheckedAtSaveAndKeptOnEdit() {
+  const char* built = R"({"id":0,"name":"steps","createdBy":"x","enabled":true,)"
+                      R"("triggers":[{"type":"boot","nextAt":null}],"commands":["echo"]})";
+  reset(nullptr);
+  const char* reply = nullptr;
+  long id = 0;
+  // An administrator may store an admin step, not a super-admin one, and not
+  // one hidden in a branch.
+  runAs("admin", true);
+  CHECK(add(built, false, id, 0, nullptr, "echo a;adminthing on") == AutomationsMutateResult::Changed);
+  JsonDocument doc;
+  CHECK(std::string(storedEntry(doc, id)["createdBy"] | "") == "admin");
+  for (const char* steps : {"superthing now", "echo;superthing", "IF TEMP>30 THEN echo hot ELSE superthing",
+                            "IF A=1 THEN echo ELSE IF B=2 THEN superthing", "PRINT hi;superthing"}) {
+    roleChecks.clear();
+    long fresh = 0;
+    const unsigned before = writes;
+    CHECK(add(built, false, fresh, 0, &reply, steps) == AutomationsMutateResult::Refused);
+    CHECK(reply && std::strstr(reply, "needs a super admin") && std::strstr(reply, "'admin'") && writes == before);
+    for (const std::string& check : roleChecks) CHECK(check.rfind("admin|", 0) == 0);
+  }
+  // PRINT is not a command; the branch text is checked, not the condition.
+  roleChecks.clear();
+  long printed = 0;
+  CHECK(add(built, false, printed, 0, nullptr, "PRINT superthing;IF TEMP>30 THEN echo") ==
+        AutomationsMutateResult::Changed);
+  CHECK(roleChecks.size() == 1 && roleChecks[0] == "admin|echo");
+
+  // A super admin edits the administrator's automation: the owner stays, and
+  // the steps are checked against the owner, not the editor.
+  runAs("root", true);
+  long target = id;
+  CHECK(add(built, true, target, 0, &reply, "superthing") == AutomationsMutateResult::Refused);
+  CHECK(reply && std::strstr(reply, "'admin'"));
+  CHECK(add(built, true, target, 0, nullptr, "adminthing off") == AutomationsMutateResult::Changed);
+  CHECK(target == id && std::string(storedEntry(doc, id)["createdBy"] | "") == "admin");
+  // The super admin's own new automation may hold the super step.
+  long own = 0;
+  CHECK(add(built, false, own, 0, nullptr, "superthing") == AutomationsMutateResult::Changed);
+  CHECK(std::string(storedEntry(doc, own)["createdBy"] | "") == "root");
+  // An administrator editing the super admin's automation cannot add a step
+  // only a super admin may run (it would run as the super admin), and the
+  // check uses the editor's name; an edit within the editor's own rights
+  // keeps the super admin as owner.
+  runAs("admin", true);
+  long theirs = own;
+  CHECK(add(built, true, theirs, 0, &reply, "superthing again") == AutomationsMutateResult::Refused);
+  CHECK(reply && std::strstr(reply, "needs a super admin") && std::strstr(reply, "'admin' is not"));
+  CHECK(add(built, true, theirs, 0, nullptr, "adminthing") == AutomationsMutateResult::Changed);
+  CHECK(std::string(storedEntry(doc, own)["createdBy"] | "") == "root");
+  // The save splits a conditional the way the run does: a THEN or ELSE inside
+  // quotes still splits it, so the step behind it is checked.
+  long quoted = 0;
+  CHECK(add(built, false, quoted, 0, &reply, "IF A=1 THEN echo \"x ELSE superthing now\"") ==
+        AutomationsMutateResult::Refused);
+  runAs("root", true);
+  // An owner whose role cannot be read: nothing is stored.
+  runAs("ghost", true);
+  long lost = 0;
+  CHECK(add(built, false, lost, 0, &reply, "echo") == AutomationsMutateResult::Refused);
+  CHECK(reply && std::strstr(reply, "could not be read"));
+  runAs("admin", true);
 }
 
 static void interleavedMutationsBothLand() {
@@ -577,6 +669,7 @@ int main() {
   changesGoByNumericId();
   quotesAndBracesSurvive();
   addIsOneWriteAndIdStaysFirst();
+  ownerRoleCheckedAtSaveAndKeptOnEdit();
   interleavedMutationsBothLand();
   brokenDocumentsAreNotPublished();
   sanitizeStoreIsOneStep();

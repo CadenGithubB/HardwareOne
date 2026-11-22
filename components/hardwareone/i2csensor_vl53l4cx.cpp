@@ -624,8 +624,8 @@ static const char* cmd_tofbus(const String& a) {
 
 const CommandEntry tofCommands[] = {
   // Start/Stop/Read (3-level voice: "sensor" -> "time of flight" -> "open/close")
-  { "opentof", "Start VL53L4CX ToF sensor.", false, cmd_tofstart },
-  { "closetof", "Stop VL53L4CX ToF sensor.", false, cmd_tofstop },
+  { "opentof", "Start VL53L4CX ToF sensor.", true, cmd_tofstart },
+  { "closetof", "Stop VL53L4CX ToF sensor.", true, cmd_tofstop },
   { "tofread", "Read ToF distance sensor. (add 'json' for JSON output)", false, cmd_tof },
   
   // UI Settings (client-side visualization)
@@ -762,7 +762,6 @@ void tofTask(void* parameter) {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry tofSettingEntries[] = {
-  { "tofEnabled", SETTING_BOOL, &gSettings.tofEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "tofenabled" },
   { "tofAutoStart", SETTING_BOOL, &gSettings.tofAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "tofautostart" },
   { "tofPollingMs", SETTING_INT, &gSettings.tofPollingMs, 220, 0, nullptr, 50, 5000, "Polling (ms)", nullptr, false, nullptr, "tofpollingms" },
   { "tofStabilityThreshold", SETTING_INT, &gSettings.tofStabilityThreshold, 3, 0, nullptr, 0, 50, "Stability Threshold", nullptr, false, nullptr, "tofstabilitythreshold" },

@@ -17101,15 +17101,10 @@ bool bleStackRecycleIfWedged(void) {
   // Terminal host/controller teardown is the positive lifetime barrier for
   // every client left in BLEDevice's retirement registry.
 
-  // Master-disable or a role change can be committed while RECOVERING. The
-  // setting is the desired terminal state; never blindly resurrect the old
-  // client role after the user asked to power BLE down or switch to server.
-  if (!gSettings.bleEnabled) {
-    bleStackSetLifecycleFault(false);
-    gBleWedgeStreak = 0;
-    BROADCAST_PRINTF("[BLE] Stack recycle complete — BLE remains disabled by user intent");
-    return true;
-  }
+  // No user close can land in the middle: this recycle holds the RECOVERING
+  // role claim from admission to here, and closeble / closeconsole / openconsole
+  // need that claim (they answer "busy" meanwhile). So the stack this recycle
+  // tore down is the stack the user still wants; bring it back.
 
   // This recovery was admitted only while the server profile was not the
   // stack owner. Restore the shared stack (it stays up until `closeble`, so a
@@ -29334,9 +29329,9 @@ extern const CommandEntry g2Commands[] = {
   { "g2 list preview", "Show the next QuickList rows' bytes without sending.", true, cmd_g2listpreview,
     "Usage: g2 list preview" },
   { "g2 list push",    "Read the glasses' settings and replace their QuickList with the five control rows now (items added in the Even app are removed).", true, cmd_g2listpush,
-    "Usage: g2 list push  (both temples, glasses firmware 2.3.2.14)" },
+    "Usage: g2 list push  (both temples, glasses firmware 2.3.2.14)", /*requiresSuperAdmin=*/true },
   { "g2 list feed",    "Replace the glasses' QuickList with Wear Detection, Silent Mode, Auto Brightness, Head-Up Display and Brightness rows after each connect (saved; off by default).", true, cmd_g2listfeed,
-    "Usage: g2 list feed [on|off]" },
+    "Usage: g2 list feed [on|off]", /*requiresSuperAdmin=*/true },
 #endif
   { "g2sensors",    "Show device's sensor list on the G2 lens",        false, cmd_g2sensors },
   { "g2network",    "Show Network info page on the G2 lens",           false, cmd_g2network },

@@ -23,6 +23,7 @@
 
 #include <time.h>
 #include "System_Utils.h"
+#include "G2_ReplyNotice.h"   // g2ReplyNoticeText: the lens words of a refusal
 
 // =============================================================================
 // Health history + graph renderer. Portable aside from reading live telemetry
@@ -1666,7 +1667,10 @@ void g2HealthNoteLoggingCommandQueued(void) {
 void g2HealthNoteLoggingCommandResult(bool ok, const char* result) {
   sLoggingCmdPending = false;
   if (ok) { sLoggingUiMsg[0] = '\0'; return; }
-  snprintf(sLoggingUiMsg, sizeof(sLoggingUiMsg), "%s", (result && result[0]) ? result : "Logging failed");
+  // Starting or stopping logging needs an admin: the shared lens text says so
+  // ("Needs an admin"), or gives the failure's first sentence.
+  if (!g2ReplyNoticeText(ok, result, sLoggingUiMsg, sizeof(sLoggingUiMsg)) || !sLoggingUiMsg[0])
+    snprintf(sLoggingUiMsg, sizeof(sLoggingUiMsg), "Logging failed");
   sLoggingUiMs = millis();
 }
 

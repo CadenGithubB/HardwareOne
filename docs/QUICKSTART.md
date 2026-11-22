@@ -289,23 +289,23 @@ network feature compiled in.
 
 | # | Page | Shown when | Contents |
 | - | ---- | ---------- | -------- |
-| 1 | **Connections** | a network feature is compiled in | WiFi (with **WiFi auto-connect**), Web Interface, Bluetooth, ESP-NOW (with **ESP-NOW mesh**), Bonded Mode and MQTT (with **MQTT auto-start**), whichever are compiled in, each with a rough heap cost |
+| 1 | **Connections** | a network feature is compiled in | WiFi, Web Interface, Bluetooth, ESP-NOW (with **ESP-NOW mesh**), Bonded Mode and MQTT, whichever are compiled in, each a start-at-boot choice with a rough heap cost |
 | 2 | **WiFi Setup** | WiFi enabled on page 1 | Scan and join. Select by number, type an SSID directly, `rescan`, or `skip` |
 | 3 | **Web Mode** | Web Interface enabled and HTTPS compiled in | `HTTP` or `HTTPS` (HTTPS costs ~20 KB more RAM; picking it generates a self-signed cert) |
 | 4 | **Bluetooth Mode** | Bluetooth enabled and the G2 client compiled in | `App console` (the phone/app server) or `Glasses` (`Glasses+pipe` on phone-pipe builds; ~10 KB more RAM) |
 | 5 | **ESP-NOW Identity** | ESP-NOW enabled on page 1 | Display label (free text), then the device name (ESP-NOW name, Bluetooth name and Wi-Fi hostname; 1-31 letters, digits and `-`), offered from the label so Enter accepts it; room, zone, mobile/stationary. All optional |
-| 6 | **MQTT Broker** | MQTT enabled **and** MQTT auto-start on, both on page 1 | Broker host, port, username, password |
+| 6 | **MQTT Broker** | MQTT set to start at boot on page 1 | Broker host, port, username, password |
 | 7 | **Display & Controls** | a display, LED, G2, input or I2C feature is compiled in | Local display, NeoPixel LED (with its startup effect), G2 Glasses, the input device and the I2C bus |
 | 8 | **Sensors** | a sensor feature is compiled in | Each compiled sensor and audio/camera feature; most rows are auto-start choices |
 | 9 | **System** | always | Remaining features (for example Automations, LLM), then device name, timezone, NTP server (when WiFi is compiled in) and log level |
 
 On any page, `b` / `back` returns to the previous one.
 
-> **Skipping the ESP-NOW Identity page turns ESP-NOW off.** Answering `n` (or
-> pressing Enter) at that page's prompt sets `espnowEnabled = false`, because the
-> mesh cannot start without a device name. If you want ESP-NOW, answer `c` and
-> at minimum accept the offered name. You can set it later with `devicename`
-> and re-enable with `espnowenabled 1`.
+> **Skipping the ESP-NOW Identity page turns ESP-NOW off at boot.** Answering `n`
+> (or pressing Enter) at that page's prompt sets `espnowAutoStart = false`, because
+> the mesh cannot start without a device name. If you want ESP-NOW, answer `c` and
+> at minimum accept the offered name. You can set it later with `devicename`,
+> then start it with `openespnow` (now) or `espnowautostart 1` (at boot).
 
 The theme is not one of the nine pages. On builds with the web server compiled
 in, first-time setup asks for a **Light** or **Dark** web UI theme once, right
@@ -314,11 +314,11 @@ is skipped entirely when `ENABLE_HTTP_SERVER=0`, and you can change it later fro
 the web **Settings** page.
 
 ### Step 4 - Access the UI
-> The boot path starts the web server only when the Web Interface is enabled **and** WiFi is already connected, and it connects to WiFi at boot only when WiFi auto-connect is on and a network is saved. Until then the Serial interface and the local display (if connected) are the only ones available.
+> The boot path starts the web server only when the Web Interface is set to start at boot **and** WiFi is already connected, and it connects to WiFi at boot only when WiFi is set to start at boot and a network is saved. Until then the Serial interface and the local display (if connected) are the only ones available.
 >
-> **Basic mode** turns the web server's auto-start on but configures no WiFi network, so it also leaves WiFi auto-connect off. In the serial console run `wifiscan`, then `wifiadd <ssid> <password>` and `wifiautostart 1`, and reboot: the device then joins the network and starts the web server on every boot. To use the web UI right away instead, run `openwifi` and then `openhttp` (this session only). The **Meshed Node** archetype does not turn the Web Interface on; add `httpenabled 1` and `httpautostart 1` first if you want it.
+> **Basic mode** turns the web server's auto-start on but configures no WiFi network, so it also leaves WiFi off at boot. In the serial console run `wifiscan`, then `wifiadd <ssid> <password>` and `wifiautostart 1`, and reboot: the device then joins the network and starts the web server on every boot. To use the web UI right away instead, run `openwifi` and then `openhttp` (this session only). The **Meshed Node** archetype does not turn the Web Interface on; add `httpautostart 1` first if you want it.
 >
-> **Advanced mode** with the Web Interface turned off or WiFi skipped: turn them on later with `httpenabled 1`, `httpautostart 1`, `wifiadd <ssid> <password>` and `wifiautostart 1`, or start them for this session with `openwifi` and `openhttp`.
+> **Advanced mode** with the Web Interface turned off or WiFi skipped: turn them on later with `httpautostart 1`, `wifiadd <ssid> <password>` and `wifiautostart 1`, or start them for this session with `openwifi` and `openhttp`.
 >
 > If you enabled the Web Interface and joined a network during the wizard, the device connects to WiFi and prints its IP address in the serial monitor. Navigate to that address in a browser to reach the web UI, and log in with the username and password you created in Step 2.
 

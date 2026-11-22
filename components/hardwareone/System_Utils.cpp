@@ -1677,7 +1677,7 @@ void buildSystemInfoJson(JsonDocument& doc, bool includeDeviceList) {
 #if ENABLE_ESPNOW
   {
     JsonObject espnow = conn["espnow"].to<JsonObject>();
-    espnow["enabled"] = gSettings.espnowEnabled;
+    espnow["enabled"] = gSettings.espnowAutoStart;  // start at boot, as mqtt below
     espnow["running"] = (gEspNow && gEspNow->initialized);
     espnow["mesh"] = gSettings.espnowmesh;
     espnow["deviceName"] = gSettings.espnowDeviceName;  // the stored name; "" when none is set
@@ -2851,7 +2851,7 @@ extern const CommandEntry commands[] = {
   { "lightsleep", "Enter ESP32 light sleep: lightsleep [seconds] (default 20s).", true, cmd_lightsleep,
     "Usage: lightsleep [seconds]  (1..3600, default 20)" },
   { "deepsleep", "Power off via deep sleep (no wake source — reset button to wake).", true, cmd_deepsleep,
-    "Usage: deepsleep  (admin; wakes only via physical reset)" },
+    "Usage: deepsleep  (super admin; wakes only via physical reset)", /*requiresSuperAdmin=*/true },
 };
 
 extern const size_t commandsCount = sizeof(commands) / sizeof(commands[0]);
@@ -3817,32 +3817,13 @@ static bool commandAllowedDuringPasswordChange(const String& line) {
 
 // The bonded peer runs every remote:/@ command as bond-admin, which is super
 // for the live bond session (v4_handle_cmd, System_ESPNow.cpp). Here the
-// unwrapped line can be checked only against this build's registry flags.
-// Handlers that decide access at run time from the caller (file path rules,
+// unwrapped line can be checked only against this build's registry flags, and
+// handlers that decide access at run time from the caller (file path rules,
 // the owner of notes and transcripts, user settings, sessions, voice arming)
-// would decide it for super on the peer, and a command this build does not
-// compile has no row here at all. So a remote command needs a local
-// administrator, except the lines below: the bond page and the OLED bond
-// screen send them for any signed-in user, and their handlers check no
-// identity. Each starts or stops one of the peer's sensors and takes no
-// arguments. Anything not listed, including a command added later, needs an
-// administrator.
-static bool remoteCommandAllowedWithoutAdmin(const String& line) {
-  static const char* const kSensors[] = {
-      "thermal", "tof", "imu", "input", "apds", "gps", "rtc", "presence", "fmradio"};
-  CommandArgs args(line);
-  if (args.unterminatedQuote() || args.count() != 1 || args.argWasQuoted(0)) return false;
-  String verb = args.arg(0);
-  verb.toLowerCase();  // the registry matches names without case
-  const char* sensor = nullptr;
-  if (verb.startsWith("open")) sensor = verb.c_str() + 4;
-  else if (verb.startsWith("close")) sensor = verb.c_str() + 5;
-  if (!sensor) return false;
-  for (const char* known : kSensors) {
-    if (strcmp(sensor, known) == 0) return true;
-  }
-  return false;
-}
+// would decide it for super on the peer. So every remote command needs a local
+// administrator. The peer sensor toggles the bond page and the OLED bond
+// screen send used to be open to any signed-in user; since sensor open/close
+// is admin-only (1.0 role tiers), there is no exception left.
 
 enum class SessionControlForm : uint8_t {
   Other,
@@ -3953,6 +3934,32 @@ static bool callerMayTargetAnotherSession(const AuthContext& auth,
   return true;
 }
 
+// The role half of the policy for one resolved line (see CommandRoleRefusal in
+// System_Command.h): guest surface, then super-admin rows, then admin rows. A
+// super-only row is gated even when its table entry is not adminOnly. A bonded
+// session satisfies super (bond == super); a regular mesh/pair account never
+// does — the elevation lives entirely in isSuperAdminUser.
+static CommandRoleRefusal commandRoleRefusal(const AuthContext& ctx,
+                                             const String& line,
+                                             const CommandResolution& resolution,
+                                             const String& role) {
+  if (role == kRoleGuest && !commandAllowedForGuest(line)) {
+    return CommandRoleRefusal::Guest;
+  }
+  const bool requiresSuperAdmin =
+      resolution.entry && resolution.entry->requiresSuperAdmin;
+  if (requiresSuperAdmin && !hasSuperAdminPrivilege(ctx)) {
+    return CommandRoleRefusal::SuperAdmin;
+  }
+  const bool requiresAdmin =
+      resolution.entry &&
+      (resolution.entry->requiresAdmin || requiresSuperAdmin);
+  if (requiresAdmin && !hasAdminPrivilege(ctx)) {
+    return CommandRoleRefusal::Admin;
+  }
+  return CommandRoleRefusal::None;
+}
+
 // Centralized authorization for a command line and context.
 // Returns true if authorized, otherwise writes an error to 'out' and returns false.
 static bool authorizeCommand(const AuthContext& ctx, const String& line,
@@ -4017,9 +4024,29 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
     systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), "role_unavailable");
     return false;
   }
+  // The role half, shared with automation save (commandRoleRefusalFor).
+  CommandRoleRefusal roleRefusal =
+      commandRoleRefusal(ctx, line, resolution, liveRole);
+  // One exception: a G2 EvenAI exchange starts the microphone it records
+  // with. `openmic` is admin-only (sensor lifecycle, 1.0), but this worker's
+  // exact bare `openmic` carries a one-shot capability bound to the active
+  // exchange and the UART login that admitted it, revalidated in
+  // executeCommand before this check. Nothing else the worker sends is
+  // admitted this way.
+  if (roleRefusal == CommandRoleRefusal::Admin && liveG2UartSessionIdentity) {
+    const CommandContext* evenAiCtx =
+        static_cast<const CommandContext*>(currentCommandContext());
+    String bare = line;
+    bare.trim();
+    if (evenAiCtx &&
+        (evenAiCtx->behaviorFlags & COMMAND_CONTEXT_REQUIRE_G2_EVENAI_AUTHORITY) &&
+        bare.equalsIgnoreCase("openmic")) {
+      roleRefusal = CommandRoleRefusal::None;
+    }
+  }
   // Guest: authenticated but view-only. Deny before admin/super checks so a
   // guest never reaches an admin-gated handler by accident.
-  if (liveRole == kRoleGuest && !commandAllowedForGuest(line)) {
+  if (roleRefusal == CommandRoleRefusal::Guest) {
     String cmdName = line;
     int spacePos = line.indexOf(' ');
     if (spacePos > 0) cmdName = line.substring(0, spacePos);
@@ -4042,13 +4069,8 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
     systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), cmdName.c_str());
     return false;
   }
-  // Super-admin (top-tier) protection. Checked independently of the admin flag
-  // so a super-only command is gated even if its table entry is not adminOnly.
-  // A bonded session satisfies this (bond == super); a regular mesh/pair
-  // account never does — the elevation lives entirely in isSuperAdminUser.
-  const bool requiresSuperAdmin =
-      resolution.entry && resolution.entry->requiresSuperAdmin;
-  if (requiresSuperAdmin && !hasSuperAdminPrivilege(ctx)) {
+  // Super-admin (top-tier) protection; see commandRoleRefusal.
+  if (roleRefusal == CommandRoleRefusal::SuperAdmin) {
     // The row's own name, so a multi-word row reads `phone secret`, not `phone`.
     const String cmdName = resolution.entry->name;
     snprintf(out, outSize, "%s for command '%s'.", kCommandReplySuperAdminRequired, cmdName.c_str());
@@ -4059,11 +4081,7 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
     return false;
   }
   // Admin-only protection via registry
-  const bool requiresAdmin =
-      resolution.entry &&
-      (resolution.entry->requiresAdmin ||
-       resolution.entry->requiresSuperAdmin);
-  if (requiresAdmin && !hasAdminPrivilege(ctx)) {
+  if (roleRefusal == CommandRoleRefusal::Admin) {
     // The row's own name: `ring control`, not `ring` (whose status is open).
     const String cmdName = resolution.entry->name;
     snprintf(out, outSize, "%s for command '%s'. Contact an administrator.", kCommandReplyAdminRequired, cmdName.c_str());
@@ -4080,14 +4098,15 @@ static bool authorizeCommand(const AuthContext& ctx, const String& line,
 }
 
 // The remote:/@ gate, applied after authorizeCommand has passed the unwrapped
-// line: see remoteCommandAllowedWithoutAdmin for why the peer's authority
+// line: the comment above SessionControlForm says why the peer's authority
 // needs a local administrator.
 static bool authorizeRemoteCommand(const AuthContext& ctx, const String& line,
                                    const String& redactedLine,
                                    char* out, size_t outSize) {
   // The trusted internal identity passes authorizeCommand unchecked; same here.
   if (isSystemIdentity(ctx)) return true;
-  if (remoteCommandAllowedWithoutAdmin(line) || hasAdminPrivilege(ctx)) return true;
+  (void)line;
+  if (hasAdminPrivilege(ctx)) return true;
   snprintf(out, outSize,
            "%s to send this command to the bonded device; "
            "it runs there as administrator.", kCommandReplyAdminRequired);
@@ -4100,6 +4119,51 @@ static bool authorizeRemoteCommand(const AuthContext& ctx, const String& line,
     systemEventPost(SYSEVT_COMMAND_DENIED, ctx.user.c_str(), "remote");
   }
   return false;
+}
+
+CommandRoleRefusal commandRoleRefusalFor(const String& user, const String& line,
+                                         String* rowName) {
+  if (rowName) *rowName = String();
+  AuthContext ctx;
+  ctx.transport = SOURCE_INTERNAL;
+  ctx.user = user;
+  ctx.path = "/automation";
+  ctx.opaque = nullptr;
+  if (isSystemIdentity(ctx)) return CommandRoleRefusal::None;
+  // Fail closed, as authorizeCommand does for a live account.
+  String role;
+  if (hasNamedUser(ctx) && !getUserAuthorizationRole(user, role)) {
+    return CommandRoleRefusal::RoleUnavailable;
+  }
+  String command = line;
+  command.trim();
+  String inner;
+  bool remote = false;
+  if (command.startsWith("remote:") || command.startsWith("remote ")) {
+    remote = true;
+    inner = command.substring(7);
+  } else if (command.startsWith("@") && command.length() > 1) {
+    remote = true;
+    inner = command.substring(1);
+  }
+  if (!remote) {
+    const CommandResolution resolution = resolveCommand(command);
+    if (rowName && resolution.entry) *rowName = resolution.entry->name;
+    return commandRoleRefusal(ctx, command, resolution, role);
+  }
+  // The same order executeCommand applies to a remote:/@ line.
+  inner.trim();
+  if (inner.startsWith("remote:") || inner.startsWith("remote ") ||
+      inner.startsWith("@")) {
+    return CommandRoleRefusal::NestedRemote;
+  }
+  const CommandResolution resolution = resolveCommand(inner);
+  if (rowName && resolution.entry) *rowName = resolution.entry->name;
+  const CommandRoleRefusal refusal =
+      commandRoleRefusal(ctx, inner, resolution, role);
+  if (refusal != CommandRoleRefusal::None) return refusal;
+  if (!hasAdminPrivilege(ctx)) return CommandRoleRefusal::RemoteAdmin;
+  return CommandRoleRefusal::None;
 }
 
 // Core command execution with authentication and registry dispatch
@@ -4177,7 +4241,9 @@ static void stampOkStatus(char* out, size_t outSize, bool success) {
   out[pfx + n] = '\0';
 }
 
-// The executor's reply to a line with no command in it.
+// The executor's reply to a line with no command in it. The same text as
+// kCommandReplyEmptyCommand (System_CommandReply.h), PendingCommand's refusal
+// of an empty line before it is queued.
 static constexpr char kReplyEmptyCommand[] =
     "Error: Empty command. Type a command, or help for the list.";
 
@@ -4868,6 +4934,10 @@ bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback, void* us
   
   DEBUG_CMD_FLOWF("[submitAsync] Command queued successfully");
   return true;
+}
+
+bool commandQueueFull() {
+  return gCmdExecQ != nullptr && uxQueueSpacesAvailable(gCmdExecQ) == 0;
 }
 
 // Deferred work submission — runs an arbitrary callback on cmd_exec,

@@ -16,6 +16,7 @@
 
 #include "G2_Glasses.h"        // g2ShowListPage / g2Set/GetHijackPage / g2BumpMenuGen
 #include "G2_HijackCmd.h"      // G2CmdCookie / g2SubmitHijackCommand / g2HijackAuthContext
+#include "G2_ReplyNotice.h"    // g2ReplyNoticeText: the lens words of a refusal
 #include "G2_Page_TextEntry.h" // on-lens keyboard for Add User
 #include "System_Utils.h"      // redactCmdForAudit
 #include "System_User.h"       // readUserRoster / isAdminUser / isSuperAdminUser / userRoleRank
@@ -208,6 +209,9 @@ static void setResultMessage(bool failed, const char* result) {
   gResultFailed = failed;
   const char* msg = (result && result[0]) ? result
                                           : (failed ? "Action failed" : "Action completed");
+  // A refusal reads as the shared lens text ("Needs a super admin").
+  char refusal[kG2NoticeMax];
+  if (failed && g2ReplyNoticeText(/*ok=*/false, result, refusal, sizeof(refusal))) msg = refusal;
   snprintf(gResultMessage, sizeof(gResultMessage), "%.108s", msg);
 }
 

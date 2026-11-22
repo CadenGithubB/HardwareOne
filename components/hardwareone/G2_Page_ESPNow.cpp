@@ -59,6 +59,16 @@ static inline void setSub(EspNowAppSub s) {
   g2BumpMenuGen();
 }
 
+// The back row of a submenu: its label, or in the redraw after a refused
+// action (Forget needs a super admin, the radio toggle an admin) the reason
+// ("<- Needs a super admin"). One buffer: each render draws one back row and
+// the list is deep-copied before the next render.
+static const char* espnBackRow(const char* label) {
+  EXT_RAM_BSS_ATTR static char row[48];  // PSRAM: deep-copied by g2ShowListPage
+  g2LensNoticeBackRow(G2_HIJACK_PAGE_ESPNOW_APP, label, row, sizeof(row));
+  return row;
+}
+
 // Peer-detail target. Index into gEspNow->devices[]. Set when the user taps
 // a row in the peers list; consulted by showPeerDetail / handlers below.
 // -1 means "no peer selected" (peer-detail not reachable).
@@ -308,7 +318,7 @@ static void showMainMenu() {
   snprintf(inboxLine, sizeof(inboxLine), "Inbox (%d) >>", nInbox);
 
   const char* items[] = {
-    "<- Main Menu",   // 0
+    espnBackRow("<- Main Menu"),   // 0
     stateLine,        // 1 — tap = toggle ESP-NOW / jump to WiFi
     peersLine,        // 2
     inboxLine,        // 3 — merged chronological view of all peers' history
@@ -342,7 +352,7 @@ static void showPeersMenu() {
   // buffer never needs to be internal (frees ~680 B internal DRAM).
   static EXT_RAM_BSS_ATTR char rows[1 + 16][40];
   const char* ptrs[1 + 16];
-  strlcpy(rows[0], "<- Back", sizeof(rows[0]));
+  strlcpy(rows[0], espnBackRow("<- Back"), sizeof(rows[0]));  // or why Forget was refused
   ptrs[0] = rows[0];
   size_t n = 1;
   // The address of each row being drawn; the tap table takes them below.
@@ -374,7 +384,7 @@ static void showPeersMenu() {
     }
   }
 
-  static const char* empty[] = { "<- Back", "(no paired peers)" };
+  const char* empty[] = { rows[0], "(no paired peers)" };
   const bool accepted = (n == 1) ? g2ShowListPage(empty, 2) : g2ShowListPage(ptrs, n);
   if (accepted) {
     // The lens takes this list: its rows are the ones a tap means now.
@@ -457,7 +467,7 @@ static void showPeerDetail() {
            countInboxForPeer(d.mac));
 
   const char* items[] = {
-    "<- Peers",     // 0
+    espnBackRow("<- Peers"),     // 0
     nameLine,       // 1 — info, no action
     macLine,        // 2 — info, no action
     msgsLine,       // 3 — drills into per-peer inbox slice
@@ -483,7 +493,7 @@ static void showPeerDetail() {
 static void showBroadcastMenu() {
   setSub(ESPN_APP_SUB_BCAST);
   const char* items[] = {
-    "<- Back",          // 0
+    espnBackRow("<- Back"),          // 0
     "Send: Here",       // 1 — canned
     "Send: OK",         // 2 — canned
     "Send: Help",       // 3 — canned
@@ -505,7 +515,7 @@ static void showStatsMenu() {
   static EXT_RAM_BSS_ATTR char rows[10][40];  // PSRAM: deep-copied by g2ShowListPage
   const char* ptrs[10];
   size_t n = 0;
-  strlcpy(rows[n], "<- Back", sizeof(rows[n])); ptrs[n] = rows[n]; n++;
+  strlcpy(rows[n], espnBackRow("<- Back"), sizeof(rows[n])); ptrs[n] = rows[n]; n++;
 
   snprintf(rows[n], sizeof(rows[n]), "%s", phaseLabel(currentPhase()));
   ptrs[n] = rows[n]; n++;
@@ -878,6 +888,7 @@ static void onNameThenOpenDone(bool ok,
             (int)ok, result ? result : "",
             gSettings.espnowDeviceName.c_str());
   if (gSettings.espnowDeviceName.length() == 0) {
+    (void)g2LensNoticeTake(cookie.targetPage, nullptr, 0);  // shown in full below
     strncpy(sAppOpenMsg,
             (result && result[0]) ? result : "ESP-NOW needs a device name",
             sizeof(sAppOpenMsg) - 1);

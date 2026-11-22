@@ -49,8 +49,11 @@ from test_web_batch_handlers import extract_block, require
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
-# sha256 of the report printed by 1cea1a79 (before this change), on the host.
-REPORT_SHA256 = "c4a5e61c7cc080ff2f16c8fc0644179a9da563d1904536a09b034101030ea00f"
+# sha256 of the report on the host. Recorded first at 1cea1a79; changed
+# 2026-11-21 only by the 1.0 user-rights rule (accounts below admin no longer
+# append, write over, remove or rmdir on catch-all paths: 23 user columns of
+# case and double-slash variants, checked with --baseline against 3076e0c6).
+REPORT_SHA256 = "07a3b8b106776f93566b771156fdff5e3efcfaa675089df1fc80cee93921eb07"
 
 # Helpers the new code calls; an older tree has none of them.
 OPTIONAL = ("static bool alreadyNormalized(", "static const String& normalizedView(")

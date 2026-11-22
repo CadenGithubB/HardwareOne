@@ -1029,7 +1029,7 @@ class Poller(threading.Thread):
 
     def _poll_camera(self):
         sysd = self.state.get('sensors') or {}
-        if not (sysd.get('cameraConnected') or sysd.get('cameraRunning') or sysd.get('cameraEnabled')):
+        if not (sysd.get('cameraConnected') or sysd.get('cameraRunning')):
             self.camera['available'] = False
             return
         status, body = self.tr.get_bytes('/api/sensors/camera/frame')

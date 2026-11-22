@@ -653,6 +653,12 @@ const char* cmd_batterylog(const String& argsInput) {
   // file reads/clears are permission-checked against the caller, not system.
   const AuthContext& ctx = currentAuthContext();
 
+  // on, off, interval and clear change the log: administrators only.
+  if ((argIsOn(a) || argIsOff(a) || a.startsWith("interval") || a.equalsIgnoreCase("clear")) &&
+      !currentExecIsAdmin()) {
+    return kCommandReplyLoggingAdminRequired;
+  }
+
   if (argIsOn(a))  { setSetting(gSettings.batteryLogEnabled, true);  return "Battery log: ON"; }
   if (argIsOff(a)) { setSetting(gSettings.batteryLogEnabled, false); return "Battery log: OFF"; }
 

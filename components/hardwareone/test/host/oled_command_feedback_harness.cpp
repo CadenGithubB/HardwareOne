@@ -239,15 +239,25 @@ static void case_helper_admin_refusal() {
   resetWorld();
   refuse(kAdminRefusal);
   EXPECT(!oledRunCommand("radiopower off"), "a refused command reports failure");
-  EXPECT(gToast == "Admin required" && gToastCount == 1,
-         "an admin denial toasts 'Admin required', toast: '" + gToast + "'");
+  EXPECT(gToast == "Needs an admin" && gToastCount == 1,
+         "an admin denial toasts 'Needs an admin', toast: '" + gToast + "'");
   EXPECT(gChecked.size() == 1 && gChecked[0] == "radiopower off" && gFireAndForget.empty(),
          "the helper runs the line once through the checked executor, ran: " + ran());
 
   resetWorld();
   refuse("Error: Super-admin access required for command 'factoryreset'.");
-  EXPECT(!oledRunCommand("factoryreset") && gToast == "Admin required",
-         "a super-admin denial toasts 'Admin required', toast: '" + gToast + "'");
+  EXPECT(!oledRunCommand("factoryreset") && gToast == "Needs a super admin",
+         "a super-admin denial toasts 'Needs a super admin', toast: '" + gToast + "'");
+
+  resetWorld();
+  refuse("Error: Admin access required to start, stop or change logging. Contact an administrator.");
+  EXPECT(!oledRunCommand("log start") && gToast == "Needs an admin",
+         "the logging gate toasts 'Needs an admin', toast: '" + gToast + "'");
+
+  resetWorld();
+  refuse("Error: This recording belongs to alice. Only alice or an administrator can stop it.");
+  EXPECT(!oledRunCommand("cameravideo stop") && gToast == "This recording belongs to alice.",
+         "a recording owner's refusal keeps its first sentence, toast: '" + gToast + "'");
 }
 
 static void case_helper_error_replies() {
@@ -258,7 +268,10 @@ static void case_helper_error_replies() {
     {"[ERROR] list full", "list full"},
     {"Error: Command timed out after 60 s. It may still finish; check the result before "
      "repeating it.",
-     "Command timed out after 60 s. It may still finish; check the result before repeating it."},
+     "Command timed out after 60 s."},
+    {"Error: Not a whole number. Give the value in digits, for example 250.",
+     "Not a whole number. Give the value in digits, for example 250."},  // fits: whole line
+    {"Error: Saved to v1.2. done", "Saved to v1.2. done"},
     {"Error: first line\nsecond line", "first line"},
     {"Unknown command: frob\nType 'help' for available commands", "Unknown command: frob"},
     {"ERROR", "Command failed. Check logs."},
@@ -301,13 +314,13 @@ static void case_reply_text() {
   const struct { bool ok; const char* reply; const char* text; } kCases[] = {
     {true, "OK: Saved network 'HomeNet' with priority 1", "Network saved"},
     {false, "Error: Admin access required for command 'wifiadd'. Contact an administrator.",
-     "Admin required"},
-    {false, "Error: Super-admin access required for command 'factoryreset'.", "Admin required"},
+     "Needs an admin"},
+    {false, "Error: Super-admin access required for command 'factoryreset'.", "Needs a super admin"},
     {false, "[ERROR] list full", "list full"},
     // The executor's timeout reply, cut to the caller's 40-byte buffer.
     {false, "Error: Command timed out after 60 s. It may still finish; check the result before "
             "repeating it.",
-     "Command timed out after 60 s. It may st"},
+     "Command timed out after 60 s."},
     {false, "ERROR: list full\nsecond line", "list full"},
     {false, "Unknown command: frob", "Unknown command: frob"},
     {false, "ERROR", "Add failed"},
@@ -354,7 +367,7 @@ static void case_automations_toggle() {
   autoToggleSelected();
   EXPECT(ran() == "automation disable id=7", "the toggle runs the owner command, ran: " + ran());
   EXPECT(gToastIcon == OledUiIcon::ERROR, "a refused toggle shows error feedback");
-  EXPECT(gToast == "Admin required", "a refused toggle shows the refusal, toast: '" + gToast + "'");
+  EXPECT(gToast == "Needs an admin", "a refused toggle shows the refusal, toast: '" + gToast + "'");
   EXPECT(autoForceRefresh, "the list refreshes after the action either way");
 
   resetWorld();
@@ -373,7 +386,7 @@ static void case_automations_delete() {
   refuse(kAdminRefusal);
   autoDeleteConfirmed(nullptr);
   EXPECT(ran() == "automation delete id=9", "delete runs the owner command, ran: " + ran());
-  EXPECT(gToastIcon == OledUiIcon::ERROR && gToast == "Admin required",
+  EXPECT(gToastIcon == OledUiIcon::ERROR && gToast == "Needs an admin",
          "a refused delete shows the refusal, not 'Deleted', shown: " + gToast +
              ", toast: '" + gToast + "'");
 
@@ -391,7 +404,7 @@ static void case_quick_radio_wifi() {
   toggleQuickRadio();
   land();
   EXPECT(ran() == "radiopower off", "the radio row runs radiopower, ran: " + ran());
-  EXPECT(quickStatusMsg[0] == '\0' && gToast == "Admin required",
+  EXPECT(quickStatusMsg[0] == '\0' && gToast == "Needs an admin",
          "a refused radio toggle shows the refusal, not a status, status: '" +
              std::string(quickStatusMsg) + "', toast: '" + gToast + "'");
 
@@ -405,7 +418,7 @@ static void case_quick_radio_wifi() {
   refuse(kAdminRefusal);
   toggleQuickWifi();
   land();
-  EXPECT(ran() == "closewifi" && quickStatusMsg[0] == '\0' && gToast == "Admin required",
+  EXPECT(ran() == "closewifi" && quickStatusMsg[0] == '\0' && gToast == "Needs an admin",
          "a refused Wi-Fi toggle shows the refusal, ran: " + ran() + ", status: '" +
              std::string(quickStatusMsg) + "'");
 
@@ -430,7 +443,7 @@ static void case_quick_bluetooth_http() {
   refuse(kAdminRefusal);
   bluetoothToggleConfirmedQuick(nullptr);
   land();
-  EXPECT(ran() == "openconsole" && quickStatusMsg[0] == '\0' && gToast == "Admin required",
+  EXPECT(ran() == "openconsole" && quickStatusMsg[0] == '\0' && gToast == "Needs an admin",
          "a refused Bluetooth start shows the refusal, ran: " + ran() + ", status: '" +
              std::string(quickStatusMsg) + "'");
 
@@ -468,7 +481,7 @@ static void case_quick_bluetooth_http() {
   refuse(kAdminRefusal);
   httpToggleConfirmedQuick(nullptr);
   land();
-  EXPECT(ran() == "openhttp" && quickStatusMsg[0] == '\0' && gToast == "Admin required",
+  EXPECT(ran() == "openhttp" && quickStatusMsg[0] == '\0' && gToast == "Needs an admin",
          "a refused HTTP start shows the refusal, ran: " + ran() + ", status: '" +
              std::string(quickStatusMsg) + "'");
 
@@ -578,13 +591,13 @@ static void case_network_http_callbacks() {
   resetWorld();
   refuse(kAdminRefusal);
   webServerStartConfirmed(nullptr);
-  EXPECT(ran() == "openhttp" && gToast == "Admin required",
+  EXPECT(ran() == "openhttp" && gToast == "Needs an admin",
          "a refused HTTP start from the Web menu shows the refusal, ran: " + ran() +
              ", toast: '" + gToast + "'");
   resetWorld();
   refuse(kAdminRefusal);
   webServerStopConfirmed(nullptr);
-  EXPECT(ran() == "closehttp" && gToast == "Admin required",
+  EXPECT(ran() == "closehttp" && gToast == "Needs an admin",
          "a refused HTTP stop from the Web menu shows the refusal, toast: '" + gToast + "'");
 }
 

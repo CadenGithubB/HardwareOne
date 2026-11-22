@@ -108,7 +108,6 @@ OLD_WIFI_KEYS = {
     'kSection': 'wifi',
     'kModuleSection': 'network.wifi',
     'kNetworks': 'networks',
-    'kEnabled': 'wifiEnabled',
     'kAutoStart': 'wifiAutoStart',
     'kAutoReconnect': 'wifiAutoReconnect',
 }
@@ -129,7 +128,6 @@ OLD_PEER_VALID = r'''e["pipeChannelVersion"].is<int>() && e["pipeChannelVersion"
                          e["pipeEnrolled"].is<bool>() && e["pipeEnrolled"].as<bool>()'''
 OLD_RESTORE_WIFI = r'''
         mergedDoc["network"]["wifi"]["networks"] = deviceSettingsDoc["network"]["wifi"]["networks"];
-        mergedDoc["network"]["wifi"]["wifiEnabled"]       = true;
         mergedDoc["network"]["wifi"]["wifiAutoStart"]     = true;
         mergedDoc["network"]["wifi"]["wifiAutoReconnect"] = true;
 '''
@@ -337,7 +335,7 @@ def contract(root: Path) -> list[str]:
     # Wi-Fi: the rows, the module section, the networks array and the restore share the names.
     wifi = code_only(read('System_WiFi.cpp'))
     rows = extract_block(wifi, 'static const SettingEntry wifiSettingsEntries[]')
-    for name in ('kEnabled', 'kAutoStart', 'kAutoReconnect'):
+    for name in ('kAutoStart', 'kAutoReconnect'):
         if not re.search(r'\{\s*hw1wifijson::' + name + r',\s*SETTING_BOOL', rows):
             failures.append(f'the wifi settings row {OLD_WIFI_KEYS[name]} does not use hw1wifijson::{name}')
     module = extract_block(wifi, 'extern const SettingsModule wifiSettingsModule')
@@ -348,7 +346,7 @@ def contract(root: Path) -> list[str]:
            'System_WiFiNetworks.cpp', 3)
     restore = extract_block(migration, 'static bool writeRestoreFilesFromDoc(')
     merge = extract_block(restore, 'if (haveDeviceWifi && pathStr == ')
-    for name in ('kNetworks', 'kEnabled', 'kAutoStart', 'kAutoReconnect'):
+    for name in ('kNetworks', 'kAutoStart', 'kAutoReconnect'):
         if f'mergedDoc[kParent][kSection][{name}]' not in merge:
             failures.append(f'the restore does not write network.wifi.{OLD_WIFI_KEYS[name]} through hw1wifijson')
     if 'using namespace hw1wifijson;' not in merge:

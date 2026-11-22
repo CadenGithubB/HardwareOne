@@ -208,7 +208,7 @@ static bool g2BothConnected(){++armQueries;return false;}
 // validate pass returns before any handler acts, as RETURN_VALID_IF_VALIDATE_CSTR does.
 static bool gCliValidateOnly=false;
 #define RETURN_VALID_IF_VALIDATE_CSTR() do{if(::gCliValidateOnly)return "VALID";}while(0)
-struct Settings{int bleMode=0;bool bleEnabled=true;String phonePipeSecret;};static Settings gSettings;constexpr int BLE_MODE_PHONE_CLIENT=3;
+struct Settings{int bleMode=0;String phonePipeSecret;};static Settings gSettings;constexpr int BLE_MODE_PHONE_CLIENT=3;
 template<class T,class V> static void setSetting(T& field,V value){field=value;}
 enum class BleRoleTransition:uint8_t{PHONE_START,PHONE_STOP};
 static bool bleRoleTransitionBegin(BleRoleTransition){return true;}
@@ -757,7 +757,7 @@ static void reset() {
  pairState=PhonePairWindow::None;pairRetryAt=0;pairJobSeen=false;pairEpoch=0;pairSource=SOURCE_SERIAL;
  pairId=pairOpenedAt=0;pairOnDisplay=false;std::memset(pairCode,0,sizeof(pairCode));pairCloseWanted=0;
  replaceCalls.clear();replaceFail=nullptr;replaceFailAfter=false;storedSecret.clear();storedGenerated=false;randomCalls=0;
- ownerUser="admin";captureEpoch=5;gSettings.bleEnabled=true;gSettings.phonePipeSecret="";
+ ownerUser="admin";captureEpoch=5;gSettings.phonePipeSecret="";
 #if !HW1_PAIR_SINK
  serialSinkReady=serialWriteOk=true;serialWrites.clear();displaySinkReady=displayShowOk=true;displayShows=0;
 #endif
@@ -2307,7 +2307,6 @@ static void pairNewTests() {
   {"Error: phone pair new prints its code once on this console; turn serial output on","",[]{serialSinkReady=false;}},
   {"Error: the OLED cannot show a pairing code now","",[]{authContext.transport=SOURCE_LOCAL_DISPLAY;displaySinkReady=false;}},
   {"Error: the app console server owns Bluetooth; run 'closeconsole', then this command again","",[]{serverUp=true;}},
-  {"Error: Bluetooth is disabled; run bleenabled on first","",[]{active=false;gSettings.bleEnabled=false;}},
   {"Error: phone is owned by another account","",[]{ownerUser="other";}},
   {"Error: local authenticated session required","",[]{captureEpoch=0;}},
   {"Error: pipe authentication cooldown (30 seconds)","",[]{haveAuthFailure=true;lastAuthFailure=clockMs;}},
@@ -2425,8 +2424,8 @@ static void pairNewTests() {
   pairNewReset();startOk=false;
   assert(!std::strcmp(phonePairNewCommand(""),"Error: phone link could not open (stopped)"));
   assert(serialWrites.empty() && pairState==PhonePairWindow::None && storedSecret==code);}
- // Bluetooth set off while the pipe still runs is no refusal (the link runs).
- {pairNewReset();gSettings.bleEnabled=false;assert(phonePairNewCommand("")==std::string(kSerialReply));}
+ // Bluetooth off (the stack down, no pipe link) is no refusal: the pair opens it.
+ {pairNewReset();active=false;stackReady=false;assert(phonePairNewCommand("")==std::string(kSerialReply));stackReady=true;}
  // `phone pair` takes no argument: `phone pair new` is its own row.
  {pairNewReset();assert(!std::strcmp(phonePairCommand("news"),"Error: invalid arguments — Usage: phone pair [new]"));
   assert(!claimCalls && !manualLearns && !job);}
@@ -2588,9 +2587,10 @@ static void pathTests() {
   ready=true;relayOn=true;v=phonePipePathView();assert(v.state==PhonePathState::Up&&!v.attempt&&text(v)=="phone relay ready");
   relayOn=false;v=phonePipePathView();assert(v.state==PhonePathState::RelayOff&&text(v)=="relay off in the app"&&!phonePathRecoverable(v));
   ready=false;
-  // Off: Bluetooth disabled, or the console server owns the radio.
-  gSettings.bleEnabled=false;v=phonePipePathView();assert(v.state==PhonePathState::Off&&text(v)=="Bluetooth off");
-  gSettings.bleEnabled=true;serverUp=true;v=phonePipePathView();
+  // Off: the stack is down with no pipe link, or the console server owns the radio.
+  {const bool wasActive=active.load();active=false;stackReady=false;v=phonePipePathView();
+   assert(v.state==PhonePathState::Off&&text(v)=="Bluetooth off");active=wasActive;}
+  stackReady=true;serverUp=true;v=phonePipePathView();
   assert(v.state==PhonePathState::Off&&v.hint==PhonePathHint::ConsoleServer&&text(v)=="console server owns Bluetooth (closeconsole)");
   serverUp=false;}
 }

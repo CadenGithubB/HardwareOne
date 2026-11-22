@@ -3722,8 +3722,9 @@ static void automationsWebReadError(char* out, size_t outSize, uint32_t newerVer
   }
 }
 
-// GET /api/automations: automations.json plus `systemEnabled` (folded in so
-// the page no longer needs CLI `automation system status` on load).
+// GET /api/automations: automations.json plus `systemEnabled`, whether the
+// scheduler runs now (folded in so the page no longer needs CLI
+// `automation system status` on load).
 esp_err_t handleAutomationsGet(httpd_req_t* req) {
   WEB_AUTH_OR_RETURN(req, ctx);
 
@@ -3738,7 +3739,7 @@ esp_err_t handleAutomationsGet(httpd_req_t* req) {
       snprintf(reply, sizeof(reply),
                "{\"success\":false,\"systemEnabled\":%s,\"formatVersion\":%lu,\"supported\":%lu,"
                "\"error\":\"%s\"}",
-               gSettings.automationEnabled ? "true" : "false", (unsigned long)newerVersion,
+               automationSchedulerRunning() ? "true" : "false", (unsigned long)newerVersion,
                (unsigned long)kAutomationsFileVersion, error);
     } else {
       snprintf(reply, sizeof(reply), "{\"success\":false,\"systemEnabled\":false,\"error\":\"%s\"}",
@@ -3762,7 +3763,7 @@ esp_err_t handleAutomationsGet(httpd_req_t* req) {
   PSRAM_JSON_DOC(doc);
   DeserializationError err = deserializeJson(doc, safeBody);
   if (err) return sendJsonResponse(req, "{\"success\":false,\"error\":\"Automation response encoding failed\"}");
-  doc["systemEnabled"] = gSettings.automationEnabled;
+  doc["systemEnabled"] = automationSchedulerRunning();  // the scheduler runs now
   String out;
   serializeJson(doc, out);
   httpd_resp_send(req, out.c_str(), out.length());

@@ -159,7 +159,7 @@ static void case_hardware_capabilities() {
   {"key":"ntpServer","type":"string","cmdKey":"ntpserver"},
   {"key":"ntpEnabled","type":"bool","cmdKey":"ntpenabled"},
   {"key":"tzOffsetMinutes","type":"int","cmdKey":"tzoffsetminutes"}]},
- {"name":"wifi","section":"network.wifi","entries":[{"key":"wifiEnabled","cmdKey":"wifienabled"}]},
+ {"name":"wifi","section":"network.wifi","entries":[{"key":"wifiAutoStart","cmdKey":"wifiautostart"}]},
  {"entries":[{"key":"orphan"}]},
  {"name":"debug","section":"system.debug","entries":[]}
 ],"count":7,"extra":"kept"})FIXTURE";

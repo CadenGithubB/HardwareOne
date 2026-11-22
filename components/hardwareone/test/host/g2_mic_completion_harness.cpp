@@ -89,6 +89,8 @@ static bool g2SessionLifecycleAllows(uint32_t epoch) {
   return actorIsSession && sessionCurrent && epoch == gWidgetLifecycleEpoch;
 }
 static void liveTextKickRefresh() { ++kicks; }
+// Lens notice boundary (G2_HijackCmd.h): no refusal is pending in these cases.
+static bool g2LensNoticePeek(G2HijackPage, char*, size_t) { return false; }
 static void liveTextExitToHijackMenu() {}
 static bool tearDownActiveContainer(G2Temple&) {
   CHECK(actorIsSession);

@@ -33,6 +33,7 @@ from test_web_batch_handlers import extract_block, require
 from test_g2_page_publish import boundary_types, defines, list_publish_helper, paginator, \
     text_entry_types
 from reply_words_source import reply_prelude
+from test_g2_page_publish import notice_include
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -137,7 +138,7 @@ def main() -> None:
         harness = harness.replace(marker, replacement)
     with tempfile.TemporaryDirectory(prefix="hw1-g2-files-host-") as temp:
         generated = Path(temp) / "g2_files.cpp"
-        generated.write_text(reply_prelude(COMPONENT) + harness)
+        generated.write_text(reply_prelude(COMPONENT) + notice_include(component) + harness)
         for psram in (True, False):
             executable = Path(temp) / ("g2_files_psram" if psram else "g2_files_internal")
             command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
@@ -151,7 +152,7 @@ def main() -> None:
             subprocess.run(command, check=True)
             subprocess.run([str(executable)], check=True)
         redraw = Path(temp) / "g2_files_redraw.cpp"
-        redraw.write_text(reply_prelude(COMPONENT) + redraw_unit(component))
+        redraw.write_text(reply_prelude(COMPONENT) + notice_include(component) + redraw_unit(component))
         executable = Path(temp) / "g2_files_redraw"
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                    "-I", str(component), str(redraw), "-o", str(executable)]

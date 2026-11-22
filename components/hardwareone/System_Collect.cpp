@@ -1360,7 +1360,7 @@ extern const CommandEntry collectCommands[] = {
   { "collect", "Pull files from the devices that name this hub (shows why not with no argument).", true, cmd_collect,
     "collect [on|off]" },
   { "collectrate", "Frames per second the collector asks for (5-100).", true, cmd_collectrate, "collectrate [<5..100>]" },
-  { "collectquota", "Card quota per device in MB (64-65535).", true, cmd_collectquota, "collectquota [<64..65535>]" },
+  { "collectquota", "Card quota per device in MB (64-65535).", true, cmd_collectquota, "collectquota [<64..65535>]", /*requiresSuperAdmin=*/true },
 };
 extern const size_t collectCommandsCount = sizeof(collectCommands) / sizeof(collectCommands[0]);
 

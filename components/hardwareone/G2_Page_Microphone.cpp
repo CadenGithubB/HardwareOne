@@ -11,6 +11,7 @@
 #include "BLE_Server.h"
 #include "System_Microphone.h"
 #include "G2_HijackCmd.h"
+#include "G2_ReplyNotice.h"
 
 #include "G2_Page_Sensors.h"
 #include "System_Settings.h"
@@ -63,6 +64,9 @@ static void requestMicDetailRecreate() {
 // readout's 200 px width × firmware near-monospace font.
 static void buildMicReadoutText(char* out, size_t cap) {
   if (!out || cap == 0) return;
+  // A refused tap (MIC on/off, Rec, Src) shows its reason here for a few
+  // seconds; the list rows keep the state the firmware reports.
+  if (g2LensNoticePeek(G2_HIJACK_PAGE_MIC_DETAIL, out, cap)) return;
 #if ENABLE_MICROPHONE
   // Source-honest config: the G2 mic is always 16 kHz/16-bit; only PDM honors
   // micSampleRate. The HAL delivers int16 for every source, so bits is always 16.
@@ -347,9 +351,10 @@ static void onMicDetailRuntimeDone(bool ok, const char* result,
 }
 
 // micrecord start/stop done — re-CREATE so the Record row label flips
-// (list rows can't UPDATE_TEXT). No micautostart chaining — recording is a
-// one-shot, not a boot preference. The ~1 s worst-case flush on `stop` (WAV
-// header) runs on cmd_exec, not here.
+// (list rows can't UPDATE_TEXT). A refused stop (a recording another account
+// started) keeps the row as it was and its reason shows in the readout. No
+// micautostart chaining — recording is a one-shot, not a boot preference. The
+// ~1 s worst-case flush on `stop` (WAV header) runs on cmd_exec, not here.
 static void onMicDetailRecordDone(bool ok, const char* result,
                                   const G2CmdCookie& cookie, void* /*userData*/) {
   if (!ok) {

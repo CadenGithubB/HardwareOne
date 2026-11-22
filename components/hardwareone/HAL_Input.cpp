@@ -452,12 +452,6 @@ static const char* inputDeviceLabel() {
 static const char* cmd_openinput(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 #if ENABLE_GPIO_ENCODER
-  // The master switch, as for every I2C input backend (requestSensorStart()).
-  // Only this command checks it: boot, the menu auto-start and first-time
-  // setup call inputStartInternal() and keep their own rules.
-  if (!gSettings.inputEnabled) {
-    return "Error: GPIO encoder is disabled - run 'inputenabled 1' first";
-  }
   // gpioEncoderStart() reports a running encoder as Started; the command
   // answers it as a refusal.
   if (gInputRunning) {
@@ -580,8 +574,8 @@ const CommandEntry inputCommands[] = {
 #if ENABLE_GT911_TOUCH
   { "touchread", "Read the single-touch snapshot without consuming events.", false, cmd_touchread },
 #endif
-  { "openinput",         "Start the configured input device.",              false, cmd_openinput },
-  { "closeinput",        "Stop the input device.",                            false, cmd_closeinput },
+  { "openinput",         "Start the configured input device.",              true, cmd_openinput },
+  { "closeinput",        "Stop the input device.",                            true, cmd_closeinput },
   { "inputautostart",    "Enable/disable input device auto-start [on|off]",   true, cmd_inputautostart,    "Usage: inputautostart [on|off]" },
   { "inputdevicepollms", "Set input device poll interval ms [10-1000]",       true,  cmd_inputdevicepollms, "Usage: inputdevicepollms <10-1000>" },
 #if ENABLE_GPIO_ENCODER
@@ -594,7 +588,6 @@ const size_t inputCommandsCount = sizeof(inputCommands) / sizeof(inputCommands[0
 // settings. Driver-specific entries (anoEncoderI2cAddr, anoEncoderInvert)
 // live in anoEncoderSettingsModule.
 static const SettingEntry inputSettingEntries[] = {
-  { "inputEnabled", SETTING_BOOL, &gSettings.inputEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "inputenabled" },
   { "inputAutoStart",    SETTING_BOOL, &gSettings.inputAutoStart,     0, 0, nullptr, 0,  1,    "Auto-start after boot", nullptr, false, nullptr, "inputautostart" },
 #if !ENABLE_GPIO_ENCODER && !ENABLE_GT911_TOUCH
   { "inputDevicePollMs", SETTING_INT,  &gSettings.inputDevicePollMs, 90, 0, nullptr, 10, 1000, "Poll Interval (ms)",   nullptr, false, nullptr, "inputdevicepollms" },

@@ -107,7 +107,13 @@ static void acceptReply(const Ticket& ticket,bool ok) {
        (ticket.op==Op::List && currentOledMode!=OLED_TRANSCRIPTS) ||
        (ticket.op==Op::Read && currentOledMode!=OLED_TRANSCRIPT_VIEW))) return;
   if (!ok || !parsed || doc["success"]==false) {
-    copy(v.message,sizeof(v.message),parsed ? (doc["error"]|"Transcription request failed. Retry; check logs if it persists.") : "Invalid transcription reply. Retry; check logs if it persists.");
+    if (parsed) copy(v.message,sizeof(v.message),doc["error"]|"Transcription request failed. Retry; check logs if it persists.");
+    // A refusal before the handler (an admin gate, a recording someone else
+    // owns) is plain text, not JSON: show its reason the way every OLED
+    // screen does (oledCommandReplyText), not as an invalid reply.
+    else if (oled_message::isError(received))
+      oledCommandReplyText(false,received,nullptr,"Transcription request failed. Retry; check logs if it persists.",v.message,sizeof(v.message));
+    else copy(v.message,sizeof(v.message),"Invalid transcription reply. Retry; check logs if it persists.");
     // Polling failures stay in the status line; explicit actions show the full
     // actionable refusal once through the shared, auto-dismiss error toast.
     if (ticket.op==Op::Start || ticket.op==Op::Stop || ticket.op==Op::List || ticket.op==Op::Read)
@@ -346,8 +352,11 @@ void prepareTranscriptionData() {
     inFlight=false;
     if(ticket.op==Op::Toggle && ticket.generation==v.generation && ticket.epoch==v.epoch) {
       const bool changed=ok && received[0] && !oled_message::isError(received);
-      copy(v.message,sizeof(v.message),changed?"Setting updated":
-           (received[0]?received:"Setting could not be updated. Retry; check logs if it persists."));
+      // A refused toggle (save default, mic source) shows its reason short, as
+      // every OLED screen does; the row keeps the state the next status reads.
+      oledCommandReplyText(changed,received,"Setting updated",
+                           "Setting could not be updated. Retry; check logs if it persists.",
+                           v.message,sizeof(v.message));
       if(!changed) oledToastShow(v.message,oled_message::kErrorDurationMs,OledUiIcon::ERROR);
       v.nextPoll=false; v.pollAt=0;
     } else acceptReply(ticket,ok);

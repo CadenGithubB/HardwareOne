@@ -127,7 +127,7 @@ static bool gCliValidateOnly = false;
   do { if (::gCliValidateOnly) return "VALID"; } while (0)
 
 static struct Settings {
-  bool bleEnabled = true, bleAutoStart = false, bleRequireAuth = true;
+  bool bleAutoStart = false, bleRequireAuth = true;
   String bleDeviceName = "HardwareOne";
   int bleTxPower = 3, bleMode = 1;
   bool bleRequireSecureChannel = true;

@@ -199,6 +199,10 @@ inline void streamMicrophoneSensorJs(httpd_req_t* req) {
     "        del.className = 'btn btn-sm btn-danger rec-delete';\n"
     "        del.textContent = 'X';\n"
     "        del.addEventListener('click', function(){ window.deleteMicRecording(name); });\n"
+    // micdelete is a super-admin command (1.0 role tiers): grayed out with the
+    // reason below super admin. The firmware still decides.
+    "        var R=window.__hwRoleRank||{superadmin:3};\n"
+    "        if(typeof window.__hwRank==='number'&&window.__hwRank<R.superadmin){del.disabled=true;del.title='Super admin only';}\n"
     "        item.appendChild(info); item.appendChild(audio); item.appendChild(del);\n"
     "        list.appendChild(item);\n"
     "      });\n"

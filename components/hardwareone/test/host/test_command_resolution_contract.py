@@ -134,11 +134,16 @@ authorize_signature = utils_cpp[
 ]
 assert "const CommandResolution& resolution" in authorize_signature
 assert "const String& redactedLine" in authorize_signature
-assert "resolution.entry->requiresSuperAdmin" in authorize
-assert "resolution.entry->requiresAdmin" in authorize
-assert "findCommand(" not in authorize
-assert "redactCmdForAudit(" not in authorize
-# The row flags are read in authorizeCommand only: the second-scan helpers
+# The row flags are read in commandRoleRefusal, the role half authorizeCommand
+# and automation save (commandRoleRefusalFor) share, from the caller's resolution.
+role = function_body(utils_cpp, "static CommandRoleRefusal commandRoleRefusal(")
+assert "commandRoleRefusal(ctx, line, resolution, liveRole)" in authorize
+assert "resolution.entry->requiresSuperAdmin" in role
+assert "resolution.entry->requiresAdmin" in role
+for body in (authorize, role):
+    assert "findCommand(" not in body
+    assert "redactCmdForAudit(" not in body
+# The row flags are read in commandRoleRefusal only: the second-scan helpers
 # (commandRequiresAdmin/SuperAdmin) and the auth-less dispatchCommand are gone.
 for removed in ("commandRequiresAdmin(", "commandRequiresSuperAdmin(", "dispatchCommand("):
     assert removed not in utils_cpp, removed

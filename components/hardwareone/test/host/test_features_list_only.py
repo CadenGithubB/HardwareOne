@@ -93,9 +93,9 @@ def switch_rows(feature_cpp: str) -> list[dict]:
     for match in re.finditer(r'FEATURE_SENSOR_SWITCHES\("(\w+)",\s*(\w+),\s*\w+\)|\{([^{}]*)\}', body):
         if match.group(1):
             ident, field = match.group(1), match.group(2)
-            rows.append({"id": ident, "allowed": field + "Enabled", "auto": field + "AutoStart",
+            rows.append({"id": ident, "allowed": None, "auto": field + "AutoStart",
                          "now": f"open{ident} / close{ident}", "boot": f"{ident}autostart <0|1>",
-                         "allow": f"{ident}enabled <0|1>", "reboot": False})
+                         "allow": None, "reboot": False})
             continue
         fields = [f.strip() for f in re.split(r",(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)", match.group(3))]
         require(len(fields) in (7, 8), f"unexpected kFeatureSwitches row: {match.group(3)!r}")
@@ -158,10 +158,13 @@ def source_checks(component: Path) -> None:
                     require(name in registered,
                             f"{row['id']}: '{name}' ({key}) is not a registered command")
     require(any(row["now"] for row in rows), "switch table parsed no commands")
+    # A feature has one saved switch, start at boot (owner decision 2026-11-21);
+    # only the I2C bus keeps an "allowed" switch.
+    require([row["id"] for row in rows if row["allowed"] or row["allow"]] == ["i2c"],
+            "only the I2C bus has an allowed switch")
 
     # The "after a reboot" note goes exactly on rows whose allowed command says
-    # so itself (i2cbusenabled: "(reboot required)"). wifienabled and oledenabled
-    # act at once, so their rows carry no note.
+    # so itself (i2cbusenabled: "(reboot required)").
     for row in rows:
         if not row["allow"]:
             continue

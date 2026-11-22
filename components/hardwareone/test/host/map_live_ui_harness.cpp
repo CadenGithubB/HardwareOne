@@ -554,13 +554,15 @@ static void oledTests() {
   oledGuest = false;
   oledAction(4, "SUCCESS: Live tracking started", true, true);
   oledAction(4, "SUCCESS: Live tracking stopped", true, true);
-  oledAction(4, "Error: logger in use", true, false, "Error: logger in use");
+  oledAction(4, "Error: logger in use", true, false, "logger in use");
+  oledAction(4, "Error: Admin access required to start, stop or change logging. Contact an administrator.",
+             true, false, "Needs an admin");
   oledAction(4, "SUCCESS: stale session", false, false, "SUCCESS: stale session");
   oledAction(4, "", false, false, "Live track failed");
   oledAction(4, "Queued: pending", true, false, "Queued: pending");
   oledAction(1, "GPS track cleared", true, true);
   oledAction(1, "OK: GPS track cleared", true, true);
-  oledAction(1, "Error: Stop live tracking first", true, false, "Error: Stop live tracking first");
+  oledAction(1, "Error: Stop live tracking first", true, false, "Stop live tracking first");
   oledAction(1, "GPS track cleared", false, false, "GPS track cleared");
   oledAction(1, "", false, false, "Clear track failed");
   gShowTrackStatus = false; saveOk = false;

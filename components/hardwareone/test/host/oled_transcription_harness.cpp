@@ -123,7 +123,11 @@ int main(){
   // Exact bridge epoch fence is independent of a caller's command contents.
   assert(!submitOledCommandForSession("transcription start",99,nullptr,nullptr));
   // Numeric toggle reports ordinary command failure and refreshes state.
-  v.menu.selectedIndex=2;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="sttsavetranscripts 1");answer("Error: Admin required",true);tick(1);assert(std::string(v.message)=="Error: Admin required");assert(toast=="Error: Admin required"&&toastDuration==8000&&toastIcon==OledUiIcon::ERROR);assert(request()=="transcription status");answer(status(false,""));tick(1);
+  v.menu.selectedIndex=2;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="sttsavetranscripts 1");answer("Error: Not saved. Retry later.",true);tick(1);assert(std::string(v.message)=="Not saved. Retry later.");assert(toast=="Not saved. Retry later."&&toastDuration==8000&&toastIcon==OledUiIcon::ERROR);assert(request()=="transcription status");answer(status(false,""));tick(1);
+  // The executor's admin gate is plain text: the toggle shows it short and keeps the row.
+  v.menu.selectedIndex=5;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request().rfind("micsource ",0)==0);answer("Error: Admin access required for command 'micsource'. Contact an administrator.",false);tick(1);assert(std::string(v.message)=="Needs an admin"&&toast=="Needs an admin");assert(request()=="transcription status");answer(status(false,""));tick(1);
+  // A refused start that never reached the handler shows its reason, not "invalid reply".
+  toast.clear();v.menu.selectedIndex=0;menuInput(0,0,INPUT_BUTTON_A);tick(1);assert(request()=="transcription start");answer("Error: This recording belongs to bob. Only bob or an administrator can stop it.",false);tick(1);assert(std::string(v.message)=="This recording belongs to bob."&&toast=="This recording belongs to bob.");tick();assert(request()=="transcription status");answer(status(false,""));tick(1);
   // List and file reads cannot publish after Back or selecting another file.
   // Mic row cycles reachable sources through micsource, then refreshes status.
   v.micPdm=true;v.micG2=false;std::strcpy(v.micSource,"auto");populateMenu();assert(std::string(v.menu.items[5])=="Mic: Auto");

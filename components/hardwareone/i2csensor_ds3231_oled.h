@@ -122,9 +122,11 @@ static void rtcToggleConfirmed(void* userData) {
 
 static void rtcNtpSyncConfirmed(void* userData) {
   (void)userData;
-  executeOledCommand("ntpsync");
-  // ntpsync handles RTC sync internally when RTC is connected
-  oledNotificationBannerShow("NTP sync requested", OledUiIcon::SUCCESS, 2000);
+  // ntpsync handles RTC sync internally when RTC is connected. A refusal is on
+  // the toast (oledRunCommand); the banner only follows an accepted request.
+  if (oledRunCommand("ntpsync")) {
+    oledNotificationBannerShow("NTP sync requested", OledUiIcon::SUCCESS, 2000);
+  }
 }
 
 // Input handler for RTC OLED mode - X toggles sensor, Y syncs time via NTP

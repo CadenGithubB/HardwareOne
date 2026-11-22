@@ -217,8 +217,8 @@ int main() {
   CHECK(opens == 1, "the dialog opened %d times for one refused request over 50 frames; it must open once", opens);
   CHECK(onlyCommand(kRejectX), "expected exactly one '%s', got %zu command(s)%s%s", kRejectX, commands.size(),
         commands.empty() ? "" : ", first: ", commands.empty() ? "" : commands[0].c_str());
-  CHECK(toasts.size() == 1 && toasts[0] == "Admin required",
-        "the owner's refusal must be toasted once as 'Admin required' (%zu toast(s))", toasts.size());
+  CHECK(toasts.size() == 1 && toasts[0] == "Needs an admin",
+        "the owner's refusal must be toasted once as 'Needs an admin' (%zu toast(s))", toasts.size());
   CHECK(pending.active, "the refused owner keeps the request pending (double sanity)");
 
   // R2: the same with Accept.
@@ -228,8 +228,8 @@ int main() {
   framesAnswering(50, pressYes);
   CHECK(opens == 1, "the dialog opened %d times for one refused request over 50 frames; it must open once", opens);
   CHECK(onlyCommand(kAcceptX), "expected exactly one '%s', got %zu command(s)", kAcceptX, commands.size());
-  CHECK(toasts.size() == 1 && toasts[0] == "Admin required",
-        "the owner's refusal must be toasted once as 'Admin required' (%zu toast(s))", toasts.size());
+  CHECK(toasts.size() == 1 && toasts[0] == "Needs an admin",
+        "the owner's refusal must be toasted once as 'Needs an admin' (%zu toast(s))", toasts.size());
 
   // L1: nobody logged in, login screen: the prompt must not cover it.
   beginCase("L1 login screen", false, false, OLED_LOGIN);
@@ -336,8 +336,7 @@ int main() {
   for (int i = 0; i < 10; ++i) frame();
   CHECK(opens == 1 && accepted.empty(), "an expired request pairs nothing and does not reopen (%d)", opens);
   CHECK(toasts.size() == 1 &&
-            toasts[0] == "No pending pair request. Open discovery with 'espnowpairmode' on both "
-                         "devices and send the request again.",
+            toasts[0] == "No pending pair request.",
         "an expired request toasts the owner's reason once (%zu)", toasts.size());
 
   // S1: a session boundary drops the dialog without an answer: the next admin

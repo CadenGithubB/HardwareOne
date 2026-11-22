@@ -13,5 +13,5 @@ def main():
         src=Path(tmp)/'checks.cpp';binary=Path(tmp)/'checks';src.write_text(with_arg_text(unit))
         subprocess.run(['c++','-std=c++17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined',str(src),'-o',str(binary)],check=True)
         subprocess.run([str(binary)],check=True)
-    print('Wi-Fi command errors: disabled, companion refusal, startup failure, empty/busy saved list, join failure and success, console cancel passed')
+    print('Wi-Fi command errors: companion refusal, startup failure, empty/busy saved list, join failure and success, console cancel passed')
 if __name__=='__main__':main()

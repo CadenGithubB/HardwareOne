@@ -31,6 +31,9 @@ template<class...T>void quietLog(const char*,T...){ }
 #define WARN_COMMANDF(...) quietLog(__VA_ARGS__)
 #define ERROR_MEMORYF(...) quietLog(__VA_ARGS__)
 #define DEBUG_G2F(...) quietLog(__VA_ARGS__)
+// The lens notice each completion records for its page (G2_HijackCmd.h).
+static unsigned noticeRecords=0;
+bool g2LensNoticeFromReply(int,bool,const char*){++noticeRecords;return false;}
 // INSERT_PRODUCTION
 static void userCallback(bool ok,const char*result,const G2CmdCookie&cookie,void*data){assert(ok&&std::string(result)=="owned result"&&cookie.menuGen==gMenuGen&&data==reinterpret_cast<void*>(1));++userCallbacks;}
 static void deliver(){assert(queued.size()==1);auto q=queued.front();queued.clear();q.callback(true,"owned result",q.data);}
@@ -41,9 +44,10 @@ int main(){
     assert(queued[0].command.ctx.transportSessionEpoch==10);
     assert((queued[0].command.ctx.behaviorFlags&COMMAND_CONTEXT_REQUIRE_LIVE_SESSION)!=0);
     assert((queued[0].command.ctx.behaviorFlags&COMMAND_CONTEXT_MODE_INDEPENDENT)!=0);
-    deliver();assert(userCallbacks==1);
+    deliver();assert(userCallbacks==1&&noticeRecords==1);
     assert(g2SubmitHijackCommand("transcription status",cookie,userCallback,reinterpret_cast<void*>(1),10));
-    ++currentOwner.transportEpoch;++currentOwner.generation;deliver();assert(userCallbacks==1);
+    // A completion for a replaced owner neither calls back nor records a notice.
+    ++currentOwner.transportEpoch;++currentOwner.generation;deliver();assert(userCallbacks==1&&noticeRecords==1);
     // Replacement after the coherent capture cannot relabel the queued command.
     currentOwner.transportEpoch=20;replaceAfterCapture=true;
     assert(g2SubmitHijackCommand("transcription start",cookie,userCallback,reinterpret_cast<void*>(1),20));

@@ -129,7 +129,6 @@ static BluetoothHalStatus halControllerStuck(Backend b = Backend::Native) {
 }
 
 struct Settings {
-  bool bleEnabled = true;
   int bleTxPower = 3;  // System_Settings.cpp default
 };
 Settings gSettings;
@@ -588,18 +587,13 @@ int main() {
   EXPECT_REFUSAL("the app console server owns the Bluetooth host; run 'closeconsole' first");
 
   // S3: the admission refusals, in their order, each before any HAL call.
+  // No saved setting is among them: bleautostart only decides boot.
   startCase("S3 up refusals in order, none touching the HAL");
-  gSettings.bleEnabled = false;
   world.fault = true;
   world.companionBlocks = true;
   world.companionReason = "the radio companion is resetting";
   world.serverUp = true;
   world.hal = halReady();  // the console server's own host
-  EXPECT(!UP());
-  EXPECT_EVENTS({kUp, kEnd});
-  EXPECT_REFUSAL("Bluetooth is disabled - run 'bleenabled 1' first");
-  gSettings.bleEnabled = true;
-  clearRecords();
   EXPECT(!UP());
   EXPECT_EVENTS({kUp, kEnd});
   EXPECT_REFUSAL("a prior Bluetooth teardown was incomplete; reboot required");

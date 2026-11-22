@@ -39,6 +39,7 @@
 
 #include "G2_Page_Files.h"
 #include "System_CommandReply.h"  // the reply words and how to read them
+#include "G2_ReplyNotice.h"       // g2ReplyNoticeText: the lens words of a refusal
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -661,6 +662,9 @@ static void onFilesMutateDone(bool ok, const char* result,
   const bool success = ok && commandReplyHasOkStamp(result);
   const char* msg = (result && result[0]) ? result : (ok ? "Done" : "Failed");
   msg = commandReplyBody(msg);  // back-row brevity
+  // A refusal reads as the shared lens text ("Needs a super admin").
+  char refusal[kG2NoticeMax];
+  if (g2ReplyNoticeText(ok, result, refusal, sizeof(refusal))) msg = refusal;
   char copy[FILES_ROW_LEN];
   snprintf(copy, sizeof(copy), "%s", msg);
   DEBUG_G2F("[G2] Files: mutate done ok=%d success=%d '%s'",

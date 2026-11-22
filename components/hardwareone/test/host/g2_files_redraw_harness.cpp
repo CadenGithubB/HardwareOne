@@ -503,8 +503,8 @@ static void testFailedResultKeepsCache() {
   const unsigned rescansBefore = rescans, invalidationsBefore = invalidations;
   completeOnExecutor(sent, true, "Error: File no longer exists or access denied");
   runApplier();
-  CHECK(rowHas(0, "<- Error: File no longer exists or access"));
-  CHECK(shownRows.empty() || shownRows[0].size() == FILES_ROW_LEN - 1);
+  // A refusal reads as the shared lens text: the reason's first sentence.
+  CHECK(rowIs(0, "<- File no longer exists or access denied"));
   CHECK(rescans == rescansBefore && invalidations == invalidationsBefore);
   CHECK(rowHas(2, "notes.bin"));
 }

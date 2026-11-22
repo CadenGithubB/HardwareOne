@@ -193,7 +193,10 @@ worker_marker_reset = start.index("sMqttBeforeConnectSeen.store(false", start_cl
 start_error = start.index("if (startErr != ESP_OK)", driver_start)
 running_publish = start.index("mqttClientRunning.store(true", start_error)
 gate_open = start.index("startAttempt.finishStarted()", running_publish)
-first_fallible_check = start.index("if (!gSettings.mqttEnabled)")
+first_fallible_check = start.index("if (!WiFi.isConnected())")
+# No saved setting refuses a start (the mqttclientenabled switch was removed
+# 2026-11-21; mqttautostart only decides boot).
+assert "gSettings.mqttAutoStart" not in start
 assert start_claim < start_attempt < first_fallible_check
 assert first_fallible_check < worker_marker_reset < driver_start
 assert driver_start < start_error < running_publish < gate_open
@@ -202,23 +205,16 @@ assert "sMqttLifecycle.finishStart(false)" in start_attempt_destructor
 assert "case MQTT_EVENT_BEFORE_CONNECT:" in mqtt
 assert "sMqttBeforeConnectSeen.store(true" in mqtt
 
-# Both current shutdown routes go through the central request-only API.
+# The shutdown route goes through the central request-only API.
 close_command = function_body(mqtt, "const char* cmd_closemqtt(")
-enabled_command = function_body(mqtt, "const char* cmd_mqttclientenabled(")
 not_running_branch = function_body(close_command, "if (!stopMqtt())")
 assert 'return "Error: MQTT client is not running. Start it with \'openmqtt\'.";' in not_running_branch
 assert close_command.index(not_running_branch) < close_command.index(
     'return "[MQTT] Client stop scheduled";'
 )
-disable_branch = function_body(enabled_command, "if (!enable)")
-assert "stopMqtt()" in disable_branch
-assert "client stop scheduled" in disable_branch
 assert mqtt.count(
     '{ "closemqtt", "Stop MQTT client", true, cmd_closemqtt }'
 ) == 1
-assert mqtt.count(
-    '{ "mqttclientenabled", "Enable/disable MQTT [0|1]", true, '
-    'cmd_mqttclientenabled, "Usage: mqttclientenabled [0|1]" }'
-) == 1
+assert "mqttclientenabled" not in mqtt
 
 print("MQTT lifecycle source guards passed")

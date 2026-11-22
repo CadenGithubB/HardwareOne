@@ -34,7 +34,7 @@ volatile bool gInHelpRender = false;  // System_CLI.cpp; the wizard marks its re
 
 struct SettingsBoundary {
   String bleDeviceName, espnowDeviceName, espnowFriendlyName, espnowRoom, espnowZone;
-  bool espnowStationary, espnowEnabled;
+  bool espnowStationary, espnowAutoStart;
 } gSettings, beforeInput;
 
 static std::vector<String> inputs;
@@ -167,7 +167,7 @@ static void reset() {
 // (the name is confirmed on its own prompt, offered from the label).
 static void patch(const char* label, const char* name, const char* room = "", const char* zone = "",
                   bool stationary = true) {
-  unchanged(); assert(gSettings.espnowEnabled);
+  unchanged(); assert(gSettings.espnowAutoStart);
   assert(staged.size() == 1);
   if (staged[0].espnowFriendlyName != label || staged[0].deviceName != name) {
     std::fprintf(stderr, "staged label='%s' name='%s', expected '%s' / '%s'\n",
@@ -215,18 +215,18 @@ static void serialCases() {
     reset(); result = {}; running = true;
     inputs = {"c", "new-label", "new-device", "new-room", "new-zone", "s"}; inputs[back] = "back";
     handleSerialEspNowPage(result, running);
-    unchanged(); assert(gSettings.espnowEnabled && previousCalls == 1 && nextCalls == 0 && running);
+    unchanged(); assert(gSettings.espnowAutoStart && previousCalls == 1 && nextCalls == 0 && running);
   }
   for (int timeout = 1; timeout < 6; ++timeout) {
     reset(); result = {}; running = true;
     inputs = {"c", "new-label", "new-device", "new-room", "new-zone", "s"}; cancelInput = timeout;
     handleSerialEspNowPage(result, running);
-    unchanged(); assert(!running && nextCalls == 0 && gSettings.espnowEnabled);
+    unchanged(); assert(!running && nextCalls == 0 && gSettings.espnowAutoStart);
   }
   for (const char* skip : {"", "n", "next"}) {
     reset(); result = {}; running = true; inputs = {skip};
     handleSerialEspNowPage(result, running);
-    unchanged(); assert(!draftEnabled && gSettings.espnowEnabled && nextCalls == 1);
+    unchanged(); assert(!draftEnabled && gSettings.espnowAutoStart && nextCalls == 1);
   }
   reset(); result = {}; running = true; stageSucceeds = false;
   inputs = {"c", "new-label", "new-device", "", "", "s"}; handleSerialEspNowPage(result, running);
@@ -247,7 +247,7 @@ static void oledCases() {
   for (int cancel = 0; cancel < 4; ++cancel) {
     reset(); result = {}; running = true; inputs = {"new-label", "new-device", "new-room", "new-zone", "s"};
     cancelInput = cancel; handleOledEspNowPage(result, running);
-    unchanged(); assert(previousCalls == 0 && nextCalls == 0 && !running && gSettings.espnowEnabled);
+    unchanged(); assert(previousCalls == 0 && nextCalls == 0 && !running && gSettings.espnowAutoStart);
   }
   reset(); result = {}; running = true; inputs = {"new-label", "new-device", "new-room", "new-zone", "back"};
   handleOledEspNowPage(result, running);
@@ -266,7 +266,7 @@ static void oledCases() {
     reset(); result = {}; running = true; introChoice = intro;
     handleOledEspNowPage(result, running); unchanged();
     assert(inputIndex == 0 && running && nextCalls == (intro == 0));
-    assert(gSettings.espnowEnabled && draftEnabled == (intro == -1));
+    assert(gSettings.espnowAutoStart && draftEnabled == (intro == -1));
   }
 }
 
@@ -299,7 +299,7 @@ static void cliCases() {
   for (int field = 0; field < 6; ++field) {
     const char* prefix[] = {"c", "new-label", "new-device", "new-room", "new-zone"};
     reset(); for (int i = 0; i < field; ++i) cli(prefix[i]);
-    cli("b"); unchanged(); assert(nextCalls == 0 && gSettings.espnowEnabled);
+    cli("b"); unchanged(); assert(nextCalls == 0 && gSettings.espnowAutoStart);
     reset(); for (int i = 0; i < field; ++i) cli(prefix[i]);
     assert(cli("cancel") == CLI_MODE_HANDLED_AND_EXIT);
     unchanged(); assert(!sWizard.result.completed && clearCalls == 1 && nextCalls == 0);
@@ -314,7 +314,7 @@ static void cliCases() {
   for (const char* value : {"c", "new-label", "new-device", "new-room", "new-zone", "s"}) cli(value);
   patch("new-label", "new-device", "new-room", "new-zone"); assert(nextCalls == 0);
   for (const char* skip : {"", "n", "next"}) {
-    reset(); cli(skip); unchanged(); assert(!draftEnabled && gSettings.espnowEnabled && nextCalls == 1);
+    reset(); cli(skip); unchanged(); assert(!draftEnabled && gSettings.espnowAutoStart && nextCalls == 1);
   }
 }
 

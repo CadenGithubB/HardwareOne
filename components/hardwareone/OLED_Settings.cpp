@@ -12,8 +12,7 @@
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry oledSettingEntries[] = {
-  { "oledEnabled", SETTING_BOOL, &gSettings.oledEnabled, false, 0, nullptr, 0, 1, "OLED Enabled", nullptr, false, nullptr, "oledenabled" },
-  { "oledAutoStart", SETTING_BOOL, &gSettings.oledAutoStart, 1, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "oledautostart" },
+  { "oledAutoStart", SETTING_BOOL, &gSettings.oledAutoStart, 0, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "oledautostart" },
   { "oledDefaultMode", SETTING_STRING, &gSettings.oledDefaultMode, 0, 0, "status", 0, 0, "Default Mode", "logo,status,sensors,thermal,network,mesh,off", false, "boot", "oleddefaultmode" },
   { "oledBootDuration", SETTING_INT, &gSettings.oledBootDuration, 2000, 0, nullptr, 500, 10000, "Boot Duration (ms)", nullptr, false, "boot", "oledbootduration" },
   { "oledUpdateInterval", SETTING_INT, &gSettings.oledUpdateInterval, 125, 0, nullptr, 10, 1000, "Update Interval (ms)", nullptr, false, "display", "oledupdateinterval" },

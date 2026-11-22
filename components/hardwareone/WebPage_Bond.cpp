@@ -731,8 +731,10 @@ void streamBondInner(httpd_req_t* req) {
   window.unbondDevice = function() {
     if (!confirm('Unbond from this device? This ends the bond on THIS device. The peer will show offline until you unbond it there too.')) return;
     hw.postForm('/api/cli', {cmd: 'bonddisconnect'})
-    .then(function(r){ return r.text(); })
-    .then(function(){
+    .then(function(r){ return r.text().then(function(t){ return {ok: r.ok, text: t}; }); })
+    .then(function(res){
+      // A refused unbond keeps the bond: show the reason and stay.
+      if (!res.ok || hw.cliFailed(res.text)) { hw.showCliError(res.text); return; }
       // bonddisconnect clears bond mode locally; reload so the page returns to
       // the device-selection view.
       setTimeout(function(){ window.location.reload(); }, 600);

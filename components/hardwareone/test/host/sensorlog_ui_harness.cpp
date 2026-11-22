@@ -70,6 +70,11 @@ void g2SetHijackPage(G2HijackPage value) { page = value; }
 void g2ShowSystemMenu() { ++systemMenus; }
 void g2ShowText(const char* value) { shownText = value; }
 bool g2ShowListPage(const char* const*, size_t) { ++listsShown; return true; }
+// Lens notice boundary (G2_HijackCmd.h): no refusal pending, the back row
+// keeps its label.
+void g2LensNoticeBackRow(G2HijackPage, const char* label, char* out, size_t cap) {
+  if (label != out) std::snprintf(out, cap, "%s", label);
+}
 bool g2SubmitHijackCommand(const char* command, const G2CmdCookie& cookie,
                           Completion completion, void* user) {
   g2Requests.push_back({command, cookie, completion, user});

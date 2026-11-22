@@ -101,7 +101,7 @@ static bool filesystemReady = true;
 // A path as the report shows it: bytes outside printable ASCII and the
 // backslash as \xNN, and a '/' right after "Users" as \/, because the tracked
 // tree holds no text shaped like a home directory path (test_tree_hygiene_gate,
-// the commit guard) and the path table has a "/Users" rule.
+// the commit guard) and the corpus probes paths under the old "/Users" root.
 static std::string escaped(const char* p, size_t n) {
   std::string out;
   for (size_t i = 0; p && i < n; i++) {

@@ -98,12 +98,12 @@ window.ledLiveSetBrightness = function() {
   if (val < 0) val = 0;
   if (val > 100) val = 100;
   postSettingsCli('ledbrightness ' + val)
-    .catch(function(e) { alert('LED brightness failed: ' + e.message); });
+    .catch(function(e) { hw.showCliError(e.message); });
 };
 window.ledLiveApplyColor = function() {
   var color = hw.$('led-live-color').value;
   postSettingsCli('ledcolor ' + color)
-    .catch(function(e) { alert('LED color failed: ' + e.message); });
+    .catch(function(e) { hw.showCliError(e.message); });
 };
 window.ledLiveEffectChanged = function() {
   var needsTwo = hw.$('led-live-effect').value === 'fade';
@@ -119,11 +119,11 @@ window.ledLiveRunEffect = function() {
     ? ('ledeffect fade ' + color1 + ' ' + color2 + ' ' + duration)
     : ('ledeffect ' + effect + ' ' + color1 + ' ' + duration);
   postSettingsCli(cmd)
-    .catch(function(e) { alert('LED effect failed: ' + e.message); });
+    .catch(function(e) { hw.showCliError(e.message); });
 };
 window.ledLiveClear = function() {
   postSettingsCli('ledclear')
-    .catch(function(e) { alert('LED clear failed: ' + e.message); });
+    .catch(function(e) { hw.showCliError(e.message); });
 };
 )LEDLIVEJS", HTTPD_RESP_USE_STRLEN);
 #endif  // ENABLE_NEOPIXEL
@@ -169,7 +169,11 @@ window.sendSequential = function(cmds, onDone, onFail) {
       var cmd = (all[firstError.index] || '').trim();
       var msg = 'Command failed: ' + cmd;
       if (firstError.output) msg += ' -> ' + firstError.output;
-      if (onFail) onFail(new Error(msg));
+      // e.reply is the device's own reply (a refusal names its reason), for a
+      // caller that shows it with hw.showCliError.
+      var failure = new Error(msg);
+      failure.reply = firstError.output;
+      if (onFail) onFail(failure);
       return;
     }
 
@@ -571,6 +575,7 @@ window.SchemaPanel = (function(){
         function(e){
           errp(pfx, 'Save failed: ' + (e ? e.message : 'unknown'));
           hw.setText(msg, 'Save failed: ' + (e ? e.message : 'unknown'));
+          hw.showCliError(e ? (e.reply || e.message) : '');
         }
       );
     });
@@ -677,10 +682,6 @@ window.SchemaPanel.render({
       <div id='wifi-pane' style='display:none;margin-top:0.75rem'>
         <div style='margin-bottom:1rem'>
           <span style='color:var(--panel-fg)'>SSID: <span style='font-weight:bold;color:var(--accent)' id='wifi-ssid'>-</span></span>
-        </div>
-        <div style='display:flex;align-items:center;gap:1rem;margin-bottom:0.6rem;flex-wrap:wrap'>
-          <span style='color:var(--panel-fg)' title='Master switch. Off means nothing can bring WiFi up - not boot, not connect, not scan. ESP-NOW is unaffected.'>Enabled: <span style='font-weight:bold;color:var(--accent)' id='wifi-enabled-value'>-</span></span>
-          <button class='btn' onclick='wifiSetFlag("wifienabled")' id='wifi-enabled-btn'>Toggle</button>
         </div>
         <div style='display:flex;align-items:center;gap:1rem;margin-bottom:0.6rem;flex-wrap:wrap'>
           <span style='color:var(--panel-fg)' title='Connect to a saved network automatically at boot.'>Connect at boot: <span style='font-weight:bold;color:var(--accent)' id='wifi-autostart-value'>-</span></span>
@@ -913,16 +914,11 @@ window.SchemaPanel.render({
         // no consumer of its own, so it comes up if and only if something that
         // NEEDS it starts. Rather than leave that as an unexplained hole in the
         // card, derive the answer from the two flags that actually decide it
-        // (HardwareOne.cpp gates setupWiFi and cmd_espnow_init on exactly these).
+        // (HardwareOne.cpp starts setupWiFi and cmd_espnow_init on exactly these).
         var net = (settings && settings.network) || {};
         var w = net.wifi || {}, en = net.espnow || {};
-        // ESP-NOW's master switch is still the BARE jsonKey "enabled" - it only
-        // becomes "espnowEnabled" in the Phase 4 rename. Accept either so this
-        // keeps working across that change instead of silently reading
-        // undefined and always reporting "off".
-        var espnowOn = (en.espnowEnabled !== undefined) ? en.espnowEnabled : en.enabled;
-        var wifiAtBoot   = !!w.wifiEnabled && !!w.wifiAutoStart;
-        var espnowAtBoot = !!espnowOn && !!en.espnowAutoStart;
+        var wifiAtBoot   = !!w.wifiAutoStart;
+        var espnowAtBoot = !!en.espnowAutoStart;
         var why = [];
         if (wifiAtBoot)   why.push('WiFi connects at boot');
         if (espnowAtBoot) why.push('ESP-NOW starts at boot');
@@ -2095,7 +2091,7 @@ function saveNotifPolicy() {
         if(msg){msg.textContent='Saved';setTimeout(function(){msg.style.opacity='0';},1500);}
         try{refreshSettings();}catch(_){}
       },
-      function(){if(msg){msg.textContent='Error saving';msg.style.color='#f55';}}
+      function(e){if(msg){msg.textContent='Error saving';msg.style.color='#f55';}hw.showCliError(e?(e.reply||e.message):'');}
     );
   };
 })();
@@ -2482,11 +2478,10 @@ console.log('[SETTINGS] Part 1: Core init starting...');
         __S.state.savedSSIDs = [];
         if (primary) __S.state.savedSSIDs.push(primary);
         if (list && list.length) __S.state.savedSSIDs = __S.state.savedSSIDs.concat(list);
-        // Three independent WiFi axes. `autoReconnect` used to be the jsonKey for
+        // Two independent WiFi switches. `autoReconnect` used to be the jsonKey for
         // the BOOT flag, which is why that toggle was mislabelled; the keys are
         // now one-to-one with what they do.
         var wifiFlags = [
-          ['wifiEnabled',       'wifi-enabled-value',   'wifi-enabled-btn'],
           ['wifiAutoStart',     'wifi-autostart-value', 'wifi-autostart-btn'],
           ['wifiAutoReconnect', 'wifi-value',           'wifi-btn']
         ];
@@ -2611,17 +2606,13 @@ console.log('[SETTINGS] Part 2: API helpers starting...');
     console.log('[SETTINGS] refreshSettings defined');
     
     // Toggle WiFi auto-reconnect
-    // One handler for all three WiFi flags. Reads current state off the button
+    // One handler for both WiFi flags. Reads current state off the button
     // label so it stays correct after a refresh, and re-reads from the device
     // afterwards rather than assuming the write landed.
     window.wifiSetFlag = function(cmd) {
-      var map = { wifienabled: 'wifi-enabled-btn', wifiautostart: 'wifi-autostart-btn', wifiautoreconnect: 'wifi-btn' };
+      var map = { wifiautostart: 'wifi-autostart-btn', wifiautoreconnect: 'wifi-btn' };
       var btn = hw.$(map[cmd]);
       var v = (btn && btn.textContent === 'Disable') ? 0 : 1;
-      if (cmd === 'wifienabled' && v === 0) {
-        // Disabling the master switch stops connect AND scan, so say so.
-        if (!confirm('Disable WiFi entirely? Nothing will be able to bring it up - not boot, not connect, not scan - until you re-enable it. ESP-NOW is not affected.')) return;
-      }
       postSettingsCli(cmd + ' ' + v)
       .then(function(t) {
         if (t && t.indexOf('Error') >= 0) alert(t);
@@ -3232,6 +3223,12 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
                owner that every one of which was guaranteed to fail. Show why
                instead. __hwRank is the viewer's own rank, from the renderer. */
             var myRank = (typeof window.__hwRank === 'number') ? window.__hwRank : R.admin;
+            /* Demote, reset password, delete and ban are super-admin commands
+               (1.0 role tiers): grayed out with the reason below super admin.
+               The firmware still decides; this only saves a refused click. */
+            var superOnly = function (t) {
+              return myRank >= R.superadmin ? ' title="' + t + '"' : ' disabled title="Super admin only"';
+            };
             if (rank > myRank) {
               html += '<span style="font-size:0.85rem;color:var(--muted,#888);padding:0.25rem 0">' +
                       'Higher-privileged account &mdash; no actions available at your role.</span>';
@@ -3243,26 +3240,26 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
               html += '<button class="btn" data-user="' + usernameAttr + '" onclick="promoteUserByName(this.dataset.user,\'user\')" title="Promote to User">Promote to User</button>';
             } else if (rank === R.user) {
               html += '<button class="btn" data-user="' + usernameAttr + '" onclick="promoteUserByName(this.dataset.user,\'admin\')" title="Promote to Admin">Promote to Admin</button>';
-              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="demoteUserByName(this.dataset.user,\'guest\')" title="Demote to Guest - view-only">Demote to Guest</button>';
+              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="demoteUserByName(this.dataset.user,\'guest\')"' + superOnly('Demote to Guest - view-only') + '>Demote to Guest</button>';
             } else if (rank === R.admin) {
               /* admin -> superadmin: only a superadmin may grant it, and the
                  firmware refuses otherwise, so only offer it to one. */
               if (myRank >= R.superadmin) {
                 html += '<button class="btn" data-user="' + usernameAttr + '" onclick="promoteUserByName(this.dataset.user,\'superadmin\')" title="Promote to Super Admin - full device and filesystem control">Promote to Super Admin</button>';
               }
-              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="demoteUserByName(this.dataset.user,\'user\')" title="Demote to User">Demote to User</button>';
+              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="demoteUserByName(this.dataset.user,\'user\')"' + superOnly('Demote to User') + '>Demote to User</button>';
             } else {
-              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="demoteUserByName(this.dataset.user,\'admin\')" title="Demote to Admin">Demote to Admin</button>';
+              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="demoteUserByName(this.dataset.user,\'admin\')"' + superOnly('Demote to Admin') + '>Demote to Admin</button>';
             }
-            html += '<button class="btn" data-user="' + usernameAttr + '" onclick="resetUserPassword(this.dataset.user)" title="Reset password for this user">Reset Password</button>';
-            html += '<button class="btn" data-user="' + usernameAttr + '" onclick="deleteUserByName(this.dataset.user)" title="Delete this user">Delete</button>';
+            html += '<button class="btn" data-user="' + usernameAttr + '" onclick="resetUserPassword(this.dataset.user)"' + superOnly('Reset password for this user') + '>Reset Password</button>';
+            html += '<button class="btn" data-user="' + usernameAttr + '" onclick="deleteUserByName(this.dataset.user)"' + superOnly('Delete this user') + '>Delete</button>';
             if (sessionCount > 0) {
               html += '<button class="btn" data-user="' + usernameAttr + '" onclick="revokeUserSessions(this.dataset.user)" title="Revoke all sessions for this user">Revoke Sessions</button>';
             }
             if (isBanned) {
               html += '<button class="btn" data-user="' + usernameAttr + '" onclick="unbanUserByName(this.dataset.user)" title="Remove ban and restore access">Unban</button>';
             } else {
-              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="banUserByName(this.dataset.user)" title="Ban this user from all access">Ban</button>';
+              html += '<button class="btn" data-user="' + usernameAttr + '" onclick="banUserByName(this.dataset.user)"' + superOnly('Ban this user from all access') + '>Ban</button>';
             }
             }  /* end: viewer outranks this account */
           }

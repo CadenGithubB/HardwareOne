@@ -1661,8 +1661,9 @@ static void executeSubmenuAction(int submenuType, int action) {
                 "gpstrack clear", result, sizeof(result));
             const char* message = commandReplyBody(result);
             if (!executed || strcmp(message, kGpsTrackReplyCleared) != 0) {
-              oledToastShow(result[0] ? result : "Clear track failed", 3000,
-                            OledUiIcon::ERROR);
+              char text[sizeof(result)];
+              oledCommandReplyText(false, result, nullptr, "Clear track failed", text, sizeof(text));
+              oledToastShow(text, 3000, OledUiIcon::ERROR);
             } else {
               sForceRender = true;
             }
@@ -1686,8 +1687,11 @@ static void executeSubmenuAction(int submenuType, int action) {
             const bool executed = executeOledCommandWithResult(
                 "gpstrack live toggle", result, sizeof(result));
             if (!executed || !commandReplyConfirms(result)) {
-              oledToastShow(result[0] ? result : "Live track failed", 3000,
-                            OledUiIcon::ERROR);
+              // The shared short refusal ("Needs an admin": logging is an
+              // administrator's job).
+              char text[sizeof(result)];
+              oledCommandReplyText(false, result, nullptr, "Live track failed", text, sizeof(text));
+              oledToastShow(text, 3000, OledUiIcon::ERROR);
             } else {
               sForceRender = true;
             }

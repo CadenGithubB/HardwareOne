@@ -39,9 +39,9 @@ namespace SelfDevice { static String deviceName() { return String("HardwareOne-B
 // INSERT_TYPES
 
 static struct SettingsBoundary {
-  bool wifiEnabled, wifiAutoStart, httpAutoStart, httpsEnabled, bleAutoStart;
-  bool espnowEnabled, espnowmesh, mqttEnabled, mqttAutoStart;
-  bool automationEnabled, oledEnabled, i2cEnabled, tofAutoStart;
+  bool wifiAutoStart, httpAutoStart, httpsEnabled, bleAutoStart;
+  bool espnowAutoStart, espnowmesh, mqttAutoStart;
+  bool automationAutoStart, oledAutoStart, i2cEnabled, tofAutoStart;
   bool ledEnabled;
   int bleMode, tzOffsetMinutes, logLevel, mqttPort, unrelated;
   String espnowDeviceName, espnowFriendlyName, espnowRoom, espnowZone;
@@ -62,27 +62,27 @@ static bool compiledLed() { return ENABLE_NEOPIXEL; }
 static bool neverCompiled() { return false; }
 static const FeatureEntry featureRegistry[] = {
   {"wifi", "WiFi", FEATURE_CAT_NETWORK, 20, FEATURE_FLAG_RUNTIME_TOGGLE,
-   &gSettings.wifiEnabled, compiledWifi, "WiFi fixture"},
+   &gSettings.wifiAutoStart, compiledWifi, "WiFi fixture"},
   {"http", "HTTP", FEATURE_CAT_NETWORK, 10, FEATURE_FLAG_RUNTIME_TOGGLE,
    &gSettings.httpAutoStart, compiledWeb, "HTTP fixture"},
   {"bluetooth", "Bluetooth", FEATURE_CAT_NETWORK, 12, FEATURE_FLAG_RUNTIME_TOGGLE,
    &gSettings.bleAutoStart, compiledBluetooth, "Bluetooth fixture"},
   {"espnow", "ESP-NOW", FEATURE_CAT_NETWORK, 4, FEATURE_FLAG_RUNTIME_TOGGLE,
-   &gSettings.espnowEnabled, compiledEspnow, "ESP-NOW fixture"},
+   &gSettings.espnowAutoStart, compiledEspnow, "ESP-NOW fixture"},
   {"mqtt", "MQTT", FEATURE_CAT_NETWORK, 8, FEATURE_FLAG_RUNTIME_TOGGLE,
-   &gSettings.mqttEnabled, compiledMqtt, "MQTT fixture"},
+   &gSettings.mqttAutoStart, compiledMqtt, "MQTT fixture"},
   {"automation", "Automation", FEATURE_CAT_SYSTEM, 2, FEATURE_FLAG_RUNTIME_TOGGLE,
-   &gSettings.automationEnabled, nullptr, "Automation fixture"},
+   &gSettings.automationAutoStart, nullptr, "Automation fixture"},
   {"i2c", "I2C", FEATURE_CAT_DISPLAY, 3, FEATURE_FLAG_RUNTIME_TOGGLE,
    &gSettings.i2cEnabled, nullptr, "I2C fixture"},
   {"oled", "OLED", FEATURE_CAT_DISPLAY, 3, FEATURE_FLAG_RUNTIME_TOGGLE,
-   &gSettings.oledEnabled, compiledOled, "OLED fixture"},
+   &gSettings.oledAutoStart, compiledOled, "OLED fixture"},
   {"tof", "ToF", FEATURE_CAT_SENSOR, 1, FEATURE_FLAG_RUNTIME_TOGGLE,
    &gSettings.tofAutoStart, nullptr, "ToF fixture"},
   {"led", "LED", FEATURE_CAT_DISPLAY, 1, FEATURE_FLAG_RUNTIME_TOGGLE,
    &gSettings.ledEnabled, compiledLed, "LED fixture"},
   {"missing", "Missing", FEATURE_CAT_NETWORK, 5, FEATURE_FLAG_RUNTIME_TOGGLE,
-   &gSettings.automationEnabled, neverCompiled, "Absent fixture"},
+   &gSettings.automationAutoStart, neverCompiled, "Absent fixture"},
   {"fixed", "Fixed", FEATURE_CAT_SYSTEM, 1, FEATURE_FLAG_COMPILE_TIME,
    nullptr, nullptr, "Fixed fixture"},
 };
@@ -153,12 +153,12 @@ static unsigned checks;
 static void checked(bool good, int line) { ++checks; if (!good) std::fprintf(stderr, "draft check line %d\n", line); assert(good); }
 #define check(good) checked((good), __LINE__)
 static std::vector<std::string> liveValues() {
-  return {std::to_string(gSettings.wifiEnabled), std::to_string(gSettings.wifiAutoStart),
+  return {std::to_string(gSettings.wifiAutoStart),
     std::to_string(gSettings.httpAutoStart), std::to_string(gSettings.httpsEnabled),
     std::to_string(gSettings.bleAutoStart), std::to_string(gSettings.bleMode),
-    std::to_string(gSettings.espnowEnabled), std::to_string(gSettings.espnowmesh),
-    std::to_string(gSettings.mqttEnabled), std::to_string(gSettings.mqttAutoStart),
-    std::to_string(gSettings.automationEnabled), std::to_string(gSettings.oledEnabled),
+    std::to_string(gSettings.espnowAutoStart), std::to_string(gSettings.espnowmesh),
+    std::to_string(gSettings.mqttAutoStart),
+    std::to_string(gSettings.automationAutoStart), std::to_string(gSettings.oledAutoStart),
     std::to_string(gSettings.i2cEnabled), std::to_string(gSettings.tofAutoStart),
     std::to_string(gSettings.ledEnabled), std::to_string(gSettings.tzOffsetMinutes),
     std::to_string(gSettings.logLevel), std::to_string(gSettings.mqttPort),
@@ -215,7 +215,7 @@ static void toggleFeature(const char* id) {
 static void cancellationAndRestart() {
   reset(); const auto original = liveValues(); initSetupWizard();
   toggleFeature("automation");
-  check(!gSettings.automationEnabled && wizardFeatureEnabled("automation"));
+  check(!gSettings.automationAutoStart && wizardFeatureEnabled("automation"));
   setWizardCurrentPage(WIZARD_PAGE_SYSTEM);
   setWizardTimezoneSelection(0); setWizardLogLevelSelection(0);
   SetupWizardResult result{};
@@ -226,12 +226,12 @@ static void cancellationAndRestart() {
   check(!wizardSaveAndApplySettings(result));
   check(!result.completed && liveValues() == original && changed.empty());
   operations.clear(); output.clear();
-  gSettings.automationEnabled = true; gSettings.tzOffsetMinutes = 321;
+  gSettings.automationAutoStart = true; gSettings.tzOffsetMinutes = 321;
   initSetupWizard();
   check(wizardFeatureEnabled("automation"));
   check(getWizardDraftValues().timezoneOffset == 321);
   discardSetupWizard();
-  check(gSettings.automationEnabled && gSettings.tzOffsetMinutes == 321);
+  check(gSettings.automationAutoStart && gSettings.tzOffsetMinutes == 321);
 }
 
 static void navigationAndModes() {
@@ -244,9 +244,12 @@ static void navigationAndModes() {
   wizardSetFeatureEnabled("espnow", true); check(wizardShouldShowEspNow());
 #endif
 #if ENABLE_MQTT
-  wizardSetFeatureEnabled("mqtt", true); wizardSetMqttAutoStart(true);
-  check(wizardShouldShowMqtt());
-  wizardSetMqttAutoStart(false); check(!wizardShouldShowMqtt());
+  // The MQTT row is its start-at-boot switch; the page follows it alone.
+  wizardSetFeatureEnabled("mqtt", true); check(wizardShouldShowMqtt());
+  wizardSetFeatureEnabled("mqtt", false); check(!wizardShouldShowMqtt());
+  wizardSetFeatureEnabled("mqtt", true); wizardSkipMqttPage();
+  check(wizardShouldShowMqtt());  // a skip keeps a configured broker as it is
+  wizardSetFeatureEnabled("mqtt", false);
 #endif
   uint32_t beforeCost, maxCost; int percentage;
   getHeapBarData(&beforeCost, &maxCost, &percentage);
@@ -497,7 +500,7 @@ static void touchedOnlyApply() {
   gSettings.tofAutoStart = true;
   auto result = completed();
   check(wizardSaveAndApplySettings(result));
-  check(result.completed && gSettings.automationEnabled);
+  check(result.completed && gSettings.automationAutoStart);
 #if ENABLE_MQTT
   check(gSettings.mqttHost == "edited.host");
 #endif
@@ -537,7 +540,7 @@ static void completionFailuresAndNoop() {
   cancelledResult.wifiPassword = "fixture-secret"; cancelRequested = true;
   check(!wizardSaveAndApplySettings(cancelledResult));
   check(!cancelledResult.completed && !cancelledResult.wifiConfigured && cancelledResult.wifiPassword.empty());
-  check(!gSettings.automationEnabled && changed.empty() && applyCalls == 0 && wifiSaveCalls == 0);
+  check(!gSettings.automationAutoStart && changed.empty() && applyCalls == 0 && wifiSaveCalls == 0);
 
   reset(); initSetupWizard(); const auto original = liveValues();
   auto result = completed(); check(wizardSaveAndApplySettings(result));
@@ -546,13 +549,13 @@ static void completionFailuresAndNoop() {
   scopeAvailable = false; result = completed();
   // No batch slot: the accepted draft still applies, one file at a time.
   check(wizardSaveAndApplySettings(result));
-  check(result.applied && gSettings.automationEnabled && applyCalls == 1 && scopeFinishes == 0);
+  check(result.applied && gSettings.automationAutoStart && applyCalls == 1 && scopeFinishes == 0);
   check(std::count(operations.begin(), operations.end(), "storage.warn") == 1);
   for (const auto& line : output) check(line.find("could not be saved") == std::string::npos);
   reset(); initSetupWizard(); toggleFeature("automation");
   scopeResult = false; result = completed();
   check(wizardSaveAndApplySettings(result));
-  check(result.completed && result.applied && gSettings.automationEnabled && applyCalls == 1 && scopeFinishes == 1);
+  check(result.completed && result.applied && gSettings.automationAutoStart && applyCalls == 1 && scopeFinishes == 1);
   bool warning = false;
   for (const auto& line : output) if (line.find("could not be saved") != std::string::npos) warning = true;
   check(warning);
@@ -602,9 +605,9 @@ static void completionEffects() {
       for (const auto& line : output) check(line.find("fixture-secret") == std::string::npos);
     }
   reset(); initSetupWizard(); toggleFeature("automation"); toggleFeature("automation");
-  gSettings.automationEnabled = true;
+  gSettings.automationAutoStart = true;
   auto result = completed(); check(wizardSaveAndApplySettings(result));
-  check(gSettings.automationEnabled && changed.empty()); // Reverted draft leaves the external edit intact.
+  check(gSettings.automationAutoStart && changed.empty()); // Reverted draft leaves the external edit intact.
 #if ENABLE_WIFI
   // Credentials entered before Wi-Fi was switched off on a later Back are
   // dropped, and the caller reads that back from the result.

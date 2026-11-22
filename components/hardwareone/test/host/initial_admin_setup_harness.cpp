@@ -60,7 +60,7 @@ static const char* kRoster = R"({"nextId":3,"users":[{"id":1,"username":"fixture
 static bool markerPresent, markerWriteOk, ownerFileCorrupt;
 static unsigned ownerLoads, markerWrites, markerRemovals, identityBumps;
 static std::vector<std::string> events;
-static struct { bool oledEnabled, inputAutoStart; } gSettings;
+static struct { bool oledAutoStart, inputAutoStart; } gSettings;
 
 void webBatchTestStringAppend() {}
 static unsigned long millis() { return nowMs; }

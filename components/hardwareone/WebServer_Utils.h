@@ -1659,7 +1659,9 @@ inline void streamCommonDialogs(httpd_req_t* req) {
     "ca.addEventListener('click',function(){closeD(null);});"
     "inp.addEventListener('keydown',function(e){if(e.key==='Enter')closeD(inp.value);if(e.key==='Escape')closeD(null);});"
     "d.addEventListener('click',function(e){if(e.target===d)closeD(null);});"
-    "window.hwAlert=function(msg){return show(String(msg),'alert',null);};"
+    // A refusal the page already showed as a toast (hw.showCliError) is not
+    // shown a second time as a dialog.
+    "window.hwAlert=function(msg){if(hw._recentErr&&hw._recentErr(msg))return Promise.resolve(true);return show(String(msg),'alert',null);};"
     "window.hwConfirm=function(msg){return show(String(msg),'confirm',null);};"
     "window.hwPrompt=function(msg,def){return show(String(msg),'prompt',def!=null?String(def):'');};"
     "window.alert=function(msg){hwAlert(msg);};"

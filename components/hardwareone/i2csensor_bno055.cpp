@@ -1124,8 +1124,8 @@ static const char* cmd_imubus(const String& a) {
 
 const CommandEntry imuCommands[] = {
   // Start/Stop (3-level voice: "sensor" -> "motion sensor" -> "open/close")
-  { "openimu", "Start BNO055 IMU sensor.", false, cmd_imustart },
-  { "closeimu", "Stop BNO055 IMU sensor.", false, cmd_imustop },
+  { "openimu", "Start BNO055 IMU sensor.", true, cmd_imustart },
+  { "closeimu", "Stop BNO055 IMU sensor.", true, cmd_imustop },
   
   // Information
   { "imuread", "Read IMU sensor data. (add 'json' for JSON output)", false, cmd_imu },
@@ -1289,7 +1289,6 @@ void imuTask(void* parameter) {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry imuSettingEntries[] = {
-  { "imuEnabled", SETTING_BOOL, &gSettings.imuEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "imuenabled" },
   { "imuAutoStart", SETTING_BOOL, &gSettings.imuAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "imuautostart" },
   { "imuPollingMs", SETTING_INT, &gSettings.imuPollingMs, 200, 0, nullptr, 50, 2000, "Polling (ms)", nullptr, false, "timing", "imupollingms" },
   { "imuEWMAFactor", SETTING_FLOAT, &gSettings.imuEwmaFactor, 0, 0.1f, nullptr, 0, 1, "EWMA Factor", nullptr, false, "timing", "imuewmafactor" },

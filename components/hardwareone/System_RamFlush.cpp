@@ -192,9 +192,8 @@ bool ramFlushReadLive(RamFlushFeatureId f) {
 #endif
 
 #if ENABLE_AUTOMATION
-    // The scheduler's own runtime state, not automationEnabled: the setting is
-    // the permission, this is whether the cache is live and the loop is
-    // ticking — which is what automationAutoStart controls.
+    // The scheduler's own runtime state: whether the cache is live and the
+    // loop is ticking — which is what automationAutoStart controls.
     case RF_AUTOMATION: return automationSchedulerRunning();
 #else
     case RF_AUTOMATION: return false;
@@ -204,10 +203,8 @@ bool ramFlushReadLive(RamFlushFeatureId f) {
   }
 }
 
-// The intent each feature's live state is diffed against. For most this is the
-// *AutoStart flag; WiFi is keyed to wifiAutoStart because wifiEnabled is inert
-// (persisted and read back, but nothing applies it — boot gates on
-// wifiAutoStart at HardwareOne.cpp:1606), and espnow is a master-enable.
+// The intent each feature's live state is diffed against: its *AutoStart flag,
+// the one saved switch a feature has.
 static bool ramFlushReadIntent(RamFlushFeatureId f) {
   switch (f) {
     case RF_THERMAL:    return gSettings.thermalAutoStart;
@@ -228,7 +225,7 @@ static bool ramFlushReadIntent(RamFlushFeatureId f) {
     case RF_BLUETOOTH:  return gSettings.bleAutoStart;
     case RF_SENSORLOG:  return gSettings.sensorLogAutoStart;
     case RF_SYSTEMLOG:  return gSettings.systemLogAutoStart;
-    case RF_ESPNOW:     return gSettings.espnowEnabled;
+    case RF_ESPNOW:     return gSettings.espnowAutoStart;
     case RF_WIFI:       return gSettings.wifiAutoStart;
     case RF_OLED:       return gSettings.oledAutoStart;
     case RF_AUTOMATION: return gSettings.automationAutoStart;

@@ -1022,9 +1022,7 @@ WifiCoexTag wifiCoexTag() {
 
 // One diagnostic owner for Wi-Fi connect and radio-enable entry paths.
 // Do not replace a known refusal with a list of unrelated possible causes.
-static const char* wifiStartFailure(bool wifiRequired, const char* fallback) {
-  if (wifiRequired && !gSettings.wifiEnabled)
-    return "Error: Wi-Fi is disabled. Enable Wi-Fi in Settings.";
+static const char* wifiStartFailure(const char* fallback) {
   const char* companionReason = nullptr;
   if (radioCompanionBlocksRadio(&companionReason) && companionReason) {
     if (!ensureDebugBuffer()) return "Error: Radio companion unavailable. Retry shortly.";
@@ -1039,7 +1037,7 @@ const char* cmd_wificonnect(const String& originalCmd) {
 
   // Ensure WiFi is initialized (lazy init)
   if (!ensureWifiInitialized()) {
-    return wifiStartFailure(true, "Error: Wi-Fi radio could not start. Retry shortly.");
+    return wifiStartFailure("Error: Wi-Fi radio could not start. Retry shortly.");
   }
 
   // Re-arm the runtime reconnect hunt that closewifi disables, if the user
@@ -1448,12 +1446,8 @@ static RadioPowerOffResult radioPowerOff() {
 // Power an unassociated STA back up without starting a connection attempt. This
 // is intentionally separate from ensureWifiInitialized(): after radiopower off,
 // the application-level initialization latch can still be true while the live
-// driver mode is WIFI_OFF. The master WiFi switch remains authoritative.
+// driver mode is WIFI_OFF.
 static bool ensureStaRadioMode() {
-  if (!gSettings.wifiEnabled) {
-    WARN_WIFIF("[WiFi] radio enable refused: WiFi is disabled in Settings");
-    return false;
-  }
   if (wifiRadioOn()) return true;
   {
     const char* companionReason = nullptr;
@@ -1494,12 +1488,11 @@ static bool radioPowerOn() {
     if (restoreEspNow && !isEspNowInitialized()) cmd_espnow_init("");
 #endif
     // ESP-NOW may already have brought the shared radio up. Otherwise restore
-    // the prior WiFi-owned radio state only while the master switch permits it.
-    if ((restoreStaIdle || restoreWifi) && gSettings.wifiEnabled &&
-        !wifiRadioOn() && !ensureStaRadioMode()) {
+    // the prior WiFi-owned radio state.
+    if ((restoreStaIdle || restoreWifi) && !wifiRadioOn() && !ensureStaRadioMode()) {
       return false;
     }
-    if (restoreWifi && gSettings.wifiEnabled) {
+    if (restoreWifi) {
       WiFi.setAutoReconnect(gSettings.wifiAutoReconnect);  // honour the user's hunt preference
       setupWifi();                  // sets mode (AP_STA if ESP-NOW up, else STA), re-associates
     }
@@ -1559,8 +1552,7 @@ const char* cmd_radiopower(const String& originalCmd) {
       return "Error: The radio is already on. Turn it off first with 'radiopower off'.";
     }
     if (!radioPowerOn()) {
-      return wifiStartFailure(!(gRadioForcedOff && gRadioPrevEspNow),
-          "Error: Radio could not start. Retry or check Radio Status.");
+      return wifiStartFailure("Error: Radio could not start. Retry or check Radio Status.");
     }
     memDiagCheckpoint("radiopower-on");
     return "Radio on (runtime only).";
@@ -1702,7 +1694,7 @@ const char* cmd_wifiscan(const String& argsInput) {
   
   // Ensure WiFi is initialized (lazy init) before scanning
   if (!ensureWifiInitialized()) {
-    return wifiStartFailure(true, "Error: WiFi could not start. Check radiopower, then retry wifiscan.");
+    return wifiStartFailure("Error: WiFi could not start. Check radiopower, then retry wifiscan.");
   }
   
   String args = argsInput;
@@ -2543,10 +2535,6 @@ const char* cmd_httpstart(const String& argsInput) {
   // The user wants the server again: later joins may start it.
   sHttpUserClosed = false;
 
-  if (!gSettings.httpEnabled) {
-    return "Error: HTTP server is disabled - run 'httpenabled 1' first";
-  }
-
   if (!WiFi.isConnected()) {
     cliHint("to connect, run 'openwifi'; check the result with 'wifistatus'");
     return "Error: WiFi not connected. Connect to WiFi before starting HTTP server.";
@@ -3043,7 +3031,6 @@ static void wifiReconcileNetworkServicesJob(void*) {
   if (!getNtpRuntimeStatus().clientArmed) setupNtp();
 #if ENABLE_HTTP_SERVER
   WifiServicesInputs in;
-  in.httpEnabled = gSettings.httpEnabled;
   // As boot resolves it. The RAM-flush overlay is not one-shot: it stands for
   // the whole boot, so a later join decides the same way boot did.
   in.autostart = ramFlushResolve(RF_HTTP, gSettings.httpAutoStart);
@@ -3204,7 +3191,7 @@ void wifiRehuntPoll() {
   in.connected = WiFi.isConnected();
   // The same reading of "wants to reconnect" as the radio status line; the
   // settings are checked too because closing Wi-Fi only clears the runtime flag.
-  in.armed = gSettings.wifiEnabled && gSettings.wifiAutoReconnect &&
+  in.armed = gSettings.wifiAutoReconnect &&
              wifiInitialized.load() && WiFi.getAutoReconnect();
   // Not while a boot connect or a commanded connect has the radio, and not
   // while the P4's radio companion is away (its restore reconnects by itself).
@@ -3239,15 +3226,6 @@ void wifiRehuntPoll() {
 
 // Ensure WiFi is initialized (lazy initialization to save ~32KB at boot)
 bool ensureWifiInitialized() {
-  // Master switch. This is the single chokepoint for every STA entry path
-  // (cmd_wificonnect, cmd_wifiscan, the OLED network page), so one check here
-  // covers them all. Deliberately does NOT affect ESP-NOW: it shares the radio
-  // but never calls this, so `wifienabled 0` disables WiFi without taking the
-  // mesh down with it.
-  if (!gSettings.wifiEnabled) {
-    WARN_SYSTEMF("[WiFi] refused: WiFi is disabled - run 'wifienabled 1' first");
-    return false;
-  }
   if (wifiInitialized) {
     DEBUG_WIFIF("[WiFi] Already initialized");
     return true;
@@ -3464,7 +3442,7 @@ void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin) {
     // The attempt ended in a commanded disconnect, so the driver will not
     // retry. Hand it to the rehunt (first hunt 60 s from now, then the
     // backoff), as for a dropped link. Every board with wifiautoreconnect on.
-    if (savedCount > 0 && gSettings.wifiEnabled && gSettings.wifiAutoReconnect) {
+    if (savedCount > 0 && gSettings.wifiAutoReconnect) {
       wifiRehuntNoteConnectFailed();
     }
     // Once-per-boot latch: setupWifi can also run via first-time setup.
@@ -3489,7 +3467,6 @@ void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin) {
 static const SettingEntry wifiSettingsEntries[] = {
   // Keys and section owned by hw1wifijson (System_WiFiNetworks.h); the backup
   // restore forces these three on by the same names.
-  { hw1wifijson::kEnabled,       SETTING_BOOL,   &gSettings.wifiEnabled,       true, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "wifienabled" },
   { hw1wifijson::kAutoStart,     SETTING_BOOL,   &gSettings.wifiAutoStart,     true, 0, nullptr, 0, 1, "Connect at boot", nullptr, false, nullptr, "wifiautostart" },
   { hw1wifijson::kAutoReconnect, SETTING_BOOL,   &gSettings.wifiAutoReconnect, true, 0, nullptr, 0, 1, "Auto-reconnect after drop", nullptr, false, nullptr, "wifiautoreconnect" },
   // The legacy single-network "ssid"/"password" rows are gone (removed
@@ -3525,7 +3502,6 @@ extern const SettingsModule wifiSettingsModule = {
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry httpSettingsEntries[] = {
-  { "httpEnabled", SETTING_BOOL, &gSettings.httpEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "httpenabled" },
   { "httpAutoStart", SETTING_BOOL, &gSettings.httpAutoStart, true, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "httpautostart" },
 #if ENABLE_HTTPS
   { "httpsEnabled", SETTING_BOOL, &gSettings.httpsEnabled, false, 0, nullptr, 0, 1, "Enable HTTPS (requires certs + reboot)", nullptr, false, nullptr, "httpsenabled" },

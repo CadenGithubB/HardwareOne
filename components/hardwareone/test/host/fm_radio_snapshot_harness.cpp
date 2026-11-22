@@ -269,8 +269,8 @@ static void commandTests() {
   assert(broadcasts==std::vector<std::string>{"Volume set to 9 (will apply when radio starts)"});
   assert(radio.volumeCalls==0 && banners.empty() && events.empty());
   reset(); assert(std::string(cmd_fmradio_mute(""))=="OK" && DATA.muted && radio.muted);
-  assert(std::string(cmd_fmradio_unmute(""))=="OK" && !DATA.muted && !radio.muted);
-  afterBus=[] { assert(DATA.muted && radio.muted); assert(std::string(cmd_fmradio_unmute(""))=="OK"); };
+  assert(std::string(cmd_fmradio_mute("off"))=="OK" && !DATA.muted && !radio.muted);
+  afterBus=[] { assert(DATA.muted && radio.muted); assert(std::string(cmd_fmradio_mute("off"))=="OK"); };
   assert(std::string(cmd_fmradio_mute(""))=="OK" && !DATA.muted && !radio.muted);
   // A command ordered after polling must not be overwritten when the old poll returns.
   reset(); setSeek(true,true,100); nowMs=500;
@@ -303,15 +303,14 @@ static void invalidCommandTests() {
   }
   for (const char* input : {"sideways", "up down", "down 1"}) rejectedCommand(cmd_fmradio_seek,input);
   for (const char* input : {"moot", "of", "on off", "2", "-1"}) rejectedCommand(cmd_fmradio_mute,input);
-  for (const char* input : {"on", "off", "garbage"}) rejectedCommand(cmd_fmradio_unmute,input);
 }
 static void blockedCommandTests() {
   const std::vector<std::pair<Command,const char*>> commands = {
     {cmd_fmradio_tune,"99.5"}, {cmd_fmradio_volume,"12"}, {cmd_fmradio_mute,""},
-    {cmd_fmradio_mute,"off"}, {cmd_fmradio_unmute,""}, {cmd_fmradio_seek,"up"}
+    {cmd_fmradio_mute,"off"}, {cmd_fmradio_seek,"up"}
   };
   for (const auto& [command,input] : commands) {
-    reset(); busAdmit=false; DATA.dataValid=true; DATA.muted=command==cmd_fmradio_unmute;
+    reset(); busAdmit=false; DATA.dataValid=true; DATA.muted=command==cmd_fmradio_mute && std::string(input)=="off";
     strcpy(DATA.stationName,"OLD"); strcpy(DATA.stationText,"Old song");
     const auto before=json();
     assert(std::string(command(input)).find("Error:")==0);
@@ -351,7 +350,7 @@ static void acceptedArgumentTests() {
     assert(radio.muteCalls==1 && radio.muted==muted && DATA.muted==muted);
     assert(broadcasts==std::vector<std::string>{muted ? "FM Radio mute command sent" : "FM Radio unmute command sent"});
   }
-  reset(); assert(std::string(cmd_fmradio_unmute("  "))=="OK" && radio.muteCalls==1 && !DATA.muted);
+  reset(); assert(std::string(cmd_fmradio_mute(" off "))=="OK" && radio.muteCalls==1 && !DATA.muted);
   assert(broadcasts==std::vector<std::string>{"FM Radio unmute command sent"});
   reset(); assert(std::string(cmd_fmradio_seek(""))=="OK" && radio.seekUpCalls==1);
 }

@@ -10,9 +10,9 @@ rows (OLED_SettingsEditor.cpp) and the Web menu's server confirm callbacks
 (OLED_Mode_Network.cpp). The OLED command executor, the global toast, the
 Automations rows and the radio/BLE/HTTP state are doubles.
 
-The cases check that a refused or failed command toasts its reply ("Admin
-required" for an admin denial, otherwise the reply's first line without its
-error token, "Failed" when empty) and that the caller's success text appears
+The cases check that a refused or failed command toasts its reply ("Needs
+an admin" / "Needs a super admin" for the privilege gates, otherwise the reply's
+first sentence without its error token, "Failed" when empty) and that the caller's success text appears
 only when the command succeeded. The Quick Settings rows submit without
 waiting: the executor double finishes each command only when a case says so,
 and the reply is delivered by the display-task poll (one request at a time, a

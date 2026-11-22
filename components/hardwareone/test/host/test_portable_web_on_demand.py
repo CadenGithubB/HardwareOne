@@ -13,8 +13,8 @@ unnoticed:
   plain HTTP);
 - `openwifi`, `openhttp` and their counterparts are registered commands, the
   two web-server rows inside the HTTP server's own compile gate only;
-- `openhttp` refuses for three reasons only: the web server subsystem is off
-  (`httpenabled`), Wi-Fi is not joined, or the server already runs;
+- `openhttp` refuses for two reasons only: Wi-Fi is not joined, or the server
+  already runs (no saved setting refuses it since 2026-11-21);
 - the settings those depend on default to on in both places a default lives
   (the struct initialiser and the settings row, which is what a boot applies);
 - nothing this batch's defaults changed (the C6 console mirror, the phrase
@@ -22,8 +22,8 @@ unnoticed:
   defaults) is read by those two handlers.
 
 The command sequence with `httpautostart 0` saved, written down from
-HardwareOne.cpp (boot starts the server only with httpEnabled and
-httpAutoStart both on) and System_WiFi.cpp (cmd_httpstart):
+HardwareOne.cpp (boot starts the server only with httpAutoStart on) and
+System_WiFi.cpp (cmd_httpstart):
 
     wifiadd <ssid> <pass>      once, when no network is saved
     openwifi                   then `wifistatus` until it reads connected
@@ -103,25 +103,25 @@ def check_commands() -> None:
     require(before_wifi.count("endif") == len(before_wifi) - before_wifi.count("endif"),
             "openwifi is in no conditional block of the table")
 
-    # openhttp: three refusals, in this order, then the start.
+    # openhttp: two refusals, in this order, then the start.
     markers = [m.start() for m in re.finditer(r"^const char\* cmd_httpstart\(const String& argsInput\) \{$", wifi, re.M)]
     require(len(markers) >= 1, "cmd_httpstart is defined")
     body = strip_comments(extract_block(wifi[markers[0]:], "const char* cmd_httpstart(const String& argsInput)"))
     refusals = re.findall(r'if \(([^{}]+)\) \{', body)
-    require([r.strip() for r in refusals[:3]] == ["!gSettings.httpEnabled", "!WiFi.isConnected()", "server != NULL"],
-            f"openhttp refuses only for: subsystem off, Wi-Fi not joined, already running ({refusals})")
+    require([r.strip() for r in refusals[:2]] == ["!WiFi.isConnected()", "server != NULL"],
+            f"openhttp refuses only for: Wi-Fi not joined, already running ({refusals})")
     require(body.index("server != NULL") < body.index("startHttpServer();"), "then it starts the server")
-    require("run 'httpenabled 1' first" in body and "'openwifi'" in body, "each refusal says what to run")
+    require("'openwifi'" in body and "'closehttp'" in body, "each refusal says what to run")
     # Every command a refusal or hint names exists under that name (the sequence in this file's
     # header uses the same ones).
     named = set(re.findall(r"'(\w+)(?: \d)?'", body))
-    require({"httpenabled", "openwifi", "closehttp"} <= named, f"the refusals name their commands ({sorted(named)})")
+    require({"openwifi", "closehttp"} <= named, f"the refusals name their commands ({sorted(named)})")
     editor = strip_comments((COMPONENT / "System_Settings.cpp").read_text())
     for name in sorted(named):
         require(name in rows or re.search(r'\{ "' + name + r'",', editor) is not None,
                 f"{name}, named by openhttp's replies, is a registered command")
     settings_read = set(re.findall(r"gSettings\.(\w+)", body))
-    require(settings_read == {"httpEnabled"}, f"openhttp reads one setting, httpEnabled ({sorted(settings_read)})")
+    require(not settings_read, f"openhttp reads no saved setting ({sorted(settings_read)})")
     connect = strip_comments(extract_block(wifi, "const char* cmd_wificonnect(const String&"))
     # Nothing this batch gave a new default is consulted by either command.
     for changed in ("c6ConsoleMirror", "sttPhraseLevel", "c6OutageCount", "c6RebootCount", "c6LastFaultEpochSec",
@@ -129,24 +129,23 @@ def check_commands() -> None:
         require(changed not in body and changed not in connect,
                 f"{changed} does not decide whether openwifi or openhttp run")
 
-    # Boot starts the server only when both settings are on; with httpautostart 0 the commands are the way.
+    # Boot starts the server only with httpautostart on; with it off the commands are the way.
     main = strip_comments((COMPONENT / "HardwareOne.cpp").read_text())
-    require(re.search(r"sBootNetServices\.http = gSettings\.httpEnabled && "
+    require(re.search(r"sBootNetServices\.http = "
                       r"ramFlushResolve\(RF_HTTP, gSettings\.httpAutoStart\);", main) is not None,
-            "boot auto-starts the server only with httpEnabled and httpAutoStart")
+            "boot auto-starts the server only with httpAutoStart")
 
 
 def check_defaults() -> None:
     settings_h = (COMPONENT / "System_Settings.h").read_text()
     wifi = strip_comments((COMPONENT / "System_WiFi.cpp").read_text())
-    for field in ("wifiEnabled", "wifiAutoStart", "httpEnabled", "httpAutoStart"):
+    for field in ("wifiAutoStart", "httpAutoStart"):
         require(re.search(r"\b" + field + r"\(true\)", settings_h) is not None,
                 f"the struct default of {field} is on")
         row = re.search(r"\{ [^{}\n]*SETTING_BOOL,\s*&gSettings\." + field + r",\s*(\w+),", wifi)
         require(row is not None, f"{field} has a settings row in System_WiFi.cpp")
         require(row.group(1) in ("true", "1"), f"the row default of {field} is on (it is what a boot applies)")
-    for key, command in (("wifiEnabled", "wifienabled"), ("httpEnabled", "httpenabled"),
-                         ("httpAutoStart", "httpautostart")):
+    for key, command in (("wifiAutoStart", "wifiautostart"), ("httpAutoStart", "httpautostart")):
         require(re.search(r"&gSettings\." + key + r",[^\n]*\"" + command + r"\" \}", wifi) is not None,
                 f"{key} is switched with {command}")
 
@@ -159,7 +158,7 @@ def main() -> None:
     note = check_build()
     check_commands()
     check_defaults()
-    print(f"portable web on demand: {note}; openwifi/openhttp registered, three refusals only, "
+    print(f"portable web on demand: {note}; openwifi/openhttp registered, two refusals only, "
           "Wi-Fi and web server defaults on")
 
 

@@ -16,8 +16,12 @@ def main():
     harness='#include \"OLED_MessageText.h\"\n'+harness
     harness=harness.replace('// INSERT_PRODUCTION',source)
     harness=harness.replace('// INSERT_POLICY',(COMPONENT/'System_TranscriptionUIPolicy.h').read_text().replace('#pragma once',''))
-    bridge=extract_block((COMPONENT/'OLED_Utils.cpp').read_text(),'bool submitOledCommandForSession(')
+    utils=(COMPONENT/'OLED_Utils.cpp').read_text()
+    bridge=extract_block(utils,'bool submitOledCommandForSession(')
+    # The shared refusal text every OLED screen shows (oledCommandReplyText).
+    bridge+='\n'+extract_block(utils,'void oledCommandReplyText(')
     harness=harness.replace('// INSERT_BRIDGE',bridge)
+    harness='#include "System_CommandReply.h"\n'+harness
     with tempfile.TemporaryDirectory(prefix='hw1-oled-transcription-') as tmp:
         unit=Path(tmp)/'test.cpp';exe=Path(tmp)/'test';unit.write_text(harness)
         cmd=['clang++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-const-variable','-I',str(COMPONENT.parent/'hardwareone_libs/ArduinoJson/src'),'-I',str(COMPONENT),'-I',str(HERE),str(unit),'-o',str(exe)]

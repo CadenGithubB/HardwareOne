@@ -419,7 +419,6 @@ static void transitions() {
 
   // The refusals the stack owns now reach the user with the stack's reason.
   const char* stackReasons[] = {
-      "Bluetooth is disabled - run 'bleenabled 1' first",
       "a prior Bluetooth teardown was incomplete; reboot required",
       "the app console server owns the Bluetooth host; run 'closeconsole' first",
       "a ring connection is still active; retry shortly",

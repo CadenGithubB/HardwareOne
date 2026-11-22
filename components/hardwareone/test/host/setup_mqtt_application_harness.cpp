@@ -37,13 +37,17 @@ volatile bool gInHelpRender = false;  // System_CLI.cpp; the wizard marks its re
 struct SettingsBoundary {
   String mqttHost, mqttUser, mqttPassword;
   int mqttPort;
-  bool mqttAutoStart, mqttEnabled;
+  bool mqttAutoStart;
 } gSettings;
 static SetupWizardResult draftValues;
 static std::vector<SetupWizardResult> staged;
 static bool draftAutoStart, stageSucceeds;
 static const SetupWizardResult& getWizardDraftValues() { return draftValues; }
-static void wizardSetMqttAutoStart(bool enabled) { draftAutoStart = enabled; }
+// The MQTT row's draft switch is its start-at-boot setting (the feature row).
+static void wizardSetFeatureEnabled(const char* featureId, bool enabled) {
+  assert(std::strcmp(featureId, "mqtt") == 0);
+  draftAutoStart = enabled;
+}
 static bool wizardStageMqttSettings(const SetupWizardResult& value) {
   staged.push_back(value); return stageSucceeds;
 }
@@ -65,7 +69,7 @@ struct SerialBoundary {
 static String readInput() {
   assert(gSettings.mqttHost == "old.host" && gSettings.mqttPort == 8883);
   assert(gSettings.mqttUser == "old-user" && gSettings.mqttPassword == "old-secret");
-  assert(gSettings.mqttAutoStart && gSettings.mqttEnabled && saveCalls == 0 && startCalls == 0);
+  assert(gSettings.mqttAutoStart && saveCalls == 0 && startCalls == 0);
   if (cancelRequested) return "";
   assert(inputIndex < inputs.size());
   if (static_cast<int>(inputIndex) == cancelInput) cancelRequested = true;
@@ -118,7 +122,7 @@ static bool wizardIsGroupPage(SetupWizardPage page) {
 // INSERT_PRODUCTION_FUNCTIONS
 
 static void reset() {
-  gSettings = {"old.host", "old-user", "old-secret", 8883, true, true};
+  gSettings = {"old.host", "old-user", "old-secret", 8883, true};
   inputs.clear(); inputIndex = 0; cancelInput = -1; introChoice = 1;
   previousCalls = nextCalls = clearCalls = saveCalls = startCalls = 0;
   cancelRequested = false; hasNextPage = true; currentPage = WIZARD_PAGE_MQTT;
@@ -131,7 +135,7 @@ static void broker(const char* host = "old.host", int port = 8883,
                    const char* user = "old-user", const char* password = "old-secret") {
   assert(gSettings.mqttHost == host && gSettings.mqttPort == port);
   assert(gSettings.mqttUser == user && gSettings.mqttPassword == password);
-  assert(gSettings.mqttEnabled && saveCalls == 0 && startCalls == 0);
+  assert(gSettings.mqttAutoStart && saveCalls == 0 && startCalls == 0);
 }
 static CliModeInputResult cli(const char* line) {
   char output[128] = {};

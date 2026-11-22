@@ -2671,9 +2671,6 @@ const char* cmd_micstart(const String& argsInput) {
       return "Error: G2 EvenAI UART authority changed before microphone start.";
     }
   }
-  if (!gSettings.micEnabled) {
-    return "Error: Microphone is disabled - run 'micenabled 1' first";
-  }
   // initMicrophone() answers true for a running microphone (other owners rely
   // on that); the command reports it as the refusal it is.
   if (gMicRunning) {
@@ -2827,6 +2824,37 @@ static void micStopResultMarkReported(const MicRecordingResult& r) {
   sMicStopReportedValid = true;
 }
 
+// The account whose micrecord start/startid started the running recording;
+// empty when none did (another subsystem started it, or it was stopped). An
+// account below admin may stop only its own recording (owner decision 1.0).
+static String sMicRecordStarter;
+// Which recording that was: its recordingStartTime. A recording started any
+// other way (voice, glasses, CM5 startid by another account) has another
+// start time, so its stop is an admin's.
+static uint32_t sMicRecordStartedAt = 0;
+
+static bool micCallerMayStopRecording() {
+  if (currentExecIsAdmin()) return true;
+  const String user = currentExecUser();
+  return user.length() > 0 && user == sMicRecordStarter &&
+         recordingStartTime == sMicRecordStartedAt;
+}
+
+// Why an account below admin may not stop the running recording: it names the
+// account that started it, or says it was not started by an account's command.
+static const char* micStopRefusal() {
+  EXT_RAM_BSS_ATTR static char text[160];
+  if (sMicRecordStarter.length() && recordingStartTime == sMicRecordStartedAt) {
+    snprintf(text, sizeof(text),
+             "Error: This recording belongs to %.40s. Only %.40s or an administrator can stop it.",
+             sMicRecordStarter.c_str(), sMicRecordStarter.c_str());
+  } else {
+    snprintf(text, sizeof(text),
+             "Error: The device started this recording; only an admin can stop it.");
+  }
+  return text;
+}
+
 const char* cmd_micrecord(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
@@ -2913,6 +2941,8 @@ const char* cmd_micrecord(const String& argsInput) {
                                 AUDIO_SRC_NONE, &why)) {
       return why ? why : kRecStartBusy;
     }
+    sMicRecordStarter = currentExecUser();
+    sMicRecordStartedAt = recordingStartTime;
     char ownerHex[17];
     micRecordingOwnerHex(owner, ownerHex);
     snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
@@ -3007,6 +3037,8 @@ const char* cmd_micrecord(const String& argsInput) {
     }
     const char* why = nullptr;
     if (startRecording(silenceMs, trim, &why)) {
+      sMicRecordStarter = currentExecUser();
+      sMicRecordStartedAt = recordingStartTime;
       return silenceMs ? (trim ? "Recording started (auto-stop on silence, trimmed)"
                               : "Recording started (auto-stop on silence)")
                        : "Recording started";
@@ -3014,6 +3046,7 @@ const char* cmd_micrecord(const String& argsInput) {
     return why ? why : kRecStartBusy;
   } else if (arg == "0" || arg.equalsIgnoreCase("stop")) {
     bool wasRecording = micRecordingBusy();
+    if (wasRecording && !micCallerMayStopRecording()) return micStopRefusal();
     if (!stopRecording()) {
       snprintf(gMicCmdBuffer, sizeof(gMicCmdBuffer),
                "Error: Recording still %s; WAV is not fetchable",
@@ -3543,8 +3576,8 @@ const char* cmd_micsource(const String& argsInput) {
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry micCommands[] = {
   { "micread", "Read microphone sensor status.", false, cmd_mic, "Usage: micread [json]" },
-  { "openmic", "Start microphone sensor.", false, cmd_micstart },
-  { "closemic", "Stop microphone sensor.", false, cmd_micstop },
+  { "openmic", "Start microphone sensor.", true, cmd_micstart },
+  { "closemic", "Stop microphone sensor.", true, cmd_micstop },
   { "miclevel", "Get current audio level.", false, cmd_miclevel, "Usage: miclevel [json]" },
   { "micviz", "Real-time audio level visualizer.", false, cmd_micviz, "Usage: micviz (press any key to stop)" },
   { "micrecord", "Start/stop recording to WAV file (bare = show recording status).", false, cmd_micrecord,
@@ -3553,7 +3586,7 @@ const CommandEntry micCommands[] = {
     "       micrecord statusid <16hex>\n"
     "       micrecord stopid <16hex> [discard]" },
   { "miclist", "List saved recordings.", false, cmd_miclist, "Usage: miclist [json]" },
-  { "micdelete", "Delete recording(s).", true, cmd_micdelete, "Usage: micdelete \"<filename>\" | micdelete all" },
+  { "micdelete", "Delete recording(s).", true, cmd_micdelete, "Usage: micdelete \"<filename>\" | micdelete all", /*requiresSuperAdmin=*/true },
   { "micdeleteid", "Delete one owner-correlated recording.", true, cmd_micdeleteid,
     "Usage: micdeleteid <16hex> \"<filename>\"" },
   // Lives in System_UartLink.cpp (it owns the port + frame writer); scoped to
@@ -3561,12 +3594,12 @@ const CommandEntry micCommands[] = {
   { "voicefetch", "Stream a recording to the UART host as binary frames (CM5 bulk pull).", false, cmd_voicefetch,
     "Usage: voicefetch \"<path>\" - path must be under /recordings or /sd/recordings.\n"
     "Sends META+AUDIO frames on the UART link, then replies with byte/frame totals and crc16." },
-  { "micsamplerate", "Get/set sample rate.", false, cmd_micsamplerate, "Usage: micsamplerate [8000-48000]" },
-  { "micgain", "Get/set microphone gain.", false, cmd_micgain, "Usage: micgain [0-100]" },
-  { "micbitdepth", "Get/set bit depth.", false, cmd_micbitdepth, "Usage: micbitdepth [16|32]" },
+  { "micsamplerate", "Get/set sample rate.", true, cmd_micsamplerate, "Usage: micsamplerate [8000-48000]" },
+  { "micgain", "Get/set microphone gain.", true, cmd_micgain, "Usage: micgain [0-100]" },
+  { "micbitdepth", "Get/set bit depth.", true, cmd_micbitdepth, "Usage: micbitdepth [16|32]" },
   { "pdmamplify", "Get/set the onboard PDM hardware gain multiplier (applies at the next capture start).", true, cmd_pdmamplify, "Usage: pdmamplify [1-15]" },
   { "pdmhpf", "Get/set the onboard PDM high-pass cut-off in Hz, 0 = off (applies at the next capture start).", true, cmd_pdmhpf, "Usage: pdmhpf [0|23-185]" },
-  { "micsource", "Get/set mic source: onboard microphone or G2 glasses.", false, cmd_micsource, "Usage: micsource [auto|onboard|pdm|g2]" },
+  { "micsource", "Get/set mic source: onboard microphone or G2 glasses.", true, cmd_micsource, "Usage: micsource [auto|onboard|pdm|g2]" },
 
   // Auto-start
   { "micautostart", "Enable/disable microphone auto-start after boot [on|off]", true, cmd_micautostart, "Usage: micautostart [on|off]" },
@@ -3577,7 +3610,6 @@ const size_t micCommandsCount = sizeof(micCommands) / sizeof(micCommands[0]);
 // Settings module registration
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry micSettingEntries[] = {
-  { "micEnabled", SETTING_BOOL, &gSettings.micEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "micenabled" },
   { "microphoneAutoStart", SETTING_BOOL, &gSettings.micAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "micautostart" },
   // Source preference {auto,pdm,g2}. Resolved lazily against availability.
   { "micSource", SETTING_STRING, &gSettings.micSource, 0, 0, "auto", 0, 0, "Mic source", "auto|Auto,pdm|Onboard microphone,g2|G2 glasses", false, nullptr, "micsource" },

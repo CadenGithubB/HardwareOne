@@ -1021,6 +1021,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
         console.error('[ESP-NOW] Error toggling backup master:', error);
         var cb = hw.$('backup-master-enabled');
         if (cb) cb.checked = !enabled;
+        hw.showCliError(error && error.message);
       });
     };
     
@@ -1111,10 +1112,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
             hw.$('setup-device-name').focus();
           } else {
             // Name is set, proceed with init
-            // Explicit user init: flip the persisted enable switch first —
-            // openespnow refuses while espnowenabled=0 (the first-run default).
-            return cliText('espnowenabled 1')
-            .then(function(){ return cliText('openespnow'); })
+            return cliText('openespnow')
             .then(text => {
               hw.$('espnow-status-data').textContent = text;
               refreshStatus();
@@ -1147,11 +1145,11 @@ inline void streamEspNowInner(httpd_req_t* req) {
             if (!modeObj || typeof modeObj.mode !== 'string') throw new Error('could not read the current mode');
             var isMesh = modeObj.mode === 'mesh';
             var next = isMesh ? 'direct' : 'mesh';
-            // Update global flag immediately based on what we're switching TO
-            window.espnowIsMesh = (next === 'mesh');
-            return hw.postFormText('/api/cli', { cmd: 'espnowmode ' + next });
+            // The flag follows the mode only once the device took the change.
+            return hw.postFormText('/api/cli', { cmd: 'espnowmode ' + next })
+              .then(()=>{ window.espnowIsMesh = (next === 'mesh'); });
           })
-          .then(()=>{ try { /* optional toast */ } catch(_) {}; refreshStatus(); })
+          .then(()=>{ refreshStatus(); })
           .catch(e=>{ try { alert('Error: ' + e.message); } catch(_) {}; });
       });
       // Build the optional ' <meshLabel>' suffix for pair commands. Only
@@ -1182,6 +1180,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
         })
         .catch(error => {
           console.error('[ESP-NOW] Pair error:', error);
+          hw.showCliError(error && error.message);
           // A refused pair can leave the device paired until restart: show it.
           listDevices();
         });
@@ -1203,6 +1202,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
         })
         .catch(error => {
           console.error('[ESP-NOW] Secure pair error:', error);
+          hw.showCliError(error && error.message);
           // A refused pair can leave the device paired until restart: show it.
           listDevices();
         });
@@ -1240,27 +1240,32 @@ inline void streamEspNowInner(httpd_req_t* req) {
       _on('btn-set-friendly','click', function() {
         const val = hw.$('friendly-name').value;
         hw.postFormText('/api/cli', { cmd: 'espnowfriendlyname "'+val+'"' })
-          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); })
+          .catch(e=>{ hw.showCliError(e && e.message); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-room','click', function() {
         const val = hw.$('room-name').value;
         hw.postFormText('/api/cli', { cmd: 'espnowroom "'+val+'"' })
-          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); })
+          .catch(e=>{ hw.showCliError(e && e.message); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-zone','click', function() {
         const val = hw.$('zone-name').value;
         hw.postFormText('/api/cli', { cmd: 'espnowzone "'+val+'"' })
-          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); })
+          .catch(e=>{ hw.showCliError(e && e.message); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-tags','click', function() {
         const val = hw.$('tags-input').value;
         hw.postFormText('/api/cli', { cmd: 'espnowtags "'+val+'"' })
-          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); })
+          .catch(e=>{ hw.showCliError(e && e.message); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('stationary-checkbox','change', function() {
         const checked = hw.$('stationary-checkbox').checked;
         hw.postFormText('/api/cli', { cmd: 'espnowstationary '+(checked?'on':'off') })
-          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
+          .then(()=>{ if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); })
+          .catch(e=>{ hw.showCliError(e && e.message); if(typeof window.loadLocalDeviceMetadata==='function')window.loadLocalDeviceMetadata(); });
       });
       _on('btn-set-channel','click', function() {
         var sel = hw.$('channel-select');
@@ -1290,14 +1295,16 @@ inline void streamEspNowInner(httpd_req_t* req) {
             errorDiv.style.display = 'block';
           } else {
             // Success! Now initialize ESP-NOW
-            return cliText('espnowenabled 1')
-            .then(function(){ return cliText('openespnow'); })
+            return cliText('openespnow')
             .then(initText => {
               if (initText.indexOf('ERROR') === 0 || initText.indexOf('Error') === 0) {
                 errorDiv.textContent = initText;
                 errorDiv.style.display = 'block';
                 return;
               }
+              // Setting the device up keeps ESP-NOW on after a restart, as the
+              // OLED setup does (espnowautostart is its only saved switch).
+              cliText('espnowautostart 1');
               hw.$('espnow-status-data').textContent = 'Device name set to: ' + deviceName + '\n\n' + initText;
               hw.$('setup-modal').classList.remove('show');
               hw.$('setup-device-name').value = '';
@@ -1503,7 +1510,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
         var primaryAction = m.enabled
           ? '<button class="btn btn-mesh-actions" data-guest-hide data-slot="' + m.slot + '" data-label="' + label + '" style="font-size:.82em;padding:4px 10px">⋯</button>'
           : '<button class="btn btn-mesh-enable" data-guest-hide data-slot="' + m.slot + '" data-label="' + label + '" style="font-size:.82em;padding:4px 10px">Enable</button>' +
-            '<button class="btn btn-mesh-delete" data-guest-hide data-slot="' + m.slot + '" data-label="' + label + '" title="Free this slot. Devices paired in this mesh must be unpaired first." style="font-size:.82em;padding:4px 10px">Delete</button>';
+            '<button class="btn btn-mesh-delete" data-guest-hide data-slot="' + m.slot + '" data-label="' + label + '"' + ((typeof window.__hwRank === 'number' && window.__hwRank < ((window.__hwRoleRank || {superadmin: 3}).superadmin)) ? ' disabled title="Super admin only"' : ' title="Free this slot. Devices paired in this mesh must be unpaired first."') + ' style="font-size:.82em;padding:4px 10px">Delete</button>';
 
         html += '<div class="mesh-row" data-slot="' + m.slot + '" data-label="' + label + '" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:8px;background:var(--crumb-bg);border:1px solid var(--border);flex-wrap:wrap">' +
           '<span style="font-weight:600;color:var(--panel-fg);min-width:80px">' + label + '</span>' +

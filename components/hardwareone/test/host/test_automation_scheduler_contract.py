@@ -303,19 +303,20 @@ assert delete.index(store_change) < delete.index(
     "automationUptimeForget(id);")
 assert "json.substring(" not in delete
 
-# The main loop ticks unconditionally; the owner checks permission itself and
-# stops when another writer revoked it (automationSchedulerRunning stays true
-# to the permission). The permission command goes through the owner transition.
-assert "if (gSettings.automationEnabled) {\n    automationTick();" not in main
+# The main loop ticks unconditionally and the owner reads no saved setting:
+# only its own start/stop decide whether it runs (the automations "allowed"
+# switch was removed 2026-11-21). `automation system enable|disable` goes
+# through the owner transition and saves nothing.
+assert "automationEnabled" not in main and "automationEnabled" not in automation
 owner_tick = function_body(automation, "void automationTick() {")
-assert owner_tick.index("if (!gSettings.automationEnabled)") < owner_tick.index("AutomationStateGuard guard;")
+assert "gSettings" not in owner_tick
 # A pass is claimed only after the filesystem try-lock: a busy lock leaves the
 # refresh flag, the pending events and the cache as they were.
 assert owner_tick.index("if (!automationPassFilesystemFree())") < owner_tick.index(
     "sAutomationRefreshPending.exchange(false);") < owner_tick.index("schedulerTickMinute();")
-assert "stopAutomationScheduler();" in owner_tick
 system = function_body(automation, "const char* automationSetSystemEnabled(bool enable) {")
 assert "startAutomationScheduler()" in system and "stopAutomationScheduler();" in system
+assert "setSetting" not in system
 # `features` only lists since 2026-11-20, so the owner transition has one writer
 # left (`automation system enable|disable`); the registry must not call it.
 features = (COMPONENT / "System_FeatureRegistry.cpp").read_text(encoding="utf-8")

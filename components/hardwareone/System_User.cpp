@@ -4873,11 +4873,11 @@ const CommandEntry userSystemCommands[] = {
   { "userapprove", "Approve pending request: <username>", true, cmd_user_approve, "Usage: userapprove <username>" },
   { "userdeny", "Deny pending request: <username>", true, cmd_user_deny, "Usage: userdeny <username>" },
   { "userpromote", "Promote a user: <username> [user|admin|superadmin]", true, cmd_user_promote, "Usage: userpromote <username> [user|admin|superadmin]  (default admin; granting superadmin requires a super-admin caller)" },
-  { "userdemote", "Lower a user's role: <username> [admin|user|guest]", true, cmd_user_demote, "Usage: userdemote <username> [admin|user|guest]  (default user; demoting a super-admin requires a super-admin caller)" },
-  { "userdelete", "Delete user: <username>", true, cmd_user_delete, "Usage: userdelete <username>" },
+  { "userdemote", "Lower a user's role: <username> [admin|user|guest]", true, cmd_user_demote, "Usage: userdemote <username> [admin|user|guest]  (super admin; default user)", /*requiresSuperAdmin=*/true },
+  { "userdelete", "Delete user: <username>", true, cmd_user_delete, "Usage: userdelete <username>", /*requiresSuperAdmin=*/true },
   { "userchangepassword", "Change own password: <currentPass> <newPass> <confirmPass>", false, cmd_user_changepassword, "Usage: userchangepassword <currentPassword> <newPassword> <confirmPassword>" },
   { "userresetpassword", "Reset user password: <username> <newPassword> [0|1]", true, cmd_user_resetpassword,
-    "Usage: userresetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login" },
+    "Usage: userresetpassword <username> <newPassword> [0|1]\nOptional: 1 = require password change on next login", /*requiresSuperAdmin=*/true },
   { "useradd", "Create user: <username> <password> [0|1] [role]", true, cmd_user_add,
     "Usage: useradd <username> <password> [0|1] [guest|user|admin|superadmin]\n"
     "  0|1:  1 = require a new password on next login (default 0)\n"
@@ -4899,7 +4899,7 @@ const CommandEntry userSystemCommands[] = {
   { "ban",      "Permanently ban an IP: <ip> [reason]",      true, cmd_ban,      "Usage: ban <ip> [reason]\nBlocks all access from the IP until manually unbanned." },
   { "unban",    "Remove an IP ban: <ip>",                    true, cmd_unban,    "Usage: unban <ip>" },
   { "banlist",  "List all banned IPs. (add 'json' for JSON output)",                      true, cmd_banlist },
-  { "banuser",  "Permanently ban a user account: <username> [reason]", true, cmd_banuser,  "Usage: banuser <username> [reason]\nPrevents the account from logging in until manually unbanned." },
+  { "banuser",  "Permanently ban a user account: <username> [reason]", true, cmd_banuser,  "Usage: banuser <username> [reason]\nPrevents the account from logging in until manually unbanned.", /*requiresSuperAdmin=*/true },
   { "unbanuser","Remove a user account ban: <username>",     true, cmd_unbanuser,"Usage: unbanuser <username>" }
 };
 

@@ -149,7 +149,6 @@ bool bleStackUp() {
       !isBleServerInitialized()) {
     return true;
   }
-  if (!gSettings.bleEnabled) return refuse("Bluetooth is disabled - run 'bleenabled 1' first");
   if (bleStackLifecycleFaulted() &&
       bleRoleTransitionState() != BleRoleTransition::RECOVERING) {
     return refuse("a prior Bluetooth teardown was incomplete; reboot required");

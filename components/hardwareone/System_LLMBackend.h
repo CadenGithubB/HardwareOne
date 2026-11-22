@@ -96,7 +96,7 @@ struct LlmModelDesc {
 // A source that is compiled in but unusable right now still contributes its
 // rows with available=false (e.g. the CM5 catalog is known but the presence
 // lease has gone stale), so a picker can show WHY a model is greyed out rather
-// than silently losing it. gSettings.llmEnabled=0 suppresses every row.
+// than silently losing it. No model anywhere means no rows.
 size_t llmEnumerateModels(LlmModelDesc* out, size_t cap);
 
 // Resolve one id back to its descriptor. THE single id→source resolver — every
@@ -139,8 +139,8 @@ void llmBackendUnload();
 // now. Returns whether a model is selected afterwards.
 bool llmBackendEnsureDefaultSelected();
 
-// Why llmBackendIsReady() is false, as one line for a person: "LLM disabled
-// (llmenabled 0)", "no model selected (llmload http:openclaw)", "busy: a
+// Why llmBackendIsReady() is false, as one line for a person: "no model
+// selected (llmload http:openclaw)", "busy: a
 // request is running", "HTTP agent disabled (llmhttpenabled)", the network
 // path ("relay off in the app", "phone link down, retrying in 12 s"), or the
 // source's own status error. "" (length 0) when ready.

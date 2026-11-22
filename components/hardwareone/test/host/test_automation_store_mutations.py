@@ -82,6 +82,10 @@ def unit(component: Path) -> str:
         definition(owner, "bool sanitizeAutomationsJson(String& jsonRef, AutomationSanitizeCounts* counts)"),
         definition(owner, "bool automationsSanitizeStore(AutomationSanitizeCounts* counts, bool* changedOut)"),
         definition(owner, "static const char* automationsReadErrorReply()"),
+        # The save-time owner role check: the refusal kinds and the branch
+        # splitter it shares with the audit redaction.
+        extract_block((COMPONENT / "System_Command.h").read_text(), "enum class CommandRoleRefusal") + ";",
+        extract_block(owner, "static int findAutomationKeywordOutsideQuotes("),
         # The add entry point of the store: its context and mutation.
         between(owner, "// automationMutateErrorReply and automationCallerMayChange are defined with",
                 "const char* cmd_automation_add(const String& argsInput) {"),

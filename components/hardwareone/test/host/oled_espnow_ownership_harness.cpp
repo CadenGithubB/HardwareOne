@@ -149,13 +149,20 @@ int main() {
   execOk = false;
   execReply = adminRefusal("espnowunpair");
   oledEspNowUnpairDevice();
-  expectRefusedUnpair("Admin required");
+  expectRefusedUnpair("Needs an admin");
+
+  // U2b: unpair is a super-admin command; an admin's refusal says so.
+  beginCase("U2b unpair super-admin refusal", ESPNOW_VIEW_DEVICE_CONFIG);
+  execOk = false;
+  execReply = "Error: Super-admin access required for command 'espnowunpair'.";
+  oledEspNowUnpairDevice();
+  expectRefusedUnpair("Needs a super admin");
 
   // U3: an "Error" reply with a true executor result is still a refusal.
   beginCase("U3 unpair unknown peer", ESPNOW_VIEW_DEVICE_CONFIG);
   execReply = "Error: Device 'AA:BB:CC:01:02:03' not found. Use 'espnowdevices' to see paired devices.";
   oledEspNowUnpairDevice();
-  expectRefusedUnpair(execReply.substr(7).c_str());
+  expectRefusedUnpair("Device 'AA:BB:CC:01:02:03' not found.");
 
   // U4: a replaced display session (false, empty reply) falls back to the generic toast.
   beginCase("U4 unpair replaced session", ESPNOW_VIEW_DEVICE_CONFIG);
@@ -180,7 +187,7 @@ int main() {
   sEspNow.initialized = false;
   execReply = "Error: ESP-NOW not initialized. Run 'openespnow' first.";
   oledEspNowUnpairDevice();
-  expectRefusedUnpair(execReply.substr(7).c_str());
+  expectRefusedUnpair("ESP-NOW not initialized. Run 'openespnow' first.");
 
   // P1: A on the closed discovery screen opens the window through the owner.
   beginCase("P1 discovery open accepted", ESPNOW_VIEW_PAIRING);
@@ -202,7 +209,7 @@ int main() {
   CHECK(commands.size() == 1 && commands[0] == "espnowpairmode 120",
         "A submits 'espnowpairmode 120' to the owner");
   CHECK(openCalls == 0, "a refused open never reaches espnowPairModeOpen");
-  CHECK(toasts.size() == 1 && toasts[0] == "Admin required", "a refused open toasts 'Admin required'");
+  CHECK(toasts.size() == 1 && toasts[0] == "Needs an admin", "a refused open toasts 'Needs an admin'");
   CHECK(gOledEspNowState.currentView == ESPNOW_VIEW_PAIRING, "the screen stays on discovery");
 
   // P3: without a mesh passphrase the screen still submits nothing (screen hint).
@@ -233,7 +240,7 @@ int main() {
   CHECK(commands.size() == 1 && commands[0] == "espnowpairmode off",
         "B submits 'espnowpairmode off' to the owner");
   CHECK(closeCalls == 0, "a refused close never reaches espnowPairModeClose");
-  CHECK(toasts.size() == 1 && toasts[0] == "Admin required", "a refused close toasts 'Admin required'");
+  CHECK(toasts.size() == 1 && toasts[0] == "Needs an admin", "a refused close toasts 'Needs an admin'");
   CHECK(gOledEspNowState.currentView == ESPNOW_VIEW_MAIN_MENU, "B still leaves the discovery screen");
 
   // P6: candidates: A requests a pair (unchanged path); up/down clamp the selection.
@@ -273,7 +280,8 @@ int main() {
   CHECK(commands.size() == 1 && commands[0] == "espnowpairmode 120",
         "A submits 'espnowpairmode 120' to the owner");
   CHECK(openCalls == 0, "the OLED never calls espnowPairModeOpen itself");
-  CHECK(toasts.size() == 1 && toasts[0] == execReply.substr(7), "an owner error preserves the refusal");
+  CHECK(toasts.size() == 1 && toasts[0] == "Set a mesh passphrase first (espnowsetpassphrase).",
+        "an owner error shows the first sentence of the refusal");
 
   if (failures) {
     std::fprintf(stderr, "%d OLED ESP-NOW ownership check(s) failed\n", failures);

@@ -84,7 +84,10 @@ struct File {
 };
 namespace VFS {
  File openGuarded(const String& p,const char* mode,const AuthContext& ctx,bool create){
-  assert(locks&&ctx.user=="alice"&&create);++opens;
+  // The owner creates the file; the session's later appends run as the system
+  // confined to the owner's folder (accounts below admin never write over an
+  // existing file).
+  assert(locks&&create&&(mode[0]=='w'?ctx.user=="alice":ctx.user=="system"));++opens;
   if(denyOpen)return File();
   if(mode[0]=='w')files[p].clear();else if(!files.count(p))files[p]="";
   assert(p.compare(0,ctx.scope.size(),ctx.scope)==0);return File(p);

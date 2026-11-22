@@ -2228,7 +2228,127 @@ struct AutomationAddContext {
   String caller;
   bool callerIsAdmin;
   const char* reply;      // the refusal, when the mutator fails
+  const String* steps;    // the commands= text, checked against the owner's role
 };
+
+// Writes the refusal for one step an account may not run (commandRoleRefusalFor):
+// the owner, and on someone else's edit the editor too
+// and returns it; nullptr when the owner may run it. The text lives in a static
+// buffer: replies are read before the next command runs on cmd_exec.
+static const char* automationOwnerRefusalText(CommandRoleRefusal refusal,
+                                              const String& owner,
+                                              const String& row) {
+  EXT_RAM_BSS_ATTR static char text[224];
+  const char* who = owner.length() ? owner.c_str() : "(no owner)";
+  const char* name = row.length() ? row.c_str() : "this step";
+  switch (refusal) {
+    case CommandRoleRefusal::None:
+      return nullptr;
+    case CommandRoleRefusal::Guest:
+      snprintf(text, sizeof(text),
+               "Error: '%.40s' is a guest account, and guests run no commands. Not saved.",
+               who);
+      break;
+    case CommandRoleRefusal::Admin:
+      snprintf(text, sizeof(text),
+               "Error: '%.40s' needs an administrator, which '%.40s' is not. Remove the step. Not saved.",
+               name, who);
+      break;
+    case CommandRoleRefusal::SuperAdmin:
+      snprintf(text, sizeof(text),
+               "Error: '%.40s' needs a super admin, which '%.40s' is not. Remove the step. Not saved.",
+               name, who);
+      break;
+    case CommandRoleRefusal::RemoteAdmin:
+      snprintf(text, sizeof(text),
+               "Error: sending '%.40s' to the bonded device needs an administrator, which '%.40s' is not. Not saved.",
+               name, who);
+      break;
+    case CommandRoleRefusal::NestedRemote:
+      snprintf(text, sizeof(text), "Error: nested remote commands are not allowed. Not saved.");
+      break;
+    case CommandRoleRefusal::RoleUnavailable:
+      snprintf(text, sizeof(text),
+               "Error: the role of the owner '%.40s' could not be read. Not saved; try again.", who);
+      break;
+  }
+  return text;
+}
+
+// The keyword's position the way executeConditionalCommand finds it when the
+// step runs: the first " THEN " / " ELSE " (space or tab around it, any case)
+// at or after `from`, quotes not considered. The save check must split a step
+// exactly as the run does, or a branch it never checked would run. -1 if none;
+// *end is the index after the keyword.
+static int automationRunKeyword(const String& step, const char* keyword, int from, int* end) {
+  const int length = (int)step.length();
+  for (int i = from < 0 ? 0 : from; i + 5 < length; ++i) {
+    if (step[i] != ' ' && step[i] != '\t') continue;
+    int k = 0;
+    for (; k < 4; ++k) {
+      char c = step[i + 1 + k];
+      if (c >= 'a' && c <= 'z') c = (char)(c - ('a' - 'A'));
+      if (c != keyword[k]) break;
+    }
+    if (k == 4 && (step[i + 5] == ' ' || step[i + 5] == '\t')) {
+      if (end) *end = i + 5;
+      return i + 1;
+    }
+  }
+  return -1;
+}
+
+// One step, and the THEN/ELSE branches of a conditional step, split the way
+// the run splits them (automationRunKeyword), with bounded depth. PRINT is
+// not a command.
+static const char* automationOwnerStepRefusal(const String& owner, const String& stepIn,
+                                              unsigned depth) {
+  String step = stepIn;
+  step.trim();
+  if (step.length() == 0) return nullptr;
+  const bool conditional =
+      step.length() > 3 && (step[0] == 'I' || step[0] == 'i') &&
+      (step[1] == 'F' || step[1] == 'f') && isspace(static_cast<unsigned char>(step[2]));
+  if (conditional) {
+    if (depth >= 4) {
+      return "Error: conditional steps nest more than 4 deep. Not saved.";
+    }
+    int thenEnd = 0;
+    const int thenStart = automationRunKeyword(step, "THEN", 2, &thenEnd);
+    if (thenStart < 0) return nullptr;  // the chain syntax check reports it
+    int elseEnd = 0;
+    const int elseStart = automationRunKeyword(step, "ELSE", thenEnd, &elseEnd);
+    const String thenStep =
+        step.substring(thenEnd, elseStart >= 0 ? elseStart : (int)step.length());
+    if (const char* refusal = automationOwnerStepRefusal(owner, thenStep, depth + 1)) {
+      return refusal;
+    }
+    if (elseStart < 0) return nullptr;
+    return automationOwnerStepRefusal(owner, step.substring(elseEnd), depth + 1);
+  }
+  if (strncasecmp(step.c_str(), "PRINT ", 6) == 0) return nullptr;
+  String row;
+  const CommandRoleRefusal refusal = commandRoleRefusalFor(owner, step, &row);
+  return automationOwnerRefusalText(refusal, owner, row);
+}
+
+// Every `;`-separated step of an automation, checked against its owner's role
+// when it is saved (added or edited). Run time checks each step again as the
+// owner (authorizeCommand), so a role lowered later still stops the step.
+static const char* automationOwnerStepsRefusal(const String& owner, const String& steps) {
+  int start = 0;
+  const int len = steps.length();
+  for (int i = 0; i <= len; ++i) {
+    if (i == len || steps[i] == ';') {
+      if (const char* refusal =
+              automationOwnerStepRefusal(owner, steps.substring(start, i), 0)) {
+        return refusal;
+      }
+      start = i + 1;
+    }
+  }
+  return nullptr;
+}
 
 // Adds the built automation to the parsed store. With id=<n>: an entry that
 // holds that id is removed first, after the creator-or-admin check (an edit),
@@ -2239,6 +2359,10 @@ static AutomationsMutation automationAddMutation(JsonDocument& doc, JsonArray au
   (void)doc;
   (void)errorOut;
   AutomationAddContext* ctx = static_cast<AutomationAddContext*>(opaque);
+  // A new automation belongs to whoever adds it. An edit never changes the
+  // owner, also when an admin edits another account's automation.
+  String owner = ctx->caller;
+  bool editsStored = false;
   if (ctx->hasOverrideId) {
     size_t index = 0;
     JsonObject existing = findAutomationById(automations, ctx->id, &index);
@@ -2249,9 +2373,29 @@ static AutomationsMutation automationAddMutation(JsonDocument& doc, JsonArray au
         ctx->reply = "Error: You do not have permission to edit this automation. Only the creator or an admin can edit it.";
         return AutomationsMutation::Failed;
       }
-      automations.remove(index);
+      owner = existing["createdBy"] | "";
+      editsStored = true;
     }
-  } else {
+  }
+  // Every step against the owner's role, before anything is removed. An edit
+  // by someone else is checked against the editor's role too: an
+  // administrator editing a super admin's automation must not store a step
+  // only a super admin may run, which would then run as that super admin.
+  if (const char* refusal = automationOwnerStepsRefusal(owner, *ctx->steps)) {
+    ctx->reply = refusal;
+    return AutomationsMutation::Failed;
+  }
+  if (editsStored && owner != ctx->caller) {
+    if (const char* refusal = automationOwnerStepsRefusal(ctx->caller, *ctx->steps)) {
+      ctx->reply = refusal;
+      return AutomationsMutation::Failed;
+    }
+  }
+  if (editsStored) {
+    size_t index = 0;
+    findAutomationById(automations, ctx->id, &index);
+    automations.remove(index);
+  } else if (!ctx->hasOverrideId) {
     // From the uptime, kept inside 1..kAutomationIdMax: after 24.9 days of
     // uptime millis() itself is a number no reader of the id can take.
     unsigned long id = automationIdSeed((uint32_t)millis());
@@ -2268,6 +2412,7 @@ static AutomationsMutation automationAddMutation(JsonDocument& doc, JsonArray au
     return AutomationsMutation::Failed;
   }
   added["id"] = ctx->id;  // the member exists (first in the entry); only its value changes
+  added["createdBy"] = owner;
   return AutomationsMutation::Changed;
 }
 
@@ -2677,7 +2822,7 @@ const char* cmd_automation_add(const String& argsInput) {
   // refused file or a missing permission is still reported) and nothing is
   // written, not even the empty store of a first add.
   AutomationAddContext ctx{entryDoc.as<JsonObjectConst>(), hasOverrideId, (long)id,
-                           currentExecUser(), currentExecIsAdmin(), nullptr};
+                           currentExecUser(), currentExecIsAdmin(), nullptr, &combined};
   String error;
   const AutomationsMutateResult result = mutateAutomationsJson(
       "automation.add", automationAddMutation, &ctx,
@@ -3173,10 +3318,9 @@ const char* cmd_automation_trigger(const String& argsInput) {
   if (idStr.length() == 0) {
     return "Usage: automation trigger id=<id>";
   }
-  // The scheduler does not run while the master switch is off, so an armed
-  // timer would never fire.
-  if (!gSettings.automationEnabled) {
-    return "Error: Automations are switched off. Run 'automation system enable' first.";
+  // An armed timer fires only from a running scheduler.
+  if (!automationSchedulerRunning()) {
+    return "Error: The automation scheduler is not running. Run 'automation system enable' first.";
   }
 
   String json;
@@ -3318,7 +3462,7 @@ const char* cmd_automation(const String& argsInput) {
       en = action == "enable";
       if (const char* error = automationSetSystemEnabled(en)) return error;
     } else if (action == "status") {
-      en = gSettings.automationEnabled;
+      en = automationSchedulerRunning();
     } else {
       return "Error: invalid arguments — Usage: automation system <enable|disable|status> [json]";
     }
@@ -5246,8 +5390,8 @@ static bool automationEventTriggersMatch(const char* automationJson, const Syste
 
 // Scratch space for the event drain in schedulerTickMinute(). Sized off the
 // ring (48 x ~164 B), so it is too big to reserve at link time on behalf of the
-// many devices that never turn automations on — the only caller gates on
-// gSettings.automationEnabled, so a disabled device never runs a tick and
+// many devices that never turn automations on — the only caller runs from a
+// running scheduler (automationTick), so a device whose scheduler never starts
 // never pays for this.
 //
 // PSRAM-preferred: on PSRAM builds the ring itself already lives there, and
@@ -5262,9 +5406,9 @@ static bool automationEventTriggersMatch(const char* automationJson, const Syste
 // ps_calloc falls back to the ordinary heap when PSRAM is absent/exhausted or
 // globally bypassed, preserving event triggers on boards without usable PSRAM.
 //
-// Deliberately never freed. cmd_automation can flip automationEnabled from a
-// command task while the custom main task is mid-scan, so releasing it on
-// disable would hand a live reader a dangling pointer. Allocate-on-first-use-
+// Deliberately never freed. `automation system disable` can stop the scheduler
+// from a command task while the custom main task is mid-scan, so releasing it
+// on stop would hand a live reader a dangling pointer. Allocate-on-first-use-
 // and-keep buys back the memory for anyone who leaves automations off, with no
 // teardown race to get wrong.
 static SystemEvent* sEventBuf = nullptr;
@@ -5754,14 +5898,6 @@ static bool automationPassFilesystemFree() {
 // with the cache owner; other tasks merely notify, start or stop the scheduler.
 void automationTick() {
   static uint32_t lastAutoCheck = 0;
-  // Permission revoked by a writer other than the owner (settings page or
-  // import, `set`) stops the scheduler here, so automationSchedulerRunning()
-  // never reports a scheduler without permission. A later grant stays idle
-  // until the owner enables it (`automation system enable`).
-  if (!gSettings.automationEnabled) {
-    if (sAutomationRunning.load()) stopAutomationScheduler();
-    return;
-  }
   const uint32_t nowMs = millis();
   const time_t now = time(nullptr);
   {
@@ -5839,18 +5975,15 @@ void stopAutomationScheduler() {
   DEBUG_AUTOMATIONSF("[automations] Scheduler disabled");
 }
 
-// Owner transition for permission + runtime: `automation system enable|disable`
-// lands here (`features` only lists since 2026-11-20). A failed start withdraws
-// the permission again. Returns nullptr, or an error reply.
+// `automation system enable|disable` lands here (`features` only lists since
+// 2026-11-20): it starts or stops the scheduler now and saves nothing; whether
+// it runs from boot is automationautostart. Returns nullptr, or an error reply.
 const char* automationSetSystemEnabled(bool enable) {
   if (!enable) {
-    setSetting(gSettings.automationEnabled, false);
     stopAutomationScheduler();
     return nullptr;
   }
-  setSetting(gSettings.automationEnabled, true);
   if (!startAutomationScheduler()) {
-    setSetting(gSettings.automationEnabled, false);
     return "Error: failed to allocate automation scheduler cache";
   }
   return nullptr;
@@ -5885,7 +6018,7 @@ const CommandEntry automationCommands[] = {
   { "automationlist", "List all automations.", false, cmd_automation_list },
 
   // Utility commands
-  { "autolog", "Automation logging: autolog start <file> | stop | status.", false, cmd_autolog, "Usage: autolog start <filename> | autolog stop | autolog status" },
+  { "autolog", "Automation logging: autolog start <file> | stop | status.", true, cmd_autolog, "Usage: autolog start <filename> | autolog stop | autolog status" },
   { "validateconditions", "Validate conditional automation syntax: validateconditions IF temp>75 THEN ledcolor red.", true, cmd_validate_conditions },
   { "print", "Broadcast a message to all outputs: print <message>.", false, cmd_print },
   
@@ -5903,7 +6036,6 @@ const size_t automationCommandsCount = sizeof(automationCommands) / sizeof(autom
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry automationSettingEntries[] = {
-  { "automationsEnabled", SETTING_BOOL, &gSettings.automationEnabled, true, 0, nullptr, 0, 1, "Automations Enabled", nullptr, false, nullptr, nullptr },
   { "automationAutoStart", SETTING_BOOL, &gSettings.automationAutoStart, 1, 0, nullptr, 0, 1, "Auto-start at boot", nullptr, false, nullptr, "automationautostart" },
 
 };

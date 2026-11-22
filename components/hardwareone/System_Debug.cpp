@@ -2461,10 +2461,6 @@ const char* cmd_log(const String& argsInput) {
   
   // Handle 'start' subcommand
   if (subCmd == "start") {
-    // Master switch - see the matching gate in cmd_sensorlog.
-    if (!gSettings.systemLogEnabled) {
-      return "Error: system logging is disabled - run 'systemlogenabled 1' first";
-    }
     if (gSystemLogRunning) {
       return "Error: System logging is already running. Run log stop first.";
     }
@@ -3375,7 +3371,6 @@ constexpr SystemLogFlagsOptionsBuf kSystemLogFlagsOptions = dbgBuildLogFlagOptio
 }  // namespace
 
 static const SettingEntry systemLogSettingEntries[] = {
-  { "systemLogEnabled", SETTING_BOOL, &gSettings.systemLogEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "systemlogenabled" },
   { "systemLogAutoStart",    SETTING_BOOL,   &gSettings.systemLogAutoStart,    0, 0, nullptr, 0, 1, "Auto-start logging after boot", nullptr, false, nullptr, "log autostart" },
   { "systemLogPath", SETTING_STRING, &gSettings.systemLogPath, 0, 0, "", 0, 0, "Log file path (empty = auto-generate)", nullptr, false, nullptr, nullptr },
   { "systemLogCategoryTags", SETTING_BOOL, &gSettings.systemLogCategoryTags, 1, 0, nullptr, 0, 1, "Include category tags", nullptr, false, nullptr, "logcategorytags" },

@@ -35,7 +35,6 @@ struct SetupWizardResult {
   // other exit (cancel, timeout, Back off the first page, refused save) leaves
   // it false, so callers key "proceed" on this rather than on completed.
   bool applied = false;
-  bool wifiEnabled = false;
   bool wifiConfigured = false;
   String wifiSsid;
   String wifiPassword;
@@ -173,7 +172,6 @@ const SetupWizardResult& getWizardDraftValues();
 void discardSetupWizard();
 bool wizardFeatureEnabled(const char* featureId);
 void wizardSetFeatureEnabled(const char* featureId, bool enabled);
-void wizardSetMqttAutoStart(bool enabled);
 // Skipping the broker page leaves a configured broker exactly as it is; only a
 // draft with no broker host has its auto-start cleared. Every adapter's
 // Next/Skip on the MQTT page goes through this.

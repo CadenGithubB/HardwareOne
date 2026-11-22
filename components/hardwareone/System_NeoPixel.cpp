@@ -580,12 +580,12 @@ static const char* cmd_hardwareled_startupduration(const String& argsInput) {
 
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 extern const CommandEntry ledCommands[] = {
-  { "ledbrightness",        "Set LED brightness 0-100.",                      false, cmd_hardwareled_brightness,    "Usage: ledbrightness <0..100>" },
+  { "ledbrightness",        "Set LED brightness 0-100.",                      true, cmd_hardwareled_brightness,    "Usage: ledbrightness <0..100>" },
   { "ledstartupenabled",    "Enable/disable LED startup effect [0|1].",        true, cmd_hardwareled_startupenabled,"Usage: ledstartupenabled <0|1>" },
-  { "ledstartupeffect",     "Set LED startup effect [none|rainbow|pulse|fade|blink|strobe].",   false, cmd_hardwareled_startupeffect, "Usage: ledstartupeffect <none|rainbow|pulse|fade|blink|strobe>" },
-  { "ledstartupcolor",      "Set LED startup primary color (any of ~80 named colors or 'off'; an unknown name is refused).",                  false, cmd_hardwareled_startupcolor,  "Usage: ledstartupcolor <color name|off>  (any of ~80 named colors)" },
-  { "ledstartupcolor2",     "Set LED startup secondary color (any of ~80 named colors or 'off'; an unknown name is refused).",                false, cmd_hardwareled_startupcolor2, "Usage: ledstartupcolor2 <color name|off>  (any of ~80 named colors)" },
-  { "ledstartupduration",   "Set LED startup effect duration in ms.",         false, cmd_hardwareled_startupduration,"Usage: ledstartupduration <100..10000>" },
+  { "ledstartupeffect",     "Set LED startup effect [none|rainbow|pulse|fade|blink|strobe].",   true, cmd_hardwareled_startupeffect, "Usage: ledstartupeffect <none|rainbow|pulse|fade|blink|strobe>" },
+  { "ledstartupcolor",      "Set LED startup primary color (any of ~80 named colors or 'off'; an unknown name is refused).",                  true, cmd_hardwareled_startupcolor,  "Usage: ledstartupcolor <color name|off>  (any of ~80 named colors)" },
+  { "ledstartupcolor2",     "Set LED startup secondary color (any of ~80 named colors or 'off'; an unknown name is refused).",                true, cmd_hardwareled_startupcolor2, "Usage: ledstartupcolor2 <color name|off>  (any of ~80 named colors)" },
+  { "ledstartupduration",   "Set LED startup effect duration in ms.",         true, cmd_hardwareled_startupduration,"Usage: ledstartupduration <100..10000>" },
 };
 
 extern const size_t ledCommandsCount = sizeof(ledCommands) / sizeof(ledCommands[0]);

@@ -177,6 +177,11 @@ static AuthContext makeWebAuthCtx(httpd_req_t*) {
 static std::vector<std::string> commandLines;
 bool executeUnifiedWebCommand(httpd_req_t*, AuthContext& ctx, const String& line, String& out);
 
+// The G2 EvenAI openmic exception in authorizeCommand reads the executing
+// command's context; these suites never run under one.
+struct CommandContext { uint32_t behaviorFlags = 0; };
+enum : uint32_t { COMMAND_CONTEXT_REQUIRE_G2_EVENAI_AUTHORITY = 1u << 2 };
+static void* currentCommandContext() { return nullptr; }
 // INSERT_PRODUCTION
 
 static bool authorize(const AuthContext& ctx, const String& line, const CommandEntry* entry,

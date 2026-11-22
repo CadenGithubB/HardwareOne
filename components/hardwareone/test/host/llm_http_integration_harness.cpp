@@ -45,7 +45,6 @@ uint32_t millis() { return testNow; }
 // INSERT_PRODUCTION_HEADERS
 
 struct TestSettings {
-  bool llmEnabled = true;
   bool llmAutoStart = false;
   String llmDefaultModel;
   int llmMaxTokens = 256;
@@ -269,9 +268,9 @@ static void httpAutostartAndLazySelect() {
   gSettings.llmAutoStart = false;
   testNow += 60000; llmBackendTick(); assert(llmBackendActiveKind() == LlmBackendKind::None);
   assert(!llmBackendEnsureDefaultSelected());
-  gSettings.llmEnabled = false;
-  assert(llmBackendNotReadyReason(reason, sizeof(reason)) && !std::strcmp(reason, "LLM disabled (llmenabled 0)"));
-  gSettings.llmEnabled = true;
+  // Nothing selected is the only "off": no saved setting hides the LLM.
+  assert(llmBackendNotReadyReason(reason, sizeof(reason)) &&
+         !std::strcmp(reason, "no model selected (llmload http:openclaw)"));
   gSettings.llmDefaultModel = "";
 }
 #endif
@@ -286,9 +285,6 @@ int main() {
   LlmModelDesc models[4]{};
   const size_t count = llmEnumerateModels(models, 4);
   assert(count == ENABLE_LLM_SOURCE_HTTP + ENABLE_LLM_SOURCE_CM5);
-  gSettings.llmEnabled = false;
-  assert(llmEnumerateModels(models, 4) == 0);
-  gSettings.llmEnabled = true;
   char error[128]{};
 #if ENABLE_LLM_SOURCE_HTTP
   assert(llmBackendSelect("http:openclaw", error, sizeof(error)));

@@ -13,6 +13,7 @@
 #include "System_VFS.h"
 #include "System_Mutex.h"
 #include "G2_HijackCmd.h"
+#include "G2_ReplyNotice.h"
 
 #include "G2_Page_CameraSettings.h"
 #include "System_Settings.h"
@@ -479,7 +480,7 @@ static size_t buildBmp4bppFromRgb888(uint8_t* out, size_t outCap,
 
 #if ENABLE_CAMERA_SENSOR
 #include "System_Camera_DVP.h"    // captureFrame, cameraWidth, cameraHeight, gCameraRunning
-#include "System_Camera_Video.h"  // videoRecording, start/stopVideoRecording — stream Rec row
+#include "System_Camera_Video.h"  // videoRecording — stream Rec row picks start or stop
 
 struct CameraViewerArgs {
   void (*onDone)();
@@ -621,6 +622,30 @@ struct CameraStreamArgs {
   void (*onDone)();
 };
 
+// The Rec row runs `camerarecord start|stop` on cmd_exec as the paired
+// wearer, like the web Record button, so the firmware decides who may stop a
+// recording (its starter or an administrator) and records who started one.
+// The stream's list rows cannot change while the image child is up, so a
+// refusal ends the stream: onDone draws the CAM detail, whose back row shows
+// the reason (lens notice of the Sensors page, "This recording belongs to
+// alice"). Run ids keep a late reply from ending a later stream.
+static std::atomic<uint32_t> sCamStreamRun{0};
+static std::atomic<uint32_t> sCamStreamRecRefusedRun{0};
+// The run whose Rec command is still on cmd_exec. A second Rec tap meanwhile
+// is ignored: videoRecording has not flipped yet, so it would send a second
+// `start`, whose "already recording" error would end the stream.
+static std::atomic<uint32_t> sCamStreamRecPendingRun{0};
+
+static void onCamStreamRecordDone(bool ok, const char* result,
+                                  const G2CmdCookie& /*cookie*/, void* userData) {
+  const uint32_t run = (uint32_t)(uintptr_t)userData;
+  uint32_t pending = run;
+  (void)sCamStreamRecPendingRun.compare_exchange_strong(pending, 0);
+  if (!g2ReplyRefused(ok, result)) return;
+  DEBUG_G2F("[G2] Camera stream: record refused: %.80s", result ? result : "");
+  if (run == sCamStreamRun.load()) sCamStreamRecRefusedRun.store(run);
+}
+
 // User-configurable lens-stream dimensions. The worker snapshots
 // these at session start (so changing mid-stream takes effect on the
 // next stream) and does its own clamp. Bounds match the lens panel
@@ -639,6 +664,9 @@ static void g2CameraStreamWorker(void* arg) {
   // chains into g2ShowCameraSettingsMenu() (Settings path → settings
   // page → relaunch on back via g2CamStreamSettingsExitRelaunch).
   bool exitToSettings = false;
+  bool recRefused = false;
+  const uint32_t streamRun = ++sCamStreamRun;
+  sCamStreamRecRefusedRun.store(0);
 
   do {
     if (!gCameraRunning) {
@@ -754,8 +782,9 @@ static void g2CameraStreamWorker(void* arg) {
     // under the 240 B single-fragment cap. Labels stay static for the
     // whole stream: REBUILD-list mid-compound drops the image child
     // (verified 2026-05-08). Snapshot / Record act silently; logs +
-    // SD files are the feedback path. Record row text is a toggle
-    // affordance (start when idle, stop when videoRecording).
+    // SD files are the feedback path. A refused Record ends the stream
+    // so the CAM detail can show why (onCamStreamRecordDone). Record row
+    // text is a toggle affordance (start when idle, stop when videoRecording).
     static const char* const kRootRows[] = {
       "<- Back",
       "Snapshot",
@@ -868,21 +897,29 @@ static void g2CameraStreamWorker(void* arg) {
         snapshotPending = true;
       }
       if (taps & 0x4u) {
-        // Same CLI path as the web Sensors Record button. Keep the
-        // viewfinder running — recorder and this worker share
-        // captureFrame() (non-blocking mutex); losers skip a frame.
-        if (videoRecording) {
-          stopVideoRecording();
-          DEBUG_G2F("[G2] Camera stream: recording stopped (%s, %u frames)",
-                    videoLastRecordingPath(),
-                    (unsigned)videoLastRecordingFrames());
-        } else if (!VFS::isSdWritable()) {
-          DEBUG_G2F("[G2] Camera stream: record ignored — SD not writable");
-        } else if (startVideoRecording()) {
-          DEBUG_G2F("[G2] Camera stream: recording started");
+        // Same command as the web Sensors Record button, run as the paired
+        // wearer. Keep the viewfinder running — recorder and this worker
+        // share captureFrame() (non-blocking mutex); losers skip a frame.
+        G2CmdCookie cookie{};
+        cookie.targetPage = G2_HIJACK_PAGE_SENSORS;  // onDone's page shows a refusal
+        const char* line = videoRecording ? "camerarecord stop" : "camerarecord start";
+        if (sCamStreamRecPendingRun.load() == streamRun) {
+          DEBUG_G2F("[G2] Camera stream: Rec tap ignored, previous Rec still pending");
         } else {
-          DEBUG_G2F("[G2] Camera stream: recording start failed");
+          sCamStreamRecPendingRun.store(streamRun);
+          if (!g2SubmitHijackCommand(line, cookie, onCamStreamRecordDone,
+                                     (void*)(uintptr_t)streamRun)) {
+            sCamStreamRecPendingRun.store(0);
+            DEBUG_G2F("[G2] Camera stream: '%s' submit failed", line);
+          } else {
+            DEBUG_G2F("[G2] Camera stream: '%s' submitted", line);
+          }
         }
+      }
+      if (sCamStreamRecRefusedRun.load() == streamRun) {
+        DEBUG_G2F("[G2] Camera stream: record refused → exit to show why");
+        recRefused = true;
+        break;
       }
 
       const uint32_t frameStartMs = millis();
@@ -1016,6 +1053,7 @@ static void g2CameraStreamWorker(void* arg) {
     DEBUG_G2F("[G2] Camera stream: stopped after %d frame(s) (%s)",
               frame,
               exitToSettings           ? "Settings tap" :
+              recRefused               ? "record refused" :
               !g2LensGetState().hijackActive      ? "hijack ended (safety-timeout/peer)" :
               gImgProbeAbort           ? "abort flag"
                                        : "Back tap or loop exit");

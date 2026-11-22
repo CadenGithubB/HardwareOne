@@ -379,29 +379,24 @@ static bool sensorHasTask(I2cDeviceType sensor) {
   }
 }
 
-// The two saved switches of each queue-managed device, in one table: the
-// master switch (<x>enabled) that every open obeys, and start-at-boot
-// (<x>autostart) that the automatic restart also obeys. `enableCmd` is the
-// command a refused open names. `disabledName` is the noun of that refusal;
-// nullptr uses the name the open command passed. Read-only pointers: nothing
-// writes a setting through this table.
+// Start-at-boot (<x>autostart) of each queue-managed device, in one table:
+// the automatic restart obeys it as boot does. An open by hand is never
+// refused for a setting. Read-only pointers: nothing writes a setting through
+// this table.
 struct SensorSwitchRow {
   I2cDeviceType sensor;
-  const bool* enabled;
   const bool* autoStart;
-  const char* enableCmd;
-  const char* disabledName;
 };
 static const SensorSwitchRow kSensorSwitches[] = {
-  { I2C_DEVICE_THERMAL,  &gSettings.thermalEnabled,  &gSettings.thermalAutoStart,  "thermalenabled",  "Thermal camera" },
-  { I2C_DEVICE_TOF,      &gSettings.tofEnabled,      &gSettings.tofAutoStart,      "tofenabled",      nullptr },
-  { I2C_DEVICE_IMU,      &gSettings.imuEnabled,      &gSettings.imuAutoStart,      "imuenabled",      nullptr },
-  { I2C_DEVICE_INPUT,    &gSettings.inputEnabled,    &gSettings.inputAutoStart,    "inputenabled",    nullptr },
-  { I2C_DEVICE_GPS,      &gSettings.gpsEnabled,      &gSettings.gpsAutoStart,      "gpsenabled",      nullptr },
-  { I2C_DEVICE_FMRADIO,  &gSettings.fmRadioEnabled,  &gSettings.fmRadioAutoStart,  "fmradioenabled",  nullptr },
-  { I2C_DEVICE_APDS,     &gSettings.apdsEnabled,     &gSettings.apdsAutoStart,     "apdsenabled",     nullptr },
-  { I2C_DEVICE_RTC,      &gSettings.rtcEnabled,      &gSettings.rtcAutoStart,      "rtcenabled",      nullptr },
-  { I2C_DEVICE_PRESENCE, &gSettings.presenceEnabled, &gSettings.presenceAutoStart, "presenceenabled", nullptr },
+  { I2C_DEVICE_THERMAL,  &gSettings.thermalAutoStart },
+  { I2C_DEVICE_TOF,      &gSettings.tofAutoStart },
+  { I2C_DEVICE_IMU,      &gSettings.imuAutoStart },
+  { I2C_DEVICE_INPUT,    &gSettings.inputAutoStart },
+  { I2C_DEVICE_GPS,      &gSettings.gpsAutoStart },
+  { I2C_DEVICE_FMRADIO,  &gSettings.fmRadioAutoStart },
+  { I2C_DEVICE_APDS,     &gSettings.apdsAutoStart },
+  { I2C_DEVICE_RTC,      &gSettings.rtcAutoStart },
+  { I2C_DEVICE_PRESENCE, &gSettings.presenceAutoStart },
 };
 static_assert(sizeof(kSensorSwitches) / sizeof(kSensorSwitches[0]) == (size_t)I2C_DEVICE_COUNT,
               "every queue-managed device type needs its switch row");
@@ -411,17 +406,6 @@ static const SensorSwitchRow* sensorSwitchRow(I2cDeviceType sensor) {
     if (row.sensor == sensor) return &row;
   }
   return nullptr;
-}
-
-// The master switch, as an open sees it. First-time setup starts the input
-// device whatever the kept settings say (HardwareOne.cpp and the OLED menu
-// auto-start do so on purpose): without it a device whose users were removed
-// but whose settings still hold inputenabled 0 could not be set up on its own
-// screen.
-static bool sensorEnabledForStart(I2cDeviceType sensor) {
-  const SensorSwitchRow* row = sensorSwitchRow(sensor);
-  if (!row || *row->enabled) return true;
-  return sensor == I2C_DEVICE_INPUT && gFirstTimeSetupState != SETUP_NOT_NEEDED;
 }
 
 // Admitted starts the queue worker has not settled yet. A stop that cancels
@@ -493,8 +477,6 @@ bool requestSensorStart(I2cDeviceType sensor, const char* eventTag, SensorStartR
     if (why) *why = reason;
     return false;
   };
-  // The master switch first: a disabled sensor is neither probed nor queued.
-  if (!sensorEnabledForStart(sensor)) return refuse(SensorStartRefusal::Disabled);
   // Reject immediately if the I2C bus is disabled at runtime (distinct from hardware not connected)
   if (!gI2cBusRunning) return refuse(SensorStartRefusal::BusDisabled);
 
@@ -531,7 +513,6 @@ const char* sensorStartRefusalText(SensorStartRefusal why) {
     case SensorStartRefusal::NoAck:            return "no acknowledgement from device on I2C bus";
     case SensorStartRefusal::ProbeFailed:      return "I2C probe could not complete";
     case SensorStartRefusal::NotQueued:        return "could not queue (queue unavailable/full or stop pending)";
-    case SensorStartRefusal::Disabled:         return "disabled in settings";
   }
   return "unknown";
 }
@@ -556,14 +537,6 @@ const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName
     return getDebugBuffer();
   }
   switch (why) {
-    case SensorStartRefusal::Disabled: {
-      // One sentence for every sensor; the row names the command that undoes it.
-      const SensorSwitchRow* row = sensorSwitchRow(sensor);
-      snprintf(getDebugBuffer(), 1024, "Error: %s is disabled - run '%s 1' first",
-               (row && row->disabledName) ? row->disabledName : displayName,
-               row ? row->enableCmd : "its enable command");
-      break;
-    }
     case SensorStartRefusal::BusDisabled:
       snprintf(getDebugBuffer(), 1024, "Error: [%s] I2C bus is disabled — enable it in settings and reboot", displayName);
       break;
@@ -2808,11 +2781,9 @@ const char* buildSensorStatusJson() {
 #endif
 
 #if ENABLE_EDGE_IMPULSE
-  doc["eiEnabled"] = gSettings.eiEnabled;
   doc["eiModelLoaded"] = isEdgeImpulseModelLoaded();
   doc["eiCompiled"] = true;
 #else
-  doc["eiEnabled"] = false;
   doc["eiModelLoaded"] = false;
   doc["eiCompiled"] = false;
 #endif
@@ -2965,13 +2936,13 @@ static void announceSensorStart(const char* name, bool ok) {
 
 // --- Automatic restart: the worker's side (see the state near requestSensorStart) ---
 
-// The boot rule: the master switch on, and start-at-boot on as the RAM-flush
-// resume resolved it. Read each time it matters, so `<x>enabled 0`,
-// `<x>autostart 0`, the setup wizard and a settings import all end a restart
-// without a hook in any of them.
+// The boot rule: start-at-boot on as the RAM-flush resume resolved it. Read
+// each time it matters, so `<x>autostart 0`, the setup wizard and a settings
+// import all end a restart without a hook in any of them (close<x> ends it
+// through sensorRestartClosedByHand).
 static bool sensorRestartGateOpen(I2cDeviceType sensor) {
   const SensorSwitchRow* row = sensorSwitchRow(sensor);
-  return gI2cBusRunning && row && *row->enabled &&
+  return gI2cBusRunning && row &&
          ramFlushResolve(ramFlushIdForDevice(sensor), *row->autoStart);
 }
 
@@ -3027,10 +2998,6 @@ static void sensorRestartAttempt(I2cDeviceType sensor, sensor_restart::State& st
     case SensorStartRefusal::AlreadyRunning:
       // Started by someone else (the menu's input auto-start): watch it too.
       sensor_restart::attemptFoundRunning(state, nowMs);
-      ramFlushClearAutostartFailed(ramFlushIdForDevice(sensor));
-      break;
-    case SensorStartRefusal::Disabled:
-      sensor_restart::cancel(state);
       ramFlushClearAutostartFailed(ramFlushIdForDevice(sensor));
       break;
     case SensorStartRefusal::ProbeFailed:
@@ -3100,7 +3067,7 @@ static void sensorRestartTick(I2cDeviceManager* mgr) {
         break;
       case sensor_restart::Tick::GateClosed:
         ramFlushClearAutostartFailed(flushId);
-        logSystemEvent("SENSOR", "%s automatic restart ended: disabled or auto-start off", name);
+        logSystemEvent("SENSOR", "%s automatic restart ended: auto-start off", name);
         break;
       case sensor_restart::Tick::Stopped:
         ramFlushClearAutostartFailed(flushId);
@@ -3451,7 +3418,7 @@ void processAutoStartSensors() {
   int autoStartQueued = 0;
   
   #if ENABLE_THERMAL_SENSOR
-  if (gSettings.thermalEnabled && ramFlushResolve(RF_THERMAL, gSettings.thermalAutoStart)) {
+  if (ramFlushResolve(RF_THERMAL, gSettings.thermalAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_THERMAL)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing thermal sensor");
       enqueueDeviceStart(I2C_DEVICE_THERMAL); autoStartQueued++;
@@ -3462,7 +3429,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_TOF_SENSOR
-  if (gSettings.tofEnabled && ramFlushResolve(RF_TOF, gSettings.tofAutoStart)) {
+  if (ramFlushResolve(RF_TOF, gSettings.tofAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_TOF)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing ToF sensor");
       enqueueDeviceStart(I2C_DEVICE_TOF); autoStartQueued++;
@@ -3473,7 +3440,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_IMU_SENSOR
-  if (gSettings.imuEnabled && ramFlushResolve(RF_IMU, gSettings.imuAutoStart)) {
+  if (ramFlushResolve(RF_IMU, gSettings.imuAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_IMU)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing IMU sensor");
       enqueueDeviceStart(I2C_DEVICE_IMU); autoStartQueued++;
@@ -3484,7 +3451,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_GPS_SENSOR
-  if (gSettings.gpsEnabled && ramFlushResolve(RF_GPS, gSettings.gpsAutoStart)) {
+  if (ramFlushResolve(RF_GPS, gSettings.gpsAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_GPS)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing GPS sensor");
       enqueueDeviceStart(I2C_DEVICE_GPS); autoStartQueued++;
@@ -3495,7 +3462,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_FM_RADIO
-  if (gSettings.fmRadioEnabled && ramFlushResolve(RF_FMRADIO, gSettings.fmRadioAutoStart)) {
+  if (ramFlushResolve(RF_FMRADIO, gSettings.fmRadioAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_FMRADIO)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing FM Radio sensor");
       enqueueDeviceStart(I2C_DEVICE_FMRADIO); autoStartQueued++;
@@ -3506,7 +3473,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_APDS_SENSOR
-  if (gSettings.apdsEnabled && ramFlushResolve(RF_APDS, gSettings.apdsAutoStart)) {
+  if (ramFlushResolve(RF_APDS, gSettings.apdsAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_APDS)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing APDS sensor");
       enqueueDeviceStart(I2C_DEVICE_APDS); autoStartQueued++;
@@ -3517,7 +3484,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_GAMEPAD_SENSOR || ENABLE_GT911_TOUCH
-  if (gSettings.inputEnabled && ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
+  if (ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
     // The device type is the identity. Its module name comes from its
     // i2cSensors[] row, so the registry lookup and the ramflush id cannot
     // disagree. (A hand-typed "gamepad" here once missed the registry, fell
@@ -3533,7 +3500,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_RTC_SENSOR
-  if (gSettings.rtcEnabled && ramFlushResolve(RF_RTC, gSettings.rtcAutoStart)) {
+  if (ramFlushResolve(RF_RTC, gSettings.rtcAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_RTC)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing RTC sensor");
       enqueueDeviceStart(I2C_DEVICE_RTC); autoStartQueued++;
@@ -3544,7 +3511,7 @@ void processAutoStartSensors() {
   #endif
   
   #if ENABLE_PRESENCE_SENSOR
-  if (gSettings.presenceEnabled && ramFlushResolve(RF_PRESENCE, gSettings.presenceAutoStart)) {
+  if (ramFlushResolve(RF_PRESENCE, gSettings.presenceAutoStart)) {
     if (isSensorAvailableForAutoStart(I2C_DEVICE_PRESENCE)) {
       INFO_I2C_AUTOSTARTF("[AutoStart] Queuing Presence sensor");
       enqueueDeviceStart(I2C_DEVICE_PRESENCE); autoStartQueued++;

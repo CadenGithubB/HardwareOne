@@ -47,8 +47,13 @@ def generated(baseline: Path | None = None) -> str:
     guard = action[:action.index("  char maps[8][96];")]
     branch = action[action.index("    case MENU_CAT_TRACKS:"):action.index("    case MENU_CAT_INFO:")]
     action = guard + "\n  switch (submenuType) {\n" + branch + "  }\n}"
+    # The shared OLED refusal text the track actions toast (OLED_Utils.cpp).
+    oled_utils = (COMPONENT / "OLED_Utils.cpp").read_text()
+    reply_text = ([f'#include "{COMPONENT / "OLED_MessageText.h"}"',
+                   extract_block(oled_utils, "void oledCommandReplyText(")]
+                  if "void oledCommandReplyText(" in oled_utils else [])
     production = [utils[auth_start:auth_end],
-                  *web_executor,
+                  *web_executor, *reply_text,
                   extract_block(web, "static esp_err_t handleGpsLiveTrackAction("),
                   handler, action, extract_block(oled, "static void drawTrackStatus(")]
     harness = (HERE / "map_live_ui_harness.cpp").read_text()

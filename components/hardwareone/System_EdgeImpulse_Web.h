@@ -22,8 +22,7 @@ inline void streamEdgeImpulseSensorCard(httpd_req_t* req) {
       <div class='sensor-title'><span>Edge Impulse ML</span><span class='status-indicator status-disabled' id='ei-status-indicator'></span></div>
       <div class='sensor-description'>TensorFlow Lite Micro object detection with state change tracking.</div>
       <div class='sensor-controls'>
-        <button class='btn' id='btn-ei-enable'>Enable</button>
-        <button class='btn' id='btn-ei-disable' style='display:none'>Disable</button>
+        <button class='btn' id='btn-ei-unload' style='display:none'>Unload model</button>
         <button class='btn' id='btn-ei-detect'>Detect</button>
         <button class='btn' id='btn-ei-continuous-start'>Continuous</button>
         <button class='btn' id='btn-ei-continuous-stop' style='display:none'>Stop</button>
@@ -78,7 +77,7 @@ inline void streamEdgeImpulseSensorCard(httpd_req_t* req) {
 
 // Stream button bindings for Edge Impulse
 inline void streamEdgeImpulseSensorBindButtons(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "bind('btn-ei-enable','eienable 1');bind('btn-ei-disable','eienable 0');bind('btn-ei-detect','eidetect');bind('btn-ei-continuous-start','eicontinuous 1');bind('btn-ei-continuous-stop','eicontinuous 0');", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "bind('btn-ei-unload','eimodelunload');bind('btn-ei-detect','eidetect');bind('btn-ei-continuous-start','eicontinuous 1');bind('btn-ei-continuous-stop','eicontinuous 0');", HTTPD_RESP_USE_STRLEN);
 }
 
 // Stream Edge Impulse-specific JavaScript
@@ -235,13 +234,11 @@ inline void streamEdgeImpulseSensorJs(httpd_req_t* req) {
     "      var modelEl = hw.$('eiModelPath');\n"
     "      hw.setText(modelEl, modelMatch ? modelMatch[1].trim() : 'Not loaded');\n"
     "      var indicator = hw.$('ei-status-indicator');\n"
-    "      var enabledMatch = txt.match(/Enabled:\\s*(yes|no)/i);\n"
-    "      var isEnabled = enabledMatch && enabledMatch[1].toLowerCase() === 'yes';\n"
-    "      if(indicator) indicator.className = 'status-indicator ' + (isEnabled ? 'status-enabled' : 'status-disabled');\n"
-    "      var btnEnable = hw.$('btn-ei-enable');\n"
-    "      var btnDisable = hw.$('btn-ei-disable');\n"
-    "      if(btnEnable) btnEnable.style.display = isEnabled ? 'none' : 'inline-block';\n"
-    "      if(btnDisable) btnDisable.style.display = isEnabled ? 'inline-block' : 'none';\n"
+    "      var loadedMatch = txt.match(/Model loaded:\\s*(yes|no)/i);\n"
+    "      var isLoaded = loadedMatch && loadedMatch[1].toLowerCase() === 'yes';\n"
+    "      if(indicator) indicator.className = 'status-indicator ' + (isLoaded ? 'status-enabled' : 'status-disabled');\n"
+    "      var btnUnload = hw.$('btn-ei-unload');\n"
+    "      if(btnUnload) btnUnload.style.display = isLoaded ? 'inline-block' : 'none';\n"
     "      var contMatch = txt.match(/Continuous:\\s*(running|stopped)/i);\n"
     "      var isRunning = contMatch && contMatch[1].toLowerCase() === 'running';\n"
     "      var btnStart = hw.$('btn-ei-continuous-start');\n"

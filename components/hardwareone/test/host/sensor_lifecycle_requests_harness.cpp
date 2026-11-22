@@ -84,26 +84,11 @@ static unsigned long& gPresenceLastStopTime = stopTimes[I2C_DEVICE_PRESENCE];
 static struct {
   int thermalBus = 0, tofBus = 0, imuBus = 0, inputBus = 0, gpsBus = 0;
   int fmRadioBus = 0, apdsBus = 0, rtcBus = 0, presenceBus = 0;
-  // The two saved switches per device, at the firmware's defaults.
-  bool thermalEnabled = true, tofEnabled = true, imuEnabled = true, inputEnabled = true, gpsEnabled = true;
-  bool fmRadioEnabled = true, apdsEnabled = true, rtcEnabled = true, presenceEnabled = true;
+  // The one saved switch per device (start at boot), at the firmware's defaults.
   bool thermalAutoStart = false, tofAutoStart = false, imuAutoStart = false, inputAutoStart = false;
   bool gpsAutoStart = false, fmRadioAutoStart = false, apdsAutoStart = false, rtcAutoStart = true;
   bool presenceAutoStart = false;
 } gSettings;
-static bool& enabledSetting(I2cDeviceType sensor) {
-  switch (sensor) {
-    case I2C_DEVICE_THERMAL: return gSettings.thermalEnabled;
-    case I2C_DEVICE_TOF: return gSettings.tofEnabled;
-    case I2C_DEVICE_IMU: return gSettings.imuEnabled;
-    case I2C_DEVICE_INPUT: return gSettings.inputEnabled;
-    case I2C_DEVICE_GPS: return gSettings.gpsEnabled;
-    case I2C_DEVICE_FMRADIO: return gSettings.fmRadioEnabled;
-    case I2C_DEVICE_APDS: return gSettings.apdsEnabled;
-    case I2C_DEVICE_RTC: return gSettings.rtcEnabled;
-    default: return gSettings.presenceEnabled;
-  }
-}
 static bool& autoStartSetting(I2cDeviceType sensor) {
   switch (sensor) {
     case I2C_DEVICE_THERMAL: return gSettings.thermalAutoStart;
@@ -474,62 +459,24 @@ static void cleanupCases() {
     assert(eventCount(SYSEVT_SENSOR_STOPPED) == 1 && !sSensorStopAwaitingCleanup[I2C_DEVICE_RTC]); }
 }
 
-// SEN-6: `<x>enabled 0` blocks every open of that sensor with one sentence,
-// before the bus is looked at; nothing is probed, queued or bumped.
-static void enableGateCases() {
-  static const struct { I2cDeviceType sensor; const char* reply; } expected[] = {
-    { I2C_DEVICE_THERMAL,  "Error: Thermal camera is disabled - run 'thermalenabled 1' first" },
-    { I2C_DEVICE_TOF,      "Error: ToF is disabled - run 'tofenabled 1' first" },
-    { I2C_DEVICE_IMU,      "Error: IMU is disabled - run 'imuenabled 1' first" },
-    { I2C_DEVICE_INPUT,    "Error: Gamepad is disabled - run 'inputenabled 1' first" },
-    { I2C_DEVICE_GPS,      "Error: GPS is disabled - run 'gpsenabled 1' first" },
-    { I2C_DEVICE_FMRADIO,  "Error: FM Radio is disabled - run 'fmradioenabled 1' first" },
-    { I2C_DEVICE_APDS,     "Error: APDS is disabled - run 'apdsenabled 1' first" },
-    { I2C_DEVICE_RTC,      "Error: RTC is disabled - run 'rtcenabled 1' first" },
-    { I2C_DEVICE_PRESENCE, "Error: Presence is disabled - run 'presenceenabled 1' first" },
-  };
-  assert(sizeof(expected) / sizeof(expected[0]) == I2C_DEVICE_COUNT);
-  for (const auto& row : expected) {
-    // Disabled: the same sentence, and nothing happened.
-    { Fixture f; enabledSetting(row.sensor) = false;
-      assert(f.open(row.sensor) == row.reply);
-      assert(probeCalls == 0 && f.manager.getQueueDepth() == 0 && statuses.empty() && hints.empty());
-      f.worker(); assert(starts[row.sensor] == 0 && events.empty());
-      SensorStartRefusal why = SensorStartRefusal::None;
-      assert(!requestSensorStart(row.sensor, "menu@auto", &why) && why == SensorStartRefusal::Disabled);
-      assert(probeCalls == 0 && statuses.empty() && contains(sensorStartRefusalText(why), "disabled"));
-      // It comes before the bus-disabled refusal, as the thermal check did.
-      gI2cBusRunning = false; assert(f.open(row.sensor) == row.reply); }
-    // Every other sensor still opens while this one is disabled.
-    { Fixture f; enabledSetting(row.sensor) = false;
-      for (const auto& other : expected) {
-        if (other.sensor == row.sensor) continue;
-        assert(contains(f.open(other.sensor), "queued for start"));
-        f.worker(); assert(starts[other.sensor] == 1);
-      }
-      assert(starts[row.sensor] == 0); }
-    // Enabled again: it opens.
-    { Fixture f; enabledSetting(row.sensor) = false; assert(f.open(row.sensor) == row.reply);
-      enabledSetting(row.sensor) = true; assert(contains(f.open(row.sensor), "queued for start")); }
+// No saved setting refuses an open (owner decision 2026-11-21): with every
+// start-at-boot switch off, each sensor still opens by hand and from the menu,
+// inside first-time setup and outside it.
+static void noGateCases() {
+  for (int d = 0; d < I2C_DEVICE_COUNT; ++d) {
+    const auto sensor = static_cast<I2cDeviceType>(d);
+    { Fixture f; autoStartSetting(sensor) = false;
+      assert(contains(f.open(sensor), "queued for start"));
+      f.worker(); assert(starts[sensor] == 1); }
+    { Fixture f; autoStartSetting(sensor) = false;
+      SensorStartRefusal why = SensorStartRefusal::NotQueued;
+      assert(requestSensorStart(sensor, "menu@auto", &why) && why == SensorStartRefusal::None); }
   }
-  // First-time setup starts the input device whatever the kept setting says
-  // (HardwareOne.cpp's "input@setup" and the OLED menu auto-start), in every
-  // setup state; no other sensor gets that exception.
-  for (auto state : {SETUP_REQUIRED, SETUP_IN_PROGRESS, SETUP_COMPLETE}) {
-    { Fixture f; gSettings.inputEnabled = false; gFirstTimeSetupState = state;
-      assert(contains(cmd_sensorstart_queued(I2C_DEVICE_INPUT, "Input", "input@setup", nullptr), "queued for start"));
-      f.worker(); assert(starts[I2C_DEVICE_INPUT] == 1); }
-    { Fixture f; gSettings.inputEnabled = false; gFirstTimeSetupState = state;
-      SensorStartRefusal why = SensorStartRefusal::Disabled;
-      assert(requestSensorStart(I2C_DEVICE_INPUT, "input@menu", &why) && why == SensorStartRefusal::None); }
-    { Fixture f; gSettings.gpsEnabled = false; gFirstTimeSetupState = state;
-      assert(contains(f.open(), "GPS is disabled")); assert(probeCalls == 0); }
+  for (auto state : {SETUP_NOT_NEEDED, SETUP_REQUIRED, SETUP_IN_PROGRESS, SETUP_COMPLETE}) {
+    Fixture f; gSettings.inputAutoStart = false; gFirstTimeSetupState = state;
+    assert(contains(cmd_sensorstart_queued(I2C_DEVICE_INPUT, "Input", "input@setup", nullptr), "queued for start"));
+    f.worker(); assert(starts[I2C_DEVICE_INPUT] == 1);
   }
-  // Outside setup the menu auto-start is refused quietly: nothing queued.
-  { Fixture f; gSettings.inputEnabled = false;
-    SensorStartRefusal why = SensorStartRefusal::None;
-    assert(!requestSensorStart(I2C_DEVICE_INPUT, "input@menu", &why) && why == SensorStartRefusal::Disabled);
-    assert(f.manager.getQueueDepth() == 0 && statuses.empty() && probeCalls == 0); }
 }
 
 // UP-05: a sensor that switched itself off is started again by the worker.
@@ -548,9 +495,6 @@ static void restartCases() {
   { Fixture f; running[gps] = true; autoDisable(gps); f.after(0); f.after(3600000);
     assert(starts[gps] == 0 && logs.empty() && events.empty() && probeCalls == 0);
     assert(sSensorRestart[gps].phase == Phase::Idle && !flushFailedMark[gps]); }
-  { Fixture f; gSettings.gpsAutoStart = true; gSettings.gpsEnabled = false;
-    running[gps] = true; autoDisable(gps); f.after(0); f.after(3600000);
-    assert(starts[gps] == 0 && logs.empty() && probeCalls == 0); }
   // The RAM-flush resume decides start-at-boot, here as at boot.
   { Fixture f; gSettings.gpsAutoStart = true; flushOverride[gps] = 0;
     running[gps] = true; autoDisable(gps); f.after(0); f.after(3600000);
@@ -667,16 +611,16 @@ static void restartCases() {
     assert(starts[gps] == 0 && sSensorRestart[gps].phase == Phase::Idle && !sSensorRestartPending[gps]);
     f.after(3600000); assert(starts[gps] == 0); }
 
-  // `<x>enabled 0` or `<x>autostart 0` while a try waits: no hook is needed,
-  // the worker reads both when it looks.
-  for (int which = 0; which < 2; ++which) {
+  // `<x>autostart 0` while a try waits: no hook is needed, the worker reads
+  // it when it looks.
+  {
     Fixture f; gSettings.gpsAutoStart = true; running[gps] = true; autoDisable(gps); f.after(0);
     f.after(10000);
-    (which ? gSettings.gpsEnabled : gSettings.gpsAutoStart) = false;
+    gSettings.gpsAutoStart = false;
     f.after(1000);
     assert(sSensorRestart[gps].phase == Phase::Idle && !sSensorRestartPending[gps] && !flushFailedMark[gps]);
-    assert(logs.back() == "GPS automatic restart ended: disabled or auto-start off");
-    gSettings.gpsEnabled = gSettings.gpsAutoStart = true;
+    assert(logs.back() == "GPS automatic restart ended: auto-start off");
+    gSettings.gpsAutoStart = true;
     f.after(3600000); assert(starts[gps] == 0 && probeCalls == 0);
   }
 
@@ -785,9 +729,6 @@ static void restartCases() {
       for (int other = 0; other < I2C_DEVICE_COUNT; ++other) {
         if (other != index) assert(sSensorRestart[other].phase == Phase::Idle);
       } }
-    { Fixture f; gSettings.rtcAutoStart = false; autoStartSetting(sensor) = true; enabledSetting(sensor) = false;
-      running[sensor] = true; autoDisable(sensor); f.after(0); f.after(30000);
-      assert(starts[sensor] == 0); }
     { Fixture f; gSettings.rtcAutoStart = false;
       running[sensor] = true; autoDisable(sensor); f.after(0); f.after(30000);
       assert(starts[sensor] == 0); }
@@ -812,6 +753,6 @@ static void restartCases() {
 
 int main() {
   admissionCases(); hintCases(); workerOutcomeCases(); closeOrderingCases(); cleanupCases();
-  enableGateCases(); restartCases();
+  noGateCases(); restartCases();
   std::printf("Sensor lifecycle requests passed (production controller + manager; mesh=%d)\n", ENABLE_ESPNOW);
 }

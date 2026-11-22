@@ -44,7 +44,7 @@ static const std::vector<std::string> kLiveStartActions{
     "gps", "live /logging_captures/tracks/live.csv 1000"};
 #endif
 static struct {
-  bool sensorLogEnabled = true, healthLoggingEnabled = false;
+  bool healthLoggingEnabled = false;
   bool gpsAutoStart = false, sensorLogAutoStart = false;
 } gSettings;
 static std::mutex sSensorLogSessionMux;
@@ -107,6 +107,8 @@ static void* ps_alloc(size_t size, AllocPref, const char* name) {
 }
 using AuthContext = const char*;
 static AuthContext currentAuthContext() { return "owner"; }
+static bool callerIsAdmin = true;  // live tracking is logging: admins start and stop it
+static bool currentExecIsAdmin() { return callerIsAdmin; }
 static StaticSemaphore_t fsStorage{{}, false, true};
 static SemaphoreHandle_t gFsMutex = &fsStorage;
 static bool isHeldByCurrentTask(SemaphoreHandle_t mutex) { return mutex->fs && fsLockDepth == 1; }
@@ -376,6 +378,12 @@ static void unchangedPreferences(bool gps, bool logger) {
 
 int main() {
   reset(); imported();
+  callerIsAdmin = false;
+  check(std::string(cmd_gpstrack("live start")) == kCommandReplyLoggingAdminRequired &&
+            std::string(cmd_gpstrack("live stop")) == kCommandReplyLoggingAdminRequired &&
+            !GpsTrackManager::isLiveTracking(),
+        "an account below admin neither starts nor stops live tracking");
+  callerIsAdmin = true;
   for (const char* invalid : {"live", "live start extra", "live stop extra", "live unknown", "live \"start"}) {
     check(error(cmd_gpstrack(invalid)), "malformed live command rejected");
     check(actions.empty() && GpsTrackManager::readStatus().pointCount == 2,
@@ -386,10 +394,9 @@ int main() {
         "validation-only does not initialize services");
   gCliValidateOnly = false;
 #if ENABLE_GPS_SENSOR
-  for (unsigned guard = 0; guard < 4; ++guard) {
+  for (unsigned guard = 1; guard < 4; ++guard) {
     reset(); imported(); const auto before = GpsTrackManager::readStatus();
     const unsigned allocated = allocations;
-    if (guard == 0) gSettings.sensorLogEnabled = false;
     if (guard == 1) sensorLogPublishStarted();
     if (guard == 2) gSettings.healthLoggingEnabled = true;
     if (guard == 3) debugAvailable = false;

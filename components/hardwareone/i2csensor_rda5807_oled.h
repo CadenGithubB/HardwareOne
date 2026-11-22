@@ -143,7 +143,7 @@ static bool fmRadioInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPr
   // A: mute toggle.
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
     if (oledGuestBlocksMutate()) return true;
-    executeOledCommand(snap.muted ? "fmradiounmute" : "fmradiomute");
+    executeOledCommand(snap.muted ? "fmradiomute off" : "fmradiomute on");
     return true;
   }
 

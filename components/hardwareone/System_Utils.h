@@ -160,6 +160,10 @@ bool submitAndExecuteSync(const Command& cmd, String& out, bool* completedOut);
 // and must not block; its result pointer is valid only during that callback.
 bool submitCommandAsync(const Command& cmd, ExecAsyncCallback callback,
                         void* userData);
+// True when the command queue exists and has no free slot: what a false from
+// submitCommandAsync meant when it was not out of memory (PendingCommand
+// retries only this case).
+bool commandQueueFull();
 
 // Firmware-internal work on cmd_exec, bypassing command dispatch. On
 // success the callback owns arg's cleanup; on failure the caller retains it.

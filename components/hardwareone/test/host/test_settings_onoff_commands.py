@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""Five <0|1> setting commands read their value with the shared on/off parser.
+"""Four <0|1> setting commands read their value with the shared on/off parser.
 
-espnowenabled, httpautostart and httpsenabled (System_Settings.cpp) and
+httpautostart and httpsenabled (System_Settings.cpp) and
 thermalrollingminmaxenabled and thermalinterpolationenabled
 (i2csensor_mlx90640.cpp) each had their own test, "starts with 1 or with
-true", and read every other word as off: `espnowenabled on` stored false and
-stopped ESP-NOW (RAD-5). The five handlers, parseBoolArg and setSetting are
-extracted intact on every run and compiled into
-settings_onoff_commands_harness.cpp with the real System_CommandReply.h; String
-storage, the reply buffer, persistence, the command executor and the printed
-line are the host boundaries. The unit is built with ESP-NOW compiled and not.
+true", and read every other word as off (RAD-5; espnowenabled, the fifth, was
+removed with the other <x>enabled switches on 2026-11-21). The four handlers,
+parseBoolArg and setSetting are extracted intact on every run and compiled
+into settings_onoff_commands_harness.cpp with the real System_CommandReply.h;
+String storage, the reply buffer, persistence and the printed line are the
+host boundaries.
 
 Checked for each command, from both starting values: on/true/1/enable and
 off/false/0/disable in any case and with surrounding spaces store the value
 with the reply the command always gave; a save is requested only when the
-value changes; espnowenabled runs closeespnow on off; the thermal pair print
-their line; a word that is neither (also "10", "truex", "1 extra") is refused
-with kCommandReplyNotOnOff and changes, saves, runs and prints nothing; no
-argument still answers with the usage line; validate-only still answers VALID.
+value changes; the thermal pair print their line; a word that is neither
+(also "10", "truex", "1 extra") is refused with kCommandReplyNotOnOff and
+changes, saves and prints nothing; no argument still answers with the usage
+line; validate-only still answers VALID.
 
 --baseline DIR replays the same assertions against a saved component
 directory; the tree before this change fails the on/enable words and the
@@ -36,7 +36,7 @@ from test_web_batch_handlers import extract_block
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 
-SETTINGS_HANDLERS = ("cmd_espnowenabled", "cmd_httpAutoStart", "cmd_httpsEnabled")
+SETTINGS_HANDLERS = ("cmd_httpAutoStart", "cmd_httpsEnabled")
 THERMAL_HANDLERS = ("cmd_thermalrollingminmaxenabled", "cmd_thermalinterpolationenabled")
 
 

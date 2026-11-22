@@ -198,8 +198,7 @@ inline bool waitFor(const std::function<bool()>& condition, int ms) {
 // Settings, commands, events, auth
 // ---------------------------------------------------------------------------
 struct Settings {
-  bool eiAutoStart = true;
-  bool eiEnabled = true;
+  bool eiAutoStart = false;
   bool edgeImpulseRequireLabels = true;
   float edgeImpulseMinConfidence = 0.6f;
   int edgeImpulseMaxDetections = 5;
@@ -716,6 +715,9 @@ inline bool filesystemReady = true;
   AuthContext ctx{};                 \
   (void)ctx;                         \
   (void)(req)
+// Organize (a rename of model files) is for administrators; the scenarios
+// here run as one.
+inline bool hasAdminPrivilege(const AuthContext&) { return true; }
 
 // ---------------------------------------------------------------------------
 // Scenario helpers

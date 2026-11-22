@@ -108,7 +108,11 @@ static bool commitRemoteSettingValue(const SettingEntry* entry, const String& va
 #if ENABLE_ESPNOW && ENABLE_BONDED_MODE
   String err;
   if (applyRemoteSettingChange(entry, value, err)) return true;
-  settingsEditorShowError(err.length() ? err : String("Remote save failed"), 2500);
+  // The shared short refusal, as for a local save ("Needs an admin" when the
+  // local gate refuses the inner setter).
+  char text[160];
+  oledCommandReplyText(false, err.c_str(), nullptr, "Remote save failed", text, sizeof(text));
+  settingsEditorShowError(String(text), 2500);
 #else
   (void)entry;
   (void)value;
@@ -248,7 +252,10 @@ static bool setSettingValueStr(const SettingEntry* entry, const String& value) {
   if (!strcasecmp(cmdName, "esplog") && !arg[strspn(arg, " \t\r\n")]) arg = "clear";
   bool ok = executeOledCommandWithResult(String(cmdName) + " " + arg, out, sizeof(out));
   if (!ok) {
-    settingsEditorShowError((out[0] != '\0') ? String(out) : String("Save failed"), 2500);
+    // The shared short refusal ("Needs an admin" for an admin-only setting).
+    char text[sizeof(out)];
+    oledCommandReplyText(false, out, nullptr, "Save failed", text, sizeof(text));
+    settingsEditorShowError(String(text), 2500);
     return false;
   }
   return true;

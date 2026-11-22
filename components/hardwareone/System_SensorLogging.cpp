@@ -1558,14 +1558,6 @@ static uint32_t sensorLogClampInterval(uint32_t interval) {
 }
 
 static const char* sensorLogStartError() {
-  // Master switch. Owned here rather than by each caller because sensor
-  // logging is startable from several places that are not obviously "start
-  // logging" - notably the OLED Map screen, which begins a GPS track log as a
-  // side effect of opening it. Without this, "never write logs on this device"
-  // was not expressible.
-  if (!gSettings.sensorLogEnabled) {
-    return "Error: sensor logging is disabled - run 'sensorlogenabled 1' first";
-  }
   if (gSensorLoggingRunning) {
     return "Error: Sensor logging already running. Use 'sensorlog stop' first.";
   }
@@ -1775,6 +1767,7 @@ const char* cmd_sensorlog(const String& argsInput) {
   }
   String subCmd = a.arg(0);
   subCmd.toLowerCase();
+  if (subCmd != "status" && !currentExecIsAdmin()) return kCommandReplyLoggingAdminRequired;
 
   // Handle 'status' subcommand: the text, or one JSON object with
   // 'status json'. Both print from one SensorLogStatus reading.
@@ -2440,9 +2433,6 @@ static const char* healthLoggingSet(bool on) {
   };
 
   if (on) {
-    if (!gSettings.sensorLogEnabled) {
-      return "Error: sensor logging is disabled — run 'sensorlogenabled 1' first";
-    }
     setSetting(gSettings.healthLoggingEnabled, true);
     // Capture BEFORE the OR: the "already logging" shortcut below must only
     // fire when R1 was ALREADY in the mask. Otherwise `healthlogging on` during
@@ -2541,6 +2531,7 @@ const char* cmd_healthlogging(const String& argsInput) {
     return getDebugBuffer();
   }
   String sub = a.arg(0); sub.toLowerCase();
+  if (sub != "status" && !currentExecIsAdmin()) return kCommandReplyLoggingAdminRequired;
   if (sub == "status") {
     snprintf(getDebugBuffer(), 1024,
              "Health logging: %s (setting=%s, r1_mask=%s, logging=%s, poll=%us, path=%s)",
@@ -2974,7 +2965,6 @@ const size_t healthCommandsCount = sizeof(healthCommands) / sizeof(healthCommand
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry sensorLogSettingEntries[] = {
-  { "sensorLogEnabled", SETTING_BOOL, &gSettings.sensorLogEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "sensorlogenabled" },
   { "sensorLogAutoStart",    SETTING_BOOL,   &gSettings.sensorLogAutoStart,    0, 0, nullptr, 0, 1,       "Auto-start logging after boot", nullptr, false, nullptr, "sensorlog autostart" },
 #if ENABLE_R1_HEALTH
   { "healthLoggingEnabled", SETTING_BOOL, &gSettings.healthLoggingEnabled, 0, 0, nullptr, 0, 1, "Health logging", nullptr, false, nullptr, "healthlogging" },

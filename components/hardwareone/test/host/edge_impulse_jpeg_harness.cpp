@@ -314,14 +314,6 @@ static void scenarioParity() {
           "both paths fill the same input tensor");
   eiCheck(trackedAfterCamera == 2 && gTrackedObjectCount == 2, "only the camera path tracks objects");
 
-  gSettings.eiEnabled = false;
-  const EiResults cameraOff = runEdgeImpulseInference();
-  const EiResults fileOff = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));
-  eiCheck(!cameraOff.success && !fileOff.success, "disabled refuses both paths");
-  eiCheck(cameraOff.errorMessage && fileOff.errorMessage &&
-          std::strcmp(cameraOff.errorMessage, fileOff.errorMessage) == 0, "same disabled error");
-  gSettings.eiEnabled = true;
-
   unloadModel();
   const EiResults cameraNone = runEdgeImpulseInference();
   const EiResults fileNone = runInferenceFromFile("/images/frame.jpg", VFS::systemAuth("test.caller"));

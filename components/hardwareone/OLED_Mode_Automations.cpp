@@ -523,7 +523,7 @@ static bool wizHandleInput(uint32_t newlyPressed) {
 // ============================================================================
 
 void prepareAutomationData() {
-  if (!gSettings.automationEnabled) {
+  if (!automationSchedulerRunning()) {
     autoRenderData.valid = false;
     autoRenderData.count = 0;
     return;
@@ -579,13 +579,13 @@ void displayAutomations() {
   if (oledKeyboardDrawIfActive(oledDisplay)) return;
   if (sWizStep != AW_NONE) { wizDraw(); return; }
 
-  if (!gSettings.automationEnabled) {
+  if (!automationSchedulerRunning()) {
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     oledDisplay->setCursor(4, OLED_CONTENT_START_Y + 8);
-    oledDisplay->println("Automations disabled");
+    oledDisplay->println("Automations stopped");
     oledDisplay->setCursor(4, OLED_CONTENT_START_Y + 22);
-    oledDisplay->println("Press X to enable");
+    oledDisplay->println("Press X to start");
     return;
   }
 
@@ -830,7 +830,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
 
   // A = Run selected automation, or start the create wizard on the "+ New" row.
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {
-    if (gSettings.automationEnabled && autoRenderData.selectedIdx == autoRenderData.count) {
+    if (automationSchedulerRunning() && autoRenderData.selectedIdx == autoRenderData.count) {
       wizResetAll();
       wizStartKeyboard(AW_NAME, "Name:", false);
       return true;
@@ -838,9 +838,9 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
     autoRunSelected();
     return true;
   }
-  // X = Enable system if disabled, or toggle selected automation
+  // X = Start the scheduler if stopped, or toggle selected automation
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_X)) {
-    if (!gSettings.automationEnabled) {
+    if (!automationSchedulerRunning()) {
       oledRunCommand("automation system enable");
       autoForceRefresh = true;
       return true;
@@ -850,7 +850,7 @@ static bool automationsInputHandler(int deltaX, int deltaY, uint32_t newlyPresse
   }
   // Y = Delete selected automation (guarded by the global confirm overlay)
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_Y)) {
-    if (gSettings.automationEnabled && autoRenderData.count > 0 &&
+    if (automationSchedulerRunning() && autoRenderData.count > 0 &&
         autoRenderData.selectedIdx < autoRenderData.count) {
       const AutomationSummary& sel = autoRenderData.items[autoRenderData.selectedIdx];
       sPendingDeleteId = sel.id;

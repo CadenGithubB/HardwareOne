@@ -529,10 +529,10 @@ static void caseSetPattern() {
 }
 
 static void casePlainRequest() {
-  // oledenabled and openoled reach requestOledMode() on cmd_exec.
+  // openoled reaches requestOledMode() on cmd_exec.
   resetCase(OLED_MENU);
   onExec();
-  requestOledMode(OLED_SYSTEM_STATUS, "cmd.oledenabled.forceDefault", false);
+  requestOledMode(OLED_SYSTEM_STATUS, "cmd.openoled", false);
   check(currentOledMode == OLED_MENU && gOnEnterCalls == 0 && gGuestReads == 0,
         "off-owner requestOLEDMode must not transition, run onEnter or read the display "
         "role before the owner frame");

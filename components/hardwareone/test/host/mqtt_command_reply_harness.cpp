@@ -121,7 +121,7 @@ static MqttCommandReply* admittedReply(const char* user, const char* cmd,
   return reply;
 }
 
-// A command that stops MQTT (closemqtt, "mqttclientenabled 0") requests the
+// A command that stops MQTT (closemqtt) requests the
 // stop on cmd_exec before its completion runs. Its reply must leave before
 // the completion releases the admission, because the main loop tears the
 // client down on its next pass and the outbox goes with it.

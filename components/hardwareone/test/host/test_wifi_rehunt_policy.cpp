@@ -239,19 +239,17 @@ static void failedConnectWaitsForTheRadio() {
   CHECK(p.poll(offline(1), Policy::kFirstDelayMs + 1000), "it runs once the radio is free");
 }
 
-// Every combination of the five inputs: only enabled + autostart + stopped +
-// not user-closed + not the boot connect's join starts the server.
+// Every combination of the four inputs: only autostart + stopped + not
+// user-closed + not the boot connect's join starts the server.
 static void servicesTruthTable() {
   int starts = 0;
-  for (int bits = 0; bits < 32; ++bits) {
+  for (int bits = 0; bits < 16; ++bits) {
     WifiServicesInputs in;
-    in.httpEnabled = bits & 1;
-    in.autostart = bits & 2;
-    in.running = bits & 4;
-    in.userClosed = bits & 8;
-    in.bootConnectActive = bits & 16;
-    const bool expected = in.httpEnabled && in.autostart && !in.running && !in.userClosed &&
-                          !in.bootConnectActive;
+    in.autostart = bits & 1;
+    in.running = bits & 2;
+    in.userClosed = bits & 4;
+    in.bootConnectActive = bits & 8;
+    const bool expected = in.autostart && !in.running && !in.userClosed && !in.bootConnectActive;
     const bool got = wifiServicesShouldStartHttp(in);
     CHECK(got == expected, "services decision matches the rule");
     starts += got;

@@ -659,7 +659,7 @@ function toggleAutoStart() {
     alert(text);
     updateAutoStartStatus();
   })
-  .catch(e => alert('Error toggling auto-start: ' + e.message));
+  .catch(e => hw.showCliError(e.message));
 }
 </script>
 
@@ -701,7 +701,7 @@ async function startLogging() {
   })
   .catch(e => {
     console.error('[LOGGING] Section 6g: Start logging error:', e);
-    alert('Error: ' + e.message);
+    hw.showCliError(e.message);
   });
 }
 console.log('[LOGGING] Section 6h: startLogging defined');
@@ -725,7 +725,7 @@ async function stopLogging() {
   })
   .catch(e => {
     console.error('[LOGGING] Section 7f: Stop logging error:', e);
-    alert('Error: ' + e.message);
+    hw.showCliError(e.message);
   });
 }
 console.log('[LOGGING] Section 7g: stopLogging defined');
@@ -786,6 +786,7 @@ function applyConfig() {
       console.error('[LOGGING] Section 8h: Command', index + 1, 'error:', e);
       hw.$('config-status').textContent = 'Error: ' + e.message;
       hw.$('config-status').style.color = 'var(--danger)';
+      hw.showCliError(e.message);
     });
   }
   
@@ -983,7 +984,7 @@ function startSystemLogging() {
   })
   .catch(e => {
     console.error('[LOGGING] Start error:', e);
-    alert('Error: ' + e.message);
+    hw.showCliError(e.message);
   });
 }
 
@@ -999,7 +1000,7 @@ async function stopSystemLogging() {
   })
   .catch(e => {
     console.error('[LOGGING] Stop error:', e);
-    alert('Error: ' + e.message);
+    hw.showCliError(e.message);
   });
 }
 
@@ -1046,6 +1047,7 @@ function applySystemConfig() {
     console.error('[LOGGING] Save system config error:', e);
     status.textContent = /^error/i.test(e.message) ? e.message : 'Error: ' + e.message;
     status.style.color = 'var(--danger)';
+    hw.showCliError(e.message);
   });
 }
 
@@ -1178,7 +1180,7 @@ function toggleSystemAutoStart() {
     alert(text);
     updateSystemAutoStartStatus();
   })
-  .catch(e => alert('Error toggling system log auto-start: ' + e.message));
+  .catch(e => hw.showCliError(e.message));
 }
 
 console.log('[LOGGING] Section 13a: System logging functions defined');

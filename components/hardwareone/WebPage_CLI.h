@@ -271,8 +271,9 @@ function executeCommand(){
   if (cliOutput) { cliOutput.textContent += ('$ ' + pendingDisplay + '\n'); }
   try { console.debug('[CLI] fetch start: ' + pendingDisplay); } catch(_){}
   // This is the human terminal. Other /api/cli users default to machine mode
-  // so their polls/buttons cannot answer a pending confirmation.
-  hw.postForm('/api/cli', { cmd: command, capture: '1', interactive: '1' })
+  // so their polls/buttons cannot answer a pending confirmation. The reply,
+  // a refusal included, prints in the terminal, so no refusal toast.
+  hw.postForm('/api/cli', { cmd: command, capture: '1', interactive: '1' }, { hwQuietRefusal: true })
   .then(function(r){ var helpState=__helpStateFromResponse(r); var display=__cliReplyDisplay(r,command); return r.text().then(function(text){ return {result:text,helpState:helpState,display:display,status:r.status,ok:r.ok}; }); })
   .then(function(reply){
     if(responseGeneration!==cliResponseGeneration){ return; }

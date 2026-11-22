@@ -58,25 +58,47 @@ OUT_REFERENCE = REPO / "docs" / "COMMAND_REFERENCE.md"
 # (REMOVED_NAMES) and checks that the two agree and that no string sends a
 # removed name; this audit fails when one is a registry row again.
 RETIRED_NAMES = {
+    "apdsenabled": "apdsautostart",
     "automationadd": "automation add",
     "automationrun": "automation run",
     "automationtrigger": "automation trigger",
+    "bleenabled": "bleautostart",
     "bleread": "blestatus",
     "c6_console": "c6console",
+    "cameraenabled": "cameraautostart",
     "debugespnow": "debugespnowcore",
+    "eienable": "eiautostart",
+    "espnowenabled": "espnowautostart",
     "espnowread": "espnowstatus",
+    "fmradioenabled": "fmradioautostart",
     "g2ai-direct": "g2aidirect",
     "g2ai-noask": "g2ainoask",
+    "gpsenabled": "gpsautostart",
+    "httpenabled": "httpautostart",
     "httpread": "httpstatus",
+    "imuenabled": "imuautostart",
+    "inputenabled": "inputautostart",
+    "llmenabled": "llmautostart",
+    "micenabled": "micautostart",
+    "mqttclientenabled": "mqttautostart",
+    "oledenabled": "oledautostart",
     "oledread": "oledstatus",
     "oledstart": "openoled",
     "oledstop": "closeoled",
+    "presenceenabled": "presenceautostart",
     "ring panel off": "ring panel feed",
     "ring panel on": "ring panel feed",
+    "rtcenabled": "rtcautostart",
+    "sensorlogenabled": "sensorlog autostart",
     "sleep": "wait",
+    "srenabled": "srautostart",
     "srstart": "opensr",
     "srstop": "closesr",
+    "systemlogenabled": "log autostart",
+    "thermalenabled": "thermalautostart",
+    "tofenabled": "tofautostart",
     "validate-conditions": "validateconditions",
+    "wifienabled": "wifiautostart",
     "wifiread": "wifistatus",
 }
 
@@ -88,14 +110,12 @@ SHARED_STUB_HANDLERS = {"phoneNotBuilt", "unavailable"}
 # for a stated reason. Every entry is an open owner question; the audit fails
 # when an entry no longer saves a switch, so the list cannot go stale.
 OPEN_PERSISTENT_SWITCHES = {
-    "healthlogging": "R1 health logging toggle on the G2, OLED and web Health "
-                     "pages; its status verb shares the row (owner question 4, "
-                     "behaviour batch 2026-11-20, command-names)",
-    "gpslog": "starts GPS and the logger, then saves both boot autostarts "
-              "(owner question 4, behaviour batch 2026-11-20, command-names)",
-    "batterylog": "on/off saves the battery log switch; its status, tail and "
-                  "clear verbs share the row (owner question 4, behaviour "
-                  "batch 2026-11-20, command-names)",
+    "healthlogging": "the row stays open for its status verb; every other verb "
+                     "refuses an account below admin in the handler (logging is "
+                     "admin-only, owner decision 2026-11-21)",
+    "batterylog": "the row stays open for its status and tail verbs; on, off, "
+                  "interval and clear refuse an account below admin in the "
+                  "handler (logging is admin-only, owner decision 2026-11-21)",
 }
 
 

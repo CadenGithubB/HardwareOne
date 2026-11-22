@@ -206,7 +206,7 @@ void i2cTransactionNackTolerant(uint8_t bus, uint8_t address, uint32_t clockHz,
 // If remaining stack drops below 5% of total, the sensor is auto-disabled and
 // the standard shutdown path at the top of the task loop handles cleanup.
 //
-// Usage:  if (checkTaskStackSafety("presence", stackWords, &presenceEnabled)) break;
+// Usage:  if (checkTaskStackSafety("presence", stackWords, &gPresenceRunning)) break;
 //
 // Returns true if the task should exit (enabled flag was set to false).
 inline bool checkTaskStackSafety(const char* sensorName, uint32_t totalStackWords, volatile bool* enabledFlag) {
@@ -272,7 +272,6 @@ enum class SensorStartRefusal : uint8_t {
   NoAck,
   ProbeFailed,
   NotQueued,
-  Disabled,
 };
 bool requestSensorStart(I2cDeviceType sensor, const char* eventTag, SensorStartRefusal* why);
 const char* sensorStartRefusalText(SensorStartRefusal why);

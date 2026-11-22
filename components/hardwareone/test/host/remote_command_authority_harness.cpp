@@ -234,6 +234,11 @@ bool parseMacAddress(const String& text, uint8_t mac[6]) {
 }
 void broadcastOutput(const String& line) { gBroadcasts.push_back(line.str()); }
 
+// The G2 EvenAI openmic exception in authorizeCommand reads the executing
+// command's context; these suites never run under one.
+struct CommandContext { uint32_t behaviorFlags = 0; };
+enum : uint32_t { COMMAND_CONTEXT_REQUIRE_G2_EVENAI_AUTHORITY = 1u << 2 };
+static void* currentCommandContext() { return nullptr; }
 // INSERT_PRODUCTION
 
 // The remote routing of executeCommand, unchanged, after the line was
@@ -398,29 +403,31 @@ static void caseUnknownHereRefused() {
 }
 
 // The peer sensor toggles stay open to every signed-in, non-guest caller.
-static void caseSensorTogglesStayOpen() {
-  const AuthContext callers[] = {
+// Sensor open/close is admin-only (1.0 role tiers), so the bond page's and
+// the OLED bond screen's peer sensor toggles are no longer open to any
+// signed-in account: every remote:/@ line needs a local administrator.
+static void caseSensorTogglesNeedAdmin() {
+  const AuthContext users[] = {
       who(SOURCE_WEB, "alice"),
       who(SOURCE_LOCAL_DISPLAY, "AuthBypass", "oled"),
       who(SOURCE_LOCAL_DISPLAY, "alice", "oled"),
       who(SOURCE_INTERNAL, "alice", "/automation"),
-      who(SOURCE_WEB, "root"),
   };
-  for (const AuthContext& ctx : callers) {
+  for (const AuthContext& ctx : users) {
     for (const char* id : kSenderSensorIds) {
       const std::string open = std::string("remote:open") + id;
       const std::string close = std::string("remote:close") + id;
-      expectSent(ctx, open.c_str(), open.c_str() + 7);
-      expectSent(ctx, close.c_str(), close.c_str() + 7);
+      expectAdminRefusal(ctx, open.c_str());
+      expectAdminRefusal(ctx, close.c_str());
     }
   }
-  const AuthContext alice = who(SOURCE_WEB, "alice");
-  expectSent(alice, "@opentof", "opentof");
-  expectSent(alice, "remote closeimu", "closeimu");
-  expectSent(alice, "remote:  openthermal  ", "openthermal");
-  expectSent(alice, "remote:OPENGPS", "OPENGPS");
-  expectSent(alice, "remote:openapds", "openapds");
-  expectSent(alice, "remote:closefmradio", "closefmradio");
+  const AuthContext root = who(SOURCE_WEB, "root");
+  for (const char* id : kSenderSensorIds) {
+    const std::string open = std::string("remote:open") + id;
+    expectSent(root, open.c_str(), open.c_str() + 7);
+  }
+  expectSent(root, "@opentof", "opentof");
+  expectSent(root, "remote:  openthermal  ", "openthermal");
 }
 
 // Administrators keep the whole remote surface; the registry flags still
@@ -524,7 +531,7 @@ static void caseBondNotReady() {
          describe("no token", o));
   reset();
   gSettings.bondPeerMac = "";
-  o = run(who(SOURCE_WEB, "alice"), "remote:openthermal");
+  o = run(who(SOURCE_WEB, "root"), "remote:openthermal");
   checkd(o.result == 0 && gFrames.empty() && o.reply == "Error: Invalid bonded peer MAC",
          describe("no peer", o));
 }
@@ -564,7 +571,7 @@ int main(int argc, char** argv) {
   static const Case kCases[] = {
       {"user_cannot_use_bond_authority", caseUserCannotUseBondAuthority},
       {"unknown_here_refused", caseUnknownHereRefused},
-      {"sensor_toggles_stay_open", caseSensorTogglesStayOpen},
+      {"sensor_toggles_need_admin", caseSensorTogglesNeedAdmin},
       {"administrators_keep_remote", caseAdministratorsKeepRemote},
       {"guest_and_unknown_account", caseGuestAndUnknownAccount},
       {"nested_refusal_first", caseNestedRefusalFirst},

@@ -8,6 +8,7 @@
 #include "System_VFS.h"
 #include "System_TaskUtils.h"  // taskStackRecord — taskstats stack-size registry
 #include "System_MemUtil.h"  // ps_alloc — PSRAM-first HTTP download chunk
+#include <atomic>
 #include <strings.h>   // strcasecmp (used by the always-compiled viewer below)
 
 // Exposed to System_I2C.cpp status builder so UI can gate SD-dependent
@@ -52,6 +53,10 @@ static const char* VIDEO_FOLDER_SD = "/sd/VIDEOS";
 
 // ── Public state ────────────────────────────────────────────────────────────
 bool videoRecording = false;
+static std::atomic<uint32_t> sVideoRecordingGeneration{0};
+uint32_t videoRecordingGeneration() {
+  return sVideoRecordingGeneration.load(std::memory_order_acquire);
+}
 
 // Serializes start/stop so G2 stream + web CLI can't double-open an AVI
 // or spawn two cam_record tasks (TOCTOU on videoRecording alone).
@@ -583,6 +588,7 @@ bool startVideoRecording(const char** why) {
   s_moviPayloadBytes = 0;
   s_startMs = millis();
   s_lastSaved = false;
+  sVideoRecordingGeneration.fetch_add(1, std::memory_order_acq_rel);
   videoRecording = true;
   // The recorder task ends this session when it exits.
   cameraSessionBegin(CameraSessionKind::Recording);

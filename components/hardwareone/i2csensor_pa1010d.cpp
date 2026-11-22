@@ -593,7 +593,6 @@ int getGpsSatellites() {
 // GPS settings entries
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry gpsSettingEntries[] = {
-  { "gpsEnabled", SETTING_BOOL, &gSettings.gpsEnabled, 1, 0, nullptr, 0, 1, "Enabled", nullptr, false, nullptr, "gpsenabled" },
   { "gpsAutoStart", SETTING_BOOL, &gSettings.gpsAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "gpsautostart" },
   { "gpsDevicePollMs", SETTING_INT, &gSettings.gpsDevicePollMs, 200, 0, nullptr, 50, 10000, "Poll Interval (ms)", nullptr, false, nullptr, "gpsdevicepollms" },
 };
@@ -661,9 +660,6 @@ const char* cmd_gpslog(const String& argsInput) {
     intervalMs = (uint32_t)parsed;
   }
 
-  if (!gSettings.sensorLogEnabled) {
-    return "Error: sensor logging is disabled - run 'sensorlogenabled 1' first";
-  }
   if (gSensorLoggingRunning) {
     return "Error: Sensor logging already running. Use 'sensorlog stop' first.";
   }
@@ -726,15 +722,15 @@ static const char* cmd_gpsbus(const String& a) {
 
 const CommandEntry gpsCommands[] = {
   // 3-level voice: "sensor" -> "GPS" -> "open/close"
-  { "opengps", "Start PA1010D GPS module.", false, cmd_gpsstart },
-  { "closegps", "Stop PA1010D GPS module.", false, cmd_gpsstop },
+  { "opengps", "Start PA1010D GPS module.", true, cmd_gpsstart },
+  { "closegps", "Stop PA1010D GPS module.", true, cmd_gpsstop },
   { "gpsread", "Read GPS location and time data. (add 'json' for JSON output)", false, cmd_gps },
   
   // Auto-start
   { "gpsautostart", "Enable/disable GPS auto-start after boot [on|off]", true, cmd_gpsautostart, "Usage: gpsautostart [on|off]" },
 
   // One-shot GPS logging setup; receiver initialization remains asynchronous.
-  { "gpslog", "Set up and start GPS track logging now (persists across boots). Usage: gpslog [interval_ms]", false, cmd_gpslog,
+  { "gpslog", "Set up and start GPS track logging now (persists across boots). Usage: gpslog [interval_ms]", true, cmd_gpslog,
     "Usage: gpslog [interval_ms]\n"
     "  Requests GPS startup, selects GPS-only Track format, and starts the logger.\n"
     "  GPS initializes in the background.\n"

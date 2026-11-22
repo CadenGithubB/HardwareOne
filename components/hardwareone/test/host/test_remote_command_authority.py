@@ -59,7 +59,7 @@ ROUTING_MARKER = "// ===== REMOTE COMMAND ROUTING ====="
 CASES = (
     "user_cannot_use_bond_authority",
     "unknown_here_refused",
-    "sensor_toggles_stay_open",
+    "sensor_toggles_need_admin",
     "administrators_keep_remote",
     "guest_and_unknown_account",
     "nested_refusal_first",
@@ -142,8 +142,13 @@ def generate(read) -> str:
     pieces += [
         unique(utils, "enum class SessionControlForm", "System_Utils.cpp") + ";",
         unique(utils, "static SessionControlForm classifySessionControlLine(", "System_Utils.cpp"),
-        unique(utils, "static bool authorizeCommand(", "System_Utils.cpp"),
     ]
+    # The role half authorizeCommand shares with automation save (since
+    # 2026-11-21); an older tree has it inline.
+    if "static CommandRoleRefusal commandRoleRefusal(" in utils:
+        pieces.append(unique(command_header, "enum class CommandRoleRefusal", "System_Command.h") + ";")
+        pieces.append(unique(utils, "static CommandRoleRefusal commandRoleRefusal(", "System_Utils.cpp"))
+    pieces.append(unique(utils, "static bool authorizeCommand(", "System_Utils.cpp"))
     if "static bool authorizeRemoteCommand(" in utils:
         pieces.append(unique(utils, "static bool authorizeRemoteCommand(", "System_Utils.cpp"))
     constants = re.findall(r"^static constexpr char kRemoteSent\w+\[\] = .*;$", utils, re.M)
@@ -244,8 +249,8 @@ def main() -> None:
         for failure in failures:
             print(f"FAIL {failure}", file=sys.stderr)
         raise SystemExit("remote_command_authority: FAILED")
-    print("remote_command_authority: remote:/@ needs a local administrator except the peer sensor "
-          "toggles; admin replies, nested refusal and redaction unchanged")
+    print("remote_command_authority: remote:/@ needs a local administrator, peer sensor "
+          "toggles included; admin replies, nested refusal and redaction unchanged")
 
 
 if __name__ == "__main__":

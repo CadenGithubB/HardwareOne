@@ -24,6 +24,10 @@
 // stopVideoRecording. Start/stop are serialized (mutex) so G2 stream and
 // web CLI cannot double-open an AVI.
 extern bool videoRecording;
+// Counts recordings started since boot; changes with every start, whoever
+// started it (camerarecord, the G2 Rec row). Who may stop the running one is
+// decided against it (System_Camera_DVP.cpp cmd_camerarecord).
+uint32_t videoRecordingGeneration();
 
 // Start a new recording. Creates /sd/videos/ if missing, opens an AVI file,
 // writes the header skeleton, and spawns the recorder task.

@@ -71,14 +71,15 @@ static void oledToastShow(const char* message, uint32_t /*durationMs*/ = 3000,
 }
 
 // oledCommandReplyText (OLED_Utils.cpp) for a failed command, on the real
-// oled_message::reason(): the reply loses its error token and keeps its first
-// line, and a reply without a reason gets the fallback. The admin gate's fixed
-// text is not reached from the file browser (AdminOnly has its own toast); the
-// real function has its cases in oled_command_feedback_harness.cpp.
+// oled_message::reason(): the admin gate's sentence becomes "Needs an admin",
+// any other reply loses its error token and keeps its first sentence, and a
+// reply without a reason gets the fallback. The real function has its cases in
+// oled_command_feedback_harness.cpp.
 [[maybe_unused]] static void oledCommandReplyText(bool, const char* reply, const char*, const char* failText,
                                                   char* out, size_t outSize) {
+  if (commandReplyIsAdminRefusal(reply)) { std::snprintf(out, outSize, "Needs an admin"); return; }
   const char* reason = oled_message::reason(reply ? reply : "");
-  const size_t lineLength = std::strcspn(reason, "\r\n");
+  const size_t lineLength = oled_message::firstSentenceLength(reason);
   if (lineLength == 0) std::snprintf(out, outSize, "%s", failText ? failText : "");
   else std::snprintf(out, outSize, "%.*s", static_cast<int>(lineLength), reason);
 }
@@ -135,6 +136,10 @@ static void executorRefusals() {
         "Error: Admin access required for command 'filerename'. Contact an administrator.");
   CHECK(fbRenameSelected(String("b.txt")) == FbMutateResult::AdminOnly);
   CHECK(fileManager.rescans == 0);
+  // Its toast is the shared short refusal of the kept reply.
+  lastToast.clear();
+  fbToastMutate(FbMutateResult::AdminOnly, "Renamed", "Rename failed");
+  CHECK(lastToast == "Needs an admin");
 
   // Guest refusal and handler errors are plain failures.
   reset("/notes/a.txt", false, "Error: Guest accounts are view-only. Only local login/logout and whoami are allowed.");
@@ -174,8 +179,6 @@ static void pathPolicyRefusal() {
   lastToast.clear();
   fbToastMutate(FbMutateResult::NoAccess, "Deleted", "Delete failed");
   CHECK(lastToast == "Not found or denied");
-  fbToastMutate(FbMutateResult::AdminOnly, "Deleted", "Delete failed");
-  CHECK(lastToast == "Admin only");
   // A failure toasts the kept reply of the delete above.
   fbToastMutate(FbMutateResult::Failed, "Deleted", "Delete failed");
   CHECK(lastToast == "Failed to delete file (denied or fs error): File does not exist or access denied");

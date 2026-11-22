@@ -153,7 +153,11 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
     if (VFS::existsGuarded(status_.path, ctx)) return fail("Transcript filename already exists");
   }
   if (!first && !VFS::existsGuarded(status_.path, ctx)) return fail("Transcript file missing");
-  File file = VFS::openGuarded(status_.path, first ? "w" : "a", ctx, true);
+  // The owner creates the file. Accounts below admin never write to an
+  // existing file (the path rules), so the session's later appends to the file
+  // it created run as the system, confined to that owner's folder.
+  const AuthContext appender = VFS::systemAuth(folder, "transcript append");
+  File file = VFS::openGuarded(status_.path, first ? "w" : "a", first ? ctx : appender, true);
   if (!file || file.isDirectory()) return fail("Cannot open transcript file");
   if (!first && file.size() != status_.bytes) {
     file.close();

@@ -11,7 +11,7 @@ setSetting is a double that records whether a write ran inside a command or
 directly from the OLED task.
 
 The cases check that the "Power Saving" row submits `powersave <next step>`
-instead of writing the setting: a non-admin is refused ("Admin required" toast,
+instead of writing the setting: a non-admin is refused ("Needs an admin" toast,
 value kept), an admin's press moves along the preset ladder with one audit
 record and no direct write, a guest is still blocked, and the other rows run
 their commands as before. Static checks: no OLED_Mode_*.cpp calls setSetting

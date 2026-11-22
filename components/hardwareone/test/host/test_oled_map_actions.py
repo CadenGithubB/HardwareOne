@@ -51,6 +51,16 @@ def plain_define_lines(source: str, *prefixes: str) -> str:
                      if not line.rstrip().endswith("\\"))
 
 
+def reply_text(component: Path) -> list[str]:
+    """The shared OLED refusal text (OLED_Utils.cpp oledCommandReplyText) that
+    the track actions toast, on the real OLED_MessageText.h."""
+    utils = (component / "OLED_Utils.cpp").read_text()
+    if "void oledCommandReplyText(" not in utils:
+        return []
+    return [f'#include "{component / "OLED_MessageText.h"}"',
+            extract_block(utils, "void oledCommandReplyText(")]
+
+
 def map_actions_unit(component: Path) -> str:
     oled = (component / "OLED_Mode_Map.cpp").read_text()
     maps_h = (component / "System_Maps.h").read_text()
@@ -93,6 +103,7 @@ def map_actions_unit(component: Path) -> str:
         # goBackToMainMenu plus whatever helpers sit before the submenu dispatch.
         between(oled, "// Go back to main menu from submenu",
                 "// Execute submenu action based on current submenu type and selection"),
+        *reply_text(component),
         extract_block(oled, "static void executeSubmenuAction("),
         extract_block(oled, "static void executeMainMenuAction("),
         extract_block(oled, "static void executeMapMenuAction("),

@@ -34,6 +34,7 @@
 
 #include "G2_Glasses.h"
 #include "G2_HijackCmd.h"
+#include "G2_ReplyNotice.h"    // g2ReplyNoticeText: the lens words of a refusal
 #include "G2_Page_Common.h"    // g2ShowListPageAndPublish
 #include "System_Debug.h"
 #include "System_Power.h"      // getPowerModeName / getPowerModeCpuFreq / POWER_MODE_*
@@ -234,8 +235,12 @@ static void powerClearResult(uint32_t menuGen) {
 static bool powerPublishResult(const G2CmdCookie& cookie, PowerLevel level,
                                const char* message) {
   char copy[POWER_ROW_LEN] = {};
+  char refusal[kG2NoticeMax];
   if (message) {
-    message = commandReplyReason(message);
+    // A reply with a failure lead reads as the shared lens text ("Needs a
+    // super admin", or its first sentence); other text keeps its words.
+    if (g2ReplyNoticeText(/*ok=*/true, message, refusal, sizeof(refusal))) message = refusal;
+    else message = commandReplyReason(message);
     snprintf(copy, sizeof(copy), "%s", message);
   }
   bool published = false;

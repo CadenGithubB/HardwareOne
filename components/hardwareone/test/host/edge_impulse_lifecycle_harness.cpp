@@ -104,26 +104,26 @@ static void scenarioStopStart() {
   tearDown();
 }
 
-// `eienable 0` while the continuous task is inside Invoke: the interpreter
+// `eimodelunload` while the continuous task is inside Invoke: the interpreter
 // stays alive until that frame ends, then the task exits and the model goes.
-static void scenarioEnableOffDuringInvoke() {
+static void scenarioUnloadDuringInvoke() {
   setUp(100);
   startWithBlockedFrame();
   std::atomic<bool> finished{false};
   std::thread off([&finished] {
-    cmd_ei_enable(String("0"));
+    cmd_ei_model_unload(String(""));
     finished = true;
   });
   sleepMs(200);
-  eiCheck(!gFakeDestroyedDuringInvoke, "eienable 0 does not free the interpreter under Invoke");
+  eiCheck(!gFakeDestroyedDuringInvoke, "eimodelunload does not free the interpreter under Invoke");
   eiCheck(gFakeLiveInterpreters.load() == 1, "interpreter alive while its frame runs");
-  eiCheck(!finished, "eienable 0 waits for the running frame");
+  eiCheck(!finished, "eimodelunload waits for the running frame");
   gFakeReleaseInvoke = true;
   off.join();
   eiCheck(!gFakeDestroyedDuringInvoke, "frame finished before the free");
   eiCheck(!isEdgeImpulseModelLoaded() && gFakeLiveInterpreters.load() == 0, "model unloaded afterwards");
   eiCheck(noTaskLeft(100), "continuous task exited");
-  eiCheck(!gSettings.eiEnabled && !gSettings.edgeImpulseContinuous, "disabled and continuous off");
+  eiCheck(!gSettings.edgeImpulseContinuous, "continuous off");
   tearDown();
 }
 
@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
   const std::string scenario = argv[2];
   const std::map<std::string, void (*)()> scenarios = {
     {"stop_start", scenarioStopStart},
-    {"enable_off_during_invoke", scenarioEnableOffDuringInvoke},
+    {"unload_during_invoke", scenarioUnloadDuringInvoke},
     {"load_during_invoke", scenarioLoadDuringInvoke},
     {"detect_during_continuous", scenarioDetectDuringContinuous},
     {"unload_during_detect", scenarioUnloadDuringDetect},

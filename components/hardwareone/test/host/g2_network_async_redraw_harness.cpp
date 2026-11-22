@@ -87,6 +87,11 @@ static String operator+(const String& left, const char* right) {
 static bool inTask = false;
 static uint32_t now = 1000;
 uint32_t millis() { return now; }
+// Lens notice boundary (G2_HijackCmd.h): no refusal is pending in these
+// cases, so every back row keeps its label.
+void g2LensNoticeBackRow(G2HijackPage, const char* label, char* out, size_t cap) {
+  if (label != out) std::snprintf(out, cap, "%s", label);
+}
 struct Event { uint32_t at; void (*run)(); bool done; };
 static Event events[8]{};
 static size_t eventCount = 0;
@@ -204,7 +209,7 @@ struct FakeWiFi {
   String SSID() const { return String("HomeNet"); }
 } WiFi;
 static bool wifiRadioOn() { return radioOn; }
-struct { bool wifiEnabled = true; bool wifiAutoStart = false; int bleMode = 1; } gSettings;
+struct { bool wifiAutoStart = false; int bleMode = 1; } gSettings;
 struct WifiNetworkSnapshot { int count = 0; };
 
 static bool ringClientActive = true;
