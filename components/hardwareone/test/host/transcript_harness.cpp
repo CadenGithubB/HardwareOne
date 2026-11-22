@@ -51,6 +51,7 @@ namespace VFS {
  static std::map<std::string,std::string> files;
  static std::set<std::string> folders;
  static uint64_t available=1000000;
+ static size_t logReserveBytes(){return 100*1024;}  // the shared LittleFS reserve
  static bool sd=false,sdPresent=true,statsOk=true,denyMkdir=false;
  static unsigned sdFailures=0,notedBytes=0;
  // Fresh readings (a whole-volume walk on the device) and cached-figure reads.

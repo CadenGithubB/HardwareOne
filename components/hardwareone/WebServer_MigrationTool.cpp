@@ -432,6 +432,10 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   if (wantSettings) {
     addFileToBackup(files, warnings, HW1_SETTINGS_JSON_PATH);
     addFileToBackup(files, warnings, HW1_DEBUG_JSON_PATH);  // debug flags live in their own file now — bundle with "settings"
+    // G-31: the device notification policy (per-kind levels) is configuration
+    // too. A device that never changed a level has no file: no warning then.
+    if (VFS::existsGuarded(HW1_NOTIFICATIONS_JSON_PATH, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "migration.backup")))
+      addFileToBackup(files, warnings, HW1_NOTIFICATIONS_JSON_PATH);
   }
   if (wantUsers) {
     addFileToBackup(files, warnings, HW1_USERS_JSON_PATH);
@@ -669,7 +673,7 @@ static bool restorePathAllowed(const String& path) {
   const char* p = path.c_str();
   static const char* const kExact[] = { HW1_SETTINGS_JSON_PATH, HW1_DEBUG_JSON_PATH, HW1_USERS_JSON_PATH,
                                         HW1_BOOT_ANCHORS_JSON_PATH, HW1_AUTOMATIONS_JSON_PATH,
-                                        HW1_ESPNOW_DEVICES_JSON_PATH };
+                                        HW1_ESPNOW_DEVICES_JSON_PATH, HW1_NOTIFICATIONS_JSON_PATH };
   for (const char* exact : kExact) if (strcmp(p, exact) == 0) return true;
   static const char* const kTrees[] = { HW1_USER_SETTINGS_DIR, "/system/certs", MAPS_DIR };
   for (const char* tree : kTrees) {

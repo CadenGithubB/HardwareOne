@@ -195,6 +195,7 @@ enum StorageType { INTERNAL, SDCARD };
 static bool sdWritable = false, sdPresent = true, statsOk = true, failRename = false, denyMkdir = false, denyOpen = false;
 static bool failRemove = false;
 static uint64_t freeBytes = 1 << 20;
+static size_t logReserveBytes() { return 100 * 1024; }  // the shared LittleFS reserve
 static StorageType statsTier = INTERNAL;
 static unsigned sdFailures = 0, notedBytes = 0, denials = 0, opens = 0, systemAuths = 0, guardedCalls = 0;
 static unsigned removeCalls = 0;
@@ -492,10 +493,10 @@ static void test_create_refusals() {
       probe.words = noteWordCount(kText, std::strlen(kText));
       char head[QuickNotePolicy::kHeaderMax];
       const size_t bytes = noteFormatHeader(probe, head, sizeof(head)) + std::strlen(kText);
-      VFS::freeBytes = QuickNoteStore::kReserveBytes + bytes + 256;
+      VFS::freeBytes = VFS::logReserveBytes() + bytes + 256;
       assert(save(3) && countFiles(".txt") == 1);
       reset();
-      VFS::freeBytes = QuickNoteStore::kReserveBytes + bytes + 255;
+      VFS::freeBytes = VFS::logReserveBytes() + bytes + 255;
     }
     if (name == "stats") VFS::statsOk = false;
     if (name == "mkdir") VFS::denyMkdir = true;
@@ -769,7 +770,7 @@ static void test_read_and_remove() {
 
 static void test_room_and_stamp() {
   reset();
-  const uint64_t need = QuickNoteStore::kReserveBytes + QuickNotePolicy::kHeaderMax +
+  const uint64_t need = VFS::logReserveBytes() + QuickNotePolicy::kHeaderMax +
                         QuickNotePolicy::kMaxNoteBytes + 256;
   const char* why = nullptr;
   VFS::freeBytes = need;
@@ -969,7 +970,7 @@ static void test_restamp() {
     const std::string name = f.name;
     if (name == "busy") lockAvailable = false;
     if (name == "short read") shortRead = true;
-    if (name == "below reserve") VFS::freeBytes = QuickNoteStore::kReserveBytes + data.size() + 12 + 255;
+    if (name == "below reserve") VFS::freeBytes = VFS::logReserveBytes() + data.size() + 12 + 255;
     if (name == "stats") VFS::statsOk = false;
     if (name == "open") VFS::denyOpen = true;
     if (name == "short header") shortWrite = writes + 1;
@@ -996,7 +997,7 @@ static void test_restamp() {
   // Exactly the reserve plus the copy plus the margin is enough.
   reset();
   boot = bootNote(0x57);
-  VFS::freeBytes = QuickNoteStore::kReserveBytes + tree.at(boot).data.size() + 12 + 256;
+  VFS::freeBytes = VFS::logReserveBytes() + tree.at(boot).data.size() + 12 + 256;
   assert(restamping("alice", boot, kLater));
 }
 
@@ -1198,7 +1199,7 @@ static void test_capacity_readings() {
   // A cached figure below the reserve refuses the save before anything is written.
   reset();
   VFS::cacheSet = true;
-  VFS::cachedFree = QuickNoteStore::kReserveBytes + 100;
+  VFS::cachedFree = VFS::logReserveBytes() + 100;
   const char* why = nullptr;
   assert(!QuickNoteStore::hasRoom(&why) && !std::strcmp(why, "Note storage full or unavailable"));
   assert(!save(0x921, nullptr, &why) && !std::strcmp(why, "Note storage full or unavailable"));

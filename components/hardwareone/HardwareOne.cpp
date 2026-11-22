@@ -1077,6 +1077,17 @@ void perfPrintLoopHealth() {
                        w.inLoop ? kLoopSectionNames[w.dom] : "outside sections (blocked/preempted)");
     }
   }
+  // S-14: who holds the filesystem lock, so a stall can be tied to a holder.
+  FsLockHolderInfo fsHold;
+  fsLockHolder(&fsHold);
+  const char* longestBy = fsHold.longestOwner[0] ? fsHold.longestOwner : "-";
+  if (fsHold.owner[0]) {
+    BROADCAST_PRINTF("[PERFTOP] FS lock: held by %s for %lu ms | longest hold since boot: %lu ms (%s)",
+                     fsHold.owner, (unsigned long)fsHold.heldMs, (unsigned long)fsHold.longestMs, longestBy);
+  } else {
+    BROADCAST_PRINTF("[PERFTOP] FS lock: free | longest hold since boot: %lu ms (%s)",
+                     (unsigned long)fsHold.longestMs, longestBy);
+  }
 }
 
 // Struct-read accessor for the loop-health snapshot — the OLED perf screen

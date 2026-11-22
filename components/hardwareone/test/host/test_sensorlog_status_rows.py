@@ -46,8 +46,9 @@ def upload_contracts(component: Path) -> None:
     require(not re.search(r"\bsize_t\s+(?:freeBytes|maxFileSize|estimatedFileSize|freeLimit)\b", handler),
             "upload admission keeps a size in size_t (32 bits on the device)")
     for line in ("const uint64_t estimatedFileSize = rawBody ? (uint64_t)contentLen : ((uint64_t)contentLen * 3) / 4;",
-                 "const uint64_t maxFileSize = (freeBytes64 * 9) / 10;",
-                 "const uint64_t freeLimit = freeBytes64;",
+                 "const uint64_t reserve64 = uploadStorage == VFS::SDCARD ? 0 : (uint64_t)VFS::logReserveBytes();",
+                 "const uint64_t maxFileSize = freeBytes64 > reserve64 ? freeBytes64 - reserve64 : 0;",
+                 "const uint64_t freeLimit = maxFileSize;",
                  "if (estimatedFileSize > maxFileSize) {"):
         require(line in handler, f"upload admission lost: {line}")
     stats = handler.index("VFS::getStats(uploadStorage, totalBytes64, usedBytes64, freeBytes64);")

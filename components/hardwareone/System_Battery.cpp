@@ -505,6 +505,9 @@ const char* cmd_battery_calibrate(const String&) {
 static const char*  kBatteryLogPath         = "/battery.csv";
 static const size_t kBatteryLogMaxSize       = 65536;  // 64 KB before rotation
 static const int    kBatteryLogMaxRotations  = 2;      // keep .1 and .2
+// UP-16: rows not written because LittleFS was below the shared reserve
+// (VFS::logReserveBytes) this boot. Shown by `batterylog status` when not zero.
+static uint32_t sBatteryLogReserveSkips = 0;
 
 // Build + append one CSV row. `event` is the event-column token: "" for a
 // periodic sample, or a short tag (e.g. "powersave:enter", "cpufreq:80MHz") for
@@ -535,6 +538,17 @@ static void batteryLogAppend(const char* event) {
            state.chargingKnown ? (state.isCharging ? "1" : "0") : "",
            state.usbKnown ? (state.usbPresent ? "1" : "0") : "",
            event ? event : "");
+
+  // UP-16: /battery.csv is on LittleFS and has no SD mirror. Below the shared
+  // reserve the row is skipped and counted (as the system log does), so the
+  // log never spends the space settings, accounts and automations are saved
+  // in. The stored free figure the capped logs refresh: no volume walk on the
+  // main loop (SIZE_MAX, not yet sampled, writes).
+  if (VFS::peekLittleFsFree() < VFS::logReserveBytes()) {
+    ++sBatteryLogReserveSkips;
+    VFS::noteLogReserveDrop();
+    return;
+  }
 
   FsLockGuard appendGuard("batlog.append");
   // trusted: the system owns its own infrastructure log. Both the periodic
@@ -579,6 +593,7 @@ static void batteryLogAppend(const char* event) {
     const bool complete = writeLineChecked(f, (const uint8_t*)line, len, written);
     const size_t sz = f.size();
     f.close();
+    VFS::noteLittleFsBytesWritten(written);  // keeps the cached free figure honest
     if (!complete && isDebugFlagSet(DEBUG_STORAGE)) {
       DEBUGF_QUEUE(DEBUG_STORAGE, "Battery log: row write failed (%u/%u bytes)",
                        (unsigned)written, (unsigned)(len + 1));
@@ -750,10 +765,15 @@ const char* cmd_batterylog(const String& argsInput) {
   else snprintf(reading, sizeof(reading), "Measurement unavailable%s", state.stale ? " (stale)" : "");
   // The deferral line appears only when a periodic sample had to wait for the
   // filesystem this boot.
-  char deferred[64] = "";
+  char deferred[128] = "";
   if (sBatteryLogLockMisses != 0) {
     snprintf(deferred, sizeof(deferred), "\n  filesystem busy: %lu sample(s) deferred",
              (unsigned long)sBatteryLogLockMisses);
+  }
+  if (sBatteryLogReserveSkips != 0) {
+    const size_t used = strlen(deferred);
+    snprintf(deferred + used, sizeof(deferred) - used, "\n  flash low: %lu row(s) skipped to keep the reserve free",
+             (unsigned long)sBatteryLogReserveSkips);
   }
   snprintf(getDebugBuffer(), 1024,
            "Battery log: %s | file %s (%u B) | interval %lu s\n"

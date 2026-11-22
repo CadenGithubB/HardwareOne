@@ -551,8 +551,10 @@ bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,
                          char* outPath, size_t outPathLen);
 
 /** The LittleFS free-space floor the overflow latch keeps for non-log writes
- *  (settings, users, automations). Writers that never use the SD mirror (the
- *  `log start` system log) check it directly. */
+ *  (settings, users, automations): the one shared reserve (FILE-3). Writers
+ *  that never use the SD mirror (the `log start` system log, the battery log)
+ *  and the writers of whole files (photos, transcripts, QuickNotes, web
+ *  uploads) check it directly. */
 size_t logReserveBytes();
 
 /** Count one log line a writer dropped because resolveLogPath returned
@@ -613,8 +615,8 @@ enum class BulkFigure : uint8_t { Peek, Refresh, RefreshIfShort };
  *  estimate that shows less room than that is replaced by a fresh reading
  *  before `roomBytes` is filled in.
  *  A refusal is counted (bulkWriteRefusals) and logged with `why`, at most one
- *  line per 10 s. It changes nothing for the writers with their own reserve
- *  checks (transcripts, QuickNotes, photos, uploads). */
+ *  line per 10 s. The writers with their own free-space checks (transcripts,
+ *  QuickNotes, photos, web uploads) keep the same reserve, logReserveBytes(). */
 bool admitBulkWrite(StorageType tier, size_t bytes, const char* why,
                     BulkFigure figure = BulkFigure::Peek, size_t* roomBytes = nullptr,
                     size_t wantBytes = 0);

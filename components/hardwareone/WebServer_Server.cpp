@@ -2250,8 +2250,11 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   // free-space figure wraps above 4 GiB and "free * 9" wraps above ~477 MiB.
   // Estimate actual file size from content length (remove ~33% base64 + URL-encoding overhead)
   const uint64_t estimatedFileSize = rawBody ? (uint64_t)contentLen : ((uint64_t)contentLen * 3) / 4;
-  // Dynamic limit: 90% of free space (leave headroom for filesystem metadata)
-  const uint64_t maxFileSize = (freeBytes64 * 9) / 10;
+  // FILE-3: on LittleFS an upload may use only what is free above the shared
+  // reserve (VFS::logReserveBytes, 100 KB) that settings, accounts and
+  // automations are saved in. A card keeps no reserve: its whole free figure.
+  const uint64_t reserve64 = uploadStorage == VFS::SDCARD ? 0 : (uint64_t)VFS::logReserveBytes();
+  const uint64_t maxFileSize = freeBytes64 > reserve64 ? freeBytes64 - reserve64 : 0;
 
   DEBUG_STORAGEF("[handleFileUpload] Content-Length: %u bytes (est file: %llu), free space: %llu, max: %llu, heap=%u",
                  (unsigned)contentLen, (unsigned long long)estimatedFileSize, (unsigned long long)freeBytes64,
@@ -2264,7 +2267,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     char errBuf[128];
     snprintf(errBuf, sizeof(errBuf),
              "{\"success\":false,\"error\":\"File too large (~%.1fMB). Free: %.1fMB\"}",
-             estimatedFileSize / (1024.0 * 1024.0), freeBytes64 / (1024.0 * 1024.0));
+             estimatedFileSize / (1024.0 * 1024.0), maxFileSize / (1024.0 * 1024.0));  // usable: above the reserve
     httpd_resp_send(req, errBuf, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
@@ -2300,8 +2303,8 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   size_t outLen = 0;
   size_t totalWritten = 0;
 
-  // Track free space to abort if we exceed available FS space (already computed above)
-  const uint64_t freeLimit = freeBytes64;
+  // Abort once the body passes what the admission allowed (above the reserve).
+  const uint64_t freeLimit = maxFileSize;
   bool outOfSpace = false;
 
   // No filesystem lock is held across the network receive: a slow or stalled
@@ -3457,6 +3460,9 @@ static esp_err_t handleLoggingStatus(httpd_req_t* req) {
   results.add(timeBuf);
   results.add(sensorBuf);
   results.add(logBuf);
+  // FILE-5: a card is in, so the Log Viewer offers its copy of the log
+  // folders (logs move there when flash runs low).
+  doc["sd"] = VFS::isSdAvailable();
   // The saved System Logging options, so the Configuration pane opens on
   // them: tags, and the categories the next plain `log start` uses. Admin
   // only, like /api/debug/flags that renders the category grid.

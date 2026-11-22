@@ -319,7 +319,10 @@ inline void streamLoggingInner(httpd_req_t* req) {
     <div style='margin-bottom:1rem'>
       <div style='display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5rem'>
         <label style='color:var(--panel-fg);font-weight:500'>Select Log File:</label>
-        <button class='btn' id='btn-switch-logs' style='display:none;padding:0.25rem 0.75rem;font-size:0.85rem' onclick='switchLogSource()'>View Admin Logs</button>
+        <span>
+          <button class='btn' id='btn-switch-tier' style='display:none;padding:0.25rem 0.75rem;font-size:0.85rem' onclick='switchLogTier()'>View SD Card</button>
+          <button class='btn' id='btn-switch-logs' style='display:none;padding:0.25rem 0.75rem;font-size:0.85rem' onclick='switchLogSource()'>View Admin Logs</button>
+        </span>
       </div>
       <div id='log-viewer-file-explorer' style='margin-top:0.5rem'></div>
     </div>
@@ -421,6 +424,8 @@ window.onload = function() {
     // Dedicated status endpoint (replaces CLI batch so guests can load the page)
     hw.fetchJSON('/api/logging/status')
     .then(function(data) {
+      // FILE-5: logs move to the card when flash runs low; offer that copy.
+      if (data && data.sd === true) hw.$('btn-switch-tier').style.display = '';
       if (data && data.systemLog) {  // saved options; admins only
         gSysLogSaved = data.systemLog;
         applySavedSystemLogConfig();
@@ -1623,6 +1628,11 @@ function updateViewerStats() {
   }
 }
 
+// The folder the viewer browses: the tier ('' flash, '/sd' the card's copy,
+// where logs go once flash runs low) plus the kind (captures, or the system
+// logs for admins). FILE-5.
+var currentLogTier = '';
+var currentLogKind = '/logging_captures';
 var currentLogSource = '/logging_captures';  // Track current log source
 
 function populateLogViewerFileList() {
@@ -1651,21 +1661,31 @@ function populateLogViewerFileList() {
   }
 }
 
-function switchLogSource() {
-  // Toggle between /logging_captures and /system/sys_logs
-  if (currentLogSource === '/logging_captures') {
-    currentLogSource = '/system/sys_logs';
-    hw.$('btn-switch-logs').textContent = 'View User Logs';
-  } else {
-    currentLogSource = '/logging_captures';
-    hw.$('btn-switch-logs').textContent = 'View Admin Logs';
-  }
-  
+function reloadLogSource() {
+  currentLogSource = currentLogTier + currentLogKind;
   // Reload file explorer with new source
   populateLogViewerFileList();
-  
   // Clear current log viewer
   hw.$('viewer-content').innerHTML = '<div style="padding:1rem;color:var(--panel-fg)">Select a log file to view</div>';
+}
+
+function switchLogSource() {
+  // Toggle between /logging_captures and /system/sys_logs (on the same tier)
+  if (currentLogKind === '/logging_captures') {
+    currentLogKind = '/system/sys_logs';
+    hw.$('btn-switch-logs').textContent = 'View User Logs';
+  } else {
+    currentLogKind = '/logging_captures';
+    hw.$('btn-switch-logs').textContent = 'View Admin Logs';
+  }
+  reloadLogSource();
+}
+
+function switchLogTier() {
+  // Toggle between flash and the SD card's copy of the same folder
+  currentLogTier = currentLogTier ? '' : '/sd';
+  hw.$('btn-switch-tier').textContent = currentLogTier ? 'View Flash' : 'View SD Card';
+  reloadLogSource();
 }
 
 console.log('[LOGGING] Section 14a: Log viewer functions defined');
