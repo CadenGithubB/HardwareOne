@@ -91,6 +91,10 @@ void loadAndIncrementBootSeq();
  * @return true if initialized successfully
  */
 bool initFilesystem();
+// After initFilesystem() failed: what went wrong and how to fix it, one
+// sentence for the FATAL line (no partition, a partition that does not mount,
+// or a blank one that could not be formatted). "" before any failure.
+const char* filesystemMountFailureHelp();
 
 // ============================================================================
 // File Permissions and Protection

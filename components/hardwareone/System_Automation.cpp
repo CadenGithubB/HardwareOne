@@ -54,6 +54,7 @@
 #include "System_Mutex.h"          // SensorCacheGuard (was pulled in transitively before 71bcd2c)
 
 #include "i2csensor_apds9960.h"
+#include "i2csensor_sths34pf80.h"  // presenceCacheSnapshot: the MOTION condition
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_vl53l4cx.h"
 
@@ -1511,6 +1512,24 @@ static void automationVolatileSweep(bool begin) {
   taskEXIT_CRITICAL(&sVolatileScheduleMux);
 }
 
+// A file that does not parse (cut short by a power loss, or edited by hand)
+// runs no automation. Said once per episode: the cache is rebuilt on every
+// full tick. The file is left in place, and edits refuse it ("parse error"),
+// so it can still be fetched and repaired or deleted.
+static bool sAutomationsParseFailReported = false;
+
+static void reportAutomationsParseFailure(DeserializationError err) {
+  if (err == DeserializationError::NoMemory) return;  // a heap shortage, not a damaged file
+  if (sAutomationsParseFailReported) return;
+  sAutomationsParseFailReported = true;
+  ERROR_SYSTEMF("[automations] %s does not parse (%s): no automation runs. Fix it (Files page, "
+                "'fileview') or delete it ('filedelete'); the next scheduler pass reads it again.",
+                AUTOMATIONS_JSON_FILE, err.c_str());
+  logSystemEvent("AUTO", "%s does not parse (%s): no automation runs", AUTOMATIONS_JSON_FILE, err.c_str());
+  systemEventPost(SYSEVT_CONFIG_FILE_CORRUPT, AUTOMATIONS_JSON_FILE,
+                  "does not parse - no automation runs, file left in place");
+}
+
 // Re-read automations.json and refill the cache. Called at the end of the
 // full tick so post-fire nextAt updates are captured on the same pass.
 static void rebuildAutomationsCache() {
@@ -1520,10 +1539,12 @@ static void rebuildAutomationsCache() {
     return;
   }
   PSRAM_JSON_DOC(doc);
-  if (deserializeJson(doc, json)) {
+  if (DeserializationError err = deserializeJson(doc, json)) {
+    reportAutomationsParseFailure(err);
     markAutomationsCacheEmptyValid();
     return;
   }
+  sAutomationsParseFailReported = false;
   AutomationStateGuard guard;
   // A stop may complete while the file is being read/parsed. Do not recreate
   // its released cache or publish into freed storage after that point.
@@ -4468,9 +4489,6 @@ bool evaluateCondition(const char* condition) {
  #else
     return false;
  #endif
-  } else if (strcmp(sensor, "HUMIDITY") == 0) {
-    DEBUG_AUTOMATIONSF("[condition] Humidity sensor not available");
-    return false;
   } else if (strcmp(sensor, "DISTANCE") == 0) {
     // Special handling for distance - check if ANY valid object meets the condition
     float targetValue = atof(value);
@@ -4521,17 +4539,22 @@ bool evaluateCondition(const char* condition) {
     return false;
  #endif
   } else if (strcmp(sensor, "MOTION") == 0) {
+    // The STHS34PF80 presence sensor's motion flag (the APDS9960's proximity
+    // is distance, not motion). False without that sensor or a live reading.
     isNumeric = false;
- #if ENABLE_APDS_SENSOR
-    ApdsCache apds{};
-    if (!apdsCacheSnapshot(apds, 50) || !apds.apdsDataValid) return false;
-    strlcpy(currentStringValue, (apds.apdsProximity > 50) ? "DETECTED" : "NONE", sizeof(currentStringValue));
+ #if ENABLE_PRESENCE_SENSOR
+    PresenceCache presence{};
+    if (!presenceCacheSnapshot(presence, 50) || !presence.dataValid) return false;
+    strlcpy(currentStringValue, presence.motionDetected ? "DETECTED" : "NONE", sizeof(currentStringValue));
  #else
     return false;
  #endif
   } else if (strcmp(sensor, "TIME") == 0) {
+    // TIME, HOUR and DAY need a clock that holds a real date: at the boot epoch
+    // (1970) they would name a time of day no one chose.
     isNumeric = false;
     time_t now = time(nullptr);
+    if (!Clock::isValidEpoch(now)) return false;
     struct tm* timeinfo = localtime(&now);
     int hour = timeinfo->tm_hour;
     if (hour >= 6 && hour < 12) strlcpy(currentStringValue, "MORNING", sizeof(currentStringValue));
@@ -4610,8 +4633,9 @@ bool evaluateCondition(const char* condition) {
     if (!SelfDevice::chipTemperatureC(tc)) return false;
     currentValue = tc;
   } else if (strcmp(sensor, "HOUR") == 0) {
-    // Local hour of day 0-23 (reflects boot epoch until the clock is synced)
+    // Local hour of day 0-23; false until the clock holds a real date
     time_t now = time(nullptr);
+    if (!Clock::isValidEpoch(now)) return false;
     struct tm* ti = localtime(&now);
     currentValue = (float)ti->tm_hour;
   } else if (strcmp(sensor, "RSSI") == 0) {
@@ -4688,9 +4712,10 @@ bool evaluateCondition(const char* condition) {
     isNumeric = false;
     strlcpy(currentStringValue, Clock::isSynced() ? "SYNCED" : "NONE", sizeof(currentStringValue));
   } else if (strcmp(sensor, "DAY") == 0) {
-    // Day of week -> SUN..SAT (tm_wday is 0=Sunday)
+    // Day of week -> SUN..SAT (tm_wday is 0=Sunday); false until the clock holds a real date
     isNumeric = false;
     time_t now = time(nullptr);
+    if (!Clock::isValidEpoch(now)) return false;
     struct tm* ti = localtime(&now);
     static const char* const kDays[] = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
     int wd = ti->tm_wday;

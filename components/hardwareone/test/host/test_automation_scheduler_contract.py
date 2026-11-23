@@ -114,9 +114,11 @@ rebuild = function_body(automation, "static void rebuildAutomationsCache()")
 read_failure = function_body(
     rebuild, "if (!readAutomationsJson(json))"
 )
-parse_failure = function_body(rebuild, "if (deserializeJson(doc, json))")
+parse_failure = function_body(rebuild, "if (DeserializationError err = deserializeJson(doc, json))")
 assert "markAutomationsCacheEmptyValid();" in read_failure
 assert "markAutomationsCacheEmptyValid();" in parse_failure
+# G-38: the parse failure is reported (once per episode; the harness runs it).
+assert "reportAutomationsParseFailure(err);" in parse_failure
 
 # The full scheduler reads the file before reaching its trailing rebuild.  Its
 # early read-failure path must therefore publish the same valid-empty state or

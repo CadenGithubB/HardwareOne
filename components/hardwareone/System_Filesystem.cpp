@@ -135,6 +135,10 @@ static void cleanupBootTemporaryFiles() {
   }
 }
 
+static const char* sFsMountFailureHelp = "";
+
+const char* filesystemMountFailureHelp() { return sFsMountFailureHelp; }
+
 bool initFilesystem() {
   ESP_LOGI("FS", "Initializing LittleFS...");
   delay(50);  // Allow USB serial to attach before early boot logs
@@ -153,7 +157,11 @@ bool initFilesystem() {
     // firmware). Corruption of real data still fails closed, exactly as before.
     const esp_partition_t* part = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, kLittleFsPartitionLabel);
-    if (part && littlefsPartitionIsBlank(part)) {
+    if (!part) {
+      sFsMountFailureHelp =
+          "This image's partition table has no 'littlefs' data partition: flash the full image for this "
+          "board (tools/build_board.sh <board> -p PORT flash).";
+    } else if (littlefsPartitionIsBlank(part)) {
       ESP_LOGW("FS", "LittleFS partition is blank (erased) — formatting once for first boot");
       logSystemEvent("FS", "LittleFS blank after erase — formatting for first boot");
       mounted = LittleFS.begin(true, "/littlefs", 10, kLittleFsPartitionLabel);
@@ -163,7 +171,23 @@ bool initFilesystem() {
       } else {
         ESP_LOGE("FS", "LittleFS format failed on a blank partition");
         logSystemEvent("FS", "LittleFS format FAILED on blank partition");
+        sFsMountFailureHelp =
+            "The blank 'littlefs' partition could not be formatted: check the board file's flash size "
+            "against the chip, then erase and flash again (tools/build_board.sh <board> -p PORT "
+            "erase-flash, then flash).";
       }
+    } else {
+#if HW1_OTA_LAYOUT
+      sFsMountFailureHelp =
+          "The 'littlefs' partition holds data that does not mount; it was not formatted, so the data is "
+          "kept. This recovery layout tries the recovery updater next (docs/OTA_DEVICE_SETUP.md).";
+#else
+      sFsMountFailureHelp =
+          "The 'littlefs' partition holds data that does not mount (another firmware or layout wrote it, "
+          "or it is damaged); it was not formatted, so the data is kept. To start over, erase the board "
+          "and flash again: tools/build_board.sh <board> -p PORT erase-flash, then flash. This removes "
+          "settings, accounts and logs (docs/QUICKSTART.md).";
+#endif
     }
   }
 

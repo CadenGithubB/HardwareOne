@@ -271,17 +271,6 @@ target_include_directories(device_name_core_tests PRIVATE ../..)
 target_compile_options(device_name_core_tests PRIVATE
   -Wall -Wextra -Werror -pedantic)
 
-# The device name's once-only move from the old ESP-NOW and Bluetooth names
-# (devicename::pickLegacy, System_DeviceNameLegacy.h): settings files written
-# before and by the rename, with the vendored ArduinoJson; invalid old names
-# convert, a stored device name is never replaced, the old keys leave the file.
-add_executable(device_name_migration_tests test_device_name_migration.cpp)
-set_target_properties(device_name_migration_tests PROPERTIES
-  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
-target_include_directories(device_name_migration_tests PRIVATE ../..)
-target_include_directories(device_name_migration_tests SYSTEM PRIVATE ../../../hardwareone_libs/ArduinoJson/src)
-target_compile_options(device_name_migration_tests PRIVATE -Wall -Wextra -Werror -pedantic)
-
 # The MQTT state document and Home Assistant discovery configs
 # (System_MQTTPayloadCore.h) with the vendored ArduinoJson: free text escaped
 # and UTF-8, every HA template reads a key the sensor builders send, units
@@ -1836,7 +1825,6 @@ add_test(NAME heap_low_core_tests COMMAND heap_low_core_tests)
 add_test(NAME system_metrics_core_tests COMMAND system_metrics_core_tests)
 add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
 add_test(NAME device_name_core_tests COMMAND device_name_core_tests)
-add_test(NAME device_name_migration_tests COMMAND device_name_migration_tests)
 add_test(NAME mqtt_payload_core_tests COMMAND mqtt_payload_core_tests)
 add_test(NAME espnow_channel_core_tests COMMAND espnow_channel_core_tests
          ${CMAKE_CURRENT_LIST_DIR}/../../System_ESPNow.cpp

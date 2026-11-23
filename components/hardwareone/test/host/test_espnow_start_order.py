@@ -3,7 +3,7 @@
 
 Compiled part: extracts the production Settings::MeshIdentity record and, from
 System_ESPNow.cpp, meshFingerprintForLabel, recomputeAllMeshFingerprints,
-initPrimaryMeshFromLegacySettings and the PrimaryMeshBootstrap guard, and runs
+initPrimaryMesh and the PrimaryMeshBootstrap guard, and runs
 start attempts against a Settings double (compiled once with
 ENABLE_BONDED_MODE 1 and once with 0): a start that fails leaves slot 0 empty
 (no "primary", flags and bond fields as before, a passphrase and key it held
@@ -39,7 +39,7 @@ HERE = Path(__file__).resolve().parent
 # Each marker stops before the opening brace: extract_block takes the first "{" after it.
 BASE = (
     'static void meshIdRefreshAll()',
-    'static void initPrimaryMeshFromLegacySettings()',
+    'static void initPrimaryMesh()',
 )
 BOOTSTRAP = 'class PrimaryMeshBootstrap '
 
@@ -99,7 +99,7 @@ def main():
     check('A2 the device-name check refuses the start before anything is allocated',
           init.count('checkEspNowFirstTimeSetup()') == 1 and name_check < first_alloc and name_check < cache_clear)
     check('A3 initEspNow does not run the slot 0 bootstrap outside the guard',
-          'initPrimaryMeshFromLegacySettings()' not in init and 'recomputeAllMeshFingerprints()' not in init and
+          'initPrimaryMesh()' not in init and 'recomputeAllMeshFingerprints()' not in init and
           'meshIdRefreshAll()' not in init)
     check('A4 the guard runs after esp_now_init and before the callbacks are registered',
           init.count('PrimaryMeshBootstrap meshBootstrap;') == 1 and

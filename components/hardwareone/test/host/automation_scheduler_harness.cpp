@@ -69,6 +69,22 @@ static const char* systemEventKindName(uint8_t kind) {
 static constexpr size_t SYSEVT_DETAIL_LEN = 80;
 static const char* AUTOMATIONS_JSON_FILE = "/automations.json";
 #define DEBUG_AUTOMATIONSF(...) do {} while (false)
+// G-38: what a file that does not parse is reported through (one system log
+// line and one config_file_corrupt event per episode).
+static constexpr uint8_t SYSEVT_CONFIG_FILE_CORRUPT = 3;
+static std::atomic<unsigned> corruptEvents{0}, autoLogLines{0};
+[[maybe_unused]] static void systemEventPost(uint8_t kind, const char* subject, const char*) {
+  CHECK(kind == SYSEVT_CONFIG_FILE_CORRUPT && std::strcmp(subject, AUTOMATIONS_JSON_FILE) == 0);
+  ++corruptEvents;
+}
+// Exactly the parse-failure line's arguments (the file and the parser's
+// error), not a general double: automation_store_mutations appends its own
+// recording logSystemEvent for the store owner's lines, and a general one here
+// would take those calls from it.
+[[maybe_unused]] static void logSystemEvent(const char* tag, const char*, const char* file, const char* error) {
+  CHECK(std::strcmp(tag, "AUTO") == 0 && std::strcmp(file, AUTOMATIONS_JSON_FILE) == 0 && error && error[0]);
+  ++autoLogLines;
+}
 
 // The event ring boundary: the record, ring and lock are stubs; the real
 // systemEventLatestSeq() and systemEventFetchSince() are inserted below.
@@ -1177,6 +1193,31 @@ static void uptimeSchedule() {
 #endif
 }
 
+// G-38: an automations.json that does not parse runs nothing, and says so
+// once per episode, not on every cache rebuild (one per full tick). A file
+// that parses again ends the episode, so the next damage is reported again.
+static void parseFailureReportedOnce() {
+  auto store = [](const char* json) { std::lock_guard<std::mutex> lock(storeMutex); storeJson = json; };
+  reset(emptyRules);
+  CHECK(startAutomationScheduler());
+  rebuildAutomationsCache();  // a good parse: no episode is open
+  corruptEvents = autoLogLines = 0;
+  store("{broken");
+  for (int i = 0; i < 3; ++i) rebuildAutomationsCache();
+  CHECK(corruptEvents == 1 && autoLogLines == 1);
+  CHECK(gAutomationsCacheValid && gAutomationsCacheCount == 0);  // nothing runs, and no reread every loop
+  CHECK(storeJson == "{broken");  // the file is left in place
+  store(emptyRules);
+  rebuildAutomationsCache();
+  CHECK(corruptEvents == 1 && autoLogLines == 1);
+  store("[1,");
+  rebuildAutomationsCache();
+  rebuildAutomationsCache();
+  CHECK(corruptEvents == 2 && autoLogLines == 2);
+  store(emptyRules);
+  rebuildAutomationsCache();
+}
+
 // A clock trigger that has no next run gets its first one once the clock is
 // set (automationSeedFirstRuns, called by the pass for every enabled
 // automation while the clock is set). `automation add` stores no next run
@@ -1272,6 +1313,7 @@ int main() {
   eventDrainFromStart();
   summaries();
   lifecycle();
+  parseFailureReportedOnce();
   runsUntilStopped();
   fileFormatVersion();
   timing();

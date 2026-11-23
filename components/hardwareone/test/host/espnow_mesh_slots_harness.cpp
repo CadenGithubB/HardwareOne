@@ -5,7 +5,7 @@
 // production marker: the mesh-id helpers (refresh, snapshot, clash slot, the
 // boot clash resolution, fingerprintForPeer, staging and commit), the
 // meshes settings writer and reader, setEspNowPassphrase,
-// initPrimaryMeshFromLegacySettings, the start-passphrase and hint helpers, the
+// initPrimaryMesh, the start-passphrase and hint helpers, the
 // espnowmeshes subcommands (add, remove, delete, enable, setdefault,
 // setpassphrase, listjson) with the delete guard's counters, the helpers that
 // keep the running instance on the passphrase a start would load, the device
@@ -68,8 +68,16 @@ struct Settings {
   bool bondModeEnabled = false;
   uint8_t bondRole = 0;
   String bondPeerMac;
+  // The mesh role in use and what espnowmeshrole shows beside it.
+  uint8_t meshRole = 0;
+  String meshMasterMac;
+  bool meshBackupEnabled = false;
+  String meshBackupMac;
 };
 static Settings gSettings;
+// A backup master promoted by failover (espnowMeshesWriteJson keeps its saved role).
+enum MeshRole : uint8_t { MESH_ROLE_WORKER = 0, MESH_ROLE_MASTER = 1, MESH_ROLE_BACKUP_MASTER = 2 };
+static bool gBackupPromoted = false;
 
 static int gPersists = 0;
 static bool gPersistOk = true;
@@ -90,6 +98,14 @@ static void setSetting(bool& field, bool value) {
   field = value;
   ++gPersists;
 }
+// The role setter: like the real setSetting, an unchanged value saves nothing.
+static int gRoleSaves = 0;
+static void setSetting(uint8_t& field, uint8_t value) {
+  if (field == value) return;
+  field = value;
+  ++gRoleSaves;
+}
+static bool argWantsJson(const String& args) { return args == String("json"); }
 
 // Secrets are stored behind a marker, so a check can tell a field that went
 // through putSecret from one written in the clear.
@@ -394,7 +410,7 @@ static void resetNeverStarted() {
 static void startEspNow() {
   gEspNow = &gState;
   if (sEspNowDevicesLoad == ConfigLoad::Status::NotLoaded) sEspNowDevicesLoad = ConfigLoad::Status::AbsentOk;
-  initPrimaryMeshFromLegacySettings();
+  initPrimaryMesh();
 #if HW1_HAVE_LIVE_LOADER
   // initEspNow marks the instance initialized, then loads (pinned there by the runner).
   gState.initialized = true;
@@ -1613,7 +1629,71 @@ static void testPeerAliasRule() {
         "P3 a peer name another device has is taken with a note (%zu lines)", gBroadcasts.size());
 }
 
+// SET-3: a promoted backup master runs as master, but a save keeps the backup role.
+static void testPromotedRoleIsNotSaved() {
+  JsonDocument doc;
+  doc["network"]["espnow"]["mesh"]["meshRole"] = (uint8_t)MESH_ROLE_MASTER;
+  gBackupPromoted = true;
+  espnowMeshesWriteJson(doc, false);
+  CHECK((doc["network"]["espnow"]["mesh"]["meshRole"] | 0) == MESH_ROLE_BACKUP_MASTER,
+        "SET-3 a save while promoted wrote the runtime master role");
+  gBackupPromoted = false;
+  doc["network"]["espnow"]["mesh"]["meshRole"] = (uint8_t)MESH_ROLE_MASTER;
+  espnowMeshesWriteJson(doc, false);
+  CHECK((doc["network"]["espnow"]["mesh"]["meshRole"] | 0) == MESH_ROLE_MASTER,
+        "SET-3 a configured master was saved as something else");
+  JsonDocument bare;
+  gBackupPromoted = true;
+  espnowMeshesWriteJson(bare, false);
+  CHECK(bare["network"].isNull(), "SET-3 a document without the role got one");
+  gBackupPromoted = false;
+}
+
+// SET-3: espnowmeshrole ends a failover promotion, and the role the user
+// chooses is the one a save writes (the running role alone would match
+// "master" and save nothing).
+static void testRoleCommandEndsPromotion() {
+  auto savedRole = []() {
+    JsonDocument doc;
+    doc["network"]["espnow"]["mesh"]["meshRole"] = gSettings.meshRole;  // the registered row, from RAM
+    espnowMeshesWriteJson(doc, false);
+    return (int)(doc["network"]["espnow"]["mesh"]["meshRole"] | 0);
+  };
+  auto promote = []() {
+    gSettings.meshRole = MESH_ROLE_MASTER;
+    gBackupPromoted = true;
+    gRoleSaves = 0;
+  };
+  promote();
+  CHECK(savedRole() == MESH_ROLE_BACKUP_MASTER, "R1 a promoted backup would be saved as master");
+  const char* shown = cmd_espnow_meshrole(String(""));
+  CHECK(std::strstr(shown, "Mesh role: master") && std::strstr(shown, "saved role is backup"),
+        "R1 the status does not say the master role is a promotion: %s", shown);
+  CHECK(gBackupPromoted && gRoleSaves == 0, "R1 showing the role ended the promotion");
+  CHECK(std::strstr(cmd_espnow_meshrole(String("chief")), "Usage: espnowmeshrole") != nullptr &&
+            gBackupPromoted && gSettings.meshRole == MESH_ROLE_MASTER && gRoleSaves == 0,
+        "R2 a refused role changed the promotion");
+  CHECK(std::strcmp(cmd_espnow_meshrole(String("master")), "Role set to master") == 0 && !gBackupPromoted &&
+            gSettings.meshRole == MESH_ROLE_MASTER && gRoleSaves == 1 && savedRole() == MESH_ROLE_MASTER,
+        "R3 'master' on a promoted backup was not saved as master (saves %d)", gRoleSaves);
+  promote();
+  CHECK(std::strcmp(cmd_espnow_meshrole(String("worker")), "Role set to worker") == 0 && !gBackupPromoted &&
+            gSettings.meshRole == MESH_ROLE_WORKER && gRoleSaves == 1 && savedRole() == MESH_ROLE_WORKER,
+        "R4 'worker' on a promoted backup was not saved as worker");
+  promote();
+  CHECK(std::strcmp(cmd_espnow_meshrole(String("backup")), "Role set to backup master") == 0 && !gBackupPromoted &&
+            gSettings.meshRole == MESH_ROLE_BACKUP_MASTER && savedRole() == MESH_ROLE_BACKUP_MASTER,
+        "R5 'backup' on a promoted backup did not return it to the backup role");
+  shown = cmd_espnow_meshrole(String(""));
+  CHECK(std::strstr(shown, "Mesh role: backup") && !std::strstr(shown, "saved role"),
+        "R5 the status of a backup that is not promoted: %s", shown);
+  gSettings.meshRole = 0;
+  gRoleSaves = 0;
+}
+
 int main() {
+  testPromotedRoleIsNotSaved();
+  testRoleCommandEndsPromotion();
   testMeshIds();
   testPeerAliasRule();
   testDeviceNameSetter();

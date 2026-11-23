@@ -14,6 +14,7 @@
 #define ENABLE_GAMEPAD_SENSOR 1
 #define ENABLE_OLED_INPUT 1
 #define ENABLE_APDS_SENSOR 1
+#define ENABLE_PRESENCE_SENSOR 1
 #define LOG_THERMAL 1
 #define LOG_TOF 2
 #define LOG_IMU 4
@@ -74,6 +75,8 @@ static void setup(int state) {
   for(int i=0;i<4;i++) { auto& o=gTofCache.tofObjects[i]; o.valid=i%2==0; o.detected=true; o.distance_mm=135+i*242; o.distance_cm=o.distance_mm/10.0f; o.status=i; }
   gApdsCache.apdsRed=110;gApdsCache.apdsGreen=220;gApdsCache.apdsBlue=330;gApdsCache.apdsClear=440;
   gApdsCache.apdsProximity=77;gApdsCache.apdsGesture=3;
+  // The automation MOTION condition: the presence sensor's motion flag (set in every state but the last).
+  gPresenceCache={}; gPresenceCache.dataValid=state!=1; gPresenceCache.motionDetected=state!=3;
   gRtcCache.dateTime={2026,10,8,23,58,42,5};gRtcCache.temperature=-1.5f;
   gThermalCache.thermalMinTemp=-12.5f;gThermalCache.thermalAvgTemp=23.5f;gThermalCache.thermalMaxTemp=120.5f;
   gInputCache.joyX=state==3 ? 1023 : 512;gInputCache.joyY=0;

@@ -2466,7 +2466,9 @@ redaction and command-authorization suites qualify their own implementations.
 `automation_scheduler` compiles the production scheduler lifecycle, main-task
 poll, cache rebuild and condition backoff with the vendored ArduinoJson parser.
 It checks startup migration and failures, stopped polling, empty/malformed
-stores, clock due times, event throttling, safety polling and millisecond wrap.
+stores (G-38: a file that does not parse is reported once per episode, one
+system log line and one `config_file_corrupt` event however many rebuilds see
+it, the file stays in place, and a good parse ends the episode), clock due times, event throttling, safety polling and millisecond wrap.
 Controlled overlap verifies that refreshes during a rebuild survive and that
 stopping during a read cannot restore a freed cache. Failed file writes leave
 the cached schedule intact. Threaded polling, notifications, event posts and
@@ -3180,7 +3182,9 @@ retained for interface compatibility.
 `sensor_reading_consumers` executes the affected G2 formatters, Bluetooth JSON,
 logging blocks, automation conditions and FM readout using substituted owner
 APIs. It preserves successful output and consumer-specific validity policies;
-owner synchronization is covered by the suites above. These four suites accept
+owner synchronization is covered by the suites above. The automation `MOTION`
+condition reads the presence sensor's motion flag (SEN-8): `DETECTED`, `NONE`,
+and false without a reading or the lock. These four suites accept
 `--baseline /path/to/old/components/hardwareone` for direct comparison with
 pre-change production source. Checked-in output fixtures support ordinary runs.
 
@@ -3349,7 +3353,8 @@ requires migration and Wi-Fi independently of the regular HTTP interface.
 `setup_espnow_application` and `setup_mqtt_application` execute all three production
 serial, CLI-mode and OLED page handlers against a recording draft-owner boundary.
 They cover complete/partial input, blank/early-next fields, stale page scratch,
-back/cancel/timeout, staging refusal, skip behavior, strict MQTT ports and OLED
+back/cancel/timeout, staging refusal (the CLI page then asks for its fields again
+from the label and stages the new answers, SET-5), skip behavior, strict MQTT ports and OLED
 stationary buttons. No page submission writes live settings or starts a service.
 The draft owner itself is qualified by `setup_draft`, rather than copied into the
 adapter fixtures.
@@ -4505,7 +4510,7 @@ the number and the bond master sends it. W5: `espnow_wire_layout` (check_earmark
 
 ## ESP-NOW dispatch policy
 
-`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. TIME_SYNC, SENSOR_STATUS, SENSOR_REQ and SENSOR_ENVELOPE need one too, on a keyed and a keyless device, with no bond partner required; a signed broadcast is not enough for them. Once the device has a mesh passphrase, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. Every zero-flag row is on an explicit allow-list (handshakes, HEARTBEAT, TOPO_*, USER_SYNC); this is a subset check, so later items may only shrink the list (`V4_OPC_LEN_EXACT` is not a policy flag). The length column: every row has a minimum length equal to the 1.0 value in the driver's `EXPECTED_MINLEN` (these never rise), `V4_OPC_LEN_EXACT` is on exactly the six handshake rows, and for every row, with all its policy gates passed, one byte short is dropped before the handler and counted once in `gEspNowRxLenDrops`, the minimum passes, and a longer frame reaches the handler with its length intact (a handshake frame one byte long is dropped). An empty STREAM is dropped and counted (1.0 removed the empty STREAM_BEGIN / STREAM_END markers); a 24-byte SUBSCRIBE_UPDATE with reserved bytes set reaches the subscription store through the real handler, and a 20-byte SESSION_UNKNOWN reaches its rule. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
+`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. TIME_SYNC, SENSOR_STATUS, SENSOR_REQ and SENSOR_ENVELOPE need one too, on a keyed and a keyless device, with no bond partner required; a signed broadcast is not enough for them. Once the device has a mesh passphrase, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. USER_SYNC requires a session-sealed frame (F9): a plaintext or group-signed one from a paired peer reaches no handler, a session-sealed one does. Every zero-flag row is on an explicit allow-list (handshakes, TOPO_*); this is a subset check, so later items may only shrink the list (`V4_OPC_LEN_EXACT` is not a policy flag). The length column: every row has a minimum length equal to the 1.0 value in the driver's `EXPECTED_MINLEN` (these never rise), `V4_OPC_LEN_EXACT` is on exactly the six handshake rows, and for every row, with all its policy gates passed, one byte short is dropped before the handler and counted once in `gEspNowRxLenDrops`, the minimum passes, and a longer frame reaches the handler with its length intact (a handshake frame one byte long is dropped). An empty STREAM is dropped and counted (1.0 removed the empty STREAM_BEGIN / STREAM_END markers); a 24-byte SUBSCRIBE_UPDATE with reserved bytes set reaches the subscription store through the real handler, and a 20-byte SESSION_UNKNOWN reaches its rule. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
 
 ## ESP-NOW fragment reassembly
 
@@ -6178,7 +6183,11 @@ and the HTTPS key pair paths (owner `System_HttpsCertPaths.h`, used by HTTPS sta
 certgen). Each literal appears only in its owner (the web settings page script is the one listed
 exception) and every former site uses the owner's name. It also compiles the owners and the
 extracted certinfo/certgen reply expressions on the host and compares them byte for byte with the
-old values. `--root <repository>` reads another tree; the pre-change tree fails.
+old values. It also pins the OTA result words (N-44): the recovery updater's status carries the
+journal's last result (`resultCode`, `resultSequence`, `resultDetail`), and its `result_name` gives
+every `hw1_ota_result_code_t` value the word System_OTA.cpp's `resultName` gives it (the two
+programs cannot share the function; the updater is not compiled by the firmware builds).
+`--root <repository>` reads another tree; the pre-change tree fails.
 
 ```sh
 python3 components/hardwareone/test/host/test_definition_owners.py
@@ -7363,7 +7372,10 @@ replies to the web page's remote file browser.
 
 `espnow_mesh_slots` runs the production `espnowmeshes` subcommands, the meshes settings writer and reader (with the
 vendored ArduinoJson), the slot 0 bootstrap, the passphrase messages and the device-name setter `devicename` with
-its hand-on `deviceNameApply` (System_DeviceName.cpp) on the production mesh record. The mesh id cases (I1-I8e): a
+its hand-on `deviceNameApply` (System_DeviceName.cpp) on the production mesh record. SET-3: a save while a backup
+master is promoted writes the backup role, and `espnowmeshrole` (run here) says the master role is a promotion,
+ends it for `worker`, `master` and `backup` (the chosen role is what a save then writes) and keeps it for a
+refused role. The mesh id cases (I1-I8e): a
 new mesh has id 0 (`espnowmeshes add fjqo` no longer collides), a passphrase gives the key's id, `setpassphrase`,
 `rename` and `enable` (both the cached-key and the stored-id branch) refuse an id another mesh here has and change
 nothing, a cleared passphrase keeps the id across a restart, and two meshes with one id at boot leave the higher

@@ -1329,23 +1329,8 @@ bool settingsFirmwareVersionRestampPending();
 
 // Re-stamp ONLY firmwareVersion in the on-disk settings document, by rewriting
 // the parsed file rather than rebuilding it from RAM. Safe to call at boot;
-// writeSettingsJson() is not. No-op unless a re-stamp or the device-name move
-// below is pending; the same rewrite carries the move.
+// writeSettingsJson() is not. No-op unless a re-stamp is pending.
 bool settingsRestampFirmwareVersion();
-
-// The device name's once-only move from the names it replaced
-// (System_DeviceNameLegacy.h, System_DeviceName.cpp). readSettingsJson calls
-// deviceNameMigrateLegacy after the registered settings are read: with no
-// device name stored it takes the old ESP-NOW name (else a chosen Bluetooth
-// name), converted to the rule when needed, logs one line and marks the file
-// patch pending. settingsRestampFirmwareVersion applies the patch (the new key
-// set, the old keys removed) to the parsed file and calls
-// deviceNameLegacyPatchSaved once the file is written; every full save removes
-// the old keys too (devicename::removeLegacyKeys).
-void deviceNameMigrateLegacy(const JsonDocument& doc);
-bool deviceNameLegacyPatchPending();
-bool deviceNameLegacyPatch(JsonDocument& doc);
-void deviceNameLegacyPatchSaved();
 // Record that there is no settings.json to protect (first boot / post-erase),
 // which makes RAM the source for a full rewrite. readSettingsJson records its
 // own outcome; until the state is savable (System_ConfigLoad.h) the writer

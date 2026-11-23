@@ -1166,6 +1166,11 @@ void espnowMeshIdsAfterKeyInit();
 
 // The device name's ESP-NOW side ('devicename', System_DeviceName.cpp, is the setter).
 const char* espnowDeviceNameClearRefusal();
+// The rule 'espnowfriendlyname', 'espnowroom' and 'espnowzone' apply (length
+// and the metadata text rule), for the setup wizards' staging: true when
+// `value` may be stored as that field; otherwise `why` gets the refusal.
+enum class EspNowMetaField : uint8_t { FriendlyName, Room, Zone };
+bool espnowMetadataFieldOk(EspNowMetaField field, const char* value, char* why, size_t whyCap);
 void espnowDeviceNameApplied(const String& name);
 // Another device this one knows by `name` (ignoring case), other than the one at
 // `exceptMac`: a paired device's alias or a name a peer announces. `who` gets
