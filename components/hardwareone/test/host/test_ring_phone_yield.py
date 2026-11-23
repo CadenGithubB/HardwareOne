@@ -209,7 +209,7 @@ def check_text(component: Path) -> None:
     withdraw = '(void)bleSetupWithdraw(BleSetupClient::G2, 0);'
     first = disconnect.index(withdraw)
     assert disconnect.index('g2PublishDisconnectIntent(userInitiated);') < first < disconnect.index('if (gConnectTaskActive)')
-    wait = disconnect[disconnect.index('while (gConnectTaskActive && millis() < deadline) {'):]
+    wait = disconnect[disconnect.index('while (gConnectTaskActive && deadlinePending(deadline, millis())) {'):]
     wait = wait[:wait.index('}')]
     assert withdraw in wait and disconnect.count(withdraw) == 2
     # deinitG2Client is glasses-only: it leaves the ring alone and drains only

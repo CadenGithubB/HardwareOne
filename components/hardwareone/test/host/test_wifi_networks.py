@@ -43,7 +43,7 @@ static ObservedNetwork readNetwork(int index) {
   const auto& n = snapshot.entries[index];
   WifiConnectionTarget target;
   assert(wifiNetworkConnectionById(n.id, target) && target.ssid == n.ssid);
-  return {n.ssid, target.password, n.priority, n.hidden, n.lastConnected};
+  return {n.ssid, target.password, n.priority, n.hidden};
 }
 '''
 
@@ -99,7 +99,7 @@ def original_helpers(source_dir):
         'static void initializeNetworks() {}',
         'static int networkCount() { return gWifiNetworkCount; }',
         'static int findNetwork(const String& ssid) { return findWiFiNetwork(ssid); }',
-        'static ObservedNetwork readNetwork(int index) { assert(index >= 0 && index < gWifiNetworkCount); const auto& n = gWifiNetworks[index]; return {n.ssid, n.password, n.priority, n.hidden, n.lastConnected}; }'])
+        'static ObservedNetwork readNetwork(int index) { assert(index >= 0 && index < gWifiNetworkCount); const auto& n = gWifiNetworks[index]; return {n.ssid, n.password, n.priority, n.hidden}; }'])
 
 
 def main():

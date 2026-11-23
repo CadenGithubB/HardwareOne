@@ -8,6 +8,7 @@
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
+#include "System_Deadline.h"  // deadlineAfter / deadlinePending: the pacing waits survive the millis() wrap
 #include "System_Lz4.h"
 #include "BLE_Server.h"
 #include "System_MemUtil.h"
@@ -3008,8 +3009,8 @@ const char* g2ProbeImageQ28MixedImageTextLive() {
     if (consumedMs < kPaceMs) {
       const uint32_t remainingMs = kPaceMs - consumedMs;
       const uint32_t kSliceMs = 50;
-      const uint32_t sliceEndMs = millis() + remainingMs;
-      while (millis() < sliceEndMs && !gImgProbeAbort) {
+      const uint32_t sliceEndMs = deadlineAfter(millis(), remainingMs);
+      while (deadlinePending(sliceEndMs, millis()) && !gImgProbeAbort) {
         const uint32_t leftMs = sliceEndMs - millis();
         const uint32_t thisMs = leftMs < kSliceMs ? leftMs : kSliceMs;
         vTaskDelay(pdMS_TO_TICKS(thisMs));
@@ -3203,8 +3204,8 @@ const char* g2ProbeImageQ28LMixedListImageLive() {
     if (consumedMs < kPaceMs) {
       const uint32_t remainingMs = kPaceMs - consumedMs;
       const uint32_t kSliceMs = 50;
-      const uint32_t sliceEndMs = millis() + remainingMs;
-      while (millis() < sliceEndMs && !gImgProbeAbort) {
+      const uint32_t sliceEndMs = deadlineAfter(millis(), remainingMs);
+      while (deadlinePending(sliceEndMs, millis()) && !gImgProbeAbort) {
         const uint32_t leftMs = sliceEndMs - millis();
         const uint32_t thisMs = leftMs < kSliceMs ? leftMs : kSliceMs;
         vTaskDelay(pdMS_TO_TICKS(thisMs));
@@ -3435,8 +3436,8 @@ static const char* runQ30ListTextImageProbe(const Q30GeomSpec& g) {
     if (consumedMs < kPaceMs) {
       const uint32_t remainingMs = kPaceMs - consumedMs;
       const uint32_t kSliceMs = 50;
-      const uint32_t sliceEndMs = millis() + remainingMs;
-      while (millis() < sliceEndMs && !gImgProbeAbort) {
+      const uint32_t sliceEndMs = deadlineAfter(millis(), remainingMs);
+      while (deadlinePending(sliceEndMs, millis()) && !gImgProbeAbort) {
         const uint32_t leftMs = sliceEndMs - millis();
         const uint32_t thisMs = leftMs < kSliceMs ? leftMs : kSliceMs;
         vTaskDelay(pdMS_TO_TICKS(thisMs));

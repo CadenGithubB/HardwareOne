@@ -47,7 +47,6 @@ struct SavedWifiNetwork {
   String ssid;
   int priority = 0;
   bool hidden = false;
-  uint32_t lastConnected = 0;
 };
 
 struct WifiNetworkSnapshot {

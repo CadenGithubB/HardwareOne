@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 #include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
+#include "System_ClockCore.h"  // production clock rules: is a time a real date (copied beside this unit)
 
 // ---- Production wire types: flags, header, KEY_EX payloads -------------------
 // INSERT_WIRE

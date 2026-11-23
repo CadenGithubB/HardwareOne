@@ -21,6 +21,82 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this section collects
 everything user-visible since the v0.99.99.1 tag.
 
+### Changed (time rules, stage 1)
+Host-tested and built; not run on a device.
+- One rank table decides which source may set the clock (`Clock::step`), strongest first: the
+  device's own NTP, a time set by hand (`timeset`, `rtcset`), a mesh master whose own clock comes
+  from NTP, the CM5, the DS3231 chip, the ring, a mesh master without NTP. A clock that is not set
+  takes any source; a clock that is set takes a source that ranks equal or higher than the one
+  that set it. A command of the operator always sets the clock (NTP replaces that time at its next
+  reply), and a clock that mesh time set keeps following its named master, down to what the
+  device had itself: on a device whose RTC, CM5 or ring set the clock first, a master's time that
+  is no longer from NTP does not replace an NTP-backed one. Every source goes through this one
+  check (the RTC, `timeset`, `rtcset`, the ring, the CM5, mesh time), one at a time. lwIP's SNTP
+  client still sets the clock itself and is reported afterwards; from the moment it has, the
+  other sources are ranked against NTP (the CM5 in the same loop lap could overwrite a fresh NTP
+  time and be labelled "ntp").
+- Mesh time follows the same table: a device whose clock came from the CM5, the RTC chip or the
+  ring now takes the time of a named master whose clock is from NTP (it was ignored as "better
+  source"), and a ring-set clock no longer takes a master's time that is not from NTP. `time` and
+  `espnowtimestatus` name the source `mesh-ntp` when the master's clock is from NTP, `mesh`
+  otherwise. No change to the TIME_SYNC frame.
+- `timeset` and `rtcset` read their argument the same way: `YYYY-MM-DD HH:MM:SS` is device-local
+  time unless the word `utc` follows it (`local` may be written out), and a Unix timestamp is UTC.
+  `rtcset` used to read the same text as UTC. `rtcset` now also sets the system clock, and both
+  reply with the local time, its UTC offset and the UTC time. `rtcsync to` is refused, with the
+  reason, while the clock is set from a source that outranks the chip.
+- The DS3231 is adopted at boot, by the RTC task and as the NTP fallback only when it is trusted:
+  this device has set it and its oscillator-stopped flag is not up. The boot line says what
+  happened ("System time set from the RTC" / "RTC time not adopted: <reason>"). A chip that lost
+  power is no longer taken as good from the second boot on (the flag used to be cleared when the
+  chip was opened); it is trusted again once a time is written. `rtcsync to` takes a chip that this
+  device has not set, by hand, and marks it set.
+- One timezone list for the setup wizard and the settings: 44 entries from UTC-12:00 to UTC+14:00,
+  including +12:45, +13:00 and +14:00; the settings list is built from it, one line per offset.
+  The offset is fixed and labelled "no automatic daylight saving". A stored offset that two zones
+  share re-opens on its standard-time entry (a saved EST came back as CDT).
+- `time` and `time json` show the system clock. On a board with a DS3231 they showed a live read
+  of the chip, also a chip that was not adopted, while `synced` was false; the chip's reading is
+  `rtcread`, and `time` names it on its own line while the clock is not set.
+- `time json` adds `timeEpochMs` (UTC epoch ms, `null` while the clock is not set) and
+  `tzOffsetMinutes`; `rtcread json` (and the `rtc` object of `sensors json`, ESP-NOW and MQTT) adds
+  `"utc":true`: its date and time fields are UTC.
+- `sessionlist json` and `/api/sessions`: each web session carries `createdAtEpochMs`,
+  `lastSeenEpochMs`, `expiresAtEpochMs` (UTC epoch ms, `null` while the clock is not set) and
+  `createdAtUptimeMs`, `lastSeenUptimeMs`, `expiresAtUptimeMs`. They replace `createdAt`,
+  `lastSeen`, `expiresAt`, which held epoch ms or uptime ms depending on the clock.
+- `pendinglist json` and `/api/admin/pending`: `requestedAtEpochMs` (UTC epoch ms or `null`)
+  replaces `timestamp` (an uptime). The same key is stored in `pending_users.json`.
+- Stored files: an IP ban carries `bannedAtEpochMs` (was `bannedAt`, an uptime); a backup carries
+  `createdAtEpochMs` and `createdAtUtc` (was `timestamp`, an uptime as text); a saved Wi-Fi network
+  no longer carries `lastConnected` (an uptime nothing read), and joining Wi-Fi no longer rewrites
+  settings.json. Files written by earlier firmware are not converted.
+- GPS track files (`sensorlog` format `track`) stamp each row like the CSV format: `timestamp_ms`,
+  UTC epoch ms when the clock is set, uptime ms when it is not. A row used to carry a time of day
+  without a date.
+- The web Users panel shows creation, request and session times in the device's local time with
+  its UTC offset (it showed the stored UTC time as if it were local, and the browser's own zone
+  for sessions), and shows the address and start time of web sessions again.
+
+### Fixed (time)
+Host-tested and built; not run on a device.
+- "Is the clock set" is asked of `System_Clock` everywhere: a clock that was never set counts up
+  from 1970 and passed the old `> 0` tests, so a mesh identity's creation time, a bond time, a boot
+  anchor and an automation's first run could be stored as dates in 1970. They are stored as 0 /
+  not at all while the clock is not set. An automation added while the clock is not set gets its
+  first run from the scheduler once the clock is set (a time, monthly, yearly or interval trigger
+  without a next run is given one, without firing).
+- A DS3231 that does not answer a register read in full is a failed read (a short read passed as
+  success, so an unreadable oscillator-stopped flag read as "not set").
+- A dark NTP timeout on a board whose RTC is not trusted prints `[INFO] RTC time not used:
+  <reason>` instead of an `Error: [RTC] ...` reply outside any command.
+- HTTPS certificate expiry (`certinfo`, the warning at start) is computed in UTC; it was off by
+  the timezone offset.
+- The glasses' short waits (microphone read, scan and connect waits, image probe pacing) and the
+  lens overlay no longer end at once or stick when `millis()` wraps after 49.7 days; a web session
+  expiry can no longer be stored as "none".
+- Removed the display logout screen's "Session ended" message, whose timer was never started.
+
 ### Changed (events, notifications and retention)
 - A commanded Wi-Fi disconnect (`wifidisconnect`, `closewifi`, `radiopower off`) posts
   `wifi_disconnected` once, from the radio's own event with the network name and reason; it used to

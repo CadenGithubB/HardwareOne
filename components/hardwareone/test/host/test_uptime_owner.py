@@ -60,12 +60,11 @@ ASKERS = (
     ("System_Automation.cpp", 1),     # the UPTIME condition sensor
     ("System_ESPNow.cpp", 7),         # heartbeats (v4FillHeartbeat), bond status, capability summary, stats
     ("System_I2C.cpp", 1),            # i2cmetrics rates
-    ("System_SensorLogging.cpp", 1),  # the track stamp without GPS time
     ("System_Utils.cpp", 3),          # the command audit stamp, uptime_hms in buildSystemInfoJson, the uptime reply
 )
 # A division of the millisecond clock that is allowed to stay: a stand-in for
 # wall time when the clock reads 0.
-FALLBACK = re.compile(r"if \((?:ts == 0|now <= 0)\)")
+FALLBACK = re.compile(r"if \((?:ts == 0|now <= 0|!Clock::isValidEpoch\(now\))\)")
 DIVISION = re.compile(r"\b(?:millis\(\)|now)\s*/\s*(?:1000|60000)(?:UL|u|U|L)?\b")
 
 HARNESS = r"""

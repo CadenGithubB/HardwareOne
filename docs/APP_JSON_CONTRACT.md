@@ -160,7 +160,9 @@ Note: read the global on/off via `automation system status json`, not from
 | `encoderstatus` | Builds with the encoder board. `{"schema":1,"connected","product","board","pixels","bus","address","brightness","autoStart"}`; `product` 5752 (4 pixels) or 4991 (1 pixel), `0` with `board` `""` and `pixels` 0 until a board has been detected. `encoderstatus <n> json` (n 2-4) answers for board n with the same keys plus `"instance":n` after `schema`; its `address` is 0 while none is set. Board 1's object has no `instance` key |
 | `anoencoderstatus` | Builds with the ANO encoder (`INPUT_DEVICE_TYPE` 2). `{"schema":1,"connected","product","bus","address","pollMs","invert","swapUpDown","swapLeftRight","autoStart"}`; `connected` is true while the encoder is open, `product` 5740 then and 0 otherwise; `bus` and `address` are where it was opened while connected, else the settings (`inputbus`, `anoencoderi2caddr`, 0x49..0x50); `pollMs` is `inputdevicepollms`, `autoStart` is `inputautostart` |
 | `temperature` | `{"schema":1,"tempC","tempF"}` (both `null` when the chip has no believable reading) |
-| `time` | `{"schema":1,"synced","source","time","uptime_ms","rtc_temp_c"?}`; `time` is local time as `YYYY-MM-DDTHH:MM:SS`, `""` while the clock has no time; `rtc_temp_c` only with an RTC reading |
+| `time` | `{"schema":1,"synced","source","time","timeEpochMs","tzOffsetMinutes","uptime_ms","rtc_temp_c"?}`; `time` is the system clock in device-local time as `YYYY-MM-DDTHH:MM:SS`, `""` while the clock is not set (`synced` is then `false`; on a board with a DS3231 the chip's own reading is `rtcread`, never this field); `timeEpochMs` is the same reading as UTC epoch milliseconds, `null` while the clock is not set; `tzOffsetMinutes` is the device's fixed offset (minutes east of UTC, no automatic daylight saving): local time = `timeEpochMs` + `tzOffsetMinutes` minutes. `source` is what set the clock this boot: `none`, `rtc`, `ntp`, `manual`, `ring`, `cm5`, `mesh` (the mesh master, whose clock is not from NTP) or `mesh-ntp` (the mesh master, whose clock is from NTP); `none` with `synced:true` is a clock carried over a restart. `rtc_temp_c` only with an RTC reading |
+| `sessionlist` (admin) | `{"schema":1,"sessions":[...]}`. A web session: `{"sid","user","transport":"web","createdAtEpochMs","createdAtUptimeMs","lastSeenEpochMs","lastSeenUptimeMs","expiresAtEpochMs","expiresAtUptimeMs","ip","current"}`; `sid` is the first 8 characters and `...`. Each `...EpochMs` is UTC epoch milliseconds, `null` while the device's clock is not set; each `...UptimeMs` is the device's `millis()` stamp (32 bit, wraps after 49.7 days). A key never changes its meaning with the clock (until 2026-11-22 `createdAt`, `lastSeen` and `expiresAt` held epoch ms or uptime ms depending on it; those three keys are gone). The other transports: `{"user","transport"}` with `serial`, `uart`, `oled`, `g2` or `bluetooth`. `/api/sessions` returns the same rows under `{"success":true,"sessions":[...]}` |
+| `pendinglist` (admin) | `{"schema":1,"pending":[{"username","requestedAtEpochMs"}]}`; `requestedAtEpochMs` is when the account was requested, UTC epoch milliseconds, `null` when the clock was not set then (it replaces `timestamp`, an uptime). `/api/admin/pending` returns the same rows under `{"success":true,"pending":[...]}` |
 | `sensorlog status json` | `{"schema":1,"running","file"?,"intervalMs","format","maxSizeBytes","rotations","sensors":[names],"autoStart","lastWriteAgoSec"?,"approxSizeBytes"?}`; `format` is `text`, `csv` or `track`; `file`, `lastWriteAgoSec` and `approxSizeBytes` (the logger's running estimate) appear only while running; a reply that does not fit is `{"schema":1,"ok":false,"error":"response too large"}`. Also the second entry of `GET /api/logging/status` |
 | `log status json` (admin) | `{"schema":1,"state","running","file"?,"lastWriteAgoSec"?,"outputFlags"?,"autoStart","maxSizeKb","keep","rotations","reserveSkips","reserveKb"}`; `state` is `active`, `configured` (started but not routed to the file) or `inactive`; `file` appears while running, `lastWriteAgoSec` and `outputFlags` while active; oversize gives the same `response too large` object. Also the third entry of `GET /api/logging/status` |
 | `voltage` | `{"schema":1,"measured":false,"estimatedCurrentMa","estimatedPowerW","note"}` - estimate only; use `batterystatus json` for measured power |
@@ -330,7 +332,7 @@ field of `sensors json` - that object uses a `valid` flag (and often
 
 | Command (+`json`) | Returns |
 |---|---|
-| `imuread`, `tofread`, `gpsread`, `presenceread`, `presencestatus`, `fmradioread`, `rtcread`, `gamepadread`, `apdsread`, `anoencoderread` | the shared builder's `data` object: envelope `{"valid","connected","ts"}` + value keys |
+| `imuread`, `tofread`, `gpsread`, `presenceread`, `presencestatus`, `fmradioread`, `rtcread`, `gamepadread`, `apdsread`, `anoencoderread` | the shared builder's `data` object: envelope `{"valid","connected","ts"}` + value keys. `rtcread`: `{"valid","connected","ts","utc":true,"year","month","day","hour","minute","second","temp"}`; the date and time fields are the chip's, in UTC, and `"utc":true` says so (`time json` is device-local time and carries `tzOffsetMinutes`) |
 | `thermalread` | envelope + `{"min","avg","max"}` (summary; the 768-px frame is a separate shape) |
 | `micread` | `{"schema":1,"enabled","connected","recording","sampleRate","bitDepth","channels","level"}` |
 | `miclevel` | `{"schema":1,"enabled","level"}` |
@@ -376,7 +378,8 @@ contract in sec. 6 is **unchanged**.)
   `data` and, once a reading has arrived, adds the receiver's own arrival stamp and counts:
   `arrivalEpochMs` (UTC milliseconds, `null` while the receiving device's clock was not set),
   `arrivalUptimeMs`, `agoMs`, `clock` (how the receiving device's clock was set: `rtc`, `ntp`,
-  `manual`, `ring`, `cm5`, `mesh`, `carried` for a clock kept over a restart, `none`), `bootTag` and
+  `manual`, `ring`, `cm5`, `mesh`, `mesh-ntp` (a mesh master whose own clock is from NTP; since
+  2026-11-22), `carried` for a clock kept over a restart, `none`), `bootTag` and
   `counter` (the sender's: with its MAC and the sensor they name one reading), `received`, `lost`, `late`, `repeated`, `restarts`,
   `resumes` and `incomplete`. `lost - late` is what never arrived; `incomplete` counts readings of
   that sender (any sensor) of which a frame was missing, and is part of `lost`. `data` is at most
@@ -449,7 +452,12 @@ contract in sec. 6 is **unchanged**.)
   `ignored_weak_source`, `ignored_other_master`, `ignored_too_soon`, `refused_bad_time`,
   `held_large_change`; `differenceS` is 0 for a frame whose time is not a real date. `counts.ignored`
   also counts frames that found no room to wait for the main loop (four senders' frames wait at
-  most).
+  most). `clockSource` is `none`, `carried`, `rtc`, `ntp`, `manual`, `ring`, `cm5`, `mesh` or, since
+  2026-11-22, `mesh-ntp`: the clock was set from a named master whose own clock is from NTP
+  (`lastFrame.source` `ntp`); `mesh` is a master's time from any other source. `ignored_better_source`
+  follows the clock's rank table (ntp > manual > mesh-ntp > cm5 > rtc > ring > mesh): an NTP-backed
+  master's time is taken by a device whose clock is from the CM5, the RTC chip or the ring; any
+  other master's time only by a clock that mesh time set or that was carried over a restart.
 
 ### 8.0.1 Forwarding for a bond partner (2026-11-18, additive)
 A bond master may forward its bond partner's readings, battery state, events and sensor list to the

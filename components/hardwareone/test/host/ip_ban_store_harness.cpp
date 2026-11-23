@@ -58,6 +58,9 @@ static void broadcastOutput(const char* line) { output.emplace_back(line); }
 enum : int { SYSEVT_IP_BANNED = 1, SYSEVT_CONFIG_FILE_CORRUPT = 2 };
 static void systemEventPost(int, const char* subject, const char*) { events.emplace_back(subject ? subject : ""); }
 static unsigned long millis() { return 1234; }
+// Clock::epochMillisOrZero: the time a ban is stamped with (0 = clock not set).
+static int64_t gBanClockEpochMs = 1795357805123LL;
+namespace Clock { static int64_t epochMillisOrZero() { return gBanClockEpochMs; } }
 static void clearLoginAttempts(const char*) {}
 
 // Reversible stand-in for the device AES helpers; the prefix is what the
@@ -137,7 +140,7 @@ void enqueueTargetedRevokeForSessionIdx(int idx, const String&) {
 static const std::string kBanFile = IP_BANS_FILE;
 static const std::string kBanTemp = kBanFile + ".tmp";
 static const std::string kPrevious =
-    "{\"bans\":[{\"ip\":\"AES:1.1.1.01\",\"reason\":\"old\",\"bannedAt\":5}]}";  // 10.1.1.1
+    "{\"bans\":[{\"ip\":\"AES:1.1.1.01\",\"reason\":\"old\",\"bannedAtEpochMs\":1795357805000}]}";  // 10.1.1.1
 
 static fake_vfs::Fs& resetStore(bool withPrevious) {
   auto& fs = fake_vfs::fs();
@@ -435,8 +438,8 @@ static void caseUnreadFileIsNeverReplaced() {
 static void casePartialFileIsKeptBeforeSave() {
   // The second entry does not decrypt.
   const std::string partial =
-      "{\"bans\":[{\"ip\":\"AES:1.1.1.01\",\"reason\":\"old\",\"bannedAt\":5},"
-      "{\"ip\":\"AES:\",\"reason\":\"lost\",\"bannedAt\":6}]}";
+      "{\"bans\":[{\"ip\":\"AES:1.1.1.01\",\"reason\":\"old\",\"bannedAtEpochMs\":1795357805000},"
+      "{\"ip\":\"AES:\",\"reason\":\"lost\",\"bannedAtEpochMs\":null}]}";
   auto& fs = freshBoot(partial);
   loadIpBans();
   check(sIpBansLoad == ConfigLoad::Status::Partial);
@@ -456,8 +459,20 @@ static void casePartialFileIsKeptBeforeSave() {
   JsonDocument saved;
   check(!deserializeJson(saved, fs.text(kBanFile)));
   check(saved["bans"].size() == 2);
+  // The ban is stamped with the wall clock in epoch ms (2026-11-22 time
+  // audit, B5: it was the uptime in ms, which means nothing after a restart);
+  // the entry read from the file keeps its stamp.
+  check(saved["bans"][0]["bannedAtEpochMs"].as<int64_t>() == 1795357805000LL);
+  check(saved["bans"][1]["bannedAtEpochMs"].as<int64_t>() == gBanClockEpochMs);
+  check(saved["bans"][0]["bannedAt"].isNull() && saved["bans"][1]["bannedAt"].isNull());
+  // A ban made while the clock is not set stores null, not a 1970 time.
+  gBanClockEpochMs = 0;
   check(banIp("10.4.4.4", nullptr));             // one copy, not one per save
+  gBanClockEpochMs = 1795357805123LL;
   check(!fs.exists(kBanFile + ".partial-2"));
+  check(!deserializeJson(saved, fs.text(kBanFile)));
+  check(saved["bans"].size() == 3 && saved["bans"][2]["bannedAtEpochMs"].isNull() &&
+        fs.text(kBanFile).find("\"bannedAtEpochMs\":null") != std::string::npos);
 }
 
 int main(int argc, char** argv) {

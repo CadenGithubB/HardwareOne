@@ -83,13 +83,12 @@ def production(component: Path) -> str:
 
 def clock_questions(component: Path) -> str:
     clock = (component / "System_Clock.cpp").read_text()
-    threshold = re.search(r"^static constexpr int kSyncedTmYearThreshold = \d+;", clock, re.M)
-    require(threshold is not None, "System_Clock.cpp holds the year threshold")
     header = (component / "System_Clock.h").read_text()
     sources = re.search(r"^enum SyncSource : uint8_t \{[^}]*\};", header, re.M)
     writes = re.search(r"^constexpr bool sourceWritesRtc\(SyncSource s\) \{[^\n]*\}$", header, re.M)
     require(sources is not None and writes is not None, "System_Clock.h holds SyncSource and sourceWritesRtc")
-    return "\n".join([threshold.group(0), sources.group(0), writes.group(0), extract_block(clock, "bool isSynced()"),
+    return "\n".join([sources.group(0), writes.group(0), "bool isValidEpoch(time_t t);",
+                      extract_block(clock, "bool isSynced()"),
                       extract_block(clock, "bool isValidEpoch(time_t t)")])
 
 
@@ -116,11 +115,13 @@ def check_sources(component: Path) -> None:
 
     mesh = (component / "System_ESPNow_MeshTime.cpp").read_text()
     code = strip_comments(mesh)
-    require(code.count("settimeofday(") == 1 and code.count("Clock::clockStepped(Clock::SYNC_MESH, before)") == 1,
-            "one place sets the clock from mesh time, through the chokepoint with the mesh source")
-    setter = extract_block(mesh, "static void mtSetClock(int64_t epochMs)")
-    require(setter.index("settimeofday(") < setter.index("Clock::clockStepped("),
-            "the chokepoint is called after settimeofday")
+    require(code.count("settimeofday(") == 0 and code.count("Clock::clockStepped(") == 0 and
+            code.count("Clock::step(") == 1,
+            "one place sets the clock from mesh time, through Clock::step (plausibility, the rank table, the chores)")
+    setter = strip_comments(extract_block(mesh, "static bool mtSetClock(int64_t epochMs, uint8_t wireSource)"))
+    require("meshtime::frameClockSource(wireSource)" in setter and "Clock::step(source," in setter and
+            "Clock::StepResult::Stepped" in setter,
+            "the step names mesh time by the master's source (NTP-backed or not) and reports a refusal")
     require("ESPNOW_V4_TYPE_TIME_SYNC, 0," in extract_block(mesh, "static bool mtSend("),
             "the frame goes out as a session unicast with no flags")
     handler = extract_block(mesh, "void v4hTimeSync(const V4RxCtx& ctx)")
@@ -148,11 +149,12 @@ def check_sources(component: Path) -> None:
             "Clock::sourceWritesRtc(Clock::syncSource()) && rtcSyncFromSystem()" in task,
             "the RTC task calibrates an uncalibrated chip from the system clock only when its source may be written "
             "(not mesh time, not a clock carried over a restart)")
-    require("src != SYNC_RING && src != SYNC_MESH && src != SYNC_NONE" in stepped,
+    require("src != SYNC_RING && src != SYNC_MESH && src != SYNC_MESH_NTP && src != SYNC_NONE" in stepped,
             "mesh time is no reference for the confirmed clock")
     require("sStepSerial++;" in stepped, "every step is counted (Clock::stepSerial)")
     header = (component / "System_Clock.h").read_text()
-    require("SYNC_CM5, SYNC_MESH };" in header, "SYNC_MESH is the last clock source")
+    require("SYNC_CM5, SYNC_MESH, SYNC_MESH_NTP };" in header, "the two mesh sources are the last clock sources")
+    require('case SYNC_MESH_NTP: return "mesh-ntp";' in clock, "syncSourceName names NTP-backed mesh time")
 
     loop = (component / "HardwareOne.cpp").read_text()
     ntp = loop.index("  ntpSyncDrainTick();")
@@ -161,6 +163,30 @@ def check_sources(component: Path) -> None:
     require(ntp < apply_at < duties,
             "the main loop applies mesh time after the SNTP report and before the clock duties")
     require(loop.count("espnowMeshTimeApplyTick();") == 1, "one call of the apply tick")
+    # The SNTP report is the first clock source of a lap: the ring's and the
+    # CM5's ticks are ranked against a ledger that knows about a fresh reply.
+    require(ntp < loop.index("  g2RingTimeSyncTick();") and ntp < loop.index("  cm5TimeSyncTick();"),
+            "the main loop reports an SNTP step before it hands in the ring's and the CM5's time")
+    # Clock::step is one unit under the step mutex, ranks against the ledger
+    # (NTP while an SNTP step waits for its report, the mesh floor), and the
+    # SNTP report runs under the same mutex.
+    step = strip_comments(extract_block(clock, "StepResult step(SyncSource src, time_t epoch, uint32_t usec)"))
+    require("verdictNow(src, epoch, before)" in step and
+            step.index("StepLock lock;") < step.index("verdictNow(") < step.index("settimeofday(") < step.index("clockStepped(src, before)") < step.index("ledgerAfterOwnStep("),
+            "Clock::step: verdict, settimeofday and ledger under one mutex")
+    verdict = strip_comments(extract_block(clock, "static StepResult verdictNow(SyncSource src, time_t epoch, time_t now)"))
+    require("clockcore::ledgerVerdict(ledger," in verdict, "the verdict asks the ledger (clockcore::ledgerVerdict)")
+    report = strip_comments(extract_block(clock, "void sntpStepReport(time_t before)"))
+    require("clockStepped(name, before)" in report and
+            report.index("StepLock lock;") < report.index("clockcore::ledgerOnSntpReport(sLedger)") <
+            report.index("clockStepped(name, before)"), "the SNTP report runs under the step mutex, under the ledger's name")
+    ntp_source = strip_comments((component / "System_NTP.cpp").read_text())
+    callback = extract_block(ntp_source, "static void onSntpTimeSync(struct timeval* tv)")
+    require("Clock::sntpStepPending();" in callback and "Clock::sntpStepReport(before);" in ntp_source and
+            "Clock::clockStepped(" not in ntp_source,
+            "the SNTP callback marks the step pending and the drain reports it through Clock::sntpStepReport")
+    require("in.ownFloor = mtOwnFloor();" in extract_block(hosted, "static meshtime::FollowerInputs meshTimeFollowerInputs("),
+            "every frame is judged with what the clock had before mesh time took it over")
 
     wire = (component / "System_ESPNow_Wire.h").read_text()
     struct = strip_comments(extract_block(wire, "struct __attribute__((packed)) V4PayloadTimeSync"))

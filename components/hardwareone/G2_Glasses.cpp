@@ -42,6 +42,7 @@
 #include "System_STT.h"  // transcription page keep-alive
 #endif
 #include "System_RadioCompanion.h"  // radio companion gate (P4X-EYE); no-op with an on-chip radio
+#include "System_Deadline.h"  // deadlineAfter / deadlinePending: millis() deadlines that survive the wrap
 #include "System_Debug.h"
 #include "System_Filesystem.h"  // requireQuotedToken (uniform quoted-path rule)
 #include "System_Command.h"
@@ -709,13 +710,13 @@ static bool g2ScanCallbackEnd(uint32_t epoch, uint32_t timeoutMs = 500) {
   portENTER_CRITICAL(&gG2ScanCallbackMux);
   if (gG2ScanEpoch == epoch) gG2ScanCallbackAdmission = false;
   portEXIT_CRITICAL(&gG2ScanCallbackMux);
-  const uint32_t deadline = millis() + timeoutMs;
+  const uint32_t deadline = deadlineAfter(millis(), timeoutMs);
   for (;;) {
     portENTER_CRITICAL(&gG2ScanCallbackMux);
     const bool idle = gG2ScanCallbacksInFlight == 0;
     portEXIT_CRITICAL(&gG2ScanCallbackMux);
     if (idle) return true;
-    if ((int32_t)(millis() - deadline) >= 0) {
+    if (!deadlinePending(deadline, millis())) {
       portENTER_CRITICAL(&gG2ScanCallbackMux);
       gG2ScanCallbackQuarantined = true;
       portEXIT_CRITICAL(&gG2ScanCallbackMux);
@@ -4249,7 +4250,7 @@ uint32_t g2MicAfeIntegrityErrors() {
 size_t g2MicReadPcmSamples(int16_t* out, size_t capSamples, uint32_t timeoutMs) {
   if (!out || capSamples == 0) return 0;
   if (!gMicAfeMutex || !gMicAfeReadySem) return 0;
-  const uint32_t deadline = millis() + timeoutMs;
+  const uint32_t deadline = deadlineAfter(millis(), timeoutMs);
   for (;;) {
     xSemaphoreTake(gMicAfeMutex, portMAX_DELAY);
     if (!gMicAfeFeedActive) {
@@ -4274,8 +4275,7 @@ size_t g2MicReadPcmSamples(int16_t* out, size_t capSamples, uint32_t timeoutMs) 
       return toRead;
     }
     xSemaphoreGive(gMicAfeMutex);
-    const uint32_t now = millis();
-    if (now >= deadline) return 0;
+    if (!deadlinePending(deadline, millis())) return 0;
     // Block until a writer signals (or 20 ms tick — defensive).
     xSemaphoreTake(gMicAfeReadySem, pdMS_TO_TICKS(20));
   }
@@ -11520,8 +11520,8 @@ static bool attemptMissingArmRecoverySync(uint8_t attemptNumber,
     // Same poll-with-yield pattern as g2ConnectSync. Yields the heartbeat
     // task while the BLE event handler dispatches advert callbacks; bails
     // as soon as the missing side is populated.
-    const uint32_t deadline = millis() + (kScanSec * 1000) + 500;
-    while (millis() < deadline) {
+    const uint32_t deadline = deadlineAfter(millis(), (kScanSec * 1000) + 500);
+    while (deadlinePending(deadline, millis())) {
       if (gBeatTaskStop || gConnectCancel || !repairIntentCurrent() ||
           !survivorCurrent()) {
         break;
@@ -15812,8 +15812,8 @@ static bool g2ControlWorkerShutdown() {
   g2ControlWake();
   // A legacy half-connect recovery scan can occupy the owner for ~3.5 s.
   // Wait beyond that bound before allowing callers to free temple RX memory.
-  const uint32_t deadline = millis() + 6000;
-  while (gBeatTaskHandle && (int32_t)(millis() - deadline) < 0) {
+  const uint32_t deadline = deadlineAfter(millis(), 6000);
+  while (gBeatTaskHandle && deadlinePending(deadline, millis())) {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
   if (gBeatTaskHandle) {
@@ -17314,8 +17314,8 @@ static bool g2ConnectSync(G2Eye eye,
   gScan->start(scanSec, g2ScanEndedCallback, false);
 
   // Poll for a found-both condition, up to the scan window + a small cushion.
-  const uint32_t deadline = millis() + (scanSec * 1000) + 1000;
-  while (millis() < deadline) {
+  const uint32_t deadline = deadlineAfter(millis(), (scanSec * 1000) + 1000);
+  while (deadlinePending(deadline, millis())) {
     if (!g2PeerRequestCurrent(expectedRequest)) break;
     bool needL = (eye != G2_EYE_RIGHT);
     bool needR = (eye != G2_EYE_LEFT);
@@ -18096,8 +18096,8 @@ bool g2Disconnect(bool userInitiated) {
     }
     if (gL.client && gL.client->isConnected()) gL.client->disconnect();
     if (gR.client && gR.client->isConnected()) gR.client->disconnect();
-    const uint32_t deadline = millis() + 2000;
-    while (gConnectTaskActive && millis() < deadline) {
+    const uint32_t deadline = deadlineAfter(millis(), 2000);
+    while (gConnectTaskActive && deadlinePending(deadline, millis())) {
       // A submitter that claimed before the start block may publish late.
       (void)bleSetupWithdraw(BleSetupClient::G2, 0);
       vTaskDelay(pdMS_TO_TICKS(50));
@@ -25377,7 +25377,7 @@ void g2LensClearContainer() {
 
 void g2LensStartOverlay(G2OverlayKind kind, uint32_t durationMs) {
   gLens.overlayKind       = kind;
-  gLens.overlayDeadlineMs = millis() + durationMs;
+  gLens.overlayDeadlineMs = deadlineAfter(millis(), durationMs);  // never 0: 0 means "no overlay"
   DEBUG_G2F("[G2] lens.overlay kind=%u for %u ms",
             (unsigned)kind, (unsigned)durationMs);
 }
@@ -25400,7 +25400,7 @@ void g2LensSetOverlayExpiredCb(G2OverlayExpiredCb cb) {
 // callback to redraw their underlying list.
 static void g2LensTickOverlay() {
   if (gLens.overlayDeadlineMs == 0) return;
-  if ((int32_t)(millis() - gLens.overlayDeadlineMs) < 0) return;
+  if (deadlinePending(gLens.overlayDeadlineMs, millis())) return;
   G2OverlayKind expired = gLens.overlayKind;
   g2LensClearOverlay();
   if (gOverlayExpiredCb) gOverlayExpiredCb(expired);

@@ -3021,8 +3021,8 @@ bool approvePendingUserInternal(const String& username, String& errorOut) {
     return false;
   }
 
-  // If NTP already synced, resolve the creation timestamp immediately
-  if (time(nullptr) > 0) {
+  // If the clock is already set, resolve the creation timestamp immediately
+  if (Clock::isSynced()) {
     resolvePendingUserCreationTimes();
   }
 
@@ -3143,7 +3143,12 @@ AccountRequestResult submitAccountRequest(const String& usernameInput, const Str
   JsonObject entry = arr.add<JsonObject>();
   entry["username"] = username;
   entry["password"] = hashUserPassword(password);
-  entry["timestamp"] = (unsigned long)millis();
+  // When the request was made: UTC epoch ms, null while the clock is not
+  // set. (Until 2026-11-22 this was "timestamp", the uptime in ms, which
+  // meant nothing after a restart.)
+  const int64_t requestedAtEpochMs = Clock::epochMillisOrZero();
+  if (requestedAtEpochMs > 0) entry["requestedAtEpochMs"] = requestedAtEpochMs;
+  else entry["requestedAtEpochMs"] = nullptr;
 
   String writeError;
   if (!writePendingUsers(doc, "user.request", writeError)) {
@@ -4012,7 +4017,7 @@ const char* cmd_pending_list(const String& argsInput) {
     for (JsonObject user : pending) {
       JsonObject sanitizedUser = sanitizedArray.add<JsonObject>();
       sanitizedUser["username"] = user["username"];
-      sanitizedUser["timestamp"] = user["timestamp"];
+      sanitizedUser["requestedAtEpochMs"] = user["requestedAtEpochMs"];  // UTC epoch ms, or null
       // Explicitly exclude password field for security
     }
     static char* jsonBuf = nullptr;
@@ -4575,7 +4580,7 @@ static bool resolveUserTimestamp(JsonObject user, unsigned long createdMs,
 
   if (!Clock::isValidEpoch(createdAtUtc)) return false;  // sanity: before 2020
   time_t now = time(nullptr);
-  if (now > 0 && createdAtUtc > now + 60) return false;  // sanity: not in the future
+  if (Clock::isValidEpoch(now) && createdAtUtc > now + 60) return false;  // sanity: not in the future
 
   char isoTimestamp[24];
   if (!formatEpochAsIso8601(createdAtUtc, isoTimestamp, sizeof(isoTimestamp))) {
@@ -4765,8 +4770,10 @@ void resolvePendingUserCreationTimes() {
 // Append a boot anchor (NTP just synced) to the dedicated anchors file. Written
 // atomically via writeTextAtomic; users.json is NOT touched.
 void writeBootAnchor() {
+  // An anchor ties this boot's millis() to a real time: none while the clock
+  // is not set (time() then counts up from 1970).
   time_t now = time(nullptr);
-  if (now <= 0 || gNtpAnchorId == 0) return;
+  if (!Clock::isValidEpoch(now) || gNtpAnchorId == 0) return;
   if (!filesystemReady) return;
 
   unsigned long currentMillis = millis();

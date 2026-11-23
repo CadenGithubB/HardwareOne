@@ -6,7 +6,10 @@ weaker test of their own: `epoch < 100000` (the mesh time-sync command, the
 certificate expiry line, the validity of a new certificate, the expiry check
 when HTTPS starts), which turns true after 28 hours of uptime without any time
 source, and `now > 0` in the automation scheduler, which is true one second
-after boot.
+after boot. The same `now > 0` / `now <= 0` / `time(nullptr) > 0` tests stored
+1970-based seconds as dates (a mesh identity's createdAtSec, a bond's
+bondedAt, a boot anchor, an automation's first next run): all gone since the
+2026-11-22 time audit (B2).
 
 Run as production code: the real Clock::isValidEpoch and Clock::isSynced
 (System_Clock.cpp) against a settable clock: not set at any time before 2020,
@@ -49,20 +52,19 @@ ASKERS = (
 )
 # Own tests that stay: (file, the text, how often, why).
 KEPT = (
-    ("HardwareOne.cpp", "timeinfo.tm_year >= 120", 1,
-     "reads the tm it has just filled inside a 10 ms window; its comment says why it does not call Clock::isSynced"),
     ("R1_HealthHistoryStore.cpp", "now >= 1609459200", 1,
      "the retention pass's own floor (2021), with its own host harness; not one of the weak tests"),
-    ("System_User.cpp", "time(nullptr) > 0", 1,
-     "harmless: resolvePendingUserCreationTimes resolves from stored boot anchors, whatever the clock reads"),
-    ("System_FirstTimeSetup.cpp", "time(nullptr) > 0", 1,
-     "harmless: the same callee"),
 )
 HAND_TESTS = (
     r"\b\w*(?:now|epoch|Epoch|Now)\w*\s*(?:<|>|<=|>=)\s*100000\b",
     r"\btm_year\s*(?:<|>=)\s*1\d\d\b",
     r"\b\w*(?:now|Now)\w*\s*(?:<|>|<=|>=)\s*1[5-7]\d{8}\b",
     r"\btime\((?:nullptr|NULL)\)\s*(?:>|<=)\s*0\b",
+    # A time read into `now` or `t` and tested against 0: true one second after boot.
+    r"\(\s*now(?:Sec)?\s*>\s*0\s*\)\s*\?",
+    r"\bif\s*\(\s*(?:now|nowSec|t)\s*<=\s*0\s*(?:\)|\|\|)",
+    r"\bif\s*\(\s*(?:now|nowSec)\s*>\s*0\s*(?:\)|&&)",
+    r"\bnow\s*,\s*now\s*>\s*0\s*\)",
 )
 
 HARNESS = r"""
@@ -70,6 +72,8 @@ HARNESS = r"""
 #include <cstdio>
 #include <ctime>
 #include <string>
+
+#include "System_ClockCore.h"
 
 static time_t gClock = 0;
 static time_t testTime(time_t*) { return gClock; }
@@ -175,12 +179,14 @@ def main() -> None:
     require(bool(args.cxx), "a host C++17 compiler is required")
     component = args.component.resolve()
     clock = (component / "System_Clock.cpp").read_text()
-    threshold = re.search(r"^static constexpr int kSyncedTmYearThreshold = \d+;", clock, re.M)
-    require(threshold is not None, "System_Clock.cpp holds the year threshold")
-    harness = HARNESS.replace("// INSERT_CLOCK", threshold.group(0) + "\n" +
+    require("bool isValidEpoch(time_t t);" in (component / "System_Clock.h").read_text(),
+            "System_Clock.h declares isValidEpoch")
+    # isSynced is isValidEpoch of the clock; the bound itself is System_ClockCore.h's.
+    harness = HARNESS.replace("// INSERT_CLOCK", "bool isValidEpoch(time_t t);\n" +
                               extract_block(clock, "bool isSynced()") + "\n" +
                               extract_block(clock, "bool isValidEpoch(time_t t)"))
-    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-Wno-unused-variable"]
+    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-Wno-unused-variable",
+             "-I", str(component), "-I", str(COMPONENT)]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                   "-fno-omit-frame-pointer", "-g"]
@@ -199,7 +205,7 @@ def main() -> None:
             print(f"FAIL: {failure}", file=sys.stderr)
         print(f"clock set question: {len(failures)} failure(s)", file=sys.stderr)
         sys.exit(1)
-    print("'is the clock set' is asked of System_Clock; four own tests are kept, each with its reason", flush=True)
+    print("'is the clock set' is asked of System_Clock; one own test is kept, with its reason", flush=True)
 
 
 if __name__ == "__main__":

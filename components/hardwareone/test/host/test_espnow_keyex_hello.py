@@ -174,6 +174,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-keyex-hello-') as tmp:
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
         (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
+        # clockcore::isValidEpoch: a creation or bond time is stored only when the clock is set.
+        (unit.parent / 'System_ClockCore.h').write_text((HERE.parents[1] / 'System_ClockCore.h').read_text())
         unit.write_text(harness)
         # The pasted slices carry helpers and parameters this harness does not
         # use (the firmware builds without -Wextra).

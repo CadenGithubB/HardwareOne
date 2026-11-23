@@ -1904,7 +1904,7 @@ static wifi_init_config_t makeArduinoCompatibleWifiInitConfig() {
   return cfg;
 }
 
-// Connect to a saved network by index (0-based). Update lastConnected on success.
+// Connect to a saved network by index (0-based).
 // If showPriority is true, displays priority in connection message (for --best mode)
 // Returns: true if connected, false if failed or user cancelled
 bool connectWifiIndex(int index0based, unsigned long timeoutMs, bool showPriority) {
@@ -2335,9 +2335,11 @@ static bool connectWifiTargetWithin(const WifiConnectionTarget& nw, unsigned lon
                      nw.ssid.c_str(), WiFi.localIP().toString().c_str());
       // wifi_connected is posted from the GOT_IP edge (wifiEventLogger), which
       // this join also raised; posting here too would double it.
-      wifiNetworkMarkConnected(nw.id, millis());
+      // Nothing about the saved network changes with a connection, so nothing
+      // is written here. (Until 2026-11-22 each join stamped the entry with
+      // `lastConnected`, the uptime in ms, which no code read and which meant
+      // nothing after a restart, and rewrote settings.json for it.)
       radioGuard.release();
-      saveWifiNetworks();
       return true;
     }
 
@@ -2658,14 +2660,11 @@ const char* cmd_certinfo(const String& argsInput) {
   if (!Clock::isValidEpoch(now)) {  // System_Clock owns "is the clock set"
     expiryStatus = "unknown (time not set)";
   } else {
-    struct tm expTm = {};
-    expTm.tm_year = crt.valid_to.year - 1900;
-    expTm.tm_mon = crt.valid_to.mon - 1;
-    expTm.tm_mday = crt.valid_to.day;
-    expTm.tm_hour = crt.valid_to.hour;
-    expTm.tm_min = crt.valid_to.min;
-    expTm.tm_sec = crt.valid_to.sec;
-    time_t expTime = mktime(&expTm);
+    // An X.509 validity time is UTC. (mktime read it as local time, so the
+    // expiry was off by the timezone offset.)
+    const time_t expTime = (time_t)clockcore::epochFromCivilUtc(
+        crt.valid_to.year, crt.valid_to.mon, crt.valid_to.day,
+        crt.valid_to.hour, crt.valid_to.min, crt.valid_to.sec);
     if (expTime <= now) {
       expiryStatus = "EXPIRED";
     } else {

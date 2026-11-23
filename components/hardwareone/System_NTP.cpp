@@ -85,6 +85,9 @@ static void onSntpTimeSync(struct timeval* tv) {
   const int64_t replyEpoch = tv ? static_cast<int64_t>(tv->tv_sec) : 0;
   const int64_t replyMonotonicUs = esp_timer_get_time();
   Clock::refreshProjection();
+  // From here on the clock's time is NTP's, before the main loop reports the
+  // step: a source that comes in between is ranked against NTP.
+  Clock::sntpStepPending();
 
   portENTER_CRITICAL(&gSntpMux);
   gSntpPrevProjUs = prev;
@@ -143,7 +146,7 @@ void ntpSyncDrainTick() {
   if (!drainPending && !lateNoticePending) return;
   if (drainPending) {
     const time_t before = static_cast<time_t>(prevUs / 1000000LL);
-    Clock::clockStepped(Clock::SYNC_NTP, before);
+    Clock::sntpStepReport(before);
   }
   if (lateNoticePending) {
     char message[96];
@@ -328,11 +331,15 @@ bool syncNtpAndResolve(NtpSyncOutcome* outcomeOut) {
   // its duties through Clock::clockStepped itself now.
 #if ENABLE_RTC_SENSOR
   if (gRtcRunning && gRtcConnected) {
-    if (rtcSyncToSystem()) {
+    // The chip is taken only when it is trusted (rtcSyncToSystem). Why not
+    // is a status line here, not a command's "Error:" reply.
+    const char* whyNot = nullptr;
+    if (rtcSyncToSystem(&whyNot)) {
       broadcastOutput("[OK] System time set from RTC (no NTP reply in foreground window)");
       if (outcomeOut) *outcomeOut = NtpSyncOutcome::RtcFallback;
       return true;
     }
+    if (whyNot) BROADCAST_PRINTF("[INFO] RTC time not used: %s", rtcReasonText(whyNot));
   }
 #endif
 
