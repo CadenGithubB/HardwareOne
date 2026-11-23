@@ -47,6 +47,11 @@ void testSingleTap() {
   assert(ev[0].peakMg > 500 && ev[0].peakMg < 1000);  // sampled at 416 Hz, the top is often between samples
   assert(ev[0].durMs <= 25);
   assert(ev[0].gapMs == 0xFFFF);
+  // The knock was on z: its direction is +Z or -Z and z dominates.
+  char dir[3];
+  uint8_t share = 0;
+  knock::knockDirection(ev[0], dir, share);
+  assert(dir[1] == 'Z' && share > 90);
 }
 
 void testFastQuadAllCount() {

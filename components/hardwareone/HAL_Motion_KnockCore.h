@@ -43,6 +43,7 @@ struct Event {
   uint16_t peakMg = 0;  // the largest jump
   uint16_t durMs = 0;   // start to the last sample above the start level
   uint16_t gapMs = 0;   // since the previous knock's start (0xFFFF: none or longer)
+  int16_t peakVec[3] = {0, 0, 0};  // the jump at the peak, per axis (mg): which way the knock hit
   Verdict verdict = Verdict::Tap;
 };
 
@@ -84,9 +85,13 @@ class Detector {
         inKnock_ = true;
         startUs_ = lastAboveUs_ = tUs;
         peak_ = dev;
+        for (int i = 0; i < 3; ++i) peakVec_[i] = mg[i] - base_[i];
       }
     } else {
-      if (dev > peak_) peak_ = dev;
+      if (dev > peak_) {
+        peak_ = dev;
+        for (int i = 0; i < 3; ++i) peakVec_[i] = mg[i] - base_[i];
+      }
       if (dev >= startMg) {
         lastAboveUs_ = tUs;
       } else if (static_cast<uint32_t>(tUs - lastAboveUs_) >= kKnockQuietUs) {
@@ -110,6 +115,10 @@ class Detector {
     const uint32_t durUs = static_cast<uint32_t>(lastAboveUs_ - startUs_);
     ev.ms = startUs_ / 1000u;
     ev.peakMg = peak_ > 65535.0f ? 65535 : static_cast<uint16_t>(peak_ + 0.5f);
+    for (int i = 0; i < 3; ++i) {
+      const float v = peakVec_[i];
+      ev.peakVec[i] = static_cast<int16_t>(v > 32767.0f ? 32767 : v < -32767.0f ? -32767 : v);
+    }
     ev.durMs = static_cast<uint16_t>(durUs / 1000u > 65535u ? 65535u : durUs / 1000u);
     const uint32_t gapUs = static_cast<uint32_t>(startUs_ - prevStartUs_);
     ev.gapMs = (!havePrev_ || gapUs / 1000u >= 0xFFFFu) ? 0xFFFF : static_cast<uint16_t>(gapUs / 1000u);
@@ -139,12 +148,30 @@ class Detector {
   bool inKnock_ = false;
   uint32_t startUs_ = 0, lastAboveUs_ = 0;
   float peak_ = 0;
+  float peakVec_[3] = {0, 0, 0};
   float lastDev_ = 0;
   bool havePrev_ = false;
   uint32_t prevStartUs_ = 0;
   bool haveTap_ = false;
   uint32_t lastTapEndUs_ = 0;
 };
+
+// The knock's main axis and sign, as "+X" .. "-Z" (the largest |component|
+// of the peak jump), and how much it dominates: that component's share of
+// the jump's size, 0..100 %.
+inline void knockDirection(const Event& e, char out[3], uint8_t& sharePct) {
+  int best = 0;
+  for (int i = 1; i < 3; ++i)
+    if ((e.peakVec[i] < 0 ? -e.peakVec[i] : e.peakVec[i]) > (e.peakVec[best] < 0 ? -e.peakVec[best] : e.peakVec[best]))
+      best = i;
+  out[0] = e.peakVec[best] < 0 ? '-' : '+';
+  out[1] = static_cast<char>('X' + best);
+  out[2] = 0;
+  float n2 = 0;
+  for (int i = 0; i < 3; ++i) n2 += static_cast<float>(e.peakVec[i]) * e.peakVec[i];
+  const float a = e.peakVec[best] < 0 ? -e.peakVec[best] : e.peakVec[best];
+  sharePct = n2 > 0 ? static_cast<uint8_t>(a * a / n2 * 100.0f + 0.5f) : 0;
+}
 
 // The last kTraceLen knocks and counts per verdict since the last clear.
 constexpr uint8_t kTraceLen = 24;

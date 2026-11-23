@@ -958,9 +958,13 @@ const char* cmd_imutaptrace(const String& argsInput) {
         tr.feed.inKnock ? "true" : "false");
     for (uint8_t i = 0; software && i < tr.count; ++i) {
       const knock::Event& e = tr.at(i);
-      put("%s{\"n\":%lu,\"peakMg\":%u,\"durMs\":%u,\"gapMs\":%d,\"v\":\"%s\"}", i ? "," : "",
+      char dir[3];
+      uint8_t share = 0;
+      knock::knockDirection(e, dir, share);
+      put("%s{\"n\":%lu,\"peakMg\":%u,\"durMs\":%u,\"gapMs\":%d,\"v\":\"%s\",\"vec\":[%d,%d,%d],"
+          "\"dir\":\"%s\",\"share\":%u}", i ? "," : "",
           (unsigned long)e.seq, (unsigned)e.peakMg, (unsigned)e.durMs, e.gapMs == 0xFFFF ? -1 : (int)e.gapMs,
-          knock::verdictName(e.verdict));
+          knock::verdictName(e.verdict), e.peakVec[0], e.peakVec[1], e.peakVec[2], dir, (unsigned)share);
     }
     put("%s", "]}");
     return b;
@@ -980,13 +984,17 @@ const char* cmd_imutaptrace(const String& argsInput) {
       (unsigned)tr.feed.lastPattern);
   put("Now: accel %d, %d, %d mg; jump %u mg%s\n", tr.feed.lastMg[0], tr.feed.lastMg[1], tr.feed.lastMg[2],
       (unsigned)tr.feed.lastDevMg, tr.feed.inKnock ? " (inside a knock)" : "");
-  put("%s", "    #  peak mg  ms  gap ms  verdict\n");
+  put("%s", "    #  peak mg  ms  gap ms  verdict  dir (share)   x/y/z mg\n");
   for (uint8_t i = 0; i < tr.count; ++i) {
     const knock::Event& e = tr.at(i);
     char gap[8];
     if (e.gapMs == 0xFFFF) snprintf(gap, sizeof(gap), "-"); else snprintf(gap, sizeof(gap), "%u", (unsigned)e.gapMs);
-    put("%5lu  %7u %3u  %6s  %s\n", (unsigned long)e.seq, (unsigned)e.peakMg, (unsigned)e.durMs, gap,
-        knock::verdictName(e.verdict));
+    char dir[3];
+    uint8_t share = 0;
+    knock::knockDirection(e, dir, share);
+    put("%5lu  %7u %3u  %6s  %-7s  %s (%3u%%)   %d/%d/%d\n", (unsigned long)e.seq, (unsigned)e.peakMg,
+        (unsigned)e.durMs, gap, knock::verdictName(e.verdict), dir, (unsigned)share, e.peakVec[0], e.peakVec[1],
+        e.peakVec[2]);
   }
   // Hints: the value that would have let each kind of missed knock count.
   if (tr.counts[1]) {
