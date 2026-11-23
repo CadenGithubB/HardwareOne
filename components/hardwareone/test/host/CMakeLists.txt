@@ -296,6 +296,18 @@ target_include_directories(mqtt_payload_core_tests PRIVATE ../..)
 target_include_directories(mqtt_payload_core_tests SYSTEM PRIVATE ../../../hardwareone_libs/ArduinoJson/src)
 target_compile_options(mqtt_payload_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# ESP-NOW revocation (System_ESPNow_RevokedCore.h, 1.0 design 5.1 A + B) with
+# the vendored ArduinoJson: the revoked list by MAC and by key, revoked.json
+# read back the same and an unreadable one failing closed, rule A (identity
+# only for a registry entry), the boot identity check skipped for a
+# quarantined registry, and the first-key window (README "ESP-NOW revocation").
+add_executable(espnow_revoked_core_tests test_espnow_revoked_core.cpp)
+set_target_properties(espnow_revoked_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_revoked_core_tests PRIVATE ../..)
+target_include_directories(espnow_revoked_core_tests SYSTEM PRIVATE ../../../hardwareone_libs/ArduinoJson/src)
+target_compile_options(espnow_revoked_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # The ESP-NOW channel for the Wi-Fi state and the 'espnowchannel' checker
 # (System_ESPNow_ChannelCore.h): the AP's channel while joined whether or not
 # ESP-NOW runs, the setting or fallback offline, no mismatch while nothing pins.
@@ -1891,6 +1903,7 @@ add_test(NAME system_metrics_core_tests COMMAND system_metrics_core_tests)
 add_test(NAME espnow_pair_core_tests COMMAND espnow_pair_core_tests)
 add_test(NAME device_name_core_tests COMMAND device_name_core_tests)
 add_test(NAME mqtt_payload_core_tests COMMAND mqtt_payload_core_tests)
+add_test(NAME espnow_revoked_core_tests COMMAND espnow_revoked_core_tests)
 add_test(NAME espnow_channel_core_tests COMMAND espnow_channel_core_tests
          ${CMAKE_CURRENT_LIST_DIR}/../../System_ESPNow.cpp
          ${CMAKE_CURRENT_LIST_DIR}/../../System_WiFi.cpp)

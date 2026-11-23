@@ -29,4 +29,5 @@
 #define HW1_BOOT_ANCHORS_JSON_PATH    "/system/boot_anchors.json"  // NTP anchors, split out of users.json
 #define HW1_AUTOMATIONS_JSON_PATH     "/system/automations.json"
 #define HW1_ESPNOW_DEVICES_JSON_PATH  "/system/espnow/devices.json"
+#define HW1_ESPNOW_REVOKED_JSON_PATH  "/system/espnow/revoked.json"  // the revoked list (espnowrevoke)
 #define HW1_NOTIFICATIONS_JSON_PATH   "/system/notifications.json"  // device notification policy
