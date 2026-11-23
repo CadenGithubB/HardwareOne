@@ -30,6 +30,11 @@
 #include "System_TaskUtils.h"
 #include "System_CommandRegistry.h"
 
+// Tap diagnostics (single writer: the IMU task; read for imustatus json).
+struct ImuTapDiag { uint32_t lastReadMs, maxGapMs, gaps, chipTaps, gapDropped; };
+static ImuTapDiag sImuTapDiag = {0, 0, 0, 0, 0};
+
+
 // IMU initialization handoff variables
 volatile bool gImuInitRequested = false;
 volatile bool gImuInitDone = false;
@@ -1252,10 +1257,6 @@ extern const SettingsModule imuSettingsModule = {
 // ============================================================================
 #if DISPLAY_TYPE > 0
 #include "HAL_Motion_OLED.h"
-
-// Tap diagnostics (single writer: the IMU task; read for imustatus json).
-struct ImuTapDiag { uint32_t lastReadMs, maxGapMs, gaps, chipTaps, gapDropped; };
-static ImuTapDiag sImuTapDiag = {0, 0, 0, 0, 0};
 
 #endif
 
