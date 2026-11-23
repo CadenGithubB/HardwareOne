@@ -158,6 +158,7 @@ Note: read the global on/off via `automation system status json`, not from
 | `oledstatus` | `{"schema":1,"connected","address","width","height","enabled","mode"}` |
 | `ledstatus` | `{"schema":1,"default","lights":[...]}`: `default` is the target an LED command without one reaches (`onboard`, or `encoder` on a board without an onboard LED). One object per light the build has, connected or not: `{"target":"onboard","present":true,"connected":true,"color","rgb":[r,g,b],"brightness","effect"}`, or `{"target":"onboard","present":false}` on a board without one; with the encoder board built in, `{"target":"encoder","present":true,"connected","product","board","bus","address","brightness","pixels":[{"pixel","color","rgb":[r,g,b],"effect"}]}` for board 1, then the same object for each encoder board 2-4 that has an address set (or is connected), with `"target":"encoder<n>","instance":n` first (`{"target":"encoder2","instance":2,"present":true,...}`); board 1's object has no `instance` key. `color` is the colour word the last command gave (`off` after `ledclear`, and on the onboard light after an effect), `rgb` that colour before brightness, `effect` the running effect or `off`, `brightness` the saved percent. `product` (5752 or 4991) and `board` are `0` and `""`, and `pixels` is empty, until a board has been detected; `bus` is 0 for I2C1. Errors (text): `Error: The encoder light state is busy. Retry.`, `Error: The LED status outgrew the reply buffer.` |
 | `encoderstatus` | Builds with the encoder board. `{"schema":1,"connected","product","board","pixels","bus","address","brightness","autoStart"}`; `product` 5752 (4 pixels) or 4991 (1 pixel), `0` with `board` `""` and `pixels` 0 until a board has been detected. `encoderstatus <n> json` (n 2-4) answers for board n with the same keys plus `"instance":n` after `schema`; its `address` is 0 while none is set. Board 1's object has no `instance` key |
+| `anoencoderstatus` | Builds with the ANO encoder (`INPUT_DEVICE_TYPE` 2). `{"schema":1,"connected","product","bus","address","pollMs","invert","swapUpDown","swapLeftRight","autoStart"}`; `connected` is true while the encoder is open, `product` 5740 then and 0 otherwise; `bus` and `address` are where it was opened while connected, else the settings (`inputbus`, `anoencoderi2caddr`, 0x49..0x50); `pollMs` is `inputdevicepollms`, `autoStart` is `inputautostart` |
 | `temperature` | `{"schema":1,"tempC","tempF"}` (both `null` when the chip has no believable reading) |
 | `time` | `{"schema":1,"synced","source","time","uptime_ms","rtc_temp_c"?}`; `time` is local time as `YYYY-MM-DDTHH:MM:SS`, `""` while the clock has no time; `rtc_temp_c` only with an RTC reading |
 | `sensorlog status json` | `{"schema":1,"running","file"?,"intervalMs","format","maxSizeBytes","rotations","sensors":[names],"autoStart","lastWriteAgoSec"?,"approxSizeBytes"?}`; `format` is `text`, `csv` or `track`; `file`, `lastWriteAgoSec` and `approxSizeBytes` (the logger's running estimate) appear only while running; a reply that does not fit is `{"schema":1,"ok":false,"error":"response too large"}`. Also the second entry of `GET /api/logging/status` |
@@ -343,7 +344,7 @@ Every builder object opens with the envelope: `{"valid":bool,"connected":bool,"t
 - imu: `+ {"accel":{x,y,z},"gyro":{x,y,z},"ori":{yaw,pitch,roll},"temp"}`
 - gps: `+ {"fix","quality","sats","lat","lon","alt","speed"}`
 - apds: `+ {"r","g","b","c","proximity"}`
-- anoencoder: `+ {"pos","axis","buttons"}` *(was `{"schema":1,"connected","position",...}` - `schema` dropped, `position`->`pos`, envelope added)*
+- anoencoder: `+ {"pos","axis","buttons"}` *(was `{"schema":1,"connected","position",...}` - `schema` dropped, `position`->`pos`, envelope added)*. `axis` is always 0 (the wheel is the vertical axis); `buttons` is the device-native layout, active high: IN bit 0, UP 1, DOWN 2, LEFT 3, RIGHT 4 (START and SELECT are edges and never appear in it). `pos` counts the wheel's detents since the encoder was opened. `/api/sensors?sensor=anoencoder` answers this object in every case (closed: `valid` and `connected` false)
 - tof: `+ {"objects":[{"id","distance_mm","status","valid"}]}` (detected objects only; variable length)
 
 ---
@@ -433,6 +434,11 @@ contract in sec. 6 is **unchanged**.)
   `sensorMask`, `sensorConnectedMask` and `sensorEnabledMask` changed to the one sensor numbering
   (thermal 1, tof 2, imu 4, gps 8, input 16, fmradio 32, rtc 256, presence 512, apds 1024): read
   the masks through `sensorBits`, not through numbers of your own.
+- The ESP-NOW capability manifest's `sensorStatus` object (`thermal`, `tof`, `imu`, `input`,
+  `apds`, `gps`, `rtc`, `presence`; keys unchanged) is stricter since 2026-11-22: a value is `true`
+  only when this build has that sensor and the last bus scan found it at the bus and address the
+  build uses for it (a configured address counts; `presence` looks at the presence sensor's own
+  address, not 0x61). Before, any device answering at a matching name counted, whatever the build.
 - `espnowtimestatus json`: `schema`, `meshTime`, `role`, `masterNamed` (`false`: no master is named
   on this device, so it takes no mesh time), `clockSet`, `clockSource`, `clockSetAgoS`,
   `epoch`, `sends`, `sendsWhyNot`, `lastSentAgoS`, `framesSent`, `peersSent`, `peersReady`,

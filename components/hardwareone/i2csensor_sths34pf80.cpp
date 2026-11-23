@@ -178,12 +178,14 @@ static bool readInt16(TwoWire& wire, uint8_t regL, int16_t* value) {
 
 const char* cmd_presencestart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_PRESENCE, argsInput, "openpresence")) return error;
   return cmd_sensorstart_queued(I2C_DEVICE_PRESENCE, "Presence", "openpresence@enqueue",
       "the sensor opens in the background - read it with 'presenceread' once it is up");
 }
 
 const char* cmd_presencestop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_PRESENCE, argsInput, "closepresence")) return error;
   return cmd_sensorstop_queued(I2C_DEVICE_PRESENCE, "Presence");
 }
 
@@ -495,7 +497,7 @@ const char* cmd_presenceautostart(const String& argsInput) {
 // compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
 static const char* cmd_presencebus(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return i2cSetDeviceBusAndReport(gSettings.presenceBus, a, "presenceBus");
+  return i2cSetDeviceBusAndReport(gSettings.presenceBus, a, "presenceBus", i2cInstanceOwner(I2C_DEVICE_PRESENCE, 1));
 }
 
 const CommandEntry presenceCommands[] = {

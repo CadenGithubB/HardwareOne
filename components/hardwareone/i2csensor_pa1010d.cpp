@@ -200,12 +200,14 @@ bool gpsStartInternal() {
 
 const char* cmd_gpsstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_GPS, argsInput, "opengps")) return error;
   return cmd_sensorstart_queued(I2C_DEVICE_GPS, "GPS", "opengps@enqueue",
       "the GPS opens in the background - read location with 'gpsread' once it is up (a fix can take a minute outdoors)");
 }
 
 const char* cmd_gpsstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_GPS, argsInput, "closegps")) return error;
   return cmd_sensorstop_queued(I2C_DEVICE_GPS, "GPS");
 }
 
@@ -717,7 +719,7 @@ const char* cmd_gpslog(const String& argsInput) {
 // compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
 static const char* cmd_gpsbus(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return i2cSetDeviceBusAndReport(gSettings.gpsBus, a, "gpsBus");
+  return i2cSetDeviceBusAndReport(gSettings.gpsBus, a, "gpsBus", i2cInstanceOwner(I2C_DEVICE_GPS, 1));
 }
 
 const CommandEntry gpsCommands[] = {

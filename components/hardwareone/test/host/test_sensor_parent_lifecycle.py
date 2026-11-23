@@ -34,7 +34,7 @@ def main() -> None:
         "apds": ("apds9960", "gAPDS9960", "Adafruit_APDS9960", "apds.obj", 1, 4),
         "servo": ("pca9685", "gPwmDriver", "Adafruit_PWMServoDriver", "servo.obj", 1, 1),
         "gamepad": ("seesaw", "gGamepadSeesaw", "Adafruit_seesaw", "input.gamepad.obj", 2, 0),
-        "ano": ("ano_encoder", "gAnoSeesaw", "Adafruit_seesaw", "input.ano.obj", 1, 0),
+        "ano": ("ano_encoder", "gAnoSeesaw", "AnoSeesaw", "input.ano.obj", 1, 0),
         # Static checks only: PSRAM placement new, retained across stops.
         "encoder": ("encoder", "sPixels", "EncoderPixels", "encoder.obj", 1, 0),
     }
@@ -56,7 +56,7 @@ def main() -> None:
     for module, function in (("imu", "imuInit"), ("apds", "apdsInit"),
                              ("servo", "servoInit"), ("gamepad", "gamepadInit"),
                              ("gamepad", "gamepadInitConnection"),
-                             ("ano", "anoEncoderInit"), ("ano", "anoEncoderInitConnection")):
+                             ("ano", "anoEncoderInit")):
         init_definitions.append(extract_block(sources[module], f"\nbool {function}()"))
     invalidations = [extract_block(sources[module], marker) for module, marker in [
         ("imu", "static bool imuInvalidateCache("), ("apds", "static bool apdsInvalidateCache("),

@@ -71,11 +71,13 @@ def map_actions_unit(component: Path) -> str:
     input_cpp = (component / "HAL_Input.cpp").read_text()
     seesaw_h = (component / "i2csensor_seesaw.h").read_text()
     ano_h = (component / "i2csensor_ano_encoder.h").read_text()
+    if (component / "i2csensor_ano_encoder_core.h").exists():  # the ANO's button bits
+        ano_h += (component / "i2csensor_ano_encoder_core.h").read_text()
     types = [
         extract_block(input_h, "enum InputButton") + ";",
         extract_block(input_h, "enum InputControllerType") + ";",
         plain_define_lines(seesaw_h, "JOYSTICK_", "GAMEPAD_BUTTON_"),
-        plain_define_lines(ano_h, "ANO_BTN_", "ANO_VIRT_START"),
+        plain_define_lines(ano_h, "ANO_BTN_", "ANO_VIRT_START", "ANO_VIRT_SELECT"),
         extract_block(display, "struct NavEvents") + ";",
         extract_block(user, "enum CommandSource") + ";",
         extract_block(user, "struct AuthContext") + ";",

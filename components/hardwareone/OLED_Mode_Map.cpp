@@ -2322,7 +2322,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       // buttons stores active-low (1 = unpressed). Inverting + mask
       // gives "currently pressed" for whichever logical A bit the active
       // input driver uses.
-      aHeld = (~input.buttons & INPUT_MASK(INPUT_BUTTON_A)) != 0;
+      aHeld = (~inputNavButtons(input) & INPUT_MASK(INPUT_BUTTON_A)) != 0;
     }
   }
 #endif

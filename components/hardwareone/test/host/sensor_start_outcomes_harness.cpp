@@ -12,7 +12,7 @@ using TaskHandle_t = void*;
 using SemaphoreHandle_t = void*;
 using TickType_t = unsigned;
 constexpr unsigned MIN_RESTART_DELAY_MS = 2000;
-constexpr int DEBUG_ALWAYS = 1, DEBUG_RTC = 2, ANO_AXIS_VERTICAL = 0;
+constexpr int DEBUG_ALWAYS = 1, DEBUG_RTC = 2;
 constexpr int I2C_ADDR_TOF = 0x29, I2C_ADDR_GPS = 0x10, I2C_ADDR_APDS = 0x39;
 constexpr int PMTK_SET_NMEA_OUTPUT_RMCGGA = 1, PMTK_SET_NMEA_UPDATE_1HZ = 2, PGCMD_ANTENNA = 3;
 #define pdMS_TO_TICKS(ms) (ms)

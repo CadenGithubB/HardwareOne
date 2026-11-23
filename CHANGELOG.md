@@ -41,6 +41,55 @@ everything user-visible since the v0.99.99.1 tag.
 - Bond mode is marked experimental for 1.0 in `bondconnect`, `bondstatus` and
   `espnowbondmodeenabled` help, the Bonded Device web page and the docs (D3). No behaviour change.
 
+### Fixed (ANO rotary encoder)
+- A RIGHT tap is SELECT, sent when RIGHT is released; holding RIGHT and pressing IN is START only.
+  RIGHT used to fire SELECT the moment it was pressed, so outside the menu every RIGHT press
+  jumped to Quick Settings and the START chord always opened Quick Settings first (and the chord's
+  IN also counted as A). RIGHT is SELECT only: it no longer also moves right in the modes that read
+  a right step (one tap did two things there). Owner decision 2026-11-22.
+- Taps shorter than one poll (90 ms) are no longer lost: the poll reads the seesaw's change flags
+  and counts a button that was released at both reads with its flag set as one press. A press
+  that lands between the buttons read and the flags read is still counted once, not twice.
+- An unplugged or failing board is now seen: every read is checked (buttons, change flags, the
+  wheel's delta), so the I2C health records and the auto-disable after repeated failures work,
+  and a failed read no longer turns into phantom buttons or a burst of scroll steps.
+- `inputautostart on` now starts the ANO at boot without the OLED (it used to start only through
+  the OLED's boot and menu path); the menu path no longer asks again while that start is queued.
+- Reopening the ANO after `inputbus` moved it now talks to the new bus (the seesaw object stayed on
+  the first bus's wires). The bus and the address are taken at `openinput` and kept until the next.
+- The board is begun once (it was reset three times while holding the bus for up to 3 s).
+
+### Changed (ANO rotary encoder)
+- New `anoencoderstatus [json]`: connected, product, bus, address, poll interval, rotation,
+  button swaps and start at boot (schema 1, `docs/APP_JSON_CONTRACT.md`).
+- `anoencoderi2caddr` takes 0x49..0x50 in hex or decimal (the A0-A2 jumpers), refuses an address
+  another device of this build uses on the input bus, and applies at the next `openinput` (it said
+  "reboot required"); the setting has a list of the eight addresses on the Settings page.
+- `anoencoderread` no longer opens the board by itself: while the encoder is closed it answers
+  "Error: The ANO encoder is not open. Start it with 'openinput' ...". Its text reply names the
+  buttons held; the rotary "axis" (always vertical since the RIGHT-tap toggle was removed) is gone
+  from the web card, the G2 page and the OLED's remote view. The reading's wire format is
+  unchanged: `axis` stays in the JSON as 0 and `buttons` keeps the device-native bits.
+- `/api/sensors?sensor=anoencoder` answers the shared reading envelope in every case (it answered
+  `{"val":0,"error":...}` when closed or not built). On/off arguments of `anoencoderinvert`,
+  `anoencoderswapud`, `anoencoderswaplr` and `inputautostart` use the shared parser and reply.
+
+### Changed (I2C buses and addresses)
+- Every `<device>bus` command (`oledbus`, `fuelgaugebus`, `inputbus`, `imubus`, `tofbus`,
+  `thermalbus`, `apdsbus`, `gpsbus`, `fmradiobus`, `rtcbus`, `presencebus`, `matrixbus`,
+  `servobus`, `encoderbus`) refuses a bus where an address the device uses is already taken by
+  another device of this build, with the same one-line reply as the address setters (for example
+  `Error: 0x36 on bus 1 is in use by Encoder (instance 1). fuelGaugeBus stays 0; ...`). Both of the
+  OLED's addresses and each chip of a two-chip device are checked.
+- `open<sensor>` / `close<sensor>` of a device with one instance refuse an instance number:
+  `openimu 2` answers "Error: imu has one instance." (they ignored arguments).
+- A device counts as connected (command help, `sensors`, the ESP-NOW capability report) when the
+  last bus scan found something at the bus and address this build uses for it, not when any
+  scanned device's name matched. The ESP-NOW manifest's `sensorStatus` flags follow it: true only
+  for a sensor this build has, found at its configured bus and address (before, a device at the
+  address counted whatever the build). Its `presence` flag looked at 0x61 and now looks at the
+  presence sensor's real address.
+
 ### Added (build configuration)
 - `xiao-status-sign`: a saved XIAO configuration for the meeting-room status sign. Two Adafruit
   4991 encoder boards on STEMMA QT are lit green or red with the LED commands (`ledcolor encoder`,

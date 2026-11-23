@@ -510,7 +510,8 @@ const char* cmd_encoderbus(const String& argsInput) {
   } else if (n == 1 && text.length() > 0) {
     if (const char* hint = notValueButInstance(arg, "a bus (0 or 1)", "encoderbus", "1")) return hint;
   }
-  return i2cSetDeviceBusAndReport(saved(n).bus, text, settingRow(n, kFieldBus)->jsonKey);
+  return i2cSetDeviceBusAndReport(saved(n).bus, text, settingRow(n, kFieldBus)->jsonKey,
+                                  i2cInstanceOwner(I2C_DEVICE_ENCODER, n));
 }
 
 // One instance's frame: each open board keeps its own pacing, and a busy bus

@@ -564,7 +564,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
 
   // Remote input renderer — used for the REMOTE_SENSOR_INPUT ("input") type,
   // which bond/mesh streaming reports for BOTH worker input devices:
-  //   ANO encoder : {"pos":N,"axis":0|1,"buttons":B}  (buttons active-HIGH)
+  //   ANO encoder : {"pos":N,"axis":0,"buttons":B}    (buttons active-HIGH)
   //   gamepad     : {"x":N,"y":N,"buttons":B}         (buttons active-LOW)
   // Remote INPUT (gamepad/ANO) reuses the SHARED, parameterized renderers —
   // hwRenderGamepadState / hwRenderAnoState (+ hwBuildAnoInner for the card body).
@@ -628,7 +628,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "            host.innerHTML='<div class=\"gamepad-row\" style=\"margin-top:10px\"><div class=\"joy-wrap\"><canvas id=\"'+id+'-joystick\" class=\"joy-canvas\" width=\"100\" height=\"100\"></canvas></div><div class=\"abxy-grid\"><div></div><div id=\"'+id+'-btn-x\" class=\"btn btn-small\" style=\"width:52px\">X</div><div></div><div id=\"'+id+'-btn-y\" class=\"btn btn-small\" style=\"width:52px\">Y</div><div></div><div id=\"'+id+'-btn-a\" class=\"btn btn-small\" style=\"width:52px\">A</div><div></div><div id=\"'+id+'-btn-b\" class=\"btn btn-small\" style=\"width:52px\">B</div><div></div></div><div style=\"display:flex;flex-direction:column;gap:6px;margin-left:12px\"><div id=\"'+id+'-btn-select\" class=\"btn btn-small\" style=\"width:80px\">Select</div><div id=\"'+id+'-btn-start\" class=\"btn btn-small\" style=\"width:80px\">Start</div></div></div>';\n"
     "          }\n"
     "        }\n"
-    "        if(isAno){ window.hwRenderAnoState(payload,{data:id,pos:id+'-pos',axis:id+'-axis',wheel:id+'-wheel',btnIn:id+'-btn-in',btnUp:id+'-btn-up',btnDown:id+'-btn-down',btnLeft:id+'-btn-left',btnRight:id+'-btn-right',btnStart:id+'-btn-start'}); }\n"
+    "        if(isAno){ window.hwRenderAnoState(payload,{data:id,pos:id+'-pos',wheel:id+'-wheel',btnIn:id+'-btn-in',btnUp:id+'-btn-up',btnDown:id+'-btn-down',btnLeft:id+'-btn-left',btnRight:id+'-btn-right',btnStart:id+'-btn-start'}); }\n"
     "        else if(typeof window.hwRenderGamepadState==='function'){ window.hwRenderGamepadState(payload,{data:id,joystick:id+'-joystick',btnX:id+'-btn-x',btnY:id+'-btn-y',btnA:id+'-btn-a',btnB:id+'-btn-b',btnSelect:id+'-btn-select',btnStart:id+'-btn-start'}); }\n"
     "        return;\n"
     "      }\n"

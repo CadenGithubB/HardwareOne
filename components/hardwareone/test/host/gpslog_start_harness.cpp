@@ -57,6 +57,12 @@ static const char* borrowed(const char* text) {
 }
 
 enum { I2C_DEVICE_GPS = 4 };
+// The single-instance argument check of opengps (System_I2C.cpp): the
+// command here gets no argument.
+static const char* i2cOpenCloseArgError(int device, const String&, const char* usage) {
+  if (device != I2C_DEVICE_GPS || std::strcmp(usage, "opengps")) std::abort();
+  return nullptr;
+}
 static bool gGpsRunning;
 static const char* queueReply;
 static const char* formatReply;

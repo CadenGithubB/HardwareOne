@@ -9886,40 +9886,13 @@ static void buildDeviceManifest(JsonDocument& doc) {
   // Add sensor connectivity status (which sensors are actually connected vs compiled)
   JsonObject sensorStatus = device["sensorStatus"].to<JsonObject>();
 #if ENABLE_I2C_SYSTEM
-  // connectedDevices[] and connectedDeviceCount are extern'd at file scope
-  // Check which sensors are actually connected
-  bool thermalConnected = false, tofConnected = false, imuConnected = false;
-  bool inputConnected = false, apdsConnected = false, gpsConnected = false;
-  bool rtcConnected = false, presenceConnected = false;
-
-  for (int i = 0; i < connectedDeviceCount; i++) {
-    if (!connectedDevices[i].isConnected) continue;
-    switch (connectedDevices[i].address) {
-      case 0x33: thermalConnected = true; break;  // MLX90640
-      case 0x29: tofConnected = true; break;      // VL53L0X
-      case 0x28: imuConnected = true; break;      // BNO055
-      // Input device: either the Seesaw gamepad (0x50) OR the ANO rotary
-      // encoder (0x49) — they're mutually exclusive at compile time but the
-      // local I2C scanner doesn't know which one is compiled in, so it
-      // accepts either address. Previously only 0x50 was matched, which
-      // made the input-connected flag always read false on ANO builds.
-      case 0x49: inputConnected = true; break;    // ANO Rotary Encoder
-      case 0x50: inputConnected = true; break;    // Seesaw Gamepad
-      case 0x39: apdsConnected = true; break;     // APDS9960
-      case 0x10: gpsConnected = true; break;      // PA1010D
-      case 0x68: rtcConnected = true; break;      // DS3231
-      case 0x61: presenceConnected = true; break; // LD2410
-    }
-  }
-
-  sensorStatus["thermal"] = thermalConnected;
-  sensorStatus["tof"] = tofConnected;
-  sensorStatus["imu"] = imuConnected;
-  sensorStatus["input"] = inputConnected;
-  sensorStatus["apds"] = apdsConnected;
-  sensorStatus["gps"] = gpsConnected;
-  sensorStatus["rtc"] = rtcConnected;
-  sensorStatus["presence"] = presenceConnected;
+  // Which sensors the last bus scan found where this build looks for them:
+  // the device table's rows of each module at their configured bus and
+  // address (isSensorConnected), so a configured address, the input device
+  // of this build and the presence sensor's real address all count.
+  static const char* const kStatusModules[] = {"thermal", "tof", "imu", "input",
+                                               "apds",    "gps", "rtc", "presence"};
+  for (const char* module : kStatusModules) sensorStatus[module] = isSensorConnected(module);
 #endif
   
   // Add fwHash as hex string for cache keying

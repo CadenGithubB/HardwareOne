@@ -3632,16 +3632,6 @@ void requestOledMode(OledMode newMode, const char* reason, bool pushStack, bool 
   // owns its own reset via OledModeEntry::onEnterFunc, invoked centrally just
   // below — see the onEnter dispatch after `currentOledMode = newMode`.
 
-#if ENABLE_ANO_ENCODER
-  // Reset the rotary axis on every mode change so a horizontal-axis flip from
-  // one mode doesn't bleed into the next. MVP defaults to vertical for every
-  // mode — a per-mode hint can be added later if a mode prefers to start
-  // horizontal (radio tuner, map zoom, etc.).
-  if (newMode != currentOledMode) {
-    anoEncoderResetAxisForMode(ANO_AXIS_VERTICAL);
-  }
-#endif
-
   currentOledMode = newMode;
 
   // Centralized entry hook — the single owner of "what happens when this mode
@@ -5939,7 +5929,7 @@ void updateInputState() {
   if (inputConsumeSnapshot(input)) {
     gCurrentJoyX = input.joyX;
     gCurrentJoyY = input.joyY;
-    gCurrentButtons = input.buttons;
+    gCurrentButtons = inputNavButtons(input);
     gHelperPressedAccum |= input.buttonPressedAccum;
     gInputStateValid = true;
   }
@@ -6138,7 +6128,7 @@ bool processOledInput() {
   const bool snapshotAvailable = inputCacheSnapshot(input);
   const bool dataValid = snapshotAvailable && input.dataValid;
   int joyX = input.joyX, joyY = input.joyY;
-  uint32_t buttons = input.buttons;
+  uint32_t buttons = inputNavButtons(input);
   uint32_t latchedPresses = input.buttonPressedAccum;
 
   if (!dataValid) {
@@ -6214,7 +6204,7 @@ bool processOledInput() {
   if (!inputConsumeSnapshot(input)) return false;
   // Pair the latch with the same raw sample so a newly arrived press is
   // delivered once, even if it arrived after the peek above.
-  buttons = input.buttons;
+  buttons = inputNavButtons(input);
   latchedPresses = input.buttonPressedAccum;
 
   // Reset auto-repeat state when mode changes to prevent stuck joystick
@@ -6252,14 +6242,15 @@ bool processOledInput() {
   //     event" read the booleans below.
   //
   //   • gNavEvents.up/down/left/right — edge-style "nav happened" bools,
-  //     emitted from BOTH wheel sign (axis-aware) AND dpad press edges, so
+  //     emitted from BOTH wheel sign (up/down) AND dpad press edges, so
   //     existing menu code that only checks booleans keeps working without
   //     change.
   //
   //   • newlyPressed (downstream) — button rising edges from IN/UP/DOWN/
-  //     LEFT/RIGHT plus the synthesized START from RIGHT+IN chord, mapped
-  //     to logical INPUT_BUTTON_* via gAnoEncoderMapping. Handlers read
-  //     these via INPUT_CHECK exactly as on the gamepad.
+  //     LEFT, SELECT and RIGHT at a RIGHT tap's release, and START from the
+  //     RIGHT+IN chord, mapped to logical INPUT_BUTTON_* via
+  //     gAnoEncoderMapping. Handlers read these via INPUT_CHECK exactly as
+  //     on the gamepad.
   //
   //   • deltaX/deltaY — left untouched (stays at 0 for the ANO because
   //     joyX/joyY are always JOYSTICK_CENTER). Joystick-deflection-aware
@@ -6285,27 +6276,14 @@ bool processOledInput() {
     }
     gNavEvents.wheelDelta = totalDetents;
 
-    // Boolean nav events from wheel sign — axis chooses up/down vs left/
-    // right so modes that pre-date wheelDelta still respond. One bool max
+    // Boolean nav events from the wheel's sign (the wheel is the vertical
+    // axis) so modes that pre-date wheelDelta still respond. One bool max
     // per frame regardless of detent count; modes that want proportional
     // response read wheelDelta.
     if (totalDetents != 0) {
-      bool vertical = true;
-#if ENABLE_ANO_ENCODER
-      AnoEncoderCache ano{};
-      if (anoEncoderCacheSnapshot(ano, 5)) {
-        vertical = (ano.currentAxis == ANO_AXIS_VERTICAL);
-      }
-#endif
-      if (totalDetents > 0) {
-        if (vertical) gNavEvents.down  = true;
-        else                            gNavEvents.right = true;
-      } else {
-        if (vertical) gNavEvents.up   = true;
-        else                            gNavEvents.left = true;
-      }
-      DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] wheel    delta=%+d axis=%s",
-                                totalDetents, vertical ? "V" : "H");
+      if (totalDetents > 0) gNavEvents.down = true;
+      else                  gNavEvents.up   = true;
+      DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] wheel    delta=%+d", totalDetents);
     }
   }
 
@@ -6316,14 +6294,15 @@ bool processOledInput() {
   // / auto-repeat directional input use the wheel; modes that want a single
   // nav step per press read the booleans here. The press also lands in
   // newlyPressed downstream, where INPUT_CHECK maps it to its logical
-  // INPUT_BUTTON_* role (LEFT=B, UP=Y, DOWN=X, RIGHT=SELECT).
+  // INPUT_BUTTON_* role (LEFT=B, UP=Y, DOWN=X). RIGHT is no direction: its
+  // only edge is SELECT at its release (none after a RIGHT+IN chord), so no
+  // right step comes from the ANO.
   {
-    uint32_t dpadEdge = latchedPresses & (ANO_BTN_UP | ANO_BTN_DOWN | ANO_BTN_LEFT | ANO_BTN_RIGHT);
+    uint32_t dpadEdge = latchedPresses & (ANO_BTN_UP | ANO_BTN_DOWN | ANO_BTN_LEFT);
     if (dpadEdge) {
       if (dpadEdge & ANO_BTN_UP)    gNavEvents.up    = true;
       if (dpadEdge & ANO_BTN_DOWN)  gNavEvents.down  = true;
       if (dpadEdge & ANO_BTN_LEFT)  gNavEvents.left  = true;
-      if (dpadEdge & ANO_BTN_RIGHT) gNavEvents.right = true;
       DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] dpad     edge=0x%02lX", (unsigned long)dpadEdge);
     }
   }
@@ -6617,6 +6596,13 @@ void tryAutoStartInputForMenu() {
   // queued I2C device. Reuse the same driver start and saved autostart policy.
   inputStartInternal();
 #else
+  // Boot autostart (processAutoStartSensors) may have queued it already: a
+  // start that is admitted and not yet settled is left alone, so it is never
+  // asked for twice.
+  if (i2cSensorStartOutstanding(I2C_DEVICE_INPUT, 1)) {
+    DEBUG_DISPLAYF("[INPUT_AUTO] input start already outstanding");
+    return;
+  }
   // Admission only: this runs on the main loop, and the command wrapper's
   // reply text lives in cmd_exec's debug buffer.
   SensorStartRefusal why = SensorStartRefusal::None;

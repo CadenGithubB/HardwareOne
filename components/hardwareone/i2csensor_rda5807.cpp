@@ -489,12 +489,14 @@ void updateFmRadio() {
 
 const char* cmd_fmradio_start(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_FMRADIO, argsInput, "openfmradio")) return error;
   return cmd_sensorstart_queued(I2C_DEVICE_FMRADIO, "FM Radio", "openfmradio@enqueue",
       "the radio powers up in the background - check it with 'fmradioread', then tune with 'fmradiotune <freq>'");
 }
 
 const char* cmd_fmradio_stop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_FMRADIO, argsInput, "closefmradio")) return error;
   return cmd_sensorstop_queued(I2C_DEVICE_FMRADIO, "FM Radio");
 }
 
@@ -774,7 +776,7 @@ const char* cmd_fmradioautostart(const String& argsInput) {
 // compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
 static const char* cmd_fmradiobus(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return i2cSetDeviceBusAndReport(gSettings.fmRadioBus, a, "fmRadioBus");
+  return i2cSetDeviceBusAndReport(gSettings.fmRadioBus, a, "fmRadioBus", i2cInstanceOwner(I2C_DEVICE_FMRADIO, 1));
 }
 
 const CommandEntry fmRadioCommands[] = {

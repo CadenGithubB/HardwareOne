@@ -18,6 +18,14 @@ target_compile_options(encoder_light_tests PRIVATE -Wall -Wextra -Werror -pedant
 target_compile_definitions(encoder_light_tests PRIVATE
   HW1_NEOPIXEL_SOURCE="${CMAKE_CURRENT_LIST_DIR}/../../System_NeoPixel.cpp")
 
+# The ANO rotary encoder's poll (i2csensor_ano_encoder_core.h): pins and
+# swaps, the address rule, taps from the change flags, RIGHT tap = SELECT at
+# release, RIGHT+IN = START only, the wheel and failed reads.
+add_executable(ano_encoder_core_tests test_ano_encoder_core.cpp)
+set_target_properties(ano_encoder_core_tests PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+target_include_directories(ano_encoder_core_tests PRIVATE ../..)
+target_compile_options(ano_encoder_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # Compiles the REAL header from the firmware tree, not a copy of it — the same
 # rule updater/test/host/CMakeLists.txt states. System_LLMUtf8.h is kept
 # dependency-free so this is possible; if it ever gains an Arduino or ESP-IDF
@@ -1769,6 +1777,7 @@ add_test(NAME sdmmc_lifecycle
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_sdmmc.py ${SDMMC_TEST_ARGS})
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME encoder_light_tests COMMAND encoder_light_tests)
+add_test(NAME ano_encoder_core_tests COMMAND ano_encoder_core_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
 add_test(NAME factory_wipe_policy_tests COMMAND factory_wipe_policy_tests)
@@ -2485,6 +2494,11 @@ add_test(
   NAME sensor_auto_disable_sites
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_sensor_auto_disable_sites.py)
+add_test(
+  NAME i2c_address_walk
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_i2c_address_walk.py
+          ${I2C_PROBE_TEST_ARGS})
 add_test(
   NAME openinput_backends
   COMMAND ${Python3_EXECUTABLE}

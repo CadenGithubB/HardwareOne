@@ -2434,12 +2434,23 @@ inputdevicepollms <10-1000>     - Poll interval
 gamepadread                     - Read joystick axes and button states
 
 --- ANO rotary encoder (INPUT_DEVICE_TYPE=2) ---
-anoencoderread                  - Read encoder position and button state
-anoencoderi2caddr <1-127>       - Set I2C address
+anoencoderstatus [json]         - Bus, address, settings and whether it is open
+anoencoderread [json]           - Read the wheel position and the buttons held
+anoencoderi2caddr <0x49..0x50>  - Set the I2C address (applies at the next openinput)
 anoencoderinvert [on|off]       - Invert rotation direction
 anoencoderswapud [on|off|toggle]  - Swap UP/DOWN buttons
 anoencoderswaplr [on|off|toggle]  - Swap LEFT/RIGHT buttons
+inputbus <0|1>                  - The bus the input device is on (applies at the next openinput)
 ```
+
+ANO buttons on the OLED: the wheel scrolls up and down, IN is A (select), LEFT is B (back),
+DOWN is X and UP is Y. A RIGHT tap is SELECT (Quick Settings outside the menu, autocomplete in
+the keyboard), sent when RIGHT is released; holding RIGHT and pressing IN is START, with no
+SELECT first. A tap shorter than one poll (`inputdevicepollms`, 90 ms by default) still counts.
+The address is the A0-A2 jumpers' (0x49..0x50, hex or decimal); an address or a bus that another
+device of this build uses there is refused (`anoencoderi2caddr`, `inputbus` and the open), and
+`anoencoderread` answers an error until the encoder is open (`openinput`, or `inputautostart on`
+for every boot, with or without the OLED).
 
 > `opengamepad`, `closegamepad`, and `gamepadautostart` no longer exist - they
 > were replaced by the device-agnostic `openinput` / `closeinput` /
@@ -2496,7 +2507,9 @@ never opens that address there. The same holds for every other device built into
 that bus: the OLED (0x3C/0x3D), the APDS9960 (0x39), the gamepad (0x50) or the ANO encoder (its
 address setting). `encoderaddress`, `encoderbus` and the open refuse the address with one line that
 names the device using it, for example `Error: 0x36 on bus 0 is in use by MAX17048 (LiPo Fuel
-Gauge).` Before it claims a board the device reads the product id (one
+Gauge).` Every other bus command (`oledbus`, `fuelgaugebus`, `inputbus`, `imubus`, `tofbus`, ...)
+checks the same way: a bus where any address the device uses (both of the OLED's, each chip of a
+two-chip board) is taken by another device is refused, and the setting keeps its value. Before it claims a board the device reads the product id (one
 register read, no reset), so a fuel gauge, an ANO encoder or a gamepad at the same address is left
 alone. `i2cscan` reads the product id only where two devices of different products can share the
 address (the encoder's configured address, 0x49 with an ANO or gamepad build), and names the

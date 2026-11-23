@@ -377,6 +377,29 @@ inline const char* i2cInstanceErrorText(I2cDeviceType t, const I2cInstanceArg& a
   return buf;
 }
 
+// The open/close argument check of a single-instance type ("openimu 2"):
+// nullptr when the argument is taken, else the error reply. The reply is
+// written to buf; without a buffer (out of memory) it is a fixed text chosen
+// from the error, so the reply still says why. Pure: callers without the I2C
+// system (the GPIO encoder's openinput) use it too.
+inline const char* i2cOpenCloseArgErrorText(I2cDeviceType t, const char* args, const char* usage,
+                                            char* buf, size_t len) {
+  const I2cInstanceArg arg = i2cParseInstanceArg(t, args ? args : "", I2cInstanceForm::OpenClose);
+  if (arg.error == I2cInstanceError::None) return nullptr;
+  if (buf && len > 0) {
+    i2cInstanceErrorText(t, arg, usage, buf, len);
+    if (buf[0]) return buf;
+  }
+  switch (arg.error) {
+    case I2cInstanceError::SingleInstance: return "Error: That device has one instance.";
+    case I2cInstanceError::OutOfRange: return "Error: That instance number is out of range.";
+    case I2cInstanceError::NotAnInstance: return "Error: That argument is not an instance number.";
+    case I2cInstanceError::TooMany: return "Error: That command takes at most one argument.";
+    case I2cInstanceError::None: break;
+  }
+  return "Error: That argument is not taken.";
+}
+
 // A setter's single token was not a valid value but names an instance:
 // "Error: '2' is not on or off. To set instance 2: encoderautostart 2 on".
 // `expected` says what the value should be ("on or off"), `example` is a valid
@@ -568,26 +591,128 @@ struct I2cAddressUse {
   uint8_t n;           // the instance (1..max); 0 for a device without a queue type
   const char* name;    // the device's name ("MAX17048")
   const char* detail;  // what it is ("LiPo Fuel Gauge"), or nullptr
+  // The device-table row that names the use (its index in i2cSensors[]), -1
+  // when none does. A device without a queue type is told apart by its row.
+  int16_t row = -1;
 };
 
-// Whether `use` holds (bus, address) for someone other than instance
-// (exceptType, exceptN), the one asking.
+// Who holds a set of uses: an instance (type, n) of a queue type, or one row
+// of a device without a queue type (type I2C_DEVICE_COUNT: the OLED, the fuel
+// gauge, ...). Those rows all share (I2C_DEVICE_COUNT, 0), so only the row
+// tells one from another.
+struct I2cAddressOwner {
+  I2cDeviceType type;
+  uint8_t n;
+  int16_t row;  // read only for type I2C_DEVICE_COUNT; -1 names no row
+};
+
+constexpr I2cAddressOwner i2cInstanceOwner(I2cDeviceType type, uint8_t n) {
+  return I2cAddressOwner{type, n, -1};
+}
+constexpr I2cAddressOwner i2cRowOwner(int16_t row) {
+  return I2cAddressOwner{I2C_DEVICE_COUNT, 0, row};
+}
+
+// Whether `use` belongs to `owner`.
+inline bool i2cAddressUseOwnedBy(const I2cAddressUse& use, const I2cAddressOwner& owner) {
+  if (use.type != owner.type) return false;
+  if (owner.type == I2C_DEVICE_COUNT) return owner.row >= 0 && use.row == owner.row;
+  return use.n == owner.n;
+}
+
+// Whether `use` holds (bus, address) for someone other than `owner`, the one
+// asking.
+inline bool i2cAddressUseClashes(const I2cAddressUse& use, uint8_t bus, uint8_t address,
+                                 const I2cAddressOwner& owner) {
+  if (address == 0 || use.bus != bus || use.address != address) return false;
+  return !i2cAddressUseOwnedBy(use, owner);
+}
+
+// The same for an instance (exceptType, exceptN) of a queue type asking. A
+// device without a queue type asks with its row (i2cRowOwner): here
+// (I2C_DEVICE_COUNT, n) names no row, so every such device's uses clash.
 inline bool i2cAddressUseClashes(const I2cAddressUse& use, uint8_t bus, uint8_t address,
                                  I2cDeviceType exceptType, uint8_t exceptN) {
-  if (address == 0 || use.bus != bus || use.address != address) return false;
-  return !(use.type == exceptType && use.n == exceptN);
+  return i2cAddressUseClashes(use, bus, address, i2cInstanceOwner(exceptType, exceptN));
 }
 
 // The first use in `uses` that holds (bus, address) for someone else, or
 // nullptr when the address is free there.
 inline const I2cAddressUse* i2cAddressTakenBy(const I2cAddressUse* uses, size_t count, uint8_t bus,
-                                              uint8_t address, I2cDeviceType exceptType,
-                                              uint8_t exceptN) {
+                                              uint8_t address, const I2cAddressOwner& owner) {
   if (!uses) return nullptr;
   for (size_t i = 0; i < count; ++i) {
-    if (i2cAddressUseClashes(uses[i], bus, address, exceptType, exceptN)) return &uses[i];
+    if (i2cAddressUseClashes(uses[i], bus, address, owner)) return &uses[i];
   }
   return nullptr;
+}
+
+inline const I2cAddressUse* i2cAddressTakenBy(const I2cAddressUse* uses, size_t count, uint8_t bus,
+                                              uint8_t address, I2cDeviceType exceptType,
+                                              uint8_t exceptN) {
+  return i2cAddressTakenBy(uses, count, bus, address, i2cInstanceOwner(exceptType, exceptN));
+}
+
+// Moving `owner` to `bus` (a bus setter): every address the owner holds now,
+// on whichever bus, is checked on `bus` against everyone else's uses. Both
+// chips of a two-chip device, an OLED's alternate address and each extra row
+// of a type are uses of their owner, so each of them is checked.
+// `forEachUse(visit)` calls visit(use) for each use until it returns true
+// (the firmware walks its table and settings, System_I2C.cpp; the array form
+// below is the same rule over a list). True on a clash, with the other use in
+// `clash`.
+template <typename ForEachUse>
+inline bool i2cOwnerBusClash(ForEachUse&& forEachUse, const I2cAddressOwner& owner, uint8_t bus,
+                             I2cAddressUse& clash) {
+  bool found = false;
+  forEachUse([&](const I2cAddressUse& own) {
+    if (own.address == 0 || !i2cAddressUseOwnedBy(own, owner)) return false;
+    forEachUse([&](const I2cAddressUse& other) {
+      if (!i2cAddressUseClashes(other, bus, own.address, owner)) return false;
+      clash = other;
+      found = true;
+      return true;
+    });
+    return found;
+  });
+  return found;
+}
+
+inline const I2cAddressUse* i2cOwnerBusClash(const I2cAddressUse* uses, size_t count,
+                                             const I2cAddressOwner& owner, uint8_t bus) {
+  if (!uses) return nullptr;
+  for (size_t i = 0; i < count; ++i) {
+    if (uses[i].address == 0 || !i2cAddressUseOwnedBy(uses[i], owner)) continue;
+    if (const I2cAddressUse* other = i2cAddressTakenBy(uses, count, bus, uses[i].address, owner)) {
+      return other;
+    }
+  }
+  return nullptr;
+}
+
+// The addresses instance 1 of `type` holds besides `primary` (the address its
+// driver uses): each other compiled row of the type whose address is a
+// setting (addressAt), at its configured address, each address once. A row
+// with a fixed or an alternate-only address (the ANO's 0x50 row) claims
+// nothing here. A device with two chips (an IMU's accelerometer and
+// magnetometer) has one row per chip, each with its address setting.
+// visit(rowIndex, address) returns true to stop.
+template <typename Row, typename Visit>
+inline void i2cForEachExtraRowAddress(const Row* rows, size_t count, int type, uint8_t primary,
+                                      Visit&& visit) {
+  if (!rows) return;
+  auto configured = [&](size_t i) -> uint8_t {
+    const Row& row = rows[i];
+    if (!row.compiled || static_cast<int>(row.deviceType) != type || !row.addressAt) return 0;
+    return row.addressAt(1);
+  };
+  for (size_t i = 0; i < count; ++i) {
+    const uint8_t address = configured(i);
+    if (address == 0 || address == primary) continue;
+    bool seen = false;
+    for (size_t j = 0; j < i && !seen; ++j) seen = configured(j) == address;
+    if (!seen && visit(i, address)) return;
+  }
 }
 
 // "Error: 0x37 on bus 0 is in use by Encoder (instance 1)." for an instance of
