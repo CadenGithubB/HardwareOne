@@ -16,6 +16,8 @@
 //   wrap              the same choice across the 49.7-day millis() wrap
 #include <Arduino.h>
 
+#include "System_Deadline.h"  // deadlineAfter: a session expiry is never stored as 0
+
 #include <atomic>
 #include <cstdint>
 #include <cstdio>

@@ -20,7 +20,7 @@ Files inside this directory can include their neighboring headers directly.
 |---|---|
 | Saved entry validation, removal or priority | `upsertWiFiNetwork`, `removeWiFiNetworkById`, `setWiFiNetworkPriority` and sorting in the implementation here |
 | List presentation | `wifiNetworkSnapshot`; [OLED](../../OLED_Mode_Network.cpp) and [G2](../../G2_Page_Network.cpp) present copies and submit authorized commands |
-| Connect to a saved network | [System_WiFi.cpp](../../System_WiFi.cpp) selects a `WifiConnectionTarget`, performs the radio operation and reports connection success through `wifiNetworkMarkConnected` |
+| Connect to a saved network | [System_WiFi.cpp](../../System_WiFi.cpp) selects a `WifiConnectionTarget`, performs the radio operation (a connection changes nothing in the saved list) |
 | Settings load/save | `wifiNetworksReadJson` / `wifiNetworksWriteJson`; [System_Settings.cpp](../../System_Settings.cpp) retains crypto, load ordering and file-write policy |
 | Setup acceptance | `saveSetupWiFiNetwork`; [System_SetupWizard.cpp](../../System_SetupWizard.cpp) and [System_FirstTimeSetup.cpp](../../System_FirstTimeSetup.cpp) handle prompts and outcomes |
 | Boot storage allocation | `initWiFiNetworks`, called by [HardwareOne.cpp](../../HardwareOne.cpp) before settings load |

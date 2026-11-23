@@ -77,6 +77,18 @@ set_target_properties(clock_confirm_policy_tests PROPERTIES
 target_include_directories(clock_confirm_policy_tests PRIVATE ../..)
 target_compile_options(clock_confirm_policy_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# The rules of time that need no device (System_ClockCore.h, behind
+# System_Clock): the validity bounds, the source rank table of Clock::step,
+# civil time, the formatter family (ISO UTC, compact UTC, local date and time,
+# file stamp, log prefix with offset, durations and ages), the time timeset
+# and rtcset read, and the timezone table that feeds the setup wizard and the
+# settings list. The production dependency-free header.
+add_executable(clock_core_tests test_clock_core.cpp)
+set_target_properties(clock_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(clock_core_tests PRIVATE ../..)
+target_compile_options(clock_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # The frames that wait for an ESP-NOW session (System_ESPNow_PendingQueue.h):
 # up to 4 per peer, 16 in all, sent oldest first, the newest refused when full,
 # expiry across the millis() wrap (bench 2026-11-18: a second send evicted the
@@ -1806,6 +1818,7 @@ add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
 add_test(NAME factory_wipe_policy_tests COMMAND factory_wipe_policy_tests)
 add_test(NAME clock_confirm_policy_tests COMMAND clock_confirm_policy_tests)
+add_test(NAME clock_core_tests COMMAND clock_core_tests)
 add_test(NAME espnow_pending_queue_tests COMMAND espnow_pending_queue_tests)
 add_test(NAME espnow_peer_restart_tests COMMAND espnow_peer_restart_tests)
 add_test(NAME uart_link_framing_tests COMMAND uart_link_framing_tests)

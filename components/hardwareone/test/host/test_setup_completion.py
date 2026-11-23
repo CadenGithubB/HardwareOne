@@ -81,7 +81,7 @@ def main() -> None:
             executable = Path(directory) / f"test-wifi-{wifi}"
             command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                        "-Wno-unused-function", "-Wno-unused-parameter", f"-DENABLE_WIFI={wifi}",
-                       str(source), "-o", str(executable)]
+                       "-I", str(COMPONENT), str(source), "-o", str(executable)]
             if args.sanitize:
                 command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-g"]
             subprocess.run(command, check=True, timeout=60)

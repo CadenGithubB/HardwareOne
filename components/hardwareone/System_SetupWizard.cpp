@@ -101,42 +101,13 @@ int applyArchetypeSeed(const SetupArchetype* a) {
 // Time Zone Data
 // ============================================================================
 
-// Fixed-offset entries (no auto DST). The abbrev distinguishes the daylight
-// vs standard variant of each zone; the name gives a representative city and
-// the offset so it is findable without knowing the abbreviation.
-static const TimezoneEntry timezones[] = {
-  // UTC
-  { "UTC",  "UTC / GMT (0:00)",                     0 },
-  // North America — Daylight Saving
-  { "EDT",  "US Eastern - New York (-4:00)",     -240 },
-  { "CDT",  "US Central - Chicago (-5:00)",      -300 },
-  { "MDT",  "US Mountain - Denver (-6:00)",      -360 },
-  { "PDT",  "US Pacific - Los Angeles (-7:00)",  -420 },
-  { "AKDT", "Alaska - Anchorage (-8:00)",        -480 },
-  // North America — Standard Time
-  { "EST",  "US Eastern - New York (-5:00)",     -300 },
-  { "CST",  "US Central - Chicago (-6:00)",      -360 },
-  { "MST",  "US Mountain - Denver/Phoenix (-7:00)", -420 },
-  { "PST",  "US Pacific - Los Angeles (-8:00)",  -480 },
-  { "AKST", "Alaska - Anchorage (-9:00)",        -540 },
-  { "HST",  "Hawaii - Honolulu (-10:00)",        -600 },
-  // Europe
-  { "GMT",  "UK/Ireland - London (0:00)",           0 },
-  { "BST",  "UK/Ireland - London (+1:00)",         60 },
-  { "CET",  "Central Europe - Paris/Berlin (+1:00)", 60 },
-  { "CEST", "Central Europe - Paris/Berlin (+2:00)", 120 },
-  { "EET",  "Eastern Europe - Athens (+2:00)",    120 },
-  { "EEST", "Eastern Europe - Athens (+3:00)",    180 },
-  // Asia / Pacific
-  { "IST",  "India - Mumbai/Delhi (+5:30)",       330 },
-  { "SGT",  "Singapore (+8:00)",                  480 },
-  { "JST",  "Japan - Tokyo (+9:00)",              540 },
-  { "AEST", "Australia East - Sydney (+10:00)",   600 },
-  { "AEDT", "Australia East - Sydney (+11:00)",   660 },
-  { "NZST", "New Zealand - Auckland (+12:00)",    720 },
-  { "NZDT", "New Zealand - Auckland (+13:00)",    780 },
-};
-static const size_t timezoneCount = sizeof(timezones) / sizeof(timezones[0]);
+// The timezone list is the clock's one table (clockcore::kTimezones in
+// System_ClockCore.h), which the settings list is built from as well: the two
+// used to be separate lists that disagreed (the wizard had no +13:00, the
+// settings list no AEDT). Fixed offsets, no automatic daylight saving: a
+// zone's summer time is an entry of its own.
+static const TimezoneEntry* const timezones = clockcore::kTimezones;
+static const size_t timezoneCount = clockcore::kTimezoneCount;
 
 // ============================================================================
 // Log Level Data
@@ -201,7 +172,9 @@ static const size_t kPageOrderCount = sizeof(kPageOrder) / sizeof(kPageOrder[0])
 static SetupWizardPage currentPage = WIZARD_PAGE_CONNECTIONS;
 static int currentSelection = 0;
 static int scrollOffset = 0;
-static int timezoneSelection = 1;  // EDT default (index 1 — US Eastern Daylight, UTC-4)
+// The entry the timezone row shows. initSetupWizard sets it from the stored
+// offset; 1 (EDT) is only where stepping starts from an offset no entry has.
+static int timezoneSelection = 1;
 static int logLevelSelection = 3;  // DEBUG default (all logging enabled)
 static int ntpSelection = 0;       // pool.ntp.org default
 static int ledEffectSelection = 1; // rainbow default
@@ -668,12 +641,17 @@ void initSetupWizard() {
   }
   currentSelection = 0;
   scrollOffset = 0;
+  // Only the offset is stored, and two zones can share one (EST and CDT are
+  // both UTC-5:00): the row re-opens on the standard-time entry of the stored
+  // offset (clockcore::timezoneIndexForOffset). It used to open on the first
+  // match in list order, so a saved EST came back as CDT.
   timezoneSelection = 1;
   logLevelSelection = (draft.logLevel >= 0 && draft.logLevel < (int)logLevelCount) ? draft.logLevel : 3;
   ntpSelection = 0;
   ledEffectSelection = 1;
-  for (size_t i = 0; i < timezoneCount; ++i) {
-    if (timezones[i].offsetMinutes == draft.timezoneOffset) { timezoneSelection = i; break; }
+  {
+    const int stored = clockcore::timezoneIndexForOffset(draft.timezoneOffset);
+    if (stored >= 0) timezoneSelection = stored;
   }
   for (size_t i = 0; i < ntpPresetCount; ++i) {
     if (draft.ntpServer == ntpPresets[i]) { ntpSelection = i; break; }
@@ -997,12 +975,23 @@ static void wizardCollectSystemChoices(SetupWizardResult& result) {
   wizardCollectDeviceName();
   const auto& draft = sWizardDraft.values;
   result.timezoneOffset = draft.timezoneOffset;
+  // The entry the user stepped to, when it is the one in the draft (EST
+  // stays EST, not the first entry with its offset); else the offset's
+  // standard-time entry; else, for an offset no entry has, the offset itself.
   result.timezoneAbbrev = "";
-  for (const auto& timezone : timezones) {
-    if (timezone.offsetMinutes == draft.timezoneOffset) {
-      copyWizardString(result.timezoneAbbrev, timezone.abbrev);
-      break;
-    }
+  int entry = -1;
+  if (timezoneSelection >= 0 && timezoneSelection < (int)timezoneCount &&
+      timezones[timezoneSelection].offsetMinutes == draft.timezoneOffset) {
+    entry = timezoneSelection;
+  } else {
+    entry = clockcore::timezoneIndexForOffset(draft.timezoneOffset);
+  }
+  if (entry >= 0) {
+    copyWizardString(result.timezoneAbbrev, timezones[entry].abbrev);
+  } else {
+    char label[12];
+    clockcore::formatTzOffsetLabel(draft.timezoneOffset, label, sizeof(label));
+    copyWizardString(result.timezoneAbbrev, label);
   }
 }
 
@@ -1906,7 +1895,8 @@ SetupWizardResult runAndApplyFeatureWizard(unsigned long idleTimeoutMs) {
   if (!wizardSaveAndApplySettings(result)) return result;
 
   broadcastOutput("Feature configuration complete.");
-  broadcastOutput("Timezone: " + result.timezoneAbbrev);
+  // The offset is fixed: say that nothing changes it in spring and autumn.
+  broadcastOutput("Timezone: " + result.timezoneAbbrev + " (" + clockcore::kTimezoneDstNote + ")");
   {
     uint32_t estFreeKb = (usedKb >= totalKb) ? 0 : (totalKb - usedKb);
     char buf[64];

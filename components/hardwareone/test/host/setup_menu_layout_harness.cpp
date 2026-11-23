@@ -173,6 +173,28 @@ static void verifyPresentation() {
   check(findRow("timezone", group, index));
   check(wizardFormatMenuItem(group, index, label, sizeof(label), value, sizeof(value)));
   check(std::string(value).find("UTC-") == 0);
+  // Only the offset is stored. An offset two zones share re-opens on its
+  // standard-time entry: a saved EST came back as CDT (2026-11-22 time audit,
+  // B10), the first match in list order. The offsets the settings list had
+  // and the wizard lacked (+13:00, +12:45, +14:00) are entries now.
+  struct Reopen { int offset; const char* shows; };
+  for (const Reopen& r : { Reopen{ -300, "EST -5:00" }, Reopen{ -240, "AST -4:00" }, Reopen{ 60, "CET +1:00" },
+                           Reopen{ 0, "UTC +0:00" }, Reopen{ 780, "TOT +13:00" }, Reopen{ 765, "CHAST +12:45" },
+                           Reopen{ 840, "LINT +14:00" }, Reopen{ 330, "IST +5:30" } }) {
+    reset(); gSettings.tzOffsetMinutes = r.offset; initSetupWizard();
+    check(findRow("timezone", group, index));
+    check(wizardFormatMenuItem(group, index, label, sizeof(label), value, sizeof(value)));
+    check(std::string(value) == r.shows);
+  }
+  // Within one run the entry the user stepped to is kept: CDT stays CDT.
+  reset(); gSettings.tzOffsetMinutes = 0; initSetupWizard();
+  check(findRow("timezone", group, index));
+  for (size_t i = 0; i < getTimezoneCount(); ++i) {
+    setWizardTimezoneSelection(static_cast<int>(i));
+    check(wizardFormatMenuItem(group, index, label, sizeof(label), value, sizeof(value)));
+    if (std::string(value) == "CDT -5:00") break;
+  }
+  check(std::string(value) == "CDT -5:00" && getWizardDraftValues().timezoneOffset == -300);
 }
 static CliModeInputResult cli(const String& text) {
   char response[160]{}; return wizardMode_onInput(text, nullptr, response, sizeof(response));

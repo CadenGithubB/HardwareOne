@@ -45,7 +45,8 @@ static_assert((int)meshtime::OwnSource::None == (int)Clock::SYNC_NONE &&
               (int)meshtime::OwnSource::Manual == (int)Clock::SYNC_MANUAL &&
               (int)meshtime::OwnSource::Ring == (int)Clock::SYNC_RING &&
               (int)meshtime::OwnSource::Cm5 == (int)Clock::SYNC_CM5 &&
-              (int)meshtime::OwnSource::Mesh == (int)Clock::SYNC_MESH,
+              (int)meshtime::OwnSource::Mesh == (int)Clock::SYNC_MESH &&
+              (int)meshtime::OwnSource::MeshNtp == (int)Clock::SYNC_MESH_NTP,
               "meshtime::OwnSource mirrors Clock::SyncSource");
 static_assert((int)MESH_ROLE_MASTER == 1 && (int)MESH_ROLE_BACKUP_MASTER == 2,
               "the role numbers this file reads");
@@ -67,18 +68,20 @@ static int64_t mtMonoMs() { return (int64_t)(esp_timer_get_time() / 1000); }
 static bool mtClockSet() { return Clock::isSynced(); }
 static int64_t mtEpochMs() { return Clock::epochMillis(); }
 static meshtime::OwnSource mtOwnSource() { return (meshtime::OwnSource)Clock::syncSource(); }
+// What the clock had before mesh time took it over (None: nothing of its own).
+static meshtime::OwnSource mtOwnFloor() { return (meshtime::OwnSource)Clock::meshFloorSource(); }
 static bool mtClockHeld() { return Clock::confirmedClockHeld(); }
 static uint32_t mtStepSerial() { return Clock::stepSerial(); }
 // Seconds since the clock was last set this boot; false when nothing set it.
 static bool mtLastSetAgo(uint32_t* agoSeconds) { return Clock::lastStep(nullptr, agoSeconds); }
-// The one place mesh time sets the clock: settimeofday, then the chokepoint.
-static void mtSetClock(int64_t epochMs) {
-  const time_t before = time(nullptr);
-  struct timeval tv;
-  tv.tv_sec = (time_t)(epochMs / 1000);
-  tv.tv_usec = (suseconds_t)((epochMs % 1000) * 1000);
-  settimeofday(&tv, nullptr);
-  Clock::clockStepped(Clock::SYNC_MESH, before);
+// The one place mesh time sets the clock, through Clock::step: as mesh time
+// backed by NTP when the master's own clock is from NTP (`wireSource`), as
+// plain mesh time otherwise. False when the clock's rank table refused it
+// (another source set the clock since the frame was judged).
+static bool mtSetClock(int64_t epochMs, uint8_t wireSource) {
+  const Clock::SyncSource source = (Clock::SyncSource)meshtime::frameClockSource(wireSource);
+  return Clock::step(source, (time_t)(epochMs / 1000), (uint32_t)((epochMs % 1000) * 1000)) ==
+         Clock::StepResult::Stepped;
 }
 static void mtFormatLocal(int64_t epochMs, char* out, size_t cap) {
   char iso[24];
@@ -238,6 +241,7 @@ static meshtime::FollowerInputs meshTimeFollowerInputs(const uint8_t sender[6]) 
   in.actingMaster = mtMeshOn() && mtRole() == 1;
   in.clockSet = mtClockSet();
   in.ownSource = mtOwnSource();
+  in.ownFloor = mtOwnFloor();
   in.nowEpochMs = in.clockSet ? mtEpochMs() : 0;
   in.nowMonoMs = mtMonoMs();
   return in;
@@ -264,7 +268,12 @@ static void meshTimeJudge(const MeshTimeStash& stash) {
       decision.verdict = meshtime::Verdict::IgnoredTooSoon;
       continue;
     }
-    mtSetClock(decision.candidateEpochMs);
+    if (!mtSetClock(decision.candidateEpochMs, stash.rx.frame.source)) {
+      // The clock's owner refused the step: a better source set the clock
+      // on another task after the check above. The trial state is dropped.
+      decision.verdict = meshtime::Verdict::IgnoredBetterSource;
+      break;
+    }
     sMeshTime.follower = trial;
     break;
   }
@@ -434,6 +443,7 @@ static const char* meshTimeOwnSourceText(bool clockSet, meshtime::OwnSource sour
     case meshtime::OwnSource::Ring:   return "ring";
     case meshtime::OwnSource::Cm5:    return "cm5";
     case meshtime::OwnSource::Mesh:   return "mesh";
+    case meshtime::OwnSource::MeshNtp: return "mesh-ntp";
   }
   return "?";
 }
@@ -680,7 +690,7 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
   } else {
     meshTimeAppend(reply, cap, &pos,
                    "  Role: %s. Takes time from the master named on this device when it has no better source "
-                   "(rtc, ntp, manual, cm5).\n",
+                   "(its own ntp or a manual time; for a master whose clock is not from ntp also cm5, rtc, ring).\n",
                    meshTimeRoleName(role));
   }
 
@@ -711,10 +721,15 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
       case meshtime::Verdict::IgnoredMaster:
         meshTimeAppend(reply, cap, &pos, "Not used: this device is the mesh master.\n");
         break;
-      case meshtime::Verdict::IgnoredBetterSource:
+      case meshtime::Verdict::IgnoredBetterSource: {
+        // A clock on mesh time refuses a frame because of what the device
+        // had before mesh time took over (the floor): that is the source to name.
+        const bool onMesh = in.source == meshtime::OwnSource::Mesh || in.source == meshtime::OwnSource::MeshNtp;
+        const meshtime::OwnSource floor = mtOwnFloor();
         meshTimeAppend(reply, cap, &pos, "Not used: this device has a better source (%s).\n",
-                       meshTimeOwnSourceText(in.clockSet, in.source));
+                       meshTimeOwnSourceText(in.clockSet, onMesh && floor != meshtime::OwnSource::None ? floor : in.source));
         break;
+      }
       case meshtime::Verdict::IgnoredWeakSource:
         meshTimeAppend(reply, cap, &pos,
                        "Not used: the sender's clock has no real source, and this device's clock is set.\n");

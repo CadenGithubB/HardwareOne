@@ -55,7 +55,7 @@ static const char kFxGpsNoFix[] = R"json({"valid":true,"connected":true,"ts":123
 // fixture: i2csensor_apds9960.cpp int apdsBuildDataJson(
 static const char kFxApds[] = R"json({"valid":true,"connected":true,"ts":123456,"r":120,"g":95,"b":80,"c":310,"proximity":12})json";
 // fixture: i2csensor_ds3231.cpp int rtcBuildDataJson(
-static const char kFxRtc[] = R"json({"valid":true,"connected":true,"ts":123456,"year":2026,"month":11,"day":20,"hour":17,"minute":4,"second":9,"temp":24.5})json";
+static const char kFxRtc[] = R"json({"valid":true,"connected":true,"ts":123456,"utc":true,"year":2026,"month":11,"day":20,"hour":17,"minute":4,"second":9,"temp":24.5})json";
 // fixture: i2csensor_seesaw.cpp int gamepadBuildDataJson(
 static const char kFxGamepad[] = R"json({"valid":true,"connected":true,"ts":123456,"x":512,"y":498,"buttons":4294967295})json";
 // fixture: i2csensor_ano_encoder.cpp int anoEncoderBuildDataJson(

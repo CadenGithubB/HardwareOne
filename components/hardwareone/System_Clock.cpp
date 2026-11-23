@@ -5,6 +5,8 @@
 #include <cstring>
 #include <sys/time.h>  // gettimeofday — epochMillis()
 #include <esp_timer.h> // esp_timer_get_time — the projection reference
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>  // the step mutex
 
 #include "System_ClockConfirmPolicy.h" // which clock steps the ring is given
 #include "System_Settings.h"    // gSettings.tzOffsetMinutes, rtcTimeHasBeenSet
@@ -15,30 +17,22 @@
 #include "System_QuickNote.h"   // quickNoteClockSet (inline no-op stub without QuickNote)
 #include "System_Filesystem.h"
 #include "System_Logging.h"
+#include "System_MemUtil.h"     // ps_alloc: the timezone list
 #include "System_User.h"
 #include "i2csensor_ds3231.h"
 
 namespace Clock {
 
-// "Year >= 2020" sanity check. The system clock starts at 1970 (boot epoch)
-// or maybe RTC-backed at a stale time. Anything before 2020 is treated as
-// "not really synced yet" — same convention the scattered call sites used,
-// so behavior is preserved.
-static constexpr int kSyncedTmYearThreshold = 120;  // 1900 + 120 = 2020
-
+// The validity vocabulary (header). A clock that was never set counts up
+// from 1970; anything before 2020-01-01 UTC is "not set". Both questions are
+// the same UTC comparison (isSynced used to ask in local time, so the edge
+// moved with the timezone).
 bool isSynced() {
-  time_t now = time(nullptr);
-  if (now <= 0) return false;
-  struct tm tminfo;
-  if (!localtime_r(&now, &tminfo)) return false;
-  return tminfo.tm_year >= kSyncedTmYearThreshold;
+  return isValidEpoch(time(nullptr));
 }
 
 bool isValidEpoch(time_t t) {
-  if (t <= 0) return false;
-  struct tm tminfo;
-  if (!gmtime_r(&t, &tminfo)) return false;
-  return tminfo.tm_year >= kSyncedTmYearThreshold;
+  return clockcore::isValidEpoch((int64_t)t);
 }
 
 int64_t epochMillis() {
@@ -47,20 +41,17 @@ int64_t epochMillis() {
   return (int64_t)tv.tv_sec * 1000LL + (int64_t)(tv.tv_usec / 1000);
 }
 
+int64_t epochMillisOrZero() {
+  return isSynced() ? epochMillis() : 0;
+}
+
 int tzOffsetMinutes() {
   return gSettings.tzOffsetMinutes;
 }
 
 const char* formatTzOffsetLabel(char* out, size_t outSize) {
   if (!out || outSize == 0) return "";
-  const int tzMin = gSettings.tzOffsetMinutes;
-  if (tzMin == 0) {
-    snprintf(out, outSize, "UTC");
-    return out;
-  }
-  const int absMin = (tzMin < 0) ? -tzMin : tzMin;
-  snprintf(out, outSize, "UTC%c%d:%02d", (tzMin < 0) ? '-' : '+',
-           absMin / 60, absMin % 60);
+  clockcore::formatTzOffsetLabel(gSettings.tzOffsetMinutes, out, outSize);
   return out;
 }
 
@@ -113,24 +104,66 @@ size_t formatIso8601Local(time_t t, char* out, size_t outSize) {
   return n;
 }
 
-size_t formatFilenameLocal(time_t t, char* out, size_t outSize) {
-  if (!out || outSize == 0) return 0;
-  if (!isValidEpoch(t)) { out[0] = '\0'; return 0; }
-  struct tm tminfo;
-  if (!localtime_r(&t, &tminfo)) { out[0] = '\0'; return 0; }
-  size_t n = strftime(out, outSize, "%Y%m%d_%H%M%S", &tminfo);
-  if (n == 0) out[0] = '\0';
-  return n;
+// The formatter family: the rules are clockcore's, the offset is the
+// configured one. No localtime_r: the fields come from the epoch and the
+// offset, which is what the fixed-offset TZ string makes localtime_r do.
+size_t formatIso8601Utc(time_t t, char* out, size_t outSize) {
+  return clockcore::formatIso8601Utc((int64_t)t, out, outSize);
+}
+
+bool parseIso8601Utc(const char* text, time_t* out) {
+  int64_t epoch = 0;
+  if (!clockcore::parseIso8601Utc(text, &epoch)) return false;
+  if (out) *out = (time_t)epoch;
+  return true;
+}
+
+size_t formatCompactUtc(time_t t, char* out, size_t outSize) {
+  return clockcore::formatCompactUtc((int64_t)t, out, outSize);
+}
+
+size_t formatDateTimeLocal(time_t t, char* out, size_t outSize, bool withSeconds, bool tzLabel) {
+  return clockcore::formatDateTimeLocal((int64_t)t, tzOffsetMinutes(), withSeconds, tzLabel, out, outSize);
+}
+
+size_t formatDateLocal(time_t t, char* out, size_t outSize) {
+  return clockcore::formatDateLocal((int64_t)t, tzOffsetMinutes(), out, outSize);
 }
 
 size_t formatHHMMLocal(time_t t, char* out, size_t outSize) {
-  if (!out || outSize == 0) return 0;
-  if (!isValidEpoch(t)) { out[0] = '\0'; return 0; }
-  struct tm tminfo;
-  if (!localtime_r(&t, &tminfo)) { out[0] = '\0'; return 0; }
-  size_t n = strftime(out, outSize, "%H:%M", &tminfo);
-  if (n == 0) out[0] = '\0';
-  return n;
+  return clockcore::formatHHMMLocal((int64_t)t, tzOffsetMinutes(), out, outSize);
+}
+
+size_t formatFileStampLocal(time_t t, char* out, size_t outSize) {
+  return clockcore::formatFileStampLocal((int64_t)t, tzOffsetMinutes(), out, outSize);
+}
+
+size_t formatLogPrefixLocal(int64_t epochMs, char* out, size_t outSize) {
+  return clockcore::formatLogPrefixLocal(epochMs, tzOffsetMinutes(), out, outSize);
+}
+
+// The settings list of timezones, from the one table. Built once; the buffer
+// lives for the rest of the boot (a setting's options are read at any time).
+const char* timezoneOptionsText() {
+  static char* sOptions = nullptr;
+  static portMUX_TYPE sOptionsLock = portMUX_INITIALIZER_UNLOCKED;
+  portENTER_CRITICAL(&sOptionsLock);
+  const char* have = sOptions;
+  portEXIT_CRITICAL(&sOptionsLock);
+  if (have) return have;
+
+  char* built = (char*)ps_alloc(clockcore::kTimezoneOptionsCap, AllocPref::PreferPsram, "clock.tz.options");
+  if (!built) return "";
+  if (clockcore::timezoneOptionsText(built, clockcore::kTimezoneOptionsCap) == 0) {
+    ps_free(built);
+    return "";
+  }
+  portENTER_CRITICAL(&sOptionsLock);
+  if (!sOptions) { sOptions = built; built = nullptr; }  // another task built it meanwhile: keep the first
+  have = sOptions;
+  portEXIT_CRITICAL(&sOptionsLock);
+  if (built) ps_free(built);
+  return have;
 }
 
 // ============================================================================
@@ -143,6 +176,11 @@ size_t formatHHMMLocal(time_t t, char* out, size_t outSize) {
 // tearable without the lock).
 static portMUX_TYPE sClockMux = portMUX_INITIALIZER_UNLOCKED;
 
+// Which source the clock's time is from (clockcore::Ledger has the rules):
+// the last source that set it, the mesh floor, and an SNTP step that lwIP
+// has made and the main loop has not reported yet. Under sClockMux.
+static clockcore::Ledger sLedger;
+// The last step's label for the duties drain (they belong to that step).
 static SyncSource sSource   = SYNC_NONE;
 static long       sStepDelta = 0;      // seconds moved by the last step
 static uint32_t   sStepSerial = 0;     // steps this boot (stepSerial)
@@ -188,7 +226,19 @@ bool confirmedClockHeld() {
   return wallAndMonotonicUs(wallUs, monoUs) && ClockConfirm::disagrees(confirmState(), wallUs, monoUs);
 }
 
-SyncSource syncSource() { return sSource; }
+SyncSource syncSource() {
+  portENTER_CRITICAL(&sClockMux);
+  const SyncSource source = (SyncSource)clockcore::ledgerCurrent(sLedger);
+  portEXIT_CRITICAL(&sClockMux);
+  return source;
+}
+
+SyncSource meshFloorSource() {
+  portENTER_CRITICAL(&sClockMux);
+  const SyncSource floor = (SyncSource)sLedger.floor;
+  portEXIT_CRITICAL(&sClockMux);
+  return floor;
+}
 
 uint32_t stepSerial() {
   portENTER_CRITICAL(&sClockMux);
@@ -217,8 +267,127 @@ const char* syncSourceName(SyncSource s) {
     case SYNC_RING:   return "ring";
     case SYNC_CM5:    return "cm5";
     case SYNC_MESH:   return "mesh";
+    case SYNC_MESH_NTP: return "mesh-ntp";
     default:          return "none";
   }
+}
+
+// ============================================================================
+// Clock::step: the one way to set the clock (see the header)
+// ============================================================================
+
+static StepResult stepResultFor(clockcore::StepVerdict verdict) {
+  switch (verdict) {
+    case clockcore::StepVerdict::Allowed:            return StepResult::Stepped;
+    case clockcore::StepVerdict::RefusedImplausible: return StepResult::RefusedImplausible;
+    case clockcore::StepVerdict::RefusedOutranked:   return StepResult::RefusedOutranked;
+    case clockcore::StepVerdict::RefusedNoSource:    return StepResult::RefusedNoSource;
+  }
+  return StepResult::RefusedNoSource;
+}
+
+// One mutex around "verdict, settimeofday, ledger" (step) and around the
+// report of an SNTP step: a FreeRTOS mutex, since settimeofday() must not run
+// inside a critical section. Made at first use; without one (out of memory)
+// the steps run unserialised, as they did before.
+static SemaphoreHandle_t stepMutex() {
+  static SemaphoreHandle_t sMutex = nullptr;
+  portENTER_CRITICAL(&sClockMux);
+  SemaphoreHandle_t have = sMutex;
+  portEXIT_CRITICAL(&sClockMux);
+  if (have) return have;
+  SemaphoreHandle_t made = xSemaphoreCreateMutex();
+  if (!made) return nullptr;
+  portENTER_CRITICAL(&sClockMux);
+  if (!sMutex) { sMutex = made; made = nullptr; }  // another task made it meanwhile: keep the first
+  have = sMutex;
+  portEXIT_CRITICAL(&sClockMux);
+  if (made) vSemaphoreDelete(made);
+  return have;
+}
+
+struct StepLock {
+  SemaphoreHandle_t mutex;
+  StepLock() : mutex(stepMutex()) { if (mutex) xSemaphoreTake(mutex, portMAX_DELAY); }
+  ~StepLock() { if (mutex) xSemaphoreGive(mutex); }
+  StepLock(const StepLock&) = delete;
+  StepLock& operator=(const StepLock&) = delete;
+};
+
+// The verdict against the clock as it is now: the source its time is from
+// (NTP while an SNTP step waits for its report) and the mesh floor.
+static StepResult verdictNow(SyncSource src, time_t epoch, time_t now) {
+  portENTER_CRITICAL(&sClockMux);
+  const clockcore::Ledger ledger = sLedger;
+  portEXIT_CRITICAL(&sClockMux);
+  return stepResultFor(clockcore::ledgerVerdict(ledger, (clockcore::Source)src, (int64_t)epoch, isValidEpoch(now)));
+}
+
+StepResult stepVerdict(SyncSource src, time_t epoch) {
+  return verdictNow(src, epoch, time(nullptr));
+}
+
+StepResult step(SyncSource src, time_t epoch, uint32_t usec) {
+  StepLock lock;
+  const time_t before = time(nullptr);
+  const StepResult verdict = verdictNow(src, epoch, before);
+  if (verdict != StepResult::Stepped) return verdict;
+  struct timeval tv;
+  tv.tv_sec = epoch;
+  tv.tv_usec = (suseconds_t)(usec < 1000000u ? usec : 999999u);
+  if (settimeofday(&tv, nullptr) != 0) return StepResult::Failed;
+  clockStepped(src, before);
+  // An SNTP step that still waits for its report has been replaced (only an
+  // operator command gets here over NTP): the report must not relabel this
+  // time as NTP's.
+  portENTER_CRITICAL(&sClockMux);
+  clockcore::ledgerAfterOwnStep(sLedger);
+  portEXIT_CRITICAL(&sClockMux);
+  return StepResult::Stepped;
+}
+
+void sntpStepPending() {
+  portENTER_CRITICAL(&sClockMux);
+  clockcore::ledgerOnSntpPending(sLedger);  // lwIP has just set the clock: it shows NTP's time
+  portEXIT_CRITICAL(&sClockMux);
+}
+
+void sntpStepReport(time_t before) {
+  StepLock lock;
+  portENTER_CRITICAL(&sClockMux);
+  const SyncSource name = (SyncSource)clockcore::ledgerOnSntpReport(sLedger);
+  // The ledger names the step in the same breath as it stops being pending
+  // (clockStepped repeats this with the same result).
+  clockcore::ledgerOnStep(sLedger, (clockcore::Source)name, isValidEpoch(before));
+  portEXIT_CRITICAL(&sClockMux);
+  // Not NTP when an operator command set the clock after lwIP did: the clock
+  // shows that command's time. The chores of the step from `before` are
+  // still owed (this may be the first valid clock of the boot); they run
+  // under that name.
+  clockStepped(name, before);
+}
+
+const char* stepRefusalText(StepResult result, SyncSource src, char* out, size_t outSize) {
+  if (!out || outSize == 0) return "";
+  out[0] = '\0';
+  switch (result) {
+    case StepResult::Stepped:
+      break;
+    case StepResult::RefusedImplausible:
+      snprintf(out, outSize, "the %s time is not within the years 2020 to 2099", syncSourceName(src));
+      break;
+    case StepResult::RefusedOutranked:
+      snprintf(out, outSize, "the clock is set from %s, which outranks %s; timeset sets it by hand",
+               syncSourceName(syncSource()), syncSourceName(src));
+      break;
+    case StepResult::RefusedNoSource:
+      snprintf(out, outSize, "no time source was named");
+      break;
+    case StepResult::Failed:
+      snprintf(out, outSize, "the system refused the new time");
+      break;
+  }
+  return out;
 }
 
 void refreshProjection() {
@@ -275,7 +444,7 @@ void clockStepped(SyncSource src, time_t before) {
   // reply look doubtful.
   int64_t wallUs = 0, monoUs = 0;
   if (wallAndMonotonicUs(wallUs, monoUs)) {
-    const bool reference = nowValid && src != SYNC_RING && src != SYNC_MESH && src != SYNC_NONE;
+    const bool reference = nowValid && src != SYNC_RING && src != SYNC_MESH && src != SYNC_MESH_NTP && src != SYNC_NONE;
     portENTER_CRITICAL(&sClockMux);
     const ClockConfirm::Verdict verdict =
         ClockConfirm::onStep(sConfirm, src == SYNC_NTP, reference, wallUs, monoUs);
@@ -296,6 +465,7 @@ void clockStepped(SyncSource src, time_t before) {
   // never relabel duties that belong to an earlier step. ORing pend==0 is
   // a harmless no-op, and the ledger must update on every step regardless.
   portENTER_CRITICAL(&sClockMux);
+  clockcore::ledgerOnStep(sLedger, (clockcore::Source)src, beforeValid);
   sSource    = src;
   sStepDelta = delta;
   sPending  |= pend;
@@ -382,37 +552,13 @@ static const SettingEntry clockSettingsEntries[] = {
 #if ENABLE_WIFI
   { "ntpServer",          SETTING_STRING, &gSettings.ntpServer,         0, 0, "pool.ntp.org", 0, 0, "NTP Server", nullptr, false, nullptr, "ntpserver" },
 #endif
-  // Timezone offsets as "minutes|label" pairs — the schema renderer's enum
-  // widget reads this and produces a select dropdown. CLI verb stays "tz".
-  { "tzOffsetMinutes",    SETTING_INT,    &gSettings.tzOffsetMinutes,   0, 0, nullptr, -720, 840, "Timezone",
-    "-720|UTC-12 (Baker Island),"
-    "-660|UTC-11 (Samoa),"
-    "-600|UTC-10 (Hawaii/HST),"
-    "-540|UTC-9 (Alaska/AKST),"
-    "-480|UTC-8 (Pacific/PST),"
-    "-420|UTC-7 (Mountain/MST · Pacific/PDT),"
-    "-360|UTC-6 (Central/CST · Mountain/MDT),"
-    "-300|UTC-5 (Eastern/EST · Central/CDT),"
-    "-240|UTC-4 (Atlantic/AST · Eastern/EDT),"
-    "-180|UTC-3 (Argentina · Atlantic/ADT),"
-    "-120|UTC-2 (Mid-Atlantic),"
-    "-60|UTC-1 (Azores),"
-    "0|UTC+0 (London/GMT · Dublin),"
-    "60|UTC+1 (Berlin/Paris/CET · London/BST),"
-    "120|UTC+2 (Cairo/Athens/EET · Paris/CEST),"
-    "180|UTC+3 (Moscow/Baghdad),"
-    "240|UTC+4 (Dubai/Baku),"
-    "300|UTC+5 (Karachi/Tashkent),"
-    "330|UTC+5:30 (Mumbai/Delhi/IST),"
-    "360|UTC+6 (Dhaka/Almaty),"
-    "420|UTC+7 (Bangkok/Jakarta),"
-    "480|UTC+8 (Beijing/Singapore),"
-    "540|UTC+9 (Tokyo/Seoul/JST),"
-    "570|UTC+9:30 (Adelaide/ACST),"
-    "600|UTC+10 (Sydney/AEST),"
-    "660|UTC+11 (Solomon Islands),"
-    "720|UTC+12 (Fiji/Auckland/NZST)",
-    false, nullptr, "tzoffsetminutes" }
+  // The timezone list is built from the one table (clockcore::kTimezones,
+  // Clock::timezoneOptionsText): "minutes|label" pairs, which the schema
+  // renderer's enum widget shows as a select. The offset is fixed: the label
+  // says that nothing changes it in spring and autumn.
+  { "tzOffsetMinutes",    SETTING_INT,    &gSettings.tzOffsetMinutes,   0, 0, nullptr,
+    clockcore::kTzOffsetMinMinutes, clockcore::kTzOffsetMaxMinutes, "Timezone (no automatic daylight saving)",
+    nullptr, false, nullptr, "tzoffsetminutes", false, false, nullptr, Clock::timezoneOptionsText }
 };
 
 extern const SettingsModule clockSettingsModule = {

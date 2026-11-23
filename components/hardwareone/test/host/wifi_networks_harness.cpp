@@ -53,7 +53,6 @@ struct ObservedNetwork {
   String ssid, password;
   int priority;
   bool hidden;
-  uint32_t lastConnected;
 };
 
 // INSERT_PRODUCTION_AND_READ_ADAPTER
@@ -236,12 +235,6 @@ static void ownerCases(const std::string& scenario) {
     assert(networkId("A") != a);
     assert(!wifiNetworkConnectionById(a, target) && !removeWifiNetworkById(a));
     assert(wifiNetworkCount() == 2 && findNetwork("B") >= 0);
-    wifiNetworkMarkConnected(a, 900); // A removed identity cannot stamp its replacement.
-    assert(wifiNetworkSnapshot(before));
-    for (int i = 0; i < before.count; ++i) assert(before.entries[i].lastConnected == 0);
-    wifiNetworkMarkConnected(b, 123);
-    assert(wifiNetworkSnapshot(before));
-    for (int i = 0; i < before.count; ++i) if (before.entries[i].id == b) assert(before.entries[i].lastConnected == 123);
     assert(!wifiNetworkConnectionByIndex(-1, target) && !wifiNetworkConnectionByIndex(2, target));
   } else if (scenario == "setup_result") {
     assert(saveSetupWifiNetwork("", "p") == WifiNetworkSaveResult::Rejected);
@@ -375,7 +368,6 @@ static void expect(int index, const char* ssid, const char* password, int priori
   const auto value = readNetwork(index);
   assert(value.ssid == ssid && value.password == password);
   assert(value.priority == priority && value.hidden == hidden);
-  assert(value.lastConnected == 0);
 }
 
 int main(int argc, char** argv) {

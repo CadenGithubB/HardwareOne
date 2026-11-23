@@ -13,6 +13,7 @@
 #include "BLE_CoexRecords.h"
 #include "BLE_SetupWorkerCore.h"
 #include "G2_RepairCore.h"
+#include "System_Deadline.h"  // deadlineAfter / deadlinePending: the glasses' waits
 #include <atomic>
 #include <chrono>
 #include <condition_variable>

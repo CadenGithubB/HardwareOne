@@ -14,7 +14,7 @@ static void reply(time_t epoch = REPLY_TIME) {
   const size_t logs = fixture.logs.size(), steps = fixture.steps.size();
   const int anchors = fixture.anchorCalls, resolves = fixture.resolveCalls;
   const size_t markers = fixture.markers.size();
-  const int refreshes = fixture.refreshCalls;
+  const int refreshes = fixture.refreshCalls, pendings = fixture.sntpPendingCalls;
   fixture.epoch = epoch;  // lwIP steps the clock before notifying the application.
   timeval value{epoch, 0};
   fixture.inCallback = true;
@@ -23,6 +23,9 @@ static void reply(time_t epoch = REPLY_TIME) {
   assert(fixture.logs.size() == logs && fixture.steps.size() == steps);
   assert(fixture.anchorCalls == anchors && fixture.resolveCalls == resolves);
   assert(fixture.markers.size() == markers && fixture.refreshCalls == refreshes + 1);
+  // The callback tells the clock at once that its time is NTP's now; the
+  // chores wait for the drain.
+  assert(fixture.sntpPendingCalls == pendings + 1);
   assert(fixture.criticalDepth == 0);
 }
 
@@ -49,6 +52,14 @@ void clockStepped(SyncSource source, time_t before) {
     reply(REPLY_TIME + 60);
   }
 }
+// The callback's half: only a flag in the clock's ledger, taken outside the
+// NTP module's own lock (the clock has its own).
+void sntpStepPending() {
+  assert(fixture.inCallback && !fixture.criticalDepth);
+  ++fixture.sntpPendingCalls;
+}
+// The drain's half: the chores of the step lwIP made, under the NTP name.
+void sntpStepReport(time_t before) { clockStepped(SYNC_NTP, before); }
 }
 
 void broadcastOutput(const char* message) {
@@ -99,10 +110,16 @@ void configTime(long offset, int daylight, const char* primary, const char* seco
   fixture.setupOrder.push_back("configTime");
   if (fixture.replyOnConfig) reply();
 }
-bool rtcSyncToSystem() {
+bool rtcSyncToSystem(const char** whyNot) {
   ++fixture.rtcCalls;
+  assert(whyNot);  // the fallback asks for the reason: nothing is printed by the RTC itself
   if (fixture.rtcSuccess) Clock::clockStepped(Clock::SYNC_RTC, fixture.epoch);
+  else *whyNot = "Error: [RTC] This device has not set the RTC yet, so its time is not adopted on its own.";
   return fixture.rtcSuccess;
+}
+const char* rtcReasonText(const char* reply) {
+  static const char lead[] = "Error: [RTC] ";
+  return reply && std::strncmp(reply, lead, sizeof(lead) - 1) == 0 ? reply + sizeof(lead) - 1 : (reply ? reply : "");
 }
 size_t ntpTestStrlcpy(char* destination, const char* source, size_t size) {
   const size_t length = std::strlen(source);
@@ -189,6 +206,11 @@ int main(int argc, char** argv) {
     ntpSyncDrainTick();
     assert(fixture.steps.size() == size_t(fixture.rtcSuccess));
     assert(!fixture.anchorCalls && !fixture.resolveCalls && fixture.markers.empty());
+    // A chip that is not taken is a status line with its reason, never a
+    // command's "Error: [RTC] ..." reply printed outside any command.
+    assert(messagesContaining("[INFO] RTC time not used: This device has not set the RTC yet") ==
+           !fixture.rtcSuccess);
+    assert(!messagesContaining("Error: [RTC]"));
   } else if (scenario == "drain_interleaving" || scenario == "coalesced_replies") {
     fixture.epoch = VALID_TIME;
     setupNtp();
