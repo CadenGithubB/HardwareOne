@@ -73,6 +73,8 @@ EXT_RAM_BSS_ATTR Lsm4517State sState;
 constexpr uint32_t kTapRetune = 1u << 24;
 std::atomic<uint32_t> sTapTuning{kLsm6dsoxTapThreshold | (kLsm6dsoxTapShock << 8) | (kLsm6dsoxTapQuiet << 16)};
 
+bool readRegs(TwoWire& wire, uint8_t address, uint8_t reg, uint8_t* out, uint8_t len);  // below
+
 // The knock detector's tuning: threshold mg | max ms << 16 (both fit 16 bits),
 // and the ring window; read by the IMU task at each sample.
 std::atomic<uint32_t> sKnockTuning{500u | (40u << 16)};
