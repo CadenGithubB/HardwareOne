@@ -4495,6 +4495,8 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     // Build the authenticated command payload: a bond-token credential block
     // (E29 kind 1) and the command.
     uint8_t payload[ESPNOW_V4_MAX_PAYLOAD];
+    espnowcred::WipeOnExit payloadWipe;   // it holds the bond token: cleared at every return
+    payloadWipe.p[0] = payload; payloadWipe.n[0] = sizeof(payload);
     const size_t payloadLen = buildBondedCommandPayload(actualCommand, payload, sizeof(payload));
     if (payloadLen == 0) {
       strlcpy(out, "Error: Failed to build command payload", outSize);

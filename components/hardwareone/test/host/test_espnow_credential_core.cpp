@@ -198,7 +198,24 @@ void userSync() {
 
 }  // namespace
 
+void wipes() {
+  char a[8] = "secret1";
+  uint8_t b[4] = {1, 2, 3, 4};
+  {
+    espnowcred::WipeOnExit w;
+    w.p[0] = a; w.n[0] = sizeof(a);
+    w.p[1] = b; w.n[1] = sizeof(b);
+  }
+  bool zero = true;
+  for (char c : a) zero = zero && c == 0;
+  for (uint8_t c : b) zero = zero && c == 0;
+  check(zero, "W1 WipeOnExit clears its buffers when it leaves scope");
+  espnowcred::wipe(nullptr, 5);
+  check(true, "W2 wipe(nullptr) is harmless");
+}
+
 int main() {
+  wipes();
   colonInPassword();
   emptyPassword();
   bondToken();

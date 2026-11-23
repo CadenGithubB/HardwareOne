@@ -130,6 +130,8 @@ def generate(read) -> str:
         f"static constexpr uint8_t ESPNOW_V4_TYPE_CMD = {cmd_type.group(1)};\n"
         f"static constexpr uint16_t ESPNOW_V4_FLAG_ACK_REQ = {ack_flag.group(1)};\n"
         f"#define ESPNOW_V4_MAX_PAYLOAD {max_payload.group(1)}",
+        # The credential block helpers (1.0 step 9: the bond sender wipes its buffer).
+        read("System_ESPNow_CredentialCore.h").replace("#pragma once", ""),
     ]
 
     pieces = [

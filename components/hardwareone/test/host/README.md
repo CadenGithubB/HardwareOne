@@ -4712,6 +4712,11 @@ firmware does not know); `espnow_forward_rx` / `espnow_bond_forward` (a withdraw
 dead `encrypted` / `key`; a room command's frame is a credential block); `remote_command_authority` (the bond
 payload is built into a byte buffer); `credential_attempts`, `espnow_tx_multiframe` (the `v4_handle_cmd` slice).
 
+Review fixes: `espnow_credential_core_tests` W1-W2 (`WipeOnExit` clears its buffers at scope exit);
+`espnow_user_credentials` pins the wipes (doUserSyncWork's four field copies at every return, the deferred work's
+payload before it is freed, the deferred CMD slot after `v4_handle_cmd`) and runs a bond token sent by a device
+that is not the bond partner: refused before the token is compared.
+
 ## ESP-NOW two-way liveness (1.0 step 8, RC3)
 
 DESIGN section 4: a peer is online only when it was heard within 30 s, proved it hears this device (two-way)

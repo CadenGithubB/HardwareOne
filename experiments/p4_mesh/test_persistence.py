@@ -42,10 +42,10 @@ def public_identity(document: dict, expected_mac: str) -> dict:
     require(normalize_mac(document.get("mac", "")) == normalize_mac(expected_mac), "Public identity MAC differs from board")
     require(isinstance(document.get("pub"), str) and re.fullmatch(r"[a-fA-F0-9]{64}", document["pub"]) is not None,
             "Public Ed25519 identity has an invalid encoding")
-    require(all(type(document.get(key)) is int and document[key] >= 0 for key in ("createdAtSec", "regenCount")),
+    require(all(type(document.get(key)) is int and document[key] >= 0 for key in ("createdEpochMs", "regenCount")),
             "Public identity creation metadata is invalid")
     return {"mac": normalize_mac(document["mac"]), "pub": document["pub"].lower(),
-            "createdAtSec": document["createdAtSec"], "regenCount": document["regenCount"]}
+            "createdEpochMs": document["createdEpochMs"], "regenCount": document["regenCount"]}
 
 
 def autostart_value(output: str) -> bool:

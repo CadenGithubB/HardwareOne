@@ -36,16 +36,16 @@
 
 namespace espnowcred {
 
-constexpr uint8_t kKindAccount = 0;
-constexpr uint8_t kKindBondToken = 1;
-constexpr size_t kBlockHeaderLen = 4;
-constexpr size_t kFieldMax = 255;          // a u8 length
-constexpr size_t kBondTokenLen = 16;
-constexpr uint8_t kUserSyncFlagSourceAdmin = 0x01;
+inline constexpr uint8_t kKindAccount = 0;
+inline constexpr uint8_t kKindBondToken = 1;
+inline constexpr size_t kBlockHeaderLen = 4;
+inline constexpr size_t kFieldMax = 255;          // a u8 length
+inline constexpr size_t kBondTokenLen = 16;
+inline constexpr uint8_t kUserSyncFlagSourceAdmin = 0x01;
 // The shortest valid frames: an account block with empty fields plus one
 // command byte; two empty account blocks plus the flags byte.
-constexpr size_t kMinCmdLen = kBlockHeaderLen + 1;
-constexpr size_t kMinUserSyncLen = 2 * kBlockHeaderLen + 1;
+inline constexpr size_t kMinCmdLen = kBlockHeaderLen + 1;
+inline constexpr size_t kMinUserSyncLen = 2 * kBlockHeaderLen + 1;
 
 enum class Parse : uint8_t {
   Ok,
@@ -183,6 +183,23 @@ inline size_t packUserSync(uint8_t* out, size_t cap, const char* adminUser, cons
   out[a + b] = flags;
   return a + b + 1;
 }
+
+// Zeroes a buffer that held a credential, in a way the compiler cannot drop
+// as a dead store (a volatile write per byte). Small buffers only.
+inline void wipe(void* p, size_t n) {
+  volatile uint8_t* v = static_cast<volatile uint8_t*>(p);
+  while (p && n--) *v++ = 0;
+}
+
+// Wipes the buffers it was given when it goes out of scope, so every return
+// of a function that copied credentials onto its stack clears them.
+struct WipeOnExit {
+  void* p[4] = {};
+  size_t n[4] = {};
+  ~WipeOnExit() {
+    for (int i = 0; i < 4; i++) wipe(p[i], n[i]);
+  }
+};
 
 // Copies a field into a NUL-terminated buffer. False (and `out` empty) when it
 // does not fit: a name or password is refused, never cut (the first 31 bytes

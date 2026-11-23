@@ -207,6 +207,11 @@ static String redactCmdForAudit(const String& line) { return line; }
 // Bond-token doubles: a token whose first byte is 0 is the live one.
 static int bondFailures = 0;
 static bool validateBondSessionToken(const uint8_t* token, size_t len) { return len == 16 && token[0] == 0; }
+// The bond partner (review fix: a token from any other sender is refused before the compare).
+static const uint8_t kPeerAForBond[6] = {0x02, 0, 0, 0, 0, 0xA1};   // = kPeerA
+static const uint8_t* gBondPartner = nullptr;
+static int bondCompares = 0;
+static bool isBondPeerMac(const uint8_t* mac) { ++bondCompares; return gBondPartner && std::memcmp(mac, gBondPartner, 6) == 0; }
 static void logBondAuthFailure(const uint8_t*, const char*) { ++bondFailures; }
 
 struct Accepted { uint32_t msgId; std::string user; std::string command; };
@@ -264,6 +269,7 @@ static void begin() {
   credentialOk = true; idMark = 0; gClockMs = 1000; wallTime = 0;
   filesystemReady = true;
   gSettings.espnowUserSyncEnabled = true;
+  gBondPartner = kPeerAForBond;
   gScenarioOk = true;
 }
 
@@ -576,6 +582,9 @@ static void scenarioCredentialBlock() {
   remoteCommandBlock(kPeerA, 5, espnowcred::kKindBondToken, "", token, "status");
   check(accepted.size() == 3 && accepted[2].user == "bond-admin", name,
         "a bond token with a ':' byte in it is the 16 raw bytes and runs under the bond identity");
+  remoteCommandBlock(kPeerB, 6, espnowcred::kKindBondToken, "", token, "status");
+  check(accepted.size() == 3 && lastRefusal(6, espnowanswer::kRefused), name,
+        "the live token from a device that is not the bond partner is refused");
   finish(name);
 }
 

@@ -159,6 +159,17 @@ def generate(component: Path) -> str:
                                   "deviceName, uint32_t msgId, const uint8_t* payload",
                           "System_ESPNow.cpp")
     require(remote.count(AUTH_DECISION) == 1, f"v4_handle_cmd: one {AUTH_DECISION!r}")
+    # Review fixes (1.0 step 9): the credentials are wiped after use.
+    sync_fn = unique_block(espnow, "static void doUserSyncWork(const DeferredUserSyncWork* w)", "System_ESPNow.cpp")
+    require("espnowcred::WipeOnExit fieldWipe;" in sync_fn and sync_fn.count("fieldWipe.p[") == 4,
+            "doUserSyncWork wipes its four field copies at every return")
+    run_fn = unique_block(espnow, "static void runDeferredUserSync(void* arg)", "System_ESPNow.cpp")
+    require(run_fn.index("espnowcred::wipe(w->payload, w->payloadLen);") < run_fn.index("free(w);"),
+            "runDeferredUserSync wipes the payload before it frees the work")
+    require("espnowcred::wipe(gEspNow->deferredCmdPayload, (size_t)gEspNow->deferredCmdPayloadLen + 1);" in espnow,
+            "the deferred CMD slot is wiped after v4_handle_cmd")
+    require("isBondPeerMac(srcMac) && validateBondSessionToken(" in espnow,
+            "a bond token is compared only for the bond partner")
     # Everything up to the authentication decision; the queued command that
     # follows is recorded by the harness instead of built.
     remote = (remote[:remote.index(AUTH_DECISION) + len(AUTH_DECISION)]

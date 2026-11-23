@@ -5998,6 +5998,14 @@ static V4Verdict v4h_topo_req(const V4RxCtx& ctx) {
   ctx.read(tr);
   DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_REQ] reqId=%lu requesterMeshId=0x%04X",
          (unsigned long)tr.reqId, ctx.h->meshId);
+  // The answer (START + one PEER per peer) goes out sealed at once. While the
+  // session is not ACTIVE (a rekey) the smart path would queue it, and the
+  // per-peer queue holds 4 frames: a cut-short list. Not taken (busy); the
+  // requester's next espnowmeshtopo asks again.
+  if (!espnowSessionUp(ctx.recv_info->src_addr)) {
+    DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_REQ] session not active; not answered");
+    return ctx.refuseWith(espnowanswer::kBusy);
+  }
 
   // Only peers of the requester's mesh are reported. The mesh gate already
   // dropped a request whose mesh id is 0 or none of ours, so there is no
@@ -6348,6 +6356,12 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
   // (v4_handle_cmd: a throttled check against the local DB, session-encryption
   // required). A field too long for the buffers is refused, never cut.
   char adminUser[33], adminPass[kPublicPasswordMaxLen + 1], targetUser[33], targetPass[kPublicPasswordMaxLen + 1];
+  // The four copies are wiped at every return below.
+  espnowcred::WipeOnExit fieldWipe;
+  fieldWipe.p[0] = adminUser;  fieldWipe.n[0] = sizeof(adminUser);
+  fieldWipe.p[1] = adminPass;  fieldWipe.n[1] = sizeof(adminPass);
+  fieldWipe.p[2] = targetUser; fieldWipe.n[2] = sizeof(targetUser);
+  fieldWipe.p[3] = targetPass; fieldWipe.n[3] = sizeof(targetPass);
   const bool fits =
       espnowcred::copyField(adminCred.user, adminCred.userLen, adminUser, sizeof(adminUser)) &&
       espnowcred::copyField(adminCred.password, adminCred.passwordLen, adminPass, sizeof(adminPass)) &&
@@ -6468,6 +6482,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
 static void runDeferredUserSync(void* arg) {
   auto* w = static_cast<DeferredUserSyncWork*>(arg);
   doUserSyncWork(w);
+  espnowcred::wipe(w->payload, w->payloadLen);   // two plaintext logins
   free(w);
 }
 
@@ -10140,8 +10155,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
 #if ENABLE_BONDED_MODE
   if (cred.kind == espnowcred::kKindBondToken) {
     DEBUG_ESPNOWF("[BOND_AUTH] Received bonded command from %s", deviceName);
-    // The block's rules already hold the token to 16 raw bytes.
-    if (validateBondSessionToken(cred.password, cred.passwordLen)) {
+    // The block's rules already hold the token to 16 raw bytes. Only the bond
+    // partner can hold the token; anyone else is refused before the compare.
+    if (isBondPeerMac(srcMac) && validateBondSessionToken(cred.password, cred.passwordLen)) {
       authOk = true;
       // The bonded master is a trusted administrator for the life of the bond
       // (bond is the auth/RCE channel). Run its commands under the reserved
@@ -14672,6 +14688,10 @@ void processMeshHeartbeats() {
     v4_handle_cmd(gEspNow->deferredCmdSrcMac, gEspNow->deferredCmdDeviceName,
                   gEspNow->deferredCmdMsgId, reinterpret_cast<const uint8_t*>(gEspNow->deferredCmdPayload),
                   gEspNow->deferredCmdPayloadLen, gEspNow->deferredCmdWasEncrypted);
+    // The slot held a login or the raw bond token: cleared once the command
+    // was handled (v4_handle_cmd copied what it runs).
+    espnowcred::wipe(gEspNow->deferredCmdPayload, (size_t)gEspNow->deferredCmdPayloadLen + 1);
+    gEspNow->deferredCmdPayloadLen = 0;
   }
   
   // 7a. Saturation sampler — 1 Hz snapshot of derived link-pressure signals
@@ -18621,6 +18641,8 @@ static const char* groupCommandRun(GroupKind kind, const String& target, const S
 
   // One sealed frame: the credential block (E29) and the command.
   uint8_t payload[ESPNOW_V4_MAX_PLAINTEXT];
+  espnowcred::WipeOnExit payloadWipe;   // it holds the password: cleared at every return
+  payloadWipe.p[0] = payload; payloadWipe.n[0] = sizeof(payload);
   const size_t payloadLen = espnowAccountCmdPayload(payload, sizeof(payload), user.c_str(), pass.c_str(),
                                                     command.c_str());
   if (payloadLen == 0) {
@@ -22165,6 +22187,8 @@ const char* cmd_espnow_browse(const String& argsInput) {
   char browseCmd[ESPNOW_V4_MAX_PAYLOAD];
   const int browseLen = snprintf(browseCmd, sizeof(browseCmd), "files \"%s\"", path.c_str());
   uint8_t cmdPayload[ESPNOW_V4_MAX_PAYLOAD];
+  espnowcred::WipeOnExit cmdPayloadWipe;   // it holds the password: cleared at every return
+  cmdPayloadWipe.p[0] = cmdPayload; cmdPayloadWipe.n[0] = sizeof(cmdPayload);
   const size_t payloadLen = (browseLen > 0 && browseLen < (int)sizeof(browseCmd))
       ? espnowAccountCmdPayload(cmdPayload, sizeof(cmdPayload), username.c_str(), password.c_str(), browseCmd)
       : 0;
@@ -22261,6 +22285,8 @@ const char* cmd_espnow_fetch(const String& argsInput) {
   const int fetchLen = snprintf(fetchCmd, sizeof(fetchCmd), "espnowsendfile %s \"%s\"",
                                 gSettings.espnowDeviceName.c_str(), path.c_str());
   uint8_t cmdPayload[ESPNOW_V4_MAX_PAYLOAD];
+  espnowcred::WipeOnExit cmdPayloadWipe;   // it holds the password: cleared at every return
+  cmdPayloadWipe.p[0] = cmdPayload; cmdPayloadWipe.n[0] = sizeof(cmdPayload);
   const size_t payloadLen = (fetchLen > 0 && fetchLen < (int)sizeof(fetchCmd))
       ? espnowAccountCmdPayload(cmdPayload, sizeof(cmdPayload), username.c_str(), password.c_str(), fetchCmd)
       : 0;
@@ -22384,6 +22410,8 @@ const char* cmd_espnow_remote(const String& argsInput) {
   // CMD message (credentials checked on receiver)
   // Build command payload: credential block (E29) + command
   uint8_t cmdPayload[ESPNOW_V4_MAX_PAYLOAD];
+  espnowcred::WipeOnExit cmdPayloadWipe;   // it holds the password: cleared at every return
+  cmdPayloadWipe.p[0] = cmdPayload; cmdPayloadWipe.n[0] = sizeof(cmdPayload);
   const size_t payloadLen = espnowAccountCmdPayload(cmdPayload, sizeof(cmdPayload), username.c_str(),
                                                     password.c_str(), command.c_str());
   if (payloadLen == 0) {
