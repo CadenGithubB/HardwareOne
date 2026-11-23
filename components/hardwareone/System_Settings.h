@@ -294,7 +294,7 @@ struct Settings {
       oledUpdateInterval(125),
       oledBrightness(255),
       oledLandscape(false),
-      oledFlipped(false),         // false → setRotation(0) normal; true → setRotation(2) 180°
+      oledRotation(0),            // degrees: 0, 90, 180, 270 (oledrotation)
       oledThermalScale(2.5f),
       inputAutoStart(false),
       anoEncoderI2cAddr(0x49),
@@ -980,7 +980,7 @@ struct Settings {
   int oledUpdateInterval;       // Update interval in milliseconds (8 Hz = 125ms)
   int oledBrightness;           // Display brightness/contrast 0-255
   bool oledLandscape;           // Waveshare: 90-degree surface with right-side controls
-  bool oledFlipped;             // Rotate display 180° (true → setRotation(2), false → setRotation(0))
+  int oledRotation;             // Display rotation in degrees: 0/180 landscape, 90/270 portrait (SSD1306 only)
   float oledThermalScale;       // Scaling factor for thermal image (2.5 = 80x60)
   // Sensor Auto-Start settings (all I2C sensors)
   bool inputAutoStart;          // Auto-start the input device (gamepad or ANO) after boot

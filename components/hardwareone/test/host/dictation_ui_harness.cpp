@@ -5,6 +5,24 @@
 #include <cstring>
 #include <string>
 #include <vector>
+// The live OLED layout, landscape only: the firmware reads it at run time
+// (HAL_Display.h); this harness draws the landscape canvas, so the portrait
+// branches compile but are never taken.
+#include "OLED_Layout.h"
+#ifndef SCREEN_WIDTH
+#ifdef DISPLAY_WIDTH
+#define SCREEN_WIDTH DISPLAY_WIDTH
+#else
+#define SCREEN_WIDTH 128
+#endif
+#endif
+#define oledPortrait() (false)
+#define oledCols() (SCREEN_WIDTH / 6)
+#define oledContentBottom() (OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 2)
+#define oledKvRow(...) (0)
+#define oledPrintWrapped(...) (0)
+#define oledHeroCard(...) ((void)0)
+#define oledMeter(...) ((void)0)
 #define DICTATION_MAX_TEXT 256
 #define DEBUG_G2F(...) ((void)0)
 #define DEBUG_DISPLAYF(...) ((void)0)

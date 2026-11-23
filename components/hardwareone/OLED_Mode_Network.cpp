@@ -213,7 +213,7 @@ void displayNetworkInfoRendered() {
   if (networkRenderData.wifiConnected) {
     char rssi[12];
     snprintf(rssi, sizeof(rssi), "%ddBm", networkRenderData.rssi);
-    const int room = 21 - 1 - (int)strlen(rssi);
+    const int room = oledCols() - 1 - (int)strlen(rssi);
     char line[24];
     snprintf(line, sizeof(line), "%.*s %s", room > 0 ? room : 0,
              networkRenderData.ssid, rssi);

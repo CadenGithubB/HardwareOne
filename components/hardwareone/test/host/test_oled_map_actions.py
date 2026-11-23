@@ -24,12 +24,14 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
 
 from test_mqtt_boolean_commands import extract_macro
 from test_web_batch_handlers import extract_block, require, with_arg_text
+from oled_landscape_stubs import LANDSCAPE_STUBS
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -207,9 +209,14 @@ def main() -> None:
     map_unit = map_actions_unit(component)
     if 'oledVisibleRows(' in (component / 'OLED_Mode_Map.cpp').read_text():
         geometry = (component / 'OLED_Layout.h').read_text().replace('#pragma once', '')
-        wrapper = extract_block((component / 'OLED_Utils.h').read_text(), 'inline constexpr int oledVisibleRows(')
+        wrapper = extract_block((component / 'OLED_Utils.h').read_text(), 'inline int oledVisibleRows(')
+        # The popups' geometry macros (they follow the live layout) and the
+        # layout double they read.
+        popup = '\n'.join(re.findall(r'(?m)^#define MAP_(?:POP_X|POP_W|POP_H|DY) .*$',
+                                      (component / 'OLED_Mode_Map.cpp').read_text()))
         map_unit = map_unit.replace('static constexpr int OLED_CONTENT_START_Y = 10;',
-            'static constexpr int OLED_CONTENT_START_Y = 10;\n#define OLED_CONTENT_HEIGHT 43\n' + geometry + wrapper)
+            'static constexpr int OLED_CONTENT_START_Y = 10;\n#define OLED_CONTENT_HEIGHT 43\n' + geometry + wrapper +
+            LANDSCAPE_STUBS + popup + '\n')
     builds = [(f"map_actions_{name}_gps{gps}", map_unit,
                [f"-DMAP_TEST_DEVICE={device}", f"-DENABLE_GPS_SENSOR={gps}"])
               for name, device, gps in (("seesaw", 0, 0), ("seesaw", 0, 1), ("ano", 1, 1), ("gpio", 2, 0))]

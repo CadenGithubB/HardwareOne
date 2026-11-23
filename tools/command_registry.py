@@ -87,6 +87,7 @@ RETIRED_NAMES = {
     "micenabled": "micautostart",
     "mqttclientenabled": "mqttautostart",
     "oledenabled": "oledautostart",
+    "oledflip": "oledrotation",
     "oledread": "oledstatus",
     "oledstart": "openoled",
     "oledstop": "closeoled",

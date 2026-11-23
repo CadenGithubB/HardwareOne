@@ -388,7 +388,7 @@ static void displayI2cDiag() {
     y += rowH;
   }
   if (sI2cDiagScroll + visible < sI2cDiagCount) {
-    oledDisplay->setCursor(122, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 8);
+    oledDisplay->setCursor(SCREEN_WIDTH - 6, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 8);
     oledDisplay->print("v");
   }
 }

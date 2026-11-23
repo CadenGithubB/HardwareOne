@@ -62,10 +62,10 @@ static constexpr int loggingSensorConfigCount = loggingBackRow + 1;
 // disabled row never scrolls.
 static const int kLoggingMenuRows = 0;  // marquee owner tag for these rows
 static void drawLoggingMenuItem(int y, const char* text, bool selected, bool enabled = true) {
-  if (selected) oledDisplay->fillRect(0, y, 128, 10, DISPLAY_COLOR_WHITE);
+  if (selected) oledDisplay->fillRect(0, y, SCREEN_WIDTH, 10, DISPLAY_COLOR_WHITE);
   const int x = selected ? 4 : 2;
   const uint16_t ink = selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
-  oledTextFieldDraw(oledDisplay, x, y + 1, 120 - x, text, ink, ink, selected && enabled, &kLoggingMenuRows);
+  oledTextFieldDraw(oledDisplay, x, y + 1, SCREEN_WIDTH - 8 - x, text, ink, ink, selected && enabled, &kLoggingMenuRows);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 }
 
@@ -110,7 +110,7 @@ static constexpr int maxLogCategoriesPerBank() {
 static constexpr int sysRowCount =
     std::max({sysCfgRowCount, (int)DBG_BANK_COUNT, maxLogCategoriesPerBank() + 1});
 static_assert(sysRowCount <= OLED_SCROLL_MAX_ITEMS, "system-log list outgrew OLEDScrollState");
-static constexpr int sysRowChars = std::min(SCREEN_WIDTH / 6 - 2, 23);
+static constexpr int sysRowChars = std::min(DISPLAY_WIDTH / 6 - 2, 23);  // the widest row; drawing clips
 EXT_RAM_BSS_ATTR static char sysRowBuf[sysRowCount][sysRowChars + 1];
 
 // The flag list keeps one heading line (family name and count) above it.
@@ -337,7 +337,7 @@ static void displayLoggingMode() {
         oledDisplay->print("Status: STOPPED");
       }
       
-      int startY = 22;
+      int startY = OLED_CONTENT_START_Y + 11;  // under the status line (y22 on the 128 x 64 row)
       for (int i = 0; i < loggingSensorMenuCount; i++) {
         bool enabled = true;
         if (i == 0 && gSensorLoggingRunning) enabled = false;
@@ -355,7 +355,7 @@ static void displayLoggingMode() {
       oledDisplay->print("Status: ");
       oledDisplay->print(systemLogStateLabel(systemLogState()));
       
-      int startY = 22;
+      int startY = OLED_CONTENT_START_Y + 11;  // under the status line (y22 on the 128 x 64 row)
       for (int i = 0; i < loggingSystemMenuCount; i++) {
         bool enabled = true;
         if (i == 0 && gSystemLogRunning) enabled = false;

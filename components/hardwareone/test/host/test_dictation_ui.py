@@ -99,7 +99,7 @@ def main():
     p.add_argument('--component',type=Path,default=HERE.parents[1],help='production component tree (default: this checkout)')
     a=p.parse_args();SOURCE=a.component.resolve()
     g2=g2_client_text(SOURCE);te=(SOURCE/'G2_Page_TextEntry.cpp').read_text();oled=(SOURCE/'OLED_Utils.cpp').read_text();header=(SOURCE/'System_Dictation.h').read_text()
-    unit=(HERE/'dictation_ui_harness.cpp').read_text()
+    unit=(HERE/'dictation_ui_harness.cpp').read_text().replace('#include "OLED_Layout.h"',(SOURCE/'OLED_Layout.h').read_text().replace('#pragma once',''))
     transcript=(SOURCE/'System_Transcript.h').read_text()
     types=extract_block(transcript,'struct TranscriptStatus')+';\n'+'\n'.join(extract_block(header,s)+';' for s in ('enum class DictationState','struct DictationSnapshot','struct DictationTextReceipt'))+'\n'+extract_block(g2,'struct KbdPadState')+';'
     unit=unit.replace('// INSERT_TYPES',types)

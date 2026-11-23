@@ -155,6 +155,8 @@ static void fbPopulateActionScroll() {
 // point the user at serial `fileview` (paged) instead.
 static constexpr size_t   FB_VIEW_MAX_FILE = 10240;   // refuse-above (entry.size)
 static constexpr int      FB_VIEW_COLS     = 20;       // 21-char rows at textSize 1
+// The columns a file is wrapped to when it is opened: FB_VIEW_COLS, 9 in portrait.
+#define FB_VIEW_WRAP_COLS (FB_VIEW_COLS < oledCols() - 1 ? FB_VIEW_COLS : oledCols() - 1)
 static EXT_RAM_BSS_ATTR char sFbViewBody[12288];       // wrapped body (grows vs raw)
 EXT_RAM_BSS_ATTR static uint16_t           sFbViewLineOff[640];         // start offset per line
 static int                sFbViewLineCount = 0;
@@ -166,7 +168,7 @@ static bool               sFbViewTruncated = false;
 int oledFileBrowserActiveLevel() { return (int)sFbLevel; }
 
 static int fbViewVisibleLines() {
-  const int v = OLED_CONTENT_HEIGHT / 10;
+  const int v = (oledContentBottom() + 1 - OLED_CONTENT_START_Y) / 10;
   return v > 0 ? v : 1;
 }
 
@@ -175,7 +177,7 @@ static int fbViewVisibleLines() {
 // scroll window (CLI-viewer model). Truncation covers both the body filling
 // up and the line table running out before the body ends.
 static void fbFillView(const char* text, size_t len, bool pretty) {
-  TextWrapStream body(sFbViewBody, sizeof(sFbViewBody), FB_VIEW_COLS,
+  TextWrapStream body(sFbViewBody, sizeof(sFbViewBody), FB_VIEW_WRAP_COLS,
                       /*continuationIndent=*/0, /*stripControl=*/true);
   if (pretty) {
     JsonPrettyFormatter().write(text, len, [&](char c) {
@@ -1115,7 +1117,7 @@ void displayFileBrowserRendered() {
         int y = startY + i * itemHeight;
         bool selected = (idx == sPeerSelectedIdx);
         if (selected) {
-          oledDisplay->fillRect(0, y, 128, itemHeight - 1, DISPLAY_COLOR_WHITE);
+          oledDisplay->fillRect(0, y, SCREEN_WIDTH, itemHeight - 1, DISPLAY_COLOR_WHITE);
           oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
         } else {
           oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -1125,16 +1127,16 @@ void displayFileBrowserRendered() {
         if (e.isFolder) snprintf(line, sizeof(line), "%s/", e.name);
         else            snprintf(line, sizeof(line), "%s", e.name);
         const uint16_t ink = selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
-        oledTextFieldDraw(oledDisplay, 2, y + 1, 121 - 2 - 2, line, ink, ink, selected, &sPeerSelectedIdx);
+        oledTextFieldDraw(oledDisplay, 2, y + 1, SCREEN_WIDTH - 7 - 2 - 2, line, ink, ink, selected, &sPeerSelectedIdx);
       }
       oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
       // Scroll arrows + "x of N"
       if (sPeerScrollOffset > 0) {
-        oledDisplay->setCursor(121, OLED_CONTENT_START_Y);
+        oledDisplay->setCursor(SCREEN_WIDTH - 7, OLED_CONTENT_START_Y);
         oledDisplay->print("^");
       }
       if (sPeerScrollOffset + maxVisible < sPeerEntryCount) {
-        oledDisplay->setCursor(121, OLED_CONTENT_START_Y + (maxVisible - 1) * itemHeight);
+        oledDisplay->setCursor(SCREEN_WIDTH - 7, OLED_CONTENT_START_Y + (maxVisible - 1) * itemHeight);
         oledDisplay->print("v");
       }
       // Bottom content line: FS_GET download feedback takes priority over the
@@ -1205,11 +1207,11 @@ void displayFileBrowserRendered() {
     }
     // Scroll indicators + truncation marker on the right edge.
     if (sFbViewScroll > 0) {
-      oledDisplay->setCursor(122, OLED_CONTENT_START_Y);
+      oledDisplay->setCursor(SCREEN_WIDTH - 6, OLED_CONTENT_START_Y);
       oledDisplay->print("\x18");
     }
     if (sFbViewScroll < maxScroll) {
-      oledDisplay->setCursor(122, OLED_CONTENT_START_Y + (visible - 1) * 10);
+      oledDisplay->setCursor(SCREEN_WIDTH - 6, OLED_CONTENT_START_Y + (visible - 1) * 10);
       oledDisplay->print("\x19");
     } else if (sFbViewTruncated) {
       oledDisplay->setCursor(0, OLED_CONTENT_START_Y + (visible - 1) * 10);
@@ -1227,19 +1229,26 @@ void displayFileBrowserRendered() {
   }
   
   // Layout constants (matching menu style) - adjusted for global header
-  const int listWidth = 78;       // Width for text list area
-  const int iconAreaX = 88;       // X position for icon area
+  // Portrait stacks the pane: the icon and its size on top, a rule on y55,
+  // the list under it (10 px rows from y57), as the launcher does.
+  namespace P = oled_layout::portrait;
+  const bool tall = oledPortrait();
+  const int listWidth = tall ? P::kListSelectW : 78;  // Width for text list area
+  const int iconAreaX = tall ? 0 : 88;                 // X position for icon area
   const int iconSize = 32;        // Full size icon for selected item
   const int itemHeight = 10;      // Height per item
-  const int maxVisibleItems = min(oledVisibleRows(10, 1, 4), FILE_BROWSER_PAGE_CAPACITY);
-  const int startY = OLED_CONTENT_START_Y + 1;  // Start 1px below header for even spacing
+  const int startY = tall ? P::kPaneListY : OLED_CONTENT_START_Y + 1;  // Start 1px below header
+  const int maxVisibleItems = min(tall ? (oledContentBottom() - startY + 2) / itemHeight
+                                       : oledVisibleRows(10, 1, 4),
+                                  FILE_BROWSER_PAGE_CAPACITY);
   
   // Header is now drawn globally
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
-  // Draw vertical separator between list and icon area
-  oledDisplay->drawFastVLine(84, OLED_CONTENT_START_Y, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_WHITE);
+  // Draw the separator between the list and the icon area
+  if (tall) oledDisplay->drawFastHLine(0, P::kPaneRuleY, SCREEN_WIDTH, DISPLAY_COLOR_WHITE);
+  else oledDisplay->drawFastVLine(84, OLED_CONTENT_START_Y, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_WHITE);
   
   // Calculate scroll offset to keep selected item visible
   int scrollOffset = 0;
@@ -1290,8 +1299,8 @@ void displayFileBrowserRendered() {
       const int infoHeight = 8;
       const int infoGap = 2;
       const int groupHeight = iconSize + infoGap + infoHeight;
-      int iconX = iconAreaX + (128 - iconAreaX - iconSize) / 2;
-      int iconY = OLED_CONTENT_START_Y + (OLED_CONTENT_HEIGHT - groupHeight) / 2;
+      int iconX = tall ? 1 : iconAreaX + (SCREEN_WIDTH - iconAreaX - iconSize) / 2;
+      int iconY = tall ? P::kPaneIconY : OLED_CONTENT_START_Y + (OLED_CONTENT_HEIGHT - groupHeight) / 2;
       
       if (selectedEntry.isFolder) {
         oledDrawIcon(oledDisplay, "folder", iconX, iconY, DISPLAY_COLOR_WHITE);
@@ -1301,9 +1310,22 @@ void displayFileBrowserRendered() {
         oledDrawIcon(oledDisplay, iconName, iconX, iconY, DISPLAY_COLOR_WHITE);
       }
       
-      // Draw file info below icon
-      int textY = iconY + iconSize + infoGap;
-      if (textY + infoHeight <= OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT) {
+      // Draw file info below icon (beside it in portrait)
+      int textY = tall ? iconY + 12 : iconY + iconSize + infoGap;
+      if (tall) {
+        oledDisplay->setCursor(iconSize + 4, textY);
+        if (selectedEntry.isFolder) oledDisplay->print("Dir");
+        else {
+          // The size beside the icon: the number, then its unit under it.
+          const String sizeStr = formatFileSize(selectedEntry.size);
+          const int space = sizeStr.indexOf(' ');
+          oledDisplay->print(space < 0 ? sizeStr : sizeStr.substring(0, space));
+          if (space >= 0) {
+            oledDisplay->setCursor(iconSize + 4, textY + 9);
+            oledDisplay->print(sizeStr.substring(space + 1));
+          }
+        }
+      } else if (textY + infoHeight <= OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT) {
         oledDisplay->setTextSize(1);
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
         
@@ -1315,7 +1337,7 @@ void displayFileBrowserRendered() {
           String sizeStr = formatFileSize(selectedEntry.size);
           // Center the size text
           int sizeWidth = sizeStr.length() * 6;
-          int sizeX = iconAreaX + (128 - iconAreaX - sizeWidth) / 2;
+          int sizeX = iconAreaX + (SCREEN_WIDTH - iconAreaX - sizeWidth) / 2;
           oledDisplay->setCursor(sizeX, textY);
           oledDisplay->print(sizeStr);
         }
@@ -1326,18 +1348,19 @@ void displayFileBrowserRendered() {
   // Show empty message if no items
   if (fileBrowserRenderData.itemCount == 0) {
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(20, 30);
+    oledDisplay->setCursor(tall ? 1 : 20, tall ? startY : 30);
     oledDisplay->print("(empty)");
   }
   
   // Draw scroll indicators if needed (must stay within content area)
+  const int markX = tall ? SCREEN_WIDTH - 6 : 78;
   if (scrollOffset > 0) {
-    oledDisplay->setCursor(78, OLED_CONTENT_START_Y + 1);
+    oledDisplay->setCursor(markX, tall ? startY : OLED_CONTENT_START_Y + 1);
     oledDisplay->print("^");
   }
   if (scrollOffset + maxVisibleItems < fileBrowserRenderData.itemCount) {
-    int scrollDownY = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 9;
-    oledDisplay->setCursor(78, scrollDownY);
+    int scrollDownY = tall ? startY + (maxVisibleItems - 1) * itemHeight : OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 9;
+    oledDisplay->setCursor(markX, scrollDownY);
     oledDisplay->print("v");
   }
   

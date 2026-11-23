@@ -46,7 +46,7 @@ void drawWizardHeader(int pageNum, int totalPages, const char* title) {
   // Keep the group title readable, with its position aligned on the right.
   char position[12];
   snprintf(position, sizeof(position), "%d/%d", pageNum, totalPages);
-  const int positionX = 128 - (int)strlen(position) * 6;
+  const int positionX = SCREEN_WIDTH - (int)strlen(position) * 6;
   char heading[22];
   snprintf(heading, sizeof(heading), "%.*s", positionX / 6, title);
   oledDisplay->setCursor(0, 0);
@@ -60,15 +60,15 @@ void drawWizardHeader(int pageNum, int totalPages, const char* title) {
   getHeapBarData(&enabledKb, &maxKb, &percentage);
   char heapLabel[12];
   snprintf(heapLabel, sizeof(heapLabel), "%lu/%luKB", (unsigned long)enabledKb, (unsigned long)maxKb);
-  oledDrawBar(oledDisplay, 0, 10, 70, 6, percentage, 100, heapLabel);
-  oledDisplay->drawFastHLine(0, 18, 128, SSD1306_WHITE);
+  oledDrawBar(oledDisplay, 0, 10, oledPortrait() ? 30 : 70, 6, percentage, 100, heapLabel);
+  oledDisplay->drawFastHLine(0, 18, SCREEN_WIDTH, SSD1306_WHITE);
 }
 
 void drawWizardFooter(const char* leftAction, const char* rightAction, const char* backAction) {
   const int footerStartY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
   const int footerY = footerStartY + 2;
 
-  oledDisplay->drawFastHLine(0, footerStartY, 128, SSD1306_WHITE);
+  oledDisplay->drawFastHLine(0, footerStartY, SCREEN_WIDTH, SSD1306_WHITE);
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(SSD1306_WHITE);
   oledDisplay->setCursor(0, footerY);
@@ -104,15 +104,16 @@ void drawSetupInfoPage(const char* title, const char* body, const char* footer,
     oledDisplay->setTextColor(SSD1306_WHITE);
     // Header: optional "n/N" indicator top-right, then the title clipped to the
     // space left of it (so a long title never overlaps the indicator).
-    int titleMax = 21;  // chars per 128px line at size 1
+    const int rowCells = oledCols();  // 21 on the 128 px row, 10 in portrait
+    int titleMax = rowCells;
     if (pageCount > 0) {
       char ind[12];
       snprintf(ind, sizeof(ind), "%d/%d", pageNum, pageCount);
       int indChars = strlen(ind);
       oledDisplay->setTextWrap(false);
-      oledDisplay->setCursor(128 - indChars * 6, 0);
+      oledDisplay->setCursor(SCREEN_WIDTH - indChars * 6, 0);
       oledDisplay->print(ind);
-      titleMax = 21 - indChars - 1;  // leave a 1-char gap before the indicator
+      titleMax = rowCells - indChars - 1;  // leave a 1-char gap before the indicator
     }
     String tt = String(title);
     if ((int)tt.length() > titleMax) tt = tt.substring(0, titleMax - 1) + ".";
@@ -120,13 +121,13 @@ void drawSetupInfoPage(const char* title, const char* body, const char* footer,
     oledDisplay->setCursor(0, 0);
     oledDisplay->print(tt);
     oledDisplay->setTextWrap(true);
-    oledDisplay->drawFastHLine(0, 10, 128, SSD1306_WHITE);
+    oledDisplay->drawFastHLine(0, 10, SCREEN_WIDTH, SSD1306_WHITE);
     // Body (word-wraps at the display width)
     oledDisplay->setCursor(0, 14);
     oledDisplay->print(body);
     // Footer: rule + free-form hint
     const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
-    oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
+    oledDisplay->drawFastHLine(0, footerY, SCREEN_WIDTH, SSD1306_WHITE);
     oledDisplay->setCursor(0, footerY + 2);
     oledDisplay->print(footer);
     oledDisplay->display();
@@ -166,7 +167,7 @@ void renderWizardPage() {
       snprintf(value, sizeof(value), "%s", devicename::kDefaultMark + 1);  // skip the leading space
     }
     if (index == selection) {
-      oledDisplay->fillRect(0, y - 1, 126, lineHeight, SSD1306_WHITE);
+      oledDisplay->fillRect(0, y - 1, SCREEN_WIDTH - 2, lineHeight, SSD1306_WHITE);
       oledDisplay->setTextColor(SSD1306_BLACK, SSD1306_WHITE);
     } else {
       oledDisplay->setTextColor(SSD1306_WHITE);
@@ -185,11 +186,11 @@ void renderWizardPage() {
   }
   oledDisplay->setTextColor(SSD1306_WHITE);
   if (scrollOffset > 0) {
-    oledDisplay->setCursor(121, startY);
+    oledDisplay->setCursor(SCREEN_WIDTH - 7, startY);
     oledDisplay->print("^");
   }
   if (scrollOffset + maxVisible < itemCount) {
-    oledDisplay->setCursor(121, startY + (maxVisible - 1) * lineHeight);
+    oledDisplay->setCursor(SCREEN_WIDTH - 7, startY + (maxVisible - 1) * lineHeight);
     oledDisplay->print("v");
   }
   drawWizardFooter("Edit", wizardAdvanceFrom(page) == WIZARD_PAGE_COUNT ? "Finish" : "Next",
@@ -251,7 +252,7 @@ JoystickNav readWizardJoystickNav() {
   nav.down |= detent > 0;
 
   InputCache input{};
-  if (inputCacheSnapshot(input)) {
+  if (inputNavSnapshot(input)) {
     if (input.dataValid) {
       int joyX = input.joyX;
       int joyY = input.joyY;
@@ -664,7 +665,7 @@ void handleModePage(SetupWizardPage page, SetupWizardResult& result, bool& runni
                           SSD1306_WHITE, SSD1306_WHITE, false, &kWizardRowsTag);
       }
       const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
-      oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
+      oledDisplay->drawFastHLine(0, footerY, SCREEN_WIDTH, SSD1306_WHITE);
       oledDisplay->setCursor(0, footerY + 2);
       oledDisplay->print("A/>:Next  B/<:Back");
       OLED_TRANSACTION(oledDisplay->display());
@@ -756,7 +757,7 @@ bool getOledSetupModeSelection(int& setupMode) {
       oledDisplay->setTextColor(SSD1306_WHITE);
       oledDisplay->setCursor(20, 0);
       oledDisplay->println("FIRST-TIME SETUP");
-      oledDisplay->drawFastHLine(0, 10, 128, SSD1306_WHITE);
+      oledDisplay->drawFastHLine(0, 10, SCREEN_WIDTH, SSD1306_WHITE);
       oledDisplay->setCursor(0, 13);
       oledDisplay->println("Select setup mode:");
       for (int i = 0; i < optionCount; ++i) {
@@ -767,7 +768,7 @@ bool getOledSetupModeSelection(int& setupMode) {
                           SSD1306_WHITE, SSD1306_WHITE, false, &kWizardRowsTag);
       }
       const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
-      oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
+      oledDisplay->drawFastHLine(0, footerY, SCREEN_WIDTH, SSD1306_WHITE);
       oledDisplay->setCursor(0, footerY + 2);
       oledDisplay->print("A:Select  Joy:Move");
       OLED_TRANSACTION(oledDisplay->display());
@@ -910,7 +911,7 @@ bool getOledThemeSelection(bool& darkMode) {
       // Title
       oledDisplay->setCursor(24, 0);
       oledDisplay->println("WEB UI THEME");
-      oledDisplay->drawFastHLine(0, 10, 128, SSD1306_WHITE);
+      oledDisplay->drawFastHLine(0, 10, SCREEN_WIDTH, SSD1306_WHITE);
       
       // Option 1: Light
       oledDisplay->setCursor(0, 24);
@@ -924,7 +925,7 @@ bool getOledThemeSelection(bool& darkMode) {
       
       // Footer at standard position
       const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
-      oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
+      oledDisplay->drawFastHLine(0, footerY, SCREEN_WIDTH, SSD1306_WHITE);
       oledDisplay->setCursor(0, footerY + 2);
       oledDisplay->print("A:Select  Joy:Move");
       

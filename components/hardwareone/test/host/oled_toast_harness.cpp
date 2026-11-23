@@ -1,4 +1,5 @@
 #include "OLED_MessageText.h"
+#include "OLED_Layout.h"
 #include <cassert>
 #include <cstdint>
 #include <cstring>
@@ -8,6 +9,7 @@
 #define SCREEN_WIDTH 128
 #define OLED_CONTENT_HEIGHT (SCREEN_HEIGHT-21)
 constexpr int DISPLAY_FG=1, DISPLAY_BG=0;
+static bool oledPortrait(){return false;}  // the landscape toast; portrait is drawn on the bench
 uint32_t now=0;
 uint32_t millis(){return now;}
 bool locked=false;

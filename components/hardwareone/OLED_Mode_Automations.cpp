@@ -399,16 +399,16 @@ static void wizDrawList() {
   for (int i = 0; i < vis && (sWizScroll + i) < n; i++) {
     const int idx = sWizScroll + i;
     const bool selected = idx == sWizCursor;
-    if (selected) oledDisplay->fillRect(0, y, 128, lineH, DISPLAY_COLOR_WHITE);
+    if (selected) oledDisplay->fillRect(0, y, SCREEN_WIDTH, lineH, DISPLAY_COLOR_WHITE);
     // Bounded label ending before the arrow column (OLED_TextField.h).
-    oledTextFieldDraw(oledDisplay, 2, y + 1, 122 - 2 - 2, wizListLabel(idx),
+    oledTextFieldDraw(oledDisplay, 2, y + 1, SCREEN_WIDTH - 6 - 2 - 2, wizListLabel(idx),
                       selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
                       selected, &sWizCursor);
     y += lineH;
   }
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  if (sWizScroll > 0) { oledDisplay->setCursor(122, listTop); oledDisplay->print("\x18"); }
-  if (sWizScroll + vis < n) { oledDisplay->setCursor(122, listTop + (vis - 1) * lineH); oledDisplay->print("\x19"); }
+  if (sWizScroll > 0) { oledDisplay->setCursor(SCREEN_WIDTH - 6, listTop); oledDisplay->print("\x18"); }
+  if (sWizScroll + vis < n) { oledDisplay->setCursor(SCREEN_WIDTH - 6, listTop + (vis - 1) * lineH); oledDisplay->print("\x19"); }
 }
 
 // Confirm screen rows: the name, the trigger, then the whole command in
@@ -472,15 +472,15 @@ static void wizDrawConfirm() {
   char line[64];
   for (int i = 0; i < vis && sWizConfirmScroll + i < rows; i++) {
     wizConfirmRowText(sWizConfirmScroll + i, line, sizeof(line));
-    oledTextFieldDraw(oledDisplay, 0, y, 122 - 2, line, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
+    oledTextFieldDraw(oledDisplay, 0, y, SCREEN_WIDTH - 6 - 2, line, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
                       false, &sWizConfirmScroll);
     y += kWizConfirmLineH;
   }
   if (sWizConfirmScroll > 0) {
-    oledDisplay->setCursor(122, OLED_CONTENT_START_Y); oledDisplay->print("\x18");
+    oledDisplay->setCursor(SCREEN_WIDTH - 6, OLED_CONTENT_START_Y); oledDisplay->print("\x18");
   }
   if (sWizConfirmScroll < maxScroll) {
-    oledDisplay->setCursor(122, OLED_CONTENT_START_Y + (vis - 1) * kWizConfirmLineH);
+    oledDisplay->setCursor(SCREEN_WIDTH - 6, OLED_CONTENT_START_Y + (vis - 1) * kWizConfirmLineH);
     oledDisplay->print("\x19");
   }
 
@@ -598,17 +598,23 @@ void displayAutomations() {
     return;
   }
 
-  const int listWidth = 78;
-  const int detailX = 86;
+  // Landscape: the list left, the details right of a divider at x84.
+  // Portrait: the details on top (y21-52), a rule on y55, the list under it
+  // (10 px rows from y57), as the stacked launcher pane.
+  const bool tall = oledPortrait();
+  const int listWidth = tall ? SCREEN_WIDTH - 3 : 78;
+  const int detailX = tall ? 1 : 86;
   const int itemHeight = 10;
-  const int maxVisibleItems = oledVisibleRows(10, 1, 4);
-  const int startY = OLED_CONTENT_START_Y + 1;
+  const int startY = tall ? oled_layout::portrait::kPaneListY : OLED_CONTENT_START_Y + 1;
+  const int maxVisibleItems =
+      tall ? (oledContentBottom() - startY + 2) / itemHeight : oledVisibleRows(10, 1, 4);
 
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
 
-  // Vertical separator
-  oledDisplay->drawFastVLine(84, OLED_CONTENT_START_Y, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_WHITE);
+  // Separator
+  if (tall) oledDisplay->drawFastHLine(0, oled_layout::portrait::kPaneRuleY, SCREEN_WIDTH, DISPLAY_COLOR_WHITE);
+  else oledDisplay->drawFastVLine(84, OLED_CONTENT_START_Y, OLED_CONTENT_HEIGHT, DISPLAY_COLOR_WHITE);
 
   // Total navigable rows = the automations plus one virtual "+ New" row at
   // index == count.
@@ -671,11 +677,11 @@ void displayAutomations() {
 
     // Trigger text ("daily 07:30", "every 5m", "on peer_online", ...) over at
     // most three 7-column lines (the pane is ~42 px; GFX auto-wrap would spill
-    // into the list).
+    // into the list); two 10-column lines in portrait.
     const char* rest = sel.trigger;
-    for (int line = 0; line < 3 && *rest; line++) {
-      char seg[8];
-      rest = autoWrapLine(rest, seg, sizeof(seg) - 1);
+    for (int line = 0; line < (tall ? 2 : 3) && *rest; line++) {
+      char seg[11];
+      rest = autoWrapLine(rest, seg, tall ? 10 : 7);
       oledDisplay->setCursor(detailX, dy);
       oledDisplay->print(seg);
       dy += 10;
@@ -684,22 +690,24 @@ void displayAutomations() {
     // Enabled status
     oledDisplay->setCursor(detailX, dy);
     oledDisplay->print(sel.enabled ? "ON" : "OFF");
-    dy += 10;
+    if (!tall) dy += 10;
 
-    // Command count
-    oledDisplay->setCursor(detailX, dy);
+    // Command count (beside ON/OFF in portrait)
+    oledDisplay->setCursor(tall ? detailX + 24 : detailX, dy);
     char cmdBuf[12];
     snprintf(cmdBuf, sizeof(cmdBuf), "%d cmd%s", sel.commandCount, sel.commandCount != 1 ? "s" : "");
     oledDisplay->print(cmdBuf);
   }
 
   // Scroll indicators
+  const int markX = tall ? SCREEN_WIDTH - 6 : 78;
   if (scrollOffset > 0) {
-    oledDisplay->setCursor(78, OLED_CONTENT_START_Y);
+    oledDisplay->setCursor(markX, tall ? startY : OLED_CONTENT_START_Y);
     oledDisplay->print("^");
   }
   if (scrollOffset + maxVisibleItems < totalRows) {
-    oledDisplay->setCursor(78, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 9);
+    oledDisplay->setCursor(markX, tall ? startY + (maxVisibleItems - 1) * itemHeight
+                                       : OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 9);
     oledDisplay->print("v");
   }
 }

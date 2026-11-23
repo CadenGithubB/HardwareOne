@@ -43,21 +43,25 @@
 #include "System_LLMChat.h"
 #include "System_TextPager.h"     // textWrapAppend — the shared wrap core
 #include "System_Debug.h"
+#include <algorithm>
 #include "System_MemUtil.h"
 
 // ============================================================================
 // Layout constants
 // ============================================================================
 
-static const int LLM_CHARS         = 21;   // Characters per line at text size 1
+// Characters per line at text size 1: buffers hold the widest canvas (21);
+// the live layout has 10 in portrait.
+static const int LLM_CHARS_MAX     = 21;
+#define LLM_CHARS (std::min(LLM_CHARS_MAX, oledCols()))
 static const int LLM_LINE_H        = 10;   // Pixels per text line
-// Lines between the header and the shared footer: 4 on the 128x64 OLED, 9 on
-// the P4X-EYE's 128x128 canvas.
-static const int LLM_VISIBLE_LINES = OLED_CONTENT_HEIGHT / LLM_LINE_H > 0
-                                     ? OLED_CONTENT_HEIGHT / LLM_LINE_H : 1;
+// Lines between the header and the shared footer: 4 on the 128x64 OLED, 8 in
+// portrait, 9 on the P4X-EYE's 128x128 canvas.
+#define LLM_VISIBLE_LINES (std::max(1, (oledContentBottom() + 1 - OLED_CONTENT_START_Y) / LLM_LINE_H))
 // The reply reader wraps one column short so the scroll marks in the last
 // column never cover text.
-static const int LLM_READER_COLS   = LLM_CHARS - 1;
+#define LLM_READER_COLS (LLM_CHARS - 1)
+static const int LLM_READER_COLS_MAX = LLM_CHARS_MAX - 1;
 
 // ============================================================================
 // UI state
@@ -89,14 +93,14 @@ static bool       sLoadReturnsHome = false; // a picker load settles on HOME, no
 
 // The shared footer (drawOledFooter) clears and draws the bottom strip after
 // this mode renders, so the mode hands it its hint instead of drawing one.
-static char sFooterHint[LLM_CHARS + 1] = "";
+static char sFooterHint[LLM_CHARS_MAX + 1] = "";
 
 // Reply reader, as on the glasses: the latest exchange (the question, then the
 // whole reply), wrapped once whenever the reply changes and scrolled by line.
 // The buffers are PSRAM; a remote reply can be 16 KiB.
 #define LLM_READER_MAX_LINES 1024
 static const size_t LLM_READER_WRAP_CAP =
-    LLM_CHAT_TURN_MAX_BYTES + LLM_CHAT_TURN_MAX_BYTES / LLM_READER_COLS + 256;
+    LLM_CHAT_TURN_MAX_BYTES + LLM_CHAT_TURN_MAX_BYTES / 9 + 256;  // 9: the narrowest reader (portrait)
 static_assert(LLM_READER_WRAP_CAP <= UINT16_MAX, "line offsets are uint16_t");
 EXT_RAM_BSS_ATTR static char     sReplyRaw[LLM_CHAT_TURN_MAX_BYTES];
 EXT_RAM_BSS_ATTR static char     sReplyWrapped[LLM_READER_WRAP_CAP];
@@ -702,7 +706,7 @@ static void rebuildReader(ChatRunToken run) {
     ChatTurnInfo info;
     if (!chatGetTurnInfo(i, &info) || info.role != ChatTurnRole::USER) continue;
     // "> " then two rows: 18 glyphs on the first, 18 after the 2-space indent.
-    char question[2 + (LLM_READER_COLS - 2) * 2 + 1] = "> ";
+    char question[2 + (LLM_READER_COLS_MAX - 2) * 2 + 1] = "> ";
     const int n = chatReadTurn(i, 0, question + 2, (int)sizeof(question) - 2);
     if (n > 0) {
       question[2 + utf8FoldToAscii(question + 2, (size_t)n)] = '\0';
@@ -731,6 +735,9 @@ static void rebuildReader(ChatRunToken run) {
 // alone, and a live one is probed for one byte past what was read.
 static void syncReader() {
   const ChatRunToken run = chatGetRunToken();
+  // A turn of the screen (oledrotation) changes the columns: wrap again.
+  static int sWrappedCols = 0;
+  if (sWrappedCols != LLM_READER_COLS) { sWrappedCols = LLM_READER_COLS; sReplyStale = true; }
   if (sReplyStale || run != sReplyRun) { rebuildReader(run); return; }
   if (!run || sReplyDone) return;
   char probe[2];
@@ -824,7 +831,7 @@ static bool drawModelCard() {
     }
     int take = n;
     if (p[n] && lastSpace > 0) take = lastSpace;  // break at a word boundary if mid-word
-    char buf[LLM_CHARS + 1];
+    char buf[LLM_CHARS_MAX + 1];
     int cp = (take < LLM_CHARS) ? take : LLM_CHARS;
     memcpy(buf, p, cp);
     buf[cp] = '\0';
@@ -851,7 +858,7 @@ static void displayLlm_chat(bool generating) {
     }
   } else {
     scrollReader(0);   // clamp after a rebuild shortened the reply
-    char line[LLM_CHARS + 1];
+    char line[LLM_CHARS_MAX + 1];
     for (int i = 0; i < LLM_VISIBLE_LINES; i++) {
       readerLine(sReaderTop + i, line, sizeof(line));
       oledDisplay->setCursor(0, OLED_CONTENT_START_Y + i * LLM_LINE_H);

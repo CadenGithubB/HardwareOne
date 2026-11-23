@@ -25,6 +25,8 @@ def run(component, output, baseline=False, sanitize=False):
         'void oledScrollInit(', 'bool oledScrollAddItem(', 'void oledScrollClampSelection(',
         'void oledScrollUp(', 'void oledScrollDown(', 'void oledScrollPageUp(',
         'void oledScrollPageDown(', 'void oledScrollSetSplitPane(',
+        'static void oledScrollFitRows(', 'static void oledScrollDrawPortraitBar(',
+        'static void oledScrollRenderPortrait(',
         'void oledScrollRender(', 'void oledScrollRenderSimple('))
     harness = harness.replace('// INSERT_TYPES', types).replace('// INSERT_FUNCTIONS', functions)
     # A saved pre-change tree has no text field; its renderers print directly.

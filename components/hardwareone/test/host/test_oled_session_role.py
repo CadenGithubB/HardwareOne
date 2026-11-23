@@ -107,7 +107,7 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
         definition(utils_h, "struct OledScrollState") + ";",
         # Row capacity from the shared layout, as drawing and navigation use it.
         layout,
-        definition(utils_h, "inline constexpr int oledVisibleRows("),
+        definition(utils_h, "inline int oledVisibleRows("),
     ])
     utils = "\n\n".join([session_role_span(oled)] +
                         [definition(oled, signature) for signature in OLED_UTILS_FUNCTIONS

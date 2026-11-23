@@ -20,7 +20,8 @@ static const SettingEntry oledSettingEntries[] = {
 #if DISPLAY_TYPE == DISPLAY_TYPE_HX8394_WAVESHARE
   { "oledLandscape", SETTING_BOOL, &gSettings.oledLandscape, false, 0, nullptr, 0, 1, "Landscape UI (90 degrees)", nullptr, false, "display", "oledlandscape" },
 #endif
-  { "oledFlipped", SETTING_BOOL, &gSettings.oledFlipped, false, 0, nullptr, 0, 1, "Flip display 180°", nullptr, false, "display", "oledflip" },
+  // 90 and 270 (portrait, 64 x 128) are the SSD1306's; oledrotation refuses them on the P4 canvases.
+  { "oledRotation", SETTING_INT, &gSettings.oledRotation, 0, 0, nullptr, 0, 270, "Rotation (degrees)", "0|0 (landscape),90|90 (portrait),180|180 (flipped),270|270 (portrait, flipped)", false, "display", "oledrotation" },
   { "oledThermalScale", SETTING_FLOAT, &gSettings.oledThermalScale, 0, 2.5f, nullptr, 1, 10, "Thermal Scale", nullptr, false, "thermal", "oledthermalscale" },
 };
 

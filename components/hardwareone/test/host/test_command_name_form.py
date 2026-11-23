@@ -71,6 +71,7 @@ REMOVED_NAMES: dict[str, str] = {
     "micenabled": "micautostart",
     "mqttclientenabled": "mqttautostart",
     "oledenabled": "oledautostart",
+    "oledflip": "oledrotation",
     "oledread": "oledstatus",
     "oledstart": "openoled",
     "oledstop": "closeoled",

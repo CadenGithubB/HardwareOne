@@ -15,8 +15,10 @@
 // Row geometry shared by the editor's lists: label fields end before the
 // scroll-arrow column; a value keeps a fixed right-aligned column of at most
 // ten glyphs, so a long label scrolls under it without moving it.
-static constexpr int kSeLabelRight = 118;
-static constexpr int kSeValueMaxW = 60;
+// The value column's right edge and widest value: 118 / 60 on the 128 px
+// row; portrait (64 px) puts values on their own line instead.
+#define kSeLabelRight (SCREEN_WIDTH - 10)
+#define kSeValueMaxW (SCREEN_WIDTH / 2 - 4)
 #include "OLED_UI.h"
 #include "System_Debug.h"
 #include "System_I2C.h"
@@ -178,9 +180,9 @@ void resetSettingsEditor() {
 // For bool: shows 0|1 with indicator at current position
 // For int: shows min|max with proportional indicator
 void drawSettingsSlider(Adafruit_SSD1306* display, int y, int minVal, int maxVal, int currentVal, bool isBool) {
-  const int barX = 10;
+  const int barX = oledPortrait() ? 2 : 10;
   const int barY = y;
-  const int barWidth = 108;  // Leave room for value text
+  const int barWidth = SCREEN_WIDTH - 2 * barX;  // 108 on the 128 px row
   const int barHeight = 8;
   
   // Draw slider track
@@ -339,7 +341,7 @@ void displaySettingsEditor() {
         for (int i = 0; i < maxVisibleItems && (scrollOffset + i) < (int)moduleCount; i++) {
           int itemIdx = scrollOffset + i;
           const bool selected = itemIdx == gSettingsEditor.categoryIndex;
-          if (selected) oledDisplay->fillRect(0, y, 128, 10, DISPLAY_COLOR_WHITE);
+          if (selected) oledDisplay->fillRect(0, y, SCREEN_WIDTH - 3, 10, DISPLAY_COLOR_WHITE);
           oledTextFieldDraw(oledDisplay, 2, y + 1, kSeLabelRight - 2, modules[itemIdx]->name,
                             selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
                             selected, &gSettingsEditor);
@@ -349,12 +351,12 @@ void displaySettingsEditor() {
         // Draw scroll indicators
         if (scrollOffset > 0) {
           oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-          oledDisplay->setCursor(120, OLED_CONTENT_START_Y);
+          oledDisplay->setCursor(SCREEN_WIDTH - 8, OLED_CONTENT_START_Y);
           oledDisplay->print("\x18");  // Up arrow
         }
         if (scrollOffset + maxVisibleItems < (int)moduleCount) {
           oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-          oledDisplay->setCursor(120, OLED_CONTENT_START_Y + (maxVisibleItems - 1) * lineHeight);
+          oledDisplay->setCursor(SCREEN_WIDTH - 8, OLED_CONTENT_START_Y + (maxVisibleItems - 1) * lineHeight);
           oledDisplay->print("\x19");  // Down arrow
         }
       }
@@ -385,9 +387,12 @@ void displaySettingsEditor() {
       }
       
       // Calculate scrolling window - content starts below header
-      const int itemStartY = OLED_CONTENT_START_Y;
-      const int lineHeight = 10;
-      const int maxVisibleItems = OLED_CONTENT_HEIGHT / lineHeight;  // 4 items
+      // Portrait: two-line items (label, then the value right-aligned), 16 px each.
+      const bool tall = oledPortrait();
+      const int itemStartY = OLED_CONTENT_START_Y + (tall ? 0 : 0);
+      const int lineHeight = tall ? 16 : 10;
+      const int maxVisibleItems = tall ? (oledContentBottom() + 1 - itemStartY) / lineHeight
+                                       : OLED_CONTENT_HEIGHT / lineHeight;  // 4 items; 5 in portrait
       
       // Calculate scroll offset to keep selected item visible (context-owned,
       // reset whenever a module is entered)
@@ -420,7 +425,25 @@ void displaySettingsEditor() {
         int y = itemStartY + displayedCount * lineHeight;
         
         const bool selected = (int)i == gSettingsEditor.itemIndex;
-        if (selected) oledDisplay->fillRect(0, y - 1, 128, 10, DISPLAY_COLOR_WHITE);
+        if (tall) {
+          // Line 1 the label (cut, scrolling when selected), line 2 the value
+          // right-aligned to x59; the selected item inverts the 61 x 16 block.
+          if (selected) oledDisplay->fillRect(0, y, SCREEN_WIDTH - 3, 16, DISPLAY_COLOR_WHITE);
+          const uint16_t tallInk = selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
+          const char* tallLabel = entry->label ? entry->label : entry->jsonKey;
+          const String tallValue = (entry->type == SETTING_STRING) ? *((String*)entry->valuePtr)
+                                                                   : String(getSettingCurrentValue(entry));
+          oledTextFieldDraw(oledDisplay, 1, y, SCREEN_WIDTH - 5, tallLabel, tallInk, DISPLAY_COLOR_WHITE, selected,
+                            &gSettingsEditor);
+          int tallW = (int)tallValue.length() * 6 - 1;
+          if (tallW > SCREEN_WIDTH - 6) tallW = SCREEN_WIDTH - 6;
+          oledTextFieldDraw(oledDisplay, SCREEN_WIDTH - 4 - tallW, y + 8, tallW + 1, tallValue.c_str(), tallInk,
+                            DISPLAY_COLOR_WHITE, false, &gSettingsEditor);
+          displayedCount++;
+          currentVisibleIdx++;
+          continue;
+        }
+        if (selected) oledDisplay->fillRect(0, y - 1, SCREEN_WIDTH - 3, 10, DISPLAY_COLOR_WHITE);
         const uint16_t ink = selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
 
         // Label and value keep separate fields: the value in a fixed
@@ -445,12 +468,12 @@ void displaySettingsEditor() {
       // Draw scroll indicators
       if (itemScrollOffset > 0) {
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-        oledDisplay->setCursor(120, itemStartY);
+        oledDisplay->setCursor(SCREEN_WIDTH - 8, itemStartY);
         oledDisplay->print("\x18");  // Up arrow
       }
       if (itemScrollOffset + maxVisibleItems < visibleCount) {
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-        oledDisplay->setCursor(120, itemStartY + (maxVisibleItems - 1) * lineHeight);
+        oledDisplay->setCursor(SCREEN_WIDTH - 8, itemStartY + (maxVisibleItems - 1) * lineHeight);
         oledDisplay->print("\x19");  // Down arrow
       }
       
@@ -494,7 +517,7 @@ void displaySettingsEditor() {
             break;
           }
           const bool selected = idx == gSettingsEditor.optionIndex;
-          if (selected) oledDisplay->fillRect(0, y, 128, 10, DISPLAY_COLOR_WHITE);
+          if (selected) oledDisplay->fillRect(0, y, SCREEN_WIDTH - 3, 10, DISPLAY_COLOR_WHITE);
           oledTextFieldDraw(oledDisplay, 2, y + 1, kSeLabelRight - 2, optLabel,
                             selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE,
                             selected, &gSettingsEditor);
@@ -502,11 +525,11 @@ void displaySettingsEditor() {
         }
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
         if (gSettingsEditor.optionScroll > 0) {
-          oledDisplay->setCursor(120, listStartY);
+          oledDisplay->setCursor(SCREEN_WIDTH - 8, listStartY);
           oledDisplay->print("\x18");
         }
         if (gSettingsEditor.optionScroll + maxVisible < gSettingsEditor.optionCount) {
-          oledDisplay->setCursor(120, listStartY + (maxVisible - 1) * lineHeight);
+          oledDisplay->setCursor(SCREEN_WIDTH - 8, listStartY + (maxVisible - 1) * lineHeight);
           oledDisplay->print("\x19");
         }
         break;
@@ -1196,7 +1219,7 @@ void displayQuickSettings() {
       bool isEnabled = quickItems[i].getState ? quickItems[i].getState() : false;
 
       if (isSelected) {
-        oledDisplay->fillRect(0, yPos - 2, 128, hiliteH, DISPLAY_COLOR_WHITE);
+        oledDisplay->fillRect(0, yPos - 2, SCREEN_WIDTH - 3, hiliteH, DISPLAY_COLOR_WHITE);
         oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
       } else {
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -1204,10 +1227,17 @@ void displayQuickSettings() {
 
       // The name field ends before the fixed ON/OFF column (OLED_TextField.h).
       const uint16_t ink = isSelected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
-      oledTextFieldDraw(oledDisplay, 4, yPos, 90 - 6 - 4, quickItems[i].name, ink, ink, isSelected,
-                        quickItems);
+      // The state column: x90 on the 128 px row; portrait keeps 3 cells ("ON"/"OFF").
+      const int stateX = oledPortrait() ? SCREEN_WIDTH - 22 : 90;
+      oledTextFieldDraw(oledDisplay, oledPortrait() ? 1 : 4, yPos, stateX - 6 - (oledPortrait() ? 1 : 4),
+                        quickItems[i].name, ink, ink, isSelected, quickItems);
 
-      oledDisplay->setCursor(90, yPos);
+      oledDisplay->setCursor(stateX, yPos);
+      if (oledPortrait()) {
+        oledDisplay->print(isEnabled ? "ON" : "OFF");
+        yPos += stepPx;
+        continue;
+      }
       oledDisplay->print(isEnabled ? "[ON]" : "[OFF]");
 
       yPos += stepPx;

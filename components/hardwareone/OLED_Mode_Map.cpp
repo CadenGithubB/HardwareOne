@@ -78,8 +78,19 @@ static OledMapRenderer* gOledMapRenderer = nullptr;
 // Async Double-Buffer Rendering
 // =============================================================================
 
+// Sized for the physical panel; a portrait raster (64 x 128 logical) has the
+// same pixel count and packs into the same 1024 B.
 static const size_t SSD1306_BUF_SIZE = DISPLAY_WIDTH * ((DISPLAY_HEIGHT + 7) / 8);
 static const size_t MAP_SHADE_BUF_SIZE = DISPLAY_WIDTH * DISPLAY_HEIGHT;  // one shade byte per pixel
+
+// Popups (waypoint and track pickers, the map menu): a box under the header,
+// inset 10 px on the 128 px row, full width and the whole content zone in
+// portrait. MAP_DY moves the rows written for the landscape content start
+// (y11) to the live one (y21 in portrait).
+#define MAP_POP_X (oledPortrait() ? 0 : 10)
+#define MAP_POP_W (SCREEN_WIDTH - 2 * MAP_POP_X)
+#define MAP_POP_H (oledPortrait() ? oledContentBottom() + 1 - OLED_CONTENT_START_Y : 42)
+#define MAP_DY (OLED_CONTENT_START_Y - 11)
 
 // Double framebuffers in PSRAM (1-bit SSD1306 page layout, blitted per UI frame)
 static uint8_t* sMapBufA = nullptr;   // Buffer A (PSRAM)
@@ -107,12 +118,19 @@ static struct {
   bool hasTrack;
   // Track scale params (precomputed by display task)
   int32_t trackScaleX, trackScaleY;
+  // The logical canvas the raster is for (oledrotation: 128 x 64 or 64 x 128)
+  // and its content rows.
+  int16_t width, height, viewHeight, offsetY;
 } sRenderSnapshot;
+
+// The logical canvas the front raster was drawn for (under sSwapSpinlock).
+static int16_t sFrontW = 0, sFrontH = 0;
 
 // Last-rendered snapshot (for dirty detection)
 static float sRenderedLat = 0, sRenderedLon = 0;
 static float sRenderedZoom = 0, sRenderedRotation = 0;
 static uint16_t sRenderedLayers = 0;
+static int16_t sRenderedW = 0, sRenderedH = 0;  // the canvas the last request was for
 
 // Force re-render flag (set when layers toggled, etc.)
 static volatile bool sForceRender = false;
@@ -386,7 +404,9 @@ static void drawTrackStatus() {
     snprintf(buf, sizeof(buf), "Time: %d:%02d", mins, secs);
     oledDisplay->print(buf);
     
-    oledDisplay->setCursor(72, y + 3 * step);
+    // Beside the time on the 128 px row; under it in portrait.
+    if (oledPortrait()) oledDisplay->setCursor(0, y + 5 * step);
+    else oledDisplay->setCursor(72, y + 3 * step);
     snprintf(buf, sizeof(buf), "%.1fm/s", stats.avgSpeedMps);
     oledDisplay->print(buf);
   }
@@ -565,8 +585,8 @@ static void drawWaypointSelect() {
   if (!oledDisplay) return;
   
   // Under the header bar, which shows the popup's title (mapHeaderTitle).
-  oledDisplay->fillRect(10, OLED_CONTENT_START_Y, 108, 42, DISPLAY_COLOR_BLACK);
-  oledDisplay->drawRect(10, OLED_CONTENT_START_Y, 108, 42, DISPLAY_COLOR_WHITE);
+  oledDisplay->fillRect(MAP_POP_X, OLED_CONTENT_START_Y, MAP_POP_W, MAP_POP_H, DISPLAY_COLOR_BLACK);
+  oledDisplay->drawRect(MAP_POP_X, OLED_CONTENT_START_Y, MAP_POP_W, MAP_POP_H, DISPLAY_COLOR_WHITE);
   
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -576,9 +596,9 @@ static void drawWaypointSelect() {
     const Waypoint* wp = WaypointManager::getWaypoint(i);
     if (wp) {
       if (activeIdx == gWaypointSelectIdx) {
-        oledDisplay->fillRect(12, 20, 104, 12, DISPLAY_COLOR_WHITE);
+        oledDisplay->fillRect(MAP_POP_X + 2, 20 + MAP_DY, MAP_POP_W - 4, 12, DISPLAY_COLOR_WHITE);
         oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-        oledDisplay->setCursor(14, 22);
+        oledDisplay->setCursor(MAP_POP_X + 4, 22 + MAP_DY);
         char buf[24];
         snprintf(buf, sizeof(buf), "%d: %s", i, wp->name);
         oledDisplay->print(buf);
@@ -589,7 +609,7 @@ static void drawWaypointSelect() {
   }
   
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(14, 40);
+  oledDisplay->setCursor(MAP_POP_X + 4, 40 + MAP_DY);
   oledDisplay->print("A:OK  B:Cancel");
 }
 
@@ -721,24 +741,24 @@ static void drawTrackSelect() {
   if (!oledDisplay) return;
   
   // Under the header bar, which shows the popup's title (mapHeaderTitle).
-  oledDisplay->fillRect(10, OLED_CONTENT_START_Y, 108, 42, DISPLAY_COLOR_BLACK);
-  oledDisplay->drawRect(10, OLED_CONTENT_START_Y, 108, 42, DISPLAY_COLOR_WHITE);
+  oledDisplay->fillRect(MAP_POP_X, OLED_CONTENT_START_Y, MAP_POP_W, MAP_POP_H, DISPLAY_COLOR_BLACK);
+  oledDisplay->drawRect(MAP_POP_X, OLED_CONTENT_START_Y, MAP_POP_W, MAP_POP_H, DISPLAY_COLOR_WHITE);
   
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
   if (gTrackFileCount == 0) {
-    oledDisplay->setCursor(14, 22);
+    oledDisplay->setCursor(MAP_POP_X + 4, 22 + MAP_DY);
     oledDisplay->print("No GPS logs found");
-    oledDisplay->setCursor(14, 40);
+    oledDisplay->setCursor(MAP_POP_X + 4, 40 + MAP_DY);
     oledDisplay->print("B:Cancel");
     return;
   }
   
   if (gTrackFileIdx < gTrackFileCount) {
-    oledDisplay->fillRect(12, 20, 104, 12, DISPLAY_COLOR_WHITE);
+    oledDisplay->fillRect(MAP_POP_X + 2, 20 + MAP_DY, MAP_POP_W - 4, 12, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
-    oledDisplay->setCursor(14, 22);
+    oledDisplay->setCursor(MAP_POP_X + 4, 22 + MAP_DY);
     // Show just filename, not full path
     const char* filename = strrchr(gTrackFiles[gTrackFileIdx], '/');
     if (filename) filename++; else filename = gTrackFiles[gTrackFileIdx];
@@ -748,7 +768,7 @@ static void drawTrackSelect() {
   }
   
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(14, 40);
+  oledDisplay->setCursor(MAP_POP_X + 4, 40 + MAP_DY);
   oledDisplay->print("A:OK  B:Cancel");
 }
 
@@ -823,7 +843,7 @@ static void executeSubtypeMenuAction(int typeIdx, int action) {
     // Back → return to layers submenu, restore selection
     gMapSubmenuLevel = 1;
     gMapMenuSelection = gLayerTypeSelectIdx;
-    gMapMenuScrollOffset = max(0, gLayerTypeSelectIdx - oledVisibleRows(9, 18 - OLED_CONTENT_START_Y, 4) + 1);
+    gMapMenuScrollOffset = max(0, gLayerTypeSelectIdx - oledVisibleRows(9, 18 + MAP_DY - OLED_CONTENT_START_Y, 4) + 1);
   }
 }
 
@@ -895,8 +915,8 @@ static void drawMapMenu() {
   }
   
   // Under the header bar, which shows the popup's title (mapHeaderTitle).
-  oledDisplay->fillRect(10, OLED_CONTENT_START_Y, 108, 42, DISPLAY_COLOR_BLACK);
-  oledDisplay->drawRect(10, OLED_CONTENT_START_Y, 108, 42, DISPLAY_COLOR_WHITE);
+  oledDisplay->fillRect(MAP_POP_X, OLED_CONTENT_START_Y, MAP_POP_W, MAP_POP_H, DISPLAY_COLOR_BLACK);
+  oledDisplay->drawRect(MAP_POP_X, OLED_CONTENT_START_Y, MAP_POP_W, MAP_POP_H, DISPLAY_COLOR_WHITE);
   
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -952,33 +972,33 @@ static void drawMapMenu() {
     }
   }
   
-  const int maxVisible = oledVisibleRows(9, 18 - OLED_CONTENT_START_Y, 4);
+  const int maxVisible = oledVisibleRows(9, 18 + MAP_DY - OLED_CONTENT_START_Y, 4);
   const int itemHeight = 9;
-  const int startY = 18;
+  const int startY = 18 + MAP_DY;
   
   for (int i = 0; i < maxVisible && (i + gMapMenuScrollOffset) < menuItemCount; i++) {
     int itemIdx = i + gMapMenuScrollOffset;
     int y = startY + (i * itemHeight);
     
     if (itemIdx == gMapMenuSelection) {
-      oledDisplay->fillRect(12, y - 1, 104, itemHeight, DISPLAY_COLOR_WHITE);
+      oledDisplay->fillRect(MAP_POP_X + 2, y - 1, MAP_POP_W - 4, itemHeight, DISPLAY_COLOR_WHITE);
       oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
     } else {
       oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     }
     
-    oledDisplay->setCursor(14, y);
-    oledDisplay->print(menuItems[itemIdx]);
+    oledDisplay->setCursor(MAP_POP_X + 4, y);
+    oledDisplay->printf("%.*s", max(1, (MAP_POP_W - 14) / 6), menuItems[itemIdx]);
   }
   
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   if (gMapMenuScrollOffset > 0) {
-    oledDisplay->setCursor(112, 18);
+    oledDisplay->setCursor(MAP_POP_X + MAP_POP_W - 6, startY);
     oledDisplay->print("^");
   }
   if (gMapMenuScrollOffset + maxVisible < menuItemCount) {
     // Beside the last visible row (y=44 on the 64 px OLED), not at a fixed y.
-    oledDisplay->setCursor(112, startY + (maxVisible - 1) * itemHeight - 1);
+    oledDisplay->setCursor(MAP_POP_X + MAP_POP_W - 6, startY + (maxVisible - 1) * itemHeight - 1);
     oledDisplay->print("v");
   }
 }
@@ -1060,18 +1080,58 @@ static bool ensureMapRenderTask() {
 // 1-bit SSD1306 page buffer (byte = 8 vertical pixels, LSB = top). shade>0 => pixel on, so
 // OLED output is byte-identical to the old direct 1-bit rendering no matter
 // how the per-class shade values are tuned.
-static void packShadeBufTo1Bit(const uint8_t* shades, uint8_t* pageBuf) {
-  for (int page = 0; page < (DISPLAY_HEIGHT + 7) / 8; page++) {
-    const uint8_t* rows = shades + (size_t)page * 8 * DISPLAY_WIDTH;
-    uint8_t* out = pageBuf + (size_t)page * DISPLAY_WIDTH;
-    for (int x = 0; x < DISPLAY_WIDTH; x++) {
+// width x height is the logical canvas (64 x 128 in portrait): the pages are
+// that canvas's, not the panel's, and the blit turns them (blitMapFrame).
+static void packShadeBufTo1Bit(const uint8_t* shades, uint8_t* pageBuf, int width, int height) {
+  for (int page = 0; page < (height + 7) / 8; page++) {
+    const uint8_t* rows = shades + (size_t)page * 8 * width;
+    uint8_t* out = pageBuf + (size_t)page * width;
+    for (int x = 0; x < width; x++) {
       uint8_t b = 0;
       for (int bit = 0; bit < 8; bit++) {
-        if (page * 8 + bit < DISPLAY_HEIGHT && rows[(size_t)bit * DISPLAY_WIDTH + x]) {
+        if (page * 8 + bit < height && rows[(size_t)bit * width + x]) {
           b |= (uint8_t)(1 << bit);
         }
       }
       out[x] = b;
+    }
+  }
+}
+
+// The front raster onto the display. The raster is in logical pages of the
+// canvas it was drawn for; the panel's buffer is in physical pages. Unturned
+// (rotation 0) they are the same layout and one copy does it (~1 us). Any
+// other rotation (180 flipped, 90/270 portrait) goes through the GFX pixel
+// path, which applies the rotation, so the map reads upright as every other
+// screen does. A raster drawn for the other orientation is not shown (the
+// next render, already requested, replaces it).
+static void blitMapFrame() {
+  const int w = SCREEN_WIDTH, h = SCREEN_HEIGHT;
+  if (oledDisplay->getRotation() == 0 && w == DISPLAY_WIDTH && h == DISPLAY_HEIGHT) {
+    taskENTER_CRITICAL(&sSwapSpinlock);
+    const bool same = sFrontW == w && sFrontH == h;
+    if (same) memcpy(oledDisplay->getBuffer(), sMapFrontBuf, SSD1306_BUF_SIZE);
+    taskEXIT_CRITICAL(&sSwapSpinlock);
+    return;
+  }
+  // Copy out under the lock, draw outside it (drawPixel is not for a
+  // critical section).
+  static uint8_t* sBlitCopy = nullptr;
+  if (!sBlitCopy) sBlitCopy = (uint8_t*)ps_alloc(SSD1306_BUF_SIZE, AllocPref::RequirePsram, "oled.map.blit");
+  if (!sBlitCopy) return;
+  taskENTER_CRITICAL(&sSwapSpinlock);
+  const bool same = sFrontW == w && sFrontH == h;
+  if (same) memcpy(sBlitCopy, sMapFrontBuf, SSD1306_BUF_SIZE);
+  taskEXIT_CRITICAL(&sSwapSpinlock);
+  if (!same) return;
+  for (int page = 0; page < (h + 7) / 8; ++page) {
+    const uint8_t* row = sBlitCopy + (size_t)page * w;
+    for (int x = 0; x < w; ++x) {
+      const uint8_t bits = row[x];
+      if (!bits) continue;
+      for (int bit = 0; bit < 8; ++bit) {
+        if (bits & (1u << bit)) oledDisplay->drawPixel(x, page * 8 + bit, DISPLAY_COLOR_WHITE);
+      }
     }
   }
 }
@@ -1097,6 +1157,7 @@ static void mapRenderTask(void* param) {
     float lat, lon, zoom, rotation;
     bool hasTrack;
     int32_t trackScaleX, trackScaleY;
+    int16_t width, height, viewHeight, offsetY;
     MapRenderParams renderParams;
     
     taskENTER_CRITICAL(&sSwapSpinlock);
@@ -1111,7 +1172,12 @@ static void mapRenderTask(void* param) {
     hasTrack = sRenderSnapshot.hasTrack;
     trackScaleX = sRenderSnapshot.trackScaleX;
     trackScaleY = sRenderSnapshot.trackScaleY;
+    width = sRenderSnapshot.width;
+    height = sRenderSnapshot.height;
+    viewHeight = sRenderSnapshot.viewHeight;
+    offsetY = sRenderSnapshot.offsetY;
     taskEXIT_CRITICAL(&sSwapSpinlock);
+    if ((size_t)width * (size_t)height > MAP_SHADE_BUF_SIZE || width <= 0 || height <= 0) continue;
     
     // Get current back buffer pointer (read under spinlock)
     taskENTER_CRITICAL(&sSwapSpinlock);
@@ -1119,9 +1185,7 @@ static void mapRenderTask(void* param) {
     taskEXIT_CRITICAL(&sSwapSpinlock);
     
     // Create a local offscreen renderer targeting the shade scratch buffer
-    OffscreenMapRenderer localRenderer(sMapShadeBuf, DISPLAY_WIDTH, DISPLAY_HEIGHT,
-                                       DISPLAY_WIDTH, DISPLAY_CONTENT_HEIGHT,
-                                       DISPLAY_CONTENT_START_Y);
+    OffscreenMapRenderer localRenderer(sMapShadeBuf, width, height, width, viewHeight, offsetY);
     localRenderer.clear();
 
     MapCore::renderMap(&localRenderer, lat, lon, renderParams);
@@ -1132,13 +1196,15 @@ static void mapRenderTask(void* param) {
     }
 
     // Crush shades to 1-bit into the back buffer (fully overwrites it)
-    packShadeBufTo1Bit(sMapShadeBuf, backBuf);
+    packShadeBufTo1Bit(sMapShadeBuf, backBuf, width, height);
 
     // Swap front/back pointers (atomic via spinlock)
     taskENTER_CRITICAL(&sSwapSpinlock);
     uint8_t* temp = sMapFrontBuf;
     sMapFrontBuf = backBuf;
     sMapBackBuf  = temp;
+    sFrontW = width;
+    sFrontH = height;
     sFrontBufReady = true;
     taskEXIT_CRITICAL(&sSwapSpinlock);
   }
@@ -1287,6 +1353,7 @@ static void displayGpsMap() {
   if (!gOledMapRenderer) {
     gOledMapRenderer = new OledMapRenderer(oledDisplay);
   }
+  if (gOledMapRenderer) gOledMapRenderer->setViewport(SCREEN_WIDTH, OLED_CONTENT_HEIGHT);
   
   // Check if viewport changed since last render request
   uint16_t currentLayers = mapLayersGetVisible();
@@ -1295,7 +1362,8 @@ static void displayGpsMap() {
                   gMapCenterLon != sRenderedLon ||
                   gMapZoom != sRenderedZoom ||
                   gMapRotation != sRenderedRotation ||
-                  currentLayers != sRenderedLayers;
+                  currentLayers != sRenderedLayers ||
+                  SCREEN_WIDTH != sRenderedW || SCREEN_HEIGHT != sRenderedH;
   
   // With the render task refused the frame stays dirty for the retry.
   if (mapDirty && sRenderSemaphore && renderer) {
@@ -1304,8 +1372,8 @@ static void displayGpsMap() {
     bool hasTrack = GpsTrackManager::hasTrack();
     int32_t mapWidth = map.header.maxLon - map.header.minLon;
     int32_t mapHeight = map.header.maxLat - map.header.minLat;
-    int32_t trkScaleX = (mapWidth > 0) ? (int32_t)((DISPLAY_WIDTH * 1000L) / mapWidth * gMapZoom) : 1;
-    int32_t trkScaleY = (mapHeight > 0) ? (int32_t)((DISPLAY_CONTENT_HEIGHT * 1000L) / mapHeight * gMapZoom) : 1;
+    int32_t trkScaleX = (mapWidth > 0) ? (int32_t)((SCREEN_WIDTH * 1000L) / mapWidth * gMapZoom) : 1;
+    int32_t trkScaleY = (mapHeight > 0) ? (int32_t)((OLED_CONTENT_HEIGHT * 1000L) / mapHeight * gMapZoom) : 1;
     
     // Write snapshot for render task (minimal critical section)
     taskENTER_CRITICAL(&sSwapSpinlock);
@@ -1318,6 +1386,10 @@ static void displayGpsMap() {
     sRenderSnapshot.hasTrack = hasTrack;
     sRenderSnapshot.trackScaleX = trkScaleX;
     sRenderSnapshot.trackScaleY = trkScaleY;
+    sRenderSnapshot.width = (int16_t)SCREEN_WIDTH;
+    sRenderSnapshot.height = (int16_t)SCREEN_HEIGHT;
+    sRenderSnapshot.viewHeight = (int16_t)OLED_CONTENT_HEIGHT;
+    sRenderSnapshot.offsetY = (int16_t)OLED_CONTENT_START_Y;
     taskEXIT_CRITICAL(&sSwapSpinlock);
     
     // Update dirty-tracking state
@@ -1326,6 +1398,8 @@ static void displayGpsMap() {
     sRenderedZoom = gMapZoom;
     sRenderedRotation = gMapRotation;
     sRenderedLayers = currentLayers;
+    sRenderedW = (int16_t)SCREEN_WIDTH;
+    sRenderedH = (int16_t)SCREEN_HEIGHT;
     sForceRender = false;
     
     // Signal the render task
@@ -1335,15 +1409,11 @@ static void displayGpsMap() {
     sPerfCacheHits++;
   }
   
-  // Always blit front buffer to display (instant memcpy ~1us)
-  if (sFrontBufReady) {
-    taskENTER_CRITICAL(&sSwapSpinlock);
-    memcpy(oledDisplay->getBuffer(), sMapFrontBuf, SSD1306_BUF_SIZE);
-    taskEXIT_CRITICAL(&sSwapSpinlock);
-  }
+  // Always blit the front raster to the display
+  if (sFrontBufReady) blitMapFrame();
   if (!renderer) {
     // No task to draw the raster (or refresh the one shown): say so.
-    oledDisplay->setCursor(0, DISPLAY_CONTENT_START_Y);
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Map: low memory");
   }
   
@@ -1395,23 +1465,29 @@ static void displayGpsMap() {
   }
   
   char overlayBuf[32];
+  // Overlay columns: the middle and the right of the top row (on a 64 px
+  // portrait row the zoom and the angle take the second row instead).
+  const bool tall = oledPortrait();
+  const int midX = tall ? 0 : 50;
+  const int midY = tall ? 8 : 0;
+  const int rightX = SCREEN_WIDTH - 28;
   if (gMapZoom != 1.0f || gMapRotation != 0.0f) {
-    int pos = 50;
+    int pos = midX;
     if (gMapZoom != 1.0f) {
       snprintf(overlayBuf, sizeof(overlayBuf), " %.1fx ", gMapZoom);
-      gOledMapRenderer->drawOverlayText(pos, 0, overlayBuf, true);
+      gOledMapRenderer->drawOverlayText(pos, midY, overlayBuf, true);
       pos += 30;
     }
     if (gMapRotation != 0.0f) {
       snprintf(overlayBuf, sizeof(overlayBuf), " %d\xf8 ", (int)gMapRotation);
-      gOledMapRenderer->drawOverlayText(pos, 0, overlayBuf, true);
+      gOledMapRenderer->drawOverlayText(pos, midY, overlayBuf, true);
     }
   }
   
   // Show cache pressure indicator if tiles were dropped this frame
   if (map.valid && map.tilesDropped > 0) {
     snprintf(overlayBuf, sizeof(overlayBuf), " -%lu ", map.tilesDropped);
-    gOledMapRenderer->drawOverlayText(50, 0, overlayBuf, true);
+    gOledMapRenderer->drawOverlayText(midX, midY, overlayBuf, true);
   }
 
   // Show satellite count with source indicator
@@ -1421,13 +1497,13 @@ static void displayGpsMap() {
     } else {
       snprintf(overlayBuf, sizeof(overlayBuf), " %dS ", satellites);
     }
-    gOledMapRenderer->drawOverlayText(100, 0, overlayBuf, true);
+    gOledMapRenderer->drawOverlayText(rightX, 0, overlayBuf, true);
   }
 #if ENABLE_GPS_SENSOR
   else if (gGpsRunning) {
     // Local GPS enabled but no fix - show searching indicator
     snprintf(overlayBuf, sizeof(overlayBuf), " %dS ", satellites);
-    gOledMapRenderer->drawOverlayText(100, 0, overlayBuf, true);
+    gOledMapRenderer->drawOverlayText(rightX, 0, overlayBuf, true);
   }
   
   // Show LIVE indicator when live tracking
@@ -1452,7 +1528,7 @@ static void displayGpsMap() {
   // Show search results navigation indicator
   if (gSearchResultsActive && gSearchResultCount > 1) {
     snprintf(overlayBuf, sizeof(overlayBuf), " %d/%d <> ", gSearchResultCurrent + 1, gSearchResultCount);
-    gOledMapRenderer->drawOverlayText(40, gOledMapRenderer->getHeight() - 8, overlayBuf, true);
+    gOledMapRenderer->drawOverlayText(tall ? 0 : 40, gOledMapRenderer->getHeight() - (tall ? 16 : 8), overlayBuf, true);
   }
   
   if (gMapMenuOpen) {
@@ -2295,7 +2371,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
   
   // Menu navigation when open
   if (gMapMenuOpen) {
-    const int maxVisible = oledVisibleRows(9, 18 - OLED_CONTENT_START_Y, 4);
+    const int maxVisible = oledVisibleRows(9, 18 + MAP_DY - OLED_CONTENT_START_Y, 4);
     
     // Get item count for current menu level
     int menuItemCount;
@@ -2331,7 +2407,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
         // Subtype submenu → layers submenu, restore selection
         gMapSubmenuLevel = 1;
         gMapMenuSelection = gLayerTypeSelectIdx;
-        gMapMenuScrollOffset = max(0, gLayerTypeSelectIdx - oledVisibleRows(9, 18 - OLED_CONTENT_START_Y, 4) + 1);
+        gMapMenuScrollOffset = max(0, gLayerTypeSelectIdx - oledVisibleRows(9, 18 + MAP_DY - OLED_CONTENT_START_Y, 4) + 1);
       } else if (gMapSubmenuLevel > 0) {
         goBackToMainMenu();
       } else {

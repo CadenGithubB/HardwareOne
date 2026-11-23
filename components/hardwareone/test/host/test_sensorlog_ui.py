@@ -26,6 +26,7 @@ import tempfile
 
 from test_web_batch_handlers import extract_block, require
 from g2_client_source import g2_client_text_via
+from oled_landscape_stubs import LANDSCAPE_STUBS, portrait_scroll_helpers
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -95,8 +96,8 @@ def generated_config_list(read) -> str:
                                    extract_block(utils_header, "struct OledScrollState") + ";",
                                    # Row capacity from the shared layout, as the renderers use it.
                                    read("OLED_Layout.h").replace("#pragma once", ""),
-                                   extract_block(utils_header, "inline constexpr int oledVisibleRows(")]
-    scroll = []
+                                   extract_block(utils_header, "inline int oledVisibleRows(")]
+    scroll = [LANDSCAPE_STUBS, portrait_scroll_helpers(utils)]
     for marker in SCROLL_FUNCTIONS:
         require(utils.count(marker) == 1, f"OLED_Utils.cpp: marker missing or not unique: {marker}")
         scroll.append(extract_block(utils, marker))

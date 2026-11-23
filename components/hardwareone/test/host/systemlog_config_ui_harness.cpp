@@ -22,6 +22,7 @@ using std::min;
 
 #define EXT_RAM_BSS_ATTR
 #define SCREEN_WIDTH 128
+#define DISPLAY_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_CONTENT_START_Y 11  // 10 px header + 1 px gap
 #define OLED_CONTENT_HEIGHT 43   // 64 - 10 header - 10 footer - 1

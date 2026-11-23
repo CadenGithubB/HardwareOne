@@ -229,8 +229,10 @@ static constexpr CommandModule gCommandModules[] = {
     "<name>|fps <n> picks the animation -- both require the display to be running (run "
     "openoled first) and neither persists across reboot. Separately, the oled* config "
     "commands write settings to flash immediately: oleddefaultmode sets the idle "
-    "default screen, while oledbrightness <0-255>, oledflip, oledbootduration, "
-    "oledupdateinterval and oledthermalscale tune appearance and timing, and "
+    "default screen, while oledbrightness <0-255>, oledrotation <0|90|180|270> (90 "
+    "and 270 turn the SSD1306 to a 64x128 portrait layout, and the navigation turns "
+    "with it), oledbootduration, "
+        "oledupdateinterval and oledthermalscale tune appearance and timing, and "
     "oledautostart says whether the display comes up at boot. Whether a user "
     "must log in at the display before interacting with it is set with "
     "displayrequireauth <0|1> (super admin, Settings module).", oledCommands,        &oledCommandsCount, 0, nullptr },

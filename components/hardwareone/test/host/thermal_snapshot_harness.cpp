@@ -20,6 +20,24 @@ template <typename... Args> static void debugLog(const char*, Args...) {}
 #define DISPLAY_COLOR_WHITE 1
 #define OLED_CONTENT_START_Y 8
 #define OLED_CONTENT_HEIGHT 43
+// The live OLED layout, landscape only: the firmware reads it at run time
+// (HAL_Display.h); this harness draws the landscape canvas, so the portrait
+// branches compile but are never taken.
+#include "OLED_Layout.h"
+#ifndef SCREEN_WIDTH
+#ifdef DISPLAY_WIDTH
+#define SCREEN_WIDTH DISPLAY_WIDTH
+#else
+#define SCREEN_WIDTH 128
+#endif
+#endif
+#define oledPortrait() (false)
+#define oledCols() (SCREEN_WIDTH / 6)
+#define oledContentBottom() (OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 2)
+#define oledKvRow(...) (0)
+#define oledPrintWrapped(...) (0)
+#define oledHeroCard(...) ((void)0)
+#define oledMeter(...) ((void)0)
 using TickType_t = uint32_t;
 struct Semaphore { bool held = false; } semaphore;
 using SemaphoreHandle_t = Semaphore*;

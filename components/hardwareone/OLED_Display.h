@@ -29,8 +29,8 @@ void oledApplySettings();
 // Apply OLED brightness from gSettings (can be called independently)
 void applyOledBrightness();
 
-// Apply OLED rotation (oledFlipped) from gSettings — calls setRotation + clears
-// the buffer so the next render tick repaints in the new orientation.
+// Apply the OLED rotation (oledRotation, degrees) from gSettings: the render
+// task turns the canvas and the live layout at its next frame.
 void applyOledRotation();
 
 // Sleep lifecycle. On boards where the OLED rides an I2C bus with a

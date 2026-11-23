@@ -107,7 +107,7 @@ static void displayChangePasswordMode() {
   
   // Current password field
   if (currentField == FIELD_CURRENT_PASSWORD) {
-    oledDisplay->fillRect(0, fieldY1, 128, 8, DISPLAY_COLOR_WHITE);
+    oledDisplay->fillRect(0, fieldY1, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
   }
   oledDisplay->setCursor(0, fieldY1);
@@ -124,7 +124,7 @@ static void displayChangePasswordMode() {
   
   // New password field
   if (currentField == FIELD_NEW_PASSWORD) {
-    oledDisplay->fillRect(0, fieldY2, 128, 8, DISPLAY_COLOR_WHITE);
+    oledDisplay->fillRect(0, fieldY2, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
   }
   oledDisplay->setCursor(0, fieldY2);
@@ -145,7 +145,7 @@ static void displayChangePasswordMode() {
   
   // Confirm password field
   if (currentField == FIELD_CONFIRM_PASSWORD) {
-    oledDisplay->fillRect(0, fieldY3, 128, 8, DISPLAY_COLOR_WHITE);
+    oledDisplay->fillRect(0, fieldY3, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
   }
   oledDisplay->setCursor(0, fieldY3);
@@ -162,7 +162,7 @@ static void displayChangePasswordMode() {
   
   // Change button
   if (currentField == FIELD_CHANGE_BUTTON) {
-    oledDisplay->fillRect(0, fieldY4, 128, 8, DISPLAY_COLOR_WHITE);
+    oledDisplay->fillRect(0, fieldY4, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
   }
   oledDisplay->setCursor(0, fieldY4);

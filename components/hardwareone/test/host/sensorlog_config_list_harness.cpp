@@ -63,6 +63,7 @@ class Adafruit_SSD1306 {
   void println() { cx_ = 0; cy_ += 8; }
   void fillRect(int x, int y, int w, int h, uint16_t) { ops.push_back({'R', x, y, w, h, ""}); }
   void drawFastVLine(int x, int y, int h, uint16_t) { ops.push_back({'V', x, y, 1, h, ""}); }
+  void drawFastHLine(int x, int y, int w, uint16_t) { ops.push_back({'H', x, y, w, 1, ""}); }
  private:
   int cx_ = 0, cy_ = 0;
 };

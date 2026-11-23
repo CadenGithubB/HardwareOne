@@ -338,6 +338,33 @@ void oledToastRender() {
   portEXIT_CRITICAL(&sToastMux);
   if (!toast.active) return;
 
+  if (oledPortrait()) {
+    // Portrait: an inverted box x1-60 (x61 stays blank beside a scrollbar
+    // thumb) whose bottom sits on y104, the type icon centred at the top and
+    // the text wrapped at 9 cells, centred. It never covers the status row,
+    // the title or the footer.
+    namespace P = oled_layout::portrait;
+    const int boxX = 1, boxW = SCREEN_WIDTH - 4;
+    const int iconH = toast.icon == OledUiIcon::NONE ? 0 : 11;
+    const int maxLines = (P::kContentBottom - P::kContentY - 8 - iconH) / 8;
+    const auto lines = oled_message::wrap(toast.message, oled_layout::cellsIn(boxW - 6), maxLines);
+    const int count = lines.count ? lines.count : 1;
+    const int boxH = 8 + iconH + 8 * count;
+    const int boxY = P::kContentBottom - boxH;
+    gDisplay->fillRect(boxX, boxY, boxW, boxH, DISPLAY_FG);
+    if (toast.icon != OledUiIcon::NONE)
+      oledDrawIcon(boxX + (boxW - 8) / 2, boxY + 4, toast.icon, DISPLAY_BG);
+    gDisplay->setTextSize(1);
+    gDisplay->setTextColor(DISPLAY_BG);
+    for (int row = 0; row < lines.count; ++row) {
+      const int n = (int)strlen(lines.text[row]);
+      gDisplay->setCursor(boxX + (boxW - oled_layout::textWidth(n)) / 2, boxY + 4 + iconH + row * 8);
+      gDisplay->print(lines.text[row]);
+    }
+    gDisplay->setTextColor(DISPLAY_FG);
+    return;
+  }
+
   const int boxW = SCREEN_WIDTH - 16, boxX = 8;
   const int iconSpace = toast.icon == OledUiIcon::NONE ? 0 : 10;
   const int textX = boxX + 4 + iconSpace;

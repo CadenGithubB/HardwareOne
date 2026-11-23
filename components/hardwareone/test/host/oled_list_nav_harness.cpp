@@ -30,6 +30,9 @@
 #define OLED_CONTENT_START_Y 11  // 10 px header + 1 px gap
 #define SCREEN_WIDTH 128
 #define OLED_CONTENT_HEIGHT 43   // 64 - 10 header - 10 footer - 1
+// Landscape: the editors' portrait branches are not taken here.
+static bool oledPortrait() { return false; }
+static int oledContentBottom() { return OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 2; }
 #define DISPLAY_COLOR_WHITE 1
 #define DISPLAY_COLOR_BLACK 0
 
