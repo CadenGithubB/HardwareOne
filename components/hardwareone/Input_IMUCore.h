@@ -4,10 +4,19 @@
 // every other input device publishes: buttons and a joystick.
 //
 //   Taps     a run of taps is counted until no tap follows for tapWindowMs,
-//            then the count is the button: 1 = A, 2 = B, 3 = Y, 4 = X,
-//            5 = take the present pose as the new centre. More than 5: nothing.
-//            (So every button arrives tapWindowMs after its last tap.)
-//   Shake    a sustained shake is START (shakeStart; off: a shake does nothing).
+//            then the count is the button. Taps on the side (the knock
+//            detector tells side from face; a chip that cannot tell counts
+//            as side): 1 = A, 2 = B, 3 = Y, 4 = X. Taps on the face: 2 =
+//            START, 3 = SELECT (1 is nothing: setting the device down or
+//            bumping its face knocks once). Other counts: nothing. A run is
+//            of one kind: a tap of the other kind ends it (its button goes
+//            out) and starts a new run. (Every button arrives tapWindowMs
+//            after its last tap.)
+//   Shake    a sustained shake starts a calibration (shakeCalibrate): the
+//            device is to be set down in the pose it will be used in; once
+//            it has been still for kCalStillMs the pose is the new centre.
+//            Taps and the joystick are off meanwhile; it gives up after
+//            kCalTimeoutMs. Output::calEvent reports each stage for a prompt.
 //            A shake here is strong acceleration for more than half of the
 //            last 500 ms, counted from the samples themselves: a run of taps
 //            is a few single strong samples and never reaches it. (The
@@ -15,7 +24,7 @@
 //            the tap rule must not depend on thresholds tuned for events.)
 //   Tilt     the joystick: how far the device leans away from its reference
 //            pose, one axis at a time. The reference is the pose it had when
-//            input started, or at the last 5 taps / recentre request.
+//            input started, or at the last calibration / recentre request.
 //
 // Tilt is measured on the "up" vector (which way is up, in the sensor's
 // frame), not on Euler angles: the difference of two up vectors is a lean
@@ -48,6 +57,25 @@ constexpr uint8_t kButtonB = 1u << 1;
 constexpr uint8_t kButtonX = 1u << 2;
 constexpr uint8_t kButtonY = 1u << 3;
 constexpr uint8_t kButtonStart = 1u << 4;
+constexpr uint8_t kButtonSelect = 1u << 5;
+
+// Where a tap hit (Sample::tapKind; the values of HAL_MotionHookCore.h's
+// kMotionTapKind*). Unknown counts as side.
+constexpr uint8_t kTapUnknown = 0;
+constexpr uint8_t kTapSide = 1;
+constexpr uint8_t kTapFace = 2;
+
+// Calibration (a shake): the stages Output::calEvent reports.
+constexpr uint8_t kCalNone = 0;
+constexpr uint8_t kCalStarted = 1;    // set the device down in the pose to use
+constexpr uint8_t kCalCountdown = 2;  // still: calSecondsLeft to go
+constexpr uint8_t kCalMoved = 3;      // it moved during the countdown: waiting again
+constexpr uint8_t kCalDone = 4;       // the new centre is taken
+constexpr uint8_t kCalCancelled = 5;  // never still long enough
+constexpr uint32_t kCalStillMs = 3000;
+constexpr uint32_t kCalTimeoutMs = 20000;
+// Still, for the calibration: acceleration without gravity under this.
+constexpr float kCalStillAccel = 1.2f;  // m/s^2
 
 // The joystick's scale, the Seesaw gamepad's (i2csensor_seesaw.h): 0..1023,
 // centre 512, and the navigation's dead zone of 200 around it.
@@ -103,7 +131,7 @@ struct Config {
   bool swapXY = false;
   bool invertX = false;
   bool invertY = false;
-  bool shakeStart = true;
+  bool shakeCalibrate = true;  // a shake starts a calibration (off: a shake does nothing)
 };
 
 // One sample (the fields of MotionHookSample this core reads).
@@ -112,6 +140,7 @@ struct Sample {
   float up[3] = {0, 0, 1};     // unit vector, sensor frame
   float accel[3] = {0, 0, 0};  // m/s^2, sensor frame
   bool tap = false;            // at least one single tap since the previous sample
+  uint8_t tapKind = kTapUnknown;  // where it hit
 };
 
 struct Output {
@@ -121,17 +150,24 @@ struct Output {
   int joyY = kJoyCentre;
   bool activity = false; // something a user did: a press, or the joystick deflected
   bool recentred = false; // a new reference pose was taken on this sample
+  uint8_t calEvent = kCalNone;  // a calibration stage reached on this sample
+  uint8_t calSecondsLeft = 0;   // with kCalCountdown
 };
 
-// What a finished run of `count` taps is: a button mask, or kTapsRecentre.
-constexpr uint8_t kTapsRecentre = 0x80;
-inline uint8_t buttonForTaps(uint8_t count) {
+// What a finished run of `count` taps is: a button mask (0: nothing).
+inline uint8_t buttonForTaps(uint8_t count, bool face) {
+  if (face) {
+    switch (count) {
+      case 2: return kButtonStart;
+      case 3: return kButtonSelect;
+      default: return 0;
+    }
+  }
   switch (count) {
     case 1: return kButtonA;
     case 2: return kButtonB;
     case 3: return kButtonY;
     case 4: return kButtonX;
-    case 5: return kTapsRecentre;
     default: return 0;
   }
 }
@@ -229,19 +265,68 @@ class Engine {
     if (!inShake_ && strongCount >= kShakeCount) {
       inShake_ = true;
       tapCount_ = 0;
-      if (cfg.shakeStart) press(out, kButtonStart, s.ms);
+      if (calState_ != CalState::Idle) calState_ = CalState::Idle;  // a new shake starts over
     } else if (inShake_ && strongCount <= kShakeEndCount) {
       inShake_ = false;
       tapsFromMs_ = s.ms + kAfterShakeMs;
       tapsBlocked_ = true;
+      if (cfg.shakeCalibrate) {
+        calState_ = CalState::Waiting;
+        calStartMs_ = s.ms;
+        calStillSinceMs_ = s.ms;
+        calStill_ = false;
+        calShown_ = 0;
+        out.calEvent = kCalStarted;
+      }
     }
     if (tapsBlocked_ && static_cast<int32_t>(s.ms - tapsFromMs_) >= 0) tapsBlocked_ = false;
 
+    // ---- Calibration ------------------------------------------------------
+    if (calState_ == CalState::Waiting) {
+      tapCount_ = 0;
+      const bool still = !s.tap && dot3(lin, lin) < kCalStillAccel * kCalStillAccel;
+      if (!still) {
+        if (calStill_ && out.calEvent == kCalNone) out.calEvent = kCalMoved;
+        calStill_ = false;
+        calShown_ = 0;
+        calStillSinceMs_ = s.ms;
+      } else {
+        calStill_ = true;
+        const uint32_t held = static_cast<uint32_t>(s.ms - calStillSinceMs_);
+        if (held >= kCalStillMs) {
+          calState_ = CalState::Capturing;
+          recentre();
+        } else {
+          const uint8_t left = static_cast<uint8_t>((kCalStillMs - held + 999u) / 1000u);
+          if (left != calShown_ && out.calEvent == kCalNone) {
+            calShown_ = left;
+            out.calEvent = kCalCountdown;
+            out.calSecondsLeft = left;
+          }
+        }
+      }
+      if (calState_ == CalState::Waiting && static_cast<uint32_t>(s.ms - calStartMs_) > kCalTimeoutMs) {
+        calState_ = CalState::Idle;
+        out.calEvent = kCalCancelled;
+      }
+    }
+    const bool calibrating = calState_ != CalState::Idle;
+
     // ---- Taps -------------------------------------------------------------
-    if (inShake_) {
+    if (inShake_ || calibrating) {
       tapCount_ = 0;
     } else if (s.tap && !tapsBlocked_) {
+      const bool face = s.tapKind == kTapFace;
+      // A tap of the other kind ends the run in progress: its button goes out
+      // now (unless the device was being moved about), and this tap starts a
+      // new run.
+      if (tapCount_ > 0 && face != runFace_) {
+        const uint8_t what = movedSinceKnock ? 0 : buttonForTaps(tapCount_, runFace_);
+        tapCount_ = 0;
+        if (what) press(out, what, s.ms);
+      }
       if (tapCount_ == 0 || static_cast<uint32_t>(s.ms - lastTapMs_) >= cfg.tapMinGapMs) {
+        if (tapCount_ == 0) runFace_ = face;
         if (tapCount_ < 15) ++tapCount_;
         lastTapMs_ = s.ms;
         freezeUntilMs_ = s.ms + kTapFreezeMs;
@@ -253,10 +338,9 @@ class Engine {
       if (since > cfg.tapWindowMs + kTapPatienceMs) {
         tapCount_ = 0;  // never calm enough to mean it
       } else if (since > cfg.tapWindowMs && !movedSinceKnock) {
-        const uint8_t what = buttonForTaps(tapCount_);
+        const uint8_t what = buttonForTaps(tapCount_, runFace_);
         tapCount_ = 0;
-        if (what == kTapsRecentre) recentre();
-        else if (what) press(out, what, s.ms);
+        if (what) press(out, what, s.ms);
       }
     }
     if (frozen_ && static_cast<int32_t>(s.ms - freezeUntilMs_) >= 0) frozen_ = false;
@@ -279,6 +363,10 @@ class Engine {
             haveRef_ = true;
             capturing_ = false;
             out.recentred = true;
+            if (calState_ == CalState::Capturing) {
+              calState_ = CalState::Idle;
+              out.calEvent = kCalDone;
+            }
           } else {  // not a direction (the samples cancelled out): try again
             captured_ = 0;
             sum_[0] = sum_[1] = sum_[2] = 0.0f;
@@ -288,7 +376,7 @@ class Engine {
     }
 
     // ---- Tilt -------------------------------------------------------------
-    if (!haveRef_ || capturing_ || moving || inShake_) {
+    if (!haveRef_ || capturing_ || moving || inShake_ || calState_ != CalState::Idle) {
       releaseJoystick();
     } else if (!frozen_) {
       float x = 0, y = 0;
@@ -348,6 +436,8 @@ class Engine {
   bool hasReference() const { return haveRef_; }
   bool capturing() const { return capturing_; }
   bool shaking() const { return inShake_; }
+  bool calibrating() const { return calState_ != CalState::Idle; }
+  bool runOnFace() const { return runFace_; }
   float leanX() const { return leanX_; }  // degrees, after the swap and the inversions
   float leanY() const { return leanY_; }
   const float* reference() const { return up0_; }
@@ -369,6 +459,11 @@ class Engine {
   // After a gap: nothing that was being counted is still true.
   void dropRun() {
     tapCount_ = 0;
+    if (calState_ == CalState::Waiting) {  // the countdown starts over
+      calStill_ = false;
+      calShown_ = 0;
+      calStillSinceMs_ = lastMs_;
+    }
     strongBits_ = 0;
     afterKnock_ = strongAfterKnock_ = 0;
     inShake_ = false;
@@ -393,7 +488,14 @@ class Engine {
   uint32_t tapsFromMs_ = 0;
 
   uint8_t tapCount_ = 0;
+  bool runFace_ = false;  // the run in progress is of face taps
   uint32_t lastTapMs_ = 0;
+
+  enum class CalState : uint8_t { Idle = 0, Waiting, Capturing };
+  CalState calState_ = CalState::Idle;
+  uint32_t calStartMs_ = 0, calStillSinceMs_ = 0;
+  bool calStill_ = false;
+  uint8_t calShown_ = 0;  // the countdown second last reported
   bool frozen_ = false;
   uint32_t freezeUntilMs_ = 0;
 

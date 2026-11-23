@@ -55,6 +55,12 @@ extern OledToast gOledToast;
 // Full queue drops the oldest pending non-error first.
 void oledToastShow(const char* message, uint32_t durationMs = 3000, OledUiIcon icon = OledUiIcon::NONE);
 
+// A toast that changes as something progresses (a countdown): a call with
+// the same nonzero tag replaces that toast, visible or pending, in place;
+// otherwise it queues like oledToastShow. Any task may call it.
+void oledToastUpdate(uint32_t tag, const char* message, uint32_t durationMs = 3000,
+                     OledUiIcon icon = OledUiIcon::NONE);
+
 // Clear active and pending feedback (including at session replacement).
 void oledToastClear();
 

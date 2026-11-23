@@ -36,10 +36,14 @@
 // The tap settings last handed to the backend: a changed one (a command, the
 // web settings, an import) is passed on at the next sample. IMU task only.
 static void imuApplyTapTuning(bool force) {
-  static int lastMg = -1, lastShock = -1, lastQuiet = -1, lastMax = -1, lastRing = -1;
+  static int lastMg = -1, lastShock = -1, lastQuiet = -1, lastMax = -1, lastRing = -1, lastAxis = -1, lastSide = -1;
   if (!force && gSettings.imuTapThresholdMg == lastMg && gSettings.imuTapShock == lastShock &&
-      gSettings.imuTapQuiet == lastQuiet && gSettings.imuTapMaxMs == lastMax && gSettings.imuTapRingMs == lastRing)
+      gSettings.imuTapQuiet == lastQuiet && gSettings.imuTapMaxMs == lastMax && gSettings.imuTapRingMs == lastRing &&
+      gSettings.imuTapSideAxis == lastAxis && gSettings.imuTapSideMg == lastSide)
     return;
+  lastAxis = gSettings.imuTapSideAxis;
+  lastSide = gSettings.imuTapSideMg;
+  motionBackendSetKnockSide(lastAxis, lastSide);
   lastMg = gSettings.imuTapThresholdMg;
   lastShock = gSettings.imuTapShock;
   lastQuiet = gSettings.imuTapQuiet;
@@ -671,7 +675,7 @@ static bool imuStoreSample(const MotionSample& sample, bool publish, unsigned lo
     const MotionHookSample hooked =
         motionHookSample((uint32_t)readMs, sample.pitch, sample.roll, sample.accel,
                          sample.hasGravity ? sample.gravity : nullptr, sample.hasHwTap, sample.hwTap, afterGap,
-                         shaking, kMotionTapAccel);
+                         shaking, kMotionTapAccel, sample.hwTapKind);
     motionHookCall(sImuHook, hooked);
   }
   return updated;
@@ -920,6 +924,33 @@ const char* cmd_imutapringms(const String& argsInput) {
                               "a knock starting this soon after a tap is the board ringing, not a new tap");
 }
 
+const char* cmd_imutapsideaxis(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String text = argsInput;
+  text.trim();
+  text.toLowerCase();
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  if (text.length() > 0) {
+    int axis = -1;
+    if (text == "x" || text == "0") axis = 0;
+    else if (text == "y" || text == "1") axis = 1;
+    else if (text == "z" || text == "2") axis = 2;
+    if (axis < 0) return "Error: The side axis is x, y or z.";
+    setSetting(gSettings.imuTapSideAxis, axis);
+  }
+  snprintf(getDebugBuffer(), 1024,
+           "[IMU] Side knocks: a knock of %d mg or more along %c (either sign) is a side tap, any other a face tap. "
+           "'imutaptrace' shows each knock's x/y/z.",
+           gSettings.imuTapSideMg, (char)('X' + (gSettings.imuTapSideAxis & 3)));
+  return getDebugBuffer();
+}
+
+const char* cmd_imutapsidemg(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return imuTapSettingCommand(argsInput, gSettings.imuTapSideMg, 100, 16000, "Side knock (mg)",
+                              "a knock this hard along the side axis is a side tap, else a face tap");
+}
+
 // The knock trace: every recent knock the software detector saw, how hard
 // and how long it was, and why it did or did not count, with a hint per
 // kind of miss. Its own PSRAM buffer: the table outgrows the debug buffer.
@@ -962,9 +993,10 @@ const char* cmd_imutaptrace(const String& argsInput) {
       uint8_t share = 0;
       knock::knockDirection(e, dir, share);
       put("%s{\"n\":%lu,\"peakMg\":%u,\"durMs\":%u,\"gapMs\":%d,\"v\":\"%s\",\"vec\":[%d,%d,%d],"
-          "\"dir\":\"%s\",\"share\":%u}", i ? "," : "",
+          "\"dir\":\"%s\",\"share\":%u,\"hit\":\"%s\"}", i ? "," : "",
           (unsigned long)e.seq, (unsigned)e.peakMg, (unsigned)e.durMs, e.gapMs == 0xFFFF ? -1 : (int)e.gapMs,
-          knock::verdictName(e.verdict), e.peakVec[0], e.peakVec[1], e.peakVec[2], dir, (unsigned)share);
+          knock::verdictName(e.verdict), e.peakVec[0], e.peakVec[1], e.peakVec[2], dir, (unsigned)share,
+          e.side ? "side" : "face");
     }
     put("%s", "]}");
     return b;
@@ -984,7 +1016,7 @@ const char* cmd_imutaptrace(const String& argsInput) {
       (unsigned)tr.feed.lastPattern);
   put("Now: accel %d, %d, %d mg; jump %u mg%s\n", tr.feed.lastMg[0], tr.feed.lastMg[1], tr.feed.lastMg[2],
       (unsigned)tr.feed.lastDevMg, tr.feed.inKnock ? " (inside a knock)" : "");
-  put("%s", "    #  peak mg  ms  gap ms  verdict  dir (share)   x/y/z mg\n");
+  put("%s", "    #  peak mg  ms  gap ms  verdict  hit   dir (share)   x/y/z mg\n");
   for (uint8_t i = 0; i < tr.count; ++i) {
     const knock::Event& e = tr.at(i);
     char gap[8];
@@ -992,9 +1024,9 @@ const char* cmd_imutaptrace(const String& argsInput) {
     char dir[3];
     uint8_t share = 0;
     knock::knockDirection(e, dir, share);
-    put("%5lu  %7u %3u  %6s  %-7s  %s (%3u%%)   %d/%d/%d\n", (unsigned long)e.seq, (unsigned)e.peakMg,
-        (unsigned)e.durMs, gap, knock::verdictName(e.verdict), dir, (unsigned)share, e.peakVec[0], e.peakVec[1],
-        e.peakVec[2]);
+    put("%5lu  %7u %3u  %6s  %-7s  %-4s  %s (%3u%%)   %d/%d/%d\n", (unsigned long)e.seq, (unsigned)e.peakMg,
+        (unsigned)e.durMs, gap, knock::verdictName(e.verdict), e.side ? "side" : "face", dir, (unsigned)share,
+        e.peakVec[0], e.peakVec[1], e.peakVec[2]);
   }
   // Hints: the value that would have let each kind of missed knock count.
   if (tr.counts[1]) {
@@ -1234,6 +1266,8 @@ const CommandEntry imuCommands[] = {
   { "imutapquiet", "IMU tap quiet window: [0..3]", true, cmd_imutapquiet, "Usage: imutapquiet [0..3]" },
   { "imutapmaxms", "IMU tap max length in ms (software knock detector): [5..500]", true, cmd_imutapmaxms, "Usage: imutapmaxms [5..500]" },
   { "imutapringms", "IMU tap ring window in ms (software knock detector): [0..500]", true, cmd_imutapringms, "Usage: imutapringms [0..500]" },
+  { "imutapsideaxis", "IMU side knocks: the axis a side knock hits along (software knock detector): [x|y|z]", true, cmd_imutapsideaxis, "Usage: imutapsideaxis [x|y|z]" },
+  { "imutapsidemg", "IMU side knocks: how hard along the side axis makes a side tap, in mg: [100..16000]", true, cmd_imutapsidemg, "Usage: imutapsidemg [100..16000]" },
   { "imutaptrace", "Every recent knock: how hard, how long, and why it did or did not count, with tuning hints. (add 'json' for JSON output)", false, cmd_imutaptrace, "Usage: imutaptrace [json|clear]" },
 #endif
   { "imudevicepollms", "IMU device poll interval: <50..1000>", true, cmd_imudevicepollms, "Usage: imuDevicePollMs <50..1000>" },
@@ -1422,6 +1456,8 @@ static const SettingEntry imuSettingEntries[] = {
   { "imuTapShock", SETTING_INT, &gSettings.imuTapShock, 2, 0, nullptr, 0, 3, "Tap shock window", nullptr, false, "tap", "imutapshock" },
   { "imuTapQuiet", SETTING_INT, &gSettings.imuTapQuiet, 1, 0, nullptr, 0, 3, "Tap quiet window", nullptr, false, "tap", "imutapquiet" },
   { "imuTapMaxMs", SETTING_INT, &gSettings.imuTapMaxMs, 120, 0, nullptr, 5, 500, "Tap max length (ms)", nullptr, false, "tap", "imutapmaxms" },
+  { "imuTapSideAxis", SETTING_INT, &gSettings.imuTapSideAxis, 1, 0, nullptr, 0, 2, "Side knock axis", "0:X,1:Y,2:Z", false, "tap", "imutapsideaxis" },
+  { "imuTapSideMg", SETTING_INT, &gSettings.imuTapSideMg, 1500, 0, nullptr, 100, 16000, "Side knock (mg)", nullptr, false, "tap", "imutapsidemg" },
   { "imuTapRingMs", SETTING_INT, &gSettings.imuTapRingMs, 80, 0, nullptr, 0, 500, "Tap ring window (ms)", nullptr, false, "tap", "imutapringms" },
 #endif
   { "imuOrientationMode", SETTING_INT, &gSettings.imuOrientationMode, 0, 0, nullptr, 0, 8, "Orientation Mode", "0:Normal,1:Flip Pitch,2:Flip Roll,3:Flip Yaw,4:Flip Pitch+Roll,5:Roll 180 Fix,6:Rotate 90 CCW,7:Alt Extreme Pitch,8:Upside Down", false, "orientation", "imuorientationmode" },

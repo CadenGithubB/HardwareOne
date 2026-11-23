@@ -19,6 +19,9 @@
 #include "System_SensorJsonKeys.h"  // inter-device sensor JSON key names (receivers read the same)
 #include "System_Settings.h"
 #include "System_Utils.h"
+#if ENABLE_OLED_DISPLAY
+#include "OLED_UI.h"  // oledToastUpdate: the calibration prompts
+#endif
 
 // The OLED-facing input state, as every input driver defines it. Running: the
 // input is open (hook registered, IMU held). Connected: samples are arriving
@@ -53,6 +56,7 @@ struct ImuInputStatus {
   bool centred;         // a reference pose is in use
   bool centring;        // one is being taken
   bool shaking;
+  bool calibrating;     // a shake's calibration is waiting for the device to be still
   bool unsupported;     // the IMU's chip has no tap detection or no gravity
   bool imuStopped;      // the IMU closed under the input
   float leanX, leanY;   // degrees from the centre pose
@@ -90,7 +94,7 @@ static imuinput::Config configFromSettings() {
   cfg.swapXY = gSettings.imuInputSwapXY;
   cfg.invertX = gSettings.imuInputInvertX;
   cfg.invertY = gSettings.imuInputInvertY;
-  cfg.shakeStart = gSettings.imuInputShakeStart;
+  cfg.shakeCalibrate = gSettings.imuInputShakeCalibrate;
   return cfg;
 }
 
@@ -101,6 +105,40 @@ static imuinput::Config configFromSettings() {
 // go with the next sample, 20 ms later. A deflection is never left behind
 // when the samples stop: the input layer treats a reading older than a
 // quarter of a second as centred (HAL_Input.cpp).
+// The calibration's prompts: one toast, updated in place as it goes, and a
+// log line per stage.
+static void showCalibration(uint8_t event, uint8_t secondsLeft) {
+  char text[64];
+  uint32_t ms = 3000;
+  switch (event) {
+    case imuinput::kCalStarted:
+    case imuinput::kCalMoved:
+      snprintf(text, sizeof(text), "Calibrating tilt: set the sign down the way you will use it");
+      ms = imuinput::kCalTimeoutMs;
+      break;
+    case imuinput::kCalCountdown:
+      snprintf(text, sizeof(text), "Hold still: %u", (unsigned)secondsLeft);
+      ms = 1500;
+      break;
+    case imuinput::kCalDone:
+      snprintf(text, sizeof(text), "Tilt calibrated");
+      break;
+    case imuinput::kCalCancelled:
+      snprintf(text, sizeof(text), "Calibration cancelled: it never held still");
+      break;
+    default:
+      return;
+  }
+  INFO_INPUT_LIFECYCLEF("[IMU input] %s", text);
+#if ENABLE_OLED_DISPLAY
+  constexpr uint32_t kCalToastTag = 0x494D5543u;  // "IMUC"
+  const OledUiIcon icon = event == imuinput::kCalDone        ? OledUiIcon::SUCCESS
+                          : event == imuinput::kCalCancelled ? OledUiIcon::WARNING
+                                                             : OledUiIcon::INFO;
+  oledToastUpdate(kCalToastTag, text, ms, icon);
+#endif
+}
+
 static void imuInputHook(const MotionHookSample& sample, void*) {
   ImuInputStatus status = sStatus;  // only this function writes it
   status.ms = sample.ms;
@@ -129,6 +167,7 @@ static void imuInputHook(const MotionHookSample& sample, void*) {
     in.accel[i] = sample.accel[i];
   }
   in.tap = sample.tapLatched;
+  in.tapKind = sample.tapKind;
   const uint8_t tapsBefore = sEngine.tapCount();
   const imuinput::Output out = sEngine.update(in, configFromSettings());
 
@@ -149,12 +188,14 @@ static void imuInputHook(const MotionHookSample& sample, void*) {
   status.centred = sEngine.hasReference();
   status.centring = sEngine.capturing();
   status.shaking = sEngine.shaking();
+  status.calibrating = sEngine.calibrating();
+  if (out.calEvent != imuinput::kCalNone) showCalibration(out.calEvent, out.calSecondsLeft);
   status.leanX = sEngine.leanX();
   status.leanY = sEngine.leanY();
   if (out.pressed) {
     ++status.presses;
     status.lastPress = out.pressed;
-    status.lastTaps = (out.pressed & imuinput::kButtonStart) ? 0 : tapsBefore;
+    status.lastTaps = tapsBefore;
   }
   if (out.recentred) ++status.recentres;
   statusWrite(status);
@@ -273,6 +314,7 @@ static const char* stateWord(const ImuInputStatus& s) {
   if (s.unsupported) return "unsupported";
   if (s.imuStopped || !gImuRunning) return "imu-closed";
   if (!gInputConnected) return "starting";
+  if (s.calibrating) return "calibrating";
   if (s.centring || !s.centred) return "centring";
   return "ready";
 }
@@ -293,14 +335,14 @@ const char* cmd_imuinputread(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024,
              "{\"schema\":1,\"state\":\"%s\",\"running\":%s,\"connected\":%s,\"x\":%d,\"y\":%d,\"buttons\":%u,"
              "\"leanX\":%.1f,\"leanY\":%.1f,\"taps\":%u,\"shaking\":%s,\"presses\":%lu,\"recentres\":%lu,"
-             "\"lastPress\":%u,\"lastTaps\":%u,\"tapWindowMs\":%d,\"tiltDeg\":%d,\"shakeStart\":%s,\"swapXY\":%s,\"invertX\":%s,\"invertY\":%s}",
+             "\"lastPress\":%u,\"lastTaps\":%u,\"tapWindowMs\":%d,\"tiltDeg\":%d,\"shakeCalibrate\":%s,\"swapXY\":%s,\"invertX\":%s,\"invertY\":%s}",
              state, gInputRunning ? "true" : "false", gInputConnected ? "true" : "false", x, y,
              static_cast<unsigned>(live ? s.held : 0), static_cast<double>(live ? s.leanX : 0.0f),
              static_cast<double>(live ? s.leanY : 0.0f), static_cast<unsigned>(live ? s.tapCount : 0),
              live && s.shaking ? "true" : "false", static_cast<unsigned long>(s.presses),
              static_cast<unsigned long>(s.recentres), static_cast<unsigned>(s.lastPress),
              static_cast<unsigned>(s.lastTaps), gSettings.imuInputTapWindowMs, gSettings.imuInputTiltDeg,
-             gSettings.imuInputShakeStart ? "true" : "false", gSettings.imuInputSwapXY ? "true" : "false",
+             gSettings.imuInputShakeCalibrate ? "true" : "false", gSettings.imuInputSwapXY ? "true" : "false",
              gSettings.imuInputInvertX ? "true" : "false", gSettings.imuInputInvertY ? "true" : "false");
     return getDebugBuffer();
   }
@@ -410,8 +452,9 @@ static const char* boolSetting(bool& field, const String& argsInput, bool allowT
 
 const char* cmd_imuinputshake(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return boolSetting(gSettings.imuInputShakeStart, argsInput, false, "[IMU input] Shake: START",
-                     "[IMU input] Shake: no button");
+  return boolSetting(gSettings.imuInputShakeCalibrate, argsInput, false,
+                     "[IMU input] Shake: calibrate the tilt (set the device down, hold it still 3 s)",
+                     "[IMU input] Shake: nothing");
 }
 
 const char* cmd_imuinputswapxy(const String& argsInput) {
@@ -435,11 +478,11 @@ const char* cmd_imuinputinverty(const String& argsInput) {
 // The open/close/autostart commands are the input module's (HAL_Input.cpp).
 const CommandEntry imuInputCommands[] = {
   { "imuinputread",    "IMU input: state, lean, joystick and taps. (add 'json' for JSON output)", false, cmd_imuinputread, "Usage: imuinputread [json]" },
-  { "imuinputzero",    "Take the present pose as the joystick's centre (the same as five taps).", true, cmd_imuinputzero, "Usage: imuinputzero" },
+  { "imuinputzero",    "Take the present pose as the joystick's centre (a shake does the same, with a prompt).", true, cmd_imuinputzero, "Usage: imuinputzero" },
   { "imuinputtapms",   "Tap window in ms: a button arrives this long after its last tap <200..800>", true, cmd_imuinputtapms, "Usage: imuinputtapms [200..800]" },
   { "imuinputtapmerge", "Tap flags closer than this many ms are one knock (its rebound) <0..300>", true, cmd_imuinputtapmerge, "Usage: imuinputtapmerge [0..300]" },
   { "imuinputtilt",    "Tilt angle in degrees that moves the joystick <8..40>", true, cmd_imuinputtilt, "Usage: imuinputtilt [8..40]" },
-  { "imuinputshake",   "A shake is the START button [on|off]", true, cmd_imuinputshake, "Usage: imuinputshake [on|off]" },
+  { "imuinputshake",   "A shake calibrates the tilt: set the device down, hold still 3 s [on|off]", true, cmd_imuinputshake, "Usage: imuinputshake [on|off]" },
   { "imuinputswapxy",  "Swap the tilt axes [on|off|toggle]", true, cmd_imuinputswapxy, "Usage: imuinputswapxy [on|off|toggle]" },
   { "imuinputinvertx", "Invert left/right tilt [on|off|toggle]", true, cmd_imuinputinvertx, "Usage: imuinputinvertx [on|off|toggle]" },
   { "imuinputinverty", "Invert up/down tilt [on|off|toggle]", true, cmd_imuinputinverty, "Usage: imuinputinverty [on|off|toggle]" },
@@ -452,7 +495,7 @@ static const SettingEntry imuInputSettingEntries[] = {
   { "imuInputTapWindowMs", SETTING_INT,  &gSettings.imuInputTapWindowMs, 300, 0, nullptr, 200, 800, "Tap window (ms)",       nullptr, false, nullptr, "imuinputtapms" },
   { "imuInputTapMergeMs",  SETTING_INT,  &gSettings.imuInputTapMergeMs,  0,   0, nullptr, 0,   300, "Tap merge (ms)",        nullptr, false, nullptr, "imuinputtapmerge" },
   { "imuInputTiltDeg",     SETTING_INT,  &gSettings.imuInputTiltDeg,      15, 0, nullptr, 8,   40,  "Tilt angle (degrees)",  nullptr, false, nullptr, "imuinputtilt" },
-  { "imuInputShakeStart",  SETTING_BOOL, &gSettings.imuInputShakeStart,    1, 0, nullptr, 0,   1,   "Shake is START",        nullptr, false, nullptr, "imuinputshake" },
+  { "imuInputShakeCalibrate",  SETTING_BOOL, &gSettings.imuInputShakeCalibrate,    1, 0, nullptr, 0,   1,   "Shake calibrates tilt",        nullptr, false, nullptr, "imuinputshake" },
   { "imuInputSwapXY",      SETTING_BOOL, &gSettings.imuInputSwapXY,        0, 0, nullptr, 0,   1,   "Swap tilt axes",        nullptr, false, nullptr, "imuinputswapxy" },
   { "imuInputInvertX",     SETTING_BOOL, &gSettings.imuInputInvertX,       0, 0, nullptr, 0,   1,   "Invert left/right tilt", nullptr, false, nullptr, "imuinputinvertx" },
   { "imuInputInvertY",     SETTING_BOOL, &gSettings.imuInputInvertY,       0, 0, nullptr, 0,   1,   "Invert up/down tilt",   nullptr, false, nullptr, "imuinputinverty" },

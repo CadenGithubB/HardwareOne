@@ -35,6 +35,12 @@ struct Config {
   uint16_t thresholdMg = 500;  // peak jump a tap must reach
   uint16_t maxMs = 120;        // longest a tap may last (bench 2026-11-23: knocks on the sign ring 45-95 ms)
   uint16_t ringMs = 80;        // a knock starting this soon after a tap is its ringing
+  // Side or face: a knock whose jump on sideAxis (0 X, 1 Y, 2 Z) reaches
+  // sideMg (either sign) hit the side; any other hit the face. Bench
+  // 2026-11-23 (the sign, IMU in its bottom-right corner): right-side knocks
+  // had |Y| 2.5-3.8 g, face knocks |Y| at most 0.53 g.
+  uint8_t sideAxis = 1;
+  uint16_t sideMg = 1500;
 };
 
 struct Event {
@@ -45,6 +51,7 @@ struct Event {
   uint16_t gapMs = 0;   // since the previous knock's start (0xFFFF: none or longer)
   int16_t peakVec[3] = {0, 0, 0};  // the jump at the peak, per axis (mg): which way the knock hit
   Verdict verdict = Verdict::Tap;
+  bool side = false;    // hit the side (Config::sideAxis / sideMg), else the face
 };
 
 constexpr float kBaselineTauMs = 40.0f;  // the slow level the jump is measured from
@@ -118,6 +125,10 @@ class Detector {
     for (int i = 0; i < 3; ++i) {
       const float v = peakVec_[i];
       ev.peakVec[i] = static_cast<int16_t>(v > 32767.0f ? 32767 : v < -32767.0f ? -32767 : v);
+    }
+    {
+      const int16_t a = ev.peakVec[cfg.sideAxis < 3 ? cfg.sideAxis : 1];
+      ev.side = (a < 0 ? -a : a) >= cfg.sideMg;
     }
     ev.durMs = static_cast<uint16_t>(durUs / 1000u > 65535u ? 65535u : durUs / 1000u);
     const uint32_t gapUs = static_cast<uint32_t>(startUs_ - prevStartUs_);

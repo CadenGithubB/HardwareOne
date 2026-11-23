@@ -375,14 +375,15 @@ static constexpr CommandModule gCommandModules[] = {
 #endif
 #if ENABLE_IMU_INPUT
   { "imuinput",   "IMU as the input device — taps are buttons, tilt is the joystick", "The motion sensor used as the OLED navigation "
-    "input (INPUT_DEVICE_TYPE 5; it needs the Adafruit 4517, whose chip detects taps). Tap the device: one tap is A, two are B, "
-    "three are Y, four are X; the button arrives once no further tap has followed for the tap window (imuinputtapms "
-    "<200..800>, default 350 ms). Five taps take the device's present pose as the joystick's centre, as does "
-    "imuinputzero; six or more taps do nothing. Tilting the device away from that centre pose by more than the tilt angle "
+    "input (INPUT_DEVICE_TYPE 5; it needs the Adafruit 4517, whose chip detects taps). Tap the side: one tap is A, two are B, "
+    "three are Y, four are X; tap the face: two taps are START, three SELECT (one does nothing). The button arrives "
+    "once no further tap has followed for the tap window (imuinputtapms <200..800>, default 300 ms); a tap on the "
+    "other side ends the run. Side or face comes from the knock's direction (imutapsideaxis, imutapsidemg; "
+    "'imutaptrace' shows each knock); a chip that cannot tell counts every tap as a side tap. Tilting the device away from that centre pose by more than the tilt angle "
     "(imuinputtilt <8..40> degrees, default 15) deflects the joystick left, right, up or down, one direction at a time, "
     "and returning releases it; a lean of more than 60 degrees is taken as a new pose and centres the joystick until the "
     "next re-centre. imuinputswapxy, imuinputinvertx and imuinputinverty [on|off|toggle] fit the directions to how the "
-    "sensor sits in its enclosure. A sustained shake is START (imuinputshake [on|off]); SELECT has no gesture. "
+    "sensor sits in its enclosure. A sustained shake calibrates the tilt (imuinputshake [on|off]): set the device down the way it will be used and hold it still for 3 s, and that pose is the new centre (imuinputzero takes it at once). "
     "imuinputread [json] shows the state, the lean in degrees, the joystick and the taps being counted. The "
     "open/close/autostart lifecycle lives under the input module: openinput also opens the IMU and holds it open "
     "(closeimu refuses while the input runs), closeinput leaves the IMU open.", imuInputCommands, &imuInputCommandsCount, CMD_MODULE_SENSOR, []() { return gInputConnected; } },

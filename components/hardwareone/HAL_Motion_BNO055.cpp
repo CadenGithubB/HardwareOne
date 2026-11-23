@@ -135,6 +135,7 @@ void motionBackendStop() {}
 
 void motionBackendSetTapTuning(long, long, long) {}  // the BNO055 has no tap engine
 void motionBackendSetKnockTuning(long, long, long) {}
+void motionBackendSetKnockSide(long, long) {}
 bool motionBackendKnockTrace(knock::Trace&, knock::Config&) { return false; }
 void motionBackendKnockTraceClear() {}
 

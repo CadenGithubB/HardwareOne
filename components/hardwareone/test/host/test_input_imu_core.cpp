@@ -1,6 +1,7 @@
 // The IMU as an input device (Input_IMUCore.h): a run of taps becomes one
-// button after the tap window (1 = A, 2 = B, 3 = Y, 4 = X, 5 = re-centre,
-// more = nothing), a sustained shake is START and cancels taps, a lean from
+// button after the tap window (side: 1 = A, 2 = B, 3 = Y, 4 = X; face: 2 =
+// START, 3 = SELECT; other counts nothing), a sustained shake starts a
+// calibration (still for 3 s: the new centre) and cancels taps, a lean from
 // the reference pose is the joystick (one axis, hysteresis, a dwell), the
 // reference can be any pose, and a gap drops what was being counted.
 #include <cassert>
@@ -22,6 +23,9 @@ struct Rig {
   Output last;
   uint8_t pressedSince = 0;  // every press since the last clear
   int recentres = 0;
+  uint8_t kind = kTapSide;   // where taps hit
+  int calEvents[8] = {0};    // count per calEvent
+  uint8_t lastCountdown = 0;
 
   void pose(float x, float y, float z) {
     const float n = std::sqrt(x * x + y * y + z * z);
@@ -42,9 +46,12 @@ struct Rig {
     }
     s.accel[0] += extraAccel;
     s.tap = tap;
+    s.tapKind = kind;
     last = engine.update(s, cfg);
     pressedSince |= last.pressed;
     if (last.recentred) ++recentres;
+    if (last.calEvent) ++calEvents[last.calEvent];
+    if (last.calEvent == kCalCountdown) lastCountdown = last.calSecondsLeft;
     ms += 20;
     return last;
   }
@@ -85,15 +92,59 @@ static void testTapCounts() {
     r.run(1000);
     assert(r.take() == 0);  // once
   }
-  // Six and more: nothing, and no re-centre.
-  for (int count = 6; count <= 8; ++count) {
+  // Five and more on the side: nothing, and no re-centre.
+  for (int count = 5; count <= 8; ++count) {
     Rig r;
     r.start();
     r.taps(count);
     r.run(1500);
     assert(r.take() == 0 && r.recentres == 1);
   }
-  assert(buttonForTaps(0) == 0 && buttonForTaps(5) == kTapsRecentre && buttonForTaps(16) == 0);
+  assert(buttonForTaps(0, false) == 0 && buttonForTaps(5, false) == 0 && buttonForTaps(16, false) == 0);
+  assert(buttonForTaps(1, true) == 0 && buttonForTaps(2, true) == kButtonStart &&
+         buttonForTaps(3, true) == kButtonSelect && buttonForTaps(4, true) == 0);
+}
+
+static void testFaceTaps() {
+  const uint8_t expect[] = {0, 0, kButtonStart, kButtonSelect, 0, 0};
+  for (int count = 1; count <= 5; ++count) {
+    Rig r;
+    r.kind = kTapFace;
+    r.start();
+    r.taps(count);
+    r.run(600);
+    assert(r.take() == expect[count]);
+  }
+  // A chip that cannot tell counts as side.
+  Rig unknown;
+  unknown.kind = kTapUnknown;
+  unknown.start();
+  unknown.taps(2);
+  unknown.run(600);
+  assert(unknown.take() == kButtonB);
+}
+
+static void testKindChangeEndsTheRun() {
+  // One side tap, then two face taps right after: A at once, then START.
+  Rig r;
+  r.start();
+  r.tap();
+  r.kind = kTapFace;
+  r.step(true, 15.0f);
+  assert(r.last.pressed == kButtonA);  // the side run ended with the face tap
+  r.run(140);
+  r.tap();
+  r.run(600);
+  assert(r.take() == (kButtonA | kButtonStart));
+  // Two face taps then a side tap: START, then the side run of one: A.
+  Rig f;
+  f.kind = kTapFace;
+  f.start();
+  f.taps(2);
+  f.kind = kTapSide;
+  f.tap();
+  f.run(600);
+  assert(f.take() == (kButtonStart | kButtonA));
 }
 
 static void testTapTiming() {
@@ -141,41 +192,61 @@ static void testTapTiming() {
 }
 
 static void testShake() {
-  // A sustained shake: START once, and the taps the chip reports in it are not buttons.
+  // A shake presses nothing; when it ends a calibration starts: the device is
+  // set down, held still 3 s, and that pose becomes the centre.
   Rig r;
   r.start();
   for (int i = 0; i < 40; ++i) r.step(i % 5 == 0, (i % 2) ? 14.0f : -14.0f);
   assert(r.engine.shaking());
-  assert(r.take() == kButtonStart);
-  r.run(1500);
-  assert(!r.engine.shaking());
   assert(r.take() == 0);
-  // And taps work again afterwards.
+  r.run(600);  // the shake winds down
+  assert(!r.engine.shaking() && r.engine.calibrating());
+  assert(r.calEvents[kCalStarted] == 1);
+  // Set down standing on its edge (+Y up), still.
+  r.pose(0, 1, 0);
+  r.run(2000);
+  assert(r.engine.calibrating() && r.calEvents[kCalCountdown] >= 2 && r.calEvents[kCalDone] == 0);
+  // Taps and the joystick are off meanwhile.
+  r.tap();
+  r.run(400);
+  assert(r.take() == 0 && r.last.joyX == kJoyCentre && r.last.joyY == kJoyCentre);
+  // The tap broke the stillness: the countdown started over (moved).
+  assert(r.calEvents[kCalMoved] >= 1);
+  r.run(3600);
+  assert(!r.engine.calibrating() && r.calEvents[kCalDone] == 1);
+  assert(std::fabs(r.engine.reference()[1] - 1.0f) < 0.01f);
+  assert(r.lastCountdown == 1);
+  // Taps work again.
   r.tap();
   r.run(400);
   assert(r.take() == kButtonA);
 
-  // A second shake is a second START.
-  for (int i = 0; i < 40; ++i) r.step(false, (i % 2) ? 14.0f : -14.0f);
-  r.run(1500);
-  assert(r.take() == kButtonStart);
+  // Never still: cancelled after the timeout, the old centre kept.
+  Rig busy;
+  busy.start();
+  for (int i = 0; i < 40; ++i) busy.step(false, (i % 2) ? 14.0f : -14.0f);
+  busy.run(600);
+  assert(busy.engine.calibrating());
+  for (int i = 0; i < 1100; ++i) busy.step(false, (i % 4 == 0) ? 4.0f : 0.0f);  // fidgeting, not a shake
+  assert(!busy.engine.calibrating() && busy.calEvents[kCalCancelled] == 1 && busy.calEvents[kCalDone] == 0);
+  assert(std::fabs(busy.engine.reference()[2] - 1.0f) < 0.01f);
 
-  // With shakeStart off a shake presses nothing (and still cancels taps).
+  // With shakeCalibrate off a shake does nothing (and still cancels taps).
   Rig off;
-  off.cfg.shakeStart = false;
+  off.cfg.shakeCalibrate = false;
   off.start();
   off.taps(2);
   for (int i = 0; i < 40; ++i) off.step(false, (i % 2) ? 14.0f : -14.0f);
   off.run(1500);
-  assert(off.take() == 0);
+  assert(off.take() == 0 && !off.engine.calibrating() && off.calEvents[kCalStarted] == 0);
 
-  // Five hard taps are not a shake.
+  // Five hard taps are not a shake (and on the side, five is nothing).
   Rig taps;
   taps.start();
   taps.taps(5, 140);
   assert(!taps.engine.shaking());
   taps.run(1000);
-  assert(taps.take() == 0 && taps.recentres == 2);  // the re-centre, no START
+  assert(taps.take() == 0 && taps.recentres == 1 && !taps.engine.calibrating());
 }
 
 // A real knock rings: the tap flag plus a few strong samples. Four firm taps
@@ -333,13 +404,13 @@ static void testTapDoesNotMoveTheJoystick() {
 }
 
 static void testRecentreAnyPose() {
-  // Standing on its edge: +Y up. Five taps make that the centre.
+  // Standing on its edge: +Y up. A re-centre makes that the centre.
   Rig r;
   r.start();
   r.pose(0, 1, 0);
   r.run(200);
   assert(r.last.joyX == kJoyCentre && r.last.joyY == kJoyCentre);  // 90 degrees away: out of range
-  r.taps(5);
+  r.engine.recentre();
   r.run(800);
   assert(r.take() == 0 && r.recentres == 2);
   assert(r.last.joyX == kJoyCentre && r.last.joyY == kJoyCentre);
@@ -451,6 +522,8 @@ static void testLeanAxes() {
 int main() {
   testRingingKnocksStillCount();
   testTapCounts();
+  testFaceTaps();
+  testKindChangeEndsTheRun();
   testTapTiming();
   testShake();
   testTapsWaitForCalm();

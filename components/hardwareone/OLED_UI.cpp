@@ -169,7 +169,9 @@ struct PendingToast {
   uint32_t durationMs;
   OledUiIcon icon;
   uint32_t eventSeq;  // the event it shows; 0 = not from an event
+  uint32_t tag;       // oledToastUpdate's tag; 0 = an ordinary toast
 };
+static uint32_t sToastActiveTag = 0;  // the visible toast's tag
 static PendingToast sToastQueue[kToastQueueCapacity];
 static unsigned sToastQueueCount = 0;
 static bool sToastPaused = false;
@@ -187,9 +189,11 @@ static void toastPromoteNextLocked(uint32_t now) {
   gOledToast.expireMs = (sToastPaused ? sToastPausedAt : now) + item.durationMs;
   gOledToast.eventSeq = item.eventSeq;
   gOledToast.active = true;
+  sToastActiveTag = item.tag;
 }
 
-static void toastEnqueue(const char* message, uint32_t durationMs, OledUiIcon icon, uint32_t eventSeq) {
+static void toastEnqueue(const char* message, uint32_t durationMs, OledUiIcon icon, uint32_t eventSeq,
+                         uint32_t tag = 0) {
   if (icon == OledUiIcon::NONE)
     icon = oled_message::isError(message) ? OledUiIcon::ERROR : OledUiIcon::INFO;
   if (icon == OledUiIcon::ERROR) {
@@ -202,7 +206,26 @@ static void toastEnqueue(const char* message, uint32_t durationMs, OledUiIcon ic
   item.durationMs = durationMs;
   item.icon = icon;
   item.eventSeq = eventSeq;
+  item.tag = tag;
   portENTER_CRITICAL(&sToastMux);
+  // A tagged update replaces its own toast in place: the visible one, or one
+  // still waiting in the queue.
+  if (tag != 0) {
+    if (gOledToast.active && sToastActiveTag == tag) {
+      memcpy(gOledToast.message, item.message, sizeof(item.message));
+      gOledToast.icon = icon;
+      gOledToast.expireMs = (sToastPaused ? sToastPausedAt : millis()) + durationMs;
+      portEXIT_CRITICAL(&sToastMux);
+      oledMarkDirty();
+      return;
+    }
+    for (unsigned i = 0; i < sToastQueueCount; ++i) {
+      if (sToastQueue[i].tag != tag) continue;
+      sToastQueue[i] = item;
+      portEXIT_CRITICAL(&sToastMux);
+      return;
+    }
+  }
   // A repeat is coalesced into the message already shown or pending. That
   // message then stands for the newer event too, so a clear of the notification
   // center that predates the newer event leaves it.
@@ -225,6 +248,7 @@ static void toastEnqueue(const char* message, uint32_t durationMs, OledUiIcon ic
       gOledToast.expireMs = (sToastPaused ? sToastPausedAt : millis()) + durationMs;
       gOledToast.eventSeq = eventSeq;
       gOledToast.active = true;
+      sToastActiveTag = tag;
     } else {
       if (sToastQueueCount == kToastQueueCapacity) {
         unsigned discard = 0;
@@ -245,6 +269,10 @@ static void toastEnqueue(const char* message, uint32_t durationMs, OledUiIcon ic
 
 void oledToastShow(const char* message, uint32_t durationMs, OledUiIcon icon) {
   toastEnqueue(message, durationMs, icon, 0);
+}
+
+void oledToastUpdate(uint32_t tag, const char* message, uint32_t durationMs, OledUiIcon icon) {
+  toastEnqueue(message, durationMs, icon, 0, tag);
 }
 
 void oledEventBannersDismissThrough(uint32_t seq) {
@@ -268,6 +296,7 @@ void oledEventBannersDismissThrough(uint32_t seq) {
 void oledToastClear() {
   portENTER_CRITICAL(&sToastMux);
   gOledToast = {};
+  sToastActiveTag = 0;
   // Erase messages as well as counters at a display identity boundary.
   memset(sToastQueue, 0, sizeof(sToastQueue));
   sToastQueueCount = 0;

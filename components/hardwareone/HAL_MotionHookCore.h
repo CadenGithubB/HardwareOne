@@ -46,6 +46,11 @@
 #include <stdio.h>
 #include <string.h>
 
+// Where a tap hit, when the detector can tell (MotionHookSample::tapKind).
+constexpr uint8_t kMotionTapKindUnknown = 0;
+constexpr uint8_t kMotionTapKindSide = 1;
+constexpr uint8_t kMotionTapKindFace = 2;
+
 // One sample as the hook gets it.
 struct MotionHookSample {
   uint32_t ms = 0;             // millis() right after the sample was read from the chip
@@ -65,6 +70,7 @@ struct MotionHookSample {
   // first sample after a gap never carries one (the latch may be stale).
   // Without hasHwTap it is this sample's acceleration spike.
   bool tapLatched = false;
+  uint8_t tapKind = kMotionTapKindUnknown;  // with tapLatched: side, face, or unknown
   bool isShaking = false;      // the action detector's state after this sample
   // What the build's chip provides.
   bool hasHwTap = false;       // taps are detected by the chip (latched between samples)
@@ -205,7 +211,8 @@ inline bool motionRawTap(bool hasHwTap, bool hwTap, bool afterGap, const float a
 // afterGap is motionHookAfterGap's answer for this sample.
 inline MotionHookSample motionHookSample(uint32_t ms, float pitchDeg, float rollDeg, const float accel[3],
                                          const float* gravity, bool hasHwTap, bool hwTap, bool afterGap,
-                                         bool isShaking, float tapAccelThreshold) {
+                                         bool isShaking, float tapAccelThreshold,
+                                         uint8_t hwTapKind = kMotionTapKindUnknown) {
   MotionHookSample out;
   out.ms = ms;
   out.pitchDeg = pitchDeg;
@@ -221,6 +228,7 @@ inline MotionHookSample motionHookSample(uint32_t ms, float pitchDeg, float roll
   }
   out.hasHwTap = hasHwTap;
   out.tapLatched = motionRawTap(hasHwTap, hwTap, afterGap, accel, tapAccelThreshold);
+  out.tapKind = (out.tapLatched && hasHwTap) ? hwTapKind : kMotionTapKindUnknown;
   out.isShaking = isShaking;
   return out;
 }

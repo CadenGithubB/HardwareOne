@@ -63,6 +63,8 @@ struct Settings {
       imuTapQuiet(1),
       imuTapMaxMs(120),
       imuTapRingMs(80),
+      imuTapSideAxis(1),
+      imuTapSideMg(1500),
       gpsDevicePollMs(200),
       apdsDevicePollMs(200),
       inputDevicePollMs(90),
@@ -302,7 +304,7 @@ struct Settings {
       imuInputTapWindowMs(300),
       imuInputTapMergeMs(0),
       imuInputTiltDeg(15),
-      imuInputShakeStart(true),
+      imuInputShakeCalibrate(true),
       imuInputSwapXY(false),
       imuInputInvertX(false),
       imuInputInvertY(false),
@@ -565,6 +567,8 @@ struct Settings {
   int imuTapQuiet;        // ...quiet window 0..3 (imutapquiet)
   int imuTapMaxMs;        // software knock detector: longest a tap may last (imutapmaxms)
   int imuTapRingMs;       // ...a knock this soon after a tap is its ringing (imutapringms)
+  int imuTapSideAxis;     // ...side or face: the axis (0 X, 1 Y, 2 Z) a side knock hits along (imutapsideaxis)
+  int imuTapSideMg;       // ...and how hard on it (either sign) makes it a side knock (imutapsidemg)
   int gpsDevicePollMs;
   int apdsDevicePollMs;
   int inputDevicePollMs;
@@ -987,7 +991,7 @@ struct Settings {
   int  imuInputTapWindowMs;     // IMU input: a run of taps ends this long after its last tap (Input_IMU: imuinputtapms)
   int  imuInputTapMergeMs;      // IMU input: tap flags closer than this are one knock (its rebound) (imuinputtapmerge)
   int  imuInputTiltDeg;         // IMU input: lean from the centre pose that deflects the joystick (imuinputtilt)
-  bool imuInputShakeStart;      // IMU input: a sustained shake is START (imuinputshake)
+  bool imuInputShakeCalibrate;  // IMU input: a sustained shake starts a tilt calibration (imuinputshake)
   bool imuInputSwapXY;          // IMU input: swap the tilt axes (the sensor's mounting)
   bool imuInputInvertX;         // IMU input: invert left/right tilt
   bool imuInputInvertY;         // IMU input: invert up/down tilt

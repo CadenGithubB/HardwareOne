@@ -31,6 +31,7 @@
 
 #include "HAL_Motion_Fusion.h"
 #include "HAL_Motion_LSM6DSOXCore.h"
+#include "HAL_MotionHookCore.h"  // kMotionTapKind*
 #include "System_I2C.h"
 
 namespace {
@@ -64,6 +65,7 @@ struct Lsm4517State {
   bool knockFifo;
   knock::Detector knock;
   uint8_t pendingTaps;
+  uint8_t pendingSide;  // bit i: the i-th pending tap (oldest first) hit the side
 };
 EXT_RAM_BSS_ATTR Lsm4517State sState;
 
@@ -80,6 +82,7 @@ bool writeRegs(TwoWire& wire, uint8_t address, uint8_t reg, const uint8_t* value
 // and the ring window; read by the IMU task at each sample.
 std::atomic<uint32_t> sKnockTuning{1300u | (120u << 16)};
 std::atomic<uint16_t> sKnockRingMs{80};
+std::atomic<uint32_t> sKnockSide{1u | (1500u << 8)};  // axis | sideMg << 8
 // The trace: written by the IMU task, copied by commands (a short critical
 // section each way). PSRAM, cleared at each start.
 EXT_RAM_BSS_ATTR knock::Trace sKnockTrace;
@@ -92,6 +95,9 @@ knock::Config knockConfig() {
   c.thresholdMg = (uint16_t)(t & 0xFFFF);
   c.maxMs = (uint16_t)(t >> 16);
   c.ringMs = sKnockRingMs.load();
+  const uint32_t side = sKnockSide.load();
+  c.sideAxis = (uint8_t)(side & 0xFF);
+  c.sideMg = (uint16_t)(side >> 8);
   return c;
 }
 
@@ -156,7 +162,10 @@ void readKnockFifo(TwoWire& wire, uint8_t bus, uint8_t address) {
     const uint32_t tUs = lastUs - (uint32_t)(n - 1 - i) * kLsm6ds3FifoSampleUs;
     knock::Event ev;
     if (!sState.knock.add(cfg, mg, tUs, ev)) continue;
-    if (ev.verdict == knock::Verdict::Tap && sState.pendingTaps < 8) ++sState.pendingTaps;
+    if (ev.verdict == knock::Verdict::Tap && sState.pendingTaps < 8) {
+      if (ev.side) sState.pendingSide |= (uint8_t)(1u << sState.pendingTaps);
+      ++sState.pendingTaps;
+    }
     if (nev < 4) evs[nev++] = ev;
   }
   portENTER_CRITICAL(&sKnockMux);
@@ -345,7 +354,12 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, Moti
   if (sState.knockFifo) {
     readKnockFifo(*wire, bus, address);
     out.hwTap = sState.pendingTaps > 0;
-    if (out.hwTap) --sState.pendingTaps;
+    out.hwTapKind = kMotionTapKindUnknown;
+    if (out.hwTap) {
+      out.hwTapKind = (sState.pendingSide & 1u) ? kMotionTapKindSide : kMotionTapKindFace;
+      sState.pendingSide >>= 1;
+      --sState.pendingTaps;
+    }
   } else {
     out.hwTap = reading.tap;
   }
@@ -391,6 +405,12 @@ void motionBackendSetKnockTuning(long thresholdMg, long maxMs, long ringMs) {
   const uint32_t mx = (uint32_t)(maxMs < 5 ? 5 : maxMs > 500 ? 500 : maxMs);
   sKnockTuning.store(thr | (mx << 16));
   sKnockRingMs.store((uint16_t)(ringMs < 0 ? 0 : ringMs > 500 ? 500 : ringMs));
+}
+
+void motionBackendSetKnockSide(long axis, long sideMg) {
+  const uint32_t a = (uint32_t)(axis < 0 ? 0 : axis > 2 ? 2 : axis);
+  const uint32_t mg = (uint32_t)(sideMg < 100 ? 100 : sideMg > 16000 ? 16000 : sideMg);
+  sKnockSide.store(a | (mg << 8));
 }
 
 bool motionBackendKnockTrace(knock::Trace& out, knock::Config& cfg) {

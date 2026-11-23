@@ -57,6 +57,9 @@ struct MotionSample {
   // since the previous sample. The action detector takes them in place of
   // its software rule (HAL_MotionCore.h).
   bool hasHwTap = false, hwTap = false;
+  // Where the tap hit (kMotionTapKind*): the software knock detector tells
+  // side from face; a chip's own tap engine cannot (Unknown).
+  uint8_t hwTapKind = 0;
   bool hasHwFreefall = false, hwFreefall = false;
   // False while the backend is still starting (the 4517's gyro bias): the
   // read worked, but there is nothing to publish or detect yet.
@@ -106,6 +109,7 @@ void motionBackendSetTapTuning(long thresholdMg, long shock, long quiet);
 // motionBackendKnockTrace is false on a backend without the detector (it
 // uses the chip's own tap engine, or none). Any task may call these.
 void motionBackendSetKnockTuning(long thresholdMg, long maxMs, long ringMs);
+void motionBackendSetKnockSide(long axis, long sideMg);
 bool motionBackendKnockTrace(knock::Trace& out, knock::Config& cfg);
 void motionBackendKnockTraceClear();
 
