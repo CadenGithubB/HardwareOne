@@ -45,6 +45,33 @@ The band guard scans the in-frame OLED painters for a draw at a literal y of
 poll and `oleddump` is checked in the sources.
 The `oledIsDirty` side of the staleness poll is in `test_millis_deadlines.py`.
 
+## OLED rotation, portrait layout and input mounts
+
+`oled_rotation_core_tests` (CTest; `test_oled_rotation_core.cpp`) compiles
+`OLED_Layout.h` and `Input_RotationCore.h` unchanged (`-Wall -Wextra -Werror
+-pedantic`). It checks the `oledrotation` degrees and quarter turns, the live
+geometry for 128 x 64, 64 x 128 and the P4 canvases (portrait content y21-105,
+footer rule y107, landscape unchanged), the glyph metrics and the hero card's
+ink-centred columns, the ToF gauge fill, the portrait scrollbar against the
+design's worked examples, the key/value stacking rule, the footer chips (hint
+tokens to the four fixed A/B/X/Y slots, 3-letter verbs, arrow and START tokens
+dropped), the portrait title cut (whole, leaf, path tail, 9 glyphs and the
+mark), the keyboard's 30 keys re-wrapped 5 x 6, input directions that follow
+the screen (joystick and direction bits at every rotation), the mount codes and
+their argument forms, mount-then-screen for vectors and bits at all 8 mounts x
+4 screens, that the teach step learns each mount back, and the portrait
+header (`OLED_HeaderCore.h`'s tall profile: fixed status slots, title cut,
+the rule on y19; the keyboard profile's page in the Power slot).
+`input_imu_core_tests` checks the 8 IMU mounts on the tilt and the teach step
+(each mount and screen rotation learned from one lean; no lean is a quiet
+timeout; offered after a calibration only when asked). `ano_encoder_core_tests`
+checks the ANO mount (180 = both old swaps, mirror = the LEFT/RIGHT swap and a
+reversed wheel) and that the ring's roles follow the turned screen.
+The harnesses that splice shipping screens draw the landscape canvas: their
+portrait branches compile against a landscape double of the live layout
+(`oled_landscape_stubs.py`, or the same lines inline in the harness).
+`test_oled_layout.py` also packs a 64 x 128 map raster.
+
 ## OLED CLI Output and its console history
 
 `python3 components/hardwareone/test/host/test_oled_console_buffer.py` executes

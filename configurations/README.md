@@ -155,8 +155,10 @@ OLED and the Power page left on, and adds:
   the sign left, right, up or down moves through the menus and the on-screen keyboard like a
   joystick. Five taps (or `imuinputzero`) take the sign's present pose as the centre, for when
   it is stood or hung another way. `imuinputread` shows what it makes of the motion; the
-  directions are fitted to how the sensor sits in the enclosure with `imuinputswapxy`,
-  `imuinputinvertx` and `imuinputinverty`. (Until 2026-11-23 an Adafruit 5740 ANO wheel was the
+  directions are fitted to how the sensor sits against the screen with `imuinputmount
+  0|90|180|270 [mirror]`, or taught with `imuinputlearn` (tilt the sign toward the top of the
+  screen; also offered after a shake calibration). `oledrotation 90` (or 270) stands the
+  screen on its side, and the tilt directions turn with it. (Until 2026-11-23 an Adafruit 5740 ANO wheel was the
   input device, `INPUT_DEVICE_TYPE 2`; this configuration no longer builds its driver);
 - the web Sensors page (`CUSTOM_ENABLE_WEB_SENSORS`), which shows the input and the motion sensor.
 

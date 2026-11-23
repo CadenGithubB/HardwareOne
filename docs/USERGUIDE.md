@@ -185,6 +185,30 @@ Notes on placement, which changed in the menu reorg:
 - **Users** is hidden for non-admins, and the mode refuses to open without an admin session.
 - **Health** (R1 ring vitals, Poll Now, Health Logging) requires `ENABLE_R1_HEALTH`. Ring *pairing* is under Connect -> Bluetooth.
 
+### Rotation and portrait
+
+`oledrotation 0|90|180|270` turns the SSD1306 OLED (also under **Config > Settings > oled**). 0 and
+180 are landscape (180 is the old `oledflip`); 90 and 270 stand the 128 x 64 panel on its side as a
+64 x 128 portrait screen. The change applies at the next frame and is kept for the next boot. The
+P4 displays take 0 and 180 only.
+
+In portrait every screen follows one layout: a status row of fixed slots (busy, capture dot,
+notifications, battery), the title on the row under it (cut to its last part, `Menu>Hardware>Sensors`
+shows `Sensors`), the content, and a two-line footer with one chip per button, `[A]` and `[B]` on
+the first line and `[X]` and `[Y]` on the second, each with a verb of up to three letters (`Sel`,
+`Bck`, `Stp`, `Esc` ...); a button that does nothing on the screen leaves its chip out. The menus
+show the selected item's icon above the list; ToF, RTC, FM radio and the microphone show their
+reading large (ToF with a vertical 0-2 m gauge); key/value pages put a value that does not fit on
+the line under its label; the keyboard shows its 30 keys in 5 columns. Screens without a layout of
+their own use the same narrower rows, wrapped where a line is long.
+
+Navigation turns with the screen: up on the joystick, the IMU tilt and the ANO ring is up on the
+screen as you see it, at every rotation (the ANO wheel keeps its direction). How the input device
+itself sits against the screen is a separate setting, applied first: `imuinputmount` and `anomount`
+take `0|90|180|270` and an optional `mirror`. `imuinputlearn` teaches the IMU's: tilt the sign
+toward the top of the screen within 10 s and the lean sets the mount; the same step is offered
+after a shake calibration and ends quietly when nothing tilts.
+
 ---
 
 ## G2 Lens Interface
@@ -1660,6 +1684,8 @@ oledtext <message>              - Set custom text overlay
 oledanim <name>                 - Select animation, or: oledanim fps <1-60>
 oledclear                       - Clear display
 oledbrightness <0-255>          - Set brightness
+oledrotation [0|90|180|270]     - Turn the screen: 0/180 landscape, 90/270 portrait (SSD1306;
+                                  64 x 128 layout, navigation turns with it). Other displays: 0/180
 oledupdateinterval <ms>         - Display update interval (10-1000ms)
 oleddefaultmode <status|thermal|off>     - Mode after boot animation
 oledbootduration <ms>           - Boot animation duration (500-10000ms)
@@ -2574,9 +2600,9 @@ gamepadread                     - Read joystick axes and button states
 anoencoderstatus [json]         - Bus, address, settings and whether it is open
 anoencoderread [json]           - Read the wheel position and the buttons held
 anoencoderi2caddr <0x49..0x50>  - Set the I2C address (applies at the next openinput)
-anoencoderinvert [on|off]       - Invert rotation direction
-anoencoderswapud [on|off|toggle]  - Swap UP/DOWN buttons
-anoencoderswaplr [on|off|toggle]  - Swap LEFT/RIGHT buttons
+anomount [0|90|180|270] [mirror] - How the ring sits against the screen (default 180, the
+                                  breakout as usually assembled); mirror swaps LEFT/RIGHT and
+                                  reverses the wheel
 inputbus <0|1>                  - The bus the input device is on (applies at the next openinput)
 ```
 

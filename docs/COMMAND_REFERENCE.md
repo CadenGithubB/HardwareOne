@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1045 commands across 61 modules (1045 registry entries).
+1042 commands across 61 modules (1042 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -38,8 +38,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`imu`](#imu) — 27 commands
 - [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
-- [`anoencoder`](#anoencoder) — 6 commands
-- [`imuinput`](#imuinput) — 9 commands
+- [`anoencoder`](#anoencoder) — 4 commands
+- [`imuinput`](#imuinput) — 8 commands
 - [`apds`](#apds) — 9 commands
 - [`gps`](#gps) — 6 commands
 - [`fmradio`](#fmradio) — 9 commands
@@ -437,7 +437,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## oled
 
-> Drives the selected local display backend: its lifecycle, the live screen contents, and persistent appearance settings. openoled/closeoled power the display task on and off, and oledstatus reports its state. oledmode <mode> switches the live screen among the built-in views (menu, status, sensordata, thermal, network, mesh, gps, espnow, memory, off, and more); oledtext <message> shows custom text and oledanim <name>|fps <n> picks the animation -- both require the display to be running (run openoled first) and neither persists across reboot. Separately, the oled* config commands write settings to flash immediately: oleddefaultmode sets the idle default screen, while oledbrightness <0-255>, oledflip, oledbootduration, oledupdateinterval and oledthermalscale tune appearance and timing, and oledautostart says whether the display comes up at boot. Whether a user must log in at the display before interacting with it is set with displayrequireauth <0|1> (super admin, Settings module).
+> Drives the selected local display backend: its lifecycle, the live screen contents, and persistent appearance settings. openoled/closeoled power the display task on and off, and oledstatus reports its state. oledmode <mode> switches the live screen among the built-in views (menu, status, sensordata, thermal, network, mesh, gps, espnow, memory, off, and more); oledtext <message> shows custom text and oledanim <name>|fps <n> picks the animation -- both require the display to be running (run openoled first) and neither persists across reboot. Separately, the oled* config commands write settings to flash immediately: oleddefaultmode sets the idle default screen, while oledbrightness <0-255>, oledrotation <0|90|180|270> (90 and 270 turn the SSD1306 to a 64x128 portrait layout, and the navigation turns with it), oledbootduration, oledupdateinterval and oledthermalscale tune appearance and timing, and oledautostart says whether the display comes up at boot. Whether a user must log in at the display before interacting with it is set with displayrequireauth <0|1> (super admin, Settings module).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -449,9 +449,9 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `oledclear` | A | Clear OLED display. |
 | `oleddefaultmode` | A | OLED default mode: <logo\|status\|sensors\|thermal\|network\|mesh\|off><br/>`Usage: oleddefaultmode <logo\|status\|sensors\|thermal\|network\|mesh\|off>` |
 | `oleddump` | A | Display canvas as text ('#' lit, '.' dark): [first-row] [rows]<br/>`Usage: oleddump [first-row] [rows] Example: oleddump 0 10 (the header bar) A reply holds up to 31 rows; its first line names the next first-row.` |
-| `oledflip` | A | Flip display 180°: [on\|off\|toggle]<br/>`Usage: oledflip [on\|off\|toggle]` |
 | `oledlandscape` | A | Landscape UI with right-side controls: [0\|1]<br/>`Usage: oledlandscape [0\|1]` |
 | `oledmode` | A | Set display mode: <mode><br/>`Usage: oledmode <menu\|status\|sensordata\|sensorlist\|thermal\|camera\|network\|mesh\|gps\|text\|logo\|anim\|imuactions\|fmradio\|files\|logging\|automations\|espnow\|memory\|off> Example: oledmode memory Example: oledmode off` |
+| `oledrotation` | A | Display rotation in degrees: [0\|90\|180\|270] (90/270: portrait, SSD1306 OLED only)<br/>`Usage: oledrotation [0\|90\|180\|270]` |
 | `oledstatus` |  | Show OLED status. (add 'json' for JSON output) |
 | `oledtext` | A | Set custom text: <message><br/>`Usage: oledtext <message>` |
 | `oledthermalscale` | A | Thermal image scale: <1.0-10.0><br/>`Usage: oledthermalscale <1.0..10.0>` |
@@ -634,28 +634,25 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## anoencoder
 
-> Adafruit ANO directional navigation rotary encoder (5740) on seesaw I2C: a click wheel with a center IN press and UP/DOWN/LEFT/RIGHT buttons, used as the OLED navigation input. The wheel scrolls up and down; IN is A, LEFT is B, DOWN is X, UP is Y, a RIGHT tap is SELECT (sent when RIGHT is released) and RIGHT held with IN is START. The open/close/autostart/poll lifecycle lives under the input module and the bus is set with inputbus. anoencoderstatus [json] shows the bus, address, settings and whether it is open; anoencoderread [json] gives the wheel position and buttons. anoencoderi2caddr <0x49..0x50> sets the address (A0-A2 jumpers; refused when another device of this build uses it on the input bus; applies at the next openinput), anoencoderinvert [on|off] reverses rotation, and anoencoderswapud / anoencoderswaplr [on|off|toggle] swap the UP/DOWN and LEFT/RIGHT button pairs. The polling task reads the buttons, the seesaw's change flags (so taps shorter than one poll are kept) and the wheel's detents in one checked transaction. Mutually exclusive at build time with the Seesaw gamepad.
+> Adafruit ANO directional navigation rotary encoder (5740) on seesaw I2C: a click wheel with a center IN press and UP/DOWN/LEFT/RIGHT buttons, used as the OLED navigation input. The wheel scrolls up and down; IN is A, LEFT is B, DOWN is X, UP is Y, a RIGHT tap is SELECT (sent when RIGHT is released) and RIGHT held with IN is START. The open/close/autostart/poll lifecycle lives under the input module and the bus is set with inputbus. anoencoderstatus [json] shows the bus, address, settings and whether it is open; anoencoderread [json] gives the wheel position and buttons. anoencoderi2caddr <0x49..0x50> sets the address (A0-A2 jumpers; refused when another device of this build uses it on the input bus; applies at the next openinput), and anomount [0|90|180|270] [mirror] says how the ring sits against the screen: the turn moves the direction buttons, mirror exchanges LEFT and RIGHT and reverses the wheel (default 180, the breakout as usually assembled); the screen's own rotation (oledrotation) is applied after it. The polling task reads the buttons, the seesaw's change flags (so taps shorter than one poll are kept) and the wheel's detents in one checked transaction. Mutually exclusive at build time with the Seesaw gamepad.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `anoencoderi2caddr` | A | Set the ANO I2C address [0x49-0x50] (next openinput)<br/>`Usage: anoencoderi2caddr <0x49..0x50>` |
-| `anoencoderinvert` | A | Invert rotation direction [on\|off]<br/>`Usage: anoencoderinvert [on\|off]` |
 | `anoencoderread` |  | Read the ANO encoder: wheel position and buttons. (add 'json' for JSON output) |
 | `anoencoderstatus` |  | ANO encoder status: bus, address, settings. (add 'json' for JSON output)<br/>`Usage: anoencoderstatus [json]` |
-| `anoencoderswaplr` | A | Swap LEFT/RIGHT buttons [on\|off\|toggle]<br/>`Usage: anoencoderswaplr [on\|off\|toggle]` |
-| `anoencoderswapud` | A | Swap UP/DOWN buttons [on\|off\|toggle]<br/>`Usage: anoencoderswapud [on\|off\|toggle]` |
+| `anomount` | A | How the ring sits, in the screen's terms: [0\|90\|180\|270] [mirror]<br/>`Usage: anomount [0\|90\|180\|270] [mirror]` |
 
 ## imuinput
 
-> The motion sensor used as the OLED navigation input (INPUT_DEVICE_TYPE 5; it needs the Adafruit 4517, whose chip detects taps). Tap the side: one tap is A, two are B, three are Y, four are X; tap the face: two taps are START, three SELECT (one does nothing). The button arrives once no further tap has followed for the tap window (imuinputtapms <200..800>, default 450 ms); a tap on the other side ends the run. Side or face comes from the knock's direction (imutapsideaxis, imutapsideratio; 'imutaptrace' shows each knock); a chip that cannot tell counts every tap as a side tap. Tilting the device away from that centre pose by more than the tilt angle (imuinputtilt <8..40> degrees, default 15) deflects the joystick left, right, up or down, one direction at a time, and returning releases it; a lean of more than 60 degrees is taken as a new pose and centres the joystick until the next re-centre. imuinputswapxy, imuinputinvertx and imuinputinverty [on|off|toggle] fit the directions to how the sensor sits in its enclosure. A sustained shake calibrates the tilt (imuinputshake [on|off]): set the device down the way it will be used and hold it still for 3 s, and that pose is the new centre (imuinputzero takes it at once). imuinputread [json] shows the state, the lean in degrees, the joystick and the taps being counted. The open/close/autostart lifecycle lives under the input module: openinput also opens the IMU and holds it open (closeimu refuses while the input runs), closeinput leaves the IMU open.
+> The motion sensor used as the OLED navigation input (INPUT_DEVICE_TYPE 5; it needs the Adafruit 4517, whose chip detects taps). Tap the side: one tap is A, two are B, three are Y, four are X; tap the face: two taps are START, three SELECT (one does nothing). The button arrives once no further tap has followed for the tap window (imuinputtapms <200..800>, default 450 ms); a tap on the other side ends the run. Side or face comes from the knock's direction (imutapsideaxis, imutapsideratio; 'imutaptrace' shows each knock); a chip that cannot tell counts every tap as a side tap. Tilting the device away from that centre pose by more than the tilt angle (imuinputtilt <8..40> degrees, default 15) deflects the joystick left, right, up or down, one direction at a time, and returning releases it; a lean of more than 60 degrees is taken as a new pose and centres the joystick until the next re-centre. imuinputmount [0|90|180|270] [mirror] fits the directions to how the sensor sits against the screen (the screen's own rotation, oledrotation, is applied after it); imuinputlearn teaches it: tilt the sign toward the top of the screen within 10 s and the lean sets the mount. A sustained shake calibrates the tilt (imuinputshake [on|off]): set the device down the way it will be used and hold it still for 3 s, and that pose is the new centre (imuinputzero takes it at once); the teach step is offered right after (it ends quietly when nothing tilts). imuinputread [json] shows the state, the lean in degrees, the joystick and the taps being counted. The open/close/autostart lifecycle lives under the input module: openinput also opens the IMU and holds it open (closeimu refuses while the input runs), closeinput leaves the IMU open.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `imuinputinvertx` | A | Invert left/right tilt [on\|off\|toggle]<br/>`Usage: imuinputinvertx [on\|off\|toggle]` |
-| `imuinputinverty` | A | Invert up/down tilt [on\|off\|toggle]<br/>`Usage: imuinputinverty [on\|off\|toggle]` |
+| `imuinputlearn` | A | Teach the mount: tilt the sign toward the top of the screen within 10 s<br/>`Usage: imuinputlearn` |
+| `imuinputmount` | A | How the sensor sits, in the screen's terms: [0\|90\|180\|270] [mirror]<br/>`Usage: imuinputmount [0\|90\|180\|270] [mirror]` |
 | `imuinputread` |  | IMU input: state, lean, joystick and taps. (add 'json' for JSON output)<br/>`Usage: imuinputread [json]` |
 | `imuinputshake` | A | A shake calibrates the tilt: set the device down, hold still 3 s [on\|off]<br/>`Usage: imuinputshake [on\|off]` |
-| `imuinputswapxy` | A | Swap the tilt axes [on\|off\|toggle]<br/>`Usage: imuinputswapxy [on\|off\|toggle]` |
 | `imuinputtapmerge` | A | Tap flags closer than this many ms are one knock (its rebound) <0..300><br/>`Usage: imuinputtapmerge [0..300]` |
 | `imuinputtapms` | A | Tap window in ms: a button arrives this long after its last tap <200..800><br/>`Usage: imuinputtapms [200..800]` |
 | `imuinputtilt` | A | Tilt angle in degrees that moves the joystick <8..40><br/>`Usage: imuinputtilt [8..40]` |
