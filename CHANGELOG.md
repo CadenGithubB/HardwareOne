@@ -107,15 +107,16 @@ Host-tested and built; not run on a device.
   acknowledgement: busy, no free slot, too large, not supported by its build, malformed, or (to a
   paired device over its session only) refused. A chat message to a device whose inbox is full, or a
   remote command to a device still holding one, is answered busy. A long message or command result
-  that meets busy or no slot is sent once more after a short pause; a chat message shows Failed
-  instead of Delivered.
+  that meets busy or no slot is sent once more after a short pause (a long chat message is not:
+  its parts are shown as they arrive); a chat message shows Failed instead of Delivered.
 - **A busy answer keeps the session.** Only a send that gets no answer at all counts toward
   re-opening the encrypted session (two in a row), so a busy device no longer has its sessions torn
   down. A copy of a frame the device already took (its acknowledgement was lost) is acknowledged
   again and not processed twice, also a fragment of a message that already arrived.
 - A received small file is written right after its end frame is acknowledged; a user sync refused
   because it was not encrypted or `espnowusersync` is off is refused in its acknowledgement.
-  A long message cut by a key refresh this device started is sent again on the new keys.
+  A long message (not a chat message) cut by a key refresh this device started is sent again on
+  the new keys. A small file received just before ESP-NOW closes is reported as failed.
   Reflash devices together.
 
 ### Changed (ESP-NOW 1.0 acknowledgement frame)

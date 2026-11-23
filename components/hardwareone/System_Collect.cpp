@@ -1124,14 +1124,14 @@ V4Verdict v4hCatchupReadResp(const V4RxCtx& ctx) {
     sClient.readOffset = h.offset;
     sClient.readRetry = h.status == cu::kStBusy ? cu::busyRetryAfter(ctx.payload, ctx.payloadLen, h.headerLen) : 0;
     sClient.statusReady = true;
-    return ctx.refuse();
+    return ctx.accepted();  // the answer's status is stored for the client
   }
   if (h.fileId != sClient.plan.fileId) { ++sStats.unexpected; return ctx.refuse(); }
   if (sClient.plan.mode == cu::kModeDigest) {
     if (!(h.flags & cu::kRfDigest) || dataLen < cu::kDigestLen) { ++sStats.malformed; return ctx.refuseWith(espnowanswer::kBadRequest); }
     memcpy(sClient.digest, data, cu::kDigestLen);
     sClient.digestReady = true;
-    return ctx.refuse();
+    return ctx.accepted();
   }
   const cc::WindowAssembler::Took t = sWin.onFrame(h, data, dataLen, (uint32_t)millis());
   if (t == cc::WindowAssembler::Took::Ignored) ++sStats.unexpected;

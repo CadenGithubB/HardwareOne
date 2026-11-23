@@ -1738,6 +1738,14 @@ static void testAckFollowsHandler() {
 // Policy refusals (G3): kRefused to an authenticated session peer, silence to
 // anyone else.
 static void testPolicyRefusals() {
+  // A sealed frame from a session peer that is not in the registry (a REQ_PAIRED row).
+  reset(true);
+  const uint8_t savedCount = (uint8_t)gState.deviceCount;
+  gState.deviceCount = 0;
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD, gPeerB, 529, text("status")));
+  gState.deviceCount = savedCount;
+  check("a sealed CMD from a session peer that is not paired here is answered kRefused (not silence)",
+        gCalls.empty() && ackIs(lastAck(), 529, 0, 1, espnowanswer::kRefused, 0));
   reset(true);
   deliver(gPeerC, sealedFrame(gSessC, ESPNOW_V4_TYPE_BOND_HEARTBEAT, gPeerC, 530, bytes(24, 0)));
   check("a sealed bond frame from a paired peer that is not the bond partner is answered kRefused",
@@ -1782,6 +1790,31 @@ static void testFragmentVerdicts() {
   deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 552, bytes(200, 1), 0, 2));
   check("after an entry frees, the refused fragment's retry is stored (the refusal was not remembered)",
         ackIs(lastAck(), 552, 0, 2, 0, 0) && reasmHolds(552));
+
+  // A message its handler refused: the resent last fragment (its refusal ACK
+  // was lost) gets the same status and opens no entry, never ACK 0.
+  reset(true);
+  gStubOverrideName = "v4h_cmd_resp";
+  gStubOverride = v4RefusedStatus(espnowanswer::kBusy);
+  gStubOverrideLeft = 1;
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 570, bytes(200, 1), 0, 2));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 570, bytes(20, 2), 1, 2));
+  check("a reassembled message its handler refuses: the completing fragment is ACKed kBusy",
+        calls("v4h_cmd_resp") == 1 && ackIs(lastAck(), 570, 1, 2, espnowanswer::kBusy, 0) && !reasmHolds(570));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 570, bytes(20, 2), 1, 2));
+  check("its last fragment resent: the same kBusy, no new entry, no handler (not a false Delivered)",
+        calls("v4h_cmd_resp") == 1 && ackIs(lastAck(), 570, 1, 2, espnowanswer::kBusy, 0) && !reasmHolds(570));
+  gNowMs += 5001;  // past the reassembly timeout: the message may be tried again
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 570, bytes(200, 1), 0, 2));
+  check("after the reassembly timeout the refusal is forgotten", ackIs(lastAck(), 570, 0, 2, 0, 0));
+  // A message cut short by the length rule is remembered the same way.
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_METADATA_PUSH, gPeerB, 571, bytes(200, 1), 0, 2));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_METADATA_PUSH, gPeerB, 571, bytes(1, 1), 1, 2));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_METADATA_PUSH, gPeerB, 571, bytes(1, 1), 1, 2));
+  check("a reassembled message under its row minimum: kBadRequest, and so is its resent last fragment",
+        gSentAcks.size() == 3 && ackIs(&gSentAcks[1], 571, 1, 2, espnowanswer::kBadRequest, 0) &&
+            ackIs(lastAck(), 571, 1, 2, espnowanswer::kBadRequest, 0) && !reasmHolds(571));
 
   // Over the budget: kTooLarge, no entry.
   reset(true);

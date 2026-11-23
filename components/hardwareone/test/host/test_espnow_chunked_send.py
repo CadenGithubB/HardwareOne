@@ -21,7 +21,8 @@ three tries of the first fragment, the only outcome the session counts as a
 strike; a rekey this device starts in the middle of the send is waited for and
 the message sent again on the new keys under a new msgId; a rekey that does
 not apply within 1 s is NotSent and counts toward nothing; kNoSlot is retried
-once like busy.
+once like busy; no copy leaving the radio is NotSent (no strike); a long TEXT
+(stored per fragment on the receiver) is never sent again as a whole.
 """
 import argparse
 import os
@@ -60,7 +61,9 @@ def main():
     local = re.findall(r'^#define V4_(?:MAX_FRAGMENT_PAYLOAD|FRAG_MAX|REASM_MAX_MSG)\b.*$', source, re.M)
     if not relay or len(local) != 3:
         sys.exit('FAIL extraction: relay budget or the fragment constants not found')
-    wire_part = '\n'.join(['static constexpr size_t CMD_RESULT_MAX = 4096;'] + defines + local)
+    text_op = re.search(r'\bESPNOW_V4_TYPE_TEXT\s*=\s*(\d+)', wire).group(1)
+    wire_part = '\n'.join(['static constexpr size_t CMD_RESULT_MAX = 4096;',
+                           f'static constexpr uint8_t ESPNOW_V4_TYPE_TEXT = {text_op};'] + defines + local)
     # The relay budget refers to wire constants this harness does not need; the
     # sender only reads it on a routed send, which the doubles never make.
     wire_part += '\n#define ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT 146\n'

@@ -4734,6 +4734,16 @@ unsealed or turned-off sync (kRefused) before it allocates or queues (source). `
 `espnow_metadata_text`, `espnow_keyex_hello`, `espnow_wire_layout` and the handler markers of the other ESP-NOW
 suites follow the verdict signature.
 
+Review fixes (step 5b): `espnow_rx_frontend` testFragmentVerdicts adds that a reassembled message its handler
+refused (or that falls under its row minimum) answers its resent last fragment with the same status, opens no
+entry and does not run the handler (forgotten after the reassembly timeout), and testPolicyRefusals that a sealed
+CMD from a session peer not in the registry is kRefused; `espnow_dispatch_policy` runVerdictWalk checks kRefused
+for every REQ_PAIRED row from a sealed unpaired peer; `espnow_reassembly` reports a broken entry as Discarded;
+`espnow_chunked_send` K9 (no copy leaves the radio: NotSent, no strike) and K10 (a long TEXT is never sent again
+as a whole, after busy or a rekey); `espnow_answers`: a STREAM line into a full ring is refused busy;
+`espnow_file_transfer`: closing ESP-NOW after a small file's ACK reports it failed with FILE_CANCEL and frees the
+slot (`fileRamFinalizeDropAll`).
+
 ## ESP-NOW 1.0 step 5a: the ACK frame
 
 ```sh

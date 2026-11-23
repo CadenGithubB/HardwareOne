@@ -1456,6 +1456,19 @@ static void testRamFinishAfterAck() {
   check(fake_vfs::fs().text(inboxPath(kSender, "later.txt")) == bytes && fileSlotsActiveCount() == 0 &&
             eventCount(MSG_FILE_RECV_SUCCESS) == 1,
         "RAM path: the loop's next pass writes the file once and releases the slot");
+  // ESP-NOW closes between the ACK and the loop pass: the accepted file is
+  // reported as a failed receive (with the sender's FILE_CANCEL), not lost silently.
+  resetWorld();
+  rxStart(kSender, 18, "closed.txt", bytes.size());
+  for (uint16_t i = 0; i < chunksOf(bytes.size()); i++) rxChunk(kSender, 18, bytes, i);
+  gHoldLoopPass = true;
+  rxEnd(kSender, 18, crcOf(bytes));
+  gHoldLoopPass = false;
+  fileRamFinalizeDropAll();
+  check(acks.size() == 1 && cancelCount(18, FILE_CANCEL_WRITE_FAILED) == 1 &&
+            eventCount(MSG_FILE_RECV_FAILED) == 1 && fileSlotsActiveCount() == 0 &&
+            !fake_vfs::fs().exists(inboxPath(kSender, "closed.txt")),
+        "RAM path: closing ESP-NOW after the ACK reports the file failed (FILE_CANCEL) and frees the slot");
   // A CRC mismatch is decided before the ACK: refused, nothing queued.
   resetWorld();
   rxStart(kSender, 16, "bad.txt", bytes.size());

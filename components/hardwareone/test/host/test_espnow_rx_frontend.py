@@ -252,7 +252,12 @@ def main():
     reasm = '\n\n'.join(reasm_constants + [one(source, 'struct V4ReasmEntry') + ';', table_ptr.group(0)] + [
         one(source, m) for m in ('static void v4_reasm_reset(V4ReasmEntry& e)', 'static void v4_reasm_gc(uint32_t nowMs)',
                                  'static V4ReasmEntry* v4_reasm_find_or_alloc(', 'static void v4_reasm_release(',
-                                 'static V4ReasmOutcome v4_reasm_accept(', 'static bool v4_reasm_step(')])
+                                 'static V4ReasmOutcome v4_reasm_accept(')])
+    # The refused-message memory (review of step 5b), where the tree has it, then the step.
+    refused_at = source.find('// Messages whose reassembly ended in a refusal')
+    if refused_at >= 0:
+        reasm += '\n\n' + source[refused_at:source.index('static bool v4_reasm_step(')]
+    reasm += '\n\n' + one(source, 'static bool v4_reasm_step(')
     harness = (HERE / 'espnow_rx_frontend_harness.cpp').read_text()
     for tag, value in [('// INSERT_WIRE', wire_types),
                        ('// INSERT_PEER_TYPES', peer_types),

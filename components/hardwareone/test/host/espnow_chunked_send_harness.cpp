@@ -90,7 +90,9 @@ static void sendStatusMarkRefused(uint32_t msgId, const uint8_t*) { gRefused.pus
 struct Sent { uint32_t msgId; uint8_t fragIndex, fragCount; uint32_t atMs; };
 static std::vector<Sent> gSent;
 static std::function<int(const Sent&)> gReceiver;
+static bool gRadioFails = false;  // every emit fails locally (nothing leaves)
 static bool v4_radio_emit(const uint8_t*, const uint8_t* frame, size_t, bool) {
+  if (gRadioFails) return false;
   EspNowV4Header h;
   memcpy(&h, frame, sizeof h);
   const Sent s{h.msgId, h.fragIndex, h.fragCount, gNowMs};
@@ -125,6 +127,7 @@ static void reset() {
   gSess.state = SESSION_ACTIVE;
   gSealsBeforeRekey = -1;
   gSeals = 0;
+  gRadioFails = false;
   memset(gV4FragAckWait, 0, sizeof gV4FragAckWait);
   gNowMs += 10000;
 }
@@ -212,6 +215,29 @@ int main() {
   r = v4_send_encrypted_chunked(kPeer, 51, 0, kId, kPayload, sizeof kPayload, 1);
   check("K8 kNoSlot: the message is sent once more (new msgId) and Delivered",
         r.outcome == V4SendOutcome::Delivered && gSent.size() == 4 && gSent[1].msgId != kId);
+
+  // K9: no copy of the first fragment leaves the radio: a local failure,
+  // NotSent, no strike on the session.
+  reset();
+  gRadioFails = true;
+  r = v4_send_encrypted_chunked(kPeer, 51, 0, kId, kPayload, sizeof kPayload, 1);
+  check("K9 the radio refuses every copy: NotSent, counted toward nothing (not a session strike)",
+        r.outcome == V4SendOutcome::NotSent && gSent.empty() && gNoted.size() == 1 &&
+            gNoted[0] == V4SendOutcome::NotSent);
+
+  // K10: a long TEXT is stored per fragment on the receiver: busy on its last
+  // fragment is final (no second copy under a new msgId).
+  reset();
+  gReceiver = [](const Sent& s) { return s.fragIndex == 2 ? (int)espnowanswer::kBusy : 0; };
+  r = v4_send_encrypted_chunked(kPeer, ESPNOW_V4_TYPE_TEXT, 0, kId, kPayload, sizeof kPayload, 1);
+  check("K10 a long TEXT refused busy is not sent again as a whole (Refused after one attempt)",
+        r.outcome == V4SendOutcome::Refused && r.status == espnowanswer::kBusy && gSent.size() == 3 &&
+            gRefused == std::vector<uint32_t>{kId});
+  reset();
+  gSealsBeforeRekey = 1;
+  r = v4_send_encrypted_chunked(kPeer, ESPNOW_V4_TYPE_TEXT, 0, kId + 1, kPayload, sizeof kPayload, 1);
+  check("K10 a long TEXT cut by this device's rekey is not sent again either (NotSent)",
+        r.outcome == V4SendOutcome::NotSent && gSent.size() == 1);
 
   printf("espnow_chunked_send: %d checks, %d failures\n", gChecks, gFailures);
   return gFailures ? 1 : 0;

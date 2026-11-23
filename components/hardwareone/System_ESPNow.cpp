@@ -3559,6 +3559,7 @@ static V4SendResult v4_send_chunked_attempt(const uint8_t dst[6], uint8_t type, 
                                                           : (uint16_t)(payloadLen - offset);
 
     bool fragSent = false;
+    bool fragLeft = false;  // at least one copy of this fragment left the radio
     for (uint8_t retry = 0; retry < MAX_RETRIES && !fragSent; retry++) {
       if (retry > 0) {
         DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] retry %u/%u for fragment %u/%u",
@@ -3616,6 +3617,7 @@ static V4SendResult v4_send_chunked_attempt(const uint8_t dst[6], uint8_t type, 
         continue;
       }
       if (gEspNow) { gEspNow->routerMetrics.v4FragTx++; }
+      fragLeft = true;
 
       uint32_t waitStart = millis();
       uint8_t refusedStatus = 0;
@@ -3651,9 +3653,10 @@ static V4SendResult v4_send_chunked_attempt(const uint8_t dst[6], uint8_t type, 
       WARN_ESPNOWF("[V4_ENC_FRAG_TX] FAILED: frag %u/%u no ACK after %u retries — aborting send",
                    fragIdx + 1, fragCount, MAX_RETRIES);
       DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] ==============================");
-      // Sent at least once and never answered (a send that never left is
-      // retried above; all retries failing to leave still reads as silence).
-      return V4SendResult{V4SendOutcome::NoAnswer, 0};
+      // Sent at least once and never answered: silence (one session strike).
+      // No copy left the radio: a local failure, which says nothing about the
+      // peer or the session.
+      return fragLeft ? V4SendResult{V4SendOutcome::NoAnswer, 0} : kNotSent;
     }
 
     offset += fragLen;
@@ -3706,7 +3709,11 @@ V4SendResult v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint1
   bool rekeyStall = false;
   V4SendResult r = v4_send_chunked_attempt(dst, type, baseFlags, msgId, payload, payloadLen, ttl, &rekeyStall);
   bool again = false;
-  if (r.outcome == V4SendOutcome::Refused &&
+  // TEXT is stored per fragment on the receiver (v4h_text): fragments it
+  // already took would be shown twice under a second msgId, so a long TEXT is
+  // never sent again as a whole; its sender sees the refusal.
+  const bool wholeRetryOk = type != ESPNOW_V4_TYPE_TEXT;
+  if (wholeRetryOk && r.outcome == V4SendOutcome::Refused &&
       (r.status == espnowanswer::kBusy || r.status == espnowanswer::kNoSlot)) {
     const uint32_t waitMs = 300 + (esp_random() % 501);
     WARN_ESPNOWF("[V4_ENC_FRAG_TX] receiver %s (msgId=%lu): sending the message again in %lu ms",
@@ -3714,7 +3721,7 @@ V4SendResult v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint1
                  (unsigned long)waitMs);
     v4_chunked_wait(waitMs);
     again = true;
-  } else if (r.outcome == V4SendOutcome::NotSent && rekeyStall) {
+  } else if (wholeRetryOk && r.outcome == V4SendOutcome::NotSent && rekeyStall) {
     const uint32_t t0 = millis();
     while ((uint32_t)(millis() - t0) < kChunkedRekeyWaitMs) {
       const PeerIdentity* pid = peerIdentityFindByMac(dst);
@@ -4645,6 +4652,7 @@ static V4Verdict v4h_text(const V4RxCtx& ctx) {
   } else {
     DEBUG_ESPNOW_ROUTERF("[V4_RX] TEXT message REJECTED: payloadLen=%u gEspNow=%p",
            ctx.payloadLen, gEspNow);
+    return ctx.refuseWith(ctx.payloadLen ? espnowanswer::kTooLarge : espnowanswer::kBadRequest);
   }
   DEBUG_ESPNOW_ROUTERF("[V4_RX] ========================================");
   return ctx.accepted();
@@ -4714,6 +4722,7 @@ static V4Verdict v4h_session_unknown(const V4RxCtx& ctx) {
 // CMD — deferred to task via gEspNow->deferredCmd* fields (one in flight).
 // Auth/validation runs later in v4_handle_cmd() on the espnow task.
 static V4Verdict v4h_cmd(const V4RxCtx& ctx) {
+  if (ctx.payloadLen > ESPNOW_V4_MAX_PAYLOAD) return ctx.refuseWith(espnowanswer::kTooLarge);
   if (ctx.payloadLen <= ESPNOW_V4_MAX_PAYLOAD && gEspNow && !gEspNow->deferredCmdPending) {
     size_t copyLen = (ctx.payloadLen < sizeof(gEspNow->deferredCmdPayload) - 1)
                        ? ctx.payloadLen
@@ -5925,7 +5934,7 @@ static V4Verdict v4h_topo_start(const V4RxCtx& ctx) {
   TopoStreamsGuard guard("v4h_topo_start");
   if (gTopoStreamsMutex && !guard.held) {
     WARN_ESPNOWF("[V4_RX_TOPO_START] Topology state busy; dropping response");
-    return ctx.refuse();
+    return ctx.refuseWith(espnowanswer::kBusy);
   }
   const uint32_t now = (uint32_t)millis();
   if (ts.reqId != gTopoRequestId ||
@@ -6009,7 +6018,7 @@ static V4Verdict v4h_topo_peer(const V4RxCtx& ctx) {
   TopoStreamsGuard guard("v4h_topo_peer");
   if (gTopoStreamsMutex && !guard.held) {
     WARN_ESPNOWF("[V4_RX_TOPO_PEER] Topology state busy; dropping response");
-    return ctx.refuse();
+    return ctx.refuseWith(espnowanswer::kBusy);
   }
   const uint32_t now = (uint32_t)millis();
   if (tp.reqId != gTopoRequestId ||
@@ -6749,6 +6758,8 @@ static V4Verdict v4h_stream(const V4RxCtx& ctx) {
     // accurately; without this, drops were silent and the "Stream Dropped"
     // counter stayed at 0 forever (latent observability bug).
     gEspNow->streamDroppedCount++;
+    gEspNow->streamReceivedCount++;
+    return ctx.refuseWith(espnowanswer::kBusy);  // not taken (1.0 step 5b)
   }
   gEspNow->streamReceivedCount++;
   return ctx.accepted();
@@ -7208,6 +7219,25 @@ static void fileRamFinalizeTick() {
     for (uint8_t i = 1; i < sFileRamFinalizeCount; i++) sFileRamFinalizeQueue[i - 1] = sFileRamFinalizeQueue[i];
     sFileRamFinalizeCount--;
     fileRamFinalize(slot);
+  }
+}
+
+// ESP-NOW is closing with small files accepted but not yet written: their
+// FILE_END was ACKed, so each is recorded as a failed receive (with the
+// sender's FILE_CANCEL) instead of vanishing, and its slot released. Not
+// written here: the bond processors run only on espnow_task.
+static void fileRamFinalizeDropAll() {
+  while (sFileRamFinalizeCount > 0) {
+    FileTransferSlot* slot = sFileRamFinalizeQueue[--sFileRamFinalizeCount];
+    if (!fileSlotsIsRamFinalizing(slot)) continue;
+    const uint8_t* sndMac = fileSlotsGetSenderMac(slot);
+    String senderMacStr = macToDisplayStr(sndMac);
+    WARN_ESPNOWF("[V4_FILE] '%s' was received but ESP-NOW closed before it was written",
+                 fileSlotsGetFilename(slot));
+    v4_send_file_cancel(sndMac, fileSlotsGetMsgId(slot), FILE_CANCEL_WRITE_FAILED);
+    logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), fileSlotsGetFilename(slot),
+                         MSG_FILE_RECV_FAILED);
+    fileSlotsRelease(slot);
   }
 }
 
@@ -7862,8 +7892,10 @@ static V4Verdict v4h_relay_data(const V4RxCtx& ctx) {
                              (uint8_t)(ctx.h->ttl - 1), (uint8_t)(env->hopsUsed + 1),
                              ctx.h->msgId)) {
     m.routedForwards++;
+    return ctx.accepted();
   }
-  return ctx.accepted();
+  // The next hop could not be sent to.
+  return ctx.refuseWith(espnowanswer::kBusy);
 }
 
 // PEER_LIST — a neighbour's route table. Pure input to the distance-vector
@@ -8665,9 +8697,12 @@ static const V4OpcodeEntry* v4_dispatch_lookup(uint8_t opcode) {
 //   Duplicate  this fragment is already stored: ACK(0, duplicate), not stored again.
 //   NoSlot     no free reassembly entry: ACK(kNoSlot); no entry is opened.
 //   TooLarge   fragCount over V4_FRAG_MAX: ACK(kTooLarge); no entry is opened.
-//   Mismatch   the fragment disagrees with its message (type, count, index,
-//              size): ACK(kBadRequest).
-enum class V4ReasmOutcome : uint8_t { Pending, Complete, Duplicate, NoSlot, TooLarge, Mismatch };
+//   Mismatch   the fragment disagrees with its message (type, count, index):
+//              ACK(kBadRequest); the message's entry is kept.
+//   Discarded  the fragment broke its message (overflow, or a completion
+//              larger than the buffer): the entry is reset, ACK(kBadRequest),
+//              and the message is remembered as refused (v4_reasm_refused_note).
+enum class V4ReasmOutcome : uint8_t { Pending, Complete, Duplicate, NoSlot, TooLarge, Mismatch, Discarded };
 
 // Feed one plaintext fragment (SESSION_FRAME already unwrapped) into the
 // reassembler. The entry is keyed by (src, msgId) and fixed by its FIRST
@@ -8760,7 +8795,7 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
     DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Resetting corrupted reassembly buffer");
     v4_reasm_reset(*e);
     DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ==============================");
-    return V4ReasmOutcome::Mismatch;
+    return V4ReasmOutcome::Discarded;
   }
 
   memcpy(e->buffer + offset, payload, payloadLen);
@@ -8810,7 +8845,7 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
     WARN_ESPNOWF("[V4_FRAG_RX] reassembled %u B exceeds the %u B buffer (msgId=%lu from %s) - dropping",
                  reassembledSize, e->bufferSize, (unsigned long)h->msgId, srcMac);
     v4_reasm_reset(*e);
-    return V4ReasmOutcome::Mismatch;
+    return V4ReasmOutcome::Discarded;
   }
 
   DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ✓✓✓ REASSEMBLY COMPLETE ✓✓✓");
@@ -8841,9 +8876,57 @@ static void v4_dispatch_post_cleanup(const esp_now_recv_info* recv_info, const E
 // kTooLarge, inconsistent -> kBadRequest). True for the fragment that
 // completes its message: `payload` then is the whole message, in the entry's
 // buffer until v4_dispatch_post_cleanup releases it after the handler ran.
+// Messages whose reassembly ended in a refusal (the handler or the length rule
+// refused the completed message, or a fragment broke it). The entry is
+// released then, and a refusal is not in the accept memory, so without this a
+// resent last fragment (its refusal ACK was lost) would open a new entry, be
+// stored and ACKed 0: a false Delivered, and a slot held for the GC timeout.
+// For V4_REASM_TIMEOUT_MS every later fragment of that message is answered
+// with the same status and opens no entry. PSRAM; espnow_task only.
+struct V4ReasmRefusal {
+  bool active;
+  uint8_t src[6];
+  uint8_t status;
+  uint32_t msgId;
+  uint32_t atMs;
+};
+static constexpr int kV4ReasmRefusalSlots = 4;
+EXT_RAM_BSS_ATTR static V4ReasmRefusal gV4ReasmRefused[kV4ReasmRefusalSlots];
+static int gV4ReasmRefusedNext = 0;
+
+static void v4_reasm_refused_note(const uint8_t* src, uint32_t msgId, uint8_t status) {
+  V4ReasmRefusal* r = nullptr;
+  for (auto& e : gV4ReasmRefused) {
+    if (e.active && e.msgId == msgId && memcmp(e.src, src, 6) == 0) { r = &e; break; }
+  }
+  if (!r) {
+    r = &gV4ReasmRefused[gV4ReasmRefusedNext];
+    gV4ReasmRefusedNext = (gV4ReasmRefusedNext + 1) % kV4ReasmRefusalSlots;
+  }
+  r->active = true;
+  memcpy(r->src, src, 6);
+  r->msgId = msgId;
+  r->status = status;
+  r->atMs = (uint32_t)millis();
+}
+
+// The status a refused message is answered with, or 0 (not refused, or long ago).
+static uint8_t v4_reasm_refused_status(const uint8_t* src, uint32_t msgId) {
+  for (auto& e : gV4ReasmRefused) {
+    if (!e.active || e.msgId != msgId || memcmp(e.src, src, 6) != 0) continue;
+    if ((uint32_t)((uint32_t)millis() - e.atMs) >= V4_REASM_TIMEOUT_MS) { e.active = false; return 0; }
+    return e.status;
+  }
+  return 0;
+}
+
 static bool v4_reasm_step(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
                           const uint8_t*& payload, uint16_t& payloadLen, V4Verdict* out) {
   if (gEspNow) { gEspNow->routerMetrics.v4FragRx++; }
+  if (const uint8_t refused = v4_reasm_refused_status(recv_info->src_addr, h->msgId)) {
+    *out = v4RefusedStatus(refused);  // the message was refused: same answer, no new entry
+    return false;
+  }
   switch (v4_reasm_accept(recv_info, h, payload, payloadLen)) {
     case V4ReasmOutcome::Pending:   *out = v4Accepted(); return false;
     case V4ReasmOutcome::Duplicate:
@@ -8853,6 +8936,10 @@ static bool v4_reasm_step(const esp_now_recv_info* recv_info, const EspNowV4Head
     case V4ReasmOutcome::NoSlot:    *out = v4RefusedStatus(espnowanswer::kNoSlot); return false;
     case V4ReasmOutcome::TooLarge:  *out = v4RefusedStatus(espnowanswer::kTooLarge); return false;
     case V4ReasmOutcome::Mismatch:  *out = v4RefusedStatus(espnowanswer::kBadRequest); return false;
+    case V4ReasmOutcome::Discarded:
+      *out = v4RefusedStatus(espnowanswer::kBadRequest);
+      v4_reasm_refused_note(recv_info->src_addr, h->msgId, out->status);
+      return false;
     case V4ReasmOutcome::Complete:  break;
   }
   if (gEspNow) { gEspNow->routerMetrics.v4FragRxCompleted++; }
@@ -8900,9 +8987,10 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
     return v4RefusedStatus(espnowanswer::kUnsupported);
   }
   if ((e->flags & V4_OPC_FLAG_REQ_PAIRED) && !isPaired) {
-    // Not a paired sender: silent (it is no session peer of ours).
+    // Not in the registry: a policy refusal (kRefused to a sealed frame's
+    // session peer, silence to anyone else).
     v4_dispatch_post_cleanup(recv_info, h);
-    return v4Silent();
+    return v4_policy_refusal(isSessionEncrypted);
   }
 #if ENABLE_BONDED_MODE
   if ((e->flags & V4_OPC_FLAG_REQ_BOND_PEER) &&
@@ -9021,6 +9109,9 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
       sLenUnreported++;
     }
     v4_dispatch_post_cleanup(recv_info, h);
+    if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_TEXT) {
+      v4_reasm_refused_note(recv_info->src_addr, h->msgId, espnowanswer::kBadRequest);
+    }
     return v4RefusedStatus(espnowanswer::kBadRequest);
   }
 
@@ -9035,6 +9126,11 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
   if (isSessionEncrypted) espnowChFollowOnSealedFrame(recv_info, h->type);
   const V4Verdict verdict = e->handler(ctx);
   v4_dispatch_post_cleanup(recv_info, h);
+  // A reassembled message its handler refused: a resent fragment of it gets
+  // the same answer (v4_reasm_refused_note), never a new entry.
+  if (verdict.kind == V4VerdictKind::Refused && h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_TEXT) {
+    v4_reasm_refused_note(recv_info->src_addr, h->msgId, verdict.status);
+  }
   return verdict;
 }
 
@@ -15905,7 +16001,9 @@ static bool deinitEspNow(bool publishOffEvent) {
   }
 
   // Cleanup active file transfers (multi-slot: walk + release all
-  // slots; equivalent to the old single-slot delete).
+  // slots; equivalent to the old single-slot delete). Small files already
+  // accepted (ACKed) but not yet written are reported failed first.
+  fileRamFinalizeDropAll();
   {
     uint8_t active = fileSlotsActiveCount();
     if (active > 0) {
@@ -22184,7 +22282,9 @@ const char* cmd_espnow_send(const String& argsInput) {
   // delivered from INSIDE sendAeadSync once all fragments ACK. If we registered
   // afterward, that mark would hit an unregistered msgId (no-op) and the bubble
   // would wrongly time out. Single-frame sends ACK asynchronously, so early
-  // registration is harmless for them.
+  // registration is harmless for them. (TEXT never takes the chunked sender's
+  // whole-message retry, 1.0 step 5b, so no 300-800 ms retry runs inside this
+  // 2000 ms wait and turns a later delivery into a timed-out "failed".)
   sendStatusRegister(msgId, mac);
   if (!espnowtx::sendAeadSync(mac, ESPNOW_V4_TYPE_TEXT, ESPNOW_V4_FLAG_ACK_REQ, msgId,
                          (const uint8_t*)message.c_str(), (uint16_t)msgLen, 1, 2000)) {

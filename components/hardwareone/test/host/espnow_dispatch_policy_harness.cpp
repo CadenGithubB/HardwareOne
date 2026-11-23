@@ -202,6 +202,7 @@ static void espnowChFollowOnSealedFrame(const esp_now_recv_info*, uint8_t) {}
 // real one.
 [[maybe_unused]] static bool v4_reasm_step(const esp_now_recv_info*, const EspNowV4Header*, const uint8_t*&,
                                            uint16_t&, V4Verdict*) { return true; }
+[[maybe_unused]] static void v4_reasm_refused_note(const uint8_t*, uint32_t, uint8_t) {}
 
 // INSERT_DISPATCH
 
@@ -857,7 +858,7 @@ static unsigned runVerdictWalk() {
     std::printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
   };
   gEspNow->encryptionEnabled = true;
-  unsigned rows = 0, stubAccepted = 0, shortBad = 0, gateSilent = 0, gated = 0;
+  unsigned rows = 0, stubAccepted = 0, shortBad = 0, gateSilent = 0, gated = 0, pairedRows = 0, pairedRefused = 0;
   for (size_t i = 0; i < kV4HandlerTableSize; i++) {
     const V4OpcodeEntry& row = kV4HandlerTable[i];
     if (row.flags & V4_OPC_FLAG_REQ_BOND_PEER) continue;  // runBondCases walks the bond rows
@@ -889,6 +890,13 @@ static unsigned runVerdictWalk() {
       if (gHandlerCalls == 0 && v.kind == V4VerdictKind::Silent) ++gateSilent;
       else check(name + " refused at a gate to a sender without a session: silence", false);
     }
+    if (row.flags & V4_OPC_FLAG_REQ_PAIRED) {
+      ++pairedRows;
+      gHandlerCalls = 0;
+      v = v4_dispatch_table_try(&ri, &h, payload, row.minLen, false, true, true, "peer");
+      if (gHandlerCalls == 0 && v.kind == V4VerdictKind::Refused && v.status == espnowanswer::kRefused) ++pairedRefused;
+      else check(name + " from a sealed session peer that is not paired: kRefused", false);
+    }
   }
   check("every non-bond row with its gates passed reaches its handler and returns its verdict (" +
             std::to_string(stubAccepted) + " stub rows accepted of " + std::to_string(rows) + ")",
@@ -897,6 +905,9 @@ static unsigned runVerdictWalk() {
             std::to_string(rows) + ")", shortBad == rows);
   check("every gated row refused to an unpaired or unsealed sender is silent (" + std::to_string(gateSilent) +
             "/" + std::to_string(gated) + ")", gateSilent == gated && gated > 0);
+  check("every REQ_PAIRED row refuses a sealed frame from an unpaired session peer with kRefused (" +
+            std::to_string(pairedRefused) + "/" + std::to_string(pairedRows) + ")",
+        pairedRefused == pairedRows && pairedRows > 0);
   for (unsigned op = 0; op < 256; ++op) {
     if (v4_dispatch_lookup((uint8_t)op)) continue;
     esp_now_recv_info ri{gSrc, nullptr, nullptr};

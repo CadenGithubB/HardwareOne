@@ -158,6 +158,10 @@ static void reassemblyCases() {
   feed(B, ESPNOW_V4_TYPE_CMD_RESP, 16, 20, 21, 160, 1);
   f = feed(B, ESPNOW_V4_TYPE_CMD_RESP, 16, 19, 20, 202, 1);
   check(!f.complete, "7: index-19-of-20 frame must not complete a 21-fragment entry");
+#if HW1_REASM_OUTCOMES
+  check(f.outcome == (int)V4ReasmOutcome::Discarded || f.outcome == (int)V4ReasmOutcome::Mismatch,
+        "7: the inconsistent fragment is refused (Mismatch, or Discarded when it broke the entry)");
+#endif
   if (f.complete) {
     check(f.len <= gV4Reasm[1].bufferSize, "7: completed size within bufferSize");
     consume(f);
@@ -175,6 +179,9 @@ static void lateStrideCase() {
   for (uint8_t i = 0; i < 19; i++) feed(B, ESPNOW_V4_TYPE_CMD_RESP, 17, i, 21, 202, 1);
   const Fed f = feed(B, ESPNOW_V4_TYPE_CMD_RESP, 17, 19, 21, 202, 1);
   check(!f.complete, "8: completion larger than the buffer (20*202+200 = 4240 > 4200) is refused");
+#if HW1_REASM_OUTCOMES
+  check(f.outcome == (int)V4ReasmOutcome::Discarded, "8: and reported Discarded (the message is remembered refused)");
+#endif
   if (f.complete) {
     check(f.len <= gV4Reasm[1].bufferSize, "8: completed size within bufferSize");
     consume(f);
