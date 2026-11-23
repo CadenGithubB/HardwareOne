@@ -91,7 +91,7 @@ inline AddResult add(Table& t, const uint8_t mac[6], const uint8_t pub[32], uint
   if (pub) { memcpy(x.pub, pub, 32); x.flags |= kFlagHasKey; }
   x.meshSlot = meshSlot;
   x.revokedEpochMs = revokedEpochMs;
-  if (name) { strncpy(x.name, name, kNameCap - 1); x.name[kNameCap - 1] = '\0'; }
+  if (name) snprintf(x.name, sizeof(x.name), "%s", name);   // cut at 31 bytes (a device name fits)
   return r;
 }
 
@@ -196,7 +196,7 @@ inline Load parse(const char* text, size_t len, Table& out, JsonDocument& doc) {
     x.revokedEpochMs = o["revokedEpochMs"] | (uint64_t)0;
     const char* name = o["name"] | "";
     if (strlen(name) >= kNameCap) return Load::Locked;
-    strcpy(x.name, name);
+    snprintf(x.name, sizeof(x.name), "%s", name);   // fits: checked above
     out.count++;
   }
   return Load::Ok;
