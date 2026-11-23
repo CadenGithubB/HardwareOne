@@ -78,7 +78,7 @@ bool writeRegs(TwoWire& wire, uint8_t address, uint8_t reg, const uint8_t* value
 
 // The knock detector's tuning: threshold mg | max ms << 16 (both fit 16 bits),
 // and the ring window; read by the IMU task at each sample.
-std::atomic<uint32_t> sKnockTuning{500u | (120u << 16)};
+std::atomic<uint32_t> sKnockTuning{1300u | (120u << 16)};
 std::atomic<uint16_t> sKnockRingMs{80};
 // The trace: written by the IMU task, copied by commands (a short critical
 // section each way). PSRAM, cleared at each start.

@@ -58,7 +58,7 @@ struct Settings {
       thermalDevicePollMs(100),
       tofDevicePollMs(220),
       imuDevicePollMs(200),
-      imuTapThresholdMg(500),
+      imuTapThresholdMg(1300),
       imuTapShock(2),
       imuTapQuiet(1),
       imuTapMaxMs(120),
@@ -300,7 +300,7 @@ struct Settings {
       anoEncoderInvert(false),
       anoEncoderSwapUpDown(true),     // Adafruit ANO breakout's silkscreen UP/DOWN map inverted by default
       anoEncoderSwapLeftRight(true),  // ditto LEFT/RIGHT — matches the typical assembled orientation
-      imuInputTapWindowMs(350),
+      imuInputTapWindowMs(300),
       imuInputTapMergeMs(0),
       imuInputTiltDeg(15),
       imuInputShakeStart(true),

@@ -1412,7 +1412,7 @@ static const SettingEntry imuSettingEntries[] = {
   { "imuWebMaxFps", SETTING_INT, &gSettings.imuWebMaxFps, 15, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", "imuwebmaxfps" },
   { "imuDevicePollMs", SETTING_INT, &gSettings.imuDevicePollMs, 200, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr, false, "timing", "imudevicepollms" },
 #if ENABLE_IMU_LSM6DSOX
-  { "imuTapThresholdMg", SETTING_INT, &gSettings.imuTapThresholdMg, 500, 0, nullptr, 50, 4000, "Tap threshold (mg)", nullptr, false, "tap", "imutapthreshold" },
+  { "imuTapThresholdMg", SETTING_INT, &gSettings.imuTapThresholdMg, 1300, 0, nullptr, 50, 4000, "Tap threshold (mg)", nullptr, false, "tap", "imutapthreshold" },
   { "imuTapShock", SETTING_INT, &gSettings.imuTapShock, 2, 0, nullptr, 0, 3, "Tap shock window", nullptr, false, "tap", "imutapshock" },
   { "imuTapQuiet", SETTING_INT, &gSettings.imuTapQuiet, 1, 0, nullptr, 0, 3, "Tap quiet window", nullptr, false, "tap", "imutapquiet" },
   { "imuTapMaxMs", SETTING_INT, &gSettings.imuTapMaxMs, 120, 0, nullptr, 5, 500, "Tap max length (ms)", nullptr, false, "tap", "imutapmaxms" },
