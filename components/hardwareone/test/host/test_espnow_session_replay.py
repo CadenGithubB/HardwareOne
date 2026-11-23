@@ -64,8 +64,11 @@ def main():
                    header.index('// One-time allocation of the gSessions table')]
     internal = '\n\n'.join(extract_block(source, marker) for marker in
                            ('void buildNonce(', 'bool replayCheckAndInsert('))
+    # The seal behind sessionWrapFrame (1.0 step 5a: sessionWrapImpl, shared
+    # with the ACK-only sessionWrapAck), where the tree has it.
+    wrap_impl = ('static bool sessionWrapImpl(SessionState* s,',) if 'static bool sessionWrapImpl(' in source else ()
     production = '\n\n'.join(extract_block(source, marker) for marker in
-                             ('void sessionClear(SessionState* s)',
+                             ('void sessionClear(SessionState* s)',) + wrap_impl + (
                               'bool sessionWrapFrame(SessionState* s,',
                               'bool sessionUnwrapFrame(SessionState* s,',
                               'void sessionApplyRekeyedKeys(SessionState* s,',

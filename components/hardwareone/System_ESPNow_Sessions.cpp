@@ -309,15 +309,18 @@ static const char* sessionStateName(uint8_t s) {
            ? kSessionStateNames[s] : "?";
 }
 
-bool sessionWrapFrame(SessionState* s,
-                      struct EspNowV4Header* headerInOut,
-                      const uint8_t* plaintext, uint16_t plaintextLen,
-                      uint8_t* outCipherWithTag) {
+// ackDuringRekey: the ACK-only exception (sessionWrapAck). The state is read
+// again under the TX lock, so a session that leaves ACTIVE/REKEYING between
+// the caller's lookup and the seal is refused there.
+static bool sessionWrapImpl(SessionState* s,
+                            struct EspNowV4Header* headerInOut,
+                            const uint8_t* plaintext, uint16_t plaintextLen,
+                            uint8_t* outCipherWithTag, bool ackDuringRekey) {
   if (!s) {
     WARN_ESPNOWF("session: wrap reject — null session pointer");
     return false;
   }
-  if (s->state != SESSION_ACTIVE) {
+  if (s->state != SESSION_ACTIVE && !(ackDuringRekey && s->state == SESSION_REKEYING)) {
     // Most common cause for an intermittent fallback: caller looked up the
     // session and saw ACTIVE, but by the time wrap runs the state flipped
     // (REKEYING during a rekey round, CLOSED if peer tore down, etc.).
@@ -357,6 +360,9 @@ bool sessionWrapFrame(SessionState* s,
   // ++txSeqNext below would mint duplicate frameSeq values → nonce reuse.
   // The guard holds only for the bump+seal (microseconds, no blocking calls).
   EspNowTxGuard txGuard("sessionWrap");
+  if (s->state != SESSION_ACTIVE && !(ackDuringRekey && s->state == SESSION_REKEYING)) {
+    return false;  // the state changed after the check above
+  }
 
   uint32_t mySeq = ++s->txSeqNext;  // first frame uses seq=1
 
@@ -388,6 +394,20 @@ bool sessionWrapFrame(SessionState* s,
   }
   s->lastUseMs = (uint32_t)millis();
   return true;
+}
+
+bool sessionWrapFrame(SessionState* s,
+                      struct EspNowV4Header* headerInOut,
+                      const uint8_t* plaintext, uint16_t plaintextLen,
+                      uint8_t* outCipherWithTag) {
+  return sessionWrapImpl(s, headerInOut, plaintext, plaintextLen, outCipherWithTag, /*ackDuringRekey=*/false);
+}
+
+bool sessionWrapAck(SessionState* s,
+                    struct EspNowV4Header* headerInOut,
+                    const uint8_t* plaintext, uint16_t plaintextLen,
+                    uint8_t* outCipherWithTag) {
+  return sessionWrapImpl(s, headerInOut, plaintext, plaintextLen, outCipherWithTag, /*ackDuringRekey=*/true);
 }
 
 bool sessionUnwrapFrame(SessionState* s,

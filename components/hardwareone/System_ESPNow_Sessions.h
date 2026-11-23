@@ -218,6 +218,16 @@ bool sessionWrapFrame(SessionState* s,
                       const uint8_t* plaintext, uint16_t plaintextLen,
                       uint8_t* outCipherWithTag);
 
+// The ACK-only exception (1.0, DESIGN 2.2): an ACK frame is also sealed while
+// the session is REKEYING, under the current TX key, so a frame that arrives
+// during a rekey is still answered (the receive side opens sealed frames in
+// ACTIVE and REKEYING). The state is checked and frameSeq taken under the
+// session TX lock. Any other frame keeps sessionWrapFrame's ACTIVE-only rule.
+bool sessionWrapAck(SessionState* s,
+                    struct EspNowV4Header* headerInOut,
+                    const uint8_t* plaintext, uint16_t plaintextLen,
+                    uint8_t* outCipherWithTag);
+
 // Unwrap a received SESSION_FRAME. Verifies the AEAD tag (last 16 bytes of
 // the payload region), then runs the replay check against the sliding
 // 64-frame window of the key that opened the frame: the current key's window,
