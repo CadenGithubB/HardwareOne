@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 #include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
+#include "System_ESPNow_HandshakeCore.h"  // production handshake byte layouts (copied beside this unit)
 
 // ---- Deadline owner (System_ESPNow_Deadline.h, when the tree has it) ---------
 // INSERT_DEADLINE
@@ -162,6 +163,32 @@ static bool espnowCryptoEd25519Verify(const uint8_t sig[64], const uint8_t* m, s
     if (sig[i] != (uint8_t)(((size_t)i < n ? m[i] : 0) ^ pub[i % 32])) return false;
   return true;
 }
+// A keyed digest standing in for HMAC-SHA256: any changed byte or key gives another output.
+static bool espnowCryptoHmacSha256(uint8_t out[32], const uint8_t* key, size_t keyLen, const uint8_t* in1,
+                                   size_t len1, const uint8_t* in2, size_t len2, const uint8_t* in3, size_t len3) {
+  uint64_t h = 0xcbf29ce484222325ULL;
+  auto mix = [&h](const uint8_t* p, size_t n) {
+    for (size_t i = 0; p && i < n; i++) { h ^= p[i]; h *= 0x100000001b3ULL; }
+    h ^= n; h *= 0x100000001b3ULL;
+  };
+  mix(key, keyLen); mix(in1, len1); mix(in2, len2); mix(in3, len3);
+  for (int i = 0; i < 32; i++) { h ^= (uint64_t)i; h *= 0x100000001b3ULL; out[i] = (uint8_t)(h >> 29); }
+  return true;
+}
+
+// ---- Mesh keys (1.0 step 4: C1 mesh tags and C2 session keys under the slot's
+// bootstrap key; the generation steps when the passphrase changes).
+struct MeshDerivedKeys { bool valid; uint16_t fingerprint; uint8_t bootstrapKey[32]; uint8_t groupKey[32]; };
+struct Settings {
+  static constexpr uint8_t N_MESHES = 4;
+  struct Mesh { uint16_t fingerprint; std::string label; };
+  Mesh meshes[N_MESHES];
+};
+static Settings gSettings = {{{0x1234, "lab"}, {0, ""}, {0, ""}, {0, ""}}};
+static MeshDerivedKeys gMeshKeys = {true, 0x1234, {0x61}, {0x62}};
+static uint16_t gMeshGen = 1;
+static const MeshDerivedKeys* meshKeysGet(uint8_t slot) { return slot == 0 && gMeshKeys.valid ? &gMeshKeys : nullptr; }
+static uint16_t meshKeysGeneration(uint8_t slot) { return slot == 0 ? gMeshGen : 0; }
 
 // ---- Production: Sessions.cpp lifecycle ----------------------------------------
 // INSERT_SESSIONS
@@ -198,8 +225,7 @@ static void makeIdentity(uint8_t pub[32], uint8_t sec[64]) {
 static void peerDerive(PeerSide& b, const uint8_t otherEphPub[32]) {
   uint8_t shared[32], kAtoB[32], kBtoA[32];
   espnowCryptoX25519Shared(shared, b.ephSec, otherEphPub);
-  espnowCryptoKdfSubkey(kAtoB, shared, 1, "esp-AtoB");
-  espnowCryptoKdfSubkey(kBtoA, shared, 2, "esp-BtoA");
+  sessionDeriveKeyMaterial(gMeshKeys.bootstrapKey, shared, kAtoB, kBtoA, nullptr);   // C2: under the mesh key
   std::memcpy(b.keyTx, b.myDirection == 0 ? kAtoB : kBtoA, 32);
   std::memcpy(b.keyRx, b.myDirection == 0 ? kBtoA : kAtoB, 32);
 }
@@ -214,10 +240,10 @@ static V4PayloadSessionRekey peerRekey(PeerSide& b, uint16_t sessionId, uint32_t
   std::memcpy(rk.newEphX25519Pub, b.ephPub, 32);
   espnowCryptoRandomBytes(rk.nonceRekey, 16);
   rk.prevTxSeqAtRekey = bTxSeq;
-  uint8_t t[75];
-  buildRekeyTranscript(t, rk.sessionId, rk.senderMac, rk.receiverMac, rk.newEphX25519Pub,
-                       rk.nonceRekey, rk.prevTxSeqAtRekey);
+  uint8_t t[kRekeyTranscriptLen];
+  buildRekeyTranscript(t, rk);
   espnowCryptoEd25519Sign(rk.signature, t, sizeof t, b.idSec);
+  sessionMeshTag(rk.meshTag, espnowhs::MeshTagKind::Rekey, 0, t, sizeof t, rk.signature);   // the peer holds the mesh key
   return rk;
 }
 
@@ -253,6 +279,7 @@ static SessionState* activeSession(PeerSide& b, uint16_t sessionId, uint32_t txS
   espnowCryptoRandomBytes(s->aeadKeyTx, 32);
   espnowCryptoRandomBytes(s->aeadKeyRx, 32);
   s->txSeqNext = txSeq;
+  s->meshKeyGen = meshKeysGeneration(s->meshId);   // keyed under the current mesh key
   s->state = SESSION_ACTIVE;
   s->establishedAtMs = gNow - kRekeyAgeThresholdMs;  // keyed long ago: due for its periodic rekey
   s->lastUseMs = gNow;
@@ -486,6 +513,45 @@ int main() {
   autoRekeyTick();
   check(gSent.size() == 1 && s->state == SESSION_REKEYING,
         "c8b one REKEY has gone out by kRekeyMinIntervalMs after the key change");
+
+  // c9 (1.0 step 4, C1): a REKEY whose mesh tag was made under another
+  // bootstrap key (a device without the current passphrase, holding the same
+  // mesh id) is dropped as "mesh key mismatch": no reply, keys unchanged.
+  reset();
+  s = activeSession(B, 0x7701, 5);
+  {
+    uint8_t txBefore[32], rxBefore[32];
+    std::memcpy(txBefore, s->aeadKeyTx, 32);
+    std::memcpy(rxBefore, s->aeadKeyRx, 32);
+    gNow += kRekeyMinIntervalMs;
+    V4PayloadSessionRekey rk = peerRekey(B, s->sessionId, 9);
+    uint8_t t[kRekeyTranscriptLen];
+    buildRekeyTranscript(t, rk);
+    const MeshDerivedKeys real = gMeshKeys;
+    std::memset(gMeshKeys.bootstrapKey, 0x99, 32);   // the sender's (old) key, same mesh id
+    sessionMeshTag(rk.meshTag, espnowhs::MeshTagKind::Rekey, 0, t, sizeof t, rk.signature);
+    gMeshKeys = real;
+    deliver(B, rk);
+    check(gSent.empty() && s->state == SESSION_ACTIVE && std::memcmp(s->aeadKeyTx, txBefore, 32) == 0 &&
+              std::memcmp(s->aeadKeyRx, rxBefore, 32) == 0,
+          "c9 a REKEY tagged under another bootstrap key: no reply, keys unchanged");
+    check(logsContaining("WARN", "mesh key mismatch") == 1, "c9 it is logged as a mesh key mismatch");
+    deliver(B, peerRekey(B, s->sessionId, 11));
+    check(gSent.size() == 1 && s->state == SESSION_ACTIVE, "c9 the genuine REKEY is still answered and applied");
+  }
+
+  // c10 (1.0 step 4): a session keyed under an older mesh key (the passphrase
+  // changed since; its sessions are closed, this one raced the close) is not
+  // rekeyed, either way: the initiator refuses, and a peer REKEY closes it.
+  reset();
+  s = activeSession(B, 0x7702, kRekeyTxFramesThreshold);
+  ++gMeshGen;   // espnowsetpassphrase re-derived the mesh keys
+  check(!espnowRekeyInitiate(B.mac) && gSent.empty() && s->state == SESSION_ACTIVE,
+        "c10 no REKEY is sent for a session from an older mesh key");
+  deliver(B, peerRekey(B, s->sessionId, 3));
+  check(gSent.empty() && sessionFindBySessionId(0x7702, B.mac) == nullptr &&
+            logsContaining("WARN", "older mesh passphrase") >= 1,
+        "c10 a peer REKEY of such a session is refused and the session closed");
 
   // Lock discipline across all cases: no frame is sent and no pending drain
   // runs while EspNowTxGuard is held.

@@ -7,7 +7,8 @@
 // against its own meshes.
 //
 // Derivation (a cross-device contract; docs/COMPATIBILITY.md states it too):
-//   stretched = PBKDF2-HMAC-SHA256(passphrase, SHA256("espnow-v4-mesh-salt:" || label), 100000)
+//   stretched = PBKDF2-HMAC-SHA256(passphrase, SHA256(kSaltPrefix || label), kPbkdf2Iters)
+//               with kSaltPrefix "hw1-espnow-1-mesh-salt:" and 100000 rounds (kdf record 1)
 //   sub       = crypto_kdf_blake2b_derive_from_key(32 bytes, subkey id 3, context "esp-mid1", stretched)
 //   id        = pick(sub): the first nonzero little-endian u16 of sub's 16 byte pairs
 // All 32 bytes zero gives 0, "no id" (probability 2^-256; logged).
@@ -15,8 +16,8 @@
 // Rules:
 //   - A mesh that never had a passphrase has no id (0) and sends nothing.
 //   - The id is never 0 on the air; the receiver drops a frame carrying 0.
-//   - The id is stored with the mesh and kept when the passphrase is cleared,
-//     so a mesh without a passphrase keeps its paired devices' traffic. A new
+//   - Clearing a mesh's passphrase disables the mesh and drops its id (1.0,
+//     E2): a mesh without a passphrase sends and takes nothing. A new
 //     passphrase or label gives a new id.
 //   - Ids are unique among this device's meshes: a command whose new id another
 //     mesh here already has is refused and changes nothing (clashSlot).
@@ -28,6 +29,13 @@
 #include <stdint.h>
 
 namespace meshid {
+
+// The stretch (a cross-device contract, like the id). kKdfRecord is stored as
+// "kdf" next to the cached stretched key in the settings file; a cached key
+// with another record (or none) is not used: the passphrase is stretched again.
+constexpr const char* kSaltPrefix = "hw1-espnow-1-mesh-salt:";
+constexpr uint32_t kPbkdf2Iters = 100000;
+constexpr int kKdfRecord = 1;
 
 constexpr uint64_t kSubkeyId = 3;
 constexpr const char* kKdfContext = "esp-mid1";  // exactly 8 bytes (libsodium KDF context)

@@ -3439,6 +3439,20 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_mesh_id_kat.py
           ${ESPNOW_MESH_ID_KAT_TEST_ARGS})
 
+# ESP-NOW 1.0 step 4: the handshake bytes (KEY_EX tags, session transcripts, C1
+# mesh tags, C2 session keys, group tag label, mesh salt prefix and kdf record)
+# from System_ESPNow_HandshakeCore.h against an independent Python assembly
+# (espnow_handshake_kat_vectors.py) and pinned digests; firmware call sites pinned.
+set(ESPNOW_HANDSHAKE_KAT_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_HANDSHAKE_KAT_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_handshake_kat
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_handshake_kat.py
+          ${ESPNOW_HANDSHAKE_KAT_TEST_ARGS})
+
 # The boot-time walk over the stored peer identities says when it is incomplete
 # (an identity that is stored but not in the cache, or names a mesh slot this
 # firmware does not have), which the mesh delete guard relies on; only folders

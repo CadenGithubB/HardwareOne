@@ -4601,6 +4601,48 @@ sender, or one with no stored identity, on espnow_task before anything is queued
 `espnow_command_privileges` (`espnowrevoke` and `espnowunrevoke` super admin, `espnowrevoked` admin, `espnowforget`
 gone).
 
+## ESP-NOW 1.0 step 4: handshake crypto and sessions bound to the mesh key
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_handshake_kat.py --sanitize
+python3 components/hardwareone/test/host/espnow_handshake_kat_vectors.py   # prints the vectors
+python3 components/hardwareone/test/host/test_espnow_keyex_hello.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_session_rekey.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_rekey_retry.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_mesh_slots.py
+```
+
+`espnow_handshake_kat` (`test_espnow_handshake_kat.py`) compiles `System_ESPNow_HandshakeCore.h` (every byte
+the handshake tags or signs) and compares its output with an independent assembly of the written layout in
+`espnow_handshake_kat_vectors.py` (Python hashlib/hmac, nothing taken from the firmware), then pins that
+assembly's digests: the mesh salt prefix `hw1-espnow-1-mesh-salt:` (passphrase -> stretched key -> mesh id ->
+bootstrap and group key), the KEY_EX_HELLO / REPLY / CONFIRM tags (labels, nonces, the REPLY bound to its HELLO,
+a refusal with zero reply nonce and responder key), the SESSION_OPEN / CONFIRM / REKEY transcripts (92, 100, 84
+bytes, `openEpochMs`), the C1 mesh tags, the C2 session keys and bond token, and the group tag label. Source
+checks tie the handlers, `sessionDeriveKeyMaterial`, the rekey derivation, `v4_group_tag`, the stretch and the
+settings `kdf` record to those builders. Run the vectors script to print the vectors after a deliberate change.
+
+`espnow_keyex_hello` (K7, K12, K26 after the step 4 review: a same-key exchange on another mesh does not move the
+stored slot unless a local pairing action is open and the lower address started it; a new sender takes an unused
+HELLO-table slot, else the oldest; K2, K20-K25): a replayed HELLO (a nonce already answered) gets no REPLY; a forged CONFIRM
+refusal leaves the HELLO retries armed; an authenticated status 3 ends the key exchange in flight and keeps the
+back-off, and is ignored with none in flight or over another HELLO's nonce; the status 3 this device sends is 34
+bytes and tagged over the HELLO it refuses; a REPLY with no exchange in flight, or a recorded one over an older
+nonce, stores nothing; the initiator's CONFIRM is checked against the REPLY sent (a copy does nothing); after an
+accepted pair request only the key it carried is stored (HELLO and REPLY), until the key binds or the first-key
+window ends (the binding from `System_ESPNow.cpp` is compiled; its wiring into `espnowKeyExAdmit`,
+`espnowaccept`, the pair request and the unpair is pinned). `espnow_session_rekey` (C22-C24, C28, C30-C33): OPEN
+154 and CONFIRM 162 bytes; a changed frame fails the mesh tag first and, re-tagged, the signature; golden 92- and
+100-byte transcripts; **C1 by host only**: a device with the same mesh id and another bootstrap key gets "mesh key
+mismatch" both ways, and with the same key the session opens without re-pairing; another bootstrap key gives other
+session keys and bond token; no OPEN on a mesh without a key; `openEpochMs` is the clock (0 unset) and is signed.
+`espnow_rekey_retry` (c9, c10): a REKEY tagged under another bootstrap key gets no reply and changes no key; a
+session keyed under an older mesh key is not rekeyed and a peer REKEY of it closes it. `espnow_mesh_slots` (L1, L5,
+P1, I6, I7, S1b): a passphrase change closes the mesh's sessions and says who reconnects; clearing a passphrase
+disables the mesh and drops its id on every slot (the default mesh only after another is the default); a cached
+key without `kdf` record 1 is not used. `espnow_wire_layout` and `espnow_dispatch_policy` pin the new sizes and
+minimum lengths (KEY_EX_CONFIRM 34, SESSION_OPEN 154, SESSION_CONFIRM 162 = the relay budget, SESSION_REKEY 146).
+
 ## ESP-NOW session handshake freshness
 
 `espnow_session_rekey` drives the production SESSION_OPEN / SESSION_CONFIRM / SESSION_REKEY handlers and
@@ -4623,8 +4665,8 @@ python3 components/hardwareone/test/host/test_espnow_bond_agreement.py --sanitiz
 python3 components/hardwareone/test/host/test_espnow_header_flags.py
 ```
 
-SESSION_OPEN (130 bytes) and SESSION_CONFIRM (146 bytes) carry each side's 32-bit capability word
-(`System_ESPNow_SessionCapsCore.h`) right before the signature, inside the signed transcripts (75 and 91 bytes).
+SESSION_OPEN (154 bytes since step 4) and SESSION_CONFIRM (162) carry each side's 32-bit capability word
+(`System_ESPNow_SessionCapsCore.h`) inside the signed transcripts (92 and 100 bytes).
 `espnow_session_rekey` (C22-C28) checks that each side keeps the other's word (the initiator's view confirmed at
 once, the responder's after the first sealed frame of the session), that a changed caps byte in OPEN or CONFIRM
 fails the signature, that a REKEY keeps the words, that a new handshake replaces them and holds none while in

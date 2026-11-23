@@ -43,6 +43,7 @@
 #include <sodium.h>                 // sodium_memcmp (constant-time)
 #include "System_ESPNow_Handlers_Crypto.h"  // KEY_EX handlers + initiator
 #include "System_ESPNow_HandshakeBackoff.h"  // WarnLimiter
+#include "System_ESPNow_HandshakeCore.h"  // the group tag label
 #include "System_ESPNow_MeshTime.h"   // TIME_SYNC: handler, send tick, commands
 #include "System_ESPNow_PowerEvents.h" // POWER_STATUS, EVENT_PUSH: handlers, send tick, commands
 #include "System_ESPNow_ForwardRx.h"   // FORWARD_LINK: the mesh master's side of forwarding for a bond partner
@@ -1154,7 +1155,7 @@ static void setEspNowPassphrase(const String& passphrase) {
     m0.isDefault = false;
   }
   // The mesh id is not touched here: the caller (meshesCmd_setpassphrase)
-  // stages a new key and its id, and a clear keeps the id (System_ESPNow_MeshIdCore.h).
+  // stages a new key and its id, and on a clear drops the id with the key.
 }
 
 // ============================================================================
@@ -2218,6 +2219,9 @@ void espnowMeshesWriteJson(JsonDocument& doc, bool excludePasswords) {
       }
       hex[64] = '\0';
       putSecret(e, "passphraseStretchedKey", String(hex));
+      // How the key was stretched (salt prefix, PBKDF2 rounds): a reader with
+      // another record stretches the passphrase again instead of using it.
+      e["kdf"] = meshid::kKdfRecord;
     }
   }
 #if ENABLE_BONDED_MODE
@@ -2257,12 +2261,18 @@ void espnowMeshesReadJson(JsonDocument& doc) {
       gSettings.meshes[idx].passphrase = getSecret(e, "passphrase");  // decrypt at-rest AES
       gSettings.meshes[idx].enabled    = e["enabled"]   | false;
       gSettings.meshes[idx].isDefault  = e["isDefault"] | false;
-      gSettings.meshes[idx].fingerprint = (uint16_t)(e["meshId"] | 0);
+      // A mesh without a passphrase has no key and so no id (1.0, E2), whatever the file says.
+      gSettings.meshes[idx].fingerprint =
+          gSettings.meshes[idx].passphrase.length() ? (uint16_t)(e["meshId"] | 0) : (uint16_t)0;
       // Load the cached PBKDF2 hash if present. Hex-decode strict;
       // any malformed value falls back to "no cached hash" (will trigger a
       // re-stretch at boot) rather than refusing to load settings.
       gSettings.meshes[idx].passphraseStretchedKeyValid = false;
       String keyHex = getSecret(e, "passphraseStretchedKey");  // decrypt at-rest AES (key material)
+      // A key cached by another stretch (its "kdf" record differs or is
+      // missing) is not used: the passphrase is stretched again at the start.
+      const int kdf = e["kdf"] | 0;
+      if (kdf != meshid::kKdfRecord) keyHex = "";
       if (keyHex.length() == 64) {
         const char* hp = keyHex.c_str();
         auto nyb = [](char c) -> int {
@@ -2746,14 +2756,17 @@ static void broadcast_tracker_check_timeouts() {
 // ============================================================================
 
 // The group (BROADCAST_AUTH) tag: the first ESPNOW_V4_BROADCAST_AUTH_TAG_LEN
-// (16) bytes of HMAC-SHA256(groupKey, header[0..29] || payload). The one
-// computation for the sender, the flood re-tag and the receiver's check
-// (which compares the 16 bytes in constant time). False if the HMAC failed.
+// (16) bytes of HMAC-SHA256(groupKey, "hw1-espnow-1-group" || header[0..29] ||
+// payload) (System_ESPNow_HandshakeCore.h). The one computation for the
+// sender, the flood re-tag and the receiver's check (which compares the 16
+// bytes in constant time). False if the HMAC failed.
 static bool v4_group_tag(uint8_t out[ESPNOW_V4_BROADCAST_AUTH_TAG_LEN], const uint8_t groupKey[32],
                          const uint8_t* hdr30, const uint8_t* payload, size_t payloadLen) {
   static_assert(ESPNOW_V4_BROADCAST_AUTH_TAG_LEN <= 32, "the tag is a cut HMAC-SHA256");
   uint8_t full[32];
-  const bool ok = espnowCryptoHmacSha256(full, groupKey, 32, hdr30, 30, payload, payloadLen, nullptr, 0);
+  const bool ok = espnowCryptoHmacSha256(full, groupKey, 32,
+                                         reinterpret_cast<const uint8_t*>(espnowhs::kLabelGroup),
+                                         espnowhs::labelLen(espnowhs::kLabelGroup), hdr30, 30, payload, payloadLen);
   if (ok) memcpy(out, full, ESPNOW_V4_BROADCAST_AUTH_TAG_LEN);
   sodium_memzero(full, sizeof(full));
   return ok;
@@ -7861,6 +7874,72 @@ static void sendPairBeacon() {
 // after it is released.
 static espnowpair::State gPair = {};
 static portMUX_TYPE gPairLock = portMUX_INITIALIZER_UNLOCKED;
+// The key the pending incoming request carried (V4PayloadPairRequest.senderPub),
+// under gPairLock with gPair.in: an accept binds the key exchange that follows
+// to it (pairKeyBind).
+EXT_RAM_BSS_ATTR static uint8_t gPairInPub[32];
+static uint8_t gPairInPubMac[6] = {};
+static bool gPairInPubValid = false;
+
+// Keys bound by an accepted pairing request (1.0 step 4): the first key
+// exchange with that MAC must present the key the request carried, or it is
+// answered "not accepted" (status 3, authenticated). A binding lasts as long as
+// the first-key window (10 min) and goes when the key binds or the device is
+// unpaired. Written on cmd_exec (accept, unpair), read on espnow_task (rule A
+// in espnowKeyExAdmit): every access holds gPairLock. 4 x 44 B in PSRAM.
+struct PairKeyBinding {
+  bool     used;
+  uint8_t  mac[6];
+  uint8_t  pub[32];
+  uint32_t untilMs;
+};
+static constexpr uint8_t kPairKeyBindings = 4;
+EXT_RAM_BSS_ATTR static PairKeyBinding gPairKeyBind[kPairKeyBindings];
+
+static void pairKeyBind(const uint8_t mac[6], const uint8_t pub[32]) {
+  const uint32_t nowMs = (uint32_t)millis();
+  portENTER_CRITICAL(&gPairLock);
+  PairKeyBinding* slot = nullptr;
+  for (auto& b : gPairKeyBind) {
+    if (b.used && macEquals(b.mac, mac)) { slot = &b; break; }
+  }
+  if (!slot) {
+    for (auto& b : gPairKeyBind) {
+      if (!b.used || (int32_t)(b.untilMs - nowMs) <= 0) { slot = &b; break; }
+    }
+  }
+  if (!slot) {   // all four live: the oldest goes
+    slot = &gPairKeyBind[0];
+    for (auto& b : gPairKeyBind) if ((int32_t)(b.untilMs - slot->untilMs) < 0) slot = &b;
+  }
+  memcpy(slot->mac, mac, 6);
+  memcpy(slot->pub, pub, 32);
+  slot->untilMs = nowMs + espnowrevoke::kFirstKeyWindowMs;
+  slot->used = true;
+  portEXIT_CRITICAL(&gPairLock);
+}
+
+static void pairKeyUnbind(const uint8_t mac[6]) {
+  portENTER_CRITICAL(&gPairLock);
+  for (auto& b : gPairKeyBind) {
+    if (b.used && macEquals(b.mac, mac)) b = PairKeyBinding{};
+  }
+  portEXIT_CRITICAL(&gPairLock);
+}
+
+// True when an accepted pairing request bound `mac` to a key other than `pub`.
+static bool pairKeyMismatch(const uint8_t mac[6], const uint8_t pub[32]) {
+  const uint32_t nowMs = (uint32_t)millis();
+  bool mismatch = false;
+  portENTER_CRITICAL(&gPairLock);
+  for (auto& b : gPairKeyBind) {
+    if (!b.used || !macEquals(b.mac, mac)) continue;
+    if ((int32_t)(b.untilMs - nowMs) <= 0) { b = PairKeyBinding{}; continue; }
+    mismatch = memcmp(b.pub, pub, 32) != 0;
+  }
+  portEXIT_CRITICAL(&gPairLock);
+  return mismatch;
+}
 
 // Send a pairing control frame (REQUEST/ACCEPT/REJECT) addressed to `dst`. Sent
 // as a BROADCAST_AUTH FF broadcast (NOT unicast): the two devices aren't ESP-NOW
@@ -7956,6 +8035,11 @@ static void v4h_pair_request(const V4RxCtx& ctx) {
   const bool windowOpen = espnowPairModeActive();
   portENTER_CRITICAL(&gPairLock);
   const espnowpair::Reply reply = espnowpair::onRequest(gPair, mac, name, (uint32_t)millis(), paired, windowOpen);
+  if (reply == espnowpair::Reply::Prompt) {   // the request now pending: keep the key it carries
+    memcpy(gPairInPub, req.senderPub, 32);
+    memcpy(gPairInPubMac, mac, 6);
+    gPairInPubValid = true;
+  }
   portEXIT_CRITICAL(&gPairLock);
   switch (reply) {
     case espnowpair::Reply::Accept: sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_ACCEPT); return;
@@ -19135,13 +19219,11 @@ static const char* meshesCmd_enable(const String& label) {
       if (gSettings.meshes[i].enabled) {
         return "Mesh is already enabled.";
       }
-      // Passphrase is no longer required to enable a mesh.
-      // Reason: the UI exposes "Set passphrase" only on ENABLED meshes, so
-      // requiring a passphrase before enable creates a chicken-and-egg
-      // (user can't reach the passphrase field). A mesh without a passphrase
-      // can still do per-peer encrypted sessions (KEY_EX + Ed25519 + X25519);
-      // it just can't do BROADCAST_AUTH (no group HMAC tag on heartbeats) or
-      // bootstrap KEY_EX-via-shared-secret. Set a passphrase later when ready.
+      // A passphrase is not required to enable a mesh: the UI exposes "Set
+      // passphrase" only on ENABLED meshes, so requiring one first would be a
+      // chicken-and-egg. A mesh without a passphrase has no key and no mesh id
+      // (1.0, E2): it sends and takes nothing, pairs nothing and opens no
+      // session until 'espnowsetpassphrase' gives it both.
       // The mesh id it comes back with: from its key (staged first when only
       // the passphrase is stored), else the stored one. An id another mesh here
       // has refuses the enable before anything changes.
@@ -19232,10 +19314,14 @@ static const char* meshesCmd_setdefault(const String& label) {
 
 // Set/clear the passphrase on a mesh by label. Pass an empty passphrase to
 // clear. Everything it changes applies at once, on any slot: the mesh's own keys
-// (pairing and signed broadcasts on this mesh) are re-derived here, and when
-// this mesh's passphrase is the one a start loads, the running instance takes it
-// too (espnowLoadLivePassphrase). Paired devices keep their stored keys and open
-// sessions: neither rests on a mesh passphrase.
+// (pairing, signed broadcasts and the session binding on this mesh) are
+// re-derived here, and when this mesh's passphrase is the one a start loads, the
+// running instance takes it too (espnowLoadLivePassphrase). Every session on
+// the mesh is closed (1.0, revocation C): sessions are bound to the mesh key, so
+// a device without the new passphrase cannot open one again, and this is the
+// mesh-wide revoke. Paired devices keep their stored identity keys; those with
+// the new passphrase reconnect by themselves. Clearing the passphrase disables
+// the mesh and drops its id (E2): no mesh is enabled without a key.
 static const char* meshesCmd_setpassphrase(const String& label, const String& passphrase) {
   // Length check — but allow empty as a "clear" sentinel.
   if (passphrase.length() > 0 && passphrase.length() < 8) {
@@ -19247,18 +19333,17 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
   if (label.length() == 0) return "Error: Mesh not found. Run 'espnowmeshes add <label>' first.";  // "" would match an empty slot
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
     if (gSettings.meshes[i].label == label) {
-      // A clear disables slot 0's mesh, so it follows 'espnowmeshes remove': the
+      // A clear disables the mesh, so it follows 'espnowmeshes remove': the
       // default mesh goes only when no other enabled mesh could take over.
-      if (i == 0 && passphrase.length() == 0 && gSettings.meshes[0].enabled &&
-          gSettings.meshes[0].isDefault && meshOtherEnabledExists(0)) {
+      if (passphrase.length() == 0 && gSettings.meshes[i].enabled &&
+          gSettings.meshes[i].isDefault && meshOtherEnabledExists(i)) {
         return meshDefaultInUseReply();
       }
       if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
       // The new key and the mesh id it gives are staged first (PBKDF2 into a
       // temporary, ~12 s with HW SHA accel — submitSync's 60 s timeout covers
       // it). An id another mesh here has refuses the change before anything is
-      // touched. A clear keeps the mesh id, so paired devices keep exchanging
-      // frames on it (System_ESPNow_MeshIdCore.h).
+      // touched. A clear drops the mesh id with the key (System_ESPNow_MeshIdCore.h).
       uint8_t staged[32] = {};
       uint16_t newId = 0;
       const uint16_t oldId = gSettings.meshes[i].fingerprint;
@@ -19269,16 +19354,24 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
         setEspNowPassphrase(passphrase);  // a clear also disables slot 0's mesh and drops its default flag
       } else {
         gSettings.meshes[i].passphrase = passphrase;
+        if (passphrase.length() == 0) {   // E2: a mesh without a passphrase is disabled, as slot 0's is
+          gSettings.meshes[i].enabled = false;
+          gSettings.meshes[i].isDefault = false;
+        }
       }
-      // These per-mesh keys authenticate KEY_EX HMACs and sign BROADCAST_AUTH
-      // frames on this mesh, so they change now, whichever slot it is.
+      // These per-mesh keys authenticate KEY_EX tags, the session mesh tags and
+      // keys, and sign BROADCAST_AUTH frames on this mesh, so they change now,
+      // whichever slot it is.
       if (passphrase.length() > 0) {
         meshIdCommit(i, staged, newId);
       } else {
         meshKeysInvalidate(i);
         sodium_memzero(gSettings.meshes[i].passphraseStretchedKey, sizeof(gSettings.meshes[i].passphraseStretchedKey));
         gSettings.meshes[i].passphraseStretchedKeyValid = false;
+        gSettings.meshes[i].fingerprint = 0;   // no key, no id: the mesh sends and takes nothing
       }
+      // Sessions on this mesh were keyed under the old mesh key (C1, C2).
+      const uint8_t sessionsClosed = sessionCloseMesh(i);
       const bool idChanged = passphrase.length() > 0 && newId != oldId;
       espnowLoadLivePassphrase();
       // Persist only after the crypto state is coherent (or merely mark this
@@ -19287,30 +19380,20 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
         return "Error: Mesh passphrase changed in RAM, but the coherent key state could not be persisted.";
       }
       if (passphrase.length() == 0) {
-        // Clearing slot 0's passphrase also disables that mesh (setEspNowPassphrase);
-        // the other slots stay enabled. Say what happened, with the mesh's own label.
-        if (gSettings.meshes[i].enabled) {
-          // Without the group key this mesh's broadcasts go out unsigned: devices
-          // that hold a passphrase drop them, and their signed ones are dropped here.
-          snprintf(getDebugBuffer(), 1024,
-                   "Cleared passphrase for mesh '%s'. New pairings on this mesh need a passphrase "
-                   "again. Its heartbeats and time sync now go out unsigned, so devices on it that "
-                   "still have a passphrase drop them, and their signed ones are dropped here. "
-                   "Paired devices keep their keys and open sessions.", label.c_str());
-        } else {
-          // Frames of a disabled mesh are dropped on receipt (meshByFingerprint).
-          snprintf(getDebugBuffer(), 1024,
-                   "Cleared passphrase for mesh '%s'. The mesh is disabled, so its paired devices "
-                   "cannot exchange frames with this device until you turn it back on with "
-                   "'espnowmeshes enable %s'.", label.c_str(), label.c_str());
-        }
+        // E2: clearing disables the mesh, on every slot, and drops its id.
+        snprintf(getDebugBuffer(), 1024,
+                 "Cleared passphrase for mesh '%s'. The mesh is now disabled: a mesh needs a passphrase. "
+                 "Sessions on it were closed (%u), and its paired devices exchange nothing with this "
+                 "device until you set a passphrase again with 'espnowsetpassphrase %s <passphrase>' "
+                 "and turn it back on with 'espnowmeshes enable %s'.",
+                 label.c_str(), (unsigned)sessionsClosed, label.c_str(), label.c_str());
       } else if (!gSettings.meshes[i].enabled) {
         // The keys are stored, but frames of a disabled mesh are dropped on receipt.
         snprintf(getDebugBuffer(), 1024,
                  "Updated passphrase for mesh '%s' (mesh id 0x%04X), but the mesh is disabled: pairing "
                  "and traffic on it stay off until you turn it back on with 'espnowmeshes enable %s'. "
                  "The other devices on this mesh need the same passphrase. Paired devices keep their "
-                 "keys and do not need to re-pair.",
+                 "identity keys and do not need to re-pair.",
                  label.c_str(), (unsigned)newId, label.c_str());
       } else if (idChanged) {
         // The mesh id comes from the key, so every frame on this mesh changes
@@ -19321,20 +19404,22 @@ static const char* meshesCmd_setpassphrase(const String& label, const String& pa
         else snprintf(was, sizeof(was), "0x%04X", (unsigned)oldId);
         snprintf(getDebugBuffer(), 1024,
                  "Updated passphrase for mesh '%s'; it applies %s. Its mesh id is now 0x%04X "
-                 "(was %s). The other devices on this mesh need the same passphrase: until they "
-                 "have it, all traffic with them stops (pairing, sessions and signed broadcasts; "
-                 "'espnowstats' counts their frames as unknown mesh id). Paired devices keep their "
-                 "keys and do not need to re-pair.",
+                 "(was %s). Sessions on this mesh were closed (%u). Devices that have the new "
+                 "passphrase reconnect by themselves; devices that do not are cut off (pairing, "
+                 "sessions and signed broadcasts; 'espnowstats' counts their frames as unknown mesh "
+                 "id). Paired devices keep their identity keys and do not need to re-pair.",
                  label.c_str(),
                  (gEspNow && gEspNow->initialized) ? "now" : "from the next ESP-NOW start",
-                 (unsigned)newId, was);
+                 (unsigned)newId, was, (unsigned)sessionsClosed);
       } else {
         snprintf(getDebugBuffer(), 1024,
                  "Updated passphrase for mesh '%s'; it applies %s (mesh id 0x%04X, unchanged). "
-                 "Paired devices keep their keys and open sessions and do not need to re-pair.",
+                 "Sessions on this mesh were closed (%u). Devices that have the new passphrase "
+                 "reconnect by themselves; devices that do not are cut off. Paired devices keep "
+                 "their identity keys and do not need to re-pair.",
                  label.c_str(),
                  (gEspNow && gEspNow->initialized) ? "now" : "from the next ESP-NOW start",
-                 (unsigned)newId);
+                 (unsigned)newId, (unsigned)sessionsClosed);
       }
       appendLivePassphraseNote();
       // Bus event: passphrase set/cleared on this mesh. NEVER include the
@@ -19379,6 +19464,8 @@ static const char* meshesCmd_rename(const String& oldLabel, const String& newLab
         meshKeysInvalidate(i);
         gSettings.meshes[i].passphraseStretchedKeyValid = false;
       }
+      // The label is part of the mesh key: sessions keyed under the old one close.
+      const uint8_t sessionsClosed = sessionCloseMesh(i);
       // Make the final, internally-consistent tuple durable together.
       if (!requestSettingsPersist()) {
         return "Error: Mesh renamed in RAM, but the coherent key state could not be persisted.";
@@ -19387,9 +19474,9 @@ static const char* meshesCmd_rename(const String& oldLabel, const String& newLab
         snprintf(getDebugBuffer(), 1024,
                  "Renamed mesh '%s' -> '%s' (new mesh id 0x%04X). WARNING: peers in this mesh "
                  "must also rename or comms will break — the label is part of the mesh key, so the "
-                 "mesh id changed.",
+                 "mesh id changed and its sessions were closed (%u).",
                  oldLabel.c_str(), newLabel.c_str(),
-                 (unsigned)gSettings.meshes[i].fingerprint);
+                 (unsigned)gSettings.meshes[i].fingerprint, (unsigned)sessionsClosed);
       } else {
         snprintf(getDebugBuffer(), 1024,
                  "Renamed mesh '%s' -> '%s'. It has no passphrase, so its mesh id is unchanged; "
@@ -19603,8 +19690,10 @@ static void espnowUnpairClearPairing(const uint8_t mac[6]) {
   portENTER_CRITICAL(&gPairLock);
   if (gPair.in.active && macEquals(gPair.in.mac, mac)) gPair.in = espnowpair::Request{};
   if (gPair.out.active && macEquals(gPair.out.mac, mac)) gPair.out = espnowpair::Request{};
+  if (gPairInPubValid && macEquals(gPairInPubMac, mac)) gPairInPubValid = false;
   portEXIT_CRITICAL(&gPairLock);
   pairingWindowCloseFor(mac);
+  pairKeyUnbind(mac);
 }
 
 // The unpair teardown, shared by espnowunpair and espnowrevoke: every store
@@ -20867,12 +20956,33 @@ espnowrevoke::Admit espnowKeyExAdmit(const uint8_t mac[6], const uint8_t pub[32]
   in.listLocked = espnowRevokedLocked();
   in.firstKeyOpen = pairingWindowOpenFor(mac) ||
                     (dev && espnowrevoke::firstKeyOpen(dev->awaitingKeyUntilMs, (uint32_t)millis()));
-  return espnowrevoke::admit(in);
+  const espnowrevoke::Admit verdict = espnowrevoke::admit(in);
+  // An accepted pairing request bound this MAC to the key it carried: another
+  // key is not accepted (answered status 3), whatever window is open.
+  if (verdict == espnowrevoke::Admit::Accept && pub && !in.sameKey && pairKeyMismatch(mac, pub)) {
+    static uint32_t sBindLogMs = 0;
+    if (logCooldownOk(sBindLogMs, 30000)) {
+      char keyId[espnowrevoke::kKeyIdHexLen + 1];
+      espnowrevoke::formatKeyId(pub, keyId);
+      WARN_ESPNOWF("KEY_EX from " MAC_FMT " not accepted: its key (keyId %s) is not the one its accepted "
+                   "pairing request carried", MAC_ARGS(mac), keyId);
+    }
+    return espnowrevoke::Admit::NotAccepted;
+  }
+  return verdict;
+}
+
+bool espnowLocalPairingOpen(const uint8_t mac[6]) {
+  if (!mac) return false;
+  const EspNowDevice* dev = groupRecordOf(mac);
+  return pairingWindowOpenFor(mac) ||
+         (dev && espnowrevoke::firstKeyOpen(dev->awaitingKeyUntilMs, (uint32_t)millis()));
 }
 
 void espnowFirstKeyBound(const uint8_t mac[6]) {
   EspNowDevice* dev = groupRecordOf(mac);
   if (dev) dev->awaitingKeyUntilMs = 0;   // RAM only: an expired window reads the same after a restart
+  pairKeyUnbind(mac);                     // the key the request carried (or no binding) is the one bound
 }
 
 // The rollback job (cmd_exec): the registry entry goes only while it still has
@@ -23200,6 +23310,17 @@ const char* cmd_espnow_accept(const String& argsInput) {
                                   "on both devices and send the request again.", req);
   if (err) return err;
 
+  // The key exchange that follows must present the key the request carried
+  // (its keyId was shown with the prompt).
+  {
+    uint8_t pub[32];
+    portENTER_CRITICAL(&gPairLock);
+    const bool have = gPairInPubValid && macEquals(gPairInPubMac, req.mac);
+    if (have) memcpy(pub, gPairInPub, 32);
+    gPairInPubValid = false;
+    portEXIT_CRITICAL(&gPairLock);
+    if (have) pairKeyBind(req.mac, pub);
+  }
   sendPairCtrl(req.mac, ESPNOW_V4_TYPE_PAIR_ACCEPT);   // re-sent by the heartbeat sweep (PairCore)
   char macStr[18]; macToDisplay(req.mac, macStr, sizeof(macStr));
   String pairArgs = String(macStr) + " " + req.name;
@@ -23409,7 +23530,7 @@ extern const CommandEntry espNowCommands[] = {
 #endif
   
   // ---- ESP-NOW Encryption ----
-  { "espnowsetpassphrase", "Set encryption passphrase on a mesh: 'espnowsetpassphrase <mesh> <phrase>'.", true, cmd_espnow_setpassphrase, "Usage: espnowsetpassphrase <mesh> <passphrase>\n       espnowsetpassphrase <mesh> clear", /*requiresSuperAdmin=*/true },
+  { "espnowsetpassphrase", "Set encryption passphrase on a mesh: 'espnowsetpassphrase <mesh> <phrase>'. Closes the mesh's sessions; clearing it disables the mesh.", true, cmd_espnow_setpassphrase, "Usage: espnowsetpassphrase <mesh> <passphrase>\n       espnowsetpassphrase <mesh> clear\n       Every session on the mesh is closed: devices with the new passphrase reconnect by themselves,\n       devices without it are cut off. 'clear' disables the mesh (a mesh needs a passphrase).", /*requiresSuperAdmin=*/true },
   { "espnowencstatus", "Show ESP-NOW encryption status and key fingerprint.", true, cmd_espnow_encstatus },
   { "espnowpairsecure", "Pair device with encryption: 'espnowpairsecure <mac> <name> [mesh]'. (local pair is synchronous; secure channel completes async - see espnowsessions)", true, cmd_espnow_pairsecure, "Usage: espnowpairsecure <mac_address> <device_name> [mesh]\n       Requires a mesh passphrase first - run 'espnowsetpassphrase <mesh> <passphrase>'.\n       The device is added synchronously; KEY_EX then runs asynchronously (~100ms) so the encrypted channel becomes usable shortly after - inspect with 'espnowsessions' / 'espnowencstatus'." },
   { "espnowpairmode", "Open the discovery window: 'espnowpairmode [seconds|off|status]'. Open on BOTH same-mesh devices, then 'espnowdiscovered' to see + pair. Nothing pairs by itself.", true, cmd_espnow_pairmode, "Usage: espnowpairmode [<seconds>|off|status]\n       Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh).\n       While open, the device broadcasts a discovery beacon and RECORDS other same-mesh\n       devices it hears (see 'espnowdiscovered'); it does not pair by itself. Pair from the\n       list with 'espnowpairsecure <mac> <name>'." },

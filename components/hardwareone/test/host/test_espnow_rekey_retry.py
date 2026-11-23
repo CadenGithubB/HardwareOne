@@ -72,7 +72,7 @@ def build_sessions(sessions):
     for marker in ('bool sessionsInit(', 'SessionState* sessionFindByPeer(',
                    'SessionState* sessionFindBySessionId(', 'SessionState* sessionAllocate(',
                    'void sessionClear(', 'bool sessionIsASide(', 'const SessionState* sessionAt(',
-                   'uint8_t sessionSlotCount('):
+                   'uint8_t sessionSlotCount(', 'bool sessionDeriveKeyMaterial('):
         pieces.append(extract_block(sessions, marker))
     pieces.append(match(sessions, r'^static constexpr uint32_t kSessionEstablishTimeoutMs = \d+;',
                         'kSessionEstablishTimeoutMs').group(0))
@@ -92,10 +92,17 @@ def build_crypto(crypto):
     table and sweep are optional: a source without them (the pre-fix tree) gets
     an empty sweep, so the cases fail on behaviour rather than on a missing
     symbol."""
-    internal = [match(crypto, r'^constexpr const char\*\s+kRekeyLabel\s*=[^;]*;', 'kRekeyLabel').group(0),
-                match(crypto, r'^constexpr size_t\s+kLabelLen\s*=[^;]*;', 'kLabelLen').group(0),
+    # 1.0 step 4: the transcript from HandshakeCore, the C1 mesh tag and the
+    # mesh key generation check (the throttled reject counter they log through).
+    internal = [match(crypto, r'^constexpr size_t kRekeyTranscriptLen\s*=[^;]*;', 'kRekeyTranscriptLen').group(0),
+                extract_block(crypto, 'static uint16_t sessionRejectLogCount('),
                 extract_block(crypto, 'void buildRekeyTranscript('),
+                extract_block(crypto, 'bool sessionMeshTag('),
+                extract_block(crypto, 'bool sessionMeshTagOk('),
+                extract_block(crypto, 'bool sessionSealRekey('),
+                extract_block(crypto, 'void logMeshKeyMismatch('),
                 extract_block(crypto, 'struct DeferredRekeyWork') + ';',
+                extract_block(crypto, 'bool sessionKeyedUnderCurrentMeshKey('),
                 extract_block(crypto, 'bool deriveRekeyedKeysFromShared(')]
     for name in ('kRekeyInFlightSlots', 'kRekeyMaxRetries', 'kRekeyRetryMs'):
         m = re.search(r'^constexpr\s+uint\d+_t\s+' + name + r'\s*=\s*\d+;', crypto, re.M)
@@ -212,6 +219,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-rekey-retry-') as tmp:
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
         (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
+        (unit.parent / 'System_ESPNow_HandshakeCore.h').write_text(
+            (HERE.parents[1] / 'System_ESPNow_HandshakeCore.h').read_text())
         unit.write_text(harness)
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic', str(unit), '-o', str(exe)]
         if a.sanitize:

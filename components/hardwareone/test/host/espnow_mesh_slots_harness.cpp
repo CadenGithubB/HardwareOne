@@ -189,6 +189,10 @@ static const MeshDerivedKeys* meshKeysGet(uint8_t i) {
   return gDerivedValid[i] ? &keys : nullptr;
 }
 static void sodium_memzero(void* p, size_t n) { std::memset(p, 0, n); }
+// The sessions of a mesh are closed on a passphrase or label change (1.0
+// revocation C); the double counts the calls per slot.
+static int gSessionCloses[Settings::N_MESHES] = {};
+static uint8_t sessionCloseMesh(uint8_t i) { ++gSessionCloses[i]; return 1; }
 
 // ---- The mesh id behind the key doubles (System_ESPNow_MeshIdCore.h has the
 // rule; test_espnow_mesh_id_kat.py pins the real derivation). The toy stretch
@@ -875,6 +879,27 @@ static void testSlotsSurviveARestart() {
   CHECK(gSettings.bondModeEnabledMesh[2] && gSettings.bondPeerMacMesh[2] == String("02:00:00:00:00:09"),
         "S1 the bond settings are no longer beside their mesh");
   CHECK(enabledDefaults() == 1 && gSettings.meshes[0].isDefault, "S1 default flag");
+  // S1b (1.0 step 4): the cached stretched key is stored with its "kdf" record;
+  // one cached by another stretch (no record, or another) is not used: the
+  // start stretches the passphrase again.
+  {
+    JsonDocument doc;
+    espnowMeshesWriteJson(doc, false);
+    JsonObject work = doc["espnow"]["meshes"][1].as<JsonObject>();
+    CHECK(work["slot"] == 2 && work["kdf"] == 1, "S1b the stored key has no kdf record 1");
+    for (const char* kdf : {"none", "2"}) {
+      if (std::strcmp(kdf, "none") == 0) work.remove("kdf"); else work["kdf"] = 2;
+      std::string text;
+      serializeJson(doc, text);
+      JsonDocument back;
+      deserializeJson(back, text.c_str());
+      espnowMeshesReadJson(back);
+      CHECK(!gSettings.meshes[2].passphraseStretchedKeyValid &&
+                gSettings.meshes[2].passphrase == String("work-passphrase"),
+            "S1b a key cached with kdf record %s was used", kdf);
+    }
+    saveAndReload();
+  }
   // A device paired in "work" (slot 2) still holds its slot after the restart.
   gPeers[0] = PeerIdentity{{2, 0, 0, 0, 0, 7}, 2, true};
   CHECK(isError(meshesCmd_delete(String("work"))), "S1 the paired device no longer protects its mesh");
@@ -1013,12 +1038,15 @@ static void testMessagesNameTheMesh() {
   CHECK(!has(r, "primary"), "P1 the reply calls mesh 'bench' primary: %s", r);
   CHECK(has(r, "'bench'") && !gSettings.meshes[0].enabled && has(r, "disabled") && has(r, "espnowmeshes enable bench"),
         "P1 the reply does not say the mesh is now disabled: %s", r);
-  // A mesh in another slot stays enabled, and the reply does not claim otherwise.
+  // A mesh in another slot is disabled too (1.0, E2: no mesh without a key),
+  // its id goes and its sessions close; the reply names that mesh only.
   resetAll();
   CHECK(!isError(meshesCmd_add(String("work"))), "P1 add");
   CHECK(!isError(meshesCmd_setpassphrase(String("work"), String("work-passphrase"))), "P1 set");
   r = meshesCmd_setpassphrase(String("work"), String(""));
-  CHECK(gSettings.meshes[slotOf("work")].enabled && !has(r, "disabled") && !has(r, "primary"), "P1 other slot: %s", r);
+  CHECK(!gSettings.meshes[slotOf("work")].enabled && gSettings.meshes[slotOf("work")].fingerprint == 0 &&
+            has(r, "now disabled") && has(r, "'work'") && !has(r, "primary") && gSessionCloses[slotOf("work")] > 0,
+        "P1 other slot: %s", r);
 
   // P2: the start-up warning names the mesh whose passphrase a start loads.
   char w[224];
@@ -1149,8 +1177,8 @@ static void testPassphraseInUse() {
   CHECK(!isError(r), "L1 set: %s", r);
   CHECK(instanceHolds("work-passphrase"), "L1 the running instance did not take the default mesh's new passphrase");
   CHECK(!has(r, "Not used for current encryption") && !has(r, "will need to re-pair"), "L1 the reply still says it is not used: %s", r);
-  CHECK(has(r, "applies now") && has(r, "do not need to re-pair") && has(r, "need the same passphrase") &&
-            has(r, "uses the passphrase of mesh 'work'"),
+  CHECK(has(r, "applies now") && has(r, "do not need to re-pair") && has(r, "reconnect by themselves") &&
+            has(r, "cut off") && has(r, "uses the passphrase of mesh 'work'"),
         "L1 the reply does not say what applies now and what peers need: %s", r);
   CHECK(listjsonSays(true, 1), "L1 listjson does not name slot 1 as the passphrase in use");
 
@@ -1177,23 +1205,32 @@ static void testPassphraseInUse() {
         "L4 setdefault to a mesh without a passphrase: %s", r);
   CHECK(listjsonSays(true, 0), "L4 listjson");
 
-  // L5: clearing the passphrase in use falls back to what a start would load.
+  // L5: a clear disables the mesh (1.0, E2), so the default mesh is cleared
+  // only once no other enabled mesh could take over; clearing the passphrase
+  // in use falls back to what a start would load.
   r = meshesCmd_setdefault(String("work"));
   CHECK(instanceHolds("work-passphrase"), "L5 setup: %s", r);
   r = meshesCmd_setpassphrase(String("work"), String(""));
-  CHECK(!isError(r) && instanceHolds("prim-passphrase") && has(r, "uses the passphrase of mesh 'primary'"),
-        "L5 cleared default mesh: %s", r);
-  CHECK(has(r, "keep their keys and open sessions"), "L5 the clear does not say what happens to paired devices: %s", r);
-  // Without the group key the mesh's broadcasts go out unsigned and keyed peers drop them.
-  CHECK(has(r, "heartbeats and time sync now go out unsigned") && has(r, "their signed ones are dropped here"),
-        "L5 the clear does not say that the mesh's heartbeats stop getting through: %s", r);
+  CHECK(isError(r) && has(r, "default mesh") && gSettings.meshes[slotOf("work")].enabled &&
+            instanceHolds("work-passphrase"),
+        "L5 the default mesh was cleared while others could take over: %s", r);
+  CHECK(!isError(meshesCmd_remove(String("lab"))) && !isError(meshesCmd_setdefault(String("primary"))),
+        "L5 setup: primary is the default, lab disabled");
+  const int closesBefore = gSessionCloses[slotOf("work")];
+  r = meshesCmd_setpassphrase(String("work"), String(""));
+  CHECK(!isError(r) && instanceHolds("prim-passphrase") && !gSettings.meshes[slotOf("work")].enabled &&
+            gSettings.meshes[slotOf("work")].fingerprint == 0,
+        "L5 a cleared mesh stays enabled or keeps its id: %s", r);
+  CHECK(has(r, "now disabled") && has(r, "Sessions on it were closed") && has(r, "'espnowmeshes enable work'") &&
+            gSessionCloses[slotOf("work")] == closesBefore + 1,
+        "L5 the clear does not close the mesh's sessions or say what happens to paired devices: %s", r);
   r = meshesCmd_setpassphrase(String("primary"), String(""));
   CHECK(!isError(r) && instanceHolds(nullptr), "L5 the cleared passphrase is still in use: %s", r);
-  // Slot 0's clear also disables its mesh, whose frames are then dropped: the reply says so.
-  CHECK(!gSettings.meshes[0].enabled && has(r, "The mesh is disabled") &&
-            has(r, "cannot exchange frames with this device") && has(r, "'espnowmeshes enable primary'"),
+  // Slot 0's clear disables its mesh too, whose frames are then dropped: the reply says so.
+  CHECK(!gSettings.meshes[0].enabled && has(r, "now disabled") &&
+            has(r, "exchange nothing with this device") && has(r, "'espnowmeshes enable primary'"),
         "L5 slot 0's clear does not say its paired devices cannot exchange frames: %s", r);
-  CHECK(has(r, "no passphrase in use") && has(r, "until mesh 'work' has one"), "L5 the reply does not say none is in use: %s", r);
+  CHECK(has(r, "no passphrase in use"), "L5 the reply does not say none is in use: %s", r);
   CHECK(listjsonSays(true, -1), "L5 listjson");
 
   // L6: enable brings a keyed mesh into use when it becomes the default; disabling
@@ -1498,12 +1535,14 @@ static void testMeshIds() {
             gSettings.meshes[work].fingerprint != labId && has(r, "mesh id 0x"),
         "I5 enable: %s", r);
 
-  // I6: a cleared passphrase keeps the id (paired devices keep their traffic),
-  // and the id survives a save and load without a key to derive it from.
-  CHECK(!isError(meshesCmd_setpassphrase(String("lab"), String(""))), "I6 clear");
-  CHECK(gSettings.meshes[slotOf("lab")].fingerprint == labId, "I6 the cleared mesh lost its id");
+  // I6: a cleared passphrase drops the id with the key and disables the mesh
+  // (1.0, E2: nothing is sent or taken without a key), also after a restart.
+  CHECK(labId != 0 && !isError(meshesCmd_setpassphrase(String("lab"), String(""))), "I6 clear");
+  CHECK(gSettings.meshes[slotOf("lab")].fingerprint == 0 && !gSettings.meshes[slotOf("lab")].enabled,
+        "I6 the cleared mesh kept its id or stayed enabled");
   saveAndReload();
-  CHECK(gSettings.meshes[slotOf("lab")].fingerprint == labId, "I6 the stored id did not survive a restart");
+  CHECK(gSettings.meshes[slotOf("lab")].fingerprint == 0 && !gSettings.meshes[slotOf("lab")].enabled,
+        "I6 the cleared mesh has an id or is enabled after a restart");
 
   // I7: a passphrase change gives a new id and says so.
   resetAll();
@@ -1511,7 +1550,8 @@ static void testMeshIds() {
         "I7 setup");
   startEspNow();
   r = meshesCmd_setpassphrase(String("lab"), String("second-passphrase"));
-  CHECK(!isError(r) && has(r, "mesh id is now 0x") && has(r, "all traffic with them stops"),
+  CHECK(!isError(r) && has(r, "mesh id is now 0x") && has(r, "Sessions on this mesh were closed") &&
+            has(r, "cut off"),
         "I7 the reply does not say the mesh id changed: %s", r);
 
   // I8: two meshes with one id at boot (an edited settings file): the lower slot

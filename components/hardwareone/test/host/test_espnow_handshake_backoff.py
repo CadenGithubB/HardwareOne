@@ -152,9 +152,12 @@ def main():
     keyex = [line(crypto, r'^constexpr uint8_t\s+kKeyExInFlightSlots\s*=.*;', 'kKeyExInFlightSlots'),
              line(crypto, r'^constexpr uint8_t\s+kKeyExMaxRetries\s*=.*;', 'kKeyExMaxRetries'),
              line(crypto, r'^constexpr uint32_t\s+kKeyExRetryMs\s*=.*;', 'kKeyExRetryMs'),
+             line(crypto, r'^constexpr uint8_t\s+kKeyExHelloNonces\s*=.*;', 'kKeyExHelloNonces'),
              definition(crypto, 'struct KeyExInFlight', 'Crypto') + ';',
-             line(crypto, r'^KeyExInFlight gKeyExInFlight\[kKeyExInFlightSlots\] = \{\};', 'gKeyExInFlight'),
-             definition(crypto, 'void keyExInFlightArm(', 'Crypto')]
+             line(crypto, r'^EXT_RAM_BSS_ATTR KeyExInFlight gKeyExInFlight\[kKeyExInFlightSlots\] = \{\};',
+                  'gKeyExInFlight'),
+             definition(crypto, 'KeyExInFlight* keyExInFlightArm(', 'Crypto'),
+             definition(crypto, 'KeyExInFlight* keyExInFlightFind(', 'Crypto')]
     if have_backoff:
         keyex += [line(crypto, r'^constexpr uint32_t kKeyExGiveUpWarnWindowMs = .*;', 'kKeyExGiveUpWarnWindowMs'),
                   line(crypto, r'^WarnLimiter gKeyExGiveUpWarn = \{\};', 'gKeyExGiveUpWarn'),
@@ -210,7 +213,9 @@ def main():
     pin(0 < reply.find('keyExClearInFlight(msg->responderMac);') < clear_at,
         'KEY_EX_REPLY (the peer answered) ends its back-off')
     confirm = body(crypto, 'void v4hKeyExConfirm(const V4RxCtx& ctx)')
-    ok_branch = confirm[confirm.find('if (msg->status == 0) {'):]
+    # The last status-0 branch: the initiator's CONFIRM ending an exchange we
+    # answered (1.0 step 4: an earlier one refuses a status 0 that answers our HELLO).
+    ok_branch = confirm[confirm.rfind('if (msg->status == 0) {'):]
     ok_branch = ok_branch[:ok_branch.find('} else {')] if '} else {' in ok_branch else ''
     pin('espnowHandshakeBackoffClear(msg->confirmerMac);' in ok_branch and
         confirm.count('espnowHandshakeBackoffClear(') == 1,

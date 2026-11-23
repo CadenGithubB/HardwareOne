@@ -240,6 +240,8 @@ def main():
         (unit.parent / 'System_DeviceName.h').write_text((HERE.parents[1] / 'System_DeviceName.h').read_text())
         (unit.parent / 'System_ESPNow_AnswerCore.h').write_text(
             (HERE.parents[1] / 'System_ESPNow_AnswerCore.h').read_text())
+        (unit.parent / 'System_ESPNow_HandshakeCore.h').write_text(
+            (HERE.parents[1] / 'System_ESPNow_HandshakeCore.h').read_text())
         (unit.parent / 'System_ESPNow_GroupCore.h').write_text(
             (HERE.parents[1] / 'System_ESPNow_GroupCore.h').read_text())
         unit.write_text(harness)

@@ -64,7 +64,8 @@ struct SessionState {
   uint8_t  meshId;
   uint8_t  myDirection;        // 0 = our MAC is the "A" side (numerically lower), 1 = "B"
   uint16_t sessionId;
-  uint16_t _pad;
+  uint16_t meshKeyGen;         // meshKeysGeneration(meshId) when the keys were made (0 = none yet):
+                               //   a passphrase change gives a new one, and the session is closed
   uint8_t  aeadKeyTx[32];      // key used when we encrypt to the peer
   uint8_t  aeadKeyRx[32];      // key used when we decrypt from the peer
   uint32_t txSeqNext;          // next frameSeq value to use on send
@@ -170,11 +171,26 @@ void sessionClear(SessionState* s);
 // concurrent-handshake tiebreak (A-side wins).
 bool sessionIsASide(const uint8_t myMac[6], const uint8_t peerMac[6]);
 
-// Derive both per-direction AEAD keys from a 32-byte X25519 shared secret.
-// Context strings: "esp-AtoB" (key flowing from A to B) and "esp-BtoA".
-// The caller assigns aeadKeyTx / aeadKeyRx based on its own A-vs-B role.
-// Returns false on KDF failure.
+// The session key derivation (1.0, C2; System_ESPNow_HandshakeCore.h): prk =
+// HMAC-SHA256(bootstrapKey, "hw1-espnow-1-session" || shared), then the Blake2b
+// subkeys "esp-AtoB" (id 1), "esp-BtoA" (id 2) and, when bondToken is given,
+// "esp-bond" (id 3, first 16 bytes). The mesh bootstrap key is mixed in, so a
+// device without the current passphrase cannot derive the keys even if it
+// could finish the exchange. False on any failure (outputs zeroed).
+bool sessionDeriveKeyMaterial(const uint8_t bootstrapKey[32], const uint8_t shared[32],
+                              uint8_t keyAtoB[32], uint8_t keyBtoA[32], uint8_t bondToken[16]);
+
+// Derive both per-direction AEAD keys (and the bond token) from a 32-byte X25519
+// shared secret under the bootstrap key of the session's mesh slot (s->meshId),
+// and record that slot's key generation in s->meshKeyGen. The caller's
+// A-vs-B role (s->myDirection) picks Tx / Rx. False when the mesh has no keys
+// (no passphrase: no session opens on it) or the derivation fails.
 bool sessionDeriveAeadKeys(SessionState* s, const uint8_t shared[32]);
+
+// Close every session on mesh slot `meshSlot` (a passphrase or label change:
+// those sessions were keyed under the old mesh key). Returns how many closed.
+// Peers that have the new passphrase open new sessions by themselves.
+uint8_t sessionCloseMesh(uint8_t meshSlot);
 
 // Read-only iteration (for the espnowsessions CLI). i ranges 0..slotCount-1.
 const SessionState* sessionAt(uint8_t i);

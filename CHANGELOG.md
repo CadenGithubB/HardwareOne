@@ -71,6 +71,40 @@ Host-tested and built; not run on a device.
   revoked key is refused whatever address it comes from, and the accept prompt shows its keyId.
   KEY_EX_CONFIRM status 3 means "not accepted". Reflash devices together.
 
+### Changed (ESP-NOW 1.0 handshake crypto and passphrase change)
+Host-tested and built; not run on a device.
+- **Changing a mesh passphrase now cuts off devices that do not get the new one.** Every session
+  on the mesh is closed at once; devices that have the new passphrase reconnect by themselves
+  (nothing is paired again), and a device without it cannot open or rekey a session any more,
+  even with modified firmware: sessions are now bound to the mesh key (a 16-byte mesh tag on
+  SESSION_OPEN, SESSION_CONFIRM and SESSION_REKEY, and the session keys mix the mesh key in). A
+  session frame with a wrong mesh tag is logged as `mesh key mismatch`. Renaming a mesh closes its
+  sessions too. The `espnowsetpassphrase` reply says so.
+- **Clearing a mesh's passphrase disables that mesh** on every slot (it was slot 0 only) and drops
+  its mesh id: a mesh without a passphrase sends and takes nothing. The default mesh is cleared only
+  when no other enabled mesh could take over (`espnowmeshes setdefault <other>` first).
+- **The key exchange cannot be replayed.** KEY_EX_HELLO and KEY_EX_REPLY carry fresh nonces and
+  16-byte tags with a label per frame type; a REPLY counts only for a HELLO of this device's own
+  exchange, and a HELLO already answered is dropped as a copy. KEY_EX_CONFIRM is authenticated (a
+  16-byte tag over both addresses, nonces and keys): an authenticated "not accepted" ends this
+  device's key exchange in flight (the automatic tries keep backing off), and a forged one is
+  ignored.
+- A stored key stays on the mesh it was paired on: a key exchange on another mesh both devices share
+  moves it only while a pairing action is open on this device, and when two devices pair from both
+  ends with different default meshes both end on the lower address's mesh (both sides key the
+  session under that mesh).
+- After `espnowaccept`, the key exchange that follows must present the key the pair request carried
+  (the keyId shown with the prompt); another key is answered "not accepted".
+- SESSION_OPEN carries the sender's clock (`openEpochMs`, signed; 0 when the clock is not set).
+- New labels: the mesh salt (`hw1-espnow-1-mesh-salt:`), the session transcripts
+  (`hw1-espnow-1-sopen`/`-sconf`/`-rekey`) and the group tag (`hw1-espnow-1-group`). **Every mesh
+  id and mesh key changes**, so devices with this change and devices without it do not hear each
+  other. The settings file stores a `kdf` record next to the cached mesh key; a key cached without it
+  is stretched again from the passphrase at the next start (one slow start).
+- **Wire change:** KEY_EX_CONFIRM 18 -> 34 bytes, SESSION_OPEN 130 -> 154, SESSION_CONFIRM 146 -> 162
+  (the whole relay budget), SESSION_REKEY 130 -> 146; KEY_EX_HELLO and KEY_EX_REPLY stay 72.
+  Reflash devices together.
+
 ### Removed (ESP-NOW 1.0 revocation)
 - `espnowforget` is gone: `espnowunpair` (and the start-up check) cover it. The warnings that named it
   now say "run espnowunpair, then pair again on both sides".

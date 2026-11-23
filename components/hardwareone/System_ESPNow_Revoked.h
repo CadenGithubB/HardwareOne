@@ -65,6 +65,12 @@ void espnowRevokedFormatDate(uint64_t epochMs, char* out, size_t outLen);
 // revoked list and the MAC's first-key window. espnow_task.
 espnowrevoke::Admit espnowKeyExAdmit(const uint8_t mac[6], const uint8_t pub[32]);
 
+// A local pairing action for `mac` is open: espnowpairsecure's 15 s re-key
+// window (also opened by espnowaccept), or the registry entry's first-key
+// window. Only then may a key exchange move a stored identity to another mesh
+// slot (keyExStoreSlot). espnow_task.
+bool espnowLocalPairingOpen(const uint8_t mac[6]);
+
 // The first key of a registry entry was stored: its first-key window closes.
 void espnowFirstKeyBound(const uint8_t mac[6]);
 
