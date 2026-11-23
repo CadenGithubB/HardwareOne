@@ -9,6 +9,8 @@
 
 #include <stdint.h>
 
+#include "Input_RotationCore.h"
+
 // Button bits (the device-native layout of the `buttons` field every reading
 // carries: ESP-NOW, MQTT, the web card, `anoencoderread json`). Active high.
 #define ANO_BTN_IN     (1u << 0)
@@ -51,21 +53,23 @@ constexpr uint8_t anoAddressFromSetting(long saved) {
 }
 
 // Pins set in `pins` (a pressed mask or an interrupt-flag mask, one bit per
-// seesaw pin) as ANO_BTN_* bits. The swaps (mounting orientation) pick which
-// pin is which button, here at the one place pins become buttons, so
-// everything downstream sees the labels the user sees.
-inline uint32_t anoPinsToButtons(uint32_t pins, bool swapUpDown, bool swapLeftRight) {
-  const uint8_t upPin = swapUpDown ? kAnoPinDown : kAnoPinUp;
-  const uint8_t downPin = swapUpDown ? kAnoPinUp : kAnoPinDown;
-  const uint8_t leftPin = swapLeftRight ? kAnoPinRight : kAnoPinLeft;
-  const uint8_t rightPin = swapLeftRight ? kAnoPinLeft : kAnoPinRight;
+// seesaw pin) as ANO_BTN_* bits, here at the one place pins become buttons,
+// so everything downstream sees directions as they are seen on the screen.
+// The mount (`anomount`: how the ring sits against the panel, 0/90/180/270,
+// optionally mirrored) straightens the ring first; the screen's rotation
+// (`oledrotation`, quarter turns) turns it after that. The button at the top
+// of the screen as it is seen is UP, with UP's roles, and RIGHT's SELECT and
+// START chord go with the button on the right.
+inline uint32_t anoPinsToButtons(uint32_t pins, input_rotation::Mount mount = {0, false},
+                                 int screenQuarterTurns = 0) {
   uint32_t out = 0;
   if (pins & (1UL << kAnoPinIn)) out |= ANO_BTN_IN;
-  if (pins & (1UL << upPin)) out |= ANO_BTN_UP;
-  if (pins & (1UL << downPin)) out |= ANO_BTN_DOWN;
-  if (pins & (1UL << leftPin)) out |= ANO_BTN_LEFT;
-  if (pins & (1UL << rightPin)) out |= ANO_BTN_RIGHT;
-  return out;
+  if (pins & (1UL << kAnoPinUp)) out |= ANO_BTN_UP;
+  if (pins & (1UL << kAnoPinDown)) out |= ANO_BTN_DOWN;
+  if (pins & (1UL << kAnoPinLeft)) out |= ANO_BTN_LEFT;
+  if (pins & (1UL << kAnoPinRight)) out |= ANO_BTN_RIGHT;
+  return input_rotation::orientDirectionBits(out, mount, screenQuarterTurns, ANO_BTN_UP, ANO_BTN_RIGHT,
+                                             ANO_BTN_DOWN, ANO_BTN_LEFT);
 }
 
 // One poll's reads. Each part counts only when its read succeeded. The
@@ -132,12 +136,15 @@ struct AnoPollResult {
 //   nothing changes.
 // - The wheel's turns count whenever the delta read succeeded, whatever the
 //   buttons did.
-inline AnoPollResult anoPoll(AnoPollState& state, const AnoPollReads& reads, bool swapUpDown,
-                             bool swapLeftRight, bool invert) {
+// A mirrored mount is the ring seen from behind, so the wheel turns the other
+// way too; a turn of the mount or the screen leaves the wheel as it is
+// (clockwise stays clockwise).
+inline AnoPollResult anoPoll(AnoPollState& state, const AnoPollReads& reads, input_rotation::Mount mount,
+                             int screenQuarterTurns = 0) {
   AnoPollResult out;
   if (reads.deltaOk) {
     out.rawDelta = reads.delta;
-    out.detents = invert ? -reads.delta : reads.delta;
+    out.detents = mount.mirror ? -reads.delta : reads.delta;
   }
   const bool plausible = reads.buttonsOk && reads.flagsOk && (reads.bulk & kAnoPinMask) != 0;
   if (!plausible) {
@@ -147,8 +154,8 @@ inline AnoPollResult anoPoll(AnoPollState& state, const AnoPollReads& reads, boo
     return out;
   }
   out.buttonsValid = true;
-  const uint32_t now = anoPinsToButtons(~reads.bulk & kAnoPinMask, swapUpDown, swapLeftRight);
-  const uint32_t flagged = anoPinsToButtons(reads.intFlags & kAnoPinMask, swapUpDown, swapLeftRight);
+  const uint32_t now = anoPinsToButtons(~reads.bulk & kAnoPinMask, mount, screenQuarterTurns);
+  const uint32_t flagged = anoPinsToButtons(reads.intFlags & kAnoPinMask, mount, screenQuarterTurns);
   const uint32_t prev = state.buttons;
   // Held now after a tap at the last read, with no change since: that tap's
   // own press, already counted.

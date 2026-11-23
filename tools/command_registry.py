@@ -61,6 +61,9 @@ OUT_REFERENCE = REPO / "docs" / "COMMAND_REFERENCE.md"
 # (REMOVED_NAMES) and checks that the two agree and that no string sends a
 # removed name; this audit fails when one is a registry row again.
 RETIRED_NAMES = {
+    "anoencoderinvert": "anomount",
+    "anoencoderswaplr": "anomount",
+    "anoencoderswapud": "anomount",
     "apdsenabled": "apdsautostart",
     "automationadd": "automation add",
     "automationrun": "automation run",
@@ -82,6 +85,9 @@ RETIRED_NAMES = {
     "httpenabled": "httpautostart",
     "httpread": "httpstatus",
     "imuenabled": "imuautostart",
+    "imuinputinvertx": "imuinputmount",
+    "imuinputinverty": "imuinputmount",
+    "imuinputswapxy": "imuinputmount",
     "inputenabled": "inputautostart",
     "llmenabled": "llmautostart",
     "micenabled": "micautostart",

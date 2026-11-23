@@ -43,7 +43,11 @@ const char* cmd_imuinputtapms(const String& argsInput);
 const char* cmd_imuinputtapmerge(const String& argsInput);
 const char* cmd_imuinputtilt(const String& argsInput);
 const char* cmd_imuinputshake(const String& argsInput);
-const char* cmd_imuinputswapxy(const String& argsInput);
-const char* cmd_imuinputinvertx(const String& argsInput);
-const char* cmd_imuinputinverty(const String& argsInput);
+const char* cmd_imuinputmount(const String& argsInput);
+const char* cmd_imuinputlearn(const String& argsInput);
+// Main loop: saves a mount the teach step learned (imuinputlearn, or the step
+// offered after a shake calibration).
+void imuInputTick();
+#else
+inline void imuInputTick() {}
 #endif

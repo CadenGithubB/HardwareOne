@@ -1,5 +1,5 @@
 // The ANO rotary encoder's poll without the hardware (i2csensor_ano_encoder_core.h):
-// pins to buttons with the swaps, the address rule, taps from the interrupt
+// pins to buttons through the mount and the screen's rotation, the address rule, taps from the interrupt
 // flags, the RIGHT tap = SELECT at release and RIGHT+IN = START rules, the
 // wheel's detents, and failed or implausible reads.
 
@@ -34,31 +34,48 @@ AnoPollReads reads(uint32_t held, uint32_t changed = 0, int32_t delta = 0) {
   return r;
 }
 
-AnoPollResult poll(AnoPollState& s, const AnoPollReads& r, bool invert = false) {
-  return anoPoll(s, r, false, false, invert);
+AnoPollResult poll(AnoPollState& s, const AnoPollReads& r, bool mirror = false) {
+  return anoPoll(s, r, input_rotation::Mount{0, mirror});
 }
 
 void testPinsAndSwaps() {
+  using input_rotation::Mount;
   const uint32_t up = 1u << kAnoPinUp, down = 1u << kAnoPinDown;
   const uint32_t left = 1u << kAnoPinLeft, right = 1u << kAnoPinRight, in = 1u << kAnoPinIn;
-  assert(anoPinsToButtons(in, false, false) == ANO_BTN_IN);
-  assert(anoPinsToButtons(up | left, false, false) == (ANO_BTN_UP | ANO_BTN_LEFT));
-  // Each swap exchanges exactly its own pair, in all four combinations.
-  assert(anoPinsToButtons(up, true, false) == ANO_BTN_DOWN);
-  assert(anoPinsToButtons(down, true, false) == ANO_BTN_UP);
-  assert(anoPinsToButtons(left, true, false) == ANO_BTN_LEFT);
-  assert(anoPinsToButtons(left, false, true) == ANO_BTN_RIGHT);
-  assert(anoPinsToButtons(right, false, true) == ANO_BTN_LEFT);
-  assert(anoPinsToButtons(up, false, true) == ANO_BTN_UP);
-  assert(anoPinsToButtons(up | right, true, true) == (ANO_BTN_DOWN | ANO_BTN_LEFT));
-  assert(anoPinsToButtons(in, true, true) == ANO_BTN_IN);
+  assert(anoPinsToButtons(in) == ANO_BTN_IN);
+  assert(anoPinsToButtons(up | left) == (ANO_BTN_UP | ANO_BTN_LEFT));
+  // The default mount (180): both pairs exchanged, as the two old swaps did.
+  assert(anoPinsToButtons(up, Mount{2, false}) == ANO_BTN_DOWN);
+  assert(anoPinsToButtons(down, Mount{2, false}) == ANO_BTN_UP);
+  assert(anoPinsToButtons(up | right, Mount{2, false}) == (ANO_BTN_DOWN | ANO_BTN_LEFT));
+  assert(anoPinsToButtons(in, Mount{2, false}) == ANO_BTN_IN);
+  // Mirror: LEFT and RIGHT exchanged (the old LEFT/RIGHT swap); 180 mirror
+  // is the old UP/DOWN swap.
+  assert(anoPinsToButtons(left, Mount{0, true}) == ANO_BTN_RIGHT);
+  assert(anoPinsToButtons(up, Mount{0, true}) == ANO_BTN_UP);
+  assert(anoPinsToButtons(up, Mount{2, true}) == ANO_BTN_DOWN);
+  assert(anoPinsToButtons(left, Mount{2, true}) == ANO_BTN_LEFT);
+  // A quarter turn: the ring's RIGHT is at the top (mount 90, or the screen
+  // turned 90 with a straight mount): it is UP, with UP's roles.
+  assert(anoPinsToButtons(right, Mount{1, false}) == ANO_BTN_UP);
+  assert(anoPinsToButtons(right, Mount{0, false}, 1) == ANO_BTN_UP);
+  assert(anoPinsToButtons(up, Mount{0, false}, 1) == ANO_BTN_LEFT);
+  // The mount first, then the screen: 90 + 270 is straight.
+  assert(anoPinsToButtons(up | right, Mount{1, false}, 3) == (ANO_BTN_UP | ANO_BTN_RIGHT));
   // Pins that are not buttons are ignored.
-  assert(anoPinsToButtons(1u << 0 | 1u << 9, false, false) == 0);
-  // The swaps apply to the interrupt flags too.
+  assert(anoPinsToButtons(1u << 0 | 1u << 9) == 0);
+  // The mount applies to the interrupt flags too.
   AnoPollState s;
   AnoPollReads r = reads(0, ANO_BTN_UP);
-  const AnoPollResult swapped = anoPoll(s, r, true, false, false);
-  assert(swapped.edges == ANO_BTN_DOWN && swapped.presses == ANO_BTN_DOWN);
+  const AnoPollResult turned = anoPoll(s, r, Mount{2, false});
+  assert(turned.edges == ANO_BTN_DOWN && turned.presses == ANO_BTN_DOWN);
+  // The screen at 270 puts the physical RIGHT button at the bottom: it is
+  // DOWN, a navigation step, and the button now on the right (physical UP)
+  // carries SELECT.
+  AnoPollState t;
+  assert(anoPoll(t, reads(0, ANO_BTN_RIGHT), Mount{0, false}, 3).edges == ANO_BTN_DOWN);
+  AnoPollState u;
+  assert(anoPoll(u, reads(0, ANO_BTN_UP), Mount{0, false}, 3).edges == ANO_VIRT_SELECT);
 }
 
 void testAddressRule() {
@@ -230,8 +247,11 @@ void testWheel() {
   AnoPollState s;
   AnoPollResult r = poll(s, reads(0, 0, 3));
   assert(r.rawDelta == 3 && r.detents == 3);
+  // A mirrored ring (seen from behind) turns the other way; a turned one does not.
   r = poll(s, reads(0, 0, -2), true);
   assert(r.rawDelta == -2 && r.detents == 2);
+  r = anoPoll(s, reads(0, 0, -2), input_rotation::Mount{2, false}, 1);
+  assert(r.detents == -2);
   // A delta read that failed counts nothing.
   AnoPollReads failed = reads(0, 0, 7);
   failed.deltaOk = false;

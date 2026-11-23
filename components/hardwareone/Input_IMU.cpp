@@ -44,6 +44,12 @@ static uint32_t sUnpublishedPresses = 0;   // presses the input reading has not 
 static bool sUnpublishedActivity = false;
 
 static std::atomic<bool> sRecentreRequest{false};
+static std::atomic<bool> sLearnRequest{false};
+// The teach step's result for the main loop and the waiting command: the
+// mount code learned (-1 none) and a count of finished teach steps.
+static std::atomic<int> sLearnedMount{-1};
+static std::atomic<uint32_t> sLearnSeq{0};
+static std::atomic<bool> sLearnTimedOut{false};
 
 // ---- What a command reads ---------------------------------------------------
 // Written by the hook, copied by readers: a version counter that is odd while
@@ -68,6 +74,7 @@ struct ImuInputStatus {
   uint8_t dropTaps;     // the last such run: its taps, side or face, and why (imuinput::kDrop*)
   bool dropFace;
   uint8_t dropWhy;
+  bool learning;        // the teach step is waiting for a lean
 };
 EXT_RAM_BSS_ATTR static ImuInputStatus sStatus;
 static std::atomic<uint32_t> sStatusVersion{0};
@@ -95,9 +102,10 @@ static imuinput::Config configFromSettings() {
   cfg.engageDeg = static_cast<float>(constrain(gSettings.imuInputTiltDeg, 8, 40));
   cfg.releaseDeg = cfg.engageDeg - 4.0f;
   cfg.fullDeg = cfg.engageDeg + 15.0f;
-  cfg.swapXY = gSettings.imuInputSwapXY;
-  cfg.invertX = gSettings.imuInputInvertX;
-  cfg.invertY = gSettings.imuInputInvertY;
+  const input_rotation::Mount mount = input_rotation::mountFromCode(gSettings.imuInputMount);
+  cfg.mountTurns = static_cast<uint8_t>(mount.quarterTurns);
+  cfg.mountMirror = mount.mirror;
+  cfg.learnAfterCalibration = true;  // owner, 2026-11-23: offered after every calibration
   cfg.shakeCalibrate = gSettings.imuInputShakeCalibrate;
   return cfg;
 }
@@ -143,6 +151,29 @@ static void showCalibration(uint8_t event, uint8_t secondsLeft) {
 #endif
 }
 
+// The teach step's prompts, in the calibration's toast.
+static void showLearn(uint8_t event, int code) {
+  char text[64];
+  uint32_t ms = 3000;
+  switch (event) {
+    case imuinput::kLearnStarted:
+      snprintf(text, sizeof(text), "Tilt the sign toward the top of the screen");
+      ms = imuinput::kLearnTimeoutMs;
+      break;
+    case imuinput::kLearnDone:
+      snprintf(text, sizeof(text), "Tilt learned: mount %s", input_rotation::mountName(code));
+      break;
+    default:
+      return;  // a timeout ends quietly (the prompt runs out on its own)
+  }
+  INFO_INPUT_LIFECYCLEF("[IMU input] %s", text);
+#if ENABLE_OLED_DISPLAY
+  constexpr uint32_t kCalToastTag = 0x494D5543u;  // "IMUC", the calibration's toast
+  oledToastUpdate(kCalToastTag, text, ms,
+                  event == imuinput::kLearnDone ? OledUiIcon::SUCCESS : OledUiIcon::INFO);
+#endif
+}
+
 static void imuInputHook(const MotionHookSample& sample, void*) {
   ImuInputStatus status = sStatus;  // only this function writes it
   status.ms = sample.ms;
@@ -164,6 +195,8 @@ static void imuInputHook(const MotionHookSample& sample, void*) {
   status.unsupported = false;
 
   if (sRecentreRequest.exchange(false)) sEngine.recentre();
+  imuinput::Output learnStart;
+  if (sLearnRequest.exchange(false)) sEngine.startLearn(sample.ms, &learnStart);
   imuinput::Sample in;
   in.ms = sample.ms;
   for (int i = 0; i < 3; ++i) {
@@ -197,7 +230,26 @@ static void imuInputHook(const MotionHookSample& sample, void*) {
   status.dropTaps = sEngine.lastDropTaps();
   status.dropFace = sEngine.lastDropFace();
   status.dropWhy = sEngine.lastDrop();
+  status.learning = sEngine.learning();
   if (out.calEvent != imuinput::kCalNone) showCalibration(out.calEvent, out.calSecondsLeft);
+  const uint8_t learnEvent = learnStart.learnEvent ? learnStart.learnEvent : out.learnEvent;
+  if (learnEvent == imuinput::kLearnDone) {
+    // Up on the screen as it is seen: the screen's rotation is applied after
+    // the mount, so it is part of the answer; the mirror is kept.
+    const bool mirror = input_rotation::mountFromCode(gSettings.imuInputMount).mirror;
+    const int turns = input_rotation::learnQuarterTurns(static_cast<input_rotation::Dir>(out.learnDir), mirror,
+                                                        inputScreenQuarterTurns());
+    const int code = input_rotation::mountCode(turns * 90, mirror);
+    sLearnedMount.store(code);
+    sLearnTimedOut.store(false);
+    sLearnSeq.fetch_add(1);
+    showLearn(learnEvent, code);
+  } else if (learnEvent == imuinput::kLearnTimedOut) {
+    sLearnTimedOut.store(true);
+    sLearnSeq.fetch_add(1);
+  } else if (learnEvent == imuinput::kLearnStarted) {
+    showLearn(learnEvent, 0);
+  }
   status.leanX = sEngine.leanX();
   status.leanY = sEngine.leanY();
   if (out.pressed) {
@@ -344,7 +396,7 @@ const char* cmd_imuinputread(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024,
              "{\"schema\":1,\"state\":\"%s\",\"running\":%s,\"connected\":%s,\"x\":%d,\"y\":%d,\"buttons\":%u,"
              "\"leanX\":%.1f,\"leanY\":%.1f,\"taps\":%u,\"shaking\":%s,\"presses\":%lu,\"recentres\":%lu,"
-             "\"lastPress\":%u,\"lastTaps\":%u,\"drops\":%lu,\"lastDrop\":{\"taps\":%u,\"hit\":\"%s\",\"why\":\"%s\"},\"tapWindowMs\":%d,\"tiltDeg\":%d,\"shakeCalibrate\":%s,\"swapXY\":%s,\"invertX\":%s,\"invertY\":%s}",
+             "\"lastPress\":%u,\"lastTaps\":%u,\"drops\":%lu,\"lastDrop\":{\"taps\":%u,\"hit\":\"%s\",\"why\":\"%s\"},\"tapWindowMs\":%d,\"tiltDeg\":%d,\"shakeCalibrate\":%s,\"mount\":%d,\"mirror\":%s,\"learning\":%s}",
              state, gInputRunning ? "true" : "false", gInputConnected ? "true" : "false", x, y,
              static_cast<unsigned>(live ? s.held : 0), static_cast<double>(live ? s.leanX : 0.0f),
              static_cast<double>(live ? s.leanY : 0.0f), static_cast<unsigned>(live ? s.tapCount : 0),
@@ -353,8 +405,9 @@ const char* cmd_imuinputread(const String& argsInput) {
              static_cast<unsigned>(s.lastTaps), static_cast<unsigned long>(s.drops),
              static_cast<unsigned>(s.dropTaps), s.dropFace ? "face" : "side", imuinput::dropName(s.dropWhy),
              gSettings.imuInputTapWindowMs, gSettings.imuInputTiltDeg,
-             gSettings.imuInputShakeCalibrate ? "true" : "false", gSettings.imuInputSwapXY ? "true" : "false",
-             gSettings.imuInputInvertX ? "true" : "false", gSettings.imuInputInvertY ? "true" : "false");
+             gSettings.imuInputShakeCalibrate ? "true" : "false", input_rotation::mountDegrees(gSettings.imuInputMount),
+             input_rotation::mountFromCode(gSettings.imuInputMount).mirror ? "true" : "false",
+             s.learning ? "true" : "false");
     return getDebugBuffer();
   }
   if (!gInputRunning) return "Error: IMU input is not running. Start it with 'openinput'.";
@@ -468,22 +521,58 @@ const char* cmd_imuinputshake(const String& argsInput) {
                      "[IMU input] Shake: nothing");
 }
 
-const char* cmd_imuinputswapxy(const String& argsInput) {
+// imuinputmount [0|90|180|270 [mirror]]: how the sensor sits against the
+// panel at rotation 0, in the screen's terms (Input_RotationCore.h): mirrored
+// first, then turned. The screen's own rotation (oledrotation) is applied
+// after it. Replaces imuinputswapxy / imuinputinvertx / imuinputinverty.
+const char* cmd_imuinputmount(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return boolSetting(gSettings.imuInputSwapXY, argsInput, true, "[IMU input] Tilt axes: swapped",
-                     "[IMU input] Tilt axes: normal");
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  String arg = argsInput;
+  arg.trim();
+  if (arg.length() > 0) {
+    int code = 0;
+    if (!input_rotation::parseMountArg(arg.c_str(), code)) {
+      return "Error: The mount is 0, 90, 180 or 270, optionally followed by mirror. Usage: imuinputmount [0|90|180|270] [mirror]";
+    }
+    setSetting(gSettings.imuInputMount, code);
+  }
+  snprintf(getDebugBuffer(), 1024, "[IMU input] Mount: %s", input_rotation::mountName(gSettings.imuInputMount));
+  return getDebugBuffer();
 }
 
-const char* cmd_imuinputinvertx(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return boolSetting(gSettings.imuInputInvertX, argsInput, true, "[IMU input] Left/right tilt: inverted",
-                     "[IMU input] Left/right tilt: normal");
+// Main loop: a mount the teach step learned is saved here (the hook runs on
+// the IMU task and does not write settings).
+void imuInputTick() {
+  const int code = sLearnedMount.exchange(-1);
+  if (code >= 0) setSetting(gSettings.imuInputMount, code);
 }
 
-const char* cmd_imuinputinverty(const String& argsInput) {
+// imuinputlearn: the teach step. Tilt the sign toward the top of the screen
+// within 10 s; the lean's axis and sign set imuinputmount (keeping its
+// mirror). Waits for the answer; no lean leaves the mount as it was.
+const char* cmd_imuinputlearn(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return boolSetting(gSettings.imuInputInvertY, argsInput, true, "[IMU input] Up/down tilt: inverted",
-                     "[IMU input] Up/down tilt: normal");
+  String text = argsInput;
+  text.trim();
+  if (text.length() > 0) return "Error: invalid arguments — Usage: imuinputlearn";
+  if (!gInputRunning) return "Error: IMU input is not running. Start it with 'openinput'.";
+  if (!gInputConnected) return "Error: No samples are arriving from the IMU. Check 'imustatus'.";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  const uint32_t seq = sLearnSeq.load();
+  sLearnRequest.store(true);
+  const uint32_t start = millis();
+  while (sLearnSeq.load() == seq && (uint32_t)(millis() - start) < imuinput::kLearnTimeoutMs + 1000) {
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+  if (sLearnSeq.load() == seq || sLearnTimedOut.load()) {
+    return "[IMU input] No tilt within 10 s: the mount is unchanged. Run imuinputlearn and tilt the sign "
+           "toward the top of the screen.";
+  }
+  imuInputTick();  // save it now, so the reply states what is in use
+  snprintf(getDebugBuffer(), 1024, "[IMU input] Tilt learned: mount %s",
+           input_rotation::mountName(gSettings.imuInputMount));
+  return getDebugBuffer();
 }
 
 // The open/close/autostart commands are the input module's (HAL_Input.cpp).
@@ -494,22 +583,20 @@ const CommandEntry imuInputCommands[] = {
   { "imuinputtapmerge", "Tap flags closer than this many ms are one knock (its rebound) <0..300>", true, cmd_imuinputtapmerge, "Usage: imuinputtapmerge [0..300]" },
   { "imuinputtilt",    "Tilt angle in degrees that moves the joystick <8..40>", true, cmd_imuinputtilt, "Usage: imuinputtilt [8..40]" },
   { "imuinputshake",   "A shake calibrates the tilt: set the device down, hold still 3 s [on|off]", true, cmd_imuinputshake, "Usage: imuinputshake [on|off]" },
-  { "imuinputswapxy",  "Swap the tilt axes [on|off|toggle]", true, cmd_imuinputswapxy, "Usage: imuinputswapxy [on|off|toggle]" },
-  { "imuinputinvertx", "Invert left/right tilt [on|off|toggle]", true, cmd_imuinputinvertx, "Usage: imuinputinvertx [on|off|toggle]" },
-  { "imuinputinverty", "Invert up/down tilt [on|off|toggle]", true, cmd_imuinputinverty, "Usage: imuinputinverty [on|off|toggle]" },
+  { "imuinputmount",   "How the sensor sits, in the screen's terms: [0|90|180|270] [mirror]", true, cmd_imuinputmount, "Usage: imuinputmount [0|90|180|270] [mirror]" },
+  { "imuinputlearn",   "Teach the mount: tilt the sign toward the top of the screen within 10 s", true, cmd_imuinputlearn, "Usage: imuinputlearn" },
 };
 const size_t imuInputCommandsCount = sizeof(imuInputCommands) / sizeof(imuInputCommands[0]);
 
 // ---- Settings ---------------------------------------------------------------
 // Only this device's entries; autostart is the input module's (HAL_Input.cpp).
+static const char kImuMountOptions[] = INPUT_MOUNT_OPTIONS;
 static const SettingEntry imuInputSettingEntries[] = {
   { "imuInputTapWindowMs", SETTING_INT,  &gSettings.imuInputTapWindowMs, 450, 0, nullptr, 200, 800, "Tap window (ms)",       nullptr, false, nullptr, "imuinputtapms" },
   { "imuInputTapMergeMs",  SETTING_INT,  &gSettings.imuInputTapMergeMs,  0,   0, nullptr, 0,   300, "Tap merge (ms)",        nullptr, false, nullptr, "imuinputtapmerge" },
   { "imuInputTiltDeg",     SETTING_INT,  &gSettings.imuInputTiltDeg,      15, 0, nullptr, 8,   40,  "Tilt angle (degrees)",  nullptr, false, nullptr, "imuinputtilt" },
   { "imuInputShakeCalibrate",  SETTING_BOOL, &gSettings.imuInputShakeCalibrate,    1, 0, nullptr, 0,   1,   "Shake calibrates tilt",        nullptr, false, nullptr, "imuinputshake" },
-  { "imuInputSwapXY",      SETTING_BOOL, &gSettings.imuInputSwapXY,        0, 0, nullptr, 0,   1,   "Swap tilt axes",        nullptr, false, nullptr, "imuinputswapxy" },
-  { "imuInputInvertX",     SETTING_BOOL, &gSettings.imuInputInvertX,       0, 0, nullptr, 0,   1,   "Invert left/right tilt", nullptr, false, nullptr, "imuinputinvertx" },
-  { "imuInputInvertY",     SETTING_BOOL, &gSettings.imuInputInvertY,       0, 0, nullptr, 0,   1,   "Invert up/down tilt",   nullptr, false, nullptr, "imuinputinverty" },
+  { "imuInputMount",       SETTING_INT,  &gSettings.imuInputMount,         0, 0, nullptr, 0,   271, "Mount (degrees, mirror)", kImuMountOptions, false, nullptr, "imuinputmount" },
 };
 
 static bool isImuInputConnected() { return gInputConnected; }

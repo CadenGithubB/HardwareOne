@@ -298,16 +298,12 @@ struct Settings {
       oledThermalScale(2.5f),
       inputAutoStart(false),
       anoEncoderI2cAddr(0x49),
-      anoEncoderInvert(false),
-      anoEncoderSwapUpDown(true),     // Adafruit ANO breakout's silkscreen UP/DOWN map inverted by default
-      anoEncoderSwapLeftRight(true),  // ditto LEFT/RIGHT — matches the typical assembled orientation
+      anoMount(180),                  // the breakout as typically assembled reads turned 180 (anomount)
       imuInputTapWindowMs(450),
       imuInputTapMergeMs(0),
       imuInputTiltDeg(15),
       imuInputShakeCalibrate(true),
-      imuInputSwapXY(false),
-      imuInputInvertX(false),
-      imuInputInvertY(false),
+      imuInputMount(0),
       thermalAutoStart(false),
       tofAutoStart(false),
       imuAutoStart(false),
@@ -985,16 +981,12 @@ struct Settings {
   // Sensor Auto-Start settings (all I2C sensors)
   bool inputAutoStart;          // Auto-start the input device (gamepad or ANO) after boot
   int  anoEncoderI2cAddr;       // ANO I2C address override (default 0x49 = I2C_ADDR_ANO_ENCODER)
-  bool anoEncoderInvert;        // Flip rotation direction if encoder is mounted backwards
-  bool anoEncoderSwapUpDown;    // Swap UP/DOWN button bits (for vertically-mirrored mounts)
-  bool anoEncoderSwapLeftRight; // Swap LEFT/RIGHT button bits (for horizontally-mirrored mounts)
+  int anoMount;                 // How the ANO ring sits: 0/90/180/270, +1 mirrored (anomount; Input_RotationCore.h)
   int  imuInputTapWindowMs;     // IMU input: a run of taps ends this long after its last tap (Input_IMU: imuinputtapms)
   int  imuInputTapMergeMs;      // IMU input: tap flags closer than this are one knock (its rebound) (imuinputtapmerge)
   int  imuInputTiltDeg;         // IMU input: lean from the centre pose that deflects the joystick (imuinputtilt)
   bool imuInputShakeCalibrate;  // IMU input: a sustained shake starts a tilt calibration (imuinputshake)
-  bool imuInputSwapXY;          // IMU input: swap the tilt axes (the sensor's mounting)
-  bool imuInputInvertX;         // IMU input: invert left/right tilt
-  bool imuInputInvertY;         // IMU input: invert up/down tilt
+  int imuInputMount;            // IMU input: how the sensor sits: 0/90/180/270, +1 mirrored (imuinputmount)
   bool thermalAutoStart;        // Auto-start thermal camera after boot
   bool tofAutoStart;            // Auto-start ToF distance sensor after boot
   bool imuAutoStart;            // Auto-start IMU after boot
