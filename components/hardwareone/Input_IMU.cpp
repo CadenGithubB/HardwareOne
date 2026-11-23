@@ -10,6 +10,7 @@
 #include "HAL_Input.h"
 #include "HAL_InputInternal.h"
 #include "HAL_Motion.h"
+#include "HAL_MotionBackend.h"  // motionBackendInfo: the sample period (decimation)
 #include "HAL_MotionHookCore.h"
 #include "Input_IMUCore.h"
 #include "System_Command.h"
@@ -40,6 +41,9 @@ static SemaphoreHandle_t sStateMutex = xSemaphoreCreateMutexStatic(&sStateMutexS
 // Only the IMU task touches these, and only inside the hook: start and stop
 // change them while the hook is not registered.
 EXT_RAM_BSS_ATTR static imuinput::Engine sEngine;
+// A feed faster than the engine's 20 ms (the BNO055: 10 ms) reaches it
+// through this, every tap kept (Input_IMUCore.h).
+EXT_RAM_BSS_ATTR static imuinput::Decimator sDecimator;
 static uint32_t sUnpublishedPresses = 0;   // presses the input reading has not taken yet
 static bool sUnpublishedActivity = false;
 
@@ -61,7 +65,7 @@ struct ImuInputStatus {
   bool centring;        // one is being taken
   bool shaking;
   bool calibrating;     // a shake's calibration is waiting for the device to be still
-  bool unsupported;     // the IMU's chip has no tap detection or no gravity
+  bool unsupported;     // the IMU's backend gives no taps or no gravity
   bool imuStopped;      // the IMU closed under the input
   float leanX, leanY;   // degrees from the centre pose
   uint32_t presses;     // buttons pressed since the input opened
@@ -117,7 +121,8 @@ static imuinput::Config configFromSettings() {
 // On the IMU task, once per sample (HAL_MotionHookCore.h has the contract):
 // no waiting, no logging, a few hundred bytes of stack. The input reading is
 // published with no wait for its lock; presses that could not be handed over
-// go with the next sample, 20 ms later. A deflection is never left behind
+// go with the next engine update, 20 ms later. A feed faster than 20 ms is
+// decimated first (sDecimator), its taps carried to the next update. A deflection is never left behind
 // when the samples stop: the input layer treats a reading older than a
 // quarter of a second as centred (HAL_Input.cpp).
 // The calibration's prompts: one toast, updated in place as it goes, and a
@@ -220,17 +225,23 @@ static void imuInputHook(const MotionHookSample& sample, void*) {
   }
   status.unsupported = false;
 
+  imuinput::Sample raw;
+  raw.ms = sample.ms;
+  for (int i = 0; i < 3; ++i) {
+    raw.up[i] = sample.gravity[i];
+    raw.accel[i] = sample.accel[i];
+  }
+  raw.tap = sample.tapLatched;
+  raw.tapKind = sample.tapKind;
+  imuinput::Sample in;
+  if (!sDecimator.add(raw, imuinput::decimationFor(motionBackendInfo().samplePeriodMs), in)) {
+    gInputConnected = true;  // samples arrive; the engine takes the next one
+    statusWrite(status);
+    return;
+  }
   if (sRecentreRequest.exchange(false)) sEngine.recentre();
   imuinput::Output learnStart;
   if (sLearnRequest.exchange(false)) sEngine.startLearn(sample.ms, &learnStart);
-  imuinput::Sample in;
-  in.ms = sample.ms;
-  for (int i = 0; i < 3; ++i) {
-    in.up[i] = sample.gravity[i];
-    in.accel[i] = sample.accel[i];
-  }
-  in.tap = sample.tapLatched;
-  in.tapKind = sample.tapKind;
   const uint8_t tapsBefore = sEngine.tapCount();
   const imuinput::Output out = sEngine.update(in, configFromSettings());
 
@@ -317,6 +328,7 @@ const char* imuInputStartReply() {
     why = "Error: IMU input is busy. Retry openinput in a few seconds.";
   } else {
     sEngine.reset();
+    sDecimator.reset();
     sUnpublishedPresses = 0;
     sUnpublishedActivity = false;
     sRecentreRequest.store(false);
@@ -437,8 +449,8 @@ const char* cmd_imuinputread(const String& argsInput) {
   }
   if (!gInputRunning) return "Error: IMU input is not running. Start it with 'openinput'.";
   if (s.unsupported) {
-    return "Error: This build's IMU chip does not detect taps or give the direction of gravity, so it cannot "
-           "be the input device. IMU input needs the Adafruit 4517 (IMU_DEVICE_TYPE 2).";
+    return "Error: The IMU gives no taps or no direction of gravity yet, so it cannot be the input device. "
+           "Check 'imustatus' (taps found by the firmware) and reopen the IMU ('closeinput', then 'openinput').";
   }
   if (s.imuStopped || !gImuRunning) {
     return "Error: The IMU is closed, so there are no taps or tilt to read. Open it with 'openimu' and check "

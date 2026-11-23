@@ -50,9 +50,12 @@
 // calibration the step is only offered: a face tap within kLearnOfferMs arms
 // it, anything else leaves the mount alone and the joystick works at once.
 //
-// The rates are the Adafruit 4517's: one sample every 20 ms. The windows that
-// are counted in samples (strong samples, the dwell, the centre capture)
-// assume about that; the times are real milliseconds from each sample.
+// The engine runs at one sample every 20 ms (kEnginePeriodMs, the Adafruit
+// 4517's rate). The windows that are counted in samples (strong samples, the
+// dwell, the centre capture) assume about that; the times are real
+// milliseconds from each sample. A faster feed (the BNO055 with IMU input: one
+// sample every 10 ms) goes through the Decimator below, which hands the engine
+// every second sample and carries each tap, with its kind, to the next one.
 //
 // Pure header (C library only); host-tested by test_input_imu_core.cpp.
 #pragma once
@@ -259,6 +262,62 @@ inline int deflectionFor(float deg, const Config& cfg) {
   if (t > 1.0f) t = 1.0f;
   return kJoyMinDeflection + static_cast<int>(t * (kJoyMaxDeflection - kJoyMinDeflection) + 0.5f);
 }
+
+// ---- Decimation ---------------------------------------------------------------
+// The engine's sample period, and how many samples of a feed make one engine
+// update: 1 at 20 ms and slower, 2 at 10 ms (a backend's samplePeriodMs; 0:
+// it samples every imuDevicePollMs, slower than this).
+constexpr uint32_t kEnginePeriodMs = 20;
+inline uint8_t decimationFor(uint16_t samplePeriodMs) {
+  if (samplePeriodMs == 0 || samplePeriodMs * 3u >= kEnginePeriodMs * 2u) return 1;  // 14 ms and slower
+  const uint32_t n = (kEnginePeriodMs + samplePeriodMs / 2u) / samplePeriodMs;
+  return static_cast<uint8_t>(n > 8 ? 8 : n);
+}
+
+// Hands every `factor`-th sample to the engine. No tap is lost: a tap on a
+// sample that is not handed over waits, with its kind, for the next one that
+// is; taps waiting there go out one per engine update, oldest first (two taps
+// within one engine period are two knocks the detector told apart). With
+// factor 1 every sample passes unchanged. A gap (kGapMs) drops what waits, as
+// the engine drops its run.
+class Decimator {
+ public:
+  void reset() { *this = Decimator(); }
+  // True when `s` makes an engine update: `out` is then the sample to feed.
+  bool add(const Sample& s, uint8_t factor, Sample& out) {
+    if (have_ && static_cast<uint32_t>(s.ms - lastMs_) > kGapMs) {
+      count_ = 0;
+      kinds_ = 0;
+      since_ = 0;
+    }
+    have_ = true;
+    lastMs_ = s.ms;
+    if (s.tap && count_ < kMaxWaiting) {
+      kinds_ = static_cast<uint16_t>(kinds_ | ((s.tapKind & 3u) << (2u * count_)));
+      ++count_;
+    }
+    if (++since_ < (factor ? factor : 1)) return false;
+    since_ = 0;
+    out = s;
+    out.tap = count_ > 0;
+    out.tapKind = kTapUnknown;
+    if (out.tap) {
+      out.tapKind = static_cast<uint8_t>(kinds_ & 3u);
+      kinds_ = static_cast<uint16_t>(kinds_ >> 2);
+      --count_;
+    }
+    return true;
+  }
+  uint8_t waiting() const { return count_; }
+
+ private:
+  static constexpr uint8_t kMaxWaiting = 8;
+  bool have_ = false;
+  uint32_t lastMs_ = 0;
+  uint8_t since_ = 0;    // samples since the last engine update
+  uint8_t count_ = 0;    // taps waiting
+  uint16_t kinds_ = 0;   // their kinds, two bits each, oldest in the low bits
+};
 
 class Engine {
  public:

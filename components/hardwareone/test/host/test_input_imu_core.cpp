@@ -628,7 +628,209 @@ static void testLeanAxes() {
   }
 }
 
+// ---- A 100 Hz feed through the decimator (the BNO055 with IMU input) -------------
+static void testDecimationFactor() {
+  assert(decimationFor(0) == 1);   // sampled every imuDevicePollMs
+  assert(decimationFor(20) == 1);  // the 4517
+  assert(decimationFor(50) == 1);
+  assert(decimationFor(10) == 2);  // the BNO055
+  assert(decimationFor(5) == 4);
+  assert(decimationFor(1) == 8);   // capped
+}
+
+static void testDecimatorPassThrough() {
+  // Factor 1: every sample goes to the engine unchanged, taps and kinds too.
+  Decimator d;
+  for (uint32_t i = 0; i < 50; ++i) {
+    Sample s;
+    s.ms = 1000 + 20 * i;
+    s.up[0] = 0.1f * (float)i;
+    s.accel[2] = (float)i;
+    s.tap = i % 3 == 0;
+    s.tapKind = s.tap ? (uint8_t)(i % 2 ? kTapFace : kTapSide) : kTapUnknown;
+    Sample out;
+    assert(d.add(s, 1, out));
+    assert(out.ms == s.ms && out.up[0] == s.up[0] && out.accel[2] == s.accel[2]);
+    assert(out.tap == s.tap && out.tapKind == s.tapKind);
+  }
+  assert(d.waiting() == 0);
+}
+
+static void testDecimatorKeepsEveryTap() {
+  Decimator d;
+  Sample out;
+  uint32_t ms = 1000;
+  auto feed = [&](bool tap, uint8_t kind, bool& forwarded) {
+    Sample s;
+    s.ms = ms;
+    s.tap = tap;
+    s.tapKind = kind;
+    ms += 10;
+    forwarded = d.add(s, 2, out);
+  };
+  bool fwd = false;
+  // Every second sample goes on: the first is held, the second forwarded.
+  feed(false, 0, fwd);
+  assert(!fwd);
+  feed(false, 0, fwd);
+  assert(fwd && !out.tap && out.ms == 1010);
+  // A tap on the held sample goes out with the next one, with its kind.
+  feed(true, kTapFace, fwd);
+  assert(!fwd && d.waiting() == 1);
+  feed(false, 0, fwd);
+  assert(fwd && out.tap && out.tapKind == kTapFace && d.waiting() == 0);
+  // Taps on both samples of one engine period: one now, the other at the next
+  // update, oldest first.
+  feed(true, kTapSide, fwd);
+  feed(true, kTapFace, fwd);
+  assert(fwd && out.tap && out.tapKind == kTapSide && d.waiting() == 1);
+  feed(false, 0, fwd);
+  assert(!fwd);
+  feed(false, 0, fwd);
+  assert(fwd && out.tap && out.tapKind == kTapFace && d.waiting() == 0);
+  feed(false, 0, fwd);
+  feed(false, 0, fwd);
+  assert(fwd && !out.tap);
+  // A gap drops what waits (the engine drops its run as well).
+  feed(true, kTapSide, fwd);
+  assert(d.waiting() == 1);
+  ms += kGapMs + 50;
+  feed(false, 0, fwd);
+  assert(d.waiting() == 0);
+}
+
+// The engine fed at 100 Hz through the decimator: the same buttons, and the
+// sample-counted windows keep their times.
+struct Rig100 {
+  Engine engine;
+  Decimator dec;
+  Config cfg;
+  uint32_t ms = 1000;
+  float up[3] = {0, 0, 1};
+  uint8_t pressedSince = 0;
+  int recentres = 0;
+  int calEvents[8] = {0};
+  int updates = 0;
+  Output last;
+  void step(bool tap = false, uint8_t kind = kTapSide, float extraAccel = 0.0f) {
+    Sample s;
+    s.ms = ms;
+    for (int i = 0; i < 3; ++i) {
+      s.up[i] = up[i];
+      s.accel[i] = kGravity * up[i];
+    }
+    s.accel[0] += extraAccel;
+    s.tap = tap;
+    s.tapKind = kind;
+    Sample in;
+    if (dec.add(s, decimationFor(10), in)) {
+      last = engine.update(in, cfg);
+      ++updates;
+      pressedSince |= last.pressed;
+      if (last.recentred) ++recentres;
+      if (last.calEvent) ++calEvents[last.calEvent];
+    }
+    ms += 10;
+  }
+  void run(uint32_t forMs) {
+    for (uint32_t t = 0; t < forMs; t += 10) step();
+  }
+  // One knock: the detector's tap on one sample (odd or even), strong.
+  void taps(int count, uint32_t gapMs, uint8_t kind, bool odd) {
+    for (int i = 0; i < count; ++i) {
+      if (odd) step();
+      step(true, kind, 15.0f);
+      run(gapMs - (odd ? 20 : 10));
+    }
+  }
+  uint8_t take() {
+    const uint8_t p = pressedSince;
+    pressedSince = 0;
+    return p;
+  }
+};
+
+static void testEngineAt100Hz() {
+  const uint8_t side[] = {0, kButtonA, kButtonB, kButtonY, kButtonX};
+  for (int odd = 0; odd < 2; ++odd) {
+    for (int count = 1; count <= 4; ++count) {
+      Rig100 r;
+      r.run(400);
+      assert(r.engine.hasReference() && r.recentres == 1);
+      r.take();
+      r.taps(count, 160, kTapSide, odd != 0);
+      r.run(600);
+      assert(r.take() == side[count]);
+    }
+    // The 4-tap run about 250 ms apart is still X with a wider window.
+    Rig100 x;
+    x.cfg.tapWindowMs = 450;
+    x.run(400);
+    x.take();
+    x.taps(4, 250, kTapSide, odd != 0);
+    x.run(800);
+    assert(x.take() == kButtonX);
+    // Face: 2 START, 3 SELECT.
+    Rig100 f;
+    f.run(400);
+    f.take();
+    f.taps(2, 160, kTapFace, odd != 0);
+    f.run(600);
+    assert(f.take() == kButtonStart);
+    f.taps(3, 160, kTapFace, odd != 0);
+    f.run(600);
+    assert(f.take() == kButtonSelect);
+  }
+  // Two taps 10 ms apart (each a knock the detector told apart): both count.
+  Rig100 two;
+  two.cfg.tapMinGapMs = 0;
+  two.run(400);
+  two.take();
+  two.step(true, kTapSide, 15.0f);
+  two.step(true, kTapSide, 15.0f);
+  two.run(600);
+  assert(two.take() == kButtonB);
+  // The engine is updated every 20 ms: 1 s of samples is 50 updates.
+  Rig100 rate;
+  rate.run(1000);
+  assert(rate.updates == 50);
+}
+
+static void testWindowsKeepTheirTimesAt100Hz() {
+  // A lean engages after the dwell: three engine updates, 60 ms, not 30.
+  Rig100 r;
+  r.run(400);
+  const float d = 25.0f * kDeg;
+  r.up[0] = -std::sin(d);
+  r.up[1] = 0;
+  r.up[2] = std::cos(d);
+  int engagedAfterMs = -1;
+  for (int t = 0; t < 200 && engagedAfterMs < 0; t += 10) {
+    r.step();
+    if (r.last.joyX != kJoyCentre) engagedAfterMs = t;
+  }
+  assert(engagedAfterMs >= 40 && engagedAfterMs <= 60);
+  // A shake: strong more than half of 500 ms starts the calibration; 200 ms
+  // of it is not enough (20 samples at 100 Hz, but only 10 engine updates).
+  Rig100 s;
+  s.run(400);
+  for (int t = 0; t < 200; t += 10) s.step(false, kTapSide, (t / 10) % 2 ? 20.0f : -20.0f);
+  s.run(600);
+  assert(s.calEvents[kCalStarted] == 0);
+  for (int t = 0; t < 1200; t += 10) s.step(false, kTapSide, (t / 10) % 2 ? 20.0f : -20.0f);
+  s.run(800);  // the shake ends once at most 2 of the last 25 updates were strong
+  assert(s.calEvents[kCalStarted] == 1);
+  // Still for 3 s: done, the centre taken from 10 calm updates (200 ms).
+  s.run(3000);
+  assert(s.calEvents[kCalDone] == 1);
+}
+
 int main() {
+  testDecimationFactor();
+  testDecimatorPassThrough();
+  testDecimatorKeepsEveryTap();
+  testEngineAt100Hz();
+  testWindowsKeepTheirTimesAt100Hz();
   testRingingKnocksStillCount();
   testTapCounts();
   testFaceTaps();
