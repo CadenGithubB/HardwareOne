@@ -559,10 +559,6 @@ static MotionOrientationSettings imuOrientationSettings() {
   settings.yawOffset = gSettings.imuYawOffset;
   return settings;
 }
-// Tap diagnostics (single writer: the IMU task; read for imustatus json).
-struct ImuTapDiag { uint32_t lastReadMs, maxGapMs, gaps, chipTaps, gapDropped; };
-static ImuTapDiag sImuTapDiag = {0, 0, 0, 0, 0};
-
 
 // The detector on one sample; returns whether it is shaking after it
 // (defined below, with the detector).
@@ -1256,6 +1252,11 @@ extern const SettingsModule imuSettingsModule = {
 // ============================================================================
 #if DISPLAY_TYPE > 0
 #include "HAL_Motion_OLED.h"
+
+// Tap diagnostics (single writer: the IMU task; read for imustatus json).
+struct ImuTapDiag { uint32_t lastReadMs, maxGapMs, gaps, chipTaps, gapDropped; };
+static ImuTapDiag sImuTapDiag = {0, 0, 0, 0, 0};
+
 #endif
 
 #endif // ENABLE_IMU_SENSOR
