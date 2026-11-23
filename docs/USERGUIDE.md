@@ -798,7 +798,23 @@ and a mesh without an id sends nothing. `espnowmeshes` shows it. Changing a mesh
 gives it a new id, and its frames and the other devices' are dropped at each other's mesh gate until
 they have the same passphrase and label: `espnowstats` counts those frames (`RX Unknown Mesh Id Drops`,
 with the last id and sender), and a paired device or a key exchange that sends another id gets one
-warning a minute. Clearing a passphrase disables the mesh and drops its id: a mesh without a
+warning a minute.
+
+### Acknowledgements and plaintext
+Every ESP-NOW frame on a mesh is either sealed in a session with the other device or signed with the
+mesh's group key; only the six key-exchange and session handshake frames go out without either (they
+carry their own signature or tag). Any other frame that arrives with neither is dropped and counted
+(`espnowstats` `RX Plaintext Drops`), so a device without the passphrase cannot make a mesh device
+show, acknowledge or pass on anything. An acknowledgement is a small frame of its own in the class of
+the frame it answers: a sealed frame gets a sealed acknowledgement in the same session (also while that
+session is being rekeyed), a signed frame a signed one. A sender takes only the acknowledgement it
+can trust: a long message or remote command result sent in fragments counts a fragment as delivered
+only on a sealed acknowledgement from that device's session; one from another device, or a signed one
+where a sealed one is expected, is refused and counted (`RX ACKs Refused`). An acknowledgement still
+means "received" (not yet "accepted"). Handshake frames ask for no acknowledgement: their answer is
+the next handshake frame. If the device is too busy to queue an acknowledgement, it sends none and
+counts it (`TX ACKs Dropped`); the sender retries as for a lost frame. The mesh topology view
+(`espnowmeshtopo`) is signed with the group key too. Clearing a passphrase disables the mesh and drops its id: a mesh without a
 passphrase sends and takes nothing (the default mesh is cleared only after another enabled mesh is
 made the default). Two
 meshes on one device never share an id: `espnowsetpassphrase`, `espnowmeshes rename` and
@@ -1436,7 +1452,7 @@ found no network at boot is not retried: run `openwifi`.
 openespnow                      - Initialize ESP-NOW
 closeespnow                     - Deinitialize ESP-NOW and free resources
 espnowstatus                    - Show ESP-NOW status and configuration
-espnowstats                     - Show message/error counters (RX Length Drops: frames shorter than their type allows)
+espnowstats                     - Show message/error counters (RX Length Drops: frames shorter than their type allows; RX Plaintext Drops, RX ACKs Refused, TX ACKs Dropped)
 espnowlist                      - List all paired peers
 espnowpairrequest <mac_or_name> - Ask a discovered device to pair (it accepts)
 espnowunpair <name_or_mac>      - Remove a paired peer
