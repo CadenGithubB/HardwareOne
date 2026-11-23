@@ -112,6 +112,7 @@
 #include "i2csensor_vl53l4cx.h"
 #endif
 #include "WebServer_Server.h"
+#include "BLE_Server.h"  // bleSubsystemActive: Bluetooth running, for the capability summary and bond status
 
 #include "i2csensor_bno055.h"
 #include "i2csensor_mlx90640.h"
@@ -661,10 +662,6 @@ static bool addEspNowPeerWithEncryption(const uint8_t* mac, bool useEncryption, 
 // File paths (the registry's own path is owned by System_StatePaths.h)
 static const char* ESPNOW_DEVICES_FILE = HW1_ESPNOW_DEVICES_JSON_PATH;
 static const char* ESPNOW_DEVICES_TEMP_FILE = HW1_ESPNOW_DEVICES_JSON_PATH ".tmp";
-static const char* ESPNOW_DEVICES_MIGRATION_BACKUP_FILE =
-    "/system/espnow/devices.pre-psram.json";
-static const char* ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE =
-    "/system/espnow/devices.pre-psram.json.tmp";
 
 // What the last read of ESPNOW_DEVICES_FILE found. saveEspNowDevices() replaces
 // the file only when the registry in memory can stand for it.
@@ -748,8 +745,8 @@ static volatile uint32_t gEspNowRxDrops = 0;
 // (text and JSON). Written by espnow_task only.
 //   rxLengthDrops: a frame shorter than its opcode's minimum, or a handshake
 //     frame not of its exact length (v4_dispatch_table_try). It counts after
-//     the row's policy gates, so an unauthenticated row (TOPO_*, USER_SYNC,
-//     the handshake) can be raised by anyone in radio range; the WARN says
+//     the row's policy gates, so an unauthenticated row (TOPO_*, the
+//     handshake) can be raised by anyone in radio range; the WARN says
 //     whether the frame was authenticated.
 //   rxMustUnderstandDrops: a frame with a must-understand header flag this
 //     firmware does not know.
@@ -1131,7 +1128,7 @@ static int8_t gEspNowLivePassphraseSlot = -1;
 // the new passphrase beside the old cached key.
 static void setEspNowPassphrase(const String& passphrase) {
   // Slot 0 holds a mesh here: the one caller finds it by its label, and an empty
-  // label never matches. Creating "primary" is initPrimaryMeshFromLegacySettings's
+  // label never matches. Creating "primary" is initPrimaryMesh's
   // job alone, which knows when a device must not get one. This also runs before
   // the first start of a boot (no instance yet): the setting is all there is then.
   Settings::MeshIdentity& m0 = gSettings.meshes[0];
@@ -2162,6 +2159,13 @@ bool espnowPeerInPrimaryMesh(const uint8_t* mac) {
 // (espnowMeshIdsAfterKeyInit), which wins over the stored value.
 
 void espnowMeshesWriteJson(JsonDocument& doc, bool excludePasswords) {
+  // The registered meshRole was just written from RAM. A promoted backup master
+  // runs as master only until the master returns (setMeshRole): its saved role
+  // stays backup master.
+  if (gBackupPromoted) {
+    JsonObject mesh = doc["network"]["espnow"]["mesh"].as<JsonObject>();
+    if (!mesh.isNull() && !mesh["meshRole"].isNull()) mesh["meshRole"] = (uint8_t)MESH_ROLE_BACKUP_MASTER;
+  }
   JsonArray meshesArr = doc["espnow"]["meshes"].to<JsonArray>();
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
     const Settings::MeshIdentity& m = gSettings.meshes[i];
@@ -2281,17 +2285,13 @@ void espnowMeshesReadJson(JsonDocument& doc) {
 #endif
 }
 
-// Phase 2.1 init shim: populate meshes[0] from the legacy single-mesh fields
-// if it hasn't been configured yet. Lets existing user flows (e.g. CLI
-// `espnowsetpassphrase`) keep writing the legacy field; meshes[0] picks up
-// the value at next boot. Phase 2.x sub-commits will rewire the CLI/web
-// commands to write meshes[] directly, at which point this shim becomes
-// dead code.
-static void initPrimaryMeshFromLegacySettings() {
+// The slot 0 bootstrap: a device with no mesh at all gets "primary" when
+// ESP-NOW starts, so commands that name a mesh have one to name. It reads no
+// older settings: 1.0 boards start erased.
+static void initPrimaryMesh() {
   Settings::MeshIdentity& m0 = gSettings.meshes[0];
   if (m0.label.length() > 0) {
-    // Already configured (probably from a previous boot that already ran
-    // this shim and persisted). Its mesh id is the stored or key-derived one.
+    // Already set up. Its mesh id is the stored or key-derived one.
     return;
   }
   // Slot 0 is empty. When another slot holds a mesh, the user has set meshes
@@ -2341,7 +2341,7 @@ class PrimaryMeshBootstrap {
     savedBondRole_    = gSettings.bondRoleMesh[0];
     savedBondPeer_    = gSettings.bondPeerMacMesh[0];
 #endif
-    initPrimaryMeshFromLegacySettings();
+    initPrimaryMesh();
     meshIdRefreshAll();
     created_ = wasEmpty && m0.label.length() > 0;
     if (!created_) return;
@@ -8162,7 +8162,10 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_TOPO_REQ,         0, ESPNOW_V4_MINLEN_TOPO_REQ, v4h_topo_req          },
   { ESPNOW_V4_TYPE_TOPO_START,       0, ESPNOW_V4_MINLEN_TOPO_START, v4h_topo_start        },
   { ESPNOW_V4_TYPE_TOPO_PEER,        0, ESPNOW_V4_MINLEN_TOPO_PEER, v4h_topo_peer         },
-  { ESPNOW_V4_TYPE_USER_SYNC,        0, ESPNOW_V4_MINLEN_USER_SYNC, v4h_user_sync         },
+  // USER_SYNC carries account records: only a session-sealed frame reaches the
+  // handler. doUserSyncWork checks isSessionEncrypted again (and admin auth and
+  // the espnowusersync opt-in) before it touches users.json.
+  { ESPNOW_V4_TYPE_USER_SYNC,        V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_USER_SYNC, v4h_user_sync         },
   // Metadata contains identity/location details and every current sender uses
   // encrypt-or-queue. Reject plaintext injection consistently in all three
   // directions; the handler's fixed-width text normalization remains defense
@@ -9688,11 +9691,12 @@ void buildLocalBondStatus(BondPeerStatus& status) {
 #if ENABLE_WIFI
   status.wifiConnected = (WiFi.status() == WL_CONNECTED) ? 1 : 0;
 #endif
+  // What runs now, not what starts at boot (bleAutoStart/httpAutoStart).
 #if ENABLE_BLUETOOTH
-  status.bluetoothActive = gSettings.bleAutoStart ? 1 : 0;
+  status.bluetoothActive = bleSubsystemActive() ? 1 : 0;
 #endif
 #if ENABLE_HTTP_SERVER
-  status.httpActive = gSettings.httpAutoStart ? 1 : 0;
+  status.httpActive = isHttpServerRunning() ? 1 : 0;
 #endif
   // Report sync progress as a simple 0-3 value for the wire format
   uint8_t syncProgress = 0;
@@ -9781,10 +9785,10 @@ static void buildCapabilitySummary(CapabilitySummary& cap) {
   if (WiFi.status() == WL_CONNECTED) cap.serviceMask |= CAP_SERVICE_WIFI_CONN;
 #endif
 #if ENABLE_HTTP_SERVER
-  if (gSettings.httpAutoStart) cap.serviceMask |= CAP_SERVICE_HTTP;
+  if (isHttpServerRunning()) cap.serviceMask |= CAP_SERVICE_HTTP;
 #endif
 #if ENABLE_BLUETOOTH
-  if (gSettings.bleAutoStart) cap.serviceMask |= CAP_SERVICE_BLUETOOTH;
+  if (bleSubsystemActive()) cap.serviceMask |= CAP_SERVICE_BLUETOOTH;
 #endif
   
   // Build sensor mask (using CAP_SENSOR_* constants)
@@ -11894,8 +11898,8 @@ bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t mac[6]) {
   if (!gEspNow) return false;
 
   // A MAC-shaped alias must never shadow the actual paired device with that
-  // address. This also makes the unique MAC aliases used by the bounded-field
-  // migration unambiguous.
+  // address. This also keeps the address names given to peers whose stored
+  // alias breaks the rule (loadEspNowDevices) unambiguous.
   if (parseMacAddress(nameOrMac, mac)) {
     for (int i = 0; i < gEspNow->deviceCount; i++) {
       if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) return true;
@@ -12092,12 +12096,13 @@ static void loadEspNowDevices() {
   JsonArray arr = doc["devices"].as<JsonArray>();
 
   int count = 0;
-  bool migrationBackupNeeded = false;
+  // False when an entry did not come through whole: the next save keeps a copy
+  // of the file first (Partial below).
   bool registryFullyRepresented = true;
   for (JsonObject entry : arr) {
     if (gEspNow->deviceCount >= 16) {
       registryFullyRepresented = false;
-      WARN_ESPNOWF("[ESP-NOW] Saved registry exceeds the 16-device limit; migration will not overwrite it");
+      WARN_ESPNOWF("[ESP-NOW] Saved registry exceeds the 16-device limit; the rest is not loaded");
       break;
     }
     const char* rawMac = entry["mac"] | "";
@@ -12107,17 +12112,12 @@ static void loadEspNowDevices() {
       continue;
     }
 
-    // Decrypt MAC if stored encrypted
-    String macStr = String(rawMac);
-    if (isDeviceCipherText(macStr)) {
-      String decrypted = decryptString(macStr);
-      if (decrypted.length() > 0) {
-        macStr = decrypted;
-      } else {
-        WARN_ESPNOWF("[ESP-NOW] Failed to decrypt device MAC for '%s', skipping", name);
-        registryFullyRepresented = false;
-        continue;
-      }
+    // saveEspNowDevices stores every MAC encrypted (device-bound AES).
+    String macStr = isDeviceCipherText(rawMac) ? decryptString(String(rawMac)) : String();
+    if (macStr.length() == 0) {
+      WARN_ESPNOWF("[ESP-NOW] Device MAC for '%s' is not readable, skipping", name);
+      registryFullyRepresented = false;
+      continue;
     }
 
     uint8_t mac[6];
@@ -12142,16 +12142,14 @@ static void loadEspNowDevices() {
     memcpy(dev.mac, mac, 6);
     const devicename::Fault aliasFault = devicename::check(name);
     if (aliasFault != devicename::Fault::None || !dev.name.assign(name)) {
-      // An alias that breaks the device-name rule (an older build's, or one
-      // edited into the file) is not used: the pairing stays, the peer is
-      // called by its address, and the original JSON is kept in a one-time
-      // backup below.
+      // An alias that breaks the device-name rule (one edited into the file)
+      // is not used: the pairing stays and the peer is called by its address.
       char fallbackName[18];
       macToDisplay(mac, fallbackName, sizeof(fallbackName));
       (void)dev.name.assign(fallbackName);
-      migrationBackupNeeded = true;
-      WARN_ESPNOWF("[ESP-NOW] Peer alias for %s is not a valid device name (%s); using its address and "
-                   "preserving the original registry backup. Rename it with 'espnowpairsecure'.",
+      registryFullyRepresented = false;
+      WARN_ESPNOWF("[ESP-NOW] Peer alias for %s is not a valid device name (%s); using its address. "
+                   "Rename it with 'espnowpairsecure'.",
                    macStr.c_str(), devicename::faultText(aliasFault));
     }
     dev.encrypted = entry["encrypted"] | false;
@@ -12160,11 +12158,10 @@ static void loadEspNowDevices() {
     // Decrypt and validate the encryption key if present. Never consider an
     // encrypted entry safe to rewrite unless all 16 bytes were represented by
     // exactly 32 hexadecimal characters.
-    String keyStr = String(entry["key"] | "");
     if (dev.encrypted) {
-      if (keyStr.length() > 0 && isDeviceCipherText(keyStr)) {
-        keyStr = decryptString(keyStr);
-      }
+      // Stored encrypted, like the MAC.
+      const char* rawKey = entry["key"] | "";
+      String keyStr = isDeviceCipherText(rawKey) ? decryptString(String(rawKey)) : String();
       bool validKey = keyStr.length() == 32;
       for (size_t i = 0; validKey && i < 32; i++) {
         validKey = isxdigit(static_cast<unsigned char>(keyStr[i])) != 0;
@@ -12176,39 +12173,37 @@ static void loadEspNowDevices() {
         }
       } else {
         registryFullyRepresented = false;
-        WARN_ESPNOWF("[ESP-NOW] Missing, invalid, or undecryptable key for encrypted peer '%s'; migration will not overwrite the registry",
-                     name);
+        WARN_ESPNOWF("[ESP-NOW] Missing, invalid, or undecryptable key for encrypted peer '%s'", name);
       }
     }
-    // Restore cached metadata fields (backwards-compatible: missing fields default to empty)
+    // Cached metadata fields: a missing one is empty
     const char* friendlyName = entry["friendlyName"] | "";
     const char* room = entry["room"] | "";
     const char* zone = entry["zone"] | "";
     const char* tags = entry["tags"] | "";
     if (!dev.friendlyName.assign(friendlyName)) {
-      migrationBackupNeeded = true;
+      registryFullyRepresented = false;
       WARN_ESPNOWF("[ESP-NOW] Oversized friendlyName cache for %s cleared; metadata will be refreshed", macStr.c_str());
     }
     if (!dev.room.assign(room)) {
-      migrationBackupNeeded = true;
+      registryFullyRepresented = false;
       WARN_ESPNOWF("[ESP-NOW] Oversized room cache for %s cleared; metadata will be refreshed", macStr.c_str());
     }
     if (!dev.zone.assign(zone)) {
-      migrationBackupNeeded = true;
+      registryFullyRepresented = false;
       WARN_ESPNOWF("[ESP-NOW] Oversized zone cache for %s cleared; metadata will be refreshed", macStr.c_str());
     }
     if (!dev.tags.assign(tags)) {
-      migrationBackupNeeded = true;
+      registryFullyRepresented = false;
       WARN_ESPNOWF("[ESP-NOW] Oversized tags cache for %s cleared; metadata will be refreshed", macStr.c_str());
     }
     if (!groupAcceptedFromJson(entry, dev)) {
-      migrationBackupNeeded = true;
+      registryFullyRepresented = false;
       WARN_ESPNOWF("[ESP-NOW] Oversized accepted room or tags for %s cleared; accept them again with '%s'",
                    macStr.c_str(), espnowgroup::kAcceptCommand);
     }
     dev.stationary   = entry["stationary"] | false;
-    // Phase 2 multi-mesh — meshId persisted on save; default 0 (primary mesh)
-    // when missing for backwards-compat with pre-Phase-2 devices.json files.
+    // The mesh slot the pairing belongs to; one this firmware does not have is slot 0.
     {
       uint8_t loadedMid = (uint8_t)(entry["meshId"] | 0);
       dev.meshId = (loadedMid < Settings::N_MESHES) ? loadedMid : 0;
@@ -12217,59 +12212,10 @@ static void loadEspNowDevices() {
     count++;
   }
 
-  // Set before the migration save below, which goes through the same gate.
   if (!registryFullyRepresented) {
     sEspNowDevicesLoad = ConfigLoad::Status::Partial;
-    WARN_ESPNOWF("[ESP-NOW] %s holds entries this device could not take; the next save keeps a copy of it first",
+    WARN_ESPNOWF("[ESP-NOW] %s holds entries this device could not take whole; the next save keeps a copy of it first",
                  ESPNOW_DEVICES_FILE);
-  }
-
-  if (migrationBackupNeeded) {
-    bool backupReady = VFS::existsGuarded(
-        ESPNOW_DEVICES_MIGRATION_BACKUP_FILE,
-        VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_migration_backup_check"));
-    if (!backupReady) {
-      // Publish the backup only after a complete write. A reset during this
-      // step leaves merely a .tmp file, so the next boot safely retries.
-      File backup = VFS::openGuarded(
-          ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE, "w",
-          VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_migration_backup"), true);
-      if (backup) {
-        const size_t backedUp = backup.print(content);
-        backup.flush();
-        backup.close();
-        if (backedUp == content.length() &&
-            VFS::renameGuarded(ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE,
-                               ESPNOW_DEVICES_MIGRATION_BACKUP_FILE,
-                               VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_migration_backup"))) {
-          backupReady = true;
-          WARN_ESPNOWF("[ESP-NOW] Preserved pre-migration registry at %s",
-                       ESPNOW_DEVICES_MIGRATION_BACKUP_FILE);
-        } else {
-          WARN_ESPNOWF("[ESP-NOW] Registry migration backup was incomplete (%u/%u bytes)",
-                       (unsigned)backedUp, (unsigned)content.length());
-          VFS::removeGuarded(ESPNOW_DEVICES_MIGRATION_BACKUP_TEMP_FILE,
-                             VFS::systemAuth(VFS::Scopes::ESPNOW_STATE, "espnow.devices_migration_backup"));
-        }
-      } else {
-        WARN_ESPNOWF("[ESP-NOW] Could not create registry migration backup at %s",
-                     ESPNOW_DEVICES_MIGRATION_BACKUP_FILE);
-      }
-    }
-
-    // The file holds aliases that memory does not. With no backup of it, the
-    // next save keeps a copy first.
-    if (!backupReady) sEspNowDevicesLoad = ConfigLoad::Status::Partial;
-
-    if (backupReady && registryFullyRepresented) {
-      if (saveEspNowDevices()) {
-        WARN_ESPNOWF("[ESP-NOW] Persisted bounded registry migration");
-      } else {
-        WARN_ESPNOWF("[ESP-NOW] Could not persist bounded registry migration; the original remains active and migration will retry");
-      }
-    } else if (!registryFullyRepresented) {
-      WARN_ESPNOWF("[ESP-NOW] Registry migration not persisted because one or more source entries could not be represented safely");
-    }
   }
   DEBUG_ESPNOW_MESHF("[ESP-NOW] Loaded %d device(s) from %s", count, ESPNOW_DEVICES_FILE);
 }
@@ -12717,7 +12663,10 @@ void buildMeshStatusPeersJson(JsonArray peers, uint32_t nowMillis, int* outTotal
   if (outTotalPeers) *outTotalPeers = n;
 }
 
-// Set mesh role at runtime with logging. Does not persist — reboot restores saved role.
+// The backup failover's runtime role change, with logging. It changes
+// gSettings.meshRole, which everything reads as the role in use, but not the
+// saved role: while promoted, espnowMeshesWriteJson writes the backup role, so
+// an unrelated save keeps it and a reboot comes back as backup master.
 void setMeshRole(MeshRole role, const char* reason) {
   if (gSettings.meshRole == (uint8_t)role) return;
   BROADCAST_PRINTF("[MESH_ROLE] %d -> %d | %s", (int)gSettings.meshRole, (int)role, reason ? reason : "");
@@ -17477,6 +17426,30 @@ static const char* metaGetSet(const String& args, String& field, const char* fie
   return getDebugBuffer();
 }
 
+bool espnowMetadataFieldOk(EspNowMetaField field, const char* value, char* why, size_t whyCap) {
+  const char* name = "Friendly name";
+  size_t maxLen = sizeof(V4PayloadMetadata::friendlyName) - 1;
+  if (field == EspNowMetaField::Room) {
+    name = "Room";
+    maxLen = sizeof(V4PayloadMetadata::room) - 1;
+  } else if (field == EspNowMetaField::Zone) {
+    name = "Zone";
+    maxLen = sizeof(V4PayloadMetadata::zone) - 1;
+  }
+  if (!value) value = "";
+  if (strlen(value) > maxLen) {
+    if (why && whyCap) snprintf(why, whyCap, "Error: %s too long (max %zu chars)", name, maxLen);
+    return false;
+  }
+  if (!metadataTextAllowed(value)) {
+    if (why && whyCap) {
+      snprintf(why, whyCap, "Error: %s may not contain control characters or < > \" ' & \\", name);
+    }
+    return false;
+  }
+  return true;
+}
+
 const char* cmd_espnow_room(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return metaGetSet(argsInput, gSettings.espnowRoom, "Room", sizeof(V4PayloadMetadata::room) - 1);
@@ -18461,6 +18434,16 @@ const char* cmd_espnow_meshrole(const String& argsInput) {
   
   String role = a.arg(0);
   role.toLowerCase();
+  if (role != "worker" && role != "master" && role != "backup") {
+    return "Error: invalid arguments — Usage: espnowmeshrole [worker|master|backup]";
+  }
+  // A role set here ends a failover promotion: the change is made from the
+  // configured role (backup master), so it is saved even when the running
+  // role already matches.
+  if (gBackupPromoted) {
+    gBackupPromoted = false;
+    gSettings.meshRole = (uint8_t)MESH_ROLE_BACKUP_MASTER;
+  }
   if (role == "worker") {
     setSetting(gSettings.meshRole, (uint8_t)MESH_ROLE_WORKER);
     BROADCAST_PRINTF("[MESH] Role set to worker");
@@ -19491,7 +19474,7 @@ static const char* meshesCmd_remove(const String& label) {
 // the slot again afterwards, and the other meshes keep their slot numbers (the
 // settings file stores them). Deleting the last mesh leaves the device as a new
 // one is: no mesh until 'add' or the next ESP-NOW start, which sets up
-// "primary" (initPrimaryMeshFromLegacySettings).
+// "primary" (initPrimaryMesh).
 static const char* meshesCmd_delete(const String& label) {
   if (label.length() == 0) return "Error: Mesh not found. Run 'espnowmeshes' to list.";  // "" would match an empty slot
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {

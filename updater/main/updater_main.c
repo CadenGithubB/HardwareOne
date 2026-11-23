@@ -91,6 +91,11 @@ typedef struct {
     size_t image_size;
     char detail[STATUS_DETAIL_SIZE];
     char candidate_version[HW1_OTA_VERSION_SIZE];
+    /* The journal's last finished update (success, failure or cancel), so a
+     * recovery client sees why the previous attempt ended. */
+    hw1_ota_result_code_t result_code;
+    uint32_t result_sequence;
+    char result_detail[HW1_OTA_RESULT_DETAIL_SIZE];
 } updater_snapshot_t;
 
 static QueueHandle_t s_control_queue;
@@ -152,6 +157,28 @@ static const char *phase_name(hw1_ota_phase_t phase)
     case HW1_OTA_PHASE_SUCCEEDED: return "succeeded";
     case HW1_OTA_PHASE_FAILED: return "failed";
     case HW1_OTA_PHASE_CANCELED: return "canceled";
+    default: return "unknown";
+    }
+}
+
+/* The same words as the main firmware's OTA status (System_OTA.cpp resultName). */
+static const char *result_name(hw1_ota_result_code_t code)
+{
+    switch (code) {
+    case HW1_OTA_RESULT_NONE: return "none";
+    case HW1_OTA_RESULT_SUCCESS: return "success";
+    case HW1_OTA_RESULT_CANCELED: return "canceled";
+    case HW1_OTA_RESULT_MANIFEST_INVALID: return "manifest_invalid";
+    case HW1_OTA_RESULT_SIGNATURE_INVALID: return "signature_invalid";
+    case HW1_OTA_RESULT_INCOMPATIBLE_IMAGE: return "incompatible_image";
+    case HW1_OTA_RESULT_DIGEST_MISMATCH: return "digest_mismatch";
+    case HW1_OTA_RESULT_POWER_UNSAFE: return "power_unsafe";
+    case HW1_OTA_RESULT_STORAGE_ERROR: return "storage_error";
+    case HW1_OTA_RESULT_FLASH_ERROR: return "flash_error";
+    case HW1_OTA_RESULT_BOOT_SWITCH_ERROR: return "boot_switch_error";
+    case HW1_OTA_RESULT_HEALTH_TIMEOUT: return "health_timeout";
+    case HW1_OTA_RESULT_ROLLBACK_DETECTED: return "rollback_detected";
+    case HW1_OTA_RESULT_INTERNAL_ERROR: return "internal_error";
     default: return "unknown";
     }
 }
@@ -279,6 +306,10 @@ static void snapshot_record(const hw1_ota_record_t *record, bool valid)
             s_snapshot.phase = record->phase;
             s_snapshot.source = record->source;
             s_snapshot.journal_sequence = record->sequence;
+            s_snapshot.result_code = record->last_result.code;
+            s_snapshot.result_sequence = record->last_result.sequence;
+            snprintf(s_snapshot.result_detail, sizeof(s_snapshot.result_detail), "%s",
+                     record->last_result.detail);
             if (record->candidate_present) {
                 snprintf(s_snapshot.candidate_version,
                          sizeof(s_snapshot.candidate_version), "%s",
@@ -350,6 +381,10 @@ static size_t status_json(char *buffer, size_t buffer_size, void *context)
     cJSON_AddNumberToObject(root, "bytesWritten", (double)status.bytes_written);
     cJSON_AddNumberToObject(root, "imageSize", (double)status.image_size);
     cJSON_AddStringToObject(root, "candidateVersion", status.candidate_version);
+    /* The last finished update, keyed as the main firmware's OTA status keys it. */
+    cJSON_AddStringToObject(root, "resultCode", result_name(status.result_code));
+    cJSON_AddNumberToObject(root, "resultSequence", (double)status.result_sequence);
+    cJSON_AddStringToObject(root, "resultDetail", status.result_detail);
     {
         /* Visible so an operator can tell "the AP is being guessed at" apart
          * from "the AP is misbehaving". */

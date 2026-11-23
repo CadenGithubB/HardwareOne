@@ -4,7 +4,7 @@
 Extracts the production Settings::MeshIdentity record and, from
 System_ESPNow.cpp, the mesh-id helpers (refresh, clash check, the boot
 clash resolution, fingerprintForPeer, the staging of a new key and id), the meshes settings writer and
-reader, setEspNowPassphrase, initPrimaryMeshFromLegacySettings, the
+reader, setEspNowPassphrase, initPrimaryMesh, the
 start-passphrase and hint helpers, the helpers that keep a running instance on
 the passphrase a start would load, the espnowmeshes subcommands (add, remove,
 delete, enable, setdefault, setpassphrase, listjson) with the delete guard's
@@ -55,7 +55,7 @@ BASE = (
     'void espnowMeshesWriteJson(',
     'void espnowMeshesReadJson(',
     'static void setEspNowPassphrase(const String& passphrase)',
-    'static void initPrimaryMeshFromLegacySettings()',
+    'static void initPrimaryMesh()',
 )
 # Present after the fix, absent on the trees before it, which then still compile
 # and fail on the checks that name the defect. The start slot returns -1 for "none"

@@ -44,6 +44,33 @@ everything user-visible since the v0.99.99.1 tag.
   popup. Host-tested (`web_guest_gate`, `web_guest_view_browser`,
   `remote_command_authority`); not checked on a device.
 
+### Changed (no pre-1.0 data; automations, mesh role, setup, status)
+- 1.0 boards start erased, so the readers for data saved by older firmware are gone: the old
+  ESP-NOW and Bluetooth name keys in `settings.json` are no longer moved into the device name, the
+  `g2_worn` event name no longer resolves (use `g2_plugin_alive`), ESP-NOW peer files of version 1
+  and plaintext MACs or keys in the device registry are not read, the one-time
+  `devices.pre-psram.json` registry backup is gone (a registry entry that does not come through
+  whole now keeps a copy of the file before the next save, as other damaged entries did), the
+  device key no longer tries the byte-swapped flash id of older IDF releases, and `users.json` is
+  not cleaned of `lastSeenSec`.
+- Automation conditions: `MOTION` reads the presence sensor's (STHS34PF80) motion flag, not the
+  APDS9960's proximity; `HUMIDITY` (no sensor ever fed it) is gone; `TIME`, `HOUR` and `DAY` are
+  false until the clock holds a real date. An `automations.json` that does not parse is now
+  reported once (console, system log and a `config_file_corrupt` event) instead of silently
+  running nothing.
+- A backup master promoted by failover is no longer saved as master: an unrelated settings save
+  keeps the backup role, and `espnowmeshrole` ends the promotion.
+- The setup wizards refuse a display label, room or zone that `espnowfriendlyname`,
+  `espnowroom` or `espnowzone` would refuse, and say why.
+- The ESP-NOW capability summary and bond status report HTTP and Bluetooth as running only while
+  they run (they followed the boot autostart settings).
+- USER_SYNC frames not sealed in a session are now dropped by the receive table as well as by
+  the handler.
+- `FATAL: Filesystem initialization failed` now says why (no `littlefs` partition, a partition
+  that does not mount, or a blank one that could not be formatted) and how to fix it.
+- The recovery updater's `status` and `/status` show the last finished update (`resultCode`,
+  `resultSequence`, `resultDetail`).
+
 ### Added
 - Boot debug file (owner decision B13): every boot runs with every debug flag on and every log
   level shown until boot finishes (or the buffer fills), into a 56 KB PSRAM buffer (4 KB of internal memory on a board without PSRAM) instead

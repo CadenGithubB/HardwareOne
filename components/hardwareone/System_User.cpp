@@ -2720,7 +2720,6 @@ static UsersJsonMutation lastSeenMutation(JsonDocument& doc, JsonArray users, vo
   const LastSeenMutationContext* ctx = static_cast<const LastSeenMutationContext*>(opaque);
   JsonObject u = findRosterUser(users, *ctx->username);
   if (u.isNull()) return UsersJsonMutation::Unchanged;
-  u.remove("lastSeenSec");  // Remove legacy field if present
   u["lastSeen"] = ctx->isoTimestamp;
   return UsersJsonMutation::Changed;
 }

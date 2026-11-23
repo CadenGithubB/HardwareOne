@@ -313,11 +313,8 @@ constexpr uint8_t kPeerSlots = 16;
 EXT_RAM_BSS_ATTR PeerIdentity gPeerIdentities[kPeerSlots] = {};
 
 constexpr const char* kPeersDir = "/system/espnow/peers";
-// File schema versions:
-//   1 — initial (Phase 3.2). No subscribedEvents field.
-//   2 — Phase 5: added subscribedEvents (uint32 bitmask). v1 files are
-//       upgraded on load (subscribedEvents defaults to ALL = 0xFFFFFFFF);
-//       the next write rewrites them as v2.
+// File schema version: 2 carries subscribedEvents (uint32 bitmask). Version 1
+// (before subscribedEvents) is no longer read.
 constexpr uint8_t  kPeerFileVersion = 2;
 
 // peerIdentityPersist rewrites an unchanged peer's file only to move the
@@ -412,10 +409,10 @@ bool readPeerIdentityFile(const char* path, PeerIdentity& out) {
   f.close();
   if (jerr) return false;
 
-  // Phase 5: accept v1 (no subscribedEvents) and v2 (with). Anything else
-  // is unknown / future — reject so we don't silently mis-parse.
+  // Only the version this firmware writes; any other is not one it wrote
+  // (1.0 boards start erased) and is rejected rather than mis-parsed.
   uint8_t ver = doc["version"] | (uint8_t)0;
-  if (ver != 1 && ver != kPeerFileVersion) return false;
+  if (ver != kPeerFileVersion) return false;
 
   const char* macStr = doc["mac"] | (const char*)nullptr;
   if (!macStr) return false;
@@ -438,8 +435,8 @@ bool readPeerIdentityFile(const char* path, PeerIdentity& out) {
   out.meshId      = (uint8_t)meshVal.as<unsigned>();
   out.bondedAtSec = doc["bondedAtSec"] | (uint32_t)0;
   out.lastSeenSec = doc["lastSeenSec"] | (uint32_t)0;
-  // Phase 5: v1 files don't carry subscribedEvents — default to ALL so they
-  // keep receiving every broadcast until they opt out via SUBSCRIBE_UPDATE.
+  // Written on every save; a hand-edited file without it gets every event
+  // until the peer opts out via SUBSCRIBE_UPDATE.
   out.subscribedEvents = doc["subscribedEvents"] | (uint32_t)ESPNOW_EVT_ALL;
 
   const char* pubHex = doc["longTermPubEd25519_hex"] | (const char*)nullptr;

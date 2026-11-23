@@ -30,7 +30,6 @@
 #include "System_Notifications.h"
 #include "System_ESPSR.h"  // srSyncDebugLevel() — derive legacy gSrDebugLevel from flags
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() — Stage 1 consolidation
-#include "System_DeviceNameLegacy.h"  // devicename::removeLegacyKeys — the old name keys leave every full save
 #include "System_SensorLogging.h"  // Logger-owned settings editors
 #include "System_Power.h"    // applyPowerMode — the saved mode is re-applied in applySettings
 #include "System_UartLink.h"       // uartLinkStart/Stop/StatusLine — cmd_uartlink live apply
@@ -1761,12 +1760,6 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
   // or burn the 5120-byte budget. No-op once the on-disk file is already clean.
   { JsonObject sysObj = doc["system"].as<JsonObject>(); if (!sysObj.isNull()) sysObj.remove("debug"); }
 
-  // The names the device name replaced (System_DeviceNameLegacy.h): the merge
-  // keeps keys no build reads, and an old name left here would come back at
-  // the next boot after 'devicename clear'. The device name itself was just
-  // written from RAM.
-  (void)devicename::removeLegacyKeys(doc);
-
   if (!writeSettingsSnapshot(doc, SETTINGS_JSON_FILE, "/system/settings.tmp", "settings.write")) {
     pollResume();
     return false;
@@ -1916,13 +1909,15 @@ bool readDebugJson() {
 // Device-key epoch selection (boot self-healing)
 // ============================================================================
 // The at-rest key is derived from eFuse MAC + the flash chip unique ID
-// (esp_flash_read_unique_chip_id). That read can transiently fail (-> UID 0)
-// or change representation across IDF/toolchain versions, silently re-keying
-// the device on a reflash: every stored secret then decrypts to ""/garbage,
-// logins break (PBKDF2 salt is this same key), and the next save clobbers the
-// still-recoverable blobs. Before anything decrypts, test the stored blobs
-// against every plausible derivation and adopt the one that actually opens
+// (esp_flash_read_unique_chip_id). That read can transiently fail (-> UID 0,
+// getDeviceEncryptionKey), and secrets saved on such a boot are under the
+// MAC-only key: every stored secret would then decrypt to ""/garbage on the
+// next boot, logins break (PBKDF2 salt is this same key), and the next save
+// clobbers the still-recoverable blobs. Before anything decrypts, test the
+// stored blobs against both derivations and adopt the one that actually opens
 // them. The outcome is logged durably (system-events.log) on every boot.
+// (Keys from older builds, such as the byte-swapped UID of earlier IDF
+// releases, are not tried: 1.0 boards start erased.)
 
 static void collectAesBlobs(JsonVariantConst v, String* out, int cap, int& n) {
   if (n >= cap) return;
@@ -1948,19 +1943,17 @@ static void selectDeviceKeyEpoch(const JsonDocument& doc) {
   bool uidOk = (esp_flash_read_unique_chip_id(NULL, &flashUid) == ESP_OK);
   if (!uidOk) flashUid = 0;
 
-  String cand[3];
-  const char* candName[3];
+  String cand[2];
+  const char* candName[2];
   int nCand = 0;
   cand[nCand] = deriveDeviceKeyFromIds(chipId, flashUid);
   candName[nCand++] = uidOk ? "mac+flashUID" : "mac+0 (flashUID read FAILED)";
   if (uidOk && flashUid != 0) {
     cand[nCand] = deriveDeviceKeyFromIds(chipId, 0);
-    candName[nCand++] = "mac+0 (legacy/read-failed epoch)";
-    cand[nCand] = deriveDeviceKeyFromIds(chipId, __builtin_bswap64(flashUid));
-    candName[nCand++] = "mac+bswap(flashUID) (cross-IDF epoch)";
+    candName[nCand++] = "mac+0 (secrets saved while the flashUID read failed)";
   }
 
-  int okCount[3] = {0, 0, 0};
+  int okCount[2] = {0, 0};
   int best = 0;
   for (int c = 0; c < nCand; c++) {
     for (int b = 0; b < nBlobs; b++) {
@@ -2018,12 +2011,7 @@ bool settingsRestampFirmwareVersion() {
     ERROR_STORAGEF("Could not acquire settings file writer lock for version re-stamp");
     return false;
   }
-  // The same one-key rewrite carries the device name's move from the old
-  // ESP-NOW/Bluetooth names (deviceNameMigrateLegacy): the moved name is set
-  // where the file has none and the old keys are removed.
-  const bool restamp = gSettingsVersionRestampPending;
-  const bool namePatch = deviceNameLegacyPatchPending();
-  if (!restamp && !namePatch) return true;
+  if (!gSettingsVersionRestampPending) return true;
   if (!filesystemReady) return false;
 
   String json;
@@ -2031,8 +2019,7 @@ bool settingsRestampFirmwareVersion() {
 
   PSRAM_JSON_DOC(doc);
   if (deserializeJson(doc, json) != DeserializationError::Ok) return false;
-  if (restamp) doc["firmwareVersion"] = SelfDevice::firmwareVersion();
-  if (namePatch) (void)deviceNameLegacyPatch(doc);
+  doc["firmwareVersion"] = SelfDevice::firmwareVersion();
 
   // The shared snapshot writer stages and checks the replacement. A failed
   // re-stamp is cosmetic (the next boot derives the pending state again), so
@@ -2045,12 +2032,9 @@ bool settingsRestampFirmwareVersion() {
                    result.failure, result.bytesWritten, result.observedBytes, result.expectedBytes);
     return false;
   }
-  if (namePatch) deviceNameLegacyPatchSaved();
-  if (restamp) {
-    gSettingsVersionRestampPending = false;
-    logSystemEvent("SETTINGS", "firmwareVersion re-stamped to %s",
-                   SelfDevice::firmwareVersion());
-  }
+  gSettingsVersionRestampPending = false;
+  logSystemEvent("SETTINGS", "firmwareVersion re-stamped to %s",
+                 SelfDevice::firmwareVersion());
   return true;
 }
 
@@ -2179,12 +2163,6 @@ bool readSettingsJson() {
   if (registeredCount > 0) {
     DEBUG_STORAGEF("[Settings] Applied %zu settings from registered modules", registeredCount);
   }
-
-  // A file from a build before the one device name has the old ESP-NOW and
-  // Bluetooth names instead: take one into the device name once (nothing that
-  // uses the name has started yet) and mark the file patch, which
-  // settingsRestampFirmwareVersion() applies after the load.
-  deviceNameMigrateLegacy(doc);
 
   // The network owner loads records after key selection above. Keep the shared
   // damaged-secret count here so all secret writers preserve recoverable blobs.

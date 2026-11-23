@@ -5,7 +5,7 @@
 // production marker: the mesh-id helpers (refresh, snapshot, clash slot, the
 // boot clash resolution, fingerprintForPeer, staging and commit), the
 // meshes settings writer and reader, setEspNowPassphrase,
-// initPrimaryMeshFromLegacySettings, the start-passphrase and hint helpers, the
+// initPrimaryMesh, the start-passphrase and hint helpers, the
 // espnowmeshes subcommands (add, remove, delete, enable, setdefault,
 // setpassphrase, listjson) with the delete guard's counters, the helpers that
 // keep the running instance on the passphrase a start would load, the device
@@ -70,6 +70,9 @@ struct Settings {
   String bondPeerMac;
 };
 static Settings gSettings;
+// A backup master promoted by failover (espnowMeshesWriteJson keeps its saved role).
+enum MeshRole : uint8_t { MESH_ROLE_WORKER = 0, MESH_ROLE_MASTER = 1, MESH_ROLE_BACKUP_MASTER = 2 };
+static bool gBackupPromoted = false;
 
 static int gPersists = 0;
 static bool gPersistOk = true;
@@ -386,7 +389,7 @@ static void resetNeverStarted() {
 static void startEspNow() {
   gEspNow = &gState;
   if (sEspNowDevicesLoad == ConfigLoad::Status::NotLoaded) sEspNowDevicesLoad = ConfigLoad::Status::AbsentOk;
-  initPrimaryMeshFromLegacySettings();
+  initPrimaryMesh();
 #if HW1_HAVE_LIVE_LOADER
   // initEspNow marks the instance initialized, then loads (pinned there by the runner).
   gState.initialized = true;
@@ -1605,7 +1608,28 @@ static void testPeerAliasRule() {
         "P3 a peer name another device has is taken with a note (%zu lines)", gBroadcasts.size());
 }
 
+// SET-3: a promoted backup master runs as master, but a save keeps the backup role.
+static void testPromotedRoleIsNotSaved() {
+  JsonDocument doc;
+  doc["network"]["espnow"]["mesh"]["meshRole"] = (uint8_t)MESH_ROLE_MASTER;
+  gBackupPromoted = true;
+  espnowMeshesWriteJson(doc, false);
+  CHECK((doc["network"]["espnow"]["mesh"]["meshRole"] | 0) == MESH_ROLE_BACKUP_MASTER,
+        "SET-3 a save while promoted wrote the runtime master role");
+  gBackupPromoted = false;
+  doc["network"]["espnow"]["mesh"]["meshRole"] = (uint8_t)MESH_ROLE_MASTER;
+  espnowMeshesWriteJson(doc, false);
+  CHECK((doc["network"]["espnow"]["mesh"]["meshRole"] | 0) == MESH_ROLE_MASTER,
+        "SET-3 a configured master was saved as something else");
+  JsonDocument bare;
+  gBackupPromoted = true;
+  espnowMeshesWriteJson(bare, false);
+  CHECK(bare["network"].isNull(), "SET-3 a document without the role got one");
+  gBackupPromoted = false;
+}
+
 int main() {
+  testPromotedRoleIsNotSaved();
   testMeshIds();
   testPeerAliasRule();
   testDeviceNameSetter();

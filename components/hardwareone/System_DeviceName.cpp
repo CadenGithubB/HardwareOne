@@ -11,7 +11,6 @@
 
 #include "System_BuildConfig.h"
 #include "System_DeviceName.h"
-#include "System_DeviceNameLegacy.h"  // the old names in settings.json and their once-only move
 #include "System_SelfDevice.h"
 
 #include <Arduino.h>
@@ -44,65 +43,6 @@ void deviceNameApply(const String& name, char* warn, size_t warnCap) {
   }
 #endif
 }
-
-// ----------------------------------------------------------------------------
-// The once-only move from the names the device name replaced (the rule is
-// devicename::pickLegacy; the keys are in System_DeviceNameLegacy.h). Runs from
-// readSettingsJson after the registered read, before anything that uses the
-// name has started (ESP-NOW's start gate, Bluetooth, the hostname), so all of
-// them see the moved name on this boot. The file is patched by the boot's
-// one-key rewrite (settingsRestampFirmwareVersion), never by a full save from
-// RAM; a failed patch is retried at the next boot, where the same pick runs
-// again and gives the same name.
-// ----------------------------------------------------------------------------
-
-static bool sLegacyPatchPending = false;
-static char sLegacyMoved[devicename::kFieldLen] = {};
-
-void deviceNameMigrateLegacy(const JsonDocument& doc) {
-  const JsonVariantConst root = doc.as<JsonVariantConst>();
-  if (!devicename::hasLegacyKeys(root)) return;
-  sLegacyPatchPending = true;  // the old keys leave the file in every case
-  const char* espnowOld = devicename::legacyEspNowNameIn(root);
-  const char* bluetoothOld = devicename::legacyBluetoothNameIn(root);
-  const devicename::LegacyPick pick =
-      devicename::pickLegacy(gSettings.espnowDeviceName.c_str(), espnowOld, bluetoothOld);
-  const char* unusableOld = pick.unusable == devicename::LegacySource::EspNow ? espnowOld : bluetoothOld;
-  if (pick.source == devicename::LegacySource::None) {
-    if (gSettings.espnowDeviceName.length() == 0 && pick.unusable != devicename::LegacySource::None) {
-      logSystemEvent("SETTINGS",
-                     "device name: the old %s \"%.47s\" gives no valid name and is dropped; "
-                     "set one with 'devicename <name>'",
-                     devicename::legacySourceText(pick.unusable), unusableOld);
-    }
-    return;
-  }
-  // Direct assignment: the load is still running (no persist request, no
-  // change events; the patch above writes the file).
-  gSettings.espnowDeviceName = pick.name;
-  memcpy(sLegacyMoved, pick.name, sizeof(sLegacyMoved));
-  const char* old = pick.source == devicename::LegacySource::EspNow ? espnowOld : bluetoothOld;
-  char also[96] = "";
-  if (pick.unusable != devicename::LegacySource::None) {
-    snprintf(also, sizeof(also), "; the old %s \"%.31s\" gave no valid name",
-             devicename::legacySourceText(pick.unusable), unusableOld);
-  }
-  if (pick.converted) {
-    logSystemEvent("SETTINGS",
-                   "device name \"%s\" taken from the old %s \"%.47s\", changed to fit the rule "
-                   "(letters, digits and '-')%s",
-                   pick.name, devicename::legacySourceText(pick.source), old, also);
-  } else {
-    logSystemEvent("SETTINGS", "device name \"%s\" taken from the old %s%s", pick.name,
-                   devicename::legacySourceText(pick.source), also);
-  }
-}
-
-bool deviceNameLegacyPatchPending() { return sLegacyPatchPending; }
-
-bool deviceNameLegacyPatch(JsonDocument& doc) { return devicename::patchLegacy(doc, sLegacyMoved); }
-
-void deviceNameLegacyPatchSaved() { sLegacyPatchPending = false; }
 
 // devicename [<name>|clear]
 const char* cmd_devicename(const String& argsInput) {

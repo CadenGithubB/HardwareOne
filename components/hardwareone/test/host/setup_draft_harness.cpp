@@ -102,6 +102,17 @@ static unsigned mainWrites, debugWrites, applyCalls, certCalls, timezoneCalls, s
 static size_t hw1InternalTotalBytes() { return 300 * 1024; }
 static size_t hw1InternalFreeBytes() { return 250 * 1024; }
 static void broadcastOutput(const String& line) { output.emplace_back(line); }
+#if ENABLE_ESPNOW
+// The rule the ESP-NOW label/room/zone commands apply (System_ESPNow.cpp): this
+// double refuses '<' and anything over the field's length.
+enum class EspNowMetaField : uint8_t { FriendlyName, Room, Zone };
+static bool espnowMetadataFieldOk(EspNowMetaField field, const char* value, char* why, size_t whyCap) {
+  const size_t maxLen = field == EspNowMetaField::FriendlyName ? 47 : 31;
+  if (std::strlen(value) <= maxLen && !std::strchr(value, '<')) return true;
+  std::snprintf(why, whyCap, "Error: metadata refused");
+  return false;
+}
+#endif
 static bool writeSettingsJson() { ++mainWrites; operations.emplace_back("main.write"); return mainSave; }
 static bool writeDebugJson() { ++debugWrites; operations.emplace_back("debug.write"); return debugSave; }
 static void applySettings() { ++applyCalls; operations.emplace_back("settings.apply"); }
@@ -322,6 +333,21 @@ static void stagingAndPortValidation() {
   }
   patch.deviceName = std::string(31, 'n');
   check(wizardStageEspNowSettings(patch) && getWizardDraftValues().deviceName == std::string(31, 'n'));
+#if ENABLE_ESPNOW
+  // SET-5: the label, room and zone follow their commands' rule; a refused one
+  // stages nothing and says why.
+  patch.espnowRoom = "<b>room";
+  check(!wizardStageEspNowSettings(patch) && getWizardDraftValues().espnowRoom == "new-room");
+  check(!output.empty() && output.back() == "Error: metadata refused");
+  patch.espnowRoom = "new-room";
+  patch.espnowZone = std::string(32, 'z');
+  check(!wizardStageEspNowSettings(patch) && getWizardDraftValues().espnowZone == "old-zone");
+  patch.espnowZone = "";
+  patch.espnowFriendlyName = std::string(48, 'f');
+  check(!wizardStageEspNowSettings(patch) && getWizardDraftValues().espnowFriendlyName == "My Kitchen");
+  patch.espnowFriendlyName = "My Kitchen";
+  check(wizardStageEspNowSettings(patch));
+#endif
   // The checked text setter keeps the buffer on a refused name.
   check(wizardSetDeviceName("bad name") != nullptr && wizardSetDeviceName("good-name") == nullptr);
   check(std::strcmp(getWizardDeviceName(), "good-name") == 0);

@@ -74,6 +74,8 @@ def generate(component, baseline):
     automation_source = (component / 'System_Automation.cpp').read_text()
     automation_source = automation_source[automation_source.index('bool evaluateCondition(const char* condition) {'):]
     automation = extract_block(automation_source, 'bool evaluateCondition(')
+    # MOTION reads the presence sensor (STHS34PF80), which this harness does not
+    # build: its line is all false (fail closed), as on a board without it.
     branches = ' else '.join(extract_block(automation, f'if (strcmp(sensor, "{sensor}") == 0)')
                              for sensor in ['TEMP', 'DISTANCE', 'LIGHT', 'MOTION'])
     comparisons = automation[automation.index('  // Evaluate condition'):]

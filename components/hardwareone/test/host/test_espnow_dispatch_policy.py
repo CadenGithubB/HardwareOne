@@ -50,7 +50,7 @@ from test_web_batch_handlers import extract_block  # noqa: E402
 
 ZERO_FLAG_ALLOWED = ('KEY_EX_HELLO', 'KEY_EX_REPLY', 'KEY_EX_CONFIRM',
                      'SESSION_OPEN', 'SESSION_CONFIRM', 'SESSION_REKEY',
-                     'TOPO_REQ', 'TOPO_START', 'TOPO_PEER', 'USER_SYNC')
+                     'TOPO_REQ', 'TOPO_START', 'TOPO_PEER')
 
 # The rows of the table's ENABLE_BONDED_MODE block: accepted only from the
 # configured bond partner. A row added to or removed from that block must be

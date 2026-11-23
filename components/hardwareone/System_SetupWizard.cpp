@@ -18,6 +18,7 @@
 #include <strings.h>
 #include "System_FeatureRegistry.h"
 #include "System_Settings.h"
+#include "System_ESPNow.h"   // espnowMetadataFieldOk: the label, room and zone rule
 #include "System_BuildConfig.h"
 #include "System_Debug.h"
 #include "System_NTP.h"
@@ -736,6 +737,24 @@ bool wizardStageEspNowSettings(const SetupWizardResult& result) {
   } else if (!devicename::valid(draft.deviceName.c_str())) {
     copyWizardString(draft.deviceName, SelfDevice::deviceName());
   }
+#if ENABLE_ESPNOW
+  // The label, room and zone follow the rule their commands apply
+  // (espnowfriendlyname/espnowroom/espnowzone): a value it refuses is not
+  // staged, and the page says why and asks again.
+  const struct {
+    EspNowMetaField field;
+    const String& value;
+  } meta[] = {{EspNowMetaField::FriendlyName, result.espnowFriendlyName},
+              {EspNowMetaField::Room, result.espnowRoom},
+              {EspNowMetaField::Zone, result.espnowZone}};
+  for (const auto& m : meta) {
+    char why[96];
+    if (m.value.length() && !espnowMetadataFieldOk(m.field, m.value.c_str(), why, sizeof(why))) {
+      broadcastOutput(why);
+      return false;
+    }
+  }
+#endif
   if (result.espnowFriendlyName.length()) copyWizardString(draft.espnowFriendlyName, result.espnowFriendlyName);
   if (result.espnowRoom.length()) copyWizardString(draft.espnowRoom, result.espnowRoom);
   if (result.espnowZone.length()) copyWizardString(draft.espnowZone, result.espnowZone);

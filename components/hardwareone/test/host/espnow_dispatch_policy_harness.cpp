@@ -217,8 +217,8 @@ static const char* opcodeName(uint8_t opcode) {
 }
 
 // Rows that legitimately carry no table flag: handshakes that establish trust
-// themselves, plaintext-compatible beacons and the topology/user-sync opcodes
-// whose handlers enforce their own gates. A subset check: a row may leave this
+// themselves, plaintext-compatible beacons and the topology opcodes whose
+// handlers enforce their own gates. A subset check: a row may leave this
 // list, but no new zero-flag row may appear outside it.
 static const uint8_t kZeroFlagAllowed[] = {
 // INSERT_ZERO_FLAG_ALLOWED
@@ -942,6 +942,16 @@ int main() {
   const V4OpcodeEntry* e = v4_dispatch_lookup(ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE);
   check("SUBSCRIBE_UPDATE row requires REQ_PAIRED|REQ_SESSION_ENC",
         e && (e->flags & kPairedEnc) == kPairedEnc);
+  // USER_SYNC carries account records: the table refuses a frame not sealed in a
+  // session before the handler (which checks again) runs.
+  e = v4_dispatch_lookup(ESPNOW_V4_TYPE_USER_SYNC);
+  check("USER_SYNC row requires REQ_SESSION_ENC", e && (e->flags & V4_OPC_FLAG_REQ_SESSION_ENC) != 0);
+  check("plaintext USER_SYNC from a paired peer reaches no handler",
+        !run(ESPNOW_V4_TYPE_USER_SYNC, /*paired=*/true, /*authed=*/false, /*enc=*/false, /*keyed=*/true));
+  check("group-signed USER_SYNC reaches no handler",
+        !run(ESPNOW_V4_TYPE_USER_SYNC, /*paired=*/true, /*authed=*/true, /*enc=*/false, /*keyed=*/true));
+  check("session-sealed USER_SYNC reaches its handler",
+        run(ESPNOW_V4_TYPE_USER_SYNC, /*paired=*/true, /*authed=*/true, /*enc=*/true, /*keyed=*/true));
 
   // Verifier's table-driven invariant: no state-mutating opcode has empty flags.
   bool zeroFlagOk = true;
