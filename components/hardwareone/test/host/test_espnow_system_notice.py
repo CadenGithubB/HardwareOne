@@ -15,8 +15,8 @@ the name is the registry name, else the MAC text; chat is printed and stored as
 before, and the drain parses nothing.
 
 Source part: EspNowState has no deviceName copy and nothing refers to one;
-v4h_text files every frame as chat; v4h_heartbeat files a restart only when a
-known counter moved forward (restartSeen), and nothing names the BOOT frame.
+v4h_text files every frame as chat; v4h_heartbeat files a restart only from a
+sealed counter past the last sealed one, and nothing names the BOOT frame.
 
 --source-dir replays other production sources (for example the tree before the
 fix), which compile with the same doubles and fail the checks that name the
@@ -96,9 +96,10 @@ def main():
     check('B4 v4h_text files every frame as chat (BOOT 31 retired in 1.0 step 8)',
           'slot.msgType = MSG_TEXT;' in text_handler and 'MSG_SYSTEM_EVENT' not in text_handler)
     heartbeat = definition(source, 'static V4Verdict v4h_heartbeat(', 'System_ESPNow.cpp')
-    check('B5 v4h_heartbeat files a restart only for a known counter that moved forward',
-          'if (restarted) espnowFilePeerRestart(ctx.h->origin, hb.bootCounter, ctx.isSessionEncrypted);'
-          in heartbeat and 'sessionPeerBootCounter(ctx.h->origin, hb.bootCounter, &restarted)' in heartbeat)
+    check('B5 v4h_heartbeat files a restart only from a sealed counter past the last sealed one',
+          'if (sessionPeerBootSeen(ctx.h->origin, hb.bootCounter)) {' in heartbeat and
+          heartbeat.count('espnowFilePeerRestart(') == 1 and
+          '(void)sessionPeerBootCounter(ctx.h->origin, hb.bootCounter);' in heartbeat)
     check('B6 nothing names the BOOT frame or its JSON notice',
           all(name not in source and name not in header for name in
               ('ESPNOW_V4_TYPE_BOOT', 'MSG_TYPE_BOOT', 'buildBootNotification', 'meshSendBootToPeers',

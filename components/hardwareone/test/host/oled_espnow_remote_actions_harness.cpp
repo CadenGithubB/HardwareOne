@@ -196,6 +196,8 @@ static bool espnowSessionUp(const uint8_t* mac, uint32_t* = nullptr) {
   for (const auto& session : sSessions) if (std::memcmp(session.data(), mac, 6) == 0) return true;
   return false;
 }
+// ACTIVE or REKEYING (the peer state reads this since 1.0 step 8): the same set here.
+[[maybe_unused]] static bool espnowSessionLive(const uint8_t* mac) { return espnowSessionUp(mac); }
 static bool isSelfMac(const uint8_t* mac) { return std::memcmp(mac, sSelf, 6) == 0; }
 
 // INSERT_PEER_STATE

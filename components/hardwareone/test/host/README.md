@@ -4693,7 +4693,8 @@ L10-L12 a two-board simulation at 1 s steps with a 5 s heartbeat tick: both ways
 online event each; **the one-way case** (B cannot hear A) for 10 minutes: A shows B connecting (one-way) and B
 shows A offline the whole time, no link change and no event, A hears B at least every 10 s, B backs off to 10 s,
 one lost heartbeat of B's stream keeps A's view; a link flapping every 5 s for 10 minutes posts events at least
-30 s apart. Built against the pre-1.0 back-off (30 s after 5 minutes) L11 fails 7 checks.
+30 s apart; L13 a silent peer's link memory is cleared (no stale stamp after the millis() wrap) until it is
+heard again. Built against the pre-1.0 back-off (30 s after 5 minutes) L11 fails 7 checks.
 
 `espnow_channel_follow_tests` F30 is channel-follow bench check B8: a master that never hears its worker sends
 its heartbeats with the production back-off; with the 10 s ceiling the worker starts no sweep in 10 minutes,
@@ -4706,21 +4707,28 @@ heartbeat sent 30 s ago are not; a sealed direct ACK for one of our direct sends
 frame not sent direct, a tagged ACK and a relayed sealed ACK are not (the relayed one does not refresh the heard
 clock either); the boot counter: the first sealed counter is recorded without a restart record, a replayed
 old-boot or same-boot tagged heartbeat closes nothing and files nothing, one naming the peer from another radio
-asks nothing, a newer one closes the stale session once and files one restart, a sealed newer one files and
-closes nothing, the first tagged counter after this device's start closes the stale session but files no
-restart. Source checks: the periodic heartbeat asks no ACK and is sealed when the session is up, the broadcast
+asks nothing, a newer tagged one closes the stale session once and files nothing, forged ever-newer tagged
+counters file nothing, a sealed counter past the last sealed one files once and closes nothing, the first
+counters after this device's start file nothing; while a session is up a tagged heartbeat between two sealed
+ones changes neither the echo nor the RSSI (review fix 1). Source checks: the periodic heartbeat asks no ACK and
+is sealed when the session is up, the fan-out is spread over passes (4 per 50 ms) and leaves TX queue room, a
+heartbeat msgId is remembered only once sent, the broadcast
 ACK tracking and `espnowbroadcaststats` are gone, the router takes adverts only from a two-way neighbour and
 `neighbourAlive` and `v4_radio_emit` go direct only on a two-way link.
 
 `espnow_peer_state_surfaces` (extended): a one-way peer with a session is connecting and not counted online
-(MESH metric, Home Assistant availability). `oled_espnow_remote_actions`, `g2_espnow_peer_rows` and
+(MESH metric, Home Assistant availability); a session being rekeyed counts as up (review fix 2).
+`espnow_meshstatus_fit` (new) runs the production `cmd_espnow_meshstatus` with its row builders and ArduinoJson:
+the worst case (32 peer rows, 16 discovered devices, 31-character names, largest numbers) is a reply under
+`CMD_RESULT_MAX` that parses, with `peersNotShown` / `unpairedNotShown` adding up to the totals (paired peers
+first); a small mesh is shown whole; rows carry `state`, `link`, `lastTwoWayAgeMs` and none of the removed keys. `oled_espnow_remote_actions`, `g2_espnow_peer_rows` and
 `espnow_group_membership` read the link through `meshPeerLinkOf` doubles; `espnow_wire_layout` pins HEARTBEAT at
 56 bytes and opcode 31 retired; `espnow_dispatch_policy` the HEARTBEAT minimum 56 and no BOOT row;
 `espnow_handshake_backoff` that hearing a peer again (not the online event) ends its back-off; `espnow_page_render`
 a one-way mesh row showing Connecting with its link; `command_name_form` the retired name `espnowbroadcaststats`.
 
 ```sh
-ctest --test-dir <build> -R 'espnow_(link_core_tests|channel_follow_tests|rx_frontend|peer_restart_tests|peer_state_surfaces|system_notice|wire_layout|dispatch_policy)' --output-on-failure
+ctest --test-dir <build> -R 'espnow_(link_core_tests|channel_follow_tests|rx_frontend|peer_restart_tests|peer_state_surfaces|meshstatus_fit|system_notice|wire_layout|dispatch_policy)' --output-on-failure
 ```
 
 Not covered (device only): the sealed heartbeat through the TX dispatcher, the per-peer fan-out and back-off
@@ -7845,7 +7853,7 @@ before the fix. The round-4 cases fail 8 of its 30 compiled checks (7 of 26 with
 (boot #N)` and is stored as one attributed `MSG_SYSTEM_EVENT` record `Online (boot #N)` with no group id
 (sealed marks it encrypted; no registry name gives the MAC text; a long name is cut); chat is unchanged and
 the drain parses nothing. Source checks: no copy of the name in `EspNowState`, `v4h_text` files every frame
-as chat, `v4h_heartbeat` files a restart only for a known counter that moved forward, and nothing names
+as chat, `v4h_heartbeat` files a restart only from a sealed counter past the last sealed one, and nothing names
 the BOOT frame, its JSON notice or its formatter.
 
 `espnow_bond_partner_change` runs the production `bondconnect`, `bonddisconnect`, `espnowbondmodeenabled`,
@@ -7910,8 +7918,8 @@ counter is newer (or the first one this device sees; the BOOT notice until ESP-N
 notices of different starts played in turn close nothing), 0 or no counter, no session or a session younger than 2 s
 close nothing; a counter from a sealed frame (bond heartbeat) becomes the reference outright, so a peer whose count
 was erased is recognised again; copies (same or older counter) are not filed; counters compare as a signed 32-bit
-difference across the wrap; only a group tag of the peer's own mesh counts; only a known counter that moved forward
-is reported as a restart (`restartSeen`, the "Online (boot #N)" record); forged heartbeats with ever newer counters close at most once per peer per
+difference across the wrap; only a group tag of the peer's own mesh counts; only a sealed counter past the last sealed
+one is reported as a restart (the "Online (boot #N)" record; tagged counters never report); forged heartbeats with ever newer counters close at most once per peer per
 10 s, a limit the SESSION_UNKNOWN hint shares; the device without the session answers at most one hint per peer per
 second and none for its own handshake or a replaced session; a hint closes only the live session it names, for a
 sequence this device sealed in it; the 16-entry table gives up the entry used longest ago; the times survive the

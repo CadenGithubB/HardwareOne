@@ -334,19 +334,25 @@ def main():
     advert = extract_block(read('System_ESPNow_Router.cpp'), 'void meshRouterIngestAdvert(')
     if advert.count('espnowRevokedMac(') != 2:
         failures.append('meshRouterIngestAdvert does not refuse revoked advertisers and revoked destinations')
-    heartbeat = extract_block(source[source.rindex('static int meshSendHeartbeats(const V4PayloadHeartbeat& base)'):],
-                              'static int meshSendHeartbeats(const V4PayloadHeartbeat& base)')
-    if 'espnowRevokedMac(gMeshPeers[i].mac)' not in heartbeat:
-        failures.append('meshSendHeartbeats may send a heartbeat to a revoked device')
+    heartbeat = extract_block(source[source.rindex('static void meshHeartbeatFanoutStep(uint32_t now)'):],
+                              'static void meshHeartbeatFanoutStep(uint32_t now)')
+    if 'espnowRevokedMac(p.mac)' not in heartbeat:
+        failures.append('the heartbeat fan-out may send a heartbeat to a revoked device')
     # 1.0 step 8 (RC3), the parts outside this harness: the periodic heartbeat
-    # asks no ACK and goes sealed when the session is up; the broadcast ACK
-    # tracking is gone; the router installs adverts only from a two-way
-    # neighbour; the radio chokepoint goes direct only on a two-way link.
-    if 'v4SendHeartbeatTo(mac, hb, msgId, /*ackReq=*/false)' not in heartbeat:
-        failures.append('meshSendHeartbeats asks an ACK or does not send through v4SendHeartbeatTo')
+    # asks no ACK and goes sealed when the session is up; the fan-out is spread
+    # and leaves TX queue room; a heartbeat's msgId is remembered only once
+    # sent; the broadcast ACK tracking is gone; the router installs adverts
+    # only from a two-way neighbour; the radio chokepoint goes direct only on a
+    # two-way link.
+    if 'v4SendHeartbeatTo(mac, hb, generateMessageId(), /*ackReq=*/false)' not in heartbeat:
+        failures.append('the heartbeat fan-out asks an ACK or does not send through v4SendHeartbeatTo')
+    if 'espnowtx::queueDepth() >= kHbQueueReserve' not in heartbeat or 'done < kHbBatch' not in heartbeat:
+        failures.append('the heartbeat fan-out is not spread over passes or takes the whole TX queue')
     send_to = extract_block(source[source.rindex('static bool v4SendHeartbeatTo('):], 'static bool v4SendHeartbeatTo(')
     if 'espnowSessionUp(mac)' not in send_to or 'espnowtx::sendAead(mac, ESPNOW_V4_TYPE_HEARTBEAT' not in send_to:
         failures.append('v4SendHeartbeatTo does not seal the heartbeat when the session is up')
+    if 'if (ok) v4HeartbeatSent(mac, msgId);' not in send_to:
+        failures.append('v4SendHeartbeatTo remembers a heartbeat msgId whose send failed')
     for gone in ('BroadcastTracker', 'broadcast_tracker_', 'cmd_espnow_broadcaststats'):
         if gone in source:
             failures.append(f'{gone} is still in System_ESPNow.cpp (removed in 1.0 step 8)')

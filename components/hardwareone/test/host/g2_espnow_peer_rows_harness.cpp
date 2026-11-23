@@ -100,6 +100,8 @@ static bool espnowSessionUp(const uint8_t* mac, uint32_t* = nullptr) {
   for (uint8_t id : sessionsUp) if (mac[5] == id) return true;
   return false;
 }
+// ACTIVE or REKEYING (the peer state reads this since 1.0 step 8): the same set here.
+[[maybe_unused]] static bool espnowSessionLive(const uint8_t* mac) { return espnowSessionUp(mac); }
 // The heartbeat table: a slot per peer heard, by the last address byte, and
 // whether it was heard within the 30 s window (meshPeerLinkOf).
 struct MeshPeerHealth { uint8_t id; bool recent; };

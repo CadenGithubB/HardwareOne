@@ -97,9 +97,14 @@ static MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMiss
 static MeshLink meshPeerLinkOf(const MeshPeerHealth* slot) {
   return !slot || !slot->recent ? MeshLink::None : slot->oneWay ? MeshLink::OneWay : MeshLink::TwoWay;
 }
-static bool espnowSessionUp(const uint8_t* mac, uint32_t* = nullptr) {
+static std::vector<uint8_t> rekeying;   // sessions in REKEYING (still usable)
+[[maybe_unused]] static bool espnowSessionUp(const uint8_t* mac, uint32_t* = nullptr) {
   for (uint8_t id : sessions) if (mac[5] == id) return true;
   return false;
+}
+static bool espnowSessionLive(const uint8_t* mac) {
+  for (uint8_t id : rekeying) if (mac[5] == id) return true;
+  return espnowSessionUp(mac);
 }
 static void paired(std::initializer_list<uint8_t> ids) {
   espnow = EspNowState();
@@ -178,6 +183,15 @@ int main() {
   // The document's system.state words.
   CHECK(std::strcmp(espnowPeerStateName(espnowPeerState(macOf(2))), "connecting") == 0);
   CHECK(std::strcmp(espnowPeerStateName(espnowPeerState(macOf(3))), "offline") == 0);
+  // A rekey keeps the peer online (review fix 2: no offline / online events
+  // around every rekey).
+  heartbeats = {{1, true, false}};
+  sessions.clear();
+  rekeying = {1};
+  CHECK(espnowPeerState(macOf(1)) == EspNowPeerState::Online);
+  CHECK(mesh(1, 3));
+  rekeying.clear();
+  sessions = {1};
   heartbeats = {{1, true, true}};                         // one-way with a session: connecting
   CHECK(std::strcmp(espnowPeerStateName(espnowPeerState(macOf(1))), "connecting") == 0);
   CHECK(std::strcmp(meshPeerAvailability(espnowPeerState(macOf(1))), "offline") == 0);

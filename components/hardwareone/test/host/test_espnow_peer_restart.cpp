@@ -11,8 +11,8 @@
 // close nothing; a counter from a sealed frame becomes the reference outright
 // (an erased peer is not locked out); counters compare across the 32-bit wrap;
 // a counter of 0 closes nothing; only a group tag of the peer's own mesh
-// counts; only a known counter that moved forward is reported as a restart
-// (restartSeen); a forged heartbeat forces at most one close per peer per
+// counts; only a sealed counter past the last sealed one is reported as a
+// restart; a forged heartbeat forces at most one close per peer per
 // 10 s, shared with the hint; the device without
 // the session answers at most one hint per peer per second and none for its own
 // handshake or a replaced session; a hint closes only the live session it
@@ -156,25 +156,22 @@ static void signalScope() {
 }
 
 
-// restartSeen (1.0 step 8): only a counter this device already knew that moved
-// forward is reported as a restart (the "Online (boot #N)" record). The first
-// counter after this device's own start, a copy and an older one are not.
-static void restartSeenRule() {
+// Restart reports (1.0 step 8, review fix 3): only a SEALED counter that moved
+// past the last sealed one reports a restart (the "Online (boot #N)" record).
+// Tagged counters (any group-key holder can send them) never report; the first
+// sealed counter after this device's start, a copy and an older one do not.
+static void restartReports() {
   PeerRestartTable t = {};
-  bool seen = true;
-  CHECK(peerRestartOnBootCounter(t, kP4, 7, true, kOld, 1000, &seen) == V::DropSession && !seen);
-  CHECK(peerRestartOnBootCounter(t, kP4, 7, true, kOld, 20000, &seen) == V::SameBoot && !seen);
-  CHECK(peerRestartOnBootCounter(t, kP4, 6, true, kOld, 40000, &seen) == V::OlderBoot && !seen);
-  CHECK(peerRestartOnBootCounter(t, kP4, 8, false, 0, 60000, &seen) == V::NoSession && seen);
-  CHECK(peerRestartOnBootCounter(t, kP4, 0, true, kOld, 70000, &seen) == V::NoCounter && !seen);
-  // A sealed heartbeat's counter: the first one is no restart, a newer one is.
-  PeerRestartTable u = {};
-  CHECK(!peerRestartBootSeen(u, kXiao, 3, 1000));
-  CHECK(!peerRestartBootSeen(u, kXiao, 3, 2000));
-  CHECK(peerRestartBootSeen(u, kXiao, 4, 3000));
-  CHECK(!peerRestartBootSeen(u, kXiao, 1, 4000));  // erased: the reference, not a restart
-  CHECK(peerRestartFind(u, kXiao)->boot == 1);
-  CHECK(!peerRestartBootSeen(u, kXiao, 0, 5000) && peerRestartFind(u, kXiao)->boot == 1);
+  CHECK(!peerRestartBootSeen(t, kXiao, 3, 1000));             // first sealed: the reference
+  CHECK(peerRestartOnBootCounter(t, kXiao, 4, true, kOld, 2000) == V::DropSession);  // tagged, newer
+  for (uint32_t c = 5; c < 50; c++) (void)peerRestartOnBootCounter(t, kXiao, c, false, 0, 2000 + c * 11000);
+  CHECK(peerRestartFind(t, kXiao)->boot == 49 && peerRestartFind(t, kXiao)->confirmedBoot == 3);
+  CHECK(peerRestartBootSeen(t, kXiao, 4, 900000));             // sealed past the last sealed: one report
+  CHECK(!peerRestartBootSeen(t, kXiao, 4, 901000));            // the same again: none
+  CHECK(!peerRestartBootSeen(t, kXiao, 1, 902000));            // erased: the reference, not a restart
+  CHECK(peerRestartFind(t, kXiao)->boot == 1 && peerRestartFind(t, kXiao)->confirmedBoot == 1);
+  CHECK(!peerRestartBootSeen(t, kXiao, 0, 903000) && peerRestartFind(t, kXiao)->boot == 1);
+  CHECK(peerRestartBootSeen(t, kXiao, 2, 904000));
 }
 
 // A mesh member forging notices with ever newer counters closes the session at
@@ -299,7 +296,7 @@ int main() {
   counterWrap();
   noCounter();
   signalScope();
-  restartSeenRule();
+  restartReports();
   forgedNotices();
   unknownSessionReplies();
   hintRules();

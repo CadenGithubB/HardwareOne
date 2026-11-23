@@ -1515,6 +1515,14 @@ set(ESPNOW_PEER_STATE_SURFACES_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND ESPNOW_PEER_STATE_SURFACES_TEST_ARGS --sanitize)
 endif()
+# espnowmeshstatus always fits one command result (1.0 step 8 review): the worst
+# case (32 peer rows, 16 discovered devices, long names, largest numbers) is cut
+# with peersNotShown / unpairedNotShown, never "response too large".
+add_test(
+  NAME espnow_meshstatus_fit
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_meshstatus_fit.py
+          ${ESPNOW_PEER_STATE_SURFACES_TEST_ARGS})
 add_test(
   NAME espnow_peer_state_surfaces
   COMMAND ${Python3_EXECUTABLE}

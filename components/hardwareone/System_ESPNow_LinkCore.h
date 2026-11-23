@@ -17,6 +17,20 @@
 // entering needs two distinct evidences, staying needs one), else OneWay.
 // Each evidence id (our msgId the ACK or echo names) counts once.
 //
+// Limits (threat model):
+//   - Wormhole: an attacker without any key who records B's sealed frames
+//     near B and replays them near A (and A's near B) in real time can make a
+//     link that is one-way on the air look two-way: the frames are genuine
+//     and inside the replay window. It cannot read, change or forge them, so
+//     the worst case is a direct send that is lost (an unanswered send then
+//     counts toward the session re-open as before).
+//   - A replayed group-tagged frame of a paired peer refreshes its heard
+//     clock (tags carry no freshness beyond the 5 s dedup), so someone in
+//     range can keep a powered-off peer "connecting" (never online: that
+//     needs fresh sealed evidence). Counting only sealed frames as heard once
+//     a session existed would close this; not done in 1.0 (a restarted peer
+//     sends tagged heartbeats until its session reopens).
+//
 // Also here (pure, host-tested): the heartbeat echo memory, the record of
 // direct sends an ACK can prove, the heartbeat back-off (ceiling 10 s, E8) and
 // the online/offline event rate limit (one per peer per 30 s, the latest state
@@ -50,6 +64,7 @@ struct MeshLinkState {
   uint32_t evidenceId[kMeshLinkEvidenceSlots];  // our msgIds the evidences named
   uint32_t evidenceMs[kMeshLinkEvidenceSlots];  // 0 = empty
   bool     wasTwoWay;                           // settled state, for the hysteresis
+  bool     expired;                             // went silent: nothing here counts until heard again
   // Heartbeat echo (DESIGN 4.2): the msgIds of the last two heartbeats we sent
   // the peer, and the last heartbeat we heard from it (echoed back to it).
   uint32_t hbTxId[2];
@@ -76,13 +91,26 @@ inline uint8_t meshLinkHits(const MeshLinkState& s, uint32_t nowMs) {
 
 // The one definition (DESIGN 4.3).
 inline MeshLink meshLinkOf(const MeshLinkState& s, uint32_t lastHeardMs, uint32_t nowMs) {
-  if (!meshLinkWithin(lastHeardMs, nowMs, kMeshLinkWindowMs)) return MeshLink::None;
+  if (s.expired || !meshLinkWithin(lastHeardMs, nowMs, kMeshLinkWindowMs)) return MeshLink::None;
   if (meshLinkWithin(s.lastTwoWayMs, nowMs, kMeshLinkWindowMs)) {
     const uint8_t hits = meshLinkHits(s, nowMs);
     if (s.wasTwoWay ? hits >= 1 : hits >= 2) return MeshLink::TwoWay;
   }
   return MeshLink::OneWay;
 }
+
+// The peer went silent (heard -> None, seen on the owner's tick): its link
+// memory is cleared and the old stamps no longer count. A paired peer's slot
+// is kept for good, and every compare here is a wrap-safe difference, so
+// without this a stamp from about 49.7 days ago would read as "just now" when
+// millis() comes round again. meshLinkHeard ends it.
+inline void meshLinkExpire(MeshLinkState& s) {
+  memset(&s, 0, sizeof(s));
+  s.expired = true;
+}
+
+// The peer was heard (the owner sets its heard clock at the same time).
+inline void meshLinkHeard(MeshLinkState& s) { s.expired = false; }
 
 // The owner settles the hysteresis after each change and on its tick.
 inline MeshLink meshLinkSettle(MeshLinkState& s, uint32_t lastHeardMs, uint32_t nowMs) {

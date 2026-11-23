@@ -441,9 +441,9 @@ static bool sessionLiveFor(const uint8_t* mac) {
   }
   return false;
 }
-static PeerBootVerdict sessionPeerBootCounter(const uint8_t* mac, uint32_t boot, bool* restartSeen) {
-  const PeerBootVerdict v = peerRestartOnBootCounter(gRestart, mac, boot, sessionLiveFor(mac), 600000, gNowMs,
-                                                     restartSeen);
+static bool espnowSessionLive(const uint8_t* mac) { return sessionLiveFor(mac); }
+static PeerBootVerdict sessionPeerBootCounter(const uint8_t* mac, uint32_t boot) {
+  const PeerBootVerdict v = peerRestartOnBootCounter(gRestart, mac, boot, sessionLiveFor(mac), 600000, gNowMs);
   if (v == PeerBootVerdict::DropSession) ++gSessionDrops;
   return v;
 }
@@ -1973,7 +1973,9 @@ static void testHeartbeatBootCounter() {
   // The known counter 6 (a sealed heartbeat); then copies of B's earlier
   // tagged heartbeats are played back: an old start (5) or the same one (6)
   // closes nothing and files nothing; a newer start (7) closes the stale
-  // session and files one restart.
+  // session once. A restart is filed only from a SEALED counter that moved
+  // past the last sealed one (review fix 3: a tagged counter can be forged by
+  // any group-key holder, one record per forged counter).
   reset(true);
   deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 830, heartbeatPayload(6), 0, 1, 0));
   check("the first sealed counter is recorded, no restart filed",
@@ -1988,25 +1990,56 @@ static void testHeartbeatBootCounter() {
   check("a heartbeat naming B from another radio closes nothing", gSessionDrops == 0 &&
         peerRestartFind(gRestart, gPeerB)->boot == 6);
   deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 834, heartbeatPayload(7)));
-  check("a tagged heartbeat with a newer counter closes the stale session and files one restart",
-        gSessionDrops == 1 && gRestartsFiled.size() == 1 && gRestartsFiled[0] == 7);
-  gNowMs += 1000;
-  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 835, heartbeatPayload(7)));
-  check("its next heartbeats (same counter) close nothing more", gSessionDrops == 1 && gRestartsFiled.size() == 1);
-  // A sealed heartbeat whose counter moved forward (the restart was missed,
-  // the session already reopened): filed, nothing closed.
-  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 836, heartbeatPayload(8), 0, 1, 0));
-  check("a sealed newer counter is filed and closes nothing", gSessionDrops == 1 && gRestartsFiled.size() == 2);
+  check("a tagged heartbeat with a newer counter closes the stale session once and files nothing",
+        gSessionDrops == 1 && gRestartsFiled.empty());
+  // A group-key holder's forged counters 8, 9, 10 ... (11 s apart, past the
+  // drop limit): each may cost a handshake, none writes a record.
+  for (uint32_t c = 8; c < 18; c++) {
+    gNowMs += 11000;
+    deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 900 + c, heartbeatPayload(c)));
+  }
+  check("forged ever-newer tagged counters file no restart record (FAILS ON filing on a tagged counter)",
+        gRestartsFiled.empty());
+  // The session reopened; the peer's first sealed heartbeat shows its new
+  // counter (past the last sealed 6): filed once, nothing closed.
+  const unsigned drops = gSessionDrops;
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 836, heartbeatPayload(7), 0, 1, 0));
+  check("a sealed counter past the last sealed one is filed once and closes nothing",
+        gSessionDrops == drops && gRestartsFiled.size() == 1 && gRestartsFiled[0] == 7);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 837, heartbeatPayload(7), 0, 1, 0));
+  check("its next sealed heartbeats file nothing more", gRestartsFiled.size() == 1);
   // This device's first counter for a peer after its own start is no restart.
   reset(true);
   deliver(gPeerC, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerC, 840, heartbeatPayload(3)));
-  check("the first tagged counter seen closes the stale session but files no restart",
+  deliver(gPeerC, sealedFrame(gSessC, ESPNOW_V4_TYPE_HEARTBEAT, gPeerC, 841, heartbeatPayload(3), 0, 1, 0));
+  check("the first counters seen close the stale session but file no restart",
         gSessionDrops == 1 && gRestartsFiled.empty());
+}
+
+// Review fix 1: while a session with the peer is up, a tagged heartbeat (a
+// replayed copy needs no key) does not change what our next heartbeat echoes.
+static void testTaggedHeartbeatDoesNotPoisonEcho() {
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 850, heartbeatPayload(4, 0, -55), 0, 1, 0));
+  check("a sealed heartbeat sets the echo", meshLinkEchoFor(health(gPeerB)->link, gNowMs) == 850 &&
+        health(gPeerB)->link.peerHeardRssi == -55);
+  gNowMs += 1000;
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 851, heartbeatPayload(4, 0, -90)));
+  check("a tagged heartbeat between two sealed ones does not change the echo or the RSSI "
+        "(FAILS ON the echo poisoning)",
+        meshLinkEchoFor(health(gPeerB)->link, gNowMs) == 850 && health(gPeerB)->link.peerHeardRssi == -55);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 852, heartbeatPayload(4), 0, 1, 0));
+  check("the next sealed heartbeat sets it", meshLinkEchoFor(health(gPeerB)->link, gNowMs) == 852);
+  // Without a session a tagged heartbeat is all there is: it sets the echo.
+  deliver(gFar, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gFar, 853, heartbeatPayload(1)));
+  check("with no session, a tagged heartbeat sets the echo",
+        health(gFar) && meshLinkEchoFor(health(gFar)->link, gNowMs) == 853);
 }
 
 int main() {
   testTwoWayEvidence();
   testHeartbeatBootCounter();
+  testTaggedHeartbeatDoesNotPoisonEcho();
   std::setvbuf(stdout, nullptr, _IOLBF, 0);  // keep the case lines if a pre-fix tree aborts
   testMeshIdGate();
   testForgedPlaintextDoesNotShadowSealed();

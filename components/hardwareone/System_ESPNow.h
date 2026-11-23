@@ -364,11 +364,13 @@ void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hb
 
 // Fills JsonArray for espnow meshstatus: union of active gMeshPeers + paired remotes not yet in slots.
 // JSON keys: mac, name, alive (heard within 30 s), state (online/connecting/offline), link
-// (twoWay/oneWay/none), lastTwoWayAgeMs (null: no two-way evidence yet), lastHeartbeat (mesh HB ms),
-// lastRxActivity, heartbeatCount, secondsSinceHeartbeat, secondsSinceActivity, linkRssi
-// (locally-measured per-frame EWMA dBm; 0 = no sample yet), peerHeardRssi (the RSSI the peer
-// reports for our heartbeats; 0 = none).
-void buildMeshStatusPeersJson(JsonArray peers, uint32_t nowMillis, int* outTotalPeers);
+// (twoWay/oneWay/none), lastTwoWayAgeMs (null: no two-way evidence yet), heartbeatCount,
+// secondsSinceHeartbeat, secondsSinceActivity, linkRssi (locally-measured per-frame EWMA dBm;
+// 0 = no sample yet), peerHeardRssi (the RSSI the peer reports for our heartbeats; 0 = none).
+// Rows are added while `doc` still fits a command result (CMD_RESULT_MAX) with `tailBytes` kept
+// for the fields after the list; the rest are counted in *outNotShown.
+void buildMeshStatusPeersJson(JsonDocument& doc, JsonArray peers, uint32_t nowMillis, int* outTotalPeers,
+                              int* outNotShown, size_t tailBytes);
 
 // ==========================
 // Mesh Peer Metadata (device organization for rooms/zones/tags)
@@ -1176,6 +1178,9 @@ uint32_t espnowPairModeRemainingMs();
 bool espnowBackupPromoted();
 // An ACTIVE session with a paired peer; *establishedAtMs: when it went ACTIVE.
 bool espnowSessionUp(const uint8_t* mac, uint32_t* establishedAtMs = nullptr);
+// The session with `mac` is ACTIVE or REKEYING (it works; a rekey keeps it
+// usable). The peer state (espnowPeerState) counts it as up. Any task (a read).
+bool espnowSessionLive(const uint8_t* mac);
 // True on a mesh worker while its master session is ACTIVE and a sealed frame
 // from the master came within 30 s (channel follow): the Wi-Fi rehunt waits.
 // Any task (an atomic read).
@@ -1298,11 +1303,12 @@ MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing = f
 // While stopped, a checked driver query preserves the existing helper behavior.
 bool isSelfMac(const uint8_t* mac);
 // A peer's state (System_ESPNow_PeerStateCore.h): its link (meshPeerLinkOf)
-// and its encrypted session (espnowSessionUp), as every surface reads them.
-// Reads only, any task (the reader risk of gMeshPeers).
+// and its encrypted session (espnowSessionLive: ACTIVE or REKEYING, so a rekey
+// does not make a peer connecting), as every surface reads them. Reads only,
+// any task (the reader risk of gMeshPeers).
 inline EspNowPeerState espnowPeerState(const uint8_t mac[6]) {
   const MeshPeerHealth* health = getMeshPeerHealth(mac, false);
-  return espnowPeerStateOf(health ? meshPeerLinkOf(health) : MeshLink::None, espnowSessionUp(mac));
+  return espnowPeerStateOf(health ? meshPeerLinkOf(health) : MeshLink::None, espnowSessionLive(mac));
 }
 // The paired peers (gEspNow->devices[] without this device) by state; all
 // zero while ESP-NOW is stopped.

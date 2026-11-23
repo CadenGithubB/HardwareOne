@@ -54,7 +54,9 @@
 // table lives in RAM only: after this device restarts every peer starts
 // unknown, and its first heartbeat with a counter counts as a restart for the
 // session rule (a copy of an old one can thus close a session once per peer
-// per start of this device), but not as a restart to report (restartSeen).
+// per start of this device). A restart is reported only from sealed counters
+// (peerRestartBootSeen): the first sealed counter after this device's start
+// reports nothing, a later sealed one that moved forward reports once.
 //
 // Pure logic on a small fixed table (no heap, no lock, no clock); the owner
 // (System_ESPNow_Sessions.cpp) holds the instance in PSRAM and the lock.
@@ -80,6 +82,8 @@ struct PeerRestartEntry {
   bool     haveBoot;      // `boot` holds the last counter seen from this peer
   uint8_t  mac[6];
   uint32_t boot;
+  bool     haveConfirmed; // `confirmedBoot` holds the last counter seen SEALED
+  uint32_t confirmedBoot; // (only the peer can send it: restart reports go by it)
   uint32_t lastDropMs;    // 0 = no forced close yet
   uint32_t lastHintTxMs;  // 0 = no hint sent yet
   uint32_t lastUseMs;
@@ -134,14 +138,19 @@ inline void peerRestartNoteDrop(PeerRestartEntry& e, uint32_t nowMs) {
 // A counter seen in a sealed frame of the live session (a sealed mesh
 // heartbeat, the bond heartbeat): only the peer can send it and it cannot be
 // replayed, so it becomes the reference outright, also when lower (the peer's
-// count was erased). It never closes anything. True when it moved a known
-// counter forward: the peer restarted since this device last saw its count.
+// count was erased). It never closes anything. True when it moved the last
+// SEALED counter forward: the peer restarted since this device last saw its
+// count in a session. Only this reports a restart (the "Online (boot #N)"
+// record): a group-tagged counter can be sent by any member of the mesh, so
+// reporting on it would let one file a record per forged counter.
 inline bool peerRestartBootSeen(PeerRestartTable& t, const uint8_t mac[6], uint32_t boot, uint32_t nowMs) {
   if (boot == 0) return false;
   PeerRestartEntry* e = peerRestartClaim(t, mac, nowMs);
-  const bool restarted = e->haveBoot && bootCounterNewer(boot, e->boot);
+  const bool restarted = e->haveConfirmed && bootCounterNewer(boot, e->confirmedBoot);
   e->boot = boot;
   e->haveBoot = true;
+  e->confirmedBoot = boot;
+  e->haveConfirmed = true;
   return restarted;
 }
 
@@ -166,19 +175,15 @@ enum class PeerBootVerdict : uint8_t {
 // The boot counter of a group-tagged heartbeat from `mac` (tag of the peer's
 // mesh checked, the peer is paired). `sessionLive` says whether this device
 // holds an ACTIVE (or REKEYING) session with the peer, opened or rekeyed
-// `sessionAgeMs` ago. *restartSeen (optional) is set true only when a counter
-// this device already knew moved forward: the peer restarted while this
-// device ran (the first counter after this device's own start is not one).
+// `sessionAgeMs` ago. Never reports a restart (peerRestartBootSeen does, on
+// the sealed counter that follows).
 inline PeerBootVerdict peerRestartOnBootCounter(PeerRestartTable& t, const uint8_t mac[6], uint32_t boot,
-                                                bool sessionLive, uint32_t sessionAgeMs,
-                                                uint32_t nowMs, bool* restartSeen = nullptr) {
-  if (restartSeen) *restartSeen = false;
+                                                bool sessionLive, uint32_t sessionAgeMs, uint32_t nowMs) {
   if (boot == 0) return PeerBootVerdict::NoCounter;
   PeerRestartEntry* e = peerRestartClaim(t, mac, nowMs);
   if (e->haveBoot) {
     if (boot == e->boot) return PeerBootVerdict::SameBoot;
     if (!bootCounterNewer(boot, e->boot)) return PeerBootVerdict::OlderBoot;
-    if (restartSeen) *restartSeen = true;
   }
   e->boot = boot;
   e->haveBoot = true;

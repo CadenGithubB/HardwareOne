@@ -1159,8 +1159,7 @@ bool sessionLiveState(const SessionState* s) {
 
 }  // namespace
 
-PeerBootVerdict sessionPeerBootCounter(const uint8_t peerMac[6], uint32_t bootCounter, bool* restartSeen) {
-  if (restartSeen) *restartSeen = false;
+PeerBootVerdict sessionPeerBootCounter(const uint8_t peerMac[6], uint32_t bootCounter) {
   if (!peerMac) return PeerBootVerdict::NoSession;
   const uint32_t nowMs = (uint32_t)millis();
   uint16_t closedId = 0;
@@ -1177,7 +1176,7 @@ PeerBootVerdict sessionPeerBootCounter(const uint8_t peerMac[6], uint32_t bootCo
     SessionState* s = sessionForPeer(peerMac);
     const bool live = sessionLiveState(s);
     const uint32_t age = live ? (uint32_t)(nowMs - s->establishedAtMs) : 0;
-    verdict = peerRestartOnBootCounter(*gPeerRestart, peerMac, bootCounter, live, age, nowMs, restartSeen);
+    verdict = peerRestartOnBootCounter(*gPeerRestart, peerMac, bootCounter, live, age, nowMs);
     if (verdict == PeerBootVerdict::DropSession) {
       closedId = s->sessionId;
       sessionClear(s);

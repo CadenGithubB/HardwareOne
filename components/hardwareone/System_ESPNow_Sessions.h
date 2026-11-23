@@ -543,9 +543,9 @@ bool sessionOpenIdStale(const SessionState* s, uint16_t sessionId);
 // sessionPeerBootSeen). On a restart it closes the ACTIVE/REKEYING session
 // this device holds with the peer (sends after it queue and open a new one;
 // frames that already wait stay queued and go out on the new session) and
-// prints one line naming the peer. *restartSeen (optional): a counter this
-// device knew moved forward (see peerRestartOnBootCounter). Returns the verdict.
-PeerBootVerdict sessionPeerBootCounter(const uint8_t peerMac[6], uint32_t bootCounter, bool* restartSeen = nullptr);
+// prints one line naming the peer. It reports no restart record
+// (sessionPeerBootSeen does, on the sealed counter). Returns the verdict.
+PeerBootVerdict sessionPeerBootCounter(const uint8_t peerMac[6], uint32_t bootCounter);
 
 // A boot counter seen in a sealed frame of the live session (a sealed mesh
 // heartbeat, the bond heartbeat): becomes the reference outright (lower ones

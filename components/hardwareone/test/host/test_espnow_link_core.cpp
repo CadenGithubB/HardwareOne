@@ -11,7 +11,8 @@
 // hear A) for 10 simulated minutes: A shows B connecting (one-way) and B shows A
 // offline the whole time, no flap and no event; one lost heartbeat of the
 // deaf board's 10 s stream keeps it heard; a link flapping every 5 s for 10
-// minutes posts at most one event per 30 s.
+// minutes posts at most one event per 30 s; L13: the link memory is cleared
+// when a peer goes silent (no stale stamp after the millis() wrap).
 #include "System_ESPNow_LinkCore.h"
 
 #include <cstdio>
@@ -318,6 +319,28 @@ void l12Flap() {
   CHECK(spacingOk && posted <= 600 / 30 + 1, "L12 flapping link: %d events in 10 min, >= 30 s apart", posted);
 }
 
+// L13 (review fix 4): a peer that went silent has its link memory cleared on
+// the heard -> none edge, so after about 49.7 days the old stamps do not read
+// as fresh when millis() comes round; hearing it again ends that.
+void l13Expire() {
+  MeshLinkState s = fresh();
+  const uint32_t t0 = 1000;
+  meshLinkNoteTwoWay(s, 1, t0, t0);
+  meshLinkNoteTwoWay(s, 2, t0, t0 + 1);
+  meshLinkNoteHeartbeatHeard(s, 77, -50, -60, t0);
+  meshLinkNoteHeartbeatSent(s, 88, t0);
+  meshLinkNoteDirectSend(s, 99);
+  CHECK(meshLinkOf(s, t0, t0 + 10) == MeshLink::TwoWay, "L13 two-way before");
+  meshLinkExpire(s);
+  const uint32_t wrapped = t0 + 5;  // a full millis() round later: the stamps look 5 ms old
+  CHECK(meshLinkOf(s, t0, wrapped) == MeshLink::None, "L13 after the wrap a silent peer stays none");
+  CHECK(s.lastTwoWayMs == 0 && meshLinkHits(s, wrapped) == 0 && meshLinkEchoFor(s, wrapped) == 0 &&
+            !meshLinkEchoMatches(s, 88, wrapped) && !meshLinkSentDirect(s, 99) && s.peerHeardRssi == 0,
+        "L13 the evidence, echo and direct-send memory are gone");
+  meshLinkHeard(s);
+  CHECK(meshLinkOf(s, wrapped, wrapped) == MeshLink::OneWay, "L13 heard again: one-way, then evidence as new");
+}
+
 }  // namespace
 
 int main() {
@@ -337,6 +360,7 @@ int main() {
     l11OneWay(start);
   }
   l12Flap();
+  l13Expire();
   if (gFailures) {
     std::printf("espnow_link_core_tests: %d failure(s) of %d checks\n", gFailures, gChecks);
     return 1;
