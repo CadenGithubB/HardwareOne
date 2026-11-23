@@ -95,24 +95,7 @@ uint16_t v4_single_frame_cap(const uint8_t* dst);
 bool writeSettingsJson();
 
 // Message types
-#define MSG_TYPE_HB "HB"
-#define MSG_TYPE_ACK "ACK"
-#define MSG_TYPE_MESH_SYS "MESH_SYS"
-#define MSG_TYPE_RESPONSE "RESPONSE"
-#define MSG_TYPE_STREAM "STREAM"
-#define MSG_TYPE_BOOT "BOOT"
-#define MSG_TYPE_FILE_STR "FILE"
-#define MSG_TYPE_CMD "CMD"
-#define MSG_TYPE_TEXT "TEXT"
-#define MSG_TYPE_USER_SYNC "USER_SYNC"
-#define MSG_TYPE_FILE_BROWSE "FILE_BROWSE"
-
-// Payload types
-#define PAYLOAD_CMD "cmd"
-#define PAYLOAD_TOPO_REQ "topoReq"
-#define PAYLOAD_TOPO_RESP "topoResp"
-#define PAYLOAD_QUERY "query"
-#define PAYLOAD_STATUS "status"
+#define MSG_TYPE_BOOT "BOOT"  // the BOOT notice (opcode 31) JSON type; goes with BOOT
 
 // Bond roles (stored as uint8_t in gSettings.bondRole when ENABLE_BONDED_MODE).
 // When bonded mode is compiled out, helpers are false/"none" stubs so mesh-only
@@ -235,10 +218,8 @@ struct EspNowDevice {
   EspNowInlineText<32> acceptedRoom;
   EspNowInlineText<64> acceptedTags;
   bool stationary;       // Cached from mesh peer metadata
-  // Phase 2 (multi-mesh): which of gSettings.meshes[] this peer belongs to.
-  // Defaults to 0 (the primary/default mesh) for existing-style pairings.
-  // Phase 2.x will start using this in TX/RX paths to stamp/validate the
-  // V4 header's meshFingerprint field.
+  // Which of gSettings.meshes[] this peer belongs to.
+  // The header's mesh id on frames to this peer comes from this slot.
   uint8_t meshId;
 };
 
@@ -338,8 +319,8 @@ struct MeshPeerHealth {
                                  // has a ±3 dB truncation deadband, which would eat the
                                  // planned route metric's entire hysteresis margin. 0 =
                                  // no sample yet. Readers report (v + (v>=0?2:-2)) / 4.
-                                 // Phase 0 relay groundwork: later route metrics key on
-                                 // this (docs/ESPNOW_RELAY_RESTORE_PLAN.md).
+                                 // Later route metrics key on this
+                                 // (docs/ESPNOW_RELAY_RESTORE_PLAN.md).
   bool isActive;                 // true if this slot is in use
   // True once a frame from this peer has actually been received over the radio.
   // Distinct from lastRxActivityMs != 0, because BootstrapLiveness SEEDS that
@@ -1140,7 +1121,6 @@ const char* cmd_espnow_routerstats(const String& argsInput);
 const char* cmd_espnow_resetstats(const String& argsInput);
 const char* cmd_espnow_init(const String& argsInput);
 const char* cmd_espnow_deinit(const String& argsInput);  // stop ESP-NOW (used by radiopower off)
-const char* cmd_espnow_pair(const String& argsInput);
 const char* cmd_espnow_unpair(const String& argsInput);
 const char* cmd_espnow_list(const String& argsInput);
 const char* cmd_espnow_meshstatus(const String& argsInput);
@@ -1152,10 +1132,6 @@ const char* cmd_espnow_startstream(const String& originalCmd);
 const char* cmd_espnow_stopstream(const String& originalCmd);
 
 // Test commands (defined in .ino)
-const char* cmd_test_streams(const String& argsInput);
-const char* cmd_test_concurrent(const String& argsInput);
-const char* cmd_test_cleanup(const String& argsInput);
-const char* cmd_test_filelock(const String& argsInput);
 
 // Configuration
 const char* cmd_espnow_mode(const String& originalCmd);
@@ -1176,7 +1152,6 @@ void espnowDeviceNameApplied(const String& name);
 // `exceptMac`: a paired device's alias or a name a peer announces. `who` gets
 // "<name> (<address>)".
 bool espnowNameInUseBy(const char* name, const uint8_t* exceptMac, char* who, size_t whoCap);
-const char* cmd_espnow_hbmode(const String& originalCmd);
 
 // Streaming. broadcastOutput asks espnowStreamOutputWanted() first: true while
 // cmd_exec runs an ESP-NOW command (its output goes to that request's session,
@@ -1364,8 +1339,6 @@ int requestTopologyDiscovery();  // peers that took the request; -1 when none wa
 void sendTopologyResponse(uint32_t reqId, const uint8_t masterMac[6], JsonArray requestPath);
 void checkTopologyCollectionWindow();  // Check collection window and finalize when timeout expires
 
-// Mesh envelope sender (for remote sensor broadcasting)
-void meshSendEnvelopeToPeers(const String& envelope);
 void meshSendBootToPeers(const String& envelope);  // boot notice via ESPNOW_V4_TYPE_BOOT — RX stores it as MSG_SYSTEM_EVENT, not chat
 
 // Topology state (for auto-discovery check in loop)
@@ -1378,7 +1351,7 @@ String buildBootNotification(uint32_t msgId, const char* src, uint32_t bootCount
 void v2_init_envelope(JsonDocument& doc, const char* type, uint32_t msgId, const char* src, const char* dst, int ttl);
 uint32_t generateMessageId();
 
-// Phase 2 multi-mesh — custom JSON serializers for gSettings.meshes[] and
+// Custom JSON serializers for gSettings.meshes[] and
 // the per-mesh bond arrays (the SettingsRegistry pattern can't handle
 // arrays of structs). Called from System_Settings.cpp's save/load paths,
 // mirroring the BLE_Peers writeJson/readJson pattern.

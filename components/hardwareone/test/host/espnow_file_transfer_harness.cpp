@@ -1254,7 +1254,7 @@ static void testCallersSayThereIsNoSession() {
         "espnowsendfile without a session: nothing counted or recorded as sent");
   reply = cmd_espnow_sendfile(String("peerB \"/data/report.bin\""));
   runCmdExec();
-  check(reply == "File sent successfully via v3: report.bin (1000 bytes)", "espnowsendfile with a session: success reply unchanged");
+  check(reply == "File sent successfully: report.bin (1000 bytes)", "espnowsendfile with a session: success reply unchanged");
   check(gEspNow->fileTransfersSent == 1 && fake_vfs::fs().text(inboxPath(kSender, "report.bin")) == bytes,
         "espnowsendfile with a session: counted, and the file arrived");
 

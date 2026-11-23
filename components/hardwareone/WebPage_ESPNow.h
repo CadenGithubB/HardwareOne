@@ -137,8 +137,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
 <input type='text' id='pair-mac' class='mac-input' placeholder='XX:XX:XX:XX:XX:XX' maxlength='17'>
 <input type='text' id='pair-name' placeholder='Device Name'>
 <select id='pair-mesh' class='input-fit input-m' title='Target mesh for this pairing' style='display:none'></select>
-<button class='btn' id='btn-pair-device'>Pair</button>
-<button class='btn' id='btn-pair-secure'>Pair Encrypted</button>
+<button class='btn' id='btn-pair-secure'>Pair</button>
 </div>
 </div>
 <div class='device-list' id='device-list'>
@@ -526,14 +525,15 @@ inline void streamEspNowInner(httpd_req_t* req) {
       // not on the 10-second mesh status poll — that would spam the CLI with toporesults requests.
     };
     
-    // Pair an unpaired device
+    // Pair a discovered device: an encrypted pair request. The other device shows
+    // its Accept prompt (or runs 'espnowaccept'); both need discovery open.
     window.pairUnpairedDevice = async function(mac, name) {
-      console.log('[ESP-NOW] Pairing device:', mac, name);
-      if (!await hwConfirm('Pair device "' + name + '" (' + mac + ')?')) {
+      console.log('[ESP-NOW] Pair request to:', mac, name);
+      if (!await hwConfirm('Send a pair request to "' + name + '" (' + mac + ')? The other device must accept it.')) {
         return;
       }
       
-      hw.postFormText('/api/cli', { cmd: 'espnowpair ' + mac + ' ' + name })
+      hw.postFormText('/api/cli', { cmd: 'espnowpairrequest ' + mac })
       .then(output => {
         console.log('[ESP-NOW] Pair response:', output);
         alert(output);
@@ -1163,28 +1163,6 @@ inline void streamEspNowInner(httpd_req_t* req) {
         if (!sel.value) return '';
         return ' ' + sel.value;
       }
-      hw.$('btn-pair-device').addEventListener('click', function() {
-        const mac = hw.$('pair-mac').value.trim();
-        const name = hw.$('pair-name').value.trim();
-        if (!mac || !name) {
-          alert('Please enter both MAC address and device name');
-          return;
-        }
-        hw.postFormText('/api/cli', { cmd: 'espnowpair ' + mac + ' ' + name + pairMeshArg() })
-        .then(text => {
-          if (text && text.indexOf('paired successfully') >= 0) {
-            hw.$('pair-mac').value = '';
-            hw.$('pair-name').value = '';
-            listDevices();
-          }
-        })
-        .catch(error => {
-          console.error('[ESP-NOW] Pair error:', error);
-          hw.showCliError(error && error.message);
-          // A refused pair can leave the device paired until restart: show it.
-          listDevices();
-        });
-      });
       hw.$('btn-pair-secure').addEventListener('click', function() {
         const mac = hw.$('pair-mac').value.trim();
         const name = hw.$('pair-name').value.trim();
@@ -1198,6 +1176,8 @@ inline void streamEspNowInner(httpd_req_t* req) {
             hw.$('pair-mac').value = '';
             hw.$('pair-name').value = '';
             listDevices();
+            // The key exchange completes when the other device pairs this one too.
+            alert('Now run the same on the other device: espnowpairsecure <this device\'s MAC> <name>.');
           }
         })
         .catch(error => {
@@ -1796,7 +1776,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
         // Disable (alias for remove — soft delete)
         if (t.classList.contains('btn-mesh-disable')) {
           if (!confirm('Disable mesh "' + label + '"? Paired peers in this mesh will stop receiving frames until you re-enable it.')) return;
-          fireMeshCmd('espnowmeshes disable ' + label, 'MESH_DISABLE').catch(meshCmdFailureShown);
+          fireMeshCmd('espnowmeshes remove ' + label, 'MESH_DISABLE').catch(meshCmdFailureShown);
           return;
         }
       });

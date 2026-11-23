@@ -316,8 +316,9 @@ constexpr uint8_t kPeerSlots = 16;
 EXT_RAM_BSS_ATTR PeerIdentity gPeerIdentities[kPeerSlots] = {};
 
 constexpr const char* kPeersDir = "/system/espnow/peers";
-// File schema version: 2 carries subscribedEvents (uint32 bitmask). Version 1
-// (before subscribedEvents) is no longer read.
+// File schema version 2 (1.0 boards start erased; a file of another version is
+// not read). It no longer carries subscribedEvents (SUBSCRIBE_UPDATE was removed
+// in 1.0); a file that still has the key reads the same.
 constexpr uint8_t  kPeerFileVersion = 2;
 
 // peerIdentityPersist rewrites an unchanged peer's file only to move the
@@ -393,7 +394,6 @@ bool writePeerIdentityFile(const PeerIdentity& p) {
   doc["longTermPubEd25519_hex"]   = String(pubHex);
   doc["bondedAtSec"]              = p.bondedAtSec;
   doc["lastSeenSec"]              = p.lastSeenSec;
-  doc["subscribedEvents"]         = p.subscribedEvents;  // Phase 5
 
   FsLockGuard fsGuard("espnow.peer_identity_write");
   return writeJsonFileComplete(doc, tmp, path, "espnow.peer_identity_write");
@@ -438,9 +438,6 @@ bool readPeerIdentityFile(const char* path, PeerIdentity& out) {
   out.meshId      = (uint8_t)meshVal.as<unsigned>();
   out.bondedAtSec = doc["bondedAtSec"] | (uint32_t)0;
   out.lastSeenSec = doc["lastSeenSec"] | (uint32_t)0;
-  // Written on every save; a hand-edited file without it gets every event
-  // until the peer opts out via SUBSCRIBE_UPDATE.
-  out.subscribedEvents = doc["subscribedEvents"] | (uint32_t)ESPNOW_EVT_ALL;
 
   const char* pubHex = doc["longTermPubEd25519_hex"] | (const char*)nullptr;
   if (!pubHex || strlen(pubHex) != 64) return false;
@@ -473,7 +470,6 @@ bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
   }
   PeerIdentity& p = gPeerIdentities[idx];
   const PeerIdentity before = p;  // put back if the write fails
-  bool isNewPeer = !p.valid;
   time_t now = time(nullptr);
   const uint32_t nowSec = clockcore::isValidEpoch((int64_t)now) ? (uint32_t)now : 0;  // 0 while the clock is not set
 
@@ -499,10 +495,6 @@ bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
   // overwrite if new. lastSeenSec becomes "now" with every write.
   if (!p.valid || p.bondedAtSec == 0) p.bondedAtSec = bondedAtSec;
   p.lastSeenSec = nowSec;
-  // Phase 5: new peers default to ALL events. Existing peers' subscription
-  // bitmap is preserved across re-pair (we don't want a KEY_EX redo to wipe
-  // an explicit subscribe-narrowed bitmap).
-  if (isNewPeer) p.subscribedEvents = ESPNOW_EVT_ALL;
   p.valid = true;
 
   if (!writePeerIdentityFile(p)) {
@@ -519,44 +511,6 @@ bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
 }
 
 
-bool peerIdentitySetSubscriptions(const uint8_t mac[6], uint32_t subscribedEvents) {
-  int idx = findSlotByMac(mac);
-  if (idx < 0) {
-    DEBUG_ESPNOWF("peer subscriptions: ignoring SUBSCRIBE_UPDATE from unknown peer "
-                  MAC_FMT,
-                  MAC_ARGS(mac));
-    return false;
-  }
-  uint32_t prev = gPeerIdentities[idx].subscribedEvents;
-  if (prev == subscribedEvents) {
-    DEBUG_ESPNOWF("peer subscriptions: no change for " MAC_FMT " (0x%08lX)",
-                  MAC_ARGS(mac),
-                  (unsigned long)subscribedEvents);
-    return true;  // no-op success
-  }
-  gPeerIdentities[idx].subscribedEvents = subscribedEvents;
-  if (!writePeerIdentityFile(gPeerIdentities[idx])) {
-    // Roll back in-memory state so persistence + cache stay consistent.
-    gPeerIdentities[idx].subscribedEvents = prev;
-    ERROR_ESPNOWF("peer subscriptions: persist failed for " MAC_FMT,
-                  MAC_ARGS(mac));
-    return false;
-  }
-  INFO_ESPNOWF("peer subscriptions: " MAC_FMT " now 0x%08lX (was 0x%08lX)",
-               MAC_ARGS(mac),
-               (unsigned long)subscribedEvents, (unsigned long)prev);
-  return true;
-}
-
-bool peerIdentityWantsEvent(const uint8_t mac[6], uint32_t category) {
-  int idx = findSlotByMac(mac);
-  if (idx < 0) {
-    // Unknown peer — fall back to legacy behaviour (deliver everything).
-    // Phase 5 only narrows for peers that have explicitly opted in.
-    return true;
-  }
-  return (gPeerIdentities[idx].subscribedEvents & category) != 0;
-}
 
 // True once peerIdentityLoadAll has walked the peers directory this boot (or
 // found there is none) and every stored identity went into the cache. While

@@ -72,7 +72,7 @@ entry "Command replies" under Unreleased states what changed.
 2. **Network/system status** - `blestatus`, `wifistatus`, `mqttstatus`, `httpstatus`.
 3. **Status/list batch** - `fsusage`, `sdinfo`, `wifilist`, `blepeers`, `images`,
    `maplist`, `oledstatus`, and ESP-NOW `espnowrooms`/`espnowsessions`/
-   `espnowrouterstats`/`espnowsubs`.
+   `espnowrouterstats`/`espnowsubs` (`espnowsubs` was removed in ESP-NOW 1.0).
 4. **Web-off stub hardening** - `banlist`/`httpstatus`/`sessionlist` stubs now emit
    `available:false` JSON instead of text.
 5. **Deferred set** - `memreport`, `banlist`, `miclist`, `cameravideolist`, `ring status`.
@@ -222,7 +222,6 @@ removed `espnowenabled` switch. `running` says whether ESP-NOW runs now.
 | `espnowgroupaccept json <name_or_mac\|all>` / `espnowgroupdrop json <name_or_mac\|all>` (admin; `json` leads) | `{"schema":1,"peers":[{"mac","name","room","tags","acceptedRoom","acceptedTags","pendingRoom","pendingTags","changed"}],"ok","count","changed","saved","error"?,"notShown"?}` |
 | `espnowsessions` | `{"schema":1,"selfCaps":[...],"sessions":[{"slot","mac","meshId","sessionId","dir","state","ageMs","txSeq","rxHwm","caps"?,"capsWord"?}],"more"?}` - `meshId` is the mesh slot index. `selfCaps` / `caps`: the names of the capability bits set in this device's / the peer's session word (`bond`, `remote_fs`, `file_receive`, `sensor_send`, `collect`, `relay_forward`, `time_master`, `session_unknown`, and the 1.x names `backlog_serve`, `files_serve`, which a 1.0 build never sets but shows when a peer does; a bit with no name is left out of the list and kept in `capsWord`); `caps` and `capsWord` (the whole 32-bit word, reserved bits included) only for an ACTIVE or REKEY session. `more`?: present only when the list did not fit the reply (about 13 sessions with every capability set); the number of sessions left out at the end |
 | `espnowrouterstats` | `{"schema":1,"messagesSent","messagesReceived","messagesFailed","v4FragTx","v4FragRx","reassembled","reassemblyGc","reassemblyTimeouts","nextMessageId"}` |
-| `espnowsubs` | `{"schema":1,"peers":[{"mac","meshId","subs"}]}` - `subs` is a 32-bit bitmask int |
 | `espnowidentity` | `{"schema":1,"valid","mac","pub","createdAtSec","regenCount"}` |
 | `espnowmeshmetrics` | `{"schema":1,"mode","activePeers","ttl","adaptiveTtl"}` |
 | `ring status` | `{"schema":1,"connected","name","mtu","rx","upMs","scanFound"}` (no address) |

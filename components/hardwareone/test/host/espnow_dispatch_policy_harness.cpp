@@ -178,10 +178,6 @@ static uint16_t gFrameFp = kPeerAMeshFp;
   static const uint8_t peerA[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x01};
   return std::memcmp(mac, peerA, 6) == 0 ? kPeerAMeshFp : (uint16_t)0x1111;
 }
-// SUBSCRIBE_UPDATE's store (peerIdentitySetSubscriptions double) and the
-// handler's log line.
-[[maybe_unused]] static unsigned gSubscribeCalls = 0;
-[[maybe_unused]] static uint32_t gSubscribeMask = 0;
 #define INFO_ESPNOWF(...) debugSink(__VA_ARGS__)
 [[maybe_unused]] static const char* MAC_STR(const uint8_t*) { return "mac"; }
 // INSERT_TEXT_HANDLER
@@ -808,22 +804,6 @@ static unsigned runLengthCases() {
     check("an empty STREAM is dropped and counted (no 1.0 sender sends one)",
           row && lengthRun(*row, 0) && gEspNowRxLenDrops == before + 1 && gHandlerCalls == 0);
   }
-  // SUBSCRIBE_UPDATE from a later sender: 24 bytes, reserved bytes not 0.
-  // Reserved bytes are ignored, so the subscription is stored.
-  {
-    const V4OpcodeEntry* row = v4_dispatch_lookup(ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE);
-    gSubscribeCalls = 0;
-    esp_now_recv_info ri{gSrc, nullptr, nullptr};
-    EspNowV4Header h{};
-    h.type = ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE;
-    h.fragCount = 1;
-    uint8_t payload[24];
-    std::memset(payload, 0xA5, sizeof payload);
-    payload[0] = 0x0F; payload[1] = payload[2] = payload[3] = 0;
-    const bool claimed = row && v4_dispatch_table_try(&ri, &h, payload, sizeof payload, true, true, true, "peer");
-    check("SUBSCRIBE_UPDATE longer than 16 bytes with reserved bytes set: the subscription is stored",
-          claimed && gSubscribeCalls == 1 && gSubscribeMask == 0x0F);
-  }
   // SESSION_UNKNOWN from a later sender (20 bytes): the hint still reaches its rule.
   {
     resetText(true);
@@ -864,19 +844,6 @@ int main() {
       std::printf("ok   %s\n", what);
     }
   };
-
-  // SUBSCRIBE_UPDATE persists the peer's event mask to flash: only a paired,
-  // session-encrypted frame may reach the handler.
-  expect("SUBSCRIBE_UPDATE paired plaintext keyed",
-         run(ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, true, false, false, true), false);
-  expect("SUBSCRIBE_UPDATE paired BROADCAST_AUTH-only keyed",
-         run(ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, true, true, false, true), false);
-  expect("SUBSCRIBE_UPDATE paired session-encrypted keyed",
-         run(ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, true, true, true, true), true);
-  expect("SUBSCRIBE_UPDATE unpaired session-encrypted keyed",
-         run(ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, false, true, true, true), false);
-  expect("SUBSCRIBE_UPDATE paired plaintext unkeyed",
-         run(ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, true, false, false, false), false);
 
   // Mesh time and the sensor frames: TIME_SYNC can set the clock, SENSOR_STATUS
   // and SENSOR_ENVELOPE make and fill entries of the receiver's table,
@@ -938,10 +905,9 @@ int main() {
         v4_dispatch_lookup(150) == nullptr);
 
   // Table policy as written.
-  const uint8_t kPairedEnc = V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC;
-  const V4OpcodeEntry* e = v4_dispatch_lookup(ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE);
-  check("SUBSCRIBE_UPDATE row requires REQ_PAIRED|REQ_SESSION_ENC",
-        e && (e->flags & kPairedEnc) == kPairedEnc);
+  // 130 (SUBSCRIBE_UPDATE) was on the wire before 1.0 and is retired: no row.
+  check("opcode 130 (retired SUBSCRIBE_UPDATE) has no table row", v4_dispatch_lookup(130) == nullptr);
+  const V4OpcodeEntry* e = nullptr;
   // USER_SYNC carries account records: the table refuses a frame not sealed in a
   // session before the handler (which checks again) runs.
   e = v4_dispatch_lookup(ESPNOW_V4_TYPE_USER_SYNC);

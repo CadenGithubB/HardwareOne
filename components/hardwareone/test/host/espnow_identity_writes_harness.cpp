@@ -169,7 +169,6 @@ static PeerIdentity samplePeer() {
   for (int i = 0; i < 32; ++i) p.longTermPub[i] = static_cast<uint8_t>(0x40 + i);
   p.bondedAtSec = 1762560000u;
   p.lastSeenSec = 1762570000u;
-  p.subscribedEvents = 0xFFFFFFFFu;
   p.valid = true;
   return p;
 }

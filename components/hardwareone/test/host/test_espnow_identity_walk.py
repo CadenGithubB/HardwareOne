@@ -95,7 +95,7 @@ def main():
         return found
 
     types = '\n'.join(body(header, m, 'System_ESPNow_Identity.h') + ';'
-                      for m in ('struct PeerIdentity', 'enum EspNowEventCategory'))
+                      for m in ('struct PeerIdentity',))
     have_loaded = LOADED in source  # absent on the trees before the flag
     file_scope = lines(CONSTANTS, 3, 'peer constants') + lines(CACHE, 1, 'gPeerIdentities definition')
     if have_loaded:

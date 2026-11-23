@@ -184,8 +184,11 @@ def main():
         dispatcher = extract_block(source, 'const char* cmd_espnow_meshes(const String& argsInput)')
         assert 'if (sub == "delete")' in dispatcher and 'meshesCmd_delete(a.arg(1))' in dispatcher, \
             'espnowmeshes does not route "delete"'
-        assert '[list|add|remove|delete|enable|setdefault|setpassphrase|rename]' in dispatcher, \
+        assert '[list|add|remove|delete|enable|setdefault|rename]' in dispatcher, \
             'the usage line does not list delete'
+        # 1.0 (E28): one way to set a passphrase (espnowsetpassphrase) and no 'disable' alias of remove.
+        assert 'sub == "setpassphrase"' not in dispatcher and 'sub == "disable"' not in dispatcher, \
+            'espnowmeshes still takes setpassphrase or the disable alias'
     if have_guard:
         # The registry file reader (a double in the harness): locked read, then the parser the harness runs.
         reader = definition(source, 'static int meshRegistryCountInFile(', 'System_ESPNow.cpp')
@@ -249,8 +252,9 @@ def main():
         assert 'gPeerIdentitiesLoaded = false;' in forget, \
             'an identity file that could not be removed leaves the cache marked complete'
     if have_pairing:
-        # Both pair commands take their slot from the helper; neither falls back to slot 0 itself.
-        assert source.count('meshSlotForPairing(a.arg(2))') == 2, 'a pair command does not use meshSlotForPairing'
+        # The pair command (espnowpairsecure; espnowpair is gone in 1.0) takes its slot from the
+        # helper and does not fall back to slot 0 itself.
+        assert source.count('meshSlotForPairing(a.arg(2))') == 1, 'espnowpairsecure does not use meshSlotForPairing'
         assert 'if (meshId == 0xFE) meshId = 0' not in source, 'a pair command still defaults to slot 0'
         # The slot 0 passphrase setter no longer creates a mesh.
         setter = definition(source, 'static void setEspNowPassphrase(const String& passphrase)', 'System_ESPNow.cpp')

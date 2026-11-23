@@ -35,7 +35,7 @@
 //     fetcher: sensorBroadcasterTask → transmitSensorData → sensorSendReadingTo,
 //     which stacks only one 202-byte frame and hands off via sendAead — the
 //     AEAD seal, frame build, and capture now run on the dispatcher task.
-//   * Mesh heartbeats — call v4_send_payload_smart / v4_broadcast_category
+//   * Mesh heartbeats — call v4_send_payload_smart / v4_broadcast_heartbeat
 //     directly.
 // So "every sender is a Job" is the design intent, not the current state; the
 // stack-sizing hazard this module was built to kill is still live on the

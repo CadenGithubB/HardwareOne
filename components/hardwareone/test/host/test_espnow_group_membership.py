@@ -101,7 +101,7 @@ LISTING_FUNCTIONS = ('void espnowSerializeMeshPeerMeta(JsonObject o, const MeshP
                      'const char* cmd_espnow_devices(',
                      'const char* cmd_espnow_rooms(')
 COMMAND_REGION = ('// ---- Group commands and the membership they go by -----',
-                  '// ESP-NOW heartbeat mode command')
+                  '// Mesh role command')
 ADMIN_COMMANDS = ('espnowroomcmd', 'espnowtagcmd', 'espnowgroups', 'espnowgroupaccept', 'espnowgroupdrop')
 
 
@@ -199,7 +199,6 @@ def main():
     metadata = body(source, 'static void processMetadata(')
     runner = body(source, 'static const char* groupCommandRun(')
     pairsecure = body(source, 'const char* cmd_espnow_pairsecure(')
-    pair = body(source, 'const char* cmd_espnow_pair(')
     add = body(source, 'static void addEspNowDevice(')
 
     def at(text, part):
@@ -233,7 +232,7 @@ def main():
          len(re.findall(r'if \(identityNewOrReplaced\) \{[^}]*espnowGroupAcceptanceClear\(msg->(?:sender|responder)Mac,',
                         crypto)) == 2,
          'both KEY_EX handlers clear the acceptance when a stored identity is new or replaced'),
-        (all('acceptedRoom = "";' in text and 'acceptedTags = "";' in text for text in (pairsecure, pair, add)),
+        (all('acceptedRoom = "";' in text and 'acceptedTags = "";' in text for text in (pairsecure, add)),
          'every place that fills a new device record starts it with nothing accepted'),
     )
     loop = body(source, 'void processMeshHeartbeats()')

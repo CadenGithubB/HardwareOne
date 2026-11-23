@@ -5,10 +5,10 @@ Extracts metaGetSet (with the metadata text policy when the source has it),
 cmd_espnow_stationary, espnowDeviceNameApplied (the ESP-NOW side of
 'devicename'), buildMetadataPayload, sendMetadata,
 the metadata tracking block and metadataPushTick from System_ESPNow.cpp, plus the
-real SessionState, EspNowEventCategory and V4PayloadMetadata definitions, and
-compiles them beside session-table, subscription, transport, settings and clock
+real SessionState and V4PayloadMetadata definitions, and
+compiles them beside session-table, transport, settings and clock
 doubles. The harness checks that a local metadata change is pushed (type 55)
-once per ACTIVE, subscribed session after the settle window, that a burst of
+once per ACTIVE session after the settle window, that a burst of
 edits coalesces, that the deadline is millis()-wrap safe, that a failed send is
 not retried and that the request/response path is unchanged. No hardware or
 radio is accessed.
@@ -60,13 +60,11 @@ def main():
 
     source = read('System_ESPNow.cpp')
     sessions = read('System_ESPNow_Sessions.h')
-    identity = read('System_ESPNow_Identity.h')
     wire = read('System_ESPNow_Wire.h')
 
     for marker in ESPNOW_MARKERS:
         require(source.count(marker) == 1, f'marker must be unique: {marker!r} ({source.count(marker)} hits)')
     for text, marker in ((sessions, 'enum SessionStateLifecycle'), (sessions, 'struct SessionState'),
-                         (identity, 'enum EspNowEventCategory'),
                          (wire, 'struct __attribute__((packed)) V4PayloadMetadata')):
         require(text.count(marker) == 1, f'marker must be unique: {marker!r} ({text.count(marker)} hits)')
 
@@ -83,7 +81,6 @@ def main():
     for tag, value in (('// INSERT_WIRE', extract_block(wire, 'struct __attribute__((packed)) V4PayloadMetadata') + ';'),
                        ('// INSERT_SESSIONS', extract_block(sessions, 'enum SessionStateLifecycle') + ';\n'
                                               + extract_block(sessions, 'struct SessionState') + ';'),
-                       ('// INSERT_IDENTITY', extract_block(identity, 'enum EspNowEventCategory') + ';'),
                        ('// INSERT_TRACKING', tracking),
                        ('// INSERT_PRODUCTION', production),
                        ('// INSERT_TICK', tick)):

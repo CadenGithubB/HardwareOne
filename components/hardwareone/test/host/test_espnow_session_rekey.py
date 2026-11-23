@@ -87,7 +87,7 @@ def build_wire(wire):
                      'static_assert(sizeof(EspNowV4Header) == 32', 'System_ESPNow_Wire.h'),
              line(wire, r'^static_assert\(sizeof\(EspNowV4Header\) == 32[^;]*;', 'header size assert'),
              between(wire, 'struct __attribute__((packed)) V4PayloadSessionOpen {',
-                     '// ---- Phase 5 — event subscription registry', 'System_ESPNow_Wire.h')]
+                     '// File transfer payloads', 'System_ESPNow_Wire.h')]
     for name in ('OPEN', 'CONFIRM', 'REKEY'):
         value = re.search(r'\bESPNOW_V4_TYPE_SESSION_' + name + r'\s*=\s*(\d+)', wire)
         if not value:

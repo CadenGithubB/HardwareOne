@@ -174,8 +174,8 @@ static void loadsOne() {
   check(p != nullptr, "one stored identity: in the cache under its address");
   check(p && p->meshId == 3, "one stored identity: cached with its mesh slot");
   check(p && p->valid && p->longTermPub[0] == kA[5] && p->longTermPub[31] == kA[5] + 31 &&
-            p->bondedAtSec == kBondedAt && p->subscribedEvents == 5,
-        "one stored identity: cached with its key, pairing time and subscriptions");
+            p->bondedAtSec == kBondedAt,
+        "one stored identity: cached with its key and pairing time (a leftover subscribedEvents key is ignored)");
   check(cachedCount() == 1, "one stored identity: nothing else in the cache");
   check(warnings() == 0, "one stored identity: no warning");
   check(peerIdentitySlotCount() == 16, "the cache has 16 slots");

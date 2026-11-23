@@ -8,7 +8,7 @@ LogMessageType and TextQueueEntry from System_ESPNow.h, the opcode/flag enums
 and header from System_ESPNow_Wire.h and V4RxCtx from System_ESPNow_RxCtx.h,
 generates one recording double per other handler named in the table, and
 compiles the harness once with ENABLE_BONDED_MODE 1 and once with 0. The cases
-check that SUBSCRIBE_UPDATE needs a paired, session-encrypted frame, that
+check that opcode 130 (SUBSCRIBE_UPDATE, retired in 1.0) has no row, that
 TIME_SYNC, SENSOR_STATUS, SENSOR_REQ, SENSOR_ENVELOPE, POWER_STATUS,
 EVENT_PUSH and FORWARD_LINK need one too (keyed or keyless device, a signed broadcast is not
 enough, no bond partner required), that
@@ -77,7 +77,7 @@ EXPECTED_MINLEN = {
     'TEXT': 1, 'BOOT': 1, 'CMD': 1, 'CMD_RESP': 5, 'USER_SYNC': 1, 'STREAM': 6,
     'RELAY_DATA': 40, 'PEER_LIST': 4, 'HEARTBEAT': 44, 'PAIR_BEACON': 36,
     'PAIR_REQUEST': 40, 'PAIR_ACCEPT': 40, 'PAIR_REJECT': 40,
-    'SENSOR_STATUS': 16, 'SENSOR_REQ': 20, 'SUBSCRIBE_UPDATE': 16, 'BOND_SENSOR_STATUS': 16,
+    'SENSOR_STATUS': 16, 'SENSOR_REQ': 20, 'BOND_SENSOR_STATUS': 16,
     'SENSOR_ENVELOPE': 13, 'BOND_SENSOR_DATA': 13,
     'POWER_STATUS': 24, 'BOND_POWER_STATUS': 24, 'EVENT_PUSH': 128, 'BOND_EVENT_PUSH': 128,
     'FORWARD_LINK': 96, 'TOPO_REQ': 8, 'TOPO_START': 8, 'TOPO_PEER': 47,
@@ -162,14 +162,6 @@ def main():
                          '  ++gBootSeenCalls;\n}\n'
                          + extract_block(source, 'static void v4h_boot('))
         real_handlers.append('v4h_boot')
-    # SUBSCRIBE_UPDATE's handler runs for real: a longer frame and reserved
-    # bytes that are not 0 still reach the subscription store (a double).
-    if 'static void v4h_subscribe_update(' in source:
-        text_handler += ('\n\n' + extract_block(wire, 'struct __attribute__((packed)) V4PayloadSubscribe') + ';\n'
-                         'static bool peerIdentitySetSubscriptions(const uint8_t*, uint32_t mask) {\n'
-                         '  ++gSubscribeCalls;\n  ++gHandlerCalls;\n  gSubscribeMask = mask;\n  return true;\n}\n'
-                         + extract_block(source, 'static void v4h_subscribe_update('))
-        real_handlers.append('v4h_subscribe_update')
     # The SESSION_UNKNOWN row's handler runs for real when the tree has it; the
     # rule behind it is a recording double (espnow_peer_restart_tests runs it).
     if 'static void v4h_session_unknown(' in source:

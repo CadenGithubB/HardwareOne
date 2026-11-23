@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1051 commands across 61 modules (1051 registry entries).
+1041 commands across 61 modules (1041 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -16,7 +16,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`system`](#system) — 25 commands
 - [`versions`](#versions) — 1 commands
 - [`wifi`](#wifi) — 19 commands
-- [`espnow`](#espnow) — 126 commands
+- [`espnow`](#espnow) — 116 commands
 - [`catchup`](#catchup) — 2 commands
 - [`collect`](#collect) — 5 commands
 - [`c6`](#c6) — 9 commands
@@ -155,7 +155,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## espnow
 
-> ESP-NOW links HardwareOne devices directly over the WiFi radio with no router or access point, as named peers that can also form a multi-hop mesh. Pair with espnowpair, then message (espnowsend/espnowbroadcast), push a file (espnowsendfile), pull a file (espnowfetch), browse a peer's files (espnowbrowse), or run a command on a peer (espnowremote). espnowremote, espnowfetch, espnowbrowse, espnowroomcmd and espnowtagcmd are ASYNCHRONOUS: they return OK on delivery; the real result arrives later in the message buffer, read with 'espnowmessages json [mac]'. Mesh mode (espnowmode mesh) adds routing with a TTL and master/worker/backup roles; each device carries identity metadata (name, friendly name, room, zone, tags) queried with espnowdeviceinfo locally or espnowrequestmeta for a peer.
+> ESP-NOW links HardwareOne devices directly over the WiFi radio with no router or access point, as named peers that can also form a multi-hop mesh. Pair with espnowpairrequest (discovery, the other device accepts) or espnowpairsecure on both devices, then message (espnowsend/espnowbroadcast), push a file (espnowsendfile), pull a file (espnowfetch), browse a peer's files (espnowbrowse), or run a command on a peer (espnowremote). espnowremote, espnowfetch, espnowbrowse, espnowroomcmd and espnowtagcmd are ASYNCHRONOUS: they return OK on delivery; the real result arrives later in the message buffer, read with 'espnowmessages json [mac]'. Mesh mode (espnowmode mesh) adds routing with a TTL and master/worker/backup roles; each device carries identity metadata (name, friendly name, room, zone, tags) queried with espnowdeviceinfo locally or espnowrequestmeta for a peer.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -182,7 +182,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `bondstreamrtc` | A | Set auto-stream RTC: <0\|1><br/>`Usage: bondstreamrtc <0\|1>` |
 | `bondstreamthermal` | A | Set auto-stream thermal: <0\|1><br/>`Usage: bondstreamthermal <0\|1>` |
 | `bondstreamtof` | A | Set auto-stream ToF: <0\|1><br/>`Usage: bondstreamtof <0\|1>` |
-| `bondtestsensor` | A | Test v3 sensor data transmission (worker only - a master cannot send sensor data): 'bondtestsensor [sensor_type]'. (async - frame appears on the master via espnowsensorstatus)<br/>`Usage: bondtestsensor [thermal\|tof\|imu\|gps\|input\|fmradio\|rtc\|presence] (worker only) Returns OK on send; the test frame appears on the bonded master's remote-sensor cache ('espnowsensorstatus' / GET /api/sensors/remote).` |
 | `closeespnow` | A | Deinitialize ESP-NOW and free resources. |
 | `closestream` | A | Stop streaming output to ESP-NOW device (admin). |
 | `espnowaccept` | A | Accept a pending incoming pair request: 'espnowaccept [<mac_or_name>]'.<br/>`Usage: espnowaccept [<mac_or_name>] (no arg = the sole pending request)` |
@@ -212,16 +211,14 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowgroupaccept` | A | Accept the room and tags a paired peer announces right now, for room and tag commands: 'espnowgroupaccept [json] <name_or_mac\|all>'.<br/>`Usage: espnowgroupaccept [json] <name_or_mac\|all> Records exactly what the peer announces at this moment; the reply states what was accepted. A name that more than one paired device has is refused: use the address espnowgroups shows. From then on espnowroomcmd and espnowtagcmd send that room's and those tags' commands, with the account password they carry, to this peer.` |
 | `espnowgroupdrop` | S | Take back the room and tags accepted for a paired peer: 'espnowgroupdrop [json] <name_or_mac\|all>'.<br/>`Usage: espnowgroupdrop [json] <name_or_mac\|all> The peer is no longer a target of room or tag commands; what it announces is pending again.` |
 | `espnowgroups` | A | List paired peers with the room and tags each announces, what was accepted here and what is pending: 'espnowgroups [json] [name_or_mac]'.<br/>`Usage: espnowgroups [json] [<name_or_mac>] announced = what the peer says about itself; accepted = what room and tag commands go by; pending = announced and not accepted, so not used. A peer that stops announcing a room or tag leaves it at once; a new one waits for espnowgroupaccept.` |
-| `espnowhbmode` | A | Get/set heartbeat mode: 'espnowhbmode [public\|private]'.<br/>`Usage: espnowhbmode [public\|private]` |
-| `espnowheartbeatbroadcast` | A | Set heartbeat broadcast: <0\|1><br/>`Usage: espnowheartbeatbroadcast <0\|1>` |
 | `espnowheartbeatinterval` | A | Set master heartbeat interval: <1000-60000 ms><br/>`Usage: espnowheartbeatinterval <1000..60000>` |
 | `espnowhistorykb` | A | Message history per peer and direction in KB: [<0-32>] (0 = board default; no argument shows saved and active; reboot required)<br/>`Usage: espnowhistorykb [<0..32>]` |
 | `espnowidentity` |  | Show long-term Ed25519 identity (MAC, pub key, createdAtSec, regenCount). |
-| `espnowkeyex` | A | Initiate KEY_EX handshake with a peer (runs alongside legacy pairing). (async - handshake completes later; check espnowsessions)<br/>`Usage: espnowkeyex <name_or_mac> [<mesh>] Returns OK when KEY_EX_HELLO is sent; the handshake completes asynchronously - inspect with 'espnowsessions' / 'espnowencstatus'.` |
+| `espnowkeyex` | A | Initiate KEY_EX handshake with a peer (espnowpairsecure starts it too). (async - handshake completes later; check espnowsessions)<br/>`Usage: espnowkeyex <name_or_mac> [<mesh>] Returns OK when KEY_EX_HELLO is sent; the handshake completes asynchronously - inspect with 'espnowsessions' / 'espnowencstatus'.` |
 | `espnowlist` |  | List all paired ESP-NOW devices. |
 | `espnowmasterfingerprint` | S | Name the mesh master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.<br/>`Usage: espnowmasterfingerprint [<64-hex-pubkey>\|clear] No argument shows it. The master named here gives this device mesh time, gets its readings, battery state and events, and may ask it for readings. clear: no master is named (the reply says what that stops).` |
 | `espnowmeshbackup` | A | Get/set backup MAC: 'espnowmeshbackup [MAC]'.<br/>`Usage: espnowmeshbackup [<AA:BB:CC:DD:EE:FF>]` |
-| `espnowmeshes` | A | Manage multi-mesh slots: 'espnowmeshes [list\|add\|remove\|delete\|enable\|setdefault\|rename\|setpassphrase] ...'.<br/>`Usage: espnowmeshes list espnowmeshes add <label> (then set passphrase via 'espnowsetpassphrase <label> <pw>') espnowmeshes remove <label> (alias: disable) espnowmeshes delete <label> (frees the slot; unpair its devices first) espnowmeshes enable <label> espnowmeshes setdefault <label> espnowmeshes setpassphrase <label> <passphrase> espnowmeshes rename <oldLabel> <newLabel>` |
+| `espnowmeshes` | A | Manage multi-mesh slots: 'espnowmeshes [list\|add\|remove\|delete\|enable\|setdefault\|rename] ...'.<br/>`Usage: espnowmeshes list espnowmeshes add <label> (then set passphrase via 'espnowsetpassphrase <label> <pw>') espnowmeshes remove <label> (disables it; the slot is kept) espnowmeshes delete <label> (frees the slot; unpair its devices first) espnowmeshes enable <label> espnowmeshes setdefault <label> (set or clear its passphrase with 'espnowsetpassphrase <label> <passphrase\|clear>') espnowmeshes rename <oldLabel> <newLabel>` |
 | `espnowmeshmaster` | A | Get/set master MAC: 'espnowmeshmaster [MAC]'.<br/>`Usage: espnowmeshmaster [<AA:BB:CC:DD:EE:FF>]` |
 | `espnowmeshmetrics` |  | Show multi-hop routing metrics (flood forwards, routed hops, drops, route churn). |
 | `espnowmeshpeermax` | A | Set max peer slots: <1-16> (reboot required)<br/>`Usage: espnowmeshpeermax <1..16>` |
@@ -234,7 +231,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowmeshttl` |  | Get/set the multi-hop budget: 'espnowmeshttl [1-10]'.<br/>`Usage: espnowmeshttl [<1..10>] How many hops this node's relay-eligible frames may travel. 1 = single hop (no multi-hop). Applies to broadcast text/time sync and to routed unicast; heartbeats and pairing are always single-hop.` |
 | `espnowmessages` | A | Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch. Admin only: it carries remote command output.<br/>`Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]` |
 | `espnowmode` | A | Get/set ESP-NOW mode: 'espnowmode [direct\|mesh]'.<br/>`Usage: espnowmode [direct\|mesh]` |
-| `espnowpair` | A | Pair ESP-NOW device: 'espnowpair <mac> <name> [mesh]'. (synchronous; local registry add, no remote handshake)<br/>`Usage: espnowpair <mac> <name> [mesh]` |
 | `espnowpairmode` | A | Open the discovery window: 'espnowpairmode [seconds\|off\|status]'. Open on BOTH same-mesh devices, then 'espnowdiscovered' to see + pair. Nothing pairs by itself.<br/>`Usage: espnowpairmode [<seconds>\|off\|status] Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh). While open, the device broadcasts a discovery beacon and RECORDS other same-mesh devices it hears (see 'espnowdiscovered'); it does not pair by itself. Pair from the list with 'espnowpairsecure <mac> <name>'.` |
 | `espnowpairrequest` | A | Request a pair with a discovered device: 'espnowpairrequest <mac_or_name>'. The other device must Accept.<br/>`Usage: espnowpairrequest <mac_or_name> (name/MAC from 'espnowdiscovered') Sends a request; the target shows an Accept prompt (or run 'espnowaccept' there).` |
 | `espnowpairsecure` | A | Pair device with encryption: 'espnowpairsecure <mac> <name> [mesh]'. (local pair is synchronous; secure channel completes async - see espnowsessions)<br/>`Usage: espnowpairsecure <mac_address> <device_name> [mesh] Requires a mesh passphrase first - run 'espnowsetpassphrase <mesh> <passphrase>'. The device is added synchronously; KEY_EX then runs asynchronously (~100ms) so the encrypted channel becomes usable shortly after - inspect with 'espnowsessions' / 'espnowencstatus'.` |
@@ -245,7 +241,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowrekey` | A | Force immediate SESSION_REKEY for a peer (manual trigger). (async - completes later; check espnowsessions)<br/>`Usage: espnowrekey <name_or_mac> Returns OK when REKEY is sent; new keys derive when the peer's REKEY arrives - verify with 'espnowsessions'.` |
 | `espnowrelayblock` | A | DIAGNOSTIC: drop ALL inbound ESP-NOW frames from one MAC (bench stand-in for an out-of-range peer; relay HW testing). RAM-only - reboot clears it.<br/>`Usage: espnowrelayblock <mac\|clear\|status> Drops frames at the RX drain before any parsing - heartbeats too, so the peer goes offline within ~30s, like real RF loss.` |
 | `espnowremote` | A | Execute a command on a peer: 'espnowremote <target> <target-user> <target-pass> <cmd>'. user/pass are an account ON THE TARGET (verified there), not this device. (async - result via espnowmessages json)<br/>`Usage: espnowremote <target> <target-user> <target-pass> <command> <target-user>/<target-pass> are credentials ON THE TARGET device, not this one. Async: returns a reqId on delivery; read the output later with 'espnowmessages json 0 <target-mac>' (match the reqId).` |
-| `espnowrequestevents` | A | Ask a peer to send US only events in <bitmask>. Updates state ON THE PEER. (async - changes peer state, no reply; verify with espnowsubs on the peer)<br/>`Usage: espnowrequestevents <name_or_mac> <bitmask> Returns OK on delivery; this updates the PEER's subscription (no confirmation returns) - run 'espnowsubs' on that peer to verify.` |
 | `espnowrequestmeta` |  | Request metadata from peer: 'espnowrequestmeta <name_or_mac>'. (async - updates cache; view with espnowdevices)<br/>`Usage: espnowrequestmeta <name_or_mac> Returns OK on delivery; the peer's name/room/zone/tags arrive later and update the local peer cache shown by 'espnowdevices' / 'espnowrooms' / 'espnowfind'.` |
 | `espnowresetstats` | A | Reset ESP-NOW statistics counters. |
 | `espnowroom` |  | Get/set device room: 'espnowroom [name]'.<br/>`Usage: espnowroom [Kitchen\|Bedroom\|...] espnowroom clear` |
@@ -268,7 +263,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowstationary` |  | Get/set stationary flag: 'espnowstationary [0\|1]'.<br/>`Usage: espnowstationary [on\|off\|0\|1]` |
 | `espnowstats` |  | Show ESP-NOW statistics (messages, errors, and received frames dropped by cause: too short for their type, an unknown must-understand flag, an unknown mesh id). |
 | `espnowstatus` |  | Show ESP-NOW status and configuration. |
-| `espnowsubs` |  | List peers + their event-subscription bitmaps (what they want from us). |
 | `espnowtagcmd` | A | Run command on all devices accepted here as holders of a tag; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)<br/>`Usage: espnowtagcmd <tag> <target-user> <target-pass> <command> Credentials are checked ON EACH target device, not this one. One tag per command: a tag list (a comma) is refused. Goes only to peers whose tag was accepted on this device (espnowgroups, espnowgroupaccept); a peer that only announces the tag is skipped and counted in the reply. Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'.` |
 | `espnowtags` |  | Get/set device tags: 'espnowtags [tag1,tag2,...]'.<br/>`Usage: espnowtags stationary,thermal espnowtags clear` |
 | `espnowtimestatus` |  | Show mesh time: where this device's clock comes from, what it sends or last received: 'espnowtimestatus [json]'.<br/>`Usage: espnowtimestatus [json]` |
@@ -281,10 +275,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowzone` |  | Get/set device zone: 'espnowzone [name]'.<br/>`Usage: espnowzone [Counter\|Door\|Ceiling\|...] espnowzone clear` |
 | `openespnow` | A | Initialize ESP-NOW communication. |
 | `openstream` | A | Start streaming all output to ESP-NOW caller (admin, remote only). |
-| `testcleanup` | A | Test cleanup of stale topology streams. |
-| `testconcurrent` | A | Test concurrent topology streams (simulated). |
-| `testfilelock` |  | Test file transfer lock acquire/release. |
-| `teststreams` | A | Test topology stream management functions. |
 
 ## catchup
 

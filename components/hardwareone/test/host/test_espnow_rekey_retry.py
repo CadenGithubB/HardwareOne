@@ -33,7 +33,7 @@ SOURCES = ('System_ESPNow_Handlers_Crypto.cpp', 'System_ESPNow_Sessions.cpp',
            'System_ESPNow_Deadline.h', 'System_ESPNow.cpp')
 
 # Step 1e of processMeshHeartbeats: the periodic REKEY auto-trigger (espnow tick).
-AUTO_TRIGGER_MARKER = '// 1e. Phase 3.6'
+AUTO_TRIGGER_MARKER = '// 1e. Auto-trigger REKEY'
 AUTO_TRIGGER_INFO = 'INFO_ESPNOWF("REKEY auto-trigger'
 
 

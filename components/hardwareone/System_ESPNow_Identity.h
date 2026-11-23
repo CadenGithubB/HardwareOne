@@ -78,7 +78,7 @@ const EspNowIdentity& espnowIdentityGet();
 void espnowIdentityFormatPubHex(const uint8_t pub[32], char* out, size_t outLen);
 
 // ============================================================================
-// Phase 3.2 — per-peer long-term identity record.
+// Per-peer long-term identity record.
 //
 // One file per paired peer at /system/espnow/peers/<MAC>/identity.json:
 //   { version, mac, meshId, longTermPubEd25519_hex, bondedAtSec, lastSeenSec }
@@ -91,15 +91,6 @@ void espnowIdentityFormatPubHex(const uint8_t pub[32], char* out, size_t outLen)
 // successfully (3.3); cleared by espnowforget.
 // ============================================================================
 
-// Phase 5 — event subscription registry. subscribedEvents is a bitmask of
-// EspNowEventCategory bits (see below). When THIS device wants to broadcast
-// e.g. HEARTBEAT, it iterates paired peers and skips any whose bitmask omits
-// the HEARTBEAT bit. The peer told us their preferences via SUBSCRIBE_UPDATE
-// (ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE = 130).
-//
-// Default for newly-paired peers OR peers loaded from a version-1 identity.json
-// (pre-Phase-5) is 0xFFFFFFFF — subscribe to everything. Phase 5 only matters
-// once a peer sends an explicit SUBSCRIBE_UPDATE narrowing the set.
 struct PeerIdentity {
   uint8_t  mac[6];
   uint8_t  meshId;            // mesh slot index (0..N_MESHES-1)
@@ -107,26 +98,7 @@ struct PeerIdentity {
   uint8_t  longTermPub[32];   // peer's Ed25519 public key
   uint32_t bondedAtSec;       // Unix epoch when first paired
   uint32_t lastSeenSec;       // time of the last KEY_EX that wrote the file (hourly at most)
-  uint32_t subscribedEvents;  // Phase 5 — events this peer wants from US
   bool     valid;             // false = slot is empty
-};
-
-// Phase 5 — event category bitmask values. Stored in PeerIdentity.subscribedEvents
-// and carried on the wire in V4PayloadSubscribe.requestedEvents. New categories
-// must be added at the END to keep the bit assignment stable across firmware
-// versions (peers will exchange bitmaps blind, so reordering is breaking).
-enum EspNowEventCategory : uint32_t {
-  ESPNOW_EVT_HEARTBEAT       = 1u << 0,   // V4 heartbeat (type 30)
-  ESPNOW_EVT_SENSOR          = 1u << 1,   // was the sensor status broadcast (151), which is now a session
-                                          // unicast to the receiver of the readings — bit kept, no sender
-  ESPNOW_EVT_TOPOLOGY        = 1u << 2,   // topo req/start/peer (32-34)
-  ESPNOW_EVT_BOND_HEARTBEAT  = 1u << 3,   // bond heartbeat (170)
-  ESPNOW_EVT_WORKER_STATUS   = 1u << 4,   // retired opcode (ex-WORKER_STATUS) — bit kept for bitmap stability
-  ESPNOW_EVT_METADATA_PUSH   = 1u << 5,   // metadata push (55)
-  ESPNOW_EVT_TIME_SYNC       = 1u << 6,   // was the time broadcast (35), which is now a session unicast
-                                          // from the master — bit kept, no sender
-  // Add new categories here; preserve existing bit values.
-  ESPNOW_EVT_ALL             = 0xFFFFFFFFu  // default for legacy / pre-Phase-5 peers
 };
 
 // Lookup by MAC. Returns nullptr if no match. Lifetime is global (slot pointer
@@ -143,18 +115,6 @@ const PeerIdentity* peerIdentityFindByMac(const uint8_t mac[6]);
 bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
                          const uint8_t pub[32], uint32_t bondedAtSec);
 
-
-// Phase 5 — record the peer's subscription bitmap and persist immediately.
-// Called from the SUBSCRIBE_UPDATE handler. Returns false if the peer isn't
-// known (no PeerIdentity slot — drop silently from the handler) or if
-// persistence fails.
-bool peerIdentitySetSubscriptions(const uint8_t mac[6], uint32_t subscribedEvents);
-
-// Phase 5 — gating helper for the broadcast paths. Returns true if `category`
-// is present in the peer's subscribedEvents bitmap. Unknown peers (no
-// PeerIdentity) get the all-1s default — backward compat: a peer that never
-// sent SUBSCRIBE_UPDATE receives everything.
-bool peerIdentityWantsEvent(const uint8_t mac[6], uint32_t category);
 
 // Forget a paired peer. Removes the on-disk file AND clears the in-memory
 // slot. Idempotent. Returns true when there was something to forget: a cached

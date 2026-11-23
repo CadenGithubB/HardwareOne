@@ -527,7 +527,7 @@ static uint32_t gBondHeartbeatSeqNum = 0;
 static uint32_t gBootCounter = 7;
 struct V4PayloadBondHeartbeat {
   uint8_t role; int8_t rssi; uint8_t reserved[2];
-  uint32_t uptimeSec, freeHeap, seqNum, bootCounter, settingsHash;
+  uint32_t uptimeSec, freeHeap, reserved2, bootCounter, settingsHash;
 };
 namespace SelfDevice { [[maybe_unused]] static uint32_t uptimeSeconds() { return gNowMs / 1000; } }
 struct EspClass { uint32_t getFreeHeap() const { return 100000; } };
