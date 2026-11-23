@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 from test_espsr_runtime import function
 from test_web_batch_handlers import extract_block
+from sd_path_core_host import sd_path_core, with_sd_path_core
 from identity_names_source import identity_constants
 HERE=Path(__file__).resolve().parent
 COMPONENT=HERE.parents[1]
@@ -20,7 +21,7 @@ def main():
     args=(COMPONENT/'System_Command.cpp').read_text()
     parser+='\n'.join(function(args,s) for s in ('CommandArgs::CommandArgs(', 'void CommandArgs::parse(', 'const String& CommandArgs::arg('))
     adapter=source[source.index('namespace {'):source.index('const CommandEntry transcriptionUiCommands')]
-    unit=(HERE/'transcription_ui_adapter_harness.cpp').read_text().replace('// INSERT_TYPES',types).replace('// INSERT_PARSER',parser).replace('// INSERT_NORMALIZER',function((COMPONENT/'System_Filesystem.cpp').read_text(),'bool normalizeFsPath(')).replace('// INSERT_ADAPTER',adapter)
+    unit=(HERE/'transcription_ui_adapter_harness.cpp').read_text().replace('// INSERT_TYPES',types).replace('// INSERT_PARSER',parser).replace('// INSERT_NORMALIZER',with_sd_path_core(function((COMPONENT/'System_Filesystem.cpp').read_text(),'bool normalizeFsPath('),COMPONENT)).replace('// INSERT_ADAPTER',adapter)
     with tempfile.TemporaryDirectory(prefix='hw1-transcription-adapter-') as t:
         t=Path(t);cpp=t/'test.cpp';exe=t/'test';cpp.write_text(unit)
         # Same bounded host String as the HTTP suite, extended only for the

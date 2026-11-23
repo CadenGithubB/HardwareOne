@@ -283,6 +283,8 @@ def run_role_matrix(cxx: str, sanitize: bool) -> None:
                           for name, flag in gates.items())
     harness = (here / "filesystem_role_matrix_harness.cpp").read_text()
     policy = (ROOT / "System_TranscriptPathPolicy.h").read_text().replace("#pragma once", "")
+    # normalizeFsPath refuses aliased card paths through System_SdPathCore.h (B11).
+    policy += "\n" + (ROOT / "System_SdPathCore.h").read_text().replace("#pragma once", "")
     for marker, value in (("// INSERT_POLICY", policy), ("// INSERT_INTERNAL", internal),
                           ("// INSERT_PRODUCTION", "\n\n".join(pieces)),
                           ("// INSERT_COMMAND_GATES", gate_rows)):
@@ -301,10 +303,32 @@ def run_role_matrix(cxx: str, sanitize: bool) -> None:
         assert result.returncode == 0, "file permission matrix disagrees between transports"
 
 
+def protected_card_folders_cover_the_rules() -> None:
+    """B11: every "/sd/<folder>" a rule row names is refused in its aliased spellings."""
+    core = (ROOT / "System_SdPathCore.h").read_text()
+    listed = re.search(r"kProtectedFolders\[\] = \{(.*?)\};", core, re.S)
+    assert listed, "System_SdPathCore.h lists the protected card folders"
+    protected = set(re.findall(r'"([^"]+)"', listed.group(1)))
+    rules = FS_CPP[FS_CPP.index("static const PathRule sPathRules[]"):]
+    rules = rules[:rules.index("\n};")]
+    in_rules = set(re.findall(r'\{"/sd/([^/"]+)', rules))
+    assert in_rules, "the rule table has card rows"
+    assert in_rules <= protected, f"card folders with a rule row but no alias refusal: {sorted(in_rules - protected)}"
+    # The design's list (transcripts, notes, the collector's store and the
+    # ESP-NOW captures have no row but a policy or a system writer of their own).
+    assert {"system", "logging_captures", "stt", "g2", "collect", "espnow"} <= protected
+    normalize = FS_CPP[FS_CPP.index("bool normalizeFsPath("):]
+    normalize = normalize[:normalize.index("\n}\n")]
+    assert "sdpath::classify(out.c_str()) == sdpath::Verdict::Refused) return false;" in normalize, \
+        "normalizeFsPath refuses an aliased card path, where every guarded call and permission query starts"
+
+
 parser = argparse.ArgumentParser()
 parser.add_argument("--cxx", default="c++")
 parser.add_argument("--sanitize", action="store_true")
 ARGS = parser.parse_args()
+
+protected_card_folders_cover_the_rules()
 
 web_handlers_gate_like_the_model()
 run_role_matrix(ARGS.cxx, ARGS.sanitize)

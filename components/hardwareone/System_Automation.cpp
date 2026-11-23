@@ -46,6 +46,7 @@
 #include "System_Debug.h"
 #include "System_Filesystem.h"
 #include "System_VFS.h"
+#include "System_SealedLog.h"       // B11: the automation log on the card is sealed
 #include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_User.h"
@@ -389,6 +390,7 @@ struct AutomationLogReplacement {
   bool replaced = false;  // an active session was displaced
   bool marked = false;    // its file received the LOG_STOP marker
   String filename;        // the displaced file
+  String writtenAt;       // where the new session's LOG_START went (the card twin, or the name given)
 };
 
 AutomationLogSession sAutomationLogSession;
@@ -414,8 +416,10 @@ AutomationLogStatus automationLogStatus() {
 // Keep the starter's owning identity fields: permission checks consult the
 // current user roster on every write, even when a different task appends.
 // Do not substitute system identity or the appending task's current identity.
+// `writtenAt`, when given, receives the path the entry went to: the session's
+// file, or its card twin while the card takes log lines.
 bool writeAutomationLogEntry(const AutomationLogSession& session,
-                             const char* type, const String& message) {
+                             const char* type, const String& message, String* writtenAt = nullptr) {
   if (!filesystemReady || !type || session.filename.length() == 0) return false;
   char tsPrefix[32];
   getTimestampPrefixMsCached(tsPrefix, sizeof(tsPrefix));
@@ -440,6 +444,47 @@ bool writeAutomationLogEntry(const AutomationLogSession& session,
   }
   String destStr(dest.get());
   if (destStr.length() != strlen(dest.get())) return false;
+  // B11: on the card the entry is sealed. SealedLog starts the file with the
+  // mark (missing folders included). A file there that is not this device's
+  // is moved aside only inside the log trees; anywhere else it is left alone
+  // and the card is not used for this session's file. The entry counts once
+  // the file was flushed and has the size its rows make (SealedLog::settle).
+  // A card file that does not take the entry is reported, which keeps this
+  // log (or, with a failed card, every log) off the card for a while, and the
+  // entry goes to flash instead; a session whose own file is on the card has
+  // no flash twin and fails.
+  if (SealedLog::appliesTo(destStr)) {
+    // The path rules are the same on both tiers: a refusal here is not the card's.
+    if (!VFS::canWriteGuarded(destStr, session.owner)) return false;
+    size_t stored = 0;
+    File sealed = SealedLog::openAppend(destStr, session.owner, stored);
+    bool ok = false;
+    if (sealed) {
+      const size_t before = stored;
+      const bool wrote = SealedLog::writeLines(sealed, destStr, line.c_str(), line.length(), stored);
+      ok = SealedLog::settle(sealed, destStr, stored) && wrote;
+      if (!ok) {
+        // A write the handle reported short that the card took after all.
+        const size_t have = sealed.size();
+        ok = have > before && sealedlog::linesLanded(line.c_str(), line.length(), sealedlog::kMaxRowBytes,
+                                                     have - before) >= line.length();
+      }
+      sealed.close();
+    }
+    if (ok) {
+      if (writtenAt) *writtenAt = destStr;
+      return true;
+    }
+    if (SealedLog::appliesTo(session.filename)) return false;
+    VFS::noteLogCardFileFailure(session.filename.c_str(), "automation.log");
+    if (VFS::resolveLogPath(session.filename.c_str(), line.length() + 512, dest.get(), pathSize) ==
+        VFS::LogTier::Refused) {
+      VFS::noteLogReserveDrop();
+      return false;
+    }
+    destStr = dest.get();
+    if (destStr.length() != strlen(dest.get()) || SealedLog::appliesTo(destStr)) return false;
+  }
   const int lastSlash = destStr.lastIndexOf('/');
   if (lastSlash > 0) {
     const String dir = destStr.substring(0, lastSlash);
@@ -458,6 +503,7 @@ bool writeAutomationLogEntry(const AutomationLogSession& session,
   const bool ok = written == expected && !file.getWriteError() &&
                  file.size() == previousBytes + expected;
   file.close();
+  if (ok && writtenAt) *writtenAt = destStr;
   return ok;
 }
 
@@ -478,7 +524,9 @@ bool startAutomationLog(const String& filename, const AuthContext& owner,
 
   FsLockGuard fsGuard("automation.log.start");
   if (!isFsLockedByCurrentTask()) return false;
-  if (!writeAutomationLogEntry(candidate, "LOG_START", "Automation logging started")) return false;
+  String writtenAt;
+  if (!writeAutomationLogEntry(candidate, "LOG_START", "Automation logging started", &writtenAt)) return false;
+  if (replacement) replacement->writtenAt = writtenAt;
   // Sessions are published only under the FS lock held here, so the active
   // one cannot change before the swap below.
   if (sAutomationLogActive.load()) {
@@ -5407,14 +5455,27 @@ const char* cmd_autolog(const String& argsInput) {
     if (filename.length() == 0) return "Error: invalid arguments — Usage: autolog start <filename>";
     AutomationLogReplacement replaced;
     if (!startAutomationLog(filename, currentAuthContext(), &replaced)) {
-      snprintf(getDebugBuffer(), 1024, "Error: Failed to create log file: %s", filename.c_str());
-    } else if (!replaced.replaced) {
-      snprintf(getDebugBuffer(), 1024, "Automation logging started: %s", filename.c_str());
+      snprintf(getDebugBuffer(), 1024,
+               "Error: Failed to create log file: %s (the path is not writable for this account, storage is "
+               "short, or a file of that name on the card is not this device's sealed log)",
+               filename.c_str());
+      return getDebugBuffer();
+    }
+    // The reply names the file the entries really go to: the card twin while
+    // a card takes log lines (sealed there), else the name as given.
+    const String& real = replaced.writtenAt.length() ? replaced.writtenAt : filename;
+    int n;
+    if (!replaced.replaced) {
+      n = snprintf(getDebugBuffer(), 1024, "Automation logging started: %s", real.c_str());
     } else {
-      snprintf(getDebugBuffer(), 1024, replaced.marked
+      n = snprintf(getDebugBuffer(), 1024, replaced.marked
           ? "Automation logging started: %s (replaced %s)"
           : "Automation logging started: %s (replaced %s; its LOG_STOP marker could not be written)",
-          filename.c_str(), replaced.filename.c_str());
+          real.c_str(), replaced.filename.c_str());
+    }
+    if (real != filename && n > 0 && n < 1024) {
+      snprintf(getDebugBuffer() + n, 1024 - n, " (sealed on the card; on flash as %s while no card takes it)",
+               filename.c_str());
     }
     return getDebugBuffer();
   }

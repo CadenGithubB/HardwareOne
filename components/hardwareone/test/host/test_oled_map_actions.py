@@ -101,6 +101,8 @@ def map_actions_unit(component: Path) -> str:
         extract_block(oled, "struct RouteInfo") + ";",
         extract_block(oled, "static bool isGpsDataLine("),
         extract_block(oled, "static void probeTrackFile("),
+        extract_block(oled, "static String trackEntryPath("),
+        extract_block(oled, "static bool trackFolderScannedOnItsOwn("),
         extract_block(oled, "static void scanTrackFiles("),
         # goBackToMainMenu plus whatever helpers sit before the submenu dispatch.
         between(oled, "// Go back to main menu from submenu",
@@ -174,7 +176,7 @@ def main() -> None:
                         help="component source tree to extract from (default: this checkout)")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
-    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-I", str(HERE),
+    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-I", str(HERE), "-I", str(COMPONENT),
              "-Wno-unused-function", "-Wno-unused-variable", "-Wno-unused-const-variable",
              "-Wno-unused-but-set-variable", "-Wno-unused-parameter"]
     if args.sanitize:

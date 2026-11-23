@@ -7743,3 +7743,104 @@ with the real `CommandContextBehavior` enum: a web page's own status poll (bit
 `COMMAND_CONTEXT_INTERNAL_STATUS_POLL`) writes no `command-audit.log` line and no `[CMD]` echo; the same command
 from a user, an automation or a trusted system command is audited. Its `READ_ONLY_POLLS` list is the review
 point: a command added there runs unaudited, so it must be a read-only status command.
+
+## Logs on the SD card, sealed (B11, 2026-11-22)
+
+Log lines go to the card first and every log file there is sealed with the device key
+(`System_SealedLog.h`). The pure rules have their own executables; the module and each writer around it are
+executed by a harness.
+
+`sd_path_core` compiles `System_SdPathCore.h` as it is: for every protected card folder, each spelling FatFs
+would resolve to it (other case, a trailing dot or space, a backslash, the 8.3 alias) is refused, alone and with
+a tail; the shape of a short-name alias; paths that are not on the card are never refused.
+`filesystem_listing_permissions_contract` runs the same matrix through the production permission code for a
+user, a guest and an admin, on the command table and the web endpoints (read, write, create and delete), and
+fails when a `/sd/...` row of the rule table names a folder the core does not list. `guarded_path_normalize` and
+`fs_permission_strings` hold the reports of the paths that changed (card names ending in a dot or space;
+`/sd/STT/u2`).
+
+`sealed_log_core` compiles `System_SealedLogCore.h` and the card part of `System_LogCapsCore.h`: the mark line
+with its key id and whose file a head marks (ours, another device's, no id, torn, plain), lines of a batch, a
+line over 1023 bytes split with nothing dropped and no UTF-8 sequence cut, stored sizes, the moved-aside name,
+the card caps (twice nominal, 5,646,884 bytes) and the card reserve with its hysteresis.
+
+`sealed_log` compiles the production `System_SealedLog.cpp` over `fake_vfs.h` with the toy key and cipher of
+`sealed_log_host.h`: the mark first in a new or empty file, the head of our own file read once per mount, a file
+that is not this device's moved aside unchanged to the first free `.foreign-<n>` (never appended to, never
+removed), nothing created without the key, one row per line and one write per row, a short write that leaves
+whole rows and no plain byte, `openFresh`, `writeMark`, `LineStream` (lines put together across pieces of any
+size) and `readWindow` (whole rows by stored offset through windows of several sizes, the ends of the file,
+rows that do not open, another device's file, a failed read). ASan/UBSan.
+
+`log_overflow_latch` executes `VFS::resolveLogPath` from `System_VFS.cpp`: the card twin while a card takes
+writes, has room and the key is there; card absent, back (after the probe back-off), full at 8 MiB and usable
+again at 16 MiB with the low-storage event once per episode, a new mount starting a new episode, the minute off
+the card after a failed append, the flash floor with and without a card, and no key (flash, counted, one event,
+the key asked for once a minute). One `[EVENT]` line per switch. The G-39 and FILE-3 cases are unchanged.
+
+`capped_log_writes` compiles the capped-log writer with the production `System_SealedLog.cpp` under it. The
+cases written before B11 run with the harness switch `cardSealing` off (plain bytes on either tier: the append,
+both rotations and every failure branch); `sealedCardCases` and `sealedBatchCases` run with it on, as the device
+does: the mark and one sealed row per line for a single line and for a flushed batch, a long line split, the
+card cap of twice the caller's, the copy rotation (the mark first, whole rows from a row boundary, the trim note
+less the mark line), the generation rename (each generation with its own mark), the restart when the copy cannot
+be written, a file that is not ours moved aside, and a card that fails (open, short write, seal, no key) sending
+the line or the whole batch to flash with no plain byte left on the card.
+
+`log_row_writes` (the sensor log), `automation_log`, `transcript`, `transcription_ui_adapter`,
+`gpslog_start`, `map_live_tracking`, `web_file_streaming` and `r1_history_store` use the SealedLog double
+`sealed_log_host.h` (the production rules over each harness's own file double) or their own crypto doubles:
+a capture on the card is sealed whatever `capturecrypt` says and falls back to flash when the card fails; the
+automation log on the card; a transcript whose sealed header and text read back byte for byte as the flash file
+and whose kept size is the stored size; `transcripts read` paging a sealed transcript in whole rows; the start
+preparing the card twin; a sealed track loaded and listed from both tiers; the mark with its key id on a sealed
+health day. `g2_files_psram` runs the production reveal with a mark that names another device's key (one notice
+line, no row tried). `espnow_catchup_core_tests` checks that the classification of sealed card files is as
+before and that a moved-aside file is never offered. `log_retention` already holds that no pass removes a
+transcript on either volume (B12). `time_anchor_persistence` adds the promote sweep on the card: a boot folder
+there is promoted on its own tier, the open session's card twin is left alone, and a boot's anchor row is kept
+until neither tier holds its folder.
+
+### Review fixes (2026-11-23)
+
+Nine findings of the review of the first B11 commit, each with host cases:
+
+- **Code-page spellings.** The card is mounted with code page 437 and ANSI/OEM paths; FatFs folds a byte of
+  0x80 or above to ASCII for the short name (0x82 to E, 0x98 to Y, 0x93/0x95/0xA2 to O). `sd_path_core` refuses
+  every protected folder with each letter replaced by each byte from 0x80 up, and any card path with such a byte;
+  `filesystem_listing_permissions_contract` runs the folded spellings and the review's paths through the
+  permission code for a user, a guest, an admin and the system identity. `guarded_path_normalize` records the 18
+  corpus paths that changed (all `/sd/<byte>`, every column now a refusal).
+- **Rows bound to the kind of file.** `sealed_log_core` holds `classOf` (system logs, boot debug files, the
+  capture tree, one account's transcript folder, else the exact path; a file and its card twin one class).
+  `sealed_log`, `transcript`, `transcription_ui_adapter`, `map_live_tracking`, `web_file_streaming` and
+  `g2_files_psram` (the production reveal) read rows at a path of another class: a transcript copied into
+  another account's folder, the card's root or the capture tree, and the command audit copied elsewhere, show
+  `[undecryptable row]`. The toy seal of `sealed_log_host.h` carries the class and has the size of a real row;
+  `sealed_reveal_host.h` is the reader-side double (`ENC1:@<class>@text` opens only for that class).
+  `web_file_streaming`'s source contract holds that the seal and the open take their additional data from the
+  path and that the web viewer hands over the normalized path.
+- **Plain lines in a sealed file.** `sealed_log_core` holds `classifyLine` (mark, schema line directly after it
+  in a class that has them, row, blank, unsealed); `sealed_log` (`readWindow`), `g2_files_psram` (the production
+  `captureCryptoRevealText`, including the growth of short lines and a later page that has no header),
+  `transcription_ui_adapter`, `capture_stitching` (the export) and `map_live_tracking` (the loader takes no point
+  from a plain row) show `[unsealed line]` or ignore the line.
+- **A failed card write is detected.** `fake_vfs.h` has the fault `lostAfter` ("write accepted, flush lost":
+  every write and the flush succeed, the file never grows), and the capped-log, sensor and automation harness
+  file doubles have the same knob. `sealed_log` holds `settle` (flush, then the size) and
+  `sealedlog::linesLanded`; `capped_log_writes`, `log_row_writes` and `automation_log` lose a line or part of
+  a batch at the flush and find it on flash, once. The system log's kept lines and failover are held by source
+  contract in `log_line_writes` (its writer is not executed on the host).
+- **Torn tail.** `sealed_log` and `capped_log_writes`: a file of ours that does not end in a line end gets one
+  before the next row (found at a mount, or left by a pull); only the torn row is unreadable; a tail that cannot
+  be mended sends the line to flash.
+- **Back-off per file.** `log_overflow_latch` executes `VFS::noteLogCardFileFailure`: with the card's write
+  probe passing only that log leaves the card (1, 4, 16, 60 minutes, starting over after a quiet spell, cleared
+  by a new mount, eight entries), no card failure is reported and the other logs stay; with the probe failing
+  it is the card, as before. `sealed_log` reuses the oldest `.foreign-<n>` when all twenty are taken.
+- **Move-aside limits.** `sealed_log`, `capped_log_writes` and `log_row_writes`: without the key a file is
+  "unreadable", never "not ours", and nothing is moved. `sealed_log` and `automation_log`: outside the log
+  trees a file that is not ours is left alone and the session's entries go to flash; `autolog start` names the
+  file the entries go to.
+- **Log task stack.** `log_line_writes` holds by source contract that the sealed line is formatted in external
+  RAM. The stack itself is not measured on the host.

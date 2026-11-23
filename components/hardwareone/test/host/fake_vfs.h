@@ -158,10 +158,14 @@ struct Faults {
   PathSet flush;                                // flush() sets the write error
   PathSet seek;                                 // seek() returns false, position unchanged
   std::map<std::string, size_t> shortWriteAfter; // accept at most N bytes in total per file
+  // "Write accepted, flush lost": write() reports every byte taken and flush()
+  // reports nothing, but the file keeps at most N bytes; the rest never
+  // arrives (a card pulled under a buffered handle). Only the size tells.
+  std::map<std::string, size_t> lostAfter;
   std::map<std::string, int> stat;              // stat() fails with this errno
   void clear() {
     open.clear(); mkdir.clear(); rmdir.clear(); remove.clear(); rename.clear();
-    writeError.clear(); flush.clear(); seek.clear(); shortWriteAfter.clear(); stat.clear();
+    writeError.clear(); flush.clear(); seek.clear(); shortWriteAfter.clear(); lostAfter.clear(); stat.clear();
   }
 };
 
@@ -585,9 +589,16 @@ class File {
     }
     if (handle_->append) handle_->offset = node.bytes.size();
     if (handle_->offset > node.bytes.size()) node.bytes.resize(handle_->offset, '\0');
-    node.bytes.replace(handle_->offset, std::min(accepted, node.bytes.size() - handle_->offset),
-                       reinterpret_cast<const char*>(data), accepted);
-    handle_->offset += accepted;
+    // What reaches the file: all that was accepted, unless the handle's
+    // buffer is being lost (lostAfter), which the caller is not told.
+    size_t landed = accepted;
+    const auto lost = fs.faults.lostAfter.find(node.path);
+    if (lost != fs.faults.lostAfter.end()) {
+      landed = lost->second > handle_->offset ? std::min(accepted, lost->second - handle_->offset) : 0;
+    }
+    node.bytes.replace(handle_->offset, std::min(landed, node.bytes.size() - handle_->offset),
+                       reinterpret_cast<const char*>(data), landed);
+    handle_->offset += landed;
     node.accepted += accepted;
     node.modified = fs.now;
     if (fs.faults.writeError.matches(node.path)) node.writeError = true;

@@ -280,6 +280,17 @@ static const char* cmd_sensorlog(const String& command);
 static const char* sensorLogStartLiveTrack(const char* path, uint32_t intervalMs);
 #endif
 
+// B11: a track sealed at rest (every capture on the card) has its rows
+// revealed for the load. The toy seal: "ENC1:" + the row; "ENC1:!" is a row
+// this device cannot open.
+// Rows open with the class of the path they are read at, and a plain line in
+// a sealed file is no point (sealed_reveal_host.h, over the production rule).
+#include "sealed_reveal_host.h"
+static unsigned& revealCalls = sealed_reveal_host::calls;
+static bool normalizeFsPath(const String& in, String& out) {
+  out = in; return in.length() > 0 && in.c_str()[0] == '/';
+}
+
 // INSERT_PRODUCTION
 
 static std::function<void(const char*)> boundaryHook;
@@ -610,6 +621,52 @@ static void snapshotTests() {
         outOfBounds.status.coveragePercent == 0 && outOfBounds.points.get()[0].lat == 20,
         "load reply carries the exact accepted generation and its validation");
 #if !BASELINE
+  // B11: a sealed track loads like a plain one. The mark and the plain header
+  // are skipped, every sealed row is revealed and parsed, and a row this
+  // device cannot open is skipped, not an error.
+  {
+    inputLines = {"#HW1ENC v1 k1 id=0123456789abcdef", "# GPS Track Log", "# timestamp_ms,lat,lon,alt_m,speed_kn,satellites",
+                  "ENC1:1000,37.000000,-122.000000,10.5,0.0,8", "ENC1:!", "ENC1:2000,37.001000,-122.000000,10.5,0.0,8",
+                  "ENC1:3000,---,SIGNAL_LOST"};
+    String sealedError;
+    GpsTrackSnapshot sealedTrack;
+    revealCalls = 0;
+    check(GpsTrackManager::loadTrack("/sd/logging_captures/tracks/live.csv", sealedError, sealedTrack) &&
+          sealedTrack.status.pointCount == 2 && sealedTrack.points.get()[0].lat == 37.0f &&
+          sealedTrack.points.get()[1].lat == 37.001f,
+          "a sealed track's rows are revealed and loaded");
+    check(revealCalls == 7 && std::string(sealedTrack.status.filename) == "/sd/logging_captures/tracks/live.csv",
+          "every line goes through the reveal; the track keeps its card path");
+    // Another device's card: no row opens, so there is no track to load.
+    inputLines = {"#HW1ENC v1 k1 id=fedcba9876543210", "# GPS Track Log", "ENC1:!", "ENC1:!"};
+    check(!GpsTrackManager::loadTrack("/sd/logging_captures/tracks/other.csv", sealedError, sealedTrack) &&
+          sealedError == "No GPS data found in file", "a file whose rows do not open has no GPS data");
+    // Review of 2026-11-22: only sealed rows are points in a sealed track. A
+    // plain row someone put into the file (the card edited elsewhere) is not
+    // loaded, wherever it sits: before the rows, between them, after them.
+    inputLines = {"#HW1ENC v1 k1 id=0123456789abcdef", "# GPS Track Log", "5000,51.500000,-0.120000,10.0,0.0,9",
+                  "ENC1:1000,37.000000,-122.000000,10.5,0.0,8", "6000,48.850000,2.350000,10.0,0.0,9",
+                  "ENC1:2000,37.001000,-122.000000,10.5,0.0,8", "7000,35.680000,139.690000,10.0,0.0,9"};
+    check(GpsTrackManager::loadTrack("/sd/logging_captures/tracks/live.csv", sealedError, sealedTrack) &&
+          sealedTrack.status.pointCount == 2 && sealedTrack.points.get()[0].lat == 37.0f &&
+          sealedTrack.points.get()[1].lat == 37.001f, "plain rows in a sealed track are not points");
+    check(sealed_reveal_host::lastPath == "/sd/logging_captures/tracks/live.csv", "rows are opened with the class of the track's path");
+    // A sealed track of plain rows only has no GPS data.
+    inputLines = {"#HW1ENC v1 k1 id=0123456789abcdef", "1000,20.0,20.0", "2000,20.1,20.0"};
+    check(!GpsTrackManager::loadTrack("/sd/logging_captures/tracks/forged.csv", sealedError, sealedTrack) &&
+          sealedError == "No GPS data found in file", "a marked file of plain rows loads nothing");
+    // Rows sealed for another class (a file copied into the track folder from
+    // somewhere else) do not open here and load nothing.
+    inputLines = {"#HW1ENC v1 k1 id=0123456789abcdef", "ENC1:@stt|u1@1000,37.0,-122.0", "ENC1:@syslog@2000,37.1,-122.0"};
+    check(!GpsTrackManager::loadTrack("/sd/logging_captures/tracks/moved.csv", sealedError, sealedTrack) &&
+          sealedError == "No GPS data found in file", "rows of another class do not open in the track folder");
+    inputLines = {"#HW1ENC v1 k1 id=0123456789abcdef", "ENC1:@capture@1000,37.0,-122.0", "ENC1:@capture@2000,37.1,-122.0"};
+    check(GpsTrackManager::loadTrack("/sd/logging_captures/tracks/own.csv", sealedError, sealedTrack) &&
+          sealedTrack.status.pointCount == 2, "rows of the capture class open there");
+    // An unmarked file is a plain track, as before.
+    inputLines = {"1000,20.0,20.0", "2000,20.1,20.0"};
+    check(GpsTrackManager::loadTrack("/logs/outside.csv", why, outOfBounds), "the plain track is loaded again");
+  }
   // CLI load replies: a validation refusal is already a complete reply and is
   // returned as is; other failures carry the load prefix.
   const std::string refused = cmd_gpstrack("load /logs/outside.csv");

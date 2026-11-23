@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Execute the production LittleFS log-overflow latch (G-39) and the bulk-write admission (FILE-3).
+"""Execute the production log tier resolution (B11, G-39) and the bulk-write admission (FILE-3).
 
 The free-space cache, resolveLogPath and resolveOverflowPath come unchanged
-from System_VFS.cpp; the clock, the LittleFS size report and the SD mount and
-write-probe answers are host-controlled. Checks that a latched resolution with
-no writable card is Refused (the reserve is kept), that a mounted but
-unwritable card is not used, and that the latch re-arms when space returns.
+from System_VFS.cpp; the clock, the LittleFS size report, the SD mount and
+write-probe answers, the card's free figure and the device key are
+host-controlled. B11: a log resolves to its card twin while a card takes
+writes, has room above its reserve and the key is there (card present, absent,
+full with its hysteresis and once-per-episode warning, in back-off after a
+failed append, no key), with one [EVENT] line per switch. G-39: with no such
+card a latched resolution is Refused at the flash floor (the reserve is kept),
+a mounted but unwritable card is not used, and the latch re-arms when space
+returns.
 
 FILE-3: VFS::admitBulkWrite and VFS::peekLittleFsFree come from the same
 region and run over the same fake volume: with reserve + N bytes free, N bytes
@@ -51,6 +56,13 @@ def generate() -> str:
     harness = (HERE / "log_overflow_latch_harness.cpp").read_text()
     require(harness.count("// INSERT_PRODUCTION") == 1, "one production insertion marker")
     require(harness.count("// INSERT_MIC_ADMISSION") == 1, "one microphone insertion marker")
+    # B11: the card-first resolution is part of the region, and the card
+    # reserve it asks is the production System_LogCapsCore.h.
+    for symbol in ("static LogCardUse logCardUse()", "static bool logCardHasRoom()", "static bool logCardKeyReady()",
+                   "LogCardStatus logCardStatus()", "void noteLogCardFileFailure(const char* path, const char* hint)",
+                   "static bool logCardFileHeld(const char* path)"):
+        require(symbol in production, f"{symbol} lives in the overflow region")
+    require('#include "System_LogCapsCore.h"' in harness, "the harness compiles the production caps header")
     return harness.replace("// INSERT_PRODUCTION", production).replace("// INSERT_MIC_ADMISSION", mic_code)
 
 
@@ -180,7 +192,8 @@ def main() -> None:
         unit, binary = Path(temporary) / "test.cpp", Path(temporary) / "test"
         unit.write_text(generate())
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror",
-                   "-Wno-unused-function", "-Wno-unused-parameter", str(unit), "-o", str(binary)]
+                   "-Wno-unused-function", "-Wno-unused-parameter", "-I", str(COMPONENT),
+                   str(unit), "-o", str(binary)]
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                             "-fno-omit-frame-pointer", "-g"]

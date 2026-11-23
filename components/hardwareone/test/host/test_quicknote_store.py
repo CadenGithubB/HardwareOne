@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 
 from test_espsr_runtime import function
+from sd_path_core_host import sd_path_core, with_sd_path_core
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -39,7 +40,8 @@ def main():
     component = args.component.resolve()
     policies = '\n'.join(clean((component / name).read_text()) for name in
                          ('System_TranscriptPathPolicy.h', 'System_TranscriptTextPolicy.h', 'System_TranscriptionUIPolicy.h', 'QuickNote_Policy.h'))
-    normalizer = function((component / 'System_Filesystem.cpp').read_text(), 'bool normalizeFsPath(')
+    normalizer = with_sd_path_core(
+        function((component / 'System_Filesystem.cpp').read_text(), 'bool normalizeFsPath('), component)
     store = (clean((component / 'QuickNote_Store.h').read_text()) +
              clean((component / 'QuickNote_Store.cpp').read_text()))
     if 'bool sweep(uint32_t* removed, const char** why) {' not in store:

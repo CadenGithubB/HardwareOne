@@ -86,6 +86,51 @@ constexpr LogCaps logCapsFor(size_t totalBytes) {
 }
 
 // ---------------------------------------------------------------------------
+// The card (B11, 2026-11-22). Logs go to the card first when one takes writes
+// (VFS::resolveLogPath) and are sealed there (System_SealedLog.h), which
+// stores about 2.0x the plain bytes of a 60-byte line, 1.7x at 120 and 1.5x
+// at 300. A capped log on the card therefore gets twice its nominal cap,
+// counted in stored (sealed) bytes: about the nominal number of lines, and
+// 5.6 MB for all eight. The flash share above does not apply to the card.
+// ---------------------------------------------------------------------------
+constexpr size_t kCardCapFactor = 2;
+constexpr size_t cardCap(size_t capBytes) { return capBytes * kCardCapFactor; }
+static_assert(cardCap(kNominalTotal) == 2 * 2823442u, "all eight logs on the card: 5,646,884 stored bytes");
+
+// The card reserve: with less than this free the card counts as absent for
+// log lines (they go to flash, as with no card), and it counts as usable
+// again once twice this is free, so a card at the edge does not flip a log
+// between the tiers line by line. Capture retention (System_LogRetentionCore.h)
+// starts freeing card space long before: at 20 % free, capped at 64 MiB.
+constexpr uint64_t kCardReserveBytes = 8ull * 1024 * 1024;
+constexpr uint64_t kCardRearmBytes = 2 * kCardReserveBytes;
+// Whether the card is full for log lines, given whether it was and its free
+// bytes now.
+constexpr bool cardFull(bool wasFull, uint64_t freeBytes) {
+  return wasFull ? freeBytes < kCardRearmBytes : freeBytes < kCardReserveBytes;
+}
+
+// One log's file on a card that otherwise takes writes may be beyond writing
+// (damaged, a directory in its place, a torn tail that cannot be mended). Only
+// that log then stays off the card, and for longer each time the trouble is
+// still there when the card is tried again: 1, 4, 16, then 60 minutes. The
+// other logs keep going to the card, and the card is not reported as failed.
+constexpr uint8_t kCardFileStrikesMax = 4;
+constexpr uint32_t cardFileBackoffMs(uint8_t strikes) {
+  return strikes <= 1 ? 60000u : strikes == 2 ? 240000u : strikes == 3 ? 960000u : 3600000u;
+}
+// The strike count after a failure, given the count before and how long ago
+// the failure before this one was. A failure within twice the last back-off is
+// the same trouble (the retry failed too); a later one starts over.
+constexpr uint8_t cardFileStrikes(uint8_t before, uint32_t sinceLastFailureMs) {
+  if (before == 0) return 1;
+  if (sinceLastFailureMs > 2 * cardFileBackoffMs(before)) return 1;
+  return before < kCardFileStrikesMax ? static_cast<uint8_t>(before + 1) : kCardFileStrikesMax;
+}
+static_assert(cardFileStrikes(0, 0) == 1 && cardFileStrikes(1, 60000) == 2 && cardFileStrikes(4, 3600000) == 4 &&
+              cardFileStrikes(2, 480001) == 1, "the back-off grows while the retry fails and starts over after a quiet spell");
+
+// ---------------------------------------------------------------------------
 // Per-log policy, by file name (the last path component), so the /sd mirror of
 // a log follows the same rule as the log itself.
 // ---------------------------------------------------------------------------

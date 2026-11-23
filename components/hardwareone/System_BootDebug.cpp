@@ -17,10 +17,12 @@
 #include <new>
 
 #include "System_BootDebugCore.h"
+#include "System_CaptureCrypto.h"  // captureCryptoEnsureKey: the card takes the file sealed only
 #include "System_Command.h"       // CommandArgs
 #include "System_CommandReply.h"  // kCommandReplyNotOnOff
 #include "System_Debug.h"
 #include "System_Mutex.h"
+#include "System_SealedLog.h"      // B11: the boot debug file on the card is sealed
 #include "System_Settings.h"      // gSettings.bootDebugCapture, setDebugSetting
 #include "System_Utils.h"         // submitDeferredToCmdExec, commandQueueFull, gBootCounter, resetReasonName
 #include "System_VFS.h"
@@ -149,13 +151,40 @@ const char* writeTier(bool card, const Piece* pieces, size_t count, size_t total
   // trusted: the boot debug writer, confined to the system log folder of its tier.
   const AuthContext ctx = VFS::systemAuth(card ? VFS::Scopes::SYS_LOGS_SD : VFS::Scopes::SYS_LOGS, "bootdebug.write");
   File f;
+  size_t stored = 0;
   {
     FsLockGuard lock("bootdebug.write");
     GuardedFs fs{ctx};
     if (!bootdebug::rotate(fs, files, kept)) logSystemEvent("BOOT", "boot debug files: an older boot's file could not be moved");
-    f = VFS::openGuarded(String(files[0]), "w", ctx, /*create=*/true);
+    // B11: on the card the file is sealed like every log there: the mark
+    // first (SealedLog), then one sealed row per line.
+    f = card ? SealedLog::openFresh(String(files[0]), ctx, stored)
+             : VFS::openGuarded(String(files[0]), "w", ctx, /*create=*/true);
   }
-  if (!f) return "the file could not be created";
+  if (!f) return card ? "the sealed file could not be created (card or device key)" : "the file could not be created";
+  if (card) {
+    // The pieces do not end at line ends (the kept head and the ring's two
+    // halves), so the lines are put together across them.
+    const String cardFile(files[0]);
+    SealedLog::LineStream lines(f, cardFile);
+    bool ok = true;
+    for (size_t i = 0; i < count && ok; ++i) {
+      for (size_t off = 0; off < pieces[i].len && ok; off += kWriteChunk) {
+        const size_t n = pieces[i].len - off < kWriteChunk ? pieces[i].len - off : kWriteChunk;
+        FsLockGuard lock("bootdebug.write");
+        ok = lines.write(pieces[i].data + off, n);
+      }
+    }
+    {
+      FsLockGuard lock("bootdebug.write");
+      // Written counts only when the flushed file has the size the mark and
+      // the rows make: a pulled card fails neither write() nor flush().
+      ok = ok && lines.finish();
+      ok = SealedLog::settle(f, cardFile, stored + lines.stored()) && ok;
+      f.close();
+    }
+    return ok ? nullptr : "the sealed write did not reach the card (pulled or full?)";
+  }
   size_t written = 0;
   bool shortWrite = false;
   for (size_t i = 0; i < count && !shortWrite; ++i) {
@@ -171,7 +200,7 @@ const char* writeTier(bool card, const Piece* pieces, size_t count, size_t total
     FsLockGuard lock("bootdebug.write");
     f.close();
   }
-  if (!card) VFS::noteLittleFsBytesWritten(written);
+  VFS::noteLittleFsBytesWritten(written);
   if (written != total) return "the write was short (volume full?)";
   return nullptr;
 }
@@ -198,8 +227,9 @@ void writeBootFileProc(void*) {
   size_t total = 0;
   for (const Piece& p : pieces) total += p.len;
 
-  // A writable card takes it (three boots kept), else flash (the newest only).
-  const bool card = VFS::isSdWritable();
+  // A writable card takes it (three boots kept; sealed there, B11, so only
+  // with the device key), else flash (the newest only).
+  const bool card = VFS::isSdWritable() && captureCryptoEnsureKey();
   const char* failure = writeTier(card, pieces, sizeof(pieces) / sizeof(pieces[0]), total);
   bool onCard = card;
   if (failure && card) {

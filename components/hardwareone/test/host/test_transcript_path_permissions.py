@@ -61,6 +61,9 @@ def main():
                     else args.component / 'test/host/transcript_path_permissions_harness.cpp')
     harness = harness_path.read_text()
     policy = read('System_TranscriptPathPolicy.h').replace('#pragma once', '')
+    # normalizeFsPath refuses aliased card paths through System_SdPathCore.h (B11).
+    if 'sdpath::' in source:
+        policy += '\n' + read('System_SdPathCore.h').replace('#pragma once', '')
     for marker, value in (('// INSERT_POLICY', policy), ('// INSERT_INTERNAL', internal),
                           ('// INSERT_PRODUCTION', '\n\n'.join(pieces))):
         assert harness.count(marker) == 1

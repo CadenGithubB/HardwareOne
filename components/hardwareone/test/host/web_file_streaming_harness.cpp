@@ -106,6 +106,7 @@ static void requireFsLock() {
 
 struct FileState {
   std::string path;
+  std::string backendName;
   const FakeNode* node = nullptr;
   size_t pos = 0;
   size_t nextChild = 0;
@@ -138,6 +139,10 @@ class File {
     return String(out);
   }
   const char* path() const { return s_->path.c_str(); }
+  // What the backend calls the entry: on the card that is its path without
+  // the "/sd" mount, so a listing must build an entry's VFS path from the
+  // folder it listed and the entry's last name component, never from this.
+  const char* name() const { return s_->backendName.c_str(); }
   bool isDirectory() const { requireFsLock(); return s_->node->dir; }
   File openNextFile() {
     requireFsLock();
@@ -146,7 +151,8 @@ class File {
     auto it = gTree.find(child);
     if (it == gTree.end()) return File();
     auto state = std::make_shared<FileState>();
-    state->path = child;
+    state->path = child.rfind("/sd/", 0) == 0 ? child.substr(3) : child;   // as the SD backend reports it
+    state->backendName = state->path;
     state->node = &it->second;
     return File(state);
   }
@@ -178,10 +184,19 @@ File openGuarded(const String& path, const char* mode, const AuthContext& ctx, b
   if (it == gTree.end()) return File();
   auto state = std::make_shared<FileState>();
   state->path = path.c_str();
+  state->backendName = path.c_str();
   state->node = &it->second;
   return File(state);
 }
 }  // namespace VFS
+
+// B11: a track on the card is sealed at rest; the listing reveals a row to
+// see whether the file holds GPS data. The toy seal here is "ENC1:" + text.
+// Rows open with the class of the path they are read at, and a plain line in
+// a sealed file is no row (sealed_reveal_host.h, over the production rule).
+#include "sealed_reveal_host.h"
+static unsigned& gRevealCalls = sealed_reveal_host::calls;
+static bool normalizeFsPath(const String& in, String& out) { out = in; return in.length() > 0 && in.c_str()[0] == '/'; }
 
 // ---------------------------------------------------------------------------
 // httpd double. Every chunk send records the lock and pause state it saw and
@@ -527,7 +542,9 @@ static void buildGpsTree() {
   addDir("/logging_captures/2026-01-01", {"/logging_captures/2026-01-01/t.log",
                                           "/logging_captures/2026-01-01/n.txt",
                                           "/logging_captures/2026-01-01/t.csv.tmp"});
-  addDir("/logging_captures", {"/logging_captures/x.csv", "/logging_captures/2026-01-01"});
+  // The tracks folder is a child of the capture root, as on the device: it is
+  // listed once, by its own visit, not a second time from its parent.
+  addDir("/logging_captures", {"/logging_captures/x.csv", "/logging_captures/2026-01-01", "/logging_captures/tracks"});
   addFile("/logging_captures/tracks/a.csv", "9,8,7,6,5,4,3,2,1,0\n");
   addDir("/logging_captures/tracks", {"/logging_captures/tracks/a.csv"});
 }
@@ -547,6 +564,57 @@ static void testGpsListing() {
   check(req.terminators == 1, "gps: terminating chunk");
   check(req.contentType == "application/json", "gps: content type");
   checkQuiescent(req, "gps");
+
+  // B11: tracks on the card. A capture goes to the card while one takes log
+  // lines, sealed; the listing finds it there (under its "/sd" path, not the
+  // flash file of the same name), top level and one folder down, and reveals
+  // its rows to see the GPS data. A sealed file with no GPS row is left out.
+  resetCounters();
+  buildGpsTree();
+  addFile("/sd/logging_captures/tracks/live.csv",
+          "#HW1ENC v1 k1 id=0123456789abcdef\n# GPS Track Log\nENC1:1795357805123,37.123456,-122.123456,10.5,0.0,8\n");
+  addFile("/sd/logging_captures/tracks/a.csv", "#HW1ENC v1 k1 id=0123456789abcdef\nENC1:9,8,7,6,5,4,3,2,1,0\n");
+  addDir("/sd/logging_captures/tracks", {"/sd/logging_captures/tracks/live.csv", "/sd/logging_captures/tracks/a.csv"});
+  addFile("/sd/logging_captures/sensors/2026-11-22/s.csv",
+          "#HW1ENC v1 k1 id=0123456789abcdef\ntimestamp_ms,gps_fix,gps_lat,gps_lon\nENC1:1,1,37.1,-122.1\n");
+  addFile("/sd/logging_captures/sensors/2026-11-22/notes.txt", "#HW1ENC v1 k1 id=0123456789abcdef\nENC1:short\n");
+  addDir("/sd/logging_captures/sensors/2026-11-22", {"/sd/logging_captures/sensors/2026-11-22/s.csv",
+                                                     "/sd/logging_captures/sensors/2026-11-22/notes.txt"});
+  addDir("/sd/logging_captures/sensors", {"/sd/logging_captures/sensors/2026-11-22"});
+  httpd_req_t card;
+  gRevealCalls = 0;
+  check(gpsTrackListing(&card, ctx) == ESP_OK, "gps-card: handler result");
+  check(card.body ==
+            "{\"success\":true,\"files\":["
+            "{\"path\":\"/logging_captures/x.csv\",\"size\":20},"
+            "{\"path\":\"/logging_captures/2026-01-01/t.log\",\"size\":13},"
+            "{\"path\":\"/logging_captures/tracks/a.csv\",\"size\":20},"
+            "{\"path\":\"/sd/logging_captures/tracks/live.csv\",\"size\":102},"
+            "{\"path\":\"/sd/logging_captures/tracks/a.csv\",\"size\":59},"
+            "{\"path\":\"/sd/logging_captures/sensors/2026-11-22/s.csv\",\"size\":92}]}",
+        "gps-card: both tiers listed, each file under its own path");
+  check(gRevealCalls > 0, "gps-card: sealed rows are revealed for the probe");
+  checkQuiescent(card, "gps-card");
+
+  // Review of 2026-11-22: a plain line in a sealed file is no row. A marked
+  // file whose only GPS-looking lines are plain ones is not listed as a track,
+  // and neither is one whose rows were sealed for another class.
+  resetCounters();
+  buildGpsTree();
+  addFile("/sd/logging_captures/tracks/forged.csv",
+          "#HW1ENC v1 k1 id=0123456789abcdef\n1795357805123,37.123456,-122.123456,10.5,0.0,8\nENC1:short\n");
+  addFile("/sd/logging_captures/tracks/moved.csv",
+          "#HW1ENC v1 k1 id=0123456789abcdef\nENC1:@stt|u1@1795357805123,37.123456,-122.123456,10.5,0.0,8\n");
+  addFile("/sd/logging_captures/tracks/own.csv",
+          "#HW1ENC v1 k1 id=0123456789abcdef\nENC1:@capture@1795357805123,37.123456,-122.123456,10.5,0.0,8\n");
+  addDir("/sd/logging_captures/tracks", {"/sd/logging_captures/tracks/forged.csv", "/sd/logging_captures/tracks/moved.csv",
+                                         "/sd/logging_captures/tracks/own.csv"});
+  httpd_req_t forged;
+  check(gpsTrackListing(&forged, ctx) == ESP_OK, "gps-forged: handler result");
+  check(forged.body.find("forged.csv") == std::string::npos, "gps-forged: plain lines in a sealed file are not GPS rows");
+  check(forged.body.find("moved.csv") == std::string::npos, "gps-forged: rows of another class do not open in the track folder");
+  check(forged.body.find("/sd/logging_captures/tracks/own.csv") != std::string::npos, "gps-forged: the folder's own rows do");
+  checkQuiescent(forged, "gps-forged");
 
   resetCounters();
   buildGpsTree();

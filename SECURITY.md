@@ -96,6 +96,31 @@ here so you can choose a deployment with them in mind.
   dump.
 - On every profile, `feathers3_fe` included, treat a lost or stolen device as a disclosed Wi-Fi
   passphrase and disclosed account passwords: change them.
+- **Logs on the SD card are sealed** with a device key (ChaCha20-Poly1305, one random nonce per
+  row; the key is a random 256-bit value in NVS). The system logs, sensor, track and automation
+  captures, the system log, the boot debug file and saved transcripts on the card cannot be read
+  without that key, and no row can be made or changed without it, so a card that leaves the device
+  alone does not give up its logs.
+  - Each row is bound to the kind of file it was written into: the system logs, the boot debug
+    files, the capture folder, one account's transcript folder, or (anywhere else) the exact
+    path. The device opens a row only when it is read at a path of that kind. Someone who takes
+    the card out, copies another account's transcript or the command audit to a place their own
+    account may read, and puts the card back, gets `[undecryptable row]` from every viewer.
+  - A line in a sealed file that is not a sealed row (apart from the mark and the column or `#`
+    header lines directly after it in a capture) was not written by the device. The viewers show
+    it as `[unsealed line]`, and the track loader ignores it.
+  - Paths on the card have one spelling for the permission rules and for the card alike: another
+    letter case of a protected folder, a backslash, a trailing dot or space, a short 8.3 name and
+    any character outside ASCII are refused before anything is opened.
+  - What this does not give: the key is on the device, and with flash and NVS encryption off
+    someone holding the **device** can read it. File names, sizes, dates, the mark line and the
+    header lines of a capture are in clear, and someone with the card can put header-style lines
+    there. Whole rows can be deleted, reordered, or copied between files of the same kind (two
+    system logs, two files of one account) without detection, and a whole file can be replaced by
+    a plain one, which the viewers show as plain text; a sealed log is not a tamper-proof record.
+    QuickNotes, recordings, pictures, videos and raw speech input on the card are **not** sealed.
+    Log files on internal flash are plain unless capture encryption seals them. There is no key
+    backup: after a flash erase the card's logs cannot be read by anything.
 
 ### Bluetooth
 

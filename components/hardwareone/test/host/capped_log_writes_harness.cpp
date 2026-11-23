@@ -29,6 +29,13 @@ static bool failAppendOpen = false, failReadOpen = false, failTempOpen = false;
 // sees; flashBelowReserve false models a latch that re-armed (space returned).
 static bool sdWritable = false, flashBelowReserve = true, failSdAppendOpen = false;
 static int sdFailures = 0, reserveDrops = 0;
+// B11: a card that silently loses what a handle buffered, and a card file
+// that fails while the card itself is fine (see File::write and
+// VFS::noteLogCardFileFailure below).
+static size_t cardKeepsBytes = SIZE_MAX;
+static bool cardProbeFine = false;
+static int cardFileFailures = 0;
+static std::string heldLog;
 static bool isTemp(const std::string& path) { return path.size() > 4 && path.compare(path.size() - 4, 4, ".tmp") == 0; }
 static int failAppendWrite = 0, appendWrites = 0, failCopyWrite = 0, copyWrites = 0;
 static int failCopyRead = 0, copyReads = 0, failScanRead = 0, scanReads = 0;
@@ -63,6 +70,8 @@ static std::vector<std::unique_ptr<char[]>> lineBlocks;
 static int batchAllocCalls = 0;
 static bool failBatchAlloc = false;
 static std::vector<std::unique_ptr<char[]>> batchBlocks;
+static int sealedAllocCalls = 0;
+static std::vector<std::unique_ptr<char[]>> sealedBlocks;
 static void ps_free(void*) {}
 static void* ps_alloc(size_t size, AllocPref pref, const char* tag) {
   if (std::string(tag) == "log.batch" || std::string(tag) == "log.batch_paths") {
@@ -80,6 +89,13 @@ static void* ps_alloc(size_t size, AllocPref pref, const char* tag) {
     if (failLineAlloc) return nullptr;
     lineBlocks.push_back(std::make_unique<char[]>(size));
     return lineBlocks.back().get();
+  }
+  if (std::string(tag).rfind("sealedlog.", 0) == 0) {
+    // B11: the sealed-log row, plain and carry buffers (System_SealedLog.cpp).
+    ++sealedAllocCalls;
+    check(pref == AllocPref::PreferPsram && size <= 4097, "the sealed-log buffers are small PSRAM blocks");
+    sealedBlocks.push_back(std::make_unique<char[]>(size));
+    return sealedBlocks.back().get();
   }
   ++allocCalls; io("alloc");
   check(size == 1024 && pref == AllocPref::PreferPsram && std::string(tag) == "logrot.buf", "retained 1 KB PSRAM buffer policy");
@@ -102,6 +118,7 @@ public:
     ++liveFiles;
   }
   explicit operator bool() const { return handle && !handle->closed; }
+  bool isDirectory() const { return false; }
   size_t write(uint8_t byte) override { return write(&byte, 1); }
   size_t write(const uint8_t* bytes, size_t count) override {
     check(bool(*this) && handle->mode != "r", "write uses open writable file");
@@ -114,7 +131,15 @@ public:
     const int call = append ? ++appendWrites : ++copyWrites;
     io(std::string(append ? "append:" : "copy:") + std::to_string(count));
     const size_t actual = call == (append ? failAppendWrite : failCopyWrite) ? std::min(shortCount, count) : count;
-    disk[handle->path].append(reinterpret_cast<const char*>(bytes), actual);
+    // "Write accepted, flush lost": the handle takes every byte and reports
+    // it, flush() says nothing, and the card file keeps at most cardKeepsBytes
+    // (a card pulled under a buffered handle). Only the size tells.
+    size_t landed = actual;
+    if (append && cardKeepsBytes != SIZE_MAX && handle->path.rfind("/sd/", 0) == 0) {
+      const size_t have = disk[handle->path].size();
+      landed = cardKeepsBytes > have ? std::min(actual, cardKeepsBytes - have) : 0;
+    }
+    disk[handle->path].append(reinterpret_cast<const char*>(bytes), landed);
     handle->offset += actual;
     if (append ? appendError : copyError) setWriteError();
     return actual;
@@ -148,6 +173,7 @@ public:
     handle->offset = offset; return true;
   }
   void flush() override { check(bool(*this), "flush uses open file"); io("flush:" + handle->mode); if (flushError) setWriteError(); }
+  time_t getLastWrite() const { return 0; }
   void close() {
     check(bool(*this), "each handle closed once"); io("close:" + handle->mode); handle->closed = true; --liveFiles;
   }
@@ -168,12 +194,19 @@ static void resolveOverflowPath(const char* path, size_t need, char* dest, size_
 enum class LogTier { Primary, Overflow, Refused };
 static LogTier resolveLogPath(const char* path, size_t need, char* dest, size_t capacity) {
   io("resolve"); requestedSpace = need;
-  const bool toSd = overflow && sdWritable;
+  const bool toSd = overflow && sdWritable && heldLog != path;
   std::snprintf(dest, capacity, "%s%s", toSd ? "/sd" : "", path);
   if (toSd) return LogTier::Overflow;
   return overflow && flashBelowReserve ? LogTier::Refused : LogTier::Primary;
 }
 static void noteLogOverflowSdFailure(const char*) { io("sd_failed"); ++sdFailures; sdWritable = false; }
+// B11: one log's card file failed. The real note asks the card's write probe:
+// a card that fails it is reported as a whole (as above); with the card fine
+// only this log leaves the card (cardProbeFine: the hold on `heldLog`).
+static void noteLogCardFileFailure(const char* path, const char* hint) {
+  if (!cardProbeFine) { noteLogOverflowSdFailure(hint); return; }
+  io("card_file_failed"); ++cardFileFailures; heldLog = path;
+}
 static void noteLogReserveDrop() { ++reserveDrops; }
 static File open(const String& path, const char* mode, bool create = false) {
   io(std::string("open:") + mode); const auto name = text(path);
@@ -283,11 +316,69 @@ static std::vector<std::string> catchupNotes;
   events.push_back("catchup:restart");
 }
 
+// ---------------------------------------------------------------------------
+// B11: log files on the card are sealed. The production System_SealedLog.cpp
+// is compiled below (it opens, marks, moves aside and seals through the fake
+// VFS above); the device key and the cipher are doubles. The toy seal writes
+// "ENC1:" and the text in base64, so a row never shows its text or a line
+// end, and a 1023-byte row fits the production row buffer as the real one
+// does.
+//
+// `cardSealing` is this harness's one switch on production: the cases written
+// before B11 run with it off and keep exercising the append, both rotations
+// and every failure branch with plain bytes on either tier; the B11 cases
+// (sealedCardCases) run with it on, which is what the device does.
+// ---------------------------------------------------------------------------
+static bool cardSealing = false;
+static uint32_t mountGeneration = 1;
+static int movedAsideEvents = 0;
+// INSERT_CAPCRYPT_MACROS
+// The device key and the cipher: the shared toy ones (a row is as long as a
+// real one and opens only for the class of the path it was sealed for).
+#define SEALED_LOG_HOST_CRYPTO_ONLY
+#define SEALED_LOG_HOST_MARK_API
+#define SEALED_LOG_HOST_CRYPTO_API
+#include "sealed_log_host.h"  // copied beside this unit, with System_SealedLogCore.h
+static bool& keyAvailable = sealed_log_host::keyAvailable;
+static std::string& ownKeyId = sealed_log_host::keyId;
+static int& sealCalls = sealed_log_host::sealCalls;
+static int& failSealAt = sealed_log_host::sealFailAt;
+static void logSystemEvent(const char*, const char*, ...) { ++movedAsideEvents; events.push_back("event:moved_aside"); }
+namespace VFS {
+static uint32_t sdMountGeneration() { return mountGeneration; }
+}
+// What a reader of the card file sees: the mark line dropped, every row opened.
+static std::string revealed(const std::string& stored) {
+  std::string out;
+  size_t at = 0;
+  bool first = true;
+  while (at < stored.size()) {
+    size_t end = stored.find('\n', at);
+    if (end == std::string::npos) end = stored.size();
+    const std::string line = stored.substr(at, end - at);
+    at = end + 1;
+    if (first && line.rfind("#HW1ENC", 0) == 0) { first = false; continue; }
+    first = false;
+    std::string plain;
+    out += sealed_log_host::open(nullptr, line.data(), line.size(), plain) ? plain : "[undecryptable row]";
+    out += '\n';
+  }
+  return out;
+}
+static std::string markLine() { return "#HW1ENC v1 k1 id=" + ownKeyId + "\n"; }
+
+// INSERT_SEALED_LOG
+
 // INSERT_PRODUCTION
 
 // INSERT_LOG_LINE
 
-static std::string destination() { return overflow ? "/sd/logs/events.log" : "/logs/events.log"; }
+// The log the single-line cases write. The cases from before B11 keep their
+// short name; the sealed cases use one under the system log folder, where the
+// card's log files live (a file that is not this device's is moved aside
+// only in the log trees, and the rows are sealed for that folder's class).
+static std::string logName = "/logs/events.log";
+static std::string destination() { return (overflow ? "/sd" : "") + logName; }
 static bool seen(const std::string& event) { return std::find(events.begin(), events.end(), event) != events.end(); }
 static size_t eventIndex(const std::string& event) {
   auto item = std::find(events.begin(), events.end(), event); check(item != events.end(), event.c_str()); return static_cast<size_t>(item - events.begin());
@@ -296,6 +387,8 @@ static void reset(bool onSd = false) {
   check(lockDepth == 0 && liveFiles == 0, "previous case releases resources");
   ++cases; disk.clear(); events.clear(); recovering = false; overflow = onSd; sdAvailable = sdWritable = onSd;
   flashBelowReserve = true; failSdAppendOpen = false; sdFailures = reserveDrops = 0;
+  cardKeepsBytes = SIZE_MAX; cardProbeFine = false; cardFileFailures = 0; heldLog.clear();
+  logName = "/logs/events.log";
   failAlloc = failSeek = failRename = appendError = copyError = flushError = false;
   failAppendOpen = failReadOpen = failTempOpen = false;
   failAppendWrite = appendWrites = failCopyWrite = copyWrites = failCopyRead = copyReads = failScanRead = scanReads = 0;
@@ -308,13 +401,13 @@ static std::string rows(int begin, int end) {
   return out;
 }
 static bool append(const char* line = "new", size_t cap = 100) {
-  const bool result = appendLineWithCap("/logs/events.log", String(line), cap);
+  const bool result = appendLineWithCap(logName.c_str(), String(line), cap);
   check(lockDepth == 0 && liveFiles == 0, "append releases lock and handles");
   check(requestedSpace == std::strlen(line) + 512, "overflow admission retains existing margin");
   return result;
 }
 static void recover() {
-  recovering = true; cleanupLogOrphan("/logs/events.log"); recovering = false;
+  recovering = true; cleanupLogOrphan(logName.c_str()); recovering = false;
   check(lockDepth == 0 && liveFiles == 0, "recovery releases resources");
   check(requestedSpace == 0, "recovery resolves without reserving write space");
 }
@@ -492,6 +585,251 @@ static void reserveAndSdLatch() {
   reset(false); failAppendOpen = true;
   check(!append() && sdFailures == 0 && reserveDrops == 0, "a flash append failure never reports the card");
 }
+#if HAVE_SEALED_LOG
+// ---------------------------------------------------------------------------
+// B11: the capped logs on the card, sealed (production System_SealedLog under
+// the writer; `cardSealing` on, as on the device).
+// ---------------------------------------------------------------------------
+static const std::string kCard = "/sd/system/sys_logs/t/events.log";   // copy rotation (followed by catch-up)
+static std::string sealedRow(const std::string& text) {  // sealed for the system logs' class
+  return sealed_log_host::sealRow(text, kCard.c_str());
+}
+static std::string sealedRows(int begin, int end) {
+  std::string out;
+  for (int i = begin; i < end; ++i) { char line[16]; std::snprintf(line, sizeof(line), "old-%02d", i); out += sealedRow(line); }
+  return out;
+}
+static void sealReset() {
+  reset(true);
+  logName = "/system/sys_logs/t/events.log";
+  cardSealing = true; keyAvailable = true; flashBelowReserve = false;
+  sealCalls = failSealAt = movedAsideEvents = 0;
+  ++mountGeneration;  // every case is a new mount: no head is remembered from the case before
+}
+// Every line of a stored card file is the mark (first) or a whole sealed row.
+static void wholeRows(const std::string& stored) {
+  check(stored.rfind(markLine(), 0) == 0, "the card file starts with the mark and this device's key id");
+  check(stored.find("#HW1ENC", 1) == std::string::npos, "the mark appears once, at the head");
+  check(!stored.empty() && stored.back() == '\n', "the card file ends at a row boundary");
+  size_t at = markLine().size();
+  while (at < stored.size()) {
+    const size_t end = stored.find('\n', at);
+    check(end != std::string::npos && stored.compare(at, 5, "ENC1:") == 0 && (end - at - 5) % 4 == 0,
+          "every line after the mark is one whole sealed row");
+    at = end + 1;
+  }
+  check(revealed(stored).find("[undecryptable row]") == std::string::npos, "every row opens with this device's key");
+}
+static void sealedCardCases() {
+  // A first line: the mark, then the line as one sealed row. Nothing of the
+  // text is on the card in the clear, and flash is not touched.
+  sealReset();
+  check(append("hello card", 200), "a line is appended on the card");
+  check(disk.count(kCard) && disk.at(kCard) == markLine() + sealedRow("hello card"), "mark first, then one sealed row");
+  check(revealed(disk.at(kCard)) == "hello card\n" && disk.at(kCard).find("hello") == std::string::npos,
+        "the row opens to the line and does not show it");
+  check(!disk.count("/system/sys_logs/t/events.log") && bytesNoted == 0, "nothing is written or counted on flash");
+  check(std::count(events.begin(), events.end(), "open:a") == 1 && !seen("open:r"),
+        "a new file needs one append open and no read");
+  // Further lines: rows are appended, the mark is not repeated, and the head
+  // of a file found ours is read once per mount, not once per line.
+  check(append("second", 200), "a second line");
+  events.clear();
+  check(append("third", 200), "a third line");
+  check(disk.at(kCard) == markLine() + sealedRow("hello card") + sealedRow("second") + sealedRow("third"),
+        "rows follow in order under the one mark");
+  check(!seen("open:r"), "no head read for a file this mount already found ours");
+  wholeRows(disk.at(kCard));
+  // An existing file of ours from before this mount: its head is read, then rows are appended.
+  sealReset(); disk[kCard] = markLine() + sealedRows(0, 2);
+  check(append("new", 200) && disk.at(kCard) == markLine() + sealedRows(0, 2) + sealedRow("new"),
+        "this device's file takes the new row");
+  check(std::count(events.begin(), events.end(), "open:r") == 2 && movedAsideEvents == 0,
+        "its mark is judged and its last byte looked at, once");
+  events.clear();
+  check(append("next", 200) && !seen("open:r"), "a settled file is not read again within the mount");
+  // An empty file gets the mark.
+  sealReset(); disk[kCard] = "";
+  check(append("new", 200) && disk.at(kCard) == markLine() + sealedRow("new"), "an empty card file starts with the mark");
+  // An empty line is one (empty) row.
+  sealReset();
+  check(append("", 200) && disk.at(kCard) == markLine() + sealedRow("") && revealed(disk.at(kCard)) == "\n",
+        "an empty line is one row");
+
+  // Q9: a card file that is not this device's sealed file is moved aside, byte
+  // for byte, and a new sealed file is started. Nothing in it is read beyond
+  // its first line, converted, or appended to.
+  const std::string otherDevice = "#HW1ENC v1 k1 id=fedcba9876543210\n" + sealedRows(0, 3);
+  const std::string plainFile = "[2026-11-22 10:00:00] | a plain log line\r\n";
+  const std::string oldMark = "#HW1ENC v1 k1\n" + sealedRows(0, 1);   // sealed before the mark named its key
+  const std::string tornMark = "#HW1ENC v1 k1 id=0123";                // a pull during the first write
+  for (const std::string* foreign : {&otherDevice, &plainFile, &oldMark, &tornMark}) {
+    sealReset(); disk[kCard] = *foreign;
+    check(append("new", 200), "the line is written although the name was taken");
+    check(disk.count(kCard + ".foreign-1") && disk.at(kCard + ".foreign-1") == *foreign,
+          "the other file is moved aside unchanged");
+    check(disk.at(kCard) == markLine() + sealedRow("new"), "a new sealed file takes the name");
+    check(movedAsideEvents == 1 && !disk.count("/system/sys_logs/t/events.log"), "one event line; flash is not involved");
+  }
+  // The first free name is taken: -1 and -2 exist, so -3.
+  sealReset(); disk[kCard] = plainFile; disk[kCard + ".foreign-1"] = "a"; disk[kCard + ".foreign-2"] = "b";
+  check(append("new", 200) && disk.at(kCard + ".foreign-3") == plainFile && disk.at(kCard + ".foreign-1") == "a",
+        "an earlier set-aside file is never replaced");
+  // It cannot be moved (the rename fails): the card does not take the line,
+  // the plain file is neither appended to nor removed, and the line goes to flash.
+  sealReset(); disk[kCard] = plainFile; failRename = true;
+  check(append("new", 200), "the line is kept");
+  check(disk.at(kCard) == plainFile && sdFailures == 1 && disk.at("/system/sys_logs/t/events.log") == "new\r\n",
+        "an unmovable foreign file stays as it is and the line lands on flash");
+
+  // No device key: nothing is created on the card; the line lands on flash, plain.
+  sealReset(); keyAvailable = false;
+  check(append("new", 200), "the line is kept without the key");
+  check(!disk.count(kCard) && disk.at("/system/sys_logs/t/events.log") == "new\r\n" && sdFailures == 1,
+        "no key: no card file, the line on flash");
+  // The key fails between the open and a row (it cannot on the device; the
+  // seal call is what is checked): no plain row follows on the card.
+  sealReset(); disk[kCard] = markLine() + sealedRows(0, 2); failSealAt = 1;
+  check(append("secret line", 200), "the line is kept");
+  check(disk.at(kCard) == markLine() + sealedRows(0, 2) && disk.at("/system/sys_logs/t/events.log") == "secret line\r\n",
+        "a failed seal writes nothing to the card and the line goes to flash");
+
+  // The card is pulled mid-write: a short write of a row. The card is
+  // reported, the line is written again on flash, and the card holds at most
+  // one torn row, never plain text.
+  for (size_t partial : {size_t(0), size_t(7)}) {
+    sealReset(); disk[kCard] = markLine() + sealedRows(0, 2); failAppendWrite = 1; shortCount = partial;
+    check(append("pulled", 200), "the line is kept when the card fails");
+    check(sdFailures == 1 && disk.at("/system/sys_logs/t/events.log") == "pulled\r\n", "the card is reported and flash takes the line");
+    const std::string card = disk.at(kCard);
+    check(card.size() == (markLine() + sealedRows(0, 2)).size() + partial &&
+          card.find("pulled") == std::string::npos, "at most one torn row, and no plain byte, on the card");
+    check(revealed(card).rfind("old-00\nold-01\n", 0) == 0, "the rows before the tear still open");
+  }
+
+  // A line over 1023 bytes is split into rows of 1023 or less, never dropped.
+  {
+    sealReset();
+    std::string longLine(2500, 'x');
+    for (size_t i = 0; i < longLine.size(); i += 97) longLine[i] = char('a' + i % 26);
+    check(appendLineWithCap("/system/sys_logs/t/events.log", longLine.c_str(), longLine.size(), 100000), "a long line is appended");
+    const std::string card = disk.at(kCard);
+    wholeRows(card);
+    check(card == markLine() + sealedRow(longLine.substr(0, 1023)) + sealedRow(longLine.substr(1023, 1023)) +
+                      sealedRow(longLine.substr(2046)), "three rows: 1023 + 1023 + 454 bytes");
+    std::string joined = revealed(card);
+    joined.erase(std::remove(joined.begin(), joined.end(), '\n'), joined.end());
+    check(joined == longLine, "nothing of the line is lost");
+  }
+
+  // The cap on the card is twice the caller's, in stored bytes: a file that
+  // would be over a 100-byte cap on flash is within its 200 bytes here.
+  sealReset(); disk[kCard] = markLine() + sealedRows(0, 5);          // 34 + 5 * 54 = 304 stored bytes
+  check(append("new", 200), "append within the card cap");
+  check(disk.at(kCard).size() == 354 && disk.at(kCard) == markLine() + sealedRows(0, 5) + sealedRow("new") &&
+        !seen("open:w") && catchupNotes.empty(), "354 stored bytes do not rotate under the 400-byte card cap");
+
+  // Copy rotation on the card (events.log is followed by catch-up): the copy
+  // starts with the mark, keeps whole rows from a row boundary, and ends with
+  // the new row. The trim note is the row bytes that went (the mark line
+  // stays where it was, at the head).
+  {
+    sealReset(); disk[kCard] = markLine() + sealedRows(0, 20); disk[kCard + ".tmp"] = "stale";
+    check(append("new", 100), "rotation on the card succeeds");
+    const std::string before = markLine() + sealedRows(0, 20) + sealedRow("new");   // 34 + 20 * 54 + 50 = 1164 > 200
+    const std::string after = disk.at(kCard);
+    wholeRows(after);
+    check(after.size() <= 170 + markLine().size() && after.size() < before.size(), "the copy holds about 85 percent of the card cap");
+    const std::string kept = after.substr(markLine().size());
+    check(before.size() > kept.size() && before.compare(before.size() - kept.size(), kept.size(), kept) == 0,
+          "the kept rows are the newest ones, unchanged");
+    check(revealed(after).size() >= 4 && revealed(after).compare(revealed(after).size() - 4, 4, "new\n") == 0,
+          "the new line is the last row");
+    check(!disk.count(kCard + ".tmp") && seen("flush:w") && eventIndex("flush:w") < eventIndex("rename"),
+          "the copy is verified, then promoted");
+    const size_t dropped = before.size() - after.size();
+    check(catchupNotes == std::vector<std::string>{"trim:" + kCard + ":" + std::to_string(dropped)},
+          "one trim note: the row bytes that went, the mark line not counted");
+    // The next line goes on under the same mark.
+    check(append("after", 100), "append after the rotation");
+    wholeRows(disk.at(kCard));
+  }
+  // The copy cannot be written (the card is full): the log is restarted as a
+  // sealed file, with the drop marker and the new line as rows.
+  {
+    sealReset(); disk[kCard] = markLine() + sealedRows(0, 20); copyError = true;
+    check(append("new", 100), "the line is kept when the copy fails");
+    const std::string after = disk.at(kCard);
+    wholeRows(after);
+    const std::string shown = revealed(after);
+    check(shown.rfind("[LOG] rotation blocked (low space): ", 0) == 0 && shown.find("older bytes dropped\nnew\n") != std::string::npos,
+          "a sealed drop marker, then the new line");
+    check(!disk.count(kCard + ".tmp") && catchupNotes == std::vector<std::string>{"restart:" + kCard},
+          "no temp left, one restart note");
+  }
+  // ---- Review of 2026-11-22 ----
+  // "Write accepted, flush lost": the card is pulled under the handle. Every
+  // write reports all its bytes and the flush says nothing; the file never
+  // grows. The size after the flush tells: the card is reported and the line
+  // is written on flash. Before the fix the line was silently gone.
+  {
+    sealReset(); disk[kCard] = markLine() + sealedRows(0, 2);
+    const std::string before = disk.at(kCard);
+    cardKeepsBytes = before.size();                       // nothing more arrives
+    check(append("pulled under the handle", 200), "the line is kept when the flush is lost");
+    check(disk.at(kCard) == before && disk.at(logName) == "pulled under the handle\r\n" && sdFailures == 1,
+          "the lost row is noticed by the file's size and the line lands on flash");
+    check(seen("flush:a") && seen("size:a") && eventIndex("flush:a") < eventIndex("sd_failed"),
+          "the append is flushed and its size read before it counts");
+    // Part of the row arrived (a torn row): the same, and nothing plain is on the card.
+    sealReset(); disk[kCard] = before; cardKeepsBytes = before.size() + 9;
+    check(append("torn", 200) && disk.at(logName) == "torn\r\n" && disk.at(kCard).size() == before.size() + 9 &&
+          disk.at(kCard).find("torn") == std::string::npos, "a torn row is a failed append");
+    // The card comes back: the torn row is ended first, so the next row is a
+    // row of its own and not lost with it.
+    cardKeepsBytes = SIZE_MAX; sdWritable = true; ++mountGeneration;
+    check(append("after", 200), "the next line goes to the card again");
+    check(disk.at(kCard) == before + sealedRow("torn").substr(0, 9) + "\n" + sealedRow("after"),
+          "a line end is written after the torn row before the next row");
+    check(revealed(disk.at(kCard)) == "old-00\nold-01\n[undecryptable row]\nafter\n", "only the torn row is lost");
+    check(disk.at(logName) == "torn\r\n", "and that line is on flash, once");
+  }
+  // A card file found torn at the next mount (a power cut mid-row).
+  sealReset(); disk[kCard] = markLine() + sealedRows(0, 2) + "ENC1:dG9yb";
+  check(append("next", 200) && disk.at(kCard) == markLine() + sealedRows(0, 2) + "ENC1:dG9yb\n" + sealedRow("next"),
+        "a torn tail is ended before the next row");
+  // The tail cannot be mended (the card takes no byte): the card file is
+  // given up for this line and nothing is appended to it.
+  sealReset(); disk[kCard] = markLine() + sealedRows(0, 2) + "ENC1:dG9yb"; failAppendWrite = 1; shortCount = 0;
+  check(append("next", 200) && disk.at(kCard) == markLine() + sealedRows(0, 2) + "ENC1:dG9yb" &&
+        disk.at(logName) == "next\r\n" && sdFailures == 1, "an unmendable tail sends the line to flash");
+
+  // One bad file, a good card (the write probe passes): only this log leaves
+  // the card; the card is not reported as failed.
+  sealReset(); cardProbeFine = true; disk[kCard] = plainFile; failRename = true;
+  check(append("kept", 200) && disk.at(kCard) == plainFile && disk.at(logName) == "kept\r\n",
+        "the line lands on flash");
+  check(sdFailures == 0 && sdWritable && cardFileFailures == 1 && heldLog == logName && seen("card_file_failed"),
+        "the failure is this log's file, not the card");
+  events.clear();
+  check(append("kept two", 200) && disk.at(logName) == "kept\r\nkept two\r\n" && !seen("open:r") && cardFileFailures == 1,
+        "while the file is held the log writes to flash without touching the card");
+
+  // A file that is not this device's is never judged without the key: it is
+  // not moved aside (before the fix a key that did not load made every card
+  // file look foreign).
+  sealReset(); keyAvailable = false; disk[kCard] = otherDevice;
+  check(append("no key", 200) && disk.at(kCard) == otherDevice && !disk.count(kCard + ".foreign-1") &&
+        movedAsideEvents == 0 && disk.at(logName) == "no key\r\n", "without the key nothing on the card is moved");
+
+  // Recovery of a rotation cut short on the card promotes the staged copy,
+  // which is a complete sealed file (the mark at its head).
+  sealReset(); disk[kCard + ".tmp"] = markLine() + sealedRows(3, 6); recover();
+  check(disk.count(kCard) && !disk.count(kCard + ".tmp"), "the staged copy is promoted");
+  wholeRows(disk.at(kCard));
+  cardSealing = false;
+}
+#endif
 #if HAVE_TIMESTAMPED_LINE
 // log_out's capped-log line: production appendTimestampedLine against the
 // statements it replaced (String line = buildTimestampPrefix(); line += text;
@@ -881,6 +1219,95 @@ static void batchingCases() {
   batchReset();
   check(mutexDepth == 0 && lockDepth == 0 && liveFiles == 0, "batching cases release everything");
 }
+#if HAVE_SEALED_LOG
+// B11 with batching on: a flushed batch is sealed line by line, and the
+// two-generation rotation starts a new marked file.
+static void sealedBatchCases() {
+  const char* kEvents = "/system/sys_logs/system-events.log";   // two generations (not followed by catch-up)
+  const std::string card = std::string("/sd") + kEvents;
+  auto sealBatchReset = [] {
+    batchReset(true);
+    cardSealing = true; keyAvailable = true; flashBelowReserve = false; ++mountGeneration;
+  };
+  // Five lines inside the batch window: no file is touched. The flush then
+  // writes them with one append open: the mark, and one sealed row per line.
+  sealBatchReset();
+  std::string expected = markLine(), shown;
+  for (int i = 0; i < 5; ++i) {
+    const std::string line = "event line " + std::to_string(i);
+    check(put(kEvents, line), "a batched line is accepted");
+    expected += sealedRow(line);
+    shown += line + "\n";
+  }
+  check(!disk.count(card) && cappedLogsPending() && countEvent("open:a") == 0, "nothing reaches the card before the flush");
+  events.clear();
+  cappedLogsFlush(false);
+  check(disk.count(card) && disk.at(card) == expected && revealed(disk.at(card)) == shown,
+        "the flushed batch is the mark and one sealed row per line, in order");
+  check(countEvent("open:a") == 1 && countPrefix("append:") == 6, "one open; the mark and each row are one write each");
+  check(disk.at(card).find("event line") == std::string::npos && !disk.count(kEvents), "no plain line on the card, none on flash");
+  wholeRows(disk.at(card));
+  // A second batch goes on under the same mark, without reading the head again.
+  check(put(kEvents, "later one") && put(kEvents, "later two"), "more lines");
+  events.clear();
+  cappedLogsFlush(false);
+  check(disk.at(card) == expected + sealedRow("later one") + sealedRow("later two") && countEvent("open:r") == 0,
+        "the next batch appends its rows");
+  // A batch with a line over 1023 bytes: that line is split, the others are not.
+  sealBatchReset();
+  const std::string longLine(1500, 'q');
+  check(put(kEvents, "before") && put(kEvents, longLine) && put(kEvents, "after"), "three lines, one long");
+  cappedLogsFlush(false);
+  check(disk.at(card) == markLine() + sealedRow("before") + sealedRow(longLine.substr(0, 1023)) +
+                             sealedRow(longLine.substr(1023)) + sealedRow("after"), "the long line is two rows, in place");
+
+  // Two-generation rotation on the card. The cap there is twice the caller's
+  // (200), so a generation is 100 stored bytes: the file that passes it is
+  // renamed to ".1" whole, and the next line starts a new file with its mark.
+  sealBatchReset();
+  const std::string older = markLine() + sealedRows(0, 5);            // 104 stored bytes
+  disk[card] = older;
+  check(put(kEvents, "roll", 100), "a line past the generation size");
+  cappedLogsFlush(false);
+  check(!disk.count(card) && disk.count(card + ".1") && disk.at(card + ".1") == older + sealedRow("roll"),
+        "the full generation is renamed with its mark and every row");
+  wholeRows(disk.at(card + ".1"));
+  check(put(kEvents, "next", 100), "the next line");
+  cappedLogsFlush(false);
+  check(disk.at(card) == markLine() + sealedRow("next"), "a new generation starts with the mark");
+  check(revealed(disk.at(card + ".1")) + revealed(disk.at(card)) ==
+            "old-00\nold-01\nold-02\nold-03\nold-04\nroll\nnext\n",
+        "a reader of both generations sees every line in order");
+  // Review of 2026-11-22: the card is pulled in the middle of a batch. The
+  // rows it verifiably took stay there and are not written a second time;
+  // flash gets the lines from the first one the card does not hold whole.
+  sealBatchReset();
+  check(put(kEvents, "batch one") && put(kEvents, "batch two") && put(kEvents, "batch three"), "three lines pending");
+  cardKeepsBytes = (markLine() + sealedRow("batch one")).size() + 11;   // the first row and a piece of the second
+  cappedLogsFlush(false);
+  check(disk.at(card).rfind(markLine() + sealedRow("batch one"), 0) == 0 &&
+            disk.at(card).size() == (markLine() + sealedRow("batch one")).size() + 11,
+        "the card holds the first row and a torn second one");
+  check(disk.at(kEvents) == "batch two\r\nbatch three\r\n" && sdFailures == 1,
+        "flash takes the lines the card did not take whole, each once");
+  // Nothing of the batch arrived: all of it goes to flash.
+  sealBatchReset();
+  check(put(kEvents, "lost one") && put(kEvents, "lost two"), "two lines pending");
+  cardKeepsBytes = 0;
+  cappedLogsFlush(false);
+  check(disk.at(kEvents) == "lost one\r\nlost two\r\n" && sdFailures == 1 && disk.at(card).empty(),
+        "a batch the card lost whole lands on flash whole");
+  // The card fails under a batch: the whole batch lands on flash, plain.
+  sealBatchReset();
+  check(put(kEvents, "kept one") && put(kEvents, "kept two"), "two lines pending");
+  failSdAppendOpen = true;
+  cappedLogsFlush(false);
+  check(!disk.count(card) && disk.at(kEvents) == "kept one\r\nkept two\r\n" && sdFailures == 1,
+        "a card that does not open sends the batch to flash");
+  batchReset();
+  cardSealing = false;
+}
+#endif
 #endif
 
 int main() {
@@ -895,11 +1322,17 @@ int main() {
   else { check(append(), "PSRAM allocation failure restarts the log"); restartedRotation(rows(0, 20)); }
   for (bool onSd : {false, true}) { normalCases(onSd); failureCases(onSd); }
   if (!BASELINE) { mirrorRecovery(); lowSpaceHoldsCap(false); lowSpaceHoldsCap(true); reserveAndSdLatch(); }
+#if HAVE_SEALED_LOG
+  if (!BASELINE) sealedCardCases();
+#endif
 #if HAVE_TIMESTAMPED_LINE
   if (!BASELINE) timestampedLines();
 #endif
 #if HAVE_BATCHING
   if (!BASELINE) batchingCases();
+#if HAVE_SEALED_LOG
+  if (!BASELINE) sealedBatchCases();
+#endif
 #endif
   check(allocCalls == 2, "one failed allocation then one reusable PSRAM allocation across all logs");
   reset(); recovering = true; cleanupLogOrphan(nullptr); recovering = false; check(events.empty(), "null recovery path is a no-op");

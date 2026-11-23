@@ -198,16 +198,37 @@ static constexpr const char* CAPTURE_DIR_SENSORS = "/logging_captures/sensors";
 struct { int captureEncryptMode = 0; } gSettings;
 static bool gSensorLoggingRunning = false, gSensorLogSealed = false;
 static const char* captureEncryptModeName(int) { return "off"; }
+// B11: whether the running session's rows are sealed now (on the card always).
+static bool sensorLogSessionSealedNow() { return gSensorLogSealed; }
 static bool captureCryptoKeyReady() { return false; }
 // The export loads this device's key before it opens its output; a case can make the load fail.
 static bool keyLoads = true;
 static bool captureCryptoEnsureKey() { return keyLoads; }
 static void setSetting(int& value, int next) { value = next; }
 static constexpr const char* CAPCRYPT_UNDECRYPTABLE = "[UNDECRYPTABLE]";
+// (A tree from before the class binding calls this one; kept for --baseline.)
 static bool captureCryptoRevealLine(String& line) {
   if (!line.startsWith("cipher:")) return false;
   line = line == "cipher:bad" ? CAPCRYPT_UNDECRYPTABLE : "decoded";
   return true;
+}
+// The export reveals line by line with the class of the input's path. The toy
+// rows here are "cipher:<x>"; what every other line is comes from the
+// production rule (System_SealedLogCore.h): the mark, a schema line directly
+// after it, or a plain line where only rows belong.
+#include "System_SealedLogCore.h"
+static std::string exportClassPath;
+static sealedlog::Line captureCryptoRevealFileLine(const char* path, sealedlog::LineState& state, String& line) {
+  exportClassPath = path ? path : "";
+  if (line.startsWith("cipher:")) {
+    state.started = state.marked = true;
+    state.inHeader = false;
+    line = line == "cipher:bad" ? CAPCRYPT_UNDECRYPTABLE : "decoded";
+    return sealedlog::Line::Row;
+  }
+  const sealedlog::Line kind = sealedlog::classifyLine(state, line.c_str(), line.length());
+  if (kind == sealedlog::Line::Unsealed) line = "[unsealed line]";
+  return kind;
 }
 // INSERT_PRODUCTION
 
@@ -531,9 +552,23 @@ static void exportCases() {
     disk[path] = "prior";
     const std::string result = cmd_capturecrypt(String(("export \"/sealed\" \"" + path + "\"").c_str()));
     check(lockDepth == 0 && liveFiles == 0, "refused export releases all handles and lock");
-    check(result == "Error: No row could be decrypted, the file was sealed with another key. "
-                    "Export it on the device that recorded it.", "export without a readable row is refused");
+    check(result == "Error: No row could be decrypted: the file was sealed with another key, or it was moved "
+                    "(rows open only where the kind of file they were sealed for lives). "
+                    "Export it on the device that recorded it, from where it was written.",
+          "export without a readable row is refused");
+    check(exportClassPath == "/sealed", "the rows are opened with the class of the input's normalized path");
     check(disk.at(path) == "prior" && disk.count(path + ".tmp") == 0, "refused export keeps the earlier output and no temporary");
+#if !BASELINE
+    // Review of 2026-11-22: a plain line where only sealed rows belong is not
+    // exported as if the device had recorded it.
+    reset(); ++scenarios;
+    disk["/sealed"] = "#HW1ENC v1\n# columns\ncipher:good\n1700000000000,forged,row\ncipher:good\n# late comment\n";
+    disk[path] = "prior";
+    const std::string mixed = cmd_capturecrypt(String(("export \"//sealed\" \"" + path + "\"").c_str()));
+    check(mixed.rfind("SUCCESS:", 0) == 0 && exportClassPath == "/sealed", "the export runs on the normalized path");
+    check(disk.at(path) == "# columns\ndecoded\n[unsealed line]\ndecoded\n[unsealed line]\n",
+          "plain lines among the rows are exported as their marker");
+#endif
   }
   {
     // The device key does not load: refused before any output is opened, so

@@ -162,12 +162,15 @@ static char* getDebugBuffer(){return debugBuffer;}
 static void broadcastOutput(const char* text){broadcasts.emplace_back(text);}
 template<class... Args>static void cliHintf(const char*,Args...){ }
 static bool readTextLimited(const char*,String& text,size_t cap,const AuthContext&){++viewReads;text=fileBytes.substr(0,cap);return true;}
-static void captureCryptoRevealText(String&){ }
+// The reveal is handed the normalized path of the file (the class its rows
+// open with); the last one is kept for the cases.
+static std::string revealClassPath;
+static void captureCryptoRevealText(const char* path,String&){ revealClassPath=path?path:""; }
 // A large file's pages reveal sealed rows through the bounded overload; these
 // fixtures are never sealed, so the magic check is all that runs.
 static bool captureCryptoIsMagicLine(const char* line){return std::strncmp(line,"#HW1ENC",7)==0;}
-static size_t captureCryptoRevealCapacity(const char*,size_t length){return length+1;}
-static bool captureCryptoRevealText(char*,size_t&,size_t,size_t* =nullptr){return true;}
+static size_t captureCryptoRevealCapacity(const char*,size_t length,bool=false){return length+1;}
+static bool captureCryptoRevealText(const char* path,char*,size_t&,size_t,size_t* =nullptr,bool=false){revealClassPath=path?path:"";return true;}
 namespace VFS {
 static bool existsGuarded(const String&,const AuthContext& ctx){check(&ctx==&auth,"fileview preserves caller identity");++existsCalls;return fileExists;}
 static File openGuarded(const String& path, const char* mode, const AuthContext& ctx) {
@@ -490,22 +493,45 @@ int main(int argc, char** argv) {
 
     // Exercise the actual legacy viewer: private aliases stop before any
     // existence/read/broadcast path, while an ordinary page still renders.
-    for(const char* path:{"/stt/u2/session.txt","/sd/stt/u2/session.txt"," //./stt//u2/session.txt ",
-                         "/sd/STT/u2/a.txt","/sd/stt./u2/a.txt","/sd/\\stt/u2/a.txt",
-                         "/sd/.\\stt/u2/a.txt","/sd/stt/u2~1/a.txt"}) {
+    for(const char* path:{"/stt/u2/session.txt","/sd/stt/u2/session.txt"," //./stt//u2/session.txt "}) {
       fixture("private spoken words");tokens={String(path)};broadcasts.clear();
       const unsigned beforeExists=existsCalls,beforeRead=viewReads;
       const char* refusal=cmd_fileview("");
-      check(std::strcmp(refusal,"Error: fileview does not show private transcripts. Use fileread or the file browser.")==0,
+      check(std::strcmp(refusal,"Error: fileview does not show private transcripts. Use 'transcripts read' or the file browser.")==0,
             "private fileview redirects to owner-scoped readers");
       check(commandReplyIsFailure(refusal),"a refused view is a failed command");
       check(existsCalls==beforeExists&&viewReads==beforeRead&&broadcasts.empty(),
             "private fileview cannot read or broadcast content");
     }
+    // B11: a card path in a spelling FatFs would resolve to another name is
+    // refused where ".." is, for the transcript tree and every other protected
+    // card folder: the words of a missing file, and nothing looked up, read or
+    // broadcast.
+    for(const char* path:{"/sd/STT/u2/a.txt","/sd/stt./u2/a.txt","/sd/\\stt/u2/a.txt",
+                         "/sd/.\\stt/u2/a.txt","/sd/stt/u2~1/a.txt",
+                         "/sd/System/sys_logs/failed_login.log","/sd/system\\sys_logs\\failed_login.log",
+                         "/sd/system./sys_logs/failed_login.log","/sd/LOGGIN~1/system/x.log",
+                         "/sd/logging_captures /sensors/a.csv","/sd/SYSTEM~1/sys_logs/errors.log"}) {
+      fixture("private spoken words");tokens={String(path)};broadcasts.clear();
+      const unsigned beforeExists=existsCalls,beforeRead=viewReads;
+      const char* refusal=cmd_fileview("");
+      check(std::strncmp(refusal,"Error: File not found or access denied: ",40)==0,
+            "an aliased card path is answered like a missing file");
+      check(commandReplyIsFailure(refusal),"a refused view is a failed command");
+      check(existsCalls==beforeExists&&viewReads==beforeRead&&broadcasts.empty(),
+            "an aliased card path is neither looked up nor read nor broadcast");
+    }
     fixture("ordinary page");tokens={String("/ordinary.txt")};broadcasts.clear();
     check(std::strcmp(cmd_fileview(""),"[FS] File displayed")==0,"ordinary fileview remains available");
     check(std::find(broadcasts.begin(),broadcasts.end(),"ordinary page")!=broadcasts.end(),
           "ordinary fileview still broadcasts its page");
+    // Review of 2026-11-22: a sealed file's rows open only with the class of
+    // the path they are viewed at, so the reveal is handed that path in its
+    // one normalized spelling, whatever spelling the command was given.
+    check(revealClassPath=="/ordinary.txt","the reveal gets the viewed file's path");
+    fixture("ordinary page");tokens={String("//ordinary.txt")};broadcasts.clear();revealClassPath.clear();
+    check(std::strcmp(cmd_fileview(""),"[FS] File displayed")==0&&revealClassPath=="/ordinary.txt",
+          "the reveal gets the normalized path, not the spelling typed");
 
     // JSON is re-indented by default (the shared re-indenter); `raw`, before or
     // after the page number, shows the stored text. Other files ignore `raw`.

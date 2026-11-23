@@ -17,6 +17,7 @@
 #include "System_SensorLogging.h"
 #include "System_Debug.h"
 #include "System_VFS.h"
+#include "System_CaptureCrypto.h"  // a track sealed at rest: rows revealed for a caller who may read it
 #include "System_AuthIdentity.h"  // currentAuthContext
 
 #include "System_I2C.h"
@@ -3037,10 +3038,20 @@ bool GpsTrackManager::loadTrackImpl(const char* filepath, String& errorMsg,
       errorMsg = "Failed to open file";
       return false;
     }
+    // Rows open with the class of the path they are read at.
+    String classPath;
+    if (!normalizeFsPath(String(filepath), classPath)) classPath = "";
+    sealedlog::LineState lineKinds = sealedlog::stateFor(classPath.c_str());
     while (f.available() && count < MAX_TRACK_POINTS) {
       String line = f.readStringUntil('\n');
       line.trim();
       if (line.length() == 0) continue;
+      // A track sealed at rest (every capture on the card, B11; on flash by
+      // capturecrypt): the caller passed the guarded open above, so its rows
+      // are revealed for parsing. A row this device cannot open parses as
+      // nothing and is skipped, and so is a plain line in a sealed file:
+      // only sealed rows are points there, whoever put the line in.
+      if (captureCryptoRevealFileLine(classPath.c_str(), lineKinds, line) == sealedlog::Line::Unsealed) continue;
       float lat, lon;
       if (!parseGpsLine(line.c_str(), lat, lon)) continue;
       // GPS logs often repeat the same fix at sub-1Hz intervals.

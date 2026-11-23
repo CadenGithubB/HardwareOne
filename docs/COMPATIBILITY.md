@@ -54,6 +54,21 @@ bundle formats and the ESP-IDF and Arduino core it was built with (`versions jso
   back from it), so that firmware finds it as it left it. The console says so once. `automation`
   commands, the web Automations page (`GET /api/automations`: `success` false with
   `formatVersion` and `supported`) and its exports (`409`) name the version instead of listing it.
+- Sealed files (captures and health days that capture encryption seals on flash, and every log
+  file on the SD card) start with the mark line `#HW1ENC v1 k1 id=<16 hex>`: `v1` is the row
+  format (`ENC1:` and base64 of nonce, ciphertext and tag), `k1` the key slot, and `id` names the
+  device key that sealed the file (it is not the key). A reader takes any first line that starts
+  with `#HW1ENC` as the mark. The rows open only with that device's key (NVS `hw1cap`/`k1`); an
+  NVS or flash erase removes it, and nothing can read the files afterwards. A row is also bound
+  to the kind of file it was sealed for (the seal's additional data is `HW1ENC1|` and `syslog`,
+  `bootdebug`, `capture`, `stt|u<id>`, or `path|<path>` for any other place, the same for a file
+  and its `/sd` twin): read at a path of another kind it does not open. There is no reader for
+  rows sealed with the earlier constant additional data (`HW1ENC1`): sealed captures and health
+  days written by builds before this change show `[undecryptable row]` and do not load; 1.0
+  starts from erased storage. A line of a sealed file that is neither the mark, a header line
+  directly after it (a capture's column names or `#` lines, at most eight) nor a row reads as
+  `[unsealed line]`. A log file on the card that does not carry this device's mark is moved aside
+  to `<name>.foreign-<n>` (in the log folders only); it is never converted.
 - The web migration backup bundle (`HWBACKUP`) carries `"formatVersion": 1` (`kBackupFormatVersion`,
   `versions` key `backup_format`). Import from Backup refuses a higher or non-whole-number
   `formatVersion` before staging anything (`400`, `"error":"Backup format too new"` with

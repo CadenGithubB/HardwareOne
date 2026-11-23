@@ -19,6 +19,7 @@ import tempfile
 
 from test_mqtt_boolean_commands import extract_macro
 from test_web_batch_handlers import extract_block, require
+from sd_path_core_host import sd_path_core, with_sd_path_core
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -39,8 +40,8 @@ def generate(overlay: Path | None) -> str:
     parser += "\n".join(extract_block(command, marker) for marker in (
         "CommandArgs::CommandArgs(", "void CommandArgs::parse(", "const String& CommandArgs::arg(",
         "String CommandArgs::remaining("))
-    parser += "\n" + "\n".join(extract_block(filesystem, marker) for marker in (
-        "bool normalizeFsPath(", "const char* requireQuotedPath(", "const char* requireQuotedToken("))
+    parser += "\n" + with_sd_path_core("\n".join(extract_block(filesystem, marker) for marker in (
+        "bool normalizeFsPath(", "const char* requireQuotedPath(", "const char* requireQuotedToken(")), COMPONENT)
     scope = read("System_VFS.h")
     scope = "\n".join(extract_block(scope, marker) for marker in (
         "inline const char* captureScopeFor(", "inline bool pathInCaptureTree("))
@@ -90,7 +91,7 @@ def main() -> None:
         sanitize = (["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                      "-fno-omit-frame-pointer", "-g"] if args.sanitize else [])
         flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function",
-                 "-Wno-unused-parameter", "-I", str(CORE), *sanitize]
+                 "-Wno-unused-parameter", "-I", str(CORE), "-I", str(COMPONENT), *sanitize]
         subprocess.run([shutil.which("cc"), "-std=c11", *sanitize, "-I", str(CORE),
                         "-c", str(work / "stdlib_noniso.c"), "-o", str(work / "conversions.o")], check=True)
         subprocess.run([args.cxx, *flags, "-Wno-sign-compare", "-c", str(work / "WString.cpp"), "-o", str(work / "WString.o")], check=True)

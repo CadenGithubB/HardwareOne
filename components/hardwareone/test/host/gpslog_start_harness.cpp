@@ -203,6 +203,18 @@ bool getStats(Storage storage, uint64_t& total, uint64_t& used, uint64_t& free) 
   return true;
 }
 bool isSdAvailable() { return sdAvailable; }
+// B11: where the session's first row will go: the card twin while a card
+// takes log lines, else the path itself.
+enum class LogTier : uint8_t { Primary, Overflow, Refused };
+static bool cardTakesLogs = false;
+static std::string preparedPath;
+LogTier resolveLogPath(const char* path, size_t, char* out, size_t capacity) {
+  std::snprintf(out, capacity, "%s%s", cardTakesLogs ? "/sd" : "", path);
+  return cardTakesLogs ? LogTier::Overflow : LogTier::Primary;
+}
+}
+namespace SealedLog {
+inline bool appliesTo(const String& path) { return std::strncmp(path.c_str(), "/sd/", 4) == 0; }
 }
 struct { unsigned getFreeHeap() { return freeHeap; } } ESP;
 String resolveSessionTarget(const String& path) {
@@ -213,7 +225,7 @@ String resolveSessionTarget(const String& path) {
 bool sessionWantsSealing(uint8_t) { return wantsSealing; }
 bool captureCryptoEnsureKey() { return keyAvailable; }
 bool writeHeaderChecked(File&) { return headerWritable; }
-File openSensorLogForAppend(const String&) { return {headerWritable}; }
+File openSensorLogForAppend(const String& path) { VFS::preparedPath = path.c_str(); return {headerWritable}; }
 void sensorLogClassifyActivePath(const char* path) { classifiedPath = path; }
 size_t sensorLogResolvedSize(const String&) { return 42; }
 String stripSessionShaping(const String& path) { return path; }
@@ -274,6 +286,8 @@ static void reset() {
   outputs.clear();
   logEvents.clear();
   systemEvents.clear();
+  VFS::cardTakesLogs = false;
+  VFS::preparedPath.clear();
 #endif
 }
 
@@ -659,6 +673,30 @@ static void liveTrackTransientSession() {
 #endif
 #endif
 
+#if !TEST_GPS
+// B11: a start prepares the file its first row will go to. While a card takes
+// log lines that is the card twin (sealed there), and the reply names it; the
+// session keeps its flash-named path, which is what every row resolves again.
+static void startOnTheCard() {
+  context = "the start prepares the card twin";
+  reset();
+  VFS::cardTakesLogs = true;
+  const std::string reply = commandStart("start \"/logging_captures/logs/card.csv\" 700");
+  check(!error(reply.c_str()), "a start with a card refused");
+  check(VFS::preparedPath == "/sd/logging_captures/logs/card.csv", "the flash file was prepared although rows go to the card");
+  check(reply.find("File: /sd/logging_captures/logs/card.csv (on the card, sealed)") != std::string::npos,
+        "the reply does not name the card file");
+  check(gSensorLogPath == "/logging_captures/logs/card.csv" && gSettings.sensorLogPath == "/logging_captures/logs/card.csv",
+        "the session and the saved path are not the flash-named path");
+  context = "the start prepares the flash file";
+  reset();
+  const std::string flash = commandStart("start \"/logging_captures/logs/flash.csv\" 700");
+  check(!error(flash.c_str()) && VFS::preparedPath == "/logging_captures/logs/flash.csv" &&
+        flash.find("File: /logging_captures/logs/flash.csv\n") != std::string::npos &&
+        flash.find("sealed") == std::string::npos, "a start without a card names anything but the flash file");
+}
+#endif
+
 int main() {
   const auto run = [](const char* name, void (*test)()) {
     int beforeChecks = checks, beforeFailures = failures;
@@ -676,6 +714,7 @@ int main() {
   run("typed admission and command adapter", admissionFailuresAndAdapter);
   run("paths outside the capture tree are refused", outOfTreeRefused);
   run("logger session ownership", sessionOwnership);
+  run("the start prepares the tier its rows go to (B11)", startOnTheCard);
 #if HAVE_LIVE_TRACK_START
   run("transient live-track session", liveTrackTransientSession);
 #endif

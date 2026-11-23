@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from sd_path_core_host import sd_path_core, with_sd_path_core
 
 # getStorageType reads an already normalized path in place through these
 # (an older tree has neither).
@@ -67,7 +68,7 @@ def main():
     wire = read('System_ESPNow_Wire.h')
     # Keep the real packed request/reply definitions and their static assertions.
     wire = wire[wire.index('struct __attribute__((packed)) V4PayloadFsListReq'):wire.index('// ---- Multi-hop reachability invariants')]
-    pieces = [extract_block(filesystem, 'bool normalizeFsPath('),
+    pieces = [with_sd_path_core(extract_block(filesystem, 'bool normalizeFsPath('), a.component),
               extract_block(source, 'static bool fsRpcPathAllowed(')]
     # The requester gate exists only in sources that have it; an overlay without it
     # still compiles and reaches the behavioral assertions (which then name the defect).

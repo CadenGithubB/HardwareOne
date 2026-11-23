@@ -33,6 +33,8 @@
 #include "System_ESPSR.h"  // srSyncDebugLevel()
 #include "System_CommandRegistry.h"
 #include "System_Notifications.h"
+#include "System_SealedLog.h"      // B11: the system log on the card is sealed
+#include "System_SealedLogCore.h"  // kMarkLength: a sealed file that holds only its mark is new
 #include "HAL_Motion.h"
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_rda5807.h"
@@ -133,6 +135,36 @@ bool gSystemLogCategoryTags = true;  // Default: enabled
 
 // Persistent file handle for efficient logging (avoids open/close per message)
 static File gSystemLogFile;
+// B11: the file that handle is (or was last) open on. gSystemLogPath is the
+// path the session was started with; while a card takes log lines the file is
+// its card twin, sealed. Resolved when the file is opened (the start, the
+// first line after a rotation, a card that failed) and looked at again once a
+// minute while the file is on flash, so a card that comes back takes the log
+// again. Written under the filesystem lock.
+static String gSystemLogActivePath;
+static uint32_t gSystemLogTierCheckedMs = 0;
+static constexpr uint32_t kSystemLogTierCheckMs = 60000;
+// B11: what the open card file is known to hold. A row the handle took is on
+// the card only once a flush was followed by the file having the size the
+// rows make (SealedLog::settle): the file layer buffers, and a pulled card
+// fails neither write() nor flush(). Until then the plain text of the rows
+// written since the last verified flush is kept (PSRAM), so that a card that
+// went away loses nothing: those lines are written to flash instead
+// (systemLogCardFailoverLocked). Written under the filesystem lock.
+static constexpr size_t kSystemLogPendingBytes = 8192;  // 20 lines between flushes, 320 bytes at most each
+struct SystemLogCard {
+  size_t stored;        // bytes the handle has taken: the size at the open and every row since
+  size_t settled;       // the size at the last flush that verified
+  size_t pendingBytes;  // of `pending`
+  char*  pending;       // the lines written since, each with its '\n'
+};
+EXT_RAM_BSS_ATTR static SystemLogCard sSystemLogCard;
+// The line being sealed and the path being resolved: not locals, since both
+// are used on the log task's 6 KB stack above the seal and the file layer.
+// Used under the filesystem lock only.
+EXT_RAM_BSS_ATTR static char sSystemLogResolved[160];
+static void systemLogCardFailoverLocked();
+static bool systemLogCardSettleLocked();
 static unsigned long gSystemLogLastFlush = 0;
 static uint16_t gSystemLogUnflushedCount = 0;
 static const uint16_t LOG_FLUSH_MESSAGE_COUNT = 20;      // Flush every 20 messages
@@ -148,12 +180,13 @@ static uint32_t gSystemLogRotations = 0;
 static uint32_t gSystemLogRotateRetryAtMs = 0;  // set after a failed rotation; 0 = no backoff
 static uint32_t gSystemLogReserveSkips = 0;     // lines not written: LittleFS below the reserve
 
-// G-39: the system log never moves to the SD mirror (its path is the user's
-// choice), and its default budget (1 MB x 4 generations) exceeds the LittleFS
-// partition of the 8 MB layouts. On LittleFS it must not eat the reserve the
-// overflow latch keeps for settings and state saves, so lines are skipped and
-// counted while flash is below it. The free figure is the VFS cache the capped
-// logs already refresh, so most lines cost no traverse.
+// G-39: the system log's default budget (1 MB x 4 generations) exceeds the
+// LittleFS partition of the 8 MB layouts. On LittleFS it must not eat the
+// reserve the flash latch keeps for settings and state saves, so lines are
+// skipped and counted while flash is below it. The free figure is the VFS
+// cache the capped logs already refresh, so most lines cost no traverse.
+// `path` is the file the handle is on: since B11 that is the card twin while
+// a card takes log lines, and the card is not held to the flash reserve.
 static bool systemLogBlockedByReserve(const String& path) {
   if (VFS::getStorageType(path) == VFS::SDCARD) return false;
   return VFS::getCachedLittleFsFree() < VFS::logReserveBytes();
@@ -175,26 +208,37 @@ static int systemLogMaxRotations() {
 // no generation is kept — and leaves the handle closed: the next line reopens
 // the path for append exactly as a run's first write does. No log line from
 // here — this runs inside the log writer itself.
+//
+// B11: the file rotated is the one the handle was on (gSystemLogActivePath),
+// so a log on the card rotates on the card; its generations are sealed files
+// with their own mark, and the next open starts a new marked file.
 static void systemLogRotateLocked() {
+  // A card file is rotated only once the card verifiably holds its rows; one
+  // that does not is given up for flash and nothing is rotated.
+  if (SealedLog::appliesTo(gSystemLogActivePath) && !systemLogCardSettleLocked()) {
+    systemLogCardFailoverLocked();
+    return;
+  }
   gSystemLogFile.flush();
   gSystemLogFile.close();
   gSystemLogUnflushedCount = 0;
+  const String& path = gSystemLogActivePath.length() ? gSystemLogActivePath : gSystemLogPath;
   const AuthContext ctx =
-      VFS::systemAuth(VFS::captureScopeFor(gSystemLogPath), "debug.system_log_rotate");
+      VFS::systemAuth(VFS::captureScopeFor(path), "debug.system_log_rotate");
   const int keep = systemLogMaxRotations();
   bool ok;
   if (keep > 0) {
-    const String oldest = gSystemLogPath + "." + String(keep);
+    const String oldest = path + "." + String(keep);
     if (VFS::existsGuarded(oldest, ctx)) VFS::removeGuarded(oldest, ctx);
     for (int i = keep - 1; i >= 1; --i) {
-      const String from = gSystemLogPath + "." + String(i);
+      const String from = path + "." + String(i);
       if (VFS::existsGuarded(from, ctx)) {
-        VFS::renameGuarded(from, gSystemLogPath + "." + String(i + 1), ctx);
+        VFS::renameGuarded(from, path + "." + String(i + 1), ctx);
       }
     }
-    ok = VFS::renameGuarded(gSystemLogPath, gSystemLogPath + ".1", ctx);
+    ok = VFS::renameGuarded(path, path + ".1", ctx);
   } else {
-    ok = VFS::removeGuarded(gSystemLogPath, ctx);  // start over, keep nothing
+    ok = VFS::removeGuarded(path, ctx);  // start over, keep nothing
   }
   if (ok) {
     ++gSystemLogRotations;
@@ -358,6 +402,168 @@ static __attribute__((noinline)) void writeLogLine(Print& out, unsigned long tim
   }
 }
 
+// B11: opens the system log `path` for append where its next line goes: the
+// card twin while a card takes log lines (sealed: SealedLog writes the mark
+// into a new file, moves a file that is not this device's aside and ends a
+// torn last row), else the path itself. The open counts only when the card
+// verifiably holds the file as opened (SealedLog::settle). A card file that
+// does not take the open is reported (which keeps this log, or with a failed
+// card every log, off the card for a while) and the flash path is opened
+// instead; a path the user put on the card has no flash twin. `active`
+// receives the file's path, `isNew` whether it holds no line yet and
+// `storedOut` a card file's size. `startFresh` (the boot auto-start, which
+// begins its file anew on every boot) empties an existing file first; on the
+// card that is this device's own file only, since one that is not is moved
+// aside, never removed. The caller holds the filesystem lock.
+static File systemLogOpenLocked(const String& path, String& active, bool* isNew = nullptr,
+                                bool startFresh = false, size_t* storedOut = nullptr) {
+  if (isNew) *isNew = false;
+  if (storedOut) *storedOut = 0;
+  char* resolved = sSystemLogResolved;
+  active = path;
+  if (path.length() + 4 < sizeof(sSystemLogResolved)) {
+    (void)VFS::resolveLogPath(path.c_str(), 0, resolved, sizeof(sSystemLogResolved));
+    active = resolved;
+  }
+  File file;
+  if (SealedLog::appliesTo(active)) {
+    const AuthContext cardCtx = VFS::systemAuth(VFS::captureScopeFor(active), "debug.system_log_append");
+    size_t stored = 0;
+    file = startFresh ? SealedLog::openFresh(active, cardCtx, stored)
+                      : SealedLog::openAppend(active, cardCtx, stored);
+    if (file && !SealedLog::settle(file, active, stored)) file.close();
+    if (file) {
+      if (isNew) *isNew = stored == sealedlog::kMarkLength + 1;
+      if (storedOut) *storedOut = stored;
+      return file;
+    }
+    if (SealedLog::appliesTo(path)) return file;
+    VFS::noteLogCardFileFailure(path.c_str(), "debug.log.open");
+    active = path;
+  }
+  const AuthContext ctx = VFS::systemAuth(VFS::captureScopeFor(active), "debug.system_log_append");
+  const bool existed = isNew && !startFresh && VFS::existsGuarded(active, ctx);
+  file = VFS::openGuarded(active, startFresh ? "w" : "a", ctx, true);
+  if (file && isNew) *isNew = !existed || file.size() == 0;
+  return file;
+}
+
+// The "# System log ..." line a session's file starts with: plain on flash,
+// one sealed row on the card (`stored`: the card file's size before it).
+static void systemLogWriteStartLine(File& file, const String& active, const char* what, size_t stored = 0) {
+  char line[56];
+  const int n = snprintf(line, sizeof(line), "# System log %s at %lu ms", what, millis());
+  if (n <= 0) return;
+  if (SealedLog::appliesTo(active)) {
+    (void)SealedLog::writeLines(file, active, line, static_cast<size_t>(n), stored);
+    (void)SealedLog::settle(file, active, stored);  // a row that did not land is mended at the next open
+  } else {
+    file.printf("%s\n", line);
+  }
+}
+
+// Opens the log task's handle where the next line goes (the caller holds the
+// filesystem lock, and the session is running).
+static void systemLogOpenHandleLocked() {
+  size_t stored = 0;
+  gSystemLogFile = systemLogOpenLocked(gSystemLogPath, gSystemLogActivePath, nullptr, false, &stored);
+  gSystemLogTierCheckedMs = millis();
+  sSystemLogCard.stored = sSystemLogCard.settled = stored;
+  sSystemLogCard.pendingBytes = 0;
+  if (gSystemLogFile) {
+    gSystemLogLastFlush = millis();
+    gSystemLogUnflushedCount = 0;
+  }
+}
+
+// Flushes the card file and verifies its size. True: the card holds every
+// row written, and the kept lines are let go.
+static bool systemLogCardSettleLocked() {
+  SystemLogCard& card = sSystemLogCard;
+  if (!SealedLog::settle(gSystemLogFile, gSystemLogActivePath, card.stored)) return false;
+  card.settled = card.stored;
+  card.pendingBytes = 0;
+  return true;
+}
+
+// The card file did not take what was written (a row, or a flush that did not
+// verify). Closes it, reports it, opens the log where its lines go now (flash)
+// and writes there the kept lines the card does not verifiably hold. A log
+// the user put on the card itself has no flash twin: its handle stays closed
+// and the next line tries the card again. Leaves the handle open on flash, or
+// closed.
+static void systemLogCardFailoverLocked() {
+  SystemLogCard& card = sSystemLogCard;
+  size_t keptBytes = card.pending ? card.pendingBytes : 0;
+  size_t taken = 0;
+  if (gSystemLogFile) {
+    const size_t have = gSystemLogFile.size();
+    if (keptBytes && have > card.settled) {
+      taken = sealedlog::linesLanded(card.pending, keptBytes, sealedlog::kMaxRowBytes, have - card.settled);
+    }
+    gSystemLogFile.close();
+  }
+  gSystemLogUnflushedCount = 0;
+  card.pendingBytes = 0;
+  if (SealedLog::appliesTo(gSystemLogPath)) return;
+  VFS::noteLogCardFileFailure(gSystemLogPath.c_str(), "debug.log");
+  systemLogOpenHandleLocked();
+  if (gSystemLogFile && SealedLog::appliesTo(gSystemLogActivePath)) {
+    gSystemLogFile.close();  // still the card: nothing plain goes there
+    return;
+  }
+  if (!gSystemLogFile || taken >= keptBytes) return;
+  if (systemLogBlockedByReserve(gSystemLogActivePath)) {
+    ++gSystemLogReserveSkips;
+    return;
+  }
+  gSystemLogFile.write(reinterpret_cast<const uint8_t*>(card.pending) + taken, keptBytes - taken);
+}
+
+// B11: one line for the system log on the card, as one sealed row (the row's
+// '\n' ends it; the text is the line without one). A line that does not fit
+// the buffer is cut to it. The line is formatted in external RAM, not on this
+// task's stack, and its text is kept until a flush has verified the row.
+// False when the card did not take the row: the caller gives the card file up
+// (systemLogCardFailoverLocked) and writes this line on flash.
+static __attribute__((noinline)) bool systemLogCardWriteLocked(unsigned long timestamp, const char* tag,
+                                                               const char* text) {
+  EXT_RAM_BSS_ATTR static char line[kLogLineCapacity];
+  int length = tag ? snprintf(line, sizeof(line), "[%lu] [%s] %s", timestamp, tag, text)
+                   : snprintf(line, sizeof(line), "[%lu] %s", timestamp, text);
+  if (length < 0) return true;  // a format error writes nothing, as in writeLogLine
+  if (static_cast<size_t>(length) >= sizeof(line)) length = static_cast<int>(sizeof(line)) - 1;
+  SystemLogCard& card = sSystemLogCard;
+  if (!card.pending) {
+    card.pending = static_cast<char*>(ps_alloc(kSystemLogPendingBytes, AllocPref::PreferPsram, "syslog.pending"));
+  }
+  // No room to keep this line beside the unverified ones: verify those first.
+  if (card.pending && card.pendingBytes + static_cast<size_t>(length) + 1 > kSystemLogPendingBytes &&
+      !systemLogCardSettleLocked()) {
+    return false;
+  }
+  if (!SealedLog::writeLines(gSystemLogFile, gSystemLogActivePath, line, static_cast<size_t>(length), card.stored)) {
+    return false;
+  }
+  if (!card.pending) return systemLogCardSettleLocked();  // nothing can be kept: verify each row
+  memcpy(card.pending + card.pendingBytes, line, static_cast<size_t>(length));
+  card.pendingBytes += static_cast<size_t>(length);
+  card.pending[card.pendingBytes++] = '\n';
+  return true;
+}
+
+// Closes the log task's handle (the caller holds the filesystem lock). A card
+// file is verified first; lines it did not take go to flash before the close.
+static void systemLogCloseHandleLocked() {
+  if (!gSystemLogFile) return;
+  if (SealedLog::appliesTo(gSystemLogActivePath) && !systemLogCardSettleLocked()) systemLogCardFailoverLocked();
+  if (gSystemLogFile) {
+    gSystemLogFile.flush();
+    gSystemLogFile.close();  // File::close() also drops the handle
+  }
+  gSystemLogUnflushedCount = 0;
+}
+
 // UP-06: the system log's file stays open between lines. When it is on the
 // card it has to be closed before the card's mount ends (`sdunmount`,
 // `sdmount`, `sdformat`, the card watch's remount): after that its descriptor
@@ -373,10 +579,7 @@ static __attribute__((noinline)) void writeLogLine(Print& out, unsigned long tim
 // it took.
 void systemLogReleaseSdHandle() {
   FsLockGuard guard("debug.log.sd_release");
-  if (gSystemLogFile && gSystemLogPath.startsWith("/sd/")) {
-    gSystemLogFile.close();  // File::close() also drops the handle
-    gSystemLogUnflushedCount = 0;
-  }
+  if (gSystemLogFile && gSystemLogActivePath.startsWith("/sd/")) systemLogCloseHandleLocked();
 }
 
 // Debug output task - single writer for all debug messages
@@ -404,7 +607,8 @@ void debugOutputTask(void* parameter) {
         if (dropped != sDropSeen) {
           unsigned long nowMs = millis();
           if (sDropMarkMs == 0 || (nowMs - sDropMarkMs) >= 1000UL) {
-            char mark[96];
+            // Not a local: this frame is under every sealed card write.
+            EXT_RAM_BSS_ATTR static char mark[96];
             int mw = snprintf(mark, sizeof(mark),
                               "[%lu] [output] %lu line(s) dropped (queue saturated)",
                               nowMs, dropped - sDropSeen);
@@ -441,7 +645,10 @@ void debugOutputTask(void* parameter) {
       }
       // Web mirror (circular buffer for /api/cli/logs polling)
       if ((msg->routing & MSG_ROUTE_WEB) && gWebMirror.buf) {
-        char formattedMsg[DEBUG_MSG_SIZE + 32];
+        // External RAM, not this task's frame, which stays on the stack under
+        // the file sinks below (the sealed card writes). log_out is the only
+        // consumer task, so one buffer serves every line.
+        EXT_RAM_BSS_ATTR static char formattedMsg[DEBUG_MSG_SIZE + 32];
         int written = snprintf(formattedMsg, sizeof(formattedMsg), "[%lu] %s", msg->timestamp, msg->text);
         if (written > 0) {
           gWebMirror.appendDirect(formattedMsg, (size_t)written, true);
@@ -451,34 +658,64 @@ void debugOutputTask(void* parameter) {
       if ((msg->routing & MSG_ROUTE_FILE) && (gOutputFlags & MSG_ROUTE_FILE) &&
           gSystemLogRunning && gSystemLogPath.length() > 0) {
         fsLock("debug.log");
-        // Re-check under the lock: `log stop` closes the file and clears the
-        // path in one lock hold, so a stale pre-lock check must not reopen.
-        if (!gSystemLogFile && gSystemLogRunning && gSystemLogPath.length() > 0) {
-          gSystemLogFile = VFS::openGuarded(gSystemLogPath, "a", VFS::systemAuth(VFS::captureScopeFor(gSystemLogPath), "debug.system_log_append"), true);
-          if (gSystemLogFile) {
-            gSystemLogLastFlush = millis();
-            gSystemLogUnflushedCount = 0;
+        // B11: a log that is on flash while its session could be on the card
+        // is looked at again once a minute: when a card takes log lines by
+        // then, the flash file is closed and the next open goes to the card.
+        if (gSystemLogFile && !SealedLog::appliesTo(gSystemLogActivePath) &&
+            (uint32_t)(millis() - gSystemLogTierCheckedMs) >= kSystemLogTierCheckMs) {
+          gSystemLogTierCheckedMs = millis();
+          if (gSystemLogPath.length() + 4 < sizeof(sSystemLogResolved) &&
+              VFS::resolveLogPath(gSystemLogPath.c_str(), 0, sSystemLogResolved, sizeof(sSystemLogResolved)) ==
+                  VFS::LogTier::Overflow &&
+              gSystemLogActivePath != sSystemLogResolved) {
+            systemLogCloseHandleLocked();
           }
         }
-        if (gSystemLogFile && systemLogBlockedByReserve(gSystemLogPath)) {
+        // Re-check under the lock: `log stop` closes the file and clears the
+        // path in one lock hold, so a stale pre-lock check must not reopen.
+        if (!gSystemLogFile && gSystemLogRunning && gSystemLogPath.length() > 0) systemLogOpenHandleLocked();
+        bool wrote = false;
+        if (gSystemLogFile && systemLogBlockedByReserve(gSystemLogActivePath)) {
           ++gSystemLogReserveSkips;  // shown by `log status`
         } else if (gSystemLogFile) {
-          if (gSystemLogCategoryTags && msg->category != 0) {
-            const char* cat = getDebugCategoryName(msg->category);
-            writeLogLine(gSystemLogFile, msg->timestamp, cat, msg->text);
+          const char* cat = (gSystemLogCategoryTags && msg->category != 0)
+                                ? getDebugCategoryName(msg->category) : nullptr;
+          if (SealedLog::appliesTo(gSystemLogActivePath)) {
+            // On the card: one sealed row. A card file that does not take it
+            // (pulled mid-run) is given up: the lines it does not verifiably
+            // hold and this one are written on flash. A log the user put on
+            // the card itself has no flash twin.
+            wrote = systemLogCardWriteLocked(msg->timestamp, cat, msg->text);
+            if (!wrote) {
+              systemLogCardFailoverLocked();
+              if (gSystemLogFile && systemLogBlockedByReserve(gSystemLogActivePath)) {
+                ++gSystemLogReserveSkips;
+              } else if (gSystemLogFile) {
+                writeLogLine(gSystemLogFile, msg->timestamp, cat, msg->text);
+                wrote = true;
+              }
+            }
           } else {
-            writeLogLine(gSystemLogFile, msg->timestamp, nullptr, msg->text);
+            writeLogLine(gSystemLogFile, msg->timestamp, cat, msg->text);
+            wrote = true;
           }
+        }
+        if (wrote && gSystemLogFile) {
           gSystemLogLastWrite = millis();
           gSystemLogUnflushedCount++;
           bool shouldFlush =
             (gSystemLogUnflushedCount >= LOG_FLUSH_MESSAGE_COUNT) ||
             ((millis() - gSystemLogLastFlush) >= LOG_FLUSH_INTERVAL_MS);
           if (shouldFlush) {
-            gSystemLogFile.flush();
+            // A card file's flush counts only when its size then matches what
+            // was written; otherwise the card is given up for this log.
+            if (!SealedLog::appliesTo(gSystemLogActivePath)) gSystemLogFile.flush();
+            else if (!systemLogCardSettleLocked()) systemLogCardFailoverLocked();
             gSystemLogLastFlush = millis();
             gSystemLogUnflushedCount = 0;
           }
+        }
+        if (wrote && gSystemLogFile) {
           // Append mode: position() is the file size, buffered bytes included.
           if (gSystemLogFile.position() >= systemLogMaxSizeBytes() &&
               (gSystemLogRotateRetryAtMs == 0 ||
@@ -2431,7 +2668,8 @@ struct SystemLogStatus {
 static void systemLogReadStatus(SystemLogStatus& st) {
   st.state = systemLogState();
   st.running = gSystemLogRunning;
-  st.path = gSystemLogPath.c_str();
+  // B11: the file the lines go to (the card twin while a card takes them).
+  st.path = gSystemLogActivePath.length() ? gSystemLogActivePath.c_str() : gSystemLogPath.c_str();
   st.lastWriteAgoSec = (millis() - gSystemLogLastWrite) / 1000;
   st.outputFlags = (unsigned)gOutputFlags;
   st.autoStart = gSettings.systemLogAutoStart;
@@ -2574,16 +2812,13 @@ const char* cmd_log(const String& argsInput) {
     // cleared (which used to reopen an empty path and log a [PERM] denial).
     String msg;
     fsLock("debug.log");
-    if (gSystemLogFile) {
-      gSystemLogFile.flush();
-      gSystemLogFile.close();
-      // Note: close() resets the handle internally
-      gSystemLogUnflushedCount = 0;
-    }
+    systemLogCloseHandleLocked();  // a card file is verified first (B11)
     gSystemLogRunning = false;
     gOutputFlags &= ~MSG_ROUTE_FILE;
-    msg = "System logging stopped. Log saved to: " + gSystemLogPath;
+    msg = "System logging stopped. Log saved to: " +
+          (gSystemLogActivePath.length() ? gSystemLogActivePath : gSystemLogPath);
     gSystemLogPath = "";
+    gSystemLogActivePath = "";
     fsUnlock();
     snprintf(gDebugBuffer, 1024, "%s", msg.c_str());
     return gDebugBuffer;
@@ -2683,16 +2918,20 @@ const char* cmd_log(const String& argsInput) {
       }
     }
 
-    // Create file if needed
+    // Create the file if needed, where its first line will go (B11): the
+    // card twin, sealed, while a card takes log lines, else the path itself.
+    String startedFile;
     fsLock("log.create");
-    if (!VFS::existsGuarded(filepath, VFS::systemAuth(VFS::captureScopeFor(filepath), "debug.log_setup_create"))) {
-      File f = VFS::openGuarded(filepath, "w", VFS::systemAuth(VFS::captureScopeFor(filepath), "debug.log_setup_create"), true);
+    {
+      bool isNew = false;
+      size_t stored = 0;
+      File f = systemLogOpenLocked(filepath, startedFile, &isNew, false, &stored);
       if (!f) {
         fsUnlock();
-        snprintf(gDebugBuffer, 1024, "Error: Failed to create file: %s", filepath.c_str());
+        snprintf(gDebugBuffer, 1024, "Error: Failed to create file: %s", startedFile.c_str());
         return gDebugBuffer;
       }
-      f.printf("# System log started at %lu ms\n", millis());
+      if (isNew) systemLogWriteStartLine(f, startedFile, "started", stored);
       f.close();
     }
     fsUnlock();
@@ -2723,12 +2962,14 @@ const char* cmd_log(const String& argsInput) {
     }
     
     gSystemLogPath = filepath;
+    gSystemLogActivePath = startedFile;
     gSystemLogRunning = true;
     gSystemLogLastWrite = millis();
     gOutputFlags |= MSG_ROUTE_FILE;
     setSetting(gSettings.systemLogPath, filepath);
 
-    snprintf(gDebugBuffer, 1024, "System logging started\n  File: %s", filepath.c_str());
+    snprintf(gDebugBuffer, 1024, "System logging started\n  File: %s%s", startedFile.c_str(),
+             SealedLog::appliesTo(startedFile) ? " (on the card, sealed)" : "");
     broadcastOutput(gDebugBuffer);
     return gDebugBuffer;
   }
@@ -3406,26 +3647,31 @@ void systemLogAutoStart() {
     fsUnlock();
   }
   
-  // Create the log file
+  // Create the log file, where its lines will go (B11): the card twin, sealed,
+  // while a card takes log lines, else the path itself. It starts anew on
+  // every boot, as before.
+  String startedFile;
   fsLock("debug.log");
-  File f = VFS::openGuarded(filepath, "w", VFS::systemAuth(VFS::captureScopeFor(filepath), "debug.log_autostart"), true);
+  size_t startedStored = 0;
+  File f = systemLogOpenLocked(filepath, startedFile, nullptr, /*startFresh=*/true, &startedStored);
   if (!f) {
     fsUnlock();
-    broadcastOutput("[SYSTEM_LOG] Auto-start failed: Could not create file: " + filepath);
-    logSystemEvent("LOG", "debug-capture log autostart FAILED — could not create %s", filepath.c_str());
+    broadcastOutput("[SYSTEM_LOG] Auto-start failed: Could not create file: " + startedFile);
+    logSystemEvent("LOG", "debug-capture log autostart FAILED — could not create %s", startedFile.c_str());
     return;
   }
-  f.printf("# System log auto-started at %lu ms\n", millis());
+  systemLogWriteStartLine(f, startedFile, "auto-started", startedStored);
   f.close();
   fsUnlock();
   
   gSystemLogPath = filepath;
+  gSystemLogActivePath = startedFile;
   gSystemLogRunning = true;
   gSystemLogLastWrite = millis();
   gOutputFlags |= MSG_ROUTE_FILE;
 
-  broadcastOutput("[SYSTEM_LOG] Auto-start enabled, logging to: " + filepath);
-  logSystemEvent("LOG", "debug-capture log autostart OK → %s", filepath.c_str());
+  broadcastOutput("[SYSTEM_LOG] Auto-start enabled, logging to: " + startedFile);
+  logSystemEvent("LOG", "debug-capture log autostart OK → %s", startedFile.c_str());
 }
 
 // ============================================================================

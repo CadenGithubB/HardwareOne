@@ -121,11 +121,18 @@ def main() -> None:
     state = source[source.index("#define FILES_TEXT_MAX_PAGES"):
                    source.index("// -----------------------------------------------------------------------------",
                                 source.index("#define FILES_TEXT_MAX_PAGES"))]
+    # B11: the mark names the key that sealed the file. The owner test and the
+    # notice a viewer shows for another device's file are production code too;
+    # the key id is the harness's.
     definitions = "\n\n".join(extract_block(crypto, marker) for marker in (
+        "CaptureMarkOwner captureCryptoMarkOwner(",
+        "size_t captureCryptoForeignNotice(",
+        "size_t foreignMarkNotice(",
         "size_t captureCryptoRevealCapacity(",
-        "bool captureCryptoRevealText(char*",
-        "size_t captureCryptoRevealText(String&",
+        "bool captureCryptoRevealText(const char* path, char* buf",
+        "size_t captureCryptoRevealText(const char* path, String& text)",
     ))
+    definitions = extract_block(crypto_header, "enum class CaptureMarkOwner") + ";\n" + definitions
     macros = "\n".join(re.findall(r"^#define CAPCRYPT_.*$", crypto_header, re.MULTILINE))
     harness = (HERE / "g2_files_psram_harness.cpp").read_text()
     for marker, replacement in {

@@ -188,7 +188,13 @@ static bool captureCryptoPseudonym(const char* domain, const char* value, char* 
   // Fixture pseudonym is deterministic, opaque, and contains no real identity.
   std::snprintf(output, capacity, "%s", "0123456789abcdef0123456789abcdef"); return true;
 }
-static int captureCryptoSealLine(const char* input, size_t length, char* output, size_t capacity) {
+// A day's rows are sealed for, and opened with, the class of the history
+// folder (the capture tree): the path the store hands over is checked here.
+static void checkHistoryClass(const char* path) {
+  check(path && std::string(path) == "/logging_captures/r1-health-history", "the store seals and opens with its folder's path");
+}
+static int captureCryptoSealLine(const char* path, const char* input, size_t length, char* output, size_t capacity) {
+  checkHistoryClass(path);
   ++sealCalls; if (!keyReady || sealCalls == failSeal) return -1;
   static const char hex[] = "0123456789abcdef";
   std::string encoded = "ENC1:";
@@ -196,7 +202,8 @@ static int captureCryptoSealLine(const char* input, size_t length, char* output,
   if (encoded.size() >= capacity) return -1;
   std::memcpy(output, encoded.c_str(), encoded.size() + 1); return static_cast<int>(encoded.size());
 }
-static int captureCryptoOpenLine(const char* line, size_t length, char* output, size_t capacity) {
+static int captureCryptoOpenLine(const char* path, const char* line, size_t length, char* output, size_t capacity) {
+  checkHistoryClass(path);
   if (!keyReady || length < 5 || strncmp(line, "ENC1:", 5) || (length - 5) % 2) return -1;
   size_t count = (length - 5) / 2; if (count >= capacity) return -1;
   auto nibble = [](char ch) { return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : -1; };
@@ -207,6 +214,13 @@ static int captureCryptoOpenLine(const char* line, size_t length, char* output, 
   output[count] = 0; return static_cast<int>(count);
 }
 static bool captureCryptoIsMagicLine(const char* line) { return strncmp(line, "#HW1ENC", 7) == 0; }
+// B11 (Q13): the mark of a new sealed file names the key that sealed it.
+static const char kMarkWithKeyId[] = "#HW1ENC v1 k1 id=0123456789abcdef";
+static size_t captureCryptoMarkLine(char* out, size_t capacity) {
+  if (!keyReady || capacity < sizeof(kMarkWithKeyId)) return 0;
+  memcpy(out, kMarkWithKeyId, sizeof(kMarkWithKeyId));
+  return sizeof(kMarkWithKeyId) - 1;
+}
 // INSERT_PRODUCTION
 
 static void released() { check(liveFiles == 0 && lockStack.empty(), "all handles and locks released"); }
@@ -261,6 +275,8 @@ static void normal() {
     check(disk.size() == 1 && disk.count(path), "one primary; no backup or temporary");
     check(path.find(day.peerId) == std::string::npos, "filename uses pseudonym");
     check((disk.at(path).find(day.peerId) == std::string::npos) == (mode != 0), "nonzero policy keeps identity sealed");
+    check((disk.at(path).rfind(std::string(kMarkWithKeyId) + "\n", 0) == 0) == (mode != 0),
+          "a sealed day starts with the mark that names its key (B11); a plain day has none");
     const auto original = disk.at(path); int writes = writeCalls;
     save(day, 2); good(day, 2); check(status().lastCommitSkipped && writeCalls == writes, "identical content skips replacement");
     day.activity.slots[0].steps += 5; save(day, 3); good(day, 3);

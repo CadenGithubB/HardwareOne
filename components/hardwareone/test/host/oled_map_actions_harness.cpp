@@ -256,6 +256,14 @@ class File {
   explicit operator bool() const { return node_ >= 0; }
   bool isDirectory() const { return node_ >= 0 && gFs[node_].dir; }
   const char* path() const { return node_ >= 0 ? gFs[node_].path.c_str() : ""; }
+  // What the backend calls the entry: for a card entry that is its path
+  // without the "/sd" mount, so the scan builds an entry's VFS path from the
+  // folder it listed and this name's last component.
+  const char* name() const {
+    if (node_ < 0) return "";
+    const std::string& path = gFs[node_].path;
+    return path.c_str() + (path.rfind("/sd/", 0) == 0 ? 3 : 0);
+  }
   File openNextFile() {
     if (!isDirectory()) return File();
     while (++cursor_ < static_cast<int>(gFs.size())) {
@@ -281,6 +289,13 @@ class File {
   size_t readPos_ = 0;
 };
 struct FsLockGuard { explicit FsLockGuard(const char*) {} };
+// B11: a track on the card is sealed at rest; the probe reveals a row to see
+// whether the file holds GPS data. The toy seal here is "ENC1:" + the row.
+// Rows open with the class of the path they are read at, and a plain line in
+// a sealed file is no row (sealed_reveal_host.h, over the production rule).
+#include "sealed_reveal_host.h"
+static unsigned& gRevealCalls = sealed_reveal_host::calls;
+static bool normalizeFsPath(const String& in, String& out) { out = in; return true; }  // the scan's paths are canonical
 namespace VFS {
 static File openGuarded(const String& path, const char*, const AuthContext& ctx) {
   gVfsOpens.push_back({path.c_str(), ctx});
@@ -880,6 +895,43 @@ static void caseMapViewInput() {
          "B leaves the map (the handler hands it back to the router)");
 }
 
+// B11: tracks on the card. A capture goes to the card while one takes log
+// lines, sealed; the picker lists it there under its "/sd" path (never the
+// flash file of the same name), top level and one folder down, and reveals
+// its rows to see the GPS data.
+static void caseCardTracks() {
+  resetAll();
+  const std::string sealed = "#HW1ENC v1 k1 id=0123456789abcdef\n# GPS Track Log\nENC1:1000,40.71234,-74.00123\n";
+  gFs = {
+      {"/logging_captures", true, ""},
+      {"/logging_captures/tracks", true, ""},
+      {"/logging_captures/tracks/day.csv", false, "# time,lat,lon\n1000,40.71234,-74.00123\n"},
+      {"/sd/logging_captures", true, ""},
+      {"/sd/logging_captures/tracks", true, ""},
+      {"/sd/logging_captures/tracks/day.csv", false, sealed},
+      {"/sd/logging_captures/tracks/notes.txt", false, "#HW1ENC v1 k1 id=0123456789abcdef\nENC1:hello\n"},
+      {"/sd/logging_captures/sensors", true, ""},
+      {"/sd/logging_captures/sensors/2026-11-22", true, ""},
+      {"/sd/logging_captures/sensors/2026-11-22/walk.csv", false, sealed},
+  };
+  gRevealCalls = 0;
+  pressMenuItem(MENU_CAT_TRACKS, 0);  // Load Track
+  const auto listed = [](const char* path) {
+    for (int i = 0; i < gTrackFileCount; i++) if (std::strcmp(gTrackFiles[i], path) == 0) return true;
+    return false;
+  };
+  EXPECT(gTrackSelectMode == 1 && gTrackFileCount == 3, "the picker lists the flash track and both card tracks");
+  EXPECT(listed("/logging_captures/tracks/day.csv") && listed("/sd/logging_captures/tracks/day.csv") &&
+         listed("/sd/logging_captures/sensors/2026-11-22/walk.csv"),
+         "each track is listed under its own tier's path");
+  EXPECT(!listed("/sd/logging_captures/tracks/notes.txt") && gRevealCalls > 0,
+         "sealed rows are revealed for the probe, and a sealed file without GPS rows is left out");
+  bool cardOpenedByItsPath = false;
+  for (const VfsOpen& open : gVfsOpens) cardOpenedByItsPath = cardOpenedByItsPath || open.path == "/sd/logging_captures/tracks/day.csv";
+  EXPECT(cardOpenedByItsPath, "the card file is opened by its /sd path");
+  press(INPUT_BUTTON_B);
+}
+
 int main() {
   caseMarkWaypoint();
   caseWaypointSelect();
@@ -889,6 +941,7 @@ int main() {
   caseSelectMap();
   caseMenuInput();
   casePickerInput();
+  caseCardTracks();
   caseViewerInput();
   caseMapViewInput();
   if (failures) {

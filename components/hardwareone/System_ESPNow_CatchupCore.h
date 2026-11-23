@@ -644,6 +644,10 @@ inline Classified classifyPathMatch(const char* path, bool sd) {
     if (detail::countChar(rest, '/') != 1) return c;
     const char* file = strchr(rest, '/') + 1;
     if (detail::endsWith(file, ".tmp") || detail::endsWith(file, ".bak")) return c;
+    // B11: a file a card writer moved aside ("<name>.foreign-<n>": not this
+    // device's sealed file, System_SealedLog.h) is not this device's capture
+    // and is never offered as one.
+    if (strstr(file, ".foreign-") != nullptr) return c;
     c.kind = Kind::SensorCapture;
     c.rel = rest;
     return c;

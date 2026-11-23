@@ -2,8 +2,10 @@
 #if ENABLE_DICTATION || ENABLE_LOCAL_STT
 #include "System_AuthIdentity.h"
 #include "System_BootState.h"
+#include "System_CaptureCrypto.h"  // captureCryptoEnsureKey: no key, no transcript on the card
 #include "System_Clock.h"
 #include "System_Mutex.h"
+#include "System_SealedLog.h"      // B11: a transcript on the card is sealed, header included
 #include "System_Settings.h"
 #include "System_VFS.h"
 #include "System_Utils.h"
@@ -14,6 +16,12 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+
+// B11: the longest text one sealed transcript row holds. `transcripts read`
+// (System_TranscriptionUI.cpp) hands out whole rows through a 512-byte
+// window, so a row and its line end must fit it; a phrase longer than this
+// is stored as two rows.
+static constexpr size_t kTranscriptSealedRowBytes = 480;
 
 static void transcriptStartTime(char* out, size_t size) {
   const time_t now = Clock::epochSeconds();
@@ -110,7 +118,10 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
     return fail("Transcript session expired before saving");
   if (first) {
     userId_ = currentId;
-    sd_ = VFS::isSdWritable();
+    // B11: on the card a transcript is sealed with the device key, so the
+    // card is used only when the key is there; without it the session is
+    // saved on flash, as with no card.
+    sd_ = VFS::isSdWritable() && captureCryptoEnsureKey();
     snprintf(status_.path, sizeof(status_.path), "%s/u%lu/%s-%s-%08lx%08lx.txt",
              sd_ ? "/sd/stt" : "/stt", static_cast<unsigned long>(userId_), start_, provider_,
              static_cast<unsigned long>(id_ >> 32), static_cast<unsigned long>(id_ & 0xffffffffu));
@@ -140,7 +151,9 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
     free = VFS::getCachedLittleFsFree();
     haveFree = true;
   }
-  if (!haveFree || free < reserve + length + 256) return fail("Transcript storage full or unavailable");
+  // A sealed row stores about twice its text, and the header about 1 KB.
+  const uint64_t need = sd_ ? 2 * uint64_t(length) + 1536 : uint64_t(length) + 256;
+  if (!haveFree || free < reserve + need) return fail("Transcript storage full or unavailable");
   if (first) {
     // trusted: only create the protected transcript root; owner folder/file
     // creation below always uses the admitted named user's guarded context.
@@ -181,6 +194,25 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
       file.close();
       return fail("Transcript header too long");
     }
+    if (sd_) {
+      // B11: the mark, then the header as sealed rows (its Title line holds
+      // the first spoken words), then the text. The size kept for the
+      // session is what the card stores.
+      // The rows are sealed for this owner's transcript folder (the class of
+      // the path): moved to another account's folder they do not open.
+      const String sealedPath(status_.path);
+      bool sealed = SealedLog::writeMark(file, written) &&
+          SealedLog::writeLines(file, sealedPath, header, static_cast<size_t>(n), written, kTranscriptSealedRowBytes) &&
+          SealedLog::writeLines(file, sealedPath, text, length, written, kTranscriptSealedRowBytes);
+      volatile char* wipeHeader = header;
+      for (size_t i = 0; i < sizeof(header); ++i) wipeHeader[i] = 0;
+      file.flush();
+      sealed = sealed && !file.getWriteError() && file.size() == status_.bytes + written;
+      file.close();
+      status_.bytes += written;
+      if (!sealed) VFS::noteSdWriteFailure("transcript header");
+      return sealed || fail("Transcript write incomplete");
+    }
     expected += static_cast<size_t>(n);
     written = file.write(reinterpret_cast<const uint8_t*>(header), n);
     if (written != static_cast<size_t>(n)) {
@@ -190,6 +222,16 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
       status_.bytes += written;
       return fail("Transcript write incomplete");
     }
+  }
+  if (sd_) {
+    // B11: each line of the text is one sealed row.
+    bool sealed = SealedLog::writeLines(file, String(status_.path), text, length, written, kTranscriptSealedRowBytes);
+    file.flush();
+    sealed = sealed && !file.getWriteError() && file.size() == status_.bytes + written;
+    file.close();
+    status_.bytes += written;
+    if (!sealed) VFS::noteSdWriteFailure("transcript append");
+    return sealed || fail("Transcript write incomplete");
   }
   written += file.write(reinterpret_cast<const uint8_t*>(text), length);
   file.flush();

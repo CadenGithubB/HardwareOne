@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 
 import sys
+from sd_path_core_host import sd_path_core, with_sd_path_core
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -59,7 +60,7 @@ def main() -> None:
     require("bleScSendEncrypted" not in handler and "bleScEstablished" not in handler,
             "the raw body is fenced on the command's epoch (never the connection's current one)")
     definitions = [read("System_JsonText.h").replace("#pragma once", ""),
-                   extract_block(source, "bool normalizeFsPath("),
+                   with_sd_path_core(extract_block(source, "bool normalizeFsPath("), COMPONENT),
                    extract_block(source, "static bool filePathIsPrivateTranscript("),
                    extract_block(source, "static void fileviewEmitLines("),
                    extract_block(source, "static bool fileviewFileSize("),

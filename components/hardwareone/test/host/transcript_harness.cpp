@@ -94,6 +94,11 @@ namespace VFS {
   assert(p.compare(0,ctx.scope.size(),ctx.scope)==0);return File(p);
  }
 }
+// B11: a transcript on the card is sealed, header included. The SealedLog
+// double (the mark with this device's key id, one sealed row per line) writes
+// through the File above; the device key is the double's.
+#include "sealed_log_host.h"
+static bool captureCryptoEnsureKey(){return sealed_log_host::keyAvailable;}
 // INSERT_INTERFACE
 // INSERT_RUNTIME
 static void reset(){
@@ -105,6 +110,7 @@ static void reset(){
  VFS::sd=false;VFS::sdPresent=VFS::statsOk=true;VFS::denyMkdir=false;
  VFS::sdFailures=VFS::notedBytes=0;
  VFS::freshStats=VFS::sdFreshStats=VFS::cachedReads=0;VFS::cacheSet=false;VFS::cachedFree=0;
+ sealed_log_host::keyAvailable=true;sealed_log_host::sealFailAt=0;sealed_log_host::sealCalls=0;
 }
 static TranscriptOptions options(){return transcriptCaptureOptions(SOURCE_SERIAL,7);}
 static std::string text(const TranscriptSession& s){return VFS::files.at(s.snapshot().path);}
@@ -210,4 +216,95 @@ static void capacity_readings(){
  for(uint32_t i=1;i<=5;++i)assert(sd.append(i,"card",4));
  sd.finish("done");assert(sd.snapshot().complete&&VFS::sdFreshStats==6&&VFS::freshStats==6&&!VFS::cachedReads);
 }
-int main(){complete();disabled_and_identity();identity_without_saving();faults();terminal_and_bounds();capacity_readings();puts("Shared transcript writer: identity, latch, replay, storage and cleanup checks passed");}
+// B11: on the card a transcript is sealed with the device key: the mark, then
+// the header and every phrase as sealed rows. What a reader with the key gets
+// back is byte for byte the file the same session writes on flash, and the
+// size the session keeps is the stored size, so its "file changed" check
+// still holds.
+static void sealed_on_card(){
+ // The same session on flash: the reference text.
+ reset();TranscriptSession plain;plain.begin(options(),"local",0x77ULL);
+ assert(plain.append(1,"first words",11)&&plain.append(2,"second phrase",13));plain.finish("done");
+ const std::string flashText=text(plain);
+ assert(std::string(plain.snapshot().path).find("/stt/u2/")==0&&flashText.find("Title: first words\n")!=std::string::npos);
+
+ reset();VFS::sd=true;TranscriptSession card;card.begin(options(),"local",0x77ULL);
+ assert(card.append(1,"first words",11));
+ assert(std::string(card.snapshot().path).find("/sd/stt/u2/")==0);
+ // After the first write: the mark, then only sealed rows; the size kept is what the card stores.
+ assert(text(card).rfind(sealed_log_host::mark(),0)==0&&card.snapshot().bytes==text(card).size());
+ assert(card.append(2,"second phrase",13)&&card.snapshot().bytes==text(card).size());
+ card.finish("done");
+ assert(card.snapshot().complete&&!card.snapshot().error[0]&&card.snapshot().chunks==2&&card.snapshot().bytes==text(card).size());
+ const std::string stored=text(card);
+ // Nothing spoken and nothing of the header is on the card in the clear: not
+ // the phrases, not the title (the first spoken words), not the field names.
+ for(const char* secret:{"first words","second phrase","Title:","HardwareOne transcript","Started:","Backend:","[End: done]"})
+  assert(stored.find(secret)==std::string::npos);
+ // Every line after the mark is one sealed row.
+ {
+  size_t at=sealed_log_host::mark().size(),rows=0;
+  while(at<stored.size()){const size_t end=stored.find('\n',at);assert(end!=std::string::npos&&stored.compare(at,5,"ENC1:")==0);at=end+1;++rows;}
+  // 9 header lines and the blank one, two phrases, the blank line and the End marker.
+  assert(rows==14&&stored.find("#HW1ENC",1)==std::string::npos);
+ }
+ // The header and the text round-trip: revealed, the card file is the flash file.
+ assert(sealed_log_host::reveal(stored)==flashText);
+ // Review of 2026-11-22: the rows are sealed for the owner's transcript folder
+ // (the class of the file's path). Read where they were written they open;
+ // copied into another account's folder, out of the transcript tree or into
+ // the capture tree they do not, so the viewer of that place reveals nothing.
+ {
+  const std::string home=card.snapshot().path;
+  assert(home.rfind("/sd/stt/u2/",0)==0);
+  assert(sealed_log_host::view(stored,home.c_str())==sealed_log_host::mark()+flashText);
+  for(const char* moved:{"/sd/stt/u3/copy.txt","/sd/x.txt","/sd/logging_captures/sensors/x.csv","/sd/system/sys_logs/x.log","/stt/u3/copy.txt"}){
+   const std::string shown=sealed_log_host::view(stored,moved);
+   assert(shown.find("first words")==std::string::npos&&shown.find("second phrase")==std::string::npos&&shown.find("Title")==std::string::npos);
+   assert(shown.find("[undecryptable row]")!=std::string::npos);
+  }
+  // Another file of the same owner (the same account reads both) still opens.
+  assert(sealed_log_host::view(stored,"/sd/stt/u2/copy.txt")==sealed_log_host::mark()+flashText);
+ }
+ assert(stored.size()>flashText.size());   // sealed rows are larger; the session counted them
+ // The session notices a card file that changed under it, by its stored size.
+ reset();VFS::sd=true;TranscriptSession changed;changed.begin(options(),"pi",0x78ULL);assert(changed.append(1,"one",3));
+ VFS::files[changed.snapshot().path]+="edited";const auto edited=text(changed);
+ assert(!changed.append(2,"two",3)&&text(changed)==edited&&!strcmp(changed.snapshot().error,"Transcript file changed during session"));
+ // A phrase of the longest size (512 bytes) is two rows, so every row fits a
+ // reader's 512-byte window with its line end; no byte of it is lost.
+ {
+  reset();VFS::sd=true;TranscriptSession longest;longest.begin(options(),"local",0x79ULL);
+  std::string phrase(512,'x');for(size_t i=0;i<phrase.size();i+=37)phrase[i]=char('a'+i%26);
+  assert(longest.append(1,phrase.c_str(),phrase.size()));
+  const std::string shown=sealed_log_host::reveal(text(longest));
+  const size_t body=shown.find("\n\n")+2;
+  assert(shown.substr(body)==phrase.substr(0,480)+"\n"+phrase.substr(480)+"\n");
+  size_t at=sealed_log_host::mark().size();
+  while(at<text(longest).size()){const size_t end=text(longest).find('\n',at);
+   std::string row;assert(sealed_log_host::open(longest.snapshot().path,text(longest).data()+at,end-at,row)&&row.size()<=480);at=end+1;}
+  assert(longest.snapshot().bytes==text(longest).size());
+ }
+ // No device key: nothing goes to the card. The session is saved on flash, plain, as with no card.
+ reset();VFS::sd=true;sealed_log_host::keyAvailable=false;TranscriptSession noKey;noKey.begin(options(),"local",0x7aULL);
+ assert(noKey.append(1,"kept on flash",13)&&std::string(noKey.snapshot().path).find("/stt/u2/")==0);
+ assert(text(noKey).find("kept on flash\n")!=std::string::npos&&VFS::files.size()==1);
+ // A write the card cuts short, in the header and in a later phrase: the
+ // write fails, the card is reported, and no plain byte is on the card.
+ for(unsigned failing:{1u,2u,5u}){
+  reset();VFS::sd=true;shortWrite=failing;TranscriptSession torn;torn.begin(options(),"pi",0x7bULL);
+  assert(!torn.append(1,"private phrase",14)&&VFS::sdFailures==1&&torn.snapshot().error[0]);
+  for(const auto& file:VFS::files){assert(file.second.find("private")==std::string::npos&&file.second.find("Title")==std::string::npos);}
+ }
+ reset();VFS::sd=true;TranscriptSession later;later.begin(options(),"pi",0x7cULL);assert(later.append(1,"one",3));
+ shortWrite=writes+1;assert(!later.append(2,"private phrase",14)&&VFS::sdFailures==1);
+ assert(text(later).find("private")==std::string::npos&&later.snapshot().bytes==text(later).size());
+ // The seal itself fails mid-header (it cannot on the device once the key is loaded): the same outcome.
+ reset();VFS::sd=true;sealed_log_host::sealFailAt=3;TranscriptSession sealFault;sealFault.begin(options(),"pi",0x7dULL);
+ assert(!sealFault.append(1,"private phrase",14)&&text(sealFault).find("private")==std::string::npos);
+ // A full card refuses the transcript (B12: nothing removes one to make room).
+ reset();VFS::sd=true;VFS::available=100*1024+1536;TranscriptSession full;full.begin(options(),"pi",0x7eULL);
+ assert(!full.append(1,"no room",7)&&!strcmp(full.snapshot().error,"Transcript storage full or unavailable")&&VFS::files.empty());
+ assert(!locks&&!filesOpen);
+}
+int main(){complete();disabled_and_identity();identity_without_saving();faults();terminal_and_bounds();capacity_readings();sealed_on_card();puts("Shared transcript writer: identity, latch, replay, storage and cleanup checks passed");}

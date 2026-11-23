@@ -17,6 +17,7 @@ import tempfile
 
 from test_mqtt_boolean_commands import extract_macro
 from test_web_batch_handlers import extract_block, require
+from sd_path_core_host import sd_path_core, with_sd_path_core
 
 # getStorageType reads an already normalized path in place through these
 # (an older tree has neither).
@@ -90,7 +91,8 @@ def generate(baseline: Path | None) -> str:
         "// INSERT_ARG_WANTS_JSON": extract_block(read("System_Utils.cpp"), "bool argWantsJson("),
         "// INSERT_FS_GUARD": guard,
         "// INSERT_COMMAND_PARSER": parser,
-        "// INSERT_NORMALIZE_FS_PATH": extract_block(filesystem, "bool normalizeFsPath("),
+        "// INSERT_NORMALIZE_FS_PATH": with_sd_path_core(
+            extract_block(filesystem, "bool normalizeFsPath("), COMPONENT),
         "// INSERT_VFS_PATHS": paths,
         "// INSERT_DIRECTORY_READER": reader,
         "// INSERT_IMAGE_MANAGER": declarations + "\n" + methods,

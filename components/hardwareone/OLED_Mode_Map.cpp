@@ -36,6 +36,8 @@
 #include "HAL_Input.h"
 #include "System_TaskUtils.h"
 #include "System_VFS.h"
+#include "System_CaptureCrypto.h"  // a sealed track's rows, revealed for the probe
+#include "System_Filesystem.h"     // normalizeFsPath: the class a sealed row opens with
 #include "System_AuthIdentity.h"  // CommandIdentityScope (OLEDMapCtxGuard)
 
 #include "i2csensor_pa1010d.h"
@@ -226,7 +228,9 @@ static int gWaypointSelectIdx = 0;
 // Track file selection state
 static int gTrackSelectMode = 0;  // 0=none, 1=load, 2=delete
 static int gTrackFileIdx = 0;
-EXT_RAM_BSS_ATTR static char gTrackFiles[8][64];
+// 96: the card twin of a shaped session file ("/sd/logging_captures/sensors/
+// <day>/<name>-<stamp>.csv") is longer than 64.
+EXT_RAM_BSS_ATTR static char gTrackFiles[8][96];
 static int gTrackFileCount = 0;
 
 // Track status overlay
@@ -614,26 +618,53 @@ static bool isGpsDataLine(const String& line) {
 
 // Probe one candidate file's head for GPS data; record it in gTrackFiles if
 // it qualifies. Shared by the top-level scan and the subfolder descent.
-static void probeTrackFile(File& file, const AuthContext& auth) {
+// `path` is the file's VFS path, built by the scan from the folder it listed:
+// a card entry's own path() has no "/sd" in front and would name the flash
+// file of the same name.
+static void probeTrackFile(const String& path, const AuthContext& auth) {
   if (gTrackFileCount >= 8) return;
   // Staging files of an interrupted merge/export are never loadable tracks.
-  if (VFS::isStagingName(String(file.path()))) return;
+  if (VFS::isStagingName(path)) return;
   FsLockGuard fsGuard("oled.map.probe_track");
-  File check = VFS::openGuarded(file.path(), "r", auth);
+  File check = VFS::openGuarded(path, "r", auth);
   if (!check) return;
   bool hasGps = false;
+  // Rows open with the class of the path they are read at; a plain line in a
+  // sealed file is not a row and never counts as GPS data.
+  String classPath;
+  if (!normalizeFsPath(path, classPath)) classPath = "";
+  sealedlog::LineState lineKinds = sealedlog::stateFor(classPath.c_str());
   for (int i = 0; i < 15 && check.available(); i++) {
     String line = check.readStringUntil('\n');
+    // Sealed at rest (every track on the card, B11): the rows are revealed
+    // for this user, who passed the guarded open above.
+    if (captureCryptoRevealFileLine(classPath.c_str(), lineKinds, line) == sealedlog::Line::Unsealed) continue;
     if (isGpsDataLine(line)) {
       hasGps = true;
       break;
     }
   }
   check.close();
-  if (hasGps) {
-    strlcpy(gTrackFiles[gTrackFileCount], file.path(), 64);
+  // A path that does not fit would name another file: such a track is left out.
+  if (hasGps && path.length() < sizeof(gTrackFiles[0])) {
+    strlcpy(gTrackFiles[gTrackFileCount], path.c_str(), sizeof(gTrackFiles[0]));
     gTrackFileCount++;
   }
+}
+
+// "<folder>/<name>" for a listed entry, whatever form its name() has.
+static String trackEntryPath(const String& folder, File& entry) {
+  const char* name = entry.name();
+  const char* slash = name ? strrchr(name, '/') : nullptr;
+  return folder + "/" + (slash ? slash + 1 : (name ? name : ""));
+}
+
+// True when `path` is one of the folders the track scan visits by name.
+static bool trackFolderScannedOnItsOwn(const String& path, const char* const* dirs, size_t count) {
+  for (size_t i = 0; i < count; i++) {
+    if (path == dirs[i]) return true;
+  }
+  return false;
 }
 
 // Scan for GPS track files in the capture dirs. Session shaping places logs
@@ -649,24 +680,32 @@ static void scanTrackFiles() {
 
   // Scan directories (sensors included: autostart-resumed TRACK sessions
   // land there, shaped into session subfolders).
+  // Both tiers: a capture goes to the card while one takes log lines (B11),
+  // so a track can be on flash, on the card, or split across the two.
   const char* dirs[] = {"/logging_captures", "/logging_captures/tracks",
-                        "/logging_captures/sensors"};
+                        "/logging_captures/sensors",
+                        "/sd/logging_captures", "/sd/logging_captures/tracks",
+                        "/sd/logging_captures/sensors"};
 
-  for (int d = 0; d < 3 && gTrackFileCount < 8; d++) {
+  for (size_t d = 0; d < sizeof(dirs) / sizeof(dirs[0]) && gTrackFileCount < 8; d++) {
     File root = VFS::openGuarded(dirs[d], "r", auth);
     if (!root || !root.isDirectory()) continue;
 
+    const String folder(dirs[d]);
     File file = root.openNextFile();
     while (file && gTrackFileCount < 8) {
+      const String path = trackEntryPath(folder, file);
       if (!file.isDirectory()) {
-        probeTrackFile(file, auth);
-      } else {
-        // One level down: session subfolders (dated / boot-N).
-        File sub = VFS::openGuarded(file.path(), "r", auth);
+        probeTrackFile(path, auth);
+      } else if (!trackFolderScannedOnItsOwn(path, dirs, sizeof(dirs) / sizeof(dirs[0]))) {
+        // One level down: session subfolders (dated / boot-N). A folder this
+        // scan visits on its own (tracks, sensors) is not walked from its
+        // parent as well: its tracks were listed twice, and the list holds 8.
+        File sub = VFS::openGuarded(path, "r", auth);
         if (sub && sub.isDirectory()) {
           File child = sub.openNextFile();
           while (child && gTrackFileCount < 8) {
-            if (!child.isDirectory()) probeTrackFile(child, auth);
+            if (!child.isDirectory()) probeTrackFile(trackEntryPath(path, child), auth);
             child = sub.openNextFile();
           }
         }

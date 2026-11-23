@@ -29,7 +29,7 @@ function fixture(options={}) {
     if(state.fetchOverride){const result=state.fetchOverride(url,opts,form);if(result!==undefined)return result;}
     if(url==='/api/transcription?identity=1')return response({success:true,session:state.epoch});
     if(url.startsWith('/api/files/list'))return stream(JSON.stringify({success:true,files:state.list}));
-    if(url.startsWith('/api/files/read'))return stream(state.fileText);
+    if(url.startsWith('/api/files/view'))return stream(state.fileText);
     if(url==='/api/transcription/ack') {
       state.acks++;const key=[form.id,form.sequence,form.offset,form.length].join(':');
       if(key===state.lastAck)return response({success:true,id:state.id});
@@ -103,10 +103,12 @@ function fixture(options={}) {
   f=fixture();await f.open();f.state.list=[{name:'../escape.txt',type:'file',perms:1},{name:'<img onerror=boom>.txt',type:'file',perms:1},...Array.from({length:205},(_,i)=>({name:`2026-${String(i).padStart(3,'0')}.txt`,type:'file',perms:1}))];
   f.el('files').open=true;f.el('files').dispatch('toggle');await f.settle();assert.equal(f.el('file-list').children.length,10);assert.match(f.el('file-status').textContent,/200/);assert.equal(f.el('next').disabled,false);assert(!f.el('file-list').children.some(row=>row.children[0].textContent.includes('escape')));
   f.state.fileText='A'.repeat(18000);await f.el('file-list').children[0].children[1].onclick();assert.match(f.el('preview').textContent,/limited to 16 KiB/);assert(f.el('preview').textContent.length<16500);assert(f.state.fileCancels>0);
+  // B11: a transcript on the SD card is sealed. The preview and the download go through the viewer endpoint, which reveals it for its owner (dec=1); the raw read endpoint never does.
+  assert(f.state.calls.some(c=>/^\/api\/files\/view\?name=.*&mode=raw&dec=1$/.test(c.url))&&!f.state.calls.some(c=>c.url.startsWith('/api/files/read')));assert.match(f.el('file-list').children[0].children[2].href,/^\/api\/files\/view\?name=.*&mode=raw&dec=1$/);
   const first=f.el('file-list').children[0].children[0].textContent;f.el('next').onclick();assert.notEqual(f.el('file-list').children[0].children[0].textContent,first);
   // A cookie epoch change during a saved-file read cannot republish old text.
   f=fixture();await f.open();f.state.list=[{name:'one.txt',type:'file',perms:1}];f.el('files').open=true;f.el('files').dispatch('toggle');await f.settle();
-  f.state.fileText='old account private text';f.state.fetchOverride=(url)=>{if(url.startsWith('/api/files/read')){f.state.epoch=43;return f.stream(f.state.fileText);}return undefined;};
+  f.state.fileText='old account private text';f.state.fetchOverride=(url)=>{if(url.startsWith('/api/files/view')){f.state.epoch=43;return f.stream(f.state.fileText);}return undefined;};
   await f.el('file-list').children[0].children[1].onclick();assert.equal(f.el('preview').textContent,'');assert.equal(f.el('file-list').children.length,0);
   // The panel can expose files before initial metadata arrives; it loads once roots arrive.
   f=fixture();f.el('files').open=true;f.el('files').dispatch('toggle');await f.open();await f.settle();assert(f.state.calls.some(c=>c.url.startsWith('/api/files/list')));

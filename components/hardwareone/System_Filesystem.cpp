@@ -24,7 +24,9 @@
 #include "System_LogCapsCore.h"  // capped-log sizes by volume, rotation and batching policy
 #include "System_MemUtil.h"
 #include "System_PsramBuffer.h"
+#include "System_SealedLog.h"     // B11: log files on the card are sealed
 #include "System_CommandLimits.h"
+#include "System_SdPathCore.h"
 #include "System_TranscriptPathPolicy.h"
 #include "System_Mutex.h"
 #include "System_Settings.h"
@@ -974,8 +976,8 @@ static bool fileviewFileSize(const String& path, const AuthContext& ctx, size_t&
 // pages to its end with pages the transports carry. JSON is shown as stored
 // (re-indenting needs the whole file). A sealed capture's rows are revealed
 // page by page: the magic first line is read with each later page.
-static const char* fileviewLargePage(const String& path, size_t fileSize, int page, bool raw,
-                                     const AuthContext& ctx) {
+static const char* fileviewLargePage(const String& path, const char* classPath, size_t fileSize, int page,
+                                     bool raw, const AuthContext& ctx) {
   static constexpr size_t kFileviewStride = 2800;  // a page plus its wrap stays under the ~3.5 KB budget
   static constexpr size_t kFileviewSearch = 600;
   const size_t pageCount = filePageCount(fileSize, kFileviewStride);
@@ -1054,12 +1056,17 @@ static const char* fileviewLargePage(const String& path, size_t fileSize, int pa
   char* revealed = nullptr;
   if (shownLen >= 7 && captureCryptoIsMagicLine(shown)) {
     shown[shownLen] = '\0';
-    const size_t need = captureCryptoRevealCapacity(shown, shownLen);
+    // Rows open with the class of the path they are read at (a sealed file
+    // copied elsewhere stays closed). A later page starts past the file's
+    // header: its magic line is borrowed, and no plain line after it is a
+    // schema line.
+    const bool afterHeader = magicLen != 0;
+    const size_t need = captureCryptoRevealCapacity(shown, shownLen, afterHeader);
     revealed = need ? (char*)ps_alloc(need, AllocPref::PreferPsram, "fs.fileview.reveal") : nullptr;
     if (revealed) {
       memcpy(revealed, shown, shownLen + 1);
       size_t len = shownLen;
-      if (captureCryptoRevealText(revealed, len, need)) {
+      if (captureCryptoRevealText(classPath, revealed, len, need, nullptr, afterHeader)) {
         shown = revealed;
         shownLen = len;
       }
@@ -1129,9 +1136,22 @@ const char* cmd_fileview(const String& argsInput) {
     havePage = true;
   }
 
-  // This legacy viewer broadcasts untagged page chunks to shared sinks.
+  // A path the guarded VFS refuses outright (traversal, a quote, or a card
+  // path in a spelling FatFs would resolve to another name, B11) is answered
+  // here, before anything is looked up: the same words a missing or denied
+  // file gets.
+  // The normalized path also names the class a sealed file's rows open with.
+  String normalized;
+  if (!normalizeFsPath(path, normalized)) {
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+    snprintf(getDebugBuffer(), 1024, "Error: File not found or access denied: %s", path.c_str());
+    return getDebugBuffer();
+  }
+  // This legacy viewer broadcasts untagged page chunks to shared sinks. A
+  // transcript on the card is sealed, so `fileread` returns its sealed bytes;
+  // `transcripts read` and the file browser reveal it for its owner.
   if (filePathIsPrivateTranscript(path))
-    return "Error: fileview does not show private transcripts. Use fileread or the file browser.";
+    return "Error: fileview does not show private transcripts. Use 'transcripts read' or the file browser.";
 
   const AuthContext& ctx = currentAuthContext();
   // existsGuarded gates by canRead — combines the previous canRead +
@@ -1150,7 +1170,7 @@ const char* cmd_fileview(const String& argsInput) {
   const size_t kReadCap = 60000;
   size_t fileSize = 0;
   if (fileviewFileSize(path, ctx, fileSize) && fileSize > kReadCap)
-    return fileviewLargePage(path, fileSize, page, raw, ctx);
+    return fileviewLargePage(path, normalized.c_str(), fileSize, page, raw, ctx);
   String content;
   if (!readTextLimited(path.c_str(), content, kReadCap, ctx)) {
     if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
@@ -1163,9 +1183,10 @@ const char* cmd_fileview(const String& argsInput) {
   // surface behind requiresAdmin + the existsGuarded canRead above; byte
   // surfaces (fileread, /api/files/read, ESP-NOW) keep shipping ciphertext.
   // The '#HW1ENC' first line stays visible as the encrypted-at-rest mark;
-  // unopenable rows (torn tail, another device's key) render as
-  // "[undecryptable row]".
-  captureCryptoRevealText(content);
+  // unopenable rows (torn tail, another device's key, a row sealed for a file
+  // of another class) render as "[undecryptable row]", and a plain line where
+  // only rows belong as "[unsealed line]".
+  captureCryptoRevealText(normalized.c_str(), content);
 
   // JSON is re-indented by default through the re-indenter the web, OLED and
   // G2 viewers share; `raw` shows the stored text. Re-indenting grows the
@@ -1806,25 +1827,29 @@ const char* cmd_filedelete(const String& argsInput) {
 // Filesystem Command Registry
 // ============================================================================
 
-// Print the log-overflow tier status: whether LittleFS is primary or if we've
-// latched into SD overflow, plus free-space snapshots on each tier.
+// Where log lines go (B11): to the card, sealed, while one takes them, else to
+// flash; why they are on flash when they are; and free space on each tier.
 static const char* cmd_logtier(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
   uint64_t lt = 0, lu = 0, lf = 0;
   (void)VFS::getStats(VFS::INTERNAL, lt, lu, lf);
+  const VFS::LogCardStatus card = VFS::logCardStatus();
+  const bool latched = VFS::isLogOverflowActive();
+  const bool sdOk = VFS::isSdAvailable();
+  uint64_t st = 0, su = 0, sf = 0;
+  if (sdOk) VFS::getStats(VFS::SDCARD, st, su, sf);
 
   if (argWantsJson(argsInput)) {
-    bool overflow = VFS::isLogOverflowActive();
-    bool sdOk = VFS::isSdAvailable();
-    uint64_t st = 0, su = 0, sf = 0;
-    if (sdOk) VFS::getStats(VFS::SDCARD, st, su, sf);
-    const char* tier = !overflow ? "littlefs" : (sdOk ? "sd-overflow" : "sd-overflow-unmounted");
     snprintf(getDebugBuffer(), 1024,
-      "{\"schema\":1,\"tier\":\"%s\",\"overflow\":%s,"
+      "{\"schema\":2,\"tier\":\"%s\",\"sealed\":%s,\"cardFull\":%s,\"keyUnavailable\":%s,"
+      "\"noKeyLines\":%lu,\"movedAside\":%lu,\"reserveDrops\":%lu,\"overflow\":%s,"
       "\"littlefs\":{\"free\":%lu,\"total\":%lu,\"used\":%lu},"
       "\"sd\":{\"available\":%s,\"total\":%llu,\"used\":%llu,\"free\":%llu}}",
-      tier, overflow ? "true" : "false",
+      card.onCard ? "sd" : "littlefs", card.onCard ? "true" : "false",
+      card.cardFull ? "true" : "false", card.keyUnavailable ? "true" : "false",
+      (unsigned long)card.noKeyLines, (unsigned long)SealedLog::movedAsideCount(),
+      (unsigned long)VFS::logReserveDrops(), latched ? "true" : "false",
       (unsigned long)VFS::getCachedLittleFsFree(), (unsigned long)lt,
       (unsigned long)lu,
       sdOk ? "true" : "false",
@@ -1832,44 +1857,36 @@ static const char* cmd_logtier(const String& argsInput) {
     return getDebugBuffer();
   }
 
-  size_t flashFree = VFS::getCachedLittleFsFree();
-  size_t flashTotal = (size_t)lt;
-  size_t flashUsed = (size_t)lu;
-  bool overflow = VFS::isLogOverflowActive();
-  bool sdOk = VFS::isSdAvailable();
-  uint64_t sdTotal = 0, sdUsed = 0, sdFree = 0;
-  if (sdOk) VFS::getStats(VFS::SDCARD, sdTotal, sdUsed, sdFree);
-
-  const char* tierStr;
-  if (!overflow)        tierStr = "LittleFS primary";
-  else if (sdOk)        tierStr = "SD overflow (active)";
-  else                  tierStr = "SD overflow wanted — card not mounted, writes may drop";
-
-  const char* routeStr;
-  if (!overflow)        routeStr = "their primary LittleFS paths";
-  else if (sdOk)        routeStr = "/sd mirror paths";
-  else                  routeStr = "primary paths (data will drop if flash is full)";
+  const size_t flashFree = VFS::getCachedLittleFsFree();
+  const char* where;
+  if (card.onCard)              where = "the card, sealed with the device key";
+  else if (card.keyUnavailable) where = "flash, unsealed (the device key is unavailable; the card is not written)";
+  else if (card.cardFull)       where = "flash (the card is below its reserve)";
+  else if (sdOk)                where = "flash (the card is not taking writes)";
+  else                          where = "flash (no card)";
 
   char* buf = getDebugBuffer();
-  if (sdOk) {
-    snprintf(buf, 1024,
-      "Log storage tier: %s\n"
-      "  LittleFS: %uKB used / %uKB total (%uKB free)\n"
-      "  SD card:  mounted — %uKB used / %uKB total (%uKB free)\n"
-      "Overflow latches on next reboot. Once latched, new log writes go to %s.",
-      tierStr,
-      (unsigned)(flashUsed / 1024), (unsigned)(flashTotal / 1024), (unsigned)(flashFree / 1024),
-      (unsigned)(sdUsed / 1024), (unsigned)(sdTotal / 1024), (unsigned)(sdFree / 1024),
-      routeStr);
-  } else {
-    snprintf(buf, 1024,
-      "Log storage tier: %s\n"
-      "  LittleFS: %uKB used / %uKB total (%uKB free)\n"
-      "  SD card:  not mounted\n"
-      "Overflow latches on next reboot. Once latched, new log writes go to %s.",
-      tierStr,
-      (unsigned)(flashUsed / 1024), (unsigned)(flashTotal / 1024), (unsigned)(flashFree / 1024),
-      routeStr);
+  int n = snprintf(buf, 1024,
+      "Log lines go to: %s\n"
+      "  LittleFS: %uKB used / %uKB total (%uKB free)%s\n",
+      where,
+      (unsigned)(lu / 1024), (unsigned)(lt / 1024), (unsigned)(flashFree / 1024),
+      latched ? " - below the log reserve: flash lines stop at the 100KB floor" : "");
+  if (n > 0 && n < 1024) {
+    if (sdOk) {
+      n += snprintf(buf + n, 1024 - n, "  SD card:  mounted - %uKB used / %uKB total (%uKB free)\n",
+                    (unsigned)(su / 1024), (unsigned)(st / 1024), (unsigned)(sf / 1024));
+    } else {
+      n += snprintf(buf + n, 1024 - n, "  SD card:  not mounted\n");
+    }
+  }
+  if (n > 0 && n < 1024) {
+    n += snprintf(buf + n, 1024 - n,
+                  "Lines dropped at the flash floor: %lu. Lines kept on flash for want of the key: %lu. "
+                  "Card files moved aside (not this device's): %lu.\n"
+                  "A card that is put in takes the lines from then on; one that is pulled sends them back to flash.",
+                  (unsigned long)VFS::logReserveDrops(), (unsigned long)card.noKeyLines,
+                  (unsigned long)SealedLog::movedAsideCount());
   }
   return buf;
 }
@@ -1898,8 +1915,8 @@ const CommandEntry filesystemCommands[] = {
     "offset 0 truncates/creates; later offsets must equal current size; 'final' runs post-save hooks." },
   { "filedelete", "Delete file: \"<path>\" [confirm]", false, cmd_filedelete, "Usage: filedelete \"<path>\" [confirm]" },
   { "filerename", "Rename file: \"<oldpath>\" \"<newname>\"", false, cmd_filerename, "Usage: filerename \"<oldpath>\" \"<newname>\"" },
-  { "logtier", "Show current log storage tier (LittleFS vs SD overflow).", false, cmd_logtier,
-    "logtier             - Report which tier logs are writing to and free space on each. [json]" },
+  { "logtier", "Show where log lines go (the card, sealed, or flash).", false, cmd_logtier,
+    "logtier             - Report where log lines go (the card first, sealed; else flash), why, and free space on each. [json]" },
 };
 
 const size_t filesystemCommandsCount = sizeof(filesystemCommands) / sizeof(filesystemCommands[0]);
@@ -2207,6 +2224,11 @@ bool normalizeFsPath(const String& in, String& out) {
     for (size_t k = start; k < i; k++) out += text[k];
   }
   if (out.length() == 0) out = "/";  // "/", "///", "/.", "/./" all mean root
+  // B11: a card path in a spelling FatFs would resolve to another name (other
+  // case of a protected folder, '\\', a trailing dot or space, an 8.3 alias)
+  // is refused like "..": the rules below compare bytes, the card does not
+  // (System_SdPathCore.h).
+  if (sdpath::classify(out.c_str()) == sdpath::Verdict::Refused) return false;
   return true;
 }
 
@@ -2725,11 +2747,22 @@ bool readTextLimited(const char* path, String& out, size_t maxBytes, const AuthC
 // copy (open, seek, size or scan mismatch) still keep the original untouched:
 // they say the file is not what the append saw, not that space ran out.
 //
-// The append itself honours the overflow latch: a Refused resolution (LittleFS
-// below the reserve, no writable card) drops the line and counts it, and a
-// failed append on the SD mirror reports the card unwritable (with a backoff
-// so it is not re-probed at once) and retries once on the tier the latch then
-// resolves to.
+// The append itself honours the tier VFS::resolveLogPath names: a Refused
+// resolution (LittleFS below the reserve, no usable card) drops the line and
+// counts it, and a failed append on the card reports the card unwritable (with
+// a backoff so it is not re-probed at once) and retries once on the tier the
+// resolution then names.
+//
+// On the card (B11, 2026-11-22). The card comes first whenever it takes
+// writes, and what is written there is sealed (System_SealedLog.h): the mark
+// line with the device key's id goes first in every new file and in every
+// rotation's copy, each log line is one sealed row (a flushed batch is sealed
+// line by line), and a file that is not this device's sealed file is moved
+// aside instead of appended to. The cap on the card is twice the nominal cap,
+// counted in stored bytes (System_LogCapsCore.h, cardCap); the flash share
+// does not apply there. The same two rotations run on the card: the rename
+// starts a new marked file, the copy writes the mark and then the kept rows
+// from a row boundary.
 
 // Whether this build serves file catch-up (System_CatchupLedger.h). The three
 // logs a collector fetches then keep the copy rotation; see
@@ -2780,10 +2813,49 @@ EXT_RAM_BSS_ATTR static CappedLogState sCappedLogs;
 // callers — a whole extra LittleFS open (~20 ms measured) for a number the
 // append handle already knew. The read handle of a copy rotation is opened
 // only when that rotation is actually due.
+//
+// B11: on the card the same append is sealed. The file is opened through
+// SealedLog (the mark first in a new file; a file that is not this device's
+// is moved aside; a torn last row gets its line end), each line of `data`
+// becomes one sealed row, and `sz` and `written` count stored bytes. The
+// append counts only once the file was flushed and has the size the rows
+// make (SealedLog::settle): a pulled card fails neither write() nor flush().
+// Nothing plain reaches the card. On a failure `taken` is how much of `data`
+// the card verifiably holds (whole lines from its start), so the caller
+// writes only the rest on flash.
+static bool appendCappedSealedOnce(const String& dest, const char* data, size_t length,
+                                   const AuthContext& ctx, size_t& sz, size_t& written, size_t& taken) {
+  taken = 0;
+  size_t stored = 0;
+  File a = SealedLog::openAppend(dest, ctx, stored);
+  if (!a) { STACK_TRACEF("appendLineWithCap.open_sealed_failed"); return false; }
+  const size_t before = stored;
+  // An empty line is a row too (flash writes its CRLF).
+  if (length == 0) { data = "\n"; length = 1; }
+  // A row that was not sealed (the key) or not taken is a failure; so is a
+  // file that, flushed, does not have the size the rows make.
+  const bool wrote = SealedLog::writeLines(a, dest, data, length, stored);
+  bool appended = SealedLog::settle(a, dest, stored) && wrote;
+  if (!appended) {
+    const size_t have = a.size();
+    taken = have > before ? sealedlog::linesLanded(data, length, sealedlog::kMaxRowBytes, have - before) : 0;
+    // Every line there after all (a write the handle reported short but the
+    // card took): nothing is left to write.
+    if (taken >= length && have >= before) { appended = true; stored = have; }
+  }
+  sz = stored;
+  written = stored - before;
+  a.close();
+  STACK_TRACEF("appendLineWithCap.sealed_done sz=%u ok=%d", (unsigned)sz, appended ? 1 : 0);
+  return appended;
+}
+
 static bool appendCappedLineOnce(const String& dest, const char* data, size_t length, bool addNewline,
-                                 const AuthContext& ctx, size_t& sz, size_t& written) {
+                                 const AuthContext& ctx, size_t& sz, size_t& written, size_t& taken) {
   sz = 0;
   written = 0;
+  taken = 0;
+  if (SealedLog::appliesTo(dest)) return appendCappedSealedOnce(dest, data, length, ctx, sz, written, taken);
   File a = VFS::openGuarded(dest, "a", ctx, true);
   if (!a) { STACK_TRACEF("appendLineWithCap.open_a_failed"); return false; }
   STACK_TRACEF("appendLineWithCap.opened_for_append");
@@ -2809,19 +2881,33 @@ static bool appendCappedLineOnce(const String& dest, const char* data, size_t le
 static bool restartCappedLog(const String& dest, const char* data, size_t length, bool addNewline,
                              size_t droppedBytes, const AuthContext& ctx) {
   if (!VFS::removeGuarded(dest, ctx)) { STACK_TRACEF("appendLineWithCap.restart_remove_failed"); return false; }
-  File t = VFS::openGuarded(dest, "w", ctx, true);
-  if (!t) { STACK_TRACEF("appendLineWithCap.restart_open_failed"); return false; }
-  // File catch-up: the path now holds a new file (a new id); only notes it.
-  catchupNoteRestart(dest.c_str());
   char marker[80];
   snprintf(marker, sizeof(marker), "[LOG] rotation blocked (low space): %u older bytes dropped",
            (unsigned)droppedBytes);
-  size_t n = t.println(marker);
-  n += t.write(reinterpret_cast<const uint8_t*>(data), length);
-  if (addNewline) n += t.println();
-  const bool ok = n == strlen(marker) + length + (addNewline ? 4 : 2) && !t.getWriteError();
-  t.close();
-  VFS::noteLittleFsBytesWritten(n);
+  bool ok = false;
+  if (SealedLog::appliesTo(dest)) {
+    // B11: the restarted file on the card is a sealed file like any other:
+    // the mark, then the marker line and the new line as sealed rows.
+    size_t stored = 0;
+    File sealed = SealedLog::openAppend(dest, ctx, stored);
+    if (!sealed) { STACK_TRACEF("appendLineWithCap.restart_open_failed"); return false; }
+    catchupNoteRestart(dest.c_str());
+    ok = SealedLog::writeLines(sealed, dest, marker, strlen(marker), stored) &&
+         SealedLog::writeLines(sealed, dest, data, length, stored);
+    ok = SealedLog::settle(sealed, dest, stored) && ok;
+    sealed.close();
+  } else {
+    File t = VFS::openGuarded(dest, "w", ctx, true);
+    if (!t) { STACK_TRACEF("appendLineWithCap.restart_open_failed"); return false; }
+    // File catch-up: the path now holds a new file (a new id); only notes it.
+    catchupNoteRestart(dest.c_str());
+    size_t n = t.println(marker);
+    n += t.write(reinterpret_cast<const uint8_t*>(data), length);
+    if (addNewline) n += t.println();
+    ok = n == strlen(marker) + length + (addNewline ? 4 : 2) && !t.getWriteError();
+    t.close();
+    VFS::noteLittleFsBytesWritten(n);
+  }
   Serial.printf("[FS] %s: rotation copy failed; log restarted to hold its cap\n", dest.c_str());
   STACK_TRACEF("appendLineWithCap.restarted ok=%d", ok ? 1 : 0);
   return ok;
@@ -2833,9 +2919,15 @@ static bool restartCappedLog(const String& dest, const char* data, size_t length
 // starts at. NothingToDo: there is nothing to drop. KeepOriginal: the file is
 // not what the append saw (open, size, seek or read failed); it stays as it
 // is. CannotWrite: the copy could not be made (no buffer, no space).
+//
+// B11: on the card the copy is a sealed file of its own: the mark line is
+// written first (`markBytes`, 0 on flash) and the kept rows follow from a row
+// boundary, which is where the scan for the next line end already starts.
 enum class LogTailStage : uint8_t { Staged, NothingToDo, KeepOriginal, CannotWrite };
 static LogTailStage stageCappedLogTail(const String& destPath, size_t sz, size_t keepBytes,
-                                       const AuthContext& ctx, String& tmpName, size_t& tailStart) {
+                                       const AuthContext& ctx, String& tmpName, size_t& tailStart,
+                                       size_t* markBytesOut = nullptr) {
+  if (markBytesOut) *markBytesOut = 0;
   File r = VFS::openGuarded(destPath, "r", ctx);
   if (!r) { STACK_TRACEF("appendLineWithCap.open_r_failed"); return LogTailStage::KeepOriginal; }
   // close() cannot report a buffered append failure. Before discarding any
@@ -2898,6 +2990,16 @@ static LogTailStage stageCappedLogTail(const String& destPath, size_t sz, size_t
   }
   STACK_TRACEF("appendLineWithCap.tmp_opened copying...");
 
+  size_t markBytes = 0;
+  if (SealedLog::appliesTo(destPath) && !SealedLog::writeMark(w, markBytes)) {
+    r.close();
+    w.close();
+    VFS::removeGuarded(tmpName, ctx);
+    STACK_TRACEF("appendLineWithCap.tmp_mark_failed");
+    return LogTailStage::CannotWrite;
+  }
+  if (markBytesOut) *markBytesOut = markBytes;
+
   size_t copied = 0;
   bool readShort = false;
   while (copied < tailBytes) {
@@ -2911,7 +3013,7 @@ static LogTailStage stageCappedLogTail(const String& destPath, size_t sz, size_t
   r.close();
   w.flush();
   const bool complete = copied == tailBytes && !w.getWriteError() &&
-                        w.size() == tailBytes;
+                        w.size() == markBytes + tailBytes;
   w.close();
   STACK_TRACEF("appendLineWithCap.copy_done bytes=%u", (unsigned)copied);
   if (!complete) {
@@ -2987,8 +3089,8 @@ static bool cappedLogKeepsCopyRotation(const char* path) {
 // caller holds the filesystem lock.
 static bool cappedLogWrite(const char* path, const char* data, size_t length, bool addNewline,
                            unsigned lines, size_t nominalCap) {
-  const size_t capBytes = logcaps::scaledCap(nominalCap, sCappedLogs.partitionBytes);
-  // Resolve destination (LittleFS primary, or /sd overflow mirror if flash full).
+  // Resolve destination: the card twin while a card takes log lines (B11),
+  // else the LittleFS path.
   char dest[128];
   if (VFS::resolveLogPath(path, length + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
     // G-39: LittleFS is below the reserve and no card takes the overflow.
@@ -3008,16 +3110,19 @@ static bool cappedLogWrite(const char* path, const char* data, size_t length, bo
   // 1. Append — fast path, one open for a line or a whole batch.
   size_t sz = 0;
   size_t written = 0;
-  bool appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written);
+  size_t taken = 0;
+  bool appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written, taken);
   if (!appended && VFS::getStorageType(destPath) == VFS::SDCARD &&
       VFS::getStorageType(String(path)) != VFS::SDCARD) {
-    // G-39: the latch sent this line to a card that no longer takes writes
-    // (yanked SPI or detect-less SDMMC card, or a log tree the card's write
-    // probe does not exercise). Report it so the overflow path stops choosing
-    // the card for a while — not re-probing it on the retry below — then
-    // retry once wherever the latch resolves now: flash while free space is
-    // above the floor, otherwise a counted drop.
-    VFS::noteLogOverflowSdFailure("log.append");
+    // G-39: this line went to a card that no longer takes writes (yanked SPI
+    // or detect-less SDMMC card), or to a card file that cannot be written
+    // while the card is fine (damaged, a directory in its place). Report it:
+    // a failed card stops being chosen for every log for a while, a failed
+    // file only for this log, for longer each time (noteLogCardFileFailure).
+    // Then retry once wherever the line resolves now: flash while free space
+    // is above the floor, otherwise a counted drop. Lines of a batch the card
+    // verifiably took are not written a second time.
+    VFS::noteLogCardFileFailure(path, "log.append");
     if (VFS::resolveLogPath(path, length + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
       for (unsigned i = 0; i < lines; ++i) VFS::noteLogReserveDrop();
       STACK_TRACEF("appendLineWithCap.sd_failed_reserve_refused");
@@ -3025,14 +3130,21 @@ static bool cappedLogWrite(const char* path, const char* data, size_t length, bo
     }
     destPath = dest;
     ctx = VFS::systemAuth(VFS::sysLogScopeFor(destPath), "log.append");
-    appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written);
+    if (taken > length) taken = length;
+    data += taken;
+    length -= taken;
+    appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written, taken);
   }
   if (!appended) { STACK_TRACEF("appendLineWithCap.short_append"); return false; }
 
   // 2. Check size. The size came from the append handle above, so the common
   //    path (no rotation) returns without opening the file a second time.
   //    A two-generation log rotates at half its cap, a copy-rotated one at
-  //    its cap.
+  //    its cap. The cap is the caller's scaled to the LittleFS partition on
+  //    flash, and twice the caller's in stored bytes on the card (B11).
+  const size_t capBytes = SealedLog::appliesTo(destPath)
+                              ? logcaps::cardCap(nominalCap)
+                              : logcaps::scaledCap(nominalCap, sCappedLogs.partitionBytes);
   const bool copyRotation = cappedLogKeepsCopyRotation(path);
   const size_t limit = copyRotation ? capBytes : logcaps::generationBytes(capBytes);
   STACK_TRACEF("appendLineWithCap.size_checked sz=%u limit=%u", (unsigned)sz, (unsigned)limit);
@@ -3052,12 +3164,13 @@ static bool cappedLogWrite(const char* path, const char* data, size_t length, bo
   // 3. Copy rotation — only now is a read handle worth its open. Drop enough
   //    bytes that the survivors are ~85% of cap.
   String tmpName;
-  size_t tailStart = 0;
-  switch (stageCappedLogTail(destPath, sz, (capBytes * 85) / 100, ctx, tmpName, tailStart)) {
+  size_t tailStart = 0, markBytes = 0;
+  switch (stageCappedLogTail(destPath, sz, (capBytes * 85) / 100, ctx, tmpName, tailStart, &markBytes)) {
     case LogTailStage::NothingToDo:  return true;
     case LogTailStage::KeepOriginal: return false;
     case LogTailStage::CannotWrite:  // G-39: hold the cap
-      return restartCappedLog(destPath, data, length, addNewline, sz - length - (addNewline ? 2 : 0), ctx);
+      return restartCappedLog(destPath, data, length, addNewline,
+                              sz > written ? sz - written : 0, ctx);
     case LogTailStage::Staged:       break;
   }
 
@@ -3078,8 +3191,10 @@ static bool cappedLogWrite(const char* path, const char* data, size_t length, bo
     return false;
   }
   // File catch-up: the first tailStart bytes are gone, the file keeps its id
-  // (System_CatchupLedger: no I/O, no logging, a spinlock only).
-  catchupNoteTrim(dest, tailStart);
+  // (System_CatchupLedger: no I/O, no logging, a spinlock only). A sealed copy
+  // on the card starts with the same mark line the old file started with, so
+  // what is gone there is the rows between the mark and the kept tail.
+  catchupNoteTrim(dest, tailStart > markBytes ? tailStart - markBytes : 0);
   STACK_TRACEF("appendLineWithCap.rotate_complete");
   return true;
 }
@@ -3317,19 +3432,14 @@ static void recoverLogOrphanAt(const char* dest) {
 void cleanupLogOrphan(const char* path) {
   if (!path) return;
 
-  char dest[128];
-  // Use the same overflow-aware resolution so we look at the actual location
-  // writes land in. Pass 0 for requiredSpace — we're not writing.
-  VFS::resolveOverflowPath(path, 0, dest, sizeof(dest));
-  recoverLogOrphanAt(dest);
-
-  // A rotation that ran while log overflow was latched in an earlier boot can
-  // leave its orphan on the SD mirror, which the resolution above names only
-  // while the latch is tripped again. Check the mirror whenever the card is
-  // mounted, independent of the current latch.
-  if (VFS::isSdAvailable()) {
+  // A log lives on flash, on the card, or on both (B11: the card takes the
+  // lines while it is in, flash the rest), and a rotation can have been cut
+  // short on either. Both twins are checked: the flash path always, the card
+  // twin whenever a card is mounted.
+  recoverLogOrphanAt(path);
+  if (VFS::isSdAvailable() && strncmp(path, "/sd/", 4) != 0) {
     char mirror[140];
     snprintf(mirror, sizeof(mirror), "/sd%s", path);
-    if (strcmp(mirror, dest) != 0) recoverLogOrphanAt(mirror);
+    recoverLogOrphanAt(mirror);
   }
 }

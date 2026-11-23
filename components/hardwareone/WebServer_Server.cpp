@@ -4896,6 +4896,15 @@ esp_err_t handleFileView(httpd_req_t* req) {
   if (revealSealed) {
     // Same lock discipline as streamFileChunks: read a line under the lock,
     // send it without, stop at the first failed send.
+    bool firstLine = true, foreign = false;
+    unsigned skippedRows = 0;
+    // Rows open only with the class of the path they are read at (a sealed
+    // file copied to a place another account may read stays closed), and a
+    // plain line where only sealed rows belong is shown as "[unsealed line]",
+    // never as if the device had written it.
+    String classPath;
+    if (!normalizeFsPath(path, classPath)) classPath = "";
+    sealedlog::LineState lineKinds = sealedlog::stateFor(classPath.c_str());
     while (true) {
       String lineStr;
       {
@@ -4903,7 +4912,29 @@ esp_err_t handleFileView(httpd_req_t* req) {
         if (!file.available()) break;
         lineStr = file.readStringUntil('\n');
       }
-      captureCryptoRevealLine(lineStr);
+      if (firstLine) {
+        // B11: the mark names the key that sealed the file. Another device's
+        // file gets one line saying so in place of a column of rows that
+        // cannot be opened here.
+        firstLine = false;
+        String head = lineStr;
+        head += '\n';
+        char keyId[17];
+        if (captureCryptoMarkOwner(head.c_str(), head.length(), keyId) == CaptureMarkOwner::Other) {
+          char notice[CAPCRYPT_FOREIGN_NOTICE_MAX];
+          if (captureCryptoForeignNotice(keyId, notice, sizeof(notice))) {
+            lineStr += '\n';
+            lineStr += notice;
+            foreign = true;
+          }
+        }
+      } else if (foreign) {
+        if (captureCryptoIsSealedRow(lineStr.c_str())) {  // said once, above
+          if ((++skippedRows % 64) == 0) delay(0);
+          continue;
+        }
+      }
+      (void)captureCryptoRevealFileLine(classPath.c_str(), lineKinds, lineStr);
       lineStr += '\n';
       sendErr = raw ? httpd_resp_send_chunk(req, lineStr.c_str(), lineStr.length())
                     : streamHtmlEscapedChecked(req, lineStr.c_str(), lineStr.length());

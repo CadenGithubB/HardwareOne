@@ -74,10 +74,31 @@ def generate(overlay: Path | None, baseline: bool | None = None) -> str:
     harness = (HERE / "capped_log_writes_harness.cpp").read_text()
     require(harness.count("// INSERT_PRODUCTION") == 1, "one production insertion marker")
     require(harness.count("// INSERT_LOG_LINE") == 1, "one log line insertion marker")
+    require(harness.count("// INSERT_SEALED_LOG") == 1, "one sealed log insertion marker")
+    require(harness.count("// INSERT_CAPCRYPT_MACROS") == 1, "one capture crypto macro insertion marker")
     notes = int("catchupNoteTrim(" in production)
+    # B11: a writer that seals on the card is compiled with the production
+    # System_SealedLog (header and source, their includes dropped). Its one
+    # line changed here is appliesTo, which also asks the harness's switch, so
+    # the cases from before B11 keep their plain bytes on either tier.
+    sealed, macros = "", ""
+    sealing = "SealedLog::" in functions
+    if sealing:
+        strip = lambda text: re.sub(r"(?m)^#(include|ifndef SYSTEM_SEALED_LOG_H|define SYSTEM_SEALED_LOG_H)[^\n]*\n", "", text)
+        header = strip(((overlay or COMPONENT) / "System_SealedLog.h").read_text())
+        header = header[:header.rindex("#endif")]
+        source_text = strip(((overlay or COMPONENT) / "System_SealedLog.cpp").read_text())
+        applies = "bool appliesTo(const String& path) { return VFS::getStorageType(path) == VFS::SDCARD; }"
+        require(source_text.count(applies) == 1, "SealedLog::appliesTo is the card test")
+        source_text = source_text.replace(
+            applies, "bool appliesTo(const String& path) { return cardSealing && VFS::getStorageType(path) == VFS::SDCARD; }")
+        sealed = header + "\n" + source_text
+        crypto_header = ((overlay or COMPONENT) / "System_CaptureCrypto.h").read_text()
+        macros = "\n".join(re.findall(r"^#define CAPCRYPT_.*$", crypto_header, re.MULTILINE))
     return (f"#define BASELINE {int(baseline)}\n#define HAVE_CATCHUP_NOTES {notes}\n"
-            f"#define HAVE_BATCHING {int(batching)}\n" +
-            harness.replace("// INSERT_PRODUCTION", functions).replace("// INSERT_LOG_LINE", line_code))
+            f"#define HAVE_BATCHING {int(batching)}\n#define HAVE_SEALED_LOG {int(sealing)}\n" +
+            harness.replace("// INSERT_PRODUCTION", functions).replace("// INSERT_LOG_LINE", line_code)
+            .replace("// INSERT_SEALED_LOG", sealed).replace("// INSERT_CAPCRYPT_MACROS", macros))
 
 
 def source_contract() -> None:
@@ -98,10 +119,11 @@ def source_contract() -> None:
     # File catch-up (System_CatchupLedger.h): one trim note after the promoted
     # rename, one restart note after the restarted log opened; the hooks do no
     # I/O, logging or allocation (they run inside this writer).
-    require(body.count("catchupNoteTrim(dest, tailStart);") == 1 and
+    require(body.count("catchupNoteTrim(") == 1 and
+            body.count("catchupNoteTrim(dest, tailStart > markBytes ? tailStart - markBytes : 0);") == 1 and
             body.index("catchupNoteTrim(") > body.index("renameGuarded(tmpName, destPath, ctx)") and
             body.index("catchupNoteTrim(") > body.index('STACK_TRACEF("appendLineWithCap.rename_failed")'),
-            "the copy rotation notes the trim once, after the successful rename")
+            "the copy rotation notes the trim once, after the successful rename (less the mark line of a card copy)")
     # S-8: the two-generation rotation leaves no note (the logs the ledger
     # follows never take it in a build that serves catch-up) and copies nothing
     # of its own: one rename, with the staged copy only for an oversized file.
@@ -118,8 +140,40 @@ def source_contract() -> None:
             "if (!copyAllowed) {" in body and
             body.index("if (!copyAllowed) {") < body.index("stageCappedLogTail(destPath, sz, (capBytes * 85) / 100"),
             "the copy rotation is put off until boot is over")
-    require("const size_t capBytes = logcaps::scaledCap(nominalCap, sCappedLogs.partitionBytes);" in body,
-            "the writer scales the caller's cap itself and keeps the cap as named")
+    require("? logcaps::cardCap(nominalCap)" in body and
+            ": logcaps::scaledCap(nominalCap, sCappedLogs.partitionBytes);" in body and
+            body.index("const size_t capBytes = SealedLog::appliesTo(destPath)") >
+            body.index('STACK_TRACEF("appendLineWithCap.short_append")'),
+            "the writer scales the caller's cap itself, by the tier the line landed on: the flash share, "
+            "or twice the cap in stored bytes on the card (B11)")
+    # B11: nothing plain reaches the card. The append, the restart and the
+    # copy rotation each go through SealedLog for a card path.
+    once = extract_block(fs, "static bool appendCappedLineOnce(")
+    require(once.index("if (SealedLog::appliesTo(dest)) return appendCappedSealedOnce(") <
+            once.index('VFS::openGuarded(dest, "a", ctx, true)'),
+            "a card path is appended sealed before any plain open")
+    sealed_once = extract_block(fs, "static bool appendCappedSealedOnce(")
+    require("SealedLog::openAppend(dest, ctx, stored)" in sealed_once and
+            "SealedLog::writeLines(a, dest, data, length, stored)" in sealed_once and
+            'if (length == 0) { data = "\\n"; length = 1; }' in sealed_once and
+            "VFS::openGuarded" not in sealed_once and ".println(" not in sealed_once and ".write(" not in sealed_once,
+            "the sealed append opens and writes through SealedLog only")
+    # Review of 2026-11-22: a card append counts only when the flushed file has
+    # the size its rows make, and a failure says how much the card did take.
+    require("bool appended = SealedLog::settle(a, dest, stored) && wrote;" in sealed_once and
+            sealed_once.index("SealedLog::settle(a, dest, stored)") < sealed_once.index("a.close();") and
+            "sealedlog::linesLanded(data, length, sealedlog::kMaxRowBytes, have - before)" in sealed_once,
+            "the sealed append is verified by the file's size after the flush")
+    require('VFS::noteLogCardFileFailure(path, "log.append");' in body and "noteLogOverflowSdFailure" not in body and
+            body.index("data += taken;") < body.rindex(
+                "appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written, taken);"),
+            "a failed card append is reported for this log's file, and flash gets only what the card did not take")
+    restart = extract_block(fs, "static bool restartCappedLog(")
+    require("ok = SealedLog::settle(sealed, dest, stored) && ok;" in restart, "a restarted card log is verified too")
+    stage = extract_block(fs, "static LogTailStage stageCappedLogTail(")
+    require(stage.index("SealedLog::writeMark(w, markBytes)") < stage.index("while (copied < tailBytes)") and
+            "w.size() == markBytes + tailBytes" in stage,
+            "a rotation's copy on the card starts with the mark, and its size check counts it")
     require("if (oversized && !copyAllowed) {" in generation and
             generation.index("if (oversized && !copyAllowed) {") < generation.index("stageCappedLogTail("),
             "the one-time cut of an oversized file is put off until boot is over")
@@ -174,9 +228,13 @@ def source_contract() -> None:
     require("isSystemIdentity(ctx)" in hook and "cappedLogsFlush(false);" in hook and "sys_logs" in hook,
             "only a user's read under the system log folders flushes; system identities never do")
     restart = extract_block(fs, "static bool restartCappedLog(")
-    require(restart.count("catchupNoteRestart(dest.c_str());") == 1 and
-            restart.index("catchupNoteRestart(") > restart.index("restart_open_failed"),
-            "restartCappedLog notes the restart once, after the new log opened")
+    require(restart.count("catchupNoteRestart(dest.c_str());") == 2 and
+            restart.index("catchupNoteRestart(") > restart.index("restart_open_failed") and
+            restart.rindex("catchupNoteRestart(") > restart.rindex("restart_open_failed"),
+            "restartCappedLog notes the restart once per tier's branch, after the new log opened")
+    require(restart.index("if (SealedLog::appliesTo(dest)) {") < restart.index("} else {") <
+            restart.index('VFS::openGuarded(dest, "w", ctx, true)'),
+            "a restarted log on the card is a sealed file; the plain restart is for flash only")
     ledger_path = COMPONENT / "System_CatchupLedger.cpp"
     if ledger_path.exists():
         ledger = ledger_path.read_text()
@@ -218,6 +276,8 @@ def main() -> None:
             'void hostStringFree(void* p) { if (p) ++gStringHeap.freed; std::free(p); }\n')
         # The pure policy header the writer region and the harness both use.
         shutil.copyfile(COMPONENT / "System_LogCapsCore.h", work / "System_LogCapsCore.h")
+        shutil.copyfile(COMPONENT / "System_SealedLogCore.h", work / "System_SealedLogCore.h")
+        shutil.copyfile(HERE / "sealed_log_host.h", work / "sealed_log_host.h")
         printing = (CORE / "Print.cpp").read_text().replace('#include "Arduino.h"', '#include <cstdarg>')
         (work / "Print.cpp").write_text(printing)
         conversions = (CORE / "stdlib_noniso.c").read_text().replace('#include "esp_system.h"', '')

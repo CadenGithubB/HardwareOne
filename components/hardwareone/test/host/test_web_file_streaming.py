@@ -94,6 +94,33 @@ def check_sources() -> None:
     # chunked branch uses the helper, the viewer's escaper is the checked one,
     # and polling resumes exactly once before any transfer.
     view = extract_block(server, "esp_err_t handleFileView(")
+    # Review of 2026-11-22: the viewer reveals a sealed file line by line with
+    # the class of the path it is read at (a sealed file copied to where another
+    # account may read stays closed) and shows a plain line where only sealed
+    # rows belong as "[unsealed line]". No row is opened without the path.
+    require("if (!normalizeFsPath(path, classPath)) classPath = \"\";" in view and
+            "sealedlog::LineState lineKinds = sealedlog::stateFor(classPath.c_str());" in view and
+            "captureCryptoRevealFileLine(classPath.c_str(), lineKinds, lineStr)" in view and
+            "captureCryptoRevealLine(" not in view,
+            "handleFileView reveals sealed rows with the class of the viewed path, line kind by line kind")
+    crypto = (COMPONENT / "System_CaptureCrypto.cpp").read_text()
+    reveal_line = extract_block(crypto, "sealedlog::Line captureCryptoRevealFileLine(")
+    require("sealedlog::classifyLine(state, line.c_str(), line.length())" in reveal_line and
+            "if (kind == sealedlog::Line::Row) (void)captureCryptoRevealLine(path, line);" in reveal_line and
+            "else if (kind == sealedlog::Line::Unsealed) line = kUnsealed;" in reveal_line,
+            "a line is a row (opened for the path's class), unsealed (its marker), or passed through")
+    row = extract_block(crypto, "bool captureCryptoRevealLine(const char* path, String& line)")
+    require("setAadLocked(path) ? openLineLocked(line.c_str(), line.length()) : -1" in row and
+            "if (!path || !captureCryptoEnsureKey()) { line = kUndecryptable; return true; }" in row,
+            "a row opens only with the additional data of its path's class")
+    for name in ("captureCryptoSealLine", "captureCryptoOpenLine"):
+        body = extract_block(crypto, f"int {name}(const char* path, ")
+        require("if (!setAadLocked(path)) return -1;" in body, f"{name} binds the row to the class of its file's path")
+    aad = extract_block(crypto, "bool setAadLocked(const char* path)")
+    require("sealedlog::classOf(path, aadScratch() + kAadTagLen, sealedlog::kClassMax)" in aad and
+            'constexpr char  kAadTag[]     = "HW1ENC1|";' in crypto and
+            crypto.count("(const unsigned char*)aadScratch(), sAadLen") == 2 and "kAadLen" not in crypto,
+            "the additional data is the tag and the class of the path, for the seal and for the open")
     non_json = view[view.index("// Default: non-JSON"):]
     require('FsLockGuard fsLock("handleFileView")' not in non_json,
             "handleFileView must not hold the filesystem lock for the whole non-JSON path")
@@ -192,7 +219,7 @@ def main() -> None:
     require(harness.count("// INSERT_PRODUCTION_HERE") == 1, "missing production marker")
     unit = harness.replace("// INSERT_PRODUCTION_HERE", production())
     flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-             "-I", str(HERE / "web_batch_stubs")]
+             "-I", str(HERE / "web_batch_stubs"), "-I", str(HERE), "-I", str(COMPONENT)]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                   "-fno-omit-frame-pointer", "-g"]

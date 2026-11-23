@@ -32,6 +32,17 @@ At most 32 files a device, the newest of each kind:
 files at rest) before it leaves; the hub stores it as it came, still sealed, and cannot read it.
 Without a capture key the sealed kinds are withheld (counted), never sent in clear.
 
+**Files on the device's SD card are sealed at rest as well.** While a card takes log lines, the
+device writes its logs there, each line sealed with the same capture key (User Guide, Logs on the
+SD card). Catch-up serves such a file by the same table: a sensor capture that is sealed at rest
+goes as stored; the system log, `events.log` and transcripts are sealed again on the air (28
+bytes a frame more), so the hub holds them sealed twice with the one key; `errors.log` and
+`crash-history.log` go as stored, which on the card is sealed. A log can be on flash and on the
+card at once (the card took the lines while it was in); both files are offered, each under its
+own path. A file a card writer moved aside (`<name>.foreign-<n>`: not this device's sealed file)
+is never offered. The hub's own `/sd/collect/...` is kept as it was received and is not sealed
+with the hub's key.
+
 Never offered: login logs, the command audit, `system-events.log`, QuickNotes, recordings, GPS
 tracks, keys, state files and ESP-NOW files.
 

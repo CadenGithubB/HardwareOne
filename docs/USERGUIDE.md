@@ -1281,7 +1281,8 @@ always does.
 
 When boot finishes the buffer is saved as `boot-debug-1.log`: on the SD card
 in `/sd/system/sys_logs/` when a writable card is in (the two boots before it
-move to `boot-debug-2.log` and `boot-debug-3.log`), otherwise on flash in
+move to `boot-debug-2.log` and `boot-debug-3.log`; like every log on the card
+it is sealed with the device key, see Logs on the SD card), otherwise on flash in
 `/system/sys_logs/` (only the newest boot is kept there). The buffer is 256 KB
 in PSRAM (4 KB of internal memory on a board without PSRAM, freed after the
 save; such a board also leaves the ESP-IDF tags at their saved levels). A
@@ -1842,7 +1843,7 @@ one day an hour, and last health files older than the 14 newest stored days, unt
 16 MB) above the mark is free. Today's folder, the open session, the three newest days, transcripts,
 system logs, GPS tracks, notes and everything under `/system` are never removed. A volume too full
 for a transcript refuses it (`stt status` reports "Transcript storage full or unavailable"); delete old
-transcripts yourself to free the space. The internal flash is left alone while a writable SD card takes the overflow.
+transcripts yourself to free the space. The internal flash is left alone while a writable SD card takes the log lines.
 Each pass that removed something writes one line to the system log. `sensorlog status` shows how
 many rows had to wait for the filesystem.
 
@@ -1850,6 +1851,67 @@ many rows had to wait for the filesystem.
 `<name>.log`; the web Logging viewer shows them as one. Together they use at most a quarter of the
 internal flash data partition. Error, event, I2C and command-audit lines are written in batches
 (within 2 s); a power loss or crash can lose up to 2 s of them.
+
+<a name="logs-on-the-sd-card"></a>
+**Logs on the SD card.** While a card is in, takes writes, has more than 8 MB free and the device
+key is available, log lines go to the card instead of flash, under the same names with `/sd` in
+front: the system logs (`/sd/system/sys_logs/`), sensor, track and automation captures and the
+system log (`/sd/logging_captures/...`), and the boot debug file. Saved transcripts already went to
+the card (`/sd/stt/u<id>/`). Settings, accounts, automations, keys and `/battery.csv` stay on flash.
+
+- **Pulled card:** the next line goes to flash, and the line that failed is written again there. At
+  most the last row on the card is torn. On the P4X-EYE the card switch notices the pull within
+  about a tenth of a second; other boards find out at the next write.
+- **Card back in:** the lines go to the card again, appended to the same files. What was written
+  meanwhile stays on flash, so a log can be on both; the viewers show both.
+- **Card nearly full** (under 8 MB free): lines go to flash until 16 MB is free again. Old sensor
+  captures are removed long before that (see above).
+- One line in `system-events.log` records each switch. `logtier` shows where lines go now and why.
+
+**Every log file on the card is sealed with the device key.** Its first line is a plain mark that
+names the key, `#HW1ENC v1 k1 id=<16 hex>` (the id `espnowcatchup` shows; it is not the key), and
+every line after it is one encrypted row (`ENC1:...`). Sensor CSV and track files keep their column
+header line in clear. Transcripts on the card are sealed with their header (the title holds the
+first spoken words). On flash nothing changes: files there are plain, except captures that
+`capturecrypt` seals; on the card every capture is sealed whatever `capturecrypt` says. Not sealed:
+recordings, pictures, videos, raw speech input, the speech model, maps, QuickNotes, and what a
+collector pulled from other devices (kept as received).
+
+**Logs on the card can be read only by the device that wrote them; to read a pulled card, put it
+back in that device.**
+
+| Where the card is | What can be read |
+|---|---|
+| In the device that wrote it | Everything: `fileview`, the web file viewer and Logging page, the lens and OLED file pages and `transcripts read` show the text after their usual permission check. A raw download and `fileread` return the sealed bytes. |
+| In another HardwareOne | File names, sizes and dates, and the mark with its key id; the viewers say "sealed by device `<id>`" instead of showing rows. Plain files (media) work. |
+| In a computer | The same: names, sizes, dates, mark lines and column headers. No row. |
+
+There is no export of the key and no backup of it: if the device's flash is erased, or the board
+dies, the logs on its card cannot be read by anything. A card log file that is not this device's
+sealed file (it has no mark, or another device's key id: a card from another device, or a file
+copied in) is moved aside to `<name>.foreign-<n>` and a new file is started; nothing in it is read
+or changed. If the device key cannot be loaded, nothing is written to the card: lines stay on
+flash, unsealed, and `logtier` counts them.
+
+Sealed rows are larger than their text (about twice for a 60-character line, 1.5 times for 300),
+so each system log may use twice its nominal size on the card, about 5.6 MB for all eight.
+
+Paths on the card have one spelling. A path under `/sd` is refused when any part of it has a
+backslash, ends in a dot or a space, is a short 8.3 name (`LOGGIN~1`), has a character outside
+plain ASCII (an accented letter, an emoji), or is another letter case of `system`,
+`logging_captures`, `stt`, `g2`, `collect`, `espnow` or `g2_icon_animations`: the card would open
+the real folder under any of these spellings, past the permission rules. A file on the card whose
+name has such a character (copied there on a computer) is listed but cannot be opened, renamed or
+removed through the device; rename it on the computer. Names on internal flash are not limited
+this way.
+
+A sealed row opens only where its kind of file lives: the system logs under `system/sys_logs`,
+captures under `logging_captures`, and a transcript in its owner's folder `stt/u<id>`. A sealed
+file copied or moved to another kind of place on a computer shows `[undecryptable row]` for every
+row (move it back to read it); a rotated copy (`.1`) or a set-aside file (`.foreign-<n>`) in the
+same folder reads as before. A line that is not a sealed row in a sealed file, other than the
+header lines directly after the mark of a capture, shows as `[unsealed line]`: the device did not
+write it.
 
 **R1 health logging (preferred):** `healthlogging on` (or the **Health Logging** row on
 Apps -> Health, the OLED R1 Health page, or the **Health logging** button on Web
