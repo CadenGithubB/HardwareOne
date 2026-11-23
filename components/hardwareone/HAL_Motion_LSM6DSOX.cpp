@@ -26,6 +26,7 @@
 #include <Wire.h>
 #include <esp_attr.h>   // EXT_RAM_BSS_ATTR
 #include <esp_timer.h>
+#include <atomic>
 
 #include "HAL_Motion_Fusion.h"
 #include "HAL_Motion_LSM6DSOXCore.h"
@@ -59,6 +60,20 @@ struct Lsm4517State {
   uint8_t bus, address, secondAddress;
 };
 EXT_RAM_BSS_ATTR Lsm4517State sState;
+
+// The tap tuning: threshold | shock << 8 | quiet << 16, bit 24 set while a
+// running chip still has to take it (the IMU task writes it at its next
+// sample). One word, so a command on another task can set it without a lock.
+constexpr uint32_t kTapRetune = 1u << 24;
+std::atomic<uint32_t> sTapTuning{kLsm6dsoxTapThreshold | (kLsm6dsoxTapShock << 8) | (kLsm6dsoxTapQuiet << 16)};
+
+Lsm6TapTuning tapTuningFrom(uint32_t packed) {
+  Lsm6TapTuning t;
+  t.threshold = (uint8_t)(packed & 0xFF);
+  t.shock = (uint8_t)((packed >> 8) & 0xFF);
+  t.quiet = (uint8_t)((packed >> 16) & 0xFF);
+  return t;
+}
 
 bool readRegs(TwoWire& wire, uint8_t address, uint8_t reg, uint8_t* out, uint8_t len) {
   wire.beginTransmission(address);
@@ -127,7 +142,11 @@ bool motionBackendInit(uint8_t bus, uint8_t address, uint8_t secondAddress, char
   i2cResetGracePeriod(address, bus);
   i2cResetGracePeriod(secondAddress, bus);
   StartIo io{bus, wire};
-  if (!lsm4517StartSequence(io, bus, address, secondAddress, why, whyLen)) return false;
+  Lsm6Chip chip = Lsm6Chip::Dsox;
+  // The start writes the current tuning, so nothing is left to retune.
+  const Lsm6TapTuning tuning = tapTuningFrom(sTapTuning.fetch_and(~kTapRetune));
+  if (!lsm4517StartSequence(io, bus, address, secondAddress, why, whyLen, &chip, tuning)) return false;
+  sState.sample.chip = chip;
   // Name both health records after their chips, and start their counts fresh.
   if (I2cDeviceManager* mgr = I2cDeviceManager::getInstance()) {
     mgr->registerDevice(address, kInfo.part, bus);
@@ -145,6 +164,19 @@ bool motionBackendInit(uint8_t bus, uint8_t address, uint8_t secondAddress, char
 bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, MotionSample& out) {
   TwoWire* wire = wireFor(bus);
   if (!wire) return false;
+  // A tuning change: rewrite the event bytes before this sample's read (a
+  // failed write tries again at the next sample).
+  const uint32_t packed = sTapTuning.load();
+  if (packed & kTapRetune) {
+    uint8_t burst[9];
+    uint8_t reg = 0;
+    const uint8_t len = lsm6EventBurst(sState.sample.chip == Lsm6Chip::Ds3trc, tapTuningFrom(packed), burst, reg);
+    const bool written = i2cTaskWithTimeout(bus, address, kClockHz, kReadLockMs,
+                                            [&]() -> bool { return writeRegs(*wire, address, reg, burst, len); });
+    // Clear the flag only if no newer value came in meanwhile.
+    uint32_t expected = packed;
+    if (written) sTapTuning.compare_exchange_strong(expected, packed & ~kTapRetune);
+  }
   Lsm4517Reading reading{};
   bool magFailed = false;
   const bool ok = lsm4517ReadSample(
@@ -210,6 +242,11 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, Moti
   out.hasGravity = true;
   out.ready = true;
   return true;
+}
+
+void motionBackendSetTapTuning(long thresholdMg, long shock, long quiet) {
+  const Lsm6TapTuning t = lsm6TapTuningFromMg(thresholdMg, shock, quiet);
+  sTapTuning.store((uint32_t)t.threshold | ((uint32_t)t.shock << 8) | ((uint32_t)t.quiet << 16) | kTapRetune);
 }
 
 // The state is static; nothing to free. Both chips are powered down (best

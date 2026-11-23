@@ -178,6 +178,22 @@ static void testShake() {
   assert(taps.take() == 0 && taps.recentres == 2);  // the re-centre, no START
 }
 
+// A real knock rings: the tap flag plus a few strong samples. Four firm taps
+// in quick succession still make X (bench 2026-11-23: the run was dropped as
+// "never calm" because the knocks themselves counted as movement).
+static void testRingingKnocksStillCount() {
+  Rig r;
+  r.start();
+  for (int i = 0; i < 4; ++i) {
+    r.step(true, 15.0f);
+    r.step(false, 14.0f);
+    r.step(false, 12.0f);
+    r.run(120);
+  }
+  r.run(1200);
+  assert(r.take() == kButtonX);
+}
+
 static void testTapsWaitForCalm() {
   // A run of taps that ends while the device is being moved about waits, and
   // is dropped when it never gets calm.
@@ -433,6 +449,7 @@ static void testLeanAxes() {
 }
 
 int main() {
+  testRingingKnocksStillCount();
   testTapCounts();
   testTapTiming();
   testShake();

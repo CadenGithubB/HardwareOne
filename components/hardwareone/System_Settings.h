@@ -58,6 +58,9 @@ struct Settings {
       thermalDevicePollMs(100),
       tofDevicePollMs(220),
       imuDevicePollMs(200),
+      imuTapThresholdMg(500),
+      imuTapShock(2),
+      imuTapQuiet(1),
       gpsDevicePollMs(200),
       apdsDevicePollMs(200),
       inputDevicePollMs(90),
@@ -295,6 +298,7 @@ struct Settings {
       anoEncoderSwapUpDown(true),     // Adafruit ANO breakout's silkscreen UP/DOWN map inverted by default
       anoEncoderSwapLeftRight(true),  // ditto LEFT/RIGHT — matches the typical assembled orientation
       imuInputTapWindowMs(350),
+      imuInputTapMergeMs(120),
       imuInputTiltDeg(15),
       imuInputShakeStart(true),
       imuInputSwapXY(false),
@@ -554,6 +558,9 @@ struct Settings {
   int thermalDevicePollMs;
   int tofDevicePollMs;
   int imuDevicePollMs;
+  int imuTapThresholdMg;  // LSM6 tap engine: threshold in mg, 125 mg steps (imutapthreshold)
+  int imuTapShock;        // ...shock window 0..3 (imutapshock)
+  int imuTapQuiet;        // ...quiet window 0..3 (imutapquiet)
   int gpsDevicePollMs;
   int apdsDevicePollMs;
   int inputDevicePollMs;
@@ -974,6 +981,7 @@ struct Settings {
   bool anoEncoderSwapUpDown;    // Swap UP/DOWN button bits (for vertically-mirrored mounts)
   bool anoEncoderSwapLeftRight; // Swap LEFT/RIGHT button bits (for horizontally-mirrored mounts)
   int  imuInputTapWindowMs;     // IMU input: a run of taps ends this long after its last tap (Input_IMU: imuinputtapms)
+  int  imuInputTapMergeMs;      // IMU input: tap flags closer than this are one knock (its rebound) (imuinputtapmerge)
   int  imuInputTiltDeg;         // IMU input: lean from the centre pose that deflects the joystick (imuinputtilt)
   bool imuInputShakeStart;      // IMU input: a sustained shake is START (imuinputshake)
   bool imuInputSwapXY;          // IMU input: swap the tilt axes (the sensor's mounting)
