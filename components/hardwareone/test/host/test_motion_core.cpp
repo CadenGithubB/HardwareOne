@@ -419,6 +419,7 @@ static void testConditionVariables() {
   assert(!motionConditionValue("IMU_HEADING", true, 0, 0, feed.state, now, v));
   assert(!motionConditionValue(nullptr, true, 0, 0, feed.state, now, v));
   // No tap since the IMU opened: no age (a condition IMU_TAP_AGE<5 stays false).
+  assert(!feed.state.tapAgeKnown);
   assert(!motionConditionValue("IMU_TAP_AGE", true, 0, 0, feed.state, now, v));
 
   // Flipped over: the pose changes once it held (kMotionDebounce*), not on the first sample.
@@ -450,11 +451,50 @@ static void testConditionVariables() {
   assert(feed.state.tapCount == 1 && feed.state.lastTapMs == tapAt);
   assert(motionConditionValue("IMU_TAP_AGE", true, 0, 0, feed.state, tapAt, v) && near(v.number, 0.0f));
   assert(motionConditionValue("IMU_TAP_AGE", true, 0, 0, feed.state, tapAt + 2500, v) && near(v.number, 2.5f));
-  // millis() wrapping between the tap and the question still gives the age.
+  // The device's millisecond clock is 32 bits and wraps after 49.7 days. A
+  // tap just before the wrap, asked about just after it, has its real age.
   { MotionActionState state;
     state.tapCount = 1;
-    state.lastTapMs = static_cast<unsigned long>(-1) - 999;  // 1 s before the wrap
-    assert(motionConditionValue("IMU_TAP_AGE", true, 0, 0, state, 2000, v) && near(v.number, 3.0f)); }
+    state.tapAgeKnown = true;
+    state.lastTapMs = 0xFFFFFFFFul - 999;  // 1 s before the wrap
+    assert(motionConditionValue("IMU_TAP_AGE", true, 0, 0, state, 2000, v) && near(v.number, 3.0f));
+    // The same on a 32-bit count that has wrapped (the device's unsigned long).
+    const uint32_t wrapped = static_cast<uint32_t>(0xFFFFFFFFul - 999) + 3000u;
+    assert(wrapped == 2000u);
+    assert(motionConditionValue("IMU_TAP_AGE", true, 0, 0, state, wrapped, v) && near(v.number, 3.0f)); }
+  // A tap keeps its age for an hour, then has none: 49.7 days later the clock
+  // reads the tap's time again, and the old tap must not look fresh.
+  { Feed old;
+    old.run(still(), 5);
+    MotionActionSample knock = still();
+    knock.hasHwTap = true;
+    knock.hwTap = true;
+    const unsigned long tapTime = old.now;
+    old.run(knock, 1);
+    assert(old.state.tapAgeKnown);
+    assert(motionConditionValue("IMU_TAP_AGE", true, 0, 0, old.state, tapTime + kMotionTapAgeCapMs, v) &&
+           near(v.number, kMotionTapAgeCapMs / 1000.0f, 0.5f));
+    // Past the cap the question has no answer even before the detector runs again...
+    assert(!motionConditionValue("IMU_TAP_AGE", true, 0, 0, old.state, tapTime + kMotionTapAgeCapMs + 1, v));
+    // ...and one full turn of the 32-bit clock later (age 0 in 32 bits) the
+    // detector has long forgotten the tap: it runs on every sample.
+    old.now = tapTime + kMotionTapAgeCapMs + 20;
+    old.run(still(), 1);
+    assert(!old.state.tapAgeKnown && old.state.tapCount == 1);
+    const uint32_t oneTurnLater = static_cast<uint32_t>(tapTime);  // tapTime + 2^32 in 32 bits
+    assert(!motionConditionValue("IMU_TAP_AGE", true, 0, 0, old.state, oneTurnLater, v));
+    // A new tap has an age again.
+    old.run(knock, 1);
+    assert(old.state.tapAgeKnown && motionConditionValue("IMU_TAP_AGE", true, 0, 0, old.state, old.now, v)); }
+  // A detector that never ran again (the IMU task stalled) and a clock that
+  // came round: the state still says "known", so the age is taken in 32 bits
+  // and is small; the reading's own age gate (motionReadingFresh) is what
+  // makes such a condition false.
+  assert(motionReadingFresh(1000, 900, 200) && motionReadingFresh(2400, 1000, 200));
+  assert(!motionReadingFresh(2401, 1000, 200));                // older than 2 polls + 1 s
+  assert(motionReadingFresh(5, 0xFFFFFFF0u, 200));              // across the clock's wrap
+  assert(!motionReadingFresh(0x80000000u, 0, 1000));
+  assert(motionReadingFresh(3000, 0, 1000) && !motionReadingFresh(3001, 0, 1000));
 }
 
 // ---- What the surfaces show -----------------------------------------------------
@@ -467,6 +507,16 @@ static void testCompassPointAndGyroOffsetState() {
   };
   for (const auto& c : cases) assert(!std::strcmp(motionCompassPoint(c.heading), c.point));
   assert(!std::strcmp(motionCompassPoint(NAN), "?") && !std::strcmp(motionCompassPoint(INFINITY), "?"));
+
+  // Yaw on a small display: a whole number in 0..359, three characters at most.
+  const struct { float yaw; int shown; } yaws[] = {
+      {0.0f, 0}, {359.4f, 359}, {359.99f, 359}, {360.0f, 0}, {-0.4f, 359}, {-180.0f, 180}, {725.0f, 5},
+      {-721.0f, 359}, {180.5f, 180},
+  };
+  for (const auto& y : yaws) assert(motionYawForDisplay(y.yaw) == y.shown);
+  assert(motionYawForDisplay(NAN) == 0 && motionYawForDisplay(-INFINITY) == 0);
+  for (float y = -1000.0f; y < 1000.0f; y += 0.37f) assert(motionYawForDisplay(y) >= 0 && motionYawForDisplay(y) <= 359);
+  assert(kMotionOledColumns == 21);
 
   // 'imustatus': a chip that fuses on its own keeps its offset; a backend the
   // layer fuses measures it at each start, and a start on a moving board has none.

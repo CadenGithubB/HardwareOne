@@ -157,7 +157,10 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, Moti
       [&](uint8_t* src, uint8_t* data, bool& srcRead) -> bool {
         return i2cTaskWithTimeout(bus, address, kClockHz, kReadLockMs, [&]() -> bool {
           srcRead = readRegs(*wire, address, kLsm6dsoxRegAllIntSrc, src, kLsm6dsoxIntSrcBytes);
-          return srcRead && readRegs(*wire, address, kLsm6dsoxRegOutTemp, data, kLsm6dsoxDataBytes);
+          // An all-zero burst (the chip lost power and came back in
+          // power-down) fails the transaction, so it counts as a device error.
+          return srcRead && readRegs(*wire, address, kLsm6dsoxRegOutTemp, data, kLsm6dsoxDataBytes) &&
+                 lsm6dsoxBurstAlive(data);
         });
       },
       reading, magFailed);

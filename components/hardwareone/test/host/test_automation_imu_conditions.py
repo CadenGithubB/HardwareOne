@@ -12,8 +12,9 @@ detector copy are the harness's.
 Covers: IMU_PITCH / IMU_ROLL / IMU_TILT with every numeric operator and
 negative values, IMU_POSE with = / != / CONTAINS in any case (flip is
 IMU_POSE=FACE-DOWN), IMU_TAP_AGE, and that a closed IMU, a reading that is not
-valid yet, a busy cache, no tap yet and an unknown IMU_ name (IMU_HEADING: not
-offered yet) all make the condition false.
+valid yet, a reading the IMU task stopped refreshing (also across the 32-bit
+clock's wrap), a busy cache, no tap yet, a tap more than an hour old and an
+unknown IMU_ name (IMU_HEADING: not offered yet) all make the condition false.
 
 Source contracts: the branch sits in evaluateCondition under ENABLE_IMU_SENSOR
 with a false answer for builds without the IMU, and the user-facing lists

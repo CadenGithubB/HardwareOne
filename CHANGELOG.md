@@ -226,7 +226,8 @@ Host-tested and built; not run on a device.
 - A yaw that is not a compass heading is not shown as one. The Adafruit 4517 has no heading until
   its magnetometer calibration lands, so its yaw counts from the IMU's start:
   - the OLED IMU page shows the chip's name and its temperature, then `P: R: Yrel:` (with a heading:
-    `Y: P: R:`), the acceleration, and a heading line (`Hdg:` with the compass point, the BNO055's
+    `Y: P: R:`; yaw is shown in 0..359 and the mark shortens to `Yr:` when the row would pass the
+    panel's 21 characters), the acceleration, and a heading line (`Hdg:` with the compass point, the BNO055's
     magnetometer calibration `c0`..`c3` and the field strength) only with a heading. Open without a
     reading yet, it shows the chip's name and "Waiting for data..." instead of zeros;
   - the web IMU card writes "Yaw (relative)";
@@ -247,9 +248,10 @@ Host-tested and built; not run on a device.
 - Automation conditions on the motion sensor: `IMU_PITCH`, `IMU_ROLL` and `IMU_TILT` (degrees; tilt
   is the larger of the two), `IMU_POSE` (`FACE-UP`, `FACE-DOWN`, `PORTRAIT`, `PORTRAIT-INV`,
   `LANDSCAPE-R`, `LANDSCAPE-L`: the pose the last `imu_orientation` event announced, so
-  `IF IMU_POSE=FACE-DOWN` is "flipped over") and `IMU_TAP_AGE` (seconds since the last tap). A closed
-  IMU, no reading yet or no tap since it opened makes the condition false. The web Automations
-  page lists them. There is no heading condition yet.
+  `IF IMU_POSE=FACE-DOWN` is "flipped over") and `IMU_TAP_AGE` (seconds since the last tap, for an
+  hour after it). A closed IMU, no reading yet, a reading the IMU stopped refreshing (older than
+  two `imudevicepollms` periods and a second) or no tap in the last hour makes the condition false.
+  The web Automations page lists them. There is no heading condition yet.
 - `imustatus [json]`: the build's chip, its bus and address(es), whether the chip detects taps
   itself, whether yaw is a compass heading, and how the start's gyroscope offset went (the 4517
   measures it at each `openimu`: `still`, or `moving` when the board never held still, which makes
@@ -257,6 +259,11 @@ Host-tested and built; not run on a device.
 - Adafruit 4517: the start also reads back the accelerometer's filter setting and the I3C-off
   setting (CTRL8_XL, CTRL9_XL), so a lost write is reported instead of leaving the samples
   unfiltered.
+- Adafruit 4517: a read that returns only zeros fails. That is what the LSM6DSOX answers after its
+  supply was cut and came back (it is in power-down with its settings gone); the zeros were taken
+  as a reading, and so as a free fall. The failed reads now count as device errors, and the IMU
+  is auto-disabled with a `sensor_fault` event after the usual number in a row; `openimu` starts
+  it again.
 
 ### Changed (I2C buses and addresses)
 - Every `<device>bus` command (`oledbus`, `fuelgaugebus`, `inputbus`, `imubus`, `tofbus`,

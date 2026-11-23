@@ -256,10 +256,36 @@ static void imuPages() {
   // is marked relative, and there is no heading or magnetometer line.
   reset(); gImuBackend="LSM6DSOX"; IMU.hasHeading=false; IMU.hasMag=true; IMU.magX=30.0f; IMU.imuTemp=28.9f;
   assert(imuPage()=="LSM6DSOX 28C\nP:-12 R:90 Yrel:359\nA 1.2 -2.5 9.8\n");
-  // The longest rows fit the panel's 21 characters.
-  IMU.oriPitch=-90.0f; IMU.oriRoll=-180.0f; IMU.accelX=IMU.accelY=IMU.accelZ=-39.2f;
-  { const std::string page=imuPage(); size_t start=0;
-    for(size_t end; (end=page.find('\n',start))!=std::string::npos; start=end+1) assert(end-start<=21); }
+  // Every row fits the panel's 21 characters, at the widest values each
+  // field can take: pitch and roll to -180 (the mounting correction's
+  // extreme modes), any yaw (shown in 0..359), 16 g on every axis, a strong
+  // field, both chips, with and without a heading.
+  assert(imuPage()=="LSM6DSOX 28C\nP:-12 R:90 Yrel:359\nA 1.2 -2.5 9.8\n");
+  for(const char* chip:{"LSM6DSOX","BNO055"}) for(bool heading:{false,true})
+    for(float pitch:{-90.0f,-180.0f,179.0f,-5.0f}) for(float roll:{-180.0f,-99.0f,180.0f})
+      for(float yaw:{-180.0f,-0.4f,0.0f,359.9f,360.0f,725.0f}) for(float accel:{-39.2f,-156.9f,99.9f}) {
+        gImuBackend=chip; IMU.hasHeading=heading; IMU.hasCal=heading; IMU.cal=0xFF; IMU.hasMag=true;
+        IMU.magX=IMU.magY=IMU.magZ=-1300.0f; IMU.imuTemp=-40.0f;
+        IMU.oriPitch=pitch; IMU.oriRoll=roll; IMU.oriYaw=yaw; IMU.accelX=IMU.accelY=IMU.accelZ=accel;
+        const std::string page=imuPage(); size_t start=0, rows=0;
+        for(size_t end; (end=page.find('\n',start))!=std::string::npos; start=end+1,++rows) {
+          if(end-start>21) { std::cerr<<"row too wide: "<<page.substr(start,end-start)<<'\n'; assert(false); }
+        }
+        assert(rows==(heading?4u:3u));
+        assert(page.find("Y:-")==std::string::npos && page.find("Yrel:-")==std::string::npos &&
+               page.find("Yr:-")==std::string::npos && page.find("Hdg:-")==std::string::npos);
+      }
+  // The mark stays "Yrel:" while it fits and shortens only at the extremes;
+  // a yaw the correction pushed below zero is shown in 0..359.
+  gImuBackend="LSM6DSOX"; IMU.hasHeading=false; IMU.hasCal=false; IMU.imuTemp=28.9f;
+  IMU.accelX=1.25f; IMU.accelY=-2.5f; IMU.accelZ=9.75f;
+  IMU.oriPitch=-90.0f; IMU.oriRoll=-180.0f; IMU.oriYaw=-180.0f;
+  assert(imuPage()=="LSM6DSOX 28C\nP:-90 R:-180 Yrel:180\nA 1.2 -2.5 9.8\n");
+  IMU.oriPitch=-180.0f; IMU.oriYaw=359.5f;
+  assert(imuPage()=="LSM6DSOX 28C\nP:-180 R:-180 Yr:359\nA 1.2 -2.5 9.8\n");
+  IMU.accelX=IMU.accelY=IMU.accelZ=-156.9f; IMU.oriPitch=0.0f;
+  assert(imuPage()=="LSM6DSOX 28C\nP:0 R:-180 Yrel:359\nA -157 -157 -157\n");
+  IMU.oriPitch=-90.0f; IMU.oriRoll=-180.0f;
   // Open without a reading yet: the chip's name and a waiting line, no zeros.
   IMU.imuDataValid=false;
   assert(imuPage()=="LSM6DSOX\nWaiting for data...\n");

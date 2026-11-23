@@ -198,6 +198,16 @@ constexpr unsigned long kMotionTapQuietMs = 150;
 // about 11).
 constexpr uint8_t kMotionDebounceSamples = 3;
 constexpr unsigned long kMotionDebounceMs = 200;
+// How long a tap keeps an age (IMU_TAP_AGE): an hour, far inside the 32-bit
+// millisecond clock's 49.7 days.
+constexpr uint32_t kMotionTapAgeCapMs = 60UL * 60UL * 1000UL;
+// A reading is fresh for two publish periods and a margin: older, the IMU
+// task is not publishing (the bus is paused, the chip stopped answering) and
+// the reading says nothing about now.
+constexpr uint32_t kMotionReadingFreshMarginMs = 1000;
+inline bool motionReadingFresh(uint32_t nowMs, uint32_t lastUpdateMs, uint32_t pollMs) {
+  return static_cast<uint32_t>(nowMs - lastUpdateMs) <= 2 * pollMs + kMotionReadingFreshMarginMs;
+}
 // A chip-detected tap has no strength reading: it reports as full strength.
 constexpr float kMotionHwTapStrength = 1.0f;
 
@@ -218,6 +228,10 @@ struct MotionActionState {
   unsigned long lastTapMs = 0;
   uint32_t tapCount = 0;
   float tapStrength = 0;
+  // lastTapMs is a tap not older than kMotionTapAgeCapMs. The millisecond
+  // clock wraps after 49.7 days, so an older tap is forgotten instead of
+  // reading as fresh again when the clock comes round.
+  bool tapAgeKnown = false;
 
   bool isRotating = false;
   float rotationRateDps = 0;  // deg/s, for display
@@ -406,6 +420,7 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
   if (tapSeen && (now - s.lastTapMs) > 200) {
     s.tapDetected = true;
     s.lastTapMs = now;
+    s.tapAgeKnown = true;
     s.tapCount++;
     s.tapStrength = in.hasHwTap ? kMotionHwTapStrength : fminf((accelMag - kMotionTapAccel) / 20.0f, 1.0f);
     if (events) {
@@ -416,6 +431,11 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
   } else if (now - s.lastTapMs > 500) {
     s.tapDetected = false;
     s.tapStrength = 0.0f;
+  }
+  // The tap's age, in the device's 32-bit milliseconds: past the cap it has none.
+  if (s.tapAgeKnown &&
+      static_cast<uint32_t>(static_cast<uint32_t>(now) - static_cast<uint32_t>(s.lastTapMs)) > kMotionTapAgeCapMs) {
+    s.tapAgeKnown = false;
   }
 
   // 4. Rotation: the fastest axis against the threshold, both in rad/s.
@@ -572,6 +592,20 @@ inline const char* motionGyroOffsetText(const char* state) {
   return "not taken, the board was moving (yaw drifts faster; hold it still, then 'closeimu' and 'openimu')";
 }
 
+// ---- What a small display shows -------------------------------------------------
+// The OLED's text rows are 21 characters wide (128 px, 6 px a character).
+constexpr int kMotionOledColumns = 21;
+// Yaw as a whole number in 0..359, so it never takes more than three
+// characters (the stored yaw is 0..360 from the chip, and anything once the
+// mounting correction's offsets and modes have been applied).
+inline int motionYawForDisplay(float yawDeg) {
+  if (!(yawDeg == yawDeg) || yawDeg > 1.0e6f || yawDeg < -1.0e6f) return 0;
+  float y = fmodf(yawDeg, 360.0f);
+  if (y < 0.0f) y += 360.0f;
+  const int shown = static_cast<int>(y);
+  return shown >= 360 ? 0 : shown;
+}
+
 // ---- Compass point -------------------------------------------------------------
 // The eight-point name of a heading (degrees clockwise from north), for the
 // surfaces that show one. Only a reading with hasHeading has a heading.
@@ -592,7 +626,9 @@ inline const char* motionCompassPoint(float headingDeg) {
 //                        or LANDSCAPE-L: the pose the last imu_orientation
 //                        event announced (held for kMotionDebounce*), so
 //                        IMU_POSE=FACE-DOWN is "flipped over"
-//   IMU_TAP_AGE          seconds since the last tap
+//   IMU_TAP_AGE          seconds since the last tap, for an hour after it
+//                        (kMotionTapAgeCapMs); then, as before the first tap,
+//                        it has no value
 // There is no heading variable yet: yaw is a heading only with a calibrated
 // magnetometer (hasHeading).
 struct MotionConditionValue {
@@ -611,7 +647,8 @@ inline bool motionConditionIsVariable(const char* name) {
 }
 
 // The value of one variable. False: there is none, so the condition is false
-// (an unknown name, no valid reading, no pose yet, no tap since the IMU opened).
+// (an unknown name, no valid and fresh reading, no pose yet, no tap in the
+// last hour).
 // pitch and roll are the reading's (ImuCache, after the orientation
 // correction), `actions` the detector's state, `now` millis().
 inline bool motionConditionValue(const char* name, bool readingValid, float pitch, float roll,
@@ -643,8 +680,12 @@ inline bool motionConditionValue(const char* name, bool readingValid, float pitc
     out.isText = true;
     return true;
   }
-  // IMU_TAP_AGE
-  if (actions.tapCount == 0) return false;
-  out.number = static_cast<float>(now - actions.lastTapMs) / 1000.0f;
+  // IMU_TAP_AGE, in the device's 32-bit milliseconds (the host's unsigned
+  // long is wider). A tap past the cap has no age, whether or not the
+  // detector has run since: the clock's wrap never makes an old tap fresh.
+  if (!actions.tapAgeKnown) return false;
+  const uint32_t ageMs = static_cast<uint32_t>(now) - static_cast<uint32_t>(actions.lastTapMs);
+  if (ageMs > kMotionTapAgeCapMs) return false;
+  out.number = static_cast<float>(ageMs) / 1000.0f;
   return true;
 }

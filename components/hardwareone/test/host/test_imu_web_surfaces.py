@@ -8,7 +8,8 @@ from the "imu" rows of its device table (WebServer_Utils.cpp,
 webStreamImuIdentityJs; the name list itself is test_i2c_instance_core's).
 
 The shipping scripts are extracted from WebPage_Sensors.h, WebPage_Dashboard.h
-and HAL_Motion_Web.h and run in Node for both builds (imu_web_surfaces_browser_test.js):
+and HAL_Motion_Web.h and run in Node for both IMU builds, each as a build
+with and without the ANO encoder sends them (imu_web_surfaces_browser_test.js):
 the Sensors page's device detection and its already-running check, the
 dashboard's sensor list, its card visibility and its "detected but not
 compiled" notice, and the IMU card's reading (yaw is labelled relative when the reading has no heading).
@@ -44,18 +45,18 @@ def require(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def literals(chunk: str) -> str:
-    """Concatenated C string literals of one chunk; an #if/#else takes its #else lines
-    (the pages' only guard here is the ANO encoder, off in these builds)."""
+def literals(chunk: str, ano: bool) -> str:
+    """Concatenated C string literals of one chunk. The pages' only guard in
+    these scripts is the ANO encoder: `ano` picks its #if or its #else lines."""
     active = [True]
     parts = []
     for line in chunk.splitlines():
         directive = line.strip()
         if directive.startswith("#if "):
             require(directive == "#if ENABLE_ANO_ENCODER", f"unhandled guard in a page script: {directive}")
-            active.append(False)
+            active.append(active[-1] and ano)
         elif directive.startswith("#else"):
-            active[-1] = active[-2]
+            active[-1] = active[-2] and not ano
         elif directive.startswith("#endif"):
             active.pop()
         elif active[-1] and not directive.startswith("//"):
@@ -67,19 +68,19 @@ def chunks(source: str) -> list[str]:
     return [match.group(1) for match in CHUNK.finditer(source)]
 
 
-def one(source: str, marker: str) -> str:
+def one(source: str, marker: str, ano: bool) -> str:
     found = [chunk for chunk in chunks(source) if marker in chunk]
     require(len(found) == 1, f"expected one chunk with {marker!r}, found {len(found)}")
-    return literals(found[0])
+    return literals(found[0], ano)
 
 
-def between(source: str, first: str, last: str) -> str:
+def between(source: str, first: str, last: str, ano: bool) -> str:
     """The chunks from the one with `first` to the one with `last`, joined."""
     all_chunks = chunks(source)
     start = [i for i, chunk in enumerate(all_chunks) if first in chunk]
     end = [i for i, chunk in enumerate(all_chunks) if last in chunk]
     require(len(start) == 1 and len(end) == 1 and start[0] <= end[0], f"script from {first!r} to {last!r}")
-    return "".join(literals(chunk) for chunk in all_chunks[start[0]:end[0] + 1])
+    return "".join(literals(chunk, ano) for chunk in all_chunks[start[0]:end[0] + 1])
 
 
 def script(text: str) -> str:
@@ -87,13 +88,17 @@ def script(text: str) -> str:
     return text[len("<script>"):-len("</script>")]
 
 
-def identity_format(component: Path) -> str:
+def identity_format(component: Path) -> tuple[str, str]:
+    """The identity statement's format and the has() statement that follows it."""
     utils = (component / "WebServer_Utils.cpp").read_text()
     found = re.search(r'"(window\.__hwImu=\{names:%s,part:\'%s\',label:\'IMU \(%s\)\'\};)"', utils)
     require(found is not None, "webStreamImuIdentityJs writes window.__hwImu={names,part,label}")
     require('i2cModuleDeviceNamesJs("imu"' in utils and 'i2cModuleFirstDeviceName("imu")' in utils,
             "the identity comes from the device table's imu rows")
-    return found.group(1)
+    has = re.search(r'"(window\.__hwImu\.has=function\(n\)\{[^"]*\};)"', utils)
+    require(has is not None and "hasOwnProperty.call(this.names,n)" in has.group(1),
+            "webStreamImuIdentityJs writes window.__hwImu.has as an own-key check")
+    return found.group(1), has.group(1)
 
 
 def table_rows(component: Path) -> None:
@@ -112,32 +117,50 @@ def no_chip_names(component: Path) -> None:
     card = (component / "HAL_Motion_Web.h").read_text()
     require("device:'BNO055'" not in card and "window.__hwImu.names" in card,
             "the dashboard entry of the IMU is found by window.__hwImu.names")
+    # A name is looked up as an own key (has / hasOwnProperty), never by
+    # indexing the names object: "constructor" is on every object.
+    for file in ("WebPage_Sensors.h", "WebPage_Dashboard.h", "HAL_Motion_Web.h"):
+        text = (component / file).read_text()
+        require(not re.search(r"(?:__hwImu\.names|imuNames|d\.devices)\[", text),
+                f"{file} indexes the IMU's names object; use window.__hwImu.has(name) or hasOwnProperty")
     lens = (component / "G2_Page_Sensors.cpp").read_text()
     require('add(G2SensorKind::Imu, "IMU",   imuBackendName(), "imu", true,' in lens,
             "the lens names the build's chip (imuBackendName)")
 
 
-def pages(component: Path) -> dict:
+SCRIPTS = ("detection", "active", "reader", "dashDef", "dashList", "dashNotice", "dashVisibility")
+
+
+def scripts(component: Path, ano: bool) -> dict:
+    """The page scripts as a build with (`ano`) or without the ANO encoder sends them."""
     sensors = (component / "WebPage_Sensors.h").read_text()
     dashboard = (component / "WebPage_Dashboard.h").read_text()
     card = (component / "HAL_Motion_Web.h").read_text()
     # The detection script opens "(function(){try{" and its Promise chain ends
     # with .finally(...); the rest of that function is other page code.
-    detection = between(sensors, "[SENSORS] Device detection starting", ".finally(function(){hw.hide(loading);hw.show(grid);});")
+    detection = between(sensors, "[SENSORS] Device detection starting",
+                        ".finally(function(){hw.hide(loading);hw.show(grid);});", ano)
     require(detection.startswith("console.log('[SENSORS] Device detection starting...');(function(){try{"),
             "the detection script starts as expected")
     detection += "}catch(e){throw e;}})();"
     return {
-        "identity": identity_format(component),
-        "builds": BUILDS,
         "detection": detection,
-        "active": one(sensors, "function checkAlreadyActiveSensors()"),
-        "reader": one(card, "window._sensorReaders.imu = function()"),
-        "dashDef": one(card, "window.__dashSensorDefs.push("),
-        "dashList": script(one(dashboard, "Section 7c: Adding helper functions")),
-        "dashNotice": script(one(dashboard, "Detected but not compiled")),
-        "dashVisibility": script(one(dashboard, "window.Dash.updateDeviceVisibility=function(registry)")),
+        "active": one(sensors, "function checkAlreadyActiveSensors()", ano),
+        "reader": one(card, "window._sensorReaders.imu = function()", ano),
+        "dashDef": one(card, "window.__dashSensorDefs.push(", ano),
+        "dashList": script(one(dashboard, "Section 7c: Adding helper functions", ano)),
+        "dashNotice": script(one(dashboard, "Detected but not compiled", ano)),
+        "dashVisibility": script(one(dashboard, "window.Dash.updateDeviceVisibility=function(registry)", ano)),
     }
+
+
+def pages(component: Path) -> dict:
+    identity, has = identity_format(component)
+    # Both input variants: a build with the ANO encoder (the status sign) sends
+    # other lines in the scripts' ANO guards than a build without it.
+    variants = {"gamepad": scripts(component, ano=False), "ano": scripts(component, ano=True)}
+    require(variants["gamepad"]["active"] != variants["ano"]["active"], "the two input variants differ")
+    return {"identity": identity, "identityHas": has, "builds": BUILDS, "variants": variants}
 
 
 def main() -> None:
@@ -153,10 +176,11 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="hw1-imu-web-") as tmp:
         data = Path(tmp) / "pages.json"
         data.write_text(json.dumps(page))
-        for name in ("detection", "active", "reader", "dashDef", "dashList", "dashNotice", "dashVisibility"):
-            js = Path(tmp) / f"{name}.js"
-            js.write_text(page[name])
-            subprocess.run([args.node, "--check", str(js)], check=True)
+        for variant, texts in page["variants"].items():
+            for name in SCRIPTS:
+                js = Path(tmp) / f"{variant}-{name}.js"
+                js.write_text(texts[name])
+                subprocess.run([args.node, "--check", str(js)], check=True)
         subprocess.run([args.node, str(HERE / "imu_web_surfaces_browser_test.js"), str(data)], check=True)
 
 

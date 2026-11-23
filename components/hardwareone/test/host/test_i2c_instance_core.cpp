@@ -10,9 +10,17 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <initializer_list>
 #include <string>
+#include <vector>
 
 #include "System_I2CInstanceCore.h"
+
+// The repository's root, for the files a test reads (CMakeLists.txt sets it).
+#ifndef HW1_REPO_ROOT
+#error "define HW1_REPO_ROOT (the repository root) for test_i2c_instance_core.cpp"
+#endif
 
 static std::string str(const char* text, size_t len) { return std::string(text, len); }
 
@@ -495,9 +503,9 @@ static void testBusMove() {
   assert(i2cOwnerBusClash(uses, count, i2cRowOwner(-1), 1) == nullptr);
 }
 
-// The status sign's one-time setup (configurations/README.md,
-// feathers3-status-sign), replayed from fresh settings through the rules its
-// commands apply: a bus setter checks every address its owner holds on the
+// The status sign's one-time setup, read from configurations/README.md
+// (feathers3-status-sign) and replayed from fresh settings through the rules
+// its commands apply: a bus setter checks every address its owner holds on the
 // new bus (i2cOwnerBusClash), an address setter checks the address on the
 // owner's bus (i2cAddressTakenBy). Every command of the block is accepted in
 // the block's order, and the wiring it ends in has no address twice on a bus.
@@ -544,16 +552,86 @@ struct SignSetup {
   bool imuBusTo(uint8_t to) { return setBus(imuBus, i2cInstanceOwner(I2C_DEVICE_IMU, 1), to); }
 };
 
+// The sign's setup block as configurations/README.md prints it: the lines of
+// the first ```text block after the feathers3-status-sign paragraph begins.
+static std::vector<std::string> signSetupBlock() {
+  const std::string path = std::string(HW1_REPO_ROOT) + "/configurations/README.md";
+  std::ifstream file(path);
+  if (!file) {
+    std::fprintf(stderr, "cannot read %s\n", path.c_str());
+    assert(false);
+  }
+  std::vector<std::string> lines;
+  std::string line;
+  int state = 0;  // 0: before the sign's paragraph, 1: in it, 2: in its block
+  while (std::getline(file, line)) {
+    if (state == 0 && line.rfind("`feathers3-status-sign` is the same sign", 0) == 0) state = 1;
+    else if (state == 1 && line == "```text") state = 2;
+    else if (state == 2 && line == "```") break;
+    else if (state == 2 && !line.empty()) lines.push_back(line);
+  }
+  return lines;
+}
+
+// One line of the block applied to the sign: a bus or address command goes
+// through its collision rule; the others (autostart, antenna, power saving,
+// reboot) move no address. False when the command is refused; a command this
+// test does not know fails it, so a new line in the block is looked at.
+static bool applySignSetupLine(SignSetup& sign, const std::string& line, unsigned& moves) {
+  std::vector<std::string> words;
+  size_t start = 0;
+  while (start < line.size()) {
+    const size_t end = line.find(' ', start);
+    const std::string word = line.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    if (!word.empty()) words.push_back(word);
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  assert(!words.empty());
+  const std::string& command = words[0];
+  const auto number = [](const std::string& text) { return static_cast<uint8_t>(std::stoul(text, nullptr, 0)); };
+  // "<command> <value>" is instance 1; "<command> <n> <value>" names the instance.
+  const auto instanceAndValue = [&](uint8_t& n, uint8_t& value) {
+    assert(words.size() == 2 || words.size() == 3);
+    n = words.size() == 3 ? number(words[1]) : 1;
+    value = number(words.back());
+    assert(n >= 1 && n <= 2);
+  };
+  if (command == "encoderbus" || command == "encoderaddress") {
+    uint8_t n = 0, value = 0;
+    instanceAndValue(n, value);
+    ++moves;
+    return command == "encoderbus" ? sign.encoderBusTo(n, value) : sign.setEncoderAddress(n, value);
+  }
+  if (command == "inputbus" || command == "imubus") {
+    assert(words.size() == 2);
+    ++moves;
+    return command == "inputbus" ? sign.inputBusTo(number(words[1])) : sign.imuBusTo(number(words[1]));
+  }
+  for (const char* other : {"encoderautostart", "inputautostart", "imuautostart", "oledautostart",
+                            "wifiexternalantenna", "powersave", "reboot"}) {
+    if (command == other) return true;
+  }
+  std::fprintf(stderr, "the sign's setup block has a command this test does not know: %s\n", line.c_str());
+  assert(false);
+  return false;
+}
+
 static void testStatusSignSetup() {
   if (i2cMaxInstances(I2C_DEVICE_ENCODER) < 2) return;  // the sign has two encoder boards
   SignSetup sign;
-  // The block, in its order.
-  assert(sign.encoderBusTo(1, 1));            // encoderbus 1
-  assert(sign.setEncoderAddress(1, 0x36));    // encoderaddress 0x36
-  assert(sign.encoderBusTo(2, 0));            // encoderbus 2 0
-  assert(sign.setEncoderAddress(2, 0x37));    // encoderaddress 2 0x37
-  assert(sign.inputBusTo(1));                 // inputbus 1
-  assert(sign.imuBusTo(1));                   // imubus 1
+  // The README's block, line by line in its order: every command is accepted.
+  const std::vector<std::string> block = signSetupBlock();
+  unsigned moves = 0;
+  for (const std::string& line : block) {
+    if (!applySignSetupLine(sign, line, moves)) {
+      std::fprintf(stderr, "the sign's setup block: '%s' is refused by the address check\n", line.c_str());
+      assert(false);
+    }
+  }
+  // Both encoder boards, the wheel and the motion sensor are placed, and the
+  // block ends with the reboot that applies the buses.
+  assert(moves >= 6 && !block.empty() && block.back() == "reboot");
   // The wiring found on the board: bus 0 (horizontal STEMMA QT) the gauge
   // 0x36, the DS3231 0x68 and the second 4991 0x37; bus 1 (vertical) the OLED
   // 0x3D, the first 4991 0x36, the ANO 0x49 and the 4517 (0x6A + 0x1C).
@@ -571,9 +649,12 @@ static void testStatusSignSetup() {
       assert(!(sign.uses[i].bus == sign.uses[j].bus && sign.uses[i].address == sign.uses[j].address));
     }
   }
-  // Repeating the block changes nothing and is accepted again.
-  assert(sign.encoderBusTo(1, 1) && sign.setEncoderAddress(1, 0x36) && sign.encoderBusTo(2, 0) &&
-         sign.setEncoderAddress(2, 0x37) && sign.inputBusTo(1) && sign.imuBusTo(1));
+  // Running the block a second time changes nothing and is accepted again.
+  for (const std::string& line : block) assert(applySignSetupLine(sign, line, moves));
+  sign.walk();
+  for (size_t i = 0; i < sign.count; ++i) {
+    assert(sign.uses[i].bus == expected[i].bus && sign.uses[i].address == expected[i].address);
+  }
 
   // The order matters, and the checks say why. On fresh settings the first
   // 4991's address cannot be set before its bus: 0x36 on bus 0 is the gauge's.

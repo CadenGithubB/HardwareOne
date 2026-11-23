@@ -981,7 +981,7 @@ Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum vari
 | Sensors | `MOTION` | enum | `DETECTED` / `NONE` |
 | Sensors | `IMU_PITCH` `IMU_ROLL` `IMU_TILT` | numeric | the motion sensor's tilt, degrees (after the mounting correction); `IMU_TILT` is the larger of the two, without its sign |
 | Sensors | `IMU_POSE` | enum | `FACE-UP` `FACE-DOWN` `PORTRAIT` `PORTRAIT-INV` `LANDSCAPE-R` `LANDSCAPE-L`: the pose the last `imu_orientation` event announced (held for 3 readings and at least 200 ms); `IMU_POSE=FACE-DOWN` is "flipped over" |
-| Sensors | `IMU_TAP_AGE` | numeric | seconds since the last tap or knock; false until the first tap after `openimu` |
+| Sensors | `IMU_TAP_AGE` | numeric | seconds since the last tap or knock, for an hour after it; false before the first tap after `openimu` and once the tap is more than an hour old |
 | Time | `TIME` | enum | `MORNING` `AFTERNOON` `EVENING` `NIGHT` |
 | Time | `HOUR` | numeric | local hour, 0-23 |
 | Time | `DAY` | enum | `SUN` `MON` `TUE` `WED` `THU` `FRI` `SAT` |
@@ -1008,8 +1008,9 @@ Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum vari
 
 A variable whose subsystem is disabled or absent evaluates to false, so the condition simply never matches.
 
-The `IMU_` variables need the motion sensor open (`openimu`, or `imuautostart on`) and a reading;
-until then they are false. They are states, checked when the automation's trigger is due: to act
+The `IMU_` variables need the motion sensor open (`openimu`, or `imuautostart on`) and a current
+reading; until then they are false, and they turn false again when the sensor stops delivering
+readings (older than two `imudevicepollms` periods and a second). They are states, checked when the automation's trigger is due: to act
 the moment the device is tapped or turned over, use the `imu_tap` and `imu_orientation` event
 triggers (`type=event on=imu_orientation match=face-down`). There is no compass-heading variable
 yet.

@@ -4535,16 +4535,19 @@ bool evaluateCondition(const char* condition) {
     // The motion sensor's tilt (IMU_PITCH, IMU_ROLL, IMU_TILT, degrees), pose
     // (IMU_POSE, e.g. FACE-DOWN: flipped over) and last tap (IMU_TAP_AGE,
     // seconds): motionConditionValue, HAL_MotionCore.h. A closed IMU, no
-    // reading yet, no tap since it opened or an unknown IMU_ name has no
-    // value, so the condition is false. No heading variable yet.
+    // reading yet, a reading the IMU task stopped refreshing, no tap in the
+    // last hour or an unknown IMU_ name has no value, so the condition is
+    // false. No heading variable yet.
  #if ENABLE_IMU_SENSOR
     if (!gImuRunning || !gImuConnected) return false;
     ImuCache imu{};
     MotionActionState imuActions;
     if (!imuCacheSnapshot(imu, 50) || !imuActionsSnapshot(imuActions, 50)) return false;
+    const uint32_t imuNowMs = millis();
+    const uint32_t imuPollMs = gSettings.imuDevicePollMs > 0 ? (uint32_t)gSettings.imuDevicePollMs : 200;
+    const bool imuFresh = imu.imuDataValid && motionReadingFresh(imuNowMs, (uint32_t)imu.imuLastUpdate, imuPollMs);
     MotionConditionValue imuValue;
-    if (!motionConditionValue(sensor, imu.imuDataValid, imu.oriPitch, imu.oriRoll, imuActions, millis(),
-                              imuValue)) {
+    if (!motionConditionValue(sensor, imuFresh, imu.oriPitch, imu.oriRoll, imuActions, imuNowMs, imuValue)) {
       return false;
     }
     if (imuValue.isText) {

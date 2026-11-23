@@ -42,22 +42,32 @@ static void displayImuActions() {
     oledDisplay->println(line);
     y += 10;
 
-    // Row 2: the angles. Without a heading, yaw counts from the IMU's start:
-    // it goes last and is marked relative.
+    // Row 2: the angles. Yaw is shown in 0..359 (at most three characters),
+    // whatever the mounting correction made of it. Without a heading, yaw
+    // counts from the IMU's start: it goes last and is marked relative, with
+    // the shorter mark when the row would pass the panel's 21 characters
+    // (pitch and roll both at -100 or beyond: the correction's extreme modes).
+    const int yawShown = motionYawForDisplay(reading.oriYaw);
     if (reading.hasHeading) {
-      snprintf(line, sizeof(line), "Y:%d P:%d R:%d", (int)reading.oriYaw, (int)reading.oriPitch,
-               (int)reading.oriRoll);
+      snprintf(line, sizeof(line), "Y:%d P:%d R:%d", yawShown, (int)reading.oriPitch, (int)reading.oriRoll);
     } else {
-      snprintf(line, sizeof(line), "P:%d R:%d Yrel:%d", (int)reading.oriPitch, (int)reading.oriRoll,
-               (int)reading.oriYaw);
+      const int n = snprintf(line, sizeof(line), "P:%d R:%d Yrel:%d", (int)reading.oriPitch,
+                             (int)reading.oriRoll, yawShown);
+      if (n > kMotionOledColumns) {
+        snprintf(line, sizeof(line), "P:%d R:%d Yr:%d", (int)reading.oriPitch, (int)reading.oriRoll, yawShown);
+      }
     }
     oledDisplay->setCursor(0, y);
     oledDisplay->println(line);
     y += 10;
 
-    // Row 3: acceleration, m/s^2.
-    snprintf(line, sizeof(line), "A %.1f %.1f %.1f", (double)reading.accelX, (double)reading.accelY,
-             (double)reading.accelZ);
+    // Row 3: acceleration, m/s^2: one decimal while the row fits (up to
+    // about 10 g on every axis), else whole numbers.
+    if (snprintf(line, sizeof(line), "A %.1f %.1f %.1f", (double)reading.accelX, (double)reading.accelY,
+                 (double)reading.accelZ) > kMotionOledColumns) {
+      snprintf(line, sizeof(line), "A %.0f %.0f %.0f", (double)reading.accelX, (double)reading.accelY,
+               (double)reading.accelZ);
+    }
     oledDisplay->setCursor(0, y);
     oledDisplay->println(line);
     y += 10;
@@ -66,7 +76,7 @@ static void displayImuActions() {
     // calibration when the chip reports one (BNO055: c0..c3) and the field
     // strength. Only with a heading.
     if (reading.hasHeading) {
-      int n = snprintf(line, sizeof(line), "Hdg:%d %s", (int)reading.oriYaw, motionCompassPoint(reading.oriYaw));
+      int n = snprintf(line, sizeof(line), "Hdg:%d %s", yawShown, motionCompassPoint(reading.oriYaw));
       if (reading.hasCal && n > 0 && n < (int)sizeof(line)) {
         n += snprintf(line + n, sizeof(line) - n, " c%u", (unsigned)(reading.cal & 0x03));
       }

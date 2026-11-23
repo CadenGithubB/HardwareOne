@@ -379,6 +379,20 @@ inline void lis3mdlDecode(const uint8_t* data, Lsm4517Reading& out) {
   for (int i = 0; i < 3; ++i) out.mag[i] = kLis3mdlAxisSign[i] * raw[kLis3mdlAxisMap[i]];
 }
 
+// A burst of 14 zero bytes is no measurement: the temperature would be 25.00 C
+// exactly with every gyroscope and accelerometer axis at exactly 0, which a
+// chip that is measuring never reports (gravity or noise is on some axis). It
+// is what an LSM6DSOX answers after it lost power and came back in power-down
+// (its output registers are zero and its configuration is gone): such a read
+// fails, so the health system sees it and auto-disable ends the run, instead
+// of zeros read as a free fall.
+inline bool lsm6dsoxBurstAlive(const uint8_t* data) {
+  for (uint8_t i = 0; i < kLsm6dsoxDataBytes; ++i) {
+    if (data[i] != 0) return true;
+  }
+  return false;
+}
+
 // ---- One sample ----------------------------------------------------------------------------
 // What a sample keeps for the next one: chip events read (and so cleared on
 // the chip) by a sample that then failed, and the last good field.
@@ -399,7 +413,8 @@ struct Lsm4517SampleState {
 //   readMag(uint8_t field[6]) -> bool                    the LIS3MDL transaction
 //   readAccel(uint8_t src[3], uint8_t data[14], bool& srcRead) -> bool
 //       the LSM6DSOX transaction; srcRead: the source bytes were read
-// Returns false (out untouched) when the LSM6DSOX read failed.
+// Returns false (out untouched) when the LSM6DSOX read failed, or its burst
+// is all zero (lsm6dsoxBurstAlive: the chip lost its power and its settings).
 template <typename ReadMag, typename ReadAccel>
 inline bool lsm4517ReadSample(Lsm4517SampleState& st, ReadMag&& readMag, ReadAccel&& readAccel,
                               Lsm4517Reading& out, bool& magFailed) {
@@ -420,7 +435,7 @@ inline bool lsm4517ReadSample(Lsm4517SampleState& st, ReadMag&& readMag, ReadAcc
     for (int i = 0; i < 3; ++i) st.lastMag[i] = field3.mag[i];
     st.haveMag = true;
   }
-  if (!accelOk) return false;
+  if (!accelOk || !lsm6dsoxBurstAlive(data)) return false;
   const uint8_t events = static_cast<uint8_t>((st.pendingTap ? kLsm6dsoxSrcSingleTap : 0) |
                                               (st.pendingFreefall ? kLsm6dsoxSrcFreefall : 0));
   lsm6dsoxDecode(data, events, out);

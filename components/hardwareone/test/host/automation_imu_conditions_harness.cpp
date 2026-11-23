@@ -23,8 +23,11 @@
 // The reading's fields the branch reads (HAL_Motion.h, ImuCache).
 struct ImuCache {
   float oriPitch = 0, oriRoll = 0, oriYaw = 0;
+  unsigned long imuLastUpdate = 0;
   bool imuDataValid = false;
 };
+// The publish period setting the branch reads (imudevicepollms).
+static struct { int imuDevicePollMs = 200; } gSettings;
 
 static bool gImuRunning = true, gImuConnected = true;
 static ImuCache gReading;
@@ -34,12 +37,16 @@ static unsigned long gNow = 100000;
 static unsigned gCacheReads = 0;
 
 static unsigned long millis() { return gNow; }
+// The IMU task refreshes the reading every publish period; gStalledAtMs set:
+// it stopped then (a paused bus, a chip that no longer answers).
+static unsigned long gStalledAtMs = 0;
 static bool imuCacheSnapshot(ImuCache& out, uint32_t timeoutMs) {
   assert(timeoutMs == 50);
   ++gCacheReads;
   out = ImuCache{};
   if (!gCacheAnswers) return false;
   out = gReading;
+  out.imuLastUpdate = gStalledAtMs ? gStalledAtMs : gNow - 100;
   return true;
 }
 static bool imuActionsSnapshot(MotionActionState& out, uint32_t timeoutMs) {
@@ -155,6 +162,36 @@ int main() {
   for (const char* condition : all) check(!met(condition), std::string("detector copy busy: ") + condition);
   gActionsAnswer = true;
   for (const char* condition : all) check(met(condition), std::string("available again: ") + condition);
+
+  // The reading is as old as the IMU task's last publish. Older than two
+  // publish periods and a second, it says nothing about now: every condition
+  // is false until the task publishes again, also across the clock's wrap.
+  gStalledAtMs = gNow;
+  for (const char* condition : all) check(met(condition), std::string("just published: ") + condition);
+  gNow += 2 * 200 + kMotionReadingFreshMarginMs;
+  for (const char* condition : all) check(met(condition), std::string("at the age limit: ") + condition);
+  gNow += 1;
+  for (const char* condition : all) check(!met(condition), std::string("stale reading: ") + condition);
+  gSettings.imuDevicePollMs = 1000;  // a slower publish period allows an older reading
+  for (const char* condition : all) check(met(condition), std::string("slow poll: ") + condition);
+  gSettings.imuDevicePollMs = 200;
+  gNow += 3600000;
+  for (const char* condition : all) check(!met(condition), std::string("stalled for an hour: ") + condition);
+  gStalledAtMs = 0;
+  check(met("imu_pitch < 90") && met("imu_pose != none"), "publishing again");
+  check(!met("imu_tap_age >= 0"), "a tap more than an hour old has no age");
+  feed(knock, 1);
+  feed(flat, 5);
+  check(met("imu_tap_age < 2"), "a new tap has an age");
+  {
+    const unsigned long before = gNow;
+    gNow = 0xFFFFFFF0ul;  // 16 ms before the 32-bit clock wraps
+    gStalledAtMs = gNow;
+    gNow = 0x100000100ul;  // 272 ms later, past the wrap (the device's clock reads 0x100)
+    check(met("imu_pitch < 90"), "a fresh reading across the clock's wrap");
+    gStalledAtMs = 0;
+    gNow = before;
+  }
 
   // Names the IMU does not answer: no heading condition yet, and no prefix match.
   for (const char* condition : {"imu_heading > 0", "imu_heading != 400", "imu_yaw < 400", "imu_ != 1",

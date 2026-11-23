@@ -574,6 +574,9 @@ foreach(target i2c_instance_core_tests i2c_instance_core_four_tests)
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
   target_include_directories(${target} PRIVATE ../..)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -pedantic)
+  # The status sign's setup block is read from configurations/README.md.
+  target_compile_definitions(${target} PRIVATE
+    HW1_REPO_ROOT="${CMAKE_CURRENT_LIST_DIR}/../../../..")
 endforeach()
 target_compile_definitions(i2c_instance_core_four_tests PRIVATE HW1_HOST_I2C_TEST_ENCODER_MAX=4)
 

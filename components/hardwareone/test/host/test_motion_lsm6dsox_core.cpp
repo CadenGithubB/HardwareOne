@@ -416,6 +416,26 @@ static void testSampleKeepsTheTap() {
   bus.srcOk = true;
   assert(sample(bus, st, r, magFailed) && r.tap);
 
+  // The chip lost its power and came back in power-down (a bus-rail cut):
+  // it answers, with 14 zero bytes. That is no reading: the sample fails
+  // (zeros would read as a free fall), a tap read before stays for the next
+  // good sample, and one non-zero byte is a reading again.
+  uint8_t zeros[14] = {};
+  assert(!lsm6dsoxBurstAlive(zeros));
+  for (int i = 0; i < 14; ++i) {
+    zeros[i] = 1;
+    assert(lsm6dsoxBurstAlive(zeros));
+    zeros[i] = 0;
+  }
+  bus.intSrc = kLsm6dsoxSrcSingleTap;
+  bus.accelZ = 0;  // the scripted burst is all zero now
+  Lsm4517Reading kept = r;
+  assert(!sample(bus, st, r, magFailed) && st.pendingTap);
+  assert(r.accel[2] == kept.accel[2] && r.tap == kept.tap);  // out untouched
+  assert(!sample(bus, st, r, magFailed) && !sample(bus, st, r, magFailed));  // every such read fails
+  bus.accelZ = 8197;
+  assert(sample(bus, st, r, magFailed) && r.tap && near(r.accel[2], 9.81f, 0.01f));
+
   // No good field yet: no magnetometer reading.
   Lsm4517SampleState fresh;
   SampleBus noMag;

@@ -438,9 +438,13 @@ void webStreamImuIdentityJs(httpd_req_t* req) {
   const int n = snprintf(js, sizeof(js), "window.__hwImu={names:%s,part:'%s',label:'IMU (%s)'};", names, part, part);
   if (n <= 0 || (size_t)n >= sizeof(js)) {
     httpd_resp_send_chunk(req, "window.__hwImu={names:{},part:'IMU',label:'IMU'};", HTTPD_RESP_USE_STRLEN);
-    return;
+  } else {
+    httpd_resp_send_chunk(req, js, HTTPD_RESP_USE_STRLEN);
   }
-  httpd_resp_send_chunk(req, js, HTTPD_RESP_USE_STRLEN);
+  // has(name): the name is one of the table's, as an own key (a scanned
+  // device called "constructor" or "toString" is not the IMU).
+  httpd_resp_send_chunk(req, "window.__hwImu.has=function(n){return Object.prototype.hasOwnProperty.call(this.names,n);};",
+                        HTTPD_RESP_USE_STRLEN);
 }
 
 esp_err_t sendJsonError(httpd_req_t* req, const String& message) {

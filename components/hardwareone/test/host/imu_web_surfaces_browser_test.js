@@ -6,17 +6,20 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
-const page = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+const data = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
+// The scripts of the input variant under test ("gamepad": no ANO encoder; "ano").
+let page = null;
+let variantName = '';
 let checks = 0;
 function equal(actual, expected, label) {
   checks++;
-  assert.deepEqual(actual, expected, label);
+  assert.deepEqual(actual, expected, variantName + ': ' + label);
 }
 
 // window.__hwImu as the firmware writes it for a build.
 function identity(build) {
-  const b = page.builds[build];
-  return page.identity.replace('%s', b.names).replace('%s', b.part).replace('%s', b.part);
+  const b = data.builds[build];
+  return data.identity.replace('%s', b.names).replace('%s', b.part).replace('%s', b.part) + data.identityHas;
 }
 const quiet = {log() {}, warn() {}, error(...args) { throw new Error('page error: ' + args.join(' ')); }};
 function device(name, address) { return {name, address, bus: 1, isConnected: true}; }
@@ -105,8 +108,10 @@ async function reading(json) {
   return {html: element.innerHTML, text: element.textContent, orientations};
 }
 
-(async () => {
-  const on = {imuCompiled: true, imuRunning: true};
+async function run(variant) {
+  variantName = variant;
+  page = data.variants[variant];
+  const on = {imuCompiled: true, imuRunning: true, inputCompiled: true, inputRunning: true};
   const lsm = [device('LSM6DSOX', 0x6A), device('LIS3MDL', 0x1C), device('SSD1306', 0x3D)];
   const bno = [device('BNO055', 0x28), device('SSD1306', 0x3D)];
 
@@ -116,7 +121,17 @@ async function reading(json) {
     vm.runInContext(identity(build), context);
     equal(context.window.__hwImu.part, part, build + ': the chip');
     equal(context.window.__hwImu.label, 'IMU (' + part + ')', build + ': the label');
+    equal(context.window.__hwImu.has(part), true, build + ': has() knows its chip');
+    equal(['constructor', 'toString', '__proto__', 'hasOwnProperty', ''].map(n => context.window.__hwImu.has(n)),
+          [false, false, false, false, false], build + ': has() takes own keys only');
   }
+  // A scanned device whose name is on every object is not the IMU, on any surface.
+  const odd = [device('constructor', 0x10), device('toString', 0x11), device('__proto__', 0x12)];
+  equal((await detect('lsm6dsox', odd, on)).imu, false, 'detection: no IMU by an inherited name');
+  equal((await alreadyActive('lsm6dsox', odd, on)).started, [], 'running check: no IMU by an inherited name');
+  equal(dashboard('lsm6dsox', true).available(odd), [], 'dashboard list: no IMU by an inherited name');
+  equal(visibleCards('lsm6dsox', odd).get('dash-imu-card'), false, 'dashboard card: no IMU by an inherited name');
+  equal(dashboard('bno055', false).notice(odd, {imuCompiled: false}), [], 'notice: nothing by an inherited name');
 
   // Sensors page: the IMU card shows for the build's chip(s), by the table's names.
   equal((await detect('lsm6dsox', lsm, on)).imu, true, '4517 build: the IMU card shows');
@@ -135,6 +150,11 @@ async function reading(json) {
   // Sensors page: an IMU that is already running starts its polling once.
   const active = await alreadyActive('lsm6dsox', lsm, on);
   equal([...new Set(active.started)], ['imu'], '4517 build: the running IMU is polled');
+  // The sign's set: the 4517 next to the build's input device (the ANO at
+  // 0x49 in an ANO build, the gamepad at 0x50 otherwise).
+  const input = variant === 'ano' ? ['anoencoder', 0x49] : ['gamepad', 0x50];
+  const withInput = await alreadyActive('lsm6dsox', [...lsm, device('Seesaw', input[1])], on);
+  equal([...new Set(withInput.started)].sort(), ['imu', input[0]].sort(), 'the IMU and the input device are polled');
   equal(active.indicator, 'status-indicator status-enabled', '4517 build: its indicator is on');
   equal((await alreadyActive('bno055', bno, on)).started, ['imu'], 'BNO055 build: the running IMU is polled');
   equal((await alreadyActive('lsm6dsox', lsm, {imuCompiled: true, imuRunning: false})).started, [],
@@ -181,5 +201,10 @@ async function reading(json) {
   equal((await reading({valid: false, connected: true, ts: 0})).text.startsWith('IMU not ready'), true,
         'no reading yet');
 
-  console.log('IMU web surfaces: ' + checks + ' checks passed (detection, running check, dashboard list, visibility and notice, card reading)');
+}
+
+(async () => {
+  for (const variant of Object.keys(data.variants)) await run(variant);
+  console.log('IMU web surfaces: ' + checks + ' checks passed for ' + Object.keys(data.variants).join(' and ') +
+              ' builds (detection, running check, dashboard list, visibility and notice, card reading)');
 })().catch(error => { console.error(error); process.exit(1); });
