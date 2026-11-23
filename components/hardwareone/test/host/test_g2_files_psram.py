@@ -129,8 +129,8 @@ def main() -> None:
         "size_t captureCryptoForeignNotice(",
         "size_t foreignMarkNotice(",
         "size_t captureCryptoRevealCapacity(",
-        "bool captureCryptoRevealText(char*",
-        "size_t captureCryptoRevealText(String&",
+        "bool captureCryptoRevealText(const char* path, char* buf",
+        "size_t captureCryptoRevealText(const char* path, String& text)",
     ))
     definitions = extract_block(crypto_header, "enum class CaptureMarkOwner") + ";\n" + definitions
     macros = "\n".join(re.findall(r"^#define CAPCRYPT_.*$", crypto_header, re.MULTILINE))

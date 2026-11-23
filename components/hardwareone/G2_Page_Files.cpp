@@ -890,10 +890,15 @@ static bool showTextFileViaWidget(bool pretty) {
   // Sealed capture? Reveal for the lens — this runs under the G2-paired
   // user's identity (ctxGuard above) and behind the canRead gate; the
   // '#HW1ENC' first line stays visible as the mark.
+  // Rows open only with the class of the path they are read at, and a plain
+  // line where only sealed rows belong shows as "[unsealed line]". `path` is
+  // the browser's own: built from a listing of a normalized folder, so it is
+  // the canonical spelling the class is taken from (any other spelling would
+  // only fail to open a row).
   const size_t revealCapacity = captureCryptoRevealCapacity(raw.c_str(), raw.size());
   size_t revealedLength = raw.size();
   if (!revealCapacity || !raw.reserve(revealCapacity) ||
-      !captureCryptoRevealText(raw.data(), revealedLength, raw.capacity()) ||
+      !captureCryptoRevealText(path, raw.data(), revealedLength, raw.capacity()) ||
       !raw.setSize(revealedLength)) {
     DEBUG_G2F("[G2] Files text: reveal buffer failed '%s'", path);
     return false;

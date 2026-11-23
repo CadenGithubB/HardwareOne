@@ -154,10 +154,22 @@ def source_contract() -> None:
             "a card path is appended sealed before any plain open")
     sealed_once = extract_block(fs, "static bool appendCappedSealedOnce(")
     require("SealedLog::openAppend(dest, ctx, stored)" in sealed_once and
-            "SealedLog::writeLines(a, data, length, stored)" in sealed_once and
-            'SealedLog::writeLines(a, "\\n", 1, stored)' in sealed_once and
-            "VFS::openGuarded" not in sealed_once and ".println(" not in sealed_once,
+            "SealedLog::writeLines(a, dest, data, length, stored)" in sealed_once and
+            'if (length == 0) { data = "\\n"; length = 1; }' in sealed_once and
+            "VFS::openGuarded" not in sealed_once and ".println(" not in sealed_once and ".write(" not in sealed_once,
             "the sealed append opens and writes through SealedLog only")
+    # Review of 2026-11-22: a card append counts only when the flushed file has
+    # the size its rows make, and a failure says how much the card did take.
+    require("bool appended = SealedLog::settle(a, dest, stored) && wrote;" in sealed_once and
+            sealed_once.index("SealedLog::settle(a, dest, stored)") < sealed_once.index("a.close();") and
+            "sealedlog::linesLanded(data, length, sealedlog::kMaxRowBytes, have - before)" in sealed_once,
+            "the sealed append is verified by the file's size after the flush")
+    require('VFS::noteLogCardFileFailure(path, "log.append");' in body and "noteLogOverflowSdFailure" not in body and
+            body.index("data += taken;") < body.rindex(
+                "appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written, taken);"),
+            "a failed card append is reported for this log's file, and flash gets only what the card did not take")
+    restart = extract_block(fs, "static bool restartCappedLog(")
+    require("ok = SealedLog::settle(sealed, dest, stored) && ok;" in restart, "a restarted card log is verified too")
     stage = extract_block(fs, "static LogTailStage stageCappedLogTail(")
     require(stage.index("SealedLog::writeMark(w, markBytes)") < stage.index("while (copied < tailBytes)") and
             "w.size() == markBytes + tailBytes" in stage,
@@ -265,6 +277,7 @@ def main() -> None:
         # The pure policy header the writer region and the harness both use.
         shutil.copyfile(COMPONENT / "System_LogCapsCore.h", work / "System_LogCapsCore.h")
         shutil.copyfile(COMPONENT / "System_SealedLogCore.h", work / "System_SealedLogCore.h")
+        shutil.copyfile(HERE / "sealed_log_host.h", work / "sealed_log_host.h")
         printing = (CORE / "Print.cpp").read_text().replace('#include "Arduino.h"', '#include <cstdarg>')
         (work / "Print.cpp").write_text(printing)
         conversions = (CORE / "stdlib_noniso.c").read_text().replace('#include "esp_system.h"', '')

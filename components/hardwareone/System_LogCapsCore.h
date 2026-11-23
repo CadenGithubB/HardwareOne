@@ -110,6 +110,26 @@ constexpr bool cardFull(bool wasFull, uint64_t freeBytes) {
   return wasFull ? freeBytes < kCardRearmBytes : freeBytes < kCardReserveBytes;
 }
 
+// One log's file on a card that otherwise takes writes may be beyond writing
+// (damaged, a directory in its place, a torn tail that cannot be mended). Only
+// that log then stays off the card, and for longer each time the trouble is
+// still there when the card is tried again: 1, 4, 16, then 60 minutes. The
+// other logs keep going to the card, and the card is not reported as failed.
+constexpr uint8_t kCardFileStrikesMax = 4;
+constexpr uint32_t cardFileBackoffMs(uint8_t strikes) {
+  return strikes <= 1 ? 60000u : strikes == 2 ? 240000u : strikes == 3 ? 960000u : 3600000u;
+}
+// The strike count after a failure, given the count before and how long ago
+// the failure before this one was. A failure within twice the last back-off is
+// the same trouble (the retry failed too); a later one starts over.
+constexpr uint8_t cardFileStrikes(uint8_t before, uint32_t sinceLastFailureMs) {
+  if (before == 0) return 1;
+  if (sinceLastFailureMs > 2 * cardFileBackoffMs(before)) return 1;
+  return before < kCardFileStrikesMax ? static_cast<uint8_t>(before + 1) : kCardFileStrikesMax;
+}
+static_assert(cardFileStrikes(0, 0) == 1 && cardFileStrikes(1, 60000) == 2 && cardFileStrikes(4, 3600000) == 4 &&
+              cardFileStrikes(2, 480001) == 1, "the back-off grows while the retry fails and starts over after a quiet spell");
+
 // ---------------------------------------------------------------------------
 // Per-log policy, by file name (the last path component), so the /sd mirror of
 // a log follows the same rule as the log itself.

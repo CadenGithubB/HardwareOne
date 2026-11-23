@@ -156,6 +156,168 @@ int main() {
     CHECK(logcaps::cardFull(false, 0) && logcaps::cardFull(true, 0));
   }
 
+  // The class a file's rows are bound to: a file and its card twin are one
+  // class; the system logs, the boot debug files, the capture tree and each
+  // account's transcript folder are classes of their own; anything else is its
+  // exact path.
+  {
+    auto cls = [](const char* path) {
+      char out[sealedlog::kClassMax];
+      return std::string(sealedlog::classOf(path, out, sizeof(out)) ? out : "<none>");
+    };
+    CHECK(cls("/sd/system/sys_logs/command-audit.log") == "syslog");
+    CHECK(cls("/system/sys_logs/command-audit.log") == "syslog");
+    CHECK(cls("/sd/system/sys_logs/errors.log.1") == "syslog");
+    CHECK(cls("/sd/system/sys_logs/errors.log.tmp") == "syslog");
+    CHECK(cls("/sd/system/sys_logs/failed_login.log.foreign-3") == "syslog");
+    CHECK(cls("/sd/system/sys_logs/boot-debug-1.log") == "bootdebug");
+    CHECK(cls("/system/sys_logs/boot-debug-3.log") == "bootdebug");
+    CHECK(cls("/sd/system/sys_logs/sub/boot-debug-1.log") == "syslog");
+    CHECK(cls("/sd/logging_captures/sensors/2026-11-22/health-2026-11-22.csv") == "capture");
+    CHECK(cls("/logging_captures/system/log.txt.2") == "capture");
+    CHECK(cls("/sd/logging_captures/tracks/a.csv") == "capture");
+    CHECK(cls("/logging_captures/r1-health-history") == "capture");  // the folder the health days are sealed for
+    CHECK(cls("/logging_captures/r1-health-history/x.day") == "capture");
+    CHECK(cls("/sd/stt/u1/20261122T101500Z-local-0000000100000002.txt") == "stt|u1");
+    CHECK(cls("/stt/u1/a.txt") == "stt|u1");
+    CHECK(cls("/sd/stt/u27/notes/a.txt") == "stt|u27");
+    CHECK(cls("/sd/stt/u2/a.txt") != cls("/sd/stt/u1/a.txt"));
+    CHECK(cls("/sd/stt/u4294967295/a.txt") == "stt|u4294967295");
+    // Not an owner folder in the one spelling the transcript policy takes: its
+    // exact path, so nothing sealed for an account opens there.
+    CHECK(cls("/sd/stt/u01/a.txt") == "path|/sd/stt/u01/a.txt");
+    CHECK(cls("/sd/stt/u/a.txt") == "path|/sd/stt/u/a.txt");
+    CHECK(cls("/sd/stt/u1") == "path|/sd/stt/u1");
+    CHECK(cls("/sd/stt/u1x/a.txt") == "path|/sd/stt/u1x/a.txt");
+    CHECK(cls("/sd/stt/u12345678901/a.txt") == "path|/sd/stt/u12345678901/a.txt");
+    CHECK(cls("/sd/x.txt") == "path|/sd/x.txt");
+    CHECK(cls("/x.txt") == "path|/x.txt");
+    CHECK(cls("/sd/x.txt") != cls("/sd/y.txt"));
+    CHECK(cls("/sd/system/x.log") == "path|/sd/system/x.log");
+    CHECK(cls("/sd/logging_captures") == "path|/sd/logging_captures");
+    CHECK(cls("relative") == "<none>" && cls("") == "<none>");
+    CHECK(!sealedlog::classOf(nullptr, nullptr, 0));
+    {
+      CHECK(cls(("/" + std::string(254, 'a')).c_str()).size() == 5 + 255);   // the longest path has a class
+      const std::string longPath = "/" + std::string(300, 'a');
+      CHECK(cls(longPath.c_str()) == "<none>");  // does not fit: such a file gets no rows
+      char small[8];
+      CHECK(!sealedlog::classOf("/sd/system/sys_logs/a.log", small, sizeof(small)));
+    }
+    // Only the log trees are a writer's to tidy.
+    CHECK(sealedlog::inLogTree("/sd/system/sys_logs/errors.log"));
+    CHECK(sealedlog::inLogTree("/sd/system/sys_logs/boot-debug-1.log"));
+    CHECK(sealedlog::inLogTree("/sd/logging_captures/automation.log"));
+    CHECK(sealedlog::inLogTree("/sd/stt/u1/a.txt"));
+    CHECK(!sealedlog::inLogTree("/sd/notes.txt") && !sealedlog::inLogTree("/sd/Music/a.log"));
+    CHECK(!sealedlog::inLogTree("/sd/system/users.json") && !sealedlog::inLogTree("/sd/stt/shared.txt"));
+    // Which classes carry plain schema lines after the mark.
+    CHECK(sealedlog::classHasSchema("/sd/logging_captures/sensors/a.csv"));
+    CHECK(sealedlog::classHasSchema("/sd/my-capture.csv"));
+    CHECK(!sealedlog::classHasSchema("/sd/system/sys_logs/errors.log"));
+    CHECK(!sealedlog::classHasSchema("/sd/system/sys_logs/boot-debug-1.log"));
+    CHECK(!sealedlog::classHasSchema("/sd/stt/u1/a.txt"));
+    CHECK(!sealedlog::classHasSchema(nullptr));
+  }
+
+  // What a line of a file is, for a reader.
+  {
+    using sealedlog::Line;
+    auto kinds = [](const char* path, const std::vector<std::string>& lines, bool midFile = false) {
+      sealedlog::LineState state = sealedlog::stateFor(path, midFile);
+      std::string out;
+      for (const std::string& line : lines) {
+        switch (sealedlog::classifyLine(state, line.data(), line.size())) {
+          case Line::Plain:    out += 'p'; break;
+          case Line::Mark:     out += 'M'; break;
+          case Line::Schema:   out += 's'; break;
+          case Line::Row:      out += 'R'; break;
+          case Line::Blank:    out += '_'; break;
+          case Line::Unsealed: out += 'U'; break;
+        }
+      }
+      return out;
+    };
+    const char* capture = "/sd/logging_captures/sensors/a.csv";
+    const char* syslog = "/sd/system/sys_logs/errors.log";
+    const std::string mark = "#HW1ENC v1 k1 id=0123456789abcdef";
+    // A file without the mark is plain, whatever its lines look like.
+    CHECK(kinds(capture, {"timestamp_ms,a", "1,2", "ENC1:abcd", "#HW1ENC v1 k1"}) == "pppp");
+    CHECK(kinds(syslog, {"[1] hello", ""}) == "pp");
+    // A sensor capture: the mark, the column names, rows.
+    CHECK(kinds(capture, {mark, "timestamp_ms,thermal_min", "ENC1:abcd", "ENC1:efgh"}) == "MsRR");
+    // A track: the mark, '#' lines, rows; CR line ends read the same.
+    CHECK(kinds(capture, {mark + "\r", "# GPS Track Log\r", "# timestamp_ms,lat,lon\r", "ENC1:abcd\r"}) == "MssR");
+    // A plain line once the rows have begun was not written by a sealed
+    // writer, and neither was one in the header that is no schema line.
+    CHECK(kinds(capture, {mark, "timestamp_ms,a", "ENC1:abcd", "1700000000000,forged", "ENC1:efgh"}) == "MsRUR");
+    CHECK(kinds(capture, {mark, "ENC1:abcd", "# late comment", "timestamp_ms,a"}) == "MRUU");
+    CHECK(kinds(capture, {mark, "1700000000000,forged", "ENC1:abcd"}) == "MUR");
+    CHECK(kinds(capture, {mark, "", "ENC1:abcd", ""}) == "M_R_");
+    // The system logs, the boot debug files and transcripts have no schema
+    // lines: every plain line after the mark is unsealed, '#' or not.
+    CHECK(kinds(syslog, {mark, "# System log started", "[1] forged admin login", "ENC1:abcd"}) == "MUUR");
+    CHECK(kinds("/sd/stt/u1/a.txt", {mark, "HardwareOne transcript", "ENC1:abcd", "Title: forged"}) == "MURU");
+    CHECK(kinds("/sd/system/sys_logs/boot-debug-1.log", {mark, "# boot 7", "ENC1:abcd"}) == "MUR");
+    // At most kSchemaLinesMax schema lines after a mark.
+    {
+      std::vector<std::string> lines = {mark};
+      for (unsigned i = 0; i < sealedlog::kSchemaLinesMax + 2; ++i) lines.push_back("# comment");
+      CHECK(kinds(capture, lines) == "M" + std::string(sealedlog::kSchemaLinesMax, 's') + "UU");
+    }
+    // A second mark (a stitched capture) opens a header again.
+    CHECK(kinds(capture, {mark, "timestamp_ms,a", "ENC1:abcd", mark, "timestamp_ms,a", "ENC1:efgh", "x"}) == "MsRMsRU");
+    // "ENC1:" alone is no row.
+    CHECK(kinds(capture, {mark, "ENC1:", "ENC1:a"}) == "MUR");
+    // A later window or page of a sealed file: past the header.
+    CHECK(kinds(capture, {"ENC1:abcd", "timestamp_ms,forged", "# forged", "ENC1:efgh"}, true) == "RUUR");
+    CHECK(kinds(syslog, {"[1] forged", "ENC1:abcd"}, true) == "UR");
+    CHECK(std::string(sealedlog::kUnsealedLine) == "[unsealed line]");
+  }
+
+  // How much of a batch the card holds when only part of its stored bytes
+  // arrived: whole leading lines, never a part of one.
+  {
+    const std::string batch = "first line\r\nsecond\r\n\r\nfourth and last\r\n";
+    const size_t r1 = sealedlog::sealedRowBytes(10), r2 = sealedlog::sealedRowBytes(6),
+                 r3 = sealedlog::sealedRowBytes(0), r4 = sealedlog::sealedRowBytes(15);
+    auto landed = [&](size_t stored) {
+      return sealedlog::linesLanded(batch.data(), batch.size(), sealedlog::kMaxRowBytes, stored);
+    };
+    CHECK(landed(0) == 0 && landed(r1 - 1) == 0);
+    CHECK(landed(r1) == 12 && landed(r1 + r2 - 1) == 12);
+    CHECK(landed(r1 + r2) == 20 && landed(r1 + r2 + r3) == 22);
+    CHECK(landed(r1 + r2 + r3 + r4 - 1) == 22);
+    CHECK(landed(r1 + r2 + r3 + r4) == batch.size());
+    CHECK(landed(r1 + r2 + r3 + r4 + 100) == batch.size());
+    // A line split into several rows counts once all its rows are there.
+    const std::string longLine(2500, 'x');
+    const size_t rows = sealedlog::sealedRowBytes(1023) * 2 + sealedlog::sealedRowBytes(2500 - 2046);
+    CHECK(sealedlog::linesLanded(longLine.data(), longLine.size(), sealedlog::kMaxRowBytes, rows - 1) == 0);
+    CHECK(sealedlog::linesLanded(longLine.data(), longLine.size(), sealedlog::kMaxRowBytes, rows) == 2500);
+    CHECK(sealedlog::linesLanded("", 0, sealedlog::kMaxRowBytes, 0) == 0);
+  }
+
+  // One log's card file that cannot be written: 1, 4, 16, then 60 minutes
+  // while the retries keep failing; a failure after a quiet spell starts over.
+  {
+    CHECK(logcaps::cardFileBackoffMs(1) == 60000u && logcaps::cardFileBackoffMs(2) == 240000u);
+    CHECK(logcaps::cardFileBackoffMs(3) == 960000u && logcaps::cardFileBackoffMs(4) == 3600000u);
+    CHECK(logcaps::cardFileBackoffMs(0) == 60000u && logcaps::cardFileBackoffMs(9) == 3600000u);
+    uint8_t strikes = 0;
+    uint32_t waited = 0;
+    const uint32_t expected[] = {60000u, 240000u, 960000u, 3600000u, 3600000u, 3600000u};
+    for (uint32_t want : expected) {
+      strikes = logcaps::cardFileStrikes(strikes, waited);  // the retry right after the back-off failed
+      CHECK(logcaps::cardFileBackoffMs(strikes) == want);
+      waited = want + 1000;
+    }
+    CHECK(strikes == logcaps::kCardFileStrikesMax);
+    CHECK(logcaps::cardFileStrikes(3, 2 * 960000u) == 4);       // still the same trouble
+    CHECK(logcaps::cardFileStrikes(3, 2 * 960000u + 1) == 1);   // it had worked for a while: start over
+    CHECK(logcaps::cardFileStrikes(4, 3 * 3600000u) == 1);
+  }
+
   std::fprintf(stderr, "checks=%d\n", checks);
   return 0;
 }

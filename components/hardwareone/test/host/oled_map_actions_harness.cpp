@@ -291,13 +291,11 @@ class File {
 struct FsLockGuard { explicit FsLockGuard(const char*) {} };
 // B11: a track on the card is sealed at rest; the probe reveals a row to see
 // whether the file holds GPS data. The toy seal here is "ENC1:" + the row.
-static int gRevealCalls = 0;
-static bool captureCryptoRevealLine(String& line) {
-  ++gRevealCalls;
-  if (!line.startsWith("ENC1:")) return false;
-  line = line.substring(5);
-  return true;
-}
+// Rows open with the class of the path they are read at, and a plain line in
+// a sealed file is no row (sealed_reveal_host.h, over the production rule).
+#include "sealed_reveal_host.h"
+static unsigned& gRevealCalls = sealed_reveal_host::calls;
+static bool normalizeFsPath(const String& in, String& out) { out = in; return true; }  // the scan's paths are canonical
 namespace VFS {
 static File openGuarded(const String& path, const char*, const AuthContext& ctx) {
   gVfsOpens.push_back({path.c_str(), ctx});

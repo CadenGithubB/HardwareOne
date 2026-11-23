@@ -976,8 +976,8 @@ static bool fileviewFileSize(const String& path, const AuthContext& ctx, size_t&
 // pages to its end with pages the transports carry. JSON is shown as stored
 // (re-indenting needs the whole file). A sealed capture's rows are revealed
 // page by page: the magic first line is read with each later page.
-static const char* fileviewLargePage(const String& path, size_t fileSize, int page, bool raw,
-                                     const AuthContext& ctx) {
+static const char* fileviewLargePage(const String& path, const char* classPath, size_t fileSize, int page,
+                                     bool raw, const AuthContext& ctx) {
   static constexpr size_t kFileviewStride = 2800;  // a page plus its wrap stays under the ~3.5 KB budget
   static constexpr size_t kFileviewSearch = 600;
   const size_t pageCount = filePageCount(fileSize, kFileviewStride);
@@ -1056,12 +1056,17 @@ static const char* fileviewLargePage(const String& path, size_t fileSize, int pa
   char* revealed = nullptr;
   if (shownLen >= 7 && captureCryptoIsMagicLine(shown)) {
     shown[shownLen] = '\0';
-    const size_t need = captureCryptoRevealCapacity(shown, shownLen);
+    // Rows open with the class of the path they are read at (a sealed file
+    // copied elsewhere stays closed). A later page starts past the file's
+    // header: its magic line is borrowed, and no plain line after it is a
+    // schema line.
+    const bool afterHeader = magicLen != 0;
+    const size_t need = captureCryptoRevealCapacity(shown, shownLen, afterHeader);
     revealed = need ? (char*)ps_alloc(need, AllocPref::PreferPsram, "fs.fileview.reveal") : nullptr;
     if (revealed) {
       memcpy(revealed, shown, shownLen + 1);
       size_t len = shownLen;
-      if (captureCryptoRevealText(revealed, len, need)) {
+      if (captureCryptoRevealText(classPath, revealed, len, need, nullptr, afterHeader)) {
         shown = revealed;
         shownLen = len;
       }
@@ -1135,13 +1140,12 @@ const char* cmd_fileview(const String& argsInput) {
   // path in a spelling FatFs would resolve to another name, B11) is answered
   // here, before anything is looked up: the same words a missing or denied
   // file gets.
-  {
-    String normalized;
-    if (!normalizeFsPath(path, normalized)) {
-      if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
-      snprintf(getDebugBuffer(), 1024, "Error: File not found or access denied: %s", path.c_str());
-      return getDebugBuffer();
-    }
+  // The normalized path also names the class a sealed file's rows open with.
+  String normalized;
+  if (!normalizeFsPath(path, normalized)) {
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+    snprintf(getDebugBuffer(), 1024, "Error: File not found or access denied: %s", path.c_str());
+    return getDebugBuffer();
   }
   // This legacy viewer broadcasts untagged page chunks to shared sinks. A
   // transcript on the card is sealed, so `fileread` returns its sealed bytes;
@@ -1166,7 +1170,7 @@ const char* cmd_fileview(const String& argsInput) {
   const size_t kReadCap = 60000;
   size_t fileSize = 0;
   if (fileviewFileSize(path, ctx, fileSize) && fileSize > kReadCap)
-    return fileviewLargePage(path, fileSize, page, raw, ctx);
+    return fileviewLargePage(path, normalized.c_str(), fileSize, page, raw, ctx);
   String content;
   if (!readTextLimited(path.c_str(), content, kReadCap, ctx)) {
     if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
@@ -1179,9 +1183,10 @@ const char* cmd_fileview(const String& argsInput) {
   // surface behind requiresAdmin + the existsGuarded canRead above; byte
   // surfaces (fileread, /api/files/read, ESP-NOW) keep shipping ciphertext.
   // The '#HW1ENC' first line stays visible as the encrypted-at-rest mark;
-  // unopenable rows (torn tail, another device's key) render as
-  // "[undecryptable row]".
-  captureCryptoRevealText(content);
+  // unopenable rows (torn tail, another device's key, a row sealed for a file
+  // of another class) render as "[undecryptable row]", and a plain line where
+  // only rows belong as "[unsealed line]".
+  captureCryptoRevealText(normalized.c_str(), content);
 
   // JSON is re-indented by default through the re-indenter the web, OLED and
   // G2 viewers share; `raw` shows the stored text. Re-indenting grows the
@@ -2811,30 +2816,46 @@ EXT_RAM_BSS_ATTR static CappedLogState sCappedLogs;
 //
 // B11: on the card the same append is sealed. The file is opened through
 // SealedLog (the mark first in a new file; a file that is not this device's
-// is moved aside), each line of `data` becomes one sealed row, and `sz` and
-// `written` count stored bytes. Nothing plain reaches the card: a failure
-// returns false with at most a torn last row, and the caller retries on flash.
+// is moved aside; a torn last row gets its line end), each line of `data`
+// becomes one sealed row, and `sz` and `written` count stored bytes. The
+// append counts only once the file was flushed and has the size the rows
+// make (SealedLog::settle): a pulled card fails neither write() nor flush().
+// Nothing plain reaches the card. On a failure `taken` is how much of `data`
+// the card verifiably holds (whole lines from its start), so the caller
+// writes only the rest on flash.
 static bool appendCappedSealedOnce(const String& dest, const char* data, size_t length,
-                                   const AuthContext& ctx, size_t& sz, size_t& written) {
+                                   const AuthContext& ctx, size_t& sz, size_t& written, size_t& taken) {
+  taken = 0;
   size_t stored = 0;
   File a = SealedLog::openAppend(dest, ctx, stored);
   if (!a) { STACK_TRACEF("appendLineWithCap.open_sealed_failed"); return false; }
   const size_t before = stored;
   // An empty line is a row too (flash writes its CRLF).
-  const bool appended = length ? SealedLog::writeLines(a, data, length, stored)
-                               : SealedLog::writeLines(a, "\n", 1, stored);
+  if (length == 0) { data = "\n"; length = 1; }
+  // A row that was not sealed (the key) or not taken is a failure; so is a
+  // file that, flushed, does not have the size the rows make.
+  const bool wrote = SealedLog::writeLines(a, dest, data, length, stored);
+  bool appended = SealedLog::settle(a, dest, stored) && wrote;
+  if (!appended) {
+    const size_t have = a.size();
+    taken = have > before ? sealedlog::linesLanded(data, length, sealedlog::kMaxRowBytes, have - before) : 0;
+    // Every line there after all (a write the handle reported short but the
+    // card took): nothing is left to write.
+    if (taken >= length && have >= before) { appended = true; stored = have; }
+  }
   sz = stored;
   written = stored - before;
   a.close();
-  STACK_TRACEF("appendLineWithCap.sealed_done sz=%u", (unsigned)sz);
+  STACK_TRACEF("appendLineWithCap.sealed_done sz=%u ok=%d", (unsigned)sz, appended ? 1 : 0);
   return appended;
 }
 
 static bool appendCappedLineOnce(const String& dest, const char* data, size_t length, bool addNewline,
-                                 const AuthContext& ctx, size_t& sz, size_t& written) {
+                                 const AuthContext& ctx, size_t& sz, size_t& written, size_t& taken) {
   sz = 0;
   written = 0;
-  if (SealedLog::appliesTo(dest)) return appendCappedSealedOnce(dest, data, length, ctx, sz, written);
+  taken = 0;
+  if (SealedLog::appliesTo(dest)) return appendCappedSealedOnce(dest, data, length, ctx, sz, written, taken);
   File a = VFS::openGuarded(dest, "a", ctx, true);
   if (!a) { STACK_TRACEF("appendLineWithCap.open_a_failed"); return false; }
   STACK_TRACEF("appendLineWithCap.opened_for_append");
@@ -2871,8 +2892,9 @@ static bool restartCappedLog(const String& dest, const char* data, size_t length
     File sealed = SealedLog::openAppend(dest, ctx, stored);
     if (!sealed) { STACK_TRACEF("appendLineWithCap.restart_open_failed"); return false; }
     catchupNoteRestart(dest.c_str());
-    ok = SealedLog::writeLines(sealed, marker, strlen(marker), stored) &&
-         SealedLog::writeLines(sealed, data, length, stored);
+    ok = SealedLog::writeLines(sealed, dest, marker, strlen(marker), stored) &&
+         SealedLog::writeLines(sealed, dest, data, length, stored);
+    ok = SealedLog::settle(sealed, dest, stored) && ok;
     sealed.close();
   } else {
     File t = VFS::openGuarded(dest, "w", ctx, true);
@@ -3088,16 +3110,19 @@ static bool cappedLogWrite(const char* path, const char* data, size_t length, bo
   // 1. Append — fast path, one open for a line or a whole batch.
   size_t sz = 0;
   size_t written = 0;
-  bool appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written);
+  size_t taken = 0;
+  bool appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written, taken);
   if (!appended && VFS::getStorageType(destPath) == VFS::SDCARD &&
       VFS::getStorageType(String(path)) != VFS::SDCARD) {
-    // G-39: the latch sent this line to a card that no longer takes writes
-    // (yanked SPI or detect-less SDMMC card, or a log tree the card's write
-    // probe does not exercise). Report it so the overflow path stops choosing
-    // the card for a while — not re-probing it on the retry below — then
-    // retry once wherever the latch resolves now: flash while free space is
-    // above the floor, otherwise a counted drop.
-    VFS::noteLogOverflowSdFailure("log.append");
+    // G-39: this line went to a card that no longer takes writes (yanked SPI
+    // or detect-less SDMMC card), or to a card file that cannot be written
+    // while the card is fine (damaged, a directory in its place). Report it:
+    // a failed card stops being chosen for every log for a while, a failed
+    // file only for this log, for longer each time (noteLogCardFileFailure).
+    // Then retry once wherever the line resolves now: flash while free space
+    // is above the floor, otherwise a counted drop. Lines of a batch the card
+    // verifiably took are not written a second time.
+    VFS::noteLogCardFileFailure(path, "log.append");
     if (VFS::resolveLogPath(path, length + 512, dest, sizeof(dest)) == VFS::LogTier::Refused) {
       for (unsigned i = 0; i < lines; ++i) VFS::noteLogReserveDrop();
       STACK_TRACEF("appendLineWithCap.sd_failed_reserve_refused");
@@ -3105,7 +3130,10 @@ static bool cappedLogWrite(const char* path, const char* data, size_t length, bo
     }
     destPath = dest;
     ctx = VFS::systemAuth(VFS::sysLogScopeFor(destPath), "log.append");
-    appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written);
+    if (taken > length) taken = length;
+    data += taken;
+    length -= taken;
+    appended = appendCappedLineOnce(destPath, data, length, addNewline, ctx, sz, written, taken);
   }
   if (!appended) { STACK_TRACEF("appendLineWithCap.short_append"); return false; }
 

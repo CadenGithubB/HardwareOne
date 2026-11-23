@@ -192,13 +192,11 @@ File openGuarded(const String& path, const char* mode, const AuthContext& ctx, b
 
 // B11: a track on the card is sealed at rest; the listing reveals a row to
 // see whether the file holds GPS data. The toy seal here is "ENC1:" + text.
-static int gRevealCalls = 0;
-static bool captureCryptoRevealLine(String& line) {
-  ++gRevealCalls;
-  if (!line.startsWith("ENC1:")) return false;
-  line = line.substring(5);
-  return true;
-}
+// Rows open with the class of the path they are read at, and a plain line in
+// a sealed file is no row (sealed_reveal_host.h, over the production rule).
+#include "sealed_reveal_host.h"
+static unsigned& gRevealCalls = sealed_reveal_host::calls;
+static bool normalizeFsPath(const String& in, String& out) { out = in; return in.length() > 0 && in.c_str()[0] == '/'; }
 
 // ---------------------------------------------------------------------------
 // httpd double. Every chunk send records the lock and pause state it saw and
@@ -597,6 +595,26 @@ static void testGpsListing() {
         "gps-card: both tiers listed, each file under its own path");
   check(gRevealCalls > 0, "gps-card: sealed rows are revealed for the probe");
   checkQuiescent(card, "gps-card");
+
+  // Review of 2026-11-22: a plain line in a sealed file is no row. A marked
+  // file whose only GPS-looking lines are plain ones is not listed as a track,
+  // and neither is one whose rows were sealed for another class.
+  resetCounters();
+  buildGpsTree();
+  addFile("/sd/logging_captures/tracks/forged.csv",
+          "#HW1ENC v1 k1 id=0123456789abcdef\n1795357805123,37.123456,-122.123456,10.5,0.0,8\nENC1:short\n");
+  addFile("/sd/logging_captures/tracks/moved.csv",
+          "#HW1ENC v1 k1 id=0123456789abcdef\nENC1:@stt|u1@1795357805123,37.123456,-122.123456,10.5,0.0,8\n");
+  addFile("/sd/logging_captures/tracks/own.csv",
+          "#HW1ENC v1 k1 id=0123456789abcdef\nENC1:@capture@1795357805123,37.123456,-122.123456,10.5,0.0,8\n");
+  addDir("/sd/logging_captures/tracks", {"/sd/logging_captures/tracks/forged.csv", "/sd/logging_captures/tracks/moved.csv",
+                                         "/sd/logging_captures/tracks/own.csv"});
+  httpd_req_t forged;
+  check(gpsTrackListing(&forged, ctx) == ESP_OK, "gps-forged: handler result");
+  check(forged.body.find("forged.csv") == std::string::npos, "gps-forged: plain lines in a sealed file are not GPS rows");
+  check(forged.body.find("moved.csv") == std::string::npos, "gps-forged: rows of another class do not open in the track folder");
+  check(forged.body.find("/sd/logging_captures/tracks/own.csv") != std::string::npos, "gps-forged: the folder's own rows do");
+  checkQuiescent(forged, "gps-forged");
 
   resetCounters();
   buildGpsTree();

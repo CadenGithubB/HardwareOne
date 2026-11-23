@@ -13,6 +13,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <vector>
 #define ENABLE_BONDED_MODE 1
 
 // INSERT_POLICY
@@ -256,6 +257,70 @@ int main() {
             if(!normalizeFsPath(canonical.c_str(),normalized) || std::string(normalized.c_str())!=canonical){
                 std::printf("MISMATCH canonical %s refused\n",canonical.c_str());++failures;
             }
+        }
+        // Review of 2026-11-22: the code page. The card is mounted with code
+        // page 437 and ANSI/OEM paths, and FatFs up-cases a byte of 0x80 or
+        // above through that page's table for the short name: 0x82 lands on
+        // E, 0x98 on Y, 0x93 0x95 0xA2 on O, 0x83 0x85 0xA0 on A, 0x88-0x8A on
+        // E, 0x8B-0x8D 0xA1 on I, 0x96 0x97 0xA3 on U. "/sd/syst\x82m" opened
+        // the folder "system" while the rules saw other bytes and fell to the
+        // catch-all (a user read the sealed login log through the viewer and
+        // could create files there). Every such spelling of every protected
+        // folder is refused for every role, and so is any card path with such
+        // a byte, wherever it sits.
+        {
+            int foldRows=0;
+            auto folds=[](char c)->std::vector<unsigned char>{
+                switch(c){
+                    case 'e': return {0x82,0x88,0x89,0x8A,0x90};
+                    case 'y': return {0x98};
+                    case 'o': return {0x93,0x94,0x95,0xA2,0x99};
+                    case 'a': return {0x83,0x84,0x85,0x86,0xA0,0x8E,0x8F};
+                    case 'i': return {0x8B,0x8C,0x8D,0xA1};
+                    case 'u': return {0x81,0x96,0x97,0xA3,0x9A};
+                    case 'c': return {0x87,0x80};
+                    case 'n': return {0xA4,0xA5};
+                    default:  return {};
+                }
+            };
+            for(const char* folder:sdpath::kProtectedFolders){
+                const std::string name(folder);
+                for(size_t at=0;at<name.size();++at){
+                    for(unsigned char byte:folds(name[at])){
+                        std::string spelled=name;spelled[at]=char(byte);
+                        for(const char* tail:{"","/failed_login.log","/sys_logs/failed_login.log","/u2/notes/a.txt","/aabbccddeeff/events.log"}){
+                            const std::string path="/sd/"+spelled+tail;
+                            for(const char* who:{"alice","guest","admin"}){
+                                expect(who,path.c_str(),false,false,false,false);
+                                ++foldRows;
+                            }
+                            String normalized;
+                            if(normalizeFsPath(path.c_str(),normalized)){
+                                std::printf("MISMATCH code page spelling of %s normalizes\n",name.c_str());++failures;
+                            }
+                            if(getPermissions(path.c_str(),system)!=0){
+                                std::printf("MISMATCH code page spelling of %s grants the system identity\n",name.c_str());++failures;
+                            }
+                        }
+                    }
+                }
+            }
+            if(foldRows<7*3*5){std::printf("MISMATCH code page matrix rows %d\n",foldRows);++failures;}
+            // The paths of the review, and such a byte below a protected
+            // folder, in an unprotected one and in a file name.
+            for(const char* path:{"/sd/syst\x82m/sys_logs/failed_login.log","/sd/s\x98stem/sys_logs/failed_login.log",
+                                 "/sd/c\x93llect/aabbccddeeff/events.log","/sd/c\x95llect/x.log","/sd/c\xa2llect/x.log",
+                                 "/sd/\x82spnow/cap.bin","/sd/espn\x93w/cap.bin","/sd/syst\x82m/planted.txt",
+                                 "/sd/system/s\x98s_logs/failed_login.log","/sd/system/sys_logs/fail\x82" "d_login.log",
+                                 "/sd/stt/u2/caf\xc3\xa9.txt","/sd/notes/caf\xc3\xa9.txt","/sd/\xe9"}){
+                for(const char* who:{"alice","guest","admin"}) expect(who,path,false,false,false,false);
+                String normalized;
+                if(normalizeFsPath(path,normalized)){std::printf("MISMATCH a card path with a high byte normalizes\n");++failures;}
+                if(getPermissions(path,system)!=0){std::printf("MISMATCH a card path with a high byte grants the system identity\n");++failures;}
+            }
+            // Flash compares bytes, like the rules: such a name is a name there.
+            String normalized;
+            if(!normalizeFsPath("/notes/caf\xc3\xa9.txt",normalized)){std::puts("MISMATCH a flash name with a high byte refused");++failures;}
         }
         // The four spellings the review found, for the login log.
         for(const char* path:{"/sd/System/sys_logs/failed_login.log","/sd/system\\sys_logs\\failed_login.log",

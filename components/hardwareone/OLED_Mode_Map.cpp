@@ -37,6 +37,7 @@
 #include "System_TaskUtils.h"
 #include "System_VFS.h"
 #include "System_CaptureCrypto.h"  // a sealed track's rows, revealed for the probe
+#include "System_Filesystem.h"     // normalizeFsPath: the class a sealed row opens with
 #include "System_AuthIdentity.h"  // CommandIdentityScope (OLEDMapCtxGuard)
 
 #include "i2csensor_pa1010d.h"
@@ -628,11 +629,16 @@ static void probeTrackFile(const String& path, const AuthContext& auth) {
   File check = VFS::openGuarded(path, "r", auth);
   if (!check) return;
   bool hasGps = false;
+  // Rows open with the class of the path they are read at; a plain line in a
+  // sealed file is not a row and never counts as GPS data.
+  String classPath;
+  if (!normalizeFsPath(path, classPath)) classPath = "";
+  sealedlog::LineState lineKinds = sealedlog::stateFor(classPath.c_str());
   for (int i = 0; i < 15 && check.available(); i++) {
     String line = check.readStringUntil('\n');
     // Sealed at rest (every track on the card, B11): the rows are revealed
     // for this user, who passed the guarded open above.
-    captureCryptoRevealLine(line);
+    if (captureCryptoRevealFileLine(classPath.c_str(), lineKinds, line) == sealedlog::Line::Unsealed) continue;
     if (isGpsDataLine(line)) {
       hasGps = true;
       break;

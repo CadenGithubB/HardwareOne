@@ -260,10 +260,13 @@ const char* commandFiles(const String& input) {
       // B11: a transcript on the card is sealed. Its rows are revealed here,
       // after the owner check above; offsets stay stored-file offsets (0, or
       // the nextOffset of an earlier reply), so a reader pages as before.
+      // Rows open only with the class of this path (this account's folder):
+      // another account's transcript copied here reads "[undecryptable row]",
+      // and a plain line put into the file reads "[unsealed line]".
       char sealedText[513]{};
       size_t got = 0, next = offset;
       const bool read = offset <= total &&
-          SealedLog::readWindow(file, offset, sealedText, sizeof(sealedText), got, next);
+          SealedLog::readWindow(file, path, offset, sealedText, sizeof(sealedText), got, next);
       file.close();
       if (!read) {
         TranscriptionUi::clear(sealedText, sizeof(sealedText));

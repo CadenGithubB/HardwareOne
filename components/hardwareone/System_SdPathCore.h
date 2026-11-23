@@ -4,15 +4,22 @@
 //
 // The path rules (System_Filesystem.cpp, sPathRules) and the capability
 // scopes compare bytes. FatFs does not: it ignores ASCII case, takes '\' as a
-// separator, drops trailing dots and spaces from every path segment and also
-// answers to the 8.3 alias of a long name ("LOGGIN~1" for "logging_captures").
+// separator, drops trailing dots and spaces from every path segment, answers
+// to the 8.3 alias of a long name ("LOGGIN~1" for "logging_captures"), and
+// folds bytes above 0x7F: the build reads paths in code page 437, where the
+// short name of "syst\x82m" (e acute) is "SYSTEM", so that spelling opens
+// /sd/system as well.
 // A spelling the rules do not recognise fell to the catch-all row (accounts
 // below admin read, create and upload) while the card opened the real file,
 // so "/sd/System/sys_logs/failed_login.log" showed a user the login log.
 //
 // The rule here: for a path on the card ("/sd/..."), every segment has one
-// accepted spelling, and the first-level folders the rules protect are
-// accepted in their canonical spelling only. Anything else is refused where
+// accepted spelling (plain ASCII, no backslash, no trailing dot or space, no
+// short-name alias), and the first-level folders the rules protect are
+// accepted in their canonical spelling only. A name on the card with a byte
+// above 0x7F cannot be reached through the guarded VFS at all: the firmware
+// writes no such name, and there is no safe way to tell which real name FatFs
+// would match it to. Anything else is refused where
 // ".." is refused (normalizeFsPath), before any rule is looked up, so it can
 // neither read a protected file nor plant one under an aliased folder.
 //
@@ -60,9 +67,13 @@ inline bool shortNameAlias(const char* segment, size_t length) {
 }
 
 // One segment of a card path as FatFs would resolve it: false for a segment
-// with a second spelling (a backslash, a trailing dot or space, an 8.3 alias).
+// with a second spelling (a byte above 0x7F, a backslash, a trailing dot or
+// space, an 8.3 alias).
 inline bool segmentAccepted(const char* segment, size_t length) {
   if (length == 0) return false;
+  for (size_t i = 0; i < length; ++i) {
+    if (static_cast<unsigned char>(segment[i]) >= 0x80) return false;
+  }
   if (memchr(segment, '\\', length)) return false;
   const char last = segment[length - 1];
   if (last == '.' || last == ' ') return false;

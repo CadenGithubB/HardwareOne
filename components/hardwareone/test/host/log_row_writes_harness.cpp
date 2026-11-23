@@ -29,6 +29,7 @@ static size_t shortCount = 0;
 static bool failAppendOpen = false, failReadOpen = false, reportWriteError = false;
 static bool failHeaderOpen = false, failReplace = false, failRemove = false, headerFlushError = false;
 static size_t headerSizeOffset = 0;
+static size_t cardKeepsBytes = SIZE_MAX;  // B11: what a card that loses a handle's buffer keeps of a file (File::write)
 static int appendOpens = 0, failAppendOpenCall = 0;
 static bool overflow = false, sealFailure = false, allocFailure = false, clockSynced = false;
 static bool reserveRefused = false;  // G-39: resolveLogPath answers Refused
@@ -83,7 +84,7 @@ static void logSystemEvent(const char*, const char* format, ...) {
 
 namespace fs {
 class File : public Print {
-  struct Handle { std::string path, mode; bool closed = false; };
+  struct Handle { std::string path, mode; size_t offset = 0; bool closed = false; };
   std::shared_ptr<Handle> handle;
 public:
   File() = default;
@@ -98,19 +99,34 @@ public:
     check(bool(*this) && (handle->mode == "a" || handle->mode == "w"), "write uses borrowed writable file");
     io("write:" + std::to_string(count)); ++writeCalls;
     const size_t accepted = writeCalls == failWrite ? std::min(count, shortCount) : count;
-    if (accepted) disk.at(handle->path).append(reinterpret_cast<const char*>(bytes), accepted);
+    // "Write accepted, flush lost": a card pulled under the handle. write()
+    // reports every byte and flush() nothing; the card file keeps at most
+    // cardKeepsBytes. Only its size tells.
+    size_t landed = accepted;
+    if (cardKeepsBytes != SIZE_MAX && handle->path.rfind("/sd/", 0) == 0) {
+      const size_t have = disk.at(handle->path).size();
+      landed = cardKeepsBytes > have ? std::min(accepted, cardKeepsBytes - have) : 0;
+    }
+    if (landed) disk.at(handle->path).append(reinterpret_cast<const char*>(bytes), landed);
     if (reportWriteError) setWriteError();
     return accepted;
   }
   size_t size() const { check(bool(*this), "size uses open file"); io("size"); return disk.at(handle->path).size() + (handle->mode == "w" ? headerSizeOffset : 0); }
-  // B11: SealedLog reads a card file's first bytes to judge whose it is.
+  // B11: SealedLog reads a card file's first bytes to judge whose it is, and
+  // its last byte to see whether the last row was torn.
   size_t read(uint8_t* bytes, size_t count) {
     check(bool(*this) && handle->mode == "r", "the head is read from a file open for reading");
     io("read:" + std::to_string(count));
     const std::string& data = disk.at(handle->path);
-    const size_t n = std::min(count, data.size());
-    memcpy(bytes, data.data(), n);
+    const size_t n = std::min(count, data.size() - std::min(handle->offset, data.size()));
+    memcpy(bytes, data.data() + handle->offset, n);
+    handle->offset += n;
     return n;
+  }
+  bool seek(size_t offset) {
+    check(bool(*this) && handle->mode == "r", "seek uses a file open for reading");
+    if (offset > disk.at(handle->path).size()) return false;
+    handle->offset = offset; return true;
   }
   void flush() override { check(bool(*this), "flush uses open file"); io("flush"); if (headerFlushError && handle->mode == "w") setWriteError(); }
   void close() { check(bool(*this), "close file once"); io("close"); handle->closed = true; --liveFiles; }
@@ -142,6 +158,11 @@ static void noteLogReserveDrop() { ++reserveDrops; }
 // B11: a card that did not take a row is reported; log lines then stay off it.
 static unsigned sdFailureNotes = 0;
 static void noteLogOverflowSdFailure(const char*) { ++sdFailureNotes; overflow = false; }
+// One log's card file failed: the real note asks the card's write probe and
+// reports the card (as above) or holds only this log off it. Either way the
+// log's next resolution is flash; the path it was told is kept for the cases.
+static std::string cardFileFailurePath;
+static void noteLogCardFileFailure(const char* path, const char*) { cardFileFailurePath = path; ++sdFailureNotes; overflow = false; }
 // UP-16: the stored LittleFS free figure the battery log checks against the
 // shared reserve; noteLittleFsBytesWritten records nothing here.
 static size_t littleFsFree = SIZE_MAX;
@@ -225,7 +246,10 @@ static void* ps_alloc(size_t count, AllocPref, const char* tag) {
 }
 static uint32_t sessionId = 1;
 static uint32_t sensorLogCurrentSessionId() { return sessionId; }
-static int captureCryptoSealLine(const char* line, size_t length, char* out, size_t capacity) {
+static std::string sealedForPath;  // the path the last row was sealed for (its class binds the row)
+static int captureCryptoSealLine(const char* path, const char* line, size_t length, char* out, size_t capacity) {
+  check(path != nullptr, "a row is sealed for the path of its file");
+  sealedForPath = path;
   if (sealFailure) return -1;
   std::string sealed = "SEALED[" + std::string(line, length) + "]";
   check(sealed.size() + 1 <= capacity, "fixture fits crypto output buffer");
@@ -268,6 +292,7 @@ static void reset(bool onSd = false) {
   heldElsewhere = false; blockingWaitsOnBusyLock = tryLockMisses = 0; gFsMutex = &fsMutexStorage;
   pendingAllocFailure = false; sessionId = 1;
   cardSealing(false); VFS::sdFailureNotes = 0; sealed_log_host::keyAvailable = true; sealed_log_host::movedAside = 0;
+  cardKeepsBytes = SIZE_MAX;
 #if TRY_LOCK_WRITERS
   sPendingRowHeld = false; sAppendLockMisses = sPendingRowsDropped = 0; sBatteryLogLockMisses = 0;
   sBatteryLogSampleWaiting = false;
@@ -545,9 +570,15 @@ static void helperCases() {
 // the plain schema line, then sealed rows. A card file that is not this
 // device's is moved aside; a card that does not take the row is reported and
 // the row is written again, on flash.
-static void cardReset() { reset(false); overflow = true; cardSealing(true); }  // a flash-named session, the card taking log lines
+// A flash-named session in the capture tree (where every sensor capture
+// lives), the card taking log lines.
+static void cardReset() {
+  reset(false); overflow = true; cardSealing(true);
+  gSensorLogPath = "/logging_captures/sensors/sensor.log";
+  cardKeepsBytes = SIZE_MAX; VFS::cardFileFailurePath.clear(); sealedForPath.clear();
+}
 static void cardTwinCases() {
-  const std::string card = "/sd/sensor.log", flash = "/sensor.log";
+  const std::string card = "/sd/logging_captures/sensors/sensor.log", flash = "/logging_captures/sensors/sensor.log";
   for (auto format : {SENSOR_LOG_TEXT, SENSOR_LOG_CSV, SENSOR_LOG_TRACK}) {
     cardReset(); gSensorLogFormat = format; gSensorLogMask = LOG_GPS | LOG_R1;
     gSensorLogSealed = false;                     // capturecrypt off: flash would be plain
@@ -557,11 +588,13 @@ static void cardTwinCases() {
     if (format == SENSOR_LOG_TRACK) expected += kTrackHeader;
     check(disk.at(card) == expected + "SEALED[123,body]\n" && !disk.count(flash),
           "on the card: the mark, the plain schema, a sealed row; nothing on flash");
+    check(sealedForPath == card, "the row is sealed for the card file's path (its class: the capture tree)");
     check(log_writes == 1 && VFS::sdFailureNotes == 0, "the row counts as written");
     sensorAppend("next");
     check(disk.at(card) == expected + "SEALED[123,body]\nSEALED[next]\n", "further rows are sealed under the one mark");
     // The same session on flash (no card): plain, as the mode says.
     reset(false); cardSealing(true); gSensorLogFormat = format; gSensorLogMask = LOG_GPS | LOG_R1;
+    gSensorLogPath = flash.c_str();
     sensorAppend("123,body");
     check(disk.at(flash).find("#HW1ENC") == std::string::npos && disk.at(flash).find("123,body\n") != std::string::npos,
           "flash stays as the capture mode decides");
@@ -599,6 +632,29 @@ static void cardTwinCases() {
   check(disk.at(card) == sealed_log_host::mark() + "SEALED[old]\nSEAL\n" || disk.at(card) == sealed_log_host::mark() + "SEALED[old]\nSEAL",
         "the card keeps the rows it had and at most a torn sealed row");
   check(disk.at(card).find("torn row") == std::string::npos, "no plain text of the row on the card");
+  // Review of 2026-11-22. "Write accepted, flush lost": the card is pulled
+  // under the handle; write() and flush() report nothing. The row counts only
+  // when the flushed file has grown by it, so it is written again, on flash.
+  cardReset(); disk[card] = sealed_log_host::mark() + "SEALED[old]\n";
+  cardKeepsBytes = disk.at(card).size();
+  sensorAppend("lost at the flush"); released();
+  check(VFS::sdFailureNotes == 1 && VFS::cardFileFailurePath == flash && disk.at(flash) == "lost at the flush\n" &&
+        disk.at(card) == sealed_log_host::mark() + "SEALED[old]\n", "a row the card lost is noticed and lands on flash");
+  check(log_writes == 1, "and it is counted once");
+  // A torn last row (a pull, a power cut): the next row is not glued to it.
+  cardReset(); disk[card] = sealed_log_host::mark() + "SEALED[old]\nSEAL";
+  sensorAppend("after the tear"); released();
+  check(disk.at(card) == sealed_log_host::mark() + "SEALED[old]\nSEAL\nSEALED[after the tear]\n" && VFS::sdFailureNotes == 0,
+        "the torn row gets its line end before the next row");
+  // Without the device key a card file is not judged: one that is another
+  // device's (or plain) is not moved aside. Before the fix it was.
+  for (const char* theirs : {"#HW1ENC v1 k1 id=fedcba9876543210\nENC1:AAAA\n", "timestamp_ms\n1,2,3\n"}) {
+    cardReset(); sealed_log_host::keyAvailable = false; disk[card] = theirs;
+    sensorAppend("no key"); released();
+    check(disk.at(card) == theirs && !disk.count(card + ".foreign-1") && sealed_log_host::movedAside == 0,
+          "without the key nothing on the card is moved aside");
+    check(disk.at(flash) == "no key\n", "and the row lands on flash");
+  }
   // No device key: no card file is started (the header's mark fails), and the
   // row goes to flash.
   cardReset(); sealed_log_host::keyAvailable = false;

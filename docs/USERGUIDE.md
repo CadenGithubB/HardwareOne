@@ -1883,10 +1883,22 @@ flash, unsealed, and `logtier` counts them.
 Sealed rows are larger than their text (about twice for a 60-character line, 1.5 times for 300),
 so each system log may use twice its nominal size on the card, about 5.6 MB for all eight.
 
-Paths on the card have one spelling. A path under `/sd` with a backslash, a name that ends in a
-dot or a space, a short 8.3 name (`LOGGIN~1`) or another letter case of `system`,
-`logging_captures`, `stt`, `g2`, `collect`, `espnow` or `g2_icon_animations` is refused: the card
-would open the real folder under any of these spellings, past the permission rules.
+Paths on the card have one spelling. A path under `/sd` is refused when any part of it has a
+backslash, ends in a dot or a space, is a short 8.3 name (`LOGGIN~1`), has a character outside
+plain ASCII (an accented letter, an emoji), or is another letter case of `system`,
+`logging_captures`, `stt`, `g2`, `collect`, `espnow` or `g2_icon_animations`: the card would open
+the real folder under any of these spellings, past the permission rules. A file on the card whose
+name has such a character (copied there on a computer) is listed but cannot be opened, renamed or
+removed through the device; rename it on the computer. Names on internal flash are not limited
+this way.
+
+A sealed row opens only where its kind of file lives: the system logs under `system/sys_logs`,
+captures under `logging_captures`, and a transcript in its owner's folder `stt/u<id>`. A sealed
+file copied or moved to another kind of place on a computer shows `[undecryptable row]` for every
+row (move it back to read it); a rotated copy (`.1`) or a set-aside file (`.foreign-<n>`) in the
+same folder reads as before. A line that is not a sealed row in a sealed file, other than the
+header lines directly after the mark of a capture, shows as `[unsealed line]`: the device did not
+write it.
 
 **R1 health logging (preferred):** `healthlogging on` (or the **Health Logging** row on
 Apps -> Health, the OLED R1 Health page, or the **Health logging** button on Web

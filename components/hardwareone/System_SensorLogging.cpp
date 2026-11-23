@@ -309,6 +309,9 @@ static bool writeHeaderChecked(File& f, bool sealed) {
 // not (no mark, another device's key id) is moved aside first, so the staged
 // header below starts a new sealed file under the name; nothing plain is ever
 // appended to the card and no row of ours lands in another device's file.
+// SealedLog::prepare judges nothing without the device key (it loads it
+// itself and fails when it cannot), and gives a file of ours whose last row
+// was torn its line end, so the next row is not lost with it.
 static File openSensorLogForAppend(const String& path) {
   // Confined to the capture root of the tier `path` resolved to.
   const auto ctx = VFS::systemAuth(VFS::captureScopeFor(path), "senlog.append");
@@ -590,7 +593,8 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
       if (!gSealBuf)
         gSealBuf = (char*)ps_alloc(CAPCRYPT_MAX_SEALED,
                                    AllocPref::PreferPsram, "sensor.log.seal");
-      int sl = gSealBuf ? captureCryptoSealLine(line, len, gSealBuf,
+      // Sealed for the class of the file it goes into (the capture tree).
+      int sl = gSealBuf ? captureCryptoSealLine(activePath, line, len, gSealBuf,
                                                 CAPCRYPT_MAX_SEALED)
                         : -1;
       if (sl < 0) {
@@ -604,7 +608,17 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
       len = (size_t)sl;
     }
     size_t written = 0;
-    const bool complete = writeLineChecked(f, rowBytes, len, written);
+    // B11: a row is on the card only when the file, flushed, has grown by it.
+    // The file layer buffers and a pulled card fails neither write() nor
+    // flush(); the size after the flush tells.
+    const bool cardFile = SealedLog::appliesTo(String(activePath));  // the twin, or a session put on the card
+    const size_t sizeBefore = cardFile ? f.size() : 0;
+    bool complete = writeLineChecked(f, rowBytes, len, written);
+    if (cardFile) {
+      f.flush();
+      if (complete && f.size() != sizeBefore + written) complete = false;
+      SealedLog::noteTail(String(activePath), complete);
+    }
     f.close();
     if (complete) {
       gSensorLogLastWrite = millis();
@@ -701,13 +715,14 @@ static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed
 }
 
 // One row to the active file. B11: when the card twin did not take it (a card
-// pulled mid-run), the card is reported unwritable, which keeps log lines off
-// it for a minute, and the row is written once more: on flash.
+// pulled mid-run, or a file there that cannot be written), that is reported,
+// which keeps this log (or, with a failed card, every log) off the card for a
+// while, and the row is written once more: on flash.
 static SensorLogAppend sensorLogAppendRow(const char* line) {
   bool cardFailed = false;
   SensorLogAppend result = sensorLogAppendRowOnce(line, cardFailed);
   if (result == SensorLogAppend::Done && cardFailed) {
-    VFS::noteLogOverflowSdFailure("sensorlog.append");
+    VFS::noteLogCardFileFailure(gSensorLogPath.c_str(), "sensorlog.append");
     result = sensorLogAppendRowOnce(line, cardFailed);
   }
   return result;
@@ -2917,6 +2932,7 @@ const char* cmd_capturecrypt(const String& argsInput) {
     unsigned long rows = 0, failedRows = 0, lineNo = 0;
     size_t expectedBytes = 0;
     const size_t expectedInputBytes = in.size();
+    sealedlog::LineState lineKinds = sealedlog::stateFor(inPath.c_str());
     while (in.available()) {
       const size_t beforeRead = in.position();
       String lineStr = in.readStringUntil('\n');
@@ -2929,8 +2945,12 @@ const char* cmd_capturecrypt(const String& argsInput) {
       lineNo++;
       // The exported copy is PLAINTEXT — dropping the magic line keeps every
       // probe/viewer from mistaking it for a sealed file.
-      if (captureCryptoIsMagicLine(lineStr.c_str())) continue;
-      if (captureCryptoRevealLine(lineStr)) {
+      // Rows open with the class of the path they are read at, so a sealed
+      // file copied from another class (a transcript, a system log) does not
+      // export; a plain line where only rows belong comes out as its marker.
+      const sealedlog::Line kind = captureCryptoRevealFileLine(inPath.c_str(), lineKinds, lineStr);
+      if (kind == sealedlog::Line::Mark) continue;
+      if (kind == sealedlog::Line::Row) {
         rows++;
         if (lineStr == CAPCRYPT_UNDECRYPTABLE) failedRows++;
       }
@@ -2955,8 +2975,9 @@ const char* cmd_capturecrypt(const String& argsInput) {
     // it with a file of markers.
     if (complete && rows > 0 && failedRows == rows) {
       VFS::removeGuarded(temporary, sysCtx);
-      return "Error: No row could be decrypted, the file was sealed with another key. "
-             "Export it on the device that recorded it.";
+      return "Error: No row could be decrypted: the file was sealed with another key, or it was moved "
+             "(rows open only where the kind of file they were sealed for lives). "
+             "Export it on the device that recorded it, from where it was written.";
     }
     if (!complete || !VFS::replaceFileGuarded(temporary, outPath, sysCtx)) {
       VFS::removeGuarded(temporary, sysCtx);

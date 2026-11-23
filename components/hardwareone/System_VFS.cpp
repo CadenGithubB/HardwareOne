@@ -1137,6 +1137,77 @@ void noteLogOverflowSdFailure(const char* hint) {
   noteSdWriteFailure(hint);
 }
 
+// One log's card file that cannot be written while the card itself takes
+// writes: only that log stays off the card, for a time that grows while the
+// retries keep failing (logcaps::cardFileBackoffMs). Keyed by the log's flash
+// name, so the card twin and the name share one entry; an entry of another
+// mount (another card) does not count.
+struct LogCardFileHold {
+  uint32_t hash;        // of the flash name; 0: free
+  uint32_t generation;  // sdMountGeneration() of the failure
+  uint32_t failedAtMs;  // millis() of the last failure
+  uint8_t  strikes;
+};
+static constexpr size_t LOG_CARD_FILE_HOLDS = 8;
+// External BSS (zeroed at boot): no internal RAM. Callers hold the filesystem
+// lock, as for the latch state above.
+EXT_RAM_BSS_ATTR static LogCardFileHold gLogCardFileHolds[LOG_CARD_FILE_HOLDS];
+EXT_RAM_BSS_ATTR static uint8_t gLogCardFileHoldNext;
+
+static const char* logFlashName(const char* path) {
+  return strncmp(path, "/sd/", 4) == 0 ? path + 3 : path;
+}
+
+static uint32_t logNameHash(const char* name) {
+  uint32_t h = 2166136261u;  // FNV-1a
+  for (; *name; ++name) {
+    h ^= (uint8_t)*name;
+    h *= 16777619u;
+  }
+  return h ? h : 1u;
+}
+
+static LogCardFileHold* logCardFileHold(const char* path) {
+  const uint32_t hash = logNameHash(logFlashName(path));
+  const uint32_t generation = sdMountGeneration();
+  for (LogCardFileHold& hold : gLogCardFileHolds) {
+    if (hold.hash == hash && hold.generation == generation) return &hold;
+  }
+  return nullptr;
+}
+
+static bool logCardFileHeld(const char* path) {
+  const LogCardFileHold* hold = logCardFileHold(path);
+  return hold && (uint32_t)(millis() - hold->failedAtMs) < logcaps::cardFileBackoffMs(hold->strikes);
+}
+
+void noteLogCardFileFailure(const char* path, const char* hint) {
+  if (!path || !*path) {
+    noteLogOverflowSdFailure(hint);
+    return;
+  }
+  // A card that no longer takes a probe file has failed as a whole (pulled,
+  // write-protected, worn out): every log leaves it.
+  if (!isSdAvailable() || !probeSdWriteInternal()) {
+    noteLogOverflowSdFailure(hint);
+    return;
+  }
+  const uint32_t now = millis();
+  LogCardFileHold* hold = logCardFileHold(path);
+  if (!hold) {
+    hold = &gLogCardFileHolds[gLogCardFileHoldNext];
+    gLogCardFileHoldNext = (uint8_t)((gLogCardFileHoldNext + 1) % LOG_CARD_FILE_HOLDS);
+    *hold = {};
+    hold->hash = logNameHash(logFlashName(path));
+    hold->generation = sdMountGeneration();
+  }
+  hold->strikes = logcaps::cardFileStrikes(hold->strikes, (uint32_t)(now - hold->failedAtMs));
+  hold->failedAtMs = now;  // before the line below, which is itself a log line
+  logSystemEvent("FS", "%s cannot be written on the card (%s): this log continues on flash, the card file is tried again in %u min",
+                 logFlashName(path), hint ? hint : "unspecified",
+                 (unsigned)(logcaps::cardFileBackoffMs(hold->strikes) / 60000u));
+}
+
 // ---------------------------------------------------------------------------
 // B11: the card first. A log line goes to the card twin of its path whenever
 // the card can take it: it accepts writes (overflowSdWritable, with its
@@ -1200,7 +1271,11 @@ static bool logCardHasRoom() {
 
 static bool logCardKeyReady() {
   if (gLogCard.keyFailed && (uint32_t)(millis() - gLogCard.keyFailedAtMs) < LOG_CARD_KEY_RETRY_MS) return false;
-  const bool ok = captureCryptoEnsureKey();  // a flag test once the key is loaded
+  bool ok = captureCryptoEnsureKey();  // a flag test once the key is loaded
+  // The key id (a keyed hash, computed once and kept) is worked out here, at
+  // this shallow point of a log write, not where a card file's mark is judged.
+  char keyId[17];
+  ok = ok && captureCryptoKeyIdHex(keyId);
   if (!ok) gLogCard.keyFailedAtMs = millis();
   gLogCard.keyFailed = !ok;
   return ok;
@@ -1309,7 +1384,9 @@ LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
 
   // B11: the card first.
   const LogCardUse use = logCardUse();
-  if (use == LogCardUse::Card) {
+  // A log whose own card file failed while the card is fine stays on flash
+  // until its back-off runs out (noteLogCardFileFailure).
+  if (use == LogCardUse::Card && !logCardFileHeld(primaryPath)) {
     if (primaryPath[0] == '/') {
       snprintf(outPath, outPathLen, "/sd%s", primaryPath);
     } else {

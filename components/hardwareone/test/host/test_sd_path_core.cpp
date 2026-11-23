@@ -118,6 +118,45 @@ int main() {
     CHECK(of(std::string("/sd/notes/") + segment) == Verdict::Accepted);
   }
 
+  // Bytes of 0x80 and above. The build mounts the card with code page 437 and
+  // ANSI/OEM paths: FatFs up-cases such a byte through the code page's table
+  // for the short name, and several land on plain ASCII (0x82 -> E, 0x98 -> Y,
+  // 0x93 0x95 0xA2 -> O, 0x83 0x85 0xA0 -> A, 0x88-0x8A -> E, 0x8B-0x8D 0xA1 ->
+  // I, 0x96 0x97 0xA3 -> U), so "syst\x82m" opens the folder "system" by its
+  // short name while the rules see other bytes. No card path carries one, in
+  // any segment, protected folder or not.
+  CHECK(of("/sd/syst\x82m/sys_logs/failed_login.log") == Verdict::Refused);
+  CHECK(of("/sd/s\x98stem/sys_logs/failed_login.log") == Verdict::Refused);
+  CHECK(of("/sd/c\x93llect/aabbccddeeff/events.log") == Verdict::Refused);
+  CHECK(of("/sd/c\x95llect/x") == Verdict::Refused);
+  CHECK(of("/sd/c\xa2llect/x") == Verdict::Refused);
+  CHECK(of("/sd/\x82spnow/cap.bin") == Verdict::Refused);
+  CHECK(of("/sd/espn\x93w/cap.bin") == Verdict::Refused);
+  CHECK(of("/sd/system/s\x98s_logs/failed_login.log") == Verdict::Refused);
+  CHECK(of("/sd/system/sys_logs/fail\x82" "d_login.log") == Verdict::Refused);
+  for (const char* name : sdpath::kProtectedFolders) {
+    // Every protected folder with each of its letters replaced by every byte
+    // from 0x80 up: whatever a code page folds it to, it is not a card path.
+    const std::string folder = name;
+    for (size_t at = 0; at < folder.size(); ++at) {
+      for (int byte = 0x80; byte <= 0xff; ++byte) {
+        std::string spelled = folder;
+        spelled[at] = char(byte);
+        CHECK(of("/sd/" + spelled) == Verdict::Refused);
+        CHECK(of("/sd/" + spelled + "/x.log") == Verdict::Refused);
+      }
+    }
+  }
+  for (int byte = 0x80; byte <= 0xff; ++byte) {
+    const std::string c(1, char(byte));
+    CHECK(!sdpath::segmentAccepted((std::string("a") + c).c_str(), 2));
+    CHECK(of("/sd/notes/caf" + c + ".txt") == Verdict::Refused);     // an unprotected folder too
+    CHECK(of("/sd/" + c) == Verdict::Refused);
+    CHECK(of("/sd/stt/u7/" + c + "a.txt") == Verdict::Refused);
+    CHECK(of("/notes/caf" + c + ".txt") == Verdict::NotCard);        // flash compares bytes: untouched
+  }
+  CHECK(of("/sd/Music/Caf\xc3\xa9.mp3") == Verdict::Refused);  // UTF-8 is such bytes too
+
   // Unprotected folders keep their own case (the names are not folded), but a
   // second spelling of a segment is refused there as well.
   CHECK(of("/sd/Videos/a.avi") == Verdict::Accepted);

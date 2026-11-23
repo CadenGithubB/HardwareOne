@@ -29,6 +29,14 @@ static int cardStatReads = 0, cardLowSpacePosts = 0, keyCalls = 0;
 static bool cardStatsFail = false, keyReady = true;
 static uint32_t mountGeneration = 1;
 static bool captureCryptoEnsureKey() { ++keyCalls; return keyReady; }
+static bool captureCryptoKeyIdHex(char out[17]) {  // worked out once the key is there, kept by the real one
+  std::snprintf(out, 17, "%s", keyReady ? "0123456789abcdef" : "");
+  return keyReady;
+}
+// The card's write probe (a probe file written, read back and removed), asked
+// when one log's card file failed: is it the card, or only that file?
+static bool cardProbeOk = true;
+static int cardProbes = 0;
 #include "System_LogCapsCore.h"  // the production card reserve (the runner adds the component to the include path)
 static bool sdMounted = false, sdWritableNow = false;
 static std::vector<std::string> eventLines;
@@ -75,6 +83,7 @@ namespace VFS {
 enum class LogTier : uint8_t { Primary, Overflow, Refused };
 static bool isSdAvailable() { return sdMounted; }
 static bool isSdWritable() { ++writableProbes; return sdMounted && sdWritableNow; }
+static bool probeSdWriteInternal() { ++cardProbes; return sdMounted && sdWritableNow && cardProbeOk; }
 static void noteSdWriteFailure(const char*) { ++sdFailureNotes; }
 // Each free-space walk also hands its reading to the presentation snapshot
 // (the real cache and its fencing run in the storage_stats test).
@@ -347,6 +356,83 @@ int main() {
     advance(1000);
     CHECK(resolve(out) == LogTier::Overflow && writableProbes == probes + 1);
     CHECK(cardEvents() == cardLines + 2);
+  }
+
+  // One log's card file fails while the card itself takes writes (a damaged
+  // file, a directory in its place, a tail that cannot be mended): only that
+  // log leaves the card, the card is not reported as failed, and the others
+  // stay. The hold grows while the retries keep failing: 1, 4, 16, 60 min.
+  {
+    const char* const kAudit = "/system/sys_logs/command-audit.log";
+    const int notes = sdFailureNotes, probes = cardProbes;
+    const size_t lines = eventLines.size();
+    auto cardStateLines = [] {  // "card gone", "go to the card again": the card as a whole
+      size_t n = 0;
+      for (const std::string& line : eventLines) {
+        if (line.find("card gone") != std::string::npos || line.find("go to the card again") != std::string::npos) ++n;
+      }
+      return n;
+    };
+    cardLines = cardStateLines();
+    CHECK(resolve(out, kAudit) == LogTier::Overflow && out == "/sd/system/sys_logs/command-audit.log");
+    VFS::noteLogCardFileFailure(kAudit, "log.append");
+    CHECK(cardProbes == probes + 1 && sdFailureNotes == notes);          // asked the card; it is fine
+    CHECK(eventLines.size() == lines + 1 && lastEventHas("/system/sys_logs/command-audit.log cannot be written on the card") &&
+          lastEventHas("log.append") && lastEventHas("in 1 min"));
+    CHECK(resolve(out, kAudit) == LogTier::Primary && out == kAudit);    // this log: flash
+    CHECK(resolve(out) == LogTier::Overflow);                            // every other log: still the card
+    CHECK(resolve(out, kSensors, 250 * 1024) == LogTier::Overflow);
+    CHECK(cardStateLines() == cardLines && VFS::logCardStatus().onCard);     // no "card gone" line, no flip
+    advance(59000);
+    CHECK(resolve(out, kAudit) == LogTier::Primary);
+    advance(1000);
+    CHECK(resolve(out, kAudit) == LogTier::Overflow);                    // tried again after a minute
+    // The card twin's name is the same log: the retry fails, four minutes.
+    VFS::noteLogCardFileFailure("/sd/system/sys_logs/command-audit.log", "log.append");
+    CHECK(lastEventHas("in 4 min") && resolve(out, kAudit) == LogTier::Primary);
+    advance(239000); CHECK(resolve(out, kAudit) == LogTier::Primary);
+    advance(1000);   CHECK(resolve(out, kAudit) == LogTier::Overflow);
+    VFS::noteLogCardFileFailure(kAudit, "log.append");
+    CHECK(lastEventHas("in 16 min"));
+    advance(16 * 60000); CHECK(resolve(out, kAudit) == LogTier::Overflow);
+    VFS::noteLogCardFileFailure(kAudit, "log.append");
+    CHECK(lastEventHas("in 60 min"));
+    advance(59 * 60000); CHECK(resolve(out, kAudit) == LogTier::Primary);
+    advance(60000);      CHECK(resolve(out, kAudit) == LogTier::Overflow);
+    VFS::noteLogCardFileFailure(kAudit, "log.append");
+    CHECK(lastEventHas("in 60 min"));                                    // and stays there
+    // It worked for a long while, then fails again: back to one minute.
+    advance(3 * 3600000);
+    CHECK(resolve(out, kAudit) == LogTier::Overflow);
+    VFS::noteLogCardFileFailure(kAudit, "log.append");
+    CHECK(lastEventHas("in 1 min") && resolve(out, kAudit) == LogTier::Primary);
+    // Another mount may be another card: its files are tried at once.
+    ++mountGeneration;
+    CHECK(resolve(out, kAudit) == LogTier::Overflow);
+    // Nine logs failing at once: the table holds eight; the oldest entry is
+    // given up (that log is simply tried again), nothing else changes.
+    for (int i = 0; i < 9; ++i) {
+      const std::string name = "/system/sys_logs/log-" + std::to_string(i) + ".log";
+      VFS::noteLogCardFileFailure(name.c_str(), "log.append");
+      CHECK(resolve(out, name.c_str()) == LogTier::Primary);
+    }
+    CHECK(resolve(out, "/system/sys_logs/log-0.log") == LogTier::Overflow);
+    CHECK(resolve(out, "/system/sys_logs/log-8.log") == LogTier::Primary);
+    CHECK(sdFailureNotes == notes && cardStateLines() == cardLines);
+    // The card no longer takes a probe file: that is the card, for every log
+    // (the G-39 minute), and it is reported as before.
+    ++mountGeneration; advance(1000);
+    cardProbeOk = false;
+    VFS::noteLogCardFileFailure(kAudit, "log.append");
+    CHECK(sdFailureNotes == notes + 1);
+    CHECK(resolve(out, kAudit) == LogTier::Primary && resolve(out) == LogTier::Primary);
+    cardProbeOk = true; advance(60000);
+    CHECK(resolve(out) == LogTier::Overflow && resolve(out, kAudit) == LogTier::Overflow);
+    // No path: the card as a whole, as the old note.
+    VFS::noteLogCardFileFailure(nullptr, "log.append");
+    CHECK(sdFailureNotes == notes + 2 && resolve(out) == LogTier::Primary);
+    advance(60000);
+    CHECK(resolve(out) == LogTier::Overflow);
   }
 
   // The flash floor. With a card the lines are on the card, so flash below

@@ -13,7 +13,14 @@ and never dropped, a caller's smaller row limit; a short write leaving whole
 rows and no plain byte; openFresh; writeMark; lines put together across pieces
 (LineStream); and readWindow: whole rows by stored offset, the mark skipped, a
 plain schema line passed through, rows that do not open, another device's file,
-the ends of the file and a failed read.
+the ends of the file and a failed read. Since the review of 2026-11-22 also:
+a write that the handle accepted but the card lost is caught by the size after
+the flush (settle) and linesLanded says what did arrive; a torn last row gets
+its line end before the next row; nothing is judged or moved without the key;
+a file is moved aside only in the log trees and the oldest set-aside name is
+reused when all are taken; a row opens only at a path of the class it was
+sealed for (a transcript copied to another account's folder stays closed); and
+a plain line where only sealed rows belong reads "[unsealed line]".
 
 The real cipher and key are covered by test_capture_crypto_key.py; the writers
 around this module by their own suites (capped logs, sensor rows, the
@@ -62,9 +69,20 @@ def source_contract() -> None:
         require(banned not in source, f"System_SealedLog.cpp must not use {banned}")
     # No plain write path: every byte written is the mark or a sealed row.
     writes = re.findall(r"\.write\(([^;]*);", source)
-    require(len(writes) == 2 and all("mark" in w or "row" in w for w in writes),
-            "the module writes the mark line and sealed rows, nothing else")
-    require("captureCryptoSealLine(line, take, row, CAPCRYPT_MAX_SEALED)" in source, "every row goes through the seal")
+    require(len(writes) == 3 and all("mark" in w or "row" in w or "&lineEnd, 1" in w for w in writes),
+            "the module writes the mark line, sealed rows and the line end of a torn row, nothing else")
+    require("captureCryptoSealLine(path.c_str(), line, take, row, CAPCRYPT_MAX_SEALED)" in source,
+            "every row goes through the seal, bound to the class of its file's path")
+    require("captureCryptoOpenLine(path.c_str(), line, textLength, plain, CAPCRYPT_MAX_ROW + 1)" in source,
+            "a row is opened with the class of the path it is read at")
+    require("if (!sealedlog::inLogTree(path.c_str())) return false;" in source,
+            "a file is moved aside only inside the log trees")
+    require(re.search(r"Head inspect\([^)]*\) \{\s*char ownId\[[^\]]*\];\s*if \(!captureCryptoEnsureKey\(\) \|\| "
+                      r"!captureCryptoKeyIdHex\(ownId\)\) return Head::Unreadable;", source) is not None,
+            "nothing is judged without the device key")
+    require("return !file.getWriteError();" in source and
+            "const bool landed = !file.getWriteError() && file.size() == expectedStored;" in source,
+            "a write counts only when the flushed file has the expected size")
     header = (COMPONENT / "System_CaptureCrypto.h").read_text()
     for name in ("CAPCRYPT_MAX_ROW", "CAPCRYPT_MAX_SEALED", "CAPCRYPT_MARK_LINE_MAX"):
         require(re.search(rf"^#define {name}\s+\d+$", header, re.M) is not None, f"{name} is a plain number")

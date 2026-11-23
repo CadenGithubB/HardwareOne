@@ -107,6 +107,21 @@ constexpr uint32_t DEBUG_OUT_STACK_WORDS = 6144;     // 6 KB (was 4 KB; see the 
                                                      // FILE I/O (system-log + error-log writes and now
                                                      // rotation); see the drain loop. Do NOT trim below
                                                      // 6 KB unless those file writes move off this task.
+                                                     // B11 static audit (2026-11-23, not measured): the
+                                                     // sealed card path adds SealedLog frames (inspect's
+                                                     // 48 B head + 17 B id, writeMark's 49 B mark, ~0.2 KB
+                                                     // with saved registers), the seal (~60 B) and
+                                                     // libsodium's ChaCha20-Poly1305 (~0.35 KB: block0[64],
+                                                     // the Poly1305 state), then FatFs through the VFS
+                                                     // (LFN buffer on the heap, CONFIG_FATFS_LFN_HEAP).
+                                                     // Every line, row, name, pending text and the web
+                                                     // mirror line of the drain loop are in PSRAM or
+                                                     // EXT_RAM_BSS; the key id's keyed hash (~0.8 KB)
+                                                     // runs once, at resolveLogPath depth. The card and
+                                                     // LittleFS paths are alternatives, so the estimated
+                                                     // worst case is ~4.2 KB of 6 KB (the 3.5 KB LittleFS
+                                                     // peak above plus ~0.7 KB). The log_out stack peak
+                                                     // with a card is still to be measured on a device.
 constexpr uint32_t APDS_STACK_WORDS = 3072;     // 3 KB (was ~12KB)
 constexpr uint32_t GPS_STACK_WORDS = 3072;     // 3 KB (was ~12KB)
 constexpr uint32_t PRESENCE_STACK_WORDS = 3072;     // 3 KB (was ~12KB)

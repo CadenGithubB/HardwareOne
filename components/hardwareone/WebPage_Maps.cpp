@@ -283,11 +283,16 @@ esp_err_t handleGpsTracksApi(httpd_req_t* req) {
     bool hasGps = false;
     File check = VFS::openGuarded(path, "r", ctx);
     if (check) {
+      // Rows open with the class of the path they are read at; a plain line
+      // in a sealed file is not a row and never counts as GPS data.
+      String classPath;
+      if (!normalizeFsPath(path, classPath)) classPath = "";
+      sealedlog::LineState lineKinds = sealedlog::stateFor(classPath.c_str());
       for (int i = 0; i < 15 && check.available(); i++) {
         String line = check.readStringUntil('\n');
         // Sealed at rest (every track on the card, B11): the rows are
         // revealed for this user, who passed the guarded open above.
-        captureCryptoRevealLine(line);
+        if (captureCryptoRevealFileLine(classPath.c_str(), lineKinds, line) == sealedlog::Line::Unsealed) continue;
         // Check for both sensor log format and CSV format
         if (line.indexOf("gps:") >= 0 ||
             (line.length() > 10 && line.charAt(0) != '#' && line.indexOf(',') > 0)) {

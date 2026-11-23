@@ -188,7 +188,13 @@ static bool captureCryptoPseudonym(const char* domain, const char* value, char* 
   // Fixture pseudonym is deterministic, opaque, and contains no real identity.
   std::snprintf(output, capacity, "%s", "0123456789abcdef0123456789abcdef"); return true;
 }
-static int captureCryptoSealLine(const char* input, size_t length, char* output, size_t capacity) {
+// A day's rows are sealed for, and opened with, the class of the history
+// folder (the capture tree): the path the store hands over is checked here.
+static void checkHistoryClass(const char* path) {
+  check(path && std::string(path) == "/logging_captures/r1-health-history", "the store seals and opens with its folder's path");
+}
+static int captureCryptoSealLine(const char* path, const char* input, size_t length, char* output, size_t capacity) {
+  checkHistoryClass(path);
   ++sealCalls; if (!keyReady || sealCalls == failSeal) return -1;
   static const char hex[] = "0123456789abcdef";
   std::string encoded = "ENC1:";
@@ -196,7 +202,8 @@ static int captureCryptoSealLine(const char* input, size_t length, char* output,
   if (encoded.size() >= capacity) return -1;
   std::memcpy(output, encoded.c_str(), encoded.size() + 1); return static_cast<int>(encoded.size());
 }
-static int captureCryptoOpenLine(const char* line, size_t length, char* output, size_t capacity) {
+static int captureCryptoOpenLine(const char* path, const char* line, size_t length, char* output, size_t capacity) {
+  checkHistoryClass(path);
   if (!keyReady || length < 5 || strncmp(line, "ENC1:", 5) || (length - 5) % 2) return -1;
   size_t count = (length - 5) / 2; if (count >= capacity) return -1;
   auto nibble = [](char ch) { return ch >= '0' && ch <= '9' ? ch - '0' : ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : -1; };

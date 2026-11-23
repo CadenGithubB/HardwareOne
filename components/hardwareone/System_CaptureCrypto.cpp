@@ -24,8 +24,12 @@ namespace {
 
 constexpr const char* kNvsNamespace = "hw1cap";
 constexpr const char* kNvsKeyName   = "k1";
-constexpr char  kAad[]        = "HW1ENC1";     // constant AAD (7 bytes, no NUL)
-constexpr size_t kAadLen      = sizeof(kAad) - 1;
+// The additional data of a row: this tag, '|', and the class of the file the
+// row belongs to (sealedlog::classOf: syslog, bootdebug, capture, stt|u<id>,
+// or the exact path). A row read at a path of another class does not open.
+constexpr char  kAadTag[]     = "HW1ENC1|";
+constexpr size_t kAadTagLen   = sizeof(kAadTag) - 1;
+constexpr size_t kAadCap      = kAadTagLen + sealedlog::kClassMax;
 constexpr size_t kNonceLen    = 12;
 constexpr size_t kTagLen      = 16;
 constexpr size_t kPrefixLen   = sizeof(CAPCRYPT_ROW_PREFIX) - 1;  // "ENC1:"
@@ -38,14 +42,18 @@ constexpr size_t kBinCap      = kNonceLen + CAPCRYPT_MAX_ROW + kTagLen + 4;
 uint8_t sKey[32];
 bool    sKeyLoaded = false;
 
-// PSRAM scratch: [0..kBinCap) binary stage, then a plaintext stage. Plaintext
-// ROWS already transit PSRAM today (the row builders in System_SensorLogging
-// are ps_alloc'd), so scratch placement adds no new exposure.
+// PSRAM scratch: [0..kBinCap) binary stage, then a plaintext stage, then the
+// additional data of the row being sealed or opened. Plaintext ROWS already
+// transit PSRAM today (the row builders in System_SensorLogging are
+// ps_alloc'd), so scratch placement adds no new exposure. Nothing of a seal
+// or an open is a large local: these run on the log task's 6 KB stack.
 char*  sScratch = nullptr;
 char*  binScratch()   { return sScratch; }
 char*  plainScratch() { return sScratch + kBinCap; }
 constexpr size_t kPlainCap   = CAPCRYPT_MAX_ROW + 1;
-constexpr size_t kScratchCap = kBinCap + kPlainCap;
+char*  aadScratch()   { return sScratch + kBinCap + kPlainCap; }
+constexpr size_t kScratchCap = kBinCap + kPlainCap + kAadCap;
+size_t sAadLen = 0;  // of what aadScratch() holds; written under the mutex
 
 SemaphoreHandle_t mx() {
   // Function-local static: thread-safe init without a boot-order hook.
@@ -65,9 +73,23 @@ bool ensureScratchLocked() {
   return sScratch != nullptr;
 }
 
-// Open one sealed line into plainScratch(). Caller holds the mutex and has
-// verified the key is resident. Returns plaintext length or -1.
+// Puts the additional data for rows of the file at `path` (a normalized path)
+// into aadScratch(). Caller holds the mutex. False when the path has no class
+// or the scratch is missing: nothing is sealed or opened then.
+bool setAadLocked(const char* path) {
+  sAadLen = 0;
+  if (!ensureScratchLocked()) return false;
+  memcpy(aadScratch(), kAadTag, kAadTagLen);
+  if (!sealedlog::classOf(path, aadScratch() + kAadTagLen, sealedlog::kClassMax)) return false;
+  sAadLen = kAadTagLen + strlen(aadScratch() + kAadTagLen);
+  return true;
+}
+
+// Open one sealed line into plainScratch(), with the additional data
+// setAadLocked() put in place. Caller holds the mutex and has verified the key
+// is resident. Returns plaintext length or -1.
 int openLineLocked(const char* line, size_t lineLen) {
+  if (sAadLen == 0) return -1;
   if (lineLen <= kPrefixLen) return -1;
   if (strncmp(line, CAPCRYPT_ROW_PREFIX, kPrefixLen) != 0) return -1;
   if (!ensureScratchLocked()) return -1;
@@ -84,15 +106,17 @@ int openLineLocked(const char* line, size_t lineLen) {
   if (crypto_aead_chacha20poly1305_ietf_decrypt_detached(
           (unsigned char*)plainScratch(), nullptr,
           ct, ctLen, tag,
-          (const unsigned char*)kAad, kAadLen,
+          (const unsigned char*)aadScratch(), sAadLen,
           nonce, sKey) != 0) {
-    return -1;  // tag mismatch: torn tail line, or another device's key
+    return -1;  // tag mismatch: a torn tail line, another device's key, or a
+                // row that was sealed for a file of another class
   }
   plainScratch()[ctLen] = '\0';
   return (int)ctLen;
 }
 
 const char kUndecryptable[] = CAPCRYPT_UNDECRYPTABLE;
+const char kUnsealed[] = CAPCRYPT_UNSEALED;
 
 // The notice for marked text another device sealed, 0 when the text is not
 // marked, is ours, or names no key id (its rows are then tried as before).
@@ -339,12 +363,12 @@ size_t captureCryptoForeignNotice(const char* keyIdHex, char* out, size_t outCap
   return static_cast<size_t>(n);
 }
 
-int captureCryptoSealLine(const char* in, size_t inLen, char* out, size_t outCap) {
-  if (!in || !out) return -1;
+int captureCryptoSealLine(const char* path, const char* in, size_t inLen, char* out, size_t outCap) {
+  if (!path || !in || !out) return -1;
   if (inLen > CAPCRYPT_MAX_ROW) return -1;
   if (!captureCryptoEnsureKey()) return -1;
   ScratchGuard lock;
-  if (!ensureScratchLocked()) return -1;
+  if (!setAadLocked(path)) return -1;
 
   unsigned char* nonce = (unsigned char*)binScratch();
   unsigned char* ct    = nonce + kNonceLen;
@@ -354,7 +378,7 @@ int captureCryptoSealLine(const char* in, size_t inLen, char* out, size_t outCap
   if (crypto_aead_chacha20poly1305_ietf_encrypt_detached(
           ct, tag, &tagLen,
           (const unsigned char*)in, inLen,
-          (const unsigned char*)kAad, kAadLen,
+          (const unsigned char*)aadScratch(), sAadLen,
           nullptr, nonce, sKey) != 0) return -1;
   memcpy(ct + inLen, tag, kTagLen);
 
@@ -368,10 +392,11 @@ int captureCryptoSealLine(const char* in, size_t inLen, char* out, size_t outCap
   return (int)(kPrefixLen + b64Len);
 }
 
-int captureCryptoOpenLine(const char* line, size_t lineLen, char* out, size_t outCap) {
-  if (!line || !out) return -1;
+int captureCryptoOpenLine(const char* path, const char* line, size_t lineLen, char* out, size_t outCap) {
+  if (!path || !line || !out) return -1;
   if (!captureCryptoEnsureKey()) return -1;
   ScratchGuard lock;
+  if (!setAadLocked(path)) return -1;
   int n = openLineLocked(line, lineLen);
   if (n < 0) return -1;
   if ((size_t)n + 1 > outCap) return -1;
@@ -397,35 +422,56 @@ bool captureCryptoLooksSealed(File& f) {
          strncmp(head, CAPCRYPT_MAGIC_PREFIX, kMagicPfxLen) == 0;
 }
 
-bool captureCryptoRevealLine(String& line) {
+bool captureCryptoRevealLine(const char* path, String& line) {
   if (!captureCryptoIsSealedRow(line.c_str())) return false;
-  if (!captureCryptoEnsureKey()) { line = kUndecryptable; return true; }
+  if (!path || !captureCryptoEnsureKey()) { line = kUndecryptable; return true; }
   ScratchGuard lock;
-  int n = openLineLocked(line.c_str(), line.length());
+  int n = setAadLocked(path) ? openLineLocked(line.c_str(), line.length()) : -1;
   if (n >= 0) line = plainScratch();
   else        line = kUndecryptable;
   return true;
 }
 
-size_t captureCryptoRevealCapacity(const char* text, size_t length) {
+sealedlog::Line captureCryptoRevealFileLine(const char* path, sealedlog::LineState& state, String& line) {
+  const sealedlog::Line kind = sealedlog::classifyLine(state, line.c_str(), line.length());
+  if (kind == sealedlog::Line::Row) (void)captureCryptoRevealLine(path, line);
+  else if (kind == sealedlog::Line::Unsealed) line = kUnsealed;
+  return kind;
+}
+
+size_t captureCryptoRevealCapacity(const char* text, size_t length, bool afterHeader) {
   if (!text || length == SIZE_MAX) return 0;
   size_t capacity = length + 1;
   if (length < kMagicPfxLen ||
       memcmp(text, CAPCRYPT_MAGIC_PREFIX, kMagicPfxLen) != 0) return capacity;
   // Another device's file: its rows are dropped and one notice is shown, so
-  // the text grows by the notice at most.
+  // the text grows by the notice at most (its other lines can still grow, as
+  // below).
   char notice[CAPCRYPT_FOREIGN_NOTICE_MAX];
   const size_t noticeLen = foreignMarkNotice(text, length, notice, sizeof(notice));
-  if (noticeLen) return noticeLen > SIZE_MAX - capacity ? 0 : capacity + noticeLen;
+  if (noticeLen > SIZE_MAX - capacity) return 0;
+  capacity += noticeLen;
+  // A line shorter than what it is shown as grows: a damaged row into the
+  // failure marker, a plain line where only rows belong into its marker.
+  // Counted as for a class without schema lines: the most any path's reveal
+  // of this text can grow.
+  sealedlog::LineState state;
+  state.schema = false;
   size_t r = 0;
+  bool first = true;
   while (r < length) {
     const size_t start = r;
     while (r < length && text[r] != '\n') ++r;
     const size_t lineLen = r - start;
     if (r < length) ++r;
-    if (lineLen > kPrefixLen && lineLen < sizeof(kUndecryptable) - 1 &&
-        memcmp(text + start, CAPCRYPT_ROW_PREFIX, kPrefixLen) == 0) {
-      const size_t growth = sizeof(kUndecryptable) - 1 - lineLen;
+    const sealedlog::Line kind = sealedlog::classifyLine(state, text + start, lineLen);
+    if (first && afterHeader) state.inHeader = false;
+    first = false;
+    size_t shown = lineLen;
+    if (kind == sealedlog::Line::Row && !noticeLen) shown = sizeof(kUndecryptable) - 1;
+    else if (kind == sealedlog::Line::Unsealed) shown = sizeof(kUnsealed) - 1;
+    if (shown > lineLen) {
+      const size_t growth = shown - lineLen;
       if (growth > SIZE_MAX - capacity) return 0;
       capacity += growth;
     }
@@ -433,11 +479,11 @@ size_t captureCryptoRevealCapacity(const char* text, size_t length) {
   return capacity;
 }
 
-bool captureCryptoRevealText(char* buf, size_t& length, size_t capacity,
-                             size_t* outSealedRows) {
+bool captureCryptoRevealText(const char* path, char* buf, size_t& length, size_t capacity,
+                             size_t* outSealedRows, bool afterHeader) {
   if (outSealedRows) *outSealedRows = 0;
   if (!buf || !capacity || length >= capacity) return false;
-  const size_t needed = captureCryptoRevealCapacity(buf, length);
+  const size_t needed = captureCryptoRevealCapacity(buf, length, afterHeader);
   if (!needed || needed > capacity) return false;
   // Only marked presentation text is interpreted. Keep ordinary bytes intact.
   if (length < kMagicPfxLen ||
@@ -445,21 +491,27 @@ bool captureCryptoRevealText(char* buf, size_t& length, size_t capacity,
     buf[length] = '\0';
     return true;
   }
-  const bool haveKey = captureCryptoEnsureKey();
+  const bool haveKey = path && captureCryptoEnsureKey();
   // Judged before the mutex is taken (the key id comes through it) and before
   // the text moves. The same answer captureCryptoRevealCapacity sized for.
   char notice[CAPCRYPT_FOREIGN_NOTICE_MAX];
   const size_t noticeLen = foreignMarkNotice(buf, length, notice, sizeof(notice));
   ScratchGuard lock;
+  // Rows open only with the class of the path they are read at.
+  const bool haveClass = haveKey && setAadLocked(path);
 
-  // A torn row such as ENC1:x is shorter than the failure marker. Reserve all
-  // possible expansion BEFORE mutating, and move unread input out of its way.
-  // Every output row is <= its input row plus the growth budget for that row,
-  // so the write cursor cannot overtake the unread tail (even with no key).
+  // A line can be shorter than what it is shown as (a torn row such as ENC1:x
+  // and the failure marker; a short plain line and "[unsealed line]").
+  // Reserve all possible expansion BEFORE mutating, and move unread input out
+  // of its way. Every output line is <= its input line plus the growth budget
+  // counted for that line, so the write cursor cannot overtake the unread
+  // tail (even with no key).
   const size_t growth = needed - length - 1;
   if (growth) memmove(buf + growth, buf, length);
   const size_t end = length + growth;
   size_t r = growth, w = 0, sealedRows = 0;
+  sealedlog::LineState state = sealedlog::stateFor(path);
+  bool first = true;
   while (r < end) {
     size_t lineStart = r;
     while (r < end && buf[r] != '\n') r++;
@@ -467,8 +519,10 @@ bool captureCryptoRevealText(char* buf, size_t& length, size_t capacity,
     const bool hasNl = (r < end);
     if (hasNl) r++;
 
-    if (noticeLen && lineLen > kPrefixLen &&
-        strncmp(buf + lineStart, CAPCRYPT_ROW_PREFIX, kPrefixLen) == 0) {
+    const sealedlog::Line kind = sealedlog::classifyLine(state, buf + lineStart, lineLen);
+    if (first && afterHeader) state.inHeader = false;
+    first = false;
+    if (kind == sealedlog::Line::Row && noticeLen) {
       // Another device's rows: the notice once (growth holds its length), the
       // rest dropped with their line ends.
       if (sealedRows++ == 0) {
@@ -478,10 +532,9 @@ bool captureCryptoRevealText(char* buf, size_t& length, size_t capacity,
       }
       continue;
     }
-    if (lineLen > kPrefixLen &&
-        strncmp(buf + lineStart, CAPCRYPT_ROW_PREFIX, kPrefixLen) == 0) {
+    if (kind == sealedlog::Line::Row) {
       sealedRows++;
-      int n = haveKey ? openLineLocked(buf + lineStart, lineLen) : -1;
+      int n = haveClass ? openLineLocked(buf + lineStart, lineLen) : -1;
       if (n >= 0) {
         memcpy(buf + w, plainScratch(), (size_t)n);
         w += (size_t)n;
@@ -489,6 +542,10 @@ bool captureCryptoRevealText(char* buf, size_t& length, size_t capacity,
         memcpy(buf + w, kUndecryptable, sizeof(kUndecryptable) - 1);
         w += sizeof(kUndecryptable) - 1;
       }
+    } else if (kind == sealedlog::Line::Unsealed) {
+      // Not written by a sealed writer: never shown as if it were a row.
+      memcpy(buf + w, kUnsealed, sizeof(kUnsealed) - 1);
+      w += sizeof(kUnsealed) - 1;
     } else {
       memmove(buf + w, buf + lineStart, lineLen);
       w += lineLen;
@@ -501,7 +558,7 @@ bool captureCryptoRevealText(char* buf, size_t& length, size_t capacity,
   return true;
 }
 
-size_t captureCryptoRevealText(String& text) {
+size_t captureCryptoRevealText(const char* path, String& text) {
   const size_t originalLength = text.length();
   if (originalLength < kMagicPfxLen ||
       memcmp(text.c_str(), CAPCRYPT_MAGIC_PREFIX, kMagicPfxLen) != 0) return 0;
@@ -524,7 +581,7 @@ size_t captureCryptoRevealText(String& text) {
     }
   }
   size_t length = originalLength, sealedRows = 0;
-  if (!captureCryptoRevealText(const_cast<char*>(text.c_str()), length,
+  if (!captureCryptoRevealText(path, const_cast<char*>(text.c_str()), length,
                                needed, &sealedRows)) {
     text.remove(originalLength);
     return 0;

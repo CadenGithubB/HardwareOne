@@ -978,7 +978,10 @@ void prepareFileBrowserData() {
           if (gOledFileManager->readSelectedFile(content)) {
             // Sealed capture? Reveal for display — the read ran under the
             // OLED browser's guarded identity; the magic line stays visible.
-            captureCryptoRevealText(content);
+            // Rows open only with the class of the path they are read at.
+            String selected, classPath;
+            if (!gOledFileManager->getSelectedPath(selected) || !normalizeFsPath(selected, classPath)) classPath = "";
+            captureCryptoRevealText(classPath.c_str(), content);
             fbFillView(content.c_str(), content.length(), pretty);
             sFbLevel = FbLevel::VIEW;
           } else {

@@ -198,9 +198,12 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
       // B11: the mark, then the header as sealed rows (its Title line holds
       // the first spoken words), then the text. The size kept for the
       // session is what the card stores.
+      // The rows are sealed for this owner's transcript folder (the class of
+      // the path): moved to another account's folder they do not open.
+      const String sealedPath(status_.path);
       bool sealed = SealedLog::writeMark(file, written) &&
-          SealedLog::writeLines(file, header, static_cast<size_t>(n), written, kTranscriptSealedRowBytes) &&
-          SealedLog::writeLines(file, text, length, written, kTranscriptSealedRowBytes);
+          SealedLog::writeLines(file, sealedPath, header, static_cast<size_t>(n), written, kTranscriptSealedRowBytes) &&
+          SealedLog::writeLines(file, sealedPath, text, length, written, kTranscriptSealedRowBytes);
       volatile char* wipeHeader = header;
       for (size_t i = 0; i < sizeof(header); ++i) wipeHeader[i] = 0;
       file.flush();
@@ -222,7 +225,7 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
   }
   if (sd_) {
     // B11: each line of the text is one sealed row.
-    bool sealed = SealedLog::writeLines(file, text, length, written, kTranscriptSealedRowBytes);
+    bool sealed = SealedLog::writeLines(file, String(status_.path), text, length, written, kTranscriptSealedRowBytes);
     file.flush();
     sealed = sealed && !file.getWriteError() && file.size() == status_.bytes + written;
     file.close();

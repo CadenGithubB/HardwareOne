@@ -250,6 +250,22 @@ static void sealed_on_card(){
  }
  // The header and the text round-trip: revealed, the card file is the flash file.
  assert(sealed_log_host::reveal(stored)==flashText);
+ // Review of 2026-11-22: the rows are sealed for the owner's transcript folder
+ // (the class of the file's path). Read where they were written they open;
+ // copied into another account's folder, out of the transcript tree or into
+ // the capture tree they do not, so the viewer of that place reveals nothing.
+ {
+  const std::string home=card.snapshot().path;
+  assert(home.rfind("/sd/stt/u2/",0)==0);
+  assert(sealed_log_host::view(stored,home.c_str())==sealed_log_host::mark()+flashText);
+  for(const char* moved:{"/sd/stt/u3/copy.txt","/sd/x.txt","/sd/logging_captures/sensors/x.csv","/sd/system/sys_logs/x.log","/stt/u3/copy.txt"}){
+   const std::string shown=sealed_log_host::view(stored,moved);
+   assert(shown.find("first words")==std::string::npos&&shown.find("second phrase")==std::string::npos&&shown.find("Title")==std::string::npos);
+   assert(shown.find("[undecryptable row]")!=std::string::npos);
+  }
+  // Another file of the same owner (the same account reads both) still opens.
+  assert(sealed_log_host::view(stored,"/sd/stt/u2/copy.txt")==sealed_log_host::mark()+flashText);
+ }
  assert(stored.size()>flashText.size());   // sealed rows are larger; the session counted them
  // The session notices a card file that changed under it, by its stored size.
  reset();VFS::sd=true;TranscriptSession changed;changed.begin(options(),"pi",0x78ULL);assert(changed.append(1,"one",3));
@@ -266,7 +282,7 @@ static void sealed_on_card(){
   assert(shown.substr(body)==phrase.substr(0,480)+"\n"+phrase.substr(480)+"\n");
   size_t at=sealed_log_host::mark().size();
   while(at<text(longest).size()){const size_t end=text(longest).find('\n',at);
-   std::string row;assert(sealed_log_host::open(text(longest).data()+at,end-at,row)&&row.size()<=480);at=end+1;}
+   std::string row;assert(sealed_log_host::open(longest.snapshot().path,text(longest).data()+at,end-at,row)&&row.size()<=480);at=end+1;}
   assert(longest.snapshot().bytes==text(longest).size());
  }
  // No device key: nothing goes to the card. The session is saved on flash, plain, as with no card.

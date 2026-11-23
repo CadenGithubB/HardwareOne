@@ -4898,6 +4898,13 @@ esp_err_t handleFileView(httpd_req_t* req) {
     // send it without, stop at the first failed send.
     bool firstLine = true, foreign = false;
     unsigned skippedRows = 0;
+    // Rows open only with the class of the path they are read at (a sealed
+    // file copied to a place another account may read stays closed), and a
+    // plain line where only sealed rows belong is shown as "[unsealed line]",
+    // never as if the device had written it.
+    String classPath;
+    if (!normalizeFsPath(path, classPath)) classPath = "";
+    sealedlog::LineState lineKinds = sealedlog::stateFor(classPath.c_str());
     while (true) {
       String lineStr;
       {
@@ -4927,7 +4934,7 @@ esp_err_t handleFileView(httpd_req_t* req) {
           continue;
         }
       }
-      captureCryptoRevealLine(lineStr);
+      (void)captureCryptoRevealFileLine(classPath.c_str(), lineKinds, lineStr);
       lineStr += '\n';
       sendErr = raw ? httpd_resp_send_chunk(req, lineStr.c_str(), lineStr.length())
                     : streamHtmlEscapedChecked(req, lineStr.c_str(), lineStr.length());

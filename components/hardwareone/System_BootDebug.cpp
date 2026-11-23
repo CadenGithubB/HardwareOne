@@ -165,7 +165,8 @@ const char* writeTier(bool card, const Piece* pieces, size_t count, size_t total
   if (card) {
     // The pieces do not end at line ends (the kept head and the ring's two
     // halves), so the lines are put together across them.
-    SealedLog::LineStream lines(f);
+    const String cardFile(files[0]);
+    SealedLog::LineStream lines(f, cardFile);
     bool ok = true;
     for (size_t i = 0; i < count && ok; ++i) {
       for (size_t off = 0; off < pieces[i].len && ok; off += kWriteChunk) {
@@ -176,10 +177,13 @@ const char* writeTier(bool card, const Piece* pieces, size_t count, size_t total
     }
     {
       FsLockGuard lock("bootdebug.write");
+      // Written counts only when the flushed file has the size the mark and
+      // the rows make: a pulled card fails neither write() nor flush().
       ok = ok && lines.finish();
+      ok = SealedLog::settle(f, cardFile, stored + lines.stored()) && ok;
       f.close();
     }
-    return ok ? nullptr : "the sealed write was short (card pulled or full?)";
+    return ok ? nullptr : "the sealed write did not reach the card (pulled or full?)";
   }
   size_t written = 0;
   bool shortWrite = false;

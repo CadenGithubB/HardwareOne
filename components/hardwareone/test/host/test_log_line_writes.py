@@ -75,21 +75,41 @@ def source_contract(component: Path) -> None:
     require("writeLogLine(Serial, msg->timestamp, nullptr, msg->text);" in task,
             "the serial line goes through writeLogLine")
     # B11: the tag is chosen once (the category name, or none) and the line
-    # goes through writeLogLine on flash, or through writeSealedLogLine (one
-    # sealed row) when the file is on the card. Nothing plain is written to a
-    # card file: every writeLogLine on the file sits behind a flash-path test.
+    # goes through writeLogLine on flash, or through systemLogCardWriteLocked
+    # (one sealed row) when the file is on the card. Nothing plain is written
+    # to a card file: every writeLogLine on the file sits behind a flash-path
+    # test.
     require("? getDebugCategoryName(msg->category) : nullptr;" in task and
             task.count("writeLogLine(gSystemLogFile, msg->timestamp, cat, msg->text);") == 2 and
-            task.count("writeSealedLogLine(gSystemLogFile, msg->timestamp, cat, msg->text)") == 1,
-            "the system log file line goes through writeLogLine on flash and writeSealedLogLine on the card")
+            task.count("systemLogCardWriteLocked(msg->timestamp, cat, msg->text)") == 1,
+            "the system log file line goes through writeLogLine on flash and systemLogCardWriteLocked on the card")
     sealed_branch = task.index("if (SealedLog::appliesTo(gSystemLogActivePath)) {")
     fallback = task.index("writeLogLine(gSystemLogFile, msg->timestamp, cat, msg->text);")
-    require(sealed_branch < task.index("writeSealedLogLine(") < fallback and
-            task.index("gSystemLogFile.close();  // still the card: nothing plain goes there") < fallback,
-            "the plain writer runs only for a file that is not on the card")
-    sealed = extract_block(source, "static __attribute__((noinline)) bool writeSealedLogLine(")
-    require("SealedLog::writeLines(out, line," in sealed and "out.write(" not in sealed and "printf(" not in sealed.replace("snprintf(", ""),
+    require(sealed_branch < task.index("systemLogCardWriteLocked(") < task.index("systemLogCardFailoverLocked();") < fallback,
+            "the plain writer runs only for a file that is not on the card, after the card file was given up")
+    failover = extract_block(source, "static void systemLogCardFailoverLocked() ")
+    require("gSystemLogFile.close();  // still the card: nothing plain goes there" in failover and
+            failover.index("gSystemLogFile.close();  // still the card: nothing plain goes there") <
+            failover.index("gSystemLogFile.write("),
+            "the lines the card did not take are written plain only to a file that is not on the card")
+    sealed = extract_block(source, "static __attribute__((noinline)) bool systemLogCardWriteLocked(")
+    require("SealedLog::writeLines(gSystemLogFile, gSystemLogActivePath, line," in sealed and ".write(" not in sealed and
+            "printf(" not in sealed.replace("snprintf(", ""),
             "the sealed line is written through SealedLog only")
+    # Review of 2026-11-22: the line is formatted in external RAM (the log
+    # task's stack is 6 KB and the seal runs above this frame), a card flush
+    # counts only when the file then has the size written, and the lines of an
+    # unverified stretch are kept so a pulled card loses none.
+    require("EXT_RAM_BSS_ATTR static char line[kLogLineCapacity];" in sealed and "char line[kLogLineCapacity];\n" not in
+            sealed.replace("EXT_RAM_BSS_ATTR static char line[kLogLineCapacity];\n", ""),
+            "the sealed line's buffer is not on the log task's stack")
+    require("else if (!systemLogCardSettleLocked()) systemLogCardFailoverLocked();" in task,
+            "a card flush is verified, and a failed one gives the card file up")
+    settle = extract_block(source, "static bool systemLogCardSettleLocked() ")
+    require("SealedLog::settle(gSystemLogFile, gSystemLogActivePath, card.stored)" in settle, "the flush is verified by size")
+    require("sealedlog::linesLanded(card.pending, keptBytes, sealedlog::kMaxRowBytes, have - card.settled)" in failover and
+            'VFS::noteLogCardFileFailure(gSystemLogPath.c_str(), "debug.log");' in failover,
+            "the failover reports this log's card file and writes on flash only what the card did not take")
     require('Serial.printf("[%lu] %s\\n", msg->timestamp' not in task and "gSystemLogFile.printf(" not in task,
             "debugOutputTask prints no log line with printf")
 

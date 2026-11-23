@@ -143,8 +143,8 @@ extern "C" void memAllocDebug(const char*, void* p, size_t, bool requested,
 
 // INSERT_PRODUCTION_CRYPTO_MACROS_HERE
 static constexpr size_t kMagicPfxLen = sizeof(CAPCRYPT_MAGIC_PREFIX) - 1;
-static constexpr size_t kPrefixLen = sizeof(CAPCRYPT_ROW_PREFIX) - 1;
 static constexpr char kUndecryptable[] = CAPCRYPT_UNDECRYPTABLE;
+static constexpr char kUnsealed[] = CAPCRYPT_UNSEALED;
 static bool haveKey = true;
 static size_t openCalls = 0, keyCalls = 0;
 static char plaintext[1024];
@@ -155,21 +155,38 @@ struct ScratchGuard {
   ~ScratchGuard() { --scratchDepth; }
 };
 static char* plainScratch() { return plaintext; }
+// B11: this device's key id (the mark of a sealed file names the key that
+// sealed it). Without the key there is no id of our own.
+#include "System_SealedLogCore.h"
+// The class the rows being opened are read for (the seal's additional data on
+// the device): set from the path before a row is opened, under the mutex. A
+// row opens only for the class it was sealed for: the "VALID" and "EMPTY"
+// rows of these cases were sealed for the capture tree, the "U7" row for
+// account 7's transcript folder.
+static std::string openClass;
+static bool setAadLocked(const char* path) {
+  check(scratchDepth == 1, "the additional data is set under the scratch mutex");
+  char cls[sealedlog::kClassMax];
+  openClass = sealedlog::classOf(path, cls, sizeof(cls)) ? cls : "";
+  return !openClass.empty();
+}
 static int openLineLocked(const char* row, size_t n) {
   check(scratchDepth == 1, "shared decrypt scratch remains mutex-protected");
   ++openCalls;
   const std::string line(row, n);
-  if (line == "ENC1:VALID-ENOUGH-LENGTH-FOR-OPENED-ROW") {
+  if (line == "ENC1:VALID-ENOUGH-LENGTH-FOR-OPENED-ROW" && openClass == "capture") {
     strcpy(plaintext, "opened,row");
     return 10;
   }
-  if (line == "ENC1:EMPTY-ENOUGH-LENGTH") { plaintext[0] = 0; return 0; }
+  if (line == "ENC1:EMPTY-ENOUGH-LENGTH" && openClass == "capture") { plaintext[0] = 0; return 0; }
+  if (line == "ENC1:U7-ROW-ENOUGH-LENGTH-FOR-THE-OPEN" && openClass == "stt|u7") {
+    strcpy(plaintext, "private words");
+    return 13;
+  }
   return -1;
 }
-bool captureCryptoRevealText(char*, size_t&, size_t, size_t* = nullptr);
-// B11: this device's key id (the mark of a sealed file names the key that
-// sealed it). Without the key there is no id of our own.
-#include "System_SealedLogCore.h"
+size_t captureCryptoRevealCapacity(const char*, size_t, bool = false);
+bool captureCryptoRevealText(const char*, char*, size_t&, size_t, size_t* = nullptr, bool = false);
 static const char kOwnKeyId[] = "0123456789abcdef";
 static bool captureCryptoKeyIdHex(char out[17]) {
   if (!haveKey) { out[0] = '\0'; return false; }
@@ -257,17 +274,19 @@ static void reset() {
   setPsramBypass(false);
   check(!identity && fsDepth == 0, "previous scopes released");
 }
-static void expectReveal(const std::string& source, const std::string& expected, size_t rows) {
+static const char kCapturePath[] = "/sd/logging_captures/sensors/a.csv";
+static void expectReveal(const std::string& source, const std::string& expected, size_t rows,
+                         const char* path = kCapturePath) {
   const size_t cap = captureCryptoRevealCapacity(source.data(), source.size());
   check(cap >= expected.size() + 1, "preflight accounts for output growth");
   auto bytes = std::make_unique<char[]>(cap); // exact allocation: ASan checks bounds
   memcpy(bytes.get(), source.c_str(), source.size() + 1);
   size_t len = source.size(), encountered = SIZE_MAX;
-  check(captureCryptoRevealText(bytes.get(), len, cap, &encountered), "bounded reveal succeeds");
+  check(captureCryptoRevealText(path, bytes.get(), len, cap, &encountered), "bounded reveal succeeds");
   check(encountered == rows && len == expected.size(), "row count/output length exact");
   check(std::string(bytes.get(), len) == expected && bytes[len] == '\0', "output/tail/NUL preserved");
   String text(source.c_str());
-  check(captureCryptoRevealText(text) == rows, "legacy String row count preserved");
+  check(captureCryptoRevealText(path, text) == rows, "legacy String row count preserved");
   check(text.length() == expected.size() && std::string(text.c_str()) == expected,
         "legacy String length grows and shrinks correctly");
 }
@@ -276,18 +295,72 @@ static void testReveal() {
   expectReveal("hello\nENC1:x\ntail", "hello\nENC1:x\ntail", 0);
   check(keyCalls == 0 && openCalls == 0, "ordinary text never opens ciphertext");
   expectReveal("#HW1ENC v1 k1\nENC1:x", "#HW1ENC v1 k1\n[undecryptable row]", 1);
+  // Review of 2026-11-22: a plain line where only sealed rows belong was not
+  // written by a sealed writer. It is shown as "[unsealed line]", never as if
+  // it were a row of the file: after the rows began, or in the header when it
+  // is no schema line ("ENC1:" alone is no row either).
   expectReveal("#HW1ENC\nENC1:x\nFOLLOWING TEXT\nENC1:y\n",
-               "#HW1ENC\n[undecryptable row]\nFOLLOWING TEXT\n[undecryptable row]\n", 2);
-  expectReveal("#HW1ENC\nENC1:\nplain", "#HW1ENC\nENC1:\nplain", 0);
+               "#HW1ENC\n[undecryptable row]\n[unsealed line]\n[undecryptable row]\n", 2);
+  expectReveal("#HW1ENC\nENC1:\nplain", "#HW1ENC\n[unsealed line]\n[unsealed line]", 0);
   expectReveal("#HW1ENC\nENC1:VALID-ENOUGH-LENGTH-FOR-OPENED-ROW\nENC1:x\ntail",
-               "#HW1ENC\nopened,row\n[undecryptable row]\ntail", 2);
-  expectReveal("#HW1ENC\nENC1:EMPTY-ENOUGH-LENGTH\nend", "#HW1ENC\n\nend", 1);
+               "#HW1ENC\nopened,row\n[undecryptable row]\n[unsealed line]", 2);
+  expectReveal("#HW1ENC\nENC1:EMPTY-ENOUGH-LENGTH\nend", "#HW1ENC\n\n[unsealed line]", 1);
   expectReveal("#HW1ENC\nENC1:xxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\nend",
-               "#HW1ENC\n[undecryptable row]\nend", 1);
+               "#HW1ENC\n[undecryptable row]\n[unsealed line]", 1);
+  // The schema lines directly after the mark of a capture are a writer's:
+  // column names and '#' comment lines pass through, up to eight of them.
+  expectReveal("#HW1ENC v1 k1 id=0123456789abcdef\n# GPS Track Log\n# timestamp_ms,lat,lon\nENC1:VALID-ENOUGH-LENGTH-FOR-OPENED-ROW\n# late\n",
+               "#HW1ENC v1 k1 id=0123456789abcdef\n# GPS Track Log\n# timestamp_ms,lat,lon\nopened,row\n[unsealed line]\n", 1);
+  expectReveal("#HW1ENC\nx\n", "#HW1ENC\n[unsealed line]\n", 0);   // a short line grows into its marker
+  expectReveal("#HW1ENC\n\n\nENC1:x\n\n", "#HW1ENC\n\n\n[undecryptable row]\n\n", 1);  // blank lines stay
+  // A system log and a transcript have no schema lines: every plain line
+  // after the mark is unsealed there, '#' or not.
+  expectReveal("#HW1ENC\n# System log started\n[1] forged login\nENC1:x\n",
+               "#HW1ENC\n[unsealed line]\n[unsealed line]\n[undecryptable row]\n", 1, "/sd/system/sys_logs/errors.log");
+  expectReveal("#HW1ENC\nTitle: forged\nENC1:U7-ROW-ENOUGH-LENGTH-FOR-THE-OPEN\n",
+               "#HW1ENC\n[unsealed line]\nprivate words\n", 1, "/sd/stt/u7/a.txt");
+  // A row opens only at a path of the class it was sealed for. Account 7's
+  // transcript row read in account 8's folder, in the card's root or in the
+  // capture tree is "[undecryptable row]"; a capture row read as a transcript
+  // or as a system log too.
+  for (const char* moved : {"/sd/stt/u8/a.txt", "/sd/x.txt", "/sd/logging_captures/sensors/x.csv",
+                            "/sd/system/sys_logs/command-audit.log", "/stt/u8/a.txt"}) {
+    expectReveal("#HW1ENC\nENC1:U7-ROW-ENOUGH-LENGTH-FOR-THE-OPEN\n", "#HW1ENC\n[undecryptable row]\n", 1, moved);
+  }
+  expectReveal("#HW1ENC\nENC1:U7-ROW-ENOUGH-LENGTH-FOR-THE-OPEN\n", "#HW1ENC\nprivate words\n", 1, "/stt/u7/copy.txt");
+  for (const char* moved : {"/sd/stt/u7/a.txt", "/sd/system/sys_logs/errors.log", "/sd/x.txt"}) {
+    expectReveal("#HW1ENC\nENC1:VALID-ENOUGH-LENGTH-FOR-OPENED-ROW\n", "#HW1ENC\n[undecryptable row]\n", 1, moved);
+  }
+  {
+    // No path (it could not be normalized): nothing opens.
+    std::string text = "#HW1ENC\nENC1:VALID-ENOUGH-LENGTH-FOR-OPENED-ROW\n";
+    const size_t cap = captureCryptoRevealCapacity(text.data(), text.size());
+    std::vector<char> bytes(cap, 0);
+    memcpy(bytes.data(), text.data(), text.size());
+    size_t len = text.size(), rows = 0;
+    check(captureCryptoRevealText(nullptr, bytes.data(), len, cap, &rows) &&
+          std::string(bytes.data(), len) == "#HW1ENC\n[undecryptable row]\n" && rows == 1, "no path, no class, no open");
+    check(captureCryptoRevealText("", bytes.data(), len, cap, &rows), "an empty path is no class either");
+  }
+  // A later page of a paged view borrows the mark line; nothing after it is a
+  // schema line there, whatever it looks like.
+  {
+    const std::string page = "#HW1ENC\ntimestamp_ms,forged\nENC1:VALID-ENOUGH-LENGTH-FOR-OPENED-ROW\n";
+    const size_t cap = captureCryptoRevealCapacity(page.data(), page.size(), true);
+    std::vector<char> bytes(cap, 0);
+    memcpy(bytes.data(), page.data(), page.size());
+    size_t len = page.size();
+    check(captureCryptoRevealText(kCapturePath, bytes.data(), len, cap, nullptr, true) &&
+          std::string(bytes.data(), len) == "#HW1ENC\n[unsealed line]\nopened,row\n", "a later page has no header");
+    len = page.size();
+    memcpy(bytes.data(), page.data(), page.size());
+    check(captureCryptoRevealText(kCapturePath, bytes.data(), len, cap) &&
+          std::string(bytes.data(), len) == "#HW1ENC\ntimestamp_ms,forged\nopened,row\n", "the first page has one");
+  }
   // B11: the mark with this device's key id reveals as before; the id is
   // not part of what readers match on.
-  expectReveal("#HW1ENC v1 k1 id=0123456789abcdef\nschema,line\nENC1:VALID-ENOUGH-LENGTH-FOR-OPENED-ROW\nENC1:x\n",
-               "#HW1ENC v1 k1 id=0123456789abcdef\nschema,line\nopened,row\n[undecryptable row]\n", 2);
+  expectReveal("#HW1ENC v1 k1 id=0123456789abcdef\ntimestamp_ms,line\nENC1:VALID-ENOUGH-LENGTH-FOR-OPENED-ROW\nENC1:x\n",
+               "#HW1ENC v1 k1 id=0123456789abcdef\ntimestamp_ms,line\nopened,row\n[undecryptable row]\n", 2);
   // Another device's file: one notice where its first row was, the other
   // rows dropped, the mark and the plain schema line kept. Not a column of
   // "[undecryptable row]", and no row of it is tried with our key.
@@ -305,6 +378,9 @@ static void testReveal() {
     std::string many = "#HW1ENC v1 k1 id=fedcba9876543210\n";
     for (int i = 0; i < 200; ++i) many += "ENC1:ROW" + std::to_string(i) + "\n";
     expectReveal(many, "#HW1ENC v1 k1 id=fedcba9876543210\n" + notice + "\n", 200);
+    // Short plain lines in such a file grow into their marker beside the notice.
+    expectReveal("#HW1ENC v1 k1 id=fedcba9876543210\nENC1:x\na\nb\n",
+                 "#HW1ENC v1 k1 id=fedcba9876543210\n" + notice + "\n[unsealed line]\n[unsealed line]\n", 1);
   }
   haveKey = false;
   // Without this device's key a named id cannot be told from ours: the rows
@@ -312,33 +388,37 @@ static void testReveal() {
   expectReveal("#HW1ENC v1 k1 id=fedcba9876543210\nENC1:x\n",
                "#HW1ENC v1 k1 id=fedcba9876543210\n[undecryptable row]\n", 1);
   expectReveal("#HW1ENC\nENC1:x\nENC1:VALID-ENOUGH-LENGTH-FOR-OPENED-ROW\ntail",
-               "#HW1ENC\n[undecryptable row]\n[undecryptable row]\ntail", 2);
+               "#HW1ENC\n[undecryptable row]\n[undecryptable row]\n[unsealed line]", 2);
   const std::string damaged = "#HW1ENC\nENC1:x\nTAIL";
   std::vector<char> tooSmall(damaged.begin(), damaged.end());
   tooSmall.push_back(0);
   size_t len = damaged.size(), rows = 99;
-  check(!captureCryptoRevealText(tooSmall.data(), len, tooSmall.size(), &rows), "small capacity rejected");
+  check(!captureCryptoRevealText(kCapturePath, tooSmall.data(), len, tooSmall.size(), &rows), "small capacity rejected");
   check(len == damaged.size() && rows == 0 && std::string(tooSmall.data()) == damaged,
         "capacity failure leaves original input unchanged");
   String text(damaged.c_str());
   failStringReserve = true;
-  check(captureCryptoRevealText(text) == 0 && std::string(text.c_str()) == damaged,
+  check(captureCryptoRevealText(kCapturePath, text) == 0 && std::string(text.c_str()) == damaged,
         "legacy String reserve failure leaves input sealed and intact");
   failStringReserve = false;
   check(captureCryptoRevealCapacity(nullptr, 0) == 0, "invalid input rejected");
   check(captureCryptoRevealCapacity("x", SIZE_MAX) == 0, "size overflow rejected before access");
   char oneByte = 'x';
   size_t impossibleLength = SIZE_MAX;
-  check(!captureCryptoRevealText(&oneByte, impossibleLength, 1),
+  check(!captureCryptoRevealText(kCapturePath, &oneByte, impossibleLength, 1),
         "bounded entry rejects length outside caller storage before scanning");
   // Every short/truncated row length and newline shape exercises the expansion budget.
   for (size_t n = 0; n <= 32; ++n) {
     const std::string row = "ENC1:" + std::string(n, 'x');
     for (bool newline : {false, true}) {
-      const std::string tail = newline ? "\nTAIL\n" : "";
-      expectReveal("#HW1ENC\n" + row + tail,
-                   "#HW1ENC\n" + (n ? "[undecryptable row]" : row) + tail, n ? 1 : 0);
+      expectReveal("#HW1ENC\n" + row + (newline ? "\nTAIL\n" : ""),
+                   std::string("#HW1ENC\n") + (n ? "[undecryptable row]" : "[unsealed line]") +
+                       (newline ? "\n[unsealed line]\n" : ""), n ? 1 : 0);
     }
+  }
+  // Every short plain line length too.
+  for (size_t n = 1; n <= 20; ++n) {
+    expectReveal("#HW1ENC\nENC1:x\n" + std::string(n, 'p') + "\n", "#HW1ENC\n[undecryptable row]\n[unsealed line]\n", 1);
   }
 }
 static void expectWrap(const std::string& source, size_t cap, size_t cols, size_t indent, bool strip) {
@@ -436,8 +516,8 @@ static void testViewer() {
   check(!showTextFileViaWidget(false) && renders == 0, "reveal growth OOM publishes no corrupt viewer");
   reset();
   fileContents = "#HW1ENC\nENC1:x\nTAIL";
-  check(showTextFileViaWidget(false) && std::string(gFilesTextBody) == "#HW1ENC\n[undecryptable row]\nTAIL",
-        "damaged capture retains following text in G2");
+  check(showTextFileViaWidget(false) && std::string(gFilesTextBody) == "#HW1ENC\n[undecryptable row]\n[unsealed line]",
+        "a damaged capture shows its row as undecryptable and a plain line after it as unsealed, never as a row");
   reset();
   allowed = false;
   check(showTextFileViaWidget(true) && opens == 0 && keyCalls == 0 && blockedPages == 1,

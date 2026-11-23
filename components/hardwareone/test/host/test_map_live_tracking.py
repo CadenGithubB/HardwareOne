@@ -88,7 +88,7 @@ def main():
             for gps in (0, 1):
                 exe = root / f"{label}-{gps}"
                 subprocess.run([args.cxx, *flags, f"-DENABLE_GPS_SENSOR={gps}",
-                                "-I", str(root), str(unit), "-o", str(exe)],
+                                "-I", str(root), "-I", str(HERE), "-I", str(COMPONENT), str(unit), "-o", str(exe)],
                                check=True, timeout=120)
                 result = subprocess.run([str(exe)], capture_output=True, text=True, timeout=60,
                                         env={**os.environ, "TZ": "UTC"})

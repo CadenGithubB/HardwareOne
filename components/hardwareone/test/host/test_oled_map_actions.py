@@ -176,7 +176,7 @@ def main() -> None:
                         help="component source tree to extract from (default: this checkout)")
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
-    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-I", str(HERE),
+    flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-I", str(HERE), "-I", str(COMPONENT),
              "-Wno-unused-function", "-Wno-unused-variable", "-Wno-unused-const-variable",
              "-Wno-unused-but-set-variable", "-Wno-unused-parameter"]
     if args.sanitize:

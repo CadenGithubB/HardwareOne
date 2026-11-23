@@ -32,6 +32,17 @@ Host-tested and built; not run on a device or with a card.
   failed is written again there; at most the last row on the card is torn); a card that comes back
   takes the lines again. One `[EVENT]` line records each switch. A log can therefore be on both
   tiers; the viewers show both. `logtier` says where lines go now and why.
+- **A line counts as written to the card only once the card holds it.** After each write the file
+  is flushed and its size compared with what was written; a card pulled while a file was open
+  used to accept every line and lose it without an error. Lines the card did not take are written
+  to flash; lines of a batch the card did take are not written twice. The system log, which keeps
+  its file open, keeps the text of up to 20 lines (5 seconds) until the card has confirmed them.
+  The next write to a card file whose last row was torn ends that row first, so only the torn row
+  is unreadable.
+- **One bad file does not take the card away.** When a log's file on the card cannot be written
+  while the card itself works (a damaged file, a folder in its place), only that log goes to
+  flash, for 1 minute, then 4, 16 and 60 while it keeps failing; the other logs stay on the card
+  and no card failure is reported. A card that fails its write test is reported as before.
 - **Every log file on the card is sealed with the device key.** The file starts with a plain mark
   line that names the key, `#HW1ENC v1 k1 id=<16 hex>` (the id `espnowcatchup` shows; it is not the
   key), and every line after it is one sealed row. Sensor CSV and track files keep their column
@@ -45,19 +56,36 @@ Host-tested and built; not run on a device or with a card.
   a computer sees file names, sizes, dates, the mark line and column headers, and for a file sealed
   by another device the viewers say so in one line. There is no key export and no key backup: after
   a flash erase the card's logs cannot be read anywhere.
+- **A sealed row opens only where its kind of file lives.** Each row is bound to the system logs,
+  the boot debug files, the capture folder, one account's transcript folder, or (anywhere else)
+  its exact path. A sealed file copied on a computer to a place another account may read (a
+  transcript into another account's folder, the command audit into the card's root) shows
+  `[undecryptable row]` in every viewer and does not export. Rotated copies and set-aside files
+  in the same folder read as before.
+- **A plain line in a sealed file is shown as `[unsealed line]`**, not as a row: the device did not
+  write it. The column or `#` header lines directly after the mark of a capture are the
+  exception. The track loader and the track pickers ignore such lines.
 - A card log file that is not this device's sealed file (no mark, or another device's key id) is
   moved aside to `<name>.foreign-<n>` and a new sealed file is started. Nothing in it is read or
-  converted, and such a file is not offered to a collector.
-- Without the device key (an NVS failure) nothing is written to the card: lines stay on flash,
-  unsealed, are counted (`logtier`) and one `[EVENT]` line says so.
+  converted, and such a file is not offered to a collector. This happens only in the log folders
+  (`system/sys_logs`, `logging_captures`, `stt/u<id>`): an automation log started on another card
+  path (`autolog start`) never renames a file that is already there; its entries go to flash.
+  When all twenty set-aside names of a log are taken, the oldest is replaced.
+- Without the device key (an NVS failure) nothing is written to the card and no file on it is
+  judged or moved: lines stay on flash, unsealed, are counted (`logtier`) and one `[EVENT]` line
+  says so.
+- `autolog start` answers with the file the entries really go to: the card file while a card
+  takes them, with the flash name beside it.
 - Capped logs on the card get twice their nominal size in stored bytes (about 5.6 MB for all
   eight), since a sealed row stores 1.5 to 2 times its text; the quarter-of-flash share applies
   to flash only.
 - **Card paths have one spelling.** A path under `/sd` with a backslash, a name that ends in a
-  dot or a space, an 8.3 short name (`LOGGIN~1`) or another case of a protected folder
-  (`/sd/System`) is refused like `..` ("path rejected"). FAT resolves all of these to the real
-  folder while the permission rules compare bytes, so such a spelling let a signed-in user read
-  the card's system logs and captures or put a file among them.
+  dot or a space, an 8.3 short name (`LOGGIN~1`), a character outside ASCII, or another case of a
+  protected folder (`/sd/System`) is refused like `..` ("path rejected"). FAT resolves all of
+  these to the real folder while the permission rules compare bytes (an accented letter is folded
+  to its plain one for the short name: `syst` + `é` + `m` opened `system`), so such a spelling let
+  a signed-in user read the card's system logs and captures or put a file among them. A card file
+  whose name has a character outside ASCII is listed but not opened through the device.
 - The Maps track pickers list tracks on the card as well, under their `/sd` path, and loading a
   track reads sealed rows (a sealed track on flash did not load before). A track under
   `/logging_captures/tracks` or `/logging_captures/sensors` is listed once (it was listed twice,

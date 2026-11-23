@@ -121,6 +121,191 @@ constexpr size_t sealedRowBytes(size_t plainLength) {
   return 5 + 4 * ((plainLength + 28 + 2) / 3) + 1;
 }
 
+// ---------------------------------------------------------------------------
+// The class of a sealed file: what its rows are bound to.
+//
+// Every row is sealed with additional data that names the class of the file
+// it was written into, and a reader opens a row with the class of the path it
+// is reading. A row moved to a place of another class does not open, so the
+// device cannot be made to reveal one file's rows through another path's
+// permissions (a transcript copied into another account's folder, the command
+// audit copied to a user-readable place on a pulled card).
+//
+//   syslog        /system/sys_logs/... and its card twin
+//   bootdebug     the boot debug files there (boot-debug-<n>.log)
+//   capture       /logging_captures/... and its card twin (sensor, track and
+//                 automation captures, the system log, health days)
+//   stt|u<id>     one account's transcript folder, /stt/u<id>/... and its twin
+//   path|<path>   anything else: the exact path
+//
+// Within a class the same accounts read every file (admins the first three,
+// the owner the fourth), so a move inside a class reveals nothing new. `path`
+// is a normalized path (normalizeFsPath); "/sd" in front is not part of the
+// class, so a file and its card twin are one class.
+// ---------------------------------------------------------------------------
+constexpr size_t kClassMax = 272;  // "path|" + the longest path (255, with "/sd" in front), with its NUL
+
+inline bool startsWith(const char* text, const char* prefix) {
+  return strncmp(text, prefix, strlen(prefix)) == 0;
+}
+
+enum class Class : uint8_t { None, SysLog, BootDebug, Capture, Transcript, Path };
+
+// Which class `path` is in. For Transcript, `owner` and `ownerLength` (when
+// given) receive the account id's digits. None: not an absolute path.
+inline Class classKind(const char* path, const char** owner = nullptr, size_t* ownerLength = nullptr) {
+  if (!path || path[0] != '/') return Class::None;
+  const char* t = (strncmp(path, "/sd/", 4) == 0) ? path + 3 : path;  // the tier is not part of the class
+  static const char kSysLogs[] = "/system/sys_logs/";
+  static const char kCaptures[] = "/logging_captures/";
+  static const char kStt[] = "/stt/u";
+  if (startsWith(t, kSysLogs)) {
+    const char* name = t + sizeof(kSysLogs) - 1;
+    return startsWith(name, "boot-debug-") && !strchr(name, '/') ? Class::BootDebug : Class::SysLog;
+  }
+  if (startsWith(t, kCaptures)) return Class::Capture;
+  if (startsWith(t, kStt)) {
+    // "u" and a decimal id without a leading zero, then '/': the one spelling
+    // TranscriptPathPolicy takes for an owner folder.
+    const char* digits = t + sizeof(kStt) - 1;
+    size_t count = 0;
+    while (digits[count] >= '0' && digits[count] <= '9') ++count;
+    if (count > 0 && count <= 10 && digits[0] != '0' && digits[count] == '/') {
+      if (owner) *owner = digits;
+      if (ownerLength) *ownerLength = count;
+      return Class::Transcript;
+    }
+  }
+  return Class::Path;
+}
+
+// Writes the class of `path` into `out` (NUL-terminated). False when `path`
+// is not an absolute path or the class does not fit: such a file gets no rows.
+inline bool classOf(const char* path, char* out, size_t capacity) {
+  if (!out || capacity < 16) return false;
+  const char* owner = nullptr;
+  size_t ownerLength = 0;
+  int n = -1;
+  switch (classKind(path, &owner, &ownerLength)) {
+    case Class::None:       return false;
+    case Class::SysLog:     n = snprintf(out, capacity, "syslog"); break;
+    case Class::BootDebug:  n = snprintf(out, capacity, "bootdebug"); break;
+    case Class::Capture:    n = snprintf(out, capacity, "capture"); break;
+    case Class::Transcript: n = snprintf(out, capacity, "stt|u%.*s", static_cast<int>(ownerLength), owner); break;
+    case Class::Path:       n = snprintf(out, capacity, "path|%s", path); break;
+  }
+  return n > 0 && static_cast<size_t>(n) < capacity;
+}
+
+// True for a path in one of the log trees a card log writer owns (the first
+// four classes). Only there is a file that is not this device's moved aside;
+// anywhere else a writer leaves a file it did not make alone.
+inline bool inLogTree(const char* path) {
+  const Class kind = classKind(path);
+  return kind != Class::None && kind != Class::Path;
+}
+
+// True for a path whose sealed files carry plain schema lines after the mark:
+// the capture tree (a sensor CSV's column names, the '#' lines of a track or
+// a health day) and a capture the user put at a path of its own. The system
+// logs, the boot debug files and transcripts have none: every line after
+// their mark is a sealed row.
+inline bool classHasSchema(const char* path) {
+  const Class kind = classKind(path);
+  return kind == Class::Capture || kind == Class::Path;
+}
+
+// How much of `data` (lines as writeLines takes them, split into rows of at
+// most `maxRowBytes`) is on the card when `landedStored` of the stored bytes
+// its rows make arrived there: the bytes of the leading lines whose rows are
+// all within that. A writer that could not verify a write uses it to write
+// only the rest elsewhere.
+inline size_t linesLanded(const char* data, size_t length, size_t maxRowBytes, size_t landedStored) {
+  size_t at = 0, stored = 0;
+  while (at < length) {
+    size_t lineLength = 0, lineBytes = 0;
+    nextLine(data + at, length - at, lineLength, lineBytes);
+    const char* line = data + at;
+    size_t left = lineLength;
+    do {
+      const size_t take = nextRowLength(line, left, maxRowBytes);
+      stored += sealedRowBytes(take);
+      line += take;
+      left -= take;
+    } while (left > 0);
+    if (stored > landedStored) break;
+    at += lineBytes;
+  }
+  return at;
+}
+
+// ---------------------------------------------------------------------------
+// What a line of a marked file is, for a reader. Only sealed rows carry data.
+// Plain lines are taken as genuine only where a writer puts them: the mark,
+// and, in a file of a class that has them (classHasSchema), the schema lines
+// directly after it (a CSV column header, '#' comment lines of a track or
+// health file), at most kSchemaLinesMax of them. Any other plain line was not
+// written by a sealed writer; a reader shows it as "[unsealed line]"
+// (kUnsealedLine) and a parser ignores it.
+// ---------------------------------------------------------------------------
+constexpr char kRowPrefix[] = "ENC1:";          // CAPCRYPT_ROW_PREFIX
+constexpr char kUnsealedLine[] = "[unsealed line]";
+constexpr unsigned kSchemaLinesMax = 8;
+
+enum class Line : uint8_t {
+  Plain,     // the text is not marked: every line is as stored
+  Mark,      // "#HW1ENC ..."
+  Schema,    // a plain schema line directly after a mark
+  Row,       // a sealed row
+  Blank,     // an empty line
+  Unsealed,  // a plain line where only sealed rows belong
+};
+
+struct LineState {
+  bool started = false;   // a first line was seen
+  bool marked = false;    // the text is a sealed file
+  bool inHeader = false;  // between a mark and the first row after it
+  bool schema = true;     // the file's class has schema lines (classHasSchema)
+  uint8_t schemaLines = 0;
+};
+// The state for reading the file at `path`: from its start, or (`midFile`)
+// from inside a marked file (a later window or page), which is past the
+// header, so only rows and marks are genuine there.
+inline LineState stateFor(const char* path, bool midFile = false) {
+  LineState state;
+  state.schema = classHasSchema(path);
+  if (midFile) state.started = state.marked = true;
+  return state;
+}
+
+// `line` is one line without its line end (a trailing CR is ignored).
+inline Line classifyLine(LineState& state, const char* line, size_t length) {
+  if (length > 0 && line[length - 1] == '\r') --length;
+  const size_t markLength = sizeof(kMarkPrefix) - 1, rowLength = sizeof(kRowPrefix) - 1;
+  const bool mark = length >= markLength && memcmp(line, kMarkPrefix, markLength) == 0;
+  if (!state.started) {
+    state.started = true;
+    state.marked = mark;
+  }
+  if (!state.marked) return Line::Plain;
+  if (mark) {
+    state.inHeader = true;
+    state.schemaLines = 0;
+    return Line::Mark;
+  }
+  if (length > rowLength && memcmp(line, kRowPrefix, rowLength) == 0) {
+    state.inHeader = false;
+    return Line::Row;
+  }
+  if (length == 0) return Line::Blank;
+  if (state.schema && state.inHeader && state.schemaLines < kSchemaLinesMax &&
+      (line[0] == '#' || (length >= 12 && memcmp(line, "timestamp_ms", 12) == 0))) {
+    ++state.schemaLines;
+    return Line::Schema;
+  }
+  return Line::Unsealed;
+}
+
 // "<path>.foreign-<n>": where a card file this device may not append to is
 // moved (no mark, or another device's key id). Returns false when it does not
 // fit.

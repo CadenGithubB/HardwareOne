@@ -585,6 +585,14 @@ LogCardStatus logCardStatus();
  *  probes fine is not retried, and re-announced, on every line (G-39). */
 void noteLogOverflowSdFailure(const char* hint);
 
+/** B11: one log's file on the card could not be opened, prepared, written or
+ *  verified (`path`: its flash name or its card twin). If the card no longer
+ *  takes a probe file this is noteLogOverflowSdFailure: the card as a whole.
+ *  Otherwise only this log stays off the card (resolveLogPath answers flash
+ *  for it) for 1, 4, 16, then 60 minutes while the retries keep failing; the
+ *  other logs stay on the card and no card failure is reported. */
+void noteLogCardFileFailure(const char* path, const char* hint);
+
 /** True if the flash latch is set (LittleFS free fell below a reserve and
  *  has not recovered). NOTE: this is not the tier in use — since B11 lines go
  *  to the card whenever it can take them (logCardStatus), latch or not. */

@@ -7800,3 +7800,47 @@ before and that a moved-aside file is never offered. `log_retention` already hol
 transcript on either volume (B12). `time_anchor_persistence` adds the promote sweep on the card: a boot folder
 there is promoted on its own tier, the open session's card twin is left alone, and a boot's anchor row is kept
 until neither tier holds its folder.
+
+### Review fixes (2026-11-23)
+
+Nine findings of the review of the first B11 commit, each with host cases:
+
+- **Code-page spellings.** The card is mounted with code page 437 and ANSI/OEM paths; FatFs folds a byte of
+  0x80 or above to ASCII for the short name (0x82 to E, 0x98 to Y, 0x93/0x95/0xA2 to O). `sd_path_core` refuses
+  every protected folder with each letter replaced by each byte from 0x80 up, and any card path with such a byte;
+  `filesystem_listing_permissions_contract` runs the folded spellings and the review's paths through the
+  permission code for a user, a guest, an admin and the system identity. `guarded_path_normalize` records the 18
+  corpus paths that changed (all `/sd/<byte>`, every column now a refusal).
+- **Rows bound to the kind of file.** `sealed_log_core` holds `classOf` (system logs, boot debug files, the
+  capture tree, one account's transcript folder, else the exact path; a file and its card twin one class).
+  `sealed_log`, `transcript`, `transcription_ui_adapter`, `map_live_tracking`, `web_file_streaming` and
+  `g2_files_psram` (the production reveal) read rows at a path of another class: a transcript copied into
+  another account's folder, the card's root or the capture tree, and the command audit copied elsewhere, show
+  `[undecryptable row]`. The toy seal of `sealed_log_host.h` carries the class and has the size of a real row;
+  `sealed_reveal_host.h` is the reader-side double (`ENC1:@<class>@text` opens only for that class).
+  `web_file_streaming`'s source contract holds that the seal and the open take their additional data from the
+  path and that the web viewer hands over the normalized path.
+- **Plain lines in a sealed file.** `sealed_log_core` holds `classifyLine` (mark, schema line directly after it
+  in a class that has them, row, blank, unsealed); `sealed_log` (`readWindow`), `g2_files_psram` (the production
+  `captureCryptoRevealText`, including the growth of short lines and a later page that has no header),
+  `transcription_ui_adapter`, `capture_stitching` (the export) and `map_live_tracking` (the loader takes no point
+  from a plain row) show `[unsealed line]` or ignore the line.
+- **A failed card write is detected.** `fake_vfs.h` has the fault `lostAfter` ("write accepted, flush lost":
+  every write and the flush succeed, the file never grows), and the capped-log, sensor and automation harness
+  file doubles have the same knob. `sealed_log` holds `settle` (flush, then the size) and
+  `sealedlog::linesLanded`; `capped_log_writes`, `log_row_writes` and `automation_log` lose a line or part of
+  a batch at the flush and find it on flash, once. The system log's kept lines and failover are held by source
+  contract in `log_line_writes` (its writer is not executed on the host).
+- **Torn tail.** `sealed_log` and `capped_log_writes`: a file of ours that does not end in a line end gets one
+  before the next row (found at a mount, or left by a pull); only the torn row is unreadable; a tail that cannot
+  be mended sends the line to flash.
+- **Back-off per file.** `log_overflow_latch` executes `VFS::noteLogCardFileFailure`: with the card's write
+  probe passing only that log leaves the card (1, 4, 16, 60 minutes, starting over after a quiet spell, cleared
+  by a new mount, eight entries), no card failure is reported and the other logs stay; with the probe failing
+  it is the card, as before. `sealed_log` reuses the oldest `.foreign-<n>` when all twenty are taken.
+- **Move-aside limits.** `sealed_log`, `capped_log_writes` and `log_row_writes`: without the key a file is
+  "unreadable", never "not ours", and nothing is moved. `sealed_log` and `automation_log`: outside the log
+  trees a file that is not ours is left alone and the session's entries go to flash; `autolog start` names the
+  file the entries go to.
+- **Log task stack.** `log_line_writes` holds by source contract that the sealed line is formatted in external
+  RAM. The stack itself is not measured on the host.

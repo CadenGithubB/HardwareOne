@@ -233,7 +233,9 @@ bool lineWriteRaw(File& file, const char* line, size_t& bytesWritten) {
 
 bool lineWriteData(File& file, const char* line, bool sealed, size_t& bytesWritten) {
   if (!sealed) return lineWriteRaw(file, line, bytesWritten);
-  const int n = captureCryptoSealLine(line, strlen(line), sCryptoBuf, sizeof(sCryptoBuf));
+  // Sealed for the class of the history folder (the capture tree): a day file
+  // opens there and nowhere else.
+  const int n = captureCryptoSealLine(kHistoryDir, line, strlen(line), sCryptoBuf, sizeof(sCryptoBuf));
   if (n < 0) return false;
   return lineWriteRaw(file, sCryptoBuf, bytesWritten);
 }
@@ -567,7 +569,7 @@ bool decodeStoredLine(const String& line, bool sealed, const char*& decoded) {
     decoded = sLineBuf;
     return true;
   }
-  const int n = captureCryptoOpenLine(line.c_str(), line.length(),
+  const int n = captureCryptoOpenLine(kHistoryDir, line.c_str(), line.length(),
                                       sLineBuf, sizeof(sLineBuf));
   if (n < 0) return false;
   decoded = sLineBuf;

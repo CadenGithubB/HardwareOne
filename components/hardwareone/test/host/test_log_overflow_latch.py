@@ -59,7 +59,8 @@ def generate() -> str:
     # B11: the card-first resolution is part of the region, and the card
     # reserve it asks is the production System_LogCapsCore.h.
     for symbol in ("static LogCardUse logCardUse()", "static bool logCardHasRoom()", "static bool logCardKeyReady()",
-                   "LogCardStatus logCardStatus()"):
+                   "LogCardStatus logCardStatus()", "void noteLogCardFileFailure(const char* path, const char* hint)",
+                   "static bool logCardFileHeld(const char* path)"):
         require(symbol in production, f"{symbol} lives in the overflow region")
     require('#include "System_LogCapsCore.h"' in harness, "the harness compiles the production caps header")
     return harness.replace("// INSERT_PRODUCTION", production).replace("// INSERT_MIC_ADMISSION", mic_code)

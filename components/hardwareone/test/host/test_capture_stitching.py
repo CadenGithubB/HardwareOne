@@ -91,7 +91,7 @@ def main() -> None:
         sanitize = (["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                      "-fno-omit-frame-pointer", "-g"] if args.sanitize else [])
         flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function",
-                 "-Wno-unused-parameter", "-I", str(CORE), *sanitize]
+                 "-Wno-unused-parameter", "-I", str(CORE), "-I", str(COMPONENT), *sanitize]
         subprocess.run([shutil.which("cc"), "-std=c11", *sanitize, "-I", str(CORE),
                         "-c", str(work / "stdlib_noniso.c"), "-o", str(work / "conversions.o")], check=True)
         subprocess.run([args.cxx, *flags, "-Wno-sign-compare", "-c", str(work / "WString.cpp"), "-o", str(work / "WString.o")], check=True)
