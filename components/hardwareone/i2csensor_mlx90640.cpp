@@ -352,6 +352,7 @@ bool thermalStartInternal() {
 // Public command - uses centralized queue
 const char* cmd_thermalstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_THERMAL, argsInput, "openthermal")) return error;
   // The bus and queue checks are in requestSensorStart(), for every sensor.
   return cmd_sensorstart_queued(I2C_DEVICE_THERMAL, "Thermal", "openthermal@enqueue");
 }
@@ -437,6 +438,7 @@ const char* cmd_thermalread(const String& argsInput) {
 
 const char* cmd_thermalstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_THERMAL, argsInput, "closethermal")) return error;
   return cmd_sensorstop_queued(I2C_DEVICE_THERMAL, "Thermal");
 }
 
@@ -1370,7 +1372,7 @@ const char* cmd_thermalautostart(const String& argsInput) {
 // compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
 static const char* cmd_thermalbus(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return i2cSetDeviceBusAndReport(gSettings.thermalBus, a, "thermalBus");
+  return i2cSetDeviceBusAndReport(gSettings.thermalBus, a, "thermalBus", i2cInstanceOwner(I2C_DEVICE_THERMAL, 1));
 }
 
 const CommandEntry thermalCommands[] = {

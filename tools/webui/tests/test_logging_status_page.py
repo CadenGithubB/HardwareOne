@@ -69,7 +69,11 @@ var hw = {
 var window = this;
 var document = {addEventListener: function () {}, getElementById: node,
                 createElement: function () { return {style: {}}; }, hidden: false};
-var console = {log: function () {}, warn: function () {}, error: function () {}};
+// Quiet log, but warnings and errors are kept and fail the run (G-18).
+var consoleProblems = [];
+var console = {log: function () {},
+               warn: function () { consoleProblems.push('console.warn: ' + Array.prototype.join.call(arguments, ' ')); },
+               error: function () { consoleProblems.push('console.error: ' + Array.prototype.join.call(arguments, ' ')); }};
 var alert = function () {};
 eval(slurp(__argv[0]));
 
@@ -254,6 +258,10 @@ settle(8).then(function () {
   check(cli.slice().sort().join('|') === 'log status json|sensorlog status json|time json', 'fallback uses the json forms: ' + cli.join(','));
   check(text('status-text') === 'INACTIVE' && text('autostart-status') === 'OFF', 'fallback applies sensorlog status json');
   check(text('sys-status-text') === 'Error: HTTP 400', 'a refused log status shows the error: ' + text('sys-status-text'));
+  // The page reports this refusal on the console as well; that one is expected.
+  var expected = 'console.error: [LOGGING] System status refresh error: Error: HTTP 400';
+  check(consoleProblems.indexOf(expected) >= 0, 'a refused log status is logged: ' + JSON.stringify(consoleProblems));
+  consoleProblems = consoleProblems.filter(function (line) { return line !== expected; });
   // The extension follows the format select, which the status reply set in the same turn.
   check(/^\/logging_captures\/sensors\/sensors-2026-11-20T14-05-09\.(log|txt)$/.test(node('config-path').value),
         'fallback uses time json: ' + node('config-path').value);
@@ -345,6 +353,7 @@ settle(8).then(function () {
 }).then(function () {
   check(viewed.join('|') === '/logging_captures/system/system.log' && shownLines().join('|') === 'WEB',
         'a capture outside the system log folder is one request: ' + viewed.join('|') + ' ' + JSON.stringify(shownLines()));
+  failures = failures.concat(consoleProblems);
   if (failures.length) { __out('LOGGING_STATUS_PAGE FAIL\n' + failures.join('\n')); }
   else { __out('LOGGING_STATUS_PAGE PASS'); }
 }).catch(function (e) {

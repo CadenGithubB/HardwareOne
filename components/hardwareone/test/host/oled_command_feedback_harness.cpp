@@ -1,4 +1,7 @@
 #include "OLED_MessageText.h"
+#if HW1_HAVE_VALUE_SCROLL
+#include "OLED_ValueScroll.h"  // the production coalescing rule of a value-scroll row
+#endif
 // Host harness for test_oled_command_feedback.py. The driver splices production
 // code in at the INSERT_* markers: the OLED action helpers (OLED_Utils.cpp
 // oledRunCommand, oledCommandReplyText, and the one OLED command in flight
@@ -249,6 +252,9 @@ static void finishCommand() {
 static void nextFrame() {
 #if HW1_HAVE_ASYNC_COMMAND
   oledDeliverCommandReply();
+#endif
+#if HW1_HAVE_VALUE_SCROLL
+  oledValueScrollPump();
 #endif
 }
 
@@ -638,8 +644,10 @@ static void case_quick_async() {
 #if HW1_HAVE_ASYNC_COMMAND
 // The background executeOledCommand (OLED background commands, step 1): the
 // press returns at once, the busy flag shows while it runs, a second press is
-// refused with "Busy" and queues nothing, and the reply is the toast when it
-// ends: what the command did on success, the refusal's reason otherwise.
+// refused with "Busy" and queues nothing, and a refusal's reason is the toast
+// when it ends. A success shows nothing (owner, 2026-11-22: the screen shows
+// it); executeOledCommandShowResult, for a screen that does not, toasts what
+// the command did.
 static void case_background_actions() {
   gCase = "background_actions";
   resetWorld();
@@ -662,12 +670,27 @@ static void case_background_actions() {
          "oledRunCommandAsync shares the one slot: refused, done not called");
 
   land();
-  EXPECT(!oledCommandBusy() && gToast == "Radio powered off" && gToastIcon == OledUiIcon::SUCCESS &&
-             gToastCount == 3,
-         "success shows the reply without its OK stamp, toast: '" + gToast + "'");
+  EXPECT(!oledCommandBusy() && gToast == "Busy" && gToastCount == 2,
+         "a success shows no toast (the screen shows the new state), toast: '" + gToast + "'");
   EXPECT(gWiped.size() == 1 && gWiped[0] == "radiopower off", "the line is wiped when it ends");
+
+  // A screen that does not show the result toasts it.
+  resetWorld();
+  gExecText = "OK: Radio powered off";
+  executeOledCommandShowResult("radiopower off");
+  EXPECT(gQueued.size() == 1 && oledCommandBusy() && gToastCount == 0, "it runs in the background too");
+  land();
+  EXPECT(!oledCommandBusy() && gToast == "Radio powered off" && gToastIcon == OledUiIcon::SUCCESS &&
+             gToastCount == 1,
+         "success shows the reply without its OK stamp, toast: '" + gToast + "'");
   nextFrame();
-  EXPECT(gToastCount == 3, "a reply is shown once");
+  EXPECT(gToastCount == 1, "a reply is shown once");
+  resetWorld();
+  refuse("Error: Not connected to WiFi");
+  executeOledCommandShowResult("openhttp");
+  land();
+  EXPECT(gToast == "Not connected to WiFi" && gToastIcon == OledUiIcon::ERROR && gToastCount == 1,
+         "its refusal is the same toast, toast: '" + gToast + "'");
 
   // Admin and super-admin refusals keep their short reason.
   resetWorld();
@@ -701,7 +724,7 @@ static void case_background_actions() {
   for (const auto& c : kSuccess) {
     resetWorld();
     gExecText = c.reply;
-    executeOledCommand("cmd");
+    executeOledCommandShowResult("cmd");
     land();
     EXPECT(gToast == c.toast && gToastIcon == OledUiIcon::SUCCESS,
            std::string("success reply '") + c.reply + "' toasts '" + c.toast + "', got '" + gToast + "'");
@@ -752,6 +775,141 @@ static void case_background_actions() {
 }
 #endif
 
+#if HW1_HAVE_VALUE_SCROLL
+// A value-scroll row (OLED background commands, step 2): FM tune and the LED
+// brightness nudge. A step moves the row at once and never waits or says
+// "Busy"; while a command runs the newest value waits and replaces older ones;
+// only that one is sent when the slot frees; then the row follows the device.
+static OledValueScroll gRow;
+static int32_t gDevice = 50;
+static void scrollStep(int32_t delta) {
+  oledValueScrollStep(gRow, "ledbrightness %ld", oledValueScrollShown(gRow, gDevice) + delta);
+}
+static void case_value_scroll() {
+  gCase = "value_scroll";
+  resetWorld();
+  gRow = OledValueScroll();
+  gDevice = 50;
+  EXPECT(oledValueScrollShown(gRow, gDevice) == 50, "an idle row shows the device's value");
+
+  scrollStep(+5);
+  EXPECT(gQueued.size() == 1 && gQueued[0].line == "ledbrightness 55" && oledCommandBusy() &&
+             oledValueScrollShown(gRow, gDevice) == 55 && gToastCount == 0,
+         "the first step is sent at once and shown at once, ran: " + ran());
+  scrollStep(+5);
+  scrollStep(+5);
+  scrollStep(+5);
+  EXPECT(gQueued.size() == 1 && gToastCount == 0 && oledValueScrollShown(gRow, gDevice) == 70,
+         "steps while one runs are neither sent nor refused 'Busy'; the row shows 70, toast: '" + gToast + "'");
+  gDevice = 55;  // the first command lands
+  land();
+  EXPECT(gQueued.size() == 1 && gQueued[0].line == "ledbrightness 70" && oledCommandBusy() &&
+             gToastCount == 0,
+         "when it ends only the newest value is sent, on the same frame, ran: " + ran());
+  EXPECT(oledValueScrollShown(gRow, gDevice) == 70, "the row keeps its value while the device lags");
+  gDevice = 70;
+  land();
+  EXPECT(!oledCommandBusy() && gChecked.size() == 2 && gToastCount == 0,
+         "two commands for four steps, no toast on success, ran: " + ran());
+  EXPECT(oledValueScrollShown(gRow, gDevice) == 70, "the device shows the wanted value");
+  gDevice = 40;  // changed elsewhere (the web page)
+  EXPECT(oledValueScrollShown(gRow, gDevice) == 40, "with nothing left to send the row follows the device");
+
+  // Another screen's command holds the slot: the step waits, no "Busy".
+  resetWorld();
+  gRow = OledValueScroll();
+  gDevice = 50;
+  executeOledCommand("ledclear");
+  scrollStep(-5);
+  EXPECT(gQueued.size() == 1 && gQueued[0].line == "ledclear" && gToastCount == 0 &&
+             oledValueScrollShown(gRow, gDevice) == 45,
+         "a step while another command runs waits silently and is shown, toast: '" + gToast + "'");
+  nextFrame();
+  EXPECT(gQueued.size() == 1, "nothing is sent while the slot is busy");
+  land();
+  EXPECT(gQueued.size() == 1 && gQueued[0].line == "ledbrightness 45",
+         "the waiting value goes out when the other command ends, ran: " + ran());
+  gDevice = 45;
+  land();
+  EXPECT(!oledCommandBusy() && oledValueScrollShown(gRow, gDevice) == 45 && gToastCount == 0, "and lands");
+
+  // A refusal: its reason is the toast and the row goes back to the device.
+  resetWorld();
+  gRow = OledValueScroll();
+  gDevice = 50;
+  refuse(kAdminRefusal);
+  scrollStep(+5);
+  land();
+  EXPECT(gToast == "Needs an admin" && gToastIcon == OledUiIcon::ERROR &&
+             oledValueScrollShown(gRow, gDevice) == 50,
+         "a refused step shows why and the row shows the device again, toast: '" + gToast + "'");
+
+  // A refusal while a newer value waits: that value is still sent.
+  resetWorld();
+  gRow = OledValueScroll();
+  gDevice = 50;
+  refuse("Error: LED busy");
+  scrollStep(+5);
+  scrollStep(+5);
+  land();
+  EXPECT(gToast == "LED busy" && gQueued.size() == 1 && gQueued[0].line == "ledbrightness 60" &&
+             oledValueScrollShown(gRow, gDevice) == 60,
+         "the newer value still goes out after a refusal, ran: " + ran());
+  gExecOk = true;
+  gExecText = "OK";
+  gDevice = 60;
+  land();
+
+  // A success the device has not reported yet: the row holds its value for
+  // the settle time, then follows the device.
+  resetWorld();
+  gRow = OledValueScroll();
+  gDevice = 50;
+  scrollStep(+5);
+  land();
+  EXPECT(oledValueScrollShown(gRow, gDevice) == 55, "inside the settle time the row keeps 55");
+  gNowMs += OledValueScroll::kSettleMs;
+  EXPECT(oledValueScrollShown(gRow, gDevice) == 50, "after it the row follows the device");
+
+  // A replaced display session: done(false), the row follows the device.
+  resetWorld();
+  gRow = OledValueScroll();
+  gDevice = 50;
+  scrollStep(+5);
+  gLiveEpoch = 8;
+  land();
+  EXPECT(gToastCount == 0 && !oledCommandBusy() && oledValueScrollShown(gRow, gDevice) == 50,
+         "a replaced session's step shows nothing and the row follows the device");
+
+  // A replaced session while a newer value waits behind the row's own command:
+  // the boundary drops it, so it is never sent under the new identity.
+  resetWorld();
+  gRow = OledValueScroll();
+  gDevice = 50;
+  scrollStep(+5);
+  scrollStep(+5);
+  gUiEpoch = gLiveEpoch = 8;  // another user holds the display now
+  oledValueScrollSessionBoundary();
+  land();
+  EXPECT(gQueued.empty() && gChecked.size() == 1 && !oledCommandBusy() && gToastCount == 0 &&
+             oledValueScrollShown(gRow, gDevice) == 50,
+         "the old session's waiting value is not sent and the row follows the device, ran: " + ran());
+
+  // The same while the value waits behind another screen's command.
+  resetWorld();
+  gRow = OledValueScroll();
+  gDevice = 50;
+  executeOledCommand("ledclear");
+  scrollStep(-5);
+  gUiEpoch = gLiveEpoch = 8;
+  oledValueScrollSessionBoundary();
+  EXPECT(oledValueScrollShown(gRow, gDevice) == 50, "the dropped value is no longer shown");
+  land();
+  EXPECT(gQueued.empty() && gChecked.size() == 1 && !oledCommandBusy(),
+         "nothing is sent once the other command ends, ran: " + ran());
+}
+#endif
+
 static void case_network_http_callbacks() {
   gCase = "network_http_callbacks";
   resetWorld();
@@ -785,6 +943,9 @@ int main() {
 #if HW1_HAVE_ASYNC_COMMAND
   case_quick_async();
   case_background_actions();
+#endif
+#if HW1_HAVE_VALUE_SCROLL
+  case_value_scroll();
 #endif
   case_network_http_callbacks();
   resetWorld();  // checks the last case left nothing in flight

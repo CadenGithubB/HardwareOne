@@ -29,7 +29,7 @@ HW1_EVENT_CATALOG_FAMILY_ROW(SYSEVT_FAM_COMPANION,  "Radio companion")
   /* --- ESP-NOW mesh / bond / pairing --- */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PEER_ONLINE,         "peer_online", SYSEVT_FAM_MESH)          /* mesh peer heartbeat appeared     subject=name  detail=mac */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PEER_OFFLINE,        "peer_offline", SYSEVT_FAM_MESH)         /* mesh peer heartbeat timed out    subject=name  detail=mac */
-HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PEER_PAIRED,         "peer_paired", SYSEVT_FAM_MESH)          /* pairing-mode auto-pair ran       subject=name  detail=mac */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_PEER_PAIRED,         "peer_paired", SYSEVT_FAM_MESH)          /* a peer was saved as paired      subject=name  detail=mac */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_TEXT_RX,             "text_rx", SYSEVT_FAM_MESH)              /* ESP-NOW text message received    subject=sender detail=text */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_FILE_RX,             "file_rx", SYSEVT_FAM_MESH)              /* ESP-NOW file received            subject=sender detail=filename */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_BOND_ONLINE,         "bond_online", SYSEVT_FAM_MESH)          /* bond peer session/heartbeat up   subject=name  detail=mac */
@@ -90,7 +90,7 @@ HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_POWER_SAVE_EXIT,     "power_save_exit", SYSEVT
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_SD_MOUNTED,          "sd_mounted", SYSEVT_FAM_STORAGE)           /* subject=free MB */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_SD_UNMOUNTED,        "sd_unmounted", SYSEVT_FAM_STORAGE)
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_SD_WRITE_FAILED,     "sd_write_failed", SYSEVT_FAM_STORAGE)      /* SD went unwritable (once per episode) */
-HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_FS_LOW_SPACE,        "fs_low_space", SYSEVT_FAM_STORAGE)         /* flash log-overflow latch tripped (once per boot) */
+HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_FS_LOW_SPACE,        "fs_low_space", SYSEVT_FAM_STORAGE)         /* flash log-overflow latch tripped (once per low episode) */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_FILE_DELETED,        "file_deleted", SYSEVT_FAM_STORAGE)         /* subject=filename detail=full path */
 HW1_EVENT_CATALOG_KIND_ROW(SYSEVT_SETTINGS_SAVE_FAILED,"settings_save_failed", SYSEVT_FAM_STORAGE) /* subject=stage detail=file */
   /* --- System / settings / sensor lifecycle --- */

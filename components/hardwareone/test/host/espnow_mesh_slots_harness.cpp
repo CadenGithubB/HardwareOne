@@ -80,9 +80,14 @@ static bool requestSettingsPersist() {
   ++gPersists;
   return gPersistOk;
 }
+// The real setSetting posts setting_changed through the field's registry row;
+// for the device name that row's command name is "devicename" (SET-6).
+static void notifyNameSettingChanged(const String& field);
 static void setSetting(String& field, const String& value) {
+  const bool changed = field != value;
   field = value;
   ++gPersists;
+  if (changed) notifyNameSettingChanged(field);
 }
 static void setSetting(bool& field, bool value) {
   field = value;
@@ -296,6 +301,9 @@ struct Event {
 static std::vector<Event> gEvents;
 static void systemEventPost(uint8_t kind, const char* subject = nullptr, const char* detail = nullptr) {
   gEvents.push_back({kind, subject ? subject : "", detail ? detail : ""});
+}
+static void notifyNameSettingChanged(const String& field) {
+  if (&field == &gSettings.espnowDeviceName) systemEventPost(SYSEVT_SETTING_CHANGED, "devicename", field.c_str());
 }
 // Whitespace-split arguments, enough for the name command.
 class CommandArgs {
@@ -1056,7 +1064,7 @@ static void testNameCanBeCleared() {
   CHECK(!gSettings.espnowFirstTimeSetup, "N1 the setup-done flag stayed set with no name");
   CHECK(gState.devices[0].name.length() == 0, "N1 the stopped instance kept the name");
   CHECK(gMetadataChanged, "N1 metadata not marked changed");
-  CHECK(gEvents.size() == 1 && gEvents[0].kind == SYSEVT_SETTING_CHANGED && gEvents[0].subject == "deviceName",
+  CHECK(gEvents.size() == 1 && gEvents[0].kind == SYSEVT_SETTING_CHANGED && gEvents[0].subject == "devicename",
         "N1 no setting-changed event");
   r = cmd_devicename(String(""));
   CHECK(has(r, "Device name: HardwareOne-B2C3 (default)") && !has(r, "(not set)"),

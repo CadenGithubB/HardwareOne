@@ -20,6 +20,7 @@ EXT_RAM_BSS_ATTR EncoderInstanceSettings gEncoderInst[kEncoderMaxInstances];
 #include "System_I2C.h"
 #include "System_I2CInstanceCore.h"  // the instance argument (G1-G3), names
 #include "System_MemUtil.h"          // ps_alloc: the seesaw objects live in PSRAM
+#include "System_RamFlush.h"         // ramFlushResolveDevice: the reconnect follows the flush
 #include "System_Mutex.h"            // SensorCacheGuard
 #include "System_SeesawIdentity.h"
 #include "System_Settings.h"
@@ -152,7 +153,9 @@ bool boardWanted(EncoderInstance& e, uint8_t n) {
     case HandState::Closed: return false;
     case HandState::FollowAutoStart: break;
   }
-  return saved(n).autoStart;
+  // Start-at-boot as the RAM flush resolved it: a board a flush left closed
+  // (not on its device list, or its bus/address changed) is not reconnected.
+  return ramFlushResolveDevice(I2C_DEVICE_ENCODER, n, saved(n).autoStart);
 }
 
 uint8_t brightnessSetting(uint8_t n) {
@@ -507,7 +510,8 @@ const char* cmd_encoderbus(const String& argsInput) {
   } else if (n == 1 && text.length() > 0) {
     if (const char* hint = notValueButInstance(arg, "a bus (0 or 1)", "encoderbus", "1")) return hint;
   }
-  return i2cSetDeviceBusAndReport(saved(n).bus, text, settingRow(n, kFieldBus)->jsonKey);
+  return i2cSetDeviceBusAndReport(saved(n).bus, text, settingRow(n, kFieldBus)->jsonKey,
+                                  i2cInstanceOwner(I2C_DEVICE_ENCODER, n));
 }
 
 // One instance's frame: each open board keeps its own pacing, and a busy bus

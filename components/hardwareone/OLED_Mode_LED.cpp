@@ -47,6 +47,9 @@ static LedLevel gLedLevel = LED_LEVEL_ROOT;
 EXT_RAM_BSS_ATTR static OledScrollState sLedRootScroll;
 EXT_RAM_BSS_ATTR static OledScrollState sLedColorScroll;
 EXT_RAM_BSS_ATTR static OledScrollState sLedEffectScroll;
+// The brightness nudge's own wanted value (OLED background commands, step 2):
+// a LEFT/RIGHT step moves the row at once, only the newest value is sent.
+EXT_RAM_BSS_ATTR static OledValueScroll sLedBrightnessScroll;
 static bool sLedScrollInitialized = false;
 
 // Effect rows = the shared ledEffectNames table (single source of truth with
@@ -69,7 +72,8 @@ static void populateLedRootMenu() {
   // Live label, rewritten every frame (scroll items store the char*, not a
   // copy — same static-buffer idiom as Power's powerSaveLabel).
   static char brightLabel[24];
-  snprintf(brightLabel, sizeof(brightLabel), "Brightness: %d%%", gSettings.ledBrightness);
+  snprintf(brightLabel, sizeof(brightLabel), "Brightness: %ld%%",
+           (long)oledValueScrollShown(sLedBrightnessScroll, gSettings.ledBrightness));
   oledScrollAddItem(&sLedRootScroll, brightLabel);
   oledScrollAddItem(&sLedRootScroll, "Off");
   oledScrollClampSelection(&sLedRootScroll);
@@ -133,10 +137,10 @@ static void executeLedRootAction() {
       // A on the brightness row cycles the shared preset ladder (works on
       // both input backends; gamepad users can also nudge with LEFT/RIGHT
       // below). Ladder logic shared with the G2 LED page.
-      char cmd[24];
-      snprintf(cmd, sizeof(cmd), "ledbrightness %d",
-               ledBrightnessNextPreset(gSettings.ledBrightness));
-      executeOledCommand(cmd);
+      // The same row as the nudge: from the value it shows, coalesced.
+      const int32_t shown = oledValueScrollShown(sLedBrightnessScroll, gSettings.ledBrightness);
+      oledValueScrollStep(sLedBrightnessScroll, "ledbrightness %ld",
+                          ledBrightnessNextPreset((int)shown));
       break;
     }
     case 3: executeOledCommand("ledclear"); break;
@@ -184,14 +188,13 @@ static bool ledInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPresse
 #if !ENABLE_ANO_ENCODER
   if (gLedLevel == LED_LEVEL_ROOT && sLedRootScroll.selectedIndex == 2 &&
       (gNavEvents.left || gNavEvents.right)) {
-    int next = gSettings.ledBrightness + (gNavEvents.right ? 5 : -5);
+    // From the value the row shows; steps coalesce (only the newest is sent,
+    // nothing is refused "Busy" while one runs).
+    const int32_t shown = oledValueScrollShown(sLedBrightnessScroll, gSettings.ledBrightness);
+    int32_t next = shown + (gNavEvents.right ? 5 : -5);
     if (next < 0) next = 0;
     if (next > 100) next = 100;
-    if (next != gSettings.ledBrightness) {
-      char cmd[24];
-      snprintf(cmd, sizeof(cmd), "ledbrightness %d", next);
-      (void)oledRunCommand(cmd);  // waits: step 2 (value scroll, one command per step)
-    }
+    if (next != shown) oledValueScrollStep(sLedBrightnessScroll, "ledbrightness %ld", next);
     return true;
   }
 #endif

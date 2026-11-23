@@ -1072,10 +1072,12 @@ check("page threw no exceptions", absorbed.length === 0,
         { log: function () {}, error: function () {}, warn: function () {} }, navigatorStub
     );
     advance(3000);
-    check("non-admin: Load and Unload hidden",
+    // Owner decision 2026-11-21: every account sees Load and Unload; the
+    // device refuses a non-admin and the chat log prints the reason.
+    check("non-admin: Load and Unload offered too",
           !!els["qa-load-btn"] && !!els["qa-unload-btn"] &&
-          els["qa-load-btn"].style.display === "none" &&
-          els["qa-unload-btn"].style.display === "none",
+          els["qa-load-btn"].style.display !== "none" &&
+          els["qa-unload-btn"].style.display !== "none",
           els["qa-load-btn"] ? "load=" + JSON.stringify(els["qa-load-btn"].style.display) +
                                " unload=" + JSON.stringify(els["qa-unload-btn"] && els["qa-unload-btn"].style.display)
                              : "no qa-load-btn element in the page markup");

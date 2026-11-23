@@ -123,12 +123,11 @@ bool TranscriptSession::write(const char* text, size_t length, bool first) {
   ctx.user = options_.user;
   ctx.scope = folder;
   uint64_t total = 0, used = 0, free = 0;
-  constexpr uint64_t reserve = 100 * 1024;
+  const uint64_t reserve = VFS::logReserveBytes();  // the shared LittleFS reserve (FILE-3)
   // No tier switching, and this writer never deletes or rotates: a full volume
-  // refuses the write. (Old dated transcripts are removed only by the log
-  // retention pass, System_LogRetentionCore.h, when their volume is below its
-  // low-water mark; never the last two days', never one of the eight newest
-  // stored, never one named "boot".) The session's first
+  // refuses the write. Nothing removes transcripts on its own either (B12: the
+  // log retention pass, System_LogRetentionCore.h, never touches stt/); the
+  // owner frees space by deleting them. The session's first
   // write and every SD write take a fresh reading. Later LittleFS phrases read
   // the shared cached figure instead: a fresh one walks the whole volume under
   // the FS mutex (about 1.3 s on the P4X-EYE) before every phrase. The cache

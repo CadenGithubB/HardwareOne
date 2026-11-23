@@ -14,15 +14,14 @@ machine) is compiled as it is and run against an in-memory volume:
   secondary is left;
 - never removed: the open session and its rotations, today's folder and
   folders dated after today, dot files (.anchors.csv), .tmp and .bak files,
-  files at the root of the sensors folder, sub-folders of a day, transcripts
-  without a date, the notes folder, and everything outside the two trees;
+  files at the root of the sensors folder, sub-folders of a day, every
+  transcript and note under stt/ (B12), and everything outside the capture
+  tree;
 - boot-named folders: earlier boots without an anchor only, lowest first,
-  never their health files; transcripts: after the sensor data, oldest day
-  first, strictly named, before the cutoff, never one of the eight newest
-  stored; one that cannot be removed is passed over and not met again;
-- the two "recent" horizons are at least the catch-up ledger's (the files of
-  the three newest day folders and the eight newest transcripts it offers a
-  peer), read from System_CatchupLedger.cpp;
+  never their health files;
+- the "recent" day horizon is at least the catch-up ledger's (the files of
+  the three newest day folders it offers a peer), read from
+  System_CatchupLedger.cpp;
 - the card's tree under /sd by the same rule; a volume with nothing to remove
   ends the pass empty-handed;
 - one step lists at most kEntriesPerStep entries (plus the one-entry look at a
@@ -59,7 +58,7 @@ def source_contract() -> None:
     for include in re.findall(r'^#include\s+[<"]([^>"]+)[>"]', core, re.M):
         require(include in ("stddef.h", "stdint.h", "stdio.h", "string.h"),
                 f"System_LogRetentionCore.h includes {include}: it must stay free of Arduino and ESP-IDF headers")
-    for constant in ("kProtectedDays = 14", "kRecentDaysKept = 3", "kRecentTranscriptsKept = 8",
+    for constant in ("kProtectedDays = 14", "kRecentDaysKept = 3",
                      "kLowWaterPercent = 20", "kLowWaterReserveMultiple = 2", "kEntriesPerStep = 16",
                      "kRemovalsPerStep = 1", "kWalkMaxEntries = 512"):
         require(f"constexpr unsigned {constant};" in core, f"the named constant {constant}")
@@ -67,13 +66,14 @@ def source_contract() -> None:
     # before the peer could fetch it: the recent horizons cover the ledger's.
     ledger = (COMPONENT / "System_CatchupLedger.cpp").read_text()
     day_folders = re.search(r"constexpr uint8_t kSensorDayFolders = (\d+),", ledger)
-    pick_caps = re.search(r"constexpr uint8_t kPickCap\[kPickCats\] = \{([^}]*)\};", ledger)
-    require(bool(day_folders) and bool(pick_caps), "the catch-up ledger names its day and pick horizons")
-    require("kPickTranscript = 4" in ledger, "the transcript pick category is the fifth")
+    require(bool(day_folders), "the catch-up ledger names its day horizon")
     require(int(day_folders.group(1)) <= 3, "kRecentDaysKept covers the ledger's day folders")
-    require(int(pick_caps.group(1).split(",")[4]) <= 8, "kRecentTranscriptsKept covers the ledger's transcript picks")
+    # B12: transcripts are exempt. The core never names the transcript tree
+    # and the device side holds no transcript scope.
+    require("/stt" not in re.sub(r"//[^\n]*", "", core), "the retention pass never looks under stt/")
     anchors = (COMPONENT / "System_TimeAnchors.cpp").read_text()
     code = re.sub(r"//[^\n]*", "", anchors)
+    require("Scopes::TRANSCRIPTS" not in code, "the retention pass holds no transcript scope (B12)")
     require("EXT_RAM_BSS_ATTR static LogRetention::Pass gRetentionPass;" in code,
             "the pass object (with its listing scratch) is explicit PSRAM")
     # Free space: the internal flash only by its cached figure (a fresh one

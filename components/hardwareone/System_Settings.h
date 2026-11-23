@@ -207,6 +207,7 @@ struct Settings {
       debugSrTuning(false),
       logLevel(3),                    // Default: LOG_LEVEL_DEBUG (show everything)
       espLogLevels(""),               // No ESP-IDF tag overrides (esplog)
+      bootDebugCapture(true),         // Boot debug file on (bootdebug)
       memorySampleIntervalSec(30),
       espnowmesh(false),
       espnowUserSyncEnabled(false),
@@ -305,6 +306,7 @@ struct Settings {
       presenceAutoStart(false),
       presenceDevicePollMs(100),
       wifiAutoReconnect(true),
+      wifiExternalAntenna(false),
       // Off: ESP-NOW and the local display come up only when the user turns
       // them on (setup wizard, espnowautostart / oledautostart, or open<x>).
       espnowAutoStart(false),
@@ -756,6 +758,7 @@ struct Settings {
   bool webConsoleDebug;                // Enable browser console.log/warn/debug output in web UI (default: false)
   int logLevel;                        // Severity-based logging level (0=error, 1=warn, 2=info, 3=debug)
   String espLogLevels;                 // ESP-IDF log levels by tag, "tag:L,tag:L" (esplog; System_EspLogCore.h)
+  bool bootDebugCapture;               // Every debug output on during boot, into boot-debug-1.log (bootdebug; System_BootDebug.h)
   int memorySampleIntervalSec;  // Periodic memory sampling interval in seconds (0=disabled, default: 30)
   // ESP-NOW settings
   bool espnowmesh;
@@ -991,6 +994,10 @@ struct Settings {
   // registry (System_FeatureRegistry.cpp) names them in every build.
   // ---------------------------------------------------------------------
   bool wifiAutoReconnect;
+  // Boards with a software RF switch (WIFI_ANTENNA_SWITCH_PIN, the
+  // FeatherS3[D]): use the u.FL connector instead of the on-board antenna.
+  // Read once at boot; off on every other board.
+  bool wifiExternalAntenna;
   bool espnowAutoStart;         // Start ESP-NOW at boot
   bool oledAutoStart;           // Bring up the local display at boot
   bool eiAutoStart;             // Load the default Edge Impulse model at boot
@@ -1458,6 +1465,7 @@ inline void setDebugSetting(T& field, const T& value) {
   if (field != value) {
     field = value;
     (void)requestDebugSettingsPersist();
+    notifySettingChanged(&field);  // SET-6: setting_changed like setSetting
   }
 }
 
@@ -1505,6 +1513,7 @@ String getDeviceFingerprint();
 // WiFi Settings
 const char* cmd_wifitxpower(const String& argsInput);
 const char* cmd_wifiautoreconnect(const String& argsInput);
+const char* cmd_wifiexternalantenna(const String& argsInput);
 const char* cmd_tzoffsetminutes(const String& argsInput);
 const char* cmd_ntpserver(const String& argsInput);
 

@@ -415,6 +415,135 @@ static void testAddressCollisions() {
   assert(std::strlen(i2cAddressClashText(uses[0], tiny, sizeof(tiny))) == sizeof(tiny) - 1);
 }
 
+
+// Owners: an instance of a queue type, or one row of a device without one.
+// Rows without a queue type share (I2C_DEVICE_COUNT, 0); only the row tells
+// them apart, so the OLED asking is not exempt from the fuel gauge.
+static void testOwners() {
+  static const I2cAddressUse uses[] = {
+    {0, 0x36, I2C_DEVICE_COUNT, 0, "MAX17048", "LiPo Fuel Gauge", 10},
+    {1, 0x3D, I2C_DEVICE_COUNT, 0, "SSD1306", "OLED 128x64 Display", 11},
+    {1, 0x3C, I2C_DEVICE_COUNT, 0, "SSD1306", "OLED 128x64 Display", 11},
+    {1, 0x36, I2C_DEVICE_ENCODER, 1, "Encoder", "Adafruit 4991 Rotary Encoder, 1 RGB pixel", 14},
+    {1, 0x49, I2C_DEVICE_INPUT, 1, "Seesaw", "ANO Rotary Encoder (default)", 3},
+  };
+  const size_t count = sizeof(uses) / sizeof(uses[0]);
+  assert(i2cAddressUseOwnedBy(uses[1], i2cRowOwner(11)) && i2cAddressUseOwnedBy(uses[2], i2cRowOwner(11)));
+  assert(!i2cAddressUseOwnedBy(uses[0], i2cRowOwner(11)));
+  assert(!i2cAddressUseOwnedBy(uses[0], i2cRowOwner(-1)));
+  assert(i2cAddressUseOwnedBy(uses[3], i2cInstanceOwner(I2C_DEVICE_ENCODER, 1)));
+  assert(!i2cAddressUseOwnedBy(uses[3], i2cInstanceOwner(I2C_DEVICE_ENCODER, 2)));
+  // The OLED's own addresses are free for it; the gauge's are not.
+  assert(i2cAddressTakenBy(uses, count, 1, 0x3D, i2cRowOwner(11)) == nullptr);
+  assert(i2cAddressTakenBy(uses, count, 0, 0x36, i2cRowOwner(11)) == &uses[0]);
+  // A queue type asking with (I2C_DEVICE_COUNT, n) is no row: every device
+  // without a queue type clashes.
+  assert(i2cAddressTakenBy(uses, count, 0, 0x36, I2C_DEVICE_COUNT, 0) == &uses[0]);
+  assert(i2cAddressTakenBy(uses, count, 1, 0x3D, I2C_DEVICE_COUNT, 0) == &uses[1]);
+}
+
+// A bus setter: every address the owner holds is checked on the new bus.
+static void testBusMove() {
+  // The status sign on a FeatherS3[D]: bus 0 has the fuel gauge (0x36) and an
+  // RTC; bus 1 the OLED, encoder 1 (0x36), the ANO (0x49) and a two-chip IMU
+  // (accelerometer 0x6A, magnetometer 0x1C).
+  static const I2cAddressUse uses[] = {
+    {0, 0x36, I2C_DEVICE_COUNT, 0, "MAX17048", "LiPo Fuel Gauge", 10},
+    {1, 0x3D, I2C_DEVICE_COUNT, 0, "SSD1306", "OLED 128x64 Display", 11},
+    {1, 0x3C, I2C_DEVICE_COUNT, 0, "SSD1306", "OLED 128x64 Display", 11},
+    {0, 0x68, I2C_DEVICE_RTC, 1, "DS3231", "Precision RTC", 9},
+    {1, 0x36, I2C_DEVICE_ENCODER, 1, "Encoder", "Adafruit 4991 Rotary Encoder, 1 RGB pixel", 14},
+    {1, 0x49, I2C_DEVICE_INPUT, 1, "Seesaw", "ANO Rotary Encoder (default)", 3},
+    {1, 0x6A, I2C_DEVICE_IMU, 1, "LSM6DSOX", "Accelerometer + gyroscope", 0},
+    {1, 0x1C, I2C_DEVICE_IMU, 1, "LIS3MDL", "Magnetometer", 1},
+  };
+  const size_t count = sizeof(uses) / sizeof(uses[0]);
+  // The fuel gauge to bus 1: 0x36 is encoder 1's there.
+  const I2cAddressUse* clash = i2cOwnerBusClash(uses, count, i2cRowOwner(10), 1);
+  assert(clash == &uses[4]);
+  assert(clashText(clash) == (i2cMaxInstances(I2C_DEVICE_ENCODER) > 1
+                                  ? "Error: 0x36 on bus 1 is in use by Encoder (instance 1)."
+                                  : "Error: 0x36 on bus 1 is in use by Encoder (Adafruit 4991 Rotary Encoder, 1 RGB pixel)."));
+  // Encoder 1 to bus 0: the gauge's 0x36.
+  assert(i2cOwnerBusClash(uses, count, i2cInstanceOwner(I2C_DEVICE_ENCODER, 1), 0) == &uses[0]);
+  // The ANO to bus 0: 0x49 is free there; on its own bus nothing clashes.
+  assert(i2cOwnerBusClash(uses, count, i2cInstanceOwner(I2C_DEVICE_INPUT, 1), 0) == nullptr);
+  assert(i2cOwnerBusClash(uses, count, i2cInstanceOwner(I2C_DEVICE_INPUT, 1), 1) == nullptr);
+  // The OLED (both addresses) to bus 0: free; the OLED row is not exempt from
+  // the gauge, but holds neither 0x36 nor 0x68.
+  assert(i2cOwnerBusClash(uses, count, i2cRowOwner(11), 0) == nullptr);
+  // The IMU to bus 0 is free; with a magnetometer-address device on bus 0 the
+  // second chip is refused although the first chip's address is free.
+  assert(i2cOwnerBusClash(uses, count, i2cInstanceOwner(I2C_DEVICE_IMU, 1), 0) == nullptr);
+  I2cAddressUse more[count + 1];
+  for (size_t i = 0; i < count; ++i) more[i] = uses[i];
+  more[count] = I2cAddressUse{0, 0x1C, I2C_DEVICE_COUNT, 0, "Other", nullptr, 12};
+  assert(i2cOwnerBusClash(more, count + 1, i2cInstanceOwner(I2C_DEVICE_IMU, 1), 0) == &more[count]);
+  // The visitor form agrees with the array form.
+  const auto forEach = [&](auto&& visit) {
+    for (size_t i = 0; i < count + 1; ++i) {
+      if (visit(more[i])) return;
+    }
+  };
+  I2cAddressUse found{};
+  assert(i2cOwnerBusClash(forEach, i2cInstanceOwner(I2C_DEVICE_IMU, 1), 0, found));
+  assert(found.address == 0x1C && found.row == 12);
+  assert(!i2cOwnerBusClash(forEach, i2cInstanceOwner(I2C_DEVICE_INPUT, 1), 0, found));
+  assert(i2cOwnerBusClash(forEach, i2cRowOwner(10), 1, found) && found.type == I2C_DEVICE_ENCODER);
+  // An owner with no uses (a row not in the build) never clashes.
+  assert(i2cOwnerBusClash(uses, count, i2cRowOwner(-1), 1) == nullptr);
+}
+
+// Instance 1's extra rows: a row of the type with its own address setting
+// claims its configured address; a fixed or alternate-only row claims nothing.
+struct TypedRow {
+  uint8_t address;
+  bool compiled;
+  int deviceType;
+  uint8_t (*addressAt)(uint8_t n);
+};
+static uint8_t gMagAddress = 0x1C;
+static uint8_t accelAt(uint8_t) { return 0x6A; }
+static uint8_t magAt(uint8_t) { return gMagAddress; }
+static void testExtraRowAddresses() {
+  const TypedRow rows[] = {
+    {0x6A, true, I2C_DEVICE_IMU, accelAt},     // 0: the IMU's first chip (the driver's address)
+    {0x1C, true, I2C_DEVICE_IMU, magAt},       // 1: the second chip
+    {0x49, true, I2C_DEVICE_INPUT, nullptr},   // 2: the ANO default row
+    {0x50, true, I2C_DEVICE_INPUT, nullptr},   // 3: the ANO alternate row: no setting
+    {0x1E, false, I2C_DEVICE_IMU, magAt},      // 4: not in this build
+    {0x1C, true, I2C_DEVICE_IMU, magAt},       // 5: the same address again: once
+  };
+  const size_t count = sizeof(rows) / sizeof(rows[0]);
+  size_t seen[8];
+  uint8_t addresses[8];
+  size_t found = 0;
+  auto collect = [&](size_t row, uint8_t address) {
+    seen[found] = row;
+    addresses[found++] = address;
+    return false;
+  };
+  i2cForEachExtraRowAddress(rows, count, I2C_DEVICE_IMU, 0x6A, collect);
+  assert(found == 1 && seen[0] == 1 && addresses[0] == 0x1C);
+  found = 0;
+  i2cForEachExtraRowAddress(rows, count, I2C_DEVICE_INPUT, 0x49, collect);
+  assert(found == 0);
+  // A magnetometer set to the accelerometer's address claims nothing more.
+  gMagAddress = 0x6A;
+  found = 0;
+  i2cForEachExtraRowAddress(rows, count, I2C_DEVICE_IMU, 0x6A, collect);
+  assert(found == 0);
+  gMagAddress = 0x1C;
+  // The visitor can stop the walk.
+  found = 0;
+  i2cForEachExtraRowAddress(rows, count, I2C_DEVICE_IMU, 0x00, [&](size_t row, uint8_t address) {
+    collect(row, address);
+    return true;
+  });
+  assert(found == 1 && seen[0] == 0);
+  i2cForEachExtraRowAddress(static_cast<const TypedRow*>(nullptr), 0, I2C_DEVICE_IMU, 0x6A, collect);
+}
+
 int main() {
   testInstanceOneIsTheType();
   testSlotsRoundTrip();
@@ -422,6 +551,9 @@ int main() {
   testRowInstances();
   testScanLabelRows();
   testAddressCollisions();
+  testOwners();
+  testBusMove();
+  testExtraRowAddresses();
 #ifdef HW1_HOST_I2C_TEST_ENCODER_MAX
   testEncoderFour();
   testOpenClose();

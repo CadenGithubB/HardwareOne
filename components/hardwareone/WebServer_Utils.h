@@ -18,6 +18,9 @@ struct WebMirrorBuf {
   char* buf;
   size_t cap;  // maximum bytes stored (excluding null)
   size_t len;  // current length
+  // Change counter, bumped by every change so a poll can skip unchanged text.
+  // Never 0 once the buffer exists: 0 means "unknown" to the poll handler.
+  uint32_t seq;
   SemaphoreHandle_t mutex;  // Protects concurrent access
 
   WebMirrorBuf();
@@ -27,12 +30,14 @@ struct WebMirrorBuf {
   void append(const char* s, bool needNewline);
   void appendDirect(const char* s, size_t slen, bool needNewline);
   String snapshot();
-  size_t snapshotTo(char* dest, size_t destSize);
+  // seqOut (optional) receives the change counter of the copied text, or 0
+  // when the copy failed.
+  size_t snapshotTo(char* dest, size_t destSize, uint32_t* seqOut = nullptr);
+  void bumpSeq() { if (++seq == 0) seq = 1; }
   void assignFrom(const String& s);
 };
 
 extern WebMirrorBuf gWebMirror;
-extern volatile unsigned long gWebMirrorSeq;  // defined in HardwareOne.cpp
 extern size_t gWebMirrorCap;
 
 // Adds one executed command to the web command feed (HardwareOne.cpp).
@@ -73,10 +78,13 @@ inline esp_err_t webSendSessionChanged(httpd_req_t* req) {
   return sendJsonStatus(req, "401 Unauthorized", "{\"ok\":false,\"error\":\"web_session_changed\"}");
 }
 
-// Guest role HTTP gate. After auth succeeds: guests may only hit an allowlist
+// Role HTTP gate. After auth succeeds: guests may only hit an allowlist
 // of status/list GET APIs, HTML view pages, and logout. Everything else
-// (CLI, files, mutate POSTs, camera capture, admin, …) gets 403.
-// Non-guests always pass. Returns false after sending the 403 response.
+// (CLI, files, mutate POSTs, camera capture, admin, …) gets 403, and the
+// private reads (ESP-NOW messages, ring health, LLM chat) get a 403 with
+// code "guest_private". A user passes except for the admin-only reads
+// (ESP-NOW messages: code "admin_required"); an administrator always passes.
+// Returns false after sending the 403 response.
 // Forward-declared here (defined in System_User.h) so this header parses
 // without pulling in the full user subsystem; the reference param only needs
 // the incomplete type. Callers that expand WEB_AUTH_OR_RETURN already have
@@ -1672,14 +1680,17 @@ inline void streamCommonDialogs(httpd_req_t* req) {
 #else  // !ENABLE_HTTP_SERVER
 
 // No-op stub implementations (real implementations in WebServer_Utils.cpp)
-inline WebMirrorBuf::WebMirrorBuf() : buf(nullptr), cap(0), len(0), mutex(nullptr) {}
+inline WebMirrorBuf::WebMirrorBuf() : buf(nullptr), cap(0), len(0), seq(0), mutex(nullptr) {}
 inline void WebMirrorBuf::init(size_t) {}
 inline void WebMirrorBuf::clear() {}
 inline void WebMirrorBuf::append(const String&, bool) {}
 inline void WebMirrorBuf::append(const char*, bool) {}
 inline void WebMirrorBuf::appendDirect(const char*, size_t, bool) {}
 inline String WebMirrorBuf::snapshot() { return String(); }
-inline size_t WebMirrorBuf::snapshotTo(char*, size_t) { return 0; }
+inline size_t WebMirrorBuf::snapshotTo(char*, size_t, uint32_t* seqOut) {
+  if (seqOut) *seqOut = 0;
+  return 0;
+}
 inline void WebMirrorBuf::assignFrom(const String&) {}
 inline WebMirrorBuf gWebMirror;
 inline size_t gWebMirrorCap = 0;

@@ -1358,6 +1358,11 @@ static void continuousInferenceTask(void* param) {
   uint32_t successCount = 0;
   uint32_t detectionCount = 0;
   uint32_t taskStartTime = millis();
+#if ENABLE_CAMERA_SENSOR
+  // Continuous capture holds a stream session (capture dot, power-save
+  // inhibitor) for the task's whole life.
+  cameraSessionBegin(CameraSessionKind::Stream);
+#endif
   
   while (gEiContinuousRunning) {
     // Held for one frame, capture to results. A detect command may hold it
@@ -1406,6 +1411,9 @@ static void continuousInferenceTask(void* param) {
                 successCount, inferenceCount);
   DEBUG_SYSTEMF("[EI_DEBUG]   Total detections: %lu", detectionCount);
 
+#if ENABLE_CAMERA_SENSOR
+  cameraSessionEnd(CameraSessionKind::Stream);
+#endif
   xSemaphoreGive(eiContinuousDone());
   vTaskDelete(nullptr);
 }

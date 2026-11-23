@@ -18,6 +18,14 @@ target_compile_options(encoder_light_tests PRIVATE -Wall -Wextra -Werror -pedant
 target_compile_definitions(encoder_light_tests PRIVATE
   HW1_NEOPIXEL_SOURCE="${CMAKE_CURRENT_LIST_DIR}/../../System_NeoPixel.cpp")
 
+# The ANO rotary encoder's poll (i2csensor_ano_encoder_core.h): pins and
+# swaps, the address rule, taps from the change flags, RIGHT tap = SELECT at
+# release, RIGHT+IN = START only, the wheel and failed reads.
+add_executable(ano_encoder_core_tests test_ano_encoder_core.cpp)
+set_target_properties(ano_encoder_core_tests PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+target_include_directories(ano_encoder_core_tests PRIVATE ../..)
+target_compile_options(ano_encoder_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # Compiles the REAL header from the firmware tree, not a copy of it — the same
 # rule updater/test/host/CMakeLists.txt states. System_LLMUtf8.h is kept
 # dependency-free so this is possible; if it ever gains an Arduino or ESP-IDF
@@ -528,6 +536,14 @@ foreach(target i2c_instance_core_tests i2c_instance_core_four_tests)
 endforeach()
 target_compile_definitions(i2c_instance_core_four_tests PRIVATE HW1_HOST_I2C_TEST_ENCODER_MAX=4)
 
+# The RAM flush's I2C device list (System_RamFlushDeviceList.h): the 2-byte
+# entry, the capture's list, the per-instance check after the flush, the CRC.
+add_executable(ramflush_device_list_tests test_ramflush_device_list.cpp)
+set_target_properties(ramflush_device_list_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(ramflush_device_list_tests PRIVATE ../..)
+target_compile_options(ramflush_device_list_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # Wait ladder of the automatic sensor restart (System_SensorRestartCore.h).
 add_executable(sensor_restart_core_tests test_sensor_restart_core.cpp)
 set_target_properties(sensor_restart_core_tests PROPERTIES
@@ -786,7 +802,7 @@ if(HW1_SANITIZE)
     -fsanitize=address,undefined -g)
   target_link_options(sensor_restart_core_tests PRIVATE
     -fsanitize=address,undefined)
-  foreach(target i2c_instance_core_tests i2c_instance_core_four_tests)
+  foreach(target i2c_instance_core_tests i2c_instance_core_four_tests ramflush_device_list_tests)
     target_compile_options(${target} PRIVATE -fsanitize=address,undefined -g)
     target_link_options(${target} PRIVATE -fsanitize=address,undefined)
   endforeach()
@@ -886,8 +902,10 @@ if(HW1_SANITIZE)
 endif()
 
 # The boot debug capture (owner decision B13, System_BootDebugCore.h): whole
-# stamped lines, the first lines kept once the buffer is full, the truncation
-# counted and marked, the header's measurements, three kept boots.
+# stamped lines, the start of the boot and its newest lines kept with a
+# counted gap mark between, the header's measurements, three kept boots on a
+# card and one on flash, the recorded ESP-IDF tag levels and line shape; and
+# fileview's byte-range page boundaries (System_TextPager.h).
 add_executable(boot_debug_core_tests test_boot_debug_core.cpp)
 set_target_properties(boot_debug_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
@@ -1458,8 +1476,9 @@ add_test(NAME oled_dead_paths
 # command's reply; success texts only on success; no dropped replies on the listed screens.
 # OLED background commands, step 1 (2026-11-22): an action that ignores the verdict runs
 # in the background on System_PendingCommand (one in flight, "Busy" refusal, busy mark,
-# result toast on done/refusal/full queue/timeout); every remaining OLED wait uses the
-# verdict or is tagged "// waits:" for step 2.
+# refusal toast on refusal/full queue/timeout, success toast only for
+# executeOledCommandShowResult); every remaining OLED wait uses the verdict or is tagged
+# "// waits:". Step 2: the value-scroll rows coalesce (OLED_ValueScroll.h).
 set(OLED_COMMAND_FEEDBACK_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND OLED_COMMAND_FEEDBACK_TEST_ARGS --sanitize)
@@ -1749,6 +1768,7 @@ add_test(NAME sdmmc_lifecycle
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_sdmmc.py ${SDMMC_TEST_ARGS})
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME encoder_light_tests COMMAND encoder_light_tests)
+add_test(NAME ano_encoder_core_tests COMMAND ano_encoder_core_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
 add_test(NAME factory_wipe_policy_tests COMMAND factory_wipe_policy_tests)
@@ -2079,6 +2099,22 @@ if(NOT HW1_NODE_EXECUTABLE)
                   "and logging_system_config_browser are registered but disabled; "
                   "pass -DHW1_NODE_EXECUTABLE=/path/to/node")
 endif()
+# The Python tool suites run here too (P0-1c): the OTA tools, the web UI page
+# harnesses and the model tools, each `python3 -m unittest discover` from the
+# repository root. The web UI harnesses use the first JavaScript engine on
+# PATH (tools/webui/js_engine.py); with Node.js found, its folder goes first.
+foreach(hw1_tool_suite ota webui model)
+  add_test(
+    NAME tools_${hw1_tool_suite}_unittests
+    COMMAND ${Python3_EXECUTABLE} -m unittest discover
+            -s tools/${hw1_tool_suite}/tests -t .
+    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/../../../..)
+endforeach()
+if(HW1_NODE_EXECUTABLE)
+  get_filename_component(HW1_NODE_DIR "${HW1_NODE_EXECUTABLE}" DIRECTORY)
+  set_tests_properties(tools_webui_unittests PROPERTIES
+                       ENVIRONMENT "PATH=${HW1_NODE_DIR}:$ENV{PATH}")
+endif()
 # Guest view-only web (owner decision B6): the web guest gate, and the page
 # helpers' refusal popups run in Node.js or macOS jsc (77 = skipped without).
 add_test(
@@ -2092,6 +2128,23 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_web_guest_view_browser.py
           --node ${HW1_NODE_CMD})
 set_tests_properties(web_guest_view_browser PROPERTIES SKIP_RETURN_CODE 77)
+# Guest privacy (owner 2026-11-22, item 4): a guest's /api/settings and MQTT
+# page leave out the saved Wi-Fi networks, the MQTT host and user name and the
+# LLM gateway (WebServer_GuestSettingsView.h, vendored ArduinoJson).
+add_test(
+  NAME web_guest_settings_view
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_guest_settings_view.py
+          --cxx ${CMAKE_CXX_COMPILER})
+# Guest privacy items 1-2: the R1 Health and ESP-NOW message pages say the
+# data is not a guest's (or a user's) and stop polling (Node.js or macOS jsc;
+# 77 = skipped without).
+add_test(
+  NAME web_guest_private_pages
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_guest_private_pages.py
+          --node ${HW1_NODE_CMD})
+set_tests_properties(web_guest_private_pages PROPERTIES SKIP_RETURN_CODE 77)
 add_test(
   NAME setup_espnow_application
   COMMAND ${Python3_EXECUTABLE}
@@ -2443,10 +2496,16 @@ add_test(
 add_test(NAME sensor_restart_core_tests COMMAND sensor_restart_core_tests)
 add_test(NAME i2c_instance_core_tests COMMAND i2c_instance_core_tests)
 add_test(NAME i2c_instance_core_four_tests COMMAND i2c_instance_core_four_tests)
+add_test(NAME ramflush_device_list_tests COMMAND ramflush_device_list_tests)
 add_test(
   NAME sensor_auto_disable_sites
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_sensor_auto_disable_sites.py)
+add_test(
+  NAME i2c_address_walk
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_i2c_address_walk.py
+          ${I2C_PROBE_TEST_ARGS})
 add_test(
   NAME openinput_backends
   COMMAND ${Python3_EXECUTABLE}
@@ -2771,8 +2830,11 @@ add_test(
 # "Command-registry drift gate": `command_registry.py audit` and
 # `reference --check` both exit 0) and the tracked-tree hygiene gate (README
 # "Tracked-tree hygiene gate": no home path, no private LAN address outside the
-# allowed ranges). Source text and Python only; nothing is compiled.
-foreach(test_name IN ITEMS module_overview_text tool_pins command_registry_gate tree_hygiene_gate)
+# allowed ranges), the Markdown link check (every relative link resolves, no
+# absolute file links) and the licence notice check (NOTICE.md names every
+# locked component). Source text and Python only; nothing is compiled.
+foreach(test_name IN ITEMS module_overview_text tool_pins command_registry_gate tree_hygiene_gate doc_links
+                            notice_components)
   add_test(
     NAME ${test_name}
     COMMAND ${Python3_EXECUTABLE}
@@ -3911,6 +3973,11 @@ add_test(NAME oled_cli_output
 # the shared renderers through the same production primitive.
 add_test(NAME oled_text_field
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_text_field.py)
+# The header status bar (OLED_HeaderCore.h): the layout rules exhaustively,
+# the title cut, the Power text, the staleness signature, pixel regions and the
+# golden frames, drawn with the shipping font.
+add_test(NAME oled_header
+  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_oled_header.py)
 
 add_test(NAME wifi_command_errors
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/test_wifi_command_errors.py)

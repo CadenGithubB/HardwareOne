@@ -38,7 +38,7 @@
 #include "i2csensor_mlx90640.h"   // readings + gThermalRunning / gThermalConnected
 #include "i2csensor_seesaw.h"     // readings + gInputRunning / gInputConnected
 #if ENABLE_ANO_ENCODER
-#include "i2csensor_ano_encoder.h" // readings + ANO_BTN_* + axis consts
+#include "i2csensor_ano_encoder.h" // readings + ANO_BTN_*
 #endif
 #include "i2csensor_apds9960.h"   // readings + gApdsRunning / gApdsConnected
 #include "i2csensor_ds3231.h"     // readings + gRtcRunning / gRtcConnected
@@ -858,11 +858,11 @@ static void anoCell(bool pressed, char letter, char* dst4) {
 }
 
 // ASCII-art ANO rotary encoder for the live readout — the rotary wheel (live
-// absolute position, which axis it drives, and spin direction) over a 5-way
-// D-pad cross (Up/Down/Left/Right + centre IN press) plus the virtual START
-// chord, echoing the gamepad card's structure. Buttons are active-high in the
-// ANO_BTN_* layout. The trailing "d.. b.." line is raw tuning info.
-//   Wheel:42 +  axis:V
+// position and spin direction) over a 5-way D-pad cross (Up/Down/Left/Right +
+// centre IN press) plus the virtual START chord, echoing the gamepad card's
+// structure. Buttons are active-high in the ANO_BTN_* layout. The trailing
+// "d.. b.." line is raw tuning info.
+//   Wheel:42 +
 //        [U]
 //    [L] [O] [R]
 //        [D]
@@ -876,7 +876,6 @@ static void g2BuildAnoArt(char* out, size_t cap) {
   }
   const long     pos  = (long)ano.encoderPosition;
   const uint32_t b    = ano.buttons;
-  const uint8_t  axis = ano.currentAxis;
 
   // Spin direction since the last render. Unlike a joystick the wheel has no
   // absolute "rest" position — movement is the signal — so we diff against the
@@ -898,13 +897,13 @@ static void g2BuildAnoArt(char* out, size_t cap) {
   const char* start = (b & ANO_VIRT_START) ? "[Start]" : " Start ";
 
   snprintf(out, cap,
-           "Wheel:%ld %c  axis:%c\n"
+           "Wheel:%ld %c\n"
            "    %s\n"
            "%s %s %s\n"
            "    %s\n"
            "   %s\n"
            "d%+ld b0x%02lX",
-           pos, dir, (axis == ANO_AXIS_HORIZONTAL) ? 'H' : 'V',
+           pos, dir,
            U,
            L, C, R,
            D,

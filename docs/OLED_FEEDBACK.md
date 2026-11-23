@@ -22,14 +22,27 @@ or terminal-result footer messages.
   the background (2026-11-22): the line goes to cmd_exec through a
   `PendingCommand` and the frame loop keeps running. One OLED command is in
   flight at a time (shared with `oledRunCommandAsync`); a press while it runs
-  shows "Busy" and runs nothing. A small hourglass shows at the top right of
-  the content area while it runs, and the reply is the toast when it ends:
-  the refusal's reason, a full queue after 2 s, the 60 s timeout, or on
-  success the reply without its `OK:`/`SUCCESS:` lead ("Done" when it says
-  nothing). A reply that outlives its display session shows nothing.
+  shows "Busy" and runs nothing. A small hourglass shows in the header bar,
+  left of the bell and the battery, while it runs (2026-11-22: it no longer
+  covers the content area; nothing else in the bar moves when it comes or
+  goes, only the title gives up room, `OLED_HeaderCore.h`; on the on-screen
+  keyboard it shows on the keyboard's own top line). A failure is the toast when it ends: the
+  refusal's reason, a full queue after 2 s or the 60 s timeout. A success
+  shows no toast, because the screen shows the new state (owner, 2026-11-22),
+  except where it does not: those call sites use
+  `executeOledCommandShowResult`, which toasts the reply without its
+  `OK:`/`SUCCESS:` lead ("Done" when it says nothing). A reply that outlives
+  its display session shows nothing.
+- Value-scroll rows (FM tune, the LED brightness nudge and preset) never wait
+  and never say "Busy" (step 2, 2026-11-22): the row keeps its own wanted
+  value, which moves at once; only the newest value is sent, when none of the
+  row's commands runs and the OLED command slot is free; a step while one
+  runs replaces the waiting value. When the last command ends and the device
+  shows the value (or 1.5 s later, or at once after a refusal), the row
+  follows the device again (`oledValueScrollStep`, `OLED_ValueScroll.h`).
 - `oledRunCommand` waits (up to 2 s + 60 s) and is left only where the screen
-  uses the verdict, plus a few value-scroll and chained actions tagged
-  `// waits: <why>`; step 2 of the OLED background plan moves them.
+  uses the verdict, plus a few chained or completion-dependent actions tagged
+  `// waits: <why>`.
 - Local form validation uses `oledToastShow` with explicit `ERROR` severity.
   Local feedback is independent of notification preferences and creates no
   system event or notification-history entry merely because it was displayed.

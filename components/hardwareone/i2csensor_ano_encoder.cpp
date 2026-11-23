@@ -30,9 +30,46 @@
 // Module state
 // ============================================================================
 TaskHandle_t gAnoEncoderTaskHandle = nullptr;
+
+// The seesaw object with checked reads (the library's digitalReadBulk and
+// getEncoderPosition ignore a failed read and return whatever the buffer
+// held). Caller holds the bus for every method.
+class AnoSeesaw : public Adafruit_seesaw {
+ public:
+  explicit AnoSeesaw(TwoWire* wire) : Adafruit_seesaw(wire) {}
+  // Points the object at another bus; the next begin() builds its I2C device
+  // on it.
+  void bindWire(TwoWire* wire) { _i2cbus = wire; }
+  bool readButtons(uint32_t& bulk) { return readWord(SEESAW_GPIO_BASE, SEESAW_GPIO_BULK, bulk); }
+  // Read-to-clear: the pins that changed since the last read.
+  bool readIntFlags(uint32_t& flags) { return readWord(SEESAW_GPIO_BASE, SEESAW_GPIO_INTFLAG, flags); }
+  // Read-to-clear: the wheel's detents since the last read.
+  bool readDelta(int32_t& delta) {
+    uint32_t word = 0;
+    const bool ok = readWord(SEESAW_ENCODER_BASE, SEESAW_ENCODER_DELTA, word);
+    delta = ok ? (int32_t)word : 0;
+    return ok;
+  }
+
+ private:
+  bool readWord(uint8_t base, uint8_t reg, uint32_t& value) {
+    uint8_t buf[4] = {0, 0, 0, 0};
+    value = 0;
+    if (!read(base, reg, buf, sizeof(buf))) return false;
+    value = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) | ((uint32_t)buf[2] << 8) | buf[3];
+    return true;
+  }
+};
+
 // Retained across stops/retries; PSRAM-preferred placement-new needs ps_delete
 // if an explicit teardown is introduced. Wire/BusIO storage stays separate.
-static Adafruit_seesaw* gAnoSeesaw = nullptr;
+static AnoSeesaw* gAnoSeesaw = nullptr;
+// The bus the object's I2C device is on, and the bus and address the board
+// was opened at (latched at open: a setting changed while it runs applies at
+// the next openinput).
+static uint8_t sAnoSeesawBus = 0xFF;
+static uint8_t sAnoBus = 0;
+static uint8_t sAnoAddress = kAnoAddressDefault;
 static AnoEncoderCache sAnoEncoderCache;
 static SemaphoreHandle_t sAnoCacheMutex = nullptr;
 
@@ -62,52 +99,10 @@ bool gAnoEncoderConnected = false;
 bool gInputRunning = false;
 bool gInputConnected = false;
 
-static unsigned long gLastAnoInitMs = 0;
-static const unsigned long kAnoInitMinIntervalMs = 2000;
-
-// Seesaw GPIO pin assignments for the Adafruit ANO breakout. These come from
-// Adafruit's own example sketch — the ATtiny817 on the breakout exposes the
-// 5 switches on pins 1..5 and the rotary on encoder #0.
-static const uint8_t SS_PIN_SELECT = 1;  // IN / center press
-static const uint8_t SS_PIN_UP     = 2;
-static const uint8_t SS_PIN_LEFT   = 3;
-static const uint8_t SS_PIN_DOWN   = 4;
-static const uint8_t SS_PIN_RIGHT  = 5;
-static const uint32_t SS_BUTTON_MASK =
-    (1UL << SS_PIN_SELECT) | (1UL << SS_PIN_UP) | (1UL << SS_PIN_LEFT) |
-    (1UL << SS_PIN_DOWN)   | (1UL << SS_PIN_RIGHT);
-
-// Translate the raw seesaw GPIO bulk read (active-low) into our internal
-// active-high ANO_BTN_* bit layout. Keeping a separate layout means the
-// consumer-facing bits stay stable even if a future breakout revision
-// remaps seesaw pins.
-static inline uint32_t ssBulkToAnoBits(uint32_t bulk) {
-  // bulk: bit N = 1 if seesaw pin N is HIGH (button NOT pressed)
-  // Invert and remap to ANO_BTN_* positions.
-  //
-  // Mounting-orientation compensation: gSettings.anoEncoderSwap{UpDown,LeftRight}
-  // pick which physical seesaw pin sources each logical ANO_BTN_* bit. Applying
-  // the swap here — the single boundary where chip pins become logical bits —
-  // means everything downstream (chord state machine, cache, OLED nav, web
-  // card, MQTT, ESP-NOW peers) sees the user-perceived labels automatically.
-  const uint8_t upPin    = gSettings.anoEncoderSwapUpDown    ? SS_PIN_DOWN  : SS_PIN_UP;
-  const uint8_t downPin  = gSettings.anoEncoderSwapUpDown    ? SS_PIN_UP    : SS_PIN_DOWN;
-  const uint8_t leftPin  = gSettings.anoEncoderSwapLeftRight ? SS_PIN_RIGHT : SS_PIN_LEFT;
-  const uint8_t rightPin = gSettings.anoEncoderSwapLeftRight ? SS_PIN_LEFT  : SS_PIN_RIGHT;
-
-  uint32_t pressed = ~bulk;
-  uint32_t out = 0;
-  if (pressed & (1UL << SS_PIN_SELECT)) out |= ANO_BTN_IN;
-  if (pressed & (1UL << upPin))         out |= ANO_BTN_UP;
-  if (pressed & (1UL << downPin))       out |= ANO_BTN_DOWN;
-  if (pressed & (1UL << leftPin))       out |= ANO_BTN_LEFT;
-  if (pressed & (1UL << rightPin))      out |= ANO_BTN_RIGHT;
-  return out;
-}
-
 // Format an ANO_BTN_* bitmask as a human-readable button list. Returns the
 // passed-in buffer for inline use. Output looks like "IN+UP" or "RIGHT+START"
-// or "(none)" for an empty mask. Used by the debug logs in inputTask().
+// or "(none)" for an empty mask. Used by the debug logs, the button event and
+// the read reply.
 static const char* anoBtnNames(uint32_t mask, char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return "";
   buf[0] = '\0';
@@ -120,18 +115,19 @@ static const char* anoBtnNames(uint32_t mask, char* buf, size_t bufSize) {
       if (off + 1 + n < bufSize) { buf[off++] = '+'; memcpy(buf + off, s, n); off += n; buf[off] = '\0'; }
     }
   };
-  if (mask & ANO_BTN_IN)     append("IN");
-  if (mask & ANO_BTN_UP)     append("UP");
-  if (mask & ANO_BTN_DOWN)   append("DOWN");
-  if (mask & ANO_BTN_LEFT)   append("LEFT");
-  if (mask & ANO_BTN_RIGHT)  append("RIGHT");
-  if (mask & ANO_VIRT_START) append("START");
+  if (mask & ANO_BTN_IN)      append("IN");
+  if (mask & ANO_BTN_UP)      append("UP");
+  if (mask & ANO_BTN_DOWN)    append("DOWN");
+  if (mask & ANO_BTN_LEFT)    append("LEFT");
+  if (mask & ANO_BTN_RIGHT)   append("RIGHT");
+  if (mask & ANO_VIRT_START)  append("START");
+  if (mask & ANO_VIRT_SELECT) append("SELECT");
   if (off == 0 && bufSize >= 7) { memcpy(buf, "(none)", 7); }
   return buf;
 }
 
 // ============================================================================
-// Bus resolution
+// Bus and address
 // ============================================================================
 static bool anoResolveBus(uint8_t* outBus, TwoWire** outWire) {
   const uint8_t bus = (uint8_t)gSettings.inputBus;
@@ -142,12 +138,7 @@ static bool anoResolveBus(uint8_t* outBus, TwoWire** outWire) {
   return true;
 }
 
-static inline uint8_t anoI2cAddr() {
-  // Runtime override (set via CLI or web) for trial-and-error addressing.
-  // Falls back to the documented default if user hasn't touched it.
-  int v = gSettings.anoEncoderI2cAddr;
-  return (v > 0 && v < 0x80) ? (uint8_t)v : I2C_ADDR_ANO_ENCODER;
-}
+uint8_t anoEncoderAddress() { return anoAddressFromSetting(gSettings.anoEncoderI2cAddr); }
 
 static inline void anoLogHeap(const char* tag) {
   if (!isDebugFlagSet(DEBUG_MEMORY)) return;
@@ -162,6 +153,9 @@ static inline void anoLogHeap(const char* tag) {
 // ============================================================================
 // Initialization
 // ============================================================================
+// Runs on the sensor queue's worker (inputStartInternal). The bus and the
+// address are read from the settings here and kept for the poll until the
+// next open.
 bool anoEncoderInit() {
   if (gAnoEncoderConnected && gAnoSeesaw) return true;
 
@@ -170,19 +164,31 @@ bool anoEncoderInit() {
     ERROR_ANO_ENCODERF("ANO encoder bus %d not initialized", gSettings.inputBus);
     return false;
   }
-
-  if (!gAnoSeesaw) {
-    void* anoObjBuf = ps_alloc(sizeof(Adafruit_seesaw), AllocPref::PreferPsram,
-                              "input.ano.obj");
-    if (!anoObjBuf) {
-      ERROR_ANO_ENCODERF("Failed to allocate Adafruit_seesaw for ANO");
+  const uint8_t addr = anoEncoderAddress();
+  {
+    char why[112];
+    if (i2cAddressTakenBy(bus, addr, I2C_DEVICE_INPUT, 1, why, sizeof(why))) {
+      ERROR_ANO_ENCODERF("%s Not opening the ANO encoder there.", why);
       return false;
     }
-    gAnoSeesaw = new (anoObjBuf) Adafruit_seesaw(wire);
   }
 
-  const uint8_t addr = anoI2cAddr();
-  bool ok = i2cDeviceTransaction(bus, addr, 100000, 3000, [&]() -> bool {
+  if (!gAnoSeesaw) {
+    void* anoObjBuf = ps_alloc(sizeof(AnoSeesaw), AllocPref::PreferPsram, "input.ano.obj");
+    if (!anoObjBuf) {
+      ERROR_ANO_ENCODERF("Failed to allocate the ANO seesaw object");
+      return false;
+    }
+    gAnoSeesaw = new (anoObjBuf) AnoSeesaw(wire);
+    sAnoSeesawBus = bus;
+  } else if (sAnoSeesawBus != bus) {
+    // The bus changed since the object was made: its begin() below builds
+    // its I2C device on the new bus's Wire.
+    gAnoSeesaw->bindWire(wire);
+    sAnoSeesawBus = bus;
+  }
+
+  bool ok = i2cDeviceTransaction(bus, addr, 100000, 1000, [&]() -> bool {
     // The product id first, before any begin or reset: 0x49 is also the
     // encoder board's default and the gamepad's alternate, and a board of
     // another product is left exactly as it was.
@@ -198,30 +204,26 @@ bool anoEncoderInit() {
       return false;
     }
 
+    // One begin: it resets the board and waits for it to answer again.
     if (!gAnoSeesaw->begin(addr)) {
-      ERROR_ANO_ENCODERF("ANO seesaw not found at 0x%02X on bus %u", addr, bus);
+      ERROR_ANO_ENCODERF("ANO seesaw at 0x%02X on bus %u did not come back after its reset", addr, bus);
       return false;
     }
 
-    gAnoSeesaw->SWReset();
-    delay(10);
-
-    if (!gAnoSeesaw->begin(addr)) {
-      ERROR_ANO_ENCODERF("ANO seesaw not responding after soft reset");
-      return false;
-    }
-
-    // Configure buttons as pullups + enable interrupts (matches gamepad init).
-    gAnoSeesaw->pinModeBulk(SS_BUTTON_MASK, INPUT_PULLUP);
-    gAnoSeesaw->setGPIOInterrupts(SS_BUTTON_MASK, 1);
-
-    // Zero the encoder so first read returns a known reference.
+    // Buttons as pull-ups with change flags (read each poll, so short taps
+    // between two polls are seen); the wheel from zero.
+    gAnoSeesaw->pinModeBulk(kAnoPinMask, INPUT_PULLUP);
+    gAnoSeesaw->setGPIOInterrupts(kAnoPinMask, 1);
     gAnoSeesaw->setEncoderPosition(0, 0);
     gAnoSeesaw->enableEncoderInterrupt(0);
-    return true;
+    // Clear the flags the configuration raised, so the first poll sees none.
+    uint32_t staleFlags = 0;
+    return gAnoSeesaw->readIntFlags(staleFlags);
   });
 
   if (ok) {
+    sAnoBus = bus;
+    sAnoAddress = addr;
     gAnoEncoderConnected = true;
     gInputConnected = true;  // proxy in sync
     broadcastOutput("ANO encoder initialized");
@@ -229,14 +231,6 @@ bool anoEncoderInit() {
     ERROR_ANO_ENCODERF("ANO encoder init failed");
   }
   return ok;
-}
-
-bool anoEncoderInitConnection() {
-  if (gAnoEncoderConnected && gAnoSeesaw) return true;
-  unsigned long now = millis();
-  if (now - gLastAnoInitMs < kAnoInitMinIntervalMs) return false;
-  gLastAnoInitMs = now;
-  return anoEncoderInit();
 }
 
 bool inputStartInternal() {
@@ -273,7 +267,6 @@ bool inputStartInternal() {
       sAnoEncoderCache.buttons = 0;
       sAnoEncoderCache.encoderDelta = 0;
       sAnoEncoderCache.encoderPosition = 0;
-      sAnoEncoderCache.buttonPressedAccum = 0;
     }
   }
 
@@ -308,18 +301,6 @@ bool inputStartInternal() {
   return true;
 }
 
-// ============================================================================
-// Axis state (per-mode)
-// ============================================================================
-void anoEncoderResetAxisForMode(uint8_t defaultAxis) {
-  if (!sAnoCacheMutex) return;
-  SensorCacheGuard g(sAnoCacheMutex, pdMS_TO_TICKS(10), "ano.resetAxis");
-  if (g.held) {
-    sAnoEncoderCache.currentAxis =
-        (defaultAxis == ANO_AXIS_HORIZONTAL) ? ANO_AXIS_HORIZONTAL : ANO_AXIS_VERTICAL;
-  }
-}
-
 int anoEncoderConsumeOneDetent() {
   if (!sAnoCacheMutex) return 0;
   SensorCacheGuard g(sAnoCacheMutex, pdMS_TO_TICKS(5), "ano.consumeDetent");
@@ -329,6 +310,9 @@ int anoEncoderConsumeOneDetent() {
   return 0;
 }
 
+// The reading: the shared envelope plus pos, axis and buttons. `axis` stays
+// in the wire format and is always 0 (the wheel is vertical); `buttons` is
+// the device-native ANO_BTN_* layout.
 int anoEncoderBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   AnoEncoderCache reading;
@@ -344,9 +328,8 @@ int anoEncoderBuildDataJson(char* buf, size_t bufSize) {
   int pos = sensorEnvelopeBegin(buf, bufSize, reading.dataValid, gAnoEncoderConnected, reading.lastUpdate);
   if (pos == 0) return 0;
   int n = snprintf(buf + pos, bufSize - pos,
-                   "," HW1_SK_Q(HW1_SK_POS) "%ld," HW1_SK_Q(HW1_SK_AXIS) "%u," HW1_SK_Q(HW1_SK_BUTTONS) "%lu}",
+                   "," HW1_SK_Q(HW1_SK_POS) "%ld," HW1_SK_Q(HW1_SK_AXIS) "0," HW1_SK_Q(HW1_SK_BUTTONS) "%lu}",
                    (long)reading.encoderPosition,
-                   (unsigned)reading.currentAxis,
                    (unsigned long)reading.buttons);
   if (n < 0 || (size_t)n >= bufSize - pos) return 0;
   return pos + n;
@@ -355,6 +338,10 @@ int anoEncoderBuildDataJson(char* buf, size_t bufSize) {
 // ============================================================================
 // Command handlers
 // ============================================================================
+static bool anoRunning() { return gAnoEncoderEnabled && gAnoEncoderConnected; }
+
+// anoencoderread [json]: the reading. The device is opened through the queue
+// (openinput / inputautostart), never by this command.
 const char* cmd_anoencoder(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (argWantsJson(argsInput)) {
@@ -362,99 +349,138 @@ const char* cmd_anoencoder(const String& argsInput) {
     int n = anoEncoderBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds web + ESP-NOW)
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
-  if (!gAnoEncoderConnected) {
-    if (!anoEncoderInitConnection()) {
-      cliHint("to start the encoder, run 'openinput'; if it is still missing, confirm the address with 'i2cscan'");
-      return "Error: [ANO] Not connected - check wiring";
-    }
+  if (!anoRunning()) {
+    return "Error: The ANO encoder is not open. Start it with 'openinput'; 'anoencoderstatus' "
+           "shows its bus and address.";
   }
   AnoEncoderCache reading;
-  if (!anoEncoderCacheSnapshot(reading, 50)) return "Error: [ANO] Snapshot unavailable";
+  if (!anoEncoderCacheSnapshot(reading, 50)) return "Error: The ANO reading is busy. Retry the command.";
   // The cache holds a reading only after the polling task's first good poll.
-  if (!reading.dataValid) return "Error: [ANO] No reading yet. Run 'openinput' and retry.";
-  const long pos = reading.encoderPosition;
-  const unsigned axis = reading.currentAxis;
-  const unsigned long buttons = reading.buttons;
-  static char buf[80];
-  snprintf(buf, sizeof(buf), "[ANO] pos=%ld axis=%u buttons=0x%08lX", pos, axis, buttons);
-  return buf;
+  if (!reading.dataValid) return "Error: The ANO encoder has no reading yet. Retry in a moment.";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  char names[48];
+  snprintf(getDebugBuffer(), 1024, "[ANO] pos=%ld buttons=0x%02lX (%s)", (long)reading.encoderPosition,
+           (unsigned long)reading.buttons, anoBtnNames(reading.buttons, names, sizeof(names)));
+  return getDebugBuffer();
 }
 
+static constexpr const char* kUsageStatus = "anoencoderstatus [json]";
+
+// anoencoderstatus [json]: where the board is looked for, whether it is open,
+// and its settings (schema 1).
+const char* cmd_anoencoderstatus(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  const I2cInstanceArg arg =
+      i2cParseInstanceArg(I2C_DEVICE_INPUT, argsInput.c_str(), I2cInstanceForm::Status);
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  if (arg.error != I2cInstanceError::None) {
+    return i2cInstanceErrorText(I2C_DEVICE_INPUT, arg, kUsageStatus, getDebugBuffer(), 1024);
+  }
+  const bool running = anoRunning();
+  const unsigned bus = running ? sAnoBus : (unsigned)gSettings.inputBus;
+  const unsigned address = running ? sAnoAddress : anoEncoderAddress();
+  const int pollMs = gSettings.inputDevicePollMs;
+  const bool invert = gSettings.anoEncoderInvert;
+  const bool swapUd = gSettings.anoEncoderSwapUpDown;
+  const bool swapLr = gSettings.anoEncoderSwapLeftRight;
+  const bool autoStart = gSettings.inputAutoStart;
+  if (argWantsJson(argsInput)) {
+    snprintf(getDebugBuffer(), 1024,
+             "{\"schema\":1,\"connected\":%s,\"product\":%u,\"bus\":%u,\"address\":%u,\"pollMs\":%d,"
+             "\"invert\":%s,\"swapUpDown\":%s,\"swapLeftRight\":%s,\"autoStart\":%s}",
+             running ? "true" : "false", running ? (unsigned)kSeesawProductAnoEncoder : 0u, bus, address,
+             pollMs, invert ? "true" : "false", swapUd ? "true" : "false", swapLr ? "true" : "false",
+             autoStart ? "true" : "false");
+    return getDebugBuffer();
+  }
+  snprintf(getDebugBuffer(), 1024,
+           "[ANO] %s (I2C%u address 0x%02X). Poll %d ms. Rotation %s; UP/DOWN %s; LEFT/RIGHT %s. "
+           "Open after boot: %s. %s",
+           running ? "Connected: Adafruit 5740 ANO encoder" : "Not connected", bus + 1, address, pollMs,
+           invert ? "inverted" : "normal", swapUd ? "swapped" : "normal", swapLr ? "swapped" : "normal",
+           autoStart ? "on" : "off",
+           running ? "Read it with 'anoencoderread'." : "Start it with 'openinput'.");
+  return getDebugBuffer();
+}
+
+// anoencoderi2caddr [addr]: 0x49..0x50 in hex or decimal. Refused when
+// another device of this build holds it on the input bus; it applies at the
+// next openinput.
 const char* cmd_anoencoderi2caddr(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs a(argsInput);
-  if (a.count() == 0) {
-    static char buf[48];
-    snprintf(buf, sizeof(buf), "[ANO] I2C address: 0x%02X", gSettings.anoEncoderI2cAddr);
-    return buf;
+  String text = argsInput;
+  text.trim();
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  if (text.length() == 0) {
+    snprintf(getDebugBuffer(), 1024, "[ANO] I2C address: 0x%02X on I2C%u%s", (unsigned)anoEncoderAddress(),
+             (unsigned)gSettings.inputBus + 1,
+             anoRunning() && sAnoAddress != anoEncoderAddress() ? " (open at the old address until the next 'openinput')" : "");
+    return getDebugBuffer();
   }
-  int v = a.argInt(0, 0);
-  if (v < 1 || v > 127) return "Error: invalid arguments — Usage: anoencoderi2caddr <1-127> (decimal) — try i2cscan first";
-  setSetting(gSettings.anoEncoderI2cAddr, v);
-  return "[ANO] I2C address updated (reboot required)";
+  int address = 0;
+  if (!parseAddressArg(text, kAnoAddressMin, kAnoAddressMax, address)) {
+    return "Error: The ANO address must be 0x49..0x50 (its A0-A2 jumpers). Read it with 'i2cscan'.";
+  }
+  char why[112];
+  if (i2cAddressTakenBy((uint8_t)gSettings.inputBus, (uint8_t)address, I2C_DEVICE_INPUT, 1, why, sizeof(why))) {
+    snprintf(getDebugBuffer(), 1024,
+             "%s Use another address (its A0-A2 jumpers) or put the ANO on the other bus ('inputbus').", why);
+    return getDebugBuffer();
+  }
+  setSetting(gSettings.anoEncoderI2cAddr, address);
+  snprintf(getDebugBuffer(), 1024, "[ANO] Address 0x%02X saved; it applies at the next 'openinput'",
+           (unsigned)address);
+  return getDebugBuffer();
+}
+
+// One on/off (or toggle) setting of the ANO: no value shows it.
+static const char* anoBoolSetting(bool& field, const String& argsInput, bool allowToggle,
+                                  const char* onReply, const char* offReply) {
+  String arg = argsInput;
+  arg.trim();
+  if (arg.length() > 0) {
+    bool value = false;
+    if (allowToggle && arg.equalsIgnoreCase("toggle")) {
+      value = !field;
+    } else {
+      const int parsed = parseBoolArg(arg);
+      if (parsed < 0) return allowToggle ? "Error: Not an on/off value. Use on, off or toggle." : kCommandReplyNotOnOff;
+      value = parsed == 1;
+    }
+    setSetting(field, value);
+  }
+  return field ? onReply : offReply;
 }
 
 const char* cmd_anoencoderinvert(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  String arg = argsInput; arg.trim(); arg.toLowerCase();
-  if (arg.length() == 0) {
-    return gSettings.anoEncoderInvert ? "[ANO] Rotation: inverted" : "[ANO] Rotation: normal";
-  }
-  if (argIsOn(arg)) {
-    setSetting(gSettings.anoEncoderInvert, true);
-    return "[ANO] Rotation inverted";
-  }
-  if (argIsOff(arg)) {
-    setSetting(gSettings.anoEncoderInvert, false);
-    return "[ANO] Rotation normal";
-  }
-  return "Error: invalid arguments — Usage: anoencoderinvert [on|off]";
-}
-
-// Helper: parse on/off/toggle into a bool, applied to the given setting field.
-// Returns the new value via outNewValue; returns true on success, false on
-// usage error.
-static bool parseOnOffToggleArg(const String& argsInput, bool currentValue,
-                                bool* outNewValue) {
-  String arg = argsInput; arg.trim(); arg.toLowerCase();
-  if (arg.length() == 0) { *outNewValue = currentValue; return true; }  // status query
-  if (argIsOn(arg)) { *outNewValue = true;  return true; }
-  if (argIsOff(arg)) { *outNewValue = false; return true; }
-  if (arg == "toggle")                              { *outNewValue = !currentValue; return true; }
-  return false;
+  return anoBoolSetting(gSettings.anoEncoderInvert, argsInput, false, "[ANO] Rotation: inverted",
+                        "[ANO] Rotation: normal");
 }
 
 const char* cmd_anoencoderswapud(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  bool target = false;
-  if (!parseOnOffToggleArg(argsInput, gSettings.anoEncoderSwapUpDown, &target)) {
-    return "Error: invalid arguments — Usage: anoencoderswapud [on|off|toggle]";
-  }
-  String arg = argsInput; arg.trim();
-  if (arg.length() != 0) setSetting(gSettings.anoEncoderSwapUpDown, target);
-  return target ? "[ANO] UP/DOWN buttons: swapped" : "[ANO] UP/DOWN buttons: normal";
+  return anoBoolSetting(gSettings.anoEncoderSwapUpDown, argsInput, true, "[ANO] UP/DOWN buttons: swapped",
+                        "[ANO] UP/DOWN buttons: normal");
 }
 
 const char* cmd_anoencoderswaplr(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  bool target = false;
-  if (!parseOnOffToggleArg(argsInput, gSettings.anoEncoderSwapLeftRight, &target)) {
-    return "Error: invalid arguments — Usage: anoencoderswaplr [on|off|toggle]";
-  }
-  String arg = argsInput; arg.trim();
-  if (arg.length() != 0) setSetting(gSettings.anoEncoderSwapLeftRight, target);
-  return target ? "[ANO] LEFT/RIGHT buttons: swapped" : "[ANO] LEFT/RIGHT buttons: normal";
+  return anoBoolSetting(gSettings.anoEncoderSwapLeftRight, argsInput, true,
+                        "[ANO] LEFT/RIGHT buttons: swapped", "[ANO] LEFT/RIGHT buttons: normal");
 }
 
 // ============================================================================
-// Settings module — only ANO-specific entries. The shared poll/autostart/bus
-// settings are in inputSettingsModule (HAL_Input.cpp).
+// Settings module — only ANO-specific entries. The shared poll/autostart
+// settings are in inputSettingsModule (HAL_Input.cpp), the bus (inputBus) in
+// the I2C module.
 // ============================================================================
+static const char kAnoAddressOptions[] = ANO_ADDRESS_OPTIONS;
 static const SettingEntry anoEncoderSettingEntries[] = {
-  { "anoEncoderI2cAddr",       SETTING_INT,  &gSettings.anoEncoderI2cAddr,       I2C_ADDR_ANO_ENCODER, 0, nullptr, 1, 127, "I2C Address",           nullptr, false, nullptr, "anoencoderi2caddr" },
-  { "anoEncoderInvert",        SETTING_BOOL, &gSettings.anoEncoderInvert,        0,                    0, nullptr, 0, 1,   "Invert rotation",       nullptr, false, nullptr, "anoencoderinvert" },
-  { "anoEncoderSwapUpDown",    SETTING_BOOL, &gSettings.anoEncoderSwapUpDown,    1,                    0, nullptr, 0, 1,   "Swap UP/DOWN buttons",  nullptr, false, nullptr, "anoencoderswapud" },
-  { "anoEncoderSwapLeftRight", SETTING_BOOL, &gSettings.anoEncoderSwapLeftRight, 1,                    0, nullptr, 0, 1,   "Swap LEFT/RIGHT buttons", nullptr, false, nullptr, "anoencoderswaplr" },
+  { "anoEncoderI2cAddr",       SETTING_INT,  &gSettings.anoEncoderI2cAddr,       kAnoAddressDefault, 0, nullptr, kAnoAddressMin, kAnoAddressMax, "I2C address (next openinput)", kAnoAddressOptions, false, nullptr, "anoencoderi2caddr" },
+  { "anoEncoderInvert",        SETTING_BOOL, &gSettings.anoEncoderInvert,        0,                  0, nullptr, 0, 1,   "Invert rotation",       nullptr, false, nullptr, "anoencoderinvert" },
+  { "anoEncoderSwapUpDown",    SETTING_BOOL, &gSettings.anoEncoderSwapUpDown,    1,                  0, nullptr, 0, 1,   "Swap UP/DOWN buttons",  nullptr, false, nullptr, "anoencoderswapud" },
+  { "anoEncoderSwapLeftRight", SETTING_BOOL, &gSettings.anoEncoderSwapLeftRight, 1,                  0, nullptr, 0, 1,   "Swap LEFT/RIGHT buttons", nullptr, false, nullptr, "anoencoderswaplr" },
 };
 
 static bool isAnoEncoderConnected() { return gAnoEncoderConnected; }
@@ -469,12 +495,13 @@ extern const SettingsModule anoEncoderSettingsModule = {
 };
 
 // ============================================================================
-// Command registry — only ANO-specific debug + tuning commands. The unified
+// Command registry — only ANO-specific commands. The unified
 // open/close/autostart/poll commands live in HAL_Input.cpp (inputCommands).
 // ============================================================================
 const CommandEntry anoEncoderCommands[] = {
-  { "anoencoderread",    "Read ANO encoder state. (add 'json' for JSON output)",                  false, cmd_anoencoder },
-  { "anoencoderi2caddr", "Set ANO I2C address [1-127]",              true,  cmd_anoencoderi2caddr, "Usage: anoencoderi2caddr <1-127>" },
+  { "anoencoderread",    "Read the ANO encoder: wheel position and buttons. (add 'json' for JSON output)", false, cmd_anoencoder },
+  { "anoencoderstatus",  "ANO encoder status: bus, address, settings. (add 'json' for JSON output)", false, cmd_anoencoderstatus, "Usage: anoencoderstatus [json]" },
+  { "anoencoderi2caddr", "Set the ANO I2C address [0x49-0x50] (next openinput)", true,  cmd_anoencoderi2caddr, "Usage: anoencoderi2caddr <0x49..0x50>" },
   { "anoencoderinvert",  "Invert rotation direction [on|off]",       true, cmd_anoencoderinvert,  "Usage: anoencoderinvert [on|off]" },
   { "anoencoderswapud",  "Swap UP/DOWN buttons [on|off|toggle]",     true, cmd_anoencoderswapud,  "Usage: anoencoderswapud [on|off|toggle]" },
   { "anoencoderswaplr",  "Swap LEFT/RIGHT buttons [on|off|toggle]",  true, cmd_anoencoderswaplr,  "Usage: anoencoderswaplr [on|off|toggle]" },
@@ -484,9 +511,11 @@ const size_t anoEncoderCommandsCount = sizeof(anoEncoderCommands) / sizeof(anoEn
 // ============================================================================
 // Polling task — driven by createInputTask() (shared slot)
 // ============================================================================
-// Reads buttons + encoder, runs the RIGHT/RIGHT+IN chord state machine, and
-// accumulates detents into encoderDelta. The OLED reader consumes one detent
-// per frame so fast spins still feel responsive without losing clicks.
+// Each poll is one checked transaction: buttons, interrupt flags, then the
+// wheel delta (read-to-clear, so last). anoPoll() (i2csensor_ano_encoder_core.h)
+// turns the reads into the reading, the button events and the navigation's
+// edges and level (RIGHT tap = SELECT at release, RIGHT+IN = START only).
+// The OLED drains the accumulated detents each frame.
 
 void inputTask(void* parameter) {
   INFO_ANO_ENCODER_LIFECYCLEF("ANO encoder task started (handle=%p)", (void*)xTaskGetCurrentTaskHandle());
@@ -497,22 +526,14 @@ void inputTask(void* parameter) {
   uint8_t consecutiveInvalidReads = 0;
   static const uint8_t INVALID_READ_AUTO_DISABLE_THRESHOLD = 20;
 
-  // Chord state machine: tracks RIGHT-held window so we can disambiguate
-  // "RIGHT tapped alone (axis toggle)" from "RIGHT held while IN pressed (START)".
-  bool prevRightHeld = false;
-  bool rightHadChord = false;
-  uint32_t prevButtons = 0;  // active-high (our bit layout)
-  int32_t  prevEncoderPos = 0;
+  AnoPollState pollState;
+  int32_t position = 0;  // the reading's wheel count since this open
 
-  // POLL-log de-noise state. The driver polls at ~30 ms regardless (needed for
-  // accuracy on fast spins / quick taps), but emitting an [ANO_POLL] line on
-  // every tick floods the serial log when nothing's actually happening. So we
-  // log only on STATE CHANGE (bulk or encPos differs from what we last logged)
-  // PLUS a once-per-second heartbeat so a stuck task is still visible. Initial
-  // sentinel values guarantee the first iteration is treated as a change.
-  uint32_t      lastLoggedBulk   = 0xFFFFFFFEu;
-  int32_t       lastLoggedEncPos = INT32_MIN;
-  unsigned long lastPollLogMs    = 0;
+  // POLL-log de-noise state: an [ANO_POLL] line on a change of the raw reads
+  // or the wheel, plus a once-per-second heartbeat so a stuck task is still
+  // visible.
+  uint32_t      lastLoggedBulk  = 0xFFFFFFFEu;
+  unsigned long lastPollLogMs   = 0;
   const unsigned long POLL_LOG_HEARTBEAT_MS = 1000;
 
   while (true) {
@@ -534,149 +555,92 @@ void inputTask(void* parameter) {
       if (checkTaskStackSafety("anoencoder", INPUT_STACK_WORDS, &gAnoEncoderEnabled)) continue;
     }
 
-    if (gAnoEncoderEnabled && gAnoEncoderConnected && !pollPaused((uint8_t)gSettings.inputBus)) {
+    const uint8_t bus = sAnoBus;
+    const uint8_t addr = sAnoAddress;
+    if (gAnoEncoderEnabled && gAnoEncoderConnected && !pollPaused(bus)) {
       unsigned long pollMs = (gSettings.inputDevicePollMs > 0)
-                              ? (unsigned long)gSettings.inputDevicePollMs : 30;
+                              ? (unsigned long)gSettings.inputDevicePollMs : 90;
       if ((nowMs - lastRead) >= pollMs) {
-        bool readOk = false;
-        uint32_t bulk = 0;
-        int32_t encPos = prevEncoderPos;
-
-        const uint8_t bus = (uint8_t)gSettings.inputBus;
-        const uint8_t addr = anoI2cAddr();
-        auto result = gAnoSeesaw && i2cDeviceTransaction(bus, addr, 400000, 80, [&]() -> bool {
-          bulk = gAnoSeesaw->digitalReadBulk(SS_BUTTON_MASK);
-          encPos = gAnoSeesaw->getEncoderPosition(0);
-          return true;
+        AnoPollReads reads;
+        AnoSeesaw* seesaw = gAnoSeesaw;
+        // The I2C manager records the result: a NACK or an unplugged board is
+        // a failed transaction, which its health records and auto-disable see.
+        const bool readOk = seesaw && i2cDeviceTransaction(bus, addr, 400000, 80, [&]() -> bool {
+          reads.buttonsOk = seesaw->readButtons(reads.bulk);
+          reads.flagsOk = reads.buttonsOk && seesaw->readIntFlags(reads.intFlags);
+          reads.deltaOk = reads.flagsOk && seesaw->readDelta(reads.delta);
+          return reads.deltaOk;
         });
-        readOk = (result == true);
 
-        // Validate: if every button bit reads pressed, the bus is likely stuck low.
-        uint32_t btns = ssBulkToAnoBits(bulk);
-        bool dataValid = true;
-        if (readOk && (bulk & SS_BUTTON_MASK) == 0) dataValid = false;  // All-zero bulk = bus fault
+        const AnoPollResult r = anoPoll(pollState, reads, gSettings.anoEncoderSwapUpDown,
+                                        gSettings.anoEncoderSwapLeftRight, gSettings.anoEncoderInvert);
 
-        // Raw read log (POLLING flag). Gated on (a) state change since the
-        // last log line OR (b) heartbeat — once per POLL_LOG_HEARTBEAT_MS to
-        // confirm the task is still alive even when nothing's happening. This
-        // collapses ~30× log volume during idle while still showing every
-        // edge and every detent the moment it appears. The poll itself is
-        // unchanged — same cadence, same accuracy.
-        const bool pollChanged = (bulk != lastLoggedBulk) || (encPos != lastLoggedEncPos);
+        const bool pollChanged = (reads.bulk != lastLoggedBulk) || reads.intFlags || r.rawDelta;
         const bool pollHeartbeat = (nowMs - lastPollLogMs) >= POLL_LOG_HEARTBEAT_MS;
         if (pollChanged || pollHeartbeat) {
-          DEBUG_ANO_ENCODER_POLLINGF("[ANO_POLL] bulk=0x%08lX btns=0x%02lX encPos=%ld readOk=%d valid=%d%s",
-                                     (unsigned long)bulk, (unsigned long)btns,
-                                     (long)encPos, readOk ? 1 : 0, dataValid ? 1 : 0,
+          DEBUG_ANO_ENCODER_POLLINGF("[ANO_POLL] bulk=0x%08lX flags=0x%08lX delta=%ld readOk=%d valid=%d%s",
+                                     (unsigned long)reads.bulk, (unsigned long)reads.intFlags,
+                                     (long)reads.delta, readOk ? 1 : 0, r.buttonsValid ? 1 : 0,
                                      pollChanged ? "" : " (hb)");
-          lastLoggedBulk = bulk;
-          lastLoggedEncPos = encPos;
+          lastLoggedBulk = reads.bulk;
           lastPollLogMs = nowMs;
         }
 
-        if (readOk && dataValid) {
+        // Turns read off the chip count even when a button part failed.
+        position += r.rawDelta;
+        if (r.rawDelta != 0) {
+          DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] rotate raw=%ld -> detent=%ld (invert=%d) pos=%ld",
+                                    (long)r.rawDelta, (long)r.detents,
+                                    gSettings.anoEncoderInvert ? 1 : 0, (long)position);
+        }
+
+        if (r.buttonsValid) {
           consecutiveInvalidReads = 0;
-
-          // Edge detection: bits that went 0→1 are new presses.
-          uint32_t newlyPressed = btns & ~prevButtons;
-          uint32_t newlyReleased = prevButtons & ~btns;
-
-          // Log press/release edges (VALUES flag). Empty masks produce no log.
-          if (newlyPressed) {
+          if (r.presses) {
             char nameBuf[48];
-            DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] press   raw=0x%02lX (%s)",
-                                      (unsigned long)newlyPressed,
-                                      anoBtnNames(newlyPressed, nameBuf, sizeof(nameBuf)));
-            // Bus event: PRESS edges only (releases skipped — nav noise).
-            char evName[48];
-            systemEventPost(SYSEVT_BUTTON, anoBtnNames(newlyPressed, evName, sizeof(evName)));
+            DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] press   raw=0x%02lX (%s)", (unsigned long)r.presses,
+                                      anoBtnNames(r.presses, nameBuf, sizeof(nameBuf)));
+            // Bus event: physical presses (taps included); releases are nav noise.
+            systemEventPost(SYSEVT_BUTTON, anoBtnNames(r.presses, nameBuf, sizeof(nameBuf)));
           }
-          if (newlyReleased) {
+          if (r.edges) {
             char nameBuf[48];
-            DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] release raw=0x%02lX (%s)",
-                                      (unsigned long)newlyReleased,
-                                      anoBtnNames(newlyReleased, nameBuf, sizeof(nameBuf)));
+            DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] edges   0x%05lX (%s)", (unsigned long)r.edges,
+                                      anoBtnNames(r.edges, nameBuf, sizeof(nameBuf)));
           }
+        }
 
-          // ----- Chord: RIGHT held + IN press → synthesize START -----
-          // Earlier revisions also used RIGHT-tap to toggle the rotary axis,
-          // and stripped RIGHT from the latched newlyPressed because it was
-          // "just a modifier." Both of those made the RIGHT button unusable
-          // as a normal directional input — every press silently mutated
-          // wheel behavior and never reached the menu nav pipeline. Modes
-          // that need horizontal axis call anoEncoderResetAxisForMode() at
-          // entry; the user shouldn't have to discover a hidden gesture.
-          //
-          // The chord stays because RIGHT+IN is unusual enough that users
-          // won't trigger it accidentally, and it preserves START button
-          // access (system menu / data-source toggle) on a 5-button device.
-          bool rightHeldNow = (btns & ANO_BTN_RIGHT) != 0;
-          if (rightHeldNow && (newlyPressed & ANO_BTN_IN)) {
-            // Convert IN-press into START. Drop the IN bit (so it doesn't
-            // also count as a regular IN-press) and add the virtual bit.
-            newlyPressed &= ~ANO_BTN_IN;
-            newlyPressed |= ANO_VIRT_START;
-            DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] chord RIGHT+IN → synthesize START");
-          }
-          prevRightHeld = rightHeldNow;
-          (void)rightHadChord;  // retained for binary compatibility; no longer used
-
-          // ----- Encoder delta accumulation -----
-          int32_t rawDelta = encPos - prevEncoderPos;
-          prevEncoderPos = encPos;
-          int32_t detentDelta = rawDelta;
-          // Respect optional inversion (some users mount the encoder backwards).
-          if (gSettings.anoEncoderInvert) detentDelta = -detentDelta;
-
-          // Log rotation events with raw + inverted delta + final value (VALUES).
-          if (rawDelta != 0) {
-            DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] rotate raw=%ld → detent=%ld (invert=%d) pos=%ld",
-                                      (long)rawDelta, (long)detentDelta,
-                                      gSettings.anoEncoderInvert ? 1 : 0, (long)encPos);
-          }
-
-          // ----- Publish to native ANO cache -----
+        if (r.buttonsValid || r.detents != 0) {
+          // ----- Native ANO reading -----
           {
             SensorCacheGuard g(sAnoCacheMutex, pdMS_TO_TICKS(50), "ano.pollWrite");
             if (g.held) {
-              bool changed = (sAnoEncoderCache.buttons != btns) ||
-                             (detentDelta != 0);
-              uint32_t prevAccum = sAnoEncoderCache.buttonPressedAccum;
-              int32_t  prevPendingDetents = sAnoEncoderCache.encoderDelta;
-              sAnoEncoderCache.buttons = btns;
-              sAnoEncoderCache.buttonPressedAccum |= newlyPressed;
-              sAnoEncoderCache.encoderPosition = encPos;
-              sAnoEncoderCache.encoderDelta += detentDelta;
+              const bool changed = (sAnoEncoderCache.buttons != r.buttons) || (r.detents != 0);
+              sAnoEncoderCache.buttons = r.buttons;
+              sAnoEncoderCache.encoderPosition = position;
+              sAnoEncoderCache.encoderDelta += r.detents;
               sAnoEncoderCache.lastUpdate = nowMs;
-              sAnoEncoderCache.dataValid = true;
+              sAnoEncoderCache.dataValid = sAnoEncoderCache.dataValid || r.buttonsValid;
               if (changed) sAnoEncoderCache.seq++;
-              // Log cache mutations (VALUES). Only on actual change to avoid noise.
-              if (changed) {
-                DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] cache  buttons=0x%02lX accum=0x%02lX→0x%02lX pendingDetents=%ld→%ld seq=%lu",
-                                          (unsigned long)btns,
-                                          (unsigned long)prevAccum,
-                                          (unsigned long)sAnoEncoderCache.buttonPressedAccum,
-                                          (long)prevPendingDetents,
-                                          (long)sAnoEncoderCache.encoderDelta,
-                                          (unsigned long)sAnoEncoderCache.seq);
-              }
             }
           }
 
-          // ----- Publish to gamepad-shaped proxy cache for the OLED -----
-          // Active-low: gamepad code does `~buttons` to get active-high pressed
-          // state. We store ~btns so the inversion yields the ANO_BTN_* bits.
-          // Joystick X/Y stay at CENTER — encoder→nav-event happens via the
-          // ANO-specific branch in processOledInput, not joystick math.
-          inputPublishState(~btns, JOYSTICK_CENTER, JOYSTICK_CENTER,
-                            newlyPressed, (btns != prevButtons) || (detentDelta != 0), nowMs);
+          // ----- Gamepad-shaped proxy for the OLED -----
+          // Active-low like the gamepad: the physical buttons (~buttons), so
+          // the sensor log and the G2 page see RIGHT and the chord's IN. The
+          // navigation hides r.navHidden itself (RIGHT, whose SELECT comes at
+          // release, and the chord's IN), published under the same lock. The
+          // edges carry the presses, taps, START and SELECT. Joystick X/Y stay
+          // at CENTER: the wheel reaches the OLED as detents, not joystick math.
+          inputPublishState(~r.buttons, JOYSTICK_CENTER, JOYSTICK_CENTER, r.edges,
+                            r.edges != 0 || r.presses != 0 || r.detents != 0, nowMs,
+                            r.navHidden);
+        }
 
-          prevButtons = btns;
-        } else if (!readOk) {
-          uint8_t errors = i2cGetConsecutiveErrors(anoI2cAddr(),
-                                                   (uint8_t)gSettings.inputBus);
+        if (!readOk) {
+          uint8_t errors = i2cGetConsecutiveErrors(addr, bus);
           WARN_ANO_ENCODERF("[ANO_TASK] I2C read failure (consecutive: %u)", errors);
-          if (i2cShouldAutoDisable(anoI2cAddr(), (uint8_t)gSettings.inputBus)) {
+          if (i2cShouldAutoDisable(addr, bus)) {
             ERROR_ANO_ENCODERF("[ANO_TASK] Too many failures - auto-disabling");
             noteSensorAutoDisabled(I2C_DEVICE_INPUT);  // before the stop: see System_I2C.h
             requestSensorStop(I2C_DEVICE_INPUT);
@@ -684,7 +648,8 @@ void inputTask(void* parameter) {
             { char det[24]; snprintf(det, sizeof(det), "%u I2C errors", errors);
               systemEventPost(SYSEVT_SENSOR_FAULT, "ANO", det); }
           }
-        } else {
+        } else if (!r.buttonsValid) {
+          // Read fine, but all five switches pressed: a bus held low.
           consecutiveInvalidReads++;
           if (consecutiveInvalidReads >= INVALID_READ_AUTO_DISABLE_THRESHOLD) {
             ERROR_ANO_ENCODERF("[ANO_TASK] %u invalid reads - auto-disabling", consecutiveInvalidReads);

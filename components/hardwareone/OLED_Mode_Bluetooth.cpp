@@ -487,7 +487,8 @@ static bool bluetoothInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newly
         break;
 #endif
       case BT_ACT_ADVERTISING:  // the rows' console view (sBtShown)
-        if (sBtShown.consoleView.up) executeOledCommand("bleadv toggle");
+        // The row has no on/off state: toast what the toggle did.
+        if (sBtShown.consoleView.up) executeOledCommandShowResult("bleadv toggle");
         break;
       case BT_ACT_DISCONNECT:
         if (sBtShown.consoleView.clients) executeOledCommand("bledisconnect");
@@ -581,7 +582,7 @@ static bool g2InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         if (!isG2Connected()) executeOledCommand("openg2");
         break;
       case G2_ACT_RECONNECT:  // the saved pair, as the glasses' "Reconnect G2"
-        executeOledCommand("openg2 saved");
+        executeOledCommandShowResult("openg2 saved");  // the rows may not change: toast it
         break;
       case G2_ACT_DISCONNECT:
         if (isG2Connected()) executeOledCommand("closeg2");
@@ -756,7 +757,7 @@ static bool r1InputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPressed
         }
         break;
       case R1_ACT_RECONNECT:  // as the glasses' "Reconnect Ring"
-        executeOledCommand("openring reconnect");
+        executeOledCommandShowResult("openring reconnect");  // the rows may not change: toast it
         break;
       case R1_ACT_DISCONNECT:  // async, admin-gated
         if (g2RingIsConnected()) executeOledCommand("closering");

@@ -144,6 +144,11 @@ struct Display {
 static Display* oledDisplay=&display;
 void oledDrawIcon(int x,int y,const char* icon,int size) { callbackAllowed(); display.text+="[icon:"+std::string(icon)+":"+std::to_string(x)+","+std::to_string(y)+","+std::to_string(size)+"]"; }
 void oledDrawLevelBars(int x,int y,int level,int max,int height) { callbackAllowed(); display.text+="[bars:"+std::to_string(x)+","+std::to_string(y)+","+std::to_string(level)+","+std::to_string(max)+","+std::to_string(height)+"]"; }
+// The tune row's own wanted frequency (OLED_ValueScroll.h, OLED background
+// commands step 2): no tune step leads here, so the screen shows the tuner's.
+struct OledValueScroll {};
+[[maybe_unused]] static OledValueScroll sFmTuneScroll;
+[[maybe_unused]] static int32_t oledValueScrollShown(OledValueScroll&, int32_t device) { callbackAllowed(); return device; }
 
 // INSERT_FUNCTIONS
 

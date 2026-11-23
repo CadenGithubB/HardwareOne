@@ -575,7 +575,7 @@ def cmd_reference(args) -> int:
 # ============================================================================
 
 CALL_RE = re.compile(
-    r'\b(executeCommand|executeOledCommand|executeCommandForUser'
+    r'\b(executeCommand|executeOledCommand|executeOledCommandShowResult|executeCommandForUser'
     r'|submitAndExecuteSync|enqueueCommand|runCommand|oledRunCommand'
     r'|oledRunCommandAsync|executeOledCommandWithResult|executeCommandThroughRegistry'
     r'|runUnifiedSystemCommand|executeUnifiedWebCommand|executeInternalStatusCommand'

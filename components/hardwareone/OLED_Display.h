@@ -202,6 +202,14 @@ typedef bool (*OledInputFunc)(int deltaX, int deltaY, uint32_t newlyPressed);  /
 // — the single place that owns "what happens when this mode is entered", instead
 // of scattering resets across cmd_oledmode / the menu-select path.
 typedef void (*OledModeEnterFunc)(bool isForward);
+// Optional per-mode header hook. oledRenderHeader fills an OledHeaderSpec
+// (OLED_HeaderCore.h) with the default title (the mode name, or the menu,
+// settings and file breadcrumbs) and hands it to the mode, which may set its
+// own title (prefix/text/cut, or format into spec.buf), a short context such
+// as a page counter ("3/12", dropped first when the bar is full) or hide the
+// Power, Notify or Context item. nullptr = the defaults.
+struct OledHeaderSpec;
+typedef void (*OledHeaderFunc)(OledHeaderSpec& spec);
 
 // OLED Mode Entry - defines a display mode that can be registered from any module
 struct OledModeEntry {
@@ -217,6 +225,8 @@ struct OledModeEntry {
   const char* hints;          // Footer hints string (nullptr = use central switch fallback)
   OledModeEnterFunc onEnterFunc;  // Optional entry hook (nullptr = none). Trailing field:
                                   // existing 9-field initializers value-initialize it to nullptr.
+  OledHeaderFunc headerFunc;      // Optional header hook (nullptr = defaults). Trailing field,
+                                  // value-initialized to nullptr by shorter initializers.
 };
 
 // Maximum number of OLED modes that can be registered

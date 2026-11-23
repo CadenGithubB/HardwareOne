@@ -113,6 +113,7 @@ const char* cmd_wifiscan(const String& command);
 const char* cmd_wifitxpower(const String& originalCmd);
 const char* cmd_wifigettxpower(const String& argsInput);
 const char* cmd_wifiautoreconnect(const String& originalCmd);
+const char* cmd_wifiexternalantenna(const String& originalCmd);
 
 // WiFi Helper Functions
 bool ensureWifiInitialized();
@@ -172,6 +173,12 @@ uint32_t wifiBootConnectBudgetMs();
 
 void setupWifi();
 void setupWifi(uint32_t budgetMs, WifiConnectOrigin origin);
+
+// Boards with a software RF switch (WIFI_ANTENNA_SWITCH_PIN): whether there is
+// one, and select the antenna from gSettings.wifiExternalAntenna. Applied once
+// at boot, after the settings load and before the radio starts.
+bool wifiHasAntennaSwitch();
+void wifiApplyAntennaSelection();
 
 // Single source of truth for WiFi radio state, so every surface reports the same
 // thing. CONNECTED = associated to an AP; UP_FOR_ESPNOW = radio on but STA
@@ -234,6 +241,7 @@ inline bool wifiRadioForcedOff() { return false; }
 inline bool wifiConsoleTypeaheadPop(char&) { return false; }
 inline const char* cmd_wifitxpower(const String&) { return "WiFi disabled"; }
 inline const char* cmd_wifiautoreconnect(const String&) { return "WiFi disabled"; }
+inline const char* cmd_wifiexternalantenna(const String&) { return "WiFi disabled"; }
 
 class WiFiClass {
 public:

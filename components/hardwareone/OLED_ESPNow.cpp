@@ -1137,7 +1137,7 @@ bool oledEspNowHandleInput(int deltaX, int deltaY, uint32_t newlyPressed) {
             char cmd[48];
             snprintf(cmd, sizeof(cmd), "espnowpairrequest " MAC_FMT,
                      MAC_ARGS(mac));
-            executeOledCommand(cmd);   // waits for the other device to Accept
+            executeOledCommandShowResult(cmd);   // the other device must Accept: toast "sent"
           }
           oledMarkDirty();
           return true;
@@ -2390,7 +2390,10 @@ void oledEspNowApplySettingsEdit(const String& value) {
       break;
   }
   if (cmd.length() > 0) {
-    executeOledCommand(cmd);
+    // The list shows each value, except the passphrase ("****"): its success
+    // is the toast.
+    if (gOledEspNowState.settingsEditField == 6) executeOledCommandShowResult(cmd);
+    else executeOledCommand(cmd);
   }
   gOledEspNowState.settingsEditField = -1;
 }

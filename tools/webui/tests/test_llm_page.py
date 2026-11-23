@@ -163,6 +163,9 @@ class LlmPageExtractionTests(unittest.TestCase):
         declared = set(declared_element_ids(PAGE))
         page_js, _ = extract_js.page_js(PAGE)
         requested = set(re.findall(r"""(?:getElementById|hw\.\$)\(['"]([A-Za-z0-9_-]+)['"]\)""", page_js))
+        # Load and Unload are reached by their onclick only (every account sees
+        # them since 2026-11-21); the harness still finds them by id.
+        requested |= {"qa-load-btn", "qa-unload-btn"}
         self.assertTrue(declared, "no element ids found in the page markup")
         self.assertEqual(
             set(),

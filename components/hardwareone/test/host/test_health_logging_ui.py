@@ -114,6 +114,8 @@ def generated(component: Path = COMPONENT, source_dir: Path | None = None,
                   # once through the same reply-to-toast path.
                   "[[maybe_unused]] static void executeOledCommand(const String& line) "
                   "{ (void)oledRunCommand(line); }",
+                  "[[maybe_unused]] static void executeOledCommandShowResult(const String& line) "
+                  "{ (void)oledRunCommand(line); }",
                   *optional(oled, "static void healthRunCommand("),
                   extract_block(oled, "static bool healthInputHandler(")]
     production.append("namespace disabled {\n" + extract_block(

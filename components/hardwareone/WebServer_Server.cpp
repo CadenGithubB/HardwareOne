@@ -59,6 +59,7 @@
 #include "System_EventCatalogJson.h"  // shared event-kind JSON output adapter
 #include "System_UartLink.h"       // exact UART login-generation publication
 #include "WebServer_Utils.h"
+#include "WebServer_GuestSettingsView.h"  // guestview::reduceSettingsForGuest
 #include "WebAssets.h"
 #include "WebServer_Server.h"
 #include "WebPage_Automations.h"
@@ -2250,8 +2251,11 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   // free-space figure wraps above 4 GiB and "free * 9" wraps above ~477 MiB.
   // Estimate actual file size from content length (remove ~33% base64 + URL-encoding overhead)
   const uint64_t estimatedFileSize = rawBody ? (uint64_t)contentLen : ((uint64_t)contentLen * 3) / 4;
-  // Dynamic limit: 90% of free space (leave headroom for filesystem metadata)
-  const uint64_t maxFileSize = (freeBytes64 * 9) / 10;
+  // FILE-3: on LittleFS an upload may use only what is free above the shared
+  // reserve (VFS::logReserveBytes, 100 KB) that settings, accounts and
+  // automations are saved in. A card keeps no reserve: its whole free figure.
+  const uint64_t reserve64 = uploadStorage == VFS::SDCARD ? 0 : (uint64_t)VFS::logReserveBytes();
+  const uint64_t maxFileSize = freeBytes64 > reserve64 ? freeBytes64 - reserve64 : 0;
 
   DEBUG_STORAGEF("[handleFileUpload] Content-Length: %u bytes (est file: %llu), free space: %llu, max: %llu, heap=%u",
                  (unsigned)contentLen, (unsigned long long)estimatedFileSize, (unsigned long long)freeBytes64,
@@ -2264,7 +2268,7 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
     char errBuf[128];
     snprintf(errBuf, sizeof(errBuf),
              "{\"success\":false,\"error\":\"File too large (~%.1fMB). Free: %.1fMB\"}",
-             estimatedFileSize / (1024.0 * 1024.0), freeBytes64 / (1024.0 * 1024.0));
+             estimatedFileSize / (1024.0 * 1024.0), maxFileSize / (1024.0 * 1024.0));  // usable: above the reserve
     httpd_resp_send(req, errBuf, HTTPD_RESP_USE_STRLEN);
     return ESP_OK;
   }
@@ -2300,8 +2304,8 @@ esp_err_t handleFileUpload(httpd_req_t* req) {
   size_t outLen = 0;
   size_t totalWritten = 0;
 
-  // Track free space to abort if we exceed available FS space (already computed above)
-  const uint64_t freeLimit = freeBytes64;
+  // Abort once the body passes what the admission allowed (above the reserve).
+  const uint64_t freeLimit = maxFileSize;
   bool outOfSpace = false;
 
   // No filesystem lock is held across the network receive: a slow or stalled
@@ -2880,8 +2884,13 @@ esp_err_t handleSettingsGet(httpd_req_t* req) {
   // (System_User.cpp), so these two lines called the same function twice for the
   // same user — a second full roster read for an integer already in hand.
   const int ctxRank = userAccountRank(ctx.user);
-  user["isGuest"] = (ctx.user.length() > 0 && ctxRank == kRoleRankGuest);
+  const bool ctxIsGuest = (ctx.user.length() > 0 && ctxRank == kRoleRankGuest);
+  user["isGuest"] = ctxIsGuest;
   user["roleRank"] = ctxRank;
+  // The guest's reduced view (owner, guest privacy 4): no saved Wi-Fi
+  // networks, MQTT broker host or user name, or LLM gateway address
+  // (WebServer_GuestSettingsView.h).
+  if (ctxIsGuest) guestview::reduceSettingsForGuest(settings);
   
   // Add features
   JsonObject features = response["features"].to<JsonObject>();
@@ -3186,6 +3195,24 @@ esp_err_t handleLogs(httpd_req_t* req) {
       return ESP_OK;
     }
   }
+  // The page sends ?since=<seq> with the change counter of the text it shows
+  // (the X-HW1-Log-Seq header of its last full reply). When the mirror has not
+  // changed since, the reply is 204 with no body instead of the whole mirror.
+  // The peek reads one aligned word without the lock: a change that lands
+  // just after it is caught by the next poll.
+  {
+    char query[32];
+    char sinceText[16];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "since", sinceText, sizeof(sinceText)) == ESP_OK) {
+      const uint32_t since = (uint32_t)strtoul(sinceText, nullptr, 10);
+      if (since != 0 && since == gWebMirror.seq) {
+        httpd_resp_set_status(req, "204 No Content");
+        httpd_resp_send(req, nullptr, 0);
+        return ESP_OK;
+      }
+    }
+  }
   // Use zero-copy snapshotTo() to avoid String allocation on every poll (500ms).
   // The response buffer is made once and kept for the next poll: every handler
   // runs on the one httpd task, so it has one user at a time, and
@@ -3211,8 +3238,14 @@ esp_err_t handleLogs(httpd_req_t* req) {
     httpd_resp_sendstr(req, "[ERROR] Memory allocation failed");
     return ESP_OK;
   }
-  size_t copied = gWebMirror.snapshotTo(responseBuf, responseCap);
-  DEBUG_HTTPF("[LOGS_DEBUG] Sending %zu bytes, seq=%lu", copied, gWebMirrorSeq);
+  uint32_t sentSeq = 0;
+  size_t copied = gWebMirror.snapshotTo(responseBuf, responseCap, &sentSeq);
+  char seqText[12];
+  if (sentSeq != 0) {
+    snprintf(seqText, sizeof(seqText), "%lu", (unsigned long)sentSeq);
+    httpd_resp_set_hdr(req, "X-HW1-Log-Seq", seqText);
+  }
+  DEBUG_HTTPF("[LOGS_DEBUG] Sending %zu bytes, seq=%lu", copied, (unsigned long)sentSeq);
   httpd_resp_send(req, responseBuf, copied);
   if (responseBuf != sLogsResponseBuf) free(responseBuf);
   DEBUG_HTTPF("[LOGS_DEBUG] Response sent");
@@ -3457,6 +3490,9 @@ static esp_err_t handleLoggingStatus(httpd_req_t* req) {
   results.add(timeBuf);
   results.add(sensorBuf);
   results.add(logBuf);
+  // FILE-5: a card is in, so the Log Viewer offers its copy of the log
+  // folders (logs move there when flash runs low).
+  doc["sd"] = VFS::isSdAvailable();
   // The saved System Logging options, so the Configuration pane opens on
   // them: tags, and the categories the next plain `log start` uses. Admin
   // only, like /api/debug/flags that renders the category grid.

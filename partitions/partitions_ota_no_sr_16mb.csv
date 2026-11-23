@@ -4,8 +4,8 @@
 #
 # factory:  golden pure-IDF recovery updater (1336 KiB)
 # otadata:  two-sector ESP-IDF OTA selection journal
-# ota_0:    HardwareOne application (5760 KiB)
-# littlefs: user/system data (9216 KiB)
+# ota_0:    HardwareOne application (6272 KiB)
+# littlefs: user/system data (8704 KiB)
 #
 # 2026-08-16: ota_0 grown +512K (0x80000) at littlefs's expense to restore
 #             app-partition headroom (was ~2% free). 512K not 500K: app partition

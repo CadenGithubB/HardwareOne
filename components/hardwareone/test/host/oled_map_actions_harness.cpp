@@ -361,6 +361,7 @@ static void requestOledMode(OledMode mode, const char*, bool = true, bool = fals
 }
 static std::vector<std::string> commands;
 static void executeOledCommand(const String& line) { commands.emplace_back(line.c_str()); }
+[[maybe_unused]] static void executeOledCommandShowResult(const String& line) { executeOledCommand(line); }
 static bool executeOledCommandWithResult(const String& line, char* out, size_t length) {
   commands.emplace_back(line.c_str());
   std::snprintf(out, length, "%s", "OK: GPS track cleared");
@@ -686,7 +687,7 @@ static bool frame(uint32_t pressed, int wheel = 0, int stickX = 0, int stickY = 
   if (pressed & ANO_BTN_UP) gNavEvents.up = true;
   if (pressed & ANO_BTN_DOWN) gNavEvents.down = true;
   if (pressed & ANO_BTN_LEFT) gNavEvents.left = true;
-  if (pressed & ANO_BTN_RIGHT) gNavEvents.right = true;
+  // RIGHT is no direction on the ANO: its only edge is SELECT at release.
 #endif
   if (navDue) {
     if (stickX > JOYSTICK_DEADZONE) gNavEvents.right = true;
@@ -801,8 +802,10 @@ static void caseViewerInput() {
   frame(0, 0, -kStick, 0);
   EXPECT(gFeaturesCategory == 0, "stick left shows the previous feature category");
 #elif MAP_TEST_DEVICE == MAP_TEST_ANO
+  // RIGHT is SELECT only (owner decision 2026-11-22): no right step, so the
+  // category stays (a RIGHT tap opens Quick Settings, as it did before).
   frame(ANO_BTN_RIGHT);
-  EXPECT(gFeaturesCategory == 1, "the ANO dpad RIGHT shows the next feature category");
+  EXPECT(gFeaturesCategory == 0, "the ANO's RIGHT is no right step");
 #endif
   press(INPUT_BUTTON_B);
   EXPECT(!gShowFeatures && !gMapMenuOpen, "B closes the features viewer");

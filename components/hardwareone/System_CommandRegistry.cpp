@@ -354,16 +354,19 @@ static constexpr CommandModule gCommandModules[] = {
     "input device is compiled in per firmware (see input).", gamepadCommands,      &gamepadCommandsCount, CMD_MODULE_SENSOR, []() { return gInputConnected; } },
 #endif
 #if ENABLE_ANO_ENCODER
-  { "anoencoder", "ANO rotary encoder — debug + driver-specific config", "Adafruit ANO directional navigation rotary encoder on Seesaw I2C: a click wheel "
+  { "anoencoder", "ANO rotary encoder — status, reading and driver settings", "Adafruit ANO directional navigation rotary encoder (5740) on seesaw I2C: a click wheel "
     "with a center IN press and UP/DOWN/LEFT/RIGHT buttons, used as the OLED navigation "
-    "input. This module provides debug and remap commands; the actual "
-    "open/close/autostart/poll lifecycle lives under the input module. anoencoderread "
-    "dumps raw state -- encoder position, the currently selected rotary axis, and the "
-    "button bitmask. Remap commands persist to settings: anoencoderi2caddr <1-127> "
-    "changes the device address (reboot required), anoencoderinvert [on|off] reverses "
-    "rotation direction, and anoencoderswapud / anoencoderswaplr [on|off|toggle] swap "
-    "the UP/DOWN and LEFT/RIGHT button pairs. A polling task accumulates encoder "
-    "detents so fast spins do not drop clicks. Mutually exclusive at build time with "
+    "input. The wheel scrolls up and down; IN is A, LEFT is B, DOWN is X, UP is Y, a RIGHT "
+    "tap is SELECT (sent when RIGHT is released) and RIGHT held with IN is START. The "
+    "open/close/autostart/poll lifecycle lives under the input module and the bus is set "
+    "with inputbus. anoencoderstatus [json] shows the bus, address, settings and whether it "
+    "is open; anoencoderread [json] gives the wheel position and buttons. "
+    "anoencoderi2caddr <0x49..0x50> sets the address (A0-A2 jumpers; refused when another "
+    "device of this build uses it on the input bus; applies at the next openinput), "
+    "anoencoderinvert [on|off] reverses rotation, and anoencoderswapud / anoencoderswaplr "
+    "[on|off|toggle] swap the UP/DOWN and LEFT/RIGHT button pairs. The polling task reads "
+    "the buttons, the seesaw's change flags (so taps shorter than one poll are kept) and the "
+    "wheel's detents in one checked transaction. Mutually exclusive at build time with "
     "the Seesaw gamepad.", anoEncoderCommands, &anoEncoderCommandsCount, CMD_MODULE_SENSOR, []() { return gAnoEncoderConnected; } },
 #endif
 #if ENABLE_APDS_SENSOR

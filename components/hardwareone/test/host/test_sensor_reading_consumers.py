@@ -50,6 +50,9 @@ def generate(component, baseline):
 }}''')
         if chip in ('seesaw', 'ano_encoder'):
             text = (component / f'i2csensor_{chip}.h').read_text()
+            core = component / f'i2csensor_{chip}_core.h'
+            if core.exists():  # the ANO's button bits live in its core header
+                text += core.read_text()
             constants += re.findall(r'^#define (?:GAMEPAD_BUTTON_\w+|ANO_\w+) +[^\\\n]*$', text, re.M)
     g2 = (component / 'G2_Page_Sensors.cpp').read_text()
     constants.append(re.search(r'static const char\* kRtcDow\[8\] = \{.*?\};', g2, re.S)[0])

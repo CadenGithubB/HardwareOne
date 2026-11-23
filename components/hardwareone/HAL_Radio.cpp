@@ -28,6 +28,7 @@
 #include "freertos/task.h"
 #include "Radio_CompanionCore.h"
 #include "System_RadioLogCore.h"
+#include "System_BootDebug.h"  // bootDebugEspLogSet: the boot capture records tag levels
 
 // ESP-Hosted 2.12.13 host/drivers/transport/transport_drv.{h,c} (external
 // linkage, but not in the component's public include dirs).
@@ -206,7 +207,7 @@ void quietHostedLogs() {
   // answer, not an event (the ESP-NOW channel check reads it every 15 s).
   for (const radiolog::TagRow& row : radiolog::kTags) {
     if (row.stack == radiolog::Stack::Hosted) {
-      esp_log_level_set(row.tag, static_cast<esp_log_level_t>(radiolog::kQuiet));
+      bootDebugEspLogSet(row.tag, static_cast<esp_log_level_t>(radiolog::kQuiet));
     }
   }
 }
@@ -447,7 +448,7 @@ esp_err_t radioHalPrepare() {
   // here; applySettings (applyRadioStackLogLevels) sets it from the saved
   // flags and esplog levels once the settings have loaded.
 #if defined(RADIO_C6_UART_TX_PIN)
-  esp_log_level_set(radiolog::kC6ConsoleTag, static_cast<esp_log_level_t>(radiolog::kInfo));
+  bootDebugEspLogSet(radiolog::kC6ConsoleTag, static_cast<esp_log_level_t>(radiolog::kInfo));
 #endif
   radioHalConsoleMirror(true);
   esp_err_t err = ESP_FAIL;

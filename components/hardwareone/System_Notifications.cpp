@@ -9,6 +9,7 @@
  */
 
 #include "System_Notifications.h"
+#include "System_StatePaths.h"  // HW1_NOTIFICATIONS_JSON_PATH
 
 #include <Arduino.h>
 #include <atomic>
@@ -159,10 +160,23 @@ static NotifRule notifDefaultRuleFor(uint8_t kind) {
     // in 10 minutes. heap_low is posted once per low episode with a 60 s
     // cooldown of its own (System_HeapLowCore.h); a device that hovers at the
     // line would otherwise interrupt every minute. fs_low_space is posted once
-    // per boot, so its cooldown never bites. No OLED banner: the row in the
+    // per low episode (the log-overflow latch trips again only after space came
+    // back a reserve above the trip level). No OLED banner: the row in the
     // notification centre is the local record.
     case SYSEVT_HEAP_LOW:             return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 2, 3000, 600000};
     case SYSEVT_FS_LOW_SPACE:         return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 2, 3000, 600000};
+    // EVT-2 (owner: "toast, rate-limited"): faults that used to be event-only.
+    // A queue row for every post, a toast at most once per cooldown. No OLED
+    // banner. sd_write_failed is posted once per failure episode (the card is
+    // then marked unwritable), settings_save_failed on each failed save and
+    // each retry; sensor_fault once per sensor before it is switched off; wifi_connect_failed once per network a join or a rehunt
+    // tried (a rehunt keeps trying, hence 10 minutes); g2_disconnected once per
+    // temple and once more when none is left.
+    case SYSEVT_SD_WRITE_FAILED:       return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 3, 3000, 60000};
+    case SYSEVT_SETTINGS_SAVE_FAILED:  return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 3, 3000, 60000};
+    case SYSEVT_SENSOR_FAULT:          return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 2, 3000, 60000};
+    case SYSEVT_WIFI_CONNECT_FAILED:   return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 2, 3000, 600000};
+    case SYSEVT_G2_DISCONNECTED:       return {(uint8_t)(NSINK_QUEUE | NSINK_TOAST), 0, 2500, 30000};
     // QuickNote outcomes: queue-only, never an interrupt. A banner/toast rule
     // would also grant the G2 card sink, which draws a firmware card over HW1's
     // own lens page mid-note. note_started stays event-only.
@@ -194,7 +208,7 @@ static NotifRule notifDefaultRuleFor(uint8_t kind) {
 // persisted form is name-keyed JSON — kind numbers are internal-only and free
 // to move between builds, so the masks are rebuilt from names at boot and on
 // every edit.
-#define NOTIF_POLICY_FILE "/system/notifications.json"
+#define NOTIF_POLICY_FILE HW1_NOTIFICATIONS_JSON_PATH
 
 static volatile uint32_t gNotifOffMask[NOTIF_KIND_MASK_WORDS]   = {0};  // level: off
 static volatile uint32_t gNotifAdminMask[NOTIF_KIND_MASK_WORDS] = {0};  // level: admin
@@ -1042,6 +1056,12 @@ void notifFormatEvent(const SystemEvent& e, char* out, size_t outLen) {
     // function is compiled on its own by host tests.
     case SYSEVT_HEAP_LOW:     snprintf(out, outLen, "Memory low: %s B free", e.subject[0] ? e.subject : "?"); return;
     case SYSEVT_FS_LOW_SPACE: snprintf(out, outLen, "Storage low: %s B free", e.subject[0] ? e.subject : "?"); return;
+    // EVT-2 faults. subject: the failing operation / sensor / SSID / temple.
+    case SYSEVT_SD_WRITE_FAILED:      snprintf(out, outLen, "SD card write failed (%s)", e.subject[0] ? e.subject : "?"); return;
+    case SYSEVT_SETTINGS_SAVE_FAILED: snprintf(out, outLen, "Settings not saved (%s)", e.subject[0] ? e.subject : "?"); return;
+    case SYSEVT_SENSOR_FAULT:         snprintf(out, outLen, "%s fault: switched off", e.subject[0] ? e.subject : "Sensor"); return;
+    case SYSEVT_WIFI_CONNECT_FAILED:  snprintf(out, outLen, "WiFi join failed: %s", e.subject[0] ? e.subject : "network"); return;
+    case SYSEVT_G2_DISCONNECTED:      snprintf(out, outLen, "Glasses off (%s)", e.subject[0] ? e.subject : "?"); return;
     default:
       // Generic fallback for any kind promoted to a visible sink later.
       if (e.subject[0]) snprintf(out, outLen, "%s: %s", systemEventKindName(e.kind), e.subject);

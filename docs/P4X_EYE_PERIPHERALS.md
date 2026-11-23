@@ -127,10 +127,8 @@ in P4 images; every other board compiles it to nothing.
   (the choice is saved). Consequences: the C6's messages from the moment it
   fails, before the P4 has noticed (a crash report included), are not
   captured unless the mirror was already on; what follows, the recovery and
-  any repeat, is. `c6restart` with the mirror on shows a start. A device
-  whose saved settings already hold `c6ConsoleMirror: true` (builds from
-  2026-11-19 stored the old default) keeps the mirror on until
-  `c6console off` is run once. `c6status` shows why it is on ("saved: c6console on", "after a companion fault" or
+  any repeat, is. `c6restart` with the mirror on shows a start. `c6status`
+  shows why it is on ("saved: c6console on", "after a companion fault" or
   "for the boot"). Each line keeps the level the C6 printed it
   with, and a crash report (panic, abort, assert, stack overflow, brownout, a
   failed `ESP_ERROR_CHECK` with its file and expression, heap corruption, a

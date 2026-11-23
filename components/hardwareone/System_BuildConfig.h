@@ -1454,6 +1454,17 @@
   // Boards without a software-switchable I2C2 rail leave this at -1.
   #define I2C2_POWER_PIN        39
 
+  // Antenna switch — the [D] routes the radio through an Infineon BGS12WN6
+  // SPDT switch (S1) whose CTRL is net RF_CTL_ONBOARD on GPIO41 (MTDI), with
+  // a 100k pull-down (R24). CTRL low = RF1 = the on-board 3D antenna (the
+  // power-on state); CTRL high = RF2 = the u.FL connector. Source: the
+  // FeatherS3[D] P4 schematic (UnexpectedMaker/esp32s3, series_d) and
+  // CircuitPython's ANT_SWITCH = GPIO41. Selected by the wifiExternalAntenna
+  // setting at boot (System_WiFi.cpp). The original FeatherS3 has no switch
+  // and GPIO41 is free there, but the shared variant cannot tell them apart:
+  // the setting is off by default, so an original board never drives it.
+  #define WIFI_ANTENNA_SWITCH_PIN 41
+
   // UART host link — UART0 on the FeatherS3's TX/RX header pins (GPIO43/44).
   // Same electrical link as the XIAO's D6/D7, so the CM5 protocol is
   // bench-testable on this board with a 3.3V USB-UART dongle. Requires the
@@ -1775,6 +1786,12 @@
 // power to anything connected to the vertical STEMMA QT.
 #ifndef I2C2_POWER_PIN
   #define I2C2_POWER_PIN -1
+#endif
+
+// GPIO that selects the external antenna on a board with a software RF
+// switch (high = external), or -1 when the board has none.
+#ifndef WIFI_ANTENNA_SWITCH_PIN
+  #define WIFI_ANTENNA_SWITCH_PIN -1
 #endif
 
 // Default bus for the OLED. On boards where I2C2 has its own software-

@@ -89,7 +89,13 @@ static struct {
   bool thermalAutoStart = false, tofAutoStart = false, imuAutoStart = false, inputAutoStart = false;
   bool gpsAutoStart = false, fmRadioAutoStart = false, apdsAutoStart = false, rtcAutoStart = true;
   bool presenceAutoStart = false;
+  bool i2cEnabled = true;
 } gSettings;
+// The OLED menu's input auto-start (OLED_Utils.cpp tryAutoStartInputForMenu):
+// its connected flag and the RAM-flush resolve of the shared input switch.
+static bool gInputConnected = false;
+enum { RF_INPUT = 3 };
+static bool ramFlushResolve(int, bool intent) { return intent; }
 // The encoder's saved settings of every instance (i2csensor_encoder.h): its
 // start-at-boot switches live here, not in gSettings.
 static EncoderInstanceSettings gEncoderInst[kEncoderMaxInstances];
@@ -110,14 +116,16 @@ static bool& autoStartSetting(I2cDeviceType sensor) {
 // First-time setup state (System_FirstTimeSetup.h).
 enum FirstTimeSetupState { SETUP_NOT_NEEDED = 0, SETUP_REQUIRED = 1, SETUP_IN_PROGRESS = 2, SETUP_COMPLETE = 3 };
 static volatile FirstTimeSetupState gFirstTimeSetupState = SETUP_NOT_NEEDED;
-// RAM-flush boundary: ids numbered as the device types; the resume overlay can
-// override a start-at-boot intent, and "failed, not switched off" marks are kept.
+// RAM-flush boundary: ids numbered as the device types; the resume's device
+// list can override instance 1's start-at-boot intent (here: the cases only
+// set instance 1), and "failed, not switched off" marks are kept.
 using RamFlushFeatureId = int;
 static std::array<int, I2C_DEVICE_COUNT> flushOverride;  // -1 = no overlay, else 0/1
 static std::array<bool, I2C_DEVICE_COUNT> flushFailedMark;
 static RamFlushFeatureId ramFlushIdForDevice(I2cDeviceType sensor) { return static_cast<int>(sensor); }
-static bool ramFlushResolve(RamFlushFeatureId id, bool intent) {
-  return flushOverride[id] < 0 ? intent : flushOverride[id] != 0;
+static bool ramFlushResolveDevice(I2cDeviceType sensor, uint8_t n, bool intent) {
+  if (n != 1 || flushOverride[sensor] < 0) return intent;
+  return flushOverride[sensor] != 0;
 }
 static void ramFlushMarkAutostartFailed(RamFlushFeatureId id) { flushFailedMark[id] = true; }
 static void ramFlushClearAutostartFailed(RamFlushFeatureId id) { flushFailedMark[id] = false; }
@@ -169,9 +177,13 @@ static void sensorStatusBumpWith(const char* cause) { statuses.emplace_back(caus
 static std::vector<std::string> hints;
 static void cliHint(const char* text) { hints.emplace_back(text); }
 struct String {};  // Command handlers only pass it through.
+// The single-instance argument check of the open/close commands
+// (System_I2C.cpp, test_i2c_instance_core): the handlers here get no argument.
+static const char* i2cOpenCloseArgError(I2cDeviceType, const String&, const char*) { return nullptr; }
 #define RETURN_VALID_IF_VALIDATE_CSTR() do {} while (0)
 [[maybe_unused]] static void sensorPresenceChanged(int sensor, bool online) { meshStatuses.emplace_back(sensor, online); }
 static void systemEventPost(int event, const char* name) { events.emplace_back(event, name); }
+static void systemEventPost(int event, const char* name, const char*) { events.emplace_back(event, name); }
 static std::string format(const char* fmt, va_list args) {
   char buffer[1024]; const int n = std::vsnprintf(buffer, sizeof(buffer), fmt, args);
   assert(n >= 0 && n < static_cast<int>(sizeof(buffer))); return buffer;
@@ -184,6 +196,8 @@ static void logSystemEvent(const char*, const char* fmt, ...) {
 }
 template<class... Args> static void debugLog(const char*, Args...) {}
 #define DEBUG_CLIF(...) debugLog(__VA_ARGS__)
+#define ERROR_I2CF(...) debugLog(__VA_ARGS__)
+#define DEBUG_DISPLAYF(...) debugLog(__VA_ARGS__)
 #define INFO_I2C_AUTOSTARTF(...) debugLog(__VA_ARGS__)
 #define DEBUG_MEMORY_STACKF(...) debugLog(__VA_ARGS__)
 #define INFO_MEMORYF(...) debugLog(__VA_ARGS__)
@@ -919,7 +933,43 @@ static void instanceCases() {
 }
 #endif
 
+// Boot autostart queues the input, then the OLED menu is entered before the
+// worker ran: the menu finds the start outstanding and asks for nothing, so
+// there is one start and no start-failed event. Once it runs, a menu entry
+// asks for nothing either.
+static void bootThenMenuCases() {
+  const auto input = I2C_DEVICE_INPUT;
+  { Fixture f; gSettings.inputAutoStart = true; gInputConnected = false;
+    assert(autoStartEnqueue(input, 1));
+    assert(i2cSensorStartOutstanding(input, 1) && f.manager.getQueueDepth() == 1);
+    tryAutoStartInputForMenu();
+    tryAutoStartInputForMenu();
+    assert(f.manager.getQueueDepth() == 1 && statuses.empty());
+    f.worker();
+    assert(starts[input] == 1 && running[input] && !i2cSensorStartOutstanding(input, 1));
+    gInputConnected = true;
+    tryAutoStartInputForMenu();
+    f.worker();
+    assert(starts[input] == 1 && f.manager.getQueueDepth() == 0);
+    assert(eventCount(SYSEVT_SENSOR_STARTED) == 1 && eventCount(SYSEVT_SENSOR_START_FAILED) == 0);
+    gInputConnected = false; }
+  // With no boot start, the menu entry is the one start.
+  { Fixture f; gSettings.inputAutoStart = true; gInputConnected = false;
+    tryAutoStartInputForMenu();
+    assert(f.manager.getQueueDepth() == 1 && statuses.size() == 1 && statuses.back() == "input@menu");
+    tryAutoStartInputForMenu();
+    assert(f.manager.getQueueDepth() == 1);
+    f.worker();
+    assert(starts[input] == 1 && eventCount(SYSEVT_SENSOR_START_FAILED) == 0); }
+  // The switch off: neither path starts it.
+  { Fixture f; gSettings.inputAutoStart = false;
+    tryAutoStartInputForMenu(); f.worker();
+    assert(starts[input] == 0 && f.manager.getQueueDepth() == 0); }
+  gSettings.inputAutoStart = false;
+}
+
 int main() {
+  bootThenMenuCases();
   admissionCases(); hintCases(); workerOutcomeCases(); closeOrderingCases(); cleanupCases();
   noGateCases(); restartCases();
 #ifdef HW1_HOST_I2C_TEST_ENCODER_MAX

@@ -1879,14 +1879,14 @@ const char* cmdOtaAcknowledge(const String& argsInput) {
 #else  // !HW1_OTA_LAYOUT
 
 const char* unavailable(const String&) {
-  return "Error: OTA recovery is unavailable in this build. Rebuild with HW_OTA_LAYOUT=1 on a board in the recovery-OTA registry (feathers3, feathers3_fe, feather_esp32_v2).";
+  return "Error: OTA recovery is unavailable in this build. Rebuild with HW_OTA_LAYOUT=1 on a board in the recovery-OTA registry (feathers3, feathers3_fe, feather_esp32_v2, qtpy_esp32; xiao_s3 through HW_DEPLOYMENT=pocket_assistant/xiao_s3).";
 }
 
 const char* unavailableStatus(const String& argsInput) {
   String args = argsInput;
   args.trim();
   if (args.equalsIgnoreCase("json")) return "{\"v\":1,\"available\":false}";
-  return "OTA recovery is unavailable in this build. Rebuild with HW_OTA_LAYOUT=1 on a board in the recovery-OTA registry (feathers3, feathers3_fe, feather_esp32_v2).";
+  return "OTA recovery is unavailable in this build. Rebuild with HW_OTA_LAYOUT=1 on a board in the recovery-OTA registry (feathers3, feathers3_fe, feather_esp32_v2, qtpy_esp32; xiao_s3 through HW_DEPLOYMENT=pocket_assistant/xiao_s3).";
 }
 
 #endif  // HW1_OTA_LAYOUT

@@ -346,7 +346,11 @@ RtcDateTime rtcLocalTime(const RtcDateTime* utc) {
   RtcDateTime local = *utc;
 
   int offsetMinutes = Clock::tzOffsetMinutes();
-  if (offsetMinutes == 0) return local;  // UTC, nothing to do
+  if (offsetMinutes == 0) {
+    // UTC: the date stands; derive the weekday from it like the shifted path.
+    local.dayOfWeek = rtcDayOfWeek(local.year, local.month, local.day) + 1;
+    return local;
+  }
 
   int totalMinutes = local.hour * 60 + local.minute + offsetMinutes;
 
@@ -835,11 +839,13 @@ const char* cmd_rtcsync(const String& argsInput) {
 
 const char* cmd_rtcstart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_RTC, argsInput, "openrtc")) return error;
   return cmd_sensorstart_queued(I2C_DEVICE_RTC, "RTC", "openrtc@enqueue");
 }
 
 const char* cmd_rtcstop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
+  if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_RTC, argsInput, "closertc")) return error;
   return cmd_sensorstop_queued(I2C_DEVICE_RTC, "RTC");
 }
 
@@ -944,7 +950,7 @@ const char* cmd_rtcautostart(const String& argsInput) {
 // compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
 static const char* cmd_rtcbus(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return i2cSetDeviceBusAndReport(gSettings.rtcBus, a, "rtcBus");
+  return i2cSetDeviceBusAndReport(gSettings.rtcBus, a, "rtcBus", i2cInstanceOwner(I2C_DEVICE_RTC, 1));
 }
 
 const CommandEntry rtcCommands[] = {

@@ -232,7 +232,7 @@ struct GpsTrackManager {
   }
 };
 
-static constexpr int DISPLAY_COLOR_WHITE = 1, OLED_CONTENT_START_Y = 0, OLED_CONTENT_HEIGHT = 54;
+static constexpr int DISPLAY_COLOR_WHITE = 1, OLED_CONTENT_START_Y = 0;
 static std::function<void()> onFirstDraw;
 struct TestDisplay {
   std::vector<std::string> text;
@@ -518,19 +518,20 @@ static void oledStatusTests() {
   onFirstDraw = replaceTrack;
   drawTrackStatus();
   CHECK(statusCalls == before + 1);
+  // The title ("LIVE TRACKING" / "Track Status") is in the header bar and
+  // B:OK is the footer's hint (OLED_Mode_Map.cpp mapHeaderTitle, oledMapFooterHint).
   const std::vector<std::string> expected = {
-    "LIVE TRACKING", "original.csv", "Points: 503", "Dist: 1.20km", "Time: 2:00",
-    "10.0m/s", "Coverage: 75%", "B:OK"};
+    "original.csv", "Points: 503", "Dist: 1.20km", "Time: 2:00",
+    "10.0m/s", "Coverage: 75%"};
   CHECK(display.text == expected);
   CHECK(currentTrack.pointCount == 1);
   onFirstDraw = nullptr;
   currentTrack = {}; display.text.clear();
   drawTrackStatus();
-  CHECK(display.text == std::vector<std::string>({"Track Status", "No track loaded", "B:OK"}));
+  CHECK(display.text == std::vector<std::string>({"No track loaded"}));
   currentTrack.live = true; display.text.clear();
   drawTrackStatus();
-  CHECK(display.text.front() == "LIVE TRACKING");
-  CHECK(display.text[2] == "Points: 0");
+  CHECK(display.text.size() >= 2 && display.text[1] == "Points: 0");
   oledDisplay = nullptr;
   const auto noDisplay = statusCalls;
   drawTrackStatus();

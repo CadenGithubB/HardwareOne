@@ -7634,8 +7634,8 @@ static void v4_send_route_adverts() {
 // the slow work runs on cmd_exec and never stalls RX.
 //
 // Handlers that DEFER today (heavy crypto / FS+JSON): USER_SYNC, SESSION_OPEN,
-// SESSION_CONFIRM, SESSION_REKEY, PAIR_BEACON (auto-pair mutates the device
-// registry), and the FS_LIST / FS_STAT / FS_GET shims (via captureDeferred in
+// SESSION_CONFIRM, SESSION_REKEY, PAIR_BEACON (recording a discovered candidate
+// touches the device registry), and the FS_LIST / FS_STAT / FS_GET shims (via captureDeferred in
 // System_ESPNow_FsList.cpp). (v4h_cmd also "defers" by snapshotting into
 // gEspNow->deferredCmd* and letting the command run off-task; v4h_file_end
 // defers its writer finalize/abort jobs.)
@@ -7743,37 +7743,36 @@ static void pairModeNameFromField(const char (&field)[devicename::kFieldLen], co
   }
 }
 
-// Per-MAC cooldown so a beacon stream (one every ~1.5s) can't flood the 6-deep
-// cmd_exec queue with duplicate auto-pair jobs before the first one completes.
-static uint8_t  gAutoPairSeenMac[4][6] = {};
-static uint32_t gAutoPairSeenAt[4]     = {};
-static const uint32_t AUTOPAIR_COOLDOWN_MS = 8000;
+// Per-MAC cooldown so a beacon stream (one every ~1.5s) refreshes a discovered
+// candidate at most once per window instead of on every beacon.
+static uint8_t  gBeaconSeenMac[4][6] = {};
+static uint32_t gBeaconSeenAt[4]     = {};
+static const uint32_t BEACON_SEEN_COOLDOWN_MS = 8000;
 static bool pairModeRecentlySeen(const uint8_t* mac) {
   uint32_t now = (uint32_t)millis();
   for (int i = 0; i < 4; i++) {
-    if (gAutoPairSeenAt[i] != 0 &&
-        (uint32_t)(now - gAutoPairSeenAt[i]) < AUTOPAIR_COOLDOWN_MS &&
-        memcmp(gAutoPairSeenMac[i], mac, 6) == 0) return true;
+    if (gBeaconSeenAt[i] != 0 &&
+        (uint32_t)(now - gBeaconSeenAt[i]) < BEACON_SEEN_COOLDOWN_MS &&
+        memcmp(gBeaconSeenMac[i], mac, 6) == 0) return true;
   }
   return false;
 }
 static void pairModeMarkSeen(const uint8_t* mac) {
   uint32_t now = (uint32_t)millis();
-  int slot = 0; uint32_t oldest = gAutoPairSeenAt[0];
+  int slot = 0; uint32_t oldest = gBeaconSeenAt[0];
   for (int i = 0; i < 4; i++) {
-    if (gAutoPairSeenAt[i] == 0) { slot = i; break; }
-    if (gAutoPairSeenAt[i] < oldest) { oldest = gAutoPairSeenAt[i]; slot = i; }
+    if (gBeaconSeenAt[i] == 0) { slot = i; break; }
+    if (gBeaconSeenAt[i] < oldest) { oldest = gBeaconSeenAt[i]; slot = i; }
   }
-  memcpy(gAutoPairSeenMac[slot], mac, 6);
-  gAutoPairSeenAt[slot] = (now == 0) ? 1 : now;
+  memcpy(gBeaconSeenMac[slot], mac, 6);
+  gBeaconSeenAt[slot] = (now == 0) ? 1 : now;
 }
 
 // ---------------------------------------------------------------------------
 // Discovered-candidate list (discover-then-confirm pairing)
 // ---------------------------------------------------------------------------
 // A device in discovery mode records every same-mesh peer whose PAIR_BEACON it
-// hears into gEspNow->unpairedDevices[] — it does NOT pair automatically (the
-// old WPS instant auto-pair is removed). The user then explicitly requests a
+// hears into gEspNow->unpairedDevices[] — it does NOT pair by itself. The user then explicitly requests a
 // pair from that list, and the peer being paired with shows an accept screen
 // (Stage 2/3). Entries expire CANDIDATE_TTL_MS after their last beacon; the
 // whole list is cleared when our window closes.
@@ -7838,7 +7837,7 @@ static void addOrUpdateCandidate(const uint8_t* mac, const char* name, int rssi,
 
 // RX handler for PAIR_BEACON. Inline on espnow_task — cheap only; all beacon
 // fields are untrusted. Discover-then-confirm: record the sender as an available
-// candidate; NEVER auto-pair (removed). The recentlySeen throttle bounds how
+// candidate; never pair from a beacon. The recentlySeen throttle bounds how
 // often we refresh a candidate to the flood-guard window.
 static void v4h_pair_beacon(const V4RxCtx& ctx) {
   if (!espnowPairModeActive()) return;              // our discovery window must be open
@@ -7858,7 +7857,7 @@ static void v4h_pair_beacon(const V4RxCtx& ctx) {
 
 // Broadcast one pairing beacon to FF. BROADCAST_AUTH appends a mesh-group-key
 // (passphrase-derived) HMAC so ONLY devices holding the same passphrase can
-// trigger our auto-pair — the handler row is REQ_AUTHENTICATED, so an outsider's
+// list us as a discovered candidate — the handler row is REQ_AUTHENTICATED, so an outsider's
 // forged/plaintext beacon is dropped after one cheap HMAC verify, before it can
 // mutate the device registry. No ACK_REQ (a broadcast would ACK-storm). Fresh
 // msgId each call or dedup eats it.
@@ -8115,7 +8114,7 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // tagged origin against the source before it lets a frame create a slot.
   { ESPNOW_V4_TYPE_HEARTBEAT,        V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED, ESPNOW_V4_MINLEN_HEARTBEAT, v4h_heartbeat         },
   // Discovery beacon carries a mesh-group-key BROADCAST_AUTH HMAC (see sendPairBeacon).
-  // REQ_AUTHENTICATED gates auto-pair to same-passphrase devices so an outsider cannot
+  // REQ_AUTHENTICATED limits discovery to same-passphrase devices so an outsider cannot
   // forge a beacon to pollute our registry. NOT REQ_PAIRED — the sender is unpaired by
   // definition (pairing is what this establishes).
   { ESPNOW_V4_TYPE_PAIR_BEACON,      V4_OPC_FLAG_REQ_AUTHENTICATED, ESPNOW_V4_MINLEN_PAIR_BEACON, v4h_pair_beacon       },
@@ -9432,6 +9431,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
 // Heartbeats (HEARTBEAT / BOND_HEARTBEAT) dominate volume and are skipped by
 // default via gSettings.espnowCaptureSkipHeartbeats. A reasonable session
 // capture stays well under the 16 MB per-file cap even over several hours.
+// UP-13: a file is followed by capture-<bootTs>-part<k>.log, and one boot's
+// capture stops at 256 MB (16 parts), so a capture left on cannot fill the
+// card; turning the setting off and on does not restart it before a reboot.
 //
 // Called from the recv callback (onEspNowRawRecv) and each esp_now_send path.
 
@@ -9456,28 +9458,38 @@ static size_t espnowCaptureBase64(const uint8_t* src, size_t srcLen, char* out, 
 }
 
 // Session-scoped capture file path. Built on first write of each boot.
-// Format: /sd/espnow/capture-<unixBootSeconds>.log
-static String gEspNowCapturePath;
-static size_t gEspNowCaptureWritten = 0;
+// Format: /sd/espnow/capture-<unixBootSeconds>.log, then
+// /sd/espnow/capture-<unixBootSeconds>-part<k>.log. Every name is built from
+// the stamp kept at the first write, never from the previous part's name.
+// All of this state changes only under the filesystem lock (captureEspNowFrame).
+static char   gEspNowCapturePath[48];
+static unsigned long gEspNowCaptureStamp = 0;
+static size_t gEspNowCaptureWritten = 0;   // bytes in the current part
+static size_t gEspNowCaptureTotal   = 0;   // bytes this boot, all parts
 static int    gEspNowCapturePart    = 0;
+static bool   gEspNowCaptureFull    = false;  // the boot's budget is spent
 static constexpr size_t ESPNOW_CAPTURE_MAX_BYTES = 16 * 1024 * 1024;  // 16 MB per file
+static constexpr size_t ESPNOW_CAPTURE_MAX_TOTAL_BYTES = 256u * 1024u * 1024u;  // per boot
 static bool   gEspNowCaptureMkdirTried = false;
 
 static bool ensureCaptureFile(time_t now) {
-  if (!gEspNowCapturePath.length()) {
-    char buf[96];
-    snprintf(buf, sizeof(buf), "/sd/espnow/capture-%lu.log", (unsigned long)now);
-    gEspNowCapturePath = buf;
+  if (gEspNowCaptureFull) return false;
+  if (!gEspNowCapturePath[0]) {
+    gEspNowCaptureStamp = (unsigned long)now;
+    snprintf(gEspNowCapturePath, sizeof(gEspNowCapturePath), "/sd/espnow/capture-%lu.log", gEspNowCaptureStamp);
     gEspNowCaptureWritten = 0;
     gEspNowCapturePart = 0;
   }
+  if (gEspNowCaptureTotal >= ESPNOW_CAPTURE_MAX_TOTAL_BYTES) {
+    gEspNowCaptureFull = true;
+    WARN_ESPNOWF("ESP-NOW capture stopped: %u MB written this boot (the limit); it resumes after a reboot",
+                 (unsigned)(gEspNowCaptureTotal / (1024u * 1024u)));
+    return false;
+  }
   if (gEspNowCaptureWritten >= ESPNOW_CAPTURE_MAX_BYTES) {
     gEspNowCapturePart++;
-    char buf[112];
-    int dot = gEspNowCapturePath.lastIndexOf('.');
-    String stem = (dot > 0) ? gEspNowCapturePath.substring(0, dot) : gEspNowCapturePath;
-    snprintf(buf, sizeof(buf), "%s-part%d.log", stem.c_str(), gEspNowCapturePart);
-    gEspNowCapturePath = buf;
+    snprintf(gEspNowCapturePath, sizeof(gEspNowCapturePath), "/sd/espnow/capture-%lu-part%d.log",
+             gEspNowCaptureStamp, gEspNowCapturePart);
     gEspNowCaptureWritten = 0;
   }
   if (!gEspNowCaptureMkdirTried) {
@@ -9492,7 +9504,7 @@ static bool ensureCaptureFile(time_t now) {
 static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
                                int rssi, const uint8_t* data, int len) {
   if (!gSettings.espnowCaptureToSd) return;
-  if (!VFS::isSdAvailable()) return;
+  if (gEspNowCaptureFull) return;
   if (!data || len < (int)sizeof(EspNowV4Header)) return;
 
   const EspNowV4Header* h = (const EspNowV4Header*)data;
@@ -9510,7 +9522,6 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
 
   time_t now = time(nullptr);
   if (now <= 0) now = (time_t)(millis() / 1000);  // fallback if NTP not synced yet
-  if (!ensureCaptureFile(now)) return;
 
   // Resolve peer name (meta first, paired registry fallback).
   String peerName = peerMac ? getEspNowDeviceName(peerMac) : String();
@@ -9539,13 +9550,18 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
 
   // This runs on the Wi-Fi callback path. Never block radio processing behind
   // an unrelated long FS operation; capture is diagnostic and may drop a line.
+  // UP-13: the try-lock comes first. The card check, the folder and the part
+  // name below take the filesystem lock too, and under it they only re-enter.
   FsLockGuard fsGuard("espnow.capture_append", 0);
   if (!fsGuard.held && !isFsLockedByCurrentTask()) return;
-  File f = VFS::openGuarded(gEspNowCapturePath, "a", VFS::systemAuth(VFS::Scopes::ESPNOW_CAPTURES, "espnow.capture_append"), true);
+  if (!VFS::isSdAvailable()) return;
+  if (!ensureCaptureFile(now)) return;
+  File f = VFS::openGuarded(String(gEspNowCapturePath), "a", VFS::systemAuth(VFS::Scopes::ESPNOW_CAPTURES, "espnow.capture_append"), true);
   if (!f) return;
-  f.write((const uint8_t*)line, (size_t)n);
+  const size_t wrote = f.write((const uint8_t*)line, (size_t)n);
   f.close();
-  gEspNowCaptureWritten += (size_t)n;
+  gEspNowCaptureWritten += wrote;
+  gEspNowCaptureTotal += wrote;
 }
 
 static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* incomingData, int len) {
@@ -9874,40 +9890,13 @@ static void buildDeviceManifest(JsonDocument& doc) {
   // Add sensor connectivity status (which sensors are actually connected vs compiled)
   JsonObject sensorStatus = device["sensorStatus"].to<JsonObject>();
 #if ENABLE_I2C_SYSTEM
-  // connectedDevices[] and connectedDeviceCount are extern'd at file scope
-  // Check which sensors are actually connected
-  bool thermalConnected = false, tofConnected = false, imuConnected = false;
-  bool inputConnected = false, apdsConnected = false, gpsConnected = false;
-  bool rtcConnected = false, presenceConnected = false;
-
-  for (int i = 0; i < connectedDeviceCount; i++) {
-    if (!connectedDevices[i].isConnected) continue;
-    switch (connectedDevices[i].address) {
-      case 0x33: thermalConnected = true; break;  // MLX90640
-      case 0x29: tofConnected = true; break;      // VL53L0X
-      case 0x28: imuConnected = true; break;      // BNO055
-      // Input device: either the Seesaw gamepad (0x50) OR the ANO rotary
-      // encoder (0x49) — they're mutually exclusive at compile time but the
-      // local I2C scanner doesn't know which one is compiled in, so it
-      // accepts either address. Previously only 0x50 was matched, which
-      // made the input-connected flag always read false on ANO builds.
-      case 0x49: inputConnected = true; break;    // ANO Rotary Encoder
-      case 0x50: inputConnected = true; break;    // Seesaw Gamepad
-      case 0x39: apdsConnected = true; break;     // APDS9960
-      case 0x10: gpsConnected = true; break;      // PA1010D
-      case 0x68: rtcConnected = true; break;      // DS3231
-      case 0x61: presenceConnected = true; break; // LD2410
-    }
-  }
-
-  sensorStatus["thermal"] = thermalConnected;
-  sensorStatus["tof"] = tofConnected;
-  sensorStatus["imu"] = imuConnected;
-  sensorStatus["input"] = inputConnected;
-  sensorStatus["apds"] = apdsConnected;
-  sensorStatus["gps"] = gpsConnected;
-  sensorStatus["rtc"] = rtcConnected;
-  sensorStatus["presence"] = presenceConnected;
+  // Which sensors the last bus scan found where this build looks for them:
+  // the device table's rows of each module at their configured bus and
+  // address (isSensorConnected), so a configured address, the input device
+  // of this build and the presence sensor's real address all count.
+  static const char* const kStatusModules[] = {"thermal", "tof", "imu", "input",
+                                               "apds",    "gps", "rtc", "presence"};
+  for (const char* module : kStatusModules) sensorStatus[module] = isSensorConnected(module);
 #endif
   
   // Add fwHash as hex string for cache keying
@@ -13430,8 +13419,8 @@ void processMeshHeartbeats() {
   static const uint32_t HB_INTERVAL_MS = 5000;
   uint32_t now = (uint32_t)millis();
 
-  // 2a. WPS pairing beacon — while a pairing window is open, broadcast a plaintext
-  // FF beacon so same-mesh devices in pairing mode can discover + auto-pair us.
+  // 2a. Pairing beacon — while a pairing window is open, broadcast an FF beacon
+  // (mesh-key HMAC) so same-mesh devices in pairing mode list us as a candidate.
   // Deliberately NOT gated on having peers (the heartbeat below is): this is the
   // open discovery signal a fresh, peer-less device otherwise never emits.
   static const uint32_t PAIR_BEACON_INTERVAL_MS = 1500;
@@ -20998,8 +20987,8 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
   bool devicesOk = saveEspNowDevices();
 
   // Registry pairing is committed (radio peer + name/key saved) — announce it.
-  // Covers manual espnowpairsecure AND the pairing-mode auto-pair path, which
-  // routes through this handler (so the auto-pair site no longer double-posts).
+  // Covers espnowpairsecure, whether typed or picked from the discovered list
+  // (an accepted pair request routes through this handler too).
   systemEventPost(SYSEVT_PEER_PAIRED, deviceName.c_str(), macStr.c_str());
 
   // 2026-05-19 — auto-trigger KEY_EX so "pairsecure" actually delivers a
@@ -23311,7 +23300,7 @@ const char* cmd_espnow_pairmode(const String& argsInput) {
   snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
            "Discovery ON for %lus on channel %u. Open discovery on the other device too "
            "(same mesh, same channel), then run 'espnowdiscovered' to see it and pair. "
-           "Devices no longer auto-pair.",
+           "Pairing always needs a confirmation.",
            (unsigned long)secs, (unsigned)gEspNow->channel);
   return getDebugBuffer();
 }
@@ -23347,7 +23336,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowunpair", "Unpair ESP-NOW device and remove what this device stored about it (crypto identity, bond caches, its cached manifest); unpairing the bond partner ends the bond too: 'espnowunpair <name_or_mac>'.", true, cmd_espnow_unpair, "Usage: espnowunpair <name_or_mac>", /*requiresSuperAdmin=*/true },
   { "espnowforget", "Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.", true, cmd_espnow_forget, "Usage: espnowforget <name_or_mac>", /*requiresSuperAdmin=*/true },
   { "espnowlist", "List all paired ESP-NOW devices.", false, cmd_espnow_list },
-  { "espnowmessages", "Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch.", false, cmd_espnow_messages, "Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]" },
+  { "espnowmessages", "Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch. Admin only: it carries remote command output.", true, cmd_espnow_messages, "Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]" },
   
   // ---- ESP-NOW Mesh Configuration ----
   { "espnowmeshstatus", "Show mesh peer health (heartbeats & ACKs).", false, cmd_espnow_meshstatus },
@@ -23413,9 +23402,9 @@ extern const CommandEntry espNowCommands[] = {
   
 #if ENABLE_BONDED_MODE
   // ---- Bond Mode Commands (1:1 handshake relationship) ----
-  { "bondconnect", "Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)", true, cmd_bond_connect, "Usage: bondconnect <mac_or_name>\n       Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'.\n       The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so.\n       A role chosen with 'bondrole' is kept; else the other than the one the peer's user chose; else the higher address is master.\n       Refused when the peer's session shows its build has no bond mode (espnowsessions caps)." },
+  { "bondconnect", "EXPERIMENTAL in 1.0. Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)", true, cmd_bond_connect, "Usage: bondconnect <mac_or_name>\n       Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'.\n       The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so.\n       A role chosen with 'bondrole' is kept; else the other than the one the peer's user chose; else the higher address is master.\n       Refused when the peer's session shows its build has no bond mode (espnowsessions caps)." },
   { "bonddisconnect", "Disconnect from bonded peer device. The peer is told that the bond ended.", true, cmd_bond_disconnect },
-  { "bondstatus", "Show bond mode status and configuration, with what the peer answered about the bond (Agreement) and whether its data is forwarded to the mesh.", false, cmd_bond_status },
+  { "bondstatus", "EXPERIMENTAL in 1.0. Show bond mode status and configuration, with what the peer answered about the bond (Agreement) and whether its data is forwarded to the mesh.", false, cmd_bond_status },
   { "bondforward", "Bond master: forward the bond partner's readings, battery state and events to the mesh master named on this device: 'bondforward [on|off|sensors <all|default|name,name,...>]'.", true, cmd_bond_forward, "Usage: bondforward [on | off | sensors <all | default | name,name,...>]\n       No argument shows whether the partner's data is forwarded, and why not. Off by default.\n       Only to the master named here, when it is paired in this device's primary mesh. Input is not forwarded unless named.\n       That master may ask for the partner's readings (espnowsensorreq <partner> via <this device> there)." },
   { "bondrole", "Get/choose bond mode role: 'bondrole [master|worker|auto]' (no arg shows the role and whether it was chosen).", true, cmd_bond_role, "Usage: bondrole [master|worker|auto]   (no arg shows the role and how it was decided)\n       master or worker: your choice, kept by bondconnect; a partner whose role is automatic takes the other one.\n       auto: give the choice up (the role stays until the partner chooses or the next bondconnect)." },
   { "bondshowcap", "Show local device capability summary.", false, cmd_bond_showcap },
@@ -23434,7 +23423,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsetpassphrase", "Set encryption passphrase on a mesh: 'espnowsetpassphrase <mesh> <phrase>'.", true, cmd_espnow_setpassphrase, "Usage: espnowsetpassphrase <mesh> <passphrase>\n       espnowsetpassphrase <mesh> clear", /*requiresSuperAdmin=*/true },
   { "espnowencstatus", "Show ESP-NOW encryption status and key fingerprint.", true, cmd_espnow_encstatus },
   { "espnowpairsecure", "Pair device with encryption: 'espnowpairsecure <mac> <name> [mesh]'. (local pair is synchronous; secure channel completes async - see espnowsessions)", true, cmd_espnow_pairsecure, "Usage: espnowpairsecure <mac_address> <device_name> [mesh]\n       Requires a mesh passphrase first - run 'espnowsetpassphrase <mesh> <passphrase>'.\n       The device is added synchronously; KEY_EX then runs asynchronously (~100ms) so the encrypted channel becomes usable shortly after - inspect with 'espnowsessions' / 'espnowencstatus'." },
-  { "espnowpairmode", "Open the discovery window: 'espnowpairmode [seconds|off|status]'. Open on BOTH same-mesh devices, then 'espnowdiscovered' to see + pair. No auto-pair.", true, cmd_espnow_pairmode, "Usage: espnowpairmode [<seconds>|off|status]\n       Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh).\n       While open, the device broadcasts a discovery beacon and RECORDS other same-mesh\n       devices it hears (see 'espnowdiscovered') — it no longer auto-pairs. Pair from the\n       list with 'espnowpairsecure <mac> <name>'." },
+  { "espnowpairmode", "Open the discovery window: 'espnowpairmode [seconds|off|status]'. Open on BOTH same-mesh devices, then 'espnowdiscovered' to see + pair. Nothing pairs by itself.", true, cmd_espnow_pairmode, "Usage: espnowpairmode [<seconds>|off|status]\n       Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh).\n       While open, the device broadcasts a discovery beacon and RECORDS other same-mesh\n       devices it hears (see 'espnowdiscovered'); it does not pair by itself. Pair from the\n       list with 'espnowpairsecure <mac> <name>'." },
   { "espnowdiscovered", "List devices found during discovery: 'espnowdiscovered [clear]'. Pair one with 'espnowpairrequest <mac_or_name>'.", true, cmd_espnow_discovered, "Usage: espnowdiscovered [clear]\n       Lists same-mesh devices heard while your discovery window ('espnowpairmode') is open." },
   { "espnowpairrequest", "Request a pair with a discovered device: 'espnowpairrequest <mac_or_name>'. The other device must Accept.", true, cmd_espnow_pairrequest, "Usage: espnowpairrequest <mac_or_name>  (name/MAC from 'espnowdiscovered')\n       Sends a request; the target shows an Accept prompt (or run 'espnowaccept' there)." },
   { "espnowaccept", "Accept a pending incoming pair request: 'espnowaccept [<mac_or_name>]'.", true, cmd_espnow_accept, "Usage: espnowaccept [<mac_or_name>]  (no arg = the sole pending request)" },
@@ -23460,7 +23449,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowhistorykb", "Message history per peer and direction in KB: [<0-32>] (0 = board default; no argument shows saved and active; reboot required)", true, cmd_espnow_historykb, "Usage: espnowhistorykb [<0..32>]" },
   { "espnowsensorbroadcastinterval", "Set sensor broadcast interval: <100-10000 ms>", true, cmd_espnow_sensorbroadcastinterval, "Usage: espnowsensorbroadcastinterval <100..10000>" },
 #if ENABLE_BONDED_MODE
-  { "espnowbondmodeenabled",         "Enable/disable bond mode: <0|1>", true, cmd_espnow_bondmodeenabled, "Usage: espnowbondmodeenabled <0|1>" },
+  { "espnowbondmodeenabled",         "EXPERIMENTAL in 1.0. Enable/disable bond mode: <0|1>", true, cmd_espnow_bondmodeenabled, "Usage: espnowbondmodeenabled <0|1>" },
   { "espnowbondpeermac",             "Set bond peer MAC address", true, cmd_espnow_bondpeermac, "Usage: espnowbondpeermac <AA:BB:CC:DD:EE:FF>" },
   { "bondstreamthermal",             "Set auto-stream thermal: <0|1>", true, cmd_espnow_bondstreamthermal, "Usage: bondstreamthermal <0|1>" },
   { "bondstreamtof",                 "Set auto-stream ToF: <0|1>", true, cmd_espnow_bondstreamtof, "Usage: bondstreamtof <0|1>" },
@@ -23539,7 +23528,7 @@ static const SettingEntry espnowSettingEntries[] = {
   { "masterFingerprint", SETTING_STRING, &gSettings.espnowMasterFingerprint, 0, 0, "", 0, 0, "Master Fingerprint", nullptr, false, "mesh", "espnowmasterfingerprint" },
   { "backupMasterFingerprint", SETTING_STRING, &gSettings.espnowBackupMasterFingerprint, 0, 0, "", 0, 0, "Backup Master Fingerprint", nullptr, false, "mesh", "espnowbackupfingerprint" },
 #if ENABLE_BONDED_MODE
-  { "bondModeEnabled", SETTING_BOOL, &gSettings.bondModeEnabled, false, 0, nullptr, 0, 1, "Bond Mode Enabled", nullptr, false, "bond", "espnowbondmodeenabled" },
+  { "bondModeEnabled", SETTING_BOOL, &gSettings.bondModeEnabled, false, 0, nullptr, 0, 1, "Bond Mode Enabled (experimental)", nullptr, false, "bond", "espnowbondmodeenabled" },
   { "bondRole", SETTING_U8, &gSettings.bondRole, 0, 0, nullptr, 0, 1, "Bond Role", "0:Worker (compute/network),1:Master (display/gamepad)", false, "bond", "bondrole" },
   // The user chose bondRole (set by 'bondrole master|worker', cleared by
   // 'bondrole auto'; an edit of bondRole goes through bondrole and sets it).

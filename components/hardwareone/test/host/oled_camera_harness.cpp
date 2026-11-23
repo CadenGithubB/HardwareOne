@@ -114,6 +114,7 @@ static Display* oledDisplay=&display;
 static OledMode currentOledMode=OLED_CAMERA;
 using OledDisplayFunc=void(*)();using OledAvailabilityFunc=bool(*)(String*);
 using OledInputFunc=bool(*)(int,int,uint32_t);using OledModeEnterFunc=void(*)(bool);
+struct OledHeaderSpec;using OledHeaderFunc=void(*)(OledHeaderSpec&);
 // INSERT_OLED_ENTRY
 #define REGISTER_OLED_MODE_MODULE(...)
 #define free trackedFree

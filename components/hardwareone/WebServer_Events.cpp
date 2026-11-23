@@ -231,14 +231,21 @@ esp_err_t handleEvents(httpd_req_t* req) {
   if (wantHold) {
     unsigned long holdStart = millis();
     const unsigned long holdMs = 600UL;
-    while ((long)(millis() - holdStart) < (long)holdMs) {
+    // S-7: httpd has one worker, so this request leaves as soon as the queue
+    // is empty instead of holding every other request for the whole 600 ms.
+    // The hold now only paces a queue longer than one batch of 8.
+    bool queueEmpty = false;
+    while (!queueEmpty && (long)(millis() - holdStart) < (long)holdMs) {
       // Flush typed events (e.g., espnow-rx). Each is dequeued under the
       // session lock (bound to this request's sid); the socket write below
       // runs after it is released.
       int evSent = 0;
       while (true) {
         String evName, evData;
-        if (!webSessionDequeueSseEvent(sessIdx, sid, evName, evData)) break;
+        if (!webSessionDequeueSseEvent(sessIdx, sid, evName, evData)) {
+          queueEmpty = true;
+          break;
+        }
         char lineBuf[256];
         // Compose: event: <name>\ndata: <json>\n\n
         // Truncate if necessary
@@ -257,7 +264,7 @@ esp_err_t handleEvents(httpd_req_t* req) {
         evSent++;
         if (evSent >= 8) break;
       }
-      delay(60);
+      if (!queueEmpty) delay(60);
     }
   }
 

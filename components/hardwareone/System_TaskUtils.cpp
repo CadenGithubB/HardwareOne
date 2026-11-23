@@ -3,6 +3,7 @@
 #include "System_Filesystem.h"    // For filesystemReady, isFsLockedByCurrentTask
 #include "System_Mutex.h"  // For isFsLockedByCurrentTask
 #include "System_Debug.h"  // For DEBUG_CLIF macro
+#include "System_BootDebug.h"  // the task-create trace: a forced line goes to the boot file only
 #include "System_MemUtil.h"      // For ps_alloc, AllocPref, hw1InternalFreeBytes
 #include "System_HeapLowCore.h"  // shared low-heap line and fragmentation figure
 #include "System_ESPNow.h"       // Safe espnow_task stack snapshot
@@ -347,7 +348,10 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
       line += String(psDelta);
     }
     // Memory allocation logging removed - LOG_ALLOC_FILE is obsolete
-    broadcastOutput(line);
+    // During the boot debug capture a line the saved flags would not show
+    // goes to the boot file only.
+    if (isDebugFlagSaved(DEBUG_MEMORY)) broadcastOutput(line);
+    else bootDebugCaptureText(line.c_str());
   }
 
   return res;

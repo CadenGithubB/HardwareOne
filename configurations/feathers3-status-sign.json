@@ -1,0 +1,41 @@
+{
+  "board": "feathers3",
+  "features": {
+    "CUSTOM_ENABLE_APDS": 0,
+    "CUSTOM_ENABLE_ENCODER": 1,
+    "CUSTOM_ENABLE_FM_RADIO": 0,
+    "CUSTOM_ENABLE_GAMEPAD": 0,
+    "CUSTOM_ENABLE_GPS": 0,
+    "CUSTOM_ENABLE_IMU": 0,
+    "CUSTOM_ENABLE_LED_MATRIX": 0,
+    "CUSTOM_ENABLE_NET_ESPNOW": 0,
+    "CUSTOM_ENABLE_OLED": 1,
+    "CUSTOM_ENABLE_PRESENCE": 0,
+    "CUSTOM_ENABLE_RTC": 1,
+    "CUSTOM_ENABLE_SERVO": 0,
+    "CUSTOM_ENABLE_THERMAL": 0,
+    "CUSTOM_ENABLE_TOF": 0,
+    "CUSTOM_ENABLE_WEB_MAPS": 0,
+    "CUSTOM_ENABLE_WEB_SENSORS": 0,
+    "ENABLE_BLUETOOTH": 0,
+    "ENABLE_BONDED_MODE": 0,
+    "ENABLE_CAMERA_SENSOR": 0,
+    "ENABLE_HTTPS": 1,
+    "ENABLE_LLM_BACKEND": 0,
+    "ENABLE_LLM_SOURCE_CM5": 0,
+    "ENABLE_LLM_SOURCE_ONBOARD": 0,
+    "ENABLE_MAPS": 0,
+    "ENABLE_MICROPHONE_SENSOR": 0,
+    "ENABLE_MQTT": 0,
+    "ENABLE_RASPBERRY_PI_HOST_FAN": 0,
+    "ENABLE_RASPBERRY_PI_HOST_POWER": 0,
+    "ENABLE_UART_HOST_LINK": 0,
+    "I2C_FEATURE_LEVEL": 4,
+    "INPUT_DEVICE_TYPE": 0
+  },
+  "sdkconfig": {
+    "CONFIG_BT_ENABLED": false
+  },
+  "summary": "Two Adafruit 4991 encoder boards lit green or red, the OLED, a DS3231 clock, battery gauge and u.FL antenna; Wi-Fi, web interface and automations only.",
+  "title": "Meeting-room status sign (FeatherS3[D])"
+}

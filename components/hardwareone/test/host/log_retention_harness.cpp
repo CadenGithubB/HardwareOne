@@ -119,7 +119,6 @@ static void twentyDays(Volume& volume, const std::string& root = "") {
 static Limits limitsOn(int today, const char* openFile = "") {
   Limits limits{};
   limits.today = 20260300u + static_cast<uint32_t>(today);
-  limits.transcriptCutoffDay = limits.today - 2;
   limits.currentBoot = 50;
   limits.openSessionFile = openFile;
   return limits;
@@ -196,16 +195,6 @@ static void names() {
   uint32_t boot = 0;
   check(parseBootFolder("boot-12", &boot) && boot == 12 && parseBootFolder("boot-000007", &boot) && boot == 7);
   for (const char* bad : {"boot-", "boot-x", "boot-12a", "boot12", "Boot-12", "boot-1234567890"}) check(!parseBootFolder(bad, &boot));
-  check(parseTranscriptDay("20260307T101500Z-local-0123456789abcdef.txt", &day) && day == 20260307u);
-  check(parseTranscriptDay("20260307T235959Z-pi-00000000ffffffff.txt", &day));
-  for (const char* bad : {"boot-local-0123456789abcdef.txt", "20260307T101500Z-local-0123456789abcdef.txt.tmp",
-                          "20260307T101500Z-other-0123456789abcdef.txt", "20260307T101500Z-local-0123456789ABCDEF.txt",
-                          "20260307T101500Z-local-0123.txt", "20260307-101500Z-local-0123456789abcdef.txt",
-                          "notes", "20261307T101500Z-local-0123456789abcdef.txt", "note-20260307.txt", ""}) {
-    check(!parseTranscriptDay(bad, &day));
-  }
-  check(isTranscriptUserFolder("u1") && isTranscriptUserFolder("u4294967295") && !isTranscriptUserFolder("u") &&
-        !isTranscriptUserFolder("user") && !isTranscriptUserFolder("notes") && !isTranscriptUserFolder("u1x"));
   check(nameIsNeverRemoved(".anchors.csv") && nameIsNeverRemoved("x.csv.tmp") && nameIsNeverRemoved("x.bak") &&
         nameIsNeverRemoved("") && nameIsNeverRemoved(nullptr) && !nameIsNeverRemoved("sensors-2026-03-07.csv"));
   check(nameIsHealth("health-2026-03-07.csv") && nameIsHealth("health-2026-03-07.csv.1") && !nameIsHealth("sensors-health-.csv"));
@@ -213,19 +202,6 @@ static void names() {
         pathIsOpenSession("/a/b.csv.12", "/a/b.csv") && !pathIsOpenSession("/a/b.csv.x", "/a/b.csv") &&
         !pathIsOpenSession("/a/b.csvx", "/a/b.csv") && !pathIsOpenSession("/a/b.csv", "") &&
         !pathIsOpenSession("/a/c.csv", "/a/b.csv"));
-
-  NewestTranscripts recent;
-  recent.clear();
-  check(recent.holds("20260301T000000Z-local-0000000000000001.txt"));  // fewer than eight stored: all are recent
-  for (int i = 1; i <= 9; ++i) {
-    char name[kTranscriptNameMax];
-    std::snprintf(name, sizeof(name), "2026030%dT000000Z-local-0000000000000001.txt", i == 9 ? 1 : 10 - i);
-    recent.add(name);  // 9, 8, .. 2, then 1: the oldest does not get in
-  }
-  check(recent.count == kRecentTranscriptsKept);
-  check(std::string(recent.names[0]) == "20260309T000000Z-local-0000000000000001.txt");
-  check(recent.holds("20260302T000000Z-local-0000000000000001.txt") &&
-        !recent.holds("20260301T000000Z-local-0000000000000001.txt"));
 
   NewestDays newest;
   newest.clear();
@@ -373,116 +349,33 @@ static void bootFolders() {
   check(volume.has(sensorFile("", 20)));
 }
 
-// Transcripts go after the sensor days and boot folders, the oldest day first,
-// only dated ones before the cutoff, and never anything else under stt/.
-static void transcripts() {
-  currentCase = "transcripts";
+// B12: transcripts are never removed. Old dated ones, undated ones and notes
+// stay while the sensor days and then the expired health files go, and a
+// volume with only transcripts ends every pass empty-handed.
+static void transcriptsKept() {
+  currentCase = "transcriptsKept";
   Volume volume;
   const std::string a = "/stt/u1/", b = "/stt/u27/";
-  volume.file(a + "20260301T080000Z-local-00000001000000aa.txt", 700);
-  volume.file(b + "20260301T090000Z-pi-00000001000000bb.txt", 800);
-  volume.file(a + "20260305T080000Z-local-00000001000000cc.txt", 900);
-  volume.file(a + "20260323T080000Z-local-00000001000000dd.txt", 900);   // the cutoff day itself
-  volume.file(a + "20260325T080000Z-local-00000001000000ee.txt", 900);   // today
-  // Six more of yesterday: with the two above, the eight newest stored.
-  for (int hour = 1; hour <= 6; ++hour) {
-    volume.file((hour % 2 ? a : b) + "20260324T0" + std::to_string(hour) + "0000Z-local-00000001000000a" + std::to_string(hour) + ".txt", 900);
+  const std::vector<std::string> kept = {
+      a + "20250101T080000Z-local-00000001000000aa.txt", b + "20250102T090000Z-pi-00000001000000bb.txt",
+      a + "20260301T080000Z-local-00000001000000cc.txt", a + "boot-local-00000001000000ff.txt",
+      a + "notes/20250101T080000Z-local-00000001000000aa.txt", "/stt/readme.txt"};
+  for (const std::string& path : kept) volume.file(path, 900);
+  for (int day = 1; day <= 20; ++day) {
+    volume.file(sensorFile("", day), 5000);
+    volume.file(healthFile("", day), 2000);
   }
-  volume.file(a + "boot-local-00000001000000ff.txt", 900);               // no date
-  volume.file(a + "notes/20260301T080000Z-local-00000001000000aa.txt", 100);  // QuickNotes folder
-  volume.file(a + "20260301T080000Z-local-00000001000000aa.txt.tmp", 100);
-  volume.file("/stt/readme.txt", 100);
-  volume.file("/stt/shared/20260301T080000Z-local-00000001000000aa.txt", 100);  // not an account folder
-  volume.file(sensorFile("", 1), 5000);
-  volume.file(sensorFile("", 2), 5000);
-  volume.file(sensorFile("", 3), 5000);
-  volume.file(sensorFile("", 4), 5000);
   Pass pass{};
   const Limits limits = limitsOn(25);
-  // The sensor day comes first.
-  Outcome out = runPass(pass, volume, limits, "", 1000000);
-  check(out.removed == 1 && volume.removed[0] == sensorFile("", 1));
-  // Then the oldest transcript day, across accounts, in time order.
-  out = runPass(pass, volume, limits, "", 1000000, false);
-  check(out.removed == 2 && out.freed == 1500 && pass.lastDay() == 20260301u);
-  check(volume.removed[1] == a + "20260301T080000Z-local-00000001000000aa.txt");
-  check(volume.removed[2] == b + "20260301T090000Z-pi-00000001000000bb.txt");
-  out = runPass(pass, volume, limits, "", 1000000, false);
-  check(out.removed == 1 && volume.removed.back() == a + "20260305T080000Z-local-00000001000000cc.txt");
-  out = runPass(pass, volume, limits, "", 1000000, false);
-  check(out.removed == 0);
-  for (const std::string& kept : {a + "20260323T080000Z-local-00000001000000dd.txt",
-                                 a + "20260325T080000Z-local-00000001000000ee.txt",
-                                 a + "boot-local-00000001000000ff.txt",
-                                 a + "notes/20260301T080000Z-local-00000001000000aa.txt",
-                                 a + "20260301T080000Z-local-00000001000000aa.txt.tmp",
-                                 std::string("/stt/readme.txt"),
-                                 std::string("/stt/shared/20260301T080000Z-local-00000001000000aa.txt")}) {
-    check(volume.has(kept));
-  }
-  check(volume.has("/stt/u1") && volume.has("/stt/u27"));  // account folders are never removed
-  for (int hour = 1; hour <= 6; ++hour) {
-    check(volume.has((hour % 2 ? a : b) + "20260324T0" + std::to_string(hour) + "0000Z-local-00000001000000a" + std::to_string(hour) + ".txt"));
-  }
-  // The eight newest stored transcripts stay whatever their age (the catch-up
-  // ledger may have offered them to a peer): ten old ones, two go.
-  auto old = [&](int index) {
-    char name[64];
-    std::snprintf(name, sizeof(name), "202603%02dT080000Z-local-00000001000000aa.txt", index);
-    return (index % 2 ? a : b) + name;
-  };
-  Volume aged;
-  for (int index = 1; index <= 10; ++index) aged.file(old(index), 700);
-  Pass eight{};
   unsigned passes = 0;
-  while (runPass(eight, aged, limits, "", 1000000, passes == 0).removed > 0) check(++passes < 20);
-  check(passes == 2 && aged.removed.size() == 2 && aged.removed[0] == old(1) && aged.removed[1] == old(2));
-  for (int index = 3; index <= 10; ++index) check(aged.has(old(index)));
-  Volume few;
-  for (int index = 1; index <= 8; ++index) few.file(old(index), 700);
+  while (runPass(pass, volume, limits, "", 100000000, passes == 0).removed > 0) check(++passes < 40);
+  check(!volume.has(sensorFile("", 1)) && !volume.has(healthFile("", 1)));  // the rest did go
+  for (const std::string& path : kept) check(volume.has(path));
+  for (const std::string& gone : volume.removed) check(gone.compare(0, 5, "/stt/") != 0);
+  Volume only;
+  for (const std::string& path : kept) only.file(path, 900);
   Pass none{};
-  check(runPass(none, few, limits, "", 1000000).removed == 0 && few.removalsTried == 0);
-  // The need can end the transcript day early.
-  Volume small;
-  small.file(a + "20260301T080000Z-local-00000001000000aa.txt", 700);
-  small.file(a + "20260301T090000Z-local-00000001000000bb.txt", 700);
-  for (int index = 11; index <= 18; ++index) small.file(old(index), 700);
-  Pass early{};
-  out = runPass(early, small, limits, "", 500);
-  check(out.removed == 1 && small.has(a + "20260301T090000Z-local-00000001000000bb.txt"));
-  // A transcript that cannot be removed does not end the pass, is not met
-  // again by the next one, and does not keep the last round from being reached.
-  Volume stuck;
-  for (int index = 1; index <= 11; ++index) stuck.file(old(index), 700);
-  stuck.refuseRemoval.insert(old(1));
-  Pass skip{};
-  out = runPass(skip, stuck, limits, "", 1000000);
-  check(out.removed == 1 && stuck.removed[0] == old(2) && stuck.has(old(1)));
-  unsigned tried = stuck.removalsTried;
-  out = runPass(skip, stuck, limits, "", 1000000, false);
-  check(out.removed == 1 && stuck.removed[1] == old(3) && stuck.removalsTried == tried + 1);  // old(1) is not tried again
-  Volume blocked;
-  for (int index = 1; index <= 10; ++index) blocked.file(old(index), 700);
-  blocked.refuseRemoval.insert(old(1));
-  blocked.refuseRemoval.insert(old(2));
-  for (int day = 1; day <= 20; ++day) blocked.file(healthFile("", day), 2000);
-  Pass last{};
-  out = runPass(last, blocked, limits, "", 1000000);
-  check(out.removed == 1 && blocked.removed[0] == healthFile("", 1));  // the last round is reached
-  check(blocked.removalsTried == 3);
-  // Many that cannot be removed: a pass tries kTranscriptFailuresPerPass of
-  // them and goes on, so its length does not grow with their number.
-  Volume refused;
-  for (int index = 1; index <= 28; ++index) {
-    refused.file(old(index), 700);
-    if (index <= 20) refused.refuseRemoval.insert(old(index));
-  }
-  for (int day = 1; day <= 20; ++day) refused.file(healthFile("", day), 2000);
-  Pass bounded{};
-  out = runPass(bounded, refused, limits, "", 1000000);
-  check(refused.removalsTried == kTranscriptFailuresPerPass + 1 && out.removed == 1 &&
-        refused.removed[0] == healthFile("", 1));
-  check(out.steps < 60);
+  check(runPass(none, only, limits, "", 100000000).removed == 0 && only.removalsTried == 0);
 }
 
 // The card's tree is the same rule under /sd; a volume without the trees, or
@@ -501,6 +394,7 @@ static void otherVolumes() {
   check(volume.has(sensorFile("/sd", 1)) && std::string(pass.root()) == "/sd");
   for (int day = 1; day <= 20; ++day) check(volume.has(sensorFile("", day)));  // nothing on the flash
   check(volume.has("/sd/collect/aabbccddeeff/files/2026-03-01/sensors.csv"));
+  check(volume.has("/sd/stt/u1/20260301T080000Z-local-00000001000000aa.txt"));
 
   // A session started with a path on the card itself is kept by that path too.
   Volume direct;
@@ -584,12 +478,6 @@ static void boundedWork() {
   }
   check(days.size() == 600);
   for (const std::string& day : days) large.file(kSensors + "/" + day + "/sensors-" + day + ".csv", 500);
-  // A transcript folder beyond the limit too: 600 old transcripts.
-  for (int index = 0; index < 600; ++index) {
-    char name[64];
-    std::snprintf(name, sizeof(name), "/stt/u1/2025%02d%02dT080000Z-local-00000001000000aa.txt", 1 + index / 28, 1 + index % 28);
-    large.file(name, 300);
-  }
   Pass wide{};
   out = runPass(wide, large, limits, "", 100000000);
   check(out.removed == 1 && large.removed[0] == kSensors + "/" + days[0] + "/sensors-" + days[0] + ".csv");
@@ -603,22 +491,13 @@ static void boundedWork() {
   for (size_t index = kWalkMaxEntries - kRecentDaysKept; index < days.size(); ++index) {
     check(large.has(kSensors + "/" + days[index] + "/sensors-" + days[index] + ".csv"));
   }
-  // The transcript folder: with no sensor day left to prune in the listed
-  // part, the oldest listed transcript goes, in bounded steps.
-  Volume talk;
-  for (const auto& entry : large.files) {
-    if (entry.first.compare(0, 5, "/stt/") == 0) talk.file(entry.first, entry.second);
-  }
-  Pass words{};
-  out = runPass(words, talk, limits, "", 100);
-  check(out.removed == 1 && talk.removed[0] == "/stt/u1/20250101T080000Z-local-00000001000000aa.txt");
 }
 
 int main(int argc, char** argv) {
   struct Case { const char* name; void (*run)(); };
   static const Case cases[] = {
       {"waterMarks", waterMarks}, {"names", names}, {"twentyDayVolume", twentyDayVolume},
-      {"limitsAreKept", limitsAreKept}, {"bootFolders", bootFolders}, {"transcripts", transcripts},
+      {"limitsAreKept", limitsAreKept}, {"bootFolders", bootFolders}, {"transcriptsKept", transcriptsKept},
       {"otherVolumes", otherVolumes}, {"boundedWork", boundedWork},
   };
   unsigned ran = 0;

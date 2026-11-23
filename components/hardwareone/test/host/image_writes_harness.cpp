@@ -122,6 +122,7 @@ String normalize(const String&);
 // INSERT_DIRECTORY_READER
 namespace VFS {
 static AuthContext systemAuth(const char* reason) { return {"system", reason}; }
+[[maybe_unused]] static size_t logReserveBytes() { return reserveBytes; }  // the shared LittleFS reserve
 namespace Scopes {  // the production Scopes (System_VFS.h); keep in step
   inline constexpr const char* VIDEOS = "/sd/VIDEOS"; inline constexpr const char* CERTS = "/system/certs";
   inline constexpr const char* OTA = "/system/ota"; inline constexpr const char* ESPNOW_RECEIVED = "/espnow/received";

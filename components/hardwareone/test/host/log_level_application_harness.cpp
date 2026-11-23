@@ -21,6 +21,9 @@ static const char* const kEspNames[] = {"NONE", "ERROR", "WARN", "INFO", "DEBUG"
 void esp_log_level_set(const char* tag, esp_log_level_t level) {
   events.push_back(std::string("esp:") + tag + "=" + kEspNames[level]);
 }
+// The firmware sets its tags through the boot debug capture
+// (System_BootDebug.h), which is esp_log_level_set outside the boot.
+#define bootDebugEspLogSet esp_log_level_set
 // The saved esplog tag levels go on top of the owner's (test_esp_log_overrides
 // runs them); here only the call and its place are recorded.
 void applyEspLogOverrides(bool includeWildcard) {
@@ -34,6 +37,8 @@ struct DebugManager {
 
 struct HostSettings { int logLevel = 2; } gSettings;
 bool requestDebugSettingsPersist() { events.push_back("persist"); return true; }
+// setDebugSetting's setting_changed post (SET-6); the settings_mutation suite runs the real one.
+void notifySettingChanged(const void*) {}
 // INSERT_SET_DEBUG_SETTING
 
 bool gCliValidateOnly = false;

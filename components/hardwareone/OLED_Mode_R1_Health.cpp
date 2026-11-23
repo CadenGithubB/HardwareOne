@@ -182,8 +182,8 @@ static const char* healthNextDesiredToken(G2RingDesiredState current) {
        : "preserve";
 }
 
-// The row's command runs in the background; the owner's explanation (or what
-// it did) is the toast when it ends.
+// The row's command runs in the background; a refusal's explanation is the
+// toast when it ends (the rows show their own state on success).
 static void healthRunCommand(const char* line) { executeOledCommand(line); }
 
 static void healthOnEnter(bool isForward) {
@@ -373,7 +373,7 @@ static bool healthInputHandler(int /*deltaX*/, int /*deltaY*/, uint32_t newlyPre
         (void)g2RingRequestHistoryRefresh(false);
         break;
       case HEALTH_ACTION_HISTORY_FORCE:
-        healthRunCommand("ring history force");
+        executeOledCommandShowResult("ring history force");  // no row state: toast it
         break;
       case HEALTH_ACTION_LOW_POWER: {
         G2RingControlStatus status = {};

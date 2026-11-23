@@ -287,7 +287,7 @@ const char* cmd_pwm(const String& argsInput) {
 // compiles out with the driver — see i2cSetDeviceBusAndReport in System_I2C.h.
 static const char* cmd_servobus(const String& a) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return i2cSetDeviceBusAndReport(gSettings.servoBus, a, "servoBus");
+  return i2cSetDeviceBusAndReport(gSettings.servoBus, a, "servoBus", i2cRowOwnerByName("PCA9685"));
 }
 
 const CommandEntry servoCommands[] = {

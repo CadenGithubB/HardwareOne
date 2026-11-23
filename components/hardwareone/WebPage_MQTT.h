@@ -14,7 +14,7 @@
 void registerMqttHandlers(httpd_handle_t server);
 
 // Stream the inner MQTT page content (for embedding)
-void streamMqttInner(httpd_req_t* req);
+void streamMqttInner(httpd_req_t* req, bool guestView);
 
 #else
 

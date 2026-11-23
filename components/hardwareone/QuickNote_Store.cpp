@@ -266,7 +266,7 @@ bool hasRoom(const char** why) {
   const bool sd = VFS::isSdWritable();
   uint64_t free = 0;
   if (!noteFreeBytes(sd, free) ||
-      free < kReserveBytes + kHeaderMax + kMaxNoteBytes + 256)
+      free < VFS::logReserveBytes() + kHeaderMax + kMaxNoteBytes + 256)
     return fail(why, "Note storage full or unavailable");
   return true;
 }
@@ -333,7 +333,7 @@ bool create(CommandSource source, TransportSessionEpoch epoch, const char* user,
   const AuthContext ctx = ownerContext(source, user, owner);
   uint64_t free = 0;
   // No tier switching and no automatic deletion/rotation.
-  if (!noteFreeBytes(sd, free) || free < kReserveBytes + bytes + 256)
+  if (!noteFreeBytes(sd, free) || free < VFS::logReserveBytes() + bytes + 256)
     return fail(why, "Note storage full or unavailable");
   // trusted: only probe and create the protected transcript root; the owner
   // and notes folders and the file below always use the named owner's
@@ -408,7 +408,7 @@ bool restamp(CommandSource source, const char* user, const char* path, const cha
   } else if (!VFS::existsGuarded(copy, ctx)) {
     uint64_t total = 0, used = 0, free = 0;
     ok = VFS::getStats(sd ? VFS::SDCARD : VFS::INTERNAL, total, used, free) &&
-         free >= kReserveBytes + bytes + 256;
+         free >= VFS::logReserveBytes() + bytes + 256;
     if (!ok) fail(why, "Note storage full or unavailable");
     else if (!(ok = file.seek(body))) fail(why, "Note read incomplete");
     else ok = writeNote(ctx, sd, tmp, copy, head, headLength, nullptr, &file, bytes, why);

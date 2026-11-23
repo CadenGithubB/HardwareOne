@@ -14,6 +14,7 @@
 #include "WebPage_MQTT.h"
 #include "WebServer_Server.h"
 #include "WebServer_Utils.h"
+#include "WebServer_GuestSettingsView.h"  // guestview::kGuestHiddenText
 
 // Bytes of a received value the External Sensors table shows.
 static constexpr size_t kMqttSensorValueShownMax = 100;
@@ -36,8 +37,25 @@ static void streamMqttExternalSensorRow(httpd_req_t* req, const String& name,
   httpd_resp_send_chunk(req, tail, HTTPD_RESP_USE_STRLEN);
 }
 
-// Stream MQTT page inner content
-void streamMqttInner(httpd_req_t* req) {
+// One configuration cell: the setting's text, HTML-escaped, `emptyHtml` when
+// it is empty, or the guest sentence when `guestView` hides a set value
+// (owner, guest privacy 4: a guest does not see the broker host or user name;
+// the same text as the guest's /api/settings view).
+static void streamMqttConfigText(httpd_req_t* req, const String& value,
+                                 bool guestView, const char* emptyHtml) {
+  if (!value.length()) {
+    httpd_resp_send_chunk(req, emptyHtml, HTTPD_RESP_USE_STRLEN);
+  } else if (guestView) {
+    httpd_resp_send_chunk(req, "<em style=\"color:var(--panel-fg);\">", HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, guestview::kGuestHiddenText, HTTPD_RESP_USE_STRLEN);
+    httpd_resp_send_chunk(req, "</em>", HTTPD_RESP_USE_STRLEN);
+  } else {
+    streamHtmlEscaped(req, value.c_str(), strlen(value.c_str()));
+  }
+}
+
+// Stream MQTT page inner content. guestView: the signed-in account is a guest.
+void streamMqttInner(httpd_req_t* req, bool guestView) {
   // Get current MQTT status
   bool connected = isMqttConnected();
   const char* statusText = connected ? "Connected" : "Disconnected";
@@ -92,11 +110,8 @@ void streamMqttInner(httpd_req_t* req) {
     "<tr><td style=\"width:140px;font-weight:500;\">Host</td><td id=\"cfg-host\">", HTTPD_RESP_USE_STRLEN);
   
   // Show configured values (mask password)
-  if (gSettings.mqttHost.length()) {
-    httpd_resp_send_chunk(req, gSettings.mqttHost.c_str(), HTTPD_RESP_USE_STRLEN);
-  } else {
-    httpd_resp_send_chunk(req, "<em style=\"color:var(--panel-fg);\">Not configured</em>", HTTPD_RESP_USE_STRLEN);
-  }
+  streamMqttConfigText(req, gSettings.mqttHost, guestView,
+                       "<em style=\"color:var(--panel-fg);\">Not configured</em>");
   
   httpd_resp_send_chunk(req, "</td></tr><tr><td>Port</td><td id=\"cfg-port\">", HTTPD_RESP_USE_STRLEN);
   
@@ -122,11 +137,8 @@ void streamMqttInner(httpd_req_t* req) {
   
   httpd_resp_send_chunk(req, "</td></tr><tr><td>Username</td><td id=\"cfg-user\">", HTTPD_RESP_USE_STRLEN);
   
-  if (gSettings.mqttUser.length()) {
-    httpd_resp_send_chunk(req, gSettings.mqttUser.c_str(), HTTPD_RESP_USE_STRLEN);
-  } else {
-    httpd_resp_send_chunk(req, "<em style=\"color:var(--panel-fg);\">None</em>", HTTPD_RESP_USE_STRLEN);
-  }
+  streamMqttConfigText(req, gSettings.mqttUser, guestView,
+                       "<em style=\"color:var(--panel-fg);\">None</em>");
   
   httpd_resp_send_chunk(req, "</td></tr><tr><td>Password</td><td id=\"cfg-pass\">", HTTPD_RESP_USE_STRLEN);
   
@@ -358,7 +370,7 @@ static esp_err_t handleMqttPage(httpd_req_t* req) {
 
   streamBeginHtml(req, "MQTT", false, ctx.user, "mqtt");
   httpd_resp_send_chunk(req, "<div class='card'>", HTTPD_RESP_USE_STRLEN);
-  streamMqttInner(req);
+  streamMqttInner(req, isGuestUser(ctx.user));
   httpd_resp_send_chunk(req, "</div>", HTTPD_RESP_USE_STRLEN);
   streamEndHtml(req);
   return ESP_OK;

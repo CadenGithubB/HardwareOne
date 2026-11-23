@@ -46,11 +46,12 @@ by its attached hardware, implemented backends and available resources. Use
 
 ### 3) Hardware One (Standard Handheld)
 - The intended full build: board + SSD1306 OLED + Seesaw gamepad (or ANO rotary encoder) + a selection of I2C sensors.
-- Can be used from USB power or as a battery-powered handheld.
+- Can be used from USB power or as a battery-powered handheld. Battery runtime and current draw have not been measured for any board or mode, so no runtime figure is given (`KNOWN_ISSUES.md`).
 - Best fit when you want both the local OLED/gamepad UI and the web UI.
 - The ESP32-P4X-EYE is this configuration with its own LCD, wheel, camera and microphone; its reproducible profile lives under [`deployments/handheld/`](../deployments/handheld/README.md) as a factory-only (cable-flashed) deployment.
 
 ### 4) Bonded Microcontrollers
+- **Experimental in 1.0.** Bond mode works, but it is not a promised 1.0 feature: its behaviour and wire format may change in a later release.
 - Control features unique to one device you flash while another device is flashed with other features - effectively removing the limit of software features that is faced due to iram constrictions on the ESP32.
 - This was intended to be used in a way where one unit is the device which deals with the Display/Input Devices and bluetooth connectivity, while the other device exposes other hardware / sensors, or other software features.
 - The devices create an auth token during the bond sync / handshake process. This is used to execute commands with implicit trust between the devices to reduce the need to enter in username + password for every remote command.

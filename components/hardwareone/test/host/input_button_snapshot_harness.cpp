@@ -111,6 +111,29 @@ int main() {
   assert(!inputCacheInvalidate() && sInputCache.dataValid);
   lockAvailable = true;
   assert(inputCacheInvalidate() && !sInputCache.dataValid);
+
+  // The ANO publishes its physical buttons with RIGHT (bit 4) and a chord's
+  // IN (bit 0) hidden from the navigation: the cache keeps them held (the
+  // sensor log and the G2 page read it), and the navigation's presses never
+  // see them. A reset clears the mask.
+  constexpr uint32_t kRight = 16u, kIn = 1u;
+  assert(inputCacheReset(UINT32_MAX, 512, 512, true));
+  previous = UINT32_MAX; initialized = true;
+  assert(inputPublishState(~(kRight | kIn), 512, 512, 0, true, 50, kRight | kIn));
+  assert(sInputCache.buttons == ~(kRight | kIn) && sInputCache.navHidden == (kRight | kIn));
+  assert(inputNavButtons(sInputCache) == UINT32_MAX);
+  assert(inputConsumeButtonPresses(previous, initialized) == 0);
+  assert(previous == UINT32_MAX);
+  // The chord ends; a new IN press is a press again.
+  assert(inputPublishState(UINT32_MAX, 512, 512, 0, true, 51, 0));
+  assert(inputConsumeButtonPresses(previous, initialized) == 0);
+  assert(inputPublishState(~kIn, 512, 512, 0, true, 52));
+  assert(sInputCache.navHidden == 0);
+  assert(inputConsumeButtonPresses(previous, initialized) == kIn);
+  assert(inputPublishState(~kIn, 512, 512, 0, true, 53, kIn));
+  assert(inputCacheReset(UINT32_MAX, 512, 512, true) && sInputCache.navHidden == 0);
+  sInputCache.dataValid = true;
+
   sInputCacheMutex = nullptr;
   const int savedTakes = takes;
   assert(inputConsumeButtonPresses(previous, initialized) == 0);

@@ -296,8 +296,6 @@ void sensorStatusBump() {
 httpd_handle_t server = NULL;
 #endif
 
-volatile unsigned long gWebMirrorSeq = 0;
-
 // Per-task identity (formerly gExecUser / gExecIsAdmin / gExecAuthContext) now
 // lives in each task's TLS slot via System_AuthIdentity. Use currentAuthContext()
 // / currentExecUser() / currentExecIsAdmin() for reads, ExecIdentityGuard or
@@ -1077,6 +1075,17 @@ void perfPrintLoopHealth() {
                        w.inLoop ? kLoopSectionNames[w.dom] : "outside sections (blocked/preempted)");
     }
   }
+  // S-14: who holds the filesystem lock, so a stall can be tied to a holder.
+  FsLockHolderInfo fsHold;
+  fsLockHolder(&fsHold);
+  const char* longestBy = fsHold.longestOwner[0] ? fsHold.longestOwner : "-";
+  if (fsHold.owner[0]) {
+    BROADCAST_PRINTF("[PERFTOP] FS lock: held by %s for %lu ms | longest hold since boot: %lu ms (%s)",
+                     fsHold.owner, (unsigned long)fsHold.heldMs, (unsigned long)fsHold.longestMs, longestBy);
+  } else {
+    BROADCAST_PRINTF("[PERFTOP] FS lock: free | longest hold since boot: %lu ms (%s)",
+                     (unsigned long)fsHold.longestMs, longestBy);
+  }
 }
 
 // Struct-read accessor for the loop-health snapshot — the OLED perf screen
@@ -1437,10 +1446,10 @@ static bool bootNetHandOffServices() {
 
 void hardwareone_setup() {
 
-  // B13: every debug flag on for the boot, into the boot buffer (not the
-  // console or the normal logs); bootDebugFinish() at the end of setup()
-  // restores the saved flags and writes /system/sys_logs/boot-debug-1.log.
-  bootDebugBegin();
+  // B13: the boot debug capture is already running (app_main starts it right
+  // after initArduino(), before the radio companion); bootDebugFinish() at the
+  // end of setup() restores the saved settings and writes boot-debug-1.log (to
+  // the card when one is writable, else flash).
 
   // ========================================================================
   // 1. PRE-SERIAL — crash tracking from RTC memory (no Serial yet)
@@ -1767,6 +1776,9 @@ void hardwareone_setup() {
   // Debug system must be up before applySettings() (debug queue/task needed for flag writes)
   initDebugSystem();
   applySettings();
+#if ENABLE_WIFI
+  wifiApplyAntennaSelection();  // before any radio start (Wi-Fi or ESP-NOW)
+#endif
   // Notification device policy (per-kind levels) — name-keyed JSON, loaded
   // after the filesystem + settings are up, before render tasks start.
   notifPolicyLoad();
@@ -1835,7 +1847,7 @@ void hardwareone_setup() {
 
 #if ENABLE_I2C_SYSTEM
   initI2cBuses();
-  esp_log_level_set("i2c.master", ESP_LOG_WARN);  // Suppress routine NACK spam from FM radio RDS polling
+  bootDebugEspLogSet("i2c.master", ESP_LOG_WARN);  // Suppress routine NACK spam from FM radio RDS polling
 
   // Early silent RTC sync (zero-alloc I2C read + settimeofday) — verbose sync happens later
   #if ENABLE_RTC_SENSOR

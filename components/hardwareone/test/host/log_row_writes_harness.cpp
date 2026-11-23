@@ -130,6 +130,12 @@ static LogTier resolveLogPath(const char* path, size_t need, char* output, size_
   return overflow ? LogTier::Overflow : LogTier::Primary;
 }
 static void noteLogReserveDrop() { ++reserveDrops; }
+// UP-16: the stored LittleFS free figure the battery log checks against the
+// shared reserve; noteLittleFsBytesWritten records nothing here.
+static size_t littleFsFree = SIZE_MAX;
+[[maybe_unused]] static size_t peekLittleFsFree() { return littleFsFree; }
+[[maybe_unused]] static size_t logReserveBytes() { return 100 * 1024; }
+[[maybe_unused]] static void noteLittleFsBytesWritten(size_t) {}
 static File openGuarded(const String& path, const char* mode, const Context& ctx, bool create = false) {
   io("open:" + text(path) + ":" + mode + ":" + ctx.tag);
   check(ctx.tag.rfind("senlog.", 0) == 0 || ctx.tag == "batlog", "trusted owner context retained");
@@ -225,7 +231,7 @@ static void reset(bool onSd = false) {
   released(); ++cases; disk.clear(); operations.clear(); messages.clear(); writeCalls = failWrite = reads = 0; shortCount = 0;
   failAppendOpen = failReadOpen = reportWriteError = sealFailure = allocFailure = clockSynced = false;
   failHeaderOpen = failReplace = failRemove = headerFlushError = false;
-  headerSizeOffset = 0; appendOpens = failAppendOpenCall = 0; reserveRefused = false; reserveDrops = 0;
+  headerSizeOffset = 0; appendOpens = failAppendOpenCall = 0; reserveRefused = false; reserveDrops = 0; VFS::littleFsFree = SIZE_MAX;
   overflow = onSd; nowMs = 10000; gSensorLogFormat = SENSOR_LOG_TEXT; gSensorLogMask = LOG_TOF;
   gSensorLogPathMode = SensorLogPathMode::MANUAL; gSensorLogPath = "/sensor.log";
   gSensorLogSealed = false; gSealBuf = nullptr; gApproxSizeBytes = 0; gSensorLogMaxSize = 100000;
@@ -525,6 +531,16 @@ static void reserveRefusedCases() {
   }
   reset(); gSensorLogFormat = SENSOR_LOG_CSV; reserveRefused = true; sensorAppend("body"); released();
   check(disk.empty() && reserveDrops == 1, "a refused fresh CSV session creates no file or header");
+  // UP-16: the battery log has no SD mirror; below the shared reserve its row
+  // is skipped and counted, and nothing is opened. At the reserve it writes.
+  reset(); disk[kBatteryLogPath] = "prefix\n"; VFS::littleFsFree = 100 * 1024 - 1;
+  batteryLogAppend("event"); released();
+  check(disk.at(kBatteryLogPath) == "prefix\n" && reserveDrops == 1 && sBatteryLogReserveSkips == 1,
+        "a battery row below the reserve is skipped and counted");
+  check(std::none_of(operations.begin(), operations.end(), [](const std::string& op) { return op.rfind("open:", 0) == 0; }),
+        "a skipped battery row opens nothing");
+  VFS::littleFsFree = 100 * 1024; batteryLogAppend("event"); released();
+  check(disk.at(kBatteryLogPath).size() > 7 && reserveDrops == 1, "a battery row at the reserve is written");
 }
 #endif
 

@@ -385,8 +385,8 @@ are what comparisons use.
 
 | Role | Rank | Can do |
 | ---- | :--: | ------ |
-| `guest` | 0 | A real, named account with view-only authorization. It may use caller-local `login`, `logout`, and `whoami`, and the read-only status lines the web pages load (`espnowstatus [json]`, `espnowmeshstatus`, `espnowlist`, `espnowdeviceinfo [json]`, `espnowtoporesults`, `bondstatus [json]`, bare `g2nav`/`g2verbose`, `eistatus`, `eimodellist`, `srtuning`); anything else answers "Guest accounts are view-only." On the web a guest opens every page and sees every control; a control that changes the device answers with that refusal, and files, logs, recordings, camera pictures and transcripts say they are not available. Filesystem access is masked to read |
-| `user` | 1 | Ordinary commands; not admin-gated ones |
+| `guest` | 0 | A real, named account with view-only authorization. It may use caller-local `login`, `logout`, and `whoami`, and the read-only status lines the web pages load (`espnowstatus [json]`, `espnowmeshstatus`, `espnowlist`, `espnowdeviceinfo [json]`, `espnowtoporesults`, `bondstatus [json]`, bare `g2nav`/`g2verbose`, `eistatus`, `eimodellist`, `srtuning`); anything else answers "Guest accounts are view-only." On the web a guest opens every page and sees every control; a control that changes the device answers with that refusal, and files, logs, recordings, camera pictures and transcripts say they are not available. The ESP-NOW message history, the ring's health data and the LLM chat are not shown to a guest (the pages say so), and a guest's settings view leaves out the saved Wi-Fi networks and the joined network's name, the MQTT broker host and user name, and the LLM gateway address. Filesystem access is masked to read |
+| `user` | 1 | Ordinary commands; not admin-gated ones. The ESP-NOW message history (`espnowmessages`, the web page's conversations) is admin-only: it carries remote command output |
 | `admin` | 2 | Admin commands - user management, most settings, device control |
 | `superadmin` | 3 | Additionally the identity / crypto / destructive / auth-posture command set |
 
@@ -588,7 +588,10 @@ The migration tool exports the device's configuration to a `.hwbackup` file and
 imports it onto another device. Requires WiFi and the HTTP server
 (`ENABLE_MIGRATION_TOOL` follows `ENABLE_HTTP_SERVER`).
 
-- **Export** - `/api/backup` from the web UI.
+- **Export** - `/api/backup` from the web UI. The settings category carries `settings.json`,
+  `debug.json` and, once a notification level was changed, `notifications.json`; the others
+  carry the accounts (with `boot_anchors.json` and the per-user settings), the automations, the
+  ESP-NOW device list, the TLS certificates and the maps.
 - **Import** - `/api/restore`, or choose **Import from Backup** at first boot. In the first-boot flow the device brings up WiFi, prints its IP, and waits for you to send the `.hwbackup` from another device's migration tool; you then confirm on the OLED or serial.
   Before the Yes/No prompt (default No) the device shows the bundle's claimed hostname and board, the bytes it received, the first 8 hex of their SHA-256, and whether the bundle's fingerprint matched this board ("this device"), did not ("other device", credentials skipped), or was missing ("no fingerprint (unverified)", credentials still restored). Compare with your file: `wc -c <file>.hwbackup` and the first 8 hex of `shasum -a 256 <file>.hwbackup`. They match only if the file was sent unchanged; a forced cross-device upload has a `force` flag added, so the device says they will not match and you check the source and board instead.
   A bundle exported by newer firmware (`formatVersion` above 1) is refused before anything is staged; update this device's firmware first. A bundle without `formatVersion` is read as format 1. `versions` shows the format this firmware writes (`Backup bundle format`).
@@ -671,6 +674,8 @@ header flag this firmware must understand and does not (`RX Must-Understand Drop
 that device).
 
 ### Bonding (Master/Worker)
+**Experimental in 1.0.** Bond mode works, but it is not a promised 1.0 feature: its behaviour and wire format may change in a later release.
+
 With `ENABLE_BONDED_MODE=1`, two devices can bond into a master/worker pair. The master gains a **Remote** tab in its web UI showing the worker's features, even if those features aren't compiled into the master.
 
 A bond is a setting on each device, so `bondconnect <mac_or_name>` is run on **both**. The two devices then tell each other how the bond stands, and `bondstatus` shows it on the `Agreement:` line:
@@ -880,7 +885,7 @@ setting, regardless of which setting it was.
 | Kind | Fires when | subject / detail |
 |---|---|---|
 | `peer_online` / `peer_offline` | mesh peer heartbeat appears / times out (30s) | peer name / MAC |
-| `peer_paired` | a peer is saved as paired (`espnowpair`, `espnowpairsecure`, or an accepted `espnowpairrequest`); pairing mode only discovers, it no longer auto-pairs | peer name / MAC |
+| `peer_paired` | a peer is saved as paired (`espnowpair`, `espnowpairsecure`, or an accepted `espnowpairrequest`); pairing mode only discovers; it does not pair by itself | peer name / MAC |
 | `text_rx` | ESP-NOW text message received | sender / text preview |
 | `file_rx` | ESP-NOW file received (not the bond's own sync files: the partner's settings, manifest, schema and automation list) | sender / filename |
 | `bond_online` / `bond_offline` | bonded peer session up / heartbeat timeout, or the peer answered that it has no bond with this device | peer name / MAC |
@@ -890,11 +895,11 @@ setting, regardless of which setting it was.
 | `mesh_promoted` / `mesh_demoted` | backup-master failover / master returned | device name / reason |
 | `remote_cmd_rx` | an authenticated remote command ran on THIS device (mesh or MQTT) | sender / command |
 | `wifi_connected` / `wifi_disconnected` | WiFi got IP / dropped | IP / - |
-| `wifi_connect_failed` | all connect attempts to a network failed | SSID / attempts |
+| `wifi_connect_failed` | all connect attempts to a network failed; shown in the notification centre, and as a toast at most once in 10 minutes | SSID / attempts |
 | `wifi_net_added` / `wifi_net_removed` | saved WiFi network added / removed | SSID |
 | `mqtt_connected` / `mqtt_disconnected` | broker link up / lost (once per transition) | broker / seconds up |
 | `ble_connected` / `ble_disconnected` | companion BLE device connected / dropped | device type / MAC |
-| `g2_connected` / `g2_disconnected` | glasses link up / temple dropped | sides / side |
+| `g2_connected` / `g2_disconnected` | glasses link up / temple dropped (`g2_disconnected` is shown in the notification centre, and as a toast at most once in 30 s) | sides / side |
 | `g2_plugin_alive` / `g2_plugin_silent` | the temple's app plugin answering / not answering renderer heartbeats (app idle or set down; not a wear sensor). RIGHT temple only: on stock firmware LEFT is silent by design (it sends only mic audio and acks) | side |
 | `ring_connected` / `ring_disconnected` | R1 ring GATT up (after setup) / link lost | name / MAC |
 | `ring_worn` / `ring_not_worn` | R1 on / off finger (wearStatus edge) | name |
@@ -905,14 +910,14 @@ setting, regardless of which setting it was.
 | `charging_started` / `charging_stopped` | actually charging vs merely USB-powered | percent |
 | `power_save_enter` / `power_save_exit` | display power-save engaged / woke | idle minutes / - |
 | `sd_mounted` / `sd_unmounted` | SD card mounted / unmounted | free MB / - |
-| `sd_write_failed` | SD went unwritable (once per episode) | hint |
-| `fs_low_space` | flash below the log reserve (once per boot); shown in the notification centre and as a toast | free bytes |
+| `sd_write_failed` | SD went unwritable (once per episode); shown in the notification centre, and as a toast at most once a minute | hint |
+| `fs_low_space` | flash below the log reserve (once per low episode); shown in the notification centre and as a toast | free bytes |
 | `heap_low` | internal RAM free under 25 KB or its largest block under 16 KB (once per low spell, at most once a minute); shown in the notification centre, and as a toast at most once in 10 minutes | free bytes / `largest <bytes>` |
-| `setting_changed` | a setting was saved | key / value |
-| `settings_save_failed` | settings.json write failed | stage / file |
+| `setting_changed` | a setting was saved (debug settings included) | the setting's command name (e.g. `bleautostart`) / value |
+| `settings_save_failed` | settings.json write failed; shown in the notification centre, and as a toast at most once a minute | stage / file |
 | `sensor_started` / `sensor_stopped` | sensor came up / stopped (includes Camera) | sensor name |
 | `sensor_start_failed` | sensor failed to start | sensor name |
-| `sensor_fault` | sensor auto-disabled after repeated I2C errors | sensor name / errors |
+| `sensor_fault` | sensor auto-disabled after repeated I2C errors; shown in the notification centre, and as a toast at most once a minute | sensor name / errors |
 | `sensor_unresponsive` / `sensor_recovered` | a sensor that answered since boot stopped responding / answered again (once per outage) | sensor name / address, bus, nack\|timeout |
 | `presence_detected` / `presence_cleared` | IR presence trip / cleared (held ~2s) | value |
 | `gesture` | APDS swipe detected | UP\|DOWN\|LEFT\|RIGHT |
@@ -1248,27 +1253,41 @@ Available debug modules (type `help debug` on device for full list):
 
 ### Boot debug file
 
-Every boot runs with every debug flag on and every log level shown (the
-DEBUG, INFO and WARN lines included, whatever `loglevel` is saved), from the
-start of setup until boot finishes; the saved flags and log level are not
-changed and apply again once boot has finished (the defaults on a first
-boot). The debug lines of the boot go to a
-buffer, not to the console or the normal logs: a line your saved flags would
-show still appears as usual, the rest only in the buffer. When boot finishes
-the buffer is saved as `/system/sys_logs/boot-debug-1.log`; the two boots
-before it move to `boot-debug-2.log` and `boot-debug-3.log`. The buffer is
-56 KB in PSRAM (4 KB of internal memory on a board without PSRAM, freed after
-the save); a boot that writes more keeps its first lines and ends the file with
-a `[TRUNCATED]` line saying how much was left out. Once the buffer is full the
-forcing stops for the rest of that boot (nothing more could be kept), so the
-`[TRUNCATED]` count covers only the lines your saved flags show.
+Every boot runs with all debug output on, from the start of boot (right after
+the Arduino core starts, before the P4X-EYE's radio companion comes up) until
+boot finishes: every debug flag and sub-flag, every debug check in the code, the
+log level at `debug` (the DEBUG, INFO and WARN lines included, whatever
+`loglevel` is saved), and every ESP-IDF tag at the build's own level (the
+firmware's quieting of tags, `esplog` included, waits until boot finishes).
+The saved settings are not changed and apply again once boot has finished
+(the defaults on a first boot). Every line of the boot - debug lines, command
+and system output, system events and ESP-IDF lines - goes into a buffer; a
+line your saved settings would show still appears on the console and in the
+normal logs as usual, the rest only in the buffer, so the console looks as it
+always does.
+
+When boot finishes the buffer is saved as `boot-debug-1.log`: on the SD card
+in `/sd/system/sys_logs/` when a writable card is in (the two boots before it
+move to `boot-debug-2.log` and `boot-debug-3.log`), otherwise on flash in
+`/system/sys_logs/` (only the newest boot is kept there). The buffer is 256 KB
+in PSRAM (4 KB of internal memory on a board without PSRAM, freed after the
+save; such a board also leaves the ESP-IDF tags at their saved levels). A
+boot that writes more keeps the start of the boot and its newest lines, with
+a `[GAP]` line between them saying how many lines and bytes were dropped.
 
 The file starts with `#` lines: the boot number and reset reason, the uptime at
-the start and end of the capture, the bytes kept and dropped, and the CPU time
-spent in the capture (formatting and copying; the work of building each
-forced line's values is not included). Read it as an administrator with
-`fileview "/system/sys_logs/boot-debug-1.log"` (one page at a time) or in the
-web file browser. `system-events.log` records each save (size and time taken).
+the start and end of the capture, the lines and bytes in all (the dropped ones
+included), kept and dropped, and the wall-clock time spent in the capture path
+(formatting and copying; the work of building each forced line's values is not
+included). Read it as an administrator with `fileview "<path>"`, which pages a
+file of any size, or in the web file browser. `bootdebug` shows the setting and
+where this boot's file went; `system-events.log` records each save (size and
+time taken).
+
+`bootdebug off` turns the capture off (saved; from the next boot): nothing is
+forced or captured and no buffer is taken, the fastest boot. `bootdebug on`
+turns it back on. The setting is also under Debug settings on the web and
+OLED settings screens (Boot debug file).
 
 ---
 
@@ -1604,7 +1623,9 @@ oledupdateinterval <ms>         - Display update interval (10-1000ms)
 oleddefaultmode <status|thermal|off>     - Mode after boot animation
 oledbootduration <ms>           - Boot animation duration (500-10000ms)
 oledautostart <0|1>             - Bring the display up at boot
-oledthermalscale <1.0-10.0>     - Thermal image scale on OLED
+oledthermalscale <1.0-10.0>     - Thermal image scale on OLED (smaller when the image would
+                                  not fit between the header bar and the footer)
+oleddump [first-row] [rows]     - Screen as text ('#' lit, '.' dark), up to 31 rows per reply (admin)
 setgamepadpassword              - Set gamepad joystick unlock pattern
 ```
 </details>
@@ -1795,10 +1816,11 @@ fields empty, so the later columns stay under their header names.
 
 **Old capture data is removed before a volume fills.** Below a low-water mark (20 % of the volume,
 at most 64 MB, at least twice the 100 KB log reserve) the oldest day's sensor-log files go first,
-one day an hour, then old transcripts, and last health files older than the 14 newest stored days,
-until 5 % (at most 16 MB) above the mark is free. Today's folder, the open session, the three newest
-days, the eight newest transcripts, system logs, GPS tracks, notes and everything under `/system`
-are never removed. The internal flash is left alone while a writable SD card takes the overflow.
+one day an hour, and last health files older than the 14 newest stored days, until 5 % (at most
+16 MB) above the mark is free. Today's folder, the open session, the three newest days, transcripts,
+system logs, GPS tracks, notes and everything under `/system` are never removed. A volume too full
+for a transcript refuses it (`stt status` reports "Transcript storage full or unavailable"); delete old
+transcripts yourself to free the space. The internal flash is left alone while a writable SD card takes the overflow.
 Each pass that removed something writes one line to the system log. `sensorlog status` shows how
 many rows had to wait for the filesystem.
 
@@ -2419,12 +2441,23 @@ inputdevicepollms <10-1000>     - Poll interval
 gamepadread                     - Read joystick axes and button states
 
 --- ANO rotary encoder (INPUT_DEVICE_TYPE=2) ---
-anoencoderread                  - Read encoder position and button state
-anoencoderi2caddr <1-127>       - Set I2C address
+anoencoderstatus [json]         - Bus, address, settings and whether it is open
+anoencoderread [json]           - Read the wheel position and the buttons held
+anoencoderi2caddr <0x49..0x50>  - Set the I2C address (applies at the next openinput)
 anoencoderinvert [on|off]       - Invert rotation direction
 anoencoderswapud [on|off|toggle]  - Swap UP/DOWN buttons
 anoencoderswaplr [on|off|toggle]  - Swap LEFT/RIGHT buttons
+inputbus <0|1>                  - The bus the input device is on (applies at the next openinput)
 ```
+
+ANO buttons on the OLED: the wheel scrolls up and down, IN is A (select), LEFT is B (back),
+DOWN is X and UP is Y. A RIGHT tap is SELECT (Quick Settings outside the menu, autocomplete in
+the keyboard), sent when RIGHT is released; holding RIGHT and pressing IN is START, with no
+SELECT first. A tap shorter than one poll (`inputdevicepollms`, 90 ms by default) still counts.
+The address is the A0-A2 jumpers' (0x49..0x50, hex or decimal); an address or a bus that another
+device of this build uses there is refused (`anoencoderi2caddr`, `inputbus` and the open), and
+`anoencoderread` answers an error until the encoder is open (`openinput`, or `inputautostart on`
+for every boot, with or without the OLED).
 
 > `opengamepad`, `closegamepad`, and `gamepadautostart` no longer exist - they
 > were replaced by the device-agnostic `openinput` / `closeinput` /
@@ -2481,7 +2514,9 @@ never opens that address there. The same holds for every other device built into
 that bus: the OLED (0x3C/0x3D), the APDS9960 (0x39), the gamepad (0x50) or the ANO encoder (its
 address setting). `encoderaddress`, `encoderbus` and the open refuse the address with one line that
 names the device using it, for example `Error: 0x36 on bus 0 is in use by MAX17048 (LiPo Fuel
-Gauge).` Before it claims a board the device reads the product id (one
+Gauge).` Every other bus command (`oledbus`, `fuelgaugebus`, `inputbus`, `imubus`, `tofbus`, ...)
+checks the same way: a bus where any address the device uses (both of the OLED's, each chip of a
+two-chip board) is taken by another device is refused, and the setting keeps its value. Before it claims a board the device reads the product id (one
 register read, no reset), so a fuel gauge, an ANO encoder or a gamepad at the same address is left
 alone. `i2cscan` reads the product id only where two devices of different products can share the
 address (the encoder's configured address, 0x49 with an ANO or gamepad build), and names the

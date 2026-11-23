@@ -142,6 +142,19 @@ static const uint32_t INPUT_BUTTON_A = 1u << 0;
 static const uint32_t INPUT_BUTTON_B = 1u << 1;
 static const uint32_t INPUT_BUTTON_X = 1u << 2;
 #define INPUT_CHECK(state, btn) (((state) & (btn)) != 0)
+// The shared Yes/No dialog (OLED_Utils.h): it records the question; a case
+// answers Yes by calling the stored callback.
+typedef void (*OledConfirmCallback)(void* userData);
+static std::string gConfirmLine;
+static bool gConfirmDefaultYes = true;
+static OledConfirmCallback gConfirmYes = nullptr;
+static bool oledConfirmRequest(const char* line1, const char*, OledConfirmCallback onYes, void*,
+                               bool defaultYes = true, OledConfirmCallback = nullptr) {
+  gConfirmLine = line1 ? line1 : "";
+  gConfirmDefaultYes = defaultYes;
+  gConfirmYes = onYes;
+  return true;
+}
 static bool gGuest = false;
 static bool oledGuestBlocksMutate() {
   if (!gGuest) return false;
@@ -165,6 +178,9 @@ static void resetWorld() {
   gToastCount = 0;
   sPowerSleepScroll = OledScrollState();
   gGuest = false;
+  gConfirmLine.clear();
+  gConfirmDefaultYes = true;
+  gConfirmYes = nullptr;
 }
 
 static void pressRow(int row, uint32_t button = INPUT_BUTTON_A) {
@@ -248,11 +264,16 @@ static void caseGuestBlocked() {
 static void caseOtherRowsUnchanged() {
   gCase = "other_rows_unchanged";
   resetWorld();
+  // Sleep 20s asks first, defaulting to No (G-49); only Yes runs it.
   pressRow(1);
+  EXPECT(gFireAndForget.empty() && gConfirmYes && !gConfirmDefaultYes && !gConfirmLine.empty(),
+         "Sleep 20s asks first, defaulting to No, ran: " + joined(gFireAndForget) +
+             ", question: '" + gConfirmLine + "'");
+  if (gConfirmYes) gConfirmYes(nullptr);
   pressRow(2);
   EXPECT(gFireAndForget.size() == 2 && gFireAndForget[0] == "lightsleep 20" &&
              gFireAndForget[1] == "oledmode off",
-         "Sleep 20s / Screen Off still run their commands, ran: " + joined(gFireAndForget));
+         "Sleep 20s (after Yes) / Screen Off run their commands, ran: " + joined(gFireAndForget));
   bool powersave = false;
   for (const std::string& line : gSubmitted) powersave = powersave || line.rfind("powersave", 0) == 0;
   EXPECT(!powersave && gWrites.empty(), "the other rows do not touch the power-save timeout");

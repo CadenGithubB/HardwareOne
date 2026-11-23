@@ -4,6 +4,7 @@
 #
 #   tools/vendor_arduino.sh            # vendor + patch + verify (refuses to touch an existing copy)
 #   tools/vendor_arduino.sh --check    # only run the patch verifier on the existing copy
+#   tools/vendor_arduino.sh --compare  # vendor + patch into a temporary folder and diff the existing copy against it
 #   tools/vendor_arduino.sh --force    # move an existing components/arduino aside and re-vendor
 #   tools/vendor_arduino.sh --into DIR # vendor into DIR instead (for reproducing/testing the sequence)
 #
@@ -35,7 +36,8 @@ while [[ $# -gt 0 ]]; do
     --check) MODE="check" ;;
     --force) MODE="force" ;;
     --into) shift; DEST="${1:?--into needs a directory}" ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    --compare) MODE="compare" ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "error: unknown argument $1" >&2; exit 2 ;;
   esac
   shift
@@ -62,6 +64,21 @@ if [[ "$MODE" == "check" ]]; then
   [[ -d "$DEST" ]] || { echo "error: $DEST does not exist; run $0 to vendor it" >&2; exit 1; }
   verify && echo "components/arduino: vendored and patched (OK)"
   exit $?
+fi
+
+if [[ "$MODE" == "compare" ]]; then
+  # --check only proves the patches are present; this also finds any other edit
+  # (or a missing or extra file) in the existing copy. Needs network access.
+  [[ -d "$DEST" ]] || { echo "error: $DEST does not exist; run $0 to vendor it" >&2; exit 1; }
+  fresh="$(mktemp -d)"
+  trap 'rm -rf "$fresh"' EXIT
+  "$0" --into "$fresh/arduino" >/dev/null
+  if diff -rq -x .git "$fresh/arduino" "$DEST"; then
+    echo "$DEST: identical to a fresh vendor + patch (OK)"
+    exit 0
+  fi
+  echo "error: $DEST differs from a fresh vendor + patch (listed above)" >&2
+  exit 1
 fi
 
 for p in "${PATCHES[@]}"; do

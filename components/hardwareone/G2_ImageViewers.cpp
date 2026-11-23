@@ -843,6 +843,9 @@ static void g2CameraStreamWorker(void* arg) {
     // into our pending-tap bitfield. Cleared at exit so late echoes
     // don't pollute a future stream session.
     gCamStreamActive = true;
+    // The live viewfinder holds a stream session (capture dot, power-save
+    // inhibitor) for exactly the life of the loop below.
+    cameraSessionBegin(CameraSessionKind::Stream);
 
     DEBUG_G2F("[G2] Camera stream: dims=%dx%d frags/frame=%u slots=%u cap=%uB",
               (int)streamW, (int)streamH, fragsPerFrame, numSlots,
@@ -1048,6 +1051,7 @@ static void g2CameraStreamWorker(void* arg) {
       vTaskDelay(pdMS_TO_TICKS(toSleepMs));
     }
 
+    cameraSessionEnd(CameraSessionKind::Stream);
     gCamStreamActive     = false;
     gCamStreamPendingTap = 0;
     DEBUG_G2F("[G2] Camera stream: stopped after %d frame(s) (%s)",

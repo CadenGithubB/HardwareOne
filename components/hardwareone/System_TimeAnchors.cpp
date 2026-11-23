@@ -462,12 +462,10 @@ static uint64_t gRetentionFreeAtStart = 0;
 static uint64_t gRetentionLowWater = 0;
 static uint32_t gTickLockMisses = 0;        // tick laps that found the filesystem lock busy
 
+// Captures only: transcripts (stt/) are never removed (B12), so the pass holds
+// no transcript scope.
 static AuthContext retentionAuth(const char* path) {
-  const String p(path);
-  const bool card = p.startsWith("/sd/");
-  if (p.startsWith(card ? "/sd/stt" : "/stt")) {
-    return VFS::systemAuth(card ? VFS::Scopes::TRANSCRIPTS_SD : VFS::Scopes::TRANSCRIPTS, "retention");
-  }
+  const bool card = strncmp(path, "/sd/", 4) == 0;
   return VFS::systemAuth(card ? VFS::Scopes::CAPTURES_SD : VFS::Scopes::CAPTURES, "retention");
 }
 
@@ -609,12 +607,9 @@ static void retentionStep() {
                                                     : LogRetention::kFreeFigureRetryMs;
     if (!gRetentionPass.active()) return;
   }
-  const time_t cutoffTime = now - (time_t)LogRetention::kTranscriptDaysKept * 24 * 3600;
-  struct tm cutoff {};
-  gmtime_r(&cutoffTime, &cutoff);
   char openFile[128] = "";
   if (gSensorLoggingRunning) snprintf(openFile, sizeof(openFile), "%s", gSensorLogPath.c_str());
-  const LogRetention::Limits limits = {today, dayKeyOf(cutoff), gBootCounter, openFile};
+  const LogRetention::Limits limits = {today, gBootCounter, openFile};
   RetentionVfsPort port;
   if (gRetentionPass.step(port, limits) != LogRetention::Step::Finished) return;
   const bool card = gRetentionPass.root()[0] != '\0';

@@ -149,3 +149,34 @@ inline void textNavPage(TextPager& p, bool forward) {
     p.curPage = (p.curPage + 1) % p.pageCount;
   }
 }
+
+// ---- Paging a file of any size by byte ranges --------------------------------
+// A viewer that cannot hold a whole file (serial fileview past its whole-file
+// read) shows one page at a time, read straight from the file. Page k
+// (0-based) nominally starts at k * stride; it really starts just after the
+// first '\n' among the `search` bytes from there (at the nominal start itself
+// when there is none, cutting a very long line), so pages split at line ends
+// and every page's start is found from the bytes at its nominal position
+// alone. Page 0 starts at 0; each page ends where the next one starts.
+inline size_t filePageCount(size_t fileSize, size_t stride) {
+  if (stride == 0) return 1;
+  return fileSize == 0 ? 1 : (fileSize + stride - 1) / stride;
+}
+
+// `window` holds the file's bytes from k * stride on (windowLen of them; only
+// the first `search` are looked at). Returns the page's start offset in the
+// file, at most fileSize.
+inline size_t filePageBoundary(size_t k, size_t stride, size_t fileSize, const char* window,
+                               size_t windowLen, size_t search) {
+  if (k == 0) return 0;
+  const size_t nominal = k * stride;
+  if (nominal >= fileSize) return fileSize;
+  const size_t look = windowLen < search ? windowLen : search;
+  for (size_t i = 0; i < look; ++i) {
+    if (window[i] == '\n') {
+      const size_t at = nominal + i + 1;
+      return at < fileSize ? at : fileSize;
+    }
+  }
+  return nominal;
+}

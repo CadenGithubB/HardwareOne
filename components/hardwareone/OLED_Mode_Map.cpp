@@ -26,6 +26,7 @@
 #include "System_Maps.h"
 #include "System_Mutex.h"   // MapCacheGuard — serialize tile-cache reads vs mapRenderTask
 #include "OLED_Utils.h"
+#include "OLED_HeaderCore.h"  // OledHeaderSpec: popup titles in the header bar
 #include "OLED_UI.h"  // Shared command-failure toasts
 #include "System_FileManager.h"
 #include "i2csensor_seesaw.h"
@@ -332,12 +333,13 @@ static void drawMapInfo() {
     snprintf(buf, sizeof(buf), "Rot: %.0f", gMapRotation);
     oledDisplay->print(buf);
   }
-  
-  oledDisplay->setCursor(90, OLED_CONTENT_HEIGHT + 2);
-  oledDisplay->print("B:OK");
+  // B:OK is the footer's hint (oledMapFooterHint).
 }
 
-// Draw track status overlay
+// Draw track status overlay. Its title ("LIVE TRACKING" / "Track Status") is
+// in the header bar (mapHeaderTitle); the rows run on the 8 px text pitch from
+// the top of the content area, five of them above the 64 px OLED's footer,
+// and B:OK is the footer's hint.
 static void drawTrackStatus() {
   if (!oledDisplay) return;
   const GpsTrackStatus status = GpsTrackManager::readStatus();
@@ -345,19 +347,11 @@ static void drawTrackStatus() {
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
-  int y = OLED_CONTENT_START_Y;
-  oledDisplay->setCursor(0, y);
-  if (status.live) {
-    oledDisplay->print("LIVE TRACKING");
-  } else {
-    oledDisplay->print("Track Status");
-  }
-  
+  const int y = OLED_CONTENT_START_Y;
+  const int step = 8;
   if (status.pointCount == 0 && !status.live) {
-    oledDisplay->setCursor(0, 16);
+    oledDisplay->setCursor(0, y);
     oledDisplay->print("No track loaded");
-    oledDisplay->setCursor(90, OLED_CONTENT_HEIGHT + 2);
-    oledDisplay->print("B:OK");
     return;
   }
   
@@ -365,16 +359,16 @@ static void drawTrackStatus() {
   const char* filename = strrchr(status.filename, '/');
   if (filename) filename++; else filename = status.filename;
   
-  oledDisplay->setCursor(0, 10);
+  oledDisplay->setCursor(0, y);
   oledDisplay->print(filename);
   
-  oledDisplay->setCursor(0, 20);
+  oledDisplay->setCursor(0, y + step);
   snprintf(buf, sizeof(buf), "Points: %d", status.pointCount);
   oledDisplay->print(buf);
   
   const GpsTrackStats& stats = status.stats;
   if (stats.valid) {
-    oledDisplay->setCursor(0, 30);
+    oledDisplay->setCursor(0, y + 2 * step);
     if (stats.totalDistanceM >= 1000.0f) {
       snprintf(buf, sizeof(buf), "Dist: %.2fkm", stats.totalDistanceM / 1000.0f);
     } else {
@@ -382,24 +376,21 @@ static void drawTrackStatus() {
     }
     oledDisplay->print(buf);
     
-    oledDisplay->setCursor(0, 40);
+    oledDisplay->setCursor(0, y + 3 * step);
     int mins = (int)(stats.durationSec / 60);
     int secs = (int)stats.durationSec % 60;
     snprintf(buf, sizeof(buf), "Time: %d:%02d", mins, secs);
     oledDisplay->print(buf);
     
-    oledDisplay->setCursor(64, 40);
+    oledDisplay->setCursor(72, y + 3 * step);
     snprintf(buf, sizeof(buf), "%.1fm/s", stats.avgSpeedMps);
     oledDisplay->print(buf);
   }
   
   // Validation status
-  oledDisplay->setCursor(0, 50);
+  oledDisplay->setCursor(0, y + 4 * step);
   snprintf(buf, sizeof(buf), "Coverage: %.0f%%", status.coveragePercent);
   oledDisplay->print(buf);
-  
-  oledDisplay->setCursor(90, OLED_CONTENT_HEIGHT + 2);
-  oledDisplay->print("B:OK");
 }
 
 // Draw features list overlay
@@ -569,13 +560,12 @@ static void drawRoutes() {
 static void drawWaypointSelect() {
   if (!oledDisplay) return;
   
-  oledDisplay->fillRect(10, 5, 108, 48, DISPLAY_COLOR_BLACK);
-  oledDisplay->drawRect(10, 5, 108, 48, DISPLAY_COLOR_WHITE);
+  // Under the header bar, which shows the popup's title (mapHeaderTitle).
+  oledDisplay->fillRect(10, OLED_CONTENT_START_Y, 108, 42, DISPLAY_COLOR_BLACK);
+  oledDisplay->drawRect(10, OLED_CONTENT_START_Y, 108, 42, DISPLAY_COLOR_WHITE);
   
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(14, 8);
-  oledDisplay->print(gWaypointSelectMode == 1 ? "= Goto WP =" : "= Del WP =");
   
   int activeIdx = 0;
   for (int i = 0; i < MAX_WAYPOINTS; i++) {
@@ -691,13 +681,12 @@ static void scanTrackFiles() {
 static void drawTrackSelect() {
   if (!oledDisplay) return;
   
-  oledDisplay->fillRect(10, 5, 108, 48, DISPLAY_COLOR_BLACK);
-  oledDisplay->drawRect(10, 5, 108, 48, DISPLAY_COLOR_WHITE);
+  // Under the header bar, which shows the popup's title (mapHeaderTitle).
+  oledDisplay->fillRect(10, OLED_CONTENT_START_Y, 108, 42, DISPLAY_COLOR_BLACK);
+  oledDisplay->drawRect(10, OLED_CONTENT_START_Y, 108, 42, DISPLAY_COLOR_WHITE);
   
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(14, 8);
-  oledDisplay->print(gTrackSelectMode == 1 ? "= Load Track =" : "= Delete Track =");
   
   if (gTrackFileCount == 0) {
     oledDisplay->setCursor(14, 22);
@@ -799,6 +788,39 @@ static void executeSubtypeMenuAction(int typeIdx, int action) {
   }
 }
 
+// The header bar's title while a map popup or the track status is open (the
+// popups start under the bar); nullptr = the mode name ("Map"). The names,
+// routes and info overlays keep their own first line.
+static const char* mapHeaderTitle() {
+  if (!gMapMenuOpen || gShowMapInfo || gShowFeatures || gShowRoutes) return nullptr;
+  if (gShowTrackStatus) return GpsTrackManager::isLiveTracking() ? "LIVE TRACKING" : "Track Status";
+  if (gWaypointSelectMode != 0) return gWaypointSelectMode == 1 ? "Goto WP" : "Del WP";
+  if (gTrackSelectMode != 0) return gTrackSelectMode == 1 ? "Load Track" : "Delete Track";
+  if (gMapSubmenuLevel == 0) return "Map Menu";
+  if (gMapSubmenuLevel == 2) {
+    return (gLayerTypeSelectIdx >= 0 && gLayerTypeSelectIdx < gMapLayerTypeCount)
+               ? gMapLayerTypes[gLayerTypeSelectIdx].name : "Types";
+  }
+  switch (gMapSubmenuType) {
+    case MENU_CAT_VIEW: return "View";
+    case MENU_CAT_MAPS: return "Maps";
+#if ENABLE_GPS_SENSOR
+    case MENU_CAT_GPS: return "GPS";
+#endif
+    case MENU_CAT_WAYPOINTS: return "Waypoints";
+    case MENU_CAT_TRACKS: return "Tracks";
+    case MENU_CAT_INFO: return "Info";
+    case MENU_CAT_LAYERS: return "Layers";
+    default: return "Map Menu";
+  }
+}
+
+static void gpsMapHeader(OledHeaderSpec& spec) {
+  if (oledKeyboardIsActive()) return;
+  const char* title = mapHeaderTitle();
+  if (title) spec.text = title;
+}
+
 // Draw the map menu overlay
 static void drawMapMenu() {
   if (!oledDisplay) return;
@@ -833,78 +855,63 @@ static void drawMapMenu() {
     return;
   }
   
-  oledDisplay->fillRect(10, 5, 108, 48, DISPLAY_COLOR_BLACK);
-  oledDisplay->drawRect(10, 5, 108, 48, DISPLAY_COLOR_WHITE);
+  // Under the header bar, which shows the popup's title (mapHeaderTitle).
+  oledDisplay->fillRect(10, OLED_CONTENT_START_Y, 108, 42, DISPLAY_COLOR_BLACK);
+  oledDisplay->drawRect(10, OLED_CONTENT_START_Y, 108, 42, DISPLAY_COLOR_WHITE);
   
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(14, 8);
   
-  // Get current menu items based on submenu level
+  // Current menu items by submenu level (the title is in the header bar).
   const char* const* menuItems;
   int menuItemCount;
-  const char* menuTitle;
   
   if (gMapSubmenuLevel == 0) {
     menuItems = gMapMainMenuItems;
     menuItemCount = gMapMainMenuItemCount;
-    menuTitle = "== Map Menu ==";
   } else if (gMapSubmenuLevel == 2) {
     buildSubtypeMenuItems(gLayerTypeSelectIdx);
     menuItems = gSubtypeMenuPtrs;
     menuItemCount = gSubtypeMenuCount;
-    menuTitle = (gLayerTypeSelectIdx >= 0 && gLayerTypeSelectIdx < gMapLayerTypeCount)
-                  ? gMapLayerTypes[gLayerTypeSelectIdx].name : "== Types ==";
   } else {
-    menuTitle = "== Submenu ==";
     switch (gMapSubmenuType) {
       case MENU_CAT_VIEW:
         menuItems = gViewSubmenu;
         menuItemCount = gViewSubmenuCount;
-        menuTitle = "== View ==";
         break;
       case MENU_CAT_MAPS:
         menuItems = gMapsSubmenu;
         menuItemCount = gMapsSubmenuCount;
-        menuTitle = "== Maps ==";
         break;
 #if ENABLE_GPS_SENSOR
       case MENU_CAT_GPS:
         menuItems = gGpsSubmenu;
         menuItemCount = gGpsSubmenuCount;
-        menuTitle = "== GPS ==";
         break;
 #endif
       case MENU_CAT_WAYPOINTS:
         menuItems = gWaypointsSubmenu;
         menuItemCount = gWaypointsSubmenuCount;
-        menuTitle = "== Waypoints ==";
         break;
       case MENU_CAT_TRACKS:
         menuItems = gTracksSubmenu;
         menuItemCount = gTracksSubmenuCount;
-        menuTitle = "== Tracks ==";
         break;
       case MENU_CAT_INFO:
         menuItems = gInfoSubmenu;
         menuItemCount = gInfoSubmenuCount;
-        menuTitle = "== Info ==";
         break;
       case MENU_CAT_LAYERS:
         buildLayersMenuItems();
         menuItems = gLayersMenuPtrs;
         menuItemCount = gLayersMenuCount;
-        menuTitle = "== Layers ==";
         break;
       default:
         menuItems = gMapMainMenuItems;
         menuItemCount = gMapMainMenuItemCount;
-        menuTitle = "== Map Menu ==";
         break;
     }
   }
-  
-  oledDisplay->print(menuTitle);
   
   const int maxVisible = oledVisibleRows(9, 18 - OLED_CONTENT_START_Y, 4);
   const int itemHeight = 9;
@@ -1599,8 +1606,9 @@ static void executeSubmenuAction(int submenuType, int action) {
           break;
         case 1:  // Toggle GPS
           {
-            if (gGpsRunning) executeOledCommand("closegps");
-            else executeOledCommand("opengps");
+            // The row says "Toggle GPS" without a state: toast the result.
+            if (gGpsRunning) executeOledCommandShowResult("closegps");
+            else executeOledCommandShowResult("opengps");
           }
           break;
         case 2: goBackToMainMenu(); break;  // Back
@@ -2321,7 +2329,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
       // buttons stores active-low (1 = unpressed). Inverting + mask
       // gives "currently pressed" for whichever logical A bit the active
       // input driver uses.
-      aHeld = (~input.buttons & INPUT_MASK(INPUT_BUTTON_A)) != 0;
+      aHeld = (~inputNavButtons(input) & INPUT_MASK(INPUT_BUTTON_A)) != 0;
     }
   }
 #endif
@@ -2441,6 +2449,7 @@ static bool gpsMapInputHandler(int deltaX, int deltaY, uint32_t newlyPressed) {
 // line inside their list.
 const char* oledMapFooterHint() {
   if (!gMapMenuOpen) return "X/Y:Zoom A+J:Rot B:Back";
+  if (gShowMapInfo || gShowTrackStatus) return "B:OK";
   if (gShowFeatures) return "</>:Cat ^v:Scrl B:OK";
   if (gShowRoutes) return "^v:Sel A:Go X:Hl B:X";
   return "A:Select B:Close";
@@ -2458,7 +2467,9 @@ static const OledModeEntry gpsMapOledModes[] = {
     gpsMapInputHandler,
     true,
     50,
-    nullptr  // dynamic hints (menu vs map view)
+    nullptr,  // dynamic hints (menu vs map view)
+    nullptr,  // onEnterFunc
+    gpsMapHeader  // popup titles in the header bar
   }
 };
 

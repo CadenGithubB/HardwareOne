@@ -10,12 +10,12 @@
 //
 // Card layout:
 //   - Status indicator + open/close buttons
-//   - Encoder position (signed integer) + axis indicator (V/H)
+//   - Encoder position (signed integer)
 //   - 5-button D-pad in physical cross layout (UP/LEFT/IN/RIGHT/DOWN)
 //   - START virtual button (synthesized from RIGHT+IN chord)
 //
 // API endpoint: /api/sensors?sensor=anoencoder → JSON from
-// anoEncoderBuildDataJson() — {"valid":..,"connected":..,"ts":..,"pos":N,"axis":0|1,"buttons":B}
+// anoEncoderBuildDataJson() — {"valid":..,"connected":..,"ts":..,"pos":N,"axis":0,"buttons":B}
 
 inline void streamAnoEncoderSensorCard(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"HTML(
@@ -30,7 +30,6 @@ inline void streamAnoEncoderSensorCard(httpd_req_t* req) {
         <div style='display:flex;flex-direction:column;align-items:center;gap:4px'>
           <canvas id='ano-wheel' width='100' height='100' style='border-radius:50%;background:var(--menu-item-bg)'></canvas>
           <div style='font-size:0.75rem;color:var(--text-muted)'>Position: <span id='ano-pos'>0</span></div>
-          <div style='font-size:0.75rem;color:var(--text-muted)'>Axis: <span id='ano-axis'>vertical</span></div>
         </div>
         <div style='display:grid;grid-template-columns:repeat(3,36px);grid-template-rows:repeat(3,36px);gap:4px'>
           <div></div>
@@ -60,7 +59,8 @@ inline void streamAnoEncoderSensorBindButtons(httpd_req_t* req) {
 inline void streamAnoEncoderSensorJs(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "<script>", HTTPD_RESP_USE_STRLEN);
 
-  // Renderer: takes ANO JSON {valid,connected,ts,pos,axis,buttons} and updates the card UI.
+  // Renderer: takes ANO JSON {valid,connected,ts,pos,axis,buttons} and updates the card UI
+  // (axis is always 0: the wheel is the vertical axis).
   // Button bit layout matches i2csensor_ano_encoder.h ANO_BTN_* constants:
   //   IN=bit 0, UP=bit 1, DOWN=bit 2, LEFT=bit 3, RIGHT=bit 4
   //   Virtual START=bit 16 (synthesized from RIGHT+IN chord by the driver).
@@ -69,28 +69,34 @@ inline void streamAnoEncoderSensorJs(httpd_req_t* req) {
     "  try {\n"
     "    if (!j || typeof j !== 'object') return;\n"
     "    ids = ids || {};\n"
-    "    var idData=ids.data||'ano-data', idPos=ids.pos||'ano-pos', idAxis=ids.axis||'ano-axis', idWheel=ids.wheel||'ano-wheel';\n"
+    "    var idData=ids.data||'ano-data', idPos=ids.pos||'ano-pos', idWheel=ids.wheel||'ano-wheel';\n"
     "    var idIn=ids.btnIn||'ano-btn-in', idUp=ids.btnUp||'ano-btn-up', idDown=ids.btnDown||'ano-btn-down', idLeft=ids.btnLeft||'ano-btn-left', idRight=ids.btnRight||'ano-btn-right', idStart=ids.btnStart||'ano-btn-start';\n"
-    "    var hasData = (j.pos !== undefined && j.buttons !== undefined);\n"
-    "    if (!hasData) return;\n"
-    "    var pos = j.pos|0, axis = j.axis|0, b = j.buttons>>>0;\n"
-    "    var dataEl = hw.$(idData);\n"
-    "    if (dataEl) {\n"
-    "      var bHex = '0x' + (b & 0xFFFF).toString(16).toUpperCase().padStart(4,'0');\n"
-    "      dataEl.textContent = 'Pos: ' + pos + '  Axis: ' + (axis ? 'horizontal' : 'vertical') + '  Buttons: ' + bHex;\n"
-    "    }\n"
-    "    var posEl = hw.$(idPos);\n"
-    "    if (posEl) posEl.textContent = pos;\n"
-    "    var axisEl = hw.$(idAxis);\n"
-    "    if (axisEl) axisEl.textContent = axis ? 'horizontal ↔' : 'vertical ↕';\n"
-    "    // Buttons stored active-high in gAnoEncoderCache (bit set = pressed)\n"
-    "    var pins = {in:0, up:1, down:2, left:3, right:4, start:16};\n"
     "    function setBtn(id, p) {\n"
     "      var e = hw.$(id);\n"
     "      if (!e) return;\n"
     "      e.style.background = p ? 'var(--success)' : 'var(--menu-item-bg)';\n"
     "      e.style.color = p ? '#fff' : 'var(--menu-item-fg)';\n"
     "    }\n"
+    "    var dataEl = hw.$(idData);\n"
+    "    var hasData = (j.valid !== false && j.pos !== undefined && j.buttons !== undefined);\n"
+    "    if (!hasData) {\n"
+    "      // Closed (by hand or by the auto-disable) or no reading yet: no button\n"
+    "      // stays lit from the last reading.\n"
+    "      if (j.valid === false) {\n"
+    "        [idIn, idUp, idDown, idLeft, idRight, idStart].forEach(function(id){ setBtn(id, false); });\n"
+    "        if (dataEl) dataEl.textContent = (j.connected === false) ? 'Encoder not open' : 'No reading yet';\n"
+    "      }\n"
+    "      return;\n"
+    "    }\n"
+    "    var pos = j.pos|0, b = j.buttons>>>0;\n"
+    "    if (dataEl) {\n"
+    "      var bHex = '0x' + (b & 0xFFFF).toString(16).toUpperCase().padStart(4,'0');\n"
+    "      dataEl.textContent = 'Pos: ' + pos + '  Buttons: ' + bHex;\n"
+    "    }\n"
+    "    var posEl = hw.$(idPos);\n"
+    "    if (posEl) posEl.textContent = pos;\n"
+    "    // Buttons stored active-high in gAnoEncoderCache (bit set = pressed)\n"
+    "    var pins = {in:0, up:1, down:2, left:3, right:4, start:16};\n"
     "    setBtn(idIn,    !!(b & (1<<pins.in)));\n"
     "    setBtn(idUp,    !!(b & (1<<pins.up)));\n"
     "    setBtn(idDown,  !!(b & (1<<pins.down)));\n"
@@ -143,7 +149,6 @@ inline void streamAnoEncoderSensorJs(httpd_req_t* req) {
     "    '<div style=\"display:flex;flex-direction:column;align-items:center;gap:4px\">'+\n"
     "    '<canvas id=\"'+baseId+'-wheel\" width=\"100\" height=\"100\" style=\"border-radius:50%;background:var(--menu-item-bg)\"></canvas>'+\n"
     "    '<div style=\"font-size:0.75rem;color:var(--text-muted)\">Position: <span id=\"'+baseId+'-pos\">0</span></div>'+\n"
-    "    '<div style=\"font-size:0.75rem;color:var(--text-muted)\">Axis: <span id=\"'+baseId+'-axis\">vertical</span></div>'+\n"
     "    '</div>'+\n"
     "    '<div style=\"display:grid;grid-template-columns:repeat(3,36px);grid-template-rows:repeat(3,36px);gap:4px\">'+\n"
     "    '<div></div><div id=\"'+baseId+'-btn-up\" class=\"btn btn-small\" style=\"font-size:0.7rem;padding:4px\">UP</div><div></div>'+\n"

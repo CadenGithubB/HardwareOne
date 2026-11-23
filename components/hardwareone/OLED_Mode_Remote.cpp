@@ -419,7 +419,7 @@ static void handlePickerInput(uint32_t newlyPressed) {
         snprintf(cmd, sizeof(cmd), "bondconnect " MAC_FMT,
                  MAC_ARGS(dev.mac));
       }
-      executeOledCommand(cmd);
+      executeOledCommandShowResult(cmd);  // the bond comes up later: toast what it did
     }
   }
 }
@@ -477,7 +477,7 @@ static void swapRolesConfirmed(void* userData) {
   if (!oledRunCommand(cmd)) return;
   // Then local
   snprintf(cmd, sizeof(cmd), "bondrole %s", wasMaster ? "worker" : "master");
-  executeOledCommand(cmd);  // the last step: nothing reads its verdict
+  executeOledCommandShowResult(cmd);  // the last step: its result is the toast
 }
 
 static void executeBondAction() {
@@ -504,7 +504,8 @@ static void executeBondAction() {
       bool currentlyOn = isRemoteSensorEnabled(sd.mask);
       char cmd[32];
       snprintf(cmd, sizeof(cmd), "remote:%s%s", currentlyOn ? "close" : "open", sd.id);
-      executeOledCommand(cmd);
+      // The row changes only when the bonded device reports back: toast its reply.
+      executeOledCommandShowResult(cmd);
     } else {
       // Toggle stream: flip the local bondStream* setting
       bool currentlyStreaming = *(sd.streamSetting);

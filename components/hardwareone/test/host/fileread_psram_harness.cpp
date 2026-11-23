@@ -127,7 +127,10 @@ static size_t reportedSize = 0, shortReadLimit = std::numeric_limits<size_t>::ma
 static uint32_t lastSeek = 0;
 static std::vector<std::string> events;
 struct FsLockGuard {
-  explicit FsLockGuard(const char* name) { check(std::strcmp(name, "fileread") == 0, "FS guard tag"); ++fsDepth; }
+  explicit FsLockGuard(const char* name) {
+    check(std::strcmp(name, "fileread") == 0 || std::strcmp(name, "fileview") == 0, "FS guard tag");
+    ++fsDepth;
+  }
   ~FsLockGuard() { --fsDepth; events.push_back("unlock"); }
 };
 class File {
@@ -160,6 +163,11 @@ static void broadcastOutput(const char* text){broadcasts.emplace_back(text);}
 template<class... Args>static void cliHintf(const char*,Args...){ }
 static bool readTextLimited(const char*,String& text,size_t cap,const AuthContext&){++viewReads;text=fileBytes.substr(0,cap);return true;}
 static void captureCryptoRevealText(String&){ }
+// A large file's pages reveal sealed rows through the bounded overload; these
+// fixtures are never sealed, so the magic check is all that runs.
+static bool captureCryptoIsMagicLine(const char* line){return std::strncmp(line,"#HW1ENC",7)==0;}
+static size_t captureCryptoRevealCapacity(const char*,size_t length){return length+1;}
+static bool captureCryptoRevealText(char*,size_t&,size_t,size_t* =nullptr){return true;}
 namespace VFS {
 static bool existsGuarded(const String&,const AuthContext& ctx){check(&ctx==&auth,"fileview preserves caller identity");++existsCalls;return fileExists;}
 static File openGuarded(const String& path, const char* mode, const AuthContext& ctx) {
@@ -544,6 +552,29 @@ int main(int argc, char** argv) {
     check(view({String("/small.json")})=="[FS] File displayed"&&
               lastAllocationSize["fs.fileview.body"]==indented.size()+indented.size()/200+16,
           "a small re-indented body is sized from the counted output");
+
+    // A file past the whole-file read (the boot debug file, a long log) is
+    // paged straight from the file: every page splits at a line end and the
+    // pages put together are the whole file, each line once, to its end.
+    std::string large;
+    for(int i=0;large.size()<70000;++i) large+="row "+std::to_string(i)+" "+std::string(size_t(i%90),'x')+"\n";
+    fixture(large);
+    std::string rebuilt;int pages=0;
+    for(int p=1;p<200;++p){
+      const std::string reply=view({String("/big.log"),String(std::to_string(p))});
+      if(reply!="[FS] File displayed"){
+        check(p>1&&reply.find("out of range")!=std::string::npos,"paging a large file stops past its last page");
+        break;
+      }
+      check(headerHas("read page by page"),"a large file's header says it is read page by page");
+      std::string page;
+      for(size_t i=1;i<broadcasts.size();++i){if(i>1)page+='\n';page+=broadcasts[i];}
+      rebuilt+=page+"\n";++pages;
+    }
+    check(rebuilt==large,"the pages of a large file put together are the whole file");
+    check(pages==int((large.size()+2799)/2800),"a large file's page count follows the page stride");
+    check(view({String("/big.json")})=="[FS] File displayed"&&headerHas(", shown as stored)"),
+          "a large JSON file is paged as stored (re-indenting needs the whole file)");
     for(const char* path:{"/stt/u2/session.txt","/sd/stt/u2/session.txt"," //./stt//u2/session.txt "}) {
       fixture("words: \"quoted\"\n");
       checkPayload(invoke(path),fileBytes,path,0,true,true);

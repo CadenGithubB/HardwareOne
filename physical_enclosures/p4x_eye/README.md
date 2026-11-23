@@ -7,8 +7,9 @@ steps, and support, slider and lid guides updated together to retain the
 reviewed **0.25 mm nominal per-side clearances**. Use **all six R26 files
 together**. See [R26 changes and verification](R26_SLEEVE_CONTINUITY.md),
 [R25 changes](R25_MANUFACTURING_REFINEMENT.md),
-[R26 dimensions](dimensions-r26.json), and the
-[assembly and finish drawing](output/pdf/p4x-eye-r26-pcbway-assembly.pdf).
+[R26 dimensions](dimensions-r26.json), and the assembly and finish drawing
+(`output/pdf/p4x-eye-r26-pcbway-assembly.pdf`, made by `tools/make_assembly_pdf.py`;
+`output/` is not tracked).
 
 The button arms remain 1 mm thick x 2 mm wide. The battery compartment remains
 11 mm high, including 0.5 mm below and above the nominal 10 mm pack. Full varnish

@@ -23,7 +23,59 @@ SemaphoreHandle_t i2sMicMutex = nullptr;
 // Initialization
 // ============================================================================
 
+// S-14: the filesystem lock's current holder and the longest hold this boot.
+// Written only by the task that holds the lock (take and release), read
+// without a lock by fsLockHolder. A copy of the owner tag, so a caller's
+// temporary text is never read after the guard is gone. PSRAM where there is
+// some (a few dozen bytes, touched once per take and release).
+struct FsLockHolderState {
+  char     owner[24];
+  uint32_t sinceMs;
+  bool     held;
+  char     longestOwner[24];
+  uint32_t longestMs;
+};
+EXT_RAM_BSS_ATTR static FsLockHolderState sFsHolder;
+
+static void copyLockOwner(char* out, size_t cap, const char* owner) {
+  strlcpy(out, (owner && owner[0]) ? owner : "?", cap);
+}
+
+static void fsHolderTaken(const char* owner) {
+  copyLockOwner(sFsHolder.owner, sizeof(sFsHolder.owner), owner);
+  sFsHolder.sinceMs = millis();
+  sFsHolder.held = true;
+}
+
+static void fsHolderReleased() {
+  if (!sFsHolder.held) return;
+  const uint32_t heldMs = millis() - sFsHolder.sinceMs;
+  if (heldMs >= sFsHolder.longestMs) {
+    sFsHolder.longestMs = heldMs;
+    memcpy(sFsHolder.longestOwner, sFsHolder.owner, sizeof(sFsHolder.longestOwner));
+  }
+  sFsHolder.held = false;
+}
+
+void fsLockHolder(FsLockHolderInfo* out) {
+  if (!out) return;
+  const bool held = sFsHolder.held;
+  if (held) {
+    memcpy(out->owner, sFsHolder.owner, sizeof(out->owner));
+    out->heldMs = millis() - sFsHolder.sinceMs;
+  } else {
+    out->owner[0] = '\0';
+    out->heldMs = 0;
+  }
+  out->owner[sizeof(out->owner) - 1] = '\0';
+  memcpy(out->longestOwner, sFsHolder.longestOwner, sizeof(out->longestOwner));
+  out->longestOwner[sizeof(out->longestOwner) - 1] = '\0';
+  out->longestMs = sFsHolder.longestMs;
+}
+
 void initMutexes() {
+  FsLockGuard::noteTaken = fsHolderTaken;
+  FsLockGuard::noteReleased = fsHolderReleased;
   // Create standard mutexes
   gFsMutex = xSemaphoreCreateMutex();
   gJsonResponseMutex = xSemaphoreCreateMutex();
@@ -86,12 +138,14 @@ FsLockGuard::FsLockGuard(const char* owner, TickType_t timeoutTicks) : held(fals
     }
     if (xSemaphoreTake(gFsMutex, timeoutTicks) == pdTRUE) {
       held = true;
+      if (noteTaken) noteTaken(owner);
     }
   }
 }
 
 FsLockGuard::~FsLockGuard() {
   if (held && gFsMutex) {
+    if (noteReleased) noteReleased();
     xSemaphoreGive(gFsMutex);
   }
 }
@@ -100,11 +154,13 @@ FsLockGuard::~FsLockGuard() {
 void fsLock(const char* owner) {
   if (gFsMutex && !isHeldByCurrentTask(gFsMutex)) {
     xSemaphoreTake(gFsMutex, portMAX_DELAY);
+    if (FsLockGuard::noteTaken) FsLockGuard::noteTaken(owner);
   }
 }
 
 void fsUnlock() {
   if (gFsMutex && isHeldByCurrentTask(gFsMutex)) {
+    if (FsLockGuard::noteReleased) FsLockGuard::noteReleased();
     xSemaphoreGive(gFsMutex);
   }
 }

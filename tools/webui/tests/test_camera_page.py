@@ -30,7 +30,8 @@ function node(x){var n=typeof x==='string'?nodes[x]:x;if(!n)throw new Error('Mis
 var pending={then:function(){return this;},catch:function(){return this;}};
 var document={activeElement:null,createElement:function(){return makeNode('option');},addEventListener:function(){}};
 var window={};
-var console={log:function(){},warn:function(){},error:function(){}};
+// Quiet log, but warnings and errors are kept and fail the run (G-18).
+var consoleProblems=[];var console={log:function(){},warn:function(){consoleProblems.push('console.warn: '+Array.prototype.join.call(arguments,' '));},error:function(){consoleProblems.push('console.error: '+Array.prototype.join.call(arguments,' '));}};
 var hw={
   $:node,setText:function(x,v){node(x).textContent=v;},
   hide:function(x){node(x).style.display='none';},on:function(){},
@@ -123,6 +124,7 @@ check(optionIds()==='','lost capability data left stale options');
 disabled('camera-quality',true);disabled('camera-framesize',true);disabled('btn-hmirror',true);
 var before=sent.length;applyCameraAdjustment('cameraquality',12);
 check(sent.length===before,'unknown capabilities dispatched quality');
+failures=failures.concat(consoleProblems);
 if(failures.length)throw new Error(failures.join('\n'));
 """
 

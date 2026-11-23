@@ -111,7 +111,8 @@ var hw={
   on:function(){},fetchJSON:function(){return pending;},pollJSON:function(){},
   fetchText:function(){return {then:function(fn){loaded=fn;return pending;}};}
 };
-var console={log:function(){},warn:function(){},error:function(){}};
+// Quiet log, but warnings and errors are kept and fail the run (G-18).
+var consoleProblems=[];var console={log:function(){},warn:function(){consoleProblems.push('console.warn: '+Array.prototype.join.call(arguments,' '));},error:function(){consoleProblems.push('console.error: '+Array.prototype.join.call(arguments,' '));}};
 eval(slurp(__argv[0]));
 if(typeof loaded!=='function')throw new Error('Missing log fetch callback');
 loaded(slurp(__argv[2]));
@@ -140,6 +141,7 @@ if(rows.length===2){
   check(rows[1].children[2].textContent==='<b onmouseover=1>plug</b>','cell text: '+rows[1].children[2].textContent);
 }
 check(node('bat-log-info').textContent==='2 samples','log info: '+node('bat-log-info').textContent);
+failures=failures.concat(consoleProblems);
 if(failures.length)throw new Error(failures.join('\n'));
 __out('BATTERY_LOG_TABLE PASS');
 """

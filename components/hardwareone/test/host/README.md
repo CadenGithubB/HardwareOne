@@ -25,6 +25,26 @@ and logging-UI suites run those renderers through the same primitive
 (`oled_text_field_op_double.h` for op-recording canvases). See
 [OLED list text](../../../../docs/OLED_LIST_TEXT.md).
 
+## OLED header status bar
+
+`python3 components/hardwareone/test/host/test_oled_header.py` compiles the
+shipping `OLED_HeaderCore.h` unchanged over a GFX double with the shipping
+`glcdfont.c` (ASan/UBSan). It checks the layout rules for every combination of
+Power, Notify, Rec, Busy and Context widths and title lengths 0-24 (slots
+packed 3 px apart inside 0-127, only Context drops, a dropped item never
+outranks a shown one, nothing moves and the title never grows when Busy comes),
+the title cut (one-cell `…` mark, `KeepPrefix` for paths, the shared
+sanitizer), the Power text from the shared battery backend (hidden on a board
+with no battery measurement), the staleness signature, that every lit pixel in
+rows 1-8 belongs to exactly one region, and seven golden frames byte for byte.
+The on-screen keyboard's top line (the core's second profile: prompt, then
+Mode, Rec, Busy from the right) gets the same checks and four golden frames.
+The band guard scans the in-frame OLED painters for a draw at a literal y of
+0-9 (literal coordinates only; computed ones are caught on the device by the
+`DEBUG_DISPLAY` band check), and the wiring of the capture dot, the keyboard
+poll and `oleddump` is checked in the sources.
+The `oledIsDirty` side of the staleness poll is in `test_millis_deadlines.py`.
+
 ## OLED CLI Output and its console history
 
 `python3 components/hardwareone/test/host/test_oled_console_buffer.py` executes
@@ -122,6 +142,12 @@ Node.js is required for the four browser suites (`map_live_browser`,
 `g2_status_browser`, `sensor_mic_card`, `logging_system_config_browser`). Set `HW1_NODE_EXECUTABLE` at configure
 time if it is outside PATH. Without it they stay registered but are reported as
 not run (disabled), so a green run then covers the remaining suites only.
+
+The Python tool suites run in ctest as well: `tools_ota_unittests`,
+`tools_webui_unittests` and `tools_model_unittests` each run
+`python3 -m unittest discover -s tools/<suite>/tests -t .` from the repository
+root. The web UI page harnesses use the first JavaScript engine they find
+(`tools/webui/js_engine.py`); with `HW1_NODE_EXECUTABLE` set, that is Node.js.
 
 ## Map live recording
 
@@ -695,12 +721,12 @@ is listed by name (`getNextFileName`), opening only the file it removes. Run wit
 
 `log_retention` compiles `System_LogRetentionCore.h` as it is and runs it on an
 in-memory volume: the water marks and the low/high latch; secondary files of the
-oldest day first, one day a pass; the three newest stored days, the eight newest
-transcripts, the open session, today's folder, dot, `.tmp` and `.bak` files,
-notes and everything outside the two capture trees never removed; health files
-of the fourteen newest stored days kept; earlier unanchored boot folders before
-transcripts; a transcript that cannot be removed passed over; the "recent"
-horizons at least the catch-up ledger's (read from `System_CatchupLedger.cpp`);
+oldest day first, one day a pass; the three newest stored days, every
+transcript and note (B12), the open session, today's folder, dot, `.tmp` and
+`.bak` files and everything outside the capture tree never removed; health
+files of the fourteen newest stored days kept; earlier unanchored boot folders
+before the health round; the "recent" day horizon at least the catch-up
+ledger's (read from `System_CatchupLedger.cpp`);
 and the per-step bounds on listing and removal. Run with
 `ctest --test-dir build -R '^log_retention$' --output-on-failure`.
 
@@ -1853,6 +1879,29 @@ It does not look for a Wi-Fi network name or a password, because a tracked
 test cannot name them. `--repo <dir>` checks another checkout; the tree before
 this gate fails with one hit (a home subnet quoted in the readiness appendix).
 
+## Markdown link check
+
+```sh
+python3 components/hardwareone/test/host/test_doc_links.py
+```
+
+`doc_links` reads every tracked Markdown file (not `components/hardwareone_libs`,
+managed components or `experiments/`), skips fenced code, and fails on a
+`[text](target)` link that is an absolute path (`/private/tmp/...`) or a
+relative path with no tracked file or folder behind it. URLs and in-page
+anchors are not checked. A file a tool makes (not tracked) is named in code
+text, not linked. Readiness G-22; the tree before it had ten such links.
+
+## Licence notice check
+
+```sh
+python3 components/hardwareone/test/host/test_notice_components.py
+```
+
+`notice_components` reads every `dependencies.lock*` and fails when a locked
+registry component (`  <owner>/<name>:`) is not named in `NOTICE.md`, so a new
+managed component cannot ship without its licence row. Readiness G-05/DELTA-6.
+
 ## Repository tool pins
 
 ```sh
@@ -2147,7 +2196,8 @@ so the command guest surface decides. Every other POST (`/api/cli/batch`
 included) and the file, log, capture and admin GETs get one 403 whose JSON
 carries `code:"guest_forbidden"` and the sentence a page shows
 (`error:"Guest accounts are view-only"`). An unresolvable account is refused;
-users and administrators are never stopped by the gate.
+an administrator is never stopped by the gate, a user only by the admin-only
+reads (below).
 
 `web_guest_view_browser` runs the two shipping helper scripts every signed-in
 page gets (the role/theme script with `hw.applyGuestViewOnly`, the fetch
@@ -2159,6 +2209,37 @@ JSON; a refused page load (GET) is no popup and rejects with the sentence and
 403 for the page's own state; a non-guest 403 on a non-command POST and a
 `hwQuietRefusal` read are not popups. `--component <dir>` reads another tree;
 the pre-B6 sources fail both suites.
+
+### Guest privacy (owner, 2026-11-22)
+
+```sh
+python3 components/hardwareone/test/host/test_web_guest_settings_view.py
+python3 components/hardwareone/test/host/test_web_guest_private_pages.py
+```
+
+`web_guest_gate` also covers the private reads: for a guest the ESP-NOW
+message history, the ring's health status and the LLM chat (turns and the
+streamed answer) get a 403 with `code:"guest_private"` and
+`error:"Not available to guests"`; the message history is admin-only, so a
+user gets a 403 with `code:"admin_required"` there (and only there), and an
+administrator reads it.
+
+`web_guest_settings_view` compiles `guestview::reduceSettingsForGuest`
+(`WebServer_GuestSettingsView.h`) with the vendored ArduinoJson: the guest's
+`/api/settings` view drops `network.wifi.networks` and shows
+`(not shown to guests)` for the MQTT host and user name and the LLM gateway
+URL, leaving every other value; an empty value stays empty. Source checks pin
+the table's paths to the settings modules' sections and groups, the guest-only
+call in `handleSettingsGet`, and the MQTT page's guest-aware, escaped host and
+user cells.
+
+`web_guest_private_pages` runs the R1 Health page script and the ESP-NOW
+message poll on the shipping fetch helpers against a fake DOM and fetch (Node.js
+or `jsc`, 77 without): a guest's health page says "Health data is not available
+to guests." and starts no poll; the conversation logs say the history is not a
+guest's (or is for administrators only, for a user), polling stops, and the
+panels drawn later read the same sentence; an administrator's pages render and
+keep polling. The pre-change page scripts fail it.
 
 ## Continuous STT trim default
 
@@ -4268,7 +4349,9 @@ and warning stand. The logs replies are those of before; the state document
 is built with `System_MQTTPayloadCore.h` and carries `deviceName`,
 `deviceNameSet` and `system.psram_free`/`psram_total`. The kept
 logs block keeps its own size: after a larger `gWebMirrorCap`, a poll fills it
-only to that size. Source
+only to that size. A poll that sends `?since=` with the mirror's current change
+counter gets 204 with no body and no copy; any other poll gets the whole mirror
+and its counter in `X-HW1-Log-Seq` (S-13). Source
 contract: `stopMqttNow` releases the state buffer on both of its finished
 paths. It takes `--cxx`, `--sanitize` and `--component <directory>`.
 
@@ -5737,18 +5820,32 @@ The checks:
   over-long reply stays bounded.
 - The background `executeOledCommand` (OLED background commands, step 1): the press queues
   at once and sets the busy flag; a second press, or an `oledRunCommandAsync`, is refused
-  with "Busy" and queues nothing; success toasts the reply without its `OK:`/`SUCCESS:` lead
-  ("Done" for a bare OK, nothing or JSON; the first line or sentence of a long one); admin,
+  with "Busy" and queues nothing; a success shows no toast (owner 2026-11-22: failures
+  only), while `executeOledCommandShowResult` (screens that do not show the result) toasts
+  the reply without its `OK:`/`SUCCESS:` lead ("Done" for a bare OK, nothing or JSON; the
+  first line or sentence of a long one); admin,
   super-admin and other refusals keep their short reason; 60 s without a reply toasts the
   timeout and the late reply shows nothing (its mailbox freed); a replaced session sees
   nothing; an empty line is refused at the press; the line is wiped when it ends; off the
   display task the action waits on the checked executor as before.
+- The value-scroll rows (OLED background commands, step 2: FM tune, LED brightness;
+  `oledValueScrollStep` on the production `OLED_ValueScroll.h`): a step is shown at once and
+  sent at once when the slot is free; steps while it runs are neither sent nor refused
+  "Busy", and only the newest goes out on the frame the running one ends (four steps, two
+  commands); a step while another screen's command runs waits silently and goes out after
+  it; a refusal toasts its reason and gives the row back to the device, unless a newer value
+  waits (that one is still sent); after a success the row keeps its value until the device
+  shows it or 1.5 s pass, then follows the device; a replaced session's step shows nothing,
+  and a value still waiting at a display session boundary (behind the row's own command or
+  another screen's) is dropped, never sent as the new user (statically:
+  `oledResetLocalDisplaySessionTransients` calls `oledValueScrollSessionBoundary`).
 - Static: the Automations, Logging and Network screens, the Quick Settings section and the
   unavailable-page / Web Stats actions (`handleOledActionButton`) no longer fire commands
   whose reply is dropped, and their `broadcastOutput` success lines are conditional. The
   Quick Settings section never calls the waiting `oledRunCommand`; `executeOledCommand`
   runs in the background; `oledUpdate` delivers the command in flight whether the panel
-  runs or not and `updateOledDisplay` draws its busy mark; every `oledRunCommand` call on an
+  runs or not, then sends a value-scroll row's waiting value, and `updateOledDisplay` draws
+  its busy mark; every `oledRunCommand` call on an
   OLED screen (`OLED_*.cpp`, `i2csensor_*_oled.h`) uses its verdict or is a
   `(void)oledRunCommand(...);  // waits: <why>` line (the step-2 list).
 
@@ -5777,7 +5874,8 @@ The checks:
 - "Power Saving" submits `powersave <next step>`: a non-admin is refused ("Admin required"
   toast, value kept); an admin moves along the ladder (10 -> 15, 60 -> Off, Off -> 1, an
   off-ladder value -> 1) with one audit record and no direct write.
-- A guest is still blocked ("View-only"); Sleep 20s and Screen Off run their commands as before.
+- A guest is still blocked ("View-only"); Sleep 20s asks first, defaulting to No (G-49), and runs
+  `lightsleep 20` only on Yes; Screen Off runs its command as before.
 - Static: no `OLED_Mode_*.cpp` calls `setSetting`, and the `powersave` row is admin-only.
 
 `--component`/`--source-dir` point it at another tree; the f4cc542 sources fail it (the row
@@ -7593,7 +7691,9 @@ and the admin gate on every poll are covered. The page script is `tools/webui/te
 
 `notification_low_resource_rules` compiles the rule switch, tiers, message formatter and cooldown check of
 `System_Notifications.cpp`: `heap_low` and `fs_low_space` have the queue and toast sinks at level 2, a
-10-minute cooldown that the (now 32-bit) rule field holds, and texts that fit the 64-byte buffer.
+10-minute cooldown that the (now 32-bit) rule field holds, and texts that fit the 64-byte buffer. The EVT-2
+faults (`sd_write_failed`, `settings_save_failed`, `sensor_fault`, `wifi_connect_failed`, `g2_disconnected`)
+have the queue and toast sinks, no banner, their cooldowns and their own sentences.
 
 `memreport_table` compiles `System_MemReportCore.h` with the real ArduinoJson: every row of the field table
 appears in the text and the JSON form, a zero total prints 0 % without a division, the heading says MEMORY REPORT

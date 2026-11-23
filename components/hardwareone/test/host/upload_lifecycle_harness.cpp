@@ -77,6 +77,7 @@ static int xSemaphoreTake(SemaphoreHandle_t, TickType_t) { check(!ownsFs, "nonre
 static void xSemaphoreGive(SemaphoreHandle_t) { check(ownsFs, "unowned mutex release"); ownsFs = false; ++gives; }
 // INSERT_FS_GUARD
 
+static constexpr size_t kReserve = 100 * 1024;  // VFS::logReserveBytes()
 struct Controls {
   bool auth = true, guestAllowed = true, sd = true, import = true, admin = true;
   bool openFails = false, parentExists = true, shortWrite = false, cleanupUser = true, cleanupSystem = true;
@@ -237,6 +238,8 @@ static void invalidateStatsSnapshot(StorageType type) {
   metrics.snapshotInvalidations.push_back(int(type)); metrics.promotionsAtInvalidation = metrics.promotions;
 }
 static bool getStats(StorageType, uint64_t& total, uint64_t& used, uint64_t& free) { io(); free = control.freeBytes; total = free * 2; used = free; return true; }
+// FILE-3: the shared LittleFS reserve an upload leaves free (a card keeps none).
+[[maybe_unused]] static size_t logReserveBytes() { return kReserve; }
 static bool existsGuarded(const String&, const AuthContext&) { io(); return control.parentExists; }
 static bool mkdirGuarded(const String&, const AuthContext&) { io(); ++metrics.mkdirs; return true; }
 static File openGuarded(const String& path, const char* mode, const AuthContext& ctx, bool create) {
@@ -438,7 +441,7 @@ int main(int argc, char** argv) {
   add("disconnect after open before flush", "disconnect", [] { control.disconnectAt = 60; auto req = request("/user/upload.txt", std::string(100, 'a')); failed(req, "Recv error"); check(metrics.writes == 0 && metrics.closes == 1 && files.empty(), "failed empty opened upload removed"); });
   add("disconnect after written chunk", "disconnect", [] { control.disconnectAt = 8192; auto req = request("/user/upload.txt", std::string(12000, 'a')); failed(req, "Recv error"); check(metrics.writes > 0 && files.empty(), "disconnected upload left partial file"); check(metrics.cleanupUsers == std::vector<std::string>{"alice"}, "cleanup uses original user"); });
   add("short write", "write", [] { control.shortWrite = true; auto req = request(); failed(req, "short write"); check(files.empty() && metrics.closes == 1, "short write removed and closed"); });
-  add("storage exceeded", "write", [] { control.freeBytes = 5000; auto req = request("/user/upload.txt", std::string(5600, 'a')); failed(req, "Insufficient storage space"); check(files.empty() && metrics.writes == 2, "space exhaustion cleans streamed data"); });
+  add("storage exceeded", "write", [] { control.freeBytes = kReserve + 5000; auto req = request("/user/upload.txt", std::string(5600, 'a')); failed(req, "Insufficient storage space"); check(files.empty() && metrics.writes == 2, "space exhaustion cleans streamed data"); });
   add("cleanup system fallback", "disconnect", [] { control.cleanupUser = false; control.disconnectAt = 8192; auto req = request("/user/upload.txt", std::string(12000, 'a')); failed(req, "Recv error"); check(files.empty() && metrics.cleanupUsers == std::vector<std::string>({"alice", "system"}), "cleanup uses same-user then established system fallback"); });
   add("both cleanup attempts fail", "disconnect", [] { control.cleanupUser = control.cleanupSystem = false; control.disconnectAt = 8192; auto req = request("/user/upload.txt", std::string(12000, 'a')); failed(req, "Recv error"); check(files.size() == 1 && metrics.cleanupUsers == std::vector<std::string>({"alice", "system"}), "cleanup refusal remains a failed upload"); });
   add("text plus and percent decoding", "text", [] { control.chunkSize = 1; auto req = request("/user/space name.txt", "a b%&+\r\nz"); auto at = req.body.find("a%20b"); req.body.replace(at, 5, "a+b"); req.content_len = req.body.size(); succeeded(req, "/user/space name.txt", "a b%&+\r\nz"); });
@@ -562,10 +565,16 @@ int main(int argc, char** argv) {
     auto req = rawRequest("/user/upload.bin", "abc"); req.query.clear(); failed(req, "Missing ?path= for a raw upload");
     check(metrics.allocations == 0 && metrics.opens == 0 && metrics.receives == 0, "refused before allocation, open or receive"); });
   add("raw body admission counts the body as the file size", "raw", [] {
-    control.freeBytes = 1000; auto req = rawRequest("/user/upload.bin", std::string(901, 'r')); failed(req, "File too large");
+    control.freeBytes = kReserve + 900; auto req = rawRequest("/user/upload.bin", std::string(901, 'r')); failed(req, "File too large");
     check(metrics.allocations == 0, "size rejected before allocation"); });
-  add("raw body that fits 90 % of free space is admitted", "raw", [] {
-    control.freeBytes = 1000; auto req = rawRequest("/user/upload.bin", std::string(900, 'r')); succeeded(req, "/user/upload.bin", std::string(900, 'r')); });
+  add("raw body that fits above the reserve is admitted", "raw", [] {
+    control.freeBytes = kReserve + 900; auto req = rawRequest("/user/upload.bin", std::string(900, 'r')); succeeded(req, "/user/upload.bin", std::string(900, 'r')); });
+  // FILE-3: LittleFS keeps the shared reserve free; a card has none to keep.
+  add("raw body that would eat into the flash reserve is refused", "raw", [] {
+    control.freeBytes = kReserve; auto req = rawRequest("/user/upload.bin", "a"); failed(req, "File too large");
+    check(metrics.allocations == 0, "size rejected before allocation"); });
+  add("raw body to SD may use all of the card's free space", "raw", [] {
+    control.freeBytes = 900; auto req = rawRequest("/sd/upload.bin", std::string(900, 'r')); succeeded(req, "/sd/upload.bin", std::string(900, 'r')); });
   // Free space above 4 GiB (an SD card). The handler keeps these sizes in 64
   // bits; on the device size_t is 32 bits, where a narrowed figure left 5000
   // bytes here and stopped the stream ("Insufficient storage space"), and
@@ -575,7 +584,7 @@ int main(int argc, char** argv) {
   add("raw body with more than 4 GiB free is admitted and streamed", "raw", [] {
     control.freeBytes = (static_cast<size_t>(4) << 30) + 5000; const std::string bytes(6000, 'r');
     auto req = rawRequest("/user/upload.bin", bytes); succeeded(req, "/user/upload.bin", bytes); });
-  add("the 90 % rule holds at 1 GiB free", "raw", [] {
+  add("a 200 KB body is admitted at 1 GiB free", "raw", [] {
     control.freeBytes = static_cast<size_t>(1) << 30; const std::string bytes(200000, 'r');
     auto req = rawRequest("/user/upload.bin", bytes); succeeded(req, "/user/upload.bin", bytes); });
   add("raw empty body creates an empty file", "raw", [] {

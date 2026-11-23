@@ -21,12 +21,110 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this section collects
 everything user-visible since the v0.99.99.1 tag.
 
+### Changed (events, notifications and retention)
+- A commanded Wi-Fi disconnect (`wifidisconnect`, `closewifi`, `radiopower off`) posts
+  `wifi_disconnected` once, from the radio's own event with the network name and reason; it used to
+  be posted twice (EVT-4). A stopped connect attempt with no link still posts it once.
+- `sd_write_failed`, `settings_save_failed`, `sensor_fault`, `wifi_connect_failed` and
+  `g2_disconnected` now reach the notification centre and show a toast, rate-limited (one a minute;
+  `wifi_connect_failed` one in 10 minutes, `g2_disconnected` one in 30 s) (EVT-2).
+- The low-storage notice (`fs_low_space`) comes once per low episode instead of once per boot: once
+  space is back it warns again the next time it runs low (B10).
+- `setting_changed` names the setting by its command name (for example `bleautostart`), not by its
+  label, which nine settings shared; renaming the device posts it once (it was posted twice), and
+  debug settings post it too (SET-6).
+- Transcripts are never removed by the storage clean-up any more (B12): only old sensor logs and
+  then old health files go. A volume too full for a transcript refuses it with "Transcript storage
+  full or unavailable".
+- A refused `openg2` (for example "already connected") no longer switches the saved Bluetooth mode
+  to client; it is saved only once a connect starts (RAD-6).
+- Bond mode is marked experimental for 1.0 in `bondconnect`, `bondstatus` and
+  `espnowbondmodeenabled` help, the Bonded Device web page and the docs (D3). No behaviour change.
+
+### Fixed (ANO rotary encoder)
+- A RIGHT tap is SELECT, sent when RIGHT is released; holding RIGHT and pressing IN is START only.
+  RIGHT used to fire SELECT the moment it was pressed, so outside the menu every RIGHT press
+  jumped to Quick Settings and the START chord always opened Quick Settings first (and the chord's
+  IN also counted as A). RIGHT is SELECT only: it no longer also moves right in the modes that read
+  a right step (one tap did two things there). Owner decision 2026-11-22.
+- Taps shorter than one poll (90 ms) are no longer lost: the poll reads the seesaw's change flags
+  and counts a button that was released at both reads with its flag set as one press. A press
+  that lands between the buttons read and the flags read is still counted once, not twice.
+- An unplugged or failing board is now seen: every read is checked (buttons, change flags, the
+  wheel's delta), so the I2C health records and the auto-disable after repeated failures work,
+  and a failed read no longer turns into phantom buttons or a burst of scroll steps.
+- `inputautostart on` now starts the ANO at boot without the OLED (it used to start only through
+  the OLED's boot and menu path); the menu path no longer asks again while that start is queued.
+- Reopening the ANO after `inputbus` moved it now talks to the new bus (the seesaw object stayed on
+  the first bus's wires). The bus and the address are taken at `openinput` and kept until the next.
+- The board is begun once (it was reset three times while holding the bus for up to 3 s).
+
+### Changed (ANO rotary encoder)
+- New `anoencoderstatus [json]`: connected, product, bus, address, poll interval, rotation,
+  button swaps and start at boot (schema 1, `docs/APP_JSON_CONTRACT.md`).
+- `anoencoderi2caddr` takes 0x49..0x50 in hex or decimal (the A0-A2 jumpers), refuses an address
+  another device of this build uses on the input bus, and applies at the next `openinput` (it said
+  "reboot required"); the setting has a list of the eight addresses on the Settings page.
+- `anoencoderread` no longer opens the board by itself: while the encoder is closed it answers
+  "Error: The ANO encoder is not open. Start it with 'openinput' ...". Its text reply names the
+  buttons held; the rotary "axis" (always vertical since the RIGHT-tap toggle was removed) is gone
+  from the web card, the G2 page and the OLED's remote view. The reading's wire format is
+  unchanged: `axis` stays in the JSON as 0 and `buttons` keeps the device-native bits.
+- `/api/sensors?sensor=anoencoder` answers the shared reading envelope in every case (it answered
+  `{"val":0,"error":...}` when closed or not built). On/off arguments of `anoencoderinvert`,
+  `anoencoderswapud`, `anoencoderswaplr` and `inputautostart` use the shared parser and reply.
+
+### Changed (I2C buses and addresses)
+- Every `<device>bus` command (`oledbus`, `fuelgaugebus`, `inputbus`, `imubus`, `tofbus`,
+  `thermalbus`, `apdsbus`, `gpsbus`, `fmradiobus`, `rtcbus`, `presencebus`, `matrixbus`,
+  `servobus`, `encoderbus`) refuses a bus where an address the device uses is already taken by
+  another device of this build, with the same one-line reply as the address setters (for example
+  `Error: 0x36 on bus 1 is in use by Encoder (instance 1). fuelGaugeBus stays 0; ...`). Both of the
+  OLED's addresses and each chip of a two-chip device are checked.
+- `open<sensor>` / `close<sensor>` of a device with one instance refuse an instance number:
+  `openimu 2` answers "Error: imu has one instance." (they ignored arguments).
+- A device counts as connected (command help, `sensors`, the ESP-NOW capability report) when the
+  last bus scan found something at the bus and address this build uses for it, not when any
+  scanned device's name matched. The ESP-NOW manifest's `sensorStatus` flags follow it: true only
+  for a sensor this build has, found at its configured bus and address (before, a device at the
+  address counted whatever the build). Its `presence` flag looked at 0x61 and now looks at the
+  presence sensor's real address.
+
 ### Added (build configuration)
 - `xiao-status-sign`: a saved XIAO configuration for the meeting-room status sign. Two Adafruit
   4991 encoder boards on STEMMA QT are lit green or red with the LED commands (`ledcolor encoder`,
   `ledcolor encoder2`); Wi-Fi, the web interface and automations stay as in `xiao-default`;
   camera, microphone, assistant, ESP-NOW, maps and the Raspberry Pi link are off. The boards'
   addresses (0x36, 0x37) are device settings, set once after setup (`configurations/README.md`).
+- `feathers3-status-sign`: the same sign on a FeatherS3[D] (no flash encryption) with the OLED,
+  a DS3231 clock (0x68, bus 0), the battery gauge and an external antenna; the encoder boards go on bus 1 because the fuel gauge
+  holds 0x36 on bus 0.
+- `wifiexternalantenna` (FeatherS3[D]): selects the u.FL antenna through the board's RF switch
+  (GPIO41 high at boot, reboot required). Off by default, and the pin is then never driven, so an
+  original FeatherS3 on the same build is untouched.
+
+### Changed (display header bar)
+- The header bar on the OLED and the P4 screens is laid out by one set of rules
+  (`OLED_HeaderCore.h`): nothing overlaps any more; a long title ends in a small `…` mark
+  instead of running under the battery, and a deep folder keeps `Files>` and the folder you
+  are in. The busy hourglass of an OLED command moved into the bar, left of the bell and
+  battery: it no longer covers the scroll arrow or the first row, and nothing else in the bar
+  moves when it comes or goes. The bell is a real bell icon and the `|` before the battery is
+  gone. Boards with no battery measurement no longer show `--%`. The Automations page counter
+  (`3/12`) shows in the bar (it was erased every frame). The bar now updates by itself when the
+  battery, USB or unread count changes, also on a still screen.
+- A capture dot shows in the bar on every screen while the microphone or the camera is in use
+  (recording, dictation, transcription, the wake word, a camera stream or video recording).
+- No screen draws in the header rows any more: Presence, APDS, Thermal, Change Password, the
+  "System Error" fallback and the Map popups start under the bar, which shows their name (Map
+  popups: `Map Menu`, `Goto WP`, `Load Track`, a layer name...). The thermal image shrinks to fit
+  between the bar and the footer on the 64 px OLED. The Map track status no longer overprints
+  its first rows; its `B:OK` and the map info's are in the footer.
+- The on-screen keyboard's top line uses the same rules: a long prompt ends in the `…` mark
+  instead of running into the page label (`abc`, `ABC`, `123`, `sym`, `PAT`, the live mic), which
+  stays at the right edge; the busy hourglass and the capture dot show there too.
+- New admin command `oleddump [first-row] [rows]` prints the screen as text (`#` lit, `.` dark)
+  over the console or HTTP, up to 31 rows per reply.
 
 ### Changed (guest web view)
 - A guest (owner decision B6: guests view interfaces only) now sees every web page and every
@@ -43,6 +141,54 @@ everything user-visible since the v0.99.99.1 tag.
   reason instead of its raw JSON, so a page that also shows the error (R1 Health) still gives one
   popup. Host-tested (`web_guest_gate`, `web_guest_view_browser`,
   `remote_command_authority`); not checked on a device.
+- Guest privacy (owner decision, 2026-11-22): the ESP-NOW message history is admin-only, on
+  the web (`/api/espnow/messages`) and as the `espnowmessages` command, since it carries the
+  output of remote commands; a user's ESP-NOW page says "Message history is for administrators
+  only." A guest no longer sees the message history, the ring's health data (`/api/health/status`)
+  or the LLM chat (`/api/llm/chat/turns`, `/api/llm/result`); the ESP-NOW and R1 Health pages say
+  the data is not available to guests and stop polling. A guest's settings view (`/api/settings`)
+  leaves out the saved Wi-Fi networks and the joined network's name and shows "(not shown to
+  guests)" for the MQTT broker host and user name and the LLM gateway address, as the MQTT page
+  does; users and administrators see them as before. Host-tested (`web_guest_gate`, `web_guest_settings_view`,
+  `web_guest_private_pages`); not checked on a device.
+
+### Fixed (storage, files and the web worker)
+- One free-space reserve on flash (FILE-3, UP-16): web uploads to flash may now use what is free
+  above the shared 100 KB reserve (not 90 % of free space), and the refusal shows that figure;
+  an upload to the card may use all of its free space. Photos, transcripts and QuickNotes check
+  the same reserve instead of their own copies. The battery log skips a row while flash is below
+  the reserve and `batterylog status` counts the skipped rows.
+- ESP-NOW SD capture (UP-13): the capture no longer waits for the filesystem on the Wi-Fi path,
+  later parts are named `capture-<stamp>-part<k>.log` (no more growing names), and one boot's
+  capture stops at 256 MB with a warning.
+- The SD write probe (UP-15) removes its file when the read-back open fails, and removes leftover
+  `HWPRnnnn.TMP` files when all 16 names are taken, so the card no longer reads as unwritable.
+- Backups (G-31) include `/system/notifications.json` (the device notification levels) in the
+  settings category when it exists, and a restore accepts it.
+- The Log Viewer (FILE-5) has a View SD Card button when a card is in, so logs that moved to the
+  card when flash ran low can be opened.
+- `perftop` (S-14) shows who holds the filesystem lock now and the longest hold since boot.
+- The live-events request (S-7) leaves as soon as its event queue is empty instead of holding the
+  only web worker for 600 ms. Host-tested; not checked on a device.
+
+### Fixed (web pages, tests and docs)
+- The CLI page (S-13) no longer downloads the whole log mirror twice a second: each poll sends
+  the change counter of the text it shows and an unchanged mirror answers 204 with no body.
+- The Sensors page RTC card (SEN-4) uses the same local-time conversion as the display, and the
+  weekday always follows the local date.
+- A Dark Room's restart removes only its own save, not every page's saved browser state.
+- `otastatus` and the OTA commands on a build without recovery OTA name every board that has it
+  (qtpy_esp32 and the xiao_s3 deployment were missing). `espnowpairmode` help and reply say
+  pairing never happens by itself instead of "no longer auto-pairs".
+- The OTA tools, web UI page harnesses and model tools now run in the host ctest suite
+  (P0-1c); two stale web UI checks and a JSON fixture read as script were fixed on the way. Five
+  page harnesses now fail on a console warning or error instead of hiding it (G-18). New host
+  checks: every Markdown link resolves (G-22) and NOTICE.md names every locked component.
+- Docs: `docs/TROUBLESHOOTING.md` (diagnostic commands, a serial console without a reset);
+  battery runtime and current draw are stated as unmeasured (G-47); NOTICE.md lists
+  esp32-camera, esp_h264 and esp-libhelix-mp3; current OTA partition sizes (G-29); release builds
+  use `tools/build_board.sh` (G-03); dead links and temporary paths removed (G-22);
+  `tools/vendor_arduino.sh --compare` (G-25).
 
 ### Changed (no pre-1.0 data; automations, mesh role, setup, status)
 - 1.0 boards start erased, so the readers for data saved by older firmware are gone: the old
@@ -72,16 +218,24 @@ everything user-visible since the v0.99.99.1 tag.
   `resultSequence`, `resultDetail`).
 
 ### Added
-- Boot debug file (owner decision B13): every boot runs with every debug flag on and every log
-  level shown until boot finishes (or the buffer fills), into a 56 KB PSRAM buffer (4 KB of internal memory on a board without PSRAM) instead
-  of the console or the normal logs; lines the saved flags would show still appear as usual. The
-  saved flags (the defaults on a first boot) apply again after boot. The buffer is saved as
-  `/system/sys_logs/boot-debug-1.log`, keeping the last three boots (`-2`, `-3`), with a header
-  that records the capture's start and end uptime, the bytes kept and dropped and the CPU time
-  spent capturing, and a `[TRUNCATED]` line when the buffer filled. Admin-only to read
-  (`fileview`, web file browser). P4X-EYE: the C6 console mirror now runs during every boot, with
-  the C6's boot messages shown at INFO, and stops when boot finishes unless `c6console on` or a
-  companion fault keeps it.
+- Boot debug file (owner decision B13): every boot runs with all debug output on until boot
+  finishes - every debug flag and sub-flag, every debug check, the log level at `debug` and every
+  ESP-IDF tag at the build's level (an esp_log hook catches its lines) - into a 256 KB PSRAM buffer
+  (4 KB of internal memory on a board without PSRAM) instead of the console or the normal logs;
+  lines the saved settings would show still appear as usual. The saved settings (the defaults on a
+  first boot) apply again after boot. A full buffer keeps the start of the boot and its newest
+  lines with a `[GAP]` line between them. The buffer is saved as `boot-debug-1.log` on a writable
+  SD card (`/sd/system/sys_logs/`, last three boots kept as `-2`, `-3`), otherwise on flash
+  (`/system/sys_logs/`, newest boot only), with a header that records the capture's start and end
+  uptime, the lines and bytes in all (dropped ones included), kept and dropped, and the
+  wall-clock time spent capturing. `bootdebug [on|off]` (also in the debug settings on the web and
+  OLED) turns it off for the fastest boot (on by default; from the next boot) and shows where this
+  boot's file went. Admin-only to read (`fileview`, web file browser). P4X-EYE: the capture starts
+  before the C6 companion's bring-up, so ESP-Hosted's lines of the whole boot are in the file; the C6 console
+  mirror now runs during every boot, with the C6's boot messages shown at INFO, and stops when boot
+  finishes unless `c6console on` or a companion fault keeps it.
+- `fileview` pages a file of any size: past 60000 B it reads one page at a time straight from the
+  file (JSON shown as stored there) instead of stopping at its read limit.
 - The LED commands take the light as an optional first word: `ledcolor [target] <colour>`,
   `ledeffect [target] <effect> ...`, `ledbrightness [target] <0..100>` (admin, saved per light),
   `ledclear [target]`, with the targets `onboard` (the board's NeoPixel), `encoder` (every pixel of
@@ -1223,6 +1377,26 @@ everything user-visible since the v0.99.99.1 tag.
   Assistant.
 
 ### Changed
+- `ramflush` brings the I2C sensors back per device: it records a list of the I2C devices that were
+  running (type, board number, bus and address; up to 24), and the boot after it reopens exactly
+  those, each only while its bus and address settings are unchanged (otherwise it stays closed and
+  the system log says why). An I2C device that was not running stays closed for that boot even when
+  its start-at-boot is on. After boot a later change to a device's start-at-boot applies again (to
+  the automatic restart, the OLED menu's input start and the encoder's reconnect), where the list
+  had agreed with it; an encoder board the flush left closed is not reconnected by an LED command.
+  Encoder boards 2-4 now come back on their own instead of all together.
+  A sensor that failed to start (not plugged in) is still tried again after the flush when its
+  start-at-boot is on. Wi-Fi, Bluetooth, the web server, logging, ESP-NOW, the OLED, the camera,
+  speech and the other single-copy features work as before. `ramflush status` lists the devices.
+  The RTC record changed, so an overlay saved by older firmware is ignored once. Host-tested
+  (`ramflush_device_list_tests`); not checked on a device.
+- OLED actions: a background action now toasts only when it fails (its reason) or, on screens
+  that do not show the result themselves, what it did (bond connect, remote sensor on/off, the
+  role swap, Advertising, G2/ring Reconnect, an ESP-NOW pair request, the mesh passphrase, the CPU
+  mode, Map's Toggle GPS, Force History). Rows that show their own state no longer add a second
+  "done" message. FM tune (left/right) and the LED brightness nudge and preset no longer hold the
+  screen per step or answer "Busy": the value moves at once and only the newest one is sent.
+  Power > Sleep 20s now asks first, defaulting to No. Host-tested; not checked on a device.
 - The UART host link (the CM5 / Raspberry Pi co-processor) speaks link protocol 3, a framed command
   channel. A line `@<id> <command>` (the id 1-8 lowercase hex digits the host picks) is answered
   `@<id> ok <len>` or `@<id> err <len>`, then exactly `<len>` bytes of reply (newlines included)

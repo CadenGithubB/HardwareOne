@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1029 commands across 60 modules (1029 registry entries).
+1031 commands across 60 modules (1031 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -26,7 +26,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`relay`](#relay) — 2 commands
 - [`filesystem`](#filesystem) — 10 commands
 - [`sd`](#sd) — 5 commands
-- [`oled`](#oled) — 15 commands
+- [`oled`](#oled) — 16 commands
 - [`speaker`](#speaker) — 1 commands
 - [`neopixel`](#neopixel) — 5 commands
 - [`led`](#led) — 5 commands
@@ -38,7 +38,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`imu`](#imu) — 16 commands
 - [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
-- [`anoencoder`](#anoencoder) — 5 commands
+- [`anoencoder`](#anoencoder) — 6 commands
 - [`apds`](#apds) — 9 commands
 - [`gps`](#gps) — 6 commands
 - [`fmradio`](#fmradio) — 9 commands
@@ -54,8 +54,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`i2c`](#i2c) — 24 commands
 - [`automation`](#automation) — 5 commands
 - [`battery`](#battery) — 3 commands
-- [`debug`](#debug) — 181 commands
-- [`settings`](#settings) — 18 commands
+- [`debug`](#debug) — 182 commands
+- [`settings`](#settings) — 19 commands
 - [`sensorlog`](#sensorlog) — 3 commands
 - [`health`](#health) — 2 commands
 - [`users`](#users) — 22 commands
@@ -158,7 +158,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `bondconnect` | A | Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)<br/>`Usage: bondconnect <mac_or_name> Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'. The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so. A role chosen with 'bondrole' is kept; else the other than the one the peer's user chose; else the higher address is master. Refused when the peer's session shows its build has no bond mode (espnowsessions caps).` |
+| `bondconnect` | A | EXPERIMENTAL in 1.0. Connect to bonded peer device: 'bondconnect <mac_or_name>'. Run it on both devices. (async - bond establishes when peer is seen; watch bondstatus)<br/>`Usage: bondconnect <mac_or_name> Returns immediately; the bond completes when the peer appears via heartbeat - watch 'bondstatus'. The peer is asked to confirm; until 'bondconnect' is run there too it answers that it is not bonded, and 'bondstatus' says so. A role chosen with 'bondrole' is kept; else the other than the one the peer's user chose; else the higher address is master. Refused when the peer's session shows its build has no bond mode (espnowsessions caps).` |
 | `bonddisconnect` | A | Disconnect from bonded peer device. The peer is told that the bond ended. |
 | `bondforward` | A | Bond master: forward the bond partner's readings, battery state and events to the mesh master named on this device: 'bondforward [on\|off\|sensors <all\|default\|name,name,...>]'.<br/>`Usage: bondforward [on \| off \| sensors <all \| default \| name,name,...>] No argument shows whether the partner's data is forwarded, and why not. Off by default. Only to the master named here, when it is paired in this device's primary mesh. Input is not forwarded unless named. That master may ask for the partner's readings (espnowsensorreq <partner> via <this device> there).` |
 | `bondforwardsensors` | A | Set the sensors a bond master forwards, as a mask: <0..2047><br/>`Usage: bondforwardsensors <0..2047> (bit i: sensor i; 'bondforward sensors <names>' sets it by name)` |
@@ -171,7 +171,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `bondshowcap` |  | Show local device capability summary. |
 | `bondshowmanifest` |  | Show local device manifest (UI apps + CLI commands). |
 | `bondshowremotemanifest` |  | Show cached remote manifest(s): 'bondshowremotemanifest [fwHash]'.<br/>`Usage: bondshowremotemanifest [<fwHash>]` |
-| `bondstatus` |  | Show bond mode status and configuration, with what the peer answered about the bond (Agreement) and whether its data is forwarded to the mesh. |
+| `bondstatus` |  | EXPERIMENTAL in 1.0. Show bond mode status and configuration, with what the peer answered about the bond (Agreement) and whether its data is forwarded to the mesh. |
 | `bondstream` | A | Toggle bond sensor streaming (works on both roles): 'bondstream <sensor> <on\|off>'. WORKER streams its sensor to the bonded master; MASTER commands the bonded worker to start/stop. (local toggle; data lands on the master's espnowsensorstatus)<br/>`Usage: bondstream <sensor> <on\|off> bondstream (show status) On a WORKER: streams this device's sensor to the bonded master. On a MASTER: tells the bonded worker to start/stop that sensor. Streamed data is viewable on the master via 'espnowsensorstatus' / GET /api/sensors/remote.` |
 | `bondstreamfmradio` | A | Set auto-stream FM radio: <0\|1><br/>`Usage: bondstreamfmradio <0\|1>` |
 | `bondstreamgps` | A | Set auto-stream GPS: <0\|1><br/>`Usage: bondstreamgps <0\|1>` |
@@ -189,7 +189,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowbackupenable` | A | Enable/disable backup master feature: 'espnowbackupenable [on\|off]'.<br/>`Usage: espnowbackupenable [on\|off]` |
 | `espnowbackupfingerprint` | S | Name the backup master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.<br/>`Usage: espnowbackupfingerprint [<64-hex-pubkey>\|clear] No argument shows it. The backup named here gets this device's battery state and events, may ask it for readings, and gives it mesh time while it acts as master. clear: no backup master is named.` |
 | `espnowbattery` |  | Mesh master: show the battery state other devices sent: 'espnowbattery [json] [<name_or_mac>] [from <n>]'.<br/>`Usage: espnowbattery [json] [<name_or_mac>] [from <n>] A device sends its battery state to the master named on it (espnowpowerinterval). json: 'next' is the number to pass as 'from' when not every device fitted one reply.` |
-| `espnowbondmodeenabled` | A | Enable/disable bond mode: <0\|1><br/>`Usage: espnowbondmodeenabled <0\|1>` |
+| `espnowbondmodeenabled` | A | EXPERIMENTAL in 1.0. Enable/disable bond mode: <0\|1><br/>`Usage: espnowbondmodeenabled <0\|1>` |
 | `espnowbondpeermac` | A | Set bond peer MAC address<br/>`Usage: espnowbondpeermac <AA:BB:CC:DD:EE:FF>` |
 | `espnowbroadcast` |  | Broadcast message: 'espnowbroadcast <message>'. (async send; delivery only, no reply)<br/>`Usage: espnowbroadcast <message> (single frame, <= 202 bytes while any enabled mesh has a passphrase, 218 otherwise; longer text is refused) Fails when the frame reached no peer. There is no per-device delivery count and no per-device reply.` |
 | `espnowbroadcaststats` |  | Show broadcast ACK tracking statistics. |
@@ -231,10 +231,10 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowmeshtime` | A | Mesh time on/off: the master sends its clock, devices that name it as their master take it when they have no better source: 'espnowmeshtime [on\|off]'.<br/>`Usage: espnowmeshtime [on\|off]` |
 | `espnowmeshtopo` |  | Discover mesh topology (run on the master; role not enforced). (async - read results with espnowtoporesults) |
 | `espnowmeshttl` |  | Get/set the multi-hop budget: 'espnowmeshttl [1-10]'.<br/>`Usage: espnowmeshttl [<1..10>] How many hops this node's relay-eligible frames may travel. 1 = single hop (no multi-hop). Applies to broadcast text/time sync and to routed unicast; heartbeats and pairing are always single-hop.` |
-| `espnowmessages` |  | Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch.<br/>`Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]` |
+| `espnowmessages` | A | Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch. Admin only: it carries remote command output.<br/>`Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]` |
 | `espnowmode` | A | Get/set ESP-NOW mode: 'espnowmode [direct\|mesh]'.<br/>`Usage: espnowmode [direct\|mesh]` |
 | `espnowpair` | A | Pair ESP-NOW device: 'espnowpair <mac> <name> [mesh]'. (synchronous; local registry add, no remote handshake)<br/>`Usage: espnowpair <mac> <name> [mesh]` |
-| `espnowpairmode` | A | Open the discovery window: 'espnowpairmode [seconds\|off\|status]'. Open on BOTH same-mesh devices, then 'espnowdiscovered' to see + pair. No auto-pair.<br/>`Usage: espnowpairmode [<seconds>\|off\|status] Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh). While open, the device broadcasts a discovery beacon and RECORDS other same-mesh devices it hears (see 'espnowdiscovered') — it no longer auto-pairs. Pair from the list with 'espnowpairsecure <mac> <name>'.` |
+| `espnowpairmode` | A | Open the discovery window: 'espnowpairmode [seconds\|off\|status]'. Open on BOTH same-mesh devices, then 'espnowdiscovered' to see + pair. Nothing pairs by itself.<br/>`Usage: espnowpairmode [<seconds>\|off\|status] Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh). While open, the device broadcasts a discovery beacon and RECORDS other same-mesh devices it hears (see 'espnowdiscovered'); it does not pair by itself. Pair from the list with 'espnowpairsecure <mac> <name>'.` |
 | `espnowpairrequest` | A | Request a pair with a discovered device: 'espnowpairrequest <mac_or_name>'. The other device must Accept.<br/>`Usage: espnowpairrequest <mac_or_name> (name/MAC from 'espnowdiscovered') Sends a request; the target shows an Accept prompt (or run 'espnowaccept' there).` |
 | `espnowpairsecure` | A | Pair device with encryption: 'espnowpairsecure <mac> <name> [mesh]'. (local pair is synchronous; secure channel completes async - see espnowsessions)<br/>`Usage: espnowpairsecure <mac_address> <device_name> [mesh] Requires a mesh passphrase first - run 'espnowsetpassphrase <mesh> <passphrase>'. The device is added synchronously; KEY_EX then runs asynchronously (~100ms) so the encrypted channel becomes usable shortly after - inspect with 'espnowsessions' / 'espnowencstatus'.` |
 | `espnowpowerinterval` | A | How often this device sends its battery state to the mesh master, in seconds: 'espnowpowerinterval [0\|10..3600]'. 0 = not sent.<br/>`Usage: espnowpowerinterval [0\|10..3600]` |
@@ -455,6 +455,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `oledcameraread` |  | Read the local camera preview state (JSON) |
 | `oledclear` | A | Clear OLED display. |
 | `oleddefaultmode` | A | OLED default mode: <logo\|status\|sensors\|thermal\|network\|mesh\|off><br/>`Usage: oleddefaultmode <logo\|status\|sensors\|thermal\|network\|mesh\|off>` |
+| `oleddump` | A | Display canvas as text ('#' lit, '.' dark): [first-row] [rows]<br/>`Usage: oleddump [first-row] [rows] Example: oleddump 0 10 (the header bar) A reply holds up to 31 rows; its first line names the next first-row.` |
 | `oledflip` | A | Flip display 180°: [on\|off\|toggle]<br/>`Usage: oledflip [on\|off\|toggle]` |
 | `oledlandscape` | A | Landscape UI with right-side controls: [0\|1]<br/>`Usage: oledlandscape [0\|1]` |
 | `oledmode` | A | Set display mode: <mode><br/>`Usage: oledmode <menu\|status\|sensordata\|sensorlist\|thermal\|camera\|network\|mesh\|gps\|text\|logo\|anim\|imuactions\|fmradio\|files\|logging\|automations\|espnow\|memory\|off> Example: oledmode memory Example: oledmode off` |
@@ -629,13 +630,14 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## anoencoder
 
-> Adafruit ANO directional navigation rotary encoder on Seesaw I2C: a click wheel with a center IN press and UP/DOWN/LEFT/RIGHT buttons, used as the OLED navigation input. This module provides debug and remap commands; the actual open/close/autostart/poll lifecycle lives under the input module. anoencoderread dumps raw state -- encoder position, the currently selected rotary axis, and the button bitmask. Remap commands persist to settings: anoencoderi2caddr <1-127> changes the device address (reboot required), anoencoderinvert [on|off] reverses rotation direction, and anoencoderswapud / anoencoderswaplr [on|off|toggle] swap the UP/DOWN and LEFT/RIGHT button pairs. A polling task accumulates encoder detents so fast spins do not drop clicks. Mutually exclusive at build time with the Seesaw gamepad.
+> Adafruit ANO directional navigation rotary encoder (5740) on seesaw I2C: a click wheel with a center IN press and UP/DOWN/LEFT/RIGHT buttons, used as the OLED navigation input. The wheel scrolls up and down; IN is A, LEFT is B, DOWN is X, UP is Y, a RIGHT tap is SELECT (sent when RIGHT is released) and RIGHT held with IN is START. The open/close/autostart/poll lifecycle lives under the input module and the bus is set with inputbus. anoencoderstatus [json] shows the bus, address, settings and whether it is open; anoencoderread [json] gives the wheel position and buttons. anoencoderi2caddr <0x49..0x50> sets the address (A0-A2 jumpers; refused when another device of this build uses it on the input bus; applies at the next openinput), anoencoderinvert [on|off] reverses rotation, and anoencoderswapud / anoencoderswaplr [on|off|toggle] swap the UP/DOWN and LEFT/RIGHT button pairs. The polling task reads the buttons, the seesaw's change flags (so taps shorter than one poll are kept) and the wheel's detents in one checked transaction. Mutually exclusive at build time with the Seesaw gamepad.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `anoencoderi2caddr` | A | Set ANO I2C address [1-127]<br/>`Usage: anoencoderi2caddr <1-127>` |
+| `anoencoderi2caddr` | A | Set the ANO I2C address [0x49-0x50] (next openinput)<br/>`Usage: anoencoderi2caddr <0x49..0x50>` |
 | `anoencoderinvert` | A | Invert rotation direction [on\|off]<br/>`Usage: anoencoderinvert [on\|off]` |
-| `anoencoderread` |  | Read ANO encoder state. (add 'json' for JSON output) |
+| `anoencoderread` |  | Read the ANO encoder: wheel position and buttons. (add 'json' for JSON output) |
+| `anoencoderstatus` |  | ANO encoder status: bus, address, settings. (add 'json' for JSON output)<br/>`Usage: anoencoderstatus [json]` |
 | `anoencoderswaplr` | A | Swap LEFT/RIGHT buttons [on\|off\|toggle]<br/>`Usage: anoencoderswaplr [on\|off\|toggle]` |
 | `anoencoderswapud` | A | Swap UP/DOWN buttons [on\|off\|toggle]<br/>`Usage: anoencoderswapud [on\|off\|toggle]` |
 
@@ -913,7 +915,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `i2csclpin` | A | Set I2C1 SCL pin: <0..> (max GPIO for this board)<br/>`Usage: i2cSclPin <0..> (max GPIO for this board)` |
 | `i2csdapin` | A | Set I2C1 SDA pin: <0..> (max GPIO for this board)<br/>`Usage: i2cSdaPin <0..> (max GPIO for this board)` |
 | `i2cstats` |  | I2C bus statistics and errors. |
-| `inputbus` | A | Route input device to bus: <0\|1> (reboot required)<br/>`Usage: inputBus <0\|1>` |
+| `inputbus` | A | Route input device to bus: <0\|1> (reboot required; the ANO: next openinput)<br/>`Usage: inputBus <0\|1>` |
 | `oledbus` | A | Route OLED to bus: <0\|1> (reboot required)<br/>`Usage: oledBus <0\|1>` |
 | `sensorautostart` | A | Sensor auto-start: [sensor] [n] [on\|off]<br/>`Usage: sensorautostart [sensor] [n] [on\|off] sensorautostart all [on\|off] Sensors: thermal, tof, imu, gps, fmradio, apds, input, rtc, presence, encoder (n: encoder 1..4)` |
 | `sensorinfo` |  | Sensor details: <name><br/>`Usage: sensorinfo <sensor_name> Example: sensorinfo BNO055` |
@@ -947,6 +949,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
+| `bootdebug` | A | Boot debug file: every debug output on during boot, saved as boot-debug-1.log (on by default).<br/>`Usage: bootdebug [on\|off] (bare): the setting, and where this boot's file went on\|off: save the setting; it applies from the next boot (off: no forcing, no capture, fastest boot)` |
 | `commandmodulesummary` | A | Show command module summary. |
 | `debuganoencoder` | A | Debug ANO rotary encoder driver internals.<br/>`Usage: debuganoencoder <0\|1> [temp\|runtime]` |
 | `debuganoencoderlifecycle` | A | Debug ANO encoder init/connect/recovery.<br/>`Usage: debuganoencoderlifecycle <0\|1> [temp\|runtime]` |
@@ -1152,6 +1155,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `uartrequireauth` | S | Require auth for UART link: <0\|1><br/>`Usage: uartrequireauth <0\|1>` |
 | `webclihistorysize` | A | Set web CLI history size: <1..100><br/>`Usage: webclihistorysize <1..100>` |
 | `wifiautoreconnect` | A | Keep hunting for the AP after an unexpected drop, and retry a failed boot connect (first hunt 60 s later, then 60 s, 120 s, every 300 s): <0\|1><br/>`Usage: wifiautoreconnect <0\|1> Separate from wifiautostart: this is about recovering a dropped link, not connecting at boot.` |
+| `wifiexternalantenna` | A | Use the external u.FL antenna instead of the on-board one (boards with an RF switch, the FeatherS3[D]; reboot required): [0\|1]<br/>`Usage: wifiexternalantenna [0\|1] No argument shows the saved choice. Takes effect at the next boot.` |
 | `wifitxpower` | A | Set WiFi TX power: <dBm><br/>`Usage: wifitxpower <2..21>` |
 
 ## sensorlog

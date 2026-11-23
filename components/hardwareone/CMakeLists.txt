@@ -416,9 +416,10 @@ if(HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
         i2csensor_encoder.cpp
         i2csensor_max17048.cpp
     )
-    # Input device: exactly one of the two drivers compiles in. Both own the
-    # gamepadTask() function symbol so they would collide at link time if
-    # both were included. INPUT_DEVICE_TYPE in System_BuildConfig.h selects.
+    # Input device: exactly one I2C input driver compiles in. Each defines
+    # inputTask() (and the gInputRunning/gInputConnected proxies), so two
+    # would collide at link time. INPUT_DEVICE_TYPE in System_BuildConfig.h
+    # selects.
     if(HW_CFG_INPUT_DEVICE_TYPE EQUAL 2)
         list(APPEND hardwareone_srcs i2csensor_ano_encoder.cpp)
         message(STATUS "Input device: ANO rotary encoder")

@@ -199,20 +199,16 @@ esp_err_t handleSensorData(httpd_req_t* req) {
         return ESP_OK;
       } else if (sensorType == "anoencoder") {
 #if !ENABLE_ANO_ENCODER
-        sendJsonResponse(req, "{\"val\":0, \"error\":\"not_compiled\"}");
+        sendJsonResponse(req, SENSOR_JSON_UNAVAILABLE);
         return ESP_OK;
 #else
-        // ANO-shaped JSON: {val, pos, axis, buttons}. Built from the native
-        // ANO reading (encoder position + per-mode axis) so the sensor
-        // card shows the real driver state, not the gamepad-shaped proxy.
-        if (!gAnoEncoderEnabled || !gAnoEncoderConnected) {
-          sendJsonResponse(req, "{\"val\":0, \"error\":\"not_connected\"}");
-          return ESP_OK;
-        }
+        // The shared reading envelope in every case, from the native ANO
+        // reading: {valid,connected,ts,pos,axis,buttons}. A closed encoder
+        // answers valid/connected false; a builder failure the bare envelope.
         char anoBuf[160];
         int jsonLen = anoEncoderBuildDataJson(anoBuf, sizeof(anoBuf));
         if (jsonLen <= 0) {
-          sendJsonResponse(req, "{\"val\":0, \"error\":\"no_data\"}");
+          sendJsonResponse(req, SENSOR_JSON_UNAVAILABLE);
           return ESP_OK;
         }
         httpd_resp_set_type(req, "application/json");
@@ -330,82 +326,17 @@ esp_err_t handleSensorData(httpd_req_t* req) {
           sendJsonResponse(req, "{\"error\":\"no_data\"}");
           return ESP_OK;
         }
-        const RtcDateTime& dt = rtc.dateTime;
-        const float temp = rtc.temperature;
+        // The RTC keeps UTC; rtcLocalTime applies the timezone offset (shared
+        // with the OLED page, so both show the same local date and weekday).
+        const RtcDateTime local = rtcLocalTime(&rtc.dateTime);
+        static const char* const kDays[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+        const char* dayName = (local.dayOfWeek >= 1 && local.dayOfWeek <= 7) ? kDays[local.dayOfWeek - 1] : "???";
 
-        // RTC stores UTC time - convert to local time using gSettings.tzOffsetMinutes
-        // Manual calculation to avoid unsafe setenv/tzset that causes watchdog timeout
-        int offsetMinutes = gSettings.tzOffsetMinutes;
-        
-        // Convert to minutes since midnight, apply offset, handle day rollover
-        int totalMinutes = dt.hour * 60 + dt.minute + offsetMinutes;
-        int localHour = dt.hour;
-        int localMinute = dt.minute;
-        int localDay = dt.day;
-        int localMonth = dt.month;
-        int localYear = dt.year;
-        
-        if (totalMinutes < 0) {
-          // Rolled back to previous day
-          totalMinutes += 1440; // 24 * 60
-          localDay--;
-          if (localDay < 1) {
-            localMonth--;
-            if (localMonth < 1) {
-              localMonth = 12;
-              localYear--;
-            }
-            // Get days in previous month
-            int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-            if (localMonth == 2 && ((localYear % 4 == 0 && localYear % 100 != 0) || (localYear % 400 == 0))) {
-              daysInMonth[1] = 29; // Leap year
-            }
-            localDay = daysInMonth[localMonth - 1];
-          }
-        } else if (totalMinutes >= 1440) {
-          // Rolled forward to next day
-          totalMinutes -= 1440;
-          localDay++;
-          int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-          if (localMonth == 2 && ((localYear % 4 == 0 && localYear % 100 != 0) || (localYear % 400 == 0))) {
-            daysInMonth[1] = 29;
-          }
-          if (localDay > daysInMonth[localMonth - 1]) {
-            localDay = 1;
-            localMonth++;
-            if (localMonth > 12) {
-              localMonth = 1;
-              localYear++;
-            }
-          }
-        }
-        
-        localHour = totalMinutes / 60;
-        localMinute = totalMinutes % 60;
-        
-        // Calculate day of week for local date using Zeller's congruence
-        int y = localYear;
-        int m = localMonth;
-        int d = localDay;
-        if (m < 3) {
-          m += 12;
-          y--;
-        }
-        int q = d;
-        int k = y % 100;
-        int j = y / 100;
-        int h = (q + ((13 * (m + 1)) / 5) + k + (k / 4) + (j / 4) - (2 * j)) % 7;
-        // Convert Zeller result (0=Sat) to standard (0=Sun)
-        int localDayOfWeek = (h + 6) % 7;
-        
-        const char* days[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
-        const char* dayName = (localDayOfWeek >= 0 && localDayOfWeek <= 6) ? days[localDayOfWeek] : "???";
-        
         int len = snprintf(buf, sizeof(buf),
           "{\"year\":%d,\"month\":%d,\"day\":%d,\"dayOfWeek\":\"%s\",\"hour\":%d,\"minute\":%d,\"second\":%d,\"temperature\":%.1f}",
-          localYear, localMonth, localDay, dayName, 
-          localHour, localMinute, dt.second, temp);
-        
+          (int)local.year, (int)local.month, (int)local.day, dayName,
+          (int)local.hour, (int)local.minute, (int)local.second, rtc.temperature);
+
         sendJsonResponse(req, buf, len);
         return ESP_OK;
 #else

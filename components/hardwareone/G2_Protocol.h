@@ -115,7 +115,6 @@
                                   // reads on the side; the wider schema is broader.
 #define G2_SID_SYNC_INFO    0x0D  // SERVICE_SYNC_INFO_APP_ID — app lifecycle state
                                   // (background/foreground application IDs).
-#define G2_SID_STATE_EVENT  G2_SID_SYNC_INFO  // deprecated compatibility alias
 #define G2_SID_WIDGET_XFORM 0x0E  // UI_HEALTH_APP_ID per the firmware enum, but we
                                   // empirically see widget-transform-shaped traffic
                                   // here. Disagreement worth a labelled capture.

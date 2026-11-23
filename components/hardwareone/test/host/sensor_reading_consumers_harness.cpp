@@ -80,7 +80,6 @@ static void setup(int state) {
   gInputCache.buttons=~uint32_t(GAMEPAD_BUTTON_A|GAMEPAD_BUTTON_X|GAMEPAD_BUTTON_START);
   gInputCache.buttonPressedAccum=GAMEPAD_BUTTON_B;
   gAnoEncoderCache.encoderPosition=state==3 ? -15 : 42;gAnoEncoderCache.encoderDelta=-3;
-  gAnoEncoderCache.currentAxis=state==3 ? ANO_AXIS_HORIZONTAL : ANO_AXIS_VERTICAL;
   gAnoEncoderCache.buttons=ANO_BTN_UP|ANO_BTN_IN|ANO_VIRT_START;
   gFmRadioCache.frequency=state==3 ? 8750 : 10390;gFmRadioCache.volume=12;gFmRadioCache.muted=state==3;
   gFmRadioCache.seekInProgress=state==3;gFmRadioCache.seekDirUp=false;

@@ -56,8 +56,8 @@ Every step below must pass on the exact commit you intend to tag, from a clean t
    both must exit 0 (if the reference drifted, regenerate it with `... reference` and commit it).
    On a machine with the ESP32-P4 SDK prepared, add `-DHW1_ESP_HOSTED_TEST_IDF=$IDF_PATH` to the
    first `cmake` so the ESP-Hosted memory-pool regression (`esp_hosted_mempool`) runs too.
-   Outside ctest: the OTA tools (`python3 -m unittest discover -s tools/ota/tests`), the web UI
-   tools (`... -s tools/webui/tests`) and the model tools (`... -s tools/model/tests`) pass. The Mac
+   The OTA tools, the web UI page harnesses and the model tools run in the same ctest
+   (`tools_ota_unittests`, `tools_webui_unittests`, `tools_model_unittests`). The Mac
    test phone (`tools/phone_link_peer`, needs Python 3.10 or newer) and `tools/ble_secure` (needs
    PyNaCl) are bench tools, not part of the gate.
 3. Every stable row of the supported matrix builds from that commit with `tools/build_board.sh <board>`
@@ -131,8 +131,9 @@ model file names, which are checked at runtime.
 ## This repo's specifics
 - Multi-board firmware: do NOT attach board binaries to releases. A single `.bin` is board-specific
   and a footgun; keep releases source-only (GitHub attaches the source archive automatically). Build
-  per board with `idf.py set-target <chip> && idf.py fullclean && idf.py build`
-  (default boards: esp32s3 -> feathers3, esp32 -> qtpy_esp32).
+  per board with `tools/build_board.sh <board>` (its own `build-<board>/` directory and target, no
+  fullclean; `docs/BOARD_SWITCHING.md`), a saved configuration with `--config <name>`, and a
+  deployment row with `tools/build_deployment.sh`.
 - Never `git add` build artifacts (`build/`, `*.bin`, `sdkconfig.<board>`) - they are gitignored; do not attach them.
 - Release notes are world-readable if this repo ever goes public: keep them user-facing - no secrets,
   credentials, internal paths, or private hostnames.

@@ -679,6 +679,8 @@ const CommandEntry settingsCommands[] = {
   { "wifitxpower", "Set WiFi TX power: <dBm>", true, cmd_wifitxpower, "Usage: wifitxpower <2..21>" },
   { "wifiautoreconnect", "Keep hunting for the AP after an unexpected drop, and retry a failed boot connect (first hunt 60 s later, then 60 s, 120 s, every 300 s): <0|1>", true, cmd_wifiautoreconnect,
     "Usage: wifiautoreconnect <0|1>\n  Separate from wifiautostart: this is about recovering a dropped link, not connecting at boot." },
+  { "wifiexternalantenna", "Use the external u.FL antenna instead of the on-board one (boards with an RF switch, the FeatherS3[D]; reboot required): [0|1]", true, cmd_wifiexternalantenna,
+    "Usage: wifiexternalantenna [0|1]\n  No argument shows the saved choice. Takes effect at the next boot." },
   
   // ---- System Time Settings ----
   { "ntpserver", "Set NTP server: <hostname>", true, cmd_ntpserver, "Usage: ntpserver <host>" },
@@ -2591,13 +2593,16 @@ static constexpr SettingEntry debugSettingEntries[] = {
   // ESP-IDF log levels by tag, "tag:L,tag:L" (L = N/E/W/I/D/V); esplog edits
   // and validates it, the boot applies it after the firmware's own levels.
   { "espLogLevels",     SETTING_STRING, &gSettings.espLogLevels,      0, 0, "",      0, 0, "ESP-IDF log levels by tag", nullptr, false, nullptr, "esplog" },
+  // Every debug output on during boot, saved as boot-debug-1.log (B13). The
+  // boot reads its NVS copy (bootdebug keeps both); applies from the next boot.
+  { "bootCapture",      SETTING_BOOL, &gSettings.bootDebugCapture,    1, 0, nullptr, 0, 1, "Boot debug file (next boot)", nullptr, false, "boot", "bootdebug" },
 };
 #undef DBG_SUBROW
 #undef DBG_ROW
 
-// Row accounting, pinned: 170 = 126 flag-backed + 40 bitless-sub + 4 hand rows.
+// Row accounting, pinned: 171 = 126 flag-backed + 40 bitless-sub + 5 hand rows.
 static constexpr size_t kDbgRegGeneratedRows = (DBG_FLAG_COUNT - 1) + DBG_SUBBOOL_COUNT;  // ALWAYS emits no row
-static constexpr size_t kDbgRegHandRows = 4;  // memorysampleintervalsec, webconsole, loglevel, esplog
+static constexpr size_t kDbgRegHandRows = 5;  // memorysampleintervalsec, webconsole, loglevel, esplog, bootdebug
 static_assert(sizeof(debugSettingEntries) / sizeof(debugSettingEntries[0])
                   == kDbgRegGeneratedRows + kDbgRegHandRows,
               "debug registry row count drifted — a pick or table row changed without the other (or a hand row came/went without updating kDbgRegHandRows)");
@@ -3521,7 +3526,9 @@ void notifySettingChanged(const void* fieldPtr, const SettingEntry* entry) {
     char name[SYSEVT_DETAIL_LEN];
     if (settingOptionLabel(entry, strtoll(val, nullptr, 10), name, sizeof(name))) strlcpy(val, name, sizeof(val));
   }
-  systemEventPost(SYSEVT_SETTING_CHANGED, entry->label ? entry->label : entry->jsonKey, val);
+  // SET-6: the subject is the setting's command name (cmdKey, else jsonKey),
+  // which is unique, not its label: nine rows share "Auto-start at boot".
+  systemEventPost(SYSEVT_SETTING_CHANGED, entry->cmdKey ? entry->cmdKey : entry->jsonKey, val);
 #if ENABLE_OLED_DISPLAY
   // A remote setting change must repaint without waiting for physical input.
   { extern void oledMarkDirty(); oledMarkDirty(); }

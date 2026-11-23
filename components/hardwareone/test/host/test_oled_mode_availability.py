@@ -93,6 +93,7 @@ def build_unit(component: Path, source_dir: Path | None) -> str:
     require(len(typedefs) >= 4, "OLED_Display.h: the Oled*Func callback typedefs were not found")
     types = "\n".join([
         mode_enum + ";",
+        "struct OledHeaderSpec;",  # the header hook's parameter (OLED_HeaderCore.h)
         *typedefs,
         single(display_h, r"(?m)^#define MAX_OLED_MODES\s+\d+", "MAX_OLED_MODES"),
         definition(display_h, "struct OledModeEntry") + ";",
