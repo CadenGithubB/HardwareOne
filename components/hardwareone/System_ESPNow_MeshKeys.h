@@ -44,8 +44,8 @@ struct MeshDerivedKeys {
   uint16_t fingerprint;        // the mesh id (System_ESPNow_MeshIdCore.h), from
                                //   the same stretched key; meshKeysDerive sets
                                //   it and gSettings.meshes[i].fingerprint together
-  uint8_t  bootstrapKey[32];   // KDF subkey for KEY_EX HMAC (Phase 3.3)
-  uint8_t  groupKey[32];       // KDF subkey for mesh broadcast AEAD (Phase 3.5)
+  uint8_t  bootstrapKey[32];   // KDF subkey: KEY_EX tags, session mesh tags and session keys (C1, C2)
+  uint8_t  groupKey[32];       // KDF subkey: the BROADCAST_AUTH group tag
 };
 
 // One-shot stretcher: compute the PBKDF2-stretched key for mesh slot `meshIdx` from
@@ -90,6 +90,12 @@ uint8_t meshKeysInitAll();
 // Doesn't touch the persisted stretched key; caller is responsible for
 // calling stretch + derive afterward.
 void meshKeysInvalidate(uint8_t meshIdx);
+
+// The generation of mesh slot `meshIdx`'s derived keys: steps on every
+// meshKeysDerive and meshKeysInvalidate (never 0 once stepped). A session
+// stores the generation its keys were made under; a passphrase or label change
+// gives a new one, and a REKEY of a session from before is refused.
+uint16_t meshKeysGeneration(uint8_t meshIdx);
 
 // Read-only accessor. Returns nullptr if meshIdx out of range or no valid
 // keys. Lifetime is global; safe to hold the pointer for the life of the

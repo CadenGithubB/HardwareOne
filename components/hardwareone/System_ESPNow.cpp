@@ -43,6 +43,7 @@
 #include <sodium.h>                 // sodium_memcmp (constant-time)
 #include "System_ESPNow_Handlers_Crypto.h"  // KEY_EX handlers + initiator
 #include "System_ESPNow_HandshakeBackoff.h"  // WarnLimiter
+#include "System_ESPNow_HandshakeCore.h"  // the group tag label
 #include "System_ESPNow_MeshTime.h"   // TIME_SYNC: handler, send tick, commands
 #include "System_ESPNow_PowerEvents.h" // POWER_STATUS, EVENT_PUSH: handlers, send tick, commands
 #include "System_ESPNow_ForwardRx.h"   // FORWARD_LINK: the mesh master's side of forwarding for a bond partner
@@ -2218,6 +2219,9 @@ void espnowMeshesWriteJson(JsonDocument& doc, bool excludePasswords) {
       }
       hex[64] = '\0';
       putSecret(e, "passphraseStretchedKey", String(hex));
+      // How the key was stretched (salt prefix, PBKDF2 rounds): a reader with
+      // another record stretches the passphrase again instead of using it.
+      e["kdf"] = meshid::kKdfRecord;
     }
   }
 #if ENABLE_BONDED_MODE
@@ -2257,12 +2261,18 @@ void espnowMeshesReadJson(JsonDocument& doc) {
       gSettings.meshes[idx].passphrase = getSecret(e, "passphrase");  // decrypt at-rest AES
       gSettings.meshes[idx].enabled    = e["enabled"]   | false;
       gSettings.meshes[idx].isDefault  = e["isDefault"] | false;
-      gSettings.meshes[idx].fingerprint = (uint16_t)(e["meshId"] | 0);
+      // A mesh without a passphrase has no key and so no id (1.0, E2), whatever the file says.
+      gSettings.meshes[idx].fingerprint =
+          gSettings.meshes[idx].passphrase.length() ? (uint16_t)(e["meshId"] | 0) : (uint16_t)0;
       // Load the cached PBKDF2 hash if present. Hex-decode strict;
       // any malformed value falls back to "no cached hash" (will trigger a
       // re-stretch at boot) rather than refusing to load settings.
       gSettings.meshes[idx].passphraseStretchedKeyValid = false;
       String keyHex = getSecret(e, "passphraseStretchedKey");  // decrypt at-rest AES (key material)
+      // A key cached by another stretch (its "kdf" record differs or is
+      // missing) is not used: the passphrase is stretched again at the start.
+      const int kdf = e["kdf"] | 0;
+      if (kdf != meshid::kKdfRecord) keyHex = "";
       if (keyHex.length() == 64) {
         const char* hp = keyHex.c_str();
         auto nyb = [](char c) -> int {
@@ -2746,14 +2756,17 @@ static void broadcast_tracker_check_timeouts() {
 // ============================================================================
 
 // The group (BROADCAST_AUTH) tag: the first ESPNOW_V4_BROADCAST_AUTH_TAG_LEN
-// (16) bytes of HMAC-SHA256(groupKey, header[0..29] || payload). The one
-// computation for the sender, the flood re-tag and the receiver's check
-// (which compares the 16 bytes in constant time). False if the HMAC failed.
+// (16) bytes of HMAC-SHA256(groupKey, "hw1-espnow-1-group" || header[0..29] ||
+// payload) (System_ESPNow_HandshakeCore.h). The one computation for the
+// sender, the flood re-tag and the receiver's check (which compares the 16
+// bytes in constant time). False if the HMAC failed.
 static bool v4_group_tag(uint8_t out[ESPNOW_V4_BROADCAST_AUTH_TAG_LEN], const uint8_t groupKey[32],
                          const uint8_t* hdr30, const uint8_t* payload, size_t payloadLen) {
   static_assert(ESPNOW_V4_BROADCAST_AUTH_TAG_LEN <= 32, "the tag is a cut HMAC-SHA256");
   uint8_t full[32];
-  const bool ok = espnowCryptoHmacSha256(full, groupKey, 32, hdr30, 30, payload, payloadLen, nullptr, 0);
+  const bool ok = espnowCryptoHmacSha256(full, groupKey, 32,
+                                         reinterpret_cast<const uint8_t*>(espnowhs::kLabelGroup),
+                                         espnowhs::labelLen(espnowhs::kLabelGroup), hdr30, 30, payload, payloadLen);
   if (ok) memcpy(out, full, ESPNOW_V4_BROADCAST_AUTH_TAG_LEN);
   sodium_memzero(full, sizeof(full));
   return ok;

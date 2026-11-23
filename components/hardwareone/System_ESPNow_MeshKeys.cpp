@@ -17,6 +17,15 @@ namespace {
 
 // One key cache slot per mesh. Tiny (~70 B × 4 = 280 B) so just static BSS.
 MeshDerivedKeys gMeshDerivedKeys[Settings::N_MESHES] = {};
+// Steps every time a slot's derived keys change or go (derive, invalidate).
+// A session records it when its keys are made; one whose record differs was
+// keyed under an older mesh key (meshKeysGeneration). 8 bytes of BSS.
+uint16_t gMeshKeyGeneration[Settings::N_MESHES] = {};
+void meshKeysBumpGeneration(uint8_t meshIdx) {
+  uint16_t g = (uint16_t)(gMeshKeyGeneration[meshIdx] + 1);
+  if (g == 0) g = 1;   // 0 never names a generation
+  gMeshKeyGeneration[meshIdx] = g;
+}
 
 // 100000 iters via mbedtls HMAC-SHA256 backed by the ESP32 hardware SHA
 // accelerator. Empirically ~1 s on ESP32 @ 240 MHz (10× faster than
@@ -24,14 +33,14 @@ MeshDerivedKeys gMeshDerivedKeys[Settings::N_MESHES] = {};
 // same count). The PBKDF2 loop yields every 4096 iters — ~24 yields across a
 // 100k stretch — so the Task WDT stays quiet even if the iteration count gets
 // bumped further.
-constexpr uint32_t kPbkdf2Iters    = 100000;
-constexpr const char* kSaltPrefix  = "espnow-v4-mesh-salt:";
+constexpr uint32_t kPbkdf2Iters    = meshid::kPbkdf2Iters;
+constexpr const char* kSaltPrefix  = meshid::kSaltPrefix;  // "hw1-espnow-1-mesh-salt:"
 constexpr uint64_t  kSubkeyBootstrap = 1;
 constexpr uint64_t  kSubkeyGroup     = 2;
 constexpr const char* kCtxBootstrap  = "esp-boot";  // exactly 8 bytes
 constexpr const char* kCtxGroup      = "esp-grup";  // exactly 8 bytes
 
-// Salt = SHA256("espnow-v4-mesh-salt:" || meshLabel). Stable per label,
+// Salt = SHA256("hw1-espnow-1-mesh-salt:" || meshLabel). Stable per label,
 // distinct per mesh. Rename → salt changes → key must be recomputed.
 void computeMeshSalt(const String& label, uint8_t out[32]) {
   String input = String(kSaltPrefix) + label;
@@ -105,6 +114,7 @@ bool meshKeysDerive(uint8_t meshIdx) {
   Settings::MeshIdentity& m = gSettings.meshes[meshIdx];
   MeshDerivedKeys& dk = gMeshDerivedKeys[meshIdx];
 
+  meshKeysBumpGeneration(meshIdx);
   if (!m.passphraseStretchedKeyValid) {
     dk.valid = false;
     memset(&dk, 0, sizeof(dk));
@@ -175,6 +185,12 @@ void meshKeysInvalidate(uint8_t meshIdx) {
   if (meshIdx >= Settings::N_MESHES) return;
   MeshDerivedKeys& dk = gMeshDerivedKeys[meshIdx];
   sodium_memzero(&dk, sizeof(dk));
+  meshKeysBumpGeneration(meshIdx);
+}
+
+uint16_t meshKeysGeneration(uint8_t meshIdx) {
+  if (meshIdx >= Settings::N_MESHES) return 0;
+  return gMeshKeyGeneration[meshIdx];
 }
 
 const MeshDerivedKeys* meshKeysGet(uint8_t meshIdx) {

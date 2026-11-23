@@ -53,7 +53,7 @@ sys.path.insert(0, str(HERE))
 from test_web_batch_handlers import extract_block  # noqa: E402
 
 SOURCES = ('System_ESPNow_Handlers_Crypto.cpp', 'System_ESPNow_Identity.cpp', 'System_ESPNow_Identity.h',
-           'System_ESPNow_MeshKeys.h', 'System_ESPNow_RxCtx.h', 'System_ESPNow_Wire.h')
+           'System_ESPNow_MeshKeys.h', 'System_ESPNow_RxCtx.h', 'System_ESPNow_Wire.h', 'System_ESPNow.cpp')
 
 
 def fail(what):
@@ -124,46 +124,60 @@ def build_identity(ident):
 def build_keyex(crypto):
     name = 'System_ESPNow_Handlers_Crypto.cpp'
     parts = [line(crypto, r'^constexpr uint32_t kKeyExRetryMs\s*=\s*\d+;', 'kKeyExRetryMs')]
-    for marker in ('bool computeKeyExHmac(', 'void logMac(', 'bool ctMemcmp32(', 'int verifyKeyExPayload('):
+    # 1.0 step 4: 16-byte tags with a label per frame type (HandshakeCore), the
+    # mesh slot of a frame, the HELLO table with its nonce memory and REPLY
+    # records, and the CONFIRM checks against both.
+    for marker in ('bool keyExTag(', 'bool computeHelloTag(', 'bool computeReplyTag(', 'bool computeConfirmTag(',
+                   'espnowhs::KeyExContext keyExHelloRefusalContext(', 'void logMac(', 'int keyExMeshSlot('):
         parts.append(one(crypto, marker, name))
-    # The accepted-HELLO rate limit (absent on a pre-fix tree, where the handler
-    # does not call it).
-    if 'bool keyExHelloAdmit(' in crypto:
-        parts += ['#define HW1_HAS_HELLO_LIMIT 1',
-                  line(crypto, r'^constexpr uint8_t\s+kKeyExHelloSlots\s*=\s*\d+;', 'kKeyExHelloSlots'),
-                  line(crypto, r'^constexpr uint32_t\s+kKeyExHelloMinIntervalMs\s*=\s*\d+;',
-                       'kKeyExHelloMinIntervalMs'),
-                  'static_assert(kKeyExHelloMinIntervalMs < kKeyExRetryMs, "as in the source");',
-                  one(crypto, 'struct KeyExHelloSeen', name) + ';',
-                  line(crypto, r'^EXT_RAM_BSS_ATTR KeyExHelloSeen gKeyExHelloSeen\[kKeyExHelloSlots\] = \{\};',
-                       'gKeyExHelloSeen'),
-                  one(crypto, 'bool keyExHelloAdmit(', name)]
-    parts.append(one(crypto, 'static void sendKeyExConfirm(', name))
-    # Rule A and the revoked list (1.0 step 3), where the tree has them.
-    for marker in ('static void sendKeyExNotAccepted(', 'static void keyExRevokedDrop(',
-                   'static void logKeyBound('):
-        if marker in crypto:
-            parts.append(one(crypto, marker, name))
-    parts.append(one(crypto, 'void v4hKeyExHello(const V4RxCtx& ctx)', name))
-    # The in-flight table the REPLY handler reads, then the handler.
+    parts += ['#define HW1_HAS_HELLO_LIMIT 1',
+              line(crypto, r'^constexpr uint8_t\s+kKeyExHelloSlots\s*=\s*\d+;', 'kKeyExHelloSlots'),
+              line(crypto, r'^constexpr uint32_t\s+kKeyExHelloMinIntervalMs\s*=\s*\d+;', 'kKeyExHelloMinIntervalMs'),
+              line(crypto, r'^constexpr uint8_t\s+kKeyExHelloNonceMemory\s*=\s*\d+;', 'kKeyExHelloNonceMemory'),
+              line(crypto, r'^constexpr uint8_t\s+kKeyExReplyMemory\s*=\s*\d+;', 'kKeyExReplyMemory'),
+              'static_assert(kKeyExHelloMinIntervalMs < kKeyExRetryMs, "as in the source");',
+              one(crypto, 'struct KeyExReplySent', name) + ';',
+              one(crypto, 'struct KeyExHelloSeen', name) + ';',
+              line(crypto, r'^EXT_RAM_BSS_ATTR KeyExHelloSeen gKeyExHelloSeen\[kKeyExHelloSlots\] = \{\};',
+                   'gKeyExHelloSeen'),
+              one(crypto, 'enum class HelloVerdict', name) + ';']
+    for marker in ('KeyExHelloSeen* keyExHelloSlotFor(', 'HelloVerdict keyExHelloAdmit(', 'void keyExNoteReply(',
+                   'bool keyExConfirmMatchesReply('):
+        parts.append(one(crypto, marker, name))
+    # The in-flight table (nonces of our HELLOs), then its accessors.
     parts += [line(crypto, r'^constexpr uint8_t\s+kKeyExInFlightSlots\s*=.*;', 'kKeyExInFlightSlots'),
               line(crypto, r'^constexpr uint8_t\s+kKeyExMaxRetries\s*=.*;', 'kKeyExMaxRetries'),
+              line(crypto, r'^constexpr uint8_t\s+kKeyExHelloNonces\s*=.*;', 'kKeyExHelloNonces'),
               one(crypto, 'struct KeyExInFlight', name) + ';',
-              line(crypto, r'^KeyExInFlight gKeyExInFlight\[kKeyExInFlightSlots\] = \{\};', 'gKeyExInFlight'),
-              one(crypto, 'void keyExInFlightArm(', name),
-              one(crypto, 'static void keyExClearInFlight(const uint8_t peerMac[6]) ', name)]
-    if 'void espnowKeyExCancel(const uint8_t peerMac[6])' in crypto:
-        parts += ['#define HW1_HAS_KEYEX_CANCEL 1',
-                  one(crypto, 'void espnowKeyExCancel(const uint8_t peerMac[6])', name),
-                  one(crypto, 'static bool keyExCancelled(const uint8_t peerMac[6]) ', name)]
-    parts.append(one(crypto, 'void v4hKeyExReply(const V4RxCtx& ctx)', name))
-    # The CONFIRM handler (review finding 3), where it keeps the retries of a
-    # key exchange with a peer whose key is not stored.
-    if 'still retrying' in crypto:
-        parts += ['#define HW1_HAS_CONFIRM_KEEPS_RETRY 1',
-                  one(crypto, 'bool keyExIsInFlight(const uint8_t peerMac[6])', name),
-                  one(crypto, 'void v4hKeyExConfirm(const V4RxCtx& ctx)', name)]
+              line(crypto, r'^EXT_RAM_BSS_ATTR KeyExInFlight gKeyExInFlight\[kKeyExInFlightSlots\] = \{\};',
+                   'gKeyExInFlight')]
+    for marker in ('KeyExInFlight* keyExInFlightArm(', 'void keyExInFlightNewNonce(', 'KeyExInFlight* keyExInFlightFind(',
+                   'bool keyExConfirmMatchesHello(', 'static void keyExClearInFlight(const uint8_t peerMac[6]) '):
+        parts.append(one(crypto, marker, name))
+    parts += ['#define HW1_HAS_KEYEX_CANCEL 1',
+              one(crypto, 'void espnowKeyExCancel(const uint8_t peerMac[6])', name),
+              one(crypto, 'static bool keyExCancelled(const uint8_t peerMac[6]) ', name),
+              one(crypto, 'bool keyExIsInFlight(const uint8_t peerMac[6])', name)]
+    for marker in ('static void sendKeyExConfirm(', 'static void sendKeyExNotAccepted(', 'static void keyExRevokedDrop(',
+                   'static void logKeyBound('):
+        parts.append(one(crypto, marker, name))
+    parts += [one(crypto, 'void v4hKeyExHello(const V4RxCtx& ctx)', name),
+              one(crypto, 'void v4hKeyExReply(const V4RxCtx& ctx)', name),
+              '#define HW1_HAS_CONFIRM_KEEPS_RETRY 1',
+              one(crypto, 'void v4hKeyExConfirm(const V4RxCtx& ctx)', name)]
     return '\n\n'.join(parts)
+
+
+def build_binding(espnow):
+    """The PAIR_REQUEST key binding (1.0 step 4) from System_ESPNow.cpp."""
+    name = 'System_ESPNow.cpp'
+    return '\n\n'.join([one(espnow, 'struct PairKeyBinding', name) + ';',
+                         line(espnow, r'^static constexpr uint8_t kPairKeyBindings = \d+;', 'kPairKeyBindings'),
+                         line(espnow, r'^EXT_RAM_BSS_ATTR static PairKeyBinding gPairKeyBind\[kPairKeyBindings\];',
+                              'gPairKeyBind'),
+                         one(espnow, 'static void pairKeyBind(', name),
+                         one(espnow, 'static void pairKeyUnbind(', name),
+                         one(espnow, 'static bool pairKeyMismatch(', name)])
 
 
 def main():
@@ -187,6 +201,7 @@ def main():
                                                         read('System_ESPNow_MeshKeys.h'),
                                                         read('System_ESPNow_RxCtx.h'))),
                        ('// INSERT_IDENTITY', build_identity(read('System_ESPNow_Identity.cpp'))),
+                       ('// INSERT_BINDING', build_binding(read('System_ESPNow.cpp'))),
                        ('// INSERT_KEYEX', build_keyex(read('System_ESPNow_Handlers_Crypto.cpp')))):
         if harness.count(tag) != 1:
             fail(f'harness: {tag} must appear once')
@@ -201,6 +216,8 @@ def main():
         # use (the firmware builds without -Wextra).
         (unit.parent / 'System_ESPNow_RevokedCore.h').write_text(
             (HERE.parents[1] / 'System_ESPNow_RevokedCore.h').read_text())
+        (unit.parent / 'System_ESPNow_HandshakeCore.h').write_text(
+            (HERE.parents[1] / 'System_ESPNow_HandshakeCore.h').read_text())
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic',
                '-isystem', str(HERE.parents[2] / 'hardwareone_libs' / 'ArduinoJson' / 'src'),
                '-Wno-unused-const-variable', '-Wno-unused-function', '-Wno-unused-parameter',
@@ -226,6 +243,22 @@ def main():
             fail('v4hKeyExReply: an ACTIVE session must be drained, and only otherwise kicked')
         if reply.count('espnowSessionOpenInitiate(') != 1:
             fail('v4hKeyExReply: one SESSION_OPEN kick, in the not-ACTIVE branch')
+    # The PAIR_REQUEST key binding (1.0 step 4, from step 3's review): the
+    # binding rule is compiled above (pairKeyBind / pairKeyMismatch); its wiring
+    # in System_ESPNow.cpp is pinned here.
+    espnow = read('System_ESPNow.cpp')
+    admit = extract_block(espnow, 'espnowrevoke::Admit espnowKeyExAdmit(const uint8_t mac[6], const uint8_t pub[32])')
+    if 'pairKeyMismatch(mac, pub)' not in admit or 'return espnowrevoke::Admit::NotAccepted;' not in admit:
+        fail('espnowKeyExAdmit does not refuse a key other than the accepted request\'s (status 3)')
+    accept = extract_block(espnow, 'const char* cmd_espnow_accept(const String& argsInput)')
+    if not 0 < accept.find('pairKeyBind(req.mac, pub);') < accept.find('cmd_espnow_pairsecure('):
+        fail('espnowaccept does not bind the request\'s key before the pairing (and its key exchange) starts')
+    request = extract_block(espnow, 'static void v4h_pair_request(const V4RxCtx& ctx)')
+    if 'memcpy(gPairInPub, req.senderPub, 32);' not in request:
+        fail('the pending pair request does not keep the key it carries')
+    if 'pairKeyUnbind(mac);' not in extract_block(espnow, 'void espnowFirstKeyBound(const uint8_t mac[6])') or \
+            'pairKeyUnbind(mac);' not in extract_block(espnow, 'static void espnowUnpairClearPairing(const uint8_t mac[6])'):
+        fail('a binding does not end when the key binds or the device is unpaired')
     print('test_espnow_keyex_hello: all cases passed')
 
 

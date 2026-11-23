@@ -22,6 +22,7 @@
 #include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
 #include "System_DeviceName.h"  // the device-name rule (copied beside this unit)
 #include "System_ESPNow_AnswerCore.h"  // the answer header {reqId, status} (copied beside this unit)
+#include "System_ESPNow_HandshakeCore.h"  // the group tag label (copied beside this unit)
 
 #ifndef ENABLE_BONDED_MODE
 #error "ENABLE_BONDED_MODE must be defined by the runner"
@@ -148,19 +149,24 @@ static MeshRelayMetrics& meshRelayMetrics() { return gRelayMetrics; }
 
 // ---- Toy MAC standing in for HMAC-SHA256 and for the AEAD tag ---------------
 static void toyMac(uint8_t out[32], const uint8_t* key, size_t keyLen, const uint8_t* a, size_t aLen,
-                   const uint8_t* b, size_t bLen) {
+                   const uint8_t* b, size_t bLen, const uint8_t* c = nullptr, size_t cLen = 0) {
   uint64_t h = 1469598103934665603ull;
   auto mix = [&](const uint8_t* p, size_t n) {
     for (size_t i = 0; i < n; ++i) { h ^= p[i]; h *= 1099511628211ull; }
     h ^= n; h *= 1099511628211ull;
   };
-  mix(key, keyLen); mix(a, aLen); mix(b, bLen);
+  mix(key, keyLen); mix(a, aLen); mix(b, bLen); mix(c, cLen);
   for (int i = 0; i < 32; ++i) { h ^= (uint64_t)i; h *= 1099511628211ull; out[i] = (uint8_t)(h >> 32); }
 }
 static bool espnowCryptoHmacSha256(uint8_t out[32], const uint8_t* key, size_t keyLen, const uint8_t* in1,
-                                   size_t len1, const uint8_t* in2, size_t len2, const uint8_t*, size_t) {
-  toyMac(out, key, keyLen, in1, len1, in2, len2);
+                                   size_t len1, const uint8_t* in2, size_t len2, const uint8_t* in3, size_t len3) {
+  toyMac(out, key, keyLen, in1, len1, in2, len2, in3, len3);
   return true;
+}
+// The group tag as a sender builds it (1.0: the hw1-espnow-1-group label first).
+static void groupTagFor(uint8_t out[32], const void* hdr30, const uint8_t* payload, size_t len) {
+  toyMac(out, gGroup.groupKey, 32, reinterpret_cast<const uint8_t*>(espnowhs::kLabelGroup),
+         espnowhs::labelLen(espnowhs::kLabelGroup), reinterpret_cast<const uint8_t*>(hdr30), 30, payload, len);
 }
 static int sodium_memcmp(const void* a, const void* b, size_t n) { return std::memcmp(a, b, n); }
 static void sodium_memzero(void* p, size_t n) { std::memset(p, 0, n); }
@@ -472,7 +478,7 @@ static Frame groupFrame(uint8_t type, const uint8_t* origin, uint32_t msgId, con
   h.meshFingerprint = kMeshFp;
   h.ttl = ttl;
   uint8_t tag[32];
-  toyMac(tag, gGroup.groupKey, 32, reinterpret_cast<const uint8_t*>(&h), 30, payload.data(), payload.size());
+  groupTagFor(tag, &h, payload.data(), payload.size());
   Frame body = payload;
   body.insert(body.end(), tag, tag + ESPNOW_V4_BROADCAST_AUTH_TAG_LEN);
   return assemble(h, body, true);
@@ -1054,7 +1060,7 @@ static void testGroupTagIs16Bytes() {
     h.meshFingerprint = kMeshFp;
     h.ttl = 1;
     uint8_t tag[32];
-    toyMac(tag, gGroup.groupKey, 32, reinterpret_cast<const uint8_t*>(&h), 30, payload.data(), payload.size());
+    groupTagFor(tag, &h, payload.data(), payload.size());
     Frame body = payload;
     body.insert(body.end(), tag, tag + 32);
     deliver(gRelayR, assemble(h, body, true));

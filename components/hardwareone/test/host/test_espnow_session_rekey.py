@@ -114,7 +114,8 @@ def build_sessions(sessions):
     pieces = [namespace_around(sessions, 'constexpr uint8_t kSessionSlots', name)]
     for marker in ('bool sessionsInit(', 'SessionState* sessionFindByPeer(',
                    'SessionState* sessionFindBySessionId(', 'SessionState* sessionAllocate(',
-                   'void sessionClear(', 'bool sessionIsASide(', 'bool sessionDeriveAeadKeys(',
+                   'void sessionClear(', 'bool sessionIsASide(', 'bool sessionDeriveKeyMaterial(',
+                   'bool sessionDeriveAeadKeys(',
                    'const SessionState* sessionAt(', 'uint8_t sessionSlotCount('):
         pieces.append(one(sessions, marker, name))
     pieces.append(namespace_around(sessions, 'constexpr size_t kAeadTagBytes', name))
@@ -140,21 +141,15 @@ def build_sessions(sessions):
 def build_crypto(crypto, crypto_h):
     """Returns (anonymous-namespace internals, public entry points)."""
     name = 'System_ESPNow_Handlers_Crypto.cpp'
-    internal = [line(crypto, r'^constexpr const char\*\s+kOpenLabel\s*=[^;]*;', 'kOpenLabel'),
-                line(crypto, r'^constexpr const char\*\s+kConfirmLabel\s*=[^;]*;', 'kConfirmLabel'),
-                line(crypto, r'^constexpr const char\*\s+kRekeyLabel\s*=[^;]*;', 'kRekeyLabel'),
-                line(crypto, r'^constexpr size_t\s+kLabelLen\s*=[^;]*;', 'kLabelLen')]
-    # The 1.0 transcript lengths and their cursor (absent on a tree before the
-    # session capability word, which the harness is told by HW1_SESSION_CAPS).
-    if 'struct TranscriptCursor' in crypto:
-        internal.append('#define HW1_SESSION_CAPS 1')
-        for const in ('kOpenTranscriptLen', 'kConfirmTranscriptLen'):
-            internal.append(line(crypto, r'^constexpr size_t\s+' + const + r'\s*=[^;]*;', const))
-        for const in ('kOpenTranscriptLen == 75', 'kConfirmTranscriptLen == 91'):
-            internal.append(line(crypto, r'^static_assert\(' + re.escape(const) + r'[^;]*;', const))
-        internal.append(one(crypto, 'struct TranscriptCursor', name) + ';')
-    for marker in ('void buildOpenTranscript(', 'void buildConfirmTranscript(',
-                   'void buildRekeyTranscript(', 'static uint16_t sessionRejectLogCount('):
+    # The 1.0 transcripts come from System_ESPNow_HandshakeCore.h (step 4:
+    # hw1-espnow-1-* labels, openEpochMs), with the C1 mesh tag helpers.
+    internal = ['#define HW1_SESSION_CAPS 1']
+    for const in ('kOpenTranscriptLen', 'kConfirmTranscriptLen', 'kRekeyTranscriptLen'):
+        internal.append(line(crypto, r'^constexpr size_t\s+' + const + r'\s*=[^;]*;', const))
+    for marker in ('static uint16_t sessionRejectLogCount(', 'void buildOpenTranscript(',
+                   'void buildConfirmTranscript(', 'void buildRekeyTranscript(', 'bool sessionMeshTag(',
+                   'bool sessionMeshTagOk(', 'bool sessionSealOpen(', 'bool sessionSealConfirm(',
+                   'bool sessionSealRekey(', 'void logMeshKeyMismatch('):
         internal.append(one(crypto, marker, name))
     # The glare re-send of our own OPEN (absent on a tree before it).
     internal.append(optional(crypto, 'bool sessionOpenSendAgain(', name))
@@ -163,6 +158,7 @@ def build_crypto(crypto, crypto_h):
     for marker in ('void runDeferredSessionOpen(void* arg)', 'void runDeferredSessionConfirm(void* arg)'):
         internal.append(one(crypto, marker, name))
     internal.append(one(crypto, 'struct DeferredRekeyWork', name) + ';')
+    internal.append(one(crypto, 'bool sessionKeyedUnderCurrentMeshKey(', name))
     internal.append(one(crypto, 'bool deriveRekeyedKeysFromShared(', name))
     # The initiator REKEY retry table (present once the retry fix is in the tree).
     for const in ('kRekeyInFlightSlots', 'kRekeyMaxRetries', 'kRekeyRetryMs'):
@@ -240,6 +236,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-session-rekey-') as tmp:
         unit, exe = Path(tmp) / 'test.cpp', Path(tmp) / 'test'
         (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
+        (unit.parent / 'System_ESPNow_HandshakeCore.h').write_text(
+            (HERE.parents[1] / 'System_ESPNow_HandshakeCore.h').read_text())
         unit.write_text(harness)
         # The pasted header and source slices carry constants and helpers that
         # this harness does not exercise, and espnowSessionOpenInitiate keeps a

@@ -71,8 +71,8 @@ BOND_AGREEMENT_OPCODES = ('BOND_REQUEST', 'BOND_NOTICE')
 # by every later receiver. A struct that grows after 1.0 keeps its row's value
 # here; a test failure that asks for a larger number is the bug, not this table.
 EXPECTED_MINLEN = {
-    'KEY_EX_HELLO': 72, 'KEY_EX_REPLY': 72, 'KEY_EX_CONFIRM': 18,
-    'SESSION_OPEN': 130, 'SESSION_CONFIRM': 146, 'SESSION_REKEY': 130,
+    'KEY_EX_HELLO': 72, 'KEY_EX_REPLY': 72, 'KEY_EX_CONFIRM': 34,
+    'SESSION_OPEN': 154, 'SESSION_CONFIRM': 162, 'SESSION_REKEY': 146,
     'SESSION_UNKNOWN': 12, 'TIME_SYNC': 16,
     'TEXT': 1, 'BOOT': 1, 'CMD': 1, 'CMD_RESP': 5, 'USER_SYNC': 1, 'STREAM': 6,
     'RELAY_DATA': 40, 'PEER_LIST': 4, 'HEARTBEAT': 44, 'PAIR_BEACON': 36,

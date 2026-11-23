@@ -6,6 +6,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <stddef.h>
 #include <string.h>
 #include <time.h>
 
@@ -13,11 +14,13 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 
+#include "System_Clock.h"           // Clock::epochMillisOrZero: SESSION_OPEN openEpochMs
 #include "System_ClockCore.h"       // clockcore::isValidEpoch: bondedAt is stored only when the clock is set
 #include "System_Debug.h"
 #include "System_ESPNow.h"          // EspNowState (gEspNow); V4RxCtx comes from System_ESPNow_RxCtx.h
 #include "System_ESPNow_Crypto.h"
 #include "System_ESPNow_HandshakeBackoff.h"
+#include "System_ESPNow_HandshakeCore.h"  // the bytes the handshake tags and signs (1.0)
 #include "System_ESPNow_Identity.h"
 #include "System_ESPNow_MeshKeys.h"
 #include "System_ESPNow_Revoked.h"       // the revoked list, rule A (espnowKeyExAdmit)
@@ -67,20 +70,51 @@ int resolveMeshSlot(const char* label) {
   return fallback;
 }
 
-// Compute HMAC over (meshFingerprint LE || senderMac || senderPub) with the
-// mesh bootstrap key. 40 bytes input, 32 bytes output.
-bool computeKeyExHmac(uint16_t meshFingerprint,
-                      const uint8_t senderMac[6],
-                      const uint8_t senderPub[32],
-                      const uint8_t bootstrapKey[32],
-                      uint8_t outHmac[32]) {
-  uint8_t fpLE[2] = { (uint8_t)(meshFingerprint & 0xFF),
-                      (uint8_t)((meshFingerprint >> 8) & 0xFF) };
-  return espnowCryptoHmacSha256(outHmac,
-                                bootstrapKey, 32,
-                                fpLE, 2,
-                                senderMac, 6,
-                                senderPub, 32);
+// ---- KEY_EX tags (1.0, E16; the bytes are System_ESPNow_HandshakeCore.h's) ----
+// Each is the first 16 bytes of an HMAC-SHA256 under the mesh bootstrap key,
+// over a label per frame type and the frame's fields.
+bool keyExTag(uint8_t out[espnowhs::kTagLen], const uint8_t key[32], const uint8_t* in, size_t len) {
+  uint8_t full[32];
+  const bool ok = espnowCryptoHmacSha256(full, key, 32, in, len, nullptr, 0, nullptr, 0);
+  if (ok) memcpy(out, full, espnowhs::kTagLen);
+  sodium_memzero(full, sizeof(full));
+  return ok;
+}
+
+bool computeHelloTag(uint16_t meshId, const uint8_t senderMac[6], const uint8_t senderPub[32],
+                     const uint8_t nonce[16], const uint8_t bootstrapKey[32], uint8_t out[16]) {
+  uint8_t in[espnowhs::kHelloInputLen];
+  const size_t n = espnowhs::helloInput(in, meshId, senderMac, senderPub, nonce);
+  return keyExTag(out, bootstrapKey, in, n);
+}
+
+bool computeReplyTag(uint16_t meshId, const uint8_t respMac[6], const uint8_t respPub[32],
+                     const uint8_t replyNonce[16], const uint8_t initMac[6], const uint8_t initPub[32],
+                     const uint8_t helloNonce[16], const uint8_t bootstrapKey[32], uint8_t out[16]) {
+  uint8_t in[espnowhs::kReplyInputLen];
+  const size_t n = espnowhs::replyInput(in, meshId, respMac, respPub, replyNonce, initMac, initPub, helloNonce);
+  return keyExTag(out, bootstrapKey, in, n);
+}
+
+bool computeConfirmTag(const V4PayloadKeyExConfirm& conf, const espnowhs::KeyExContext& c,
+                       const uint8_t bootstrapKey[32], uint8_t out[16]) {
+  static_assert(offsetof(V4PayloadKeyExConfirm, hmac) == espnowhs::kConfirmHeadLen,
+                "the CONFIRM tag covers the frame up to its hmac");
+  uint8_t in[espnowhs::kConfirmInputLen];
+  const size_t n = espnowhs::confirmInput(in, reinterpret_cast<const uint8_t*>(&conf), c);
+  return keyExTag(out, bootstrapKey, in, n);
+}
+
+// The context of a refusal of a HELLO (no REPLY was sent): the responder is
+// this device; its nonce and key are not part of it.
+espnowhs::KeyExContext keyExHelloRefusalContext(const uint8_t initMac[6], const uint8_t initPub[32],
+                                                const uint8_t helloNonce[16], const uint8_t respMac[6]) {
+  espnowhs::KeyExContext c = {};
+  memcpy(c.initMac, initMac, 6);
+  memcpy(c.respMac, respMac, 6);
+  memcpy(c.helloNonce, helloNonce, 16);
+  memcpy(c.initPub, initPub, 32);
+  return c;
 }
 
 // Make sure the ESPNOW peer table knows about this MAC. We add as unencrypted
@@ -110,131 +144,312 @@ void logMac(const char* tag, const uint8_t mac[6]) {
                tag, MAC_ARGS(mac));
 }
 
-// Constant-time 32-byte compare. Avoids leaking how many leading bytes matched
-// when an attacker sprays HMAC guesses. (libsodium provides sodium_memcmp
-// but we don't pull it in here; trivial constant-time loop.)
-bool ctMemcmp32(const uint8_t* a, const uint8_t* b) {
-  uint8_t diff = 0;
-  for (int i = 0; i < 32; i++) diff |= (uint8_t)(a[i] ^ b[i]);
-  return diff == 0;
-}
-
-// Common verification step for HELLO and REPLY: payload size, mesh lookup,
-// HMAC verify, sender MAC sanity check. On success, *outBootstrapKey is set
-// to point into the mesh derived-key cache.
-//
-// Returns:
-//   -1 = invalid payload (size mismatch)
-//   -2 = unknown mesh (fingerprint doesn't match any configured slot)
-//   -3 = HMAC verification failed
+// The mesh slot of a KEY_EX frame, before its tag is checked:
 //   -4 = sender MAC mismatch between header.origin and payload
-//   >=0 = OK, value is the mesh slot index
-int verifyKeyExPayload(const V4RxCtx& ctx, uint16_t expectedFp,
-                       const uint8_t senderMac[6],
-                       const uint8_t senderPub[32],
-                       const uint8_t hmac[32],
-                       const uint8_t** outBootstrapKey) {
-  // Header origin must match the sender MAC field inside the payload.
+//   -2 = unknown mesh (the mesh id matches no enabled slot with keys)
+//   >=0 = the slot; *outKeys points into the mesh derived-key cache.
+int keyExMeshSlot(const V4RxCtx& ctx, uint16_t meshId, const uint8_t senderMac[6],
+                  const MeshDerivedKeys** outKeys) {
   if (memcmp(ctx.h->origin, senderMac, 6) != 0) return -4;
-
-  // Look up mesh by fingerprint.
-  const MeshDerivedKeys* mk = meshKeysFindByFingerprint(expectedFp);
+  const MeshDerivedKeys* mk = meshKeysFindByFingerprint(meshId);
   if (!mk) return -2;
-
-  // Recompute HMAC and constant-time compare.
-  uint8_t expected[32];
-  if (!computeKeyExHmac(expectedFp, senderMac, senderPub,
-                        mk->bootstrapKey, expected)) {
-    return -3;
-  }
-  if (!ctMemcmp32(expected, hmac)) return -3;
-
-  *outBootstrapKey = mk->bootstrapKey;
-  // Find the meshIdx (slot) that matches this fingerprint.
   for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
-    if (gSettings.meshes[i].enabled && gSettings.meshes[i].fingerprint == expectedFp) {
+    if (gSettings.meshes[i].enabled && gSettings.meshes[i].fingerprint == meshId) {
+      *outKeys = mk;
       return i;
     }
   }
   return -2;
 }
 
-// Accepted-HELLO rate limit. A HELLO's HMAC covers the mesh fingerprint, the
-// sender MAC and the sender's public key and nothing fresh, so a recorded
-// HELLO stays valid, and a copy with a new header msgId passes the
-// dispatcher's duplicate ring. Acting on one costs a REPLY (or a CONFIRM) on
-// the air and can use up a pairing window, so at most one verified HELLO per
-// sender MAC and mesh is acted on per kKeyExHelloMinIntervalMs; the others are
-// dropped right after the HMAC check. The mesh is part of the key because one
-// pairing action can send two HELLOs tens of milliseconds apart for two meshes
-// both devices share (the seed heartbeat's and the command's own), and the
-// second must not be mistaken for a copy of the first. The interval is shorter than the initiator's own
-// HELLO retry (kKeyExRetryMs, asserted where that is defined), so the
-// retransmit after a lost REPLY is always answered, and a first HELLO is
-// answered at once.
+// Accepted-HELLO table: rate limit, copy check and the REPLYs sent.
 //
-// One slot per sender MAC and mesh, as many as there are peer-identity slots. A slot is
-// taken over only after its interval has passed; while every slot is inside its
-// interval a HELLO from one more MAC is dropped, which bounds the HELLOs acted
-// on to kKeyExHelloSlots per interval however many sender MACs are replayed.
-// Only v4hKeyExHello (espnow_task) touches the table: no lock.
+// A HELLO carries a fresh nonce (a retry gets a new one), and its tag covers
+// it. A HELLO whose nonce this device already acted on for that sender is a
+// recorded copy and is dropped (kKeyExHelloNonceMemory per sender and mesh).
+// Besides, at most one verified HELLO per sender MAC and mesh is acted on per
+// kKeyExHelloMinIntervalMs: acting on one costs a REPLY (or a CONFIRM) on the
+// air and can use up a pairing window, and an older copy whose nonce was
+// forgotten still verifies. The mesh is part of the key because one pairing
+// action can send two HELLOs tens of milliseconds apart for two meshes both
+// devices share (the seed heartbeat's and the command's own), and the second
+// must not be mistaken for a copy of the first. The interval is shorter than
+// the initiator's own HELLO retry (kKeyExRetryMs, asserted where that is
+// defined), so the retransmit after a lost REPLY is always answered, and a
+// first HELLO is answered at once.
+//
+// The REPLYs sent are kept too (kKeyExReplyMemory per sender and mesh): the
+// initiator's KEY_EX_CONFIRM is tagged over both nonces and both keys, and is
+// checked against them.
+//
+// One slot per sender MAC and mesh, as many as there are peer-identity slots. A
+// slot is taken over only after its interval has passed (its nonce memory and
+// REPLYs go with it); while every slot is inside its interval a HELLO from one
+// more MAC is dropped, which bounds the HELLOs acted on to kKeyExHelloSlots per
+// interval however many sender MACs are replayed. Only the espnow_task
+// handlers (HELLO, CONFIRM) touch the table: no lock. 16 x 220 B in PSRAM.
 constexpr uint8_t  kKeyExHelloSlots         = 16;
 constexpr uint32_t kKeyExHelloMinIntervalMs = 1000;
+constexpr uint8_t  kKeyExHelloNonceMemory   = 4;
+constexpr uint8_t  kKeyExReplyMemory        = 2;
+struct KeyExReplySent {
+  bool    used;
+  uint8_t helloNonce[16];   // the HELLO answered
+  uint8_t replyNonce[16];   // our REPLY's nonce
+  uint8_t initPub[32];      // the initiator's key from that HELLO
+};
 struct KeyExHelloSeen {
   uint8_t  mac[6];
   bool     used;
   uint16_t meshFp;    // mesh fingerprint the HELLO was for
   uint32_t actedMs;   // millis() of the last HELLO from this MAC and mesh that was acted on
+  uint8_t  nonces[kKeyExHelloNonceMemory][16];   // HELLO nonces acted on (newest at nonceNext - 1)
+  uint8_t  nonceCount;
+  uint8_t  nonceNext;
+  uint8_t  replyNext;
+  KeyExReplySent replies[kKeyExReplyMemory];
 };
 EXT_RAM_BSS_ATTR KeyExHelloSeen gKeyExHelloSeen[kKeyExHelloSlots] = {};
 
-// True when a verified HELLO from `mac` for mesh `meshFp` may be acted on now;
-// notes it if so.
-bool keyExHelloAdmit(const uint8_t mac[6], uint16_t meshFp, uint32_t nowMs) {
+enum class HelloVerdict : uint8_t {
+  Act,       // act on it (noted)
+  TooSoon,   // one from this MAC and mesh was acted on less than the interval ago
+  Copy,      // its nonce was acted on already: a recorded copy
+  NoSlot,    // every slot is inside its interval
+};
+
+KeyExHelloSeen* keyExHelloSlotFor(const uint8_t mac[6], uint16_t meshFp) {
+  for (auto& e : gKeyExHelloSeen)
+    if (e.used && e.meshFp == meshFp && memcmp(e.mac, mac, 6) == 0) return &e;
+  return nullptr;
+}
+
+// What to do with a verified HELLO from `mac` for mesh `meshFp` carrying
+// `nonce`; notes it when it is acted on.
+HelloVerdict keyExHelloAdmit(const uint8_t mac[6], uint16_t meshFp, const uint8_t nonce[16], uint32_t nowMs) {
   KeyExHelloSeen* spare = nullptr;
   for (auto& e : gKeyExHelloSeen) {
     const bool lapsed = !e.used || (uint32_t)(nowMs - e.actedMs) >= kKeyExHelloMinIntervalMs;
     if (e.used && e.meshFp == meshFp && memcmp(e.mac, mac, 6) == 0) {
-      if (!lapsed) return false;
+      for (uint8_t i = 0; i < e.nonceCount; i++)
+        if (memcmp(e.nonces[i], nonce, 16) == 0) return HelloVerdict::Copy;
+      if (!lapsed) return HelloVerdict::TooSoon;
       e.actedMs = nowMs;
-      return true;
+      memcpy(e.nonces[e.nonceNext], nonce, 16);
+      e.nonceNext = (uint8_t)((e.nonceNext + 1) % kKeyExHelloNonceMemory);
+      if (e.nonceCount < kKeyExHelloNonceMemory) e.nonceCount++;
+      return HelloVerdict::Act;
     }
     if (lapsed && !spare) spare = &e;
   }
-  if (!spare) return false;
+  if (!spare) return HelloVerdict::NoSlot;
+  memset(spare, 0, sizeof(*spare));
   memcpy(spare->mac, mac, 6);
   spare->meshFp  = meshFp;
   spare->actedMs = nowMs;
+  memcpy(spare->nonces[0], nonce, 16);
+  spare->nonceCount = 1;
+  spare->nonceNext  = 1;
   spare->used    = true;
-  return true;
+  return HelloVerdict::Act;
+}
+
+// Our REPLY to the HELLO `helloNonce` from `mac` went out with `replyNonce`.
+void keyExNoteReply(const uint8_t mac[6], uint16_t meshFp, const uint8_t helloNonce[16],
+                    const uint8_t replyNonce[16], const uint8_t initPub[32]) {
+  KeyExHelloSeen* e = keyExHelloSlotFor(mac, meshFp);
+  if (!e) return;
+  KeyExReplySent& r = e->replies[e->replyNext];
+  e->replyNext = (uint8_t)((e->replyNext + 1) % kKeyExReplyMemory);
+  memcpy(r.helloNonce, helloNonce, 16);
+  memcpy(r.replyNonce, replyNonce, 16);
+  memcpy(r.initPub, initPub, 32);
+  r.used = true;
+}
+
+// A CONFIRM from the initiator of an exchange this device answered (a REPLY of
+// ours): true when its tag matches one of the REPLYs sent to it; that record
+// is used up.
+bool keyExConfirmMatchesReply(const V4PayloadKeyExConfirm& conf, const uint8_t selfMac[6],
+                              const uint8_t selfPub[32], const uint8_t bootstrapKey[32]) {
+  KeyExHelloSeen* e = keyExHelloSlotFor(conf.confirmerMac, conf.meshFingerprint);
+  if (!e) return false;
+  for (auto& r : e->replies) {
+    if (!r.used) continue;
+    espnowhs::KeyExContext c = {};
+    memcpy(c.initMac, conf.confirmerMac, 6);
+    memcpy(c.respMac, selfMac, 6);
+    memcpy(c.helloNonce, r.helloNonce, 16);
+    memcpy(c.replyNonce, r.replyNonce, 16);
+    memcpy(c.initPub, r.initPub, 32);
+    memcpy(c.respPub, selfPub, 32);
+    uint8_t want[espnowhs::kTagLen];
+    if (computeConfirmTag(conf, c, bootstrapKey, want) && espnowhs::tagEqual(want, conf.hmac)) {
+      r.used = false;   // one CONFIRM per REPLY: a copy of it matches nothing
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace
 
-// KEY_EX retry/timeout (F6) — clear the in-flight retry record for a peer once
-// the handshake resolves. Forward-declared here so the REPLY/CONFIRM handlers
-// (above the table definition) can call it; defined alongside the table below.
-static void keyExClearInFlight(const uint8_t peerMac[6]);
-static bool keyExCancelled(const uint8_t peerMac[6]);
+// ----------------------------------------------------------------------------
+// KEY_EX retry / timeout (F6) and the nonces of our own HELLOs
+//
+// espnowKeyExInitiate arms an entry here and sends the HELLO; the sweep called
+// from the periodic espnow tick re-sends it on timeout (with a new nonce) and
+// gives up after a bounded number of tries. The entry keeps the nonce of every
+// HELLO of the exchange: a REPLY is taken only when its tag covers one of them,
+// so a recorded REPLY, or one to no HELLO of ours, stores nothing.
+//
+// We only need to retry the HELLO, not all three handshake messages: the
+// responder persists the initiator's identity on HELLO receipt and is fully
+// idempotent (a re-sent HELLO finds the same key stored and re-emits the
+// REPLY). If the final CONFIRM is lost the responder already stored the
+// identity, so a single HELLO-retry makes the whole exchange robust.
+// ----------------------------------------------------------------------------
 
-// Build + send a KEY_EX_CONFIRM to peerMac with the given status
-// (0=ok, 1=hmac-fail, 2=pub-conflict, 3=not accepted: not paired here or
-// revoked, espnowrevoke::kConfirmNotAccepted). CONFIRM carries no HMAC — the prior
-// REPLY's HMAC already authenticated the peer — so this needs no mesh key,
-// just our own identity for the OOB pubkey fingerprint. Shared by the
-// responder (HELLO handler) and the initiator (REPLY handler) so the
-// conflict-rejection path is symmetric by construction rather than by
-// duplicated inline builds (was: HELLO sent status=2 on conflict, REPLY
-// silently dropped — fixed by routing both through here).
-static void sendKeyExConfirm(const uint8_t peerMac[6], uint16_t meshFingerprint,
-                             uint8_t status) {
+namespace {
+
+constexpr uint8_t  kKeyExInFlightSlots = 4;     // matches pending-frame sizing
+constexpr uint8_t  kKeyExMaxRetries    = 2;     // re-sends after the initial HELLO
+constexpr uint32_t kKeyExRetryMs       = 1500;  // re-send if unresolved this long
+constexpr uint8_t  kKeyExHelloNonces   = kKeyExMaxRetries + 1;  // one per HELLO of an exchange
+static_assert(kKeyExHelloMinIntervalMs < kKeyExRetryMs,
+              "the responder must answer the initiator's HELLO retry");
+
+struct KeyExInFlight {
+  bool     inUse;
+  uint8_t  peerMac[6];
+  int8_t   meshSlot;     // resolved slot, to rebuild the HELLO on retry
+  uint8_t  retriesLeft;
+  uint32_t lastSentMs;
+  bool     automatic;    // not asked for by a user: give-up warning is rate-limited
+  bool     cancelled;    // called off by an unpair: no retry, its REPLY is ignored
+  uint8_t  nonceCount;   // HELLO nonces kept (up to kKeyExHelloNonces)
+  uint8_t  nonceNext;
+  uint8_t  nonces[kKeyExHelloNonces][16];   // the nonce of each HELLO of this exchange
+};
+
+// Tiny table (4 × ~64 B, PSRAM). Registered on cmd_exec (espnowKeyExInitiate
+// via the CLI / pairsecure); swept + cleared on the espnow task (RX handlers +
+// tick). Lock-free per the codebase convention for these small tables:
+// register fills all fields before setting inUse=true, so a concurrent sweep
+// never observes a half-populated in-use slot; clear is a single-bool write.
+EXT_RAM_BSS_ATTR KeyExInFlight gKeyExInFlight[kKeyExInFlightSlots] = {};
+
+// The entry for `peerMac` (an exchange called off by an unpair is replaced);
+// nullptr when the table is full. A re-start of a live exchange keeps the
+// nonces already sent, so a REPLY to an earlier HELLO still counts.
+KeyExInFlight* keyExInFlightArm(const uint8_t peerMac[6], int slot, bool automatic) {
+  KeyExInFlight* e = nullptr;
+  for (auto& k : gKeyExInFlight)
+    if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) { e = &k; break; }
+  const bool keepNonces = e && !e->cancelled && e->meshSlot == (int8_t)slot;
+  if (!e)
+    for (auto& k : gKeyExInFlight)
+      if (!k.inUse) { e = &k; break; }
+  if (!e) {
+    WARN_ESPNOWF("KEY_EX: in-flight table full (%u exchanges) - try again in a few seconds",
+                 (unsigned)kKeyExInFlightSlots);
+    return nullptr;
+  }
+  memcpy(e->peerMac, peerMac, 6);
+  e->meshSlot     = (int8_t)slot;
+  e->retriesLeft  = kKeyExMaxRetries;
+  e->lastSentMs   = (uint32_t)millis();
+  e->automatic    = automatic;
+  e->cancelled    = false;  // a new exchange replaces one that was called off
+  if (!keepNonces) { e->nonceCount = 0; e->nonceNext = 0; }
+  e->inUse        = true;   // publish last
+  return e;
+}
+
+// A fresh nonce for the next HELLO of `e`, kept in the entry.
+void keyExInFlightNewNonce(KeyExInFlight* e, uint8_t out[16]) {
+  espnowCryptoRandomBytes(out, 16);
+  memcpy(e->nonces[e->nonceNext], out, 16);
+  e->nonceNext = (uint8_t)((e->nonceNext + 1) % kKeyExHelloNonces);
+  if (e->nonceCount < kKeyExHelloNonces) e->nonceCount++;
+}
+
+// The live (not called off) exchange with `peerMac`, or nullptr.
+KeyExInFlight* keyExInFlightFind(const uint8_t peerMac[6]) {
+  for (auto& k : gKeyExInFlight)
+    if (k.inUse && !k.cancelled && memcmp(k.peerMac, peerMac, 6) == 0) return &k;
+  return nullptr;
+}
+
+// A CONFIRM refusing one of our HELLOs (sent by the responder, no REPLY): true
+// when its tag covers the nonce of a HELLO of the live exchange with it.
+bool keyExConfirmMatchesHello(const V4PayloadKeyExConfirm& conf, const uint8_t selfMac[6],
+                              const uint8_t selfPub[32], const uint8_t bootstrapKey[32]) {
+  const KeyExInFlight* k = keyExInFlightFind(conf.confirmerMac);
+  if (!k) return false;
+  if (k->meshSlot < 0 || gSettings.meshes[k->meshSlot].fingerprint != conf.meshFingerprint) return false;
+  for (uint8_t i = 0; i < k->nonceCount; i++) {
+    const espnowhs::KeyExContext c = keyExHelloRefusalContext(selfMac, selfPub, k->nonces[i], conf.confirmerMac);
+    uint8_t want[espnowhs::kTagLen];
+    if (computeConfirmTag(conf, c, bootstrapKey, want) && espnowhs::tagEqual(want, conf.hmac)) return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+static void keyExClearInFlight(const uint8_t peerMac[6]) {
+  for (auto& k : gKeyExInFlight)
+    if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) { k.inUse = false; return; }
+}
+
+// Unpair (cmd_exec): the entry stays, marked, until one retry interval after
+// its last HELLO, so a REPLY to that HELLO is still recognised and ignored.
+// Single-bool write, read by the sweep and the REPLY handler on espnow_task.
+void espnowKeyExCancel(const uint8_t peerMac[6]) {
+  if (!peerMac) return;
+  for (auto& k : gKeyExInFlight)
+    if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) { k.cancelled = true; return; }
+}
+
+static bool keyExCancelled(const uint8_t peerMac[6]) {
+  for (auto& k : gKeyExInFlight)
+    if (k.inUse && k.cancelled && memcmp(k.peerMac, peerMac, 6) == 0) return true;
+  return false;
+}
+
+// Public accessor — see header for contract.
+// One called off by an unpair does not count: a new start replaces it.
+bool keyExIsInFlight(const uint8_t peerMac[6]) {
+  if (!peerMac) return false;
+  return keyExInFlightFind(peerMac) != nullptr;
+}
+
+bool keyExAnyInFlight() {
+  for (auto& k : gKeyExInFlight)
+    if (k.inUse && !k.cancelled) return true;
+  return false;
+}
+
+// Build + send a KEY_EX_CONFIRM to peerMac with the given status (0=ok,
+// 1=hmac-fail, 2=pub-conflict, 3=not accepted: not paired here or revoked,
+// espnowrevoke::kConfirmNotAccepted), tagged under the mesh bootstrap key over
+// the exchange `c` (HandshakeCore confirmInput). Shared by the responder (HELLO
+// handler: a refusal) and the initiator (REPLY handler: the end of the
+// exchange, or a refusal) so both paths build it the same way.
+static void sendKeyExConfirm(const uint8_t peerMac[6], uint16_t meshFingerprint, uint8_t status,
+                             const espnowhs::KeyExContext& c, const uint8_t bootstrapKey[32]) {
   V4PayloadKeyExConfirm conf = {};
   conf.meshFingerprint = meshFingerprint;
   uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
   memcpy(conf.confirmerMac, selfMac, 6);
   conf.status = status;
   const auto& self = espnowIdentityGet();
-  if (self.valid) memcpy(conf.pubFingerprint, self.pub, 8);
+  if (self.valid) memcpy(conf.keyId, self.pub, 8);
+  if (!computeConfirmTag(conf, c, bootstrapKey, conf.hmac)) {
+    ERROR_ESPNOWF("KEY_EX_CONFIRM: tag compute failed; not sent");
+    return;
+  }
   v4_send_frame(peerMac, ESPNOW_V4_TYPE_KEY_EX_CONFIRM,
                 ESPNOW_V4_FLAG_ACK_REQ,
                 generateMessageId(),
@@ -242,13 +457,15 @@ static void sendKeyExConfirm(const uint8_t peerMac[6], uint16_t meshFingerprint,
 }
 
 // "Not accepted" (status 3) to a sender whose key this device will not store
-// (rule A: no registry entry, or no open first-key window). The sender is
-// usually not in the radio peer table, and must not stay there: a lasting
-// radio peer would let its route adverts in (meshRouterIngestAdvert). So the
-// peer is added, the CONFIRM sent and the peer deleted again, unless it was
-// there before. The caller already rate-limited the sender (one HELLO acted
-// on per MAC and mesh per second).
-static void sendKeyExNotAccepted(const uint8_t peerMac[6], uint16_t meshFingerprint, const char* what) {
+// (rule A: no registry entry, or no open first-key window; or a key other than
+// the one its accepted pairing request carried). The sender is usually not in
+// the radio peer table, and must not stay there: a lasting radio peer would let
+// its route adverts in (meshRouterIngestAdvert). So the peer is added, the
+// CONFIRM sent and the peer deleted again, unless it was there before. The
+// caller already rate-limited the sender (one HELLO acted on per MAC and mesh
+// per second, or a REPLY to our own HELLO).
+static void sendKeyExNotAccepted(const uint8_t peerMac[6], uint16_t meshFingerprint, const char* what,
+                                 const espnowhs::KeyExContext& c, const uint8_t bootstrapKey[32]) {
   static uint32_t sNotAcceptedLogMs = 0;
   if (logCooldownOk(sNotAcceptedLogMs, 30000)) {
     INFO_ESPNOWF("%s from " MAC_FMT " not accepted: it is not paired here (or its first-key window "
@@ -257,7 +474,7 @@ static void sendKeyExNotAccepted(const uint8_t peerMac[6], uint16_t meshFingerpr
   }
   const bool existed = esp_now_is_peer_exist(peerMac);
   if (!existed && !ensureUnencryptedPeer(peerMac)) return;
-  sendKeyExConfirm(peerMac, meshFingerprint, espnowrevoke::kConfirmNotAccepted);
+  sendKeyExConfirm(peerMac, meshFingerprint, espnowrevoke::kConfirmNotAccepted, c, bootstrapKey);
   if (!existed) esp_now_del_peer(peerMac);
 }
 
@@ -317,10 +534,16 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
   ctx.read(hello);
   const V4PayloadKeyExHello* msg = &hello;
 
-  const uint8_t* bootKey = nullptr;
-  int meshSlot = verifyKeyExPayload(ctx, msg->meshFingerprint,
-                                    msg->senderMac, msg->senderPubEd25519,
-                                    msg->hmac, &bootKey);
+  const MeshDerivedKeys* mk = nullptr;
+  int meshSlot = keyExMeshSlot(ctx, msg->meshFingerprint, msg->senderMac, &mk);
+  if (meshSlot >= 0) {
+    uint8_t want[espnowhs::kTagLen];
+    if (!computeHelloTag(msg->meshFingerprint, msg->senderMac, msg->senderPubEd25519, msg->nonce,
+                         mk->bootstrapKey, want) ||
+        !espnowhs::tagEqual(want, msg->hmac)) {
+      meshSlot = -3;
+    }
+  }
   if (meshSlot < 0) {
     const char* why = (meshSlot == -2) ? "unknown mesh - this device has no mesh matching that label/fingerprint"
                     : (meshSlot == -3) ? "HMAC FAIL = PASSPHRASE MISMATCH - the two devices do NOT share the same mesh passphrase"
@@ -331,25 +554,44 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
                  meshSlot, why, (unsigned)msg->meshFingerprint);
     return;
   }
+  const uint8_t* bootKey = mk->bootstrapKey;
 
-  // Verified, but a copy of a recorded HELLO verifies too: act on one per
-  // sender MAC and mesh per interval (see keyExHelloAdmit). Checked before the
-  // pairing window below, which a dropped HELLO must not use up.
-  if (!keyExHelloAdmit(msg->senderMac, msg->meshFingerprint, (uint32_t)millis())) {
-    DEBUG_ESPNOWF("KEY_EX_HELLO from " MAC_FMT " ignored: one answered less than %ums ago",
-                  MAC_ARGS(msg->senderMac), (unsigned)kKeyExHelloMinIntervalMs);
-    return;
+  // Verified, but a recorded HELLO verifies too: one whose nonce was already
+  // acted on is a copy, and one per sender MAC and mesh is acted on per
+  // interval (see keyExHelloAdmit). Checked before the pairing window below,
+  // which a dropped HELLO must not use up.
+  switch (keyExHelloAdmit(msg->senderMac, msg->meshFingerprint, msg->nonce, (uint32_t)millis())) {
+    case HelloVerdict::Act:
+      break;
+    case HelloVerdict::Copy: {
+      static uint32_t sHelloCopyLogMs = 0;
+      if (logCooldownOk(sHelloCopyLogMs, 30000)) {
+        WARN_ESPNOWF("KEY_EX_HELLO from " MAC_FMT " ignored: a copy of one already answered (replayed)",
+                     MAC_ARGS(msg->senderMac));
+      }
+      return;
+    }
+    case HelloVerdict::TooSoon:
+    case HelloVerdict::NoSlot:
+      DEBUG_ESPNOWF("KEY_EX_HELLO from " MAC_FMT " ignored: one answered less than %ums ago",
+                    MAC_ARGS(msg->senderMac), (unsigned)kKeyExHelloMinIntervalMs);
+      return;
   }
 
+  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
+  const espnowhs::KeyExContext refusal =
+      keyExHelloRefusalContext(msg->senderMac, msg->senderPubEd25519, msg->nonce, selfMac);
+
   // Rule A (1.0): an identity is stored only for a registry entry, its first
-  // key only while a local pairing action for the MAC is open; a revoked MAC
-  // or key gets no answer at all.
+  // key only while a local pairing action for the MAC is open (and, after an
+  // accepted pairing request, only the key that request carried); a revoked
+  // MAC or key gets no answer at all.
   switch (espnowKeyExAdmit(msg->senderMac, msg->senderPubEd25519)) {
     case espnowrevoke::Admit::Revoked:
       keyExRevokedDrop(msg->senderMac, msg->senderPubEd25519, "KEY_EX_HELLO");
       return;
     case espnowrevoke::Admit::NotAccepted:
-      sendKeyExNotAccepted(msg->senderMac, msg->meshFingerprint, "KEY_EX_HELLO");
+      sendKeyExNotAccepted(msg->senderMac, msg->meshFingerprint, "KEY_EX_HELLO", refusal, bootKey);
       return;
     case espnowrevoke::Admit::Accept:
       break;
@@ -419,11 +661,11 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
 
   // If status != 0 (conflict), emit a CONFIRM with the status instead of REPLY.
   if (confirmStatus != 0) {
-    sendKeyExConfirm(msg->senderMac, msg->meshFingerprint, confirmStatus);
+    sendKeyExConfirm(msg->senderMac, msg->meshFingerprint, confirmStatus, refusal, bootKey);
     return;
   }
 
-  // Build REPLY: our pubkey + HMAC over (fp || ourMac || ourPub).
+  // Build REPLY: our key, a fresh nonce, and a tag that also covers the HELLO.
   const auto& self = espnowIdentityGet();
   if (!self.valid) {
     ERROR_ESPNOWF("KEY_EX_HELLO: own identity not loaded; cannot REPLY");
@@ -431,13 +673,16 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
   }
   V4PayloadKeyExReply reply = {};
   reply.meshFingerprint = msg->meshFingerprint;
-  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
   memcpy(reply.responderMac, selfMac, 6);
   memcpy(reply.responderPubEd25519, self.pub, 32);
-  if (!computeKeyExHmac(msg->meshFingerprint, selfMac, self.pub, bootKey, reply.hmac)) {
+  espnowCryptoRandomBytes(reply.nonce, sizeof(reply.nonce));
+  if (!computeReplyTag(msg->meshFingerprint, selfMac, self.pub, reply.nonce, msg->senderMac,
+                       msg->senderPubEd25519, msg->nonce, bootKey, reply.hmac)) {
     ERROR_ESPNOWF("KEY_EX_HELLO: HMAC compute failed for REPLY");
     return;
   }
+  // Kept for the initiator's CONFIRM, which is tagged over both nonces.
+  keyExNoteReply(msg->senderMac, msg->meshFingerprint, msg->nonce, reply.nonce, msg->senderPubEd25519);
 
   v4_send_frame(msg->senderMac, ESPNOW_V4_TYPE_KEY_EX_REPLY,
                 ESPNOW_V4_FLAG_ACK_REQ,
@@ -451,10 +696,8 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   ctx.read(replyMsg);
   const V4PayloadKeyExReply* msg = &replyMsg;
 
-  const uint8_t* bootKey = nullptr;
-  int meshSlot = verifyKeyExPayload(ctx, msg->meshFingerprint,
-                                    msg->responderMac, msg->responderPubEd25519,
-                                    msg->hmac, &bootKey);
+  const MeshDerivedKeys* mk = nullptr;
+  const int meshSlot = keyExMeshSlot(ctx, msg->meshFingerprint, msg->responderMac, &mk);
   if (meshSlot < 0) {
     WARN_ESPNOWF("KEY_EX_REPLY rejected (reason=%d) from " MAC_FMT,
                  meshSlot,
@@ -470,6 +713,44 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
     return;
   }
 
+  // A REPLY answers one HELLO of ours: its tag covers that HELLO's nonce. One
+  // with no exchange of ours in flight (late, a copy, or never asked for) or
+  // whose tag covers none of our nonces stores nothing.
+  const auto& self = espnowIdentityGet();
+  const KeyExInFlight* k = keyExInFlightFind(msg->responderMac);
+  if (!k || !self.valid || k->meshSlot != meshSlot) {
+    static uint32_t sReplyStrayLogMs = 0;
+    if (logCooldownOk(sReplyStrayLogMs, 30000)) {
+      WARN_ESPNOWF("KEY_EX_REPLY from " MAC_FMT " ignored: no key exchange of ours with it is in flight "
+                   "on that mesh (late, or a copy of an old one)", MAC_ARGS(msg->responderMac));
+    }
+    return;
+  }
+  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
+  int matched = -1;
+  for (uint8_t i = 0; i < k->nonceCount && matched < 0; i++) {
+    uint8_t want[espnowhs::kTagLen];
+    if (computeReplyTag(msg->meshFingerprint, msg->responderMac, msg->responderPubEd25519, msg->nonce,
+                        selfMac, self.pub, k->nonces[i], mk->bootstrapKey, want) &&
+        espnowhs::tagEqual(want, msg->hmac)) {
+      matched = i;
+    }
+  }
+  if (matched < 0) {
+    WARN_ESPNOWF("KEY_EX_REPLY from " MAC_FMT " rejected: its tag matches none of our HELLOs "
+                 "(another mesh passphrase, or a replayed REPLY)", MAC_ARGS(msg->responderMac));
+    return;
+  }
+  // The whole exchange, for the CONFIRM's tag.
+  espnowhs::KeyExContext full = {};
+  memcpy(full.initMac, selfMac, 6);
+  memcpy(full.respMac, msg->responderMac, 6);
+  memcpy(full.helloNonce, k->nonces[matched], 16);
+  memcpy(full.replyNonce, msg->nonce, 16);
+  memcpy(full.initPub, self.pub, 32);
+  memcpy(full.respPub, msg->responderPubEd25519, 32);
+  const uint8_t* bootKey = mk->bootstrapKey;
+
   // Rule A, as for a HELLO: a REPLY stores a key only for a registry entry.
   switch (espnowKeyExAdmit(msg->responderMac, msg->responderPubEd25519)) {
     case espnowrevoke::Admit::Revoked:
@@ -478,7 +759,7 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
       return;
     case espnowrevoke::Admit::NotAccepted:
       keyExClearInFlight(msg->responderMac);
-      sendKeyExNotAccepted(msg->responderMac, msg->meshFingerprint, "KEY_EX_REPLY");
+      sendKeyExNotAccepted(msg->responderMac, msg->meshFingerprint, "KEY_EX_REPLY", full, bootKey);
       return;
     case espnowrevoke::Admit::Accept:
       break;
@@ -509,8 +790,9 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
     // Tell the responder we rejected them — symmetric with the HELLO-side
     // conflict path. The peer is already in our hw table (we sent the HELLO
     // that triggered this REPLY), but ensure it before sending defensively.
+    keyExClearInFlight(msg->responderMac);
     if (ensureUnencryptedPeer(msg->responderMac)) {
-      sendKeyExConfirm(msg->responderMac, msg->meshFingerprint, 2);
+      sendKeyExConfirm(msg->responderMac, msg->meshFingerprint, 2, full, bootKey);
     }
     return;
   }
@@ -538,6 +820,7 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   logMac("KEY_EX_REPLY accepted from", msg->responderMac);
 
   // Handshake resolved for us (initiator) — stop the HELLO retry timer (F6).
+  // `k` is not read after this.
   keyExClearInFlight(msg->responderMac);
   // The peer answered: its automatic starts need no back-off any more.
   espnowHandshakeBackoffClear(msg->responderMac);
@@ -545,18 +828,17 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   if (!ensureUnencryptedPeer(msg->responderMac)) return;
 
   // Send CONFIRM (status=0) — KEY_EX complete from our (initiator) side.
-  sendKeyExConfirm(msg->responderMac, msg->meshFingerprint, 0);
+  sendKeyExConfirm(msg->responderMac, msg->meshFingerprint, 0, full, bootKey);
 
   // Encrypt-or-wait foundation (2026-05): if v4_send_encrypted_or_queue parked
   // any frames for this peer while we were handshaking (because there was no
   // peer identity at send time), kick SESSION_OPEN now. The pending frames
   // will drain via the existing pendingFrameDrainForPeer hook in the
   // SESSION_CONFIRM handler. No-op when there's nothing pending.
-  // A second REPLY to the same HELLO (a retransmit answered twice) finds the
-  // first one's SESSION_OPEN in flight; the kick then leaves it alone. One that
-  // finds the session already ACTIVE (a late second answer, or a replay: a
-  // REPLY's HMAC covers nothing fresh either) must not replace it, which a kick
-  // on an ACTIVE session does: what is waiting goes out over the live session.
+  // A REPLY to a HELLO retry finds the first one's SESSION_OPEN in flight; the
+  // kick then leaves it alone. One that finds the session already ACTIVE (a
+  // late answer) must not replace it, which a kick on an ACTIVE session does:
+  // what is waiting goes out over the live session.
   const SessionState* live = sessionFindByPeer(msg->responderMac, (uint8_t)meshSlot);
   if (live && live->state == SESSION_ACTIVE) {
     pendingFrameDrainForPeer(msg->responderMac);
@@ -572,62 +854,81 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
 }
 
 void v4hKeyExConfirm(const V4RxCtx& ctx) {
-  // The receive table admits exactly 18 bytes (V4_OPC_LEN_EXACT).
+  // The receive table admits exactly 34 bytes (V4_OPC_LEN_EXACT).
   V4PayloadKeyExConfirm confirmMsg;
   ctx.read(confirmMsg);
   const V4PayloadKeyExConfirm* msg = &confirmMsg;
 
-  // No HMAC on CONFIRM — it's just an acknowledgement, the prior REPLY's
-  // HMAC already authenticated this peer. What we check here is that the
-  // header origin matches the payload's confirmerMac, and that the sender is a
-  // peer we already know. We do NOT read msg->meshFingerprint at all: mesh
-  // scoping rides entirely on the dispatcher's header-level fingerprint gate,
-  // which is itself skipped when the header fingerprint is 0.
   if (memcmp(ctx.h->origin, msg->confirmerMac, 6) != 0) {
     WARN_ESPNOWF("KEY_EX_CONFIRM: header.origin / payload.confirmerMac mismatch");
     return;
   }
-  // A refusal (status 1-3) can come from a peer whose key this device does
-  // not hold yet: the answer to our own HELLO. Anything else needs an identity.
-  const PeerIdentity* p = peerIdentityFindByMac(msg->confirmerMac);
-  if (!p) {
-    if (msg->status != 0 && keyExIsInFlight(msg->confirmerMac)) {
-      // Until CONFIRM is authenticated (step 4) anyone in range can send
-      // this one: it is only logged, and our HELLO retries go on (a forged
-      // refusal must not stop espnowpairsecure's key exchange).
-      static uint32_t sNotAcceptedLogMs = 0;
-      if (logCooldownOk(sNotAcceptedLogMs, 30000)) {
-        WARN_ESPNOWF("KEY_EX with " MAC_FMT ": %s - pair from both sides ('espnowpairsecure' on both "
-                     "devices); still retrying",
-                     MAC_ARGS(msg->confirmerMac),
-                     msg->status == espnowrevoke::kConfirmNotAccepted ? "not accepted" : "refused");
-      }
-      return;
+  // Authenticated (1.0): the tag is under the mesh bootstrap key and covers
+  // the exchange it ends. It matches either a REPLY we sent (the initiator's
+  // CONFIRM: we answered its HELLO) or one of our own HELLOs (the responder
+  // refuses it: no REPLY was sent). Anything else (forged, a copy, late) is
+  // ignored: a forged refusal must not stop espnowpairsecure's retries.
+  const MeshDerivedKeys* mk = meshKeysFindByFingerprint(msg->meshFingerprint);
+  const auto& self = espnowIdentityGet();
+  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
+  bool answersOurReply = false, answersOurHello = false;
+  if (mk && self.valid) {
+    answersOurReply = keyExConfirmMatchesReply(*msg, selfMac, self.pub, mk->bootstrapKey);
+    if (!answersOurReply) answersOurHello = keyExConfirmMatchesHello(*msg, selfMac, self.pub, mk->bootstrapKey);
+  }
+  if (!answersOurReply && !answersOurHello) {
+    static uint32_t sConfirmStrayLogMs = 0;
+    if (logCooldownOk(sConfirmStrayLogMs, 30000)) {
+      WARN_ESPNOWF("KEY_EX_CONFIRM (status %u) from " MAC_FMT " ignored: its tag matches no key exchange "
+                   "in flight here (forged, a copy, or late)",
+                   (unsigned)msg->status, MAC_ARGS(msg->confirmerMac));
     }
-    WARN_ESPNOWF("KEY_EX_CONFIRM: from unknown peer; ignored");
     return;
   }
 
-  // Terminal message — whether status=0 (ok) or status=2 (peer rejected our
-  // pubkey), the handshake is resolved; stop any HELLO retry timer (F6). A
-  // rejected handshake will never succeed, so retrying would be pointless.
-  keyExClearInFlight(msg->confirmerMac);
+  if (answersOurHello) {
+    // The responder refuses our HELLO. Status 0 never comes this way.
+    if (msg->status == 0) {
+      WARN_ESPNOWF("KEY_EX_CONFIRM from " MAC_FMT ": status 0 without a REPLY; ignored",
+                   MAC_ARGS(msg->confirmerMac));
+      return;
+    }
+    // Acted on only now, while our key exchange is in flight: this attempt
+    // ends (no more HELLO retries). The automatic starts keep their back-off,
+    // so this is not a stop for good (E24): the next one comes after it.
+    keyExClearInFlight(msg->confirmerMac);
+    if (msg->status == espnowrevoke::kConfirmNotAccepted) {
+      // Not paired there (or revoked there): one code for both (E24).
+      WARN_ESPNOWF("KEY_EX with " MAC_FMT ": not accepted - pair from both sides "
+                   "('espnowpairsecure' on both devices)",
+                   MAC_ARGS(msg->confirmerMac));
+    } else if (msg->status == 2) {
+      WARN_ESPNOWF("KEY_EX with " MAC_FMT ": refused - it holds another key for this device. Run "
+                   "'espnowpairsecure' there (its one-shot re-key window), or 'espnowunpair' there, then "
+                   "pair again on both sides.", MAC_ARGS(msg->confirmerMac));
+    } else {
+      WARN_ESPNOWF("KEY_EX with " MAC_FMT " reported status=%u "
+                   "(0=ok, 1=hmac-fail, 2=pub-conflict, 3=not accepted)",
+                   MAC_ARGS(msg->confirmerMac),
+                   (unsigned)msg->status);
+    }
+    return;
+  }
 
+  // The initiator ends an exchange we answered. Terminal: stop any HELLO retry
+  // of our own to it (F6); its key is stored already (on its HELLO).
+  keyExClearInFlight(msg->confirmerMac);
   if (msg->status == 0) {
-    // Finished on our (responder) side. A refusal (status 1 or 2) does not
-    // end the back-off: such a peer answers every time and never completes.
+    // Finished on our (responder) side. A refusal does not end the back-off:
+    // such a peer answers every time and never completes.
     espnowHandshakeBackoffClear(msg->confirmerMac);
     INFO_ESPNOWF("KEY_EX with " MAC_FMT " complete "
-                 "(remote pub fp: %02X%02X%02X%02X%02X%02X%02X%02X)",
+                 "(remote keyId: %02x%02x%02x%02x%02x%02x%02x%02x)",
                  MAC_ARGS(msg->confirmerMac),
-                 msg->pubFingerprint[0], msg->pubFingerprint[1], msg->pubFingerprint[2],
-                 msg->pubFingerprint[3], msg->pubFingerprint[4], msg->pubFingerprint[5],
-                 msg->pubFingerprint[6], msg->pubFingerprint[7]);
+                 msg->keyId[0], msg->keyId[1], msg->keyId[2], msg->keyId[3],
+                 msg->keyId[4], msg->keyId[5], msg->keyId[6], msg->keyId[7]);
   } else if (msg->status == espnowrevoke::kConfirmNotAccepted) {
-    // Not paired there (or revoked there): one code for both (E24). The
-    // automatic back-off stays; this is not a stop for good, since a forged
-    // status could otherwise cut a pair.
-    WARN_ESPNOWF("KEY_EX with " MAC_FMT ": not accepted - pair from both sides "
+    WARN_ESPNOWF("KEY_EX with " MAC_FMT ": not accepted there - pair from both sides "
                  "('espnowpairsecure' on both devices)",
                  MAC_ARGS(msg->confirmerMac));
   } else {
@@ -642,27 +943,11 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
 // Initiator
 // ============================================================================
 
-// ----------------------------------------------------------------------------
-// KEY_EX retry / timeout (F6)
-//
-// KEY_EX was previously fire-and-forget: espnowKeyExInitiate sent one HELLO and
-// gave up if the REPLY never arrived (radio loss, peer busy). Now more visible
-// since espnowpairsecure auto-kicks KEY_EX. We adopt the same shape as the
-// pending-frame ring: a tiny fixed table of in-flight initiations + a sweep
-// called from the periodic espnow tick that re-sends the HELLO on timeout and
-// gives up after a bounded number of tries.
-//
-// We only need to retry the HELLO, not all three handshake messages: the
-// responder persists the initiator's identity on HELLO receipt and is fully
-// idempotent (a re-sent HELLO finds the same key stored and re-emits the
-// REPLY). If the final CONFIRM is lost the responder already stored the
-// identity, so a single HELLO-retry makes the whole exchange robust.
-// ----------------------------------------------------------------------------
-
-// Build + send a single KEY_EX_HELLO for an already-resolved mesh slot. Shared
-// by the initial initiation and the retry sweep so neither duplicates the
-// keygen/HMAC. Returns true on radio-send success.
-static bool keyExSendHello(const uint8_t peerMac[6], int slot) {
+// Build + send a single KEY_EX_HELLO with a fresh nonce (kept in `e`) for an
+// already-resolved mesh slot. Shared by the initial initiation and the retry
+// sweep so neither duplicates the keygen/HMAC. Returns true on radio-send
+// success.
+static bool keyExSendHello(const uint8_t peerMac[6], int slot, KeyExInFlight* e) {
   const MeshDerivedKeys* mk = meshKeysGet((uint8_t)slot);
   if (!mk) {
     ERROR_ESPNOWF("KEY_EX: mesh slot %d has no derived keys (passphrase not set?)", slot);
@@ -682,8 +967,9 @@ static bool keyExSendHello(const uint8_t peerMac[6], int slot) {
   hello.meshFingerprint = gSettings.meshes[slot].fingerprint;
   memcpy(hello.senderMac, selfMac, 6);
   memcpy(hello.senderPubEd25519, self.pub, 32);
-  if (!computeKeyExHmac(hello.meshFingerprint, selfMac, self.pub,
-                        mk->bootstrapKey, hello.hmac)) {
+  keyExInFlightNewNonce(e, hello.nonce);
+  if (!computeHelloTag(hello.meshFingerprint, selfMac, self.pub, hello.nonce,
+                       mk->bootstrapKey, hello.hmac)) {
     ERROR_ESPNOWF("KEY_EX: HMAC compute failed");
     return false;
   }
@@ -705,49 +991,6 @@ static bool keyExSendHello(const uint8_t peerMac[6], int slot) {
 
 namespace {
 
-constexpr uint8_t  kKeyExInFlightSlots = 4;     // matches pending-frame sizing
-constexpr uint8_t  kKeyExMaxRetries    = 2;     // re-sends after the initial HELLO
-constexpr uint32_t kKeyExRetryMs       = 1500;  // re-send if unresolved this long
-static_assert(kKeyExHelloMinIntervalMs < kKeyExRetryMs,
-              "the responder must answer the initiator's HELLO retry");
-
-struct KeyExInFlight {
-  bool     inUse;
-  uint8_t  peerMac[6];
-  int8_t   meshSlot;     // resolved slot, to rebuild the HELLO on retry
-  uint8_t  retriesLeft;
-  uint32_t lastSentMs;
-  bool     automatic;    // not asked for by a user: give-up warning is rate-limited
-  bool     cancelled;    // called off by an unpair: no retry, its REPLY is ignored
-};
-
-// Tiny table (4 × ~16 B). Registered on cmd_exec (espnowKeyExInitiate via the
-// CLI / pairsecure); swept + cleared on the espnow task (RX handlers + tick).
-// Lock-free per the codebase convention for these small tables: register fills
-// all fields before setting inUse=true, so a concurrent sweep never observes a
-// half-populated in-use slot; clear is a single-bool write.
-KeyExInFlight gKeyExInFlight[kKeyExInFlightSlots] = {};
-
-void keyExInFlightArm(const uint8_t peerMac[6], int slot, bool automatic) {
-  KeyExInFlight* e = nullptr;
-  for (auto& k : gKeyExInFlight)
-    if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) { e = &k; break; }
-  if (!e)
-    for (auto& k : gKeyExInFlight)
-      if (!k.inUse) { e = &k; break; }
-  if (!e) {
-    WARN_ESPNOWF("KEY_EX: in-flight table full — no retry coverage for this request");
-    return;
-  }
-  memcpy(e->peerMac, peerMac, 6);
-  e->meshSlot     = (int8_t)slot;
-  e->retriesLeft  = kKeyExMaxRetries;
-  e->lastSentMs   = (uint32_t)millis();
-  e->automatic    = automatic;
-  e->cancelled    = false;  // a new exchange replaces one that was called off
-  e->inUse        = true;   // publish last
-}
-
 // Automatic key exchanges to a peer that is not there give up again and
 // again; their warning comes once per 15 minutes with the count held back.
 constexpr uint32_t kKeyExGiveUpWarnWindowMs = 15UL * 60UL * 1000UL;
@@ -763,41 +1006,6 @@ HandshakeBackoffTable gHandshakeBackoff = {};
 portMUX_TYPE gHandshakeBackoffLock = portMUX_INITIALIZER_UNLOCKED;
 
 }  // namespace
-
-static void keyExClearInFlight(const uint8_t peerMac[6]) {
-  for (auto& k : gKeyExInFlight)
-    if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) { k.inUse = false; return; }
-}
-
-// Unpair (cmd_exec): the entry stays, marked, until one retry interval after
-// its last HELLO, so a REPLY to that HELLO is still recognised and ignored.
-// Single-bool write, read by the sweep and the REPLY handler on espnow_task.
-void espnowKeyExCancel(const uint8_t peerMac[6]) {
-  if (!peerMac) return;
-  for (auto& k : gKeyExInFlight)
-    if (k.inUse && memcmp(k.peerMac, peerMac, 6) == 0) { k.cancelled = true; return; }
-}
-
-static bool keyExCancelled(const uint8_t peerMac[6]) {
-  for (auto& k : gKeyExInFlight)
-    if (k.inUse && k.cancelled && memcmp(k.peerMac, peerMac, 6) == 0) return true;
-  return false;
-}
-
-// Public accessor — see header for contract.
-// One called off by an unpair does not count: a new start replaces it.
-bool keyExIsInFlight(const uint8_t peerMac[6]) {
-  if (!peerMac) return false;
-  for (auto& k : gKeyExInFlight)
-    if (k.inUse && !k.cancelled && memcmp(k.peerMac, peerMac, 6) == 0) return true;
-  return false;
-}
-
-bool keyExAnyInFlight() {
-  for (auto& k : gKeyExInFlight)
-    if (k.inUse && !k.cancelled) return true;
-  return false;
-}
 
 void keyExRetrySweep(uint32_t nowMs) {
   for (auto& k : gKeyExInFlight) {
@@ -829,7 +1037,7 @@ void keyExRetrySweep(uint32_t nowMs) {
     INFO_ESPNOWF("KEY_EX: no REPLY from " MAC_FMT " yet — retrying HELLO (%u left)",
                  MAC_ARGS(k.peerMac),
                  (unsigned)k.retriesLeft);
-    keyExSendHello(k.peerMac, k.meshSlot);   // failure just retries next tick / eventually gives up
+    keyExSendHello(k.peerMac, k.meshSlot, &k);   // a new nonce; failure just retries next tick / eventually gives up
     k.lastSentMs = nowMs;
   }
 }
@@ -856,8 +1064,12 @@ static bool keyExInitiate(const uint8_t peerMac[6], const char* meshLabel, bool 
                   meshLabel ? meshLabel : "(default)");
     return false;
   }
-  bool ok = keyExSendHello(peerMac, slot);
-  if (ok) keyExInFlightArm(peerMac, slot, automatic);  // arm retry/timeout
+  // Armed first: the HELLO's nonce is kept in the entry, and a REPLY is taken
+  // only for an exchange in it (so a full table refuses the start).
+  KeyExInFlight* e = keyExInFlightArm(peerMac, slot, automatic);
+  if (!e) return false;
+  const bool ok = keyExSendHello(peerMac, slot, e);
+  if (!ok) keyExClearInFlight(peerMac);
   return ok;
 }
 
@@ -938,92 +1150,86 @@ uint32_t espnowLocalSessionCaps() {
 
 namespace {
 
-constexpr const char* kOpenLabel    = "v4-sopen:";   // 9 bytes including ':'
-constexpr const char* kConfirmLabel = "v4-sconf:";   // 9 bytes
-constexpr const char* kRekeyLabel   = "v4-rekey:";   // 9 bytes (Phase 3.6)
-constexpr size_t      kLabelLen     = 9;
+// The transcripts (System_ESPNow_HandshakeCore.h, labels hw1-espnow-1-sopen /
+// -sconf / -rekey). Sign exactly these lengths.
+constexpr size_t kOpenTranscriptLen    = espnowhs::kOpenTranscriptLen;     // 92
+constexpr size_t kConfirmTranscriptLen = espnowhs::kConfirmTranscriptLen;  // 100
+constexpr size_t kRekeyTranscriptLen   = espnowhs::kRekeyTranscriptLen;    // 84
 
-// Signed transcript lengths: the label, then the frame's fields up to its
-// signature (System_ESPNow_Wire.h, "SESSION establishment payloads").
-constexpr size_t kOpenTranscriptLen    = kLabelLen + 2 + 6 + 6 + 32 + 16 + 4;
-constexpr size_t kConfirmTranscriptLen = kLabelLen + 2 + 6 + 6 + 32 + 16 + 16 + 4;
-static_assert(kOpenTranscriptLen == 75, "OPEN transcript is 75 bytes");
-static_assert(kConfirmTranscriptLen == 91, "CONFIRM transcript is 91 bytes");
-
-// Writes the transcript fields in order; integers little endian.
-struct TranscriptCursor {
-  uint8_t* p;
-  void bytes(const void* src, size_t n) { memcpy(p, src, n); p += n; }
-  void u16(uint16_t v) { *p++ = (uint8_t)(v & 0xFF); *p++ = (uint8_t)(v >> 8); }
-  void u32(uint32_t v) { for (int i = 0; i < 4; i++) *p++ = (uint8_t)(v >> (8 * i)); }
-};
-
-// Build the OPEN transcript for sign/verify:
-//   "v4-sopen:" || sessionId(2 LE) || initMac(6) || respMac(6) || eph(32) || nonceA(16) ||
-//   sessionCaps(4 LE)
-// Total 9 + 2 + 6 + 6 + 32 + 16 + 4 = 75 bytes.
-void buildOpenTranscript(uint8_t out[kOpenTranscriptLen],
-                         uint16_t sessionId,
-                         const uint8_t initMac[6],
-                         const uint8_t respMac[6],
-                         const uint8_t eph[32],
-                         const uint8_t nonceA[16],
-                         uint32_t sessionCaps) {
-  TranscriptCursor c{out};
-  c.bytes(kOpenLabel, kLabelLen);
-  c.u16(sessionId);
-  c.bytes(initMac, 6);
-  c.bytes(respMac, 6);
-  c.bytes(eph, 32);
-  c.bytes(nonceA, 16);
-  c.u32(sessionCaps);
+void buildOpenTranscript(uint8_t out[kOpenTranscriptLen], const V4PayloadSessionOpen& m) {
+  espnowhs::openTranscript(out, m.sessionId, m.initiatorMac, m.responderMac, m.ephX25519Pub, m.nonceA,
+                           m.sessionCaps, m.openEpochMs);
 }
 
-// Build the CONFIRM transcript:
-//   "v4-sconf:" || sessionId(2 LE) || respMac(6) || initMac(6) || eph(32) ||
-//   nonceA(16) || nonceB(16) || sessionCaps(4 LE)
-// Total 9 + 2 + 6 + 6 + 32 + 16 + 16 + 4 = 91 bytes.
-void buildConfirmTranscript(uint8_t out[kConfirmTranscriptLen],
-                            uint16_t sessionId,
-                            const uint8_t respMac[6],
-                            const uint8_t initMac[6],
-                            const uint8_t eph[32],
-                            const uint8_t nonceA[16],
-                            const uint8_t nonceB[16],
-                            uint32_t sessionCaps) {
-  TranscriptCursor c{out};
-  c.bytes(kConfirmLabel, kLabelLen);
-  c.u16(sessionId);
-  c.bytes(respMac, 6);
-  c.bytes(initMac, 6);
-  c.bytes(eph, 32);
-  c.bytes(nonceA, 16);
-  c.bytes(nonceB, 16);
-  c.u32(sessionCaps);
+void buildConfirmTranscript(uint8_t out[kConfirmTranscriptLen], const V4PayloadSessionConfirm& m) {
+  espnowhs::confirmTranscript(out, m.sessionId, m.responderMac, m.initiatorMac, m.ephX25519Pub, m.nonceA,
+                              m.nonceB, m.sessionCaps);
 }
 
-// Build the REKEY transcript:
-//   "v4-rekey:" || sessionId(2 LE) || senderMac(6) || receiverMac(6) ||
-//   newEphX25519Pub(32) || nonceRekey(16) || prevTxSeqAtRekey(4 LE)
-// Total 9 + 2 + 6 + 6 + 32 + 16 + 4 = 75 bytes.
-void buildRekeyTranscript(uint8_t out[75],
-                          uint16_t sessionId,
-                          const uint8_t senderMac[6],
-                          const uint8_t receiverMac[6],
-                          const uint8_t newEph[32],
-                          const uint8_t nonceRekey[16],
-                          uint32_t prevTxSeqAtRekey) {
-  memcpy(out, kRekeyLabel, kLabelLen);
-  out[9]  = (uint8_t)(sessionId & 0xFF);
-  out[10] = (uint8_t)((sessionId >> 8) & 0xFF);
-  memcpy(out + 11, senderMac, 6);
-  memcpy(out + 17, receiverMac, 6);
-  memcpy(out + 23, newEph, 32);
-  memcpy(out + 55, nonceRekey, 16);
-  out[71] = (uint8_t)(prevTxSeqAtRekey & 0xFF);
-  out[72] = (uint8_t)((prevTxSeqAtRekey >> 8)  & 0xFF);
-  out[73] = (uint8_t)((prevTxSeqAtRekey >> 16) & 0xFF);
-  out[74] = (uint8_t)((prevTxSeqAtRekey >> 24) & 0xFF);
+void buildRekeyTranscript(uint8_t out[kRekeyTranscriptLen], const V4PayloadSessionRekey& m) {
+  espnowhs::rekeyTranscript(out, m.sessionId, m.senderMac, m.receiverMac, m.newEphX25519Pub, m.nonceRekey,
+                            m.prevTxSeqAtRekey);
+}
+
+// The C1 mesh tag of a session frame, under the bootstrap key of mesh slot
+// `slot` (the slot the peer's identity names, never one picked from the
+// header). False when that mesh has no key (no passphrase: no session on it).
+bool sessionMeshTag(uint8_t out[espnowhs::kTagLen], espnowhs::MeshTagKind kind, uint8_t slot,
+                    const uint8_t* transcript, size_t transcriptLen, const uint8_t signature[64]) {
+  const MeshDerivedKeys* mk = meshKeysGet(slot);
+  if (!mk || slot >= Settings::N_MESHES) return false;
+  uint8_t in[espnowhs::kMeshTagInputMax];
+  const size_t n = espnowhs::meshTagInput(in, kind, gSettings.meshes[slot].fingerprint, transcript, transcriptLen,
+                                          signature);
+  if (n == 0) return false;
+  uint8_t full[32];
+  const bool ok = espnowCryptoHmacSha256(full, mk->bootstrapKey, 32, in, n, nullptr, 0, nullptr, 0);
+  if (ok) memcpy(out, full, espnowhs::kTagLen);
+  sodium_memzero(full, sizeof(full));
+  return ok;
+}
+
+// The received mesh tag checked: false = "mesh key mismatch" (the sender does
+// not hold this mesh's current passphrase, or this mesh has none).
+bool sessionMeshTagOk(espnowhs::MeshTagKind kind, uint8_t slot, const uint8_t* transcript, size_t transcriptLen,
+                      const uint8_t signature[64], const uint8_t tag[16]) {
+  uint8_t want[espnowhs::kTagLen];
+  return sessionMeshTag(want, kind, slot, transcript, transcriptLen, signature) && espnowhs::tagEqual(want, tag);
+}
+
+// Sign a session frame (every field before its signature set) under our
+// identity key and add its mesh tag for mesh slot `slot`. False when either
+// fails (no mesh key: the mesh has no passphrase).
+bool sessionSealOpen(V4PayloadSessionOpen& m, uint8_t slot, const uint8_t sec[64]) {
+  uint8_t t[kOpenTranscriptLen];
+  buildOpenTranscript(t, m);
+  return espnowCryptoEd25519Sign(m.signature, t, sizeof(t), sec) &&
+         sessionMeshTag(m.meshTag, espnowhs::MeshTagKind::Open, slot, t, sizeof(t), m.signature);
+}
+
+bool sessionSealConfirm(V4PayloadSessionConfirm& m, uint8_t slot, const uint8_t sec[64]) {
+  uint8_t t[kConfirmTranscriptLen];
+  buildConfirmTranscript(t, m);
+  return espnowCryptoEd25519Sign(m.signature, t, sizeof(t), sec) &&
+         sessionMeshTag(m.meshTag, espnowhs::MeshTagKind::Confirm, slot, t, sizeof(t), m.signature);
+}
+
+bool sessionSealRekey(V4PayloadSessionRekey& m, uint8_t slot, const uint8_t sec[64]) {
+  uint8_t t[kRekeyTranscriptLen];
+  buildRekeyTranscript(t, m);
+  return espnowCryptoEd25519Sign(m.signature, t, sizeof(t), sec) &&
+         sessionMeshTag(m.meshTag, espnowhs::MeshTagKind::Rekey, slot, t, sizeof(t), m.signature);
+}
+
+// "mesh key mismatch": the one log text for a session frame whose mesh tag
+// fails (C1), throttled per peer.
+void logMeshKeyMismatch(const char* what, const uint8_t mac[6], uint8_t slot) {
+  uint16_t n = sessionRejectLogCount(mac);
+  if (!n) return;
+  WARN_ESPNOWF("%s from " MAC_FMT " rejected (x%u in 30s): mesh key mismatch - it does not hold the current "
+               "passphrase of mesh '%s'. Set the same passphrase on both ('espnowsetpassphrase').",
+               what, MAC_ARGS(mac), (unsigned)n,
+               slot < Settings::N_MESHES ? gSettings.meshes[slot].label.c_str() : "?");
 }
 
 }  // namespace
@@ -1077,10 +1283,8 @@ bool sessionOpenSendAgain(SessionState* s, const uint8_t peerMac[6]) {
   if (!espnowCryptoX25519Public(open.ephX25519Pub, s->aeadKeyRx)) return false;
   memcpy(open.nonceA, s->aeadKeyTx, 16);
   open.sessionCaps = espnowLocalSessionCaps();   // fixed for the boot: the same word as the first copy
-  uint8_t transcript[kOpenTranscriptLen];
-  buildOpenTranscript(transcript, open.sessionId, selfMac, peerMac, open.ephX25519Pub, open.nonceA,
-                      open.sessionCaps);
-  if (!espnowCryptoEd25519Sign(open.signature, transcript, sizeof(transcript), self.sec)) return false;
+  open.openEpochMs = (uint64_t)Clock::epochMillisOrZero();
+  if (!sessionSealOpen(open, s->meshId, self.sec)) return false;
   s->openResent = 1;
   s->lastUseMs = (uint32_t)millis();
   return v4_send_frame(peerMac, ESPNOW_V4_TYPE_SESSION_OPEN,
@@ -1116,7 +1320,7 @@ void runDeferredSessionOpen(void* arg) {
                    "identity for this peer - it was re-flashed/factory-erased (identity key rotated) "
                    "or KEY_EX never completed.",
                    MAC_ARGS(msg->initiatorMac), (unsigned)n);
-      WARN_ESPNOWF("  -> IDENTITY problem, NOT a passphrase one (passphrase isn't checked here). "
+      WARN_ESPNOWF("  -> IDENTITY problem, NOT a passphrase one. "
                    "Fix: run 'espnowunpair', then pair again on both sides.");
     }
     free(w);
@@ -1124,9 +1328,16 @@ void runDeferredSessionOpen(void* arg) {
   }
 
   uint8_t transcript[kOpenTranscriptLen];
-  buildOpenTranscript(transcript, msg->sessionId,
-                      msg->initiatorMac, msg->responderMac,
-                      msg->ephX25519Pub, msg->nonceA, msg->sessionCaps);
+  buildOpenTranscript(transcript, *msg);
+  // C1: the mesh tag first (cheap, and the diagnosable failure: the peer does
+  // not hold this mesh's current passphrase), then the signature. msg->openEpochMs
+  // is signed but not checked yet (SEC-3, after 1.0).
+  if (!sessionMeshTagOk(espnowhs::MeshTagKind::Open, peer->meshId, transcript, sizeof(transcript),
+                        msg->signature, msg->meshTag)) {
+    logMeshKeyMismatch("SESSION_OPEN", msg->initiatorMac, peer->meshId);
+    free(w);
+    return;
+  }
   if (!espnowCryptoEd25519Verify(msg->signature, transcript, sizeof(transcript),
                                  peer->longTermPub)) {
     uint16_t n = sessionRejectLogCount(msg->initiatorMac);
@@ -1247,15 +1458,9 @@ void runDeferredSessionOpen(void* arg) {
   memcpy(conf.nonceB, nonceB, 16);
   conf.sessionCaps = espnowLocalSessionCaps();
 
-  uint8_t confTranscript[kConfirmTranscriptLen];
-  buildConfirmTranscript(confTranscript, msg->sessionId,
-                         selfMac, msg->initiatorMac,
-                         ephPub, msg->nonceA, nonceB, conf.sessionCaps);
   const auto& self = espnowIdentityGet();
-  if (!self.valid ||
-      !espnowCryptoEd25519Sign(conf.signature, confTranscript,
-                               sizeof(confTranscript), self.sec)) {
-    ERROR_ESPNOWF("SESSION_OPEN: own signature failed");
+  if (!self.valid || !sessionSealConfirm(conf, peer->meshId, self.sec)) {
+    ERROR_ESPNOWF("SESSION_OPEN: own signature or mesh tag failed");
     sessionClear(s);
     free(w);
     return;
@@ -1324,9 +1529,16 @@ void runDeferredSessionConfirm(void* arg) {
   }
 
   uint8_t transcript[kConfirmTranscriptLen];
-  buildConfirmTranscript(transcript, msg->sessionId,
-                         msg->responderMac, msg->initiatorMac,
-                         msg->ephX25519Pub, msg->nonceA, msg->nonceB, msg->sessionCaps);
+  buildConfirmTranscript(transcript, *msg);
+  // C1, as for an OPEN: the mesh tag under the slot our identity of the peer
+  // names, before the signature.
+  if (!sessionMeshTagOk(espnowhs::MeshTagKind::Confirm, peer->meshId, transcript, sizeof(transcript),
+                        msg->signature, msg->meshTag)) {
+    logMeshKeyMismatch("SESSION_CONFIRM", msg->responderMac, peer->meshId);
+    sessionClear(s);
+    free(w);
+    return;
+  }
   if (!espnowCryptoEd25519Verify(msg->signature, transcript, sizeof(transcript),
                                  peer->longTermPub)) {
     WARN_ESPNOWF("SESSION_CONFIRM: Ed25519 verify failed");
@@ -1458,6 +1670,12 @@ bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel,
 
   const auto& self = espnowIdentityGet();
   if (!self.valid) return false;
+  // Sessions are bound to the mesh key (C1, C2): none opens on a mesh without one.
+  if (!meshKeysGet(peer->meshId)) {
+    ERROR_ESPNOWF("SESSION_OPEN initiate: mesh slot %u of " MAC_FMT " has no passphrase - set one with "
+                  "'espnowsetpassphrase'", (unsigned)peer->meshId, MAC_ARGS(peerMac));
+    return false;
+  }
   if (!ensureUnencryptedPeer(peerMac)) return false;
 
   // Claim the slot, unless a handshake to this peer is already in flight.
@@ -1524,11 +1742,10 @@ bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel,
   memcpy(open.ephX25519Pub, ephPub, 32);
   memcpy(open.nonceA, nonceA, 16);
   open.sessionCaps = espnowLocalSessionCaps();
+  open.openEpochMs = (uint64_t)Clock::epochMillisOrZero();   // signed; 0 while the clock is not set
 
-  uint8_t transcript[kOpenTranscriptLen];
-  buildOpenTranscript(transcript, sessionId, selfMac, peerMac, ephPub, nonceA, open.sessionCaps);
-  if (!espnowCryptoEd25519Sign(open.signature, transcript, sizeof(transcript), self.sec)) {
-    ERROR_ESPNOWF("SESSION_OPEN initiate: signing failed");
+  if (!sessionSealOpen(open, peer->meshId, self.sec)) {
+    ERROR_ESPNOWF("SESSION_OPEN initiate: signing or mesh tag failed");
     sessionClear(s);
     return false;
   }
@@ -1560,6 +1777,13 @@ struct DeferredRekeyWork {
   uint8_t               srcMac[6];   // recv_info->src_addr
 };
 
+// True when the session's keys were made under its mesh's current key (the
+// generation sessionDeriveAeadKeys recorded). A passphrase or label change
+// closes the sessions on that mesh; this catches one that raced the close.
+bool sessionKeyedUnderCurrentMeshKey(const SessionState* s) {
+  return s && s->meshKeyGen != 0 && s->meshKeyGen == meshKeysGeneration(s->meshId) && meshKeysGet(s->meshId);
+}
+
 // Compute the new AEAD keys from a freshly-derived shared secret. Mirrors
 // sessionDeriveAeadKeys but writes into caller-provided buffers instead of
 // SessionState — we apply the swap atomically via sessionApplyRekeyedKeys.
@@ -1567,12 +1791,15 @@ bool deriveRekeyedKeysFromShared(SessionState* s,
                                  const uint8_t shared[32],
                                  uint8_t outTx[32],
                                  uint8_t outRx[32]) {
-  // Same KDF as initial session derivation: Blake2b with contexts
-  // "esp-AtoB" / "esp-BtoA" keyed off the X25519 shared. A-side TX = AtoB,
-  // B-side TX = BtoA (and vice versa for RX).
+  // Same derivation as the initial session (sessionDeriveKeyMaterial: the X25519
+  // shared under the mesh bootstrap key, C2, then "esp-AtoB" / "esp-BtoA").
+  // A-side TX = AtoB, B-side TX = BtoA (and vice versa for RX). Only under the
+  // mesh key the session was opened with: after a passphrase change the
+  // session is closed, and a REKEY of it is refused.
+  if (!sessionKeyedUnderCurrentMeshKey(s)) return false;
+  const MeshDerivedKeys* mk = meshKeysGet(s->meshId);
   uint8_t kAtoB[32], kBtoA[32];
-  if (!espnowCryptoKdfSubkey(kAtoB, shared, 1, "esp-AtoB")) return false;
-  if (!espnowCryptoKdfSubkey(kBtoA, shared, 2, "esp-BtoA")) return false;
+  if (!mk || !sessionDeriveKeyMaterial(mk->bootstrapKey, shared, kAtoB, kBtoA, nullptr)) return false;
   if (s->myDirection == 0) {
     memcpy(outTx, kAtoB, 32);
     memcpy(outRx, kBtoA, 32);
@@ -1676,6 +1903,12 @@ bool sendRekey(SessionState* s, const uint8_t peerMac[6], bool armRetry) {
   if (!s) return false;
   const auto& self = espnowIdentityGet();
   if (!self.valid) return false;
+  // A session keyed under an older mesh key is not rekeyed (it is closed).
+  if (!sessionKeyedUnderCurrentMeshKey(s)) {
+    WARN_ESPNOWF("REKEY: session with " MAC_FMT " was opened under an older mesh passphrase - not rekeyed",
+                 MAC_ARGS(peerMac));
+    return false;
+  }
 
   uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
 
@@ -1704,11 +1937,8 @@ bool sendRekey(SessionState* s, const uint8_t peerMac[6], bool armRetry) {
   memcpy(rk.nonceRekey, nonceRekey, 16);
   rk.prevTxSeqAtRekey = txSeqAtSign;
 
-  uint8_t transcript[75];
-  buildRekeyTranscript(transcript, s->sessionId, selfMac, peerMac,
-                       newEphPub, nonceRekey, txSeqAtSign);
-  if (!espnowCryptoEd25519Sign(rk.signature, transcript, sizeof(transcript), self.sec)) {
-    ERROR_ESPNOWF("REKEY: signing failed");
+  if (!sessionSealRekey(rk, s->meshId, self.sec)) {
+    ERROR_ESPNOWF("REKEY: signing or mesh tag failed");
     sodium_memzero(newEphSec, sizeof(newEphSec));
     return false;
   }
@@ -1771,11 +2001,25 @@ void runDeferredRekey(void* arg) {
     free(w);
     return;
   }
-  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
-  uint8_t transcript[75];
-  buildRekeyTranscript(transcript, msg->sessionId,
-                       msg->senderMac, msg->receiverMac,
-                       msg->newEphX25519Pub, msg->nonceRekey, msg->prevTxSeqAtRekey);
+  // A session opened under an older mesh key (the passphrase changed since)
+  // is not rekeyed: it is closed, and the peer opens a new one if it holds the
+  // new passphrase.
+  if (!sessionKeyedUnderCurrentMeshKey(s)) {
+    WARN_ESPNOWF("REKEY rx: session with " MAC_FMT " was opened under an older mesh passphrase — "
+                 "refused, session closed", MAC_ARGS(w->srcMac));
+    sessionClear(s);
+    free(w);
+    return;
+  }
+  uint8_t transcript[kRekeyTranscriptLen];
+  buildRekeyTranscript(transcript, *msg);
+  // C1: the mesh tag under the session's mesh key, before the signature.
+  if (!sessionMeshTagOk(espnowhs::MeshTagKind::Rekey, s->meshId, transcript, sizeof(transcript),
+                        msg->signature, msg->meshTag)) {
+    logMeshKeyMismatch("SESSION_REKEY", w->srcMac, s->meshId);
+    free(w);
+    return;
+  }
   if (!espnowCryptoEd25519Verify(msg->signature, transcript, sizeof(transcript),
                                  peer->longTermPub)) {
     WARN_ESPNOWF("REKEY rx: signature verify FAILED for sessionId=%u — dropping",

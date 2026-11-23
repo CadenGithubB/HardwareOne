@@ -121,7 +121,8 @@ static_assert(ESPNOW_V4_VERSION == 4,
 #define ESPNOW_V4_MAX_PLAINTEXT (ESPNOW_V4_MAX_PAYLOAD - ESPNOW_V4_AEAD_TAG_LEN)  // 202 bytes
 
 // BROADCAST_AUTH (group-signed) tag: the first 16 bytes of
-// HMAC-SHA256(groupKey, header[0..29] || payload), appended to the payload and
+// HMAC-SHA256(groupKey, "hw1-espnow-1-group" || header[0..29] || payload)
+// (System_ESPNow_HandshakeCore.h), appended to the payload and
 // compared in constant time over those 16 bytes. The key is the mesh group key
 // (the "esp-grup" subkey of the mesh-key derivation). Authentication only: the
 // payload stays plaintext. 16 bytes, like the AEAD tag, since 1.0 (was 32).
@@ -1076,20 +1077,22 @@ static_assert(offsetof(V4PayloadStreamHeader, reqId) == 0 && offsetof(V4PayloadS
 
 // ---- KEY_EX handshake payloads ---------------------------------
 //
-// Three-way handshake between two peers in the same mesh. Authenticates via
-// HMAC-SHA256 over (meshFingerprint || senderMac || senderPubEd25519) keyed by
-// the mesh bootstrap key (Blake2b subkey of the PBKDF2-stretched passphrase —
-// see System_ESPNow_MeshKeys). Only peers that know the passphrase can produce
-// a valid HMAC.
-//
-// On wire, each frame carries:
-//   header.type               (KEY_EX_HELLO / KEY_EX_REPLY / KEY_EX_CONFIRM)
-//   header.meshFingerprint    (RX dispatches mesh lookup off this)
+// Three-way handshake between two peers in the same mesh. Each frame carries a
+// 16-byte HMAC-SHA256 tag keyed by the mesh bootstrap key (Blake2b subkey of
+// the PBKDF2-stretched passphrase, System_ESPNow_MeshKeys), with a label per
+// frame type, so only peers that know the passphrase can produce one and a
+// HELLO tag never verifies as a REPLY. The exact bytes are in
+// System_ESPNow_HandshakeCore.h (pinned by test_espnow_handshake_kat.py).
 //
 // Flow:
-//   A → B:  KEY_EX_HELLO   (A's pubkey + HMAC)
-//   B → A:  KEY_EX_REPLY   (B's pubkey + HMAC) — only if A's HMAC verified
-//   A → B:  KEY_EX_CONFIRM (status byte + pubkey fingerprint for OOB display)
+//   A -> B:  KEY_EX_HELLO   (A's key, a fresh nonce, tag)
+//   B -> A:  KEY_EX_REPLY   (B's key, B's fresh nonce, tag that also covers A's
+//                            MAC, key and HELLO nonce: a recorded REPLY is useless)
+//   A -> B:  KEY_EX_CONFIRM (status, keyId, tag over both MACs, both nonces and
+//                            both keys). A refusal of a HELLO (status 2 or 3) is a
+//                            CONFIRM from B, tagged over A's HELLO nonce and key.
+// A receiver takes a REPLY only for a key exchange of its own in flight, and a
+// HELLO whose nonce it already answered is a copy (ignored).
 //
 // On success both sides persist each other's pubkey to
 //   /system/espnow/peers/<MAC>/identity.json
@@ -1098,60 +1101,64 @@ static_assert(offsetof(V4PayloadStreamHeader, reqId) == 0 && offsetof(V4PayloadS
 // this Ed25519 pubkey".
 
 struct __attribute__((packed)) V4PayloadKeyExHello {
-  uint16_t meshFingerprint;     // also redundant with header.meshFingerprint
-  uint8_t  senderMac[6];        // redundant with header.origin (HMAC input clarity)
+  uint16_t meshFingerprint;     // the mesh id (also in the header)
+  uint8_t  senderMac[6];        // = header.origin
   uint8_t  senderPubEd25519[32];
-  uint8_t  hmac[32];            // HMAC-SHA256 over (meshFingerprint || senderMac || pub)
-                                //   keyed by mesh bootstrap key
+  uint8_t  nonce[16];           // fresh random for every HELLO sent (a retry included)
+  uint8_t  hmac[16];            // HandshakeCore helloInput, keyed by the mesh bootstrap key
 };
 static_assert(sizeof(V4PayloadKeyExHello) == 72, "V4PayloadKeyExHello layout");
 static_assert(offsetof(V4PayloadKeyExHello, meshFingerprint) == 0 && offsetof(V4PayloadKeyExHello, senderMac) == 2 &&
-              offsetof(V4PayloadKeyExHello, senderPubEd25519) == 8 && offsetof(V4PayloadKeyExHello, hmac) == 40,
+              offsetof(V4PayloadKeyExHello, senderPubEd25519) == 8 && offsetof(V4PayloadKeyExHello, nonce) == 40 &&
+              offsetof(V4PayloadKeyExHello, hmac) == 56,
               "V4PayloadKeyExHello layout");
 
 struct __attribute__((packed)) V4PayloadKeyExReply {
   uint16_t meshFingerprint;
   uint8_t  responderMac[6];
   uint8_t  responderPubEd25519[32];
-  uint8_t  hmac[32];            // same construction as HELLO, with responder fields
+  uint8_t  nonce[16];           // the responder's own fresh nonce
+  uint8_t  hmac[16];            // HandshakeCore replyInput: also covers the HELLO answered
 };
 static_assert(sizeof(V4PayloadKeyExReply) == 72, "V4PayloadKeyExReply layout");
 static_assert(offsetof(V4PayloadKeyExReply, meshFingerprint) == 0 && offsetof(V4PayloadKeyExReply, responderMac) == 2 &&
-              offsetof(V4PayloadKeyExReply, responderPubEd25519) == 8 && offsetof(V4PayloadKeyExReply, hmac) == 40,
+              offsetof(V4PayloadKeyExReply, responderPubEd25519) == 8 && offsetof(V4PayloadKeyExReply, nonce) == 40 &&
+              offsetof(V4PayloadKeyExReply, hmac) == 56,
               "V4PayloadKeyExReply layout");
 
 struct __attribute__((packed)) V4PayloadKeyExConfirm {
   uint16_t meshFingerprint;
   uint8_t  confirmerMac[6];
-  uint8_t  status;              // 0 = paired OK, 1 = HMAC fail, 2 = already-paired-different-key
-  uint8_t  reserved;            // sent 0, ignored
-  uint8_t  pubFingerprint[8];   // first 8 bytes of own pub key (for OOB display verification)
+  uint8_t  status;              // 0 = paired OK, 1 = HMAC fail, 2 = already-paired-different-key,
+                                //   3 = not accepted (not paired here, or revoked)
+  uint8_t  reserved;            // sent 0, ignored (covered by the tag)
+  uint8_t  keyId[8];            // first 8 bytes of the sender's key (for OOB display verification)
+  uint8_t  hmac[16];            // HandshakeCore confirmInput over the 18 bytes above and the exchange
 };
-static_assert(sizeof(V4PayloadKeyExConfirm) == 18, "V4PayloadKeyExConfirm layout");
+static_assert(sizeof(V4PayloadKeyExConfirm) == 34, "V4PayloadKeyExConfirm layout");
 static_assert(offsetof(V4PayloadKeyExConfirm, meshFingerprint) == 0 && offsetof(V4PayloadKeyExConfirm, confirmerMac) == 2 &&
               offsetof(V4PayloadKeyExConfirm, status) == 8 && offsetof(V4PayloadKeyExConfirm, reserved) == 9 &&
-              offsetof(V4PayloadKeyExConfirm, pubFingerprint) == 10, "V4PayloadKeyExConfirm layout");
+              offsetof(V4PayloadKeyExConfirm, keyId) == 10 && offsetof(V4PayloadKeyExConfirm, hmac) == 18,
+              "V4PayloadKeyExConfirm layout");
 
 // ---- SESSION establishment payloads -----------------------------
 //
 // Signed Ephemeral Diffie-Hellman (SIGMA-I pattern). Both sides have already
-// exchanged long-term Ed25519 pubkeys via KEY_EX (3.3) and have those keys
+// exchanged long-term Ed25519 pubkeys via KEY_EX and have those keys
 // persisted at /system/espnow/peers/<MAC>/identity.json. SESSION_OPEN/CONFIRM
 // negotiates fresh ephemeral X25519 keys, signs them under the long-term
 // identity, and derives forward-secret AEAD session keys.
 //
-// Transcript signed (integers little endian):
-//   OPEN:    "v4-sopen:" || sessionId(2) || initMac(6) || respMac(6) ||
-//                          ephX25519Pub(32) || nonceA(16) || sessionCaps(4)
-//   CONFIRM: "v4-sconf:" || sessionId(2) || respMac(6) || initMac(6) ||
-//                          ephX25519Pub(32) || nonceA(16) || nonceB(16) || sessionCaps(4)
+// Transcripts signed (System_ESPNow_HandshakeCore.h, integers little endian):
+//   OPEN:    "hw1-espnow-1-sopen" || sessionId(2) || initMac(6) || respMac(6) ||
+//            ephX25519Pub(32) || nonceA(16) || sessionCaps(4) || openEpochMs(8)       = 92 bytes
+//   CONFIRM: "hw1-espnow-1-sconf" || sessionId(2) || respMac(6) || initMac(6) ||
+//            ephX25519Pub(32) || nonceA(16) || nonceB(16) || sessionCaps(4)           = 100 bytes
+// Sign exactly those byte counts — a transcript padded to any other length
+// verifies against nothing and every handshake fails.
 //
 // nonceA is sent in OPEN and echoed back inside the CONFIRM signature input
 // — that's the freshness binding from A to B. nonceB is added on the B side.
-// Total signed length: OPEN = 9 + 2 + 6 + 6 + 32 + 16 + 4 = 75 bytes;
-//                      CONFIRM = 9 + 2 + 6 + 6 + 32 + 16 + 16 + 4 = 91 bytes.
-// Sign exactly those byte counts — a transcript padded to any other length
-// verifies against nothing and every handshake fails.
 //
 // sessionCaps (1.0): the sender's capability word, signed by its owner
 // (System_ESPNow_SessionCapsCore.h has the bits and the rules). The
@@ -1163,20 +1170,30 @@ static_assert(offsetof(V4PayloadKeyExConfirm, meshFingerprint) == 0 && offsetof(
 // the session opens. REKEY carries no word: the session keeps the one from its
 // handshake, since a word is fixed for the sender's boot.
 //
-// In SESSION_OPEN and SESSION_CONFIRM the Ed25519 signature is the last 64
-// bytes and the capability word sits right before it. SESSION_REKEY is signed
-// too, but the field before its signature is prevTxSeqAtRekey (no word), and
-// the three KEY_EX frames carry a 32-byte HMAC instead of a signature. These
-// six handshake frames (KEY_EX HELLO/REPLY/CONFIRM, SESSION OPEN/CONFIRM/REKEY)
-// are the one exception to "longer frames are read up to the known fields":
-// each is taken only at its exact length, because its signature or HMAC
-// covers the whole frame.
+// openEpochMs (1.0, E33): the initiator's clock (UTC ms) when it signed, 0 when
+// its clock is not set. Signed, sent and not checked yet: the freshness check
+// for a replayed OPEN (SEC-3) comes after 1.0 without a wire change.
+//
+// meshTag (1.0, revocation C1): the last 16 bytes of OPEN, CONFIRM and REKEY,
+// HMAC-SHA256(bootstrap key of the mesh slot the peer's identity names,
+// "<transcript label>-mk" || meshId(2) || transcript || signature)[0..16). It
+// binds the session to the current mesh passphrase: after a passphrase change
+// a device without the new passphrase cannot open or rekey a session, even
+// with modified firmware. The receiver checks it before the signature, and a
+// wrong one is logged as "mesh key mismatch". The session keys mix in the same
+// bootstrap key too (C2, sessionDeriveAeadKeys).
+//
+// These six handshake frames (KEY_EX HELLO/REPLY/CONFIRM, SESSION
+// OPEN/CONFIRM/REKEY) are the one exception to "longer frames are read up to
+// the known fields": each is taken only at its exact length, because its
+// signature or tag covers the whole frame.
 //
 // Flow:
-//   A → B: SESSION_OPEN    (sessionId, ephPub_A, nonceA, caps_A, sig over OPEN transcript)
-//   B → A: SESSION_CONFIRM (sessionId, ephPub_B, nonceB, caps_B, sig over CONFIRM transcript)
+//   A → B: SESSION_OPEN    (sessionId, ephPub_A, nonceA, caps_A, openEpochMs, sig, meshTag)
+//   B → A: SESSION_CONFIRM (sessionId, ephPub_B, nonceB, caps_B, sig, meshTag)
 // On success both sides hold matching aeadKeyAtoB / aeadKeyBtoA derived via
-// Blake2b KDF (contexts "esp-AtoB" / "esp-BtoA") from the X25519 shared secret.
+// Blake2b KDF (contexts "esp-AtoB" / "esp-BtoA") from the X25519 shared secret
+// under the mesh bootstrap key (HandshakeCore "session keys").
 
 struct __attribute__((packed)) V4PayloadSessionOpen {
   uint16_t sessionId;            // initiator-chosen, 16-bit random non-zero
@@ -1185,16 +1202,20 @@ struct __attribute__((packed)) V4PayloadSessionOpen {
   uint8_t  ephX25519Pub[32];
   uint8_t  nonceA[16];
   uint32_t sessionCaps;          // the initiator's capability word (SessionCapsCore.h)
+  uint64_t openEpochMs;          // the initiator's clock when signing (UTC ms), 0 = not set
   uint8_t  signature[64];        // Ed25519 over the OPEN transcript above
+  uint8_t  meshTag[16];          // C1 mesh tag over the transcript and the signature
 };
-static_assert(sizeof(V4PayloadSessionOpen) == 130, "V4PayloadSessionOpen layout");
+static_assert(sizeof(V4PayloadSessionOpen) == 154, "V4PayloadSessionOpen layout");
 static_assert(offsetof(V4PayloadSessionOpen, sessionId) == 0 &&
               offsetof(V4PayloadSessionOpen, initiatorMac) == 2 &&
               offsetof(V4PayloadSessionOpen, responderMac) == 8 &&
               offsetof(V4PayloadSessionOpen, ephX25519Pub) == 14 &&
               offsetof(V4PayloadSessionOpen, nonceA) == 46 &&
               offsetof(V4PayloadSessionOpen, sessionCaps) == 62 &&
-              offsetof(V4PayloadSessionOpen, signature) == 66,
+              offsetof(V4PayloadSessionOpen, openEpochMs) == 66 &&
+              offsetof(V4PayloadSessionOpen, signature) == 74 &&
+              offsetof(V4PayloadSessionOpen, meshTag) == 138,
               "V4PayloadSessionOpen field offsets");
 
 struct __attribute__((packed)) V4PayloadSessionConfirm {
@@ -1206,8 +1227,9 @@ struct __attribute__((packed)) V4PayloadSessionConfirm {
   uint8_t  nonceB[16];
   uint32_t sessionCaps;          // the responder's capability word (SessionCapsCore.h)
   uint8_t  signature[64];        // Ed25519 over the CONFIRM transcript above
+  uint8_t  meshTag[16];          // C1 mesh tag over the transcript and the signature
 };
-static_assert(sizeof(V4PayloadSessionConfirm) == 146, "V4PayloadSessionConfirm layout");
+static_assert(sizeof(V4PayloadSessionConfirm) == 162, "V4PayloadSessionConfirm layout");
 static_assert(offsetof(V4PayloadSessionConfirm, sessionId) == 0 &&
               offsetof(V4PayloadSessionConfirm, responderMac) == 2 &&
               offsetof(V4PayloadSessionConfirm, initiatorMac) == 8 &&
@@ -1215,21 +1237,22 @@ static_assert(offsetof(V4PayloadSessionConfirm, sessionId) == 0 &&
               offsetof(V4PayloadSessionConfirm, nonceA) == 46 &&
               offsetof(V4PayloadSessionConfirm, nonceB) == 62 &&
               offsetof(V4PayloadSessionConfirm, sessionCaps) == 78 &&
-              offsetof(V4PayloadSessionConfirm, signature) == 82,
+              offsetof(V4PayloadSessionConfirm, signature) == 82 &&
+              offsetof(V4PayloadSessionConfirm, meshTag) == 146,
               "V4PayloadSessionConfirm field offsets");
 
 // ---- SESSION_REKEY (forward-secrecy rotation) -------------------
 //
 // Refreshes the AEAD keys without a full handshake. Used when txSeqNext
 // crosses a threshold (e.g. 10k frames) or sessionAge crosses a duration
-// (e.g. 1h). The long-term Ed25519 identities established in 3.0 are reused
-// to sign fresh ephemeral X25519 pubkeys; the resulting shared secret feeds
-// the Blake2b KDF to produce a new aeadKeyTx/Rx pair.
+// (e.g. 1h). The long-term Ed25519 identities are reused to sign fresh
+// ephemeral X25519 pubkeys; the resulting shared secret, under the mesh
+// bootstrap key (C2), feeds the Blake2b KDF to produce a new aeadKeyTx/Rx pair.
 //
 // Two-message symmetric exchange (each side sends one REKEY containing its
 // own fresh ephemeral pub):
-//   A → B: SESSION_REKEY (newEphA, nonceA, sig_A)
-//   B → A: SESSION_REKEY (newEphB, nonceB, sig_B)
+//   A → B: SESSION_REKEY (newEphA, nonceA, sig_A, meshTag)
+//   B → A: SESSION_REKEY (newEphB, nonceB, sig_B, meshTag)
 // Either side can initiate. On receiving a REKEY without having sent one,
 // the receiver picks its own fresh ephemeral and replies with REKEY. On
 // receiving a REKEY while own REKEY is in flight (concurrent rekey race),
@@ -1237,12 +1260,13 @@ static_assert(offsetof(V4PayloadSessionConfirm, sessionId) == 0 &&
 // (newEphA, newEphB) pair, so they end up with identical keys regardless of
 // who "started" it.
 //
-// Transcript signed:
-//   "v4-rekey:" || sessionId(2) || senderMac(6) || receiverMac(6) ||
-//                  newEphX25519Pub(32) || nonceRekey(16) || prevTxSeqAtRekey(4)
+// Transcript signed (HandshakeCore, 84 bytes):
+//   "hw1-espnow-1-rekey" || sessionId(2) || senderMac(6) || receiverMac(6) ||
+//                           newEphX25519Pub(32) || nonceRekey(16) || prevTxSeqAtRekey(4)
 // prevTxSeqAtRekey binds the signature to a specific point in the existing
 // session's transcript — prevents replay of a stale REKEY from a previous
-// rekey round.
+// rekey round. The meshTag binds it to the current mesh key: a session opened
+// under a passphrase that has since changed is closed, and its REKEY refused.
 //
 // Old keys stay valid in SessionState.aeadKey{Tx,Rx}Prev for ~5 seconds
 // after the switch so in-flight frames sent under the old keys still decrypt.
@@ -1255,12 +1279,14 @@ struct __attribute__((packed)) V4PayloadSessionRekey {
   uint8_t  nonceRekey[16];
   uint32_t prevTxSeqAtRekey;     // sender's txSeqNext at the moment of REKEY signing
   uint8_t  signature[64];        // Ed25519 over the transcript above
+  uint8_t  meshTag[16];          // C1 mesh tag over the transcript and the signature
 };
-static_assert(sizeof(V4PayloadSessionRekey) == 130, "V4PayloadSessionRekey layout");
+static_assert(sizeof(V4PayloadSessionRekey) == 146, "V4PayloadSessionRekey layout");
 static_assert(offsetof(V4PayloadSessionRekey, sessionId) == 0 && offsetof(V4PayloadSessionRekey, senderMac) == 2 &&
               offsetof(V4PayloadSessionRekey, receiverMac) == 8 && offsetof(V4PayloadSessionRekey, newEphX25519Pub) == 14 &&
               offsetof(V4PayloadSessionRekey, nonceRekey) == 46 && offsetof(V4PayloadSessionRekey, prevTxSeqAtRekey) == 62 &&
-              offsetof(V4PayloadSessionRekey, signature) == 66, "V4PayloadSessionRekey layout");
+              offsetof(V4PayloadSessionRekey, signature) == 66 && offsetof(V4PayloadSessionRekey, meshTag) == 130,
+              "V4PayloadSessionRekey layout");
 static_assert(sizeof(V4PayloadSessionRekey) <= ESPNOW_V4_MAX_PAYLOAD,
               "REKEY is sent plaintext, signed under the identity key: it must fit one frame");
 
@@ -1590,8 +1616,12 @@ static_assert(sizeof(V4PayloadSessionOpen)    <= ESPNOW_V4_RELAY_MAX_INNER_PAYLO
               "SESSION_OPEN must fit a RELAY_DATA envelope (far-peer sessions)");
 static_assert(sizeof(V4PayloadSessionConfirm) <= ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD,
               "SESSION_CONFIRM must fit a RELAY_DATA envelope (far-peer sessions)");
+static_assert(sizeof(V4PayloadSessionConfirm) == ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD &&
+              sizeof(V4PayloadSessionConfirm) == 162,
+              "SESSION_CONFIRM is exactly the 162-byte relay budget (1.0 design 7.4 risk 3)");
 // REKEY travels plaintext, signed under the identity key (like OPEN/CONFIRM):
-// 130 of the 162 bytes.
+// 146 of the 162 bytes. SESSION_CONFIRM uses all 162 (exactly the budget): it can
+// never grow, and the relay budget can never shrink.
 static_assert(sizeof(V4PayloadSessionRekey) <= ESPNOW_V4_RELAY_MAX_INNER_PAYLOAD,
               "SESSION_REKEY must fit a RELAY_DATA envelope (plaintext, signed under the identity key)");
 
@@ -1776,10 +1806,10 @@ static_assert(FILE_CANCEL_TIMEOUT == espnowanswer::kTimeout && FILE_CANCEL_WRITE
 // signed, so they never grow. Each row names the constant for its opcode.
 #define ESPNOW_V4_MINLEN_KEY_EX_HELLO        72   // exact
 #define ESPNOW_V4_MINLEN_KEY_EX_REPLY        72   // exact
-#define ESPNOW_V4_MINLEN_KEY_EX_CONFIRM      18   // exact
-#define ESPNOW_V4_MINLEN_SESSION_OPEN        130  // exact
-#define ESPNOW_V4_MINLEN_SESSION_CONFIRM     146  // exact
-#define ESPNOW_V4_MINLEN_SESSION_REKEY       130  // exact
+#define ESPNOW_V4_MINLEN_KEY_EX_CONFIRM      34   // exact
+#define ESPNOW_V4_MINLEN_SESSION_OPEN        154  // exact
+#define ESPNOW_V4_MINLEN_SESSION_CONFIRM     162  // exact
+#define ESPNOW_V4_MINLEN_SESSION_REKEY       146  // exact
 #define ESPNOW_V4_MINLEN_SESSION_UNKNOWN     12
 #define ESPNOW_V4_MINLEN_TIME_SYNC           16
 #define ESPNOW_V4_MINLEN_TEXT                1    // text, no terminator

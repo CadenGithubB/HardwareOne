@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 #include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
+#include "System_ESPNow_HandshakeCore.h"  // production handshake byte layouts (copied beside this unit)
 
 // ---- Deadline owner (System_ESPNow_Deadline.h, when the tree has it) ---------
 // INSERT_DEADLINE
@@ -33,6 +34,16 @@ struct esp_now_recv_info {
 // INSERT_TYPES
 static_assert(kRekeyMinIntervalMs > kRekeyPrevKeysWindowMs && kRekeyAgeThresholdMs > kRekeyMinIntervalMs,
               "header constants referenced");
+
+// ---- Mesh keys (1.0 step 4): each device holds its own copy of mesh slot 0's
+// derived keys; the C1 mesh tags and the C2 session keys use the bootstrap key.
+struct MeshDerivedKeys { bool valid; uint16_t fingerprint; uint8_t bootstrapKey[32]; uint8_t groupKey[32]; };
+struct Settings {
+  static constexpr uint8_t N_MESHES = 4;
+  struct Mesh { uint16_t fingerprint; std::string label; };
+  Mesh meshes[N_MESHES];
+};
+static Settings gSettings = {{{0x1234, "mesh"}, {0, ""}, {0, ""}, {0, ""}}};
 
 // ---- Modelled devices ----------------------------------------------------------
 using DeferredFn = void (*)(void*);
@@ -56,6 +67,8 @@ struct Device {
   size_t delivered;                  // outbox frames already handed to the peer
   std::vector<std::string> log;
   uint32_t caps;                     // this device's session capability word
+  MeshDerivedKeys mesh;              // this device's keys of mesh slot 0
+  uint16_t meshGen;                  // their generation (steps on a passphrase change)
 };
 static Device A, B;
 static Device* gCur = &A;  // the device whose code is running
@@ -111,6 +124,15 @@ static EspNowState gStateObj{true};
 static EspNowState* gEspNow = &gStateObj;
 
 static const EspNowIdentity& espnowIdentityGet() { return gCur->id; }
+static const MeshDerivedKeys* meshKeysGet(uint8_t slot) {
+  return slot == 0 && gCur->mesh.valid ? &gCur->mesh : nullptr;
+}
+static uint16_t meshKeysGeneration(uint8_t slot) { return slot == 0 ? gCur->meshGen : 0; }
+// The clock a SESSION_OPEN signs (openEpochMs); 0 = not set.
+namespace Clock {
+static int64_t gEpochMs = 1800000000123LL;
+static int64_t epochMillisOrZero() { return gEpochMs; }
+}  // namespace Clock
 // The image's capability word (production: System_ESPNow_Handlers_Crypto.cpp),
 // per modelled device; a case changes it to model a reflash.
 [[maybe_unused]] static uint32_t espnowLocalSessionCaps() { return gCur->caps; }
@@ -194,6 +216,14 @@ static bool espnowCryptoEd25519Verify(const uint8_t sig[64], const uint8_t* m, s
   uint8_t expect[64];
   sigFor(expect, m, n, pub);
   return std::memcmp(expect, sig, 64) == 0;
+}
+// A keyed digest standing in for HMAC-SHA256.
+static bool espnowCryptoHmacSha256(uint8_t out[32], const uint8_t* key, size_t keyLen, const uint8_t* in1,
+                                   size_t len1, const uint8_t* in2, size_t len2, const uint8_t* in3, size_t len3) {
+  uint64_t h = fnv(0x84222325cbf29ce4ULL, key, keyLen);
+  h = fnv(fnv(fnv(h, in1, len1), in2, len2), in3, len3);
+  for (int i = 0; i < 32; i++) { h ^= (uint64_t)i; h *= 0x100000001b3ULL; out[i] = (uint8_t)(h >> 29); }
+  return true;
 }
 // Keyed AEAD: keystream and tag are digests over key || nonce (|| aad ||
 // cipher); open succeeds only with the same key, nonce, AAD and ciphertext.
@@ -370,10 +400,8 @@ static Frame signedRekey(Device& from, Device& to, uint32_t prevTxSeq) {
   espnowCryptoX25519Keygen(rk.newEphX25519Pub, ephSec);
   espnowCryptoRandomBytes(rk.nonceRekey, 16);
   rk.prevTxSeqAtRekey = prevTxSeq;
-  uint8_t t[75];
-  buildRekeyTranscript(t, rk.sessionId, rk.senderMac, rk.receiverMac, rk.newEphX25519Pub,
-                       rk.nonceRekey, rk.prevTxSeqAtRekey);
-  espnowCryptoEd25519Sign(rk.signature, t, sizeof t, from.id.sec);
+  use(from);
+  sessionSealRekey(rk, 0, from.id.sec);   // signed, and tagged under `from`'s mesh key
   Frame f;
   std::memcpy(f.src, from.mac, 6);
   std::memcpy(f.dst, to.mac, 6);
@@ -457,6 +485,11 @@ static void makeDevice(Device& d, const char* name, uint8_t lastMacByte) {
   std::memcpy(d.id.sec + 32, d.id.pub, 32);
   d.id.valid = true;
   d.caps = 0;
+  d.mesh.valid = true;
+  d.mesh.fingerprint = 0x1234;
+  std::memset(d.mesh.bootstrapKey, 0x61, 32);   // both devices hold the same mesh passphrase
+  std::memset(d.mesh.groupKey, 0x62, 32);
+  d.meshGen = 1;
 }
 
 static void pairIdentities() {
@@ -937,8 +970,8 @@ int main() {
     std::memcpy(&cm, B.outbox[0].payload.data(), sizeof cm);
     const uint8_t* op = A.outbox[0].payload.data();
     const uint8_t* cp = B.outbox[0].payload.data();
-    check(A.outbox[0].payload.size() == 130 && B.outbox[0].payload.size() == 146,
-          "C22 OPEN is 130 bytes and CONFIRM 146");
+    check(A.outbox[0].payload.size() == 154 && B.outbox[0].payload.size() == 162,
+          "C22 OPEN is 154 bytes and CONFIRM 162 (1.0 step 4: openEpochMs and the mesh tag)");
     check(op[62] == 0xFE && op[63] == 0 && op[64] == 0 && op[65] == 0 && om.sessionCaps == A.caps,
           "C22 OPEN carries A's word, little endian at offset 62");
     check(cp[78] == 0xFF && cp[79] == 0 && cp[80] == 0x01 && cp[81] == 0 && cm.sessionCaps == B.caps,
@@ -964,7 +997,21 @@ int main() {
     deliver(f, B);
     check(B.outbox.empty() && sessOf(B) == nullptr,
           "C23 an OPEN whose caps byte changed gets no CONFIRM and no slot (FAILS WITHOUT THE RULE)");
-    check(logsContaining(B, "WARN", "signature") == 1, "C23 B says the signature does not match");
+    check(logsContaining(B, "WARN", "mesh key mismatch") == 1,
+          "C23 the mesh tag fails first (it covers the transcript)");
+    // A sender that holds the passphrase re-tags the changed frame: the
+    // signature still refuses it.
+    V4PayloadSessionOpen om{};
+    std::memcpy(&om, f.payload.data(), sizeof om);
+    uint8_t t[kOpenTranscriptLen];
+    buildOpenTranscript(t, om);
+    use(A);
+    sessionMeshTag(om.meshTag, espnowhs::MeshTagKind::Open, 0, t, sizeof t, om.signature);
+    std::memcpy(f.payload.data(), &om, sizeof om);
+    gNow += 31000;   // past the per-peer reject line interval
+    deliver(f, B);
+    check(B.outbox.empty() && sessOf(B) == nullptr && logsContaining(B, "WARN", "signature") == 1,
+          "C23 re-tagged, the changed OPEN fails the signature");
   }
 
   // C24 — the same for CONFIRM: A's slot is cleared.
@@ -976,6 +1023,13 @@ int main() {
     Frame f = take(B);
     check(f.type == ESPNOW_V4_TYPE_SESSION_CONFIRM, "C24 setup: B answers with CONFIRM");
     f.payload[78] ^= 0x01;
+    V4PayloadSessionConfirm cm{};   // re-tagged under the mesh key: the signature is what refuses it
+    std::memcpy(&cm, f.payload.data(), sizeof cm);
+    uint8_t t[kConfirmTranscriptLen];
+    buildConfirmTranscript(t, cm);
+    use(B);
+    sessionMeshTag(cm.meshTag, espnowhs::MeshTagKind::Confirm, 0, t, sizeof t, cm.signature);
+    std::memcpy(f.payload.data(), &cm, sizeof cm);
     deliver(f, A);
     SessionState* sa = sessOf(A);
     check(sa == nullptr || sa->state != SESSION_ACTIVE,
@@ -1023,29 +1077,44 @@ int main() {
           "C27 the copy verifies at B and both keep the other's word");
   }
 
-  // C28 — golden transcripts: 75 and 91 bytes, the word last, little endian.
+  // C28 — golden transcripts (1.0 step 4): 92 and 100 bytes, hw1-espnow-1-*
+  // labels, the word little endian, OPEN's openEpochMs last.
   {
     uint8_t initMac[6] = {1, 2, 3, 4, 5, 6}, respMac[6] = {7, 8, 9, 10, 11, 12};
-    uint8_t eph[32], nA[16], nB[16];
-    for (int i = 0; i < 32; i++) eph[i] = (uint8_t)(0x40 + i);
-    for (int i = 0; i < 16; i++) { nA[i] = (uint8_t)(0x80 + i); nB[i] = (uint8_t)(0xC0 + i); }
+    V4PayloadSessionOpen om{};
+    V4PayloadSessionConfirm cm{};
+    om.sessionId = cm.sessionId = 0xBEEF;
+    std::memcpy(om.initiatorMac, initMac, 6);
+    std::memcpy(om.responderMac, respMac, 6);
+    std::memcpy(cm.initiatorMac, initMac, 6);
+    std::memcpy(cm.responderMac, respMac, 6);
+    for (int i = 0; i < 32; i++) om.ephX25519Pub[i] = cm.ephX25519Pub[i] = (uint8_t)(0x40 + i);
+    for (int i = 0; i < 16; i++) {
+      om.nonceA[i] = cm.nonceA[i] = (uint8_t)(0x80 + i);
+      cm.nonceB[i] = (uint8_t)(0xC0 + i);
+    }
+    om.sessionCaps = 0x12345678u;
+    om.openEpochMs = 0x0102030405060708ull;
+    cm.sessionCaps = 0x9ABCDEF0u;
     uint8_t ot[kOpenTranscriptLen + 1], ct[kConfirmTranscriptLen + 1];
     std::memset(ot, 0xEE, sizeof ot);
     std::memset(ct, 0xEE, sizeof ct);
-    buildOpenTranscript(ot, 0xBEEF, initMac, respMac, eph, nA, 0x12345678u);
-    buildConfirmTranscript(ct, 0xBEEF, respMac, initMac, eph, nA, nB, 0x9ABCDEF0u);
-    check(kOpenTranscriptLen == 75 && kConfirmTranscriptLen == 91, "C28 transcript lengths 75 and 91");
-    check(std::memcmp(ot, "v4-sopen:", 9) == 0 && ot[9] == 0xEF && ot[10] == 0xBE &&
-          std::memcmp(ot + 11, initMac, 6) == 0 && std::memcmp(ot + 17, respMac, 6) == 0 &&
-          std::memcmp(ot + 23, eph, 32) == 0 && std::memcmp(ot + 55, nA, 16) == 0 &&
-          ot[71] == 0x78 && ot[72] == 0x56 && ot[73] == 0x34 && ot[74] == 0x12 && ot[75] == 0xEE,
-          "C28 OPEN transcript: label, id, MACs, eph, nonceA, caps LE at 71..74, nothing past 75");
-    check(std::memcmp(ct, "v4-sconf:", 9) == 0 && ct[9] == 0xEF && ct[10] == 0xBE &&
-          std::memcmp(ct + 11, respMac, 6) == 0 && std::memcmp(ct + 17, initMac, 6) == 0 &&
-          std::memcmp(ct + 23, eph, 32) == 0 && std::memcmp(ct + 55, nA, 16) == 0 &&
-          std::memcmp(ct + 71, nB, 16) == 0 &&
-          ct[87] == 0xF0 && ct[88] == 0xDE && ct[89] == 0xBC && ct[90] == 0x9A && ct[91] == 0xEE,
-          "C28 CONFIRM transcript: ... nonceB, caps LE at 87..90, nothing past 91");
+    buildOpenTranscript(ot, om);
+    buildConfirmTranscript(ct, cm);
+    check(kOpenTranscriptLen == 92 && kConfirmTranscriptLen == 100 && kRekeyTranscriptLen == 84,
+          "C28 transcript lengths 92, 100 and 84");
+    check(std::memcmp(ot, "hw1-espnow-1-sopen", 18) == 0 && ot[18] == 0xEF && ot[19] == 0xBE &&
+          std::memcmp(ot + 20, initMac, 6) == 0 && std::memcmp(ot + 26, respMac, 6) == 0 &&
+          std::memcmp(ot + 32, om.ephX25519Pub, 32) == 0 && std::memcmp(ot + 64, om.nonceA, 16) == 0 &&
+          ot[80] == 0x78 && ot[81] == 0x56 && ot[82] == 0x34 && ot[83] == 0x12 &&
+          ot[84] == 0x08 && ot[91] == 0x01 && ot[92] == 0xEE,
+          "C28 OPEN transcript: label, id, MACs, eph, nonceA, caps LE at 80..83, openEpochMs LE at 84..91");
+    check(std::memcmp(ct, "hw1-espnow-1-sconf", 18) == 0 && ct[18] == 0xEF && ct[19] == 0xBE &&
+          std::memcmp(ct + 20, respMac, 6) == 0 && std::memcmp(ct + 26, initMac, 6) == 0 &&
+          std::memcmp(ct + 32, cm.ephX25519Pub, 32) == 0 && std::memcmp(ct + 64, cm.nonceA, 16) == 0 &&
+          std::memcmp(ct + 80, cm.nonceB, 16) == 0 &&
+          ct[96] == 0xF0 && ct[97] == 0xDE && ct[98] == 0xBC && ct[99] == 0x9A && ct[100] == 0xEE,
+          "C28 CONFIRM transcript: ... nonceB, caps LE at 96..99, nothing past 100");
   }
 #else
   check(false, "the tree has no session capability word (HW1_SESSION_CAPS unset)");
@@ -1093,6 +1162,76 @@ int main() {
     pairIdentities();
   }
 #endif
+
+  // ---- ESP-NOW 1.0 step 4: revocation C (sessions bound to the mesh key) ------
+  // C30 — C1 by host only: B has the same mesh id but another bootstrap key
+  // (A changed the passphrase, or B is a device cut off by a rotation). A's
+  // OPEN is refused at B as "mesh key mismatch" before the signature; nothing
+  // is answered and no slot is made.
+  resetDevices();
+  std::memset(B.mesh.bootstrapKey, 0x77, 32);
+  use(A);
+  check(espnowSessionOpenInitiate(B.mac, "mesh") && A.outbox.size() == 1, "C30 setup: A sends OPEN");
+  deliver(take(A), B);
+  check(B.outbox.empty() && sessOf(B) == nullptr, "C30 the OPEN gets no CONFIRM and no slot");
+  check(logsContaining(B, "WARN", "mesh key mismatch") == 1 && logsContaining(B, "WARN", "signature") == 0,
+        "C30 B logs 'mesh key mismatch', not a signature failure");
+  // The other way round: B's OPEN (tagged under B's key) is refused at A too.
+  use(B);
+  check(espnowSessionOpenInitiate(A.mac, "mesh") && B.outbox.size() == 1, "C30 setup: B sends OPEN");
+  deliver(take(B), A);
+  check(A.outbox.size() == 1 && logsContaining(A, "WARN", "mesh key mismatch") == 1,
+        "C30 A refuses B's OPEN as well (A's own OPEN is the only frame A sent)");
+  std::memset(B.mesh.bootstrapKey, 0x61, 32);
+  // C31 — the same passphrase again: the session opens without re-pairing.
+  resetDevices();
+  check(establish(), "C31 with the same mesh key the session opens (identities kept)");
+  // C32 — C2: the session keys depend on the bootstrap key (same shared secret).
+  {
+    uint8_t shared[32], k1[32], k2[32], k3[32], k4[32], t1[16], t2[16];
+    std::memset(shared, 0x33, 32);
+    uint8_t other[32];
+    std::memset(other, 0x77, 32);
+    check(sessionDeriveKeyMaterial(A.mesh.bootstrapKey, shared, k1, k2, t1) &&
+              sessionDeriveKeyMaterial(other, shared, k3, k4, t2) &&
+              std::memcmp(k1, k3, 32) != 0 && std::memcmp(k2, k4, 32) != 0 && std::memcmp(t1, t2, 16) != 0,
+          "C32 another bootstrap key gives other session keys and another bond token");
+    A.mesh.valid = false;   // a mesh without a passphrase: no session on it
+    resetDevices();
+    use(A);
+    check(!espnowSessionOpenInitiate(B.mac, "mesh") && A.outbox.empty(),
+          "C32 no SESSION_OPEN on a mesh without a key");
+    A.mesh.valid = true;
+  }
+  // C33 — openEpochMs: OPEN carries the signer's clock (0 when not set), and it
+  // is signed (a re-tagged OPEN with another time fails the signature).
+  resetDevices();
+  Clock::gEpochMs = 0;
+  use(A);
+  espnowSessionOpenInitiate(B.mac, "mesh");
+  {
+    V4PayloadSessionOpen om{};
+    std::memcpy(&om, A.outbox.back().payload.data(), sizeof om);
+    check(om.openEpochMs == 0, "C33 an unset clock sends openEpochMs 0");
+  }
+  resetDevices();
+  Clock::gEpochMs = 1800000000123LL;
+  use(A);
+  espnowSessionOpenInitiate(B.mac, "mesh");
+  {
+    Frame f = take(A);
+    V4PayloadSessionOpen om{};
+    std::memcpy(&om, f.payload.data(), sizeof om);
+    check(om.openEpochMs == 1800000000123ull, "C33 a set clock is sent as openEpochMs");
+    om.openEpochMs += 1;
+    uint8_t t[kOpenTranscriptLen];
+    buildOpenTranscript(t, om);
+    sessionMeshTag(om.meshTag, espnowhs::MeshTagKind::Open, 0, t, sizeof t, om.signature);
+    std::memcpy(f.payload.data(), &om, sizeof om);
+    deliver(f, B);
+    check(B.outbox.empty() && logsContaining(B, "WARN", "signature") == 1,
+          "C33 a changed openEpochMs fails the signature");
+  }
 
   check(gGuardDepth == 0, "no lock left held");
   std::printf("%u failure(s)\n", gFailures);

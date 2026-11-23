@@ -13,6 +13,8 @@
 #include "System_ESPNow_Deadline.h"  // wrap-safe prev-key window
 #include "System_ESPNow_HandshakeBackoff.h"  // WarnLimiter
 #include "System_ESPNow_Handlers_Crypto.h"  // espnowSessionOpenInitiate (SESSION_UNKNOWN)
+#include "System_ESPNow_HandshakeCore.h"   // the session key input (C2)
+#include "System_ESPNow_MeshKeys.h"        // the session mesh's bootstrap key (C2)
 #include "System_ESPNow_Identity.h"  // peerIdentityFindByMac (pendingFrameDrainSettled)
 #include "System_ESPNow_Wire.h"  // EspNowV4Header, flag constants
 #include "System_MemUtil.h"      // ps_alloc, AllocPref
@@ -128,16 +130,50 @@ bool sessionIsASide(const uint8_t myMac[6], const uint8_t peerMac[6]) {
   return memcmp(myMac, peerMac, 6) < 0;
 }
 
+bool sessionDeriveKeyMaterial(const uint8_t bootstrapKey[32], const uint8_t shared[32],
+                              uint8_t keyAtoB[32], uint8_t keyBtoA[32], uint8_t bondToken[16]) {
+  uint8_t input[espnowhs::kSessionKeyInputLen];
+  uint8_t prk[32];
+  espnowhs::sessionKeyInput(input, shared);
+  bool ok = bootstrapKey && espnowCryptoHmacSha256(prk, bootstrapKey, 32, input, sizeof(input),
+                                                   nullptr, 0, nullptr, 0);
+  sodium_memzero(input, sizeof(input));
+  ok = ok && espnowCryptoKdfSubkey(keyAtoB, prk, 1, "esp-AtoB");
+  ok = ok && espnowCryptoKdfSubkey(keyBtoA, prk, 2, "esp-BtoA");
+  if (ok && bondToken) {
+    uint8_t bondTok[32];
+    ok = espnowCryptoKdfSubkey(bondTok, prk, 3, "esp-bond");
+    memcpy(bondToken, bondTok, 16);
+    sodium_memzero(bondTok, sizeof(bondTok));
+  }
+  sodium_memzero(prk, sizeof(prk));
+  if (!ok) {
+    sodium_memzero(keyAtoB, 32);
+    sodium_memzero(keyBtoA, 32);
+    if (bondToken) sodium_memzero(bondToken, 16);
+  }
+  return ok;
+}
+
 bool sessionDeriveAeadKeys(SessionState* s, const uint8_t shared[32]) {
   if (!s) return false;
-  uint8_t keyAtoB[32], keyBtoA[32];
-  bool ok1 = espnowCryptoKdfSubkey(keyAtoB, shared, 1, "esp-AtoB");
-  bool ok2 = espnowCryptoKdfSubkey(keyBtoA, shared, 2, "esp-BtoA");
-  if (!ok1 || !ok2) {
-    sodium_memzero(keyAtoB, sizeof(keyAtoB));
-    sodium_memzero(keyBtoA, sizeof(keyBtoA));
+  const MeshDerivedKeys* mk = meshKeysGet(s->meshId);
+  if (!mk) {
+    WARN_ESPNOWF("sessions: mesh slot %u has no key (no passphrase): no session opens on it",
+                 (unsigned)s->meshId);
     return false;
   }
+  uint8_t keyAtoB[32], keyBtoA[32], bondTok[16];
+  // The bond auth token (subkey id 3, "esp-bond") comes from the SAME key
+  // material for EVERY session regardless of bond-mode state. This decouples
+  // bond-token existence from the order in which a session is established vs.
+  // bond mode is enabled: previously the token was only derived when
+  // bondModeEnabled was already true at handshake time, so bonding on top of an
+  // existing session (e.g. mesh-paired first, then bondconnect) left the token
+  // absent forever. Only the configured bond peer's token is ever consulted
+  // (see bondPeerActiveSession), so deriving it for all peers is cheap and harmless.
+  if (!sessionDeriveKeyMaterial(mk->bootstrapKey, shared, keyAtoB, keyBtoA, bondTok)) return false;
+  s->meshKeyGen = meshKeysGeneration(s->meshId);
   if (s->myDirection == 0) {
     // We are A: encrypt with AtoB, decrypt with BtoA
     memcpy(s->aeadKeyTx, keyAtoB, 32);
@@ -148,24 +184,23 @@ bool sessionDeriveAeadKeys(SessionState* s, const uint8_t shared[32]) {
   }
   sodium_memzero(keyAtoB, sizeof(keyAtoB));
   sodium_memzero(keyBtoA, sizeof(keyBtoA));
-
-  // Derive the bond auth token (subkey id 3) from the SAME shared secret, for
-  // EVERY session regardless of bond-mode state. This decouples bond-token
-  // existence from the order in which a session is established vs. bond mode is
-  // enabled: previously the token was only derived when bondModeEnabled was
-  // already true at handshake time, so bonding on top of an existing session
-  // (e.g. mesh-paired first, then bondconnect) left the token absent forever.
-  // Only the configured bond peer's token is ever consulted (see
-  // bondPeerActiveSession), so deriving it for all peers is cheap and harmless.
-  {
-    uint8_t bondTok[32];
-    if (espnowCryptoKdfSubkey(bondTok, shared, 3, "esp-bond")) {
-      memcpy(s->bondToken, bondTok, 16);
-      s->bondTokenValid = 1;
-    }
-    sodium_memzero(bondTok, sizeof(bondTok));
-  }
+  memcpy(s->bondToken, bondTok, 16);
+  s->bondTokenValid = 1;
+  sodium_memzero(bondTok, sizeof(bondTok));
   return true;
+}
+
+uint8_t sessionCloseMesh(uint8_t meshSlot) {
+  if (!gSessions) return 0;
+  uint8_t closed = 0;
+  EspNowTxGuard g("sessCloseMesh");   // no seal or claim runs while the slots go
+  for (uint8_t i = 0; i < kSessionSlots; i++) {
+    SessionState& s = gSessions[i];
+    if (s.state == SESSION_FREE || s.meshId != meshSlot) continue;
+    sessionClear(&s);
+    closed++;
+  }
+  return closed;
 }
 
 const SessionState* sessionAt(uint8_t i) {

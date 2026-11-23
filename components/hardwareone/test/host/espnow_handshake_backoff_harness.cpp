@@ -162,7 +162,9 @@ static int gSessionsUp = 0;
 static uint32_t gLastSessionUpMs = 0;
 
 static int resolveMeshSlot(const char*) { return 0; }
-static bool keyExSendHello(const uint8_t peerMac[6], int) {
+#define EXT_RAM_BSS_ATTR
+struct KeyExInFlight;   // the production in-flight entry (pasted below); its HELLO nonce is not modelled
+static bool keyExSendHello(const uint8_t peerMac[6], int, KeyExInFlight*) {
   ++gHellos;
   if (std::memcmp(peerMac, kPartner, 6) == 0) ++gPartnerHellos;
   if (gPeerPresent && std::memcmp(peerMac, kPartner, 6) == 0) {

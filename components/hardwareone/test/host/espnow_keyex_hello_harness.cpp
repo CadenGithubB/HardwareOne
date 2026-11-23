@@ -21,6 +21,7 @@
 #include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
 #include "System_ClockCore.h"  // production clock rules: is a time a real date (copied beside this unit)
 #include "System_ESPNow_RevokedCore.h"  // production rule A and keyId (vendored ArduinoJson on the path)
+#include "System_ESPNow_HandshakeCore.h"  // production KEY_EX tag inputs (copied beside this unit)
 #include <set>
 
 // ---- Production wire types: flags, header, KEY_EX payloads -------------------
@@ -99,6 +100,12 @@ static bool espnowCryptoHmacSha256(uint8_t out[32], const uint8_t* key, size_t k
   }
   return true;
 }
+static void sodium_memzero(void* p, size_t n) { std::memset(p, 0, n); }
+// Nonces: a counter, so every HELLO, REPLY and retry gets a new one.
+static uint32_t gRand = 1;
+static void espnowCryptoRandomBytes(uint8_t* out, size_t n) {
+  for (size_t i = 0; i < n; i++) { gRand = gRand * 1103515245u + 12345u; out[i] = (uint8_t)(gRand >> 16); }
+}
 
 // The local `espnowpairsecure` re-key window: one use.
 static bool gWindowOpen = false;
@@ -142,7 +149,8 @@ static unsigned gBound = 0, gRollbacks = 0;
 struct PeerIdentity;
 static const PeerIdentity* peerIdentityFindByMac(const uint8_t mac[6]);
 static espnowrevoke::Admit espnowKeyExAdmit(const uint8_t mac[6], const uint8_t pub[32]);
-static void espnowFirstKeyBound(const uint8_t*) { ++gBound; }
+static void pairKeyUnbind(const uint8_t mac[6]);
+static void espnowFirstKeyBound(const uint8_t* mac) { ++gBound; pairKeyUnbind(mac); }
 static void espnowPairRollbackRevoked(const uint8_t*) { ++gRollbacks; }
 
 struct Sent { uint8_t dst[6]; uint8_t type; std::vector<uint8_t> payload; };
@@ -172,7 +180,8 @@ static bool writePeerIdentityFile(const PeerIdentity& p) {
 
 // What the KEY_EX_REPLY handler calls after it stored the identity: no
 // session and nothing queued here, so it sends its CONFIRM and stops.
-static void espnowHandshakeBackoffClear(const uint8_t*) {}
+static unsigned gBackoffClears = 0;
+static void espnowHandshakeBackoffClear(const uint8_t*) { ++gBackoffClears; }
 enum : uint8_t { SESSION_FREE = 0, SESSION_ACTIVE = 2 };
 struct SessionState { uint8_t state; };
 static const SessionState* sessionFindByPeer(const uint8_t*, uint8_t) { return nullptr; }
@@ -183,6 +192,14 @@ static bool espnowSessionOpenInitiate(const uint8_t*, const char*, bool* = nullp
 // ---- Production: Identity.cpp peer cache + peerIdentityPersist ---------------
 // INSERT_IDENTITY
 
+// ---- Production: System_ESPNow.cpp, the PAIR_REQUEST key binding ------------
+typedef int portMUX_TYPE;
+static portMUX_TYPE gPairLock = 0;
+static unsigned gLockDepth = 0;
+static void portENTER_CRITICAL(portMUX_TYPE*) { ++gLockDepth; }
+static void portEXIT_CRITICAL(portMUX_TYPE*) { --gLockDepth; }
+// INSERT_BINDING
+
 static espnowrevoke::Admit espnowKeyExAdmit(const uint8_t mac[6], const uint8_t pub[32]) {
   espnowrevoke::AdmitInputs in = {};
   in.revoked = gRevokedMacs.count(macKey(mac)) || gRevokedKeys.count(std::string(reinterpret_cast<const char*>(pub), 32));
@@ -192,7 +209,12 @@ static espnowrevoke::Admit espnowKeyExAdmit(const uint8_t mac[6], const uint8_t 
   in.sameKey = id && std::memcmp(id->longTermPub, pub, 32) == 0;
   in.listLocked = gListLocked;
   in.firstKeyOpen = gFirstKeyWindow;
-  return espnowrevoke::admit(in);
+  const espnowrevoke::Admit verdict = espnowrevoke::admit(in);
+  // As production espnowKeyExAdmit (wiring pinned by the driver): a key other
+  // than the one an accepted pairing request carried is not accepted.
+  if (verdict == espnowrevoke::Admit::Accept && pub && !in.sameKey && pairKeyMismatch(mac, pub))
+    return espnowrevoke::Admit::NotAccepted;
+  return verdict;
 }
 
 // ---- Production: Handlers_Crypto.cpp KEY_EX_HELLO path -------------------------
@@ -224,6 +246,11 @@ static unsigned sentOfType(uint8_t type) {
   return n;
 }
 static unsigned replies() { return sentOfType(ESPNOW_V4_TYPE_KEY_EX_REPLY); }
+static bool logged(const char* part) {
+  for (const auto& l : gLog)
+    if (l.find(part) != std::string::npos) return true;
+  return false;
+}
 static unsigned confirms() { return sentOfType(ESPNOW_V4_TYPE_KEY_EX_CONFIRM); }
 
 // A device that sends us HELLOs: locally administered test MAC, key byte `k`.
@@ -239,13 +266,19 @@ static Peer peer(uint8_t n, uint8_t k) {
 // Deliver a KEY_EX_HELLO from `p` on mesh `mesh` the way the dispatcher does.
 // Every delivery has a new header msgId, as a replayed copy would to pass the
 // duplicate ring. `forge` breaks the HMAC.
-static void hello(const Peer& p, unsigned mesh = 0, bool forge = false) {
+// Every HELLO has a fresh nonce, as a sender makes one for each (a retry
+// included); `nonce` replays a given one, and the last one sent is kept.
+static uint8_t gLastHelloNonce[16];
+static void hello(const Peer& p, unsigned mesh = 0, bool forge = false, const uint8_t* nonce = nullptr) {
   V4PayloadKeyExHello msg{};
   msg.meshFingerprint = gSettings.meshes[mesh].fingerprint;
   std::memcpy(msg.senderMac, p.mac, 6);
   std::memcpy(msg.senderPubEd25519, p.pub, 32);
-  computeKeyExHmac(msg.meshFingerprint, msg.senderMac, msg.senderPubEd25519,
-                   gMeshKeys[mesh].bootstrapKey, msg.hmac);
+  if (nonce) std::memcpy(msg.nonce, nonce, 16);
+  else espnowCryptoRandomBytes(msg.nonce, 16);
+  std::memcpy(gLastHelloNonce, msg.nonce, 16);
+  computeHelloTag(msg.meshFingerprint, msg.senderMac, msg.senderPubEd25519, msg.nonce,
+                  gMeshKeys[mesh].bootstrapKey, msg.hmac);
   if (forge) msg.hmac[0] ^= 0x01;
   EspNowV4Header h{};
   h.type = ESPNOW_V4_TYPE_KEY_EX_HELLO;
@@ -269,14 +302,30 @@ static bool storedKeyIs(const Peer& p, uint8_t k) {
   return true;
 }
 
-// Deliver a KEY_EX_REPLY from `p` (the answer to our HELLO) on mesh `mesh`.
-static void replyFrom(const Peer& p, unsigned mesh = 0) {
+// Our HELLO to `mac` went out: the in-flight entry with the HELLO's nonce.
+static uint8_t gOurHelloNonce[16];
+static void helloOut(const uint8_t mac[6], bool automatic) {
+  KeyExInFlight* e = keyExInFlightArm(mac, 0, automatic);
+  if (e) keyExInFlightNewNonce(e, gOurHelloNonce);
+}
+
+// Deliver a KEY_EX_REPLY from `p` on mesh `mesh`, answering our HELLO with the
+// nonce `helloNonce` (default: the last one we sent). The REPLY's own nonce is
+// kept in gLastReplyNonce.
+static uint8_t gLastReplyNonce[16];
+static V4PayloadKeyExReply gLastReply;
+static void replyFrom(const Peer& p, unsigned mesh = 0, const uint8_t* helloNonce = nullptr,
+                      const V4PayloadKeyExReply* replay = nullptr) {
   V4PayloadKeyExReply msg{};
   msg.meshFingerprint = gSettings.meshes[mesh].fingerprint;
   std::memcpy(msg.responderMac, p.mac, 6);
   std::memcpy(msg.responderPubEd25519, p.pub, 32);
-  computeKeyExHmac(msg.meshFingerprint, msg.responderMac, msg.responderPubEd25519,
-                   gMeshKeys[mesh].bootstrapKey, msg.hmac);
+  espnowCryptoRandomBytes(msg.nonce, 16);
+  computeReplyTag(msg.meshFingerprint, msg.responderMac, msg.responderPubEd25519, msg.nonce, kSelfMac, gSelf.pub,
+                  helloNonce ? helloNonce : gOurHelloNonce, gMeshKeys[mesh].bootstrapKey, msg.hmac);
+  if (replay) msg = *replay;
+  std::memcpy(gLastReplyNonce, msg.nonce, 16);
+  gLastReply = msg;
   EspNowV4Header h{};
   h.type = ESPNOW_V4_TYPE_KEY_EX_REPLY;
   h.flags = ESPNOW_V4_FLAG_ACK_REQ;
@@ -314,6 +363,8 @@ static void reset() {
   gFirstKeyWindow = true;
   gListLocked = false;
   gBound = gRollbacks = 0;
+  std::memset(gPairKeyBind, 0, sizeof gPairKeyBind);
+  gBackoffClears = 0;
   gNowMs += 100000;
   gNowSec += 100000;
 }
@@ -338,17 +389,21 @@ int main() {
         "K1 the stored record carries the mesh and the time (preserved)");
 
   // K2 — the defect: the same HELLO replayed with new msgIds, ten a second
-  // for five seconds.
+  // for five seconds. 1.0 step 4: its nonce was acted on, so every copy is
+  // dropped (no REPLY at all); before, one per interval was answered.
   const uint32_t t0 = gNowMs;
   const time_t s0 = gNowSec;
+  uint8_t k2Nonce[16];
+  std::memcpy(k2Nonce, gLastHelloNonce, 16);
   for (int i = 0; i < 50; i++) {
     gNowMs += 100;
     gNowSec = s0 + (time_t)((gNowMs - t0) / 1000);
-    hello(a);
+    hello(a, 0, false, k2Nonce);
   }
   check(gWrites == 1, "K2 fifty replayed HELLOs cause no further file write (FAILS ON BASE: one each)");
-  check(replies() >= 2 && replies() - 1 <= (gNowMs - t0) / kLimitMs,
-        "K2 and at most one REPLY per interval (FAILS ON BASE: one each)");
+  check(replies() == 1 && confirms() == 0,
+        "K2 and no further REPLY: a copy of an answered HELLO is dropped (step 4; was one per interval)");
+  check(logged("a copy of one already answered"), "K2 the copy is logged");
   check(gEvents == 1, "K2 no further 'paired' event (preserved)");
   check(gAcceptClears == 1 && std::memcmp(gAcceptClearMac, a.mac, 6) == 0,
         "K2 the first HELLO's new identity cleared the room and tags accepted for that MAC, the replays did not");
@@ -503,21 +558,21 @@ int main() {
   // folder) does not come back; a new key exchange after it works as before.
   reset();
   const Peer b = peer(7, 0xB7);
-  keyExInFlightArm(b.mac, 0, true);           // our automatic HELLO went out
+  helloOut(b.mac, true);           // our automatic HELLO went out
   replyFrom(b);
   check(gWrites == 1 && storedKeyIs(b, 0xB7) && confirms() == 1,
         "K13 a REPLY to our HELLO is stored and confirmed (preserved)");
   check(gAcceptClears == 1 && std::memcmp(gAcceptClearMac, b.mac, 6) == 0,
         "K13 an identity learnt from a REPLY clears the accepted room and tags as one from a HELLO does");
   reset();
-  keyExInFlightArm(b.mac, 0, true);           // HELLO out, then the user unpairs b
+  helloOut(b.mac, true);           // HELLO out, then the user unpairs b
   espnowKeyExCancel(b.mac);
   replyFrom(b);
   check(gWrites == 0 && peerIdentityFindByMac(b.mac) == nullptr && confirms() == 0,
         "K13 a REPLY to a key exchange an unpair called off stores nothing (FAILS ON BASE: the identity is back)");
   gNowMs += 50;
   const unsigned confirmsBefore = confirms();
-  keyExInFlightArm(b.mac, 0, false);          // the user pairs b again (espnowkeyex)
+  helloOut(b.mac, false);          // the user pairs b again (espnowkeyex)
   replyFrom(b);
   check(storedKeyIs(b, 0xB7) && confirms() == confirmsBefore + 1,
         "K13 a new key exchange after the unpair is stored and confirmed as usual");
@@ -528,11 +583,6 @@ int main() {
       if (it->type == ESPNOW_V4_TYPE_KEY_EX_CONFIRM)
         return reinterpret_cast<const V4PayloadKeyExConfirm*>(it->payload.data())->status;
     return -1;
-  };
-  auto logged = [](const char* part) {
-    for (const auto& l : gLog)
-      if (l.find(part) != std::string::npos) return true;
-    return false;
   };
 
   // K14 — a HELLO from a MAC with no registry entry stores nothing, is
@@ -599,14 +649,14 @@ int main() {
   reset();
   const Peer rr = peer(14, 0x77);
   gNotInRegistry.insert(macKey(rr.mac));
-  keyExInFlightArm(rr.mac, 0, false);
+  helloOut(rr.mac, false);
   replyFrom(rr);
   check(gWrites == 0 && peerIdentityFindByMac(rr.mac) == nullptr &&
             lastConfirmStatus() == espnowrevoke::kConfirmNotAccepted && !esp_now_is_peer_exist(rr.mac),
         "K18 a REPLY from a non-registry MAC: nothing stored, status 3, no radio peer left");
   reset();
   gRevokedKeys.insert(std::string(reinterpret_cast<const char*>(rr.pub), 32));
-  keyExInFlightArm(rr.mac, 0, false);
+  helloOut(rr.mac, false);
   replyFrom(rr);
   check(gWrites == 0 && gOutbox.empty() && gRollbacks == 1,
         "K18 a REPLY with a revoked key: nothing stored or sent; the pairing is rolled back");
@@ -619,31 +669,167 @@ int main() {
         "K19 a locked revoked list refuses a first key");
 
 #ifdef HW1_HAS_CONFIRM_KEEPS_RETRY
-  // K20 — review finding 3: an unauthenticated CONFIRM refusal (status 1-3)
-  // from a peer whose key is not stored is only logged; the HELLO retries of
-  // espnowpairsecure go on, so anyone in range cannot stop them.
+  // A CONFIRM from `from` with `status`, tagged over `c` under mesh `mesh`'s key
+  // (forge: a broken tag, as anyone in range without the passphrase sends).
+  auto confirmFrom = [](const Peer& from, uint8_t status, const espnowhs::KeyExContext& c, bool forge,
+                        unsigned mesh = 0) {
+    V4PayloadKeyExConfirm conf{};
+    conf.meshFingerprint = gSettings.meshes[mesh].fingerprint;
+    std::memcpy(conf.confirmerMac, from.mac, 6);
+    conf.status = status;
+    std::memcpy(conf.keyId, from.pub, 8);
+    computeConfirmTag(conf, c, gMeshKeys[mesh].bootstrapKey, conf.hmac);
+    if (forge) conf.hmac[3] ^= 0x10;
+    EspNowV4Header h{};
+    h.type = ESPNOW_V4_TYPE_KEY_EX_CONFIRM;
+    h.msgId = generateMessageId();
+    std::memcpy(h.origin, from.mac, 6);
+    esp_now_recv_info ri{from.mac, kSelfMac};
+    V4RxCtx ctx{};
+    ctx.recv_info = &ri;
+    ctx.h = &h;
+    ctx.payload = reinterpret_cast<const uint8_t*>(&conf);
+    ctx.payloadLen = sizeof conf;
+    v4hKeyExConfirm(ctx);
+    return conf;
+  };
+  // K20 — a forged CONFIRM refusal (status 1-3, a tag not under the mesh key)
+  // is ignored: the HELLO retries of espnowpairsecure go on, so anyone in
+  // range cannot stop them (1.0 step 4: the tag is checked; step 3 logged it).
   reset();
   {
     const Peer t = peer(15, 0x15);
-    keyExInFlightArm(t.mac, 0, false);
-    for (uint8_t status : {1, 2, 3}) {
-      V4PayloadKeyExConfirm c{};
-      std::memcpy(c.confirmerMac, t.mac, 6);
-      c.status = status;
-      EspNowV4Header h{};
-      h.type = ESPNOW_V4_TYPE_KEY_EX_CONFIRM;
-      h.msgId = generateMessageId();
-      std::memcpy(h.origin, t.mac, 6);
-      esp_now_recv_info ri{t.mac, kSelfMac};
-      V4RxCtx ctx{};
-      ctx.recv_info = &ri;
-      ctx.h = &h;
-      ctx.payload = reinterpret_cast<const uint8_t*>(&c);
-      ctx.payloadLen = sizeof c;
-      v4hKeyExConfirm(ctx);
-    }
-    check(keyExIsInFlight(t.mac), "K20 a forged CONFIRM refusal from a peer with no stored key leaves the retries armed");
-    check(logged("still retrying"), "K20 it is logged");
+    helloOut(t.mac, false);
+    const espnowhs::KeyExContext refusal = keyExHelloRefusalContext(kSelfMac, gSelf.pub, gOurHelloNonce, t.mac);
+    for (uint8_t status : {1, 2, 3}) confirmFrom(t, status, refusal, /*forge=*/true);
+    check(keyExIsInFlight(t.mac), "K20 a forged CONFIRM refusal leaves the retries armed");
+    check(logged("matches no key exchange"), "K20 it is logged as matching no exchange");
+    // K21 — the authenticated "not accepted" (status 3, tagged over our HELLO's
+    // nonce) is acted on while our KEY_EX is in flight: the attempt ends, the
+    // automatic back-off is not cleared (not a stop for good, E24).
+    gLog.clear();
+    const unsigned clears = gBackoffClears;
+    confirmFrom(t, espnowrevoke::kConfirmNotAccepted, refusal, false);
+    check(!keyExIsInFlight(t.mac) && logged("not accepted - pair from both sides") && gBackoffClears == clears,
+          "K21 an authenticated status 3 ends our in-flight KEY_EX and keeps the back-off");
+    // ... and only while it is in flight: the same (or a fresh) status 3 now changes nothing.
+    gLog.clear();
+    gNowMs += 31000;   // past the once-per-30-s line
+    confirmFrom(t, espnowrevoke::kConfirmNotAccepted, refusal, false);
+    check(!logged("not accepted - pair from both sides") && logged("matches no key exchange"),
+          "K21 a status 3 with no key exchange of ours in flight is ignored");
+    // A status 3 tagged over a HELLO nonce we never sent (a recorded refusal) is ignored too.
+    helloOut(t.mac, false);
+    uint8_t old[16];
+    std::memset(old, 0x5C, 16);
+    confirmFrom(t, 3, keyExHelloRefusalContext(kSelfMac, gSelf.pub, old, t.mac), false);
+    check(keyExIsInFlight(t.mac), "K21 a recorded status 3 (another HELLO's nonce) leaves the retries armed");
+  }
+
+  // K22 — the refusal this device sends (K14: a HELLO from a non-registry MAC)
+  // is tagged over the HELLO's nonce and key: the initiator can check it.
+  reset();
+  {
+    const Peer r9 = peer(9, 0xC9);
+    gNotInRegistry.insert(macKey(r9.mac));
+    hello(r9);
+    V4PayloadKeyExConfirm sent{};
+    std::memcpy(&sent, gOutbox.back().payload.data(), sizeof sent);
+    const espnowhs::KeyExContext c = keyExHelloRefusalContext(r9.mac, r9.pub, gLastHelloNonce, kSelfMac);
+    uint8_t want[16];
+    computeConfirmTag(sent, c, gMeshKeys[0].bootstrapKey, want);
+    check(gOutbox.back().payload.size() == 34 && sent.status == espnowrevoke::kConfirmNotAccepted &&
+              std::memcmp(want, sent.hmac, 16) == 0 && std::memcmp(sent.keyId, gSelf.pub, 8) == 0,
+          "K22 the status 3 sent is 34 bytes, carries our keyId and is tagged over the HELLO it refuses");
+  }
+
+  // K23 — a replayed REPLY stores nothing: one with no exchange of ours in
+  // flight, and one whose tag covers a HELLO nonce of an older exchange.
+  reset();
+  {
+    const Peer b7 = peer(7, 0xB7);
+    replyFrom(b7);   // nothing in flight
+    check(gWrites == 0 && confirms() == 0 && logged("no key exchange of ours"),
+          "K23 a REPLY with no key exchange of ours in flight stores nothing");
+    helloOut(b7.mac, false);
+    uint8_t firstNonce[16];
+    std::memcpy(firstNonce, gOurHelloNonce, 16);
+    replyFrom(b7);
+    const V4PayloadKeyExReply recorded = gLastReply;
+    check(gWrites == 1 && confirms() == 1 && storedKeyIs(b7, 0xB7), "K23 the genuine REPLY is stored and confirmed");
+    // The peer is unpaired here and paired again: a new exchange with a new nonce.
+    for (auto& id : gPeerIdentities) id = PeerIdentity{};
+    helloOut(b7.mac, false);
+    replyFrom(b7, 0, nullptr, &recorded);   // the recorded REPLY, replayed
+    check(gWrites == 1 && confirms() == 1 && peerIdentityFindByMac(b7.mac) == nullptr &&
+              logged("matches none of our HELLOs"),
+          "K23 a recorded REPLY (an older HELLO's nonce) is rejected: nothing stored, no CONFIRM");
+    replyFrom(b7);
+    check(gWrites == 2 && confirms() == 2, "K23 the answer to the new HELLO is taken");
+  }
+
+  // K24 — the initiator's CONFIRM (status 0) is checked against the REPLY we
+  // sent: tagged over both nonces and both keys it ends the back-off; a copy
+  // of it, or one over another REPLY, does nothing.
+  reset();
+  {
+    const Peer a1 = peer(1, 0xA1);
+    hello(a1);
+    V4PayloadKeyExReply ours{};
+    std::memcpy(&ours, gOutbox.back().payload.data(), sizeof ours);
+    espnowhs::KeyExContext full{};
+    std::memcpy(full.initMac, a1.mac, 6);
+    std::memcpy(full.respMac, kSelfMac, 6);
+    std::memcpy(full.helloNonce, gLastHelloNonce, 16);
+    std::memcpy(full.replyNonce, ours.nonce, 16);
+    std::memcpy(full.initPub, a1.pub, 32);
+    std::memcpy(full.respPub, gSelf.pub, 32);
+    uint8_t wantReply[16];
+    computeReplyTag(ours.meshFingerprint, kSelfMac, gSelf.pub, ours.nonce, a1.mac, a1.pub, gLastHelloNonce,
+                    gMeshKeys[0].bootstrapKey, wantReply);
+    check(std::memcmp(wantReply, ours.hmac, 16) == 0, "K24 our REPLY is tagged over the HELLO it answers");
+    espnowhs::KeyExContext wrong = full;
+    wrong.replyNonce[0] ^= 1;
+    confirmFrom(a1, 0, wrong, false);
+    check(gBackoffClears == 0 && logged("matches no key exchange"),
+          "K24 a CONFIRM over another REPLY nonce is ignored");
+    confirmFrom(a1, 0, full, false);
+    check(gBackoffClears == 1 && logged("complete (remote keyId: a1a1a1a1a1a1a1a1)"),
+          "K24 the initiator's CONFIRM over our REPLY completes the exchange (back-off ended, keyId logged)");
+    confirmFrom(a1, 0, full, false);
+    check(gBackoffClears == 1, "K24 a copy of that CONFIRM does nothing");
+  }
+
+  // K25 — the PAIR_REQUEST key binding (step 3's review item): after an
+  // accepted request, only the key it carried is taken as the first key; any
+  // other is answered "not accepted" (authenticated status 3).
+  reset();
+  {
+    const Peer c1 = peer(21, 0xC1);
+    const Peer c1other = peer(21, 0xC2);   // same MAC, another key
+    pairKeyBind(c1.mac, c1.pub);
+    hello(c1other);
+    check(gWrites == 0 && peerIdentityFindByMac(c1.mac) == nullptr && replies() == 0 &&
+              lastConfirmStatus() == espnowrevoke::kConfirmNotAccepted,
+          "K25 a HELLO with a key other than the accepted request's: nothing stored, status 3");
+    gNowMs += kLimitMs;
+    hello(c1);
+    check(gWrites == 1 && storedKeyIs(c1, 0xC1) && replies() == 1,
+          "K25 the request's own key is stored and answered");
+    check(!pairKeyMismatch(c1.mac, c1other.pub), "K25 the binding ends when the key binds");
+    // A REPLY is held to the binding the same way.
+    const Peer c3 = peer(23, 0xC3), c3other = peer(23, 0xC4);
+    pairKeyBind(c3.mac, c3.pub);
+    helloOut(c3.mac, false);
+    replyFrom(c3other);
+    check(peerIdentityFindByMac(c3.mac) == nullptr && lastConfirmStatus() == espnowrevoke::kConfirmNotAccepted,
+          "K25 a REPLY with another key than the request's: nothing stored, status 3");
+    // It lasts the first-key window (10 min).
+    const Peer c5 = peer(25, 0xC5), c5other = peer(25, 0xC6);
+    pairKeyBind(c5.mac, c5.pub);
+    gNowMs += espnowrevoke::kFirstKeyWindowMs + 1;
+    check(!pairKeyMismatch(c5.mac, c5other.pub), "K25 the binding ends with the first-key window");
+    check(gLockDepth == 0, "K25 the binding takes and releases its lock");
   }
 #else
   check(false, "the tree's CONFIRM handler keeps the retries (review finding 3)");

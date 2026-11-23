@@ -857,7 +857,7 @@ struct Settings {
     bool     enabled;                  // Inactive meshes are skipped in heartbeat emission, RX validation
     bool     isDefault;                // The mesh new pairings join unless overridden
     // 32-byte mesh master key: PBKDF2-HMAC-SHA256(passphrase,
-    //   salt=SHA256("espnow-v4-mesh-salt:"||label), 100k iters). Cached so boot
+    //   salt=SHA256("hw1-espnow-1-mesh-salt:"||label), 100k iters, "kdf":1). Cached so boot
     //   skips the slow stretch; re-derived on passphrase change or label rename.
     //   Persisted AES-encrypted at rest (putSecret), same as `passphrase`. This is
     //   a derived KEY (the source of the bootstrap/group KDFs) — NOT a one-way
