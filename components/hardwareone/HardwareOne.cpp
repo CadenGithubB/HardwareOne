@@ -1985,7 +1985,7 @@ void hardwareone_setup() {
     // so the OLED keyboard can receive input.
     if (oledConnected && gOledRunning) {
       DEBUG_SYSTEMF("[Boot] Starting input device for OLED first-time setup");
-#if ENABLE_GPIO_ENCODER
+#if ENABLE_INPUT_DIRECT_START
       bool ok = inputStartInternal();
       DEBUG_INPUTF("[Boot] Input device init result: %s", ok ? "SUCCESS" : "FAILED");
 #else
@@ -2193,9 +2193,10 @@ void hardwareone_setup() {
 #if ENABLE_I2C_SYSTEM
   processAutoStartSensors();
 #endif
-#if ENABLE_GPIO_ENCODER
-  // GPIO input has no I2C start queue. Preserve the shared autostart policy
-  // and RAM-flush resume decision used by the other input backends.
+#if ENABLE_INPUT_DIRECT_START
+  // GPIO input and IMU input have no I2C start queue of their own (IMU input
+  // asks the queue for the IMU). Preserve the shared autostart policy and
+  // RAM-flush resume decision used by the other input backends.
   if (ramFlushResolve(RF_INPUT, gSettings.inputAutoStart)) {
     inputStartInternal();
   }

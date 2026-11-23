@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1036 commands across 60 modules (1036 registry entries).
+1044 commands across 61 modules (1044 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -39,6 +39,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
 - [`anoencoder`](#anoencoder) — 6 commands
+- [`imuinput`](#imuinput) — 8 commands
 - [`apds`](#apds) — 9 commands
 - [`gps`](#gps) — 6 commands
 - [`fmradio`](#fmradio) — 9 commands
@@ -612,7 +613,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## input
 
-> Device-agnostic abstraction for the OLED input controller, which is either the Seesaw gamepad, ANO encoder or GPIO rotary encoder -- chosen at compile time via INPUT_DEVICE_TYPE and mutually exclusive, so exactly one driver is present per firmware. These commands operate on whichever driver was built in: openinput starts it, closeinput stops it, inputautostart [on|off] persists boot auto-start, and inputdevicepollms <10-1000> sets the polling interval in milliseconds (default 90 for I2C devices; GPIO input uses a fixed 5 ms button sample). Driver-specific debugging and tuning live in the gamepad and anoencoder modules; this module holds only the shared settings (poll interval and auto-start).
+> Device-agnostic abstraction for the OLED input controller, which is the Seesaw gamepad, ANO encoder, GPIO rotary encoder, GT911 touchscreen or the IMU (taps and tilt) -- chosen at compile time via INPUT_DEVICE_TYPE and mutually exclusive, so exactly one driver is present per firmware. These commands operate on whichever driver was built in: openinput starts it, closeinput stops it, inputautostart [on|off] persists boot auto-start, and inputdevicepollms <10-1000> sets the polling interval in milliseconds (default 90 for I2C devices; GPIO input uses a fixed 5 ms button sample). Driver-specific debugging and tuning live in the gamepad and anoencoder modules; this module holds only the shared settings (poll interval and auto-start).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -643,6 +644,21 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `anoencoderstatus` |  | ANO encoder status: bus, address, settings. (add 'json' for JSON output)<br/>`Usage: anoencoderstatus [json]` |
 | `anoencoderswaplr` | A | Swap LEFT/RIGHT buttons [on\|off\|toggle]<br/>`Usage: anoencoderswaplr [on\|off\|toggle]` |
 | `anoencoderswapud` | A | Swap UP/DOWN buttons [on\|off\|toggle]<br/>`Usage: anoencoderswapud [on\|off\|toggle]` |
+
+## imuinput
+
+> The motion sensor used as the OLED navigation input (INPUT_DEVICE_TYPE 5; it needs the Adafruit 4517, whose chip detects taps). Tap the device: one tap is A, two are B, three are Y, four are X; the button arrives once no further tap has followed for the tap window (imuinputtapms <200..800>, default 350 ms). Five taps take the device's present pose as the joystick's centre, as does imuinputzero; six or more taps do nothing. Tilting the device away from that centre pose by more than the tilt angle (imuinputtilt <8..40> degrees, default 15) deflects the joystick left, right, up or down, one direction at a time, and returning releases it; a lean of more than 60 degrees is taken as a new pose and centres the joystick until the next re-centre. imuinputswapxy, imuinputinvertx and imuinputinverty [on|off|toggle] fit the directions to how the sensor sits in its enclosure. A sustained shake is START (imuinputshake [on|off]); SELECT has no gesture. imuinputread [json] shows the state, the lean in degrees, the joystick and the taps being counted. The open/close/autostart lifecycle lives under the input module: openinput also opens the IMU and holds it open (closeimu refuses while the input runs), closeinput leaves the IMU open.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `imuinputinvertx` | A | Invert left/right tilt [on\|off\|toggle]<br/>`Usage: imuinputinvertx [on\|off\|toggle]` |
+| `imuinputinverty` | A | Invert up/down tilt [on\|off\|toggle]<br/>`Usage: imuinputinverty [on\|off\|toggle]` |
+| `imuinputread` |  | IMU input: state, lean, joystick and taps. (add 'json' for JSON output)<br/>`Usage: imuinputread [json]` |
+| `imuinputshake` | A | A shake is the START button [on\|off]<br/>`Usage: imuinputshake [on\|off]` |
+| `imuinputswapxy` | A | Swap the tilt axes [on\|off\|toggle]<br/>`Usage: imuinputswapxy [on\|off\|toggle]` |
+| `imuinputtapms` | A | Tap window in ms: a button arrives this long after its last tap <200..800><br/>`Usage: imuinputtapms [200..800]` |
+| `imuinputtilt` | A | Tilt angle in degrees that moves the joystick <8..40><br/>`Usage: imuinputtilt [8..40]` |
+| `imuinputzero` | A | Take the present pose as the joystick's centre (the same as five taps).<br/>`Usage: imuinputzero` |
 
 ## apds
 

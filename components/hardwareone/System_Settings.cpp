@@ -3011,6 +3011,9 @@ void registerAllSettingsModules() {
 #if ENABLE_ANO_ENCODER
   registerSettingsModule(&anoEncoderSettingsModule);
 #endif
+#if ENABLE_IMU_INPUT
+  registerSettingsModule(&imuInputSettingsModule);
+#endif
 #if ENABLE_APDS_SENSOR
   registerSettingsModule(&apdsSettingsModule);
 #endif

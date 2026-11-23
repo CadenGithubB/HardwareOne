@@ -11,7 +11,7 @@
 // (when ENABLE_ANO_ENCODER). The ANO driver populates the shared input reading with
 // synthesized values (buttons in active-low layout matching the gamepad's
 // semantics) so the OLED input pipeline doesn't care which driver is live.
-#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER || ENABLE_GT911_TOUCH
+#if ENABLE_OLED_INPUT
 extern bool gInputRunning;
 extern bool gInputConnected;
 #else

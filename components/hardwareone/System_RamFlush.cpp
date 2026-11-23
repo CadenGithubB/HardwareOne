@@ -142,9 +142,10 @@ static bool ramFlushInstanceFailed(I2cDeviceType type, uint8_t n) {
 
 // The I2C queue device a feature id stands for (its instances go in the device
 // list), or I2C_DEVICE_COUNT for a single-copy feature that keeps its bit. The
-// GPIO input wheel is not an I2C device: RF_INPUT keeps its bit in that build.
+// GPIO input wheel and the IMU input are not I2C devices of their own:
+// RF_INPUT keeps its bit in those builds.
 static I2cDeviceType ramFlushDeviceForFeature(RamFlushFeatureId f) {
-#if ENABLE_GPIO_ENCODER
+#if ENABLE_INPUT_DIRECT_START
   if (f == RF_INPUT) return I2C_DEVICE_COUNT;
 #endif
   for (int i = 0; i < I2C_DEVICE_COUNT; ++i) {

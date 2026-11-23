@@ -188,7 +188,8 @@
        {"title": "Seesaw gamepad on I2C", "set": {"INPUT_DEVICE_TYPE": 1, "CUSTOM_ENABLE_GAMEPAD": 1}},
        {"title": "ANO rotary encoder on I2C", "set": {"INPUT_DEVICE_TYPE": 2, "CUSTOM_ENABLE_GAMEPAD": 0}},
        {"title": "Wheel and buttons on the board", "set": {"INPUT_DEVICE_TYPE": 3, "CUSTOM_ENABLE_GAMEPAD": 0}},
-       {"title": "Touchscreen (GT911)", "set": {"INPUT_DEVICE_TYPE": 4, "CUSTOM_ENABLE_GAMEPAD": 0}}
+       {"title": "Touchscreen (GT911)", "set": {"INPUT_DEVICE_TYPE": 4, "CUSTOM_ENABLE_GAMEPAD": 0}},
+       {"title": "Motion sensor: taps and tilt (needs the Adafruit 4517)", "set": {"INPUT_DEVICE_TYPE": 5, "CUSTOM_ENABLE_GAMEPAD": 0}}
      ]},
     {"id": "imu", "group": "sensors", "title": "Motion sensor",
      "summary": "Orientation and acceleration from an IMU board on I2C.",

@@ -3367,6 +3367,9 @@ static void printMemoryReportImpl(bool atBoot) {
 #elif ENABLE_GPIO_ENCODER
   broadcastOutput("  [Y] GPIO_ENC | Input_GPIOEncoder task");
   enabled_count++;
+#elif ENABLE_IMU_INPUT
+  broadcastOutput("  [Y] IMU_INPUT| Input_IMU: taps and tilt on the IMU task's samples");
+  enabled_count++;
 #elif ENABLE_ANO_ENCODER
   broadcastOutput("  [Y] ANO_ENC  | inputTask() in i2csensor_ano_encoder.cpp");
   enabled_count++;

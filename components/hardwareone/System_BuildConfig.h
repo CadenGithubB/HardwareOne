@@ -174,9 +174,12 @@
 //   2 = ANO_ENCODER      (Adafruit ANO Rotary Encoder breakout, 0x49)
 //   3 = GPIO_ENCODER     (quadrature wheel + click and optional board buttons)
 //   4 = GT911_TOUCH      (Waveshare LCD-5 single-contact touchscreen over I2C)
+//   5 = IMU              (the motion sensor: taps are buttons, tilt is the joystick)
 //
 // Board profiles default to SEESAW_GAMEPAD on FeatherS3 and NONE on XIAO.
 // The two Seesaw options require I2C; GPIO input needs explicit assembly pins.
+// IMU input needs the IMU in the build with a chip that detects taps
+// (IMU_DEVICE_TYPE 2, the Adafruit 4517).
 #define INPUT_DEVICE_TYPE       1
 
 // Motion sensor (IMU): which chip the IMU (CUSTOM_ENABLE_IMU, or I2C level 3)
@@ -607,6 +610,7 @@
 #define INPUT_DEVICE_TYPE_ANO_ENCODER    2
 #define INPUT_DEVICE_TYPE_GPIO_ENCODER   3
 #define INPUT_DEVICE_TYPE_GT911_TOUCH    4
+#define INPUT_DEVICE_TYPE_IMU            5
 
 #define IMU_DEVICE_TYPE_BNO055           1
 #define IMU_DEVICE_TYPE_ADAFRUIT_4517    2
@@ -793,6 +797,17 @@
 #if ENABLE_GPIO_ENCODER_BUTTONS && (!HW_BOARD_P4X_EYE || !ENABLE_GPIO_ENCODER)
   #error "GPIO encoder auxiliary buttons require the P4X-EYE encoder profile"
 #endif
+// The IMU as the input device (Input_IMU.cpp): no chip of its own, it reads
+// the motion layer's samples. Taps are counted from the chip's own tap
+// detection and tilt from the direction of gravity, which only the Adafruit
+// 4517 backend provides.
+#define ENABLE_IMU_INPUT (INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_IMU)
+#if ENABLE_IMU_INPUT && !ENABLE_IMU_LSM6DSOX
+  #error "IMU input (INPUT_DEVICE_TYPE 5) needs the IMU in the build with the Adafruit 4517 (CUSTOM_ENABLE_IMU 1 at I2C_FEATURE_LEVEL 4, IMU_DEVICE_TYPE 2): the BNO055 backend has no tap detection"
+#endif
+// An input device that is not an I2C device of its own: it starts by a direct
+// call (inputStartInternal), not through the I2C sensor start queue.
+#define ENABLE_INPUT_DIRECT_START (ENABLE_GPIO_ENCODER || ENABLE_IMU_INPUT)
 #if INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_ANO_ENCODER && ENABLE_I2C_SYSTEM
   #undef  ENABLE_GAMEPAD_SENSOR
   #define ENABLE_GAMEPAD_SENSOR 0
@@ -809,7 +824,7 @@
 // gate the OLED's input-handling code so it compiles for either driver.
 // The two source-specific paths inside each block stay gated on their own
 // ENABLE_* flag.
-#define ENABLE_OLED_INPUT  (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER || ENABLE_GT911_TOUCH)
+#define ENABLE_OLED_INPUT  (ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER || ENABLE_GT911_TOUCH || ENABLE_IMU_INPUT)
 
 // Keep legacy auto-disable behavior, but reject an ineffective saved choice.
 #if defined(HW1_FEATURE_CONFIG_HEADER)

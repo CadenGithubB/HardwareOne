@@ -6682,9 +6682,11 @@ void tryAutoStartInputForMenu() {
 #endif
   }
 
-#if ENABLE_GPIO_ENCODER
+#if ENABLE_INPUT_DIRECT_START
   // The onboard wheel owns GPIOs and a polling task, with no I2C address or
-  // queued I2C device. Reuse the same driver start and saved autostart policy.
+  // queued I2C device; IMU input has no device of its own either (it asks the
+  // queue for the IMU when that is closed). Reuse the same driver start and
+  // saved autostart policy.
   inputStartInternal();
 #else
   // Boot autostart (processAutoStartSensors) may have queued it already: a

@@ -28,6 +28,7 @@
     "input|inputCommands|1|input",
     "gamepad|gamepadCommands|1|input",
     "anoencoder|anoEncoderCommands|1|ano",
+    "imuinput|imuInputCommands|1|input",
     "apds|apdsCommands|1|sensor:apds",
     "gps|gpsCommands|1|sensor:gps",
     "fmradio|fmRadioCommands|1|sensor:fmradio",
@@ -109,6 +110,16 @@
         "ENABLE_OLED_DISPLAY"
       ],
       "modules": "cli system versions filesystem oled input anoencoder i2c debug settings sensorlog users features power liveaudio cm5 ota setpattern settingsedit"
+    },
+    "imu_input": {
+      "enabled": [
+        "ENABLE_I2C_SYSTEM",
+        "ENABLE_OLED_INPUT",
+        "ENABLE_IMU_SENSOR",
+        "ENABLE_IMU_INPUT",
+        "ENABLE_OLED_DISPLAY"
+      ],
+      "modules": "cli system versions filesystem oled imu input imuinput i2c debug settings sensorlog users features power liveaudio cm5 ota setpattern settingsedit"
     },
     "applications": {
       "enabled": [

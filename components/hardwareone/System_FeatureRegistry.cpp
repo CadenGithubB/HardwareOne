@@ -383,6 +383,8 @@ static constexpr FeatureEntry featureRegistry[] = {
     "Single Touchscreen",
 #elif ENABLE_GPIO_ENCODER
     "GPIO Rotary Encoder",
+#elif ENABLE_IMU_INPUT
+    "IMU Input",  // short: the features json size check below counts every name
 #elif ENABLE_ANO_ENCODER
     "ANO Encoder",
 #else
@@ -395,6 +397,8 @@ static constexpr FeatureEntry featureRegistry[] = {
     "GT911 single-finger touch controls"
 #elif ENABLE_GPIO_ENCODER
     "GPIO quadrature wheel and click gestures for navigation"
+#elif ENABLE_IMU_INPUT
+    "Motion sensor as the input: taps are buttons, tilt is the joystick"
 #elif ENABLE_ANO_ENCODER
     "ANO rotary encoder + 5-button D-pad for navigation"
 #else
