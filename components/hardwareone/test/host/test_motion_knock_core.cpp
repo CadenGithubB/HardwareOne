@@ -53,19 +53,27 @@ void testSingleTap() {
   knock::knockDirection(ev[0], dir, share);
   assert(dir[1] == 'Z' && share > 90);
   assert(!ev[0].side);  // a Z knock is a face knock (side axis Y)
-  // The same knock on Y is a side knock; under sideMg it is the face.
+  // The same knock on Y is a side knock; with Y under sidePct of Z, the face.
   auto evY = run(cfg, 500, [](float t, float* mg) {
     float z[3] = {0, 0, 0};
     knockAt(t, 100, 3000, 25, z);
     mg[1] += z[2];
   });
   assert(evY.size() == 1 && evY[0].side);
-  Config soft = cfg;
-  soft.sideMg = 4000;
-  evY = run(soft, 500, [](float t, float* mg) {
-    float z[3] = {0, 0, 0};
-    knockAt(t, 100, 3000, 25, z);
-    mg[1] += z[2];
+  // A soft side knock (Y 1.2 g, Z 0.4 g) is still the side.
+  evY = run(cfg, 500, [](float t, float* mg) {
+    float k[3] = {0, 0, 0};
+    knockAt(t, 100, 1500, 25, k);
+    mg[1] += k[2];
+    mg[2] += k[2] / 3;
+  });
+  assert(evY.size() == 1 && evY[0].side);
+  // Y at a fifth of Z is the face.
+  evY = run(cfg, 500, [](float t, float* mg) {
+    float k[3] = {0, 0, 0};
+    knockAt(t, 100, 3000, 25, k);
+    mg[2] += k[2];
+    mg[1] += k[2] / 5;
   });
   assert(evY.size() == 1 && !evY[0].side);
 }

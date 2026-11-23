@@ -39,10 +39,10 @@ static void imuApplyTapTuning(bool force) {
   static int lastMg = -1, lastShock = -1, lastQuiet = -1, lastMax = -1, lastRing = -1, lastAxis = -1, lastSide = -1;
   if (!force && gSettings.imuTapThresholdMg == lastMg && gSettings.imuTapShock == lastShock &&
       gSettings.imuTapQuiet == lastQuiet && gSettings.imuTapMaxMs == lastMax && gSettings.imuTapRingMs == lastRing &&
-      gSettings.imuTapSideAxis == lastAxis && gSettings.imuTapSideMg == lastSide)
+      gSettings.imuTapSideAxis == lastAxis && gSettings.imuTapSidePct == lastSide)
     return;
   lastAxis = gSettings.imuTapSideAxis;
-  lastSide = gSettings.imuTapSideMg;
+  lastSide = gSettings.imuTapSidePct;
   motionBackendSetKnockSide(lastAxis, lastSide);
   lastMg = gSettings.imuTapThresholdMg;
   lastShock = gSettings.imuTapShock;
@@ -939,16 +939,17 @@ const char* cmd_imutapsideaxis(const String& argsInput) {
     setSetting(gSettings.imuTapSideAxis, axis);
   }
   snprintf(getDebugBuffer(), 1024,
-           "[IMU] Side knocks: a knock of %d mg or more along %c (either sign) is a side tap, any other a face tap. "
-           "'imutaptrace' shows each knock's x/y/z.",
-           gSettings.imuTapSideMg, (char)('X' + (gSettings.imuTapSideAxis & 3)));
+           "[IMU] Side knocks: a knock whose jump along %c is at least %d %% of its largest other axis is a side tap, "
+           "any other a face tap. 'imutaptrace' shows each knock's x/y/z.",
+           (char)('X' + (gSettings.imuTapSideAxis & 3)), gSettings.imuTapSidePct);
   return getDebugBuffer();
 }
 
-const char* cmd_imutapsidemg(const String& argsInput) {
+const char* cmd_imutapsideratio(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return imuTapSettingCommand(argsInput, gSettings.imuTapSideMg, 100, 16000, "Side knock (mg)",
-                              "a knock this hard along the side axis is a side tap, else a face tap");
+  return imuTapSettingCommand(argsInput, gSettings.imuTapSidePct, 10, 1000, "Side knock ratio (%)",
+                              "a knock whose side-axis jump is at least this share of its largest other axis is a "
+                              "side tap, else a face tap");
 }
 
 // The knock trace: every recent knock the software detector saw, how hard
@@ -1267,7 +1268,7 @@ const CommandEntry imuCommands[] = {
   { "imutapmaxms", "IMU tap max length in ms (software knock detector): [5..500]", true, cmd_imutapmaxms, "Usage: imutapmaxms [5..500]" },
   { "imutapringms", "IMU tap ring window in ms (software knock detector): [0..500]", true, cmd_imutapringms, "Usage: imutapringms [0..500]" },
   { "imutapsideaxis", "IMU side knocks: the axis a side knock hits along (software knock detector): [x|y|z]", true, cmd_imutapsideaxis, "Usage: imutapsideaxis [x|y|z]" },
-  { "imutapsidemg", "IMU side knocks: how hard along the side axis makes a side tap, in mg: [100..16000]", true, cmd_imutapsidemg, "Usage: imutapsidemg [100..16000]" },
+  { "imutapsideratio", "IMU side knocks: the side axis's share of the largest other axis, in %, that makes a side tap: [10..1000]", true, cmd_imutapsideratio, "Usage: imutapsideratio [10..1000]" },
   { "imutaptrace", "Every recent knock: how hard, how long, and why it did or did not count, with tuning hints. (add 'json' for JSON output)", false, cmd_imutaptrace, "Usage: imutaptrace [json|clear]" },
 #endif
   { "imudevicepollms", "IMU device poll interval: <50..1000>", true, cmd_imudevicepollms, "Usage: imuDevicePollMs <50..1000>" },
@@ -1457,7 +1458,7 @@ static const SettingEntry imuSettingEntries[] = {
   { "imuTapQuiet", SETTING_INT, &gSettings.imuTapQuiet, 1, 0, nullptr, 0, 3, "Tap quiet window", nullptr, false, "tap", "imutapquiet" },
   { "imuTapMaxMs", SETTING_INT, &gSettings.imuTapMaxMs, 120, 0, nullptr, 5, 500, "Tap max length (ms)", nullptr, false, "tap", "imutapmaxms" },
   { "imuTapSideAxis", SETTING_INT, &gSettings.imuTapSideAxis, 1, 0, nullptr, 0, 2, "Side knock axis", "0:X,1:Y,2:Z", false, "tap", "imutapsideaxis" },
-  { "imuTapSideMg", SETTING_INT, &gSettings.imuTapSideMg, 1500, 0, nullptr, 100, 16000, "Side knock (mg)", nullptr, false, "tap", "imutapsidemg" },
+  { "imuTapSidePct", SETTING_INT, &gSettings.imuTapSidePct, 60, 0, nullptr, 10, 1000, "Side knock ratio (%)", nullptr, false, "tap", "imutapsideratio" },
   { "imuTapRingMs", SETTING_INT, &gSettings.imuTapRingMs, 80, 0, nullptr, 0, 500, "Tap ring window (ms)", nullptr, false, "tap", "imutapringms" },
 #endif
   { "imuOrientationMode", SETTING_INT, &gSettings.imuOrientationMode, 0, 0, nullptr, 0, 8, "Orientation Mode", "0:Normal,1:Flip Pitch,2:Flip Roll,3:Flip Yaw,4:Flip Pitch+Roll,5:Roll 180 Fix,6:Rotate 90 CCW,7:Alt Extreme Pitch,8:Upside Down", false, "orientation", "imuorientationmode" },

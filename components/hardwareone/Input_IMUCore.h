@@ -88,8 +88,10 @@ constexpr float kGravity = 9.80665f;
 constexpr float kRadToDeg = 57.29577951308232f;
 
 // A sample later than this after the previous one follows a gap: what was
-// being counted is dropped (the reference pose is kept).
-constexpr uint32_t kGapMs = 100;
+// being counted is dropped (the reference pose is kept). Pauses of 105-130 ms
+// happen on a shared I2C bus (bench 2026-11-23: they dropped runs of taps at
+// a 100 ms limit), and the knock detector keeps its taps across them.
+constexpr uint32_t kGapMs = 300;
 // A button is shown as held this long after its press, so a reader of the
 // level (a status page, a peer) sees it; far below any hold gesture.
 constexpr uint32_t kHeldMs = 100;

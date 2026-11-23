@@ -79,7 +79,7 @@ const char* cmd_imutapmaxms(const String& argsInput);
 const char* cmd_imutapringms(const String& argsInput);
 const char* cmd_imutaptrace(const String& argsInput);
 const char* cmd_imutapsideaxis(const String& argsInput);
-const char* cmd_imutapsidemg(const String& argsInput);
+const char* cmd_imutapsideratio(const String& argsInput);
 const char* cmd_imuorientationmode(const String& argsInput);
 const char* cmd_imuorientationcorrection(const String& argsInput);
 const char* cmd_imupitchoffset(const String& argsInput);

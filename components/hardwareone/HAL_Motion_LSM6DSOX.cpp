@@ -66,6 +66,11 @@ struct Lsm4517State {
   knock::Detector knock;
   uint8_t pendingTaps;
   uint8_t pendingSide;  // bit i: the i-th pending tap (oldest first) hit the side
+  // The FIFO samples' clock: the next sample's time. It only moves forward
+  // (the detector's lengths and gaps are differences), and jumps ahead only
+  // when the reads fell well behind the chip.
+  bool fifoClock;
+  uint32_t fifoNextUs;
 };
 EXT_RAM_BSS_ATTR Lsm4517State sState;
 
@@ -82,7 +87,7 @@ bool writeRegs(TwoWire& wire, uint8_t address, uint8_t reg, const uint8_t* value
 // and the ring window; read by the IMU task at each sample.
 std::atomic<uint32_t> sKnockTuning{1300u | (120u << 16)};
 std::atomic<uint16_t> sKnockRingMs{80};
-std::atomic<uint32_t> sKnockSide{1u | (1500u << 8)};  // axis | sideMg << 8
+std::atomic<uint32_t> sKnockSide{1u | (60u << 8)};  // axis | sidePct << 8
 // The trace: written by the IMU task, copied by commands (a short critical
 // section each way). PSRAM, cleared at each start.
 EXT_RAM_BSS_ATTR knock::Trace sKnockTrace;
@@ -97,7 +102,7 @@ knock::Config knockConfig() {
   c.ringMs = sKnockRingMs.load();
   const uint32_t side = sKnockSide.load();
   c.sideAxis = (uint8_t)(side & 0xFF);
-  c.sideMg = (uint16_t)(side >> 8);
+  c.sidePct = (uint16_t)(side >> 8);
   return c;
 }
 
@@ -146,7 +151,10 @@ void readKnockFifo(TwoWire& wire, uint8_t bus, uint8_t address) {
   });
   const uint16_t n = ok ? take / 3 : 0;
   const knock::Config cfg = knockConfig();
-  if (ok && overrun) sState.knock.reset();  // samples were lost: start the baseline over
+  if (ok && overrun) {  // samples were lost: start the baseline and the clock over
+    sState.knock.reset();
+    sState.fifoClock = false;
+  }
   // The newest sample read is `left / 3` samples older than now.
   const uint32_t nowUs = (uint32_t)esp_timer_get_time();
   const uint32_t lastUs = nowUs - (uint32_t)(left / 3) * kLsm6ds3FifoSampleUs;
@@ -159,7 +167,15 @@ void readKnockFifo(TwoWire& wire, uint8_t bus, uint8_t address) {
       lastRaw[a] = lsm4517Le16(buf + 6 * i + 2 * a);
       mg[a] = lastRaw[a] * kLsm6dsoxAccelMgPerLsb;
     }
-    const uint32_t tUs = lastUs - (uint32_t)(n - 1 - i) * kLsm6ds3FifoSampleUs;
+    if (i == 0) {
+      const uint32_t estimateUs = lastUs - (uint32_t)(n - 1) * kLsm6ds3FifoSampleUs;
+      if (!sState.fifoClock || (int32_t)(estimateUs - sState.fifoNextUs) > 20000) {
+        sState.fifoNextUs = estimateUs;
+        sState.fifoClock = true;
+      }
+    }
+    const uint32_t tUs = sState.fifoNextUs;
+    sState.fifoNextUs += kLsm6ds3FifoSampleUs;
     knock::Event ev;
     if (!sState.knock.add(cfg, mg, tUs, ev)) continue;
     if (ev.verdict == knock::Verdict::Tap && sState.pendingTaps < 8) {
@@ -407,10 +423,10 @@ void motionBackendSetKnockTuning(long thresholdMg, long maxMs, long ringMs) {
   sKnockRingMs.store((uint16_t)(ringMs < 0 ? 0 : ringMs > 500 ? 500 : ringMs));
 }
 
-void motionBackendSetKnockSide(long axis, long sideMg) {
+void motionBackendSetKnockSide(long axis, long sidePct) {
   const uint32_t a = (uint32_t)(axis < 0 ? 0 : axis > 2 ? 2 : axis);
-  const uint32_t mg = (uint32_t)(sideMg < 100 ? 100 : sideMg > 16000 ? 16000 : sideMg);
-  sKnockSide.store(a | (mg << 8));
+  const uint32_t pct = (uint32_t)(sidePct < 10 ? 10 : sidePct > 1000 ? 1000 : sidePct);
+  sKnockSide.store(a | (pct << 8));
 }
 
 bool motionBackendKnockTrace(knock::Trace& out, knock::Config& cfg) {

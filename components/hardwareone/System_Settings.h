@@ -64,7 +64,7 @@ struct Settings {
       imuTapMaxMs(120),
       imuTapRingMs(80),
       imuTapSideAxis(1),
-      imuTapSideMg(1500),
+      imuTapSidePct(60),
       gpsDevicePollMs(200),
       apdsDevicePollMs(200),
       inputDevicePollMs(90),
@@ -301,7 +301,7 @@ struct Settings {
       anoEncoderInvert(false),
       anoEncoderSwapUpDown(true),     // Adafruit ANO breakout's silkscreen UP/DOWN map inverted by default
       anoEncoderSwapLeftRight(true),  // ditto LEFT/RIGHT — matches the typical assembled orientation
-      imuInputTapWindowMs(300),
+      imuInputTapWindowMs(450),
       imuInputTapMergeMs(0),
       imuInputTiltDeg(15),
       imuInputShakeCalibrate(true),
@@ -568,7 +568,7 @@ struct Settings {
   int imuTapMaxMs;        // software knock detector: longest a tap may last (imutapmaxms)
   int imuTapRingMs;       // ...a knock this soon after a tap is its ringing (imutapringms)
   int imuTapSideAxis;     // ...side or face: the axis (0 X, 1 Y, 2 Z) a side knock hits along (imutapsideaxis)
-  int imuTapSideMg;       // ...and how hard on it (either sign) makes it a side knock (imutapsidemg)
+  int imuTapSidePct;      // ...and its share of the largest other axis, in %, that makes it a side knock (imutapsideratio)
   int gpsDevicePollMs;
   int apdsDevicePollMs;
   int inputDevicePollMs;

@@ -109,7 +109,7 @@ void motionBackendSetTapTuning(long thresholdMg, long shock, long quiet);
 // motionBackendKnockTrace is false on a backend without the detector (it
 // uses the chip's own tap engine, or none). Any task may call these.
 void motionBackendSetKnockTuning(long thresholdMg, long maxMs, long ringMs);
-void motionBackendSetKnockSide(long axis, long sideMg);
+void motionBackendSetKnockSide(long axis, long sidePct);
 bool motionBackendKnockTrace(knock::Trace& out, knock::Config& cfg);
 void motionBackendKnockTraceClear();
 
