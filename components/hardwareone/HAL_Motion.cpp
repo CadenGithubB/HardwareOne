@@ -119,18 +119,48 @@ static MotionHookSlot sImuHook;
 EXT_RAM_BSS_ATTR static MotionHolders sImuHolders;
 static portMUX_TYPE sImuHoldersMux = portMUX_INITIALIZER_UNLOCKED;
 
-bool imuSampleHookRegister(MotionSampleHookFn fn, void* ctx) { return motionHookRegister(sImuHook, fn, ctx); }
+// The hook's gap rule (the first sample after a gap carries no chip tap);
+// the IMU task's own, started again at each open.
+static MotionHookFeed sImuHookFeed;
+
+bool imuSampleHookRegister(MotionSampleHookFn fn, void* ctx) {
+  // Another register or unregister is at work for a moment: a tick at a time.
+  return motionHookRegister(sImuHook, fn, ctx, []() { vTaskDelay(1); });
+}
 
 bool imuSampleHookUnregister(MotionSampleHookFn fn, void* ctx) {
   // On the IMU task this is the hook giving itself up: its own call is in
   // progress and is not waited for. Any other task sleeps a tick at a time
-  // until a call in progress has ended (a call is short and never blocks).
+  // until a call in progress has ended. A call is short and never blocks
+  // (the hook's contract); one that does keeps this waiting, and says so
+  // once after kMotionHookWaitWarnMs.
   const TaskHandle_t imuTaskNow = gImuTaskHandle;
   const bool fromHook = imuTaskNow != nullptr && xTaskGetCurrentTaskHandle() == imuTaskNow;
-  return motionHookUnregister(sImuHook, fn, ctx, fromHook, []() { vTaskDelay(1); });
+  const unsigned long started = millis();
+  bool warned = false;
+  return motionHookUnregister(sImuHook, fn, ctx, fromHook, [&]() {
+    vTaskDelay(1);
+    if (!warned && motionHookWaitTooLong((uint32_t)(millis() - started))) {
+      warned = true;
+      WARN_IMUF("The IMU sample hook has not returned for %lu ms; unregister keeps waiting (a hook must not block)",
+                (unsigned long)(millis() - started));
+    }
+  });
+}
+
+// The last call of a run: the IMU task is ending (closeimu, auto-disable, a
+// failed start, the stack check). On the IMU task, no lock held.
+static void imuHookStopped() {
+  sImuHookFeed = MotionHookFeed{};
+  if (motionHookRegistered(sImuHook)) motionHookCall(sImuHook, motionHookStoppedSample((uint32_t)millis()));
 }
 
 bool imuHold(const char* who) {
+  // A 'closeimu' that is queued was accepted before this hold existed: the
+  // IMU is closing, and the hold is refused rather than taken on an IMU that
+  // is about to stop (try again once it has closed). The queue worker drops
+  // a stop that a hold still overtakes (applySensorStop).
+  if (i2cSensorStopPending(I2C_DEVICE_IMU)) return false;
   portENTER_CRITICAL(&sImuHoldersMux);
   const bool added = motionHoldAdd(sImuHolders, who);
   portEXIT_CRITICAL(&sImuHoldersMux);
@@ -315,9 +345,12 @@ const char* cmd_imustop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_IMU, argsInput, "closeimu")) return error;
   // A consumer that needs the IMU open (the IMU input device) holds it:
-  // closing it under that consumer is refused, with who it is.
+  // closing it under that consumer is refused, with who it is. Only while
+  // there is something to close: an IMU that stopped by itself (auto-disable)
+  // is not "in use and open", and the close below still cancels its
+  // automatic restart.
   const MotionHolders holders = imuHoldersCopy();
-  if (holders.count > 0) {
+  if (holders.count > 0 && i2cSensorStopHasWork(I2C_DEVICE_IMU)) {
     if (!ensureDebugBuffer()) return "Error: The IMU is in use and stays open. Stop what uses it first.";
     return motionHoldRefusal(holders, getDebugBuffer(), 1024);
   }
@@ -591,11 +624,14 @@ static bool imuStoreSample(const MotionSample& sample, bool publish, unsigned lo
   const bool shaking = imuRunActions(actions, /*postEvents=*/true);
   // The per-sample hook: after the detector, no lock held. Its tilt is the
   // backend's, before the orientation correction above.
+  // The gap rule runs on every sample, hooked or not, so a hook registered
+  // mid-run starts from a known previous sample.
+  const bool afterGap = motionHookAfterGap(sImuHookFeed, (uint32_t)readMs, (uint32_t)sampleMs);
   if (motionHookRegistered(sImuHook)) {
     const MotionHookSample hooked =
         motionHookSample((uint32_t)readMs, sample.pitch, sample.roll, sample.accel,
-                         sample.hasGravity ? sample.gravity : nullptr, sample.hasHwTap, sample.hwTap, shaking,
-                         kMotionTapAccel);
+                         sample.hasGravity ? sample.gravity : nullptr, sample.hasHwTap, sample.hwTap, afterGap,
+                         shaking, kMotionTapAccel);
     motionHookCall(sImuHook, hooked);
   }
   return updated;
@@ -731,6 +767,7 @@ static bool imuRunActions(const MotionActionSample& sample, bool postEvents) {
 // A fresh detector for each run of the task (no history from a previous run).
 static void imuResetActions() {
   sImuShaking = false;
+  sImuHookFeed = MotionHookFeed{};  // the first sample of a run follows a gap
   SensorCacheGuard guard(sImuCacheMutex, pdMS_TO_TICKS(100), "imu.actionsReset");
   if (guard.held) sImuActions = MotionActionState{};
 }
@@ -1054,6 +1091,10 @@ void imuTask(void* parameter) {
       gImuInitDone = false;
       gImuInitResult = false;
 
+      // The per-sample hook's last call of this run (stopped): every way the
+      // IMU closes comes through here.
+      imuHookStopped();
+
       SENSOR_TASK_EXIT(IMU, gImuTaskHandle);
     }
 
@@ -1103,12 +1144,13 @@ void imuTask(void* parameter) {
         const uint8_t second = imuMagDeviceAddress();
         MotionSample sample;
         const bool result = motionBackendRead(imuBus, address, second, sample);
+        const unsigned long readMs = millis();  // the sample's time: right after the read
         // A fixed rate keeps its schedule; a late tick starts a new one.
         lastImuRead = (nowMs - lastImuRead < 2 * sampleMs) ? lastImuRead + sampleMs : nowMs;
         bool published = false;
         if (result && sample.ready) {
           const bool publish = motionPublishDue(publishedOnce, lastPublish, nowMs, imuPollMs, sampleMs);
-          published = imuStoreSample(sample, publish, sampleMs, nowMs);
+          published = imuStoreSample(sample, publish, sampleMs, readMs);
           if (published) {
             publishedOnce = true;
             lastPublish = nowMs;

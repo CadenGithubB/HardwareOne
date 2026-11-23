@@ -8,13 +8,16 @@ Here the firmware's use of them:
   imuHolderCount and `closeimu` (cmd_imustop). While a consumer holds the
   IMU, `closeimu` answers "Error: The IMU is in use by <who> ..." and asks
   the stop queue for nothing; released, it goes to the queue as before; a
-  bad argument is still refused first. The holder list is touched only
+  bad argument is still refused first; a held IMU that already stopped is
+  not refused; a hold is refused while a close is on its way. The holder list is touched only
   inside its critical section.
 - Source contracts for the IMU task's side (imuStoreSample is too wide to
   run here): the hook is called once per stored sample, after the action
   detector, outside the cache lock's scope, with the backend's tilt (before
   the orientation correction) and the time the sample was read; unregister
-  does not wait for its own call when it runs on the IMU task.
+  does not wait for its own call when it runs on the IMU task and reports a
+  long wait once; the hook's last call (stopped) is made once in the task's
+  exit branch; the queue worker drops a stop of a held IMU.
 """
 from __future__ import annotations
 
@@ -46,19 +49,52 @@ def contracts(owner: str) -> None:
     sample = store[store.index("motionHookSample("):call]
     require(re.search(r"motionHookSample\(\(uint32_t\)readMs, sample\.pitch, sample\.roll, sample\.accel,", sample)
             is not None, "the hook gets the read time and the backend's tilt, before the orientation correction")
-    require("sample.hasGravity ? sample.gravity : nullptr" in sample and "sample.hasHwTap, sample.hwTap, shaking" in sample,
-            "the hook gets gravity only when the backend has it, the chip's raw tap flag and the detector's shake state")
+    require("sample.hasGravity ? sample.gravity : nullptr" in sample and
+            "sample.hasHwTap, sample.hwTap, afterGap," in sample and "shaking, kMotionTapAccel" in sample,
+            "the hook gets gravity only when the backend has it, the chip's tap flag with the gap rule and the "
+            "detector's shake state")
+    # The gap rule sees every stored sample, hooked or not, before the hook's sample is built.
+    gap = store.index("motionHookAfterGap(sImuHookFeed, (uint32_t)readMs, (uint32_t)sampleMs)")
+    require(detector < gap < store.index("if (motionHookRegistered(sImuHook))"),
+            "the gap rule runs on every stored sample")
     task = extract_block(owner, "void imuTask(void* parameter)")
-    require("imuStoreSample(sample, publish, sampleMs, nowMs)" in task and task.count("imuStoreSample(") == 1,
+    require(task.count("imuStoreSample(") == 1 and "imuStoreSample(sample, publish, sampleMs, readMs)" in task,
             "the task stores each ready sample once, with the time it was read")
+    read = task.index("motionBackendRead(imuBus, address, second, sample);")
+    stamp = task.index("const unsigned long readMs = millis();")
+    require(read < stamp and task[read:stamp].count(";") == 1,
+            "the sample's time is taken right after the read returns, not before it")
     require(re.search(r"if \(result && sample\.ready\) \{[^}]*imuStoreSample\(", task, re.S) is not None,
             "only a sample with a reading reaches the hook")
+    # Every way the IMU closes goes through the task's exit branch: the hook's
+    # last call (stopped) is made there, once, after the backend was released.
+    exit_branch = extract_block(task, "if (!gImuRunning)")
+    require(task.count("imuHookStopped();") == 1 and exit_branch.count("imuHookStopped();") == 1,
+            "the stopped call is made once, in the task's exit branch")
+    require(exit_branch.index("motionBackendStop();") < exit_branch.index("imuHookStopped();") <
+            exit_branch.index("SENSOR_TASK_EXIT(IMU, gImuTaskHandle);"),
+            "the stopped call comes after the backend is released and before the task ends")
+    require(exit_branch.index("continue;") < exit_branch.index("imuHookStopped();"),
+            "a retried exit (the cache was busy) does not repeat the stopped call")
+    stopped = extract_block(owner, "static void imuHookStopped()")
+    require("motionHookCall(sImuHook, motionHookStoppedSample((uint32_t)millis()))" in stopped and
+            "sImuHookFeed = MotionHookFeed{};" in stopped, "the stopped call, and the next run starts after a gap")
+    require("sImuHookFeed = MotionHookFeed{};" in extract_block(owner, "static void imuResetActions()"),
+            "a run's first sample follows a gap")
     unregister = extract_block(owner, "bool imuSampleHookUnregister(")
     require("xTaskGetCurrentTaskHandle() == imuTaskNow" in unregister and
             "motionHookUnregister(sImuHook, fn, ctx, fromHook," in unregister and "vTaskDelay(1)" in unregister,
             "unregister waits a tick at a time, and not for its own call on the IMU task")
-    require("return motionHookRegister(sImuHook, fn, ctx);" in extract_block(owner, "bool imuSampleHookRegister("),
+    require("motionHookWaitTooLong(" in unregister and "WARN_IMUF(" in unregister and "warned = true;" in unregister,
+            "a long unregister wait is reported once")
+    require("return motionHookRegister(sImuHook, fn, ctx," in extract_block(owner, "bool imuSampleHookRegister("),
             "register takes the one slot")
+    # A hold that overtakes a queued closeimu is honoured by the queue worker.
+    controller = (COMPONENT / "System_I2C.cpp").read_text()
+    stop = extract_block(controller, "static void applySensorStop(")
+    held = stop.index("if (sensor == I2C_DEVICE_IMU && imuHolderCount() > 0)")
+    require(held < stop.index("sensorStartOutstanding(slot).exchange(false)"),
+            "a held IMU's queued stop is dropped before anything is changed")
     # A build without the IMU has the same API, answering no.
     header = (COMPONENT / "HAL_Motion.h").read_text()
     disabled = header[header.index("\n#else\n"):]

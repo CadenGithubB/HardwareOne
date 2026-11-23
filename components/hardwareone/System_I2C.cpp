@@ -882,6 +882,16 @@ static bool sensorStopHasWork(I2cDeviceType sensor, uint8_t n) {
   return false;
 }
 
+bool i2cSensorStopHasWork(I2cDeviceType sensor, uint8_t n) { return sensorStopHasWork(sensor, n); }
+
+bool i2cSensorStopPending(I2cDeviceType sensor, uint8_t n) {
+  // As requestSensorStop(): with the bus disabled nothing is queued, and the
+  // manager is not allocated to find that out.
+  if (!gI2cBusRunning) return false;
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
+  return mgr && mgr->hasPendingDeviceStop(sensor, n);
+}
+
 // Command wrapper for a queued stop: the one place that renders its outcome.
 // A sensor that is not running (the bus disabled at boot, or nothing open,
 // starting or queued) answers an Error naming the command that starts it.
@@ -3070,6 +3080,15 @@ static bool& sensorStopAwaitingCleanup(uint8_t slot) {
 static void applySensorStop(I2cDeviceType sensor, uint8_t n) {
   const uint8_t slot = i2cSlot(sensor, n);
   if (slot == kI2cNoSlot) return;
+#if ENABLE_IMU_SENSOR
+  // 'closeimu' refuses while a consumer holds the IMU, but it looks when it
+  // is issued: a hold taken after this stop was queued is honoured here, and
+  // the stop is dropped with the IMU (and a start on its way) untouched.
+  if (sensor == I2C_DEVICE_IMU && imuHolderCount() > 0) {
+    BROADCAST_PRINTF("[IMU] Close dropped: the IMU is in use now and stays open ('imustatus' names what uses it).");
+    return;
+  }
+#endif
   // Only a sensor that was running, still has a task, was initialized without
   // one (FM tune/boot, RTC), or had an admitted start this stop cancels gets a
   // cleanup latch and a stop event. Stopping an idle sensor publishes nothing.

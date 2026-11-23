@@ -57,6 +57,9 @@ static std::array<bool, I2C_DEVICE_COUNT> startResult, runningAfterStart;
 static bool& gThermalRunning = running[I2C_DEVICE_THERMAL];
 static bool& gTofRunning = running[I2C_DEVICE_TOF];
 static bool& gImuRunning = running[I2C_DEVICE_IMU];
+// HAL_Motion.h: how many consumers hold the IMU open (the IMU input device).
+static uint8_t imuHolders;
+static uint8_t imuHolderCount() { return imuHolders; }
 static bool& gInputRunning = running[I2C_DEVICE_INPUT];
 static bool& gGpsRunning = running[I2C_DEVICE_GPS];
 static bool& gFmRadioRunning = running[I2C_DEVICE_FMRADIO];
@@ -303,6 +306,7 @@ struct Fixture {
     probeResult = probeAddress = probeBus = 0;
     afterUnlock = duringDelay = duringInit = duringProbe = {};
     statuses.clear(); broadcasts.clear(); events.clear(); logs.clear(); meshStatuses.clear(); graceResets.clear();
+    imuHolders = 0;
   }
   ~Fixture() { assert(!mutex.held && takes == gives && pauseCalls == resumeCalls); I2cDeviceManager::instance = nullptr; }
   std::string open(I2cDeviceType sensor = I2C_DEVICE_GPS, const char* hint = "test hint") {
@@ -491,6 +495,39 @@ static void cleanupCases() {
     else assert((meshStatuses == std::vector<std::pair<int, bool>>{{index, false}, {index, true}}));
 #endif
   }
+  // A consumer took a hold on the IMU after `closeimu` queued its stop (the
+  // command looks for holders when it is issued): the worker drops the stop.
+  // The IMU keeps running, nothing is published, and a line says why.
+  { Fixture f; const auto sensor = I2C_DEVICE_IMU;
+    running[sensor] = true; handles[sensor] = &f;
+    assert(requestSensorStop(sensor));
+    imuHolders = 1;  // the hold arrives before the worker applies the stop
+    f.worker(); f.worker();
+    assert(running[sensor] && stopTimes[sensor] == 0 && !sSensorStopAwaitingCleanup[sensor]);
+    assert(events.empty() && statuses.empty() && meshStatuses.empty());
+    assert(broadcasts.size() == 1 && contains(broadcasts[0], "[IMU] Close dropped: the IMU is in use now"));
+    assert(!f.manager.hasPendingDeviceStop(sensor));
+    // The same for a start on its way: it is not cancelled either.
+    imuHolders = 0; broadcasts.clear();
+    assert(requestSensorStop(sensor)); f.worker();
+    assert(!running[sensor] && stopTimes[sensor] == now && sSensorStopAwaitingCleanup[sensor] && broadcasts.empty());
+    handles[sensor] = nullptr; }
+  // A start that was queued before that close is cancelled by it as before
+  // (a pending stop skips the start); the dropped stop publishes no stop, and
+  // the holder's own start (it starts the IMU itself) opens the IMU.
+  { Fixture f; const auto sensor = I2C_DEVICE_IMU;
+    assert(enqueueDeviceStart(sensor)); assert(requestSensorStop(sensor));
+    imuHolders = 1;
+    f.worker(); f.worker();
+    assert(starts[sensor] == 0 && !running[sensor] && eventCount(SYSEVT_SENSOR_STOPPED) == 0);
+    assert(!f.manager.hasPendingDeviceStop(sensor) && contains(broadcasts.back(), "Close dropped"));
+    assert(enqueueDeviceStart(sensor)); f.worker();
+    assert(starts[sensor] == 1 && running[sensor] && eventCount(SYSEVT_SENSOR_STARTED) == 1); }
+  // Only the IMU has holders: another sensor's stop goes through whatever they hold.
+  { Fixture f; imuHolders = 1;
+    running[I2C_DEVICE_GPS] = true; handles[I2C_DEVICE_GPS] = &f;
+    assert(requestSensorStop(I2C_DEVICE_GPS)); f.worker();
+    assert(!running[I2C_DEVICE_GPS] && broadcasts.empty()); handles[I2C_DEVICE_GPS] = nullptr; }
   // The bus-running flag is fixed at boot. With the bus disabled a stop is
   // refused like a start: nothing is queued and no manager is allocated.
   { Fixture f; gI2cBusRunning = false;

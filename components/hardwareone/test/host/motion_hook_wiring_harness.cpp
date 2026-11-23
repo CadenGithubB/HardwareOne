@@ -36,6 +36,11 @@ static bool gHaveBuffer = true;
 static char gBuffer[1024];
 static bool ensureDebugBuffer() { return gHaveBuffer; }
 static char* getDebugBuffer() { return gBuffer; }
+// System_I2C.h: what the stop queue knows about the IMU.
+static bool gStopHasWork = true;   // it runs, has a task or a start on its way
+static bool gStopPending = false;  // a closeimu is queued and not applied yet
+static bool i2cSensorStopHasWork(I2cDeviceType type) { assert(type == I2C_DEVICE_IMU); return gStopHasWork; }
+static bool i2cSensorStopPending(I2cDeviceType type) { assert(type == I2C_DEVICE_IMU); return gStopPending; }
 static unsigned gStops = 0;
 static const char* cmd_sensorstop_queued(I2cDeviceType type, const char* name) {
   assert(type == I2C_DEVICE_IMU && std::string(name) == "IMU");
@@ -96,6 +101,27 @@ int main() {
   check(std::string(cmd_imustop(String("2"))) == gArgError, "the argument check comes first while held");
   gArgError = nullptr;
   check(imuRelease("input"), "released");
+
+  // A held IMU that stopped by itself (auto-disable after bus failures): it
+  // is not "in use and open". closeimu is not refused; it goes on to the stop
+  // command, which answers for a sensor that is not running and cancels a
+  // waiting automatic restart.
+  check(imuHold("input"), "held");
+  gStopHasWork = false;
+  const unsigned stopsBefore = gStops;
+  check(std::string(cmd_imustop(none)).rfind("[IMU] Stop requested", 0) == 0 && gStops == stopsBefore + 1,
+        "closeimu of a held IMU that already stopped reaches the stop command");
+  gStopHasWork = true;
+  check(std::string(cmd_imustop(none)).rfind("Error: The IMU is in use by input", 0) == 0 && gStops == stopsBefore + 1,
+        "open again: refused again");
+  check(imuRelease("input"), "released");
+
+  // A closeimu that is already queued was accepted before the hold: the hold
+  // is refused while it is on its way, and taken once the IMU has closed.
+  gStopPending = true;
+  check(!imuHold("input") && imuHolderCount() == 0, "no hold while a close is on its way");
+  gStopPending = false;
+  check(imuHold("input") && imuHolderCount() == 1 && imuRelease("input"), "held once the close is done");
 
   // The list was only ever touched inside its critical section, which is
   // left again: every call above entered it at least once.

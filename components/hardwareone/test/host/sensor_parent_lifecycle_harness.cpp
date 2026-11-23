@@ -29,6 +29,7 @@ struct Scenario {
   bool bus = true, transaction = true, ping = true, defaultBegin = true;
   unsigned failAllocationAt = 0, allocationAttempts = 0, beginIndex = 0, taskExits = 0;
   unsigned resets = 0, pinConfigs = 0, encoderZeroes = 0, backendStops = 0, rebinds = 0, flagReads = 0;
+  unsigned hookStops = 0, backendStopsAtHookStop = 0;
   bool addressTaken = false;     // another device of the build holds the ANO's address
   uint8_t resolvedBus = 255, transactionBus = 255;
   unsigned long now = 10000;
@@ -104,6 +105,8 @@ static bool beginResult(void* object) {
 }
 // The IMU's backend (HAL_MotionBackend.h): no object, only a release.
 static void motionBackendStop() { ++scenario.backendStops; }
+// The per-sample hook's last call of a run (HAL_Motion.cpp: stopped).
+static void imuHookStopped() { ++scenario.hookStops; scenario.backendStopsAtHookStop = scenario.backendStops; }
 // HAL_Motion: the IMU forgets the bus and address it was opened at.
 static void imuCloseTarget() {}
 class Adafruit_APDS9960 {
@@ -307,6 +310,8 @@ static void testFreedFailureParents() {
   check(!gImuConnected && !sImuCache.imuDataValid && sImuCache.imuSeq == 0 && scenario.backendStops == 1 &&
         !gImuInitRequested && !gImuInitDone && !gImuInitResult && scenario.taskExits == 1,
         "actual IMU task shutdown releases the backend once and resets cache/init flags");
+  check(scenario.hookStops == 1 && scenario.backendStopsAtHookStop == 1,
+        "the IMU task's shutdown tells the per-sample hook once (stopped), after the backend is released");
 
   resetScenario(); scenario.defaultBegin = false;
   check(!apdsInit() && !gAPDS9960 && stats["apds.obj"].frees == 1, "APDS begin failure frees and nulls parent");
