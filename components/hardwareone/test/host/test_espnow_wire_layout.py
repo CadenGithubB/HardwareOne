@@ -69,6 +69,7 @@ GOLDEN = {
                                 ('freeHeap', 8), ('deviceName', 12)]),
     'V4PayloadPairBeacon': (36, [('role', 0), ('flags', 1), ('reserved', 2), ('deviceName', 4)]),
     'V4PayloadPairCtrl': (40, [('targetMac', 0), ('role', 6), ('reserved', 7), ('deviceName', 8)]),
+    'V4PayloadPairRequest': (72, [('ctrl', 0), ('senderPub', 40)]),
     'V4PayloadTimeSync': (16, [('epochMs', 0), ('source', 8), ('flags', 9), ('sinceSetMin', 10), ('reserved', 12)]),
     'V4PayloadTopoReq': (8, [('reqId', 0), ('reserved', 4)]),
     'V4PayloadAnswerHeader': (5, [('reqId', 0), ('status', 4)]),

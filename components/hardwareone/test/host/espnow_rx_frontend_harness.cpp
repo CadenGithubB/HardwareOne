@@ -234,6 +234,16 @@ static uint16_t gUnknownSessionLastId = 0;
   return true;
 }
 
+// The revoked list (System_ESPNow_Revoked.h): the MACs a case revokes.
+static uint8_t gRevokedMacs[4][6];
+static unsigned gRevokedCount = 0;
+[[maybe_unused]] static bool espnowRevokedMac(const uint8_t* mac) {
+  for (unsigned i = 0; i < gRevokedCount; i++)
+    if (mac && std::memcmp(gRevokedMacs[i], mac, 6) == 0) return true;
+  return false;
+}
+static void revoke(const uint8_t* mac) { std::memcpy(gRevokedMacs[gRevokedCount++], mac, 6); }
+
 // ---- Radio, ACK bookkeeping, route table and reassembler doubles ------------
 static unsigned gAcksSent = 0, gFragAcksSent = 0, gFanouts = 0, gCleanups = 0, gRelayForwards = 0;
 static bool v4_send_ack(const uint8_t*, uint32_t) { ++gAcksSent; return true; }
@@ -407,6 +417,7 @@ static void reset(bool keyed) {
   gUnwrapCalls = gReplayRejects = gRegistrySaves = 0;
   gUnknownSessionAsks = 0;
   gUnknownSessionLastId = 0;
+  gRevokedCount = 0;
   gEspNowRxUnknownMeshIdDrops = 0;
   gLastWarn.clear();
   gEspNowInRelayDelivery = false;
@@ -1338,6 +1349,69 @@ static void testRelayHopOpcodeRule() {
         gRelayMetrics.routedDelivered == 1);
 }
 
+// ESP-NOW 1.0 step 3 (revocation): a frame from a revoked radio source is
+// dropped at gate 1 (no handler, no ACK, not opened, not relayed); a frame a
+// member relays whose proven origin is revoked is dropped at gate 2, before
+// dedup and the flood relay; nothing is routed from or to a revoked device;
+// a revoked MAC gets no health slot.
+static void testRevokedDrops() {
+#ifdef HW1_REVOKED_GATES
+  reset(true);
+  revoke(gPeerB);
+  uint32_t drops = gEspNowRxRevokedDrops;
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_TEXT, gPeerB, 900, text("hi")));
+  check("gate 1: a sealed frame from a revoked source is dropped: no handler, no ACK, not opened, counted",
+        gCalls.empty() && gAcksSent == 0 && gUnwrapCalls == 0 && gEspNowRxRevokedDrops == drops + 1);
+  reset(true);
+  revoke(gRelayR);
+  drops = gEspNowRxRevokedDrops;
+  deliver(gRelayR, groupFrame(ESPNOW_V4_TYPE_TEXT, gRelayR, 901, text("flood me"), 3));
+  check("gate 1: a group-tagged broadcast from a revoked source is not dispatched and not flooded on",
+        calls("v4h_text") == 0 && gRelayMetrics.floodForwards == 0 && gFanouts == 0 &&
+        gEspNowRxRevokedDrops == drops + 1);
+  reset(true);
+  revoke(gFar);
+  drops = gEspNowRxRevokedDrops;
+  deliver(gRelayR, groupFrame(ESPNOW_V4_TYPE_TEXT, gFar, 902, text("relayed"), 3));
+  check("gate 2: a broadcast a member relays from a revoked origin is dropped before the flood relay",
+        calls("v4h_text") == 0 && gRelayMetrics.floodForwards == 0 && gFanouts == 0 &&
+        gEspNowRxRevokedDrops == drops + 1);
+  reset(true);
+  deliver(gRelayR, groupFrame(ESPNOW_V4_TYPE_TEXT, gFar, 903, text("relayed"), 3));
+  check("gate 2: the same broadcast from an origin that is not revoked is shown and flooded on (preserved)",
+        calls("v4h_text") == 1 && gFanouts >= 1);
+  reset(true);
+  revoke(gPeerB);
+  {
+    const Frame inner = sealedFrame(gSessB, ESPNOW_V4_TYPE_TIME_SYNC, gPeerB, 904, Frame(16, 0x5A));
+    drops = gEspNowRxRevokedDrops;
+    deliver(gRelayR, envelope(gRelayR, inner, 904));
+    check("a routed frame whose inner origin is revoked is not delivered",
+          calls("v4hTimeSync") == 0 && gEspNowRxRevokedDrops == drops + 1);
+  }
+  reset(true);
+  revoke(gFar);
+  {
+    const Frame inner = sealedFrame(gSessB, ESPNOW_V4_TYPE_TIME_SYNC, gPeerB, 905, Frame(16, 0x5A));
+    V4PayloadRelayData env{};
+    std::memcpy(env.finalDst, gFar, 6);
+    env.hopsUsed = 1;
+    Frame body(sizeof env + inner.size());
+    std::memcpy(body.data(), &env, sizeof env);
+    std::memcpy(body.data() + sizeof env, inner.data(), inner.size());
+    gRouteNext = gRelayR2;
+    deliver(gRelayR, groupFrame(ESPNOW_V4_TYPE_RELAY_DATA, gRelayR, 905, body, 2));
+    check("a relay carries no envelope to a revoked final destination", gRelayForwards == 0);
+  }
+  reset(true);
+  revoke(gFar);
+  check("a revoked MAC gets no health slot and no metadata slot",
+        getMeshPeerHealth(gFar, true) == nullptr && getMeshPeerMeta(gFar, true) == nullptr);
+#else
+  check("the tree has the revoked-list receive gates (gEspNowRxRevokedDrops)", false);
+#endif
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IOLBF, 0);  // keep the case lines if a pre-fix tree aborts
   testMeshIdGate();
@@ -1358,6 +1432,7 @@ int main() {
   testUnknownSessionAsksForHint();
   testMustUnderstandFlags();
   testRelayHopOpcodeRule();
+  testRevokedDrops();
   std::printf("espnow_rx_frontend: %u failure%s\n", gFailures, gFailures == 1 ? "" : "s");
   return gFailures ? 1 : 0;
 }

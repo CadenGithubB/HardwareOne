@@ -171,7 +171,10 @@ def main():
               one(source, 'MeshPeerMeta* getMeshPeerMeta(const uint8_t mac[6], bool createIfMissing)')]
     if have_reclaim:
         slots.append(last(source, RECLAIM))
-    unpair = one(source, 'const char* cmd_espnow_unpair(')
+    # The unpair teardown (shared by espnowunpair and espnowrevoke), or the
+    # command itself on a tree before it.
+    unpair = one(source, 'static bool espnowUnpairTeardown(' if 'static bool espnowUnpairTeardown(' in source
+                 else 'const char* cmd_espnow_unpair(')
     if RELEASE in source:
         slots.append(one(source, RELEASE))
         release = 'static void releasePeerSlotsForTest(const uint8_t* mac) { meshPeerSlotsRelease(mac); }'
@@ -198,6 +201,10 @@ def main():
     must = re.search(r'^static uint32_t gEspNowRxMustUnderstandDrops = 0;', source, re.MULTILINE)
     if must:
         incoming = '#define HW1_MUST_UNDERSTAND 1\n' + must.group(0) + '\n\n' + incoming
+    # The revoked-list drop counter (1.0 step 3), where the tree has it.
+    revoked = re.search(r'^static uint32_t gEspNowRxRevokedDrops = 0;', source, re.MULTILINE)
+    if revoked:   # ahead of the relay handler, which counts too
+        relay.insert(0, '#define HW1_REVOKED_GATES 1\n' + revoked.group(0))
 
     # The mesh gate's counters and the function that counts and warns.
     counters_at = source.find('static uint32_t gEspNowRxUnknownMeshIdDrops')
@@ -261,7 +268,20 @@ def main():
     if 'sodium_memcmp(token, s->bondToken, 16)' not in token or re.search(r'(?<!sodium_)memcmp\(token', token):
         failures.append('validateBondSessionToken does not compare the bond token with sodium_memcmp')
     if 'meshPeerSlotsRelease(mac)' not in unpair:
-        failures.append('cmd_espnow_unpair does not release the peer slots through meshPeerSlotsRelease')
+        failures.append('the unpair teardown does not release the peer slots through meshPeerSlotsRelease')
+    # Revocation (1.0 step 3), the parts outside this harness: the SESSION_UNKNOWN
+    # hint goes to registry peers only, and the router takes no advert from, and
+    # installs no route to, a revoked device.
+    hint = extract_block(read('System_ESPNow_Sessions.cpp'), 'bool sessionUnknownFrameSeen(')
+    if 'espnowIsRegistryPeer(srcMac)' not in hint:
+        failures.append('sessionUnknownFrameSeen answers a sender that is not in the registry')
+    advert = extract_block(read('System_ESPNow_Router.cpp'), 'void meshRouterIngestAdvert(')
+    if advert.count('espnowRevokedMac(') != 2:
+        failures.append('meshRouterIngestAdvert does not refuse revoked advertisers and revoked destinations')
+    heartbeat = extract_block(source[source.rindex('bool v4_broadcast_heartbeat(uint16_t flags'):],
+                              'bool v4_broadcast_heartbeat(uint16_t flags')
+    if 'espnowRevokedMac(gMeshPeers[i].mac)' not in heartbeat:
+        failures.append('v4_broadcast_heartbeat may send a heartbeat to a revoked device')
     for line in failures:
         print(f'FAIL: {line}')
     if failures:

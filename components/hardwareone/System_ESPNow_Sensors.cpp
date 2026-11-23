@@ -1467,6 +1467,31 @@ void espnowApplySensorSubscription(uint8_t mode, uint32_t sensorMask,
                        mode, (unsigned long)sensorMask, intervalMs, leaseMs);
 }
 
+// Unpair / revoke of `mac`: the leases it holds as controller end now (a
+// stream switched on by hand goes on, to the named master), without a
+// SENSOR_STATUS to it. True when it was the controller.
+bool espnowSensorLeasesDropFor(const uint8_t mac[6]) {
+  if (!mac) return false;
+  bool dropped = false;
+  taskENTER_CRITICAL(&gSensorBcastTaskMux);
+  bool had = false;
+  for (int b = 0; b < 6; b++) {
+    if (gSensorControllerMac[b] != 0) { had = true; break; }
+  }
+  if (had && memcmp(gSensorControllerMac, mac, 6) == 0) {
+    for (int i = 0; i < REMOTE_SENSOR_MAX; i++) {
+      if (gSensorLeaseExpiresAt[i] == 0) continue;
+      gSensorLeaseExpiresAt[i] = 0;
+      gSensorReqIntervalMs[i]  = 0;
+      if (!espnowsensor::streamSurvivesLeaseEnd(gSensorByHand[i])) gSensorStreamingEnabled[i] = false;
+    }
+    memset(gSensorControllerMac, 0, sizeof(gSensorControllerMac));
+    dropped = true;
+  }
+  taskEXIT_CRITICAL(&gSensorBcastTaskMux);
+  return dropped;
+}
+
 // ==========================
 // Sensor Broadcast Control
 // ==========================

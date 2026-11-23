@@ -20,6 +20,8 @@
 #include <vector>
 #include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
 #include "System_ClockCore.h"  // production clock rules: is a time a real date (copied beside this unit)
+#include "System_ESPNow_RevokedCore.h"  // production rule A and keyId (vendored ArduinoJson on the path)
+#include <set>
 
 // ---- Production wire types: flags, header, KEY_EX payloads -------------------
 // INSERT_WIRE
@@ -112,7 +114,36 @@ static EspNowIdentity gSelf;
 static const uint8_t kSelfMac[6] = {0x02, 0, 0, 0, 0, 0x01};
 static const EspNowIdentity& espnowIdentityGet() { return gSelf; }
 static int espnowSelfStaMac(uint8_t out[6]) { std::memcpy(out, kSelfMac, 6); return 0; }
-static bool ensureUnencryptedPeer(const uint8_t*) { return true; }
+// The radio peer table: what ensureUnencryptedPeer added and esp_now_del_peer
+// removed (a refusal must not leave a lasting radio peer).
+static std::set<std::string> gRadioPeers;
+static unsigned gRadioAdds = 0, gRadioDels = 0;
+static std::string macKey(const uint8_t* m) { return std::string(reinterpret_cast<const char*>(m), 6); }
+static bool esp_now_is_peer_exist(const uint8_t* m) { return gRadioPeers.count(macKey(m)) != 0; }
+static int esp_now_del_peer(const uint8_t* m) { ++gRadioDels; gRadioPeers.erase(macKey(m)); return 0; }
+static bool ensureUnencryptedPeer(const uint8_t* m) {
+  if (gRadioPeers.insert(macKey(m)).second) ++gRadioAdds;
+  return true;
+}
+static bool logCooldownOk(uint32_t& lastMs, uint32_t windowMs) {
+  if (lastMs != 0 && (uint32_t)(millis() - lastMs) < windowMs) return false;
+  lastMs = millis() ? millis() : 1;
+  return true;
+}
+
+// Rule A's inputs (production: espnowKeyExAdmit in System_ESPNow.cpp gathers
+// them from the registry, the identity cache and the revoked list; the rule
+// itself is the production espnowrevoke::admit). By default every MAC is a
+// registry entry inside its first-key window; a case takes MACs out, closes
+// the window, revokes a MAC or a key, or locks the list.
+static std::set<std::string> gNotInRegistry, gRevokedMacs, gRevokedKeys;
+static bool gFirstKeyWindow = true, gListLocked = false;
+static unsigned gBound = 0, gRollbacks = 0;
+struct PeerIdentity;
+static const PeerIdentity* peerIdentityFindByMac(const uint8_t mac[6]);
+static espnowrevoke::Admit espnowKeyExAdmit(const uint8_t mac[6], const uint8_t pub[32]);
+static void espnowFirstKeyBound(const uint8_t*) { ++gBound; }
+static void espnowPairRollbackRevoked(const uint8_t*) { ++gRollbacks; }
 
 struct Sent { uint8_t dst[6]; uint8_t type; std::vector<uint8_t> payload; };
 static std::vector<Sent> gOutbox;
@@ -151,6 +182,18 @@ static bool espnowSessionOpenInitiate(const uint8_t*, const char*, bool* = nullp
 
 // ---- Production: Identity.cpp peer cache + peerIdentityPersist ---------------
 // INSERT_IDENTITY
+
+static espnowrevoke::Admit espnowKeyExAdmit(const uint8_t mac[6], const uint8_t pub[32]) {
+  espnowrevoke::AdmitInputs in = {};
+  in.revoked = gRevokedMacs.count(macKey(mac)) || gRevokedKeys.count(std::string(reinterpret_cast<const char*>(pub), 32));
+  in.inRegistry = !gNotInRegistry.count(macKey(mac));
+  const PeerIdentity* id = peerIdentityFindByMac(mac);
+  in.hasIdentity = id != nullptr;
+  in.sameKey = id && std::memcmp(id->longTermPub, pub, 32) == 0;
+  in.listLocked = gListLocked;
+  in.firstKeyOpen = gFirstKeyWindow;
+  return espnowrevoke::admit(in);
+}
 
 // ---- Production: Handlers_Crypto.cpp KEY_EX_HELLO path -------------------------
 // INSERT_KEYEX
@@ -263,6 +306,14 @@ static void reset() {
   gEvents = 0;
   gAcceptClears = 0;
   for (auto& k : gKeyExInFlight) k = KeyExInFlight{};
+  gRadioPeers.clear();
+  gRadioAdds = gRadioDels = 0;
+  gNotInRegistry.clear();
+  gRevokedMacs.clear();
+  gRevokedKeys.clear();
+  gFirstKeyWindow = true;
+  gListLocked = false;
+  gBound = gRollbacks = 0;
   gNowMs += 100000;
   gNowSec += 100000;
 }
@@ -470,6 +521,102 @@ int main() {
   replyFrom(b);
   check(storedKeyIs(b, 0xB7) && confirms() == confirmsBefore + 1,
         "K13 a new key exchange after the unpair is stored and confirmed as usual");
+
+  // ---- ESP-NOW 1.0 step 3, rule A and the revoked list --------------------------
+  auto lastConfirmStatus = []() -> int {
+    for (auto it = gOutbox.rbegin(); it != gOutbox.rend(); ++it)
+      if (it->type == ESPNOW_V4_TYPE_KEY_EX_CONFIRM)
+        return reinterpret_cast<const V4PayloadKeyExConfirm*>(it->payload.data())->status;
+    return -1;
+  };
+  auto logged = [](const char* part) {
+    for (const auto& l : gLog)
+      if (l.find(part) != std::string::npos) return true;
+    return false;
+  };
+
+  // K14 — a HELLO from a MAC with no registry entry stores nothing, is
+  // answered "not accepted" (status 3) and leaves no radio peer.
+  reset();
+  const Peer r = peer(9, 0xC9);
+  gNotInRegistry.insert(macKey(r.mac));
+  hello(r);
+  check(gWrites == 0 && peerIdentityFindByMac(r.mac) == nullptr && replies() == 0,
+        "K14 a HELLO from a non-registry MAC stores nothing and gets no REPLY (FAILS ON BASE: stored)");
+  check(confirms() == 1 && lastConfirmStatus() == espnowrevoke::kConfirmNotAccepted,
+        "K14 it is answered KEY_EX_CONFIRM status 3 (not accepted)");
+  check(!esp_now_is_peer_exist(r.mac) && gRadioAdds == 1 && gRadioDels == 1,
+        "K14 the radio peer for the answer is added, used and deleted: none is left (FAILS ON BASE: one stays)");
+  gRadioPeers.insert(macKey(r.mac));   // a radio peer that was there before
+  gNowMs += kLimitMs;
+  hello(r);
+  check(esp_now_is_peer_exist(r.mac) && gRadioDels == 1, "K14 a radio peer that was there before is left alone");
+  gNowMs += 100;
+  hello(r);
+  check(confirms() == 2, "K14 the refusal is rate-limited like any HELLO (one per MAC per second)");
+
+  // K15 — a revoked key is refused under any MAC: nothing stored, no answer
+  // at all (G3), and a pairsecure entry waiting for it is rolled back.
+  reset();
+  const Peer rk = peer(10, 0xD1);
+  gRevokedKeys.insert(std::string(reinterpret_cast<const char*>(rk.pub), 32));
+  hello(rk);
+  const Peer rkOther = peer(11, 0xD1);   // the same key from another MAC
+  gNowMs += kLimitMs;
+  hello(rkOther);
+  check(gWrites == 0 && gOutbox.empty() && peerIdentityFindByMac(rk.mac) == nullptr &&
+            peerIdentityFindByMac(rkOther.mac) == nullptr,
+        "K15 a revoked key is refused under any MAC: nothing stored, nothing sent (FAILS ON BASE)");
+  check(gRollbacks == 2 && gRadioAdds == 0, "K15 the waiting pairsecure entry is rolled back; no radio peer is added");
+  check(logged("revoked here"), "K15 the drop is logged");
+
+  // K16 — a revoked MAC with a key that is not listed: the same.
+  reset();
+  const Peer rm = peer(12, 0xE1);
+  gRevokedMacs.insert(macKey(rm.mac));
+  hello(rm);
+  check(gWrites == 0 && gOutbox.empty(), "K16 a revoked MAC is refused whatever key it presents");
+
+  // K17 — the first-key window (E31): closed, nothing is stored; open, the key
+  // is stored, its keyId logged and the window closed.
+  reset();
+  const Peer w = peer(13, 0xAB);
+  gFirstKeyWindow = false;
+  hello(w);
+  check(gWrites == 0 && lastConfirmStatus() == espnowrevoke::kConfirmNotAccepted,
+        "K17 a registry entry whose first-key window is over stores no first key (status 3)");
+  gFirstKeyWindow = true;
+  gNowMs += kLimitMs;
+  hello(w);
+  check(gWrites == 1 && storedKeyIs(w, 0xAB) && gBound == 1 && logged("keyId abababababababab"),
+        "K17 inside the window the first key is stored, its keyId logged and the window closed");
+  gFirstKeyWindow = false;
+  gNowMs += kLimitMs;
+  hello(w);
+  check(replies() == 2, "K17 a key already stored is answered after the window (no window needed)");
+
+  // K18 — a REPLY from a MAC with no registry entry stores nothing either.
+  reset();
+  const Peer rr = peer(14, 0x77);
+  gNotInRegistry.insert(macKey(rr.mac));
+  keyExInFlightArm(rr.mac, 0, false);
+  replyFrom(rr);
+  check(gWrites == 0 && peerIdentityFindByMac(rr.mac) == nullptr &&
+            lastConfirmStatus() == espnowrevoke::kConfirmNotAccepted && !esp_now_is_peer_exist(rr.mac),
+        "K18 a REPLY from a non-registry MAC: nothing stored, status 3, no radio peer left");
+  reset();
+  gRevokedKeys.insert(std::string(reinterpret_cast<const char*>(rr.pub), 32));
+  keyExInFlightArm(rr.mac, 0, false);
+  replyFrom(rr);
+  check(gWrites == 0 && gOutbox.empty() && gRollbacks == 1,
+        "K18 a REPLY with a revoked key: nothing stored or sent; the pairing is rolled back");
+
+  // K19 — fail closed: while revoked.json cannot be read no new key is stored.
+  reset();
+  gListLocked = true;
+  hello(a);
+  check(gWrites == 0 && lastConfirmStatus() == espnowrevoke::kConfirmNotAccepted,
+        "K19 a locked revoked list refuses a first key");
 
   std::printf("%u failure(s)\n", gFailures);
   return gFailures ? 1 : 0;

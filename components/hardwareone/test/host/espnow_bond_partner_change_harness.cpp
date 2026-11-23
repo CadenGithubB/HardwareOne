@@ -519,6 +519,15 @@ struct Auth {};
   std::snprintf(out, outLen, "Removed: crypto identity.");
 }
 [[maybe_unused]] static void meshPeerSlotsRelease(const uint8_t*) { step("slotsRelease"); }
+// The unpair teardown's other stores (1.0 step 3; test_espnow_peer_files.py
+// checks that the teardown clears each of them).
+[[maybe_unused]] static bool espnowIsRegistryPeer(const uint8_t*) { return true; }
+[[maybe_unused]] static void espnowUnpairClearPairing(const uint8_t*) { step("clearPairing"); }
+struct PeerIdentity;
+[[maybe_unused]] static bool espnowUnpairClearPins(const uint8_t*, const PeerIdentity*) { step("clearPins"); return false; }
+[[maybe_unused]] static bool espnowSensorLeasesDropFor(const uint8_t*) { step("leasesDrop"); return false; }
+[[maybe_unused]] static bool isSelfMac(const uint8_t*) { return false; }
+[[maybe_unused]] static bool peerIdentityFileStored(const uint8_t*) { return false; }
 [[maybe_unused]] static bool saveEspNowDevices() { return true; }
 
 // ---- Doubles for the bond parts of processMeshHeartbeats ------------------------

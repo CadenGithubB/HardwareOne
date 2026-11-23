@@ -221,6 +221,11 @@ struct EspNowDevice {
   // Which of gSettings.meshes[] this peer belongs to.
   // The header's mesh id on frames to this peer comes from this slot.
   uint8_t meshId;
+  // espnowpairsecure's first-key window (E31): millis() deadline until which
+  // a key exchange may store this peer's FIRST key; 0 = none. Stored as
+  // awaitingKeyUntilEpochMs while the clock is set
+  // (System_ESPNow_RevokedCore.h, firstKeyFromStored).
+  uint32_t awaitingKeyUntilMs;
 };
 
 // ==========================
@@ -1112,6 +1117,9 @@ const char* checkEspNowFirstTimeSetup();
 // Device management
 String getEspNowDeviceName(const uint8_t* mac);
 void removeEspNowDevice(const uint8_t* mac);
+// True when the MAC has a device-registry entry (this device's own included).
+// Any task (a scan of at most 16 records).
+bool espnowIsRegistryPeer(const uint8_t mac[6]);
 // Note: addEspNowDevice is now static (internal) in espnow_system.cpp
 
 // Command functions
@@ -1122,6 +1130,9 @@ const char* cmd_espnow_resetstats(const String& argsInput);
 const char* cmd_espnow_init(const String& argsInput);
 const char* cmd_espnow_deinit(const String& argsInput);  // stop ESP-NOW (used by radiopower off)
 const char* cmd_espnow_unpair(const String& argsInput);
+const char* cmd_espnow_revoke(const String& argsInput);
+const char* cmd_espnow_unrevoke(const String& argsInput);
+const char* cmd_espnow_revoked(const String& argsInput);
 const char* cmd_espnow_list(const String& argsInput);
 const char* cmd_espnow_meshstatus(const String& argsInput);
 const char* cmd_espnow_send(const String& argsInput);

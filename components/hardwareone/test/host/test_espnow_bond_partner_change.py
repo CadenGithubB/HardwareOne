@@ -87,6 +87,7 @@ EPOCH = ('static uint32_t bondHoldEpoch()', 'static bool bondTickHeld(uint32_t e
 END = 'static void bondEndPartnership()'
 FILE_JOB = 'static void runDeferredBondFileSend(void* arg)'
 UNPAIR = 'const char* cmd_espnow_unpair(const String& argsInput)'
+TEARDOWN = 'static bool espnowUnpairTeardown(const uint8_t mac[6], UnpairOutcome& out)'
 TICK_CONSTANTS = (r'^static const uint32_t BOND_HEARTBEAT_INTERVAL_MS = \d+;',
                   r'^static const uint32_t BOND_HEARTBEAT_TIMEOUT_MS = \d+;',
                   r'^static const uint32_t BOND_SYNC_RETRY_MS = \d+;')
@@ -228,6 +229,11 @@ def assemble(a):
     if have_kick:
         pieces.append(definition(source, KICK, 'System_ESPNow.cpp'))
     pieces += [definition(source, m, 'System_ESPNow.cpp') for m in COMMANDS]
+    # The unpair teardown espnowunpair and espnowrevoke share (1.0 step 3).
+    if TEARDOWN in source:
+        pieces.append('#define HW1_HAVE_TEARDOWN 1')
+        pieces.append(definition(source, 'struct UnpairOutcome', 'System_ESPNow.cpp') + ';')
+        pieces.append(definition(source, TEARDOWN, 'System_ESPNow.cpp'))
     pieces.append(definition(source, UNPAIR, 'System_ESPNow.cpp'))
     pieces.append(definition(source, FILE_JOB, 'System_ESPNow.cpp'))
     if have_setting_helper:

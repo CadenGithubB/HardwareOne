@@ -88,7 +88,8 @@ void espnowIdentityFormatPubHex(const uint8_t pub[32], char* out, size_t outLen)
 //
 // In-memory cache: gPeerIdentities[N] (PSRAM, parallel to gEspNow->devices[16]).
 // Looked up by MAC. Loaded at boot from disk. Updated when KEY_EX completes
-// successfully (3.3); cleared by espnowforget.
+// successfully (3.3); cleared by espnowunpair / espnowrevoke (and the boot
+// check for a MAC with no registry entry).
 // ============================================================================
 
 struct PeerIdentity {
@@ -137,8 +138,8 @@ struct PeerFilesRemoved {
 // Everything this device stored about a peer: forgets its identity
 // (peerIdentityForget), then removes every other file under
 // /system/espnow/peers/<MAC>/ (the bond caches settings.json and schema.json,
-// the manifest reference) and the folder. Used by espnowunpair; espnowforget
-// only forgets the identity. Files received from the peer (/espnow/received/)
+// the manifest reference) and the folder. Used by espnowunpair and
+// espnowrevoke. Files received from the peer (/espnow/received/)
 // are the user's and are not touched. Returns false when the folder stays.
 bool peerFilesRemove(const uint8_t mac[6], PeerFilesRemoved& out);
 

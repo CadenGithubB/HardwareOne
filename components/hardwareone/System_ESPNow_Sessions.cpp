@@ -1141,10 +1141,11 @@ bool sessionUnknownFrameSeen(const uint8_t srcMac[6], const struct EspNowV4Heade
   UnknownSessionReply reply = UnknownSessionReply::RateLimited;
   {
     EspNowTxGuard g("sessUnknownRx");
-    // Only a peer whose identity this device holds is answered: it is the
-    // only kind that can hold a session with us, and nobody else can make
-    // this device transmit by sending sealed-looking frames.
-    if (!peerIdentityFindByMac(srcMac)) return false;
+    // Only a registry peer whose identity this device holds is answered: it
+    // is the only kind that can hold a session with us, and nobody else can
+    // make this device transmit by sending sealed-looking frames (an unpaired
+    // or revoked device gets no hint).
+    if (!espnowIsRegistryPeer(srcMac) || !peerIdentityFindByMac(srcMac)) return false;
     if (!ensurePeerRestartAllocated()) return false;
     // Id 0 is never a session (sessionFindBySessionId never matches it).
     const SessionState* s = sessionForPeer(srcMac);

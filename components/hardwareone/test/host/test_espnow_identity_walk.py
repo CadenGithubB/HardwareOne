@@ -10,7 +10,7 @@ path that will not open as a directory does not; folders without an
 identity.json (empty, only identity.tmp, name not an address) are skipped; an
 identity.json that stays out of the cache (unreadable, another address inside,
 a 17th when the 16 slots are full) leaves the cache marked incomplete with a
-warning naming the address and espnowforget, while the readable ones still
+warning naming the address and espnowunpair, while the readable ones still
 load; peerIdentityForget removes the files, the folder and the cache slot and
 marks the cache incomplete when the file stays; the next walk recomputes the
 mark.

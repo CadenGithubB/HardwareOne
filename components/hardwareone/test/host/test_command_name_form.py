@@ -56,6 +56,7 @@ REMOVED_NAMES: dict[str, str] = {
     "debugespnow": "debugespnowcore",
     "eienable": "eiautostart",
     "espnowenabled": "espnowautostart",
+    "espnowforget": "espnowunpair",
     "espnowpair": "espnowpairsecure",
     "espnowread": "espnowstatus",
     "fmradioenabled": "fmradioautostart",

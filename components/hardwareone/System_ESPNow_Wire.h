@@ -249,7 +249,7 @@ enum EspNowV4Type : uint8_t {
                                         //   ALWAYS (never relayed — it describes the sender's own view,
                                         //   so forwarding it would attribute someone else's routes to us).
   // Discover-then-confirm pairing control (BROADCAST_AUTH FF broadcast + V4PayloadPairCtrl.targetMac).
-  ESPNOW_V4_TYPE_PAIR_REQUEST    = 40,  // initiator → target: "I want to pair" (payload carries requester name)
+  ESPNOW_V4_TYPE_PAIR_REQUEST    = 40,  // initiator → target: "I want to pair" (requester name and key)
   ESPNOW_V4_TYPE_PAIR_ACCEPT     = 41,  // target → initiator: user accepted; both sides now run pairsecure
   ESPNOW_V4_TYPE_PAIR_REJECT     = 42,  // target → initiator: user rejected / not in discovery mode
 
@@ -591,6 +591,18 @@ static_assert(offsetof(V4PayloadPairCtrl, targetMac) == 0 && offsetof(V4PayloadP
               offsetof(V4PayloadPairCtrl, reserved) == 7 && offsetof(V4PayloadPairCtrl, deviceName) == 8,
               "V4PayloadPairCtrl layout");
 static_assert(sizeof(V4PayloadPairCtrl::deviceName) == devicename::kFieldLen, "V4PayloadPairCtrl name field");
+
+// PAIR_REQUEST (40): the control frame plus the requester's long-term Ed25519
+// key (1.0), so a request from a revoked key is refused whatever MAC it comes
+// from, and the accept prompt can show the keyId. Unauthenticated beyond the
+// group tag: the key exchange that follows an accept proves it.
+struct __attribute__((packed)) V4PayloadPairRequest {
+  V4PayloadPairCtrl ctrl;   // 0
+  uint8_t senderPub[32];    // 40 the requester's long-term key (keyId = its first 8 bytes)
+};
+static_assert(sizeof(V4PayloadPairRequest) == 72, "V4PayloadPairRequest must be 72 bytes");
+static_assert(offsetof(V4PayloadPairRequest, ctrl) == 0 && offsetof(V4PayloadPairRequest, senderPub) == 40,
+              "V4PayloadPairRequest layout");
 
 // TIME_SYNC (35): the mesh master's clock, sent to each paired device over
 // its session (System_ESPNow_TimeCore.h has the rules and the meaning of
@@ -1778,7 +1790,7 @@ static_assert(FILE_CANCEL_TIMEOUT == espnowanswer::kTimeout && FILE_CANCEL_WRITE
 #define ESPNOW_V4_MINLEN_CMD_RESP            5    // answer header {reqId, status}; text follows
 #define ESPNOW_V4_MINLEN_HEARTBEAT           44
 #define ESPNOW_V4_MINLEN_PAIR_BEACON         36
-#define ESPNOW_V4_MINLEN_PAIR_REQUEST        40
+#define ESPNOW_V4_MINLEN_PAIR_REQUEST        72   // control 40 + the requester key 32
 #define ESPNOW_V4_MINLEN_PAIR_ACCEPT         40
 #define ESPNOW_V4_MINLEN_PAIR_REJECT         40
 #define ESPNOW_V4_MINLEN_SENSOR_STATUS       16
@@ -1840,7 +1852,7 @@ static_assert(sizeof(V4PayloadSessionUnknown) == ESPNOW_V4_MINLEN_SESSION_UNKNOW
               sizeof(V4PayloadCmdRespHeader) == ESPNOW_V4_MINLEN_CMD_RESP &&
               sizeof(V4PayloadHeartbeat) == ESPNOW_V4_MINLEN_HEARTBEAT &&
               sizeof(V4PayloadPairBeacon) == ESPNOW_V4_MINLEN_PAIR_BEACON &&
-              sizeof(V4PayloadPairCtrl) == ESPNOW_V4_MINLEN_PAIR_REQUEST &&
+              sizeof(V4PayloadPairRequest) == ESPNOW_V4_MINLEN_PAIR_REQUEST &&
               sizeof(V4PayloadPairCtrl) == ESPNOW_V4_MINLEN_PAIR_ACCEPT &&
               sizeof(V4PayloadPairCtrl) == ESPNOW_V4_MINLEN_PAIR_REJECT &&
               sizeof(V4PayloadSensorStatus) == ESPNOW_V4_MINLEN_SENSOR_STATUS &&

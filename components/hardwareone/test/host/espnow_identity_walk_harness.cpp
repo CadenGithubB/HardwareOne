@@ -158,7 +158,7 @@ static bool warned(const std::string& a, const std::string& b) {
   return false;
 }
 // The warning for a stored identity that stayed out of the cache.
-static bool warnedForget(const Mac& m) { return warned(display(m), "espnowforget"); }
+static bool warnedForget(const Mac& m) { return warned(display(m), "espnowunpair"); }
 
 // ---- Cases -----------------------------------------------------------------
 static void neverRan() {
@@ -265,7 +265,7 @@ static void oneBadAmongGood(const std::string& badText, const char* what) {
   check(cached(kA) && cached(kA)->meshId == 1 && cached(kC) && cached(kC)->meshId == 2,
         (label + "the readable identities before and after it are cached").c_str());
   check(cachedCount() == 2 && !cached(kB) && !cached(kElsewhere), (label + "it is not in the cache").c_str());
-  check(warnedForget(kB), (label + "a warning names the folder's address and espnowforget").c_str());
+  check(warnedForget(kB), (label + "a warning names the folder's address and espnowunpair").c_str());
   check(warnings() == 1, (label + "one warning, none for the readable identities").c_str());
 }
 
@@ -365,7 +365,7 @@ static void fullCache() {
   }
   check(missingCount == 1, "17 stored identities: exactly one is left out");
   check(warnings() == 1 && missing >= 0 && warnedForget(numbered(static_cast<unsigned>(missing))),
-        "17 stored identities: one warning, naming the address that is left out and espnowforget");
+        "17 stored identities: one warning, naming the address that is left out and espnowunpair");
 }
 
 static void forget() {

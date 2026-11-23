@@ -193,7 +193,7 @@ def main():
 
     saver = body(source, 'static bool saveEspNowDevices()')
     loader = body(source, 'static void loadEspNowDevices()')
-    unpair = body(source, 'const char* cmd_espnow_unpair(')
+    unpair = body(source, 'static bool espnowUnpairTeardown(')  # espnowunpair's and espnowrevoke's
     forget = body(source, 'static bool espnowForgetPeerCrypto(')
     regen = body(source, 'const char* cmd_espnow_regenidentity(')
     metadata = body(source, 'static void processMetadata(')
@@ -223,7 +223,7 @@ def main():
          'continue;' in runner[at(runner, 'if (!member)'):at(runner, 'v4_send_encrypted_or_queue(')],
          'groupCommandRun sends in one place, after the membership check'),
         ('removeEspNowDevice(mac);' in unpair,
-         'cmd_espnow_unpair removes the device record, and with it what was accepted'),
+         'the unpair teardown removes the device record, and with it what was accepted'),
         ('espnowGroupAcceptanceClear(mac,' in forget,
          'forgetting a peer identity clears what was accepted for it'),
         ('espnowGroupAcceptanceClear(mac,' in regen,
