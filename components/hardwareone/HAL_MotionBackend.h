@@ -91,3 +91,19 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, Moti
 // Release whatever the backend holds and power the chip(s) down, best
 // effort; the chip may already be gone.
 void motionBackendStop();
+
+// What the backend can do and how its start went, for 'imustatus'. Asked from
+// the command's task while the IMU task may be running: the backend answers
+// from constants and single flags, so it takes no lock.
+struct MotionBackendStatus {
+  bool hasHwTap = false;        // the chip detects taps itself
+  bool hasHwFreefall = false;   // ...and free falls
+  bool hasMag = false;          // a magnetometer is read
+  bool hasHeading = false;      // yaw is a heading from magnetic north
+  // The gyro offset: a backend the layer fuses measures it at each start
+  // (measuresGyroOffset); a chip that fuses on its own keeps its own.
+  bool measuresGyroOffset = false;
+  bool gyroOffsetDone = false;   // the measurement of this start ended
+  bool gyroOffsetStill = false;  // ...on a board that held still (false: no offset, yaw drifts faster)
+};
+void motionBackendStatus(MotionBackendStatus& out);

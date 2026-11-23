@@ -117,7 +117,7 @@ const char* cmd_imu(const String& argsInput) {
 
   if (argWantsJson(argsInput)) {
     if (!ensureDebugBuffer()) return SENSOR_JSON_NOBUF;
-    int n = imuBuildDataJson(getDebugBuffer(), 1024);  // shared builder (also feeds sensors json / MQTT)
+    int n = imuBuildLocalJson(getDebugBuffer(), 1024);  // the reading plus "hdg" and "backend" (also sensors json)
     return (n > 0) ? getDebugBuffer() : SENSOR_JSON_UNAVAILABLE;
   }
 
@@ -354,6 +354,65 @@ const char* cmd_imuactions(const String& argsInput) {
   return "[IMU] Action status displayed";
 }
 
+// imustatus [json]: which chip this build reads, where it is (bus and
+// addresses: the open ones while the IMU is open, else the settings), what it
+// can do (tap on the chip, a magnetic heading) and how the start's gyro
+// offset went (a start while the board moved has none, and yaw drifts faster).
+const char* cmd_imustatus(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String text = argsInput;
+  text.trim();
+  const bool json = argWantsJson(argsInput);
+  if (text.length() > 0 && !json) return "Error: invalid arguments — Usage: imustatus [json]";
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  const MotionBackendInfo& info = motionBackendInfo();
+  MotionBackendStatus status;
+  motionBackendStatus(status);
+  const bool running = gImuRunning && gImuConnected;
+  const unsigned bus = imuDeviceBus();
+  const unsigned address = imuDeviceAddress();
+  const unsigned second = imuMagDeviceAddress();
+  const int pollMs = gSettings.imuDevicePollMs > 0 ? gSettings.imuDevicePollMs : 200;
+  const int sampleMs = (int)motionSamplePeriodMs(info.samplePeriodMs, (unsigned long)pollMs);
+  const bool autoStart = gSettings.imuAutoStart;
+  // The gyro offset of this start: the chip's own, or the backend's measurement.
+  const char* offset = motionGyroOffsetState(status.measuresGyroOffset, running, status.gyroOffsetDone,
+                                             status.gyroOffsetStill);
+  char* out = getDebugBuffer();
+  if (json) {
+    int n = snprintf(out, 1024, "{\"schema\":1,\"connected\":%s,\"backend\":\"%s\",\"bus\":%u,\"address\":%u",
+                     running ? "true" : "false", info.part, bus, address);
+    if (info.secondPart && n > 0 && n < 1024) {
+      n += snprintf(out + n, 1024 - n, ",\"magPart\":\"%s\",\"magAddress\":%u", info.secondPart, second);
+    }
+    if (n > 0 && n < 1024) {
+      snprintf(out + n, 1024 - n,
+               ",\"hwTap\":%s,\"hwFreefall\":%s,\"hasMag\":%s,\"hasHeading\":%s,\"gyroOffset\":\"%s\","
+               "\"sampleMs\":%d,\"pollMs\":%d,\"autoStart\":%s}",
+               status.hasHwTap ? "true" : "false", status.hasHwFreefall ? "true" : "false",
+               status.hasMag ? "true" : "false", status.hasHeading ? "true" : "false", offset, sampleMs, pollMs,
+               autoStart ? "true" : "false");
+    }
+    return out;
+  }
+  char where[72];
+  if (info.secondPart) {
+    snprintf(where, sizeof(where), "%s at 0x%02X and %s at 0x%02X on I2C%u", info.part, address, info.secondPart,
+             second, bus + 1);
+  } else {
+    snprintf(where, sizeof(where), "%s at 0x%02X on I2C%u", info.part, address, bus + 1);
+  }
+  snprintf(out, 1024,
+           "[IMU] %s%s%s. Tap and free fall: %s. Heading: %s. Gyro offset: %s. Sampled every %d ms, published "
+           "every %d ms. Open after boot: %s. %s",
+           running ? "Connected: " : "Not connected (", where, running ? "" : ")",
+           status.hasHwTap ? "detected by the chip" : "detected from the readings",
+           status.hasHeading ? "yes, from magnetic north" : "no, yaw counts from the IMU's start",
+           motionGyroOffsetText(offset), sampleMs, pollMs, autoStart ? "on" : "off",
+           running ? "Read it with 'imuread'." : "Start it with 'openimu'.");
+  return out;
+}
+
 // ============================================================================
 // IMU Initialization and Reading (on the IMU task)
 // ============================================================================
@@ -527,6 +586,33 @@ int imuBuildDataJson(char* buf, size_t bufSize) {
   buf[pos++] = '}';
   buf[pos] = '\0';
   return pos;
+}
+
+// The reading for this device's own surfaces: imuBuildDataJson's object with
+// "hdg" and "backend" before its closing brace. The reading as it travels
+// (ESP-NOW, MQTT) stays imuBuildDataJson, unchanged.
+int imuBuildLocalJson(char* buf, size_t bufSize) {
+  int pos = imuBuildDataJson(buf, bufSize);
+  if (pos <= 0) return pos;
+  ImuCache reading;
+  // No second copy (the lock is busy): the object stands without the two keys.
+  if (!imuCacheSnapshot(reading, CACHE_MUTEX_TIMEOUT_MS)) return pos;
+  // A reading says it itself; without one, what the backend can do.
+  bool heading = reading.hasHeading;
+  if (!reading.imuDataValid) {
+    MotionBackendStatus status;
+    motionBackendStatus(status);
+    heading = status.hasHeading;
+  }
+  // Over the closing brace.
+  const int n = snprintf(buf + pos - 1, bufSize - (size_t)(pos - 1), ",\"hdg\":%s,\"backend\":\"%s\"}",
+                         heading ? "true" : "false", imuBackendName());
+  if (n < 0 || (size_t)n >= bufSize - (size_t)(pos - 1)) {
+    buf[pos - 1] = '}';  // no room: the reading as it was
+    buf[pos] = '\0';
+    return pos;
+  }
+  return pos - 1 + n;
 }
 
 // ============================================================================
@@ -814,6 +900,7 @@ const CommandEntry imuCommands[] = {
   // Information
   { "imuread", "Read IMU sensor data. (add 'json' for JSON output)", false, cmd_imu },
   { "imuactions", "Show IMU action detection state.", false, cmd_imuactions },
+  { "imustatus", "IMU status: chip, bus, addresses, tap and heading, gyro offset. (add 'json' for JSON output)", false, cmd_imustatus, "Usage: imustatus [json]" },
 
   // Web view settings (the web Sensors page reads them)
   { "imupollingms", "IMU UI polling interval: <50..2000>", true, cmd_imupollingms, "Usage: imupollingms <50..2000>" },

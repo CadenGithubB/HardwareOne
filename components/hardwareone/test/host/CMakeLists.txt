@@ -563,6 +563,9 @@ foreach(target i2c_instance_core_tests i2c_instance_core_four_tests)
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
   target_include_directories(${target} PRIVATE ../..)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -pedantic)
+  # The status sign's setup block is read from configurations/README.md.
+  target_compile_definitions(${target} PRIVATE
+    HW1_REPO_ROOT="${CMAKE_CURRENT_LIST_DIR}/../../../..")
 endforeach()
 target_compile_definitions(i2c_instance_core_four_tests PRIVATE HW1_HOST_I2C_TEST_ENCODER_MAX=4)
 
@@ -2126,12 +2129,20 @@ add_test(
   NAME logging_system_config_browser
   COMMAND ${HW1_NODE_CMD}
           ${CMAKE_CURRENT_LIST_DIR}/logging_system_config_browser_test.js)
+# The web pages find the IMU by the device table's names (window.__hwImu),
+# whichever chip the build has: the Sensors page, the dashboard and the IMU
+# card's shipping scripts, run for the BNO055 and the Adafruit 4517 builds.
+add_test(
+  NAME imu_web_surfaces
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_imu_web_surfaces.py
+          --node ${HW1_NODE_CMD})
 if(NOT HW1_NODE_EXECUTABLE)
   set_tests_properties(map_live_browser g2_status_browser sensor_mic_card
-                       logging_system_config_browser
+                       logging_system_config_browser imu_web_surfaces
                        PROPERTIES DISABLED TRUE)
-  message(WARNING "Node.js not found: map_live_browser, g2_status_browser, sensor_mic_card "
-                  "and logging_system_config_browser are registered but disabled; "
+  message(WARNING "Node.js not found: map_live_browser, g2_status_browser, sensor_mic_card, "
+                  "logging_system_config_browser and imu_web_surfaces are registered but disabled; "
                   "pass -DHW1_NODE_EXECUTABLE=/path/to/node")
 endif()
 # The Python tool suites run here too (P0-1c): the OTA tools, the web UI page
@@ -3614,6 +3625,15 @@ add_test(
   NAME automation_condition_bounds
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_automation_condition_bounds.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Automation conditions on the IMU (IMU_PITCH, IMU_ROLL, IMU_TILT, IMU_POSE,
+# IMU_TAP_AGE): the parse, the IMU_ branch and the comparisons of
+# evaluateCondition run over the motion layer's rule and detector; a closed
+# IMU, no reading, no tap yet or an unknown IMU_ name is false.
+add_test(
+  NAME automation_imu_conditions
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_automation_imu_conditions.py
           ${SETUP_MQTT_TEST_ARGS})
 # Uptime: SelfDevice::uptimeSeconds() counts on past the millis() wrap, and the
 # places that show, send or compare uptime ask it instead of millis() / 1000.

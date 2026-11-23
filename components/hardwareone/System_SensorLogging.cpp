@@ -776,7 +776,7 @@ void sensorLogTick() {
     }
 
     // IMU (only if enabled in mask)
-    if ((gSensorLogMask & LOG_IMU) && s.gImuRunning && s.gImuConnected && remaining > 0) {
+    if ((gSensorLogMask & LOG_IMU) && s.gImuRunning && s.gImuConnected && s.imuValid && remaining > 0) {
       written = snprintf(pos, remaining, "imu: yaw=%.1f pitch=%.1f roll=%.1f accel=(%.2f,%.2f,%.2f) temp=%.1fC | ",
                          s.yaw, s.pitch, s.roll, s.ax, s.ay, s.az, s.imuTemp);
       pos += written;
@@ -901,12 +901,17 @@ void sensorLogTick() {
       remaining -= written;
     }
 
+    // The same ten columns for every IMU chip. Without a calibrated
+    // magnetometer (the Adafruit 4517 for now) imu_yaw counts from the IMU's
+    // start; 'imustatus' says which.
     if ((gSensorLogMask & LOG_IMU) && remaining > 0) {
-      written = snprintf(pos, remaining, ",%.1f,%.1f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f",
-                         s.yaw, s.pitch, s.roll,
-                         s.ax, s.ay, s.az,
-                         s.gx, s.gy, s.gz,
-                         s.imuTemp);
+      written = s.imuValid
+                    ? snprintf(pos, remaining, ",%.1f,%.1f,%.1f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.1f",
+                               s.yaw, s.pitch, s.roll,
+                               s.ax, s.ay, s.az,
+                               s.gx, s.gy, s.gz,
+                               s.imuTemp)
+                    : snprintf(pos, remaining, ",,,,,,,,,,");
       pos += written;
       remaining -= written;
     }
@@ -1057,6 +1062,7 @@ void sensorLogTick() {
       if (imuCacheSnapshot(imu, 10)) {
         snap.gImuRunning = gImuRunning;
         snap.gImuConnected = gImuConnected;
+        snap.imuValid = imu.imuDataValid;
         snap.yaw = imu.oriYaw;
         snap.pitch = imu.oriPitch;
         snap.roll = imu.oriRoll;

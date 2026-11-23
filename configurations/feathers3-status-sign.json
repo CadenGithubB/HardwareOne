@@ -6,7 +6,7 @@
     "CUSTOM_ENABLE_FM_RADIO": 0,
     "CUSTOM_ENABLE_GAMEPAD": 0,
     "CUSTOM_ENABLE_GPS": 0,
-    "CUSTOM_ENABLE_IMU": 0,
+    "CUSTOM_ENABLE_IMU": 1,
     "CUSTOM_ENABLE_LED_MATRIX": 0,
     "CUSTOM_ENABLE_NET_ESPNOW": 0,
     "CUSTOM_ENABLE_OLED": 1,
@@ -16,7 +16,7 @@
     "CUSTOM_ENABLE_THERMAL": 0,
     "CUSTOM_ENABLE_TOF": 0,
     "CUSTOM_ENABLE_WEB_MAPS": 0,
-    "CUSTOM_ENABLE_WEB_SENSORS": 0,
+    "CUSTOM_ENABLE_WEB_SENSORS": 1,
     "ENABLE_BLUETOOTH": 0,
     "ENABLE_BONDED_MODE": 0,
     "ENABLE_CAMERA_SENSOR": 0,
@@ -31,11 +31,12 @@
     "ENABLE_RASPBERRY_PI_HOST_POWER": 0,
     "ENABLE_UART_HOST_LINK": 0,
     "I2C_FEATURE_LEVEL": 4,
-    "INPUT_DEVICE_TYPE": 0
+    "IMU_DEVICE_TYPE": 2,
+    "INPUT_DEVICE_TYPE": 2
   },
   "sdkconfig": {
     "CONFIG_BT_ENABLED": false
   },
-  "summary": "Two Adafruit 4991 encoder boards lit green or red, the OLED, a DS3231 clock, battery gauge and u.FL antenna; Wi-Fi, web interface and automations only.",
+  "summary": "Two Adafruit 4991 encoder boards lit green or red, an ANO wheel for the OLED menus, an Adafruit 4517 motion sensor (tilt, flip, tap), a DS3231 clock, battery gauge and u.FL antenna; Wi-Fi, web interface with Sensors page, automations.",
   "title": "Meeting-room status sign (FeatherS3[D])"
 }

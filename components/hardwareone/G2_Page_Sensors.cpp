@@ -74,8 +74,14 @@ static void imuG2FormatValue(char* out, size_t cap) {
   ImuCache imu{};
   if (imuCacheSnapshot(imu, 5)) {
     if (imu.imuDataValid) {
-      snprintf(out, cap, "Y%d P%d R%d",
-               (int)imu.oriYaw, (int)imu.oriPitch, (int)imu.oriRoll);
+      // Yaw only when it is a heading: a yaw that counts from the IMU's
+      // start (no calibrated magnetometer) says nothing in a list row.
+      if (imu.hasHeading) {
+        snprintf(out, cap, "Y%d P%d R%d",
+                 (int)imu.oriYaw, (int)imu.oriPitch, (int)imu.oriRoll);
+      } else {
+        snprintf(out, cap, "P%d R%d", (int)imu.oriPitch, (int)imu.oriRoll);
+      }
     } else {
       snprintf(out, cap, "...");
     }
@@ -267,7 +273,7 @@ enum class G2SensorKind : uint8_t {
 struct G2SensorRow {
   G2SensorKind kind;
   const char* label;            // 5-char short identifier (e.g. "IMU", "THERM")
-  const char* hardware;         // canonical part name (e.g. "BNO055")
+  const char* hardware;         // canonical part name (e.g. "VL53L4CX"; the IMU: its build's chip)
   const char* featureId;        // feature-registry ID (lowercase, e.g. "imu",
                                 // "thermal") — used to look up the auto-start
                                 // setting pointer for the toggle row.
@@ -296,9 +302,11 @@ static void buildRows(G2SensorRow* rows, size_t maxRows, size_t* outCount,
   };
 
 #if ENABLE_IMU_SENSOR
-  add(G2SensorKind::Imu, "IMU",   "BNO055",   "imu",      true,  gImuRunning,      gImuConnected,     imuG2FormatValue);
+  // The build's chip, as the motion layer names it.
+  add(G2SensorKind::Imu, "IMU",   imuBackendName(), "imu", true,  gImuRunning,      gImuConnected,     imuG2FormatValue);
 #else
-  add(G2SensorKind::Imu, "IMU",   "BNO055",   "imu",      false, false, false,                         nullptr);
+  // Not in the build: no chip to name.
+  add(G2SensorKind::Imu, "IMU",   "-",        "imu",      false, false, false,                         nullptr);
 #endif
 
 #if ENABLE_TOF_SENSOR
@@ -946,14 +954,15 @@ static void g2BuildRtcReadout(char* out, size_t cap) {
 static void g2BuildImuReadout(char* out, size_t cap) {
   ImuCache imu{};
   if (!(imuCacheSnapshot(imu, 5) && imu.imuDataValid)) { snprintf(out, cap, "IMU\n(reading...)"); return; }
+  // Without a heading, yaw counts from the IMU's start: marked relative.
   snprintf(out, cap,
-           "Yaw  : %d\n"
+           "Yaw  : %d%s\n"
            "Pitch: %d\n"
            "Roll : %d\n"
            "Acc %.1f %.1f %.1f\n"
            "Gyr %.1f %.1f %.1f\n"
            "Temp: %.0f C",
-           (int)imu.oriYaw, (int)imu.oriPitch, (int)imu.oriRoll,
+           (int)imu.oriYaw, imu.hasHeading ? "" : " rel", (int)imu.oriPitch, (int)imu.oriRoll,
            (double)imu.accelX, (double)imu.accelY, (double)imu.accelZ,
            (double)imu.gyroX, (double)imu.gyroY, (double)imu.gyroZ,
            (double)imu.imuTemp);

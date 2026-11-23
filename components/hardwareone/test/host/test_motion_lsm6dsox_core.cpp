@@ -196,7 +196,7 @@ static void testStartConfiguresBothChips() {
   // Order: identities, resets, one unlocked wait, reset polls, configuration, read-backs.
   const std::vector<std::string> expected = {
       "r 6A 0F 1", "r 1C 0F 1", "w 6A 12 1", "w 1C 21 1", "sleep 10", "r 6A 12 1", "r 1C 21 1",
-      "w 6A 10 3", "w 6A 17 2", "w 6A 56 9", "w 1C A0 5", "r 6A 10 3", "r 6A 56 9", "r 1C A0 5",
+      "w 6A 10 3", "w 6A 17 2", "w 6A 56 9", "w 1C A0 5", "r 6A 10 3", "r 6A 17 2", "r 6A 56 9", "r 1C A0 5",
   };
   assert(bus.log == expected);
   assert(bus.accel.regs[0x10] == 0x6A && bus.accel.regs[0x11] == 0x44 && bus.accel.regs[0x12] == 0x44);
@@ -267,6 +267,19 @@ static void testConfigurationThatDoesNotStick() {
   assert(!start(events, why));
   assert(why == "Error: The LSM6DSOX at 0x6A on bus 1 did not keep its settings (register 0x58 reads 0x00, "
                 "expected 0x88). Run 'openimu' again.");
+  // So is a lost filter (CTRL8_XL) or I3C-off (CTRL9_XL) write.
+  Bus filter;
+  filter.accel.ignoreWritesTo = true;
+  filter.accel.ignoredReg = 0x17;
+  assert(!start(filter, why));
+  assert(why == "Error: The LSM6DSOX at 0x6A on bus 1 did not keep its settings (register 0x17 reads 0x00, "
+                "expected 0x40). Run 'openimu' again.");
+  Bus i3c;
+  i3c.accel.ignoreWritesTo = true;
+  i3c.accel.ignoredReg = 0x18;
+  assert(!start(i3c, why));
+  assert(why == "Error: The LSM6DSOX at 0x6A on bus 1 did not keep its settings (register 0x18 reads 0x00, "
+                "expected 0xE2). Run 'openimu' again.");
   Bus mag;
   mag.mag.ignoreWritesTo = true;
   mag.mag.ignoredReg = 0x24;
@@ -402,6 +415,26 @@ static void testSampleKeepsTheTap() {
   assert(!sample(bus, st, r, magFailed) && bus.intSrc == kLsm6dsoxSrcSingleTap && !st.pendingTap);
   bus.srcOk = true;
   assert(sample(bus, st, r, magFailed) && r.tap);
+
+  // The chip lost its power and came back in power-down (a bus-rail cut):
+  // it answers, with 14 zero bytes. That is no reading: the sample fails
+  // (zeros would read as a free fall), a tap read before stays for the next
+  // good sample, and one non-zero byte is a reading again.
+  uint8_t zeros[14] = {};
+  assert(!lsm6dsoxBurstAlive(zeros));
+  for (int i = 0; i < 14; ++i) {
+    zeros[i] = 1;
+    assert(lsm6dsoxBurstAlive(zeros));
+    zeros[i] = 0;
+  }
+  bus.intSrc = kLsm6dsoxSrcSingleTap;
+  bus.accelZ = 0;  // the scripted burst is all zero now
+  Lsm4517Reading kept = r;
+  assert(!sample(bus, st, r, magFailed) && st.pendingTap);
+  assert(r.accel[2] == kept.accel[2] && r.tap == kept.tap);  // out untouched
+  assert(!sample(bus, st, r, magFailed) && !sample(bus, st, r, magFailed));  // every such read fails
+  bus.accelZ = 8197;
+  assert(sample(bus, st, r, magFailed) && r.tap && near(r.accel[2], 9.81f, 0.01f));
 
   // No good field yet: no magnetometer reading.
   Lsm4517SampleState fresh;

@@ -246,6 +246,7 @@ static SensorCacheSnapshot fullSnapshot() {
   s.thermalValid = true; s.thermalMin = 20; s.thermalMax = 30; s.thermalAvg = 25;
   s.tofValid = true;
   for (int i = 0; i < 4; ++i) { s.tof[i].valid = (i % 2) == 0; s.tof[i].distance_mm = 100 + i; s.tof[i].status = 5 + i; }
+  s.imuValid = true;
   s.yaw = 1.5f; s.pitch = 2.5f; s.roll = 3.5f; s.ax = 0.125f; s.ay = 0.25f; s.az = 0.5f;
   s.gx = 1.0f; s.gy = 2.0f; s.gz = 3.0f; s.imuTemp = 31.5f;
   s.inputValid = true; s.joyX = 11; s.joyY = -12; s.buttons = 0x30;
@@ -259,14 +260,15 @@ static SensorCacheSnapshot fullSnapshot() {
 }
 
 static void csvRows() {
-  // Every selection, with each of the four "valid" flags on or off: the row
+  // Every selection, with each of the five "valid" flags on or off: the row
   // has exactly the header's columns.
   for (unsigned mask = 0; mask <= 255; ++mask) {
     const std::string header = buildCsvHeader(static_cast<uint8_t>(mask)).c_str();
-    for (unsigned valid = 0; valid < 16; ++valid) {
+    for (unsigned valid = 0; valid < 32; ++valid) {
       gSensorLogMask = static_cast<uint8_t>(mask);
       SensorCacheSnapshot s = fullSnapshot();
       s.thermalValid = valid & 1; s.tofValid = valid & 2; s.inputValid = valid & 4; s.apdsValid = valid & 8;
+      s.imuValid = valid & 16;
       context = "csv mask=" + std::to_string(mask) + " valid=" + std::to_string(valid);
       const std::string row = csvRow(s);
       check(commas(row) == commas(header), "row has " + std::to_string(commas(row)) + " commas, header " +
@@ -306,6 +308,25 @@ static void csvRows() {
     if (names[i] == "presence_ambient") check(values[i] == "21.5", "presence_ambient moved: " + values[i]);
     if (names[i] == "r1_hr") check(values[i] == "61", "r1_hr moved: " + values[i]);
   }
+
+  // The IMU open without a reading yet (the Adafruit 4517 measures its gyro
+  // offset first): its ten fields are empty, not zeros, and the gamepad's
+  // columns after them keep their place.
+  context = "csv imu invalid";
+  gSensorLogMask = LOG_IMU | LOG_GAMEPAD;
+  s = fullSnapshot();
+  s.imuValid = false;
+  check(std::string(csvRow(s)) == "6000,,,,,,,,,,,11,-12,48", std::string("imu-invalid row changed: ") + csvRow(s));
+  s.imuValid = true;
+  check(std::string(csvRow(s)) == "6000,1.5,2.5,3.5,0.125,0.250,0.500,1.000,2.000,3.000,31.5,11,-12,48",
+        std::string("imu row changed: ") + csvRow(s));
+  // The text row leaves an IMU without a reading out.
+  gSensorLogMask = LOG_IMU;
+  s.gImuRunning = s.gImuConnected = true;
+  check(std::string(textRow(s)).find("imu: yaw=1.5 pitch=2.5 roll=3.5") != std::string::npos,
+        std::string("imu text row: ") + textRow(s));
+  s.imuValid = false;
+  check(std::string(textRow(s)).find("imu:") == std::string::npos, std::string("imu text row without a reading: ") + textRow(s));
 
   // Mixed: only APDS without a reading, GPS selected after it.
   context = "csv mixed";

@@ -57,6 +57,8 @@
 #include "i2csensor_sths34pf80.h"  // presenceCacheSnapshot: the MOTION condition
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_vl53l4cx.h"
+#include "HAL_Motion.h"            // IMU_*: imuCacheSnapshot, imuActionsSnapshot
+#include "HAL_MotionCore.h"        // IMU_*: motionConditionValue
 
 // --- Additional condition-variable sources (see evaluateCondition) ---
 #include "System_Battery.h"        // BATTERY: valid battery snapshot
@@ -4546,6 +4548,34 @@ bool evaluateCondition(const char* condition) {
     PresenceCache presence{};
     if (!presenceCacheSnapshot(presence, 50) || !presence.dataValid) return false;
     strlcpy(currentStringValue, presence.motionDetected ? "DETECTED" : "NONE", sizeof(currentStringValue));
+ #else
+    return false;
+ #endif
+  } else if (strncmp(sensor, "IMU_", 4) == 0) {
+    // The motion sensor's tilt (IMU_PITCH, IMU_ROLL, IMU_TILT, degrees), pose
+    // (IMU_POSE, e.g. FACE-DOWN: flipped over) and last tap (IMU_TAP_AGE,
+    // seconds): motionConditionValue, HAL_MotionCore.h. A closed IMU, no
+    // reading yet, a reading the IMU task stopped refreshing, no tap in the
+    // last hour or an unknown IMU_ name has no value, so the condition is
+    // false. No heading variable yet.
+ #if ENABLE_IMU_SENSOR
+    if (!gImuRunning || !gImuConnected) return false;
+    ImuCache imu{};
+    MotionActionState imuActions;
+    if (!imuCacheSnapshot(imu, 50) || !imuActionsSnapshot(imuActions, 50)) return false;
+    const uint32_t imuNowMs = millis();
+    const uint32_t imuPollMs = gSettings.imuDevicePollMs > 0 ? (uint32_t)gSettings.imuDevicePollMs : 200;
+    const bool imuFresh = imu.imuDataValid && motionReadingFresh(imuNowMs, (uint32_t)imu.imuLastUpdate, imuPollMs);
+    MotionConditionValue imuValue;
+    if (!motionConditionValue(sensor, imuFresh, imu.oriPitch, imu.oriRoll, imuActions, imuNowMs, imuValue)) {
+      return false;
+    }
+    if (imuValue.isText) {
+      isNumeric = false;
+      strlcpy(currentStringValue, imuValue.text, sizeof(currentStringValue));
+    } else {
+      currentValue = imuValue.number;
+    }
  #else
     return false;
  #endif

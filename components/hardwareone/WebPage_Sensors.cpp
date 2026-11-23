@@ -158,7 +158,8 @@ esp_err_t handleSensorData(httpd_req_t* req) {
 
         // Use stack-allocated buffer for IMU response
         char imuResponseBuffer[IMU_RESPONSE_SIZE];
-        int jsonLen = imuBuildDataJson(imuResponseBuffer, IMU_RESPONSE_SIZE);
+        // The local form: "hdg" tells the card whether yaw is a heading.
+        int jsonLen = imuBuildLocalJson(imuResponseBuffer, IMU_RESPONSE_SIZE);
 
         // Send response — see the tof arm above for why jsonLen is guarded.
         if (jsonLen <= 0) {

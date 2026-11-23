@@ -217,6 +217,54 @@ Host-tested and built; not run on a device.
   (`docs/APP_JSON_CONTRACT.md`). `imuread` shows the magnetometer too.
 - `imuautostart` and the angle offsets use the shared on/off and number replies.
 
+### Changed (IMU on the pages, the OLED, the lens and the logs)
+Host-tested and built; not run on a device.
+- The web Sensors page and the dashboard find the IMU whichever chip the build has: they read the
+  names of the device table's IMU rows instead of looking for a device called "BNO055", so a build
+  with the Adafruit 4517 shows its IMU card (it showed none). The card names the build's chip, and
+  the "detected but not compiled" notice names the chip the table has.
+- A yaw that is not a compass heading is not shown as one. The Adafruit 4517 has no heading until
+  its magnetometer calibration lands, so its yaw counts from the IMU's start:
+  - the OLED IMU page shows the chip's name and its temperature, then `P: R: Yrel:` (with a heading:
+    `Y: P: R:`; yaw is shown in 0..359 and the mark shortens to `Yr:` when the row would pass the
+    panel's 21 characters), the acceleration, and a heading line (`Hdg:` with the compass point, the BNO055's
+    magnetometer calibration `c0`..`c3` and the field strength) only with a heading. Open without a
+    reading yet, it shows the chip's name and "Waiting for data..." instead of zeros;
+  - the web IMU card writes "Yaw (relative)";
+  - the G2 lens row leaves yaw out (`P-24 R3`) and its readout writes `Yaw  : 123 rel`; the lens
+    names the build's chip (it said BNO055);
+  - the BLE sensor stream keeps its `imu.heading` key and sends `null` there
+    (`docs/APP_JSON_CONTRACT.md`). The BNO055's values are unchanged everywhere.
+- `imuread json`, the `imu` entry of `sensors json` and the web page's own reading add `"hdg"`
+  (true: yaw is a heading from magnetic north) and `"backend"` (the chip). The reading sent over
+  ESP-NOW and MQTT is unchanged. The `imu` entry of `sensors json` is named after the build's chip
+  ("LSM6DSOX orientation" on a 4517 build).
+- The sensor log keeps its ten IMU columns for every chip; an IMU that is open without a reading
+  yet (the 4517's first second) writes empty fields instead of zeros, and the text log leaves it
+  out.
+
+### Added (IMU)
+Host-tested and built; not run on a device.
+- Automation conditions on the motion sensor: `IMU_PITCH`, `IMU_ROLL` and `IMU_TILT` (degrees; tilt
+  is the larger of the two), `IMU_POSE` (`FACE-UP`, `FACE-DOWN`, `PORTRAIT`, `PORTRAIT-INV`,
+  `LANDSCAPE-R`, `LANDSCAPE-L`: the pose the last `imu_orientation` event announced, so
+  `IF IMU_POSE=FACE-DOWN` is "flipped over") and `IMU_TAP_AGE` (seconds since the last tap, for an
+  hour after it). A closed IMU, no reading yet, a reading the IMU stopped refreshing (older than
+  two `imudevicepollms` periods and a second) or no tap in the last hour makes the condition false.
+  The web Automations page lists them. There is no heading condition yet.
+- `imustatus [json]`: the build's chip, its bus and address(es), whether the chip detects taps
+  itself, whether yaw is a compass heading, and how the start's gyroscope offset went (the 4517
+  measures it at each `openimu`: `still`, or `moving` when the board never held still, which makes
+  yaw drift faster until the IMU is opened again).
+- Adafruit 4517: the start also reads back the accelerometer's filter setting and the I3C-off
+  setting (CTRL8_XL, CTRL9_XL), so a lost write is reported instead of leaving the samples
+  unfiltered.
+- Adafruit 4517: a read that returns only zeros fails. That is what the LSM6DSOX answers after its
+  supply was cut and came back (it is in power-down with its settings gone); the zeros were taken
+  as a reading, and so as a free fall. The failed reads now count as device errors, and the IMU
+  is auto-disabled with a `sensor_fault` event after the usual number in a row; `openimu` starts
+  it again.
+
 ### Changed (I2C buses and addresses)
 - Every `<device>bus` command (`oledbus`, `fuelgaugebus`, `inputbus`, `imubus`, `tofbus`,
   `thermalbus`, `apdsbus`, `gpsbus`, `fmradiobus`, `rtcbus`, `presencebus`, `matrixbus`,
@@ -240,8 +288,12 @@ Host-tested and built; not run on a device.
   camera, microphone, assistant, ESP-NOW, maps and the Raspberry Pi link are off. The boards'
   addresses (0x36, 0x37) are device settings, set once after setup (`configurations/README.md`).
 - `feathers3-status-sign`: the same sign on a FeatherS3[D] (no flash encryption) with the OLED,
-  a DS3231 clock (0x68, bus 0), the battery gauge and an external antenna; the encoder boards go on bus 1 because the fuel gauge
-  holds 0x36 on bus 0.
+  a DS3231 clock (0x68, bus 0), the battery gauge and an external antenna, an Adafruit ANO wheel
+  for the OLED menus (`INPUT_DEVICE_TYPE 2`, until the motion sensor becomes the sign's input), an
+  Adafruit 4517 motion sensor (`IMU_DEVICE_TYPE 2`) and the web Sensors page. The first encoder
+  board, the OLED, the wheel and the motion sensor are on bus 1; the second encoder board (0x37)
+  is on bus 0 with the fuel gauge (0x36) and the clock. `configurations/README.md` has the wiring
+  and the one-time setup commands in the order the address checks accept.
 - `wifiexternalantenna` (FeatherS3[D]): selects the u.FL antenna through the board's RF switch
   (GPIO41 high at boot, reboot required). Off by default, and the pin is then never driven, so an
   original FeatherS3 on the same build is untouched.

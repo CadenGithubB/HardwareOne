@@ -575,6 +575,77 @@ inline int i2cRowIndexByAddress(const Row* rows, size_t count, uint8_t address) 
 }
 
 // ---------------------------------------------------------------------------
+// A module's device names, for the web pages.
+//
+// The pages find a module's card by the names the scan reports
+// (/api/devices). Which names those are depends on the build: the "imu"
+// module is one BNO055 row, or the Adafruit 4517's two rows (LSM6DSOX,
+// LIS3MDL). The page gets them from the table instead of naming a chip.
+// ---------------------------------------------------------------------------
+
+// The names of every table row of `moduleName`, each once, in table order, as
+// a JavaScript object literal: "{'LSM6DSOX':1,'LIS3MDL':1}"; "{}" for a
+// module without rows. Returns the length written, or 0 with "{}" in out
+// (when that fits) if the list does not fit.
+template <typename Row>
+inline size_t i2cModuleDeviceNamesJs(const Row* rows, size_t count, const char* moduleName, char* out,
+                                     size_t cap) {
+  if (!out || cap == 0) return 0;
+  out[0] = '\0';
+  if (cap < 3) return 0;
+  size_t pos = 0;
+  out[pos++] = '{';
+  bool fits = true;
+  for (size_t i = 0; rows && moduleName && fits && i < count; ++i) {
+    const char* name = rows[i].name;
+    if (!rows[i].moduleName || !name || !name[0] || strcmp(rows[i].moduleName, moduleName) != 0) continue;
+    bool seen = false, plain = true;
+    for (size_t j = 0; j < i && !seen; ++j) {
+      seen = rows[j].moduleName && rows[j].name && strcmp(rows[j].moduleName, moduleName) == 0 &&
+             strcmp(rows[j].name, name) == 0;
+    }
+    for (const char* c = name; *c; ++c) {
+      if (*c == '\'' || *c == '\\' || *c == '<' || static_cast<unsigned char>(*c) < 0x20) plain = false;
+    }
+    if (seen || !plain) continue;
+    const size_t len = strlen(name);
+    // ,'name':1 and the closing brace and terminator still to come.
+    if (pos + (pos > 1 ? 1 : 0) + len + 4 + 2 > cap) {
+      fits = false;
+      break;
+    }
+    if (pos > 1) out[pos++] = ',';
+    out[pos++] = '\'';
+    memcpy(out + pos, name, len);
+    pos += len;
+    out[pos++] = '\'';
+    out[pos++] = ':';
+    out[pos++] = '1';
+  }
+  if (!fits) {
+    out[0] = '{';
+    out[1] = '}';
+    out[2] = '\0';
+    return 0;
+  }
+  out[pos++] = '}';
+  out[pos] = '\0';
+  return pos;
+}
+
+// The first of those names (the module's main chip), or nullptr when the
+// table has no row of the module.
+template <typename Row>
+inline const char* i2cModuleFirstDeviceName(const Row* rows, size_t count, const char* moduleName) {
+  for (size_t i = 0; rows && moduleName && i < count; ++i) {
+    if (rows[i].moduleName && rows[i].name && rows[i].name[0] && strcmp(rows[i].moduleName, moduleName) == 0) {
+      return rows[i].name;
+    }
+  }
+  return nullptr;
+}
+
+// ---------------------------------------------------------------------------
 // Address collisions (design section 1.3).
 //
 // One address in use on a bus: a configured instance of a queue type at the

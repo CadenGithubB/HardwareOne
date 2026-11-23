@@ -337,6 +337,14 @@ const char* i2cModuleNameForDeviceType(I2cDeviceType type) {
   return nullptr;
 }
 
+size_t i2cModuleDeviceNamesJs(const char* moduleName, char* out, size_t cap) {
+  return i2cModuleDeviceNamesJs(i2cSensors, i2cSensorsCount, moduleName, out, cap);
+}
+
+const char* i2cModuleFirstDeviceName(const char* moduleName) {
+  return i2cModuleFirstDeviceName(i2cSensors, i2cSensorsCount, moduleName);
+}
+
 // Initialize queue mutex (called from setup())
 // Now managed by I2cDeviceManager - this is a no-op
 void initSensorQueue() {
@@ -2330,7 +2338,14 @@ static void buildSensorsJson(JsonDocument& doc, bool includeData = true) {
   addSensorEntry(arr, "tof",      "VL53L4CX distance",      SENSOR_KIND_VECTOR, gTofRunning, isSensorConnected("tof"), includeData ? tofBuildDataJson : nullptr);
 #endif
 #if ENABLE_IMU_SENSOR
-  addSensorEntry(arr, "imu",      "BNO055 orientation",     SENSOR_KIND_VECTOR, gImuRunning, isSensorConnected("imu"), includeData ? imuBuildDataJson : nullptr);
+  // Named after the build's chip (a literal: the document keeps the pointer).
+  // The reading is the local form: "hdg" says whether its yaw is a heading.
+#if ENABLE_IMU_LSM6DSOX
+  static const char kImuSensorName[] = "LSM6DSOX orientation";
+#else
+  static const char kImuSensorName[] = "BNO055 orientation";
+#endif
+  addSensorEntry(arr, "imu",      kImuSensorName,           SENSOR_KIND_VECTOR, gImuRunning, isSensorConnected("imu"), includeData ? imuBuildLocalJson : nullptr);
 #endif
 #if ENABLE_GPS_SENSOR
   addSensorEntry(arr, "gps",      "PA1010D GPS",            SENSOR_KIND_VECTOR, gGpsRunning, isSensorConnected("gps"), includeData ? gpsBuildDataJson : nullptr);
@@ -2462,7 +2477,7 @@ const char* cmd_sensorinfo(const String& argsInput) {
   args.trim();
 
   if (args.length() == 0) {
-    return "Usage: sensorinfo <sensor_name>\nExample: sensorinfo BNO055";
+    return "Usage: sensorinfo <sensor_name>\nExample: sensorinfo DS3231";
   }
 
   // Find sensor by name (case insensitive)
@@ -2968,7 +2983,7 @@ const CommandEntry i2cCommands[] = {
   
   // Device Registry
   { "sensors", "List I2C sensors [filter]", false, cmd_sensors, "Usage: sensors [filter] - filter by name, description, or manufacturer\n       sensors json [brief] - live state (+readings; 'brief' = state only, no data)\nExample: sensors temperature, sensors json brief" },
-  { "sensorinfo", "Sensor details: <name>", false, cmd_sensorinfo, "Usage: sensorinfo <sensor_name>\nExample: sensorinfo BNO055" },
+  { "sensorinfo", "Sensor details: <name>", false, cmd_sensorinfo, "Usage: sensorinfo <sensor_name>\nExample: sensorinfo DS3231" },
   { "devices", "Show discovered I2C device registry. (add 'json' for JSON output)", false, cmd_devices },
   { "discover", "Re-scan and register I2C devices.", false, cmd_discover },
   { "devicefile", "Show device registry JSON file.", false, cmd_devicefile },
