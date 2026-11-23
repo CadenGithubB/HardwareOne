@@ -114,6 +114,7 @@ static void testFaceTaps() {
     r.taps(count);
     r.run(600);
     assert(r.take() == expect[count]);
+    if (!expect[count]) assert(r.engine.lastDrop() == kDropNoButton && r.engine.lastDropFace());
   }
   // A chip that cannot tell counts as side.
   Rig unknown;
@@ -239,6 +240,7 @@ static void testShake() {
   for (int i = 0; i < 40; ++i) off.step(false, (i % 2) ? 14.0f : -14.0f);
   off.run(1500);
   assert(off.take() == 0 && !off.engine.calibrating() && off.calEvents[kCalStarted] == 0);
+  assert(off.engine.lastDrop() == kDropShake && off.engine.lastDropTaps() == 2 && !off.engine.lastDropFace());
 
   // Five hard taps are not a shake (and on the side, five is nothing).
   Rig taps;

@@ -154,6 +154,22 @@ struct Output {
   uint8_t calSecondsLeft = 0;   // with kCalCountdown
 };
 
+// Why a run of taps made no button (Engine::lastDrop).
+constexpr uint8_t kDropNone = 0;
+constexpr uint8_t kDropNeverCalm = 1;  // the device never got calm within kTapPatienceMs
+constexpr uint8_t kDropGap = 2;        // the samples stopped (a gap)
+constexpr uint8_t kDropShake = 3;      // a shake or a calibration started
+constexpr uint8_t kDropNoButton = 4;   // the count has no button (1 face tap, 5+ side taps)
+inline const char* dropName(uint8_t why) {
+  switch (why) {
+    case kDropNeverCalm: return "never-calm";
+    case kDropGap: return "gap";
+    case kDropShake: return "shake";
+    case kDropNoButton: return "no-button";
+    default: return "none";
+  }
+}
+
 // What a finished run of `count` taps is: a button mask (0: nothing).
 inline uint8_t buttonForTaps(uint8_t count, bool face) {
   if (face) {
@@ -264,6 +280,7 @@ class Engine {
     // ---- Shake ------------------------------------------------------------
     if (!inShake_ && strongCount >= kShakeCount) {
       inShake_ = true;
+      if (tapCount_ > 0) noteDrop(kDropShake);
       tapCount_ = 0;
       if (calState_ != CalState::Idle) calState_ = CalState::Idle;  // a new shake starts over
     } else if (inShake_ && strongCount <= kShakeEndCount) {
@@ -283,7 +300,6 @@ class Engine {
 
     // ---- Calibration ------------------------------------------------------
     if (calState_ == CalState::Waiting) {
-      tapCount_ = 0;
       const bool still = !s.tap && dot3(lin, lin) < kCalStillAccel * kCalStillAccel;
       if (!still) {
         if (calStill_ && out.calEvent == kCalNone) out.calEvent = kCalMoved;
@@ -314,6 +330,7 @@ class Engine {
 
     // ---- Taps -------------------------------------------------------------
     if (inShake_ || calibrating) {
+      if (tapCount_ > 0) noteDrop(kDropShake);
       tapCount_ = 0;
     } else if (s.tap && !tapsBlocked_) {
       const bool face = s.tapKind == kTapFace;
@@ -322,6 +339,7 @@ class Engine {
       // new run.
       if (tapCount_ > 0 && face != runFace_) {
         const uint8_t what = movedSinceKnock ? 0 : buttonForTaps(tapCount_, runFace_);
+        if (!what) noteDrop(movedSinceKnock ? kDropNeverCalm : kDropNoButton);
         tapCount_ = 0;
         if (what) press(out, what, s.ms);
       }
@@ -336,9 +354,11 @@ class Engine {
     if (tapCount_ > 0) {
       const uint32_t since = static_cast<uint32_t>(s.ms - lastTapMs_);
       if (since > cfg.tapWindowMs + kTapPatienceMs) {
+        noteDrop(kDropNeverCalm);
         tapCount_ = 0;  // never calm enough to mean it
       } else if (since > cfg.tapWindowMs && !movedSinceKnock) {
         const uint8_t what = buttonForTaps(tapCount_, runFace_);
+        if (!what) noteDrop(kDropNoButton);
         tapCount_ = 0;
         if (what) press(out, what, s.ms);
       }
@@ -438,11 +458,22 @@ class Engine {
   bool shaking() const { return inShake_; }
   bool calibrating() const { return calState_ != CalState::Idle; }
   bool runOnFace() const { return runFace_; }
+  // The last run of taps that made no button, and why (kDrop*).
+  uint32_t drops() const { return drops_; }
+  uint8_t lastDropTaps() const { return lastDropTaps_; }
+  bool lastDropFace() const { return lastDropFace_; }
+  uint8_t lastDrop() const { return lastDrop_; }
   float leanX() const { return leanX_; }  // degrees, after the swap and the inversions
   float leanY() const { return leanY_; }
   const float* reference() const { return up0_; }
 
  private:
+  void noteDrop(uint8_t why) {
+    ++drops_;
+    lastDropTaps_ = tapCount_;
+    lastDropFace_ = runFace_;
+    lastDrop_ = why;
+  }
   void press(Output& out, uint8_t buttons, uint32_t ms) {
     out.pressed |= buttons;
     held_ |= buttons;
@@ -458,6 +489,7 @@ class Engine {
   }
   // After a gap: nothing that was being counted is still true.
   void dropRun() {
+    if (tapCount_ > 0) noteDrop(kDropGap);
     tapCount_ = 0;
     if (calState_ == CalState::Waiting) {  // the countdown starts over
       calStill_ = false;
@@ -489,6 +521,10 @@ class Engine {
 
   uint8_t tapCount_ = 0;
   bool runFace_ = false;  // the run in progress is of face taps
+  uint32_t drops_ = 0;
+  uint8_t lastDropTaps_ = 0;
+  bool lastDropFace_ = false;
+  uint8_t lastDrop_ = kDropNone;
   uint32_t lastTapMs_ = 0;
 
   enum class CalState : uint8_t { Idle = 0, Waiting, Capturing };

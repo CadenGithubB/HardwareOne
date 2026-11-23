@@ -63,7 +63,11 @@ struct ImuInputStatus {
   uint32_t presses;     // buttons pressed since the input opened
   uint32_t recentres;   // reference poses taken since it opened
   uint8_t lastPress;    // the buttons of the most recent press (kButton*), kept until the next
-  uint8_t lastTaps;     // the taps in the run that made it (0: a shake)
+  uint8_t lastTaps;     // the taps in the run that made it
+  uint32_t drops;       // runs of taps that made no button
+  uint8_t dropTaps;     // the last such run: its taps, side or face, and why (imuinput::kDrop*)
+  bool dropFace;
+  uint8_t dropWhy;
 };
 EXT_RAM_BSS_ATTR static ImuInputStatus sStatus;
 static std::atomic<uint32_t> sStatusVersion{0};
@@ -189,6 +193,10 @@ static void imuInputHook(const MotionHookSample& sample, void*) {
   status.centring = sEngine.capturing();
   status.shaking = sEngine.shaking();
   status.calibrating = sEngine.calibrating();
+  status.drops = sEngine.drops();
+  status.dropTaps = sEngine.lastDropTaps();
+  status.dropFace = sEngine.lastDropFace();
+  status.dropWhy = sEngine.lastDrop();
   if (out.calEvent != imuinput::kCalNone) showCalibration(out.calEvent, out.calSecondsLeft);
   status.leanX = sEngine.leanX();
   status.leanY = sEngine.leanY();
@@ -335,13 +343,15 @@ const char* cmd_imuinputread(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024,
              "{\"schema\":1,\"state\":\"%s\",\"running\":%s,\"connected\":%s,\"x\":%d,\"y\":%d,\"buttons\":%u,"
              "\"leanX\":%.1f,\"leanY\":%.1f,\"taps\":%u,\"shaking\":%s,\"presses\":%lu,\"recentres\":%lu,"
-             "\"lastPress\":%u,\"lastTaps\":%u,\"tapWindowMs\":%d,\"tiltDeg\":%d,\"shakeCalibrate\":%s,\"swapXY\":%s,\"invertX\":%s,\"invertY\":%s}",
+             "\"lastPress\":%u,\"lastTaps\":%u,\"drops\":%lu,\"lastDrop\":{\"taps\":%u,\"hit\":\"%s\",\"why\":\"%s\"},\"tapWindowMs\":%d,\"tiltDeg\":%d,\"shakeCalibrate\":%s,\"swapXY\":%s,\"invertX\":%s,\"invertY\":%s}",
              state, gInputRunning ? "true" : "false", gInputConnected ? "true" : "false", x, y,
              static_cast<unsigned>(live ? s.held : 0), static_cast<double>(live ? s.leanX : 0.0f),
              static_cast<double>(live ? s.leanY : 0.0f), static_cast<unsigned>(live ? s.tapCount : 0),
              live && s.shaking ? "true" : "false", static_cast<unsigned long>(s.presses),
              static_cast<unsigned long>(s.recentres), static_cast<unsigned>(s.lastPress),
-             static_cast<unsigned>(s.lastTaps), gSettings.imuInputTapWindowMs, gSettings.imuInputTiltDeg,
+             static_cast<unsigned>(s.lastTaps), static_cast<unsigned long>(s.drops),
+             static_cast<unsigned>(s.dropTaps), s.dropFace ? "face" : "side", imuinput::dropName(s.dropWhy),
+             gSettings.imuInputTapWindowMs, gSettings.imuInputTiltDeg,
              gSettings.imuInputShakeCalibrate ? "true" : "false", gSettings.imuInputSwapXY ? "true" : "false",
              gSettings.imuInputInvertX ? "true" : "false", gSettings.imuInputInvertY ? "true" : "false");
     return getDebugBuffer();
