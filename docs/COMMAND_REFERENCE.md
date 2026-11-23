@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1044 commands across 61 modules (1044 registry entries).
+1048 commands across 61 modules (1048 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -35,11 +35,11 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`servo`](#servo) — 6 commands
 - [`thermal`](#thermal) — 23 commands
 - [`tof`](#tof) — 10 commands
-- [`imu`](#imu) — 19 commands
+- [`imu`](#imu) — 22 commands
 - [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
 - [`anoencoder`](#anoencoder) — 6 commands
-- [`imuinput`](#imuinput) — 8 commands
+- [`imuinput`](#imuinput) — 9 commands
 - [`apds`](#apds) — 9 commands
 - [`gps`](#gps) — 6 commands
 - [`fmradio`](#fmradio) — 9 commands
@@ -606,6 +606,9 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `imuread` |  | Read IMU sensor data. (add 'json' for JSON output) |
 | `imurolloffset` | A | IMU roll offset in degrees: <-180..180><br/>`Usage: imurolloffset <-180..180>` |
 | `imustatus` |  | IMU status: chip, bus, addresses, tap and heading, gyro offset. (add 'json' for JSON output)<br/>`Usage: imustatus [json]` |
+| `imutapquiet` | A | IMU tap quiet window: [0..3]<br/>`Usage: imutapquiet [0..3]` |
+| `imutapshock` | A | IMU tap shock window: [0..3]<br/>`Usage: imutapshock [0..3]` |
+| `imutapthreshold` | A | IMU tap threshold in mg (125 mg steps): [125..3875]<br/>`Usage: imutapthreshold [125..3875]` |
 | `imutransitionms` | A | IMU transition time: <0..1000><br/>`Usage: imutransitionms <0..1000>` |
 | `imuwebmaxfps` | A | IMU web max FPS: <1..30><br/>`Usage: imuwebmaxfps <1..30>` |
 | `imuyawoffset` | A | IMU yaw offset in degrees: <-180..180><br/>`Usage: imuyawoffset <-180..180>` |
@@ -656,6 +659,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `imuinputread` |  | IMU input: state, lean, joystick and taps. (add 'json' for JSON output)<br/>`Usage: imuinputread [json]` |
 | `imuinputshake` | A | A shake is the START button [on\|off]<br/>`Usage: imuinputshake [on\|off]` |
 | `imuinputswapxy` | A | Swap the tilt axes [on\|off\|toggle]<br/>`Usage: imuinputswapxy [on\|off\|toggle]` |
+| `imuinputtapmerge` | A | Tap flags closer than this many ms are one knock (its rebound) <0..300><br/>`Usage: imuinputtapmerge [0..300]` |
 | `imuinputtapms` | A | Tap window in ms: a button arrives this long after its last tap <200..800><br/>`Usage: imuinputtapms [200..800]` |
 | `imuinputtilt` | A | Tilt angle in degrees that moves the joystick <8..40><br/>`Usage: imuinputtilt [8..40]` |
 | `imuinputzero` | A | Take the present pose as the joystick's centre (the same as five taps).<br/>`Usage: imuinputzero` |

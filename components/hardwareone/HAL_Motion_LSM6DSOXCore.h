@@ -108,11 +108,16 @@ constexpr uint8_t kLsm6dsoxSrcSingleTap = 0x04; // SINGLE_TAP
 // quiet windows in INT_DUR2 (at 416 Hz: SHOCK 2 = 8/ODR each, about 38 ms;
 // QUIET 1 = 4/ODR, about 10 ms). Tuned for a knock on a desk sign; check on
 // the bench.
-constexpr uint8_t kLsm6dsoxTapThreshold = 3;    // 0.375 g above the slope. Bench 2026-11-23:
+// These are the defaults: the live values come from the settings
+// (imutapthreshold, imutapshock, imutapquiet; Lsm6TapTuning below).
+constexpr uint8_t kLsm6dsoxTapThreshold = 4;    // 0.5 g above the slope. Bench 2026-11-23:
                                                 // 1.0 g and 0.625 g missed the softer in-between taps
-                                                // of quick runs (0.625 g: 3 of 10 missed by the chip)
+                                                // of quick runs; 0.375 g caught them but split one
+                                                // knock into two (the rebound)
 constexpr uint8_t kLsm6dsoxTapShock = 2;
 constexpr uint8_t kLsm6dsoxTapQuiet = 1;
+constexpr uint16_t kLsm6TapMgPerStep = 125;     // FS_XL/32 at 4 g
+constexpr uint8_t kLsm6TapThresholdMaxSteps = 31;  // 5 bits
 // Free fall: FF_THS 001 = 219 mg (the software detector uses 2 m/s^2, about
 // 204 mg); FF_DUR in 1/ODR steps, 6 bits split over WAKE_UP_DUR[7] and
 // FREE_FALL[7:3]: 62 at 416 Hz is about 150 ms, the software detector's wait.
@@ -186,6 +191,43 @@ constexpr uint8_t kLsm6ds3EventBurst[7] = {
     static_cast<uint8_t>(((kLsm6dsoxFfDuration & 0x1F) << 3) | kLsm6dsoxFfThs219mg),  // FREE_FALL
     kLsm6dsoxInt1SingleTap | kLsm6dsoxInt1Ff,                    // MD1_CFG
 };
+// The tap engine's live tuning: threshold in 125 mg steps (1..31), shock and
+// quiet windows (0..3 each, INT_DUR2). lsm6TapTuningFromMg rounds a setting
+// in mg to the nearest step.
+struct Lsm6TapTuning {
+  uint8_t threshold = kLsm6dsoxTapThreshold;
+  uint8_t shock = kLsm6dsoxTapShock;
+  uint8_t quiet = kLsm6dsoxTapQuiet;
+};
+inline Lsm6TapTuning lsm6TapTuningFromMg(long thresholdMg, long shock, long quiet) {
+  Lsm6TapTuning t;
+  long steps = (thresholdMg + kLsm6TapMgPerStep / 2) / kLsm6TapMgPerStep;
+  if (steps < 1) steps = 1;
+  if (steps > kLsm6TapThresholdMaxSteps) steps = kLsm6TapThresholdMaxSteps;
+  t.threshold = (uint8_t)steps;
+  t.shock = (uint8_t)(shock < 0 ? 0 : shock > 3 ? 3 : shock);
+  t.quiet = (uint8_t)(quiet < 0 ? 0 : quiet > 3 ? 3 : quiet);
+  return t;
+}
+// The chip's event burst with `tuning` in place of the defaults: the
+// register it starts at, its bytes (out holds 9) and its length.
+inline uint8_t lsm6EventBurst(bool ds3, const Lsm6TapTuning& tuning, uint8_t* out, uint8_t& reg) {
+  const uint8_t dur = (uint8_t)((tuning.quiet << 2) | tuning.shock);
+  if (ds3) {
+    reg = kLsm6ds3RegTapCfg;
+    for (uint8_t i = 0; i < sizeof(kLsm6ds3EventBurst); ++i) out[i] = kLsm6ds3EventBurst[i];
+    out[1] = tuning.threshold;
+    out[2] = dur;
+    return sizeof(kLsm6ds3EventBurst);
+  }
+  reg = kLsm6dsoxRegTapCfg0;
+  for (uint8_t i = 0; i < sizeof(kLsm6dsoxEventBurst); ++i) out[i] = kLsm6dsoxEventBurst[i];
+  out[1] = tuning.threshold;
+  out[2] = kLsm6dsoxInterruptsEnable | tuning.threshold;
+  out[3] = tuning.threshold;
+  out[4] = dur;
+  return sizeof(kLsm6dsoxEventBurst);
+}
 constexpr uint8_t kLsm6ds3SrcFreefall = 0x20;   // WAKE_UP_SRC FF_IA (src[1])
 constexpr uint8_t kLsm6ds3SrcSingleTap = 0x20;  // TAP_SRC SINGLE_TAP (src[2])
 inline const char* lsm6ChipName(Lsm6Chip chip) { return chip == Lsm6Chip::Ds3trc ? "LSM6DS3TR-C" : "LSM6DSOX"; }
@@ -232,7 +274,8 @@ static_assert(kLsm4517Accesses * kLsm4517IoWorstMs + kLsm4517ResetWaitMs <= kLsm
 // worst case, with the accesses still to come) inside kLsm4517InitDeadlineMs.
 template <typename Io>
 inline bool lsm4517StartSequence(Io& io, uint8_t bus, uint8_t accelAddress, uint8_t magAddress,
-                                 char* why, size_t whyLen, Lsm6Chip* chipOut = nullptr) {
+                                 char* why, size_t whyLen, Lsm6Chip* chipOut = nullptr,
+                                 const Lsm6TapTuning& tapTuning = Lsm6TapTuning{}) {
   Lsm6Chip chip = Lsm6Chip::Dsox;
   const uint32_t start = io.nowMs();
   auto elapsed = [&]() -> uint32_t { return io.nowMs() - start; };
@@ -346,9 +389,9 @@ inline bool lsm4517StartSequence(Io& io, uint8_t bus, uint8_t accelAddress, uint
   const bool ds3 = chip == Lsm6Chip::Ds3trc;
   if (!identify(magAddress, kLis3mdlRegWhoAmI, kLis3mdlWhoAmI, 0, "imumagaddress", "magnetometer", 12)) return false;
   const uint8_t* ctrlBurst = ds3 ? kLsm6ds3CtrlBurst : kLsm6dsoxCtrlBurst;
-  const uint8_t eventReg = ds3 ? kLsm6ds3RegTapCfg : kLsm6dsoxRegTapCfg0;
-  const uint8_t* eventBurst = ds3 ? kLsm6ds3EventBurst : kLsm6dsoxEventBurst;
-  const uint8_t eventLen = ds3 ? sizeof(kLsm6ds3EventBurst) : sizeof(kLsm6dsoxEventBurst);
+  uint8_t eventReg = 0;
+  uint8_t eventBurst[9];
+  const uint8_t eventLen = lsm6EventBurst(ds3, tapTuning, eventBurst, eventReg);
 
   const uint8_t accelReset = kLsm6dsoxCtrl3SwReset;
   const uint8_t magReset = kLis3mdlCtrl2SoftReset;

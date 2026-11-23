@@ -83,6 +83,7 @@ static ImuInputStatus statusRead() {
 static imuinput::Config configFromSettings() {
   imuinput::Config cfg;
   cfg.tapWindowMs = static_cast<uint16_t>(constrain(gSettings.imuInputTapWindowMs, 200, 800));
+  cfg.tapMinGapMs = static_cast<uint16_t>(constrain(gSettings.imuInputTapMergeMs, 0, 300));
   cfg.engageDeg = static_cast<float>(constrain(gSettings.imuInputTiltDeg, 8, 40));
   cfg.releaseDeg = cfg.engageDeg - 4.0f;
   cfg.fullDeg = cfg.engageDeg + 15.0f;
@@ -356,6 +357,22 @@ const char* cmd_imuinputtapms(const String& argsInput) {
   return getDebugBuffer();
 }
 
+const char* cmd_imuinputtapmerge(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String text = argsInput;
+  text.trim();
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  if (text.length() > 0) {
+    int ms = 0;
+    if (!parseIntArg(text, ms)) return kCommandReplyNotANumber;
+    if (ms < 0 || ms > 300) return "Error: The tap merge must be 0..300 ms.";
+    setSetting(gSettings.imuInputTapMergeMs, ms);
+  }
+  snprintf(getDebugBuffer(), 1024, "[IMU input] Tap merge: %d ms (tap flags closer than this are one knock)",
+           gSettings.imuInputTapMergeMs);
+  return getDebugBuffer();
+}
+
 const char* cmd_imuinputtilt(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String text = argsInput;
@@ -420,6 +437,7 @@ const CommandEntry imuInputCommands[] = {
   { "imuinputread",    "IMU input: state, lean, joystick and taps. (add 'json' for JSON output)", false, cmd_imuinputread, "Usage: imuinputread [json]" },
   { "imuinputzero",    "Take the present pose as the joystick's centre (the same as five taps).", true, cmd_imuinputzero, "Usage: imuinputzero" },
   { "imuinputtapms",   "Tap window in ms: a button arrives this long after its last tap <200..800>", true, cmd_imuinputtapms, "Usage: imuinputtapms [200..800]" },
+  { "imuinputtapmerge", "Tap flags closer than this many ms are one knock (its rebound) <0..300>", true, cmd_imuinputtapmerge, "Usage: imuinputtapmerge [0..300]" },
   { "imuinputtilt",    "Tilt angle in degrees that moves the joystick <8..40>", true, cmd_imuinputtilt, "Usage: imuinputtilt [8..40]" },
   { "imuinputshake",   "A shake is the START button [on|off]", true, cmd_imuinputshake, "Usage: imuinputshake [on|off]" },
   { "imuinputswapxy",  "Swap the tilt axes [on|off|toggle]", true, cmd_imuinputswapxy, "Usage: imuinputswapxy [on|off|toggle]" },
@@ -432,6 +450,7 @@ const size_t imuInputCommandsCount = sizeof(imuInputCommands) / sizeof(imuInputC
 // Only this device's entries; autostart is the input module's (HAL_Input.cpp).
 static const SettingEntry imuInputSettingEntries[] = {
   { "imuInputTapWindowMs", SETTING_INT,  &gSettings.imuInputTapWindowMs, 350, 0, nullptr, 200, 800, "Tap window (ms)",       nullptr, false, nullptr, "imuinputtapms" },
+  { "imuInputTapMergeMs",  SETTING_INT,  &gSettings.imuInputTapMergeMs,  120, 0, nullptr, 0,   300, "Tap merge (ms)",        nullptr, false, nullptr, "imuinputtapmerge" },
   { "imuInputTiltDeg",     SETTING_INT,  &gSettings.imuInputTiltDeg,      15, 0, nullptr, 8,   40,  "Tilt angle (degrees)",  nullptr, false, nullptr, "imuinputtilt" },
   { "imuInputShakeStart",  SETTING_BOOL, &gSettings.imuInputShakeStart,    1, 0, nullptr, 0,   1,   "Shake is START",        nullptr, false, nullptr, "imuinputshake" },
   { "imuInputSwapXY",      SETTING_BOOL, &gSettings.imuInputSwapXY,        0, 0, nullptr, 0,   1,   "Swap tilt axes",        nullptr, false, nullptr, "imuinputswapxy" },

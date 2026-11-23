@@ -29,6 +29,22 @@
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "System_CommandRegistry.h"
+#if ENABLE_IMU_LSM6DSOX
+#include "HAL_Motion_LSM6DSOXCore.h"  // Lsm6TapTuning: the tap commands' replies
+#endif
+
+// The tap settings last handed to the backend: a changed one (a command, the
+// web settings, an import) is passed on at the next sample. IMU task only.
+static void imuApplyTapTuning(bool force) {
+  static int lastMg = -1, lastShock = -1, lastQuiet = -1;
+  if (!force && gSettings.imuTapThresholdMg == lastMg && gSettings.imuTapShock == lastShock &&
+      gSettings.imuTapQuiet == lastQuiet)
+    return;
+  lastMg = gSettings.imuTapThresholdMg;
+  lastShock = gSettings.imuTapShock;
+  lastQuiet = gSettings.imuTapQuiet;
+  motionBackendSetTapTuning(lastMg, lastShock, lastQuiet);
+}
 
 // Tap diagnostics (single writer: the IMU task; read for imustatus json).
 struct ImuTapDiag { uint32_t lastReadMs, maxGapMs, gaps, chipTaps, gapDropped; };
@@ -542,6 +558,7 @@ static bool imuInitBackend() {
   sImuOpen.secondAddress = second;
   sImuOpen.open = true;
   INFO_IMU_LIFECYCLEF("Starting %s at 0x%02X on bus %u", imuBackendName(), (unsigned)address, (unsigned)bus);
+  imuApplyTapTuning(true);
   if (!motionBackendInit(bus, address, second, sImuInitWhy, sizeof(sImuInitWhy))) {
     imuCloseTarget();
     if (!sImuInitWhy[0]) {
@@ -848,6 +865,49 @@ const char* cmd_imuwebmaxfps(const String& argsInput) {
 // IMU Device Settings Commands
 // ============================================================================
 
+#if ENABLE_IMU_LSM6DSOX
+// A setting reply for the tap engine: name, value, unit and what it does.
+static const char* imuTapSettingCommand(const String& argsInput, int& field, int lo, int hi, const char* name,
+                                        const char* what) {
+  String text = argsInput;
+  text.trim();
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  if (text.length() > 0) {
+    int v = 0;
+    if (!parseIntArg(text, v)) return kCommandReplyNotANumber;
+    if (v < lo || v > hi) {
+      snprintf(getDebugBuffer(), 1024, "Error: %s must be %d..%d.", name, lo, hi);
+      return getDebugBuffer();
+    }
+    setSetting(field, v);
+  }
+  const Lsm6TapTuning t =
+      lsm6TapTuningFromMg(gSettings.imuTapThresholdMg, gSettings.imuTapShock, gSettings.imuTapQuiet);
+  snprintf(getDebugBuffer(), 1024, "[IMU] %s: %d (%s). The chip uses threshold %u mg, shock %u, quiet %u%s.", name,
+           field, what, (unsigned)t.threshold * kLsm6TapMgPerStep, (unsigned)t.shock, (unsigned)t.quiet,
+           gImuRunning ? ", applied now" : ", applied at the next 'openimu'");
+  return getDebugBuffer();
+}
+
+const char* cmd_imutapthreshold(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return imuTapSettingCommand(argsInput, gSettings.imuTapThresholdMg, 125, 3875, "Tap threshold (mg)",
+                              "lower catches softer taps, and splits hard ones more often; 125 mg steps");
+}
+
+const char* cmd_imutapshock(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return imuTapSettingCommand(argsInput, gSettings.imuTapShock, 0, 3, "Tap shock window",
+                              "how long a knock may stay above the threshold; 0 = 4/ODR, else 8/ODR per step");
+}
+
+const char* cmd_imutapquiet(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return imuTapSettingCommand(argsInput, gSettings.imuTapQuiet, 0, 3, "Tap quiet window",
+                              "the hush after a knock before the next can count; 0 = 2/ODR, else 4/ODR per step");
+}
+#endif
+
 const char* cmd_imudevicepollms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String valStr = argsInput;
@@ -1049,6 +1109,11 @@ const CommandEntry imuCommands[] = {
   { "imuwebmaxfps", "IMU web max FPS: <1..30>", true, cmd_imuwebmaxfps, "Usage: imuwebmaxfps <1..30>" },
 
   // Device-level settings (sensor hardware behavior)
+#if ENABLE_IMU_LSM6DSOX
+  { "imutapthreshold", "IMU tap threshold in mg (125 mg steps): [125..3875]", true, cmd_imutapthreshold, "Usage: imutapthreshold [125..3875]" },
+  { "imutapshock", "IMU tap shock window: [0..3]", true, cmd_imutapshock, "Usage: imutapshock [0..3]" },
+  { "imutapquiet", "IMU tap quiet window: [0..3]", true, cmd_imutapquiet, "Usage: imutapquiet [0..3]" },
+#endif
   { "imudevicepollms", "IMU device poll interval: <50..1000>", true, cmd_imudevicepollms, "Usage: imuDevicePollMs <50..1000>" },
   { "imuorientationmode", "IMU orientation mode: <0..8>", true, cmd_imuorientationmode, "Usage: imuorientationmode <0..8>" },
   { "imuorientationcorrection", "IMU orientation correction: <0|1>", true, cmd_imuorientationcorrection, "Usage: imuorientationcorrection <0|1>" },
@@ -1163,6 +1228,7 @@ void imuTask(void* parameter) {
         const uint8_t address = imuDeviceAddress();
         const uint8_t second = imuMagDeviceAddress();
         MotionSample sample;
+        imuApplyTapTuning(false);  // a changed tap setting reaches the chip with this sample
         const bool result = motionBackendRead(imuBus, address, second, sample);
         const unsigned long readMs = millis();  // the sample's time: right after the read
         // A fixed rate keeps its schedule; a late tick starts a new one.
@@ -1229,6 +1295,11 @@ static const SettingEntry imuSettingEntries[] = {
   { "imuTransitionMs", SETTING_INT, &gSettings.imuTransitionMs, 100, 0, nullptr, 0, 1000, "Transition (ms)", nullptr, false, "timing", "imutransitionms" },
   { "imuWebMaxFps", SETTING_INT, &gSettings.imuWebMaxFps, 15, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", "imuwebmaxfps" },
   { "imuDevicePollMs", SETTING_INT, &gSettings.imuDevicePollMs, 200, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr, false, "timing", "imudevicepollms" },
+#if ENABLE_IMU_LSM6DSOX
+  { "imuTapThresholdMg", SETTING_INT, &gSettings.imuTapThresholdMg, 500, 0, nullptr, 125, 3875, "Tap threshold (mg)", nullptr, false, "tap", "imutapthreshold" },
+  { "imuTapShock", SETTING_INT, &gSettings.imuTapShock, 2, 0, nullptr, 0, 3, "Tap shock window", nullptr, false, "tap", "imutapshock" },
+  { "imuTapQuiet", SETTING_INT, &gSettings.imuTapQuiet, 1, 0, nullptr, 0, 3, "Tap quiet window", nullptr, false, "tap", "imutapquiet" },
+#endif
   { "imuOrientationMode", SETTING_INT, &gSettings.imuOrientationMode, 0, 0, nullptr, 0, 8, "Orientation Mode", "0:Normal,1:Flip Pitch,2:Flip Roll,3:Flip Yaw,4:Flip Pitch+Roll,5:Roll 180 Fix,6:Rotate 90 CCW,7:Alt Extreme Pitch,8:Upside Down", false, "orientation", "imuorientationmode" },
   { "imuOrientationCorrectionEnabled", SETTING_BOOL, &gSettings.imuOrientationCorrectionEnabled, false, 0, nullptr, 0, 1, "Orientation Correction", nullptr, false, "orientation", "imuorientationcorrection" },
   { "imuPitchOffset", SETTING_FLOAT, &gSettings.imuPitchOffset, 0, 0.0f, nullptr, -180, 180, "Pitch Offset", nullptr, false, "orientation", "imupitchoffset" },

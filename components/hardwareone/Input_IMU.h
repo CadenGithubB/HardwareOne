@@ -40,6 +40,7 @@ int imuInputBuildDataJson(char* buf, size_t size);
 const char* cmd_imuinputread(const String& argsInput);
 const char* cmd_imuinputzero(const String& argsInput);
 const char* cmd_imuinputtapms(const String& argsInput);
+const char* cmd_imuinputtapmerge(const String& argsInput);
 const char* cmd_imuinputtilt(const String& argsInput);
 const char* cmd_imuinputshake(const String& argsInput);
 const char* cmd_imuinputswapxy(const String& argsInput);

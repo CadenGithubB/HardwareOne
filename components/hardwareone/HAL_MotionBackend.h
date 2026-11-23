@@ -93,6 +93,12 @@ bool motionBackendInit(uint8_t bus, uint8_t address, uint8_t secondAddress, char
 // the sample.
 bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, MotionSample& out);
 
+// The chip's tap engine: threshold in mg, shock and quiet windows (0..3).
+// Taken at the next start, and by a running chip at its next sample (written
+// by the IMU task, so a command can call this from any task). A backend
+// without a tunable tap engine ignores it.
+void motionBackendSetTapTuning(long thresholdMg, long shock, long quiet);
+
 // Release whatever the backend holds and power the chip(s) down, best
 // effort; the chip may already be gone.
 void motionBackendStop();

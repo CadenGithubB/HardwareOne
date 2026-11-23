@@ -72,6 +72,9 @@ const char* cmd_imutransitionms(const String& argsInput);
 const char* cmd_imuwebmaxfps(const String& argsInput);
 // IMU device settings
 const char* cmd_imudevicepollms(const String& argsInput);
+const char* cmd_imutapthreshold(const String& argsInput);
+const char* cmd_imutapshock(const String& argsInput);
+const char* cmd_imutapquiet(const String& argsInput);
 const char* cmd_imuorientationmode(const String& argsInput);
 const char* cmd_imuorientationcorrection(const String& argsInput);
 const char* cmd_imupitchoffset(const String& argsInput);

@@ -40,7 +40,7 @@ static void testConfigurationBytes() {
   assert(kLsm6dsoxEventBurst[0] == 0x4F);
   // TAP_CFG1: priority 000, X threshold 8; TAP_CFG2: INTERRUPTS_ENABLE (7) + Y threshold 8;
   // TAP_THS_6D: D4D off, Z threshold 8.
-  assert(kLsm6dsoxEventBurst[1] == 0x03 && kLsm6dsoxEventBurst[2] == 0x83 && kLsm6dsoxEventBurst[3] == 0x03);
+  assert(kLsm6dsoxEventBurst[1] == 0x04 && kLsm6dsoxEventBurst[2] == 0x84 && kLsm6dsoxEventBurst[3] == 0x04);
   // INT_DUR2: DUR 0, QUIET 01, SHOCK 10.
   assert(kLsm6dsoxEventBurst[4] == 0x06);
   // WAKE_UP_THS: SINGLE_DOUBLE_TAP 0 (single tap only).
@@ -266,7 +266,7 @@ static void testConfigurationThatDoesNotStick() {
   events.accel.ignoredReg = 0x58;  // TAP_CFG2: INTERRUPTS_ENABLE
   assert(!start(events, why));
   assert(why == "Error: The LSM6DSOX at 0x6A on bus 1 did not keep its settings (register 0x58 reads 0x00, "
-                "expected 0x83). Run 'openimu' again.");
+                "expected 0x84). Run 'openimu' again.");
   // So is a lost filter (CTRL8_XL) or I3C-off (CTRL9_XL) write.
   Bus filter;
   filter.accel.ignoreWritesTo = true;
@@ -397,7 +397,7 @@ static void testDs3trcVariant() {
       "w 6A 10 3", "w 6A 58 7", "w 1C A0 5", "r 6A 10 3", "r 6A 58 7", "r 1C A0 5",
   };
   assert(bus.log == expected);
-  assert(bus.accel.regs[0x10] == 0x68 && bus.accel.regs[0x58] == 0x8F && bus.accel.regs[0x59] == 0x03 &&
+  assert(bus.accel.regs[0x10] == 0x68 && bus.accel.regs[0x58] == 0x8F && bus.accel.regs[0x59] == 0x04 &&
          bus.accel.regs[0x5B] == 0x00 && bus.accel.regs[0x5E] == 0x50);
   assert(bus.accel.regs[0x17] == 0 && bus.accel.regs[0x56] == 0);  // not written
   // Events come from WAKE_UP_SRC (src[1]) and TAP_SRC (src[2]).
@@ -479,7 +479,30 @@ static void testSampleKeepsTheTap() {
   assert(sample(noMag, fresh, r, magFailed) && magFailed && !r.hasMag);
 }
 
+// The live tap tuning: mg rounds to 125 mg steps (1..31), the windows clamp
+// to 0..3, and the burst carries them on both chips.
+static void testTapTuning() {
+  Lsm6TapTuning t = lsm6TapTuningFromMg(500, 2, 1);
+  assert(t.threshold == 4 && t.shock == 2 && t.quiet == 1);
+  t = lsm6TapTuningFromMg(440, 9, -1);
+  assert(t.threshold == 4 && t.shock == 3 && t.quiet == 0);
+  assert(lsm6TapTuningFromMg(0, 0, 0).threshold == 1 && lsm6TapTuningFromMg(99999, 0, 0).threshold == 31);
+  uint8_t burst[9];
+  uint8_t reg = 0;
+  t = lsm6TapTuningFromMg(750, 3, 2);
+  assert(lsm6EventBurst(false, t, burst, reg) == 9 && reg == 0x56);
+  assert(burst[0] == kLsm6dsoxEventBurst[0] && burst[1] == 6 && burst[2] == 0x86 && burst[3] == 6 &&
+         burst[4] == ((2 << 2) | 3) && burst[8] == kLsm6dsoxEventBurst[8]);
+  assert(lsm6EventBurst(true, t, burst, reg) == 7 && reg == 0x58);
+  assert(burst[0] == kLsm6ds3EventBurst[0] && burst[1] == 6 && burst[2] == ((2 << 2) | 3) &&
+         burst[6] == kLsm6ds3EventBurst[6]);
+  // The defaults give the constant bursts.
+  assert(lsm6EventBurst(false, Lsm6TapTuning{}, burst, reg) == 9);
+  for (int i = 0; i < 9; ++i) assert(burst[i] == kLsm6dsoxEventBurst[i]);
+}
+
 int main() {
+  testTapTuning();
   testConfigurationBytes();
   testAddresses();
   testStartConfiguresBothChips();
