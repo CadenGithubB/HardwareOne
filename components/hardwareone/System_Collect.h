@@ -32,13 +32,14 @@
 #include <Arduino.h>
 #include <stdint.h>
 
+#include "System_ESPNow_Verdict.h"  // V4Verdict, what a handler returns (1.0 step 5b)
 struct V4RxCtx;
 
 // 83 CATCHUP_LIST_RESP and 85 CATCHUP_READ_RESP (espnow_task). The receive
 // table has already required a paired sender, a session-encrypted frame and
 // the row's minLen. Without ENABLE_ESPNOW_COLLECT: counted and dropped.
-void v4hCatchupListResp(const V4RxCtx& ctx);
-void v4hCatchupReadResp(const V4RxCtx& ctx);
+V4Verdict v4hCatchupListResp(const V4RxCtx& ctx);
+V4Verdict v4hCatchupReadResp(const V4RxCtx& ctx);
 
 // espnow_task loop (step 9f2f): the scheduler and the client.
 void collectTick(uint32_t nowMs);

@@ -3,13 +3,19 @@
 duplicate ring (ESP-NOW 1.0, E21).
 
 Compiled: System_ESPNow_MsgIdCore.h, the production generateMessageId() and the
-production v4_dedup_ring_seen_and_insert() with its entry type and TTL from
-System_ESPNow.cpp, over a fake clock (espnow_msgid_dedup_harness.cpp). Checks:
+production accept memory (v4_accept_find / v4_accept_lookup / v4_accept_record,
+1.0 step 5b) with its entry type and TTL from System_ESPNow.cpp, over a fake
+clock (espnow_msgid_dedup_harness.cpp). Checks:
 the seed is never 0; the counter goes FFFFFFFF -> 1 and never hands out 0; 300
 frames from a random start across the wrap are all new to the receiver and each
 re-delivery is caught; fragments of one msgId stay distinct; a sender restarting
 within the TTL from a new random start loses no frame (the old fixed start of 1
-lost its first 20, kept as a control); expiry after the TTL is unchanged.
+lost its first 20, kept as a control); expiry after the TTL is unchanged. The
+accept memory: an accepted frame is remembered as accepted and a silent one as
+silent; a refused frame leaves no entry, so its retry is processed and then
+remembered; the class and the fragment are part of the key; an expired entry is
+forgotten and refreshed in place with the new verdict; all 21 fragments of a
+completed message stay remembered; the entry is still 20 bytes.
 
 Source: the state's counter is seeded with espnowmsgid::seed(esp_random()) where
 ESP-NOW builds its state, and generateMessageId() goes through espnowmsgid::take.
@@ -53,9 +59,13 @@ def main():
 
     types = '\n'.join(m.group(0) for m in (
         re.search(r'^enum class V4DedupClass[^\n]*\n', source, re.M),
-        re.search(r'^struct V4DedupEntry \{[^\n]*\n', source, re.M)))
+        re.search(r'^enum class V4AcceptMemo[^\n]*\n', source, re.M),
+        re.search(r'^struct V4DedupEntry \{.*?\n\};\n', source, re.M | re.S)))
     ttl = re.search(r'^static constexpr uint32_t V4_DEDUP_TTL_MS = \d+;\n', source, re.M).group(0)
-    ring = extract_block(source, 'static bool v4_dedup_ring_seen_and_insert(')
+    ring = '\n\n'.join((extract_block(source, 'struct V4AcceptKey') + ';',
+                         extract_block(source, 'static V4DedupEntry* v4_accept_find('),
+                         extract_block(source, 'static V4AcceptMemo v4_accept_lookup('),
+                         extract_block(source, 'static void v4_accept_record(')))
 
     harness = (HERE / 'espnow_msgid_dedup_harness.cpp').read_text()
     for tag, value in [('// INSERT_MSGID_CORE', core), ('// INSERT_GENERATE', generate),

@@ -162,7 +162,8 @@ enum : uint16_t { ESPNOW_V4_FLAG_ACK_REQ = 0x0001 };
 struct Reply { uint32_t msgId; bool ok; std::string text; uint8_t status; uint32_t frameMsgId; };
 static std::vector<Reply> replies;  // CMD_RESP frames, both senders
 static int acks = 0;
-static bool v4_queue_sealed_ack(const uint8_t*, uint32_t) { ++acks; return true; }  // the 1.0 sealed ACK (System_ESPNow.cpp)
+// 1.0 step 5b: the deferred work sends no ACK of its own (`acks` stays 0); the
+// frame's ACK was the receive path's answer to v4h_user_sync's verdict.
 bool v4_send_command_response(const uint8_t*, uint32_t reqId, uint8_t status, const char* text,
                               uint16_t length) {
   replies.push_back({reqId, status == 0, std::string(text, length), status, 0});
@@ -467,12 +468,12 @@ static void scenarioSyncGates() {
   const char* name = "USER_SYNC: encryption and opt-in refusals are unchanged";
   begin();
   userSync(1, syncJson("root-pass", "dave", "dave-pass"), false);
-  check(acks == 1 && replies.empty() && passwordChecks == 0, name,
-        "a plaintext sync gets a bare ACK before any check");
+  check(acks == 0 && replies.empty() && passwordChecks == 0, name,
+        "a plaintext sync is dropped before any check, with no second ACK (the handler refused it)");
   gSettings.espnowUserSyncEnabled = false;
   userSync(2, syncJson("root-pass", "dave", "dave-pass"));
-  check(acks == 2 && replies.empty() && passwordChecks == 0, name,
-        "a disabled sync gets a bare ACK before any check");
+  check(acks == 0 && replies.empty() && passwordChecks == 0, name,
+        "a sync turned off meanwhile is dropped before any check, with no second ACK");
   gSettings.espnowUserSyncEnabled = true;
   userSync(3, syncJsonAs("carol", "carol-pass", "dave", "dave-pass"));
   check(lastReply(3, false, "Admin privileges required"), name, "a non-admin is refused");

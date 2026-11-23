@@ -78,7 +78,7 @@ REGIONS = (
     ('// ---- Room and tag membership of a paired peer -----',
      '// Save named ESP-NOW devices (paired devices with names/keys) to filesystem.'),
     ('// ---- Metadata work waiting for espnow_task -----',
-     'static void v4h_metadata_req(const V4RxCtx& ctx) {'),
+     'static V4Verdict v4h_metadata_req(const V4RxCtx& ctx) {'),
     ('// ---- Room and tag membership: what a peer announces -----',
      "/**\n * Process received metadata: the paired peer's registry record first"),
 )

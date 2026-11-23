@@ -53,13 +53,13 @@ DEFINITIONS = (
     'const char* resultText, uint16_t textLen)',
     'static bool v4_send_cmd_resp_async(const uint8_t* dst, uint32_t reqId, uint8_t status, const char* text)',
     'static bool v4_send_stream_line(const uint8_t* dst, uint32_t reqId, const char* data, size_t len)',
-    'static void v4h_cmd_resp(const V4RxCtx& ctx)',
-    'static void v4h_stream(const V4RxCtx& ctx)',
-    'static void v4h_cmd(const V4RxCtx& ctx)',
+    'static V4Verdict v4h_cmd_resp(const V4RxCtx& ctx)',
+    'static V4Verdict v4h_stream(const V4RxCtx& ctx)',
+    'static V4Verdict v4h_cmd(const V4RxCtx& ctx)',
     'static String redactEspNowCommandResult(const String& output)',
     'static void v4CmdResultCallback(bool ok, const char* result, void* userData)',
-    'static void v4h_topo_start(const V4RxCtx& ctx)',
-    'static void v4h_topo_peer(const V4RxCtx& ctx)',
+    'static V4Verdict v4h_topo_start(const V4RxCtx& ctx)',
+    'static V4Verdict v4h_topo_peer(const V4RxCtx& ctx)',
 )
 HANDLE_CMD = ('static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_t msgId, '
               'const char* cmdPayload, bool wasSessionEncrypted)')
@@ -107,8 +107,8 @@ def source_rules(source: str) -> list[str]:
             line = source.count('\n', 0, m.start()) + 1
             failures.append(f'System_ESPNow.cpp:{line}: a {m.group(2)} frame is sent under '
                             f'{m.group(3).strip()!r}, not a fresh generateMessageId()')
-    incoming = source[source.index('// Dedup check'):]
-    incoming = incoming[:incoming.index('v4_dedup_frame_seen(recv_info->src_addr')]
+    incoming = source[source.index('// === Accept memory (DESIGN 3.2 step 4) ==='):]
+    incoming = incoming[:incoming.index('v4_accept_lookup(acceptKey')]
     for opcode in ('STREAM', 'BOND_STREAM_CTRL', 'CMD_RESP'):
         if f'ESPNOW_V4_TYPE_{opcode} &&' in incoming or f'h->type != ESPNOW_V4_TYPE_{opcode}' in incoming:
             failures.append(f'the duplicate check still skips {opcode}')
@@ -156,7 +156,8 @@ def main() -> int:
         (d / 'Arduino.h').write_text(string_double())
         (d / 'System_BuildConfig.h').write_text(BUILD_CONFIG)
         (d / 'esp_now.h').write_text(ESP_NOW)
-        for name in ('System_ESPNow_Wire.h', 'System_ESPNow_RxCtx.h', 'System_ESPNow_SensorCore.h',
+        for name in ('System_ESPNow_Wire.h', 'System_ESPNow_RxCtx.h', 'System_ESPNow_Verdict.h',
+                     'System_ESPNow_SensorCore.h',
                      'System_ESPNow_TimeCore.h', 'System_ClockCore.h', 'System_ESPNow_PowerEventCore.h',
                      'System_ESPNow_ForwardCore.h', 'System_ESPNow_AnswerCore.h', 'System_ESPNow_CatchupCore.h',
                      'System_DeviceName.h'):

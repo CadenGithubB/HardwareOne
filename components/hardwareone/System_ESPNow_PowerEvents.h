@@ -20,19 +20,20 @@
 
 #include "System_ESPNow_PowerEventCore.h"
 
+#include "System_ESPNow_Verdict.h"  // V4Verdict, what a handler returns (1.0 step 5b)
 struct V4RxCtx;
 
 // Receive handlers (espnow_task). The receive table has already required a
 // paired sender and a session-encrypted frame; a device whose role does not
 // receive (a worker) refuses the frame and counts it.
-void v4hPowerStatus(const V4RxCtx& ctx);
-void v4hEventPush(const V4RxCtx& ctx);
+V4Verdict v4hPowerStatus(const V4RxCtx& ctx);
+V4Verdict v4hEventPush(const V4RxCtx& ctx);
 #if ENABLE_BONDED_MODE
 // BOND_POWER_STATUS (180) / BOND_EVENT_PUSH (182) from this device's bond
 // partner (the receive table's REQ_BOND_PEER): kept on a bond master whatever
 // its mesh role, and handed to its forwarder.
-void v4hBondPowerStatus(const V4RxCtx& ctx);
-void v4hBondEventPush(const V4RxCtx& ctx);
+V4Verdict v4hBondPowerStatus(const V4RxCtx& ctx);
+V4Verdict v4hBondEventPush(const V4RxCtx& ctx);
 #endif
 
 // espnow_task loop, after sensorLinkTick: sends this device's battery state

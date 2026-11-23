@@ -77,6 +77,15 @@ def string_double():
                                      '{ return String(left) + right; }\n')
 
 
+def ram_finalize_queue(main_cpp: str) -> str:
+    """The small-file finalize queue and its loop step (1.0 step 5b), or ''."""
+    start = '// Complete small files waiting for fileRamFinalize'
+    end = '// FILE_END — finalize the slot'
+    if start not in main_cpp:
+        return ''
+    return main_cpp[main_cpp.index(start):main_cpp.index(end)]
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--cxx', default=os.environ.get('CXX') or shutil.which('clang++') or shutil.which('c++'))
@@ -139,7 +148,9 @@ def main():
     if ('fileRxIsBondSync(gSettings.bondModeEnabled, fromPartner, filename)' not in glue or
             'parseMacAddress(gSettings.bondPeerMac, partner)' not in glue):
         failures.append('fileRxBondSync does not ask the rule with bond mode and the bond partner')
-    for marker in ('static void fileWriterFinalizeJob(', 'static void v4h_file_end('):
+    ram_finish = ('static void fileRamFinalize(' if 'static void fileRamFinalize(' in main_cpp
+                  else 'static V4Verdict v4h_file_end(')
+    for marker in ('static void fileWriterFinalizeJob(', ram_finish):
         if 'if (!fileRxBondSync(sndMac, filename)) {' not in body(main_cpp, marker, E):
             failures.append(f'{marker[12:-1]} shows a toast for a bond sync file')
     fslist = read('System_ESPNow_FsList.cpp')
@@ -163,12 +174,15 @@ def main():
     slots_source = files_cpp[files_cpp.index(start):files_cpp.index(end)]
 
     rx = '\n\n'.join(filter(None, (
-        body(main_cpp, 'static void v4h_file_start(', E),
+        optional(main_cpp, 'static uint8_t v4FileStartRefusalStatus(', E),
+        body(main_cpp, 'static V4Verdict v4h_file_start(', E),
         optional(main_cpp, 'static void v4FileNoteSlotTableBusy(', E),
-        body(main_cpp, 'static void v4h_file_data(', E),
+        body(main_cpp, 'static V4Verdict v4h_file_data(', E),
         body(main_cpp, 'static void fileWriterFinalizeJob(', E),
-        body(main_cpp, 'static void v4h_file_end(', E),
-        body(main_cpp, 'static void v4h_file_cancel(', E),
+        optional(main_cpp, 'static void fileRamFinalize(', E),
+        ram_finalize_queue(main_cpp),
+        body(main_cpp, 'static V4Verdict v4h_file_end(', E),
+        body(main_cpp, 'static V4Verdict v4h_file_cancel(', E),
     )))
 
     # ---- send side ---------------------------------------------------------------
@@ -228,7 +242,7 @@ def main():
         # Real headers, from the tree under test: wire structs, the receive
         # context and the MAC text helpers.
         # (the wire header includes the five dependency-free rules headers)
-        for name in ('System_ESPNow_Wire.h', 'System_ESPNow_RxCtx.h', 'System_MacText.h',
+        for name in ('System_ESPNow_Wire.h', 'System_ESPNow_RxCtx.h', 'System_ESPNow_Verdict.h', 'System_MacText.h',
                      'System_ESPNow_SensorCore.h', 'System_ESPNow_TimeCore.h', 'System_ClockCore.h',
                      'System_ESPNow_PowerEventCore.h', 'System_ESPNow_ForwardCore.h',
                      'System_ESPNow_AnswerCore.h', 'System_ESPNow_CatchupCore.h', 'System_DeviceName.h'):
@@ -244,6 +258,8 @@ def main():
                str(unit), '-o', str(exe)]
         if not fixed:
             cmd.insert(1, '-DHW1_FILE_SEND_BOOL_ONLY=1')
+        if 'static void fileRamFinalizeTick(' in main_cpp:
+            cmd.insert(1, '-DHW1_HAVE_RAM_FINALIZE=1')
         subprocess.run(cmd, check=True, timeout=300)
         result = subprocess.run([str(exe)] + ([a.case] if a.case else []), timeout=180)
         if result.returncode:

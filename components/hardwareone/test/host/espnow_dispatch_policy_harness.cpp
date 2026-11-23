@@ -197,7 +197,22 @@ static uint32_t gEspNowRxLenDrops = 0;
 // Channel follow hook (System_ESPNow.cpp): no follower in this harness.
 static void espnowChFollowOnSealedFrame(const esp_now_recv_info*, uint8_t) {}
 
+// The reassembly step (System_ESPNow.cpp v4_reasm_step): every frame here is
+// a single frame, so it is never called; test_espnow_reassembly.py runs the
+// real one.
+[[maybe_unused]] static bool v4_reasm_step(const esp_now_recv_info*, const EspNowV4Header*, const uint8_t*&,
+                                           uint16_t&, V4Verdict*) { return true; }
+
 // INSERT_DISPATCH
+
+// The last verdict the dispatcher returned (1.0 step 5b). A frame is
+// "claimed" when its opcode has a row: everything but kUnsupported.
+static V4Verdict gLastVerdict{};
+static bool v4_dispatch_claims(const esp_now_recv_info* ri, const EspNowV4Header* h, const uint8_t* payload,
+                               uint16_t len, bool paired, bool authed, bool enc, const char* name) {
+  gLastVerdict = v4_dispatch_table_try(ri, h, payload, len, paired, authed, enc, name);
+  return !(gLastVerdict.kind == V4VerdictKind::Refused && gLastVerdict.status == espnowanswer::kUnsupported);
+}
 
 // INSERT_DRAIN
 
@@ -245,7 +260,7 @@ static bool run(uint8_t type, bool paired, bool authed, bool enc, bool keyed) {
   const V4OpcodeEntry* row = v4_dispatch_lookup(type);
   uint8_t payload[256] = {};
   const uint16_t len = row ? row->minLen : 16;
-  bool claimed = v4_dispatch_table_try(&ri, &h, payload, len, paired, authed, enc, "peer");
+  bool claimed = v4_dispatch_claims(&ri, &h, payload, len, paired, authed, enc, "peer");
   return claimed && gHandlerCalls == 1;
 }
 
@@ -299,7 +314,7 @@ static bool deliver(uint8_t type, uint8_t* origin, uint8_t* radioSrc, const char
   esp_now_recv_info info{radioSrc, nullptr, &ctrl};
   const bool paired = std::memcmp(radioSrc, gPeerA, 6) == 0;
   const std::string name = paired ? std::string("alpha") : macText(radioSrc);
-  return v4_dispatch_table_try(&info, &h, reinterpret_cast<const uint8_t*>(text),
+  return v4_dispatch_claims(&info, &h, reinterpret_cast<const uint8_t*>(text),
                                (uint16_t)std::strlen(text), paired, authed, enc, name.c_str());
 }
 
@@ -474,7 +489,7 @@ static unsigned runTextCases() {
       wifi_pkt_rx_ctrl_t ctrl{-50};
       esp_now_recv_info info{radioSrc, nullptr, &ctrl};
       const bool paired = std::memcmp(radioSrc, gPeerA, 6) == 0;
-      v4_dispatch_table_try(&info, &h, reinterpret_cast<const uint8_t*>(hintText), sizeof hint, paired,
+      v4_dispatch_claims(&info, &h, reinterpret_cast<const uint8_t*>(hintText), sizeof hint, paired,
                             authed, enc, "alpha");
     };
     resetText(true);
@@ -577,7 +592,7 @@ static bool bondRun(uint8_t type, uint8_t* src, bool paired, bool enc, bool minu
   const V4OpcodeEntry* row = v4_dispatch_lookup(type);
   uint8_t payload[256] = {};
   const uint16_t len = row ? row->minLen : 16;
-  const bool claimed = v4_dispatch_table_try(&ri, &h, payload, len, paired, enc, enc, "peer");
+  const bool claimed = v4_dispatch_claims(&ri, &h, payload, len, paired, enc, enc, "peer");
   return claimed && gHandlerCalls == 1;
 }
 
@@ -611,6 +626,11 @@ static unsigned runBondCases() {
            bondRun(op, gOtherPaired, true, true), false);
     check(name + " from a second paired peer: drop is logged (one WARN) and cleaned up",
           gWarns == 1 && gCleanups == 1 && gHandlerCalls == 0);
+    check(name + " from a second paired peer over its session is answered kRefused (1.0 step 5b, G3)",
+          gLastVerdict.kind == V4VerdictKind::Refused && gLastVerdict.status == espnowanswer::kRefused);
+    bondRun(op, gOtherPaired, true, false);
+    check(name + " from a second paired peer, not sealed: silence (no session peer, G3)",
+          gLastVerdict.kind == V4VerdictKind::Silent);
     expect(name + " from the bond partner, plaintext", bondRun(op, gPartner, true, false), false);
     expect(name + " from an unpaired source, session-encrypted", bondRun(op, gOtherPaired, false, true), false);
 
@@ -742,7 +762,7 @@ static bool lengthRun(const V4OpcodeEntry& row, uint16_t len) {
   h.fragCount = 1;
   static uint8_t payload[300];
   std::memset(payload, 0x20, sizeof payload);  // printable, so the text row takes it
-  return v4_dispatch_table_try(&ri, &h, payload, len, true, true, true, "peer");
+  return v4_dispatch_claims(&ri, &h, payload, len, true, true, true, "peer");
 }
 
 static unsigned runLengthCases() {
@@ -818,9 +838,94 @@ static unsigned runLengthCases() {
     esp_now_recv_info info{gPeerA, nullptr, &ctrl};
     uint8_t payload[20] = {0x2A, 0x00};
     const uint32_t before = gEspNowRxLenDrops;
-    const bool claimed = v4_dispatch_table_try(&info, &h, payload, sizeof payload, true, true, false, "alpha");
+    const bool claimed = v4_dispatch_claims(&info, &h, payload, sizeof payload, true, true, false, "alpha");
     check("SESSION_UNKNOWN of 20 bytes (a later sender) reaches the SESSION_UNKNOWN rule",
           claimed && gHintRuleCalls == 1 && gEspNowRxLenDrops == before);
+  }
+  return failures;
+}
+
+// The table walk (1.0 step 5b): every row answers with a verdict. With every
+// gate passed and the row's minimum length the (stub or real) handler decides;
+// one byte short is kBadRequest; a gate that wants a paired sender or a
+// session says nothing to a sender that is neither (silence); an opcode
+// without a row is kUnsupported.
+static unsigned runVerdictWalk() {
+  unsigned failures = 0;
+  auto check = [&](const std::string& what, bool ok) {
+    if (!ok) ++failures;
+    std::printf("%s %s\n", ok ? "ok  " : "FAIL", what.c_str());
+  };
+  gEspNow->encryptionEnabled = true;
+  unsigned rows = 0, stubAccepted = 0, shortBad = 0, gateSilent = 0, gated = 0;
+  for (size_t i = 0; i < kV4HandlerTableSize; i++) {
+    const V4OpcodeEntry& row = kV4HandlerTable[i];
+    if (row.flags & V4_OPC_FLAG_REQ_BOND_PEER) continue;  // runBondCases walks the bond rows
+    ++rows;
+    const std::string name = opcodeName(row.opcode);
+    esp_now_recv_info ri{gSrc, nullptr, nullptr};
+    EspNowV4Header h{};
+    h.type = row.opcode;
+    h.fragCount = 1;
+    uint8_t payload[256] = {};
+    gHandlerCalls = 0;
+    gLastHandler.clear();
+    V4Verdict v = v4_dispatch_table_try(&ri, &h, payload, row.minLen, true, true, true, "peer");
+    if (gHandlerCalls == 1 && v.kind == V4VerdictKind::Accepted) ++stubAccepted;
+    else if (gHandlerCalls == 1) check(name + ": the handler's own verdict is returned", true);
+    if (row.minLen > 0) {
+      gHandlerCalls = 0;
+      v = v4_dispatch_table_try(&ri, &h, payload, (uint16_t)(row.minLen - 1), true, true, true, "peer");
+      if (gHandlerCalls == 0 && v.kind == V4VerdictKind::Refused && v.status == espnowanswer::kBadRequest) ++shortBad;
+      else check(name + " one byte short is answered kBadRequest", false);
+    } else {
+      ++shortBad;
+    }
+    if (row.flags & (V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC)) {
+      ++gated;
+      const bool paired = !(row.flags & V4_OPC_FLAG_REQ_PAIRED);
+      gHandlerCalls = 0;
+      v = v4_dispatch_table_try(&ri, &h, payload, row.minLen, paired, true, false, "peer");
+      if (gHandlerCalls == 0 && v.kind == V4VerdictKind::Silent) ++gateSilent;
+      else check(name + " refused at a gate to a sender without a session: silence", false);
+    }
+  }
+  check("every non-bond row with its gates passed reaches its handler and returns its verdict (" +
+            std::to_string(stubAccepted) + " stub rows accepted of " + std::to_string(rows) + ")",
+        stubAccepted + 3 >= rows && stubAccepted > 0);
+  check("every row one byte short is answered kBadRequest (" + std::to_string(shortBad) + "/" +
+            std::to_string(rows) + ")", shortBad == rows);
+  check("every gated row refused to an unpaired or unsealed sender is silent (" + std::to_string(gateSilent) +
+            "/" + std::to_string(gated) + ")", gateSilent == gated && gated > 0);
+  for (unsigned op = 0; op < 256; ++op) {
+    if (v4_dispatch_lookup((uint8_t)op)) continue;
+    esp_now_recv_info ri{gSrc, nullptr, nullptr};
+    EspNowV4Header h{};
+    h.type = (uint8_t)op;
+    h.fragCount = 1;
+    uint8_t payload[16] = {};
+    const V4Verdict v = v4_dispatch_table_try(&ri, &h, payload, sizeof payload, true, true, true, "peer");
+    if (!(v.kind == V4VerdictKind::Refused && v.status == espnowanswer::kUnsupported)) {
+      check("opcode " + std::to_string(op) + " without a row is answered kUnsupported", false);
+    }
+  }
+  check("every opcode without a row is answered kUnsupported", true);
+  // TEXT into a full ring: not taken, answered busy (the sender no longer
+  // shows Delivered), and the ring is unchanged.
+  {
+    esp_now_recv_info ri{gSrc, nullptr, nullptr};
+    EspNowV4Header h{};
+    h.type = ESPNOW_V4_TYPE_TEXT;
+    h.fragCount = 1;
+    std::memcpy(h.origin, gSrc, 6);
+    const uint8_t text[] = "hello";
+    gEspNow->textQueueTail = 0;
+    gEspNow->textQueueHead = EspNowState::TEXT_QUEUE_SIZE - 1;  // one short of the tail: full
+    const V4Verdict v = v4_dispatch_table_try(&ri, &h, text, 5, true, true, true, "peer");
+    check("TEXT into a full ring is refused busy and the ring is unchanged",
+          v.kind == V4VerdictKind::Refused && v.status == espnowanswer::kBusy &&
+              gEspNow->textQueueHead == EspNowState::TEXT_QUEUE_SIZE - 1);
+    gEspNow->textQueueHead = gEspNow->textQueueTail = 0;
   }
   return failures;
 }
@@ -934,6 +1039,7 @@ int main() {
   failures += runTextCases();
   failures += runBondCases();
   failures += runLengthCases();
+  failures += runVerdictWalk();
 
   std::printf("ENABLE_BONDED_MODE=%d: %u failure%s\n", ENABLE_BONDED_MODE, failures, failures == 1 ? "" : "s");
   return failures ? 1 : 0;

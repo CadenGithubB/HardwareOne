@@ -417,6 +417,7 @@ static void testStreamLinesAreAnswers() {
 }
 
 // A CMD frame as the dispatcher hands it to v4h_cmd.
+static V4Verdict gLastCmdVerdict{};
 static void receiveCmd(const uint8_t* from, uint32_t msgId, const char* text, bool sealed = true) {
   esp_now_recv_info info{};
   info.src_addr = const_cast<uint8_t*>(from);
@@ -431,7 +432,7 @@ static void receiveCmd(const uint8_t* from, uint32_t msgId, const char* text, bo
   ctx.isPaired = ctx.isAuthenticated = true;
   ctx.isSessionEncrypted = sealed;
   ctx.deviceName = "peerA";
-  v4h_cmd(ctx);
+  gLastCmdVerdict = v4h_cmd(ctx);
 }
 
 // The answer on the air is {reqId, status} under a msgId of the answerer's
@@ -458,11 +459,14 @@ static void testCmdSlotBusy() {
   check(air.empty() && gState.deferredCmdPending && gState.deferredCmdMsgId == 300 &&
             std::strcmp(gState.deferredCmdPayload, "admin:pw:status") == 0,
         "slot free: the CMD waits for the task, nothing is answered");
+  check(gLastCmdVerdict.kind == V4VerdictKind::Accepted, "slot free: the CMD is accepted (its ACK says 0)");
   receiveCmd(kRequester, 300, "admin:pw:status");
   check(air.empty(), "the waiting command again: no answer (it will run)");
   receiveCmd(kRequester, 301, "admin:pw:status", false);
   check(air.empty(), "an unsealed CMD while the slot is taken: no answer");
   receiveCmd(kRequester, 301, "admin:pw:uptime");
+  check(gLastCmdVerdict.kind == V4VerdictKind::Refused && gLastCmdVerdict.status == espnowanswer::kBusy,
+        "slot taken: the CMD is refused busy (its ACK says busy, 1.0 step 5b)");
   checkAnswer("slot taken", 301, espnowanswer::kBusy, "busy", false);
 }
 

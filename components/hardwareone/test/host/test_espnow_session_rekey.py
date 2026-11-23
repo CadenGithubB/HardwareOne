@@ -39,6 +39,15 @@ SOURCES = ('System_ESPNow_Handlers_Crypto.cpp', 'System_ESPNow_Sessions.cpp',
            'System_ESPNow_RxCtx.h', 'System_ESPNow_Deadline.h', 'System_ESPNow_Handlers_Crypto.h')
 
 
+
+def verdict_src(rxctx_text):
+    """System_ESPNow_Verdict.h (1.0 step 5b) as text, for a harness that pastes
+    V4RxCtx in: its helpers return V4Verdict. Empty for a tree without it."""
+    p = Path(__file__).resolve().parents[2] / 'System_ESPNow_Verdict.h'
+    if 'System_ESPNow_Verdict.h' not in rxctx_text or not p.exists():
+        return ''
+    return p.read_text() + '\n'
+
 def fail(what):
     raise SystemExit(f'test_espnow_session_rekey: {what}')
 
@@ -102,13 +111,16 @@ def build_wire(wire):
 def build_types(sessions_h, ident, rxctx):
     parts = [between(sessions_h, 'enum SessionStateLifecycle',
                      '// One-time allocation of the gSessions table', 'System_ESPNow_Sessions.h')]
+    # The acknowledged-send outcome (1.0 step 5b), when present.
+    if 'enum class V4SendOutcome' in sessions_h:
+        parts.append(line(sessions_h, r'^enum class V4SendOutcome[^;]*;', 'V4SendOutcome'))
     # Handshake-freshness verdict (declared further down the header), when present.
     if 'enum SessionPeerRekeyVerdict' in sessions_h:
         parts.append(line(sessions_h, r'^constexpr uint32_t kRekeySeqSlack = \d+;', 'kRekeySeqSlack'))
         parts.append(one(sessions_h, 'enum SessionPeerRekeyVerdict', 'System_ESPNow_Sessions.h') + ';')
     parts.append(one(ident, 'struct EspNowIdentity', 'System_ESPNow_Identity.h') + ';')
     parts.append(one(ident, 'struct PeerIdentity', 'System_ESPNow_Identity.h') + ';')
-    parts.append(one(rxctx, 'struct V4RxCtx', 'System_ESPNow_RxCtx.h') + ';')
+    parts.append(verdict_src(rxctx) + one(rxctx, 'struct V4RxCtx', 'System_ESPNow_RxCtx.h') + ';')
     return '\n\n'.join(parts)
 
 
@@ -139,6 +151,10 @@ def build_sessions(sessions):
     pieces.append(line(sessions, r'^static constexpr uint32_t kSessionEstablishTimeoutMs = \d+;',
                        'kSessionEstablishTimeoutMs'))
     pieces.append(one(sessions, 'uint8_t sessionEstablishingTimeoutSweep(', name))
+    # Send-result liveness (1.0 step 5b), where the tree has it.
+    if 'void sessionNoteSendOutcome(' in sessions:
+        pieces.append(one(sessions, 'static void sessionNoteSendResult(', name))
+        pieces.append(one(sessions, 'void sessionNoteSendOutcome(', name))
     pieces.append(optional(sessions, 'bool sessionHandshakeInFlight(', name))
     return '\n\n'.join(p for p in pieces if p)
 
@@ -182,9 +198,9 @@ def build_crypto(crypto, crypto_h):
     if 'static bool sessionSenderAdmitted(' in crypto:
         public += ['#define HW1_SYNC_SENDER_CHECK 1', one(crypto, 'static bool sessionSenderAdmitted(', name)]
     public += [one(crypto, marker, name) for marker in
-              ('void v4hSessionOpen(const V4RxCtx& ctx)', 'void v4hSessionConfirm(const V4RxCtx& ctx)',
+              ('V4Verdict v4hSessionOpen(const V4RxCtx& ctx)', 'V4Verdict v4hSessionConfirm(const V4RxCtx& ctx)',
                'bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel',
-               'void v4hSessionRekey(const V4RxCtx& ctx)',
+               'V4Verdict v4hSessionRekey(const V4RxCtx& ctx)',
                'bool espnowRekeyInitiate(const uint8_t peerMac[6])')]
     # The header's declaration goes first: it carries the default argument of
     # the in-flight report, where the tree has one, and the harness is told so.
@@ -252,6 +268,8 @@ def main():
                str(unit), '-o', str(exe)]
         if a.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer', '-g']
+        if 'void sessionNoteSendOutcome(' in read('System_ESPNow_Sessions.cpp'):
+            cmd.insert(1, '-DHW1_SEND_OUTCOME=1')
         subprocess.run(cmd, check=True, timeout=180)
         result = subprocess.run([str(exe)], timeout=60)
     if result.returncode:

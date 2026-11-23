@@ -42,7 +42,14 @@ static unsigned gChecks = 0;
   } while (0)
 
 struct esp_now_recv_info { const uint8_t* src_addr; };
-struct V4RxCtx { const esp_now_recv_info* recv_info; const uint8_t* payload; uint16_t payloadLen; };
+#include "System_ESPNow_AnswerCore.h"
+#include "System_ESPNow_Verdict.h"
+// The handler's view of a frame, with the verdict helpers of System_ESPNow_RxCtx.h.
+struct V4RxCtx {
+  const esp_now_recv_info* recv_info; const uint8_t* payload; uint16_t payloadLen;
+  V4Verdict accepted() const { return v4Accepted(); }
+  V4Verdict refuseWith(uint8_t status) const { return v4RefusedStatus(status); }
+};
 
 using portMUX_TYPE = int;
 #define portMUX_INITIALIZER_UNLOCKED 0

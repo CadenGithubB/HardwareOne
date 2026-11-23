@@ -40,11 +40,11 @@ from test_web_batch_handlers import extract_block  # noqa: E402
 # guard above it breaks its line after `&&`, so this marker matches only the block.
 INLINE_BLOCK = 'if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_ACK && h->type != ESPNOW_V4_TYPE_TEXT)'
 FEED_FIXED = ('  const V4ReasmOutcome o = v4_reasm_accept(&ri, &h, p, n);\n'
-              '  return {o == V4ReasmOutcome::Complete, p, n};')
+              '  return {o == V4ReasmOutcome::Complete, p, n, (int)o};')
 # Inline block contract: `return true;` = frame handled and not complete;
 # falling through = complete with payload/payloadLen pointing at the entry.
-FEED_INLINE = ('  if (v4_reasm_accept_inline(&ri, &h, p, n)) return {false, nullptr, 0};\n'
-               '  return {true, p, n};')
+FEED_INLINE = ('  if (v4_reasm_accept_inline(&ri, &h, p, n)) return {false, nullptr, 0, -1};\n'
+               '  return {true, p, n, -1};')
 OPCODES = ('ACK', 'CMD_RESP', 'TEXT', 'FS_LIST_REPLY')
 CONSTANTS = re.compile(r'^#define V4_(MAX_FRAGMENT_PAYLOAD|FRAG_MAX|REASM_MAX_MSG|REASM_MAX|REASM_TIMEOUT_MS)\b.*$',
                        re.MULTILINE)
@@ -115,6 +115,8 @@ def main():
         (unit.parent / 'System_MacText.h').write_text((HERE.parents[1] / 'System_MacText.h').read_text())
         unit.write_text(harness)
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function', str(unit), '-o', str(exe)]
+        if 'Duplicate' in outcome:  # 1.0 step 5b: each fragment's outcome is answered
+            cmd.insert(1, '-DHW1_REASM_OUTCOMES=1')
         if a.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-sanitize-recover=undefined',
                         '-fno-omit-frame-pointer', '-g']
@@ -129,7 +131,19 @@ def main():
             if rc != 0:
                 failures.append(f'{what}: harness exited with status {rc}')
 
-    if 'v4_reasm_accept(recv_info, h, payload, payloadLen)' not in incoming:
+    # 1.0 step 5b: the dispatcher's reassembly step feeds the table, after the
+    # row's gates and before the length rule and the handler.
+    if 'static bool v4_reasm_step(' in source:
+        step = extract_block(source, 'static bool v4_reasm_step(')
+        dispatch = extract_block(source, 'static V4Verdict v4_dispatch_table_try(')
+        if 'v4_reasm_accept(recv_info, h, payload, payloadLen)' not in step:
+            failures.append('v4_reasm_step does not feed fragments through v4_reasm_accept')
+        if not (dispatch.index('REQ_SESSION_ENC) && !isSessionEncrypted)') < dispatch.index('v4_reasm_step(')
+                < dispatch.index('payloadLen < e->minLen') < dispatch.index('e->handler(ctx)')):
+            failures.append('the reassembly step is not between the row gates and the length rule')
+        if 'v4_dispatch_table_try(' not in incoming or 'gV4Reasm[' in step:
+            failures.append('v4_try_handle_incoming does not reach reassembly through the dispatcher')
+    elif 'v4_reasm_accept(recv_info, h, payload, payloadLen)' not in incoming:
         failures.append('v4_try_handle_incoming does not feed fragments through v4_reasm_accept')
     if 'gV4Reasm[' in incoming:
         failures.append('v4_try_handle_incoming indexes gV4Reasm directly instead of through the null-safe helpers')

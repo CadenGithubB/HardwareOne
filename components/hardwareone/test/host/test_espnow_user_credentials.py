@@ -26,7 +26,9 @@ publishes nothing and answers ok=false; the role is forced to "user", the
 provenance is "espnow:<device>", createdAt is stamped from a valid clock,
 SYSEVT_USER_ADDED is posted and the identity generation bumped; an existing
 name is still "User already exists (skipped)" with ok=true; the
-session-encryption and opt-in refusals still answer with a bare ACK.
+session-encryption and opt-in refusals are the receive handler's verdict
+(kRefused on the frame's own ACK, 1.0 step 5b) and the deferred work sends no
+second ACK.
 
 --component DIR reads the production files from another tree (the pre-fix
 tree fails the lockout and account-owner cases behaviourally).
@@ -132,6 +134,17 @@ def generate(component: Path) -> str:
         user[user.index("bool isValidPublicUsername("):user.index("bool adminCreateUser(")],
     ))
 
+    # 1.0 step 5b: the two refusals that need no work are v4h_user_sync's
+    # verdict (the frame's ACK carries them), before anything is allocated or
+    # queued; nothing sends a second ACK.
+    if "static V4Verdict v4h_user_sync(" in espnow:
+        rx = unique_block(espnow, "static V4Verdict v4h_user_sync(const V4RxCtx& ctx)", "System_ESPNow.cpp")
+        enc_at = rx.find("if (!ctx.isSessionEncrypted) {")
+        opt_at = rx.find("if (!gSettings.espnowUserSyncEnabled) {")
+        alloc_at = rx.find("ps_alloc(")
+        require(0 <= enc_at < opt_at < alloc_at and rx.count("return ctx.refuse();") == 2,
+                "v4h_user_sync refuses an unsealed or turned-off sync (kRefused) before it allocates or queues")
+        require("v4_queue_sealed_ack" not in espnow, "a handler still sends a second ACK (v4_queue_sealed_ack)")
     sync = unique_block(espnow, "struct DeferredUserSyncWork", "System_ESPNow.cpp") + ";\n\n"
     sync += unique_block(espnow, "static void doUserSyncWork(const DeferredUserSyncWork* w)",
                          "System_ESPNow.cpp")

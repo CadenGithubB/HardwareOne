@@ -560,7 +560,7 @@ static uint16_t sessionRejectLogCount(const uint8_t mac[6]) {
 // Receive handlers
 // ============================================================================
 
-void v4hKeyExHello(const V4RxCtx& ctx) {
+V4Verdict v4hKeyExHello(const V4RxCtx& ctx) {
   // The receive table admits exactly 72 bytes (V4_OPC_LEN_EXACT).
   V4PayloadKeyExHello hello;
   ctx.read(hello);
@@ -584,7 +584,7 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
     WARN_ESPNOWF("KEY_EX_HELLO from " MAC_FMT " rejected: reason=%d (%s) meshFp=0x%04X",
                  MAC_ARGS(msg->senderMac),
                  meshSlot, why, (unsigned)msg->meshFingerprint);
-    return;
+    return ctx.refuse();
   }
   const uint8_t* bootKey = mk->bootstrapKey;
 
@@ -601,13 +601,13 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
         WARN_ESPNOWF("KEY_EX_HELLO from " MAC_FMT " ignored: a copy of one already answered (replayed)",
                      MAC_ARGS(msg->senderMac));
       }
-      return;
+      return ctx.refuse();
     }
     case HelloVerdict::TooSoon:
     case HelloVerdict::NoSlot:
       DEBUG_ESPNOWF("KEY_EX_HELLO from " MAC_FMT " ignored: one answered less than %ums ago",
                     MAC_ARGS(msg->senderMac), (unsigned)kKeyExHelloMinIntervalMs);
-      return;
+      return ctx.refuse();
   }
 
   uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
@@ -621,10 +621,10 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
   switch (espnowKeyExAdmit(msg->senderMac, msg->senderPubEd25519)) {
     case espnowrevoke::Admit::Revoked:
       keyExRevokedDrop(msg->senderMac, msg->senderPubEd25519, "KEY_EX_HELLO");
-      return;
+      return ctx.refuse();
     case espnowrevoke::Admit::NotAccepted:
       sendKeyExNotAccepted(msg->senderMac, msg->meshFingerprint, "KEY_EX_HELLO", refusal, bootKey);
-      return;
+      return ctx.refuse();
     case espnowrevoke::Admit::Accept:
       break;
   }
@@ -676,7 +676,7 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
     if (!peerIdentityPersist(msg->senderMac, storeSlot,
                              msg->senderPubEd25519, bondedAt)) {
       ERROR_ESPNOWF("KEY_EX_HELLO: identity persist failed; not replying");
-      return;
+      return ctx.refuse();
     }
     if (identityNewOrReplaced) {
       logSystemEvent("ESPNOW", "paired: new peer identity persisted " MAC_FMT,
@@ -690,19 +690,19 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
   }
 
   // Add to ESPNOW peer table so we can send REPLY.
-  if (!ensureUnencryptedPeer(msg->senderMac)) return;
+  if (!ensureUnencryptedPeer(msg->senderMac)) return ctx.refuse();
 
   // If status != 0 (conflict), emit a CONFIRM with the status instead of REPLY.
   if (confirmStatus != 0) {
     sendKeyExConfirm(msg->senderMac, msg->meshFingerprint, confirmStatus, refusal, bootKey);
-    return;
+    return ctx.refuse();
   }
 
   // Build REPLY: our key, a fresh nonce, and a tag that also covers the HELLO.
   const auto& self = espnowIdentityGet();
   if (!self.valid) {
     ERROR_ESPNOWF("KEY_EX_HELLO: own identity not loaded; cannot REPLY");
-    return;
+    return ctx.refuse();
   }
   V4PayloadKeyExReply reply = {};
   reply.meshFingerprint = msg->meshFingerprint;
@@ -712,7 +712,7 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
   if (!computeReplyTag(msg->meshFingerprint, selfMac, self.pub, reply.nonce, msg->senderMac,
                        msg->senderPubEd25519, msg->nonce, bootKey, reply.hmac)) {
     ERROR_ESPNOWF("KEY_EX_HELLO: HMAC compute failed for REPLY");
-    return;
+    return ctx.refuse();
   }
   // Kept for the initiator's CONFIRM, which is tagged over both nonces.
   keyExNoteReply(msg->senderMac, msg->meshFingerprint, msg->nonce, reply.nonce, msg->senderPubEd25519);
@@ -721,9 +721,10 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
                 0,  // no ACK_REQ: a handshake frame's reply is its answer (1.0)
                 generateMessageId(),
                 reinterpret_cast<const uint8_t*>(&reply), sizeof(reply), 1);
+  return ctx.accepted();
 }
 
-void v4hKeyExReply(const V4RxCtx& ctx) {
+V4Verdict v4hKeyExReply(const V4RxCtx& ctx) {
   // The receive table admits exactly 72 bytes (V4_OPC_LEN_EXACT).
   V4PayloadKeyExReply replyMsg;
   ctx.read(replyMsg);
@@ -735,7 +736,7 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
     WARN_ESPNOWF("KEY_EX_REPLY rejected (reason=%d) from " MAC_FMT,
                  meshSlot,
                  MAC_ARGS(msg->responderMac));
-    return;
+    return ctx.refuse();
   }
 
   // The peer was unpaired while our HELLO was out (espnowKeyExCancel): its
@@ -743,7 +744,7 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   if (keyExCancelled(msg->responderMac)) {
     INFO_ESPNOWF("KEY_EX_REPLY from " MAC_FMT " ignored: that key exchange was called off (unpaired)",
                  MAC_ARGS(msg->responderMac));
-    return;
+    return ctx.refuse();
   }
 
   // A REPLY answers one HELLO of ours: its tag covers that HELLO's nonce. One
@@ -757,7 +758,7 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
       WARN_ESPNOWF("KEY_EX_REPLY from " MAC_FMT " ignored: no key exchange of ours with it is in flight "
                    "on that mesh (late, or a copy of an old one)", MAC_ARGS(msg->responderMac));
     }
-    return;
+    return ctx.refuse();
   }
   uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
   int matched = -1;
@@ -772,7 +773,7 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   if (matched < 0) {
     WARN_ESPNOWF("KEY_EX_REPLY from " MAC_FMT " rejected: its tag matches none of our HELLOs "
                  "(another mesh passphrase, or a replayed REPLY)", MAC_ARGS(msg->responderMac));
-    return;
+    return ctx.refuse();
   }
   // The whole exchange, for the CONFIRM's tag.
   espnowhs::KeyExContext full = {};
@@ -789,11 +790,11 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
     case espnowrevoke::Admit::Revoked:
       keyExClearInFlight(msg->responderMac);
       keyExRevokedDrop(msg->responderMac, msg->responderPubEd25519, "KEY_EX_REPLY");
-      return;
+      return ctx.refuse();
     case espnowrevoke::Admit::NotAccepted:
       keyExClearInFlight(msg->responderMac);
       sendKeyExNotAccepted(msg->responderMac, msg->meshFingerprint, "KEY_EX_REPLY", full, bootKey);
-      return;
+      return ctx.refuse();
     case espnowrevoke::Admit::Accept:
       break;
   }
@@ -827,7 +828,7 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
     if (ensureUnencryptedPeer(msg->responderMac)) {
       sendKeyExConfirm(msg->responderMac, msg->meshFingerprint, 2, full, bootKey);
     }
-    return;
+    return ctx.refuse();
   }
 
   time_t now = time(nullptr);
@@ -842,7 +843,7 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   if (!peerIdentityPersist(msg->responderMac, storeSlot,
                            msg->responderPubEd25519, bondedAt)) {
     ERROR_ESPNOWF("KEY_EX_REPLY: identity persist failed");
-    return;
+    return ctx.refuse();
   }
   if (identityNewOrReplaced) {
     logSystemEvent("ESPNOW", "paired: new peer identity persisted " MAC_FMT,
@@ -859,7 +860,7 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   // The peer answered: its automatic starts need no back-off any more.
   espnowHandshakeBackoffClear(msg->responderMac);
 
-  if (!ensureUnencryptedPeer(msg->responderMac)) return;
+  if (!ensureUnencryptedPeer(msg->responderMac)) return ctx.refuse();
 
   // Send CONFIRM (status=0) — KEY_EX complete from our (initiator) side.
   sendKeyExConfirm(msg->responderMac, msg->meshFingerprint, 0, full, bootKey);
@@ -885,9 +886,10 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
       INFO_ESPNOWF("KEY_EX_REPLY: pending frames for peer — kicked SESSION_OPEN to drain");
     }
   }
+  return ctx.accepted();
 }
 
-void v4hKeyExConfirm(const V4RxCtx& ctx) {
+V4Verdict v4hKeyExConfirm(const V4RxCtx& ctx) {
   // The receive table admits exactly 34 bytes (V4_OPC_LEN_EXACT).
   V4PayloadKeyExConfirm confirmMsg;
   ctx.read(confirmMsg);
@@ -895,7 +897,7 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
 
   if (memcmp(ctx.h->origin, msg->confirmerMac, 6) != 0) {
     WARN_ESPNOWF("KEY_EX_CONFIRM: header.origin / payload.confirmerMac mismatch");
-    return;
+    return ctx.refuse();
   }
   // Authenticated (1.0): the tag is under the mesh bootstrap key and covers
   // the exchange it ends. It matches either a REPLY we sent (the initiator's
@@ -917,7 +919,7 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
                    "in flight here (forged, a copy, or late)",
                    (unsigned)msg->status, MAC_ARGS(msg->confirmerMac));
     }
-    return;
+    return ctx.refuse();
   }
 
   if (answersOurHello) {
@@ -925,7 +927,7 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
     if (msg->status == 0) {
       WARN_ESPNOWF("KEY_EX_CONFIRM from " MAC_FMT ": status 0 without a REPLY; ignored",
                    MAC_ARGS(msg->confirmerMac));
-      return;
+      return ctx.refuse();
     }
     // Acted on only now, while our key exchange is in flight: this attempt
     // ends (no more HELLO retries). The automatic starts keep their back-off,
@@ -946,7 +948,7 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
                    MAC_ARGS(msg->confirmerMac),
                    (unsigned)msg->status);
     }
-    return;
+    return ctx.refuse();
   }
 
   // The initiator ends an exchange we answered. Terminal: stop any HELLO retry
@@ -971,6 +973,7 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
                  MAC_ARGS(msg->confirmerMac),
                  (unsigned)msg->status);
   }
+  return ctx.accepted();
 }
 
 // ============================================================================
@@ -1651,14 +1654,14 @@ static bool sessionSenderAdmitted(const uint8_t mac[6], const char* what) {
 // On-RX handlers — espnow_task scope. Lightweight: the sender check above,
 // then size-check + PSRAM copy + enqueue. All heavy crypto runs in the
 // deferred function on cmd_exec.
-void v4hSessionOpen(const V4RxCtx& ctx) {
-  if (!sessionSenderAdmitted(ctx.h->origin, "SESSION_OPEN")) return;
+V4Verdict v4hSessionOpen(const V4RxCtx& ctx) {
+  if (!sessionSenderAdmitted(ctx.h->origin, "SESSION_OPEN")) return ctx.refuse();
   // The receive table admits exactly sizeof(V4PayloadSessionOpen) (V4_OPC_LEN_EXACT).
   auto* w = static_cast<DeferredSessionOpenWork*>(
       ps_alloc(sizeof(DeferredSessionOpenWork), AllocPref::PreferPsram, "espnow.sopen.defer"));
   if (!w) {
     ERROR_ESPNOWF("SESSION_OPEN: PSRAM alloc failed (defer drop)");
-    return;
+    return ctx.refuse();
   }
   ctx.read(w->msg);
   memcpy(w->headerOrigin, ctx.h->origin, 6);
@@ -1666,16 +1669,17 @@ void v4hSessionOpen(const V4RxCtx& ctx) {
     ERROR_ESPNOWF("SESSION_OPEN: cmd_exec queue full, dropping");
     free(w);
   }
+  return ctx.accepted();
 }
 
-void v4hSessionConfirm(const V4RxCtx& ctx) {
-  if (!sessionSenderAdmitted(ctx.h->origin, "SESSION_CONFIRM")) return;
+V4Verdict v4hSessionConfirm(const V4RxCtx& ctx) {
+  if (!sessionSenderAdmitted(ctx.h->origin, "SESSION_CONFIRM")) return ctx.refuse();
   // The receive table admits exactly sizeof(V4PayloadSessionConfirm) (V4_OPC_LEN_EXACT).
   auto* w = static_cast<DeferredSessionConfirmWork*>(
       ps_alloc(sizeof(DeferredSessionConfirmWork), AllocPref::PreferPsram, "espnow.sconf.defer"));
   if (!w) {
     ERROR_ESPNOWF("SESSION_CONFIRM: PSRAM alloc failed (defer drop)");
-    return;
+    return ctx.refuse();
   }
   ctx.read(w->msg);
   memcpy(w->headerOrigin, ctx.h->origin, 6);
@@ -1683,6 +1687,7 @@ void v4hSessionConfirm(const V4RxCtx& ctx) {
     ERROR_ESPNOWF("SESSION_CONFIRM: cmd_exec queue full, dropping");
     free(w);
   }
+  return ctx.accepted();
 }
 
 bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel,
@@ -2161,8 +2166,8 @@ void runDeferredRekey(void* arg) {
 
 }  // namespace
 
-void v4hSessionRekey(const V4RxCtx& ctx) {
-  if (!sessionSenderAdmitted(ctx.recv_info->src_addr, "SESSION_REKEY")) return;
+V4Verdict v4hSessionRekey(const V4RxCtx& ctx) {
+  if (!sessionSenderAdmitted(ctx.recv_info->src_addr, "SESSION_REKEY")) return ctx.refuse();
   // The receive table admits exactly sizeof(V4PayloadSessionRekey) (V4_OPC_LEN_EXACT).
   // PSRAM-copy + defer to cmd_exec (verify+ECDH+KDF+optional sign+send
   // is the same crypto profile as SESSION_OPEN/CONFIRM, so the same defer
@@ -2171,7 +2176,7 @@ void v4hSessionRekey(const V4RxCtx& ctx) {
                                          AllocPref::PreferPsram, "espnow.rekey.defer");
   if (!w) {
     ERROR_ESPNOWF("REKEY: PSRAM alloc failed");
-    return;
+    return ctx.refuse();
   }
   ctx.read(w->msg);
   memcpy(w->srcMac, ctx.recv_info->src_addr, 6);
@@ -2179,6 +2184,7 @@ void v4hSessionRekey(const V4RxCtx& ctx) {
     ERROR_ESPNOWF("REKEY: cmd_exec queue full — dropping");
     free(w);
   }
+  return ctx.accepted();
 }
 
 bool espnowRekeyInitiate(const uint8_t peerMac[6]) {

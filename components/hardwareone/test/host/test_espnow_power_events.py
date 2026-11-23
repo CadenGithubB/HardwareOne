@@ -123,13 +123,13 @@ def check_sources(component: Path) -> None:
             "the battery frame is a session unicast that asks for an acknowledgement and has it watched")
     event_tx = strip_comments(extract_block(source, "static bool peSendEvent(const uint8_t mac[6], const uint8_t* payload, uint16_t len)"))
     require("espnowtx::sendAead(mac, ESPNOW_V4_TYPE_EVENT_PUSH, 0," in event_tx, "the event frame is a session unicast")
-    for handler, ingest, bond in (("void v4hPowerStatus(const V4RxCtx& ctx)", "powerEventsIngestPower", "false"),
-                                  ("void v4hEventPush(const V4RxCtx& ctx)", "powerEventsIngestEvent", "false"),
-                                  ("void v4hBondPowerStatus(const V4RxCtx& ctx)", "powerEventsIngestPower", "true"),
-                                  ("void v4hBondEventPush(const V4RxCtx& ctx)", "powerEventsIngestEvent", "true")):
+    for handler, ingest, bond in (("V4Verdict v4hPowerStatus(const V4RxCtx& ctx)", "powerEventsIngestPower", "false"),
+                                  ("V4Verdict v4hEventPush(const V4RxCtx& ctx)", "powerEventsIngestEvent", "false"),
+                                  ("V4Verdict v4hBondPowerStatus(const V4RxCtx& ctx)", "powerEventsIngestPower", "true"),
+                                  ("V4Verdict v4hBondEventPush(const V4RxCtx& ctx)", "powerEventsIngestEvent", "true")):
         require(f"{ingest}(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen, /*bondLink=*/{bond});" in
                 extract_block(source, handler), f"{handler.split('(')[0].split()[-1]} hands the frame to {ingest}")
-    require(depth_in(source, "void v4hBondPowerStatus(const V4RxCtx& ctx) {", "ENABLE_BONDED_MODE") == 1,
+    require(depth_in(source, "V4Verdict v4hBondPowerStatus(const V4RxCtx& ctx) {", "ENABLE_BONDED_MODE") == 1,
             "the bond handlers exist in a bond build only")
     for name, handler in (("BOND_POWER_STATUS", "v4hBondPowerStatus"), ("BOND_EVENT_PUSH", "v4hBondEventPush")):
         require(name in rows and rows[name][0] == {"V4_OPC_FLAG_REQ_PAIRED", "V4_OPC_FLAG_REQ_BOND_PEER",

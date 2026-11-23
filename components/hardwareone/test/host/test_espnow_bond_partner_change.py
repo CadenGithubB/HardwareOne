@@ -96,9 +96,9 @@ BASE = (
     'bool isBondModeOnline()',
     'bool isBondSynced()',
     'static void resetBondSync() ',
-    'static void v4h_bond_cap_req(const V4RxCtx& ctx)',
-    'static void v4h_bond_cap_resp(const V4RxCtx& ctx)',
-    'static void v4h_bond_status_req(const V4RxCtx& ctx)',
+    'static V4Verdict v4h_bond_cap_req(const V4RxCtx& ctx)',
+    'static V4Verdict v4h_bond_cap_resp(const V4RxCtx& ctx)',
+    'static V4Verdict v4h_bond_status_req(const V4RxCtx& ctx)',
 )
 ASK_LINE = 'static const uint32_t BOND_WORKER_CAP_WAIT_MS = 10000;'
 ASK = 'static void bondWorkerAskForCap(uint32_t now)'
@@ -139,7 +139,7 @@ AGREE_HEADERS = ('System_ESPNow_BondAgreeCore.h', 'System_Deadline.h')
 # The session capability word's rules, where the tree has them (HW1_HAVE_CAPS).
 CAPS_HEADER = 'System_ESPNow_SessionCapsCore.h'
 CAPS_MARK = 'bool espnowPeerSessionCaps('
-HEARTBEAT_RX = 'static void v4h_bond_heartbeat(const V4RxCtx& ctx)'
+HEARTBEAT_RX = 'static V4Verdict v4h_bond_heartbeat(const V4RxCtx& ctx)'
 SESSION_UP = 'void bondNotifySessionEstablished(const uint8_t* peerMac)'
 CASES_LINE = '// ---- Cases ---'
 
@@ -289,7 +289,7 @@ def assemble(a):
         worker = worker[:worker.index('// POST-SYNC FALLBACK GUARD')]
         assert 'bondWorkerAskForCap(now);' in worker, 'the worker tick does not ask for a missing capability'
     if have_hold:
-        dispatch = definition(source, 'static bool v4_dispatch_table_try(', 'System_ESPNow.cpp')
+        dispatch = definition(source, 'static V4Verdict v4_dispatch_table_try(', 'System_ESPNow.cpp')
         assert '(!gSettings.bondModeEnabled || bondPartnerChanging())' in dispatch, \
             'the receive table does not drop bond opcodes quietly during a partner change'
         # bondrole and the automatic role change share bondChangeRole.
@@ -345,12 +345,12 @@ def assemble(a):
         assert tick.count('bondAgreementTick(now);') == 1 and \
             'if (!bondTickHeld(hbEpoch)) bondAgreementTick(now);' in tick, \
             'the agreement tick is not skipped while a partner change holds bond frames'
-        dispatch = definition(source, 'static bool v4_dispatch_table_try(', 'System_ESPNow.cpp')
+        dispatch = definition(source, 'static V4Verdict v4_dispatch_table_try(', 'System_ESPNow.cpp')
         assert dispatch.count('bondAgreementNoteIgnoredFrame(recv_info->src_addr, isSessionEncrypted);') == 2 and \
             'if (!bondPartnerChanging()) bondAgreementNoteIgnoredFrame(' in dispatch, \
             'the receive table does not tell a peer whose bond frames it ignores (or does so during a change)'
         for name in ('v4h_bond_request', 'v4h_bond_notice'):
-            body = definition(source, f'static void {name}(const V4RxCtx& ctx)', 'System_ESPNow.cpp')
+            body = definition(source, f'static V4Verdict {name}(const V4RxCtx& ctx)', 'System_ESPNow.cpp')
             assert 'setSetting(' not in body and 'gSettings.' not in body, \
                 f'{name} touches the bond settings: a received frame must never change the bond'
         # A session coming up: the partner's "not bonded" arrives on

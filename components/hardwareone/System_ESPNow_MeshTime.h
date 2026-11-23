@@ -14,12 +14,13 @@
 #include <Arduino.h>
 #include <stdint.h>
 
+#include "System_ESPNow_Verdict.h"  // V4Verdict, what a handler returns (1.0 step 5b)
 struct V4RxCtx;
 
 // TIME_SYNC receive handler (espnow_task). Keeps the frame for the main loop;
 // sets nothing itself. The receive table has already required a paired sender
 // and a session-encrypted frame.
-void v4hTimeSync(const V4RxCtx& ctx);
+V4Verdict v4hTimeSync(const V4RxCtx& ctx);
 
 // espnow_task loop: on the acting master, sends the clock to paired devices
 // (one per half second) and starts a session with a paired device that has

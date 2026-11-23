@@ -93,7 +93,7 @@ struct EspNowState {
   bool encryptionEnabled = false;
   EspNowDevice devices[16] = {};
   int deviceCount = 0;
-  struct { uint32_t v4FragRx = 0, v4FragRxCompleted = 0; } routerMetrics;
+  struct { uint32_t v4FragRx = 0, v4FragRxCompleted = 0, v4FragRxGc = 0; } routerMetrics;
   uint32_t heartbeatsReceived = 0;
   uint32_t bondUnpairedRejectCount = 0;
   uint8_t bondUnpairedRejectType = 0;
@@ -256,11 +256,14 @@ static void revoke(const uint8_t* mac) { std::memcpy(gRevokedMacs[gRevokedCount+
 // recorded with its class; gAcksSent counts ACKs of single frames,
 // gFragAcksSent ACKs of fragments (fragCount > 1 in the payload).
 static unsigned gAcksSent = 0, gFragAcksSent = 0, gFanouts = 0, gCleanups = 0, gRelayForwards = 0;
+static size_t gHandlerCallCount = 0;  // every handler call, real or stub (1.0 step 5b timing cases)
 struct SentAck {
   uint8_t to[6];
   bool sealed;
   uint16_t sessionId;
   V4PayloadAck ack;
+  uint32_t atMs;        // the fake clock when the ACK was queued
+  size_t handlerCalls;  // handler calls recorded by then
 };
 static std::vector<SentAck> gSentAcks;
 namespace espnowtx {
@@ -270,6 +273,8 @@ static bool sendAck(const uint8_t mac[6], uint16_t classFlag, uint16_t sessionId
   a.sealed = classFlag == ESPNOW_V4_FLAG_SESSION_FRAME;
   a.sessionId = sessionId;
   std::memcpy(&a.ack, ack, sizeof a.ack);
+  a.atMs = gNowMs;
+  a.handlerCalls = gHandlerCallCount;
   gSentAcks.push_back(a);
   if (a.ack.fragCount > 1) ++gFragAcksSent; else ++gAcksSent;
   return true;
@@ -318,7 +323,13 @@ struct EspNowTxGuard { explicit EspNowTxGuard(const char*) {} };
 #define V4_FRAG_ACK_WAIT_MAX 8
 // INSERT_ACK_WAIT
 static V4FragAckWait gV4FragAckWait[V4_FRAG_ACK_WAIT_MAX];
-static void v4_dispatch_post_cleanup(const esp_now_recv_info*, const EspNowV4Header*) { ++gCleanups; }
+// The production cleanup releases a completed message's reassembly entry;
+// this one counts too.
+static void v4_reasm_release(const uint8_t* src, uint32_t msgId);
+static void v4_dispatch_post_cleanup(const esp_now_recv_info* ri, const EspNowV4Header* h) {
+  ++gCleanups;
+  if (h->fragCount > 1) v4_reasm_release(ri->src_addr, h->msgId);
+}
 
 // ---- Doubles for the parts of v4h_heartbeat that are not under test ---------
 struct PeerIdentity { uint8_t meshId; };
@@ -368,6 +379,24 @@ static void noteHandler(const char* name, const V4RxCtx& ctx) {
                 ctx.isPaired, ctx.payloadLen};
   std::memcpy(c.src, ctx.recv_info->src_addr, 6);
   gCalls.push_back(c);
+  ++gHandlerCallCount;
+}
+// The stub handlers' verdict (1.0 step 5b). A case can make the next
+// gStubOverrideLeft calls of one handler return gStubOverride (a refusal), and
+// give every stub a run time on the fake clock.
+static std::string gStubOverrideName;
+static V4Verdict gStubOverride{};
+static unsigned gStubOverrideLeft = 0;
+static uint32_t gStubTakesMs = 0;
+static uint32_t gHandlerEndMs = 0;
+static V4Verdict stubVerdict(const char* name, const V4RxCtx& ctx) {
+  gNowMs += gStubTakesMs;
+  gHandlerEndMs = gNowMs;
+  if (gStubOverrideLeft && gStubOverrideName == name) {
+    --gStubOverrideLeft;
+    return gStubOverride;
+  }
+  return ctx.accepted();
 }
 
 // The receive-drop counters of System_ESPNow.cpp (espnowstats).
@@ -392,14 +421,21 @@ static bool espnowChFollowHunting() { return false; }  // never hunting: the pre
 
 // INSERT_LOOKUP
 
-// INSERT_DISPATCH
-
 // INSERT_OUTCOME
 
-// No test here feeds a reassembled message; the real reassembler is run by
-// test_espnow_reassembly.
-static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info*, const EspNowV4Header*, const uint8_t*&,
-                                      uint16_t&) { return V4ReasmOutcome::Dropped; }
+// The production reassembler (System_ESPNow.cpp: the table, its helpers,
+// v4_reasm_accept and the dispatcher's v4_reasm_step); test_espnow_reassembly
+// runs its edge cases, here it answers fragments end to end (1.0 step 5b).
+static constexpr size_t CMD_RESULT_MAX = 4096;  // production value; V4_FRAG_MAX evaluates to 21
+// INSERT_REASM
+static void reasmTableReset() {
+  if (!gV4Reasm) gV4Reasm = static_cast<V4ReasmEntry*>(std::calloc(V4_REASM_MAX, sizeof(V4ReasmEntry)));
+  for (int i = 0; i < V4_REASM_MAX; i++) v4_reasm_reset(gV4Reasm[i]);
+}
+
+// INSERT_REFUSAL_HELPER
+
+// INSERT_DISPATCH
 
 // The mesh gate's counter and its WARN (production), with the registry lookup
 // it asks whether the sender is paired.
@@ -462,8 +498,13 @@ static void reset(bool keyed) {
   gCalls.clear();
   gWarns = gAcksSent = gFragAcksSent = gFanouts = gCleanups = gRelayForwards = 0;
   gSentAcks.clear();
+  gHandlerCallCount = 0;
+  gStubOverrideName.clear();
+  gStubOverrideLeft = 0;
+  gStubTakesMs = gHandlerEndMs = 0;
   for (auto* v : {&gTrackerAcks, &gDelivered, &gFailedSends, &gPingAcks, &gFollowAcks}) v->clear();
   std::memset(gV4FragAckWait, 0, sizeof gV4FragAckWait);
+  reasmTableReset();
   gEspNowRxPlaintextDrops = gEspNowRxAckRefused = gEspNowRxLenDrops = 0;
   gUnwrapCalls = gReplayRejects = gRegistrySaves = 0;
   gUnknownSessionAsks = 0;
@@ -1628,6 +1669,132 @@ static void testAckWaiterMatching() {
   check("an ACK that claims fragments is dropped", gEspNowRxLenDrops == 3 && gDelivered.empty());
 }
 
+// ---- 1.0 step 5b: the ACK follows the verdict (DESIGN 3.1/3.2) ---------------
+static const SentAck* lastAck() { return gSentAcks.empty() ? nullptr : &gSentAcks.back(); }
+static bool ackIs(const SentAck* a, uint32_t ackFor, uint8_t frag, uint8_t count, uint8_t status, uint8_t flags) {
+  return a && a->sealed && a->ack.ackFor == ackFor && a->ack.fragIndex == frag && a->ack.fragCount == count &&
+         a->ack.status == status && a->ack.flags == flags;
+}
+static Frame bytes(size_t n, uint8_t fill) { return Frame(n, fill); }
+static bool reasmHolds(uint32_t msgId) {
+  for (int i = 0; i < V4_REASM_MAX; i++) {
+    if (gV4Reasm[i].active && gV4Reasm[i].msgId == msgId) return true;
+  }
+  return false;
+}
+
+// Busy, then the retry: a refusal is answered with its status and is not
+// remembered, so the sender's retry (same msgId) is processed again; a copy of
+// the accepted retry is answered again with flags.duplicate, never processed.
+static void testBusyThenRetry() {
+  reset(true);
+  gStubOverrideName = "v4h_cmd";
+  gStubOverride = v4RefusedStatus(espnowanswer::kBusy);
+  gStubOverrideLeft = 1;
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD, gPeerB, 500, text("status")));
+  check("a CMD its handler refuses busy is answered with status kBusy",
+        calls("v4h_cmd") == 1 && gSentAcks.size() == 1 && ackIs(lastAck(), 500, 0, 1, espnowanswer::kBusy, 0));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD, gPeerB, 500, text("status")));
+  check("its retry (same msgId, re-sealed) is processed again and accepted",
+        calls("v4h_cmd") == 2 && gSentAcks.size() == 2 && ackIs(lastAck(), 500, 0, 1, 0, 0));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD, gPeerB, 500, text("status")));
+  check("a copy of the accepted retry is answered again with flags.duplicate and not processed",
+        calls("v4h_cmd") == 2 && gSentAcks.size() == 3 &&
+        ackIs(lastAck(), 500, 0, 1, 0, ESPNOW_V4_ACK_FLAG_DUPLICATE));
+  // A silent verdict is remembered: its copy stays silent.
+  reset(true);
+  gStubOverrideName = "v4h_cmd";
+  gStubOverride = v4Silent();
+  gStubOverrideLeft = 1;
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD, gPeerB, 501, text("status")));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD, gPeerB, 501, text("status")));
+  check("a silent verdict gets no ACK, and its copy is neither answered nor processed",
+        calls("v4h_cmd") == 1 && gSentAcks.empty());
+}
+
+// The handler-to-ACK bound on the receive side: the ACK is queued in the same
+// receive call, right after the handler returned (the TX dispatcher then
+// sends ACKs ahead of every job: espnow_tx_multiframe J2/J3).
+static void testAckFollowsHandler() {
+  reset(true);
+  gStubTakesMs = 7;
+  const uint32_t t0 = gNowMs;
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD, gPeerB, 520, text("status")));
+  check("the ACK is queued after the handler returned",
+        gSentAcks.size() == 1 && gSentAcks[0].handlerCalls == 1 && gSentAcks[0].atMs == gHandlerEndMs);
+  check("handler-to-ACK on the receive side: nothing runs between them (0 ms after a 7 ms handler)",
+        gSentAcks.size() == 1 && gSentAcks[0].atMs - t0 == 7);
+  // A frame refused at the table never reaches a handler: answered at once.
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, 200, gPeerB, 521, text("x")));
+  check("an opcode without a row (sealed) is answered kUnsupported without a handler",
+        gCalls.empty() && ackIs(lastAck(), 521, 0, 1, espnowanswer::kUnsupported, 0));
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_METADATA_PUSH, gPeerB, 522, bytes(1, 0x41)));
+  check("a frame shorter than its row's minimum (sealed) is answered kBadRequest",
+        gCalls.empty() && ackIs(lastAck(), 522, 0, 1, espnowanswer::kBadRequest, 0) && gEspNowRxLenDrops == 1);
+}
+
+// Policy refusals (G3): kRefused to an authenticated session peer, silence to
+// anyone else.
+static void testPolicyRefusals() {
+  reset(true);
+  deliver(gPeerC, sealedFrame(gSessC, ESPNOW_V4_TYPE_BOND_HEARTBEAT, gPeerC, 530, bytes(24, 0)));
+  check("a sealed bond frame from a paired peer that is not the bond partner is answered kRefused",
+        gCalls.empty() && gSentAcks.size() == 1 && ackIs(lastAck(), 530, 0, 1, espnowanswer::kRefused, 0));
+  reset(true);
+  deliver(gPeerC, groupFrame(ESPNOW_V4_TYPE_CMD, gPeerC, 531, text("status"), 1, ESPNOW_V4_FLAG_ACK_REQ));
+  deliver(gPeerC, groupFrame(ESPNOW_V4_TYPE_CMD, gPeerC, 531, text("status"), 1, ESPNOW_V4_FLAG_ACK_REQ));
+  check("a group-tagged CMD (the row wants a session) gets no answer, and neither does its copy",
+        gCalls.empty() && gSentAcks.empty());
+}
+
+// Fragments: each stored fragment is answered for itself; the handler runs
+// once, at completion; a fragment sent again after its message completed is
+// answered from the accept memory (flags.duplicate) and opens no entry.
+static void testFragmentVerdicts() {
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 540, bytes(200, 1), 0, 3));
+  check("fragment 1/3 stored: ACK 0 naming 0/3, no handler yet",
+        gCalls.empty() && ackIs(lastAck(), 540, 0, 3, 0, 0));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 540, bytes(200, 2), 1, 3));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 540, bytes(10, 3), 2, 3));
+  check("the last fragment completes the message: the handler runs once with all 410 bytes, ACK 0 for 2/3",
+        calls("v4h_cmd_resp") == 1 && gCalls[0].payloadLen == 410 && ackIs(lastAck(), 540, 2, 3, 0, 0) &&
+        !reasmHolds(540));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 540, bytes(200, 2), 1, 3));
+  check("fragment 2/3 sent again after completion: answered with flags.duplicate, not reprocessed, no entry",
+        calls("v4h_cmd_resp") == 1 && ackIs(lastAck(), 540, 1, 3, 0, ESPNOW_V4_ACK_FLAG_DUPLICATE) &&
+        !reasmHolds(540));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 540, bytes(10, 3), 2, 3));
+  check("the completing fragment sent again: answered with flags.duplicate, the handler does not run again",
+        calls("v4h_cmd_resp") == 1 && ackIs(lastAck(), 540, 2, 3, 0, ESPNOW_V4_ACK_FLAG_DUPLICATE) &&
+        !reasmHolds(540));
+
+  // No free entry: kNoSlot, nothing opened; once an entry frees, the retry is stored.
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 550, bytes(200, 1), 0, 2));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 551, bytes(200, 1), 0, 2));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 552, bytes(200, 1), 0, 2));
+  check("a fragment with every reassembly entry in use is answered kNoSlot and opens none",
+        ackIs(lastAck(), 552, 0, 2, espnowanswer::kNoSlot, 0) && !reasmHolds(552));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 550, bytes(20, 2), 1, 2));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 552, bytes(200, 1), 0, 2));
+  check("after an entry frees, the refused fragment's retry is stored (the refusal was not remembered)",
+        ackIs(lastAck(), 552, 0, 2, 0, 0) && reasmHolds(552));
+
+  // Over the budget: kTooLarge, no entry.
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 560, bytes(200, 1), 0, 30));
+  check("a fragCount over the reassembly budget is answered kTooLarge and opens no entry",
+        ackIs(lastAck(), 560, 0, 30, espnowanswer::kTooLarge, 0) && !reasmHolds(560));
+  // Gates before reassembly: a fragment the row refuses takes no entry.
+  reset(true);
+  deliver(gPeerC, sealedFrame(gSessC, ESPNOW_V4_TYPE_BOND_STATUS_RESP, gPeerC, 561, bytes(200, 1), 0, 2));
+  check("a fragment the row refuses (bond partner gate) is answered kRefused and takes no reassembly entry",
+        ackIs(lastAck(), 561, 0, 2, espnowanswer::kRefused, 0) && !reasmHolds(561));
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IOLBF, 0);  // keep the case lines if a pre-fix tree aborts
   testMeshIdGate();
@@ -1652,6 +1819,10 @@ int main() {
   testAckCounts();
   testNoPlaintextFrameIsAcked();
   testAckWaiterMatching();
+  testBusyThenRetry();
+  testAckFollowsHandler();
+  testPolicyRefusals();
+  testFragmentVerdicts();
   std::printf("espnow_rx_frontend: %u failure%s\n", gFailures, gFailures == 1 ? "" : "s");
   return gFailures ? 1 : 0;
 }

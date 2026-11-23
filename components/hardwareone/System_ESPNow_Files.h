@@ -266,6 +266,16 @@ uint32_t       fileSlotsGetReceivedCrc(const FileTransferSlot* slot);
 // re-entering the teardown path there would emit a spurious FILE_CANCEL for a
 // transfer that is actually succeeding).
 bool           fileSlotsIsReceiving(const FileTransferSlot* slot);
+// A small (RAM-path) slot whose complete file was accepted at FILE_END: moves
+// it from RECEIVING to COMPLETING so no chunk or copy of FILE_END changes it
+// while the espnow_task loop finishes it (1.0 step 5b: the flash write runs
+// after the ACK). False when it is streaming or no longer RECEIVING.
+bool           fileSlotsBeginRamFinalize(FileTransferSlot* slot);
+// True for a streaming slot that is being torn down after a failure (its
+// FILE_CANCEL was sent): a FILE_END for it is refused, not taken for a copy.
+bool           fileSlotsIsStreamFailing(const FileTransferSlot* slot);
+// True for a RAM-path slot in that COMPLETING state.
+bool           fileSlotsIsRamFinalizing(const FileTransferSlot* slot);
 
 // Release a slot — free PSRAM buffer, return to FREE state. Idempotent.
 // Waits for the slot-table lock (a skipped release would leave a finished

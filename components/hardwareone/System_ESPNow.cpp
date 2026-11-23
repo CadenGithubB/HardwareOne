@@ -1938,11 +1938,21 @@ bool espnowStreamOutputWanted() {
 
 // What a frame proved before it may write a duplicate-ring entry. The class is
 // part of the key, so an entry of one class never shadows a frame of another
-// (see v4_dedup_frame_seen for who gets which class and which MAC).
+// (see v4_accept_key for who gets which class and which MAC).
 enum class V4DedupClass : uint8_t { Group = 0, Sealed = 1, Relayed = 2, Plain = 3 };
-// `cls` sits in what was tail padding: the entry is still 20 bytes.
-struct V4DedupEntry { uint8_t origin[6]; uint32_t id; uint32_t ts; uint8_t fragIndex; bool active; uint8_t cls; };
-#define V4_DEDUP_SIZE 64
+// The accept memory (1.0 step 5b, DESIGN 3.1 G4): what this device answered
+// for a frame it saw. Accepted: a copy is answered again (flags.duplicate) and
+// not processed. Silent: a copy stays unanswered. A refusal (busy, no slot) is
+// never remembered, so the sender's retry is processed again.
+enum class V4AcceptMemo : uint8_t { None = 0, Accepted = 1, Silent = 2 };
+// `cls` and `memo` sit in what was tail padding: the entry is still 20 bytes.
+struct V4DedupEntry {
+  uint8_t origin[6]; uint32_t id; uint32_t ts; uint8_t fragIndex; bool active; uint8_t cls; uint8_t memo;
+};
+// 128 entries (2.5 KB PSRAM): every stored fragment of a long message is an
+// entry of its own now (a fragment sent again after its message completed is
+// answered from here), so the ring holds a few long messages' worth.
+#define V4_DEDUP_SIZE 128
 // PSRAM .bss: POD dedup ring, touched only from the espnow RX-processing task
 // (never an ISR) and never DMA'd — no reason to hold ~1.3 KB of internal DRAM.
 // Written ONLY by frames that proved a key (Group, Sealed) or that an
@@ -2590,48 +2600,24 @@ static void formatNoPassphraseWarning(char* out, size_t outLen) {
 static constexpr uint32_t V4_DEDUP_TTL_MS = 5000;
 
 // fragIndex is part of the key: a multi-fragment message reuses one msgId across
-// all its fragments (the group id), so deduping by (origin,msgId) alone would
-// drop fragments 1..N-1 as "duplicates" of fragment 0. Keying on fragIndex too
-// keeps distinct fragments distinct while still catching a true retransmit of
-// the SAME fragment. Single-frame messages always pass fragIndex 0.
-static bool v4_dedup_ring_seen_and_insert(V4DedupEntry* ring, int size, int& nextIdx, V4DedupClass cls,
-                                          const uint8_t* mac, uint32_t id, uint8_t fragIndex) {
-  uint32_t now = (uint32_t)millis();
-  for (int i = 0; i < size; i++) {
-    if (ring[i].active && ring[i].id == id && ring[i].fragIndex == fragIndex &&
-        ring[i].cls == (uint8_t)cls && memcmp(ring[i].origin, mac, 6) == 0) {
-      // Unsigned subtraction is rollover-safe across the ~49.7-day millis() wrap.
-      if ((uint32_t)(now - ring[i].ts) < V4_DEDUP_TTL_MS) return true;
-      // Expired: accept as new and refresh in place so an immediate radio-level
-      // duplicate of THIS message is still caught.
-      ring[i].ts = now;
-      return false;
-    }
-  }
-  V4DedupEntry& e = ring[nextIdx];
-  memcpy(e.origin, mac, 6); e.id = id; e.fragIndex = fragIndex; e.ts = now; e.active = true;
-  e.cls = (uint8_t)cls;
-  nextIdx = (nextIdx + 1) % size;
-  return false;
-}
-
-// Duplicate check for one received frame (the caller has excluded msgId 0 and
-// the opcodes that reuse a msgId on purpose). Returns true for a duplicate.
+// all its fragments (the group id), so keying by (origin,msgId) alone would
+// take fragments 1..N-1 for copies of fragment 0. Keying on fragIndex too keeps
+// distinct fragments distinct while still catching a true retransmit of the
+// SAME fragment. Single-frame messages always pass fragIndex 0.
 //
-// The key is never taken from a field the frame did not prove. Before this
-// split every frame used one ring keyed on the header's origin, so a forged
+// Which ring, which class and which MAC a frame is remembered under. The key is
+// never taken from a field the frame did not prove. Before the class split
+// every frame used one ring keyed on the header's origin, so a forged
 // plaintext frame (public magic/version, fingerprint 0, empty payload: no key
 // needed) could pre-insert a peer's next msgIds and have that peer's genuine
-// sealed frames acknowledged and then dropped as duplicates.
+// sealed frames answered and then dropped as duplicates.
 //
 //   Sealed   SESSION_FRAME that opened under the session of `radioSrc`. Keyed
 //            on that MAC, which the session lookup bound the frame to, not on
 //            the header origin. Identical bytes already fail the session
 //            replay window; this entry is for what the window lets through: a
 //            re-sealed retry (fresh frameSeq, same msgId and fragIndex) after
-//            a lost ACK. The reassembler's have[] bitmap covers that for
-//            reassembled messages only; multi-frame TEXT is dispatched per
-//            fragment and single frames may be sent again under one msgId.
+//            a lost ACK, also of a fragment whose message already completed.
 //   Group    BROADCAST_AUTH tag verified. Keyed on the header origin, which
 //            flood forwarders keep verbatim: this is the loop suppression the
 //            ring was built for.
@@ -2643,22 +2629,58 @@ static bool v4_dedup_ring_seen_and_insert(V4DedupEntry* ring, int size, int& nex
 //            plaintext is never flooded, so radio-level duplicates are still
 //            caught, and a forger can only shadow plaintext frames of the MAC
 //            it transmits as, which it could forge outright anyway.
-static bool v4_dedup_frame_seen(const uint8_t* radioSrc, const EspNowV4Header* h,
-                                bool wasAuthenticated, bool wasSessionEncrypted, bool relayDelivery) {
-  if (wasSessionEncrypted) {
-    return v4_dedup_ring_seen_and_insert(gV4Dedup, V4_DEDUP_SIZE, gV4DedupIdx, V4DedupClass::Sealed,
-                                         radioSrc, h->msgId, h->fragIndex);
+struct V4AcceptKey {
+  V4DedupEntry* ring;
+  int size;
+  int* nextIdx;
+  V4DedupClass cls;
+  const uint8_t* mac;
+};
+static V4AcceptKey v4_accept_key(const uint8_t* radioSrc, const EspNowV4Header* h, bool wasAuthenticated,
+                                 bool wasSessionEncrypted, bool relayDelivery) {
+  if (wasSessionEncrypted) return {gV4Dedup, V4_DEDUP_SIZE, &gV4DedupIdx, V4DedupClass::Sealed, radioSrc};
+  if (wasAuthenticated) return {gV4Dedup, V4_DEDUP_SIZE, &gV4DedupIdx, V4DedupClass::Group, h->origin};
+  if (relayDelivery) return {gV4Dedup, V4_DEDUP_SIZE, &gV4DedupIdx, V4DedupClass::Relayed, radioSrc};
+  return {gV4DedupPlain, V4_DEDUP_PLAIN_SIZE, &gV4DedupPlainIdx, V4DedupClass::Plain, radioSrc};
+}
+
+static V4DedupEntry* v4_accept_find(const V4AcceptKey& k, uint32_t id, uint8_t fragIndex) {
+  for (int i = 0; i < k.size; i++) {
+    V4DedupEntry& e = k.ring[i];
+    if (e.active && e.id == id && e.fragIndex == fragIndex && e.cls == (uint8_t)k.cls &&
+        memcmp(e.origin, k.mac, 6) == 0) {
+      return &e;
+    }
   }
-  if (wasAuthenticated) {
-    return v4_dedup_ring_seen_and_insert(gV4Dedup, V4_DEDUP_SIZE, gV4DedupIdx, V4DedupClass::Group,
-                                         h->origin, h->msgId, h->fragIndex);
+  return nullptr;
+}
+
+// What this device answered for (key, id, fragIndex) within the last
+// V4_DEDUP_TTL_MS; None for a frame not seen (or seen too long ago).
+static V4AcceptMemo v4_accept_lookup(const V4AcceptKey& k, uint32_t id, uint8_t fragIndex) {
+  const V4DedupEntry* e = v4_accept_find(k, id, fragIndex);
+  if (!e) return V4AcceptMemo::None;
+  // Unsigned subtraction is rollover-safe across the ~49.7-day millis() wrap.
+  if ((uint32_t)((uint32_t)millis() - e->ts) >= V4_DEDUP_TTL_MS) return V4AcceptMemo::None;
+  return (V4AcceptMemo)e->memo;
+}
+
+// Remember the verdict (Accepted or Silent) for (key, id, fragIndex). An
+// expired entry of the same key is refreshed in place.
+static void v4_accept_record(const V4AcceptKey& k, uint32_t id, uint8_t fragIndex, V4AcceptMemo memo) {
+  const uint32_t now = (uint32_t)millis();
+  V4DedupEntry* e = v4_accept_find(k, id, fragIndex);
+  if (!e) {
+    e = &k.ring[*k.nextIdx];
+    *k.nextIdx = (*k.nextIdx + 1) % k.size;
+    memcpy(e->origin, k.mac, 6);
+    e->id = id;
+    e->fragIndex = fragIndex;
+    e->cls = (uint8_t)k.cls;
+    e->active = true;
   }
-  if (relayDelivery) {
-    return v4_dedup_ring_seen_and_insert(gV4Dedup, V4_DEDUP_SIZE, gV4DedupIdx, V4DedupClass::Relayed,
-                                         radioSrc, h->msgId, h->fragIndex);
-  }
-  return v4_dedup_ring_seen_and_insert(gV4DedupPlain, V4_DEDUP_PLAIN_SIZE, gV4DedupPlainIdx,
-                                       V4DedupClass::Plain, radioSrc, h->msgId, h->fragIndex);
+  e->ts = now;
+  e->memo = (uint8_t)memo;
 }
 
 // Drop all dedup entries from one origin. Called when a peer reboot is detected
@@ -3728,21 +3750,22 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
 // group-tagged frame a tagged ACK. There is no plaintext ACK, and a plaintext
 // frame (only the handshake, opcodes 10-15) is never ACKed.
 //
-// v4_queue_ack runs on the receive path (espnow_task, and cmd_exec for the
-// deferred handlers): it only fills the payload and hands it to the TX
-// dispatcher's ACK pool (espnowtx::sendAck), because sealing needs the session
-// TX lock and builds a frame. An ACK that finds no pool slot or no queue room is
-// silence (espnowstats txAckDropped). sessionId 0 asks the dispatcher for the
-// peer's current session (the deferred handlers no longer hold the frame's).
+// v4_queue_ack runs on the receive path (espnow_task), after the frame's
+// verdict (1.0 step 5b: status 0 = accepted, flags.duplicate for a copy of an
+// accepted frame, a status for a refusal): it only fills the payload and hands
+// it to the TX dispatcher's ACK pool (espnowtx::sendAck), because sealing needs
+// the session TX lock and builds a frame. An ACK that finds no pool slot or no
+// queue room is silence (espnowstats txAckDropped). sessionId 0 asks the
+// dispatcher for the peer's current session.
 static bool v4_queue_ack(const uint8_t* dst, bool sealed, uint16_t sessionId, uint32_t ackFor,
-                         uint8_t fragIndex, uint8_t fragCount, uint8_t status) {
+                         uint8_t fragIndex, uint8_t fragCount, uint8_t status, uint8_t ackFlags) {
   if (!dst) return false;
   V4PayloadAck a = {};
   a.ackFor = ackFor;
   a.fragIndex = fragIndex;
   a.fragCount = fragCount ? fragCount : (uint8_t)1;
   a.status = status;
-  a.flags = 0;
+  a.flags = ackFlags;
   DEBUG_ESPNOWF("[V4_ACK_TX] %s ACK to " MAC_FMT " for msgId=%lu frag %u/%u status=%u",
                 sealed ? "sealed" : "tagged", MAC_ARGS(dst), (unsigned long)ackFor,
                 (unsigned)a.fragIndex + 1, (unsigned)a.fragCount, (unsigned)status);
@@ -3751,12 +3774,6 @@ static bool v4_queue_ack(const uint8_t* dst, bool sealed, uint16_t sessionId, ui
                            sessionId, reinterpret_cast<const uint8_t*>(&a));
 }
 
-// The ACK of a sealed single frame a deferred handler answers again after its
-// work (USER_SYNC, a completed file): same session class, the peer's current
-// session. (Step 5b removes these second ACKs.)
-static bool v4_queue_sealed_ack(const uint8_t* dst, uint32_t ackFor) {
-  return v4_queue_ack(dst, /*sealed=*/true, /*sessionId=*/0, ackFor, 0, 1, 0);
-}
 
 // Runs on the espnow_tx dispatcher (espnowtx::sendAck's queue). Builds the ACK frame with its own
 // msgId and sends it sealed or tagged, routed like any unicast (an ACK is
@@ -4372,7 +4389,7 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
 // ============================================================================
 // RX dispatch table. Every opcode this device receives has one row in
 // kV4HandlerTable[] (its gates, its minimum length) and one
-// `static void v4h_<name>(const V4RxCtx&)` handler; the dispatcher below runs
+// `static V4Verdict v4h_<name>(const V4RxCtx&)` handler; the dispatcher below runs
 // the row's gates and the per-frame reassembly cleanup, so handlers don't
 // repeat it.
 // ============================================================================
@@ -4382,7 +4399,9 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
 // duplicate. Field semantics are documented there.
 #include "System_ESPNow_RxCtx.h"
 
-using V4OpcodeHandler = void (*)(const V4RxCtx& ctx);
+// Every handler returns its verdict (V4Verdict, System_ESPNow_RxCtx.h): the
+// receive path ACKs only after it (1.0 step 5b, DESIGN 3.2).
+using V4OpcodeHandler = V4Verdict (*)(const V4RxCtx& ctx);
 
 // Flags on handler-table entries
 static constexpr uint8_t V4_OPC_FLAG_REQ_PAIRED        = 0x01;  // require src to be a paired peer
@@ -4448,7 +4467,7 @@ static bool espnowOriginIsKnown(const uint8_t* mac) {
 }
 
 // TEXT — deferred to task via ring buffer (gEspNow->textQueue).
-static void v4h_text(const V4RxCtx& ctx) {
+static V4Verdict v4h_text(const V4RxCtx& ctx) {
   // Relayed text (origin != the neighbour that handed it to us) is only accepted
   // from a node we know of. Directly-received text is exempt: the radio itself
   // vouches that the sender is present, and that is the path first contact
@@ -4458,7 +4477,7 @@ static void v4h_text(const V4RxCtx& ctx) {
     DEBUG_ESPNOW_ROUTERF(
            "[V4_RX] relayed TEXT from unknown origin " MAC_FMT " — dropped",
            MAC_ARGS(ctx.h->origin));
-    return;
+    return ctx.refuse();
   }
   // Bound the printf by both 80 chars AND the actual payloadLen — the
   // SESSION_FRAME unwrap path delivers a non-null-terminated buffer, so a
@@ -4530,13 +4549,17 @@ static void v4h_text(const V4RxCtx& ctx) {
                                ctx.recv_info->rx_ctrl ? ctx.recv_info->rx_ctrl->rssi : (int8_t)-128);
       }
     } else {
+      // Full ring: not taken. Answered busy (1.0 step 5b; the sender no longer
+      // shows Delivered), and not remembered, so a retry is processed again.
       DEBUG_ESPNOW_ROUTERF("[V4_RX] TEXT queue full, message dropped");
+      return ctx.refuseWith(espnowanswer::kBusy);
     }
   } else {
     DEBUG_ESPNOW_ROUTERF("[V4_RX] TEXT message REJECTED: payloadLen=%u gEspNow=%p",
            ctx.payloadLen, gEspNow);
   }
   DEBUG_ESPNOW_ROUTERF("[V4_RX] ========================================");
+  return ctx.accepted();
 }
 
 // The boot counter of a BOOT notice (the JSON envelope buildBootNotification
@@ -4569,7 +4592,7 @@ static bool bootNoticeCounter(const uint8_t* payload, uint16_t len, uint32_t* ou
 //     kept its sessions, or an older firmware opened a new one to send it), so
 //     nothing ends; its counter becomes the reference (sessionPeerBootSeen).
 // Then filed like before (v4h_text).
-static void v4h_boot(const V4RxCtx& ctx) {
+static V4Verdict v4h_boot(const V4RxCtx& ctx) {
   if (ctx.isAuthenticated && memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) == 0 &&
       peerRestartSignalScoped(ctx.isSessionEncrypted, ctx.h->meshFingerprint,
                               fingerprintForPeer(ctx.h->origin))) {
@@ -4578,10 +4601,10 @@ static void v4h_boot(const V4RxCtx& ctx) {
     if (ctx.isSessionEncrypted) {
       if (hasCounter) sessionPeerBootSeen(ctx.h->origin, boot);
     } else if (!peerBootNoticeFiled(sessionPeerBootNotice(ctx.h->origin, hasCounter, boot))) {
-      return;
+      return ctx.refuse();
     }
   }
-  v4h_text(ctx);
+  return v4h_text(ctx);
 }
 
 // SESSION_UNKNOWN — the peer could not open a sealed frame of ours: it has no
@@ -4590,18 +4613,19 @@ static void v4h_boot(const V4RxCtx& ctx) {
 // closes only the live session the hint names, for a sequence this device
 // sealed in it, at most once per peer per 10 s, and opens a new one
 // (System_ESPNow_PeerRestartCore.h).
-static void v4h_session_unknown(const V4RxCtx& ctx) {
-  if (memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) != 0) return;  // link-local only
+static V4Verdict v4h_session_unknown(const V4RxCtx& ctx) {
+  if (memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) != 0) return ctx.refuse();  // link-local only
   if (!peerRestartSignalScoped(ctx.isSessionEncrypted, ctx.h->meshFingerprint,
-                               fingerprintForPeer(ctx.h->origin))) return;  // another mesh's tag
+                               fingerprintForPeer(ctx.h->origin))) return ctx.refuse();  // another mesh's tag
   V4PayloadSessionUnknown hint;
   ctx.read(hint);
   (void)sessionUnknownHintReceived(ctx.recv_info->src_addr, &hint);
+  return ctx.accepted();
 }
 
 // CMD — deferred to task via gEspNow->deferredCmd* fields (one in flight).
 // Auth/validation runs later in v4_handle_cmd() on the espnow task.
-static void v4h_cmd(const V4RxCtx& ctx) {
+static V4Verdict v4h_cmd(const V4RxCtx& ctx) {
   if (ctx.payloadLen <= ESPNOW_V4_MAX_PAYLOAD && gEspNow && !gEspNow->deferredCmdPending) {
     size_t copyLen = (ctx.payloadLen < sizeof(gEspNow->deferredCmdPayload) - 1)
                        ? ctx.payloadLen
@@ -4625,12 +4649,16 @@ static void v4h_cmd(const V4RxCtx& ctx) {
     // RX-handler context: queued send, never a blocking one. reqId = this CMD's msgId.
     v4_send_cmd_resp_async(ctx.recv_info->src_addr, ctx.h->msgId, espnowanswer::kBusy,
                            "Error: Device busy with another remote command. Send it again.");
+    // Not taken: the ACK says busy too (1.0 step 5b). Step 6 drops the
+    // CMD_RESP(busy) above and leaves the ACK as the one answer.
+    return ctx.refuseWith(espnowanswer::kBusy);
   }
+  return ctx.accepted();
 }
 
 // CMD_RESP — deferred to task via gEspNow->deferredCmdResp* fields.
-static void v4h_cmd_resp(const V4RxCtx& ctx) {
-  if (!gEspNow) return;
+static V4Verdict v4h_cmd_resp(const V4RxCtx& ctx) {
+  if (!gEspNow) return ctx.refuse();
   // {reqId, status} (rule F3): reqId is the msgId of the CMD this answers; the
   // frame's own header msgId says nothing about which request it was.
   V4PayloadCmdRespHeader resp;
@@ -4645,7 +4673,7 @@ static void v4h_cmd_resp(const V4RxCtx& ctx) {
   // the wire could deliver 6400 — a maximal response lost 256 B in silence).
   // The alloc is V4_REASM_MAX_MSG + 1 for the NUL written below.
   if (resultLen > V4_REASM_MAX_MSG) resultLen = V4_REASM_MAX_MSG;
-  if (!gEspNow->deferredCmdRespResult) { gEspNow->deferredCmdRespPending = false; return; }
+  if (!gEspNow->deferredCmdRespResult) { gEspNow->deferredCmdRespPending = false; return ctx.refuse(); }
   if (gEspNow->deferredCmdRespPending) {
     // One slot: an answer the task has not shown yet is replaced by this
     // one. Leave a line so that answer does not vanish without a trace.
@@ -4662,12 +4690,12 @@ static void v4h_cmd_resp(const V4RxCtx& ctx) {
   gEspNow->deferredCmdRespStatus = resp.status;
   gEspNow->deferredCmdRespReqId = resp.reqId;  // correlate this result back to the request that produced it
   gEspNow->deferredCmdRespPending = true;
+  return ctx.accepted();
 }
 
-// HEARTBEAT — mesh peer heartbeat; updates rx activity, mesh-backup tracking,
-// and sends ACK if requested. Note: ACK_REQ frames also get an auto-ACK from
-// the early auto-ACK block in v4_try_handle_incoming; preserving the
-// double-send here to match original behavior exactly.
+// HEARTBEAT — mesh peer heartbeat; updates rx activity and mesh-backup
+// tracking. Its ACK (when asked for) follows the verdict in
+// v4_try_handle_incoming, like every frame's.
 // Layer-2 self-heal for the session pre-warm. A peer whose identity diverged
 // (e.g. it was re-flashed/factory-erased) rejects our SESSION_OPEN forever; the
 // heartbeat pre-warm would otherwise re-send one every ~5s indefinitely. Track
@@ -4806,7 +4834,7 @@ static void espnowChFollowOnHeartbeat(const V4RxCtx& ctx, const V4PayloadHeartbe
   }
 }
 
-static void v4h_heartbeat(const V4RxCtx& ctx) {
+static V4Verdict v4h_heartbeat(const V4RxCtx& ctx) {
   V4PayloadHeartbeat hb;
   ctx.read(hb);
   // Liveness is recorded for the RADIO SOURCE, so a missing slot may be created
@@ -4909,28 +4937,32 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
   }
   // (No ACK here: the receive path answered ACK_REQ before dispatch, in the
   // frame's own class. This second, plaintext ACK went in 1.0 step 5a.)
+  return ctx.accepted();
 }
 
 // SENSOR_STATUS: which sensors the sender has and is streaming. The receive
 // table has required a paired sender and a session-encrypted frame.
-static void v4h_sensor_status(const V4RxCtx& ctx) {
+static V4Verdict v4h_sensor_status(const V4RxCtx& ctx) {
   remoteSensorIngestStatus(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen);
+  return ctx.accepted();
 }
 
 #if ENABLE_BONDED_MODE
 // BOND_SENSOR_STATUS: the bond worker's sensor status, to its bond master only
 // (the receive table's REQ_BOND_PEER). Kept and handed to the forwarder.
-static void v4hBondSensorStatus(const V4RxCtx& ctx) {
+static V4Verdict v4hBondSensorStatus(const V4RxCtx& ctx) {
   remoteSensorIngestBondStatus(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen);
+  return ctx.accepted();
 }
 #endif
 
 // SENSOR_ENVELOPE: one part of a sensor reading from a paired sender over its
 // session (the receive table's gates). The range check, the role rule, the
 // counter rule and the store are in remoteSensorIngestPart.
-static void v4h_sensor_envelope(const V4RxCtx& ctx) {
+static V4Verdict v4h_sensor_envelope(const V4RxCtx& ctx) {
   remoteSensorIngestPart(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen,
                          /*fromBond=*/false);
+  return ctx.accepted();
 }
 
 // SENSOR_REQ — worker RX: a master/backup asks this worker to (un)subscribe/one-shot a
@@ -4938,7 +4970,7 @@ static void v4h_sensor_envelope(const V4RxCtx& ctx) {
 // Add the mandatory NARROW authorization (opt-in + Ed25519 fingerprint == master/backup),
 // then defer the apply to the super-loop (startSensorDataStreaming creates a task/mutex —
 // unsafe on the RX task). This handler never reaches executeCommand: no RCE (D1/scope).
-static void v4h_sensor_req(const V4RxCtx& ctx) {
+static V4Verdict v4h_sensor_req(const V4RxCtx& ctx) {
   // A bond worker's bond master decides what it streams: a mesh master does
   // not (espnowfwd::meshDataAllowed). Counted, and said once a minute.
   bool bondWorker = false;
@@ -4956,7 +4988,7 @@ static void v4h_sensor_req(const V4RxCtx& ctx) {
                        "decides what it streams (%lu more in the last minute)",
                        ctx.deviceName, (unsigned long)held);
     }
-    return;
+    return ctx.refuse();
   }
   // A request with the link byte set is for this device's bond partner: as
   // its bond master this device turns it into its own control of the
@@ -4968,22 +5000,23 @@ static void v4h_sensor_req(const V4RxCtx& ctx) {
 #if ENABLE_BONDED_MODE
     bondForwardSensorRequest(ctx.recv_info->src_addr, rq.mode, rq.sensorMask, rq.intervalMs, rq.leaseMs,
                              rq.fwdLink);
+    return ctx.accepted();
 #else
     DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_REQ] drop: a request for a bond partner, and this build has no bond mode");
+    return ctx.refuseWith(espnowanswer::kUnsupported);
 #endif
-    return;
   }
   if (!gSettings.espnowAcceptSensorControl) {
     DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_REQ] drop: acceptSensorControl is off");
-    return;
+    return ctx.refuse();
   }
   if (!espnowSensorControlAuthorized(ctx.recv_info->src_addr)) {
     DEBUG_ESPNOW_MESHF(
            "[V4_RX_SENSOR_REQ] drop: %s not an authorized controller (fingerprint mismatch)",
            ctx.deviceName);
-    return;
+    return ctx.refuse();
   }
-  if (!gEspNow) return;
+  if (!gEspNow) return ctx.refuse();
   gEspNow->meshSensorReqMode       = rq.mode;
   gEspNow->meshSensorReqMask       = rq.sensorMask;
   gEspNow->meshSensorReqIntervalMs = rq.intervalMs;
@@ -4992,6 +5025,7 @@ static void v4h_sensor_req(const V4RxCtx& ctx) {
   gEspNow->meshSensorReqPending    = true;
   DEBUG_ESPNOW_MESHF("[V4_RX_SENSOR_REQ] queued mode=%u mask=0x%lx interval=%u lease=%u from %s",
          rq.mode, (unsigned long)rq.sensorMask, (unsigned)rq.intervalMs, (unsigned)rq.leaseMs, ctx.deviceName);
+  return ctx.accepted();
 }
 
 #if ENABLE_BONDED_MODE
@@ -5562,10 +5596,10 @@ void bondAgreementDescribe(char* out, size_t outLen) {
 // BOND_REQUEST — a paired peer says this device is its bond partner. Kept for
 // bondAgreementTick, which answers it from settings no partner change is in
 // the middle of. It never changes the bond here: accepting takes 'bondconnect'.
-static void v4h_bond_request(const V4RxCtx& ctx) {
+static V4Verdict v4h_bond_request(const V4RxCtx& ctx) {
   V4PayloadBondRequest request;
   ctx.read(request);
-  if (request.seq == 0) return;   // 0 is "nobody asked" in a notice
+  if (request.seq == 0) return ctx.refuseWith(espnowanswer::kBadRequest);  // 0 is "nobody asked" in a notice
   portENTER_CRITICAL(&gBondAgreeLock);
   const bool kept = bondagree::pushInbound(gBondAgree, true, ctx.recv_info->src_addr, request.role,
                                            request.flags, request.seq);
@@ -5573,13 +5607,14 @@ static void v4h_bond_request(const V4RxCtx& ctx) {
   DEBUG_ESPNOW_MESHF("[BOND_REQUEST_RX] from %s role=%u seq=%u flags=0x%02X%s", ctx.deviceName,
                      (unsigned)request.role, (unsigned)request.seq, (unsigned)request.flags,
                      kept ? "" : " (dropped: too many waiting)");
-  (void)kept;
+  // Full inbox: busy, so the sender's next try is processed (not remembered).
+  return kept ? ctx.accepted() : ctx.refuseWith(espnowanswer::kBusy);
 }
 
 // BOND_NOTICE — a paired peer says how its bond stands toward this device.
 // Kept for bondAgreementTick, which uses it only when the sender is the
 // configured partner, and then only to update the agreement.
-static void v4h_bond_notice(const V4RxCtx& ctx) {
+static V4Verdict v4h_bond_notice(const V4RxCtx& ctx) {
   V4PayloadBondNotice notice;
   ctx.read(notice);
   portENTER_CRITICAL(&gBondAgreeLock);
@@ -5589,21 +5624,22 @@ static void v4h_bond_notice(const V4RxCtx& ctx) {
   DEBUG_ESPNOW_MESHF("[BOND_NOTICE_RX] from %s reason=%u seq=%u%s", ctx.deviceName,
                      (unsigned)notice.reason, (unsigned)notice.seq,
                      kept ? "" : " (dropped: too many waiting)");
-  (void)kept;
+  // Full inbox: busy, so the sender's next try is processed (not remembered).
+  return kept ? ctx.accepted() : ctx.refuseWith(espnowanswer::kBusy);
 }
 
 // BOND_HEARTBEAT — bond-mode keepalive from paired peer; updates bond peer
 // online state, boot counter, settings hash, RSSI; may trigger sync recovery.
-static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
+static V4Verdict v4h_bond_heartbeat(const V4RxCtx& ctx) {
   DEBUG_ESPNOW_MESHF("[BOND_HB_RX] from %s payloadLen=%u isPaired=%d",
          ctx.deviceName, ctx.payloadLen, (int)ctx.isPaired);
   V4PayloadBondHeartbeat hb;
   ctx.read(hb);
-  if (!gEspNow) return;
+  if (!gEspNow) return ctx.refuse();
 
   // What the heartbeat says about the bond itself comes first: from a partner
   // that declined the bond it is not acted on (bondAgreementPartnerHeartbeat).
-  if (!bondAgreementPartnerHeartbeat(ctx.recv_info->src_addr, hb.role)) return;
+  if (!bondAgreementPartnerHeartbeat(ctx.recv_info->src_addr, hb.role)) return ctx.refuse();
 
   bool bootChanged = (hb.bootCounter != 0 && gEspNow->bondPeerBootCounter != 0 &&
                       hb.bootCounter != gEspNow->bondPeerBootCounter);
@@ -5626,7 +5662,7 @@ static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
   if (bootChanged) {
     // Peer restarted its msgId counter; clear its stale dedup entries so its
     // reused low ids stop being dropped as duplicates. Clock-independent
-    // backstop to the TTL expiry in v4_dedup_ring_seen_and_insert.
+    // backstop to the TTL expiry in v4_accept_lookup.
     v4_dedup_flush_origin(ctx.recv_info->src_addr);
     resetBondSync();
   }
@@ -5687,24 +5723,26 @@ static void v4h_bond_heartbeat(const V4RxCtx& ctx) {
       // bondNeedsStreamingSetup is set after sync completes in processBondSettings()
     }
   }
+  return ctx.accepted();
 }
 
 // STREAM_CTRL — bond mode master->worker: start/stop sensor streaming.
 // Deferred to later in this loop (step 9f2) because startSensorDataStreaming
 // creates tasks/mutexes. Kept per sensor: a bond master switching several
 // sensors sends their frames back to back, and each one counts.
-static void v4h_stream_ctrl(const V4RxCtx& ctx) {
-  if (!gEspNow) return;
+static V4Verdict v4h_stream_ctrl(const V4RxCtx& ctx) {
+  if (!gEspNow) return ctx.refuse();
   V4PayloadStreamCtrl sc;
   ctx.read(sc);
   espnowsensor::streamCtrlPut(gEspNow->bondDeferredStreamCtrl, sc.sensorType, sc.enable != 0);
   DEBUG_ESPNOW_MESHF("[BOND_STREAM_CTRL_RX] sensor=%u enable=%u (deferred)",
          sc.sensorType, sc.enable);
+  return ctx.accepted();
 }
 #endif // ENABLE_BONDED_MODE
 
 // TOPO_REQ — peer is asking for our topology; respond with TOPO_START + N×TOPO_PEER.
-static void v4h_topo_req(const V4RxCtx& ctx) {
+static V4Verdict v4h_topo_req(const V4RxCtx& ctx) {
   DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_REQ] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
   V4PayloadTopoReq tr;
@@ -5751,7 +5789,7 @@ static void v4h_topo_req(const V4RxCtx& ctx) {
   if (!v4_send_topo_start(ctx.recv_info->src_addr, tr.reqId,
                           (uint8_t)peerCount)) {
     WARN_ESPNOWF("[V4_RX_TOPO_REQ] Failed to send TOPO_START; response aborted");
-    return;
+    return ctx.refuseWith(espnowanswer::kBusy);
   }
 
   int peerIndex = 0;
@@ -5772,10 +5810,11 @@ static void v4h_topo_req(const V4RxCtx& ctx) {
     }
   }
   DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_REQ] Sent %d TOPO_PEER frame(s)", peerIndex);
+  return ctx.accepted();
 }
 
 // TOPO_START — incoming topology response start (peer count). Initializes stream.
-static void v4h_topo_start(const V4RxCtx& ctx) {
+static V4Verdict v4h_topo_start(const V4RxCtx& ctx) {
   DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_START] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
   V4PayloadTopoStart ts;
@@ -5787,33 +5826,33 @@ static void v4h_topo_start(const V4RxCtx& ctx) {
   // sender is not taken for an edge device with no peers.
   if (!espnowanswer::isOk(ts.status)) {
     WARN_ESPNOWF("[V4_RX_TOPO_START] Answer status %u (not ok); nothing recorded", (unsigned)ts.status);
-    return;
+    return ctx.refuse();
   }
   if (ts.peerCount > MESH_PEER_MAX) {
     WARN_ESPNOWF("[V4_RX_TOPO_START] Rejected peerCount=%u (max=%u)",
                  ts.peerCount, (unsigned)MESH_PEER_MAX);
-    return;
+    return ctx.refuse();
   }
 
   TopoStreamsGuard guard("v4h_topo_start");
   if (gTopoStreamsMutex && !guard.held) {
     WARN_ESPNOWF("[V4_RX_TOPO_START] Topology state busy; dropping response");
-    return;
+    return ctx.refuse();
   }
   const uint32_t now = (uint32_t)millis();
   if (ts.reqId != gTopoRequestId ||
       (int32_t)(gTopoRequestTimeout - now) <= 0) {
     DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_START] Rejected: reqId mismatch or timeout");
-    return;
+    return ctx.refuse();
   }
   if (!topologySenderExpectedLocked(ctx.recv_info->src_addr)) {
     WARN_ESPNOWF("[V4_RX_TOPO_START] Rejected response from a peer outside the request snapshot");
-    return;
+    return ctx.refuse();
   }
   TopologyStream* stream = findOrCreateTopoStreamLocked(ctx.recv_info->src_addr, ts.reqId);
   if (!stream || !stream->active) {
     DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_START] ERROR: Could not allocate stream");
-    return;
+    return ctx.refuse();
   }
   if (!stream->started) {
     const char* senderNamePtr = (ctx.deviceName && ctx.deviceName[0]) ? ctx.deviceName : nullptr;
@@ -5847,16 +5886,17 @@ static void v4h_topo_start(const V4RxCtx& ctx) {
   } else if (stream->totalPeers != ts.peerCount) {
     WARN_ESPNOWF("[V4_RX_TOPO_START] Conflicting duplicate start for %s: had=%u new=%u",
                  stream->senderName, stream->totalPeers, ts.peerCount);
-    return;
+    return ctx.refuse();
   }
   if (ts.peerCount == 0) {
     DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_START] 0 peers - edge device, finalizing");
     finalizeTopologyStreamLocked(stream);
   }
+  return ctx.accepted();
 }
 
 // TOPO_PEER — incoming topology peer entry. Stores one bounded indexed record.
-static void v4h_topo_peer(const V4RxCtx& ctx) {
+static V4Verdict v4h_topo_peer(const V4RxCtx& ctx) {
   DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_PEER] Received from %s msgId=%lu payloadLen=%u",
          ctx.deviceName, (unsigned long)ctx.h->msgId, ctx.payloadLen);
   V4PayloadTopoPeer tp;
@@ -5871,48 +5911,48 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
   // Rule F3: a peer entry that is not ok is not a peer; nothing is stored.
   if (!espnowanswer::isOk(tp.status)) {
     WARN_ESPNOWF("[V4_RX_TOPO_PEER] Answer status %u (not ok); nothing stored", (unsigned)tp.status);
-    return;
+    return ctx.refuse();
   }
   if (tp.isLast > 1) {
     WARN_ESPNOWF("[V4_RX_TOPO_PEER] Rejected invalid isLast=%u", tp.isLast);
-    return;
+    return ctx.refuse();
   }
 
   TopoStreamsGuard guard("v4h_topo_peer");
   if (gTopoStreamsMutex && !guard.held) {
     WARN_ESPNOWF("[V4_RX_TOPO_PEER] Topology state busy; dropping response");
-    return;
+    return ctx.refuse();
   }
   const uint32_t now = (uint32_t)millis();
   if (tp.reqId != gTopoRequestId ||
       (int32_t)(gTopoRequestTimeout - now) <= 0) {
     DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_PEER] Rejected: reqId mismatch or timeout");
-    return;
+    return ctx.refuse();
   }
   if (!topologySenderExpectedLocked(ctx.recv_info->src_addr)) {
     WARN_ESPNOWF("[V4_RX_TOPO_PEER] Rejected response from a peer outside the request snapshot");
-    return;
+    return ctx.refuse();
   }
   TopologyStream* stream = findTopoStreamLocked(ctx.recv_info->src_addr, tp.reqId);
   if (!stream || !stream->active || !stream->started) {
     DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_PEER] No active stream for this sender");
-    return;
+    return ctx.refuse();
   }
   if (tp.peerIndex >= stream->totalPeers || tp.peerIndex >= MESH_PEER_MAX) {
     WARN_ESPNOWF("[V4_RX_TOPO_PEER] Rejected index=%u for total=%u",
                  tp.peerIndex, stream->totalPeers);
-    return;
+    return ctx.refuse();
   }
   const bool expectedLast = ((uint16_t)tp.peerIndex + 1u == stream->totalPeers);
   if ((tp.isLast != 0) != expectedLast) {
     WARN_ESPNOWF("[V4_RX_TOPO_PEER] Rejected inconsistent isLast=%u at index=%u total=%u",
                  tp.isLast, tp.peerIndex, stream->totalPeers);
-    return;
+    return ctx.refuse();
   }
   const uint16_t peerBit = (uint16_t)(1u << tp.peerIndex);
   if ((stream->receivedPeerMask & peerBit) != 0) {
     DEBUG_ESPNOW_TOPOF("[V4_RX_TOPO_PEER] Duplicate index %u, skipping", tp.peerIndex);
-    return;
+    return ctx.refuse();
   }
 
   const char* peerNamePtr2 = wireName[0] ? wireName : nullptr;
@@ -5954,6 +5994,7 @@ static void v4h_topo_peer(const V4RxCtx& ctx) {
   if (stream->receivedPeers == stream->totalPeers) {
     finalizeTopologyStreamLocked(stream);
   }
+  return ctx.accepted();
 }
 
 // USER_SYNC — propagates user credentials between bonded peers; requires
@@ -6031,15 +6072,15 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
   if (!w->isSessionEncrypted) {
     ERROR_ESPNOWF("[USER_SYNC] SECURITY: Rejected from %s — must be session-encrypted", deviceName);
     broadcastOutput("[ESP-NOW] SECURITY: User sync rejected - encryption required");
-    v4_queue_sealed_ack(srcAddr, msgId);
     return;
   }
 
-  // User sync must be enabled
+  // User sync must be enabled. v4h_user_sync already refused the frame when it
+  // was off (its ACK said so, 1.0 step 5b); this is the switch turned off in
+  // the meantime.
   if (!gSettings.espnowUserSyncEnabled) {
     WARN_ESPNOWF("[USER_SYNC] Disabled — rejecting from %s", deviceName);
     broadcastOutput("[ESP-NOW] User sync DISABLED - enable with 'espnowusersync on'");
-    v4_queue_sealed_ack(srcAddr, msgId);
     return;
   }
 
@@ -6186,13 +6227,26 @@ static void runDeferredUserSync(void* arg) {
 }
 
 // On-RX (espnow_task): snapshot frame into PSRAM and defer. Lightweight only.
-static void v4h_user_sync(const V4RxCtx& ctx) {
+// The two refusals that need no work are decided here, so the frame's ACK
+// carries them (1.0 step 5b: kRefused to the session peer; the deferred work
+// sends no second ACK): not sealed, or user sync off on this device. The rest
+// (JSON, admin login) is answered by the CMD_RESP of the deferred work.
+static V4Verdict v4h_user_sync(const V4RxCtx& ctx) {
+  if (!ctx.isSessionEncrypted) {
+    ERROR_ESPNOWF("[USER_SYNC] SECURITY: Rejected from %s — must be session-encrypted", ctx.deviceName);
+    return ctx.refuse();
+  }
+  if (!gSettings.espnowUserSyncEnabled) {
+    WARN_ESPNOWF("[USER_SYNC] Disabled — refusing from %s", ctx.deviceName);
+    broadcastOutput("[ESP-NOW] User sync DISABLED - enable with 'espnowusersync on'");
+    return ctx.refuse();
+  }
   const size_t need = sizeof(DeferredUserSyncWork) + ctx.payloadLen;
   auto* w = static_cast<DeferredUserSyncWork*>(
       ps_alloc(need, AllocPref::PreferPsram, "espnow.usersync.defer"));
   if (!w) {
     ERROR_ESPNOWF("[USER_SYNC] PSRAM alloc failed (defer drop) from %s", ctx.deviceName);
-    return;
+    return ctx.refuseWith(espnowanswer::kNoSlot);
   }
   memcpy(w->srcAddr, ctx.recv_info->src_addr, 6);
   w->msgId              = ctx.h->msgId;
@@ -6203,12 +6257,14 @@ static void v4h_user_sync(const V4RxCtx& ctx) {
   if (!submitDeferredToCmdExec(runDeferredUserSync, w)) {
     ERROR_ESPNOWF("[USER_SYNC] cmd_exec queue full, dropping from %s", ctx.deviceName);
     free(w);
+    return ctx.refuseWith(espnowanswer::kBusy);
   }
+  return ctx.accepted();
 }
 
 #if ENABLE_BONDED_MODE
 // BOND_CAP_REQ — peer asks for our capability summary. Defer to task.
-static void v4h_bond_cap_req(const V4RxCtx& ctx) {
+static V4Verdict v4h_bond_cap_req(const V4RxCtx& ctx) {
   DEBUG_ESPNOW_MESHF("[BOND_CAP_REQ_RX] from %s role=%d capSent=%d",
          ctx.deviceName, (int)gSettings.bondRole,
          gEspNow ? (int)gEspNow->bondCapSent : -1);
@@ -6216,12 +6272,13 @@ static void v4h_bond_cap_req(const V4RxCtx& ctx) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
     gEspNow->bondNeedsCapabilityResponse = true;
   }
+  return ctx.accepted();
 }
 
 // BOND_CAP_RESP — peer's capability summary. Cache it; queue our own back
 // if we haven't sent one yet. NOTE: extra payloadLen check is done here
 // (was in the original if-condition) since the dispatcher can't express it.
-static void v4h_bond_cap_resp(const V4RxCtx& ctx) {
+static V4Verdict v4h_bond_cap_resp(const V4RxCtx& ctx) {
   CapabilitySummary cap;
   ctx.read(cap);
   {
@@ -6236,7 +6293,7 @@ static void v4h_bond_cap_resp(const V4RxCtx& ctx) {
          ctx.deviceName, (int)gSettings.bondRole,
          gEspNow ? (int)gEspNow->bondCapSent : -1,
          (unsigned long)cap.sensorMask, cap.deviceName);
-  if (!gEspNow) return;
+  if (!gEspNow) return ctx.refuse();
   gEspNow->lastRemoteCap = cap;
   gEspNow->lastRemoteCapValid = true;
   gEspNow->lastRemoteCapTime = millis();
@@ -6257,41 +6314,45 @@ static void v4h_bond_cap_resp(const V4RxCtx& ctx) {
   } else {
     DEBUG_ESPNOW_MESHF("[BOND_CAP_RESP_RX] NOT sending reciprocal (bondCapSent already true)");
   }
+  return ctx.accepted();
 }
 
 // BOND_SENSOR_DATA: one part of a sensor reading from the bond partner. The
 // same layout and the same ingest as SENSOR_ENVELOPE; only the gate differs
 // (the row also requires the bond partner).
-static void v4h_sensor_data(const V4RxCtx& ctx) {
+static V4Verdict v4h_sensor_data(const V4RxCtx& ctx) {
   remoteSensorIngestPart(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen,
                          /*fromBond=*/true);
+  return ctx.accepted();
 }
 
 // SETTINGS_REQ — peer asks for our settings file. Defer to task.
-static void v4h_settings_req(const V4RxCtx& ctx) {
+static V4Verdict v4h_settings_req(const V4RxCtx& ctx) {
   DEBUG_ESPNOW_MESHF("[BOND_SETTINGS_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
   if (gEspNow) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
     gEspNow->bondNeedsSettingsResponse = true;
     DEBUG_ESPNOW_MESHF("[BOND_SETTINGS_REQ_RX] set bondNeedsSettingsResponse=true");
   }
+  return ctx.accepted();
 }
 
 // SCHEMA_REQ — peer asks for our settings schema as a file. Mirrors
 // SETTINGS_REQ: handler is a small flag-flip, the actual JSON generation +
 // file transfer happens later in the tick (section 9f) where there's stack
 // headroom and we can gate on an encrypted session.
-static void v4h_schema_req(const V4RxCtx& ctx) {
+static V4Verdict v4h_schema_req(const V4RxCtx& ctx) {
   DEBUG_ESPNOW_MESHF("[BOND_SCHEMA_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
   if (gEspNow) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
     gEspNow->bondNeedsSchemaResponse = true;
     DEBUG_ESPNOW_MESHF("[BOND_SCHEMA_REQ_RX] set bondNeedsSchemaResponse=true");
   }
+  return ctx.accepted();
 }
 
 // BOND_STATUS_REQ — peer asks for live status. Defer to task.
-static void v4h_bond_status_req(const V4RxCtx& ctx) {
+static V4Verdict v4h_bond_status_req(const V4RxCtx& ctx) {
   DEBUG_ESPNOW_MESHF("[BOND_STATUS_REQ_RX] from %s", ctx.deviceName);
   if (gEspNow) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
@@ -6307,11 +6368,12 @@ static void v4h_bond_status_req(const V4RxCtx& ctx) {
       gEspNow->bondSettingsSent = true;
     }
   }
+  return ctx.accepted();
 }
 
 // BOND_STATUS_RESP — peer's live status; cache it.
-static void v4h_bond_status_resp(const V4RxCtx& ctx) {
-  if (!gEspNow) return;
+static V4Verdict v4h_bond_status_resp(const V4RxCtx& ctx) {
+  if (!gEspNow) return ctx.refuse();
   ctx.read(gEspNow->bondPeerStatus);
   gEspNow->bondPeerStatusValid = true;
   gEspNow->bondPeerStatusTimeMs = millis();
@@ -6319,16 +6381,18 @@ static void v4h_bond_status_resp(const V4RxCtx& ctx) {
          ctx.deviceName, (unsigned long)gEspNow->bondPeerStatus.sensorEnabledMask,
          (unsigned long)gEspNow->bondPeerStatus.sensorConnectedMask,
          (unsigned long)gEspNow->bondPeerStatus.freeHeap);
+  return ctx.accepted();
 }
 
 // MANIFEST_REQ — peer asks for our manifest file. Defer to task.
-static void v4h_manifest_req(const V4RxCtx& ctx) {
+static V4Verdict v4h_manifest_req(const V4RxCtx& ctx) {
   DEBUG_ESPNOW_MESHF("[BOND_MANIFEST_REQ_RX] from %s isPaired=%d", ctx.deviceName, (int)ctx.isPaired);
   if (gEspNow) {
     memcpy(gEspNow->bondPendingResponseMac, ctx.recv_info->src_addr, 6);
     gEspNow->bondNeedsManifestResponse = true;
     DEBUG_ESPNOW_MESHF("[BOND_MANIFEST_REQ_RX] set bondNeedsManifestResponse=true");
   }
+  return ctx.accepted();
 }
 #endif // ENABLE_BONDED_MODE
 
@@ -6342,23 +6406,29 @@ static void v4h_manifest_req(const V4RxCtx& ctx) {
 // System_ESPNow_FsList.cpp answers LIST/STAT/GET only for our bonded peer
 // while its bond session is live, under the bond identity
 // (fsRpcRequesterIdentity), and replies PERM_DENIED to every other peer.
-static void v4h_fs_list_req(const V4RxCtx& ctx) {
+static V4Verdict v4h_fs_list_req(const V4RxCtx& ctx) {
   fsListOnRequestReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
+  return ctx.accepted();
 }
-static void v4h_fs_list_reply(const V4RxCtx& ctx) {
+static V4Verdict v4h_fs_list_reply(const V4RxCtx& ctx) {
   fsListOnReplyReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
+  return ctx.accepted();
 }
-static void v4h_fs_stat_req(const V4RxCtx& ctx) {
+static V4Verdict v4h_fs_stat_req(const V4RxCtx& ctx) {
   fsStatOnRequestReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
+  return ctx.accepted();
 }
-static void v4h_fs_stat_reply(const V4RxCtx& ctx) {
+static V4Verdict v4h_fs_stat_reply(const V4RxCtx& ctx) {
   fsStatOnReplyReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
+  return ctx.accepted();
 }
-static void v4h_fs_get_req(const V4RxCtx& ctx) {
+static V4Verdict v4h_fs_get_req(const V4RxCtx& ctx) {
   fsGetOnRequestReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
+  return ctx.accepted();
 }
-static void v4h_fs_get_ack(const V4RxCtx& ctx) {
+static V4Verdict v4h_fs_get_ack(const V4RxCtx& ctx) {
   fsGetOnAckReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
+  return ctx.accepted();
 }
 
 // ---- Metadata work waiting for espnow_task -------------------------------------
@@ -6449,16 +6519,17 @@ static bool metadataInboxTakeReply(uint8_t macOut[6]) {
   return false;
 }
 
-static void v4h_metadata_req(const V4RxCtx& ctx) {
+static V4Verdict v4h_metadata_req(const V4RxCtx& ctx) {
   DEBUG_ESPNOW_METADATAF("[METADATA] REQ received from %s (%s) msgId=%lu isPaired=%d",
     ctx.deviceName, MAC_STR(ctx.recv_info->src_addr), (unsigned long)ctx.h->msgId, (int)ctx.isPaired);
   MetadataInboxEntry* entry = gEspNow ? metadataInboxFor(ctx.recv_info->src_addr) : nullptr;
   if (!entry) {
     WARN_ESPNOWF("[METADATA] REQ from %s ignored: no place to note it", ctx.deviceName);
-    return;
+    return ctx.refuseWith(espnowanswer::kNoSlot);
   }
   // Answered by the loop (step 9), one peer per pass.
   entry->replyDue = true;
+  return ctx.accepted();
 }
 
 // Metadata text policy: the one owner for the local setters (metaGetSet) and the
@@ -6513,14 +6584,14 @@ static size_t normalizeMetadataWireText(V4PayloadMetadata& meta) {
 }
 
 // METADATA_RESP / METADATA_PUSH — shared handler. Type comes from header.
-static void v4h_metadata_resp_push(const V4RxCtx& ctx) {
+static V4Verdict v4h_metadata_resp_push(const V4RxCtx& ctx) {
   const char* metaType = (ctx.h->type == ESPNOW_V4_TYPE_METADATA_PUSH) ? "PUSH" : "RESP";
   DEBUG_ESPNOW_METADATAF("[METADATA] %s received from %s (%s) msgId=%lu payloadLen=%u isPaired=%d",
     metaType, ctx.deviceName, MAC_STR(ctx.recv_info->src_addr),
     (unsigned long)ctx.h->msgId, ctx.payloadLen, (int)ctx.isPaired);
   if (!gEspNow) {
     WARN_ESPNOWF("[METADATA] %s from %s dropped: gEspNow is null", metaType, ctx.deviceName);
-    return;
+    return ctx.refuse();
   }
 
   // Wire char arrays are fixed-width and are not trustworthy C strings. Copy
@@ -6535,7 +6606,7 @@ static void v4h_metadata_resp_push(const V4RxCtx& ctx) {
   if (!entry) {
     WARN_ESPNOWF("[METADATA] %s from %s dropped: no place to keep it until it is handled",
       metaType, MAC_STR(ctx.recv_info->src_addr));
-    return;
+    return ctx.refuseWith(espnowanswer::kNoSlot);
   }
   bool wasPending = entry->frameWaiting;
   ctx.read(entry->payload);
@@ -6556,18 +6627,19 @@ static void v4h_metadata_resp_push(const V4RxCtx& ctx) {
   entry->frameWaiting = true;
   DEBUG_ESPNOW_METADATAF("[METADATA] %s kept for task processing (replaced an older frame of this peer=%d)",
     metaType, (int)wasPending);
+  return ctx.accepted();
 }
 
 // STREAM — incoming stream output; ring-buffer enqueue to task. {reqId,
 // status} then the line (rule F3); each frame has its own msgId, so the
 // duplicate check applies as to any frame.
-static void v4h_stream(const V4RxCtx& ctx) {
-  if (ctx.payloadLen > ESPNOW_V4_MAX_PAYLOAD || !gEspNow || !gEspNow->streamQueue) return;
+static V4Verdict v4h_stream(const V4RxCtx& ctx) {
+  if (ctx.payloadLen > ESPNOW_V4_MAX_PAYLOAD || !gEspNow || !gEspNow->streamQueue) return ctx.refuse();
   V4PayloadStreamHeader sh;
   ctx.read(sh);
   size_t lineLen = 0;
   const uint8_t* line = ctx.tail(sizeof(sh), &lineLen);
-  if (!line || lineLen == 0) return;
+  if (!line || lineLen == 0) return ctx.refuseWith(espnowanswer::kBadRequest);
   int head = gEspNow->streamQueueHead;
   int nextHead = (head + 1) & gEspNow->streamQueueMask;
   if (nextHead != gEspNow->streamQueueTail) {
@@ -6591,6 +6663,7 @@ static void v4h_stream(const V4RxCtx& ctx) {
     gEspNow->streamDroppedCount++;
   }
   gEspNow->streamReceivedCount++;
+  return ctx.accepted();
 }
 
 // FILE_START — initialize a file transfer; allocate PSRAM buffer + chunk bitmap.
@@ -6611,7 +6684,18 @@ static void v4h_stream(const V4RxCtx& ctx) {
 //
 // RX gated REQ_PAIRED|REQ_SESSION_ENC (dispatch table) — MAC pairing alone is
 // not enough; TX already encrypt-or-fails via v4_send_payload_smart.
-static void v4h_file_start(const V4RxCtx& ctx) {
+// The shared status (System_ESPNow_AnswerCore.h) for a fileSlotsAllocate refusal.
+static uint8_t v4FileStartRefusalStatus(const char* err) {
+  if (!err) return espnowanswer::kRefused;
+  if (strcmp(err, kFileSlotErrTooBig) == 0) return espnowanswer::kTooLarge;
+  if (strcmp(err, kFileSlotErrBusy) == 0) return espnowanswer::kNoSlot;
+  if (strcmp(err, kFileSlotErrAlloc) == 0) return espnowanswer::kNoSlot;
+  if (strcmp(err, kFileSlotErrBadArgs) == 0) return espnowanswer::kBadRequest;
+  if (strcmp(err, kFileSlotErrStorage) == 0) return espnowanswer::kIoError;
+  return espnowanswer::kRefused;
+}
+
+static V4Verdict v4h_file_start(const V4RxCtx& ctx) {
   V4PayloadFileStart fsv;
   ctx.read(fsv);
   const V4PayloadFileStart* fs = &fsv;
@@ -6639,10 +6723,13 @@ static void v4h_file_start(const V4RxCtx& ctx) {
     // success. The cancel lets the sender's abort matcher (peer + msgId,
     // which echoes this FILE_START's msgId) stop within one chunk.
     v4_send_file_cancel(ctx.recv_info->src_addr, ctx.h->msgId, FILE_CANCEL_REJECTED);
-    return;
+    // The ACK names the reason too (1.0 step 5b); a capacity refusal is not
+    // remembered, so a FILE_START sent again is tried again.
+    return ctx.refuseWith(v4FileStartRefusalStatus(err));
   }
   DEBUG_ESPNOWF("[V4_FILE_RX] FILE_START: %s (%lu bytes, %u chunks, chunkSize=%u) from %s",
                fs->filename, (unsigned long)fs->fileSize, fs->chunkCount, fs->chunkSize, ctx.deviceName);
+  return ctx.accepted();
 }
 
 // The slot table could not be read (or written) within the receive path's
@@ -6671,12 +6758,12 @@ static void v4FileNoteSlotTableBusy(const char* frame, const V4RxCtx& ctx) {
 
 // FILE_DATA — route the chunk to its owning slot in the multi-slot table.
 // Pairing + session AEAD enforced by dispatch flags (see FILE_START note).
-static void v4h_file_data(const V4RxCtx& ctx) {
+static V4Verdict v4h_file_data(const V4RxCtx& ctx) {
   FileSlotLookup lookup = FILE_SLOT_LOOKUP_NOT_FOUND;
   FileTransferSlot* slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId, &lookup);
   if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) {
     v4FileNoteSlotTableBusy("FILE_DATA", ctx);
-    return;
+    return ctx.refuseWith(espnowanswer::kBusy);
   }
   if (!slot) {
     DEBUG_ESPNOWF("[V4_FILE_RX] FILE_DATA ignored: no slot for msgId=%lu from %s",
@@ -6705,13 +6792,13 @@ static void v4h_file_data(const V4RxCtx& ctx) {
         v4_send_file_cancel(ctx.recv_info->src_addr, ctx.h->msgId, FILE_CANCEL_REJECTED);
       }
     }
-    return;
+    return ctx.refuse();
   }
   // The chunk's bytes run from offset 2 to the end of the payload (the last
   // chunk is shorter than the others).
   size_t chunkLen = 0;
   const uint8_t* chunkData = ctx.tail(offsetof(V4PayloadFileData, data), &chunkLen);
-  if (!chunkData) return;
+  if (!chunkData) return ctx.refuseWith(espnowanswer::kBadRequest);
   uint16_t chunkIndex = 0;
   memcpy(&chunkIndex, ctx.payload + offsetof(V4PayloadFileData, chunkIndex), sizeof(chunkIndex));
   const uint16_t dataLen = (uint16_t)chunkLen;
@@ -6731,7 +6818,7 @@ static void v4h_file_data(const V4RxCtx& ctx) {
     // slot is NOT failing) gets no cancel either — see v4FileNoteSlotTableBusy.
     if (r == STREAM_APPEND_BUSY) {
       v4FileNoteSlotTableBusy("FILE_DATA", ctx);
-      return;
+      return ctx.refuseWith(espnowanswer::kBusy);
     }
     if (r == STREAM_APPEND_FAIL || r == STREAM_APPEND_ALREADY_FAILED) {
       // Use the frame's src_addr (== this slot's peer) for the cancel so we don't
@@ -6747,12 +6834,13 @@ static void v4h_file_data(const V4RxCtx& ctx) {
         logFileTransferEvent((uint8_t*)ctx.recv_info->src_addr, senderMacStr.c_str(),
                              fileSlotsGetFilename(slot), MSG_FILE_RECV_FAILED);
       }
+      return ctx.refuse();
     }
-    return;
+    return ctx.accepted();  // buffered (or a late copy for a slot finishing well)
   }
 
   if (!fileSlotsWriteChunk(slot, chunkIndex, chunkData, dataLen)) {
-    return;  // bounds violation already logged inside the helper
+    return ctx.refuseWith(espnowanswer::kBadRequest);  // bounds violation already logged inside the helper
   }
   uint16_t recv = fileSlotsGetReceivedChunks(slot);
   if ((recv % 10) == 0) {
@@ -6762,12 +6850,14 @@ static void v4h_file_data(const V4RxCtx& ctx) {
                  (unsigned long)fileSlotsGetReceivedBytes(slot),
                  (unsigned long)fileSlotsGetTotalSize(slot));
   }
+  return ctx.accepted();
 }
 
 // cmd_exec finalize for a STREAMING receive (submitted by v4h_file_end). Drains any
-// buffers still in flight, closes the .part, renames it into the inbox, ACKs the
-// fire-and-forget sender, logs, and releases the slot — all OFF espnow_task so the RX
-// drain is never blocked on flash. arg = the FileTransferSlot* (stable until released
+// buffers still in flight, closes the .part, renames it into the inbox (the
+// FILE_END was ACKed when it was accepted; a failure here sends FILE_CANCEL),
+// logs, and releases the slot — all OFF espnow_task so the RX drain is never
+// blocked on flash. arg = the FileTransferSlot* (stable until released
 // here; the slot is COMPLETING, so nothing else touches it). Mirrors the old inline
 // FILE_END streaming publish, just moved to cmd_exec.
 // A file of the bond's own sync from the bond partner (fileRxIsBondSync):
@@ -6826,7 +6916,6 @@ static void fileWriterFinalizeJob(void* arg) {
     }
 #endif
     if (gEspNow) gEspNow->fileTransfersReceived++;
-    v4_queue_sealed_ack(sndMac, msgId);
   } else {
     // Drained/closed/renamed but something failed — correct the fire-and-forget
     // sender instead of letting it assume success.
@@ -6855,163 +6944,26 @@ static bool v4FileBondMagicAllowed(const uint8_t* sndMac, const char* filename) 
 }
 #endif
 
-// FILE_END — finalize the slot's transfer; route manifest/settings to bond
-// processors, otherwise write to filesystem. Sends ACK back; releases slot.
-// Slot identity: (peerMac, msgId) — the FILE_START's msgId is the transferId
-// used by every chunk and the FILE_END itself.
-static void v4h_file_end(const V4RxCtx& ctx) {
-  // One retry on a busy table, FILE_END only: this frame decides the whole file
-  // and no further frame of the transfer follows it, so a second bounded wait
-  // costs the RX drain little and a dropped FILE_END costs everything received.
-  FileSlotLookup lookup = FILE_SLOT_LOOKUP_NOT_FOUND;
-  FileTransferSlot* slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId, &lookup);
-  if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) {
-    slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId, &lookup);
-  }
-  if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) {
-    // Still busy: drop it without a verdict. The slot keeps what it received;
-    // the timeout sweep reclaims it and sends the sender FILE_CANCEL(TIMEOUT).
-    v4FileNoteSlotTableBusy("FILE_END", ctx);
-    return;
-  }
-  if (!slot) {
-    ERROR_ESPNOWF("[V4_FILE] FILE_END for unknown msgId=%lu from %s — slot already released or never started",
-                  (unsigned long)ctx.h->msgId, ctx.deviceName);
-    return;
-  }
-  // The receive table drops a FILE_END shorter than its 5 bytes (the CRC
-  // gates below make fev.crc32 an accept/reject-deciding input).
-  V4PayloadFileEnd fev;
-  ctx.read(fev);
-  // status 0: the sender sent the whole file (0 = ok in every status byte,
-  // rule F3); anything else: it stopped the transfer itself.
-  const bool senderComplete = espnowanswer::isOk(fev.status);
+// The work of a complete, CRC-checked small (RAM-path) file, after its
+// FILE_END was accepted and ACKed (1.0 step 5b: heavy work leaves the ACK
+// path). Runs on espnow_task, from the loop (fileRamFinalizeTick) or inline
+// when the short queue is full: bond sync files go to their processors, any
+// other file is written to the inbox (staged, then renamed), then the slot is
+// released. A write failure still tells the sender with FILE_CANCEL.
+static void fileRamFinalize(FileTransferSlot* slot) {
+  if (!slot || !fileSlotsIsRamFinalizing(slot)) return;
   const uint8_t* sndMac    = fileSlotsGetSenderMac(slot);
   const char*    filename  = fileSlotsGetFilename(slot);
   const uint8_t* dataBuf   = fileSlotsGetBuffer(slot);
   uint32_t       recvBytes = fileSlotsGetReceivedBytes(slot);
+  const uint32_t transferMsgId = fileSlotsGetMsgId(slot);
   String senderMacStr = macToDisplayStr(sndMac);
-
-  DEBUG_ESPNOWF("[V4_FILE_RX] FILE_END: %s (%lu bytes, %u/%u chunks, status=%u)",
-               filename, (unsigned long)recvBytes,
-               fileSlotsGetReceivedChunks(slot),
-               fileSlotsGetTotalChunks(slot),
-               (unsigned)fev.status);
-
-  // ---- Streaming slot (file > 128 KB): bytes are buffered to a .part on flash via
-  // cmd_exec. FILE_END hands finalize (drain remaining buffers, close, rename, ACK,
-  // release) to cmd_exec too, so espnow_task does no FS here. A streaming slot is
-  // never a bond config file (those are small → RAM path below) → no special
-  // processing: stream files are plain inbox files. dataBuf is null here. ----
-  if (fileSlotsIsStreaming(slot)) {
-    // Duplicate-FILE_END guard: fileSlotsFindByMsg matches COMPLETING slots
-    // too, so a MAC-layer-duplicated FILE_END could re-enter here while the
-    // cmd_exec finalize/abort job owns the slot — and the else-branch below
-    // would emit a spurious FILE_CANCEL for a transfer that is succeeding.
-    // The first FILE_END already chose this slot's fate; drop the echo.
-    if (!fileSlotsIsReceiving(slot)) {
-      DEBUG_ESPNOWF("[V4_FILE_RX] duplicate FILE_END for '%s' (slot already COMPLETING) — ignored", filename);
-      return;
-    }
-    bool complete = fileSlotsIsComplete(slot);
-    // CRC verdict MUST be decided before fileSlotsStreamBeginFinalize: that
-    // call flips the slot to COMPLETING, and the failure teardown below
-    // (fileSlotsStreamFail) only acts on RECEIVING slots — a CRC check placed
-    // after it would leak the slot, both PSRAM buffers, and the open .part
-    // handle permanently on mismatch. The accumulator is final here: every
-    // chunk was appended by earlier v4h_file_data calls on this same task.
-    bool crcOk = complete && (fileSlotsGetReceivedCrc(slot) == fev.crc32);
-    if (complete && senderComplete && crcOk && fileSlotsStreamBeginFinalize(slot)) {
-      // Off-task finalize: the job owns drain + close + rename + ACK + release.
-      if (!submitDeferredToCmdExec(fileWriterFinalizeJob, slot)) {
-        ERROR_ESPNOWF("[V4_FILE] stream finalize submit failed (queue full) — aborting '%s'", filename);
-        v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_WRITE_FAILED);
-        logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
-        // Slot is COMPLETING; free it via a plain abort job. If that submit
-        // also fails, park it as teardown-pending for the sweep to retry —
-        // NEVER release a streaming slot inline here: we're on espnow_task and
-        // cmd_exec may be mid-write on this slot's buffers/.part handle.
-        if (!submitDeferredToCmdExec(fileSlotsStreamAbortJob, slot)) fileSlotsMarkTeardownPending(slot);
-      }
-    } else {
-      if (!complete) {
-        BROADCAST_PRINTF("[V4_FILE] REJECTED incomplete stream '%s': %u/%u chunks, %lu/%lu bytes",
-                     filename,
-                     (unsigned)fileSlotsGetReceivedChunks(slot),
-                     (unsigned)fileSlotsGetTotalChunks(slot),
-                     (unsigned long)recvBytes,
-                     (unsigned long)fileSlotsGetTotalSize(slot));
-      } else if (senderComplete && !crcOk) {
-        BROADCAST_PRINTF("[V4_FILE] REJECTED stream '%s': CRC mismatch (got %08lx, declared %08lx)",
-                     filename,
-                     (unsigned long)fileSlotsGetReceivedCrc(slot),
-                     (unsigned long)fev.crc32);
-      }
-      // Cancel echo ONLY when the sender still believes the transfer is alive.
-      // When the sender reports it stopped (status != 0), it initiated this abort and already knows —
-      // echoing a cancel back would just double-log the failure on its side.
-      if (senderComplete) {
-        v4_send_file_cancel(sndMac, ctx.h->msgId,
-                            !complete ? FILE_CANCEL_INCOMPLETE
-                                      : (!crcOk ? FILE_CANCEL_CRC_MISMATCH
-                                                : FILE_CANCEL_WRITE_FAILED));
-      }
-      logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
-      fileSlotsStreamFail(slot);  // queue close/delete/free on cmd_exec
-    }
-    return;
-  }
-
-  if (!fileSlotsIsComplete(slot)) {
-    BROADCAST_PRINTF("[V4_FILE] REJECTED incomplete transfer '%s': %u/%u chunks, %lu/%lu bytes",
-                 filename,
-                 (unsigned)fileSlotsGetReceivedChunks(slot),
-                 (unsigned)fileSlotsGetTotalChunks(slot),
-                 (unsigned long)recvBytes,
-                 (unsigned long)fileSlotsGetTotalSize(slot));
-    // Tell the sender — but only if it still believes the transfer is alive.
-    // When the sender reports it stopped (status != 0), it aborted this transfer itself and already
-    // knows; echoing a cancel back would double-log the failure on its side.
-    if (senderComplete) {
-      v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_INCOMPLETE);
-    }
-    logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
-    fileSlotsRelease(slot);
-    return;
-  }
-
-  // Whole-file CRC gate (integrity pass). One-shot over the assembled buffer —
-  // RAM-path chunks can arrive out of order, so unlike the streaming path there
-  // is no running accumulator; the full file is resident here anyway. Placed
-  // BEFORE the bond-magic dispatch below so a corrupt _settings_out.json /
-  // _manifest_out.json can never reach processBondSettings & co. — bond config
-  // previously had no content check at all. Worst case (128 KB) is a few ms of
-  // ROM table lookups on espnow_task, small next to the synchronous flash write
-  // this same branch already performs inline. RAM-path teardown shape (inline
-  // release) is correct here — only streaming slots defer teardown to cmd_exec.
-  if (senderComplete && dataBuf) {
-    uint32_t gotCrc = esp_crc32_le(0, dataBuf, recvBytes);
-    if (gotCrc != fev.crc32) {
-      BROADCAST_PRINTF("[V4_FILE] REJECTED '%s': CRC mismatch (got %08lx, declared %08lx)",
-                       filename, (unsigned long)gotCrc, (unsigned long)fev.crc32);
-      v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_CRC_MISMATCH);
-      logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
-      fileSlotsRelease(slot);
-      return;
-    }
-  }
-
+  const bool senderComplete = true;  // only complete files are queued here
   if (senderComplete && dataBuf) {
 #if ENABLE_BONDED_MODE
     if (strcmp(filename, "_manifest_out.json") == 0 ||
         strcmp(filename, "_settings_out.json") == 0 ||
         strcmp(filename, "_schema_out.json") == 0) {
-      if (!v4FileBondMagicAllowed(sndMac, filename)) {
-        v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_WRITE_FAILED);
-        logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
-        fileSlotsRelease(slot);
-        return;
-      }
       if (strcmp(filename, "_manifest_out.json") == 0) {
         processBondModeManifestResp((uint8_t*)sndMac, senderMacStr, (const char*)dataBuf, recvBytes);
         BROADCAST_PRINTF("[V4_FILE] Manifest processed: %lu bytes", (unsigned long)recvBytes);
@@ -7053,7 +7005,7 @@ static void v4h_file_end(const V4RxCtx& ctx) {
       snprintf(tmpPath, sizeof(tmpPath), "/espnow/received/.part-%s-%08lx-%08lx",
                senderToken,
                (unsigned long)esp_crc32_le(0, (const uint8_t*)filename, strlen(filename)),
-               (unsigned long)ctx.h->msgId);
+               (unsigned long)transferMsgId);
       AuthContext wrCtx = VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_write");
       bool wrote = false;
       {
@@ -7085,7 +7037,7 @@ static void v4h_file_end(const V4RxCtx& ctx) {
       }
       if (!wrote) {
         // Don't ACK success; tell the fire-and-forget sender it actually failed.
-        v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_WRITE_FAILED);
+        v4_send_file_cancel(sndMac, transferMsgId, FILE_CANCEL_WRITE_FAILED);
         logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
         fileSlotsRelease(slot);
         return;
@@ -7145,8 +7097,210 @@ static void v4h_file_end(const V4RxCtx& ctx) {
     logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
   }
 
-  v4_queue_sealed_ack(ctx.recv_info->src_addr, ctx.h->msgId);
   fileSlotsRelease(slot);
+}
+
+// Complete small files waiting for fileRamFinalize, in arrival order. One
+// entry per file slot is enough (a slot is queued once). espnow_task only.
+static constexpr uint8_t kFileRamFinalizeQueueLen = 4;
+EXT_RAM_BSS_ATTR static FileTransferSlot* sFileRamFinalizeQueue[kFileRamFinalizeQueueLen];
+static uint8_t sFileRamFinalizeCount = 0;
+
+static bool fileRamFinalizeQueue(FileTransferSlot* slot) {
+  if (sFileRamFinalizeCount >= kFileRamFinalizeQueueLen) return false;
+  sFileRamFinalizeQueue[sFileRamFinalizeCount++] = slot;
+  return true;
+}
+
+// Step 1d3 of the espnow_task loop: finish the small files accepted since the
+// last pass (their ACKs went out when their FILE_END was accepted).
+static void fileRamFinalizeTick() {
+  while (sFileRamFinalizeCount > 0) {
+    FileTransferSlot* slot = sFileRamFinalizeQueue[0];
+    for (uint8_t i = 1; i < sFileRamFinalizeCount; i++) sFileRamFinalizeQueue[i - 1] = sFileRamFinalizeQueue[i];
+    sFileRamFinalizeCount--;
+    fileRamFinalize(slot);
+  }
+}
+
+// FILE_END — finalize the slot's transfer; route manifest/settings to bond
+// processors, otherwise write to filesystem (after the ACK: fileRamFinalize).
+// Slot identity: (peerMac, msgId) — the FILE_START's msgId is the transferId
+// used by every chunk and the FILE_END itself.
+static V4Verdict v4h_file_end(const V4RxCtx& ctx) {
+  // One retry on a busy table, FILE_END only: this frame decides the whole file
+  // and no further frame of the transfer follows it, so a second bounded wait
+  // costs the RX drain little and a dropped FILE_END costs everything received.
+  FileSlotLookup lookup = FILE_SLOT_LOOKUP_NOT_FOUND;
+  FileTransferSlot* slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId, &lookup);
+  if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) {
+    slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId, &lookup);
+  }
+  if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) {
+    // Still busy: drop it without a verdict. The slot keeps what it received;
+    // the timeout sweep reclaims it and sends the sender FILE_CANCEL(TIMEOUT).
+    v4FileNoteSlotTableBusy("FILE_END", ctx);
+    return ctx.refuseWith(espnowanswer::kBusy);
+  }
+  if (!slot) {
+    ERROR_ESPNOWF("[V4_FILE] FILE_END for unknown msgId=%lu from %s — slot already released or never started",
+                  (unsigned long)ctx.h->msgId, ctx.deviceName);
+    return ctx.refuse();
+  }
+  // The receive table drops a FILE_END shorter than its 5 bytes (the CRC
+  // gates below make fev.crc32 an accept/reject-deciding input).
+  V4PayloadFileEnd fev;
+  ctx.read(fev);
+  // status 0: the sender sent the whole file (0 = ok in every status byte,
+  // rule F3); anything else: it stopped the transfer itself.
+  const bool senderComplete = espnowanswer::isOk(fev.status);
+  const uint8_t* sndMac    = fileSlotsGetSenderMac(slot);
+  const char*    filename  = fileSlotsGetFilename(slot);
+  const uint8_t* dataBuf   = fileSlotsGetBuffer(slot);
+  uint32_t       recvBytes = fileSlotsGetReceivedBytes(slot);
+  String senderMacStr = macToDisplayStr(sndMac);
+
+  DEBUG_ESPNOWF("[V4_FILE_RX] FILE_END: %s (%lu bytes, %u/%u chunks, status=%u)",
+               filename, (unsigned long)recvBytes,
+               fileSlotsGetReceivedChunks(slot),
+               fileSlotsGetTotalChunks(slot),
+               (unsigned)fev.status);
+
+  // ---- Streaming slot (file > 128 KB): bytes are buffered to a .part on flash via
+  // cmd_exec. FILE_END hands finalize (drain remaining buffers, close, rename, ACK,
+  // release) to cmd_exec too, so espnow_task does no FS here. A streaming slot is
+  // never a bond config file (those are small → RAM path below) → no special
+  // processing: stream files are plain inbox files. dataBuf is null here. ----
+  if (fileSlotsIsStreaming(slot)) {
+    // Duplicate-FILE_END guard: fileSlotsFindByMsg matches COMPLETING slots
+    // too, so a MAC-layer-duplicated FILE_END could re-enter here while the
+    // cmd_exec finalize/abort job owns the slot — and the else-branch below
+    // would emit a spurious FILE_CANCEL for a transfer that is succeeding.
+    // The first FILE_END already chose this slot's fate; drop the echo.
+    if (!fileSlotsIsReceiving(slot)) {
+      DEBUG_ESPNOWF("[V4_FILE_RX] duplicate FILE_END for '%s' (slot already COMPLETING) — ignored", filename);
+      // A copy of a FILE_END that was taken is answered as taken; a transfer
+      // already failing (its FILE_CANCEL went out) is refused.
+      return fileSlotsIsStreamFailing(slot) ? ctx.refuse() : ctx.accepted();
+    }
+    bool complete = fileSlotsIsComplete(slot);
+    // CRC verdict MUST be decided before fileSlotsStreamBeginFinalize: that
+    // call flips the slot to COMPLETING, and the failure teardown below
+    // (fileSlotsStreamFail) only acts on RECEIVING slots — a CRC check placed
+    // after it would leak the slot, both PSRAM buffers, and the open .part
+    // handle permanently on mismatch. The accumulator is final here: every
+    // chunk was appended by earlier v4h_file_data calls on this same task.
+    bool crcOk = complete && (fileSlotsGetReceivedCrc(slot) == fev.crc32);
+    if (complete && senderComplete && crcOk && fileSlotsStreamBeginFinalize(slot)) {
+      // Off-task finalize: the job owns drain + close + rename + ACK + release.
+      if (!submitDeferredToCmdExec(fileWriterFinalizeJob, slot)) {
+        ERROR_ESPNOWF("[V4_FILE] stream finalize submit failed (queue full) — aborting '%s'", filename);
+        v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_WRITE_FAILED);
+        logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
+        // Slot is COMPLETING; free it via a plain abort job. If that submit
+        // also fails, park it as teardown-pending for the sweep to retry —
+        // NEVER release a streaming slot inline here: we're on espnow_task and
+        // cmd_exec may be mid-write on this slot's buffers/.part handle.
+        if (!submitDeferredToCmdExec(fileSlotsStreamAbortJob, slot)) fileSlotsMarkTeardownPending(slot);
+      }
+    } else {
+      if (!complete) {
+        BROADCAST_PRINTF("[V4_FILE] REJECTED incomplete stream '%s': %u/%u chunks, %lu/%lu bytes",
+                     filename,
+                     (unsigned)fileSlotsGetReceivedChunks(slot),
+                     (unsigned)fileSlotsGetTotalChunks(slot),
+                     (unsigned long)recvBytes,
+                     (unsigned long)fileSlotsGetTotalSize(slot));
+      } else if (senderComplete && !crcOk) {
+        BROADCAST_PRINTF("[V4_FILE] REJECTED stream '%s': CRC mismatch (got %08lx, declared %08lx)",
+                     filename,
+                     (unsigned long)fileSlotsGetReceivedCrc(slot),
+                     (unsigned long)fev.crc32);
+      }
+      // Cancel echo ONLY when the sender still believes the transfer is alive.
+      // When the sender reports it stopped (status != 0), it initiated this abort and already knows —
+      // echoing a cancel back would just double-log the failure on its side.
+      if (senderComplete) {
+        v4_send_file_cancel(sndMac, ctx.h->msgId,
+                            !complete ? FILE_CANCEL_INCOMPLETE
+                                      : (!crcOk ? FILE_CANCEL_CRC_MISMATCH
+                                                : FILE_CANCEL_WRITE_FAILED));
+      }
+      logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
+      fileSlotsStreamFail(slot);  // queue close/delete/free on cmd_exec
+      // A sender's own stop (status != 0) was taken; an incomplete or corrupt
+      // file is refused (the FILE_CANCEL above names the reason).
+      return senderComplete ? ctx.refuse() : ctx.accepted();
+    }
+    return ctx.accepted();
+  }
+
+  if (!fileSlotsIsComplete(slot)) {
+    BROADCAST_PRINTF("[V4_FILE] REJECTED incomplete transfer '%s': %u/%u chunks, %lu/%lu bytes",
+                 filename,
+                 (unsigned)fileSlotsGetReceivedChunks(slot),
+                 (unsigned)fileSlotsGetTotalChunks(slot),
+                 (unsigned long)recvBytes,
+                 (unsigned long)fileSlotsGetTotalSize(slot));
+    // Tell the sender — but only if it still believes the transfer is alive.
+    // When the sender reports it stopped (status != 0), it aborted this transfer itself and already
+    // knows; echoing a cancel back would double-log the failure on its side.
+    if (senderComplete) {
+      v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_INCOMPLETE);
+    }
+    logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
+    fileSlotsRelease(slot);
+    return senderComplete ? ctx.refuse() : ctx.accepted();
+  }
+
+  // Whole-file CRC gate (integrity pass). One-shot over the assembled buffer —
+  // RAM-path chunks can arrive out of order, so unlike the streaming path there
+  // is no running accumulator; the full file is resident here anyway. Placed
+  // BEFORE the bond-magic dispatch below so a corrupt _settings_out.json /
+  // _manifest_out.json can never reach processBondSettings & co. — bond config
+  // previously had no content check at all. Worst case (128 KB) is a few ms of
+  // ROM table lookups on espnow_task, small next to the synchronous flash write
+  // this same branch already performs inline. RAM-path teardown shape (inline
+  // release) is correct here — only streaming slots defer teardown to cmd_exec.
+  if (senderComplete && dataBuf) {
+    uint32_t gotCrc = esp_crc32_le(0, dataBuf, recvBytes);
+    if (gotCrc != fev.crc32) {
+      BROADCAST_PRINTF("[V4_FILE] REJECTED '%s': CRC mismatch (got %08lx, declared %08lx)",
+                       filename, (unsigned long)gotCrc, (unsigned long)fev.crc32);
+      v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_CRC_MISMATCH);
+      logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
+      fileSlotsRelease(slot);
+      return ctx.refuse();
+    }
+  }
+
+#if ENABLE_BONDED_MODE
+  if (senderComplete && dataBuf &&
+      (strcmp(filename, "_manifest_out.json") == 0 || strcmp(filename, "_settings_out.json") == 0 ||
+       strcmp(filename, "_schema_out.json") == 0) &&
+      !v4FileBondMagicAllowed(sndMac, filename)) {
+    v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_WRITE_FAILED);
+    logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
+    fileSlotsRelease(slot);
+    return ctx.refuse();
+  }
+#endif
+  if (!senderComplete || !dataBuf) {
+    // The sender stopped the transfer itself: taken, nothing to store.
+    logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
+    fileSlotsRelease(slot);
+    return ctx.accepted();
+  }
+  // Accepted: the file is complete and checked. The flash write, the bond
+  // processors and the JSON summary run after this frame's ACK, from the
+  // espnow_task loop (1.0 step 5b). The slot leaves RECEIVING, so a copy of
+  // this FILE_END is not processed again and no chunk can change it.
+  if (!fileSlotsBeginRamFinalize(slot)) {
+    DEBUG_ESPNOWF("[V4_FILE_RX] duplicate FILE_END for '%s' (already finishing) — ignored", filename);
+    return ctx.accepted();
+  }
+  if (!fileRamFinalizeQueue(slot)) fileRamFinalize(slot);  // queue full: finish it now
+  return ctx.accepted();
 }
 
 // A peer we sent a file TO reports the transfer
@@ -7159,7 +7313,7 @@ static void v4h_file_end(const V4RxCtx& ctx) {
 //      instead of burning the rest of the file's airtime into a dead slot.
 // reqId (rule F3) is the original FILE_START's msgId, so correlation is
 // exact; the cancel's own header msgId is the canceller's and is not used.
-static void v4h_file_cancel(const V4RxCtx& ctx) {
+static V4Verdict v4h_file_cancel(const V4RxCtx& ctx) {
   V4PayloadFileCancel cancel;
   ctx.read(cancel);
   const uint32_t transferMsgId = cancel.reqId;
@@ -7195,7 +7349,7 @@ static void v4h_file_cancel(const V4RxCtx& ctx) {
     if (dup) {
       DEBUG_ESPNOWF("[V4_FILE_TX] duplicate cancel for msgId=%lu (%s) — not re-logged",
                     (unsigned long)transferMsgId, why);
-      return;
+      return ctx.accepted();
     }
     memcpy(sLastRepMac, ctx.recv_info->src_addr, 6);
     sLastRepMsgId = transferMsgId;
@@ -7205,6 +7359,7 @@ static void v4h_file_cancel(const V4RxCtx& ctx) {
   BROADCAST_PRINTF("[V4_FILE_TX] file to %s FAILED on receiver (msgId=%lu): %s",
                    macStr.c_str(), (unsigned long)transferMsgId, why);
   logFileTransferEvent((uint8_t*)ctx.recv_info->src_addr, macStr.c_str(), "(remote)", MSG_FILE_SEND_FAILED);
+  return ctx.accepted();
 }
 
 // ============================================================================
@@ -7506,7 +7661,7 @@ static void v4_relay_maybe_forward(const esp_now_recv_info* recv_info,
 
 // RELAY_DATA — routed unicast. Either the envelope is for us (unwrap and
 // re-dispatch) or we are an intermediate hop (re-wrap toward the next one).
-static void v4h_relay_data(const V4RxCtx& ctx) {
+static V4Verdict v4h_relay_data(const V4RxCtx& ctx) {
   MeshRelayMetrics& m = meshRelayMetrics();
 
   // The dispatch row demands REQ_AUTHENTICATED, so reaching here means the
@@ -7519,7 +7674,7 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
   const uint8_t* inner = ctx.tail(sizeof(V4PayloadRelayData), &innerLenZ);
   if (!inner || innerLenZ < sizeof(EspNowV4Header)) {
     m.routedDropPolicy++;
-    return;
+    return ctx.refuse();
   }
   const uint16_t innerLen = (uint16_t)innerLenZ;
   EspNowV4Header ihv;
@@ -7530,13 +7685,13 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
       ih->headerLen != sizeof(EspNowV4Header)) {
     m.routedDropPolicy++;
     DEBUG_ESPNOW_MESHF("[MESH_ROUTED] refused inner type=%u (malformed)", (unsigned)ih->type);
-    return;
+    return ctx.refuse();
   }
   // Nothing is carried from or to a revoked device.
   if (espnowRevokedMac(ih->origin) || espnowRevokedMac(env->finalDst)) {
     m.routedDropPolicy++;
     gEspNowRxRevokedDrops++;
-    return;
+    return ctx.refuse();
   }
 
   if (isSelfMac(env->finalDst)) {
@@ -7545,7 +7700,7 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
     if (!v4_routed_type_allowed(ih->type)) {
       m.routedDropPolicy++;
       DEBUG_ESPNOW_MESHF("[MESH_ROUTED] refused inner type=%u (not taken routed)", (unsigned)ih->type);
-      return;
+      return ctx.refuse();
     }
     // === Delivery: synthetic-source re-entry ===
     //
@@ -7559,7 +7714,7 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
     // Refuse to nest: a relayed frame may not itself trigger another relay
     // delivery. Bounds the recursion at one level and keeps the single static
     // AEAD scratch buffer in v4_try_handle_incoming safe.
-    if (gEspNowInRelayDelivery) { m.routedDropPolicy++; return; }
+    if (gEspNowInRelayDelivery) { m.routedDropPolicy++; return ctx.refuse(); }
 
     uint8_t synthSrc[6];
     memcpy(synthSrc, ih->origin, 6);
@@ -7584,20 +7739,20 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
     gEspNowInRelayDelivery = true;
     v4_try_handle_incoming(&ri, inner, (int)innerLen);
     gEspNowInRelayDelivery = false;
-    return;
+    return ctx.accepted();  // the inner frame got its own verdict and ACK
   }
 
   // === Forwarding ===
   // A hop refuses only the 1.0 link-local opcodes; any other inner opcode,
   // also one this firmware does not know, goes on (v4_relay_hop_refused).
-  if (!gSettings.meshRelay)                        { m.routedDropPolicy++; return; }
+  if (!gSettings.meshRelay)                        { m.routedDropPolicy++; return ctx.refuse(); }
   if (v4_relay_hop_refused(ih->type)) {
     m.routedDropPolicy++;
     DEBUG_ESPNOW_MESHF("[MESH_ROUTED] hop refused link-local inner type=%u", (unsigned)ih->type);
-    return;
+    return ctx.refuse();
   }
-  if (ctx.h->ttl < 2)                              { m.routedDropTtl++;    return; }
-  if (env->hopsUsed + 1 >= MESH_ROUTE_MAX_HOPS)    { m.routedDropTtl++;    return; }
+  if (ctx.h->ttl < 2)                              { m.routedDropTtl++;    return ctx.refuse(); }
+  if (env->hopsUsed + 1 >= MESH_ROUTE_MAX_HOPS)    { m.routedDropTtl++;    return ctx.refuse(); }
 
   uint8_t nextHop[6];
   uint8_t hops = 0;
@@ -7605,14 +7760,14 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
     m.routedDropNoRoute++;
     DEBUG_ESPNOW_MESHF("[MESH_ROUTED] no route to " MAC_FMT " — dropping",
            MAC_ARGS(env->finalDst));
-    return;
+    return ctx.refuse();
   }
   // Never bounce a frame straight back where it came from. Split horizon makes
   // this rare, but a table mid-reconvergence can briefly point backwards and
   // that is exactly when a two-node ping-pong would start.
   if (memcmp(nextHop, ctx.recv_info->src_addr, 6) == 0) {
     m.routedDropNoRoute++;
-    return;
+    return ctx.refuse();
   }
 
   if (v4_relay_wrap_and_send(nextHop, env->finalDst, inner, innerLen,
@@ -7620,30 +7775,32 @@ static void v4h_relay_data(const V4RxCtx& ctx) {
                              ctx.h->msgId)) {
     m.routedForwards++;
   }
+  return ctx.accepted();
 }
 
 // PEER_LIST — a neighbour's route table. Pure input to the distance-vector
 // algorithm; it mutates no device state beyond routing, so a bad advert can
 // cost us reachability but nothing else.
-static void v4h_peer_list(const V4RxCtx& ctx) {
+static V4Verdict v4h_peer_list(const V4RxCtx& ctx) {
   // An advert describes the SENDER's own view, so it is only meaningful from a
   // direct neighbour. It is sent ttl=1 and is on neither relay whitelist, so a
   // relayed one should be impossible — reject it anyway rather than attribute
   // someone else's topology to whoever handed it to us.
-  if (memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) != 0) return;
+  if (memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) != 0) return ctx.refuse();
 
   V4PayloadPeerListHeader hdr;
   ctx.read(hdr);
-  if (hdr.entryCount > ESPNOW_V4_PEER_LIST_MAX_ENTRIES) return;
+  if (hdr.entryCount > ESPNOW_V4_PEER_LIST_MAX_ENTRIES) return ctx.refuse();
   size_t entryBytes = 0;
   const uint8_t* entryData = ctx.tail(sizeof(V4PayloadPeerListHeader), &entryBytes);
-  if (entryBytes < (size_t)hdr.entryCount * sizeof(V4PayloadPeerListEntry)) return;
+  if (entryBytes < (size_t)hdr.entryCount * sizeof(V4PayloadPeerListEntry)) return ctx.refuse();
 
   V4PayloadPeerListEntry entries[ESPNOW_V4_PEER_LIST_MAX_ENTRIES];
   if (hdr.entryCount) memcpy(entries, entryData, (size_t)hdr.entryCount * sizeof(V4PayloadPeerListEntry));
   const int8_t linkMetric = ctx.recv_info->rx_ctrl ? (int8_t)ctx.recv_info->rx_ctrl->rssi
                                                    : (int8_t)MESH_ROUTE_METRIC_UNKNOWN;
   meshRouterIngestAdvert(ctx.recv_info->src_addr, linkMetric, entries, hdr.entryCount);
+  return ctx.accepted();
 }
 
 // Broadcast our route table to every neighbour, one tailored frame each.
@@ -7902,12 +8059,12 @@ static void addOrUpdateCandidate(const uint8_t* mac, const char* name, int rssi,
 // fields are untrusted. Discover-then-confirm: record the sender as an available
 // candidate; never pair from a beacon. The recentlySeen throttle bounds how
 // often we refresh a candidate to the flood-guard window.
-static void v4h_pair_beacon(const V4RxCtx& ctx) {
-  if (!espnowPairModeActive()) return;              // our discovery window must be open
+static V4Verdict v4h_pair_beacon(const V4RxCtx& ctx) {
+  if (!espnowPairModeActive()) return ctx.refuse();              // our discovery window must be open
   const uint8_t* mac = ctx.recv_info->src_addr;
-  if (isSelfMac(mac)) return;
-  if (pairModeIsPaired(mac)) return;                // already-paired peers are not candidates
-  if (pairModeRecentlySeen(mac)) return;            // throttle candidate refresh
+  if (isSelfMac(mac)) return ctx.refuse();
+  if (pairModeIsPaired(mac)) return ctx.refuse();                // already-paired peers are not candidates
+  if (pairModeRecentlySeen(mac)) return ctx.refuse();            // throttle candidate refresh
   pairModeMarkSeen(mac);
 
   V4PayloadPairBeacon b;
@@ -7916,6 +8073,7 @@ static void v4h_pair_beacon(const V4RxCtx& ctx) {
   pairModeNameFromField(b.deviceName, mac, name);   // attacker-controlled: the name rule or "peer-B2C3"
   int rssi = (ctx.recv_info && ctx.recv_info->rx_ctrl) ? ctx.recv_info->rx_ctrl->rssi : 0;
   addOrUpdateCandidate(mac, name, rssi, (uint32_t)millis());
+  return ctx.accepted();
 }
 
 // Broadcast one pairing beacon to FF. BROADCAST_AUTH appends a mesh-group-key
@@ -8079,10 +8237,10 @@ static void runDeferredPairComplete(void* arg) {
 // one is the same request (no new prompt). A repeat of a request the user
 // already answered gets that answer again, and a requester already in our
 // registry gets ACCEPT (its copy of our ACCEPT was lost) — see PairCore.
-static void v4h_pair_request(const V4RxCtx& ctx) {
+static V4Verdict v4h_pair_request(const V4RxCtx& ctx) {
   uint8_t mac[6];
   char name[devicename::kFieldLen];
-  if (!pairCtrlForUs(ctx, mac, name)) return;   // not addressed to us / malformed
+  if (!pairCtrlForUs(ctx, mac, name)) return ctx.refuse();   // not addressed to us / malformed
   // A revoked key (under any MAC; a revoked MAC never gets here, gate 1) is
   // refused at once and never shown: REJECT, and a line in the log.
   V4PayloadPairRequest req;
@@ -8096,7 +8254,7 @@ static void v4h_pair_request(const V4RxCtx& ctx) {
                    "('espnowrevoked')", name, MAC_ARGS(mac));
     }
     sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REJECT);
-    return;
+    return ctx.refuse();
   }
   if (espnowRevokedKey(req.senderPub)) {
     static uint32_t sRevokedRequestLogMs = 0;
@@ -8107,7 +8265,7 @@ static void v4h_pair_request(const V4RxCtx& ctx) {
                    name, MAC_ARGS(mac), keyId);
     }
     sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REJECT);
-    return;
+    return ctx.refuse();
   }
   const bool paired = pairModeIsPaired(mac);
   const bool windowOpen = espnowPairModeActive();
@@ -8120,9 +8278,9 @@ static void v4h_pair_request(const V4RxCtx& ctx) {
   }
   portEXIT_CRITICAL(&gPairLock);
   switch (reply) {
-    case espnowpair::Reply::Accept: sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_ACCEPT); return;
-    case espnowpair::Reply::Reject: sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REJECT); return;  // not in discovery / declined
-    case espnowpair::Reply::None:   return;   // the pending request, repeated
+    case espnowpair::Reply::Accept: sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_ACCEPT); return ctx.accepted();
+    case espnowpair::Reply::Reject: sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REJECT); return ctx.refuse();  // not in discovery / declined
+    case espnowpair::Reply::None:   return ctx.accepted();   // the pending request, repeated
     case espnowpair::Reply::Prompt: break;
   }
   char macStr[18];
@@ -8132,6 +8290,7 @@ static void v4h_pair_request(const V4RxCtx& ctx) {
   BROADCAST_PRINTF("[PAIR] '%s' (%s, keyId %s) wants to pair — run 'espnowaccept' or 'espnowreject'.",
                    name, macStr, keyId);
   // The OLED polls espnowGetIncomingPairRequest() and opens its accept prompt.
+  return ctx.accepted();
 }
 
 // Initiator: the target answered our request (ACCEPT/REJECT frame). Only an
@@ -8166,19 +8325,21 @@ static void pairAnswerReceived(const uint8_t mac[6], espnowpair::Answer answer) 
 }
 
 // RX: the target accepted (on the initiator).
-static void v4h_pair_accept(const V4RxCtx& ctx) {
+static V4Verdict v4h_pair_accept(const V4RxCtx& ctx) {
   uint8_t mac[6];
   char name[devicename::kFieldLen];
-  if (!pairCtrlForUs(ctx, mac, name)) return;
+  if (!pairCtrlForUs(ctx, mac, name)) return ctx.refuse();
   pairAnswerReceived(mac, espnowpair::Answer::Accept);
+  return ctx.accepted();
 }
 
 // RX: the target rejected / isn't in discovery mode (on the initiator).
-static void v4h_pair_reject(const V4RxCtx& ctx) {
+static V4Verdict v4h_pair_reject(const V4RxCtx& ctx) {
   uint8_t mac[6];
   char name[devicename::kFieldLen];
-  if (!pairCtrlForUs(ctx, mac, name)) return;
+  if (!pairCtrlForUs(ctx, mac, name)) return ctx.refuse();
   pairAnswerReceived(mac, espnowpair::Answer::Reject);
+  return ctx.accepted();
 }
 
 // -------- Public read accessors for the discover-then-confirm UI (OLED/G2/web) --------
@@ -8409,8 +8570,16 @@ static const V4OpcodeEntry* v4_dispatch_lookup(uint8_t opcode) {
   return nullptr;
 }
 
-// Outcome of feeding one fragment to the reassembler.
-enum class V4ReasmOutcome : uint8_t { Dropped, Pending, Complete };
+// Outcome of feeding one fragment to the reassembler (1.0 step 5b: each one
+// is answered, DESIGN 3.2 step 7).
+//   Pending    stored, the message is not complete yet: ACK(0) for it.
+//   Complete   stored, and it completed the message: the handler decides.
+//   Duplicate  this fragment is already stored: ACK(0, duplicate), not stored again.
+//   NoSlot     no free reassembly entry: ACK(kNoSlot); no entry is opened.
+//   TooLarge   fragCount over V4_FRAG_MAX: ACK(kTooLarge); no entry is opened.
+//   Mismatch   the fragment disagrees with its message (type, count, index,
+//              size): ACK(kBadRequest).
+enum class V4ReasmOutcome : uint8_t { Pending, Complete, Duplicate, NoSlot, TooLarge, Mismatch };
 
 // Feed one plaintext fragment (SESSION_FRAME already unwrapped) into the
 // reassembler. The entry is keyed by (src, msgId) and fixed by its FIRST
@@ -8418,7 +8587,7 @@ enum class V4ReasmOutcome : uint8_t { Dropped, Pending, Complete };
 // its index is bounded by the entry, never by the frame's own header.
 // Complete: payload/payloadLen now reference the entry's buffer, which stays
 // valid until v4_dispatch_post_cleanup (v4_reasm_release) resets the entry.
-// Pending/Dropped: the frame is finished with.
+// Any other outcome: the frame is finished with.
 static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
                                       const uint8_t*& payload, uint16_t& payloadLen) {
   char srcMac[18];
@@ -8438,7 +8607,7 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
   if (h->fragCount > V4_FRAG_MAX) {
     WARN_ESPNOWF("[V4_FRAG_RX] fragCount %u exceeds the reassembly budget (%u) - dropping msgId=%lu from %s",
                  h->fragCount, (unsigned)V4_FRAG_MAX, (unsigned long)h->msgId, srcMac);
-    return V4ReasmOutcome::Dropped;
+    return V4ReasmOutcome::TooLarge;
   }
 
   // Find or allocate reassembly buffer
@@ -8446,7 +8615,7 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
   if (!e) {
     WARN_ESPNOWF("[V4_FRAG_RX] No reassembly slot available - all %u slots in use", V4_REASM_MAX);
     DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ==============================");
-    return V4ReasmOutcome::Dropped;
+    return V4ReasmOutcome::NoSlot;
   }
 
   bool isNewEntry = (e->received == 0);
@@ -8464,7 +8633,7 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
   if (h->fragCount != e->fragCount || h->type != e->type) {
     WARN_ESPNOWF("[V4_FRAG_RX] fragment %u/%u type=%u does not match msgId=%lu entry (%u fragments, type=%u) - dropping",
                  h->fragIndex + 1, h->fragCount, h->type, (unsigned long)h->msgId, e->fragCount, e->type);
-    return V4ReasmOutcome::Dropped;
+    return V4ReasmOutcome::Mismatch;
   }
 
   // Store fragment if not duplicate. The index is bounded by the ENTRY, so
@@ -8472,13 +8641,13 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
   if (h->fragIndex >= e->fragCount) {
     WARN_ESPNOWF("[V4_FRAG_RX] Invalid fragment index %u (max %u)", h->fragIndex, e->fragCount - 1);
     DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ==============================");
-    return V4ReasmOutcome::Dropped;
+    return V4ReasmOutcome::Mismatch;
   }
 
   if (e->have[h->fragIndex]) {
-    DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Duplicate fragment %u - ignoring", h->fragIndex + 1);
+    DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Duplicate fragment %u - answered again, not stored", h->fragIndex + 1);
     DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ==============================");
-    return V4ReasmOutcome::Dropped;
+    return V4ReasmOutcome::Duplicate;
   }
 
   // Learn the sender's chunk size from any non-final fragment (every fragment
@@ -8503,7 +8672,7 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
     DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] Resetting corrupted reassembly buffer");
     v4_reasm_reset(*e);
     DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ==============================");
-    return V4ReasmOutcome::Dropped;
+    return V4ReasmOutcome::Mismatch;
   }
 
   memcpy(e->buffer + offset, payload, payloadLen);
@@ -8553,7 +8722,7 @@ static V4ReasmOutcome v4_reasm_accept(const esp_now_recv_info* recv_info, const 
     WARN_ESPNOWF("[V4_FRAG_RX] reassembled %u B exceeds the %u B buffer (msgId=%lu from %s) - dropping",
                  reassembledSize, e->bufferSize, (unsigned long)h->msgId, srcMac);
     v4_reasm_reset(*e);
-    return V4ReasmOutcome::Dropped;
+    return V4ReasmOutcome::Mismatch;
   }
 
   DEBUG_ESPNOW_ROUTERF("[V4_FRAG_RX] ✓✓✓ REASSEMBLY COMPLETE ✓✓✓");
@@ -8573,12 +8742,60 @@ static void v4_dispatch_post_cleanup(const esp_now_recv_info* recv_info, const E
   if (h->fragCount > 1) v4_reasm_release(recv_info->src_addr, h->msgId);
 }
 
-// Returns true if the dispatch table claimed the frame; false only for opcodes
-// with no row, which the caller treats as genuinely unknown and drops.
-static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
-                                  const uint8_t* payload, uint16_t payloadLen,
-                                  bool isPaired, bool isAuthenticated,
-                                  bool isSessionEncrypted, const char* deviceName) {
+// One fragment (fragCount > 1, not TEXT) of a message, for the verdict
+// (DESIGN 3.2 step 7). TEXT is deliberately excluded from device-side
+// reassembly: long text is stored per-fragment (each fragment becomes its own
+// small history record, tagged msgId/fragIndex/fragCount) and reassembled
+// CLIENT-side, so the device never materializes a multi-KB lump in RAM, and
+// each TEXT fragment gets its own verdict. Every other fragment is stored here
+// and answered for itself: false with *out set (stored -> Accepted, already
+// stored -> Accepted + duplicate, no entry -> kNoSlot, over the budget ->
+// kTooLarge, inconsistent -> kBadRequest). True for the fragment that
+// completes its message: `payload` then is the whole message, in the entry's
+// buffer until v4_dispatch_post_cleanup releases it after the handler ran.
+static bool v4_reasm_step(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
+                          const uint8_t*& payload, uint16_t& payloadLen, V4Verdict* out) {
+  if (gEspNow) { gEspNow->routerMetrics.v4FragRx++; }
+  switch (v4_reasm_accept(recv_info, h, payload, payloadLen)) {
+    case V4ReasmOutcome::Pending:   *out = v4Accepted(); return false;
+    case V4ReasmOutcome::Duplicate:
+      *out = v4Accepted();
+      out->ackFlags = ESPNOW_V4_ACK_FLAG_DUPLICATE;
+      return false;
+    case V4ReasmOutcome::NoSlot:    *out = v4RefusedStatus(espnowanswer::kNoSlot); return false;
+    case V4ReasmOutcome::TooLarge:  *out = v4RefusedStatus(espnowanswer::kTooLarge); return false;
+    case V4ReasmOutcome::Mismatch:  *out = v4RefusedStatus(espnowanswer::kBadRequest); return false;
+    case V4ReasmOutcome::Complete:  break;
+  }
+  if (gEspNow) { gEspNow->routerMetrics.v4FragRxCompleted++; }
+  return true;
+}
+
+// A policy refusal at the table (DESIGN 3.1 G3): kRefused to an authenticated
+// session peer (a sealed frame), silence to anyone else.
+static V4Verdict v4_policy_refusal(bool isSessionEncrypted) {
+  return isSessionEncrypted ? v4RefusedStatus(espnowanswer::kRefused) : v4Silent();
+}
+
+// The verdict for one frame that passed the receive front end (1.0 step 5b,
+// DESIGN 3.2 steps 5-8): the row's gates, an unknown opcode, reassembly of a
+// fragment, the row's length rule, then the handler. The caller answers
+// ACK_REQ with it and remembers it. Every path returns a verdict:
+//   - no row (unknown opcode): Refused(kUnsupported);
+//   - a row gate (paired, bond, authenticated, session): a policy refusal
+//     (kRefused to a sealed frame's session peer, silence otherwise);
+//   - a fragment (fragCount > 1, not TEXT): stored -> Accepted for it,
+//     already stored -> Accepted + duplicate, no entry -> kNoSlot, over the
+//     budget -> kTooLarge, inconsistent -> kBadRequest; the fragment that
+//     completes the message goes on with the whole message;
+//   - the length rule (on the whole message): Refused(kBadRequest);
+//   - otherwise the handler's own verdict.
+// The gates run on every fragment, before reassembly, so a frame that may not
+// reach the handler never takes a reassembly entry.
+static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
+                                       const uint8_t* payload, uint16_t payloadLen,
+                                       bool isPaired, bool isAuthenticated,
+                                       bool isSessionEncrypted, const char* deviceName) {
   // An authenticated frame sent straight from its origin shows that peer is on
   // the air: it ends the peer's handshake back-off if the peer had been quiet.
   // (A relayed frame says nothing about the origin's own radio.)
@@ -8587,12 +8804,17 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     espnowHandshakeHeard(recv_info->src_addr);
   }
   const V4OpcodeEntry* e = v4_dispatch_lookup(h->type);
-  if (!e) return false;
-  if ((e->flags & V4_OPC_FLAG_REQ_PAIRED) && !isPaired) {
-    // Match original behavior: branch was gated `&& isPaired`, so unpaired frames
-    // for this opcode were silently dropped (no other branch matched). Same here.
+  if (!e) {
+    // Every opcode the firmware handles has a row; this one is genuinely
+    // unknown here (a newer sender): it is told so.
+    DEBUG_ESPNOW_ROUTERF("[V4_RX] Unknown type %d from %s", h->type, deviceName);
     v4_dispatch_post_cleanup(recv_info, h);
-    return true;
+    return v4RefusedStatus(espnowanswer::kUnsupported);
+  }
+  if ((e->flags & V4_OPC_FLAG_REQ_PAIRED) && !isPaired) {
+    // Not a paired sender: silent (it is no session peer of ours).
+    v4_dispatch_post_cleanup(recv_info, h);
+    return v4Silent();
   }
 #if ENABLE_BONDED_MODE
   if ((e->flags & V4_OPC_FLAG_REQ_BOND_PEER) &&
@@ -8605,7 +8827,7 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     // minute), or it would keep sending to a device that is not its partner.
     if (!bondPartnerChanging()) bondAgreementNoteIgnoredFrame(recv_info->src_addr, isSessionEncrypted);
     v4_dispatch_post_cleanup(recv_info, h);
-    return true;
+    return v4_policy_refusal(isSessionEncrypted);
   }
   if ((e->flags & V4_OPC_FLAG_REQ_BOND_PEER) && !isBondPeerMac(recv_info->src_addr)) {
     // Bond mode is on, but this paired peer is not our partner (bond frames are
@@ -8633,7 +8855,7 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
       sUnreported++;
     }
     v4_dispatch_post_cleanup(recv_info, h);
-    return true;
+    return v4_policy_refusal(isSessionEncrypted);
   }
 #else
   if (e->flags & V4_OPC_FLAG_REQ_BOND_PEER) {
@@ -8641,7 +8863,7 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     // registered in kV4HandlerTable when ENABLE_BONDED_MODE=0, but keep the
     // flag check honest for forward-compat / stale peers).
     v4_dispatch_post_cleanup(recv_info, h);
-    return true;
+    return v4RefusedStatus(espnowanswer::kUnsupported);
   }
 #endif
   if ((e->flags & V4_OPC_FLAG_REQ_AUTHENTICATED) && !isAuthenticated) {
@@ -8655,7 +8877,7 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
                  h->type,
                  MAC_ARGS(recv_info->src_addr));
     v4_dispatch_post_cleanup(recv_info, h);
-    return true;
+    return v4Silent();
   }
   if ((e->flags & V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED) && !isAuthenticated &&
       gEspNow && gEspNow->encryptionEnabled) {
@@ -8667,7 +8889,7 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
                  h->type,
                  MAC_ARGS(recv_info->src_addr));
     v4_dispatch_post_cleanup(recv_info, h);
-    return true;
+    return v4Silent();
   }
   if ((e->flags & V4_OPC_FLAG_REQ_SESSION_ENC) && !isSessionEncrypted) {
     // Opcode that arrived plaintext (or only BROADCAST_AUTH). Bond + FILE + FS
@@ -8679,7 +8901,13 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
                  h->type,
                  MAC_ARGS(recv_info->src_addr));
     v4_dispatch_post_cleanup(recv_info, h);
-    return true;
+    return v4Silent();  // a tagged frame proves mesh membership only, no session peer (G3)
+  }
+
+  // === Reassembly (DESIGN 3.2 step 7), v4_reasm_step ===
+  if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_TEXT) {
+    V4Verdict fragVerdict = v4Accepted();
+    if (!v4_reasm_step(recv_info, h, payload, payloadLen, &fragVerdict)) return fragVerdict;
   }
 
   // The row's length rule (System_ESPNow_Wire.h, "Frame rules"), after the
@@ -8705,7 +8933,7 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
       sLenUnreported++;
     }
     v4_dispatch_post_cleanup(recv_info, h);
-    return true;
+    return v4RefusedStatus(espnowanswer::kBadRequest);
   }
 
   // SESSION_FRAME unwrap was previously performed here,
@@ -8717,9 +8945,9 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
   V4RxCtx ctx{recv_info, h, payload, payloadLen, isPaired, isAuthenticated, isSessionEncrypted, deviceName};
   // Channel follow: a sealed frame that passed every gate above is liveness.
   if (isSessionEncrypted) espnowChFollowOnSealedFrame(recv_info, h->type);
-  e->handler(ctx);
+  const V4Verdict verdict = e->handler(ctx);
   v4_dispatch_post_cleanup(recv_info, h);
-  return true;
+  return verdict;
 }
 
 // An ACK frame (1.0, DESIGN 2.2 and 3.3), after the plaintext gate, the
@@ -9025,17 +9253,10 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
       // System_ESPNow_Sessions.cpp — so received frames can't trigger it.)
       return true;
     }
-    // ACK_REQ is answered only after the AEAD verify (never a forged
-    // SESSION_FRAME), with a sealed ACK in this same session naming the frame
-    // and fragment (1.0). An ACK is never answered. The ACK still means
-    // "received" here (1.0 step 5b moves it after accept).
-    if ((h->flags & ESPNOW_V4_FLAG_ACK_REQ) && h->type != ESPNOW_V4_TYPE_ACK) {
-      v4_queue_ack(recv_info->src_addr, /*sealed=*/true, h->sessionId, h->msgId, h->fragIndex,
-                   h->fragCount, 0);
-    }
+    // ACK_REQ is answered after the verdict below (1.0 step 5b), with a
+    // sealed ACK in this same session (the header copy keeps sessionId).
     headerCopy = *h;
     headerCopy.flags &= ~ESPNOW_V4_FLAG_SESSION_FRAME;
-    headerCopy.flags &= ~ESPNOW_V4_FLAG_ACK_REQ;  // already ACKed above
     h = &headerCopy;
     payload = plainBuf;
     payloadLen = plainLen;
@@ -9055,8 +9276,6 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     return true;
   }
 
-  // === V4 FRAGMENTATION REASSEMBLY ===
-  //
   // An ACK is never fragmented (1.0): it is one 8-byte frame (0/1 in its
   // header) and names the fragment it answers in its payload, so it can never
   // be taken for a fragment of a message. One that claims fragments is dropped.
@@ -9064,30 +9283,28 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     gEspNowRxLenDrops++;
     return true;
   }
-  // TEXT is deliberately excluded from device-side reassembly: long text is
-  // stored per-fragment (each fragment becomes its own small history record,
-  // tagged msgId/fragIndex/fragCount) and reassembled CLIENT-side. This keeps
-  // the device from ever materializing a multi-KB lump in RAM. So multi-frame
-  // TEXT falls through to the normal per-frame dispatch below; v4h_text stashes
-  // each fragment's tags and the drain stores them as separate pieces.
-  // Plaintext multi-frame RX is refused outright. The reassembler keys slots on
-  // (src, msgId) alone and stores no per-fragment auth verdict, so the flags handed
-  // to v4_dispatch_table_try when a slot completes are the COMPLETING fragment's.
-  // An attacker in radio range reads msgId off the wire (the header is AAD-bound,
-  // so it cannot be forged, but it is not secret) and injects plaintext fragments
-  // into an in-flight encrypted transfer; the genuine final SESSION_FRAME then
-  // stamps the whole spliced buffer as authenticated. Dropping here is safe because
-  // nothing emits plaintext multi-frame any more: v4_send_frame hardcodes
-  // fragCount = 1 (:1652) and refuses an over-long payload rather than splitting it
-  // (:1696), and the sole fragmenting sender v4_send_encrypted_chunked requires a
-  // PeerIdentity + ACTIVE session (:2124-2135) and seals every fragment. This
-  // retires the RX-side legacy tolerance noted at :273-275 — no un-reflashed peer
-  // exists, since flash is erased before every flash.
-  // Broadcasts are unaffected: they cannot fragment (v4_send_frame is the only
-  // broadcast sender and it cannot count past 1). NOTE that this is a property of
-  // the SEND path only — RX does not bind a session frame to its destination
-  // address (des_addr is never read in the V4 path), so do not read this guard as
-  // proof that a broadcast cannot arrive session-encrypted.
+  // An ACK (1.0): sealed or tagged by now (the plaintext gate dropped any
+  // other), matched by the sender side and never remembered, answered or
+  // relayed by flooding (DESIGN 3.2 step 3).
+  if (h->type == ESPNOW_V4_TYPE_ACK) {
+    v4_rx_ack(recv_info, h, payload, payloadLen, wasSessionEncrypted);
+    return true;
+  }
+
+  // Plaintext multi-frame RX is refused outright (TEXT included: a plaintext
+  // frame here is a handshake frame, never fragmented). The reassembler keys
+  // slots on (src, msgId) alone and stores no per-fragment auth verdict, so the
+  // flags handed to the handler when a slot completes are the COMPLETING
+  // fragment's. An attacker in radio range reads msgId off the wire and could
+  // inject plaintext fragments into an in-flight encrypted transfer; the
+  // genuine final SESSION_FRAME would then stamp the spliced buffer as
+  // authenticated. Nothing emits plaintext multi-frame: v4_send_frame
+  // hardcodes fragCount = 1 and the sole fragmenting sender
+  // (v4_send_encrypted_chunked) seals every fragment. A group-tagged frame
+  // cannot be fragmented either (dropped at the tag check above). NOTE that RX
+  // does not bind a session frame to its destination address (des_addr is
+  // never read in the V4 path), so do not read this guard as proof that a
+  // broadcast cannot arrive session-encrypted.
   if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_TEXT && !wasSessionEncrypted) {
     DEBUG_ESPNOW_ROUTERF(
            "[V4_RX] plaintext multi-frame refused (type=%u msgId=%lu frag %u/%u) — "
@@ -9096,71 +9313,66 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     return true;
   }
 
-  if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_TEXT) {
-    // Multi-fragment message - reassemble. On Complete the entry's buffer backs
-    // `payload` until v4_dispatch_post_cleanup releases it after the handler ran.
-    if (gEspNow) { gEspNow->routerMetrics.v4FragRx++; }
-    if (v4_reasm_accept(recv_info, h, payload, payloadLen) != V4ReasmOutcome::Complete) return true;
-    if (gEspNow) { gEspNow->routerMetrics.v4FragRxCompleted++; }
-  }
-  
   DEBUG_ESPNOW_ROUTERF("[V4_RX] ========================================");
   DEBUG_ESPNOW_ROUTERF("[V4_RX] V4 BINARY MESSAGE RECEIVED");
-  DEBUG_ESPNOW_ROUTERF("[V4_RX] Type=%u MsgId=%lu PayloadLen=%u Flags=0x%02X",
-         h->type, (unsigned long)h->msgId, payloadLen, h->flags);
-  
-  // An ACK (1.0): sealed or tagged by now (the plaintext gate dropped any
-  // other), matched by the sender side and never deduplicated, answered or
-  // relayed by flooding.
-  if (h->type == ESPNOW_V4_TYPE_ACK) {
-    v4_rx_ack(recv_info, h, payload, payloadLen, wasSessionEncrypted);
-    return true;
-  }
+  DEBUG_ESPNOW_ROUTERF("[V4_RX] Type=%u MsgId=%lu frag %u/%u PayloadLen=%u Flags=0x%02X",
+         h->type, (unsigned long)h->msgId, (unsigned)h->fragIndex + 1, (unsigned)h->fragCount,
+         payloadLen, h->flags);
 
-  // Answer ACK_REQ on a group-tagged frame with a tagged ACK. A sealed frame
-  // was answered at its unwrap (its ACK_REQ is cleared in the header copy), and
-  // a plaintext frame (the handshake) is never ACKed.
-  if ((h->flags & ESPNOW_V4_FLAG_ACK_REQ) && wasAuthenticated && !wasSessionEncrypted) {
-    v4_queue_ack(recv_info->src_addr, /*sealed=*/false, 0, h->msgId, h->fragIndex, h->fragCount, 0);
-  }
+  // ACK_REQ is answered after the verdict (1.0 step 5b, DESIGN 3.2 step 9):
+  // a sealed frame with a sealed ACK in its session, a group-tagged one with a
+  // tagged ACK. A plaintext frame (only the handshake) is never answered.
+  const bool answerAckReq = (h->flags & ESPNOW_V4_FLAG_ACK_REQ) != 0 && wasAuthenticated;
 
-  // Dedup check
+  // === Accept memory (DESIGN 3.2 step 4) ===
+  // A copy of a frame this device accepted is answered again with
+  // flags.duplicate and not processed; a copy of a frame it stayed silent on
+  // stays silent; a refused frame (busy, no slot) was not remembered, so its
+  // retry is processed again. Fragments are remembered one by one, so a
+  // fragment sent again after its message completed is answered from here.
   // Answers carry the request's number in their payload (reqId, rule F3) and
-  // a fresh header msgId of their own, so STREAM and CMD_RESP are checked like
-  // every other frame (they used to borrow the command's msgId and had to skip
-  // the check). Two kinds still skip it:
+  // a fresh header msgId of their own, so STREAM and CMD_RESP are remembered
+  // like every other frame. Two kinds are not:
   // FILE_START/DATA/END are multi-frame under the transfer's one msgId (each
-  // FILE_DATA chunk repeats it), until FILE_START carries a transfer id.
-  // RELAY_DATA is bypassed for a different reason:
-  // an envelope carries the INNER message's msgId, while its origin is rewritten
-  // to the current forwarder. A legitimate retransmission of the same inner
-  // message therefore arrives with an identical (origin, msgId) pair and would
-  // be swallowed as a duplicate — breaking the ACK-and-retry loop that the
-  // chunked sender depends on. Loop protection for envelopes comes from ttl and
-  // the hopsUsed ceiling instead, and the endpoint still dedups the inner frame
-  // normally after unwrapping (keyed on its true origin).
-  if (h->type != ESPNOW_V4_TYPE_RELAY_DATA &&
-      h->type != ESPNOW_V4_TYPE_FILE_START &&
-      h->type != ESPNOW_V4_TYPE_FILE_DATA &&
-      h->type != ESPNOW_V4_TYPE_FILE_END) {
-    // Which ring and which MAC the check uses depends on what the frame proved
-    // (v4_dedup_frame_seen): unauthenticated frames can no longer write the
-    // entries that authenticated frames are checked against.
-    if (h->msgId != 0 && v4_dedup_frame_seen(recv_info->src_addr, h, wasAuthenticated,
-                                             wasSessionEncrypted, gEspNowInRelayDelivery)) {
-      DEBUG_ESPNOWF("[V4_DEDUP] Dropped duplicate: type=%u msgId=%lu frag=%u", h->type, (unsigned long)h->msgId, h->fragIndex);
+  // FILE_DATA chunk repeats it), until FILE_START carries a transfer id (1.0
+  // step 7). RELAY_DATA: an envelope carries the INNER message's msgId, while
+  // its origin is rewritten to the current forwarder, so a legitimate
+  // retransmission of the same inner message arrives with an identical
+  // (origin, msgId) pair. Loop protection for envelopes comes from ttl and the
+  // hopsUsed ceiling instead, and the endpoint still remembers the inner frame
+  // after unwrapping (keyed on its true origin). msgId 0 is never remembered.
+  const bool remembered = h->msgId != 0 &&
+                          h->type != ESPNOW_V4_TYPE_RELAY_DATA &&
+                          h->type != ESPNOW_V4_TYPE_FILE_START &&
+                          h->type != ESPNOW_V4_TYPE_FILE_DATA &&
+                          h->type != ESPNOW_V4_TYPE_FILE_END;
+  const V4AcceptKey acceptKey = v4_accept_key(recv_info->src_addr, h, wasAuthenticated,
+                                              wasSessionEncrypted, gEspNowInRelayDelivery);
+  if (remembered) {
+    const V4AcceptMemo memo = v4_accept_lookup(acceptKey, h->msgId, h->fragIndex);
+    if (memo != V4AcceptMemo::None) {
+      DEBUG_ESPNOWF("[V4_DEDUP] %s copy: type=%u msgId=%lu frag=%u",
+                    memo == V4AcceptMemo::Accepted ? "accepted" : "silent", h->type,
+                    (unsigned long)h->msgId, h->fragIndex);
       meshRelayMetrics().floodDupSuppressed++;
+      if (memo == V4AcceptMemo::Accepted && answerAckReq) {
+        v4_queue_ack(recv_info->src_addr, wasSessionEncrypted, h->sessionId, h->msgId, h->fragIndex,
+                     h->fragCount, 0, ESPNOW_V4_ACK_FLAG_DUPLICATE);
+      }
       return true;
     }
   } else {
-    DEBUG_ESPNOWF("[V4_DEDUP] Bypassed for type=%u msgId=%lu", h->type, (unsigned long)h->msgId);
+    DEBUG_ESPNOWF("[V4_DEDUP] not remembered: type=%u msgId=%lu", h->type, (unsigned long)h->msgId);
   }
 
   // === Flood relay ===
   // Positioned here on purpose: after BROADCAST_AUTH verification (so we never
-  // amplify a forgery) and after the dedup insert (so we forward a given
-  // message exactly once, no matter how many copies of it reach us). Before
-  // dispatch, so a node relays even if its own handler later ignores the frame.
+  // amplify a forgery) and after the accept-memory lookup (so a copy this
+  // device already answered is not forwarded again). Before dispatch, so a
+  // node relays even if its own handler later ignores the frame. (A frame its
+  // handler refuses is not remembered, so a second copy of it would be
+  // forwarded again; only capacity refusals do that, and the flood rate limit
+  // bounds it.)
   //
   // !wasSessionEncrypted is load-bearing: by this point `payload` for an
   // AEAD frame is DECRYPTED plaintext, and re-tagging that with the group key
@@ -9190,9 +9402,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   }
   
   // enc = AEAD-decrypted SESSION_FRAME (confidential); auth = that OR a
-  // verified BROADCAST_AUTH HMAC (authenticated, maybe plaintext). The old
-  // log read the old ENCRYPTED header bit, a legacy LMK bit that was never
-  // set (removed at 1.0), so it always printed "encrypted=NO" — even for AEAD frames.
+  // verified BROADCAST_AUTH HMAC (authenticated, maybe plaintext).
   DEBUG_ESPNOW_ROUTERF("[V4_RX] Source: %s (paired=%s enc=%s auth=%s)",
          deviceName, isPaired ? "YES" : "NO",
          wasSessionEncrypted ? "YES" : "NO",
@@ -9221,34 +9431,25 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   }
 #endif
 
-  // === Handler-table dispatch ===
-  // Opcodes registered in kV4HandlerTable are handled here. Anything not in
-  // the table is a genuinely-unknown type and gets dropped below — there is no
-  // legacy ladder to catch it.
-  // `wasAuthenticated` proves the frame holds either our session key
-  // (SESSION_FRAME unwrap) or the mesh group key (BROADCAST_AUTH HMAC).
-  if (v4_dispatch_table_try(recv_info, h, payload, payloadLen,
-                            isPaired, wasAuthenticated, wasSessionEncrypted, deviceName)) {
-    return true;
+  // === Verdict (DESIGN 3.2 steps 5-8): gates, unknown opcode, reassembly,
+  // length rule, handler. `wasAuthenticated` proves the frame holds either our
+  // session key (SESSION_FRAME unwrap) or the mesh group key (BROADCAST_AUTH).
+  const V4Verdict verdict = v4_dispatch_table_try(recv_info, h, payload, payloadLen, isPaired,
+                                                  wasAuthenticated, wasSessionEncrypted, deviceName);
+
+  // === ACK after accept (step 9) ===
+  // Accepted: status 0 (flags.duplicate for a fragment already stored).
+  // Refused: its status, so the sender knows at once (a refusal also tells it
+  // the session is alive). Silent: nothing.
+  if (answerAckReq && verdict.kind != V4VerdictKind::Silent) {
+    v4_queue_ack(recv_info->src_addr, wasSessionEncrypted, h->sessionId, h->msgId, h->fragIndex, h->fragCount,
+                 verdict.kind == V4VerdictKind::Accepted ? (uint8_t)0 : verdict.status, verdict.ackFlags);
   }
-
-  // All opcodes are now registered in kV4HandlerTable; nothing reaches the
-  // point below except genuinely-unknown types. Two wire-behavior notes worth
-  // keeping (they're not separate opcodes on the dispatch path):
-  //   - SETTINGS_RESP / SETTINGS_PUSH are unused on the wire — settings arrive
-  //     as a FILE_END for _settings_out.json (handled in v4h_file_end).
-  //   - MANIFEST_RESP travels as a FILE_END for _manifest_out.json — also
-  //     handled inside v4h_file_end.
-
-  // Unknown V4 type - log and ignore
-  DEBUG_ESPNOW_ROUTERF("[V4_RX] Unknown type %d from %s", h->type, deviceName);
-  
-  // CRITICAL: Cleanup reassembly buffer for ALL fragmented messages (not just unknown types)
-  // This was previously only cleaning up at the end of the function, causing memory leaks
-  // for message types that returned early (TEXT, CMD, HEARTBEAT, etc.)
-  // Now we cleanup immediately after processing any fragmented message
-  v4_dispatch_post_cleanup(recv_info, h);
-  
+  // === Accept memory (step 10): Accepted and Silent, never Refused ===
+  if (remembered && verdict.kind != V4VerdictKind::Refused) {
+    v4_accept_record(acceptKey, h->msgId, h->fragIndex,
+                     verdict.kind == V4VerdictKind::Accepted ? V4AcceptMemo::Accepted : V4AcceptMemo::Silent);
+  }
   return true;
 }
 
@@ -13571,6 +13772,9 @@ void processMeshHeartbeats() {
   // 1d2. Drive the FS_LIST protocol: build deferred replies +
   // time out pending sender requests. Fast path when nothing's queued.
   fsListTick();
+  // 1d3. Finish the small received files accepted since the last pass (their
+  // flash write and bond processing run here, after the FILE_END's ACK).
+  fileRamFinalizeTick();
   // 1d. Zero expired prev-keys (held briefly after a REKEY so
   // in-flight frames sent under the old keys still decrypt).
   sessionRekeyPrevKeysSweep((uint32_t)millis());

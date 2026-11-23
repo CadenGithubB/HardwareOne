@@ -499,11 +499,11 @@ def rule_failures(component: Path) -> list[str]:
                      r"V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_BOND_SENSOR_STATUS, v4hBondSensorStatus \}", espnow) is not None and
            depth_in(espnow, "  { ESPNOW_V4_TYPE_BOND_SENSOR_STATUS,", "ENABLE_BONDED_MODE") == 1,
            "185 is a bond row: only from the bond partner, over its session, in a bond build")
-    sensor_req = strip_comments(extract_block(espnow, "static void v4h_sensor_req(const V4RxCtx& ctx)"))
+    sensor_req = strip_comments(extract_block(espnow, "static V4Verdict v4h_sensor_req(const V4RxCtx& ctx)"))
     refusal = re.search(r"\{\s*bool bondWorker = false;\s*#if ENABLE_BONDED_MODE\s*"
                         r"bondWorker = gSettings\.bondModeEnabled && isBondWorker\(\);\s*#endif\s*"
                         r"if \(!espnowfwd::meshDataAllowed\(bondWorker\)\) \{(.*?)\n  \}\n", sensor_req, re.S)
-    expect(refusal is not None and "return;" in refusal.group(1) and "gEspNow->sensorReqRefusedBond" in refusal.group(1),
+    expect(refusal is not None and "return ctx.refuse();" in refusal.group(1) and "gEspNow->sensorReqRefusedBond" in refusal.group(1),
            "v4h_sensor_req first asks meshDataAllowed for a bond worker, counts the refusal and returns: a bond worker "
            "takes no sensor request from a mesh master")
     expect(refusal is not None and sensor_req.index("if (!espnowfwd::meshDataAllowed(bondWorker)) {") <
@@ -515,9 +515,11 @@ def rule_failures(component: Path) -> list[str]:
            "v4h_sensor_req takes every request with the link byte set as one for the bond partner")
     fwd_at = sensor_req.index("rq.fwdLink != 0")
     fwd_block = extract_block(sensor_req, "rq.fwdLink != 0)")
-    # The block ends with its return, after the #if/#else/#endif: whatever the
-    # build, the request never falls through to the own-sensor path.
-    expect(re.search(r"#endif\s*return;\s*\}$", fwd_block) is not None,
+    # Each branch of the #if/#else/#endif returns its verdict (1.0 step 5b:
+    # accepted with bond mode, unsupported without): whatever the build, the
+    # request never falls through to the own-sensor path.
+    expect(re.search(r"return ctx\.accepted\(\);\s*#else.*return ctx\.refuseWith\(espnowanswer::kUnsupported\);"
+                     r"\s*#endif\s*\}$", fwd_block, re.S) is not None,
            "the request for the bond partner returns at the end of its block, in every build")
     expect(sensor_req.index("if (!espnowfwd::meshDataAllowed(bondWorker)) {") < fwd_at <
            sensor_req.index("gSettings.espnowAcceptSensorControl") and
@@ -546,13 +548,13 @@ def rule_failures(component: Path) -> list[str]:
            "GET /api/sensors/remote takes &via=")
 
     # The handlers hand the frame to the one ingest.
-    for handler, call in (("static void v4h_sensor_envelope(const V4RxCtx& ctx)", "/*fromBond=*/false"),
-                          ("static void v4h_sensor_data(const V4RxCtx& ctx)", "/*fromBond=*/true")):
+    for handler, call in (("static V4Verdict v4h_sensor_envelope(const V4RxCtx& ctx)", "/*fromBond=*/false"),
+                          ("static V4Verdict v4h_sensor_data(const V4RxCtx& ctx)", "/*fromBond=*/true")):
         body = extract_block(espnow, handler)
         expect("remoteSensorIngestPart(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen," in body and
                call in body, f"{handler.split('(')[0].split()[-1]} hands the frame to remoteSensorIngestPart")
     expect("remoteSensorIngestStatus(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen);" in
-           extract_block(espnow, "static void v4h_sensor_status(const V4RxCtx& ctx)"),
+           extract_block(espnow, "static V4Verdict v4h_sensor_status(const V4RxCtx& ctx)"),
            "v4h_sensor_status hands the frame to remoteSensorIngestStatus")
     status_tx = strip_comments(extract_block(espnow, "bool v4_send_sensor_status(const uint8_t* dstMac, uint32_t presentMask, uint32_t streamingMask,"))
     expect("espnowtx::sendAead(dstMac, ESPNOW_V4_TYPE_SENSOR_STATUS, 0," in status_tx and "v4_broadcast" not in status_tx,

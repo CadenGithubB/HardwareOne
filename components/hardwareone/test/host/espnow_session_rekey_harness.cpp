@@ -1335,6 +1335,31 @@ int main() {
     check(keysMirror(), "C34 after the send both sides hold the new keys");
   }
 
+#if HW1_SEND_OUTCOME
+  // C35 (1.0 step 5b): an answered send proves the session alive, only
+  // silence counts toward the two-strike re-open. A busy NACK (Refused)
+  // between two unanswered sends clears the run; two unanswered in a row
+  // clear the session; a send that never left counts toward nothing.
+  resetDevices();
+  check(establish(), "C35 setup: session up");
+  use(A);
+  sessionNoteSendOutcome(B.mac, V4SendOutcome::NoAnswer);
+  sessionNoteSendOutcome(B.mac, V4SendOutcome::Refused);   // ACK with status kBusy
+  sessionNoteSendOutcome(B.mac, V4SendOutcome::NoAnswer);
+  check(sessOf(A) && sessOf(A)->state == SESSION_ACTIVE,
+        "C35 a busy NACK between two unanswered sends keeps the session (the run starts again)");
+  sessionNoteSendOutcome(B.mac, V4SendOutcome::NotSent);
+  check(sessOf(A) && sessOf(A)->state == SESSION_ACTIVE, "C35 a send that never left counts toward nothing");
+  sessionNoteSendOutcome(B.mac, V4SendOutcome::Delivered);
+  sessionNoteSendOutcome(B.mac, V4SendOutcome::NoAnswer);
+  sessionNoteSendOutcome(B.mac, V4SendOutcome::Refused);
+  sessionNoteSendOutcome(B.mac, V4SendOutcome::Refused);
+  check(sessOf(A) && sessOf(A)->state == SESSION_ACTIVE, "C35 refusals in a row never clear the session");
+  sessionNoteSendOutcome(B.mac, V4SendOutcome::NoAnswer);
+  sessionNoteSendOutcome(B.mac, V4SendOutcome::NoAnswer);
+  check(!sessOf(A) || sessOf(A)->state != SESSION_ACTIVE, "C35 two unanswered sends in a row clear it");
+#endif
+
   check(gGuardDepth == 0, "no lock left held");
   std::printf("%u failure(s)\n", gFailures);
   return gFailures ? 1 : 0;

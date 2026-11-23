@@ -56,6 +56,15 @@ SOURCES = ('System_ESPNow_Handlers_Crypto.cpp', 'System_ESPNow_Identity.cpp', 'S
            'System_ESPNow_MeshKeys.h', 'System_ESPNow_RxCtx.h', 'System_ESPNow_Wire.h', 'System_ESPNow.cpp')
 
 
+
+def verdict_src(rxctx_text):
+    """System_ESPNow_Verdict.h (1.0 step 5b) as text, for a harness that pastes
+    V4RxCtx in: its helpers return V4Verdict. Empty for a tree without it."""
+    p = Path(__file__).resolve().parents[2] / 'System_ESPNow_Verdict.h'
+    if 'System_ESPNow_Verdict.h' not in rxctx_text or not p.exists():
+        return ''
+    return p.read_text() + '\n'
+
 def fail(what):
     raise SystemExit(f'test_espnow_keyex_hello: {what}')
 
@@ -104,7 +113,7 @@ def build_types(ident_h, meshkeys_h, rxctx_h):
         one(ident_h, 'struct EspNowIdentity', 'System_ESPNow_Identity.h') + ';',
         one(ident_h, 'struct PeerIdentity', 'System_ESPNow_Identity.h') + ';',
         one(meshkeys_h, 'struct MeshDerivedKeys', 'System_ESPNow_MeshKeys.h') + ';',
-        one(rxctx_h, 'struct V4RxCtx', 'System_ESPNow_RxCtx.h') + ';'])
+        verdict_src(rxctx_h) + one(rxctx_h, 'struct V4RxCtx', 'System_ESPNow_RxCtx.h') + ';'])
 
 
 def build_identity(ident):
@@ -161,10 +170,10 @@ def build_keyex(crypto):
     for marker in ('static void sendKeyExConfirm(', 'static void sendKeyExNotAccepted(', 'static void keyExRevokedDrop(',
                    'static void logKeyBound('):
         parts.append(one(crypto, marker, name))
-    parts += [one(crypto, 'void v4hKeyExHello(const V4RxCtx& ctx)', name),
-              one(crypto, 'void v4hKeyExReply(const V4RxCtx& ctx)', name),
+    parts += [one(crypto, 'V4Verdict v4hKeyExHello(const V4RxCtx& ctx)', name),
+              one(crypto, 'V4Verdict v4hKeyExReply(const V4RxCtx& ctx)', name),
               '#define HW1_HAS_CONFIRM_KEEPS_RETRY 1',
-              one(crypto, 'void v4hKeyExConfirm(const V4RxCtx& ctx)', name)]
+              one(crypto, 'V4Verdict v4hKeyExConfirm(const V4RxCtx& ctx)', name)]
     return '\n\n'.join(parts)
 
 
@@ -234,7 +243,7 @@ def main():
     # on an ACTIVE session would replace it.
     crypto = read('System_ESPNow_Handlers_Crypto.cpp')
     if 'bool keyExHelloAdmit(' in crypto:
-        reply = extract_block(crypto, 'void v4hKeyExReply(const V4RxCtx& ctx)')
+        reply = extract_block(crypto, 'V4Verdict v4hKeyExReply(const V4RxCtx& ctx)')
         live = reply.find('live->state == SESSION_ACTIVE')
         drain = reply.find('pendingFrameDrainForPeer(msg->responderMac);')
         kick = reply.find('espnowSessionOpenInitiate(msg->responderMac')
@@ -253,7 +262,7 @@ def main():
     accept = extract_block(espnow, 'const char* cmd_espnow_accept(const String& argsInput)')
     if not 0 < accept.find('pairKeyBind(req.mac, pub);') < accept.find('cmd_espnow_pairsecure('):
         fail('espnowaccept does not bind the request\'s key before the pairing (and its key exchange) starts')
-    request = extract_block(espnow, 'static void v4h_pair_request(const V4RxCtx& ctx)')
+    request = extract_block(espnow, 'static V4Verdict v4h_pair_request(const V4RxCtx& ctx)')
     if 'memcpy(gPairInPub, req.senderPub, 32);' not in request:
         fail('the pending pair request does not keep the key it carries')
     if 'pairKeyUnbind(mac);' not in extract_block(espnow, 'void espnowFirstKeyBound(const uint8_t mac[6])') or \

@@ -25,13 +25,14 @@
 #include <Arduino.h>
 #include <stdint.h>
 
+#include "System_ESPNow_Verdict.h"  // V4Verdict, what a handler returns (1.0 step 5b)
 struct V4RxCtx;
 
 // 82 CATCHUP_LIST_REQ and 84 CATCHUP_READ_REQ (espnow_task). The receive table
 // has already required a paired sender and a session-encrypted frame of at
 // least the row's minLen.
-void v4hCatchupListReq(const V4RxCtx& ctx);
-void v4hCatchupReadReq(const V4RxCtx& ctx);
+V4Verdict v4hCatchupListReq(const V4RxCtx& ctx);
+V4Verdict v4hCatchupReadReq(const V4RxCtx& ctx);
 
 // espnow_task loop (step 9f2e): sends the next frame of a ready window,
 // paced; expires the requester lease; frees the slot when the session is gone.

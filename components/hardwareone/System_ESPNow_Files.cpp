@@ -879,6 +879,28 @@ bool fileSlotsStreamBeginFinalize(FileTransferSlot* slot) {     // espnow_task (
   return true;
 }
 
+bool fileSlotsBeginRamFinalize(FileTransferSlot* slot) {     // espnow_task (FILE_END)
+  if (!slot) return false;
+  FileTransferSlotImpl& s = *impl(slot);
+  FileSlotsLockGuard g(kFileSlotsLockWait);
+  if (!g.ok) return false;
+  if (s.streaming || s.state != FILE_SLOT_RECEIVING) return false;
+  s.state = FILE_SLOT_COMPLETING;  // the espnow_task loop finishes and releases it
+  return true;
+}
+
+bool fileSlotsIsStreamFailing(const FileTransferSlot* slot) {
+  if (!slot) return false;
+  const FileTransferSlotImpl* s = implC(slot);
+  return s->streaming && s->streamFailed;
+}
+
+bool fileSlotsIsRamFinalizing(const FileTransferSlot* slot) {
+  if (!slot) return false;
+  const FileTransferSlotImpl* s = implC(slot);
+  return !s->streaming && s->state == FILE_SLOT_COMPLETING;
+}
+
 bool fileSlotsStreamFinalizeWrite(FileTransferSlot* slot) {     // cmd_exec
   if (!slot) return false;
   FileTransferSlotImpl& s = *impl(slot);
