@@ -407,6 +407,7 @@ static void displayBluetoothStatus() {
   // Decorated single-line render from the scroll state (honors the scroll
   // window), with the original inline state indicators.
   const int lineHeight = 8;
+  oledScrollFitRowsTo(&sBtMenuScroll, lineHeight, OLED_CONTENT_START_Y);
   int visEnd = sBtMenuScroll.scrollOffset + sBtMenuScroll.visibleLines;
   if (visEnd > sBtMenuScroll.itemCount) visEnd = sBtMenuScroll.itemCount;
   int row = 0;
@@ -864,6 +865,7 @@ static void displayPhone() {
 
   const int lineHeight = 8;
   const int top = OLED_CONTENT_START_Y + kPhoneHeaderLines * lineHeight;
+  oledScrollFitRowsTo(&sPhoneScroll, lineHeight, top);
   int visEnd = sPhoneScroll.scrollOffset + sPhoneScroll.visibleLines;
   if (visEnd > sPhoneScroll.itemCount) visEnd = sPhoneScroll.itemCount;
   int row = 0;

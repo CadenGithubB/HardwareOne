@@ -22,7 +22,8 @@ static int canvasHeight = 64;
 #define DISPLAY_COLOR_BLACK 0
 #define OLED_SCROLL_MAX_ITEMS 32
 // Landscape here: the portrait branches of the shared renderers are not taken.
-bool oledPortrait() { return false; }
+static bool gHarnessPortrait = false;  // set only while a list is set up "in portrait"
+bool oledPortrait() { return gHarnessPortrait; }
 int oledContentBottom() { return OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 2; }
 int oledCols() { return SCREEN_WIDTH / 6; }
 int oledVisibleRows(int rowHeight, int reservedHeight=0, int baselineRows=0) {
@@ -332,6 +333,29 @@ int main(int argc,char** argv) {
       assert(((packed[(yy/8)*128+xx]>>(yy&7))&1)==(shades[yy*128+xx]!=0));
   }
 #ifndef BASELINE_LAYOUT
+  if (canvasHeight == 64) {
+    // A list set up while the screen was portrait (oledVisibleRows gave a
+    // 64 x 128 count) and then drawn in landscape gets the rows that fit, with
+    // the selection kept in view (booting at 90, then oledrotation 0).
+    static const char* names[10]={"a","b","c","d","e","f","g","h","i","j"};
+    gHarnessPortrait=true;
+    OledScrollState simple;oledScrollInit(&simple,nullptr,10);
+    OledScrollState split;oledScrollInit(&split,nullptr,8);
+    gHarnessPortrait=false;
+    oledScrollSetSplitPane(&split,68,74,32);
+    for(auto* n:names){oledScrollAddItem(&simple,n,nullptr,true,nullptr);oledScrollAddItem(&split,n,nullptr,true,nullptr);}
+    simple.selectedIndex=7;split.selectedIndex=7;
+    Adafruit_SSD1306 a;oledScrollRenderSimple(&a,&simple,true,OLED_CONTENT_START_Y);
+    assert(simple.visibleLines==5 && simple.scrollOffset==3);
+    Adafruit_SSD1306 b;oledScrollRender(&b,&split,true,true,nullptr);
+    assert(split.visibleLines==4 && split.scrollOffset==4);
+    // A list set up in landscape keeps its own count.
+    OledScrollState kept;oledScrollInit(&kept,nullptr,3);
+    for(auto* n:names) oledScrollAddItem(&kept,n,nullptr,true,nullptr);
+    Adafruit_SSD1306 c;oledScrollRenderSimple(&c,&kept,true,OLED_CONTENT_START_Y);
+    assert(kept.visibleLines==3);
+    oledTextFieldReset();
+  }
   {
     // A portrait raster (64 x 128 logical, oledrotation 90/270) packs into the
     // same 1024 bytes in its own pages: 16 pages of 64 columns.

@@ -98,7 +98,9 @@ static char sFooterHint[LLM_CHARS_MAX + 1] = "";
 // Reply reader, as on the glasses: the latest exchange (the question, then the
 // whole reply), wrapped once whenever the reply changes and scrolled by line.
 // The buffers are PSRAM; a remote reply can be 16 KiB.
-#define LLM_READER_MAX_LINES 1024
+// Lines of the narrowest reader (9 columns in portrait): a 16 KiB reply wraps
+// to about 1820 lines, plus its newlines.
+#define LLM_READER_MAX_LINES 2304
 static const size_t LLM_READER_WRAP_CAP =
     LLM_CHAT_TURN_MAX_BYTES + LLM_CHAT_TURN_MAX_BYTES / 9 + 256;  // 9: the narrowest reader (portrait)
 static_assert(LLM_READER_WRAP_CAP <= UINT16_MAX, "line offsets are uint16_t");
@@ -816,7 +818,7 @@ static bool drawModelCard() {
 
   if (!hasDesc) return true;
 
-  int charsPerLine = (DISPLAY_WIDTH - textX) / 6;
+  int charsPerLine = (SCREEN_WIDTH - textX) / 6;
   if (charsPerLine < 1) charsPerLine = 1;
   if (charsPerLine > LLM_CHARS) charsPerLine = LLM_CHARS;
 

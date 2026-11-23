@@ -200,6 +200,10 @@ struct OledScrollState {
   // The row count the screen asked for, kept while a portrait renderer sets
   // its own (0 = the list has not been drawn in portrait since).
   int landscapeVisibleLines;
+  // The list was set up while the screen was portrait, so its row count was
+  // worked out for 64 x 128: the first landscape frame fits it to the rows
+  // that are there (oledScrollFitRows).
+  bool initInPortrait;
 };
 
 void oledScrollInit(OledScrollState* state, const char* title = nullptr, int visibleLines = oledVisibleRows(10, 1, 4));
@@ -248,6 +252,10 @@ bool oledScrollHandleNav(OledScrollState* state, bool leftRightNav = false);
 
 // Configure split-pane layout (list on left, icon on right)
 void oledScrollSetSplitPane(OledScrollState* state, int listWidth, int separatorX, int iconSize = 32);
+// For a hand-drawn list of rowHeight rows from topY: its row count, worked
+// out again for the live layout (the screen may have turned since the list
+// was set up), selection kept in view.
+void oledScrollFitRowsTo(OledScrollState* state, int rowHeight, int topY);
 
 // ============= Virtual Keyboard =============
 

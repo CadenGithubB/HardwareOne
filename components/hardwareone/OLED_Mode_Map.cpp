@@ -426,7 +426,7 @@ static void drawFeatures() {
   MapCacheGuard mapGuard("OLED.drawFeatures");
   const LoadedMap& map = MapCore::getCurrentMap();
   
-  oledDisplay->fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_COLOR_BLACK);
+  oledDisplay->fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, DISPLAY_COLOR_BLACK);  // the logical canvas
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   
@@ -481,7 +481,7 @@ static void drawRoutes() {
   MapCacheGuard mapGuard("OLED.drawRoutes");
   const LoadedMap& map = MapCore::getCurrentMap();
   
-  oledDisplay->fillRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, DISPLAY_COLOR_BLACK);
+  oledDisplay->fillRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, DISPLAY_COLOR_BLACK);  // the logical canvas
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   

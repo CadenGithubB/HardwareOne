@@ -161,7 +161,15 @@ static EXT_RAM_BSS_ATTR char sFbViewBody[12288];       // wrapped body (grows vs
 EXT_RAM_BSS_ATTR static uint16_t           sFbViewLineOff[640];         // start offset per line
 static int                sFbViewLineCount = 0;
 static int                sFbViewScroll = 0;
+static int                sFbViewWrapCols = 0;   // the columns the body was wrapped to
 static bool               sFbViewTruncated = false;
+
+// The file as read (PSRAM), so a turn of the screen (oledrotation) can wrap
+// it again for the new row width.
+EXT_RAM_BSS_ATTR static char sFbViewRaw[FB_VIEW_MAX_FILE];
+static size_t sFbViewRawLen = 0;
+static bool sFbViewRawPretty = false;
+
 
 // Exposed to the central footer-hint switch (OLED_Utils.cpp) so it can show the
 // right hints per level without reaching into these statics.
@@ -198,7 +206,27 @@ static void fbFillView(const char* text, size_t len, bool pretty) {
   }
   sFbViewLineCount = lc;
   sFbViewScroll    = 0;
+  sFbViewWrapCols  = FB_VIEW_WRAP_COLS;
   sFbViewTruncated = body.truncated() || linesFull;
+}
+
+static void fbOpenView(const String& content, bool pretty) {
+  sFbViewRawLen = content.length() < sizeof(sFbViewRaw) ? content.length() : sizeof(sFbViewRaw);
+  memcpy(sFbViewRaw, content.c_str(), sFbViewRawLen);
+  sFbViewRawPretty = pretty;
+  fbFillView(sFbViewRaw, sFbViewRawLen, pretty);
+}
+
+// Wrap the open file again when the row width changed since it was wrapped,
+// keeping the reading position roughly where it was.
+static void fbRewrapIfTurned() {
+  if (sFbViewWrapCols == FB_VIEW_WRAP_COLS || sFbViewRawLen == 0) return;
+  const int oldCols = sFbViewWrapCols > 0 ? sFbViewWrapCols : 1;
+  const int oldScroll = sFbViewScroll;
+  fbFillView(sFbViewRaw, sFbViewRawLen, sFbViewRawPretty);
+  int scroll = oldScroll * oldCols / (FB_VIEW_WRAP_COLS > 0 ? FB_VIEW_WRAP_COLS : 1);
+  if (scroll > sFbViewLineCount - 1) scroll = sFbViewLineCount - 1;
+  sFbViewScroll = scroll > 0 ? scroll : 0;
 }
 
 // The action-menu rows, built in one place so render / count / dispatch agree.
@@ -317,6 +345,8 @@ void oledFileBrowserResetSessionState() {
   memset(sFbDeletePrompt, 0, sizeof(sFbDeletePrompt));
   memset(sFbMutateReply, 0, sizeof(sFbMutateReply));
   memset(sFbViewBody, 0, sizeof(sFbViewBody));
+  memset(sFbViewRaw, 0, sizeof(sFbViewRaw));  // the file as read, kept for a re-wrap
+  sFbViewRawLen = 0;
   memset(sFbViewLineOff, 0, sizeof(sFbViewLineOff));
   sFbViewLineCount = 0;
   sFbViewScroll = 0;
@@ -984,7 +1014,7 @@ void prepareFileBrowserData() {
             String selected, classPath;
             if (!gOledFileManager->getSelectedPath(selected) || !normalizeFsPath(selected, classPath)) classPath = "";
             captureCryptoRevealText(classPath.c_str(), content);
-            fbFillView(content.c_str(), content.length(), pretty);
+            fbOpenView(content, pretty);
             sFbLevel = FbLevel::VIEW;
           } else {
             oledToastShow("Read failed", oled_message::kErrorDurationMs, OledUiIcon::ERROR);
@@ -1098,7 +1128,10 @@ void displayFileBrowserRendered() {
 
     // READY — render entries
     const int itemHeight = 10;
-    const int maxVisible = oledVisibleRows(10, 1, 4);
+    // The bottom content row carries the download state or "M/N": the list
+    // gives it up while one shows.
+    const bool bottomLine = sGetUi != FsGetUi::NONE || sPeerHasMore || sPeerTotalEntries > sPeerEntryCount;
+    const int maxVisible = max(1, oledVisibleRows(10, 1, 4) - (bottomLine ? 1 : 0));
     int startY = OLED_CONTENT_START_Y + 1;
 
     // Clamp + scroll math
@@ -1151,13 +1184,13 @@ void displayFileBrowserRendered() {
         case FsGetUi::NONE:       getMsg = nullptr;               break;
       }
       if (getMsg) {
-        oledDisplay->setCursor(0, DISPLAY_HEIGHT - 9);
+        oledDisplay->setCursor(0, oledContentBottom() - 7);
         oledDisplay->print(getMsg);
       } else if (sPeerHasMore || sPeerTotalEntries > sPeerEntryCount) {
         char ftr[24];
         snprintf(ftr, sizeof(ftr), "%d/%u%s", sPeerEntryCount,
                  (unsigned)sPeerTotalEntries, sPeerHasMore ? "+" : "");
-        oledDisplay->setCursor(0, DISPLAY_HEIGHT - 9);
+        oledDisplay->setCursor(0, oledContentBottom() - 7);
         oledDisplay->print(ftr);
       }
     }
@@ -1186,6 +1219,7 @@ void displayFileBrowserRendered() {
 
   // Text viewer: line-scrolled wrapped body (CLI-viewer window model).
   if (sFbLevel == FbLevel::VIEW) {
+    fbRewrapIfTurned();
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
     const int visible = fbViewVisibleLines();

@@ -1227,6 +1227,7 @@ void oledScrollInit(OledScrollState* state, const char* title, int visibleLines)
   state->singleLineItems = false;
   state->rightPaneDraw = nullptr;
   state->landscapeVisibleLines = 0;
+  state->initInPortrait = oledPortrait();
 
   // Clear all items
   for (int i = 0; i < OLED_SCROLL_MAX_ITEMS; i++) {
@@ -1391,6 +1392,15 @@ int oledScrollCalculateVisibleLines(int displayHeight, int textSize, bool hasTit
   return max(1, availableHeight / itemHeight);
 }
 
+void oledScrollFitRowsTo(OledScrollState* state, int rowHeight, int topY) {
+  if (!state || rowHeight <= 0) return;
+  const int fit = max(1, (oledContentBottom() - topY + 1) / rowHeight);
+  if (state->visibleLines != fit) {
+    state->visibleLines = fit;
+    oledScrollClampSelection(state);
+  }
+}
+
 void oledScrollSetSplitPane(OledScrollState* state, int listWidth, int separatorX, int iconSize) {
   if (!state) return;
   state->listWidth = listWidth;
@@ -1403,14 +1413,22 @@ void oledScrollSetSplitPane(OledScrollState* state, int listWidth, int separator
 // renderer sets its own count and keeps the screen's, which comes back as soon
 // as the list is drawn in landscape again. Navigation reads visibleLines, so
 // it pages by the rows on the screen.
-static void oledScrollFitRows(OledScrollState* state, int portraitRows) {
+static void oledScrollFitRows(OledScrollState* state, int portraitRows, int landscapeFit) {
   const int before = state->visibleLines;
   if (portraitRows > 0) {
     if (state->landscapeVisibleLines == 0) state->landscapeVisibleLines = state->visibleLines;
     state->visibleLines = portraitRows;
-  } else if (state->landscapeVisibleLines > 0) {
-    state->visibleLines = state->landscapeVisibleLines;
-    state->landscapeVisibleLines = 0;
+  } else {
+    if (state->landscapeVisibleLines > 0) {
+      state->visibleLines = state->landscapeVisibleLines;
+      state->landscapeVisibleLines = 0;
+    }
+    // A list set up in portrait asked for portrait rows: in landscape it gets
+    // at most the rows that fit (its own count was never a landscape one).
+    if (state->initInPortrait) {
+      if (landscapeFit > 0 && state->visibleLines > landscapeFit) state->visibleLines = landscapeFit;
+      state->initInPortrait = false;
+    }
   }
   if (state->visibleLines != before) oledScrollClampSelection(state);
 }
@@ -1443,7 +1461,7 @@ static void oledScrollRenderPortrait(Adafruit_SSD1306* display, OledScrollState*
   if (splitPane) {
     const int top = P::kPaneListY;
     const int rows = (bottom - top + 2) / P::kListRowH;
-    oledScrollFitRows(state, rows);
+    oledScrollFitRows(state, rows, 0);
     if (state->itemCount > 0) {
       OledScrollItem* selected = &state->items[state->selectedIndex];
       if (selected->iconName && selected->iconName[0] != '\0') {
@@ -1475,7 +1493,7 @@ static void oledScrollRenderPortrait(Adafruit_SSD1306* display, OledScrollState*
   }
   const int itemH = 16;
   const int rows = max(1, (bottom - top + 1) / itemH);
-  oledScrollFitRows(state, rows);
+  oledScrollFitRows(state, rows, 0);
   const int end = min(state->itemCount, state->scrollOffset + state->visibleLines);
   int y = top;
   for (int i = state->scrollOffset; i < end; ++i, y += itemH) {
@@ -1504,7 +1522,15 @@ void oledScrollRender(Adafruit_SSD1306* display, OledScrollState* state,
     if (footerHints) oledRenderFooter(display, footerHints);
     return;
   }
-  oledScrollFitRows(state, 0);
+  {
+    // The rows that fit this landscape canvas: 10 px rows in a split pane,
+    // 16 px items (under an optional title) in a full-width list.
+    const bool split = state->listWidth > 0;
+    const bool titled = !split && state->title && state->title[0] != '\0';
+    const int top = OLED_CONTENT_START_Y + (split ? 1 : (titled ? 10 : 0));
+    const int fit = split ? (oledContentBottom() - top + 2) / 10 : (oledContentBottom() - top + 1) / 16;
+    oledScrollFitRows(state, 0, max(1, fit));
+  }
   
   bool splitPane = (state->listWidth > 0);
   int lineHeight = 8;  // For text size 1
@@ -1655,7 +1681,7 @@ void oledScrollRenderSimple(Adafruit_SSD1306* display, OledScrollState* state,
     namespace P = oled_layout::portrait;
     const int top = max(startY, (int)OLED_CONTENT_START_Y);
     const int bottom = oledContentBottom();
-    oledScrollFitRows(state, max(1, (bottom - top + 1) / 8));
+    oledScrollFitRows(state, max(1, (bottom - top + 1) / 8), 0);
     const int end = min(state->itemCount, state->scrollOffset + state->visibleLines);
     int y = top;
     for (int i = state->scrollOffset; i < end; ++i, y += 8) {
@@ -1671,7 +1697,7 @@ void oledScrollRenderSimple(Adafruit_SSD1306* display, OledScrollState* state,
                               state->scrollOffset);
     return;
   }
-  oledScrollFitRows(state, 0);
+  oledScrollFitRows(state, 0, max(1, (oledContentBottom() - startY + 1) / 8));
 
   const int lineHeight = 8;
   int visibleStart = state->scrollOffset;
@@ -4004,6 +4030,9 @@ static unsigned long oledFrameSensorSeq = 0;
 // any task, so it records the request here and the next frame applies it at a
 // safe boundary.
 static volatile bool oledRotationPending = false;
+// A stick held across a turn of the screen now points another way: it is
+// ignored until it is let go (no press of the new direction).
+static bool sNavHeldAcrossTurn = false;
 
 // The GFX rotation the saved setting asks for on this display: a value that is
 // not 0/90/180/270, or a portrait turn on a display that only flips, is 0.
@@ -4021,7 +4050,9 @@ static int oledSavedRotation() {
 // fields' scroll state restarts.
 static void oledApplySavedRotationNow() {
   const bool wasPortrait = oledPortrait();
+  const int before = displayRotation();
   displaySetRotation(oledSavedRotation());
+  if (displayRotation() != before) sNavHeldAcrossTurn = true;
   if (wasPortrait != oledPortrait()) oledTextFieldReset();
 }
 
@@ -6755,6 +6786,10 @@ bool processOledInput() {
   // Check if there's any meaningful input
   bool deflectedX = abs(deltaX) > JOYSTICK_DEADZONE;
   bool deflectedY = abs(deltaY) > JOYSTICK_DEADZONE;
+  if (sNavHeldAcrossTurn) {
+    if (deflectedX || deflectedY) deflectedX = deflectedY = false;  // still the old hold
+    else sNavHeldAcrossTurn = false;
+  }
   bool hasJoystickInput = deflectedX || deflectedY;
   bool hasButtonChange = (buttons != lastButtonState) || latchedPresses != 0;
   

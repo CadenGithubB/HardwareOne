@@ -141,6 +141,11 @@ static void oledScrollClampSelection(OledScrollState* st) {
     st->scrollOffset = st->selectedIndex - st->visibleLines + 1;
 }
 static bool oledScrollHandleNav(OledScrollState*) { return false; }
+// OLED_Utils.cpp oledScrollFitRowsTo: the rows a hand-drawn list has from topY.
+static void oledScrollFitRowsTo(OledScrollState* st, int rowHeight, int topY) {
+  const int fit = std::max(1, (OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 2 - topY + 1) / rowHeight);
+  if (st->visibleLines != fit) { st->visibleLines = fit; oledScrollClampSelection(st); }
+}
 // OLED_Utils.cpp oledScrollRenderSimple: one 8 px row per visible item, "> " on
 // the selection. Its scrollbar is pixels, not text, so it is left out here.
 static void oledScrollRenderSimple(FakeDisplay* display, OledScrollState* state,
