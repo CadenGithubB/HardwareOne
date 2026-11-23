@@ -64,9 +64,8 @@ header (`OLED_HeaderCore.h`'s tall profile: fixed status slots, title cut,
 the rule on y19; the keyboard profile's page in the Power slot).
 `input_imu_core_tests` checks the 8 IMU mounts on the tilt and the teach step
 (each mount and screen rotation learned from one lean; no lean is a quiet
-timeout; after a calibration only an offer: the stick works at once, a side tap
-stays a button, the offer lapses quietly, a face tap starts the step, and a
-shake cancels it with an event). `ano_encoder_core_tests` also checks that a
+timeout; a shake configuration offers no step: afterwards the stick works and
+face taps are buttons; a shake cancels a running step with an event). `ano_encoder_core_tests` also checks that a
 button held across a turn makes no press of its new direction, and
 `test_oled_layout.py` that a list set up in portrait gets the landscape rows
 after a turn back (selection kept in view). `ano_encoder_core_tests`
@@ -98,27 +97,47 @@ its surface's teaching, a face knock read the other way round is no face, and
 the side knock (+57,+362,-485) that a sign-blind rule reads as the face), the
 sign's Y side and -Z face knocks (also through the 100 Hz detector, with the
 margin on the event), the warnings (face knocks of opposite signs, surfaces
-under 25 degrees apart, a step's knocks that sort the other way), and the saved
-text form (round trip, the longest form fits, malformed text forgets it).
+under 25 degrees apart, a step's knocks that sort the other way), the shared
+judgement of `imutapteach` and the shake configuration (`judgeTaught`: both
+steps at once equal two steps in a row, both replace what was taught, and each
+warning in its order), the pending taps' peak jumps (kept in order, handed on
+by the feed), and the saved text form (round trip, the longest form fits,
+malformed text forgets it).
 `motion_bno055_core_tests` adds the fast path's decode: the ACC_DATA / GRV_DATA
 / TEMP addresses, 100 LSB per m/s^2, m/s^2 to mg, gravity as a direction (the
 zeros of a fusion that has not started are refused) and the full block every
 100 ms. `input_imu_core_tests` checks the decimator in front of the input's
 engine: the factor per sample period (1 at 20 ms, 2 at 10 ms), that factor 1
 passes every sample unchanged, that a tap on a held sample goes out with the
-next one with its kind, two taps in one engine period go out on two updates,
+next one with its kind and peak jump, two taps in one engine period go out on two updates,
 a gap drops what waits, and that the engine fed at 100 Hz gives the same
 buttons (side 1-4, the 250 ms four-tap run, face 2 and 3, two taps 10 ms
 apart) with its sample-counted windows at their 20 ms times (the dwell, the
-shake, the calibration). `motion_knock_feed_wiring`
+shake, the calibration). It also runs the shake configuration
+(`Input_IMUCore.h` with `teachKnocks`): the happy path (settle 3 s, five side
+knocks counted, five top knocks counted, then the new centre in use and both
+steps Done and judged Ok; no button from the ten knocks, whatever side or face
+the detector called them, nor from the last one; taps map to A / START and the
+joystick follows the new centre afterwards; a tap without a peak jump teaches
+nothing); a time-out in every stage that can time out (settle 20 s, side and
+face 30 s, counted from the stage's start) cancels with the old centre kept and
+nothing taught, then taps work; a shake in each stage (settle, centre, side,
+face, and the tilt-only flow) cancels with nothing changed, neither that shake
+nor one 1 s later starts a configuration, one after 2.5 s quiet does; and five
+quick ringing knocks are no shake. `motion_hook_core_tests` checks that the
+hook sample carries a tap's peak jump (none without a tap or after a gap).
+`motion_knock_feed_wiring`
 (`test_motion_knock_feed_wiring.py`) checks the firmware's wiring in the
 sources: one shared feed (`HAL_Motion_KnockFeed.cpp`) with the tuning, the
 PSRAM trace and the knock API bodies, none left in the 4517 backend; the
 BNO055's one transaction per sample of ACC_DATA and GRV_DATA, the full block
 only when due, the forward-only read-time clock, taps from the queue and
 `tapsInSoftware`; `imutaptrace` registered with the detector for either
-backend and `imutapshock` for the LSM6DSOX only; and the decimator ahead of
-the engine. `test_optional_peripheral_config.py` builds IMU input with either
+backend and `imutapshock` for the LSM6DSOX only; the decimator ahead of
+the engine; the peak jump from backend to hook to engine; the shake
+configuration collected on the IMU task and saved by the main loop through the
+same save as `imutapteach` (which waits while a configuration runs); and no
+mount teach offer left. `test_optional_peripheral_config.py` builds IMU input with either
 backend (with the detector and its default threshold, 300 mg on the BNO055,
 1300 mg on the 4517) and refuses it without the IMU.
 

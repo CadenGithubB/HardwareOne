@@ -36,6 +36,34 @@ Built and host-tested; not yet run on a device.
 - The Map draws its raster at every rotation (it used to be copied unturned, upside down on a
   flipped screen), and `oleddump` dumps the screen as it is seen (64 columns in portrait).
 
+### Changed (IMU input: a shake configures tilt, side and top)
+Host-tested and built (`feathers3-pod`, `feathers3-status-sign`, `xiao-default`); not yet run on a
+device.
+- **A shake starts one configuration in stages**, each prompted on the OLED in one message updated
+  in place: "Set the sign down and hold still" (3 s still: the tilt centre; never still within
+  20 s cancels), "Knock the side 5 times" ("Side: 2 of 5"), "Knock the top 5 times" ("Top: 3 of
+  5"), then "Configured: side and top N deg apart" or the teach warnings (under 25 degrees apart,
+  top knocks pointing opposite ways, knocks that would sort as the other surface). Nothing changes
+  until the last top knock: then the new centre is used and both surfaces are saved (the main
+  loop saves them; the IMU task only collects). A knock stage without its 5 knocks within 30 s
+  cancels the whole configuration and keeps the previous centre and surfaces. The knocks press no
+  button, including the last one. With an IMU whose chip finds the taps itself (no knock
+  direction) the configuration is the tilt centre only.
+- **A shake during the configuration cancels it** ("Configuration cancelled"; nothing changes),
+  and does not start a new one: the next configuration starts only from a shake that begins 2 s
+  after the last shake ended. (Before, a shake during a calibration started it over.)
+- The mount teach step is **no longer offered after the shake** ("Tap the face to teach which way
+  is up" is gone: its face tap would be a top knock); `imuinputlearn` still runs it.
+  `imuinputshake on|off` still turns the shake off.
+- `imutapteach` and the configuration share one save and one judgement (the same warnings);
+  `imutapteach side|face` is refused while a configuration runs, and `imutapteach status` reports
+  a configuration as the last teach. Each tap now carries its peak jump from the knock detector to
+  the input (backend sample, hook sample, decimator).
+- `imuinputread json`: added `configStage` (`"none"`, `"settle"`, `"centre"`, `"side"`, `"face"`),
+  `configKnocks`, `lastConfig` (`"none"`, `"configured"`, `"cancelled"`, `"timeout"`,
+  `"never-still"`) and `lastConfigStage`; removed `learnOffered`. `state` stays `"calibrating"`
+  for the whole configuration. The text reply adds the stage while one runs.
+
 ### Added (IMU knocks: taught side and face)
 Host-tested and built (`feathers3-pod`, `feathers3-status-sign`, `xiao-default`); not yet run on a
 device.
@@ -91,9 +119,8 @@ Host-tested and built (`feathers3-pod`); not yet run on the pod.
   `imuinputread json` and `anoencoderstatus json` show `mount` and `mirror` in place of the flags.
 - **`imuinputlearn`**: answers at once; tilt the sign toward the top of the screen within 10 s and
   the lean sets `imuinputmount` (keeping its mirror), confirmed on the screen and shown by
-  `imuinputread` (`lastLearn`, `mount`). After a shake calibration the step is offered ("Tap the
-  face to teach which way is up"): only a face tap within about 4 s starts it; otherwise nothing
-  changes and the menus work at once. A shake or a calibration cancels a running step.
+  `imuinputread` (`lastLearn`, `mount`). A shake or a configuration cancels a running step. (It
+  was briefly offered after a shake calibration; that offer is gone again, see above.)
 
 ### Removed (ESP-NOW 1.0 clean-out)
 Host-tested and built; not run on a device.

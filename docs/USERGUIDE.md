@@ -207,9 +207,9 @@ screen as you see it, at every rotation (the ANO wheel keeps its direction). How
 itself sits against the screen is a separate setting, applied first: `imuinputmount` and `anomount`
 take `0|90|180|270` and an optional `mirror`. `imuinputlearn` teaches the IMU's: it answers at
 once, then tilt the sign toward the top of the screen within 10 s and the lean sets the mount (the
-screen confirms it; `imuinputread` shows `lastLearn` and the mount). After a shake calibration the
-step is offered ("Tap the face to teach which way is up"): a face tap within about 4 s starts it,
-anything else leaves the mount alone and the menus work at once.
+screen confirms it; `imuinputread` shows `lastLearn` and the mount). The shake configuration no
+longer offers it afterwards (its face tap would land in the configuration's top-knock stage): run
+`imuinputlearn` when the mount needs teaching.
 
 ---
 
@@ -2595,7 +2595,8 @@ imutapringms [0-500]            - A knock this soon after a tap is its ringing (
 imutapsideaxis [x|y|z]          - The axis a side tap hits along (default y)
 imutapsideratio [10-1000]       - Side tap: that axis is at least this % of the largest other
 imutapteach [side|face|clear|status] - Teach side and face with 5 knocks each (used once both
-                                  are taught, in place of the two above); clear forgets them
+                                  are taught, in place of the two above); clear forgets them.
+                                  A shake (imuinputshake) teaches both in its configuration
 imutaptrace [json|clear]        - Every recent knock: how hard, how long, why it did or did
                                   not count, with a tuning hint per kind of miss
 imutapshock [0-3]               - Adafruit 4517 with an LSM6DSOX: its chip's tap engine
@@ -2774,15 +2775,40 @@ for every boot, with or without the OLED).
 
 The motion sensor as the input device (`INPUT_DEVICE_TYPE 5`, with either IMU chip): side taps
 are A (1), B (2), Y (3) and X (4); face taps are START (2) and SELECT (3); tilting from the centre
-pose is the joystick, and a sustained shake calibrates the tilt (set the device down and hold it
-still for 3 s). `imuinputread [json]` shows what it makes of the motion, `imuinputtapms`,
+pose is the joystick, and a sustained shake starts the configuration (below). `imuinputread [json]`
+shows what it makes of the motion, `imuinputtapms`,
 `imuinputtilt`, `imuinputmount` and `imuinputlearn` tune it, and `imutaptrace` (under imu) shows
 every knock. On the BNO055 the input reads the chip every 10 ms; the tap and tilt rules see a
 sample every 20 ms on both chips, and every tap reaches them.
 
-**Teaching side and face.** Out of the box a knock is a side tap when it hits mostly along one
+**Configuring by shaking.** Shake the device for about a second, then follow the screen; one
+message is updated in place as you go:
+
+1. "Set the sign down and hold still": set it down the way you will use it and keep it still for
+   3 s ("Hold still: 3, 2, 1"). That pose becomes the tilt's centre. Never still within 20 s:
+   "Configuration cancelled: it never held still".
+2. "Knock the side 5 times": knock the side 5 times, a second or so apart, the way you will use it
+   ("Side: 2 of 5").
+3. "Knock the top 5 times": knock the top (the face) 5 times ("Top: 3 of 5").
+4. "Configured: side and top 64 deg apart", or a warning: the side and top are under 25 degrees
+   apart (they can't be told apart), the top knocks pointed opposite ways, or some knocks would sort
+   as the other surface. The values are saved even with a warning: shake to configure again.
+
+Nothing changes until the last top knock: only then do the new centre and both taught surfaces
+(as `imutapteach` would teach them) take effect. A knock stage without its 5 knocks within 30 s
+cancels the whole configuration ("No 5 knocks on the side in 30 s: configuration cancelled"), and
+the previous centre and surfaces stay. The knocks in the configuration press no button. Shaking
+the device while it runs cancels it ("Configuration cancelled", nothing changes); that shake does
+not start a new one: let the device rest 2 s, then shake again. `imuinputshake off` turns the
+whole thing off (a shake then does nothing); `imuinputread json` shows the stage (`configStage`,
+`configKnocks`) and how the last one ended (`lastConfig`). With an IMU whose own chip finds the
+taps (the LSM6DSOX on a 4517) the knocks carry no direction, and the configuration is the tilt
+centre only. `imutapteach` waits while a configuration runs.
+
+**Teaching side and face by command.** Out of the box a knock is a side tap when it hits mostly along one
 axis (`imutapsideaxis`, `imutapsideratio`), which suits the meeting sign. Where that does not
-work (on the pod side knocks come either way round), teach the device its two surfaces:
+work (on the pod side knocks come either way round), teach the device its two surfaces, by the
+shake configuration above or by command (both teach and judge the surfaces the same way):
 
 1. Open the IMU (`openinput` or `openimu`).
 2. `imutapteach side`, then within 30 s knock the side 5 times, the way you will use it, a second

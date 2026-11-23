@@ -154,15 +154,19 @@ OLED and the Power page left on, and adds:
 - that motion sensor as the OLED's input device (`INPUT_DEVICE_TYPE 5`), the sign's only one:
   taps on the sign's side are A (one), B (two), Y (three) and X (four); taps on its face are
   START (two) and SELECT (three); tilting the sign left, right, up or down moves through the
-  menus and the on-screen keyboard like a joystick. A sustained shake calibrates the tilt: set
-  the sign down the way it will be used and hold it still for 3 s, and that pose is the centre
-  (`imuinputzero` takes the present pose at once). The firmware finds the taps in the
+  menus and the on-screen keyboard like a joystick. A sustained shake starts the configuration:
+  set the sign down the way it will be used and hold it still for 3 s (the tilt centre), knock its
+  side 5 times, then its top (face) 5 times; the OLED prompts each stage and counts the knocks.
+  Only the last top knock applies the new centre and the taught side and face; a stage left
+  without its knocks for 30 s, or a shake during it, cancels it and keeps the previous values
+  (rest the sign 2 s before shaking again). `imuinputzero` takes the present pose at once;
+  `imuinputshake off` turns the shake off. The firmware finds the taps in the
   accelerometer's 416 Hz stream; `imutaptrace` shows every knock and why it did or did not count
   (bench defaults: `imutapthreshold 1300`, `imutapmaxms 120`, `imutapringms 80`, side axis Y at
   60 %). `imuinputread` shows what it makes of the motion; the
   directions are fitted to how the sensor sits against the screen with `imuinputmount
   0|90|180|270 [mirror]`, or taught with `imuinputlearn` (tilt the sign toward the top of the
-  screen; also offered after a shake calibration). `oledrotation 90` (or 270) stands the
+  screen). `oledrotation 90` (or 270) stands the
   screen on its side, and the tilt directions turn with it. (Until 2026-11-23 an Adafruit 5740 ANO wheel was the
   input device, `INPUT_DEVICE_TYPE 2`; this configuration no longer builds its driver);
 - the web Sensors page (`CUSTOM_ENABLE_WEB_SENSORS`), which shows the input and the motion sensor.
@@ -224,16 +228,17 @@ encryption (board `feathers3_fe`: never flash it to a board that is not meant to
 BNO055 motion sensor (`IMU_DEVICE_TYPE 1`), the SSD1306 OLED and a LiPo on the board's fuel gauge.
 The BNO055 is also its input device (`INPUT_DEVICE_TYPE 5`), with the sign's gestures: side taps
 A, B, Y, X (one to four), face taps START (two) and SELECT (three), tilt as the joystick, a shake
-to calibrate the tilt. In this build the BNO055 is read every 10 ms (the accelerometer and the
+to configure it (hold still for the tilt centre, 5 knocks on the side, 5 on the top). In this build the BNO055 is read every 10 ms (the accelerometer and the
 fusion's gravity; the rest of the reading every 100 ms) and the firmware finds the taps in those
 readings. The chip filters its accelerometer at 62.5 Hz, so knocks read about a third as strong
 as on the sign: the default threshold is 300 mg (soft side taps on the pod peaked from about
 255 mg; their echoes, 70-100 ms later, fall in the ring window), a starting point to tune with
 `imutaptrace` (tap it, read the peaks, then `imutapthreshold`). On the pod side knocks come
 either way round (bench 2026-11-23), so the one-axis rule (`imutapsideaxis`, `imutapsideratio`)
-cannot tell side from face: teach it instead, `imutapteach side` and 5 knocks on the side, then
-`imutapteach face` and 5 on the face, and check with `imutapteach status` and `imutaptrace`
-(USERGUIDE, "Teaching side and face"). To start it with every boot:
+cannot tell side from face: teach it instead, by the shake configuration (its side and top
+stages) or by command, `imutapteach side` and 5 knocks on the side, then `imutapteach face` and 5
+on the face, and check with `imutapteach status` and `imutaptrace` (USERGUIDE, "Configuring by
+shaking" and "Teaching side and face by command"). To start it with every boot:
 `imuautostart on` and `inputautostart on`.
 
 `qtpy-sensors` targets the **Adafruit QT Py ESP32 Pico** (classic ESP32). It
