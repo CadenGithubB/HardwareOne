@@ -614,6 +614,11 @@ Every pairing is encrypted: both devices need the same mesh passphrase first (`e
 
 Once paired, devices appear in each other's peer list.
 
+After you accept a pair request, the key exchange that follows must present the key the request
+carried (its keyId is shown with the prompt); a device presenting another key is answered "not
+accepted". A key exchange cannot be replayed: each one carries fresh random numbers, and a recorded
+answer or refusal is ignored.
+
 A device stores another device's key only when that device is in its own device list. A key exchange from a device that is not listed (or was unpaired) is answered "not accepted" and nothing is stored; the other side shows `not accepted - pair from both sides`. After `espnowpairsecure`, the other device's first key is accepted for 10 minutes; after that, run `espnowpairsecure` again. When a key is stored, the log shows its keyId (the first 16 hex digits of the key).
 
 ### Unpairing and revoking a device
@@ -627,6 +632,14 @@ If the revoked list file (`/system/espnow/revoked.json`) is there but cannot be 
 1. On each remaining device: `espnowrevoke <device>`. Its frames are dropped and it cannot be paired again by mistake.
 2. On each remaining device: `espnowsetpassphrase <mesh> <new passphrase>` for **every mesh the lost device knew**. This step is required: until it is done, the lost device (which holds the old passphrase) can still be heard and relayed by devices that did not revoke it.
 3. Devices with the new passphrase reconnect by themselves; nothing needs to be paired again.
+
+**Changing a passphrase closes the mesh's sessions.** Sessions are bound to the mesh key: when
+`espnowsetpassphrase` changes a mesh's passphrase, every session on that mesh is closed at once.
+Devices that get the same new passphrase open new sessions by themselves (they keep their keys and
+are not paired again); a device that does not have it cannot open or renew a session any more, even
+with modified firmware. A session frame from a device with another passphrase shows in the log as
+`mesh key mismatch`. A typo in the new passphrase on one device cuts that device off until it is
+corrected. Renaming a mesh (`espnowmeshes rename`) closes its sessions too.
 
 ### Radio channel
 Devices only hear each other on the same radio channel. `espnowchannel` shows the preference, the radio's actual channel, the channel it should be on and a check; `espnowchannel <1-13>` pins a channel for when the device is not joined to Wi-Fi, `espnowchannel auto` (the default) lets the device choose, and `espnowchannel resync` puts the radio back on the right channel now.
@@ -783,7 +796,9 @@ and a mesh without an id sends nothing. `espnowmeshes` shows it. Changing a mesh
 gives it a new id, and its frames and the other devices' are dropped at each other's mesh gate until
 they have the same passphrase and label: `espnowstats` counts those frames (`RX Unknown Mesh Id Drops`,
 with the last id and sender), and a paired device or a key exchange that sends another id gets one
-warning a minute. Clearing a passphrase keeps the id, so paired devices keep exchanging frames. Two
+warning a minute. Clearing a passphrase disables the mesh and drops its id: a mesh without a
+passphrase sends and takes nothing (the default mesh is cleared only after another enabled mesh is
+made the default). Two
 meshes on one device never share an id: `espnowsetpassphrase`, `espnowmeshes rename` and
 `espnowmeshes enable` refuse a change that would give one the id of another and change nothing (pick
 another passphrase or label). If two meshes have one id anyway (an edited or restored settings file), the
@@ -1474,7 +1489,8 @@ espnowbackupfingerprint [64 hex|clear] - Name the backup master on this device (
 espnowforwardlinks [json] [from <n>]   - Master: who forwards for which bond partner
 
 --- Security ---
-espnowsetpassphrase <mesh> "<passphrase>"  - Set a mesh's encryption passphrase (double quotes when it has spaces)
+espnowsetpassphrase <mesh> "<passphrase>"  - Set a mesh's encryption passphrase (double quotes when it has spaces);
+                                  closes the mesh's sessions; 'clear' disables the mesh
 espnowencstatus                 - Show encryption status and key fingerprint
 espnowpairsecure <mac> <name>   - Pair by address (run on both devices)
 
