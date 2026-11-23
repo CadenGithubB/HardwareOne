@@ -36,6 +36,7 @@
 #include <atomic>
 #include <string.h>
 #include "HAL_Motion_KnockFeed.h"  // knockFeedActive: the tap commands' replies; the taught surfaces
+#include "Input_IMU.h"  // imuInputConfiguring: imutapteach waits for the shake configuration
 #if ENABLE_OLED_DISPLAY
 #include "OLED_UI.h"  // oledToastUpdate: the teach step's progress
 #endif
@@ -1209,6 +1210,11 @@ const char* cmd_imutapteach(const String& argsInput) {
   if (text != "side" && text != "face") return "Error: invalid arguments — Usage: imutapteach [side|face|clear|status]";
   const bool side = text == "side";
   if (!gImuRunning) return "Error: The IMU is not running. Open it with 'openimu' (or 'openinput'), then teach.";
+#if ENABLE_IMU_INPUT
+  if (imuInputConfiguring())
+    return "Error: A shake configuration is running (it teaches both surfaces). Finish it, or shake to cancel it, "
+           "then retry.";
+#endif
   if (!knockFeedActive())
     return "Error: This IMU finds taps with its own chip engine, which cannot be taught. Use 'imutapthreshold'.";
   knockFeedTeachStart(side, millis());

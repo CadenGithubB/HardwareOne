@@ -653,11 +653,11 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `imuinputlearn` | A | Teach the mount: tilt the sign toward the top of the screen within 10 s<br/>`Usage: imuinputlearn` |
 | `imuinputmount` | A | How the sensor sits, in the screen's terms: [0\|90\|180\|270] [mirror]<br/>`Usage: imuinputmount [0\|90\|180\|270] [mirror]` |
 | `imuinputread` |  | IMU input: state, lean, joystick and taps. (add 'json' for JSON output)<br/>`Usage: imuinputread [json]` |
-| `imuinputshake` | A | A shake calibrates the tilt: set the device down, hold still 3 s [on\|off]<br/>`Usage: imuinputshake [on\|off]` |
+| `imuinputshake` | A | A shake configures: hold still 3 s (tilt centre), knock the side 5x, the top 5x [on\|off]<br/>`Usage: imuinputshake [on\|off]` |
 | `imuinputtapmerge` | A | Tap flags closer than this many ms are one knock (its rebound) <0..300><br/>`Usage: imuinputtapmerge [0..300]` |
 | `imuinputtapms` | A | Tap window in ms: a button arrives this long after its last tap <200..800><br/>`Usage: imuinputtapms [200..800]` |
 | `imuinputtilt` | A | Tilt dead zone in degrees: a smaller lean does nothing, a larger one moves the joystick <8..40><br/>`Usage: imuinputtilt [8..40]` |
-| `imuinputzero` | A | Take the present pose as the joystick's centre (a shake does the same, with a prompt).<br/>`Usage: imuinputzero` |
+| `imuinputzero` | A | Take the present pose as the joystick's centre (a shake's configuration takes it too, with prompts).<br/>`Usage: imuinputzero` |
 
 ## apds
 

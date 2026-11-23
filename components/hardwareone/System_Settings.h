@@ -987,7 +987,7 @@ struct Settings {
   int  imuInputTapWindowMs;     // IMU input: a run of taps ends this long after its last tap (Input_IMU: imuinputtapms)
   int  imuInputTapMergeMs;      // IMU input: tap flags closer than this are one knock (its rebound) (imuinputtapmerge)
   int  imuInputTiltDeg;         // IMU input: lean from the centre pose that deflects the joystick (imuinputtilt)
-  bool imuInputShakeCalibrate;  // IMU input: a sustained shake starts a tilt calibration (imuinputshake)
+  bool imuInputShakeCalibrate;  // IMU input: a sustained shake starts the configuration: tilt centre, side and top knocks (imuinputshake)
   int imuInputMount;            // IMU input: how the sensor sits: 0/90/180/270, +1 mirrored (imuinputmount)
   bool thermalAutoStart;        // Auto-start thermal camera after boot
   bool tofAutoStart;            // Auto-start ToF distance sensor after boot

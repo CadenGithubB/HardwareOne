@@ -20,8 +20,11 @@
 #include "System_SensorJsonKeys.h"  // inter-device sensor JSON key names (receivers read the same)
 #include "System_Settings.h"
 #include "System_Utils.h"
+#if ENABLE_IMU_KNOCK_DETECTOR
+#include "HAL_Motion_KnockFeed.h"  // knockFeedActive / knockFeedTeachCancel: the configuration's knock stages
+#endif
 #if ENABLE_OLED_DISPLAY
-#include "OLED_UI.h"  // oledToastUpdate: the calibration prompts
+#include "OLED_UI.h"  // oledToastUpdate: the configuration's prompts
 #endif
 
 // The OLED-facing input state, as every input driver defines it. Running: the
@@ -53,6 +56,17 @@ static std::atomic<bool> sLearnRequest{false};
 // mount code learned (-1 none) and a count of finished teach steps.
 static std::atomic<int> sLearnedMount{-1};
 
+#if ENABLE_IMU_KNOCK_DETECTOR
+// A finished shake configuration's two knock steps, for the main loop to save
+// (imuInputTick): the hook writes them only while ready is false, then sets
+// it; the main loop copies them, then clears it.
+struct ConfigTaught {
+  knock::Teacher side, face;
+};
+EXT_RAM_BSS_ATTR static ConfigTaught sConfigTaught;
+static std::atomic<bool> sConfigTaughtReady{false};
+#endif
+
 // ---- What a command reads ---------------------------------------------------
 // Written by the hook, copied by readers: a version counter that is odd while
 // the hook writes, so the hook never waits for a reader.
@@ -64,7 +78,9 @@ struct ImuInputStatus {
   bool centred;         // a reference pose is in use
   bool centring;        // one is being taken
   bool shaking;
-  bool calibrating;     // a shake's calibration is waiting for the device to be still
+  bool calibrating;     // a shake configuration is under way (any stage)
+  uint8_t calStage;     // ...its stage (imuinput::kStage*)
+  uint8_t calKnocks;    // ...and knocks taken in a knock stage
   bool unsupported;     // the IMU's backend gives no taps or no gravity
   bool imuStopped;      // the IMU closed under the input
   float leanX, leanY;   // degrees from the centre pose
@@ -77,8 +93,9 @@ struct ImuInputStatus {
   bool dropFace;
   uint8_t dropWhy;
   bool learning;        // the teach step is waiting for a lean
-  bool learnOffered;    // after a calibration: a face tap would start it
   uint8_t lastLearn;    // how the last teach step ended (kLastLearn*)
+  uint8_t lastConfig;   // how the last shake configuration ended (kLastConfig*)
+  uint8_t lastConfigStage;  // ...in which stage (imuinput::kStage*), for a cancel or a time-out
 };
 EXT_RAM_BSS_ATTR static ImuInputStatus sStatus;
 static std::atomic<uint32_t> sStatusVersion{0};
@@ -109,11 +126,17 @@ static imuinput::Config configFromSettings() {
   const input_rotation::Mount mount = input_rotation::mountFromCode(gSettings.imuInputMount);
   cfg.mountTurns = static_cast<uint8_t>(mount.quarterTurns);
   cfg.mountMirror = mount.mirror;
-  // Offered after every calibration (owner, 2026-11-23): a face tap within a
-  // few seconds arms the teach step. "Only while the mount is still 0" would
-  // be: cfg.learnAfterCalibration = gSettings.imuInputMount == 0;
-  cfg.learnAfterCalibration = true;
   cfg.shakeCalibrate = gSettings.imuInputShakeCalibrate;
+  // The configuration teaches the side and the top (face) when the
+  // firmware's knock detector finds the taps (their peak jumps come with
+  // them); a chip's own tap engine gives none, and the configuration is the
+  // tilt centre only. (The mount teach step is no longer offered after it:
+  // owner, 2026-11-23; its face tap would be a face-stage knock.)
+#if ENABLE_IMU_KNOCK_DETECTOR
+  cfg.teachKnocks = knockFeedActive();
+#else
+  cfg.teachKnocks = false;
+#endif
   return cfg;
 }
 
@@ -125,38 +148,89 @@ static imuinput::Config configFromSettings() {
 // decimated first (sDecimator), its taps carried to the next update. A deflection is never left behind
 // when the samples stop: the input layer treats a reading older than a
 // quarter of a second as centred (HAL_Input.cpp).
-// The calibration's prompts: one toast, updated in place as it goes, and a
-// log line per stage.
-static void showCalibration(uint8_t event, uint8_t secondsLeft) {
-  char text[64];
-  uint32_t ms = 3000;
-  switch (event) {
+// The configuration's prompts: one toast, updated in place as it goes
+// (kConfigToastTag; the main loop's final "Configured" line too), and a log
+// line per stage.
+constexpr uint32_t kConfigToastTag = 0x494D5543u;  // "IMUC"
+
+static void configToast(const char* text, uint32_t ms, bool done, bool warn) {
+  INFO_INPUT_LIFECYCLEF("[IMU input] %s", text);
+#if ENABLE_OLED_DISPLAY
+  oledToastUpdate(kConfigToastTag, text, ms,
+                  warn ? OledUiIcon::WARNING : done ? OledUiIcon::SUCCESS : OledUiIcon::INFO);
+#else
+  (void)ms;
+  (void)done;
+  (void)warn;
+#endif
+}
+
+// How the last shake configuration ended (imuinputread's lastConfig).
+enum : uint8_t {
+  kLastConfigNone = 0,
+  kLastConfigDone,        // configured: the new values are in use
+  kLastConfigShake,       // a shake cancelled it
+  kLastConfigTimeout,     // a knock stage ran out of time
+  kLastConfigNeverStill,  // it was never set down still
+};
+static const char* lastConfigWord(uint8_t v) {
+  switch (v) {
+    case kLastConfigDone: return "configured";
+    case kLastConfigShake: return "cancelled";
+    case kLastConfigTimeout: return "timeout";
+    case kLastConfigNeverStill: return "never-still";
+    default: return "none";
+  }
+}
+
+// One configuration event (Output::calEvent) on the screen. msLeft: the knock
+// stage's time left. With the knock stages, "Configured" comes from the main
+// loop once both surfaces are saved (imuInputTick).
+static void showConfiguration(const imuinput::Output& out, uint32_t msLeft, bool taught) {
+  char text[72];
+  const unsigned knocks = knock::kTeachKnocks;
+  switch (out.calEvent) {
     case imuinput::kCalStarted:
     case imuinput::kCalMoved:
-      snprintf(text, sizeof(text), "Calibrating tilt: set the sign down the way you will use it");
-      ms = imuinput::kCalTimeoutMs;
-      break;
+      configToast("Set the sign down and hold still", imuinput::kCalTimeoutMs, false, false);
+      return;
     case imuinput::kCalCountdown:
-      snprintf(text, sizeof(text), "Hold still: %u", (unsigned)secondsLeft);
-      ms = 1500;
-      break;
+      snprintf(text, sizeof(text), "Hold still: %u", (unsigned)out.calSecondsLeft);
+      configToast(text, 1500, false, false);
+      return;
+    case imuinput::kCalSideStart:
+      snprintf(text, sizeof(text), "Knock the side %u times", knocks);
+      configToast(text, knock::kTeachTimeoutMs + 500, false, false);
+      return;
+    case imuinput::kCalSideKnock:
+      snprintf(text, sizeof(text), "Side: %u of %u", (unsigned)out.calKnocks, knocks);
+      configToast(text, msLeft + 500, false, false);
+      return;
+    case imuinput::kCalFaceStart:
+      snprintf(text, sizeof(text), "Knock the top %u times", knocks);
+      configToast(text, knock::kTeachTimeoutMs + 500, false, false);
+      return;
+    case imuinput::kCalFaceKnock:
+      snprintf(text, sizeof(text), "Top: %u of %u", (unsigned)out.calKnocks, knocks);
+      configToast(text, msLeft + 500, false, false);
+      return;
     case imuinput::kCalDone:
-      snprintf(text, sizeof(text), "Tilt calibrated");
-      break;
+      if (!taught) configToast("Configured", 3000, true, false);
+      return;
     case imuinput::kCalCancelled:
-      snprintf(text, sizeof(text), "Calibration cancelled: it never held still");
-      break;
+      configToast("Configuration cancelled: it never held still", 5000, true, true);
+      return;
+    case imuinput::kCalTimedOut:
+      snprintf(text, sizeof(text), "No %u knocks on the %s in %u s: configuration cancelled", knocks,
+               out.calStage == imuinput::kStageFace ? "top" : "side", (unsigned)(knock::kTeachTimeoutMs / 1000));
+      configToast(text, 5000, true, true);
+      return;
+    case imuinput::kCalShakeCancelled:
+      configToast("Configuration cancelled", 4000, true, true);
+      return;
     default:
       return;
   }
-  INFO_INPUT_LIFECYCLEF("[IMU input] %s", text);
-#if ENABLE_OLED_DISPLAY
-  constexpr uint32_t kCalToastTag = 0x494D5543u;  // "IMUC"
-  const OledUiIcon icon = event == imuinput::kCalDone        ? OledUiIcon::SUCCESS
-                          : event == imuinput::kCalCancelled ? OledUiIcon::WARNING
-                                                             : OledUiIcon::INFO;
-  oledToastUpdate(kCalToastTag, text, ms, icon);
-#endif
 }
 
 // How the last teach step ended (imuinputread's lastLearn).
@@ -175,10 +249,6 @@ static void showLearn(uint8_t event, int code) {
   char text[64];
   uint32_t ms = 3000;
   switch (event) {
-    case imuinput::kLearnOffered:
-      snprintf(text, sizeof(text), "Tap the face to teach which way is up");
-      ms = imuinput::kLearnOfferMs;
-      break;
     case imuinput::kLearnStarted:
       snprintf(text, sizeof(text), "Tilt the sign toward the top of the screen");
       ms = imuinput::kLearnTimeoutMs;
@@ -197,8 +267,7 @@ static void showLearn(uint8_t event, int code) {
   }
   INFO_INPUT_LIFECYCLEF("[IMU input] %s", text);
 #if ENABLE_OLED_DISPLAY
-  constexpr uint32_t kCalToastTag = 0x494D5543u;  // "IMUC", the calibration's toast
-  oledToastUpdate(kCalToastTag, text, ms,
+  oledToastUpdate(kConfigToastTag, text, ms,
                   event == imuinput::kLearnDone        ? OledUiIcon::SUCCESS
                   : event == imuinput::kLearnTimedOut || event == imuinput::kLearnCancelled ? OledUiIcon::WARNING
                                                                                             : OledUiIcon::INFO);
@@ -233,6 +302,7 @@ static void imuInputHook(const MotionHookSample& sample, void*) {
   }
   raw.tap = sample.tapLatched;
   raw.tapKind = sample.tapKind;
+  for (int i = 0; i < 3; ++i) raw.tapVec[i] = sample.tapVec[i];
   imuinput::Sample in;
   if (!sDecimator.add(raw, imuinput::decimationFor(motionBackendInfo().samplePeriodMs), in)) {
     gInputConnected = true;  // samples arrive; the engine takes the next one
@@ -243,7 +313,8 @@ static void imuInputHook(const MotionHookSample& sample, void*) {
   imuinput::Output learnStart;
   if (sLearnRequest.exchange(false)) sEngine.startLearn(sample.ms, &learnStart);
   const uint8_t tapsBefore = sEngine.tapCount();
-  const imuinput::Output out = sEngine.update(in, configFromSettings());
+  const imuinput::Config cfg = configFromSettings();
+  const imuinput::Output out = sEngine.update(in, cfg);
 
   sUnpublishedPresses |= out.pressed;
   sUnpublishedActivity |= out.activity;
@@ -263,13 +334,46 @@ static void imuInputHook(const MotionHookSample& sample, void*) {
   status.centring = sEngine.capturing();
   status.shaking = sEngine.shaking();
   status.calibrating = sEngine.calibrating();
+  status.calStage = sEngine.calStage();
+  status.calKnocks = sEngine.calKnocks();
   status.drops = sEngine.drops();
   status.dropTaps = sEngine.lastDropTaps();
   status.dropFace = sEngine.lastDropFace();
   status.dropWhy = sEngine.lastDrop();
   status.learning = sEngine.learning();
-  status.learnOffered = sEngine.learnOffered();
-  if (out.calEvent != imuinput::kCalNone) showCalibration(out.calEvent, out.calSecondsLeft);
+  if (out.calEvent != imuinput::kCalNone) {
+    const bool taught = sEngine.sideTeach().state == knock::TeachState::Done &&
+                        sEngine.faceTeach().state == knock::TeachState::Done;
+    switch (out.calEvent) {
+#if ENABLE_IMU_KNOCK_DETECTOR
+      case imuinput::kCalSideStart:
+        knockFeedTeachCancel();  // an imutapteach step would take the knocks (it drops their taps)
+        break;
+#endif
+      case imuinput::kCalDone:
+        status.lastConfig = kLastConfigDone;
+        status.lastConfigStage = imuinput::kStageNone;
+#if ENABLE_IMU_KNOCK_DETECTOR
+        if (taught && !sConfigTaughtReady.load()) {  // the main loop saves them (never this task)
+          sConfigTaught.side = sEngine.sideTeach();
+          sConfigTaught.face = sEngine.faceTeach();
+          sConfigTaughtReady.store(true);
+        }
+#endif
+        break;
+      case imuinput::kCalCancelled:
+      case imuinput::kCalTimedOut:
+      case imuinput::kCalShakeCancelled:
+        status.lastConfig = out.calEvent == imuinput::kCalCancelled ? kLastConfigNeverStill
+                            : out.calEvent == imuinput::kCalTimedOut ? kLastConfigTimeout
+                                                                       : kLastConfigShake;
+        status.lastConfigStage = out.calStage;
+        break;
+      default:
+        break;
+    }
+    showConfiguration(out, sEngine.calMsLeft(in.ms), taught && cfg.teachKnocks);
+  }
   const uint8_t learnEvent = learnStart.learnEvent ? learnStart.learnEvent : out.learnEvent;
   if (learnEvent == imuinput::kLearnDone) {
     // Up on the screen as it is seen: the screen's rotation is applied after
@@ -433,7 +537,8 @@ const char* cmd_imuinputread(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024,
              "{\"schema\":1,\"state\":\"%s\",\"running\":%s,\"connected\":%s,\"x\":%d,\"y\":%d,\"buttons\":%u,"
              "\"leanX\":%.1f,\"leanY\":%.1f,\"taps\":%u,\"shaking\":%s,\"presses\":%lu,\"recentres\":%lu,"
-             "\"lastPress\":%u,\"lastTaps\":%u,\"drops\":%lu,\"lastDrop\":{\"taps\":%u,\"hit\":\"%s\",\"why\":\"%s\"},\"tapWindowMs\":%d,\"tiltDeg\":%d,\"shakeCalibrate\":%s,\"mount\":%d,\"mirror\":%s,\"learning\":%s,\"learnOffered\":%s,\"lastLearn\":\"%s\"}",
+             "\"lastPress\":%u,\"lastTaps\":%u,\"drops\":%lu,\"lastDrop\":{\"taps\":%u,\"hit\":\"%s\",\"why\":\"%s\"},\"tapWindowMs\":%d,\"tiltDeg\":%d,\"shakeCalibrate\":%s,\"mount\":%d,\"mirror\":%s,\"learning\":%s,\"lastLearn\":\"%s\","
+             "\"configStage\":\"%s\",\"configKnocks\":%u,\"lastConfig\":\"%s\",\"lastConfigStage\":\"%s\"}",
              state, gInputRunning ? "true" : "false", gInputConnected ? "true" : "false", x, y,
              static_cast<unsigned>(live ? s.held : 0), static_cast<double>(live ? s.leanX : 0.0f),
              static_cast<double>(live ? s.leanY : 0.0f), static_cast<unsigned>(live ? s.tapCount : 0),
@@ -444,7 +549,10 @@ const char* cmd_imuinputread(const String& argsInput) {
              gSettings.imuInputTapWindowMs, gSettings.imuInputTiltDeg,
              gSettings.imuInputShakeCalibrate ? "true" : "false", input_rotation::mountDegrees(gSettings.imuInputMount),
              input_rotation::mountFromCode(gSettings.imuInputMount).mirror ? "true" : "false",
-             s.learning ? "true" : "false", s.learnOffered ? "true" : "false", lastLearnWord(s.lastLearn));
+             s.learning ? "true" : "false", lastLearnWord(s.lastLearn),
+             imuinput::stageName(live && s.calibrating ? s.calStage : imuinput::kStageNone),
+             static_cast<unsigned>(live && s.calibrating ? s.calKnocks : 0), lastConfigWord(s.lastConfig),
+             imuinput::stageName(s.lastConfigStage));
     return getDebugBuffer();
   }
   if (!gInputRunning) return "Error: IMU input is not running. Start it with 'openinput'.";
@@ -462,12 +570,21 @@ const char* cmd_imuinputread(const String& argsInput) {
                           : s.joyY > JOYSTICK_CENTER ? "up"
                           : s.joyY < JOYSTICK_CENTER ? "down"
                                                      : "centre";
-  snprintf(getDebugBuffer(), 1024,
-           "[IMU input] %s; lean right %+.1f up %+.1f deg; joystick %s (x %d, y %d); taps counted %u; "
-           "presses %lu; centre taken %lu time(s)",
-           state, static_cast<double>(s.leanX), static_cast<double>(s.leanY), direction, static_cast<int>(s.joyX),
-           static_cast<int>(s.joyY), static_cast<unsigned>(s.tapCount), static_cast<unsigned long>(s.presses),
-           static_cast<unsigned long>(s.recentres));
+  int n = snprintf(getDebugBuffer(), 1024,
+                   "[IMU input] %s; lean right %+.1f up %+.1f deg; joystick %s (x %d, y %d); taps counted %u; "
+                   "presses %lu; centre taken %lu time(s)",
+                   state, static_cast<double>(s.leanX), static_cast<double>(s.leanY), direction,
+                   static_cast<int>(s.joyX), static_cast<int>(s.joyY), static_cast<unsigned>(s.tapCount),
+                   static_cast<unsigned long>(s.presses), static_cast<unsigned long>(s.recentres));
+  if (s.calibrating && n > 0 && n < 1024) {
+    if (s.calStage == imuinput::kStageSide || s.calStage == imuinput::kStageFace) {
+      snprintf(getDebugBuffer() + n, 1024 - n, "; configuring: %s knocks %u of %u",
+               s.calStage == imuinput::kStageSide ? "side" : "top", static_cast<unsigned>(s.calKnocks),
+               static_cast<unsigned>(knock::kTeachKnocks));
+    } else {
+      snprintf(getDebugBuffer() + n, 1024 - n, "; configuring: %s", imuinput::stageName(s.calStage));
+    }
+  }
   return getDebugBuffer();
 }
 
@@ -557,7 +674,8 @@ static const char* boolSetting(bool& field, const String& argsInput, bool allowT
 const char* cmd_imuinputshake(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return boolSetting(gSettings.imuInputShakeCalibrate, argsInput, false,
-                     "[IMU input] Shake: calibrate the tilt (set the device down, hold it still 3 s)",
+                     "[IMU input] Shake: configure (set the device down and hold it still 3 s for the tilt "
+                     "centre, knock the side 5 times, knock the top 5 times; a shake during it cancels it)",
                      "[IMU input] Shake: nothing");
 }
 
@@ -581,18 +699,30 @@ const char* cmd_imuinputmount(const String& argsInput) {
   return getDebugBuffer();
 }
 
-// Main loop: a mount the teach step learned is saved here (the hook runs on
-// the IMU task and does not write settings).
+// Main loop: a mount the teach step learned, and the surfaces a finished
+// shake configuration taught, are saved here (the hook runs on the IMU task
+// and does not write settings). The configuration's centre is already in use.
 void imuInputTick() {
   const int code = sLearnedMount.exchange(-1);
   if (code >= 0) setSetting(gSettings.imuInputMount, code);
+#if ENABLE_IMU_KNOCK_DETECTOR
+  if (sConfigTaughtReady.load()) {
+    const ConfigTaught taught = sConfigTaught;
+    sConfigTaughtReady.store(false);
+    char msg[96];
+    const bool warn = imuKnockSaveTaught(&taught.side, &taught.face, msg, sizeof(msg));
+    configToast(msg, warn ? 8000 : 3000, true, warn);
+  }
+#endif
 }
+
+bool imuInputConfiguring() { return gInputRunning && statusRead().calibrating; }
 
 // imuinputlearn: the teach step. Answers at once; the user then tilts the
 // sign toward the top of the screen within 10 s and the lean sets
 // imuinputmount (keeping its mirror). The outcome is on the screen (the toast)
 // and in imuinputread (learning, lastLearn, mount); no lean, a shake or a
-// calibration leaves the mount as it was.
+// configuration leaves the mount as it was.
 const char* cmd_imuinputlearn(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String text = argsInput;
@@ -608,11 +738,11 @@ const char* cmd_imuinputlearn(const String& argsInput) {
 // The open/close/autostart commands are the input module's (HAL_Input.cpp).
 const CommandEntry imuInputCommands[] = {
   { "imuinputread",    "IMU input: state, lean, joystick and taps. (add 'json' for JSON output)", false, cmd_imuinputread, "Usage: imuinputread [json]" },
-  { "imuinputzero",    "Take the present pose as the joystick's centre (a shake does the same, with a prompt).", true, cmd_imuinputzero, "Usage: imuinputzero" },
+  { "imuinputzero",    "Take the present pose as the joystick's centre (a shake's configuration takes it too, with prompts).", true, cmd_imuinputzero, "Usage: imuinputzero" },
   { "imuinputtapms",   "Tap window in ms: a button arrives this long after its last tap <200..800>", true, cmd_imuinputtapms, "Usage: imuinputtapms [200..800]" },
   { "imuinputtapmerge", "Tap flags closer than this many ms are one knock (its rebound) <0..300>", true, cmd_imuinputtapmerge, "Usage: imuinputtapmerge [0..300]" },
   { "imuinputtilt",    "Tilt dead zone in degrees: a smaller lean does nothing, a larger one moves the joystick <8..40>", true, cmd_imuinputtilt, "Usage: imuinputtilt [8..40]" },
-  { "imuinputshake",   "A shake calibrates the tilt: set the device down, hold still 3 s [on|off]", true, cmd_imuinputshake, "Usage: imuinputshake [on|off]" },
+  { "imuinputshake",   "A shake configures: hold still 3 s (tilt centre), knock the side 5x, the top 5x [on|off]", true, cmd_imuinputshake, "Usage: imuinputshake [on|off]" },
   { "imuinputmount",   "How the sensor sits, in the screen's terms: [0|90|180|270] [mirror]", true, cmd_imuinputmount, "Usage: imuinputmount [0|90|180|270] [mirror]" },
   { "imuinputlearn",   "Teach the mount: tilt the sign toward the top of the screen within 10 s", true, cmd_imuinputlearn, "Usage: imuinputlearn" },
 };
@@ -625,7 +755,7 @@ static const SettingEntry imuInputSettingEntries[] = {
   { "imuInputTapWindowMs", SETTING_INT,  &gSettings.imuInputTapWindowMs, 450, 0, nullptr, 200, 800, "Tap window (ms)",       nullptr, false, nullptr, "imuinputtapms" },
   { "imuInputTapMergeMs",  SETTING_INT,  &gSettings.imuInputTapMergeMs,  0,   0, nullptr, 0,   300, "Tap merge (ms)",        nullptr, false, nullptr, "imuinputtapmerge" },
   { "imuInputTiltDeg",     SETTING_INT,  &gSettings.imuInputTiltDeg,      15, 0, nullptr, 8,   40,  "Tilt dead zone (degrees)", nullptr, false, nullptr, "imuinputtilt" },
-  { "imuInputShakeCalibrate",  SETTING_BOOL, &gSettings.imuInputShakeCalibrate,    1, 0, nullptr, 0,   1,   "Shake calibrates tilt",        nullptr, false, nullptr, "imuinputshake" },
+  { "imuInputShakeCalibrate",  SETTING_BOOL, &gSettings.imuInputShakeCalibrate,    1, 0, nullptr, 0,   1,   "Shake configures (tilt + knocks)", nullptr, false, nullptr, "imuinputshake" },
   { "imuInputMount",       SETTING_INT,  &gSettings.imuInputMount,         0, 0, nullptr, 0,   271, "Mount (degrees, mirror)", kImuMountOptions, false, nullptr, "imuinputmount" },
 };
 

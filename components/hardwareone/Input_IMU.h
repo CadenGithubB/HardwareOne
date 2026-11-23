@@ -13,7 +13,10 @@
 //
 //   side taps: 1 = A   2 = B   3 = Y   4 = X
 //   face taps: 2 = START   3 = SELECT
-//   a sustained shake calibrates the tilt (imuinputshake)
+//   a sustained shake starts the configuration (imuinputshake): set it down
+//   and hold still (the tilt centre), knock the side 5 times, knock the top
+//   (face) 5 times; nothing changes unless every stage is done, and a shake
+//   during it cancels it
 //   tilt left / right / up / down from the centre pose = the joystick
 //
 // Either IMU backend: the firmware's knock detector finds the taps (the
@@ -47,9 +50,12 @@ const char* cmd_imuinputtilt(const String& argsInput);
 const char* cmd_imuinputshake(const String& argsInput);
 const char* cmd_imuinputmount(const String& argsInput);
 const char* cmd_imuinputlearn(const String& argsInput);
-// Main loop: saves a mount the teach step learned (imuinputlearn, or the step
-// offered after a shake calibration).
+// Main loop: saves a mount the teach step learned (imuinputlearn) and the
+// knock surfaces a finished shake configuration taught.
 void imuInputTick();
+// A shake configuration is under way (imutapteach waits for it).
+bool imuInputConfiguring();
 #else
 inline void imuInputTick() {}
+inline bool imuInputConfiguring() { return false; }
 #endif
