@@ -54,6 +54,16 @@ constexpr uint8_t kLsm6dsoxIntSrcBytes = 3;
 constexpr uint8_t kLsm6dsoxRegOutTemp = 0x20;   // OUT_TEMP, OUTX/Y/Z_G, OUTX/Y/Z_A: 14 bytes
 constexpr uint8_t kLsm6dsoxRegTapCfg0 = 0x56;   // TAP_CFG0 .. MD1_CFG (0x5E): 9 bytes
 constexpr uint8_t kLsm6dsoxWhoAmI = 0x6C;
+// The same board ships with an LSM6DS3TR-C (WHO_AM_I 0x6A, Adafruit 5543 and
+// later 4517-style boards). Same output registers, scales, CTRL1..3 and
+// INT_DUR2..MD1_CFG layout; differences handled below: no LPF2_XL_EN in
+// CTRL1_XL (bit 1 there is LPF1_BW_SEL), CTRL8/9_XL left at reset, the tap
+// engine starts at TAP_CFG (0x58) with one tap threshold for all axes, and
+// there is no ALL_INT_SRC: the same 3-byte read at 0x1A returns MASTER_CONFIG,
+// WAKE_UP_SRC (FF_IA bit 5) and TAP_SRC (SINGLE_TAP bit 5), which LIR clears
+// as they are read.
+constexpr uint8_t kLsm6ds3trcWhoAmI = 0x6A;
+enum class Lsm6Chip : uint8_t { Dsox, Ds3trc };
 constexpr uint8_t kLsm6dsoxDataBytes = 14;
 
 // CTRL1_XL: ODR_XL[7:4], FS_XL[3:2] (00 2 g, 01 16 g, 10 4 g, 11 8 g), LPF2_XL_EN[1].
@@ -161,6 +171,23 @@ constexpr uint8_t kLsm6dsoxEventBurst[9] = {
     static_cast<uint8_t>(((kLsm6dsoxFfDuration & 0x1F) << 3) | kLsm6dsoxFfThs219mg),  // FREE_FALL
     kLsm6dsoxInt1SingleTap | kLsm6dsoxInt1Ff,                    // MD1_CFG
 };
+// LSM6DS3TR-C: CTRL1_XL without bit 1, then TAP_CFG (0x58) .. MD1_CFG (0x5E).
+constexpr uint8_t kLsm6ds3RegTapCfg = 0x58;
+constexpr uint8_t kLsm6ds3CtrlBurst[3] = {(kLsm6dsoxOdr416Hz << 4) | (kLsm6dsoxFsXl4g << 2), kLsm6dsoxCtrl2G,
+                                          kLsm6dsoxCtrl3C};
+constexpr uint8_t kLsm6ds3EventBurst[7] = {
+    kLsm6dsoxInterruptsEnable | kLsm6dsoxTapXEn | kLsm6dsoxTapYEn | kLsm6dsoxTapZEn | kLsm6dsoxTapLir,  // TAP_CFG
+    kLsm6dsoxTapThreshold,                                       // TAP_THS_6D: one threshold, 6D off
+    (kLsm6dsoxTapQuiet << 2) | kLsm6dsoxTapShock,                // INT_DUR2
+    0x00,                                                        // WAKE_UP_THS: single tap only
+    static_cast<uint8_t>((kLsm6dsoxFfDuration >> 5) << 7),       // WAKE_UP_DUR: FF_DUR[5]
+    static_cast<uint8_t>(((kLsm6dsoxFfDuration & 0x1F) << 3) | kLsm6dsoxFfThs219mg),  // FREE_FALL
+    kLsm6dsoxInt1SingleTap | kLsm6dsoxInt1Ff,                    // MD1_CFG
+};
+constexpr uint8_t kLsm6ds3SrcFreefall = 0x20;   // WAKE_UP_SRC FF_IA (src[1])
+constexpr uint8_t kLsm6ds3SrcSingleTap = 0x20;  // TAP_SRC SINGLE_TAP (src[2])
+inline const char* lsm6ChipName(Lsm6Chip chip) { return chip == Lsm6Chip::Ds3trc ? "LSM6DS3TR-C" : "LSM6DSOX"; }
+
 // LIS3MDL CTRL_REG1..CTRL_REG5 as one burst: ultra-high performance on all
 // axes at 80 Hz, 4 gauss, continuous, BDU.
 constexpr uint8_t kLis3mdlCtrlBurst[5] = {
@@ -203,7 +230,8 @@ static_assert(kLsm4517Accesses * kLsm4517IoWorstMs + kLsm4517ResetWaitMs <= kLsm
 // worst case, with the accesses still to come) inside kLsm4517InitDeadlineMs.
 template <typename Io>
 inline bool lsm4517StartSequence(Io& io, uint8_t bus, uint8_t accelAddress, uint8_t magAddress,
-                                 char* why, size_t whyLen) {
+                                 char* why, size_t whyLen, Lsm6Chip* chipOut = nullptr) {
+  Lsm6Chip chip = Lsm6Chip::Dsox;
   const uint32_t start = io.nowMs();
   auto elapsed = [&]() -> uint32_t { return io.nowMs() - start; };
   // Room for `ms` plus `after` accesses at their worst case.
@@ -211,7 +239,7 @@ inline bool lsm4517StartSequence(Io& io, uint8_t bus, uint8_t accelAddress, uint
     return elapsed() + ms + after * kLsm4517IoWorstMs <= kLsm4517InitDeadlineMs;
   };
   const bool hasWhy = why && whyLen;
-  auto chipName = [&](uint8_t address) { return address == accelAddress ? "LSM6DSOX" : "LIS3MDL"; };
+  auto chipName = [&](uint8_t address) { return address == accelAddress ? lsm6ChipName(chip) : "LIS3MDL"; };
   auto busyWhy = [&](const char* what) {
     if (hasWhy) snprintf(why, whyLen, "Error: I2C bus %u stayed busy, so the Adafruit 4517 could not be started "
                          "(%s). Run 'openimu' again.", (unsigned)bus, what);
@@ -241,7 +269,7 @@ inline bool lsm4517StartSequence(Io& io, uint8_t bus, uint8_t accelAddress, uint
   };
   // The identity read is tried again only while the bus is busy: a chip that
   // does not answer is not there.
-  auto identify = [&](uint8_t address, uint8_t reg, uint8_t expected, const char* setting,
+  auto identify = [&](uint8_t address, uint8_t reg, uint8_t expected, uint8_t alsoOk, const char* setting,
                       const char* role, uint32_t after) {
     if (!fits(kLsm4517IoWorstMs, after)) return lateWhy("chip id");
     uint8_t id = 0;
@@ -258,10 +286,19 @@ inline bool lsm4517StartSequence(Io& io, uint8_t bus, uint8_t accelAddress, uint
                            (unsigned)address, (unsigned)bus, role, setting);
       return false;
     }
+    if (alsoOk && id == alsoOk) {
+      chip = Lsm6Chip::Ds3trc;
+      return true;
+    }
     if (id != expected) {
-      if (hasWhy) snprintf(why, whyLen, "Error: The device at 0x%02X on bus %u is not an %s (WHO_AM_I 0x%02X, "
-                           "expected 0x%02X). Check '%s'.", (unsigned)address, (unsigned)bus, chipName(address),
-                           (unsigned)id, (unsigned)expected, setting);
+      if (hasWhy) {
+        if (alsoOk) snprintf(why, whyLen, "Error: The device at 0x%02X on bus %u is not an LSM6DSOX or LSM6DS3TR-C "
+                             "(WHO_AM_I 0x%02X, expected 0x%02X or 0x%02X). Check '%s'.", (unsigned)address,
+                             (unsigned)bus, (unsigned)id, (unsigned)expected, (unsigned)alsoOk, setting);
+        else snprintf(why, whyLen, "Error: The device at 0x%02X on bus %u is not an %s (WHO_AM_I 0x%02X, "
+                      "expected 0x%02X). Check '%s'.", (unsigned)address, (unsigned)bus, chipName(address),
+                      (unsigned)id, (unsigned)expected, setting);
+      }
       return false;
     }
     return true;
@@ -300,9 +337,16 @@ inline bool lsm4517StartSequence(Io& io, uint8_t bus, uint8_t accelAddress, uint
     return true;
   };
 
-  if (!identify(accelAddress, kLsm6dsoxRegWhoAmI, kLsm6dsoxWhoAmI, "imuaddress", "accelerometer and gyroscope", 13))
+  if (!identify(accelAddress, kLsm6dsoxRegWhoAmI, kLsm6dsoxWhoAmI, kLsm6ds3trcWhoAmI, "imuaddress",
+                "accelerometer and gyroscope", 13))
     return false;
-  if (!identify(magAddress, kLis3mdlRegWhoAmI, kLis3mdlWhoAmI, "imumagaddress", "magnetometer", 12)) return false;
+  if (chipOut) *chipOut = chip;
+  const bool ds3 = chip == Lsm6Chip::Ds3trc;
+  if (!identify(magAddress, kLis3mdlRegWhoAmI, kLis3mdlWhoAmI, 0, "imumagaddress", "magnetometer", 12)) return false;
+  const uint8_t* ctrlBurst = ds3 ? kLsm6ds3CtrlBurst : kLsm6dsoxCtrlBurst;
+  const uint8_t eventReg = ds3 ? kLsm6ds3RegTapCfg : kLsm6dsoxRegTapCfg0;
+  const uint8_t* eventBurst = ds3 ? kLsm6ds3EventBurst : kLsm6dsoxEventBurst;
+  const uint8_t eventLen = ds3 ? sizeof(kLsm6ds3EventBurst) : sizeof(kLsm6dsoxEventBurst);
 
   const uint8_t accelReset = kLsm6dsoxCtrl3SwReset;
   const uint8_t magReset = kLis3mdlCtrl2SoftReset;
@@ -313,22 +357,21 @@ inline bool lsm4517StartSequence(Io& io, uint8_t bus, uint8_t accelAddress, uint
   if (!waitReset(accelAddress, kLsm6dsoxRegCtrl3C, kLsm6dsoxCtrl3SwReset, 9)) return false;
   if (!waitReset(magAddress, kLis3mdlRegCtrl2, kLis3mdlCtrl2SoftReset, 8)) return false;
 
-  if (!write(accelAddress, kLsm6dsoxRegCtrl1Xl, kLsm6dsoxCtrlBurst, sizeof(kLsm6dsoxCtrlBurst),
-             "accelerometer and gyroscope", 7)) return false;
-  if (!write(accelAddress, kLsm6dsoxRegCtrl8Xl, kLsm6dsoxCtrl89Burst, sizeof(kLsm6dsoxCtrl89Burst),
-             "filter and I3C off", 6)) return false;
-  if (!write(accelAddress, kLsm6dsoxRegTapCfg0, kLsm6dsoxEventBurst, sizeof(kLsm6dsoxEventBurst),
-             "tap and free fall", 5)) return false;
+  if (!write(accelAddress, kLsm6dsoxRegCtrl1Xl, ctrlBurst, 3, "accelerometer and gyroscope", 7)) return false;
+  if (!ds3 && !write(accelAddress, kLsm6dsoxRegCtrl8Xl, kLsm6dsoxCtrl89Burst, sizeof(kLsm6dsoxCtrl89Burst),
+                     "filter and I3C off", 6)) return false;
+  if (!write(accelAddress, eventReg, eventBurst, eventLen, "tap and free fall", 5)) return false;
   if (!write(magAddress, kLis3mdlRegCtrl1 | kLis3mdlAutoIncrement, kLis3mdlCtrlBurst, sizeof(kLis3mdlCtrlBurst),
              "magnetometer", 4)) return false;
 
-  if (!readBack(accelAddress, kLsm6dsoxRegCtrl1Xl, kLsm6dsoxCtrlBurst, sizeof(kLsm6dsoxCtrlBurst), 3)) return false;
+  if (!readBack(accelAddress, kLsm6dsoxRegCtrl1Xl, ctrlBurst, 3, 3)) return false;
   // CTRL8_XL (the LPF2 cut-off) and CTRL9_XL (I3C off): a lost write would
   // leave the samples unfiltered, or the chip listening for I3C.
-  if (!readBack(accelAddress, kLsm6dsoxRegCtrl8Xl, kLsm6dsoxCtrl89Burst, sizeof(kLsm6dsoxCtrl89Burst), 2)) return false;
+  if (!ds3 && !readBack(accelAddress, kLsm6dsoxRegCtrl8Xl, kLsm6dsoxCtrl89Burst, sizeof(kLsm6dsoxCtrl89Burst), 2))
+    return false;
   // The event engines' bytes (INTERRUPTS_ENABLE, LIR, the thresholds): a lost
   // write here would leave tap and free fall silently off.
-  if (!readBack(accelAddress, kLsm6dsoxRegTapCfg0, kLsm6dsoxEventBurst, sizeof(kLsm6dsoxEventBurst), 1)) return false;
+  if (!readBack(accelAddress, eventReg, eventBurst, eventLen, 1)) return false;
   return readBack(magAddress, kLis3mdlRegCtrl1 | kLis3mdlAutoIncrement, kLis3mdlCtrlBurst,
                   sizeof(kLis3mdlCtrlBurst), 0);
 }
@@ -400,6 +443,7 @@ struct Lsm4517SampleState {
   bool pendingTap = false;
   bool pendingFreefall = false;
   bool haveMag = false;
+  Lsm6Chip chip = Lsm6Chip::Dsox;  // which accelerometer chip the start found
   float lastMag[3] = {0, 0, 0};
 };
 
@@ -425,8 +469,11 @@ inline bool lsm4517ReadSample(Lsm4517SampleState& st, ReadMag&& readMag, ReadAcc
   bool srcRead = false;
   const bool accelOk = readAccel(src, data, srcRead);
   if (srcRead) {
-    st.pendingTap = st.pendingTap || (src[0] & kLsm6dsoxSrcSingleTap) != 0;
-    st.pendingFreefall = st.pendingFreefall || (src[0] & kLsm6dsoxSrcFreefall) != 0;
+    const bool ds3 = st.chip == Lsm6Chip::Ds3trc;
+    const bool tap = ds3 ? (src[2] & kLsm6ds3SrcSingleTap) != 0 : (src[0] & kLsm6dsoxSrcSingleTap) != 0;
+    const bool ff = ds3 ? (src[1] & kLsm6ds3SrcFreefall) != 0 : (src[0] & kLsm6dsoxSrcFreefall) != 0;
+    st.pendingTap = st.pendingTap || tap;
+    st.pendingFreefall = st.pendingFreefall || ff;
   }
   magFailed = !magOk;
   if (magOk) {
