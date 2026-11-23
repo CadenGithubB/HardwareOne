@@ -132,7 +132,11 @@ def stream_target_contract(read) -> list[str]:
     if "submitCommandAsync(" not in handle:
         failures.append("v4_handle_cmd no longer submits the command")
     callback = extract_block(espnow, "static void v4CmdResultCallback(")
-    resp, destroy = callback.find("ESPNOW_V4_TYPE_CMD_RESP"), callback.find("destroyStreamSession(")
+    # The result goes out through v4_send_cmd_result (ESP-NOW 1.0 step 6: a CMD_RESP
+    # sent waiting for its ACK), then the session ends.
+    resp, destroy = callback.find("v4_send_cmd_result("), callback.find("destroyStreamSession(")
+    if "ESPNOW_V4_TYPE_CMD_RESP" not in extract_block(espnow, "static void v4_send_cmd_result("):
+        failures.append("v4_send_cmd_result no longer sends a CMD_RESP")
     if not 0 <= resp < destroy:
         failures.append("v4CmdResultCallback: expected CMD_RESP, then destroyStreamSession")
     # 1.0: no empty STREAM_BEGIN / STREAM_END frames (the receiver never read

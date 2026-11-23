@@ -219,6 +219,11 @@ static std::string gRefusedDst;
 // Destinations whose frame is parked until their session opens (status
 // "queued", as the real send says it).
 static std::vector<std::string> gQueuedDst;
+// The remote-command requester table (ESP-NOW 1.0 step 6): registration only.
+static std::vector<uint32_t> gRemoteCmdBegun, gRemoteCmdCancelled, gRemoteCmdQueued;
+static void espnowRemoteCmdBegin(const uint8_t*, uint32_t reqId) { gRemoteCmdBegun.push_back(reqId); }
+static void espnowRemoteCmdCancel(const uint8_t*, uint32_t reqId) { gRemoteCmdCancelled.push_back(reqId); }
+static void espnowRemoteCmdQueued(const uint8_t*, uint32_t reqId) { gRemoteCmdQueued.push_back(reqId); }
 static bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t flags, uint32_t,
                                        const uint8_t* plaintext, uint16_t plaintextLen, uint8_t, char* status,
                                        size_t statusLen) {
