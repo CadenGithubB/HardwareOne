@@ -77,6 +77,40 @@ portrait branches compile against a landscape double of the live layout
 (`oled_landscape_stubs.py`, or the same lines inline in the harness).
 `test_oled_layout.py` also packs a 64 x 128 map raster.
 
+## IMU taps: the knock detector at 416 and 100 Hz, and the BNO055 as input
+
+`motion_knock_core_tests` (`test_motion_knock_core.cpp`) runs
+`HAL_Motion_KnockCore.h` unchanged: knocks in a 416 Hz stream (the 4517's
+FIFO), and in a 100 Hz stream as the BNO055 gives it (a single tap that dips
+under the start level for one sample while it rings is still one knock, and
+would split with the 416 Hz quiet time; a soft knock; four side taps 250 ms
+apart, all four waiting as side taps; a ring 50 ms after a tap and a tap
+200 ms after; side and face on Y, Z and X), the quiet time per rate (8 ms at
+416 Hz, 20 ms at 100 Hz), and the shared feed's parts: the pending taps (order,
+kinds, the cap), the forward-only sample clock (per read and per FIFO batch,
+across the wrap) and the feed's restart that keeps accepted taps.
+`motion_bno055_core_tests` adds the fast path's decode: the ACC_DATA / GRV_DATA
+/ TEMP addresses, 100 LSB per m/s^2, m/s^2 to mg, gravity as a direction (the
+zeros of a fusion that has not started are refused) and the full block every
+100 ms. `input_imu_core_tests` checks the decimator in front of the input's
+engine: the factor per sample period (1 at 20 ms, 2 at 10 ms), that factor 1
+passes every sample unchanged, that a tap on a held sample goes out with the
+next one with its kind, two taps in one engine period go out on two updates,
+a gap drops what waits, and that the engine fed at 100 Hz gives the same
+buttons (side 1-4, the 250 ms four-tap run, face 2 and 3, two taps 10 ms
+apart) with its sample-counted windows at their 20 ms times (the dwell, the
+shake, the calibration). `motion_knock_feed_wiring`
+(`test_motion_knock_feed_wiring.py`) checks the firmware's wiring in the
+sources: one shared feed (`HAL_Motion_KnockFeed.cpp`) with the tuning, the
+PSRAM trace and the knock API bodies, none left in the 4517 backend; the
+BNO055's one transaction per sample of ACC_DATA and GRV_DATA, the full block
+only when due, the forward-only read-time clock, taps from the queue and
+`tapsInSoftware`; `imutaptrace` registered with the detector for either
+backend and `imutapshock` for the LSM6DSOX only; and the decimator ahead of
+the engine. `test_optional_peripheral_config.py` builds IMU input with either
+backend (with the detector and its default threshold, 400 mg on the BNO055,
+1300 mg on the 4517) and refuses it without the IMU.
+
 ## OLED CLI Output and its console history
 
 `python3 components/hardwareone/test/host/test_oled_console_buffer.py` executes

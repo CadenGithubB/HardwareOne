@@ -26,6 +26,7 @@ Fifteen configurations are kept, each a board and a job:
 | | `xiao-display` | An SSD1306 display on external I2C; camera, maps and the on-board model off |
 | | `xiao-status-sign` | Meeting-room status sign: two Adafruit 4991 encoder boards lit by the LED commands; Wi-Fi, web interface and automations only |
 | FeatherS3[D] | `feathers3-status-sign` | Meeting-room status sign: two Adafruit 4991 encoder boards, an Adafruit 4517 motion sensor that is also the OLED's input (tap for buttons, tilt to move), the OLED, a DS3231 clock, battery gauge and u.FL antenna; Wi-Fi, web interface with the Sensors page, and automations |
+| FeatherS3[D], encrypted | `feathers3-pod` | Handheld pod: a BNO055 motion sensor that is also the OLED's input (tap for buttons, tilt to move), the SSD1306 OLED and a LiPo on the board gauge |
 | QT Py ESP32 | `qtpy-sensors` | Sensor node: GPS, distance and presence sensors with a gamepad |
 | | `qtpy-oled` | Sensor node with an SSD1306 display and a gesture sensor |
 | | `qtpy-espnow` | The OLED sensor node plus the ESP-NOW mesh |
@@ -151,10 +152,14 @@ OLED and the Power page left on, and adds:
   for tilt, flip and tap. Its yaw counts from the IMU's start: there is no compass heading until
   the magnetometer calibration lands;
 - that motion sensor as the OLED's input device (`INPUT_DEVICE_TYPE 5`), the sign's only one:
-  one tap on the sign is A, two are B, three are Y, four are X, a shake is START, and tilting
-  the sign left, right, up or down moves through the menus and the on-screen keyboard like a
-  joystick. Five taps (or `imuinputzero`) take the sign's present pose as the centre, for when
-  it is stood or hung another way. `imuinputread` shows what it makes of the motion; the
+  taps on the sign's side are A (one), B (two), Y (three) and X (four); taps on its face are
+  START (two) and SELECT (three); tilting the sign left, right, up or down moves through the
+  menus and the on-screen keyboard like a joystick. A sustained shake calibrates the tilt: set
+  the sign down the way it will be used and hold it still for 3 s, and that pose is the centre
+  (`imuinputzero` takes the present pose at once). The firmware finds the taps in the
+  accelerometer's 416 Hz stream; `imutaptrace` shows every knock and why it did or did not count
+  (bench defaults: `imutapthreshold 1300`, `imutapmaxms 120`, `imutapringms 80`, side axis Y at
+  60 %). `imuinputread` shows what it makes of the motion; the
   directions are fitted to how the sensor sits against the screen with `imuinputmount
   0|90|180|270 [mirror]`, or taught with `imuinputlearn` (tilt the sign toward the top of the
   screen; also offered after a shake calibration). `oledrotation 90` (or 270) stands the
@@ -213,6 +218,20 @@ returns: with it the sign's input stops until `openinput` is run again). With po
 `wifiexternalantenna` (FeatherS3[D] only, reboot required) drives GPIO41 high at boot, which turns
 the board's RF switch to the u.FL connector; off, the pin is left alone and the switch's pull-down
 keeps the on-board antenna.
+
+`feathers3-pod` is the owner's handheld pod: an Unexpected Maker FeatherS3[D] with flash
+encryption (board `feathers3_fe`: never flash it to a board that is not meant to be encrypted), a
+BNO055 motion sensor (`IMU_DEVICE_TYPE 1`), the SSD1306 OLED and a LiPo on the board's fuel gauge.
+The BNO055 is also its input device (`INPUT_DEVICE_TYPE 5`), with the sign's gestures: side taps
+A, B, Y, X (one to four), face taps START (two) and SELECT (three), tilt as the joystick, a shake
+to calibrate the tilt. In this build the BNO055 is read every 10 ms (the accelerometer and the
+fusion's gravity; the rest of the reading every 100 ms) and the firmware finds the taps in those
+readings. The chip filters its accelerometer at 62.5 Hz, so knocks read about a third as strong
+as on the sign: the default threshold is 400 mg, a starting point to tune on the pod with
+`imutaptrace` (tap it, read the peaks, then `imutapthreshold`). Which way a side knock hits
+depends on how the BNO055 sits in the pod: `imutapsideaxis` and `imutapsideratio` (defaults Y,
+60 %) fit it, and `imutaptrace` shows each knock's x/y/z. To start it with every boot:
+`imuautostart on` and `inputautostart on`.
 
 `qtpy-sensors` targets the **Adafruit QT Py ESP32 Pico** (classic ESP32). It
 enables VL53L4CX ToF, the Seesaw gamepad, STHS34PF80 presence and PA1010D GPS,

@@ -36,6 +36,27 @@ Built and host-tested; not yet run on a device.
 - The Map draws its raster at every rotation (it used to be copied unturned, upside down on a
   flipped screen), and `oleddump` dumps the screen as it is seen (64 columns in portrait).
 
+### Added (IMU input with the BNO055)
+Host-tested and built (`feathers3-pod`); not yet run on the pod.
+- **The BNO055 can be the input device** (`INPUT_DEVICE_TYPE 5`, taps and tilt), which the build
+  used to refuse. In a build with IMU input the BNO055 is read every 10 ms (its fusion rate), each
+  read the accelerometer (`ACC_DATA`) and the fusion's gravity (`GRV_DATA`), 12 bytes in one short
+  transaction, with the rest of the reading every 100 ms; the firmware's knock detector finds the
+  taps in that stream, as it does in the Adafruit 4517's 416 Hz stream, side and face included.
+  Without IMU input a BNO055 build reads the chip every `imudevicepollms` as before.
+- `imutapthreshold`, `imutapmaxms`, `imutapringms`, `imutapsideaxis`, `imutapsideratio` and
+  `imutaptrace` exist in those BNO055 builds too (`imutapshock` and `imutapquiet` stay with the
+  4517's LSM6DSOX). The BNO055's default threshold is 400 mg (the 4517's stays 1300 mg): its
+  accelerometer is filtered at 62.5 Hz, so a knock reads about a third as strong. `imustatus`
+  says "taps found by the firmware in the 100 Hz readings".
+- `imutaptrace json` adds `sampleHz` (416 or 100); on the BNO055 `feed` counts one read per
+  sample (`unread` and `pattern` stay 0, they are the 4517's FIFO status).
+- The knock detector ends a knock after at least two quiet samples, so a 100 Hz knock that dips
+  under the start level for one sample while it rings is not split in two (unchanged at 416 Hz).
+- The IMU input's tap and tilt rules count some windows in samples (the shake, the dwell, the
+  centre); a 10 ms feed reaches them every second sample, each tap carried to the next one.
+- `feathers3-pod` builds the BNO055 as its input device.
+
 ### Changed (input device mounts)
 - **`imuinputmount 0|90|180|270 [mirror]`** and **`anomount 0|90|180|270 [mirror]`** say how the
   input device sits against the screen; they are applied before the screen's rotation, so turning

@@ -40,7 +40,7 @@ Feature flags are declared, with their defaults, in `components/hardwareone/Syst
 | `NETWORK_FEATURE_LEVEL` | How much of the network stack is compiled: `0`=disabled, `1`=WiFi only, `2`=WiFi+HTTP, `3`=WiFi+HTTP+ESP-NOW, `4`=custom |
 | `WEB_FEATURE_LEVEL` | How much of the web UI is compiled: `0`=disabled, `1`=core UI, `2`=standard modules, `3`=all modules, `4`=custom |
 | `DISPLAY_TYPE` | Which panel driver is compiled: `0`=none, `1`=SSD1306 OLED, `2`=generic ST7789 TFT, `3`=generic ILI9341 TFT, `4`=ST7789 240×240 LCD of the ESP32-P4X-EYE, `5`=HX8394 720×1280 DSI panel of the Waveshare ESP32-P4 Touch LCD 5. `4` and `5` are set by those boards' feature files. SSD1306 is the tested path for the other boards; `2` and `3` are example branches without board wiring, and a saved configuration that selects them is refused at compile time |
-| `INPUT_DEVICE_TYPE` | Which physical input controller is compiled, mutually exclusive: `0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder, `3`=GPIO wheel and buttons (ESP32-P4X-EYE), `4`=GT911 touch panel (Waveshare ESP32-P4 Touch LCD 5). `3` and `4` are set by those boards' feature files |
+| `INPUT_DEVICE_TYPE` | Which physical input controller is compiled, mutually exclusive: `0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder, `3`=GPIO wheel and buttons (ESP32-P4X-EYE), `4`=GT911 touch panel (Waveshare ESP32-P4 Touch LCD 5), `5`=the motion sensor (taps are buttons, tilt is the joystick; needs the IMU, either chip). `3` and `4` are set by those boards' feature files |
 | `ENABLE_HTTPS` | Set to `1` for TLS on the web server; certs in `/system/certs/`. Runtime toggle: `httpsenabled` |
 | `ENABLE_MAPS` | Set to `1` to build offline maps and waypoints |
 | `ENABLE_GAMES` | Set to `1` with `ENABLE_WEB_GAME_DARKROOM=1` to build A Dark Room and its browser launcher |
@@ -69,7 +69,7 @@ When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABL
 | ---- | ------ |
 | `CUSTOM_ENABLE_OLED` | SSD1306 OLED display |
 | `CUSTOM_ENABLE_GAMEPAD` | Seesaw gamepad |
-| `CUSTOM_ENABLE_IMU` | IMU (motion sensor); `IMU_DEVICE_TYPE` picks the chip: 1 = BNO055 (default), 2 = Adafruit 4517 (LSM6DSOX + LIS3MDL; tilt, flip and tap, yaw relative to the start until the magnetometer calibration lands) |
+| `CUSTOM_ENABLE_IMU` | IMU (motion sensor); `IMU_DEVICE_TYPE` picks the chip: 1 = BNO055 (default), 2 = Adafruit 4517 (LSM6DSOX + LIS3MDL; tilt, flip and tap, yaw relative to the start until the magnetometer calibration lands). Either can be the input device (`INPUT_DEVICE_TYPE 5`: taps and tilt) |
 | `CUSTOM_ENABLE_TOF` | VL53L4CX Time-of-Flight |
 | `CUSTOM_ENABLE_THERMAL` | MLX90640 thermal camera |
 | `CUSTOM_ENABLE_APDS` | APDS9960 gesture/proximity/light |
@@ -2588,6 +2588,16 @@ imuaddress [addr]               - IMU address; next openimu (BNO055: 0x28, 0x29 
                                   high; Adafruit 4517 LSM6DSOX: 0x6A, 0x6B with SA0 high)
 imumagaddress [0x1C|0x1E]       - Adafruit 4517 builds: the LIS3MDL magnetometer's address
 imubus <0|1>                    - The bus the IMU is on (both 4517 chips are checked)
+imutapthreshold [50-4000]       - Tap threshold in mg (default 1300 on the 4517, 400 on the
+                                  BNO055); lower catches softer taps
+imutapmaxms [5-500]             - Longest a tap may last (default 120 ms; longer is handling)
+imutapringms [0-500]            - A knock this soon after a tap is its ringing (default 80 ms)
+imutapsideaxis [x|y|z]          - The axis a side tap hits along (default y)
+imutapsideratio [10-1000]       - Side tap: that axis is at least this % of the largest other
+imutaptrace [json|clear]        - Every recent knock: how hard, how long, why it did or did
+                                  not count, with a tuning hint per kind of miss
+imutapshock [0-3]               - Adafruit 4517 with an LSM6DSOX: its chip's tap engine
+imutapquiet [0-3]                 (shock and quiet windows)
 imuewmafactor <0.0-1.0>         - EWMA smoothing factor
 imutransitionms <0-1000>        - Transition time
 imuwebmaxfps <1-30>             - Web UI max frame rate
@@ -2603,6 +2613,19 @@ chips down. The magnetometer is read (`mag` in
 `imuread json`) but not calibrated yet, so yaw counts from the start and drifts slowly (`imuread`
 says "Yaw (relative)"); pitch and roll are absolute. Pitch is positive when the board's +X end
 rises, roll when its +Y edge rises, and yaw grows clockwise seen from above.
+
+Taps found by the firmware: the 4517's LSM6DS3TR-C streams its accelerometer at 416 Hz to a
+software knock detector, and in a build with the IMU as the input device (`INPUT_DEVICE_TYPE 5`)
+the BNO055 is read every 10 ms (its fusion rate) for the same detector: each read is the
+accelerometer and the fusion's gravity (12 bytes), with the rest of the reading (orientation,
+heading, gyroscope, magnetometer, calibration) every 100 ms. A BNO055 build without IMU input is
+read every `imudevicepollms` as before, with no tap detection of its own. The BNO055 filters its
+accelerometer at 62.5 Hz, so a knock reads about a third as strong as on the 4517: its default
+threshold is 400 mg against the 4517's 1300 mg. To tune it, tap the device the way it will be used
+and run `imutaptrace`: each knock is listed with its peak, length and verdict (`tap`, `soft` under
+the threshold, `long` over `imutapmaxms`, `ring` inside `imutapringms`), and a hint names the
+setting that would have counted the missed ones. `imustatus` says where taps come from ("taps
+found by the firmware in the 416 Hz readings", or 100 Hz on the BNO055).
 
 Every surface marks such a yaw: the OLED IMU page shows `Yrel:` and no heading line, the web card
 "Yaw (relative)", the G2 lens leaves yaw out of its row and writes `rel` in its readout, and
@@ -2746,6 +2769,14 @@ The address is the A0-A2 jumpers' (0x49..0x50, hex or decimal); an address or a 
 device of this build uses there is refused (`anoencoderi2caddr`, `inputbus` and the open), and
 `anoencoderread` answers an error until the encoder is open (`openinput`, or `inputautostart on`
 for every boot, with or without the OLED).
+
+The motion sensor as the input device (`INPUT_DEVICE_TYPE 5`, with either IMU chip): side taps
+are A (1), B (2), Y (3) and X (4); face taps are START (2) and SELECT (3); tilting from the centre
+pose is the joystick, and a sustained shake calibrates the tilt (set the device down and hold it
+still for 3 s). `imuinputread [json]` shows what it makes of the motion, `imuinputtapms`,
+`imuinputtilt`, `imuinputmount` and `imuinputlearn` tune it, and `imutaptrace` (under imu) shows
+every knock. On the BNO055 the input reads the chip every 10 ms; the tap and tilt rules see a
+sample every 20 ms on both chips, and every tap reaches them.
 
 > `opengamepad`, `closegamepad`, and `gamepadautostart` no longer exist - they
 > were replaced by the device-agnostic `openinput` / `closeinput` /
