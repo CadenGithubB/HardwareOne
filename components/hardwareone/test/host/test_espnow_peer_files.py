@@ -22,9 +22,12 @@ manifest reference, the bond sync's cache lookup and the reply line from
 System_ESPNow.cpp, the cache path
 helpers from System_Utils.h, run on the shared in-memory filesystem
 (fake_vfs.h) by espnow_peer_files_harness.cpp. Source checks (counted with the
-harness's): cmd_espnow_unpair reads the reference before the folder goes and
-drops the manifest after, and puts the line in its reply; cmd_espnow_forget
-removes neither; the bond sync records the reference for a manifest that reached
+harness's): the unpair teardown (espnowUnpairTeardown, shared by espnowunpair
+and espnowrevoke) reads the reference before the folder goes and drops the
+manifest after, saves the registry before it deletes the identity (write
+order), clears every other store (pins, sensor leases, pairing state, slots),
+and cmd_espnow_unpair puts the line in its reply; espnowforget is gone;
+espnowrevoke writes the revoked list before the teardown; the bond sync records the reference for a manifest that reached
 the cache and looks cached manifests up only through manifestCacheHit, which
 records one it finds; the unpair reply's identity flag comes from what
 peerIdentityForget removed; an unpair of the bond partner (the partner setting
@@ -125,42 +128,91 @@ def main():
 
     # Source checks: the order inside the command, which a host build cannot run.
     source_failures = []
-    unpair = body(espnow, 'const char* cmd_espnow_unpair(', 'System_ESPNow.cpp')
-    forget = body(espnow, 'const char* cmd_espnow_forget(', 'System_ESPNow.cpp')
+    command = body(espnow, 'const char* cmd_espnow_unpair(', 'System_ESPNow.cpp')
+    # The steps live in the teardown that espnowunpair and espnowrevoke share.
+    unpair = body(espnow, 'static bool espnowUnpairTeardown(', 'System_ESPNow.cpp')
+    pins = body(espnow, 'static bool espnowUnpairClearPins(', 'System_ESPNow.cpp')
+    pairing = body(espnow, 'static void espnowUnpairClearPairing(', 'System_ESPNow.cpp')
+    revoke = body(espnow, 'const char* cmd_espnow_revoke(', 'System_ESPNow.cpp')
+    tidy = body(espnow, 'static void espnowRevokedBootTidy() ', 'System_ESPNow.cpp')
+    init = body(espnow, 'bool initEspNow(', 'System_ESPNow.cpp')
+    rollback_queue = body(espnow, 'void espnowPairRollbackRevoked(', 'System_ESPNow.cpp')
+    rollback_job = body(espnow, 'static void runDeferredPairRollback(', 'System_ESPNow.cpp')
+    pair_request = body(espnow, 'static void v4h_pair_request(', 'System_ESPNow.cpp')
     manifest_resp = body(espnow, 'static void processBondModeManifestResp(', 'System_ESPNow.cpp')
     forget_crypto = body(espnow, 'static bool espnowForgetPeerCrypto(', 'System_ESPNow.cpp')
 
     def at(text, needle):
         return text.find(needle)
 
+    # Every store the unpair teardown clears (1.0 design 5.1, "The unpair
+    # teardown is completed"), by the call that clears it.
+    stores = ('bondEndPartnership();', 'espnowDeletePeerRuntime(mac)', 'removeEspNowDevice(mac);',
+              'saveEspNowDevices()', 'espnowKeyExCancel(mac);', 'pendingFrameDropForPeer(mac);',
+              'espnowUnpairClearPairing(mac);', 'espnowUnpairClearPins(mac, peerIdentityFindByMac(mac))',
+              'espnowSensorLeasesDropFor(mac)', 'espnowForgetPeerCrypto(mac, &out.hadIdentity)',
+              'manifestRefRead(mac,', 'peerFilesRemove(mac,', 'manifestDropIfUnused(', 'meshPeerSlotsRelease(mac);')
+    missing = [c for c in stores if c not in unpair]
+    pin_parts = ('gSettings.espnowMasterFingerprint, String("")', 'gSettings.espnowBackupMasterFingerprint, String("")',
+                 'gSettings.meshMasterMac, String("")', 'gChFollowMasterRank = 0;', 'gChFollowBackupResolved = false;')
+    pairing_parts = ('removeFromUnpairedList(mac);', 'gPair.in = espnowpair::Request{};',
+                     'gPair.out = espnowpair::Request{};', 'pairingWindowCloseFor(mac);')
+
     checks = (
         (0 <= at(unpair, 'espnowForgetPeerCrypto(mac') < at(unpair, 'manifestRefRead(mac,') and
          0 <= at(unpair, 'manifestRefRead(mac,') < at(unpair, 'peerFilesRemove(mac,') < at(unpair, 'manifestDropIfUnused('),
-         'cmd_espnow_unpair forgets the identity, reads the manifest reference, removes the peer folder, '
+         'the unpair teardown forgets the identity, reads the manifest reference, removes the peer folder, '
          'then drops the manifest'),
-        (at(unpair, 'formatUnpairFilesLine(') >= 0 and unpair.count(', filesLine') == 3,
+        (at(unpair, 'formatUnpairFilesLine(') >= 0 and command.count('out.filesLine') == 3,
          'every reply of cmd_espnow_unpair after the removal carries the line about the files'),
-        (at(forget, 'peerFilesRemove(') < 0 and at(forget, 'manifestDropIfUnused(') < 0,
-         'cmd_espnow_forget keeps the cached files'),
+        ('const char* cmd_espnow_forget(' not in espnow,
+         'espnowforget is gone (ESP-NOW 1.0 step 3): espnowunpair and the boot identity check cover it'),
+        (0 <= at(unpair, 'saveEspNowDevices()') < at(unpair, 'espnowForgetPeerCrypto(mac') and
+         at(unpair, 'removeEspNowDevice(mac);') < at(unpair, 'saveEspNowDevices()'),
+         'write order: the registry is saved before the identity is deleted'),
+        (not missing, 'the unpair teardown clears every store (missing: ' + ', '.join(missing) + ')'),
+        (all(p in pins for p in pin_parts) and at(unpair, 'espnowUnpairClearPins(') < at(unpair, 'espnowForgetPeerCrypto(mac'),
+         'the teardown clears the master and backup pins, meshMasterMac and the channel-follow master '
+         'while the identity still holds the key'),
+        (all(p in pairing for p in pairing_parts),
+         'the teardown clears the candidate list, a pending pair request either way and the re-key window'),
+        (0 <= at(revoke, 'espnowRevokedAdd(') < at(revoke, 'espnowUnpairTeardown(mac, out'),
+         'espnowrevoke writes the revoked list before any teardown'),
+        # Review 2026-11-23, findings 2, 4, 5, 6, 8.
+        (revoke.count('espnowUnpairTeardown(mac, out, /*revoking=*/true') == 3 and
+         '/*radioUp=*/false' in revoke,
+         'review 2: espnowrevoke retries a failed teardown, then tears down without the radio peer'),
+        (0 <= at(init, 'loadEspNowDevices();') < at(init, 'espnowRevokedBootTidy();') < at(init, 'restoreEspNowPeers();')
+         and 'espnowRevokedMacOrKey(' in tidy and '/*radioUp=*/false' in tidy and 'peerIdentityAt(' in tidy,
+         'review 2: at start-up a revoked device still listed or stored is torn down before the radio peers return'),
+        (0 <= at(unpair, 'out.keptIdentity = true;') < at(unpair, 'espnowForgetPeerCrypto(mac') and
+         '!out.devicesOk && !revoking' in unpair,
+         'review 5: an unpair whose registry save failed keeps the identity and folder'),
+        ('espnowrevoke::isUnicastMac(mac)' in revoke and 'espnowrevoke::isUnicastMac(mac)' in command,
+         'review 6: revoke and the unpair raw-MAC path refuse broadcast, group and all-zero addresses'),
+        ('espnowrevoke::firstKeyOpen(dev->awaitingKeyUntilMs' in rollback_queue and
+         'espnowrevoke::firstKeyOpen(dev->awaitingKeyUntilMs' in rollback_job,
+         'review 4: a rollback needs the open first-key window when queued and again in the job'),
+        (0 <= at(pair_request, 'espnowRevokedLocked()') < at(pair_request, 'espnowpair::onRequest('),
+         'review 8: a pair request is refused without a prompt while the revoked list is locked'),
         (re.search(r'cacheManifestToLittleFs\([^;]*\)\)\s*\{\s*manifestCacheRecordUse\(srcMac,', manifest_resp)
          is not None,
          'the bond sync records the manifest reference only after the manifest reached the cache'),
         (espnow.count('manifestCacheHit(peerMac, gEspNow->lastRemoteCap.fwHash)') == 1 and
          espnow.count('manifestCachedFor(') == 2,
          'the bond sync looks the cached manifest up through manifestCacheHit, which records it for the partner'),
-        (re.search(r'espnowForgetPeerCrypto\(mac, &hadIdentity\)', unpair) is not None and
+        (re.search(r'espnowForgetPeerCrypto\(mac, &out\.hadIdentity\)', unpair) is not None and
          re.search(r'=\s*peerIdentityForget\(mac\);[^}]*\*removedAny = had \|\| forgot;', forget_crypto) is not None,
          'the unpair reply reports an identity file removed outside the cache as a removed identity'),
         (re.search(r'parseMacAddress\(gSettings\.bondPeerMac, bondPartner\) && macEquals\(bondPartner, mac\)\)'
                    r'\s*\{[^}]*bondEndPartnership\(\);', unpair) is not None and
          0 <= at(unpair, 'bondEndPartnership();') < at(unpair, 'espnowDeletePeerRuntime(mac)') and
          'isBondPeerMac(' not in unpair,
-         'cmd_espnow_unpair ends the bond first when the partner setting names the device'),
+         'the unpair teardown ends the bond first when the partner setting names the device'),
         (0 <= at(unpair, 'espnowKeyExCancel(mac);') < at(unpair, 'espnowForgetPeerCrypto(mac') and
-         0 <= at(unpair, 'pendingFrameDropForPeer(mac);') < at(unpair, 'espnowForgetPeerCrypto(mac') and
-         at(forget, 'espnowKeyExCancel(') < 0,
-         'cmd_espnow_unpair calls off its key exchange with the peer and the frames queued for it before the '
-         'identity goes (espnowforget does not: the next key exchange is wanted there)'),
+         0 <= at(unpair, 'pendingFrameDropForPeer(mac);') < at(unpair, 'espnowForgetPeerCrypto(mac'),
+         'the unpair teardown calls off its key exchange with the peer and the frames queued for it before the '
+         'identity goes'),
     )
     for ok, what in checks:
         if not ok:

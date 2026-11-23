@@ -118,6 +118,10 @@ static constexpr uint16_t ESPNOW_V4_FLAG_ACK_REQ = 0x0001;
 static uint8_t gSelf[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x09};      // higher: initiator
 static const uint8_t kPartner[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x01};
 static void espnowSelfStaMac(uint8_t out[6]) { std::memcpy(out, gSelf, 6); }
+// Rule A (1.0): a key exchange is started only with a registry entry; every
+// peer these cases name is paired, none is revoked.
+static bool espnowIsRegistryPeer(const uint8_t*) { return true; }
+static bool espnowRevokedMac(const uint8_t*) { return false; }
 static bool sessionIsASide(const uint8_t me[6], const uint8_t peer[6]) { return std::memcmp(me, peer, 6) < 0; }
 
 // Identities (KEY_EX done) and session slots.

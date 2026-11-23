@@ -593,7 +593,7 @@ static void testDeleteFreesTheSlot() {
   gPeers[6] = PeerIdentity{{2, 0, 0, 0, 0, 9}, 0, true};  // another mesh: not counted
   int persistsBefore = gPersists;
   r = meshesCmd_delete(String("work"));
-  CHECK(isError(r) && has(r, "2 with stored keys") && has(r, "espnowunpair") && has(r, "espnowforget"),
+  CHECK(isError(r) && has(r, "2 with stored keys") && has(r, "espnowunpair <name_or_mac>") && has(r, "'espnowunpair <mac>' too"),
         "D2 delete with stored identities: %s", r);
   CHECK(slotOf("work") == slotW && gSettings.meshes[slotW].enabled && gPersists == persistsBefore,
         "D2 a refused delete changed or persisted something");
@@ -601,8 +601,8 @@ static void testDeleteFreesTheSlot() {
   gPeers[3].valid = false;
   CHECK(!isError(meshesCmd_delete(String("work"))), "D2 delete after unpairing");
 
-  // D2b: a registry device with no stored identity (plain 'espnowpair', a key
-  // exchange that never finished, or 'espnowforget') also holds the slot.
+  // D2b: a registry device with no stored identity (a key exchange that never
+  // finished) also holds the slot.
   resetAll();
   CHECK(!isError(meshesCmd_add(String("lab"))), "D2b setup");
   addRegistryDevice(0x21, (uint8_t)slotOf("lab"));

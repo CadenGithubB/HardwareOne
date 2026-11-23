@@ -13,7 +13,12 @@ espNowCommands[] and, for each row it judges, the handler's own body.
   `bondtestsensor`, unencrypted `espnowpair`, and the heartbeat mode
   (`espnowhbmode`, `espnowheartbeatbroadcast` and the setting
   meshHeartbeatBroadcast, which nothing read): no row, no handler and no
-  setting field remain.
+  setting field remain. Step 3 (revocation) removed `espnowforget`
+  (espnowunpair and the boot identity check cover it).
+- The revocation commands (ESP-NOW 1.0 step 3): `espnowrevoke` and
+  `espnowunrevoke` are super admin (a revoke is destructive, an unrevoke lets
+  a refused device pair again), `espnowrevoked` is admin (read-only), and
+  `espnowunpair` stays super admin.
 
 Not covered: the general rule for the other open rows that save a setting or
 transmit (an owner decision), and whether the executor enforces the flag
@@ -50,7 +55,16 @@ REMOVED_COMMANDS = {
     "testcleanup": "cmd_test_cleanup", "testfilelock": "cmd_test_filelock",
     "bondtestsensor": "cmd_bond_testsensor", "espnowpair": "cmd_espnow_pair",
     "espnowhbmode": "cmd_espnow_hbmode", "espnowheartbeatbroadcast": "cmd_espnow_heartbeatbroadcast",
+    "espnowforget": "cmd_espnow_forget",
 }
+# Command -> (admin, super admin) the revocation rows must have.
+REVOCATION_ROWS = {
+    "espnowunpair": (True, True),
+    "espnowrevoke": (True, True),
+    "espnowunrevoke": (True, True),
+    "espnowrevoked": (True, False),
+}
+SUPER_ROW = re.compile(r'^\s*\{\s*"(?P<name>[A-Za-z0-9_]+)",.*?/\*requiresSuperAdmin=\*/true\s*\},?\s*$', re.M)
 REMOVED_FIELD = "meshHeartbeatBroadcast"
 
 
@@ -99,6 +113,14 @@ def main() -> int:
     for name, handler in sorted(REMOVED_COMMANDS.items()):
         check(f"{name} has no row", name not in rows)
         check(f"{handler} is gone", re.search(r"\b" + handler + r"\b", source + header) is None)
+    supers = {m["name"] for m in SUPER_ROW.finditer(table)}
+    for name, (admin, superAdmin) in sorted(REVOCATION_ROWS.items()):
+        row = rows.get(name)
+        check(f"{name} has a row", row is not None)
+        if row is None:
+            continue
+        check(f"{name} is {'admin' if admin else 'open'}", (row["admin"] == "true") == admin)
+        check(f"{name} is {'' if superAdmin else 'not '}super admin", (name in supers) == superAdmin)
     settings = (args.component / "System_Settings.h").read_text()
     check("the heartbeat mode setting is gone",
           REMOVED_FIELD not in source and REMOVED_FIELD not in settings and '"heartbeatBroadcast"' not in source)

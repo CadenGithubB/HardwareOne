@@ -5,6 +5,7 @@
 
 #if ENABLE_ESPNOW
 
+#include "System_ESPNow_Revoked.h"   // espnowRevokedMac: no route to or through a revoked device
 #include "System_ESPNow.h"   // gMeshPeers, getMeshPeerHealth, isSelfMac, MESH_PEER_TIMEOUT_MS
 #include "System_Debug.h"
 #include <esp_now.h>
@@ -207,6 +208,7 @@ void meshRouterIngestAdvert(const uint8_t* fromMac, int8_t linkMetric,
   // USE them as a next hop if the radio can address them. Anything else is a
   // route we would install and never be able to send over.
   if (!esp_now_is_peer_exist(fromMac)) return;
+  if (espnowRevokedMac(fromMac)) return;   // also dropped at receive gate 1
 
   const uint32_t nowMs = (uint32_t)millis();
   gMetrics.advertsReceived++;
@@ -219,6 +221,7 @@ void meshRouterIngestAdvert(const uint8_t* fromMac, int8_t linkMetric,
     if (isSelfMac(e.mac)) continue;                    // our own address, learned back
     if (memcmp(e.mac, fromMac, 6) == 0) continue;      // advertiser listing itself
     if (e.hops == 0) continue;                         // malformed
+    if (espnowRevokedMac(e.mac)) continue;             // no route to a revoked device
     const uint8_t newHops = (uint8_t)(e.hops + 1);
     if (newHops > MESH_ROUTE_MAX_HOPS) continue;       // count-to-infinity backstop
 

@@ -200,6 +200,10 @@ void espnowApplySensorSubscription(uint8_t mode, uint32_t sensorMask,
                                    uint32_t intervalMs, uint32_t leaseMs,
                                    const uint8_t* controllerMac);
 
+// Unpair / revoke: the sensor leases `mac` holds as controller end now
+// (no SENSOR_STATUS is sent to it). True when it was the controller. cmd_exec.
+bool espnowSensorLeasesDropFor(const uint8_t mac[6]);
+
 // Before that apply (block 9f3): a subscribe or one-shot keeps only the
 // sensors this device has running (what its SENSOR_STATUS lists,
 // espnowsensor::sensorReqSplit). The others are counted per sensor

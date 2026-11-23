@@ -1,7 +1,6 @@
 // The checked number parsers for command arguments (System_ArgParse.h).
 // Numbers are decimal and the whole token has to be the number. Only a bus
-// address (parseAddressArg) and a bit mask (parseMaskArg) may also be written
-// as 0x and hexadecimal digits.
+// address (parseAddressArg) may also be written as 0x and hexadecimal digits.
 #include "System_ArgParse.h"
 
 #include <cassert>
@@ -59,24 +58,6 @@ int main() {
     assert(address == 1);
   }
   assert(!parseAddressArg(std::string("0x5A\0x", 6), 1, 127, address));
-
-  // A 32-bit bit mask: decimal or hexadecimal, 0 to 0xFFFFFFFF.
-  uint32_t mask = 7;
-  assert(parseMaskArg("0x05", mask) && mask == 0x05);
-  assert(parseMaskArg("0XffFFffFF", mask) && mask == 0xFFFFFFFFu);
-  assert(parseMaskArg("4294967295", mask) && mask == 0xFFFFFFFFu);
-  assert(parseMaskArg("0", mask) && mask == 0);
-  assert(parseMaskArg("0x0", mask) && mask == 0);
-  assert(parseMaskArg(" 18 ", mask) && mask == 18);
-  assert(parseMaskArg(std::string(" 0x7F "), mask) && mask == 0x7F);
-  for (const char* text : {"", " ", "0x", "0xZZ", "5A", "ff", "all", "-1", "-0x1", "4294967296",
-                           "0x100000000", "0x05 junk", "0x0.5", "1e3", "0b101"}) {
-    mask = 3;
-    assert(!parseMaskArg(text, mask));
-    assert(mask == 3);
-  }
-  assert(!parseMaskArg(static_cast<const char*>(nullptr), mask));
-  assert(!parseMaskArg(std::string("0x05\0x", 6), mask) && mask == 3);
 
   // A decimal number: sign, digits, at most one decimal point.
   float f = -7.0f;

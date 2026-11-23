@@ -17,6 +17,16 @@ called off (espnowKeyExCancel) stores nothing, so the unpaired peer's identity
 does not come back (finding X4, round 3); a new key exchange after the unpair
 is answered and stored again.
 
+Rule A and the revoked list (ESP-NOW 1.0 step 3, cases K14-K19): a HELLO or
+REPLY from a MAC with no registry entry stores nothing and is answered
+KEY_EX_CONFIRM status 3 through a radio peer that is added, used and deleted
+(none is left); a revoked key is refused under any MAC and a revoked MAC with
+any key, with no answer at all, and a pairsecure entry waiting for that key is
+rolled back; a registry entry stores its first key only inside its first-key
+window, and the keyId is logged when it binds; a locked (unreadable) revoked
+list refuses new keys. The rule is the production espnowrevoke::admit
+(System_ESPNow_RevokedCore.h); its inputs are doubles.
+
 Compiled: v4hKeyExHello with its HMAC check, rate limit and CONFIRM builder
 from System_ESPNow_Handlers_Crypto.cpp, and the peer cache with
 peerIdentityPersist from System_ESPNow_Identity.cpp, spliced into
@@ -129,6 +139,11 @@ def build_keyex(crypto):
                        'gKeyExHelloSeen'),
                   one(crypto, 'bool keyExHelloAdmit(', name)]
     parts.append(one(crypto, 'static void sendKeyExConfirm(', name))
+    # Rule A and the revoked list (1.0 step 3), where the tree has them.
+    for marker in ('static void sendKeyExNotAccepted(', 'static void keyExRevokedDrop(',
+                   'static void logKeyBound('):
+        if marker in crypto:
+            parts.append(one(crypto, marker, name))
     parts.append(one(crypto, 'void v4hKeyExHello(const V4RxCtx& ctx)', name))
     # The in-flight table the REPLY handler reads, then the handler.
     parts += [line(crypto, r'^constexpr uint8_t\s+kKeyExInFlightSlots\s*=.*;', 'kKeyExInFlightSlots'),
@@ -142,6 +157,12 @@ def build_keyex(crypto):
                   one(crypto, 'void espnowKeyExCancel(const uint8_t peerMac[6])', name),
                   one(crypto, 'static bool keyExCancelled(const uint8_t peerMac[6]) ', name)]
     parts.append(one(crypto, 'void v4hKeyExReply(const V4RxCtx& ctx)', name))
+    # The CONFIRM handler (review finding 3), where it keeps the retries of a
+    # key exchange with a peer whose key is not stored.
+    if 'still retrying' in crypto:
+        parts += ['#define HW1_HAS_CONFIRM_KEEPS_RETRY 1',
+                  one(crypto, 'bool keyExIsInFlight(const uint8_t peerMac[6])', name),
+                  one(crypto, 'void v4hKeyExConfirm(const V4RxCtx& ctx)', name)]
     return '\n\n'.join(parts)
 
 
@@ -178,7 +199,10 @@ def main():
         unit.write_text(harness)
         # The pasted slices carry helpers and parameters this harness does not
         # use (the firmware builds without -Wextra).
+        (unit.parent / 'System_ESPNow_RevokedCore.h').write_text(
+            (HERE.parents[1] / 'System_ESPNow_RevokedCore.h').read_text())
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic',
+               '-isystem', str(HERE.parents[2] / 'hardwareone_libs' / 'ArduinoJson' / 'src'),
                '-Wno-unused-const-variable', '-Wno-unused-function', '-Wno-unused-parameter',
                str(unit), '-o', str(exe)]
         if a.sanitize:

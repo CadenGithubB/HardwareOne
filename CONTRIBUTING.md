@@ -192,8 +192,9 @@ attachment should report unavailable without breaking unrelated services.
   (a threshold, a latitude, a gain) is read with `parseFloatArg`: a plain
   decimal number, no exponent, `nan` or `inf`, otherwise the command answers
   `kCommandReplyNotADecimal` or its own range message. Only a bus address
-  (`parseAddressArg`, as in `i2crecover 0x5A`) and a bit mask (`parseMaskArg`,
-  as in `espnowsensorreq <peer> 0x05 ...`) may also be written in hexadecimal.
+  (`parseAddressArg`, as in `i2crecover 0x5A`) and a sensor mask (read by
+  `espnowsensor::parseSensorList`, as in `espnowsensorreq <peer> 0x05 ...`) may
+  also be written in hexadecimal.
   `String::toInt`, `atoi` and `atol` read junk as 0 and are not used for
   command arguments. The same holds for `String::toFloat` and `atof`, which
   the host test `shared_text_helpers` does not count yet. An on/off

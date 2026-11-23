@@ -120,6 +120,9 @@ static const PeerIdentity* peerIdentityFindByMac(const uint8_t mac[6]) {
   return (p.valid && std::memcmp(mac, p.mac, 6) == 0) ? &p : nullptr;
 }
 static bool ensureUnencryptedPeer(const uint8_t*) { return true; }
+// The revoked list (System_ESPNow_Revoked.h): a case revokes the sender.
+static bool gSenderRevoked = false;
+[[maybe_unused]] static bool espnowRevokedMacOrKey(const uint8_t*, const uint8_t*) { return gSenderRevoked; }
 static uint32_t gNextMsgId = 100;
 static uint32_t generateMessageId() { return gNextMsgId++; }
 static bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
@@ -1046,6 +1049,49 @@ int main() {
   }
 #else
   check(false, "the tree has no session capability word (HW1_SESSION_CAPS unset)");
+#endif
+
+#ifdef HW1_SYNC_SENDER_CHECK
+  // C29 — ESP-NOW 1.0 step 3: the three session handlers check the sender on
+  // espnow_task. A revoked sender, or one with no stored identity, has nothing
+  // queued to cmd_exec and gets no answer.
+  {
+    resetDevices();
+    use(A);
+    check(espnowSessionOpenInitiate(B.mac, "mesh") && !A.outbox.empty(), "C29 setup: A sends an OPEN");
+    const Frame open = take(A);
+    gSenderRevoked = true;
+    use(B);
+    const size_t b0 = B.outbox.size();
+    deliver(open, B);
+    check(B.queue.empty() && B.outbox.size() == b0 && !sessOf(B),
+          "C29 a revoked sender's SESSION_OPEN queues nothing and is not answered");
+    check(logsContaining(B, "WARN", "revoked here") == 1, "C29 one line names the revoke");
+    gSenderRevoked = false;
+    resetDevices();
+    establish();
+    gNow += kRekeyAgeThresholdMs;
+    use(A);
+    check(espnowRekeyInitiate(B.mac), "C29 setup: A sends a REKEY");
+    const Frame rk = take(A);
+    gSenderRevoked = true;
+    gNow += 31000;   // past the drop-line interval
+    const size_t b1 = B.outbox.size();
+    deliver(rk, B);
+    check(B.outbox.size() == b1 && sessOf(B)->state == SESSION_ACTIVE,
+          "C29 a revoked sender's SESSION_REKEY queues nothing: keys unchanged, no reply");
+    gSenderRevoked = false;
+    resetDevices();
+    use(A);
+    espnowSessionOpenInitiate(B.mac, "mesh");
+    const Frame open2 = take(A);
+    B.peer.valid = false;   // B no longer holds A's identity (unpaired there)
+    gNow += 31000;
+    deliver(open2, B);
+    check(B.queue.empty() && !sessOf(B) && logsContaining(B, "WARN", "espnowunpair") >= 1,
+          "C29 a sender with no stored identity is dropped before queueing; the line names the remedy");
+    pairIdentities();
+  }
 #endif
 
   check(gGuardDepth == 0, "no lock left held");

@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1041 commands across 61 modules (1041 registry entries).
+1043 commands across 61 modules (1043 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -16,7 +16,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`system`](#system) — 25 commands
 - [`versions`](#versions) — 1 commands
 - [`wifi`](#wifi) — 19 commands
-- [`espnow`](#espnow) — 116 commands
+- [`espnow`](#espnow) — 118 commands
 - [`catchup`](#catchup) — 2 commands
 - [`collect`](#collect) — 5 commands
 - [`c6`](#c6) — 9 commands
@@ -205,7 +205,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowfetch` | A | Fetch a file from a peer; user/pass are an account ON THE TARGET: 'espnowfetch <target> <target-user> <target-pass> "<path>"'. (async - status via espnowmessages json; file saved on this device)<br/>`Usage: espnowfetch <target> <target-user> <target-pass> "<path>" Credentials are verified ON THE TARGET device, not this one. Returns OK on delivery; status lands in 'espnowmessages json'; the fetched file is written to this device's filesystem.` |
 | `espnowfind` |  | Find devices by name, room, or tag: 'espnowfind <query>'.<br/>`Usage: espnowfind <query>` |
 | `espnowfirsttimesetup` | A | Set first time setup flag: <0\|1><br/>`Usage: espnowfirsttimesetup <0\|1>` |
-| `espnowforget` | S | Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.<br/>`Usage: espnowforget <name_or_mac>` |
 | `espnowforwardlinks` |  | Mesh master: show the devices that forward their bond partner's data to this device: 'espnowforwardlinks [json] [from <n>]'.<br/>`Usage: espnowforwardlinks [json] [from <n>] json: 'next' is the number to pass as 'from' when not every link fitted one reply.` |
 | `espnowfriendlyname` |  | Get/set friendly display name: 'espnowfriendlyname [name]'.<br/>`Usage: espnowfriendlyname [<name>] (<=47 chars) espnowfriendlyname clear` |
 | `espnowgroupaccept` | A | Accept the room and tags a paired peer announces right now, for room and tag commands: 'espnowgroupaccept [json] <name_or_mac\|all>'.<br/>`Usage: espnowgroupaccept [json] <name_or_mac\|all> Records exactly what the peer announces at this moment; the reply states what was accepted. A name that more than one paired device has is refused: use the address espnowgroups shows. From then on espnowroomcmd and espnowtagcmd send that room's and those tags' commands, with the account password they carry, to this peer.` |
@@ -243,6 +242,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowremote` | A | Execute a command on a peer: 'espnowremote <target> <target-user> <target-pass> <cmd>'. user/pass are an account ON THE TARGET (verified there), not this device. (async - result via espnowmessages json)<br/>`Usage: espnowremote <target> <target-user> <target-pass> <command> <target-user>/<target-pass> are credentials ON THE TARGET device, not this one. Async: returns a reqId on delivery; read the output later with 'espnowmessages json 0 <target-mac>' (match the reqId).` |
 | `espnowrequestmeta` |  | Request metadata from peer: 'espnowrequestmeta <name_or_mac>'. (async - updates cache; view with espnowdevices)<br/>`Usage: espnowrequestmeta <name_or_mac> Returns OK on delivery; the peer's name/room/zone/tags arrive later and update the local peer cache shown by 'espnowdevices' / 'espnowrooms' / 'espnowfind'.` |
 | `espnowresetstats` | A | Reset ESP-NOW statistics counters. |
+| `espnowrevoke` | S | Revoke an ESP-NOW device: unpair it, drop everything it sends and refuse it (also by its key) until espnowunrevoke; then change the passphrase of every mesh it knew: 'espnowrevoke <name\|mac>'.<br/>`Usage: espnowrevoke <name\|mac> Writes the revoked list, then runs the espnowunpair teardown. Required next, on every remaining device: espnowrevoke it there too and 'espnowsetpassphrase <mesh> <new>' for every mesh it knew.` |
+| `espnowrevoked` | A | List revoked devices (name, keyId, MAC, date) and the peer identities stored here: espnowrevoked [json].<br/>`Usage: espnowrevoked [json]` |
 | `espnowroom` |  | Get/set device room: 'espnowroom [name]'.<br/>`Usage: espnowroom [Kitchen\|Bedroom\|...] espnowroom clear` |
 | `espnowroomcmd` | A | Run command on all devices accepted here as members of a room; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)<br/>`Usage: espnowroomcmd <room> <target-user> <target-pass> <command> Credentials are checked ON EACH target device, not this one. Goes only to peers whose room was accepted on this device (espnowgroups, espnowgroupaccept); a peer that only announces the room is skipped and counted in the reply. Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'.` |
 | `espnowrooms` |  | List announced rooms and their devices (from this node's cached peer metadata); [pending] marks a membership not accepted here. |
@@ -270,7 +271,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowtopoautorefresh` | A | Set auto refresh topology: <0\|1><br/>`Usage: espnowtopoautorefresh <0\|1>` |
 | `espnowtopodiscoveryinterval` | A | Set topology discovery interval: <0-300000 ms><br/>`Usage: espnowtopodiscoveryinterval <0..300000>` |
 | `espnowtoporesults` |  | Get topology results: 'espnowtoporesults [page] [request-id]'. |
-| `espnowunpair` | S | Unpair ESP-NOW device and remove what this device stored about it (crypto identity, bond caches, its cached manifest); unpairing the bond partner ends the bond too: 'espnowunpair <name_or_mac>'.<br/>`Usage: espnowunpair <name_or_mac>` |
+| `espnowunpair` | S | Unpair ESP-NOW device and remove what this device stored about it (crypto identity, bond caches, its cached manifest, a master pin that names its key, sensor leases it holds); unpairing the bond partner ends the bond too. A MAC no longer in the device list has its leftovers removed: 'espnowunpair <name_or_mac>'.<br/>`Usage: espnowunpair <name_or_mac>` |
+| `espnowunrevoke` | S | Lift a revoke so the device can be paired again: 'espnowunrevoke <name\|mac\|keyId>', or '--all' (also moves an unreadable revoked list aside).<br/>`Usage: espnowunrevoke <name\|mac\|keyId> \| --all` |
 | `espnowusersync` | S | Enable/disable user credential sync: 'espnowusersync [on\|off]'.<br/>`Usage: espnowusersync [on\|off]` |
 | `espnowzone` |  | Get/set device zone: 'espnowzone [name]'.<br/>`Usage: espnowzone [Counter\|Door\|Ceiling\|...] espnowzone clear` |
 | `openespnow` | A | Initialize ESP-NOW communication. |

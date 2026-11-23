@@ -698,7 +698,7 @@ uint8_t peerIdentityLoadAll() {
       if (isAddress && strcmp(base, canonical) != 0) {
         // Never written by this firmware, never read or removed by it either,
         // so it holds no mesh slot: skipped without marking the cache
-        // incomplete, but named, since espnowforget cannot remove it.
+        // incomplete, but named, since espnowunpair cannot remove it.
         char odd[96];
         snprintf(odd, sizeof(odd), "%s/%s/identity.json", kPeersDir, base);
         if (VFS::existsGuarded(odd, auth)) {
@@ -720,8 +720,8 @@ uint8_t peerIdentityLoadAll() {
           // inside, or no room): which mesh slot it uses is not known.
           if (notLoaded < 255) notLoaded++;
           char shown[18];
-          macToDisplay(mac, shown, sizeof(shown));  // the form espnowforget accepts
-          WARN_ESPNOWF("stored peer identity %s/%s was not loaded; 'espnowforget %s' removes it",
+          macToDisplay(mac, shown, sizeof(shown));  // the form espnowunpair accepts
+          WARN_ESPNOWF("stored peer identity %s/%s was not loaded; 'espnowunpair %s' removes it",
                        kPeersDir, base, shown);
         }
       }

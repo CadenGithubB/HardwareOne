@@ -519,7 +519,21 @@ struct Auth {};
   std::snprintf(out, outLen, "Removed: crypto identity.");
 }
 [[maybe_unused]] static void meshPeerSlotsRelease(const uint8_t*) { step("slotsRelease"); }
-[[maybe_unused]] static bool saveEspNowDevices() { return true; }
+// The unpair teardown's other stores (1.0 step 3; test_espnow_peer_files.py
+// checks that the teardown clears each of them).
+[[maybe_unused]] static bool espnowIsRegistryPeer(const uint8_t*) { return true; }
+[[maybe_unused]] static void espnowUnpairClearPairing(const uint8_t*) { step("clearPairing"); }
+struct PeerIdentity;
+[[maybe_unused]] static bool espnowUnpairClearPins(const uint8_t*, const PeerIdentity*) { step("clearPins"); return false; }
+[[maybe_unused]] static bool espnowSensorLeasesDropFor(const uint8_t*) { step("leasesDrop"); return false; }
+[[maybe_unused]] static bool isSelfMac(const uint8_t*) { return false; }
+[[maybe_unused]] static bool peerIdentityFileStored(const uint8_t*) { return false; }
+// System_ESPNow_RevokedCore.h's address rule (run by espnow_revoked_core_tests).
+namespace espnowrevoke {
+[[maybe_unused]] static bool isUnicastMac(const uint8_t* m) { return m && !(m[0] & 0x01); }
+}  // namespace espnowrevoke
+static bool gSaveOk = true;
+[[maybe_unused]] static bool saveEspNowDevices() { step("save"); return gSaveOk; }
 
 // ---- Doubles for the bond parts of processMeshHeartbeats ------------------------
 static uint32_t gLastBondHeartbeatSentMs = 0;
@@ -1391,6 +1405,27 @@ static void caseUnpairPartner() {
         toA, gAutoStarts - autoStarts);
 }
 
+// Review finding 5: an unpair whose registry save fails keeps the identity
+// and the peer folder (the file still lists the device, which could not key
+// in again without them) and asks for a retry; the save comes before them.
+static void caseUnpairSaveFailsKeepsIdentity() {
+#ifdef HW1_HAVE_TEARDOWN
+  resetWorld(kMasterSelf);
+  gSaveOk = false;
+  gSteps.clear();
+  const char* reply = cmd_espnow_unpair(String("02:11:22:33:44:03"));
+  CHECK(stepAt("save") != SIZE_MAX && stepAt("forgetCrypto") == SIZE_MAX && stepAt("peerFilesRemove") == SIZE_MAX,
+        "review 5: a failed registry save still deleted the identity or the folder");
+  CHECK(replyHas(reply, "session only") && replyHas(reply, "kept") && replyHas(reply, "again"),
+        "review 5: the reply does not say the key was kept and to retry: %s", reply);
+  gSaveOk = true;
+  gSteps.clear();
+  cmd_espnow_unpair(String("02:11:22:33:44:03"));
+  CHECK(stepAt("save") != SIZE_MAX && stepAt("save") < stepAt("forgetCrypto"),
+        "write order: the registry is saved before the identity goes");
+#endif
+}
+
 // Unpairing another device leaves the bond alone; a partner set while bond
 // mode is off is cleared without an offline event; a failed peer delete says
 // the bond went.
@@ -1655,6 +1690,7 @@ int main() {
   caseSwitchHoldsWorkerAsk();
   caseUnpairPartner();
   caseUnpairOther();
+  caseUnpairSaveFailsKeepsIdentity();
   caseSwitchHoldsAnswersAndStatus();
   caseServiceChangePushesStatus();
   caseTickWaitsThroughSwitch();

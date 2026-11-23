@@ -176,7 +176,11 @@ def build_crypto(crypto, crypto_h):
     internal.append(optional(crypto, 'void rekeyInFlightArm(', name))
     internal.append(one(crypto, 'bool sendRekey(', name))
     internal.append(one(crypto, 'void runDeferredRekey(void* arg)', name))
-    public = [one(crypto, marker, name) for marker in
+    public = []
+    # The synchronous sender check of the three handlers (1.0 step 3).
+    if 'static bool sessionSenderAdmitted(' in crypto:
+        public += ['#define HW1_SYNC_SENDER_CHECK 1', one(crypto, 'static bool sessionSenderAdmitted(', name)]
+    public += [one(crypto, marker, name) for marker in
               ('void v4hSessionOpen(const V4RxCtx& ctx)', 'void v4hSessionConfirm(const V4RxCtx& ctx)',
                'bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel',
                'void v4hSessionRekey(const V4RxCtx& ctx)',

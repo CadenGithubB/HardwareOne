@@ -20,6 +20,7 @@
 #include "System_ESPNow_HandshakeBackoff.h"
 #include "System_ESPNow_Identity.h"
 #include "System_ESPNow_MeshKeys.h"
+#include "System_ESPNow_Revoked.h"       // the revoked list, rule A (espnowKeyExAdmit)
 #include "System_ESPNow_Sensors.h"         // sensorTypeInThisBuild: the sensor_send capability
 #include "System_ESPNow_SessionCapsCore.h"  // the session capability word
 #include "System_ESPNow_Sessions.h"
@@ -217,7 +218,8 @@ static void keyExClearInFlight(const uint8_t peerMac[6]);
 static bool keyExCancelled(const uint8_t peerMac[6]);
 
 // Build + send a KEY_EX_CONFIRM to peerMac with the given status
-// (0=ok, 1=hmac-fail, 2=pub-conflict). CONFIRM carries no HMAC — the prior
+// (0=ok, 1=hmac-fail, 2=pub-conflict, 3=not accepted: not paired here or
+// revoked, espnowrevoke::kConfirmNotAccepted). CONFIRM carries no HMAC — the prior
 // REPLY's HMAC already authenticated the peer — so this needs no mesh key,
 // just our own identity for the OOB pubkey fingerprint. Shared by the
 // responder (HELLO handler) and the initiator (REPLY handler) so the
@@ -237,6 +239,47 @@ static void sendKeyExConfirm(const uint8_t peerMac[6], uint16_t meshFingerprint,
                 ESPNOW_V4_FLAG_ACK_REQ,
                 generateMessageId(),
                 reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
+}
+
+// "Not accepted" (status 3) to a sender whose key this device will not store
+// (rule A: no registry entry, or no open first-key window). The sender is
+// usually not in the radio peer table, and must not stay there: a lasting
+// radio peer would let its route adverts in (meshRouterIngestAdvert). So the
+// peer is added, the CONFIRM sent and the peer deleted again, unless it was
+// there before. The caller already rate-limited the sender (one HELLO acted
+// on per MAC and mesh per second).
+static void sendKeyExNotAccepted(const uint8_t peerMac[6], uint16_t meshFingerprint, const char* what) {
+  static uint32_t sNotAcceptedLogMs = 0;
+  if (logCooldownOk(sNotAcceptedLogMs, 30000)) {
+    INFO_ESPNOWF("%s from " MAC_FMT " not accepted: it is not paired here (or its first-key window "
+                 "is over); answered status 3. Pair it with 'espnowpairsecure' on both devices.",
+                 what, MAC_ARGS(peerMac));
+  }
+  const bool existed = esp_now_is_peer_exist(peerMac);
+  if (!existed && !ensureUnencryptedPeer(peerMac)) return;
+  sendKeyExConfirm(peerMac, meshFingerprint, espnowrevoke::kConfirmNotAccepted);
+  if (!existed) esp_now_del_peer(peerMac);
+}
+
+// A revoked MAC or key: nothing is stored and nothing is answered (G3). A
+// registry entry espnowpairsecure made for this MAC is rolled back.
+static void keyExRevokedDrop(const uint8_t peerMac[6], const uint8_t pub[32], const char* what) {
+  static uint32_t sRevokedLogMs = 0;
+  if (logCooldownOk(sRevokedLogMs, 30000)) {
+    char keyId[espnowrevoke::kKeyIdHexLen + 1];
+    espnowrevoke::formatKeyId(pub, keyId);
+    WARN_ESPNOWF("%s from " MAC_FMT " (keyId %s) dropped: that device or key is revoked here "
+                 "('espnowrevoked' lists it)", what, MAC_ARGS(peerMac), keyId);
+  }
+  espnowPairRollbackRevoked(peerMac);
+}
+
+// The log line when a key is bound to a MAC: its keyId.
+static void logKeyBound(const uint8_t mac[6], const uint8_t pub[32]) {
+  char keyId[espnowrevoke::kKeyIdHexLen + 1];
+  espnowrevoke::formatKeyId(pub, keyId);
+  INFO_ESPNOWF("KEY_EX: key bound for " MAC_FMT ", keyId %s", MAC_ARGS(mac), keyId);
+  espnowFirstKeyBound(mac);
 }
 
 // Per-peer throttle for the repeating SESSION_OPEN-reject WARN. A re-flashed or
@@ -298,10 +341,25 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
     return;
   }
 
+  // Rule A (1.0): an identity is stored only for a registry entry, its first
+  // key only while a local pairing action for the MAC is open; a revoked MAC
+  // or key gets no answer at all.
+  switch (espnowKeyExAdmit(msg->senderMac, msg->senderPubEd25519)) {
+    case espnowrevoke::Admit::Revoked:
+      keyExRevokedDrop(msg->senderMac, msg->senderPubEd25519, "KEY_EX_HELLO");
+      return;
+    case espnowrevoke::Admit::NotAccepted:
+      sendKeyExNotAccepted(msg->senderMac, msg->meshFingerprint, "KEY_EX_HELLO");
+      return;
+    case espnowrevoke::Admit::Accept:
+      break;
+  }
+
   // Check for conflicting existing identity. If we already know a different
-  // pubkey for this MAC, refuse to overwrite — operator must espnowforget
-  // first. Without this, an attacker who learns the passphrase later can
-  // silently replace a paired peer's identity.
+  // pubkey for this MAC, refuse to overwrite: the operator re-pairs with
+  // espnowpairsecure (its one-shot re-key window), or runs espnowunpair first.
+  // Without this, an attacker who learns the passphrase later can silently
+  // replace a paired peer's identity.
   const PeerIdentity* existing = peerIdentityFindByMac(msg->senderMac);
   uint8_t confirmStatus = 0;
   bool conflict = existing && memcmp(existing->longTermPub, msg->senderPubEd25519, 32) != 0;
@@ -317,7 +375,7 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
   }
   if (conflict) {
     WARN_ESPNOWF("KEY_EX_HELLO: peer " MAC_FMT " presented new pubkey, "
-                 "refusing overwrite — run 'espnowforget' or re-run 'espnowpairsecure'",
+                 "refusing overwrite — re-run 'espnowpairsecure' here, or run 'espnowunpair', then pair again on both sides",
                  MAC_ARGS(msg->senderMac));
     // Event log is min-interval gated: repeated HELLOs from the same rogue
     // sender must not flood the event stream.
@@ -348,6 +406,7 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
     if (identityNewOrReplaced) {
       logSystemEvent("ESPNOW", "paired: new peer identity persisted " MAC_FMT,
                      MAC_ARGS(msg->senderMac));
+      logKeyBound(msg->senderMac, msg->senderPubEd25519);
       // Another key at this address may be another device: it does not
       // inherit the room and tags accepted for the one before it.
       espnowGroupAcceptanceClear(msg->senderMac, "its identity key is new");
@@ -411,6 +470,20 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
     return;
   }
 
+  // Rule A, as for a HELLO: a REPLY stores a key only for a registry entry.
+  switch (espnowKeyExAdmit(msg->responderMac, msg->responderPubEd25519)) {
+    case espnowrevoke::Admit::Revoked:
+      keyExClearInFlight(msg->responderMac);
+      keyExRevokedDrop(msg->responderMac, msg->responderPubEd25519, "KEY_EX_REPLY");
+      return;
+    case espnowrevoke::Admit::NotAccepted:
+      keyExClearInFlight(msg->responderMac);
+      sendKeyExNotAccepted(msg->responderMac, msg->meshFingerprint, "KEY_EX_REPLY");
+      return;
+    case espnowrevoke::Admit::Accept:
+      break;
+  }
+
   const PeerIdentity* existing = peerIdentityFindByMac(msg->responderMac);
   bool conflict = existing && memcmp(existing->longTermPub, msg->responderPubEd25519, 32) != 0;
   if (conflict) {
@@ -424,7 +497,7 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   }
   if (conflict) {
     WARN_ESPNOWF("KEY_EX_REPLY: peer presented new pubkey, refusing overwrite — "
-                 "signaling reject (status=2). Run 'espnowforget' or re-run 'espnowpairsecure'.");
+                 "signaling reject (status=2). Re-run 'espnowpairsecure' here, or run 'espnowunpair', then pair again on both sides.");
     // Event log is min-interval gated — symmetric with the HELLO-side guard.
     static uint32_t sReplyConflictEventMs = 0;
     uint32_t nowMs = millis();
@@ -458,6 +531,7 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   if (identityNewOrReplaced) {
     logSystemEvent("ESPNOW", "paired: new peer identity persisted " MAC_FMT,
                    MAC_ARGS(msg->responderMac));
+    logKeyBound(msg->responderMac, msg->responderPubEd25519);
     // As for a HELLO: a new key does not inherit the accepted room and tags.
     espnowGroupAcceptanceClear(msg->responderMac, "its identity key is new");
   }
@@ -513,8 +587,23 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
     WARN_ESPNOWF("KEY_EX_CONFIRM: header.origin / payload.confirmerMac mismatch");
     return;
   }
+  // A refusal (status 1-3) can come from a peer whose key this device does
+  // not hold yet: the answer to our own HELLO. Anything else needs an identity.
   const PeerIdentity* p = peerIdentityFindByMac(msg->confirmerMac);
   if (!p) {
+    if (msg->status != 0 && keyExIsInFlight(msg->confirmerMac)) {
+      // Until CONFIRM is authenticated (step 4) anyone in range can send
+      // this one: it is only logged, and our HELLO retries go on (a forged
+      // refusal must not stop espnowpairsecure's key exchange).
+      static uint32_t sNotAcceptedLogMs = 0;
+      if (logCooldownOk(sNotAcceptedLogMs, 30000)) {
+        WARN_ESPNOWF("KEY_EX with " MAC_FMT ": %s - pair from both sides ('espnowpairsecure' on both "
+                     "devices); still retrying",
+                     MAC_ARGS(msg->confirmerMac),
+                     msg->status == espnowrevoke::kConfirmNotAccepted ? "not accepted" : "refused");
+      }
+      return;
+    }
     WARN_ESPNOWF("KEY_EX_CONFIRM: from unknown peer; ignored");
     return;
   }
@@ -534,9 +623,16 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
                  msg->pubFingerprint[0], msg->pubFingerprint[1], msg->pubFingerprint[2],
                  msg->pubFingerprint[3], msg->pubFingerprint[4], msg->pubFingerprint[5],
                  msg->pubFingerprint[6], msg->pubFingerprint[7]);
+  } else if (msg->status == espnowrevoke::kConfirmNotAccepted) {
+    // Not paired there (or revoked there): one code for both (E24). The
+    // automatic back-off stays; this is not a stop for good, since a forged
+    // status could otherwise cut a pair.
+    WARN_ESPNOWF("KEY_EX with " MAC_FMT ": not accepted - pair from both sides "
+                 "('espnowpairsecure' on both devices)",
+                 MAC_ARGS(msg->confirmerMac));
   } else {
     WARN_ESPNOWF("KEY_EX with " MAC_FMT " reported status=%u "
-                 "(0=ok, 1=hmac-fail, 2=pub-conflict)",
+                 "(0=ok, 1=hmac-fail, 2=pub-conflict, 3=not accepted)",
                  MAC_ARGS(msg->confirmerMac),
                  (unsigned)msg->status);
   }
@@ -741,6 +837,17 @@ void keyExRetrySweep(uint32_t nowMs) {
 static bool keyExInitiate(const uint8_t peerMac[6], const char* meshLabel, bool automatic) {
   if (!gEspNow || !gEspNow->initialized) {
     ERROR_ESPNOWF("KEY_EX initiate: ESPNOW not initialized");
+    return false;
+  }
+  // Rule A: a key is exchanged only with a registry entry (the other side
+  // would not store ours either). Pairing writes the entry first.
+  if (!espnowIsRegistryPeer(peerMac)) {
+    ERROR_ESPNOWF("KEY_EX initiate: " MAC_FMT " is not paired here - pair it with 'espnowpairsecure'",
+                  MAC_ARGS(peerMac));
+    return false;
+  }
+  if (espnowRevokedMac(peerMac)) {
+    ERROR_ESPNOWF("KEY_EX initiate: " MAC_FMT " is revoked here ('espnowrevoked')", MAC_ARGS(peerMac));
     return false;
   }
   int slot = resolveMeshSlot(meshLabel);
@@ -1010,7 +1117,7 @@ void runDeferredSessionOpen(void* arg) {
                    "or KEY_EX never completed.",
                    MAC_ARGS(msg->initiatorMac), (unsigned)n);
       WARN_ESPNOWF("  -> IDENTITY problem, NOT a passphrase one (passphrase isn't checked here). "
-                   "Fix: run 'espnowforget' then 'espnowpairsecure' on BOTH devices to re-pair.");
+                   "Fix: run 'espnowunpair', then pair again on both sides.");
     }
     free(w);
     return;
@@ -1272,9 +1379,33 @@ void runDeferredSessionConfirm(void* arg) {
 
 }  // namespace
 
-// On-RX handlers — espnow_task scope. Lightweight: size-check + PSRAM copy +
-// enqueue. All heavy crypto runs in the deferred function on cmd_exec.
+// The synchronous part of the three session handlers (1.0 design 3.2): a
+// sender with no stored identity, or one whose MAC or key is revoked, is
+// dropped here on espnow_task, before anything is copied or queued to
+// cmd_exec. One line per 30 s for all of them (espnow_task only).
+static bool sessionSenderAdmitted(const uint8_t mac[6], const char* what) {
+  const PeerIdentity* id = peerIdentityFindByMac(mac);
+  const bool revoked = espnowRevokedMacOrKey(mac, id ? id->longTermPub : nullptr);
+  if (id && !revoked) return true;
+  static uint32_t sDropLogMs = 0;
+  if (logCooldownOk(sDropLogMs, 30000)) {
+    if (revoked) {
+      WARN_ESPNOWF("%s from " MAC_FMT " dropped: that device is revoked here ('espnowrevoked')",
+                   what, MAC_ARGS(mac));
+    } else {
+      WARN_ESPNOWF("%s from " MAC_FMT " rejected: no stored identity for this peer (re-flashed, "
+                   "factory-erased, unpaired here, or never paired). Fix: run 'espnowunpair', then "
+                   "pair again on both sides.", what, MAC_ARGS(mac));
+    }
+  }
+  return false;
+}
+
+// On-RX handlers — espnow_task scope. Lightweight: the sender check above,
+// then size-check + PSRAM copy + enqueue. All heavy crypto runs in the
+// deferred function on cmd_exec.
 void v4hSessionOpen(const V4RxCtx& ctx) {
+  if (!sessionSenderAdmitted(ctx.h->origin, "SESSION_OPEN")) return;
   // The receive table admits exactly sizeof(V4PayloadSessionOpen) (V4_OPC_LEN_EXACT).
   auto* w = static_cast<DeferredSessionOpenWork*>(
       ps_alloc(sizeof(DeferredSessionOpenWork), AllocPref::PreferPsram, "espnow.sopen.defer"));
@@ -1291,6 +1422,7 @@ void v4hSessionOpen(const V4RxCtx& ctx) {
 }
 
 void v4hSessionConfirm(const V4RxCtx& ctx) {
+  if (!sessionSenderAdmitted(ctx.h->origin, "SESSION_CONFIRM")) return;
   // The receive table admits exactly sizeof(V4PayloadSessionConfirm) (V4_OPC_LEN_EXACT).
   auto* w = static_cast<DeferredSessionConfirmWork*>(
       ps_alloc(sizeof(DeferredSessionConfirmWork), AllocPref::PreferPsram, "espnow.sconf.defer"));
@@ -1751,6 +1883,7 @@ void runDeferredRekey(void* arg) {
 }  // namespace
 
 void v4hSessionRekey(const V4RxCtx& ctx) {
+  if (!sessionSenderAdmitted(ctx.recv_info->src_addr, "SESSION_REKEY")) return;
   // The receive table admits exactly sizeof(V4PayloadSessionRekey) (V4_OPC_LEN_EXACT).
   // PSRAM-copy + defer to cmd_exec (verify+ECDH+KDF+optional sign+send
   // is the same crypto profile as SESSION_OPEN/CONFIRM, so the same defer
