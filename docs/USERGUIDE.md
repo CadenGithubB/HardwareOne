@@ -1322,8 +1322,10 @@ runs answers `Error: HTTP server is already running. Stop it first with 'closeht
 status                          - Show system status (WiFi, FS, memory)
 versions                        - Firmware version and every version a separate part must match
 uptime                          - Show device uptime
-time                            - Show current time (uptime + NTP if synced)
-timeset <YYYY-MM-DD HH:MM:SS>   - Set time manually (or unix timestamp)
+time                            - Show the device's local time, its source and the uptime
+timeset <YYYY-MM-DD HH:MM:SS> [utc|local]
+                                - Set the clock by hand: local time unless utc follows
+                                  (or a unix timestamp, which is UTC); NTP replaces it later
 reboot                          - Restart the device
 ramflush                        - Reboot to reclaim RAM, restoring the features running right now
 factoryreset [all]              - Wipe user accounts and reboot into the setup wizard (super admin);
@@ -1446,8 +1448,12 @@ espnowusersync [on|off]         - Enable/disable credential sync across mesh
 **Mesh time.** The mesh master sends its clock to each paired device when their encrypted session
 starts, every 10 minutes and when its own clock is set. A device takes it only from the master
 named on it (`espnowmasterfingerprint`, or the backup master named with `espnowbackupfingerprint`
-while it acts as master), and only when it has no better source of its own (RTC chip, NTP,
-`timeset`, CM5); `time` then shows the source "mesh". A device that names no master takes no mesh
+while it acts as master), and only when it has no better source of its own. One rank table
+decides what "better" is, strongest first: the device's own NTP, a time set by hand (`timeset`,
+`rtcset`), a mesh master whose own clock comes from NTP, the CM5, the RTC chip, the ring, and
+last a mesh master whose clock does not come from NTP. A clock takes a source that ranks equal
+or higher than the one that set it; a clock that mesh time set keeps following its master. `time`
+then shows the source "mesh-ntp" (the master's clock is from NTP) or "mesh". A device that names no master takes no mesh
 time; `espnowtimestatus` says so. A master named in place of another (or a fingerprint cleared)
 counts at once: the device no longer follows the master it followed and takes the newly named
 one's next time. The master only sends a clock that comes from one of those four
@@ -1710,7 +1716,8 @@ print <message>                 - Broadcast a message to all output channels
 ```
 wifiautoreconnect <0|1>         - WiFi auto-reconnect on disconnect
 ntpserver <hostname>            - Set NTP server
-tzoffsetminutes <-720..720>     - Set timezone offset in minutes
+tzoffsetminutes <-720..840>     - Set timezone offset in minutes (a fixed offset: no automatic
+                                  daylight saving, change it when the clocks change)
 httpautostart <0|1>             - Auto-start web server on boot
 httpsenabled <0|1>              - Enable HTTPS (reboot required)
 webclihistorysize <1-100>       - Web CLI history buffer size
@@ -2353,8 +2360,10 @@ gpslog [interval_ms]            - Start GPS track logging (persists across boots
 openrtc                         - Start RTC
 closertc                        - Stop RTC
 rtcread [status|temp]           - Read time or temperature compensation
-rtcset <datetime|timestamp>     - Set RTC time (UTC, years 2020-2099)
-rtcsync [to|from]               - Sync time to/from system clock
+rtcset <YYYY-MM-DD HH:MM:SS> [utc|local]
+                                - Set the RTC chip and the system clock: local time unless utc
+                                  follows (or a unix timestamp, which is UTC); years 2020-2099
+rtcsync [to|from]               - Copy time RTC -> system (to, the default) or system -> RTC (from)
 rtcautostart [on|off]           - Auto-start on boot
 ```
 </details>
