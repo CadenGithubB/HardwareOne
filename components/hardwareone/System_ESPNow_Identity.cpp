@@ -10,6 +10,7 @@
 #include <esp_attr.h>   // EXT_RAM_BSS_ATTR
 #include <time.h>
 
+#include "System_ClockCore.h"    // clockcore::isValidEpoch: a time is stored only when the clock is set
 #include "System_Debug.h"
 #include "System_ESPNow_Crypto.h"
 #include "System_Filesystem.h"   // filesystemReady
@@ -232,8 +233,10 @@ bool generateFreshIdentity(EspNowIdentity& out, uint32_t regenCount) {
     ERROR_ESPNOWF("identity gen: keypair generation failed");
     return false;
   }
+  // 0 while the clock is not set: a clock that was never set counts up from
+  // 1970, and that number is not a creation date.
   time_t now = time(nullptr);
-  out.createdAtSec = (now > 0) ? (uint32_t)now : 0;
+  out.createdAtSec = clockcore::isValidEpoch((int64_t)now) ? (uint32_t)now : 0;
   out.regenCount   = regenCount;
   out.valid        = true;
   return true;
@@ -472,7 +475,7 @@ bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
   const PeerIdentity before = p;  // put back if the write fails
   bool isNewPeer = !p.valid;
   time_t now = time(nullptr);
-  const uint32_t nowSec = (now > 0) ? (uint32_t)now : 0;
+  const uint32_t nowSec = clockcore::isValidEpoch((int64_t)now) ? (uint32_t)now : 0;  // 0 while the clock is not set
 
   // A KEY_EX that changes nothing we store (same key, same mesh, bondedAtSec
   // already set) is not worth a flash write. Every KEY_EX_HELLO and REPLY

@@ -66,6 +66,7 @@ void webBatchTestStringAppend() {}
 static unsigned long millis() { return nowMs; }
 static time_t testWallTime(time_t*) { return wallTime; }
 #define time testWallTime
+namespace Clock { static bool isSynced() { return wallTime >= 1577836800; } }  // 2020-01-01
 static String hashUserPassword(const String& plaintext) {
   ++hashCalls; operations.emplace_back("hash");
   check(plaintext == "fixture-secret");
@@ -274,7 +275,9 @@ static void rejectedBeforePublication() {
 }
 static void helperCases() {
   for (bool dark : {false, true}) for (bool clockReady : {false, true}) {
-    reset(); wallTime = clockReady ? 1234 : 0;
+    // A clock that was never set counts up from 1970 (1234 s of uptime): it
+    // is not "set" (2026-11-22 time audit, B2: `time(nullptr) > 0` said it was).
+    reset(); wallTime = clockReady ? 1795357805 : 1234;
     check(createInitialAdminUser("fixture-owner", "fixture-secret", dark));
     check(hashCalls == 1 && credentialCalls == 1 && indexCalls == 1);
     check(timestampCalls == static_cast<unsigned>(clockReady)); recordAndOrder(dark);

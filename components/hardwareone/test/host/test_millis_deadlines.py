@@ -55,6 +55,16 @@ SITES = (
     # deadline of their own: their errors go through the shared feedback queue,
     # whose lifetime test_oled_toast.py runs across the clock wrap.)
     ("WebServer_Events.cpp", "gSessions[sessIdx].noticeBurstUntil", 1),
+    # The glasses' short waits (2026-11-22 time audit, B9): `millis() < deadline`
+    # on a `millis() + X` deadline ended at once when set just before the wrap.
+    # The microphone read, the repair scan, the connect scan and the connect
+    # cancel; the scan-callback drain and the control stop read theirs as a
+    # signed difference and go through the owner as well.
+    ("G2_Glasses.cpp", "deadline", 6),
+    # The lens overlay: `millis() + durationMs` could be 0, which means "none".
+    ("G2_Glasses.cpp", "gLens.overlayDeadlineMs", 1),
+    # The three image-probe pacing waits.
+    ("G2_ImageProbes.cpp", "sliceEndMs", 3),
 )
 
 # File-scope deadlines that outlive their moment and are set back to 0 once passed.

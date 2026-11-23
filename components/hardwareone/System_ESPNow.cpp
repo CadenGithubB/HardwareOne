@@ -94,7 +94,7 @@
 #include "i2csensor_pa1010d.h"
 #endif
 #if ENABLE_BONDED_MODE && ENABLE_IMU_SENSOR
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #endif
 #if ENABLE_BONDED_MODE && ENABLE_OLED_INPUT
 #include "i2csensor_seesaw.h"
@@ -114,7 +114,7 @@
 #include "WebServer_Server.h"
 #include "BLE_Server.h"  // bleSubsystemActive: Bluetooth running, for the capability summary and bond status
 
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_mlx90640.h"
 
 // Forward declaration — definition is further down near onEspNowRawRecv. Used
@@ -9521,7 +9521,7 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
   }
 
   time_t now = time(nullptr);
-  if (now <= 0) now = (time_t)(millis() / 1000);  // fallback if NTP not synced yet
+  if (!Clock::isValidEpoch(now)) now = (time_t)(millis() / 1000);  // uptime seconds while the clock is not set
 
   // Resolve peer name (meta first, paired registry fallback).
   String peerName = peerMac ? getEspNowDeviceName(peerMac) : String();
@@ -23379,7 +23379,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowbackupenable", "Enable/disable backup master feature: 'espnowbackupenable [on|off]'.", true, cmd_espnow_backupenable, "Usage: espnowbackupenable [on|off]" },
   { "espnowmeshtopo", "Discover mesh topology (run on the master; role not enforced). (async - read results with espnowtoporesults)", false, cmd_espnow_meshtopo },
   { "espnowtoporesults", "Get topology results: 'espnowtoporesults [page] [request-id]'.", false, cmd_espnow_toporesults },
-  { "espnowtimesync", "Mesh master: send this device's clock to the paired devices now (it is also sent when a session starts and every 10 minutes).", false, cmd_espnow_timesync, "Usage: espnowtimesync\n       Only the mesh master sends time, and only when its own clock comes from rtc, ntp, timeset or cm5.\n       A paired device takes it when it names this device as its master (espnowmasterfingerprint) and has no such source itself. See 'espnowtimestatus'." },
+  { "espnowtimesync", "Mesh master: send this device's clock to the paired devices now (it is also sent when a session starts and every 10 minutes).", false, cmd_espnow_timesync, "Usage: espnowtimesync\n       Only the mesh master sends time, and only when its own clock comes from rtc, ntp, timeset or cm5.\n       A paired device takes it when it names this device as its master (espnowmasterfingerprint) and has no better source itself (its own ntp or a manual time; when this master's clock is not from ntp also cm5, rtc or the ring). See 'espnowtimestatus'." },
   { "espnowtimestatus", "Show mesh time: where this device's clock comes from, what it sends or last received: 'espnowtimestatus [json]'.", false, cmd_espnow_timestatus, "Usage: espnowtimestatus [json]" },
   { "espnowmeshtime", "Mesh time on/off: the master sends its clock, devices that name it as their master take it when they have no better source: 'espnowmeshtime [on|off]'.", true, cmd_espnow_meshtime, "Usage: espnowmeshtime [on|off]" },
   

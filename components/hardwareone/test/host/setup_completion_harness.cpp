@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "System_ClockCore.h"  // clockcore::kTimezoneDstNote: the wizard's timezone line
+
 class String : public std::string {
  public:
   using std::string::string;
@@ -152,7 +154,9 @@ static void completedAdapterCases() {
     }
     check(applyCalls == 1 && appliedResult.wifiPassword == "fixture-secret");
     check(hasOutput("Feature configuration complete.") == accepted);
-    check(hasOutput("Timezone: APPLIED") == accepted && !hasOutput("Timezone: BEFORE"));
+    // The timezone line says that the offset is fixed, in both wizard engines.
+    check(hasOutput("Timezone: APPLIED (no automatic daylight saving)") == accepted);
+    for (const auto& line : output) check(line.rfind("Timezone: BEFORE", 0) != 0);
     if (accepted) check(std::find(operations.begin(), operations.end(), "draft.apply") <
                         std::find(operations.begin(), operations.end(), "complete.message"));
     noSecrets();

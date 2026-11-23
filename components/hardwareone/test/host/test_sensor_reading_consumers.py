@@ -18,7 +18,7 @@ from g2_client_source import g2_client_text
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 SENSORS = [
-    ('bno055', 'ImuCache', 'gImuCache', 'imuCacheSnapshot'),
+    ('HAL_Motion', 'ImuCache', 'gImuCache', 'imuCacheSnapshot'),
     ('vl53l4cx', 'TofCache', 'gTofCache', 'tofCacheSnapshot'),
     ('apds9960', 'ApdsCache', 'gApdsCache', 'apdsCacheSnapshot'),
     ('ds3231', 'RtcCache', 'gRtcCache', 'rtcCacheSnapshot'),
@@ -37,7 +37,10 @@ FORMATTERS = ['imuG2FormatValue', 'tofG2FormatValue', 'thermalG2FormatValue',
 def generate(component, baseline):
     types, state, mocks, constants = [], [], [], []
     for chip, typ, glob, api in SENSORS:
-        text = (component / f'i2csensor_{chip}.h').read_text()
+        header = f'{chip}.h' if chip.startswith('HAL_') else f'i2csensor_{chip}.h'
+        if not (component / header).exists() and chip == 'HAL_Motion':
+            header = 'i2csensor_bno055.h'  # a baseline before the motion layer
+        text = (component / header).read_text()
         if typ == 'RtcCache':
             types.append(extract_block(text, 'struct RtcDateTime') + ';')
         if typ == 'InputCache' and 'struct InputCache' not in text:

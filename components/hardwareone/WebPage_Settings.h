@@ -1042,7 +1042,7 @@ window.SchemaPanel.render({
   // to recurse into the nested layout. Identity mappings kept here for
   // backwards compatibility with any older flat settings.json that lingers.
   var sensorSections = {'camera':'camera','microphone':'microphone','edgeimpulse':'edgeimpulse','espsr':'espsr','thermal':'thermal','tof':'tof','imu':'imu','gps':'gps','fmradio':'fmradio','apds':'apds','rtc':'rtc','presence':'presence','sensorlog':'sensorlog','power':'power','debug':'debug','output':'output','oled':'oled','gamepad':'gamepad','input':'input','anoencoder':'anoencoder','led':'led','llm':'llm','maps':'maps'};
-  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',servo:'Servo Driver (PCA9685)',gamepad:'Gamepad (Seesaw)',input:'Input Device',anoencoder:'ANO Encoder (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',systemlog:'System Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels',oled:'OLED Display (SSD1306)',led:'LED Startup & Brightness',llm:'On-Device LLM',maps:'Maps',notifications:'Notifications'};
+  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (motion sensor)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',servo:'Servo Driver (PCA9685)',gamepad:'Gamepad (Seesaw)',input:'Input Device',anoencoder:'ANO Encoder (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',systemlog:'System Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels',oled:'OLED Display (SSD1306)',led:'LED Startup & Brightness',llm:'On-Device LLM',maps:'Maps',notifications:'Notifications'};
   
   function inferType(val) {
     if (typeof val === 'boolean') return 'bool';
@@ -1867,10 +1867,10 @@ function saveNotifPolicy() {
     debugthermalpolling:"Logs per-frame capture timing — very noisy at higher frame rates.",
     debugthermalvalues:"Logs the raw pixel values / min-max-avg stats of each captured frame. Extremely verbose.",
     // imu
-    debugimu:"Master toggle for IMU (BNO055) debug.",
+    debugimu:"Master toggle for IMU (motion sensor) debug.",
     debugimulifecycle:"Logs IMU init, connect, and recovery.",
     debugimupolling:"Logs each IMU poll cycle (orientation + accel + gyro).",
-    debugimuvalues:"Logs the raw quaternion and Euler-angle values read from the sensor. Verbose.",
+    debugimuvalues:"Logs each stored IMU reading. Verbose.",
     // gamepad
     debuginput:"Master toggle for input-device debug (Seesaw gamepad / ANO encoder).",
     debuginputlifecycle:"Logs input-device init, connect, and auto-disable.",
@@ -2943,11 +2943,34 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       });
     };
 
-    function formatMillisTimestamp(millis) {
-      if (!millis || millis === 0) return 'Unknown';
-      var d = new Date(millis);
-      if (isNaN(d.getTime())) return 'Invalid';
-      return d.toLocaleString();
+    /* Times on this panel are DEVICE-LOCAL time (the device's timezone
+       setting), never UTC and never the browser's own zone or locale: the same
+       date and time the device shows everywhere else. The device sends UTC
+       (epoch ms, or ISO text ending in Z) and its offset (`time json`:
+       tzOffsetMinutes); this is the one place the panel turns them into text:
+       "2026-11-22 15:30:05 UTC+1:00". '' when there is no time to show. */
+    var deviceTzOffsetMinutes = 0;
+    function formatDeviceLocal(epochMs) {
+      if (typeof epochMs !== 'number' || !isFinite(epochMs) || epochMs <= 0) return '';
+      var tz = deviceTzOffsetMinutes || 0;
+      var d = new Date(epochMs + tz * 60000);
+      if (isNaN(d.getTime())) return '';
+      var p = function(n) { return (n < 10 ? '0' : '') + n; };
+      var a = Math.abs(tz);
+      return d.getUTCFullYear() + '-' + p(d.getUTCMonth() + 1) + '-' + p(d.getUTCDate()) + ' ' +
+             p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + ':' + p(d.getUTCSeconds()) + ' ' +
+             (tz ? 'UTC' + (tz < 0 ? '-' : '+') + Math.floor(a / 60) + ':' + p(a % 60) : 'UTC');
+    }
+    /* A stored creation time: ISO UTC text ("2026-11-22T14:30:05Z") is shown
+       as device-local time; any other text (a creation that could only be
+       tied to a power cycle) is shown as it is. */
+    function formatStoredUtc(text) {
+      text = String(text || '');
+      if (/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/.test(text)) {
+        var local = formatDeviceLocal(Date.parse(text));
+        if (local) return local;
+      }
+      return text;
     }
     
     function cleanIPAddress(ip) {
@@ -3106,10 +3129,17 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
       Promise.all([
         postSettingsCli('userlist json'),
         postSettingsCli('sessionlist json'),
-        postSettingsCli('pendinglist json')
+        postSettingsCli('pendinglist json'),
+        postSettingsCli('time json').catch(function() { return ''; })
       ])
       .then(function(results) {
         var users = [], sessions = [], pending = [];
+        /* The device's timezone offset, for formatDeviceLocal. Without it
+           the times are shown as UTC, and say so. */
+        try {
+          var rt = JSON.parse(results[3] || '{}');
+          deviceTzOffsetMinutes = (rt && typeof rt.tzOffsetMinutes === 'number') ? rt.tzOffsetMinutes : 0;
+        } catch(_) { deviceTzOffsetMinutes = 0; }
         try {
           var ru = JSON.parse(results[0] || '{}');
           var rs = JSON.parse(results[1] || '{}');
@@ -3148,7 +3178,7 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
         var allUsers = users.slice();
         pending.forEach(function(p) {
           if (!pendingUsernames[p.username]) return;
-          allUsers.push({ username: p.username, isPending: true });
+          allUsers.push({ username: p.username, isPending: true, requestedAtEpochMs: p.requestedAtEpochMs });
         });
 
         var html = '<div style="display:grid;gap:0.5rem">';
@@ -3175,7 +3205,9 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           html += '<div onclick="toggleUserDropdown(\'' + uid + '\')" style="padding:0.5rem;cursor:pointer">';
           if (isPending) {
             html += '<div style="display:flex;align-items:center;justify-content:space-between"><div><strong>' + usernameHtml + '</strong> <span style="color:#b8860b;font-size:0.85rem">(Pending Approval)</span></div><div style="font-size:0.8rem;color:var(--panel-fg)">&#9660;</div></div>';
-            if (user.timestamp) { html += '<div style="font-size:0.8rem;color:var(--muted,#888);margin-top:0.25rem">Requested: ' + (typeof user.timestamp === 'string' ? user.timestamp : formatMillisTimestamp(user.timestamp)) + '</div>'; }
+            /* requestedAtEpochMs: UTC epoch ms, null when the clock was not set at the request. */
+            var requested = formatDeviceLocal(user.requestedAtEpochMs);
+            if (requested) { html += '<div style="font-size:0.8rem;color:var(--muted,#888);margin-top:0.25rem">Requested: ' + requested + '</div>'; }
           } else {
             // Line 1: username + role badge + banned badge + session count
             var roleBadge = userRoleBadge(rank);
@@ -3188,7 +3220,10 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
           html += '<div id="dropdown-' + uid + '" style="display:none;padding:0.5rem">';
           if (!isPending) {
             var meta = [];
-            if (createdAt) meta.push('<strong>Created:</strong> ' + createdAt.replace('T', ' ').replace('Z', ''));
+            /* createdAt is stored in UTC; shown in the device's local time
+               (it used to be shown with the T and Z stripped, which read as
+               local time and was off by the timezone offset). */
+            if (createdAt) meta.push('<strong>Created:</strong> ' + escapeUserHtml(formatStoredUtc(createdAt)));
             if (meta.length) html += '<div style="font-size:0.8rem;color:var(--muted,#888);margin-bottom:0.5rem">' + meta.join(' &middot; ') + '</div>';
           }
           if (!isPending && sessionCount > 0) {
@@ -3196,11 +3231,14 @@ console.log('[SETTINGS] Part 4: WiFi/User management starting...');
             html += '<div style="font-size:0.85rem;margin-bottom:0.5rem">';
             userSessions.forEach(function(session) {
               var transport = session.transport || '';
-              var label = transport === 'oled' ? 'OLED Display' : transport === 'serial' ? 'Serial' : transport === 'bluetooth' ? 'Bluetooth' : transport === 'g2' ? 'G2 Glasses' : transport ? transport : 'Web';
+              var label = transport === 'oled' ? 'OLED Display' : transport === 'serial' ? 'Serial' : transport === 'bluetooth' ? 'Bluetooth' : transport === 'g2' ? 'G2 Glasses' : (transport && transport !== 'web') ? transport : 'Web';
               var detail = [];
-              if (!transport) {
+              /* A web session carries its address and its times (transport "web"). */
+              if (!transport || transport === 'web') {
                 var ip = cleanIPAddress(session.ip || '');
-                var created = session.createdAt ? formatMillisTimestamp(session.createdAt) : '';
+                /* createdAtEpochMs: UTC epoch ms, null while the device's
+                   clock is not set (createdAtUptimeMs is then all there is). */
+                var created = formatDeviceLocal(session.createdAtEpochMs);
                 var current = session.current || false;
                 if (ip) detail.push('IP: ' + ip + (current ? ' <span style="color:#28a745;font-weight:bold">(Current)</span>' : ''));
                 if (created) detail.push('Since: ' + created);

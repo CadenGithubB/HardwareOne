@@ -60,7 +60,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username);
 #include "i2csensor_rda5807_web.h"
 #endif
 #if ENABLE_IMU_SENSOR
-#include "i2csensor_bno055_web.h"
+#include "HAL_Motion_Web.h"
 #endif
 #if ENABLE_SERVO
 #include "i2csensor_pca9685_web.h"
@@ -132,7 +132,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   )HTML", HTTPD_RESP_USE_STRLEN);
 
 #if ENABLE_IMU_SENSOR
-  streamBNO055ImuSensorCard(req);
+  streamImuSensorCard(req);
 #endif
 #if ENABLE_THERMAL_SENSOR
   streamMLX90640ThermalSensorCard(req);
@@ -231,7 +231,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "';else if(/^gps/i.test(c))sensor='gps';else if(/^fmradio/i.test(c))sensor='fmradio';else if(/^camera/i.test(c))sensor='camera';else if(/^mic/i.test(c))sensor='microphone';else if(/^edgeimpulse/i.test(c))sensor='edgeimpulse';else if(/^rtc/i.test(c))sensor='rtc';else if(/^presence/i.test(c))sensor='presence';if(action==='start'&&sensor){startSensorPolling(sensor)}else if(action==='stop'&&sensor){stopSensorPolling(sensor)}}catch(_){}}).catch(function(e){console.error('[SENSORS] Command error:',e);})})}};",
     HTTPD_RESP_USE_STRLEN);
 #if ENABLE_IMU_SENSOR
-  streamBNO055ImuSensorBindButtons(req);
+  streamImuSensorBindButtons(req);
 #endif
 #if ENABLE_THERMAL_SENSOR
   streamMLX90640ThermalSensorBindButtons(req);
@@ -722,7 +722,7 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   streamVL53L4CXTofSensorJs(req);
 #endif
 #if ENABLE_IMU_SENSOR
-  streamBNO055ImuSensorJs(req);
+  streamImuSensorJs(req);
 #endif
 #if ENABLE_GAMEPAD_SENSOR
   streamSeesawGamepadSensorJs(req);

@@ -69,7 +69,7 @@ When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABL
 | ---- | ------ |
 | `CUSTOM_ENABLE_OLED` | SSD1306 OLED display |
 | `CUSTOM_ENABLE_GAMEPAD` | Seesaw gamepad |
-| `CUSTOM_ENABLE_IMU` | BNO055 9-DoF IMU |
+| `CUSTOM_ENABLE_IMU` | IMU (motion sensor); `IMU_DEVICE_TYPE` picks the chip: 1 = BNO055 (default), 2 = Adafruit 4517 (its backend comes later) |
 | `CUSTOM_ENABLE_TOF` | VL53L4CX Time-of-Flight |
 | `CUSTOM_ENABLE_THERMAL` | MLX90640 thermal camera |
 | `CUSTOM_ENABLE_APDS` | APDS9960 gesture/proximity/light |
@@ -1327,8 +1327,10 @@ runs answers `Error: HTTP server is already running. Stop it first with 'closeht
 status                          - Show system status (WiFi, FS, memory)
 versions                        - Firmware version and every version a separate part must match
 uptime                          - Show device uptime
-time                            - Show current time (uptime + NTP if synced)
-timeset <YYYY-MM-DD HH:MM:SS>   - Set time manually (or unix timestamp)
+time                            - Show the device's local time, its source and the uptime
+timeset <YYYY-MM-DD HH:MM:SS> [utc|local]
+                                - Set the clock by hand: local time unless utc follows
+                                  (or a unix timestamp, which is UTC); NTP replaces it later
 reboot                          - Restart the device
 ramflush                        - Reboot to reclaim RAM, restoring the features running right now
 factoryreset [all]              - Wipe user accounts and reboot into the setup wizard (super admin);
@@ -1451,8 +1453,14 @@ espnowusersync [on|off]         - Enable/disable credential sync across mesh
 **Mesh time.** The mesh master sends its clock to each paired device when their encrypted session
 starts, every 10 minutes and when its own clock is set. A device takes it only from the master
 named on it (`espnowmasterfingerprint`, or the backup master named with `espnowbackupfingerprint`
-while it acts as master), and only when it has no better source of its own (RTC chip, NTP,
-`timeset`, CM5); `time` then shows the source "mesh". A device that names no master takes no mesh
+while it acts as master), and only when it has no better source of its own. One rank table
+decides what "better" is, strongest first: the device's own NTP, a time set by hand (`timeset`,
+`rtcset`), a mesh master whose own clock comes from NTP, the CM5, the RTC chip, the ring, and
+last a mesh master whose clock does not come from NTP. A clock takes a source that ranks equal
+or higher than the one that set it; a clock that mesh time set keeps following its master, but
+never on a time that ranks below what the device had itself (a device whose RTC chip set the clock
+follows an NTP-backed master and stops when that master's time is no longer from NTP). `time`
+then shows the source "mesh-ntp" (the master's clock is from NTP) or "mesh". A device that names no master takes no mesh
 time; `espnowtimestatus` says so. A master named in place of another (or a fingerprint cleared)
 counts at once: the device no longer follows the master it followed and takes the newly named
 one's next time. The master only sends a clock that comes from one of those four
@@ -1717,7 +1725,8 @@ print <message>                 - Broadcast a message to all output channels
 ```
 wifiautoreconnect <0|1>         - WiFi auto-reconnect on disconnect
 ntpserver <hostname>            - Set NTP server
-tzoffsetminutes <-720..720>     - Set timezone offset in minutes
+tzoffsetminutes <-720..840>     - Set timezone offset in minutes (a fixed offset: no automatic
+                                  daylight saving, change it when the clocks change)
 httpautostart <0|1>             - Auto-start web server on boot
 httpsenabled <0|1>              - Enable HTTPS (reboot required)
 webclihistorysize <1-100>       - Web CLI history buffer size
@@ -2305,7 +2314,7 @@ toftransitionms <0-5000>        - Reading transition time
 </details>
 
 <details>
-<summary><strong>imu - BNO055 9-DoF IMU</strong></summary>
+<summary><strong>imu - IMU (motion sensor)</strong></summary>
 
 ```
 openimu                         - Start IMU sensor
@@ -2320,6 +2329,8 @@ imuorientationcorrection <0|1>  - Apply orientation correction
 imupitchoffset <-180..180>      - Pitch offset correction
 imurolloffset <-180..180>       - Roll offset correction
 imuyawoffset <-180..180>        - Yaw offset correction
+imuaddress [0x28|0x29]          - BNO055 address (0x29 with ADR high); next openimu
+imubus <0|1>                    - The bus the IMU is on
 imuewmafactor <0.0-1.0>         - EWMA smoothing factor
 imutransitionms <0-1000>        - Transition time
 imuwebmaxfps <1-30>             - Web UI max frame rate
@@ -2360,8 +2371,10 @@ gpslog [interval_ms]            - Start GPS track logging (persists across boots
 openrtc                         - Start RTC
 closertc                        - Stop RTC
 rtcread [status|temp]           - Read time or temperature compensation
-rtcset <datetime|timestamp>     - Set RTC time (UTC, years 2020-2099)
-rtcsync [to|from]               - Sync time to/from system clock
+rtcset <YYYY-MM-DD HH:MM:SS> [utc|local]
+                                - Set the RTC chip and the system clock: local time unless utc
+                                  follows (or a unix timestamp, which is UTC); years 2020-2099
+rtcsync [to|from]               - Copy time RTC -> system (to, the default) or system -> RTC (from)
 rtcautostart [on|off]           - Auto-start on boot
 ```
 </details>
@@ -2474,8 +2487,8 @@ Supports up to 4 simultaneous distance measurements. Range up to 6m. Polling rat
 ### MLX90640 (Thermal)
 32x24 IR thermal camera. Web UI displays interpolated heatmap with HSL color mapping. Configurable palette, interpolation steps, and frame rate. High memory footprint - uses PSRAM.
 
-### BNO055 (IMU)
-9-DoF orientation (accel + gyro + magnetometer fusion). Orientation correction configurable via settings (`imuOrientationMode`, `imuPitchOffset`, etc.).
+### IMU (motion sensor)
+One chip per build (`IMU_DEVICE_TYPE`). The BNO055 fuses accel, gyro and magnetometer on the chip (NDOF mode) and is read at 0x28, or at 0x29 (`imuaddress 0x29`) when its ADR pin is high. `imuread` shows orientation (yaw/pitch/roll in degrees), acceleration (m/s²), gyro (rad/s), magnetometer (µT) and temperature; `imuread json` adds `mag` and the chip's calibration byte `cal`. The readings are the chip's own: the mounting correction (`imuorientationcorrection`, `imuorientationmode`, `imuPitchOffset`, etc.) is off by default, and nothing clamps the stored pitch (the web page's 3D view clamps only its drawing). Starting the BNO055 takes about a second and never holds the I2C bus while it waits, so the OLED and the other devices on the same bus keep working; a start that fails says why (no answer at the address, another chip there, no answer after its reset).
 
 ### APDS9960
 Three independent modes: color/RGB (`apdscolor`), proximity (`apdsproximity`), gesture up/down/left/right (`apdsgesture`). Each can be run independently.

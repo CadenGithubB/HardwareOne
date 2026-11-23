@@ -26,6 +26,18 @@ set_target_properties(ano_encoder_core_tests PROPERTIES CXX_STANDARD 17 CXX_STAN
 target_include_directories(ano_encoder_core_tests PRIVATE ../..)
 target_compile_options(ano_encoder_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# The motion (IMU) layer's pure rules (HAL_MotionCore.h): the orientation
+# correction, the action detector (rotation in rad/s, tap, free fall, steps,
+# pose debounce); and the BNO055 backend's bounded start sequence and decode
+# (HAL_Motion_BNO055Core.h) over a scripted chip.
+add_executable(motion_core_tests test_motion_core.cpp)
+add_executable(motion_bno055_core_tests test_motion_bno055_core.cpp)
+foreach(target motion_core_tests motion_bno055_core_tests)
+  set_target_properties(${target} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+  target_include_directories(${target} PRIVATE ../..)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -pedantic)
+endforeach()
+
 # Compiles the REAL header from the firmware tree, not a copy of it — the same
 # rule updater/test/host/CMakeLists.txt states. System_LLMUtf8.h is kept
 # dependency-free so this is possible; if it ever gains an Arduino or ESP-IDF
@@ -58,6 +70,18 @@ set_target_properties(clock_confirm_policy_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_include_directories(clock_confirm_policy_tests PRIVATE ../..)
 target_compile_options(clock_confirm_policy_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
+# The rules of time that need no device (System_ClockCore.h, behind
+# System_Clock): the validity bounds, the source rank table of Clock::step,
+# civil time, the formatter family (ISO UTC, compact UTC, local date and time,
+# file stamp, log prefix with offset, durations and ages), the time timeset
+# and rtcset read, and the timezone table that feeds the setup wizard and the
+# settings list. The production dependency-free header.
+add_executable(clock_core_tests test_clock_core.cpp)
+set_target_properties(clock_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(clock_core_tests PRIVATE ../..)
+target_compile_options(clock_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
 # The frames that wait for an ESP-NOW session (System_ESPNow_PendingQueue.h):
 # up to 4 per peer, 16 in all, sent oldest first, the newest refused when full,
@@ -1769,10 +1793,13 @@ add_test(NAME sdmmc_lifecycle
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME encoder_light_tests COMMAND encoder_light_tests)
 add_test(NAME ano_encoder_core_tests COMMAND ano_encoder_core_tests)
+add_test(NAME motion_core_tests COMMAND motion_core_tests)
+add_test(NAME motion_bno055_core_tests COMMAND motion_bno055_core_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
 add_test(NAME factory_wipe_policy_tests COMMAND factory_wipe_policy_tests)
 add_test(NAME clock_confirm_policy_tests COMMAND clock_confirm_policy_tests)
+add_test(NAME clock_core_tests COMMAND clock_core_tests)
 add_test(NAME espnow_pending_queue_tests COMMAND espnow_pending_queue_tests)
 add_test(NAME espnow_peer_restart_tests COMMAND espnow_peer_restart_tests)
 add_test(NAME uart_link_framing_tests COMMAND uart_link_framing_tests)

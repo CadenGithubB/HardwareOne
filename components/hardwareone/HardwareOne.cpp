@@ -118,7 +118,7 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 // sensor_config.h included early (before WiFi)
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_vl53l4cx.h"
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_seesaw.h"
 #include "i2csensor_apds9960.h"
 #include "i2csensor_pa1010d.h"
@@ -315,6 +315,13 @@ static PendingCommand sSerialPending;
 // The console prompt, printed after each completed line or reply.
 static void printSerialPrompt() { Serial.print("$ "); }
 static bool gSerialCliOverflow = false;  // the line being assembled exceeded CMD_INPUT_MAX; discarded whole at newline
+#if ENABLE_RTC_SENSOR
+// The early RTC sync of this boot (setup step 4), reported in step 6: whether
+// the chip's time was adopted, and the reason when a chip answered but was
+// not (nullptr: no chip answered).
+static bool gBootRtcAdopted = false;
+static const char* gBootRtcWhyNot = nullptr;
+#endif
 static TransportSessionEpoch gSerialCliEpoch = 0;
 
 
@@ -1245,19 +1252,10 @@ static void bootNetConnectAndSync(bool background) {
   if (wifiConnected) {
     bool rtcProvidedTime = false;
 #if ENABLE_RTC_SENSOR
-    // Check if RTC already set valid system time during early boot.
-    // getLocalTime(&t, 10) blocks up to 10ms for the time to become valid
-    // and fills timeinfo on success. Validate against the same year>=2020
-    // threshold Clock::isSynced uses, but read the JUST-populated tm_year
-    // directly — calling Clock::isSynced here would do a fresh time()/
-    // localtime_r and could race against the 10ms-window state we just
-    // sampled.
-    if (gSettings.rtcTimeHasBeenSet) {
-      struct tm timeinfo;
-      if (getLocalTime(&timeinfo, 10) && timeinfo.tm_year >= 120) {
-        rtcProvidedTime = true;
-      }
-    }
+    // Did the RTC set the system time during early boot? The clock's own
+    // ledger answers: the last source that set it this boot (this used to be
+    // inferred from the calibrated flag plus a year test on getLocalTime).
+    rtcProvidedTime = Clock::isSynced() && Clock::syncSource() == Clock::SYNC_RTC;
 #endif
     if (rtcProvidedTime) {
       // RTC already provided valid time - skip blocking NTP sync at boot
@@ -1849,9 +1847,14 @@ void hardwareone_setup() {
   initI2cBuses();
   bootDebugEspLogSet("i2c.master", ESP_LOG_WARN);  // Suppress routine NACK spam from FM radio RDS polling
 
-  // Early silent RTC sync (zero-alloc I2C read + settimeofday) — verbose sync happens later
+  // Early RTC sync (I2C read + Clock::step), so the boot's own log lines
+  // carry a date. Only a trusted chip is adopted: one this device has set
+  // (rtcTimeHasBeenSet) whose oscillator has not stopped since. The result is
+  // reported in step 6, when the console and the display are up. (Until
+  // 2026-11-22 this call adopted any chip with a plausible year, and the
+  // gated call in step 6 was dead.)
   #if ENABLE_RTC_SENSOR
-  rtcEarlyBootSync();
+  gBootRtcAdopted = rtcEarlyBootSync(&gBootRtcWhyNot);
   #endif
 #endif
 
@@ -1875,7 +1878,7 @@ void hardwareone_setup() {
     broadcastOutput("  [N] TOF      | Disabled (~25-30KB flash, ~10KB RAM saved)");
 #endif
 #if ENABLE_IMU_SENSOR
-    broadcastOutput("  [Y] IMU      | BNO055 9-DOF orientation sensor");
+    broadcastOutput("  [Y] IMU      | motion sensor (orientation, acceleration)");
 #else
     broadcastOutput("  [N] IMU      | Disabled (~12-18KB flash, ~8KB RAM saved)");
 #endif
@@ -2028,17 +2031,19 @@ void hardwareone_setup() {
   // always parses the actual Authorization header and lets isValidUser
   // decide. See AUTH_ASSESSMENT_REPORT.md §4 #6.)
 
-  // RTC early boot sync - only if RTC time has been previously set
-  // If rtcTimeHasBeenSet is false, we'll prioritize NTP at boot to get accurate time first
+  // What the early RTC sync (step 4) did, said once the console is up. The
+  // line is true to what happened: adopted, not adopted and why, or no chip.
 #if ENABLE_RTC_SENSOR
-  if (gSettings.rtcTimeHasBeenSet) {
-    oledSetBootProgress(28, "Syncing RTC");
-    if (rtcEarlyBootSync()) {
-      broadcastOutput("[Boot] System time set from RTC (previously calibrated)");
-    }
+  if (gBootRtcAdopted) {
+    oledSetBootProgress(28, "Time from RTC");
+    broadcastOutput("[Boot] System time set from the RTC");
+  } else if (gBootRtcWhyNot) {
+    // The reason is a command reply ("Error: [RTC] ..."); at boot it is a
+    // statement, not a failed command.
+    oledSetBootProgress(28, "RTC not used");
+    BROADCAST_PRINTF("[Boot] RTC time not adopted: %s", rtcReasonText(gBootRtcWhyNot));
   } else {
     oledSetBootProgress(28, "Skipping RTC");
-    broadcastOutput("[Boot] RTC time not yet set - will sync from NTP if available");
   }
 #endif
 
@@ -2627,10 +2632,14 @@ void hardwareone_loop() {
 #endif
   timeAnchorsTick();   // retro-date boot-named captures once the clock syncs
   VFS::sdWatchTick();  // SD card: mount a card put in after boot (boards with a detect switch; UP-06)
-  g2RingTimeSyncTick(); // ring-clock custody: adopt when dark / correct ring after sync
-  cm5TimeSyncTick();    // CM5 carrier RTC: adopt when dark / correct after sync (authoritative)
-  g2Tick();             // glasses: overlay auto-dismiss + adaptive clock/tz re-push (self-throttled)
+  // The clock sources of this lap, strongest first: the SNTP report runs
+  // before any other source is handed in, so each is ranked against a ledger
+  // that knows about a fresh NTP reply (Clock::step also ranks against NTP
+  // while a reply still waits for this report).
   ntpSyncDrainTick();   // hand real SNTP replies to the clock-step chokepoint
+  g2RingTimeSyncTick(); // ring-clock custody: adopt when dark / correct ring after sync
+  cm5TimeSyncTick();    // CM5 carrier RTC: adopt when dark / correct after sync (the rank table decides)
+  g2Tick();             // glasses: overlay auto-dismiss + adaptive clock/tz re-push (self-throttled)
   espnowMeshTimeApplyTick(); // mesh time: after the SNTP report, so a fresh NTP reply is the better source
   Clock::clockDutiesTick(); // drain filesystem-touching clock-step chores
 #if ENABLE_LOCAL_STT

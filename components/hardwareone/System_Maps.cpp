@@ -2935,12 +2935,12 @@ bool GpsTrackManager::parseGpsLine(const char* line, float& lat, float& lon) {
     // GPS-track CSV format has no "gps:" marker, so it is unaffected.
     if (strstr(line, "gps:")) return false;
     // Try Format 2: Dedicated GPS track CSV
-    // "HH:MM:SS,lat,lon,alt_m,speed_kn,satellites" (new format with time)
-    // "timestamp_ms,lat,lon,alt_m,speed_kn,satellites" (old format with millis)
-    // e.g., "14:30:45,37.123456,-122.123456,10.5,0.0,8"
+    // "timestamp_ms,lat,lon,alt_m,speed_kn,satellites": the sensor log's row
+    // stamp (UTC epoch ms when the clock was set, else uptime ms)
+    // e.g., "1795357805123,37.123456,-122.123456,10.5,0.0,8"
     char* endptr;
     
-    // Skip timestamp (first field - either HH:MM:SS or milliseconds)
+    // Skip the stamp (first field)
     const char* p = strchr(line, ',');
     if (!p) return false;
     p++;  // Skip comma

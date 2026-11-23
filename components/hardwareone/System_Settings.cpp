@@ -1183,7 +1183,7 @@ void settingsDefaults() {
   // - i2c (System_I2C.cpp): bus settings, clock speeds
   // - thermal (i2csensor_mlx90640.cpp): autoStart, polling, interpolation, EWMA, rotation
   // - tof (i2csensor_vl53l4cx.cpp): autoStart, polling, stability, transition
-  // - imu (i2csensor_bno055.cpp): autoStart, polling, EWMA, orientation correction
+  // - imu (HAL_Motion.cpp): autoStart, polling, EWMA, orientation correction
   // - gps (i2csensor_pa1010d.cpp): autoStart, polling
   // - apds (i2csensor_apds9960.cpp): autoStart, polling
   // - gamepad (i2csensor_seesaw.cpp): autoStart, polling
@@ -1618,10 +1618,12 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
   // and rebuilds three sections from it - blePeersWriteJson() and
   // espnowMeshesWriteJson() both .to<>() their objects, and every registered
   // scalar is stamped from gSettings - so the merge-read cannot recover any of
-  // it. On a WiFi device the trigger fires ~2 s into boot without anyone asking
-  // for it: a successful association calls saveWifiNetworks(), which lands
-  // here. Bluetooth pairings and the whole ESP-NOW mesh/bond config are gone
-  // before an operator could notice the file was damaged.
+  // it. On a WiFi device the trigger used to fire ~2 s into boot without anyone
+  // asking for it: a successful association called saveWifiNetworks(), which
+  // landed here (that save is gone since 2026-11-22; the next setting any
+  // command changes lands here just the same). Bluetooth pairings and the
+  // whole ESP-NOW mesh/bond config were gone before an operator could notice
+  // the file was damaged.
   //
   // The guard belongs here rather than on each section: this is the single
   // choke point every destructive rebuild passes through, and covering the

@@ -11,7 +11,6 @@
 #include "System_SensorLogging.h"
 #include "System_CommandReply.h"  // the reply words and how to read them
 #include "System_Clock.h"   // Clock::isSynced — session subfolder/timestamp shaping
-#include "System_SelfDevice.h"  // SelfDevice::uptimeSeconds — track stamp without GPS time
 #include "System_Utils.h"
 #include "System_Command.h"
 #include "System_Debug.h"
@@ -31,7 +30,7 @@
 // Conditional sensor includes (same approach as main .ino)
 #include "System_BuildConfig.h"
 #include "i2csensor_mlx90640.h"
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_vl53l4cx.h"
 #if ENABLE_OLED_INPUT
   #include "HAL_Input.h"   // readings, gInputRunning/Connected — populated by either driver
@@ -236,11 +235,13 @@ static String buildCsvHeader(uint8_t mask) {
 }
 
 // TRACK static header (mask-independent; hoisted from the create block).
+// The first column is the CSV rows' stamp: UTC epoch ms when the clock is
+// set, uptime ms when it is not.
 static const char kTrackHeader[] =
     "# GPS Track Log\n"
-    "# time,lat,lon,alt_m,speed_kn,satellites\n"
-    "# Signal loss: time,---,SIGNAL_LOST\n"
-    "# Signal regained: time,~~~,SIGNAL_REGAINED (lost N intervals)\n";
+    "# timestamp_ms,lat,lon,alt_m,speed_kn,satellites\n"
+    "# Signal loss: timestamp_ms,---,SIGNAL_LOST\n"
+    "# Signal regained: timestamp_ms,~~~,SIGNAL_REGAINED (lost N intervals)\n";
 
 // Write and check a complete header in an empty staging file. Only the caller
 // may publish it as an append target; partial headers must remain unpublished.
@@ -860,12 +861,13 @@ void sensorLogTick() {
       if (!buf) return "";
     }
 
-    // Dual-range stamp, one column: wall-clock epoch-ms when the clock is
-    // synced (13+ digits), millis-since-boot otherwise (≤10 digits — the
-    // ranges can't collide). Epoch stamps make rows from different
-    // sessions/boots continuous inside a per-day file; dark-boot rows stay
-    // boot-relative and are retro-dated at file level by System_TimeAnchors.
-    // int64 is mandatory — epoch-ms truncates silently in 32-bit.
+    // Dual-range stamp, one column (the track rows carry the same one):
+    // wall-clock epoch-ms when the clock is synced (13+ digits),
+    // millis-since-boot otherwise (≤10 digits — the ranges can't collide).
+    // Epoch stamps make rows from different sessions/boots continuous inside
+    // a per-day file; dark-boot rows stay boot-relative and are retro-dated at
+    // file level by System_TimeAnchors. int64 is mandatory — epoch-ms
+    // truncates silently in 32-bit.
     const int64_t timestamp =
         Clock::isSynced() ? Clock::epochMillis() : (int64_t)millis();
     char* pos = buf;
@@ -971,19 +973,16 @@ void sensorLogTick() {
   static uint32_t trackSignalLostCount = 0;
   static bool trackWasConnected = false;
 
-  // Track format builder — GPS-only compact: time,lat,lon,alt,speed,sats
+  // Track format builder — GPS-only compact: timestamp_ms,lat,lon,alt,speed,sats
   auto buildTrackFromSnap = [](const SensorCacheSnapshot& s) -> const char* {
     EXT_RAM_BSS_ATTR static char buf[128];
-    
-    // Format timestamp from GPS time or millis fallback
-    char ts[12];
-    if (s.gpsHasTime) {
-      snprintf(ts, sizeof(ts), "%02d:%02d:%02d", s.gpsHour, s.gpsMinute, s.gpsSecond);
-    } else {
-      unsigned long secs = SelfDevice::uptimeSeconds();
-      snprintf(ts, sizeof(ts), "%02lu:%02lu:%02lu",
-               (secs / 3600) % 24, (secs / 60) % 60, secs % 60);
-    }
+
+    // The same stamp as a CSV row. (Until 2026-11-22 a track row carried a
+    // time of day without a date: GPS UTC when the receiver had the time,
+    // else the uptime folded into 24 hours, both under one column.)
+    char ts[24];
+    snprintf(ts, sizeof(ts), "%lld",
+             (long long)(Clock::isSynced() ? Clock::epochMillis() : (int64_t)millis()));
 
     if (!s.gpsFix) {
       trackSignalLostCount++;
@@ -1836,7 +1835,7 @@ const char* cmd_sensorlog(const String& argsInput) {
       snprintf(getDebugBuffer(), 1024, "Current format: %s\nUsage: sensorlog format <text|csv|track>\n"
                "  text: Human-readable sensor data\n"
                "  csv: Structured CSV data\n"
-               "  track: GPS-only compact track (time,lat,lon,alt,speed,sats) with signal loss dedup\n"
+               "  track: GPS-only compact track (timestamp_ms,lat,lon,alt,speed,sats) with signal loss dedup\n"
                "  WARNING: 'track' also OVERWRITES the sensor mask to GPS-only and persists\n"
                "           it — your previous sensor selection is not recoverable.",
                fmtName);

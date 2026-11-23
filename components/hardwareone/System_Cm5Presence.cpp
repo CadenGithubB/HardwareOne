@@ -731,16 +731,15 @@ void cm5TimeSyncTick() {
       adopt = true;
     }
   } else {
-    // Already valid: CM5 is authoritative over the fallback sources actually
-    // present on a carrier (ring / RTC-carryover / a prior CM5 step), but in
-    // Phase 1 it YIELDS to a live NTP fix and to a manual operator set. To make
-    // CM5 the full grandmaster (override NTP too), drop the SYNC_NTP term here
-    // — that ordering decision belongs to the Phase 2 central arbiter. A
-    // battery-RTC-only Pi (bit0 clear) may seed a dark clock but not override a
-    // running one. Drift gate self-quenches steady state.
-    const Clock::SyncSource src = Clock::syncSource();
+    // Already valid: whether the CM5 may correct the source that set the
+    // clock is the clock's rank table (System_ClockCore.h): it corrects the
+    // RTC chip, the ring, mesh time without NTP, a clock carried over a
+    // restart and an earlier CM5 step; it yields to this device's own NTP, a
+    // manual time and an NTP-backed mesh master. A battery-RTC-only Pi (bit0
+    // clear) may seed a dark clock but not override a running one. Drift gate
+    // self-quenches steady state.
     const bool correctable =
-        src != Clock::SYNC_MANUAL && src != Clock::SYNC_NTP;
+        Clock::stepVerdict(Clock::SYNC_CM5, projected) == Clock::StepResult::Stepped;
     if (correctable && (stash.flags & CM5_TIME_FLAG_PI_SYNCED)) {
       int64_t drift = static_cast<int64_t>(projected) -
                       static_cast<int64_t>(before);
@@ -749,10 +748,7 @@ void cm5TimeSyncTick() {
     }
   }
 
-  if (step) {
-    struct timeval tv = { .tv_sec = projected, .tv_usec = 0 };
-    settimeofday(&tv, nullptr);
-    Clock::clockStepped(Clock::SYNC_CM5, before);
+  if (step && Clock::step(Clock::SYNC_CM5, projected) == Clock::StepResult::Stepped) {
     if (adopt) {
       char tsStr[24] = "";
       struct tm tmNow;

@@ -28,7 +28,7 @@ def main() -> None:
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     owners = (
-        ("vl53l4cx", "tof", "tof"), ("bno055", "imu", "imu"),
+        ("vl53l4cx", "tof", "tof"), ("HAL_Motion", "imu", "imu"),
         ("mlx90640", "thermal", "thermal"), ("pa1010d", "gps", "gps"),
         ("apds9960", "apds", "apds"), ("sths34pf80", "presence", "presence"),
         ("ds3231", "rtc", "rtc"), ("rda5807", "fmRadio", "fmRadio"),
@@ -37,7 +37,8 @@ def main() -> None:
     definitions = []
     logs = set()
     for file, function, unique in owners:
-        source = (COMPONENT / f"i2csensor_{file}.cpp").read_text()
+        name = f"{file}.cpp" if file.startswith("HAL_") else f"i2csensor_{file}.cpp"
+        source = (COMPONENT / name).read_text()
         code = extract_block(source, f"bool {function}StartInternal()")
         # The two alternative input backends export the same production name;
         # only their declaration names change to exercise both in one binary.
@@ -49,12 +50,13 @@ def main() -> None:
         definitions.append(code)
     types = []
     for file, names in (
-        ("vl53l4cx", ("TofCache",)), ("bno055", ("ImuCache",)),
+        ("vl53l4cx", ("TofCache",)), ("HAL_Motion", ("ImuCache",)),
         ("pa1010d", ("GpsCache",)), ("apds9960", ("ApdsCache",)),
         ("sths34pf80", ("PresenceCache",)), ("ds3231", ("RtcDateTime", "RtcCache")),
         ("ano_encoder", ("AnoEncoderCache",)),
     ):
-        source = (COMPONENT / f"i2csensor_{file}.h").read_text()
+        name = f"{file}.h" if file.startswith("HAL_") else f"i2csensor_{file}.h"
+        source = (COMPONENT / name).read_text()
         types.extend(extract_block(source, f"struct {name}") + ";" for name in names)
     harness = (HERE / "sensor_start_outcomes_harness.cpp").read_text()
     for marker, text in {

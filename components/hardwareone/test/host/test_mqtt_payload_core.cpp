@@ -44,8 +44,8 @@ using namespace mqttpayload;
 static const char kFxThermal[] = R"json({"valid":true,"connected":true,"ts":123456,"min":21.5,"avg":24.3,"max":31.0})json";
 // fixture: i2csensor_vl53l4cx.cpp int tofBuildDataJson(
 static const char kFxTof[] = R"json({"valid":true,"connected":true,"ts":123456,"objects":[{"id":1,"distance_mm":1460,"status":0,"valid":true},{"id":3,"distance_mm":812,"status":0,"valid":true}]})json";
-// fixture: i2csensor_bno055.cpp int imuBuildDataJson(
-static const char kFxImu[] = R"json({"valid":true,"connected":true,"ts":123456,"accel":{"x":0.12,"y":-0.03,"z":9.81},"gyro":{"x":0.001,"y":-0.002,"z":0.000},"ori":{"yaw":12.50,"pitch":1.25,"roll":-0.75},"temp":27})json";
+// fixture: HAL_Motion.cpp int imuBuildDataJson(
+static const char kFxImu[] = R"json({"valid":true,"connected":true,"ts":123456,"accel":{"x":0.12,"y":-0.03,"z":9.81},"gyro":{"x":0.001,"y":-0.002,"z":0.000},"ori":{"yaw":12.50,"pitch":1.25,"roll":-0.75},"temp":27,"mag":{"x":21.50,"y":-4.25,"z":-40.06},"cal":255})json";
 // fixture: i2csensor_sths34pf80.cpp int presenceBuildDataJson(
 static const char kFxPresence[] = R"json({"valid":true,"connected":true,"ts":123456,"ambient":22.75,"presence":1500,"presenceDetected":true,"motion":40,"motionDetected":false,"tempShock":0,"tempShockDetected":false})json";
 // fixture: i2csensor_pa1010d.cpp int gpsBuildDataJson(
@@ -55,7 +55,7 @@ static const char kFxGpsNoFix[] = R"json({"valid":true,"connected":true,"ts":123
 // fixture: i2csensor_apds9960.cpp int apdsBuildDataJson(
 static const char kFxApds[] = R"json({"valid":true,"connected":true,"ts":123456,"r":120,"g":95,"b":80,"c":310,"proximity":12})json";
 // fixture: i2csensor_ds3231.cpp int rtcBuildDataJson(
-static const char kFxRtc[] = R"json({"valid":true,"connected":true,"ts":123456,"year":2026,"month":11,"day":20,"hour":17,"minute":4,"second":9,"temp":24.5})json";
+static const char kFxRtc[] = R"json({"valid":true,"connected":true,"ts":123456,"utc":true,"year":2026,"month":11,"day":20,"hour":17,"minute":4,"second":9,"temp":24.5})json";
 // fixture: i2csensor_seesaw.cpp int gamepadBuildDataJson(
 static const char kFxGamepad[] = R"json({"valid":true,"connected":true,"ts":123456,"x":512,"y":498,"buttons":4294967295})json";
 // fixture: i2csensor_ano_encoder.cpp int anoEncoderBuildDataJson(

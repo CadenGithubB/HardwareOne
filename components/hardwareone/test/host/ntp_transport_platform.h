@@ -19,6 +19,10 @@ int64_t projectedEpochUs();
 void refreshProjection();
 void applyTimezone();
 void clockStepped(SyncSource source, time_t before);
+// lwIP's SNTP step in two halves: the callback says the clock is NTP's now,
+// the main-loop drain reports the step.
+void sntpStepPending();
+void sntpStepReport(time_t before);
 }
 
 struct NtpFixture {
@@ -27,6 +31,7 @@ struct NtpFixture {
   bool replyDuringDrain = false, rtcSuccess = false;
   int delayCalls = 0, replyAfterDelay = 0, configCalls = 0, criticalDepth = 0;
   int anchorCalls = 0, resolveCalls = 0, rtcCalls = 0, refreshCalls = 0;
+  int sntpPendingCalls = 0;  // Clock::sntpStepPending, from the callback
   int timezoneMinutes = -330;
   int64_t nowUs = 1000000, projectionUs = 0;
   time_t epoch = 0;
@@ -66,7 +71,9 @@ bool esp_sntp_enabled();
 void sntp_set_time_sync_notification_cb(void (*callback)(timeval*));
 void configTime(long offset, int daylight, const char* primary, const char* secondary, const char* tertiary);
 #if ENABLE_RTC_SENSOR
-bool rtcSyncToSystem();
+// False with *whyNot = the reason as a reply line; prints nothing itself.
+bool rtcSyncToSystem(const char** whyNot = nullptr);
+const char* rtcReasonText(const char* reply);
 #endif
 size_t ntpTestStrlcpy(char* destination, const char* source, size_t size);
 time_t ntpTestTime(time_t* output);

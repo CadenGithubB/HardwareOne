@@ -12,6 +12,7 @@
 
 #define ENABLE_GT911_TOUCH 0
 #define ENABLE_ANO_ENCODER 1
+#define ENABLE_IMU_SENSOR 1
 #include "System_I2CInstanceCore.h"
 #include "i2csensor_ano_encoder_core.h"
 
@@ -26,7 +27,10 @@ static struct {
   int fuelGaugeBus = 0, oledBus = 1;
   int anoEncoderI2cAddr = 0x4A;  // a non-default ANO address (jumper A0)
   int magAddress = 0x1C;         // the second chip's address setting
+  int imuAddress = 0x28;         // the IMU's address setting (imuaddress)
 } gSettings;
+// HAL_Motion: the address the IMU opens, from its setting.
+static uint8_t imuDeviceAddress() { return static_cast<uint8_t>(gSettings.imuAddress); }
 static uint8_t encoderInstanceAddress(uint8_t) { return 0; }
 static int encoderInstanceBus(uint8_t) { return 0; }
 
@@ -125,6 +129,24 @@ int main() {
   assert(!isSensorConnected("tof"));
   scanned({{1, 0x28}});
   connectedDevices[0].isConnected = false;  // gone since the scan
+  assert(!isSensorConnected("imu"));
+
+  // The IMU's address follows its setting (imuaddress): a chip strapped to
+  // 0x29 is claimed and found at 0x29, not at 0x28.
+  gSettings.imuAddress = 0x29;
+  {
+    const std::set<Use> uses = walk();
+    assert(uses.count(Use{1, 0x29, I2C_DEVICE_IMU, 1, 2}) == 1 && uses.count(Use{1, 0x28, I2C_DEVICE_IMU, 1, 2}) == 0);
+    assert(uses.count(Use{1, 0x1C, I2C_DEVICE_IMU, 1, 3}) == 1);
+  }
+  scanned({{1, 0x29}});
+  assert(isSensorConnected("imu"));
+  scanned({{1, 0x28}});
+  assert(!isSensorConnected("imu"));
+  gSettings.imuAddress = 0x28;
+  // ...and set to 0x28, a chip (or a ToF) answering only at 0x29 is not the
+  // IMU: the other address is no hidden alternate.
+  scanned({{1, 0x29}});
   assert(!isSensorConnected("imu"));
 
   // i2cRowOwnerByName: rows of devices without a queue type only.

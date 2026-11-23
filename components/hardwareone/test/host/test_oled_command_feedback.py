@@ -75,7 +75,7 @@ VALUE_SCROLL = ("static void oledValueScrollDone(", "static void oledValueScroll
                 "void oledValueScrollStep(", "int32_t oledValueScrollShown(",
                 "static void oledValueScrollSessionBoundary(")
 # Every OLED screen source whose actions run commands.
-OLED_SOURCES_GLOB = ("OLED_*.cpp", "i2csensor_*_oled.h")
+OLED_SOURCES_GLOB = ("OLED_*.cpp", "i2csensor_*_oled.h", "HAL_*_OLED.h")
 # A wait that stays (value scroll, a chained or completion-dependent action)
 # carries this tag on its line; step 2 of the OLED background plan moves them.
 WAIT_TAG = "// waits:"

@@ -18,6 +18,7 @@
 #include "OLED_Display.h"
 #include "OLED_FirstTimeSetup.h"
 #include "System_BuildConfig.h"
+#include "System_Clock.h"      // Clock::isSynced
 #include "System_Debug.h"
 #include "System_BootState.h"  // bootStateGetBootCount — boot counter lives in NVS, not users.json
 #include "System_FirstTimeSetup.h"
@@ -366,8 +367,8 @@ static bool createInitialAdminUser(const String& username, const String& plainte
   // already loaded it). Must NOT hardcode 1 — the device may have power-cycled
   // several times before setup completed, and telemetry/heartbeats read this.
   gBootCounter = bootStateGetBootCount();
-  if (time(nullptr) > 0) {
-    resolvePendingUserCreationTimes();  // resolve creation timestamp if NTP already synced
+  if (Clock::isSynced()) {
+    resolvePendingUserCreationTimes();  // resolve creation timestamp if the clock is already set
   }
   return true;
 }

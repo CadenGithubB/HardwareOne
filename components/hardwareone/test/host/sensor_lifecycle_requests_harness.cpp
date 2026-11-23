@@ -91,6 +91,8 @@ static struct {
   bool presenceAutoStart = false;
   bool i2cEnabled = true;
 } gSettings;
+// HAL_Motion: the address the IMU opens (its imuAddress setting).
+static uint8_t imuDeviceAddress() { return 0x28; }
 // The OLED menu's input auto-start (OLED_Utils.cpp tryAutoStartInputForMenu):
 // its connected flag and the RAM-flush resolve of the shared input switch.
 static bool gInputConnected = false;

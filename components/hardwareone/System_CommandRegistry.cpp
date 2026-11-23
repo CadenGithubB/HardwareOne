@@ -39,7 +39,7 @@ static constexpr CommandModule gCommandModules[] = {
     "prompt, and clear wipes the CLI scrollback/history.", cliCommands,          &cliCommandsCount, CMD_MODULE_CORE, nullptr },
   { "system",     "Core system commands", "The system module holds core device commands that do not belong to any peripheral. "
     "Status and inspection: status (WiFi, filesystem, memory summary), uptime, time "
-    "(uptime plus NTP wall-clock if synced), temperature and voltage (ESP32 internal "
+    "(the device's local time, the source that set the clock, and the uptime), temperature and voltage (ESP32 internal "
     "die temp and supply rail), taskstats/perftop (FreeRTOS task and live loop/CPU "
     "profiling), fsusage, events (recent system events from the in-memory register "
     "that drives automation event triggers), and the memory tools memsample (snapshot, with memsample "
@@ -47,7 +47,9 @@ static constexpr CommandModule gCommandModules[] = {
     "power: reboot, ramflush, cpufreq [MHz] to read or set a supported CPU clock, lightsleep "
     "[seconds] for ESP32 light sleep, deepsleep for power-off (reset to wake), and "
     "wait <ms> to pause command-script execution. "
-    "timeset sets the clock manually. broadcast <message> pushes a line of text to all "
+    "timeset sets the clock by hand: a date and time is read as device-local time unless "
+    "the word utc follows it, a Unix timestamp is UTC, and the device's own NTP replaces the "
+    "time at its next reply. broadcast <message> pushes a line of text to all "
     "connected output interfaces, and factoryreset deletes the user-accounts file so "
     "the first-boot setup wizard re-runs on next reboot while deliberately preserving "
     "WiFi credentials and other settings. Most mutating commands (timeset, cpufreq, "
@@ -318,11 +320,11 @@ static constexpr CommandModule gCommandModules[] = {
     "controls how often the firmware reads the hardware.", tofCommands,          &tofCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("tof"); } },
 #endif
 #if ENABLE_IMU_SENSOR
-  { "imu",        "BNO055 9-DOF orientation sensor", "The BNO055 is a 9-DOF inertial measurement unit providing fused absolute "
-    "orientation. openimu starts it, imuread reports yaw/pitch/roll (degrees) plus "
-    "acceleration, gyroscope, and chip temperature, and closeimu stops it; imuautostart "
-    "[on|off] persists launching it at boot, and it runs on the fixed secondary I2C bus "
-    "(Wire1) using the board external crystal. Beyond raw orientation, imuactions runs "
+  { "imu",        "IMU (motion sensor)", "The IMU is the motion sensor on I2C; the build picks its chip (a BNO055, "
+    "which fuses absolute orientation on the chip). openimu starts it, imuread reports "
+    "yaw/pitch/roll (degrees) plus acceleration, gyroscope, magnetometer and chip "
+    "temperature, and closeimu stops it; imuautostart [on|off] persists launching it at "
+    "boot, imubus and imuaddress say where it is wired. Beyond raw orientation, imuactions runs "
     "gesture/event detection derived from the motion data: shake, tilt (with "
     "direction), tap/knock, rotation (with axis), freefall, a step counter with "
     "cadence, and screen-style orientation. Because the chip can be mounted in any "
@@ -415,13 +417,17 @@ static constexpr CommandModule gCommandModules[] = {
     "temperature sensor. Lifecycle: openrtc starts the RTC task, rtcread [status|temp] "
     "reads the clock (or die temperature), and closertc stops it; rtcautostart [on|off] "
     "persists boot auto-start and the module appears in help only when detected. rtcset "
-    "accepts either \"YYYY-MM-DD HH:MM:SS\" (UTC) or a bare Unix timestamp, years 2020 to "
-    "2099, and writes it to the chip, computing day-of-week automatically. rtcsync "
-    "[to|from] moves time "
-    "between the RTC and the system clock: to (the default) copies RTC -> system, from "
+    "reads its argument as timeset does (\"YYYY-MM-DD HH:MM:SS\" is device-local time unless "
+    "the word utc follows it; a bare Unix timestamp is UTC; years 2020 to 2099), writes it to "
+    "the chip in UTC, computing day-of-week automatically, and sets the system clock to the "
+    "same time. rtcsync [to|from] moves time "
+    "between the RTC and the system clock: to (the default) copies RTC -> system, and is "
+    "refused while the clock is set from a source that outranks the chip (the device's own "
+    "NTP, a manual time, an NTP-backed mesh master, the CM5); from "
     "copies system -> RTC (use this after an NTP sync to persist accurate time into the "
-    "battery-backed chip). Setting the time via rtcset or rtcsync from also marks the "
-    "RTC as calibrated so later boots trust it as a time source.", rtcCommands,          &rtcCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("rtc"); } },
+    "battery-backed chip). Setting the time via rtcset, rtcsync from or rtcsync to marks the "
+    "RTC as set, so later boots take its time on their own; a chip that this device has not "
+    "set, or that lost power since (its oscillator-stopped flag), is not adopted at boot.", rtcCommands,          &rtcCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("rtc"); } },
 #endif
 #if ENABLE_PRESENCE_SENSOR
   { "presence",   "STHS34PF80 IR presence/motion sensor", "The STHS34PF80 is an infrared presence and motion sensor that detects warm bodies "

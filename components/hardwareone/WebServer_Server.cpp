@@ -28,6 +28,7 @@
 #endif
 
 #include "System_Automation.h"
+#include "System_Deadline.h"  // deadlineAfter: a session expiry is never stored as 0 ("none")
 #include "System_Debug.h"
 #include "System_I2C.h"
 #include "System_Icons.h"
@@ -609,7 +610,7 @@ String setSession(httpd_req_t* req, const String& u) {
   s.bootId = gBootId;  // Store current boot ID for version checking
   s.createdAt = millis();
   s.lastSeen = s.createdAt;
-  s.expiresAt = s.createdAt + SESSION_TTL_MS;
+  s.expiresAt = deadlineAfter(s.createdAt, SESSION_TTL_MS);  // never 0: 0 reads as "no expiry"
   s.lastInteractionMs = sessionStampNow();  // login counts as a real interaction
 
   // Debug: Log session creation with boot ID
@@ -893,7 +894,7 @@ bool isAuthed(httpd_req_t* req, const String& sid, String& outUser) {
 
   // refresh
   gSessions[idx].lastSeen = now;
-  gSessions[idx].expiresAt = now + SESSION_TTL_MS;
+  gSessions[idx].expiresAt = deadlineAfter(now, SESSION_TTL_MS);  // never 0: 0 reads as "no expiry"
   // Stamp the idle clock ONLY on genuine user actions, never on passive
   // background traffic, so the session goes idle when the user walks away.
   if (requestIsInteraction(req, uri)) {
@@ -918,13 +919,25 @@ static void appendNamedTransportSession(JsonArray& sessions,
 // own rich cookie/IP/timestamp metadata; the other transports expose a
 // synchronized username snapshot plus their transport identifier.
 void buildAllSessionsJson(const String& currentSid, JsonArray& sessions) {
-  // Convert boot millis to epoch millis for display
-  time_t now = time(nullptr);
-  unsigned long currentMillis = millis();
-  int64_t epochMillis = 0;
-  if (now > 0) {
-    epochMillis = (int64_t)now * 1000LL - (int64_t)currentMillis;
-  }
+  // A session's three stamps are millis() values. Each is sent twice, and a
+  // key never changes its meaning with the state of the clock:
+  //   <what>EpochMs   UTC epoch ms, null while the clock is not set
+  //   <what>UptimeMs  the millis() stamp itself
+  // (Until 2026-11-22 one key held epoch ms when the clock was set and uptime
+  // ms when it was not.) The epoch is the clock now minus how long ago the
+  // stamp is, as a signed 32-bit difference: right across the millis() wrap,
+  // and for expiresAt, which lies ahead.
+  const int64_t nowEpochMs = Clock::epochMillisOrZero();
+  const uint32_t nowUptimeMs = (uint32_t)millis();
+  const auto putStamp = [&](JsonObject session, const char* epochKey, const char* uptimeKey,
+                            unsigned long stampMs) {
+    if (nowEpochMs > 0) {
+      session[epochKey] = nowEpochMs + (int64_t)(int32_t)((uint32_t)stampMs - nowUptimeMs);
+    } else {
+      session[epochKey] = nullptr;
+    }
+    session[uptimeKey] = (uint32_t)stampMs;
+  };
 
   // Do not hold the web-session fence while taking any transport-owned
   // snapshot. Keeping the lock domains disjoint avoids creating a lock-order
@@ -942,10 +955,9 @@ void buildAllSessionsJson(const String& currentSid, JsonArray& sessions) {
         session["sid"] = s.sid.substring(0, 8) + "...";
         session["user"] = s.user;
         session["transport"] = "web";
-        // Convert boot-relative millis to epoch millis for JavaScript Date().
-        session["createdAt"] = (epochMillis > 0) ? (epochMillis + (int64_t)s.createdAt) : s.createdAt;
-        session["lastSeen"] = (epochMillis > 0) ? (epochMillis + (int64_t)s.lastSeen) : s.lastSeen;
-        session["expiresAt"] = (epochMillis > 0) ? (epochMillis + (int64_t)s.expiresAt) : s.expiresAt;
+        putStamp(session, "createdAtEpochMs", "createdAtUptimeMs", s.createdAt);
+        putStamp(session, "lastSeenEpochMs", "lastSeenUptimeMs", s.lastSeen);
+        putStamp(session, "expiresAtEpochMs", "expiresAtUptimeMs", s.expiresAt);
         session["ip"] = s.ip.length() ? s.ip : "-";
         session["current"] = (s.sid == currentSid);
       }
@@ -1189,7 +1201,7 @@ static void loadIpBansFromFile(bool replace) {
       strncpy(staged[count].ip, ipStr.c_str(), sizeof(staged[count].ip) - 1);
       const char* reason = ban["reason"] | "";
       strncpy(staged[count].reason, reason, sizeof(staged[count].reason) - 1);
-      staged[count].bannedAt = ban["bannedAt"] | 0UL;
+      staged[count].bannedAtEpochMs = ban["bannedAtEpochMs"] | int64_t(0);
       count++;
     }
   }
@@ -1292,7 +1304,9 @@ static bool saveIpBans() {
     JsonObject ban = bans.add<JsonObject>();
     ban["ip"]       = encryptedIp;
     ban["reason"]   = snapshot[i].reason;
-    ban["bannedAt"] = snapshot[i].bannedAt;
+    // Epoch ms, null while unknown (banned before the clock was set).
+    if (snapshot[i].bannedAtEpochMs > 0) ban["bannedAtEpochMs"] = snapshot[i].bannedAtEpochMs;
+    else ban["bannedAtEpochMs"] = nullptr;
   }
   free(snapshot);
   if (!encrypted || doc.overflowed()) return false;
@@ -1353,7 +1367,7 @@ bool banIp(const char* ip, const char* reason) {
       if (reason && reason[0]) {
         strncpy(entry.reason, reason, sizeof(entry.reason) - 1);
       }
-      entry.bannedAt = millis();
+      entry.bannedAtEpochMs = Clock::epochMillisOrZero();
       added = true;
     }
   }
@@ -1492,7 +1506,7 @@ void enqueueTargetedRevokeForSessionIdx(int idx, const String& reasonMsg) {
   if (gSessions[idx].sid.length() == 0) return;
   webInvalidateSessionSlot(idx);
   gSessions[idx].revoked = true;
-  gSessions[idx].expiresAt = millis() + 30000UL;
+  gSessions[idx].expiresAt = deadlineAfter(millis(), 30000UL);  // never 0: 0 reads as "no expiry"
 }
 
 int webRevokeSessionsForUser(const String& username,
@@ -5075,7 +5089,9 @@ esp_err_t handleAdminPending(httpd_req_t* req) {
         for (JsonObject user : pending) {
           JsonObject sanitizedUser = pendingArray.add<JsonObject>();
           sanitizedUser["username"] = user["username"];
-          sanitizedUser["timestamp"] = user["timestamp"];
+          // When the request was made, UTC epoch ms; null when the clock was
+          // not set then. (Was "timestamp", the uptime in ms.)
+          sanitizedUser["requestedAtEpochMs"] = user["requestedAtEpochMs"];
           // Explicitly exclude password field for security
         }
       }
@@ -5755,14 +5771,10 @@ void startHttpServer() {
           if (mbedtls_x509_crt_parse(&crt, (const unsigned char*)sHttpsCertData.c_str(), sHttpsCertData.length() + 1) == 0) {
             time_t now = time(NULL);
             if (Clock::isValidEpoch(now)) {  // Only check if time is set; System_Clock owns that question
-              struct tm expTm = {};
-              expTm.tm_year = crt.valid_to.year - 1900;
-              expTm.tm_mon = crt.valid_to.mon - 1;
-              expTm.tm_mday = crt.valid_to.day;
-              expTm.tm_hour = crt.valid_to.hour;
-              expTm.tm_min = crt.valid_to.min;
-              expTm.tm_sec = crt.valid_to.sec;
-              time_t expTime = mktime(&expTm);
+              // An X.509 validity time is UTC (mktime read it as local time).
+              const time_t expTime = (time_t)clockcore::epochFromCivilUtc(
+                  crt.valid_to.year, crt.valid_to.mon, crt.valid_to.day,
+                  crt.valid_to.hour, crt.valid_to.min, crt.valid_to.sec);
               if (expTime <= now) {
                 broadcastOutput("WARNING: HTTPS certificate has EXPIRED!");
               } else {

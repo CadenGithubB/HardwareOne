@@ -35,6 +35,7 @@
 #include <mbedtls/sha256.h>
 #include <vector>
 
+#include "System_Clock.h"   // when a backup was made: epoch ms and ISO UTC
 #include "System_Debug.h"
 #include "System_Mutex.h"
 #include "System_FirstTimeSetup.h"
@@ -403,11 +404,19 @@ static esp_err_t handleBackup(httpd_req_t* req) {
   doc["magic"] = "HWBACKUP";
   doc["formatVersion"] = kBackupFormatVersion;
 
-  // Timestamp
-  char ts[32];
-  unsigned long now = millis();
-  snprintf(ts, sizeof(ts), "%lu", now);
-  doc["timestamp"] = ts;
+  // When the backup was made: UTC epoch ms, and the same instant as text.
+  // Null while the clock is not set. (Until 2026-11-22 this was "timestamp",
+  // the uptime in ms as a string, which said nothing about when.)
+  const int64_t createdAtEpochMs = Clock::epochMillisOrZero();
+  char createdAtUtc[24];
+  if (createdAtEpochMs > 0 &&
+      Clock::formatIso8601Utc((time_t)(createdAtEpochMs / 1000), createdAtUtc, sizeof(createdAtUtc))) {
+    doc["createdAtEpochMs"] = createdAtEpochMs;
+    doc["createdAtUtc"] = createdAtUtc;
+  } else {
+    doc["createdAtEpochMs"] = nullptr;
+    doc["createdAtUtc"] = nullptr;
+  }
 
   // Device info
   JsonObject device = doc["device"].to<JsonObject>();

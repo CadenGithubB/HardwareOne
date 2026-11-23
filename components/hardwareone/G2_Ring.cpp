@@ -2234,9 +2234,9 @@ static bool ringAdoptClockIfDark(void) {
   if (adopted == 0) return false;
   sAdoptedThisBoot = true;
 
-  const time_t before = time(nullptr);  // pre-step, for the duty helper
-  struct timeval tv = { .tv_sec = adopted, .tv_usec = 0 };
-  settimeofday(&tv, nullptr);
+  // Clock::step: the ring fills a clock that is not set; any source that set
+  // the clock meanwhile outranks or equals it, and the step is then refused.
+  if (Clock::step(Clock::SYNC_RING, adopted) != Clock::StepResult::Stepped) return false;
 
   char tsStr[24] = "";
   struct tm tmNow;
@@ -2244,8 +2244,6 @@ static bool ringAdoptClockIfDark(void) {
     strftime(tsStr, sizeof(tsStr), "%Y-%m-%d %H:%M", &tmNow);
   }
   INFO_RINGF("Adopted ring clock: %s (no local time source)", tsStr);
-
-  Clock::clockStepped(Clock::SYNC_RING, before);
   return true;
 }
 

@@ -339,10 +339,11 @@ static void testScanLabelRows() {
   assert(i2cAddressLabelRows(rows, count, 0x36, 1, all, out, 1) == 1 && out[0] == 0);
   assert(i2cRowHasAddress(rows[1], 0x3C) && !i2cRowHasAddress(rows[0], 0x37));
   // A row's own address before an earlier row's alternate: the ToF at 0x29
-  // is not the IMU (alternate 0x29), both on bus 0 (the I2C_LEVEL_FULL table
-  // order); with the ToF not in this build the IMU's alternate claims it.
+  // is not a two-address chip at 0x28 (alternate 0x29), both on bus 0; with
+  // the ToF not in this build the alternate claims it. (The BNO055 row no
+  // longer has an alternate: its address is the imuAddress setting.)
   const TestRow imuTof[] = {
-    {0x28, true, 0x29, true, imuBusAt, nullptr, 1},   // BNO055, alternate 0x29
+    {0x28, true, 0x29, true, imuBusAt, nullptr, 1},   // a chip with alternate 0x29
     {0x39, false, 0, true, imuBusAt, nullptr, 1},     // APDS9960
     {0x29, false, 0, true, imuBusAt, nullptr, 1},     // VL53L4CX
   };

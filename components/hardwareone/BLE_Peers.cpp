@@ -534,6 +534,7 @@ bool blePeerBeginManualConnectRequest(
     if (state.autoReconnect && !state.wantReconnect) {
       state.wantReconnect = true;
       state.dueMs = millis() + 5000;
+      if (!state.dueMs) state.dueMs = 1;  // 0 reads as "due now"
     }
     if (kind == BLE_PEER_PHONE) {
       // A manual openphone starts a fresh burst: the attempt it admits, then

@@ -250,18 +250,12 @@ static bool isLoginModeAvailable(String* outReason) {
 // Logout Mode
 // ============================================================================
 
-// Logout state
-static unsigned long logoutMessageUntil = 0;
-static String loggedOutUser = "";
-
-static void resetLogoutSessionState() {
-  logoutMessageUntil = 0;
-  secureClearString(loggedOutUser);
-}
-
+// The logout screen keeps no state of its own. (It used to carry a "Session
+// ended" message with a timer, logoutMessageUntil, that nothing ever started:
+// the message could not show. Removed 2026-11-22; the OLED owner tears the
+// session UI down right after the logout.)
 void oledAuthModeResetSessionState() {
   resetLoginSessionState();
-  resetLogoutSessionState();
 }
 
 // Display logout confirmation
@@ -273,20 +267,6 @@ static void displayLogoutMode() {
   
   // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
   int y = OLED_CONTENT_START_Y;
-  
-  // Check if we just logged out (message timer active)
-  if (millis() < logoutMessageUntil && loggedOutUser.length() > 0) {
-    oledDisplay->setCursor(0, y);
-    oledDisplay->print("User: ");
-    oledDisplay->println(loggedOutUser);
-    y += 10;
-    oledDisplay->setCursor(0, y);
-    oledDisplay->println("Session ended");
-    y += 10;
-    oledDisplay->setCursor(0, y);
-    oledDisplay->println("successfully.");
-    return;
-  }
   
   // Normal logout prompt (if somehow we get here without being logged in)
   String currentUser = getTransportUser(SOURCE_LOCAL_DISPLAY);
@@ -321,17 +301,6 @@ static bool handleLogoutModeInput(int deltaX, int deltaY, uint32_t newlyPressed)
   }
   
   bool handled = false;
-  
-  // If showing logout confirmation message, any button returns to previous mode
-  if (millis() < logoutMessageUntil) {
-    if (newlyPressed != 0) {
-      logoutMessageUntil = 0;
-      loggedOutUser = "";
-      oledMenuBack();
-      handled = true;
-    }
-    return handled;
-  }
   
   // A button: Confirm logout
   if (INPUT_CHECK(newlyPressed, INPUT_BUTTON_A)) {

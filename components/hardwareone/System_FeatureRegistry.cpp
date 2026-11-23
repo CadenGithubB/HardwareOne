@@ -415,7 +415,7 @@ static constexpr FeatureEntry featureRegistry[] = {
   { "imu", "IMU", FEATURE_CAT_SENSOR, 12,
     FEATURE_FLAG_RUNTIME_TOGGLE,
     &gSettings.imuAutoStart, isImuCompiled,
-    "BNO055 orientation/motion sensing" },
+    "Orientation and motion sensing" },
     
   { "gps", "GPS", FEATURE_CAT_SENSOR, 4,
     FEATURE_FLAG_RUNTIME_TOGGLE,

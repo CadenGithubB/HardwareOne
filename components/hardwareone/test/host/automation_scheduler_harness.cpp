@@ -1218,6 +1218,97 @@ static void parseFailureReportedOnce() {
   rebuildAutomationsCache();
 }
 
+// A clock trigger that has no next run gets its first one once the clock is
+// set (automationSeedFirstRuns, called by the pass for every enabled
+// automation while the clock is set). `automation add` stores no next run
+// while the clock is not set (a time counted from 1970 is not one), and
+// without this such an automation never ran: the pass works a missing next
+// run out afresh from now on every lap, the due cache reads the stored 0 as
+// "nothing scheduled", and a fire only advances a next run that exists.
+#ifdef HAVE_SEED_FIRST_RUNS
+static void firstRunsAfterClockSet() {
+  constexpr time_t kSet = 1763000000;
+  reset();
+  clockForcedSet = false;
+  clockSeconds = kSet;
+  uptimeSec = 500;
+  const char* daily = R"({"id":81,"enabled":true,"commands":["a"],"triggers":[{"type":"time","time":"07:30","nextAt":null}]})";
+  const char* slow = R"({"id":82,"enabled":true,"commands":["a"],"triggers":[{"type":"interval","intervalMs":900000,"nextAt":null}]})";
+  const char* quick = R"({"id":83,"enabled":true,"commands":["a"],"triggers":[{"type":"interval","intervalMs":5000,"nextAt":null}]})";
+  const char* manual = R"({"id":84,"enabled":true,"commands":["a"],"triggers":[{"type":"manual","delayMs":3000,"nextAt":null},{"type":"event","on":"edge"},{"type":"boot","bootDelayMs":0,"nextAt":null}]})";
+  const String kept = String(R"({"id":85,"enabled":true,"commands":["a"],"triggers":[{"type":"time","time":"07:30","nextAt":)") +
+                      String(std::to_string(kSet + 500)) + R"(},{"type":"interval","intervalMs":900000,"nextAt":null}]})";
+  replaceStore(String(R"({"version":2,"automations":[)") + daily + "," + slow + "," + quick + "," + manual + "," + kept + "]}");
+  CHECK(startAutomationScheduler());
+
+  // The dead end without the seed: never due, at no later time.
+  rebuildAutomationsCache();
+  CHECK(gAutomationsCacheCount == 5 && gAutomationsCache[0].nextAt == 0 && gAutomationsCache[1].nextAt == 0 &&
+        gAutomationsCache[2].nextAt == 0 && gAutomationsCache[3].nextAt == 0);
+  for (time_t later : {kSet, kSet + 3600, kSet + 86400 * 30}) {
+    CHECK(automationNextRunTime(daily, later, true) > later);
+    CHECK(automationNextRunTime(slow, later, true) > later);
+  }
+  unsigned before = writes;
+  rescheduleAfterFire(81, daily, kSet + 86400, false);  // nothing to advance
+  CHECK(writes == before);
+
+  // The time of day: its first run is written, nothing fires.
+  CHECK(automationSeedFirstRuns(81, daily, kSet));
+  CHECK(writes == before + 1);
+  time_t firstDaily = 0;
+  String storedDaily;
+  {
+    JsonDocument doc = storeDoc();
+    firstDaily = (time_t)automationNamed(doc, 81)["triggers"][0]["nextAt"].as<long long>();
+    serializeJson(automationNamed(doc, 81), storedDaily);
+  }
+  CHECK(firstDaily > kSet && firstDaily <= kSet + 86400 && Clock::isValidEpoch(firstDaily));
+  // Seeded once: the stored automation has its next run and is left alone.
+  CHECK(!automationSeedFirstRuns(81, storedDaily.c_str(), kSet + 10) && writes == before + 1);
+  // It comes due at that time, and the fire advances it by a day.
+  CHECK(automationNextRunTime(storedDaily.c_str(), kSet + 10, true) == firstDaily);
+  CHECK(automationNextRunTime(storedDaily.c_str(), firstDaily, true) == firstDaily);
+  rescheduleAfterFire(81, storedDaily.c_str(), firstDaily, false);
+  {
+    JsonDocument doc = storeDoc();
+    CHECK(automationNamed(doc, 81)["triggers"][0]["nextAt"].as<long long>() == (long long)firstDaily + 86400);
+  }
+  before = writes;
+
+  // A long interval is written; a short one goes to the RAM schedule.
+  CHECK(automationSeedFirstRuns(82, slow, kSet) && writes == before + 1);
+  CHECK(automationSeedFirstRuns(83, quick, kSet) && writes == before + 1);
+  {
+    JsonDocument doc = storeDoc();
+    CHECK(automationNamed(doc, 82)["triggers"][0]["nextAt"].as<long long>() == (long long)kSet + 900);
+    CHECK(automationNamed(doc, 83)["triggers"][0]["nextAt"].isNull());
+  }
+  CHECK(sVolatileSchedule.find(83, 0) && (time_t)sVolatileSchedule.find(83, 0)->nextAt == kSet + 5);
+  CHECK(automationNextRunTime(quick, kSet + 5, true) == kSet + 5);
+  CHECK(!automationSeedFirstRuns(83, quick, kSet + 2) && writes == before + 1);  // the RAM entry counts
+
+  // Manual, boot and event triggers have no clock run: left alone.
+  CHECK(!automationSeedFirstRuns(84, manual, kSet) && writes == before + 1);
+  // A trigger that has its next run keeps it; its neighbour without one is seeded.
+  CHECK(automationSeedFirstRuns(85, kept.c_str(), kSet) && writes == before + 2);
+  {
+    JsonDocument doc = storeDoc();
+    CHECK(automationNamed(doc, 85)["triggers"][0]["nextAt"].as<long long>() == (long long)kSet + 500);
+    CHECK(automationNamed(doc, 85)["triggers"][1]["nextAt"].as<long long>() == (long long)kSet + 900);
+    CHECK(automationNamed(doc, 84)["triggers"][0]["nextAt"].isNull());
+  }
+
+  // The due cache follows: each is due at its first run and not before.
+  rebuildAutomationsCache();
+  CHECK(gAutomationsCache[1].nextAt == kSet + 900 && gAutomationsCache[2].nextAt == kSet + 5 &&
+        gAutomationsCache[3].nextAt == 0 && gAutomationsCache[4].nextAt == kSet + 500);
+  CHECK(!automationsAnyDue(kSet + 4) && automationsAnyDue(kSet + 5));
+  stopAutomationScheduler();
+  sVolatileSchedule = AutomationVolatileSchedule{};
+}
+#endif
+
 int main() {
   eventDrainFromStart();
   summaries();
@@ -1231,6 +1322,9 @@ int main() {
   shortIntervals();
   uptimeSchedule();
   clockNotSet();
+#ifdef HAVE_SEED_FIRST_RUNS
+  firstRunsAfterClockSet();
+#endif
   reset();
   std::printf("automation scheduler: %u summary, ownership, timing and overlap checks passed\n", checks.load());
 }

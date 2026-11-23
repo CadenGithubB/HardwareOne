@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1033 commands across 60 modules (1033 registry entries).
+1034 commands across 60 modules (1034 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -35,7 +35,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`servo`](#servo) — 6 commands
 - [`thermal`](#thermal) — 23 commands
 - [`tof`](#tof) — 10 commands
-- [`imu`](#imu) — 16 commands
+- [`imu`](#imu) — 17 commands
 - [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
 - [`anoencoder`](#anoencoder) — 6 commands
@@ -88,7 +88,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 
 ## system
 
-> The system module holds core device commands that do not belong to any peripheral. Status and inspection: status (WiFi, filesystem, memory summary), uptime, time (uptime plus NTP wall-clock if synced), temperature and voltage (ESP32 internal die temp and supply rail), taskstats/perftop (FreeRTOS task and live loop/CPU profiling), fsusage, events (recent system events from the in-memory register that drives automation event triggers), and the memory tools memsample (snapshot, with memsample track on|off|reset|status for allocation tracking) and memreport. Control and power: reboot, ramflush, cpufreq [MHz] to read or set a supported CPU clock, lightsleep [seconds] for ESP32 light sleep, deepsleep for power-off (reset to wake), and wait <ms> to pause command-script execution. timeset sets the clock manually. broadcast <message> pushes a line of text to all connected output interfaces, and factoryreset deletes the user-accounts file so the first-boot setup wizard re-runs on next reboot while deliberately preserving WiFi credentials and other settings. Most mutating commands (timeset, cpufreq, reboot, ramflush, factoryreset, broadcast, lightsleep, deepsleep) require admin.
+> The system module holds core device commands that do not belong to any peripheral. Status and inspection: status (WiFi, filesystem, memory summary), uptime, time (the device's local time, the source that set the clock, and the uptime), temperature and voltage (ESP32 internal die temp and supply rail), taskstats/perftop (FreeRTOS task and live loop/CPU profiling), fsusage, events (recent system events from the in-memory register that drives automation event triggers), and the memory tools memsample (snapshot, with memsample track on|off|reset|status for allocation tracking) and memreport. Control and power: reboot, ramflush, cpufreq [MHz] to read or set a supported CPU clock, lightsleep [seconds] for ESP32 light sleep, deepsleep for power-off (reset to wake), and wait <ms> to pause command-script execution. timeset sets the clock by hand: a date and time is read as device-local time unless the word utc follows it, a Unix timestamp is UTC, and the device's own NTP replaces the time at its next reply. broadcast <message> pushes a line of text to all connected output interfaces, and factoryreset deletes the user-accounts file so the first-boot setup wizard re-runs on next reboot while deliberately preserving WiFi credentials and other settings. Most mutating commands (timeset, cpufreq, reboot, ramflush, factoryreset, broadcast, lightsleep, deepsleep) require admin.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -112,8 +112,8 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `temperature` |  | Read ESP32 internal temperature. (add 'json' for JSON output) |
 | `testencryption` | A | Test WiFi password encryption (admin only). |
 | `testpassword` | A | Test user password hashing (admin only). |
-| `time` |  | Show device time (uptime + NTP if synced). (add 'json' for JSON output) |
-| `timeset` | A | Set time manually: timeset YYYY-MM-DD HH:MM:SS or <unix_timestamp>.<br/>`Usage: timeset <YYYY-MM-DD HH:MM:SS>\|<unix_timestamp>` |
+| `time` |  | Show the device's local time, its source and the uptime. (add 'json' for JSON output) |
+| `timeset` | A | Set the clock by hand: a local date and time (add utc for UTC) or a Unix timestamp. NTP replaces it at its next reply.<br/>`Usage: timeset <YYYY-MM-DD HH:MM:SS> [utc\|local] \| <unix_timestamp> (local when no word is given; a Unix timestamp is UTC; years 2020-2099)` |
 | `uptime` |  | Show device uptime. (add 'json' for JSON output) |
 | `voltage` |  | Estimate power draw from active subsystems (not a real voltage measurement; use batterystatus for measured volts). (add 'json' for JSON output) |
 | `wait` |  | Delay execution for N milliseconds: wait <ms>.<br/>`Usage: wait <ms> (1..60000)` |
@@ -271,7 +271,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowtagcmd` | A | Run command on all devices accepted here as holders of a tag; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)<br/>`Usage: espnowtagcmd <tag> <target-user> <target-pass> <command> Credentials are checked ON EACH target device, not this one. One tag per command: a tag list (a comma) is refused. Goes only to peers whose tag was accepted on this device (espnowgroups, espnowgroupaccept); a peer that only announces the tag is skipped and counted in the reply. Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'.` |
 | `espnowtags` |  | Get/set device tags: 'espnowtags [tag1,tag2,...]'.<br/>`Usage: espnowtags stationary,thermal espnowtags clear` |
 | `espnowtimestatus` |  | Show mesh time: where this device's clock comes from, what it sends or last received: 'espnowtimestatus [json]'.<br/>`Usage: espnowtimestatus [json]` |
-| `espnowtimesync` |  | Mesh master: send this device's clock to the paired devices now (it is also sent when a session starts and every 10 minutes).<br/>`Usage: espnowtimesync Only the mesh master sends time, and only when its own clock comes from rtc, ntp, timeset or cm5. A paired device takes it when it names this device as its master (espnowmasterfingerprint) and has no such source itself. See 'espnowtimestatus'.` |
+| `espnowtimesync` |  | Mesh master: send this device's clock to the paired devices now (it is also sent when a session starts and every 10 minutes).<br/>`Usage: espnowtimesync Only the mesh master sends time, and only when its own clock comes from rtc, ntp, timeset or cm5. A paired device takes it when it names this device as its master (espnowmasterfingerprint) and has no better source itself (its own ntp or a manual time; when this master's clock is not from ntp also cm5, rtc or the ring). See 'espnowtimestatus'.` |
 | `espnowtopoautorefresh` | A | Set auto refresh topology: <0\|1><br/>`Usage: espnowtopoautorefresh <0\|1>` |
 | `espnowtopodiscoveryinterval` | A | Set topology discovery interval: <0-300000 ms><br/>`Usage: espnowtopodiscoveryinterval <0..300000>` |
 | `espnowtoporesults` |  | Get topology results: 'espnowtoporesults [page] [request-id]'. |
@@ -586,14 +586,15 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## imu
 
-> The BNO055 is a 9-DOF inertial measurement unit providing fused absolute orientation. openimu starts it, imuread reports yaw/pitch/roll (degrees) plus acceleration, gyroscope, and chip temperature, and closeimu stops it; imuautostart [on|off] persists launching it at boot, and it runs on the fixed secondary I2C bus (Wire1) using the board external crystal. Beyond raw orientation, imuactions runs gesture/event detection derived from the motion data: shake, tilt (with direction), tap/knock, rotation (with axis), freefall, a step counter with cadence, and screen-style orientation. Because the chip can be mounted in any pose, imuorientationmode <0..8> applies a fixed remap (flip pitch/roll/yaw, 90-degree rotations, upside-down fixes), imuorientationcorrection <0|1> toggles that correction, and imupitchoffset/imurolloffset/imuyawoffset trim each axis in degrees.
+> The IMU is the motion sensor on I2C; the build picks its chip (a BNO055, which fuses absolute orientation on the chip). openimu starts it, imuread reports yaw/pitch/roll (degrees) plus acceleration, gyroscope, magnetometer and chip temperature, and closeimu stops it; imuautostart [on|off] persists launching it at boot, imubus and imuaddress say where it is wired. Beyond raw orientation, imuactions runs gesture/event detection derived from the motion data: shake, tilt (with direction), tap/knock, rotation (with axis), freefall, a step counter with cadence, and screen-style orientation. Because the chip can be mounted in any pose, imuorientationmode <0..8> applies a fixed remap (flip pitch/roll/yaw, 90-degree rotations, upside-down fixes), imuorientationcorrection <0|1> toggles that correction, and imupitchoffset/imurolloffset/imuyawoffset trim each axis in degrees.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closeimu` | A | Stop BNO055 IMU sensor. |
+| `closeimu` | A | Stop the IMU (motion sensor). |
 | `imuactions` |  | Show IMU action detection state. |
+| `imuaddress` | A | IMU I2C address (next openimu): [0x28\|0x29]<br/>`Usage: imuaddress [0x28\|0x29]` |
 | `imuautostart` | A | Enable/disable IMU auto-start after boot [on\|off]<br/>`Usage: imuautostart [on\|off]` |
-| `imubus` | A | Route BNO055 IMU to bus: <0\|1> (reboot required)<br/>`Usage: imuBus <0\|1>` |
+| `imubus` | A | Route the IMU to bus: <0\|1> (reboot required)<br/>`Usage: imuBus <0\|1>` |
 | `imudevicepollms` | A | IMU device poll interval: <50..1000><br/>`Usage: imuDevicePollMs <50..1000>` |
 | `imuewmafactor` | A | IMU EWMA smoothing: <0.0..1.0><br/>`Usage: imuewmafactor <0.0..1.0>` |
 | `imuorientationcorrection` | A | IMU orientation correction: <0\|1><br/>`Usage: imuorientationcorrection <0\|1>` |
@@ -605,7 +606,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `imutransitionms` | A | IMU transition time: <0..1000><br/>`Usage: imutransitionms <0..1000>` |
 | `imuwebmaxfps` | A | IMU web max FPS: <1..30><br/>`Usage: imuwebmaxfps <1..30>` |
 | `imuyawoffset` | A | IMU yaw offset in degrees: <-180..180><br/>`Usage: imuyawoffset <-180..180>` |
-| `openimu` | A | Start BNO055 IMU sensor. |
+| `openimu` | A | Start the IMU (motion sensor). |
 
 ## input
 
@@ -688,7 +689,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## rtc
 
-> DS3231 precision I2C real-time clock with battery backup and an on-chip temperature sensor. Lifecycle: openrtc starts the RTC task, rtcread [status|temp] reads the clock (or die temperature), and closertc stops it; rtcautostart [on|off] persists boot auto-start and the module appears in help only when detected. rtcset accepts either "YYYY-MM-DD HH:MM:SS" (UTC) or a bare Unix timestamp, years 2020 to 2099, and writes it to the chip, computing day-of-week automatically. rtcsync [to|from] moves time between the RTC and the system clock: to (the default) copies RTC -> system, from copies system -> RTC (use this after an NTP sync to persist accurate time into the battery-backed chip). Setting the time via rtcset or rtcsync from also marks the RTC as calibrated so later boots trust it as a time source.
+> DS3231 precision I2C real-time clock with battery backup and an on-chip temperature sensor. Lifecycle: openrtc starts the RTC task, rtcread [status|temp] reads the clock (or die temperature), and closertc stops it; rtcautostart [on|off] persists boot auto-start and the module appears in help only when detected. rtcset reads its argument as timeset does ("YYYY-MM-DD HH:MM:SS" is device-local time unless the word utc follows it; a bare Unix timestamp is UTC; years 2020 to 2099), writes it to the chip in UTC, computing day-of-week automatically, and sets the system clock to the same time. rtcsync [to|from] moves time between the RTC and the system clock: to (the default) copies RTC -> system, and is refused while the clock is set from a source that outranks the chip (the device's own NTP, a manual time, an NTP-backed mesh master, the CM5); from copies system -> RTC (use this after an NTP sync to persist accurate time into the battery-backed chip). Setting the time via rtcset, rtcsync from or rtcsync to marks the RTC as set, so later boots take its time on their own; a chip that this device has not set, or that lost power since (its oscillator-stopped flag), is not adopted at boot.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -697,8 +698,8 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `rtcautostart` | A | Enable/disable RTC auto-start after boot [on\|off]<br/>`Usage: rtcautostart [on\|off]` |
 | `rtcbus` | A | Route DS3231 RTC to bus: <0\|1> (reboot required)<br/>`Usage: rtcBus <0\|1>` |
 | `rtcread` |  | Read RTC status [status\|temp]<br/>`Usage: rtcread [status\|temp] [json]` |
-| `rtcset` | A | Set RTC time: <datetime\|timestamp><br/>`Usage: rtcset YYYY-MM-DD HH:MM:SS (UTC) or rtcset <unix_timestamp>` |
-| `rtcsync` | A | Sync time: [to\|from]<br/>`Usage: rtcsync [to\|from] (to=RTC->system, from=system->RTC)` |
+| `rtcset` | A | Set the RTC chip and the system clock: a local date and time (add utc for UTC) or a Unix timestamp.<br/>`Usage: rtcset <YYYY-MM-DD HH:MM:SS> [utc\|local] \| <unix_timestamp> (local when no word is given; a Unix timestamp is UTC; years 2020-2099)` |
+| `rtcsync` | A | Copy time between the RTC chip and the system clock: [to\|from]<br/>`Usage: rtcsync [to\|from] (to=RTC->system, the default; from=system->RTC). 'to' is refused while the clock is set from a source that outranks the RTC (ntp, manual, mesh-ntp, cm5).` |
 
 ## presence
 
@@ -1026,7 +1027,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `debugi2cautostart` | A | Debug I2C sensor auto-start orchestration + init results.<br/>`Usage: debugi2cautostart <0\|1> [temp\|runtime]` |
 | `debugi2cbus` | A | Debug I2C bus lifecycle, polling pause/resume, status bumps.<br/>`Usage: debugi2cbus <0\|1> [temp\|runtime]` |
 | `debugi2cdiscovery` | A | Debug I2C device probing, registry, scan results.<br/>`Usage: debugi2cdiscovery <0\|1> [temp\|runtime]` |
-| `debugimu` | A | Debug IMU sensor (BNO055).<br/>`Usage: debugimu <0\|1> [temp\|runtime]` |
+| `debugimu` | A | Debug the IMU (motion sensor).<br/>`Usage: debugimu <0\|1> [temp\|runtime]` |
 | `debugimulifecycle` | A | Debug IMU init/connect/recovery.<br/>`Usage: debugimulifecycle <0\|1> [temp\|runtime]` |
 | `debugimupolling` | A | Debug IMU poll cadence.<br/>`Usage: debugimupolling <0\|1> [temp\|runtime]` |
 | `debugimuvalues` | A | Debug IMU orientation/acceleration values.<br/>`Usage: debugimuvalues <0\|1> [temp\|runtime]` |
