@@ -3,7 +3,7 @@
 
 // ============================================================================
 // The mesh id: the 16-bit value every frame carries in the V4 header's
-// meshFingerprint field (bytes 22-23), which the receiver's mesh gate matches
+// meshId field (bytes 22-23), which the receiver's mesh gate matches
 // against its own meshes.
 //
 // Derivation (a cross-device contract; docs/COMPATIBILITY.md states it too):

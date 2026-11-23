@@ -212,7 +212,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowheartbeatinterval` | A | Set master heartbeat interval: <1000-60000 ms><br/>`Usage: espnowheartbeatinterval <1000..60000>` |
 | `espnowhistorykb` | A | Message history per peer and direction in KB: [<0-32>] (0 = board default; no argument shows saved and active; reboot required)<br/>`Usage: espnowhistorykb [<0..32>]` |
 | `espnowholdresult` | A | DIAGNOSTIC: hold each received remote command result for <seconds> before it is shown (bench check of 'No result' and 'Result (late)'). RAM-only - reboot clears it.<br/>`Usage: espnowholdresult <seconds\|off\|status> 0..300 s. Held results still take their place in the result queue; above 30 s the sender shows 'No result', then 'Result (late)'.` |
-| `espnowidentity` |  | Show long-term Ed25519 identity (MAC, pub key, createdAtSec, regenCount). |
+| `espnowidentity` |  | Show long-term Ed25519 identity (MAC, pub key, createdEpochMs, regenCount). |
 | `espnowkeyex` | A | Initiate KEY_EX handshake with a peer (espnowpairsecure starts it too). (async - handshake completes later; check espnowsessions)<br/>`Usage: espnowkeyex <name_or_mac> [<mesh>] Returns OK when KEY_EX_HELLO is sent; the handshake completes asynchronously - inspect with 'espnowsessions' / 'espnowencstatus'.` |
 | `espnowlist` |  | List all paired ESP-NOW devices. |
 | `espnowmasterfingerprint` | S | Name the mesh master on this device: its key as 'espnowidentity' shows it (64 hex), or 'clear' to name none.<br/>`Usage: espnowmasterfingerprint [<64-hex-pubkey>\|clear] No argument shows it. The master named here gives this device mesh time, gets its readings, battery state and events, and may ask it for readings. clear: no master is named (the reply says what that stops).` |
@@ -226,7 +226,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowmeshroutes` |  | Show the mesh route table: who this node can reach and via which neighbour.<br/>`Usage: espnowmeshroutes [clear] 'via (direct)' = in radio range. Anything else is reached over one or more relay hops. Multi-hop routes are learned from neighbours every 30s — allow a minute after boot.` |
 | `espnowmeshstatus` |  | Show mesh peer health: state (online/connecting/offline), two-way link, heartbeats. |
 | `espnowmeshtime` | A | Mesh time on/off: the master sends its clock, devices that name it as their master take it when they have no better source: 'espnowmeshtime [on\|off]'.<br/>`Usage: espnowmeshtime [on\|off]` |
-| `espnowmeshtopo` |  | Discover mesh topology (run on the master; role not enforced). (async - read results with espnowtoporesults) |
+| `espnowmeshtopo` |  | Discover mesh topology from the paired peers in reach (sealed in their sessions; run on the master; role not enforced). (async - read results with espnowtoporesults) |
 | `espnowmeshttl` |  | Get/set the multi-hop budget: 'espnowmeshttl [1-10]'.<br/>`Usage: espnowmeshttl [<1..10>] How many hops this node's relay-eligible frames may travel. 1 = single hop (no multi-hop). Applies to broadcast text/time sync and to routed unicast; heartbeats and pairing are always single-hop.` |
 | `espnowmessages` | A | Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch. Admin only: it carries remote command output.<br/>`Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]` |
 | `espnowmode` | A | Get/set ESP-NOW mode: 'espnowmode [direct\|mesh]'.<br/>`Usage: espnowmode [direct\|mesh]` |

@@ -22,7 +22,7 @@
 //     A peer that is not the partner gets at most one answer every 5 s, however
 //     often it asks.
 //
-// Both frames carry a 16-bit number. A request's number comes back in the
+// Both frames carry a 32-bit number (reqId; 16 bit before 1.0 step 9). A request's number comes back in the
 // notice that answers it, and an answer counts only when it is to the last
 // request sent. ENDED is never an answer, and its number means something else:
 // the last request its sender sent. The receiver takes that sender's requests
@@ -85,7 +85,10 @@ constexpr uint8_t kPeerSlots = 4;                     // peers with limits of th
 constexpr uint8_t kPeerEntries = kPeerSlots + 1;      // ... and one entry the peers beyond them share
 constexpr uint8_t kInboxSlots = 4;
 
-// BOND_NOTICE reason codes, as sent (BondNoticeReason in System_ESPNow_Wire.h).
+// BOND_NOTICE reasons as this core keeps them. On the wire (1.0 step 9, rule
+// F3) the notice carries a status instead: 0 ok (accepted), 16 not_bonded,
+// 17 bonded_elsewhere, 18 ended, 19 role_conflict (BondNoticeStatus in
+// System_ESPNow_Wire.h); noticeStatusOf / reasonOfNoticeStatus map at the edge.
 // A receiver ignores a code it does not know.
 enum Reason : uint8_t {
   kReasonNone = 0,
@@ -99,6 +102,37 @@ enum Reason : uint8_t {
   // mode and cannot be a bond partner (System_ESPNow_SessionCapsCore.h).
   kReasonNoBondBuild = 0x80,
 };
+
+// The wire status of a notice with this reason, and back. A status this
+// firmware does not know maps to kReasonUnknown, which takeInbound ignores.
+constexpr uint8_t kNoticeStatusOk = 0;
+constexpr uint8_t kNoticeStatusNotBonded = 16;
+constexpr uint8_t kNoticeStatusBondedElsewhere = 17;
+constexpr uint8_t kNoticeStatusEnded = 18;
+constexpr uint8_t kNoticeStatusRoleConflict = 19;
+constexpr uint8_t kReasonUnknown = 0x7F;   // local only: a status from newer firmware
+
+inline uint8_t noticeStatusOf(uint8_t reason) {
+  switch (reason) {
+    case kReasonAccepted:        return kNoticeStatusOk;
+    case kReasonNotBonded:       return kNoticeStatusNotBonded;
+    case kReasonBondedElsewhere: return kNoticeStatusBondedElsewhere;
+    case kReasonEnded:           return kNoticeStatusEnded;
+    case kReasonRoleConflict:    return kNoticeStatusRoleConflict;
+    default:                     return 0xFF;   // never sent: the owner sends only the five above
+  }
+}
+
+inline uint8_t reasonOfNoticeStatus(uint8_t status) {
+  switch (status) {
+    case kNoticeStatusOk:              return kReasonAccepted;
+    case kNoticeStatusNotBonded:       return kReasonNotBonded;
+    case kNoticeStatusBondedElsewhere: return kReasonBondedElsewhere;
+    case kNoticeStatusEnded:           return kReasonEnded;
+    case kNoticeStatusRoleConflict:    return kReasonRoleConflict;
+    default:                           return kReasonUnknown;
+  }
+}
 
 // BOND_REQUEST flags. Fresh: the bond was just set up or the session just came
 // up; clear on the once-a-minute repeats. RoleChosen: the sender's user chose
@@ -141,7 +175,7 @@ struct Inbound {
   uint8_t role;
   uint8_t code;    // request: flags; notice: reason
   uint8_t flags;   // notice: its flags (0 for a request)
-  uint16_t seq;
+  uint32_t reqId;
   uint16_t order;  // arrival order
 };
 
@@ -151,7 +185,7 @@ struct PeerNote {
   bool inUse;
   bool noticeDue;         // its bond frames were ignored: tell it why
   bool answerDue;         // it asked again inside kAnswerGapMs: answered when the gap is over
-  uint16_t answerSeq;     // ... the number of its newest request
+  uint32_t answerReqId;     // ... the number of its newest request
   uint8_t mac[6];
   uint32_t lastNoticeMs;  // 0 = none sent
   uint32_t lastAskLineMs; // 0 = none printed
@@ -171,10 +205,10 @@ struct State {
   uint32_t requestNotBeforeMs; // deadline; 0 = at once
   uint32_t nextRepeatMs;       // deadline of the next once-a-minute request; 0 = none
   uint32_t lastRequestMs;      // 0 = none sent
-  uint16_t lastSeq;            // of the last request sent, 0 = none yet; survives a partner change
+  uint32_t lastReqId;            // of the last request sent, 0 = none yet; survives a partner change
   uint32_t endingSinceMs;      // 0 = not ending. The partner was told ENDED then: no request for kEndingQuietMs
   bool partnerVoidSet;         // the partner's ENDED named its last request ...
-  uint16_t partnerVoidSeq;     // ... its requests up to this number are void
+  uint32_t partnerVoidReqId;     // ... its requests up to this number are void
   uint16_t nextOrder;
   uint32_t requestsSent;
   uint32_t requestsVoided;     // the partner's requests from before its ENDED, not used
@@ -228,11 +262,11 @@ inline const char* agreementKey(Agreement a) {
   }
 }
 
-// True when request number `a` was given out after `b`. The numbers are 16 bit
+// True when request number `a` was given out after `b`. The numbers are 32 bit
 // and go round, so "after" is "up to half the range ahead".
-inline bool seqNewer(uint16_t a, uint16_t b) {
-  const uint16_t ahead = (uint16_t)(a - b);
-  return ahead != 0 && ahead < 0x8000u;
+inline bool reqIdNewer(uint32_t a, uint32_t b) {
+  const uint32_t ahead = a - b;
+  return ahead != 0 && ahead < 0x80000000u;
 }
 
 // The partner or bond mode changed (or the bond was just set up): nothing
@@ -389,7 +423,7 @@ enum class Line : uint8_t {
 // full (the frame is dropped: a request is repeated, an ignored bond frame
 // brings a notice again).
 inline bool pushInbound(State& s, bool isRequest, const uint8_t mac[6], uint8_t role, uint8_t code,
-                        uint16_t seq, uint8_t flags = 0) {
+                        uint32_t reqId, uint8_t flags = 0) {
   Inbound* slot = nullptr;
   for (auto& e : s.inbox) {
     if (!e.inUse || e.isRequest != isRequest || !macIs(e.mac, mac)) continue;
@@ -412,7 +446,7 @@ inline bool pushInbound(State& s, bool isRequest, const uint8_t mac[6], uint8_t 
   slot->role = role;
   slot->code = code;
   slot->flags = isRequest ? 0 : flags;
-  slot->seq = seq;
+  slot->reqId = reqId;
   slot->order = s.nextOrder++;
   return true;
 }
@@ -481,21 +515,21 @@ inline bool answerReady(const PeerNote& p, uint32_t nowMs) {
 }
 
 // The next notice owed to a peer that is not the partner: its bond frames
-// were ignored (`seq` 0), or it asked again inside kAnswerGapMs and the gap is
-// over (`seq` is its newest request). A peer that has become the partner
+// were ignored (`reqId` 0), or it asked again inside kAnswerGapMs and the gap is
+// over (`reqId` is its newest request). A peer that has become the partner
 // meanwhile is owed none: it is asked, and its own request is answered.
 inline bool takeOwedNotice(State& s, const Local& local, uint32_t nowMs, uint8_t to[6], uint8_t* reason,
-                           uint16_t* seq) {
+                           uint32_t* reqId) {
   for (auto& p : s.peers) {
     if (!p.inUse || !(p.noticeDue || answerReady(p, nowMs))) continue;
-    const uint16_t answers = p.answerDue ? p.answerSeq : 0;
+    const uint32_t answers = p.answerDue ? p.answerReqId : 0;
     p.noticeDue = false;
     p.answerDue = false;
     if (isPartner(local, p.mac)) continue;
     p.lastNoticeMs = stamp(nowMs);
     memcpy(to, p.mac, 6);
     *reason = local.bonded ? kReasonBondedElsewhere : kReasonNotBonded;
-    *seq = answers;
+    *reqId = answers;
     s.noticesSent++;
     return true;
   }
@@ -505,9 +539,9 @@ inline bool takeOwedNotice(State& s, const Local& local, uint32_t nowMs, uint8_t
 // What the owner does for one received request or notice.
 struct Outcome {
   bool handled;          // an inbox entry was taken (call again for the next)
-  bool sendNotice;       // to `mac`, with noticeReason and noticeSeq
+  bool sendNotice;       // to `mac`, with noticeReason and noticeReqId
   uint8_t noticeReason;
-  uint16_t noticeSeq;
+  uint32_t noticeReqId;
   Line line;             // about `mac`
   uint8_t lineReason;    // Declined: the partner's reason; WantsBond: what the peer was answered
   bool becameDeclined;   // the partner just declined: stop the bond's periodic work
@@ -574,10 +608,10 @@ inline Outcome takeInbound(State& s, const Local& local, uint32_t nowMs) {
   out.noticeRole = local.role;
 
   if (in.isRequest) {
-    out.noticeSeq = in.seq;
+    out.noticeReqId = in.reqId;
     if (isPartner(local, in.mac)) {
       if (s.partnerVoidSet) {
-        if (!seqNewer(in.seq, s.partnerVoidSeq)) {
+        if (!reqIdNewer(in.reqId, s.partnerVoidReqId)) {
           // Sent before the partner ended the bond and overtaken by its
           // ENDED. Acting on it would call the bond agreed again and start
           // the heartbeat toward a device that has just left.
@@ -618,7 +652,7 @@ inline Outcome takeInbound(State& s, const Local& local, uint32_t nowMs) {
       // frame. Its newest request is answered when the gap is over
       // (takeOwedNotice), so the answer still carries a number it accepts.
       p.answerDue = true;
-      p.answerSeq = in.seq;
+      p.answerReqId = in.reqId;
     } else {
       out.sendNotice = true;
       s.noticesSent++;
@@ -638,18 +672,18 @@ inline Outcome takeInbound(State& s, const Local& local, uint32_t nowMs) {
 
   // A notice. The number of an answer is that of our request; the number of
   // ENDED is the sender's own (see below) and is not compared with ours.
-  const bool oldAnswer = in.code != kReasonEnded && in.seq != 0 && in.seq != s.lastSeq;
+  const bool oldAnswer = in.code != kReasonEnded && in.reqId != 0 && in.reqId != s.lastReqId;
   if (!isPartner(local, in.mac) || oldAnswer) {
     s.noticesIgnored++;
     out.ignored = true;
     return out;
   }
-  if (in.code == kReasonEnded && in.seq != 0 &&
-      (!s.partnerVoidSet || seqNewer(in.seq, s.partnerVoidSeq))) {
+  if (in.code == kReasonEnded && in.reqId != 0 &&
+      (!s.partnerVoidSet || reqIdNewer(in.reqId, s.partnerVoidReqId))) {
     // The partner's requests up to this number were made before it ended the
     // bond. One of them may still be on its way here.
     s.partnerVoidSet = true;
-    s.partnerVoidSeq = in.seq;
+    s.partnerVoidReqId = in.reqId;
   }
   if (in.code == kReasonAccepted || in.code == kReasonRoleConflict || in.code == kReasonEnded) {
     notePartnerRole(s, local, in.role, (in.flags & kNoticeFlagRoleChosen) != 0, out);
@@ -774,17 +808,17 @@ inline Beat onPartnerHeartbeat(State& s, uint8_t partnerRole, uint8_t localRole,
 // kEndingQuietMs. The time is kept as a start, not as a deadline: nothing
 // looks at it while the bond is agreed, and a deadline left standing for
 // weeks would read as still ahead.
-inline uint16_t beginEnding(State& s, uint32_t nowMs) {
+inline uint32_t beginEnding(State& s, uint32_t nowMs) {
   s.endingSinceMs = stamp(nowMs);
-  return s.lastSeq;
+  return s.lastReqId;
 }
 
 struct RequestPlan {
-  bool send;           // BOND_REQUEST to the partner with seq and flags
+  bool send;           // BOND_REQUEST to the partner with reqId and flags
   bool watchAck;       // ... and count a missing acknowledgement against the session
   bool kickHandshake;  // declined partner, no session: one backed-off handshake start
   bool noBondBuildLine; // the partner just became "built without bond mode": tell the user once
-  uint16_t seq;
+  uint32_t reqId;
   uint8_t flags;
 };
 
@@ -882,8 +916,8 @@ inline RequestPlan planRequest(State& s, const Local& local, uint32_t nowMs, boo
   plan.send = true;
   plan.flags = asked ? kRequestFlagFresh : 0;
   plan.watchAck = !asked || s.agreement == Agreement::Declined;
-  if (++s.lastSeq == 0) s.lastSeq = 1;
-  plan.seq = s.lastSeq;
+  if (++s.lastReqId == 0) s.lastReqId = 1;
+  plan.reqId = s.lastReqId;
   return plan;
 }
 

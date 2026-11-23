@@ -4492,9 +4492,11 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
       return false;
     }
     
-    // Build authenticated command payload: @BOND:<token>:<command>
-    String payload = buildBondedCommandPayload(actualCommand);
-    if (payload.length() == 0) {
+    // Build the authenticated command payload: a bond-token credential block
+    // (E29 kind 1) and the command.
+    uint8_t payload[ESPNOW_V4_MAX_PAYLOAD];
+    const size_t payloadLen = buildBondedCommandPayload(actualCommand, payload, sizeof(payload));
+    if (payloadLen == 0) {
       strlcpy(out, "Error: Failed to build command payload", outSize);
       return false;
     }
@@ -4508,7 +4510,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     // named constant so it can never drift from the handler registration again.
     //
     // SECURITY: send via v4_send_encrypted_or_queue (NOT raw v4_send_frame). The
-    // payload is "@BOND:<32-hex static token>:<command>"; sent in cleartext, a
+    // payload carries the static bond token and the command; sent in cleartext, a
     // passive sniffer captures the token and can forge arbitrary commands (RCE on
     // the bonded peer). The session-aware sender AEAD-wraps the frame when a
     // session is active (synced bond mode always has one) and otherwise queues +
@@ -4519,7 +4521,7 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     // step 6): its result, Busy, Refused, No answer or No result.
     espnowRemoteCmdBegin(peerMac, msgId);
     bool sent = v4_send_encrypted_or_queue(peerMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ,
-                                           msgId, (const uint8_t*)payload.c_str(), payload.length(), 1,
+                                           msgId, payload, (uint16_t)payloadLen, 1,
                                            sendStatus, sizeof(sendStatus));
     // Every status of a frame parked for the session starts with "queued".
     const bool queued = sent && strncmp(sendStatus, "queued", 6) == 0;

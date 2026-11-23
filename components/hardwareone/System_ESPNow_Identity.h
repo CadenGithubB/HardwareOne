@@ -36,7 +36,8 @@ struct EspNowIdentity {
   uint8_t  sec[64];          // crypto_sign_SECRETKEYBYTES (Ed25519 secret;
                              //   the trailing 32 bytes mirror `pub` per
                              //   libsodium convention — do not separate)
-  uint32_t createdAtSec;     // Unix epoch when this keypair was generated
+  uint64_t createdEpochMs;   // Unix epoch milliseconds when this keypair was generated (0: the
+                             // clock was not set); stored as "createdEpochMs" (1.0 step 9)
   uint32_t regenCount;       // Bumped every time the keypair is regenerated
                              // via the CLI recovery path (zero on first boot)
   bool     valid;            // false until load_or_generate succeeds
@@ -81,7 +82,9 @@ void espnowIdentityFormatPubHex(const uint8_t pub[32], char* out, size_t outLen)
 // Per-peer long-term identity record.
 //
 // One file per paired peer at /system/espnow/peers/<MAC>/identity.json:
-//   { version, mac, meshId, longTermPubEd25519_hex, bondedAtSec, lastSeenSec }
+//   { schema: 1, mac, meshId, longTermPubEd25519_hex, pairedEpochMs, lastSeenEpochMs }
+// (1.0 step 9: "schema" replaces "version", times are epoch milliseconds, 0
+// while the clock is not set)
 // Plain JSON, no encryption at rest — the peer's public key is, by definition,
 // public. An attacker with flash access learns which peers we've paired with;
 // that's the same threat surface as the existing /system/espnow/devices.json.
@@ -97,8 +100,8 @@ struct PeerIdentity {
   uint8_t  meshId;            // mesh slot index (0..N_MESHES-1)
   uint8_t  _pad;
   uint8_t  longTermPub[32];   // peer's Ed25519 public key
-  uint32_t bondedAtSec;       // Unix epoch when first paired
-  uint32_t lastSeenSec;       // time of the last KEY_EX that wrote the file (hourly at most)
+  uint64_t pairedEpochMs;     // Unix epoch milliseconds when first paired (0: clock not set)
+  uint64_t lastSeenEpochMs;   // time of the last KEY_EX that wrote the file (hourly at most)
   bool     valid;             // false = slot is empty
 };
 
@@ -110,11 +113,11 @@ const PeerIdentity* peerIdentityFindByMac(const uint8_t mac[6]);
 // Store / overwrite the peer's identity: the in-memory cache and the on-disk
 // file, which always hold the same record. A call that changes nothing stored
 // (same key, same mesh) writes nothing and returns true, except that it moves
-// lastSeenSec forward once the stored value is an hour or more behind. Returns
+// lastSeenEpochMs forward once the stored value is an hour or more behind. Returns
 // false when the cache is full or the write fails; the cache is then left as
 // it was.
 bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
-                         const uint8_t pub[32], uint32_t bondedAtSec);
+                         const uint8_t pub[32], uint64_t pairedEpochMs);
 
 
 // Forget a paired peer. Removes the on-disk file AND clears the in-memory
@@ -166,8 +169,9 @@ const PeerIdentity* peerIdentityAt(uint8_t i);
 // silently leave this table at 16.
 uint8_t peerIdentitySlotCount();
 
-// The "version" each file kind is written with and read back as, for
-// `versions`: this device's identity.json and the per-peer identity files.
+// The format number each file kind is written with and read back as, for
+// `versions`: this device's identity.json ("version") and the per-peer
+// identity files ("schema", 1.0 step 9).
 uint8_t espnowIdentityFileVersion();
 uint8_t peerIdentityFileVersion();
 

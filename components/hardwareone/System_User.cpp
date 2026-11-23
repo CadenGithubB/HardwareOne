@@ -5141,39 +5141,19 @@ const char* cmd_user_sync(const String& argsInput) {
   INFO_USERF("[USER_SYNC] Syncing user '%s' (role=%s) to device '%s'", 
              username.c_str(), role.c_str(), deviceName.c_str());
   
-  // Build USER_SYNC message
-  PSRAM_JSON_DOC(doc);
-  uint32_t msgId = generateMessageId();
-  
-  // Get device name for source
-  String myDeviceName = gSettings.espnowDeviceName;
-  if (myDeviceName.length() == 0) {
-    myDeviceName = "unknown";
-  }
-  
-  // Build JSON payload (no V2 envelope, just the sync data)
-  JsonObject payload = doc.to<JsonObject>();
-  payload["recv_admin_user"] = recvAdminUser;
-  payload["recv_admin_pass"] = recvAdminPass;
-  payload["target_user"] = username;
-  payload["target_pass"] = userPass;
-  payload["role"] = role;
-  payload["src_device"] = myDeviceName;
-  payload["dst_device"] = deviceName;
-  
-  // Serialize to string
-  String jsonStr;
-  serializeJson(doc, jsonStr);
-  
-  // Send via V4 binary protocol
-  if (!v4_send_user_sync(targetMac, jsonStr.c_str(), jsonStr.length())) {
+  // USER_SYNC (E29): the target device's admin login and this account's,
+  // as two credential blocks, then whether the account is an admin here (the
+  // receiver creates it as a standard user either way and says so).
+  const uint8_t syncFlags = (role != kRoleUser) ? espnowcred::kUserSyncFlagSourceAdmin : 0;
+  if (!v4_send_user_sync(targetMac, recvAdminUser.c_str(), recvAdminPass.c_str(), username.c_str(),
+                         userPass.c_str(), syncFlags)) {
     ERROR_USERF("[USER_SYNC] Failed to send sync message to %s", deviceName.c_str());
     snprintf(getDebugBuffer(), 1024, "Error: Failed to send user sync to '%s'", deviceName.c_str());
     return getDebugBuffer();
   }
   
-  INFO_USERF("[USER_SYNC] ✓ Sent user '%s' to device '%s' (msgId=%lu)", 
-             username.c_str(), deviceName.c_str(), (unsigned long)msgId);
+  INFO_USERF("[USER_SYNC] ✓ Sent user '%s' to device '%s'",
+             username.c_str(), deviceName.c_str());
   
   snprintf(getDebugBuffer(), 1024, "User sync sent: '%s' → '%s' (role=%s)", 
            username.c_str(), deviceName.c_str(), role.c_str());

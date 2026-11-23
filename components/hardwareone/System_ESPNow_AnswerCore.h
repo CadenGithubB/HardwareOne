@@ -20,7 +20,7 @@
 // could be dropped as a duplicate of the canceller's own frame).
 //
 // Answer frames: TOPO_START (33), TOPO_PEER (34), CMD_RESP (51),
-// FS_LIST_REPLY (71), FS_STAT_REPLY (73), FS_GET_ACK (75), STREAM (90),
+// FS_LIST_RESP (71), FS_STAT_RESP (73), FS_GET_RESP (75), STREAM (90),
 // FILE_RESULT (113, 1.0 step 7), FILE_CANCEL (115), and since 2026-11-19 CATCHUP_LIST_RESP (83) and
 // CATCHUP_READ_RESP (85) (file catch-up, System_ESPNow_CatchupCore.h). The shared code 1 (busy) lets a later firmware answer
 // "not now" in any answer, which is the NACK shape (opcode 2 stays reserved).

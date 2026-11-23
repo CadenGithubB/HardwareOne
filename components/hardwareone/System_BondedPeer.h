@@ -96,7 +96,7 @@ bool requestSettingsSync(uint32_t timeoutMs = 6000, uint32_t* outElapsedMs = nul
 bool requestSchemaSync  (uint32_t timeoutMs = 6000, uint32_t* outElapsedMs = nullptr);
 
 // Non-blocking schema sync for callers that run on a UI loop: begin clears
-// bondSchemaReceived and sends SCHEMA_REQ (false + lastError on the usual
+// bondSchemaReceived and sends BOND_SCHEMA_REQ (false + lastError on the usual
 // preconditions: not master / not paired / peer offline / send failed);
 // schemaSyncDone() reports the file_end completion. requestSchemaSync() is the
 // blocking composition of the two.

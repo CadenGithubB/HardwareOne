@@ -23,7 +23,7 @@
 #include <esp_attr.h>
 #include "System_BondedPeer.h"    // BondedPeer:: — unified accessor for the bonded worker (settings/schema sync, cache reads)
 #include "System_SelfDevice.h"    // SelfDevice:: — local MAC / name / uptime / heap accessors
-#include "System_ESPNow_Wire.h"   // V4PayloadFsListReplyHeader, V4PayloadFsEntry, FsListStatus
+#include "System_ESPNow_Wire.h"   // V4PayloadFsListRespHeader, V4PayloadFsEntry, FsListStatus
 #include "System_ESPNow_FsList.h" // fsListSendRequest / fsListCancel — structured peer FS listing
 #include "WebBondFsPollCore.h"    // bond_fs_poll: start-and-poll state of the three /api/bond/fs routes
 #include "System_ArgParse.h"      // parseIntArg: the id of a poll
@@ -1795,7 +1795,7 @@ static esp_err_t handleBondSettingsSchema(httpd_req_t* req) {
 }
 
 // POST /api/bond/settings/schema/sync — clear bondSchemaReceived, send
-// SCHEMA_REQ over bond, poll for completion. Mirrors handleBondSettingsSync
+// BOND_SCHEMA_REQ over bond, poll for completion. Mirrors handleBondSettingsSync
 // exactly, just with a different opcode + completion flag. ~6s timeout
 // covers the ~1–2s typical file transfer plus retry margin.
 static esp_err_t handleBondSettingsSchemaSync(httpd_req_t* req) {
@@ -1885,7 +1885,7 @@ static esp_err_t handleBondPairedDevices(httpd_req_t* req) {
     webBondSendChunkf(req, "\"zone\":\"%s\",", sz(dev.zone));
     webBondSendChunkf(req, "\"tags\":\"%s\",", sz(dev.tags));
     webBondSendChunkf(req, "\"stationary\":%s,", dev.stationary ? "true" : "false");
-    webBondSendChunkf(req, "\"encrypted\":%s", dev.encrypted ? "true" : "false");
+    webBondSendChunk(req, "\"encrypted\":true");  // every paired device is sealed (1.0)
     webBondSendChunk(req, "}");
   }
   
@@ -1945,17 +1945,17 @@ namespace {
 // mutex pointer below and the mutex itself.
 struct WebFsBridge {
   bond_fs_poll::Slot       slot;
-  V4PayloadFsListReplyHeader hdr;
+  V4PayloadFsListRespHeader hdr;
   V4PayloadFsEntry         entries[FS_LIST_ENTRIES_PER_REPLY];
   uint8_t                  entryCount;
 };
 struct WebFsStatBridge {
   bond_fs_poll::Slot     slot;
-  V4PayloadFsStatReply   reply;
+  V4PayloadFsStatResp   reply;
 };
 struct WebFsGetBridge {
   bond_fs_poll::Slot     slot;
-  V4PayloadFsGetAck      ack;
+  V4PayloadFsGetResp      ack;
 };
 
 EXT_RAM_BSS_ATTR static WebFsBridge     sWebFsBridge = {};
@@ -1995,7 +1995,7 @@ static bool webFsBridgeEnsureInit() {
 // The protocol calls each exactly once per request: with the peer's reply, or
 // with a synthesized IO_ERROR when its own 5 s timeout passes.
 static void webFsListReplyCallback(const uint8_t /*mac*/[6],
-                                   const V4PayloadFsListReplyHeader* hdr,
+                                   const V4PayloadFsListRespHeader* hdr,
                                    const V4PayloadFsEntry* entries) {
   if (!hdr) return;
   WebFsLock lock(kWebFsCallbackLockWait);
@@ -2011,7 +2011,7 @@ static void webFsListReplyCallback(const uint8_t /*mac*/[6],
 }
 
 static void webFsStatReplyCallback(const uint8_t /*mac*/[6],
-                                   const V4PayloadFsStatReply* reply) {
+                                   const V4PayloadFsStatResp* reply) {
   if (!reply) return;
   WebFsLock lock(kWebFsCallbackLockWait);
   if (!lock.held) return;
@@ -2023,7 +2023,7 @@ static void webFsStatReplyCallback(const uint8_t /*mac*/[6],
 // the actual file content arrives later via FILE_START/DATA/END handled by
 // System_ESPNow_Files.
 static void webFsGetAckCallback(const uint8_t /*mac*/[6],
-                                const V4PayloadFsGetAck* ack) {
+                                const V4PayloadFsGetResp* ack) {
   if (!ack) return;
   WebFsLock lock(kWebFsCallbackLockWait);
   if (!lock.held) return;
@@ -2035,7 +2035,7 @@ static void webFsGetAckCallback(const uint8_t /*mac*/[6],
 // (System_ESPNow_AnswerCore.h), the same words the console and the OLED use;
 // "unknown" for a code this firmware does not know.
 static const char* fsStatusTag(uint8_t status) {
-  const char* name = espnowanswer::statusName(ESPNOW_V4_TYPE_FS_LIST_REPLY, status);
+  const char* name = espnowanswer::statusName(ESPNOW_V4_TYPE_FS_LIST_RESP, status);
   return name ? name : "unknown";
 }
 
@@ -2277,7 +2277,7 @@ static esp_err_t handleBondFsStat(httpd_req_t* req) {
     if (idKind == WebFsQueryId::Valid) {
       uint32_t cancelId = 0;
       bond_fs_poll::Poll outcome;
-      V4PayloadFsStatReply reply = {};
+      V4PayloadFsStatResp reply = {};
       {
         WebFsLock lock(kWebFsHandlerLockWait);
         if (!lock.held) return webFsSendPending(req, pollId);  // ask again
@@ -2372,7 +2372,7 @@ static esp_err_t handleBondFsStat(httpd_req_t* req) {
 // =============================================================================
 // Replaces the BondFs.exec('espnowsendfile') CLI trigger. Two stages:
 //   1. Start and poll: send FS_GET_REQ; the page asks with ?id=N until the
-//      FS_GET_ACK is there and gets the ack status + fileSize.
+//      FS_GET_RESP is there and gets the ack status + fileSize.
 //   2. If ACK was OK: the peer is now sending the file via FILE_START/DATA
 //      /END (existing transfer pipeline). The file lands at
 //      /espnow/received/<MAC>/<basename> via the standard inbound path —
@@ -2409,7 +2409,7 @@ static esp_err_t handleBondFsGet(httpd_req_t* req) {
   if (idKind == WebFsQueryId::Valid) {
     uint32_t cancelId = 0;
     bond_fs_poll::Poll outcome;
-    V4PayloadFsGetAck ack = {};
+    V4PayloadFsGetResp ack = {};
     {
       WebFsLock lock(kWebFsHandlerLockWait);
       if (!lock.held) return webFsSendPending(req, pollId);  // ask again

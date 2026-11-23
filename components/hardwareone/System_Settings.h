@@ -840,7 +840,7 @@ struct Settings {
   // ============================================================================
   // A device can belong to up to N_MESHES independent meshes simultaneously
   // (home + work + lab, etc.). Each mesh has its own passphrase, group key,
-  // and peer set. The V4 frame header carries a `meshFingerprint` (the mesh
+  // and peer set. The V4 frame header carries a `meshId` (the mesh
   // id, derived from the mesh key: System_ESPNow_MeshIdCore.h) so receivers
   // know which mesh a frame belongs to regardless of local-index differences
   // between devices.
@@ -853,7 +853,7 @@ struct Settings {
     String   label;                    // Human-readable name, e.g. "primary", "work"
     String   passphrase;               // User-typed (raw). 3.6 will remove this from persistence — only ever
                                        //   held in RAM long enough to (re)compute passphraseStretchedKey.
-    uint16_t fingerprint;              // the mesh id (System_ESPNow_MeshIdCore.h): from the mesh key, 0 = none; stamped in V4 header meshFingerprint; stored as "meshId"
+    uint16_t fingerprint;              // the mesh id (System_ESPNow_MeshIdCore.h): from the mesh key, 0 = none; stamped in V4 header meshId; stored as "meshId"
     bool     enabled;                  // Inactive meshes are skipped in heartbeat emission, RX validation
     bool     isDefault;                // The mesh new pairings join unless overridden
     // 32-byte mesh master key: PBKDF2-HMAC-SHA256(passphrase,

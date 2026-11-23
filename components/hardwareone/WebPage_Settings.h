@@ -3869,7 +3869,7 @@ console.log('[SETTINGS] All parts loaded successfully');
 
   // Re-sync button: pull BOTH the worker's values (/api/bond/settings/sync)
   // AND its schema (/api/bond/settings/schema/sync) in parallel, then render.
-  // Both endpoints trigger a SETTINGS_REQ / SCHEMA_REQ over bond and poll
+  // Both endpoints trigger a BOND_SETTINGS_REQ / BOND_SCHEMA_REQ over bond and poll
   // their respective `received` flags until the file transfer completes.
   // Parallel because the two transfers are independent on the wire and the
   // master/worker can pipeline them — typical wall time is max(2s, 2s)
