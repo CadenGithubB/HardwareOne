@@ -543,17 +543,17 @@ bool storeSentMessageInPeerHistory(uint8_t*, const char*, uint32_t) { ++historyS
 // stamps a state that resolved before the record existed.
 enum SendStatusState : uint8_t { SEND_STATUS_PENDING = 0, SEND_STATUS_DELIVERED = 1 };
 struct SendStatus { bool inUse; uint8_t state; uint8_t peerMac[6]; uint32_t msgId; uint32_t registeredAtMs;
-                    uint32_t resolvedAtMs; };
+                    uint32_t resolvedAtMs; uint8_t status; };
 static unsigned statusReads = 0, deliveryStamps = 0;
 static uint8_t statusState = SEND_STATUS_PENDING;  // what the status table says when re-read
 static uint32_t stampMsgId = 0;
 static uint8_t stampState = 0xFF, stampMac[6] = {};
 bool sendStatusGet(uint32_t msgId, SendStatus* out) {
   ++statusReads;
-  if (out) *out = SendStatus{true, statusState, {}, msgId, 0, 0};
+  if (out) *out = SendStatus{true, statusState, {}, msgId, 0, 0, 0};
   return true;
 }
-void espnowUpdateSentDeliveryState(const uint8_t* mac, uint32_t msgId, uint8_t state) {
+void espnowUpdateSentDeliveryState(const uint8_t* mac, uint32_t msgId, uint8_t state, uint8_t = 0) {
   ++deliveryStamps;
   historyStoredAtStamp = historyStored;
   stampMsgId = msgId;

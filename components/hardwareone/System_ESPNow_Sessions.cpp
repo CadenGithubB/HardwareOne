@@ -859,7 +859,7 @@ void sendStatusRegister(uint32_t msgId, const uint8_t peerMac[6]) {
 // conversation keeps showing Delivered/Failed/No-ACK after this ephemeral entry
 // is swept (kSendStatusKeepResolvedMs). Declared in System_ESPNow.h; forward-
 // declared here to avoid pulling that heavy header into the session unit.
-void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state, uint8_t status = 0);
+void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state, uint8_t status);
 
 // TX-driven session liveness. Tracks consecutive unicast send-timeouts on a peer's
 // ACTIVE session: a delivered ACK clears the run; each no-ACK timeout bumps it, and
