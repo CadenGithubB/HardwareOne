@@ -19,6 +19,12 @@ could silently split them:
    reply texts quote them. Owner: System_HttpsCertPaths.h
    (HW1_HTTPS_CERT_PATH, HW1_HTTPS_KEY_PATH).
 
+4. The OTA result words (N-44): the recovery updater's status reports the
+   journal's last result (resultCode, resultSequence, resultDetail) in the
+   words of `otastatus json`. The two programs cannot share a function, so
+   System_OTA.cpp's resultName and updater_main.c's result_name must name
+   every hw1_ota_result_code_t value, with the same word.
+
 Source contract: each literal appears only in its owner (firmware sources
 under components/hardwareone outside test/, and updater/main), and every
 former site uses the owner's name. The one documented exception is the web
@@ -270,19 +276,52 @@ int main(void) {
     return failures
 
 
+def ota_result_words(root: Path) -> list[str]:
+    """N-44: the updater's status names the last OTA result as the main firmware does."""
+    failures = []
+    protocol = (root / 'components/hw1_ota_protocol/include/hw1_ota_protocol.h').read_text()
+    codes = re.findall(r'^\s*(HW1_OTA_RESULT_[A-Z_]+)\s*=\s*\d+,', protocol, re.M)
+    if len(codes) < 14:
+        return [f'hw1_ota_result_code_t: only {len(codes)} values found (extraction changed)']
+    case = re.compile(r'case (HW1_OTA_RESULT_[A-Z_]+):\s*return "([a-z_]+)";')
+    main_words = dict(case.findall(extract_block(
+        (root / 'components/hardwareone/System_OTA.cpp').read_text(), 'const char* resultName(')))
+    updater = (root / 'updater/main/updater_main.c').read_text()
+    if 'static const char *result_name(' not in updater:
+        return ['updater_main.c: the status does not name the last OTA result (no result_name)']
+    updater_words = dict(case.findall(extract_block(updater, 'static const char *result_name(')))
+    for code in codes:
+        if code not in main_words:
+            failures.append(f'System_OTA.cpp resultName: no word for {code}')
+        elif updater_words.get(code) != main_words[code]:
+            failures.append(f'updater result_name: {code} is {updater_words.get(code)!r}, '
+                            f'otastatus says {main_words[code]!r}')
+    status = extract_block(updater, 'static size_t status_json(')
+    for key, value in (('resultCode', 'result_name(status.result_code)'),
+                       ('resultSequence', 'status.result_sequence'),
+                       ('resultDetail', 'status.result_detail')):
+        if not re.search(r'cJSON_Add\w+ToObject\(root, "%s", [^;]*%s' % (key, re.escape(value)), status):
+            failures.append(f'updater status_json: no "{key}" from {value}')
+    snapshot = extract_block(updater, 'static void snapshot_record(')
+    for field in ('record->last_result.code', 'record->last_result.sequence', 'record->last_result.detail'):
+        if field not in snapshot:
+            failures.append(f'updater snapshot_record: {field} is not copied into the status')
+    return failures
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--root', type=Path, default=HERE.parents[3], help='repository root to read')
     parser.add_argument('--cxx', default=os.environ.get('CXX') or shutil.which('c++'))
     args = parser.parse_args()
     root = args.root.resolve()
-    failures = contract(root) + values(root, args.cxx)
+    failures = contract(root) + values(root, args.cxx) + ota_result_words(root)
     if failures:
         for failure in failures:
             print(f'definition_owners: {failure}', file=sys.stderr)
         return 1
     print('definition_owners: OTA handoff NVS keys, OTA frame marker/head and HTTPS key pair paths '
-          'each have one owner; values and reply texts unchanged')
+          'each have one owner; values and reply texts unchanged; the updater names OTA results as otastatus does')
     return 0
 
 

@@ -727,20 +727,13 @@ void wizardSuggestDeviceName(const char* label, char (&out)[32]) {
 bool wizardStageEspNowSettings(const SetupWizardResult& result) {
   if (!sWizardDraft.active) return false;
   auto& draft = sWizardDraft.values;
-  // The device name and the display label are separate: the name is the one
-  // the page confirmed (it passed the rule there), never derived from the
-  // label here. A page finished early keeps the name it had, and a draft with
-  // no valid name gets the one in use (HardwareOne-B2C3), so ESP-NOW can start.
-  if (result.deviceName.length() > 0) {
-    if (!devicename::valid(result.deviceName.c_str())) return false;
-    copyWizardString(draft.deviceName, result.deviceName);
-  } else if (!devicename::valid(draft.deviceName.c_str())) {
-    copyWizardString(draft.deviceName, SelfDevice::deviceName());
-  }
+  // Every refusal comes before anything is staged, so a refused page leaves
+  // the draft (and the name the System page set) as it was.
+  if (result.deviceName.length() > 0 && !devicename::valid(result.deviceName.c_str())) return false;
 #if ENABLE_ESPNOW
   // The label, room and zone follow the rule their commands apply
   // (espnowfriendlyname/espnowroom/espnowzone): a value it refuses is not
-  // staged, and the page says why and asks again.
+  // staged, and the page says why and asks for the fields again.
   const struct {
     EspNowMetaField field;
     const String& value;
@@ -755,6 +748,15 @@ bool wizardStageEspNowSettings(const SetupWizardResult& result) {
     }
   }
 #endif
+  // The device name and the display label are separate: the name is the one
+  // the page confirmed (it passed the rule there), never derived from the
+  // label here. A page finished early keeps the name it had, and a draft with
+  // no valid name gets the one in use (HardwareOne-B2C3), so ESP-NOW can start.
+  if (result.deviceName.length() > 0) {
+    copyWizardString(draft.deviceName, result.deviceName);
+  } else if (!devicename::valid(draft.deviceName.c_str())) {
+    copyWizardString(draft.deviceName, SelfDevice::deviceName());
+  }
   if (result.espnowFriendlyName.length()) copyWizardString(draft.espnowFriendlyName, result.espnowFriendlyName);
   if (result.espnowRoom.length()) copyWizardString(draft.espnowRoom, result.espnowRoom);
   if (result.espnowZone.length()) copyWizardString(draft.espnowZone, result.espnowZone);

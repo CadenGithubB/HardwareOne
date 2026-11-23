@@ -341,6 +341,11 @@ static void stagingAndPortValidation() {
   patch.espnowRoom = "<b>room";
   check(!wizardStageEspNowSettings(patch) && getWizardDraftValues().espnowRoom == "new-room");
   check(!output.empty() && output.back() == "Error: metadata refused");
+  // A refused page stages nothing at all: a new device name sent with the
+  // refused room is not left in the draft.
+  patch.deviceName = "other-name";
+  check(!wizardStageEspNowSettings(patch) && getWizardDraftValues().deviceName == std::string(31, 'n'));
+  patch.deviceName = std::string(31, 'n');
   patch.espnowRoom = "new-room";
   patch.espnowZone = std::string(32, 'z');
   check(!wizardStageEspNowSettings(patch) && getWizardDraftValues().espnowZone == "old-zone");

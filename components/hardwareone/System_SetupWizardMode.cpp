@@ -526,7 +526,15 @@ static CliModeInputResult dispatchEspNow(const String& line,
   };
   auto stageAndAdvance = [&]() {
     if (!wizardStageEspNowSettings(sWizard.result)) {
-      snprintf(out, outSize, "Error: ESP-NOW choices could not be staged. Try again or cancel.");
+      // A refused label, room or zone was named by the staging call, and
+      // nothing was staged. The fields start again from the label, as on the
+      // serial page, so a retry is not the same refusal.
+      sWizard.result.espnowFriendlyName = "";
+      sWizard.result.deviceName = "";
+      sWizard.result.espnowRoom = "";
+      sWizard.result.espnowZone = "";
+      sWizard.subMode = WizardSubMode::ESPNOW_NAME;
+      snprintf(out, outSize, "Error: the ESP-NOW choices were not staged. Enter them again, or 'cancel'.");
       return;
     }
     broadcastOutput("ESP-NOW identity staged.");

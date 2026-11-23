@@ -205,11 +205,14 @@ everything user-visible since the v0.99.99.1 tag.
   reported once (console, system log and a `config_file_corrupt` event) instead of silently
   running nothing.
 - A backup master promoted by failover is no longer saved as master: an unrelated settings save
-  keeps the backup role, and `espnowmeshrole` ends the promotion.
+  keeps the backup role, `espnowmeshrole` says when the master role is a promotion, and setting a
+  role with it ends the promotion.
 - The setup wizards refuse a display label, room or zone that `espnowfriendlyname`,
-  `espnowroom` or `espnowzone` would refuse, and say why.
+  `espnowroom` or `espnowzone` would refuse, say why, stage nothing from the refused page and ask
+  for its fields again.
 - The ESP-NOW capability summary and bond status report HTTP and Bluetooth as running only while
-  they run (they followed the boot autostart settings).
+  they run (they followed the boot autostart settings). A start or stop of either is pushed to the
+  bond partner with the next status; the capability summary is as of the last bond sync.
 - USER_SYNC frames not sealed in a session are now dropped by the receive table as well as by
   the handler.
 - `FATAL: Filesystem initialization failed` now says why (no `littlefs` partition, a partition
@@ -740,21 +743,6 @@ everything user-visible since the v0.99.99.1 tag.
   `closephone` point to `phone pair new` (serial) or "New code and pair" (screen); setting a secret
   clears that status, and a stored secret whose key derivation fails is retried instead of reported as
   missing.
-- A device updated to the one device name kept its name. The rename read only the new setting
-  (`system.device.identity.deviceName`), so a device updated from any earlier build came up with
-  "Device name: (not set)", and ESP-NOW refused to start ("No device name configured"): its peers could
-  not open sessions with it (bench 2026-11-18: the XIAO's `benchxiao` and the P4's `benchp4b` were lost).
-  The settings load now takes the old name once when no device name is stored: the old ESP-NOW name
-  (`network.espnow.identity.deviceName`), else the old Bluetooth name
-  (`network.bluetooth.bluetoothDeviceName`) unless it is the old default `HardwareOne`. A name that
-  breaks the rule is converted (spaces and `_` to `-`, other characters dropped, runs of `-` joined, cut
-  to 31 bytes, `-` trimmed at the ends; `Living_Room` becomes `Living-Room`); one with nothing valid
-  left is dropped. One line in the system log names what was taken. ESP-NOW's start, Bluetooth and the
-  Wi-Fi hostname use the name from that boot on; the file is rewritten once with the name under the new
-  key and both old keys removed, and every full settings save removes them too (so a later
-  `devicename clear` stays cleared). A stored device name is never replaced. Host-tested
-  (`device_name_migration_tests`, `settings_file_writes`, `device_name_sources`); not yet run on
-  hardware.
 - `espnowchannel` printed "Expected right now: 0 (following the joined AP)" and "Checker: MISMATCH"
   whenever ESP-NOW was stopped, even with the radio on the joined AP's channel (bench 2026-11-18, P4
   joined on channel 11). The expected channel is now the AP's channel while joined (else the setting,
@@ -1667,8 +1655,8 @@ everything user-visible since the v0.99.99.1 tag.
   address), checked in one place (`System_DeviceName.h`). It is the ESP-NOW name, the Bluetooth name and
   the Wi-Fi hostname (the hostname was never set before), and `devicename [<name>|clear]` sets it in
   every build; `espnowsetname`, `blename` and the Bluetooth-only `bluetoothDeviceName` setting are gone,
-  and the settings row moved from `espnow.deviceName` to `system.device.deviceName` (a device updated
-  from an earlier build takes its old name into it once: see Fixed). Without a stored
+  and the settings row moved from `espnow.deviceName` to `system.device.deviceName` (the old keys are not read: a
+  1.0 board starts erased and gets its name from the setup wizard or `devicename`). Without a stored
   name Bluetooth and Wi-Fi use `HardwareOne-B2C3`, the last two bytes of the address (on a P4 board from
   the P4's own address, not the radio address of its C6); screens and text replies show it as
   `HardwareOne-B2C3 (default)`, and `bleinfo json`, `status json` (`/api/system`, with new top-level

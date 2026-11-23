@@ -14133,6 +14133,28 @@ void processMeshHeartbeats() {
            (unsigned long)localStatus.freeHeap);
   }
 
+  // 9j1. Bond: the status's HTTP and Bluetooth bits say what runs now
+  // (buildLocalBondStatus), and nothing bumps the sensor status when the web
+  // server or Bluetooth starts or stops (HTTP comes up after Wi-Fi, often
+  // after the bond sync). A change is pushed like a sensor change instead of
+  // waiting for the partner's next 30 s poll (9k). Not sampled while a partner
+  // change holds the tick: a change in that time is seen, and pushed to the
+  // partner of then, at the first tick after it.
+  if (!bondTickHeld(syncEpoch)) {
+    static uint8_t sLastServiceBits = 0xFF;  // 0xFF: not sampled yet
+    uint8_t serviceBits = 0;
+#if ENABLE_HTTP_SERVER
+    if (isHttpServerRunning()) serviceBits |= 0x01;
+#endif
+#if ENABLE_BLUETOOTH
+    if (bleSubsystemActive()) serviceBits |= 0x02;
+#endif
+    if (serviceBits != sLastServiceBits) {
+      if (sLastServiceBits != 0xFF) gEspNow->bondNeedsProactiveStatus = true;
+      sLastServiceBits = serviceBits;
+    }
+  }
+
   // 9j2. Bond: proactive status push — sensor state changed locally, push to peer immediately
   if (!bondTickHeld(syncEpoch) && gEspNow->bondNeedsProactiveStatus) {
     gEspNow->bondNeedsProactiveStatus = false;
@@ -18411,6 +18433,10 @@ const char* cmd_espnow_meshrole(const String& argsInput) {
     int pos = 0;
     char* buf = getDebugBuffer();
     pos += snprintf(buf + pos, 1024 - pos, "Mesh role: %s", getMeshRoleString(gSettings.meshRole));
+    if (gBackupPromoted) {
+      pos += snprintf(buf + pos, 1024 - pos,
+                      " (acting for the silent master; the saved role is backup, and setting a role here ends this)");
+    }
     if (gSettings.meshMasterMac.length() > 0) {
       pos += snprintf(buf + pos, 1024 - pos, "\nMaster MAC: %s", gSettings.meshMasterMac.c_str());
     }

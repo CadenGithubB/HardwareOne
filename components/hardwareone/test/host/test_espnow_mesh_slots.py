@@ -108,6 +108,9 @@ REST = (
     'void espnowDeviceNameApplied(',
     'bool espnowNameInUseBy(',
     'static const char* espnowPeerAliasRefusal(',
+    # SET-3: the role command ends a failover promotion.
+    'const char* getMeshRoleString(uint8_t role)',
+    'const char* cmd_espnow_meshrole(const String& argsInput)',
 )
 # The one device-name setter, compiled in every build (System_DeviceName.cpp).
 SETTER = 'const char* cmd_devicename(const String& argsInput)'

@@ -642,6 +642,10 @@ static void noteFileSend(const uint8_t* mac, uint8_t kind) {
 // Status (processMeshHeartbeats 9j / 9j2).
 struct BondPeerStatus { uint32_t sensorEnabledMask; uint32_t sensorConnectedMask; uint32_t freeHeap; };
 [[maybe_unused]] static void buildLocalBondStatus(BondPeerStatus& st) { st = BondPeerStatus{1, 1, 100000}; }
+// The web server's running state (WebServer_Handle.h), which the status's HTTP
+// bit reports and step 9j1 watches (RAD-3).
+static bool gHttpRunning = false;
+[[maybe_unused]] static bool isHttpServerRunning() { return gHttpRunning; }
 enum RemoteSensorType { REMOTE_SENSOR_THERMAL = 0, REMOTE_SENSOR_TOF = 1, REMOTE_SENSOR_MAX = 2 };
 static bool gStreamThermal = true;
 [[maybe_unused]] static bool* bondStreamSetting(RemoteSensorType) { return &gStreamThermal; }
@@ -1253,6 +1257,40 @@ static void caseSwitchHoldsAnswersAndStatus() {
   CHECK(toA == 0, "X5 after the change %zu answers to the old partner's requests still went to it", toA);
 }
 
+// RAD-3: the status's HTTP bit says whether the web server runs now, and
+// nothing bumps the sensor status when it starts or stops. Step 9j1 pushes the
+// status to the partner on a change, once, and pushes nothing while the state
+// stays as it is.
+static void caseServiceChangePushesStatus() {
+  resetWorld(kMasterSelf);
+  gSettings.bondModeEnabled = true;
+  gSettings.bondRole = BOND_ROLE_MASTER;
+  gSettings.bondPeerMac = "02:11:22:33:44:01";
+  gMaster.mac = kPartnerC;
+  gEspNow->bondPeerOnline = true;
+  gEspNow->lastRemoteCapValid = true;
+  gEspNow->bondManifestReceived = true;
+  gEspNow->bondSettingsReceived = true;
+  gEspNow->bondCapSent = true;
+  gEspNow->lastBondHeartbeatReceivedMs = gNowMs;
+  gLastBondHeartbeatSentMs = gNowMs;
+  gHttpRunning = false;
+  runTicks();  // the state now is what the partner has
+  const auto pushes = [] { return framesTo(kPartnerA, ESPNOW_V4_TYPE_BOND_STATUS_RESP, false); };
+  const size_t before = pushes();
+  gNowMs += 100; runTicks();
+  CHECK(pushes() == before, "S1 %zu status pushes with nothing changed", pushes() - before);
+  gHttpRunning = true;
+  gNowMs += 100; runTicks();
+  CHECK(pushes() == before + 1, "S2 the web server started: %zu status pushes, expected 1", pushes() - before);
+  gNowMs += 100; runTicks();
+  gNowMs += 100; runTicks();
+  CHECK(pushes() == before + 1, "S3 a running web server pushed the status again (%zu)", pushes() - before);
+  gHttpRunning = false;
+  gNowMs += 100; runTicks();
+  CHECK(pushes() == before + 2, "S4 the web server stopped: %zu status pushes, expected 2", pushes() - before);
+}
+
 // Round 4: a step of the tick that waits lets cmd_exec run a whole partner
 // change. The tick must not go on with the old partner's state afterwards.
 static void caseTickWaitsThroughSwitch() {
@@ -1618,6 +1656,7 @@ int main() {
   caseUnpairPartner();
   caseUnpairOther();
   caseSwitchHoldsAnswersAndStatus();
+  caseServiceChangePushesStatus();
   caseTickWaitsThroughSwitch();
   caseQueuedBondFileAfterUnpair();
 #if HW1_HAVE_AGREE

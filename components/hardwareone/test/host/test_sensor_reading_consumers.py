@@ -54,6 +54,14 @@ def generate(component, baseline):
             if core.exists():  # the ANO's button bits live in its core header
                 text += core.read_text()
             constants += re.findall(r'^#define (?:GAMEPAD_BUTTON_\w+|ANO_\w+) +[^\\\n]*$', text, re.M)
+    # The presence cache, for the automation MOTION condition only.
+    presence = (component / 'i2csensor_sths34pf80.h').read_text()
+    types.append(extract_block(presence, 'struct PresenceCache') + ';')
+    state.append('PresenceCache gPresenceCache{};')
+    mocks.append('''bool presenceCacheSnapshot(PresenceCache& out, uint32_t ms=10) {
+  assert(ms == 50);
+  assert(!held); out={}; if (!admit) return false; out=gPresenceCache; return true;
+}''')
     g2 = (component / 'G2_Page_Sensors.cpp').read_text()
     constants.append(re.search(r'static const char\* kRtcDow\[8\] = \{.*?\};', g2, re.S)[0])
     functions = [extract_block(g2, 'static void ' + name + '(')
@@ -77,8 +85,8 @@ def generate(component, baseline):
     automation_source = (component / 'System_Automation.cpp').read_text()
     automation_source = automation_source[automation_source.index('bool evaluateCondition(const char* condition) {'):]
     automation = extract_block(automation_source, 'bool evaluateCondition(')
-    # MOTION reads the presence sensor (STHS34PF80), which this harness does not
-    # build: its line is all false (fail closed), as on a board without it.
+    # MOTION reads the presence sensor's (STHS34PF80) motion flag: DETECTED in
+    # the first state, NONE in the last, and false without a reading or the lock.
     branches = ' else '.join(extract_block(automation, f'if (strcmp(sensor, "{sensor}") == 0)')
                              for sensor in ['TEMP', 'DISTANCE', 'LIGHT', 'MOTION'])
     comparisons = automation[automation.index('  // Evaluate condition'):]
