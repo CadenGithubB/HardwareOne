@@ -108,8 +108,9 @@ constexpr uint8_t kLsm6dsoxSrcSingleTap = 0x04; // SINGLE_TAP
 // quiet windows in INT_DUR2 (at 416 Hz: SHOCK 2 = 8/ODR each, about 38 ms;
 // QUIET 1 = 4/ODR, about 10 ms). Tuned for a knock on a desk sign; check on
 // the bench.
-constexpr uint8_t kLsm6dsoxTapThreshold = 5;    // 0.625 g above the slope (1.0 g missed the
-                                                // softer second tap of a quick double, bench 2026-11-23)
+constexpr uint8_t kLsm6dsoxTapThreshold = 3;    // 0.375 g above the slope. Bench 2026-11-23:
+                                                // 1.0 g and 0.625 g missed the softer in-between taps
+                                                // of quick runs (0.625 g: 3 of 10 missed by the chip)
 constexpr uint8_t kLsm6dsoxTapShock = 2;
 constexpr uint8_t kLsm6dsoxTapQuiet = 1;
 // Free fall: FF_THS 001 = 219 mg (the software detector uses 2 m/s^2, about
