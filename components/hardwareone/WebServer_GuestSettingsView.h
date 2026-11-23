@@ -1,15 +1,17 @@
 #pragma once
 
 // The guest's view of GET /api/settings (owner, guest privacy 4, 2026-11-22):
-// a guest sees the settings without the saved Wi-Fi networks (their SSIDs),
+// a guest sees the settings without the saved Wi-Fi networks (their SSIDs)
+// or the joined network's name (the root wifiPrimarySSID, live WiFi.SSID()),
 // the MQTT broker host and user name, and the LLM gateway address. Users and
 // administrators get the settings unchanged.
 //
 // A hidden text value is replaced by kGuestHiddenText, so every settings
 // renderer on the page shows that sentence in the field instead of an empty
 // box that reads as "not configured"; an empty value stays empty (nothing is
-// hidden). The saved-network list is dropped whole. The paths are the
-// settings modules' own: network.wifi.networks (System_WiFiNetworks.h),
+// hidden). The saved-network list and wifiPrimarySSID are dropped whole. The
+// paths are the settings modules' own: network.wifi.networks
+// (System_WiFiNetworks.h), wifiPrimarySSID (buildSettingsJsonDoc),
 // network.mqtt + group broker (System_MQTT.cpp), apps.llm + group http
 // (System_LLMCommands.cpp); host test web_guest_settings_view pins them.
 //
@@ -34,6 +36,7 @@ struct GuestHiddenSetting {
 };
 
 inline constexpr GuestHiddenSetting kGuestHiddenSettings[] = {
+  {"wifiPrimarySSID", GuestHide::Drop},
   {"network.wifi.networks", GuestHide::Drop},
   {"network.mqtt.broker.mqttHost", GuestHide::Mask},
   {"network.mqtt.broker.mqttUser", GuestHide::Mask},

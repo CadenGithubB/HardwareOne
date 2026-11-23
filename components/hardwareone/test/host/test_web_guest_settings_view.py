@@ -2,14 +2,14 @@
 """A guest's GET /api/settings and MQTT page leave out the private settings.
 
 Owner, guest privacy 4 (2026-11-22): a guest gets a reduced settings view, with
-no saved Wi-Fi networks (their SSIDs), no MQTT broker host or user name, and no
+no saved Wi-Fi networks (their SSIDs) and no joined network name, no MQTT broker host or user name, and no
 LLM gateway address; users and administrators are unchanged.
 
 The production guestview::reduceSettingsForGuest (WebServer_GuestSettingsView.h)
 is compiled with the vendored ArduinoJson over a settings object laid out as
 buildSettingsJsonDoc writes it, and checked:
 
-- network.wifi.networks is gone; the MQTT host and user name and the LLM
+- network.wifi.networks and wifiPrimarySSID are gone; the MQTT host and user name and the LLM
   gateway URL read "(not shown to guests)"; every other value (port, topics,
   the gateway's model, the current network flags, LLM tuning) is unchanged;
 - an empty value stays empty (nothing to hide), a build without a section
@@ -83,7 +83,7 @@ int main() {
     JsonDocument doc;
     checked(!deserializeJson(doc, kFull), "parse the full settings");
     JsonObject s = doc.as<JsonObject>();
-    checked(guestview::reduceSettingsForGuest(s) == 4, "four values hidden");
+    checked(guestview::reduceSettingsForGuest(s) == 5, "five values hidden");
     checked(s["network"]["wifi"]["networks"].isNull(), "saved networks dropped");
     checked(s["network"]["wifi"]["wifiAutoStart"] == true, "wifi flags kept");
     checked(textIs(s["network"]["mqtt"]["broker"]["mqttHost"], hidden), "MQTT host hidden");
@@ -95,14 +95,14 @@ int main() {
     checked(textIs(s["apps"]["llm"]["http"]["model"], "openclaw/default"), "LLM model kept");
     checked(s["apps"]["llm"]["http"]["enabled"] == true, "LLM enabled kept");
     checked(s["apps"]["llm"]["temperature"] == 0.5, "LLM tuning kept");
-    checked(textIs(s["wifiPrimarySSID"], "HomeNet"), "the current network is not a saved list");
+    checked(s["wifiPrimarySSID"].isNull(), "the joined network name dropped");
     checked(s["network"]["espnow"]["espnowAutoStart"] == true, "other sections kept");
     // A second pass finds nothing new to drop; the masks are already the sentence.
     checked(guestview::reduceSettingsForGuest(s) == 3, "a second pass re-masks only");
     checked(textIs(s["network"]["mqtt"]["broker"]["mqttHost"], hidden), "still hidden");
     std::string out;
     serializeJson(doc, out);
-    checked(out.find("broker.lan") == std::string::npos && out.find("hauser") == std::string::npos &&
+    checked(out.find("broker.lan") == std::string::npos && out.find("HomeNet") == std::string::npos && out.find("hauser") == std::string::npos &&
                 out.find("WorkNet") == std::string::npos && out.find("gw.lan") == std::string::npos,
             "no hidden text left in the serialized view");
   }
@@ -135,6 +135,7 @@ def check_sources(component: Path) -> None:
     view = (component / "WebServer_GuestSettingsView.h").read_text()
     paths = re.findall(r'\{"([a-zA-Z.]+)", GuestHide::(Mask|Drop)\}', view)
     require(dict(paths) == {
+        "wifiPrimarySSID": "Drop",
         "network.wifi.networks": "Drop",
         "network.mqtt.broker.mqttHost": "Mask",
         "network.mqtt.broker.mqttUser": "Mask",
@@ -145,6 +146,9 @@ def check_sources(component: Path) -> None:
     for name, value in (("kParent", "network"), ("kSection", "wifi"), ("kNetworks", "networks")):
         require(f'inline constexpr char {name}[] = "{value}";' in wifi,
                 f"the saved networks live at network.wifi.networks ({name})")
+    settings = (component / "System_Settings.cpp").read_text()
+    require('doc["wifiPrimarySSID"] = cur;' in settings,
+            "the joined network name is the settings root's wifiPrimarySSID")
 
     mqtt = (component / "System_MQTT.cpp").read_text()
     require('"mqtt",\n  "network.mqtt",' in mqtt, "the MQTT module's section is network.mqtt")
