@@ -37,10 +37,12 @@ inline const char* verdictName(Verdict v) {
 // Default thresholds per feed (the imuTapThresholdMg setting's default). The
 // 4517's from the sign (bench 2026-11-23). The BNO055 filters its
 // accelerometer at 62.5 Hz and is read at 100 Hz, so a knock's short spike
-// reaches it at roughly a third of what the 416 Hz stream sees: the sign's
-// 1300 mg scaled by that, to be tuned live with 'imutaptrace'.
+// reaches it at roughly a third of what the 416 Hz stream sees. Pod bench
+// 2026-11-23: soft side taps peaked 255-472 mg, so 300 mg; their echoes
+// (230-300 mg, 70-100 ms after the tap) fall in the ring window. Tuned live
+// with 'imutaptrace'.
 constexpr uint16_t kKnockThresholdMg416Hz = 1300;
-constexpr uint16_t kKnockThresholdMg100Hz = 400;
+constexpr uint16_t kKnockThresholdMg100Hz = 300;
 
 struct Config {
   uint16_t thresholdMg = 500;  // peak jump a tap must reach

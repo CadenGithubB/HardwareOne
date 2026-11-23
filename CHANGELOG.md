@@ -46,8 +46,10 @@ Host-tested and built (`feathers3-pod`); not yet run on the pod.
   Without IMU input a BNO055 build reads the chip every `imudevicepollms` as before.
 - `imutapthreshold`, `imutapmaxms`, `imutapringms`, `imutapsideaxis`, `imutapsideratio` and
   `imutaptrace` exist in those BNO055 builds too (`imutapshock` and `imutapquiet` stay with the
-  4517's LSM6DSOX). The BNO055's default threshold is 400 mg (the 4517's stays 1300 mg): its
-  accelerometer is filtered at 62.5 Hz, so a knock reads about a third as strong. `imustatus`
+  4517's LSM6DSOX). The BNO055's default threshold is 300 mg (the 4517's stays 1300 mg): its
+  accelerometer is filtered at 62.5 Hz, so a knock reads about a third as strong (pod bench
+  2026-11-23: soft side taps peaked 255-472 mg; their 230-300 mg echoes 70-100 ms later fall in
+  the ring window). `imustatus`
   says "taps found by the firmware in the 100 Hz readings".
 - `imutaptrace json` adds `sampleHz` (416 or 100); on the BNO055 `feed` counts one read per
   sample (`unread` and `pattern` stay 0, they are the 4517's FIFO status).

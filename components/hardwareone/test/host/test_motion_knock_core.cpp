@@ -215,8 +215,8 @@ void testSingleTap100() {
   fast.sampleHz = 416;
   auto split = run100(fast, 600, [](float t, float* mg) { knock100At(t, 200, 600, 40, &mg[2]); });
   assert(split.size() == 2);
-  // A soft one (300 mg) is recorded, not counted.
-  ev = run100(cfg, 600, [](float t, float* mg) { knock100At(t, 200, 300, 40, &mg[2]); });
+  // A soft one (220 mg, under the 300 mg default) is recorded, not counted.
+  ev = run100(cfg, 600, [](float t, float* mg) { knock100At(t, 200, 220, 40, &mg[2]); });
   assert(ev.size() == 1 && ev[0].verdict == Verdict::Soft);
 }
 

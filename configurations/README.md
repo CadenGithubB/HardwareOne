@@ -227,7 +227,8 @@ A, B, Y, X (one to four), face taps START (two) and SELECT (three), tilt as the 
 to calibrate the tilt. In this build the BNO055 is read every 10 ms (the accelerometer and the
 fusion's gravity; the rest of the reading every 100 ms) and the firmware finds the taps in those
 readings. The chip filters its accelerometer at 62.5 Hz, so knocks read about a third as strong
-as on the sign: the default threshold is 400 mg, a starting point to tune on the pod with
+as on the sign: the default threshold is 300 mg (soft side taps on the pod peaked from about
+255 mg; their echoes, 70-100 ms later, fall in the ring window), a starting point to tune with
 `imutaptrace` (tap it, read the peaks, then `imutapthreshold`). Which way a side knock hits
 depends on how the BNO055 sits in the pod: `imutapsideaxis` and `imutapsideratio` (defaults Y,
 60 %) fit it, and `imutaptrace` shows each knock's x/y/z. To start it with every boot:

@@ -2621,7 +2621,7 @@ accelerometer and the fusion's gravity (12 bytes), with the rest of the reading 
 heading, gyroscope, magnetometer, calibration) every 100 ms. A BNO055 build without IMU input is
 read every `imudevicepollms` as before, with no tap detection of its own. The BNO055 filters its
 accelerometer at 62.5 Hz, so a knock reads about a third as strong as on the 4517: its default
-threshold is 400 mg against the 4517's 1300 mg. To tune it, tap the device the way it will be used
+threshold is 300 mg against the 4517's 1300 mg. To tune it, tap the device the way it will be used
 and run `imutaptrace`: each knock is listed with its peak, length and verdict (`tap`, `soft` under
 the threshold, `long` over `imutapmaxms`, `ring` inside `imutapringms`), and a hint names the
 setting that would have counted the missed ones. `imustatus` says where taps come from ("taps

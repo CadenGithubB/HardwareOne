@@ -143,7 +143,7 @@ class PeripheralConfig(unittest.TestCase):
         imu = dict(self.profile(), I2C_FEATURE_LEVEL=4, CUSTOM_ENABLE_IMU=1)
         self.check_profile(dict(imu, IMU_DEVICE_TYPE=1, INPUT_DEVICE_TYPE=5),
                            ['ENABLE_IMU_INPUT == 1', 'ENABLE_IMU_BNO055 == 1', 'ENABLE_IMU_KNOCK_DETECTOR == 1',
-                            'IMU_TAP_THRESHOLD_DEFAULT_MG == 400'])
+                            'IMU_TAP_THRESHOLD_DEFAULT_MG == 300'])
         self.check_profile(dict(imu, IMU_DEVICE_TYPE=2, INPUT_DEVICE_TYPE=5),
                            ['ENABLE_IMU_INPUT == 1', 'ENABLE_IMU_LSM6DSOX == 1', 'ENABLE_IMU_KNOCK_DETECTOR == 1',
                             'IMU_TAP_THRESHOLD_DEFAULT_MG == 1300'])

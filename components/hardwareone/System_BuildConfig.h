@@ -812,8 +812,9 @@
 #define ENABLE_IMU_KNOCK_DETECTOR (ENABLE_IMU_LSM6DSOX || (ENABLE_IMU_BNO055 && ENABLE_IMU_INPUT))
 // The tap threshold's default (imuTapThresholdMg): the 4517's from the sign;
 // the BNO055 sees knocks about a third as strong (62.5 Hz filter, 100 Hz
-// reads): HAL_Motion_KnockCore.h's kKnockThresholdMg*.
-#define IMU_TAP_THRESHOLD_DEFAULT_MG (ENABLE_IMU_BNO055 ? 400 : 1300)
+// reads; soft pod taps peak from about 255 mg): HAL_Motion_KnockCore.h's
+// kKnockThresholdMg*.
+#define IMU_TAP_THRESHOLD_DEFAULT_MG (ENABLE_IMU_BNO055 ? 300 : 1300)
 // An input device that is not an I2C device of its own: it starts by a direct
 // call (inputStartInternal), not through the I2C sensor start queue.
 #define ENABLE_INPUT_DIRECT_START (ENABLE_GPIO_ENCODER || ENABLE_IMU_INPUT)

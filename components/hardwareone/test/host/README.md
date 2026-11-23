@@ -108,7 +108,7 @@ only when due, the forward-only read-time clock, taps from the queue and
 `tapsInSoftware`; `imutaptrace` registered with the detector for either
 backend and `imutapshock` for the LSM6DSOX only; and the decimator ahead of
 the engine. `test_optional_peripheral_config.py` builds IMU input with either
-backend (with the detector and its default threshold, 400 mg on the BNO055,
+backend (with the detector and its default threshold, 300 mg on the BNO055,
 1300 mg on the 4517) and refuses it without the IMU.
 
 ## OLED CLI Output and its console history
