@@ -360,7 +360,7 @@ static bool imuInitBackend() {
   const uint8_t address = imuConfiguredAddress();
   // The imuAddress setting can also arrive by a settings write, which checks
   // only its range: refuse an address another device of this build holds.
-  char clash[112];
+  char clash[104];  // with the advice below, fits sImuInitWhy
   if (i2cAddressTakenBy(bus, address, I2C_DEVICE_IMU, 1, clash, sizeof(clash))) {
     snprintf(sImuInitWhy, sizeof(sImuInitWhy), "%s Change 'imuaddress' or 'imubus', then 'openimu'.", clash);
     return false;

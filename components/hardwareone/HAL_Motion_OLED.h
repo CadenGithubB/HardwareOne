@@ -94,7 +94,9 @@ static const OledModeEntry imuOledModes[] = {
     imuInputHandler,         // inputFunc - X toggles sensor
     true,                    // showInMenu
     40,                      // menuOrder
-    nullptr                  // hints
+    nullptr,                 // hints
+    nullptr,                 // onEnterFunc
+    nullptr                  // headerFunc
   }
 };
 
