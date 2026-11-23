@@ -109,7 +109,10 @@ Host-tested and built; not run on a device.
   `PEERS`, metrics, MQTT availability, `espnowdevices` / `espnowrooms` (`online`, and `state` in
   their JSON).
 - `espnowmeshstatus` JSON: each peer gains `state`, `link` (`twoWay` / `oneWay` / `none`),
-  `lastTwoWayAgeMs` and `peerHeardRssi`; `lastAck`, `ackCount` and `activityAlive` are gone.
+  `lastTwoWayAgeMs` and `peerHeardRssi`; `lastAck`, `ackCount`, `activityAlive`, `lastHeartbeat` and
+  `lastRxActivity` are gone. The reply always fits one command result (it could answer "response too
+  large" with about 12 peers); rows that do not fit are counted in `peersNotShown` /
+  `unpairedNotShown`.
 - Messages go straight to a peer only on a two-way link; a one-way peer is reached through a relay
   that hears it both ways when there is one (a relay must be paired with this device). Route adverts
   from a neighbour that is not two-way are ignored.
@@ -117,9 +120,12 @@ Host-tested and built; not run on a device.
   cannot hear this device no longer flaps between offline and back, and a mesh worker no longer
   hunts for a master that only cannot hear it. Heartbeats ask no acknowledgement any more (about two
   frames fewer per peer per 5 s) and go encrypted once a session is up.
-- `peer_online` / `peer_offline` follow the online state, at most one per peer per 30 s.
+- `peer_online` / `peer_offline` follow the online state, at most one per peer per 30 s; a key
+  renewal (rekey) no longer counts as a state change.
 - A peer's restart is seen in its heartbeat (its boot count): the stale session ends and one
-  `Online (boot #N)` line is filed, now only for a real restart (not when this device restarted).
+  `Online (boot #N)` line is filed, now only for a real restart, once the peer's first encrypted
+  heartbeat shows the new count (forged group-signed counts write nothing).
+- Heartbeats to many peers are spread over about 200 ms and leave room in the send queue.
 - **Removed:** the boot notice frame (opcode 31, retired) and `espnowbroadcaststats` with the broadcast
   acknowledgement tracking (use `espnowmeshstatus`).
 - **Wire change:** HEARTBEAT is 56 bytes (+ boot count, echo, link RSSI). Reflash devices together.

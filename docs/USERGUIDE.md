@@ -903,7 +903,8 @@ the device is heard.
 
 `espnowmeshstatus` gives each peer's `state`, its `link` (`twoWay`, `oneWay` or `none`), how long ago
 the last two-way proof came (`lastTwoWayAgeMs`) and `peerHeardRssi` (how strongly the peer hears this
-device's heartbeats). `espnowdevices` prints the state, `(connecting, one-way` for a peer heard only one
+device's heartbeats). The reply always fits one command result: in a large mesh with long names the
+rows that do not fit are counted in `peersNotShown` / `unpairedNotShown` (paired peers come first). `espnowdevices` prints the state, `(connecting, one-way` for a peer heard only one
 way. The web page's device list shows Online, Connecting or Offline with the link.
 
 - **Messages to a one-way peer** do not go straight to it when a relay can reach it both ways; with no
@@ -915,13 +916,19 @@ way. The web page's device list shows Online, Connecting or Offline with the lin
   because its master cannot hear it.
 - **A restart** is seen in the peer's heartbeat: it carries the device's boot count. A newer count than
   before ends the session this device still held with it (the next message opens a new one) and leaves
-  one `Online (boot #N)` line in that device's conversation. A copy of an old heartbeat played back by
-  someone in range ends nothing. (The separate boot notice frame of earlier builds is gone.)
+  one `Online (boot #N)` line in that device's conversation, written once the device's first encrypted
+  heartbeat after the restart shows the new count. A copy of an old heartbeat played back by someone in
+  range ends nothing and writes nothing. (The separate boot notice frame of earlier builds is gone.)
 - **Events** `peer_online` / `peer_offline` follow the online state: online when the peer becomes online,
   offline when it stops being online (silent, or only connecting). At most one per peer per 30 s; a
   change that is undone within the 30 s posts nothing, otherwise the state at the end of the 30 s is
   posted. The log line says why (`not heard for 30 s`, `connecting: one-way ...`, `connecting: no session`).
-- A paired device keeps its place in the peer table while it is offline.
+- A paired device keeps its place in the peer table while it is offline. A key renewal (rekey) does
+  not make a device connecting.
+- Limits: someone in radio range who relays this device's and the other device's encrypted frames
+  in real time (without any key) can make a one-way link look two-way; they cannot read or change
+  anything, the worst case is a message that goes unanswered. Someone who replays a paired device's
+  old group-signed frames can keep it shown as connecting after it was switched off (never online).
 
 ### Rooms, tags and group commands
 `espnowroomcmd <room> <user> <pass> <command>` and `espnowtagcmd <tag> <user> <pass> <command>` run a command on every device of a room or with a tag. The user and password are an account on the target devices and travel with the command, encrypted for each device.
