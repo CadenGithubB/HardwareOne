@@ -1415,7 +1415,7 @@ static const SettingEntry imuSettingEntries[] = {
   { "imuTapThresholdMg", SETTING_INT, &gSettings.imuTapThresholdMg, 500, 0, nullptr, 50, 4000, "Tap threshold (mg)", nullptr, false, "tap", "imutapthreshold" },
   { "imuTapShock", SETTING_INT, &gSettings.imuTapShock, 2, 0, nullptr, 0, 3, "Tap shock window", nullptr, false, "tap", "imutapshock" },
   { "imuTapQuiet", SETTING_INT, &gSettings.imuTapQuiet, 1, 0, nullptr, 0, 3, "Tap quiet window", nullptr, false, "tap", "imutapquiet" },
-  { "imuTapMaxMs", SETTING_INT, &gSettings.imuTapMaxMs, 40, 0, nullptr, 5, 500, "Tap max length (ms)", nullptr, false, "tap", "imutapmaxms" },
+  { "imuTapMaxMs", SETTING_INT, &gSettings.imuTapMaxMs, 120, 0, nullptr, 5, 500, "Tap max length (ms)", nullptr, false, "tap", "imutapmaxms" },
   { "imuTapRingMs", SETTING_INT, &gSettings.imuTapRingMs, 80, 0, nullptr, 0, 500, "Tap ring window (ms)", nullptr, false, "tap", "imutapringms" },
 #endif
   { "imuOrientationMode", SETTING_INT, &gSettings.imuOrientationMode, 0, 0, nullptr, 0, 8, "Orientation Mode", "0:Normal,1:Flip Pitch,2:Flip Roll,3:Flip Yaw,4:Flip Pitch+Roll,5:Roll 180 Fix,6:Rotate 90 CCW,7:Alt Extreme Pitch,8:Upside Down", false, "orientation", "imuorientationmode" },

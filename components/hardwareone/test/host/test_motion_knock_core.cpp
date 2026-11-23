@@ -95,6 +95,12 @@ void testHandlingIsLongAndTiltIgnored() {
     if (t > 100 && t < 300) mg[0] += 800;
   });
   assert(!ev.empty() && ev[0].verdict == Verdict::Long && ev[0].durMs >= 150);
+  // A soft bump right after a long knock is its ringing, not a soft knock.
+  ev = run(cfg, 800, [](float t, float* mg) {
+    if (t > 100 && t < 300) mg[0] += 800;
+    knockAt(t, 360, 600, 15, mg);
+  });
+  assert(ev.size() == 2 && ev[1].verdict == Verdict::Ring);
   // A slow tilt (gravity moving to x over 1 s) is no knock.
   ev = run(cfg, 2000, [](float t, float* mg) {
     const float a = t < 1000 ? 0 : (t > 2000 ? 1.5708f : (t - 1000) / 1000 * 1.5708f);

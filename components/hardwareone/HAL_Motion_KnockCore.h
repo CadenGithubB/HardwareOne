@@ -10,8 +10,8 @@
 //   - it ends once the jump stays under that level for kKnockQuietMs;
 //   - it counts as a tap when its peak reached the threshold, it lasted at
 //     most maxMs (longer is handling, not a knock: "long"), and it did not
-//     start within ringMs of the previous tap's end (the board ringing after
-//     a knock: "ring").
+//     start within ringMs of the previous hard knock's end (the board
+//     ringing after a knock: "ring").
 #pragma once
 
 #include <math.h>
@@ -33,7 +33,7 @@ inline const char* verdictName(Verdict v) {
 
 struct Config {
   uint16_t thresholdMg = 500;  // peak jump a tap must reach
-  uint16_t maxMs = 40;         // longest a tap may last
+  uint16_t maxMs = 120;        // longest a tap may last (bench 2026-11-23: knocks on the sign ring 45-95 ms)
   uint16_t ringMs = 80;        // a knock starting this soon after a tap is its ringing
 };
 
@@ -115,14 +115,19 @@ class Detector {
     ev.gapMs = (!havePrev_ || gapUs / 1000u >= 0xFFFFu) ? 0xFFFF : static_cast<uint16_t>(gapUs / 1000u);
     havePrev_ = true;
     prevStartUs_ = startUs_;
-    if (ev.peakMg < cfg.thresholdMg) {
+    // Ringing follows any hard knock (a tap, or one too long to be a tap).
+    const bool ringing =
+        haveTap_ && static_cast<uint32_t>(startUs_ - lastTapEndUs_) < static_cast<uint32_t>(cfg.ringMs) * 1000u;
+    if (ringing) {
+      ev.verdict = Verdict::Ring;
+    } else if (ev.peakMg < cfg.thresholdMg) {
       ev.verdict = Verdict::Soft;
     } else if (ev.durMs > cfg.maxMs) {
       ev.verdict = Verdict::Long;
-    } else if (haveTap_ && static_cast<uint32_t>(startUs_ - lastTapEndUs_) < static_cast<uint32_t>(cfg.ringMs) * 1000u) {
-      ev.verdict = Verdict::Ring;
     } else {
       ev.verdict = Verdict::Tap;
+    }
+    if (ev.peakMg >= cfg.thresholdMg) {
       haveTap_ = true;
       lastTapEndUs_ = lastAboveUs_;
     }

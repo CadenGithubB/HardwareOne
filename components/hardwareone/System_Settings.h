@@ -61,7 +61,7 @@ struct Settings {
       imuTapThresholdMg(500),
       imuTapShock(2),
       imuTapQuiet(1),
-      imuTapMaxMs(40),
+      imuTapMaxMs(120),
       imuTapRingMs(80),
       gpsDevicePollMs(200),
       apdsDevicePollMs(200),
