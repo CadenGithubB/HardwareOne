@@ -167,6 +167,18 @@ static int openLineLocked(const char* row, size_t n) {
   return -1;
 }
 bool captureCryptoRevealText(char*, size_t&, size_t, size_t* = nullptr);
+// B11: this device's key id (the mark of a sealed file names the key that
+// sealed it). Without the key there is no id of our own.
+#include "System_SealedLogCore.h"
+static const char kOwnKeyId[] = "0123456789abcdef";
+static bool captureCryptoKeyIdHex(char out[17]) {
+  if (!haveKey) { out[0] = '\0'; return false; }
+  memcpy(out, kOwnKeyId, 17);
+  return true;
+}
+enum class CaptureMarkOwner : uint8_t;
+CaptureMarkOwner captureCryptoMarkOwner(const char* head, size_t headLen, char keyIdOut[17] = nullptr);
+size_t captureCryptoForeignNotice(const char* keyIdHex, char* out, size_t outCap);
 // INSERT_PRODUCTION_CRYPTO_REVEAL_HERE
 
 // Filesystem, identity, and rendering boundary mocks.
@@ -272,7 +284,33 @@ static void testReveal() {
   expectReveal("#HW1ENC\nENC1:EMPTY-ENOUGH-LENGTH\nend", "#HW1ENC\n\nend", 1);
   expectReveal("#HW1ENC\nENC1:xxxxxxxxxxxxxxxxxxxxxxxxxxxx\r\nend",
                "#HW1ENC\n[undecryptable row]\nend", 1);
+  // B11: the mark with this device's key id reveals as before; the id is
+  // not part of what readers match on.
+  expectReveal("#HW1ENC v1 k1 id=0123456789abcdef\nschema,line\nENC1:VALID-ENOUGH-LENGTH-FOR-OPENED-ROW\nENC1:x\n",
+               "#HW1ENC v1 k1 id=0123456789abcdef\nschema,line\nopened,row\n[undecryptable row]\n", 2);
+  // Another device's file: one notice where its first row was, the other
+  // rows dropped, the mark and the plain schema line kept. Not a column of
+  // "[undecryptable row]", and no row of it is tried with our key.
+  {
+    const size_t opensBefore = openCalls;
+    const std::string notice = "[sealed by device fedcba9876543210: its rows can only be read on that device]";
+    expectReveal("#HW1ENC v1 k1 id=fedcba9876543210\ntimestamp_ms,gps_fix\nENC1:VALID-ENOUGH-LENGTH-FOR-OPENED-ROW\n"
+                 "ENC1:AAAA\nENC1:BBBB\n",
+                 "#HW1ENC v1 k1 id=fedcba9876543210\ntimestamp_ms,gps_fix\n" + notice + "\n", 3);
+    check(openCalls == opensBefore, "another device's rows are not tried with this device's key");
+    // The shapes that stress the buffer: one short row and no line end, a
+    // file of the mark alone, and many rows.
+    expectReveal("#HW1ENC v1 k1 id=fedcba9876543210\nENC1:x", "#HW1ENC v1 k1 id=fedcba9876543210\n" + notice, 1);
+    expectReveal("#HW1ENC v1 k1 id=fedcba9876543210\n", "#HW1ENC v1 k1 id=fedcba9876543210\n", 0);
+    std::string many = "#HW1ENC v1 k1 id=fedcba9876543210\n";
+    for (int i = 0; i < 200; ++i) many += "ENC1:ROW" + std::to_string(i) + "\n";
+    expectReveal(many, "#HW1ENC v1 k1 id=fedcba9876543210\n" + notice + "\n", 200);
+  }
   haveKey = false;
+  // Without this device's key a named id cannot be told from ours: the rows
+  // read as undecryptable, as before, never as "another device's".
+  expectReveal("#HW1ENC v1 k1 id=fedcba9876543210\nENC1:x\n",
+               "#HW1ENC v1 k1 id=fedcba9876543210\n[undecryptable row]\n", 1);
   expectReveal("#HW1ENC\nENC1:x\nENC1:VALID-ENOUGH-LENGTH-FOR-OPENED-ROW\ntail",
                "#HW1ENC\n[undecryptable row]\n[undecryptable row]\ntail", 2);
   const std::string damaged = "#HW1ENC\nENC1:x\nTAIL";

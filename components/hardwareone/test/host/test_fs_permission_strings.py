@@ -22,7 +22,10 @@ embedded NUL: the matched rule, both filename tests, isAdminOnlyPath and, for
 eleven identities, the six canX answers, getPermissions and the reason
 logFsAccessDeny gives for each refusal; then a pathWithinScope matrix and the
 contexts systemAuth builds. That report must equal fs_permission_answers.txt,
-which the tree before the change printed. The harness then checks that no
+which the tree before the change printed (one line differs since B11,
+2026-11-22: normalizeFsPath refuses a card path in a spelling FatFs would
+resolve to another name, so getPermissions now answers 0 for "/sd/STT/u2" for
+the super admin and the system too). The harness then checks that no
 permission query made a String block and that systemAuth made one per kept
 text.
 
@@ -45,6 +48,7 @@ import tempfile
 from arduino_string_host import arduino_string_counted
 from identity_names_source import identity_constants, identity_predicates
 from test_web_batch_handlers import extract_block, require
+from sd_path_core_host import sd_path_core, with_sd_path_core
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -90,6 +94,9 @@ def permission_pieces(component: Path) -> dict[str, str]:
     pieces.append("namespace VFS {\n" + extract_block(vfs, "AuthContext systemAuth(const char* reason)")
                   + "\n\n" + extract_block(vfs, "AuthContext systemAuth(const char* scope, const char* reason)")
                   + "\n}  // namespace VFS")
+    # normalizeFsPath refuses aliased card paths through System_SdPathCore.h (B11).
+    if (component / "System_SdPathCore.h").exists():
+        policy += "\n" + sd_path_core(component)
     return {"// INSERT_POLICY": policy, "// INSERT_IDENTITY": identity,
             "// INSERT_PRODUCTION": "\n\n".join(pieces)}
 

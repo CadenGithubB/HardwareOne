@@ -86,6 +86,31 @@ constexpr LogCaps logCapsFor(size_t totalBytes) {
 }
 
 // ---------------------------------------------------------------------------
+// The card (B11, 2026-11-22). Logs go to the card first when one takes writes
+// (VFS::resolveLogPath) and are sealed there (System_SealedLog.h), which
+// stores about 2.0x the plain bytes of a 60-byte line, 1.7x at 120 and 1.5x
+// at 300. A capped log on the card therefore gets twice its nominal cap,
+// counted in stored (sealed) bytes: about the nominal number of lines, and
+// 5.6 MB for all eight. The flash share above does not apply to the card.
+// ---------------------------------------------------------------------------
+constexpr size_t kCardCapFactor = 2;
+constexpr size_t cardCap(size_t capBytes) { return capBytes * kCardCapFactor; }
+static_assert(cardCap(kNominalTotal) == 2 * 2823442u, "all eight logs on the card: 5,646,884 stored bytes");
+
+// The card reserve: with less than this free the card counts as absent for
+// log lines (they go to flash, as with no card), and it counts as usable
+// again once twice this is free, so a card at the edge does not flip a log
+// between the tiers line by line. Capture retention (System_LogRetentionCore.h)
+// starts freeing card space long before: at 20 % free, capped at 64 MiB.
+constexpr uint64_t kCardReserveBytes = 8ull * 1024 * 1024;
+constexpr uint64_t kCardRearmBytes = 2 * kCardReserveBytes;
+// Whether the card is full for log lines, given whether it was and its free
+// bytes now.
+constexpr bool cardFull(bool wasFull, uint64_t freeBytes) {
+  return wasFull ? freeBytes < kCardRearmBytes : freeBytes < kCardReserveBytes;
+}
+
+// ---------------------------------------------------------------------------
 // Per-log policy, by file name (the last path component), so the /sd mirror of
 // a log follows the same rule as the log itself.
 // ---------------------------------------------------------------------------

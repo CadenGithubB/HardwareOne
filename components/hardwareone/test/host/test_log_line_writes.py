@@ -74,9 +74,22 @@ def source_contract(component: Path) -> None:
     task = extract_block(source, "void debugOutputTask(void* parameter) {")
     require("writeLogLine(Serial, msg->timestamp, nullptr, msg->text);" in task,
             "the serial line goes through writeLogLine")
-    require("writeLogLine(gSystemLogFile, msg->timestamp, cat, msg->text);" in task and
-            "writeLogLine(gSystemLogFile, msg->timestamp, nullptr, msg->text);" in task,
-            "both system log file lines go through writeLogLine")
+    # B11: the tag is chosen once (the category name, or none) and the line
+    # goes through writeLogLine on flash, or through writeSealedLogLine (one
+    # sealed row) when the file is on the card. Nothing plain is written to a
+    # card file: every writeLogLine on the file sits behind a flash-path test.
+    require("? getDebugCategoryName(msg->category) : nullptr;" in task and
+            task.count("writeLogLine(gSystemLogFile, msg->timestamp, cat, msg->text);") == 2 and
+            task.count("writeSealedLogLine(gSystemLogFile, msg->timestamp, cat, msg->text)") == 1,
+            "the system log file line goes through writeLogLine on flash and writeSealedLogLine on the card")
+    sealed_branch = task.index("if (SealedLog::appliesTo(gSystemLogActivePath)) {")
+    fallback = task.index("writeLogLine(gSystemLogFile, msg->timestamp, cat, msg->text);")
+    require(sealed_branch < task.index("writeSealedLogLine(") < fallback and
+            task.index("gSystemLogFile.close();  // still the card: nothing plain goes there") < fallback,
+            "the plain writer runs only for a file that is not on the card")
+    sealed = extract_block(source, "static __attribute__((noinline)) bool writeSealedLogLine(")
+    require("SealedLog::writeLines(out, line," in sealed and "out.write(" not in sealed and "printf(" not in sealed.replace("snprintf(", ""),
+            "the sealed line is written through SealedLog only")
     require('Serial.printf("[%lu] %s\\n", msg->timestamp' not in task and "gSystemLogFile.printf(" not in task,
             "debugOutputTask prints no log line with printf")
 

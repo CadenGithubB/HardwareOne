@@ -108,6 +108,9 @@ static bool peekStatsSnapshot(StorageType type, CapacitySnapshot& out) {
 }
 static void invalidateStatsSnapshot(StorageType type) { ++snapshotInvalidations[type]; }
 static size_t logReserveBytes() { return 100 * 1024; }
+// B11: a card that is mounted re-arms the promote sweep (its boot folders are in reach).
+static uint32_t mountGeneration = 1;
+static uint32_t sdMountGeneration() { return mountGeneration; }
 }  // namespace VFS
 
 static unsigned long nowMs = 60000;
@@ -339,6 +342,90 @@ static void successfulPrune() {
 // S-5: the tick never waits for the filesystem lock. With the lock held by
 // another task it does no file work, records no failure and is due again on
 // the next lap; the anchor is written once after the lock is free.
+// B11: captures go to the card while one takes log lines, so a boot folder can
+// be on the card, on flash, or on both. The sweep promotes each on its own
+// tier (the dated folder is made beside it, under /sd for the card), and the
+// boot's anchor row goes only once neither tier holds the folder. (Each case
+// is its own process, so each starts with an unread registry.)
+static const std::string kCardSensors = std::string("/sd") + CAPTURE_DIR_SENSORS;
+static void sweepPromotesOnTheCard() {
+  start("sweep_promotes_on_the_card", row(2, 1000, 1700000000) + row(5, 50000, wallTime - 10));
+  auto& fs = fake_vfs::fs();
+  fs.sdAvailable() = true;
+  const std::string& card = kCardSensors;
+  fs.mkdirAll(card);
+  fs.put(card + "/boot-2/health-boot2-2000.csv", "#HW1ENC v1 k1 id=0123456789abcdef\nt,v\n");
+  fs.put(CAPTURE_DIR_SENSORS "/boot-2/sensors-boot2-3000.csv", "t,v\n");
+  ++VFS::mountGeneration;   // the card was mounted: the sweep is armed again
+  for (int i = 0; i < 6; ++i) tick();
+  // Both folders are promoted, each on its own tier, and removed.
+  check(!fs.exists(card + "/boot-2") && !fs.exists(CAPTURE_DIR_SENSORS "/boot-2"));
+  check(fs.exists(card + "/2023-11-14") && fs.exists(CAPTURE_DIR_SENSORS "/2023-11-14"));
+  const std::vector<std::string> onCard = fs.list(card + "/2023-11-14");
+  check(onCard.size() == 1 && onCard[0].rfind("health-2023-11-14T", 0) == 0 &&
+        onCard[0].find("-boot2-000002000.csv") != std::string::npos);
+  check(fs.text(card + "/2023-11-14/" + onCard[0]) == "#HW1ENC v1 k1 id=0123456789abcdef\nt,v\n");   // a rename: the bytes are as they were
+  const std::vector<std::string> onFlash = fs.list(CAPTURE_DIR_SENSORS "/2023-11-14");
+  check(onFlash.size() == 1 && onFlash[0].find("-boot2-000003000.csv") != std::string::npos);
+  // Nothing of the card's folder landed on flash, and the other way round.
+  check(fs.text(kRegistry) == row(5, 50000, wallTime - 10));   // the anchor row went once both were done
+}
+
+// The card's folder first, while flash still holds one: the row is kept until
+// flash's folder is promoted too.
+static void sweepKeepsTheAnchorForTheOtherTier() {
+  start("sweep_keeps_the_anchor_for_the_other_tier", row(3, 1000, 1700100000) + row(5, 50000, wallTime - 10));
+  auto& fs = fake_vfs::fs();
+  const std::string& card = kCardSensors;
+  fs.sdAvailable() = true;
+  fs.mkdirAll(card);
+  fs.put(card + "/boot-3/health-boot3-2000.csv", "t,v\n");
+  fs.put(CAPTURE_DIR_SENSORS "/boot-3/sensors-boot3-9000.csv", "t,v\n");
+  gSensorLoggingRunning = true;                               // flash's file is the open session's: not promotable yet
+  gSensorLogPath = CAPTURE_DIR_SENSORS "/boot-3/sensors-boot3-9000.csv";
+  ++VFS::mountGeneration;
+  for (int i = 0; i < 6; ++i) tick();
+  check(!fs.exists(card + "/boot-3") && fs.exists(CAPTURE_DIR_SENSORS "/boot-3/sensors-boot3-9000.csv"));
+  check(fs.text(kRegistry) == row(3, 1000, 1700100000) + row(5, 50000, wallTime - 10));   // boot 3's row is still needed
+  gSensorLoggingRunning = false;                              // the session stops: the sweep is armed again
+  for (int i = 0; i < 6; ++i) tick();
+  check(!fs.exists(CAPTURE_DIR_SENSORS "/boot-3") && fs.text(kRegistry) == row(5, 50000, wallTime - 10));
+}
+
+// The open session's card twin is not promoted either (its rows go to the
+// card while one takes log lines; the session's path is the flash name).
+static void sweepLeavesTheOpenCardTwin() {
+  start("sweep_leaves_the_open_card_twin", row(3, 1000, 1700100000) + row(5, 50000, wallTime - 10));
+  auto& fs = fake_vfs::fs();
+  const std::string& card = kCardSensors;
+  fs.sdAvailable() = true;
+  fs.mkdirAll(card);
+  fs.put(card + "/boot-3/sensors-boot3-9000.csv", "t,v\n");
+  gSensorLoggingRunning = true;
+  gSensorLogPath = CAPTURE_DIR_SENSORS "/boot-3/sensors-boot3-9000.csv";
+  ++VFS::mountGeneration;
+  for (int i = 0; i < 6; ++i) tick();
+  check(fs.exists(card + "/boot-3/sensors-boot3-9000.csv"));
+  gSensorLoggingRunning = false;
+  gSensorLogPath = String();
+  for (int i = 0; i < 6; ++i) tick();
+  check(!fs.exists(card + "/boot-3") && fs.list(card + "/2023-11-16").size() == 1);
+}
+
+// No card mounted: the card is not looked at, and flash is swept as before.
+static void sweepWithoutACard() {
+  start("sweep_without_a_card", row(2, 1000, 1700000000) + row(5, 50000, wallTime - 10));
+  auto& fs = fake_vfs::fs();
+  const std::string& card = kCardSensors;
+  fs.sdAvailable() = false;
+  fs.put(CAPTURE_DIR_SENSORS "/boot-2/sensors-boot2-3000.csv", "t,v\n");
+  ++VFS::mountGeneration;
+  const unsigned cardOpens = fs.count("open", card);
+  for (int i = 0; i < 6; ++i) tick();
+  check(!fs.exists(CAPTURE_DIR_SENSORS "/boot-2") && fs.count("open", card) == cardOpens);
+  check(fs.text(kRegistry) == row(5, 50000, wallTime - 10));
+}
+
 static void tickDoesNotWaitForABusyLock() {
   const std::string before = row(3, 1000, 1700000000);
   start("tick_does_not_wait_for_a_busy_lock", before);
@@ -685,6 +772,10 @@ int main(int argc, char** argv) {
     {"failed_prune_keeps_registry_write_error", [] { failedPruneKeepsRegistry("write_error"); }},
     {"failed_prune_keeps_registry_rename", [] { failedPruneKeepsRegistry("rename"); }},
     {"successful_prune", successfulPrune},
+    {"sweep_promotes_on_the_card", sweepPromotesOnTheCard},
+    {"sweep_keeps_the_anchor_for_the_other_tier", sweepKeepsTheAnchorForTheOtherTier},
+    {"sweep_leaves_the_open_card_twin", sweepLeavesTheOpenCardTwin},
+    {"sweep_without_a_card", sweepWithoutACard},
   };
   if (which == "--list") {
     for (const Case& c : cases) std::printf("%s\n", c.name);

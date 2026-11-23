@@ -7,7 +7,9 @@
 
 #include "System_Debug.h"
 #include "System_MemUtil.h"   // ps_alloc — scratch lives in PSRAM, key does NOT
+#include "System_SealedLogCore.h"  // the mark line's format and how it is judged
 
+#include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 #include <sodium.h>
 #include <mbedtls/base64.h>
 #include <nvs.h>
@@ -91,6 +93,15 @@ int openLineLocked(const char* line, size_t lineLen) {
 }
 
 const char kUndecryptable[] = CAPCRYPT_UNDECRYPTABLE;
+
+// The notice for marked text another device sealed, 0 when the text is not
+// marked, is ours, or names no key id (its rows are then tried as before).
+size_t foreignMarkNotice(const char* text, size_t length, char* notice, size_t noticeCap) {
+  char keyId[sealedlog::kKeyIdHexLength + 1];
+  const size_t probe = length < sealedlog::kMarkProbeBytes ? length : sealedlog::kMarkProbeBytes;
+  if (captureCryptoMarkOwner(text, probe, keyId) != CaptureMarkOwner::Other) return 0;
+  return captureCryptoForeignNotice(keyId, notice, noticeCap);
+}
 
 }  // namespace
 
@@ -267,6 +278,67 @@ bool captureCryptoKeyId(uint8_t out[8]) {
   return true;
 }
 
+// The key id in hex is public (it is written at the head of every sealed
+// file), so one copy is kept, in external RAM, once the key has given it.
+EXT_RAM_BSS_ATTR static char sKeyIdHex[sealedlog::kKeyIdHexLength + 1];
+static volatile bool sKeyIdHexReady = false;
+
+bool captureCryptoKeyIdHex(char out[17]) {
+  if (!out) return false;
+  if (!sKeyIdHexReady) {
+    uint8_t id[8];
+    if (!captureCryptoKeyId(id)) {
+      out[0] = '\0';
+      return false;
+    }
+    char hex[sizeof(sKeyIdHex)];
+    static const char kDigits[] = "0123456789abcdef";
+    for (int i = 0; i < 8; ++i) {
+      hex[2 * i] = kDigits[id[i] >> 4];
+      hex[2 * i + 1] = kDigits[id[i] & 0x0f];
+    }
+    hex[16] = '\0';
+    ScratchGuard lock;  // two first callers write the same bytes; the flag goes last
+    memcpy(sKeyIdHex, hex, sizeof(sKeyIdHex));
+    sKeyIdHexReady = true;
+  }
+  memcpy(out, sKeyIdHex, sizeof(sKeyIdHex));
+  return true;
+}
+
+size_t captureCryptoMarkLine(char* out, size_t outCap) {
+  char keyId[sealedlog::kKeyIdHexLength + 1];
+  if (!out || !captureCryptoKeyIdHex(keyId)) return 0;
+  return sealedlog::formatMark(keyId, out, outCap);
+}
+
+CaptureMarkOwner captureCryptoMarkOwner(const char* head, size_t headLen, char keyIdOut[17]) {
+  if (keyIdOut) keyIdOut[0] = '\0';
+  char own[sealedlog::kKeyIdHexLength + 1];
+  const bool haveOwn = captureCryptoKeyIdHex(own);
+  const sealedlog::MarkInfo info = sealedlog::classifyMark(head, headLen, haveOwn ? own : nullptr);
+  if (keyIdOut) memcpy(keyIdOut, info.keyId, sizeof(info.keyId));
+  switch (info.kind) {
+    case sealedlog::Mark::Unmarked: return CaptureMarkOwner::None;
+    case sealedlog::Mark::Own:      return CaptureMarkOwner::Ours;
+    // Without this device's own id (its key did not load) a named id cannot
+    // be told from ours: unknown, not "another device's".
+    case sealedlog::Mark::Foreign:  return haveOwn ? CaptureMarkOwner::Other : CaptureMarkOwner::Unknown;
+    case sealedlog::Mark::NoId:     break;
+  }
+  return CaptureMarkOwner::Unknown;
+}
+
+size_t captureCryptoForeignNotice(const char* keyIdHex, char* out, size_t outCap) {
+  if (!keyIdHex || !out || outCap == 0) return 0;
+  const int n = snprintf(out, outCap, "[sealed by device %s: its rows can only be read on that device]", keyIdHex);
+  if (n <= 0 || static_cast<size_t>(n) >= outCap) {
+    out[0] = '\0';
+    return 0;
+  }
+  return static_cast<size_t>(n);
+}
+
 int captureCryptoSealLine(const char* in, size_t inLen, char* out, size_t outCap) {
   if (!in || !out) return -1;
   if (inLen > CAPCRYPT_MAX_ROW) return -1;
@@ -340,6 +412,11 @@ size_t captureCryptoRevealCapacity(const char* text, size_t length) {
   size_t capacity = length + 1;
   if (length < kMagicPfxLen ||
       memcmp(text, CAPCRYPT_MAGIC_PREFIX, kMagicPfxLen) != 0) return capacity;
+  // Another device's file: its rows are dropped and one notice is shown, so
+  // the text grows by the notice at most.
+  char notice[CAPCRYPT_FOREIGN_NOTICE_MAX];
+  const size_t noticeLen = foreignMarkNotice(text, length, notice, sizeof(notice));
+  if (noticeLen) return noticeLen > SIZE_MAX - capacity ? 0 : capacity + noticeLen;
   size_t r = 0;
   while (r < length) {
     const size_t start = r;
@@ -369,6 +446,10 @@ bool captureCryptoRevealText(char* buf, size_t& length, size_t capacity,
     return true;
   }
   const bool haveKey = captureCryptoEnsureKey();
+  // Judged before the mutex is taken (the key id comes through it) and before
+  // the text moves. The same answer captureCryptoRevealCapacity sized for.
+  char notice[CAPCRYPT_FOREIGN_NOTICE_MAX];
+  const size_t noticeLen = foreignMarkNotice(buf, length, notice, sizeof(notice));
   ScratchGuard lock;
 
   // A torn row such as ENC1:x is shorter than the failure marker. Reserve all
@@ -386,6 +467,17 @@ bool captureCryptoRevealText(char* buf, size_t& length, size_t capacity,
     const bool hasNl = (r < end);
     if (hasNl) r++;
 
+    if (noticeLen && lineLen > kPrefixLen &&
+        strncmp(buf + lineStart, CAPCRYPT_ROW_PREFIX, kPrefixLen) == 0) {
+      // Another device's rows: the notice once (growth holds its length), the
+      // rest dropped with their line ends.
+      if (sealedRows++ == 0) {
+        memcpy(buf + w, notice, noticeLen);
+        w += noticeLen;
+        if (hasNl) buf[w++] = '\n';
+      }
+      continue;
+    }
     if (lineLen > kPrefixLen &&
         strncmp(buf + lineStart, CAPCRYPT_ROW_PREFIX, kPrefixLen) == 0) {
       sealedRows++;

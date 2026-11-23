@@ -185,6 +185,25 @@ class File {
     written.push_back({path_, std::string(line.c_str(), count), user_});
     return count;
   }
+  // B11: a card file is written through SealedLog, in rows (the mark, then
+  // one sealed row per entry), and its head is read to judge whose it is.
+  size_t write(const uint8_t* bytes, size_t length) {
+    io();
+    size_t count = length;
+    if (fault == Fault::Short) count /= 2;
+    if (fault == Fault::Zero) count = 0;
+    node_->bytes.append(reinterpret_cast<const char*>(bytes), count);
+    if (fault == Fault::WriteError) node_->writeError = true;
+    written.push_back({path_, std::string(reinterpret_cast<const char*>(bytes), count), user_});
+    return count;
+  }
+  size_t read(uint8_t* bytes, size_t length) {
+    io();
+    const size_t count = std::min(length, node_->bytes.size() - std::min(readAt_, node_->bytes.size()));
+    std::memcpy(bytes, node_->bytes.data() + readAt_, count);
+    readAt_ += count;
+    return count;
+  }
   void flush() { io(); node_->flushed = true; if (fault == Fault::FlushError) node_->writeError = true; }
   int getWriteError() const { io(); return node_->writeError; }
   void close() { io(); ++closes; node_.reset(); }
@@ -192,6 +211,7 @@ class File {
   std::string path_;
   std::shared_ptr<Node> node_;
   std::string user_;
+  size_t readAt_ = 0;
 };
 namespace VFS {
 enum class LogTier : uint8_t { Primary, Overflow, Refused };
@@ -204,8 +224,12 @@ LogTier resolveLogPath(const char* source, size_t bytes, char* out, size_t capac
   return reserveRefused ? LogTier::Refused : sd ? LogTier::Overflow : LogTier::Primary;
 }
 void noteLogReserveDrop() { ++reserveDrops; }
+static bool cardFails = false;  // B11: a card that was pulled: nothing on it opens
 bool existsGuarded(const String& path, const AuthContext& ctx) {
-  record("exists", path, ctx); return permitted(ctx) && directories.count(path.c_str());
+  record("exists", path, ctx);
+  if (cardFails && std::strncmp(path.c_str(), "/sd/", 4) == 0) return false;
+  // Folders for the writer's own mkdir step; card files for SealedLog's look at their head.
+  return permitted(ctx) && (directories.count(path.c_str()) || files.count(path.c_str()));
 }
 bool mkdirGuarded(const String& path, const AuthContext& ctx) {
   record("mkdir", path, ctx);
@@ -220,7 +244,24 @@ File openGuarded(const String& path, const char* mode, const AuthContext& ctx) {
   node->directory = fault == Fault::Directory; node->flushed = false; node->writeError = false;
   ++opens; return File(path.c_str(), node, ctx.user.c_str());
 }
+// B11: what SealedLog asks of the card, as the session's owner.
+static unsigned sdFailureNotes = 0;
+void noteLogOverflowSdFailure(const char*) { io(); ++sdFailureNotes; overflow = false; }
+bool canWriteGuarded(const String& path, const AuthContext& ctx) { record("canwrite", path, ctx); return permitted(ctx); }
+File openGuarded(const String& path, const char* mode, const AuthContext& ctx, bool create) {
+  if (std::strcmp(mode, "a") == 0) { CHECK(create); return cardFails ? File() : openGuarded(path, mode, ctx); }
+  record("open-read", path, ctx); CHECK(std::strcmp(mode, "r") == 0 && !create);
+  if (cardFails || !permitted(ctx) || !files.count(path.c_str())) return {};
+  ++opens; return File(path.c_str(), files.at(path.c_str()), ctx.user.c_str());
 }
+bool renameGuarded(const String& from, const String& to, const AuthContext& ctx) {
+  record("rename", from, ctx);
+  if (cardFails || !permitted(ctx) || !files.count(from.c_str()) || files.count(to.c_str())) return false;
+  files[to.c_str()] = files.at(from.c_str()); files.erase(from.c_str()); return true;
+}
+}
+#define SEALED_LOG_HOST_OPEN
+#include "sealed_log_host.h"  // the SealedLog double over the fakes above
 // INSERT_COMMAND_PARSER
 // INSERT_OWNER
 // INSERT_AUTOLOG_COMMAND
@@ -241,6 +282,7 @@ static void reset() {
   if (automationLogActive()) command("stop");
   balanced(); files.clear(); accesses.clear(); written.clear(); directories.clear();
   opens = closes = 0; overflow = reserveRefused = false; reserveDrops = 0; withTimestamp = true; caller = identity("alice");
+  VFS::cardFails = false; VFS::sdFailureNotes = 0; sealed_log_host::keyAvailable = true; sealed_log_host::movedAside = 0;
 }
 static void start(const char* path = "/logs/alice.log") {
   const std::string result = command((std::string("start ") + path).c_str());
@@ -329,12 +371,93 @@ static void reserveRefusal() {
   CHECK(appendAutoLogEntry("EVENT", "space back") && written.back().path == "/logs/alice.log");
   balanced();
 }
+// B11: the card twin of the session's file. A card that does not take an
+// entry is reported (which keeps log lines off it for a minute) and the entry
+// lands on flash, plain; a file there that is not this device's sealed file is
+// moved aside; a refusal by the path rules is not the card's doing.
+static void cardTwin() {
+  reset(); overflow = true; withTimestamp = false;
+  start("/logs/card.log");
+  CHECK(files.count("/sd/logs/card.log") && !files.count("/logs/card.log"));
+  VFS::cardFails = true;                                   // pulled mid-run
+  CHECK(appendAutoLogEntry("EVENT", "after the pull"));
+  CHECK(VFS::sdFailureNotes == 1 && files.count("/logs/card.log") &&
+        files.at("/logs/card.log")->bytes == "EVENT | after the pull\n");
+  CHECK(sealed_log_host::reveal(files.at("/sd/logs/card.log")->bytes) == "LOG_START | Automation logging started\n");
+  VFS::cardFails = false; overflow = true;                 // the card is back
+  CHECK(appendAutoLogEntry("EVENT", "back on the card"));
+  CHECK(sealed_log_host::reveal(files.at("/sd/logs/card.log")->bytes) ==
+        "LOG_START | Automation logging started\nEVENT | back on the card\n");
+  CHECK(files.at("/logs/card.log")->bytes == "EVENT | after the pull\n" && VFS::sdFailureNotes == 1);
+  balanced();
+
+  // A short write on the card (the tear of a pull): the same fallback, and
+  // no plain byte of the entry on the card.
+  reset(); overflow = true; withTimestamp = false;
+  start("/logs/card.log");
+  fault = Fault::Short;
+  CHECK(!appendAutoLogEntry("EVENT", "torn"));             // flash takes the same fault in this double
+  fault = Fault::None;
+  CHECK(VFS::sdFailureNotes == 1 && files.at("/sd/logs/card.log")->bytes.find("torn") == std::string::npos);
+  balanced();
+
+  // Another device's file, or a plain one, under the name: moved aside
+  // unchanged, and a new sealed file takes the name.
+  for (const char* foreign : {"#HW1ENC v1 k1 id=fedcba9876543210\nENC1:AAAA\n", "a plain automation log\n"}) {
+    reset(); overflow = true; withTimestamp = false;
+    files["/sd/logs/card.log"] = std::make_shared<Node>();
+    files.at("/sd/logs/card.log")->bytes = foreign;
+    start("/logs/card.log");
+    CHECK(files.count("/sd/logs/card.log.foreign-1") && files.at("/sd/logs/card.log.foreign-1")->bytes == foreign);
+    CHECK(files.at("/sd/logs/card.log")->bytes ==
+          sealed_log_host::mark() + sealed_log_host::sealRow("LOG_START | Automation logging started"));
+    CHECK(sealed_log_host::movedAside == 1 && VFS::sdFailureNotes == 0);
+    balanced();
+  }
+
+  // No device key: nothing is created on the card.
+  reset(); overflow = true; withTimestamp = false; sealed_log_host::keyAvailable = false;
+  start("/logs/card.log");
+  CHECK(!files.count("/sd/logs/card.log") && files.at("/logs/card.log")->bytes == "LOG_START | Automation logging started\n");
+  balanced();
+
+  // The path rules refuse the owner (the same rules on both tiers): the
+  // entry fails and the card is not reported.
+  reset(); overflow = true; withTimestamp = false;
+  start("/logs/card.log");
+  deniedUsers.insert("alice");
+  CHECK(!appendAutoLogEntry("EVENT", "refused") && VFS::sdFailureNotes == 0);
+  deniedUsers.clear();
+  balanced();
+
+  // A session whose own file is on the card has no flash twin: a failure there fails.
+  reset(); withTimestamp = false;
+  start("/sd/logs/own.log");
+  CHECK(files.at("/sd/logs/own.log")->bytes.rfind(sealed_log_host::mark(), 0) == 0);
+  VFS::cardFails = true;
+  CHECK(!appendAutoLogEntry("EVENT", "nowhere to go") && VFS::sdFailureNotes == 0 && !files.count("/logs/own.log"));
+  VFS::cardFails = false;
+  balanced();
+}
 static void routingAndAllocation() {
   reset(); overflow = true; withTimestamp = false;
   const std::string path = "/logs/" + std::string(150, 'x') + ".log";
   start(path.c_str());
   CHECK(files.count("/sd" + path));
-  CHECK(written.front().bytes == "LOG_START | Automation logging started\n");
+  // B11: on the card the log is a sealed file: the mark, then one sealed row
+  // per entry, written as the session's owner. No entry is there in the clear.
+  {
+    const std::string& card = files.at("/sd" + path)->bytes;
+    CHECK(card == sealed_log_host::mark() + sealed_log_host::sealRow("LOG_START | Automation logging started"));
+    CHECK(sealed_log_host::reveal(card) == "LOG_START | Automation logging started\n");
+    CHECK(card.find("LOG_START") == std::string::npos && !files.count(path));
+    for (const Written& w : written) CHECK(w.path == "/sd" + path && w.user == "alice");
+    CHECK(appendAutoLogEntry("EVENT", "second entry"));
+    CHECK(sealed_log_host::reveal(files.at("/sd" + path)->bytes) ==
+          "LOG_START | Automation logging started\nEVENT | second entry\n");
+    CHECK(files.at("/sd" + path)->bytes.rfind(sealed_log_host::mark(), 0) == 0 &&
+          files.at("/sd" + path)->bytes.find("#HW1ENC", 1) == std::string::npos);
+  }
   {
     FsLockGuard callerGuard("existing.caller");
     CHECK(appendAutoLogEntry("NESTED", "already holds filesystem lock"));
@@ -474,7 +597,7 @@ static void concurrency() {
   if (automationLogActive()) command("stop"); balanced();
 }
 int main() {
-  basicLifecycle(); failures(); reserveRefusal(); replacement(); routingAndAllocation(); executorHooks(); concurrency();
+  basicLifecycle(); failures(); reserveRefusal(); replacement(); routingAndAllocation(); cardTwin(); executorHooks(); concurrency();
   reset();
   std::printf("automation logging: %u checks passed (owner, permissions, checked writes, hooks and concurrency)\n", checks.load());
 }

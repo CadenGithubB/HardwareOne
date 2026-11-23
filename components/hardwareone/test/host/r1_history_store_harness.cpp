@@ -207,6 +207,13 @@ static int captureCryptoOpenLine(const char* line, size_t length, char* output, 
   output[count] = 0; return static_cast<int>(count);
 }
 static bool captureCryptoIsMagicLine(const char* line) { return strncmp(line, "#HW1ENC", 7) == 0; }
+// B11 (Q13): the mark of a new sealed file names the key that sealed it.
+static const char kMarkWithKeyId[] = "#HW1ENC v1 k1 id=0123456789abcdef";
+static size_t captureCryptoMarkLine(char* out, size_t capacity) {
+  if (!keyReady || capacity < sizeof(kMarkWithKeyId)) return 0;
+  memcpy(out, kMarkWithKeyId, sizeof(kMarkWithKeyId));
+  return sizeof(kMarkWithKeyId) - 1;
+}
 // INSERT_PRODUCTION
 
 static void released() { check(liveFiles == 0 && lockStack.empty(), "all handles and locks released"); }
@@ -261,6 +268,8 @@ static void normal() {
     check(disk.size() == 1 && disk.count(path), "one primary; no backup or temporary");
     check(path.find(day.peerId) == std::string::npos, "filename uses pseudonym");
     check((disk.at(path).find(day.peerId) == std::string::npos) == (mode != 0), "nonzero policy keeps identity sealed");
+    check((disk.at(path).rfind(std::string(kMarkWithKeyId) + "\n", 0) == 0) == (mode != 0),
+          "a sealed day starts with the mark that names its key (B11); a plain day has none");
     const auto original = disk.at(path); int writes = writeCalls;
     save(day, 2); good(day, 2); check(status().lastCommitSkipped && writeCalls == writes, "identical content skips replacement");
     day.activity.slots[0].steps += 5; save(day, 3); good(day, 3);

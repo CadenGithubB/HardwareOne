@@ -55,8 +55,11 @@ COMPONENT = HERE.parents[1]
 # case and double-slash variants, checked with --baseline against 3076e0c6);
 # changed 2026-11-22 only by the same rule on /espnow/ (M-espnowfs: the user
 # and admin columns of the /espnow/ paths, checked with --baseline against
-# d7522e16).
-REPORT_SHA256 = "e5aa0f4b51eafb0959e377d85458c341cc1c15f18cb9c207fe99c495647920c8"
+# d7522e16); changed 2026-11-22 only by B11's card-path rule (normalizeFsPath
+# refuses a card path with a segment that ends in a dot or a space,
+# System_SdPathCore.h: the 19 such paths of the corpus, checked with --baseline
+# against 3eba119a).
+REPORT_SHA256 = "60f7e1208e7588f6f2b88e721f2fe25e14224f53fbf8ae67f3465e758a196c68"
 
 # Helpers the new code calls; an older tree has none of them.
 OPTIONAL = ("static bool alreadyNormalized(", "static const String& normalizedView(")

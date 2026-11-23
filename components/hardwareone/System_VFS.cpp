@@ -4,9 +4,11 @@
 
 #include "System_AuthIdentity.h"  // currentExecUser (event log attribution)
 #include "System_BuildConfig.h"
+#include "System_CaptureCrypto.h"  // captureCryptoEnsureKey: the card takes sealed log lines only
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_Filesystem.h"
+#include "System_LogCapsCore.h"    // the card reserve for log lines
 #include "System_MemUtil.h"
 #include "System_Utils.h"  // argWantsJson
 #include "System_Mutex.h"
@@ -853,16 +855,18 @@ void invalidateStatsSnapshot(StorageType type) {
 // Overflow-aware path resolution (opt-in tier)
 // ============================================================================
 // See System_VFS.h for the design contract. Tl;dr: append-only log code asks
-// resolveOverflowPath to either return the primary LittleFS path OR switch to
-// the /sd mirror once LittleFS free space is below the reserve floor. The
-// latch keeps a log stream on one tier while space is short; since G-39 it
-// re-arms once free space is back a reserve's width above the level that
-// tripped it (the hysteresis keeps a log from flapping between tiers), and a
-// latched resolution with no writable card is Refused once LittleFS free is
-// below the global floor, rather than handed the flash path to spend the
-// reserve on. Above the floor such a resolution stays on flash: the latch may
-// have been tripped by one caller's larger margin (the sensor log asks for its
-// whole rotation size), and that must not silence every other log.
+// resolveLogPath where its next line goes. Since B11 (2026-11-22) that is the
+// card twin ("/sd" + the path) whenever a card takes writes, has room above
+// its reserve and the device key is there to seal with; otherwise the flash
+// path. The latch below is about flash running short: it trips once LittleFS
+// free space is below the reserve, re-arms once free space is back a
+// reserve's width above the level that tripped it (G-39; the hysteresis keeps
+// its warning from flapping), and a latched resolution with no usable card is
+// Refused once LittleFS free is below the global floor, rather than handed the
+// flash path to spend the reserve on. Above the floor such a resolution stays
+// on flash: the latch may have been tripped by one caller's larger margin
+// (the sensor log asks for its whole rotation size), and that must not
+// silence every other log.
 
 // Global floor: LittleFS free bytes below which any caller's request tips the
 // overflow latch. This headroom is preserved for NON-log writes (settings
@@ -1133,6 +1137,117 @@ void noteLogOverflowSdFailure(const char* hint) {
   noteSdWriteFailure(hint);
 }
 
+// ---------------------------------------------------------------------------
+// B11: the card first. A log line goes to the card twin of its path whenever
+// the card can take it: it accepts writes (overflowSdWritable, with its
+// back-off after a failed probe or append), it has room above the card
+// reserve, and the device key is available, because nothing is written to the
+// card unsealed (System_SealedLog.h). In every other case the line goes to
+// flash as before, down to the 100 KB floor. State files, /battery.csv and
+// media do not come through here and are not moved.
+// ---------------------------------------------------------------------------
+// How old the card's free figure may be before the card is asked again. Each
+// reading is a fresh one (getStats; FatFs keeps its free count in memory, so
+// it is cheap after the first one of a mount), never a presentation snapshot.
+static constexpr uint32_t LOG_CARD_ROOM_CHECK_MS = 30000;
+// After a key failure (NVS): how long before the key is asked for again.
+static constexpr uint32_t LOG_CARD_KEY_RETRY_MS = 60000;
+
+enum class LogCardUse : uint8_t { Unset, Card, NoCard, Full, NoKey };
+
+struct LogCardState {
+  uint32_t   roomCheckedMs;   // millis() of the last free reading
+  uint32_t   roomGeneration;  // sdMountGeneration() it belongs to
+  uint32_t   keyFailedAtMs;   // millis() of the last key failure
+  uint32_t   noKeyLines;      // resolutions kept on flash for want of the key (this boot)
+  LogCardUse use;             // what the last resolution of a flash-named log found
+  bool       roomKnown;
+  bool       full;            // free below the card reserve (logcaps::cardFull)
+  bool       keyFailed;
+};
+// External BSS (zeroed at boot): no internal RAM. Callers hold the filesystem
+// lock, as for the latch state above.
+EXT_RAM_BSS_ATTR static LogCardState gLogCard;
+
+static bool logCardHasRoom() {
+  const uint32_t now = millis();
+  const uint32_t generation = sdMountGeneration();
+  if (gLogCard.roomKnown && generation == gLogCard.roomGeneration &&
+      (uint32_t)(now - gLogCard.roomCheckedMs) < LOG_CARD_ROOM_CHECK_MS) {
+    return !gLogCard.full;
+  }
+  // Another mount may be another card: its episode starts from "not full".
+  if (generation != gLogCard.roomGeneration) gLogCard.full = false;
+  gLogCard.roomKnown = true;
+  gLogCard.roomCheckedMs = now;
+  gLogCard.roomGeneration = generation;
+  uint64_t totalBytes = 0, usedBytes = 0, freeBytes = 0;
+  // No figure: the answer stays as it was, and a failing write reports the
+  // card through noteLogOverflowSdFailure.
+  if (!getStats(SDCARD, totalBytes, usedBytes, freeBytes)) return !gLogCard.full;
+  const bool wasFull = gLogCard.full;
+  gLogCard.full = logcaps::cardFull(wasFull, freeBytes);
+  if (gLogCard.full && !wasFull) {
+    // The low-storage warning, once per episode (B10): the episode ends when
+    // twice the reserve is free again, or with the mount.
+    char freeB[24], wantB[40];
+    snprintf(freeB, sizeof(freeB), "%llu", (unsigned long long)freeBytes);
+    snprintf(wantB, sizeof(wantB), "card reserve %llu", (unsigned long long)logcaps::kCardReserveBytes);
+    systemEventPost(SYSEVT_FS_LOW_SPACE, freeB, wantB);
+  }
+  return !gLogCard.full;
+}
+
+static bool logCardKeyReady() {
+  if (gLogCard.keyFailed && (uint32_t)(millis() - gLogCard.keyFailedAtMs) < LOG_CARD_KEY_RETRY_MS) return false;
+  const bool ok = captureCryptoEnsureKey();  // a flag test once the key is loaded
+  if (!ok) gLogCard.keyFailedAtMs = millis();
+  gLogCard.keyFailed = !ok;
+  return ok;
+}
+
+// Whether the card takes the next log line, and if not, why. One [EVENT] line
+// records each change; a boot that simply starts with or without a card
+// records none.
+static LogCardUse logCardUse() {
+  LogCardUse use = LogCardUse::Card;
+  if (!overflowSdWritable()) use = LogCardUse::NoCard;
+  else if (!logCardHasRoom()) use = LogCardUse::Full;
+  else if (!logCardKeyReady()) use = LogCardUse::NoKey;
+  const LogCardUse before = gLogCard.use;
+  if (use == before) return use;
+  gLogCard.use = use;  // before the line below, which is itself a log line
+  switch (use) {
+    case LogCardUse::Card:
+      if (before != LogCardUse::Unset) logSystemEvent("FS", "log lines go to the card again (sealed)");
+      break;
+    case LogCardUse::NoCard:
+      if (before != LogCardUse::Unset) {
+        logSystemEvent("FS", "card gone or not taking writes: log lines continue on flash");
+      }
+      break;
+    case LogCardUse::Full:
+      logSystemEvent("FS", "card below its reserve (%llu bytes free): log lines continue on flash",
+                     (unsigned long long)logcaps::kCardReserveBytes);
+      break;
+    case LogCardUse::NoKey:
+      logSystemEvent("FS", "device key unavailable (NVS): log lines stay on flash, unsealed, until it loads");
+      break;
+    case LogCardUse::Unset:
+      break;
+  }
+  return use;
+}
+
+LogCardStatus logCardStatus() {
+  LogCardStatus status = {};
+  status.onCard = gLogCard.use == LogCardUse::Card;
+  status.cardFull = gLogCard.use == LogCardUse::Full;
+  status.keyUnavailable = gLogCard.use == LogCardUse::NoKey;
+  status.noKeyLines = gLogCard.noKeyLines;
+  return status;
+}
+
 LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
                        char* outPath, size_t outPathLen) {
   if (!primaryPath || !outPath || outPathLen == 0) return LogTier::Primary;
@@ -1156,13 +1271,13 @@ LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
       gLogOverflowRearmFree = want + LOG_OVERFLOW_DEFAULT_RESERVE;
       gLogOverflowRearmCheckMs = millis();
       const bool sd = isSdAvailable();
-      logSystemEvent("FS", "LittleFS free below reserve (%u < %u bytes) — log writes latched to SD overflow (SD mounted: %s%s)",
+      logSystemEvent("FS", "LittleFS free below reserve (%u < %u bytes) — flash log lines stop at the floor (SD mounted: %s%s)",
                      (unsigned)gLogFreeCheckCached, (unsigned)want,
                      sd ? "yes" : "no",
                      sd ? "" : "; logs stay on flash down to the floor, then are dropped");
       if (!gLogOverflowWarned) {
         gLogOverflowWarned = true;
-        WARN_SYSTEMF("[LOG] LittleFS low on free space (%u < %u bytes); new log writes will route to SD overflow",
+        WARN_SYSTEMF("[LOG] LittleFS low on free space (%u < %u bytes); log lines need the card or are dropped at the floor",
                      (unsigned)gLogFreeCheckCached, (unsigned)want);
         // Once per low episode (B10): the latch clears only when free space
         // is back a reserve above the trip level, which re-arms this post.
@@ -1177,46 +1292,44 @@ LogTier resolveLogPath(const char* primaryPath, size_t reserveBytes,
     if (refreshLittleFsFreeCached() >= gLogOverflowRearmFree) {
       gLogOverflowActive = false;
       gLogOverflowWarned = false;  // the episode is over: the next one warns again
-      logSystemEvent("FS", "LittleFS free back to %u bytes (>= %u) — log overflow latch re-armed, logs return to flash",
+      logSystemEvent("FS", "LittleFS free back to %u bytes (>= %u) — flash reserve latch re-armed",
                      (unsigned)gLogFreeCheckCached, (unsigned)gLogOverflowRearmFree);
     }
   }
 
-  if (!gLogOverflowActive) {
-    snprintf(outPath, outPathLen, "%s", primaryPath);
-    return LogTier::Primary;
-  }
-
+  // A path the caller put on the card itself (`log start "/sd/..."`) is never
+  // moved, does not touch the flash reserve and is not refused. Its tier
+  // answer is what it was before B11: Overflow only while flash is short and
+  // the card takes writes.
   const bool primaryOnSd = strncmp(primaryPath, "/sd/", 4) == 0 || strcmp(primaryPath, "/sd") == 0;
-
-  // Overflow active but no card takes writes: name the primary path for
-  // readers and recovery. Below the global floor tell writers it is refused —
-  // appending there would spend the reserve this latch exists to keep (G-39).
-  // The floor, not the `want` that tripped the latch, decides: a sensor log
-  // with a 250 KB-10 MB margin trips it far above the floor, and the audit,
-  // login and event logs must keep landing on flash until the floor itself is
-  // reached. Only this card-less branch reads free space while latched, at the
-  // same 2 s cadence an unlatched caller pays. A path already on SD does not
-  // touch the reserve and is not refused.
-  if (!overflowSdWritable()) {
-    snprintf(outPath, outPathLen, "%s", primaryPath);
-    if (primaryOnSd) return LogTier::Primary;
-    return refreshLittleFsFreeCached() < LOG_OVERFLOW_DEFAULT_RESERVE ? LogTier::Refused
-                                                                      : LogTier::Primary;
-  }
-
-  // Defensive: if the caller already passed a /sd path, leave it alone.
   if (primaryOnSd) {
     snprintf(outPath, outPathLen, "%s", primaryPath);
-    return LogTier::Overflow;
+    return gLogOverflowActive && overflowSdWritable() ? LogTier::Overflow : LogTier::Primary;
   }
 
-  if (primaryPath[0] == '/') {
-    snprintf(outPath, outPathLen, "/sd%s", primaryPath);
-  } else {
-    snprintf(outPath, outPathLen, "/sd/%s", primaryPath);
+  // B11: the card first.
+  const LogCardUse use = logCardUse();
+  if (use == LogCardUse::Card) {
+    if (primaryPath[0] == '/') {
+      snprintf(outPath, outPathLen, "/sd%s", primaryPath);
+    } else {
+      snprintf(outPath, outPathLen, "/sd/%s", primaryPath);
+    }
+    return LogTier::Overflow;
   }
-  return LogTier::Overflow;
+  if (use == LogCardUse::NoKey) ++gLogCard.noKeyLines;  // on flash, plain, and counted
+
+  // No card takes the line: flash, as without one. Below the global floor
+  // tell writers it is refused — appending there would spend the reserve the
+  // latch exists to keep (G-39). The floor, not the `want` that tripped the
+  // latch, decides: a sensor log with a 250 KB-10 MB margin trips it far above
+  // the floor, and the audit, login and event logs must keep landing on flash
+  // until the floor itself is reached. Only a latched resolution reads free
+  // space here, at the same 2 s cadence an unlatched caller pays above.
+  snprintf(outPath, outPathLen, "%s", primaryPath);
+  if (!gLogOverflowActive) return LogTier::Primary;
+  return refreshLittleFsFreeCached() < LOG_OVERFLOW_DEFAULT_RESERVE ? LogTier::Refused
+                                                                    : LogTier::Primary;
 }
 
 bool resolveOverflowPath(const char* primaryPath, size_t reserveBytes,

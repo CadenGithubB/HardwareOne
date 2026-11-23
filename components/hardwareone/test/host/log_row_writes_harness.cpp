@@ -103,6 +103,15 @@ public:
     return accepted;
   }
   size_t size() const { check(bool(*this), "size uses open file"); io("size"); return disk.at(handle->path).size() + (handle->mode == "w" ? headerSizeOffset : 0); }
+  // B11: SealedLog reads a card file's first bytes to judge whose it is.
+  size_t read(uint8_t* bytes, size_t count) {
+    check(bool(*this) && handle->mode == "r", "the head is read from a file open for reading");
+    io("read:" + std::to_string(count));
+    const std::string& data = disk.at(handle->path);
+    const size_t n = std::min(count, data.size());
+    memcpy(bytes, data.data(), n);
+    return n;
+  }
   void flush() override { check(bool(*this), "flush uses open file"); io("flush"); if (headerFlushError && handle->mode == "w") setWriteError(); }
   void close() { check(bool(*this), "close file once"); io("close"); handle->closed = true; --liveFiles; }
 };
@@ -130,6 +139,9 @@ static LogTier resolveLogPath(const char* path, size_t need, char* output, size_
   return overflow ? LogTier::Overflow : LogTier::Primary;
 }
 static void noteLogReserveDrop() { ++reserveDrops; }
+// B11: a card that did not take a row is reported; log lines then stay off it.
+static unsigned sdFailureNotes = 0;
+static void noteLogOverflowSdFailure(const char*) { ++sdFailureNotes; overflow = false; }
 // UP-16: the stored LittleFS free figure the battery log checks against the
 // shared reserve; noteLittleFsBytesWritten records nothing here.
 static size_t littleFsFree = SIZE_MAX;
@@ -173,6 +185,16 @@ static bool guardedNormalize(const String& path, String& normalized, const char*
 }
 // INSERT_REPLACE
 }
+// B11: a capture on the card is always sealed. The SealedLog double (the mark
+// with this device's key id, a file that is not ours moved aside) runs over
+// the fakes above. The cases written before B11 keep the card as an unsealed
+// tier (cardSealing off: they exercise the row writer, the header staging and
+// the rotation with plain bytes on either tier); the B11 cases switch it on,
+// which is what the device does.
+#define SEALED_LOG_HOST_OPEN
+#define SEALED_LOG_HOST_MARK_API
+#include "sealed_log_host.h"
+static void cardSealing(bool on) { sealed_log_host::cardPrefix = on ? "/sd/" : "\x01no card sealing"; }
 namespace Clock { static bool isSynced() { return clockSynced; } }
 static SensorLogFormat gSensorLogFormat = SENSOR_LOG_TEXT;
 static uint8_t gSensorLogMask = LOG_TOF;
@@ -222,7 +244,13 @@ static BatteryState getBatterySnapshot() { return batteryState; }
 
 // INSERT_PRODUCTION
 
-static std::string sensorPath() { return overflow ? "/sd/sensor.log" : "/sensor.log"; }
+// The file the cases from before B11 write: the session's own path, on flash
+// or (onSd) on the card. They used to reach the card through the overflow
+// resolution; since B11 a card twin that fails falls back to flash, which the
+// B11 cases cover (cardTwinCases), so these name the card file themselves and
+// keep testing the row writer, the header staging and the rotation on it.
+static bool legacyOnSd = false;
+static std::string sensorPath() { return legacyOnSd ? "/sd/sensor.log" : "/sensor.log"; }
 static bool containsMessage(const std::string& value) {
   return std::any_of(messages.begin(), messages.end(), [&](const std::string& m) { return m.find(value) != std::string::npos; });
 }
@@ -232,20 +260,21 @@ static void reset(bool onSd = false) {
   failAppendOpen = failReadOpen = reportWriteError = sealFailure = allocFailure = clockSynced = false;
   failHeaderOpen = failReplace = failRemove = headerFlushError = false;
   headerSizeOffset = 0; appendOpens = failAppendOpenCall = 0; reserveRefused = false; reserveDrops = 0; VFS::littleFsFree = SIZE_MAX;
-  overflow = onSd; nowMs = 10000; gSensorLogFormat = SENSOR_LOG_TEXT; gSensorLogMask = LOG_TOF;
-  gSensorLogPathMode = SensorLogPathMode::MANUAL; gSensorLogPath = "/sensor.log";
+  overflow = false; legacyOnSd = onSd; nowMs = 10000; gSensorLogFormat = SENSOR_LOG_TEXT; gSensorLogMask = LOG_TOF;
+  gSensorLogPathMode = SensorLogPathMode::MANUAL; gSensorLogPath = onSd ? "/sd/sensor.log" : "/sensor.log";
   gSensorLogSealed = false; gSealBuf = nullptr; gApproxSizeBytes = 0; gSensorLogMaxSize = 100000;
   gSensorLogMaxRotations = 2; gSensorLogLastWrite = 25; lastTruncateMs = 0; log_writes = log_open_fail = log_trunc = 0;
   gSettings.batteryLogEnabled = true; gSettings.batteryLogIntervalMs = 60000; batteryState = {};
   heldElsewhere = false; blockingWaitsOnBusyLock = tryLockMisses = 0; gFsMutex = &fsMutexStorage;
   pendingAllocFailure = false; sessionId = 1;
+  cardSealing(false); VFS::sdFailureNotes = 0; sealed_log_host::keyAvailable = true; sealed_log_host::movedAside = 0;
 #if TRY_LOCK_WRITERS
   sPendingRowHeld = false; sAppendLockMisses = sPendingRowsDropped = 0; sBatteryLogLockMisses = 0;
   sBatteryLogSampleWaiting = false;
 #endif
 }
 static void transcript(const char* name) {
-  released(); std::cout << name << ':' << overflow << ':' << log_writes << ':' << gSensorLogLastWrite << ':' << log_trunc << '\n';
+  released(); std::cout << name << ':' << legacyOnSd << ':' << log_writes << ':' << gSensorLogLastWrite << ':' << log_trunc << '\n';
   for (const auto& file : disk) std::cout << std::quoted(file.first) << '=' << std::quoted(file.second) << '\n';
 }
 static void sensorNormal(bool onSd) {
@@ -253,7 +282,7 @@ static void sensorNormal(bool onSd) {
     for (bool sealed : {false, true}) {
       reset(onSd); gSensorLogFormat = format; gSensorLogMask = LOG_GPS | LOG_R1; gSensorLogSealed = sealed;
       sensorAppend("123,body"); released();
-      std::string expected = sealed ? CAPCRYPT_MAGIC_LINE "\n" : "";
+      std::string expected = sealed ? sealed_log_host::mark() : "";   // the mark names the key (B11)
       if (format == SENSOR_LOG_CSV) expected += text(buildCsvHeader(LOG_GPS | LOG_R1)) + "\n";
       if (format == SENSOR_LOG_TRACK) expected += kTrackHeader;
       expected += sealed ? "SEALED[123,body]\n" : "123,body\n";
@@ -278,9 +307,9 @@ static void sensorNormal(bool onSd) {
   check(log_trunc == 0, "rotation cooldown retained"); transcript("sensor-cooldown");
   reset(onSd); sensorAppend(nullptr); sensorAppend(""); check(disk.empty() && operations.empty(), "empty/null built rows skip all I/O"); transcript("sensor-empty");
   reset(onSd); gSensorLogSealed = true; sealFailure = true; sensorAppend("private");
-  check(disk.at(sensorPath()) == CAPCRYPT_MAGIC_LINE "\n" && log_writes == 0, "seal failure never appends plaintext"); transcript("sensor-seal-failure");
+  check(disk.at(sensorPath()) == sealed_log_host::mark() && log_writes == 0, "seal failure never appends plaintext"); transcript("sensor-seal-failure");
   reset(onSd); gSensorLogSealed = true; allocFailure = true; sensorAppend("private");
-  check(disk.at(sensorPath()) == CAPCRYPT_MAGIC_LINE "\n" && log_writes == 0, "allocation failure remains fail closed"); transcript("sensor-allocation-failure");
+  check(disk.at(sensorPath()) == sealed_log_host::mark() && log_writes == 0, "allocation failure remains fail closed"); transcript("sensor-allocation-failure");
   reset(onSd); failAppendOpen = true; sensorAppend("body");
   check(disk.empty() && log_open_fail == 1 && log_writes == 0, "append open failure preserved"); transcript("sensor-open-failure");
   reset(onSd); gSensorLogFormat = SENSOR_LOG_CSV; failWrite = 1; shortCount = 3; sensorAppend("body");
@@ -481,7 +510,7 @@ static void headerCases() {
       sensorAppend("private body"); released();
       check(!disk.count(sensorPath()) && log_writes == 0 && !disk.count(sensorPath() + ".header.tmp"), "partial sealing magic/schema never becomes appendable or creates the destination");
       failWrite = 0; sensorAppend("private body");
-      check(disk.at(sensorPath()).rfind(CAPCRYPT_MAGIC_LINE "\n", 0) == 0 && disk.at(sensorPath()).find("SEALED[private body]\n") != std::string::npos,
+      check(disk.at(sensorPath()).rfind(sealed_log_host::mark(), 0) == 0 && disk.at(sensorPath()).find("SEALED[private body]\n") != std::string::npos,
             "sealed retry publishes magic/schema before sealed row"); released();
     }
   }
@@ -508,6 +537,82 @@ static void helperCases() {
   check(!writeLineChecked(f, binary, sizeof(binary), accepted) && accepted == 4, "helper retains existing Print error despite exact writes");
   check(disk.at("/sensor.log") == std::string("a\0b\n", 4), "helper uses explicit byte length, not C-string termination");
   check(f.getWriteError(), "borrowed file's error is not cleared"); f.close(); fsUnlock(); released();
+}
+#endif
+#if !BASELINE && !LEGACY_ROWS
+// B11: the card twin of the session's file. Whatever the capture mode says for
+// flash, a capture on the card is sealed: the mark with this device's key id,
+// the plain schema line, then sealed rows. A card file that is not this
+// device's is moved aside; a card that does not take the row is reported and
+// the row is written again, on flash.
+static void cardReset() { reset(false); overflow = true; cardSealing(true); }  // a flash-named session, the card taking log lines
+static void cardTwinCases() {
+  const std::string card = "/sd/sensor.log", flash = "/sensor.log";
+  for (auto format : {SENSOR_LOG_TEXT, SENSOR_LOG_CSV, SENSOR_LOG_TRACK}) {
+    cardReset(); gSensorLogFormat = format; gSensorLogMask = LOG_GPS | LOG_R1;
+    gSensorLogSealed = false;                     // capturecrypt off: flash would be plain
+    sensorAppend("123,body"); released();
+    std::string expected = sealed_log_host::mark();
+    if (format == SENSOR_LOG_CSV) expected += text(buildCsvHeader(LOG_GPS | LOG_R1)) + "\n";
+    if (format == SENSOR_LOG_TRACK) expected += kTrackHeader;
+    check(disk.at(card) == expected + "SEALED[123,body]\n" && !disk.count(flash),
+          "on the card: the mark, the plain schema, a sealed row; nothing on flash");
+    check(log_writes == 1 && VFS::sdFailureNotes == 0, "the row counts as written");
+    sensorAppend("next");
+    check(disk.at(card) == expected + "SEALED[123,body]\nSEALED[next]\n", "further rows are sealed under the one mark");
+    // The same session on flash (no card): plain, as the mode says.
+    reset(false); cardSealing(true); gSensorLogFormat = format; gSensorLogMask = LOG_GPS | LOG_R1;
+    sensorAppend("123,body");
+    check(disk.at(flash).find("#HW1ENC") == std::string::npos && disk.at(flash).find("123,body\n") != std::string::npos,
+          "flash stays as the capture mode decides");
+  }
+  // A file on the card that is not this device's sealed file: moved aside
+  // unchanged, and a new sealed file takes the name.
+  for (const char* foreign : {"#HW1ENC v1 k1 id=fedcba9876543210\ntimestamp_ms\nENC1:AAAA\n", "timestamp_ms\n1,2,3\n",
+                              "#HW1ENC v1 k1\ntimestamp_ms\nENC1:AAAA\n"}) {
+    cardReset(); gSensorLogFormat = SENSOR_LOG_CSV; disk[card] = foreign;
+    sensorAppend("body"); released();
+    check(disk.count(card + ".foreign-1") && disk.at(card + ".foreign-1") == foreign, "the other file is moved aside unchanged");
+    check(disk.at(card) == sealed_log_host::mark() + text(buildCsvHeader(LOG_TOF)) + "\nSEALED[body]\n" &&
+          sealed_log_host::movedAside == 1, "a new sealed file takes the name");
+  }
+  // This device's own file from an earlier run takes the row.
+  cardReset(); gSensorLogFormat = SENSOR_LOG_CSV;
+  disk[card] = sealed_log_host::mark() + text(buildCsvHeader(LOG_TOF)) + "\nSEALED[old]\n";
+  sensorAppend("body");
+  check(disk.at(card) == sealed_log_host::mark() + text(buildCsvHeader(LOG_TOF)) + "\nSEALED[old]\nSEALED[body]\n" &&
+        sealed_log_host::movedAside == 0, "our own file is appended to");
+  // The card is pulled: the open fails. The card is reported and the row is
+  // written once more, on flash, plain.
+  cardReset(); failAppendOpenCall = 1;
+  disk[card] = sealed_log_host::mark() + "SEALED[old]\n";
+  sensorAppend("after the pull"); released();
+  check(VFS::sdFailureNotes == 1 && disk.at(flash) == "after the pull\n" && disk.at(card) == sealed_log_host::mark() + "SEALED[old]\n",
+        "an open that fails on the card sends the row to flash");
+  check(log_writes == 1, "the row is written once");
+  // The card is pulled mid-row: a short write. Same fallback; the card holds
+  // at most the torn sealed row, never plain text.
+  cardReset(); disk[card] = sealed_log_host::mark() + "SEALED[old]\n";
+  failWrite = 1; shortCount = 4;
+  sensorAppend("torn row"); released();
+  check(VFS::sdFailureNotes == 1 && disk.at(flash) == "torn row\n", "a short write on the card sends the row to flash");
+  check(disk.at(card) == sealed_log_host::mark() + "SEALED[old]\nSEAL\n" || disk.at(card) == sealed_log_host::mark() + "SEALED[old]\nSEAL",
+        "the card keeps the rows it had and at most a torn sealed row");
+  check(disk.at(card).find("torn row") == std::string::npos, "no plain text of the row on the card");
+  // No device key: no card file is started (the header's mark fails), and the
+  // row goes to flash.
+  cardReset(); sealed_log_host::keyAvailable = false;
+  sensorAppend("no key"); released();
+  check(!disk.count(card) && !disk.count(card + ".header.tmp") && disk.at(flash) == "no key\n" && VFS::sdFailureNotes == 1,
+        "without the key nothing is created on the card and the row lands on flash");
+  // A session whose own path is on the card has no flash twin: a failure there
+  // is a failed row, and the card is not reported on its account.
+  reset(false); cardSealing(true); gSensorLogPath = "/sd/own.log"; failAppendOpenCall = 1;
+  sensorAppend("body"); released();
+  check(VFS::sdFailureNotes == 0 && log_open_fail == 1 && log_writes == 0 && !disk.count("/own.log"),
+        "a card-named session does not fall back");
+  failAppendOpenCall = 0; sensorAppend("body");
+  check(disk.at("/sd/own.log") == sealed_log_host::mark() + "SEALED[body]\n", "and is sealed like every capture on the card");
 }
 #endif
 #if !BASELINE
@@ -662,6 +767,9 @@ int main() {
 #endif
 #if !BASELINE
   reserveRefusedCases();
+#endif
+#if !BASELINE && !LEGACY_ROWS
+  cardTwinCases();
 #endif
   for (bool onSd : {false, true}) { sensorNormal(onSd); sensorFailures(onSd); }
   batteryNormal(); batteryFailures(); batteryCadence(); headerCases();

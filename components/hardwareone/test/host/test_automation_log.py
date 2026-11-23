@@ -87,7 +87,10 @@ def main() -> None:
         work = Path(directory)
         source, binary = work / "test.cpp", work / "test"
         source.write_text(generated())
-        subprocess.run([args.cxx, *flags, str(source), "-o", str(binary)], check=True, timeout=120)
+        # sealed_log_host.h (the SealedLog double) and the production format
+        # rules it includes, System_SealedLogCore.h.
+        subprocess.run([args.cxx, *flags, "-I", str(HERE), "-I", str(COMPONENT), str(source), "-o", str(binary)],
+                       check=True, timeout=120)
         subprocess.run([str(binary)], check=True, timeout=60)
         # The actual disabled public header must need no filesystem, mutex,
         # authentication or owner implementation to link its unavailable API.

@@ -447,7 +447,11 @@ R1HealthHistoryStoreError commitDay(const R1HealthHistoryDay& day,
   if (!file) return R1_HISTORY_STORE_OPEN_FAILED;
   size_t bytesWritten = 0;
   bool ok = true;
-  if (encrypted) ok = lineWriteRaw(file, CAPCRYPT_MAGIC_LINE, bytesWritten);
+  if (encrypted) {
+    // The mark names the key that sealed the file (B11): "#HW1ENC v1 k1 id=...".
+    char mark[CAPCRYPT_MARK_LINE_MAX];
+    ok = captureCryptoMarkLine(mark, sizeof(mark)) != 0 && lineWriteRaw(file, mark, bytesWritten);
+  }
   if (ok) ok = lineWriteRaw(file, kSchemaLine, bytesWritten);
   if (ok) {
     // In sealed mode equality/integrity metadata is AEAD-protected too; the

@@ -4896,12 +4896,36 @@ esp_err_t handleFileView(httpd_req_t* req) {
   if (revealSealed) {
     // Same lock discipline as streamFileChunks: read a line under the lock,
     // send it without, stop at the first failed send.
+    bool firstLine = true, foreign = false;
+    unsigned skippedRows = 0;
     while (true) {
       String lineStr;
       {
         FsLockGuard fsGuard("handleFileView");
         if (!file.available()) break;
         lineStr = file.readStringUntil('\n');
+      }
+      if (firstLine) {
+        // B11: the mark names the key that sealed the file. Another device's
+        // file gets one line saying so in place of a column of rows that
+        // cannot be opened here.
+        firstLine = false;
+        String head = lineStr;
+        head += '\n';
+        char keyId[17];
+        if (captureCryptoMarkOwner(head.c_str(), head.length(), keyId) == CaptureMarkOwner::Other) {
+          char notice[CAPCRYPT_FOREIGN_NOTICE_MAX];
+          if (captureCryptoForeignNotice(keyId, notice, sizeof(notice))) {
+            lineStr += '\n';
+            lineStr += notice;
+            foreign = true;
+          }
+        }
+      } else if (foreign) {
+        if (captureCryptoIsSealedRow(lineStr.c_str())) {  // said once, above
+          if ((++skippedRows % 64) == 0) delay(0);
+          continue;
+        }
       }
       captureCryptoRevealLine(lineStr);
       lineStr += '\n';

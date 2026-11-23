@@ -48,6 +48,7 @@
   #include "BLE_Events.h"  // CompactJson for buildHealthStatusJson
 #endif
 #include "System_CaptureCrypto.h"  // at-rest sealing of capture files
+#include "System_SealedLog.h"      // B11: a capture on the card is always sealed
 #include "System_CommandRegistry.h"
 
 // Modular sensor caches (conditionally available based on enabled sensors)
@@ -185,6 +186,10 @@ static size_t gApproxSizeBytes = 0;
 // captureEncryptMode at session start and re-derived on rollover; sticky per
 // FILE — one file is always all-sealed or all-plain (resolveSessionTarget
 // forks a variant when an existing file's mode doesn't match the session's).
+//
+// B11: this is the answer for FLASH. A capture on the card is always sealed,
+// whatever captureEncryptMode says (sensorLogSealedAt): the flash file and its
+// card twin are two files, so each stays all-sealed or all-plain.
 static bool gSensorLogSealed = false;
 static char* gSealBuf = nullptr;  // PSRAM; sealed-line stage for the append path
 
@@ -198,6 +203,20 @@ static bool sessionWantsSealing(uint8_t mask) {
 
 static const char* captureEncryptModeName(int m) {
   return (m == 2) ? "all" : (m == 1) ? "health" : "off";
+}
+
+// Whether the session's rows are sealed in the file at `resolvedPath` (the
+// path a row is about to go to): always on the card, by the session's mode on
+// flash.
+static bool sensorLogSealedAt(const String& resolvedPath) {
+  return SealedLog::appliesTo(resolvedPath) || gSensorLogSealed;
+}
+
+// For status displays: whether the running session's rows are being sealed
+// now (its own path on the card, log lines going to the card, or the flash
+// mode).
+static bool sensorLogSessionSealedNow() {
+  return gSensorLogSealed || SealedLog::appliesTo(gSensorLogPath) || VFS::logCardStatus().onCard;
 }
 
 static String shapeSessionPath(String path);      // shared shaper (defined below)
@@ -245,17 +264,24 @@ static const char kTrackHeader[] =
 
 // Write and check a complete header in an empty staging file. Only the caller
 // may publish it as an append target; partial headers must remain unpublished.
-static bool writeHeaderChecked(File& f) {
+static bool writeHeaderChecked(File& f, bool sealed) {
   size_t expected = 0;
   bool complete = true;
-  if (gSensorLogSealed) {
+  if (sealed) {
     // Sealed files carry a plaintext magic first line — the at-rest mark every
-    // viewer and probe keys off. Data rows are sealed; the schema header below
-    // stays plaintext (column names aren't data, and the append-compat compare
-    // must stay readable without the key).
-    static const char kMagic[] = CAPCRYPT_MAGIC_LINE "\n";
-    expected += sizeof(kMagic) - 1;
-    complete = f.write((const uint8_t*)kMagic, sizeof(kMagic) - 1) == sizeof(kMagic) - 1;
+    // viewer and probe keys off, with the id of the key that sealed the file
+    // (B11). Data rows are sealed; the schema header below stays plaintext
+    // (column names aren't data, and the append-compat compare must stay
+    // readable without the key). No key, no mark: the header fails and no
+    // file is published.
+    char mark[CAPCRYPT_MARK_LINE_MAX + 1];
+    const size_t markLen = captureCryptoMarkLine(mark, CAPCRYPT_MARK_LINE_MAX);
+    complete = markLen != 0;
+    if (complete) {
+      mark[markLen] = '\n';
+      expected += markLen + 1;
+      complete = f.write((const uint8_t*)mark, markLen + 1) == markLen + 1;
+    }
   }
   if (complete && gSensorLogFormat == SENSOR_LOG_CSV) {
     String h = buildCsvHeader(gSensorLogMask);
@@ -278,10 +304,20 @@ static bool writeHeaderChecked(File& f) {
 // only when its staged header is promoted, which is then a plain rename on
 // every backend (an existing destination on SD would make replaceFileGuarded
 // keep a .bak of it), and a failed header leaves no empty file behind.
+//
+// B11: on the card the file must be this device's sealed file. One that is
+// not (no mark, another device's key id) is moved aside first, so the staged
+// header below starts a new sealed file under the name; nothing plain is ever
+// appended to the card and no row of ours lands in another device's file.
 static File openSensorLogForAppend(const String& path) {
   // Confined to the capture root of the tier `path` resolved to.
   const auto ctx = VFS::systemAuth(VFS::captureScopeFor(path), "senlog.append");
-  const bool headerless = !gSensorLogSealed && gSensorLogFormat == SENSOR_LOG_TEXT;
+  const bool sealed = sensorLogSealedAt(path);
+  if (SealedLog::appliesTo(path)) {
+    bool ours = false;
+    if (!SealedLog::prepare(path, ctx, ours)) return File();
+  }
+  const bool headerless = !sealed && gSensorLogFormat == SENSOR_LOG_TEXT;
   if (VFS::existsGuarded(path, ctx)) {
     File file = VFS::openGuarded(path, "a", ctx, true);
     if (!file || file.isDirectory()) {
@@ -303,7 +339,7 @@ static File openSensorLogForAppend(const String& path) {
   // unpublished staging file from an interrupted attempt, never data. The
   // "w" open replaces it and the header is staged again.
   File header = VFS::openGuarded(temporary, "w", ctx, true);
-  const bool complete = header && !header.isDirectory() && writeHeaderChecked(header);
+  const bool complete = header && !header.isDirectory() && writeHeaderChecked(header, sealed);
   if (header) header.close();
   if (!complete || !VFS::replaceFileGuarded(temporary, path, ctx)) {
     // Remove the staging file so the next attempt starts clean; no
@@ -363,11 +399,7 @@ static size_t sensorLogResolvedSize(const String& path) {
 // append path or the start-time create). Returns the UNRESOLVED path — the
 // append path re-resolves per write.
 static String resolveSessionTarget(const String& shaped) {
-  const bool wantSealed = sessionWantsSealing(gSensorLogMask);
-  // TEXT/TRACK are per-session files and append-safe — but a sealed/plain
-  // mismatch on a name collision (same-second restart) must still fork, so
-  // they only skip the probe when sealing is off (the pre-sealing behavior).
-  if (gSensorLogFormat != SENSOR_LOG_CSV && !wantSealed) return shaped;
+  const bool flashSealed = sessionWantsSealing(gSensorLogMask);
 
   const String expect = (gSensorLogFormat == SENSOR_LOG_CSV)
                             ? buildCsvHeader(gSensorLogMask) : String();
@@ -381,6 +413,14 @@ static String resolveSessionTarget(const String& shaped) {
     char resolved[128];
     VFS::resolveOverflowPath(candidate.c_str(), (size_t)gSensorLogMaxSize,
                              resolved, sizeof(resolved));
+    const bool onCard = SealedLog::appliesTo(String(resolved));
+    // B11: a file on the card is always sealed; on flash the session's mode
+    // decides.
+    const bool wantSealed = onCard || flashSealed;
+    // TEXT/TRACK are per-session files and append-safe — but a sealed/plain
+    // mismatch on a name collision (same-second restart) must still fork, so
+    // they only skip the probe when sealing is off (the pre-sealing behavior).
+    if (gSensorLogFormat != SENSOR_LOG_CSV && !wantSealed) return candidate;
     File f = VFS::openGuarded(String(resolved), "r",
                               VFS::systemAuth(VFS::captureScopeFor(String(resolved)), "senlog.compat"));
     if (!f) return candidate;                       // missing → fresh
@@ -396,6 +436,15 @@ static String resolveSessionTarget(const String& shaped) {
       first[fl++] = (char)c;
     }
     first[fl] = '\0';
+    if (onCard) {
+      // A card file that is not this device's sealed file (no mark, another
+      // device's key id) takes no row of ours: the append path moves it aside
+      // and starts a new sealed file under this name, so the name is free.
+      first[fl] = '\n';  // the mark is judged with its line end; fl + 1 fits
+      const CaptureMarkOwner owner = captureCryptoMarkOwner(first, fl + 1);
+      first[fl] = '\0';
+      if (owner != CaptureMarkOwner::Ours) { f.close(); return candidate; }
+    }
     // Sealed files put the magic on line 1 and the schema header on line 2.
     // A mode mismatch (sealed file vs plain session, or vice versa) forks a
     // variant exactly like a mask mismatch — one file is never mixed-mode.
@@ -450,7 +499,12 @@ enum class SensorLogAppend : uint8_t {
   Busy,  // another task holds the filesystem lock: nothing was touched
 };
 
-static SensorLogAppend sensorLogAppendRow(const char* line) {
+// `cardFailed` is set when the row was meant for the card twin of a flash
+// path and the card did not take it (the file could not be opened, or the
+// write came up short): the caller reports the card and tries the row again,
+// which then resolves to flash.
+static SensorLogAppend sensorLogAppendRowOnce(const char* line, bool& cardFailed) {
+  cardFailed = false;
   // RAII lock: later branches in this section (rollover, header-on-create)
   // return/skip early — a manual fsLock/fsUnlock pair here would leak the
   // FS mutex on any early exit and deadlock all filesystem access. The
@@ -521,11 +575,15 @@ static SensorLogAppend sensorLogAppendRow(const char* line) {
     return SensorLogAppend::Done;
   }
   const bool onSd = tier == VFS::LogTier::Overflow;
+  // The card twin of a flash-named session: a failure there falls back to
+  // flash. A session whose own path is on the card has no flash twin.
+  const bool cardTwin = onSd && VFS::getStorageType(gSensorLogPath) != VFS::SDCARD;
+  const bool rowSealed = sensorLogSealedAt(String(activePath));
   File f = openSensorLogForAppend(String(activePath));
   if (f) {
     size_t len = strlen(line);
     const uint8_t* rowBytes = (const uint8_t*)line;
-    if (gSensorLogSealed) {
+    if (rowSealed) {
       // Never write plaintext into a file that carries the magic. A seal
       // failure (key unavailable, oversize row) drops this one row —
       // fail closed, matching the session-start key check.
@@ -556,6 +614,7 @@ static SensorLogAppend sensorLogAppendRow(const char* line) {
     // On failure, refresh from the exact tier we wrote; a failed reopen
     // keeps the estimate rather than resetting it or resolving a new tier.
     gApproxSizeBytes += written;
+    if (!complete && cardTwin) cardFailed = true;
     if (!complete) {
       File sizeFile = VFS::openGuarded(String(activePath), "r", VFS::systemAuth(VFS::captureScopeFor(String(activePath)), "senlog.size"));
       if (sizeFile) {
@@ -629,6 +688,7 @@ static SensorLogAppend sensorLogAppendRow(const char* line) {
       DEBUG_LOGGERF("logger: wrote %dB, approxSize=%uB, writes=%u", (int)len, (unsigned)gApproxSizeBytes, (unsigned)log_writes);
     }
   } else {
+    if (cardTwin) cardFailed = true;
     if (isDebugFlagSet(DEBUG_STORAGE)) {
       DEBUGF_QUEUE(DEBUG_STORAGE, "Sensor log: failed to open file");
     }
@@ -638,6 +698,19 @@ static SensorLogAppend sensorLogAppendRow(const char* line) {
     }
   }
   return SensorLogAppend::Done;
+}
+
+// One row to the active file. B11: when the card twin did not take it (a card
+// pulled mid-run), the card is reported unwritable, which keeps log lines off
+// it for a minute, and the row is written once more: on flash.
+static SensorLogAppend sensorLogAppendRow(const char* line) {
+  bool cardFailed = false;
+  SensorLogAppend result = sensorLogAppendRowOnce(line, cardFailed);
+  if (result == SensorLogAppend::Done && cardFailed) {
+    VFS::noteLogOverflowSdFailure("sensorlog.append");
+    result = sensorLogAppendRowOnce(line, cardFailed);
+  }
+  return result;
 }
 
 // One row waiting for the filesystem lock. The row text comes from the
@@ -1624,16 +1697,22 @@ static const char* sensorLogStart(String filepath, uint32_t interval, bool persi
 
   // Start and append share header preparation, including empty existing files
   // and the next base created after rotation or an overflow-tier change.
+  // B11: the file that is prepared is the one the first row will go to, the
+  // card twin while a card takes log lines (sealed there), else the flash path.
+  String startFile = filepath;
   {
     FsLockGuard fsGuard("sensorlog.setup_create");
-    const bool created = !VFS::existsGuarded(filepath, VFS::systemAuth(VFS::captureScopeFor(filepath), "senlog.setup_create"));
-    File f = openSensorLogForAppend(filepath);
+    char resolved[128];
+    (void)VFS::resolveLogPath(filepath.c_str(), (size_t)gSensorLogMaxSize, resolved, sizeof(resolved));
+    startFile = resolved;
+    const bool created = !VFS::existsGuarded(startFile, VFS::systemAuth(VFS::captureScopeFor(startFile), "senlog.setup_create"));
+    File f = openSensorLogForAppend(startFile);
     if (!f) {
-      snprintf(getDebugBuffer(), 1024, "Error: Failed to prepare log file: %s", filepath.c_str());
+      snprintf(getDebugBuffer(), 1024, "Error: Failed to prepare log file: %s", startFile.c_str());
       return getDebugBuffer();
     }
     f.close();
-    if (created) broadcastOutput("Created log file: " + filepath);
+    if (created) broadcastOutput("Created log file: " + startFile);
   }
 
   if (ESP.getFreeHeap() < 8192) {
@@ -1694,10 +1773,11 @@ static const char* sensorLogStart(String filepath, uint32_t interval, bool persi
 
   systemEventPost(SYSEVT_SENSOR_STARTED, "Logging");
   logSystemEvent("SENSOR", "Logging online");
-  snprintf(getDebugBuffer(), 1024, "SUCCESS: Sensor logging started\n  File: %s\n  Interval: %lums",
-           filepath.c_str(), (unsigned long)interval);
+  snprintf(getDebugBuffer(), 1024, "SUCCESS: Sensor logging started\n  File: %s%s\n  Interval: %lums",
+           startFile.c_str(), SealedLog::appliesTo(startFile) ? " (on the card, sealed)" : "",
+           (unsigned long)interval);
   broadcastOutput(getDebugBuffer());
-  cliHintf("readings are written to the file, not to this output - read them back with 'fileview \"%s\"', and stop logging with 'sensorlog stop'", filepath.c_str());
+  cliHintf("readings are written to the file, not to this output - read them back with 'fileview \"%s\"', and stop logging with 'sensorlog stop'", startFile.c_str());
   return getDebugBuffer();
 }
 
@@ -2087,7 +2167,7 @@ const char* buildHealthStatusJson(char* buf, size_t cap, bool* complete) {
    .kv("healthLoggingR1Selected", (bool)((gSensorLogMask & LOG_R1) != 0))
    .kv("healthLoggingWorkerRunning", (bool)gSensorLoggingRunning)
    .kv("healthLoggingAtRest", captureEncryptModeName(gSettings.captureEncryptMode))
-   .kv("healthLoggingSessionSealed", (bool)(gSensorLoggingRunning && gSensorLogSealed))
+   .kv("healthLoggingSessionSealed", (bool)(gSensorLoggingRunning && sensorLogSessionSealedNow()))
    .kv("historyAvailable", (bool)history.available)
    .kv("historyState", r1HealthHistoryFetchStateName(history.fetchState))
    .kv("historyDayStart", (unsigned long)history.dayStart)
@@ -2738,7 +2818,8 @@ const char* cmd_capturecrypt(const String& argsInput) {
 
   if (sub.length() == 0 || sub == "status") {
     snprintf(buf, 1024,
-             "Capture at-rest encryption: %s\n"
+             "Capture at-rest encryption on flash: %s\n"
+             "  On the card every capture is sealed, whatever this mode says\n"
              "  Key: %s\n"
              "  Active session: %s\n"
              "  Sealed files keep their names — '#HW1ENC' on line 1 is the mark",
@@ -2747,7 +2828,7 @@ const char* cmd_capturecrypt(const String& argsInput) {
                  ? "present (NVS)"
                  : "not yet minted (created on first sealed session)",
              !gSensorLoggingRunning ? "none"
-                                    : (gSensorLogSealed ? "sealed" : "plaintext"));
+                                    : (sensorLogSessionSealedNow() ? "sealed" : "plaintext"));
     return buf;
   }
 
@@ -2917,9 +2998,10 @@ const CommandEntry sensorLoggingCommands[] = {
   { "capturecrypt", "Capture at-rest encryption: status, mode (off/health/all), plaintext export", true, cmd_capturecrypt,
     "Usage: capturecrypt [status|off|health|all|export \"<in>\" \"<out>\"]\n"
     "  Sealed sessions write '#HW1ENC' on line 1 + per-row ciphertext; filenames\n"
-    "  don't change. health: seal sessions that include the R1 ring (default).\n"
-    "  all: every capture session. Mode changes apply at the next session or\n"
-    "  day rollover — a single file is never mixed-mode.\n"
+    "  don't change. The mode is for captures on flash: health seals sessions\n"
+    "  that include the R1 ring (default), all seals every session. A capture\n"
+    "  on the SD card is always sealed. Mode changes apply at the next session\n"
+    "  or day rollover — a single file is never mixed-mode.\n"
     "  Viewers (fileview, web view, G2/OLED) decrypt for authorized users; raw\n"
     "  downloads, fileread and ESP-NOW transfers ship sealed bytes.\n"
     "  export: write a decrypted copy (inside /logging_captures) for sharing." },
@@ -2996,7 +3078,7 @@ static const SettingEntry sensorLogSettingEntries[] = {
   // flash write is never mistaken for a ring ACK/readback.
   { "ringHealthCollectionDesired", SETTING_INT, &gSettings.ringHealthCollectionDesired, 0, 0, nullptr, 0, 2, "Ring health collection desired", "0|Preserve,1|Off,2|On", false, nullptr, nullptr, true },
   { "ringLowPowerDesired", SETTING_INT, &gSettings.ringLowPowerDesired, 0, 0, nullptr, 0, 2, "Ring low power desired", "0|Preserve,1|Off,2|On", false, nullptr, nullptr, true },
-  { "captureEncryptMode", SETTING_INT, &gSettings.captureEncryptMode, 1, 0, nullptr, 0, 2, "Capture at-rest encryption", "0|Off,1|Health,2|All", false, nullptr, "capturecrypt" },
+  { "captureEncryptMode", SETTING_INT, &gSettings.captureEncryptMode, 1, 0, nullptr, 0, 2, "Flash capture encryption", "0|Off,1|Health,2|All", false, nullptr, "capturecrypt" },
 #endif
   { "sensorLogPath", SETTING_STRING, &gSettings.sensorLogPath, 0, 0, CAPTURE_SENSORLOG_DEFAULT, 0, 0, "Log file path", nullptr, false, nullptr, "sensorlogpath" },
   { "sensorLogIntervalMs", SETTING_INT, &gSettings.sensorLogIntervalMs, 5000, 0, nullptr, 100, 3600000, "Poll interval (ms)", nullptr, false, nullptr, "sensorlog interval" },

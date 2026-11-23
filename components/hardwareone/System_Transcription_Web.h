@@ -360,7 +360,7 @@ function renderFiles() {
     const preview = document.createElement('button'); preview.className = 'btn'; preview.textContent = 'Preview';
     preview.onclick = () => previewFile(file);
     const link = document.createElement('a'); link.className = 'btn'; link.textContent = 'Download';
-    link.href = '/api/files/read?name=' + encodeURIComponent(file.path); link.download = file.name;
+    link.href = transcriptTextUrl(file.path); link.download = file.name;
     row.append(name, preview, link); box.append(row);
   });
   el('prev').disabled = filePage === 0; el('next').disabled = start + PAGE >= files.length;
@@ -401,13 +401,20 @@ async function loadFiles() {
     if (session === generation && mine === fileGeneration && !ended) { el('file-status').textContent = error.message; if (error.status === 401 || error.status === 403) failure(error); }
   } finally { fileBusy = false; }
 }
+// A transcript's text for its owner. On the SD card transcripts are sealed with
+// the device key; the viewer endpoint reveals them after its permission check
+// (dec=1), which the raw read endpoint never does. A file on flash comes back
+// as stored either way.
+function transcriptTextUrl(path) {
+  return '/api/files/view?name=' + encodeURIComponent(path) + '&mode=raw&dec=1';
+}
 async function previewFile(file) {
   if (previewAbort) previewAbort.abort();
   previewAbort = new AbortController();
   const signal = previewAbort.signal, mine = ++fileGeneration, session = generation, owner = sessionEpoch;
   el('preview').textContent = 'Loading preview...';
   try {
-    const response = await fetch('/api/files/read?name=' + encodeURIComponent(file.path), {credentials:'same-origin', cache:'no-store', signal:signal});
+    const response = await fetch(transcriptTextUrl(file.path), {credentials:'same-origin', cache:'no-store', signal:signal});
     const body = await limitedText(response, 16384, signal);
     if (!await fileSessionStillCurrent(owner) || session !== generation || mine !== fileGeneration || ended || signal.aborted) return;
     el('preview').textContent = body.text + (body.truncated ? '\n[Preview limited to 16 KiB. Download for the full file.]' : '');

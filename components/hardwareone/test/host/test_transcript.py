@@ -25,7 +25,8 @@ def main():
             exe = Path(tmp) / f'test-{local}-{dictate}'
             cmd = ['clang++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
                    '-Wno-unused-function', f'-DENABLE_LOCAL_STT={local}',
-                   f'-DENABLE_DICTATION={dictate}', str(source), '-o', str(exe)]
+                   f'-DENABLE_DICTATION={dictate}', '-I', str(HERE), '-I', str(SOURCE),
+                   str(source), '-o', str(exe)]
             if args.sanitize:
                 cmd[1:1] = ['-fsanitize=address,undefined', '-fno-omit-frame-pointer']
             subprocess.run(cmd, check=True, timeout=120)

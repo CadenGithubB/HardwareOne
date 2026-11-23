@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 
 from test_web_batch_handlers import extract_block, require
+from sd_path_core_host import sd_path_core, with_sd_path_core
 
 # getStorageType reads an already normalized path in place through these
 # (an older tree has neither).
@@ -88,7 +89,8 @@ def generate(baseline: Path | None) -> str:
     for marker, value in {
         "// INSERT_BOUNDARIES": boundaries,
         "// INSERT_FS_GUARD": guard,
-        "// INSERT_NORMALIZE_FS_PATH": extract_block(read("System_Filesystem.cpp"), "bool normalizeFsPath("),
+        "// INSERT_NORMALIZE_FS_PATH": with_sd_path_core(
+            extract_block(read("System_Filesystem.cpp"), "bool normalizeFsPath("), COMPONENT),
         "// INSERT_VFS_PATHS": paths,
         "// INSERT_DIRECTORY_READER": reader,
         "// INSERT_IMAGE_MANAGER": header + "\n" + constant + "\n" + methods,

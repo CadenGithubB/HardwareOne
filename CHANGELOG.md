@@ -21,6 +21,56 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this section collects
 everything user-visible since the v0.99.99.1 tag.
 
+### Changed (logs on the SD card are sealed)
+Host-tested and built; not run on a device or with a card.
+- **Logs go to the SD card first.** While a card takes writes, has more than 8 MB free and the
+  device key is available, log lines go to the card under the same names (`/sd/system/sys_logs/...`,
+  `/sd/logging_captures/...`); without such a card they go to flash as before, down to the 100 KB
+  floor. This covers the eight capped system logs, sensor, track and automation captures, the
+  system log (`log start`) and the boot debug file. Settings, accounts, automations, keys and
+  `/battery.csv` stay on flash. A card that is pulled sends the next line to flash (the line that
+  failed is written again there; at most the last row on the card is torn); a card that comes back
+  takes the lines again. One `[EVENT]` line records each switch. A log can therefore be on both
+  tiers; the viewers show both. `logtier` says where lines go now and why.
+- **Every log file on the card is sealed with the device key.** The file starts with a plain mark
+  line that names the key, `#HW1ENC v1 k1 id=<16 hex>` (the id `espnowcatchup` shows; it is not the
+  key), and every line after it is one sealed row. Sensor CSV and track files keep their column
+  header in clear. Saved transcripts on the card are sealed too, header included (its title holds
+  the first spoken words). Files on flash are as before; on flash `capturecrypt` still decides for
+  captures, on the card every capture is sealed whatever it says. Media (recordings, pictures,
+  videos, raw speech input), the speech model, maps and what a collector pulled are not sealed.
+- **A pulled card can be read only in the device that wrote it.** `fileview`, the web viewer, the
+  lens and OLED file pages, the web Logging page and `transcripts read` show the text after their
+  usual permission check; a raw download and `fileread` return the sealed bytes. Another device or
+  a computer sees file names, sizes, dates, the mark line and column headers, and for a file sealed
+  by another device the viewers say so in one line. There is no key export and no key backup: after
+  a flash erase the card's logs cannot be read anywhere.
+- A card log file that is not this device's sealed file (no mark, or another device's key id) is
+  moved aside to `<name>.foreign-<n>` and a new sealed file is started. Nothing in it is read or
+  converted, and such a file is not offered to a collector.
+- Without the device key (an NVS failure) nothing is written to the card: lines stay on flash,
+  unsealed, are counted (`logtier`) and one `[EVENT]` line says so.
+- Capped logs on the card get twice their nominal size in stored bytes (about 5.6 MB for all
+  eight), since a sealed row stores 1.5 to 2 times its text; the quarter-of-flash share applies
+  to flash only.
+- **Card paths have one spelling.** A path under `/sd` with a backslash, a name that ends in a
+  dot or a space, an 8.3 short name (`LOGGIN~1`) or another case of a protected folder
+  (`/sd/System`) is refused like `..` ("path rejected"). FAT resolves all of these to the real
+  folder while the permission rules compare bytes, so such a spelling let a signed-in user read
+  the card's system logs and captures or put a file among them.
+- The Maps track pickers list tracks on the card as well, under their `/sd` path, and loading a
+  track reads sealed rows (a sealed track on flash did not load before). A track under
+  `/logging_captures/tracks` or `/logging_captures/sensors` is listed once (it was listed twice,
+  which used up the OLED picker's eight places).
+- Boot-named capture files (`boot-<N>/`, written before the clock was set) get their date on the
+  card as well: the sweep that moves them into their day folder runs on both tiers.
+- The web Transcription panel previews and downloads a saved transcript through the viewer
+  endpoint, so a transcript on the card comes back as text for its owner.
+- `logtier json` is schema 2: `tier` is `sd` or `littlefs` (where lines go now), with `sealed`,
+  `cardFull`, `keyUnavailable`, `noKeyLines`, `movedAside` and `reserveDrops`; `overflow` is the
+  flash latch as before.
+- QuickNotes on the card are not sealed yet.
+
 ### Changed (time rules, stage 1)
 Host-tested and built; not run on a device.
 - One rank table decides which source may set the clock (`Clock::step`), strongest first: the

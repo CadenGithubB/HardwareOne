@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Execute the production System_SealedLog.cpp (B11) over the shared fake VFS.
+
+Log files on the card are sealed with the device key. The module that opens,
+marks and writes them is compiled here unchanged (its header and source, their
+includes dropped) against fake_vfs.h; the device key and the cipher are the toy
+ones of sealed_log_host.h. Checked: the mark first in a new or empty file; a
+file found ours read once per mount; a file that is not this device's (another
+key id, no mark, a mark with no id, a torn mark) moved aside unchanged to the
+first free "<name>.foreign-<n>" and never appended to or removed; nothing
+created without the key; one sealed row per line, a line over 1023 bytes split
+and never dropped, a caller's smaller row limit; a short write leaving whole
+rows and no plain byte; openFresh; writeMark; lines put together across pieces
+(LineStream); and readWindow: whole rows by stored offset, the mark skipped, a
+plain schema line passed through, rows that do not open, another device's file,
+the ends of the file and a failed read.
+
+The real cipher and key are covered by test_capture_crypto_key.py; the writers
+around this module by their own suites (capped logs, sensor rows, the
+automation log, transcripts).
+"""
+from __future__ import annotations
+
+import argparse
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import tempfile
+
+from test_fake_vfs import string_double
+from test_web_batch_handlers import require
+
+HERE = Path(__file__).resolve().parent
+COMPONENT = HERE.parents[1]
+
+
+def generate() -> str:
+    strip = lambda text: re.sub(r"(?m)^#(include|ifndef SYSTEM_SEALED_LOG_H|define SYSTEM_SEALED_LOG_H)[^\n]*\n", "", text)
+    header = strip((COMPONENT / "System_SealedLog.h").read_text())
+    header = header[:header.rindex("#endif")]
+    source = strip((COMPONENT / "System_SealedLog.cpp").read_text())
+    crypto_header = (COMPONENT / "System_CaptureCrypto.h").read_text()
+    macros = "\n".join(line for line in re.findall(r"^#define CAPCRYPT_.*$", crypto_header, re.MULTILINE)
+                       if "CAPCRYPT_MARK_LINE_MAX" not in line)  # sealed_log_host.h defines that one
+    harness = (HERE / "sealed_log_harness.cpp").read_text()
+    for marker, text in {"// INSERT_CAPCRYPT_MACROS": macros, "// INSERT_SEALED_LOG": header + "\n" + source}.items():
+        require(harness.count(marker) == 1, f"one insertion marker: {marker}")
+        harness = harness.replace(marker, text)
+    return harness
+
+
+def source_contract() -> None:
+    source = re.sub(r"//[^\n]*", "", (COMPONENT / "System_SealedLog.cpp").read_text())
+    # Explicit PSRAM at the source, nothing in internal RAM, and no file call
+    # that goes around the guarded VFS.
+    require("EXT_RAM_BSS_ATTR State sState;" in source, "the module's state is in external BSS")
+    require(source.count("ps_alloc(") == 4 and source.count("AllocPref::PreferPsram") == 4 and "malloc(" not in source,
+            "the row, plain, carry and read buffers are ps_alloc blocks")
+    for banned in ("LittleFS.", "SD.open", "SD.remove", "fopen(", "VFS::open(", "VFS::remove(", "VFS::rename("):
+        require(banned not in source, f"System_SealedLog.cpp must not use {banned}")
+    # No plain write path: every byte written is the mark or a sealed row.
+    writes = re.findall(r"\.write\(([^;]*);", source)
+    require(len(writes) == 2 and all("mark" in w or "row" in w for w in writes),
+            "the module writes the mark line and sealed rows, nothing else")
+    require("captureCryptoSealLine(line, take, row, CAPCRYPT_MAX_SEALED)" in source, "every row goes through the seal")
+    header = (COMPONENT / "System_CaptureCrypto.h").read_text()
+    for name in ("CAPCRYPT_MAX_ROW", "CAPCRYPT_MAX_SEALED", "CAPCRYPT_MARK_LINE_MAX"):
+        require(re.search(rf"^#define {name}\s+\d+$", header, re.M) is not None, f"{name} is a plain number")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cxx", default=os.environ.get("CXX") or shutil.which("c++"))
+    parser.add_argument("--sanitize", action="store_true")
+    args = parser.parse_args()
+    require(bool(args.cxx), "a host C++17 compiler is required")
+    with tempfile.TemporaryDirectory(prefix="hw1-sealed-log-") as directory:
+        work = Path(directory)
+        (work / "Arduino.h").write_text(string_double())
+        unit, binary = work / "sealed_log.cpp", work / "sealed_log"
+        unit.write_text(generate())
+        command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic", "-Wno-unused-parameter",
+                   "-Wno-unused-function", "-I", directory, "-I", str(HERE), "-I", str(COMPONENT),
+                   str(unit), "-o", str(binary)]
+        if args.sanitize:
+            command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer", "-g"]
+        subprocess.run(command, check=True, timeout=180)
+        result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=60)
+        require(result.returncode == 0, f"sealed log failed:\n{result.stdout}\n{result.stderr}")
+        print(result.stdout.strip())
+    source_contract()
+    print("sealed log: source contract passed")
+
+
+if __name__ == "__main__":
+    main()

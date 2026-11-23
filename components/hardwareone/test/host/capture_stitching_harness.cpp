@@ -198,6 +198,8 @@ static constexpr const char* CAPTURE_DIR_SENSORS = "/logging_captures/sensors";
 struct { int captureEncryptMode = 0; } gSettings;
 static bool gSensorLoggingRunning = false, gSensorLogSealed = false;
 static const char* captureEncryptModeName(int) { return "off"; }
+// B11: whether the running session's rows are sealed now (on the card always).
+static bool sensorLogSessionSealedNow() { return gSensorLogSealed; }
 static bool captureCryptoKeyReady() { return false; }
 // The export loads this device's key before it opens its output; a case can make the load fail.
 static bool keyLoads = true;

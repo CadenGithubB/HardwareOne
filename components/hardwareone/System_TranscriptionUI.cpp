@@ -7,6 +7,7 @@
 #include "System_Filesystem.h"
 #include "System_MemUtil.h"
 #include "System_Mutex.h"
+#include "System_SealedLog.h"  // B11: reveal a sealed transcript for its owner
 #include "System_Settings.h"
 #if ENABLE_LOCAL_STT
 #include "System_STTVocabulary.h"
@@ -255,6 +256,25 @@ const char* commandFiles(const String& input) {
     File file = VFS::openGuarded(path, "r", ctx);
     if (!file || file.isDirectory()) return error(doc, "Transcript unavailable");
     const size_t total = file.size();
+    if (SealedLog::looksSealed(file)) {
+      // B11: a transcript on the card is sealed. Its rows are revealed here,
+      // after the owner check above; offsets stay stored-file offsets (0, or
+      // the nextOffset of an earlier reply), so a reader pages as before.
+      char sealedText[513]{};
+      size_t got = 0, next = offset;
+      const bool read = offset <= total &&
+          SealedLog::readWindow(file, offset, sealedText, sizeof(sealedText), got, next);
+      file.close();
+      if (!read) {
+        TranscriptionUi::clear(sealedText, sizeof(sealedText));
+        return error(doc, offset > total ? "Invalid offset" : "Transcript read incomplete");
+      }
+      doc["sttText"] = sealedText; doc["offset"] = offset; doc["nextOffset"] = next;
+      doc["eof"] = next >= total; doc["total"] = total; doc["transcriptPath"] = path;
+      TranscriptionUi::clear(sealedText, sizeof(sealedText));
+      if (!live(owner)) return error(doc, "Session expired");
+      return reply(doc);
+    }
     if (offset > total || (offset && !file.seek(offset))) { file.close(); return error(doc, "Invalid offset"); }
     char text[513]{};
     const size_t wanted = std::min<size_t>(512, total - offset);

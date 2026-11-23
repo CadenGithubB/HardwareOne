@@ -210,6 +210,62 @@ int main() {
         assert(normalizeFsPath("/battery.csv",path));
         if(canRename(path,alice)){std::puts("MISMATCH alice rename /battery.csv");++failures;}
     }
+    // B11, the FAT alias matrix. FatFs ignores case, takes '\\' as a separator,
+    // drops trailing dots and spaces and answers to 8.3 aliases; the rules
+    // compare bytes. For every protected card folder, every such spelling is
+    // refused for every role, through the commands and the web endpoints, for
+    // read, write, create and delete alike (it used to fall to the catch-all:
+    // users read, create and upload, while the card opened the real file).
+    {
+        int aliasRows=0;
+        for(const char* folder:sdpath::kProtectedFolders){
+            const std::string name(folder);
+            std::string upper=name,mixed=name,alias;
+            for(char& c:upper)c=char(std::toupper(static_cast<unsigned char>(c)));
+            mixed[0]=char(std::toupper(static_cast<unsigned char>(mixed[0])));
+            for(char c:upper){if(c!='_'||alias.size()<6)alias+=c;if(alias.size()==6)break;}
+            alias+="~1";
+            const std::string spellings[]={
+                "/sd/"+upper,"/sd/"+mixed,"/sd/"+name+".","/sd/"+name+" ","/sd/"+alias,
+                "/sd/\\"+name,"/sd/"+name+"\\sys_logs","/sd/"+upper+"."};
+            for(const std::string& spelling:spellings){
+                for(const char* tail:{"","/failed_login.log","/sys_logs/failed_login.log","/u2/notes/a.txt"}){
+                    const std::string path=spelling+tail;
+                    // A space that ends the whole path is trimmed by the
+                    // normalizer and by the backend alike, like the space
+                    // around any path: that is the canonical folder, no alias.
+                    if(path.back()==' ') continue;
+                    for(const char* who:{"alice","guest","admin"}){
+                        expect(who,path.c_str(),false,false,false,false);
+                        ++aliasRows;
+                    }
+                    // The system identity and a confined system identity get no
+                    // further: the path is refused before any rule is asked.
+                    String normalized;
+                    if(normalizeFsPath(path.c_str(),normalized)){
+                        std::printf("MISMATCH alias %s normalizes to %s\n",path.c_str(),normalized.c_str());++failures;
+                    }
+                    if(getPermissions(path.c_str(),system)!=0){
+                        std::printf("MISMATCH alias %s grants the system identity\n",path.c_str());++failures;
+                    }
+                }
+            }
+            // The canonical spelling still answers by its rule row, not by this refusal.
+            String normalized;
+            const std::string canonical="/sd/"+name+"/x.log";
+            if(!normalizeFsPath(canonical.c_str(),normalized) || std::string(normalized.c_str())!=canonical){
+                std::printf("MISMATCH canonical %s refused\n",canonical.c_str());++failures;
+            }
+        }
+        // The four spellings the review found, for the login log.
+        for(const char* path:{"/sd/System/sys_logs/failed_login.log","/sd/system\\sys_logs\\failed_login.log",
+                             "/sd/system./sys_logs/failed_login.log","/sd/LOGGIN~1/system/system.log"}){
+            for(const char* who:{"alice","guest","admin"}) expect(who,path,false,false,false,false);
+        }
+        expect("admin","/sd/system/sys_logs/failed_login.log",true,false,false,false);
+        expect("alice","/sd/system/sys_logs/failed_login.log",false,false,false,false);
+        if(aliasRows!=7*(8*4-1)*3){std::printf("MISMATCH alias matrix rows %d\n",aliasRows);++failures;}
+    }
     assert(!fsOwner);
     if(failures){std::printf("filesystem role matrix: %d mismatches\n",failures);return 1;}
     std::puts("filesystem role matrix: command table and web endpoints agree with the path rules");

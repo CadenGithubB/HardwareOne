@@ -19,37 +19,41 @@
 //   - Paths beginning with "/sd/..." (or exactly "/sd") → SD card
 //   - Everything else → LittleFS
 //
-// There is no automatic overflow in the routing layer itself. A call like
+// There is no automatic tier switching in the routing layer itself. A call like
 //   VFS::open("/system/settings.json", "w")
 // will always write to LittleFS. The write may fail if LittleFS is full; it
 // will NOT silently end up on SD. This is intentional: state files (users,
 // settings, automations) must have a single source of truth.
 //
-// Overflow is OPT-IN, via `resolveOverflowPath` + a normal `VFS::open` on
-// the resolved path. When LittleFS free space drops below a threshold, that
-// function rewrites primary paths like "/logging_captures/foo.csv" to their SD mirror
-// "/sd/logging_captures/foo.csv".
+// Log lines are the exception, and they OPT IN through `resolveLogPath` + a
+// normal `VFS::open` on the resolved path. Since B11 (2026-11-22) the card
+// comes first: while a card takes writes, has room above its reserve and the
+// device key is available, a primary path like "/logging_captures/foo.csv"
+// resolves to its card twin "/sd/logging_captures/foo.csv", and what a logger
+// writes there is sealed (System_SealedLog.h). With no usable card the path
+// stays on flash.
 //
-// What is latched is the DECISION to overflow, not the tier: once the latch
-// fires, every call still re-tests isSdWritable() and falls back to the
-// primary path when the card cannot take writes. So a card pulled (or
-// re-inserted) mid-run flips the active tier back and forth and one logical
-// day CAN split across tiers with nothing on disk marking the boundary.
-// Callers that need a stable tier must resolve once per session and store the
-// result. Since G-39 the latch also re-arms once LittleFS free space is back
-// a reserve's width above the level that tripped it, and resolveLogPath
-// reports a latched resolution with no usable card as Refused once LittleFS
-// free is below the global floor, so a log does not eat the reserve it exists
-// to protect.
+// Nothing is latched about the tier: every call asks again, so a card pulled
+// (or put back) mid-run flips the active tier and one logical day CAN split
+// across the two with nothing on disk marking the boundary; readers show both
+// twins. Callers that need a stable tier must resolve once per session and
+// store the result. The latch that remains is about flash running short: it
+// trips when LittleFS free space is below the reserve, re-arms once free
+// space is back a reserve's width above the level that tripped it (G-39), and
+// while it is set resolveLogPath reports a resolution with no usable card as
+// Refused once LittleFS free is below the global floor, so a log does not eat
+// the reserve it exists to protect.
 //
 // Convention for callers:
 //   - State files (settings, users, automations, mesh config, etc.)
 //     → call VFS::open directly. They stay on LittleFS; writes fail cleanly
 //       when flash is full rather than splitting across tiers.
-//   - Append-only bulk data (logs, sensor captures, recordings)
-//     → call resolveOverflowPath first to get the overflow-aware path, then
-//       VFS::open / VFS::exists / VFS::rename / VFS::remove on that path.
-//       Rotation and cap enforcement happens on whichever tier is active.
+//   - Append-only log data (the capped logs, sensor and automation captures,
+//     the system log)
+//     → call resolveLogPath first, then VFS::open / VFS::exists / VFS::rename /
+//       VFS::remove on the path it gives. Rotation and cap enforcement happen
+//       on whichever tier is active, and a path on the card is written
+//       through System_SealedLog.
 
 namespace VFS {
 
@@ -518,26 +522,29 @@ inline bool pathInCaptureTree(const String& path) {
 // Overflow-aware path resolution (opt-in for append-only data)
 // ============================================================================
 
-/** Where an overflow-aware write should go. Refused: the overflow latch is
- *  set, no writable card can take the data and LittleFS free is below the
- *  global floor (logReserveBytes); outPath still names the primary path (for
- *  readers and recovery), but a writer must not append there (G-39). A
- *  latched resolution with no card above the floor is Primary. */
+/** Where a log line should go. Overflow: the card twin of the path (the name
+ *  is from before B11, when the card was only used once flash ran short).
+ *  Primary: the path as given. Refused: the flash latch is set, no usable card
+ *  can take the line and LittleFS free is below the global floor
+ *  (logReserveBytes); outPath still names the primary path (for readers and
+ *  recovery), but a writer must not append there (G-39). A latched resolution
+ *  with no card above the floor is Primary. */
 enum class LogTier : uint8_t { Primary, Overflow, Refused };
 
-/** Map a primary LittleFS log path to itself, OR to its /sd mirror once
- *  LittleFS free space drops below `reserveBytes`. While the overflow latch is
- *  set, resolutions return the SD mirror when the card is writable; the latch
- *  re-arms (back to the primary path) once LittleFS free space recovers a
- *  reserve's width above the level that tripped it.
+/** Map a primary LittleFS log path to its card twin while a card can take the
+ *  line (B11: it accepts writes, has room above logcaps::kCardReserveBytes and
+ *  the device key is available to seal with), and to itself otherwise. Every
+ *  call asks again: a card pulled or put back flips the answer, and one
+ *  [EVENT] line records each change. A path already under /sd is returned as
+ *  it is.
  *
- *  Use for append-only bulk data that's safe to split across tiers: logs,
- *  captures, recordings. DO NOT use for state files like settings.json,
- *  users.json, or automations.json — those must stay single-source-of-truth.
+ *  Use for append-only log data that's safe to split across tiers: logs and
+ *  captures. DO NOT use for state files like settings.json, users.json, or
+ *  automations.json — those must stay single-source-of-truth.
  *
  *  @param primaryPath LittleFS path, e.g. "/system/log.txt"
- *  @param reserveBytes Minimum LittleFS free bytes before overflow triggers.
- *                     The global floor (100 KB) is applied as a minimum.
+ *  @param reserveBytes Minimum LittleFS free bytes before the flash latch
+ *                     trips. The global floor (100 KB) is applied as a minimum.
  *  @param outPath Destination buffer for the resolved path
  *  @param outPathLen Size of `outPath`
  *  @return the tier the resolved path is on, or Refused (see LogTier)
@@ -562,15 +569,25 @@ size_t logReserveBytes();
 void noteLogReserveDrop();
 uint32_t logReserveDrops();
 
+/** B11: where flash-named log lines went at the last resolution, for status
+ *  displays (`logtier`). */
+struct LogCardStatus {
+  bool     onCard;          // the card took the last line (sealed there)
+  bool     cardFull;        // the card is below its reserve: lines are on flash
+  bool     keyUnavailable;  // no device key: lines are on flash, unsealed
+  uint32_t noKeyLines;      // resolutions kept on flash for want of the key, this boot
+};
+LogCardStatus logCardStatus();
+
 /** A log append on the SD overflow mirror failed: report the card unwritable
  *  (noteSdWriteFailure) and keep the overflow path off the card for a minute
  *  even if its write probe still passes, so a damaged log tree on a card that
  *  probes fine is not retried, and re-announced, on every line (G-39). */
 void noteLogOverflowSdFailure(const char* hint);
 
-/** True if the overflow latch is set. NOTE: this reports the latched
- *  DECISION, not the tier actually in use — resolveLogPath still falls back
- *  to the primary path (or Refused) whenever SD cannot take writes. */
+/** True if the flash latch is set (LittleFS free fell below a reserve and
+ *  has not recovered). NOTE: this is not the tier in use — since B11 lines go
+ *  to the card whenever it can take them (logCardStatus), latch or not. */
 bool isLogOverflowActive();
 
 /** Cached LittleFS free bytes (refreshed every 2, 5 or 15 s by headroom, or

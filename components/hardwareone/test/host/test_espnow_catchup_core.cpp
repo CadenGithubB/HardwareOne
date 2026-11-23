@@ -514,6 +514,52 @@ static void testKinds() {
   c = refine("/system/sys_logs/events.log", "r1: x");
   CHECK(c.kind == Kind::EventsLog && c.seal == Seal::OnSend);
 
+  // B11: logs on the card are sealed at rest, and their mark names the key
+  // that sealed them ("#HW1ENC v1 k1 id=<16 hex>"). The classification of
+  // such files is unchanged: the mark is found by its prefix, with or without
+  // the id, and each kind keeps its sealing rule.
+  {
+    const char* withId = "#HW1ENC v1 k1 id=0123456789abcdef\n";
+    const uint8_t* m = reinterpret_cast<const uint8_t*>(withId);
+    CHECK(hasSealedMagic(m, std::strlen(withId)) && hasSealedMagic(m, 7) && !hasSealedMagic(m, 6));
+    // Sensor captures sealed at rest are served as stored, never sealed twice.
+    const std::string sealedGps = std::string(withId) + "timestamp_ms,gps_fix,gps_lat,gps_lon\nENC1:AAAA\n";
+    c = refine((std::string(day) + "gps.csv").c_str(), sealedGps.c_str());
+    CHECK(c.kind == Kind::SensorCapture && c.seal == Seal::Plain);
+    c = refine((std::string(day) + "env.txt").c_str(), (std::string(withId) + "ENC1:AAAA\n").c_str());
+    CHECK(c.kind == Kind::SensorCapture && c.seal == Seal::Plain);
+    c = refine((std::string(day) + "track.csv").c_str(),
+               (std::string(withId) + "# GPS Track Log\n# timestamp_ms,lat,lon\nENC1:AAAA\n").c_str());
+    CHECK(c.kind == Kind::SensorCapture && c.seal == Seal::Plain);
+    // Health stays health: its plain column header gives it away, sealed or not.
+    c = refine((std::string(day) + "env.csv").c_str(), (std::string(withId) + "timestamp_ms,r1_hr\nENC1:AAAA\n").c_str());
+    CHECK(c.kind == Kind::Health && c.seal == Seal::AtRestOnly);
+    Classified sealedHealth = c;
+    CHECK(offer(sealedHealth, true, true) == Offer::Serve);
+    // The system log, events.log and transcripts on the card are still
+    // sealed on send (a sealed-at-rest card file is sealed again on the air,
+    // 28 bytes a frame): refinement does not touch them, whatever their head.
+    for (const char* path : {"/sd/logging_captures/system/system.log", "/sd/logging_captures/system/system.log.2",
+                             "/sd/system/sys_logs/events.log", "/sd/stt/u3/20261122T101500Z-local-0000000100000002.txt"}) {
+      const Classified before = classifyPath(path);
+      c = refine(path, (std::string(withId) + "ENC1:AAAA\n").c_str());
+      CHECK(before.kind != Kind::None && c.kind == before.kind && c.seal == Seal::OnSend && before.seal == Seal::OnSend);
+    }
+    // errors.log and crash-history.log keep their rule on the card as well.
+    c = refine("/sd/system/sys_logs/errors.log", (std::string(withId) + "ENC1:AAAA\n").c_str());
+    CHECK(c.kind == Kind::ErrorLogs && c.seal == Seal::Plain);
+    // What a card writer leaves beside a log is never offered: a file moved
+    // aside (not this device's), a rotation's staging copy, a generation.
+    for (const char* path : {"/sd/system/sys_logs/events.log.foreign-1", "/sd/system/sys_logs/errors.log.tmp",
+                             "/sd/system/sys_logs/events.log.1", "/sd/logging_captures/system/system.log.foreign-1",
+                             "/sd/stt/u3/x.txt.foreign-1", "/sd/logging_captures/sensors/2026-11-19/gps.csv.foreign-1",
+                             "/sd/system/sys_logs/boot-debug-1.log"}) {
+      CHECK(classifyPath(path).kind == Kind::None);
+    }
+    // The trim slots of the followed logs on the card are theirs alone.
+    CHECK(trimSlot("/sd/system/sys_logs/events.log") == 3 && trimSlot("/sd/system/sys_logs/errors.log") == 4);
+  }
+
   // offer().
   Classified h = { Kind::Health, Seal::AtRestOnly, false, kNoSlot, nullptr };
   CHECK(offer(h, false, true) == Offer::WithheldUnsealedHealth);

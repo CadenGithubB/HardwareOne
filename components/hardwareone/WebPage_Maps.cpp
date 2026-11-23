@@ -12,6 +12,7 @@
 #include "System_Mutex.h"
 #include "System_Filesystem.h"
 #include "System_VFS.h"
+#include "System_CaptureCrypto.h"  // a sealed track's rows, revealed for the probe
 #include "System_User.h"
 #include <ArduinoJson.h>
 #include "System_MemUtil.h"
@@ -273,14 +274,20 @@ esp_err_t handleGpsTracksApi(httpd_req_t* req) {
 
   // Probe one candidate file's head for GPS content and emit its JSON entry.
   // Shared by the top-level scan and the one-level session-subfolder descent.
-  auto emitIfGps = [&](File& file, bool& first) {
+  // `path` is the file's VFS path, built from the folder that was listed: a
+  // card entry's own path() has no "/sd" in front and would name the flash
+  // file of the same name.
+  auto emitIfGps = [&](const String& path, File& file, bool& first) {
     // Staging files of an interrupted merge/export are never loadable tracks.
-    if (VFS::isStagingName(String(file.path()))) return;
+    if (VFS::isStagingName(path)) return;
     bool hasGps = false;
-    File check = VFS::openGuarded(file.path(), "r", ctx);
+    File check = VFS::openGuarded(path, "r", ctx);
     if (check) {
       for (int i = 0; i < 15 && check.available(); i++) {
         String line = check.readStringUntil('\n');
+        // Sealed at rest (every track on the card, B11): the rows are
+        // revealed for this user, who passed the guarded open above.
+        captureCryptoRevealLine(line);
         // Check for both sensor log format and CSV format
         if (line.indexOf("gps:") >= 0 ||
             (line.length() > 10 && line.charAt(0) != '#' && line.indexOf(',') > 0)) {
@@ -293,7 +300,7 @@ esp_err_t handleGpsTracksApi(httpd_req_t* req) {
     if (hasGps) {
       // A file name may hold a backslash: the path is JSON-escaped.
       String fileJson = first ? "{\"path\":" : ",{\"path\":";
-      fileJson += jsonQuote(file.path());
+      fileJson += jsonQuote(path.c_str());
       char sizeJson[32];
       snprintf(sizeJson, sizeof(sizeJson), ",\"size\":%lu}", (unsigned long)file.size());
       fileJson += sizeJson;
@@ -311,24 +318,43 @@ esp_err_t handleGpsTracksApi(httpd_req_t* req) {
   // one level down in YYYY-MM-DD/ and boot-N/ subfolders (see
   // shapeSessionPath), so descend exactly one directory level — a flat-only
   // scan makes every shaped TRACK/CSV log invisible to the picker.
-  const char* dirs[] = {"/logging_captures", "/logging_captures/tracks", "/logging_captures/sensors"};
+  // Both tiers: a capture goes to the card while one takes log lines (B11),
+  // so a track can be on flash, on the card, or split across the two.
+  const char* dirs[] = {"/logging_captures", "/logging_captures/tracks", "/logging_captures/sensors",
+                        "/sd/logging_captures", "/sd/logging_captures/tracks",
+                        "/sd/logging_captures/sensors"};
   bool firstFile = true;
 
-  for (int d = 0; d < 3 && !sendFailed; d++) {
+  for (size_t d = 0; d < sizeof(dirs) / sizeof(dirs[0]) && !sendFailed; d++) {
     File root = VFS::openGuarded(dirs[d], "r", ctx);
     if (!root || !root.isDirectory()) continue;
 
+    // "<folder>/<name>" for a listed entry, whatever form its name() has.
+    auto entryPath = [](const String& folder, File& entry) -> String {
+      const char* name = entry.name();
+      const char* slash = name ? strrchr(name, '/') : nullptr;
+      return folder + "/" + (slash ? slash + 1 : (name ? name : ""));
+    };
+    const String folder(dirs[d]);
     File file = root.openNextFile();
     while (file && !sendFailed) {
+      const String path = entryPath(folder, file);
       if (!file.isDirectory()) {
-        emitIfGps(file, firstFile);
-      } else {
+        emitIfGps(path, file, firstFile);
+      } else if ([&] {
+                   // A folder this scan visits on its own (tracks, sensors) is not
+                   // walked from its parent as well: its tracks were listed twice.
+                   for (const char* own : dirs) {
+                     if (path == own) return false;
+                   }
+                   return true;
+                 }()) {
         // One level down: session subfolders (dated / boot-N).
-        File sub = VFS::openGuarded(file.path(), "r", ctx);
+        File sub = VFS::openGuarded(path, "r", ctx);
         if (sub && sub.isDirectory()) {
           File child = sub.openNextFile();
           while (child && !sendFailed) {
-            if (!child.isDirectory()) emitIfGps(child, firstFile);
+            if (!child.isDirectory()) emitIfGps(entryPath(path, child), child, firstFile);
             child = sub.openNextFile();
           }
         }

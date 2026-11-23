@@ -19,6 +19,7 @@ import tempfile
 
 from test_mqtt_boolean_commands import extract_macro
 from test_web_batch_handlers import extract_block, require
+from sd_path_core_host import sd_path_core, with_sd_path_core
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -39,8 +40,8 @@ def generate(overlay: Path | None) -> str:
     parser += "\n".join(extract_block(command, marker) for marker in (
         "CommandArgs::CommandArgs(", "void CommandArgs::parse(", "const String& CommandArgs::arg(",
         "String CommandArgs::remaining("))
-    parser += "\n" + "\n".join(extract_block(filesystem, marker) for marker in (
-        "bool normalizeFsPath(", "const char* requireQuotedPath(", "const char* requireQuotedToken("))
+    parser += "\n" + with_sd_path_core("\n".join(extract_block(filesystem, marker) for marker in (
+        "bool normalizeFsPath(", "const char* requireQuotedPath(", "const char* requireQuotedToken(")), COMPONENT)
     scope = read("System_VFS.h")
     scope = "\n".join(extract_block(scope, marker) for marker in (
         "inline const char* captureScopeFor(", "inline bool pathInCaptureTree("))

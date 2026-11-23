@@ -1,6 +1,8 @@
-// Executes the production LittleFS log-overflow latch from System_VFS.cpp
+// Executes the production log tier resolution from System_VFS.cpp
 // (resolveLogPath, resolveOverflowPath and the free-space cache they share)
-// over a controlled clock, LittleFS size report and SD state. G-39: the latch
+// over a controlled clock, LittleFS size report, SD state, card free figure
+// and device key. B11: a card that takes writes, has room above its reserve
+// and can be sealed for comes first. G-39: with no such card the flash latch
 // must refuse rather than spend the reserve, need a WRITABLE card, and re-arm
 // once space returns.
 #include <cstdarg>
@@ -20,6 +22,14 @@ static unsigned long nowMs = 1000;
 static unsigned long millis() { return nowMs; }
 static size_t lfsTotal = 2 * 1024 * 1024, lfsUsed = 0;
 static int traverses = 0, writableProbes = 0, lowSpacePosts = 0, warnings = 0, sdFailureNotes = 0;
+// B11: the card's free figure (a fresh reading every 30 s), its mount and the
+// device key the card's log lines are sealed with.
+static uint64_t cardFree = 4096ull * 1024 * 1024;
+static int cardStatReads = 0, cardLowSpacePosts = 0, keyCalls = 0;
+static bool cardStatsFail = false, keyReady = true;
+static uint32_t mountGeneration = 1;
+static bool captureCryptoEnsureKey() { ++keyCalls; return keyReady; }
+#include "System_LogCapsCore.h"  // the production card reserve (the runner adds the component to the include path)
 static bool sdMounted = false, sdWritableNow = false;
 static std::vector<std::string> eventLines;
 static constexpr const char* kLittleFsPartitionLabel = "littlefs";
@@ -32,7 +42,12 @@ static esp_err_t esp_littlefs_info(const char* label, size_t* total, size_t* use
 }
 struct FsLockGuard { explicit FsLockGuard(const char*) {} };
 enum { SYSEVT_FS_LOW_SPACE = 7 };
-static void systemEventPost(uint8_t kind, const char*, const char*) { CHECK(kind == SYSEVT_FS_LOW_SPACE); ++lowSpacePosts; }
+static void systemEventPost(uint8_t kind, const char*, const char* detail) {
+  CHECK(kind == SYSEVT_FS_LOW_SPACE);
+  // The same event for both volumes; the detail says which reserve.
+  if (detail && std::strncmp(detail, "card reserve ", 13) == 0) ++cardLowSpacePosts;
+  else ++lowSpacePosts;
+}
 static void logSystemEvent(const char*, const char* fmt, ...) {
   char line[256]; va_list args; va_start(args, fmt); std::vsnprintf(line, sizeof(line), fmt, args); va_end(args);
   eventLines.push_back(line);
@@ -76,6 +91,18 @@ static void publishCapacitySnapshot(StorageType type, uint32_t generation, const
   CHECK(sample.totalBytes == lfsTotal && sample.usedBytes == lfsUsed && sample.freeBytes == lfsTotal - lfsUsed);
   ++snapshotPublishes;
 }
+// B11: what the card-first resolution asks beside the write probe.
+static uint32_t sdMountGeneration() { return mountGeneration; }
+static bool getStats(StorageType type, uint64_t& total, uint64_t& used, uint64_t& free) {
+  CHECK(type == SDCARD);  // a fresh reading of the card; the flash figure has its own walk
+  ++cardStatReads;
+  if (cardStatsFail) return false;
+  total = 32ull * 1024 * 1024 * 1024;
+  used = total - cardFree;
+  free = cardFree;
+  return true;
+}
+struct LogCardStatus { bool onCard; bool cardFull; bool keyUnavailable; uint32_t noKeyLines; };  // System_VFS.h
 // INSERT_PRODUCTION
 }  // namespace VFS
 
@@ -91,6 +118,16 @@ static LogTier resolve(std::string& out, const char* path = "/system/sys_logs/ev
   return tier;
 }
 static void advance(unsigned long ms) { nowMs += ms; }
+// [EVENT] lines by subject: the flash latch's ("LittleFS ...") and the card's.
+static size_t latchEvents() {
+  size_t n = 0;
+  for (const std::string& line : eventLines) n += line.rfind("LittleFS", 0) == 0;
+  return n;
+}
+static size_t cardEvents() { return eventLines.size() - latchEvents(); }
+static bool lastEventHas(const char* text) {
+  return !eventLines.empty() && eventLines.back().find(text) != std::string::npos;
+}
 
 int main() {
   std::string out;
@@ -116,20 +153,21 @@ int main() {
   setFree(60 * 1024); advance(16000);  // >800 KB free was cached for 15 s
   CHECK(resolve(out) == LogTier::Refused && out == "/system/sys_logs/events.log");
   CHECK(VFS::isLogOverflowActive());
-  CHECK(lowSpacePosts == 1 && warnings == 1 && eventLines.size() == 1);
+  CHECK(lowSpacePosts == 1 && warnings == 1 && eventLines.size() == 1 && latchEvents() == 1);
   CHECK(eventLines.back().find("then are dropped") != std::string::npos);
   char dest[128];
   CHECK(!VFS::resolveOverflowPath("/system/sys_logs/events.log", 0, dest, sizeof(dest)));
   // An explicit /sd path never touches the reserve and is not refused.
   CHECK(resolve(out, "/sd/system/sys_logs/events.log") == LogTier::Primary && out == "/sd/system/sys_logs/events.log");
 
-  // A writable card takes the overflow — after the failed-probe backoff.
+  // A writable card takes the lines — after the failed-probe backoff.
   sdMounted = sdWritableNow = true;
   const int probesBefore = writableProbes;
   CHECK(resolve(out) == LogTier::Refused);  // still inside the 10 s backoff
-  CHECK(writableProbes == probesBefore);
+  CHECK(writableProbes == probesBefore && cardEvents() == 0);
   advance(10000);
   CHECK(resolve(out) == LogTier::Overflow && out == "/sd/system/sys_logs/events.log");
+  CHECK(cardEvents() == 1 && lastEventHas("go to the card again (sealed)"));  // one line for the switch
   CHECK(VFS::resolveOverflowPath("/system/sys_logs/events.log", 0, dest, sizeof(dest)) &&
         std::strcmp(dest, "/sd/system/sys_logs/events.log") == 0);
 
@@ -140,8 +178,10 @@ int main() {
   const int probesAfterYank = writableProbes;
   for (int i = 0; i < 50; ++i) CHECK(resolve(out) == LogTier::Refused);
   CHECK(writableProbes == probesAfterYank);  // no write probe per logged line
+  CHECK(cardEvents() == 2 && lastEventHas("continue on flash"));  // one line, not one per refused resolve
   sdWritableNow = true; advance(10000);
-  CHECK(resolve(out) == LogTier::Overflow);  // card back: overflow resumes
+  CHECK(resolve(out) == LogTier::Overflow);  // card back: the card takes the lines again
+  CHECK(cardEvents() == 3);
 
   // Hysteresis: free back above the trip level but not a reserve's width
   // above it keeps the latch, so logs stay on the card.
@@ -167,7 +207,7 @@ int main() {
   // episode, not once per boot), with its own [EVENT] line.
   setFree(50 * 1024); advance(20000);
   CHECK(resolve(out) == LogTier::Refused && VFS::isLogOverflowActive());
-  CHECK(lowSpacePosts == 2 && warnings == 2 && eventLines.size() == 3);
+  CHECK(lowSpacePosts == 2 && warnings == 2 && latchEvents() == 3);
   // Still inside that episode: no further post.
   advance(6000);
   CHECK(resolve(out) == LogTier::Refused && lowSpacePosts == 2 && warnings == 2);
@@ -212,6 +252,144 @@ int main() {
 
   VFS::noteLogReserveDrop(); VFS::noteLogReserveDrop();
   CHECK(VFS::logReserveDrops() == 2);
+
+  // ---- B11: the card first ---------------------------------------------
+  // Flash has plenty and the latch is clear: none of this depends on flash
+  // running short.
+  const uint64_t kMiB = 1024ull * 1024ull;
+  const char* const kSensors = "/logging_captures/sensors/2026-11-22/sensors-2026-11-22.csv";
+  setFree(1024 * 1024); advance(31000);
+  sdMounted = sdWritableNow = true;
+  CHECK(resolve(out) == LogTier::Overflow && out == "/sd/system/sys_logs/events.log");
+  CHECK(!VFS::isLogOverflowActive());
+  // Card present: every flash-named log resolves to its card twin, with its
+  // own name under /sd.
+  CHECK(resolve(out, kSensors, 250 * 1024) == LogTier::Overflow && out == std::string("/sd") + kSensors);
+  CHECK(resolve(out, "/logging_captures/system/system.log", 0) == LogTier::Overflow &&
+        out == "/sd/logging_captures/system/system.log");
+  CHECK(resolve(out, "autolog.txt") == LogTier::Overflow && out == "/sd/autolog.txt");
+  CHECK(VFS::resolveOverflowPath("/system/sys_logs/errors.log", 0, dest, sizeof(dest)) &&
+        std::strcmp(dest, "/sd/system/sys_logs/errors.log") == 0);
+  {
+    const VFS::LogCardStatus st = VFS::logCardStatus();
+    CHECK(st.onCard && !st.cardFull && !st.keyUnavailable && st.noKeyLines == 0);
+  }
+  // A path the caller put on the card itself is not moved and, with the latch
+  // clear, answers Primary as before.
+  CHECK(resolve(out, "/sd/logging_captures/system/own.log") == LogTier::Primary &&
+        out == "/sd/logging_captures/system/own.log");
+  // The card's free figure is read at most every 30 s, and the key once it is
+  // loaded costs a call, not NVS.
+  {
+    const int reads = cardStatReads, probes = writableProbes;
+    for (int i = 0; i < 100; ++i) CHECK(resolve(out) == LogTier::Overflow);
+    CHECK(cardStatReads == reads && writableProbes == probes + 100);  // (the probe is the cached flag on the device)
+    advance(30000);
+    CHECK(resolve(out) == LogTier::Overflow && cardStatReads == reads + 1);
+  }
+
+  // Card absent (pulled): the next line goes to flash, as with no card; one
+  // [EVENT] line, and no probe per line while the 10 s back-off runs.
+  size_t cardLines = cardEvents();
+  sdMounted = sdWritableNow = false;
+  CHECK(resolve(out) == LogTier::Primary && out == "/system/sys_logs/events.log");
+  CHECK(cardEvents() == cardLines + 1 && lastEventHas("card gone or not taking writes"));
+  CHECK(!VFS::logCardStatus().onCard && !VFS::resolveOverflowPath("/system/sys_logs/errors.log", 0, dest, sizeof(dest)));
+  {
+    const int probes = writableProbes;
+    for (int i = 0; i < 50; ++i) CHECK(resolve(out, kSensors, 250 * 1024) == LogTier::Primary && out == kSensors);
+    CHECK(writableProbes == probes && cardEvents() == cardLines + 1);
+  }
+  // The card comes back: inside the back-off still flash, after it the card
+  // again, appending to the same names; one line for the switch.
+  sdMounted = sdWritableNow = true; ++mountGeneration;
+  CHECK(resolve(out) == LogTier::Primary);
+  advance(10000);
+  CHECK(resolve(out) == LogTier::Overflow && out == "/sd/system/sys_logs/events.log");
+  CHECK(cardEvents() == cardLines + 2 && lastEventHas("go to the card again"));
+
+  // Card full: free below the 8 MiB reserve counts as absent. The low-storage
+  // warning is posted once per episode (B10), and the card is usable again
+  // only at twice the reserve.
+  cardLines = cardEvents();
+  cardFree = 8 * kMiB - 1; advance(30000);
+  CHECK(resolve(out) == LogTier::Primary && out == "/system/sys_logs/events.log");
+  CHECK(cardLowSpacePosts == 1 && cardEvents() == cardLines + 1 && lastEventHas("below its reserve"));
+  CHECK(VFS::logCardStatus().cardFull && !VFS::logCardStatus().onCard);
+  for (int i = 0; i < 20; ++i) CHECK(resolve(out) == LogTier::Primary);
+  cardFree = 12 * kMiB; advance(30000);          // above the reserve, below twice it: still full
+  CHECK(resolve(out) == LogTier::Primary && cardLowSpacePosts == 1 && cardEvents() == cardLines + 1);
+  cardFree = 16 * kMiB; advance(30000);          // retention (or the owner) freed space
+  CHECK(resolve(out) == LogTier::Overflow && cardLowSpacePosts == 1 && cardEvents() == cardLines + 2);
+  CHECK(!VFS::logCardStatus().cardFull && VFS::logCardStatus().onCard);
+  cardFree = 1 * kMiB; advance(30000);           // a second episode warns again
+  CHECK(resolve(out) == LogTier::Primary && cardLowSpacePosts == 2);
+  // Another mount may be another card: its episode starts from "not full",
+  // so 10 MiB on the new card is room (it would not be within the old episode).
+  cardFree = 10 * kMiB; ++mountGeneration;
+  CHECK(resolve(out) == LogTier::Overflow && cardLowSpacePosts == 2);
+  // No free figure (the card would not say): the answer stays as it was and a
+  // failing write is what reports the card.
+  cardStatsFail = true; advance(30000);
+  CHECK(resolve(out) == LogTier::Overflow);
+  cardStatsFail = false; cardFree = 4096 * kMiB; advance(30000);
+  CHECK(resolve(out) == LogTier::Overflow);
+
+  // In back-off: a log append failed on the card (noteLogOverflowSdFailure).
+  // Flash for a minute without a probe, then the card again.
+  cardLines = cardEvents();
+  VFS::noteLogOverflowSdFailure("log.append");
+  {
+    const int probes = writableProbes;
+    CHECK(resolve(out) == LogTier::Primary && out == "/system/sys_logs/events.log");
+    advance(59000);
+    CHECK(resolve(out) == LogTier::Primary && writableProbes == probes);
+    advance(1000);
+    CHECK(resolve(out) == LogTier::Overflow && writableProbes == probes + 1);
+    CHECK(cardEvents() == cardLines + 2);
+  }
+
+  // The flash floor. With a card the lines are on the card, so flash below
+  // its floor refuses nothing; with the card gone the same state is Refused
+  // (the reserve is kept, the line is counted by its writer).
+  setFree(50 * 1024); advance(20000);
+  CHECK(resolve(out) == LogTier::Overflow && out == "/sd/system/sys_logs/events.log" && VFS::isLogOverflowActive());
+  CHECK(resolve(out, "/sd/logging_captures/system/own.log") == LogTier::Overflow);  // latched + writable, as before B11
+  sdMounted = sdWritableNow = false;
+  CHECK(resolve(out) == LogTier::Refused && out == "/system/sys_logs/events.log");
+  CHECK(resolve(out, kSensors, 250 * 1024) == LogTier::Refused && out == kSensors);
+  setFree(1024 * 1024); advance(31000);
+  CHECK(resolve(out) == LogTier::Primary && !VFS::isLogOverflowActive());
+
+  // No device key (NVS failure): nothing goes to the card unsealed. The line
+  // stays on flash, plain, and is counted; one [EVENT] line per episode; the
+  // key is asked for again only once a minute.
+  sdMounted = sdWritableNow = true; advance(10000);
+  CHECK(resolve(out) == LogTier::Overflow);
+  cardLines = cardEvents();
+  keyReady = false;
+  int keyCallsBefore = keyCalls;
+  CHECK(resolve(out) == LogTier::Primary && out == "/system/sys_logs/events.log");
+  CHECK(keyCalls == keyCallsBefore + 1 && cardEvents() == cardLines + 1 && lastEventHas("device key unavailable"));
+  for (int i = 0; i < 9; ++i) CHECK(resolve(out, kSensors, 250 * 1024) == LogTier::Primary && out == kSensors);
+  CHECK(keyCalls == keyCallsBefore + 1 && cardEvents() == cardLines + 1);
+  {
+    const VFS::LogCardStatus st = VFS::logCardStatus();
+    CHECK(st.keyUnavailable && !st.onCard && st.noKeyLines == 10);
+  }
+  CHECK(!VFS::resolveOverflowPath("/system/sys_logs/errors.log", 0, dest, sizeof(dest)));
+  keyReady = true; advance(59000);               // the key is back, but not asked yet
+  CHECK(resolve(out) == LogTier::Primary && keyCalls == keyCallsBefore + 1);
+  advance(1000);
+  CHECK(resolve(out) == LogTier::Overflow && keyCalls == keyCallsBefore + 2);
+  CHECK(cardEvents() == cardLines + 2 && !VFS::logCardStatus().keyUnavailable && VFS::logCardStatus().noKeyLines == 12);
+  // No key and no card: the card's absence is the reason, and nothing is counted.
+  sdMounted = sdWritableNow = false; keyReady = false;
+  CHECK(resolve(out) == LogTier::Primary && VFS::logCardStatus().noKeyLines == 12 && !VFS::logCardStatus().keyUnavailable);
+  keyReady = true;
+  // Leave the card state as the FILE-3 cases below found it before B11.
+  sdMounted = sdWritableNow = true; advance(10000);
+  CHECK(resolve(out) == LogTier::Overflow);
 
   // ---- FILE-3: bulk-write admission over the same free figure ----
   using VFS::BulkFigure;

@@ -66,6 +66,9 @@ static bool isSdAvailable(){return sdAvailable;}
 static bool existsGuarded(const char* path,const AuthContext& ctx){return canRead(path,ctx);}
 static File openGuarded(const String& path,const char* mode,const AuthContext& ctx){assert(fsDepth&&std::string(mode)=="r");openedPaths.emplace_back(path.c_str());return canRead(path.c_str(),ctx)?File(nodes.at(path.c_str())):File();}
 }
+// B11: a transcript on the card is sealed; `transcripts read` reveals it for
+// its owner through SealedLog (the double: toy seal, production row rules).
+#include "sealed_log_host.h"
 static DictationAppLease current{SOURCE_WEB,7,0x1122334455667788ULL};
 static bool haveLease=true,active=true,haveText=true;
 static DictationTextReceipt committed{};
@@ -118,6 +121,51 @@ static void testFiles(){
  reset();add("/stt/u7/private.txt","abc");readHook=[] {epochLive=false;};d=files("read \"/stt/u7/private.txt\" 0");assert(d["success"]==false&&!d.containsKey("sttText")&&d["transcriptPath"]==true);
  for(int n=0;n<4;++n){reset();if(n==0)auth.user="";if(n==1)auth.epoch=0;if(n==2)epochLive=false;if(n==3)accountExists=false;deniedFile("read \"/stt/u7/private.txt\" 0");}
  reset();storageBusy=true;deniedFile("list internal 0");
+ // B11: a sealed transcript on the card is revealed for its owner, in whole
+ // rows per 512-byte window. Offsets are stored-file offsets: 0, then each
+ // reply's nextOffset, to the end of the file.
+ {
+  std::string plain="HardwareOne transcript\nStarted: 20260929T000000Z\nTitle: first words\n\n",stored=sealed_log_host::mark();
+  for(int i=0;i<14;++i){plain+="phrase "+std::to_string(i)+" "+std::string(90,char('a'+i))+"\n";}
+  plain+="\n[End: done]\n";
+  for(size_t at=0;at<plain.size();){const size_t end=plain.find('\n',at);stored+=sealed_log_host::sealRow(plain.substr(at,end-at));at=end+1;}
+  reset();add("/sd/stt/u7/sealed.txt",stored);
+  std::string shown;unsigned offset=0,windows=0;
+  for(;;){
+   auto w=files(("read \"/sd/stt/u7/sealed.txt\" "+std::to_string(offset)).c_str());
+   assert(w["success"]==true&&w["total"]==stored.size()&&w["offset"]==offset);
+   const std::string text=w["sttText"].as<std::string>();
+   assert(text.size()<=512&&!text.empty()&&text.back()=='\n');            // whole rows only
+   assert(text.find("ENC1:")==std::string::npos&&text.find("#HW1ENC")==std::string::npos);
+   shown+=text;++windows;
+   const unsigned next=w["nextOffset"];assert(next>offset&&next<=stored.size());
+   // Every nextOffset is a row boundary of the stored file.
+   assert(next==stored.size()||stored[next-1]=='\n');
+   if(w["eof"].as<bool>()){assert(next==stored.size());break;}
+   offset=next;
+  }
+  assert(shown==plain&&windows>=3);
+  // At the end, and past it.
+  auto end=files(("read \"/sd/stt/u7/sealed.txt\" "+std::to_string(stored.size())).c_str());
+  assert(end["success"]==true&&end["eof"]==true&&end["sttText"]=="");
+  end=files(("read \"/sd/stt/u7/sealed.txt\" "+std::to_string(stored.size()+1)).c_str());assert(end["success"]==false);
+  // A row that cannot be opened (a torn tail) reads as such; the rows before it still open.
+  reset();add("/sd/stt/u7/torn.txt",sealed_log_host::mark()+sealed_log_host::sealRow("kept row")+"ENC1:AAA\n");
+  auto torn=files("read \"/sd/stt/u7/torn.txt\" 0");
+  assert(torn["sttText"]=="kept row\n[undecryptable row]\n"&&torn["eof"]==true);
+  // Another device's card: one line says whose file it is, and nothing else is shown.
+  reset();add("/sd/stt/u7/other.txt","#HW1ENC v1 k1 id=fedcba9876543210\n"+sealed_log_host::sealRow("their words"));
+  auto other=files("read \"/sd/stt/u7/other.txt\" 0");
+  assert(other["success"]==true&&other["eof"]==true&&other["sttText"]=="[sealed by device fedcba9876543210]\n");
+  // The owner check comes first: another account's sealed transcript is refused before any read.
+  reset();add("/sd/stt/u8/sealed.txt",stored);deniedFile("read \"/sd/stt/u8/sealed.txt\" 0");
+  // A read that fails is an error, with no text.
+  reset();add("/sd/stt/u7/sealed.txt",stored);seekFails=true;
+  auto failed=files("read \"/sd/stt/u7/sealed.txt\" 0");assert(failed["success"]==false&&!failed.containsKey("sttText"));
+  // A transcript on flash is plain and reads as before.
+  reset();add("/stt/u7/private.txt","private text");auto flash=files("read \"/stt/u7/private.txt\" 0");
+  assert(flash["sttText"]=="private text"&&flash["nextOffset"]==12);
+ }
 }
 static void testSession(){
  reset();auto d=session("status");assert(d["exchange"]=="1122334455667788"&&d["active"]==true&&d["transcriptPath"]=="/stt/u7/private.txt");

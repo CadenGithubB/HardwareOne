@@ -206,8 +206,8 @@ static constexpr CommandModule gCommandModules[] = {
     "later offset must equal the current file size, and passing final runs the "
     "post-save hooks. Access is permission-gated per path: system trees like /system "
     "are read-only (or browse-only) for admins, while user data is fully writable; "
-    "logtier reports whether logs are writing to LittleFS or have spilled into SD "
-    "overflow.", filesystemCommands,   &filesystemCommandsCount, 0, nullptr },
+    "logtier reports where log lines go: to the card first, sealed with the device "
+    "key, or to flash when no card takes them.", filesystemCommands,   &filesystemCommandsCount, 0, nullptr },
 #if ENABLE_SD_CARD
   { "sd",         "SD card mount, format, and info", "Controls the optional microSD card, which mounts at /sd and serves as "
     "overflow/bulk storage (and is only compiled in on boards that wire a "

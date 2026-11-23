@@ -96,6 +96,16 @@ here so you can choose a deployment with them in mind.
   dump.
 - On every profile, `feathers3_fe` included, treat a lost or stolen device as a disclosed Wi-Fi
   passphrase and disclosed account passwords: change them.
+- **Logs on the SD card are sealed** with a device key (ChaCha20-Poly1305, one random nonce per
+  row; the key is a random 256-bit value in NVS). The system logs, sensor, track and automation
+  captures, the system log, the boot debug file and saved transcripts on the card cannot be read
+  or forged without that key, so a card that leaves the device alone does not give up its logs.
+  The limits: the key is on the device, and with flash and NVS encryption off someone holding the
+  **device** can read it; file names, sizes, dates, the mark line and CSV column names are in
+  clear; rows can be deleted, reordered or copied between files without detection; QuickNotes,
+  recordings, pictures, videos and raw speech input on the card are **not** sealed; log files on
+  internal flash are plain unless capture encryption seals them. There is no key backup: after a
+  flash erase the card's logs cannot be read by anything.
 
 ### Bluetooth
 

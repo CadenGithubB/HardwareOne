@@ -490,17 +490,33 @@ int main(int argc, char** argv) {
 
     // Exercise the actual legacy viewer: private aliases stop before any
     // existence/read/broadcast path, while an ordinary page still renders.
-    for(const char* path:{"/stt/u2/session.txt","/sd/stt/u2/session.txt"," //./stt//u2/session.txt ",
-                         "/sd/STT/u2/a.txt","/sd/stt./u2/a.txt","/sd/\\stt/u2/a.txt",
-                         "/sd/.\\stt/u2/a.txt","/sd/stt/u2~1/a.txt"}) {
+    for(const char* path:{"/stt/u2/session.txt","/sd/stt/u2/session.txt"," //./stt//u2/session.txt "}) {
       fixture("private spoken words");tokens={String(path)};broadcasts.clear();
       const unsigned beforeExists=existsCalls,beforeRead=viewReads;
       const char* refusal=cmd_fileview("");
-      check(std::strcmp(refusal,"Error: fileview does not show private transcripts. Use fileread or the file browser.")==0,
+      check(std::strcmp(refusal,"Error: fileview does not show private transcripts. Use 'transcripts read' or the file browser.")==0,
             "private fileview redirects to owner-scoped readers");
       check(commandReplyIsFailure(refusal),"a refused view is a failed command");
       check(existsCalls==beforeExists&&viewReads==beforeRead&&broadcasts.empty(),
             "private fileview cannot read or broadcast content");
+    }
+    // B11: a card path in a spelling FatFs would resolve to another name is
+    // refused where ".." is, for the transcript tree and every other protected
+    // card folder: the words of a missing file, and nothing looked up, read or
+    // broadcast.
+    for(const char* path:{"/sd/STT/u2/a.txt","/sd/stt./u2/a.txt","/sd/\\stt/u2/a.txt",
+                         "/sd/.\\stt/u2/a.txt","/sd/stt/u2~1/a.txt",
+                         "/sd/System/sys_logs/failed_login.log","/sd/system\\sys_logs\\failed_login.log",
+                         "/sd/system./sys_logs/failed_login.log","/sd/LOGGIN~1/system/x.log",
+                         "/sd/logging_captures /sensors/a.csv","/sd/SYSTEM~1/sys_logs/errors.log"}) {
+      fixture("private spoken words");tokens={String(path)};broadcasts.clear();
+      const unsigned beforeExists=existsCalls,beforeRead=viewReads;
+      const char* refusal=cmd_fileview("");
+      check(std::strncmp(refusal,"Error: File not found or access denied: ",40)==0,
+            "an aliased card path is answered like a missing file");
+      check(commandReplyIsFailure(refusal),"a refused view is a failed command");
+      check(existsCalls==beforeExists&&viewReads==beforeRead&&broadcasts.empty(),
+            "an aliased card path is neither looked up nor read nor broadcast");
     }
     fixture("ordinary page");tokens={String("/ordinary.txt")};broadcasts.clear();
     check(std::strcmp(cmd_fileview(""),"[FS] File displayed")==0,"ordinary fileview remains available");

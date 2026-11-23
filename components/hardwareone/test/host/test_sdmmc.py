@@ -72,7 +72,9 @@ release = extract_block(vfs, "static void sdReleaseHandlesBeforeUnmount()")
 assert "systemLogReleaseSdHandle();" in release
 debug = (component / "System_Debug.cpp").read_text()
 handle = code_of(extract_block(debug, "void systemLogReleaseSdHandle()"))
-assert 'gSystemLogPath.startsWith("/sd/")' in handle and "gSystemLogFile.close();" in handle
+# B11: the file the handle is on (gSystemLogActivePath) is the card twin while
+# a card takes log lines, whatever path the session was started with.
+assert 'gSystemLogActivePath.startsWith("/sd/")' in handle and "gSystemLogFile.close();" in handle
 # Its callers (unmountSd, remountSd, formatSd) hold the filesystem lock. The
 # guard is reentrant and releases only what it took; fsUnlock() gives the
 # mutex whenever the task holds it, so the pair would drop the caller's lock

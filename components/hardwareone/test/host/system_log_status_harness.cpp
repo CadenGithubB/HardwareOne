@@ -20,6 +20,8 @@ static unsigned long nowMs = 0;
 static unsigned long millis() { return nowMs; }
 volatile uint32_t gOutputFlags = 0;
 String gSystemLogPath = "";
+// B11: the file the lines go to (the card twin while a card takes them); empty until a file was opened.
+static String gSystemLogActivePath = "";
 bool gSystemLogRunning = false;
 unsigned long gSystemLogLastWrite = 0;
 uint32_t gSystemLogRotations = 0;  // production: static in System_Debug.cpp, shown by the ACTIVE status
@@ -132,6 +134,15 @@ int main() {
       "\"lastWriteAgoSec\":62,\"outputFlags\":" +
       std::to_string(static_cast<unsigned>(MSG_ROUTE_SERIAL | MSG_ROUTE_FILE)) + ",\"autoStart\":true";
   for (size_t size : {kCliStatus, kWebStatus}) CHECK(statusJson(size) == activeJson + limits);
+  // B11: while a card takes log lines the file is the card twin of the
+  // session's path, and that is the file the status names; a session whose
+  // file is on flash shows the path as before.
+  gSystemLogActivePath = "/sd/logging_captures/system/debug.log";
+  CHECK(status(kCliStatus).find("  File: /sd/logging_captures/system/debug.log\n") != std::string::npos);
+  CHECK(statusJson(kWebStatus).find("\"file\":\"/sd/logging_captures/system/debug.log\",") != std::string::npos);
+  CHECK(!systemLogBlockedByReserve(gSystemLogActivePath));   // the card is not held to the flash reserve
+  gSystemLogActivePath = "";
+  CHECK(status(kCliStatus) == active);
   gSystemLogRotations = 3;  // the writer's rotation count reaches the status line
   CHECK(status(kCliStatus).find("rotated 3 time(s) this boot") != std::string::npos);
   CHECK(statusJson(kWebStatus).find(",\"rotations\":3,") != std::string::npos);

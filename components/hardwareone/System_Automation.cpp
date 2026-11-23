@@ -46,6 +46,7 @@
 #include "System_Debug.h"
 #include "System_Filesystem.h"
 #include "System_VFS.h"
+#include "System_SealedLog.h"       // B11: the automation log on the card is sealed
 #include "System_MemUtil.h"
 #include "System_Settings.h"
 #include "System_User.h"
@@ -438,6 +439,34 @@ bool writeAutomationLogEntry(const AutomationLogSession& session,
   }
   String destStr(dest.get());
   if (destStr.length() != strlen(dest.get())) return false;
+  // B11: on the card the entry is sealed. SealedLog starts the file with the
+  // mark (missing folders included) and moves a file that is not this
+  // device's aside. A card that does not take the entry is reported, which
+  // keeps log lines off it for a minute, and the entry goes to flash instead;
+  // a session whose own file is on the card has no flash twin and fails.
+  if (SealedLog::appliesTo(destStr)) {
+    // The path rules are the same on both tiers: a refusal here is not the card's.
+    if (!VFS::canWriteGuarded(destStr, session.owner)) return false;
+    size_t stored = 0;
+    File sealed = SealedLog::openAppend(destStr, session.owner, stored);
+    bool ok = false;
+    if (sealed) {
+      ok = SealedLog::writeLines(sealed, line.c_str(), line.length(), stored);
+      sealed.flush();
+      ok = ok && !sealed.getWriteError();
+      sealed.close();
+    }
+    if (ok) return true;
+    if (SealedLog::appliesTo(session.filename)) return false;
+    VFS::noteLogOverflowSdFailure("automation.log");
+    if (VFS::resolveLogPath(session.filename.c_str(), line.length() + 512, dest.get(), pathSize) ==
+        VFS::LogTier::Refused) {
+      VFS::noteLogReserveDrop();
+      return false;
+    }
+    destStr = dest.get();
+    if (destStr.length() != strlen(dest.get()) || SealedLog::appliesTo(destStr)) return false;
+  }
   const int lastSlash = destStr.lastIndexOf('/');
   if (lastSlash > 0) {
     const String dir = destStr.substring(0, lastSlash);

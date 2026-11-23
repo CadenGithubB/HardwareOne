@@ -8,13 +8,21 @@
 // unconditionally — this module deliberately does NOT go through the
 // System_ESPNow_Crypto wrappers so it exists in ESPNOW-less builds):
 //
-//   #HW1ENC v1 k1\n                          plaintext magic (the "mark")
+//   #HW1ENC v1 k1 id=<16 hex>\n              plaintext magic (the "mark")
 //   <plaintext structural header line(s)>    schema, not data
 //   ENC1:<b64(nonce12 || ct || tag16)>\n     one per data row
 //
 // Filenames never change; detection is by magic first line only. Per-line
 // sealing keeps append/rotation/merge byte-semantics intact and bounds a
 // torn tail write to one lost row.
+//
+// The mark names the key that sealed the file (B11, 2026-11-22): id= is
+// captureCryptoKeyId in hex, a keyed one-way hash and never the key. Readers
+// still detect the "#HW1ENC" prefix only. Every new sealed file gets the id
+// (captureCryptoMarkLine); a writer on the card uses it to tell its own file
+// from another device's, and a viewer to say whose file it is
+// (System_SealedLogCore.h has the format rules, System_SealedLog.h the card
+// log writer).
 //
 // Key: random 256-bit, NVS blob (namespace hw1cap / key k1) — NVS is not
 // reachable through any file-serving surface. Held in internal DRAM only
@@ -31,7 +39,11 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// The mark without its key id: the stem every mark line starts with. Writers
+// use captureCryptoMarkLine(), which adds " id=<16 hex>".
 #define CAPCRYPT_MAGIC_LINE   "#HW1ENC v1 k1"
+// A whole mark line with its id and NUL fits this.
+#define CAPCRYPT_MARK_LINE_MAX 48
 #define CAPCRYPT_MAGIC_PREFIX "#HW1ENC"
 #define CAPCRYPT_ROW_PREFIX   "ENC1:"
 // What a sealed row becomes when it cannot be opened (torn tail write, or a
@@ -89,6 +101,27 @@ int captureCryptoOpenChunk(const uint8_t* aad, size_t aadLen, const uint8_t* in,
 // espnowcatchup; the health key share (package 7) carries it. False on a key
 // failure. Mints the key on first use, like every other sealing call.
 bool captureCryptoKeyId(uint8_t out[8]);
+// The same id as 16 lower-case hex digits and a NUL.
+bool captureCryptoKeyIdHex(char out[17]);
+// The mark line of a new sealed file, "#HW1ENC v1 k1 id=<16 hex>", without a
+// line end. Returns its length, 0 on a key failure or a small buffer (callers
+// fail closed: no mark, no sealed file).
+size_t captureCryptoMarkLine(char* out, size_t outCap);
+
+// Whose mark a file starts with, judged from its first bytes (the first line
+// with its line end; CAPCRYPT_MARK_LINE_MAX bytes are enough).
+enum class CaptureMarkOwner : uint8_t {
+  None,     // no mark: a plain file
+  Ours,     // sealed with this device's key
+  Other,    // sealed with another device's key; its id is in keyIdOut
+  Unknown,  // a mark without a key id, a damaged one, or this device's key did not load
+};
+CaptureMarkOwner captureCryptoMarkOwner(const char* head, size_t headLen, char keyIdOut[17] = nullptr);
+// What a viewer shows once for a file another device sealed, in place of its
+// rows: "[sealed by device <id>: its rows can only be read on that device]".
+// Returns the length written (NUL-terminated), 0 when `out` is too small.
+#define CAPCRYPT_FOREIGN_NOTICE_MAX 96
+size_t captureCryptoForeignNotice(const char* keyIdHex, char* out, size_t outCap);
 
 // Seal one row (no trailing newline in/out). Returns bytes written to out
 // (NUL-terminated), or -1 on key failure / oversize row / small buffer.
@@ -115,6 +148,9 @@ bool captureCryptoRevealLine(String& line);
 // In-place reveal of a whole line-oriented blob that STARTS with the magic
 // line (non-marked text returns 0 untouched — stray ENC1 text in ordinary
 // files is not interpreted). Returns the number of sealed rows encountered.
+// A blob whose mark names another device's key shows the notice above once
+// where its first sealed row was and drops the other sealed rows, instead of
+// a column of "[undecryptable row]".
 // This is the hook for fileview / G2 / OLED viewers, applied AFTER their
 // existing auth gates: presentation surfaces reveal, byte surfaces never do.
 size_t captureCryptoRevealText(String& text);

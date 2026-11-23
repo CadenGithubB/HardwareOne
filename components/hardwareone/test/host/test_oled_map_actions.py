@@ -101,6 +101,8 @@ def map_actions_unit(component: Path) -> str:
         extract_block(oled, "struct RouteInfo") + ";",
         extract_block(oled, "static bool isGpsDataLine("),
         extract_block(oled, "static void probeTrackFile("),
+        extract_block(oled, "static String trackEntryPath("),
+        extract_block(oled, "static bool trackFolderScannedOnItsOwn("),
         extract_block(oled, "static void scanTrackFiles("),
         # goBackToMainMenu plus whatever helpers sit before the submenu dispatch.
         between(oled, "// Go back to main menu from submenu",

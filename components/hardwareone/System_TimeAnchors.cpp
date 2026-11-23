@@ -244,19 +244,41 @@ static bool parseBootFile(const char* name, uint32_t* bootOut, uint32_t* msOut,
   return true;
 }
 
+// B11: captures go to the card while one takes log lines, so a boot folder can
+// be on flash, on the card, or on both. The sweep runs on each tier: `root` is
+// "" for flash and "/sd" for the card. The registry itself stays on flash.
+static AuthContext sweepAuth(const char* root, const char* reason) {
+  return VFS::systemAuth(root[0] ? VFS::Scopes::CAPTURES_SD : VFS::Scopes::CAPTURES, reason);
+}
+
+// True when `folderName` (boot-<N>) still exists on the tier `root`.
+static bool bootFolderOn(const char* root, const char* folderName) {
+  char path[100];
+  snprintf(path, sizeof(path), "%s%s/%s", root, CAPTURE_DIR_SENSORS, folderName);
+  return VFS::existsGuarded(path, sweepAuth(root, "timeanchor.sweep"));
+}
+
+// True when `srcPath` on the tier `root` is the file of the running session:
+// its own path, or the card twin of it.
+static bool isActiveSessionFile(const char* root, const char* srcPath) {
+  if (gSensorLogPath == srcPath) return true;
+  const size_t rootLength = strlen(root);
+  return rootLength != 0 && strncmp(srcPath, root, rootLength) == 0 && gSensorLogPath == srcPath + rootLength;
+}
+
 // Promote up to kMaxRenamesPerPass files out of one boot folder. Returns the
 // number of renames performed; sets *folderClear when no promotable files
 // remain (everything moved, or the leftovers are unpromotable/skipped).
-static int promoteFolderPass(const char* folderName, const Anchor& a,
+static int promoteFolderPass(const char* root, const char* folderName, const Anchor& a,
                              bool* folderClear) {
   *folderClear = true;
   int renames = 0;
 
-  char folderPath[96];
-  snprintf(folderPath, sizeof(folderPath), "%s/%s", CAPTURE_DIR_SENSORS,
+  char folderPath[100];
+  snprintf(folderPath, sizeof(folderPath), "%s%s/%s", root, CAPTURE_DIR_SENSORS,
            folderName);
 
-  const AuthContext ctx = VFS::systemAuth(VFS::Scopes::CAPTURES, "timeanchor.sweep");
+  const AuthContext ctx = sweepAuth(root, "timeanchor.sweep");
   FsLockGuard guard("timeAnchors.sweep");
 
   File dir = VFS::openGuarded(folderPath, "r", ctx);
@@ -294,7 +316,7 @@ static int promoteFolderPass(const char* folderName, const Anchor& a,
 
     // Skip the file an active session still has open — it promotes after
     // the session stops (running→stopped edge re-arms the sweep).
-    if (gSensorLoggingRunning && gSensorLogPath == srcPath) {
+    if (gSensorLoggingRunning && isActiveSessionFile(root, srcPath)) {
       *folderClear = false;
       f = dir.openNextFile();
       continue;
@@ -320,8 +342,8 @@ static int promoteFolderPass(const char* folderName, const Anchor& a,
     char stamp[24];
     strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H-%M-%S", &lt);
 
-    char dayDir[96];
-    snprintf(dayDir, sizeof(dayDir), "%s/%s", CAPTURE_DIR_SENSORS, day);
+    char dayDir[100];
+    snprintf(dayDir, sizeof(dayDir), "%s%s/%s", root, CAPTURE_DIR_SENSORS, day);
     if (!VFS::existsGuarded(dayDir, ctx)) VFS::mkdirGuarded(dayDir, ctx);
 
     // Unique by construction: wall stamp + boot + file-ms. Same-second
@@ -378,19 +400,26 @@ static int promoteFolderPass(const char* folderName, const Anchor& a,
     // is correct: they're still browsable in order.
     if (VFS::rmdirGuarded(folderPath, ctx)) {
       DEBUG_SYSTEMF("[TimeAnchors] removed empty %s", folderPath);
-      registryPrune(a.boot);
+      // The anchor row goes once neither tier holds the boot's folder: the
+      // other tier's files still need it. (A card that is out cannot be
+      // asked; its folder, if any, then stays boot-named.)
+      const char* other = root[0] ? "" : "/sd";
+      if (!(other[0] && !VFS::isSdAvailable()) && bootFolderOn(other, folderName)) {
+        DEBUG_SYSTEMF("[TimeAnchors] boot %lu's anchor kept: %s%s/%s remains",
+                      (unsigned long)a.boot, other, CAPTURE_DIR_SENSORS, folderName);
+      } else {
+        registryPrune(a.boot);
+      }
     }
   }
   return renames;
 }
 
-// One bounded sweep pass over the sensors dir. Returns true when a full
-// pass found nothing to do (sweep complete until re-armed).
-static bool sweepPass() {
-  // Registry load happens OUTSIDE the scan's FsLockGuard so the guard never
-  // nests around another guarded open (safe today — FileManager nests the
-  // same way — but no reason to depend on it here).
-  if (!gRegistryLoaded) registryLoad();
+// One bounded sweep pass over the sensors dir of one tier (`root`: "" flash,
+// "/sd" the card). Returns true when a full pass found nothing to do there.
+static bool sweepTierPass(const char* root) {
+  char sensorsDir[40];
+  snprintf(sensorsDir, sizeof(sensorsDir), "%s%s", root, CAPTURE_DIR_SENSORS);
 
   // Collect ANCHORED boot-* folder names first (small, bounded), then
   // promote — renaming while iterating the parent dir handle is asking for
@@ -402,8 +431,7 @@ static bool sweepPass() {
   bool sawAll = true;
   {
     FsLockGuard guard("timeAnchors.scan");
-    File dir = VFS::openGuarded(CAPTURE_DIR_SENSORS, "r",
-                                VFS::systemAuth(VFS::Scopes::CAPTURES, "timeanchor.scan"));
+    File dir = VFS::openGuarded(sensorsDir, "r", sweepAuth(root, "timeanchor.scan"));
     if (!dir || !dir.isDirectory()) {
       if (dir) dir.close();
       return true;  // nothing to sweep without the capture tree
@@ -439,13 +467,26 @@ static bool sweepPass() {
     const Anchor* a = registryFind(b);
     if (!a) continue;  // pruned mid-pass — nothing to do
     bool clear = false;
-    renames += promoteFolderPass(folders[i], *a, &clear);
+    renames += promoteFolderPass(root, folders[i], *a, &clear);
     if (!clear) allClear = false;
     if (renames >= kMaxRenamesPerPass) return false;  // budget spent, come back
   }
   // Complete only when we saw every anchored folder, all came up clear,
   // and no work was performed.
   return sawAll && allClear && renames == 0;
+}
+
+// One bounded sweep pass: flash, then the card when one is mounted (B11).
+// Returns true when a full pass found nothing to do on either (sweep complete
+// until re-armed).
+static bool sweepPass() {
+  // Registry load happens OUTSIDE the scan's FsLockGuard so the guard never
+  // nests around another guarded open (safe today — FileManager nests the
+  // same way — but no reason to depend on it here).
+  if (!gRegistryLoaded) registryLoad();
+  bool done = sweepTierPass("");
+  if (VFS::isSdAvailable()) done = sweepTierPass("/sd") && done;
+  return done;
 }
 
 // ===========================================================================
@@ -641,6 +682,13 @@ void timeAnchorsTick() {
   const bool running = gSensorLoggingRunning;
   if (sWasRunning && !running) gSweepDone = false;
   sWasRunning = running;
+  // And when a card is mounted (B11): its boot folders are in reach now.
+  static uint32_t sSweepMountGeneration = 0;
+  const uint32_t mountGeneration = VFS::sdMountGeneration();
+  if (mountGeneration != sSweepMountGeneration) {
+    sSweepMountGeneration = mountGeneration;
+    gSweepDone = false;
+  }
 
   if (!Clock::isSynced()) return;
 

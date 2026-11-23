@@ -37,7 +37,8 @@ def generate(overlay: Path | None) -> str:
     crypto = (COMPONENT / "System_CaptureCrypto.h").read_text()
     types = "\n".join(line for line in header.splitlines() if line.startswith("#define LOG_"))
     types += "\n" + extract_block(header, "enum SensorLogFormat") + ";\n"
-    types += "\n".join(line for line in crypto.splitlines() if line.startswith(("#define CAPCRYPT_MAGIC_LINE", "#define CAPCRYPT_MAX_SEALED")))
+    types += "\n".join(line for line in crypto.splitlines() if line.startswith(
+        ("#define CAPCRYPT_MAGIC_LINE", "#define CAPCRYPT_MAX_SEALED", "#define CAPCRYPT_MARK_LINE_MAX")))
     types += "\n" + extract_block(sensor, "enum class SensorLogPathMode") + ";\n"
     functions = []
     legacy_rows = "writeLineChecked(" not in sensor
@@ -47,6 +48,9 @@ def generate(overlay: Path | None) -> str:
     start = sensor.index("static const char kTrackHeader[]")
     functions.append(sensor[start:sensor.index(";", start) + 1])
     functions.append(extract_block(sensor, "static bool writeHeaderChecked("))
+    # B11: whether a file's rows are sealed is asked per resolved path (always on the card).
+    if "static bool sensorLogSealedAt(" in sensor:
+        functions.append(extract_block(sensor, "static bool sensorLogSealedAt("))
     if "static File openSensorLogForAppend(" in sensor:
         functions.append(extract_block(sensor, "static File openSensorLogForAppend("))
     vfs_path = (root / "System_VFS.cpp") if (root / "System_VFS.cpp").exists() else (COMPONENT / "System_VFS.cpp")
@@ -114,7 +118,7 @@ def main() -> None:
         sanitize = (["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                      "-fno-omit-frame-pointer", "-g"] if args.sanitize else [])
         flags = ["-std=c++17", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function",
-                 "-Wno-unused-parameter", "-I", str(CORE), "-I", str(COMPONENT), *sanitize]
+                 "-Wno-unused-parameter", "-I", str(CORE), "-I", str(COMPONENT), "-I", str(HERE), *sanitize]
         subprocess.run([shutil.which("cc"), "-std=c11", *sanitize, "-I", str(CORE),
                         "-c", str(work / "stdlib_noniso.c"), "-o", str(work / "conversions.o")], check=True)
         for source in ("WString", "Print"):

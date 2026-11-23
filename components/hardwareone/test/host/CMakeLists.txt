@@ -959,12 +959,35 @@ if(HW1_SANITIZE)
   target_link_options(restart_quiesce_core_tests PRIVATE -fsanitize=address,undefined)
 endif()
 
+# B11, logs on the card sealed with the device key: the pure rules.
+# System_SdPathCore.h: which spellings of a card path the guarded VFS takes
+# (FatFs ignores case, takes '\' as a separator, drops trailing dots and
+# spaces and answers to 8.3 aliases; every such spelling of a protected card
+# folder is refused). System_SealedLogCore.h and the card part of
+# System_LogCapsCore.h: the mark line with its key id and whose file it marks,
+# one row per line with long lines split, stored sizes, the name a file that
+# is not this device's is moved to, the card's caps and its reserve.
+add_executable(sd_path_core_tests test_sd_path_core.cpp)
+add_executable(sealed_log_core_tests test_sealed_log_core.cpp)
+foreach(target sd_path_core_tests sealed_log_core_tests)
+  set_target_properties(${target} PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+  target_include_directories(${target} PRIVATE ../..)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -pedantic)
+  if(HW1_SANITIZE)
+    target_compile_options(${target} PRIVATE -fsanitize=address,undefined -g)
+    target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+  endif()
+endforeach()
+
 enable_testing()
 
 add_test(NAME esp_now_hosted_protocol COMMAND esp_now_hosted_protocol_tests)
 add_test(NAME radio_companion_core COMMAND radio_companion_core_tests)
 add_test(NAME boot_debug_core COMMAND boot_debug_core_tests)
 add_test(NAME restart_quiesce_core COMMAND restart_quiesce_core_tests)
+add_test(NAME sd_path_core COMMAND sd_path_core_tests)
+add_test(NAME sealed_log_core COMMAND sealed_log_core_tests)
 # The real HAL_Bluetooth.cpp under native and Hosted (P4 + C6) controller
 # substitutes, with the app console's teardown hooks around every stop; see
 # test_hal_bluetooth.py for what it does and does not prove.
@@ -3895,6 +3918,14 @@ add_test(
   NAME fake_vfs
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_fake_vfs.py
+          ${SETUP_MQTT_TEST_ARGS})
+# B11: the production System_SealedLog.cpp over the fake VFS (the mark, files
+# that are not this device's moved aside, one sealed row per line, lines put
+# together across pieces, whole rows read back by stored offset).
+add_test(
+  NAME sealed_log
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_sealed_log.py
           ${SETUP_MQTT_TEST_ARGS})
 # The shared bounded HTTP request-body reader and the LLM page's wrapper on it.
 add_test(

@@ -280,6 +280,18 @@ static const char* cmd_sensorlog(const String& command);
 static const char* sensorLogStartLiveTrack(const char* path, uint32_t intervalMs);
 #endif
 
+// B11: a track sealed at rest (every capture on the card) has its rows
+// revealed for the load. The toy seal: "ENC1:" + the row; "ENC1:!" is a row
+// this device cannot open.
+static unsigned revealCalls = 0;
+static bool captureCryptoRevealLine(String& line) {
+  ++revealCalls;
+  const std::string text = line.c_str();
+  if (text.rfind("ENC1:", 0) != 0) return false;
+  line = text == "ENC1:!" ? String("[undecryptable row]") : String(text.substr(5).c_str());
+  return true;
+}
+
 // INSERT_PRODUCTION
 
 static std::function<void(const char*)> boundaryHook;
@@ -610,6 +622,29 @@ static void snapshotTests() {
         outOfBounds.status.coveragePercent == 0 && outOfBounds.points.get()[0].lat == 20,
         "load reply carries the exact accepted generation and its validation");
 #if !BASELINE
+  // B11: a sealed track loads like a plain one. The mark and the plain header
+  // are skipped, every sealed row is revealed and parsed, and a row this
+  // device cannot open is skipped, not an error.
+  {
+    inputLines = {"#HW1ENC v1 k1 id=0123456789abcdef", "# GPS Track Log", "# timestamp_ms,lat,lon,alt_m,speed_kn,satellites",
+                  "ENC1:1000,37.000000,-122.000000,10.5,0.0,8", "ENC1:!", "ENC1:2000,37.001000,-122.000000,10.5,0.0,8",
+                  "ENC1:3000,---,SIGNAL_LOST"};
+    String sealedError;
+    GpsTrackSnapshot sealedTrack;
+    revealCalls = 0;
+    check(GpsTrackManager::loadTrack("/sd/logging_captures/tracks/live.csv", sealedError, sealedTrack) &&
+          sealedTrack.status.pointCount == 2 && sealedTrack.points.get()[0].lat == 37.0f &&
+          sealedTrack.points.get()[1].lat == 37.001f,
+          "a sealed track's rows are revealed and loaded");
+    check(revealCalls == 7 && std::string(sealedTrack.status.filename) == "/sd/logging_captures/tracks/live.csv",
+          "every line goes through the reveal; the track keeps its card path");
+    // Another device's card: no row opens, so there is no track to load.
+    inputLines = {"#HW1ENC v1 k1 id=fedcba9876543210", "# GPS Track Log", "ENC1:!", "ENC1:!"};
+    check(!GpsTrackManager::loadTrack("/sd/logging_captures/tracks/other.csv", sealedError, sealedTrack) &&
+          sealedError == "No GPS data found in file", "a file whose rows do not open has no GPS data");
+    inputLines = {"1000,20.0,20.0", "2000,20.1,20.0"};
+    check(GpsTrackManager::loadTrack("/logs/outside.csv", why, outOfBounds), "the plain track is loaded again");
+  }
   // CLI load replies: a validation refusal is already a complete reply and is
   // returned as is; other failures carry the load prefix.
   const std::string refused = cmd_gpstrack("load /logs/outside.csv");
