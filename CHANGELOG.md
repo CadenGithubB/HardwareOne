@@ -80,6 +80,16 @@ everything user-visible since the v0.99.99.1 tag.
   reason instead of its raw JSON, so a page that also shows the error (R1 Health) still gives one
   popup. Host-tested (`web_guest_gate`, `web_guest_view_browser`,
   `remote_command_authority`); not checked on a device.
+- Guest privacy (owner decision, 2026-11-22): the ESP-NOW message history is admin-only, on
+  the web (`/api/espnow/messages`) and as the `espnowmessages` command, since it carries the
+  output of remote commands; a user's ESP-NOW page says "Message history is for administrators
+  only." A guest no longer sees the message history, the ring's health data (`/api/health/status`)
+  or the LLM chat (`/api/llm/chat/turns`, `/api/llm/result`); the ESP-NOW and R1 Health pages say
+  the data is not available to guests and stop polling. A guest's settings view (`/api/settings`)
+  leaves out the saved Wi-Fi networks and shows "(not shown to guests)" for the MQTT broker host
+  and user name and the LLM gateway address, as the MQTT page does; users and administrators see
+  them as before. Host-tested (`web_guest_gate`, `web_guest_settings_view`,
+  `web_guest_private_pages`); not checked on a device.
 
 ### Fixed (storage, files and the web worker)
 - One free-space reserve on flash (FILE-3, UP-16): web uploads to flash may now use what is free

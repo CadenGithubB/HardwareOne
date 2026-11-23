@@ -16,8 +16,13 @@ that for a guest:
 - every other POST, /api/cli/batch included, and the file, log and capture
   GETs are refused with a 403 whose JSON carries code "guest_forbidden" and the
   sentence the pages show ("Guest accounts are view-only");
-- an account the roster cannot resolve is refused, and a user or an
-  administrator is never stopped by this gate.
+- the private reads (owner, guest privacy 1-3, 2026-11-22: the ESP-NOW message
+  history, the ring's health status, the LLM chat turns and streamed answer)
+  are refused with a 403 whose JSON carries code "guest_private" and "Not
+  available to guests", which the pages show as their own state;
+- an account the roster cannot resolve is refused; a user is stopped only by
+  the admin-only reads (the ESP-NOW message history: 403, code
+  "admin_required"), and an administrator never.
 
 --component points the suite at another copy of the production sources.
 """
@@ -38,6 +43,11 @@ from test_web_batch_handlers import extract_block, require  # noqa: E402
 
 MARKERS = (
     "static void webGuestSendForbidden(",
+    "static void webGuestSendPrivate(",
+    "static void webSendAdminRequired(",
+    "static bool webApiAdminOnly(",
+    "static bool webGuestApiPrivate(",
+    "static void webRequestPath(",
     "static bool webGuestApiAllowed(",
     "static bool webResolveGuestRole(",
     "bool webGuestMutationAllowed(",
@@ -86,6 +96,7 @@ static bool getUserAuthorizationRole(const String& user, String& role) {
   return false;
 }
 static bool isSuperAdminUser(const String& user) { return user.str() == "owner"; }
+static bool isAdminUser(const String& user) { return user.str() == "root" || user.str() == "owner"; }
 struct FsLockGuard { bool held = true; explicit FsLockGuard(const char*) {} };
 static bool isFsLockedByCurrentTask() { return false; }
 '''
@@ -115,12 +126,15 @@ static void expectPass(const char* user, int method, const char* uri) {
   const bool ok = gate(user, method, uri);
   checked(ok && gReply.sends == 0, label(user, method, uri) + " passes");
 }
-static void expectRefused(const char* user, int method, const char* uri) {
+static void expectRefusedAs(const char* kind, const char* user, int method, const char* uri) {
   const bool ok = gate(user, method, uri);
   checked(!ok && gReply.sends == 1 && gReply.status == "403 Forbidden" &&
               gReply.type == "application/json",
           label(user, method, uri) + " refused with one 403");
-  std::printf("BODY %s\n", gReply.body.c_str());
+  std::printf("BODY %s %s\n", kind, gReply.body.c_str());
+}
+static void expectRefused(const char* user, int method, const char* uri) {
+  expectRefusedAs("guest_forbidden", user, method, uri);
 }
 
 int main() {
@@ -153,6 +167,24 @@ int main() {
                                "/api/videos", "/api/debug/flags", "/api/admin/sessions",
                                "/api/transcription", "/api/bond/fs/list", "/api/cli"};
   for (const char* uri : refusedGets) expectRefused("gina", HTTP_GET, uri);
+  // Private reads (owner, guest privacy 1-3): not for a guest, said as such.
+  const char* privateReads[] = {"/api/espnow/messages", "/api/espnow/messages?since=0",
+                                "/api/health/status", "/api/llm/chat/turns",
+                                "/api/llm/result?session=3&offset=0"};
+  for (const char* uri : privateReads) expectRefusedAs("guest_private", "gina", HTTP_GET, uri);
+  // The pages that load them still open, and the neighbouring reads pass.
+  expectPass("gina", HTTP_GET, "/r1-health");
+  expectPass("gina", HTTP_GET, "/api/llm/status");
+  expectPass("gina", HTTP_GET, "/api/espnow/metadata");
+  // The ESP-NOW message history is admin-only: a user is refused, the other
+  // private reads are a user's as before, and an administrator reads all.
+  expectRefusedAs("admin_required", "alice", HTTP_GET, "/api/espnow/messages?since=4&mac=AA");
+  expectRefusedAs("admin_required", "alice", HTTP_GET, "/api/espnow/messages");
+  expectPass("alice", HTTP_GET, "/api/health/status");
+  expectPass("alice", HTTP_GET, "/api/llm/chat/turns");
+  expectPass("alice", HTTP_GET, "/api/espnow/status");
+  expectPass("root", HTTP_GET, "/api/espnow/messages?since=0");
+  expectPass("owner", HTTP_GET, "/api/espnow/messages");
   // An account the roster cannot resolve is refused, even for a page.
   expectRefused("ghost", HTTP_GET, "/dashboard");
   // Users and administrators are never stopped here.
@@ -216,15 +248,25 @@ def main() -> None:
         if run.returncode != 0:
             print(run.stdout[-2000:], (run.stderr or "").strip(), file=sys.stderr)
             raise SystemExit("web_guest_gate: FAILED")
-    bodies = [line[5:] for line in run.stdout.splitlines() if line.startswith("BODY ")]
-    require(bool(bodies), "refusals were checked")
-    for body in set(bodies):
+    sentences = {
+        "guest_forbidden": "Guest accounts are view-only",
+        "guest_private": "Not available to guests",
+        "admin_required": "Admin access required",
+    }
+    seen = set()
+    for line in run.stdout.splitlines():
+        if not line.startswith("BODY "):
+            continue
+        kind, body = line[5:].split(" ", 1)
+        seen.add(kind)
         reply = json.loads(body)
-        require(reply.get("success") is False and reply.get("code") == "guest_forbidden" and
-                reply.get("error") == "Guest accounts are view-only",
-                f"the guest refusal names its code and the sentence a page shows: {body}")
+        require(reply.get("success") is False and reply.get("code") == kind and
+                reply.get("error") == sentences[kind] and reply.get("message") == sentences[kind],
+                f"the {kind} refusal names its code and the sentence a page shows: {body}")
+    require(seen == set(sentences), f"every refusal kind was checked: {sorted(seen)}")
     print(f"web_guest_gate: {run.stdout.splitlines()[-1]}; a guest views every page, "
-          "POST /api/cli reaches the command guest surface, everything else is the refusal")
+          "POST /api/cli reaches the command guest surface, everything else is the refusal; "
+          "private reads are not a guest's, the ESP-NOW history is an administrator's")
 
 
 if __name__ == "__main__":

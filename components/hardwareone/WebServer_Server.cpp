@@ -59,6 +59,7 @@
 #include "System_EventCatalogJson.h"  // shared event-kind JSON output adapter
 #include "System_UartLink.h"       // exact UART login-generation publication
 #include "WebServer_Utils.h"
+#include "WebServer_GuestSettingsView.h"  // guestview::reduceSettingsForGuest
 #include "WebAssets.h"
 #include "WebServer_Server.h"
 #include "WebPage_Automations.h"
@@ -2883,8 +2884,13 @@ esp_err_t handleSettingsGet(httpd_req_t* req) {
   // (System_User.cpp), so these two lines called the same function twice for the
   // same user — a second full roster read for an integer already in hand.
   const int ctxRank = userAccountRank(ctx.user);
-  user["isGuest"] = (ctx.user.length() > 0 && ctxRank == kRoleRankGuest);
+  const bool ctxIsGuest = (ctx.user.length() > 0 && ctxRank == kRoleRankGuest);
+  user["isGuest"] = ctxIsGuest;
   user["roleRank"] = ctxRank;
+  // The guest's reduced view (owner, guest privacy 4): no saved Wi-Fi
+  // networks, MQTT broker host or user name, or LLM gateway address
+  // (WebServer_GuestSettingsView.h).
+  if (ctxIsGuest) guestview::reduceSettingsForGuest(settings);
   
   // Add features
   JsonObject features = response["features"].to<JsonObject>();

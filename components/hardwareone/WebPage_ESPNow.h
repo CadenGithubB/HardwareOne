@@ -1860,6 +1860,28 @@ inline void streamEspNowInner(httpd_req_t* req) {
   var lastSeqNum = 0;
   var pollInterval = null;
   var authFailed = false;
+  var refused = false;      // the message history is not this account's to read
+
+  // The message history is admin-only, and private from a guest (owner, guest
+  // privacy 1): its 403 says which (code guest_private / admin_required). The
+  // conversation logs then say so instead of "No messages yet", and polling
+  // stops. Panels drawn later read window.__espnowMessagesRefused
+  // (renderDevicePanel in espnow-core.js).
+  function messagesRefusedText(e) {
+    var code = '';
+    try { code = (JSON.parse((e && e.reply) || '{}') || {}).code || ''; } catch (_) {}
+    return (code === 'guest_private')
+      ? 'Message history is not available to guests.'
+      : 'Message history is for administrators only.';
+  }
+  function showMessagesRefused(text) {
+    window.__espnowMessagesRefused = text;
+    var logs = document.querySelectorAll('.message-log');
+    for (var i = 0; i < logs.length; i++) {
+      var empty = logs[i].querySelector('.message-empty');
+      if (empty) empty.textContent = text;
+    }
+  }
   var pendingGroups = {};   // reqId -> accumulating multi-piece (chunked) message
   var pollTick = 0;
 
@@ -1936,7 +1958,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
   }
 
   function pollEspNowMessages() {
-    if (authFailed) return;
+    if (authFailed || refused) return;
     pollTick++;
     flushStaleGroups();
     console.log('[ESP-NOW] Polling messages since=' + lastSeqNum);
@@ -1999,6 +2021,10 @@ inline void streamEspNowInner(httpd_req_t* req) {
           console.log('[ESP-NOW] Auth required, stopping polling');
           authFailed = true;
           stopPolling();
+        } else if (e && e.status === 403) {
+          refused = true;
+          stopPolling();
+          showMessagesRefused(messagesRefusedText(e));
         } else {
           console.error('[ESP-NOW] Poll error:', e); 
         }
@@ -2006,7 +2032,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
   }
   
   function startPolling() {
-    if (pollInterval || authFailed) return;
+    if (pollInterval || authFailed || refused) return;
     console.log('[ESP-NOW] Starting message polling (500ms)');
     pollEspNowMessages();
     pollInterval = setInterval(pollEspNowMessages, 500);
