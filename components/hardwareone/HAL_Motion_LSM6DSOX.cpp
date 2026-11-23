@@ -206,6 +206,8 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, Moti
   out.yaw = euler.yaw;
   out.pitch = euler.pitch;
   out.roll = euler.roll;
+  mahonyGravity(sState.filter, out.gravity);
+  out.hasGravity = true;
   out.ready = true;
   return true;
 }

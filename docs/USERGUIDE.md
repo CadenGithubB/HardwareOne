@@ -2331,7 +2331,8 @@ toftransitionms <0-5000>        - Reading transition time
 
 ```
 openimu                         - Start IMU sensor
-closeimu                        - Stop IMU sensor
+closeimu                        - Stop IMU sensor (refused, with who, while something that
+                                  needs the IMU open is using it; 'imustatus' names it)
 imuread                         - Read orientation data
 imuautostart [on|off]           - Auto-start on boot
 imuactions                      - Show action detection state (tap, shake, etc.)

@@ -38,6 +38,10 @@ struct ImuCache {
   uint8_t backend = 0;          // kMotionBackend* (HAL_MotionCore.h); 0 = none
 };
 
+// The per-sample hook's types (HAL_MotionHookCore.h; this alias is the same one).
+struct MotionHookSample;
+using MotionSampleHookFn = void (*)(const MotionHookSample& sample, void* ctx);
+
 // Values only: callers own their copy; the live cache and lock stay in the layer.
 #if ENABLE_IMU_SENSOR
 
@@ -104,6 +108,51 @@ const char* imuBackendName();
 void imuUpdateActions(const MotionActionSample& sample, bool postEvents = false);
 bool imuActionsSnapshot(MotionActionState& out, uint32_t timeoutMs = 10);
 
+// ---- Per-sample hook ---------------------------------------------------------
+// The sample and the function type are HAL_MotionHookCore.h's (include it to
+// read a sample).
+// For a consumer that needs every sample (the IMU input device: taps as
+// buttons, tilt as a joystick). One slot. The full contract is at the top of
+// HAL_MotionHookCore.h; in short:
+//   - The IMU task calls the hook once per sample that has a reading (50 Hz
+//     on the Adafruit 4517, every imuDevicePollMs on the BNO055), after the
+//     action detector has seen it, with no lock held.
+//   - It runs on the IMU task's 4 KB stack: under about 512 bytes of its own,
+//     never blocking, never opening or closing the IMU.
+//   - Calls can pause without notice (a paused bus, failed reads, the first
+//     second after an open): compare each sample's `ms` with the previous.
+//   - When the IMU closes, for whatever reason, the hook gets one last call
+//     with `stopped` true. The registration stays for the next open.
+//
+// imuSampleHookRegister: false when fn is null or another consumer has the
+// slot. imuSampleHookUnregister: only with the fn and ctx that registered;
+// true when this call removed the registration, false when it is not this
+// consumer's (or another caller is removing it). Either way, when it returns
+// no call into fn with this ctx is in progress and none will start, so what
+// ctx points at may be freed. Called from the hook itself, it does not wait
+// for its own call. A hook that blocks keeps unregister waiting (it logs a
+// warning after half a second).
+bool imuSampleHookRegister(MotionSampleHookFn fn, void* ctx);
+bool imuSampleHookUnregister(MotionSampleHookFn fn, void* ctx);
+
+// ---- Holders -----------------------------------------------------------------
+// A consumer that needs the IMU to stay open holds it, by name (a string
+// literal: "input"). While anyone holds it, 'closeimu' answers
+// "Error: The IMU is in use by <who> ..." and closes nothing. Holding does
+// not start the IMU: the holder starts it through the normal queued start
+// ('openimu', or requestSensorStart(I2C_DEVICE_IMU)), and it still stops by
+// itself after repeated bus failures (gImuRunning says so).
+// imuHold: false when who is empty, holds already, the list is full (four
+// holders), or a 'closeimu' accepted earlier is still on its way (the IMU is
+// closing: hold again once it has closed). imuRelease: false when who was
+// not holding.
+// A hold taken while the IMU is closed, or one whose IMU stopped by itself,
+// does not block 'closeimu' (there is nothing to close), and the hook's last
+// call of a run says so (`stopped`).
+bool imuHold(const char* who);
+bool imuRelease(const char* who);
+uint8_t imuHolderCount();
+
 // JSON building. imuBuildDataJson is the reading as it travels (ESP-NOW,
 // MQTT): its keys are a wire format. imuBuildLocalJson is the same reading
 // for this device's own surfaces ('imuread json', the "imu" entry of
@@ -142,6 +191,26 @@ inline int imuBuildDataJson(char* buf, size_t bufSize) {
   return 0;
 }
 inline int imuBuildLocalJson(char* buf, size_t bufSize) { return imuBuildDataJson(buf, bufSize); }
+// No IMU in this build: nothing to hook or to hold.
+inline bool imuSampleHookRegister(MotionSampleHookFn fn, void* ctx) {
+  (void)fn;
+  (void)ctx;
+  return false;
+}
+inline bool imuSampleHookUnregister(MotionSampleHookFn fn, void* ctx) {
+  (void)fn;
+  (void)ctx;
+  return false;
+}
+inline bool imuHold(const char* who) {
+  (void)who;
+  return false;
+}
+inline bool imuRelease(const char* who) {
+  (void)who;
+  return false;
+}
+inline uint8_t imuHolderCount() { return 0; }
 inline size_t imuCacheStorageBytes() { return 0; }
 #endif // ENABLE_IMU_SENSOR
 #endif // HAL_MOTION_H

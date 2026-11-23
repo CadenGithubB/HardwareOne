@@ -131,6 +131,16 @@ inline bool mahonyUpdate(MahonyFilter& f, float gx, float gy, float gz, float ax
   return true;
 }
 
+// Which way is up, as a unit vector in the sensor frame: the third row of the
+// quaternion's rotation matrix, the direction the accelerometer reads at
+// rest (lying flat face up: (0, 0, 1)). It follows the fused attitude, so a
+// knock or a shake that moves the accelerometer does not move it.
+inline void mahonyGravity(const MahonyFilter& f, float out[3]) {
+  out[0] = 2.0f * (f.q1 * f.q3 - f.q0 * f.q2);
+  out[1] = 2.0f * (f.q0 * f.q1 + f.q2 * f.q3);
+  out[2] = f.q0 * f.q0 - f.q1 * f.q1 - f.q2 * f.q2 + f.q3 * f.q3;
+}
+
 struct FusionEuler {
   float yaw = 0.0f, pitch = 0.0f, roll = 0.0f;  // degrees, see the header
 };

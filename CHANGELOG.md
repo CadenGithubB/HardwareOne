@@ -265,6 +265,26 @@ Host-tested and built; not run on a device.
   is auto-disabled with a `sensor_fault` event after the usual number in a row; `openimu` starts
   it again.
 
+### Added (IMU: per-sample hook and holders, for the coming IMU input device)
+Host-tested and built; not run on a device. Nothing uses it yet.
+- A consumer can take every IMU sample instead of the reading published every `imudevicepollms`:
+  one hook (`imuSampleHookRegister` / `imuSampleHookUnregister`, `HAL_Motion.h`), called by the IMU
+  once per sample (50 Hz on the Adafruit 4517, every `imudevicepollms` on the BNO055) after the
+  motion events have seen it. A sample carries its time, pitch and roll before the mounting
+  correction, the acceleration, which way is up as a unit vector (4517), whether a tap happened
+  since the previous sample (no 200 ms lockout, unlike the `imu_tap` event; on the 4517 the chip
+  latches it, so a knock between two samples is not lost; the first sample after a pause of more
+  than 100 ms carries none, since the latch may be stale) and whether the device is being shaken.
+  When the IMU closes, for whatever reason, the hook gets one last call marked `stopped`.
+  Unregistering returns only when no call is in progress.
+- A consumer that needs the IMU open holds it (`imuHold` / `imuRelease`). While one does,
+  `closeimu` answers `Error: The IMU is in use by <who> and stays open for it. Stop it first, then
+  run 'closeimu'.` and closes nothing. A `closeimu` that was accepted just before the hold is
+  dropped when its turn comes (`[IMU] Close dropped: ...`). A held IMU that stopped by itself
+  (repeated bus failures) is not refused: `closeimu` then answers as for any stopped sensor and
+  cancels its automatic restart. `imustatus` shows who holds the IMU (`"heldBy"` and
+  `"sampleHook"` in `imustatus json`).
+
 ### Changed (I2C buses and addresses)
 - Every `<device>bus` command (`oledbus`, `fuelgaugebus`, `inputbus`, `imubus`, `tofbus`,
   `thermalbus`, `apdsbus`, `gpsbus`, `fmradiobus`, `rtcbus`, `presencebus`, `matrixbus`,

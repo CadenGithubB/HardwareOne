@@ -295,6 +295,12 @@ const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName
                                    const char* eventTag, const char* hint = nullptr,
                                    uint8_t n = 1);
 
+// A stop of the sensor would have something to do: it runs, still has a task,
+// or has a start admitted or queued (what cmd_sensorstop_queued() tests before
+// it queues a stop).
+bool i2cSensorStopHasWork(I2cDeviceType sensor, uint8_t n = 1);
+// A stop of the sensor is queued and not applied yet.
+bool i2cSensorStopPending(I2cDeviceType sensor, uint8_t n = 1);
 // Command wrapper for requestSensorStop(): the stop commands return its reply.
 // `displayName` is the tag the reply carries in brackets ("ToF", "FM Radio").
 const char* cmd_sensorstop_queued(I2cDeviceType sensor, const char* displayName, uint8_t n = 1);
