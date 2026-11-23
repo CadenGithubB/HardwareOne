@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1036 commands across 61 modules (1036 registry entries).
+1034 commands across 61 modules (1034 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -16,7 +16,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`system`](#system) — 25 commands
 - [`versions`](#versions) — 1 commands
 - [`wifi`](#wifi) — 19 commands
-- [`espnow`](#espnow) — 118 commands
+- [`espnow`](#espnow) — 116 commands
 - [`catchup`](#catchup) — 2 commands
 - [`collect`](#collect) — 5 commands
 - [`c6`](#c6) — 9 commands
@@ -241,7 +241,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowrekey` | A | Force immediate SESSION_REKEY for a peer (manual trigger). (async - completes later; check espnowsessions)<br/>`Usage: espnowrekey <name_or_mac> Returns OK when REKEY is sent; new keys derive when the peer's REKEY arrives - verify with 'espnowsessions'.` |
 | `espnowrelayblock` | A | DIAGNOSTIC: drop ALL inbound ESP-NOW frames from one MAC (bench stand-in for an out-of-range peer; relay HW testing). RAM-only - reboot clears it.<br/>`Usage: espnowrelayblock <mac\|clear\|status> Drops frames at the RX drain before any parsing - heartbeats too, so the peer goes offline within ~30s, like real RF loss.` |
 | `espnowremote` | A | Execute a command on a peer: 'espnowremote <target> <target-user> <target-pass> <cmd>'. user/pass are an account ON THE TARGET (verified there), not this device. (async - result via espnowmessages json)<br/>`Usage: espnowremote <target> <target-user> <target-pass> <command> <target-user>/<target-pass> are credentials ON THE TARGET device, not this one. Async: returns a reqId on delivery; read the output later with 'espnowmessages json 0 <target-mac>' (match the reqId).` |
-| `espnowrequestevents` | A | Ask a peer to send US only events in <bitmask>. Updates state ON THE PEER. (async - changes peer state, no reply; verify with espnowsubs on the peer)<br/>`Usage: espnowrequestevents <name_or_mac> <bitmask> Returns OK on delivery; this updates the PEER's subscription (no confirmation returns) - run 'espnowsubs' on that peer to verify.` |
 | `espnowrequestmeta` |  | Request metadata from peer: 'espnowrequestmeta <name_or_mac>'. (async - updates cache; view with espnowdevices)<br/>`Usage: espnowrequestmeta <name_or_mac> Returns OK on delivery; the peer's name/room/zone/tags arrive later and update the local peer cache shown by 'espnowdevices' / 'espnowrooms' / 'espnowfind'.` |
 | `espnowresetstats` | A | Reset ESP-NOW statistics counters. |
 | `espnowroom` |  | Get/set device room: 'espnowroom [name]'.<br/>`Usage: espnowroom [Kitchen\|Bedroom\|...] espnowroom clear` |
@@ -264,7 +263,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowstationary` |  | Get/set stationary flag: 'espnowstationary [0\|1]'.<br/>`Usage: espnowstationary [on\|off\|0\|1]` |
 | `espnowstats` |  | Show ESP-NOW statistics (messages, errors, and received frames dropped by cause: too short for their type, an unknown must-understand flag, an unknown mesh id). |
 | `espnowstatus` |  | Show ESP-NOW status and configuration. |
-| `espnowsubs` |  | List peers + their event-subscription bitmaps (what they want from us). |
 | `espnowtagcmd` | A | Run command on all devices accepted here as holders of a tag; user/pass must be valid on EACH target device. (async - replies via espnowmessages json)<br/>`Usage: espnowtagcmd <tag> <target-user> <target-pass> <command> Credentials are checked ON EACH target device, not this one. One tag per command: a tag list (a comma) is refused. Goes only to peers whose tag was accepted on this device (espnowgroups, espnowgroupaccept); a peer that only announces the tag is skipped and counted in the reply. Returns OK on dispatch; each device's reply arrives later in 'espnowmessages json'.` |
 | `espnowtags` |  | Get/set device tags: 'espnowtags [tag1,tag2,...]'.<br/>`Usage: espnowtags stationary,thermal espnowtags clear` |
 | `espnowtimestatus` |  | Show mesh time: where this device's clock comes from, what it sends or last received: 'espnowtimestatus [json]'.<br/>`Usage: espnowtimestatus [json]` |

@@ -32,7 +32,12 @@ Source rules:
     numbers; 156-158 BACKLOG_* stay earmarked (named in the opcode map and at
     the enum, unallocated); 86 and 159 stay free; the wire stream-id table
     (0-127 sensor type, 0xF0 battery, 0xF1 events) is in the header, and
-    docs/COMPATIBILITY.md states them.
+    docs/COMPATIBILITY.md states them;
+  * ESP-NOW 1.0 step 2: 130 (SUBSCRIBE_UPDATE) and 150 are retired (no enum
+    value, the map says so), the earmarks 2, 16/17, 37/38, 131 and 133-135 are
+    released (not allocated, no longer named), SUBSCRIBE_UPDATE and its
+    subscription state are gone from the sources, and BOND_HEARTBEAT bytes
+    12-15 are reserved (not filled).
 
 Options: --cxx <compiler>, --component <dir> (--sanitize is accepted and unused).
 """
@@ -71,7 +76,7 @@ GOLDEN = {
     'V4PayloadTopoPeer': (47, [('reqId', 0), ('status', 4), ('peerIndex', 5), ('isLast', 6), ('mac', 7),
                                ('rssi', 13), ('encrypted', 14), ('name', 15)]),
     'V4PayloadBondHeartbeat': (24, [('role', 0), ('rssi', 1), ('reserved', 2), ('uptimeSec', 4), ('freeHeap', 8),
-                                    ('seqNum', 12), ('bootCounter', 16), ('settingsHash', 20)]),
+                                    ('reserved2', 12), ('bootCounter', 16), ('settingsHash', 20)]),
     'V4PayloadStreamCtrl': (4, [('sensorType', 0), ('enable', 1), ('reserved', 2)]),
     'V4PayloadBondRequest': (8, [('role', 0), ('flags', 1), ('seq', 2), ('reserved', 4)]),
     'V4PayloadBondNotice': (8, [('reason', 0), ('role', 1), ('seq', 2), ('flags', 4), ('reserved', 5)]),
@@ -113,7 +118,6 @@ GOLDEN = {
                                       ('signature', 82)]),
     'V4PayloadSessionRekey': (130, [('sessionId', 0), ('senderMac', 2), ('receiverMac', 8), ('newEphX25519Pub', 14),
                                     ('nonceRekey', 46), ('prevTxSeqAtRekey', 62), ('signature', 66)]),
-    'V4PayloadSubscribe': (16, [('requestedEvents', 0), ('reserved', 4)]),
     'V4PayloadFileStart': (72, [('fileSize', 0), ('chunkCount', 4), ('chunkSize', 6), ('filename', 8)]),
     'V4PayloadFileData': (202, [('chunkIndex', 0), ('data', 2)]),
     'V4PayloadFileEnd': (5, [('crc32', 0), ('status', 4)]),
@@ -381,6 +385,39 @@ EARMARKS = {156: 'BACKLOG_REQ', 157: 'BACKLOG_RESP', 158: 'BACKLOG_DATA'}
 ALLOCATED = {82: 'CATCHUP_LIST_REQ', 83: 'CATCHUP_LIST_RESP', 84: 'CATCHUP_READ_REQ', 85: 'CATCHUP_READ_RESP'}
 CATCHUP_MINLEN = {'CATCHUP_LIST_REQ': 16, 'CATCHUP_LIST_RESP': 24, 'CATCHUP_READ_REQ': 24, 'CATCHUP_READ_RESP': 20}
 EARMARK_FREE = (86, 87, 88, 89, 159)
+# ESP-NOW 1.0 step 2 (E20): numbers that were on the wire are retired forever;
+# earmarks that never were are released (free for a later frame).
+RETIRED = {130: 'SUBSCRIBE_UPDATE', 150: 'SENSOR_BROADCAST'}
+RELEASED = (2, 16, 17, 37, 38, 131, 133, 134, 135)
+RELEASED_NAMES = ('NACK', 'SESSION_AUTH', 'CAP_REQ', 'CAP_RESP', 'UNSUBSCRIBE_ALL', 'SUB_LIST', 'EVENT_SUB')
+
+
+def check_retired(component: Path) -> None:
+    wire = (component / 'System_ESPNow_Wire.h').read_text()
+    code = strip_comments(wire)
+    enum = code[code.index('enum EspNowV4Type'):]
+    enum = enum[:enum.index('};')]
+    taken = {int(v) for v in re.findall(r'ESPNOW_V4_TYPE_\w+\s*=\s*(\d+)', enum)}
+    for number, name in RETIRED.items():
+        expect(number not in taken and f'ESPNOW_V4_TYPE_{name}' not in code,
+               f'opcode {number} ({name}) is retired: no enum value, no symbol')
+        expect(f'{number} retired' in wire, f'the opcode map says {number} is retired')
+    for number in RELEASED:
+        expect(number not in taken, f'opcode {number} was released in 1.0 and is not allocated')
+    enum_text = wire[wire.index('enum EspNowV4Type'):]
+    enum_text = enum_text[:enum_text.index('};')]
+    for name in RELEASED_NAMES:
+        expect(not re.search(rf'\b{name}\b(?![^\n]*released)', enum_text),
+               f'the enum no longer earmarks {name} (released in 1.0)')
+    expect('MINLEN_SUBSCRIBE_UPDATE' not in code and 'V4PayloadSubscribe' not in code,
+           'SUBSCRIBE_UPDATE has no minLen and no payload struct')
+    espnow = (component / 'System_ESPNow.cpp').read_text()
+    identity = (component / 'System_ESPNow_Identity.cpp').read_text() + (component / 'System_ESPNow_Identity.h').read_text()
+    for gone in ('SUBSCRIBE_UPDATE', 'v4h_subscribe_update', 'peerIdentityWantsEvent', 'peerIdentitySetSubscriptions',
+                 'subscribedEvents', 'EspNowEventCategory', 'ESPNOW_EVT_', 'cmd_espnow_subs', 'cmd_espnow_requestevents'):
+        expect(gone not in strip_comments(espnow) and gone not in strip_comments(identity),
+               f'{gone} is gone from System_ESPNow.cpp and the identity files')
+    expect('phb.seqNum' not in espnow, 'BOND_HEARTBEAT no longer fills bytes 12-15')
 
 
 def check_earmarks(component: Path) -> None:
@@ -439,6 +476,7 @@ def main() -> int:
     compile_header(a.component, a.cxx, golden)
     check_sources(a.component)
     check_earmarks(a.component)
+    check_retired(a.component)
     for line in failures:
         print(f'FAIL: {line}')
     if failures:

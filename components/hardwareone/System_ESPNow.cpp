@@ -54,6 +54,8 @@
 #include "System_ESPNow_SessionCapsCore.h"  // the session capability word (bond gate, espnowsessions)
 #include "System_ESPNow_Sessions.h"  // Per-peer-per-mesh session state
 #include "System_ESPNow_Deadline.h"  // wrap-safe pre-warm cooldown
+#include "System_ESPNow_MsgIdCore.h"  // msgId: random nonzero start, never 0
+#include <esp_random.h>
 #include "System_ESPNow_PairCore.h"  // discover-then-confirm request/answer state + retransmit
 #include "System_DeviceName.h"       // the device-name rule: setter, wire fields, pairing names
 #include "System_ESPNow_ChannelCore.h"  // espnowch::expected / check: the channel for the Wi-Fi state, the checker
@@ -566,7 +568,7 @@ static V4FragAckWait* v4_frag_ack_alloc(const uint8_t* dst, uint32_t msgId, uint
 static const uint32_t BOND_HEARTBEAT_INTERVAL_MS = 5000;   // Send every 5 seconds
 static const uint32_t BOND_HEARTBEAT_TIMEOUT_MS = 15000;   // Peer offline after 15s no heartbeat
 static uint32_t gLastBondHeartbeatSentMs = 0;
-static uint32_t gBondHeartbeatSeqNum = 0;
+static uint32_t gBondHeartbeatSeqNum = 0;  // bond heartbeats sent, for the log only (not on the wire)
 static const uint32_t BOND_SYNC_RETRY_MS = 3000;   // Retry sync request every 3s if stuck
 
 static void resetBondSync();
@@ -609,12 +611,11 @@ static bool v4_routed_type_allowed(uint8_t type);
 
 // Forward declarations for the send helpers (non-static for external linkage)
 bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
-// Phase 5 — subscription-aware broadcast: skips peers whose subscribedEvents
-// bitmap doesn't include `category`. See System_ESPNow_Identity.h for the
-// EspNowEventCategory enum.
-bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
-                           const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
-                           uint32_t category, int* outAttempted = nullptr);
+// The periodic mesh HEARTBEAT to every active peer slot, with the per-peer
+// back-off (meshHeartbeatMinInterval).
+bool v4_broadcast_heartbeat(uint16_t flags, uint32_t msgId,
+                            const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
+                            int* outAttempted = nullptr);
 // (There is no plaintext multi-frame send: smart is strict encrypt-or-fail.)
 //
 // Longest AEAD plaintext that fits one frame to `dst` (146 B routed, 202 B
@@ -2540,10 +2541,9 @@ static void formatNoPassphraseWarning(char* out, size_t outLen) {
 }
 
 // Entries older than this are stale and must not shadow a new message that
-// reuses the id. A peer that reboots restarts its msgId counter from ~0, so
-// without expiry its reused low ids collide with our pre-reboot entries and get
-// silently dropped — including the heartbeats carrying the new bootCounter that
-// would trigger recovery. Genuine duplicates (mesh loops, radio re-delivery)
+// reuses the id. A peer that restarts starts its msgId counter at a new random
+// value (System_ESPNow_MsgIdCore.h), so its new ids rarely meet our entries; the
+// expiry bounds the rare overlap, and the 32-bit wrap. Genuine duplicates (mesh loops, radio re-delivery)
 // arrive within milliseconds; bond retries use fresh msgIds — so 5s is ample.
 static constexpr uint32_t V4_DEDUP_TTL_MS = 5000;
 
@@ -2701,7 +2701,7 @@ static void broadcast_tracker_check_timeouts() {
 //   * Single frame that must WAIT for a session (queue + kick SESSION_OPEN, drain
 //     on CONFIRM)                       -> v4_send_encrypted_or_queue()
 //                                       Now also kicks KEY_EX when no peer identity.
-//   * Mesh-wide fan-out                 -> v4_broadcast() / v4_broadcast_category()
+//   * Mesh-wide fan-out                 -> v4_broadcast() / v4_broadcast_heartbeat()
 //                                       Per-peer plaintext with BROADCAST_AUTH HMAC
 //                                       (no per-peer session exists for FF:FF:...).
 //                                       Authentication, not confidentiality.
@@ -3259,17 +3259,6 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
   return anySuccess;
 }
 
-// Phase 5 — broadcast variant that respects per-peer subscription bitmaps.
-// Functionally identical to v4_broadcast except a peer is skipped if its
-// PeerIdentity.subscribedEvents bitmap doesn't include `category`. Unknown
-// peers (no PeerIdentity slot) default to "subscribed to everything", so
-// pre-Phase-5 peers and freshly-paired peers continue to receive every
-// broadcast until they explicitly narrow via SUBSCRIBE_UPDATE.
-//
-// Designed as an additive wrapper so existing v4_broadcast callsites stay
-// untouched. As callers migrate to category-aware broadcasts, traffic to
-// uninterested peers drops out.
-
 // Per-peer heartbeat backoff schedule. A peer we've stopped hearing from gets
 // heartbeats less and less often (ramping the 5 s base up toward 30 s) so a
 // long-gone peer stops eating airtime and log lines — WITHOUT slowing the
@@ -3285,9 +3274,12 @@ static uint32_t meshHeartbeatMinInterval(uint32_t silentMs) {
   return 30000;                                        // > 5 min
 }
 
-bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
-                           const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
-                           uint32_t category, int* outAttempted) {
+// The heartbeat fan-out: like v4_broadcast, plus the per-peer back-off above
+// and the count of peers a frame was attempted for.
+bool v4_broadcast_heartbeat(uint16_t flags, uint32_t msgId,
+                            const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
+                            int* outAttempted) {
+  const uint8_t type = ESPNOW_V4_TYPE_HEARTBEAT;
   EspNowRuntimeOpGuard runtimeOp;
   if (!runtimeOp.held()) return false;
   if (outAttempted) *outAttempted = 0;
@@ -3317,17 +3309,11 @@ bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
 
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (!gMeshPeers[i].isActive || isSelfMac(gMeshPeers[i].mac)) continue;
-    // Phase 5 gate: peer must want this category.
-    if (!peerIdentityWantsEvent(gMeshPeers[i].mac, category)) {
-      skippedCount++;
-      continue;
-    }
     // Per-peer heartbeat backoff: throttle the periodic HEARTBEAT to peers we've
-    // long stopped hearing from (ramps 5 s -> 30 s). Only HEARTBEAT is gated, so
-    // data/command categories still reach every peer, and healthy peers (silent
-    // < 30 s -> interval 0) always send. State lives in the durable meta slot
+    // long stopped hearing from (ramps 5 s -> 30 s); healthy peers (silent
+    // < 30 s -> interval 0) always get it. State lives in the durable meta slot
     // because this peer's health slot is memset every 5 s tick while it's offline.
-    if (type == ESPNOW_V4_TYPE_HEARTBEAT) {
+    {
       MeshPeerMeta* hbMeta = getMeshPeerMeta(gMeshPeers[i].mac, false);
       if (hbMeta) {
         uint32_t silent = hbMeta->hbLastHeardMs ? (now - hbMeta->hbLastHeardMs) : 0;
@@ -3357,8 +3343,8 @@ bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
   }
 
   DEBUG_ESPNOW_ROUTERF(
-         "[V4_BROADCAST_GATED] type=%u msgId=%lu category=0x%08lX sent=%d skipped=%d",
-         type, (unsigned long)msgId, (unsigned long)category, sentCount, skippedCount);
+         "[V4_BROADCAST_HB] msgId=%lu sent=%d backed off=%d",
+         (unsigned long)msgId, sentCount, skippedCount);
   if (outAttempted) *outAttempted = attemptedCount;
   return anySuccess;
 }
@@ -4315,7 +4301,7 @@ static constexpr uint8_t V4_OPC_FLAG_REQ_SESSION_ENC   = 0x08;
 // A keyless device still accepts plaintext so a fleet can bootstrap; once a
 // passphrase is set, a plaintext frame for this opcode is a spoof — legitimate
 // senders seal (v4_send_payload_smart) or sign (v4_broadcast /
-// v4_broadcast_category, BROADCAST_AUTH) whenever a key exists.
+// v4_broadcast_heartbeat, BROADCAST_AUTH) whenever a key exists.
 static constexpr uint8_t V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED = 0x10;
 
 // The row's payload length must equal minLen (not only reach it): the six
@@ -6241,13 +6227,6 @@ static void v4h_manifest_req(const V4RxCtx& ctx) {
 #endif // ENABLE_BONDED_MODE
 
 // METADATA_REQ — peer asks for our metadata. Defer to task.
-// Phase 5 — SUBSCRIBE_UPDATE handler. Peer is telling us which event
-// categories they want to receive from US. We persist the bitmask into the
-// peer's PeerIdentity slot; broadcast paths gate on it.
-//
-// The opcode is REQ_PAIRED, so by the time we get here the sender has a
-// PeerIdentity (the dispatcher rejected the frame otherwise). We still
-// re-check peerIdentitySetSubscriptions's return value because race-y
 // FS_LIST / FS_STAT / FS_GET — thin shims that unpack V4RxCtx and call into
 // System_ESPNow_FsList.cpp where the real work lives. All six opcodes are
 // gated on REQ_PAIRED + REQ_SESSION_ENC by the dispatch table — no
@@ -6274,21 +6253,6 @@ static void v4h_fs_get_req(const V4RxCtx& ctx) {
 }
 static void v4h_fs_get_ack(const V4RxCtx& ctx) {
   fsGetOnAckReceived(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
-}
-
-// concurrent espnowforget could remove the slot between dispatch and here.
-static void v4h_subscribe_update(const V4RxCtx& ctx) {
-  V4PayloadSubscribe p;
-  ctx.read(p);
-  // Reserved bytes are sent 0 and ignored (Wire.h frame rules): a later
-  // sender may use them for something this firmware does not know.
-  if (peerIdentitySetSubscriptions(ctx.recv_info->src_addr, p.requestedEvents)) {
-    INFO_ESPNOWF("[SUBSCRIBE] %s updated subs to 0x%08lX",
-                 MAC_STR(ctx.recv_info->src_addr),
-                 (unsigned long)p.requestedEvents);
-  }
-  // Dispatch requires a SESSION_FRAME, which v4_try_handle_incoming ACKs before
-  // unwrap and clears ACK_REQ on its header copy — nothing to ACK here.
 }
 
 // ---- Metadata work waiting for espnow_task -------------------------------------
@@ -7257,7 +7221,6 @@ static bool v4_routed_type_allowed(uint8_t type) {
     case ESPNOW_V4_TYPE_METADATA_RESP:
     case ESPNOW_V4_TYPE_METADATA_PUSH:
     case ESPNOW_V4_TYPE_USER_SYNC:
-    case ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE:
     case ESPNOW_V4_TYPE_SENSOR_STATUS:
     case ESPNOW_V4_TYPE_SENSOR_REQ:
     case ESPNOW_V4_TYPE_SENSOR_ENVELOPE:
@@ -8090,7 +8053,7 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_CMD_RESP,         V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_CMD_RESP, v4h_cmd_resp          },
   // HEARTBEAT records liveness that routing reads (v4_radio_emit) and that the
   // online/offline events are built on. Every sender signs or seals it once a
-  // mesh key exists: the periodic one goes through v4_broadcast_category
+  // mesh key exists: the periodic one goes through v4_broadcast_heartbeat
   // (BROADCAST_AUTH), the master-to-backup, pairing-seed and app-ping ones
   // through v4_send_payload_smart (session frame, never plaintext). So on a
   // keyed device a plaintext heartbeat is a spoof; a keyless device still takes
@@ -8165,13 +8128,6 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_FILE_DATA,        V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FILE_DATA, v4h_file_data         },
   { ESPNOW_V4_TYPE_FILE_END,         V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FILE_END, v4h_file_end          },
   { ESPNOW_V4_TYPE_FILE_CANCEL,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FILE_CANCEL, v4h_file_cancel       },
-  // Phase 5: SUBSCRIBE_UPDATE — peer tells us which event categories they
-  // want from us. REQ_PAIRED so unknown peers can't pollute our broadcast
-  // gating (and to ensure peerIdentitySetSubscriptions finds the slot).
-  // REQ_SESSION_ENC because the only sender (cmd_espnow_requestevents) is
-  // encrypt-or-fail and the mask is persisted to flash — a plaintext frame
-  // from a spoofed paired MAC must not reach the handler.
-  { ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE, V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_SUBSCRIBE_UPDATE, v4h_subscribe_update  },
   // Remote filesystem (FsList) — browse/stat/fetch a peer's files over an active
   // encrypted session. The rows carry REQ_PAIRED + REQ_SESSION_ENC and no
   // REQ_BOND_PEER; the request handlers in System_ESPNow_FsList.cpp then serve
@@ -11162,8 +11118,7 @@ static void sendMetadata(const uint8_t* peerMac, bool isPush, bool force = false
 }
 
 /**
- * Push our metadata to every peer that holds an ACTIVE session with us and
- * subscribes to ESPNOW_EVT_METADATA_PUSH (espnowrequestevents META=0x20).
+ * Push our metadata to every peer that holds an ACTIVE session with us.
  * Runs on espnow_task from the super-loop (step 9a). gMetadataChanged is set
  * by the commands that edit a metadata field; the settle window coalesces a
  * burst of edits (a settings-editor save fires one command per field) into a
@@ -11191,7 +11146,6 @@ static int metadataPushTick(uint32_t nowMs) {
   for (uint8_t i = 0; i < slots; i++) {
     const SessionState* s = sessionAt(i);
     if (!s || s->state != SESSION_ACTIVE) continue;
-    if (!peerIdentityWantsEvent(s->peerMac, ESPNOW_EVT_METADATA_PUSH)) continue;
     sendMetadata(s->peerMac, /*isPush=*/true);
     attempted++;
   }
@@ -11674,15 +11628,11 @@ static bool metadataInboxHandleFrame() {
 // Helper: Generate unique message ID
 uint32_t generateMessageId() {
   if (!gEspNow) return 0;
-  // Atomic post-increment: called by every sender on every task (espnow_task,
-  // cmd_exec, SENSOR_BCAST_TASK). A plain `++` is a non-atomic
-  // read-modify-write — two cores racing it mint duplicate msgIds, which the
-  // receiver's (origin,msgId) dedup then drops as a false duplicate. The GCC
-  // builtin keeps the struct member a plain uint32_t (no std::atomic copyability
-  // constraint on EspNowState, and the read in printEspNowStatus stays a normal
-  // aligned load). RELAXED is correct: msgIds only need uniqueness, not ordering
-  // against other memory.
-  return __atomic_fetch_add(&gEspNow->nextMessageId, 1, __ATOMIC_RELAXED);
+  // Called by every sender on every task (espnow_task, cmd_exec,
+  // SENSOR_BCAST_TASK): espnowmsgid::take is one compare and swap, so two cores
+  // never mint the same msgId, and it skips 0 on wrap (msgId 0 bypasses the
+  // receiver's duplicate check). The member stays a plain uint32_t.
+  return espnowmsgid::take(&gEspNow->nextMessageId);
 }
 
 // Helper: Check if chunking is needed
@@ -13413,14 +13363,13 @@ void processMeshHeartbeats() {
         activePeerCount++;
     }
     // Also count paired devices from registry (bootstrap case: after reboot, gMeshPeers is empty)
-    // and — crucially — create a mesh-health slot for each. v4_broadcast_category()
+    // and — crucially — create a mesh-health slot for each. v4_broadcast_heartbeat()
     // below ONLY fans the heartbeat out to active gMeshPeers entries, so without
     // this the heartbeat is "sent" to an empty list (sent=0) and the mesh never
     // comes up after a reboot until the peers are manually re-paired. Bootstrapping
     // the slot here lets the first heartbeat reach the paired peer, whose reply then
     // populates the slot properly via noteMeshPeerRxActivity. Idempotent: returns the
-    // existing slot if already present. peerIdentityWantsEvent() defaults to true for
-    // peers with no explicit subscription, so the bootstrapped peer is sent, not skipped.
+    // existing slot if already present.
     uint8_t pairedDeviceCount = 0;
     meshBootstrapSlotsFromRegistry(&pairedDeviceCount);
     // Send heartbeat if we have either active peers OR paired devices
@@ -13428,14 +13377,10 @@ void processMeshHeartbeats() {
       V4PayloadHeartbeat hb;
       v4FillHeartbeat(hb);
       hb.peerCount = activePeerCount > 0 ? activePeerCount : pairedDeviceCount;
-      // Phase 5: gate on per-peer HEARTBEAT subscription. Peers default to
-      // subscribed-to-all, so this is invisible until a peer opts out.
       // With per-peer backoff a tick can legitimately reach nobody (every peer
       // backed off), so only count ticks that actually put a heartbeat on air.
-      if (v4_broadcast_category(ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ,
-                                generateMessageId(),
-                                (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1,
-                                ESPNOW_EVT_HEARTBEAT)) {
+      if (v4_broadcast_heartbeat(ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
+                                 (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1)) {
         gEspNow->heartbeatsSent++;
       }
     }
@@ -13500,7 +13445,6 @@ void processMeshHeartbeats() {
         phb.role      = gSettings.bondRole;
         phb.uptimeSec = SelfDevice::uptimeSeconds();
         phb.freeHeap  = (uint32_t)hw1InternalFreeBytes();
-        phb.seqNum    = gBondHeartbeatSeqNum + 1;
         phb.bootCounter = gBootCounter;
         phb.settingsHash = gEspNow ? gEspNow->bondLocalSettingsHash : 0;
         phb.rssi = heartbeatStaRssi();
@@ -14616,6 +14560,9 @@ static bool initEspNow() {
     // this PSRAM block; its constructors establish valid empty strings.
     memset(stateStorage, 0, sizeof(EspNowState));
     gEspNow = new (stateStorage) EspNowState();
+    // A random first msgId each start (E21): a restarted device does not repeat
+    // numbers its peers still hold in their duplicate rings.
+    gEspNow->nextMessageId = espnowmsgid::seed(esp_random());
 
     // Allocate small PSRAM buffers pulled out of the EspNowState struct
     gEspNow->listBuffer = (char*)ps_alloc(EspNowState::kListBufferSize, AllocPref::PreferPsram, "espnow.listBuf");
@@ -16340,122 +16287,6 @@ const char* cmd_espnow_rekey(const String& argsInput) {
   return getDebugBuffer();
 }
 
-// Phase 5 — list every paired peer and the subscription bitmap they've told
-// us they want. Values reflect *what events this peer wants from us*, not
-// what we want from them. Read-only.
-const char* cmd_espnow_subs(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-
-  if (argWantsJson(argsInput)) {
-    PSRAM_JSON_DOC(doc);
-    doc["schema"] = 1;
-    JsonArray arr = doc["peers"].to<JsonArray>();
-    uint8_t slots = peerIdentitySlotCount();
-    for (uint8_t i = 0; i < slots; i++) {
-      const PeerIdentity* pid = peerIdentityAt(i);
-      if (!pid) continue;
-      JsonObject o = arr.add<JsonObject>();
-      o["mac"]    = String(MAC_STR(pid->mac));
-      o["meshId"] = (unsigned)pid->meshId;
-      o["subs"]   = (unsigned long)pid->subscribedEvents;  // bitmask; see help for bit meanings
-    }
-    serializeJson(doc, getDebugBuffer(), 1024);
-    return getDebugBuffer();
-  }
-
-  char* p   = getDebugBuffer();
-  size_t cap = 1024;
-  int written = snprintf(p, cap,
-                         "Peer Subscriptions (bitmap = what each peer wants FROM US):\n"
-                         "  Each peer's row shows the mask THEY asked us to send THEM.\n"
-                         "  Default 0xFFFFFFFF = all events. Narrowed via inbound SUBSCRIBE_UPDATE.\n"
-                         "  To change a peer's row, run 'espnowrequestevents' on that peer (not here).\n"
-                         "  bits: HB=0x01 SENSOR=0x02 TOPO=0x04 BOND_HB=0x08 WORKER=0x10 META=0x20 TIME=0x40\n");
-  if (written < 0) return p;
-  uint8_t slots = peerIdentitySlotCount();
-  bool any = false;
-  for (uint8_t i = 0; i < slots; i++) {
-    const PeerIdentity* pid = peerIdentityAt(i);
-    if (!pid) continue;
-    any = true;
-    int n = snprintf(p + written, cap - written,
-                     "  " MAC_FMT " meshId=%u subs=0x%08lX\n",
-                     MAC_ARGS(pid->mac),
-                     (unsigned)pid->meshId,
-                     (unsigned long)pid->subscribedEvents);
-    if (n < 0 || (size_t)n >= cap - written) break;
-    written += n;
-  }
-  if (!any) snprintf(p + written, cap - written, "  (no paired peers)\n");
-  return p;
-}
-
-// Request that a peer send us only events matching <mask>. Sends
-// a SUBSCRIBE_UPDATE through the encrypted dispatcher (session if available,
-// plaintext otherwise). Bitmap is parsed as a 32-bit value (decimal or 0x-hex).
-//
-// Asymmetric semantic: this command mutates the PEER's outbound state, not
-// ours. The skip count appears in the peer's [V4_BROADCAST_GATED] logs, not
-// in ours. Our local PeerIdentity for that peer is unchanged; running
-// `espnowsubs` here will not show the new mask — that's correct.
-const char* cmd_espnow_requestevents(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow || !gEspNow->initialized) {
-    return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
-  }
-  CommandArgs a(argsInput);
-  if (a.count() < 2) {
-    return "Error: invalid arguments — Usage: espnowrequestevents <name_or_mac> <bitmask>\n"
-           "  Request that <peer> send US only events matching <bitmask>.\n"
-           "  Direction: this command updates state ON THE PEER, not locally.\n"
-           "  bits: HB=0x01 SENSOR=0x02 TOPO=0x04 BOND_HB=0x08 WORKER=0x10 META=0x20 TIME=0x40\n"
-           "  Examples:\n"
-           "    espnowrequestevents deviceA 0x01       # only heartbeats from deviceA\n"
-           "    espnowrequestevents deviceA 0xFFFFFFFF # everything (default)\n"
-           "    espnowrequestevents deviceA 0          # nothing — deviceA goes quiet to us\n"
-           "  Verify: run 'espnowsubs' on the PEER; its row for our MAC should\n"
-           "  show the new mask. Skips appear in the PEER's heartbeat broadcast log.";
-  }
-  uint8_t mac[6];
-  if (!resolveDeviceNameOrMac(a.arg(0), mac) && !parseMacAddress(a.arg(0), mac)) {
-    return "Error: not a paired device name and not a valid MAC.";
-  }
-  // The mask changes what the peer sends us, so the whole token has to be a
-  // number: junk read as 0 would silence the peer.
-  uint32_t mask = 0;
-  if (!parseMaskArg(a.arg(1), mask)) {
-    return "Error: Not a bitmask. Give 0 to 0xFFFFFFFF in decimal or as 0x and hex digits, "
-           "for example 0x01.";
-  }
-
-  V4PayloadSubscribe p{};
-  p.requestedEvents = mask;
-  // reserved[] zeroed by aggregate init
-
-  uint32_t msgId = generateMessageId();
-  if (!v4_send_payload_smart(mac, ESPNOW_V4_TYPE_SUBSCRIBE_UPDATE,
-                              ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                              reinterpret_cast<const uint8_t*>(&p), sizeof(p), 1)) {
-    if (!ensureDebugBuffer()) return "Error: SUBSCRIBE_UPDATE send failed.";
-    snprintf(getDebugBuffer(), 1024,
-             "Error: SUBSCRIBE_UPDATE send failed for " MAC_FMT " "
-             "(peer may not be paired or session not ready).",
-             MAC_ARGS(mac));
-    return getDebugBuffer();
-  }
-  if (!ensureDebugBuffer()) return "OK: SUBSCRIBE_UPDATE sent.";
-  snprintf(getDebugBuffer(), 1024,
-           "Asked " MAC_FMT " to send us only mask=0x%08lX "
-           "(msgId=%lu). State updates ON THE PEER, not here — run 'espnowsubs' on "
-           "the peer to verify (its row for our MAC should show the new mask). "
-           "Skip counts will appear in the PEER's [V4_BROADCAST_GATED] logs, "
-           "NOT in ours.",
-           MAC_ARGS(mac),
-           (unsigned long)mask, (unsigned long)msgId);
-  return getDebugBuffer();
-}
-
 // Send a TEXT message AEAD-wrapped through the active session
 // to the peer. Demonstrates SESSION_FRAME end-to-end without touching the
 // existing espnowsend / v4_send_frame paths. Requires an ACTIVE session
@@ -16669,7 +16500,7 @@ const char* cmd_espnow_regenidentity(const String& argsInput) {
   if (!ensureDebugBuffer()) {
     return recordsLeft
                ? "Error: Identity regenerated, but a stored peer record could not be deleted. "
-                 "After a restart run 'espnowforget <mac>' for each peer 'espnowsubs' still lists."
+                 "After a restart run 'espnowforget <mac>' for each file left in /system/espnow/peers/."
                : "OK (regenerated, but debug buffer unavailable for echo)";
   }
   char pubHex[65];
@@ -16679,7 +16510,7 @@ const char* cmd_espnow_regenidentity(const String& argsInput) {
     snprintf(p, 1024,
              "Error: Identity regenerated (regenCount %u), but %u stored peer record(s) could not "
              "be deleted and will load again at the next start. After a restart run "
-             "'espnowforget <mac>' for each peer 'espnowsubs' still lists.",
+             "'espnowforget <mac>' for each peer whose folder is left in /system/espnow/peers/.",
              (unsigned)fresh.regenCount, (unsigned)recordsLeft);
     return getDebugBuffer();
   }
@@ -22874,8 +22705,6 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsessions", "Show in-RAM session state (peer, mesh slot, sessionId, dir, age, counters) and each peer's capabilities from its handshake (caps=bond,remote_fs,...); the first line shows this device's.", false, cmd_espnow_sessions },
   { "espnowsessionsend", "DIAGNOSTIC: send an AEAD-encrypted CHAT message over an active session (exercises the session-crypto path). NOT executed on the peer and returns no reply - to RUN a command use 'espnowremote'.", true, cmd_espnow_sessionsend, "Usage: espnowsessionsend <name_or_mac> <message>\n       Delivers an encrypted CHAT message (lands in the peer's espnowmessages). It is NOT command execution and no reply comes back.\n       To run a command on the peer: espnowremote <target> <target-user> <target-pass> <command>." },
   { "espnowrekey", "Force immediate SESSION_REKEY for a peer (manual trigger). (async - completes later; check espnowsessions)", true, cmd_espnow_rekey, "Usage: espnowrekey <name_or_mac>\n       Returns OK when REKEY is sent; new keys derive when the peer's REKEY arrives - verify with 'espnowsessions'." },
-  { "espnowsubs", "List peers + their event-subscription bitmaps (what they want from us).", false, cmd_espnow_subs },
-  { "espnowrequestevents", "Ask a peer to send US only events in <bitmask>. Updates state ON THE PEER. (async - changes peer state, no reply; verify with espnowsubs on the peer)", true, cmd_espnow_requestevents, "Usage: espnowrequestevents <name_or_mac> <bitmask>\n       Returns OK on delivery; this updates the PEER's subscription (no confirmation returns) - run 'espnowsubs' on that peer to verify." },
 
   // ---- ESP-NOW Initialization & Pairing ----
   { "openespnow", "Initialize ESP-NOW communication.", true, cmd_espnow_init },

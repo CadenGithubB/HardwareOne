@@ -4406,7 +4406,11 @@ every struct in the header and checks that each is `__attribute__((packed))` and
 and an `offsetof` assert on every field it declares; that the header states little-endian once and asserts it;
 and that `CapabilitySummary` and `BondPeerStatus` live there and no longer in `System_ESPNow.h`. It compiles the
 header itself (with its four rules headers over a stub `Arduino.h` and build config) together with a golden
-table of every 1.0 layout, field by field, so a moved or resized field fails the build of the test. Source scans
+table of every 1.0 layout, field by field, so a moved or resized field fails the build of the test
+(BOND_HEARTBEAT bytes 12-15 are `reserved2` since ESP-NOW 1.0 step 2). check_retired pins the step 2 numbers: 130
+(SUBSCRIBE_UPDATE) and 150 are retired (no enum value, the map says so), the earmarks 2, 16/17, 37/38, 131 and
+133-135 are released, and SUBSCRIBE_UPDATE with its subscription state, `espnowsubs` and `espnowrequestevents`
+is gone from the sources. Source scans
 check one receive style (no `System_ESPNow*.cpp` code casts a payload to a wire struct pointer, the in-place FS
 list entries excepted; no handler compares `ctx.payloadLen` with a `sizeof` or subtracts from it, copies of a text
 tail into a local buffer excepted) and 32-bit sensor masks (no 16-bit `*Mask` in the sensor and forwarding code,
@@ -4513,7 +4517,7 @@ the number and the bond master sends it. W5: `espnow_wire_layout` (check_earmark
 
 ## ESP-NOW dispatch policy
 
-`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. SUBSCRIBE_UPDATE needs a paired, session-encrypted frame. TIME_SYNC, SENSOR_STATUS, SENSOR_REQ and SENSOR_ENVELOPE need one too, on a keyed and a keyless device, with no bond partner required; a signed broadcast is not enough for them. Once the device has a mesh passphrase, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. USER_SYNC requires a session-sealed frame (F9): a plaintext or group-signed one from a paired peer reaches no handler, a session-sealed one does. Every zero-flag row is on an explicit allow-list (handshakes, TOPO_*); this is a subset check, so later items may only shrink the list (`V4_OPC_LEN_EXACT` is not a policy flag). The length column: every row has a minimum length equal to the 1.0 value in the driver's `EXPECTED_MINLEN` (these never rise), `V4_OPC_LEN_EXACT` is on exactly the six handshake rows, and for every row, with all its policy gates passed, one byte short is dropped before the handler and counted once in `gEspNowRxLenDrops`, the minimum passes, and a longer frame reaches the handler with its length intact (a handshake frame one byte long is dropped). An empty STREAM is dropped and counted (1.0 removed the empty STREAM_BEGIN / STREAM_END markers); a 24-byte SUBSCRIBE_UPDATE with reserved bytes set reaches the subscription store through the real handler, and a 20-byte SESSION_UNKNOWN reaches its rule. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
+`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. Opcode 130 (SUBSCRIBE_UPDATE, retired in ESP-NOW 1.0) has no row. TIME_SYNC, SENSOR_STATUS, SENSOR_REQ and SENSOR_ENVELOPE need one too, on a keyed and a keyless device, with no bond partner required; a signed broadcast is not enough for them. Once the device has a mesh passphrase, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. USER_SYNC requires a session-sealed frame (F9): a plaintext or group-signed one from a paired peer reaches no handler, a session-sealed one does. Every zero-flag row is on an explicit allow-list (handshakes, TOPO_*); this is a subset check, so later items may only shrink the list (`V4_OPC_LEN_EXACT` is not a policy flag). The length column: every row has a minimum length equal to the 1.0 value in the driver's `EXPECTED_MINLEN` (these never rise), `V4_OPC_LEN_EXACT` is on exactly the six handshake rows, and for every row, with all its policy gates passed, one byte short is dropped before the handler and counted once in `gEspNowRxLenDrops`, the minimum passes, and a longer frame reaches the handler with its length intact (a handshake frame one byte long is dropped). An empty STREAM is dropped and counted (1.0 removed the empty STREAM_BEGIN / STREAM_END markers); a 24-byte SUBSCRIBE_UPDATE with reserved bytes set reaches the subscription store through the real handler, and a 20-byte SESSION_UNKNOWN reaches its rule. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
 
 ## ESP-NOW fragment reassembly
 
@@ -4524,6 +4528,20 @@ ctest --test-dir /tmp/hw1-hardwareone-host -R '^espnow_reassembly$' --output-on-
 ```
 
 (Alternative placement: as a paragraph after `espnow_disabled_interface` in "Network build selection and disabled ESP-NOW", adding `espnow_reassembly` to that section's `ctest -R` line.)
+
+## ESP-NOW message numbers
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_msgid_dedup.py --sanitize
+```
+
+`espnow_msgid_dedup` compiles `System_ESPNow_MsgIdCore.h`, the production `generateMessageId()` and the
+production receive duplicate ring (`v4_dedup_ring_seen_and_insert` with its entry type and TTL) over a fake clock
+(ESP-NOW 1.0, E21). The seed is never 0; the counter goes 0xFFFFFFFF -> 1 and never hands out 0; 300 frames from a
+random start across the wrap are all new to the receiver and each re-delivery is caught; fragments of one msgId
+stay distinct; a sender restarting within the 5 s TTL from a new random start loses no frame (a control run with
+the old fixed start of 1 loses its first 20); the TTL expiry is unchanged. Source checks: the state's counter is
+seeded with `espnowmsgid::seed(esp_random())` and `generateMessageId()` goes through `espnowmsgid::take`.
 
 ## ESP-NOW session replay window
 
@@ -5190,13 +5208,14 @@ then left the reply without a terminator). `--component <dir>`; ASan/UBSan under
 `espnow_metadata_push` extracts the production metadata setters (`metaGetSet`
 with the metadata text policy, `cmd_espnow_stationary`),
 `buildMetadataPayload`, `sendMetadata`, the metadata tracking block and
-`metadataPushTick` from `System_ESPNow.cpp`, plus the real `SessionState`,
-`EspNowEventCategory` and `V4PayloadMetadata` definitions, and runs them against
-doubles for the session table, the per-peer event subscription, the encrypted
+`metadataPushTick` from `System_ESPNow.cpp`, plus the real `SessionState`
+and `V4PayloadMetadata` definitions, and runs them against
+doubles for the session table, the encrypted
 transport, settings and the clock. A local room/zone/tags/friendly name/
-stationary/device name change must reach every ACTIVE session whose peer
-subscribes to METADATA_PUSH as one type-55 frame after the settle window
-(ESTABLISHING, REKEYING, CLOSED and opted-out peers get nothing); a burst of
+stationary/device name change must reach every ACTIVE session (there is no
+per-peer opt-out since SUBSCRIBE_UPDATE was removed in ESP-NOW 1.0)
+as one type-55 frame after the settle window
+(ESTABLISHING, REKEYING and CLOSED sessions get nothing); a burst of
 edits coalesces into one frame; the deadline is millis()-wrap safe; a change
 made while ESP-NOW is down is kept; a failed send is not retried; rejected
 values do not arm a push; and the request/response path (forced RESP,

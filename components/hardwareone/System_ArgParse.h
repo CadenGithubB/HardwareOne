@@ -124,7 +124,7 @@ inline auto parseAddressArg(const Text& text, long long low, long long high, T& 
 }
 
 // A 32-bit bit mask (0 to 0xFFFFFFFF), written in decimal or as 0x and
-// hexadecimal digits (espnowrequestevents deviceA 0x01).
+// hexadecimal digits (0x01).
 inline bool parseMaskArg(const char* text, uint32_t& value) {
   return parseIntArg(text, 0, 0xFFFFFFFFLL, value, NumberText::DecimalOrHex);
 }

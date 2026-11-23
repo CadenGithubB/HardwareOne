@@ -93,7 +93,6 @@ def build_types(ident_h, meshkeys_h, rxctx_h):
     return '\n\n'.join([
         one(ident_h, 'struct EspNowIdentity', 'System_ESPNow_Identity.h') + ';',
         one(ident_h, 'struct PeerIdentity', 'System_ESPNow_Identity.h') + ';',
-        one(ident_h, 'enum EspNowEventCategory', 'System_ESPNow_Identity.h') + ';',
         one(meshkeys_h, 'struct MeshDerivedKeys', 'System_ESPNow_MeshKeys.h') + ';',
         one(rxctx_h, 'struct V4RxCtx', 'System_ESPNow_RxCtx.h') + ';'])
 

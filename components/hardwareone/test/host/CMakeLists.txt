@@ -1126,6 +1126,19 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_session_replay.py
           ${ESPNOW_SESSION_REPLAY_TEST_ARGS})
 
+# ESP-NOW message numbers (README "ESP-NOW message numbers"): System_ESPNow_MsgIdCore.h
+# and the production generateMessageId against the production duplicate ring:
+# random nonzero start, wrap past 0, a restart within the TTL loses nothing.
+set(ESPNOW_MSGID_DEDUP_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_MSGID_DEDUP_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_msgid_dedup
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_msgid_dedup.py
+          ${ESPNOW_MSGID_DEDUP_TEST_ARGS})
+
 # ESP-NOW session rekey retry (README "ESP-NOW session rekey retry"): production REKEY
 # initiator/responder/retry sweep and session lifecycle against modelled peers.
 set(ESPNOW_REKEY_RETRY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})

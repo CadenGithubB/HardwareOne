@@ -2,7 +2,7 @@
 // The runner compiles the production metadata setters (metaGetSet,
 // cmd_espnow_stationary, espnowDeviceNameApplied), the payload builder, the
 // encrypted sender and the push tick beside these doubles; the session table,
-// identity subscriptions, the encrypted transport, settings and the clock are
+// the encrypted transport, settings and the clock are
 // the boundaries. A failed CHECK is reported and the run continues, so one run
 // names every case that fails; the exit status is non-zero if any failed.
 #include <cctype>
@@ -98,7 +98,6 @@ uint32_t generateMessageId() { static uint32_t n = 100; return ++n; }
 constexpr uint8_t ESPNOW_V4_TYPE_METADATA_RESP = 54, ESPNOW_V4_TYPE_METADATA_PUSH = 55;
 // INSERT_WIRE
 // INSERT_SESSIONS
-// INSERT_IDENTITY
 
 // Session table double, read through the production accessor signatures.
 static std::vector<SessionState> sessions;
@@ -110,12 +109,6 @@ static void addSession(uint8_t last, uint8_t lifecycle) {
   s.peerMac[0] = 0x02; s.peerMac[5] = last;
   s.state = lifecycle;
   sessions.push_back(s);
-}
-static std::vector<uint8_t> optedOut;  // peers whose subscription excludes METADATA_PUSH
-bool peerIdentityWantsEvent(const uint8_t mac[6], uint32_t category) {
-  if (category != ESPNOW_EVT_METADATA_PUSH) return true;
-  for (uint8_t m : optedOut) if (m == mac[5]) return false;
-  return true;
 }
 
 // Transport double: records every encrypted send. A peer whose last MAC byte
@@ -184,7 +177,7 @@ static const Sent& sentAt(size_t i) {
 
 static void reset(const char* name) {
   currentCase = name;
-  sessions.clear(); optedOut.clear(); sent.clear();
+  sessions.clear(); sent.clear();
   sendFails = false; gNowMs = 10000; gMetadataChanged = false;
   gSettings = Settings{}; warns = infos = events = 0;
   state.initialized = true; state.deviceCount = 0;
@@ -218,17 +211,18 @@ int main() {
   gNowMs += 5000;
   CHECK(metadataPushTick(gNowMs) == 0 && pushes() == 1);         // no repeat without a change
 
-  reset("P2 only ACTIVE sessions that subscribe to METADATA_PUSH");
+  // No per-peer opt-out since 1.0 (SUBSCRIBE_UPDATE removed): every ACTIVE session gets it.
+  reset("P2 every ACTIVE session, and only those");
   addSession(0x11, SESSION_ACTIVE);
   addSession(0x22, SESSION_ESTABLISHING);
-  addSession(0x33, SESSION_ACTIVE); optedOut.push_back(0x33);
+  addSession(0x33, SESSION_ACTIVE);
   addSession(0x44, SESSION_REKEYING);
   addSession(0x55, SESSION_CLOSED);
   addSession(0x66, SESSION_ACTIVE);
   addSession(0x77, SESSION_FREE);
   metaGetSet(String("Lab"), gSettings.espnowZone, "Zone", 31);
-  CHECK(settleAndTick() == 2);
-  CHECK(pushes() == 2 && sentAt(0).dst[5] == 0x11 && sentAt(1).dst[5] == 0x66);
+  CHECK(settleAndTick() == 3);
+  CHECK(pushes() == 3 && sentAt(0).dst[5] == 0x11 && sentAt(1).dst[5] == 0x33 && sentAt(2).dst[5] == 0x66);
   CHECK(std::strcmp(sentAt(1).payload.zone, "Lab") == 0);
 
   reset("P3 a burst of edits yields one PUSH carrying all of them");
