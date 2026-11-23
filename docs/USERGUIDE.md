@@ -2588,12 +2588,14 @@ imuaddress [addr]               - IMU address; next openimu (BNO055: 0x28, 0x29 
                                   high; Adafruit 4517 LSM6DSOX: 0x6A, 0x6B with SA0 high)
 imumagaddress [0x1C|0x1E]       - Adafruit 4517 builds: the LIS3MDL magnetometer's address
 imubus <0|1>                    - The bus the IMU is on (both 4517 chips are checked)
-imutapthreshold [50-4000]       - Tap threshold in mg (default 1300 on the 4517, 400 on the
+imutapthreshold [50-4000]       - Tap threshold in mg (default 1300 on the 4517, 300 on the
                                   BNO055); lower catches softer taps
 imutapmaxms [5-500]             - Longest a tap may last (default 120 ms; longer is handling)
 imutapringms [0-500]            - A knock this soon after a tap is its ringing (default 80 ms)
 imutapsideaxis [x|y|z]          - The axis a side tap hits along (default y)
 imutapsideratio [10-1000]       - Side tap: that axis is at least this % of the largest other
+imutapteach [side|face|clear|status] - Teach side and face with 5 knocks each (used once both
+                                  are taught, in place of the two above); clear forgets them
 imutaptrace [json|clear]        - Every recent knock: how hard, how long, why it did or did
                                   not count, with a tuning hint per kind of miss
 imutapshock [0-3]               - Adafruit 4517 with an LSM6DSOX: its chip's tap engine
@@ -2777,6 +2779,31 @@ still for 3 s). `imuinputread [json]` shows what it makes of the motion, `imuinp
 `imuinputtilt`, `imuinputmount` and `imuinputlearn` tune it, and `imutaptrace` (under imu) shows
 every knock. On the BNO055 the input reads the chip every 10 ms; the tap and tilt rules see a
 sample every 20 ms on both chips, and every tap reaches them.
+
+**Teaching side and face.** Out of the box a knock is a side tap when it hits mostly along one
+axis (`imutapsideaxis`, `imutapsideratio`), which suits the meeting sign. Where that does not
+work (on the pod side knocks come either way round), teach the device its two surfaces:
+
+1. Open the IMU (`openinput` or `openimu`).
+2. `imutapteach side`, then within 30 s knock the side 5 times, the way you will use it, a second
+   or so apart. The screen counts them ("Knock the side: 2 of 5"); `imutapteach status` shows the
+   same. These knocks press no button.
+3. `imutapteach face`, then knock the face 5 times.
+4. `imutapteach status`: the side's axis, the face's direction and how many degrees apart they
+   are. Under 25 degrees the two can't be told apart (a warning says so: teach both again,
+   knocking the middle of each surface). The message at the end of a step also warns when the face
+   knocks pointed opposite ways or some of the step's knocks would sort as the other surface.
+5. Test: knock and run `imutaptrace`. Each tap shows `side` or `face` and `cos s/f`: how well it
+   lines up with the side's axis (either way round, 0 to 1) and with the face's direction (-1 to
+   1, negative when it points away from the face). The face wins when its value is the larger; a
+   close call (say 0.81/0.78) is a knock between the two.
+
+The face keeps its sign and the side does not: on the pod a face knock always hits the same way,
+while side knocks come either way round, some pointing straight against the face. Teaching one
+surface again replaces only that surface; a step that does not get its 5 knocks within 30 s
+changes nothing. `imutapteach clear` forgets both and goes back to the ratio rule. The taught
+surfaces are saved settings (`imuTapSideTaught`, `imuTapFaceTaught`, shown in the settings but set
+only by `imutapteach`), so they survive a restart.
 
 > `opengamepad`, `closegamepad`, and `gamepadautostart` no longer exist - they
 > were replaced by the device-agnostic `openinput` / `closeinput` /

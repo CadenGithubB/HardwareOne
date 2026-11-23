@@ -36,6 +36,29 @@ Built and host-tested; not yet run on a device.
 - The Map draws its raster at every rotation (it used to be copied unturned, upside down on a
   flipped screen), and `oleddump` dumps the screen as it is seen (64 columns in portrait).
 
+### Added (IMU knocks: taught side and face)
+Host-tested and built (`feathers3-pod`, `feathers3-status-sign`, `xiao-default`); not yet run on a
+device.
+- **`imutapteach side|face|clear|status`** teaches the knock detector the device's two surfaces:
+  `side` (or `face`) takes the next 5 taps within 30 s as examples of that surface (they press no
+  button meanwhile; the OLED counts them, "Knock the side: 2 of 5"), `status` shows the taught
+  side axis and face direction and the angle between them (a warning under 25 degrees: the
+  surfaces can't be told apart), and `clear` forgets both. The face is kept as the signed mean
+  direction of its knocks, the side as the axis of its knocks with the sign folded away; once both
+  are taught a knock is the face when its signed cos to the face direction beats its |cos| to the
+  side axis, else the side. Until then the ratio rule (`imutapsideaxis`, `imutapsideratio`) stays.
+  For the pod (bench 2026-11-23, BNO055 glued down): face knocks always hit +Z, side knocks are
+  Y-dominant with Y and Z of either sign, some pointing straight against the face, so a rule that
+  ignored the sign read them as face knocks. The teach step's outcome (screen and log) warns when
+  the face knocks point opposite ways or some taught knocks would sort as the other surface.
+- The taught surfaces are saved settings, `imuTapSideTaught` and `imuTapFaceTaught` (display-only
+  rows, "x,y,z" unit vectors in thousandths; `imutapteach` writes them). The main loop hands them
+  to the detector and saves a finished step; the IMU task only collects the knocks.
+- `imutaptrace` says which rule sorts the knocks and shows `cos s/f` per knock (|cos| to the side
+  axis, signed cos to the face direction); `imutaptrace json` adds `rule` (`"taught"` or
+  `"ratio"`), `taught` (`{"side","face"}` booleans) and per knock `cosSide` (0..1) / `cosFace`
+  (-1..1) when the taught surfaces sorted it.
+
 ### Added (IMU input with the BNO055)
 Host-tested and built (`feathers3-pod`); not yet run on the pod.
 - **The BNO055 can be the input device** (`INPUT_DEVICE_TYPE 5`, taps and tilt), which the build

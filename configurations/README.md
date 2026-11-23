@@ -229,9 +229,11 @@ fusion's gravity; the rest of the reading every 100 ms) and the firmware finds t
 readings. The chip filters its accelerometer at 62.5 Hz, so knocks read about a third as strong
 as on the sign: the default threshold is 300 mg (soft side taps on the pod peaked from about
 255 mg; their echoes, 70-100 ms later, fall in the ring window), a starting point to tune with
-`imutaptrace` (tap it, read the peaks, then `imutapthreshold`). Which way a side knock hits
-depends on how the BNO055 sits in the pod: `imutapsideaxis` and `imutapsideratio` (defaults Y,
-60 %) fit it, and `imutaptrace` shows each knock's x/y/z. To start it with every boot:
+`imutaptrace` (tap it, read the peaks, then `imutapthreshold`). On the pod side knocks come
+either way round (bench 2026-11-23), so the one-axis rule (`imutapsideaxis`, `imutapsideratio`)
+cannot tell side from face: teach it instead, `imutapteach side` and 5 knocks on the side, then
+`imutapteach face` and 5 on the face, and check with `imutapteach status` and `imutaptrace`
+(USERGUIDE, "Teaching side and face"). To start it with every boot:
 `imuautostart on` and `inputautostart on`.
 
 `qtpy-sensors` targets the **Adafruit QT Py ESP32 Pico** (classic ESP32). It
