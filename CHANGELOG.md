@@ -102,7 +102,8 @@ everything user-visible since the v0.99.99.1 tag.
   uptime, the lines and bytes in all (dropped ones included), kept and dropped, and the
   wall-clock time spent capturing. `bootdebug [on|off]` (also in the debug settings on the web and
   OLED) turns it off for the fastest boot (on by default; from the next boot) and shows where this
-  boot's file went. Admin-only to read (`fileview`, web file browser). P4X-EYE: the C6 console
+  boot's file went. Admin-only to read (`fileview`, web file browser). P4X-EYE: the capture starts
+  before the C6 companion's bring-up, so ESP-Hosted's lines of the whole boot are in the file; the C6 console
   mirror now runs during every boot, with the C6's boot messages shown at INFO, and stops when boot
   finishes unless `c6console on` or a companion fault keeps it.
 - `fileview` pages a file of any size: past 60000 B it reads one page at a time straight from the

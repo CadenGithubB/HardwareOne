@@ -245,6 +245,18 @@ def source_checks() -> None:
         code = re.sub(r"/\*.*?\*/", "", re.sub(r"//[^\n]*", "", path.read_text(errors="ignore")), flags=re.S)
         require("esp_log_level_set(" not in code,
                 f"{path.name} sets an ESP-IDF tag level past the boot capture (use bootDebugEspLogSet)")
+    # The capture starts in app_main before the radio companion's bring-up:
+    # quietHostedLogs (the first tag-level setter of the boot) is then
+    # recorded, not applied, so ESP-Hosted's lines of the whole boot reach the
+    # hook. No tag-level call runs before it.
+    app = (ROOT / "main/hardwareone-idf.cpp").read_text()
+    app_main = extract_block(app, 'extern "C" void app_main(void)')
+    order(app_main, "initArduino();", "bootDebugBegin();", "radioHalPrepare();", "setup();")
+    require(app_main.count("bootDebugBegin();") == 1, "one capture start")
+    before = app_main[:app_main.index("bootDebugBegin();")]
+    require("esp_log_level_set(" not in before and "bootDebugEspLogSet(" not in before,
+            "no ESP-IDF tag level is set before the capture starts")
+    require("bootDebugBegin(" not in boot, "setup() does not start the capture again")
     # The action gates read the saved flags, not the capture's force.
     require("applyHttpsLogLevels(isDebugFlagSet(" not in debug, "the HTTPS tag levels follow the saved flag")
 

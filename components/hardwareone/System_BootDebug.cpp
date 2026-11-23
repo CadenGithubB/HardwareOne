@@ -13,6 +13,7 @@
 #include <nvs.h>
 #include <sdkconfig.h>
 #include <stdarg.h>
+#include <atomic>
 #include <new>
 
 #include "System_BootDebugCore.h"
@@ -44,7 +45,14 @@ constexpr uint32_t kBufferCaps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
 constexpr bool kBufferPsram = false;
 constexpr bool kForceEspTags = false;
 #endif
-constexpr size_t kShadowOffset = (kBufferBytes + 7) & ~static_cast<size_t>(7);
+// The ESP-IDF hook's formatting line (bootDebugScratchTake) is part of the
+// same allocation: the hook then adds no line buffer to the stack of the task
+// that logs (sys_evt and esp_timer have small stacks). On a build without
+// PSRAM it comes out of the 4 KB, which stays the whole internal cost.
+constexpr size_t kScratchBytes = DEBUG_MSG_SIZE;
+constexpr size_t kLineBytes = kBufferPsram ? kBufferBytes : kBufferBytes - kScratchBytes;
+constexpr size_t kScratchOffset = kLineBytes;
+constexpr size_t kShadowOffset = (kScratchOffset + kScratchBytes + 7) & ~static_cast<size_t>(7);
 
 // The setting's NVS copy, read before any file system is mounted.
 constexpr const char* kNvsNamespace = "hw1bootdbg";
@@ -60,6 +68,10 @@ bootdebug::LineBuffer sBuf;
 char* sMem = nullptr;
 bootdebug::LevelShadow* sShadow = nullptr;
 uint64_t sCaptureUs = 0;
+// The hook's line: one user at a time (a try-lock, never a wait in the log
+// path); releaseBuffer waits for the user before freeing.
+std::atomic<char*> sScratch{nullptr};
+std::atomic<bool> sScratchBusy{false};
 uint32_t sStartMs = 0;
 uint32_t sEndMs = 0;
 volatile bool sBootInProgress = true;
@@ -107,6 +119,8 @@ struct GuardedFs {
 };
 
 void releaseBuffer() {
+  sScratch.store(nullptr);
+  while (sScratchBusy.load()) vTaskDelay(1);  // a hook still formatting into it
   portENTER_CRITICAL(&sLock);
   char* mem = sMem;
   sMem = nullptr;
@@ -232,7 +246,7 @@ void bootDebugBegin() {
     sOutcome = Outcome::Off;
     return;
   }
-  const size_t bytes = kForceEspTags ? kShadowOffset + sizeof(bootdebug::LevelShadow) : kBufferBytes;
+  const size_t bytes = kForceEspTags ? kShadowOffset + sizeof(bootdebug::LevelShadow) : kScratchOffset + kScratchBytes;
   char* mem = static_cast<char*>(heap_caps_malloc(bytes, kBufferCaps));
   if (!mem) {  // no capture this boot: the flags stay as saved, nothing is forced
     sOutcome = Outcome::NoMemory;
@@ -248,9 +262,10 @@ void bootDebugBegin() {
   portENTER_CRITICAL(&sLock);
   sMem = mem;
   sShadow = shadow;
-  sBuf.attach(mem, kBufferBytes);
+  sBuf.attach(mem, kLineBytes);
   sCaptureUs = 0;
   portEXIT_CRITICAL(&sLock);
+  sScratch.store(mem + kScratchOffset);
   sEspForcing = shadow != nullptr;
   gBootDebugCapturing = true;
   gDebugLineForce = true;
@@ -318,6 +333,19 @@ esp_log_level_t bootDebugEspLogGet(const char* tag) {
 }
 
 bool bootDebugEspLogWanted() { return sEspForcing || gBootDebugCapturing; }
+
+char* bootDebugScratchTake(size_t* cap) {
+  if (sScratchBusy.exchange(true)) return nullptr;  // another task is formatting
+  char* line = sScratch.load();
+  if (!line) {
+    sScratchBusy.store(false);
+    return nullptr;
+  }
+  if (cap) *cap = kScratchBytes;
+  return line;
+}
+
+void bootDebugScratchGive() { sScratchBusy.store(false); }
 
 bool bootDebugEspLogLine(const char* text, size_t len, int64_t formatStartUs) {
   bool shown = true;

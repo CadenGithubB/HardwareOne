@@ -1,9 +1,10 @@
 // System_BootDebug.h - every debug output on during boot, into a file of its
 // own (owner decision B13, 2026-11-21; follow-up 2026-11-22).
 //
-// From the top of setup() until setup() ends, unless the `bootdebug` setting
-// is off, every debug output is on: every debug flag and sub-flag, every
-// explicit isDebugFlagSet() gate, the log level at DEBUG (gDebugLineForce in
+// From app_main, right after initArduino() and before the radio companion's
+// bring-up, until setup() ends, unless the `bootdebug` setting is off, every
+// debug output is on: every debug flag and sub-flag, every explicit
+// isDebugFlagSet() gate, the log level at DEBUG (gDebugLineForce in
 // System_Debug.h), and every ESP-IDF tag at the build's default level (its
 // compiled maximum): the firmware's esp_log calls are recorded instead of
 // lowering tags (bootDebugEspLogSet) and replayed when the capture ends. The
@@ -22,7 +23,7 @@
 // or the web file browser; `bootdebug` says where this boot's file went.
 //
 // The setting lives in debug.json like every debug setting, and in a one-byte
-// NVS copy the top of setup() reads before any file system is mounted; off
+// NVS copy the capture's start reads before any file system is mounted; off
 // means no force, no capture, no buffer (the fastest boot). A change applies
 // from the next boot.
 //
@@ -43,8 +44,8 @@ class String;
 // so a plain flag.
 extern volatile bool gBootDebugCapturing;
 
-// Top of setup(): unless the setting is off, allocate the buffer and force
-// every debug output on.
+// app_main, right after initArduino(): unless the setting is off, allocate
+// the buffer and force every debug output on.
 void bootDebugBegin();
 // End of setup(): stop the force and the capture, put the ESP-IDF tag levels
 // where the firmware set them, hand the buffer to cmd_exec for the file write.
@@ -81,6 +82,12 @@ bool bootDebugEspLogWanted();
 // One formatted ESP-IDF line (no trailing newline): captured while the capture
 // runs. Returns whether the saved levels would show it (print it then).
 bool bootDebugEspLogLine(const char* text, size_t len, int64_t formatStartUs);
+// The hook's formatting line, from the capture's own allocation (no line
+// buffer on the logging task's stack): nullptr when another task holds it or
+// the buffer is gone (the hook then formats on its own stack). Give it back
+// with bootDebugScratchGive() as soon as the line is captured.
+char* bootDebugScratchTake(size_t* cap);
+void bootDebugScratchGive();
 // System_Debug.cpp: installs the esp_log vprintf hook while `loglink` or the
 // capture wants it, and puts the previous one back when neither does.
 void idfLogHookRefresh();

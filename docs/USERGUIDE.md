@@ -1262,8 +1262,9 @@ Available debug modules (type `help debug` on device for full list):
 
 ### Boot debug file
 
-Every boot runs with all debug output on, from the start of setup until boot
-finishes: every debug flag and sub-flag, every debug check in the code, the
+Every boot runs with all debug output on, from the start of boot (right after
+the Arduino core starts, before the P4X-EYE's radio companion comes up) until
+boot finishes: every debug flag and sub-flag, every debug check in the code, the
 log level at `debug` (the DEBUG, INFO and WARN lines included, whatever
 `loglevel` is saved), and every ESP-IDF tag at the build's own level (the
 firmware's quieting of tags, `esplog` included, waits until boot finishes).

@@ -1329,29 +1329,44 @@ static void stripAnsiInPlace(char* s) {
   *w = '\0';
 }
 
-static int idfLogVprintf(const char* fmt, va_list ap) {
-  // The boot debug capture: format a copy (ap stays unread for the paths
-  // below), keep it, and stop here when only the capture's force made it.
-  if (bootDebugEspLogWanted() && !xPortInIsrContext()) {
-    const int64_t startUs = esp_timer_get_time();
-    char line[DEBUG_MSG_SIZE];
-    va_list copy;
-    va_copy(copy, ap);
-    const int cn = vsnprintf(line, sizeof(line), fmt, copy);
-    va_end(copy);
-    if (cn >= 0) {
-      size_t len = strnlen(line, sizeof(line) - 1);
-      while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
-      stripAnsiInPlace(line);
-      len = strlen(line);
-      if (len > 0 && !bootDebugEspLogLine(line, len, startUs)) return cn;
-    }
-  }
-  // Decide BEFORE consuming ap (a va_list can only be walked once). In ISR
-  // context, or before the queue exists, behave exactly like the old handler.
-  if (!s_idfBridgeOn || xPortInIsrContext() || !gDebugOutputQueue || !gDebugFreeQueue) {
-    return s_prevLogVprintf ? s_prevLogVprintf(fmt, ap) : vprintf(fmt, ap);
-  }
+// The boot debug capture's copy of one line, formatted into `line`. Returns
+// false when only the capture's force made the line (do not print it).
+static bool idfLogCaptureInto(char* line, size_t cap, const char* fmt, va_list ap, int* cn) {
+  const int64_t startUs = esp_timer_get_time();
+  va_list copy;
+  va_copy(copy, ap);
+  *cn = vsnprintf(line, cap, fmt, copy);
+  va_end(copy);
+  if (*cn < 0) return true;
+  size_t len = strnlen(line, cap - 1);
+  while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+  stripAnsiInPlace(line);
+  len = strlen(line);
+  return len == 0 || bootDebugEspLogLine(line, len, startUs);
+}
+
+// Only when another task holds the capture's line: format on this stack. Its
+// own frame, gone before the previous handler prints.
+static bool __attribute__((noinline)) idfLogCaptureOnStack(const char* fmt, va_list ap, int* cn) {
+  char line[DEBUG_MSG_SIZE];
+  return idfLogCaptureInto(line, sizeof(line), fmt, ap, cn);
+}
+
+// ESP-IDF logs from tasks with small stacks (sys_evt, esp_timer): the capture
+// formats into the line of its own allocation (bootDebugScratchTake), so the
+// frame left under the previous handler is only this one's few words.
+static bool __attribute__((noinline)) idfLogCapture(const char* fmt, va_list ap, int* cn) {
+  size_t cap = 0;
+  char* line = bootDebugScratchTake(&cap);
+  if (!line) return idfLogCaptureOnStack(fmt, ap, cn);
+  const bool shown = idfLogCaptureInto(line, cap, fmt, ap, cn);
+  bootDebugScratchGive();
+  return shown;
+}
+
+// `loglink`: one ESP-IDF line into the output queue. Its own frame, so the
+// line buffer is not on the stack of the plain path.
+static int __attribute__((noinline)) idfLogBridgeLine(const char* fmt, va_list ap) {
   char buf[DEBUG_MSG_SIZE];
   int n = vsnprintf(buf, sizeof(buf), fmt, ap);
   int len = (n > 0 && n < (int)sizeof(buf)) ? n : (int)strlen(buf);
@@ -1363,6 +1378,21 @@ static int idfLogVprintf(const char* fmt, va_list ap) {
   // (not OLED/G2/BLE). strlen(buf) is the post-strip length (always <= 255).
   enqueueChunk(buf, strlen(buf), MSG_ROUTE_SERIAL | MSG_ROUTE_WEB | MSG_ROUTE_FILE, /*category=*/0, false);
   return n;
+}
+
+static int idfLogVprintf(const char* fmt, va_list ap) {
+  // The boot debug capture: format a copy (ap stays unread for the paths
+  // below), keep it, and stop here when only the capture's force made it.
+  if (bootDebugEspLogWanted() && !xPortInIsrContext()) {
+    int cn = 0;
+    if (!idfLogCapture(fmt, ap, &cn)) return cn;
+  }
+  // Decide BEFORE consuming ap (a va_list can only be walked once). In ISR
+  // context, or before the queue exists, behave exactly like the old handler.
+  if (!s_idfBridgeOn || xPortInIsrContext() || !gDebugOutputQueue || !gDebugFreeQueue) {
+    return s_prevLogVprintf ? s_prevLogVprintf(fmt, ap) : vprintf(fmt, ap);
+  }
+  return idfLogBridgeLine(fmt, ap);
 }
 
 // Installs the hook while the bridge or the boot debug capture wants it and

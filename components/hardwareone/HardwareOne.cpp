@@ -1448,11 +1448,10 @@ static bool bootNetHandOffServices() {
 
 void hardwareone_setup() {
 
-  // B13: every debug output on for the boot, into the boot buffer (not the
-  // console or the normal logs) unless the bootdebug setting is off;
-  // bootDebugFinish() at the end of setup() restores the saved settings and
-  // writes boot-debug-1.log (to the card when one is writable, else flash).
-  bootDebugBegin();
+  // B13: the boot debug capture is already running (app_main starts it right
+  // after initArduino(), before the radio companion); bootDebugFinish() at the
+  // end of setup() restores the saved settings and writes boot-debug-1.log (to
+  // the card when one is writable, else flash).
 
   // ========================================================================
   // 1. PRE-SERIAL — crash tracking from RTC memory (no Serial yet)
