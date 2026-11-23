@@ -7,8 +7,9 @@
 //
 // The contract, for whoever registers a hook:
 //   - When: the IMU task calls it once per sample that has a reading (50 Hz
-//     on the Adafruit 4517, every imuDevicePollMs on the BNO055), after the
-//     action detector has seen the sample, with no lock held.
+//     on the Adafruit 4517; on the BNO055 100 Hz in a build with IMU input,
+//     else every imuDevicePollMs), after the action detector has seen the
+//     sample, with no lock held.
 //   - Where: on the IMU task. Its stack is 4 KB and the task's own frames are
 //     on it: keep the hook's use under about 512 bytes (no large locals, no
 //     formatting of floats, no logging of more than a short line). It must

@@ -58,7 +58,7 @@ struct Settings {
       thermalDevicePollMs(100),
       tofDevicePollMs(220),
       imuDevicePollMs(200),
-      imuTapThresholdMg(1300),
+      imuTapThresholdMg(IMU_TAP_THRESHOLD_DEFAULT_MG),
       imuTapShock(2),
       imuTapQuiet(1),
       imuTapMaxMs(120),
@@ -558,7 +558,7 @@ struct Settings {
   int thermalDevicePollMs;
   int tofDevicePollMs;
   int imuDevicePollMs;
-  int imuTapThresholdMg;  // LSM6 tap engine: threshold in mg, 125 mg steps (imutapthreshold)
+  int imuTapThresholdMg;  // tap threshold in mg: the knock detector, or the LSM6DSOX tap engine in 125 mg steps (imutapthreshold)
   int imuTapShock;        // ...shock window 0..3 (imutapshock)
   int imuTapQuiet;        // ...quiet window 0..3 (imutapquiet)
   int imuTapMaxMs;        // software knock detector: longest a tap may last (imutapmaxms)

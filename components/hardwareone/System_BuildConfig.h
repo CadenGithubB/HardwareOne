@@ -178,8 +178,8 @@
 //
 // Board profiles default to SEESAW_GAMEPAD on FeatherS3 and NONE on XIAO.
 // The two Seesaw options require I2C; GPIO input needs explicit assembly pins.
-// IMU input needs the IMU in the build with a chip that detects taps
-// (IMU_DEVICE_TYPE 2, the Adafruit 4517).
+// IMU input needs the IMU in the build (IMU_DEVICE_TYPE 1 BNO055 or 2
+// Adafruit 4517); the firmware finds the taps in its readings.
 #define INPUT_DEVICE_TYPE       1
 
 // Motion sensor (IMU): which chip the IMU (CUSTOM_ENABLE_IMU, or I2C level 3)
@@ -798,19 +798,22 @@
   #error "GPIO encoder auxiliary buttons require the P4X-EYE encoder profile"
 #endif
 // The IMU as the input device (Input_IMU.cpp): no chip of its own, it reads
-// the motion layer's samples. Taps are counted from the chip's own tap
-// detection and tilt from the direction of gravity, which only the Adafruit
-// 4517 backend provides.
+// the motion layer's samples. Taps come from the software knock detector
+// (HAL_Motion_KnockCore.h) and tilt from the direction of gravity. Both
+// backends give them: the Adafruit 4517 streams its accelerometer at 416 Hz;
+// the BNO055 is read at 100 Hz in a build with IMU input (and only then).
 #define ENABLE_IMU_INPUT (INPUT_DEVICE_TYPE == INPUT_DEVICE_TYPE_IMU)
-#if ENABLE_IMU_INPUT && !ENABLE_IMU_LSM6DSOX
-  #error "IMU input (INPUT_DEVICE_TYPE 5) needs the IMU in the build with the Adafruit 4517 (CUSTOM_ENABLE_IMU 1 at I2C_FEATURE_LEVEL 4, IMU_DEVICE_TYPE 2): the BNO055 backend has no tap detection"
+#if ENABLE_IMU_INPUT && !ENABLE_IMU_SENSOR
+  #error "IMU input (INPUT_DEVICE_TYPE 5) needs the IMU in the build (CUSTOM_ENABLE_IMU 1 at I2C_FEATURE_LEVEL 4, IMU_DEVICE_TYPE 1 or 2)"
 #endif
-// The software knock detector and its settings, commands and trace
-// (HAL_Motion_KnockFeed.cpp): the 4517 (its LSM6DS3TR-C feeds it; an
-// LSM6DSOX keeps the chip's own tap engine).
-#define ENABLE_IMU_KNOCK_DETECTOR ENABLE_IMU_LSM6DSOX
-// The tap threshold's default (imuTapThresholdMg): the 4517's from the sign.
-#define IMU_TAP_THRESHOLD_DEFAULT_MG 1300
+// The software knock detector and its settings, commands and trace: the 4517
+// (its LSM6DS3TR-C feeds it; an LSM6DSOX keeps the chip's own tap engine),
+// and the BNO055 when it is sampled fast enough for it (IMU input builds).
+#define ENABLE_IMU_KNOCK_DETECTOR (ENABLE_IMU_LSM6DSOX || (ENABLE_IMU_BNO055 && ENABLE_IMU_INPUT))
+// The tap threshold's default (imuTapThresholdMg): the 4517's from the sign;
+// the BNO055 sees knocks about a third as strong (62.5 Hz filter, 100 Hz
+// reads): HAL_Motion_KnockCore.h's kKnockThresholdMg*.
+#define IMU_TAP_THRESHOLD_DEFAULT_MG (ENABLE_IMU_BNO055 ? 400 : 1300)
 // An input device that is not an I2C device of its own: it starts by a direct
 // call (inputStartInternal), not through the I2C sensor start queue.
 #define ENABLE_INPUT_DIRECT_START (ENABLE_GPIO_ENCODER || ENABLE_IMU_INPUT)

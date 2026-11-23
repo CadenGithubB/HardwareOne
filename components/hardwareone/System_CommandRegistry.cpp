@@ -380,7 +380,8 @@ static constexpr CommandModule gCommandModules[] = {
 #endif
 #if ENABLE_IMU_INPUT
   { "imuinput",   "IMU as the input device — taps are buttons, tilt is the joystick", "The motion sensor used as the OLED navigation "
-    "input (INPUT_DEVICE_TYPE 5; it needs the Adafruit 4517, whose chip detects taps). Tap the side: one tap is A, two are B, "
+    "input (INPUT_DEVICE_TYPE 5, with either motion sensor: the firmware finds the taps in its readings, the Adafruit 4517's "
+    "at 416 Hz, the BNO055's at 100 Hz). Tap the side: one tap is A, two are B, "
     "three are Y, four are X; tap the face: two taps are START, three SELECT (one does nothing). The button arrives "
     "once no further tap has followed for the tap window (imuinputtapms <200..800>, default 450 ms); a tap on the "
     "other side ends the run. Side or face comes from the knock's direction (imutapsideaxis, imutapsideratio; "

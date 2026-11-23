@@ -137,6 +137,25 @@ class PeripheralConfig(unittest.TestCase):
             with self.subTest(imu_device_type=value):
                 self.check_profile(dict(imu, IMU_DEVICE_TYPE=value), [], succeeds=False)
 
+    def test_imu_input_works_with_either_imu_backend(self):
+        # IMU input (INPUT_DEVICE_TYPE 5): taps come from the software knock
+        # detector, which both backends feed (the BNO055 only in an input build).
+        imu = dict(self.profile(), I2C_FEATURE_LEVEL=4, CUSTOM_ENABLE_IMU=1)
+        self.check_profile(dict(imu, IMU_DEVICE_TYPE=1, INPUT_DEVICE_TYPE=5),
+                           ['ENABLE_IMU_INPUT == 1', 'ENABLE_IMU_BNO055 == 1', 'ENABLE_IMU_KNOCK_DETECTOR == 1',
+                            'IMU_TAP_THRESHOLD_DEFAULT_MG == 400'])
+        self.check_profile(dict(imu, IMU_DEVICE_TYPE=2, INPUT_DEVICE_TYPE=5),
+                           ['ENABLE_IMU_INPUT == 1', 'ENABLE_IMU_LSM6DSOX == 1', 'ENABLE_IMU_KNOCK_DETECTOR == 1',
+                            'IMU_TAP_THRESHOLD_DEFAULT_MG == 1300'])
+        # The BNO055 without IMU input: no detector (read every imuDevicePollMs).
+        self.check_profile(dict(imu, IMU_DEVICE_TYPE=1, INPUT_DEVICE_TYPE=0),
+                           ['ENABLE_IMU_KNOCK_DETECTOR == 0'])
+        # The 4517 has it with or without IMU input.
+        self.check_profile(dict(imu, IMU_DEVICE_TYPE=2, INPUT_DEVICE_TYPE=0),
+                           ['ENABLE_IMU_KNOCK_DETECTOR == 1'])
+        # IMU input without the IMU is refused.
+        self.check_profile(dict(imu, CUSTOM_ENABLE_IMU=0, INPUT_DEVICE_TYPE=5), [], succeeds=False)
+
     def test_build_config_accepts_only_imu_chip_values(self):
         # The saved-selection tool refuses 0 (no chip) before a build would.
         import sys

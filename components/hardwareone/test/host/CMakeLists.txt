@@ -3795,6 +3795,13 @@ add_test(
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_automation_imu_conditions.py
           ${SETUP_MQTT_TEST_ARGS})
+# The software knock detector's shared feed (HAL_Motion_KnockFeed.cpp) as the
+# 4517 and BNO055 backends feed it, and the IMU input's decimator in front of
+# its engine: source contracts.
+add_test(
+  NAME motion_knock_feed_wiring
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_motion_knock_feed_wiring.py)
 # The IMU's holders and per-sample hook as HAL_Motion.cpp wires them:
 # `closeimu` refuses while a consumer holds the IMU (run on the host), and
 # the hook is called per stored sample, after the detector, outside the lock.

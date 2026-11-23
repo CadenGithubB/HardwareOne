@@ -32,6 +32,9 @@
 #if ENABLE_IMU_LSM6DSOX
 #include "HAL_Motion_LSM6DSOXCore.h"  // Lsm6TapTuning: the tap commands' replies
 #endif
+#if ENABLE_IMU_KNOCK_DETECTOR
+#include "HAL_Motion_KnockFeed.h"  // knockFeedActive: the tap commands' replies
+#endif
 
 // The tap settings last handed to the backend: a changed one (a command, the
 // web settings, an import) is passed on at the next sample. IMU task only.
@@ -517,6 +520,15 @@ const char* cmd_imustatus(const String& argsInput) {
     }
     return out;
   }
+  // Taps: the firmware's knock detector (free fall by the chip that has an
+  // engine for it, else from the readings), the chip, or the readings.
+  char tapText[112];
+  if (status.tapsInSoftware) {
+    snprintf(tapText, sizeof(tapText), "taps found by the firmware in the %u Hz readings ('imutaptrace'), free fall %s",
+             (unsigned)status.knockHz, status.hasHwFreefall ? "by the chip" : "from the readings");
+  } else {
+    snprintf(tapText, sizeof(tapText), "%s", status.hasHwTap ? "detected by the chip" : "detected from the readings");
+  }
   char where[72];
   const char* part = status.chipName ? status.chipName : info.part;
   if (info.secondPart) {
@@ -529,9 +541,7 @@ const char* cmd_imustatus(const String& argsInput) {
            "[IMU] %s%s%s. Tap and free fall: %s. Heading: %s. Gyro offset: %s. Sampled every %d ms, published "
            "every %d ms. Open after boot: %s. %s%s%s%s",
            running ? "Connected: " : "Not connected (", where, running ? "" : ")",
-           status.tapsInSoftware ? "taps found by the firmware in the 416 Hz readings ('imutaptrace'), free fall by the chip"
-           : status.hasHwTap     ? "detected by the chip"
-                                 : "detected from the readings",
+           tapText,
            status.hasHeading ? "yes, from magnetic north" : "no, yaw counts from the IMU's start",
            motionGyroOffsetText(offset), sampleMs, pollMs, autoStart ? "on" : "off",
            holders.count ? "Kept open for: " : "", heldBy, holders.count ? ". " : "",
@@ -875,7 +885,7 @@ const char* cmd_imuwebmaxfps(const String& argsInput) {
 // IMU Device Settings Commands
 // ============================================================================
 
-#if ENABLE_IMU_LSM6DSOX
+#if ENABLE_IMU_KNOCK_DETECTOR
 // A setting reply for the tap engine: name, value, unit and what it does.
 static const char* imuTapSettingCommand(const String& argsInput, int& field, int lo, int hi, const char* name,
                                         const char* what) {
@@ -891,21 +901,26 @@ static const char* imuTapSettingCommand(const String& argsInput, int& field, int
     }
     setSetting(field, v);
   }
-  knock::Trace scratch;
-  knock::Config kc;
-  const bool software = motionBackendKnockTrace(scratch, kc);
+#if ENABLE_IMU_LSM6DSOX
+  const bool software = knockFeedActive();  // the LSM6DS3TR-C; the LSM6DSOX uses its chip's engine
+#else
+  const bool software = true;  // the BNO055 has no tap engine of its own
+#endif
   if (software) {
     snprintf(getDebugBuffer(), 1024,
              "[IMU] %s: %d (%s). Knock detector: threshold %d mg, max %d ms, ring %d ms%s. See 'imutaptrace'.", name,
              field, what, gSettings.imuTapThresholdMg, gSettings.imuTapMaxMs, gSettings.imuTapRingMs,
              gImuRunning ? ", applied now" : ", applied at the next 'openimu'");
-  } else {
+  }
+#if ENABLE_IMU_LSM6DSOX
+  else {
     const Lsm6TapTuning t =
         lsm6TapTuningFromMg(gSettings.imuTapThresholdMg, gSettings.imuTapShock, gSettings.imuTapQuiet);
     snprintf(getDebugBuffer(), 1024, "[IMU] %s: %d (%s). The chip uses threshold %u mg, shock %u, quiet %u%s.", name,
              field, what, (unsigned)t.threshold * kLsm6TapMgPerStep, (unsigned)t.shock, (unsigned)t.quiet,
              gImuRunning ? ", applied now" : ", applied at the next 'openimu'");
   }
+#endif
   return getDebugBuffer();
 }
 
@@ -980,11 +995,11 @@ const char* cmd_imutaptrace(const String& argsInput) {
     if (n < kTapTraceBufLen) n += (size_t)snprintf(b + n, kTapTraceBufLen - n, fmt, args...);
   };
   if (json) {
-    put("{\"schema\":1,\"detector\":%s,\"thresholdMg\":%u,\"maxMs\":%u,\"ringMs\":%u,\"total\":%lu,"
+    put("{\"schema\":1,\"detector\":%s,\"sampleHz\":%u,\"thresholdMg\":%u,\"maxMs\":%u,\"ringMs\":%u,\"total\":%lu,"
         "\"counts\":{\"tap\":%lu,\"soft\":%lu,\"long\":%lu,\"ring\":%lu},"
         "\"feed\":{\"reads\":%lu,\"failed\":%lu,\"empty\":%lu,\"samples\":%lu,\"overruns\":%lu,"
         "\"unread\":%u,\"pattern\":%u,\"lastMg\":[%d,%d,%d],\"jumpMg\":%u,\"inKnock\":%s},\"knocks\":[",
-        software ? "true" : "false", (unsigned)cfg.thresholdMg, (unsigned)cfg.maxMs, (unsigned)cfg.ringMs,
+        software ? "true" : "false", (unsigned)cfg.sampleHz, (unsigned)cfg.thresholdMg, (unsigned)cfg.maxMs, (unsigned)cfg.ringMs,
         (unsigned long)tr.seq, (unsigned long)tr.counts[0], (unsigned long)tr.counts[1],
         (unsigned long)tr.counts[2], (unsigned long)tr.counts[3], (unsigned long)tr.feed.reads,
         (unsigned long)tr.feed.failedReads, (unsigned long)tr.feed.emptyReads, (unsigned long)tr.feed.samples,
@@ -1006,18 +1021,27 @@ const char* cmd_imutaptrace(const String& argsInput) {
     return b;
   }
   if (!software) {
+#if ENABLE_IMU_LSM6DSOX
     return "[IMU] This chip uses its own tap engine (no knock trace): tune it with 'imutapthreshold', "
            "'imutapshock' and 'imutapquiet'; 'imustatus json' counts its taps.";
+#else
+    return "[IMU] The knock detector starts with the IMU: open it with 'openimu' (or 'openinput'), then tap.";
+#endif
   }
-  put("[IMU] Knock trace: threshold %u mg, max %u ms, ring %u ms (416 Hz, software)\n", (unsigned)cfg.thresholdMg,
-      (unsigned)cfg.maxMs, (unsigned)cfg.ringMs);
+  put("[IMU] Knock trace: threshold %u mg, max %u ms, ring %u ms (%u Hz, software)\n", (unsigned)cfg.thresholdMg,
+      (unsigned)cfg.maxMs, (unsigned)cfg.ringMs, (unsigned)cfg.sampleHz);
   put("Since the clear: %lu knocks: %lu tap, %lu soft, %lu long, %lu ring\n", (unsigned long)tr.seq,
       (unsigned long)tr.counts[0], (unsigned long)tr.counts[1], (unsigned long)tr.counts[2],
       (unsigned long)tr.counts[3]);
-  put("FIFO: %lu reads (%lu failed, %lu empty), %lu samples, %lu overruns; last: %u unread, pattern %u\n",
-      (unsigned long)tr.feed.reads, (unsigned long)tr.feed.failedReads, (unsigned long)tr.feed.emptyReads,
-      (unsigned long)tr.feed.samples, (unsigned long)tr.feed.overruns, (unsigned)tr.feed.lastUnread,
-      (unsigned)tr.feed.lastPattern);
+  if (tr.feed.fifo) {
+    put("FIFO: %lu reads (%lu failed, %lu empty), %lu samples, %lu overruns; last: %u unread, pattern %u\n",
+        (unsigned long)tr.feed.reads, (unsigned long)tr.feed.failedReads, (unsigned long)tr.feed.emptyReads,
+        (unsigned long)tr.feed.samples, (unsigned long)tr.feed.overruns, (unsigned)tr.feed.lastUnread,
+        (unsigned)tr.feed.lastPattern);
+  } else {
+    put("Reads: %lu (%lu failed), %lu samples\n", (unsigned long)tr.feed.reads, (unsigned long)tr.feed.failedReads,
+        (unsigned long)tr.feed.samples);
+  }
   put("Now: accel %d, %d, %d mg; jump %u mg%s\n", tr.feed.lastMg[0], tr.feed.lastMg[1], tr.feed.lastMg[2],
       (unsigned)tr.feed.lastDevMg, tr.feed.inKnock ? " (inside a knock)" : "");
   put("%s", "    #  peak mg  ms  gap ms  verdict  hit   dir (share)   x/y/z mg\n");
@@ -1050,6 +1074,7 @@ const char* cmd_imutaptrace(const String& argsInput) {
   return b;
 }
 
+#if ENABLE_IMU_LSM6DSOX
 const char* cmd_imutapshock(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   return imuTapSettingCommand(argsInput, gSettings.imuTapShock, 0, 3, "Tap shock window",
@@ -1061,7 +1086,8 @@ const char* cmd_imutapquiet(const String& argsInput) {
   return imuTapSettingCommand(argsInput, gSettings.imuTapQuiet, 0, 3, "Tap quiet window",
                               "the hush after a knock before the next can count; 0 = 2/ODR, else 4/ODR per step");
 }
-#endif
+#endif  // ENABLE_IMU_LSM6DSOX
+#endif  // ENABLE_IMU_KNOCK_DETECTOR
 
 const char* cmd_imudevicepollms(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -1264,10 +1290,14 @@ const CommandEntry imuCommands[] = {
   { "imuwebmaxfps", "IMU web max FPS: <1..30>", true, cmd_imuwebmaxfps, "Usage: imuwebmaxfps <1..30>" },
 
   // Device-level settings (sensor hardware behavior)
-#if ENABLE_IMU_LSM6DSOX
+#if ENABLE_IMU_KNOCK_DETECTOR
   { "imutapthreshold", "IMU tap threshold in mg: [50..4000]", true, cmd_imutapthreshold, "Usage: imutapthreshold [50..4000]" },
+#endif
+#if ENABLE_IMU_LSM6DSOX
   { "imutapshock", "IMU tap shock window: [0..3]", true, cmd_imutapshock, "Usage: imutapshock [0..3]" },
   { "imutapquiet", "IMU tap quiet window: [0..3]", true, cmd_imutapquiet, "Usage: imutapquiet [0..3]" },
+#endif
+#if ENABLE_IMU_KNOCK_DETECTOR
   { "imutapmaxms", "IMU tap max length in ms (software knock detector): [5..500]", true, cmd_imutapmaxms, "Usage: imutapmaxms [5..500]" },
   { "imutapringms", "IMU tap ring window in ms (software knock detector): [0..500]", true, cmd_imutapringms, "Usage: imutapringms [0..500]" },
   { "imutapsideaxis", "IMU side knocks: the axis a side knock hits along (software knock detector): [x|y|z]", true, cmd_imutapsideaxis, "Usage: imutapsideaxis [x|y|z]" },
@@ -1300,7 +1330,8 @@ const size_t imuCommandsCount = sizeof(imuCommands) / sizeof(imuCommands[0]);
 // IMU Task - FreeRTOS Task Function
 // ============================================================================
 // Purpose: starts the backend's chip, then reads a sample every
-// imuDevicePollMs (or at the backend's fixed rate, 50 Hz for the 4517), runs
+// imuDevicePollMs (or at the backend's fixed rate: 50 Hz for the 4517, 100 Hz
+// for the BNO055 in a build with IMU input), runs
 // the action detector on each and refreshes the cache every imuDevicePollMs
 // Stack: 4096 BYTES (4 KB) | Priority: 1 | Core: I2C_SENSOR_CORE
 // Lifecycle: Created by imuStartInternal, deleted when gImuRunning=false
@@ -1455,10 +1486,14 @@ static const SettingEntry imuSettingEntries[] = {
   { "imuTransitionMs", SETTING_INT, &gSettings.imuTransitionMs, 100, 0, nullptr, 0, 1000, "Transition (ms)", nullptr, false, "timing", "imutransitionms" },
   { "imuWebMaxFps", SETTING_INT, &gSettings.imuWebMaxFps, 15, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", "imuwebmaxfps" },
   { "imuDevicePollMs", SETTING_INT, &gSettings.imuDevicePollMs, 200, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr, false, "timing", "imudevicepollms" },
+#if ENABLE_IMU_KNOCK_DETECTOR
+  { "imuTapThresholdMg", SETTING_INT, &gSettings.imuTapThresholdMg, IMU_TAP_THRESHOLD_DEFAULT_MG, 0, nullptr, 50, 4000, "Tap threshold (mg)", nullptr, false, "tap", "imutapthreshold" },
+#endif
 #if ENABLE_IMU_LSM6DSOX
-  { "imuTapThresholdMg", SETTING_INT, &gSettings.imuTapThresholdMg, 1300, 0, nullptr, 50, 4000, "Tap threshold (mg)", nullptr, false, "tap", "imutapthreshold" },
   { "imuTapShock", SETTING_INT, &gSettings.imuTapShock, 2, 0, nullptr, 0, 3, "Tap shock window", nullptr, false, "tap", "imutapshock" },
   { "imuTapQuiet", SETTING_INT, &gSettings.imuTapQuiet, 1, 0, nullptr, 0, 3, "Tap quiet window", nullptr, false, "tap", "imutapquiet" },
+#endif
+#if ENABLE_IMU_KNOCK_DETECTOR
   { "imuTapMaxMs", SETTING_INT, &gSettings.imuTapMaxMs, 120, 0, nullptr, 5, 500, "Tap max length (ms)", nullptr, false, "tap", "imutapmaxms" },
   { "imuTapSideAxis", SETTING_INT, &gSettings.imuTapSideAxis, 1, 0, nullptr, 0, 2, "Side knock axis", "0:X,1:Y,2:Z", false, "tap", "imutapsideaxis" },
   { "imuTapSidePct", SETTING_INT, &gSettings.imuTapSidePct, 60, 0, nullptr, 10, 1000, "Side knock ratio (%)", nullptr, false, "tap", "imutapsideratio" },

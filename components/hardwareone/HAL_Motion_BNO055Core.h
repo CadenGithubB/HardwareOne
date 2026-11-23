@@ -33,6 +33,10 @@ constexpr uint8_t bno055AddressFromSetting(long saved) {
 constexpr uint8_t kBno055RegChipId = 0x00;
 constexpr uint8_t kBno055RegPageId = 0x07;
 constexpr uint8_t kBno055RegAccelData = 0x08;  // accel, mag, gyro, euler: 24 bytes from here
+// GRV_DATA_X_LSB: the fusion's gravity vector, x/y/z little-endian int16 in
+// the accelerometer's unit (after QUA_DATA 0x20..0x27 and LIA_DATA
+// 0x28..0x2D, before TEMP).
+constexpr uint8_t kBno055RegGravityData = 0x2E;
 constexpr uint8_t kBno055RegTemp = 0x34;       // temp, then CALIB_STAT at 0x35
 constexpr uint8_t kBno055RegOprMode = 0x3D;
 constexpr uint8_t kBno055RegPwrMode = 0x3E;
@@ -47,6 +51,23 @@ constexpr uint8_t kBno055TriggerExtClock = 0x80;  // CLK_SEL: the board's 32 kHz
 
 constexpr uint8_t kBno055DataBytes = 24;       // 0x08..0x1F
 constexpr uint8_t kBno055StatusBytes = 2;      // 0x34..0x35
+constexpr uint8_t kBno055VectorBytes = 6;      // one x/y/z vector: ACC_DATA 0x08..0x0D, GRV_DATA 0x2E..0x33
+
+// The default UNIT_SEL (0x3B = 0x00, left as the reset sets it): acceleration
+// and gravity in m/s^2, 1 m/s^2 = 100 LSB (datasheet, acceleration and
+// gravity vector data representation).
+constexpr float kBno055AccelLsbPerMs2 = 100.0f;
+constexpr float kBno055StandardGravity = 9.80665f;  // m/s^2 per g
+
+// ---- Fast sampling (a build with IMU input) ------------------------------------
+// In NDOF the fusion outputs at 100 Hz, and the chip sets its accelerometer
+// itself (4 g, 62.5 Hz bandwidth; datasheet, fusion modes): the knock
+// detector reads ACC_DATA and GRV_DATA every 10 ms,
+// and the full block (mag, gyro, Euler, temperature, CALIB_STAT) every
+// kBno055FullEveryMs, its last values standing in between.
+constexpr uint16_t kBno055FastPeriodMs = 10;
+constexpr uint16_t kBno055FastHz = 100;
+constexpr uint32_t kBno055FullEveryMs = 100;
 
 // ---- Timing --------------------------------------------------------------------
 // Power-on reset takes 650 ms (datasheet table 0-2); Adafruit's driver allows
@@ -214,6 +235,32 @@ struct Bno055Reading {
 
 inline int16_t bno055Le16(const uint8_t* bytes) {
   return static_cast<int16_t>(static_cast<uint16_t>(bytes[0]) | (static_cast<uint16_t>(bytes[1]) << 8));
+}
+
+// One x/y/z vector of the accelerometer's unit (ACC_DATA, GRV_DATA) in m/s^2.
+inline void bno055DecodeVector(const uint8_t* six, float out[3]) {
+  for (int i = 0; i < 3; ++i) out[i] = bno055Le16(six + 2 * i) / kBno055AccelLsbPerMs2;
+}
+// m/s^2 to mg, for the knock detector.
+inline void bno055AccelToMg(const float ms2[3], float mg[3]) {
+  for (int i = 0; i < 3; ++i) mg[i] = ms2[i] * (1000.0f / kBno055StandardGravity);
+}
+// The gravity vector (m/s^2) as a direction in g (what the accelerometer reads
+// at rest, divided by g), when it is one: the fusion reads zeros until it has
+// started, and a length far from 1 g is no gravity estimate. False leaves
+// `up` unchanged.
+inline bool bno055GravityUp(const float grav[3], float up[3]) {
+  float n2 = 0;
+  for (int i = 0; i < 3; ++i) n2 += grav[i] * grav[i];
+  const float g2 = kBno055StandardGravity * kBno055StandardGravity;
+  if (!(n2 > 0.25f * g2 && n2 < 4.0f * g2)) return false;
+  for (int i = 0; i < 3; ++i) up[i] = grav[i] / kBno055StandardGravity;
+  return true;
+}
+// Whether the full block is due at nowMs: the first sample, then every
+// kBno055FullEveryMs (within half a fast period, as the reads jitter).
+inline bool bno055FullDue(bool haveFull, uint32_t lastFullMs, uint32_t nowMs) {
+  return !haveFull || static_cast<uint32_t>(nowMs - lastFullMs) + kBno055FastPeriodMs / 2 >= kBno055FullEveryMs;
 }
 
 // data: the 24 bytes from 0x08; status: the 2 bytes from 0x34.
