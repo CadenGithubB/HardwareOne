@@ -94,10 +94,10 @@ static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
 // zero (a full field may have no terminator; receivers bound their reads).
 #define ESPNOW_V4_NAME_LEN     32
 
-#define ESPNOW_V4_MAGIC        0x3148u       // 'H1' little-endian (unchanged from V3)
+#define ESPNOW_V4_MAGIC        0x3148u       // 'H1' little-endian
 #define ESPNOW_V4_VERSION      4             // Protocol version
-#define ESPNOW_V4_HEADER_LEN   32            // Header size in bytes (was 24 in V3)
-#define ESPNOW_V4_MAX_PAYLOAD  (250 - 32)    // 218 bytes max payload (was 226 in V3)
+#define ESPNOW_V4_HEADER_LEN   32            // Header size in bytes
+#define ESPNOW_V4_MAX_PAYLOAD  (250 - 32)    // 218 bytes max payload
 
 // The name of this format, as `versions` shows it: "custom ESP-NOW v1". It is
 // HardwareOne's own mesh format carried in Espressif ESP-NOW frames; "v1" is
@@ -110,7 +110,7 @@ static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
 static_assert(ESPNOW_V4_VERSION == 4,
               "wire format changed: bump HW1_ESPNOW_RELEASE and docs/COMPATIBILITY.md");
 
-// Phase 3.5 — when a frame is wrapped in SESSION_FRAME, 16 of the 218 payload
+// When a frame is wrapped in SESSION_FRAME, 16 of the 218 payload
 // bytes are consumed by the Poly1305 AEAD tag (cipher || tag layout on wire).
 // Structs that may be encrypted MUST fit in this lower bound, not the raw
 // MAX_PAYLOAD. static_asserts below enforce this for the encrypt-eligible
@@ -197,10 +197,6 @@ static_assert(ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT == 202, "group-signed pay
 //     row and handler — a TX'd opcode with no RX row is a silent drop.
 //   * Earmarks (named numbers in comments) are intentions, not allocations;
 //     re-justify or release them when the category next allocates.
-//
-// Dead V3 opcodes removed: MANIFEST_RESP, SETTINGS_RESP, SETTINGS_PUSH
-// (none were ever sent or received in V3 — manifests/settings travel as
-//  files via FILE_END for specially-named payloads).
 
 enum EspNowV4Type : uint8_t {
   // --- Transport (1–9) ---
@@ -342,7 +338,7 @@ enum EspNowV4Type : uint8_t {
 // Every other value is unassigned. Comment only until those frames land: an
 // enum symbol comes with its row.
 //
-// ---- Flag bits (16-bit in V4; was 8-bit in V3) -----------------------------
+// ---- Flag bits (16-bit) ---------------------------------------------------
 //
 // Two classes of bit (1.0 rule):
 //   * 0xF000 is must-understand. A receiver drops a frame that carries a bit
@@ -382,10 +378,8 @@ static_assert((ESPNOW_V4_FLAGS_KNOWN_MUST_UNDERSTAND & ~ESPNOW_V4_FLAGS_MUST_UND
 
 // ---- Frame header (32 bytes) -----------------------------------------------
 //
-// Phase 1 lands the structure; the new fields (meshFingerprint, sessionId,
-// frameSeq) are populated by zero and not consulted yet. Phase 2 fills in
-// meshFingerprint from gSettings; Phase 3 wires up sessionId + frameSeq for
-// per-pair AEAD with replay protection.
+// The payload length is not a header field: it is the radio frame's length
+// minus headerLen.
 
 struct __attribute__((packed)) EspNowV4Header {
   uint16_t magic;            // 0   — 0x3148 ('H1' little-endian)
@@ -413,11 +407,9 @@ struct __attribute__((packed)) EspNowV4Header {
   uint16_t meshFingerprint;  // 22–23 — the mesh id: derived from the mesh key (System_ESPNow_MeshIdCore.h:
                              //         KDF subkey 3, context "esp-mid1", first nonzero LE u16), never 0;
                              //         a receiver drops 0 and any id none of its enabled meshes has
-  uint16_t sessionId;        // 24–25 — Phase 3 (zero in Phase 1)
-  uint32_t frameSeq;         // 26–29 — Phase 3 (zero in Phase 1)
+  uint16_t sessionId;        // 24–25 — the pairwise session of a SESSION_FRAME (0 otherwise)
+  uint32_t frameSeq;         // 26–29 — that session's frame number (replay check; 0 otherwise)
   uint16_t crc16;            // 30–31 — CRC16-CCITT of payload
-  // Note: V3 had a `payloadLen` field. In V4 it's derived from the ESPNOW
-  // recv_info's `data_len` minus headerLen — saves 2 bytes on the wire.
 };
 static_assert(sizeof(EspNowV4Header) == 32, "EspNowV4Header must be 32 bytes");
 static_assert(offsetof(EspNowV4Header, magic) == 0 && offsetof(EspNowV4Header, ver) == 2 &&
@@ -1012,7 +1004,7 @@ static_assert(sizeof(V4PayloadTimeSync) <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT &
               "the time, sensor, battery, event and forward-link frames must fit one routed frame");
 
 // Metadata payload for metadata exchange (REQ/RESP/PUSH)
-// Phase 3.5: trimmed tags 64→54 so the struct fits ESPNOW_V4_MAX_PLAINTEXT
+// Trimmed tags 64→54 so the struct fits ESPNOW_V4_MAX_PLAINTEXT
 // (202 B) for future SESSION_FRAME wrapping. Total now exactly 202.
 // It is exactly the sealed single-frame budget (202 B), so it cannot grow.
 struct __attribute__((packed)) V4PayloadMetadata {
@@ -1066,7 +1058,7 @@ static_assert(sizeof(V4PayloadStreamHeader) == 5, "V4PayloadStreamHeader layout"
 static_assert(offsetof(V4PayloadStreamHeader, reqId) == 0 && offsetof(V4PayloadStreamHeader, status) == 4,
               "V4PayloadStreamHeader layout");
 
-// ---- Phase 3.3 — KEY_EX handshake payloads ---------------------------------
+// ---- KEY_EX handshake payloads ---------------------------------
 //
 // Three-way handshake between two peers in the same mesh. Authenticates via
 // HMAC-SHA256 over (meshFingerprint || senderMac || senderPubEd25519) keyed by
@@ -1085,8 +1077,8 @@ static_assert(offsetof(V4PayloadStreamHeader, reqId) == 0 && offsetof(V4PayloadS
 //
 // On success both sides persist each other's pubkey to
 //   /system/espnow/peers/<MAC>/identity.json
-// SESSION establishment (X25519 ephemeral DH, AEAD keys) happens in Phase 3.4
-// — KEY_EX in 3.3 only proves "this peer knows the mesh passphrase + owns
+// SESSION establishment (X25519 ephemeral DH, AEAD keys) comes after it
+// — KEY_EX only proves "this peer knows the mesh passphrase + owns
 // this Ed25519 pubkey".
 
 struct __attribute__((packed)) V4PayloadKeyExHello {
@@ -1124,7 +1116,7 @@ static_assert(offsetof(V4PayloadKeyExConfirm, meshFingerprint) == 0 && offsetof(
               offsetof(V4PayloadKeyExConfirm, status) == 8 && offsetof(V4PayloadKeyExConfirm, reserved) == 9 &&
               offsetof(V4PayloadKeyExConfirm, pubFingerprint) == 10, "V4PayloadKeyExConfirm layout");
 
-// ---- Phase 3.4 — SESSION establishment payloads -----------------------------
+// ---- SESSION establishment payloads -----------------------------
 //
 // Signed Ephemeral Diffie-Hellman (SIGMA-I pattern). Both sides have already
 // exchanged long-term Ed25519 pubkeys via KEY_EX (3.3) and have those keys
@@ -1210,7 +1202,7 @@ static_assert(offsetof(V4PayloadSessionConfirm, sessionId) == 0 &&
               offsetof(V4PayloadSessionConfirm, signature) == 82,
               "V4PayloadSessionConfirm field offsets");
 
-// ---- Phase 3.6 — SESSION_REKEY (forward-secrecy rotation) -------------------
+// ---- SESSION_REKEY (forward-secrecy rotation) -------------------
 //
 // Refreshes the AEAD keys without a full handshake. Used when txSeqNext
 // crosses a threshold (e.g. 10k frames) or sessionAge crosses a duration
@@ -1289,9 +1281,9 @@ static_assert(offsetof(V4PayloadFileStart, fileSize) == 0 && offsetof(V4PayloadF
               offsetof(V4PayloadFileStart, chunkSize) == 6 && offsetof(V4PayloadFileStart, filename) == 8,
               "V4PayloadFileStart layout");
 
-// Phase 3.5: chunk data sized for ESPNOW_V4_MAX_PLAINTEXT so encrypted
+// Chunk data sized for ESPNOW_V4_MAX_PLAINTEXT so encrypted
 // file transfers don't silently truncate every chunk by 16 bytes. Per-chunk
-// data is 200 B (was 216 in plaintext-only V3), and the struct also carries a
+// data is 200 B, and the struct also carries a
 // 2 B chunkIndex: 202 B plaintext + 16 B AEAD tag = 218 = MAX_PAYLOAD EXACTLY,
 // zero headroom. There is no room for another field — adding one trips the
 // static_assert below rather than corrupting the wire, so shrink data[] (or
@@ -1326,7 +1318,7 @@ static_assert(sizeof(V4PayloadFileEnd) == 5, "V4PayloadFileEnd layout");
 static_assert(offsetof(V4PayloadFileEnd, crc32) == 0 && offsetof(V4PayloadFileEnd, status) == 4,
               "V4PayloadFileEnd layout");
 
-// Phase 4: FILE_CANCEL — the receiver tells the sender a transfer it started
+// FILE_CANCEL — the receiver tells the sender a transfer it started
 // will not complete. An answer (rule F3): reqId is the FILE_START's header
 // msgId (the transfer's number until FILE_START carries its own id); the
 // FILE_CANCEL's header msgId is the canceller's own. The sender matches

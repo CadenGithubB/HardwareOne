@@ -211,9 +211,8 @@ def main():
         need(needle in espnow, f'System_ESPNow.cpp does not have: {needle}')
     # A peer's name given to the pair commands follows the same rule (the rule
     # itself runs in test_espnow_mesh_slots): both commands return its refusal.
-    need('if (const char* refused = espnowPeerAliasRefusal(name, mac)) return refused;' in espnow and
-         'return espnowPeerAliasRefusal(deviceName);' in espnow,
-         'espnow pair / espnowpairsecure do not refuse a peer name that breaks the device-name rule')
+    need('return espnowPeerAliasRefusal(deviceName);' in espnow,
+         'espnowpairsecure does not refuse a peer name that breaks the device-name rule')
     need('strcmp(wireName, "Unknown")' not in espnow and '"Unknown";\n      MeshPeerHealth' not in espnow,
          'TOPO still puts the "Unknown" placeholder on the air or reads it as no name')
     need('devicename::putField(f.partnerName, name);' in text('System_ESPNow_BondForward.cpp'),

@@ -83,7 +83,8 @@ static constexpr CommandModule gCommandModules[] = {
   { "espnow",     "ESP-NOW wireless communication (peer-to-peer, mesh)",
     "ESP-NOW links HardwareOne devices directly over the WiFi radio with no router or "
     "access point, as named peers that can also form a multi-hop mesh. Pair with "
-    "espnowpair, then message (espnowsend/espnowbroadcast), push a file (espnowsendfile), "
+    "espnowpairrequest (discovery, the other device accepts) or espnowpairsecure on both "
+    "devices, then message (espnowsend/espnowbroadcast), push a file (espnowsendfile), "
     "pull a file (espnowfetch), browse a peer's files (espnowbrowse), or run a command on "
     "a peer (espnowremote). espnowremote, espnowfetch, espnowbrowse, espnowroomcmd and "
     "espnowtagcmd are ASYNCHRONOUS: they return OK on delivery; the real result arrives "

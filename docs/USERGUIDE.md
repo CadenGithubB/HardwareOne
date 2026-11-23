@@ -607,10 +607,12 @@ have a recent export.
 Hardware One's custom ESP-NOW v1 mesh is its inter-device wireless protocol. Devices pair with a shared passphrase and form an encrypted mesh.
 
 ### Pairing
-1. On both devices, open the **ESP-NOW** page in the web UI (pairing lives there - there is no separate Pair page) or use the `espnowpair` CLI.
-2. Set the same passphrase on both devices.
-3. One device initiates - the other accepts.
-4. Once paired, devices appear in each other's peer list.
+Every pairing is encrypted: both devices need the same mesh passphrase first (`espnowsetpassphrase <mesh> <passphrase>`).
+
+- **By discovery:** open the discovery window on both devices (`espnowpairmode`), then on one of them press **Pair** on the discovered device on the **ESP-NOW** page, or run `espnowpairrequest <mac_or_name>`. The other device shows an Accept prompt (or run `espnowaccept` there).
+- **By address:** run `espnowpairsecure <mac> <name>` on both devices, each naming the other (the **Pair** button of the page's Add Device form runs it on this device).
+
+Once paired, devices appear in each other's peer list.
 
 ### Radio channel
 Devices only hear each other on the same radio channel. `espnowchannel` shows the preference, the radio's actual channel, the channel it should be on and a check; `espnowchannel <1-13>` pins a channel for when the device is not joined to Wi-Fi, `espnowchannel auto` (the default) lets the device choose, and `espnowchannel resync` puts the radio back on the right channel now.
@@ -885,7 +887,7 @@ setting, regardless of which setting it was.
 | Kind | Fires when | subject / detail |
 |---|---|---|
 | `peer_online` / `peer_offline` | mesh peer heartbeat appears / times out (30s) | peer name / MAC |
-| `peer_paired` | a peer is saved as paired (`espnowpair`, `espnowpairsecure`, or an accepted `espnowpairrequest`); pairing mode only discovers; it does not pair by itself | peer name / MAC |
+| `peer_paired` | a peer is saved as paired (`espnowpairsecure`, or an accepted `espnowpairrequest`); pairing mode only discovers; it does not pair by itself | peer name / MAC |
 | `text_rx` | ESP-NOW text message received | sender / text preview |
 | `file_rx` | ESP-NOW file received (not the bond's own sync files: the partner's settings, manifest, schema and automation list) | sender / filename |
 | `bond_online` / `bond_offline` | bonded peer session up / heartbeat timeout, or the peer answered that it has no bond with this device | peer name / MAC |
@@ -1405,7 +1407,7 @@ closeespnow                     - Deinitialize ESP-NOW and free resources
 espnowstatus                    - Show ESP-NOW status and configuration
 espnowstats                     - Show message/error counters (RX Length Drops: frames shorter than their type allows)
 espnowlist                      - List all paired peers
-espnowpair <mac> <name>         - Pair with a device
+espnowpairrequest <mac_or_name> - Ask a discovered device to pair (it accepts)
 espnowunpair <name_or_mac>      - Remove a paired peer
 espnowsend <name_or_mac> <msg>  - Send a text message (relayed if the peer is out of range)
 espnowbroadcast <message>       - Broadcast to the whole mesh (flooded, up to the TTL)
@@ -1457,7 +1459,7 @@ espnowforwardlinks [json] [from <n>]   - Master: who forwards for which bond par
 --- Security ---
 espnowsetpassphrase <mesh> "<passphrase>"  - Set a mesh's encryption passphrase (double quotes when it has spaces)
 espnowencstatus                 - Show encryption status and key fingerprint
-espnowpairsecure <mac> <name>   - Pair with encryption
+espnowpairsecure <mac> <name>   - Pair by address (run on both devices)
 
 --- Metadata sync ---
 espnowrequestmeta <name_or_mac> - Pull metadata from a peer

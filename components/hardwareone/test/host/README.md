@@ -4109,7 +4109,10 @@ graph view, the status apply, the mesh role card, the local metadata / channel
 card and the button handlers, unmodified, against a fake `hw`/DOM on whatever JavaScript engine
 `tools/webui/js_engine.py` finds (node, deno, jsc, ...). Peer names and metadata
 must reach `innerHTML` as literal text, clean text must render unchanged, and the
-Pair button must pass a discovered name with quotes intact. The page must decide
+Pair button must pass a discovered name with quotes intact. Pairing is encrypted only
+(ESP-NOW 1.0): Pair on a discovered device sends `espnowpairrequest <mac>` (P1), and the
+Add Device form has one Pair button, which runs `espnowpairsecure` and says to pair from
+the other device too (B7). The page must decide
 from the json replies of `/api/espnow/status` only (nine slots, the last one
 display text): a text reply decides nothing, a slot that is not json is
 tolerated, settings strings are shape-checked and escaped, a reply that cannot
@@ -7350,8 +7353,10 @@ the session opens answers "Encrypted message queued until the session with <devi
 `"queued":true`), four in a row all go out in order when it opens, and a fifth is refused with "Error: 4 messages to
 <device> already wait for the session to open. Retry in a few seconds." (marked failed, not stored as sent).
 
-`espnow_command_privileges` (source) pins the admin flag on the ESP-NOW test commands that change live state and on
-both writers of the heartbeat mode. `espnow_history_depth` compiles the two `#if` blocks that set the message
+`espnow_command_privileges` (source) pins the admin flag on any ESP-NOW test command that changes live state, and
+that the commands the 1.0 clean-out removed (`teststreams`, `testconcurrent`, `testcleanup`, `testfilelock`,
+`bondtestsensor`, `espnowpair`, `espnowhbmode`, `espnowheartbeatbroadcast`) have no row or handler and the setting
+`meshHeartbeatBroadcast` is gone. `espnow_history_depth` compiles the two `#if` blocks that set the message
 history budget (default, maximum and total KB per ring, refs per on-device view) and the web poll: they follow
 `CONFIG_SPIRAM`, so the ESP32-P4 gets the PSRAM budget; it also checks that ESP-NOW start allocates no history,
 decides the budget from the PSRAM found at runtime and says it in one line.

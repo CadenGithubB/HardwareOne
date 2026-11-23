@@ -565,6 +565,35 @@ settle(function () {
 }).then(function () {
   check(cliCommands.join(',') === 'espnowmode json' && alerts.join('|') === 'Error: HTTP 400',
         'B6 a refused espnowmode changes nothing and shows the reason', cliCommands.join(',') + ' | ' + alerts.join('|'));
+  /* B7: pairing is encrypted only (ESP-NOW 1.0). The Add Device form has one Pair button, which runs
+     espnowpairsecure; there is no unencrypted Pair button and no espnowpair command. */
+  check(el('btn-pair-device').listeners.click === undefined && (el('btn-pair-secure').listeners.click || []).length === 1,
+        'B7 only the encrypted Pair button is wired');
+  var listed = 0;
+  win.listDevices = function () { listed++; };
+  cliCommands.length = 0;
+  alerts.length = 0;
+  el('pair-mac').value = '02:00:00:00:00:09';
+  el('pair-name').value = 'node9';
+  cliReplies['espnowpairsecure 02:00:00:00:00:09 node9'] = 'Encrypted device paired successfully: node9 (02:00:00:00:00:09)';
+  fire('btn-pair-secure', 'click');
+  return settle(function () { return listed > 0; }, 40).then(function () {
+    check(cliCommands.join(',') === 'espnowpairsecure 02:00:00:00:00:09 node9' && listed === 1 &&
+          el('pair-mac').value === '' && alerts.length === 1 && alerts[0].indexOf('other device') >= 0,
+          'B7 Pair runs espnowpairsecure and says to pair from the other device too', cliCommands.join(',') + ' | ' + alerts.join('|'));
+    /* P1: Pair on a discovered device sends an encrypted pair request; the other device accepts. */
+    cliCommands.length = 0;
+    alerts.length = 0;
+    win.hwConfirm = function () { return Promise.resolve(true); };
+    cliReplies['espnowpairrequest 02:00:00:00:00:03'] = "Pair request sent to 'node3'.";
+    return win.pairUnpairedDevice('02:00:00:00:00:03', 'node3');
+  }).then(function () {
+    return settle(function () { return alerts.length > 0; }, 40);
+  }).then(function () {
+    check(cliCommands[0] === 'espnowpairrequest 02:00:00:00:00:03' && cliCommands.every(function (c) { return c.indexOf('espnowpair ') !== 0; }),
+          'P1 Pair on a discovered device sends espnowpairrequest', cliCommands.join(','));
+  });
+}).then(function () {
   check(consoleErrors.length === 0, 'no console errors from the button handlers', consoleErrors.join(' | '));
   __out('HARNESS_RESULT passed=' + __passed + ' failed=' + __failed);
   return undefined;

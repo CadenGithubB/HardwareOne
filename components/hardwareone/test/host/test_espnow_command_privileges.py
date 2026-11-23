@@ -1,27 +1,25 @@
 #!/usr/bin/env python3
-"""ESP-NOW test commands that change live state, and both writers of the
-heartbeat mode, need admin.
+"""ESP-NOW test commands that change live state need admin, and the commands
+the 1.0 clean-out removed stay removed.
 
 Reads System_ESPNow.cpp as text (nothing is compiled): the rows of
 espNowCommands[] and, for each row it judges, the handler's own body.
 
 - A test command (its name contains "test", or its help text starts with
   "TEST") is admin unless its handler changes nothing: no memset of a global,
-  no assignment to a global, no topology-stream mutator, no send. The open
-  ones are exactly `testfilelock`, which prints the file-transfer slot table.
-  `teststreams`, `testconcurrent` and `testcleanup` rewrite the topology
-  collection another session may be using (FEAT-11).
-- Every command that writes gSettings.meshHeartbeatBroadcast carries the same
-  flag, and that flag is admin: `espnowhbmode` (its handler calls setSetting on
-  it) and the command named by the setting's SettingEntry row
-  (`espnowheartbeatbroadcast`).
+  no assignment to a global, no topology-stream mutator, no send.
+- The 1.0 clean-out (ESP-NOW 1.0 step 1) removed the test commands
+  `teststreams`, `testconcurrent`, `testcleanup` and `testfilelock`,
+  `bondtestsensor`, unencrypted `espnowpair`, and the heartbeat mode
+  (`espnowhbmode`, `espnowheartbeatbroadcast` and the setting
+  meshHeartbeatBroadcast, which nothing read): no row, no handler and no
+  setting field remain.
 
 Not covered: the general rule for the other open rows that save a setting or
 transmit (an owner decision), and whether the executor enforces the flag
 (test_command_executor_admission.py and the role suites own that).
 
---component DIR reads another tree (the tree before this change fails five
-checks).
+--component DIR reads another tree.
 """
 from __future__ import annotations
 
@@ -47,8 +45,13 @@ WRITES = (
                 r"cleanupStaleTopoStreams)\(")),
     ("send", re.compile(r"\b(?:espnowtx::send\w*|v4_send\w*|esp_now_send|sendV4\w*)\(")),
 )
-OPEN_TEST_COMMANDS = {"testfilelock"}
-HEARTBEAT_FIELD = "gSettings.meshHeartbeatBroadcast"
+REMOVED_COMMANDS = {
+    "teststreams": "cmd_test_streams", "testconcurrent": "cmd_test_concurrent",
+    "testcleanup": "cmd_test_cleanup", "testfilelock": "cmd_test_filelock",
+    "bondtestsensor": "cmd_bond_testsensor", "espnowpair": "cmd_espnow_pair",
+    "espnowhbmode": "cmd_espnow_hbmode", "espnowheartbeatbroadcast": "cmd_espnow_heartbeatbroadcast",
+}
+REMOVED_FIELD = "meshHeartbeatBroadcast"
 
 
 def handler_body(source: str, handler: str) -> str | None:
@@ -80,8 +83,6 @@ def main() -> int:
 
     tests = {name: row for name, row in rows.items()
              if "test" in name or row["help"].startswith("TEST")}
-    check("the test commands are found", {"teststreams", "testconcurrent", "testcleanup",
-                                          "testfilelock"} <= set(tests), ", ".join(sorted(tests)))
     for name, row in sorted(tests.items()):
         body = handler_body(source, row["handler"])
         if body is None:
@@ -93,27 +94,14 @@ def main() -> int:
         else:
             check(f"{name} is open and changes nothing", not writes,
                   "handler has " + ", ".join(writes) + " but the row is open")
-    open_tests = {name for name, row in tests.items() if row["admin"] == "false"}
-    check("the open test commands are exactly testfilelock", open_tests == OPEN_TEST_COMMANDS,
-          ", ".join(sorted(open_tests)))
 
-    # Every command that writes the heartbeat mode: handlers that set the
-    # field, plus the command its SettingEntry row names.
-    writers = set()
-    for name, row in rows.items():
-        body = handler_body(source, row["handler"])
-        if body and re.search(r"setSetting\(\s*" + re.escape(HEARTBEAT_FIELD) + r"\s*,", body):
-            writers.add(name)
-    entry = re.search(r"\{[^{}\n]*&" + re.escape(HEARTBEAT_FIELD) + r"\b[^{}\n]*\}", source)
-    key = re.findall(r'"(\w+)"', entry[0])[-1] if entry else ""
-    check("the heartbeat setting names its command", key in rows, key or "no SettingEntry row")
-    if key in rows:
-        writers.add(key)
-    check("two commands write the heartbeat mode",
-          writers == {"espnowhbmode", "espnowheartbeatbroadcast"}, ", ".join(sorted(writers)))
-    for name in sorted(writers):
-        check(f"{name} is admin", rows[name]["admin"] == "true",
-              "writes meshHeartbeatBroadcast from an open row")
+    header = (args.component / "System_ESPNow.h").read_text()
+    for name, handler in sorted(REMOVED_COMMANDS.items()):
+        check(f"{name} has no row", name not in rows)
+        check(f"{handler} is gone", re.search(r"\b" + handler + r"\b", source + header) is None)
+    settings = (args.component / "System_Settings.h").read_text()
+    check("the heartbeat mode setting is gone",
+          REMOVED_FIELD not in source and REMOVED_FIELD not in settings and '"heartbeatBroadcast"' not in source)
 
     print(f"espnow command privileges: {total - failures}/{total} passed")
     return 1 if failures else 0

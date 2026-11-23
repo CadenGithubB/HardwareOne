@@ -80,7 +80,7 @@ def build_wire(wire):
                      'static_assert(sizeof(EspNowV4Header) == 32', name),
              line(wire, r'^static_assert\(sizeof\(EspNowV4Header\) == 32[^;]*;', 'header size assert'),
              between(wire, 'struct __attribute__((packed)) V4PayloadKeyExHello {',
-                     '// ---- Phase 3.4', name)]
+                     '// ---- SESSION establishment payloads', name)]
     for kind in ('HELLO', 'REPLY', 'CONFIRM'):
         value = re.search(r'\bESPNOW_V4_TYPE_KEY_EX_' + kind + r'\s*=\s*(\d+)', wire)
         if not value:

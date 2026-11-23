@@ -841,7 +841,7 @@ namespace {
     // Passphrase setters — MASK_AFTER_TOKEN_POS masks the whole rest of the line
     // (robust to quoted / spaced passphrases), keeping the mesh label visible.
     { "espnowsetpassphrase ",        MASK_AFTER_TOKEN_POS, 2, nullptr },  // espnowsetpassphrase <mesh> <passphrase>
-    { "espnowmeshes setpassphrase ", MASK_AFTER_TOKEN_POS, 3, nullptr },  // espnowmeshes setpassphrase <label> <passphrase>
+    { "espnowmeshes setpassphrase ", MASK_AFTER_TOKEN_POS, 3, nullptr },  // removed command: a stale typed line is still masked
     // User credential commands — keep <username> visible where present, mask password(s).
     { "userchangepassword ", MASK_AFTER_TOKEN_POS, 1, nullptr },  // <curPass> <newPass> <confirmPass>
     { "userresetpassword ",  MASK_AFTER_TOKEN_POS, 2, nullptr },  // <username> <newPassword> [flag]

@@ -36,12 +36,12 @@
 #include "System_ESPNow.h"
 #include "System_StatePaths.h"  // HW1_ESPNOW_DEVICES_JSON_PATH — the device registry file
 #include "System_CommandTypes.h"  // CMD_RESULT_MAX — the V4 fragment budget derives from it
-#include "System_ESPNow_Wire.h"      // V3 wire schema (Phase 0 extraction)
-#include "System_ESPNow_Crypto.h"    // Phase 3.0: libsodium init / RNG / Ed25519 keygen
-#include "System_ESPNow_Files.h"    // Phase 4: concurrent file-transfer slot table
+#include "System_ESPNow_Wire.h"      // the wire schema (frames, opcodes, layouts)
+#include "System_ESPNow_Crypto.h"    // libsodium init / RNG / Ed25519 keygen
+#include "System_ESPNow_Files.h"    // Concurrent file-transfer slot table
 #include "System_ESPNow_Router.h"   // multi-hop: route table, relay policy, relay metrics
-#include <sodium.h>                 // Phase 3.5 task #32: sodium_memcmp (constant-time)
-#include "System_ESPNow_Handlers_Crypto.h"  // Phase 3.3: KEY_EX handlers + initiator
+#include <sodium.h>                 // sodium_memcmp (constant-time)
+#include "System_ESPNow_Handlers_Crypto.h"  // KEY_EX handlers + initiator
 #include "System_ESPNow_HandshakeBackoff.h"  // WarnLimiter
 #include "System_ESPNow_MeshTime.h"   // TIME_SYNC: handler, send tick, commands
 #include "System_ESPNow_PowerEvents.h" // POWER_STATUS, EVENT_PUSH: handlers, send tick, commands
@@ -49,10 +49,10 @@
 #include "System_ESPNow_BondForward.h" // the bond master's side: bondforward, the forward tick
 #include "System_ESPNow_Catchup.h"     // CATCHUP_LIST_REQ / READ_REQ: the device's file catch-up server
 #include "System_Collect.h"            // CATCHUP_LIST_RESP / READ_RESP: the collector's client
-#include "System_ESPNow_Identity.h"  // Phase 3.0: long-term Ed25519 identity load/store
-#include "System_ESPNow_MeshKeys.h"  // Phase 3.1: per-mesh PBKDF2 hash + bootstrap/group key cache
+#include "System_ESPNow_Identity.h"  // Long-term Ed25519 identity load/store
+#include "System_ESPNow_MeshKeys.h"  // Per-mesh PBKDF2 hash + bootstrap/group key cache
 #include "System_ESPNow_SessionCapsCore.h"  // the session capability word (bond gate, espnowsessions)
-#include "System_ESPNow_Sessions.h"  // Phase 3.4: per-peer-per-mesh session state
+#include "System_ESPNow_Sessions.h"  // Per-peer-per-mesh session state
 #include "System_ESPNow_Deadline.h"  // wrap-safe pre-warm cooldown
 #include "System_ESPNow_PairCore.h"  // discover-then-confirm request/answer state + retransmit
 #include "System_DeviceName.h"       // the device-name rule: setter, wire fields, pairing names
@@ -62,7 +62,7 @@
 #include "System_ESPNow_BondAgreeCore.h"  // BOND_REQUEST / BOND_NOTICE: what the partner said about the bond
 #include "System_ESPNow_GroupCore.h"  // room and tag membership: announced by the peer, accepted here
 #include "System_ESPNow_Sensors.h"
-#include "System_ESPNow_Tx.h"        // Single-sender TX dispatcher (Phase 1)
+#include "System_ESPNow_Tx.h"        // Single-sender TX dispatcher
 #include "System_MemUtil.h"          // ps_alloc — heap copy of payload for async send
 #include "G2_Page_ESPNow.h"        // g2ESPNowAppOnRxText push-kick (inline no-op when BT/G2 off)
 #include "System_MemUtil.h"
@@ -386,16 +386,15 @@ static void onEspNowDataReceived(const esp_now_recv_info* recv_info, const uint8
 static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* data, int len);
 
 // ============================================================================
-// ESP-NOW V3 Binary Protocol — wire schema moved to System_ESPNow_Wire.h.
+// ESP-NOW binary protocol — the wire schema is in System_ESPNow_Wire.h.
 // Constants, EspNowV4Type, EspNowV4Flags, EspNowV4Header, and payload structs
-// all live there now. Phase 0 of docs/ESPNOW_V4_PLAN.md.
+// all live there.
 // ============================================================================
 
 // ============================================================================
 // V4 FRAGMENTATION CONSTANTS AND REASSEMBLY
 // ============================================================================
-// Per-fragment plaintext budget. Phase 3.5 task #51 (encrypted fragmentation)
-// is shipped: v4_send_encrypted_chunked uses this same 200-byte fragment
+// Per-fragment plaintext budget: v4_send_encrypted_chunked uses this same 200-byte fragment
 // size and adds the 16-byte AEAD tag per fragment, giving 216 wire bytes per
 // fragment (still ≤ MAX_PAYLOAD = 218). Plaintext and encrypted fragments
 // interleave through the same reassembly buffer pool — the receiver decides
@@ -580,7 +579,7 @@ static void bondTellPartnerEnded(const uint8_t* nextPartner);
 #endif
 
 // Forward declaration for v4_send_frame (implemented later).
-// Phase 3.5 task #32: flags widened uint8_t -> uint16_t to carry the
+// Flags widened uint8_t -> uint16_t to carry the
 // high-byte flag bits (BROADCAST_AUTH=0x0100, SESSION_FRAME=0x0200, and the
 // must-understand class 0xF000). Before, the high byte was silently
 // truncated on every call.
@@ -608,7 +607,7 @@ static bool v4_relay_wrap_and_send(const uint8_t nextHop[6], const uint8_t final
 // that only passes an envelope on asks v4_relay_hop_refused instead.
 static bool v4_routed_type_allowed(uint8_t type);
 
-// Forward declarations for V3 helper functions (non-static for external linkage)
+// Forward declarations for the send helpers (non-static for external linkage)
 bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
 // Phase 5 — subscription-aware broadcast: skips peers whose subscribedEvents
 // bitmap doesn't include `category`. See System_ESPNow_Identity.h for the
@@ -616,9 +615,7 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
 bool v4_broadcast_category(uint8_t type, uint16_t flags, uint32_t msgId,
                            const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
                            uint32_t category, int* outAttempted = nullptr);
-// (v4_send_chunked removed 2026-05 — plaintext multi-frame is unreachable now
-// that smart is strict encrypt-or-fail. RX-side plaintext reassembly remains
-// for one release window to tolerate old-firmware peers, then can be removed.)
+// (There is no plaintext multi-frame send: smart is strict encrypt-or-fail.)
 //
 // Longest AEAD plaintext that fits one frame to `dst` (146 B routed, 202 B
 // direct). Non-static: the espnow_tx dispatcher asks it too.
@@ -630,7 +627,7 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
                            uint32_t msgId,
                            const uint8_t* payload, uint16_t payloadLen,
                            uint8_t ttl);
-// Phase 3.5 task #51 — encrypted multi-frame send. Splits payload into
+// Encrypted multi-frame send. Splits payload into
 // fragments of ≤ESPNOW_V4_MAX_PLAINTEXT bytes, AEAD-seals each fragment
 // independently under the peer's session key, sends with fragIndex/fragCount
 // set in the outer header, ACK-waits per fragment with retry.
@@ -760,7 +757,7 @@ static uint32_t gEspNowRxUnknownMeshIdDrops = 0;
 static uint16_t gEspNowRxUnknownMeshIdLast = 0;
 static uint8_t gEspNowRxUnknownMeshIdLastMac[6] = {};
 
-// DIAGNOSTIC (Phase 0 relay groundwork, docs/ESPNOW_RELAY_RESTORE_PLAN.md):
+// DIAGNOSTIC:
 // out-of-range emulation. While active, the RX-ring drain discards every frame
 // whose radio source MAC matches — before any parsing, heartbeats included, so
 // the blocked peer goes offline within MESH_PEER_TIMEOUT_MS exactly like real
@@ -792,7 +789,7 @@ uint32_t gLastHeartbeatSentMs = 0;
 // plus a dedicated mutex, for nothing. The espnowmeshstatus JSON keeps its
 // retryQueue/activeRetries keys as constant empty/0 so external readers of that
 // payload see an unchanged shape.)
-// Phase 4: per-transfer state lives in System_ESPNow_Files.{h,cpp}'s slot
+// Per-transfer state lives in System_ESPNow_Files.{h,cpp}'s slot
 // table. The old single-flight FileTransfer struct + gActiveFileTransfer
 // pointer + gFileTransferLocked flag are gone.
 
@@ -822,7 +819,7 @@ EXT_RAM_BSS_ATTR static TopoDeviceEntry gTopoDeviceCache[MAX_TOPO_DEVICE_CACHE];
 EXT_RAM_BSS_ATTR static uint8_t gTopoExpectedTargets[MESH_PEER_MAX][6];
 static uint8_t gTopoExpectedTargetCount = 0;
 
-// Phase 4: per-transfer state moved to System_ESPNow_Files (multi-slot).
+// Per-transfer state moved to System_ESPNow_Files (multi-slot).
 // gFileTransferLocked / gFileTransferOwnerMac / gFileTransferLockTime
 // were removed — the slot table is the new concurrency primitive.
 
@@ -991,7 +988,7 @@ static bool saveEspNowDevices() {
     if (dev.tags.length())         entry["tags"] = dev.tags.c_str();
     groupAcceptedToJson(entry, dev);
     if (dev.stationary)            entry["stationary"] = true;
-    // Phase 2 multi-mesh — record which mesh this peer belongs to. Omit
+    // Record which mesh this peer belongs to. Omit
     // the key when meshId==0 to keep the on-disk file compact for the
     // common single-mesh case (loader defaults missing field to 0).
     if (dev.meshId != 0)           entry["meshId"] = dev.meshId;
@@ -1387,9 +1384,9 @@ String buildBondedCommandPayload(const String& /*command*/) { return String(); }
 #endif // ENABLE_BONDED_MODE
 
 // Add ESP-NOW peer with optional encryption
-// Phase 3.5 step 4 — LMK removed. Peers are now ALWAYS added unencrypted at
+// LMK removed. Peers are now ALWAYS added unencrypted at
 // the radio layer; confidentiality+integrity come from the application-layer
-// SESSION_FRAME AEAD (Phase 3.4/3.5). The `useEncryption` and `encryptionKey`
+// SESSION_FRAME AEAD. The `useEncryption` and `encryptionKey`
 // arguments are kept in the signature to avoid churn at every call site, but
 // they're ignored — `peerInfo.encrypt = false` unconditionally.
 // Note: bond-mode token derivation is a separate concern and not touched here.
@@ -1674,15 +1671,15 @@ void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& r
   String fullResult = statusPrefix + result;
   BROADCAST_PRINTF("[ESP-NOW] Sending response to %s (%u bytes)", senderName.c_str(), (unsigned)result.length());
 
-  // Send via V3 command response
+  // Send as CMD_RESP
   bool sent = v4_send_command_response(targetMac, msgId, success ? espnowanswer::kOk : espnowanswer::kCmdFailed,
                                        fullResult.c_str(), fullResult.length());
 
   if (sent) {
-    broadcastOutput("[ESP-NOW] V3 response sent successfully");
-    DEBUG_ESPNOW_STREAMF("[ESP-NOW] V3 response sent successfully to %s", senderName.c_str());
+    broadcastOutput("[ESP-NOW] Response sent");
+    DEBUG_ESPNOW_STREAMF("[ESP-NOW] Response sent to %s", senderName.c_str());
   } else {
-    broadcastOutput("[ESP-NOW] WARNING: V3 response transmission failed");
+    broadcastOutput("[ESP-NOW] WARNING: the response could not be sent");
   }
 
   // Restore streaming state
@@ -1690,7 +1687,7 @@ void sendChunkedResponse(const uint8_t* targetMac, bool success, const String& r
 }
 
 
-// Forward declaration for session-based streaming helper (defined in V3 protocol section)
+// Forward declaration for session-based streaming helper
 static bool trySendToStreamSession(uint32_t cmdMsgId, const char* data, size_t len);
 
 // One STREAM frame (rule F3): {reqId, status 0} and then the line, cut to the
@@ -1733,7 +1730,7 @@ static uint32_t streamCmdIdForCurrentTask() {
   return ctx->id;
 }
 
-// Send stream message to ESP-NOW target (called by broadcastOutput) - V3 binary STREAM
+// Send stream message to ESP-NOW target (called by broadcastOutput) (binary STREAM)
 // Supports two modes:
 // 1. Session-based: cmd_exec running an ESP-NOW command streams to that
 //    request's session target (streamCmdIdForCurrentTask)
@@ -1749,7 +1746,7 @@ void sendEspNowStreamMessage(const String& message) {
   // counted as a short frame at the receiver. Send nothing instead.
   if (safeMessage.length() == 0) return;
 
-  // Session-based streaming first (V3 CMD output), keyed by the command the
+  // Session-based streaming first (CMD output), keyed by the command the
   // calling task is running.
   const uint32_t cmdMsgId = streamCmdIdForCurrentTask();
   if (cmdMsgId != 0) {
@@ -1815,7 +1812,7 @@ static void onEspNowDataReceived(const esp_now_recv_info* recv_info, const uint8
 }
 
 // ============================================================================
-// ESP-NOW V3 Binary Protocol - Additional Structures
+// ESP-NOW Binary Protocol - Additional Structures
 // (enum EspNowV4Type and V4PayloadHeartbeat forward-declared near top of file)
 // ============================================================================
 
@@ -1985,7 +1982,7 @@ static uint16_t v4_crc16_ccitt(const uint8_t* data, size_t len) {
 }
 
 // ============================================================================
-// Multi-mesh helpers (Phase 2 of docs/ESPNOW_V4_PLAN.md)
+// Multi-mesh helpers
 // ============================================================================
 //
 // Each mesh has a human-readable label (e.g. "primary", "work") and a 16-bit
@@ -2134,7 +2131,7 @@ bool espnowPeerInPrimaryMesh(const uint8_t* mac) {
 }
 
 // ============================================================================
-// Phase 2 — Settings JSON persistence for multi-mesh fields
+// Settings JSON persistence for multi-mesh fields
 // ============================================================================
 //
 // The SettingsRegistry pattern (SETTING_INT / SETTING_STRING / ...) handles
@@ -2244,7 +2241,7 @@ void espnowMeshesReadJson(JsonDocument& doc) {
       gSettings.meshes[idx].enabled    = e["enabled"]   | false;
       gSettings.meshes[idx].isDefault  = e["isDefault"] | false;
       gSettings.meshes[idx].fingerprint = (uint16_t)(e["meshId"] | 0);
-      // Phase 3.1: load the cached PBKDF2 hash if present. Hex-decode strict;
+      // Load the cached PBKDF2 hash if present. Hex-decode strict;
       // any malformed value falls back to "no cached hash" (will trigger a
       // re-stretch at boot) rather than refusing to load settings.
       gSettings.meshes[idx].passphraseStretchedKeyValid = false;
@@ -2303,7 +2300,7 @@ static void initPrimaryMesh() {
     if (gSettings.meshes[i].label.length() > 0) return;
   }
   // A device with no mesh at all gets "primary", also with no passphrase yet.
-  // Decoupling 'espnowmeshes add' from passphrase setup (Phase 2.8 refactor)
+  // Decoupling 'espnowmeshes add' from passphrase setup
   // means CLI users target a mesh by name first and set its passphrase second
   // — so a named slot has to exist once ESP-NOW has started.
   m0.label       = "primary";
@@ -2762,7 +2759,7 @@ static bool v4_send_frame_ex(const uint8_t* dst, uint8_t type, uint16_t flags, u
   h.headerLen = (uint8_t)sizeof(EspNowV4Header); h.msgId = msgId;
   uint8_t myMac[6]; espnowSelfStaMac(myMac); memcpy(h.origin, myMac, 6);
   h.ttl = ttl; h.fragIndex = 0; h.fragCount = 1;
-  h.meshFingerprint = fingerprintForPeer(dst);  // Phase 2: scope frame to dst's mesh
+  h.meshFingerprint = fingerprintForPeer(dst);  // Scope frame to dst's mesh
   // A mesh with no id (it never had a passphrase) is not on the air: a frame
   // with id 0 would be dropped by every receiver's mesh gate.
   if (h.meshFingerprint == 0) {
@@ -2780,7 +2777,7 @@ static bool v4_send_frame_ex(const uint8_t* dst, uint8_t type, uint16_t flags, u
   if (sizeof(h) + payloadLen > sizeof(frame)) return false;
   if (payloadLen > 0) memcpy(frame + sizeof(h), payload, payloadLen);
 
-  // Phase 3.5 task #32 — if the caller flagged BROADCAST_AUTH, append the
+  // If the caller flagged BROADCAST_AUTH, append the
   // 16-byte group tag (v4_group_tag) over (header[0..29] || payload) with the
   // mesh group key. Receivers verify and silently drop forgeries. Tag is part of
   // the on-wire payload (CRC covers it too, as a transport-level check).
@@ -2966,7 +2963,7 @@ static bool v4_relay_wrap_and_send(const uint8_t nextHop[6], const uint8_t final
                           ttl, /*allowRoute=*/false);
 }
 
-// Phase 3.5 step 1 — session-wrapped unicast send. Mirrors v4_send_frame's
+// Session-wrapped unicast send. Mirrors v4_send_frame's
 // signature minus features that don't apply when a frame is AEAD-sealed:
 // no CRC (the Poly1305 tag is the integrity check), no v4 ACK tracking via
 // the broadcast tracker path, no fragmentation (caller's responsibility to
@@ -3055,7 +3052,7 @@ bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFl
   return true;
 }
 
-// Phase 3.5 step 3 — encrypted send with auto-kick + queue.
+// Encrypted send with auto-kick + queue.
 // Behaviour:
 //   - If a peer identity is on file AND an ACTIVE session exists, wrap & send
 //     immediately (same path as v4_send_session_wrapped).
@@ -3227,7 +3224,7 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
     }
   }
   
-  // Phase 3.5 task #32 — OR in BROADCAST_AUTH so v4_send_frame appends an
+  // OR in BROADCAST_AUTH so v4_send_frame appends an
   // HMAC tag keyed by the mesh group key. Receivers verify; outsiders' forged
   // broadcasts drop silently on bad HMAC. Skipped at TX time per-peer if
   // their meshFingerprint is 0 or we don't hold a key for that mesh.
@@ -3377,7 +3374,7 @@ uint16_t v4_single_frame_cap(const uint8_t* dst) {
                                  : (uint16_t)ESPNOW_V4_MAX_PLAINTEXT;
 }
 
-// Phase 3.5 task #51 — encrypted multi-frame send.
+// Encrypted multi-frame send.
 //
 // Splits `payload` into fragments of up to ESPNOW_V4_MAX_PLAINTEXT bytes each
 // and sends them as independent SESSION_FRAMEs sharing the same `msgId`. The
@@ -3675,7 +3672,7 @@ static bool v4_send_ack(const uint8_t* dst, uint32_t ackFor) {
   return result;
 }
 
-// Phase 4: tell a sender that a file transfer it started will not complete.
+// Tell a sender that a file transfer it started will not complete.
 // The sender is fire-and-forget (it returns "sent" once frames are handed off,
 // without waiting for completion), so this is a post-hoc failure notice. An
 // answer (rule F3): reqId = the transfer's FILE_START msgId, status = the
@@ -3713,7 +3710,7 @@ static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragInd
   h.ttl = 1;
   h.fragIndex = fragIndex;
   h.fragCount = fragCount;
-  h.meshFingerprint = fingerprintForPeer(dst);  // Phase 2: ACK rides the requester's mesh
+  h.meshFingerprint = fingerprintForPeer(dst);  // ACK rides the requester's mesh
   if (h.meshFingerprint == 0) return false;  // no mesh id: receivers would drop it
   h.crc16 = 0;
 
@@ -3734,7 +3731,7 @@ static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragInd
   return (result == ESP_OK);
 }
 
-// V3 sender functions for mesh system messages
+// Sender functions for mesh system messages
 
 // (TIME_SYNC is sent by espnowMeshTimeSendTick in System_ESPNow_MeshTime.cpp:
 // a session unicast to each paired device, never a broadcast.)
@@ -4113,7 +4110,7 @@ bool v4_send_bond_event(const uint8_t* dstMac, const uint8_t* payload, uint16_t 
 }
 
 // Send user sync to specific device (JSON payload)
-// Phase 3.5 task #6 — helper functions for app-unicast opcodes now route
+// Helper functions for app-unicast opcodes now route
 // through v4_send_encrypted_or_queue: wraps in SESSION_FRAME if a session
 // exists, queues + auto-kicks SESSION_OPEN otherwise. Returns false if the
 // peer has no long-term identity yet (KEY_EX never completed) — strict
@@ -4280,25 +4277,14 @@ static void processBondModeManifestResp(const uint8_t* srcMac, const String& dev
 static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_t msgId, const char* cmd, bool wasSessionEncrypted);
 
 // ============================================================================
-// V3 RX dispatch table (Phase 0 of docs/ESPNOW_V4_PLAN.md).
-//
-// The legacy if-ladder in v4_try_handle_incoming() is being replaced
-// incrementally by a handler table. For each opcode in this table, the
-// corresponding if-branch in v4_try_handle_incoming() has been removed —
-// the dispatcher below runs first and claims the frame.
-//
-// New opcodes get migrated by:
-//   1. Implementing a `static void v4h_<name>(const V4RxCtx&)` function.
-//   2. Adding one row to kV4HandlerTable[].
-//   3. Deleting the corresponding `if (h->type == ESPNOW_V4_TYPE_<X>)` branch
-//      from v4_try_handle_incoming().
-//
-// The dispatcher preserves the exact behavior of the original branches,
-// including the per-branch reassembly cleanup that ran at the end of each.
-// That cleanup is centralized in the dispatcher so handlers don't repeat it.
+// RX dispatch table. Every opcode this device receives has one row in
+// kV4HandlerTable[] (its gates, its minimum length) and one
+// `static void v4h_<name>(const V4RxCtx&)` handler; the dispatcher below runs
+// the row's gates and the per-frame reassembly cleanup, so handlers don't
+// repeat it.
 // ============================================================================
 
-// V4RxCtx moved to System_ESPNow_RxCtx.h (Phase 0 relay groundwork) so the
+// V4RxCtx lives in System_ESPNow_RxCtx.h so the
 // handlers TU shares the ONE definition instead of carrying an out-of-sync
 // duplicate. Field semantics are documented there.
 #include "System_ESPNow_RxCtx.h"
@@ -4346,7 +4332,7 @@ struct V4OpcodeEntry {
   V4OpcodeHandler  handler;
 };
 
-// ----- Per-opcode handlers (Phase 0 migrations) -----
+// ----- Per-opcode handlers -----
 
 // Is this MAC a node we have some independent reason to know about — a peer we
 // paired with, or one the route table learned from a neighbour's advert?
@@ -5651,8 +5637,7 @@ static void v4h_topo_req(const V4RxCtx& ctx) {
       }
     }
     // Peer not in our paired-device table — only in mesh routing layer.
-    // Phase 2 transitional: treat as default-mesh member. Phase 2.x may
-    // tighten this once gMeshPeers gains a meshId field of its own.
+    // Treat as default-mesh member (gMeshPeers has no mesh slot of its own).
     for (uint8_t i = 0; i < Settings::N_MESHES; i++) {
       if (gSettings.meshes[i].enabled && gSettings.meshes[i].isDefault) {
         return gSettings.meshes[i].fingerprint == requesterFp;
@@ -6539,7 +6524,7 @@ static void v4h_stream(const V4RxCtx& ctx) {
 }
 
 // FILE_START — initialize a file transfer; allocate PSRAM buffer + chunk bitmap.
-// Phase 4: routes into the multi-slot file-transfer table (up to kFileSlots
+// Routes into the multi-slot file-transfer table (up to kFileSlots
 // concurrent transfers); the single global gActiveFileTransfer pointer and
 // gFileTransferLocked flag are long gone.
 //
@@ -7094,7 +7079,7 @@ static void v4h_file_end(const V4RxCtx& ctx) {
   fileSlotsRelease(slot);
 }
 
-// Phase 4 + integrity pass: a peer we sent a file TO reports the transfer
+// A peer we sent a file TO reports the transfer
 // failed on its end (timeout, staging-write failure, missing chunks, CRC
 // mismatch, or rejected-at-start). Two jobs:
 //   1. Correct the record — surface it to the operator, count a failed send.
@@ -8055,17 +8040,17 @@ static_assert((int)ESPNOW_PAIR_OUT_WAITING == (int)espnowpair::Outcome::Waiting 
               "EspNowPairOutcome mirrors espnowpair::Outcome");
 
 static const V4OpcodeEntry kV4HandlerTable[] = {
-  // Phase 3.3: KEY_EX handshake. NOT REQ_PAIRED — these *establish* pairing.
+  // KEY_EX handshake. NOT REQ_PAIRED — these *establish* pairing.
   // Handler verifies HMAC via mesh bootstrap key; loud-rejects bad frames.
   { ESPNOW_V4_TYPE_KEY_EX_HELLO,     V4_OPC_LEN_EXACT, ESPNOW_V4_MINLEN_KEY_EX_HELLO, v4hKeyExHello         },
   { ESPNOW_V4_TYPE_KEY_EX_REPLY,     V4_OPC_LEN_EXACT, ESPNOW_V4_MINLEN_KEY_EX_REPLY, v4hKeyExReply         },
   { ESPNOW_V4_TYPE_KEY_EX_CONFIRM,   V4_OPC_LEN_EXACT, ESPNOW_V4_MINLEN_KEY_EX_CONFIRM, v4hKeyExConfirm       },
-  // Phase 3.4: SESSION establishment. NOT REQ_PAIRED for the same reason — sessions
+  // SESSION establishment. NOT REQ_PAIRED for the same reason — sessions
   // are negotiated between peers that have completed KEY_EX (verified via
   // Ed25519 signature against stored long-term pubkey, no LMK dependency).
   { ESPNOW_V4_TYPE_SESSION_OPEN,     V4_OPC_LEN_EXACT, ESPNOW_V4_MINLEN_SESSION_OPEN, v4hSessionOpen        },
   { ESPNOW_V4_TYPE_SESSION_CONFIRM,  V4_OPC_LEN_EXACT, ESPNOW_V4_MINLEN_SESSION_CONFIRM, v4hSessionConfirm     },
-  // Phase 3.6: SESSION_REKEY refreshes AEAD keys for an active session. NOT
+  // SESSION_REKEY refreshes AEAD keys for an active session. NOT
   // REQ_PAIRED — handler verifies Ed25519 sig against the peer's stored
   // long-term pubkey (same trust path as SESSION_OPEN/CONFIRM).
   { ESPNOW_V4_TYPE_SESSION_REKEY,    V4_OPC_LEN_EXACT, ESPNOW_V4_MINLEN_SESSION_REKEY, v4hSessionRekey       },
@@ -8084,8 +8069,8 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // TEXT/BOOT: every legitimate sender seals (v4_send_text → v4_send_payload_smart,
   // encrypt-or-fail) or signs (v4_broadcast_text, meshSendBootToPeers →
   // BROADCAST_AUTH) once a mesh key exists, so a plaintext frame on a keyed
-  // device is a spoof: it can carry any origin MAC behind a non-secret CRC16
-  // via the fingerprint-0 compatibility path. Plaintext stays accepted only
+  // device is a spoof: it can carry any origin MAC behind a non-secret CRC16.
+  // Plaintext stays accepted only
   // while this device has no passphrase; v4h_text then files it under the MAC,
   // not a registry name, and the drain posts no text_rx event for it. No
   // REQ_PAIRED: flooded broadcasts and 2-hop members are unpaired senders.
@@ -8544,7 +8529,7 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
     return true;
   }
 
-  // Phase 3.5 task #51 — SESSION_FRAME unwrap was previously performed here,
+  // SESSION_FRAME unwrap was previously performed here,
   // gated on h->flags & SESSION_FRAME. It now lives upstream in
   // v4_try_handle_incoming (right after BROADCAST_AUTH), so encrypted-chunked
   // payloads can be unwrapped per-fragment before the reassembler. By the
@@ -8579,12 +8564,11 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
            (unsigned)h->fragIndex, (unsigned)h->fragCount, (unsigned)h->type, (unsigned long)h->msgId);
     return true;
   }
-  // V4 derives payloadLen from the ESPNOW radio length minus the fixed header
-  // size (V3 carried a redundant payloadLen field in the header; V4 saves
-  // those 2 bytes since the radio already gives us the frame length).
+  // The payload length is from the ESPNOW radio length minus the fixed header
+  // size; the header carries no length field.
   const uint8_t* payload = data + sizeof(EspNowV4Header);
   uint16_t payloadLen = (uint16_t)(len - sizeof(EspNowV4Header));
-  // SESSION_FRAME-wrapped payloads (Phase 3.5) use the AEAD tag as their
+  // SESSION_FRAME-wrapped payloads use the AEAD tag as their
   // integrity check; the CRC field is zeroed on the wire and would never
   // match the encrypted payload, so skip CRC validation for them.
   const bool isSessionFrame = (h->flags & ESPNOW_V4_FLAG_SESSION_FRAME) != 0;
@@ -8662,7 +8646,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // authenticated plaintext). Drives the honest "encrypted" reporting below.
   bool wasSessionEncrypted = false;
 
-  // === Phase 3.5 task #32 — BROADCAST_AUTH HMAC verification ===
+  // === BROADCAST_AUTH HMAC verification ===
   // If the BROADCAST_AUTH flag is set, the last 16 bytes of the payload are
   // the group tag (HMAC-SHA256 keyed by the mesh group key, cut to 16 bytes). Verify before any
   // dispatch — forged broadcasts drop silently here. After verification we
@@ -8707,7 +8691,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     wasAuthenticated = true;
   }
 
-  // === Phase 3.5 task #51 — SESSION_FRAME per-fragment early unwrap ===
+  // === SESSION_FRAME per-fragment early unwrap ===
   //
   // For fragmented encrypted sends, each fragment carries its own AEAD seal
   // (the cipher cannot be sliced across frames — AEAD is all-or-nothing). We
@@ -8863,12 +8847,12 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     // Check broadcast tracker
     broadcast_tracker_record_ack(h->msgId, recv_info->src_addr);
 
-    // Phase 3.5 task #49 — mark any tracked CLI-originated send as delivered
+    // Mark any tracked CLI-originated send as delivered
     // so the web UI's chat bubble can transition from ✓ Sent to ✓✓ Delivered
     // on the next /api/espnow/messages poll cycle.
     sendStatusMarkDelivered(h->msgId, recv_info->src_addr);
     
-    // Check V3 fragment ACK waiters. Same lock as the sender's alloc/free
+    // Check fragment ACK waiters. Same lock as the sender's alloc/free
     // (v4_frag_ack_alloc) so this scan can't match a slot mid-reclaim. Runs on
     // espnow_task; the brief hold may make a concurrent sender's seal wait a
     // few microseconds — never the reverse (no deadlock: this path doesn't
@@ -8881,7 +8865,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
             gV4FragAckWait[i].fragIndex == h->fragIndex) {
           gV4FragAckWait[i].acked = true;
           foundV3 = true;
-          DEBUG_ESPNOWF("[V4_ACK_RX] Matched V3 fragment ACK waiter slot %d (msgId=%lu fragIdx=%u)",
+          DEBUG_ESPNOWF("[V4_ACK_RX] Matched fragment ACK waiter slot %d (msgId=%lu fragIdx=%u)",
                  i, (unsigned long)h->msgId, h->fragIndex);
           break;
         }
@@ -9015,7 +8999,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   }
 #endif
 
-  // === Handler-table dispatch (Phase 0 of docs/ESPNOW_V4_PLAN.md) ===
+  // === Handler-table dispatch ===
   // Opcodes registered in kV4HandlerTable are handled here. Anything not in
   // the table is a genuinely-unknown type and gets dropped below — there is no
   // legacy ladder to catch it.
@@ -9046,7 +9030,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   return true;
 }
 
-// V3 CMD async context - passed to callback for sending response
+// CMD async context - passed to callback for sending response
 struct V3CmdAsyncCtx {
   uint8_t srcMac[6];
   char deviceName[32];
@@ -9070,7 +9054,7 @@ static String redactEspNowCommandResult(const String& output) {
 
 // ExecAsyncCallback, CommandOrigin, CommandContext, Command defined in System_CommandTypes.h (included above)
 
-// Async callback for V3 CMD results - called on cmd_exec task (large stack)
+// Async callback for CMD results - called on cmd_exec task (large stack)
 static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
   V3CmdAsyncCtx* ctx = (V3CmdAsyncCtx*)userData;
   if (!ctx) return;
@@ -9157,7 +9141,7 @@ static void v4CmdResultCallback(bool ok, const char* result, void* userData) {
   free(ctx);
 }
 
-// V3 command execution handler
+// Command execution handler
 // Payload formats:
 //   1. "username:password:command" - Traditional auth with credentials
 //   2. "@BOND:<32-hex-token>:command" - Bond mode session token auth
@@ -9394,7 +9378,7 @@ static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_
   }
   cmd.ctx.id = msgId;
   cmd.ctx.timestampMs = millis();
-  cmd.ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;  // local sinks; output also streams via V3 STREAM frames
+  cmd.ctx.outputMask = MSG_ROUTE_WEB | MSG_ROUTE_FILE;  // local sinks; output also streams via STREAM frames
   cmd.ctx.validateOnly = false;
   cmd.ctx.replyHandle = nullptr;
   cmd.ctx.httpReq = nullptr;
@@ -9576,14 +9560,13 @@ static void onEspNowRawRecv(const esp_now_recv_info* recv_info, const uint8_t* i
                        incomingData, len);
   }
 
-  // === V3-ONLY MODE ===
-  // Try v3 binary protocol (only handler enabled)
+  // The binary protocol is the only receive path.
   if (recv_info && incomingData && len > 0 && v4_try_handle_incoming(recv_info, incomingData, len)) {
     return;
   }
 
-  // V3 didn't handle it - log and drop
-  DEBUG_ESPNOW_ROUTERF("[RX] Message not handled by V3 - dropped (len=%d)", len);
+  // No row took it - log and drop
+  DEBUG_ESPNOW_ROUTERF("[RX] Message not handled - dropped (len=%d)", len);
   return;
 
 }
@@ -11097,7 +11080,7 @@ bool requestMetadata(const uint8_t* peerMac, bool force, bool* outQueued = nullp
   uint32_t msgId = generateMessageId();
   DEBUG_ESPNOW_METADATAF("[METADATA] Sending REQ (encrypted-or-queue) to %s msgId=%lu force=%d",
     MAC_STR(peerMac), (unsigned long)msgId, (int)force);
-  // Phase 3.5 task #6 — METADATA_REQ rides SESSION_FRAME. Returns false if the
+  // METADATA_REQ rides SESSION_FRAME. Returns false if the
   // peer has no long-term identity yet (KEY_EX not done), no active session
   // and queue full, etc. — capture the real status so the WARN below isn't the
   // misleading "peer not in hw table?" (the actual cause is almost always
@@ -11976,23 +11959,6 @@ static bool espnowPeerExists(const uint8_t* mac) {
   return esp_now_get_peer(mac, &peer) == ESP_OK;
 }
 
-// Helper: Request topology discovery (stub - implemented in mesh system)
- 
-
-// Helper: Cleanup stale topology streams (call periodically)
-static void cleanupStaleTopoStreams() {
-  TopoStreamsGuard guard("cleanupStaleTopoStreams");
-  if (gTopoStreamsMutex && !guard.held) return;
-  unsigned long now = millis();
-  for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
-    if (gTopoStreams[i].active && (now - gTopoStreams[i].startTime > 10000)) {
-      DEBUG_ESPNOW_TOPOF("[TOPO] Timeout: Finalizing partial stream from %s (reqId=%lu)",
-                    gTopoStreams[i].senderName, (unsigned long)gTopoStreams[i].reqId);
-      finalizeTopologyStreamLocked(&gTopoStreams[i]);
-    }
-  }
-}
-
 
 // ============================================================================
 // ESP-NOW COMMAND FUNCTIONS
@@ -12477,7 +12443,7 @@ void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hb
   }
 }
 
-// Check if a mesh peer is considered alive (mesh V3 HEARTBEAT within timeout window)
+// Check if a mesh peer is considered alive (mesh HEARTBEAT within timeout window)
 bool isMeshPeerAlive(const MeshPeerHealth* peer) {
   if (!peer || !peer->isActive) return false;
   if (peer->lastMeshHeartbeatMs == 0) return false;
@@ -12691,30 +12657,6 @@ void v2_init_envelope(JsonDocument& doc, const char* type, uint32_t msgId,
   doc["src"]  = src ? src : "";
   if (dst && dst[0]) doc["dst"] = dst;
   if (ttl >= 0)      doc["ttl"] = ttl;
-}
-
-// Send a serialized JSON string to all active mesh peers via V4 TEXT frames.
-// 2026-05: now routes through v4_send_payload_smart (strict encrypt-or-fail),
-// not v4_send_chunked (deleted). Peers without an active session get the
-// auto-handshake treatment from smart's _or_queue path — first envelope to a
-// new peer queues + kicks KEY_EX/SESSION_OPEN, drains when the session is up.
-// Cross-mesh peers can't be in gMeshPeers (no shared bootstrap key, so KEY_EX
-// would never have established their identity), so this is exclusively
-// same-mesh fan-out — encryption always works once the handshake settles.
-static void meshBroadcastEnvelopeTyped(const String& envelope, uint8_t v4Type) {
-  if (!gEspNow || !gEspNow->initialized || !gMeshPeers) return;
-  const uint8_t* data = (const uint8_t*)envelope.c_str();
-  uint16_t len = (uint16_t)envelope.length();
-  uint32_t msgId = generateMessageId();
-  for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (gMeshPeers[i].isActive && !isSelfMac(gMeshPeers[i].mac))
-      v4_send_payload_smart(gMeshPeers[i].mac, v4Type, 0, msgId, data, len, 3);
-  }
-}
-
-// Generic envelope broadcast (legacy v2/v3 wrapper) — goes out as TEXT.
-void meshSendEnvelopeToPeers(const String& envelope) {
-  meshBroadcastEnvelopeTyped(envelope, ESPNOW_V4_TYPE_TEXT);
 }
 
 // Boot/online notice — its OWN V4 type so the receiver files it as a system
@@ -13307,7 +13249,7 @@ void processMeshHeartbeats() {
   // result, text and stream drains all sit below this line).
   if (!gEspNow || !gEspNow->initialized) return;
 
-  // 1b. Phase 3.5 — sweep expired pending encrypted frames (queued while
+  // 1b. Sweep expired pending encrypted frames (queued while
   // waiting for SESSION_OPEN that never completed). 5-second budget per slot.
   // First, frames whose peer's session is up and settled go out (a session
   // this device answered drains nothing when it opens; see
@@ -13319,11 +13261,11 @@ void processMeshHeartbeats() {
   // lets the next bond/encrypted send re-initiate — without this the bond never
   // reconnects after the peer reboots out from under an in-flight handshake.
   sessionEstablishingTimeoutSweep((uint32_t)millis());
-  // 1c. Phase 3.5 task #49 — age out tracked-send entries (PENDING → TIMEOUT
+  // 1c. Age out tracked-send entries (PENDING → TIMEOUT
   // after 10s; resolved entries cleared after 30s so the polling window has
   // time to surface them to the web UI).
   sendStatusSweep((uint32_t)millis());
-  // 1d. Phase 4 — stale file-transfer slot sweep. Slots with no frame in
+  // 1d. Stale file-transfer slot sweep. Slots with no frame in
   // kFileSlotTimeoutMs (30s) are released, freeing their PSRAM buffer. Each
   // expired transfer's sender gets a FILE_CANCEL(TIMEOUT) so it stops assuming
   // the (fire-and-forget) send landed. The same sweep also retries any
@@ -13345,10 +13287,10 @@ void processMeshHeartbeats() {
                      toMacStr.c_str(), (unsigned long)expiredSlots[i].msgId);
     }
   }
-  // 1d2. Phase 4b — drive the FS_LIST protocol: build deferred replies +
+  // 1d2. Drive the FS_LIST protocol: build deferred replies +
   // time out pending sender requests. Fast path when nothing's queued.
   fsListTick();
-  // 1d. Phase 3.6 — zero expired prev-keys (held briefly after a REKEY so
+  // 1d. Zero expired prev-keys (held briefly after a REKEY so
   // in-flight frames sent under the old keys still decrypt).
   sessionRekeyPrevKeysSweep((uint32_t)millis());
   // 1d2. F6 — re-send unanswered KEY_EX_HELLOs / expire dead handshakes.
@@ -13356,7 +13298,7 @@ void processMeshHeartbeats() {
   // 1d3. Re-send an unanswered REKEY; drop a session whose REKEY stays
   // unanswered so the next send re-handshakes.
   rekeyRetrySweep((uint32_t)millis());
-  // 1e. Phase 3.6 — auto-trigger REKEY on threshold (txSeq>=10k OR age>=1h).
+  // 1e. Auto-trigger REKEY on threshold (txSeq>=10k OR age>=1h).
   // Walks the SessionState table; uses the kRekeyMinIntervalMs guard inside
   // espnowRekeyInitiate to avoid re-firing while a rekey is in flight.
   {
@@ -13415,7 +13357,7 @@ void processMeshHeartbeats() {
     }
   }
 
-  // 2. Send periodic V3 mesh heartbeat (if we have active peers OR paired devices)
+  // 2. Send periodic mesh heartbeat (if we have active peers OR paired devices)
   static const uint32_t HB_INTERVAL_MS = 5000;
   uint32_t now = (uint32_t)millis();
 
@@ -13711,7 +13653,7 @@ void processMeshHeartbeats() {
   // when ≥1s has elapsed since the last commit.
   espnowSaturationTick();
 
-  // 7b. Drain stream queue (remote command output received via V3 STREAM frames)
+  // 7b. Drain stream queue (remote command output received via STREAM frames)
   if (gEspNow->streamQueue) {
     int tail = gEspNow->streamQueueTail;
     int processed = 0;
@@ -14073,7 +14015,7 @@ void processMeshHeartbeats() {
     if (gEspNow->bondUnpairedRejectCount > sLastReportedRejectCount) {
       uint32_t newRejects = gEspNow->bondUnpairedRejectCount - sLastReportedRejectCount;
       sLastReportedRejectCount = gEspNow->bondUnpairedRejectCount;
-      BROADCAST_PRINTF("[BOND] REJECTED %lu bond msg(s) from UNPAIRED " MAC_FMT " (type=%d, total=%lu) — run 'bondconnect' or 'espnowpair'!",
+      BROADCAST_PRINTF("[BOND] REJECTED %lu bond msg(s) from UNPAIRED " MAC_FMT " (type=%d, total=%lu) — pair it ('espnowpairsecure' on both devices), then run 'bondconnect'",
                        (unsigned long)newRejects,
                        MAC_ARGS(gEspNow->bondUnpairedRejectMac),
                        (int)gEspNow->bondUnpairedRejectType,
@@ -15385,7 +15327,7 @@ static bool deinitEspNow(bool publishOffEvent) {
     }
   }
 
-  // Cleanup active file transfers (Phase 4 multi-slot: walk + release all
+  // Cleanup active file transfers (multi-slot: walk + release all
   // slots; equivalent to the old single-slot delete).
   {
     uint8_t active = fileSlotsActiveCount();
@@ -15798,7 +15740,7 @@ const char* cmd_espnow_stats(const String& argsInput) {
   return "OK";
 }
 
-// DIAGNOSTIC (Phase 0 relay groundwork): emulate an out-of-range peer by
+// DIAGNOSTIC: emulate an out-of-range peer by
 // discarding every inbound frame from one radio source MAC at the RX-ring
 // drain — before any parsing, heartbeats included, so the blocked peer goes
 // offline within MESH_PEER_TIMEOUT_MS exactly like real RF loss. The
@@ -16003,7 +15945,7 @@ const char* cmd_espnow_resetstats(const String& argsInput) {
   gEspNow->fileTransfersSent = 0;
   gEspNow->fileTransfersReceived = 0;
   gEspNow->lastResetTime = millis();
-  gEspNowRxDrops = 0;  // surfaced by espnowstats since Phase 0, so reset it too
+  gEspNowRxDrops = 0;  // espnowstats shows it, so reset it too
   gEspNowRxLenDrops = 0;
   gEspNowRxMustUnderstandDrops = 0;
   gEspNowRxUnknownMeshIdDrops = 0;
@@ -16017,7 +15959,7 @@ const char* cmd_espnow_resetstats(const String& argsInput) {
 }
 
 // ============================================================================
-// Phase 3.0 — long-term identity CLI
+// Long-term identity CLI
 // ============================================================================
 // `espnowidentity` is the read-only inspection command — every operator should
 // know how to display the device's public key for OOB pairing verification
@@ -16131,9 +16073,8 @@ static const char* keyExNotSentReply(const uint8_t mac[6]) {
   return getDebugBuffer();
 }
 
-// Phase 3.3: initiate KEY_EX handshake with a paired-or-unpaired peer MAC.
-// Additive command — does not interact with the existing espnowpair /
-// espnowpairsecure LMK flows. Once the REPLY + CONFIRM round-trip completes,
+// Initiate KEY_EX handshake with a paired-or-unpaired peer MAC.
+// espnowpairsecure runs it too. Once the REPLY + CONFIRM round-trip completes,
 // /system/espnow/peers/<mac>/identity.json appears on both ends. Subsequent
 // phases (3.4 SESSION_OPEN, 3.5 SESSION_FRAME) consume that identity.
 const char* cmd_espnow_keyex(const String& argsInput) {
@@ -16178,11 +16119,11 @@ const char* cmd_espnow_keyex(const String& argsInput) {
   return getDebugBuffer();
 }
 
-// Phase 3.4: initiate a SESSION_OPEN handshake. Requires the peer to have a
+// Initiate a SESSION_OPEN handshake. Requires the peer to have a
 // prior KEY_EX identity record on disk (else there's no Ed25519 pubkey to
 // verify the responder's CONFIRM signature against). Result lands in the
-// in-RAM gSessions table; survives until reboot. Phase 3.5 will start
-// requiring an active session for app-level unicast traffic.
+// in-RAM gSessions table; survives until reboot. App-level unicast
+// traffic needs an active session.
 const char* cmd_espnow_sessionopen(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow || !gEspNow->initialized) {
@@ -16366,7 +16307,7 @@ const char* cmd_espnow_probe(const String& argsInput) {
   return buf;
 }
 
-// Phase 3.6: force an immediate SESSION_REKEY for a peer. Useful for manual
+// Force an immediate SESSION_REKEY for a peer. Useful for manual
 // testing without waiting for the periodic threshold trigger. Requires an
 // ACTIVE session.
 const char* cmd_espnow_rekey(const String& argsInput) {
@@ -16450,7 +16391,7 @@ const char* cmd_espnow_subs(const String& argsInput) {
   return p;
 }
 
-// Phase 5 — request that a peer send us only events matching <mask>. Sends
+// Request that a peer send us only events matching <mask>. Sends
 // a SUBSCRIBE_UPDATE through the encrypted dispatcher (session if available,
 // plaintext otherwise). Bitmap is parsed as a 32-bit value (decimal or 0x-hex).
 //
@@ -16515,7 +16456,7 @@ const char* cmd_espnow_requestevents(const String& argsInput) {
   return getDebugBuffer();
 }
 
-// Phase 3.5a: send a TEXT message AEAD-wrapped through the active session
+// Send a TEXT message AEAD-wrapped through the active session
 // to the peer. Demonstrates SESSION_FRAME end-to-end without touching the
 // existing espnowsend / v4_send_frame paths. Requires an ACTIVE session
 // (run espnowsessionopen first).
@@ -16572,7 +16513,7 @@ const char* cmd_espnow_sessionsend(const String& argsInput) {
   return getDebugBuffer();
 }
 
-// Phase 3.4: dump all in-RAM SessionState slots — peer, sessionId, age, dir,
+// Dump all in-RAM SessionState slots — peer, sessionId, age, dir,
 // counters. RAM-only; reboots wipe everything.
 const char* cmd_espnow_sessions(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -16755,7 +16696,7 @@ const char* cmd_espnow_regenidentity(const String& argsInput) {
 }
 
 // ESP-NOW pair device command
-// Phase 2.5: parse an optional mesh argument from a CLI command.
+// Parse an optional mesh argument from a CLI command.
 // Accepts either a numeric index (0..N_MESHES-1) or a configured mesh label.
 // Returns N_MESHES on parse error, or 0xFE if the arg is missing entirely
 // (which the caller should interpret as "default mesh" — meshId=0 today).
@@ -16849,119 +16790,6 @@ static const char* espnowPeerAliasRefusal(const String& alias, const uint8_t* pe
                      "commands need the MAC to reach either.", alias.c_str(), who);
   }
   return nullptr;
-}
-
-const char* cmd_espnow_pair(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
-  if (!gEspNow->initialized) {
-    return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
-  }
-
-  CommandArgs a(argsInput);
-  if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: espnowpair <mac> <name> [mesh]";
-
-  uint8_t mac[6];
-  if (!a.argMac(0, mac)) {
-    return "Error: Invalid MAC address format. Use AA:BB:CC:DD:EE:FF";
-  }
-  // The name is a single token under the device-name rule (System_DeviceName.h).
-  // The optional 3rd arg is the mesh (label or 0..N_MESHES-1).
-  String name = a.arg(1);
-  if (const char* refused = espnowPeerAliasRefusal(name, mac)) return refused;
-  const uint8_t meshId = meshSlotForPairing(a.arg(2));  // no argument: the default mesh
-  if (meshId == Settings::N_MESHES) {
-    return "Error: Invalid mesh. Use the label or slot number (0..3) of a configured mesh; see 'espnowmeshes'.";
-  }
-  // The address as it is stored and shown, not as it was typed.
-  const String macStr = macToDisplayStr(mac);
-  // Prevent pairing with self MAC (STA or AP interface)
-  {
-    uint8_t selfSta[6];
-    uint8_t selfAp[6];
-    espnowSelfStaMac(selfSta);
-    espnowSelfApMac(selfAp);
-    if (memcmp(mac, selfSta, 6) == 0 || memcmp(mac, selfAp, 6) == 0) {
-      return "Error: Cannot pair with self MAC address.";
-    }
-  }
-
-  for (int i = 0; i < gEspNow->deviceCount; i++) {
-    if (memcmp(gEspNow->devices[i].mac, mac, 6) == 0) {
-      if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-      const auto& paired = gEspNow->devices[i];
-      if (paired.name == name && paired.meshId == meshId && !paired.encrypted) {
-        // Asked for exactly what is stored: nothing to change.
-        snprintf(getDebugBuffer(), 1024, "Already paired: %s (%s)", name.c_str(), macStr.c_str());
-      } else {
-        snprintf(getDebugBuffer(), 1024,
-                 "Error: %s is already paired as '%s'. Run 'espnowunpair %s' first.",
-                 macStr.c_str(), paired.name.c_str(), macStr.c_str());
-      }
-      return getDebugBuffer();
-    }
-  }
-
-  if (gEspNow->deviceCount >= 16) {
-    return "Error: Maximum number of devices (16) already paired.";
-  }
-
-  if (!addEspNowPeerWithEncryption(mac, false, nullptr)) {
-    if (!ensureDebugBuffer()) return "Error: Failed to add unencrypted peer to ESP-NOW.";
-    snprintf(getDebugBuffer(), 1024,
-             "Error: The radio did not accept %s as a peer (peer table full or radio busy). "
-             "Check 'espnowlist' and retry.",
-             macStr.c_str());
-    return getDebugBuffer();
-  }
-
-  memcpy(gEspNow->devices[gEspNow->deviceCount].mac, mac, 6);
-  gEspNow->devices[gEspNow->deviceCount].name = name;
-  gEspNow->devices[gEspNow->deviceCount].encrypted = false;
-  memset(gEspNow->devices[gEspNow->deviceCount].key, 0, 16);
-  gEspNow->devices[gEspNow->deviceCount].meshId = meshId;  // Phase 2.5
-  // Explicitly initialize optional metadata for this newly occupied slot.
-  gEspNow->devices[gEspNow->deviceCount].friendlyName = "";
-  gEspNow->devices[gEspNow->deviceCount].room = "";
-  gEspNow->devices[gEspNow->deviceCount].zone = "";
-  gEspNow->devices[gEspNow->deviceCount].tags = "";
-  gEspNow->devices[gEspNow->deviceCount].acceptedRoom = "";
-  gEspNow->devices[gEspNow->deviceCount].acceptedTags = "";
-  gEspNow->deviceCount++;
-
-  removeFromUnpairedList(mac);
-
-  // Seed gMeshPeers immediately so v4_broadcast reaches this peer on the next
-  // heartbeat tick (without this, two freshly-paired devices never exchange
-  // heartbeats until one reboots, so mesh topology stays empty)
-  if (meshEnabled()) {
-    noteMeshPeerRxActivity(mac, EspNowMeshRxKind::BootstrapLiveness);
-    V4PayloadHeartbeat hb;
-    v4FillHeartbeat(hb);
-    // 2026-05-19: smart-send so the post-pair seed heartbeat rides
-    // SESSION_FRAME if a session is already up (rare — usually KEY_EX hasn't
-    // run yet at this point, so this falls through to plaintext, which is
-    // what we want for bootstrap liveness).
-    v4_send_payload_smart(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
-                          (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
-  }
-  bool devicesOk = saveEspNowDevices();
-
-  // Peer is committed to the registry — announce the (unencrypted) pair.
-  systemEventPost(SYSEVT_PEER_PAIRED, name.c_str(), macStr.c_str());
-
-  if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  if (!devicesOk) {
-    // The pairing holds until the next restart only. A second 'espnowpair'
-    // would find the device in the table, so the way out is unpair and pair.
-    snprintf(getDebugBuffer(), 1024,
-      "Error: Paired %s (%s) for this session only: the device list could not be saved. "
-      "Check storage with 'fsusage', then run 'espnowunpair %s' and pair again.",
-      name.c_str(), macStr.c_str(), macStr.c_str());
-  } else {
-    snprintf(getDebugBuffer(), 1024, "Unencrypted device paired successfully: %s (%s)", name.c_str(), macStr.c_str());
-  }
-  return getDebugBuffer();
 }
 
 // Mesh TTL command — the hop budget stamped on relay-eligible frames.
@@ -17559,7 +17387,7 @@ const char* cmd_espnow_deviceinfo(const String& argsInput) {
 }
 
 // ==========================
-// Master Aggregation CLI Commands (Phase 3)
+// Master Aggregation CLI Commands
 // ==========================
 
 // ---- What the listings say about room and tag membership ---------------------
@@ -18386,33 +18214,6 @@ const char* cmd_espnow_groupdrop(const String& argsInput) {
   return groupAcceptOrDrop(argsInput, false);
 }
 
-// ESP-NOW heartbeat mode command
-const char* cmd_espnow_hbmode(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  CommandArgs a(argsInput);
-
-  if (a.count() == 0) {
-    const char* mode = gSettings.meshHeartbeatBroadcast ? "public" : "private";
-    const char* desc = gSettings.meshHeartbeatBroadcast
-      ? "Heartbeats broadcast to all devices (discovery enabled)"
-      : "Heartbeats sent only to paired devices (discovery disabled)";
-    snprintf(getDebugBuffer(), 1024, "Heartbeat mode: %s\n%s", mode, desc);
-    return getDebugBuffer();
-  }
-
-  String hbArg = a.arg(0);
-  hbArg.toLowerCase();
-  if (hbArg == "public" || hbArg == "broadcast") {
-    setSetting(gSettings.meshHeartbeatBroadcast, true);
-    return "Heartbeat mode set to public (broadcast). Unpaired devices can now be discovered.";
-  } else if (hbArg == "private" || hbArg == "unicast") {
-    setSetting(gSettings.meshHeartbeatBroadcast, false);
-    return "Heartbeat mode set to private (unicast). Only paired devices will receive heartbeats.";
-  }
-  
-  return "Error: invalid arguments — Usage: espnowhbmode [public|private]";
-}
-
 // Mesh role command
 const char* cmd_espnow_meshrole(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -18591,8 +18392,8 @@ const char* cmd_espnow_meshtopo(const String& argsInput) {
     int pairedCount = peerNum.total_num;
     
     if (pairedCount == 0) {
-      return "Error: No mesh peers available. Pair devices using 'espnowpair' or "
-             "'espnowpairsecure' first.";
+      return "Error: No mesh peers available. Pair devices with 'espnowpairrequest' "
+             "(discovery) or 'espnowpairsecure' on both devices first.";
     }
     if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
     snprintf(getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE,
@@ -18816,211 +18617,6 @@ const char* cmd_espnow_toporesults(const String& argsInput) {
   return gTopoOutputBuffer;
 }
 
-// ============================================================================
-// ESP-NOW Test Commands
-// ============================================================================
-
-// Test stream management
-const char* cmd_test_streams(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  TopoStreamsGuard guard("cmd_test_streams");
-  if (gTopoStreamsMutex && !guard.held) return "Error: topology state busy";
-  memset(gTopoStreams, 0, sizeof(gTopoStreams));
-
-  broadcastOutput("\n=== Testing Stream Management ===");
-  
-  uint8_t fakeMac1[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
-  uint8_t fakeMac2[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02};
-  uint8_t fakeMac3[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x03};
-  
-  BROADCAST_PRINTF("Creating stream 1 (MAC: aa:bb:cc:dd:ee:01, reqId: 100)");
-  TopologyStream* s1 = findOrCreateTopoStreamLocked(fakeMac1, 100);
-  BROADCAST_PRINTF("  Result: %p, active=%d", s1, s1 ? s1->active : 0);
-  
-  BROADCAST_PRINTF("Creating stream 2 (MAC: aa:bb:cc:dd:ee:02, reqId: 200)");
-  TopologyStream* s2 = findOrCreateTopoStreamLocked(fakeMac2, 200);
-  BROADCAST_PRINTF("  Result: %p, active=%d", s2, s2 ? s2->active : 0);
-  
-  BROADCAST_PRINTF("Creating stream 3 (MAC: aa:bb:cc:dd:ee:03, reqId: 300)");
-  TopologyStream* s3 = findOrCreateTopoStreamLocked(fakeMac3, 300);
-  BROADCAST_PRINTF("  Result: %p, active=%d", s3, s3 ? s3->active : 0);
-  
-  BROADCAST_PRINTF("\nTesting findTopoStream for stream 1:");
-  TopologyStream* s1_again = findTopoStreamLocked(fakeMac1, 100);
-  BROADCAST_PRINTF("  Found same pointer: %s", s1 == s1_again ? "YES" : "NO");
-  
-  BROADCAST_PRINTF("\nTesting findTopoStream for non-existent stream:");
-  TopologyStream* s_none = findTopoStreamLocked(fakeMac1, 999);
-  BROADCAST_PRINTF("  Result: %s", s_none ? "FOUND (ERROR!)" : "NULL (correct)");
-  
-  broadcastOutput("\nActive streams:");
-  int activeCount = 0;
-  for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
-    if (gTopoStreams[i].active) {
-      activeCount++;
-      BROADCAST_PRINTF("  Slot %d: reqId=%lu, MAC=%s", 
-                      i, (unsigned long)gTopoStreams[i].reqId,
-                      MAC_STR(gTopoStreams[i].senderMac));
-    }
-  }
-  BROADCAST_PRINTF("Total active streams: %d/%d", activeCount, MAX_CONCURRENT_TOPO_STREAMS);
-  
-  broadcastOutput("\n=== Test Complete ===");
-  return "OK";
-}
-
-// Test concurrent streams
-const char* cmd_test_concurrent(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  TopoStreamsGuard guard("cmd_test_concurrent");
-  if (gTopoStreamsMutex && !guard.held) return "Error: topology state busy";
-
-  broadcastOutput("\n=== Testing Concurrent Streams (Simulated) ===");
-  
-  uint8_t mac1[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
-  uint8_t mac2[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02};
-  uint8_t mac3[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x03};
-  
-  memset(gTopoStreams, 0, sizeof(gTopoStreams));
-  gTopoRequestId = 12345;
-  gTopoCompletedRequestId = 0;
-  gTopoRequestTimeout = millis() + 10000;
-  gTopoResponsesReceived = 0;
-  gExpectedWorkerCount = 3;
-  
-  BROADCAST_PRINTF("Simulating topology request (reqId=%lu)", (unsigned long)gTopoRequestId);
-  
-  BROADCAST_PRINTF("\nDevice 1 (2 peers):");
-  TopologyStream* s1 = findOrCreateTopoStreamLocked(mac1, 12345);
-  strlcpy(s1->senderName, "TestDevice1", sizeof(s1->senderName));
-  s1->started = true;
-  s1->totalPeers = 2;
-  s1->receivedPeers = 2;
-  s1->receivedPeerMask = 0x0003;
-  const uint8_t peer11[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x11};
-  const uint8_t peer12[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x12};
-  memcpy(s1->peers[0].mac, peer11, 6);
-  strlcpy(s1->peers[0].name, "Peer1", sizeof(s1->peers[0].name));
-  s1->peers[0].rssi = -45;
-  s1->peers[0].present = true;
-  memcpy(s1->peers[1].mac, peer12, 6);
-  strlcpy(s1->peers[1].name, "Peer2", sizeof(s1->peers[1].name));
-  s1->peers[1].rssi = -52;
-  s1->peers[1].present = true;
-  finalizeTopologyStreamLocked(s1);
-  BROADCAST_PRINTF("  Finalized");
-  
-  BROADCAST_PRINTF("\nDevice 2 (1 peer):");
-  TopologyStream* s2 = findOrCreateTopoStreamLocked(mac2, 12345);
-  strlcpy(s2->senderName, "TestDevice2", sizeof(s2->senderName));
-  s2->started = true;
-  s2->totalPeers = 1;
-  s2->receivedPeers = 1;
-  s2->receivedPeerMask = 0x0001;
-  const uint8_t peer21[6] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x21};
-  memcpy(s2->peers[0].mac, peer21, 6);
-  strlcpy(s2->peers[0].name, "Peer1", sizeof(s2->peers[0].name));
-  s2->peers[0].rssi = -48;
-  s2->peers[0].present = true;
-  finalizeTopologyStreamLocked(s2);
-  BROADCAST_PRINTF("  Finalized");
-  
-  BROADCAST_PRINTF("\nDevice 3 (0 peers):");
-  TopologyStream* s3 = findOrCreateTopoStreamLocked(mac3, 12345);
-  strlcpy(s3->senderName, "TestDevice3", sizeof(s3->senderName));
-  s3->started = true;
-  s3->totalPeers = 0;
-  s3->receivedPeers = 0;
-  finalizeTopologyStreamLocked(s3);
-  BROADCAST_PRINTF("  Finalized");
-  
-  BROADCAST_PRINTF("\n=== Simulation Complete ===");
-  BROADCAST_PRINTF("Structured responders retained: %d", gTopoResponsesReceived);
-  BROADCAST_PRINTF("Responses received: %d", gTopoResponsesReceived);
-  broadcastOutput("\nRun 'espnowtoporesults' to view the simulated results");
-  
-  return "OK";
-}
-
-// Test cleanup
-const char* cmd_test_cleanup(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  broadcastOutput("\n=== Testing Stream Cleanup ===");
-  
-  int activeBefore = 0;
-  {
-    TopoStreamsGuard guard("cmd_test_cleanup.before");
-    if (gTopoStreamsMutex && !guard.held) return "Error: topology state busy";
-    for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
-      if (gTopoStreams[i].active) {
-        activeBefore++;
-        BROADCAST_PRINTF("Before: Slot %d active (reqId=%lu, age=%lums)",
-                        i, (unsigned long)gTopoStreams[i].reqId,
-                        millis() - gTopoStreams[i].startTime);
-      }
-    }
-  }
-  BROADCAST_PRINTF("Active streams before cleanup: %d", activeBefore);
-  
-  broadcastOutput("\nRunning cleanupStaleTopoStreams()...");
-  cleanupStaleTopoStreams();
-  
-  int activeAfter = 0;
-  {
-    TopoStreamsGuard guard("cmd_test_cleanup.after");
-    if (gTopoStreamsMutex && !guard.held) return "Error: topology state busy";
-    for (int i = 0; i < MAX_CONCURRENT_TOPO_STREAMS; i++) {
-      if (gTopoStreams[i].active) {
-        activeAfter++;
-        BROADCAST_PRINTF("After: Slot %d still active (reqId=%lu, age=%lums)",
-                        i, (unsigned long)gTopoStreams[i].reqId,
-                        millis() - gTopoStreams[i].startTime);
-      }
-    }
-  }
-  BROADCAST_PRINTF("Active streams after cleanup: %d", activeAfter);
-  BROADCAST_PRINTF("Cleaned up: %d streams", activeBefore - activeAfter);
-  
-  broadcastOutput("\n=== Cleanup Test Complete ===");
-  return "OK";
-}
-
-// Phase 4: was cmd_test_filelock (exercised the old single-slot lock).
-// Repurposed to dump the multi-slot table for diagnostics. Kept the same
-// command name so anyone with muscle memory still gets useful output.
-const char* cmd_test_filelock(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-
-  broadcastOutput("\n=== File Transfer Slot Table ===");
-  uint8_t total  = fileSlotsSlotCount();
-  uint8_t active = fileSlotsActiveCount();
-  BROADCAST_PRINTF("Slots: %u/%u in use", (unsigned)active, (unsigned)total);
-  if (active == 0) {
-    broadcastOutput("  (all slots idle)");
-  } else {
-    uint32_t nowMs = (uint32_t)millis();
-    for (uint8_t i = 0; i < total; i++) {
-      FileTransferSlotInfo info;
-      if (!fileSlotsSnapshot(i, &info)) continue;
-      static const char* kStates[] = { "FREE", "RECEIVING", "COMPLETING", "FAILED" };
-      const char* stateStr = (info.state < 4) ? kStates[info.state] : "?";
-      BROADCAST_PRINTF("  [%u] %s '%s' from " MAC_FMT " "
-                       "msgId=%lu %lu/%lu bytes %u/%u chunks ageMs=%lu",
-                       (unsigned)i, stateStr, info.filename,
-                       MAC_ARGS(info.peerMac),
-                       (unsigned long)info.msgId,
-                       (unsigned long)info.receivedBytes,
-                       (unsigned long)info.totalSize,
-                       (unsigned)info.receivedChunks,
-                       (unsigned)info.totalChunks,
-                       (unsigned long)(nowMs - info.startedMs));
-    }
-  }
-  broadcastOutput("=== End slot table ===");
-  return "OK";
-}
-
 // ESP-NOW Device Management Commands
 // ============================================================================
 
@@ -19049,7 +18645,7 @@ const char* cmd_espnow_list(const String& argsInput) {
     d["mac"]       = String(listMacBuf);
     d["name"]      = gEspNow->devices[i].name.c_str();
     d["encrypted"] = gEspNow->devices[i].encrypted;
-    // Phase 2.8: surface which mesh slot this peer was paired into so
+    // Surface which mesh slot this peer was paired into so
     // the web UI can show a "mesh: <label>" badge per row and grey out
     // peers whose mesh is currently disabled.
     d["meshId"]    = (int)gEspNow->devices[i].meshId;
@@ -19125,7 +18721,7 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
   // Serialize to gDebugBuffer
   if (!ensureDebugBuffer()) return "{\"schema\":1,\"ok\":false,\"error\":\"out of memory\"}";
 
-  // Full buffer, not 1024: 16 peers × ~260 B of rows (+linkRssi as of Phase 0)
+  // Full buffer, not 1024: 16 peers × ~260 B of rows (+linkRssi)
   // plus unpaired/retry lists overflowed the old cap on larger meshes.
   size_t len = serializeJson(doc, getDebugBuffer(), GLOBAL_DEBUG_BUFFER_SIZE);
   if (len >= GLOBAL_DEBUG_BUFFER_SIZE) return "{\"schema\":1,\"ok\":false,\"error\":\"response too large\"}";
@@ -19135,7 +18731,7 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
 
 // Unpair device command
 // ============================================================================
-// Phase 2.8 — espnowmeshes CLI: manage the multi-mesh data model
+// espnowmeshes CLI: manage the multi-mesh data model
 // ============================================================================
 //
 // Subcommands:
@@ -19147,13 +18743,12 @@ const char* cmd_espnow_meshstatus(const String& argsInput) {
 //   espnowmeshes delete <label>                        — empty the slot so 'add' can use it again
 //                                                        (refused while paired peers belong to it)
 //   espnowmeshes setdefault <label>                    — set the default mesh
-//   espnowmeshes setpassphrase <label> <passphrase>    — change a mesh's passphrase
-//   espnowmeshes rename <oldlabel> <newlabel>          — rename (changes fingerprint!)
+//   espnowmeshes rename <oldlabel> <newlabel>          — rename; the label is part of the
+//                                                        key salt, so a keyed mesh gets a new id
+// A mesh's passphrase is set or cleared with espnowsetpassphrase.
 //
 // Mesh slot 0 is special: on a device with no mesh at all, an ESP-NOW start
 // bootstraps it under the label "primary".
-// Removing or renaming it is allowed but breaks comms with existing peers
-// until they too rename.
 
 static bool isValidMeshLabel(const String& label) {
   if (label.length() == 0 || label.length() > 16) return false;
@@ -19412,8 +19007,8 @@ static int meshRegistryCountInFile(uint8_t slot) {
 }
 
 // Registry devices that name mesh slot `slot`. A device gets into the registry
-// with its slot before any key exchange ('espnowpair', or 'espnowpairsecure'
-// to a peer that never answers) and stays there after 'espnowforget', so the
+// with its slot before any key exchange ('espnowpairsecure' to a peer that
+// never answers) and stays there after 'espnowforget', so the
 // stored identities alone do not show every device that points at a slot.
 // -1 when the registry cannot be read.
 static int meshRegistryDeviceCount(uint8_t slot) {
@@ -19557,7 +19152,7 @@ static const char* meshesCmd_enable(const String& label) {
       if (gSettings.meshes[i].enabled) {
         return "Mesh is already enabled.";
       }
-      // Phase 3.x: passphrase is no longer required to enable a mesh.
+      // Passphrase is no longer required to enable a mesh.
       // Reason: the UI exposes "Set passphrase" only on ENABLED meshes, so
       // requiring a passphrase before enable creates a chicken-and-egg
       // (user can't reach the passphrase field). A mesh without a passphrase
@@ -19835,13 +19430,12 @@ const char* cmd_espnow_meshes(const String& argsInput) {
   String sub = a.arg(0);
   sub.toLowerCase();
 
-  // Dropping a mesh or changing its key is super admin work, as the
-  // espnowsetpassphrase row is: the row itself stays open to administrators
-  // for list, add, enable, setdefault and rename.
-  if ((sub == "remove" || sub == "disable" || sub == "delete" || sub == "setpassphrase") &&
-      !hasSuperAdminPrivilege(currentAuthContext())) {
+  // Dropping a mesh is super admin work, as the espnowsetpassphrase row is:
+  // the row itself stays open to administrators for list, add, enable,
+  // setdefault and rename. A mesh's passphrase is set with espnowsetpassphrase.
+  if ((sub == "remove" || sub == "delete") && !hasSuperAdminPrivilege(currentAuthContext())) {
     static const char kMeshesSuperReply[] =
-        "Error: Super-admin access required for espnowmeshes remove, delete and setpassphrase.";
+        "Error: Super-admin access required for espnowmeshes remove and delete.";
     return kMeshesSuperReply;
   }
 
@@ -19859,7 +19453,7 @@ const char* cmd_espnow_meshes(const String& argsInput) {
     }
     return meshesCmd_add(a.arg(1));
   }
-  if (sub == "remove" || sub == "disable") {
+  if (sub == "remove") {
     if (!a.hasMinArgs(2)) return "Error: invalid arguments — Usage: espnowmeshes remove <label>";
     if (a.count() > 2) return kMeshesOneLabelReply;
     return meshesCmd_remove(a.arg(1));
@@ -19879,21 +19473,12 @@ const char* cmd_espnow_meshes(const String& argsInput) {
     if (a.count() > 2) return kMeshesOneLabelReply;
     return meshesCmd_setdefault(a.arg(1));
   }
-  if (sub == "setpassphrase") {
-    if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: espnowmeshes setpassphrase <label> <passphrase>";
-    // Words after the first would be dropped and a shorter passphrase stored.
-    if (a.count() > 3 || a.unterminatedQuote()) {
-      return "Error: Passphrase must be one argument. Put it in double quotes: "
-             "espnowmeshes setpassphrase <label> \"<passphrase>\".";
-    }
-    return meshesCmd_setpassphrase(a.arg(1), a.arg(2));
-  }
   if (sub == "rename") {
     if (!a.hasMinArgs(3)) return "Error: invalid arguments — Usage: espnowmeshes rename <oldlabel> <newlabel>";
     if (a.count() > 3) return "Error: Too many arguments. Usage: espnowmeshes rename <oldlabel> <newlabel>.";
     return meshesCmd_rename(a.arg(1), a.arg(2));
   }
-  return "Error: invalid arguments — Usage: espnowmeshes [list|add|remove|delete|enable|setdefault|setpassphrase|rename] ...";
+  return "Error: invalid arguments — Usage: espnowmeshes [list|add|remove|delete|enable|setdefault|rename] ...";
 }
 
 // Tear down the cryptographic relationship for a peer: close any live AEAD
@@ -20196,7 +19781,7 @@ const char* cmd_espnow_broadcast(const String& argsInput) {
   return "Broadcast sent";
 }
 
-// Helper function to send a file to a specific MAC address via v3 binary protocol
+// Send a file to a specific MAC address (FILE_START / FILE_DATA / FILE_END).
 // Used by FILE_BROWSE fetch and other internal functions
 // RAII flag set around an outbound file send so the rekey scheduler can see it
 // (the slot table only tracks INBOUND transfers). Peer + start-time are published
@@ -20347,7 +19932,7 @@ FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath) 
     fileSize = file.size();
   }
   
-  // Phase 3.5: chunk size aligned to ESPNOW_V4_MAX_PLAINTEXT so that the
+  // Chunk size aligned to ESPNOW_V4_MAX_PLAINTEXT so that the
   // V4PayloadFileData.data[] declared size (200) matches what we put on the
   // wire. Old code used MAX_PAYLOAD - 2 = 216, which only "worked" because
   // the surrounding stack buffer was MAX_PAYLOAD-sized and we wrote past
@@ -20404,7 +19989,7 @@ FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath) 
   
   vTaskDelay(pdMS_TO_TICKS(100));  // Give receiver more time to set up
   
-  // Send chunks - use stack buffer sized for v3 payload.
+  // Send chunks - use stack buffer sized for payload.
   // The loop can ABORT (integrity pass) on any of three causes; on exit,
   // chunkIdx < totalChunks is the single source of truth for "aborted":
   //   1. receiver cancelled — v4h_file_cancel (espnow_task) published our
@@ -20690,9 +20275,9 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
     return sendfileBuffer;
   }
 
-  BROADCAST_PRINTF("[ESP-NOW] Sending file to %s: %s (%lu bytes) via v3", deviceName.c_str(), filename.c_str(), (unsigned long)fileSize);
+  BROADCAST_PRINTF("[ESP-NOW] Sending file to %s: %s (%lu bytes)", deviceName.c_str(), filename.c_str(), (unsigned long)fileSize);
 
-  // Use unified v3 file transfer
+  // Use unified file transfer
   const FileSendResult sendResult = sendFileToMacResult(mac, filepath);
   if (sendResult == FileSendResult::NoSession) {
     // Nothing was sent. Also what a remote espnowfetch gets back as its result.
@@ -20718,7 +20303,7 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
   gEspNow->fileTransfersSent++;
   logFileTransferEvent(mac, deviceName.c_str(), filename.c_str(), MSG_FILE_SEND_SUCCESS);
   
-  snprintf(sendfileBuffer, sizeof(sendfileBuffer), "File sent successfully via v3: %s (%lu bytes)",
+  snprintf(sendfileBuffer, sizeof(sendfileBuffer), "File sent successfully: %s (%lu bytes)",
            filename.c_str(), (unsigned long)fileSize);
   return sendfileBuffer;
 }
@@ -20987,7 +20572,7 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
     gEspNow->devices[gEspNow->deviceCount].name = deviceName;
     gEspNow->devices[gEspNow->deviceCount].encrypted = true;
     memcpy(gEspNow->devices[gEspNow->deviceCount].key, gEspNow->derivedKey, 16);
-    gEspNow->devices[gEspNow->deviceCount].meshId = meshId;  // Phase 2.5
+    gEspNow->devices[gEspNow->deviceCount].meshId = meshId;
     // A new pairing starts with no room or tags accepted.
     gEspNow->devices[gEspNow->deviceCount].acceptedRoom = "";
     gEspNow->devices[gEspNow->deviceCount].acceptedTags = "";
@@ -21018,11 +20603,9 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
   systemEventPost(SYSEVT_PEER_PAIRED, deviceName.c_str(), macStr.c_str());
 
   // 2026-05-19 — auto-trigger KEY_EX so "pairsecure" actually delivers a
-  // working end-to-end secure pair in one command. Without this the legacy
-  // LMK (now unused post-Phase-3.5) is the only "security" installed, and
-  // any default-encrypted unicast (espnowsend, espnowsessionsend, …) fails
-  // with "no peer identity — run espnowkeyex first" because the Phase 3.3
-  // KEY_EX never ran. KEY_EX is async (~100ms over the air) — by the time
+  // working end-to-end secure pair in one command. Without this any
+  // encrypted unicast (espnowsend, espnowsessionsend, …) fails with
+  // "no peer identity — run espnowkeyex first" because KEY_EX never ran. KEY_EX is async (~100ms over the air) — by the time
   // the user's next command lands, the peer identity will be cached and
   // the next encrypted send will auto-kick SESSION_OPEN.
   // Re-pair is an explicit, local operator action — open a short re-key window
@@ -21126,7 +20709,7 @@ const char* cmd_espnow_requestmeta(const String& argsInput) {
 // ============================================================================
 
 // Remote file browse
-// reqId-correlation ack helper (Phase 3): in `json` mode, swap a human error
+// reqId-correlation ack helper: in `json` mode, swap a human error
 // string for a json error so a `... json` caller never has to parse free text.
 // On success these senders return {"schema":1,"ok":true,"reqId":<msgId>} — the
 // caller polls `espnowmessages json` and matches that reqId to the result.
@@ -21172,7 +20755,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
     return browseBuffer;
   }
 
-  // Build V3 CMD payload: "user:pass:files \"/path\"" — the remote parses the
+  // Build CMD payload: "user:pass:files \"/path\"" — the remote parses the
   // path as a quoted token (uniform quoted-path rule), so it survives spaces.
   char cmdPayload[ESPNOW_V4_MAX_PAYLOAD];
   int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:files \"%s\"",
@@ -21189,7 +20772,7 @@ const char* cmd_espnow_browse(const String& argsInput) {
     }
   }
 
-  // Send via V3 CMD (receiver parses user:pass:cmd format)
+  // Send via CMD (receiver parses user:pass:cmd format)
   uint32_t msgId = generateMessageId();
   // Step 3b: route through clerk (JOB_AEAD_SMART → v4_send_payload_smart →
   // v4_send_encrypted_or_queue). Status-string distinction (immediate vs
@@ -21254,8 +20837,8 @@ const char* cmd_espnow_fetch(const String& argsInput) {
     return fetchBuffer;
   }
 
-  // Build V3 CMD payload: "user:pass:espnowsendfile <our_name> <path>"
-  // This tells the remote device to send the file back to us via V3 binary file transfer.
+  // Build CMD payload: "user:pass:espnowsendfile <our_name> <path>"
+  // This tells the remote device to send the file back to us via file transfer.
   // NOTE: the command token is "espnowsendfile" (one word) — it is registered that way in
   // the command table. Emitting "espnow sendfile" (two words) makes the remote reject it as
   // "Unknown command", which is why fetch silently failed while direct send worked.
@@ -21373,7 +20956,7 @@ const char* cmd_espnow_remote(const String& argsInput) {
     }
   }
 
-  // V3 binary CMD message (credentials checked on receiver)
+  // CMD message (credentials checked on receiver)
   // Build command payload: "user:pass:cmd"
   char cmdPayload[ESPNOW_V4_MAX_PAYLOAD];
   int payloadLen = snprintf(cmdPayload, sizeof(cmdPayload), "%s:%s:%s", 
@@ -21629,7 +21212,7 @@ const char* cmd_espnow_send(const String& argsInput) {
   // reply says "queued", not "sent", for a frame that has not left yet.
   // Smart path queues to the pending ring if session not yet ACTIVE; drain on
   // SESSION_CONFIRM reuses the same msgId so the bubble-flip still works.
-  // Phase 3.5 task #49 — register the msgId so the web UI's polling loop can
+  // Register the msgId so the web UI's polling loop can
   // flip the bubble to ✓✓ Delivered. Register BEFORE sending: a long (chunked)
   // message is sent SYNCHRONOUSLY, and v4_send_encrypted_chunked marks the msgId
   // delivered from INSIDE sendAeadSync once all fragments ACK. If we registered
@@ -21855,7 +21438,7 @@ const char* cmd_bond_showcap(const String& argsInput) {
 }
 
 /**
- * Request full manifest from bonded peer (v3 binary protocol)
+ * Request full manifest from bonded peer
  */
 const char* cmd_bond_requestmanifest(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -21869,14 +21452,14 @@ const char* cmd_bond_requestmanifest(const String& argsInput) {
     return "Error: Invalid peer MAC address in settings.";
   }
   
-  // Send v3 manifest request
+  // Send the manifest request
   uint32_t msgId = generateMessageId();
   bool queued = false;
   if (bondSendRequestForReply(peerMac, ESPNOW_V4_TYPE_MANIFEST_REQ, msgId, &queued)) {
     cliHint("the manifest arrives asynchronously via file transfer - view it with 'bondshowremotemanifest'");
-    return queued ? "Manifest request queued until the session with the bond partner opens (v3). "
+    return queued ? "Manifest request queued until the session with the bond partner opens. "
                     "Response will arrive via file transfer."
-                  : "Manifest request sent (v3). Response will arrive via file transfer.";
+                  : "Manifest request sent. Response will arrive via file transfer.";
   } else {
     return "Error: Failed to send manifest request.";
   }
@@ -22873,66 +22456,6 @@ const char* cmd_bond_stream(const String& argsInput) {
                         : "OK: Started streaming sensor data to bonded master";
 }
 
-/**
- * Test sensor streaming: bondtestsensor [type]
- * Sends a dummy sensor data packet to verify the V4 sensor-data path
- */
-const char* cmd_bond_testsensor(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  if (!gSettings.bondModeEnabled) {
-    return "Error: Not in bond mode. Use 'bondconnect <device>' first.";
-  }
-  
-  String args = argsInput;
-  args.trim();
-  args.toLowerCase();
-
-  // Default to thermal sensor for testing
-  RemoteSensorType testType = REMOTE_SENSOR_THERMAL;
-  if (args.length() > 0 && !sensorTypeFromString(args.c_str(), testType)) {
-    return "Error: Unknown sensor. Valid: thermal, tof, imu, gps, input, fmradio, rtc, presence";
-  }
-  // The causes the send below would only report as "not sent".
-  if (!gEspNow || !gEspNow->initialized) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
-  if (isBondMaster()) {
-    return "Error: This device is the bond master; only the worker sends sensor data. "
-           "Run bondtestsensor on the worker.";
-  }
-  if (!isBondModeOnline()) return "Error: Bond partner is offline. Wait for it and retry.";
-  
-  broadcastOutput("[BOND_TEST] Testing v3 sensor data transmission...");
-  BROADCAST_PRINTF("  Sensor type: %s (%d)", sensorTypeToString(testType), (int)testType);
-  BROADCAST_PRINTF("  Role: %s", isBondMaster() ? "MASTER" : "WORKER");
-  BROADCAST_PRINTF("  Peer MAC: %s", gSettings.bondPeerMac.c_str());
-  BROADCAST_PRINTF("  isBondModeOnline(): %s", isBondModeOnline() ? "YES" : "NO");
-  
-  // Build a test JSON payload
-  char testJsonBuf[128];
-  snprintf(testJsonBuf, sizeof(testJsonBuf), "{\"test\":true,\"type\":\"%s\",\"timestamp\":%lu,\"value\":42.5}",
-           sensorTypeToString(testType), (unsigned long)millis());
-  String testJson = testJsonBuf;
-  
-  BROADCAST_PRINTF("  Test payload (%u bytes): %s", (unsigned)testJson.length(), testJson.c_str());
-  
-  uint8_t peerMac[6];
-  espnowsensor::DropReason why = espnowsensor::DropReason::NoReceiver;
-  const bool sent = parseMacAddress(gSettings.bondPeerMac, peerMac) &&
-                    sensorSendReadingTo(peerMac, /*viaBond=*/true, testType, testJson.c_str(),
-                                        testJson.length(), &why);
-  
-  if (sent) {
-    broadcastOutput("[BOND_TEST] SUCCESS: Test reading queued for the bond partner");
-    return "OK: Test sensor packet sent";
-  } else {
-    BROADCAST_PRINTF("[BOND_TEST] FAILED: not sent (%s)", espnowsensor::dropReasonText(why));
-    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
-    snprintf(getDebugBuffer(), 1024, "Error: Test packet was not queued (%s). Retry in a few seconds.",
-             espnowsensor::dropReasonText(why));
-    return getDebugBuffer();
-  }
-}
-
 #endif // ENABLE_BONDED_MODE
 
 // ============================================================================
@@ -22947,7 +22470,6 @@ const char* cmd_espnow_heartbeatinterval(const String&);
 const char* cmd_espnow_failovertimeout(const String&);
 const char* cmd_espnow_topodiscoveryinterval(const String&);
 const char* cmd_espnow_topoautorefresh(const String&);
-const char* cmd_espnow_heartbeatbroadcast(const String&);
 const char* cmd_espnow_meshrelay(const String&);
 const char* cmd_espnow_meshpeermax(const String&);
 const char* cmd_espnow_historykb(const String&);
@@ -23343,10 +22865,10 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowsaturationreset", "Clear the saturation rolling window (use before a stress test).", false, cmd_espnow_saturationreset },
   { "espnowrelayblock", "DIAGNOSTIC: drop ALL inbound ESP-NOW frames from one MAC (bench stand-in for an out-of-range peer; relay HW testing). RAM-only - reboot clears it.", true, cmd_espnow_relayblock, "Usage: espnowrelayblock <mac|clear|status>\n       Drops frames at the RX drain before any parsing - heartbeats too, so the peer goes offline within ~30s, like real RF loss." },
 
-  // ---- ESP-NOW Cryptographic Identity (Phase 3.0/3.3) ----
+  // ---- ESP-NOW Cryptographic Identity ----
   { "espnowidentity", "Show long-term Ed25519 identity (MAC, pub key, createdAtSec, regenCount).", false, cmd_espnow_identity },
   { "espnowregenidentity", "Regenerate Ed25519 identity. Requires '--confirm-wipe-all-bonds'.", true, cmd_espnow_regenidentity, "Usage: espnowregenidentity --confirm-wipe-all-bonds", /*requiresSuperAdmin=*/true },
-  { "espnowkeyex", "Initiate KEY_EX handshake with a peer (runs alongside legacy pairing). (async - handshake completes later; check espnowsessions)", true, cmd_espnow_keyex, "Usage: espnowkeyex <name_or_mac> [<mesh>]\n       Returns OK when KEY_EX_HELLO is sent; the handshake completes asynchronously - inspect with 'espnowsessions' / 'espnowencstatus'." },
+  { "espnowkeyex", "Initiate KEY_EX handshake with a peer (espnowpairsecure starts it too). (async - handshake completes later; check espnowsessions)", true, cmd_espnow_keyex, "Usage: espnowkeyex <name_or_mac> [<mesh>]\n       Returns OK when KEY_EX_HELLO is sent; the handshake completes asynchronously - inspect with 'espnowsessions' / 'espnowencstatus'." },
   { "espnowprobe", "Reachability probe via KEY_EX. Synchronous, bounded timeout. Reports alive+mesh+firmware in one shot (no plaintext on the wire).", true, cmd_espnow_probe, "Usage: espnowprobe <name_or_mac> [<timeoutMs (50-5000, default 500)>] [<mesh>]" },
   { "espnowsessionopen", "Initiate SESSION handshake (requires prior espnowkeyex). (async - session goes ACTIVE later; check espnowsessions)", true, cmd_espnow_sessionopen, "Usage: espnowsessionopen <name_or_mac> [<mesh>]\n       Returns OK when SESSION_OPEN is sent; the session becomes ACTIVE when CONFIRM arrives - run 'espnowsessions'." },
   { "espnowsessions", "Show in-RAM session state (peer, mesh slot, sessionId, dir, age, counters) and each peer's capabilities from its handshake (caps=bond,remote_fs,...); the first line shows this device's.", false, cmd_espnow_sessions },
@@ -23358,7 +22880,6 @@ extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Initialization & Pairing ----
   { "openespnow", "Initialize ESP-NOW communication.", true, cmd_espnow_init },
   { "closeespnow", "Deinitialize ESP-NOW and free resources.", true, cmd_espnow_deinit },
-  { "espnowpair", "Pair ESP-NOW device: 'espnowpair <mac> <name> [mesh]'. (synchronous; local registry add, no remote handshake)", true, cmd_espnow_pair, "Usage: espnowpair <mac> <name> [mesh]" },
   { "espnowunpair", "Unpair ESP-NOW device and remove what this device stored about it (crypto identity, bond caches, its cached manifest); unpairing the bond partner ends the bond too: 'espnowunpair <name_or_mac>'.", true, cmd_espnow_unpair, "Usage: espnowunpair <name_or_mac>", /*requiresSuperAdmin=*/true },
   { "espnowforget", "Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.", true, cmd_espnow_forget, "Usage: espnowforget <name_or_mac>", /*requiresSuperAdmin=*/true },
   { "espnowlist", "List all paired ESP-NOW devices.", false, cmd_espnow_list },
@@ -23368,11 +22889,10 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowmeshstatus", "Show mesh peer health (heartbeats & ACKs).", false, cmd_espnow_meshstatus },
   { "espnowmeshmetrics", "Show multi-hop routing metrics (flood forwards, routed hops, drops, route churn).", false, cmd_espnow_meshmetrics },
   { "espnowmeshroutes", "Show the mesh route table: who this node can reach and via which neighbour.", false, cmd_espnow_meshroutes, "Usage: espnowmeshroutes [clear]\n       'via (direct)' = in radio range. Anything else is reached over one or more relay hops.\n       Multi-hop routes are learned from neighbours every 30s — allow a minute after boot." },
-  { "espnowmeshes", "Manage multi-mesh slots: 'espnowmeshes [list|add|remove|delete|enable|setdefault|rename|setpassphrase] ...'.", true, cmd_espnow_meshes, "Usage: espnowmeshes list\n       espnowmeshes add <label>          (then set passphrase via 'espnowsetpassphrase <label> <pw>')\n       espnowmeshes remove <label>       (alias: disable)\n       espnowmeshes delete <label>       (frees the slot; unpair its devices first)\n       espnowmeshes enable <label>\n       espnowmeshes setdefault <label>\n       espnowmeshes setpassphrase <label> <passphrase>\n       espnowmeshes rename <oldLabel> <newLabel>" },
+  { "espnowmeshes", "Manage multi-mesh slots: 'espnowmeshes [list|add|remove|delete|enable|setdefault|rename] ...'.", true, cmd_espnow_meshes, "Usage: espnowmeshes list\n       espnowmeshes add <label>          (then set passphrase via 'espnowsetpassphrase <label> <pw>')\n       espnowmeshes remove <label>       (disables it; the slot is kept)\n       espnowmeshes delete <label>       (frees the slot; unpair its devices first)\n       espnowmeshes enable <label>\n       espnowmeshes setdefault <label>\n       (set or clear its passphrase with 'espnowsetpassphrase <label> <passphrase|clear>')\n       espnowmeshes rename <oldLabel> <newLabel>" },
   { "espnowmode", "Get/set ESP-NOW mode: 'espnowmode [direct|mesh]'.", true, cmd_espnow_mode, "Usage: espnowmode [direct|mesh]" },
   { "espnowmeshttl", "Get/set the multi-hop budget: 'espnowmeshttl [1-10]'.", false, cmd_espnow_meshttl, "Usage: espnowmeshttl [<1..10>]\n       How many hops this node's relay-eligible frames may travel. 1 = single hop (no multi-hop).\n       Applies to broadcast text/time sync and to routed unicast; heartbeats and pairing are always single-hop." },
   { "espnowchannel", "Get/set preferred ESP-NOW channel: 'espnowchannel [1-13|auto|resync]'. No arg shows a checker (actual vs expected). Set the SAME value on both devices to pair off-grid.", true, cmd_espnow_channel, "Usage: espnowchannel [<1..13>|auto|resync]\n       (no arg) = show preference, actual radio channel, expected, and an OK/MISMATCH check.\n       auto (0) = a worker follows its master's channel (hunting for it when silent); a master follows WiFi; offline fallback otherwise. 1-13 = force this channel when not joined to WiFi.\n       resync   = force the radio back onto the correct channel now (no setting change).\n       Two devices only hear each other on the same channel — set both the same for field use." },
-  { "espnowhbmode", "Get/set heartbeat mode: 'espnowhbmode [public|private]'.", true, cmd_espnow_hbmode, "Usage: espnowhbmode [public|private]" },
   { "espnowmeshrole", "Get/set mesh role: 'espnowmeshrole [worker|master|backup]'.", true, cmd_espnow_meshrole, "Usage: espnowmeshrole [worker|master|backup]" },
   { "espnowmeshmaster", "Get/set master MAC: 'espnowmeshmaster [MAC]'.", true, cmd_espnow_meshmaster, "Usage: espnowmeshmaster [<AA:BB:CC:DD:EE:FF>]" },
   { "espnowmeshbackup", "Get/set backup MAC: 'espnowmeshbackup [MAC]'.", true, cmd_espnow_meshbackup, "Usage: espnowmeshbackup [<AA:BB:CC:DD:EE:FF>]" },
@@ -23442,7 +22962,6 @@ extern const CommandEntry espNowCommands[] = {
   { "bondresync", "Force re-sync of bond state (cap+manifest+settings+schema). Use when UI is stuck on 'Establishing Bond' or peer state looks stale. (async - results populate as they arrive)", true, cmd_bond_resync, "Usage: bondresync [--cap|--manifest|--settings|--schema|--all]\n       Returns OK on dispatch; results arrive over time - view via 'bondshowremotemanifest' and GET /api/bond/status, /api/bond/settings, /api/bond/settings/schema." },
   { "bondshowremotemanifest", "Show cached remote manifest(s): 'bondshowremotemanifest [fwHash]'.", false, cmd_bond_showremotemanifest, "Usage: bondshowremotemanifest [<fwHash>]" },
   { "bondstream", "Toggle bond sensor streaming (works on both roles): 'bondstream <sensor> <on|off>'. WORKER streams its sensor to the bonded master; MASTER commands the bonded worker to start/stop. (local toggle; data lands on the master's espnowsensorstatus)", true, cmd_bond_stream, "Usage: bondstream <sensor> <on|off>\n       bondstream (show status)\n       On a WORKER: streams this device's sensor to the bonded master. On a MASTER: tells the bonded worker to start/stop that sensor.\n       Streamed data is viewable on the master via 'espnowsensorstatus' / GET /api/sensors/remote." },
-  { "bondtestsensor", "Test v3 sensor data transmission (worker only - a master cannot send sensor data): 'bondtestsensor [sensor_type]'. (async - frame appears on the master via espnowsensorstatus)", true, cmd_bond_testsensor, "Usage: bondtestsensor [thermal|tof|imu|gps|input|fmradio|rtc|presence]   (worker only)\n       Returns OK on send; the test frame appears on the bonded master's remote-sensor cache ('espnowsensorstatus' / GET /api/sensors/remote)." },
 #endif
   
   // ---- ESP-NOW Encryption ----
@@ -23455,13 +22974,6 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowaccept", "Accept a pending incoming pair request: 'espnowaccept [<mac_or_name>]'.", true, cmd_espnow_accept, "Usage: espnowaccept [<mac_or_name>]  (no arg = the sole pending request)" },
   { "espnowreject", "Reject a pending incoming pair request: 'espnowreject [<mac_or_name>]'.", true, cmd_espnow_reject, "Usage: espnowreject [<mac_or_name>]" },
   
-  // ---- ESP-NOW Testing Commands ----
-  // The three that rewrite the live topology collection (gTopoStreams and the
-  // request counters) are admin-only; testfilelock only prints the slot table.
-  { "teststreams", "Test topology stream management functions.", true, cmd_test_streams },
-  { "testconcurrent", "Test concurrent topology streams (simulated).", true, cmd_test_concurrent },
-  { "testcleanup", "Test cleanup of stale topology streams.", true, cmd_test_cleanup },
-  { "testfilelock", "Test file transfer lock acquire/release.", false, cmd_test_filelock },
   
   // ---- ESP-NOW Settings (schema-driven, for web UI save) ----
   { "espnowfirsttimesetup",          "Set first time setup flag: <0|1>", true, cmd_espnow_firsttimesetup, "Usage: espnowfirsttimesetup <0|1>" },
@@ -23469,7 +22981,6 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowfailovertimeout",         "Set failover timeout: <5000-120000 ms>", true, cmd_espnow_failovertimeout, "Usage: espnowfailovertimeout <5000..120000>" },
   { "espnowtopodiscoveryinterval",   "Set topology discovery interval: <0-300000 ms>", true, cmd_espnow_topodiscoveryinterval, "Usage: espnowtopodiscoveryinterval <0..300000>" },
   { "espnowtopoautorefresh",         "Set auto refresh topology: <0|1>", true, cmd_espnow_topoautorefresh, "Usage: espnowtopoautorefresh <0|1>" },
-  { "espnowheartbeatbroadcast",      "Set heartbeat broadcast: <0|1>", true, cmd_espnow_heartbeatbroadcast, "Usage: espnowheartbeatbroadcast <0|1>" },
   { "espnowmeshrelay",               "Carry other nodes' mesh traffic: <0|1>", true, cmd_espnow_meshrelay, "Usage: espnowmeshrelay <0|1>\n       1 (default) = act as a relay so out-of-range peers can reach each other through this node.\n       0 = stop forwarding for others. This node still uses multi-hop for its OWN traffic\n       (set espnowmeshttl 1 for that), and stops advertising routes so nobody sends via it." },
   { "espnowmeshpeermax",             "Set max peer slots: <1-16> (reboot required)", true, cmd_espnow_meshpeermax, "Usage: espnowmeshpeermax <1..16>" },
   { "espnowhistorykb", "Message history per peer and direction in KB: [<0-32>] (0 = board default; no argument shows saved and active; reboot required)", true, cmd_espnow_historykb, "Usage: espnowhistorykb [<0..32>]" },
@@ -23522,7 +23033,6 @@ static const SettingEntry espnowSettingEntries[] = {
   { "failoverTimeout", SETTING_INT, &gSettings.meshFailoverTimeout, 20000, 0, nullptr, 5000, 120000, "Failover Timeout (ms)", nullptr, false, "mesh", "espnowfailovertimeout" },
   { "topoDiscoveryInterval", SETTING_INT, &gSettings.meshTopoDiscoveryInterval, 0, 0, nullptr, 0, 300000, "Topo Discovery Interval (ms)", nullptr, false, "mesh", "espnowtopodiscoveryinterval" },
   { "topoAutoRefresh", SETTING_BOOL, &gSettings.meshTopoAutoRefresh, false, 0, nullptr, 0, 1, "Auto Refresh Topology", nullptr, false, "mesh", "espnowtopoautorefresh" },
-  { "heartbeatBroadcast", SETTING_BOOL, &gSettings.meshHeartbeatBroadcast, true, 0, nullptr, 0, 1, "Heartbeat Broadcast", nullptr, false, "mesh", "espnowheartbeatbroadcast" },
   { "meshTTL", SETTING_U8, &gSettings.meshTtl, 3, 0, nullptr, 1, 10, "TTL", nullptr, false, "mesh", "espnowmeshttl" },
   // Preferred radio channel (0=auto, 1-13). U8 range 0..13. cmdKey routes the
   // settings editor to the custom cmd_espnow_channel so a change applies live.
@@ -23597,7 +23107,6 @@ ESPNOW_SETTING_CMD(cmd_espnow_heartbeatinterval, "masterHeartbeatInterval")
 ESPNOW_SETTING_CMD(cmd_espnow_failovertimeout, "failoverTimeout")
 ESPNOW_SETTING_CMD(cmd_espnow_topodiscoveryinterval, "topoDiscoveryInterval")
 ESPNOW_SETTING_CMD(cmd_espnow_topoautorefresh, "topoAutoRefresh")
-ESPNOW_SETTING_CMD(cmd_espnow_heartbeatbroadcast, "heartbeatBroadcast")
 ESPNOW_SETTING_CMD(cmd_espnow_meshrelay, "meshRelay")
 ESPNOW_SETTING_CMD(cmd_espnow_meshpeermax, "meshPeerMax")
 ESPNOW_SETTING_CMD(cmd_espnow_meshtime, "meshTime")
@@ -23695,7 +23204,7 @@ const char* cmd_espnow_backupfingerprint(const String& a) {
 
 // Phase 1b test harness: hand-send a SENSOR_REQ to a paired worker so the worker path
 // (fingerprint auth → lease → encrypted SENSOR_ENVELOPE reply) is exercisable before the
-// master auto-fetch tick (Phase 2) exists. Admin-gated; removed/kept as a diagnostic later.
+// master auto-fetch tick exists. Admin-gated; removed/kept as a diagnostic later.
 //
 // A bond partner whose bond master forwards its readings here is asked the
 // same way: 'espnowsensorreq <partner> via <bond master> ...', or the

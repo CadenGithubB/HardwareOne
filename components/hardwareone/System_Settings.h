@@ -230,7 +230,6 @@ struct Settings {
       meshFailoverTimeout(20000),
       meshTopoDiscoveryInterval(0),
       meshTopoAutoRefresh(false),
-      meshHeartbeatBroadcast(true),
       meshTtl(3),
       meshRelay(true),
       meshPeerMax(8),
@@ -803,7 +802,6 @@ struct Settings {
   uint32_t meshFailoverTimeout;        // Backup promotes after this timeout (ms, default: 20000)
   uint32_t meshTopoDiscoveryInterval;  // Topology discovery interval (ms, 0=disabled)
   bool meshTopoAutoRefresh;            // Enable automatic topology refresh
-  bool meshHeartbeatBroadcast;         // Broadcast heartbeats to FF:FF:FF:FF:FF:FF (public mode)
   uint8_t meshTtl;                     // Hop budget stamped on relay-eligible frames (1-10,
                                        // default 3). 1 = single hop, i.e. relaying off for
                                        // that frame. Applies to flooded broadcasts and to the

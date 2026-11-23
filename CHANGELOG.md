@@ -21,6 +21,21 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this section collects
 everything user-visible since the v0.99.99.1 tag.
 
+### Removed (ESP-NOW 1.0 clean-out)
+Host-tested and built; not run on a device.
+- **`espnowpair` is gone: every pairing is encrypted.** Pair by discovery (`espnowpairmode` on
+  both devices, then `espnowpairrequest` and `espnowaccept`) or run `espnowpairsecure <mac> <name>`
+  on both devices. On the ESP-NOW page, **Pair** on a discovered device sends a pair request (the
+  other device accepts it), and the Add Device form has one **Pair** button, which runs
+  `espnowpairsecure` and says to do the same on the other device.
+- `espnowhbmode`, `espnowheartbeatbroadcast` and the setting `heartbeatBroadcast` are gone; the
+  setting changed nothing.
+- The test commands `teststreams`, `testconcurrent`, `testcleanup`, `testfilelock` and
+  `bondtestsensor` are gone.
+- `espnowmeshes setpassphrase` and `espnowmeshes disable` are gone: set or clear a passphrase with
+  `espnowsetpassphrase <mesh> <passphrase|clear>`, and disable a mesh with `espnowmeshes remove`.
+- Replies no longer say "via v3" (`espnowsendfile`, `bondrequestmanifest`).
+
 ### Changed (logs on the SD card are sealed)
 Host-tested and built; not run on a device or with a card.
 - **Logs go to the SD card first.** While a card takes writes, has more than 8 MB free and the
