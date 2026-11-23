@@ -96,18 +96,18 @@ def source_checks() -> None:
     # Setting and command rows.
     require(re.search(r'\{ "espLogLevels",\s+SETTING_STRING, &gSettings\.espLogLevels,.*"esplog" \},', settings),
             "espLogLevels is a debug-module string row bound to esplog")
-    require("kDbgRegHandRows = 4;" in settings, "the debug registry counts the esplog hand row")
+    require("kDbgRegHandRows = 5;" in settings, "the debug registry counts the esplog (and bootdebug) hand rows")
     require("String espLogLevels;" in settings_h and 'espLogLevels(""),' in settings_h, "the field and its default")
     require(re.search(r'\{ "esplog", "[^"]+", true, cmd_esplog,', debug), "esplog is an admin debug command")
 
     # The owners re-apply the tag entries (not the wildcard) after their tags.
     order(extract_block(debug, "void applyLogLevel(uint8_t level)"),
-          'esp_log_level_set("phy_init", espLevel);', "applyEspLogOverrides(false);")
+          'bootDebugEspLogSet("phy_init", espLevel);', "applyEspLogOverrides(false);")
     order(extract_block(debug, "void applyHttpsLogLevels(bool verbose)"),
-          'esp_log_level_set("httpd_txrx", lvl);', "applyEspLogOverrides(false);")
+          'bootDebugEspLogSet("httpd_txrx", lvl);', "applyEspLogOverrides(false);")
     # Boot: after the I2C tag (hardware phase) and applySettings, before the
     # radio companion and Wi-Fi; HAL_Radio's RPC tags are set before setup().
-    order(boot, "applySettings();", 'esp_log_level_set("i2c.master", ESP_LOG_WARN);',
+    order(boot, "applySettings();", 'bootDebugEspLogSet("i2c.master", ESP_LOG_WARN);',
           "crashRecordSetPhase(CRASH_PHASE_NETWORK);", "applyEspLogOverrides(true);", "radioCompanionBootInit();")
     require(boot.count("applyEspLogOverrides(") == 1, "one boot apply")
     # Every fresh Hosted session resets rpc_core/rpc_rsp/rpc_evt to WARN in

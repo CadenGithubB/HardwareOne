@@ -30,7 +30,6 @@ def main() -> None:
     args = parser.parse_args()
     require(bool(args.cxx), "a host C++17 compiler is required")
     modules = {
-        "imu": ("bno055", "gBNO055", "Adafruit_BNO055", "imu.obj", 1, 5),
         "apds": ("apds9960", "gAPDS9960", "Adafruit_APDS9960", "apds.obj", 1, 4),
         "servo": ("pca9685", "gPwmDriver", "Adafruit_PWMServoDriver", "servo.obj", 1, 1),
         "gamepad": ("seesaw", "gGamepadSeesaw", "Adafruit_seesaw", "input.gamepad.obj", 2, 0),
@@ -52,8 +51,14 @@ def main() -> None:
         require(len(re.findall(rf"ps_delete\s*\(\s*{pointer}\s*\)\s*;\s*"
                                rf"{pointer}\s*=\s*nullptr\s*;", source)) == releases,
                 f"{name} changed parent release/nulling count or retained-object ownership")
+    # The IMU (HAL_Motion.cpp) keeps no driver object: its BNO055 backend is
+    # register level. Only its cache invalidation and task shutdown run here.
+    sources["imu"] = (COMPONENT / "HAL_Motion.cpp").read_text()
+    imu_code = sources["imu"] + (COMPONENT / "HAL_Motion_BNO055.cpp").read_text()
+    require("#include <Adafruit_BNO055.h>" not in imu_code and "ps_alloc" not in imu_code,
+            "the IMU layer allocates no BNO055 library object")
     init_definitions = []
-    for module, function in (("imu", "imuInit"), ("apds", "apdsInit"),
+    for module, function in (("apds", "apdsInit"),
                              ("servo", "servoInit"), ("gamepad", "gamepadInit"),
                              ("gamepad", "gamepadInitConnection"),
                              ("ano", "anoEncoderInit")):

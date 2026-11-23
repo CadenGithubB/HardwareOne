@@ -66,8 +66,8 @@ struct Settings {
       imuEwmaFactor(0.1f),
       imuTransitionMs(100),
       imuWebMaxFps(15),
-      imuOrientationCorrectionEnabled(true),
-      imuOrientationMode(8),
+      imuOrientationCorrectionEnabled(false),  // the chip's own readings unless a mounting asks
+      imuOrientationMode(0),
       imuPitchOffset(0.0f),
       imuRollOffset(0.0f),
       imuYawOffset(0.0f),
@@ -207,6 +207,7 @@ struct Settings {
       debugSrTuning(false),
       logLevel(3),                    // Default: LOG_LEVEL_DEBUG (show everything)
       espLogLevels(""),               // No ESP-IDF tag overrides (esplog)
+      bootDebugCapture(true),         // Boot debug file on (bootdebug)
       memorySampleIntervalSec(30),
       espnowmesh(false),
       espnowUserSyncEnabled(false),
@@ -297,6 +298,7 @@ struct Settings {
       thermalAutoStart(false),
       tofAutoStart(false),
       imuAutoStart(false),
+      imuAddress(0x28),  // the BNO055 default; the imu module's schema default applies at boot
       gpsAutoStart(false),
       fmRadioAutoStart(false),
       apdsAutoStart(false),
@@ -757,6 +759,7 @@ struct Settings {
   bool webConsoleDebug;                // Enable browser console.log/warn/debug output in web UI (default: false)
   int logLevel;                        // Severity-based logging level (0=error, 1=warn, 2=info, 3=debug)
   String espLogLevels;                 // ESP-IDF log levels by tag, "tag:L,tag:L" (esplog; System_EspLogCore.h)
+  bool bootDebugCapture;               // Every debug output on during boot, into boot-debug-1.log (bootdebug; System_BootDebug.h)
   int memorySampleIntervalSec;  // Periodic memory sampling interval in seconds (0=disabled, default: 30)
   // ESP-NOW settings
   bool espnowmesh;
@@ -925,7 +928,7 @@ struct Settings {
   int rtcBus;               // DS3231 precision RTC
   int fmRadioBus;           // RDA5807 FM radio
   int presenceBus;          // STHS34PF80 IR presence/motion
-  int imuBus;               // BNO055 9-axis IMU (compiled out by default)
+  int imuBus;               // IMU (motion sensor, compiled out by default)
   int thermalBus;           // MLX90640 thermal camera (compiled out)
   int tofBus;               // VL53L4CX time-of-flight (compiled out)
   int apdsBus;              // APDS9960 gesture/proximity (compiled out)
@@ -968,6 +971,7 @@ struct Settings {
   bool thermalAutoStart;        // Auto-start thermal camera after boot
   bool tofAutoStart;            // Auto-start ToF distance sensor after boot
   bool imuAutoStart;            // Auto-start IMU after boot
+  int  imuAddress;              // IMU I2C address, the backend's rule (HAL_Motion: imuaddress)
   bool gpsAutoStart;            // Auto-start GPS after boot
   bool fmRadioAutoStart;        // Auto-start FM radio after boot
   bool apdsAutoStart;           // Auto-start APDS gesture/color sensor after boot

@@ -26,6 +26,18 @@ set_target_properties(ano_encoder_core_tests PROPERTIES CXX_STANDARD 17 CXX_STAN
 target_include_directories(ano_encoder_core_tests PRIVATE ../..)
 target_compile_options(ano_encoder_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# The motion (IMU) layer's pure rules (HAL_MotionCore.h): the orientation
+# correction, the action detector (rotation in rad/s, tap, free fall, steps,
+# pose debounce); and the BNO055 backend's bounded start sequence and decode
+# (HAL_Motion_BNO055Core.h) over a scripted chip.
+add_executable(motion_core_tests test_motion_core.cpp)
+add_executable(motion_bno055_core_tests test_motion_bno055_core.cpp)
+foreach(target motion_core_tests motion_bno055_core_tests)
+  set_target_properties(${target} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+  target_include_directories(${target} PRIVATE ../..)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -pedantic)
+endforeach()
+
 # Compiles the REAL header from the firmware tree, not a copy of it — the same
 # rule updater/test/host/CMakeLists.txt states. System_LLMUtf8.h is kept
 # dependency-free so this is possible; if it ever gains an Arduino or ESP-IDF
@@ -925,8 +937,10 @@ if(HW1_SANITIZE)
 endif()
 
 # The boot debug capture (owner decision B13, System_BootDebugCore.h): whole
-# stamped lines, the first lines kept once the buffer is full, the truncation
-# counted and marked, the header's measurements, three kept boots.
+# stamped lines, the start of the boot and its newest lines kept with a
+# counted gap mark between, the header's measurements, three kept boots on a
+# card and one on flash, the recorded ESP-IDF tag levels and line shape; and
+# fileview's byte-range page boundaries (System_TextPager.h).
 add_executable(boot_debug_core_tests test_boot_debug_core.cpp)
 set_target_properties(boot_debug_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
@@ -1790,6 +1804,8 @@ add_test(NAME sdmmc_lifecycle
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME encoder_light_tests COMMAND encoder_light_tests)
 add_test(NAME ano_encoder_core_tests COMMAND ano_encoder_core_tests)
+add_test(NAME motion_core_tests COMMAND motion_core_tests)
+add_test(NAME motion_bno055_core_tests COMMAND motion_bno055_core_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
 add_test(NAME factory_wipe_policy_tests COMMAND factory_wipe_policy_tests)
@@ -2151,6 +2167,23 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_web_guest_view_browser.py
           --node ${HW1_NODE_CMD})
 set_tests_properties(web_guest_view_browser PROPERTIES SKIP_RETURN_CODE 77)
+# Guest privacy (owner 2026-11-22, item 4): a guest's /api/settings and MQTT
+# page leave out the saved Wi-Fi networks, the MQTT host and user name and the
+# LLM gateway (WebServer_GuestSettingsView.h, vendored ArduinoJson).
+add_test(
+  NAME web_guest_settings_view
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_guest_settings_view.py
+          --cxx ${CMAKE_CXX_COMPILER})
+# Guest privacy items 1-2: the R1 Health and ESP-NOW message pages say the
+# data is not a guest's (or a user's) and stop polling (Node.js or macOS jsc;
+# 77 = skipped without).
+add_test(
+  NAME web_guest_private_pages
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_guest_private_pages.py
+          --node ${HW1_NODE_CMD})
+set_tests_properties(web_guest_private_pages PROPERTIES SKIP_RETURN_CODE 77)
 add_test(
   NAME setup_espnow_application
   COMMAND ${Python3_EXECUTABLE}

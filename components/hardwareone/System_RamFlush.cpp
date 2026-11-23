@@ -35,7 +35,7 @@
 // condition.
 #include "i2csensor_seesaw.h"
 #include "i2csensor_mlx90640.h"
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_vl53l4cx.h"
 #include "i2csensor_rda5807.h"
 #include "i2csensor_pa1010d.h"

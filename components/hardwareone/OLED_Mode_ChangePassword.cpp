@@ -75,14 +75,9 @@ static void displayChangePasswordMode() {
     return;
   }
 
-  oledDisplay->clearDisplay();
-  
-  // Header
+  // The header bar shows the screen's name; the content starts below it.
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(0, 0);
   oledDisplay->setTextSize(1);
-  oledDisplay->println("Change Password");
-  oledDisplay->drawFastHLine(0, 9, 128, SSD1306_WHITE);
 
   // Guard: must be authenticated to change password
   if (!isTransportAuthenticated(SOURCE_LOCAL_DISPLAY)) {

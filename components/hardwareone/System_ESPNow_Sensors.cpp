@@ -27,7 +27,7 @@
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
 #include "System_Utils.h"
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_ds3231.h"
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_pa1010d.h"
@@ -44,7 +44,7 @@
 #include "Input_GPIOEncoder.h"
 #endif
 #include "i2csensor_pa1010d.h"
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_vl53l4cx.h"
 #include "i2csensor_rda5807.h"

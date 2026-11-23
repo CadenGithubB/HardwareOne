@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1031 commands across 60 modules (1031 registry entries).
+1034 commands across 60 modules (1034 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -26,7 +26,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`relay`](#relay) — 2 commands
 - [`filesystem`](#filesystem) — 10 commands
 - [`sd`](#sd) — 5 commands
-- [`oled`](#oled) — 15 commands
+- [`oled`](#oled) — 16 commands
 - [`speaker`](#speaker) — 1 commands
 - [`neopixel`](#neopixel) — 5 commands
 - [`led`](#led) — 5 commands
@@ -35,7 +35,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`servo`](#servo) — 6 commands
 - [`thermal`](#thermal) — 23 commands
 - [`tof`](#tof) — 10 commands
-- [`imu`](#imu) — 16 commands
+- [`imu`](#imu) — 17 commands
 - [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
 - [`anoencoder`](#anoencoder) — 6 commands
@@ -54,7 +54,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`i2c`](#i2c) — 24 commands
 - [`automation`](#automation) — 5 commands
 - [`battery`](#battery) — 3 commands
-- [`debug`](#debug) — 181 commands
+- [`debug`](#debug) — 182 commands
 - [`settings`](#settings) — 19 commands
 - [`sensorlog`](#sensorlog) — 3 commands
 - [`health`](#health) — 2 commands
@@ -231,7 +231,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowmeshtime` | A | Mesh time on/off: the master sends its clock, devices that name it as their master take it when they have no better source: 'espnowmeshtime [on\|off]'.<br/>`Usage: espnowmeshtime [on\|off]` |
 | `espnowmeshtopo` |  | Discover mesh topology (run on the master; role not enforced). (async - read results with espnowtoporesults) |
 | `espnowmeshttl` |  | Get/set the multi-hop budget: 'espnowmeshttl [1-10]'.<br/>`Usage: espnowmeshttl [<1..10>] How many hops this node's relay-eligible frames may travel. 1 = single hop (no multi-hop). Applies to broadcast text/time sync and to routed unicast; heartbeats and pairing are always single-hop.` |
-| `espnowmessages` |  | Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch.<br/>`Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]` |
+| `espnowmessages` | A | Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch. Admin only: it carries remote command output.<br/>`Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]` |
 | `espnowmode` | A | Get/set ESP-NOW mode: 'espnowmode [direct\|mesh]'.<br/>`Usage: espnowmode [direct\|mesh]` |
 | `espnowpair` | A | Pair ESP-NOW device: 'espnowpair <mac> <name> [mesh]'. (synchronous; local registry add, no remote handshake)<br/>`Usage: espnowpair <mac> <name> [mesh]` |
 | `espnowpairmode` | A | Open the discovery window: 'espnowpairmode [seconds\|off\|status]'. Open on BOTH same-mesh devices, then 'espnowdiscovered' to see + pair. Nothing pairs by itself.<br/>`Usage: espnowpairmode [<seconds>\|off\|status] Default 120s, max 600. Requires a mesh passphrase set on both devices (same mesh). While open, the device broadcasts a discovery beacon and RECORDS other same-mesh devices it hears (see 'espnowdiscovered'); it does not pair by itself. Pair from the list with 'espnowpairsecure <mac> <name>'.` |
@@ -455,6 +455,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `oledcameraread` |  | Read the local camera preview state (JSON) |
 | `oledclear` | A | Clear OLED display. |
 | `oleddefaultmode` | A | OLED default mode: <logo\|status\|sensors\|thermal\|network\|mesh\|off><br/>`Usage: oleddefaultmode <logo\|status\|sensors\|thermal\|network\|mesh\|off>` |
+| `oleddump` | A | Display canvas as text ('#' lit, '.' dark): [first-row] [rows]<br/>`Usage: oleddump [first-row] [rows] Example: oleddump 0 10 (the header bar) A reply holds up to 31 rows; its first line names the next first-row.` |
 | `oledflip` | A | Flip display 180°: [on\|off\|toggle]<br/>`Usage: oledflip [on\|off\|toggle]` |
 | `oledlandscape` | A | Landscape UI with right-side controls: [0\|1]<br/>`Usage: oledlandscape [0\|1]` |
 | `oledmode` | A | Set display mode: <mode><br/>`Usage: oledmode <menu\|status\|sensordata\|sensorlist\|thermal\|camera\|network\|mesh\|gps\|text\|logo\|anim\|imuactions\|fmradio\|files\|logging\|automations\|espnow\|memory\|off> Example: oledmode memory Example: oledmode off` |
@@ -585,14 +586,15 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## imu
 
-> The BNO055 is a 9-DOF inertial measurement unit providing fused absolute orientation. openimu starts it, imuread reports yaw/pitch/roll (degrees) plus acceleration, gyroscope, and chip temperature, and closeimu stops it; imuautostart [on|off] persists launching it at boot, and it runs on the fixed secondary I2C bus (Wire1) using the board external crystal. Beyond raw orientation, imuactions runs gesture/event detection derived from the motion data: shake, tilt (with direction), tap/knock, rotation (with axis), freefall, a step counter with cadence, and screen-style orientation. Because the chip can be mounted in any pose, imuorientationmode <0..8> applies a fixed remap (flip pitch/roll/yaw, 90-degree rotations, upside-down fixes), imuorientationcorrection <0|1> toggles that correction, and imupitchoffset/imurolloffset/imuyawoffset trim each axis in degrees.
+> The IMU is the motion sensor on I2C; the build picks its chip (a BNO055, which fuses absolute orientation on the chip). openimu starts it, imuread reports yaw/pitch/roll (degrees) plus acceleration, gyroscope, magnetometer and chip temperature, and closeimu stops it; imuautostart [on|off] persists launching it at boot, imubus and imuaddress say where it is wired. Beyond raw orientation, imuactions runs gesture/event detection derived from the motion data: shake, tilt (with direction), tap/knock, rotation (with axis), freefall, a step counter with cadence, and screen-style orientation. Because the chip can be mounted in any pose, imuorientationmode <0..8> applies a fixed remap (flip pitch/roll/yaw, 90-degree rotations, upside-down fixes), imuorientationcorrection <0|1> toggles that correction, and imupitchoffset/imurolloffset/imuyawoffset trim each axis in degrees.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closeimu` | A | Stop BNO055 IMU sensor. |
+| `closeimu` | A | Stop the IMU (motion sensor). |
 | `imuactions` |  | Show IMU action detection state. |
+| `imuaddress` | A | IMU I2C address (next openimu): [0x28\|0x29]<br/>`Usage: imuaddress [0x28\|0x29]` |
 | `imuautostart` | A | Enable/disable IMU auto-start after boot [on\|off]<br/>`Usage: imuautostart [on\|off]` |
-| `imubus` | A | Route BNO055 IMU to bus: <0\|1> (reboot required)<br/>`Usage: imuBus <0\|1>` |
+| `imubus` | A | Route the IMU to bus: <0\|1> (reboot required)<br/>`Usage: imuBus <0\|1>` |
 | `imudevicepollms` | A | IMU device poll interval: <50..1000><br/>`Usage: imuDevicePollMs <50..1000>` |
 | `imuewmafactor` | A | IMU EWMA smoothing: <0.0..1.0><br/>`Usage: imuewmafactor <0.0..1.0>` |
 | `imuorientationcorrection` | A | IMU orientation correction: <0\|1><br/>`Usage: imuorientationcorrection <0\|1>` |
@@ -604,7 +606,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `imutransitionms` | A | IMU transition time: <0..1000><br/>`Usage: imutransitionms <0..1000>` |
 | `imuwebmaxfps` | A | IMU web max FPS: <1..30><br/>`Usage: imuwebmaxfps <1..30>` |
 | `imuyawoffset` | A | IMU yaw offset in degrees: <-180..180><br/>`Usage: imuyawoffset <-180..180>` |
-| `openimu` | A | Start BNO055 IMU sensor. |
+| `openimu` | A | Start the IMU (motion sensor). |
 
 ## input
 
@@ -948,6 +950,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
+| `bootdebug` | A | Boot debug file: every debug output on during boot, saved as boot-debug-1.log (on by default).<br/>`Usage: bootdebug [on\|off] (bare): the setting, and where this boot's file went on\|off: save the setting; it applies from the next boot (off: no forcing, no capture, fastest boot)` |
 | `commandmodulesummary` | A | Show command module summary. |
 | `debuganoencoder` | A | Debug ANO rotary encoder driver internals.<br/>`Usage: debuganoencoder <0\|1> [temp\|runtime]` |
 | `debuganoencoderlifecycle` | A | Debug ANO encoder init/connect/recovery.<br/>`Usage: debuganoencoderlifecycle <0\|1> [temp\|runtime]` |
@@ -1024,7 +1027,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `debugi2cautostart` | A | Debug I2C sensor auto-start orchestration + init results.<br/>`Usage: debugi2cautostart <0\|1> [temp\|runtime]` |
 | `debugi2cbus` | A | Debug I2C bus lifecycle, polling pause/resume, status bumps.<br/>`Usage: debugi2cbus <0\|1> [temp\|runtime]` |
 | `debugi2cdiscovery` | A | Debug I2C device probing, registry, scan results.<br/>`Usage: debugi2cdiscovery <0\|1> [temp\|runtime]` |
-| `debugimu` | A | Debug IMU sensor (BNO055).<br/>`Usage: debugimu <0\|1> [temp\|runtime]` |
+| `debugimu` | A | Debug the IMU (motion sensor).<br/>`Usage: debugimu <0\|1> [temp\|runtime]` |
 | `debugimulifecycle` | A | Debug IMU init/connect/recovery.<br/>`Usage: debugimulifecycle <0\|1> [temp\|runtime]` |
 | `debugimupolling` | A | Debug IMU poll cadence.<br/>`Usage: debugimupolling <0\|1> [temp\|runtime]` |
 | `debugimuvalues` | A | Debug IMU orientation/acceleration values.<br/>`Usage: debugimuvalues <0\|1> [temp\|runtime]` |

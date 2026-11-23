@@ -69,7 +69,7 @@ When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABL
 | ---- | ------ |
 | `CUSTOM_ENABLE_OLED` | SSD1306 OLED display |
 | `CUSTOM_ENABLE_GAMEPAD` | Seesaw gamepad |
-| `CUSTOM_ENABLE_IMU` | BNO055 9-DoF IMU |
+| `CUSTOM_ENABLE_IMU` | IMU (motion sensor); `IMU_DEVICE_TYPE` picks the chip: 1 = BNO055 (default), 2 = Adafruit 4517 (its backend comes later) |
 | `CUSTOM_ENABLE_TOF` | VL53L4CX Time-of-Flight |
 | `CUSTOM_ENABLE_THERMAL` | MLX90640 thermal camera |
 | `CUSTOM_ENABLE_APDS` | APDS9960 gesture/proximity/light |
@@ -385,8 +385,8 @@ are what comparisons use.
 
 | Role | Rank | Can do |
 | ---- | :--: | ------ |
-| `guest` | 0 | A real, named account with view-only authorization. It may use caller-local `login`, `logout`, and `whoami`, and the read-only status lines the web pages load (`espnowstatus [json]`, `espnowmeshstatus`, `espnowlist`, `espnowdeviceinfo [json]`, `espnowtoporesults`, `bondstatus [json]`, bare `g2nav`/`g2verbose`, `eistatus`, `eimodellist`, `srtuning`); anything else answers "Guest accounts are view-only." On the web a guest opens every page and sees every control; a control that changes the device answers with that refusal, and files, logs, recordings, camera pictures and transcripts say they are not available. Filesystem access is masked to read |
-| `user` | 1 | Ordinary commands; not admin-gated ones |
+| `guest` | 0 | A real, named account with view-only authorization. It may use caller-local `login`, `logout`, and `whoami`, and the read-only status lines the web pages load (`espnowstatus [json]`, `espnowmeshstatus`, `espnowlist`, `espnowdeviceinfo [json]`, `espnowtoporesults`, `bondstatus [json]`, bare `g2nav`/`g2verbose`, `eistatus`, `eimodellist`, `srtuning`); anything else answers "Guest accounts are view-only." On the web a guest opens every page and sees every control; a control that changes the device answers with that refusal, and files, logs, recordings, camera pictures and transcripts say they are not available. The ESP-NOW message history, the ring's health data and the LLM chat are not shown to a guest (the pages say so), and a guest's settings view leaves out the saved Wi-Fi networks and the joined network's name, the MQTT broker host and user name, and the LLM gateway address. Filesystem access is masked to read |
+| `user` | 1 | Ordinary commands; not admin-gated ones. The ESP-NOW message history (`espnowmessages`, the web page's conversations) is admin-only: it carries remote command output |
 | `admin` | 2 | Admin commands - user management, most settings, device control |
 | `superadmin` | 3 | Additionally the identity / crypto / destructive / auth-posture command set |
 
@@ -1262,27 +1262,41 @@ Available debug modules (type `help debug` on device for full list):
 
 ### Boot debug file
 
-Every boot runs with every debug flag on and every log level shown (the
-DEBUG, INFO and WARN lines included, whatever `loglevel` is saved), from the
-start of setup until boot finishes; the saved flags and log level are not
-changed and apply again once boot has finished (the defaults on a first
-boot). The debug lines of the boot go to a
-buffer, not to the console or the normal logs: a line your saved flags would
-show still appears as usual, the rest only in the buffer. When boot finishes
-the buffer is saved as `/system/sys_logs/boot-debug-1.log`; the two boots
-before it move to `boot-debug-2.log` and `boot-debug-3.log`. The buffer is
-56 KB in PSRAM (4 KB of internal memory on a board without PSRAM, freed after
-the save); a boot that writes more keeps its first lines and ends the file with
-a `[TRUNCATED]` line saying how much was left out. Once the buffer is full the
-forcing stops for the rest of that boot (nothing more could be kept), so the
-`[TRUNCATED]` count covers only the lines your saved flags show.
+Every boot runs with all debug output on, from the start of boot (right after
+the Arduino core starts, before the P4X-EYE's radio companion comes up) until
+boot finishes: every debug flag and sub-flag, every debug check in the code, the
+log level at `debug` (the DEBUG, INFO and WARN lines included, whatever
+`loglevel` is saved), and every ESP-IDF tag at the build's own level (the
+firmware's quieting of tags, `esplog` included, waits until boot finishes).
+The saved settings are not changed and apply again once boot has finished
+(the defaults on a first boot). Every line of the boot - debug lines, command
+and system output, system events and ESP-IDF lines - goes into a buffer; a
+line your saved settings would show still appears on the console and in the
+normal logs as usual, the rest only in the buffer, so the console looks as it
+always does.
+
+When boot finishes the buffer is saved as `boot-debug-1.log`: on the SD card
+in `/sd/system/sys_logs/` when a writable card is in (the two boots before it
+move to `boot-debug-2.log` and `boot-debug-3.log`), otherwise on flash in
+`/system/sys_logs/` (only the newest boot is kept there). The buffer is 256 KB
+in PSRAM (4 KB of internal memory on a board without PSRAM, freed after the
+save; such a board also leaves the ESP-IDF tags at their saved levels). A
+boot that writes more keeps the start of the boot and its newest lines, with
+a `[GAP]` line between them saying how many lines and bytes were dropped.
 
 The file starts with `#` lines: the boot number and reset reason, the uptime at
-the start and end of the capture, the bytes kept and dropped, and the CPU time
-spent in the capture (formatting and copying; the work of building each
-forced line's values is not included). Read it as an administrator with
-`fileview "/system/sys_logs/boot-debug-1.log"` (one page at a time) or in the
-web file browser. `system-events.log` records each save (size and time taken).
+the start and end of the capture, the lines and bytes in all (the dropped ones
+included), kept and dropped, and the wall-clock time spent in the capture path
+(formatting and copying; the work of building each forced line's values is not
+included). Read it as an administrator with `fileview "<path>"`, which pages a
+file of any size, or in the web file browser. `bootdebug` shows the setting and
+where this boot's file went; `system-events.log` records each save (size and
+time taken).
+
+`bootdebug off` turns the capture off (saved; from the next boot): nothing is
+forced or captured and no buffer is taken, the fastest boot. `bootdebug on`
+turns it back on. The setting is also under Debug settings on the web and
+OLED settings screens (Boot debug file).
 
 ---
 
@@ -1626,7 +1640,9 @@ oledupdateinterval <ms>         - Display update interval (10-1000ms)
 oleddefaultmode <status|thermal|off>     - Mode after boot animation
 oledbootduration <ms>           - Boot animation duration (500-10000ms)
 oledautostart <0|1>             - Bring the display up at boot
-oledthermalscale <1.0-10.0>     - Thermal image scale on OLED
+oledthermalscale <1.0-10.0>     - Thermal image scale on OLED (smaller when the image would
+                                  not fit between the header bar and the footer)
+oleddump [first-row] [rows]     - Screen as text ('#' lit, '.' dark), up to 31 rows per reply (admin)
 setgamepadpassword              - Set gamepad joystick unlock pattern
 ```
 </details>
@@ -2307,7 +2323,7 @@ toftransitionms <0-5000>        - Reading transition time
 </details>
 
 <details>
-<summary><strong>imu - BNO055 9-DoF IMU</strong></summary>
+<summary><strong>imu - IMU (motion sensor)</strong></summary>
 
 ```
 openimu                         - Start IMU sensor
@@ -2322,6 +2338,8 @@ imuorientationcorrection <0|1>  - Apply orientation correction
 imupitchoffset <-180..180>      - Pitch offset correction
 imurolloffset <-180..180>       - Roll offset correction
 imuyawoffset <-180..180>        - Yaw offset correction
+imuaddress [0x28|0x29]          - BNO055 address (0x29 with ADR high); next openimu
+imubus <0|1>                    - The bus the IMU is on
 imuewmafactor <0.0-1.0>         - EWMA smoothing factor
 imutransitionms <0-1000>        - Transition time
 imuwebmaxfps <1-30>             - Web UI max frame rate
@@ -2478,8 +2496,8 @@ Supports up to 4 simultaneous distance measurements. Range up to 6m. Polling rat
 ### MLX90640 (Thermal)
 32x24 IR thermal camera. Web UI displays interpolated heatmap with HSL color mapping. Configurable palette, interpolation steps, and frame rate. High memory footprint - uses PSRAM.
 
-### BNO055 (IMU)
-9-DoF orientation (accel + gyro + magnetometer fusion). Orientation correction configurable via settings (`imuOrientationMode`, `imuPitchOffset`, etc.).
+### IMU (motion sensor)
+One chip per build (`IMU_DEVICE_TYPE`). The BNO055 fuses accel, gyro and magnetometer on the chip (NDOF mode) and is read at 0x28, or at 0x29 (`imuaddress 0x29`) when its ADR pin is high. `imuread` shows orientation (yaw/pitch/roll in degrees), acceleration (m/s²), gyro (rad/s), magnetometer (µT) and temperature; `imuread json` adds `mag` and the chip's calibration byte `cal`. The readings are the chip's own: the mounting correction (`imuorientationcorrection`, `imuorientationmode`, `imuPitchOffset`, etc.) is off by default, and nothing clamps the stored pitch (the web page's 3D view clamps only its drawing). Starting the BNO055 takes about a second and never holds the I2C bus while it waits, so the OLED and the other devices on the same bus keep working; a start that fails says why (no answer at the address, another chip there, no answer after its reset).
 
 ### APDS9960
 Three independent modes: color/RGB (`apdscolor`), proximity (`apdsproximity`), gesture up/down/left/right (`apdsgesture`). Each can be run independently.

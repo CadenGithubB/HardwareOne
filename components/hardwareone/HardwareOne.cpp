@@ -118,7 +118,7 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 // sensor_config.h included early (before WiFi)
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_vl53l4cx.h"
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_seesaw.h"
 #include "i2csensor_apds9960.h"
 #include "i2csensor_pa1010d.h"
@@ -1444,10 +1444,10 @@ static bool bootNetHandOffServices() {
 
 void hardwareone_setup() {
 
-  // B13: every debug flag on for the boot, into the boot buffer (not the
-  // console or the normal logs); bootDebugFinish() at the end of setup()
-  // restores the saved flags and writes /system/sys_logs/boot-debug-1.log.
-  bootDebugBegin();
+  // B13: the boot debug capture is already running (app_main starts it right
+  // after initArduino(), before the radio companion); bootDebugFinish() at the
+  // end of setup() restores the saved settings and writes boot-debug-1.log (to
+  // the card when one is writable, else flash).
 
   // ========================================================================
   // 1. PRE-SERIAL — crash tracking from RTC memory (no Serial yet)
@@ -1845,7 +1845,7 @@ void hardwareone_setup() {
 
 #if ENABLE_I2C_SYSTEM
   initI2cBuses();
-  esp_log_level_set("i2c.master", ESP_LOG_WARN);  // Suppress routine NACK spam from FM radio RDS polling
+  bootDebugEspLogSet("i2c.master", ESP_LOG_WARN);  // Suppress routine NACK spam from FM radio RDS polling
 
   // Early RTC sync (I2C read + Clock::step), so the boot's own log lines
   // carry a date. Only a trusted chip is adopted: one this device has set
@@ -1878,7 +1878,7 @@ void hardwareone_setup() {
     broadcastOutput("  [N] TOF      | Disabled (~25-30KB flash, ~10KB RAM saved)");
 #endif
 #if ENABLE_IMU_SENSOR
-    broadcastOutput("  [Y] IMU      | BNO055 9-DOF orientation sensor");
+    broadcastOutput("  [Y] IMU      | motion sensor (orientation, acceleration)");
 #else
     broadcastOutput("  [N] IMU      | Disabled (~12-18KB flash, ~8KB RAM saved)");
 #endif

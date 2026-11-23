@@ -19,6 +19,7 @@ template <typename... Args> static void debugLog(const char*, Args...) {}
 #define DEBUG_PERFORMANCEF(...) debugLog(__VA_ARGS__)
 #define DISPLAY_COLOR_WHITE 1
 #define OLED_CONTENT_START_Y 8
+#define OLED_CONTENT_HEIGHT 43
 using TickType_t = uint32_t;
 struct Semaphore { bool held = false; } semaphore;
 using SemaphoreHandle_t = Semaphore*;

@@ -52,7 +52,7 @@
 // Each header supplies the types and state names when its sensor is compiled out.
 #include "i2csensor_mlx90640.h"   // ThermalCache, readings, gThermalRunning/Connected
 #include "i2csensor_vl53l4cx.h"   // TofCache, readings, gTofRunning/Connected
-#include "i2csensor_bno055.h"     // ImuCache, readings, gImuRunning/Connected
+#include "HAL_Motion.h"     // ImuCache, readings, gImuRunning/Connected
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() for the Device Info BLE characteristic; deviceName()
 #include "System_DeviceName.h"  // the advertised name (29 of the name's up to 31 bytes)
 #include "System_Settings.h"
@@ -70,15 +70,18 @@
 #include <string.h>
 #include <esp_attr.h>  // EXT_RAM_BSS_ATTR
 #include "System_CommandRegistry.h"
+#include "System_BootDebug.h"  // BLE_DEBUGF: a forced line goes to the boot file only
 
 // Memory allocation
 
-// Debug macros
+// Debug macros. During the boot debug capture every flag passes; a line the
+// saved flags would not show goes to the boot file only (System_BootDebug.h).
 #define BLE_DEBUGF(flag, fmt, ...) \
   do { \
     if (isDebugFlagSet(flag) && ensureDebugBuffer()) { \
       snprintf(getDebugBuffer(), 1024, "[BLE] " fmt, ##__VA_ARGS__); \
-      broadcastOutput(getDebugBuffer()); \
+      if (isDebugFlagSaved(flag)) broadcastOutput(getDebugBuffer()); \
+      else bootDebugCaptureText(getDebugBuffer()); \
     } \
   } while(0)
 
@@ -1106,7 +1109,10 @@ static void bleCommandOutputFlush(BleCommandReplyContext* reply);
 // (DEBUG_BLE_DATA). Non-static so BLE_SecureChannel.cpp's per-frame [BLE-SC]
 // traces share the same flag. The traces themselves still route NOT-to-BLE (0x2F)
 // to avoid feeding the very pipe they trace; this just makes them off by default.
-bool bleDataDebugEnabled() { return isDebugFlagSet(DEBUG_BLE_DATA); }
+// The saved flag: the traces it gates go out through broadcastOutputCore_Routed,
+// which has no boot-file-only path, so the boot capture does not force them
+// (a Bluetooth session's traffic during setup is all they could show).
+bool bleDataDebugEnabled() { return isDebugFlagSaved(DEBUG_BLE_DATA); }
 
 // Inspect the complete bounded payload before previews/trace fragmentation.
 // Raw notify also carries non-NUL-terminated encrypted frames, so never use

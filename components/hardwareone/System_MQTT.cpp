@@ -55,7 +55,7 @@
 
 #include "i2csensor_vl53l4cx.h"
 
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 
 #include "i2csensor_apds9960.h"
 

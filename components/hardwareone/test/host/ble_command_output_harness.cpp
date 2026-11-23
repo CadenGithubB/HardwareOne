@@ -79,6 +79,9 @@ static bool isDebugFlagSet(DebugFlagMask flag) { return coreDebug && flag == DEB
 static char debugBuffer[1024];
 static bool ensureDebugBuffer() { return true; }
 static char* getDebugBuffer() { return debugBuffer; }
+// No boot debug capture here: the saved flag is the live one.
+static bool isDebugFlagSaved(DebugFlagMask flag) { return isDebugFlagSet(flag); }
+static void bootDebugCaptureText(const char*) {}
 // INSERT_BLE_DEBUGF
 static volatile uint32_t gOutputFlags = MSG_ROUTE_SERIAL;  // the boot default
 static bool dataDebug = false;  // `debugbluetoothdata`
@@ -94,6 +97,9 @@ static bool enqueueChunk(const char* text, size_t len, uint8_t routing, DebugFla
 
 // Tasks and the per-task command context (System_AuthIdentity's TLS slot).
 bool gThermalRunning = false, gImuRunning = false, gTofRunning = false;
+// The boot debug capture (System_BootDebug.h) is not running here.
+static volatile bool gBootDebugCapturing = false;
+static void bootDebugCaptureLine(const char*, size_t, bool, int64_t) {}
 TaskHandle_t gThermalTaskHandle = nullptr, gImuTaskHandle = nullptr, gTofTaskHandle = nullptr;
 static void* gCurrentContext = nullptr;
 static void* currentCommandContext() { return gCurrentContext; }

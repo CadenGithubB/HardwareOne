@@ -1184,7 +1184,7 @@ void settingsDefaults() {
   // - i2c (System_I2C.cpp): bus settings, clock speeds
   // - thermal (i2csensor_mlx90640.cpp): autoStart, polling, interpolation, EWMA, rotation
   // - tof (i2csensor_vl53l4cx.cpp): autoStart, polling, stability, transition
-  // - imu (i2csensor_bno055.cpp): autoStart, polling, EWMA, orientation correction
+  // - imu (HAL_Motion.cpp): autoStart, polling, EWMA, orientation correction
   // - gps (i2csensor_pa1010d.cpp): autoStart, polling
   // - apds (i2csensor_apds9960.cpp): autoStart, polling
   // - gamepad (i2csensor_seesaw.cpp): autoStart, polling
@@ -2617,13 +2617,16 @@ static constexpr SettingEntry debugSettingEntries[] = {
   // ESP-IDF log levels by tag, "tag:L,tag:L" (L = N/E/W/I/D/V); esplog edits
   // and validates it, the boot applies it after the firmware's own levels.
   { "espLogLevels",     SETTING_STRING, &gSettings.espLogLevels,      0, 0, "",      0, 0, "ESP-IDF log levels by tag", nullptr, false, nullptr, "esplog" },
+  // Every debug output on during boot, saved as boot-debug-1.log (B13). The
+  // boot reads its NVS copy (bootdebug keeps both); applies from the next boot.
+  { "bootCapture",      SETTING_BOOL, &gSettings.bootDebugCapture,    1, 0, nullptr, 0, 1, "Boot debug file (next boot)", nullptr, false, "boot", "bootdebug" },
 };
 #undef DBG_SUBROW
 #undef DBG_ROW
 
-// Row accounting, pinned: 170 = 126 flag-backed + 40 bitless-sub + 4 hand rows.
+// Row accounting, pinned: 171 = 126 flag-backed + 40 bitless-sub + 5 hand rows.
 static constexpr size_t kDbgRegGeneratedRows = (DBG_FLAG_COUNT - 1) + DBG_SUBBOOL_COUNT;  // ALWAYS emits no row
-static constexpr size_t kDbgRegHandRows = 4;  // memorysampleintervalsec, webconsole, loglevel, esplog
+static constexpr size_t kDbgRegHandRows = 5;  // memorysampleintervalsec, webconsole, loglevel, esplog, bootdebug
 static_assert(sizeof(debugSettingEntries) / sizeof(debugSettingEntries[0])
                   == kDbgRegGeneratedRows + kDbgRegHandRows,
               "debug registry row count drifted — a pick or table row changed without the other (or a hand row came/went without updating kDbgRegHandRows)");

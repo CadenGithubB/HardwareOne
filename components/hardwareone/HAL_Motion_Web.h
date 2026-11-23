@@ -1,10 +1,11 @@
-#ifndef I2CSENSOR_BNO055_WEB_H
-#define I2CSENSOR_BNO055_WEB_H
+// HAL_Motion_Web.h - the IMU card of the web Sensors page and its dashboard entry.
+#ifndef HAL_MOTION_WEB_H
+#define HAL_MOTION_WEB_H
 
 #include <Arduino.h>
 #include "WebServer_Utils.h"
 
-inline void streamBNO055ImuSensorCard(httpd_req_t* req) {
+inline void streamImuSensorCard(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"HTML(
 
     <div class='sensor-card' id='sensor-card-imu'>
@@ -25,11 +26,11 @@ inline void streamBNO055ImuSensorCard(httpd_req_t* req) {
 )HTML", HTTPD_RESP_USE_STRLEN);
 }
 
-inline void streamBNO055ImuSensorBindButtons(httpd_req_t* req) {
+inline void streamImuSensorBindButtons(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "bind('btn-imu-start','openimu');bind('btn-imu-stop','closeimu');", HTTPD_RESP_USE_STRLEN);
 }
 
-inline void streamBNO055ImuSensorJs(httpd_req_t* req) {
+inline void streamImuSensorJs(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "<script>", HTTPD_RESP_USE_STRLEN);
   
   // IMU sensor reader - register in window._sensorReaders
@@ -49,13 +50,13 @@ inline void streamBNO055ImuSensorJs(httpd_req_t* req) {
     "            var yw = j.ori.yaw.toFixed(1), pt = j.ori.pitch.toFixed(1), rl = j.ori.roll.toFixed(1);\n"
     "            var tc = Number(j.temp).toFixed(0);\n"
     "            var accel = 'Accel: X=' + ax + ' Y=' + ay + ' Z=' + az + ' m/s²';\n"
-    "            var gyro = 'Gyro: X=' + gx + ' Y=' + gy + ' Z=' + gz + ' °/s';\n"
+    "            var gyro = 'Gyro: X=' + gx + ' Y=' + gy + ' Z=' + gz + ' rad/s';\n"
     "            var euler = 'Euler: Yaw=' + yw + '° Pitch=' + pt + '° Roll=' + rl + '°';\n"
     "            var temp = 'Temperature: ' + tc + '°C';\n"
     "            \n"
-    "            // Update device rotation visualization\n"
+    "            // Update device rotation visualization (pitch, roll, yaw)\n"
     "            if (window.updateDeviceOrientation) {\n"
-    "              window.updateDeviceOrientation(j.ori.yaw || 0, j.ori.pitch || 0, j.ori.roll || 0);\n"
+    "              window.updateDeviceOrientation(j.ori.pitch || 0, j.ori.roll || 0, j.ori.yaw || 0);\n"
     "            }\n"
     "            \n"
     "            if (el) {\n"
@@ -209,14 +210,17 @@ inline void streamBNO055ImuSensorJs(httpd_req_t* req) {
     "  if (deviceViz && deviceViz.canvas) deviceViz.updateOrientation(15, 0, 0);\n"
     "};\n"
     "window.updateDeviceOrientation = function(pitch, roll, yaw) {\n"
-    "  if (deviceViz && deviceViz.canvas) deviceViz.updateOrientation(pitch, roll, yaw);\n"
+    "  // The drawing clamps pitch to +-75 deg so the cube never flips edge-on;\n"
+    "  // the readings themselves are not clamped.\n"
+    "  var p = Math.max(-75, Math.min(75, pitch || 0));\n"
+    "  if (deviceViz && deviceViz.canvas) deviceViz.updateOrientation(p, roll, yaw);\n"
     "};\n", HTTPD_RESP_USE_STRLEN);
   
   httpd_resp_send_chunk(req, "</script>", HTTPD_RESP_USE_STRLEN);
 }
 
-inline void streamBNO055ImuDashboardDef(httpd_req_t* req) {
+inline void streamImuDashboardDef(httpd_req_t* req) {
   httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'BNO055',key:'imu',name:'IMU (BNO055)',desc:'Gyroscope & Accelerometer'});", HTTPD_RESP_USE_STRLEN);
 }
 
-#endif // I2CSENSOR_BNO055_WEB_H
+#endif // HAL_MOTION_WEB_H

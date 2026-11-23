@@ -21,6 +21,7 @@ static void displayThermalVisual() {
   auto frame = thermalSnapshotBuffer(THERMAL_RAW_FRAME_PIXELS);
   ThermalCache reading;
   if (!frame || !thermalFrameSnapshot(reading, frame.get(), THERMAL_RAW_FRAME_PIXELS, false, 10)) {
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Thermal: Busy");
     return;
   }
@@ -40,7 +41,15 @@ static void displayThermalVisual() {
   // Adjust dimensions based on rotation setting
   const int thermalWidth = reading.thermalFrameWidth;
   const int thermalHeight = reading.thermalFrameHeight;
-  const float scale = (gSettings.oledThermalScale > 0.0) ? gSettings.oledThermalScale : 2.5;
+  // The image sits between the header bar and the footer (owner, 2026-11-22:
+  // shrink to fit): the set scale, or less when the frame would not fit the
+  // content height (the 64 px OLED); the taller P4 canvases keep the set scale.
+  const int imageTop = OLED_CONTENT_START_Y;
+  const int imageBottom = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT;  // exclusive
+  float scale = (gSettings.oledThermalScale > 0.0) ? gSettings.oledThermalScale : 2.5;
+  if (thermalHeight > 0 && scale * thermalHeight > OLED_CONTENT_HEIGHT) {
+    scale = (float)OLED_CONTENT_HEIGHT / (float)thermalHeight;
+  }
   const int imageWidth = (int)(thermalWidth * scale);
   const int textStartX = imageWidth + 2;
 
@@ -70,11 +79,11 @@ static void displayThermalVisual() {
       // Draw scaled pixel block
       if (drawPixel) {
         int startX = (int)(tx * scale);
-        int startY = (int)(ty * scale);
+        int startY = imageTop + (int)(ty * scale);
         int endX = (int)((tx + 1) * scale);
-        int endY = (int)((ty + 1) * scale);
+        int endY = imageTop + (int)((ty + 1) * scale);
 
-        for (int y = startY; y < endY && y < 64; y++) {
+        for (int y = startY; y < endY && y < imageBottom; y++) {
           for (int x = startX; x < endX && x < imageWidth; x++) {
             oledDisplay->drawPixel(x, y, DISPLAY_COLOR_WHITE);
           }
@@ -83,17 +92,18 @@ static void displayThermalVisual() {
     }
   }
 
-  // Draw temperature data on the right side
+  // Temperatures on the right side, inside the content area (the header bar
+  // names the screen).
+  int lineStep = (OLED_CONTENT_HEIGHT - 8) / 2;
+  if (lineStep > 16) lineStep = 16;
   oledDisplay->setTextSize(1);
-  oledDisplay->setCursor(textStartX, 0);
-  oledDisplay->print("THERMAL");
-  oledDisplay->setCursor(textStartX, 16);
+  oledDisplay->setCursor(textStartX, imageTop);
   oledDisplay->print("Min:");
   oledDisplay->print((int)minTemp);
-  oledDisplay->setCursor(textStartX, 32);
+  oledDisplay->setCursor(textStartX, imageTop + lineStep);
   oledDisplay->print("Avg:");
   oledDisplay->print((int)avgTemp);
-  oledDisplay->setCursor(textStartX, 48);
+  oledDisplay->setCursor(textStartX, imageTop + 2 * lineStep);
   oledDisplay->print("Max:");
   oledDisplay->print((int)maxTemp);
 }

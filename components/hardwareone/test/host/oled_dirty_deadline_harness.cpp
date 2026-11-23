@@ -35,6 +35,14 @@ static uint32_t gHeaderSig = 0;
 static uint32_t sHeaderDrawnSig = 0;
 static bool oledHeaderVisible() { return gHeaderVisible; }
 static uint32_t oledHeaderSignatureNow() { return gHeaderSig; }
+// The keyboard's top line (busy, capture dot): watched only while the keyboard
+// is up and the last frame drew its line.
+static bool gKeyboardActive = false;
+static uint32_t gKeyboardSig = 0;
+static uint32_t sKeyboardLineDrawnSig = 0;
+static bool sKeyboardLineShown = false;
+static bool oledKeyboardIsActive() { return gKeyboardActive; }
+static uint32_t oledKeyboardLineSignatureNow() { return gKeyboardSig; }
 
 // INSERT_STATE
 
@@ -153,6 +161,24 @@ int main() {
   sHeaderDrawnSig = gHeaderSig;  // the frame drew it
   check(!dirtyAt(60000), "drawn: clean again");
   gHeaderVisible = false;
+
+  // The keyboard's top line: a command starts while the keyboard is up.
+  reset();
+  gKeyboardActive = true;
+  gKeyboardSig = sKeyboardLineDrawnSig = 0x1111u;
+  sKeyboardLineShown = true;
+  check(!dirtyAt(70000), "an unchanged keyboard line is not dirty");
+  gKeyboardSig = 0x2222u;
+  check(dirtyAt(70000), "busy or capture changed under the keyboard: dirty");
+  sKeyboardLineShown = false;
+  check(!dirtyAt(70000), "a keyboard line the frame did not draw is not watched");
+  sKeyboardLineShown = true;
+  gKeyboardActive = false;
+  check(!dirtyAt(70000), "a closed keyboard is not watched");
+  gKeyboardActive = true;
+  sKeyboardLineDrawnSig = gKeyboardSig;
+  check(!dirtyAt(70000), "keyboard line drawn: clean again");
+  gKeyboardActive = false;
 
   if (failures != 0) {
     std::fprintf(stderr, "%d of %d OLED dirty deadline checks failed\n", failures, checks);

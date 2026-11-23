@@ -120,7 +120,7 @@ def main():
         if a.sanitize:cmd[1:1]=['-fsanitize=address,undefined','-fno-omit-frame-pointer']
         subprocess.run(cmd,check=True);subprocess.run([str(exe)],check=True)
         mask_cpp=Path(d)/'mask.cpp';mask_exe=Path(d)/'mask';mask_cpp.write_text(mask_unit(SOURCE))
-        cmd=[a.cxx,'-std=c++17','-Wall','-Wextra','-Werror','-pedantic',str(mask_cpp),'-o',str(mask_exe)]
+        cmd=[a.cxx,'-std=c++17','-Wall','-Wextra','-Werror','-pedantic','-I',str(SOURCE),str(mask_cpp),'-o',str(mask_exe)]
         if a.sanitize:cmd[1:1]=['-fsanitize=address,undefined','-fno-sanitize-recover=all','-fno-omit-frame-pointer']
         subprocess.run(cmd,check=True);masked=subprocess.run([str(mask_exe)])
     failures=secret_field_failures(SOURCE)

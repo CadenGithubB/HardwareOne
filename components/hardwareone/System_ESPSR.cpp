@@ -56,8 +56,10 @@
 #define TAG_SR "ESP_SR"
 #define DEBUG_SRF(fmt, ...)       DEBUGF_QUEUE_DEBUG(DEBUG_SR | DEBUG_SR_LIFECYCLE, "[%s] " fmt, TAG_SR, ##__VA_ARGS__)
 #define DEBUG_SR_AUDIOF(fmt, ...) DEBUGF_QUEUE_DEBUG(DEBUG_SR | DEBUG_SR_AFE,       "[%s] " fmt, TAG_SR, ##__VA_ARGS__)
-#define INFO_SRF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_INFO) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_SR, "[INFO][SR] " fmt, ##__VA_ARGS__); } while (0)
-#define WARN_SRF(fmt, ...)  do { if (getLogLevel() >= LOG_LEVEL_WARN) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_SR, "[WARN][SR] " fmt, ##__VA_ARGS__); } while (0)
+// The level goes to the line path (DEBUGF_QUEUE_LEVEL), so during the boot
+// debug capture a line the saved level would filter goes to the boot file only.
+#define INFO_SRF(fmt, ...)  DEBUGF_QUEUE_LEVEL(LOG_LEVEL_INFO, DEBUG_ALWAYS | DEBUG_SR, "[INFO][SR] " fmt, ##__VA_ARGS__)
+#define WARN_SRF(fmt, ...)  DEBUGF_QUEUE_LEVEL(LOG_LEVEL_WARN, DEBUG_ALWAYS | DEBUG_SR, "[WARN][SR] " fmt, ##__VA_ARGS__)
 #define ERROR_SRF(fmt, ...) DEBUGF_QUEUE(DEBUG_ALWAYS | DEBUG_SR, "[ERROR][SR] " fmt, ##__VA_ARGS__)
 
 // Every microphone enters speech recognition through the shared mono PCM HAL.

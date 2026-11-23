@@ -94,7 +94,7 @@
 #include "i2csensor_pa1010d.h"
 #endif
 #if ENABLE_BONDED_MODE && ENABLE_IMU_SENSOR
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #endif
 #if ENABLE_BONDED_MODE && ENABLE_OLED_INPUT
 #include "i2csensor_seesaw.h"
@@ -113,7 +113,7 @@
 #endif
 #include "WebServer_Server.h"
 
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_mlx90640.h"
 
 // Forward declaration — definition is further down near onEspNowRawRecv. Used
@@ -23353,7 +23353,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowunpair", "Unpair ESP-NOW device and remove what this device stored about it (crypto identity, bond caches, its cached manifest); unpairing the bond partner ends the bond too: 'espnowunpair <name_or_mac>'.", true, cmd_espnow_unpair, "Usage: espnowunpair <name_or_mac>", /*requiresSuperAdmin=*/true },
   { "espnowforget", "Forget a peer's crypto identity + close its session: 'espnowforget <name_or_mac>'.", true, cmd_espnow_forget, "Usage: espnowforget <name_or_mac>", /*requiresSuperAdmin=*/true },
   { "espnowlist", "List all paired ESP-NOW devices.", false, cmd_espnow_list },
-  { "espnowmessages", "Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch.", false, cmd_espnow_messages, "Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]" },
+  { "espnowmessages", "Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch. Admin only: it carries remote command output.", true, cmd_espnow_messages, "Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]" },
   
   // ---- ESP-NOW Mesh Configuration ----
   { "espnowmeshstatus", "Show mesh peer health (heartbeats & ACKs).", false, cmd_espnow_meshstatus },

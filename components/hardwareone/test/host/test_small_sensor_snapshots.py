@@ -18,9 +18,16 @@ from test_web_batch_handlers import extract_block, require
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
 SENSORS = [('apds', 'apds9960', 'ApdsCache', 'Apds', 'APDS'),
-           ('imu', 'bno055', 'ImuCache', 'Imu', 'IMU'),
+           ('imu', 'HAL_Motion', 'ImuCache', 'Imu', 'IMU'),
            ('tof', 'vl53l4cx', 'TofCache', 'Tof', 'TOF'),
            ('rtc', 'ds3231', 'RtcCache', 'Rtc', 'RTC')]
+
+
+def source(file: str, suffix: str) -> str:
+    """The owner's file name: a HAL layer is named as it is (HAL_Motion.cpp, HAL_Motion_OLED.h)."""
+    if file.startswith('HAL_'):
+        return file + ('_OLED.h' if suffix == '_oled.h' else suffix)
+    return f'i2csensor_{file}{suffix}'
 
 
 def generate(component: Path, baseline: bool) -> str:
@@ -33,15 +40,17 @@ def generate(component: Path, baseline: bool) -> str:
                            extract_block(mutex, 'SensorCacheGuard::~SensorCacheGuard('),
                            extract_block((COMPONENT / 'System_I2C.cpp').read_text(), 'int sensorEnvelopeBegin(')]
     for short, file, typename, title, flag in SENSORS:
-        owner = (component / f'i2csensor_{file}.cpp').read_text()
-        header = (component / f'i2csensor_{file}.h').read_text()
+        if baseline and file.startswith('HAL_'):
+            file = 'bno055'  # the IMU's files before the motion layer
+        owner = (component / source(file, '.cpp')).read_text()
+        header = (component / source(file, '.h')).read_text()
         types.append(extract_block(header, f'struct {typename}') + ';')
         if baseline:
             state.append(f'{typename} g{title}Cache{{}};\n#define {short.upper()} g{title}Cache\n'
                          f'#define {short.upper()}_MUTEX g{title}Cache.mutex')
         else:
             for name in [f's{title}Cache', f's{title}CacheMutex']:
-                state.append(re.search(r'(?m)^static[^\n]*\b' + name + r'\b[^\n]*;', owner)[0])
+                state.append(re.search(r'(?m)^(?:EXT_RAM_BSS_ATTR )?static[^\n]*\b' + name + r'\b[^\n]*;', owner)[0])
             state.append(f'#define {short.upper()} s{title}Cache\n#define {short.upper()}_MUTEX s{title}CacheMutex')
             state.append(re.search(r'(?m)^bool ' + short + r'CacheSnapshot\([^\n]*;', header)[0])
             functions += [extract_block(owner, f'bool {short}CacheSnapshot('),
@@ -55,7 +64,7 @@ def generate(component: Path, baseline: bool) -> str:
         functions.append(extract_block(owner, f'int {short}BuildDataJson('))
         oled = {'apds':'void displayApdsData()', 'imu':'static void displayImuActions()',
                 'tof':'static void displayTofData()', 'rtc':'static void displayRtcData()'}[short]
-        functions.append(extract_block((component / f'i2csensor_{file}_oled.h').read_text(), oled))
+        functions.append(extract_block((component / source(file, '_oled.h')).read_text(), oled))
         if short == 'apds':
             functions += [extract_block(owner, marker) for marker in ['uint8_t apdsGetProximity(',
                           *[f'uint16_t apdsGetColor{c}(' for c in 'RGBC']]]
@@ -101,8 +110,8 @@ def main() -> None:
         (work / 'freertos/task.h').write_text('#include "FreeRTOS.h"\n')
         disabled = ['#include <cassert>']
         for short, file, typename, title, flag in SENSORS:
-            shutil.copyfile(COMPONENT / f'i2csensor_{file}.h', work / f'i2csensor_{file}.h')
-            disabled.append(f'#include "i2csensor_{file}.h"')
+            shutil.copyfile(COMPONENT / source(file, '.h'), work / source(file, '.h'))
+            disabled.append(f'#include "{source(file, ".h")}"')
         disabled.append('int main() {')
         for short, _, typename, _, _ in SENSORS:
             field = {'apds':'apdsDataValid','imu':'imuDataValid','tof':'tofDataValid','rtc':'dataValid'}[short]

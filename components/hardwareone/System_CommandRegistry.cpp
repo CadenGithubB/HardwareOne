@@ -320,11 +320,11 @@ static constexpr CommandModule gCommandModules[] = {
     "controls how often the firmware reads the hardware.", tofCommands,          &tofCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("tof"); } },
 #endif
 #if ENABLE_IMU_SENSOR
-  { "imu",        "BNO055 9-DOF orientation sensor", "The BNO055 is a 9-DOF inertial measurement unit providing fused absolute "
-    "orientation. openimu starts it, imuread reports yaw/pitch/roll (degrees) plus "
-    "acceleration, gyroscope, and chip temperature, and closeimu stops it; imuautostart "
-    "[on|off] persists launching it at boot, and it runs on the fixed secondary I2C bus "
-    "(Wire1) using the board external crystal. Beyond raw orientation, imuactions runs "
+  { "imu",        "IMU (motion sensor)", "The IMU is the motion sensor on I2C; the build picks its chip (a BNO055, "
+    "which fuses absolute orientation on the chip). openimu starts it, imuread reports "
+    "yaw/pitch/roll (degrees) plus acceleration, gyroscope, magnetometer and chip "
+    "temperature, and closeimu stops it; imuautostart [on|off] persists launching it at "
+    "boot, imubus and imuaddress say where it is wired. Beyond raw orientation, imuactions runs "
     "gesture/event detection derived from the motion data: shake, tilt (with "
     "direction), tap/knock, rotation (with axis), freefall, a step counter with "
     "cadence, and screen-style orientation. Because the chip can be mounted in any "

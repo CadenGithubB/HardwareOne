@@ -144,7 +144,7 @@
   #define CUSTOM_ENABLE_OLED        1   // SSD1306 OLED display
   #define CUSTOM_ENABLE_GAMEPAD     1   // Adafruit Seesaw gamepad
   #define CUSTOM_ENABLE_GPS         0   // PA1010D GPS module - re-enabled 2026-07-03
-  #define CUSTOM_ENABLE_IMU         0   // BNO055 IMU — not installed
+  #define CUSTOM_ENABLE_IMU         0   // IMU (chip: IMU_DEVICE_TYPE) — not installed
   #define CUSTOM_ENABLE_TOF         0   // VL53L4CX ToF — not installed
   #define CUSTOM_ENABLE_THERMAL     0   // MLX90640 thermal camera
   #define CUSTOM_ENABLE_APDS        0   // APDS9960 gesture/proximity — not installed
@@ -178,6 +178,13 @@
 // Board profiles default to SEESAW_GAMEPAD on FeatherS3 and NONE on XIAO.
 // The two Seesaw options require I2C; GPIO input needs explicit assembly pins.
 #define INPUT_DEVICE_TYPE       1
+
+// Motion sensor (IMU): which chip the IMU (CUSTOM_ENABLE_IMU, or I2C level 3)
+// is. Exactly one backend compiles in (HAL_Motion_*.cpp, guarded in the file).
+//   1 = BNO055          (9-axis with on-chip fusion, 0x28 or 0x29)
+//   2 = ADAFRUIT_4517   (LSM6DSOX + LIS3MDL; its backend is not in the firmware yet)
+// A build without the IMU keeps 1.
+#define IMU_DEVICE_TYPE         1
 
 // Optional native SDMMC card backend; an explicit board profile supplies pins.
 // Existing SD_CS_PIN boards continue to use their SPI card backend.
@@ -601,6 +608,9 @@
 #define INPUT_DEVICE_TYPE_GPIO_ENCODER   3
 #define INPUT_DEVICE_TYPE_GT911_TOUCH    4
 
+#define IMU_DEVICE_TYPE_BNO055           1
+#define IMU_DEVICE_TYPE_ADAFRUIT_4517    2
+
 // The generic color TFT branches still use example wiring and do not supply
 // the SSD1306-compatible framebuffer/commands expected by the shared UI.
 // A saved selection must not advertise them as working display backends.
@@ -700,6 +710,20 @@
   #define ENABLE_LED_MATRIX CUSTOM_ENABLE_LED_MATRIX
 #else
   #define ENABLE_LED_MATRIX 0
+#endif
+
+// The IMU's backend (IMU_DEVICE_TYPE). Only the selected one compiles.
+#define ENABLE_IMU_BNO055   (ENABLE_IMU_SENSOR && IMU_DEVICE_TYPE == IMU_DEVICE_TYPE_BNO055)
+#define ENABLE_IMU_LSM6DSOX (ENABLE_IMU_SENSOR && IMU_DEVICE_TYPE == IMU_DEVICE_TYPE_ADAFRUIT_4517)
+#if ENABLE_IMU_SENSOR && !ENABLE_IMU_BNO055 && !ENABLE_IMU_LSM6DSOX
+  #error "IMU_DEVICE_TYPE must be 1 (BNO055) or 2 (Adafruit 4517) when the IMU is in the build"
+#endif
+#if ENABLE_IMU_LSM6DSOX
+  #error "IMU_DEVICE_TYPE 2 (Adafruit 4517) has no backend in this firmware yet; use 1 (BNO055)"
+#endif
+// A saved chip choice without the IMU has no effect: reject it.
+#if defined(HW1_FEATURE_CONFIG_HEADER) && !ENABLE_IMU_SENSOR && IMU_DEVICE_TYPE != IMU_DEVICE_TYPE_BNO055
+  #error "IMU_DEVICE_TYPE picks the IMU chip; it needs the IMU (CUSTOM_ENABLE_IMU 1 at I2C_FEATURE_LEVEL 4), or keep it at 1"
 #endif
 
 // The encoder device: an Adafruit seesaw encoder board (5752 Quad Rotary
@@ -1145,7 +1169,7 @@
 // Level FULL (3): All features enabled
 //   - THERMAL: +20-25KB flash, +15KB RAM (MLX90640)
 //   - TOF:     +25-30KB flash, +10KB RAM (VL53L4CX)
-//   - IMU:     +12-18KB flash, +8KB RAM  (BNO055)
+//   - IMU:     +12-18KB flash, +8KB RAM  (BNO055 backend)
 //   - GAMEPAD: +8-12KB flash,  +6KB RAM  (Seesaw)
 //   - APDS:    +6-10KB flash,  +4KB RAM  (APDS9960)
 //   - GPS:     +5-8KB flash,   +4KB RAM  (PA1010D)

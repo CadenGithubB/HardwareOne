@@ -28,7 +28,7 @@ static std::unordered_map<void*, Allocation> allocations;
 struct Scenario {
   bool bus = true, transaction = true, ping = true, defaultBegin = true;
   unsigned failAllocationAt = 0, allocationAttempts = 0, beginIndex = 0, taskExits = 0;
-  unsigned resets = 0, pinConfigs = 0, encoderZeroes = 0, crystalEnables = 0, rebinds = 0, flagReads = 0;
+  unsigned resets = 0, pinConfigs = 0, encoderZeroes = 0, backendStops = 0, rebinds = 0, flagReads = 0;
   bool addressTaken = false;     // another device of the build holds the ANO's address
   uint8_t resolvedBus = 255, transactionBus = 255;
   unsigned long now = 10000;
@@ -43,8 +43,7 @@ static Scenario scenario;
 struct TwoWire {};
 static TwoWire wire;
 static struct { int imuBus = 1, apdsBus = 1, servoBus = 1, inputBus = 1; } gSettings;
-static constexpr uint8_t BNO055_ADDRESS_A = 0x28, BNO055_ADDRESS_B = 0x29;
-static constexpr uint8_t I2C_ADDR_IMU = 0x28, I2C_ADDR_APDS = 0x39;
+static constexpr uint8_t I2C_ADDR_APDS = 0x39;
 static constexpr uint8_t APDS9960_ADDRESS = 0x39, PCA9685_I2C_ADDRESS = 0x40;
 static constexpr uint8_t I2C_ADDR_GAMEPAD = 0x50;
 static constexpr int APDS9960_AGAIN_4X = 1, INPUT_PULLUP = 2;
@@ -103,17 +102,10 @@ static bool beginResult(void* object) {
   ++scenario.beginIndex;
   return scenario.defaultBegin;
 }
-class Adafruit_BNO055 {
- public:
-  Adafruit_BNO055(int id, uint8_t address, TwoWire* bus) {
-    constructed(this, "imu.obj");
-    check(id == 55 && (address == BNO055_ADDRESS_A || address == BNO055_ADDRESS_B) && bus == &wire,
-          "BNO constructor identity/address/wire unchanged");
-  }
-  ~Adafruit_BNO055() { destroyed(this); }
-  bool begin() { return beginResult(this); }
-  void setExtCrystalUse(bool enabled) { check(enabled, "BNO crystal remains enabled"); ++scenario.crystalEnables; }
-};
+// The IMU's backend (HAL_MotionBackend.h): no object, only a release.
+static void motionBackendStop() { ++scenario.backendStops; }
+// HAL_Motion: the IMU forgets the bus and address it was opened at.
+static void imuCloseTarget() {}
 class Adafruit_APDS9960 {
  public:
   Adafruit_APDS9960() { constructed(this, "apds.obj"); }
@@ -194,7 +186,6 @@ static bool seesawReadProductIdOnHeldBus(TwoWire* bus, uint8_t address, uint16_t
   scenario.lastIdProduct = product;
   return true;
 }
-static Adafruit_BNO055* gBNO055 = nullptr;
 static Adafruit_APDS9960* gAPDS9960 = nullptr;
 static Adafruit_PWMServoDriver* gPwmDriver = nullptr;
 static Adafruit_seesaw* gGamepadSeesaw = nullptr;
@@ -203,7 +194,7 @@ static uint8_t sAnoSeesawBus = 0xFF, sAnoBus = 0, sAnoAddress = 0;
 static void* ps_alloc(size_t size, AllocPref preference, const char* tag) {
   check(preference == AllocPref::PreferPsram, "parent allocation requests PSRAM preference");
   const std::map<std::string, size_t> expected = {
-    {"imu.obj", sizeof(Adafruit_BNO055)}, {"apds.obj", sizeof(Adafruit_APDS9960)},
+    {"apds.obj", sizeof(Adafruit_APDS9960)},
     {"servo.obj", sizeof(Adafruit_PWMServoDriver)}, {"input.gamepad.obj", sizeof(Adafruit_seesaw)},
     {"input.ano.obj", sizeof(AnoSeesaw)}};
   check(expected.count(tag) && expected.at(tag) == size, "parent allocation tag and sizeof match driver");
@@ -277,7 +268,6 @@ static void broadcastOutput(const char*) {}
 static void fixtureCleanup() {
   // Gamepad/ANO (and successful servo) are intentionally retained by firmware.
   // The host fixture releases them only between isolated test cases.
-  ps_delete(gBNO055); gBNO055 = nullptr;
   ps_delete(gAPDS9960); gAPDS9960 = nullptr;
   ps_delete(gPwmDriver); gPwmDriver = nullptr;
   ps_delete(gGamepadSeesaw); gGamepadSeesaw = nullptr;
@@ -299,7 +289,7 @@ static void resetScenario() {
   sApdsCache.apdsColorValid = sApdsCache.apdsProximityValid = sApdsCache.apdsGestureValid = true;
 }
 static void testAllocationAndBusFailure() {
-  const std::vector<bool(*)()> initializers = {imuInit, apdsInit, servoInit, gamepadInit,
+  const std::vector<bool(*)()> initializers = {apdsInit, servoInit, gamepadInit,
                                              gamepadInitConnection, anoEncoderInit};
   for (auto initialize : initializers) {
     resetScenario(); scenario.failAllocationAt = 1;
@@ -312,25 +302,11 @@ static void testAllocationAndBusFailure() {
   }
 }
 static void testFreedFailureParents() {
-  resetScenario(); scenario.defaultBegin = false;
-  check(!imuInit(), "BNO reports exhaustion of existing retries");
-  check(gBNO055 == nullptr && stats["imu.obj"].constructions == 10 && stats["imu.obj"].frees == 10,
-        "BNO preserves five attempts/two address tries and frees each failed parent");
-  scenario.defaultBegin = true;
-  check(imuInit() && gImuConnected, "BNO retries successfully after failure");
-  auto* imu = gBNO055; const auto imuAllocations = stats["imu.obj"].allocations;
-  check(imuInit() && gBNO055 == imu && stats["imu.obj"].allocations == imuAllocations,
-        "already initialized BNO does not allocate again");
+  resetScenario(); gImuConnected = true;
   stopImuBranch();
-  check(!gBNO055 && !gImuConnected && !sImuCache.imuDataValid && sImuCache.imuSeq == 0 &&
-        !gImuInitRequested && !gImuInitDone && !gImuInitResult,
-        "actual BNO task shutdown frees parent and resets cache/init flags");
-  resetScenario(); scenario.beginResults = {false, false, true};
-  check(imuInit() && stats["imu.obj"].constructions == 3 && stats["imu.obj"].frees == 2,
-        "BNO retains only the successful retry parent");
-  resetScenario(); scenario.defaultBegin = false; scenario.failAllocationAt = 2;
-  check(!imuInit() && stats["imu.obj"].frees == 1 && allocations.empty(),
-        "BNO later allocation failure preserves prior-attempt cleanup");
+  check(!gImuConnected && !sImuCache.imuDataValid && sImuCache.imuSeq == 0 && scenario.backendStops == 1 &&
+        !gImuInitRequested && !gImuInitDone && !gImuInitResult && scenario.taskExits == 1,
+        "actual IMU task shutdown releases the backend once and resets cache/init flags");
 
   resetScenario(); scenario.defaultBegin = false;
   check(!apdsInit() && !gAPDS9960 && stats["apds.obj"].frees == 1, "APDS begin failure frees and nulls parent");

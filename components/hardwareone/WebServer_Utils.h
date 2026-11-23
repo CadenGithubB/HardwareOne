@@ -78,10 +78,13 @@ inline esp_err_t webSendSessionChanged(httpd_req_t* req) {
   return sendJsonStatus(req, "401 Unauthorized", "{\"ok\":false,\"error\":\"web_session_changed\"}");
 }
 
-// Guest role HTTP gate. After auth succeeds: guests may only hit an allowlist
+// Role HTTP gate. After auth succeeds: guests may only hit an allowlist
 // of status/list GET APIs, HTML view pages, and logout. Everything else
-// (CLI, files, mutate POSTs, camera capture, admin, …) gets 403.
-// Non-guests always pass. Returns false after sending the 403 response.
+// (CLI, files, mutate POSTs, camera capture, admin, …) gets 403, and the
+// private reads (ESP-NOW messages, ring health, LLM chat) get a 403 with
+// code "guest_private". A user passes except for the admin-only reads
+// (ESP-NOW messages: code "admin_required"); an administrator always passes.
+// Returns false after sending the 403 response.
 // Forward-declared here (defined in System_User.h) so this header parses
 // without pulling in the full user subsystem; the reference param only needs
 // the incomplete type. Callers that expand WEB_AUTH_OR_RETURN already have

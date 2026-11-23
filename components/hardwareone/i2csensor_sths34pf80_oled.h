@@ -12,20 +12,16 @@
 void displayPresenceData() {
   if (!oledDisplay || !oledConnected) return;
   
-  oledDisplay->clearDisplay();
+  // Under the header bar, which shows the screen's name.
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-  oledDisplay->setCursor(0, 0);
+  oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   
   if (!gPresenceConnected || !gPresenceRunning) {
-    oledDisplay->println("== PRESENCE ==");
-    oledDisplay->println();
     oledDisplay->println("Not active");
     oledDisplay->println();
     oledDisplay->println("Press X to start");
   } else {
-    oledDisplay->println("== PRESENCE ==");
-    
     PresenceCache presence{};
     if (presenceCacheSnapshot(presence)) {
       // Ambient temperature

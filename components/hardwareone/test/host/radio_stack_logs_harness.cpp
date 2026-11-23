@@ -50,6 +50,9 @@ void esp_log_level_set(const char* tag, esp_log_level_t level) {
     gTagLevel[tag] = level;
   }
 }
+// The firmware sets its tags through the boot debug capture
+// (System_BootDebug.h), which is esp_log_level_set outside the boot.
+#define bootDebugEspLogSet esp_log_level_set
 static int effective(const char* tag) {
   const auto it = gTagLevel.find(tag);
   return it == gTagLevel.end() ? gDefaultLevel : it->second;

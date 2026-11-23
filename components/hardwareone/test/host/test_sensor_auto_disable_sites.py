@@ -32,7 +32,7 @@ NOTE = re.compile(r"\bnoteSensorAutoDisabled\(\s*(\w+)\s*(?:,\s*\w+\s*)?\)")
 
 # file -> (device type, number of auto-disable sites, what the site does to stop)
 EXPECTED = {
-    "i2csensor_bno055.cpp":       ("I2C_DEVICE_IMU", 1, "gImuRunning = false"),
+    "HAL_Motion.cpp":             ("I2C_DEVICE_IMU", 1, "gImuRunning = false"),
     "i2csensor_mlx90640.cpp":     ("I2C_DEVICE_THERMAL", 1, "gThermalRunning = false"),
     "i2csensor_vl53l4cx.cpp":     ("I2C_DEVICE_TOF", 1, "gTofRunning = false"),
     "i2csensor_apds9960.cpp":     ("I2C_DEVICE_APDS", 1, "gApdsColorRunning = false"),
@@ -54,7 +54,8 @@ def strip_comments(text: str) -> str:
 
 def main() -> int:
     failures: list[str] = []
-    drivers = sorted(COMPONENT.glob("i2csensor_*.cpp"))
+    # The sensor drivers, and the HAL layers that own a sensor task (the IMU).
+    drivers = sorted(list(COMPONENT.glob("i2csensor_*.cpp")) + list(COMPONENT.glob("HAL_Motion*.cpp")))
     if not drivers:
         print("no i2csensor_*.cpp found")
         return 1

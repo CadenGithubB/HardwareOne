@@ -14,6 +14,8 @@
 #include <map>
 #include <string>
 
+#include "OLED_HeaderCore.h"  // the keyboard's top line (oled_header::kb)
+
 static int gFailures = 0;
 static int gChecks = 0;
 static std::string gCase;
@@ -52,6 +54,7 @@ class Adafruit_SSD1306 {
   void setCursor(int, int y) { row = y; }
   void drawRect(int, int, int, int, int) {}
   void fillRect(int, int, int, int, int) {}
+  void drawPixel(int, int, int) {}
   void fillCircle(int, int, int, int) {}
   void print(const char* text) { rows[row] += text; }
   void print(const String& text) { rows[row] += text; }
@@ -79,6 +82,12 @@ static DictationSnapshot dictationSnapshotNow() {
   snap.sourceName = "PDM";
   return snap;
 }
+
+// The keyboard line's busy and capture marks (OLED_Utils.cpp).
+static bool oledCommandBusy() { return false; }
+static bool oledCaptureLive() { return false; }
+static uint32_t sKeyboardLineDrawnSig = 0;
+static bool sKeyboardLineShown = false;
 
 // INSERT_KEYBOARD
 
@@ -160,7 +169,7 @@ static std::string leakedRow(const std::string& secret) {
 
 static std::string expectedPreview(Page page, const std::string& text, bool masked) {
   if (page == Page::SUGGESTIONS) {
-    const size_t shown = std::min<size_t>(text.size(), 8);
+    const size_t shown = std::min<size_t>(text.size(), 7);  // the keyboard line's mode slot
     return "Suggestions:" + (masked ? std::string(shown, '*') : text.substr(0, shown));
   }
   const size_t shown = std::min<size_t>(text.size(), 20);
@@ -171,7 +180,7 @@ static std::string previewRow(Page page) {
 }
 
 // A masked field never shows its text on any page; the preview is '*' per
-// character (last 20, first 8 on the suggestions page).
+// character (last 20, first 7 on the suggestions page).
 static void maskedFieldHidesText() {
   const char* const secrets[] = {"Kq7mZp3Rv9", "Kq7mZp3Rv9Wt4Ns8Bx2Hc6", "^^>v<<v>"};
   for (const char* secret : secrets) {

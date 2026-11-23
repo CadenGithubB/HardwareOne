@@ -704,7 +704,7 @@ CONCAT_SOURCES = [
     "System_Microphone_Web.h",
     "WebServer_Utils.cpp",
     "i2csensor_ano_encoder_web.h",
-    "i2csensor_bno055_web.h",
+    "HAL_Motion_Web.h",
     "i2csensor_ds3231_web.h",
     "i2csensor_mlx90640_web.h",
     "i2csensor_pa1010d_web.h",

@@ -338,7 +338,7 @@
           + '<button class="btn interact-tab" id="btn-sensors-' + mac + '" onclick="toggleMessageType(\'' + mac + '\', \'sensors\')">Sensor Streaming</button>'
           + '</div>'
           + '<div>'
-          + '<div class="message-log" id="log-' + mac + '" style="margin-bottom:12px;max-height:300px;overflow-y:auto"><div class="message-empty">No messages yet. Start a conversation!</div></div>'
+          + '<div class="message-log" id="log-' + mac + '" style="margin-bottom:12px;max-height:300px;overflow-y:auto"><div class="message-empty">' + hw.esc(window.__espnowMessagesRefused || 'No messages yet. Start a conversation!') + '</div></div>'
           + '<div id="text-input-' + mac + '" style="display:block" data-guest-hide>'
           + '<div style="display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap">'
           + '<textarea id="msg-' + mac + '" maxlength="1024" oninput="var c=hw.$(this.id.replace(\'msg-\',\'msg-count-\'));hw.setText(c,(1024-this.value.length)+\' characters left\');" placeholder="Message to send" style="flex:1;min-width:220px;min-height:60px;resize:vertical;font-family:inherit;padding:8px;border:1px solid var(--border);border-radius:4px;background:var(--panel-bg);color:var(--panel-fg)"></textarea>'

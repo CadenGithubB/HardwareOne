@@ -150,6 +150,44 @@ Host-tested and built; not run on a device.
   `{"val":0,"error":...}` when closed or not built). On/off arguments of `anoencoderinvert`,
   `anoencoderswapud`, `anoencoderswaplr` and `inputautostart` use the shared parser and reply.
 
+### Fixed (IMU, BNO055)
+- A BNO055 strapped to 0x29 (ADR high) can be used: the new `imuaddress [0x28|0x29]` setting
+  (applies at the next `openimu`; a running IMU keeps reading the address it was opened at until
+  then; refused, by the command and again at `openimu`, when another device of the build holds
+  the address on the IMU bus) is the address the start check, the driver, every reading, the I2C
+  health record, the auto-disable, autostart and the RAM-flush resume all use. Before, the start
+  check and every poll looked only at 0x28, while `detect` also counted any answer at 0x29 (a
+  VL53L4CX ToF, say) as the IMU; it now looks only at the configured address.
+- Starting the BNO055 no longer holds the I2C bus for up to about 10 s: the driver talks to the
+  chip's registers itself (the Adafruit library is no longer used), each register access is one
+  short transaction and every wait (power-up, the 650 ms reset) sleeps with the bus released, so
+  the OLED, the fuel gauge and the encoders on the same bus keep running. A step another device's
+  long transfer delays is tried again. The start takes about a second, ends within 4 s even with
+  every bus access at its worst case, and a failure says why (`Error: No BNO055 answers at 0x29 on
+  bus 1. ...`, another chip at the address, no answer after its reset, the bus staying busy),
+  instead of "timeout after 3s" whatever happened.
+- Rotation detection works: it compared the gyro (rad/s) with 100 as if it were deg/s, so it never
+  fired; `imuactions` now shows the rate in deg/s, and the web card labels the gyro rad/s.
+- The web page's 3D view turns the right way: it was passed yaw, pitch, roll where it takes pitch,
+  roll, yaw.
+- The readings are the chip's own by default: the mounting correction (`imuorientationcorrection`)
+  is off and `imuorientationmode` is 0 (they were on and 8, tuned to one mounting, which swapped
+  pitch and roll), and the stored pitch is never clamped to ±75° any more (only the web 3D view
+  clamps its drawing). The logs, ESP-NOW, MQTT, the G2 page and the events get the unclamped pitch.
+- The motion events no longer count renders as samples: the OLED IMU page and `imuactions` read the
+  detector's state instead of running it again on the same reading, and a start no longer reads as
+  a shake (the detector's history starts from the first reading).
+
+### Changed (IMU)
+- The IMU is a motion layer with one backend per build (`HAL_Motion`): `IMU_DEVICE_TYPE` picks the
+  chip (1 = BNO055, the default; 2 = Adafruit 4517 LSM6DSOX + LIS3MDL, whose backend comes in a
+  later change and is refused by the build until then). The guided setup shows a "Motion sensor"
+  choice (None / BNO055 on I2C). The commands and settings keep their names.
+- `imuread json` (and the `imu` entry of `sensors json` and the ESP-NOW reading) adds `"mag":{x,y,z}`
+  (µT) and `"cal"` (the chip's calibration byte) when the chip has them; the BNO055 has both
+  (`docs/APP_JSON_CONTRACT.md`). `imuread` shows the magnetometer too.
+- `imuautostart` and the angle offsets use the shared on/off and number replies.
+
 ### Changed (I2C buses and addresses)
 - Every `<device>bus` command (`oledbus`, `fuelgaugebus`, `inputbus`, `imubus`, `tofbus`,
   `thermalbus`, `apdsbus`, `gpsbus`, `fmradiobus`, `rtcbus`, `presencebus`, `matrixbus`,
@@ -189,6 +227,18 @@ Host-tested and built; not run on a device.
   gone. Boards with no battery measurement no longer show `--%`. The Automations page counter
   (`3/12`) shows in the bar (it was erased every frame). The bar now updates by itself when the
   battery, USB or unread count changes, also on a still screen.
+- A capture dot shows in the bar on every screen while the microphone or the camera is in use
+  (recording, dictation, transcription, the wake word, a camera stream or video recording).
+- No screen draws in the header rows any more: Presence, APDS, Thermal, Change Password, the
+  "System Error" fallback and the Map popups start under the bar, which shows their name (Map
+  popups: `Map Menu`, `Goto WP`, `Load Track`, a layer name...). The thermal image shrinks to fit
+  between the bar and the footer on the 64 px OLED. The Map track status no longer overprints
+  its first rows; its `B:OK` and the map info's are in the footer.
+- The on-screen keyboard's top line uses the same rules: a long prompt ends in the `…` mark
+  instead of running into the page label (`abc`, `ABC`, `123`, `sym`, `PAT`, the live mic), which
+  stays at the right edge; the busy hourglass and the capture dot show there too.
+- New admin command `oleddump [first-row] [rows]` prints the screen as text (`#` lit, `.` dark)
+  over the console or HTTP, up to 31 rows per reply.
 
 ### Changed (guest web view)
 - A guest (owner decision B6: guests view interfaces only) now sees every web page and every
@@ -205,6 +255,16 @@ Host-tested and built; not run on a device.
   reason instead of its raw JSON, so a page that also shows the error (R1 Health) still gives one
   popup. Host-tested (`web_guest_gate`, `web_guest_view_browser`,
   `remote_command_authority`); not checked on a device.
+- Guest privacy (owner decision, 2026-11-22): the ESP-NOW message history is admin-only, on
+  the web (`/api/espnow/messages`) and as the `espnowmessages` command, since it carries the
+  output of remote commands; a user's ESP-NOW page says "Message history is for administrators
+  only." A guest no longer sees the message history, the ring's health data (`/api/health/status`)
+  or the LLM chat (`/api/llm/chat/turns`, `/api/llm/result`); the ESP-NOW and R1 Health pages say
+  the data is not available to guests and stop polling. A guest's settings view (`/api/settings`)
+  leaves out the saved Wi-Fi networks and the joined network's name and shows "(not shown to
+  guests)" for the MQTT broker host and user name and the LLM gateway address, as the MQTT page
+  does; users and administrators see them as before. Host-tested (`web_guest_gate`, `web_guest_settings_view`,
+  `web_guest_private_pages`); not checked on a device.
 
 ### Fixed (storage, files and the web worker)
 - One free-space reserve on flash (FILE-3, UP-16): web uploads to flash may now use what is free
@@ -245,16 +305,24 @@ Host-tested and built; not run on a device.
   `tools/vendor_arduino.sh --compare` (G-25).
 
 ### Added
-- Boot debug file (owner decision B13): every boot runs with every debug flag on and every log
-  level shown until boot finishes (or the buffer fills), into a 56 KB PSRAM buffer (4 KB of internal memory on a board without PSRAM) instead
-  of the console or the normal logs; lines the saved flags would show still appear as usual. The
-  saved flags (the defaults on a first boot) apply again after boot. The buffer is saved as
-  `/system/sys_logs/boot-debug-1.log`, keeping the last three boots (`-2`, `-3`), with a header
-  that records the capture's start and end uptime, the bytes kept and dropped and the CPU time
-  spent capturing, and a `[TRUNCATED]` line when the buffer filled. Admin-only to read
-  (`fileview`, web file browser). P4X-EYE: the C6 console mirror now runs during every boot, with
-  the C6's boot messages shown at INFO, and stops when boot finishes unless `c6console on` or a
-  companion fault keeps it.
+- Boot debug file (owner decision B13): every boot runs with all debug output on until boot
+  finishes - every debug flag and sub-flag, every debug check, the log level at `debug` and every
+  ESP-IDF tag at the build's level (an esp_log hook catches its lines) - into a 256 KB PSRAM buffer
+  (4 KB of internal memory on a board without PSRAM) instead of the console or the normal logs;
+  lines the saved settings would show still appear as usual. The saved settings (the defaults on a
+  first boot) apply again after boot. A full buffer keeps the start of the boot and its newest
+  lines with a `[GAP]` line between them. The buffer is saved as `boot-debug-1.log` on a writable
+  SD card (`/sd/system/sys_logs/`, last three boots kept as `-2`, `-3`), otherwise on flash
+  (`/system/sys_logs/`, newest boot only), with a header that records the capture's start and end
+  uptime, the lines and bytes in all (dropped ones included), kept and dropped, and the
+  wall-clock time spent capturing. `bootdebug [on|off]` (also in the debug settings on the web and
+  OLED) turns it off for the fastest boot (on by default; from the next boot) and shows where this
+  boot's file went. Admin-only to read (`fileview`, web file browser). P4X-EYE: the capture starts
+  before the C6 companion's bring-up, so ESP-Hosted's lines of the whole boot are in the file; the C6 console
+  mirror now runs during every boot, with the C6's boot messages shown at INFO, and stops when boot
+  finishes unless `c6console on` or a companion fault keeps it.
+- `fileview` pages a file of any size: past 60000 B it reads one page at a time straight from the
+  file (JSON shown as stored there) instead of stopping at its read limit.
 - The LED commands take the light as an optional first word: `ledcolor [target] <colour>`,
   `ledeffect [target] <effect> ...`, `ledbrightness [target] <0..100>` (admin, saved per light),
   `ledclear [target]`, with the targets `onboard` (the board's NeoPixel), `encoder` (every pixel of

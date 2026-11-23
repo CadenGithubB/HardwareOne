@@ -33,7 +33,7 @@ SECTIONS = [
     ("Feature flags", lambda n: n.startswith("ENABLE_")),
     ("Custom selections", lambda n: n.startswith("CUSTOM_ENABLE_")),
     ("Levels & selection", lambda n: n.endswith("_FEATURE_LEVEL") or n in (
-        "DISPLAY_TYPE", "INPUT_DEVICE_TYPE", "HW1_OTA_LAYOUT")),
+        "DISPLAY_TYPE", "INPUT_DEVICE_TYPE", "IMU_DEVICE_TYPE", "HW1_OTA_LAYOUT")),
     ("Board hardware", lambda n: n.startswith((
         "BOARD_", "NEOPIXEL_", "BATTERY_", "I2C_", "I2C2_", "MIC_", "SD_",
         "CAMERA_", "UART_LINK_", "USER_LED_")) or n in ("XIAO_ESP32S3_SENSE_ENABLED",)),

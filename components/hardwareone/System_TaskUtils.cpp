@@ -3,6 +3,7 @@
 #include "System_Filesystem.h"    // For filesystemReady, isFsLockedByCurrentTask
 #include "System_Mutex.h"  // For isFsLockedByCurrentTask
 #include "System_Debug.h"  // For DEBUG_CLIF macro
+#include "System_BootDebug.h"  // the task-create trace: a forced line goes to the boot file only
 #include "System_MemUtil.h"      // For ps_alloc, AllocPref, hw1InternalFreeBytes
 #include "System_HeapLowCore.h"  // shared low-heap line and fragmentation figure
 #include "System_ESPNow.h"       // Safe espnow_task stack snapshot
@@ -38,7 +39,7 @@ extern "C" __attribute__((weak)) UBaseType_t uxTaskGetSystemState(
 // header, which also holds the disabled branch for a sensor that is compiled out.
 #include "i2csensor_seesaw.h"
 #include "i2csensor_mlx90640.h"
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_vl53l4cx.h"
 #include "i2csensor_rda5807.h"
 #include "i2csensor_pa1010d.h"
@@ -347,7 +348,10 @@ BaseType_t xTaskCreateLogged(TaskFunction_t pxTaskCode,
       line += String(psDelta);
     }
     // Memory allocation logging removed - LOG_ALLOC_FILE is obsolete
-    broadcastOutput(line);
+    // During the boot debug capture a line the saved flags would not show
+    // goes to the boot file only.
+    if (isDebugFlagSaved(DEBUG_MEMORY)) broadcastOutput(line);
+    else bootDebugCaptureText(line.c_str());
   }
 
   return res;
@@ -412,7 +416,7 @@ bool createThermalTask() {
 
 bool createImuTask() {
   if (gImuTaskHandle == nullptr) {
-    const uint32_t imuStack = IMU_STACK_WORDS;  // words; ~16KB (BNO055 init retries need extra stack)
+    const uint32_t imuStack = IMU_STACK_WORDS;  // bytes on this port (4 KB)
     if (xTaskCreateLogged(imuTask, "sensor_imu", imuStack, nullptr, TASK_PRIORITY_LOW, &gImuTaskHandle, "imu", I2C_SENSOR_CORE) != pdPASS) {
       return false;
     }

@@ -157,6 +157,8 @@ static void displayUpdate() {
   if (gWriterHeld) ++gPushesUnderWriter;
   publish(gPublishAtPush);
 }
+// oleddump's copy of the committed frame (OLED_Utils.cpp): nothing to copy here.
+static void oledDumpCapture() {}
 
 // --- The OLED command path ---------------------------------------------------
 struct CommandContext {

@@ -476,6 +476,74 @@ static void webGuestSendForbidden(httpd_req_t* req) {
     "\"message\":\"Guest accounts are view-only\"}");
 }
 
+// A private read a guest does not see (owner, guest privacy 2026-11-22): the
+// page that loads it shows "not available to guests" ("code" is what the page
+// matches; "error" the sentence it can show).
+static void webGuestSendPrivate(httpd_req_t* req) {
+  httpd_resp_set_status(req, "403 Forbidden");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_sendstr(req,
+    "{\"success\":false,\"code\":\"guest_private\","
+    "\"error\":\"Not available to guests\","
+    "\"message\":\"Not available to guests\"}");
+}
+
+// A read only an administrator may make, refused for a user.
+static void webSendAdminRequired(httpd_req_t* req) {
+  httpd_resp_set_status(req, "403 Forbidden");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_sendstr(req,
+    "{\"success\":false,\"code\":\"admin_required\","
+    "\"error\":\"Admin access required\","
+    "\"message\":\"Admin access required\"}");
+}
+
+// Reads only an administrator may make (owner, guest privacy 1, 2026-11-22):
+// the ESP-NOW message history carries the output of bonded remote commands
+// (espnowremote, espnowbrowse, espnowfetch, room and tag commands), which are
+// admin commands. The command that reads the same history (espnowmessages) is
+// an admin row too.
+static bool webApiAdminOnly(const char* path) {
+  static const char* const kAdminOnly[] = {
+    "/api/espnow/messages",
+  };
+  for (const char* admin : kAdminOnly) {
+    if (strcmp(path, admin) == 0) return true;
+  }
+  return false;
+}
+
+// Private data a guest does not see (owner, guest privacy 1-3, 2026-11-22):
+// the ESP-NOW message history, the ring's health data (heart rate, HRV, SpO2,
+// temperature, activity), and the LLM conversation (the turns, and the
+// streamed answer of the current turn). The pages that load them say they are
+// not available to guests. Checked before the allowlist.
+static bool webGuestApiPrivate(const char* path) {
+  static const char* const kPrivate[] = {
+    "/api/espnow/messages",
+    "/api/health/status",
+    "/api/llm/chat/turns",
+    "/api/llm/result",
+  };
+  for (const char* priv : kPrivate) {
+    if (strcmp(path, priv) == 0) return true;
+  }
+  return false;
+}
+
+// The request path without its query string, cut to fit `out`.
+// httpd_req_t::uri is a fixed-size char array, never NULL, so no null-guard
+// (a ternary here trips -Werror=address).
+static void webRequestPath(const httpd_req_t* req, char* out, size_t outSize) {
+  const char* uri = req->uri;
+  size_t n = 0;
+  while (uri[n] && uri[n] != '?' && n + 1 < outSize) {
+    out[n] = uri[n];
+    n++;
+  }
+  out[n] = '\0';
+}
+
 // Surface-level status / list APIs guests may poll. Not files, camera
 // capture, bond FS, admin, or other deep/control surfaces. The command line
 // (POST /api/cli) is not on this list: it is let through by
@@ -496,7 +564,6 @@ static bool webGuestApiAllowed(const char* path) {
     "/api/events/kinds",
     "/api/logging/status",
     "/api/espnow/status",
-    "/api/espnow/messages",
     "/api/espnow/metadata",
     "/api/ble/status",
     "/api/speech/status",
@@ -504,7 +571,6 @@ static bool webGuestApiAllowed(const char* path) {
     "/api/automations",
     "/api/battery/status",
     "/api/power/status",
-    "/api/health/status",
     "/api/sensors",
     "/api/sensors/status",
     "/api/sensors/remote",
@@ -512,8 +578,6 @@ static bool webGuestApiAllowed(const char* path) {
     "/api/llm/status",
     "/api/llm/models",
     "/api/llm/menu",
-    "/api/llm/result",
-    "/api/llm/chat/turns",
     "/api/bond/status",
     "/api/bond/paired-devices",
     "/api/maps/features",
@@ -571,21 +635,20 @@ bool webGuestAccessAllowed(httpd_req_t* req, const AuthContext& ctx) {
     webGuestSendForbidden(req);
     return false;
   }
-  if (!guestRole) return true;
+  char path[128];
+  webRequestPath(req, path, sizeof(path));
+  if (!guestRole) {
+    // A user or an administrator: only the admin-only reads are checked
+    // (isAdminUser reads the roster, so only for those paths).
+    if (webApiAdminOnly(path) && !isAdminUser(ctx.user)) {
+      webSendAdminRequired(req);
+      return false;
+    }
+    return true;
+  }
 
   // CORS preflight — never a mutate.
   if (req->method == HTTP_OPTIONS) return true;
-
-  // Path without query string. httpd_req_t::uri is a fixed-size char array,
-  // never NULL, so no null-guard (a ternary here trips -Werror=address).
-  const char* uri = req->uri;
-  char path[128];
-  size_t n = 0;
-  while (uri[n] && uri[n] != '?' && n + 1 < sizeof(path)) {
-    path[n] = uri[n];
-    n++;
-  }
-  path[n] = '\0';
 
   // The single command line: the executor decides, with the same guest
   // surface every transport has (read-only status lines pass; any other line
@@ -606,6 +669,10 @@ bool webGuestAccessAllowed(httpd_req_t* req, const AuthContext& ctx) {
     return true;
   }
 
+  if (webGuestApiPrivate(path)) {
+    webGuestSendPrivate(req);
+    return false;
+  }
   if (!webGuestApiAllowed(path)) {
     webGuestSendForbidden(req);
     return false;
