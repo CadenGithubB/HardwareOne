@@ -9,6 +9,7 @@
 #include <sodium.h>
 
 #include "System_Debug.h"
+#include "System_ESPNow_AnswerCore.h"  // busy / no slot vs other refusal statuses
 #include "System_ESPNow_Crypto.h"
 #include "System_ESPNow_Deadline.h"  // wrap-safe prev-key window
 #include "System_ESPNow_HandshakeBackoff.h"  // WarnLimiter
@@ -851,6 +852,7 @@ void sendStatusRegister(uint32_t msgId, const uint8_t peerMac[6]) {
   slot->msgId          = msgId;
   slot->registeredAtMs = nowMs;
   slot->resolvedAtMs   = 0;
+  slot->status         = 0;
 }
 
 // Mirror the resolved send state onto the DURABLE sent[] history record so the
@@ -906,14 +908,16 @@ void sendStatusMarkDelivered(uint32_t msgId, const uint8_t srcMac[6]) {
   sessionNoteSendResult(s->peerMac, /*delivered=*/true);  // a real ACK → session healthy, clear the run
 }
 
-void sendStatusMarkRefused(uint32_t msgId, const uint8_t srcMac[6]) {
+void sendStatusMarkRefused(uint32_t msgId, const uint8_t srcMac[6], uint8_t status) {
   if (!gSendStatus || msgId == 0 || !srcMac) return;
   SendStatus* s = findByMsgId(msgId);
   if (!s || s->state != SEND_STATUS_PENDING) return;
   if (memcmp(s->peerMac, srcMac, 6) != 0) return;
-  s->state        = SEND_STATUS_FAILED;
+  const bool busy = status == espnowanswer::kBusy || status == espnowanswer::kNoSlot;
+  s->state        = busy ? SEND_STATUS_BUSY : SEND_STATUS_REFUSED;
+  s->status       = status;
   s->resolvedAtMs = (uint32_t)millis();
-  espnowUpdateSentDeliveryState(s->peerMac, msgId, SEND_STATUS_FAILED);
+  espnowUpdateSentDeliveryState(s->peerMac, msgId, s->state);
   sessionNoteSendResult(s->peerMac, /*delivered=*/true);  // an answer: the session is alive
 }
 

@@ -10,8 +10,10 @@
 //
 //   header  0 marker 0xA5   1 length   2 type   3 flags   4 piece   5 pieceTotal
 //           6 check   7 zero   8 seq (LE)   12 reqId (LE)   16 timestamp (LE)
-//   flags   bit0 encrypted, bit1 sent, bit2 unattributed, bits3-4 sendState,
-//           bits5-7 zero
+//   flags   bit0 encrypted, bit1 sent, bit2 unattributed, bits3-5 sendState,
+//           bits6-7 zero. sendState: a sent record's delivery state
+//           (SendStatusState); a received remote-command result row's outcome
+//           (espnowcmd::Outcome, 1.0 step 6); 0 otherwise.
 //   check   0x5A ^ sum p[i]*(2i+1) mod 256 over bytes 0..19 except 6: odd
 //           weights, so any single changed header byte is detected.
 //
@@ -51,7 +53,7 @@ constexpr uint32_t kMaxFootprint   = footprint(kTextMax);   // 276
 constexpr uint32_t kMinRingBytes   = 1024;
 constexpr uint32_t kMaxRingBytes   = 65536;
 constexpr uint8_t  kTypeMax        = 7;
-constexpr uint8_t  kSendStateMax   = 3;
+constexpr uint8_t  kSendStateMax   = 7;
 constexpr uint8_t  kRecordMarker   = 0xA5;
 constexpr uint8_t  kWrapMarker     = 0x5A;
 constexpr int      kMaxSources     = 32;    // 2 rings x MESH_PEER_MAX (asserted in System_ESPNow.h)
@@ -73,8 +75,8 @@ constexpr uint8_t kFlagEncrypted    = 0x01;
 constexpr uint8_t kFlagSent         = 0x02;
 constexpr uint8_t kFlagUnattributed = 0x04;
 constexpr uint8_t kSendStateShift   = 3;
-constexpr uint8_t kSendStateMask    = 0x18;
-constexpr uint8_t kFlagsReserved    = 0xE0;
+constexpr uint8_t kSendStateMask    = 0x38;
+constexpr uint8_t kFlagsReserved    = 0xC0;
 
 struct Header {
   uint32_t seq;
@@ -84,7 +86,7 @@ struct Header {
   uint8_t  type;         // LogMessageType
   uint8_t  piece;
   uint8_t  pieceTotal;
-  uint8_t  sendState;    // 0..3
+  uint8_t  sendState;    // 0..7
   bool     encrypted;
   bool     sent;         // set by append from the ring; ignored on input
   bool     unattributed;
@@ -119,7 +121,7 @@ inline uint8_t headerCheck(const uint8_t* p) {
   return static_cast<uint8_t>(0x5A ^ (sum & 0xFF));
 }
 
-// Writes 20 bytes incl. the check. sendState is masked to its two bits.
+// Writes 20 bytes incl. the check. sendState is masked to its three bits.
 inline void encodeHeader(const Header& h, uint8_t* p) {
   p[kOffMarker] = kRecordMarker;
   p[kOffLength] = h.length;

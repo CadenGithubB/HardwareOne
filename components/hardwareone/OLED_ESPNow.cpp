@@ -12,6 +12,7 @@
 #include "System_ESPNow.h"
 #include "System_ESPNow_HistoryNames.h"  // per-refresh name cache for conversation rows
 #include "System_ESPNow_Sessions.h"   // sendStatusGet / SendStatusState — post-send delivery indicator
+#include "System_ESPNow_RemoteCmdCore.h"  // a remote command result that came late (Outcome::Late)
 #include "System_MeshPeers.h"
 #include "System_Utils.h"
 
@@ -997,10 +998,13 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
       // espnowUpdateSentDeliveryState) — NOT the ephemeral sendStatus ring, which
       // is swept after 30s and used to make delivered rows revert to "Sent".
       const char* label; bool icon = true, dbl = false;
+      // One word per meaning (ESP-NOW 1.0): the same words as the web page.
       switch (gOledRowMeta[i].sendState) {
         case SEND_STATUS_DELIVERED: label = "Delivered"; dbl = true; break;
-        case SEND_STATUS_TIMEOUT:   label = "No ACK"; icon = false; break;
-        case SEND_STATUS_FAILED:    label = "Failed"; icon = false; break;
+        case SEND_STATUS_TIMEOUT:                                        // no ACK in 10 s
+        case SEND_STATUS_FAILED:    label = "No answer"; icon = false; break;  // session never opened
+        case SEND_STATUS_BUSY:      label = "Busy"; icon = false; break;
+        case SEND_STATUS_REFUSED:   label = "Refused"; icon = false; break;
         default:                    label = "Sent"; break;  // PENDING: awaiting ACK
       }
       int iconW = icon ? (dbl ? 8 : 6) : 0;
@@ -1764,7 +1768,12 @@ void oledEspNowRefreshMessages() {
       // Called after espnowCopyCollapsedHead returned: no store lock is held.
       const char* who = nameCache.get(head.peerMac, head.isSent, head.unattributed,
           [&head](char* out, size_t cap) { espnowHistoryDisplayName(head, out, cap); });
-      if (refs[i].partsTotal > 1) {
+      if (head.msgType == MSG_CMD_RESULT && head.sendState == (uint8_t)espnowcmd::Outcome::Late) {
+        // A remote command result that came after "No result" was shown
+        // (ESP-NOW 1.0): the word replaces the sender's name on line 2.
+        strlcpy(metaBuf[m], "Result (late)", sizeof(metaBuf[m]));
+        meta = metaBuf[m];
+      } else if (refs[i].partsTotal > 1) {
         snprintf(metaBuf[m], sizeof(metaBuf[m]), "%s (%u/%u)", who[0] ? who : "Unknown",
                  refs[i].partsPresent, refs[i].partsTotal);
         meta = metaBuf[m];
