@@ -2138,12 +2138,20 @@ add_test(
   NAME logging_system_config_browser
   COMMAND ${HW1_NODE_CMD}
           ${CMAKE_CURRENT_LIST_DIR}/logging_system_config_browser_test.js)
+# The web pages find the IMU by the device table's names (window.__hwImu),
+# whichever chip the build has: the Sensors page, the dashboard and the IMU
+# card's shipping scripts, run for the BNO055 and the Adafruit 4517 builds.
+add_test(
+  NAME imu_web_surfaces
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_imu_web_surfaces.py
+          --node ${HW1_NODE_CMD})
 if(NOT HW1_NODE_EXECUTABLE)
   set_tests_properties(map_live_browser g2_status_browser sensor_mic_card
-                       logging_system_config_browser
+                       logging_system_config_browser imu_web_surfaces
                        PROPERTIES DISABLED TRUE)
-  message(WARNING "Node.js not found: map_live_browser, g2_status_browser, sensor_mic_card "
-                  "and logging_system_config_browser are registered but disabled; "
+  message(WARNING "Node.js not found: map_live_browser, g2_status_browser, sensor_mic_card, "
+                  "logging_system_config_browser and imu_web_surfaces are registered but disabled; "
                   "pass -DHW1_NODE_EXECUTABLE=/path/to/node")
 endif()
 # The Python tool suites run here too (P0-1c): the OTA tools, the web UI page
@@ -3626,6 +3634,15 @@ add_test(
   NAME automation_condition_bounds
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_automation_condition_bounds.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Automation conditions on the IMU (IMU_PITCH, IMU_ROLL, IMU_TILT, IMU_POSE,
+# IMU_TAP_AGE): the parse, the IMU_ branch and the comparisons of
+# evaluateCondition run over the motion layer's rule and detector; a closed
+# IMU, no reading, no tap yet or an unknown IMU_ name is false.
+add_test(
+  NAME automation_imu_conditions
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_automation_imu_conditions.py
           ${SETUP_MQTT_TEST_ARGS})
 # Uptime: SelfDevice::uptimeSeconds() counts on past the millis() wrap, and the
 # places that show, send or compare uptime ask it instead of millis() / 1000.

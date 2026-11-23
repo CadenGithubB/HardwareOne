@@ -185,8 +185,8 @@ constexpr uint32_t kLsm4517TransferTimeoutMs = 100;  // I2C_WIRE_IO_TIMEOUT_MS (
 constexpr uint32_t kLsm4517IoWorstMs = kLsm4517StepLockMs + 2 * kLsm4517TransferTimeoutMs;
 constexpr uint32_t kLsm4517InitDeadlineMs = kMotionInitBudgetMs;
 // The sequence: two identity reads, two reset writes, the reset wait, two
-// reset polls, four configuration writes and three read-backs.
-constexpr uint32_t kLsm4517Accesses = 13;
+// reset polls, four configuration writes and four read-backs.
+constexpr uint32_t kLsm4517Accesses = 14;
 static_assert(kLsm4517Accesses * kLsm4517IoWorstMs + kLsm4517ResetWaitMs <= kLsm4517InitDeadlineMs,
               "the start must fit its deadline with every access at its worst case");
 
@@ -300,29 +300,32 @@ inline bool lsm4517StartSequence(Io& io, uint8_t bus, uint8_t accelAddress, uint
     return true;
   };
 
-  if (!identify(accelAddress, kLsm6dsoxRegWhoAmI, kLsm6dsoxWhoAmI, "imuaddress", "accelerometer and gyroscope", 12))
+  if (!identify(accelAddress, kLsm6dsoxRegWhoAmI, kLsm6dsoxWhoAmI, "imuaddress", "accelerometer and gyroscope", 13))
     return false;
-  if (!identify(magAddress, kLis3mdlRegWhoAmI, kLis3mdlWhoAmI, "imumagaddress", "magnetometer", 11)) return false;
+  if (!identify(magAddress, kLis3mdlRegWhoAmI, kLis3mdlWhoAmI, "imumagaddress", "magnetometer", 12)) return false;
 
   const uint8_t accelReset = kLsm6dsoxCtrl3SwReset;
   const uint8_t magReset = kLis3mdlCtrl2SoftReset;
-  if (!write(accelAddress, kLsm6dsoxRegCtrl3C, &accelReset, 1, "reset", 10)) return false;
-  if (!write(magAddress, kLis3mdlRegCtrl2, &magReset, 1, "reset", 9)) return false;
-  if (!fits(kLsm4517ResetWaitMs, 9)) return lateWhy("reset");
+  if (!write(accelAddress, kLsm6dsoxRegCtrl3C, &accelReset, 1, "reset", 11)) return false;
+  if (!write(magAddress, kLis3mdlRegCtrl2, &magReset, 1, "reset", 10)) return false;
+  if (!fits(kLsm4517ResetWaitMs, 10)) return lateWhy("reset");
   io.sleepMs(kLsm4517ResetWaitMs);
-  if (!waitReset(accelAddress, kLsm6dsoxRegCtrl3C, kLsm6dsoxCtrl3SwReset, 8)) return false;
-  if (!waitReset(magAddress, kLis3mdlRegCtrl2, kLis3mdlCtrl2SoftReset, 7)) return false;
+  if (!waitReset(accelAddress, kLsm6dsoxRegCtrl3C, kLsm6dsoxCtrl3SwReset, 9)) return false;
+  if (!waitReset(magAddress, kLis3mdlRegCtrl2, kLis3mdlCtrl2SoftReset, 8)) return false;
 
   if (!write(accelAddress, kLsm6dsoxRegCtrl1Xl, kLsm6dsoxCtrlBurst, sizeof(kLsm6dsoxCtrlBurst),
-             "accelerometer and gyroscope", 6)) return false;
+             "accelerometer and gyroscope", 7)) return false;
   if (!write(accelAddress, kLsm6dsoxRegCtrl8Xl, kLsm6dsoxCtrl89Burst, sizeof(kLsm6dsoxCtrl89Burst),
-             "filter and I3C off", 5)) return false;
+             "filter and I3C off", 6)) return false;
   if (!write(accelAddress, kLsm6dsoxRegTapCfg0, kLsm6dsoxEventBurst, sizeof(kLsm6dsoxEventBurst),
-             "tap and free fall", 4)) return false;
+             "tap and free fall", 5)) return false;
   if (!write(magAddress, kLis3mdlRegCtrl1 | kLis3mdlAutoIncrement, kLis3mdlCtrlBurst, sizeof(kLis3mdlCtrlBurst),
-             "magnetometer", 3)) return false;
+             "magnetometer", 4)) return false;
 
-  if (!readBack(accelAddress, kLsm6dsoxRegCtrl1Xl, kLsm6dsoxCtrlBurst, sizeof(kLsm6dsoxCtrlBurst), 2)) return false;
+  if (!readBack(accelAddress, kLsm6dsoxRegCtrl1Xl, kLsm6dsoxCtrlBurst, sizeof(kLsm6dsoxCtrlBurst), 3)) return false;
+  // CTRL8_XL (the LPF2 cut-off) and CTRL9_XL (I3C off): a lost write would
+  // leave the samples unfiltered, or the chip listening for I3C.
+  if (!readBack(accelAddress, kLsm6dsoxRegCtrl8Xl, kLsm6dsoxCtrl89Burst, sizeof(kLsm6dsoxCtrl89Burst), 2)) return false;
   // The event engines' bytes (INTERRUPTS_ENABLE, LIR, the thresholds): a lost
   // write here would leave tap and free fall silently off.
   if (!readBack(accelAddress, kLsm6dsoxRegTapCfg0, kLsm6dsoxEventBurst, sizeof(kLsm6dsoxEventBurst), 1)) return false;

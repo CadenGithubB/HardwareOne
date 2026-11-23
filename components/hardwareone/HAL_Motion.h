@@ -60,6 +60,7 @@ const char* cmd_imu(const String& argsInput);
 const char* cmd_imustart(const String& argsInput);
 const char* cmd_imustop(const String& argsInput);
 const char* cmd_imuactions(const String& argsInput);
+const char* cmd_imustatus(const String& argsInput);
 // IMU web view settings (read by the web Sensors page)
 const char* cmd_imupollingms(const String& argsInput);
 const char* cmd_imuewmafactor(const String& argsInput);
@@ -103,8 +104,14 @@ const char* imuBackendName();
 void imuUpdateActions(const MotionActionSample& sample, bool postEvents = false);
 bool imuActionsSnapshot(MotionActionState& out, uint32_t timeoutMs = 10);
 
-// JSON building
+// JSON building. imuBuildDataJson is the reading as it travels (ESP-NOW,
+// MQTT): its keys are a wire format. imuBuildLocalJson is the same reading
+// for this device's own surfaces ('imuread json', the "imu" entry of
+// 'sensors json', the web Sensors page), with two more keys at the end:
+// "hdg" (yaw is a heading from magnetic north; false: it counts from the
+// IMU's start) and "backend" (the chip, imuBackendName()).
 int imuBuildDataJson(char* buf, size_t bufSize);
+int imuBuildLocalJson(char* buf, size_t bufSize);
 
 // Copy one reading; false clears out when uninitialized or the lock is busy.
 // Success only means a copy was available; check imuDataValid where required.
@@ -134,6 +141,7 @@ inline int imuBuildDataJson(char* buf, size_t bufSize) {
   if (buf && bufSize) buf[0] = '\0';
   return 0;
 }
+inline int imuBuildLocalJson(char* buf, size_t bufSize) { return imuBuildDataJson(buf, bufSize); }
 inline size_t imuCacheStorageBytes() { return 0; }
 #endif // ENABLE_IMU_SENSOR
 #endif // HAL_MOTION_H

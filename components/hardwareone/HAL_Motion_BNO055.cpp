@@ -133,4 +133,11 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t, MotionSample& out)
 // until the next start resets it.
 void motionBackendStop() {}
 
+// The chip fuses nine axes itself: a heading from its magnetometer, its own
+// calibration (the reading's cal byte), no tap or free-fall engine.
+void motionBackendStatus(MotionBackendStatus& out) {
+  out = MotionBackendStatus{};
+  out.hasMag = out.hasHeading = true;
+}
+
 #endif  // ENABLE_IMU_BNO055

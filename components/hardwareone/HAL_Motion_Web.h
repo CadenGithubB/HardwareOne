@@ -3,13 +3,21 @@
 #define HAL_MOTION_WEB_H
 
 #include <Arduino.h>
+#include "System_BuildConfig.h"
 #include "WebServer_Utils.h"
+
+// What the card calls this build's chip (IMU_DEVICE_TYPE).
+#if ENABLE_IMU_LSM6DSOX
+#define IMU_WEB_CHIP_LABEL "Adafruit 4517: LSM6DSOX + LIS3MDL"
+#else
+#define IMU_WEB_CHIP_LABEL "BNO055"
+#endif
 
 inline void streamImuSensorCard(httpd_req_t* req) {
   httpd_resp_send_chunk(req, R"HTML(
 
     <div class='sensor-card' id='sensor-card-imu'>
-      <div class='sensor-title'><span>Gyroscope & Accelerometer (BNO055)</span><span class='status-indicator status-disabled' id='gyro-status-indicator'></span></div>
+      <div class='sensor-title'><span>Gyroscope & Accelerometer ()HTML" IMU_WEB_CHIP_LABEL R"HTML()</span><span class='status-indicator status-disabled' id='gyro-status-indicator'></span></div>
       <div class='sensor-description'>9-axis IMU sensor for orientation, acceleration, and gyroscope data.</div>
       <div id='imu-queue-status' style='display:none;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:8px;margin-bottom:10px;color:#856404;font-size:.9em'></div>
       <div class='sensor-controls'><button class='btn' id='btn-imu-start'>Open IMU</button><button class='btn' id='btn-imu-stop'>Close IMU</button></div>
@@ -51,7 +59,8 @@ inline void streamImuSensorJs(httpd_req_t* req) {
     "            var tc = Number(j.temp).toFixed(0);\n"
     "            var accel = 'Accel: X=' + ax + ' Y=' + ay + ' Z=' + az + ' m/s²';\n"
     "            var gyro = 'Gyro: X=' + gx + ' Y=' + gy + ' Z=' + gz + ' rad/s';\n"
-    "            var euler = 'Euler: Yaw=' + yw + '° Pitch=' + pt + '° Roll=' + rl + '°';\n"
+    "            // Without a heading (hdg false) yaw counts from the IMU's start.\n"
+    "            var euler = 'Euler: ' + (j.hdg === false ? 'Yaw (relative)=' : 'Yaw=') + yw + '° Pitch=' + pt + '° Roll=' + rl + '°';\n"
     "            var temp = 'Temperature: ' + tc + '°C';\n"
     "            \n"
     "            // Update device rotation visualization (pitch, roll, yaw)\n"
@@ -220,7 +229,9 @@ inline void streamImuSensorJs(httpd_req_t* req) {
 }
 
 inline void streamImuDashboardDef(httpd_req_t* req) {
-  httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:'BNO055',key:'imu',name:'IMU (BNO055)',desc:'Gyroscope & Accelerometer'});", HTTPD_RESP_USE_STRLEN);
+  // Found by the device table's names for this build's chip(s) (window.__hwImu,
+  // set at the top of the dashboard), not by a chip's name.
+  httpd_resp_send_chunk(req, "window.__dashSensorDefs.push({device:window.__hwImu.part,devices:window.__hwImu.names,key:'imu',name:window.__hwImu.label,desc:'Gyroscope & Accelerometer'});", HTTPD_RESP_USE_STRLEN);
 }
 
 #endif // HAL_MOTION_WEB_H

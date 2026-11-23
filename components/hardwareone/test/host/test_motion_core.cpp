@@ -1,11 +1,14 @@
 // The motion layer's pure rules (HAL_MotionCore.h) on synthetic samples: the
 // orientation correction (off by default, no pitch clamp) and the action
 // detector (rotation in rad/s, a start that is not a shake, tap, free fall,
-// tilt, steps and the pose debounce).
+// tilt, steps and the pose debounce), the automation condition variables
+// (IMU_PITCH, IMU_ROLL, IMU_TILT, IMU_POSE, IMU_TAP_AGE), the compass point
+// and the gyro offset states 'imustatus' reports.
 #include <cassert>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <initializer_list>
 
 #include "HAL_MotionCore.h"
 
@@ -383,7 +386,108 @@ static void testWithoutEvents() {
   assert(state.tapCount == 1 && state.tapDetected);
 }
 
+// ---- Automation condition variables ---------------------------------------------
+// IMU_PITCH / IMU_ROLL / IMU_TILT (degrees), IMU_POSE (the announced pose, upper
+// case) and IMU_TAP_AGE (seconds). No value means the condition is false.
+static void testConditionVariables() {
+  for (const char* name : {"IMU_PITCH", "IMU_ROLL", "IMU_TILT", "IMU_POSE", "IMU_TAP_AGE"}) {
+    assert(motionConditionIsVariable(name));
+  }
+  // No heading variable yet, no lower case (the parser upper-cases), no prefix match.
+  for (const char* name : {"IMU_HEADING", "IMU_YAW", "IMU_", "IMU_PITCHX", "imu_pitch", "PITCH", ""}) {
+    assert(!motionConditionIsVariable(name));
+  }
+  assert(!motionConditionIsVariable(nullptr));
+
+  Feed feed;
+  MotionActionSample flat = still();
+  feed.run(flat, 5);
+  MotionConditionValue v;
+  const unsigned long now = feed.now;
+  // Tilt: the reading's angles, and the larger of the two.
+  assert(motionConditionValue("IMU_PITCH", true, -35.5f, 12.0f, feed.state, now, v) && !v.isText && near(v.number, -35.5f));
+  assert(motionConditionValue("IMU_ROLL", true, -35.5f, 12.0f, feed.state, now, v) && !v.isText && near(v.number, 12.0f));
+  assert(motionConditionValue("IMU_TILT", true, -35.5f, 12.0f, feed.state, now, v) && near(v.number, 35.5f));
+  assert(motionConditionValue("IMU_TILT", true, 5.0f, -60.0f, feed.state, now, v) && near(v.number, 60.0f));
+  // The pose the detector announced, upper case: the first sample's without an event.
+  assert(motionConditionValue("IMU_POSE", true, 0, 0, feed.state, now, v) && v.isText && !std::strcmp(v.text, "FACE-UP"));
+  // No reading: nothing has a value, whatever the detector holds.
+  for (const char* name : {"IMU_PITCH", "IMU_ROLL", "IMU_TILT", "IMU_POSE", "IMU_TAP_AGE"}) {
+    assert(!motionConditionValue(name, false, 10, 10, feed.state, now, v));
+  }
+  // An unknown IMU_ name has none either.
+  assert(!motionConditionValue("IMU_HEADING", true, 0, 0, feed.state, now, v));
+  assert(!motionConditionValue(nullptr, true, 0, 0, feed.state, now, v));
+  // No tap since the IMU opened: no age (a condition IMU_TAP_AGE<5 stays false).
+  assert(!motionConditionValue("IMU_TAP_AGE", true, 0, 0, feed.state, now, v));
+
+  // Flipped over: the pose changes once it held (kMotionDebounce*), not on the first sample.
+  MotionActionSample down = still();
+  down.az = -9.81f;
+  feed.run(down, 1);
+  assert(motionConditionValue("IMU_POSE", true, 0, 0, feed.state, feed.now, v) && !std::strcmp(v.text, "FACE-UP"));
+  feed.run(down, 15);  // 300 ms at 50 Hz
+  assert(motionConditionValue("IMU_POSE", true, 0, 0, feed.state, feed.now, v) && !std::strcmp(v.text, "FACE-DOWN"));
+  assert(feed.count(MotionEventKind::Orientation) == 1);
+  // Every pose name fits the value and is upper case.
+  for (char pose : {'F', 'D', 'P', 'U', 'R', 'L'}) {
+    MotionActionState state;
+    state.posePosted = pose;
+    assert(motionConditionValue("IMU_POSE", true, 0, 0, state, 0, v) && v.isText);
+    assert(std::strlen(v.text) == std::strlen(motionPoseName(pose)));
+    for (const char* c = v.text; *c; ++c) assert(!(*c >= 'a' && *c <= 'z'));
+  }
+  { MotionActionState state;  // no pose yet (the detector has not seen a sample)
+    assert(!motionConditionValue("IMU_POSE", true, 0, 0, state, 0, v)); }
+
+  // A tap (the chip's, as on the 4517): its age in seconds from then on.
+  MotionActionSample tap = still();
+  tap.hasHwTap = true;
+  tap.hwTap = true;
+  feed.run(still(), 15);
+  const unsigned long tapAt = feed.now;
+  feed.run(tap, 1);
+  assert(feed.state.tapCount == 1 && feed.state.lastTapMs == tapAt);
+  assert(motionConditionValue("IMU_TAP_AGE", true, 0, 0, feed.state, tapAt, v) && near(v.number, 0.0f));
+  assert(motionConditionValue("IMU_TAP_AGE", true, 0, 0, feed.state, tapAt + 2500, v) && near(v.number, 2.5f));
+  // millis() wrapping between the tap and the question still gives the age.
+  { MotionActionState state;
+    state.tapCount = 1;
+    state.lastTapMs = static_cast<unsigned long>(-1) - 999;  // 1 s before the wrap
+    assert(motionConditionValue("IMU_TAP_AGE", true, 0, 0, state, 2000, v) && near(v.number, 3.0f)); }
+}
+
+// ---- What the surfaces show -----------------------------------------------------
+static void testCompassPointAndGyroOffsetState() {
+  // Eight points, each 45 degrees wide and centred on its direction.
+  const struct { float heading; const char* point; } cases[] = {
+      {0.0f, "N"}, {22.4f, "N"}, {22.6f, "NE"}, {45.0f, "NE"}, {90.0f, "E"}, {135.0f, "SE"}, {180.0f, "S"},
+      {225.0f, "SW"}, {270.0f, "W"}, {315.0f, "NW"}, {337.4f, "NW"}, {337.6f, "N"}, {359.9f, "N"},
+      {360.0f, "N"}, {-90.0f, "W"}, {450.0f, "E"},
+  };
+  for (const auto& c : cases) assert(!std::strcmp(motionCompassPoint(c.heading), c.point));
+  assert(!std::strcmp(motionCompassPoint(NAN), "?") && !std::strcmp(motionCompassPoint(INFINITY), "?"));
+
+  // 'imustatus': a chip that fuses on its own keeps its offset; a backend the
+  // layer fuses measures it at each start, and a start on a moving board has none.
+  assert(!std::strcmp(motionGyroOffsetState(false, true, false, false), "chip"));
+  assert(!std::strcmp(motionGyroOffsetState(false, false, true, true), "chip"));
+  assert(!std::strcmp(motionGyroOffsetState(true, false, true, true), "closed"));
+  assert(!std::strcmp(motionGyroOffsetState(true, true, false, false), "measuring"));
+  assert(!std::strcmp(motionGyroOffsetState(true, true, true, true), "still"));
+  assert(!std::strcmp(motionGyroOffsetState(true, true, true, false), "moving"));
+  // Each state has its own sentence part, and "moving" says what to do.
+  const char* states[] = {"chip", "closed", "measuring", "still", "moving"};
+  for (const char* a : states) {
+    assert(std::strlen(motionGyroOffsetText(a)) > 0);
+    for (const char* b : states) assert(a == b || std::strcmp(motionGyroOffsetText(a), motionGyroOffsetText(b)) != 0);
+  }
+  assert(std::strstr(motionGyroOffsetText("moving"), "'closeimu' and 'openimu'") != nullptr);
+}
+
 int main() {
+  testConditionVariables();
+  testCompassPointAndGyroOffsetState();
   testOpenAddressIsLatched();
   testOrientationCorrection();
   testStartIsNotAShake();
@@ -404,6 +508,7 @@ int main() {
   testWithoutEvents();
   std::puts("motion core: open address latched, correction off by default and unclamped, rotation in rad/s, no shake at start, "
             "tap, free fall, tilt, pose debounce (200 ms and 50 Hz), chip tap and free fall, "
-            "knock at 50 Hz (no shake, no walk), shake at 50 Hz and at a slow poll, sampling and steps passed");
+            "knock at 50 Hz (no shake, no walk), shake at 50 Hz and at a slow poll, sampling, steps, "
+            "automation condition variables, compass points and gyro offset states passed");
   return 0;
 }

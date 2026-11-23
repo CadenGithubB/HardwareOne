@@ -70,6 +70,9 @@ static void setup(int state) {
   gImuCache.oriYaw=123.5f; gImuCache.oriPitch=-24.5f; gImuCache.oriRoll=3.5f;
   gImuCache.accelX=1.25f; gImuCache.accelY=-2.5f; gImuCache.accelZ=9.75f;
   gImuCache.gyroX=-0.5f; gImuCache.gyroY=0.25f; gImuCache.gyroZ=4.5f; gImuCache.imuTemp=28.5f;
+#if !TEST_BASELINE
+  gImuCache.hasHeading=true;  // a reading whose yaw is a heading (the BNO055's), as recorded
+#endif
   gTofCache.tofTotalObjects=state==3 ? 0 : 4;
   for(int i=0;i<4;i++) { auto& o=gTofCache.tofObjects[i]; o.valid=i%2==0; o.detected=true; o.distance_mm=135+i*242; o.distance_cm=o.distance_mm/10.0f; o.status=i; }
   gApdsCache.apdsRed=110;gApdsCache.apdsGreen=220;gApdsCache.apdsBlue=330;gApdsCache.apdsClear=440;
@@ -120,6 +123,19 @@ int main() {
     if(state!=2) { char fm[160];buildFmTunerReadout(fm,sizeof(fm));emit(fm); }
   }
 #if !TEST_BASELINE
+  // A yaw that is no heading (no calibrated magnetometer: the Adafruit 4517
+  // for now) is not shown as one: the lens row leaves it out, the readout
+  // marks it relative, and the BLE stream keeps its "heading" key with null.
+  setup(0); gImuCache.hasHeading=false;
+  { char row[32];imuG2FormatValue(row,sizeof(row));assert(std::string(row)=="P-24 R3");
+    char readout[160];g2BuildImuReadout(readout,sizeof(readout));
+    assert(std::string(readout)=="Yaw  : 123 rel\nPitch: -24\nRoll : 3\nAcc 1.2 -2.5 9.8\nGyr -0.5 0.2 4.5\nTemp: 28 C");
+    char ble[1024];buildSensorDataJson(ble,sizeof(ble));
+    assert(std::string(ble).find("\"imu\":{\"heading\":null,\"pitch\":-24.5,\"roll\":3.5,\"valid\":true}")!=std::string::npos);
+    assert(std::string(ble).find("123.5")==std::string::npos); }
+  // The sensor log's IMU columns carry whether there is a reading.
+  setup(0); assert(logReadings(LOG_IMU).imuValid);
+  setup(1); assert(!logReadings(LOG_IMU).imuValid);
   setup(2); char fm[160];buildFmTunerReadout(fm,sizeof(fm));assert(std::string(fm)=="Radio busy\n(reading...)");
   // The lens shows the RTC in local time (the chip keeps UTC): Thu 2026-10-08
   // 23:58:42 UTC is Fri 01:58:42 at +120 min, with the date and the weekday

@@ -10,6 +10,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 // ---- Start contract ---------------------------------------------------------
 // imuStartInternal() waits kMotionStartWaitMs for the IMU task's init. Every
@@ -545,4 +546,105 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
     s.poseStable = 1;
     s.poseCandidateMs = now;
   }
+}
+
+// ---- Gyro offset state ----------------------------------------------------------
+// How the start's gyro offset went, as 'imustatus' reports it ("gyroOffset"
+// in its JSON):
+//   chip       the chip keeps its own (a backend that fuses on the chip)
+//   closed     measured at each start; the IMU is not open
+//   measuring  being measured now (about a second with the board still)
+//   still      measured on a board that held still
+//   moving     the board moved for the whole measurement: no offset, and yaw
+//              drifts faster until the IMU is opened again on a still board
+inline const char* motionGyroOffsetState(bool measures, bool running, bool done, bool still) {
+  if (!measures) return "chip";
+  if (!running) return "closed";
+  if (!done) return "measuring";
+  return still ? "still" : "moving";
+}
+// The same state as a sentence part for the text reply.
+inline const char* motionGyroOffsetText(const char* state) {
+  if (strcmp(state, "chip") == 0) return "kept by the chip";
+  if (strcmp(state, "closed") == 0) return "measured at each start";
+  if (strcmp(state, "measuring") == 0) return "being measured (keep the board still)";
+  if (strcmp(state, "still") == 0) return "measured while the board was still";
+  return "not taken, the board was moving (yaw drifts faster; hold it still, then 'closeimu' and 'openimu')";
+}
+
+// ---- Compass point -------------------------------------------------------------
+// The eight-point name of a heading (degrees clockwise from north), for the
+// surfaces that show one. Only a reading with hasHeading has a heading.
+inline const char* motionCompassPoint(float headingDeg) {
+  static const char* const kPoints[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+  if (!(headingDeg == headingDeg) || headingDeg > 1.0e6f || headingDeg < -1.0e6f) return "?";
+  float h = fmodf(headingDeg, 360.0f);
+  if (h < 0.0f) h += 360.0f;
+  return kPoints[static_cast<int>((h + 22.5f) / 45.0f) % 8];
+}
+
+// ---- Automation condition variables ----------------------------------------------
+// What an automation condition can ask the IMU (System_Automation.cpp,
+// evaluateCondition; the variable name arrives upper-cased):
+//   IMU_PITCH, IMU_ROLL  degrees, after the orientation correction (tilt)
+//   IMU_TILT             the larger of |pitch| and |roll|, degrees
+//   IMU_POSE             FACE-UP, FACE-DOWN, PORTRAIT, PORTRAIT-INV, LANDSCAPE-R
+//                        or LANDSCAPE-L: the pose the last imu_orientation
+//                        event announced (held for kMotionDebounce*), so
+//                        IMU_POSE=FACE-DOWN is "flipped over"
+//   IMU_TAP_AGE          seconds since the last tap
+// There is no heading variable yet: yaw is a heading only with a calibrated
+// magnetometer (hasHeading).
+struct MotionConditionValue {
+  bool isText = false;
+  float number = 0.0f;
+  char text[16] = "";  // upper case, as the condition's value is compared
+};
+
+inline bool motionConditionIsVariable(const char* name) {
+  if (!name) return false;
+  static const char* const kNames[] = {"IMU_PITCH", "IMU_ROLL", "IMU_TILT", "IMU_POSE", "IMU_TAP_AGE"};
+  for (const char* known : kNames) {
+    if (strcmp(name, known) == 0) return true;
+  }
+  return false;
+}
+
+// The value of one variable. False: there is none, so the condition is false
+// (an unknown name, no valid reading, no pose yet, no tap since the IMU opened).
+// pitch and roll are the reading's (ImuCache, after the orientation
+// correction), `actions` the detector's state, `now` millis().
+inline bool motionConditionValue(const char* name, bool readingValid, float pitch, float roll,
+                                 const MotionActionState& actions, unsigned long now,
+                                 MotionConditionValue& out) {
+  out = MotionConditionValue{};
+  if (!readingValid || !motionConditionIsVariable(name)) return false;
+  if (strcmp(name, "IMU_PITCH") == 0) {
+    out.number = pitch;
+    return true;
+  }
+  if (strcmp(name, "IMU_ROLL") == 0) {
+    out.number = roll;
+    return true;
+  }
+  if (strcmp(name, "IMU_TILT") == 0) {
+    out.number = fmaxf(fabsf(pitch), fabsf(roll));
+    return true;
+  }
+  if (strcmp(name, "IMU_POSE") == 0) {
+    if (actions.posePosted == 0) return false;
+    const char* pose = motionPoseName(actions.posePosted);
+    size_t i = 0;
+    for (; pose[i] && i + 1 < sizeof(out.text); ++i) {
+      const char c = pose[i];
+      out.text[i] = (c >= 'a' && c <= 'z') ? static_cast<char>(c - 32) : c;
+    }
+    out.text[i] = '\0';
+    out.isText = true;
+    return true;
+  }
+  // IMU_TAP_AGE
+  if (actions.tapCount == 0) return false;
+  out.number = static_cast<float>(now - actions.lastTapMs) / 1000.0f;
+  return true;
 }

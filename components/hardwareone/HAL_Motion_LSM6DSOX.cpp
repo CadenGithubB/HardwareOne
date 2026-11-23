@@ -227,4 +227,19 @@ void motionBackendStop() {
   }
 }
 
+// Tap and free fall come from the LSM6DSOX; no heading until the magnetometer
+// calibration lands. The gyro offset is this start's (flags the IMU task
+// writes; read here without a lock).
+void motionBackendStatus(MotionBackendStatus& out) {
+  out = MotionBackendStatus{};
+  out.hasHwTap = out.hasHwFreefall = true;
+  out.hasMag = true;
+  out.hasHeading = false;
+  out.measuresGyroOffset = true;
+  if (sState.started) {
+    out.gyroOffsetDone = sState.bias.done;
+    out.gyroOffsetStill = sState.bias.done && sState.bias.still;
+  }
+}
+
 #endif  // ENABLE_IMU_LSM6DSOX

@@ -5,6 +5,7 @@
 #include "System_BuildConfig.h"
 #if ENABLE_HTTP_SERVER
 #include <esp_http_server.h>
+#include "WebServer_Utils.h"  // webStreamImuIdentityJs
 #endif
 
 // Registration function - registers all sensor-related URI handlers
@@ -186,6 +187,8 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
 
   // Small script: detect devices and toggle card visibility (using shared hw helpers)
   httpd_resp_send_chunk(req, "<script>console.log('[SENSORS] Section 1: Pre-script sentinel');</script><script>", HTTPD_RESP_USE_STRLEN);
+  // Which scanned devices are this build's IMU (window.__hwImu), from the device table.
+  webStreamImuIdentityJs(req);
   httpd_resp_send_chunk(req, "console.log('[SENSORS] Device detection starting...');(function(){try{var loading=hw.$('sensors-loading');var grid=hw.$('sensors-grid');", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "var setVis=function(id,show){var el=hw.$(id);hw.toggle(el,(show));};", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "Promise.all([hw.fetchJSON('/api/devices'),hw.fetchJSON('/api/sensors/status')]).then(function(rs){var d=rs[0]||{};var st=rs[1]||{};console.log('[SENSORS] Devices response:',d);console.log('[SENSORS] Status response:',st);", HTTPD_RESP_USE_STRLEN);
@@ -193,13 +196,13 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
   // only one card exists in DOM at a time (whichever driver was compiled in),
   // so the setVis for the missing one is a no-op.
   httpd_resp_send_chunk(req, "var has={imu:false,thermal:false,tof:false,gamepad:false,anoencoder:false,gps:false,servo:false,fmradio:false,camera:false,rtc:false,presence:false};if(d&&d.devices&&d.devices.forEach){d.devices.forEach(function(dev){", HTTPD_RESP_USE_STRLEN);
-  httpd_resp_send_chunk(req, "if(dev&&dev.name==='BNO055')has.imu=true;else if(dev&&dev.name==='MLX90640')has.thermal=true;else if(dev&&dev.name==='VL53L4CX')has.tof=true;else if(dev&&dev.name==='Seesaw'){has.gamepad=true;has.anoencoder=true;}else if(dev&&dev.name==='PA1010D')has.gps=true;else if(dev&&dev.name==='PCA9685')has.servo=true;else if(dev&&dev.name==='RDA5807')has.fmradio=true;else if(dev&&dev.name==='DS3231')has.rtc=true;else if(dev&&dev.name==='STHS34PF80')has.presence=true;});}console.log('[SENSORS] Detected sensors:',has);", HTTPD_RESP_USE_STRLEN);
+  httpd_resp_send_chunk(req, "if(dev&&window.__hwImu.names[dev.name])has.imu=true;else if(dev&&dev.name==='MLX90640')has.thermal=true;else if(dev&&dev.name==='VL53L4CX')has.tof=true;else if(dev&&dev.name==='Seesaw'){has.gamepad=true;has.anoencoder=true;}else if(dev&&dev.name==='PA1010D')has.gps=true;else if(dev&&dev.name==='PCA9685')has.servo=true;else if(dev&&dev.name==='RDA5807')has.fmradio=true;else if(dev&&dev.name==='DS3231')has.rtc=true;else if(dev&&dev.name==='STHS34PF80')has.presence=true;});}console.log('[SENSORS] Detected sensors:',has);", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "var compiled={imu:!!st.imuCompiled,thermal:!!st.thermalCompiled,tof:!!st.tofCompiled,gamepad:!!st.inputCompiled,anoencoder:!!st.inputCompiled,gps:!!st.gpsCompiled,fmradio:!!st.fmradioCompiled,servo:!!st.servoCompiled,camera:!!st.cameraCompiled,rtc:!!st.rtcCompiled,presence:!!st.presenceCompiled};has.camera=!!st.cameraCompiled;console.log('[SENSORS] Compiled sensors:',compiled);", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "setVis('sensor-card-imu',has.imu&&compiled.imu);setVis('sensor-card-thermal',has.thermal&&compiled.thermal);setVis('sensor-card-tof',has.tof&&compiled.tof);setVis('sensor-card-gamepad',has.gamepad&&compiled.gamepad);setVis('sensor-card-ano-encoder',has.anoencoder&&compiled.anoencoder);setVis('sensor-card-gps',has.gps&&compiled.gps);setVis('sensor-card-servo',has.servo&&compiled.servo);setVis('sensor-card-fmradio',has.fmradio&&compiled.fmradio);setVis('sensor-card-camera',has.camera&&compiled.camera);setVis('sensor-card-rtc',has.rtc&&compiled.rtc);setVis('sensor-card-presence',has.presence&&compiled.presence);", HTTPD_RESP_USE_STRLEN);
   httpd_resp_send_chunk(req, "var any=(has.imu&&compiled.imu)||(has.thermal&&compiled.thermal)||(has.tof&&compiled.tof)||(has.gamepad&&compiled.gamepad)||(has.anoencoder&&compiled.anoencoder)||(has.gps&&compiled.gps)||(has.servo&&compiled.servo)||(has.fmradio&&compiled.fmradio)||(has.camera&&compiled.camera)||(has.rtc&&compiled.rtc)||(has.presence&&compiled.presence)||!!hw.$('mic-card');if(!any&&grid){grid.innerHTML='<div style=\"grid-column:1/-1;text-align:center;padding:2rem;color:#87ceeb;font-style:italic\">No sensors available (none compiled + detected)</div>';}console.log('[SENSORS] Device detection complete');", HTTPD_RESP_USE_STRLEN);
   // Show banner for sensors detected on I2C bus but not compiled into firmware
   httpd_resp_send_chunk(req,
-    "var nameMap={imu:'IMU (BNO055)',thermal:'Thermal Camera (MLX90640)',tof:'ToF Distance (VL53L4CX)',"
+    "var nameMap={imu:window.__hwImu.label,thermal:'Thermal Camera (MLX90640)',tof:'ToF Distance (VL53L4CX)',"
 #if ENABLE_ANO_ENCODER
     "gamepad:'ANO Encoder (Seesaw)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',"
 #else
@@ -525,7 +528,6 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "    var devices = devicesData.devices || [];\n"
     "    devices.forEach(function(device) {\n"
     "      var map = {\n"
-    "        'BNO055': {type: 'imu', enabledKey: 'imuRunning', compiledKey: 'imuCompiled', indicatorId: 'gyro-status-indicator'},\n"
     "        'MLX90640': {type: 'thermal', enabledKey: 'thermalRunning', compiledKey: 'thermalCompiled', indicatorId: 'thermal-status-indicator'},\n"
     "        'VL53L4CX': {type: 'tof', enabledKey: 'tofRunning', compiledKey: 'tofCompiled', indicatorId: 'tof-status-indicator'},\n"
     "        'PA1010D': {type: 'gps', enabledKey: 'gpsRunning', compiledKey: 'gpsCompiled', indicatorId: 'gps-status-indicator'},\n"
@@ -538,6 +540,8 @@ inline void streamSensorsInner(httpd_req_t* req, const String& username) {
     "        'DS3231': {type: 'rtc', enabledKey: 'rtcRunning', compiledKey: 'rtcCompiled', indicatorId: 'rtc-status-indicator'},\n"
     "        'STHS34PF80': {type: 'presence', enabledKey: 'presenceRunning', compiledKey: 'presenceCompiled', indicatorId: 'presence-status-indicator'}\n"
     "      }[device.name];\n"
+    "      // The IMU by the device table's names for this build (one or two chips).\n"
+    "      if (!map && window.__hwImu.names[device.name]) map = {type: 'imu', enabledKey: 'imuRunning', compiledKey: 'imuCompiled', indicatorId: 'gyro-status-indicator'};\n"
     "      if (!map) {\n"
     "        if (device && (device.name === 'SSD1306')) return;\n"
     "        console.log('[Sensors] No map for device:', device.name);\n"

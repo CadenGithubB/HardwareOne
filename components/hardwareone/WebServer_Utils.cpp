@@ -15,6 +15,7 @@
 #include "System_Settings.h"
 #include "System_VFS.h"
 #include "System_HttpsCertPaths.h"  // HW1_HTTPS_CERT_PATH, HW1_HTTPS_KEY_PATH
+#include "System_I2C.h"             // the IMU's device names for the pages
 #include <lwip/sockets.h>
 #include <esp_random.h>
 #include <memory>
@@ -427,6 +428,20 @@ esp_err_t webSendBodyReadError(httpd_req_t* req, WebBodyStatus status, bool json
 // ============================================================================
 // JSON text values
 // ============================================================================
+
+void webStreamImuIdentityJs(httpd_req_t* req) {
+  char names[96];
+  i2cModuleDeviceNamesJs("imu", names, sizeof(names));
+  const char* part = i2cModuleFirstDeviceName("imu");
+  if (!part) part = "IMU";
+  char js[256];
+  const int n = snprintf(js, sizeof(js), "window.__hwImu={names:%s,part:'%s',label:'IMU (%s)'};", names, part, part);
+  if (n <= 0 || (size_t)n >= sizeof(js)) {
+    httpd_resp_send_chunk(req, "window.__hwImu={names:{},part:'IMU',label:'IMU'};", HTTPD_RESP_USE_STRLEN);
+    return;
+  }
+  httpd_resp_send_chunk(req, js, HTTPD_RESP_USE_STRLEN);
+}
 
 esp_err_t sendJsonError(httpd_req_t* req, const String& message) {
   String body = "{\"success\":false,\"error\":";

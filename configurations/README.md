@@ -25,7 +25,7 @@ Fifteen configurations are kept, each a board and a job:
 | | `xiao-openclaw` | Assistant over HTTP or from a Raspberry Pi; Bluetooth and the on-board model off |
 | | `xiao-display` | An SSD1306 display on external I2C; camera, maps and the on-board model off |
 | | `xiao-status-sign` | Meeting-room status sign: two Adafruit 4991 encoder boards lit by the LED commands; Wi-Fi, web interface and automations only |
-| FeatherS3[D] | `feathers3-status-sign` | Meeting-room status sign: two Adafruit 4991 encoder boards on I2C bus 1, the OLED, a DS3231 clock, battery gauge and u.FL antenna; Wi-Fi, web interface and automations only |
+| FeatherS3[D] | `feathers3-status-sign` | Meeting-room status sign: two Adafruit 4991 encoder boards, an ANO wheel for the OLED menus, an Adafruit 4517 motion sensor, the OLED, a DS3231 clock, battery gauge and u.FL antenna; Wi-Fi, web interface with the Sensors page, and automations |
 | QT Py ESP32 | `qtpy-sensors` | Sensor node: GPS, distance and presence sensors with a gamepad |
 | | `qtpy-oled` | Sensor node with an SSD1306 display and a gesture sensor |
 | | `qtpy-espnow` | The OLED sensor node plus the ESP-NOW mesh |
@@ -142,30 +142,63 @@ builds; it has not been run on the sign.
 
 `feathers3-status-sign` is the same sign on an Unexpected Maker FeatherS3[D] (16 MB, no flash
 encryption: board `feathers3`, not `feathers3_fe`), with the handheld's SSD1306 OLED, a LiPo and
-an external antenna on the u.FL. It is `xiao-status-sign` with the board changed and the OLED and
-the Power page left on. The [D]'s MAX17048 fuel gauge sits at 0x36 on bus 0 (the horizontal STEMMA
-QT, with the OLED), the same address as the first 4991, so the two encoder boards go on bus 1 (the
-vertical STEMMA QT, I2C2), the second with its A0 pad bridged (0x37). A DS3231 clock (`CUSTOM_ENABLE_RTC`)
-sits at 0x68 on bus 0 and starts at boot with the defaults (`rtcbus 0`, `rtcautostart on`), so it keeps
-the time through power loss and before Wi-Fi/NTP is up. Once after the first setup:
+an external antenna on the u.FL. It starts from `xiao-status-sign` with the board changed and the
+OLED and the Power page left on, and adds:
+
+- a DS3231 clock (`CUSTOM_ENABLE_RTC`), which keeps the time through power loss and before
+  Wi-Fi/NTP is up;
+- an Adafruit 5740 ANO wheel as the OLED's input device (`INPUT_DEVICE_TYPE 2`). This is an
+  interim: the sign's input is to become the motion sensor (taps and tilt), and the configuration
+  changes then;
+- an Adafruit 4517 motion sensor (`CUSTOM_ENABLE_IMU`, `IMU_DEVICE_TYPE 2`: LSM6DSOX + LIS3MDL)
+  for tilt, flip and tap. Its yaw counts from the IMU's start: there is no compass heading until
+  the magnetometer calibration lands;
+- the web Sensors page (`CUSTOM_ENABLE_WEB_SENSORS`), which shows the wheel and the motion sensor.
+
+The wiring, as found on the board:
+
+| Bus | Port | Devices |
+|---|---|---|
+| 0 (I2C1) | horizontal STEMMA QT | MAX17048 fuel gauge `0x36` (on the board), DS3231 clock `0x68`, the second 4991 at `0x37` once its A0 pad is bridged |
+| 1 (I2C2) | vertical STEMMA QT | OLED `0x3D`, the first 4991 `0x36`, ANO wheel `0x49`, the 4517: LSM6DSOX `0x6A` and LIS3MDL `0x1C` |
+
+The [D]'s fuel gauge has the first 4991's address (`0x36`), so the two cannot share bus 0; the
+second 4991 goes there at `0x37`. The clock starts at boot with its defaults (`rtcbus 0`,
+`rtcautostart on`). Once after the first setup, in this order:
 
 ```text
 encoderbus 1
-encoderbus 2 1
 encoderaddress 0x36
-encoderaddress 2 0x37
 encoderautostart on
+encoderbus 2 0
+encoderaddress 2 0x37
 encoderautostart 2 on
+inputbus 1
+inputautostart on
+imubus 1
+imuautostart on
 oledautostart on
 wifiexternalantenna on
 powersave 0
 reboot
 ```
 
+The order matters, because every bus and address command refuses an address that another device
+of the build already has on that bus. On fresh settings the first 4991 and the ANO are both at
+`0x49` on bus 0, and `0x36` on bus 0 is the fuel gauge's: so the first 4991 moves to bus 1 before
+it gets `0x36`, and the ANO follows to bus 1 only after that. `encoderbus 2 0` is the default and
+is listed so the block says where each board is. A host test replays the block against the
+collision check (`test_i2c_instance_core`, `testStatusSignSetup`).
+
+After the reboot, `i2cscan` should list `0x36`, `0x37` and `0x68` on bus 0 and `0x1C`, `0x36`,
+`0x3D`, `0x49` and `0x6A` on bus 1; `imustatus`, `anoencoderstatus`, `encoderstatus 1` and
+`encoderstatus 2` show each device.
+
 `powersave 0` matters on this board: the OLED is on bus 1 (the vertical STEMMA QT, the [D]'s
 default OLED bus), and a power-save blank cuts LDO2 (GPIO39), which also powers off everything else on
-bus 1 (the 4991 pixels and any other sensor there). With power saving off the panel never blanks on its
-own; a deliberate sleep (light/deep sleep) still cuts the rail.
+bus 1 (the first 4991's pixel, the ANO and the motion sensor, which is not started again when the
+rail returns). With power saving off the panel never blanks on its own; a deliberate sleep
+(light/deep sleep) still cuts the rail.
 
 `wifiexternalantenna` (FeatherS3[D] only, reboot required) drives GPIO41 high at boot, which turns
 the board's RF switch to the u.FL connector; off, the pin is left alone and the switch's pull-down

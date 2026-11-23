@@ -56,6 +56,8 @@
 #include "i2csensor_apds9960.h"
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_vl53l4cx.h"
+#include "HAL_Motion.h"            // IMU_*: imuCacheSnapshot, imuActionsSnapshot
+#include "HAL_MotionCore.h"        // IMU_*: motionConditionValue
 
 // --- Additional condition-variable sources (see evaluateCondition) ---
 #include "System_Battery.h"        // BATTERY: valid battery snapshot
@@ -4526,6 +4528,31 @@ bool evaluateCondition(const char* condition) {
     ApdsCache apds{};
     if (!apdsCacheSnapshot(apds, 50) || !apds.apdsDataValid) return false;
     strlcpy(currentStringValue, (apds.apdsProximity > 50) ? "DETECTED" : "NONE", sizeof(currentStringValue));
+ #else
+    return false;
+ #endif
+  } else if (strncmp(sensor, "IMU_", 4) == 0) {
+    // The motion sensor's tilt (IMU_PITCH, IMU_ROLL, IMU_TILT, degrees), pose
+    // (IMU_POSE, e.g. FACE-DOWN: flipped over) and last tap (IMU_TAP_AGE,
+    // seconds): motionConditionValue, HAL_MotionCore.h. A closed IMU, no
+    // reading yet, no tap since it opened or an unknown IMU_ name has no
+    // value, so the condition is false. No heading variable yet.
+ #if ENABLE_IMU_SENSOR
+    if (!gImuRunning || !gImuConnected) return false;
+    ImuCache imu{};
+    MotionActionState imuActions;
+    if (!imuCacheSnapshot(imu, 50) || !imuActionsSnapshot(imuActions, 50)) return false;
+    MotionConditionValue imuValue;
+    if (!motionConditionValue(sensor, imu.imuDataValid, imu.oriPitch, imu.oriRoll, imuActions, millis(),
+                              imuValue)) {
+      return false;
+    }
+    if (imuValue.isText) {
+      isNumeric = false;
+      strlcpy(currentStringValue, imuValue.text, sizeof(currentStringValue));
+    } else {
+      currentValue = imuValue.number;
+    }
  #else
     return false;
  #endif

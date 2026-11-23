@@ -196,7 +196,7 @@ static void testStartConfiguresBothChips() {
   // Order: identities, resets, one unlocked wait, reset polls, configuration, read-backs.
   const std::vector<std::string> expected = {
       "r 6A 0F 1", "r 1C 0F 1", "w 6A 12 1", "w 1C 21 1", "sleep 10", "r 6A 12 1", "r 1C 21 1",
-      "w 6A 10 3", "w 6A 17 2", "w 6A 56 9", "w 1C A0 5", "r 6A 10 3", "r 6A 56 9", "r 1C A0 5",
+      "w 6A 10 3", "w 6A 17 2", "w 6A 56 9", "w 1C A0 5", "r 6A 10 3", "r 6A 17 2", "r 6A 56 9", "r 1C A0 5",
   };
   assert(bus.log == expected);
   assert(bus.accel.regs[0x10] == 0x6A && bus.accel.regs[0x11] == 0x44 && bus.accel.regs[0x12] == 0x44);
@@ -267,6 +267,19 @@ static void testConfigurationThatDoesNotStick() {
   assert(!start(events, why));
   assert(why == "Error: The LSM6DSOX at 0x6A on bus 1 did not keep its settings (register 0x58 reads 0x00, "
                 "expected 0x88). Run 'openimu' again.");
+  // So is a lost filter (CTRL8_XL) or I3C-off (CTRL9_XL) write.
+  Bus filter;
+  filter.accel.ignoreWritesTo = true;
+  filter.accel.ignoredReg = 0x17;
+  assert(!start(filter, why));
+  assert(why == "Error: The LSM6DSOX at 0x6A on bus 1 did not keep its settings (register 0x17 reads 0x00, "
+                "expected 0x40). Run 'openimu' again.");
+  Bus i3c;
+  i3c.accel.ignoreWritesTo = true;
+  i3c.accel.ignoredReg = 0x18;
+  assert(!start(i3c, why));
+  assert(why == "Error: The LSM6DSOX at 0x6A on bus 1 did not keep its settings (register 0x18 reads 0x00, "
+                "expected 0xE2). Run 'openimu' again.");
   Bus mag;
   mag.mag.ignoreWritesTo = true;
   mag.mag.ignoredReg = 0x24;
