@@ -74,6 +74,7 @@ constexpr uint32_t kTapRetune = 1u << 24;
 std::atomic<uint32_t> sTapTuning{kLsm6dsoxTapThreshold | (kLsm6dsoxTapShock << 8) | (kLsm6dsoxTapQuiet << 16)};
 
 bool readRegs(TwoWire& wire, uint8_t address, uint8_t reg, uint8_t* out, uint8_t len);  // below
+bool writeRegs(TwoWire& wire, uint8_t address, uint8_t reg, const uint8_t* values, uint8_t len);
 
 // The knock detector's tuning: threshold mg | max ms << 16 (both fit 16 bits),
 // and the ring window; read by the IMU task at each sample.
@@ -113,8 +114,14 @@ void readKnockFifo(TwoWire& wire, uint8_t bus, uint8_t address) {
     if (!readRegs(wire, address, kLsm6ds3RegFifoStatus1, st, sizeof(st))) return false;
     uint16_t diff = (uint16_t)(st[0] | ((st[1] & 0x07) << 8));
     unread = diff;
-    overrun = (st[1] & 0x40) != 0;
+    overrun = (st[1] & 0x60) != 0;  // OVER_RUN or FIFO_FULL_SMART
     pattern = (uint16_t)(st[2] | ((st[3] & 0x03) << 8));
+    // A full FIFO reports 0 unread words and would stay full: restart it
+    // (bypass empties it) and read again at the next sample.
+    if (overrun) {
+      return writeRegs(wire, address, kLsm6ds3RegFifoCtrl5, &kLsm6ds3FifoCtrl5Bypass, 1) &&
+             writeRegs(wire, address, kLsm6ds3RegFifoCtrl5, &kLsm6ds3FifoCtrl5Stream, 1);
+    }
     // Line up on an X word: drop the rest of a partly read sample.
     const uint8_t skip = (uint8_t)((3 - pattern % 3) % 3);
     for (uint8_t i = 0; i < skip && diff > 0; ++i, --diff) {
