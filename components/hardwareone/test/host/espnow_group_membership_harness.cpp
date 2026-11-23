@@ -33,6 +33,7 @@
 
 #include "System_CommandReply.h"
 #include "System_ESPNow_GroupCore.h"
+#include "System_ESPNow_CredentialCore.h"  // the CMD credential block (1.0 step 9)
 #include "System_DeviceName.h"  // the device-name rule (metadata receive)
 #include "System_MacText.h"
 
@@ -240,7 +241,20 @@ static bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint1
   bool queued = false;
   for (const auto& q : gQueuedDst) queued = queued || q == MAC_STR(dst);
   if (status && statusLen) std::snprintf(status, statusLen, "%s", queued ? "queued" : "sent");
-  gSent.push_back({MAC_STR(dst), std::string(reinterpret_cast<const char*>(plaintext), plaintextLen), type, flags});
+  // A CMD is a credential block and the command (1.0 step 9, E29): recorded as
+  // "user:password:command" so the checks read as a person types it.
+  std::string text(reinterpret_cast<const char*>(plaintext), plaintextLen);
+  if (type == ESPNOW_V4_TYPE_CMD) {
+    espnowcred::Credential c{};
+    const char* cmd = nullptr;
+    size_t cmdLen = 0;
+    text = espnowcred::parseCmd(plaintext, plaintextLen, c, &cmd, &cmdLen) == espnowcred::Parse::Ok
+               ? std::string(reinterpret_cast<const char*>(c.user), c.userLen) + ":" +
+                     std::string(reinterpret_cast<const char*>(c.password), c.passwordLen) + ":" +
+                     std::string(cmd, cmdLen)
+               : std::string("<not a credential block>");
+  }
+  gSent.push_back({MAC_STR(dst), text, type, flags});
   return true;
 }
 static uint32_t generateMessageId() {
@@ -362,10 +376,10 @@ static void resetAll() {
   gSaves = 0;
   gSaveFails = false;
   // This device has an entry of its own in the registry, as on a device.
-  addEspNowDevice(kSelf, String("self"), false, nullptr);
+  addEspNowDevice(kSelf, String("self"));
 }
 static EspNowDevice* pair(uint8_t last, const char* name) {
-  addEspNowDevice(macOf(last), String(name), true, nullptr);
+  addEspNowDevice(macOf(last), String(name));
   return &gState.devices[gState.deviceCount - 1];
 }
 static EspNowDevice* device(uint8_t last) {

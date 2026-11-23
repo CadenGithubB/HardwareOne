@@ -136,9 +136,9 @@ static void reassemblyCases() {
   // 5 a fragment whose type disagrees with its entry is dropped
   table(true);
   feed(A, ESPNOW_V4_TYPE_CMD_RESP, 14, 0, 3, 200, 1);
-  feed(A, ESPNOW_V4_TYPE_FS_LIST_REPLY, 14, 1, 3, 200, 2);
+  feed(A, ESPNOW_V4_TYPE_FS_LIST_RESP, 14, 1, 3, 200, 2);
   check(gV4Reasm[0].received == 1 && !gV4Reasm[0].have[1],
-        "5: type-mismatch fragment (FS_LIST_REPLY into a CMD_RESP entry) dropped");
+        "5: type-mismatch fragment (FS_LIST_RESP into a CMD_RESP entry) dropped");
 
   // 6 a fragCount above V4_FRAG_MAX gets no entry
   table(true);

@@ -215,8 +215,14 @@ static std::vector<Frame> gFrames;
 static std::vector<std::string> gBroadcasts;
 bool isBondSynced() { return gTokenValid; }
 bool isBondSessionTokenValid() { return gTokenValid; }
-String buildBondedCommandPayload(const String& command) {
-  return String("@BOND:0123456789abcdef0123456789abcdef:") + command;
+// The bond-token CMD payload (1.0 step 9: an E29 kind 1 block, then the
+// command): a stand-in prefix here, so the checks read the command after it.
+static const char kBondBlock[] = "<bond-token-block>";
+size_t buildBondedCommandPayload(const String& command, uint8_t* out, size_t cap) {
+  const std::string text = std::string(kBondBlock) + command.c_str();
+  if (text.size() > cap) return 0;
+  std::memcpy(out, text.data(), text.size());
+  return text.size();
 }
 // What the send path answers: "" (no status, the default), "queued" (the
 // frame waits for the bond session to open) or a refusal reason with
@@ -317,7 +323,7 @@ static void expectSent(AuthContext ctx, const char* line, const char* unwrapped,
   check(frame.type == ESPNOW_V4_TYPE_CMD);
   check(frame.flags == ESPNOW_V4_FLAG_ACK_REQ);
   check(frame.ttl == 1);
-  checkd(frame.payload == std::string("@BOND:0123456789abcdef0123456789abcdef:") + unwrapped,
+  checkd(frame.payload == std::string(kBondBlock) + unwrapped,
          frame.payload);
   char expected[256];
   formatRemoteCommandSent(expected, sizeof(expected), echoed ? echoed : unwrapped, frame.msgId);

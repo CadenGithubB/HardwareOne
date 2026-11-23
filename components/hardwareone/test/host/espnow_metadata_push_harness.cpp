@@ -88,7 +88,7 @@ enum { ESP_OK = 0 };
 [[maybe_unused]] static bool espnowShutdownPending() { return false; }
 static const uint8_t kSelfMac[6] = {0x02, 0, 0, 0, 0, 0x01};
 esp_err_t espnowSelfStaMac(uint8_t out[6]) { std::memcpy(out, kSelfMac, 6); return 0; }
-void addEspNowDevice(const uint8_t* mac, const String& name, bool, const uint8_t*) {
+void addEspNowDevice(const uint8_t* mac, const String& name) {
   if (state.deviceCount >= 4) return;
   std::memcpy(state.devices[state.deviceCount].mac, mac, 6);
   state.devices[state.deviceCount].name = name;

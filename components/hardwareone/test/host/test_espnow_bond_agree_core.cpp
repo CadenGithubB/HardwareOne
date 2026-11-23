@@ -44,7 +44,7 @@ struct Frame {
   bool isRequest;
   int from, to;
   uint8_t role, code;
-  uint16_t seq;
+  uint32_t seq;
   uint8_t flags = 0;  // a notice's flags
 };
 
@@ -120,9 +120,9 @@ static void tick(int who) {
         // Its answer: its own role, and a conflict whenever the roles match.
         const uint8_t reason = out.noticeReason == kReasonAccepted && gDev[peer].local.role == d.local.role
                                    ? kReasonRoleConflict : out.noticeReason;
-        send(who, peer, Frame{false, who, peer, d.local.role, reason, out.noticeSeq, 0});
+        send(who, peer, Frame{false, who, peer, d.local.role, reason, out.noticeReqId, 0});
       } else {
-        send(who, peer, Frame{false, who, peer, out.noticeRole, out.noticeReason, out.noticeSeq,
+        send(who, peer, Frame{false, who, peer, out.noticeRole, out.noticeReason, out.noticeReqId,
                               (uint8_t)(withRole && d.local.roleChosen ? kNoticeFlagRoleChosen : 0)});
       }
     }
@@ -139,7 +139,7 @@ static void tick(int who) {
   for (;;) {
     uint8_t to[6];
     uint8_t reason = 0;
-    uint16_t seq = 0;
+    uint32_t seq = 0;
     if (!takeOwedNotice(d.s, d.local, gNow, to, &reason, &seq)) break;
     const int peer = indexOf(to);
     if (gSession[who][peer]) send(who, peer, Frame{false, who, peer, d.local.role, reason, seq});
@@ -152,7 +152,7 @@ static void tick(int who) {
     const uint8_t flags = d.oldFirmware ? plan.flags
                                         : (uint8_t)(plan.flags | kRequestFlagRoleYields |
                                                     (d.local.roleChosen ? kRequestFlagRoleChosen : 0));
-    if (queued) send(who, partner, Frame{true, who, partner, d.local.role, flags, plan.seq});
+    if (queued) send(who, partner, Frame{true, who, partner, d.local.role, flags, plan.reqId});
     requestResult(d.s, gNow, queued);
   } else if (plan.kickHandshake) {
     d.handshakeKicks++;
@@ -255,7 +255,7 @@ static void caseBondedElsewhere() {
 static void endBond(int who) {
   Device& d = gDev[who];
   const int partner = indexOf(d.local.partner);
-  const uint16_t lastRequest = beginEnding(d.s, gNow);
+  const uint32_t lastRequest = beginEnding(d.s, gNow);
   send(who, partner, Frame{false, who, partner, d.local.role, kReasonEnded, lastRequest});
   d.local.bonded = false;
   reset(d.s);
@@ -269,7 +269,7 @@ static void caseEndedAndBack() {
   bond(1, 0, kRoleWorker);
   run(1000);
   endBond(1);
-  CHECK(gSentLog.back().code == kReasonEnded && gSentLog.back().seq == gDev[1].s.lastSeq && gDev[1].s.lastSeq != 0);
+  CHECK(gSentLog.back().code == kReasonEnded && gSentLog.back().seq == gDev[1].s.lastReqId && gDev[1].s.lastReqId != 0);
   run(1000);
   CHECK(gDev[0].s.agreement == Agreement::Declined && gDev[0].s.reason == kReasonEnded);
   CHECK(gDev[0].local.bonded && gDev[0].declinedEdges == 1 && gDev[0].lineReasons.back() == kReasonEnded);
@@ -328,11 +328,11 @@ static void caseRequestOvertakenByEnded() {
   local.role = kRoleMaster;
   std::memcpy(local.partner, gDev[1].mac, 6);
   reset(s);
-  s.lastSeq = 3;                                                  // our own numbers play no part
+  s.lastReqId = 3;                                                  // our own numbers play no part
   pushInbound(s, false, gDev[1].mac, kRoleWorker, kReasonEnded, 40);
   Outcome out = takeInbound(s, local, 1000);
-  CHECK(out.becameDeclined && !out.ignored && s.partnerVoidSet && s.partnerVoidSeq == 40);
-  for (uint16_t old : {(uint16_t)40, (uint16_t)39, (uint16_t)1}) {
+  CHECK(out.becameDeclined && !out.ignored && s.partnerVoidSet && s.partnerVoidReqId == 40);
+  for (uint32_t old : {(uint32_t)40, (uint32_t)39, (uint32_t)1}) {
     pushInbound(s, true, gDev[1].mac, kRoleWorker, kRequestFlagFresh, old);
     out = takeInbound(s, local, 1100);
     CHECK(out.handled && out.voided && !out.sendNotice && out.line == Line::None && !out.becameDeclined);
@@ -343,7 +343,7 @@ static void caseRequestOvertakenByEnded() {
   // mark and arrives after it is then an ordinary repeat.
   pushInbound(s, true, gDev[1].mac, kRoleWorker, kRequestFlagFresh, 41);
   out = takeInbound(s, local, 1200);
-  CHECK(!out.voided && out.sendNotice && out.noticeReason == kReasonAccepted && out.noticeSeq == 41);
+  CHECK(!out.voided && out.sendNotice && out.noticeReason == kReasonAccepted && out.noticeReqId == 41);
   CHECK(s.agreement == Agreement::Agreed && !s.partnerVoidSet);
 
   // An ENDED that names no request (the sender never asked) voids nothing.
@@ -362,18 +362,20 @@ static void caseRequestOvertakenByEnded() {
   takeInbound(s, local, 3100);
   pushInbound(s, false, gDev[1].mac, kRoleWorker, kReasonEnded, 0);
   takeInbound(s, local, 3200);
-  CHECK(s.partnerVoidSet && s.partnerVoidSeq == 50);
+  CHECK(s.partnerVoidSet && s.partnerVoidReqId == 50);
 
-  // The numbers go round at 16 bit: a request is older or newer by the
-  // shorter way round (0 is never a request number).
-  CHECK(seqNewer(1, 0xFFFF) && !seqNewer(0xFFFF, 1) && !seqNewer(7, 7) && seqNewer(8, 7) && !seqNewer(7, 8));
-  CHECK(seqNewer(0x8006, 7) && !seqNewer(0x8007, 7) && !seqNewer(0x8008, 7));
+  // The numbers go round at 32 bit (1.0 step 9; 16 bit before): a request is
+  // older or newer by the shorter way round (0 is never a request number).
+  CHECK(reqIdNewer(1, 0xFFFFFFFFu) && !reqIdNewer(0xFFFFFFFFu, 1) && !reqIdNewer(7, 7) && reqIdNewer(8, 7) &&
+        !reqIdNewer(7, 8));
+  CHECK(reqIdNewer(0x80000006u, 7) && !reqIdNewer(0x80000007u, 7) && !reqIdNewer(0x80000008u, 7));
+  CHECK(reqIdNewer(0x10001u, 0xFFFFu));   // past the old 16-bit range: no false wrap
   reset(s);
-  pushInbound(s, false, gDev[1].mac, kRoleWorker, kReasonEnded, 0xFFFE);
+  pushInbound(s, false, gDev[1].mac, kRoleWorker, kReasonEnded, 0xFFFFFFFEu);
   takeInbound(s, local, 4000);
-  pushInbound(s, true, gDev[1].mac, kRoleWorker, 0, 0xFFFD);
+  pushInbound(s, true, gDev[1].mac, kRoleWorker, 0, 0xFFFFFFFDu);
   CHECK(takeInbound(s, local, 4100).voided);
-  pushInbound(s, true, gDev[1].mac, kRoleWorker, 0, 1);            // 0xFFFF, then 1
+  pushInbound(s, true, gDev[1].mac, kRoleWorker, 0, 1);            // 0xFFFFFFFF, then 1
   CHECK(takeInbound(s, local, 4200).sendNotice && !s.partnerVoidSet);
 
   // The mark is the partner's. A partner change forgets it, and so does a new
@@ -430,13 +432,13 @@ static void caseNoRequestWhileEnding() {
   reset(s);
   CHECK(planRequest(s, local, 1000, true).send);
   requestResult(s, 1000, true);
-  pushInbound(s, false, gDev[1].mac, kRoleWorker, kReasonNotBonded, s.lastSeq);
+  pushInbound(s, false, gDev[1].mac, kRoleWorker, kReasonNotBonded, s.lastReqId);
   CHECK(takeInbound(s, local, 1100).becameDeclined);
   // A request is due (the declined partner's heartbeat set it off) when the
   // user ends the bond.
   CHECK(!onPartnerHeartbeat(s, kRoleWorker, kRoleMaster, 7000).proceed && s.requestDue && hasWork(s, 7000));
   CHECK(beginEnding(s, 7000) == 1);
-  CHECK(!hasWork(s, 7000) && !planRequest(s, local, 7000, true).send && s.lastSeq == 1);
+  CHECK(!hasWork(s, 7000) && !planRequest(s, local, 7000, true).send && s.lastReqId == 1);
   CHECK(!onPartnerHeartbeat(s, kRoleWorker, kRoleMaster, 7100).proceed);
   RequestPlan plan = planRequest(s, local, 7100, false);
   CHECK(!plan.send && !plan.kickHandshake);
@@ -444,7 +446,7 @@ static void caseNoRequestWhileEnding() {
   std::memcpy(local.partner, gDev[2].mac, 6);
   reset(s);
   plan = planRequest(s, local, 7200, true);
-  CHECK(plan.send && plan.seq == 2);
+  CHECK(plan.send && plan.reqId == 2);
   requestResult(s, 7200, true);
   // A change that never came: asking goes on after kEndingQuietMs.
   CHECK(beginEnding(s, 10000) == 2);
@@ -452,14 +454,14 @@ static void caseNoRequestWhileEnding() {
   CHECK(!hasWork(s, 10000 + kEndingQuietMs - 1) && !planRequest(s, local, 10000 + kEndingQuietMs - 1, true).send);
   CHECK(hasWork(s, 10000 + kEndingQuietMs));
   plan = planRequest(s, local, 10000 + kEndingQuietMs, true);
-  CHECK(plan.send && plan.seq == 3 && s.endingSinceMs == 0);
+  CHECK(plan.send && plan.reqId == 3 && s.endingSinceMs == 0);
   requestResult(s, 10000 + kEndingQuietMs, true);
 
   // The change never came and the bond stayed agreed for a month: nothing
   // looked at the time of the ENDED meanwhile, and it must not hold the next
   // request back when the partner goes silent and its session returns.
   const uint32_t kDay = 24UL * 3600UL * 1000UL;
-  pushInbound(s, false, gDev[2].mac, kRoleWorker, kReasonAccepted, s.lastSeq);
+  pushInbound(s, false, gDev[2].mac, kRoleWorker, kReasonAccepted, s.lastReqId);
   CHECK(takeInbound(s, local, 16000).line == Line::Accepted);
   CHECK(beginEnding(s, 20000) == 3);
   for (uint32_t days : {25u, 30u, 49u}) {
@@ -469,7 +471,7 @@ static void caseNoRequestWhileEnding() {
     plan = planRequest(s, local, later, true);
     CHECK(plan.send);
     requestResult(s, later, true);
-    pushInbound(s, false, gDev[2].mac, kRoleWorker, kReasonAccepted, s.lastSeq);
+    pushInbound(s, false, gDev[2].mac, kRoleWorker, kReasonAccepted, s.lastReqId);
     CHECK(takeInbound(s, local, later + 100).handled && s.agreement == Agreement::Agreed);
   }
 }
@@ -515,24 +517,24 @@ static void caseNoticesThatDoNotCount() {
     CHECK(out.handled && out.ignored && !out.sendNotice && !out.becameDeclined && out.line == Line::None);
   }
   CHECK(d.s.agreement == Agreement::Agreed && d.s.noticesIgnored == 4);
-  pushInbound(d.s, false, gDev[1].mac, kRoleWorker, kReasonNotBonded, (uint16_t)(d.s.lastSeq + 1));
+  pushInbound(d.s, false, gDev[1].mac, kRoleWorker, kReasonNotBonded, (uint32_t)(d.s.lastReqId + 1));
   CHECK(takeInbound(d.s, d.local, gNow).ignored && d.s.agreement == Agreement::Agreed);
   pushInbound(d.s, false, gDev[1].mac, kRoleWorker, 200, 0);
   CHECK(takeInbound(d.s, d.local, gNow).ignored && d.s.agreement == Agreement::Agreed);
   // Unasked (number 0) and the answer to the last request both count. ENDED
   // is never an answer and counts with any number (caseRequestOvertakenByEnded).
-  pushInbound(d.s, false, gDev[1].mac, kRoleWorker, kReasonEnded, (uint16_t)(d.s.lastSeq + 9));
+  pushInbound(d.s, false, gDev[1].mac, kRoleWorker, kReasonEnded, (uint32_t)(d.s.lastReqId + 9));
   CHECK(takeInbound(d.s, d.local, gNow).becameDeclined);
-  pushInbound(d.s, false, gDev[1].mac, kRoleWorker, kReasonAccepted, d.s.lastSeq);
+  pushInbound(d.s, false, gDev[1].mac, kRoleWorker, kReasonAccepted, d.s.lastReqId);
   CHECK(takeInbound(d.s, d.local, gNow).line == Line::Accepted && d.s.agreement == Agreement::Agreed);
   // With no bond here nobody is the partner.
   Device& idle = gDev[2];
   pushInbound(idle.s, false, gDev[0].mac, kRoleMaster, kReasonAccepted, 0);
   CHECK(takeInbound(idle.s, idle.local, gNow).ignored && idle.s.agreement == Agreement::Unknown);
   // A partner change: the answer to a request made before it matches nothing.
-  const uint16_t before = d.s.lastSeq;
+  const uint32_t before = d.s.lastReqId;
   bond(0, 2, kRoleMaster);
-  CHECK(d.s.agreement == Agreement::Unknown && d.s.lastSeq == before);
+  CHECK(d.s.agreement == Agreement::Unknown && d.s.lastReqId == before);
   pushInbound(d.s, false, gDev[1].mac, kRoleWorker, kReasonAccepted, before);
   CHECK(takeInbound(d.s, d.local, gNow).ignored && d.s.agreement == Agreement::Unknown);
 }
@@ -575,13 +577,13 @@ static void caseInbox() {
   CHECK(pushInbound(s, true, gDev[1].mac, 0, 0, 22));                 // replaces number 2, moves to the end
   CHECK(hasWork(s, gNow));
   Outcome out = takeInbound(s, local, gNow);
-  CHECK(out.handled && out.sendNotice && out.noticeSeq == 1 && macIs(out.mac, gDev[0].mac));
+  CHECK(out.handled && out.sendNotice && out.noticeReqId == 1 && macIs(out.mac, gDev[0].mac));
   out = takeInbound(s, local, gNow);
   CHECK(out.handled && out.ignored && macIs(out.mac, gDev[0].mac));   // the notice: no bond here
   out = takeInbound(s, local, gNow);
-  CHECK(out.noticeSeq == 3 && macIs(out.mac, gDev[2].mac));
+  CHECK(out.noticeReqId == 3 && macIs(out.mac, gDev[2].mac));
   out = takeInbound(s, local, gNow);
-  CHECK(out.noticeSeq == 22 && macIs(out.mac, gDev[1].mac));
+  CHECK(out.noticeReqId == 22 && macIs(out.mac, gDev[1].mac));
   CHECK(!takeInbound(s, local, gNow).handled);
 }
 
@@ -593,7 +595,7 @@ static void casePeerLimits() {
   Local local = {};
   uint8_t to[6];
   uint8_t reason = 0;
-  uint16_t seq = 99;
+  uint32_t seq = 99;
   CHECK(noteIgnoredFrame(s, gDev[1].mac, gNow));
   CHECK(!noteIgnoredFrame(s, gDev[1].mac, gNow + 10));                // already due
   CHECK(hasWork(s, gNow));
@@ -622,7 +624,7 @@ static void tickCounting(State& s, const Local& local, uint32_t now, Counts& c) 
   }
   uint8_t to[6];
   uint8_t reason = 0;
-  uint16_t seq = 0;
+  uint32_t seq = 0;
   while (takeOwedNotice(s, local, now, to, &reason, &seq)) c.notices++;
 }
 
@@ -656,7 +658,7 @@ static void caseMorePeersThanEntries() {
   c = Counts();
   for (uint32_t t = 1000; t < 1000 + 60 * 60000; t += 100) {
     for (uint32_t i = 0; i < 6; ++i) {
-      if (t % 60000 == i * 1000) pushInbound(s, true, peers[i], kRoleMaster, 0, (uint16_t)(1 + t / 60000));
+      if (t % 60000 == i * 1000) pushInbound(s, true, peers[i], kRoleMaster, 0, (uint32_t)(1 + t / 60000));
     }
     tickCounting(s, local, t, c);
   }
@@ -672,7 +674,7 @@ static void caseMorePeersThanEntries() {
   for (uint32_t t = 1000; t < 1000 + 60 * 60000; t += 100) {
     for (uint32_t i = 0; i < 10; ++i) {
       const uint8_t mac[6] = {7, 7, 7, 7, 8, (uint8_t)i};
-      if (t % 120000 == i * 1000) pushInbound(s, true, mac, kRoleMaster, 0, (uint16_t)(1 + t / 60000));
+      if (t % 120000 == i * 1000) pushInbound(s, true, mac, kRoleMaster, 0, (uint32_t)(1 + t / 60000));
     }
     tickCounting(s, local, t, c);
   }
@@ -684,7 +686,7 @@ static void caseMorePeersThanEntries() {
   for (uint8_t i = 0; i < 5; ++i) noteIgnoredFrame(s, peers[i], 1000 + i * 100u);
   uint8_t to[6];
   uint8_t reason = 0;
-  uint16_t seq = 0;
+  uint32_t seq = 0;
   size_t owed = 0;
   while (takeOwedNotice(s, local, 2000, to, &reason, &seq)) owed++;
   CHECK(owed == 5);
@@ -699,7 +701,7 @@ static void caseMorePeersThanEntries() {
   // peer that takes the entry over: the number in it is the first one's.
   s = State();
   for (uint8_t i = 0; i < 5; ++i) {
-    pushInbound(s, true, peers[i], kRoleMaster, 0, (uint16_t)(10 + i));
+    pushInbound(s, true, peers[i], kRoleMaster, 0, (uint32_t)(10 + i));
     CHECK(takeInbound(s, local, 1000).sendNotice);
   }
   pushInbound(s, true, peers[4], kRoleMaster, 0, 99);
@@ -717,7 +719,7 @@ static void caseRequestFlood() {
   Local local = {};
   Counts c;
   for (uint32_t t = 1000; t < 1000 + 10000; t += 10) {                // 1000 requests in 10 s
-    pushInbound(s, true, gDev[1].mac, kRoleMaster, kRequestFlagFresh, (uint16_t)(t / 10));
+    pushInbound(s, true, gDev[1].mac, kRoleMaster, kRequestFlagFresh, (uint32_t)(t / 10));
     tickCounting(s, local, t, c);
   }
   CHECK(c.notices == 2 && c.lines == 1);                              // at 0 s and at 5 s
@@ -729,13 +731,13 @@ static void caseRequestFlood() {
   (void)planRequest(s, local, 1000, false);                           // no bond here: nobody to ask
   pushInbound(s, true, gDev[1].mac, kRoleMaster, kRequestFlagFresh, 7);
   Outcome out = takeInbound(s, local, 1000);
-  CHECK(out.sendNotice && out.noticeSeq == 7 && out.noticeReason == kReasonNotBonded);
+  CHECK(out.sendNotice && out.noticeReqId == 7 && out.noticeReason == kReasonNotBonded);
   pushInbound(s, true, gDev[1].mac, kRoleMaster, kRequestFlagFresh, 8);
   out = takeInbound(s, local, 1500);
   CHECK(out.handled && !out.sendNotice);
   uint8_t to[6];
   uint8_t reason = 0;
-  uint16_t seq = 0;
+  uint32_t seq = 0;
   CHECK(!hasWork(s, 1000 + kAnswerGapMs - 1) && !takeOwedNotice(s, local, 1000 + kAnswerGapMs - 1, to, &reason, &seq));
   CHECK(hasWork(s, 1000 + kAnswerGapMs));
   CHECK(takeOwedNotice(s, local, 1000 + kAnswerGapMs, to, &reason, &seq) && seq == 8 &&
@@ -757,7 +759,7 @@ static void caseRequestFlood() {
   // The partner is answered every time.
   size_t answered = 0;
   for (uint32_t t = 20000; t < 21000; t += 10) {
-    pushInbound(s, true, gDev[1].mac, kRoleMaster, 0, (uint16_t)t);
+    pushInbound(s, true, gDev[1].mac, kRoleMaster, 0, (uint32_t)t);
     answered += takeInbound(s, local, t).sendNotice;
   }
   CHECK(answered == 100);
@@ -781,7 +783,7 @@ static void caseRequestTiming() {
   CHECK(!plan.send && !plan.kickHandshake && !hasWork(s, gNow + 500) && hasWork(s, gNow + 1000));
   CHECK(onSessionUp(s, gNow + 100, false) && hasWork(s, gNow + 100));
   plan = planRequest(s, local, gNow + 100, true);
-  CHECK(plan.send && plan.seq == 1 && (plan.flags & kRequestFlagFresh));
+  CHECK(plan.send && plan.reqId == 1 && (plan.flags & kRequestFlagFresh));
   CHECK(!plan.watchAck);                                               // the first request on a session
 
   // The send queue was full: again after kRequestRetryMs, still fresh, with
@@ -789,13 +791,13 @@ static void caseRequestTiming() {
   requestResult(s, gNow + 100, false);
   CHECK(!planRequest(s, local, gNow + 4000, true).send);
   plan = planRequest(s, local, gNow + 100 + kRequestRetryMs, true);
-  CHECK(plan.send && plan.seq == 2 && (plan.flags & kRequestFlagFresh));
+  CHECK(plan.send && plan.reqId == 2 && (plan.flags & kRequestFlagFresh));
   requestResult(s, gNow + 6000, true);
   CHECK(s.requestsSent == 1 && !hasWork(s, gNow + 6000 + kRequestRepeatMs - 1));
 
   // Unanswered: once a minute, not fresh.
   plan = planRequest(s, local, gNow + 6000 + kRequestRepeatMs, true);
-  CHECK(plan.send && plan.seq == 3 && plan.flags == 0 && plan.watchAck);
+  CHECK(plan.send && plan.reqId == 3 && plan.flags == 0 && plan.watchAck);
   requestResult(s, gNow + 66000, true);
 
   // Agreed: no repeat; a new session asks once more.
@@ -854,7 +856,7 @@ static void caseSessionSettle() {
   CHECK(onSessionUp(t, 5000, false) && planRequest(t, local, 5000, true).send);
 
   // Declined: the 5 s since the last request and the settle time both hold.
-  pushInbound(s, false, gDev[1].mac, kRoleMaster, kReasonNotBonded, s.lastSeq);
+  pushInbound(s, false, gDev[1].mac, kRoleMaster, kReasonNotBonded, s.lastReqId);
   CHECK(takeInbound(s, local, 6100).becameDeclined);
   CHECK(!onSessionUp(s, 6200, true));                                  // asked 200 ms ago
   CHECK(!planRequest(s, local, 6200 + kSessionSettleMs, true).send);
@@ -880,7 +882,7 @@ static void caseDeclinedSessionLost() {
     uint32_t now = 1000;
     CHECK(planRequest(s, local, now, true).send);
     requestResult(s, now, true);
-    pushInbound(s, false, gDev[1].mac, kRoleWorker, kReasonNotBonded, s.lastSeq);
+    pushInbound(s, false, gDev[1].mac, kRoleWorker, kReasonNotBonded, s.lastReqId);
     CHECK(takeInbound(s, local, now + 100).becameDeclined);
     if (how == 0) {
       CHECK(!onPartnerHeartbeat(s, kRoleWorker, kRoleMaster, now + 200).proceed);   // sets a request off
@@ -922,7 +924,7 @@ static void caseDeclineAfterWeeks() {
     CHECK(planRequest(s, local, now, true).send);
     requestResult(s, now, true);
     if (how == 0) {            // agreed by the partner's answer
-      pushInbound(s, false, gDev[1].mac, kRoleWorker, kReasonAccepted, s.lastSeq);
+      pushInbound(s, false, gDev[1].mac, kRoleWorker, kReasonAccepted, s.lastReqId);
       CHECK(takeInbound(s, local, now + 100).line == Line::Accepted);
     } else if (how == 1) {     // ... by its own request
       pushInbound(s, true, gDev[1].mac, kRoleWorker, kRequestFlagFresh, 5);
@@ -1248,7 +1250,28 @@ static void caseNoBondBuild() {
   CHECK(plan.send);
 }
 
+// 1.0 step 9: the notice's wire status (0 ok, 16-19 its own codes) and the
+// core's reasons map one to one; a status from newer firmware is ignored.
+static void caseNoticeStatusMapping() {
+  for (uint8_t r : {kReasonAccepted, kReasonNotBonded, kReasonBondedElsewhere, kReasonEnded, kReasonRoleConflict}) {
+    CHECK(reasonOfNoticeStatus(noticeStatusOf(r)) == r);
+  }
+  CHECK(noticeStatusOf(kReasonAccepted) == 0 && noticeStatusOf(kReasonNotBonded) == 16 &&
+        noticeStatusOf(kReasonBondedElsewhere) == 17 && noticeStatusOf(kReasonEnded) == 18 &&
+        noticeStatusOf(kReasonRoleConflict) == 19);
+  CHECK(reasonOfNoticeStatus(1) == kReasonUnknown && reasonOfNoticeStatus(5) == kReasonUnknown &&
+        reasonOfNoticeStatus(20) == kReasonUnknown);
+  State s{};
+  Local local{};
+  local.bonded = true;
+  std::memcpy(local.partner, gDev[1].mac, 6);
+  pushInbound(s, false, gDev[1].mac, kRoleWorker, reasonOfNoticeStatus(99), 0);
+  const Outcome out = takeInbound(s, local, 1000);
+  CHECK(s.agreement == Agreement::Unknown && !out.sendNotice);
+}
+
 int main() {
+  caseNoticeStatusMapping();
   caseMutual();
   caseOneSided();
   caseBondedElsewhere();

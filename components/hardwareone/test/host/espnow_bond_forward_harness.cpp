@@ -638,7 +638,7 @@ static void testSessionsAndChanges() {
         "declined: the link is withdrawn");
   run(10);
   check(linkFrames(kHub).size() == 3, "three tries without an answer, then no more");
-  answer(kSpare, espnowfwd::kOpWithdraw, espnowfwd::kResultWithdrawn, 1);
+  answer(kSpare, espnowfwd::kOpWithdraw, espnowfwd::kResultOk, 1);
   const size_t spareBefore = linkFrames(kSpare).size();
   run(10);
   check(linkFrames(kSpare).size() == spareBefore, "an answered withdrawal is not repeated");
@@ -661,8 +661,8 @@ static void testSessionsAndChanges() {
   w = linkFrames(kHub);
   check(w.size() == 1 && w[0].op == espnowfwd::kOpWithdraw && w[0].linkGen == 2 && std::memcmp(w[0].partnerMac, kPorch, 6) == 0,
         "the old link is withdrawn with its number and partner");
-  answer(kHub, espnowfwd::kOpWithdraw, espnowfwd::kResultWithdrawn, 2, kPorch);
-  answer(kSpare, espnowfwd::kOpWithdraw, espnowfwd::kResultWithdrawn, 2, kPorch);
+  answer(kHub, espnowfwd::kOpWithdraw, espnowfwd::kResultOk, 2, kPorch);
+  answer(kSpare, espnowfwd::kOpWithdraw, espnowfwd::kResultOk, 2, kPorch);
   gBond.agreeState = espnowfwd::kAgreeAgreed;
   run(1);
   w = linkFrames(kHub);

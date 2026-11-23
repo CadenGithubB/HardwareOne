@@ -143,13 +143,13 @@ def main():
     espnow = (a.component / 'System_ESPNow.cpp').read_text().splitlines()
     stamps = 0
     for i, line in enumerate(espnow):
-        m = re.search(r'(?:h\.|h->)meshFingerprint\s*=(?!=)\s*([^;]+);', line)
+        m = re.search(r'(?:h\.|h->)meshId\s*=(?!=)\s*([^;]+);', line)
         if not m:
             continue
         stamps += 1
         value = m.group(1).strip()
         if value.startswith('fingerprintForPeer('):
-            ok = any('meshFingerprint == 0' in l for l in espnow[i + 1:i + 7])
+            ok = any('meshId == 0' in l for l in espnow[i + 1:i + 7])
         else:
             ok = any(f'{value} == 0' in l for l in espnow[max(0, i - 120):i])
         if not ok:

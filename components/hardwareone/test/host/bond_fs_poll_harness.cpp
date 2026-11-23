@@ -182,10 +182,10 @@ static constexpr size_t FILE_MANAGER_MAX_PATH = INSERT_MAX_PATH;
 
 // ── protocol module double ──────────────────────────────────────────────────
 typedef void (*FsListReplyCallback)(const uint8_t peerMac[6],
-                                    const V4PayloadFsListReplyHeader* header,
+                                    const V4PayloadFsListRespHeader* header,
                                     const V4PayloadFsEntry* entries);
-typedef void (*FsStatReplyCallback)(const uint8_t peerMac[6], const V4PayloadFsStatReply* reply);
-typedef void (*FsGetAckCallback)(const uint8_t peerMac[6], const V4PayloadFsGetAck* ack);
+typedef void (*FsStatReplyCallback)(const uint8_t peerMac[6], const V4PayloadFsStatResp* reply);
+typedef void (*FsGetAckCallback)(const uint8_t peerMac[6], const V4PayloadFsGetResp* ack);
 
 struct Protocol {
   uint32_t nextId = 100;
@@ -272,7 +272,7 @@ static const char* const kAdmin = "{\"success\":false,\"error\":\"admin required
 static void deliverList(uint32_t id, uint8_t status, const char* path,
                         std::initializer_list<std::pair<const char*, bool>> names,
                         bool hasMore = false) {
-  V4PayloadFsListReplyHeader hdr = {};
+  V4PayloadFsListRespHeader hdr = {};
   hdr.reqId = id;
   hdr.status = status;
   hdr.hasMore = hasMore ? 1 : 0;
@@ -293,7 +293,7 @@ static void deliverList(uint32_t id, uint8_t status, const char* path,
   requireUnlocked("the list callback's return");
 }
 static void deliverStat(uint32_t id, uint8_t status) {
-  V4PayloadFsStatReply reply = {};
+  V4PayloadFsStatResp reply = {};
   reply.reqId = id;
   reply.status = status;
   reply.totalBytes = 1000000;
@@ -305,7 +305,7 @@ static void deliverStat(uint32_t id, uint8_t status) {
   requireUnlocked("the stat callback's return");
 }
 static void deliverAck(uint32_t id, uint8_t status, uint32_t size) {
-  V4PayloadFsGetAck ack = {};
+  V4PayloadFsGetResp ack = {};
   ack.reqId = id;
   ack.status = status;
   ack.fileSize = size;

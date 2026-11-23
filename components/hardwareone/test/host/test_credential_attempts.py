@@ -289,12 +289,12 @@ def check_contracts() -> None:
     # reserved key; the bond-token path is not a password and stays outside.
     espnow = (COMPONENT / "System_ESPNow.cpp").read_text()
     remote = extract_block(espnow, "static void v4_handle_cmd(const uint8_t* srcMac, "
-                                   "const char* deviceName, uint32_t msgId, const char* cmdPayload")
-    password = remote[remote.index("Traditional username:password auth"):]
+                                   "const char* deviceName, uint32_t msgId, const uint8_t* payload")
+    password = remote[remote.index("Account auth: a user name and password"):]
     require(re.search(r"checkCredentialAttempt\(\s*SOURCE_ESPNOW", password) is not None
             and "isValidUser(" not in password,
             "ESP-NOW password remote commands consult the table")
-    bond = remote[:remote.index("Traditional username:password auth")]
+    bond = remote[:remote.index("Account auth: a user name and password")]
     require("credentialAttempt" not in bond and "logBondAuthFailure(" in bond,
             "the bond-token path keeps logBondAuthFailure and stays out of the table")
     sync = extract_block(espnow, "static void doUserSyncWork(const DeferredUserSyncWork* w)")

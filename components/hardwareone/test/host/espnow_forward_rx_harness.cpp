@@ -386,13 +386,13 @@ static void testResolveAndWithdraw() {
   w.viaBootTag = 9;
   std::memcpy(w.partnerMac, kPorch, 6);
   rx(kGlasses, "glasses", w);
-  check(lastResult() == espnowfwd::kResultWithdrawn && gSent.back().f.answers == espnowfwd::kOpWithdraw &&
+  check(lastResult() == espnowfwd::kResultOk && gSent.back().f.answers == espnowfwd::kOpWithdraw &&
         !espnowForwardLinkActive(kGlasses, kPorch) &&
         resolve(kGlasses, true, 3, REMOTE_SENSOR_GPS, &o) == ForwardResolve::Refused,
         "withdrawn: answered, ended, its frames refused");
   check(gConsole.size() == 1 && gConsole[0] == "[ESP-NOW] glasses no longer forwards for porch", "said once");
   rx(kGlasses, "glasses", w);
-  check(lastResult() == espnowfwd::kResultWithdrawn && gConsole.size() == 1, "a repeated withdraw is harmless");
+  check(lastResult() == espnowfwd::kResultOk && gConsole.size() == 1, "a repeated withdraw is harmless");
   // The same number again (a held announcement): stale; a newer one: accepted.
   rx(kGlasses, "glasses", announceOf(3, 9, kPorch, "porch"));
   check(lastResult() == espnowfwd::kResultStale, "an announcement of the ended link: stale");
@@ -403,7 +403,7 @@ static void testResolveAndWithdraw() {
   all.op = espnowfwd::kOpWithdraw;
   all.viaBootTag = 10;
   rx(kGlasses, "glasses", all);
-  check(lastResult() == espnowfwd::kResultWithdrawn && !espnowForwardLinkActive(kGlasses, kPorch),
+  check(lastResult() == espnowfwd::kResultOk && !espnowForwardLinkActive(kGlasses, kPorch),
         "a withdrawal of everything from B's next boot ends the link");
   check(espnowForwardLinkCount() == 0, "no active link");
 

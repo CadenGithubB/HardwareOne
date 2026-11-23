@@ -156,7 +156,7 @@ static EspNowIdentity sampleIdentity() {
   EspNowIdentity id{};
   for (int i = 0; i < 32; ++i) id.pub[i] = static_cast<uint8_t>(i);
   for (int i = 0; i < 64; ++i) id.sec[i] = static_cast<uint8_t>(0xA0 + i);
-  id.createdAtSec = 1762560000u;
+  id.createdEpochMs = 1762560000000ull;
   id.regenCount = 3;
   id.valid = true;
   return id;
@@ -167,8 +167,8 @@ static PeerIdentity samplePeer() {
   std::memcpy(p.mac, mac, 6);
   p.meshId = 1;
   for (int i = 0; i < 32; ++i) p.longTermPub[i] = static_cast<uint8_t>(0x40 + i);
-  p.bondedAtSec = 1762560000u;
-  p.lastSeenSec = 1762570000u;
+  p.pairedEpochMs = 1762560000000ull;
+  p.lastSeenEpochMs = 1762570000000ull;
   p.valid = true;
   return p;
 }
@@ -189,7 +189,11 @@ static size_t completeSize(bool peer) {
   check(!has(peer ? kPeerTmp : kIdTmp), "normal write leaves no temp");
   JsonDocument doc;
   check(!deserializeJson(doc, content(dest)), "normal write is complete JSON");
-  check(doc["version"].as<int>() == (peer ? 2 : 1), "normal write carries the schema version");
+  // 1.0 step 9: the peer file carries "schema":1, this device's identity "version":1.
+  check(peer ? (doc["schema"].as<int>() == 1 && !doc["version"].is<int>() && doc["pairedEpochMs"].is<uint64_t>() &&
+                doc["lastSeenEpochMs"].as<uint64_t>() == 1762570000000ull && !doc["bondedAtSec"].is<int>())
+             : (doc["version"].as<int>() == 1 && doc["createdEpochMs"].as<uint64_t>() == 1762560000000ull),
+        "normal write carries the file's format number and epoch-millisecond times");
   check(gFsLockDepth == 0, "filesystem lock released");
   return content(dest).size();
 }

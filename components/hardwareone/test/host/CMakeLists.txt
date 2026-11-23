@@ -155,6 +155,16 @@ set_target_properties(espnow_link_core_tests PROPERTIES
 target_include_directories(espnow_link_core_tests PRIVATE ../..)
 target_compile_options(espnow_link_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# ESP-NOW 1.0 step 9: the CMD / USER_SYNC credential block (E29). A ':' in the
+# password, an empty password, a bond token, short and garbled blocks, the
+# field limits and USER_SYNC's two blocks + flags, against the production
+# dependency-free header (System_ESPNow_CredentialCore.h).
+add_executable(espnow_credential_core_tests test_espnow_credential_core.cpp)
+set_target_properties(espnow_credential_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_credential_core_tests PRIVATE ../..)
+target_compile_options(espnow_credential_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
 # The one checked number parser for command arguments (System_ArgParse.h):
 # decimal whole tokens; only a bus address and a bit mask may be written in
 # hexadecimal.
@@ -1957,6 +1967,7 @@ add_test(NAME clock_core_tests COMMAND clock_core_tests)
 add_test(NAME espnow_pending_queue_tests COMMAND espnow_pending_queue_tests)
 add_test(NAME espnow_peer_restart_tests COMMAND espnow_peer_restart_tests)
 add_test(NAME espnow_link_core_tests COMMAND espnow_link_core_tests)
+add_test(NAME espnow_credential_core_tests COMMAND espnow_credential_core_tests)
 add_test(NAME uart_link_framing_tests COMMAND uart_link_framing_tests)
 add_test(NAME arg_parse_tests COMMAND arg_parse_tests)
 add_test(NAME config_load_tests COMMAND config_load_tests)

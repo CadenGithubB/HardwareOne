@@ -377,7 +377,7 @@ def assemble(a):
         # The ENDED carries the number of the last request, taken with the step
         # that stops further requests.
         tell = definition(source, 'static void bondTellPartnerEnded(const uint8_t* nextPartner) ', 'System_ESPNow.cpp')
-        assert 'notice.seq = bondagree::beginEnding(gBondAgree,' in tell and \
+        assert 'notice.reqId = bondagree::beginEnding(gBondAgree,' in tell and \
             tell.index('bondagree::beginEnding(') < tell.index('v4_send_session_wrapped('), \
             'bondTellPartnerEnded: the ENDED does not name the last request made'
         # The agreement in JSON: one text everywhere (it was a number in the

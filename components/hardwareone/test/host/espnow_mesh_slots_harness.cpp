@@ -148,7 +148,7 @@ static int espnowSelfStaMac(uint8_t mac[6]) {
 static bool gLastSelfKnown = false;
 static bool isSelfMac(const uint8_t* mac) { return gState.initialized && std::memcmp(mac, kSelfMac, 6) == 0; }
 static bool isLastKnownSelfMac(const uint8_t* mac) { return gLastSelfKnown && std::memcmp(mac, kSelfMac, 6) == 0; }
-static void addEspNowDevice(const uint8_t* mac, const String& name, bool, const uint8_t*) {
+static void addEspNowDevice(const uint8_t* mac, const String& name) {
   if (gState.deviceCount >= 6) return;
   std::memcpy(gState.devices[gState.deviceCount].mac, mac, 6);
   gState.devices[gState.deviceCount].name = name;
@@ -433,7 +433,7 @@ static void startEspNow() {
   gLastSelfKnown = true;
   bool haveSelf = false;
   for (int i = 0; i < gState.deviceCount; i++) haveSelf = haveSelf || std::memcmp(gState.devices[i].mac, kSelfMac, 6) == 0;
-  if (!haveSelf) addEspNowDevice(kSelfMac, String("self"), false, nullptr);
+  if (!haveSelf) addEspNowDevice(kSelfMac, String("self"));
 }
 static void stopEspNow() {
   gState.initialized = false;
@@ -481,7 +481,7 @@ static bool slotIsEmpty(uint8_t i) {
 }
 static void addRegistryDevice(uint8_t lastByte, uint8_t meshId) {
   const uint8_t mac[6] = {0x02, 0, 0, 0, 0, lastByte};
-  addEspNowDevice(mac, String("peer"), false, nullptr);
+  addEspNowDevice(mac, String("peer"));
   gState.devices[gState.deviceCount - 1].meshId = meshId;
 }
 // Older firmware's clear of slot 0's passphrase: the mesh disabled, its default

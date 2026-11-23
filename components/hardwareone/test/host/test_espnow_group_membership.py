@@ -83,6 +83,7 @@ REGIONS = (
      "/**\n * Process received metadata: the paired peer's registry record first"),
 )
 FUNCTIONS = (
+    'static size_t espnowAccountCmdPayload(',
     'static void processMetadata(',
     'static void addEspNowDevice(',
     'void removeEspNowDevice(',

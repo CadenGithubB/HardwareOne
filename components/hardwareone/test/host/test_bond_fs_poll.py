@@ -122,15 +122,15 @@ def main() -> None:
     wire_slice = wire[wire.index("struct __attribute__((packed)) V4PayloadFsListReq"):
                       wire.index("struct __attribute__((packed)) V4PayloadSessionUnknown")]
     wire_slice = wire_slice[:wire_slice.rindex("\n// ----")]
-    opcode = re.search(r"ESPNOW_V4_TYPE_FS_LIST_REPLY\s*=\s*(\d+)", wire)
-    require(opcode is not None, "FS_LIST_REPLY opcode")
+    opcode = re.search(r"ESPNOW_V4_TYPE_FS_LIST_RESP\s*=\s*(\d+)", wire)
+    require(opcode is not None, "FS_LIST_RESP opcode")
     max_path = re.search(r"^#define FILE_MANAGER_MAX_PATH (\d+)$",
                          (COMPONENT / "System_FileManager.h").read_text(), re.M)
     require(max_path is not None, "FILE_MANAGER_MAX_PATH")
 
     harness = (HERE / "bond_fs_poll_harness.cpp").read_text()
     for marker, replacement in (
-            ("// INSERT_OPCODE", f"constexpr uint8_t ESPNOW_V4_TYPE_FS_LIST_REPLY = {opcode.group(1)};"),
+            ("// INSERT_OPCODE", f"constexpr uint8_t ESPNOW_V4_TYPE_FS_LIST_RESP = {opcode.group(1)};"),
             ("// INSERT_WIRE", wire_slice),
             ("INSERT_MAX_PATH", max_path.group(1)),
             ("// INSERT_PRODUCTION", region)):

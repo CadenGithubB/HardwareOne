@@ -156,7 +156,7 @@ def generate(component: Path) -> str:
     require(espnow.count(cmd_resp + " {") == 1, f"System_ESPNow.cpp: expected one {cmd_resp!r} definition")
     remote = extract_block(espnow[espnow.index(cmd_resp + " {"):], cmd_resp) + "\n\n"
     remote += unique_block(espnow, "static void v4_handle_cmd(const uint8_t* srcMac, const char* "
-                                  "deviceName, uint32_t msgId, const char* cmdPayload",
+                                  "deviceName, uint32_t msgId, const uint8_t* payload",
                           "System_ESPNow.cpp")
     require(remote.count(AUTH_DECISION) == 1, f"v4_handle_cmd: one {AUTH_DECISION!r}")
     # Everything up to the authentication decision; the queued command that

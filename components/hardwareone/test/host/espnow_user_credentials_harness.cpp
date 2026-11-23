@@ -14,6 +14,7 @@
 #include <ArduinoJson.h>
 #include "System_PollPause.h"
 #include "System_ESPNow_AnswerCore.h"
+#include "System_ESPNow_CredentialCore.h"
 
 #include <cctype>
 #include <cstdarg>
@@ -119,7 +120,8 @@ bool isValidUser(const String& user, const String& password) {
   ++passwordChecks;
   return (user == "root" && password == "root-pass") ||
          (user == "carol" && password == "carol-pass") ||
-         (user == kName31 && password == kPass31);
+         (user == kName31 && password == kPass31) ||
+         (user == "colon" && password == "a:b:c");   // 1.0 step 9: a ':' in a password
 }
 bool isAdminUser(const String& user) { return user == "root"; }
 void secureClearString(String& s) { s = ""; }
@@ -202,15 +204,9 @@ static bool lastRefusal(uint32_t reqId, uint8_t status) {
 
 static String redactCmdForAudit(const String& line) { return line; }
 
-// Bond-token doubles: the token "00..0" (32 hex zeros) is the live one.
+// Bond-token doubles: a token whose first byte is 0 is the live one.
 static int bondFailures = 0;
-static bool parseSessionToken(const char* text, uint8_t* token) {
-  for (int i = 0; i < 32; ++i) if (!std::isxdigit(static_cast<unsigned char>(text[i]))) return false;
-  std::memset(token, 0, 16);
-  token[0] = std::strncmp(text, "00000000000000000000000000000000", 32) == 0 ? 0 : 1;
-  return true;
-}
-static bool validateBondSessionToken(const uint8_t* token, size_t) { return token[0] == 0; }
+static bool validateBondSessionToken(const uint8_t* token, size_t len) { return len == 16 && token[0] == 0; }
 static void logBondAuthFailure(const uint8_t*, const char*) { ++bondFailures; }
 
 struct Accepted { uint32_t msgId; std::string user; std::string command; };
@@ -274,9 +270,33 @@ static void begin() {
 static const uint8_t kPeerA[6] = {0x02, 0, 0, 0, 0, 0xA1};
 static const uint8_t kPeerB[6] = {0x02, 0, 0, 0, 0, 0xB2};
 
-static void remoteCommand(const uint8_t* mac, uint32_t msgId, const char* payload,
-                          bool encrypted = true) {
-  v4_handle_cmd(mac, "peer-a", msgId, payload, encrypted);
+// The CMD payload v4_handle_cmd gets (1.0 step 9, E29): a credential block,
+// the command, then the NUL deferredCmdPayload adds.
+static void remoteCommandBlock(const uint8_t* mac, uint32_t msgId, uint8_t kind, const std::string& user,
+                               const std::string& password, const std::string& command, bool encrypted = true) {
+  uint8_t buf[600];
+  const size_t n = espnowcred::packCmd(buf, sizeof(buf) - 1, kind, reinterpret_cast<const uint8_t*>(user.data()),
+                                       user.size(), reinterpret_cast<const uint8_t*>(password.data()),
+                                       password.size(), command.data(), command.size());
+  if (n == 0) { std::printf("harness: credential block does not pack\n"); std::abort(); }
+  buf[n] = 0;
+  v4_handle_cmd(mac, "peer-a", msgId, buf, n, encrypted);
+}
+
+// The scenarios below name a login the way a person types one: "user:pass:cmd"
+// (split on the first two colons, as test text only), or "@BOND:<32 hex>:cmd"
+// for a bond token (kind 1, the 16 raw bytes).
+static void remoteCommand(const uint8_t* mac, uint32_t msgId, const std::string& text, bool encrypted = true) {
+  const size_t a = text.find(':');
+  const size_t b = text.find(':', a + 1);
+  if (text.compare(0, 6, "@BOND:") == 0) {
+    std::string token(16, '\0');
+    for (int i = 0; i < 16; ++i) token[i] = (char)std::strtoul(text.substr(6 + 2 * i, 2).c_str(), nullptr, 16);
+    remoteCommandBlock(mac, msgId, espnowcred::kKindBondToken, "", token, text.substr(b + 1), encrypted);
+    return;
+  }
+  remoteCommandBlock(mac, msgId, espnowcred::kKindAccount, text.substr(0, a), text.substr(a + 1, b - a - 1),
+                     text.substr(b + 1), encrypted);
 }
 
 static void userSync(uint32_t msgId, const std::string& json, bool encrypted = true) {
@@ -292,11 +312,14 @@ static void userSync(uint32_t msgId, const std::string& json, bool encrypted = t
   std::free(work);
 }
 
+// USER_SYNC's payload (1.0 step 9, E29): two credential blocks and the flags
+// byte (bit 0: an admin on the sender).
 static std::string syncJsonAs(const char* admin, const char* adminPass, const char* user,
                               const char* pass, const char* role = "user") {
-  return std::string("{\"recv_admin_user\":\"") + admin + "\",\"recv_admin_pass\":\"" + adminPass +
-         "\",\"target_user\":\"" + user + "\",\"target_pass\":\"" + pass + "\",\"role\":\"" +
-         role + "\"}";
+  uint8_t buf[600];
+  const uint8_t flags = std::strcmp(role, "user") != 0 ? espnowcred::kUserSyncFlagSourceAdmin : 0;
+  const size_t n = espnowcred::packUserSync(buf, sizeof(buf), admin, adminPass, user, pass, flags);
+  return std::string(reinterpret_cast<const char*>(buf), n);
 }
 static std::string syncJson(const char* adminPass, const char* user, const char* pass,
                             const char* role = "user") {
@@ -528,7 +551,36 @@ static void scenarioRemoteCredentialLength() {
   finish(name);
 }
 
+// 1.0 step 9 (E29): the credential block carries lengths, so a password with
+// ':' in it logs in (the pre-1.0 colon split read "a" as the password and
+// "b:c:status" as the command); an empty password is checked and refused like
+// any wrong one; a bond token is 16 raw bytes.
+static void scenarioCredentialBlock() {
+  const char* name = "remote command: the E29 credential block";
+  begin();
+  remoteCommandBlock(kPeerA, 1, espnowcred::kKindAccount, "colon", "a:b:c", "status");
+  check(accepted.size() == 1 && accepted[0].user == "colon" && accepted[0].command == "status", name,
+        "a password with ':' logs in and runs the whole command");
+  remoteCommandBlock(kPeerA, 2, espnowcred::kKindAccount, "colon", "a", "b:c:status");
+  check(accepted.size() == 1 && lastReply(2, false, kLoginFailed), name,
+        "the old split of the same text is a wrong password, not that account");
+  const int checks = passwordChecks;
+  remoteCommandBlock(kPeerA, 3, espnowcred::kKindAccount, "root", "", "status");
+  check(accepted.size() == 1 && lastReply(3, false, kLoginFailed) && passwordChecks == checks + 1, name,
+        "an empty password is checked and refused (Login failed), never taken as no login");
+  remoteCommandBlock(kPeerA, 4, espnowcred::kKindAccount, "root", "root-pass", "espnowsend peer: a:b");
+  check(accepted.size() == 2 && accepted[1].command == "espnowsend peer: a:b", name,
+        "a ':' in the command is part of the command");
+  std::string token(16, '\0');
+  token[5] = ':';
+  remoteCommandBlock(kPeerA, 5, espnowcred::kKindBondToken, "", token, "status");
+  check(accepted.size() == 3 && accepted[2].user == "bond-admin", name,
+        "a bond token with a ':' byte in it is the 16 raw bytes and runs under the bond identity");
+  finish(name);
+}
+
 int main() {
+  scenarioCredentialBlock();
   scenarioRemoteLockout();
   scenarioPlaintextAndBond();
   scenarioSyncAdminLockout();
