@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1043 commands across 61 modules (1043 registry entries).
+1042 commands across 61 modules (1042 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -16,7 +16,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`system`](#system) — 25 commands
 - [`versions`](#versions) — 1 commands
 - [`wifi`](#wifi) — 19 commands
-- [`espnow`](#espnow) — 119 commands
+- [`espnow`](#espnow) — 118 commands
 - [`catchup`](#catchup) — 2 commands
 - [`collect`](#collect) — 5 commands
 - [`c6`](#c6) — 9 commands
@@ -192,7 +192,6 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowbondmodeenabled` | A | EXPERIMENTAL in 1.0. Enable/disable bond mode: <0\|1><br/>`Usage: espnowbondmodeenabled <0\|1>` |
 | `espnowbondpeermac` | A | Set bond peer MAC address<br/>`Usage: espnowbondpeermac <AA:BB:CC:DD:EE:FF>` |
 | `espnowbroadcast` |  | Broadcast message: 'espnowbroadcast <message>'. (async send; delivery only, no reply)<br/>`Usage: espnowbroadcast <message> (single frame, <= 202 bytes while any enabled mesh has a passphrase, 218 otherwise; longer text is refused) Fails when the frame reached no peer. There is no per-device delivery count and no per-device reply.` |
-| `espnowbroadcaststats` |  | Show broadcast ACK tracking statistics. |
 | `espnowbrowse` | A | Browse a peer's files; user/pass are an account ON THE TARGET: 'espnowbrowse <target> <target-user> <target-pass> ["path"]'. (async - result via espnowmessages json)<br/>`Usage: espnowbrowse <target> <target-user> <target-pass> ["path"] [json] Credentials are verified ON THE TARGET device, not this one. Returns OK on delivery; the remote listing arrives later - read with 'espnowmessages json' (match the reqId).` |
 | `espnowchannel` | A | Get/set preferred ESP-NOW channel: 'espnowchannel [1-13\|auto\|resync]'. No arg shows a checker (actual vs expected). Set the SAME value on both devices to pair off-grid.<br/>`Usage: espnowchannel [<1..13>\|auto\|resync] (no arg) = show preference, actual radio channel, expected, and an OK/MISMATCH check. auto (0) = a worker follows its master's channel (hunting for it when silent); a master follows WiFi; offline fallback otherwise. 1-13 = force this channel when not joined to WiFi. resync = force the radio back onto the correct channel now (no setting change). Two devices only hear each other on the same channel — set both the same for field use.` |
 | `espnowdeviceinfo` |  | Show all local device metadata. |
@@ -225,7 +224,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 | `espnowmeshrelay` | A | Carry other nodes' mesh traffic: <0\|1><br/>`Usage: espnowmeshrelay <0\|1> 1 (default) = act as a relay so out-of-range peers can reach each other through this node. 0 = stop forwarding for others. This node still uses multi-hop for its OWN traffic (set espnowmeshttl 1 for that), and stops advertising routes so nobody sends via it.` |
 | `espnowmeshrole` | A | Get/set mesh role: 'espnowmeshrole [worker\|master\|backup]'.<br/>`Usage: espnowmeshrole [worker\|master\|backup]` |
 | `espnowmeshroutes` |  | Show the mesh route table: who this node can reach and via which neighbour.<br/>`Usage: espnowmeshroutes [clear] 'via (direct)' = in radio range. Anything else is reached over one or more relay hops. Multi-hop routes are learned from neighbours every 30s — allow a minute after boot.` |
-| `espnowmeshstatus` |  | Show mesh peer health (heartbeats & ACKs). |
+| `espnowmeshstatus` |  | Show mesh peer health: state (online/connecting/offline), two-way link, heartbeats. |
 | `espnowmeshtime` | A | Mesh time on/off: the master sends its clock, devices that name it as their master take it when they have no better source: 'espnowmeshtime [on\|off]'.<br/>`Usage: espnowmeshtime [on\|off]` |
 | `espnowmeshtopo` |  | Discover mesh topology (run on the master; role not enforced). (async - read results with espnowtoporesults) |
 | `espnowmeshttl` |  | Get/set the multi-hop budget: 'espnowmeshttl [1-10]'.<br/>`Usage: espnowmeshttl [<1..10>] How many hops this node's relay-eligible frames may travel. 1 = single hop (no multi-hop). Applies to broadcast text/time sync and to routed unicast; heartbeats and pairing are always single-hop.` |

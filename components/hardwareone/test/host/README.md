@@ -4451,7 +4451,7 @@ SENSOR_ENVELOPE / BOND_SENSOR_DATA, CMD_RESP, FILE_DATA, FS_LIST_REPLY and the t
 in data or fixed-stride entries, never grow: the rules block and `docs/COMPATIBILITY.md` name them, each of their
 structs is marked "Fixed header: cannot grow", and every `ctx.tail()` read starts after one of them. The limits that
 follow from the 16-byte group tag (the signed-frame fit on send, the flood size check, the relay wrap, the
-PEER_LIST receive limit, the signed BOOT limit) compare against the named constants, never a written-out number.
+PEER_LIST receive limit) compare against the named constants, never a written-out number.
 Reserved bytes are sent as 0: no sender fills a wire struct field by field without declaring it `= {}`, and the
 shared builders (`v4FillHeartbeat`, `buildMetadataPayload`, `buildCapabilitySummary`, `buildLocalBondStatus`)
 clear the struct first. It takes `--cxx` and `--component <directory>`; the base tree at 4c8f7627 fails it.
@@ -4549,7 +4549,7 @@ the number and the bond master sends it. W5: `espnow_wire_layout` (check_earmark
 
 ## ESP-NOW dispatch policy
 
-`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. Opcode 130 (SUBSCRIBE_UPDATE, retired in ESP-NOW 1.0) has no row. TIME_SYNC, SENSOR_STATUS, SENSOR_REQ and SENSOR_ENVELOPE need one too, on a keyed and a keyless device, with no bond partner required; a signed broadcast is not enough for them. Once the device has a mesh passphrase, TEXT and BOOT need an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event, and BOOT stays a system notice. The retired opcode 150 has no row. USER_SYNC requires a session-sealed frame (F9): a plaintext or group-signed one from a paired peer reaches no handler, a session-sealed one does. Every zero-flag row is on an explicit allow-list (handshakes, TOPO_*); this is a subset check, so later items may only shrink the list (`V4_OPC_LEN_EXACT` is not a policy flag). The length column: every row has a minimum length equal to the 1.0 value in the driver's `EXPECTED_MINLEN` (these never rise), `V4_OPC_LEN_EXACT` is on exactly the six handshake rows, and for every row, with all its policy gates passed, one byte short is dropped before the handler and counted once in `gEspNowRxLenDrops`, the minimum passes, and a longer frame reaches the handler with its length intact (a handshake frame one byte long is dropped). An empty STREAM is dropped and counted (1.0 removed the empty STREAM_BEGIN / STREAM_END markers); a 24-byte SUBSCRIBE_UPDATE with reserved bytes set reaches the subscription store through the real handler, and a 20-byte SESSION_UNKNOWN reaches its rule. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
+`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. Opcodes 130 (SUBSCRIBE_UPDATE) and 31 (BOOT, step 8), retired in ESP-NOW 1.0, have no row. TIME_SYNC, SENSOR_STATUS, SENSOR_REQ and SENSOR_ENVELOPE need one too, on a keyed and a keyless device, with no bond partner required; a signed broadcast is not enough for them. Once the device has a mesh passphrase, TEXT needs an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event. The retired opcode 150 has no row. USER_SYNC requires a session-sealed frame (F9): a plaintext or group-signed one from a paired peer reaches no handler, a session-sealed one does. Every zero-flag row is on an explicit allow-list (handshakes, TOPO_*); this is a subset check, so later items may only shrink the list (`V4_OPC_LEN_EXACT` is not a policy flag). The length column: every row has a minimum length equal to the 1.0 value in the driver's `EXPECTED_MINLEN` (these never rise), `V4_OPC_LEN_EXACT` is on exactly the six handshake rows, and for every row, with all its policy gates passed, one byte short is dropped before the handler and counted once in `gEspNowRxLenDrops`, the minimum passes, and a longer frame reaches the handler with its length intact (a handshake frame one byte long is dropped). An empty STREAM is dropped and counted (1.0 removed the empty STREAM_BEGIN / STREAM_END markers); a 24-byte SUBSCRIBE_UPDATE with reserved bytes set reaches the subscription store through the real handler, and a 20-byte SESSION_UNKNOWN reaches its rule. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
 
 ## ESP-NOW fragment reassembly
 
@@ -4675,6 +4675,57 @@ P1, I6, I7, S1b): a passphrase change closes the mesh's sessions and says who re
 disables the mesh and drops its id on every slot (the default mesh only after another is the default); a cached
 key without `kdf` record 1 is not used. `espnow_wire_layout` and `espnow_dispatch_policy` pin the new sizes and
 minimum lengths (KEY_EX_CONFIRM 34, SESSION_OPEN 154, SESSION_CONFIRM 162 = the relay budget, SESSION_REKEY 146).
+
+## ESP-NOW two-way liveness (1.0 step 8, RC3)
+
+DESIGN section 4: a peer is online only when it was heard within 30 s, proved it hears this device (two-way)
+and a session is up; heard only is connecting. Rules: `System_ESPNow_LinkCore.h` (with `MeshLink` and the state
+mapping in `System_ESPNow_PeerStateCore.h`).
+
+`espnow_link_core_tests` compiles both production headers: L1-L4 the link definition (none after 30 s silence,
+one-way when heard, two-way after two distinct evidences in 30 s and kept with one, the same id counted once,
+id 0 never, three slots with the oldest given up, every window across the millis() wrap); L5 the heartbeat echo
+memory (last two heartbeats sent within 30 s, the echo and RSSI for the next heartbeat, 0 after 30 s); L6 the
+record of direct ACK_REQ sends (fragments one entry, a ring of 8, msgId 0 never); L7 the back-off (0 below 30 s,
+10 s after, also after an hour); L8 the event rate limit (no offline before an online, one per 30 s, a change
+undone inside the window posts nothing, the state at the window's end is posted); L9 the state from the link;
+L10-L12 a two-board simulation at 1 s steps with a 5 s heartbeat tick: both ways online within 16 s with one
+online event each; **the one-way case** (B cannot hear A) for 10 minutes: A shows B connecting (one-way) and B
+shows A offline the whole time, no link change and no event, A hears B at least every 10 s, B backs off to 10 s,
+one lost heartbeat of B's stream keeps A's view; a link flapping every 5 s for 10 minutes posts events at least
+30 s apart. Built against the pre-1.0 back-off (30 s after 5 minutes) L11 fails 7 checks.
+
+`espnow_channel_follow_tests` F30 is channel-follow bench check B8: a master that never hears its worker sends
+its heartbeats with the production back-off; with the 10 s ceiling the worker starts no sweep in 10 minutes,
+with the pre-1.0 back-off it hunted (both checked, also across the wrap).
+
+`espnow_rx_frontend` (extended) runs the real `v4h_heartbeat`, `meshLinkOnHeartbeat` and `v4_rx_ack` with the
+production link and restart headers: a sealed heartbeat echoing one of our heartbeats is two-way evidence and a
+second distinct one makes the link two-way; a tagged echo, an echo of an id never sent, echo 0 and an echo of a
+heartbeat sent 30 s ago are not; a sealed direct ACK for one of our direct sends is evidence (busy too), one for a
+frame not sent direct, a tagged ACK and a relayed sealed ACK are not (the relayed one does not refresh the heard
+clock either); the boot counter: the first sealed counter is recorded without a restart record, a replayed
+old-boot or same-boot tagged heartbeat closes nothing and files nothing, one naming the peer from another radio
+asks nothing, a newer one closes the stale session once and files one restart, a sealed newer one files and
+closes nothing, the first tagged counter after this device's start closes the stale session but files no
+restart. Source checks: the periodic heartbeat asks no ACK and is sealed when the session is up, the broadcast
+ACK tracking and `espnowbroadcaststats` are gone, the router takes adverts only from a two-way neighbour and
+`neighbourAlive` and `v4_radio_emit` go direct only on a two-way link.
+
+`espnow_peer_state_surfaces` (extended): a one-way peer with a session is connecting and not counted online
+(MESH metric, Home Assistant availability). `oled_espnow_remote_actions`, `g2_espnow_peer_rows` and
+`espnow_group_membership` read the link through `meshPeerLinkOf` doubles; `espnow_wire_layout` pins HEARTBEAT at
+56 bytes and opcode 31 retired; `espnow_dispatch_policy` the HEARTBEAT minimum 56 and no BOOT row;
+`espnow_handshake_backoff` that hearing a peer again (not the online event) ends its back-off; `espnow_page_render`
+a one-way mesh row showing Connecting with its link; `command_name_form` the retired name `espnowbroadcaststats`.
+
+```sh
+ctest --test-dir <build> -R 'espnow_(link_core_tests|channel_follow_tests|rx_frontend|peer_restart_tests|peer_state_surfaces|system_notice|wire_layout|dispatch_policy)' --output-on-failure
+```
+
+Not covered (device only): the sealed heartbeat through the TX dispatcher, the per-peer fan-out and back-off
+glue (`meshSendHeartbeats`), the event tick in `processMeshHeartbeats` (its rules are tested), the meshstatus JSON
+fields and three or more boards (relay paths).
 
 ## ESP-NOW files: the Q26 transfer layout (1.0 step 7)
 
@@ -7789,13 +7840,13 @@ notice, and only a successful start (or one whose cleanup is pending) keeps it; 
 size the arrays were allocated with; `openespnow` does not say "Error:" twice. 18 of its 48 checks fail on the tree
 before the fix. The round-4 cases fail 8 of its 30 compiled checks (7 of 26 without bonded mode) on 3c5dda31.
 
-`espnow_system_notice` runs the production text-queue drain, `formatEspNowSystemNotice` and
-`buildBootNotification` with the vendored ArduinoJson: a BOOT notice prints `[ESP-NOW] <name> is online
-(boot #N)` and is stored as one readable `MSG_SYSTEM_EVENT` record with no group id; the name is the one
-resolved from the authenticated origin, never the notice's "src"; malformed, unterminated and other
-system events get a neutral line; chat is unchanged; source checks keep the notice built from the
-device-name setting and no copy of the name in `EspNowState`. 19 of its 25 checks fail on the tree before
-the fix.
+`espnow_system_notice` (rewritten in ESP-NOW 1.0 step 8, when the BOOT frame went) runs the production
+`espnowFilePeerRestart` and the text-queue drain: a peer's restart prints `[ESP-NOW] <name> is online
+(boot #N)` and is stored as one attributed `MSG_SYSTEM_EVENT` record `Online (boot #N)` with no group id
+(sealed marks it encrypted; no registry name gives the MAC text; a long name is cut); chat is unchanged and
+the drain parses nothing. Source checks: no copy of the name in `EspNowState`, `v4h_text` files every frame
+as chat, `v4h_heartbeat` files a restart only for a known counter that moved forward, and nothing names
+the BOOT frame, its JSON notice or its formatter.
 
 `espnow_bond_partner_change` runs the production `bondconnect`, `bonddisconnect`, `espnowbondmodeenabled`,
 `espnowbondpeermac`, the bond frame hold, `isBondPeerMac`, `resetBondSync`, the worker's capability request and the
@@ -7854,13 +7905,13 @@ Bench 2026-11-18: the P4 restarted while the XIAO still held its session with it
 SESSION_FRAME" into a session the P4 no longer had and were lost, the XIAO noticed only after two send timeouts
 (~10 s), and then lost 6 s more to a SESSION_OPEN glare. Rules: `System_ESPNow_PeerRestartCore.h`.
 
-`espnow_peer_restart_tests` compiles that production dependency-free header: a BOOT notice with a newer counter (or
-the first one this device sees) closes a live session; the same counter, an older one (never recorded: two captured
+`espnow_peer_restart_tests` compiles that production dependency-free header: a group-tagged heartbeat whose boot
+counter is newer (or the first one this device sees; the BOOT notice until ESP-NOW 1.0 step 8) closes a live session; the same counter, an older one (never recorded: two captured
 notices of different starts played in turn close nothing), 0 or no counter, no session or a session younger than 2 s
 close nothing; a counter from a sealed frame (bond heartbeat) becomes the reference outright, so a peer whose count
 was erased is recognised again; copies (same or older counter) are not filed; counters compare as a signed 32-bit
-difference across the wrap; only a group tag of the peer's own mesh counts; the notice is sealed to a peer this
-device still holds a live session with; forged notices with ever newer counters close at most once per peer per
+difference across the wrap; only a group tag of the peer's own mesh counts; only a known counter that moved forward
+is reported as a restart (`restartSeen`, the "Online (boot #N)" record); forged heartbeats with ever newer counters close at most once per peer per
 10 s, a limit the SESSION_UNKNOWN hint shares; the device without the session answers at most one hint per peer per
 second and none for its own handshake or a replaced session; a hint closes only the live session it names, for a
 sequence this device sealed in it; the 16-entry table gives up the entry used longest ago; the times survive the
@@ -7868,10 +7919,9 @@ millis() wrap.
 
 `espnow_rx_frontend` (extended) checks that a sealed frame for a session this device does not hold ACTIVE is not
 opened, acknowledged or handed on, and asks the hint rule once per frame, and that a frame under the live session
-asks nothing. `espnow_dispatch_policy` (extended) runs the real BOOT handler (`v4h_boot`): a group-signed notice from
-the peer itself under its mesh's tag asks the session rule once and is filed, unless the rule calls it a copy; one
-sealed in the session only records the counter; a plaintext one (keyed or keyless), one under another mesh's tag or
-one whose origin is not the radio sender asks nothing. It also runs the real SESSION_UNKNOWN handler: only a
+asks nothing; since step 8 it also runs the heartbeat's boot counter through the real rules (see the step 8
+section). `espnow_dispatch_policy` (extended) checks that opcode 31 (BOOT, retired in step 8) has no row and runs the
+real SESSION_UNKNOWN handler: only a
 group-signed hint from the paired peer itself under its mesh's tag reaches the hint rule. `espnow_session_rekey` (extended, C12, C20, C21) runs the
 glare change in the production handlers: the A side keeps its SESSION_OPEN and sends it once more, byte for byte,
 when the peer's OPEN arrives; a peer that missed the first copy yields to the second and one session stands at once
@@ -7890,8 +7940,8 @@ ctest --test-dir <build> -R 'espnow_(peer_restart_tests|rx_frontend|dispatch_pol
 ```
 
 Not covered: the radio and the session close and hint send glue in `System_ESPNow_Sessions.cpp`
-(`sessionPeerBootNotice`, `sessionUnknownFrameSeen`, `sessionUnknownHintReceived`, `sessionLiveWithPeer`) and the
-per-peer choice in `meshSendBootToPeers`, which run on the device only (the rules they call are tested).
+(`sessionPeerBootCounter`, `sessionPeerBootSeen`, `sessionUnknownFrameSeen`, `sessionUnknownHintReceived`), which
+run on the device only (the rules they call are tested).
 
 ## Bond agreement (BOND_REQUEST / BOND_NOTICE)
 
