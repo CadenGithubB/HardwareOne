@@ -48,8 +48,6 @@ static std::atomic<bool> sLearnRequest{false};
 // The teach step's result for the main loop and the waiting command: the
 // mount code learned (-1 none) and a count of finished teach steps.
 static std::atomic<int> sLearnedMount{-1};
-static std::atomic<uint32_t> sLearnSeq{0};
-static std::atomic<bool> sLearnTimedOut{false};
 
 // ---- What a command reads ---------------------------------------------------
 // Written by the hook, copied by readers: a version counter that is odd while
@@ -75,6 +73,8 @@ struct ImuInputStatus {
   bool dropFace;
   uint8_t dropWhy;
   bool learning;        // the teach step is waiting for a lean
+  bool learnOffered;    // after a calibration: a face tap would start it
+  uint8_t lastLearn;    // how the last teach step ended (kLastLearn*)
 };
 EXT_RAM_BSS_ATTR static ImuInputStatus sStatus;
 static std::atomic<uint32_t> sStatusVersion{0};
@@ -105,7 +105,10 @@ static imuinput::Config configFromSettings() {
   const input_rotation::Mount mount = input_rotation::mountFromCode(gSettings.imuInputMount);
   cfg.mountTurns = static_cast<uint8_t>(mount.quarterTurns);
   cfg.mountMirror = mount.mirror;
-  cfg.learnAfterCalibration = true;  // owner, 2026-11-23: offered after every calibration
+  // Offered after every calibration (owner, 2026-11-23): a face tap within a
+  // few seconds arms the teach step. "Only while the mount is still 0" would
+  // be: cfg.learnAfterCalibration = gSettings.imuInputMount == 0;
+  cfg.learnAfterCalibration = true;
   cfg.shakeCalibrate = gSettings.imuInputShakeCalibrate;
   return cfg;
 }
@@ -151,11 +154,26 @@ static void showCalibration(uint8_t event, uint8_t secondsLeft) {
 #endif
 }
 
-// The teach step's prompts, in the calibration's toast.
+// How the last teach step ended (imuinputread's lastLearn).
+enum : uint8_t { kLastLearnNone = 0, kLastLearnLearned, kLastLearnTimeout, kLastLearnCancelled };
+static const char* lastLearnWord(uint8_t v) {
+  switch (v) {
+    case kLastLearnLearned: return "learned";
+    case kLastLearnTimeout: return "timeout";
+    case kLastLearnCancelled: return "cancelled";
+    default: return "none";
+  }
+}
+
+// The teach step's prompts and outcome, in the calibration's toast.
 static void showLearn(uint8_t event, int code) {
   char text[64];
   uint32_t ms = 3000;
   switch (event) {
+    case imuinput::kLearnOffered:
+      snprintf(text, sizeof(text), "Tap the face to teach which way is up");
+      ms = imuinput::kLearnOfferMs;
+      break;
     case imuinput::kLearnStarted:
       snprintf(text, sizeof(text), "Tilt the sign toward the top of the screen");
       ms = imuinput::kLearnTimeoutMs;
@@ -163,14 +181,22 @@ static void showLearn(uint8_t event, int code) {
     case imuinput::kLearnDone:
       snprintf(text, sizeof(text), "Tilt learned: mount %s", input_rotation::mountName(code));
       break;
+    case imuinput::kLearnTimedOut:
+      snprintf(text, sizeof(text), "No tilt: mount unchanged");
+      break;
+    case imuinput::kLearnCancelled:
+      snprintf(text, sizeof(text), "Teach step cancelled: mount unchanged");
+      break;
     default:
-      return;  // a timeout ends quietly (the prompt runs out on its own)
+      return;
   }
   INFO_INPUT_LIFECYCLEF("[IMU input] %s", text);
 #if ENABLE_OLED_DISPLAY
   constexpr uint32_t kCalToastTag = 0x494D5543u;  // "IMUC", the calibration's toast
   oledToastUpdate(kCalToastTag, text, ms,
-                  event == imuinput::kLearnDone ? OledUiIcon::SUCCESS : OledUiIcon::INFO);
+                  event == imuinput::kLearnDone        ? OledUiIcon::SUCCESS
+                  : event == imuinput::kLearnTimedOut || event == imuinput::kLearnCancelled ? OledUiIcon::WARNING
+                                                                                            : OledUiIcon::INFO);
 #endif
 }
 
@@ -231,6 +257,7 @@ static void imuInputHook(const MotionHookSample& sample, void*) {
   status.dropFace = sEngine.lastDropFace();
   status.dropWhy = sEngine.lastDrop();
   status.learning = sEngine.learning();
+  status.learnOffered = sEngine.learnOffered();
   if (out.calEvent != imuinput::kCalNone) showCalibration(out.calEvent, out.calSecondsLeft);
   const uint8_t learnEvent = learnStart.learnEvent ? learnStart.learnEvent : out.learnEvent;
   if (learnEvent == imuinput::kLearnDone) {
@@ -241,13 +268,11 @@ static void imuInputHook(const MotionHookSample& sample, void*) {
                                                         inputScreenQuarterTurns());
     const int code = input_rotation::mountCode(turns * 90, mirror);
     sLearnedMount.store(code);
-    sLearnTimedOut.store(false);
-    sLearnSeq.fetch_add(1);
+    status.lastLearn = kLastLearnLearned;
     showLearn(learnEvent, code);
-  } else if (learnEvent == imuinput::kLearnTimedOut) {
-    sLearnTimedOut.store(true);
-    sLearnSeq.fetch_add(1);
-  } else if (learnEvent == imuinput::kLearnStarted) {
+  } else if (learnEvent != imuinput::kLearnNone) {
+    if (learnEvent == imuinput::kLearnTimedOut) status.lastLearn = kLastLearnTimeout;
+    if (learnEvent == imuinput::kLearnCancelled) status.lastLearn = kLastLearnCancelled;
     showLearn(learnEvent, 0);
   }
   status.leanX = sEngine.leanX();
@@ -396,7 +421,7 @@ const char* cmd_imuinputread(const String& argsInput) {
     snprintf(getDebugBuffer(), 1024,
              "{\"schema\":1,\"state\":\"%s\",\"running\":%s,\"connected\":%s,\"x\":%d,\"y\":%d,\"buttons\":%u,"
              "\"leanX\":%.1f,\"leanY\":%.1f,\"taps\":%u,\"shaking\":%s,\"presses\":%lu,\"recentres\":%lu,"
-             "\"lastPress\":%u,\"lastTaps\":%u,\"drops\":%lu,\"lastDrop\":{\"taps\":%u,\"hit\":\"%s\",\"why\":\"%s\"},\"tapWindowMs\":%d,\"tiltDeg\":%d,\"shakeCalibrate\":%s,\"mount\":%d,\"mirror\":%s,\"learning\":%s}",
+             "\"lastPress\":%u,\"lastTaps\":%u,\"drops\":%lu,\"lastDrop\":{\"taps\":%u,\"hit\":\"%s\",\"why\":\"%s\"},\"tapWindowMs\":%d,\"tiltDeg\":%d,\"shakeCalibrate\":%s,\"mount\":%d,\"mirror\":%s,\"learning\":%s,\"learnOffered\":%s,\"lastLearn\":\"%s\"}",
              state, gInputRunning ? "true" : "false", gInputConnected ? "true" : "false", x, y,
              static_cast<unsigned>(live ? s.held : 0), static_cast<double>(live ? s.leanX : 0.0f),
              static_cast<double>(live ? s.leanY : 0.0f), static_cast<unsigned>(live ? s.tapCount : 0),
@@ -407,7 +432,7 @@ const char* cmd_imuinputread(const String& argsInput) {
              gSettings.imuInputTapWindowMs, gSettings.imuInputTiltDeg,
              gSettings.imuInputShakeCalibrate ? "true" : "false", input_rotation::mountDegrees(gSettings.imuInputMount),
              input_rotation::mountFromCode(gSettings.imuInputMount).mirror ? "true" : "false",
-             s.learning ? "true" : "false");
+             s.learning ? "true" : "false", s.learnOffered ? "true" : "false", lastLearnWord(s.lastLearn));
     return getDebugBuffer();
   }
   if (!gInputRunning) return "Error: IMU input is not running. Start it with 'openinput'.";
@@ -548,9 +573,11 @@ void imuInputTick() {
   if (code >= 0) setSetting(gSettings.imuInputMount, code);
 }
 
-// imuinputlearn: the teach step. Tilt the sign toward the top of the screen
-// within 10 s; the lean's axis and sign set imuinputmount (keeping its
-// mirror). Waits for the answer; no lean leaves the mount as it was.
+// imuinputlearn: the teach step. Answers at once; the user then tilts the
+// sign toward the top of the screen within 10 s and the lean sets
+// imuinputmount (keeping its mirror). The outcome is on the screen (the toast)
+// and in imuinputread (learning, lastLearn, mount); no lean, a shake or a
+// calibration leaves the mount as it was.
 const char* cmd_imuinputlearn(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String text = argsInput;
@@ -558,21 +585,9 @@ const char* cmd_imuinputlearn(const String& argsInput) {
   if (text.length() > 0) return "Error: invalid arguments — Usage: imuinputlearn";
   if (!gInputRunning) return "Error: IMU input is not running. Start it with 'openinput'.";
   if (!gInputConnected) return "Error: No samples are arriving from the IMU. Check 'imustatus'.";
-  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
-  const uint32_t seq = sLearnSeq.load();
   sLearnRequest.store(true);
-  const uint32_t start = millis();
-  while (sLearnSeq.load() == seq && (uint32_t)(millis() - start) < imuinput::kLearnTimeoutMs + 1000) {
-    vTaskDelay(pdMS_TO_TICKS(50));
-  }
-  if (sLearnSeq.load() == seq || sLearnTimedOut.load()) {
-    return "[IMU input] No tilt within 10 s: the mount is unchanged. Run imuinputlearn and tilt the sign "
-           "toward the top of the screen.";
-  }
-  imuInputTick();  // save it now, so the reply states what is in use
-  snprintf(getDebugBuffer(), 1024, "[IMU input] Tilt learned: mount %s",
-           input_rotation::mountName(gSettings.imuInputMount));
-  return getDebugBuffer();
+  return "[IMU input] Tilt the device toward the top of the screen now (10 s). The result shows on the screen "
+         "and in 'imuinputread' (lastLearn, mount).";
 }
 
 // The open/close/autostart commands are the input module's (HAL_Input.cpp).

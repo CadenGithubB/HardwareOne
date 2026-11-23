@@ -205,9 +205,11 @@ their own use the same narrower rows, wrapped where a line is long.
 Navigation turns with the screen: up on the joystick, the IMU tilt and the ANO ring is up on the
 screen as you see it, at every rotation (the ANO wheel keeps its direction). How the input device
 itself sits against the screen is a separate setting, applied first: `imuinputmount` and `anomount`
-take `0|90|180|270` and an optional `mirror`. `imuinputlearn` teaches the IMU's: tilt the sign
-toward the top of the screen within 10 s and the lean sets the mount; the same step is offered
-after a shake calibration and ends quietly when nothing tilts.
+take `0|90|180|270` and an optional `mirror`. `imuinputlearn` teaches the IMU's: it answers at
+once, then tilt the sign toward the top of the screen within 10 s and the lean sets the mount (the
+screen confirms it; `imuinputread` shows `lastLearn` and the mount). After a shake calibration the
+step is offered ("Tap the face to teach which way is up"): a face tap within about 4 s starts it,
+anything else leaves the mount alone and the menus work at once.
 
 ---
 

@@ -93,6 +93,7 @@ struct AnoPollState {
   uint32_t navMasked = 0; // held buttons hidden from the level until released:
                           // the chord's IN, and a raced tap's press (below)
   uint32_t tappedLast = 0; // the buttons counted as taps at the last good read
+  int mapping = 0;        // mount and screen turns the buttons were read with (+1)
 };
 
 struct AnoPollResult {
@@ -156,6 +157,18 @@ inline AnoPollResult anoPoll(AnoPollState& state, const AnoPollReads& reads, inp
   out.buttonsValid = true;
   const uint32_t now = anoPinsToButtons(~reads.bulk & kAnoPinMask, mount, screenQuarterTurns);
   const uint32_t flagged = anoPinsToButtons(reads.intFlags & kAnoPinMask, mount, screenQuarterTurns);
+  // The mount or the screen turned since the last read: a button held across
+  // it now reads as another one. Take this read as the new starting point (no
+  // edges from it), so a held button makes no press of its new direction.
+  const int mapping = 1 + ((mount.quarterTurns + screenQuarterTurns) & 3) + (mount.mirror ? 4 : 0);
+  if (state.mapping != 0 && state.mapping != mapping) {
+    state.buttons = now;
+    state.tappedLast = 0;
+    state.navMasked &= now;
+    state.rightDown = (now & ANO_BTN_RIGHT) != 0;
+    state.chorded = state.rightDown;  // a RIGHT held across the turn owes no SELECT
+  }
+  state.mapping = mapping;
   const uint32_t prev = state.buttons;
   // Held now after a tap at the last read, with no change since: that tap's
   // own press, already counted.

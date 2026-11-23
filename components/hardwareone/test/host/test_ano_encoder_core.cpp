@@ -76,6 +76,13 @@ void testPinsAndSwaps() {
   assert(anoPoll(t, reads(0, ANO_BTN_RIGHT), Mount{0, false}, 3).edges == ANO_BTN_DOWN);
   AnoPollState u;
   assert(anoPoll(u, reads(0, ANO_BTN_UP), Mount{0, false}, 3).edges == ANO_VIRT_SELECT);
+  // A button held across a turn of the screen makes no press of its new
+  // direction; let go and pressed again, it is the new direction's press.
+  AnoPollState h;
+  assert(anoPoll(h, reads(ANO_BTN_UP, ANO_BTN_UP), Mount{0, false}, 0).edges == ANO_BTN_UP);
+  assert(anoPoll(h, reads(ANO_BTN_UP), Mount{0, false}, 1).edges == 0);
+  assert(anoPoll(h, reads(0, ANO_BTN_UP), Mount{0, false}, 1).edges == 0);
+  assert(anoPoll(h, reads(ANO_BTN_UP, ANO_BTN_UP), Mount{0, false}, 1).edges == ANO_BTN_LEFT);
 }
 
 void testAddressRule() {

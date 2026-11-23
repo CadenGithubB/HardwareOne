@@ -388,8 +388,8 @@ static constexpr CommandModule gCommandModules[] = {
     "and returning releases it; a lean of more than 60 degrees is taken as a new pose and centres the joystick until the "
     "next re-centre. imuinputmount [0|90|180|270] [mirror] fits the directions to how the sensor sits against the "
     "screen (the screen's own rotation, oledrotation, is applied after it); imuinputlearn teaches it: tilt the sign "
-    "toward the top of the screen within 10 s and the lean sets the mount. A sustained shake calibrates the tilt (imuinputshake [on|off]): set the device down the way it will be used and hold it still for 3 s, and that pose is the new centre (imuinputzero takes it at once); the teach step is offered right after "
-    "(it ends quietly when nothing tilts). "
+    "toward the top of the screen within 10 s and the lean sets the mount. A sustained shake calibrates the tilt (imuinputshake [on|off]): set the device down the way it will be used and hold it still for 3 s, and that pose is the new centre (imuinputzero takes it at once); the teach step is then offered: "
+    "a face tap within 4 s starts it, anything else leaves the mount alone. "
     "imuinputread [json] shows the state, the lean in degrees, the joystick and the taps being counted. The "
     "open/close/autostart lifecycle lives under the input module: openinput also opens the IMU and holds it open "
     "(closeimu refuses while the input runs), closeinput leaves the IMU open.", imuInputCommands, &imuInputCommandsCount, CMD_MODULE_SENSOR, []() { return gInputConnected; } },

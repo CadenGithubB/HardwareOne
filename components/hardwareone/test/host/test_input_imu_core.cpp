@@ -435,17 +435,57 @@ static void testLearnMount() {
   idle.flatLean(20, 0);
   idle.run(200);
   assert(idle.last.joyX > kJoyCentre);
-  // Offered after a calibration only when the caller asks for it.
-  Rig cal;
-  cal.cfg.learnAfterCalibration = true;
-  cal.start();
-  for (int i = 0; i < 40; ++i) cal.step(false, (i % 2) ? 14.0f : -14.0f);
-  bool started = false;
-  for (int i = 0; i < 300 && !started; ++i) {
-    cal.step();
-    started = cal.last.learnEvent == kLearnStarted;
+  // After a calibration the step is only offered (when the caller asks for
+  // it): the joystick works at once, a side tap is still a button, the offer
+  // lapses quietly, and only a face tap in the window arms the step.
+  auto calibrated = [](Rig& r) {
+    r.cfg.learnAfterCalibration = true;
+    r.start();
+    for (int i = 0; i < 40; ++i) r.step(false, (i % 2) ? 14.0f : -14.0f);
+    bool offered = false;
+    for (int i = 0; i < 300 && !offered; ++i) {
+      r.step();
+      offered = r.last.learnEvent == kLearnOffered;
+    }
+    assert(offered && r.engine.learnOffered() && !r.engine.learning() && r.calEvents[kCalDone] == 1);
+  };
+  Rig lean;
+  calibrated(lean);
+  lean.flatLean(20, 0);
+  lean.run(200);
+  assert(lean.last.joyX > kJoyCentre && !lean.engine.learning());  // no re-mount, navigation at once
+  Rig side;
+  calibrated(side);
+  side.take();
+  side.tap();
+  side.run(400);
+  assert(side.take() == kButtonA && !side.engine.learning());
+  Rig lapse;
+  calibrated(lapse);
+  bool any = false;
+  for (uint32_t t = 0; t < kLearnOfferMs + 400; t += 20) {
+    lapse.step();
+    any |= lapse.last.learnEvent != kLearnNone;
   }
-  assert(started && cal.engine.learning() && cal.calEvents[kCalDone] == 1);
+  assert(!any && !lapse.engine.learnOffered() && !lapse.engine.learning());
+  Rig face;
+  calibrated(face);
+  face.take();
+  face.kind = kTapFace;
+  face.step(true, 15.0f);
+  bool started = false;
+  for (int i = 0; i < 40 && !started; ++i) {
+    face.step();
+    started = face.last.learnEvent == kLearnStarted;
+  }
+  assert(started && face.engine.learning() && face.take() == 0);
+  // A shake ends a running step, and says so.
+  bool cancelled = false;
+  for (int i = 0; i < 40; ++i) {
+    face.step(false, (i % 2) ? 14.0f : -14.0f);
+    cancelled |= face.last.learnEvent == kLearnCancelled;
+  }
+  assert(cancelled && !face.engine.learning());
 }
 
 static void testTapDoesNotMoveTheJoystick() {

@@ -43,10 +43,11 @@ Built and host-tested; not yet run on a device.
   `imuinputinverty`, `anoencoderinvert`, `anoencoderswapud` and `anoencoderswaplr` (both ANO swaps
   are `anomount 180`, the default; one swap is a mirror, which also turns the wheel the other way).
   `imuinputread json` and `anoencoderstatus json` show `mount` and `mirror` in place of the flags.
-- **`imuinputlearn`**: tilt the sign toward the top of the screen within 10 s and the lean sets
-  `imuinputmount` (keeping its mirror), confirmed on the screen and in the reply. The same step is
-  offered after a shake calibration ("Tilt the sign toward the top of the screen") and ends quietly
-  when nothing tilts.
+- **`imuinputlearn`**: answers at once; tilt the sign toward the top of the screen within 10 s and
+  the lean sets `imuinputmount` (keeping its mirror), confirmed on the screen and shown by
+  `imuinputread` (`lastLearn`, `mount`). After a shake calibration the step is offered ("Tap the
+  face to teach which way is up"): only a face tap within about 4 s starts it; otherwise nothing
+  changes and the menus work at once. A shake or a calibration cancels a running step.
 
 ### Removed (ESP-NOW 1.0 clean-out)
 Host-tested and built; not run on a device.

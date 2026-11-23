@@ -64,7 +64,12 @@ header (`OLED_HeaderCore.h`'s tall profile: fixed status slots, title cut,
 the rule on y19; the keyboard profile's page in the Power slot).
 `input_imu_core_tests` checks the 8 IMU mounts on the tilt and the teach step
 (each mount and screen rotation learned from one lean; no lean is a quiet
-timeout; offered after a calibration only when asked). `ano_encoder_core_tests`
+timeout; after a calibration only an offer: the stick works at once, a side tap
+stays a button, the offer lapses quietly, a face tap starts the step, and a
+shake cancels it with an event). `ano_encoder_core_tests` also checks that a
+button held across a turn makes no press of its new direction, and
+`test_oled_layout.py` that a list set up in portrait gets the landscape rows
+after a turn back (selection kept in view). `ano_encoder_core_tests`
 checks the ANO mount (180 = both old swaps, mirror = the LEFT/RIGHT swap and a
 reversed wheel) and that the ring's roles follow the turned screen.
 The harnesses that splice shipping screens draw the landscape canvas: their
