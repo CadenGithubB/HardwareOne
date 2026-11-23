@@ -94,7 +94,7 @@ struct Node{bool directory;size_t size;std::vector<std::string> children;};
 static std::map<std::string,Node> nodes={
     {"/",{true,0,{"/stt","/hello.txt"}}}, {"/sd",{true,0,{"/stt"}}},
     {"/stt",{true,0,{"/stt/u2"}}}, {"/stt/u2",{true,0,{"/stt/u2/secret.txt"}}},
-    {"/stt/u2/secret.txt",{false,900,{}}}, {"/hello.txt",{false,42,{}}},
+    {"/stt/u2/secret.txt",{false,900,{}}}, {"/hello.txt",{false,42,{}}}, {"/nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn.txt",{false,5,{}}},
     {"/ordinary",{true,0,{"/ordinary/note.txt"}}}, {"/ordinary/note.txt",{false,19,{}}},
     {"/sd/public.txt",{false,75,{}}}, {"/stt2/a.txt",{false,6,{}}}, {"/STT/a.txt",{false,7,{}}},
     // Device-private files: a wrongly served request would actually list or transfer these.
@@ -219,6 +219,10 @@ static std::string installedList(){std::string s;for(const auto& id:installed){i
 static void servedIdentity(){
     reset();auto g=request<V4PayloadFsGetReq>("/hello.txt");processGetDeferred(mac,g);auto ga=decoded<V4PayloadFsGetAck>(ESPNOW_V4_TYPE_FS_GET_ACK);
     ++servedChecks;if(!(ga.status==FS_LIST_STATUS_OK&&ga.fileSize==42&&transfers==1&&transferPath=="/hello.txt"&&scopes==2))servedFail("GET '/hello.txt' from the bonded peer: expected OK with one transfer under two identity installs");
+    // 1.0 step 7: a name the requester's inbox cannot hold (over 63 bytes) is refused before the OK.
+    {reset();auto lg=request<V4PayloadFsGetReq>("/nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn.txt");processGetDeferred(mac,lg);auto la=decoded<V4PayloadFsGetAck>(ESPNOW_V4_TYPE_FS_GET_ACK);
+     ++servedChecks;if(!(la.status==FS_LIST_STATUS_TOO_LARGE&&transfers==0))servedFail("GET of a 68-byte name: expected too_large and no transfer");
+     reset();g=request<V4PayloadFsGetReq>("/hello.txt");processGetDeferred(mac,g);}
     ++servedChecks;if(!onlyBondIdentity()){char msg[200];std::snprintf(msg,sizeof(msg),"expected bond-admin over SOURCE_ESPNOW, got %s",installedList().c_str());servedFail(msg);}
     ++servedChecks;if(!(lastInstalled.path=="/espnow/fs"&&lastInstalled.ip=="espnow:01:02:03:04:05:06"&&lastInstalled.scope==""&&lastInstalled.sid==""&&lastInstalled.opaque==nullptr))servedFail("expected the bond identity stamped path=/espnow/fs ip=espnow:<MAC>, unconfined");
     reset();auto l=request<V4PayloadFsListReq>("/");l.maxEntries=32;processListDeferred(mac,l);auto lr=decoded<V4PayloadFsListReplyHeader>(ESPNOW_V4_TYPE_FS_LIST_REPLY);

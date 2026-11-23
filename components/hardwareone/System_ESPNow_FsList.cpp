@@ -902,6 +902,17 @@ static void processGetDeferred(const uint8_t srcMac[6], const V4PayloadFsGetReq&
       ack.fileSize = (uint32_t)f.size();
       f.close();
     }
+    // The requester's inbox takes a name of at most 63 bytes (one LittleFS
+    // component; 1.0 step 7 refuses a longer one at FILE_START): say so now,
+    // not after an OK the transfer cannot keep.
+    {
+      const int slash = filePath.lastIndexOf('/');
+      const size_t baseLen = filePath.length() - (size_t)(slash + 1);
+      if (baseLen == 0 || baseLen > 63) {
+        ack.status = FS_LIST_STATUS_TOO_LARGE;
+        goto send_ack;
+      }
+    }
     ack.status = FS_LIST_STATUS_OK;
   }
 

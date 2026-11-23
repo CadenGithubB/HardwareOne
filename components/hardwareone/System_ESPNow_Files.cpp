@@ -957,6 +957,15 @@ uint32_t fileSlotsGetTransferId(const FileTransferSlot* slot) {
 uint8_t fileSlotsGetKind(const FileTransferSlot* slot) {
   return slot ? implC(slot)->kind : 0;
 }
+uint32_t fileSlotsExpectedChunkLen(const FileTransferSlot* slot, uint32_t chunkIdx) {
+  if (!slot) return 0;
+  const FileTransferSlotImpl& s = *implC(slot);
+  if (s.chunkSize == 0 || chunkIdx >= s.totalChunks) return 0;
+  const uint64_t offset = (uint64_t)chunkIdx * s.chunkSize;
+  if (offset >= s.totalSize) return 0;
+  const uint64_t left = s.totalSize - offset;
+  return left < s.chunkSize ? (uint32_t)left : s.chunkSize;
+}
 
 // ---- Result memory (1.0 step 7) ----------------------------------------------
 // The last FILE_RESULTs this device sent, so a copy of FILE_END that arrives

@@ -4712,7 +4712,13 @@ FILE_DATA (8 + 194), FILE_END (16) and FILE_RESULT (12) layouts, FILE_START as a
 `espnow_dispatch_policy` the minimum lengths 13 / 9 / 16 / 12 / 5 and the FILE_RESULT row; `espnow_chunked_send` K13:
 a FILE_START refused no_slot is not sent again; `espnow_answer_core` FILE_RESULT as the eleventh answer opcode.
 `espnow_fs_transcript_privacy` takes the FS_GET server's `sendFileToMacResult`; `log_overflow_latch` pins the
-storage refusal as the START's io_error.
+storage refusal as the START's io_error. Review fixes (case `chunk-length-late`): a chunk that is not exactly
+chunkSize (the last one: the rest of totalSize) ends the transfer with FILE_CANCEL(bad_request) and writes nothing
+(a 3-byte chunk size with 194-byte chunks on a streamed file); a late chunk of a transfer that has its verdict draws
+no cancel; cancels for unknown transfers are one per peer per 100 ms; a "rejected" cancel during the result wait is
+not the verdict; names with CR/LF, an escape or DEL are bad_request; a bond answer over 128 KB is refused (source
+pin); `espnow_chunked_send` K13 also resends a FILE_START cut by this device's rekey; `espnow_fs_transcript_privacy`
+refuses an FS_GET of a name over 63 bytes with too_large before the OK.
 
 ## ESP-NOW remote command results and capacity (1.0 step 6)
 

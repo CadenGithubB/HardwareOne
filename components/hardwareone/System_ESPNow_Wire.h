@@ -1511,6 +1511,7 @@ enum FsListStatus : uint8_t {
   FS_LIST_STATUS_IO_ERROR    = 8,   // io_error
   FS_LIST_STATUS_TOO_BUSY    = 1,   // busy
   FS_LIST_STATUS_NOT_READY   = 7,   // not_ready
+  FS_LIST_STATUS_TOO_LARGE   = 4,   // too_large (FS_GET: the file's name is over what the requester's inbox takes)
 };
 
 // Fixed header: cannot grow (see the frame rules at the top of this file).
@@ -1869,7 +1870,8 @@ static_assert(FS_LIST_STATUS_OK == espnowanswer::kOk && FS_LIST_STATUS_NOT_FOUND
               FS_LIST_STATUS_NOT_A_DIR == espnowanswer::kFsNotADir &&
               FS_LIST_STATUS_PERM_DENIED == espnowanswer::kRefused &&
               FS_LIST_STATUS_IO_ERROR == espnowanswer::kIoError && FS_LIST_STATUS_TOO_BUSY == espnowanswer::kBusy &&
-              FS_LIST_STATUS_NOT_READY == espnowanswer::kNotReady,
+              FS_LIST_STATUS_NOT_READY == espnowanswer::kNotReady &&
+              FS_LIST_STATUS_TOO_LARGE == espnowanswer::kTooLarge,
               "the FS answers use the shared status table (rule F3)");
 static_assert(FILE_CANCEL_TIMEOUT == espnowanswer::kTimeout && FILE_CANCEL_WRITE_FAILED == espnowanswer::kIoError &&
               FILE_CANCEL_INCOMPLETE == espnowanswer::kFileIncomplete &&

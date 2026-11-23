@@ -749,6 +749,15 @@ static void rxChunk(uint8_t* src, uint32_t id, const std::string& bytes, uint16_
   rxFrame(ESPNOW_V4_TYPE_FILE_DATA, src, ++nextFrameMsgId, reinterpret_cast<const uint8_t*>(&d),
           static_cast<uint16_t>(offsetof(V4PayloadFileData, data) + n));
 }
+// A chunk of any length (a peer that does not keep to FILE_START's chunkSize).
+static V4Verdict rxChunkRaw(uint8_t* src, uint32_t id, uint32_t index, size_t len) {
+  V4PayloadFileData d{};
+  d.transferId = id;
+  d.chunkIndex = index;
+  std::memset(d.data, 0xA5, sizeof(d.data));
+  return rxFrame(ESPNOW_V4_TYPE_FILE_DATA, src, ++nextFrameMsgId, reinterpret_cast<const uint8_t*>(&d),
+                 static_cast<uint16_t>(offsetof(V4PayloadFileData, data) + len));
+}
 // FILE_END's status: 0 = the sender sent the whole file (0 is ok in every
 // status byte, rule F3); anything else (kCancelled) = it stopped.
 static V4Verdict rxEnd(uint8_t* src, uint32_t id, uint32_t crc, uint32_t count, uint8_t status = espnowanswer::kOk) {
@@ -900,6 +909,11 @@ static void testStartRefusals() {
   check(isRefused(rxStartNamed(kSender, 5, "..", 100), espnowanswer::kBadRequest), "'..' as the name: kBadRequest");
   check(isRefused(rxStartNamed(kSender, 6, std::string("a\0b", 3), 100), espnowanswer::kBadRequest),
         "a NUL inside the name: kBadRequest");
+  check(isRefused(rxStartNamed(kSender, 61, "a\r\nb.txt", 100), espnowanswer::kBadRequest),
+        "CR/LF in the name: kBadRequest (no forged log lines)");
+  check(isRefused(rxStartNamed(kSender, 62, "\x1b[2Jx.txt", 100), espnowanswer::kBadRequest),
+        "an escape sequence in the name: kBadRequest");
+  check(isRefused(rxStartNamed(kSender, 63, "del\x7f.txt", 100), espnowanswer::kBadRequest), "DEL in the name: kBadRequest");
   check(isRefused(rxStartNamed(kSender, 7, "x.bin", 100, 2), espnowanswer::kUnsupported), "kind 2: kUnsupported");
   check(isRefused(rxStartNamed(kSender, 8, "_settings_out.json", 100, V4_FILE_KIND_BOND), espnowanswer::kUnsupported),
         "a bond answer in a build without bond mode: kUnsupported");
@@ -1928,6 +1942,69 @@ static void testRamFinishAfterAck() {
         "FILE_END with another chunk count than FILE_START implied: FILE_RESULT incomplete");
 }
 
+// Review fixes (2026-11-23): a chunk must be exactly chunkSize (the last one
+// the rest of totalSize); a late chunk of a finished transfer draws no cancel;
+// cancels for unknown transfers are limited per peer.
+static void testChunkLengthAndLateChunks() {
+  // Streaming: FILE_START declares 3-byte chunks, the peer sends 194 bytes.
+  resetWorld();
+  check(isAccepted(rxStartNamed(kSender, 81, "big.bin", kStreamSize, V4_FILE_KIND_FILE, 3)),
+        "a 3-byte chunk size is accepted at FILE_START");
+  check(isRefused(rxChunkRaw(kSender, 81, 0, kChunk), espnowanswer::kBadRequest) &&
+            cancelCount(81, espnowanswer::kBadRequest) == 1 && eventCount(MSG_FILE_RECV_FAILED) == 1,
+        "streaming: a chunk longer than chunkSize ends the transfer (bad_request cancel)");
+  check(rxChunkRaw(kSender, 81, 1, 3).kind == V4VerdictKind::Refused, "streaming: nothing more is taken");
+  runCmdExec();
+  check(fileSlotsActiveCount() == 0 && partFiles() == 0 && fakeTakenBytes == 0 && liveAllocations == 0,
+        "streaming: nothing was written; slot and buffers freed");
+  // RAM path: a short middle chunk, and a long last chunk.
+  resetWorld();
+  const std::string bytes = pattern(1000, 41);
+  rxStart(kSender, 82, "ram.bin", bytes.size());
+  check(isRefused(rxChunkRaw(kSender, 82, 0, kChunk - 1), espnowanswer::kBadRequest) && fileSlotsActiveCount() == 0,
+        "RAM path: a short chunk ends the transfer");
+  rxStart(kSender, 83, "ram2.bin", bytes.size());
+  for (uint16_t i = 0; i + 1 < chunksOf(bytes.size()); i++) rxChunk(kSender, 83, bytes, i);
+  check(isRefused(rxChunkRaw(kSender, 83, chunksOf(bytes.size()) - 1, kChunk), espnowanswer::kBadRequest) &&
+            fileSlotsActiveCount() == 0,
+        "RAM path: a last chunk longer than the rest of totalSize ends the transfer");
+
+  // A late chunk of a stored transfer draws no cancel.
+  resetWorld();
+  rxStart(kSender, 85, "done.txt", bytes.size());
+  for (uint16_t i = 0; i < chunksOf(bytes.size()); i++) rxChunk(kSender, 85, bytes, i);
+  rxEndOf(kSender, 85, bytes);
+  rxChunk(kSender, 85, bytes, 1);
+  check(resultCount(85, espnowanswer::kOk) == 1 && cancels.empty(),
+        "a late chunk after the verdict: no FILE_CANCEL (the sender would read it as a failure)");
+  // Cancels for unknown transfers: one per peer per 100 ms, whatever the id.
+  resetWorld();
+  rxChunk(kSender, 901, bytes, 0);
+  rxChunk(kSender, 902, bytes, 0);
+  rxChunk(kOther, 903, bytes, 0);
+  check(cancels.size() == 2 && cancelCount(901) == 1 && cancelCount(903) == 1,
+        "unknown transfers: one cancel per peer per 100 ms, new ids do not get around it");
+  nowMs += 100;
+  rxChunk(kSender, 904, bytes, 0);
+  check(cancelCount(904) == 1, "unknown transfers: the next window gets its cancel");
+
+  // The sender: a "rejected" cancel during the result wait (a late chunk) does
+  // not end the send; the FILE_RESULT does.
+  resetWorld();
+  putSendFile(bytes);
+  loopback = true;
+  dropResults = 1;
+  onAirFrame = [](const AirFrame& f) {
+    if (f.type == ESPNOW_V4_TYPE_FILE_END && dropResults == 1) {
+      uint32_t id = 0;
+      std::memcpy(&id, f.payload.data(), 4);
+      v4_send_file_cancel(kSender, id, FILE_CANCEL_REJECTED);
+    }
+  };
+  check(sendFileToMacResult(kReceiver, String(kFile)).result == FileSendResult::Stored,
+        "a rejected cancel after FILE_END is not the verdict: Stored from the FILE_RESULT");
+}
+
 int main(int argc, char** argv) {
   // With a case name, only that case runs (a case that leaves a slot behind on
   // a broken tree would otherwise blur the ones after it).
@@ -1961,6 +2038,7 @@ int main(int argc, char** argv) {
     {"bond-sync-quiet", testBondSyncFilesAreQuiet},
     {"cancel-answer", testCancelIsAnAnswer},
     {"ram-finish-after-ack", testRamFinishAfterAck},
+    {"chunk-length-late", testChunkLengthAndLateChunks},
   };
   check(fileSlotsInit(), "slot table initialised");
   liveAllocations = 0;  // count transfer buffers only, not the table

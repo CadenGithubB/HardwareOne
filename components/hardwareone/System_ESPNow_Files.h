@@ -270,6 +270,9 @@ uint16_t       fileSlotsGetTotalChunks(const FileTransferSlot* slot);
 uint32_t       fileSlotsGetTotalSize(const FileTransferSlot* slot);
 uint32_t       fileSlotsGetTransferId(const FileTransferSlot* slot);
 uint8_t        fileSlotsGetKind(const FileTransferSlot* slot);  // FILE_START's kind
+// The length chunk `chunkIdx` must have: chunkSize, or what is left of
+// totalSize for the last one; 0 for an index past the end.
+uint32_t       fileSlotsExpectedChunkLen(const FileTransferSlot* slot, uint32_t chunkIdx);
 // Running esp_crc32_le over the chunks accepted so far (streaming slots only —
 // RAM slots compute one-shot over the whole buffer at FILE_END instead, since
 // their chunks can arrive out of order). Final once fileSlotsIsComplete().

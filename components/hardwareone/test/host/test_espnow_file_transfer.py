@@ -155,6 +155,12 @@ def main():
     fs_get = extract_block(fslist[fslist.rindex(get_marker):], get_marker)
     if not re.search(r'\bsendFileToMac(Result)?\(', fs_get):
         failures.append('processGetDeferred no longer sends through sendFileToMac')
+    start_handler = body(main_cpp, 'static V4Verdict v4h_file_start(', E)
+    bond_part = start_handler[start_handler.index('if (fs.kind == V4_FILE_KIND_BOND) {'):]
+    if 'if (fs.totalSize > kFileSlotMaxFileSize) return ctx.refuseWith(espnowanswer::kTooLarge);' not in \
+            bond_part[:bond_part.index('#else')]:
+        failures.append('a bond answer over the RAM-path size is not refused kTooLarge at FILE_START '
+                        '(it would stream and never reach its processor)')
     if failures:
         for f in failures:
             print(f'espnow_file_transfer: {f}', file=sys.stderr)

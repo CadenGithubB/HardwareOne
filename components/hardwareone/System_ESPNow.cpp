@@ -3861,16 +3861,17 @@ V4SendResult v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint1
   // already took would be shown twice under a second msgId, so a long TEXT is
   // never sent again as a whole; its sender sees the refusal. A CMD answered
   // busy ends Busy (DESIGN 3.5: terminal, shown at once); the person sends it
-  // again. A FILE_START refused (no slot) ends the file send at once (DESIGN
-  // 3.6); FILE_END keeps the retry (a busy slot table).
-  const bool wholeRetryOk = type != ESPNOW_V4_TYPE_TEXT && type != ESPNOW_V4_TYPE_CMD &&
-                            type != ESPNOW_V4_TYPE_FILE_START;
+  // again. A FILE_START refused busy / no slot ends the file send at once
+  // (DESIGN 3.6), but is sent again after a rekey this device started;
+  // FILE_END keeps both retries (a busy slot table).
+  const bool wholeRetryOk = type != ESPNOW_V4_TYPE_TEXT && type != ESPNOW_V4_TYPE_CMD;
+  const bool busyRetryOk = wholeRetryOk && type != ESPNOW_V4_TYPE_FILE_START;
   // A tracked request (USER_SYNC) that may go once more: its busy ACK is not
   // its end; the final outcome below is (remoteCmdSettle).
   if (wholeRetryOk) remoteCmdHold(dst, msgId);
   V4SendResult r = v4_send_chunked_attempt(dst, type, baseFlags, msgId, payload, payloadLen, ttl, &rekeyStall,
                                            ackSingle);
-  if (wholeRetryOk && r.outcome == V4SendOutcome::Refused &&
+  if (busyRetryOk && r.outcome == V4SendOutcome::Refused &&
       (r.status == espnowanswer::kBusy || r.status == espnowanswer::kNoSlot)) {
     const uint32_t waitMs = 300 + (esp_random() % 501);
     WARN_ESPNOWF("[V4_ENC_FRAG_TX] receiver %s (msgId=%lu): sending the message again in %lu ms",
@@ -7020,10 +7021,16 @@ static constexpr size_t kFileInboxNameMax = (CONFIG_LITTLEFS_OBJ_NAME_LEN - 1) <
 static constexpr size_t kFileInboxNameMax = 63;
 #endif
 
-// One path component: no '/', '\\' or NUL inside, not "." or "..".
+// One path component: no '/', '\\', NUL or other control byte (< 0x20, 0x7F:
+// CR/LF or an escape sequence would forge log lines and drive a serial
+// terminal) inside, not "." or "..".
 static bool v4FileNameIsPlain(const char* name, size_t len) {
   if (len == 0) return false;
-  if (memchr(name, '\0', len) || memchr(name, '/', len) || memchr(name, '\\', len)) return false;
+  if (memchr(name, '/', len) || memchr(name, '\\', len)) return false;
+  for (size_t i = 0; i < len; i++) {
+    const uint8_t c = (uint8_t)name[i];
+    if (c < 0x20 || c == 0x7F) return false;
+  }
   if ((len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.')) return false;
   return true;
 }
@@ -7085,6 +7092,9 @@ static V4Verdict v4h_file_start(const V4RxCtx& ctx) {
   if (fs.kind == V4_FILE_KIND_BOND) {
 #if ENABLE_BONDED_MODE
     if (!v4FileIsBondAnswerName(name)) return ctx.refuseWith(espnowanswer::kBadRequest);
+    // A bond answer is processed in RAM: one larger than the RAM path would
+    // stream to flash and never reach its processor.
+    if (fs.totalSize > kFileSlotMaxFileSize) return ctx.refuseWith(espnowanswer::kTooLarge);
     if (!v4FileBondMagicAllowed(ctx.recv_info->src_addr, name)) return ctx.refuse();
 #else
     return ctx.refuseWith(espnowanswer::kUnsupported);  // no bond mode in this build
@@ -7147,6 +7157,27 @@ static void v4FileNoteSlotTableBusy(const char* frame, uint32_t transferId, cons
                frame, (unsigned long)transferId, ctx.deviceName);
 }
 
+// One FILE_CANCEL per peer per 100 ms for chunks of unknown transfers
+// (espnow_task only). Four peers remembered; the oldest entry is reused.
+static bool v4FileCancelRateOk(const uint8_t* mac) {
+  struct Entry { uint8_t mac[6]; uint32_t atMs; bool used; };
+  EXT_RAM_BSS_ATTR static Entry sEntries[4];
+  const uint32_t nowMs = (uint32_t)millis();
+  Entry* oldest = &sEntries[0];
+  for (Entry& e : sEntries) {
+    if (e.used && memcmp(e.mac, mac, 6) == 0) {
+      if ((uint32_t)(nowMs - e.atMs) < 100) return false;
+      e.atMs = nowMs;
+      return true;
+    }
+    if (!e.used || (oldest->used && (uint32_t)(nowMs - e.atMs) > (uint32_t)(nowMs - oldest->atMs))) oldest = &e;
+  }
+  memcpy(oldest->mac, mac, 6);
+  oldest->atMs = nowMs;
+  oldest->used = true;
+  return true;
+}
+
 // FILE_DATA — route the chunk to its owning slot in the multi-slot table.
 // Payload {transferId, chunkIndex u32} then the chunk's bytes. No ACK_REQ: the
 // verdict only counts. Pairing + session AEAD enforced by dispatch flags.
@@ -7172,24 +7203,19 @@ static V4Verdict v4h_file_data(const V4RxCtx& ctx) {
     // cancelled). Tell the sender so its pump stops; repeating it is what
     // makes the stop robust against a single dropped cancel frame.
     //
-    // Rate-limited per (peer, transferId) rather than one-per-chunk: an honest
-    // sender's chunks all carry the SAME transferId and are ~15 ms apart, so it
-    // still gets a cancel within one window and stops promptly; a peer
-    // spraying FILE_DATA with random ids cannot force one AEAD seal + TX per
-    // received frame on espnow_task (the RX drain task).
-    {
-      static uint8_t  sLastCancelMac[6] = {0};
-      static uint32_t sLastCancelId     = 0;
-      static uint32_t sLastCancelMs     = 0;
-      const uint32_t nowMs = (uint32_t)millis();
-      const bool sameTarget = (sLastCancelId == transferId) &&
-                              (memcmp(sLastCancelMac, ctx.recv_info->src_addr, 6) == 0);
-      if (!sameTarget || (nowMs - sLastCancelMs) >= 100) {
-        memcpy(sLastCancelMac, ctx.recv_info->src_addr, 6);
-        sLastCancelId = transferId;
-        sLastCancelMs = nowMs;
-        v4_send_file_cancel(ctx.recv_info->src_addr, transferId, FILE_CANCEL_REJECTED);
-      }
+    // A late chunk of a transfer that already has its verdict (released
+    // after FILE_END): no cancel, which the sender would read as the end of a
+    // transfer that was in fact stored.
+    if (fileSlotsFindResult(ctx.recv_info->src_addr, transferId, nullptr, nullptr) != FILE_RESULT_LOOKUP_NOT_FOUND) {
+      return ctx.refuse();
+    }
+    // Rate-limited per peer (at most one cancel per 100 ms, whatever
+    // transferId): an honest sender's chunks are ~15 ms apart, so it still
+    // gets a cancel within one window and stops promptly; a peer spraying
+    // FILE_DATA with random ids cannot force one AEAD seal + TX per received
+    // frame on espnow_task (the RX drain task).
+    if (v4FileCancelRateOk(ctx.recv_info->src_addr)) {
+      v4_send_file_cancel(ctx.recv_info->src_addr, transferId, FILE_CANCEL_REJECTED);
     }
     return ctx.refuse();
   }
@@ -7200,6 +7226,25 @@ static V4Verdict v4h_file_data(const V4RxCtx& ctx) {
   if (!chunkData || chunkIndex32 > 0xFFFFu) return ctx.refuseWith(espnowanswer::kBadRequest);
   const uint16_t chunkIndex = (uint16_t)chunkIndex32;
   const uint16_t dataLen = (uint16_t)chunkLen;
+  // Every chunk is exactly chunkSize long, the last one what is left of
+  // totalSize. Anything else ends the transfer: a longer chunk would let a
+  // peer write past what FILE_START declared (a streamed .part has no other
+  // bound), a shorter one would leave a hole.
+  const uint32_t expectedLen = fileSlotsExpectedChunkLen(slot, chunkIndex32);
+  if (expectedLen == 0 || chunkLen != expectedLen) {
+    WARN_ESPNOWF("[V4_FILE_RX] chunk %lu of '%s' from %s is %u bytes, expected %lu: transfer ended",
+                 (unsigned long)chunkIndex32, fileSlotsGetFilename(slot), ctx.deviceName, (unsigned)chunkLen,
+                 (unsigned long)expectedLen);
+    if (fileSlotsIsReceiving(slot)) {
+      String senderMacStr = macToDisplayStr(ctx.recv_info->src_addr);
+      logFileTransferEvent((uint8_t*)ctx.recv_info->src_addr, senderMacStr.c_str(), fileSlotsGetFilename(slot),
+                           MSG_FILE_RECV_FAILED);
+      if (fileSlotsIsStreaming(slot)) fileSlotsStreamFail(slot);  // teardown on cmd_exec
+      else fileSlotsRelease(slot);
+      v4_send_file_cancel(ctx.recv_info->src_addr, transferId, espnowanswer::kBadRequest);
+    }
+    return ctx.refuseWith(espnowanswer::kBadRequest);
+  }
 
   // Streaming slot (file > 128 KB): espnow_task ONLY memcpy's the chunk into a
   // double-buffer — the flash write is deferred to cmd_exec so the RX drain is never
@@ -21584,7 +21629,10 @@ FileSendOutcome sendFileToMacResult(const uint8_t* mac, const String& localPath,
                    v4FileStatusWhy(status));
       return failed(status, v4FileStatusWhy(status));
     }
-    if (gEspNow->fileSendAbortTransferId == transferId) {
+    // A cancel after FILE_END ends the wait, except "rejected": that only
+    // answers a late chunk of a transfer the receiver already released, and
+    // its FILE_RESULT is the verdict.
+    if (gEspNow->fileSendAbortTransferId == transferId && gEspNow->fileSendAbortStatus != FILE_CANCEL_REJECTED) {
       const uint8_t status = gEspNow->fileSendAbortStatus;
       return failed(status, v4FileStatusWhy(status));
     }
