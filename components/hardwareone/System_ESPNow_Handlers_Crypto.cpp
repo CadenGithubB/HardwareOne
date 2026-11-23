@@ -590,7 +590,20 @@ void v4hKeyExConfirm(const V4RxCtx& ctx) {
   // A refusal (status 1-3) can come from a peer whose key this device does
   // not hold yet: the answer to our own HELLO. Anything else needs an identity.
   const PeerIdentity* p = peerIdentityFindByMac(msg->confirmerMac);
-  if (!p && !(msg->status != 0 && keyExIsInFlight(msg->confirmerMac))) {
+  if (!p) {
+    if (msg->status != 0 && keyExIsInFlight(msg->confirmerMac)) {
+      // Until CONFIRM is authenticated (step 4) anyone in range can send
+      // this one: it is only logged, and our HELLO retries go on (a forged
+      // refusal must not stop espnowpairsecure's key exchange).
+      static uint32_t sNotAcceptedLogMs = 0;
+      if (logCooldownOk(sNotAcceptedLogMs, 30000)) {
+        WARN_ESPNOWF("KEY_EX with " MAC_FMT ": %s - pair from both sides ('espnowpairsecure' on both "
+                     "devices); still retrying",
+                     MAC_ARGS(msg->confirmerMac),
+                     msg->status == espnowrevoke::kConfirmNotAccepted ? "not accepted" : "refused");
+      }
+      return;
+    }
     WARN_ESPNOWF("KEY_EX_CONFIRM: from unknown peer; ignored");
     return;
   }

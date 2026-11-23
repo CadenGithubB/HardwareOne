@@ -4582,9 +4582,13 @@ closed) instead of reading as empty; rule A (`espnowrevoke::admit`: an identity 
 first key only inside its first-key window, no answer to a revoked MAC or key, nothing new while the list is
 locked); the boot identity check allowed after an Ok load or with no registry file, and skipped for a
 quarantined, partial or unread registry; the 10-minute first-key window across the millis() wrap and across a
-restart.
+restart; a key revoked under a second MAC is a second entry (the first MAC stays listed); only a unicast MAC is
+revoked or unpaired by address; `espnowunrevoke --all` reads a never-read list again before it moves anything aside.
 
-The handlers that use it are run by their own suites: `espnow_keyex_hello` (K14-K19: a HELLO from a non-registry
+The handlers that use it are run by their own suites (review fixes of 2026-11-23 included: keyex_hello K20, a
+forged CONFIRM refusal from a peer with no stored key leaves the HELLO retries armed; bond_partner_change, an unpair
+whose registry save fails keeps the identity and folder; peer_files source checks for the start-up revoked tidy, the
+revoke teardown retry, the rollback window, the unicast rule and the locked-list pair-request refusal): `espnow_keyex_hello` (K14-K19: a HELLO from a non-registry
 MAC stores nothing, is answered KEY_EX_CONFIRM status 3 and leaves no radio peer; a revoked key is refused under any
 MAC with no answer and the waiting pairsecure entry is rolled back; the first-key window; a REPLY under the same
 rules; a locked list), `espnow_rx_frontend` (testRevokedDrops: gate 1 drops a frame from a revoked radio source

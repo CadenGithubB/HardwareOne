@@ -64,6 +64,8 @@ Host-tested and built; not run on a device.
   that cannot be read refuses new keys and pairing instead of starting empty. For a lost or stolen
   device, revoke it on every remaining device, then change the passphrase of every mesh it knew
   (USERGUIDE, "Unpairing and revoking a device").
+  A revoke interrupted by a power loss is finished at the next start. An unpair whose device list
+  could not be saved keeps the device's key until it is run again.
 - `espnowstats` counts the dropped frames (`RX Revoked Drops`, JSON `rxRevokedDrops`).
 - **Wire change:** PAIR_REQUEST carries the requester's key (40 -> 72 bytes), so a request from a
   revoked key is refused whatever address it comes from, and the accept prompt shows its keyId.

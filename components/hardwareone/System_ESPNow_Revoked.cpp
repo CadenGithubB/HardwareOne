@@ -209,11 +209,17 @@ RevokedChange espnowRevokedRemove(const char* text, espnowrevoke::Entry* removed
 
 RevokedChange espnowRevokedClear(uint8_t* count, char* movedTo, size_t movedToLen) {
   if (movedTo && movedToLen) movedTo[0] = '\0';
+  // Locked without a read (no filesystem or no memory at start-up): read it
+  // now. A file that is valid is never moved aside unread.
+  if (espnowrevoke::clearAction(gRevokedLocked, gRevokedLoaded) == espnowrevoke::ClearAction::RetryLoad) {
+    espnowRevokedLoad();
+    if (!gRevokedLoaded) return RevokedChange::SaveFailed;   // still nothing read: leave the file
+  }
   portENTER_CRITICAL(&gRevokedLock);
   const uint8_t listed = gRevoked.count;
   portEXIT_CRITICAL(&gRevokedLock);
   if (count) *count = listed;
-  if (gRevokedLocked) {
+  if (espnowrevoke::clearAction(gRevokedLocked, gRevokedLoaded) == espnowrevoke::ClearAction::Quarantine) {
     if (!filesystemReady) return RevokedChange::SaveFailed;
     FsLockGuard fsGuard("espnow.revoked.clear");
     const AuthContext auth = revokedAuth("espnow.revoked_clear");

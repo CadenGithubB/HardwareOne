@@ -87,7 +87,7 @@ EPOCH = ('static uint32_t bondHoldEpoch()', 'static bool bondTickHeld(uint32_t e
 END = 'static void bondEndPartnership()'
 FILE_JOB = 'static void runDeferredBondFileSend(void* arg)'
 UNPAIR = 'const char* cmd_espnow_unpair(const String& argsInput)'
-TEARDOWN = 'static bool espnowUnpairTeardown(const uint8_t mac[6], UnpairOutcome& out)'
+TEARDOWN = 'static bool espnowUnpairTeardown(const uint8_t mac[6], UnpairOutcome& out'
 TICK_CONSTANTS = (r'^static const uint32_t BOND_HEARTBEAT_INTERVAL_MS = \d+;',
                   r'^static const uint32_t BOND_HEARTBEAT_TIMEOUT_MS = \d+;',
                   r'^static const uint32_t BOND_SYNC_RETRY_MS = \d+;')

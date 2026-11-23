@@ -46,9 +46,10 @@ RevokedChange espnowRevokedAdd(const uint8_t mac[6], const uint8_t pub[32], uint
 // copy of it. Writes the file first. cmd_exec.
 RevokedChange espnowRevokedRemove(const char* text, espnowrevoke::Entry* removed);
 
-// Lifts every revoke. While the list is locked the unreadable file is moved
-// aside first (its revokes are lifted with it). *count gets how many were
-// listed. cmd_exec.
+// Lifts every revoke. A list locked because nothing could be read at
+// start-up (no filesystem, no memory) is read again first; a file that was
+// read and is unreadable is moved aside (its revokes are lifted with it).
+// *count gets how many were listed. cmd_exec.
 RevokedChange espnowRevokedClear(uint8_t* count, char* movedTo, size_t movedToLen);
 
 // A copy of the whole table.

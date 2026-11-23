@@ -67,6 +67,17 @@ inline int findMacOrKey(const Table& t, const uint8_t mac[6], const uint8_t pub[
   return byMac >= 0 ? byMac : findKey(t, pub);
 }
 
+// A MAC that can name one device: not all zero, and not a group address
+// (broadcast FF:FF:FF:FF:FF:FF included: the group bit of the first byte).
+// Revoke and unpair refuse any other: tearing down the broadcast radio peer
+// would make every broadcast send fail until a restart.
+inline bool isUnicastMac(const uint8_t mac[6]) {
+  if (!mac || (mac[0] & 0x01)) return false;
+  for (int i = 0; i < 6; i++)
+    if (mac[i]) return true;
+  return false;
+}
+
 inline void formatKeyId(const uint8_t pub[32], char out[kKeyIdHexLen + 1]) {
   for (size_t i = 0; i < kKeyIdHexLen / 2; i++) snprintf(out + 2 * i, 3, "%02x", pub[i]);
   out[kKeyIdHexLen] = '\0';
@@ -74,11 +85,13 @@ inline void formatKeyId(const uint8_t pub[32], char out[kKeyIdHexLen + 1]) {
 
 enum class AddResult : uint8_t { Added, Updated, Full };
 
-// Adds a revoke, or refreshes the entry already listed for this MAC or key.
-// pub may be null (revoke by MAC with no stored key).
+// Adds a revoke, or refreshes the entry already listed for this MAC. Only a
+// MAC match is merged: the same key under another MAC is a second entry, so
+// the first MAC stays listed (gate 1, relay, slots and heartbeats check by
+// MAC). pub may be null (revoke by MAC with no stored key).
 inline AddResult add(Table& t, const uint8_t mac[6], const uint8_t pub[32], uint8_t meshSlot,
                      uint64_t revokedEpochMs, const char* name) {
-  int i = findMacOrKey(t, mac, pub);
+  int i = findMac(t, mac);
   AddResult r = AddResult::Updated;
   if (i < 0) {
     if (t.count >= kMax) return AddResult::Full;
@@ -226,6 +239,15 @@ inline size_t serialize(const Table& t, char* out, size_t cap, JsonDocument& doc
 
 // Room for a full list: 32 entries of about 190 bytes each.
 constexpr size_t kFileCap = 7168;
+
+// What `espnowunrevoke --all` does. A list locked because the file could not
+// be read at all (no filesystem, no memory: loaded false) is read again first;
+// only a file that was read and is unreadable is moved aside.
+enum class ClearAction : uint8_t { WriteEmpty, RetryLoad, Quarantine };
+inline ClearAction clearAction(bool locked, bool loaded) {
+  if (!locked) return ClearAction::WriteEmpty;
+  return loaded ? ClearAction::Quarantine : ClearAction::RetryLoad;
+}
 
 // ---- Which key a key exchange may store (rule A) --------------------------------
 

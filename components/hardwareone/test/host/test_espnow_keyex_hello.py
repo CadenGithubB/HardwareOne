@@ -157,6 +157,12 @@ def build_keyex(crypto):
                   one(crypto, 'void espnowKeyExCancel(const uint8_t peerMac[6])', name),
                   one(crypto, 'static bool keyExCancelled(const uint8_t peerMac[6]) ', name)]
     parts.append(one(crypto, 'void v4hKeyExReply(const V4RxCtx& ctx)', name))
+    # The CONFIRM handler (review finding 3), where it keeps the retries of a
+    # key exchange with a peer whose key is not stored.
+    if 'still retrying' in crypto:
+        parts += ['#define HW1_HAS_CONFIRM_KEEPS_RETRY 1',
+                  one(crypto, 'bool keyExIsInFlight(const uint8_t peerMac[6])', name),
+                  one(crypto, 'void v4hKeyExConfirm(const V4RxCtx& ctx)', name)]
     return '\n\n'.join(parts)
 
 

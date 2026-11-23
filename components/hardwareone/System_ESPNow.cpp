@@ -7930,6 +7930,17 @@ static void v4h_pair_request(const V4RxCtx& ctx) {
   // refused at once and never shown: REJECT, and a line in the log.
   V4PayloadPairRequest req;
   ctx.read(req);
+  // While the revoked list cannot be read nothing is paired (fail closed):
+  // the request is refused without a prompt.
+  if (espnowRevokedLocked()) {
+    static uint32_t sLockedRequestLogMs = 0;
+    if (logCooldownOk(sLockedRequestLogMs, 30000)) {
+      WARN_ESPNOWF("[PAIR] request from '%s' (" MAC_FMT ") refused: the revoked list cannot be read "
+                   "('espnowrevoked')", name, MAC_ARGS(mac));
+    }
+    sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_REJECT);
+    return;
+  }
   if (espnowRevokedKey(req.senderPub)) {
     static uint32_t sRevokedRequestLogMs = 0;
     if (logCooldownOk(sRevokedRequestLogMs, 30000)) {
@@ -12210,6 +12221,8 @@ static void loadEspNowDevices() {
   DEBUG_ESPNOW_MESHF("[ESP-NOW] Loaded %d device(s) from %s", count, ESPNOW_DEVICES_FILE);
 }
 
+static void espnowRevokedBootTidy();   // after the unpair teardown, below
+
 // The registry's load result as the boot identity check needs it.
 static espnowrevoke::RegistryLoad espnowRegistryLoadForSweep() {
   switch (sEspNowDevicesLoad) {
@@ -15110,6 +15123,7 @@ static bool initEspNow() {
   // Load and restore saved devices
   loadEspNowDevices();
   espnowIdentityBootCheck();
+  espnowRevokedBootTidy();   // before restoreEspNowPeers: a revoked device gets no radio peer back
   restoreEspNowPeers();
   
   // Seed health slots from the paired registry. This replaced loadMeshPeers():
@@ -19538,6 +19552,7 @@ struct UnpairOutcome {
   bool devicesOk;        // the registry was saved (always true without an entry)
   bool pinCleared;       // a named master or backup pin matched its key
   bool leasesDropped;    // it held sensor leases here
+  bool keptIdentity;     // the registry save failed: the identity and folder were kept
   const char* bondNote;  // "" or the bond line
   char filesLine[256];
 };
@@ -19598,8 +19613,14 @@ static void espnowUnpairClearPairing(const uint8_t mac[6]) {
 // a device that is no longer listed (the boot check removes it), never a
 // listed device without an identity (rule A would let it key straight back
 // in). A MAC with no registry entry has its leftovers removed (identity,
-// folder, pins). False only when the radio peer could not be deleted.
-static bool espnowUnpairTeardown(const uint8_t mac[6], UnpairOutcome& out) {
+// folder, pins). An unpair whose registry save failed keeps the identity and
+// the peer folder (out.keptIdentity): the file still lists the device, and a
+// listed device without its key could not key in again; the user retries.
+// A revoke removes them anyway (the revoked list refuses the device). With
+// radioUp false (start-up, before the radio peers are restored) no radio peer
+// is deleted. False only when the radio peer could not be deleted.
+static bool espnowUnpairTeardown(const uint8_t mac[6], UnpairOutcome& out, bool revoking = false,
+                                 bool radioUp = true) {
   memset(&out, 0, sizeof(out));
   out.bondNote = "";
   out.devicesOk = true;
@@ -19619,7 +19640,7 @@ static bool espnowUnpairTeardown(const uint8_t mac[6], UnpairOutcome& out) {
   }
 #endif
 
-  if (!espnowDeletePeerRuntime(mac) && out.inRegistry) return false;
+  if (radioUp && !espnowDeletePeerRuntime(mac) && out.inRegistry) return false;
 
   if (out.inRegistry) {
     removeEspNowDevice(mac);
@@ -19637,6 +19658,19 @@ static bool espnowUnpairTeardown(const uint8_t mac[6], UnpairOutcome& out) {
   // Pins that name its key go before the identity that holds the key.
   out.pinCleared = espnowUnpairClearPins(mac, peerIdentityFindByMac(mac));
   out.leasesDropped = espnowSensorLeasesDropFor(mac);
+
+  if (out.inRegistry && !out.devicesOk && !revoking) {
+    // Write order, the other way round: the file still lists the device, so
+    // its key and folder stay until a save succeeds (the reply asks for a
+    // retry). Only its live session goes.
+    out.keptIdentity = true;
+    if (const PeerIdentity* pid = peerIdentityFindByMac(mac)) {
+      if (SessionState* sess = sessionFindByPeer(mac, pid->meshId)) sessionClear(sess);
+    }
+    out.filesLine[0] = '\0';
+    meshPeerSlotsRelease(mac);
+    return true;
+  }
 
   // Full teardown: also drop the crypto identity + any live session so a later
   // re-pair starts clean (no stale-key pub-conflict).
@@ -19678,6 +19712,42 @@ static bool espnowUnpairTeardown(const uint8_t mac[6], UnpairOutcome& out) {
   return true;
 }
 
+// Start-up (after loadEspNowDevices, before restoreEspNowPeers): a device on
+// the revoked list, by MAC or by its stored key, that is still in the device
+// list or still has an identity here is torn down now. That is what is left
+// when power was lost between espnowrevoke writing the list and its teardown,
+// or when its teardown failed; without this, restoreEspNowPeers would give it
+// its radio peer back. Runs once per boot; no radio peer exists yet.
+static void espnowRevokedBootTidy() {
+  static bool sDone = false;
+  if (sDone || !gEspNow) return;
+  sDone = true;
+  uint8_t macs[2 * MESH_PEER_MAX][6];
+  uint8_t n = 0;
+  auto note = [&](const uint8_t* mac) {
+    if (n >= 2 * MESH_PEER_MAX || isSelfMac(mac)) return;
+    for (uint8_t i = 0; i < n; i++)
+      if (memcmp(macs[i], mac, 6) == 0) return;
+    memcpy(macs[n++], mac, 6);
+  };
+  for (int i = 0; i < gEspNow->deviceCount; i++) {
+    const uint8_t* mac = gEspNow->devices[i].mac;
+    const PeerIdentity* pid = peerIdentityFindByMac(mac);
+    if (espnowRevokedMacOrKey(mac, pid ? pid->longTermPub : nullptr)) note(mac);
+  }
+  for (uint8_t i = 0, slots = peerIdentitySlotCount(); i < slots; i++) {
+    const PeerIdentity* id = peerIdentityAt(i);
+    if (id && espnowRevokedMacOrKey(id->mac, id->longTermPub)) note(id->mac);
+  }
+  for (uint8_t i = 0; i < n; i++) {
+    UnpairOutcome out;
+    espnowUnpairTeardown(macs[i], out, /*revoking=*/true, /*radioUp=*/false);
+    WARN_ESPNOWF("[ESP-NOW] Revoked device " MAC_FMT " was still %s here: torn down at start-up%s",
+                 MAC_ARGS(macs[i]), out.inRegistry ? "paired" : "stored",
+                 out.inRegistry && !out.devicesOk ? " (the device list could not be saved)" : "");
+  }
+}
+
 const char* cmd_espnow_unpair(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!gEspNow) return "Error: ESP-NOW not initialized. Run 'openespnow' first.";
@@ -19694,7 +19764,7 @@ const char* cmd_espnow_unpair(const String& argsInput) {
   // and the key-exchange warnings name).
   uint8_t mac[6];
   const bool listed = resolveDeviceNameOrMac(target, mac);
-  if (!listed && !(parseMacAddress(target, mac) && !isSelfMac(mac) &&
+  if (!listed && !(parseMacAddress(target, mac) && espnowrevoke::isUnicastMac(mac) && !isSelfMac(mac) &&
                    (peerIdentityFindByMac(mac) || peerIdentityFileStored(mac)))) {
     EXT_RAM_BSS_ATTR static char errBuf[256];
     snprintf(errBuf, sizeof(errBuf), 
@@ -19733,8 +19803,8 @@ const char* cmd_espnow_unpair(const String& argsInput) {
     // once a restart has loaded the device from the file.
     snprintf(getDebugBuffer(), 1024,
       "Unpaired device for this session only: the device list could not be saved, so it is paired "
-      "again after a restart. Check storage with 'fsusage'. If the device is listed again after a "
-      "restart, run 'espnowunpair <name_or_mac>' again.\n%s%s%s%s", out.bondNote, bondSep, out.filesLine,
+      "again after a restart; its key and stored files were kept for that. Check storage with 'fsusage', "
+      "then run 'espnowunpair <name_or_mac>' again after a restart.\n%s%s%s", out.bondNote, bondSep,
       pinLine);
     return getDebugBuffer();
   }
@@ -19782,6 +19852,9 @@ const char* cmd_espnow_revoke(const String& argsInput) {
     return "Error: Not a paired device name or a MAC address (AA:BB:CC:DD:EE:FF). See 'espnowdevices'.";
   }
   if (isSelfMac(mac)) return "Error: Cannot revoke this device.";
+  if (!espnowrevoke::isUnicastMac(mac)) {
+    return "Error: Not a device address (a broadcast, group or all-zero address cannot be revoked).";
+  }
   if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
 
   const EspNowDevice* dev = groupRecordOf(mac);
@@ -19803,7 +19876,18 @@ const char* cmd_espnow_revoke(const String& argsInput) {
   }
 
   UnpairOutcome out;
-  const bool tornDown = espnowUnpairTeardown(mac, out);
+  // The list holds the device now; the teardown must follow. Tried twice
+  // with the radio; if the radio peer still cannot go (ESP-NOW closing), the
+  // rest is torn down anyway: a revoked source is dropped at receive gate 1,
+  // and the radio peer goes with the next close or restart. A power loss in
+  // between is finished at the next start (espnowRevokedBootTidy).
+  bool tornDown = espnowUnpairTeardown(mac, out, /*revoking=*/true);
+  if (!tornDown) tornDown = espnowUnpairTeardown(mac, out, /*revoking=*/true);
+  bool radioPeerLeft = false;
+  if (!tornDown) {
+    radioPeerLeft = true;
+    tornDown = espnowUnpairTeardown(mac, out, /*revoking=*/true, /*radioUp=*/false);
+  }
   if (tornDown && (out.inRegistry || out.hadIdentity)) {
     systemEventPost(SYSEVT_PEER_UNPAIRED, name, macToDisplayStr(mac).c_str());
   }
@@ -19821,7 +19905,7 @@ const char* cmd_espnow_revoke(const String& argsInput) {
   }
   const char* meshLabel = meshSlot < Settings::N_MESHES && gSettings.meshes[meshSlot].label.length()
                               ? gSettings.meshes[meshSlot].label.c_str() : "its mesh";
-  const char* teardownNote = !tornDown ? "\nThe radio peer could not be removed now (ESP-NOW closing?); run espnowunpair for it."
+  const char* teardownNote = radioPeerLeft ? "\nIts radio peer could not be removed now (ESP-NOW closing?); it goes with the next restart, and its frames are dropped meanwhile."
                            : (out.inRegistry && !out.devicesOk) ? "\nThe device list could not be saved: check storage with 'fsusage'."
                            : "";
   const char* bondSep = out.bondNote[0] ? "\n" : "";
@@ -19854,6 +19938,7 @@ const char* cmd_espnow_unrevoke(const String& argsInput) {
   if (target == "--all") {
     uint8_t count = 0;
     char movedTo[64];
+    espnowRevokedLoad();   // a list never read (no filesystem or memory at start-up) is read now
     const bool wasLocked = espnowRevokedLocked();
     const RevokedChange r = espnowRevokedClear(&count, movedTo, sizeof(movedTo));
     if (r != RevokedChange::Removed) {
@@ -20791,13 +20876,15 @@ void espnowFirstKeyBound(const uint8_t mac[6]) {
 }
 
 // The rollback job (cmd_exec): the registry entry goes only while it still has
-// no key (a key bound since then is a real pairing) and the MAC is not this
-// device.
+// no key (a key bound since then is a real pairing), its first-key window is
+// still open (checked again here: a fresh pairsecure of another device does not
+// race it) and the MAC is not this device.
 struct PairRollbackJob { uint8_t mac[6]; };
 static void runDeferredPairRollback(void* arg) {
   auto* w = static_cast<PairRollbackJob*>(arg);
   const EspNowDevice* dev = groupRecordOf(w->mac);
-  if (dev && !peerIdentityFindByMac(w->mac) && !isSelfMac(w->mac)) {
+  if (dev && !peerIdentityFindByMac(w->mac) && !isSelfMac(w->mac) &&
+      espnowrevoke::firstKeyOpen(dev->awaitingKeyUntilMs, (uint32_t)millis())) {
     const String name = dev->name.c_str();
     espnowrevoke::Entry hit = {};
     char date[24] = "an unknown date";
@@ -20817,7 +20904,10 @@ static void runDeferredPairRollback(void* arg) {
 
 void espnowPairRollbackRevoked(const uint8_t mac[6]) {
   const EspNowDevice* dev = groupRecordOf(mac);
-  if (!dev || peerIdentityFindByMac(mac)) return;   // nothing waiting for a first key here
+  // Only an entry espnowpairsecure made that still waits for its first key
+  // (its window open): never a paired device whose key is merely not loaded.
+  if (!dev || peerIdentityFindByMac(mac) ||
+      !espnowrevoke::firstKeyOpen(dev->awaitingKeyUntilMs, (uint32_t)millis())) return;
   auto* w = static_cast<PairRollbackJob*>(ps_alloc(sizeof(PairRollbackJob), AllocPref::PreferPsram,
                                                    "espnow.pair.rollback"));
   if (!w) return;

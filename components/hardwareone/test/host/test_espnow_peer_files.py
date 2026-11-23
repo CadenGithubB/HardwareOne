@@ -134,6 +134,11 @@ def main():
     pins = body(espnow, 'static bool espnowUnpairClearPins(', 'System_ESPNow.cpp')
     pairing = body(espnow, 'static void espnowUnpairClearPairing(', 'System_ESPNow.cpp')
     revoke = body(espnow, 'const char* cmd_espnow_revoke(', 'System_ESPNow.cpp')
+    tidy = body(espnow, 'static void espnowRevokedBootTidy() ', 'System_ESPNow.cpp')
+    init = body(espnow, 'bool initEspNow(', 'System_ESPNow.cpp')
+    rollback_queue = body(espnow, 'void espnowPairRollbackRevoked(', 'System_ESPNow.cpp')
+    rollback_job = body(espnow, 'static void runDeferredPairRollback(', 'System_ESPNow.cpp')
+    pair_request = body(espnow, 'static void v4h_pair_request(', 'System_ESPNow.cpp')
     manifest_resp = body(espnow, 'static void processBondModeManifestResp(', 'System_ESPNow.cpp')
     forget_crypto = body(espnow, 'static bool espnowForgetPeerCrypto(', 'System_ESPNow.cpp')
 
@@ -158,7 +163,7 @@ def main():
          0 <= at(unpair, 'manifestRefRead(mac,') < at(unpair, 'peerFilesRemove(mac,') < at(unpair, 'manifestDropIfUnused('),
          'the unpair teardown forgets the identity, reads the manifest reference, removes the peer folder, '
          'then drops the manifest'),
-        (at(unpair, 'formatUnpairFilesLine(') >= 0 and command.count('out.filesLine') == 4,
+        (at(unpair, 'formatUnpairFilesLine(') >= 0 and command.count('out.filesLine') == 3,
          'every reply of cmd_espnow_unpair after the removal carries the line about the files'),
         ('const char* cmd_espnow_forget(' not in espnow,
          'espnowforget is gone (ESP-NOW 1.0 step 3): espnowunpair and the boot identity check cover it'),
@@ -171,8 +176,25 @@ def main():
          'while the identity still holds the key'),
         (all(p in pairing for p in pairing_parts),
          'the teardown clears the candidate list, a pending pair request either way and the re-key window'),
-        (0 <= at(revoke, 'espnowRevokedAdd(') < at(revoke, 'espnowUnpairTeardown(mac, out)'),
+        (0 <= at(revoke, 'espnowRevokedAdd(') < at(revoke, 'espnowUnpairTeardown(mac, out'),
          'espnowrevoke writes the revoked list before any teardown'),
+        # Review 2026-11-23, findings 2, 4, 5, 6, 8.
+        (revoke.count('espnowUnpairTeardown(mac, out, /*revoking=*/true') == 3 and
+         '/*radioUp=*/false' in revoke,
+         'review 2: espnowrevoke retries a failed teardown, then tears down without the radio peer'),
+        (0 <= at(init, 'loadEspNowDevices();') < at(init, 'espnowRevokedBootTidy();') < at(init, 'restoreEspNowPeers();')
+         and 'espnowRevokedMacOrKey(' in tidy and '/*radioUp=*/false' in tidy and 'peerIdentityAt(' in tidy,
+         'review 2: at start-up a revoked device still listed or stored is torn down before the radio peers return'),
+        (0 <= at(unpair, 'out.keptIdentity = true;') < at(unpair, 'espnowForgetPeerCrypto(mac') and
+         '!out.devicesOk && !revoking' in unpair,
+         'review 5: an unpair whose registry save failed keeps the identity and folder'),
+        ('espnowrevoke::isUnicastMac(mac)' in revoke and 'espnowrevoke::isUnicastMac(mac)' in command,
+         'review 6: revoke and the unpair raw-MAC path refuse broadcast, group and all-zero addresses'),
+        ('espnowrevoke::firstKeyOpen(dev->awaitingKeyUntilMs' in rollback_queue and
+         'espnowrevoke::firstKeyOpen(dev->awaitingKeyUntilMs' in rollback_job,
+         'review 4: a rollback needs the open first-key window when queued and again in the job'),
+        (0 <= at(pair_request, 'espnowRevokedLocked()') < at(pair_request, 'espnowpair::onRequest('),
+         'review 8: a pair request is refused without a prompt while the revoked list is locked'),
         (re.search(r'cacheManifestToLittleFs\([^;]*\)\)\s*\{\s*manifestCacheRecordUse\(srcMac,', manifest_resp)
          is not None,
          'the bond sync records the manifest reference only after the manifest reached the cache'),

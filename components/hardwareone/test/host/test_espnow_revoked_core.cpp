@@ -57,8 +57,11 @@ int main() {
   check(findMacOrKey(t, m3, k1) == 0, "R1 the revoked key under another MAC is found (any MAC)");
   check(findMacOrKey(t, m2, k2) == 1, "R1 the revoked MAC with another key is found (any key)");
   check(findKey(t, zero) < 0, "R1 'no key' never matches an all-zero key");
-  check(add(t, m3, k1, 0, 5, "porch2") == AddResult::Updated && t.count == 2,
-        "R1 the same key under a new MAC refreshes the entry, it is not listed twice");
+  check(add(t, m3, k1, 0, 5, "porch2") == AddResult::Added && t.count == 3 && findMac(t, m1) == 0 &&
+            findMac(t, m3) == 2,
+        "R1 the same key under another MAC is a second entry: the first MAC stays listed (review 1)");
+  check(add(t, m1, k2, 0, 6, "porch") == AddResult::Updated && t.count == 3 && findMac(t, m3) == 2,
+        "R1 a second revoke of a listed MAC refreshes its own entry only");
   memset(&t, 0, sizeof t);
   for (uint8_t i = 0; i < kMax; i++) {
     uint8_t m[6], k[32];
@@ -82,6 +85,20 @@ int main() {
   char id[kKeyIdHexLen + 1];
   formatKeyId(k1, id);
   check(std::string(id) == "a1a1a1a1a1a1a1a1", "R1 the keyId is the first 16 hex digits of the key, lowercase");
+
+  // R6 (review 6) — only a unicast MAC can be revoked or unpaired by address.
+  {
+    const uint8_t bcast[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    const uint8_t mcast[6] = {0x01, 0x00, 0x5E, 0x00, 0x00, 0x01};
+    const uint8_t zeroMac[6] = {0, 0, 0, 0, 0, 0};
+    check(isUnicastMac(m1) && !isUnicastMac(bcast) && !isUnicastMac(mcast) && !isUnicastMac(zeroMac) &&
+              !isUnicastMac(nullptr),
+          "R6 broadcast, multicast and all-zero MACs are refused; a device MAC is taken");
+  }
+  // R7 (review 7) — espnowunrevoke --all moves aside only a file that was read.
+  check(clearAction(false, true) == ClearAction::WriteEmpty && clearAction(true, false) == ClearAction::RetryLoad &&
+            clearAction(true, true) == ClearAction::Quarantine,
+        "R7 a list locked because nothing could be read is read again first; only an unreadable file moves");
 
   // R2
   memset(&t, 0, sizeof t);

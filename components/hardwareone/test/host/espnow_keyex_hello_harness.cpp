@@ -618,6 +618,37 @@ int main() {
   check(gWrites == 0 && lastConfirmStatus() == espnowrevoke::kConfirmNotAccepted,
         "K19 a locked revoked list refuses a first key");
 
+#ifdef HW1_HAS_CONFIRM_KEEPS_RETRY
+  // K20 — review finding 3: an unauthenticated CONFIRM refusal (status 1-3)
+  // from a peer whose key is not stored is only logged; the HELLO retries of
+  // espnowpairsecure go on, so anyone in range cannot stop them.
+  reset();
+  {
+    const Peer t = peer(15, 0x15);
+    keyExInFlightArm(t.mac, 0, false);
+    for (uint8_t status : {1, 2, 3}) {
+      V4PayloadKeyExConfirm c{};
+      std::memcpy(c.confirmerMac, t.mac, 6);
+      c.status = status;
+      EspNowV4Header h{};
+      h.type = ESPNOW_V4_TYPE_KEY_EX_CONFIRM;
+      h.msgId = generateMessageId();
+      std::memcpy(h.origin, t.mac, 6);
+      esp_now_recv_info ri{t.mac, kSelfMac};
+      V4RxCtx ctx{};
+      ctx.recv_info = &ri;
+      ctx.h = &h;
+      ctx.payload = reinterpret_cast<const uint8_t*>(&c);
+      ctx.payloadLen = sizeof c;
+      v4hKeyExConfirm(ctx);
+    }
+    check(keyExIsInFlight(t.mac), "K20 a forged CONFIRM refusal from a peer with no stored key leaves the retries armed");
+    check(logged("still retrying"), "K20 it is logged");
+  }
+#else
+  check(false, "the tree's CONFIRM handler keeps the retries (review finding 3)");
+#endif
+
   std::printf("%u failure(s)\n", gFailures);
   return gFailures ? 1 : 0;
 }
