@@ -108,8 +108,13 @@ static bool rtcReadRegisters(uint8_t startReg, uint8_t* buffer, uint8_t count) {
     w->write(startReg);
     if (w->endTransmission() != 0) return false;
 
-    w->requestFrom((uint8_t)I2C_ADDR_DS3231, count);
-    for (uint8_t i = 0; i < count && w->available(); i++) {
+    // Every byte asked for, or the read failed: a short read left the rest
+    // of `buffer` as the caller had it, and a caller that tests a bit of it
+    // (the oscillator-stopped flag) then read "not set" from a chip that did
+    // not answer.
+    if (w->requestFrom((uint8_t)I2C_ADDR_DS3231, count) != count) return false;
+    for (uint8_t i = 0; i < count; i++) {
+      if (!w->available()) return false;
       buffer[i] = w->read();
     }
     return true;
@@ -265,9 +270,19 @@ static const char* rtcChipDistrust(RtcAdopt how) {
   return nullptr;
 }
 
+static const char kRtcWhyOutranked[] =
+    "Error: [RTC] System time not changed: the clock is set from a source that outranks the RTC "
+    "(see 'time'); 'timeset' sets it by hand.";
+
 // The one place the chip's time sets the system clock. False with *whyNot
-// (an "Error: ..." line) when it did not.
-static bool rtcAdoptToSystem(RtcAdopt how, const char** whyNot, RtcDateTime* adopted = nullptr) {
+// (an "Error: ..." line) when it did not. Every reason is a constant text
+// but one: a refusal by the clock's rank table names the source that
+// outranks the chip, and is written into `refusal` when the caller gives a
+// buffer of its own (the command does; boot, the RTC task and the NTP
+// fallback get the constant text). No shared buffer: this runs on the boot
+// task, the RTC task and the command task.
+static bool rtcAdoptToSystem(RtcAdopt how, const char** whyNot, RtcDateTime* adopted = nullptr,
+                             char* refusal = nullptr, size_t refusalCap = 0) {
   const char* fallback = nullptr;
   if (!whyNot) whyNot = &fallback;
 
@@ -278,15 +293,15 @@ static bool rtcAdoptToSystem(RtcAdopt how, const char** whyNot, RtcDateTime* ado
 
   const Clock::StepResult result = Clock::step(Clock::SYNC_RTC, rtcDateTimeToEpochUtc(&dt));
   if (result != Clock::StepResult::Stepped) {
-    // The refusal names the source that outranks the chip; the text lives
-    // for the rest of the boot (replies are returned by pointer).
-    static char* refusal = nullptr;
-    if (!refusal) refusal = (char*)ps_alloc(160, AllocPref::PreferPsram, "rtc.step.refusal");
-    if (!refusal) { *whyNot = "Error: [RTC] The system clock was not changed"; return false; }
-    char why[112];
-    snprintf(refusal, 160, "Error: [RTC] System time not changed: %s",
-             Clock::stepRefusalText(result, Clock::SYNC_RTC, why, sizeof(why)));
-    *whyNot = refusal;
+    if (refusal && refusalCap > 0) {
+      char why[112];
+      snprintf(refusal, refusalCap, "Error: [RTC] System time not changed: %s",
+               Clock::stepRefusalText(result, Clock::SYNC_RTC, why, sizeof(why)));
+      *whyNot = refusal;
+    } else {
+      *whyNot = result == Clock::StepResult::RefusedOutranked
+                    ? kRtcWhyOutranked : "Error: [RTC] The system refused the RTC's time";
+    }
     return false;
   }
   // The operator vouched for the chip: later boots adopt it on their own.
@@ -323,16 +338,24 @@ bool rtcEarlyBootSync(const char** whyNot) {
   return true;
 }
 
-bool rtcSyncToSystem(const char** whyNot, bool operatorAsked) {
+bool rtcSyncToSystem(const char** whyNot, bool operatorAsked, char* refusal, size_t refusalCap) {
   const char* why = nullptr;
   RtcDateTime dt;
-  if (!rtcAdoptToSystem(operatorAsked ? RtcAdopt::OperatorAsked : RtcAdopt::Automatic, &why, &dt)) {
+  if (!rtcAdoptToSystem(operatorAsked ? RtcAdopt::OperatorAsked : RtcAdopt::Automatic, &why, &dt,
+                        refusal, refusalCap)) {
+    // The reason goes to the caller, who knows whether it is a command's
+    // reply or a status line; nothing is printed from here.
     if (whyNot) *whyNot = why;
-    else if (why) broadcastOutput(why);
     return false;
   }
   DEBUG_RTC_VALUESF("[RTC] Synced system time from RTC: %s", rtcDateTimeToString(&dt).c_str());
   return true;
+}
+
+const char* rtcReasonText(const char* reply) {
+  static const char kReplyLead[] = "Error: [RTC] ";
+  if (!reply) return "";
+  return strncmp(reply, kReplyLead, sizeof(kReplyLead) - 1) == 0 ? reply + sizeof(kReplyLead) - 1 : reply;
 }
 
 bool rtcSyncFromSystem(const char** whyNot) {
@@ -556,7 +579,7 @@ void rtcTask(void* pvParameters) {
     if (rtcSyncToSystem(&whyNot)) {
       broadcastOutput("[RTC] System time synchronized from RTC");
     } else if (whyNot) {
-      DEBUG_RTC_LIFECYCLEF("[RTC] System time not taken from the RTC: %s", whyNot);
+      DEBUG_RTC_LIFECYCLEF("[RTC] System time not taken from the RTC: %s", rtcReasonText(whyNot));
     }
   }
   
@@ -859,8 +882,13 @@ const char* cmd_rtcsync(const String& argsInput) {
     // chip this device has not set itself is taken too (and marked set), as
     // long as its oscillator has not stopped. The clock's rank table still
     // decides: the reply says which source outranks the RTC when it does.
+    // The refusal text names the outranking source; it is this command's own
+    // buffer (commands run one at a time on the command task), in PSRAM.
+    static char* refusal = nullptr;
+    static constexpr size_t kRefusalCap = 192;
+    if (!refusal) refusal = (char*)ps_alloc(kRefusalCap, AllocPref::PreferPsram, "rtcsync.refusal");
     const char* whyNot = "Error: [RTC] Sync failed";
-    if (rtcSyncToSystem(&whyNot, true)) {
+    if (rtcSyncToSystem(&whyNot, true, refusal, refusal ? kRefusalCap : 0)) {
       Clock::clockDutiesFlush();
       return "[RTC] System time updated from RTC";
     }

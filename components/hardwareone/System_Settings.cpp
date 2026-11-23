@@ -1619,10 +1619,12 @@ static bool writeSettingsJsonImpl(bool clearPipeCredentials) {
   // and rebuilds three sections from it - blePeersWriteJson() and
   // espnowMeshesWriteJson() both .to<>() their objects, and every registered
   // scalar is stamped from gSettings - so the merge-read cannot recover any of
-  // it. On a WiFi device the trigger fires ~2 s into boot without anyone asking
-  // for it: a successful association calls saveWifiNetworks(), which lands
-  // here. Bluetooth pairings and the whole ESP-NOW mesh/bond config are gone
-  // before an operator could notice the file was damaged.
+  // it. On a WiFi device the trigger used to fire ~2 s into boot without anyone
+  // asking for it: a successful association called saveWifiNetworks(), which
+  // landed here (that save is gone since 2026-11-22; the next setting any
+  // command changes lands here just the same). Bluetooth pairings and the
+  // whole ESP-NOW mesh/bond config were gone before an operator could notice
+  // the file was damaged.
   //
   // The guard belongs here rather than on each section: this is the single
   // choke point every destructive rebuild passes through, and covering the

@@ -114,26 +114,102 @@ enum class StepVerdict : uint8_t {
 //     It is a deliberate act, and it is how a clock that an NTP reply moved
 //     wrongly is put right (System_ClockConfirmPolicy.h).
 //   - Mesh time is the other: it corrects mesh time, with or without NTP
-//     behind either. A follower follows the master it names, and that
-//     master's own source may change (its NTP gone, a timeset on it); the
-//     two mesh ranks order mesh time against the OTHER sources.
+//     behind either, down to the device's own source. A follower follows the
+//     master it names, and that master's own source may change (its NTP gone,
+//     a timeset on it), so the two mesh ranks order mesh time against the
+//     OTHER sources, not against each other. But the master's time never
+//     ranks below what the device had itself: `floor` is the source that set
+//     the clock before mesh time took it over (None when the clock was not
+//     set, or only carried over a restart). A device whose RTC chip set its
+//     clock follows an NTP-backed master (mesh-ntp outranks rtc) and stops
+//     following when that master's time is no longer from NTP (plain mesh
+//     does not outrank rtc); a device with nothing of its own follows either.
 constexpr bool sourceIsMesh(Source s) { return s == Source::Mesh || s == Source::MeshNtp; }
 
 // May `candidate` correct a clock that `current` set? (The question without
-// a time; mesh time asks it before it looks at the frame's time.)
-constexpr bool sourceMayCorrect(Source candidate, Source current, bool clockSet) {
+// a time; mesh time asks it before it looks at the frame's time.) `floor`
+// matters only while both are mesh time: see above.
+constexpr bool sourceMayCorrect(Source candidate, Source current, bool clockSet, Source floor = Source::None) {
   return candidate != Source::None && candidate < Source::Count &&
          (!clockSet || candidate == Source::Manual ||
-          (sourceIsMesh(candidate) && sourceIsMesh(current)) ||
-          sourceRank(candidate) >= sourceRank(current));
+          (sourceIsMesh(candidate) && sourceIsMesh(current)
+               ? sourceRank(candidate) >= sourceRank(floor)
+               : sourceRank(candidate) >= sourceRank(current)));
+}
+
+// The floor after `candidate` has set a clock that `current` had set with
+// `floor` (clockSet: the clock was set before the step). Mesh time taking
+// over from another source remembers it; mesh time following mesh time keeps
+// what is remembered; any other source clears it.
+constexpr Source floorAfterStep(Source candidate, Source current, bool clockSet, Source floor) {
+  return !sourceIsMesh(candidate) ? Source::None
+       : !clockSet ? Source::None
+       : sourceIsMesh(current) ? floor
+       : current;
 }
 
 constexpr StepVerdict stepVerdict(Source candidate, int64_t candidateEpoch,
-                                  Source current, bool clockSet) {
+                                  Source current, bool clockSet, Source floor = Source::None) {
   return candidate == Source::None || candidate >= Source::Count ? StepVerdict::RefusedNoSource
        : !isPlausibleEpoch(candidateEpoch) ? StepVerdict::RefusedImplausible
-       : sourceMayCorrect(candidate, current, clockSet) ? StepVerdict::Allowed
+       : sourceMayCorrect(candidate, current, clockSet, floor) ? StepVerdict::Allowed
        : StepVerdict::RefusedOutranked;
+}
+
+// The ledger: which source the clock's time is from. System_Clock keeps one
+// under its lock; the functions are the whole of its bookkeeping.
+//
+// lwIP's SNTP client sets the clock on its own task, and the main loop
+// reports that step a little later. Between the two the clock already shows
+// NTP's time: ledgerCurrent says Ntp from the callback on (sntpPending), so a
+// source that comes in between is ranked against NTP and not against the
+// stale `source`. An operator command is the one source that may still
+// replace the time then (sntpSuperseded); the report then runs under that
+// command's name instead of relabelling its time as NTP's.
+struct Ledger {
+  Source source = Source::None;   // the last source that set the clock this boot
+  Source floor = Source::None;    // what the clock had before mesh time took it over
+  bool sntpPending = false;       // lwIP set the clock; the report has not run
+  bool sntpSuperseded = false;    // ... and another source has set it since
+};
+
+// The source the clock's time is from right now.
+constexpr Source ledgerCurrent(const Ledger& l) {
+  return (l.sntpPending && !l.sntpSuperseded) ? Source::Ntp : l.source;
+}
+
+// May `candidate` set the clock to `candidateEpoch` now?
+constexpr StepVerdict ledgerVerdict(const Ledger& l, Source candidate, int64_t candidateEpoch, bool clockSet) {
+  return stepVerdict(candidate, candidateEpoch, ledgerCurrent(l), clockSet, l.floor);
+}
+
+// `src` has set the clock (clockSet: it was set before). Also the bookkeeping
+// of a reported SNTP step, with src = the name ledgerOnSntpReport returned.
+inline void ledgerOnStep(Ledger& l, Source src, bool clockSet) {
+  l.floor = floorAfterStep(src, ledgerCurrent(l), clockSet, l.floor);
+  l.source = src;
+}
+
+// A source other than lwIP has set the clock (Clock::step, after
+// ledgerOnStep): an SNTP step that still waits for its report is replaced.
+inline void ledgerAfterOwnStep(Ledger& l) {
+  if (l.sntpPending) l.sntpSuperseded = true;
+}
+
+// The SNTP callback: lwIP has just set the clock.
+inline void ledgerOnSntpPending(Ledger& l) {
+  l.sntpPending = true;
+  l.sntpSuperseded = false;
+}
+
+// The main-loop report of an SNTP step: the name its chores run under. Ntp,
+// or the source that replaced NTP's time since. The caller then runs the
+// step's chores, which end in ledgerOnStep with that name.
+inline Source ledgerOnSntpReport(Ledger& l) {
+  const Source name = (l.sntpPending && l.sntpSuperseded) ? l.source : Source::Ntp;
+  l.sntpPending = false;
+  l.sntpSuperseded = false;
+  return name;
 }
 
 // ---------------------------------------------------------------------------

@@ -1899,39 +1899,29 @@ const char* cmd_uptime(const String& argsInput) {
 const char* cmd_time(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
 
-  // Structured path: resolve the active time source (RTC primary, NTP fallback)
-  // and emit one verbatim JSON blob via a small PSRAM buffer. No broadcastOutput.
-  // All values are digits / a fixed time format, so manual building is safe.
+  // The time shown is the system clock: the clock the device runs on, set by
+  // the source the ledger names. (On a board with a DS3231 this command used
+  // to show a live read of the chip instead: a chip that is not trusted, and
+  // so was not adopted, then showed as the time, labelled "(RTC)", while
+  // `synced` was false.) The chip's own reading is `rtcread`; its temperature
+  // stays here as an extra.
+
+  // Structured path: one verbatim JSON blob via a small PSRAM buffer. No
+  // broadcastOutput. All values are digits / a fixed time format, so manual
+  // building is safe.
   if (argWantsJson(argsInput)) {
-    char timeBuf[40] = "";
-    bool haveTime = false;
+    // One reading of the clock for all three: synced, time and timeEpochMs.
+    const int64_t nowEpochMs = Clock::epochMillisOrZero();  // 0 while the clock is not set
+    char timeBuf[40] = "";   // "" while the clock is not set
     bool haveTemp = false;
     float temp = 0.0f;
-    // Displayed time: live RTC read when the hardware is present (deliberate
-    // — do not replace with the system clock), else the system clock.
+    if (nowEpochMs > 0) Clock::formatIso8601Local((time_t)(nowEpochMs / 1000), timeBuf, sizeof(timeBuf));
 #if ENABLE_RTC_SENSOR
     if (gRtcRunning && gRtcConnected) {
-      RtcDateTime dt;
-      if (rtcReadDateTime(&dt)) {
-        // RTC stores UTC; every human-facing surface shows local (ds3231.h
-        // contract). This branch used to skip the conversion, so the same
-        // "time" field was UTC on RTC boards but local on NTP-only boards.
-        RtcDateTime local = rtcLocalTime(&dt);
-        snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
-                 local.year, local.month, local.day, local.hour, local.minute, local.second);
-        haveTime = true;
-        temp = rtcReadTemperature();
-        haveTemp = (temp != kRtcTemperatureUnavailable);
-      }
+      temp = rtcReadTemperature();
+      haveTemp = (temp != kRtcTemperatureUnavailable);
     }
 #endif
-    if (!haveTime) {
-      struct tm timeinfo;
-      if (getLocalTime(&timeinfo, 0)) {
-        strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S", &timeinfo);
-        haveTime = true;
-      }
-    }
     // "source" is the ledger: which custody chain actually stepped the
     // clock THIS boot (rtc/ntp/manual/ring). synced:true + source:"none"
     // means the time was carried across a soft reboot in the RTC domain.
@@ -1942,12 +1932,11 @@ const char* cmd_time(const String& argsInput) {
     // ms (null while it is not set) and tzOffsetMinutes the device's fixed
     // offset: with these two a reader shows device-local time itself.
     char epochText[24] = "null";
-    const int64_t nowEpochMs = Clock::epochMillisOrZero();
     if (nowEpochMs > 0) snprintf(epochText, sizeof(epochText), "%lld", (long long)nowEpochMs);
     int p = snprintf(buf, 256,
       "{\"schema\":1,\"synced\":%s,\"source\":\"%s\",\"time\":\"%s\",\"timeEpochMs\":%s,"
       "\"tzOffsetMinutes\":%d,\"uptime_ms\":%lu",
-      Clock::isSynced() ? "true" : "false",
+      nowEpochMs > 0 ? "true" : "false",
       Clock::syncSourceName(Clock::syncSource()), timeBuf, epochText,
       Clock::tzOffsetMinutes(),
       (unsigned long)millis());
@@ -1966,42 +1955,38 @@ const char* cmd_time(const String& argsInput) {
                     "than a day. timeset or a restart ends the hold.");
   }
   
-  // Priority: RTC (primary) -> NTP (fallback)
-#if ENABLE_RTC_SENSOR
-  if (gRtcRunning && gRtcConnected) {
-    // RTC is primary display source (live register read — deliberate).
-    RtcDateTime dt;
-    if (rtcReadDateTime(&dt)) {
-      RtcDateTime local = rtcLocalTime(&dt);  // RTC stores UTC; show local
-      char timeBuf[32];
-      snprintf(timeBuf, sizeof(timeBuf), "%04d-%02d-%02dT%02d:%02d:%02d",
-               local.year, local.month, local.day, local.hour, local.minute, local.second);
-      BROADCAST_PRINTF("Time: %s (RTC)", timeBuf);
-      const float temp = rtcReadTemperature();
-      if (temp == kRtcTemperatureUnavailable) {
-        broadcastOutput("Temp: n/a");
-      } else {
-        BROADCAST_PRINTF("Temp: %.1f C", temp);
-      }
-      return "OK";
-    }
-  }
-#endif
-
-  // Fallback to system time if RTC not available
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo, 0)) {
+  const bool clockSet = Clock::isSynced();
+  if (clockSet) {
     char timeBuf[32];
-    strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S", &timeinfo);
+    Clock::formatIso8601Local(time(nullptr), timeBuf, sizeof(timeBuf));
     const Clock::SyncSource src = Clock::syncSource();
     // "none" while synced = time carried across a soft reboot in hardware.
     BROADCAST_PRINTF("Time: %s (source: %s)", timeBuf,
-                     (src == Clock::SYNC_NONE && Clock::isSynced())
-                         ? "carried over soft reboot"
-                         : Clock::syncSourceName(src));
+                     src == Clock::SYNC_NONE ? "carried over soft reboot" : Clock::syncSourceName(src));
   } else {
     broadcastOutput("Time: Not synced (no time source yet)");
   }
+
+#if ENABLE_RTC_SENSOR
+  if (gRtcRunning && gRtcConnected) {
+    // The chip's own reading is not the device's time while the clock is not
+    // set (the chip was not adopted: never set by this device, or it lost
+    // power): shown as what it is.
+    RtcDateTime dt;
+    if (!clockSet && rtcReadDateTime(&dt)) {
+      RtcDateTime local = rtcLocalTime(&dt);  // RTC stores UTC; show local
+      BROADCAST_PRINTF("RTC chip: %04d-%02d-%02dT%02d:%02d:%02d (not adopted as the system time; "
+                       "'rtcsync to' takes it, 'rtcset' sets it)",
+                       local.year, local.month, local.day, local.hour, local.minute, local.second);
+    }
+    const float temp = rtcReadTemperature();
+    if (temp == kRtcTemperatureUnavailable) {
+      broadcastOutput("Temp: n/a");
+    } else {
+      BROADCAST_PRINTF("Temp: %.1f C", temp);
+    }
+  }
+#endif
 
   return "OK";
 }

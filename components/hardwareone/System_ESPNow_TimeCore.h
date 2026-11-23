@@ -79,9 +79,12 @@ static_assert((int)OwnSource::None == (int)clockcore::Source::None && (int)OwnSo
               "meshtime::OwnSource mirrors clockcore::Source");
 
 // May a frame with this wire source correct a clock that `own` set? The
-// clock's rank table decides (clockcore::sourceMayCorrect).
-constexpr bool frameMayCorrect(uint8_t wireSource, OwnSource own) {
-  return clockcore::sourceMayCorrect((clockcore::Source)frameClockSource(wireSource), (clockcore::Source)own, true);
+// clock's rank table decides (clockcore::sourceMayCorrect). `floor` is what
+// the clock had before mesh time took it over (Clock::meshFloorSource): a
+// clock on mesh time follows its master down to that source and no lower.
+constexpr bool frameMayCorrect(uint8_t wireSource, OwnSource own, OwnSource floor = OwnSource::None) {
+  return clockcore::sourceMayCorrect((clockcore::Source)frameClockSource(wireSource), (clockcore::Source)own, true,
+                                     (clockcore::Source)floor);
 }
 
 // A source a clock can be passed on from by a master. Not the ring, not mesh
@@ -297,10 +300,17 @@ inline void peerSent(PeerSendState& p, const RoundState& r, uint32_t established
 //   own clock set from          frame from an NTP master   any other frame
 //   ntp, manual                 ignored_better_source      ignored_better_source
 //   cm5, rtc, ring              judged (8 to 12)           ignored_better_source
-//   mesh, mesh-ntp, carried     judged                     judged
+//   mesh, mesh-ntp, carried     judged                     judged, unless the
+//                                                          device's own source
+//                                                          outranks it (below)
 //
 // A clock that mesh time set follows the named master whatever that master's
-// source is now.
+// source is now, down to what the device had itself: ownFloor is the source
+// that set the clock before mesh time took it over (the CM5, the RTC chip or
+// the ring; none when the clock was not set or only carried over a restart).
+// A device whose RTC set its clock follows an NTP-backed master, and when
+// that master's time is no longer from NTP its frames are
+// ignored_better_source again: plain mesh time does not outrank the chip.
 //
 // 3: mesh time comes only from the master named on this device: the primary
 // (espnowmasterfingerprint), or the backup (espnowbackupfingerprint), which
@@ -401,6 +411,7 @@ struct FollowerInputs {
   bool      actingMaster;
   bool      clockSet;
   OwnSource ownSource;
+  OwnSource ownFloor;              // what the clock had before mesh time took it over (None: nothing)
   int64_t   nowEpochMs;            // this device's clock (meaningful when clockSet)
   int64_t   nowMonoMs;             // monotonic time now
 };
@@ -468,7 +479,10 @@ inline Decision followerDecide(FollowerState& st, const FollowerInputs& in, cons
     d.verdict = Verdict::RefusedBadTime;
     return d;
   }
-  if (in.clockSet && !frameMayCorrect(f.source, in.ownSource)) { d.verdict = Verdict::IgnoredBetterSource; return d; }
+  if (in.clockSet && !frameMayCorrect(f.source, in.ownSource, in.ownFloor)) {
+    d.verdict = Verdict::IgnoredBetterSource;
+    return d;
+  }
   if (in.clockSet && f.source >= kSrcWeakFirst) { d.verdict = Verdict::IgnoredWeakSource; return d; }
 
   const uint8_t rank = senderRank(in);

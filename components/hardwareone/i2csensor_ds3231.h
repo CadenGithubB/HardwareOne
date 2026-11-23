@@ -72,11 +72,19 @@ float rtcReadTemperature();
 // oscillator has not stopped since). False with *whyNot = an "Error: ..." line
 // when a chip answered but its time was not taken, nullptr when no chip did.
 bool rtcEarlyBootSync(const char** whyNot = nullptr);
-// A command passes `whyNot` and gets the failure as its reply text; without it
-// the reason is printed on the output stream. Both go through Clock::step
-// (the rank table). `operatorAsked` ('rtcsync to'): a chip this device has not
-// set is taken as well, and is marked set; automatic callers leave it false.
-bool rtcSyncToSystem(const char** whyNot = nullptr, bool operatorAsked = false);  // RTC -> ESP32 system time
+// RTC -> system time, through Clock::step (the rank table). False with
+// *whyNot = the reason as a reply line ("Error: [RTC] ..."); nothing is
+// printed from here, the caller says it in its own way (rtcReasonText gives
+// the reason without the reply lead, for a status line).
+// `operatorAsked` ('rtcsync to'): a chip this device has not set is taken as
+// well, and is marked set; automatic callers leave it false. `refusal`: the
+// caller's own buffer for the one reason that is not a constant text (the
+// rank table's refusal, which names the outranking source); without it that
+// reason is a constant text too.
+bool rtcSyncToSystem(const char** whyNot = nullptr, bool operatorAsked = false,
+                     char* refusal = nullptr, size_t refusalCap = 0);
+// A reason from the functions above without its reply lead "Error: [RTC] ".
+const char* rtcReasonText(const char* reply);
 bool rtcSyncFromSystem(const char** whyNot = nullptr);    // ESP32 system time -> RTC
 
 // Utility functions

@@ -163,6 +163,30 @@ def check_sources(component: Path) -> None:
     require(ntp < apply_at < duties,
             "the main loop applies mesh time after the SNTP report and before the clock duties")
     require(loop.count("espnowMeshTimeApplyTick();") == 1, "one call of the apply tick")
+    # The SNTP report is the first clock source of a lap: the ring's and the
+    # CM5's ticks are ranked against a ledger that knows about a fresh reply.
+    require(ntp < loop.index("  g2RingTimeSyncTick();") and ntp < loop.index("  cm5TimeSyncTick();"),
+            "the main loop reports an SNTP step before it hands in the ring's and the CM5's time")
+    # Clock::step is one unit under the step mutex, ranks against the ledger
+    # (NTP while an SNTP step waits for its report, the mesh floor), and the
+    # SNTP report runs under the same mutex.
+    step = strip_comments(extract_block(clock, "StepResult step(SyncSource src, time_t epoch, uint32_t usec)"))
+    require("verdictNow(src, epoch, before)" in step and
+            step.index("StepLock lock;") < step.index("verdictNow(") < step.index("settimeofday(") < step.index("clockStepped(src, before)") < step.index("ledgerAfterOwnStep("),
+            "Clock::step: verdict, settimeofday and ledger under one mutex")
+    verdict = strip_comments(extract_block(clock, "static StepResult verdictNow(SyncSource src, time_t epoch, time_t now)"))
+    require("clockcore::ledgerVerdict(ledger," in verdict, "the verdict asks the ledger (clockcore::ledgerVerdict)")
+    report = strip_comments(extract_block(clock, "void sntpStepReport(time_t before)"))
+    require("clockStepped(name, before)" in report and
+            report.index("StepLock lock;") < report.index("clockcore::ledgerOnSntpReport(sLedger)") <
+            report.index("clockStepped(name, before)"), "the SNTP report runs under the step mutex, under the ledger's name")
+    ntp_source = strip_comments((component / "System_NTP.cpp").read_text())
+    callback = extract_block(ntp_source, "static void onSntpTimeSync(struct timeval* tv)")
+    require("Clock::sntpStepPending();" in callback and "Clock::sntpStepReport(before);" in ntp_source and
+            "Clock::clockStepped(" not in ntp_source,
+            "the SNTP callback marks the step pending and the drain reports it through Clock::sntpStepReport")
+    require("in.ownFloor = mtOwnFloor();" in extract_block(hosted, "static meshtime::FollowerInputs meshTimeFollowerInputs("),
+            "every frame is judged with what the clock had before mesh time took it over")
 
     wire = (component / "System_ESPNow_Wire.h").read_text()
     struct = strip_comments(extract_block(wire, "struct __attribute__((packed)) V4PayloadTimeSync"))

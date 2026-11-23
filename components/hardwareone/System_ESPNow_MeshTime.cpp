@@ -68,6 +68,8 @@ static int64_t mtMonoMs() { return (int64_t)(esp_timer_get_time() / 1000); }
 static bool mtClockSet() { return Clock::isSynced(); }
 static int64_t mtEpochMs() { return Clock::epochMillis(); }
 static meshtime::OwnSource mtOwnSource() { return (meshtime::OwnSource)Clock::syncSource(); }
+// What the clock had before mesh time took it over (None: nothing of its own).
+static meshtime::OwnSource mtOwnFloor() { return (meshtime::OwnSource)Clock::meshFloorSource(); }
 static bool mtClockHeld() { return Clock::confirmedClockHeld(); }
 static uint32_t mtStepSerial() { return Clock::stepSerial(); }
 // Seconds since the clock was last set this boot; false when nothing set it.
@@ -239,6 +241,7 @@ static meshtime::FollowerInputs meshTimeFollowerInputs(const uint8_t sender[6]) 
   in.actingMaster = mtMeshOn() && mtRole() == 1;
   in.clockSet = mtClockSet();
   in.ownSource = mtOwnSource();
+  in.ownFloor = mtOwnFloor();
   in.nowEpochMs = in.clockSet ? mtEpochMs() : 0;
   in.nowMonoMs = mtMonoMs();
   return in;
@@ -687,7 +690,7 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
   } else {
     meshTimeAppend(reply, cap, &pos,
                    "  Role: %s. Takes time from the master named on this device when it has no better source "
-                   "(rtc, ntp, manual, cm5).\n",
+                   "(its own ntp or a manual time; for a master whose clock is not from ntp also cm5, rtc, ring).\n",
                    meshTimeRoleName(role));
   }
 
@@ -718,10 +721,15 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
       case meshtime::Verdict::IgnoredMaster:
         meshTimeAppend(reply, cap, &pos, "Not used: this device is the mesh master.\n");
         break;
-      case meshtime::Verdict::IgnoredBetterSource:
+      case meshtime::Verdict::IgnoredBetterSource: {
+        // A clock on mesh time refuses a frame because of what the device
+        // had before mesh time took over (the floor): that is the source to name.
+        const bool onMesh = in.source == meshtime::OwnSource::Mesh || in.source == meshtime::OwnSource::MeshNtp;
+        const meshtime::OwnSource floor = mtOwnFloor();
         meshTimeAppend(reply, cap, &pos, "Not used: this device has a better source (%s).\n",
-                       meshTimeOwnSourceText(in.clockSet, in.source));
+                       meshTimeOwnSourceText(in.clockSet, onMesh && floor != meshtime::OwnSource::None ? floor : in.source));
         break;
+      }
       case meshtime::Verdict::IgnoredWeakSource:
         meshTimeAppend(reply, cap, &pos,
                        "Not used: the sender's clock has no real source, and this device's clock is set.\n");

@@ -61,8 +61,9 @@ HAND_TESTS = (
     r"\b\w*(?:now|Now)\w*\s*(?:<|>|<=|>=)\s*1[5-7]\d{8}\b",
     r"\btime\((?:nullptr|NULL)\)\s*(?:>|<=)\s*0\b",
     # A time read into `now` or `t` and tested against 0: true one second after boot.
-    r"\(\s*now\s*>\s*0\s*\)\s*\?",
-    r"\bif\s*\(\s*(?:now|t)\s*<=\s*0\s*(?:\)|\|\|)",
+    r"\(\s*now(?:Sec)?\s*>\s*0\s*\)\s*\?",
+    r"\bif\s*\(\s*(?:now|nowSec|t)\s*<=\s*0\s*(?:\)|\|\|)",
+    r"\bif\s*\(\s*(?:now|nowSec)\s*>\s*0\s*(?:\)|&&)",
     r"\bnow\s*,\s*now\s*>\s*0\s*\)",
 )
 

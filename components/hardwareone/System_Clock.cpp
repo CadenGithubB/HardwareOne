@@ -5,6 +5,8 @@
 #include <cstring>
 #include <sys/time.h>  // gettimeofday — epochMillis()
 #include <esp_timer.h> // esp_timer_get_time — the projection reference
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>  // the step mutex
 
 #include "System_ClockConfirmPolicy.h" // which clock steps the ring is given
 #include "System_Settings.h"    // gSettings.tzOffsetMinutes, rtcTimeHasBeenSet
@@ -174,6 +176,11 @@ const char* timezoneOptionsText() {
 // tearable without the lock).
 static portMUX_TYPE sClockMux = portMUX_INITIALIZER_UNLOCKED;
 
+// Which source the clock's time is from (clockcore::Ledger has the rules):
+// the last source that set it, the mesh floor, and an SNTP step that lwIP
+// has made and the main loop has not reported yet. Under sClockMux.
+static clockcore::Ledger sLedger;
+// The last step's label for the duties drain (they belong to that step).
 static SyncSource sSource   = SYNC_NONE;
 static long       sStepDelta = 0;      // seconds moved by the last step
 static uint32_t   sStepSerial = 0;     // steps this boot (stepSerial)
@@ -219,7 +226,19 @@ bool confirmedClockHeld() {
   return wallAndMonotonicUs(wallUs, monoUs) && ClockConfirm::disagrees(confirmState(), wallUs, monoUs);
 }
 
-SyncSource syncSource() { return sSource; }
+SyncSource syncSource() {
+  portENTER_CRITICAL(&sClockMux);
+  const SyncSource source = (SyncSource)clockcore::ledgerCurrent(sLedger);
+  portEXIT_CRITICAL(&sClockMux);
+  return source;
+}
+
+SyncSource meshFloorSource() {
+  portENTER_CRITICAL(&sClockMux);
+  const SyncSource floor = (SyncSource)sLedger.floor;
+  portEXIT_CRITICAL(&sClockMux);
+  return floor;
+}
 
 uint32_t stepSerial() {
   portENTER_CRITICAL(&sClockMux);
@@ -267,24 +286,85 @@ static StepResult stepResultFor(clockcore::StepVerdict verdict) {
   return StepResult::RefusedNoSource;
 }
 
+// One mutex around "verdict, settimeofday, ledger" (step) and around the
+// report of an SNTP step: a FreeRTOS mutex, since settimeofday() must not run
+// inside a critical section. Made at first use; without one (out of memory)
+// the steps run unserialised, as they did before.
+static SemaphoreHandle_t stepMutex() {
+  static SemaphoreHandle_t sMutex = nullptr;
+  portENTER_CRITICAL(&sClockMux);
+  SemaphoreHandle_t have = sMutex;
+  portEXIT_CRITICAL(&sClockMux);
+  if (have) return have;
+  SemaphoreHandle_t made = xSemaphoreCreateMutex();
+  if (!made) return nullptr;
+  portENTER_CRITICAL(&sClockMux);
+  if (!sMutex) { sMutex = made; made = nullptr; }  // another task made it meanwhile: keep the first
+  have = sMutex;
+  portEXIT_CRITICAL(&sClockMux);
+  if (made) vSemaphoreDelete(made);
+  return have;
+}
+
+struct StepLock {
+  SemaphoreHandle_t mutex;
+  StepLock() : mutex(stepMutex()) { if (mutex) xSemaphoreTake(mutex, portMAX_DELAY); }
+  ~StepLock() { if (mutex) xSemaphoreGive(mutex); }
+  StepLock(const StepLock&) = delete;
+  StepLock& operator=(const StepLock&) = delete;
+};
+
+// The verdict against the clock as it is now: the source its time is from
+// (NTP while an SNTP step waits for its report) and the mesh floor.
+static StepResult verdictNow(SyncSource src, time_t epoch, time_t now) {
+  portENTER_CRITICAL(&sClockMux);
+  const clockcore::Ledger ledger = sLedger;
+  portEXIT_CRITICAL(&sClockMux);
+  return stepResultFor(clockcore::ledgerVerdict(ledger, (clockcore::Source)src, (int64_t)epoch, isValidEpoch(now)));
+}
+
 StepResult stepVerdict(SyncSource src, time_t epoch) {
-  const bool clockSet = isSynced();
-  return stepResultFor(clockcore::stepVerdict((clockcore::Source)src, (int64_t)epoch,
-                                              (clockcore::Source)syncSource(), clockSet));
+  return verdictNow(src, epoch, time(nullptr));
 }
 
 StepResult step(SyncSource src, time_t epoch, uint32_t usec) {
+  StepLock lock;
   const time_t before = time(nullptr);
-  const StepResult verdict = stepResultFor(
-      clockcore::stepVerdict((clockcore::Source)src, (int64_t)epoch, (clockcore::Source)syncSource(),
-                             isValidEpoch(before)));
+  const StepResult verdict = verdictNow(src, epoch, before);
   if (verdict != StepResult::Stepped) return verdict;
   struct timeval tv;
   tv.tv_sec = epoch;
   tv.tv_usec = (suseconds_t)(usec < 1000000u ? usec : 999999u);
   if (settimeofday(&tv, nullptr) != 0) return StepResult::Failed;
   clockStepped(src, before);
+  // An SNTP step that still waits for its report has been replaced (only an
+  // operator command gets here over NTP): the report must not relabel this
+  // time as NTP's.
+  portENTER_CRITICAL(&sClockMux);
+  clockcore::ledgerAfterOwnStep(sLedger);
+  portEXIT_CRITICAL(&sClockMux);
   return StepResult::Stepped;
+}
+
+void sntpStepPending() {
+  portENTER_CRITICAL(&sClockMux);
+  clockcore::ledgerOnSntpPending(sLedger);  // lwIP has just set the clock: it shows NTP's time
+  portEXIT_CRITICAL(&sClockMux);
+}
+
+void sntpStepReport(time_t before) {
+  StepLock lock;
+  portENTER_CRITICAL(&sClockMux);
+  const SyncSource name = (SyncSource)clockcore::ledgerOnSntpReport(sLedger);
+  // The ledger names the step in the same breath as it stops being pending
+  // (clockStepped repeats this with the same result).
+  clockcore::ledgerOnStep(sLedger, (clockcore::Source)name, isValidEpoch(before));
+  portEXIT_CRITICAL(&sClockMux);
+  // Not NTP when an operator command set the clock after lwIP did: the clock
+  // shows that command's time. The chores of the step from `before` are
+  // still owed (this may be the first valid clock of the boot); they run
+  // under that name.
+  clockStepped(name, before);
 }
 
 const char* stepRefusalText(StepResult result, SyncSource src, char* out, size_t outSize) {
@@ -385,6 +465,7 @@ void clockStepped(SyncSource src, time_t before) {
   // never relabel duties that belong to an earlier step. ORing pend==0 is
   // a harmless no-op, and the ledger must update on every step regardless.
   portENTER_CRITICAL(&sClockMux);
+  clockcore::ledgerOnStep(sLedger, (clockcore::Source)src, beforeValid);
   sSource    = src;
   sStepDelta = delta;
   sPending  |= pend;

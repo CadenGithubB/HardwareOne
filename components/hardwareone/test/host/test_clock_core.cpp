@@ -91,11 +91,123 @@ static void rankTable() {
   CHECK(stepVerdict(Source::Mesh, kNow, Source::None, true) == StepVerdict::Allowed);        // a carried clock
   CHECK(stepVerdict(Source::Rtc, kNow, Source::Rtc, true) == StepVerdict::Allowed);
 
+  // The master is followed down to what the device had itself, and no
+  // lower: the floor is the source that set the clock before mesh time took
+  // it over. Plain mesh time (rank 1) replaces an NTP-backed master's time
+  // only on a device with nothing of its own.
+  for (Source floor : { Source::None, Source::Rtc, Source::Cm5, Source::Ring }) {
+    const bool nothingOwn = floor == Source::None;
+    CHECK(sourceMayCorrect(Source::Mesh, Source::MeshNtp, true, floor) == nothingOwn);
+    CHECK(sourceMayCorrect(Source::Mesh, Source::Mesh, true, floor) == nothingOwn);
+    CHECK(sourceMayCorrect(Source::MeshNtp, Source::MeshNtp, true, floor));   // mesh-ntp outranks all three
+    CHECK(sourceMayCorrect(Source::MeshNtp, Source::Mesh, true, floor));
+    CHECK((stepVerdict(Source::Mesh, kNow, Source::MeshNtp, true, floor) == StepVerdict::Allowed) == nothingOwn);
+    // The floor matters only between mesh and mesh.
+    CHECK(sourceMayCorrect(Source::Rtc, Source::Rtc, true, floor) && !sourceMayCorrect(Source::Ring, Source::Rtc, true, floor));
+    CHECK(sourceMayCorrect(Source::Manual, Source::MeshNtp, true, floor) && sourceMayCorrect(Source::Mesh, Source::None, false, floor));
+  }
+  // What is remembered: mesh time taking over from another source keeps it,
+  // mesh after mesh keeps what was kept, anything else clears it.
+  CHECK(floorAfterStep(Source::MeshNtp, Source::Rtc, true, Source::None) == Source::Rtc);
+  CHECK(floorAfterStep(Source::MeshNtp, Source::Cm5, true, Source::Ring) == Source::Cm5);
+  CHECK(floorAfterStep(Source::Mesh, Source::None, true, Source::Rtc) == Source::None);     // carried: nothing of its own
+  CHECK(floorAfterStep(Source::MeshNtp, Source::Rtc, false, Source::Rtc) == Source::None);  // the clock was not set
+  CHECK(floorAfterStep(Source::Mesh, Source::MeshNtp, true, Source::Rtc) == Source::Rtc);
+  CHECK(floorAfterStep(Source::MeshNtp, Source::Mesh, true, Source::None) == Source::None);
+  CHECK(floorAfterStep(Source::Ntp, Source::MeshNtp, true, Source::Rtc) == Source::None);
+  CHECK(floorAfterStep(Source::Manual, Source::Mesh, true, Source::Cm5) == Source::None);
+
   CHECK_TEXT(sourceName(Source::MeshNtp), "mesh-ntp");
   CHECK_TEXT(sourceName(Source::None), "none");
   std::set<std::string> names;
   for (Source s : real) names.insert(sourceName(s));
   CHECK(names.size() == 7);
+}
+
+// The ledger System_Clock keeps: the source the clock's time is from, across
+// an SNTP step that lwIP has made and the main loop has not reported yet.
+static void ledger() {
+  // A device on its RTC; lwIP's SNTP client sets the clock.
+  Ledger l;
+  CHECK(ledgerCurrent(l) == Source::None);
+  CHECK(ledgerVerdict(l, Source::Rtc, kNow, false) == StepVerdict::Allowed);
+  ledgerOnStep(l, Source::Rtc, false);
+  ledgerAfterOwnStep(l);
+  CHECK(ledgerCurrent(l) == Source::Rtc && !l.sntpPending && !l.sntpSuperseded);
+  CHECK(ledgerVerdict(l, Source::Cm5, kNow, true) == StepVerdict::Allowed);   // cm5 corrects rtc
+
+  ledgerOnSntpPending(l);
+  // Before the report the time is NTP's already: the CM5 tick of the same
+  // lap, the ring, the chip and mesh time are ranked against NTP. (They were
+  // ranked against the stale "rtc", overwrote the fresh NTP time and were
+  // then relabelled "ntp" by the report.)
+  CHECK(ledgerCurrent(l) == Source::Ntp && l.source == Source::Rtc);
+  for (Source lower : { Source::Cm5, Source::Rtc, Source::Ring, Source::Mesh, Source::MeshNtp }) {
+    CHECK(ledgerVerdict(l, lower, kNow, true) == StepVerdict::RefusedOutranked);
+  }
+  CHECK(ledgerVerdict(l, Source::Manual, kNow, true) == StepVerdict::Allowed);
+  // The report: the chores run under the NTP name, and the ledger says ntp.
+  CHECK(ledgerOnSntpReport(l) == Source::Ntp);
+  ledgerOnStep(l, Source::Ntp, true);
+  CHECK(ledgerCurrent(l) == Source::Ntp && l.source == Source::Ntp && !l.sntpPending);
+  CHECK(ledgerVerdict(l, Source::Cm5, kNow, true) == StepVerdict::RefusedOutranked);
+
+  // An operator command between the callback and the report replaces the
+  // NTP time: the report keeps the command's name and does not relabel.
+  ledgerOnSntpPending(l);
+  CHECK(ledgerVerdict(l, Source::Manual, kNow, true) == StepVerdict::Allowed);
+  ledgerOnStep(l, Source::Manual, true);
+  ledgerAfterOwnStep(l);
+  CHECK(ledgerCurrent(l) == Source::Manual && l.sntpPending && l.sntpSuperseded);
+  CHECK(ledgerVerdict(l, Source::Cm5, kNow, true) == StepVerdict::RefusedOutranked);  // manual outranks cm5
+  CHECK(ledgerOnSntpReport(l) == Source::Manual);
+  ledgerOnStep(l, Source::Manual, true);
+  CHECK(ledgerCurrent(l) == Source::Manual && !l.sntpPending && !l.sntpSuperseded);
+  // The next NTP reply takes the clock back, as NTP does over a manual time.
+  ledgerOnSntpPending(l);
+  CHECK(ledgerCurrent(l) == Source::Ntp);
+  // A second reply before the first report: still one pending step, NTP's.
+  ledgerOnStep(l, Source::Manual, true);
+  ledgerAfterOwnStep(l);
+  ledgerOnSntpPending(l);
+  CHECK(ledgerCurrent(l) == Source::Ntp && !l.sntpSuperseded);
+  CHECK(ledgerOnSntpReport(l) == Source::Ntp);
+  ledgerOnStep(l, Source::Ntp, true);
+  // A report with nothing pending (a second drain) is NTP's as well.
+  CHECK(ledgerOnSntpReport(l) == Source::Ntp);
+
+  // The first clock of a boot from SNTP: nothing set before it.
+  Ledger dark;
+  ledgerOnSntpPending(dark);
+  CHECK(ledgerCurrent(dark) == Source::Ntp);
+  CHECK(ledgerVerdict(dark, Source::Ring, kNow, true) == StepVerdict::RefusedOutranked);
+  CHECK(ledgerOnSntpReport(dark) == Source::Ntp);
+  ledgerOnStep(dark, Source::Ntp, false);
+  CHECK(dark.source == Source::Ntp && dark.floor == Source::None);
+
+  // The mesh floor through the ledger: a device on its RTC follows an
+  // NTP-backed master, not that master's later time without NTP.
+  Ledger m;
+  ledgerOnStep(m, Source::Rtc, false);
+  CHECK(ledgerVerdict(m, Source::Mesh, kNow, true) == StepVerdict::RefusedOutranked);
+  CHECK(ledgerVerdict(m, Source::MeshNtp, kNow, true) == StepVerdict::Allowed);
+  ledgerOnStep(m, Source::MeshNtp, true);
+  CHECK(m.source == Source::MeshNtp && m.floor == Source::Rtc);
+  CHECK(ledgerVerdict(m, Source::MeshNtp, kNow, true) == StepVerdict::Allowed);
+  CHECK(ledgerVerdict(m, Source::Mesh, kNow, true) == StepVerdict::RefusedOutranked);
+  CHECK(ledgerVerdict(m, Source::Rtc, kNow, true) == StepVerdict::RefusedOutranked);   // the chip does not take it back
+  ledgerOnStep(m, Source::MeshNtp, true);
+  CHECK(m.floor == Source::Rtc);
+  // A device with nothing of its own follows the master either way.
+  Ledger bare;
+  ledgerOnStep(bare, Source::MeshNtp, false);
+  CHECK(bare.floor == Source::None && ledgerVerdict(bare, Source::Mesh, kNow, true) == StepVerdict::Allowed);
+  ledgerOnStep(bare, Source::Mesh, true);
+  CHECK(bare.source == Source::Mesh && bare.floor == Source::None);
+  CHECK(ledgerVerdict(bare, Source::MeshNtp, kNow, true) == StepVerdict::Allowed);
+  // Another source in between clears what was remembered.
+  ledgerOnStep(m, Source::Ntp, true);
+  CHECK(m.floor == Source::None);
 }
 
 static void civil() {
@@ -393,6 +505,7 @@ static void timezones() {
 int main() {
   validity();
   rankTable();
+  ledger();
   civil();
   formatters();
   durations();

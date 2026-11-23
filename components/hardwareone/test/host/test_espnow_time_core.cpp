@@ -345,6 +345,21 @@ static void testFollowerRows() {
         CHECK(other.frame(kHub, kNow + 60000, 0, plain).verdict ==
               (ownOutranksPlainMaster ? Verdict::IgnoredBetterSource : Verdict::Applied));
       }
+      // A clock on mesh time follows its master down to what the device had
+      // before mesh time took over (ownFloor), and no lower.
+      if (source == OwnSource::Mesh || source == OwnSource::MeshNtp) {
+        for (OwnSource floor : { OwnSource::None, OwnSource::Rtc, OwnSource::Cm5, OwnSource::Ring }) {
+          const bool nothingOwn = floor == OwnSource::None;
+          CHECK(frameMayCorrect(kSrcNtp, source, floor));
+          CHECK(frameMayCorrect(kSrcManual, source, floor) == nothingOwn);
+          Follower plain, backed;
+          plain.in.ownSource = backed.in.ownSource = source;
+          plain.in.ownFloor = backed.in.ownFloor = floor;
+          CHECK(plain.frame(kHub, kNow + 60000, 0, kSrcManual).verdict ==
+                (nothingOwn ? Verdict::Applied : Verdict::IgnoredBetterSource));
+          CHECK(backed.frame(kHub, kNow + 60000, 0, kSrcNtp).verdict == Verdict::Applied);
+        }
+      }
       Follower f;
       f.in.ownSource = source;
       const Decision d = f.frame(kHub, kNow + 60000);

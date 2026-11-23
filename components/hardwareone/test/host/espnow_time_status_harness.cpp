@@ -46,6 +46,9 @@ namespace Clock {
 
 // ---- The clock module (recording double) --------------------------------------
 static meshtime::OwnSource gSource = meshtime::OwnSource::None;
+// Clock::meshFloorSource: what the clock had before mesh time took it over,
+// kept by the clock's own rule (clockcore::floorAfterStep).
+static meshtime::OwnSource gFloor = meshtime::OwnSource::None;
 static bool gClockHeld = false;
 static uint32_t gStepSerial = 0;
 static uint32_t gLastStepUptimeMs = 0;
@@ -65,6 +68,7 @@ static void pass(int64_t ms) {
 static void otherSourceSets(meshtime::OwnSource source, int64_t epochMs) {
   gClockMs = epochMs;
   gSource = source;
+  gFloor = meshtime::OwnSource::None;  // not mesh time: nothing to remember
   gStepSerial++;
   gLastStepUptimeMs = gUptimeMs;
 }
@@ -116,6 +120,7 @@ static int64_t mtMonoMs() { return gMonoMs; }
 static bool mtClockSet() { return Clock::isSynced(); }
 static int64_t mtEpochMs() { return gClockMs; }
 static meshtime::OwnSource mtOwnSource() { return gSource; }
+static meshtime::OwnSource mtOwnFloor() { return gFloor; }
 static bool mtClockHeld() { return gClockHeld; }
 static uint32_t mtStepSerial() {
   if (gRaceOnNextRead && ++gRaceReads == 2) {
@@ -137,8 +142,12 @@ static bool mtSetClock(int64_t epochMs, uint8_t wireSource) {
   // Clock::step(SYNC_MESH or SYNC_MESH_NTP, ...): settimeofday, then the chores.
   if (gRefuseMeshStep) return false;
   gMeshStepBeforeMs = gClockMs;
+  const meshtime::OwnSource stepped = meshtime::frameClockSource(wireSource);
+  gFloor = (meshtime::OwnSource)clockcore::floorAfterStep(
+      (clockcore::Source)stepped, (clockcore::Source)gSource,
+      meshtime::epochMsPlausible(gClockMs), (clockcore::Source)gFloor);
   gClockMs = epochMs;
-  gSource = meshtime::frameClockSource(wireSource);
+  gSource = stepped;
   gStepSerial++;
   gLastStepUptimeMs = gUptimeMs;
   gMeshSteps++;
@@ -242,6 +251,7 @@ static void resetAll() {
   sMeshTime = MeshTimeState{};
   gClockMs = 0;
   gSource = meshtime::OwnSource::None;
+  gFloor = meshtime::OwnSource::None;
   gClockHeld = false;
   gStepSerial = 0;
   gLastStepUptimeMs = 0;
@@ -316,7 +326,8 @@ static void testFollower() {
   check(gMeshSteps == 1, "a frame is applied once");
   std::string s = status();
   check(has(s, "This device's clock: set, from mesh-ntp, last set 0 s ago"), "status: set, from mesh-ntp");
-  check(has(s, "Role: worker. Takes time from the master named on this device when it has no better source"),
+  check(has(s, "Role: worker. Takes time from the master named on this device when it has no better source "
+               "(its own ntp or a manual time; for a master whose clock is not from ntp also cm5, rtc, ring)."),
         "status: role worker");
   check(has(s, "Last time frame: 0 s ago from hub (its source: ntp). Applied."), "status: last frame applied");
   check(has(s, "Frames: 1 applied, 0 agreed, 0 held, 0 not used, 0 refused"), "status: counts");
@@ -398,6 +409,37 @@ static void testFollower() {
   espnowMeshTimeApplyTick();
   check(gMeshSteps == 3 && gSource == meshtime::OwnSource::Mesh,
         "the master's source changed to manual: its follower still follows it");
+  // The master is followed down to what the device had itself and no lower
+  // (review 2026-11-22): a device whose RTC set its clock follows an
+  // NTP-backed master; when that master's time is no longer from NTP its
+  // frames are not used, since plain mesh time does not outrank the chip.
+  for (meshtime::OwnSource own : { meshtime::OwnSource::Rtc, meshtime::OwnSource::Cm5, meshtime::OwnSource::Ring }) {
+    resetAll();
+    addPeer(kHub, "hub", true);
+    otherSourceSets(own, kT0);
+    receive(kHub, kT0 + 120000, meshtime::kSrcNtp);
+    espnowMeshTimeApplyTick();
+    check(gMeshSteps == 1 && gSource == meshtime::OwnSource::MeshNtp && gFloor == own,
+          "an NTP-backed master takes over from the device's own source, which is remembered");
+    pass(60000);
+    receive(kHub, gClockMs + 60000, meshtime::kSrcNtp);
+    espnowMeshTimeApplyTick();
+    check(gMeshSteps == 2 && gFloor == own, "and is followed while its time is from NTP");
+    pass(60000);
+    const int64_t kept = gClockMs;
+    receive(kHub, gClockMs + 60000, meshtime::kSrcManual);
+    espnowMeshTimeApplyTick();
+    check(gMeshSteps == 2 && gClockMs == kept && gSource == meshtime::OwnSource::MeshNtp,
+          "the master's time without NTP does not replace it on a device with a source of its own");
+    check(has(status("json"), "\"result\":\"ignored_better_source\""), "the frame is recorded as not used");
+    check(has(status(), std::string("Not used: this device has a better source (") +
+                        (own == meshtime::OwnSource::Rtc ? "rtc" : own == meshtime::OwnSource::Cm5 ? "cm5" : "ring") + ")."),
+          "and the status names the device's own source");
+    pass(60000);
+    receive(kHub, gClockMs + 60000, meshtime::kSrcNtp);
+    espnowMeshTimeApplyTick();
+    check(gMeshSteps == 3 && gSource == meshtime::OwnSource::MeshNtp, "the master's NTP time is followed again");
+  }
   // The clock's owner refuses the step (another source set the clock on
   // another task after the decision): nothing is set, the frame is not used.
   resetAll();

@@ -530,6 +530,7 @@ time_t computeNextRunTime(const char* automationJson, time_t fromTime);
 // Unified post-fire helper (Trigger model defined later in this file). A
 // scheduler pass passes notify=false: its trailing cache rebuild reads the file.
 static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt, bool notify);
+static bool automationSeedFirstRuns(long id, const char* automationJson, time_t now);
 // Force-recompute every CLOCK trigger of every enabled automation in one
 // read/modify/write. Defined below the Trigger type; declared here for
 // cmd_automation's "recompute" subcommand. Returns triggers rewritten.
@@ -2724,7 +2725,9 @@ const char* cmd_automation_add(const String& argsInput) {
   // automation object so computeNextRunTime can parse it).
   auto computeInitialNextAt = [&](const String& body) -> time_t {
     // No next run without a set clock: time() then counts up from 1970, and
-    // a next run computed from it would be stored as a date.
+    // a next run computed from it would be stored as a date. The scheduler
+    // pass gives the trigger its first run once the clock is set
+    // (automationSeedFirstRuns).
     time_t now = time(nullptr);
     if (!Clock::isValidEpoch(now)) return 0;
     String tmp = "{\"triggers\":[{\n" + body + "\n    }]}";
@@ -2754,7 +2757,6 @@ const char* cmd_automation_add(const String& argsInput) {
   // above. Each is a JSON object in the same shape as the primary trigger
   // would produce — we just serialize it back in and compute nextAt per entry.
   if (!secArr.isNull()) {
-    time_t nowSec = time(nullptr);
     int addedSec = 0;
     for (JsonVariantConst sv : secArr) {
       const char* stype = sv["type"] | "";
@@ -2782,12 +2784,10 @@ const char* cmd_automation_add(const String& argsInput) {
         const char* matchV = sv["match"] | "";
         if (matchV[0]) body += ",\n      \"match\": \"" + jsonEscape(String(matchV)) + "\"";
       }
-      // Compute initial nextAt for this secondary trigger.
-      time_t snext = 0;
-      if (nowSec > 0) {
-        String tmp = "{\"triggers\":[{\n" + body + "\n    }]}";
-        snext = computeNextRunTime(tmp.c_str(), nowSec);
-      }
+      // The initial nextAt of this secondary trigger, by the primary's rule:
+      // none while the clock is not set (the scheduler pass gives it its
+      // first run once it is).
+      const time_t snext = computeInitialNextAt(body);
       if (snext > 0) body += ",\n      \"nextAt\": " + String((unsigned long)snext);
       else              body += ",\n      \"nextAt\": null";
       triggersJson += ",\n    {\n" + body + "\n    }";
@@ -4135,6 +4135,47 @@ static void rescheduleAfterFire(long id, const char* automationJson, time_t fire
   String unused;
   (void)mutateAutomationsJson("automation.reschedule", automationRescheduleMutation, &ctx,
                               notify ? kAutomationsMutateNotify : 0, unused);
+}
+
+// A clock trigger without a next run gets its first one. `now` is clock time
+// (the caller asks only while the clock is set).
+//
+// A trigger of type time, monthly, yearly or interval whose nextAt is 0 can
+// never come due by itself: the pass works its next run out afresh from `now`
+// on every lap (always ahead), the due cache reads the stored 0 as "nothing
+// scheduled", and rescheduleAfterFire only advances a next run that exists.
+// That is the state of an automation added while the clock was not set
+// (`automation add` stores no next run then: a time counted from 1970 is not
+// one) and of an interval still in its first uptime countdown when the clock
+// was set (automationCarryUptimeSchedule drops it). So the pass seeds it:
+// nextFire from now, nothing fires. A short interval's first run goes to the
+// RAM schedule (AutomationVolatileSchedule), anything else is written to the
+// trigger's nextAt, in one locked read-modify-write with no notification:
+// the pass's trailing rebuild reads the result. Manual, boot and event
+// triggers have no clock run and are left alone. True when a trigger was
+// seeded.
+static bool automationSeedFirstRuns(long id, const char* automationJson, time_t now) {
+  Trigger triggers[MAX_TRIGGERS];
+  const int n = triggersFromJson(automationJson, triggers, MAX_TRIGGERS, now);
+  bool seeded = false, save = false;
+  for (int i = 0; i < n; i++) {
+    const bool clockTrigger =
+        triggers[i].type == Trigger::TIME || triggers[i].type == Trigger::MONTHLY ||
+        triggers[i].type == Trigger::YEARLY || triggers[i].type == Trigger::INTERVAL;
+    if (!clockTrigger || triggers[i].nextAt > 0) continue;
+    const time_t first = nextFire(triggers[i], now);
+    if (first <= 0) continue;  // nothing to schedule (an interval of 0, a date that never comes)
+    triggers[i].nextAt = first;
+    seeded = true;
+    const bool inRam = triggers[i].type == Trigger::INTERVAL && triggers[i].slot < 255 &&
+                       automationVolatileSet(id, triggers[i].slot, triggers[i].intervalMs, first);
+    if (!inRam) save = true;
+  }
+  if (!save) return seeded;
+  AutomationRescheduleContext ctx{id, triggers, n};
+  String unused;
+  (void)mutateAutomationsJson("automation.seed", automationRescheduleMutation, &ctx, 0, unused);
+  return true;
 }
 
 // Force-recompute every clock trigger of every enabled automation.
@@ -5583,6 +5624,10 @@ static void schedulerTickMinute() {
     // min moves forward and the cache/fire-check agree again.
     // With the clock not set a time-of-day trigger is not part of the minimum
     // (automationNextRunTime), so it cannot be due.
+    // A clock trigger that has no next run yet (added while the clock was not
+    // set) gets its first one now that the clock is; it comes due on a later
+    // pass like any other.
+    if (clockSet) (void)automationSeedFirstRuns(id, obj.c_str(), now);
     time_t nextAt = automationNextRunTime(obj.c_str(), now, clockSet);
     bool clockDue = (nextAt > 0 && now >= nextAt);
 

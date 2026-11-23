@@ -1452,7 +1452,9 @@ while it acts as master), and only when it has no better source of its own. One 
 decides what "better" is, strongest first: the device's own NTP, a time set by hand (`timeset`,
 `rtcset`), a mesh master whose own clock comes from NTP, the CM5, the RTC chip, the ring, and
 last a mesh master whose clock does not come from NTP. A clock takes a source that ranks equal
-or higher than the one that set it; a clock that mesh time set keeps following its master. `time`
+or higher than the one that set it; a clock that mesh time set keeps following its master, but
+never on a time that ranks below what the device had itself (a device whose RTC chip set the clock
+follows an NTP-backed master and stops when that master's time is no longer from NTP). `time`
 then shows the source "mesh-ntp" (the master's clock is from NTP) or "mesh". A device that names no master takes no mesh
 time; `espnowtimestatus` says so. A master named in place of another (or a fingerprint cleared)
 counts at once: the device no longer follows the master it followed and takes the newly named

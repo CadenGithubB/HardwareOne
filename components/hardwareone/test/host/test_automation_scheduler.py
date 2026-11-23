@@ -135,11 +135,14 @@ def generated(component: Path) -> str:
     # The post-fire writeback goes through the store's mutation owner on a
     # tree that has one (mutateAutomationsJson, in the cache section).
     reschedule_mutation = "static AutomationsMutation automationRescheduleMutation("
+    seed_first = "static bool automationSeedFirstRuns(long id, const char* automationJson, time_t now) "
     reschedule = "\n".join(extract_block(owner, signature) for signature in (
         "static time_t nextFire(const Trigger& s, time_t from)",
         "static bool onFired(Trigger& s, time_t firedAt)",
         *((reschedule_mutation,) if reschedule_mutation in owner else ()),
         "static void rescheduleAfterFire(long id, const char* automationJson, time_t firedAt, bool notify) ",
+        # A clock trigger without a next run gets its first one once the clock is set.
+        *((seed_first,) if seed_first in owner else ()),
         *((next_run,) if next_run in owner else ()),
         "time_t computeNextRunTime(const char* automationJson, time_t fromTime) "))
     # System_Clock's "is this a real epoch", which the due cache and the pass ask.
@@ -173,8 +176,19 @@ def generated(component: Path) -> str:
                                 "// INSERT_RESCHEDULE": reschedule}.items():
         require(harness.count(marker) == 1, f"exactly one insertion marker: {marker}")
         harness = harness.replace(marker, replacement)
+    if seed_first in owner:
+        require("if (clockSet) (void)automationSeedFirstRuns(id, obj.c_str(), now);" in tick and
+                tick.index("automationSeedFirstRuns(") < tick.index("automationNextRunTime(obj.c_str(), now, clockSet)"),
+                "the scheduler pass gives a clock trigger without a next run its first one, while the clock is set, "
+                "before it asks what is due")
+        add = extract_block(owner, "auto computeInitialNextAt = [&](const String& body) -> time_t")
+        require("if (!Clock::isValidEpoch(now)) return 0;" in add,
+                "`automation add` stores no next run while the clock is not set")
+        require("const time_t snext = computeInitialNextAt(body);" in owner and "nowSec > 0" not in owner,
+                "the secondary triggers of `automation add` take their first next run by the primary's rule")
     return (("#define HAVE_UPTIME_SCHEDULE 1\n" if uptime_table else "") +
-            ("#define HAVE_UPTIME_CARRY_RULE 1\n" if carry_rule else "") + harness)
+            ("#define HAVE_UPTIME_CARRY_RULE 1\n" if carry_rule else "") +
+            ("#define HAVE_SEED_FIRST_RUNS 1\n" if seed_first in owner else "") + harness)
 
 
 def g2_page(component: Path) -> str:

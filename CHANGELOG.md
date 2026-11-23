@@ -28,9 +28,13 @@ Host-tested and built; not run on a device.
   from NTP, the CM5, the DS3231 chip, the ring, a mesh master without NTP. A clock that is not set
   takes any source; a clock that is set takes a source that ranks equal or higher than the one
   that set it. A command of the operator always sets the clock (NTP replaces that time at its next
-  reply), and a clock that mesh time set keeps following its named master. Every source goes
-  through this one check (the RTC, `timeset`, `rtcset`, the ring, the CM5, mesh time); lwIP's SNTP
-  client still sets the clock itself and is reported afterwards.
+  reply), and a clock that mesh time set keeps following its named master, down to what the
+  device had itself: on a device whose RTC, CM5 or ring set the clock first, a master's time that
+  is no longer from NTP does not replace an NTP-backed one. Every source goes through this one
+  check (the RTC, `timeset`, `rtcset`, the ring, the CM5, mesh time), one at a time. lwIP's SNTP
+  client still sets the clock itself and is reported afterwards; from the moment it has, the
+  other sources are ranked against NTP (the CM5 in the same loop lap could overwrite a fresh NTP
+  time and be labelled "ntp").
 - Mesh time follows the same table: a device whose clock came from the CM5, the RTC chip or the
   ring now takes the time of a named master whose clock is from NTP (it was ignored as "better
   source"), and a ring-set clock no longer takes a master's time that is not from NTP. `time` and
@@ -51,6 +55,9 @@ Host-tested and built; not run on a device.
   including +12:45, +13:00 and +14:00; the settings list is built from it, one line per offset.
   The offset is fixed and labelled "no automatic daylight saving". A stored offset that two zones
   share re-opens on its standard-time entry (a saved EST came back as CDT).
+- `time` and `time json` show the system clock. On a board with a DS3231 they showed a live read
+  of the chip, also a chip that was not adopted, while `synced` was false; the chip's reading is
+  `rtcread`, and `time` names it on its own line while the clock is not set.
 - `time json` adds `timeEpochMs` (UTC epoch ms, `null` while the clock is not set) and
   `tzOffsetMinutes`; `rtcread json` (and the `rtc` object of `sensors json`, ESP-NOW and MQTT) adds
   `"utc":true`: its date and time fields are UTC.
@@ -76,7 +83,13 @@ Host-tested and built; not run on a device.
 - "Is the clock set" is asked of `System_Clock` everywhere: a clock that was never set counts up
   from 1970 and passed the old `> 0` tests, so a mesh identity's creation time, a bond time, a boot
   anchor and an automation's first run could be stored as dates in 1970. They are stored as 0 /
-  not at all while the clock is not set.
+  not at all while the clock is not set. An automation added while the clock is not set gets its
+  first run from the scheduler once the clock is set (a time, monthly, yearly or interval trigger
+  without a next run is given one, without firing).
+- A DS3231 that does not answer a register read in full is a failed read (a short read passed as
+  success, so an unreadable oscillator-stopped flag read as "not set").
+- A dark NTP timeout on a board whose RTC is not trusted prints `[INFO] RTC time not used:
+  <reason>` instead of an `Error: [RTC] ...` reply outside any command.
 - HTTPS certificate expiry (`certinfo`, the warning at start) is computed in UTC; it was off by
   the timezone offset.
 - The glasses' short waits (microphone read, scan and connect waits, image probe pacing) and the

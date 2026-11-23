@@ -219,9 +219,17 @@ static_assert((int)SYNC_NONE == (int)clockcore::Source::None && (int)SYNC_RTC ==
               (int)SYNC_MESH == (int)clockcore::Source::Mesh && (int)SYNC_MESH_NTP == (int)clockcore::Source::MeshNtp,
               "Clock::SyncSource mirrors clockcore::Source");
 
-// Last source that stepped the clock THIS boot. SYNC_NONE with isSynced()
-// true means the time was carried across a soft reboot in the RTC domain.
+// The source the clock's time is from: the last one that set it THIS boot.
+// SYNC_NONE with isSynced() true means the time was carried across a soft
+// reboot in the RTC domain. SYNC_NTP from the moment lwIP's SNTP client has
+// set the clock, before the main loop has reported that step (sntpStepPending).
 SyncSource syncSource();
+
+// What set the clock before mesh time took it over (SYNC_NONE when the clock
+// was not set then, or was only carried over a restart, and whenever the
+// clock is not on mesh time). The master's time is followed down to this
+// source and no lower: see clockcore::sourceMayCorrect.
+SyncSource meshFloorSource();
 const char* syncSourceName(SyncSource s);  // "none|rtc|ntp|manual|ring|cm5|mesh|mesh-ntp"
 
 // True for a source whose time may be written into the RTC chip. Not the
@@ -243,7 +251,10 @@ constexpr bool sourceWritesRtc(SyncSource s) { return s != SYNC_NONE && s != SYN
 //     one that set it; a lower one is refused (RefusedOutranked).
 //   - An operator command (SYNC_MANUAL: timeset, rtcset) always sets the
 //     clock; NTP replaces that time at its next reply.
-//   - Mesh time corrects mesh time, with or without NTP behind it.
+//   - Mesh time corrects mesh time, with or without NTP behind it, as long as
+//     it ranks no lower than what the device had before mesh time took over
+//     (meshFloorSource): plain mesh time does not replace an NTP-backed
+//     master's time on a device whose own RTC or CM5 set the clock first.
 //   - The time must be within 2020-2099, whoever offers it.
 enum class StepResult : uint8_t {
   Stepped = 0,
@@ -254,10 +265,31 @@ enum class StepResult : uint8_t {
 };
 
 // Sets the clock to `epoch` (+ `usec`) from `src` when the rank table allows
-// it, then runs clockStepped(). Any normal task (the callers that own
-// filesystem chores drain them: see clockDutiesTick / clockDutiesFlush); not
-// from lwIP or BLE callbacks, not from an ISR.
+// it, then runs clockStepped(). The verdict, settimeofday() and the ledger
+// are one unit under one mutex: two sources on two tasks cannot both pass the
+// verdict against the same earlier state. Any normal task (the callers that
+// own filesystem chores drain them: see clockDutiesTick / clockDutiesFlush);
+// not from lwIP or BLE callbacks, not from an ISR.
 StepResult step(SyncSource src, time_t epoch, uint32_t usec = 0);
+
+// lwIP's SNTP client sets the clock itself, on its own task. Its two halves:
+//
+//   sntpStepPending()   from the SNTP callback, right after lwIP set the
+//                       clock: from here on the clock's time is NTP's
+//                       (syncSource() says so, and step() ranks a candidate
+//                       against NTP), although the chores have not run.
+//   sntpStepReport()    from the main-loop drain (ntpSyncDrainTick, the first
+//                       clock tick of a lap): the chores of that step, with
+//                       the clock from before it.
+//
+// Without the first half a source that came between the two (the CM5 tick
+// earlier in the same lap, a timeset on the command task) was ranked against
+// the stale ledger, overwrote the fresh NTP time and was then relabelled
+// "ntp" by the report. When an operator command did replace the NTP time
+// between the two halves, the report runs the chores under that command's
+// name: the clock shows its time.
+void sntpStepPending();
+void sntpStepReport(time_t before);
 
 // The same answer without setting anything.
 StepResult stepVerdict(SyncSource src, time_t epoch);
@@ -275,11 +307,9 @@ uint32_t stepSerial();
 // False when nothing has set the clock this boot.
 bool lastStep(SyncSource* src, uint32_t* agoSeconds);
 
-// The chores after a step, passing the pre-step epoch. Clock::step() calls
-// it; the only other caller is System_NTP's main-loop drain, which reports
-// the step lwIP's SNTP client has already made. Inline-cheap; safe from any
-// normal task. NOT for lwIP/BLE callbacks: those store what they know and
-// let a drain call this.
+// The chores after a step, passing the pre-step epoch. Clock::step() and
+// sntpStepReport() call it under the step mutex; nothing else does.
+// Inline-cheap; safe from any normal task. NOT for lwIP/BLE callbacks.
 void clockStepped(SyncSource src, time_t before);
 
 // Main-loop drain for the filesystem-touching chores clockStepped() pends.

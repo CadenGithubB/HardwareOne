@@ -1074,8 +1074,11 @@ are not covered and have not been run on hardware.
 validity bounds (2020 for the own clock, 2020-2099 for a time from outside);
 the source rank table of `Clock::step` for every pair of sources, set and not
 set (ntp > manual > mesh-ntp > cm5 > rtc > ring > mesh > carried; an operator
-command always sets; mesh time corrects mesh time; an implausible time is
-refused first); civil time against the C library for every day of 2020-2099
+command always sets; mesh time corrects mesh time down to the source the
+device had before mesh time took over, the floor; an implausible time is
+refused first); the ledger across an SNTP step that lwIP has made and the main
+loop has not reported yet (the other sources are ranked against NTP from the
+callback on; an operator command in between keeps its name at the report); civil time against the C library for every day of 2020-2099
 and with a fixed offset across a date line; the formatters (ISO UTC and its
 parser round trip, compact UTC, local date and time with and without seconds
 and the `UTC+H:MM` label, local date, file stamp, the log prefix with its

@@ -2040,11 +2040,8 @@ void hardwareone_setup() {
   } else if (gBootRtcWhyNot) {
     // The reason is a command reply ("Error: [RTC] ..."); at boot it is a
     // statement, not a failed command.
-    static const char kReplyLead[] = "Error: [RTC] ";
-    const char* why = strncmp(gBootRtcWhyNot, kReplyLead, sizeof(kReplyLead) - 1) == 0
-                          ? gBootRtcWhyNot + sizeof(kReplyLead) - 1 : gBootRtcWhyNot;
     oledSetBootProgress(28, "RTC not used");
-    BROADCAST_PRINTF("[Boot] RTC time not adopted: %s", why);
+    BROADCAST_PRINTF("[Boot] RTC time not adopted: %s", rtcReasonText(gBootRtcWhyNot));
   } else {
     oledSetBootProgress(28, "Skipping RTC");
   }
@@ -2635,10 +2632,14 @@ void hardwareone_loop() {
 #endif
   timeAnchorsTick();   // retro-date boot-named captures once the clock syncs
   VFS::sdWatchTick();  // SD card: mount a card put in after boot (boards with a detect switch; UP-06)
-  g2RingTimeSyncTick(); // ring-clock custody: adopt when dark / correct ring after sync
-  cm5TimeSyncTick();    // CM5 carrier RTC: adopt when dark / correct after sync (authoritative)
-  g2Tick();             // glasses: overlay auto-dismiss + adaptive clock/tz re-push (self-throttled)
+  // The clock sources of this lap, strongest first: the SNTP report runs
+  // before any other source is handed in, so each is ranked against a ledger
+  // that knows about a fresh NTP reply (Clock::step also ranks against NTP
+  // while a reply still waits for this report).
   ntpSyncDrainTick();   // hand real SNTP replies to the clock-step chokepoint
+  g2RingTimeSyncTick(); // ring-clock custody: adopt when dark / correct ring after sync
+  cm5TimeSyncTick();    // CM5 carrier RTC: adopt when dark / correct after sync (the rank table decides)
+  g2Tick();             // glasses: overlay auto-dismiss + adaptive clock/tz re-push (self-throttled)
   espnowMeshTimeApplyTick(); // mesh time: after the SNTP report, so a fresh NTP reply is the better source
   Clock::clockDutiesTick(); // drain filesystem-touching clock-step chores
 #if ENABLE_LOCAL_STT
