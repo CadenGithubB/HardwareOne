@@ -68,6 +68,9 @@ constexpr uint32_t kHeldMs = 100;
 // Tilt is not re-evaluated this long after a tap: the knock itself rocks the
 // device.
 constexpr uint32_t kTapFreezeMs = 150;
+// How long a tap's knock rings: strong samples this soon after a tap flag
+// (and the one sample before it) are the knock, not movement.
+constexpr uint32_t kKnockMs = 60;
 // After a shake ends, taps are ignored this long (the hand is settling).
 constexpr uint32_t kAfterShakeMs = 300;
 // A finished run of taps waits for the device to be calm before it becomes a
@@ -201,9 +204,26 @@ class Engine {
     const float lin[3] = {s.accel[0] - kGravity * s.up[0], s.accel[1] - kGravity * s.up[1],
                           s.accel[2] - kGravity * s.up[2]};
     const bool strong = dot3(lin, lin) > kStrongAccel * kStrongAccel;
-    strongBits_ = ((strongBits_ << 1) | (strong ? 1u : 0u)) & ((1u << kMotionWindow) - 1u);
+    const uint32_t mask = (1u << kMotionWindow) - 1u;
+    strongBits_ = ((strongBits_ << 1) | (strong ? 1u : 0u)) & mask;
     const int strongCount = __builtin_popcount(strongBits_);
     const bool moving = strongCount >= kMovingCount;
+    // Whether the device moved since the last tap's knock ended: a run of
+    // firm taps rings for a few samples per knock, which is not "being moved
+    // about" (bench 2026-11-23: four quick taps were dropped as never calm).
+    // Only the samples after the knock (kKnockMs) count, as a share.
+    if (s.tap) {
+      knockUntilMs_ = s.ms + kKnockMs;
+      afterKnock_ = 0;
+      strongAfterKnock_ = 0;
+    } else if (static_cast<int32_t>(s.ms - knockUntilMs_) >= 0) {
+      if (afterKnock_ < kMotionWindow) {
+        ++afterKnock_;
+        if (strong) ++strongAfterKnock_;
+      }
+    }
+    const bool movedSinceKnock =
+        afterKnock_ > 0 && strongAfterKnock_ * kMotionWindow >= kMovingCount * afterKnock_;
 
     // ---- Shake ------------------------------------------------------------
     if (!inShake_ && strongCount >= kShakeCount) {
@@ -232,7 +252,7 @@ class Engine {
       const uint32_t since = static_cast<uint32_t>(s.ms - lastTapMs_);
       if (since > cfg.tapWindowMs + kTapPatienceMs) {
         tapCount_ = 0;  // never calm enough to mean it
-      } else if (since > cfg.tapWindowMs && !moving) {
+      } else if (since > cfg.tapWindowMs && !movedSinceKnock) {
         const uint8_t what = buttonForTaps(tapCount_);
         tapCount_ = 0;
         if (what == kTapsRecentre) recentre();
@@ -350,6 +370,7 @@ class Engine {
   void dropRun() {
     tapCount_ = 0;
     strongBits_ = 0;
+    afterKnock_ = strongAfterKnock_ = 0;
     inShake_ = false;
     tapsBlocked_ = false;
     frozen_ = false;
@@ -365,6 +386,8 @@ class Engine {
   uint32_t lastMs_ = 0;
 
   uint32_t strongBits_ = 0;
+  uint32_t knockUntilMs_ = 0;   // a tap's knock rings until then
+  int afterKnock_ = 0, strongAfterKnock_ = 0;  // samples (and strong ones) since it ended
   bool inShake_ = false;
   bool tapsBlocked_ = false;
   uint32_t tapsFromMs_ = 0;
