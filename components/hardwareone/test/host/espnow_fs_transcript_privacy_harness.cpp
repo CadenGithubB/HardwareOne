@@ -130,7 +130,11 @@ bool getStats(StorageType tier,uint64_t& total,uint64_t& used,uint64_t& free){as
 uint8_t getPermissions(const String&,const AuthContext&){assert(scopeDepth);++fsCalls;return identityMayRead()?0x3f:0;}
 String formatPath(const char* dir,const char* name){return String(dir)+(String(dir)=="/"?"":"/")+name;}
 // Reads under the installed identity (canRead), so a refused identity transfers nothing.
-bool sendFileToMac(const uint8_t*,const String& path){assert(scopeDepth);if(!identityMayRead())return false;++transfers;transferPath=path;return true;}
+// The 1.0 step 7 result: Stored once the requester's FILE_RESULT came.
+enum class FileSendResult:uint8_t{Stored=0,Failed=1,NoSession=2,Unknown=3};
+struct FileSendOutcome{FileSendResult result;uint8_t status;uint32_t bytesStored;const char* why;};
+const char* fileSendResultWord(FileSendResult r){return r==FileSendResult::Stored?"stored":"failed";}
+FileSendOutcome sendFileToMacResult(const uint8_t*,const String& path){assert(scopeDepth);if(!identityMayRead())return {FileSendResult::Failed,2,0,"refused"};++transfers;transferPath=path;return {FileSendResult::Stored,0,42,""};}
 // INSERT_PRODUCTION
 static void reset(){assert(scopeDepth==0);scopes=fsCalls=transfers=statsCalls=sdChecks=sends=0;response.clear();transferPath="";VFS::requestedTiers.clear();filesystemReady=sdAvailable=statsOkay=true;allocFails=openFails=false;bondConfigured=bondSession=true;installed.clear();lastInstalled=AuthContext{};}
 static const uint8_t mac[6]={1,2,3,4,5,6};        // the bonded peer (equals bondMac)
