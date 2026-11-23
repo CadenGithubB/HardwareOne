@@ -1620,6 +1620,12 @@ static void testCancelMidPump() {
         "no answer to FILE_START: no chunk, a FILE_CANCEL for the transferId");
   check(fileSlotsActiveCount() == 0 && eventCount(MSG_FILE_RECV_FAILED) == 1,
         "the sender's FILE_CANCEL frees the receiver's slot at once");
+  // The same cancel for a transfer the receiver never had frees nothing and is
+  // not taken for a failed send of the receiver's own.
+  check(isAccepted(rxFrame(ESPNOW_V4_TYPE_FILE_CANCEL, kSender, ++nextFrameMsgId, air[1].payload.data(),
+                           static_cast<uint16_t>(air[1].payload.size()))) &&
+            eventCount(MSG_FILE_SEND_FAILED) == 0,
+        "a sender's cancel for an unknown transfer is taken quietly (no failed-send record)");
 }
 
 // F7 from the sender: a long name goes whole and the receiver refuses it; a

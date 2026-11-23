@@ -7775,6 +7775,15 @@ static V4Verdict v4h_file_cancel(const V4RxCtx& ctx) {
       }
       return ctx.accepted();  // a slot already finishing keeps its course
     }
+    // A sender giving up a transfer this device never had (its FILE_START
+    // never arrived): nothing to free. Only a sender says "cancelled"; a
+    // receiver's reasons are refused, io_error, timeout, incomplete and
+    // crc_mismatch, so this is not a failed send of ours.
+    if (reason == espnowanswer::kCancelled) {
+      DEBUG_ESPNOWF("[V4_FILE_RX] cancel for unknown transferId=%lu from %s — nothing to free",
+                    (unsigned long)transferId, ctx.deviceName);
+      return ctx.accepted();
+    }
   }
   // Report ONCE per (peer, transfer). The receiver deliberately repeats
   // cancels so the stop survives a dropped frame; each repeat has its own
