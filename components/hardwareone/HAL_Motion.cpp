@@ -693,7 +693,7 @@ static bool imuStoreSample(const MotionSample& sample, bool publish, unsigned lo
     const MotionHookSample hooked =
         motionHookSample((uint32_t)readMs, sample.pitch, sample.roll, sample.accel,
                          sample.hasGravity ? sample.gravity : nullptr, sample.hasHwTap, sample.hwTap, afterGap,
-                         shaking, kMotionTapAccel, sample.hwTapKind);
+                         shaking, kMotionTapAccel, sample.hwTapKind, sample.hwTapVec);
     motionHookCall(sImuHook, hooked);
   }
   return updated;
@@ -983,8 +983,8 @@ const char* cmd_imutapsideratio(const String& argsInput) {
 // detector; the command starts, clears and reports.
 
 // The last finished teach step, for 'imutapteach status': written by the main
-// loop. state (knock::TeachState; Idle = none since boot) | side << 8 |
-// knocks << 16 | misfits << 24.
+// loop. state (knock::TeachState; Idle = none since boot) | surface << 8 (0
+// face, 1 side, 2 both: the shake configuration) | knocks << 16 | misfits << 24.
 static std::atomic<uint32_t> sTeachLast{0};
 // The saved surfaces' text the detector was last given (main loop only).
 EXT_RAM_BSS_ATTR static char sAppliedTaught[2][knock::kTaughtTextMax];
@@ -1013,40 +1013,68 @@ static void teachToast(const char* text, uint32_t ms, bool done, bool warn) {
 #endif
 }
 
-// A finished step: save the surface, then say how it sits against the other.
-static void teachFinished(const knock::Teacher& t) {
-  uint16_t agree = 1000;
-  const knock::Surfaces s = knock::withTaught(savedSurfaces(), t, agree);
+bool imuKnockSaveTaught(const knock::Teacher* side, const knock::Teacher* face, char* msg, size_t len) {
+  const knock::TeachJudgement j = knock::judgeTaught(savedSurfaces(), side, face);
   char text[knock::kTaughtTextMax];
-  if (t.side) {
-    knock::formatDirection(s.haveSide, s.side, text, sizeof(text));
+  if (side) {
+    knock::formatDirection(j.surfaces.haveSide, j.surfaces.side, text, sizeof(text));
     setSetting(gSettings.imuTapSideTaught, text);
-  } else {
-    knock::formatDirection(s.haveFace, s.face, text, sizeof(text));
+  }
+  if (face) {
+    knock::formatDirection(j.surfaces.haveFace, j.surfaces.face, text, sizeof(text));
     setSetting(gSettings.imuTapFaceTaught, text);
   }
-  const knock::TeachReport r = knock::teachReport(s);
-  const uint8_t misfits = knock::teachMisfits(t, s);
-  sTeachLast.store((uint32_t)knock::TeachState::Done | ((uint32_t)t.side << 8) | ((uint32_t)t.got.count << 16) |
-                   ((uint32_t)misfits << 24));
-  const char* name = t.side ? "Side" : "Face";
-  char msg[96];
-  bool warn = true;
-  if (!t.side && agree < knock::kTeachAgreeMin) {
-    snprintf(msg, sizeof(msg), "Face taught, but its knocks point opposite ways: teach it again");
-  } else if (!s.taught()) {
-    snprintf(msg, sizeof(msg), "%s taught. Now teach the %s", name, surfaceWord(!t.side));
-    warn = false;
-  } else if (r.close) {
-    snprintf(msg, sizeof(msg), "%s taught, but only %u deg from the %s: they can't be told apart", name,
-             (unsigned)r.sepDeg, surfaceWord(!t.side));
-  } else if (misfits) {
-    snprintf(msg, sizeof(msg), "%s taught: %u of %u knocks would sort as the %s", name, (unsigned)misfits,
-             (unsigned)t.got.count, surfaceWord(!t.side));
-  } else {
-    snprintf(msg, sizeof(msg), "%s taught: %u deg from the %s", name, (unsigned)r.sepDeg, surfaceWord(!t.side));
-    warn = false;
+  const bool both = side && face;
+  const uint32_t surface = both ? 2u : side ? 1u : 0u;
+  sTeachLast.store((uint32_t)knock::TeachState::Done | (surface << 8) | ((uint32_t)j.knocks << 16) |
+                   ((uint32_t)j.misfits << 24));
+  using knock::TeachVerdict;
+  if (both) {  // the shake configuration: "top" is the owner's word for the face
+    switch (j.verdict) {
+      case TeachVerdict::FaceDisagrees:
+        snprintf(msg, len, "Configured, but the top knocks point opposite ways: shake to configure again");
+        return true;
+      case TeachVerdict::Close:
+        snprintf(msg, len, "Configured, but side and top are only %u deg apart: they can't be told apart",
+                 (unsigned)j.sepDeg);
+        return true;
+      case TeachVerdict::Misfits:
+        snprintf(msg, len, "Configured: %u of %u knocks would sort as the other surface", (unsigned)j.misfits,
+                 (unsigned)j.knocks);
+        return true;
+      default:
+        snprintf(msg, len, "Configured: side and top %u deg apart", (unsigned)j.sepDeg);
+        return false;
+    }
   }
+  const bool isSide = side != nullptr;
+  const char* name = isSide ? "Side" : "Face";
+  switch (j.verdict) {
+    case TeachVerdict::FaceDisagrees:
+      snprintf(msg, len, "Face taught, but its knocks point opposite ways: teach it again");
+      return true;
+    case TeachVerdict::NeedOther:
+      snprintf(msg, len, "%s taught. Now teach the %s", name, surfaceWord(!isSide));
+      return false;
+    case TeachVerdict::Close:
+      snprintf(msg, len, "%s taught, but only %u deg from the %s: they can't be told apart", name,
+               (unsigned)j.sepDeg, surfaceWord(!isSide));
+      return true;
+    case TeachVerdict::Misfits:
+      snprintf(msg, len, "%s taught: %u of %u knocks would sort as the %s", name, (unsigned)j.misfits,
+               (unsigned)j.knocks, surfaceWord(!isSide));
+      return true;
+    default:
+      snprintf(msg, len, "%s taught: %u deg from the %s", name, (unsigned)j.sepDeg, surfaceWord(!isSide));
+      return false;
+  }
+}
+
+// A finished imutapteach step: save the surface, then say how it sits
+// against the other.
+static void teachFinished(const knock::Teacher& t) {
+  char msg[96];
+  const bool warn = imuKnockSaveTaught(t.side ? &t : nullptr, t.side ? nullptr : &t, msg, sizeof(msg));
   teachToast(msg, warn ? 8000 : 3000, true, warn);
 }
 
@@ -1141,9 +1169,13 @@ static const char* teachStatus() {
   } else {
     const uint32_t last = sTeachLast.load();
     const knock::TeachState st = (knock::TeachState)(last & 0xFF);
-    const bool side = (last >> 8) & 1;
+    const unsigned surface = (last >> 8) & 0xFF;
+    const bool side = surface == 1;
     const unsigned knocks = (last >> 16) & 0xFF, misfits = (last >> 24) & 0xFF;
-    if (st == knock::TeachState::Done && misfits)
+    if (st == knock::TeachState::Done && surface == 2)
+      put("Last teach: the shake configuration, side and top (face) taught; %u of its %u knocks would sort as the "
+          "other surface.\n", misfits, knocks);
+    else if (st == knock::TeachState::Done && misfits)
       put("Last teach step: the %s, taught; %u of its %u knocks would sort as the %s.\n", surfaceWord(side), misfits,
           knocks, surfaceWord(!side));
     else if (st == knock::TeachState::Done)

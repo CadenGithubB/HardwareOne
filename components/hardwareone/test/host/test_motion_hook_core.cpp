@@ -353,6 +353,15 @@ static void testSampleFields() {
   assert(!motionHookSample(1, 0, 0, accel, none, true, false, false, false, kMotionTapAccel).hasGravity);
   const float bad[3] = {NAN, 0, 1};
   assert(!motionHookSample(1, 0, 0, accel, bad, true, false, false, false, kMotionTapAccel).hasGravity);
+  // A tap from the knock detector carries its kind and peak jump; a sample
+  // without a tap, or a stale latch after a gap, carries neither.
+  const int16_t jump[3] = {-54, -242, 83};
+  s = motionHookSample(1, 0, 0, accel, gravity, true, true, false, false, kMotionTapAccel, kMotionTapKindSide, jump);
+  assert(s.tapLatched && s.tapKind == kMotionTapKindSide && s.tapVec[0] == -54 && s.tapVec[1] == -242 && s.tapVec[2] == 83);
+  s = motionHookSample(1, 0, 0, accel, gravity, true, false, false, false, kMotionTapAccel, kMotionTapKindSide, jump);
+  assert(!s.tapLatched && s.tapKind == kMotionTapKindUnknown && s.tapVec[0] == 0 && s.tapVec[1] == 0 && s.tapVec[2] == 0);
+  s = motionHookSample(1, 0, 0, accel, gravity, true, true, true, false, kMotionTapAccel, kMotionTapKindFace, jump);
+  assert(!s.tapLatched && s.tapVec[1] == 0);
 }
 
 // The raw tap has no lockout. Knocks 60 ms apart: the hook sees each, while

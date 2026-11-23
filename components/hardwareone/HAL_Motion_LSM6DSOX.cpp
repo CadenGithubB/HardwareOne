@@ -315,7 +315,7 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, Moti
   out.hasHwTap = out.hasHwFreefall = true;
   if (sState.knockFifo) {
     readKnockFifo(*wire, bus, address);
-    out.hwTap = knockFeedTakeTap(out.hwTapKind);
+    out.hwTap = knockFeedTakeTap(out.hwTapKind, out.hwTapVec);
   } else {
     out.hwTap = reading.tap;
   }

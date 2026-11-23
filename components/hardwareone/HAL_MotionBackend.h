@@ -60,6 +60,9 @@ struct MotionSample {
   // Where the tap hit (kMotionTapKind*): the software knock detector tells
   // side from face; a chip's own tap engine cannot (Unknown).
   uint8_t hwTapKind = 0;
+  // ...and its peak jump (mg, sensor frame; zero when unknown): the shake
+  // configuration teaches the side and the face from it.
+  int16_t hwTapVec[3] = {0, 0, 0};
   bool hasHwFreefall = false, hwFreefall = false;
   // False while the backend is still starting (the 4517's gyro bias): the
   // read worked, but there is nothing to publish or detect yet.

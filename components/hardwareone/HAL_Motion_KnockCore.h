@@ -462,6 +462,56 @@ inline TeachReport teachReport(const Surfaces& s) {
   return r;
 }
 
+// ---- Judging what was taught -----------------------------------------------------
+// imutapteach (one surface) and the shake configuration (both, side then
+// face) save and report what was taught the same way: the surfaces after the
+// step(s) and the first thing worth a warning, in this order.
+enum class TeachVerdict : uint8_t {
+  Ok = 0,         // both taught, kTeachCloseDeg or more apart, every knock sorts as its own surface
+  NeedOther,      // one surface taught, the other not yet
+  FaceDisagrees,  // the face's knocks point opposite ways (agreement under kTeachAgreeMin)
+  Close,          // the two are under kTeachCloseDeg apart: they cannot be told apart
+  Misfits,        // some of the step's knocks would sort as the other surface
+};
+struct TeachJudgement {
+  Surfaces surfaces;          // to save
+  TeachVerdict verdict = TeachVerdict::Ok;
+  uint16_t sepDeg = 0;        // with both taught: how far apart
+  uint8_t knocks = 0;         // the step(s)' knocks
+  uint8_t misfits = 0;        // ...of which would sort as the other surface
+  uint16_t faceAgree = 1000;  // the face step's agreement in sign (1000 without one)
+};
+// side and/or face: finished teach steps (Done) joined to `before`.
+inline TeachJudgement judgeTaught(const Surfaces& before, const Teacher* side, const Teacher* face) {
+  TeachJudgement j;
+  j.surfaces = before;
+  uint16_t agree = 1000;
+  if (side) j.surfaces = withTaught(j.surfaces, *side, agree);
+  if (face) {
+    j.surfaces = withTaught(j.surfaces, *face, agree);
+    j.faceAgree = agree;
+  }
+  const Teacher* steps[2] = {side, face};
+  for (const Teacher* t : steps) {
+    if (!t) continue;
+    j.knocks = static_cast<uint8_t>(j.knocks + t->got.count);
+    j.misfits = static_cast<uint8_t>(j.misfits + teachMisfits(*t, j.surfaces));
+  }
+  const TeachReport r = teachReport(j.surfaces);
+  j.sepDeg = r.sepDeg;
+  if (face && j.faceAgree < kTeachAgreeMin)
+    j.verdict = TeachVerdict::FaceDisagrees;
+  else if (!j.surfaces.taught())
+    j.verdict = TeachVerdict::NeedOther;
+  else if (r.close)
+    j.verdict = TeachVerdict::Close;
+  else if (j.misfits)
+    j.verdict = TeachVerdict::Misfits;
+  else
+    j.verdict = TeachVerdict::Ok;
+  return j;
+}
+
 // A direction as setting text: "x,y,z" (milli-units), "" untaught.
 inline void formatDirection(bool have, const int16_t v[3], char* out, size_t len) {
   if (!len) return;
@@ -543,23 +593,32 @@ struct Trace {
 };
 
 // Taps the detector accepted, handed out one per sample (MotionSample::hwTap),
-// oldest first, with where each hit. At most kPendingMax wait; more are
-// dropped (eight taps inside one sample period is not a person).
+// oldest first, with where each hit and its peak jump (Event::peakVec, mg:
+// the shake configuration teaches the surfaces from it). At most kPendingMax
+// wait; more are dropped (eight taps inside one sample period is not a
+// person).
 constexpr uint8_t kPendingMax = 8;
 struct PendingTaps {
   uint8_t count = 0;
   uint8_t sideBits = 0;  // bit i: the i-th waiting tap (oldest first) hit the side
+  int16_t vec[kPendingMax][3] = {};  // the i-th waiting tap's peak jump
   void clear() { count = sideBits = 0; }
-  void push(bool side) {
+  void push(bool side, const int16_t* v = nullptr) {
     if (count >= kPendingMax) return;
     if (side) sideBits = static_cast<uint8_t>(sideBits | (1u << count));
+    for (int i = 0; i < 3; ++i) vec[count][i] = v ? v[i] : 0;
     ++count;
   }
-  // The oldest waiting tap; false when none waits.
-  bool pop(bool& side) {
+  // The oldest waiting tap (and its peak jump into v, when given); false
+  // when none waits.
+  bool pop(bool& side, int16_t* v = nullptr) {
     if (!count) return false;
     side = (sideBits & 1u) != 0;
     sideBits = static_cast<uint8_t>(sideBits >> 1);
+    if (v)
+      for (int i = 0; i < 3; ++i) v[i] = vec[0][i];
+    for (uint8_t k = 1; k < count; ++k)
+      for (int i = 0; i < 3; ++i) vec[k - 1][i] = vec[k][i];
     --count;
     return true;
   }
@@ -613,7 +672,7 @@ struct Feed {
   // joins the pending taps.
   bool add(const Config& cfg, const float mg[3], uint32_t tUs, Event& ev) {
     if (!detector.add(cfg, mg, tUs, ev)) return false;
-    if (ev.verdict == Verdict::Tap) pending.push(ev.side);
+    if (ev.verdict == Verdict::Tap) pending.push(ev.side, ev.peakVec);
     return true;
   }
 };

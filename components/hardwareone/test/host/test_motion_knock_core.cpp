@@ -305,6 +305,30 @@ void testPendingTaps() {
   p.push(true);
   p.clear();
   assert(p.count == 0 && !p.pop(side));
+  // Each tap keeps its peak jump (the shake configuration teaches from it),
+  // oldest first; a tap pushed without one has zero.
+  const int16_t a[3] = {10, -900, 300}, b[3] = {-5, 80, 1700};
+  p.push(true, a);
+  p.push(false, b);
+  p.push(true);
+  int16_t v[3] = {1, 1, 1};
+  assert(p.pop(side, v) && side && v[0] == 10 && v[1] == -900 && v[2] == 300);
+  assert(p.pop(side, v) && !side && v[0] == -5 && v[1] == 80 && v[2] == 1700);
+  assert(p.pop(side, v) && side && v[0] == 0 && v[1] == 0 && v[2] == 0);
+  // The feed hands a tap's peak jump on with it.
+  knock::Feed feed;
+  Config cfg = cfg100();
+  float mg[3] = {0, 0, 1000};
+  Event ev;
+  uint32_t us = 0;
+  bool got = false;
+  for (int i = 0; i < 200 && !got; ++i, us += 10000) {
+    mg[1] = (i == 60) ? 900.0f : 0.0f;
+    got = feed.add(cfg, mg, us, ev) && ev.verdict == Verdict::Tap;
+  }
+  assert(got && feed.pending.count == 1);
+  assert(feed.pending.pop(side, v) && v[0] == ev.peakVec[0] && v[1] == ev.peakVec[1] && v[2] == ev.peakVec[2]);
+  assert(v[1] > 500);
 }
 
 void testSampleClock() {
@@ -597,6 +621,45 @@ void testTeachWarnings() {
   assert(!r.close && r.sepDeg == 0 && knock::teachMisfits(mixed, s) == 0);
 }
 
+// imutapteach and the shake configuration judge what was taught alike
+// (judgeTaught): the surfaces to save and the first warning, in order.
+void testJudgeTaught() {
+  using knock::TeachVerdict;
+  // Both steps at once (the configuration), well apart: Ok, nothing misfits.
+  const Teacher side = stepWith(kSignSide, true), face = stepWith(kSignFace, false);
+  knock::TeachJudgement j = knock::judgeTaught(Surfaces{}, &side, &face);
+  assert(j.verdict == TeachVerdict::Ok && j.surfaces.taught() && j.knocks == 10 && j.misfits == 0);
+  assert(j.sepDeg == knock::teachReport(teachBoth(kSignSide, kSignFace)).sepDeg && j.sepDeg > 75);
+  // The same surfaces as two imutapteach steps in a row.
+  knock::TeachJudgement one = knock::judgeTaught(Surfaces{}, &side, nullptr);
+  assert(one.verdict == TeachVerdict::NeedOther && one.surfaces.haveSide && !one.surfaces.haveFace && one.knocks == 5);
+  knock::TeachJudgement two = knock::judgeTaught(one.surfaces, nullptr, &face);
+  assert(two.verdict == TeachVerdict::Ok && two.sepDeg == j.sepDeg);
+  for (int i = 0; i < 3; ++i) assert(two.surfaces.side[i] == j.surfaces.side[i] && two.surfaces.face[i] == j.surfaces.face[i]);
+  // Both steps replace what was taught before.
+  Surfaces old = teachBoth(kPodSide, kPodFace);
+  j = knock::judgeTaught(old, &side, &face);
+  for (int i = 0; i < 3; ++i) assert(j.surfaces.side[i] == two.surfaces.side[i] && j.surfaces.face[i] == two.surfaces.face[i]);
+  // Face knocks of opposite signs come first.
+  const Teacher mixedFace =
+      stepWith({{{0, 0, 1500}}, {{0, 0, -1500}}, {{50, 0, 1400}}, {{0, 30, -1600}}, {{0, 0, 1500}}}, false);
+  j = knock::judgeTaught(Surfaces{}, &side, &mixedFace);
+  assert(j.verdict == TeachVerdict::FaceDisagrees && j.faceAgree < knock::kTeachAgreeMin);
+  // Too close to tell apart.
+  const Teacher nearSide =
+      stepWith({{{0, 1000, 200}}, {{0, 1000, 150}}, {{0, -1000, -250}}, {{50, 1000, 200}}, {{0, 1000, 200}}}, true);
+  const Teacher nearFace =
+      stepWith({{{0, 1000, 500}}, {{0, 1000, 450}}, {{0, 1000, 550}}, {{-50, 1000, 500}}, {{0, 1000, 500}}}, false);
+  j = knock::judgeTaught(Surfaces{}, &nearSide, &nearFace);
+  assert(j.verdict == TeachVerdict::Close && j.sepDeg < knock::kTeachCloseDeg);
+  // Apart, but a knock of a step sorts as the other surface.
+  const Teacher oddFace =
+      stepWith({{{80, 150, -1600}}, {{-100, -60, -1400}}, {{30, 200, -1800}}, {{60, -1500, -300}}, {{-40, 120, -1700}}},
+               false);
+  j = knock::judgeTaught(Surfaces{}, &side, &oddFace);
+  assert(j.verdict == TeachVerdict::Misfits && j.misfits >= 1 && j.sepDeg >= knock::kTeachCloseDeg);
+}
+
 void testDirectionText() {
   const Surfaces s = teachBoth(kPodSide, kPodFace);
   char text[knock::kTaughtTextMax];
@@ -641,6 +704,7 @@ int main() {
   testTrace();
   testCos();
   testTeacher();
+  testJudgeTaught();
   testUntaughtKeepsTheRatioRule();
   testPodSurfaces();
   testSignSurfaces();

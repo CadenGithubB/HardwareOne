@@ -227,6 +227,14 @@ inline size_t imuCacheStorageBytes() { return 0; }
 // detector and saves a finished teach step; its progress on the screen.
 #if ENABLE_IMU_KNOCK_DETECTOR
 void imuKnockTick();
+#include "HAL_Motion_KnockCore.h"
+// Save finished teach steps and say how they turned out: one surface
+// (imutapteach, the other null) or both (the shake configuration). Main loop
+// or command task only (it writes settings). The report for the screen goes
+// to msg (both: worded as the configuration's "Configured..." line); true
+// when it is a warning. The surfaces are saved either way, as imutapteach
+// always has.
+bool imuKnockSaveTaught(const knock::Teacher* side, const knock::Teacher* face, char* msg, size_t len);
 #else
 inline void imuKnockTick() {}
 #endif

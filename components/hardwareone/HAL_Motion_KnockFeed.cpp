@@ -114,10 +114,11 @@ void knockFeedRecord(const KnockFeedRead& read, const knock::Event* events, uint
   portEXIT_CRITICAL(&sKnockMux);
 }
 
-bool knockFeedTakeTap(uint8_t& kind) {
+bool knockFeedTakeTap(uint8_t& kind, int16_t vec[3]) {
   bool side = false;
-  if (!sFeed.pending.pop(side)) {
+  if (!sFeed.pending.pop(side, vec)) {
     kind = kMotionTapKindUnknown;
+    vec[0] = vec[1] = vec[2] = 0;
     return false;
   }
   kind = side ? kMotionTapKindSide : kMotionTapKindFace;

@@ -39,9 +39,10 @@ struct KnockFeedRead {
   int16_t lastMg[3] = {0, 0, 0};
 };
 void knockFeedRecord(const KnockFeedRead& read, const knock::Event* events, uint8_t count);
-// The oldest tap waiting to go out with this sample: true and its kind
-// (kMotionTapKindSide / Face), or false (none waits).
-bool knockFeedTakeTap(uint8_t& kind);
+// The oldest tap waiting to go out with this sample: true, its kind
+// (kMotionTapKindSide / Face) and its peak jump (mg), or false (none waits:
+// vec is zeroed).
+bool knockFeedTakeTap(uint8_t& kind, int16_t vec[3]);
 
 // ---- Any task -------------------------------------------------------------------
 // Whether this start feeds the detector (imustatus: taps found by the firmware).

@@ -72,6 +72,7 @@ struct MotionHookSample {
   // Without hasHwTap it is this sample's acceleration spike.
   bool tapLatched = false;
   uint8_t tapKind = kMotionTapKindUnknown;  // with tapLatched: side, face, or unknown
+  int16_t tapVec[3] = {0, 0, 0};  // with tapLatched and hasHwTap: the knock's peak jump (mg), zero when unknown
   bool isShaking = false;      // the action detector's state after this sample
   // What the build's chip provides.
   bool hasHwTap = false;       // taps are detected by the chip (latched between samples)
@@ -213,7 +214,8 @@ inline bool motionRawTap(bool hasHwTap, bool hwTap, bool afterGap, const float a
 inline MotionHookSample motionHookSample(uint32_t ms, float pitchDeg, float rollDeg, const float accel[3],
                                          const float* gravity, bool hasHwTap, bool hwTap, bool afterGap,
                                          bool isShaking, float tapAccelThreshold,
-                                         uint8_t hwTapKind = kMotionTapKindUnknown) {
+                                         uint8_t hwTapKind = kMotionTapKindUnknown,
+                                         const int16_t* hwTapVec = nullptr) {
   MotionHookSample out;
   out.ms = ms;
   out.pitchDeg = pitchDeg;
@@ -230,6 +232,8 @@ inline MotionHookSample motionHookSample(uint32_t ms, float pitchDeg, float roll
   out.hasHwTap = hasHwTap;
   out.tapLatched = motionRawTap(hasHwTap, hwTap, afterGap, accel, tapAccelThreshold);
   out.tapKind = (out.tapLatched && hasHwTap) ? hwTapKind : kMotionTapKindUnknown;
+  if (out.tapLatched && hasHwTap && hwTapVec)
+    for (int i = 0; i < 3; ++i) out.tapVec[i] = hwTapVec[i];
   out.isShaking = isShaking;
   return out;
 }

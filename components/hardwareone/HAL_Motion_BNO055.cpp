@@ -202,7 +202,7 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t, MotionSample& out)
   out.hasMag = out.hasOrientation = out.hasHeading = out.hasCal = true;
   out.hasGravity = true;
   out.hasHwTap = true;
-  out.hwTap = knockFeedTakeTap(out.hwTapKind);
+  out.hwTap = knockFeedTakeTap(out.hwTapKind, out.hwTapVec);
   // Nothing to publish until the fusion gives gravity (it reads zeros just
   // after the start).
   out.ready = sFast.haveUp;
