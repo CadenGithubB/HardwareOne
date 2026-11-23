@@ -7861,6 +7861,72 @@ static void sendPairBeacon() {
 // after it is released.
 static espnowpair::State gPair = {};
 static portMUX_TYPE gPairLock = portMUX_INITIALIZER_UNLOCKED;
+// The key the pending incoming request carried (V4PayloadPairRequest.senderPub),
+// under gPairLock with gPair.in: an accept binds the key exchange that follows
+// to it (pairKeyBind).
+static uint8_t gPairInPub[32] = {};
+static uint8_t gPairInPubMac[6] = {};
+static bool gPairInPubValid = false;
+
+// Keys bound by an accepted pairing request (1.0 step 4): the first key
+// exchange with that MAC must present the key the request carried, or it is
+// answered "not accepted" (status 3, authenticated). A binding lasts as long as
+// the first-key window (10 min) and goes when the key binds or the device is
+// unpaired. Written on cmd_exec (accept, unpair), read on espnow_task (rule A
+// in espnowKeyExAdmit): every access holds gPairLock. 4 x 44 B in PSRAM.
+struct PairKeyBinding {
+  bool     used;
+  uint8_t  mac[6];
+  uint8_t  pub[32];
+  uint32_t untilMs;
+};
+static constexpr uint8_t kPairKeyBindings = 4;
+EXT_RAM_BSS_ATTR static PairKeyBinding gPairKeyBind[kPairKeyBindings];
+
+static void pairKeyBind(const uint8_t mac[6], const uint8_t pub[32]) {
+  const uint32_t nowMs = (uint32_t)millis();
+  portENTER_CRITICAL(&gPairLock);
+  PairKeyBinding* slot = nullptr;
+  for (auto& b : gPairKeyBind) {
+    if (b.used && macEquals(b.mac, mac)) { slot = &b; break; }
+  }
+  if (!slot) {
+    for (auto& b : gPairKeyBind) {
+      if (!b.used || (int32_t)(b.untilMs - nowMs) <= 0) { slot = &b; break; }
+    }
+  }
+  if (!slot) {   // all four live: the oldest goes
+    slot = &gPairKeyBind[0];
+    for (auto& b : gPairKeyBind) if ((int32_t)(b.untilMs - slot->untilMs) < 0) slot = &b;
+  }
+  memcpy(slot->mac, mac, 6);
+  memcpy(slot->pub, pub, 32);
+  slot->untilMs = nowMs + espnowrevoke::kFirstKeyWindowMs;
+  slot->used = true;
+  portEXIT_CRITICAL(&gPairLock);
+}
+
+static void pairKeyUnbind(const uint8_t mac[6]) {
+  portENTER_CRITICAL(&gPairLock);
+  for (auto& b : gPairKeyBind) {
+    if (b.used && macEquals(b.mac, mac)) b = PairKeyBinding{};
+  }
+  portEXIT_CRITICAL(&gPairLock);
+}
+
+// True when an accepted pairing request bound `mac` to a key other than `pub`.
+static bool pairKeyMismatch(const uint8_t mac[6], const uint8_t pub[32]) {
+  const uint32_t nowMs = (uint32_t)millis();
+  bool mismatch = false;
+  portENTER_CRITICAL(&gPairLock);
+  for (auto& b : gPairKeyBind) {
+    if (!b.used || !macEquals(b.mac, mac)) continue;
+    if ((int32_t)(b.untilMs - nowMs) <= 0) { b = PairKeyBinding{}; continue; }
+    mismatch = memcmp(b.pub, pub, 32) != 0;
+  }
+  portEXIT_CRITICAL(&gPairLock);
+  return mismatch;
+}
 
 // Send a pairing control frame (REQUEST/ACCEPT/REJECT) addressed to `dst`. Sent
 // as a BROADCAST_AUTH FF broadcast (NOT unicast): the two devices aren't ESP-NOW
@@ -7956,6 +8022,11 @@ static void v4h_pair_request(const V4RxCtx& ctx) {
   const bool windowOpen = espnowPairModeActive();
   portENTER_CRITICAL(&gPairLock);
   const espnowpair::Reply reply = espnowpair::onRequest(gPair, mac, name, (uint32_t)millis(), paired, windowOpen);
+  if (reply == espnowpair::Reply::Prompt) {   // the request now pending: keep the key it carries
+    memcpy(gPairInPub, req.senderPub, 32);
+    memcpy(gPairInPubMac, mac, 6);
+    gPairInPubValid = true;
+  }
   portEXIT_CRITICAL(&gPairLock);
   switch (reply) {
     case espnowpair::Reply::Accept: sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_ACCEPT); return;
@@ -19603,8 +19674,10 @@ static void espnowUnpairClearPairing(const uint8_t mac[6]) {
   portENTER_CRITICAL(&gPairLock);
   if (gPair.in.active && macEquals(gPair.in.mac, mac)) gPair.in = espnowpair::Request{};
   if (gPair.out.active && macEquals(gPair.out.mac, mac)) gPair.out = espnowpair::Request{};
+  if (gPairInPubValid && macEquals(gPairInPubMac, mac)) gPairInPubValid = false;
   portEXIT_CRITICAL(&gPairLock);
   pairingWindowCloseFor(mac);
+  pairKeyUnbind(mac);
 }
 
 // The unpair teardown, shared by espnowunpair and espnowrevoke: every store
@@ -20867,12 +20940,26 @@ espnowrevoke::Admit espnowKeyExAdmit(const uint8_t mac[6], const uint8_t pub[32]
   in.listLocked = espnowRevokedLocked();
   in.firstKeyOpen = pairingWindowOpenFor(mac) ||
                     (dev && espnowrevoke::firstKeyOpen(dev->awaitingKeyUntilMs, (uint32_t)millis()));
-  return espnowrevoke::admit(in);
+  const espnowrevoke::Admit verdict = espnowrevoke::admit(in);
+  // An accepted pairing request bound this MAC to the key it carried: another
+  // key is not accepted (answered status 3), whatever window is open.
+  if (verdict == espnowrevoke::Admit::Accept && pub && !in.sameKey && pairKeyMismatch(mac, pub)) {
+    static uint32_t sBindLogMs = 0;
+    if (logCooldownOk(sBindLogMs, 30000)) {
+      char keyId[espnowrevoke::kKeyIdHexLen + 1];
+      espnowrevoke::formatKeyId(pub, keyId);
+      WARN_ESPNOWF("KEY_EX from " MAC_FMT " not accepted: its key (keyId %s) is not the one its accepted "
+                   "pairing request carried", MAC_ARGS(mac), keyId);
+    }
+    return espnowrevoke::Admit::NotAccepted;
+  }
+  return verdict;
 }
 
 void espnowFirstKeyBound(const uint8_t mac[6]) {
   EspNowDevice* dev = groupRecordOf(mac);
   if (dev) dev->awaitingKeyUntilMs = 0;   // RAM only: an expired window reads the same after a restart
+  pairKeyUnbind(mac);                     // the key the request carried (or no binding) is the one bound
 }
 
 // The rollback job (cmd_exec): the registry entry goes only while it still has
@@ -23200,6 +23287,17 @@ const char* cmd_espnow_accept(const String& argsInput) {
                                   "on both devices and send the request again.", req);
   if (err) return err;
 
+  // The key exchange that follows must present the key the request carried
+  // (its keyId was shown with the prompt).
+  {
+    uint8_t pub[32];
+    portENTER_CRITICAL(&gPairLock);
+    const bool have = gPairInPubValid && macEquals(gPairInPubMac, req.mac);
+    if (have) memcpy(pub, gPairInPub, 32);
+    gPairInPubValid = false;
+    portEXIT_CRITICAL(&gPairLock);
+    if (have) pairKeyBind(req.mac, pub);
+  }
   sendPairCtrl(req.mac, ESPNOW_V4_TYPE_PAIR_ACCEPT);   // re-sent by the heartbeat sweep (PairCore)
   char macStr[18]; macToDisplay(req.mac, macStr, sizeof(macStr));
   String pairArgs = String(macStr) + " " + req.name;
