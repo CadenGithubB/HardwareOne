@@ -450,7 +450,7 @@ const size_t imuInputCommandsCount = sizeof(imuInputCommands) / sizeof(imuInputC
 // Only this device's entries; autostart is the input module's (HAL_Input.cpp).
 static const SettingEntry imuInputSettingEntries[] = {
   { "imuInputTapWindowMs", SETTING_INT,  &gSettings.imuInputTapWindowMs, 350, 0, nullptr, 200, 800, "Tap window (ms)",       nullptr, false, nullptr, "imuinputtapms" },
-  { "imuInputTapMergeMs",  SETTING_INT,  &gSettings.imuInputTapMergeMs,  120, 0, nullptr, 0,   300, "Tap merge (ms)",        nullptr, false, nullptr, "imuinputtapmerge" },
+  { "imuInputTapMergeMs",  SETTING_INT,  &gSettings.imuInputTapMergeMs,  0,   0, nullptr, 0,   300, "Tap merge (ms)",        nullptr, false, nullptr, "imuinputtapmerge" },
   { "imuInputTiltDeg",     SETTING_INT,  &gSettings.imuInputTiltDeg,      15, 0, nullptr, 8,   40,  "Tilt angle (degrees)",  nullptr, false, nullptr, "imuinputtilt" },
   { "imuInputShakeStart",  SETTING_BOOL, &gSettings.imuInputShakeStart,    1, 0, nullptr, 0,   1,   "Shake is START",        nullptr, false, nullptr, "imuinputshake" },
   { "imuInputSwapXY",      SETTING_BOOL, &gSettings.imuInputSwapXY,        0, 0, nullptr, 0,   1,   "Swap tilt axes",        nullptr, false, nullptr, "imuinputswapxy" },

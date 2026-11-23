@@ -7,6 +7,7 @@
 // transactions; no call holds the bus while it waits.
 #pragma once
 
+#include "HAL_Motion_KnockCore.h"
 #include <stddef.h>
 #include <stdint.h>
 
@@ -98,6 +99,15 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, Moti
 // by the IMU task, so a command can call this from any task). A backend
 // without a tunable tap engine ignores it.
 void motionBackendSetTapTuning(long thresholdMg, long shock, long quiet);
+
+// The software knock detector (HAL_Motion_KnockCore.h), on a backend that
+// streams the accelerometer at full rate (the LSM6DS3TR-C). Its tuning is
+// taken at the next sample; the trace is every recent knock with its verdict.
+// motionBackendKnockTrace is false on a backend without the detector (it
+// uses the chip's own tap engine, or none). Any task may call these.
+void motionBackendSetKnockTuning(long thresholdMg, long maxMs, long ringMs);
+bool motionBackendKnockTrace(knock::Trace& out, knock::Config& cfg);
+void motionBackendKnockTraceClear();
 
 // Release whatever the backend holds and power the chip(s) down, best
 // effort; the chip may already be gone.

@@ -27,6 +27,7 @@
 #include <esp_attr.h>   // EXT_RAM_BSS_ATTR
 #include <esp_timer.h>
 #include <atomic>
+#include <freertos/FreeRTOS.h>  // portMUX: the knock trace
 
 #include "HAL_Motion_Fusion.h"
 #include "HAL_Motion_LSM6DSOXCore.h"
@@ -58,6 +59,11 @@ struct Lsm4517State {
   // false until a start succeeded and again after the stop.
   bool started;
   uint8_t bus, address, secondAddress;
+  // The software knock detector (LSM6DS3TR-C: fed from the FIFO). Taps it
+  // accepted wait here and go out one per sample.
+  bool knockFifo;
+  knock::Detector knock;
+  uint8_t pendingTaps;
 };
 EXT_RAM_BSS_ATTR Lsm4517State sState;
 
@@ -66,6 +72,82 @@ EXT_RAM_BSS_ATTR Lsm4517State sState;
 // sample). One word, so a command on another task can set it without a lock.
 constexpr uint32_t kTapRetune = 1u << 24;
 std::atomic<uint32_t> sTapTuning{kLsm6dsoxTapThreshold | (kLsm6dsoxTapShock << 8) | (kLsm6dsoxTapQuiet << 16)};
+
+// The knock detector's tuning: threshold mg | max ms << 16 (both fit 16 bits),
+// and the ring window; read by the IMU task at each sample.
+std::atomic<uint32_t> sKnockTuning{500u | (40u << 16)};
+std::atomic<uint16_t> sKnockRingMs{80};
+// The trace: written by the IMU task, copied by commands (a short critical
+// section each way). PSRAM, cleared at each start.
+EXT_RAM_BSS_ATTR knock::Trace sKnockTrace;
+portMUX_TYPE sKnockMux = portMUX_INITIALIZER_UNLOCKED;
+bool sKnockTraceLive = false;  // false: nothing written yet (the PSRAM bytes are not initialised)
+
+knock::Config knockConfig() {
+  knock::Config c;
+  const uint32_t t = sKnockTuning.load();
+  c.thresholdMg = (uint16_t)(t & 0xFFFF);
+  c.maxMs = (uint16_t)(t >> 16);
+  c.ringMs = sKnockRingMs.load();
+  return c;
+}
+
+void knockTraceClear() {
+  portENTER_CRITICAL(&sKnockMux);
+  sKnockTrace.clear();
+  sKnockTraceLive = true;
+  portEXIT_CRITICAL(&sKnockMux);
+}
+
+// Reads the FIFO's unread samples (at most kLsm6ds3FifoMaxWordsPerRead words;
+// a backlog drains over the next samples) and runs them through the detector.
+// A failed read loses nothing the chip still holds.
+void readKnockFifo(TwoWire& wire, uint8_t bus, uint8_t address) {
+  uint8_t buf[kLsm6ds3FifoMaxWordsPerRead * 2];
+  uint16_t take = 0, left = 0;
+  bool overrun = false;
+  const bool ok = i2cTaskWithTimeout(bus, address, kClockHz, kReadLockMs, [&]() -> bool {
+    uint8_t st[4];
+    if (!readRegs(wire, address, kLsm6ds3RegFifoStatus1, st, sizeof(st))) return false;
+    uint16_t diff = (uint16_t)(st[0] | ((st[1] & 0x07) << 8));
+    overrun = (st[1] & 0x40) != 0;
+    const uint16_t pattern = (uint16_t)(st[2] | ((st[3] & 0x03) << 8));
+    // Line up on an X word: drop the rest of a partly read sample.
+    const uint8_t skip = (uint8_t)((3 - pattern % 3) % 3);
+    if (skip) {
+      if (diff < skip) return true;
+      uint8_t junk[4];
+      if (!readRegs(wire, address, kLsm6ds3RegFifoDataOut, junk, (uint8_t)(skip * 2))) return false;
+      diff = (uint16_t)(diff - skip);
+    }
+    take = (uint16_t)(diff / 3 * 3);
+    if (take > kLsm6ds3FifoMaxWordsPerRead) take = kLsm6ds3FifoMaxWordsPerRead;
+    left = (uint16_t)(diff - take);
+    return take == 0 || readRegs(wire, address, kLsm6ds3RegFifoDataOut, buf, (uint8_t)(take * 2));
+  });
+  if (!ok || take == 0) return;
+  if (overrun) sState.knock.reset();  // samples were lost: start the baseline over
+  const knock::Config cfg = knockConfig();
+  const uint16_t n = take / 3;
+  // The newest sample read is `left / 3` samples older than now.
+  const uint32_t nowUs = (uint32_t)esp_timer_get_time();
+  const uint32_t lastUs = nowUs - (uint32_t)(left / 3) * kLsm6ds3FifoSampleUs;
+  for (uint16_t i = 0; i < n; ++i) {
+    float mg[3];
+    for (int a = 0; a < 3; ++a) mg[a] = lsm4517Le16(buf + 6 * i + 2 * a) * kLsm6dsoxAccelMgPerLsb;
+    const uint32_t tUs = lastUs - (uint32_t)(n - 1 - i) * kLsm6ds3FifoSampleUs;
+    knock::Event ev;
+    if (!sState.knock.add(cfg, mg, tUs, ev)) continue;
+    if (ev.verdict == knock::Verdict::Tap && sState.pendingTaps < 8) ++sState.pendingTaps;
+    portENTER_CRITICAL(&sKnockMux);
+    if (!sKnockTraceLive) {
+      sKnockTrace.clear();
+      sKnockTraceLive = true;
+    }
+    sKnockTrace.push(ev);
+    portEXIT_CRITICAL(&sKnockMux);
+  }
+}
 
 Lsm6TapTuning tapTuningFrom(uint32_t packed) {
   Lsm6TapTuning t;
@@ -147,6 +229,23 @@ bool motionBackendInit(uint8_t bus, uint8_t address, uint8_t secondAddress, char
   const Lsm6TapTuning tuning = tapTuningFrom(sTapTuning.fetch_and(~kTapRetune));
   if (!lsm4517StartSequence(io, bus, address, secondAddress, why, whyLen, &chip, tuning)) return false;
   sState.sample.chip = chip;
+  // The LSM6DS3TR-C streams its accelerometer into the FIFO for the software
+  // knock detector (its own tap engine loses knocks of quick runs).
+  if (chip == Lsm6Chip::Ds3trc) {
+    const uint8_t ctrl3 = kLsm6ds3FifoCtrl3XlOnly, bypass = kLsm6ds3FifoCtrl5Bypass, stream = kLsm6ds3FifoCtrl5Stream;
+    uint8_t got = 0;
+    if (!io.write(address, kLsm6ds3RegFifoCtrl3, &ctrl3, 1) || !io.write(address, kLsm6ds3RegFifoCtrl5, &bypass, 1) ||
+        !io.write(address, kLsm6ds3RegFifoCtrl5, &stream, 1) || !io.read(address, kLsm6ds3RegFifoCtrl5, &got, 1) ||
+        got != stream) {
+      if (why && whyLen) {
+        snprintf(why, whyLen, "Error: The LSM6DS3TR-C at 0x%02X on bus %u did not take its FIFO settings. Run "
+                 "'openimu' again.", (unsigned)address, (unsigned)bus);
+      }
+      return false;
+    }
+    sState.knockFifo = true;
+    knockTraceClear();
+  }
   // Name both health records after their chips, and start their counts fresh.
   if (I2cDeviceManager* mgr = I2cDeviceManager::getInstance()) {
     mgr->registerDevice(address, kInfo.part, bus);
@@ -211,7 +310,13 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, Moti
   out.hasHeading = false;  // 6-axis fusion: yaw is relative to the start
   out.hasCal = false;
   out.hasHwTap = out.hasHwFreefall = true;
-  out.hwTap = reading.tap;
+  if (sState.knockFifo) {
+    readKnockFifo(*wire, bus, address);
+    out.hwTap = sState.pendingTaps > 0;
+    if (out.hwTap) --sState.pendingTaps;
+  } else {
+    out.hwTap = reading.tap;
+  }
   out.hwFreefall = reading.freefall;
 
   // The first second: the gyro bias, with the board (hopefully) still. No
@@ -248,6 +353,24 @@ void motionBackendSetTapTuning(long thresholdMg, long shock, long quiet) {
   const Lsm6TapTuning t = lsm6TapTuningFromMg(thresholdMg, shock, quiet);
   sTapTuning.store((uint32_t)t.threshold | ((uint32_t)t.shock << 8) | ((uint32_t)t.quiet << 16) | kTapRetune);
 }
+
+void motionBackendSetKnockTuning(long thresholdMg, long maxMs, long ringMs) {
+  const uint32_t thr = (uint32_t)(thresholdMg < 50 ? 50 : thresholdMg > 4000 ? 4000 : thresholdMg);
+  const uint32_t mx = (uint32_t)(maxMs < 5 ? 5 : maxMs > 500 ? 500 : maxMs);
+  sKnockTuning.store(thr | (mx << 16));
+  sKnockRingMs.store((uint16_t)(ringMs < 0 ? 0 : ringMs > 500 ? 500 : ringMs));
+}
+
+bool motionBackendKnockTrace(knock::Trace& out, knock::Config& cfg) {
+  cfg = knockConfig();
+  if (!sState.knockFifo) return false;
+  portENTER_CRITICAL(&sKnockMux);
+  if (sKnockTraceLive) out = sKnockTrace; else out.clear();
+  portEXIT_CRITICAL(&sKnockMux);
+  return true;
+}
+
+void motionBackendKnockTraceClear() { knockTraceClear(); }
 
 // The state is static; nothing to free. Both chips are powered down (best
 // effort, NACK-tolerant: the chip may be gone, and the next start resets

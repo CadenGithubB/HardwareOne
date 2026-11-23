@@ -228,6 +228,20 @@ inline uint8_t lsm6EventBurst(bool ds3, const Lsm6TapTuning& tuning, uint8_t* ou
   out[4] = dur;
   return sizeof(kLsm6dsoxEventBurst);
 }
+// LSM6DS3TR-C FIFO: the accelerometer alone at 416 Hz, continuous, for the
+// software knock detector (HAL_Motion_KnockCore.h; the chip's own tap engine
+// loses knocks of quick runs). FIFO_STATUS1..4 give the unread words and the
+// next word's place in the X, Y, Z pattern; FIFO_DATA_OUT rolls over on a
+// burst read.
+constexpr uint8_t kLsm6ds3RegFifoCtrl3 = 0x08;
+constexpr uint8_t kLsm6ds3RegFifoCtrl5 = 0x0A;
+constexpr uint8_t kLsm6ds3RegFifoStatus1 = 0x3A;
+constexpr uint8_t kLsm6ds3RegFifoDataOut = 0x3E;
+constexpr uint8_t kLsm6ds3FifoCtrl3XlOnly = 0x01;                     // DEC_FIFO_XL: no decimation; gyro out
+constexpr uint8_t kLsm6ds3FifoCtrl5Bypass = 0x00;
+constexpr uint8_t kLsm6ds3FifoCtrl5Stream = (0x6 << 3) | 0x6;        // ODR_FIFO 416 Hz, continuous mode
+constexpr uint32_t kLsm6ds3FifoSampleUs = 2404;                       // 1/416 Hz
+constexpr uint8_t kLsm6ds3FifoMaxWordsPerRead = 60;                   // 20 samples, 120 bytes: inside the Wire buffer
 constexpr uint8_t kLsm6ds3SrcFreefall = 0x20;   // WAKE_UP_SRC FF_IA (src[1])
 constexpr uint8_t kLsm6ds3SrcSingleTap = 0x20;  // TAP_SRC SINGLE_TAP (src[2])
 inline const char* lsm6ChipName(Lsm6Chip chip) { return chip == Lsm6Chip::Ds3trc ? "LSM6DS3TR-C" : "LSM6DSOX"; }

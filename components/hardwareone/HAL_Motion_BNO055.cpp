@@ -134,6 +134,9 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t, MotionSample& out)
 void motionBackendStop() {}
 
 void motionBackendSetTapTuning(long, long, long) {}  // the BNO055 has no tap engine
+void motionBackendSetKnockTuning(long, long, long) {}
+bool motionBackendKnockTrace(knock::Trace&, knock::Config&) { return false; }
+void motionBackendKnockTraceClear() {}
 
 // The chip fuses nine axes itself: a heading from its magnetometer, its own
 // calibration (the reading's cal byte), no tap or free-fall engine.

@@ -36,14 +36,17 @@
 // The tap settings last handed to the backend: a changed one (a command, the
 // web settings, an import) is passed on at the next sample. IMU task only.
 static void imuApplyTapTuning(bool force) {
-  static int lastMg = -1, lastShock = -1, lastQuiet = -1;
+  static int lastMg = -1, lastShock = -1, lastQuiet = -1, lastMax = -1, lastRing = -1;
   if (!force && gSettings.imuTapThresholdMg == lastMg && gSettings.imuTapShock == lastShock &&
-      gSettings.imuTapQuiet == lastQuiet)
+      gSettings.imuTapQuiet == lastQuiet && gSettings.imuTapMaxMs == lastMax && gSettings.imuTapRingMs == lastRing)
     return;
   lastMg = gSettings.imuTapThresholdMg;
   lastShock = gSettings.imuTapShock;
   lastQuiet = gSettings.imuTapQuiet;
+  lastMax = gSettings.imuTapMaxMs;
+  lastRing = gSettings.imuTapRingMs;
   motionBackendSetTapTuning(lastMg, lastShock, lastQuiet);
+  motionBackendSetKnockTuning(lastMg, lastMax, lastRing);
 }
 
 // Tap diagnostics (single writer: the IMU task; read for imustatus json).
@@ -881,18 +884,116 @@ static const char* imuTapSettingCommand(const String& argsInput, int& field, int
     }
     setSetting(field, v);
   }
-  const Lsm6TapTuning t =
-      lsm6TapTuningFromMg(gSettings.imuTapThresholdMg, gSettings.imuTapShock, gSettings.imuTapQuiet);
-  snprintf(getDebugBuffer(), 1024, "[IMU] %s: %d (%s). The chip uses threshold %u mg, shock %u, quiet %u%s.", name,
-           field, what, (unsigned)t.threshold * kLsm6TapMgPerStep, (unsigned)t.shock, (unsigned)t.quiet,
-           gImuRunning ? ", applied now" : ", applied at the next 'openimu'");
+  knock::Trace scratch;
+  knock::Config kc;
+  const bool software = motionBackendKnockTrace(scratch, kc);
+  if (software) {
+    snprintf(getDebugBuffer(), 1024,
+             "[IMU] %s: %d (%s). Knock detector: threshold %d mg, max %d ms, ring %d ms%s. See 'imutaptrace'.", name,
+             field, what, gSettings.imuTapThresholdMg, gSettings.imuTapMaxMs, gSettings.imuTapRingMs,
+             gImuRunning ? ", applied now" : ", applied at the next 'openimu'");
+  } else {
+    const Lsm6TapTuning t =
+        lsm6TapTuningFromMg(gSettings.imuTapThresholdMg, gSettings.imuTapShock, gSettings.imuTapQuiet);
+    snprintf(getDebugBuffer(), 1024, "[IMU] %s: %d (%s). The chip uses threshold %u mg, shock %u, quiet %u%s.", name,
+             field, what, (unsigned)t.threshold * kLsm6TapMgPerStep, (unsigned)t.shock, (unsigned)t.quiet,
+             gImuRunning ? ", applied now" : ", applied at the next 'openimu'");
+  }
   return getDebugBuffer();
 }
 
 const char* cmd_imutapthreshold(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  return imuTapSettingCommand(argsInput, gSettings.imuTapThresholdMg, 125, 3875, "Tap threshold (mg)",
-                              "lower catches softer taps, and splits hard ones more often; 125 mg steps");
+  return imuTapSettingCommand(argsInput, gSettings.imuTapThresholdMg, 50, 4000, "Tap threshold (mg)",
+                              "how hard a knock must be to count; lower catches softer taps");
+}
+
+const char* cmd_imutapmaxms(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return imuTapSettingCommand(argsInput, gSettings.imuTapMaxMs, 5, 500, "Tap max length (ms)",
+                              "a knock longer than this is handling, not a tap");
+}
+
+const char* cmd_imutapringms(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  return imuTapSettingCommand(argsInput, gSettings.imuTapRingMs, 0, 500, "Tap ring window (ms)",
+                              "a knock starting this soon after a tap is the board ringing, not a new tap");
+}
+
+// The knock trace: every recent knock the software detector saw, how hard
+// and how long it was, and why it did or did not count, with a hint per
+// kind of miss. Its own PSRAM buffer: the table outgrows the debug buffer.
+static char* sTapTraceBuf = nullptr;
+static constexpr size_t kTapTraceBufLen = 4096;
+
+const char* cmd_imutaptrace(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String text = argsInput;
+  text.trim();
+  const bool json = argWantsJson(argsInput);
+  if (text.equalsIgnoreCase("clear")) {
+    motionBackendKnockTraceClear();
+    return "[IMU] Knock trace cleared.";
+  }
+  if (text.length() > 0 && !json) return "Error: invalid arguments — Usage: imutaptrace [json|clear]";
+  if (!sTapTraceBuf) sTapTraceBuf = (char*)ps_alloc(kTapTraceBufLen, AllocPolicy::PreferPsram, "imu.taptrace");
+  if (!sTapTraceBuf) return kCommandReplyOutOfMemory;
+  EXT_RAM_BSS_ATTR static knock::Trace tr;  // PSRAM: too big for the command task's stack
+  knock::Config cfg;
+  const bool software = motionBackendKnockTrace(tr, cfg);
+  char* b = sTapTraceBuf;
+  size_t n = 0;
+  auto put = [&](const char* fmt, auto... args) {
+    if (n < kTapTraceBufLen) n += (size_t)snprintf(b + n, kTapTraceBufLen - n, fmt, args...);
+  };
+  if (json) {
+    put("{\"schema\":1,\"detector\":%s,\"thresholdMg\":%u,\"maxMs\":%u,\"ringMs\":%u,\"total\":%lu,"
+        "\"counts\":{\"tap\":%lu,\"soft\":%lu,\"long\":%lu,\"ring\":%lu},\"knocks\":[",
+        software ? "true" : "false", (unsigned)cfg.thresholdMg, (unsigned)cfg.maxMs, (unsigned)cfg.ringMs,
+        (unsigned long)tr.seq, (unsigned long)tr.counts[0], (unsigned long)tr.counts[1],
+        (unsigned long)tr.counts[2], (unsigned long)tr.counts[3]);
+    for (uint8_t i = 0; software && i < tr.count; ++i) {
+      const knock::Event& e = tr.at(i);
+      put("%s{\"n\":%lu,\"peakMg\":%u,\"durMs\":%u,\"gapMs\":%d,\"v\":\"%s\"}", i ? "," : "",
+          (unsigned long)e.seq, (unsigned)e.peakMg, (unsigned)e.durMs, e.gapMs == 0xFFFF ? -1 : (int)e.gapMs,
+          knock::verdictName(e.verdict));
+    }
+    put("%s", "]}");
+    return b;
+  }
+  if (!software) {
+    return "[IMU] This chip uses its own tap engine (no knock trace): tune it with 'imutapthreshold', "
+           "'imutapshock' and 'imutapquiet'; 'imustatus json' counts its taps.";
+  }
+  put("[IMU] Knock trace: threshold %u mg, max %u ms, ring %u ms (416 Hz, software)\n", (unsigned)cfg.thresholdMg,
+      (unsigned)cfg.maxMs, (unsigned)cfg.ringMs);
+  put("Since the clear: %lu knocks: %lu tap, %lu soft, %lu long, %lu ring\n", (unsigned long)tr.seq,
+      (unsigned long)tr.counts[0], (unsigned long)tr.counts[1], (unsigned long)tr.counts[2],
+      (unsigned long)tr.counts[3]);
+  put("%s", "    #  peak mg  ms  gap ms  verdict\n");
+  for (uint8_t i = 0; i < tr.count; ++i) {
+    const knock::Event& e = tr.at(i);
+    char gap[8];
+    if (e.gapMs == 0xFFFF) snprintf(gap, sizeof(gap), "-"); else snprintf(gap, sizeof(gap), "%u", (unsigned)e.gapMs);
+    put("%5lu  %7u %3u  %6s  %s\n", (unsigned long)e.seq, (unsigned)e.peakMg, (unsigned)e.durMs, gap,
+        knock::verdictName(e.verdict));
+  }
+  // Hints: the value that would have let each kind of missed knock count.
+  if (tr.counts[1]) {
+    put("Hint: %lu knock(s) under the threshold, the strongest %u mg. If they were taps: 'imutapthreshold %u'.\n",
+        (unsigned long)tr.counts[1], (unsigned)tr.softMaxMg, (unsigned)(tr.softMaxMg / 25 * 25));
+  }
+  if (tr.counts[2]) {
+    put("Hint: %lu knock(s) longer than %u ms, the longest %u ms. If they were taps: 'imutapmaxms %u'.\n",
+        (unsigned long)tr.counts[2], (unsigned)cfg.maxMs, (unsigned)tr.longMaxMs, (unsigned)tr.longMaxMs + 5);
+  }
+  if (tr.counts[3]) {
+    put("Hint: %lu knock(s) inside the ring window, the closest %u ms after a tap. If they were taps: "
+        "'imutapringms %u'.\n", (unsigned long)tr.counts[3], (unsigned)tr.ringMinMs,
+        (unsigned)(tr.ringMinMs > 20 ? tr.ringMinMs - 20 : 0));
+  }
+  if (!tr.seq) put("%s", "No knocks yet: tap the device, then run 'imutaptrace' again ('imutaptrace clear' starts over).\n");
+  return b;
 }
 
 const char* cmd_imutapshock(const String& argsInput) {
@@ -1110,9 +1211,12 @@ const CommandEntry imuCommands[] = {
 
   // Device-level settings (sensor hardware behavior)
 #if ENABLE_IMU_LSM6DSOX
-  { "imutapthreshold", "IMU tap threshold in mg (125 mg steps): [125..3875]", true, cmd_imutapthreshold, "Usage: imutapthreshold [125..3875]" },
+  { "imutapthreshold", "IMU tap threshold in mg: [50..4000]", true, cmd_imutapthreshold, "Usage: imutapthreshold [50..4000]" },
   { "imutapshock", "IMU tap shock window: [0..3]", true, cmd_imutapshock, "Usage: imutapshock [0..3]" },
   { "imutapquiet", "IMU tap quiet window: [0..3]", true, cmd_imutapquiet, "Usage: imutapquiet [0..3]" },
+  { "imutapmaxms", "IMU tap max length in ms (software knock detector): [5..500]", true, cmd_imutapmaxms, "Usage: imutapmaxms [5..500]" },
+  { "imutapringms", "IMU tap ring window in ms (software knock detector): [0..500]", true, cmd_imutapringms, "Usage: imutapringms [0..500]" },
+  { "imutaptrace", "Every recent knock: how hard, how long, and why it did or did not count, with tuning hints. (add 'json' for JSON output)", false, cmd_imutaptrace, "Usage: imutaptrace [json|clear]" },
 #endif
   { "imudevicepollms", "IMU device poll interval: <50..1000>", true, cmd_imudevicepollms, "Usage: imuDevicePollMs <50..1000>" },
   { "imuorientationmode", "IMU orientation mode: <0..8>", true, cmd_imuorientationmode, "Usage: imuorientationmode <0..8>" },
@@ -1296,9 +1400,11 @@ static const SettingEntry imuSettingEntries[] = {
   { "imuWebMaxFps", SETTING_INT, &gSettings.imuWebMaxFps, 15, 0, nullptr, 1, 30, "Web Max FPS", nullptr, false, "timing", "imuwebmaxfps" },
   { "imuDevicePollMs", SETTING_INT, &gSettings.imuDevicePollMs, 200, 0, nullptr, 50, 1000, "Poll Interval (ms)", nullptr, false, "timing", "imudevicepollms" },
 #if ENABLE_IMU_LSM6DSOX
-  { "imuTapThresholdMg", SETTING_INT, &gSettings.imuTapThresholdMg, 500, 0, nullptr, 125, 3875, "Tap threshold (mg)", nullptr, false, "tap", "imutapthreshold" },
+  { "imuTapThresholdMg", SETTING_INT, &gSettings.imuTapThresholdMg, 500, 0, nullptr, 50, 4000, "Tap threshold (mg)", nullptr, false, "tap", "imutapthreshold" },
   { "imuTapShock", SETTING_INT, &gSettings.imuTapShock, 2, 0, nullptr, 0, 3, "Tap shock window", nullptr, false, "tap", "imutapshock" },
   { "imuTapQuiet", SETTING_INT, &gSettings.imuTapQuiet, 1, 0, nullptr, 0, 3, "Tap quiet window", nullptr, false, "tap", "imutapquiet" },
+  { "imuTapMaxMs", SETTING_INT, &gSettings.imuTapMaxMs, 40, 0, nullptr, 5, 500, "Tap max length (ms)", nullptr, false, "tap", "imutapmaxms" },
+  { "imuTapRingMs", SETTING_INT, &gSettings.imuTapRingMs, 80, 0, nullptr, 0, 500, "Tap ring window (ms)", nullptr, false, "tap", "imutapringms" },
 #endif
   { "imuOrientationMode", SETTING_INT, &gSettings.imuOrientationMode, 0, 0, nullptr, 0, 8, "Orientation Mode", "0:Normal,1:Flip Pitch,2:Flip Roll,3:Flip Yaw,4:Flip Pitch+Roll,5:Roll 180 Fix,6:Rotate 90 CCW,7:Alt Extreme Pitch,8:Upside Down", false, "orientation", "imuorientationmode" },
   { "imuOrientationCorrectionEnabled", SETTING_BOOL, &gSettings.imuOrientationCorrectionEnabled, false, 0, nullptr, 0, 1, "Orientation Correction", nullptr, false, "orientation", "imuorientationcorrection" },

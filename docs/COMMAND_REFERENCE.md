@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1048 commands across 61 modules (1048 registry entries).
+1051 commands across 61 modules (1051 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -35,7 +35,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`servo`](#servo) — 6 commands
 - [`thermal`](#thermal) — 23 commands
 - [`tof`](#tof) — 10 commands
-- [`imu`](#imu) — 22 commands
+- [`imu`](#imu) — 25 commands
 - [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
 - [`anoencoder`](#anoencoder) — 6 commands
@@ -606,9 +606,12 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `imuread` |  | Read IMU sensor data. (add 'json' for JSON output) |
 | `imurolloffset` | A | IMU roll offset in degrees: <-180..180><br/>`Usage: imurolloffset <-180..180>` |
 | `imustatus` |  | IMU status: chip, bus, addresses, tap and heading, gyro offset. (add 'json' for JSON output)<br/>`Usage: imustatus [json]` |
+| `imutapmaxms` | A | IMU tap max length in ms (software knock detector): [5..500]<br/>`Usage: imutapmaxms [5..500]` |
 | `imutapquiet` | A | IMU tap quiet window: [0..3]<br/>`Usage: imutapquiet [0..3]` |
+| `imutapringms` | A | IMU tap ring window in ms (software knock detector): [0..500]<br/>`Usage: imutapringms [0..500]` |
 | `imutapshock` | A | IMU tap shock window: [0..3]<br/>`Usage: imutapshock [0..3]` |
-| `imutapthreshold` | A | IMU tap threshold in mg (125 mg steps): [125..3875]<br/>`Usage: imutapthreshold [125..3875]` |
+| `imutapthreshold` | A | IMU tap threshold in mg: [50..4000]<br/>`Usage: imutapthreshold [50..4000]` |
+| `imutaptrace` |  | Every recent knock: how hard, how long, and why it did or did not count, with tuning hints. (add 'json' for JSON output)<br/>`Usage: imutaptrace [json\|clear]` |
 | `imutransitionms` | A | IMU transition time: <0..1000><br/>`Usage: imutransitionms <0..1000>` |
 | `imuwebmaxfps` | A | IMU web max FPS: <1..30><br/>`Usage: imuwebmaxfps <1..30>` |
 | `imuyawoffset` | A | IMU yaw offset in degrees: <-180..180><br/>`Usage: imuyawoffset <-180..180>` |

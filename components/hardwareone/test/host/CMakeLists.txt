@@ -46,8 +46,10 @@ add_executable(motion_hook_core_tests test_motion_hook_core.cpp)
 add_executable(motion_hook_core_tsan_tests test_motion_hook_core.cpp)
 # The IMU as an input device: taps as buttons, tilt as a joystick (Input_IMUCore.h).
 add_executable(input_imu_core_tests test_input_imu_core.cpp)
+# The software knock detector (HAL_Motion_KnockCore.h).
+add_executable(motion_knock_core_tests test_motion_knock_core.cpp)
 foreach(target motion_core_tests motion_bno055_core_tests motion_lsm6dsox_core_tests motion_fusion_tests
-        motion_hook_core_tests motion_hook_core_tsan_tests input_imu_core_tests)
+        motion_hook_core_tests motion_hook_core_tsan_tests input_imu_core_tests motion_knock_core_tests)
   set_target_properties(${target} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
   target_include_directories(${target} PRIVATE ../..)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -pedantic)
@@ -1849,6 +1851,7 @@ add_test(NAME motion_lsm6dsox_core_tests COMMAND motion_lsm6dsox_core_tests)
 add_test(NAME motion_fusion_tests COMMAND motion_fusion_tests)
 add_test(NAME motion_hook_core_tests COMMAND motion_hook_core_tests)
 add_test(NAME input_imu_core_tests COMMAND input_imu_core_tests)
+add_test(NAME motion_knock_core_tests COMMAND motion_knock_core_tests)
 add_test(NAME motion_hook_core_tsan_tests COMMAND motion_hook_core_tsan_tests)
 # ThreadSanitizer reports a race and goes on: make a report fail the test.
 set_tests_properties(motion_hook_core_tsan_tests PROPERTIES ENVIRONMENT "TSAN_OPTIONS=halt_on_error=1:exitcode=66")
