@@ -10,9 +10,8 @@
 // digits. Refused: empty text, any other character (so also 0x10 and 12.5), a
 // value outside the target type or outside the given range.
 //
-// A bus address and a bit mask are the two kinds of argument people write in
-// hexadecimal. parseAddressArg and parseMaskArg read them: decimal as above,
-// or hexadecimal digits after 0x.
+// A bus address is the kind of argument people write in hexadecimal.
+// parseAddressArg reads it: decimal as above, or hexadecimal digits after 0x.
 //
 // A value with a fraction (a threshold, a latitude, a gain) goes through
 // parseFloatArg, or the command answers kCommandReplyNotADecimal. Accepted:
@@ -121,17 +120,6 @@ template <typename Text, typename T>
 inline auto parseAddressArg(const Text& text, long long low, long long high, T& value)
     -> decltype(argTextIsWhole(text)) {
   return argTextIsWhole(text) && parseAddressArg(text.c_str(), low, high, value);
-}
-
-// A 32-bit bit mask (0 to 0xFFFFFFFF), written in decimal or as 0x and
-// hexadecimal digits (0x01).
-inline bool parseMaskArg(const char* text, uint32_t& value) {
-  return parseIntArg(text, 0, 0xFFFFFFFFLL, value, NumberText::DecimalOrHex);
-}
-
-template <typename Text>
-inline auto parseMaskArg(const Text& text, uint32_t& value) -> decltype(argTextIsWhole(text)) {
-  return argTextIsWhole(text) && parseMaskArg(text.c_str(), value);
 }
 
 // A decimal number as described at the top. `value` is written only on success.
