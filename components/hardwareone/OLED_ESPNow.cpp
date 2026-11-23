@@ -12,6 +12,7 @@
 #include "System_ESPNow.h"
 #include "System_ESPNow_HistoryNames.h"  // per-refresh name cache for conversation rows
 #include "System_ESPNow_Sessions.h"   // sendStatusGet / SendStatusState — post-send delivery indicator
+#include "System_ESPNow_RemoteCmdCore.h"  // a remote command result that came late (Outcome::Late)
 #include "System_MeshPeers.h"
 #include "System_Utils.h"
 
@@ -55,7 +56,7 @@ EXT_RAM_BSS_ATTR static OledScrollState sEspNowMessageListScroll;
 // oledEspNowRefreshMessages and read by the device-detail renderer (left=received,
 // right=sent + live delivery status).
 // PSRAM .bss: CPU-only row metadata, written/read solely on the OLED task.
-EXT_RAM_BSS_ATTR static struct { bool isSent; uint32_t msgId; uint8_t sendState; } gOledRowMeta[OLED_SCROLL_MAX_ITEMS];
+EXT_RAM_BSS_ATTR static struct { bool isSent; uint32_t msgId; uint8_t sendState; uint8_t sendStatus; } gOledRowMeta[OLED_SCROLL_MAX_ITEMS];
 
 // Owner commands preserve their refusal through the shared reply mapping.
 static bool oledEspNowRunOwnerCommand(const char* cmd, const char* failToast) {
@@ -997,11 +998,24 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
       // espnowUpdateSentDeliveryState) — NOT the ephemeral sendStatus ring, which
       // is swept after 30s and used to make delivered rows revert to "Sent".
       const char* label; bool icon = true, dbl = false;
+      // One word per meaning (ESP-NOW 1.0): the same words as the web page.
       switch (gOledRowMeta[i].sendState) {
         case SEND_STATUS_DELIVERED: label = "Delivered"; dbl = true; break;
-        case SEND_STATUS_TIMEOUT:   label = "No ACK"; icon = false; break;
-        case SEND_STATUS_FAILED:    label = "Failed"; icon = false; break;
+        case SEND_STATUS_TIMEOUT:                                        // no ACK in 10 s
+        case SEND_STATUS_FAILED:    label = "No answer"; icon = false; break;  // session never opened
+        case SEND_STATUS_BUSY:      label = "Busy"; icon = false; break;
+        case SEND_STATUS_REFUSED:   label = "Refused"; icon = false; break;
         default:                    label = "Sent"; break;  // PENDING: awaiting ACK
+      }
+      // "Refused: <reason>" when it fits the row at this rotation; else the word.
+      char refusedLabel[32];
+      if (gOledRowMeta[i].sendState == SEND_STATUS_REFUSED) {
+        const char* why = espnowanswer::sharedStatusName(gOledRowMeta[i].sendStatus);
+        if (why) {
+          snprintf(refusedLabel, sizeof(refusedLabel), "Refused: %s", why);
+          for (char* c = refusedLabel; *c; ++c) if (*c == '_') *c = ' ';
+          if ((int)strlen(refusedLabel) * 6 <= rightEdge - 4) label = refusedLabel;
+        }
       }
       int iconW = icon ? (dbl ? 8 : 6) : 0;
       int lblW = (int)strlen(label) * 6 + iconW;
@@ -1756,6 +1770,7 @@ void oledEspNowRefreshMessages() {
     gOledRowMeta[m].isSent    = refs[i].isSent;
     gOledRowMeta[m].msgId     = refs[i].isSent ? head.reqId : 0;
     gOledRowMeta[m].sendState = head.sendState;  // durable; survives the 30s sendStatus sweep
+    gOledRowMeta[m].sendStatus = head.sendStatus;  // a refusal's reason (ACK status), durable too
 
     const char* meta;
     if (refs[i].isSent) {
@@ -1764,7 +1779,12 @@ void oledEspNowRefreshMessages() {
       // Called after espnowCopyCollapsedHead returned: no store lock is held.
       const char* who = nameCache.get(head.peerMac, head.isSent, head.unattributed,
           [&head](char* out, size_t cap) { espnowHistoryDisplayName(head, out, cap); });
-      if (refs[i].partsTotal > 1) {
+      if (head.msgType == MSG_CMD_RESULT && head.sendState == (uint8_t)espnowcmd::Outcome::Late) {
+        // A remote command result that came after "No result" was shown
+        // (ESP-NOW 1.0): the word replaces the sender's name on line 2.
+        strlcpy(metaBuf[m], "Result (late)", sizeof(metaBuf[m]));
+        meta = metaBuf[m];
+      } else if (refs[i].partsTotal > 1) {
         snprintf(metaBuf[m], sizeof(metaBuf[m]), "%s (%u/%u)", who[0] ? who : "Unknown",
                  refs[i].partsPresent, refs[i].partsTotal);
         meta = metaBuf[m];

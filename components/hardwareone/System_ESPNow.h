@@ -708,7 +708,10 @@ struct ReceivedTextMessage {
   bool     encrypted;
   bool     isSent;
   bool     unattributed;    // received, sender not proven: shown under the MAC text
-  uint8_t  sendState;       // sent records: 0 pending, 1 delivered, 2 timeout, 3 failed
+  uint8_t  sendState;       // sent records: SendStatusState (0 pending, 1 delivered, 2 timeout,
+                            // 3 failed, 4 busy, 5 refused); received remote-command rows: the
+                            // outcome (espnowcmd::Outcome, 0 = a plain result); else 0
+  uint8_t  sendStatus;      // a refused sent record's ACK status (sendState 5), else 0
   uint8_t  length;          // text bytes in message
   char     message[espnowhist::kTextMax + 1];   // NUL-terminated
 };
@@ -943,17 +946,8 @@ struct EspNowState {
   volatile int textQueueTail;  // Task reads here (consumer)
   
   // CMD_RESP message
-  bool deferredCmdRespPending;
-  uint8_t deferredCmdRespSrcMac[6];
-  char deferredCmdRespDeviceName[32];
-  char* deferredCmdRespResult;  // PSRAM-allocated at init to V4_REASM_MAX_MSG + 1 (the fragmentation
-                                // budget V4_FRAG_MAX × V4_MAX_FRAGMENT_PAYLOAD, plus the NUL). Alloc and
-                                // clamp both derive from that one constant, so a maximal reassembled
-                                // CMD_RESP now fits exactly. Sized from the WIRE, not from CMD_RESULT_MAX:
-                                // the sender is a remote peer whose output limit is not ours to assume.
-  bool deferredCmdRespSuccess;   // status == 0
-  uint8_t deferredCmdRespStatus; // the answer's status (espnowanswer, rule F3)
-  uint32_t deferredCmdRespReqId; // Correlation id — the request's msgId, carried in the CMD_RESP's reqId
+  // (The received CMD_RESP results live in the remote-command store in
+  // System_ESPNow.cpp since 1.0 step 6: 16 entries + a 24 KB PSRAM ring.)
   
   // STREAM message ring buffer (replaces single-buffer to prevent overwrite loss).
   // Allocated separately in initEspNow(): STREAM_QUEUE_SIZE_PSRAM slots when PSRAM
@@ -1069,11 +1063,6 @@ struct EspNowState {
     meshSensorReqLeaseMs(0),
     textQueueHead(0),
     textQueueTail(0),
-    deferredCmdRespPending(false),
-    deferredCmdRespResult(nullptr),
-    deferredCmdRespSuccess(false),
-    deferredCmdRespStatus(0),
-    deferredCmdRespReqId(0),
     streamQueue(nullptr),
     streamQueueCap(0),
     streamQueueMask(0),
@@ -1092,9 +1081,6 @@ struct EspNowState {
     memset(meshSensorReqSrcMac, 0, 6);
     // Initialize deferred message buffers
     memset(textQueue, 0, sizeof(textQueue));
-    memset(deferredCmdRespSrcMac, 0, 6);
-    memset(deferredCmdRespDeviceName, 0, sizeof(deferredCmdRespDeviceName));
-    // deferredCmdRespResult is a pointer — zeroed after ps_alloc in initEspNow
     // streamQueue is also a pointer — allocated + zeroed in initEspNow
     memset(deferredCmdSrcMac, 0, 6);
     memset(deferredCmdDeviceName, 0, sizeof(deferredCmdDeviceName));
@@ -1269,6 +1255,20 @@ struct EspNowCmdResult {
 };
 uint32_t espnowCmdResultSeq();
 bool     espnowCmdResultGet(EspNowCmdResult& out);   // false until the first result
+// (Since 1.0 step 6 the record also carries a request that ended without a
+// result: success false and the text "Busy: ...", "Refused: ...", "No answer:
+// ..." or "No result: ...".)
+
+// Remote-command requests (CMD, USER_SYNC) this device sends, 1.0 step 6
+// (DESIGN 3.5): every sender calls Begin with the request's msgId BEFORE the
+// send (a fast ACK must find it), Queued when the frame waits for the session to
+// open, Cancel when nothing was sent. The table then ends each request in one
+// terminal result: its result, Busy, Refused, No answer, or No result (then
+// perhaps Result (late)), shown on the console, in the history and in the
+// published record above.
+void espnowRemoteCmdBegin(const uint8_t mac[6], uint32_t reqId);
+void espnowRemoteCmdQueued(const uint8_t mac[6], uint32_t reqId);
+void espnowRemoteCmdCancel(const uint8_t mac[6], uint32_t reqId);
 
 // Inline helpers
 inline const char* getEspNowModeString() {
@@ -1454,16 +1454,21 @@ bool storeSentMessageInPeerHistory(uint8_t* peerMac, const char* message, uint32
 // remote command's result — into <=200 B pieces sharing reqId (at most 255
 // pieces), so the feed delivers reassemblable pieces instead of one record
 // truncated at 255 B. Mirrors the sent path; the client stitches by reqId.
+// `outcome`: a remote-command row's outcome (espnowcmd::Outcome, 0 = an
+// ordinary result), kept in the record's state field (1.0 step 6).
 bool storeReceivedMessageChunked(uint8_t* peerMac, const char* peerName, const char* message,
                                  bool encrypted, LogMessageType msgType, uint32_t reqId,
-                                 HistoryAttribution attribution = HistoryAttribution::FromName);
+                                 HistoryAttribution attribution = HistoryAttribution::FromName,
+                                 uint8_t outcome = 0);
 // Stamp the DURABLE delivery state onto the sent record(s) for msgId (all
 // fragments share it). Called from the sendStatus terminal transitions
-// (delivered / failed / timeout) so the conversation shows the resolved state
-// long after the ephemeral sendStatus ring entry is swept. state mirrors
-// SendStatusState; a state above 3 is ignored. No-op if the peer/msgId isn't in
+// (delivered / failed / timeout / busy / refused) so the conversation shows the
+// resolved state long after the ephemeral sendStatus ring entry is swept. state
+// mirrors SendStatusState; a state above espnowhist::kSendStateMax is ignored. No-op if the peer/msgId isn't in
 // history.
-void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state);
+// `status`: a refused send's ACK status (SEND_STATUS_REFUSED), kept with the
+// record so "Refused: <reason>" survives the sweep; 0 otherwise.
+void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state, uint8_t status = 0);
 void logFileTransferEvent(uint8_t* peerMac, const char* peerName, const char* filename, LogMessageType eventType);
 // getPeerMessages / getAllMessages merge BOTH rings (received + sent) of one peer
 // (getPeerMessages) or of every peer (getAllMessages, a k-way merge), ascending

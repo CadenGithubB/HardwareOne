@@ -120,7 +120,7 @@ static uint32_t get32(const uint8_t* p) {
 }
 
 static uint8_t specFlags(bool enc, bool sent, bool unattr, uint8_t sendState) {
-  return (uint8_t)((enc ? 1 : 0) | (sent ? 2 : 0) | (unattr ? 4 : 0) | ((sendState & 3) << 3));
+  return (uint8_t)((enc ? 1 : 0) | (sent ? 2 : 0) | (unattr ? 4 : 0) | ((sendState & 7) << 3));  // three state bits (ESP-NOW 1.0 step 6)
 }
 
 static void specEncode(uint8_t* p, uint32_t seq, uint32_t reqId, uint32_t ts, uint8_t len, uint8_t type,
@@ -524,7 +524,7 @@ struct Episode {
       uint32_t kind = rng.below(5);
       h.seq = seq + 1;
       h.type = (uint8_t)rng.below(8);
-      h.sendState = (uint8_t)rng.below(4);
+      h.sendState = (uint8_t)rng.below(8);
       const char* text = "x";
       size_t tl = 1;
       if (kind == 0) h.seq = 0;
@@ -532,7 +532,7 @@ struct Episode {
         if (t.m.q.empty()) return;
         h.seq = rng.pct(50) ? t.m.q.back().seq : rng.range(1, t.m.q.back().seq);
       } else if (kind == 2) h.type = (uint8_t)rng.range(8, 255);
-      else if (kind == 3) h.sendState = (uint8_t)rng.range(4, 255);
+      else if (kind == 3) h.sendState = (uint8_t)rng.range(8, 255);
       else {
         text = nullptr;
         tl = rng.range(1, 300);
@@ -568,7 +568,7 @@ struct Episode {
       r.piece = (uint8_t)rng.u32();
       r.pieceTotal = (uint8_t)rng.u32();
     }
-    r.sendState = (uint8_t)rng.below(4);
+    r.sendState = (uint8_t)rng.below(8);
     r.enc = rng.pct(50);
     r.unattr = rng.pct(20);
     // model first: it says where the record goes, so fakes can be aligned
@@ -742,14 +742,14 @@ struct Episode {
     if (k < 6 && !t.m.q.empty()) reqId = t.m.q[rng.below((uint32_t)t.m.q.size())].reqId;
     else if (k < 9) reqId = reqPool[rng.below((uint32_t)reqPool.size())];
     else reqId = 0;
-    uint8_t state = rng.pct(85) ? (uint8_t)rng.below(4) : (uint8_t)rng.range(4, 255);
+    uint8_t state = rng.pct(85) ? (uint8_t)rng.below(8) : (uint8_t)rng.range(8, 255);
     std::vector<uint8_t> snap(t.buf, t.buf + t.st.size);
     eh::RingState ss = t.st;
     bool damaged = false;
     int n = eh::setSendState(t.st, t.buf, reqId, state, rng.pct(50) ? &damaged : nullptr);
     std::vector<uint8_t> allowed(t.st.size, 0);
     int want = 0;
-    if (state <= 3 && reqId != 0) {
+    if (state <= 7 && reqId != 0) {
       for (MRec& r : t.m.q)
         if (r.reqId == reqId) {
           r.sendState = state;
@@ -1141,7 +1141,7 @@ struct Episode {
         if (k > 0) fseq = rng.range(1, m.q[k - 1].seq);
         else fseq = (r.seq > 1 && (rng.pct(50) || r.seq > 0xFFFFFF00u)) ? rng.range(1, r.seq - 1) : r.seq + rng.range(1, 5);
       } else if (kind == 2) type = (uint8_t)rng.range(8, 255);
-      else if (kind == 3) flags = (uint8_t)(flags | (0x20u << rng.below(3)));
+      else if (kind == 3) flags = (uint8_t)(flags | (0x40u << rng.below(2)));
       else fseq = 0;
       specEncode(cb + r.off, fseq, r.reqId, r.ts, r.len, type, flags, r.piece, r.pieceTotal);
       at = r.off;
@@ -1281,7 +1281,7 @@ struct Episode {
     // setSendState on the copy: only the matching headers before the damage change
     {
       uint32_t reqId = m.q[rng.below((uint32_t)m.q.size())].reqId;
-      uint8_t state = (uint8_t)rng.below(4);
+      uint8_t state = (uint8_t)rng.below(8);
       std::vector<uint8_t> snap(cb, cb + cs.size);
       bool damaged = false;
       int n = eh::setSendState(cs, cb, reqId, state, &damaged);
@@ -1396,7 +1396,7 @@ struct Episode {
       while (eh::next(cs, cb, c, off, h)) {
         CHECKM(off % 4 == 0 && off + fp(h.length) <= size, "walk yielded a record at %u len %u", off, h.length);
         CHECK(h.seq > last);
-        CHECK(h.sendState <= 3 && h.type <= 7);
+        CHECK(h.sendState <= 7 && h.type <= 7);
         last = h.seq;
         char tb[300];
         size_t cap = rng.range(1, sizeof tb);
@@ -1466,7 +1466,7 @@ struct Episode {
       std::vector<uint8_t> snap(cb, cb + size);
       eh::RingState ss = cs;
       bool damaged = false;
-      int n = eh::setSendState(cs, cb, reqPool[rng.below((uint32_t)reqPool.size())], (uint8_t)rng.below(4), &damaged);
+      int n = eh::setSendState(cs, cb, reqPool[rng.below((uint32_t)reqPool.size())], (uint8_t)rng.below(8), &damaged);
       CHECK(n >= 0);
       CHECKM(memcmp(&ss, &cs, sizeof ss) == 0, "setSendState changed RingState");
       if (!sane) CHECK(n == 0 && memcmp(snap.data(), cb, size) == 0);

@@ -136,7 +136,7 @@ static void completionFinish(SyncCompletion* completion, bool ok) {
   xSemaphoreGive(sCompletionLock);
 }
 
-static bool completionWait(SyncCompletion* completion, uint32_t timeoutMs) {
+static bool completionWait(SyncCompletion* completion, uint32_t timeoutMs, bool* outFinished = nullptr) {
   const EventBits_t bit = (EventBits_t)1U << completion->index;
   (void)xEventGroupWaitBits(sCompletionEvents, bit, pdFALSE, pdTRUE,
                             pdMS_TO_TICKS(timeoutMs));
@@ -146,6 +146,7 @@ static bool completionWait(SyncCompletion* completion, uint32_t timeoutMs) {
   // boundary: a dispatcher completion that won the mutex is a valid result.
   const bool finished = !completion->dispatcherOwned;
   const bool ok = finished && completion->result == 1;
+  if (outFinished) *outFinished = finished;
   completion->callerWaiting = false;
   if (finished) {
     xEventGroupClearBits(sCompletionEvents, bit);
@@ -648,7 +649,10 @@ bool submit(const Job& job) {
   return true;
 }
 
-bool submitSync(Job& job, uint32_t timeoutMs) {
+bool submitSync(Job& job, uint32_t timeoutMs, SyncOutcome* outcome) {
+  SyncOutcome dummy;
+  SyncOutcome& out = outcome ? *outcome : dummy;
+  out = SyncOutcome::NotQueued;
   // submitSync OWNS job.payload on every return path: it is freed here on an
   // enqueue failure or after a multi-frame send run on cmd_exec, and by the
   // dispatcher once a queued job is accepted (even if we then time out
@@ -669,7 +673,9 @@ bool submitSync(Job& job, uint32_t timeoutMs) {
   if (needsFragments(job) && xTaskGetCurrentTaskHandle() == gCmdExecTaskHandle) {
     // Not queue work: release the claim and run the fragment loop on cmd_exec.
     releaseQueueClaim();
-    return runMultiFrameOnCaller(job);
+    const bool sent = runMultiFrameOnCaller(job);
+    out = sent ? SyncOutcome::Sent : SyncOutcome::Failed;
+    return sent;
   }
 
   SyncCompletion* completion = completionCreate();
@@ -701,7 +707,10 @@ bool submitSync(Job& job, uint32_t timeoutMs) {
   // The dispatcher owns the payload and slot from here. On timeout the caller
   // marks itself gone; the dispatcher later releases the slot after retiring
   // the job, so no stale event can survive into a future request.
-  bool ok = completionWait(completion, timeoutMs);
+  bool finished = false;
+  bool ok = completionWait(completion, timeoutMs, &finished);
+  // Not finished: the dispatcher still holds the job and may yet send it.
+  out = ok ? SyncOutcome::Sent : (finished ? SyncOutcome::Failed : SyncOutcome::TimedOut);
   if (!ok) {
     DEBUG_ESPNOWF("[ESPNOW_TX] submitSync FAILED/TIMEOUT (%ums) type=%u",
            (unsigned)timeoutMs, (unsigned)job.type);
@@ -823,7 +832,8 @@ void drainAcksOnDispatcher() {
 
 bool sendAeadSync(const uint8_t mac[6], uint8_t type, uint16_t flags,
                   uint32_t msgId, const uint8_t* payload, uint16_t payloadLen,
-                  uint8_t ttl, uint32_t timeoutMs) {
+                  uint8_t ttl, uint32_t timeoutMs, SyncOutcome* outcome) {
+  if (outcome) *outcome = SyncOutcome::NotQueued;
   uint8_t* psBuf = nullptr;
   if (payloadLen > 0) {
     psBuf = (uint8_t*)ps_alloc(payloadLen, AllocPref::PreferPsram, "espnow.tx.aead.sync");
@@ -845,7 +855,7 @@ bool sendAeadSync(const uint8_t mac[6], uint8_t type, uint16_t flags,
   job.payloadLen = payloadLen;
   // submitSync OWNS the buffer on every return path (its contract) — do not
   // free psBuf here on failure.
-  return submitSync(job, timeoutMs);
+  return submitSync(job, timeoutMs, outcome);
 }
 
 }  // namespace espnowtx

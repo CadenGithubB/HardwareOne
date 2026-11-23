@@ -99,6 +99,34 @@ Host-tested and built; not run on a device.
   revoked key is refused whatever address it comes from, and the accept prompt shows its keyId.
   KEY_EX_CONFIRM status 3 means "not accepted". Reflash devices together.
 
+### Changed (ESP-NOW 1.0: one word per meaning, and one result per remote command)
+Host-tested and built; not run on a device.
+- **One word per meaning** on the web page, the OLED conversation, the message history and the
+  console: Sent, Delivered, **Busy** (the other device could not take it now: send it again later),
+  **Refused: `<reason>`**, **No answer** (no reply in 10 s; also a session that never opened, which
+  showed "Failed (handshake)"), **No result** and **Result (late)**. "No ACK" and "Failed" are gone. A
+  chat message to a device whose inbox is full shows Busy, not Delivered or Failed.
+- **Every remote command ends in exactly one result** (`espnowremote`, `espnowbrowse`, `espnowfetch`,
+  `espnowroomcmd`/`espnowtagcmd` per device, bond `remote:` commands, `espnowusersync`): its output, or
+  a conversation line that starts with Busy (the device already holds a command: shown at once, the
+  command is not run), Refused, No answer, or **No result** (accepted, but no result within 30 s; each
+  streamed output line gives 30 s more). A result after "No result" is shown as **Result (late)**; one
+  for a command this device is not waiting on is only logged. The device no longer sends a "busy"
+  command result: its acknowledgement says busy.
+- **More room behind the acknowledgement:** 4 long messages can be reassembled at once (was 2; a
+  fifth is answered "no slot"); up to 16 remote commands can wait for their results at once (one
+  room command to 16 devices), and received results wait in a 24 KB queue instead of one slot that
+  a second result overwrote; a device whose queue is full answers busy and the other device sends
+  the result once more. A command result now waits for its acknowledgement like a long one.
+- `espnowmessages json` and `/api/espnow/messages`: a received result row may carry `result`
+  (`busy`, `refused`, `noAnswer`, `noResult`, `late`); `sendState` 4 is busy and 5 refused, and is 0
+  on received rows; a refused sent row keeps its `reason` (also after a reload); the web delivery
+  snapshot names `busy` and `refused` (with a `reason`). A remote command whose send was not confirmed
+  within 2 s stays tracked (it may still go out) and ends in its result or No answer.
+- New bench command `espnowholdresult <seconds|off>` (admin, RAM only) holds every received command
+  result that long before it is shown, to see "No result" and then "Result (late)".
+  Reflash devices together.
+
 ### Changed (ESP-NOW 1.0: an acknowledgement means accepted)
 Host-tested and built; not run on a device.
 - **"Delivered" now means the other device took the message.** A device acknowledges a frame only

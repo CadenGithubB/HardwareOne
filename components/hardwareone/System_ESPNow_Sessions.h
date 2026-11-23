@@ -369,17 +369,25 @@ uint8_t pendingFrameDropAll();
 constexpr uint32_t kSendStatusPendingTimeoutMs = 10000;  // PENDING → TIMEOUT
 constexpr uint32_t kSendStatusKeepResolvedMs   = 30000;  // hold resolved entries this long for the poll window
 
+// One word per state on every surface (1.0 step 6, DESIGN 1.3):
+//   PENDING "Sent", DELIVERED "Delivered", TIMEOUT "No answer" (no ACK in 10 s),
+//   FAILED "No answer" (the session with the peer never opened, so the frame
+//   was dropped unsent), BUSY "Busy" (ACK busy / no slot: send it again later),
+//   REFUSED "Refused: <reason>" (ACK with another status).
 enum SendStatusState : uint8_t {
   SEND_STATUS_PENDING   = 0,
   SEND_STATUS_DELIVERED = 1,
   SEND_STATUS_TIMEOUT   = 2,
   SEND_STATUS_FAILED    = 3,
+  SEND_STATUS_BUSY      = 4,
+  SEND_STATUS_REFUSED   = 5,
 };
 
 struct SendStatus {
   bool     inUse;
   uint8_t  state;          // SendStatusState
   uint8_t  peerMac[6];
+  uint8_t  status;         // the ACK's status for BUSY / REFUSED (espnowanswer); 0 otherwise
   uint32_t msgId;
   uint32_t registeredAtMs;
   uint32_t resolvedAtMs;   // 0 while PENDING
@@ -415,11 +423,12 @@ void sessionNoteSendOutcome(const uint8_t peerMac[6], V4SendOutcome outcome);
 // Match key is (msgId AND peerMac). No-op if no matching PENDING entry.
 void sendStatusMarkDelivered(uint32_t msgId, const uint8_t srcMac[6]);
 
-// Mark the matching tracked send FAILED because the peer answered it with a
-// sealed ACK carrying a status (a refusal, 1.0). Unlike sendStatusMarkFailed
-// it also counts the answer as proof that the session is alive (it clears the
-// no-answer run, as a delivery does): only silence counts toward a re-open.
-void sendStatusMarkRefused(uint32_t msgId, const uint8_t srcMac[6]);
+// Mark the matching tracked send BUSY (status busy / no slot) or REFUSED (any
+// other status) because the peer answered it with a sealed ACK carrying that
+// status (1.0 step 6). Unlike sendStatusMarkFailed it also counts the answer as
+// proof that the session is alive (it clears the no-answer run, as a delivery
+// does): only silence counts toward a re-open.
+void sendStatusMarkRefused(uint32_t msgId, const uint8_t srcMac[6], uint8_t status);
 
 // Mark a tracked send as FAILED. Called from the pending-frame timeout sweep
 // when a queued encrypted frame gets dropped (handshake never completed).

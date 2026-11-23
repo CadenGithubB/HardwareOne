@@ -9,10 +9,13 @@
 // sees the wrong number.
 //
 // The command path is inserted unchanged as well: v4h_cmd (the one-slot busy
-// answer), v4CmdResultCallback (every remote command's result) and
+// answer: the ACK only, since 1.0 step 6), v4CmdResultCallback and
+// v4_send_cmd_result (every remote command's result, sent with an ACK wait) and
 // v4_handle_cmd from its authentication decision on. The stream-session
 // table, the command queue and the executor are doubles; the executor's
-// callback is called by the cases as cmd_exec would.
+// callback is called by the cases as cmd_exec would. The requester's result
+// queue is the real System_ESPNow_RemoteCmdCore.h (16 entries, 24 KB ring):
+// a burst fills it and the next result is refused busy.
 #include <Arduino.h>
 #include <cctype>
 #include <cstdarg>
@@ -22,8 +25,11 @@
 #include <string>
 #include <vector>
 
+#include <atomic>
+
 #include "System_ESPNow_RxCtx.h"  // V4RxCtx over the real System_ESPNow_Wire.h
 #include "System_DeviceName.h"
+#include "System_ESPNow_RemoteCmdCore.h"
 
 static unsigned checks = 0, failures = 0;
 static void check(bool ok, const char* what) {
@@ -81,6 +87,22 @@ bool sendAead(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId, 
   return true;
 }
 }  // namespace espnowtx
+// The session the acknowledged CMD_RESP sender looks up (System_ESPNow_Sessions.h).
+struct PeerIdentity { uint8_t meshId; };
+static PeerIdentity gPeerIdentity{0};
+static const PeerIdentity* peerIdentityFindByMac(const uint8_t*) { return &gPeerIdentity; }
+enum { SESSION_FREE = 0, SESSION_ACTIVE = 3 };
+struct SessionState { int state; };
+static SessionState gSession{SESSION_ACTIVE};
+static bool sessionUp = true;
+static SessionState* sessionFindByPeer(const uint8_t*, uint8_t) { return sessionUp ? &gSession : nullptr; }
+enum class V4SendOutcome : uint8_t { Delivered = 0, Refused = 1, NoAnswer = 2, NotSent = 3 };
+struct V4SendResult { V4SendOutcome outcome; uint8_t status; };
+// v4_send_encrypted_chunked with ackSingle: records the frame and how it went.
+static std::vector<bool> ackedSends;
+static V4SendResult chunkedResult{V4SendOutcome::Delivered, 0};
+V4SendResult v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t flags, uint32_t msgId,
+                                       const uint8_t* payload, uint16_t len, uint8_t ttl, bool ackSingle);
 bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
                            const uint8_t* payload, uint16_t len, uint8_t ttl) {
   const bool ok = espnowtx::sendAead(dst, type, flags, msgId, payload, len, ttl);
@@ -95,6 +117,13 @@ bool sendAeadSync(const uint8_t mac[6], uint8_t type, uint16_t flags, uint32_t m
   return ok;
 }
 }  // namespace espnowtx
+V4SendResult v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t flags, uint32_t msgId,
+                                       const uint8_t* payload, uint16_t len, uint8_t ttl, bool ackSingle) {
+  espnowtx::sendAead(dst, type, flags, msgId, payload, len, ttl);
+  air.back().sync = true;
+  ackedSends.push_back(ackSingle);
+  return chunkedResult;
+}
 
 // ---- the command path's doubles ---------------------------------------------------------
 #define DEBUG_ESPNOW_ROUTERF(...) do {} while (0)
@@ -158,7 +187,13 @@ static void destroyStreamSession(uint32_t cmdMsgId) { sessionsEnded.push_back(cm
 
 // ---- the topology receivers' doubles (System_ESPNow.h, one stream slot) -----------------
 #define DEBUG_ESPNOW_TOPOF(...) do {} while (0)
-#define WARN_ESPNOWF(...) do {} while (0)
+static unsigned warnings = 0;
+#define WARN_ESPNOWF(...)                                       \
+  do {                                                          \
+    ++warnings;                                                 \
+    char warn_[200];                                            \
+    std::snprintf(warn_, sizeof(warn_), __VA_ARGS__);           \
+  } while (0)
 #define MESH_PEER_MAX 16
 struct TopologyPeerRecord {
   uint8_t mac[6];
@@ -229,13 +264,6 @@ struct EspNowState {
   char deferredCmdPayload[256] = {};
   uint32_t deferredCmdMsgId = 0;
   bool deferredCmdWasEncrypted = false;
-  bool deferredCmdRespPending = false;
-  uint8_t deferredCmdRespSrcMac[6] = {};
-  char deferredCmdRespDeviceName[32] = {};
-  char* deferredCmdRespResult = nullptr;
-  bool deferredCmdRespSuccess = false;
-  uint8_t deferredCmdRespStatus = 0;
-  uint32_t deferredCmdRespReqId = 0;
   struct StreamQueueEntry {
     uint8_t srcMac[6];
     char deviceName[32];
@@ -252,8 +280,29 @@ struct EspNowState {
 };
 static EspNowState gState;
 static EspNowState* gEspNow = &gState;
-static char gRespBuffer[V4_REASM_MAX_MSG + 1];
 static EspNowState::StreamQueueEntry gQueue[16];
+
+// The requester's store (System_ESPNow.cpp, RemoteCmdStore): the real result
+// queue over a 24 KB ring; the lab hold; the STREAM deadline hook.
+struct RemoteCmdStore {
+  espnowcmd::RequesterTable requesters;
+  espnowcmd::ResultQueue results;
+  uint8_t ring[espnowcmd::kResultRingBytes];
+};
+static RemoteCmdStore gStore;
+static RemoteCmdStore* gRemoteCmd = &gStore;
+static std::atomic<uint32_t> gRemoteCmdHoldMs{0};
+static std::vector<uint32_t> streamExtended;  // reqIds whose deadline a STREAM line moved
+static void remoteCmdOnStream(const uint8_t*, uint32_t reqId) { streamExtended.push_back(reqId); }
+// The newest queued result (what the old single slot held).
+static const espnowcmd::ResultEntry* lastQueued() {
+  const espnowcmd::ResultQueue& q = gStore.results;
+  return q.count ? &q.e[(q.head + q.count - 1) % espnowcmd::kResults] : nullptr;
+}
+static std::string lastQueuedText() {
+  const espnowcmd::ResultEntry* r = lastQueued();
+  return r ? std::string(espnowcmd::textOf(gStore.results, *r)) : std::string();
+}
 
 // ---- production -------------------------------------------------------------------------
 // INSERT_PRODUCTION
@@ -266,8 +315,14 @@ static void resetWorld() {
   air.clear();
   broadcasts.clear();
   gState = EspNowState{};
-  gState.deferredCmdRespResult = gRespBuffer;
-  std::memset(gRespBuffer, 0, sizeof(gRespBuffer));
+  std::memset(&gStore.requesters, 0, sizeof(gStore.requesters));
+  espnowcmd::queueInit(gStore.results, gStore.ring, sizeof(gStore.ring));
+  gRemoteCmdHoldMs = 0;
+  streamExtended.clear();
+  ackedSends.clear();
+  chunkedResult = V4SendResult{V4SendOutcome::Delivered, 0};
+  sessionUp = true;
+  warnings = 0;
   std::memset(gQueue, 0, sizeof(gQueue));
   gState.streamQueue = gQueue;
   gState.streamQueueMask = 15;
@@ -324,11 +379,10 @@ static void testRefusalIsAnAnswer() {
             std::memcmp(air[0].payload.data() + 5, "Error: busy", 11) == 0,
         "refusal: the text follows the five bytes, no terminator");
   receive(air[0]);
-  check(gState.deferredCmdRespPending && gState.deferredCmdRespReqId == 41,
+  check(lastQueued() && lastQueued()->reqId == 41,
         "refusal received: correlated to request 41 by the payload's reqId, not the header msgId");
-  check(!gState.deferredCmdRespSuccess && gState.deferredCmdRespStatus == espnowanswer::kBusy,
-        "refusal received: not ok, status busy kept");
-  check(std::strcmp(gState.deferredCmdRespResult, "Error: busy") == 0, "refusal received: the text");
+  check(lastQueued() && lastQueued()->status == espnowanswer::kBusy, "refusal received: not ok, status busy kept");
+  check(lastQueuedText() == "Error: busy", "refusal received: the text");
 
   // A long refusal is cut to fit one frame, never past the 120-byte text room.
   resetWorld();
@@ -348,18 +402,18 @@ static void testResultIsAnAnswer() {
   check(headerIs(air[0], 7, espnowanswer::kOk) && ownFreshMsgId(air[0], 7),
         "result: {reqId 7, status 0} under the answerer's own msgId");
   receive(air[0]);
-  check(gState.deferredCmdRespReqId == 7 && gState.deferredCmdRespSuccess &&
-            std::strcmp(gState.deferredCmdRespResult, text) == 0,
-        "result received: request 7, ok, the text");
+  check(lastQueued() && lastQueued()->reqId == 7 && espnowanswer::isOk(lastQueued()->status) &&
+            lastQueuedText() == text && std::strcmp(lastQueued()->name, "peerB") == 0,
+        "result received: request 7, ok, the text, the sender's name");
 
   // A failure carries CMD_RESP's own 16 (failed); the receiver says so by name.
   resetWorld();
   v4_send_command_response(kRequester, 8, espnowanswer::kCmdFailed, "Error: nope", 11);
   receive(air.at(0));
-  check(gState.deferredCmdRespReqId == 8 && !gState.deferredCmdRespSuccess &&
-            gState.deferredCmdRespStatus == espnowanswer::kCmdFailed,
+  check(lastQueued() && lastQueued()->reqId == 8 && lastQueued()->status == espnowanswer::kCmdFailed,
         "failed result received: request 8, not ok, status 16");
-  check(std::strcmp(espnowanswer::statusName(ESPNOW_V4_TYPE_CMD_RESP, gState.deferredCmdRespStatus), "failed") == 0,
+  check(lastQueued() &&
+            std::strcmp(espnowanswer::statusName(ESPNOW_V4_TYPE_CMD_RESP, lastQueued()->status), "failed") == 0,
         "failed result: status 16 is named 'failed' in CMD_RESP");
 
   // The receiver reads the correlation from the payload only: the same
@@ -369,7 +423,75 @@ static void testResultIsAnAnswer() {
   AirFrame copy = air.at(0);
   copy.msgId = 9999;
   receive(copy);
-  check(gState.deferredCmdRespReqId == 9, "the header msgId does not decide which request an answer is for");
+  check(lastQueued() && lastQueued()->reqId == 9,
+        "the header msgId does not decide which request an answer is for");
+}
+
+// CMD_RESP burst (1.0 step 6): results wait in 16 entries with their texts in a
+// 24 KB ring. The 17th, or one whose text does not fit the bytes left, is not
+// taken: refused busy (the responder sends it once more under a new msgId),
+// and nothing already queued is touched. Shown in arrival order; once the
+// oldest are shown, there is room again (the ring wraps).
+static void testCmdRespBurst() {
+  resetWorld();
+  for (uint32_t i = 0; i < espnowcmd::kResults; ++i) {
+    air.clear();
+    char text[32];
+    std::snprintf(text, sizeof(text), "result %u", (unsigned)i);
+    v4_send_command_response(kRequester, 600 + i, espnowanswer::kOk, text, (uint16_t)std::strlen(text));
+    receive(air.at(0));
+    check(gLastReceiveVerdict.kind == V4VerdictKind::Accepted, "burst: each of 16 results is taken");
+  }
+  check(gStore.results.count == espnowcmd::kResults, "burst: 16 results wait");
+  air.clear();
+  v4_send_command_response(kRequester, 700, espnowanswer::kOk, "one more", 8);
+  receive(air.at(0));
+  check(gLastReceiveVerdict.kind == V4VerdictKind::Refused && gLastReceiveVerdict.status == espnowanswer::kBusy &&
+            gStore.results.count == espnowcmd::kResults,
+        "burst: the 17th result is refused busy, nothing replaced");
+  check(gStore.results.e[gStore.results.head].reqId == 600, "burst: the oldest waiting result is still the first");
+
+  // Bytes: six 4 KB results fill the 24 KB ring; the seventh does not fit and
+  // is refused busy although entries are free.
+  resetWorld();
+  const std::string big(4000, 'R');
+  unsigned taken = 0, refusedBusy = 0;
+  for (uint32_t i = 0; i < 7; ++i) {
+    air.clear();
+    v4_send_command_response(kRequester, 800 + i, espnowanswer::kOk, big.c_str(), (uint16_t)big.size());
+    receive(air.at(0));
+    if (gLastReceiveVerdict.kind == V4VerdictKind::Accepted) ++taken;
+    else if (gLastReceiveVerdict.status == espnowanswer::kBusy) ++refusedBusy;
+  }
+  check(taken == 6 && refusedBusy == 1 && espnowcmd::bytesUsed(gStore.results) <= espnowcmd::kResultRingBytes,
+        "burst: 4 KB results fill the 24 KB ring (6 fit), the next is refused busy");
+  espnowcmd::pop(gStore.results);
+  espnowcmd::pop(gStore.results);
+  air.clear();
+  v4_send_command_response(kRequester, 900, espnowanswer::kOk, big.c_str(), (uint16_t)big.size());
+  receive(air.at(0));
+  check(gLastReceiveVerdict.kind == V4VerdictKind::Accepted && lastQueued() && lastQueued()->off == 0 &&
+            lastQueuedText() == big,
+        "burst: after two are shown, the next result wraps to the ring's start whole");
+
+  // No store (no PSRAM at start): every result is refused not ready (an
+  // honest refusal, not busy: a retry would not help).
+  resetWorld();
+  gRemoteCmd = nullptr;
+  v4_send_command_response(kRequester, 950, espnowanswer::kOk, "x", 1);
+  receive(air.at(0));
+  check(gLastReceiveVerdict.kind == V4VerdictKind::Refused && gLastReceiveVerdict.status == espnowanswer::kNotReady,
+        "no result store: refused not ready");
+  gRemoteCmd = &gStore;
+
+  // The lab hook holds a result: it is queued with a later ready time.
+  resetWorld();
+  gRemoteCmdHoldMs = 40000;
+  v4_send_command_response(kRequester, 960, espnowanswer::kOk, "held", 4);
+  receive(air.at(0));
+  check(lastQueued() && lastQueued()->readyAtMs == 1000 + 40000 && !espnowcmd::front(gStore.results, 1000) &&
+            espnowcmd::front(gStore.results, 41000),
+        "lab hold: the result is queued, shown only 40 s after it came");
 }
 
 static void testStreamLinesAreAnswers() {
@@ -386,6 +508,8 @@ static void testStreamLinesAreAnswers() {
   receive(air[1]);
   check(gState.streamQueueHead == 2 && gQueue[0].cmdMsgId == 55 && gQueue[1].cmdMsgId == 55,
         "stream received: both lines filed under command 55 (the reqId), not their msgIds");
+  check(streamExtended.size() == 2 && streamExtended[0] == 55 && streamExtended[1] == 55,
+        "stream received: each line moves command 55's result deadline (E4, 1.0 step 6)");
   check(std::strcmp(gQueue[0].content, "line one") == 0 && std::strcmp(gQueue[1].content, "line two") == 0,
         "stream received: the text after the five bytes");
 
@@ -455,16 +579,17 @@ static void checkAnswer(const char* what, uint32_t reqId, uint8_t status, const 
   if (air.size() != 1) return;
   check(headerIs(air[0], reqId, status), (w + ": {reqId = the CMD's msgId, status}").c_str());
   check(ownFreshMsgId(air[0], reqId), (w + ": header msgId is the answerer's own").c_str());
-  gState.deferredCmdRespPending = false;
+  espnowcmd::queueClear(gStore.results);
   receive(air[0]);
-  check(gState.deferredCmdRespPending && gState.deferredCmdRespReqId == reqId &&
-            gState.deferredCmdRespSuccess == ok && gState.deferredCmdRespStatus == status,
+  check(lastQueued() && lastQueued()->reqId == reqId && espnowanswer::isOk(lastQueued()->status) == ok &&
+            lastQueued()->status == status,
         (w + ": received under the CMD's number with its status").c_str());
   check(std::strcmp(espnowanswer::statusName(ESPNOW_V4_TYPE_CMD_RESP, status), name) == 0,
         (w + ": the status is named " + name).c_str());
 }
 
-// v4h_cmd: one command waits in the slot; another sealed CMD is answered busy.
+// v4h_cmd: one command waits in the slot; another CMD is answered busy by its
+// ACK alone (1.0 step 6: no CMD_RESP(busy)).
 static void testCmdSlotBusy() {
   resetWorld();
   receiveCmd(kRequester, 300, "admin:pw:status");
@@ -474,12 +599,12 @@ static void testCmdSlotBusy() {
   check(gLastCmdVerdict.kind == V4VerdictKind::Accepted, "slot free: the CMD is accepted (its ACK says 0)");
   receiveCmd(kRequester, 300, "admin:pw:status");
   check(air.empty(), "the waiting command again: no answer (it will run)");
-  receiveCmd(kRequester, 301, "admin:pw:status", false);
-  check(air.empty(), "an unsealed CMD while the slot is taken: no answer");
+  check(gLastCmdVerdict.kind == V4VerdictKind::Accepted, "the waiting command again: accepted (it runs once)");
   receiveCmd(kRequester, 301, "admin:pw:uptime");
   check(gLastCmdVerdict.kind == V4VerdictKind::Refused && gLastCmdVerdict.status == espnowanswer::kBusy,
-        "slot taken: the CMD is refused busy (its ACK says busy, 1.0 step 5b)");
-  checkAnswer("slot taken", 301, espnowanswer::kBusy, "busy", false);
+        "slot taken: the CMD is refused busy (its ACK says busy)");
+  check(air.empty(), "slot taken: no CMD_RESP(busy) on the air, the ACK is the one answer (1.0 step 6)");
+  check(gState.deferredCmdMsgId == 300, "slot taken: the waiting command is untouched");
 }
 
 // v4_handle_cmd after authentication: the refusals it sends itself.
@@ -537,6 +662,8 @@ static void testCommandResults() {
     queuedCallback(c.ok, c.text, queuedUserData);  // as cmd_exec does
     allocFails = false;
     check(air.size() == 1 && air[0].sync, (std::string(c.what) + ": sent from cmd_exec, blocking").c_str());
+    check(ackedSends.size() == 1 && ackedSends[0],
+          (std::string(c.what) + ": sent waiting for its ACK (busy: sent once more, 1.0 step 6)").c_str());
     checkAnswer(c.what, reqId, c.status, c.name, c.ok);
     if (air.size() == 1) {
       const std::string text(air[0].payload.begin() + 5, air[0].payload.end());
@@ -545,6 +672,20 @@ static void testCommandResults() {
     check(!sessionsEnded.empty() && sessionsEnded.back() == reqId,
           (std::string(c.what) + ": the stream session is ended").c_str());
   }
+
+  // No session up: the result goes the encrypt-or-wait way (queued until the
+  // session opens), not waited for; a requester that stays busy is logged.
+  resetWorld();
+  v4_handle_cmd_after_auth(kRequester, "peerA", 590, "status", "admin", String("status"));
+  sessionUp = false;
+  if (queuedCallback) queuedCallback(true, "x", queuedUserData);
+  check(air.size() == 1 && air[0].sync && ackedSends.empty() && headerIs(air[0], 590, espnowanswer::kOk),
+        "no session: the result is handed to the encrypt-or-wait sender");
+  resetWorld();
+  v4_handle_cmd_after_auth(kRequester, "peerA", 591, "status", "admin", String("status"));
+  chunkedResult = V4SendResult{V4SendOutcome::Refused, espnowanswer::kBusy};
+  if (queuedCallback) queuedCallback(true, "x", queuedUserData);
+  check(ackedSends.size() == 1 && warnings == 1, "requester busy after the retry: logged once");
 }
 
 // TOPO_START / TOPO_PEER from the answerer, as the dispatcher hands them on.
@@ -641,6 +782,7 @@ int main() {
   testCommandResults();
   testRefusalIsAnAnswer();
   testResultIsAnAnswer();
+  testCmdRespBurst();
   testStreamLinesAreAnswers();
   std::printf("espnow_answers harness: %u checks, %u failures\n", checks, failures);
   return failures ? 1 : 0;

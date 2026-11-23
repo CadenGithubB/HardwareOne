@@ -87,8 +87,9 @@ static constexpr CommandModule gCommandModules[] = {
     "devices, then message (espnowsend/espnowbroadcast), push a file (espnowsendfile), "
     "pull a file (espnowfetch), browse a peer's files (espnowbrowse), or run a command on "
     "a peer (espnowremote). espnowremote, espnowfetch, espnowbrowse, espnowroomcmd and "
-    "espnowtagcmd are ASYNCHRONOUS: they return OK on delivery; the real result arrives "
-    "later in the message buffer, read with 'espnowmessages json [mac]'. Mesh mode "
+    "espnowtagcmd are ASYNCHRONOUS: they return OK once sent; the one result per device "
+    "(its output, or Busy, Refused, No answer or No result) arrives later in the message "
+    "buffer, read with 'espnowmessages json [mac]'. Mesh mode "
     "(espnowmode mesh) adds routing with a TTL and master/worker/backup roles; each "
     "device carries identity metadata (name, friendly name, room, zone, tags) queried "
     "with espnowdeviceinfo locally or espnowrequestmeta for a peer.",

@@ -4515,11 +4515,16 @@ bool executeCommand(AuthContext& ctx, const char* cmd, char* out, size_t outSize
     // kicks SESSION_OPEN — so the token is never on-air in plaintext. This is the
     // same path every other CMD send already uses; bond was the lone exception.
     char sendStatus[64] = "";
+    // Tracked to one terminal result like every remote command (ESP-NOW 1.0
+    // step 6): its result, Busy, Refused, No answer or No result.
+    espnowRemoteCmdBegin(peerMac, msgId);
     bool sent = v4_send_encrypted_or_queue(peerMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ,
                                            msgId, (const uint8_t*)payload.c_str(), payload.length(), 1,
                                            sendStatus, sizeof(sendStatus));
     // Every status of a frame parked for the session starts with "queued".
     const bool queued = sent && strncmp(sendStatus, "queued", 6) == 0;
+    if (!sent) espnowRemoteCmdCancel(peerMac, msgId);
+    else if (queued) espnowRemoteCmdQueued(peerMac, msgId);
     
     if (sent) {
       // SECURITY: echo the REDACTED form. actualCommand is the unwrapped inner

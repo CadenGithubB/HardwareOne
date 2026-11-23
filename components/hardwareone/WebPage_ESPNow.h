@@ -1869,25 +1869,37 @@ inline void streamEspNowInner(httpd_req_t* req) {
   // tagged piece/of. The device stores them as separate small records and never
   // reassembles — WE stitch here, client-side, where RAM is free. Single-frame
   // messages (of<=1) render immediately, exactly as before.
-  // sendState mirrors the device's SendStatusState: 0 pending, 1 delivered,
-  // 2 timeout/no-ACK, 3 failed. For SENT rows we render the durable state from
+  // sendState mirrors the device's SendStatusState: 0 pending (Sent), 1
+  // delivered, 2 timeout and 3 failed (No answer), 4 busy, 5 refused: one word
+  // per meaning (ESP-NOW 1.0). For SENT rows we render the durable state from
   // the record (so it's right for messages sent elsewhere or after a reload) and
   // tag the bubble with data-msg-id so the live deliveries[] flip can still
   // upgrade pending → delivered within the tracker's window.
-  function renderMessage(mac, text, partial, isSent, sendState, reqId) {
+  // The word of a sent message's state (sendState or a deliveries[] state name).
+  function sendStateWord(state) {
+    if (state === 2 || state === 3 || state === 'timeout' || state === 'failed') return 'No answer';
+    if (state === 4 || state === 'busy') return 'Busy';
+    if (state === 5 || state === 'refused') return 'Refused';
+    return '';
+  }
+  function renderMessage(mac, text, partial, isSent, sendState, reqId, result, reason) {
     if (typeof window.appendLogLine !== 'function') { console.error('[ESP-NOW] appendLogLine not available'); return; }
     if (!isSent) {
-      window.appendLogLine('log-' + mac, 'RECEIVED', partial ? (text + '  …(partial — some pieces missing)') : text, null);
+      // A remote command result that came after "No result" was shown.
+      var shown = (result === 'late') ? ('Result (late): ' + text) : text;
+      window.appendLogLine('log-' + mac, 'RECEIVED', partial ? (shown + '  …(partial — some pieces missing)') : shown, null);
       return;
     }
     var bubble = window.appendLogLine('log-' + mac, 'SENT', text, (sendState === 1) ? 'delivered' : 'sent');
     if (!bubble) return;
     if (reqId) bubble.setAttribute('data-msg-id', reqId);
-    if (sendState === 2 || sendState === 3) {
+    var word = sendStateWord(sendState);
+    if (word) {
+      // A refusal names its reason, kept with the record (also after a reload).
+      if (sendState === 5 && reason) word += ': ' + String(reason).replace(/_/g, ' ');
       var sd = bubble.querySelector('.message-status');
       if (sd) {
-        sd.innerHTML = (sendState === 2) ? '<span class="status-icon">✗</span>No ACK (timeout)'
-                                         : '<span class="status-icon">✗</span>Failed';
+        sd.innerHTML = '<span class="status-icon">✗</span>' + hw.esc(word);
         bubble.classList.add('message-error');
       }
     }
@@ -1901,6 +1913,8 @@ inline void streamEspNowInner(httpd_req_t* req) {
     var reqId = msg.reqId || 0;
     var isSent = !!msg.sent;
     var sendState = msg.sendState || 0;
+    var result = msg.result || '';
+    var reason = msg.reason || '';
     // Sent messages now come from the shared device history (so the OLED/BLE see
     // our sends and we see theirs). If this is the polled echo of a message WE
     // just sent from this browser, its optimistic bubble is already on screen
@@ -1910,15 +1924,16 @@ inline void streamEspNowInner(httpd_req_t* req) {
         hw.qs('.message-bubble[data-msg-id="' + reqId + '"]')) {
       return;
     }
-    if (of <= 1 || !reqId) { renderMessage(mac, text, false, isSent, sendState, reqId); return; }  // not chunked
+    if (of <= 1 || !reqId) { renderMessage(mac, text, false, isSent, sendState, reqId, result, reason); return; }  // not chunked
     var g = pendingGroups[reqId];
-    if (!g) { g = pendingGroups[reqId] = { of: of, mac: mac, parts: {}, count: 0, tick: pollTick, isSent: isSent, sendState: sendState, reqId: reqId }; }
+    if (!g) { g = pendingGroups[reqId] = { of: of, mac: mac, parts: {}, count: 0, tick: pollTick, isSent: isSent, sendState: sendState, reqId: reqId, result: result, reason: reason }; }
     g.sendState = sendState;  // latest fragment's state (all share it once resolved)
+    g.reason = reason;
     if (!(piece in g.parts)) { g.parts[piece] = text; g.count++; }
     if (g.count >= g.of) {  // all pieces in — join in order and render once
       var full = '';
       for (var k = 1; k <= g.of; k++) full += (g.parts[k] || '');
-      renderMessage(g.mac, full, false, g.isSent, g.sendState, g.reqId);
+      renderMessage(g.mac, full, false, g.isSent, g.sendState, g.reqId, g.result, g.reason);
       delete pendingGroups[reqId];
     }
   }
@@ -1931,7 +1946,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
       if (pollTick - g.tick > 20) {
         var full = '';
         for (var k = 1; k <= g.of; k++) full += (g.parts[k] || '[missing] ');
-        renderMessage(g.mac, full, true, g.isSent, g.sendState, g.reqId);
+        renderMessage(g.mac, full, true, g.isSent, g.sendState, g.reqId, g.result, g.reason);
         delete pendingGroups[id];
       }
     }
@@ -1982,13 +1997,13 @@ inline void streamEspNowInner(httpd_req_t* req) {
             if (!bubble) return;
             var statusDiv = bubble.querySelector('.message-status');
             if (!statusDiv) return;
+            var word = sendStateWord(d.state);
             if (d.state === 'delivered') {
               statusDiv.innerHTML = '<span class="status-icon">✓✓</span>Delivered';
-            } else if (d.state === 'timeout') {
-              statusDiv.innerHTML = '<span class="status-icon">✗</span>No ACK (timeout)';
-              bubble.classList.add('message-error');
-            } else if (d.state === 'failed') {
-              statusDiv.innerHTML = '<span class="status-icon">✗</span>Failed (handshake)';
+            } else if (word) {
+              // Refused names its reason (an ACK status word such as too_large).
+              if (d.state === 'refused' && d.reason) word += ': ' + String(d.reason).replace(/_/g, ' ');
+              statusDiv.innerHTML = '<span class="status-icon">✗</span>' + hw.esc(word);
               bubble.classList.add('message-error');
             }
             // 'pending' — leave the bubble at whatever the send-side set

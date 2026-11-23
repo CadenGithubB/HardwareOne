@@ -343,7 +343,6 @@ static void testHeader() {
     Header x{};
     return !decodeHeader(q, x);
   };
-  CHECK(refusedWith([](uint8_t* q) { q[kOffFlags] |= 0x20; }));
   CHECK(refusedWith([](uint8_t* q) { q[kOffFlags] |= 0x40; }));
   CHECK(refusedWith([](uint8_t* q) { q[kOffFlags] |= 0x80; }));
   CHECK(refusedWith([](uint8_t* q) { q[kOffZero] = 1; }));
@@ -355,14 +354,46 @@ static void testHeader() {
   CHECK(refusedWith([](uint8_t* q) { q[kOffMarker] = 0; }));
   CHECK(!refusedWith([](uint8_t* q) { q[kOffPiece] = 200; }));  // piece and pieceTotal are not validated
 
-  // encodeHeader masks a sendState above 3 to its two bits and never sets a reserved bit.
+  // encodeHeader masks a sendState above 7 to its three bits (ESP-NOW 1.0 step 6)
+  // and never sets a reserved bit (0xC0).
   for (int st = 0; st < 256; ++st) {
     Header s = mk(3);
     s.sendState = static_cast<uint8_t>(st);
     encodeHeader(s, p);
     CHECK((p[kOffFlags] & kFlagsReserved) == 0);
     CHECK(decodeHeader(p, d));
-    CHECK(d.sendState == (st & 3));
+    CHECK(d.sendState == (st & 7));
+  }
+
+  // The status byte (ESP-NOW 1.0 step 6): kept only on a refused sent record (1-15).
+  {
+    Header s = mk(3);
+    s.sent = true;
+    s.sendState = kRefusedState;
+    s.status = 4;
+    encodeHeader(s, p);
+    CHECK(decodeHeader(p, d) && d.status == 4 && d.sendState == kRefusedState);
+    s.sendState = 4;
+    encodeHeader(s, p);
+    CHECK(decodeHeader(p, d) && d.status == 0);
+    s.sent = false;
+    s.sendState = kRefusedState;
+    encodeHeader(s, p);
+    CHECK(decodeHeader(p, d) && d.status == 0);
+    s.sent = true;
+    s.status = 16;
+    encodeHeader(s, p);
+    CHECK(decodeHeader(p, d) && d.status == 0);
+    s.status = 4;
+    encodeHeader(s, p);
+    p[kOffZero] = 16;
+    p[kOffCheck] = headerCheck(p);
+    CHECK(!decodeHeader(p, d));
+    s.sendState = 2;
+    encodeHeader(s, p);
+    p[kOffZero] = 4;
+    p[kOffCheck] = headerCheck(p);
+    CHECK(!decodeHeader(p, d));
   }
 
   // decodeCount counts every call, refused ones too.
@@ -654,7 +685,7 @@ static void testRefusals() {
   CHECK(!a.ok && unchanged());
   a = append(g.r, g.buf, mk(gSeq + 1, 0, 1, 1, 255), t.data(), t.size());
   CHECK(!a.ok && unchanged());
-  a = append(g.r, g.buf, mk(gSeq + 1, 0, 1, 1, 0, 4), t.data(), t.size());
+  a = append(g.r, g.buf, mk(gSeq + 1, 0, 1, 1, 0, 8), t.data(), t.size());  // a state above 7 (three bits)
   CHECK(!a.ok && unchanged());
   a = append(g.r, g.buf, mk(gSeq + 1), nullptr, 5);
   CHECK(!a.ok && unchanged());
@@ -1097,7 +1128,7 @@ static void testSendState() {
   }
   std::vector<uint8_t> snap(g.buf, g.buf + g.size);
   const RingState rs = g.r;
-  for (int state = 4; state < 256; ++state) CHECK(setSendState(g.r, g.buf, 77, static_cast<uint8_t>(state)) == 0);
+  for (int state = 8; state < 256; ++state) CHECK(setSendState(g.r, g.buf, 77, static_cast<uint8_t>(state)) == 0);
   CHECK(setSendState(g.r, g.buf, 0, 1) == 0);
   CHECK(setSendState(g.r, g.buf, 123456, 1) == 0);
   CHECK(setSendState(g.r, nullptr, 77, 1) == 0);

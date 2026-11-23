@@ -10,6 +10,7 @@
 
 #include "G2_Page_ESPNow.h"
 #include "System_DeviceName.h"  // devicename::kMaxLen (the device name's 31 bytes)
+#include "System_ESPNow_RemoteCmdCore.h"  // a remote command result that came late (Outcome::Late)
 
 #if ENABLE_BLUETOOTH && ENABLE_G2_GLASSES
 
@@ -229,6 +230,9 @@ static void chatLogicalLine(char* out, size_t cap, const CollapsedMsgRef& ref,
   }
   if (ref.isSent) {
     snprintf(out, cap, "me: %s%s", body, suffix);
+  } else if (head.msgType == MSG_CMD_RESULT && head.sendState == (uint8_t)espnowcmd::Outcome::Late) {
+    // A remote command result that came after "No result" (ESP-NOW 1.0 step 6).
+    snprintf(out, cap, "%s: Result (late): %s%s", chatWho(head), body, suffix);
   } else {
     snprintf(out, cap, "%s: %s%s", chatWho(head), body, suffix);
   }

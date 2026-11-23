@@ -198,11 +198,17 @@ static void gcCase() {
   clockMs += V4_REASM_TIMEOUT_MS + 1;
   check(!feed(C, ESPNOW_V4_TYPE_CMD_RESP, 20, 0, 2, 200, 1).complete, "9: third sender pending after GC");
 #if HW1_REASM_OUTCOMES
-  // Both entries in use and fresh: a third message gets no entry, and none is opened for it.
+  // Every entry (V4_REASM_MAX, 4 since 1.0 step 6) in use and fresh: the next
+  // message gets no entry, and none is opened for it.
+  static_assert(V4_REASM_MAX == 4, "case 9 fills a pool of four");
   feed(A, ESPNOW_V4_TYPE_CMD_RESP, 22, 0, 3, 200, 1);
-  const Fed full = feed(B, ESPNOW_V4_TYPE_CMD_RESP, 23, 0, 3, 200, 1);
-  check(full.outcome == (int)V4ReasmOutcome::NoSlot && !(gV4Reasm[0].active && gV4Reasm[0].msgId == 23) &&
-        !(gV4Reasm[1].active && gV4Reasm[1].msgId == 23),
+  feed(B, ESPNOW_V4_TYPE_CMD_RESP, 23, 0, 3, 200, 1);
+  const Fed fourth = feed(A, ESPNOW_V4_TYPE_CMD_RESP, 24, 0, 3, 200, 1);
+  check(fourth.outcome == (int)V4ReasmOutcome::Pending, "9: the fourth message has an entry");
+  const Fed full = feed(B, ESPNOW_V4_TYPE_CMD_RESP, 25, 0, 3, 200, 1);
+  bool opened = false;
+  for (int i = 0; i < V4_REASM_MAX; i++) opened = opened || (gV4Reasm[i].active && gV4Reasm[i].msgId == 25);
+  check(full.outcome == (int)V4ReasmOutcome::NoSlot && !opened,
         "9: a full pool reports NoSlot (kNoSlot) and opens no entry");
 #endif
   check(gV4Reasm[0].active && gV4Reasm[0].msgId == 20 && gEspNow->routerMetrics.v4FragRxGc == 2,

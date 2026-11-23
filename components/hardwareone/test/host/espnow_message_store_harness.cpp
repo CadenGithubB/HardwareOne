@@ -1221,6 +1221,34 @@ static void casePaging() {
   checkLockDiscipline();
 }
 
+// A received remote command row carries its outcome in the record's three
+// state bits (ESP-NOW 1.0 step 6): busy (1) on a one-piece row, late (5) on
+// every piece of a result; a plain result row stays 0.
+static void caseOutcomeRows() {
+  storeInit();
+  uint8_t A[6];
+  macFor(2, A);
+  const std::string longText = patternText(450, 4);
+  CHECK(storeReceivedMessageChunked(A, "alpha", "Busy: alpha could not take the command now.", true,
+                                    MSG_CMD_RESULT, 91, HistoryAttribution::Attributed, 1),
+        "outcome row stored");
+  CHECK(storeReceivedMessageChunked(A, "alpha", longText.c_str(), true, MSG_CMD_RESULT, 92,
+                                    HistoryAttribution::Attributed, 5),
+        "late result stored");
+  CHECK(storeReceivedMessageChunked(A, "alpha", "ok", true, MSG_CMD_RESULT, 93), "plain result stored");
+  ReceivedTextMessage rows[16];
+  const int nr = getPeerMessages(A, rows, 16, 0);
+  int busyRows = 0, lateRows = 0, plain = 0, other = 0;
+  for (int i = 0; i < nr; i++) {
+    if (rows[i].reqId == 91 && rows[i].sendState == 1 && !rows[i].isSent) ++busyRows;
+    else if (rows[i].reqId == 92 && rows[i].sendState == 5 && !rows[i].isSent) ++lateRows;
+    else if (rows[i].reqId == 93 && rows[i].sendState == 0) ++plain;
+    else ++other;
+  }
+  CHECK(busyRows == 1 && lateRows == 3 && plain == 1 && other == 0,
+        "outcomes read back on received rows (busy 1, late x3, plain 0)");
+}
+
 static void caseDelivery() {
   storeInit();
   uint8_t A[6];
@@ -1229,9 +1257,28 @@ static void caseDelivery() {
   CHECK(storeSentMessageInPeerHistory(A, longText.c_str(), 42), "sent");
   CHECK(storeSentMessageInPeerHistory(A, "other", 43), "sent");
   const std::vector<uint8_t> before = snapshot(blockOf(A));
-  for (int s = 4; s <= 255; s++) espnowUpdateSentDeliveryState(A, 42, (uint8_t)s);
+  // Three state bits since ESP-NOW 1.0 step 6 (busy 4, refused 5): above 7 is refused.
+  for (int s = 8; s <= 255; s++) espnowUpdateSentDeliveryState(A, 42, (uint8_t)s);
   espnowUpdateSentDeliveryState(A, 0, 1);
-  CHECK(snapshot(blockOf(A)) == before, "a state above 3 or msgId 0 changed the ring");
+  CHECK(snapshot(blockOf(A)) == before, "a state above 7 or msgId 0 changed the ring");
+  espnowUpdateSentDeliveryState(A, 43, 4);
+  {
+    ReceivedTextMessage busy[8];
+    const int nb = getPeerMessages(A, busy, 8, 0);
+    bool stamped = false;
+    for (int i = 0; i < nb; i++) stamped = stamped || (busy[i].reqId == 43 && busy[i].sendState == 4);
+    CHECK(stamped, "a busy send (state 4) is stamped and read back");
+  }
+  // A refused send keeps its reason (the ACK status) with the record.
+  espnowUpdateSentDeliveryState(A, 43, 5, 4);
+  {
+    ReceivedTextMessage rf[8];
+    const int nf = getPeerMessages(A, rf, 8, 0);
+    bool kept = false;
+    for (int i = 0; i < nf; i++) kept = kept || (rf[i].reqId == 43 && rf[i].sendState == 5 && rf[i].sendStatus == 4);
+    CHECK(kept, "a refused send (state 5) keeps its status 4 (too large)");
+  }
+  espnowUpdateSentDeliveryState(A, 43, 0);
   espnowUpdateSentDeliveryState(A, 42, 2);
   ReceivedTextMessage out[8];
   int n = getPeerMessages(A, out, 8, 0);
@@ -1409,7 +1456,7 @@ int main(int argc, char** argv) {
     {"alloc_internal", caseAllocInternal}, {"budget", caseBudget}, {"budget_bytes", caseBudgetBytes},
     {"slots_clamp", caseSlotsClamp}, {"view_clamp", caseViewClamp}, {"time_order", caseTimeOrder}, {"install_race", caseInstallRace}, {"install_full", caseInstallFull},
     {"seq_wrap", caseSeqWrap}, {"isolation", caseIsolation}, {"damaged", caseDamaged}, {"names", caseNames},
-    {"intake", caseIntake}, {"paging", casePaging}, {"delivery", caseDelivery},
+    {"intake", caseIntake}, {"paging", casePaging}, {"delivery", caseDelivery}, {"outcome_rows", caseOutcomeRows},
     {"lock_refusal", caseLockRefusal}, {"race", caseRace},
   };
   auto it = kCases.find(which);

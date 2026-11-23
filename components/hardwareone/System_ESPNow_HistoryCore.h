@@ -9,9 +9,13 @@
 // belongs to one peer, and the name is looked up when a record is shown.
 //
 //   header  0 marker 0xA5   1 length   2 type   3 flags   4 piece   5 pieceTotal
-//           6 check   7 zero   8 seq (LE)   12 reqId (LE)   16 timestamp (LE)
-//   flags   bit0 encrypted, bit1 sent, bit2 unattributed, bits3-4 sendState,
-//           bits5-7 zero
+//           6 check   7 status   8 seq (LE)   12 reqId (LE)   16 timestamp (LE)
+//   flags   bit0 encrypted, bit1 sent, bit2 unattributed, bits3-5 sendState,
+//           bits6-7 zero. sendState: a sent record's delivery state
+//           (SendStatusState); a received remote-command result row's outcome
+//           (espnowcmd::Outcome, 1.0 step 6); 0 otherwise.
+//   status  a refused sent record's ACK status (sendState kRefusedState, 1-15:
+//           the reason "Refused: <reason>" names); 0 on every other record.
 //   check   0x5A ^ sum p[i]*(2i+1) mod 256 over bytes 0..19 except 6: odd
 //           weights, so any single changed header byte is detected.
 //
@@ -51,7 +55,7 @@ constexpr uint32_t kMaxFootprint   = footprint(kTextMax);   // 276
 constexpr uint32_t kMinRingBytes   = 1024;
 constexpr uint32_t kMaxRingBytes   = 65536;
 constexpr uint8_t  kTypeMax        = 7;
-constexpr uint8_t  kSendStateMax   = 3;
+constexpr uint8_t  kSendStateMax   = 7;
 constexpr uint8_t  kRecordMarker   = 0xA5;
 constexpr uint8_t  kWrapMarker     = 0x5A;
 constexpr int      kMaxSources     = 32;    // 2 rings x MESH_PEER_MAX (asserted in System_ESPNow.h)
@@ -73,8 +77,10 @@ constexpr uint8_t kFlagEncrypted    = 0x01;
 constexpr uint8_t kFlagSent         = 0x02;
 constexpr uint8_t kFlagUnattributed = 0x04;
 constexpr uint8_t kSendStateShift   = 3;
-constexpr uint8_t kSendStateMask    = 0x18;
-constexpr uint8_t kFlagsReserved    = 0xE0;
+constexpr uint8_t kSendStateMask    = 0x38;
+constexpr uint8_t kFlagsReserved    = 0xC0;
+constexpr uint8_t kRefusedState     = 5;    // SEND_STATUS_REFUSED: the one state with a status byte
+constexpr uint8_t kStatusMax        = 15;   // the shared ACK statuses (espnowanswer)
 
 struct Header {
   uint32_t seq;
@@ -84,7 +90,8 @@ struct Header {
   uint8_t  type;         // LogMessageType
   uint8_t  piece;
   uint8_t  pieceTotal;
-  uint8_t  sendState;    // 0..3
+  uint8_t  sendState;    // 0..7
+  uint8_t  status;       // a refused sent record's ACK status (1-15), else 0
   bool     encrypted;
   bool     sent;         // set by append from the ring; ignored on input
   bool     unattributed;
@@ -119,7 +126,7 @@ inline uint8_t headerCheck(const uint8_t* p) {
   return static_cast<uint8_t>(0x5A ^ (sum & 0xFF));
 }
 
-// Writes 20 bytes incl. the check. sendState is masked to its two bits.
+// Writes 20 bytes incl. the check. sendState is masked to its three bits.
 inline void encodeHeader(const Header& h, uint8_t* p) {
   p[kOffMarker] = kRecordMarker;
   p[kOffLength] = h.length;
@@ -129,20 +136,26 @@ inline void encodeHeader(const Header& h, uint8_t* p) {
                                       ((static_cast<uint32_t>(h.sendState) << kSendStateShift) & kSendStateMask));
   p[kOffPiece] = h.piece;
   p[kOffPieceTotal] = h.pieceTotal;
-  p[kOffZero] = 0;
+  // The status byte is kept only where it means something (a refused sent record).
+  p[kOffZero] = (h.sent && h.sendState == kRefusedState && h.status <= kStatusMax) ? h.status : 0;
   detail::put32(p + kOffSeq, h.seq);
   detail::put32(p + kOffReqId, h.reqId);
   detail::put32(p + kOffTimestamp, h.timestamp);
   p[kOffCheck] = headerCheck(p);
 }
 
-// False unless marker, zero byte, reserved bits, type <= kTypeMax, seq != 0 and check all hold.
+// False unless marker, status byte (0, or 1-15 on a refused sent record), reserved bits, type <= kTypeMax,
+// seq != 0 and check all hold.
 // h is written only on success. Every call counts in decodeCount().
 inline bool decodeHeader(const uint8_t* p, Header& h) {
   ++decodeCount();
-  if (p[kOffMarker] != kRecordMarker || p[kOffZero] != 0) return false;
+  if (p[kOffMarker] != kRecordMarker) return false;
   const uint8_t flags = p[kOffFlags];
   if (flags & kFlagsReserved) return false;
+  // Byte 7 is 0, except the status (1-15) of a refused sent record.
+  const uint8_t st = static_cast<uint8_t>((flags & kSendStateMask) >> kSendStateShift);
+  if (p[kOffZero] != 0 &&
+      !((flags & kFlagSent) && st == kRefusedState && p[kOffZero] <= kStatusMax)) return false;
   if (p[kOffType] > kTypeMax) return false;
   const uint32_t seq = detail::get32(p + kOffSeq);
   if (seq == 0) return false;
@@ -154,7 +167,8 @@ inline bool decodeHeader(const uint8_t* p, Header& h) {
   h.type = p[kOffType];
   h.piece = p[kOffPiece];
   h.pieceTotal = p[kOffPieceTotal];
-  h.sendState = static_cast<uint8_t>((flags & kSendStateMask) >> kSendStateShift);
+  h.sendState = st;
+  h.status = p[kOffZero];
   h.encrypted = (flags & kFlagEncrypted) != 0;
   h.sent = (flags & kFlagSent) != 0;
   h.unattributed = (flags & kFlagUnattributed) != 0;
@@ -535,9 +549,11 @@ inline bool findBySeq(const RingState& r, const uint8_t* buf, uint32_t seq, uint
   return false;
 }
 
-// Stamps sendState on every record with this reqId (DESIGN 3.8): only the flags and check bytes of matching headers
+// Stamps sendState on every record with this reqId (DESIGN 3.8): only the flags, status and check bytes of matching headers
 // change. state > kSendStateMax or reqId == 0 -> 0, nothing written. Returns records changed. *damaged as findBySeq.
-inline int setSendState(RingState& r, uint8_t* buf, uint32_t reqId, uint8_t state, bool* damaged = nullptr) {
+// `status`: the ACK status kept with kRefusedState on a sent record (1-15); 0 (and any other state) clears it.
+inline int setSendState(RingState& r, uint8_t* buf, uint32_t reqId, uint8_t state, bool* damaged = nullptr,
+                        uint8_t status = 0) {
   if (state > kSendStateMax || reqId == 0) return 0;
   if (!stateSane(r)) {
     if (damaged) *damaged = true;
@@ -553,6 +569,7 @@ inline int setSendState(RingState& r, uint8_t* buf, uint32_t reqId, uint8_t stat
     uint8_t* p = buf + off;
     p[kOffFlags] = static_cast<uint8_t>((p[kOffFlags] & ~kSendStateMask) |
                                         ((static_cast<uint32_t>(state) << kSendStateShift) & kSendStateMask));
+    p[kOffZero] = (d.sent && state == kRefusedState && status <= kStatusMax) ? status : 0;
     p[kOffCheck] = headerCheck(p);
     ++changed;
   }

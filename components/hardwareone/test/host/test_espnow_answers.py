@@ -53,6 +53,7 @@ DEFINITIONS = (
     'const char* resultText, uint16_t textLen)',
     'static bool v4_send_cmd_resp_async(const uint8_t* dst, uint32_t reqId, uint8_t status, const char* text)',
     'static bool v4_send_stream_line(const uint8_t* dst, uint32_t reqId, const char* data, size_t len)',
+    'static void v4_send_cmd_result(const uint8_t* dst, uint32_t reqId, const uint8_t* payload, size_t len)',
     'static V4Verdict v4h_cmd_resp(const V4RxCtx& ctx)',
     'static V4Verdict v4h_stream(const V4RxCtx& ctx)',
     'static V4Verdict v4h_cmd(const V4RxCtx& ctx)',
@@ -87,13 +88,15 @@ def handle_cmd_after_auth(source: str) -> str:
 
 def console_rules(source: str) -> list[str]:
     """The requester's console names a failed command's status (CHANGELOG:
-    "Command FAILED (busy)"), from the one status-name table."""
+    "Command FAILED (busy)"), from the one status-name table; a late result says
+    "Result (late)" first (1.0 step 6)."""
     failures = []
-    if 'const char* statusWord = espnowanswer::statusName(ESPNOW_V4_TYPE_CMD_RESP, ' \
-            'gEspNow->deferredCmdRespStatus);' not in source:
+    if 'const char* statusWord = espnowanswer::statusName(ESPNOW_V4_TYPE_CMD_RESP, r.status);' not in source:
         failures.append('the CMD_RESP console line does not name the status from espnowanswer::statusName')
-    if '"[ESP-NOW] Command FAILED (%s) from %s: %s", statusWord,' not in source:
-        failures.append('the console line is no longer "Command FAILED (<status>) from <peer>: <text>"')
+    if '"[ESP-NOW] %sCommand FAILED (%s) from %s: %s", lead, statusWord,' not in source:
+        failures.append('the console line is no longer "[Result (late) ]Command FAILED (<status>) from <peer>: <text>"')
+    if 'const char* lead = late ? "Result (late) " : "";' not in source:
+        failures.append('a late result is not marked "Result (late)" on the console')
     return failures
 
 
@@ -160,7 +163,7 @@ def main() -> int:
                      'System_ESPNow_SensorCore.h',
                      'System_ESPNow_TimeCore.h', 'System_ClockCore.h', 'System_ESPNow_PowerEventCore.h',
                      'System_ESPNow_ForwardCore.h', 'System_ESPNow_AnswerCore.h', 'System_ESPNow_CatchupCore.h',
-                     'System_DeviceName.h'):
+                     'System_DeviceName.h', 'System_ESPNow_RemoteCmdCore.h'):
             shutil.copyfile(path_of(name), d / name)
         unit, exe = d / 'espnow_answers.cpp', d / 'espnow_answers'
         unit.write_text(harness)

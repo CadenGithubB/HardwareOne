@@ -310,7 +310,22 @@ static void noteHook(std::vector<AckHook>& v, const uint8_t* peer, uint32_t ackF
 static void broadcast_tracker_record_ack(uint32_t ackFor, const uint8_t* src) { noteHook(gTrackerAcks, src, ackFor, false); }
 static void sendStatusMarkDelivered(uint32_t ackFor, const uint8_t* src) { noteHook(gDelivered, src, ackFor, true); }
 // A refusal (sealed ACK with a status): the send failed, the session answered.
-static void sendStatusMarkRefused(uint32_t ackFor, const uint8_t* src) { noteHook(gFailedSends, src, ackFor, true); }
+static std::vector<uint8_t> gFailedStatus;
+static void sendStatusMarkRefused(uint32_t ackFor, const uint8_t* src, uint8_t status) {
+  noteHook(gFailedSends, src, ackFor, true);
+  gFailedStatus.push_back(status);
+}
+// The remote-command requester table (1.0 step 6): (peer, ackFor, status, last fragment).
+struct RemoteAck { uint8_t peer[6]; uint32_t ackFor; uint8_t status; bool last; };
+static std::vector<RemoteAck> gRemoteAcks;
+static void remoteCmdOnAck(const uint8_t* peer, uint32_t ackFor, uint8_t status, bool last) {
+  RemoteAck r{};
+  std::memcpy(r.peer, peer, 6);
+  r.ackFor = ackFor;
+  r.status = status;
+  r.last = last;
+  gRemoteAcks.push_back(r);
+}
 static void espnowAppPingNoteAck(const uint8_t* src, uint32_t ackFor, bool sealed) {
   noteHook(gPingAcks, src, ackFor, sealed);
 }
@@ -503,6 +518,8 @@ static void reset(bool keyed) {
   gStubOverrideLeft = 0;
   gStubTakesMs = gHandlerEndMs = 0;
   for (auto* v : {&gTrackerAcks, &gDelivered, &gFailedSends, &gPingAcks, &gFollowAcks}) v->clear();
+  gFailedStatus.clear();
+  gRemoteAcks.clear();
   std::memset(gV4FragAckWait, 0, sizeof gV4FragAckWait);
   reasmTableReset();
   gEspNowRxPlaintextDrops = gEspNowRxAckRefused = gEspNowRxLenDrops = 0;
@@ -1631,14 +1648,28 @@ static void testAckWaiterMatching() {
   check("B's sealed ACK for another fragment does not complete this one", !w->acked);
   deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 507, ackPayload(500, 1, 3), 0, 1, 0));
   check("B's sealed ACK naming (500, fragment 1) completes the waiter with status 0", w->acked && w->status == 0);
+  {
+    // The sealed ACKs reach the remote-command requests under their radio
+    // sender (the table matches the peer); none of fragments 0-1 of 3 is the
+    // last, and the tagged and plaintext ones never get there.
+    bool notLast = true;
+    for (const RemoteAck& r : gRemoteAcks) notLast = notLast && !r.last && r.ackFor == 500;
+    check("sealed ACKs only reach the remote-command requests, by radio sender; fragment 1 of 3 is not the last",
+          gRemoteAcks.size() == 4 && notLast && std::memcmp(gRemoteAcks[0].peer, gPeerC, 6) == 0 &&
+              std::memcmp(gRemoteAcks[3].peer, gPeerB, 6) == 0);
+  }
 
   reset(true);
   w = armWaiter(3, gPeerB, 510, 0, true);
   deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 511, ackPayload(510, 0, 1, espnowanswer::kBusy), 0, 1, 0));
   check("an ACK with a status reaches the waiter with that status (a refusal)",
         w->acked && w->status == espnowanswer::kBusy);
-  check("and marks a tracked send refused (failed, session alive: sendStatusMarkRefused), not delivered",
-        gFailedSends.size() == 1 && gDelivered.empty() && gFailedSends[0].ackFor == 510);
+  check("and marks a tracked send refused with its status (Busy, session alive: sendStatusMarkRefused), not delivered",
+        gFailedSends.size() == 1 && gDelivered.empty() && gFailedSends[0].ackFor == 510 &&
+        gFailedStatus.size() == 1 && gFailedStatus[0] == espnowanswer::kBusy);
+  check("and tells the remote-command requests (1.0 step 6): busy, the whole message",
+        gRemoteAcks.size() == 1 && gRemoteAcks[0].ackFor == 510 && gRemoteAcks[0].status == espnowanswer::kBusy &&
+        gRemoteAcks[0].last && std::memcmp(gRemoteAcks[0].peer, gPeerB, 6) == 0);
 
   reset(true);
   w = armWaiter(1, gPeerB, 520, 0, true);
@@ -1779,10 +1810,14 @@ static void testFragmentVerdicts() {
         calls("v4h_cmd_resp") == 1 && ackIs(lastAck(), 540, 2, 3, 0, ESPNOW_V4_ACK_FLAG_DUPLICATE) &&
         !reasmHolds(540));
 
-  // No free entry: kNoSlot, nothing opened; once an entry frees, the retry is stored.
+  // No free entry (all V4_REASM_MAX = 4 in use, 1.0 step 6): kNoSlot, nothing
+  // opened; once an entry frees, the retry is stored.
   reset(true);
+  static_assert(V4_REASM_MAX == 4, "fills a pool of four");
   deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 550, bytes(200, 1), 0, 2));
   deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 551, bytes(200, 1), 0, 2));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 548, bytes(200, 1), 0, 2));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 549, bytes(200, 1), 0, 2));
   deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD_RESP, gPeerB, 552, bytes(200, 1), 0, 2));
   check("a fragment with every reassembly entry in use is answered kNoSlot and opens none",
         ackIs(lastAck(), 552, 0, 2, espnowanswer::kNoSlot, 0) && !reasmHolds(552));

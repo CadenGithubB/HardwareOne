@@ -366,6 +366,17 @@ target_compile_options(espnow_group_core_tests PRIVATE
 # walk, hostile text with fake headers, findBySeq and stale references, delivery
 # stamps, reassembly and the collapsed views against ports of the old ring code,
 # corrupted ring states, damage met while evicting, and decode budgets.
+# ESP-NOW 1.0 step 6 (README "ESP-NOW remote command results"): the requester
+# table and the CMD_RESP result queue of System_ESPNow_RemoteCmdCore.h, compiled
+# as is: a 16-responder fan-out, ACK outcomes, the 30 s deadline and late
+# results, STREAM extension, retry under a new msgId, the 24 KB ring vs a model.
+add_executable(espnow_remote_cmd_core_tests test_espnow_remote_cmd_core.cpp)
+set_target_properties(espnow_remote_cmd_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_remote_cmd_core_tests PRIVATE ../..)
+target_compile_options(espnow_remote_cmd_core_tests PRIVATE
+  -Wall -Wextra -Werror -pedantic)
+
 add_executable(espnow_history_core_tests test_espnow_history_core.cpp)
 set_target_properties(espnow_history_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
@@ -781,6 +792,10 @@ if(HW1_SANITIZE)
     -fsanitize=address,undefined -g)
   target_link_options(espnow_group_core_tests PRIVATE
     -fsanitize=address,undefined)
+  target_compile_options(espnow_remote_cmd_core_tests PRIVATE
+    -fsanitize=address,undefined -g)
+  target_link_options(espnow_remote_cmd_core_tests PRIVATE
+    -fsanitize=address,undefined)
   target_compile_options(espnow_history_core_tests PRIVATE
     -fsanitize=address,undefined -g)
   target_link_options(espnow_history_core_tests PRIVATE
@@ -1162,6 +1177,19 @@ add_test(
 # ESP-NOW encrypted multi-frame sender (README "ESP-NOW ACK after accept"): the
 # production v4_send_encrypted_chunked against a scripted receiver: Delivered /
 # Refused / NoAnswer / NotSent, the one whole-message retry under a new msgId.
+# ESP-NOW 1.0 step 6 (README "ESP-NOW send words"): the tracked-send table from
+# System_ESPNow_Sessions.cpp (Busy / Refused / No answer), and source rules for
+# the web, OLED and remote-command tracking.
+set(ESPNOW_SEND_WORDS_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_SEND_WORDS_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_send_words
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_send_words.py
+          ${ESPNOW_SEND_WORDS_TEST_ARGS})
+
 set(ESPNOW_CHUNKED_SEND_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
 if(HW1_SANITIZE)
   list(APPEND ESPNOW_CHUNKED_SEND_TEST_ARGS --sanitize)
@@ -1931,6 +1959,7 @@ add_test(NAME espnow_channel_follow_tests COMMAND espnow_channel_follow_tests)
 add_test(NAME espnow_bond_agree_core_tests COMMAND espnow_bond_agree_core_tests)
 add_test(NAME espnow_group_core_tests COMMAND espnow_group_core_tests)
 add_test(NAME espnow_history_core_tests COMMAND espnow_history_core_tests)
+add_test(NAME espnow_remote_cmd_core_tests COMMAND espnow_remote_cmd_core_tests)
 add_test(NAME espnow_history_stress_tests COMMAND espnow_history_stress_tests)
 add_test(NAME espnow_sensor_core_tests COMMAND espnow_sensor_core_tests)
 add_test(NAME espnow_session_caps_core_tests COMMAND espnow_session_caps_core_tests)

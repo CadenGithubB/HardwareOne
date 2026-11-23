@@ -34,6 +34,8 @@ static esp_err_t handleEspNowPage(httpd_req_t* req) {
 #include "System_ESPNow.h"
 #include "System_ESPNow_HistoryNames.h"  // per-request name cache for the history rows
 #include "System_ESPNow_Sessions.h"  // SendStatus snapshot for delivery-tracking JSON
+#include "System_ESPNow_RemoteCmdCore.h"  // espnowcmd::outcomeKey: a remote command row's `result`
+#include "System_ESPNow_AnswerCore.h"     // espnowanswer::statusName: a refused send's `reason`
 #include "System_MemUtil.h"
 
 static inline esp_err_t webEspNowSendChunk(httpd_req_t* req, const char* s) {
@@ -145,11 +147,13 @@ static ReceivedTextMessage* gWebMessagesBuf = nullptr;
  *   "messages": [
  *     {"seq":123,"reqId":7,"piece":1,"of":1,"mac":"XX:XX:XX:XX:XX:XX",
  *      "name":"device","msg":"text","enc":true,"ts":12345,"type":0,
- *      "sent":false,"sendState":1},
+ *      "sent":false,"sendState":0,"result":"late"},
+ *     {... "sent":true,"sendState":5,"reason":"too_large"},
  *     ...
  *   ],
  *   "deliveries": [
  *     {"msgId":42,"state":"delivered","mac":"XX:XX:XX:XX:XX:XX","ageMs":1200},
+ *     {"msgId":43,"state":"refused","mac":"XX:XX:XX:XX:XX:XX","ageMs":900,"reason":"too_large"},
  *     ...
  *   ]
  * }
@@ -287,11 +291,24 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
     // render as a received message.
     err = webEspNowSendChunkf(req, ",\"sent\":%s", msg.isSent ? "true" : "false");
     if (err != ESP_OK) break;
-    // Durable per-message delivery state (0 pending,1 delivered,2 timeout,3 failed)
-    // so sent rows render Delivered even for messages sent from another interface
-    // or after a reload — not only freshly-sent web bubbles via the deliveries[] flip.
-    err = webEspNowSendChunkf(req, ",\"sendState\":%u", msg.sendState);
+    // Durable per-message delivery state of a sent row (SendStatusState: 0 pending
+    // "Sent", 1 delivered, 2 timeout and 3 failed "No answer", 4 "Busy", 5
+    // "Refused") so sent rows render the right word even for messages sent from
+    // another interface or after a reload, not only freshly-sent web bubbles via
+    // the deliveries[] flip. 0 on received rows.
+    err = webEspNowSendChunkf(req, ",\"sendState\":%u", msg.isSent ? msg.sendState : 0);
     if (err != ESP_OK) break;
+    // A refused sent row keeps its reason (the ACK status word), also after a reload.
+    if (msg.isSent && msg.sendState == SEND_STATUS_REFUSED && espnowanswer::sharedStatusName(msg.sendStatus)) {
+      err = webEspNowSendChunkf(req, ",\"reason\":\"%s\"", espnowanswer::sharedStatusName(msg.sendStatus));
+      if (err != ESP_OK) break;
+    }
+    // A received remote command row that is not a plain result (1.0 step 6):
+    // busy, refused, noAnswer, noResult, or late (the result after "No result").
+    if (!msg.isSent && espnowcmd::outcomeKey(msg.sendState)) {
+      err = webEspNowSendChunkf(req, ",\"result\":\"%s\"", espnowcmd::outcomeKey(msg.sendState));
+      if (err != ESP_OK) break;
+    }
 
     err = webEspNowSendChunk(req, "}");
   }
@@ -315,8 +332,8 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
     for (uint8_t i = 0; i < ssSlots && err == ESP_OK; i++) {
       const SendStatus* s = sendStatusAt(i);
       if (!s || !s->inUse) continue;
-      static const char* kStateNames[] = { "pending", "delivered", "timeout", "failed" };
-      const char* stateName = (s->state < 4) ? kStateNames[s->state] : "unknown";
+      static const char* kStateNames[] = { "pending", "delivered", "timeout", "failed", "busy", "refused" };
+      const char* stateName = (s->state < 6) ? kStateNames[s->state] : "unknown";
       char macStr[18];
       macToDisplay(s->peerMac, macStr, sizeof(macStr));
       if (!firstDelivery) {
@@ -325,9 +342,13 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
       }
       firstDelivery = false;
       uint32_t ageMs = nowMs - s->registeredAtMs;
+      // A refusal names its reason (the ACK's status word, 1.0 step 6).
+      const char* reason = s->state == SEND_STATUS_REFUSED
+                               ? espnowanswer::sharedStatusName(s->status) : nullptr;
       err = webEspNowSendChunkf(req,
-        "{\"msgId\":%lu,\"state\":\"%s\",\"mac\":\"%s\",\"ageMs\":%lu}",
-        (unsigned long)s->msgId, stateName, macStr, (unsigned long)ageMs);
+        "{\"msgId\":%lu,\"state\":\"%s\",\"mac\":\"%s\",\"ageMs\":%lu%s%s%s}",
+        (unsigned long)s->msgId, stateName, macStr, (unsigned long)ageMs,
+        reason ? ",\"reason\":\"" : "", reason ? reason : "", reason ? "\"" : "");
     }
     if (err == ESP_OK) err = webEspNowSendChunk(req, "]}");
   }

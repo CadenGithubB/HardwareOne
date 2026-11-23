@@ -225,14 +225,22 @@ def generated(read) -> str:
 def static_checks(read) -> list[str]:
     failures = []
     source = read("System_ESPNow.cpp")
-    start = source.index("// 8. Process deferred CMD_RESP")
-    drain = source[start:source.index("#if ENABLE_BONDED_MODE", start)]
+    # The CMD_RESP drain (ESP-NOW 1.0 step 6: remoteCmdDrain shows each queued
+    # result through remoteCmdShowResult, and each request that ended without
+    # one through remoteCmdShowOutcome).
+    drain = extract_block(source, "static void remoteCmdShowResult(") if \
+        "static void remoteCmdShowResult(" in source else ""
     call = drain.find("espnowPublishCmdResult(")
     if call < 0:
         failures.append("the CMD_RESP drain does not publish espnowPublishCmdResult(...): "
                         "no reader can see the peer's answer")
-    elif "safeDeferredResult.c_str()" not in drain[call:drain.find(";", call)]:
+    elif "safeResult.c_str()" not in drain[call:drain.find(";", call)]:
         failures.append("the CMD_RESP drain publishes something other than the redacted result")
+    outcome = extract_block(source, "static void remoteCmdShowOutcome(") if \
+        "static void remoteCmdShowOutcome(" in source else ""
+    if "espnowPublishCmdResult(mac, e.reqId, false, text);" not in outcome:
+        failures.append("a remote command that ends Busy / Refused / No answer / No result is not published: "
+                        "the OLED editor would wait for an answer that never comes")
     bonded_source = read("System_BondedPeer.cpp")
     if "bool beginSchemaSync(" in bonded_source and \
             "beginSchemaSync()" not in extract_block(bonded_source, "bool requestSchemaSync("):

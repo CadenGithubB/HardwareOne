@@ -842,8 +842,34 @@ acted on (for a fragment of a long message: once the fragment is stored). A fram
 answered with the reason instead: busy, no free slot, too large, not supported by this build, or
 malformed; a paired device that sent a frame over its session that this device does not take from it
 (for example a bond frame from a device that is not its bond partner) is told "refused", and any other
-sender gets no answer. A sender shows Delivered only for an accepted message and Failed for a refused
-one; a long message or command result that meets busy or no slot is sent once more after a short pause.
+sender gets no answer. A long message or command result that meets busy or no slot is sent once more
+after a short pause.
+
+Every surface (the web page's chat bubbles, the OLED conversation, the message history and
+`espnowmessages json`, the console) uses one word per meaning for what became of a message:
+
+| Word | Meaning |
+|---|---|
+| Sent | handed to the radio; the answer is still to come |
+| Delivered | the other device accepted it into its queue |
+| Busy | the other device could not take it now (full inbox, a command already waiting, no room for a long message); send it again later |
+| Refused: `<reason>` | the other device will not take it (too large, not supported, not allowed for this sender) |
+| No answer | no reply within 10 s (device off, out of range, or a session that never opened) |
+| No result | a remote command was accepted, but its result did not come within 30 s |
+| Result (late) | a result that arrived after "No result" was shown |
+
+**Remote commands** (`espnowremote`, `espnowbrowse`, `espnowfetch`, `espnowroomcmd`, `espnowtagcmd`, the
+bond `remote:` commands and `espnowusersync`) end in exactly one result per device, shown in that
+device's conversation: the command's own result, or a line that starts with Busy, Refused, No answer or
+No result. A device runs one remote command at a time and keeps one more waiting; a further one is
+answered Busy at once and is not run (send it again when the first is done). The 30 s for a result count
+from when the device accepted the command; each line of output it streams back gives it 30 s more. A
+result that still comes later is shown as "Result (late)"; one that comes more than 5 minutes after "No
+result", or for a command this device did not send, is only logged. Up to 16 remote commands can
+wait for their results at once (one room command to 16 devices); received results wait in a 24 KB queue
+until they are shown, and a device whose queue is full answers Busy, so the other device sends the
+result once more a moment later. `espnowholdresult <seconds>` (bench test, RAM only) holds every
+received result that long before it is shown, to see "No result" and then "Result (late)".
 An answer of any kind shows that the session works: only sends that get no answer at all (two in a row)
 make a device re-open the session. A copy of a frame that was already taken (because its
 acknowledgement was lost) is acknowledged again and not processed twice. Handshake frames ask for no
@@ -1499,7 +1525,8 @@ espnowbroadcast <message>       - Broadcast to the whole mesh (flooded, up to th
 espnowsendfile <name_or_mac> "<path>"      - Send a file to a peer
 espnowbrowse <name_or_mac> <user> <pass> ["path"]  - Browse remote filesystem
 espnowfetch <name_or_mac> <user> <pass> "<path>"   - Fetch a file from a peer
-espnowremote <name_or_mac> <user> <pass> <cmd>   - Execute command on peer
+espnowremote <name_or_mac> <user> <pass> <cmd>   - Execute command on peer (one result: its output, Busy, Refused, No answer or No result)
+espnowholdresult <seconds|off>  - Bench test: hold each received command result that long (RAM only)
 
 --- Mesh ---
 espnowmode [direct|mesh]        - Get/set routing mode

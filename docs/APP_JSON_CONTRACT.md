@@ -123,6 +123,16 @@ entry "Command replies" under Unreleased states what changed.
    (sec. 4), `encoderstatus <n> json` adds `"instance":n`, and `ledstatus json` lists each
    board 2-4 that has an address as one more `lights` object with `"target":"encoder<n>"`
    and `"instance":n`. Board 1's objects are byte-identical, with no `instance` key.
+17. **ESP-NOW remote command results (1.0 step 6, 2026-11-23)** - every remote command
+   (`espnowremote`, `espnowbrowse`, `espnowfetch`, `espnowroomcmd`/`espnowtagcmd` per device,
+   bond `remote:`, `espnowusersync`) ends in exactly one received row under its `reqId` in
+   `espnowmessages json` / `GET /api/espnow/messages`: its output, or a row whose new `result`
+   key is `busy`, `refused`, `noAnswer` or `noResult` (the text starts with Busy, Refused, No
+   answer or No result); a result after `noResult` keeps its text and has `"result":"late"`.
+   A busy peer no longer sends a "Error: Device busy ..." result; the busy answer is a `result`
+   `busy` row in that peer's history, written by this device. `sendState` on sent
+   rows gains 4 (busy) and 5 (refused, with `reason`) and is 0 on received rows; the web `deliveries` snapshot
+   names `busy` and `refused` (with `reason`). See sec. 5.
 
 ---
 
@@ -226,6 +236,7 @@ removed `espnowenabled` switch. `running` says whether ESP-NOW runs now.
 | `espnowrouterstats` | `{"schema":1,"messagesSent","messagesReceived","messagesFailed","v4FragTx","v4FragRx","reassembled","reassemblyGc","reassemblyTimeouts","nextMessageId"}` |
 | `espnowidentity` | `{"schema":1,"valid","mac","pub","createdAtSec","regenCount"}` |
 | `espnowmeshmetrics` | `{"schema":1,"mode","activePeers","ttl","adaptiveTtl"}` |
+| `espnowmessages json [sinceSeq] [mac]` (admin) | `{"schema":1,"messages":[{"seq","reqId","piece","of","mac","name","msg","enc","ts","type","sent","sendState","reason"?,"result"?}]}`, at most 8 rows per page, oldest first. `type`: 0 chat, 1-5 file events, 6 a remote command's output (`MSG_CMD_RESULT`), 7 a system notice. `sendState` (sent rows; 0 on received rows): 0 sent (waiting for the answer), 1 delivered, 2 no answer (no ACK in 10 s), 3 no answer (the session never opened), 4 busy, 5 refused (1.0 step 6 added 4 and 5; 3 was "failed"). `reason` (sent rows with `sendState` 5 only): the refusal's status word (`too_large`, `unsupported`, `refused`, `bad_request`, ...), kept with the record so "Refused: <reason>" survives a reload. `result` (received `type` 6 rows only, 1.0 step 6): `busy`, `refused`, `noAnswer`, `noResult` for a remote command that ended without output (the row's text starts with Busy, Refused, No answer or No result and names the device), `late` for output that came after a `noResult` row (text unchanged, so a JSON listing still parses); absent on an ordinary result. Each remote command (`reqId` = the request's msgId from the command's reply) ends in exactly one such result per device; long output comes in `piece`/`of` rows that share the `reqId`, and STREAM lines may come before it as single rows. `GET /api/espnow/messages?since=&mac=` gives the same rows (plus `deliveries`: `[{"msgId","state","mac","ageMs","reason"?}]`, `state` `pending`, `delivered`, `timeout`, `failed`, `busy` or `refused`, `reason` the status word of a refusal such as `too_large`) |
 | `ring status` | `{"schema":1,"connected","name","mtu","rx","upMs","scanFound"}` (no address) |
 | `espnowmeshstatus` / `espnowlist` / `espnowstats` | already JSON (pre-existing). `espnowstats json` adds `rxLengthDrops`, `rxMustUnderstandDrops`, `rxRevokedDrops` (frames from a revoked radio source or relayed from a revoked origin), `rxPlaintextDrops` (frames neither sealed nor group-signed that are not handshake frames), `rxAckRefused` (acknowledgements from the wrong device or in the wrong class), `txAckDropped` (acknowledgements not sent: queue full), `rxUnknownMeshIdDrops` and, once it is nonzero, `rxUnknownMeshIdLast` (the last mesh id dropped) and `rxUnknownMeshIdLastMac` |
 
