@@ -203,11 +203,24 @@ static bool sendPendingRequest(uint32_t reqId, const uint8_t peerMac[6], uint8_t
   return sent;
 }
 
+// A path that does not fit the request's 128-byte field is refused here, never
+// cut (a cut path names another file or folder; 1.0 step 9, F7).
+static bool fsRequestPathFits(const char* path, const char* opName) {
+  if (strlen(path) < sizeof(V4PayloadFsListReq::path)) return true;
+  WARN_ESPNOWF("[FSLIST] %s refused: the path is longer than %u bytes", opName,
+               (unsigned)(sizeof(V4PayloadFsListReq::path) - 1));
+  return false;
+}
+static_assert(sizeof(V4PayloadFsListReq::path) == sizeof(V4PayloadFsStatReq::path) &&
+              sizeof(V4PayloadFsListReq::path) == sizeof(V4PayloadFsGetReq::path),
+              "one path field size for every FS request");
+
 uint32_t fsListSendRequest(const uint8_t peerMac[6],
                            const char* path,
                            uint16_t startIndex,
                            FsListReplyCallback callback) {
   if (!peerMac || !path || !callback) return 0;
+  if (!fsRequestPathFits(path, "LIST")) return 0;
 
   fsListInit();
   FsRpcCallback cb;
@@ -233,6 +246,7 @@ uint32_t fsStatSendRequest(const uint8_t peerMac[6],
                            const char* path,
                            FsStatReplyCallback callback) {
   if (!peerMac || !path || !callback) return 0;
+  if (!fsRequestPathFits(path, "STAT")) return 0;
 
   fsListInit();
   FsRpcCallback cb;
@@ -256,6 +270,7 @@ uint32_t fsGetSendRequest(const uint8_t peerMac[6],
                           const char* path,
                           FsGetAckCallback callback) {
   if (!peerMac || !path || !callback) return 0;
+  if (!fsRequestPathFits(path, "GET")) return 0;
 
   fsListInit();
   FsRpcCallback cb;
@@ -299,7 +314,7 @@ static void fsWireRead(T& out, const uint8_t* payload, uint16_t payloadLen) {
 void fsListOnReplyReceived(const uint8_t srcMac[6],
                            const uint8_t* payload, uint16_t payloadLen) {
   // Validate the structure: header followed by entryCount entries.
-  V4PayloadFsListReplyHeader hdr;
+  V4PayloadFsListRespHeader hdr;
   fsWireRead(hdr, payload, payloadLen);
   uint16_t expectedLen = sizeof(hdr) + (uint16_t)hdr.entryCount * sizeof(V4PayloadFsEntry);
   if (payloadLen < expectedLen) {
@@ -312,14 +327,6 @@ void fsListOnReplyReceived(const uint8_t srcMac[6],
                  hdr.reqId, hdr.entryCount, FS_LIST_ENTRIES_PER_REPLY);
     hdr.entryCount = FS_LIST_ENTRIES_PER_REPLY;
   }
-
-  // The entries are handed to the callback where they lie in the frame:
-  // V4PayloadFsEntry is packed (alignment 1), so any offset is a valid one.
-  static_assert(alignof(V4PayloadFsEntry) == 1, "FS entries are read in place");
-  const V4PayloadFsEntry* entries =
-      (hdr.entryCount > 0)
-          ? reinterpret_cast<const V4PayloadFsEntry*>(payload + sizeof(hdr))  // wire-read: packed, counted above
-          : nullptr;
 
   // Snapshot callback + clear slot under lock so we can fire callback without
   // holding the mutex (callback may want to call fsListSendRequest again,
@@ -337,14 +344,33 @@ void fsListOnReplyReceived(const uint8_t srcMac[6],
     // Defensive: only fire if the slot's op matches what we're handling. A
     // reqId collision between LIST and STAT/GET shouldn't happen (single
     // counter) but if it ever did we'd crash on type-punning.
-    if (sPending[slot].op != FS_OP_LIST) return;
-    cb = sPending[slot].cb.list;
-    sPending[slot].reqId = 0;
+    if (sPending[slot].op == FS_OP_LIST) {
+      cb = sPending[slot].cb.list;
+      sPending[slot].reqId = 0;
+    }
   }
 
-  if (cb) {
-    cb(srcMac, &hdr, entries);
+  // The entries are copied out of the frame (one parse style, no pointer cast
+  // onto the payload; 1.0 step 9) into a PSRAM array the callback reads. Up to
+  // 32 x 76 bytes: never on espnow_task's stack.
+  if (!cb) return;
+  V4PayloadFsEntry* entries = nullptr;
+  if (hdr.entryCount > 0) {
+    const size_t bytes = (size_t)hdr.entryCount * sizeof(V4PayloadFsEntry);
+    entries = static_cast<V4PayloadFsEntry*>(ps_alloc(bytes, AllocPref::PreferPsram, "espnow.fslist.entries"));
+    if (entries) {
+      memcpy(entries, payload + sizeof(hdr), bytes);
+    } else {
+      // The request still ends, as a failure the caller shows, not a silence.
+      ERROR_MEMORYF("[FSLIST] REPLY reqId=%u: no memory for %u entries", hdr.reqId, hdr.entryCount);
+      hdr.status = FS_LIST_STATUS_NOT_READY;
+      hdr.entryCount = 0;
+      hdr.hasMore = 0;
+    }
   }
+
+  cb(srcMac, &hdr, entries);
+  free(entries);
 }
 
 // ============================================================================
@@ -360,29 +386,29 @@ static void sendBusyReply(uint8_t op, const uint8_t srcMac[6],
   uint32_t msgId = generateMessageId();
   switch (op) {
     case FS_OP_LIST: {
-      V4PayloadFsListReplyHeader busy = {};
+      V4PayloadFsListRespHeader busy = {};
       memcpy(&busy.reqId, payload, sizeof(busy.reqId));
       busy.status = FS_LIST_STATUS_TOO_BUSY;
       // Step 3c: espnow_task RX-handler context — fire-and-forget.
-      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_FS_LIST_REPLY, 0, msgId,
+      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_FS_LIST_RESP, 0, msgId,
                          (const uint8_t*)&busy, sizeof(busy), 1);
       break;
     }
     case FS_OP_STAT: {
-      V4PayloadFsStatReply busy = {};
+      V4PayloadFsStatResp busy = {};
       memcpy(&busy.reqId, payload, sizeof(busy.reqId));
       busy.status = FS_LIST_STATUS_TOO_BUSY;
       // Step 3c: espnow_task RX-handler context — fire-and-forget.
-      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_FS_STAT_REPLY, 0, msgId,
+      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_FS_STAT_RESP, 0, msgId,
                          (const uint8_t*)&busy, sizeof(busy), 1);
       break;
     }
     case FS_OP_GET: {
-      V4PayloadFsGetAck busy = {};
+      V4PayloadFsGetResp busy = {};
       memcpy(&busy.reqId, payload, sizeof(busy.reqId));
       busy.status = FS_LIST_STATUS_TOO_BUSY;
       // Step 3c: espnow_task RX-handler context — fire-and-forget.
-      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_FS_GET_ACK, 0, msgId,
+      espnowtx::sendAead(srcMac, ESPNOW_V4_TYPE_FS_GET_RESP, 0, msgId,
                          (const uint8_t*)&busy, sizeof(busy), 1);
       break;
     }
@@ -519,7 +545,7 @@ void fsGetOnRequestReceived(const uint8_t srcMac[6],
 
 void fsStatOnReplyReceived(const uint8_t srcMac[6],
                            const uint8_t* payload, uint16_t payloadLen) {
-  V4PayloadFsStatReply reply;
+  V4PayloadFsStatResp reply;
   fsWireRead(reply, payload, payloadLen);
 
   FsStatReplyCallback cb = nullptr;
@@ -536,7 +562,7 @@ void fsStatOnReplyReceived(const uint8_t srcMac[6],
 
 void fsGetOnAckReceived(const uint8_t srcMac[6],
                         const uint8_t* payload, uint16_t payloadLen) {
-  V4PayloadFsGetAck ack;
+  V4PayloadFsGetResp ack;
   fsWireRead(ack, payload, payloadLen);
 
   FsGetAckCallback cb = nullptr;
@@ -653,26 +679,26 @@ static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListRe
   // either way the allocation is off-task-stack. On alloc failure we send
   // a NOT_READY reply via a tiny on-stack header (acceptable — header alone
   // is ~140 B, no entry array needed for an error reply).
-  const size_t kReplyBufSize = sizeof(V4PayloadFsListReplyHeader)
+  const size_t kReplyBufSize = sizeof(V4PayloadFsListRespHeader)
                              + FS_LIST_ENTRIES_PER_REPLY * sizeof(V4PayloadFsEntry);
   uint8_t* replyBuf = (uint8_t*)ps_alloc(kReplyBufSize, AllocPref::PreferPsram,
                                          "fslist.reply");
   if (!replyBuf) {
     ERROR_MEMORYF("[FSLIST] ps_alloc(%zu) failed — sending NOT_READY for reqId=%u",
                   kReplyBufSize, req.reqId);
-    V4PayloadFsListReplyHeader errHdr = {};
+    V4PayloadFsListRespHeader errHdr = {};
     errHdr.reqId  = req.reqId;
     errHdr.status = FS_LIST_STATUS_NOT_READY;
     strlcpy(errHdr.path, req.path, sizeof(errHdr.path));
     uint32_t errMsgId = generateMessageId();
     // Step 3c: cmd_exec context (deferred handler).
-    espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_LIST_REPLY, 0, errMsgId,
+    espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_LIST_RESP, 0, errMsgId,
                            (const uint8_t*)&errHdr, sizeof(errHdr), 1, 2000);
     return;
   }
-  V4PayloadFsListReplyHeader* hdr = (V4PayloadFsListReplyHeader*)replyBuf;
+  V4PayloadFsListRespHeader* hdr = (V4PayloadFsListRespHeader*)replyBuf;
   V4PayloadFsEntry* entries =
-      (V4PayloadFsEntry*)(replyBuf + sizeof(V4PayloadFsListReplyHeader));
+      (V4PayloadFsEntry*)(replyBuf + sizeof(V4PayloadFsListRespHeader));
   AuthContext peerCtx{};
   const bool served = fsRpcRequesterIdentity(srcMac, peerCtx);
 
@@ -760,14 +786,14 @@ static void processListDeferred(const uint8_t srcMac[6], const V4PayloadFsListRe
   }
 
 send_reply: ;
-  uint16_t payloadLen = sizeof(V4PayloadFsListReplyHeader)
+  uint16_t payloadLen = sizeof(V4PayloadFsListRespHeader)
                       + (uint16_t)hdr->entryCount * sizeof(V4PayloadFsEntry);
   uint32_t msgId = generateMessageId();
   // Step 3c: cmd_exec context (deferred handler). The 3000 ms bound covers a
   // single-frame send only. A REPLY with a full entry list is 2572 B (140 B
   // header + 32 × 76 B), so it fragments (13 fragments at 200 B each) and runs
   // its fragment/ACK loop here on cmd_exec (System_ESPNow_Tx.h, MULTI-FRAME).
-  bool sent = espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_LIST_REPLY, 0, msgId,
+  bool sent = espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_LIST_RESP, 0, msgId,
                                      replyBuf, payloadLen, 1, 3000);
   DEBUG_ESPNOWF("[FSLIST] Sent LIST REPLY reqId=%u status=%u entries=%u/%u hasMore=%u sent=%d",
                 hdr->reqId, hdr->status, hdr->entryCount, hdr->totalEntries,
@@ -789,7 +815,7 @@ send_reply: ;
 // the wire payload.
 
 static void processStatDeferred(const uint8_t srcMac[6], const V4PayloadFsStatReq& req) {
-  V4PayloadFsStatReply reply = {};
+  V4PayloadFsStatResp reply = {};
   reply.reqId = req.reqId;
   strlcpy(reply.path, req.path, sizeof(reply.path));
   AuthContext peerCtx{};
@@ -835,7 +861,7 @@ static void processStatDeferred(const uint8_t srcMac[6], const V4PayloadFsStatRe
 send_stat: ;
   uint32_t msgId = generateMessageId();
   // Step 3c: cmd_exec context (deferred handler).
-  bool sent = espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_STAT_REPLY, 0, msgId,
+  bool sent = espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_STAT_RESP, 0, msgId,
                                      (const uint8_t*)&reply, sizeof(reply), 1, 2000);
   DEBUG_ESPNOWF("[FSLIST] Sent STAT REPLY reqId=%u status=%u used=%llu/%llu pct=%u sent=%d",
                 reply.reqId, reply.status,
@@ -853,7 +879,7 @@ send_stat: ;
 // receive path (System_ESPNow_Files).
 
 static void processGetDeferred(const uint8_t srcMac[6], const V4PayloadFsGetReq& req) {
-  V4PayloadFsGetAck ack = {};
+  V4PayloadFsGetResp ack = {};
   ack.reqId = req.reqId;
   strlcpy(ack.path, req.path, sizeof(ack.path));
   AuthContext peerCtx{};
@@ -919,7 +945,7 @@ static void processGetDeferred(const uint8_t srcMac[6], const V4PayloadFsGetReq&
 send_ack: ;
   uint32_t msgId = generateMessageId();
   // Step 3c: cmd_exec context (deferred handler).
-  espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_GET_ACK, 0, msgId,
+  espnowtx::sendAeadSync(srcMac, ESPNOW_V4_TYPE_FS_GET_RESP, 0, msgId,
                          (const uint8_t*)&ack, sizeof(ack), 1, 2000);
   DEBUG_ESPNOWF("[FSLIST] Sent GET ACK reqId=%u status=%u fileSize=%u",
                 ack.reqId, ack.status, ack.fileSize);
@@ -987,17 +1013,17 @@ void fsListTick() {
 
     xSemaphoreGive(sMutex);
     if (listCb) {
-      V4PayloadFsListReplyHeader err = {};
+      V4PayloadFsListRespHeader err = {};
       err.reqId = expReqId;
       err.status = FS_LIST_STATUS_IO_ERROR;
       listCb(expMac, &err, nullptr);
     } else if (statCb) {
-      V4PayloadFsStatReply err = {};
+      V4PayloadFsStatResp err = {};
       err.reqId = expReqId;
       err.status = FS_LIST_STATUS_IO_ERROR;
       statCb(expMac, &err);
     } else if (getCb) {
-      V4PayloadFsGetAck err = {};
+      V4PayloadFsGetResp err = {};
       err.reqId = expReqId;
       err.status = FS_LIST_STATUS_IO_ERROR;
       getCb(expMac, &err);

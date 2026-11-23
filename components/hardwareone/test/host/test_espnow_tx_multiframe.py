@@ -126,7 +126,7 @@ def stream_target_contract(read) -> list[str]:
         failures.append("System_CommandTypes.h: CommandContext.origin / .id or ORIGIN_ESPNOW changed "
                         "(the harness mirrors them)")
     handle = extract_block(espnow, "static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, "
-                                   "uint32_t msgId, const char* cmdPayload")
+                                   "uint32_t msgId, const uint8_t* payload")
     if not ("cmd.ctx.origin = ORIGIN_ESPNOW;" in handle and "cmd.ctx.id = msgId;" in handle):
         failures.append("v4_handle_cmd no longer queues origin ORIGIN_ESPNOW with ctx.id = msgId")
     if "submitCommandAsync(" not in handle:

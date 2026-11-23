@@ -156,6 +156,12 @@ entry "Command replies" under Unreleased states what changed.
    `type` 7 history row `Online (boot #N)` only for a real restart, once the peer's first sealed
    heartbeat after it shows the new count (the BOOT frame is gone; the text is unchanged).
    `espnowbroadcaststats` is removed (text-only before). See sec. 5.
+20. **ESP-NOW remaining wire and names (1.0 step 9, 2026-11-23)** - `espnowidentity json`:
+   `createdAtSec` is **renamed** `createdEpochMs` (milliseconds). `bondforward json` target
+   `result`: `withdrawn` no longer appears (a done withdrawal answers 0, ok). `espnowlist json`
+   device rows keep `encrypted`, now always `true` (every paired device's frames are sealed;
+   devices.json no longer stores it). Remote commands and `usersync` accept a password that
+   contains `:` (no JSON change). See sec. 5.
 
 ---
 
@@ -257,7 +263,7 @@ removed `espnowenabled` switch. `running` says whether ESP-NOW runs now.
 | `espnowsessions` | `{"schema":1,"selfCaps":[...],"sessions":[{"slot","mac","meshId","sessionId","dir","state","ageMs","txSeq","rxHwm","caps"?,"capsWord"?}],"more"?}` - `meshId` is the mesh slot index. `selfCaps` / `caps`: the names of the capability bits set in this device's / the peer's session word (`bond`, `remote_fs`, `file_receive`, `sensor_send`, `collect`, `relay_forward`, `time_master`, `session_unknown`, and the 1.x names `backlog_serve`, `files_serve`, which a 1.0 build never sets but shows when a peer does; a bit with no name is left out of the list and kept in `capsWord`); `caps` and `capsWord` (the whole 32-bit word, reserved bits included) only for an ACTIVE or REKEY session. `more`?: present only when the list did not fit the reply (about 13 sessions with every capability set); the number of sessions left out at the end |
 | `espnowrevoked json` (admin) | `{"schema":1,"locked","max","revoked":[{"name","mac","keyId","meshSlot","revokedEpochMs"}],"identities":[{"mac","name","keyId","meshSlot","inDeviceList"}]}` - `locked`: revoked.json is there but cannot be read (new keys and pairing are refused). `keyId`: the first 16 hex digits of the key, `null` for a device revoked by address with no stored key. `revokedEpochMs`: UTC epoch ms, `null` when the clock was not set. `identities`: every peer key stored on this device; `name` is `""` and `inDeviceList` false for one whose device is not in the device list. A reply that does not fit is `{"schema":1,"ok":false,"error":"too large"}` |
 | `espnowrouterstats` | `{"schema":1,"messagesSent","messagesReceived","messagesFailed","v4FragTx","v4FragRx","reassembled","reassemblyGc","reassemblyTimeouts","nextMessageId"}` |
-| `espnowidentity` | `{"schema":1,"valid","mac","pub","createdAtSec","regenCount"}` |
+| `espnowidentity` | `{"schema":1,"valid","mac","pub","createdEpochMs","regenCount"}` (`createdEpochMs`: epoch milliseconds, 0 when the clock was not set; was `createdAtSec`, 1.0 step 9) |
 | `espnowmeshmetrics` | `{"schema":1,"mode","activePeers","ttl","adaptiveTtl"}` |
 | `espnowmessages json [sinceSeq] [mac]` (admin) | `{"schema":1,"messages":[{"seq","reqId","piece","of","mac","name","msg","enc","ts","type","sent","sendState","reason"?,"result"?}]}`, at most 8 rows per page, oldest first. `type`: 0 chat, 1-5 file events, 6 a remote command's output (`MSG_CMD_RESULT`), 7 a system notice. `sendState` (sent rows; 0 on received rows): 0 sent (waiting for the answer), 1 delivered, 2 no answer (no ACK in 10 s), 3 no answer (the session never opened), 4 busy, 5 refused (1.0 step 6 added 4 and 5; 3 was "failed"). `reason` (sent rows with `sendState` 5 only): the refusal's status word (`too_large`, `unsupported`, `refused`, `bad_request`, ...), kept with the record so "Refused: <reason>" survives a reload. `result` (received `type` 6 rows only, 1.0 step 6): `busy`, `refused`, `noAnswer`, `noResult` for a remote command that ended without output (the row's text starts with Busy, Refused, No answer or No result and names the device), `late` for output that came after a `noResult` row (text unchanged, so a JSON listing still parses); absent on an ordinary result. Each remote command (`reqId` = the request's msgId from the command's reply) ends in exactly one such result per device; long output comes in `piece`/`of` rows that share the `reqId`, and STREAM lines may come before it as single rows. `GET /api/espnow/messages?since=&mac=` gives the same rows (plus `deliveries`: `[{"msgId","state","mac","ageMs","reason"?}]`, `state` `pending`, `delivered`, `timeout`, `failed`, `busy` or `refused`, `reason` the status word of a refusal such as `too_large`) |
 | `ring status` | `{"schema":1,"connected","name","mtu","rx","upMs","scanFound"}` (no address) |
@@ -534,7 +540,7 @@ identified by its address **and** the device that forwarded it:
   link), `partner` (`{"mac","name"}` or `null`), `targets` (per named master: `kind`
   `primary`/`backup`, `mac`, `name`, `isPartner`, `inPrimaryMesh` (`false`: paired in another mesh
   than this device's primary one, so it gets nothing), `state` `idle`/`announcing`/`accepted`/`refused`,
-  `result` (`null` or the master's last answer: `accepted`, `withdrawn`, `not_receiver`,
+  `result` (`null` or the master's last answer: `accepted`, `not_receiver`,
   `bad_partner`, `key_mismatch`, `full`, `stale`, `name_taken`, `refused`), `streams`, `session`),
   `forwarded` (`readings`, `battery`, `events`), `notForwarded` (per stream a count per reason: the
   `whyNot` keys and `target_is_partner`, `no_session`, `not_accepted`, `refused`, `queue_full`,

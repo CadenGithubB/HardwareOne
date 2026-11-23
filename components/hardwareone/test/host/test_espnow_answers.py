@@ -63,7 +63,7 @@ DEFINITIONS = (
     'static V4Verdict v4h_topo_peer(const V4RxCtx& ctx)',
 )
 HANDLE_CMD = ('static void v4_handle_cmd(const uint8_t* srcMac, const char* deviceName, uint32_t msgId, '
-              'const char* cmdPayload, bool wasSessionEncrypted)')
+              'const uint8_t* payload, size_t payloadLen, bool wasSessionEncrypted)')
 AUTH_DECISION = 'if (!authOk) return;'
 
 
@@ -162,7 +162,7 @@ def main() -> int:
         for name in ('System_ESPNow_Wire.h', 'System_ESPNow_RxCtx.h', 'System_ESPNow_Verdict.h',
                      'System_ESPNow_SensorCore.h',
                      'System_ESPNow_TimeCore.h', 'System_ClockCore.h', 'System_ESPNow_PowerEventCore.h',
-                     'System_ESPNow_ForwardCore.h', 'System_ESPNow_AnswerCore.h', 'System_ESPNow_CatchupCore.h',
+                     'System_ESPNow_ForwardCore.h', 'System_ESPNow_AnswerCore.h', 'System_ESPNow_CatchupCore.h', 'System_ESPNow_CredentialCore.h',
                      'System_DeviceName.h', 'System_ESPNow_RemoteCmdCore.h'):
             shutil.copyfile(path_of(name), d / name)
         unit, exe = d / 'espnow_answers.cpp', d / 'espnow_answers'

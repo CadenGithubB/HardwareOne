@@ -111,7 +111,7 @@ static constexpr uint8_t ESPNOW_V4_TYPE_BOND_SENSOR_DATA = 179;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_POWER_STATUS = 180;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_EVENT_PUSH = 182;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_SENSOR_STATUS = 185;
-static constexpr uint8_t ESPNOW_V4_TYPE_MANIFEST_REQ = 172;
+static constexpr uint8_t ESPNOW_V4_TYPE_BOND_MANIFEST_REQ = 172;
 static constexpr uint16_t ESPNOW_V4_FLAG_ACK_REQ = 0x0001;
 
 // Our address and the partner's.
@@ -1019,7 +1019,7 @@ static void caseBondRequestReply() {
   // bondresync again: the queue is full, the request is refused, not "queued".
   const uint32_t fifth = ++gMsgId;
   queued = true;
-  const bool fifthOk = bondSendRequestForReply(kPartner, ESPNOW_V4_TYPE_MANIFEST_REQ, fifth, &queued);
+  const bool fifthOk = bondSendRequestForReply(kPartner, ESPNOW_V4_TYPE_BOND_MANIFEST_REQ, fifth, &queued);
   CHECK(!fifthOk && !queued && gFailedIds == (std::vector<uint32_t>{fifth}),
         "a bond request the full waiting queue refused was answered as taken (ok=%d queued=%d)", fifthOk, queued);
   // The session is up: the request goes out and is answered "sent".

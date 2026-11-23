@@ -45,7 +45,7 @@ FEED_FIXED = ('  const V4ReasmOutcome o = v4_reasm_accept(&ri, &h, p, n);\n'
 # falling through = complete with payload/payloadLen pointing at the entry.
 FEED_INLINE = ('  if (v4_reasm_accept_inline(&ri, &h, p, n)) return {false, nullptr, 0, -1};\n'
                '  return {true, p, n, -1};')
-OPCODES = ('ACK', 'CMD_RESP', 'TEXT', 'FS_LIST_REPLY')
+OPCODES = ('ACK', 'CMD_RESP', 'TEXT', 'FS_LIST_RESP')
 CONSTANTS = re.compile(r'^#define V4_(MAX_FRAGMENT_PAYLOAD|FRAG_MAX|REASM_MAX_MSG|REASM_MAX|REASM_TIMEOUT_MS)\b.*$',
                        re.MULTILINE)
 

@@ -226,8 +226,6 @@ class EspNowInlineText {
 struct EspNowDevice {
   uint8_t mac[6];
   EspNowInlineText<32> name;
-  bool encrypted;        // Whether this device uses encryption
-  uint8_t key[16];       // Per-device encryption key
   EspNowInlineText<48> friendlyName;  // Cached from mesh peer metadata
   EspNowInlineText<32> room;          // Cached from mesh peer metadata
   EspNowInlineText<32> zone;          // Cached from mesh peer metadata
@@ -960,10 +958,11 @@ struct EspNowState {
   bool deferredCmdPending;
   uint8_t deferredCmdSrcMac[6];
   char deferredCmdDeviceName[32];
-  char deferredCmdPayload[256];
+  char deferredCmdPayload[256];  // the CMD payload (credential block + command, E29), then a NUL
+  uint16_t deferredCmdPayloadLen;
   uint32_t deferredCmdMsgId;
   bool deferredCmdWasEncrypted;  // true if the CMD arrived AEAD-wrapped (SESSION_FRAME).
-                                 // Bond (@BOND token) commands REQUIRE this — see v4_handle_cmd.
+                                 // Every remote command REQUIRES this — see v4_handle_cmd.
 
   // Constructor
   EspNowState() : 
@@ -1058,6 +1057,7 @@ struct EspNowState {
     streamQueueHead(0),
     streamQueueTail(0),
     deferredCmdPending(false),
+    deferredCmdPayloadLen(0),
     deferredCmdMsgId(0),
     deferredCmdWasEncrypted(false)
   {
@@ -1217,7 +1217,7 @@ const char* cmd_espnow_send(const String& argsInput);
 extern EspNowState* gEspNow;
 
 
-// Bond schema sync — sends ESPNOW_V4_TYPE_SCHEMA_REQ to the bonded peer. The
+// Bond schema sync — sends ESPNOW_V4_TYPE_BOND_SCHEMA_REQ to the bonded peer. The
 // worker responds with the schema as a file (_schema_out.json) which is
 // cached at /system/espnow/peers/<MAC>/schema.json by v4h_file_end →
 // processBondSchema. Returns true if the request was sent on-air. Callers
@@ -1582,7 +1582,7 @@ enum BondAgreementState : uint8_t {
 };
 struct BondAgreementView {
   uint8_t state;        // BondAgreementState
-  uint8_t reason;       // BondNoticeReason while declined, else 0
+  uint8_t reason;       // bondagree::Reason while declined (kReasonNotBonded ...), else 0
   bool    roleConflict; // agreed, but both devices have the same role
 };
 // Any task. All zero when bond mode is off or no partner is set.
@@ -1750,7 +1750,9 @@ inline bool espnowWorkerHoldsWifiRetry() { return false; }
 // session for discovery/sync (replaces plaintext-heartbeat discovery). No-op
 // when bond mode is off or the peer isn't our bonded peer.
 void bondNotifySessionEstablished(const uint8_t* peerMac);
-String buildBondedCommandPayload(const String& command);
+// A bond-token CMD payload (E29 kind 1 credential block + command) into `out`;
+// its length, 0 when no bond session token is live or it does not fit.
+size_t buildBondedCommandPayload(const String& command, uint8_t* out, size_t cap);
 bool espnowConsumePairingWindow(const uint8_t mac[6]);
 bool isBondSessionTokenValid();
 // True when bond mode is on, a partner is configured and `mac` is that partner:
@@ -1775,7 +1777,9 @@ bool v4_send_bond_event(const uint8_t* dstMac, const uint8_t* payload, uint16_t 
 uint16_t v4_single_frame_cap(const uint8_t* dst);
 bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t baseFlags, uint32_t msgId, const uint8_t* plaintext, uint16_t plaintextLen, uint8_t ttl, char* outStatus = nullptr, size_t outStatusLen = 0);
 bool v4_send_session_wrapped(const uint8_t dst[6], uint8_t type, uint16_t baseFlags, uint32_t msgId, const uint8_t* plaintext, uint16_t plaintextLen, uint8_t ttl, char* errOut, size_t errOutLen);
-bool v4_send_user_sync(const uint8_t* dst, const char* jsonPayload, uint16_t jsonLen);
+// USER_SYNC: two E29 credential blocks (the target's admin, the account) + flags.
+bool v4_send_user_sync(const uint8_t* dst, const char* recvAdminUser, const char* recvAdminPassword,
+                       const char* user, const char* password, uint8_t flags);
 
 #if ENABLE_BONDED_MODE
 void buildLocalBondStatus(BondPeerStatus& status);

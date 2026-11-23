@@ -168,7 +168,7 @@ static bool gIgnoredOverSession = false;
 // The verdict the sessionPeerBootNotice double answers (PeerBootVerdict:
 // 0 DropSession, 4 SameBoot, 5 OlderBoot).
 [[maybe_unused]] static int gBootVerdict = 0;
-// The header meshFingerprint deliver() stamps, and the fingerprint of the mesh
+// The header meshId deliver() stamps, and the fingerprint of the mesh
 // gPeerA is paired in (the fingerprintForPeer double). Any other MAC reads as
 // the default mesh's.
 static constexpr uint16_t kPeerAMeshFp = 0x4A21;
@@ -309,7 +309,7 @@ static bool deliver(uint8_t type, uint8_t* origin, uint8_t* radioSrc, const char
   h.ttl = 1;
   h.fragIndex = fragIndex;
   h.fragCount = fragCount;
-  h.meshFingerprint = gFrameFp;
+  h.meshId = gFrameFp;
   std::memcpy(h.origin, origin, 6);
   wifi_pkt_rx_ctrl_t ctrl{-50};
   esp_now_recv_info info{radioSrc, nullptr, &ctrl};
@@ -428,7 +428,7 @@ static unsigned runTextCases() {
       h.msgId = 2;
       h.ttl = 1;
       h.fragCount = 1;
-      h.meshFingerprint = gFrameFp;
+      h.meshId = gFrameFp;
       std::memcpy(h.origin, origin, 6);
       wifi_pkt_rx_ctrl_t ctrl{-50};
       esp_now_recv_info info{radioSrc, nullptr, &ctrl};
@@ -764,7 +764,7 @@ static unsigned runLengthCases() {
     h.headerLen = sizeof(EspNowV4Header);
     h.fragCount = 1;
     h.ttl = 1;
-    h.meshFingerprint = kPeerAMeshFp;
+    h.meshId = kPeerAMeshFp;
     std::memcpy(h.origin, gPeerA, 6);
     wifi_pkt_rx_ctrl_t ctrl{-50};
     esp_now_recv_info info{gPeerA, nullptr, &ctrl};
@@ -965,6 +965,20 @@ int main() {
         !run(ESPNOW_V4_TYPE_USER_SYNC, /*paired=*/true, /*authed=*/true, /*enc=*/false, /*keyed=*/true));
   check("session-sealed USER_SYNC reaches its handler",
         run(ESPNOW_V4_TYPE_USER_SYNC, /*paired=*/true, /*authed=*/true, /*enc=*/true, /*keyed=*/true));
+  // 1.0 step 9: the row also needs a paired sender, and TOPO_* are sealed too.
+  check("USER_SYNC row requires REQ_PAIRED", e && (e->flags & V4_OPC_FLAG_REQ_PAIRED) != 0);
+  check("session-sealed USER_SYNC from an unpaired sender reaches no handler",
+        !run(ESPNOW_V4_TYPE_USER_SYNC, /*paired=*/false, /*authed=*/true, /*enc=*/true, /*keyed=*/true));
+  for (uint8_t topo : {(uint8_t)ESPNOW_V4_TYPE_TOPO_REQ, (uint8_t)ESPNOW_V4_TYPE_TOPO_START,
+                       (uint8_t)ESPNOW_V4_TYPE_TOPO_PEER}) {
+    const V4OpcodeEntry* te = v4_dispatch_lookup(topo);
+    check("TOPO_* row requires REQ_PAIRED and REQ_SESSION_ENC",
+          te && (te->flags & V4_OPC_FLAG_REQ_PAIRED) && (te->flags & V4_OPC_FLAG_REQ_SESSION_ENC));
+    check("group-signed TOPO_* from a paired peer reaches no handler",
+          !run(topo, /*paired=*/true, /*authed=*/true, /*enc=*/false, /*keyed=*/true));
+    check("session-sealed TOPO_* from a paired peer reaches its handler",
+          run(topo, /*paired=*/true, /*authed=*/true, /*enc=*/true, /*keyed=*/true));
+  }
 
   // Verifier's table-driven invariant: no state-mutating opcode has empty flags.
   bool zeroFlagOk = true;

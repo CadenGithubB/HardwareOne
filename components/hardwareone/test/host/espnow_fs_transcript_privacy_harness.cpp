@@ -40,7 +40,7 @@ class String {
     friend bool operator!=(const String& a,const String& b){return !(a==b);}
 };
 constexpr unsigned ESPNOW_V4_MAX_PLAINTEXT=202;
-constexpr uint8_t ESPNOW_V4_TYPE_FS_LIST_REPLY=1,ESPNOW_V4_TYPE_FS_STAT_REPLY=2,ESPNOW_V4_TYPE_FS_GET_ACK=3;
+constexpr uint8_t ESPNOW_V4_TYPE_FS_LIST_RESP=1,ESPNOW_V4_TYPE_FS_STAT_RESP=2,ESPNOW_V4_TYPE_FS_GET_RESP=3;
 // INSERT_WIRE
 enum CommandSource { SOURCE_WEB = 0, SOURCE_INTERNAL = 2, SOURCE_ESPNOW = 3 };
 struct AuthContext { CommandSource transport = SOURCE_WEB; String path, ip, user, sid; void* opaque = nullptr; String scope; };
@@ -149,9 +149,9 @@ static const char* opName(unsigned op){return op==0?"LIST":op==1?"STAT":"GET";}
 static void refused(unsigned op,const uint8_t* who,const char* label,const char* path,bool configured,bool session){
     reset();bondConfigured=configured;bondSession=session;
     uint8_t status=0xff;bool echoed=false,zeroed=false;
-    if(op==0){auto q=request<V4PayloadFsListReq>(path);q.maxEntries=32;processListDeferred(who,q);auto r=decoded<V4PayloadFsListReplyHeader>(ESPNOW_V4_TYPE_FS_LIST_REPLY);status=r.status;echoed=r.reqId==q.reqId&&!std::strcmp(r.path,q.path);zeroed=r.entryCount==0&&r.totalEntries==0&&r.hasMore==0&&r.nextStartIndex==0&&response.size()==sizeof(r);}
-    else if(op==1){auto q=request<V4PayloadFsStatReq>(path);processStatDeferred(who,q);auto r=decoded<V4PayloadFsStatReply>(ESPNOW_V4_TYPE_FS_STAT_REPLY);status=r.status;echoed=r.reqId==q.reqId&&!std::strcmp(r.path,q.path);zeroed=r.totalBytes==0&&r.usedBytes==0&&r.freeBytes==0&&r.percentUsedX10==0;}
-    else{auto q=request<V4PayloadFsGetReq>(path);processGetDeferred(who,q);auto r=decoded<V4PayloadFsGetAck>(ESPNOW_V4_TYPE_FS_GET_ACK);status=r.status;echoed=r.reqId==q.reqId&&!std::strcmp(r.path,q.path);zeroed=r.fileSize==0;}
+    if(op==0){auto q=request<V4PayloadFsListReq>(path);q.maxEntries=32;processListDeferred(who,q);auto r=decoded<V4PayloadFsListRespHeader>(ESPNOW_V4_TYPE_FS_LIST_RESP);status=r.status;echoed=r.reqId==q.reqId&&!std::strcmp(r.path,q.path);zeroed=r.entryCount==0&&r.totalEntries==0&&r.hasMore==0&&r.nextStartIndex==0&&response.size()==sizeof(r);}
+    else if(op==1){auto q=request<V4PayloadFsStatReq>(path);processStatDeferred(who,q);auto r=decoded<V4PayloadFsStatResp>(ESPNOW_V4_TYPE_FS_STAT_RESP);status=r.status;echoed=r.reqId==q.reqId&&!std::strcmp(r.path,q.path);zeroed=r.totalBytes==0&&r.usedBytes==0&&r.freeBytes==0&&r.percentUsedX10==0;}
+    else{auto q=request<V4PayloadFsGetReq>(path);processGetDeferred(who,q);auto r=decoded<V4PayloadFsGetResp>(ESPNOW_V4_TYPE_FS_GET_RESP);status=r.status;echoed=r.reqId==q.reqId&&!std::strcmp(r.path,q.path);zeroed=r.fileSize==0;}
     const bool okay=sends==1&&status==FS_LIST_STATUS_PERM_DENIED&&echoed&&zeroed&&scopes==0&&fsCalls==0&&transfers==0&&installed.empty();
     ++requesterChecks;
     if(!okay){++requesterFailures;std::fprintf(stderr,"FAIL %s '%s' from %s: expected perm_denied with no identity and no transfer, got status=%u scopes=%u fsCalls=%u transfers=%u\n",opName(op),path,label,unsigned(status),scopes,fsCalls,transfers);}
@@ -169,7 +169,7 @@ static void statRouting(const char* path, VFS::StorageType expected, bool mounte
     statsOkay = readable;
     auto q = request<V4PayloadFsStatReq>(path);
     processStatDeferred(mac, q);
-    auto r = decoded<V4PayloadFsStatReply>(ESPNOW_V4_TYPE_FS_STAT_REPLY);
+    auto r = decoded<V4PayloadFsStatResp>(ESPNOW_V4_TYPE_FS_STAT_RESP);
     const bool missing = expected == VFS::SDCARD && !mounted;
     const uint8_t status = missing ? FS_LIST_STATUS_NOT_FOUND
         : readable ? FS_LIST_STATUS_OK : FS_LIST_STATUS_IO_ERROR;
@@ -203,9 +203,9 @@ static void statRouting(const char* path, VFS::StorageType expected, bool mounte
 }
 static void denied(const char* path,uint8_t status=FS_LIST_STATUS_PERM_DENIED){
     for(unsigned op=0;op<3;++op){reset();filesystemReady=status!=FS_LIST_STATUS_NOT_READY;
-        if(op==0){auto q=request<V4PayloadFsListReq>(path);q.maxEntries=32;processListDeferred(mac,q);auto r=decoded<V4PayloadFsListReplyHeader>(ESPNOW_V4_TYPE_FS_LIST_REPLY);assert(r.reqId==q.reqId&&!std::strcmp(r.path,q.path));assert(r.status==status&&r.entryCount==0&&r.totalEntries==0&&r.hasMore==0&&r.nextStartIndex==0);assert(response.size()==sizeof(r));}
-        if(op==1){auto q=request<V4PayloadFsStatReq>(path);processStatDeferred(mac,q);auto r=decoded<V4PayloadFsStatReply>(ESPNOW_V4_TYPE_FS_STAT_REPLY);assert(r.reqId==q.reqId&&!std::strcmp(r.path,q.path));assert(r.status==status&&r.totalBytes==0&&r.usedBytes==0&&r.freeBytes==0&&r.percentUsedX10==0);}
-        if(op==2){auto q=request<V4PayloadFsGetReq>(path);processGetDeferred(mac,q);auto r=decoded<V4PayloadFsGetAck>(ESPNOW_V4_TYPE_FS_GET_ACK);assert(r.reqId==q.reqId&&!std::strcmp(r.path,q.path));assert(r.status==status&&r.fileSize==0);}
+        if(op==0){auto q=request<V4PayloadFsListReq>(path);q.maxEntries=32;processListDeferred(mac,q);auto r=decoded<V4PayloadFsListRespHeader>(ESPNOW_V4_TYPE_FS_LIST_RESP);assert(r.reqId==q.reqId&&!std::strcmp(r.path,q.path));assert(r.status==status&&r.entryCount==0&&r.totalEntries==0&&r.hasMore==0&&r.nextStartIndex==0);assert(response.size()==sizeof(r));}
+        if(op==1){auto q=request<V4PayloadFsStatReq>(path);processStatDeferred(mac,q);auto r=decoded<V4PayloadFsStatResp>(ESPNOW_V4_TYPE_FS_STAT_RESP);assert(r.reqId==q.reqId&&!std::strcmp(r.path,q.path));assert(r.status==status&&r.totalBytes==0&&r.usedBytes==0&&r.freeBytes==0&&r.percentUsedX10==0);}
+        if(op==2){auto q=request<V4PayloadFsGetReq>(path);processGetDeferred(mac,q);auto r=decoded<V4PayloadFsGetResp>(ESPNOW_V4_TYPE_FS_GET_RESP);assert(r.reqId==q.reqId&&!std::strcmp(r.path,q.path));assert(r.status==status&&r.fileSize==0);}
         assert(sends==1&&scopes==0&&fsCalls==0&&transfers==0);++checks;
     }
 }
@@ -217,19 +217,19 @@ static void servedFail(const char* what){++servedFailures;std::fprintf(stderr,"F
 static bool onlyBondIdentity(){if(installed.empty())return false;for(const auto& id:installed)if(id!="bond-admin@espnow")return false;return true;}
 static std::string installedList(){std::string s;for(const auto& id:installed){if(!s.empty())s+=",";s+=id;}return s.empty()?"none":s;}
 static void servedIdentity(){
-    reset();auto g=request<V4PayloadFsGetReq>("/hello.txt");processGetDeferred(mac,g);auto ga=decoded<V4PayloadFsGetAck>(ESPNOW_V4_TYPE_FS_GET_ACK);
+    reset();auto g=request<V4PayloadFsGetReq>("/hello.txt");processGetDeferred(mac,g);auto ga=decoded<V4PayloadFsGetResp>(ESPNOW_V4_TYPE_FS_GET_RESP);
     ++servedChecks;if(!(ga.status==FS_LIST_STATUS_OK&&ga.fileSize==42&&transfers==1&&transferPath=="/hello.txt"&&scopes==2))servedFail("GET '/hello.txt' from the bonded peer: expected OK with one transfer under two identity installs");
     // 1.0 step 7: a name the requester's inbox cannot hold (over 63 bytes) is refused before the OK.
-    {reset();auto lg=request<V4PayloadFsGetReq>("/nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn.txt");processGetDeferred(mac,lg);auto la=decoded<V4PayloadFsGetAck>(ESPNOW_V4_TYPE_FS_GET_ACK);
+    {reset();auto lg=request<V4PayloadFsGetReq>("/nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn.txt");processGetDeferred(mac,lg);auto la=decoded<V4PayloadFsGetResp>(ESPNOW_V4_TYPE_FS_GET_RESP);
      ++servedChecks;if(!(la.status==FS_LIST_STATUS_TOO_LARGE&&transfers==0))servedFail("GET of a 68-byte name: expected too_large and no transfer");
      reset();g=request<V4PayloadFsGetReq>("/hello.txt");processGetDeferred(mac,g);}
     ++servedChecks;if(!onlyBondIdentity()){char msg[200];std::snprintf(msg,sizeof(msg),"expected bond-admin over SOURCE_ESPNOW, got %s",installedList().c_str());servedFail(msg);}
     ++servedChecks;if(!(lastInstalled.path=="/espnow/fs"&&lastInstalled.ip=="espnow:01:02:03:04:05:06"&&lastInstalled.scope==""&&lastInstalled.sid==""&&lastInstalled.opaque==nullptr))servedFail("expected the bond identity stamped path=/espnow/fs ip=espnow:<MAC>, unconfined");
-    reset();auto l=request<V4PayloadFsListReq>("/");l.maxEntries=32;processListDeferred(mac,l);auto lr=decoded<V4PayloadFsListReplyHeader>(ESPNOW_V4_TYPE_FS_LIST_REPLY);
+    reset();auto l=request<V4PayloadFsListReq>("/");l.maxEntries=32;processListDeferred(mac,l);auto lr=decoded<V4PayloadFsListRespHeader>(ESPNOW_V4_TYPE_FS_LIST_RESP);
     ++servedChecks;if(!(lr.status==FS_LIST_STATUS_OK&&lr.entryCount>0&&scopes==1&&onlyBondIdentity()))servedFail("LIST '/' from the bonded peer: expected OK under the bond identity");
-    reset();auto s=request<V4PayloadFsStatReq>("/");processStatDeferred(mac,s);auto sr=decoded<V4PayloadFsStatReply>(ESPNOW_V4_TYPE_FS_STAT_REPLY);
+    reset();auto s=request<V4PayloadFsStatReq>("/");processStatDeferred(mac,s);auto sr=decoded<V4PayloadFsStatResp>(ESPNOW_V4_TYPE_FS_STAT_RESP);
     ++servedChecks;if(!(sr.status==FS_LIST_STATUS_OK&&statsCalls==1&&scopes==1&&onlyBondIdentity()))servedFail("STAT '/' from the bonded peer: expected OK under the bond identity");
-    reset();g=request<V4PayloadFsGetReq>("/system/users/users.json");processGetDeferred(mac,g);ga=decoded<V4PayloadFsGetAck>(ESPNOW_V4_TYPE_FS_GET_ACK);
+    reset();g=request<V4PayloadFsGetReq>("/system/users/users.json");processGetDeferred(mac,g);ga=decoded<V4PayloadFsGetResp>(ESPNOW_V4_TYPE_FS_GET_RESP);
     ++servedChecks;if(!(ga.status==FS_LIST_STATUS_OK&&transfers==1&&transferPath=="/system/users/users.json"&&onlyBondIdentity()))servedFail("GET '/system/users/users.json' from the bonded peer: expected OK under the bond identity (SUPER while bonded)");
 }
 #endif // ENABLE_BONDED_MODE
@@ -240,16 +240,16 @@ int main(){
         "/stt/u2/notes","/stt/u2/notes/20261004T153012Z-6f1c9a2e00000007.txt","/sd/stt/u2/notes/boot-0000000000000001.txt","/sd/STT/u2/notes/boot-0000000000000001.txt"})denied(path);
     denied("/stt/u2/secret.txt",FS_LIST_STATUS_NOT_READY);denied("/hello.txt",FS_LIST_STATUS_NOT_READY);
     // Root LIST may reveal the protected root's name, never its descendants.
-    for(const char* path:{"/","/sd","/ordinary"}){reset();auto q=request<V4PayloadFsListReq>(path);q.maxEntries=32;processListDeferred(mac,q);auto r=decoded<V4PayloadFsListReplyHeader>(ESPNOW_V4_TYPE_FS_LIST_REPLY);assert(r.status==FS_LIST_STATUS_OK&&r.entryCount>0&&scopes==1&&fsCalls>0&&transfers==0);V4PayloadFsEntry first;std::memcpy(&first,response.data()+sizeof(r),sizeof(first));assert(!std::strcmp(first.name,path==String("/ordinary")?"note.txt":"stt"));++checks;}
-    for(const char* path:{"/hello.txt","/ordinary/note.txt","/sd/public.txt","/stt2/a.txt","/STT/a.txt"}){reset();auto q=request<V4PayloadFsGetReq>(path);processGetDeferred(mac,q);auto r=decoded<V4PayloadFsGetAck>(ESPNOW_V4_TYPE_FS_GET_ACK);assert(r.status==FS_LIST_STATUS_OK&&r.fileSize==nodes[path].size&&transfers==1&&transferPath==path&&scopes==2);++checks;}
-    for(const char* path:{"/","/ordinary","/stt2","/STT"}){reset();auto q=request<V4PayloadFsStatReq>(path);processStatDeferred(mac,q);auto r=decoded<V4PayloadFsStatReply>(ESPNOW_V4_TYPE_FS_STAT_REPLY);assert(r.status==FS_LIST_STATUS_OK&&r.totalBytes==1000&&r.usedBytes==400&&r.freeBytes==600&&r.percentUsedX10==400&&statsCalls==1&&transfers==0);++checks;}
-    reset();auto get=request<V4PayloadFsGetReq>("/missing");processGetDeferred(mac,get);assert(decoded<V4PayloadFsGetAck>(3).status==FS_LIST_STATUS_NOT_FOUND&&transfers==0);
-    reset();get=request<V4PayloadFsGetReq>("/ordinary");processGetDeferred(mac,get);assert(decoded<V4PayloadFsGetAck>(3).status==FS_LIST_STATUS_NOT_A_DIR&&transfers==0);
-    reset();openFails=true;get=request<V4PayloadFsGetReq>("/hello.txt");processGetDeferred(mac,get);assert(decoded<V4PayloadFsGetAck>(3).status==FS_LIST_STATUS_PERM_DENIED&&transfers==0);
-    reset();auto list=request<V4PayloadFsListReq>("/hello.txt");processListDeferred(mac,list);assert(decoded<V4PayloadFsListReplyHeader>(1).status==FS_LIST_STATUS_NOT_A_DIR&&transfers==0);
-    reset();allocFails=true;list=request<V4PayloadFsListReq>("/stt");processListDeferred(mac,list);assert(decoded<V4PayloadFsListReplyHeader>(1).status==FS_LIST_STATUS_NOT_READY&&scopes==0&&fsCalls==0);
-    reset();sdAvailable=false;auto stat=request<V4PayloadFsStatReq>("/sd");processStatDeferred(mac,stat);assert(decoded<V4PayloadFsStatReply>(2).status==FS_LIST_STATUS_NOT_FOUND&&statsCalls==0);
-    reset();statsOkay=false;stat=request<V4PayloadFsStatReq>("/");processStatDeferred(mac,stat);assert(decoded<V4PayloadFsStatReply>(2).status==FS_LIST_STATUS_IO_ERROR);
+    for(const char* path:{"/","/sd","/ordinary"}){reset();auto q=request<V4PayloadFsListReq>(path);q.maxEntries=32;processListDeferred(mac,q);auto r=decoded<V4PayloadFsListRespHeader>(ESPNOW_V4_TYPE_FS_LIST_RESP);assert(r.status==FS_LIST_STATUS_OK&&r.entryCount>0&&scopes==1&&fsCalls>0&&transfers==0);V4PayloadFsEntry first;std::memcpy(&first,response.data()+sizeof(r),sizeof(first));assert(!std::strcmp(first.name,path==String("/ordinary")?"note.txt":"stt"));++checks;}
+    for(const char* path:{"/hello.txt","/ordinary/note.txt","/sd/public.txt","/stt2/a.txt","/STT/a.txt"}){reset();auto q=request<V4PayloadFsGetReq>(path);processGetDeferred(mac,q);auto r=decoded<V4PayloadFsGetResp>(ESPNOW_V4_TYPE_FS_GET_RESP);assert(r.status==FS_LIST_STATUS_OK&&r.fileSize==nodes[path].size&&transfers==1&&transferPath==path&&scopes==2);++checks;}
+    for(const char* path:{"/","/ordinary","/stt2","/STT"}){reset();auto q=request<V4PayloadFsStatReq>(path);processStatDeferred(mac,q);auto r=decoded<V4PayloadFsStatResp>(ESPNOW_V4_TYPE_FS_STAT_RESP);assert(r.status==FS_LIST_STATUS_OK&&r.totalBytes==1000&&r.usedBytes==400&&r.freeBytes==600&&r.percentUsedX10==400&&statsCalls==1&&transfers==0);++checks;}
+    reset();auto get=request<V4PayloadFsGetReq>("/missing");processGetDeferred(mac,get);assert(decoded<V4PayloadFsGetResp>(3).status==FS_LIST_STATUS_NOT_FOUND&&transfers==0);
+    reset();get=request<V4PayloadFsGetReq>("/ordinary");processGetDeferred(mac,get);assert(decoded<V4PayloadFsGetResp>(3).status==FS_LIST_STATUS_NOT_A_DIR&&transfers==0);
+    reset();openFails=true;get=request<V4PayloadFsGetReq>("/hello.txt");processGetDeferred(mac,get);assert(decoded<V4PayloadFsGetResp>(3).status==FS_LIST_STATUS_PERM_DENIED&&transfers==0);
+    reset();auto list=request<V4PayloadFsListReq>("/hello.txt");processListDeferred(mac,list);assert(decoded<V4PayloadFsListRespHeader>(1).status==FS_LIST_STATUS_NOT_A_DIR&&transfers==0);
+    reset();allocFails=true;list=request<V4PayloadFsListReq>("/stt");processListDeferred(mac,list);assert(decoded<V4PayloadFsListRespHeader>(1).status==FS_LIST_STATUS_NOT_READY&&scopes==0&&fsCalls==0);
+    reset();sdAvailable=false;auto stat=request<V4PayloadFsStatReq>("/sd");processStatDeferred(mac,stat);assert(decoded<V4PayloadFsStatResp>(2).status==FS_LIST_STATUS_NOT_FOUND&&statsCalls==0);
+    reset();statsOkay=false;stat=request<V4PayloadFsStatReq>("/");processStatDeferred(mac,stat);assert(decoded<V4PayloadFsStatResp>(2).status==FS_LIST_STATUS_IO_ERROR);
     assert(scopeDepth==0);std::printf("FS-RPC transcript privacy: %u path/operation checks plus ordinary/error behavior passed\n",checks);
     for(bool mounted:{false,true})for(bool readable:{false,true}){
         for(const char* path:{"/sd","/sd/","//sd//x","sd"," sd/x "})statRouting(path,VFS::SDCARD,mounted,readable);

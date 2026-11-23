@@ -16,7 +16,7 @@ static bool gFailPsram = false, gFailInternal = false;
 // INSERT_BOUNDARIES
 
 static constexpr unsigned ESPNOW_V4_MAX_PLAINTEXT = 202;
-static constexpr uint8_t ESPNOW_V4_TYPE_FS_LIST_REPLY = 123;
+static constexpr uint8_t ESPNOW_V4_TYPE_FS_LIST_RESP = 123;
 // INSERT_PRODUCTION_TYPES
 
 #define ERROR_MEMORYF(...) debugStub(__VA_ARGS__)
@@ -71,7 +71,7 @@ namespace espnowtx {
 static bool sendAeadSync(const uint8_t*, uint8_t type, uint8_t, uint32_t,
                          const uint8_t* payload, uint16_t size, unsigned, unsigned) {
   check(fsDepth == 0 && identityDepth == 0, "network send occurs after directory lock and identity release");
-  check(type == ESPNOW_V4_TYPE_FS_LIST_REPLY, "response has the listing wire type");
+  check(type == ESPNOW_V4_TYPE_FS_LIST_RESP, "response has the listing wire type");
   sentPayload.assign(payload, payload + size);
   ++sends;
   return true;
@@ -100,7 +100,7 @@ static std::string numbered(unsigned i) {
   char name[24]; std::snprintf(name, sizeof(name), "file-%03u.txt", i); return name;
 }
 struct Reply {
-  V4PayloadFsListReplyHeader header{};
+  V4PayloadFsListRespHeader header{};
   std::vector<V4PayloadFsEntry> entries;
 };
 static Reply request(const char* path, uint16_t start = 0, uint16_t maximum = 32) {
@@ -112,7 +112,7 @@ static Reply request(const char* path, uint16_t start = 0, uint16_t maximum = 32
   processListDeferred(mac, req);
   check(sends == 1 && fsDepth == 0 && identityDepth == 0 && allocations == releases,
         "request sends exactly one reply and releases resources");
-  check(sentPayload.size() >= sizeof(V4PayloadFsListReplyHeader), "reply contains a full header");
+  check(sentPayload.size() >= sizeof(V4PayloadFsListRespHeader), "reply contains a full header");
   Reply result;
   std::memcpy(&result.header, sentPayload.data(), sizeof(result.header));
   check(result.header.reqId == req.reqId && std::string(result.header.path) == path,

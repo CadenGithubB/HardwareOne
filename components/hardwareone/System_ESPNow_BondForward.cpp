@@ -176,6 +176,7 @@ struct BfTargetView {
   uint8_t mac[6];
   espnowfwd::TState state;
   uint8_t lastResult;
+  bool haveResult;   // lastResult is an answer (kResultOk is 0)
   uint8_t streams;
 };
 struct BfView {
@@ -466,6 +467,7 @@ void bondForwardTick(uint32_t nowMs) {
       if (!isPartner && (w.want || t.wTries)) (void)bfHandshake(mac);
       views[kind].state = t.state;
       views[kind].lastResult = t.lastResult;
+      views[kind].haveResult = t.haveResult;
       views[kind].streams = t.acceptedStreams;
       continue;
     }
@@ -475,6 +477,7 @@ void bondForwardTick(uint32_t nowMs) {
     if (act & espnowfwd::kActAnnounce) bfSendAnnounce(t);
     views[kind].state = t.state;
     views[kind].lastResult = t.lastResult;
+    views[kind].haveResult = t.haveResult;
     views[kind].streams = t.acceptedStreams;
   }
 
@@ -1068,7 +1071,7 @@ size_t bondForwardStatusJson(char* out, size_t cap) {
              "\"state\":\"%s\"",
              first ? "" : ",", k == espnowfwd::kTargetPrimary ? "primary" : "backup", MAC_ARGS(t.mac), nameJson,
              t.isPartner ? "true" : "false", t.inPrimary ? "true" : "false", espnowfwd::targetStateKey(t.state));
-    if (t.lastResult) bfAppend(out, cap, &pos, ",\"result\":\"%s\"", espnowfwd::resultKey(t.lastResult));
+    if (t.haveResult) bfAppend(out, cap, &pos, ",\"result\":\"%s\"", espnowfwd::resultKey(t.lastResult));
     else bfAppend(out, cap, &pos, ",\"result\":null");
     bfAppend(out, cap, &pos, ",\"streams\":%s,\"session\":%s}", streams, t.session ? "true" : "false");
     first = false;

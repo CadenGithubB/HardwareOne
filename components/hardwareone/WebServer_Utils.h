@@ -1304,7 +1304,7 @@ window.BondFs = (function(){
         h+=window.FileBrowser.rowHtml({
           name: en.name,
           isDir: en.isDir,
-          // en.size is the bonded-fs entry's byte count (post-FS_LIST_REPLY).
+          // en.size is the bonded-fs entry's byte count (post-FS_LIST_RESP).
           // formatSize already accepts bare integers, so passing the number
           // through works without changing that helper.
           sizeInfo: en.isDir ? '' : window.FileBrowser.formatSize(en.size, false),

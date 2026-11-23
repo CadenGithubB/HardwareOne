@@ -217,7 +217,7 @@ static void forwardLinkIngest(const uint8_t* src, const char* srcName, const uin
       memcpy(partnerName, e->name, sizeof(partnerName));
       FWD_UNLOCK();
     }
-    fwdAnswer(src, f, espnowfwd::kResultWithdrawn);
+    fwdAnswer(src, f, espnowfwd::kResultOk);  // the withdrawal is done (0 = ok)
     if (ended) fwdConsole("[ESP-NOW] %s no longer forwards for %s", viaName, partnerName);
     return;
   }

@@ -262,6 +262,7 @@ struct EspNowState {
   uint8_t deferredCmdSrcMac[6] = {};
   char deferredCmdDeviceName[32] = {};
   char deferredCmdPayload[256] = {};
+  uint16_t deferredCmdPayloadLen = 0;
   uint32_t deferredCmdMsgId = 0;
   bool deferredCmdWasEncrypted = false;
   struct StreamQueueEntry {
@@ -554,7 +555,17 @@ static void testStreamLinesAreAnswers() {
 
 // A CMD frame as the dispatcher hands it to v4h_cmd.
 static V4Verdict gLastCmdVerdict{};
-static void receiveCmd(const uint8_t* from, uint32_t msgId, const char* text, bool sealed = true) {
+// The CMD payload (E29): an account credential block, then the command.
+static std::string cmdBlock(const char* user, const char* password, const char* command) {
+  uint8_t buf[256];
+  const size_t n = espnowcred::packCmd(buf, sizeof(buf), espnowcred::kKindAccount,
+                                       reinterpret_cast<const uint8_t*>(user), std::strlen(user),
+                                       reinterpret_cast<const uint8_t*>(password), std::strlen(password), command,
+                                       std::strlen(command));
+  return std::string(reinterpret_cast<const char*>(buf), n);
+}
+
+static void receiveCmd(const uint8_t* from, uint32_t msgId, const std::string& payload, bool sealed = true) {
   esp_now_recv_info info{};
   info.src_addr = const_cast<uint8_t*>(from);
   EspNowV4Header h{};
@@ -563,8 +574,8 @@ static void receiveCmd(const uint8_t* from, uint32_t msgId, const char* text, bo
   V4RxCtx ctx{};
   ctx.recv_info = &info;
   ctx.h = &h;
-  ctx.payload = reinterpret_cast<const uint8_t*>(text);
-  ctx.payloadLen = static_cast<uint16_t>(std::strlen(text));
+  ctx.payload = reinterpret_cast<const uint8_t*>(payload.data());
+  ctx.payloadLen = static_cast<uint16_t>(payload.size());
   ctx.isPaired = ctx.isAuthenticated = true;
   ctx.isSessionEncrypted = sealed;
   ctx.deviceName = "peerA";
@@ -592,19 +603,35 @@ static void checkAnswer(const char* what, uint32_t reqId, uint8_t status, const 
 // ACK alone (1.0 step 6: no CMD_RESP(busy)).
 static void testCmdSlotBusy() {
   resetWorld();
-  receiveCmd(kRequester, 300, "admin:pw:status");
+  const std::string first = cmdBlock("admin", "p:w", "status");
+  receiveCmd(kRequester, 300, first);
   check(air.empty() && gState.deferredCmdPending && gState.deferredCmdMsgId == 300 &&
-            std::strcmp(gState.deferredCmdPayload, "admin:pw:status") == 0,
-        "slot free: the CMD waits for the task, nothing is answered");
+            gState.deferredCmdPayloadLen == first.size() &&
+            std::memcmp(gState.deferredCmdPayload, first.data(), first.size()) == 0 &&
+            gState.deferredCmdPayload[first.size()] == '\0',
+        "slot free: the CMD (credential block + command, then a NUL) waits for the task, nothing is answered");
   check(gLastCmdVerdict.kind == V4VerdictKind::Accepted, "slot free: the CMD is accepted (its ACK says 0)");
-  receiveCmd(kRequester, 300, "admin:pw:status");
+  receiveCmd(kRequester, 300, first);
   check(air.empty(), "the waiting command again: no answer (it will run)");
   check(gLastCmdVerdict.kind == V4VerdictKind::Accepted, "the waiting command again: accepted (it runs once)");
-  receiveCmd(kRequester, 301, "admin:pw:uptime");
+  receiveCmd(kRequester, 301, cmdBlock("admin", "pw", "uptime"));
   check(gLastCmdVerdict.kind == V4VerdictKind::Refused && gLastCmdVerdict.status == espnowanswer::kBusy,
         "slot taken: the CMD is refused busy (its ACK says busy)");
   check(air.empty(), "slot taken: no CMD_RESP(busy) on the air, the ACK is the one answer (1.0 step 6)");
   check(gState.deferredCmdMsgId == 300, "slot taken: the waiting command is untouched");
+
+  // 1.0 step 9 (E29): a payload that is not a credential block is answered
+  // bad_request on its ACK and never reaches the slot.
+  resetWorld();
+  receiveCmd(kRequester, 310, "admin:pw:status");
+  check(gLastCmdVerdict.kind == V4VerdictKind::Refused && gLastCmdVerdict.status == espnowanswer::kBadRequest &&
+            !gState.deferredCmdPending && air.empty(),
+        "the pre-1.0 colon text: refused bad_request, nothing waits");
+  std::string noCommand = cmdBlock("admin", "pw", "x");
+  noCommand.pop_back();
+  receiveCmd(kRequester, 311, noCommand);
+  check(gLastCmdVerdict.kind == V4VerdictKind::Refused && gLastCmdVerdict.status == espnowanswer::kBadRequest,
+        "a block with no command: refused bad_request");
 }
 
 // v4_handle_cmd after authentication: the refusals it sends itself.
@@ -763,7 +790,7 @@ static void testTopologyStatus() {
 static void testWebFsTags() {
   bool same = true;
   for (unsigned st = 0; st < 256; ++st) {
-    const char* name = espnowanswer::statusName(ESPNOW_V4_TYPE_FS_LIST_REPLY, (uint8_t)st);
+    const char* name = espnowanswer::statusName(ESPNOW_V4_TYPE_FS_LIST_RESP, (uint8_t)st);
     same = same && std::strcmp(fsStatusTag((uint8_t)st), name ? name : "unknown") == 0;
   }
   check(same, "web FS tags: every status named as the shared table names it");

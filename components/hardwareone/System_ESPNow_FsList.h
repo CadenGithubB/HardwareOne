@@ -14,7 +14,7 @@
 //       │            (V4_TYPE_FS_LIST_REQ)        │
 //       │                                         ├─ defers to cmd_exec
 //       │                                         │  reads VFS, builds reply
-//       │◄──── V4_TYPE_FS_LIST_REPLY ─────────────┤
+//       │◄──── V4_TYPE_FS_LIST_RESP ─────────────┤
 //       │   (header + N V4PayloadFsEntry)         │
 //       │                                         │
 //      callback fires with parsed entries
@@ -22,8 +22,8 @@
 //   The opcodes ride the base ESP-NOW encrypted session: the dispatch rows
 //   in System_ESPNow.cpp gate them with REQ_PAIRED | REQ_SESSION_ENC, so a
 //   requester whose own bond mode is off still receives replies, and they
-//   get the same confidentiality + authentication as SETTINGS_REQ /
-//   MANIFEST_REQ.
+//   get the same confidentiality + authentication as BOND_SETTINGS_REQ /
+//   BOND_MANIFEST_REQ.
 //
 // Identity model — bonded peer only
 //   The receiving module serves exactly one requester: the bonded peer, and
@@ -90,21 +90,21 @@
 // `peerMac` is the responding peer's MAC (matches the request target unless
 // something very weird happened).
 typedef void (*FsListReplyCallback)(const uint8_t peerMac[6],
-                                    const V4PayloadFsListReplyHeader* header,
+                                    const V4PayloadFsListRespHeader* header,
                                     const V4PayloadFsEntry* entries);
 
 // Stat reply callback. `reply` is owned by the receive path — copy before
 // returning. Replaces the prior fsusage-CLI-scrape pattern.
 typedef void (*FsStatReplyCallback)(const uint8_t peerMac[6],
-                                    const V4PayloadFsStatReply* reply);
+                                    const V4PayloadFsStatResp* reply);
 
-// Get-file ACK callback. Fires when the peer responds with FS_GET_ACK
+// Get-file ACK callback. Fires when the peer responds with FS_GET_RESP
 // (synchronous accept/reject). On status == FS_LIST_STATUS_OK the peer is
 // initiating a FILE_START/DATA/END transfer back; the caller's existing
 // inbound file-receive path will land the file on local VFS. On any other
 // status, no transfer follows. `ack->fileSize` is informational.
 typedef void (*FsGetAckCallback)(const uint8_t peerMac[6],
-                                 const V4PayloadFsGetAck* ack);
+                                 const V4PayloadFsGetResp* ack);
 
 // ============================================================================
 // Lifecycle
@@ -170,21 +170,21 @@ uint32_t fsGetSendRequest(const uint8_t peerMac[6],
 void fsListOnRequestReceived(const uint8_t srcMac[6],
                              const uint8_t* payload, uint16_t payloadLen);
 
-// Match an incoming FS_LIST_REPLY against the pending-request table and
+// Match an incoming FS_LIST_RESP against the pending-request table and
 // fire the registered callback. Called from espnow_task's RX-handler dispatch —
 // the callback runs on espnow_task too, so its body must be minimal (copy data,
 // set a flag) or it stalls the RX drain.
 void fsListOnReplyReceived(const uint8_t srcMac[6],
                            const uint8_t* payload, uint16_t payloadLen);
 
-// FS_STAT_REQ + FS_STAT_REPLY mirror the list pattern: REQ defers to cmd_exec,
+// FS_STAT_REQ + FS_STAT_RESP mirror the list pattern: REQ defers to cmd_exec,
 // REPLY matches reqId and fires its callback.
 void fsStatOnRequestReceived(const uint8_t srcMac[6],
                              const uint8_t* payload, uint16_t payloadLen);
 void fsStatOnReplyReceived(const uint8_t srcMac[6],
                            const uint8_t* payload, uint16_t payloadLen);
 
-// FS_GET_REQ defers to cmd_exec (peer kicks off sendFileToMac there). FS_GET_ACK
+// FS_GET_REQ defers to cmd_exec (peer kicks off sendFileToMac there). FS_GET_RESP
 // is the synchronous reply BEFORE the FILE_* transfer.
 void fsGetOnRequestReceived(const uint8_t srcMac[6],
                             const uint8_t* payload, uint16_t payloadLen);

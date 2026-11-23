@@ -38,7 +38,11 @@ static void logStub(const char*, ...) {}
 #define DEBUG_ESPNOWF(...) logStub(__VA_ARGS__)
 #define WARN_ESPNOWF(...)  logStub(__VA_ARGS__)
 #define ERROR_ESPNOWF(...) logStub(__VA_ARGS__)
+#define ERROR_MEMORYF(...) logStub(__VA_ARGS__)
 #define EXT_RAM_BSS_ATTR
+// The list reply copies its entries into a PSRAM array (1.0 step 9).
+enum class AllocPref { PreferPsram };
+static void* ps_alloc(size_t n, AllocPref, const char*) { return std::malloc(n); }
 
 // ---- FreeRTOS mutex double ----------------------------------------------------
 using TickType_t = uint32_t;
@@ -76,9 +80,9 @@ static void xSemaphoreGive(SemaphoreHandle_t s) {
 // ---- wire ---------------------------------------------------------------------
 constexpr unsigned ESPNOW_V4_MAX_PLAINTEXT = 202;
 enum : uint8_t {
-  ESPNOW_V4_TYPE_FS_LIST_REQ = 70, ESPNOW_V4_TYPE_FS_LIST_REPLY = 71,
-  ESPNOW_V4_TYPE_FS_STAT_REQ = 72, ESPNOW_V4_TYPE_FS_STAT_REPLY = 73,
-  ESPNOW_V4_TYPE_FS_GET_REQ = 74,  ESPNOW_V4_TYPE_FS_GET_ACK = 75,
+  ESPNOW_V4_TYPE_FS_LIST_REQ = 70, ESPNOW_V4_TYPE_FS_LIST_RESP = 71,
+  ESPNOW_V4_TYPE_FS_STAT_REQ = 72, ESPNOW_V4_TYPE_FS_STAT_RESP = 73,
+  ESPNOW_V4_TYPE_FS_GET_REQ = 74,  ESPNOW_V4_TYPE_FS_GET_RESP = 75,
 };
 // INSERT_WIRE
 // INSERT_HEADER
@@ -178,9 +182,9 @@ static void processGetDeferred(const uint8_t*, const V4PayloadFsGetReq&) {
 static const uint8_t peerA[6] = {0x02, 0, 0, 0, 0, 0x01};
 static const uint8_t peerB[6] = {0x02, 0, 0, 0, 0, 0x02};
 static std::atomic<unsigned> listCallbacks{0}, statCallbacks{0}, getCallbacks{0};
-static void onList(const uint8_t*, const V4PayloadFsListReplyHeader*, const V4PayloadFsEntry*) { ++listCallbacks; }
-static void onStat(const uint8_t*, const V4PayloadFsStatReply*) { ++statCallbacks; }
-static void onGet(const uint8_t*, const V4PayloadFsGetAck*) { ++getCallbacks; }
+static void onList(const uint8_t*, const V4PayloadFsListRespHeader*, const V4PayloadFsEntry*) { ++listCallbacks; }
+static void onStat(const uint8_t*, const V4PayloadFsStatResp*) { ++statCallbacks; }
+static void onGet(const uint8_t*, const V4PayloadFsGetResp*) { ++getCallbacks; }
 
 static void gate(bool open) {
   {
@@ -236,8 +240,8 @@ static unsigned busyReplies() {
   unsigned n = 0;
   for (const auto& s : sent) {
     if (s.sync || s.payload.size() < 5) continue;
-    if (s.type != ESPNOW_V4_TYPE_FS_LIST_REPLY && s.type != ESPNOW_V4_TYPE_FS_STAT_REPLY &&
-        s.type != ESPNOW_V4_TYPE_FS_GET_ACK) continue;
+    if (s.type != ESPNOW_V4_TYPE_FS_LIST_RESP && s.type != ESPNOW_V4_TYPE_FS_STAT_RESP &&
+        s.type != ESPNOW_V4_TYPE_FS_GET_RESP) continue;
     if (s.payload[4] == FS_LIST_STATUS_TOO_BUSY) ++n;  // status follows the 4-byte reqId in all three
   }
   return n;
@@ -315,7 +319,7 @@ int main() {
     check(clientId.load() != 0, "case2: client send succeeds");
     runCmdExecQueue();
     check(listWork == 1 && !sDeferred.pending, "case2: request captured during the send is served");
-    V4PayloadFsListReplyHeader reply = {};
+    V4PayloadFsListRespHeader reply = {};
     reply.reqId = clientId.load();
     reply.status = FS_LIST_STATUS_OK;
     fsListOnReplyReceived(peerA, reinterpret_cast<const uint8_t*>(&reply), sizeof(reply));
@@ -389,10 +393,10 @@ int main() {
     check(statId != 0 && getId != 0 && statId != getId, "case8: STAT and GET sends succeed with distinct reqIds");
     check(sendsWhileLocked == 0, "case8: fsStatSendRequest/fsGetSendRequest send without holding the module mutex");
     check(liveSlots() == 2, "case8: one pending slot per request");
-    V4PayloadFsStatReply stat = {};
+    V4PayloadFsStatResp stat = {};
     stat.reqId = statId;
     fsStatOnReplyReceived(peerA, reinterpret_cast<const uint8_t*>(&stat), sizeof(stat));
-    V4PayloadFsGetAck ack = {};
+    V4PayloadFsGetResp ack = {};
     ack.reqId = getId;
     fsGetOnAckReceived(peerA, reinterpret_cast<const uint8_t*>(&ack), sizeof(ack));
     check(statCallbacks == 1 && getCallbacks == 1 && liveSlots() == 0,

@@ -598,7 +598,7 @@ static Frame assemble(EspNowV4Header h, const Frame& payload, bool crc) {
 static Frame plainFrame(uint8_t type, const uint8_t* origin, uint32_t msgId, const Frame& payload = {},
                         uint8_t fragIndex = 0, uint8_t fragCount = 1, uint16_t flags = 0) {
   EspNowV4Header h = baseHeader(type, origin, msgId);
-  h.meshFingerprint = kMeshFp;
+  h.meshId = kMeshFp;
   h.flags = flags;
   h.fragIndex = fragIndex;
   h.fragCount = fragCount;
@@ -609,7 +609,7 @@ static Frame groupFrame(uint8_t type, const uint8_t* origin, uint32_t msgId, con
                         uint16_t flags = 0, uint8_t fragIndex = 0, uint8_t fragCount = 1) {
   EspNowV4Header h = baseHeader(type, origin, msgId);
   h.flags = (uint16_t)(flags | ESPNOW_V4_FLAG_BROADCAST_AUTH);
-  h.meshFingerprint = kMeshFp;
+  h.meshId = kMeshFp;
   h.ttl = ttl;
   h.fragIndex = fragIndex;
   h.fragCount = fragCount;
@@ -625,7 +625,7 @@ static Frame sealedFrame(SessionState* s, uint8_t type, const uint8_t* origin, u
                          uint8_t fragIndex = 0, uint8_t fragCount = 1, uint16_t flags = ESPNOW_V4_FLAG_ACK_REQ) {
   EspNowV4Header h = baseHeader(type, origin, msgId);
   h.flags = (uint16_t)(flags | ESPNOW_V4_FLAG_SESSION_FRAME);
-  h.meshFingerprint = kMeshFp;
+  h.meshId = kMeshFp;
   h.fragIndex = fragIndex;
   h.fragCount = fragCount;
   h.sessionId = s->sessionId;
@@ -746,7 +746,7 @@ static void testForgedPlaintextDoesNotShadowSealed() {
 static void testAuthenticatedFramesDoNotShadowEachOther() {
   // Another paired peer (own session) writes B's MAC into its header origin.
   reset(true);
-  deliver(gPeerC, sealedFrame(gSessC, ESPNOW_V4_TYPE_CMD, gPeerB, 60, text("x")));
+  deliver(gPeerC, sealedFrame(gSessC, ESPNOW_V4_TYPE_CMD, gPeerB, 60, text("status")));
   check("C's sealed frame naming B as origin is dispatched as C's", calls("v4h_cmd") == 1);
   deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD, gPeerB, 60, text("status")));
   check("B's sealed frame with the same msgId is still dispatched (keyed on the session peer)",
@@ -1213,7 +1213,7 @@ static void testGroupTagIs16Bytes() {
     // The pre-1.0 form: the full 32-byte HMAC appended.
     EspNowV4Header h = baseHeader(ESPNOW_V4_TYPE_TEXT, gFar, 702);
     h.flags = ESPNOW_V4_FLAG_BROADCAST_AUTH;
-    h.meshFingerprint = kMeshFp;
+    h.meshId = kMeshFp;
     h.ttl = 1;
     uint8_t tag[32];
     groupTagFor(tag, &h, payload.data(), payload.size());
@@ -1260,20 +1260,20 @@ static void testUnknownSessionAsksForHint() {
 static void testMeshIdGate() {
   reset(true);
   Frame zero = plainFrame(ESPNOW_V4_TYPE_TOPO_REQ, gAttacker, 2001, Frame(8, 0));
-  reinterpret_cast<EspNowV4Header*>(zero.data())->meshFingerprint = 0;
+  reinterpret_cast<EspNowV4Header*>(zero.data())->meshId = 0;
   deliver(gAttacker, zero);
   check("a frame with mesh id 0 reaches no handler and is counted (FAILS ON BASE: 0 was 'unscoped')",
         gCalls.empty() && gEspNowRxUnknownMeshIdDrops == 1 && gEspNowRxUnknownMeshIdLast == 0);
   check("an unpaired sender's drop is only counted", gWarns == 0);
 
   Frame foreign = plainFrame(ESPNOW_V4_TYPE_TEXT, gAttacker, 2002, text("x"));
-  reinterpret_cast<EspNowV4Header*>(foreign.data())->meshFingerprint = 0x1234;
+  reinterpret_cast<EspNowV4Header*>(foreign.data())->meshId = 0x1234;
   deliver(gAttacker, foreign);
   check("another mesh's id is dropped and counted, with no WARN",
         gCalls.empty() && gEspNowRxUnknownMeshIdDrops == 2 && gEspNowRxUnknownMeshIdLast == 0x1234 && gWarns == 0);
 
   Frame fromPaired = plainFrame(ESPNOW_V4_TYPE_TEXT, gPeerC, 2003, text("y"));
-  reinterpret_cast<EspNowV4Header*>(fromPaired.data())->meshFingerprint = 0x4321;
+  reinterpret_cast<EspNowV4Header*>(fromPaired.data())->meshId = 0x4321;
   deliver(gPeerC, fromPaired);
   check("a paired device with another mesh id is dropped, counted and named in one WARN",
         gCalls.empty() && gEspNowRxUnknownMeshIdDrops == 3 && gWarns == 1 &&
@@ -1288,7 +1288,7 @@ static void testMeshIdGate() {
 
   uint8_t stranger[6] = {0x02, 0xEE, 0x00, 0x00, 0x00, 0x77};
   Frame hello = plainFrame(ESPNOW_V4_TYPE_KEY_EX_HELLO, stranger, 2006, Frame(8, 0));
-  reinterpret_cast<EspNowV4Header*>(hello.data())->meshFingerprint = 0x2222;
+  reinterpret_cast<EspNowV4Header*>(hello.data())->meshId = 0x2222;
   deliver(stranger, hello);
   check("a key exchange with another mesh id (wrong passphrase) gets a WARN", gWarns == 3);
 }
@@ -1430,8 +1430,8 @@ static void testRelayHopOpcodeRule() {
     ESPNOW_V4_TYPE_TOPO_REQ, ESPNOW_V4_TYPE_TOPO_START, ESPNOW_V4_TYPE_TOPO_PEER,
     ESPNOW_V4_TYPE_PAIR_BEACON, ESPNOW_V4_TYPE_PAIR_REQUEST, ESPNOW_V4_TYPE_PAIR_ACCEPT, ESPNOW_V4_TYPE_PAIR_REJECT,
     ESPNOW_V4_TYPE_BOND_HEARTBEAT, ESPNOW_V4_TYPE_BOND_CAP_REQ, ESPNOW_V4_TYPE_BOND_CAP_RESP,
-    ESPNOW_V4_TYPE_MANIFEST_REQ, ESPNOW_V4_TYPE_SETTINGS_REQ, ESPNOW_V4_TYPE_BOND_STATUS_REQ,
-    ESPNOW_V4_TYPE_BOND_STATUS_RESP, ESPNOW_V4_TYPE_SCHEMA_REQ, ESPNOW_V4_TYPE_BOND_STREAM_CTRL,
+    ESPNOW_V4_TYPE_BOND_MANIFEST_REQ, ESPNOW_V4_TYPE_BOND_SETTINGS_REQ, ESPNOW_V4_TYPE_BOND_STATUS_REQ,
+    ESPNOW_V4_TYPE_BOND_STATUS_RESP, ESPNOW_V4_TYPE_BOND_SCHEMA_REQ, ESPNOW_V4_TYPE_BOND_STREAM_CTRL,
     ESPNOW_V4_TYPE_BOND_SENSOR_DATA, ESPNOW_V4_TYPE_BOND_POWER_STATUS, ESPNOW_V4_TYPE_BOND_EVENT_PUSH,
     ESPNOW_V4_TYPE_BOND_REQUEST, ESPNOW_V4_TYPE_BOND_NOTICE, ESPNOW_V4_TYPE_BOND_SENSOR_STATUS };
   for (uint8_t type : linkLocal) {
@@ -1655,8 +1655,10 @@ static void testNoPlaintextFrameIsAcked() {
   reset(true);
   deliver(gPeerB, plainFrame(ESPNOW_V4_TYPE_TOPO_REQ, gPeerB, 1301, Frame(ESPNOW_V4_MINLEN_TOPO_REQ, 0)));
   deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_TOPO_REQ, gPeerB, 1302, Frame(ESPNOW_V4_MINLEN_TOPO_REQ, 0)));
-  check("TOPO_REQ: plaintext dropped, group-tagged delivered (1.0 step 5a tags TOPO_*)",
-        calls("v4h_topo_req") == 1 && gEspNowRxPlaintextDrops == 1);
+  check("TOPO_REQ: plaintext dropped at the gate, group-tagged refused by the row (sealed since 1.0 step 9)",
+        calls("v4h_topo_req") == 0 && gEspNowRxPlaintextDrops == 1);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_TOPO_REQ, gPeerB, 1303, Frame(ESPNOW_V4_MINLEN_TOPO_REQ, 0)));
+  check("TOPO_REQ: sealed in the peer's session reaches its handler", calls("v4h_topo_req") == 1);
 }
 
 // The sender side: a waiter takes only the ACK it can trust.

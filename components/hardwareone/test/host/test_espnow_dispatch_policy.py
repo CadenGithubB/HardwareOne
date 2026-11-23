@@ -50,15 +50,15 @@ from test_web_batch_handlers import extract_block  # noqa: E402
 
 ZERO_FLAG_ALLOWED = ('KEY_EX_HELLO', 'KEY_EX_REPLY', 'KEY_EX_CONFIRM',
                      'SESSION_OPEN', 'SESSION_CONFIRM', 'SESSION_REKEY',
-                     'TOPO_REQ', 'TOPO_START', 'TOPO_PEER')
+                     )  # TOPO_* left the list in 1.0 step 9 (sealed: PAIRED + SESSION_ENC)
 
 # The rows of the table's ENABLE_BONDED_MODE block: accepted only from the
 # configured bond partner. A row added to or removed from that block must be
 # added here or removed, so it gets the partner cases.
 BOND_OPCODES = ('BOND_HEARTBEAT', 'BOND_STREAM_CTRL', 'BOND_CAP_REQ', 'BOND_CAP_RESP',
-                'BOND_SENSOR_DATA', 'BOND_POWER_STATUS', 'BOND_EVENT_PUSH', 'BOND_SENSOR_STATUS', 'SETTINGS_REQ',
-                'SCHEMA_REQ',
-                'BOND_STATUS_REQ', 'BOND_STATUS_RESP', 'MANIFEST_REQ')
+                'BOND_SENSOR_DATA', 'BOND_POWER_STATUS', 'BOND_EVENT_PUSH', 'BOND_SENSOR_STATUS', 'BOND_SETTINGS_REQ',
+                'BOND_SCHEMA_REQ',
+                'BOND_STATUS_REQ', 'BOND_STATUS_RESP', 'BOND_MANIFEST_REQ')
 # The rows of the table's second ENABLE_BONDED_MODE block, the bond agreement:
 # accepted from any paired peer over its session (no REQ_BOND_PEER), because
 # the receiver may not have the sender as its partner. A source from before
@@ -74,18 +74,18 @@ EXPECTED_MINLEN = {
     'KEY_EX_HELLO': 72, 'KEY_EX_REPLY': 72, 'KEY_EX_CONFIRM': 34,
     'SESSION_OPEN': 154, 'SESSION_CONFIRM': 162, 'SESSION_REKEY': 146,
     'SESSION_UNKNOWN': 12, 'TIME_SYNC': 16,
-    'TEXT': 1, 'CMD': 1, 'CMD_RESP': 5, 'USER_SYNC': 1, 'STREAM': 6,
+    'TEXT': 1, 'CMD': 5, 'CMD_RESP': 5, 'USER_SYNC': 9, 'STREAM': 6,
     'RELAY_DATA': 40, 'PEER_LIST': 4, 'HEARTBEAT': 56, 'PAIR_BEACON': 36,
     'PAIR_REQUEST': 72, 'PAIR_ACCEPT': 40, 'PAIR_REJECT': 40,
     'SENSOR_STATUS': 16, 'SENSOR_REQ': 20, 'BOND_SENSOR_STATUS': 16,
     'SENSOR_ENVELOPE': 13, 'BOND_SENSOR_DATA': 13,
     'POWER_STATUS': 24, 'BOND_POWER_STATUS': 24, 'EVENT_PUSH': 128, 'BOND_EVENT_PUSH': 128,
     'FORWARD_LINK': 96, 'TOPO_REQ': 8, 'TOPO_START': 8, 'TOPO_PEER': 47,
-    'METADATA_REQ': 0, 'BOND_CAP_REQ': 0, 'SETTINGS_REQ': 0, 'SCHEMA_REQ': 0, 'BOND_STATUS_REQ': 0,
-    'MANIFEST_REQ': 0, 'METADATA_RESP': 202, 'METADATA_PUSH': 202,
+    'METADATA_REQ': 0, 'BOND_CAP_REQ': 0, 'BOND_SETTINGS_REQ': 0, 'BOND_SCHEMA_REQ': 0, 'BOND_STATUS_REQ': 0,
+    'BOND_MANIFEST_REQ': 0, 'METADATA_RESP': 202, 'METADATA_PUSH': 202,
     'FILE_START': 13, 'FILE_DATA': 9, 'FILE_END': 16, 'FILE_RESULT': 12, 'FILE_CANCEL': 5,
-    'FS_LIST_REQ': 144, 'FS_LIST_REPLY': 140, 'FS_STAT_REQ': 140, 'FS_GET_REQ': 140, 'FS_GET_ACK': 140,
-    'FS_STAT_REPLY': 164, 'BOND_HEARTBEAT': 24, 'BOND_STREAM_CTRL': 4, 'BOND_CAP_RESP': 84,
+    'FS_LIST_REQ': 144, 'FS_LIST_RESP': 140, 'FS_STAT_REQ': 140, 'FS_GET_REQ': 140, 'FS_GET_RESP': 140,
+    'FS_STAT_RESP': 164, 'BOND_HEARTBEAT': 24, 'BOND_STREAM_CTRL': 4, 'BOND_CAP_RESP': 84,
     'BOND_STATUS_RESP': 28, 'BOND_REQUEST': 8, 'BOND_NOTICE': 8,
     # File catch-up (2026-11-19): paired + session rows outside the bond blocks.
     'CATCHUP_LIST_REQ': 16, 'CATCHUP_LIST_RESP': 24, 'CATCHUP_READ_REQ': 24, 'CATCHUP_READ_RESP': 20,

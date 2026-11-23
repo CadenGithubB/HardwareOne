@@ -234,7 +234,7 @@ static inline void statsObserveDepth(UBaseType_t depth) {
 // MAX_RETRIES per fragment), and while the single dispatcher sits in that wait
 // no other task's single-frame job is drained: sensor envelopes, bond
 // heartbeats and RX-side replies then fail at submit() once the queue fills.
-// cmd_exec sends the long ones (CMD_RESP up to 4 KB, FS_LIST_REPLY 2.5 KB), is
+// cmd_exec sends the long ones (CMD_RESP up to 4 KB, FS_LIST_RESP 2.5 KB), is
 // blocked for the whole send anyway and has the stack for the deep send path,
 // so their fragment loop runs there and the dispatcher keeps serving single
 // frames. Another task's synchronous multi-frame job (the FS RPC requests from

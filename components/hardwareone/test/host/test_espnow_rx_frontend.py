@@ -368,7 +368,7 @@ def main():
     # The 1.0 ACK frame (step 5a), the parts outside this harness: the plaintext
     # ACK senders are gone, the ACK builder seals with the REKEYING exception or
     # group-tags, no frame but the handshake is ever sent plaintext, the
-    # handshake frames carry no ACK_REQ, and TOPO_* is group-tagged.
+    # handshake frames carry no ACK_REQ, and TOPO_* is sealed (step 9).
     for gone in ('v4_send_ack(', 'v4_send_frag_ack('):
         if gone in source:
             failures.append(f'the plaintext ACK path {gone[:-1]} is still in System_ESPNow.cpp')
@@ -380,9 +380,12 @@ def main():
         failures.append('v4_send_frame_ex can still put a non-handshake frame on the air plaintext')
     if 'ESPNOW_V4_FLAG_ACK_REQ' in read('System_ESPNow_Handlers_Crypto.cpp'):
         failures.append('a handshake frame (System_ESPNow_Handlers_Crypto.cpp) still asks for an ACK')
+    # 1.0 step 9: TOPO_* are sealed, sent through the smart path, never tagged.
     for topo in ('TOPO_REQ', 'TOPO_START', 'TOPO_PEER'):
-        if not re.search(r'v4_send_frame\(dst, ESPNOW_V4_TYPE_' + topo + r', ESPNOW_V4_FLAG_BROADCAST_AUTH,', source):
-            failures.append(f'{topo} is not sent group-tagged')
+        if not re.search(r'v4_send_payload_smart\(dst, ESPNOW_V4_TYPE_' + topo + r',', source):
+            failures.append(f'{topo} is not sent sealed (v4_send_payload_smart)')
+        if re.search(r'v4_send_frame\(\w+, ESPNOW_V4_TYPE_' + topo + r',', source):
+            failures.append(f'{topo} is still sent group-tagged')
     # Review of step 5a: the ACKs queued while a fragmented send waits go out
     # from inside the wait (on the dispatcher), and a refusal ACK counts the
     # session as alive.

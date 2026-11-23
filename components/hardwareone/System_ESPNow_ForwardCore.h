@@ -100,7 +100,9 @@ constexpr uint8_t streamsForTarget(uint8_t kind) {
 //                  number (0: none this boot). A query: 0
 //   2  viaBootTag  B's boot tag (an answer echoes it; 0 in a query)
 //   4  streams     bit 0 readings, bit 1 battery, bit 2 events (echoed)
-//   5  result      answer only (kResult*)
+//   5  result      answer only (kResult*): 0 ok (accepted, or the withdrawal
+//                  done), else a shared status (5 no_slot, 6 bad_request) or
+//                  this frame's own code (16 and up); 1.0 step 9 (rule F3)
 //   6  answers     answer only: the op answered (1 or 2)
 //   7  announceGen announce: B's announcement number for this master, 1..255,
 //                  stepped on every announcement B sends (a re-send and the
@@ -131,19 +133,17 @@ constexpr uint8_t kOpWithdraw = 2;
 constexpr uint8_t kOpQuery    = 3;
 constexpr uint8_t kOpAnswer   = 4;
 
-constexpr uint8_t kResultNone        = 0;
-constexpr uint8_t kResultAccepted    = 1;
-constexpr uint8_t kResultWithdrawn   = 2;
-constexpr uint8_t kResultNotReceiver = 3;
-constexpr uint8_t kResultBadPartner  = 4;
-constexpr uint8_t kResultKeyMismatch = 5;
-constexpr uint8_t kResultFull        = 6;
-constexpr uint8_t kResultStale       = 7;
-// 8 is never sent (it was "not allowed" while the mesh master kept a list of
-// the devices that may forward to it, removed before any release); a bond
-// master reads it as any refusal it does not know.
-constexpr uint8_t kResultNameTaken   = 9;
-constexpr uint8_t kResultCount       = 10;
+// The answer's result (1.0 step 9, rule F3: 0 = ok, the shared status table
+// 1-15 of System_ESPNow_AnswerCore.h, then this frame's own codes from 16).
+// Any other value reads as a refusal this firmware does not know.
+constexpr uint8_t kResultOk          = 0;   // the announcement accepted, or the withdrawal done
+constexpr uint8_t kResultAccepted    = kResultOk;
+constexpr uint8_t kResultFull        = 5;   // shared no_slot: it already keeps the links of 16 devices
+constexpr uint8_t kResultBadPartner  = 6;   // shared bad_request: the partner's address or key is not valid
+constexpr uint8_t kResultNotReceiver = 16;
+constexpr uint8_t kResultKeyMismatch = 17;
+constexpr uint8_t kResultStale       = 18;
+constexpr uint8_t kResultNameTaken   = 19;
 
 struct LinkFrame {
   uint8_t  op;
@@ -207,7 +207,6 @@ inline bool parseLinkFrame(const uint8_t* in, size_t len, LinkFrame& f) {
 inline const char* resultKey(uint8_t result) {
   switch (result) {
     case kResultAccepted:    return "accepted";
-    case kResultWithdrawn:   return "withdrawn";
     case kResultNotReceiver: return "not_receiver";
     case kResultBadPartner:  return "bad_partner";
     case kResultKeyMismatch: return "key_mismatch";
@@ -222,7 +221,6 @@ inline const char* resultKey(uint8_t result) {
 inline const char* resultText(uint8_t result) {
   switch (result) {
     case kResultAccepted:    return "accepted";
-    case kResultWithdrawn:   return "the link was ended there";
     case kResultNotReceiver: return "it is not a mesh master or backup master";
     case kResultBadPartner:  return "the partner's address or key is not valid";
     case kResultKeyMismatch: return "it has the partner paired under another key";
@@ -478,7 +476,8 @@ struct TargetState {
   uint8_t  acceptedStreams; // what the answer echoed, within what was announced
   SensorMask acceptedMask;
   uint8_t  announceGen;     // the number of the last announcement sent (0: none yet)
-  uint8_t  lastResult;      // of the last answer to an announcement (0: none)
+  uint8_t  lastResult;      // of the last answer to an announcement (valid when haveResult)
+  bool     haveResult;      // an announcement was answered (kResultOk is 0)
   uint8_t  backoff;
   bool     queried;
   uint32_t nextMs;
@@ -627,6 +626,7 @@ inline AnswerEffect targetAnswer(TargetState& t, const LinkFrame& a, uint16_t my
       return AnswerEffect::Ignored;
     }
     t.lastResult = a.result;
+    t.haveResult = true;
     if (a.result == kResultAccepted) {
       t.state = TState::Accepted;
       t.acceptedStreams = (uint8_t)(a.streams & t.streams);

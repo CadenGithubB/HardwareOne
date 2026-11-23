@@ -89,7 +89,7 @@ static const Mac kA = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01};
 static const Mac kB = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x02};  // sorts between kA and kC
 static const Mac kC = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x03};
 static const Mac kElsewhere = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60};  // never a folder
-static const uint32_t kBondedAt = 1762560000u;
+static const uint64_t kBondedAt = 1762560000000ull;   // pairedEpochMs (1.0 step 9)
 
 static std::string macText(const Mac& m, const char* format) {
   char text[18];
@@ -108,9 +108,10 @@ static std::string identityText(const Mac& inside, unsigned meshId) {
   for (unsigned i = 0; i < 32; ++i) std::snprintf(pub + i * 2, 3, "%02x", (inside[5] + i) & 0xFFu);
   char text[320];
   std::snprintf(text, sizeof(text),
-                "{\"version\":2,\"mac\":\"%s\",\"meshId\":%u,\"longTermPubEd25519_hex\":\"%s\","
-                "\"bondedAtSec\":%lu,\"lastSeenSec\":%lu,\"subscribedEvents\":5}",
-                display(inside).c_str(), meshId, pub, (unsigned long)kBondedAt, (unsigned long)kBondedAt + 60);
+                "{\"schema\":1,\"mac\":\"%s\",\"meshId\":%u,\"longTermPubEd25519_hex\":\"%s\","
+                "\"pairedEpochMs\":%llu,\"lastSeenEpochMs\":%llu}",
+                display(inside).c_str(), meshId, pub, (unsigned long long)kBondedAt,
+                (unsigned long long)kBondedAt + 60000u);
   return text;
 }
 static void store(const Mac& m, unsigned meshId) { fake_vfs::fs().put(jsonPath(m), identityText(m, meshId)); }
@@ -174,8 +175,8 @@ static void loadsOne() {
   check(p != nullptr, "one stored identity: in the cache under its address");
   check(p && p->meshId == 3, "one stored identity: cached with its mesh slot");
   check(p && p->valid && p->longTermPub[0] == kA[5] && p->longTermPub[31] == kA[5] + 31 &&
-            p->bondedAtSec == kBondedAt,
-        "one stored identity: cached with its key and pairing time (a leftover subscribedEvents key is ignored)");
+            p->pairedEpochMs == kBondedAt,
+        "one stored identity: cached with its key and pairing time");
   check(cachedCount() == 1, "one stored identity: nothing else in the cache");
   check(warnings() == 0, "one stored identity: no warning");
   check(peerIdentitySlotCount() == 16, "the cache has 16 slots");
@@ -372,7 +373,7 @@ static void forget() {
   reset();
   fake_vfs::Fs& fs = fake_vfs::fs();
   store(kA, 1);
-  fs.put(tmpPath(kA), "{\"version\":2");
+  fs.put(tmpPath(kA), "{\"schema\":1");
   store(kC, 2);
   check(peerIdentityLoadAll() == 2 && peerIdentitiesLoaded(), "two stored identities are read before the forget");
   check(peerIdentityForget(kA.data()), "forget reports success");
@@ -401,7 +402,7 @@ static void forgetCannotRemove() {
 static void rereadAfterRepair() {
   reset();
   store(kA, 1);
-  fake_vfs::fs().put(jsonPath(kB), "{\"version\":2,\"mac\":");
+  fake_vfs::fs().put(jsonPath(kB), "{\"schema\":1,\"mac\":");
   check(peerIdentityLoadAll() == 1 && !peerIdentitiesLoaded(), "a bad file leaves the identities not marked as read");
   peerIdentityForget(kB.data());  // the command the warning names
   check(!fake_vfs::fs().exists(folder(kB)), "forget removes a stored identity that never reached the cache");

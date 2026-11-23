@@ -259,7 +259,7 @@ def main():
         for name in ('System_ESPNow_Wire.h', 'System_ESPNow_RxCtx.h', 'System_ESPNow_Verdict.h', 'System_MacText.h',
                      'System_ESPNow_SensorCore.h', 'System_ESPNow_TimeCore.h', 'System_ClockCore.h',
                      'System_ESPNow_PowerEventCore.h', 'System_ESPNow_ForwardCore.h',
-                     'System_ESPNow_AnswerCore.h', 'System_ESPNow_CatchupCore.h', 'System_DeviceName.h'):
+                     'System_ESPNow_AnswerCore.h', 'System_ESPNow_CatchupCore.h', 'System_ESPNow_CredentialCore.h', 'System_DeviceName.h'):
             shutil.copyfile(path_of(name), d / name)
         unit, exe = d / 'espnow_file_transfer.cpp', d / 'espnow_file_transfer'
         unit.write_text(harness)

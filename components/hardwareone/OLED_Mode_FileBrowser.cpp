@@ -36,7 +36,7 @@
 #endif
 
 #if ENABLE_ESPNOW
-#include "System_ESPNow_Wire.h"     // V4PayloadFsListReplyHeader, V4PayloadFsEntry, FsListStatus
+#include "System_ESPNow_Wire.h"     // V4PayloadFsListRespHeader, V4PayloadFsEntry, FsListStatus
 #include "System_ESPNow_FsList.h"   // fsListSendRequest / fsGetSendRequest / fsListCancel
 #include "System_BondedPeer.h"      // BondedPeer::isPaired, peerMacBytes
 #include "System_CommandTypes.h"    // ExecReq::DeferredFn (submitDeferredToCmdExec)
@@ -411,7 +411,7 @@ static void firePickerCallback(const char* fullPath, bool cancelled) {
 //   LOCAL    — full VFS root, includes /sd as a virtual mount
 //   SD_QUICK — jumps straight to /sd (saves the user a few presses)
 //   PEER     — the bonded peer's filesystem, fetched via the FS_LIST_REQ /
-//              FS_LIST_REPLY ESP-NOW opcodes (see System_ESPNow_FsList.h)
+//              FS_LIST_RESP ESP-NOW opcodes (see System_ESPNow_FsList.h)
 //
 // X button rotates through sources. Source indicator appears in the header.
 //
@@ -537,7 +537,7 @@ static volatile FsGetUi sGetUi = FsGetUi::NONE;
 // Reply callback — runs on BTC_TASK (tiny stack). Keep this minimal: copy
 // the data into our buffers and let the next render frame pick it up.
 static void onPeerListReply(const uint8_t peerMac[6],
-                            const V4PayloadFsListReplyHeader* hdr,
+                            const V4PayloadFsListRespHeader* hdr,
                             const V4PayloadFsEntry* entries) {
   if (!hdr) return;
   // Stale reply (we cancelled, or the user navigated since we sent). Drop.
@@ -656,7 +656,7 @@ static void peerNavigateTo(const char* newPath) {
 
 // FS_GET ack — BTC_TASK context. Record terminal feedback only (no VFS/display).
 // On OK the peer begins a FILE_* transfer that lands via the normal inbound path.
-static void onEspNowGetAck(const uint8_t /*peerMac*/[6], const V4PayloadFsGetAck* ack) {
+static void onEspNowGetAck(const uint8_t /*peerMac*/[6], const V4PayloadFsGetResp* ack) {
   // Toast the outcome (overlays any screen; the actual "Received" confirmation is
   // toasted from the inbound file-complete path once the bytes land). oledToastShow
   // is thread-safe + self-marks dirty, so it's safe from this BTC_TASK callback.
@@ -1101,7 +1101,7 @@ void displayFileBrowserRendered() {
   if (!oledDisplay || !oledConnected) return;
 
 #if ENABLE_ESPNOW
-  // PEER source — render from sPeerEntries (populated via FS_LIST_REPLY).
+  // PEER source — render from sPeerEntries (populated via FS_LIST_RESP).
   if (sCurrentSource == FsSource::PEER) {
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);

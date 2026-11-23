@@ -380,7 +380,7 @@ static void masterOnWorkerCapReq();
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_CAP_REQ = 1;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_HEARTBEAT = 2;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_CAP_RESP = 3;
-static constexpr uint8_t ESPNOW_V4_TYPE_MANIFEST_REQ = 4;
+static constexpr uint8_t ESPNOW_V4_TYPE_BOND_MANIFEST_REQ = 4;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_STATUS_REQ = 6;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_STATUS_RESP = 7;
 static constexpr uint8_t ESPNOW_V4_TYPE_BOND_REQUEST = 8;
@@ -401,21 +401,22 @@ static void noteFrame(const uint8_t* mac, uint8_t type) {
   gFrames.push_back(f);
 }
 // Every BOND_REQUEST and BOND_NOTICE the device sends, with what it says
-// (request: role, flags; notice: reason, role). `direct` marks the one sent
+// (request: b0 role, b1 flags; notice: b0 status, b1 role, b4 flags; `seq` is
+// the frame's reqId, 1.0 step 9: u32 at offset 0). `direct` marks the one sent
 // from the command itself (v4_send_session_wrapped) instead of the send queue.
-struct AgreeFrame { uint8_t mac[6]; uint8_t type; uint8_t b0; uint8_t b1; uint16_t seq; uint8_t b4; bool held; bool direct; };
+struct AgreeFrame { uint8_t mac[6]; uint8_t type; uint8_t b0; uint8_t b1; uint32_t seq; uint8_t b4; bool held; bool direct; };
 static std::vector<AgreeFrame> gAgreeFrames;
 static void noteAgreeFrame(const uint8_t* mac, uint8_t type, const uint8_t* payload, uint16_t len, bool direct) {
   if (type != ESPNOW_V4_TYPE_BOND_REQUEST && type != ESPNOW_V4_TYPE_BOND_NOTICE) return;
   AgreeFrame f{};
   std::memcpy(f.mac, mac, 6);
   f.type = type;
-  if (payload && len >= 4) {
-    f.b0 = payload[0];
-    f.b1 = payload[1];
-    std::memcpy(&f.seq, payload + 2, 2);
+  if (payload && len >= 8) {
+    std::memcpy(&f.seq, payload, 4);
+    f.b0 = payload[4];
+    f.b1 = payload[5];
+    if (type == ESPNOW_V4_TYPE_BOND_NOTICE) f.b4 = payload[6];  // a notice's flags
   }
-  if (payload && len >= 5) f.b4 = payload[4];  // a notice's flags
   f.held = bondPartnerChanging();
   f.direct = direct;
   gAgreeFrames.push_back(f);
@@ -1154,7 +1155,7 @@ static void caseSwitchHoldsTick() {
   CHECK(forB == 0, "X5 the tick recorded A's manifest for the new partner B during bondconnect (%zu)", forB);
   CHECK(heldFrames() == 0, "X5 %zu bond frames were sent while the partner change held bond frames "
         "(heartbeats %zu, MANIFEST_REQ %zu)", heldFrames(), heldFrames(ESPNOW_V4_TYPE_BOND_HEARTBEAT),
-        heldFrames(ESPNOW_V4_TYPE_MANIFEST_REQ));
+        heldFrames(ESPNOW_V4_TYPE_BOND_MANIFEST_REQ));
   size_t heldClears = 0;
   for (const auto& c : gSessionClears) heldClears += c.held;
   CHECK(heldClears == 0 && heldPosts(SYSEVT_BOND_OFFLINE) == 0,
@@ -1368,7 +1369,7 @@ static void caseTickWaitsThroughSwitch() {
         "X5 a partner change during the manifest lookup: A's cache hit marked B's manifest as received");
   size_t forB = 0;
   for (const auto& h : gManifestHits) forB += macEquals(h.mac, kPartnerB);
-  CHECK(forB == 0 && framesTo(kPartnerB, ESPNOW_V4_TYPE_MANIFEST_REQ, false) == 0,
+  CHECK(forB == 0 && framesTo(kPartnerB, ESPNOW_V4_TYPE_BOND_MANIFEST_REQ, false) == 0,
         "X5 a partner change during the manifest lookup: B got A's manifest reference or a MANIFEST_REQ");
 }
 

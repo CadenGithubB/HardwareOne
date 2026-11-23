@@ -33,23 +33,23 @@ static void advance(uint32_t ms, const std::function<void()>& everyStep = nullpt
 }
 
 // ---- Frames from a peer, through the receive table's conditions --------------------
-static void rxRequest(const uint8_t* src, uint8_t role, uint8_t flags, uint16_t seq) {
+static void rxRequest(const uint8_t* src, uint8_t role, uint8_t flags, uint32_t seq) {
   if (!bondSessionActiveWith(src)) return;   // REQ_SESSION_ENC
   V4PayloadBondRequest rq = {};
   rq.role = role;
   rq.flags = flags;
-  rq.seq = seq;
+  rq.reqId = seq;
   esp_now_recv_info info{src};
   V4RxCtx ctx{&info, reinterpret_cast<const uint8_t*>(&rq), sizeof(rq), "peer"};
   v4h_bond_request(ctx);
 }
 
-static void rxNotice(const uint8_t* src, uint8_t reason, uint8_t role, uint16_t seq, uint8_t flags = 0) {
+static void rxNotice(const uint8_t* src, uint8_t status, uint8_t role, uint32_t seq, uint8_t flags = 0) {
   if (!bondSessionActiveWith(src)) return;
   V4PayloadBondNotice n = {};
-  n.reason = reason;
+  n.status = status;   // the wire status (BondNoticeStatus: 0 accepted, 16-19)
   n.role = role;
-  n.seq = seq;
+  n.reqId = seq;
   n.flags = flags;
   esp_now_recv_info info{src};
   V4RxCtx ctx{&info, reinterpret_cast<const uint8_t*>(&n), sizeof(n), "peer"};
@@ -121,7 +121,7 @@ static void bondedToA(const uint8_t self[6], uint8_t role) {
 // The request this device sends once A's session is up; returns its number.
 // The side that started the handshake (the higher address) asks at once, the
 // side that answered it a second later.
-static uint16_t sessionUpAndRequest(const uint8_t* partner) {
+static uint32_t sessionUpAndRequest(const uint8_t* partner) {
   bondNotifySessionEstablished(partner);
   tick();
   if (sessionIsASide(gSelfMac, partner)) advance(bondagree::kSessionSettleMs);
@@ -141,7 +141,7 @@ static size_t authLinesWith(const char* text, size_t from = 0) {
 // ACCEPTED; A's ACCEPTED changes nothing more. Once agreed nothing is asked.
 static void caseMutual() {
   bondedToA(kMasterSelf, BOND_ROLE_MASTER);
-  const uint16_t seq = sessionUpAndRequest(kPeerA);
+  const uint32_t seq = sessionUpAndRequest(kPeerA);
   const AgreeFrame* rq = lastAgreeFrame(kPeerA, ESPNOW_V4_TYPE_BOND_REQUEST);
   CHECK(requestsTo(kPeerA) == 1 && rq && seq != 0 && rq->b0 == BOND_ROLE_MASTER &&
         (rq->b1 & BOND_REQUEST_FLAG_FRESH) && !rq->direct,
@@ -224,7 +224,7 @@ static void caseRequestFromNonPartner() {
   // Bonded to A and agreed: B's request is answered BONDED_ELSEWHERE. Neither
   // the frame (8 bytes: reason, role, number) nor the line names A.
   bondedToA(kMasterSelf, BOND_ROLE_MASTER);
-  const uint16_t seq = sessionUpAndRequest(kPeerA);
+  const uint32_t seq = sessionUpAndRequest(kPeerA);
   rxNotice(kPeerA, BOND_NOTICE_ACCEPTED, BOND_ROLE_WORKER, seq);
   tick();
   const size_t lines = gEventLines.size();
@@ -286,7 +286,7 @@ static void caseRequestFromNonPartner() {
   gSessionDownFor = kPeerB;
   const size_t frames = gFrames.size();
   V4PayloadBondRequest rq = {};
-  rq.seq = 10;
+  rq.reqId = 10;
   esp_now_recv_info info{kPeerB};
   V4RxCtx ctx{&info, reinterpret_cast<const uint8_t*>(&rq), sizeof(rq), "peer"};
   v4h_bond_request(ctx);
@@ -296,13 +296,16 @@ static void caseRequestFromNonPartner() {
 
   // A short frame and a request numbered 0 are not requests.
   bondedToA(kMasterSelf, BOND_ROLE_MASTER);
-  rq.seq = 0;
+  rq.reqId = 0;
   esp_now_recv_info infoA{kPeerA};
   V4RxCtx zero{&infoA, reinterpret_cast<const uint8_t*>(&rq), sizeof(rq), "peer"};
   v4h_bond_request(zero);
   V4RxCtx shortFrame{&infoA, reinterpret_cast<const uint8_t*>(&rq), sizeof(rq) - 1, "peer"};
   v4h_bond_request(shortFrame);
-  v4h_bond_notice(shortFrame);
+  // A short notice never reaches its handler: the receive table drops a frame
+  // under the row's minimum, which is the struct's size (espnow_wire_layout and
+  // espnow_dispatch_policy pin it). 1.0 step 9: a zero-filled notice would read
+  // status 0, accepted, so it is not fed to the handler here.
   bondNotifySessionEstablished(kPeerC);          // someone else's session: not ours to ask
   tick();
   CHECK(noticesTo(kPeerA) == 0 && agreementState() == BOND_AGREEMENT_UNKNOWN,
@@ -313,7 +316,7 @@ static void caseRequestFromNonPartner() {
 // is to the last request sent.
 static void caseNoticeFromNonPartner() {
   bondedToA(kMasterSelf, BOND_ROLE_MASTER);
-  const uint16_t seq = sessionUpAndRequest(kPeerA);
+  const uint32_t seq = sessionUpAndRequest(kPeerA);
   rxNotice(kPeerA, BOND_NOTICE_ACCEPTED, BOND_ROLE_WORKER, seq);
   tick();
   const size_t lines = gEventLines.size();
@@ -330,7 +333,7 @@ static void caseNoticeFromNonPartner() {
 
   // The partner's answer to an older request, and a reason this firmware does
   // not know, are not used either.
-  rxNotice(kPeerA, BOND_NOTICE_NOT_BONDED, BOND_ROLE_WORKER, (uint16_t)(seq + 100));
+  rxNotice(kPeerA, BOND_NOTICE_NOT_BONDED, BOND_ROLE_WORKER, (uint32_t)(seq + 100));
   tick();
   rxNotice(kPeerA, 99, BOND_ROLE_WORKER, 0);
   tick();
@@ -352,7 +355,7 @@ static void caseNoticeFromNonPartner() {
 static void caseEndedStopsTheCycle() {
   bondedToA(kMasterSelf, BOND_ROLE_MASTER);
   gMaster.mac = kPeerA;                          // A answers the bond sync until it ends the bond
-  const uint16_t seq = sessionUpAndRequest(kPeerA);
+  const uint32_t seq = sessionUpAndRequest(kPeerA);
   rxNotice(kPeerA, BOND_NOTICE_ACCEPTED, BOND_ROLE_WORKER, seq);
   rxHeartbeat(kPeerA, BOND_ROLE_WORKER);
   tick();
@@ -370,7 +373,7 @@ static void caseEndedStopsTheCycle() {
   rxNotice(kPeerA, BOND_NOTICE_ENDED, BOND_ROLE_WORKER, 0);
   CHECK(gEspNow->bondPeerOnline, "the handler only keeps the notice");
   tick();
-  CHECK(agreementState() == BOND_AGREEMENT_DECLINED && bondAgreementView().reason == BOND_NOTICE_ENDED,
+  CHECK(agreementState() == BOND_AGREEMENT_DECLINED && bondAgreementView().reason == bondagree::kReasonEnded,
         "the partner's ENDED declines the bond");
   CHECK(!gEspNow->bondPeerOnline && gEspNow->lastBondHeartbeatReceivedMs == 0 && !isBondSynced() &&
         posted(SYSEVT_BOND_OFFLINE) == 1, "the partner is offline at once, with one offline event (%zu)",
@@ -417,7 +420,7 @@ static void caseEndedStopsTheCycle() {
     advance(60000);
   }
   CHECK(linesWith("has bond mode off") == 0 && linesWith("ended the bond") == 1 &&
-        posted(SYSEVT_BOND_OFFLINE) == 1 && bondAgreementView().reason == BOND_NOTICE_ENDED,
+        posted(SYSEVT_BOND_OFFLINE) == 1 && bondAgreementView().reason == bondagree::kReasonEnded,
         "NOT_BONDED answers after ENDED add no line (%zu lines in all)", gEventLines.size());
 
   // A session that comes up again does not make a declined partner online.
@@ -492,7 +495,7 @@ static void caseOneSidedBond() {
 
   // The partner answers the first request: NOT_BONDED.
   bondedToA(kMasterSelf, BOND_ROLE_MASTER);
-  const uint16_t seq = sessionUpAndRequest(kPeerA);
+  const uint32_t seq = sessionUpAndRequest(kPeerA);
   CHECK(gEspNow->bondPeerOnline, "until the answer the session makes the partner online, as before");
   rxNotice(kPeerA, BOND_NOTICE_NOT_BONDED, BOND_ROLE_WORKER, seq);
   tick();
@@ -530,7 +533,7 @@ static void caseOneSidedBond() {
   // last one). The once-a-minute handshake start must not wait for that
   // request: nothing else brings the session back.
   bondedToA(kMasterSelf, BOND_ROLE_MASTER);
-  const uint16_t asked = sessionUpAndRequest(kPeerA);
+  const uint32_t asked = sessionUpAndRequest(kPeerA);
   rxNotice(kPeerA, BOND_NOTICE_NOT_BONDED, BOND_ROLE_WORKER, asked);
   tick();
   rxHeartbeat(kPeerA, BOND_ROLE_WORKER);
@@ -553,7 +556,7 @@ static void caseOneSidedBond() {
 // itself goes on as it does today.
 static void caseRoleConflict() {
   bondedToA(kMasterSelf, BOND_ROLE_MASTER);
-  const uint16_t seq = sessionUpAndRequest(kPeerA);
+  const uint32_t seq = sessionUpAndRequest(kPeerA);
   rxRequest(kPeerA, BOND_ROLE_MASTER, BOND_REQUEST_FLAG_FRESH, 5);
   tick();
   const AgreeFrame* answer = lastAgreeFrame(kPeerA, ESPNOW_V4_TYPE_BOND_NOTICE);
@@ -592,7 +595,7 @@ static void caseRoleConflict() {
 
   // The partner says ROLE_CONFLICT first (it saw our request before we saw its).
   bondedToA(kWorkerSelf, BOND_ROLE_WORKER);
-  const uint16_t seq2 = sessionUpAndRequest(kPeerA);
+  const uint32_t seq2 = sessionUpAndRequest(kPeerA);
   rxNotice(kPeerA, BOND_NOTICE_ROLE_CONFLICT, BOND_ROLE_WORKER, seq2);
   tick();
   CHECK(agreementState() == BOND_AGREEMENT_AGREED && bondAgreementView().roleConflict &&
@@ -885,7 +888,7 @@ static void caseEndedVoidsOlderRequest() {
     const size_t notices = noticesTo(kPeerA), frames = gFrames.size();
     rxRequest(kPeerA, BOND_ROLE_WORKER, 0, 8);
     tick();
-    CHECK(agreementState() == BOND_AGREEMENT_DECLINED && bondAgreementView().reason == BOND_NOTICE_ENDED &&
+    CHECK(agreementState() == BOND_AGREEMENT_DECLINED && bondAgreementView().reason == bondagree::kReasonEnded &&
           !gEspNow->bondPeerOnline, "the request from before the ENDED does not agree the bond again (same tick: %d)",
           sameTick);
     CHECK(linesWith("ended the bond") == 1 && linesWith("accepted the bond") == 1 && noticesTo(kPeerA) == notices &&
@@ -924,7 +927,7 @@ static void caseEndedVoidsOlderRequest() {
 
   // This device ends the bond: its ENDED names the last request it made.
   bondedToA(kMasterSelf, BOND_ROLE_MASTER);
-  const uint16_t asked = sessionUpAndRequest(kPeerA);
+  const uint32_t asked = sessionUpAndRequest(kPeerA);
   rxNotice(kPeerA, BOND_NOTICE_NOT_BONDED, BOND_ROLE_WORKER, asked);
   tick();
   advance(10000);
@@ -957,7 +960,7 @@ static void caseEndedVoidsOlderRequest() {
 // bond stands and asks at once, at most every 5 s.
 static void caseConnectAgainAsksAgain() {
   bondedToA(kMasterSelf, BOND_ROLE_MASTER);
-  const uint16_t asked = sessionUpAndRequest(kPeerA);
+  const uint32_t asked = sessionUpAndRequest(kPeerA);
   rxNotice(kPeerA, BOND_NOTICE_NOT_BONDED, BOND_ROLE_WORKER, asked);
   tick();
   advance(20000);                                // the next once-a-minute request is 40 s away
@@ -1023,7 +1026,7 @@ static void caseJsonText() {
   BondAgreementView view = bondAgreementView();
   CHECK(std::strcmp(bondAgreementKey(view), "unknown") == 0 && std::strcmp(bondAgreementReasonKey(view), "") == 0,
         "no answer yet: %s / %s", bondAgreementKey(view), bondAgreementReasonKey(view));
-  const uint16_t seq = sessionUpAndRequest(kPeerA);
+  const uint32_t seq = sessionUpAndRequest(kPeerA);
   rxNotice(kPeerA, BOND_NOTICE_ROLE_CONFLICT, BOND_ROLE_MASTER, seq);
   tick();
   view = bondAgreementView();
@@ -1132,7 +1135,7 @@ static void caseRoleChoice() {
 
   // The same from A's notice (its request was lost): yield, then ask again.
   bondedToA(kMasterSelf, BOND_ROLE_MASTER);
-  const uint16_t seq = sessionUpAndRequest(kPeerA);
+  const uint32_t seq = sessionUpAndRequest(kPeerA);
   const size_t asked = requestsTo(kPeerA);
   rxNotice(kPeerA, BOND_NOTICE_ROLE_CONFLICT, BOND_ROLE_MASTER, seq, BOND_NOTICE_FLAG_ROLE_CHOSEN);
   tick();
@@ -1236,7 +1239,7 @@ static void caseNoBondBuild() {
 
   // A partner reflashed with bond mode: a new session with the bit asks at once.
   gCapsWord = withBond;
-  const uint16_t seq = sessionUpAndRequest(kPeerA);
+  const uint32_t seq = sessionUpAndRequest(kPeerA);
   CHECK(requestsTo(kPeerA) == 1 && seq != 0, "a session whose word has the bond bit asks again (%zu requests)",
         requestsTo(kPeerA));
   view = bondAgreementView();

@@ -1683,17 +1683,18 @@ void oledEspNowRefreshDeviceList() {
     snprintf(line1Bufs[i], sizeof(line1Bufs[0]), "%s %s",
              oledEspNowPeerGlyph(entry->state), entry->displayName);
     
-    // Line 2: room + encrypted flag, or MAC if no room
+    // Line 2: room + "E" while the peer's encrypted session is up (1.0 step 9:
+    // every paired device is encrypted; the registry keeps no flag), or MAC if no room
     if (entry->meta && entry->meta->room[0]) {
       // '?' after the room: announced by the peer, not accepted on this device.
       snprintf(line2Bufs[i], sizeof(line2Bufs[0]), " %s%s%s",
                entry->meta->room,
                espnowGroupRoomAccepted(entry->device->mac, entry->meta->room) ? "" : "?",
-               entry->device->encrypted ? " E" : "");
+               espnowSessionLive(entry->device->mac) ? " E" : "");
     } else {
       snprintf(line2Bufs[i], sizeof(line2Bufs[0]), " %02X%02X%02X%s",
                entry->device->mac[3], entry->device->mac[4], entry->device->mac[5],
-               entry->device->encrypted ? " E" : "");
+               espnowSessionLive(entry->device->mac) ? " E" : "");
     }
     
     oledScrollAddItem(&sEspNowDeviceListScroll, line1Bufs[i], line2Bufs[i], true, entry->device);

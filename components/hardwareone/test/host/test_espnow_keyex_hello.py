@@ -5,7 +5,7 @@ A HELLO's HMAC covers the mesh fingerprint, the sender MAC and the sender's
 public key, and nothing fresh: a recorded HELLO stays valid, and a copy with a
 new header msgId passes the dispatcher's duplicate ring. The receive handler
 must therefore not rewrite the peer identity file when the key and mesh are
-unchanged (the stored lastSeenSec moves forward once an hour at most), and must
+unchanged (the stored lastSeenEpochMs moves forward once an hour at most), and must
 act on at most one verified HELLO per sender MAC per interval, while a first
 HELLO, the initiator's own retry and a HELLO with a changed key are handled as
 before. A failed file write must leave the identity cache equal to the file.
@@ -120,8 +120,8 @@ def build_identity(ident):
     name = 'System_ESPNow_Identity.cpp'
     parts = [line(ident, r'^constexpr uint8_t kPeerSlots = \d+;', 'kPeerSlots'),
              line(ident, r'^EXT_RAM_BSS_ATTR PeerIdentity gPeerIdentities\[kPeerSlots\] = \{\};', 'gPeerIdentities')]
-    # The lastSeenSec refresh interval exists only on a tree that skips unchanged writes.
-    refresh = re.search(r'^constexpr uint32_t kPeerLastSeenRefreshSec = \d+;', ident, re.M)
+    # The lastSeenEpochMs refresh interval exists only on a tree that skips unchanged writes.
+    refresh = re.search(r'^constexpr uint64_t kPeerLastSeenRefreshMs = [^;]+;', ident, re.M)
     if refresh:
         parts.append(refresh.group(0))
     for marker in ('int findSlotByMac(', 'int findFreeSlot(',

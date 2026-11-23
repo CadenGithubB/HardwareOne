@@ -275,13 +275,13 @@ static Peer peer(uint8_t n, uint8_t k) {
 static uint8_t gLastHelloNonce[16];
 static void hello(const Peer& p, unsigned mesh = 0, bool forge = false, const uint8_t* nonce = nullptr) {
   V4PayloadKeyExHello msg{};
-  msg.meshFingerprint = gSettings.meshes[mesh].fingerprint;
+  msg.meshId = gSettings.meshes[mesh].fingerprint;
   std::memcpy(msg.senderMac, p.mac, 6);
   std::memcpy(msg.senderPubEd25519, p.pub, 32);
   if (nonce) std::memcpy(msg.nonce, nonce, 16);
   else espnowCryptoRandomBytes(msg.nonce, 16);
   std::memcpy(gLastHelloNonce, msg.nonce, 16);
-  computeHelloTag(msg.meshFingerprint, msg.senderMac, msg.senderPubEd25519, msg.nonce,
+  computeHelloTag(msg.meshId, msg.senderMac, msg.senderPubEd25519, msg.nonce,
                   gMeshKeys[mesh].bootstrapKey, msg.hmac);
   if (forge) msg.hmac[0] ^= 0x01;
   EspNowV4Header h{};
@@ -321,11 +321,11 @@ static V4PayloadKeyExReply gLastReply;
 static void replyFrom(const Peer& p, unsigned mesh = 0, const uint8_t* helloNonce = nullptr,
                       const V4PayloadKeyExReply* replay = nullptr) {
   V4PayloadKeyExReply msg{};
-  msg.meshFingerprint = gSettings.meshes[mesh].fingerprint;
+  msg.meshId = gSettings.meshes[mesh].fingerprint;
   std::memcpy(msg.responderMac, p.mac, 6);
   std::memcpy(msg.responderPubEd25519, p.pub, 32);
   espnowCryptoRandomBytes(msg.nonce, 16);
-  computeReplyTag(msg.meshFingerprint, msg.responderMac, msg.responderPubEd25519, msg.nonce, kSelfMac, gSelf.pub,
+  computeReplyTag(msg.meshId, msg.responderMac, msg.responderPubEd25519, msg.nonce, kSelfMac, gSelf.pub,
                   helloNonce ? helloNonce : gOurHelloNonce, gMeshKeys[mesh].bootstrapKey, msg.hmac);
   if (replay) msg = *replay;
   std::memcpy(gLastReplyNonce, msg.nonce, 16);
@@ -389,7 +389,7 @@ int main() {
   hello(a);
   check(replies() == 1 && gWrites == 1 && storedKeyIs(a, 0xA1) && gEvents == 1,
         "K1 a first HELLO gets its REPLY at once: one file write, one 'paired' event (preserved)");
-  check(gLastWritten.lastSeenSec == (uint32_t)gNowSec && gLastWritten.bondedAtSec == (uint32_t)gNowSec &&
+  check(gLastWritten.lastSeenEpochMs == (uint64_t)gNowSec * 1000u && gLastWritten.pairedEpochMs == (uint64_t)gNowSec * 1000u &&
         gLastWritten.meshId == 0,
         "K1 the stored record carries the mesh and the time (preserved)");
 
@@ -458,7 +458,7 @@ int main() {
   check(!gWindowOpen && gWindowUses == 1 && storedKeyIs(a, 0xA2) && gWrites == 2 && replies() == 2,
         "K5 once the interval has passed the changed key is taken through the window");
 
-  // K6 — the stored lastSeenSec moves forward once an hour at most, and never
+  // K6 — the stored lastSeenEpochMs moves forward once an hour at most, and never
   // to the reading of a clock that is not set.
   reset();
   hello(a);
@@ -470,9 +470,9 @@ int main() {
   gNowMs += 5000;
   gNowSec = paired + 3600;
   hello(a);
-  check(gWrites == 2 && gLastWritten.lastSeenSec == (uint32_t)(paired + 3600) &&
-        gLastWritten.bondedAtSec == (uint32_t)paired && replies() == 3 && gEvents == 1,
-        "K6 one hour later: lastSeenSec is written once, bondedAtSec kept");
+  check(gWrites == 2 && gLastWritten.lastSeenEpochMs == (uint64_t)(paired + 3600) * 1000u &&
+        gLastWritten.pairedEpochMs == (uint64_t)paired * 1000u && replies() == 3 && gEvents == 1,
+        "K6 one hour later: lastSeenEpochMs is written once, pairedEpochMs kept");
   gNowMs += 5000;
   gNowSec = paired + 3610;
   hello(a);
@@ -483,7 +483,7 @@ int main() {
   gNowSec = 40;
   hello(a);
   check(gWrites == 2 && replies() == 6 &&
-        peerIdentityFindByMac(a.mac)->lastSeenSec == (uint32_t)(paired + 3600),
+        peerIdentityFindByMac(a.mac)->lastSeenEpochMs == (uint64_t)(paired + 3600) * 1000u,
         "K6 then not again, and not with an unset clock (FAILS ON BASE)");
 
   // K7 (1.0 step 4 review) — the same key on another mesh slot does not move
@@ -714,7 +714,7 @@ int main() {
   auto confirmFrom = [](const Peer& from, uint8_t status, const espnowhs::KeyExContext& c, bool forge,
                         unsigned mesh = 0) {
     V4PayloadKeyExConfirm conf{};
-    conf.meshFingerprint = gSettings.meshes[mesh].fingerprint;
+    conf.meshId = gSettings.meshes[mesh].fingerprint;
     std::memcpy(conf.confirmerMac, from.mac, 6);
     conf.status = status;
     std::memcpy(conf.keyId, from.pub, 8);
@@ -825,7 +825,7 @@ int main() {
     std::memcpy(full.initPub, a1.pub, 32);
     std::memcpy(full.respPub, gSelf.pub, 32);
     uint8_t wantReply[16];
-    computeReplyTag(ours.meshFingerprint, kSelfMac, gSelf.pub, ours.nonce, a1.mac, a1.pub, gLastHelloNonce,
+    computeReplyTag(ours.meshId, kSelfMac, gSelf.pub, ours.nonce, a1.mac, a1.pub, gLastHelloNonce,
                     gMeshKeys[0].bootstrapKey, wantReply);
     check(std::memcmp(wantReply, ours.hmac, 16) == 0, "K24 our REPLY is tagged over the HELLO it answers");
     espnowhs::KeyExContext wrong = full;

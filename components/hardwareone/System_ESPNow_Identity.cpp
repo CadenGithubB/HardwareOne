@@ -135,7 +135,7 @@ bool writeIdentityFile(const EspNowIdentity& id) {
   doc["version"]                       = kIdentityFileVersion;
   doc["ed25519_pub_hex"]               = pubHex;
   doc["ed25519_secret_encrypted"]      = secEncrypted;
-  doc["createdAtSec"]                  = id.createdAtSec;
+  doc["createdEpochMs"]                = id.createdEpochMs;
   doc["regenCount"]                    = id.regenCount;
 
   FsLockGuard fsGuard("espnow.identity.write");
@@ -218,7 +218,7 @@ bool readIdentityFile(EspNowIdentity& out, bool& absent) {
     return false;
   }
 
-  out.createdAtSec = doc["createdAtSec"] | (uint32_t)0;
+  out.createdEpochMs = doc["createdEpochMs"] | (uint64_t)0;
   out.regenCount   = doc["regenCount"]   | (uint32_t)0;
   out.valid        = true;
   return true;
@@ -236,7 +236,7 @@ bool generateFreshIdentity(EspNowIdentity& out, uint32_t regenCount) {
   // 0 while the clock is not set: a clock that was never set counts up from
   // 1970, and that number is not a creation date.
   time_t now = time(nullptr);
-  out.createdAtSec = clockcore::isValidEpoch((int64_t)now) ? (uint32_t)now : 0;
+  out.createdEpochMs = clockcore::isValidEpoch((int64_t)now) ? (uint64_t)now * 1000ULL : 0;
   out.regenCount   = regenCount;
   out.valid        = true;
   return true;
@@ -248,8 +248,8 @@ bool espnowIdentityLoadOrGenerate(EspNowIdentity& out) {
   bool absent = false;
   if (readIdentityFile(out, absent)) {
     gIdentity = out;
-    INFO_ESPNOWF("identity loaded, createdAtSec=%u regenCount=%u",
-                 out.createdAtSec, out.regenCount);
+    INFO_ESPNOWF("identity loaded, createdEpochMs=%llu regenCount=%u",
+                 (unsigned long long)out.createdEpochMs, out.regenCount);
     return true;
   }
   if (!absent) {
@@ -268,8 +268,8 @@ bool espnowIdentityLoadOrGenerate(EspNowIdentity& out) {
     return false;
   }
   gIdentity = out;
-  INFO_ESPNOWF("identity generated, createdAtSec=%u regenCount=0",
-               out.createdAtSec);
+  INFO_ESPNOWF("identity generated, createdEpochMs=%llu regenCount=0",
+               (unsigned long long)out.createdEpochMs);
   return true;
 }
 
@@ -316,14 +316,13 @@ constexpr uint8_t kPeerSlots = 16;
 EXT_RAM_BSS_ATTR PeerIdentity gPeerIdentities[kPeerSlots] = {};
 
 constexpr const char* kPeersDir = "/system/espnow/peers";
-// File schema version 2 (1.0 boards start erased; a file of another version is
-// not read). It no longer carries subscribedEvents (SUBSCRIBE_UPDATE was removed
-// in 1.0); a file that still has the key reads the same.
-constexpr uint8_t  kPeerFileVersion = 2;
+// File "schema" 1 (1.0 step 9; was "version" 2 with second timestamps). 1.0
+// boards start erased, so a file of another schema is not read.
+constexpr uint8_t  kPeerFileVersion = 1;
 
 // peerIdentityPersist rewrites an unchanged peer's file only to move the
-// stored lastSeenSec forward, and only once it is this far behind.
-constexpr uint32_t kPeerLastSeenRefreshSec = 3600;
+// stored lastSeenEpochMs forward, and only once it is this far behind.
+constexpr uint64_t kPeerLastSeenRefreshMs = 3600ULL * 1000ULL;
 
 // 12 hex digits, either case. A peer folder must also be spelled exactly as
 // macToPathToken() writes it (upper case); peerIdentityLoadAll checks that.
@@ -388,12 +387,12 @@ bool writePeerIdentityFile(const PeerIdentity& p) {
   bytesToHex(p.longTermPub, 32, pubHex);
 
   PSRAM_JSON_DOC(doc);
-  doc["version"]                  = kPeerFileVersion;
+  doc["schema"]                   = kPeerFileVersion;
   doc["mac"]                      = String(macColons);
   doc["meshId"]                   = p.meshId;
   doc["longTermPubEd25519_hex"]   = String(pubHex);
-  doc["bondedAtSec"]              = p.bondedAtSec;
-  doc["lastSeenSec"]              = p.lastSeenSec;
+  doc["pairedEpochMs"]            = p.pairedEpochMs;
+  doc["lastSeenEpochMs"]          = p.lastSeenEpochMs;
 
   FsLockGuard fsGuard("espnow.peer_identity_write");
   return writeJsonFileComplete(doc, tmp, path, "espnow.peer_identity_write");
@@ -412,10 +411,10 @@ bool readPeerIdentityFile(const char* path, PeerIdentity& out) {
   f.close();
   if (jerr) return false;
 
-  // Only the version this firmware writes; any other is not one it wrote
+  // Only the schema this firmware writes; any other is not one it wrote
   // (1.0 boards start erased) and is rejected rather than mis-parsed.
-  uint8_t ver = doc["version"] | (uint8_t)0;
-  if (ver != kPeerFileVersion) return false;
+  JsonVariantConst schemaVal = doc["schema"];
+  if (!schemaVal.is<unsigned>() || schemaVal.as<unsigned>() != kPeerFileVersion) return false;
 
   const char* macStr = doc["mac"] | (const char*)nullptr;
   if (!macStr) return false;
@@ -436,8 +435,8 @@ bool readPeerIdentityFile(const char* path, PeerIdentity& out) {
   JsonVariantConst meshVal = doc["meshId"];
   if (!meshVal.is<unsigned>() || meshVal.as<unsigned>() >= Settings::N_MESHES) return false;
   out.meshId      = (uint8_t)meshVal.as<unsigned>();
-  out.bondedAtSec = doc["bondedAtSec"] | (uint32_t)0;
-  out.lastSeenSec = doc["lastSeenSec"] | (uint32_t)0;
+  out.pairedEpochMs   = doc["pairedEpochMs"] | (uint64_t)0;
+  out.lastSeenEpochMs = doc["lastSeenEpochMs"] | (uint64_t)0;
 
   const char* pubHex = doc["longTermPubEd25519_hex"] | (const char*)nullptr;
   if (!pubHex || strlen(pubHex) != 64) return false;
@@ -455,7 +454,7 @@ const PeerIdentity* peerIdentityFindByMac(const uint8_t mac[6]) {
 }
 
 bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
-                         const uint8_t pub[32], uint32_t bondedAtSec) {
+                         const uint8_t pub[32], uint64_t pairedEpochMs) {
   // The KEY_EX handlers pass the slot their fingerprint matched; a file with
   // anything else would not load at the next boot.
   if (meshId >= Settings::N_MESHES) {
@@ -471,30 +470,31 @@ bool peerIdentityPersist(const uint8_t mac[6], uint8_t meshId,
   PeerIdentity& p = gPeerIdentities[idx];
   const PeerIdentity before = p;  // put back if the write fails
   time_t now = time(nullptr);
-  const uint32_t nowSec = clockcore::isValidEpoch((int64_t)now) ? (uint32_t)now : 0;  // 0 while the clock is not set
+  // 0 while the clock is not set; whole seconds, kept in milliseconds.
+  const uint64_t nowMs = clockcore::isValidEpoch((int64_t)now) ? (uint64_t)now * 1000ULL : 0;
 
-  // A KEY_EX that changes nothing we store (same key, same mesh, bondedAtSec
+  // A KEY_EX that changes nothing we store (same key, same mesh, pairedEpochMs
   // already set) is not worth a flash write. Every KEY_EX_HELLO and REPLY
   // lands here, a recorded HELLO can be replayed without the passphrase, and
   // the HELLO handler runs on the receive task. The one thing such a call
-  // would change is lastSeenSec, and that is rewritten at most once per
-  // kPeerLastSeenRefreshSec, and only forwards (a clock that is not set yet
+  // would change is lastSeenEpochMs, and that is rewritten at most once per
+  // kPeerLastSeenRefreshMs, and only forwards (a clock that is not set yet
   // never replaces a real timestamp). The cached record always equals the
   // stored one.
   const bool unchanged = p.valid && p.meshId == meshId &&
                          memcmp(p.longTermPub, pub, 32) == 0 &&
-                         (p.bondedAtSec != 0 || bondedAtSec == 0);
-  const bool lastSeenDue = nowSec > p.lastSeenSec &&
-                           (nowSec - p.lastSeenSec) >= kPeerLastSeenRefreshSec;
+                         (p.pairedEpochMs != 0 || pairedEpochMs == 0);
+  const bool lastSeenDue = nowMs > p.lastSeenEpochMs &&
+                           (nowMs - p.lastSeenEpochMs) >= kPeerLastSeenRefreshMs;
   if (unchanged && !lastSeenDue) return true;
 
   memcpy(p.mac, mac, 6);
   p.meshId       = meshId;
   memcpy(p.longTermPub, pub, 32);
-  // Preserve bondedAtSec across re-pair (don't update if already valid),
-  // overwrite if new. lastSeenSec becomes "now" with every write.
-  if (!p.valid || p.bondedAtSec == 0) p.bondedAtSec = bondedAtSec;
-  p.lastSeenSec = nowSec;
+  // Preserve pairedEpochMs across re-pair (don't update if already valid),
+  // overwrite if new. lastSeenEpochMs becomes "now" with every write.
+  if (!p.valid || p.pairedEpochMs == 0) p.pairedEpochMs = pairedEpochMs;
+  p.lastSeenEpochMs = nowMs;
   p.valid = true;
 
   if (!writePeerIdentityFile(p)) {

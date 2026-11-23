@@ -60,7 +60,7 @@ COMPONENT = HERE.parents[1]
 GOLDEN = {
     'EspNowV4Header': (32, [('magic', 0), ('ver', 2), ('type', 3), ('flags', 4), ('headerLen', 6),
                             ('reserved1', 7), ('msgId', 8), ('origin', 12), ('ttl', 18), ('fragIndex', 19),
-                            ('fragCount', 20), ('reserved2', 21), ('meshFingerprint', 22), ('sessionId', 24),
+                            ('fragCount', 20), ('reserved2', 21), ('meshId', 22), ('sessionId', 24),
                             ('frameSeq', 26), ('crc16', 30)]),
     'V4PayloadRelayData': (8, [('finalDst', 0), ('hopsUsed', 6), ('reserved', 7)]),
     'V4PayloadPeerListHeader': (4, [('entryCount', 0), ('role', 1), ('seq', 2), ('reserved', 3)]),
@@ -82,8 +82,9 @@ GOLDEN = {
     'V4PayloadBondHeartbeat': (24, [('role', 0), ('rssi', 1), ('reserved', 2), ('uptimeSec', 4), ('freeHeap', 8),
                                     ('reserved2', 12), ('bootCounter', 16), ('settingsHash', 20)]),
     'V4PayloadStreamCtrl': (4, [('sensorType', 0), ('enable', 1), ('reserved', 2)]),
-    'V4PayloadBondRequest': (8, [('role', 0), ('flags', 1), ('seq', 2), ('reserved', 4)]),
-    'V4PayloadBondNotice': (8, [('reason', 0), ('role', 1), ('seq', 2), ('flags', 4), ('reserved', 5)]),
+    # 1.0 step 9: reqId u32 at 0 (rule F3), the notice's status at 4 (0 = ok).
+    'V4PayloadBondRequest': (8, [('reqId', 0), ('role', 4), ('flags', 5), ('reserved', 6)]),
+    'V4PayloadBondNotice': (8, [('reqId', 0), ('status', 4), ('role', 5), ('flags', 6), ('reserved', 7)]),
     'CapabilitySummary': (84, [('reserved', 0), ('role', 1), ('inputDeviceType', 2), ('chipModel', 3),
                                ('featureMask', 4), ('serviceMask', 8), ('sensorMask', 12), ('mac', 16),
                                ('wifiChannel', 22), ('reserved0', 23), ('flashSizeMb', 24), ('psramSizeMb', 28),
@@ -110,11 +111,11 @@ GOLDEN = {
                                 ('stationary', 198), ('reserved', 199)]),
     'V4PayloadCmdRespHeader': (5, [('reqId', 0), ('status', 4)]),
     'V4PayloadStreamHeader': (5, [('reqId', 0), ('status', 4)]),
-    'V4PayloadKeyExHello': (72, [('meshFingerprint', 0), ('senderMac', 2), ('senderPubEd25519', 8), ('nonce', 40),
+    'V4PayloadKeyExHello': (72, [('meshId', 0), ('senderMac', 2), ('senderPubEd25519', 8), ('nonce', 40),
                                  ('hmac', 56)]),
-    'V4PayloadKeyExReply': (72, [('meshFingerprint', 0), ('responderMac', 2), ('responderPubEd25519', 8),
+    'V4PayloadKeyExReply': (72, [('meshId', 0), ('responderMac', 2), ('responderPubEd25519', 8),
                                  ('nonce', 40), ('hmac', 56)]),
-    'V4PayloadKeyExConfirm': (34, [('meshFingerprint', 0), ('confirmerMac', 2), ('status', 8), ('reserved', 9),
+    'V4PayloadKeyExConfirm': (34, [('meshId', 0), ('confirmerMac', 2), ('status', 8), ('reserved', 9),
                                    ('keyId', 10), ('hmac', 18)]),
     'V4PayloadSessionOpen': (154, [('sessionId', 0), ('initiatorMac', 2), ('responderMac', 8), ('ephX25519Pub', 14),
                                    ('nonceA', 46), ('sessionCaps', 62), ('openEpochMs', 66), ('signature', 74),
@@ -133,15 +134,15 @@ GOLDEN = {
     'V4PayloadFileResult': (12, [('reqId', 0), ('status', 4), ('reserved', 5), ('bytesStored', 8)]),
     'V4PayloadFileCancel': (5, [('reqId', 0), ('status', 4)]),
     'V4PayloadFsListReq': (144, [('reqId', 0), ('startIndex', 4), ('maxEntries', 6), ('path', 8), ('reserved', 136)]),
-    'V4PayloadFsListReplyHeader': (140, [('reqId', 0), ('status', 4), ('entryCount', 5), ('hasMore', 6),
+    'V4PayloadFsListRespHeader': (140, [('reqId', 0), ('status', 4), ('entryCount', 5), ('hasMore', 6),
                                          ('reserved', 7), ('totalEntries', 8), ('nextStartIndex', 10), ('path', 12)]),
     'V4PayloadFsEntry': (76, [('name', 0), ('size', 64), ('isFolder', 68), ('perms', 69), ('reserved', 70)]),
     'V4PayloadFsStatReq': (140, [('reqId', 0), ('path', 4), ('reserved', 132)]),
-    'V4PayloadFsStatReply': (164, [('reqId', 0), ('status', 4), ('reserved1', 5), ('totalBytes', 8),
+    'V4PayloadFsStatResp': (164, [('reqId', 0), ('status', 4), ('reserved1', 5), ('totalBytes', 8),
                                    ('usedBytes', 16), ('freeBytes', 24), ('percentUsedX10', 32), ('reserved2', 34),
                                    ('path', 36)]),
     'V4PayloadFsGetReq': (140, [('reqId', 0), ('path', 4), ('reserved', 132)]),
-    'V4PayloadFsGetAck': (140, [('reqId', 0), ('status', 4), ('reserved', 5), ('fileSize', 8), ('path', 12)]),
+    'V4PayloadFsGetResp': (140, [('reqId', 0), ('status', 4), ('reserved', 5), ('fileSize', 8), ('path', 12)]),
     'V4PayloadSessionUnknown': (12, [('sessionId', 0), ('reserved', 2), ('frameSeq', 4), ('msgId', 8)]),
     # File catch-up (82-85, 2026-11-19). The two answers carry headerLen (and
     # LIST entries entryLen / entryFixed), so they grow; not fixed-header.
@@ -175,11 +176,11 @@ STATUS_GOLDEN = {
 
 CORE_HEADERS = ('System_ESPNow_SensorCore.h', 'System_ESPNow_PowerEventCore.h', 'System_ESPNow_ForwardCore.h',
                 'System_ESPNow_TimeCore.h', 'System_ClockCore.h', 'System_ESPNow_AnswerCore.h', 'System_ESPNow_CatchupCore.h',
-                'System_DeviceName.h')
+                'System_ESPNow_CredentialCore.h', 'System_DeviceName.h')
 
-# Receive code may read FS list entries in place (V4PayloadFsEntry is packed,
-# alignment 1, and the count is checked first).
-CAST_ALLOWED = ('reinterpret_cast<const V4PayloadFsEntry*>(payload + sizeof(hdr))',)
+# No receive code reads a payload by a pointer cast (1.0 step 9 removed the last
+# one, the FS list entries, which are now copied out).
+CAST_ALLOWED = ()
 MASK_FILES = ('System_ESPNow_ForwardCore.h', 'System_ESPNow_SensorCore.h', 'System_ESPNow_ForwardRx.cpp',
               'System_ESPNow_BondForward.cpp', 'System_ESPNow_Sensors.cpp', 'OLED_Mode_Remote.cpp', 'WebPage_Bond.cpp',
               'System_ESPNow.h', 'System_ESPNow.cpp', 'System_ESPNow_Wire.h', 'System_Settings.h')
@@ -194,7 +195,7 @@ FIXED_HEADER = {
     'V4PayloadPeerListEntry': 'PEER_LIST', 'V4PayloadSensorReading': 'BOND_SENSOR_DATA',
     'V4PayloadCmdRespHeader': 'CMD_RESP', 'V4PayloadStreamHeader': 'STREAM', 'V4PayloadFileStart': 'FILE_START',
     'V4PayloadFileData': 'FILE_DATA',
-    'V4PayloadFsListReplyHeader': 'FS_LIST_REPLY', 'V4PayloadFsEntry': 'FS_LIST_REPLY',
+    'V4PayloadFsListRespHeader': 'FS_LIST_RESP', 'V4PayloadFsEntry': 'FS_LIST_RESP',
 }
 TEXT_ONLY_FRAMES = ('SENSOR_ENVELOPE', 'TEXT', 'CMD', 'USER_SYNC')
 FIXED_MARK = '// Fixed header: cannot grow'

@@ -146,7 +146,7 @@ bool requestSettingsSync(uint32_t timeoutMs, uint32_t* outElapsedMs) {
   uint8_t pm[6];
   if (!requireMasterOnlinePeer(pm)) return false;
 
-  // Mark settings missing so the sync tick fires SETTINGS_REQ on its next pass.
+  // Mark settings missing so the sync tick fires BOND_SETTINGS_REQ on its next pass.
   // Clearing the in-flight/cooldown gates makes the request go out immediately
   // rather than waiting out the 3s retry window. (Same dance the old
   // handleBondSettingsSync did inline.)
@@ -175,7 +175,7 @@ bool beginSchemaSync() {
   // be masked by a stale "received" from an earlier sync.
   gEspNow->bondSchemaReceived = false;
 
-  if (!requestBondSchema(pm)) return fail("Failed to send SCHEMA_REQ");
+  if (!requestBondSchema(pm)) return fail("Failed to send BOND_SCHEMA_REQ");
   return true;
 }
 

@@ -167,16 +167,23 @@ static void testFrame() {
   hostile[0] = kOpAnswer;
   CHECK(parseLinkFrame(hostile, sizeof(hostile), back) && back.streams == kStreamsAll &&
         back.sensorMask == espnowsensor::kSensorMaskAll && back.result == 0xFF);
-  // Results and their words.
-  for (uint8_t r = 1; r < kResultCount; ++r) {
-    if (r == 8) continue;
-    CHECK(!is(resultKey(r), "refused") && !is(resultText(r), "for a reason this firmware does not know"));
-    for (uint8_t k = 1; k < r; ++k) CHECK(!is(resultKey(r), resultKey(k)));
+  // Results and their words (1.0 step 9, rule F3): 0 ok, the shared statuses
+  // no_slot and bad_request, this frame's own codes from 16.
+  const uint8_t known[] = {kResultOk, kResultFull, kResultBadPartner, kResultNotReceiver, kResultKeyMismatch,
+                           kResultStale, kResultNameTaken};
+  CHECK(kResultOk == 0 && kResultAccepted == 0 && kResultFull == 5 && kResultBadPartner == 6 &&
+        kResultNotReceiver == 16 && kResultKeyMismatch == 17 && kResultStale == 18 && kResultNameTaken == 19);
+  for (size_t i = 0; i < sizeof(known); ++i) {
+    CHECK(!is(resultKey(known[i]), "refused") && !is(resultText(known[i]), "for a reason this firmware does not know"));
+    for (size_t k = 0; k < i; ++k) CHECK(!is(resultKey(known[i]), resultKey(known[k])));
   }
-  CHECK(is(resultKey(0), "refused") && is(resultKey(200), "refused"));
-  // 8 is never sent: an answer with it is any refusal.
-  CHECK(is(resultKey(8), "refused") && is(resultText(8), "for a reason this firmware does not know") &&
-        is(resultKey(kResultStale), "stale") && is(resultKey(kResultNameTaken), "name_taken"));
+  CHECK(is(resultKey(0), "accepted") && is(resultKey(200), "refused"));
+  // A status this firmware does not give (the old numbers 1-4, 7-9, 20) is any refusal.
+  const uint8_t unknown[] = {1, 2, 7, 8, 9, 20};
+  for (uint8_t r : unknown) {
+    CHECK(is(resultKey(r), "refused") && is(resultText(r), "for a reason this firmware does not know"));
+  }
+  CHECK(is(resultKey(kResultStale), "stale") && is(resultKey(kResultNameTaken), "name_taken"));
   CHECK(kLinkFrameLen == 96 && kLinkFrameLen <= espnowsensor::kFrameCapRouted);
   // A name cut on a UTF-8 boundary by the sender's field rule.
   char name[kPartnerNameLen];
@@ -313,7 +320,7 @@ static void testTarget() {
   // Only a matching answer counts: wrong link number, boot tag, op, or not an answer.
   CHECK(targetAnswer(t, echo(t, answer(kOpAnnounce, kResultAccepted, 2, kBoot)), kBoot, now) == AnswerEffect::Ignored);
   CHECK(targetAnswer(t, echo(t, answer(kOpAnnounce, kResultAccepted, 1, kBoot + 1)), kBoot, now) == AnswerEffect::Ignored);
-  CHECK(targetAnswer(t, answer(kOpWithdraw, kResultWithdrawn, 1, kBoot), kBoot, now) == AnswerEffect::Ignored);
+  CHECK(targetAnswer(t, answer(kOpWithdraw, kResultOk, 1, kBoot), kBoot, now) == AnswerEffect::Ignored);
   LinkFrame notAnswer = answer(kOpAnnounce, kResultAccepted, 1, kBoot);
   notAnswer.op = kOpQuery;
   CHECK(targetAnswer(t, notAnswer, kBoot, now) == AnswerEffect::Ignored);
@@ -449,9 +456,9 @@ static void testTarget() {
   CHECK(targetStep(t, none, 0x9999, true, now) == kActWithdraw);
   CHECK(targetStep(t, none, 0x9999, true, now + 1999) == 0);
   CHECK(targetStep(t, none, 0x9999, true, now + 2000) == kActWithdraw);
-  CHECK(targetAnswer(t, answer(kOpWithdraw, kResultWithdrawn, 2, kBoot), kBoot, now) == AnswerEffect::Ignored);
-  CHECK(targetAnswer(t, answer(kOpWithdraw, kResultWithdrawn, 1, kBoot, kX2), kBoot, now) == AnswerEffect::Ignored);
-  CHECK(targetAnswer(t, answer(kOpWithdraw, kResultWithdrawn, 1, kBoot), kBoot, now) == AnswerEffect::WithdrawDone);
+  CHECK(targetAnswer(t, answer(kOpWithdraw, kResultOk, 2, kBoot), kBoot, now) == AnswerEffect::Ignored);
+  CHECK(targetAnswer(t, answer(kOpWithdraw, kResultOk, 1, kBoot, kX2), kBoot, now) == AnswerEffect::Ignored);
+  CHECK(targetAnswer(t, answer(kOpWithdraw, kResultOk, 1, kBoot), kBoot, now) == AnswerEffect::WithdrawDone);
   CHECK(targetStep(t, none, 0x9999, true, now + 4000) == 0);
   // Unanswered: three tries, no more.
   TargetState w = {};
@@ -476,7 +483,7 @@ static void testTarget() {
   CHECK(targetStep(n, none, 0x0202, true, 6000) == kActWithdrawAll);  // the master's new session
   targetQuery(n);                                                       // asked: told again
   CHECK(targetStep(n, none, 0x0202, true, 7000) == kActWithdrawAll);
-  CHECK(targetAnswer(n, answer(kOpWithdraw, kResultWithdrawn, 0, kBoot, nullptr), kBoot, 0) == AnswerEffect::Noted);
+  CHECK(targetAnswer(n, answer(kOpWithdraw, kResultOk, 0, kBoot, nullptr), kBoot, 0) == AnswerEffect::Noted);
   // Wanting the link after that announces it.
   CHECK(targetStep(n, wantGen(3), 0x0202, true, 8000) == kActAnnounce);
 }

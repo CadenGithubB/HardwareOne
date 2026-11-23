@@ -15,7 +15,7 @@
 #include <esp_wifi.h>
 
 #include "System_Clock.h"           // Clock::epochMillisOrZero: SESSION_OPEN openEpochMs
-#include "System_ClockCore.h"       // clockcore::isValidEpoch: bondedAt is stored only when the clock is set
+#include "System_ClockCore.h"       // clockcore::isValidEpoch: pairedAt is stored only when the clock is set
 #include "System_Debug.h"
 #include "System_ESPNow.h"          // EspNowState (gEspNow); V4RxCtx comes from System_ESPNow_RxCtx.h
 #include "System_ESPNow_Crypto.h"
@@ -276,7 +276,7 @@ void keyExNoteReply(const uint8_t mac[6], uint16_t meshFp, const uint8_t helloNo
 // is used up.
 bool keyExConfirmMatchesReply(const V4PayloadKeyExConfirm& conf, const uint8_t selfMac[6],
                               const uint8_t selfPub[32], const uint8_t bootstrapKey[32]) {
-  KeyExHelloSeen* e = keyExHelloSlotFor(conf.confirmerMac, conf.meshFingerprint);
+  KeyExHelloSeen* e = keyExHelloSlotFor(conf.confirmerMac, conf.meshId);
   if (!e) return false;
   for (auto& r : e->replies) {
     if (!r.used) continue;
@@ -419,7 +419,7 @@ bool keyExConfirmMatchesHello(const V4PayloadKeyExConfirm& conf, const uint8_t s
                               const uint8_t selfPub[32], const uint8_t bootstrapKey[32]) {
   const KeyExInFlight* k = keyExInFlightFind(conf.confirmerMac);
   if (!k) return false;
-  if (k->meshSlot < 0 || gSettings.meshes[k->meshSlot].fingerprint != conf.meshFingerprint) return false;
+  if (k->meshSlot < 0 || gSettings.meshes[k->meshSlot].fingerprint != conf.meshId) return false;
   for (uint8_t i = 0; i < k->nonceCount; i++) {
     const espnowhs::KeyExContext c = keyExHelloRefusalContext(selfMac, selfPub, k->nonces[i], conf.confirmerMac);
     uint8_t want[espnowhs::kTagLen];
@@ -469,10 +469,10 @@ bool keyExAnyInFlight() {
 // the exchange `c` (HandshakeCore confirmInput). Shared by the responder (HELLO
 // handler: a refusal) and the initiator (REPLY handler: the end of the
 // exchange, or a refusal) so both paths build it the same way.
-static void sendKeyExConfirm(const uint8_t peerMac[6], uint16_t meshFingerprint, uint8_t status,
+static void sendKeyExConfirm(const uint8_t peerMac[6], uint16_t meshId, uint8_t status,
                              const espnowhs::KeyExContext& c, const uint8_t bootstrapKey[32]) {
   V4PayloadKeyExConfirm conf = {};
-  conf.meshFingerprint = meshFingerprint;
+  conf.meshId = meshId;
   uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
   memcpy(conf.confirmerMac, selfMac, 6);
   conf.status = status;
@@ -496,7 +496,7 @@ static void sendKeyExConfirm(const uint8_t peerMac[6], uint16_t meshFingerprint,
 // CONFIRM sent and the peer deleted again, unless it was there before. The
 // caller already rate-limited the sender (one HELLO acted on per MAC and mesh
 // per second, or a REPLY to our own HELLO).
-static void sendKeyExNotAccepted(const uint8_t peerMac[6], uint16_t meshFingerprint, const char* what,
+static void sendKeyExNotAccepted(const uint8_t peerMac[6], uint16_t meshId, const char* what,
                                  const espnowhs::KeyExContext& c, const uint8_t bootstrapKey[32]) {
   static uint32_t sNotAcceptedLogMs = 0;
   if (logCooldownOk(sNotAcceptedLogMs, 30000)) {
@@ -506,7 +506,7 @@ static void sendKeyExNotAccepted(const uint8_t peerMac[6], uint16_t meshFingerpr
   }
   const bool existed = esp_now_is_peer_exist(peerMac);
   if (!existed && !ensureUnencryptedPeer(peerMac)) return;
-  sendKeyExConfirm(peerMac, meshFingerprint, espnowrevoke::kConfirmNotAccepted, c, bootstrapKey);
+  sendKeyExConfirm(peerMac, meshId, espnowrevoke::kConfirmNotAccepted, c, bootstrapKey);
   if (!existed) esp_now_del_peer(peerMac);
 }
 
@@ -567,10 +567,10 @@ V4Verdict v4hKeyExHello(const V4RxCtx& ctx) {
   const V4PayloadKeyExHello* msg = &hello;
 
   const MeshDerivedKeys* mk = nullptr;
-  int meshSlot = keyExMeshSlot(ctx, msg->meshFingerprint, msg->senderMac, &mk);
+  int meshSlot = keyExMeshSlot(ctx, msg->meshId, msg->senderMac, &mk);
   if (meshSlot >= 0) {
     uint8_t want[espnowhs::kTagLen];
-    if (!computeHelloTag(msg->meshFingerprint, msg->senderMac, msg->senderPubEd25519, msg->nonce,
+    if (!computeHelloTag(msg->meshId, msg->senderMac, msg->senderPubEd25519, msg->nonce,
                          mk->bootstrapKey, want) ||
         !espnowhs::tagEqual(want, msg->hmac)) {
       meshSlot = -3;
@@ -583,7 +583,7 @@ V4Verdict v4hKeyExHello(const V4RxCtx& ctx) {
                     : "invalid payload";
     WARN_ESPNOWF("KEY_EX_HELLO from " MAC_FMT " rejected: reason=%d (%s) meshFp=0x%04X",
                  MAC_ARGS(msg->senderMac),
-                 meshSlot, why, (unsigned)msg->meshFingerprint);
+                 meshSlot, why, (unsigned)msg->meshId);
     return ctx.refuse();
   }
   const uint8_t* bootKey = mk->bootstrapKey;
@@ -592,7 +592,7 @@ V4Verdict v4hKeyExHello(const V4RxCtx& ctx) {
   // acted on is a copy, and one per sender MAC and mesh is acted on per
   // interval (see keyExHelloAdmit). Checked before the pairing window below,
   // which a dropped HELLO must not use up.
-  switch (keyExHelloAdmit(msg->senderMac, msg->meshFingerprint, msg->nonce, (uint32_t)millis())) {
+  switch (keyExHelloAdmit(msg->senderMac, msg->meshId, msg->nonce, (uint32_t)millis())) {
     case HelloVerdict::Act:
       break;
     case HelloVerdict::Copy: {
@@ -623,7 +623,7 @@ V4Verdict v4hKeyExHello(const V4RxCtx& ctx) {
       keyExRevokedDrop(msg->senderMac, msg->senderPubEd25519, "KEY_EX_HELLO");
       return ctx.refuse();
     case espnowrevoke::Admit::NotAccepted:
-      sendKeyExNotAccepted(msg->senderMac, msg->meshFingerprint, "KEY_EX_HELLO", refusal, bootKey);
+      sendKeyExNotAccepted(msg->senderMac, msg->meshId, "KEY_EX_HELLO", refusal, bootKey);
       return ctx.refuse();
     case espnowrevoke::Admit::Accept:
       break;
@@ -663,10 +663,10 @@ V4Verdict v4hKeyExHello(const V4RxCtx& ctx) {
     confirmStatus = 2;
   } else {
     time_t now = time(nullptr);
-    uint32_t bondedAt = (uint32_t)(clockcore::isValidEpoch((int64_t)now) ? now : 0);  // 0 while the clock is not set
+    const uint64_t pairedAt = clockcore::isValidEpoch((int64_t)now) ? (uint64_t)now * 1000ULL : 0;  // 0 while the clock is not set
     // Event-log gate: a re-sent HELLO with the same key comes through here
     // routinely (peerIdentityPersist then writes nothing, bar the hourly
-    // lastSeenSec refresh). Only log the event when the stored identity
+    // lastSeenEpochMs refresh). Only log the event when the stored identity
     // actually changes (first pairing or an operator-authorized key
     // replacement). Computed BEFORE persist mutates the slot `existing`
     // points into.
@@ -674,7 +674,7 @@ V4Verdict v4hKeyExHello(const V4RxCtx& ctx) {
         memcmp(existing->longTermPub, msg->senderPubEd25519, 32) != 0;
     const uint8_t storeSlot = keyExStoreSlot(msg->senderMac, msg->senderPubEd25519, (uint8_t)meshSlot, false);
     if (!peerIdentityPersist(msg->senderMac, storeSlot,
-                             msg->senderPubEd25519, bondedAt)) {
+                             msg->senderPubEd25519, pairedAt)) {
       ERROR_ESPNOWF("KEY_EX_HELLO: identity persist failed; not replying");
       return ctx.refuse();
     }
@@ -694,7 +694,7 @@ V4Verdict v4hKeyExHello(const V4RxCtx& ctx) {
 
   // If status != 0 (conflict), emit a CONFIRM with the status instead of REPLY.
   if (confirmStatus != 0) {
-    sendKeyExConfirm(msg->senderMac, msg->meshFingerprint, confirmStatus, refusal, bootKey);
+    sendKeyExConfirm(msg->senderMac, msg->meshId, confirmStatus, refusal, bootKey);
     return ctx.refuse();
   }
 
@@ -705,17 +705,17 @@ V4Verdict v4hKeyExHello(const V4RxCtx& ctx) {
     return ctx.refuse();
   }
   V4PayloadKeyExReply reply = {};
-  reply.meshFingerprint = msg->meshFingerprint;
+  reply.meshId = msg->meshId;
   memcpy(reply.responderMac, selfMac, 6);
   memcpy(reply.responderPubEd25519, self.pub, 32);
   espnowCryptoRandomBytes(reply.nonce, sizeof(reply.nonce));
-  if (!computeReplyTag(msg->meshFingerprint, selfMac, self.pub, reply.nonce, msg->senderMac,
+  if (!computeReplyTag(msg->meshId, selfMac, self.pub, reply.nonce, msg->senderMac,
                        msg->senderPubEd25519, msg->nonce, bootKey, reply.hmac)) {
     ERROR_ESPNOWF("KEY_EX_HELLO: HMAC compute failed for REPLY");
     return ctx.refuse();
   }
   // Kept for the initiator's CONFIRM, which is tagged over both nonces.
-  keyExNoteReply(msg->senderMac, msg->meshFingerprint, msg->nonce, reply.nonce, msg->senderPubEd25519);
+  keyExNoteReply(msg->senderMac, msg->meshId, msg->nonce, reply.nonce, msg->senderPubEd25519);
 
   v4_send_frame(msg->senderMac, ESPNOW_V4_TYPE_KEY_EX_REPLY,
                 0,  // no ACK_REQ: a handshake frame's reply is its answer (1.0)
@@ -731,7 +731,7 @@ V4Verdict v4hKeyExReply(const V4RxCtx& ctx) {
   const V4PayloadKeyExReply* msg = &replyMsg;
 
   const MeshDerivedKeys* mk = nullptr;
-  const int meshSlot = keyExMeshSlot(ctx, msg->meshFingerprint, msg->responderMac, &mk);
+  const int meshSlot = keyExMeshSlot(ctx, msg->meshId, msg->responderMac, &mk);
   if (meshSlot < 0) {
     WARN_ESPNOWF("KEY_EX_REPLY rejected (reason=%d) from " MAC_FMT,
                  meshSlot,
@@ -764,7 +764,7 @@ V4Verdict v4hKeyExReply(const V4RxCtx& ctx) {
   int matched = -1;
   for (uint8_t i = 0; i < k->nonceCount && matched < 0; i++) {
     uint8_t want[espnowhs::kTagLen];
-    if (computeReplyTag(msg->meshFingerprint, msg->responderMac, msg->responderPubEd25519, msg->nonce,
+    if (computeReplyTag(msg->meshId, msg->responderMac, msg->responderPubEd25519, msg->nonce,
                         selfMac, self.pub, k->nonces[i], mk->bootstrapKey, want) &&
         espnowhs::tagEqual(want, msg->hmac)) {
       matched = i;
@@ -793,7 +793,7 @@ V4Verdict v4hKeyExReply(const V4RxCtx& ctx) {
       return ctx.refuse();
     case espnowrevoke::Admit::NotAccepted:
       keyExClearInFlight(msg->responderMac);
-      sendKeyExNotAccepted(msg->responderMac, msg->meshFingerprint, "KEY_EX_REPLY", full, bootKey);
+      sendKeyExNotAccepted(msg->responderMac, msg->meshId, "KEY_EX_REPLY", full, bootKey);
       return ctx.refuse();
     case espnowrevoke::Admit::Accept:
       break;
@@ -826,13 +826,13 @@ V4Verdict v4hKeyExReply(const V4RxCtx& ctx) {
     // that triggered this REPLY), but ensure it before sending defensively.
     keyExClearInFlight(msg->responderMac);
     if (ensureUnencryptedPeer(msg->responderMac)) {
-      sendKeyExConfirm(msg->responderMac, msg->meshFingerprint, 2, full, bootKey);
+      sendKeyExConfirm(msg->responderMac, msg->meshId, 2, full, bootKey);
     }
     return ctx.refuse();
   }
 
   time_t now = time(nullptr);
-  uint32_t bondedAt = (uint32_t)(clockcore::isValidEpoch((int64_t)now) ? now : 0);  // 0 while the clock is not set
+  const uint64_t pairedAt = clockcore::isValidEpoch((int64_t)now) ? (uint64_t)now * 1000ULL : 0;  // 0 while the clock is not set
   // Event-log gate: only log when the stored identity actually changes (first
   // pairing or authorized key replacement) — a duplicate REPLY presents the
   // same key routinely (nothing is rewritten then) and must not log. Computed
@@ -841,7 +841,7 @@ V4Verdict v4hKeyExReply(const V4RxCtx& ctx) {
       memcmp(existing->longTermPub, msg->responderPubEd25519, 32) != 0;
   const uint8_t storeSlot = keyExStoreSlot(msg->responderMac, msg->responderPubEd25519, (uint8_t)meshSlot, true);
   if (!peerIdentityPersist(msg->responderMac, storeSlot,
-                           msg->responderPubEd25519, bondedAt)) {
+                           msg->responderPubEd25519, pairedAt)) {
     ERROR_ESPNOWF("KEY_EX_REPLY: identity persist failed");
     return ctx.refuse();
   }
@@ -863,7 +863,7 @@ V4Verdict v4hKeyExReply(const V4RxCtx& ctx) {
   if (!ensureUnencryptedPeer(msg->responderMac)) return ctx.refuse();
 
   // Send CONFIRM (status=0) — KEY_EX complete from our (initiator) side.
-  sendKeyExConfirm(msg->responderMac, msg->meshFingerprint, 0, full, bootKey);
+  sendKeyExConfirm(msg->responderMac, msg->meshId, 0, full, bootKey);
 
   // Encrypt-or-wait foundation (2026-05): if v4_send_encrypted_or_queue parked
   // any frames for this peer while we were handshaking (because there was no
@@ -904,7 +904,7 @@ V4Verdict v4hKeyExConfirm(const V4RxCtx& ctx) {
   // CONFIRM: we answered its HELLO) or one of our own HELLOs (the responder
   // refuses it: no REPLY was sent). Anything else (forged, a copy, late) is
   // ignored: a forged refusal must not stop espnowpairsecure's retries.
-  const MeshDerivedKeys* mk = meshKeysFindByFingerprint(msg->meshFingerprint);
+  const MeshDerivedKeys* mk = meshKeysFindByFingerprint(msg->meshId);
   const auto& self = espnowIdentityGet();
   uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
   bool answersOurReply = false, answersOurHello = false;
@@ -1001,11 +1001,11 @@ static bool keyExSendHello(const uint8_t peerMac[6], int slot, KeyExInFlight* e)
   espnowSelfStaMac(selfMac);
 
   V4PayloadKeyExHello hello = {};
-  hello.meshFingerprint = gSettings.meshes[slot].fingerprint;
+  hello.meshId = gSettings.meshes[slot].fingerprint;
   memcpy(hello.senderMac, selfMac, 6);
   memcpy(hello.senderPubEd25519, self.pub, 32);
   keyExInFlightNewNonce(e, hello.nonce);
-  if (!computeHelloTag(hello.meshFingerprint, selfMac, self.pub, hello.nonce,
+  if (!computeHelloTag(hello.meshId, selfMac, self.pub, hello.nonce,
                        mk->bootstrapKey, hello.hmac)) {
     ERROR_ESPNOWF("KEY_EX: HMAC compute failed");
     return false;
@@ -1019,7 +1019,7 @@ static bool keyExSendHello(const uint8_t peerMac[6], int slot, KeyExInFlight* e)
     INFO_ESPNOWF("KEY_EX_HELLO sent to " MAC_FMT " (mesh '%s', fp=0x%04X)",
                  MAC_ARGS(peerMac),
                  gSettings.meshes[slot].label.c_str(),
-                 (unsigned)hello.meshFingerprint);
+                 (unsigned)hello.meshId);
   } else {
     ERROR_ESPNOWF("KEY_EX_HELLO send failed");
   }

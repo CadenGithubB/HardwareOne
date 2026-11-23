@@ -25,7 +25,7 @@ struct V4RxCtx;  // defined in System_ESPNow_RxCtx.h (shared; forward-decl is en
 
 // Receive-side handlers. Each:
 //   - Validates the payload struct size.
-//   - Resolves mesh by header.meshFingerprint; rejects if unknown.
+//   - Resolves mesh by header.meshId; rejects if unknown.
 //   - Verifies HMAC against the mesh bootstrap key. Loud reject on fail.
 //   - Persists the peer's pubkey to /system/espnow/peers/<MAC>/identity.json
 //     (HELLO + REPLY only — CONFIRM is just a status acknowledgement). A key

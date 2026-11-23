@@ -118,7 +118,9 @@ def generate(read) -> str:
     require(len(reserved) == 1, "one reserved bond-admin name")
     cmd_type = re.search(r"\bESPNOW_V4_TYPE_CMD\s*=\s*(\w+)", wire)
     ack_flag = re.search(r"\bESPNOW_V4_FLAG_ACK_REQ\s*=\s*(\w+)", wire)
-    require(cmd_type is not None and ack_flag is not None, "the CMD opcode and ACK_REQ flag")
+    max_payload = re.search(r"^#define ESPNOW_V4_MAX_PAYLOAD\s+(\([^)]*\)|\d+)", wire, re.M)
+    require(cmd_type is not None and ack_flag is not None and max_payload is not None,
+            "the CMD opcode, ACK_REQ flag and the payload limit")
     types = [
         reserved[0],
         identity_constants(user_header),
@@ -126,7 +128,10 @@ def generate(read) -> str:
         unique(user_header, "struct AuthContext", "System_User.h") + ";",
         identity_predicates(user_header),
         f"static constexpr uint8_t ESPNOW_V4_TYPE_CMD = {cmd_type.group(1)};\n"
-        f"static constexpr uint16_t ESPNOW_V4_FLAG_ACK_REQ = {ack_flag.group(1)};",
+        f"static constexpr uint16_t ESPNOW_V4_FLAG_ACK_REQ = {ack_flag.group(1)};\n"
+        f"#define ESPNOW_V4_MAX_PAYLOAD {max_payload.group(1)}",
+        # The credential block helpers (1.0 step 9: the bond sender wipes its buffer).
+        read("System_ESPNow_CredentialCore.h").replace("#pragma once", ""),
     ]
 
     pieces = [
@@ -187,7 +192,7 @@ def single_bond_sender(component_files: dict[str, str]) -> list[str]:
     for name, text in component_files.items():
         code = re.sub(r"//[^\n]*", " ", re.sub(r"/\*.*?\*/", " ", text, flags=re.S))
         calls = re.findall(r"(?<![\w:])buildBondedCommandPayload\s*\(", code)
-        definitions = re.findall(r"\bString\s+buildBondedCommandPayload\s*\(", code)
+        definitions = re.findall(r"\bsize_t\s+buildBondedCommandPayload\s*\(", code)
         extra = len(calls) - len(definitions)
         if name == "System_Utils.cpp":
             # The routing's one call; the declaration is in System_ESPNow.h.
