@@ -747,21 +747,32 @@ const char* cmd_imagesend(const String& argsInput) {
   }
   if (!VFS::existsGuarded(path, currentAuthContext())) return kFileReplyMissingOrDenied;
   
-  const FileSendResult result = sendFileToMacResult(mac, path);
-  if (result == FileSendResult::Sent) {
-    EXT_RAM_BSS_ATTR static char buf[128];
-    snprintf(buf, sizeof(buf), "Sent %s to %s", path.c_str(), device.c_str());
-    cliHint("the image lands in the peer's /espnow/received/ inbox");
+  // The receiver's answer decides the reply (1.0 step 7): Stored, Unknown or
+  // an error with the reason.
+  const FileSendOutcome out = sendFileToMacResult(mac, path);
+  if (out.result == FileSendResult::Stored) {
+    EXT_RAM_BSS_ATTR static char buf[160];
+    snprintf(buf, sizeof(buf), "Stored %s on %s (%lu bytes)", path.c_str(), device.c_str(),
+             (unsigned long)out.bytesStored);
+    cliHint("the image is in the peer's /espnow/received/ inbox");
     return buf;
   }
-  if (result == FileSendResult::NoSession) {
+  if (out.result == FileSendResult::NoSession) {
     // Nothing was sent: the encrypted session is still being opened.
     EXT_RAM_BSS_ATTR static char noSessionBuf[160];
     snprintf(noSessionBuf, sizeof(noSessionBuf), ESPNOW_NO_SESSION_REPLY_FMT, device.c_str());
     return noSessionBuf;
   }
-
-  return "Error: Failed to send image (send aborted or receiver cancelled)";
+  EXT_RAM_BSS_ATTR static char failBuf[200];
+  if (out.result == FileSendResult::Unknown) {
+    snprintf(failBuf, sizeof(failBuf),
+             "Unknown: the image went to %s, but it did not confirm within 10 s that it is stored. "
+             "Check its /espnow/received/ inbox.", device.c_str());
+    return failBuf;
+  }
+  snprintf(failBuf, sizeof(failBuf), "Error: the image was not stored on %s: %s.", device.c_str(),
+           out.why && out.why[0] ? out.why : "failed");
+  return failBuf;
 }
 
 // Command registration
@@ -770,7 +781,7 @@ extern const CommandEntry imageCommands[] = {
   {"capture", "Capture and save image: capture [littlefs|sd|both]", false, cmd_capture, "Usage: capture [littlefs|lfs|sd|both]"},
   {"images", "List saved images: images [littlefs|sd]", false, cmd_images, "Usage: images [sd] [json]"},
   {"imagedelete", "Delete image: imagedelete \"<path>\"", true, cmd_imagedelete, "Usage: imagedelete \"<path>\""},
-  {"imagesend", "Send image via ESP-NOW: imagesend <device> \"<path>\" (synchronous send; fails if the receiver rejects/cancels)", true, cmd_imagesend, "Usage: imagesend <device> \"<path>\"\n       Blocks until the image is sent; it is written to the peer's /espnow/received/ inbox. An error result means the send aborted or the receiver cancelled."},
+  {"imagesend", "Send image via ESP-NOW: imagesend <device> \"<path>\" (waits for the receiver's answer: Stored, Error or Unknown)", true, cmd_imagesend, "Usage: imagesend <device> \"<path>\"\n       Blocks until the receiver answers; a stored image is in the peer's /espnow/received/ inbox. An error names why it was not stored; Unknown means no answer came (check the inbox)."},
 };
 
 extern const size_t imageCommandsCount = sizeof(imageCommands) / sizeof(imageCommands[0]);

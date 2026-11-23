@@ -32,13 +32,28 @@ enum class EspNowMeshRxKind : uint8_t {
   BootstrapLiveness = 3,
 };
 
-// Outcome of sendFileToMacResult.
+// Outcome of sendFileToMacResult (1.0 step 7: the receiver's FILE_RESULT is
+// the answer, DESIGN 3.6).
 enum class FileSendResult : uint8_t {
-  Sent      = 0,  // every frame was handed to the radio (sender-side truth only)
-  Failed    = 1,  // refused, aborted or cancelled by the receiver; the log names the cause
+  Stored    = 0,  // the receiver reported the file renamed into place (a bond
+                  // answer: processed)
+  Failed    = 1,  // not stored: refused at FILE_START, cancelled, not complete,
+                  // CRC mismatch, write failure, or a local problem; `status`
+                  // and `why` say which
   NoSession = 2,  // no ACTIVE encrypted session with the peer: nothing was sent, the
                   // handshake was started — a retry a few seconds later can succeed
+  Unknown   = 3,  // every frame went out and FILE_END was sent, but no FILE_RESULT
+                  // came within 10 s: the file may or may not be stored
 };
+struct FileSendOutcome {
+  FileSendResult result;
+  uint8_t        status;       // Failed: the shared/file status (espnowanswer), 0 when local
+  uint32_t       bytesStored;  // Stored: what the receiver reported
+  const char*    why;          // Failed: a short reason (static text), else ""
+};
+// FILE_START's kind (V4FileKind in System_ESPNow_Wire.h, asserted equal there).
+constexpr uint8_t kEspNowFileKindFile = 0;  // an ordinary file for the peer's inbox
+constexpr uint8_t kEspNowFileKindBond = 1;  // a bond answer (_manifest/_settings/_schema_out.json)
 
 // The one reply for a send that needs an ACTIVE encrypted session with the peer
 // (a file, a multi-frame message) when there is none yet. %s = the peer as the
@@ -676,7 +691,7 @@ static_assert(ESPNOW_HISTORY_NAME_CAP == espnowhist::kNameCap, "one name size");
 enum LogMessageType {
   MSG_TEXT = 0,           // Regular text message (chat — sent or received)
   MSG_FILE_SEND_START,    // File transfer started
-  MSG_FILE_SEND_SUCCESS,  // File transfer completed successfully
+  MSG_FILE_SEND_SUCCESS,  // the receiver reported the file stored (its FILE_RESULT, 1.0 step 7)
   MSG_FILE_SEND_FAILED,   // File transfer failed
   MSG_FILE_RECV_SUCCESS,  // File received successfully
   MSG_FILE_RECV_FAILED,   // File receive failed
@@ -818,19 +833,22 @@ struct EspNowState {
   volatile bool fileSendInProgress;
   uint8_t       fileSendPeer[6];
   uint32_t      fileSendStartedMs;
-  // Abort channel for the in-flight send (integrity pass). fileSendMsgId is
-  // the transferId published by FileSendActiveGuard; v4h_file_cancel (on
-  // espnow_task) stores that id into fileSendAbortMsgId when a FILE_CANCEL
-  // matches (inProgress && peer && msgId), and the sendFileToMac chunk loop
-  // (cmd_exec) compares fileSendAbortMsgId against its OWN transferId.
-  // Carrying the msgId instead of a bool makes the one theoretical stale-store
-  // race harmless: a late store of transfer A's id can never equal transfer
-  // B's id, so B ignores it. NOTE: this single-slot design (like
+  // Answer channels for the in-flight send. fileSendTransferId is the
+  // transferId published by FileSendActiveGuard. On espnow_task,
+  // v4h_file_cancel stores the cancel's reason, then the id into
+  // fileSendAbortTransferId, when a FILE_CANCEL matches (inProgress && peer &&
+  // transferId); v4h_file_result stores status and bytes, then the id into
+  // fileSendResultTransferId. The sendFileToMac loop (cmd_exec) compares each
+  // id against its OWN transferId, so a late store for transfer A can never
+  // be read as transfer B's. NOTE: this single-slot design (like
   // fileSendInProgress itself) assumes all sendFileToMac callers run
-  // serialized on cmd_exec — re-audit if the planned Step 4 move of the
-  // chunk loop onto espnow_tx ever lands.
-  volatile uint32_t fileSendMsgId;
-  volatile uint32_t fileSendAbortMsgId;
+  // serialized on cmd_exec.
+  volatile uint32_t fileSendTransferId;
+  volatile uint32_t fileSendAbortTransferId;
+  volatile uint8_t  fileSendAbortStatus;
+  volatile uint32_t fileSendResultTransferId;
+  volatile uint8_t  fileSendResultStatus;
+  volatile uint32_t fileSendResultBytes;
 
   unsigned long lastResetTime;
 
@@ -1013,8 +1031,12 @@ struct EspNowState {
     fileSendInProgress(false),
     fileSendPeer{},
     fileSendStartedMs(0),
-    fileSendMsgId(0),
-    fileSendAbortMsgId(0),
+    fileSendTransferId(0),
+    fileSendAbortTransferId(0),
+    fileSendAbortStatus(0),
+    fileSendResultTransferId(0),
+    fileSendResultStatus(0),
+    fileSendResultBytes(0),
     lastResetTime(0),
     lastRemoteCapValid(false),
     lastRemoteCapTime(0),
@@ -1558,13 +1580,21 @@ void espnowHistoryDisplayName(const ReceivedTextMessage& m, char* out, size_t ca
 // Adds online/lastSeenSec from MeshPeerHealth on top of the stored metadata.
 void espnowSerializeMeshPeerMeta(JsonObject o, const MeshPeerMeta& m);
 
-// File transfer to a specific MAC. Synchronous: pumps FILE_START/DATA/END on the
-// calling task (cmd_exec for every caller). Refuses to start — NoSession, with
-// the handshake kicked — unless the encrypted session with the peer is ACTIVE:
-// a file cannot be carried across a handshake (one pending frame per peer).
-FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath);
-// Same send; true only for FileSendResult::Sent.
-bool sendFileToMac(const uint8_t* mac, const String& localPath);
+// File transfer to a specific MAC (1.0 step 7, DESIGN 3.6). Synchronous on the
+// calling task (cmd_exec for every caller): FILE_START waits for its ACK (about
+// 600 ms; a refusal or no answer ends the send at once), the chunks are pumped
+// (a FILE_CANCEL stops them), FILE_END, then up to 10 s for the receiver's
+// FILE_RESULT. Returns Stored, Failed (with the reason), Unknown (no result
+// came), or NoSession — refused before any frame, with the handshake kicked,
+// unless the encrypted session with the peer is ACTIVE (a file cannot be
+// carried across a handshake). `kind` is kEspNowFileKindFile or
+// kEspNowFileKindBond.
+FileSendOutcome sendFileToMacResult(const uint8_t* mac, const String& localPath,
+                                    uint8_t kind = kEspNowFileKindFile);
+// Same send; true only for FileSendResult::Stored.
+bool sendFileToMac(const uint8_t* mac, const String& localPath, uint8_t kind = kEspNowFileKindFile);
+// One word for a send's result ("stored", "failed", "no session", "unknown").
+const char* fileSendResultWord(FileSendResult result);
 
 #if ENABLE_BONDED_MODE
 // Check if bond mode is active and peer is online
@@ -1704,13 +1734,18 @@ inline bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t* outMac) {
   (void)nameOrMac; (void)outMac;
   return false;
 }
-inline FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath) {
-  (void)mac; (void)localPath;
-  return FileSendResult::Failed;
+inline FileSendOutcome sendFileToMacResult(const uint8_t* mac, const String& localPath,
+                                           uint8_t kind = kEspNowFileKindFile) {
+  (void)mac; (void)localPath; (void)kind;
+  return FileSendOutcome{FileSendResult::Failed, 3 /* unsupported */, 0, "ESP-NOW is not in this build"};
 }
-inline bool sendFileToMac(const uint8_t* mac, const String& localPath) {
-  (void)mac; (void)localPath;
+inline bool sendFileToMac(const uint8_t* mac, const String& localPath, uint8_t kind = kEspNowFileKindFile) {
+  (void)mac; (void)localPath; (void)kind;
   return false;
+}
+inline const char* fileSendResultWord(FileSendResult result) {
+  return result == FileSendResult::Stored ? "stored" : result == FileSendResult::Unknown ? "unknown"
+       : result == FileSendResult::NoSession ? "no session" : "failed";
 }
 inline bool isBondModeOnline() { return false; }
 inline bool isBondSynced() { return false; }

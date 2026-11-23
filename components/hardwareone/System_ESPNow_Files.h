@@ -6,7 +6,7 @@
 //
 // Replaces the original single-flight `gActiveFileTransfer*` + global
 // `gFileTransferLocked` flag with a 4-slot table. Each slot tracks an
-// independent in-progress transfer keyed by (peerMac, msgId). Multiple
+// independent in-progress transfer keyed by (peerMac, transferId). Multiple
 // peers can upload simultaneously; same-destination-path conflicts are
 // rejected; timed-out slots get reclaimed by a periodic sweep.
 //
@@ -25,10 +25,17 @@
 //   previously-rejected big files take the new path. See
 //   docs/ESPNOW_FILE_STREAMING_PHASE_A.md.
 //
-// - FILE_CANCEL (opcode 115) is live: the receiver sends it on timeout, gap,
-//   write failure, CRC mismatch, and FILE_START rejection, and the SENDER now
-//   aborts its chunk loop when a cancel matches its in-flight (peer, msgId)
-//   send. FILE_PROGRESS (114) remains a reserved follow-up.
+// - 1.0 step 7 (the Q26 layout, DESIGN 3.6): a transfer is named by the
+//   transferId FILE_START carries; every frame has its own msgId. FILE_START is
+//   answered on its ACK (a refusal names the reason: no slot, too large, ...).
+//   Every transfer the receiver accepted ends with one FILE_RESULT {transferId,
+//   status, bytesStored}: 0 once the file is renamed into place (or a bond answer
+//   processed), else why not (incomplete, crc_mismatch, io_error). The last
+//   results are remembered (fileSlotsRememberResult) so a copy of FILE_END that
+//   comes after the slot was released is answered with the same FILE_RESULT.
+//   FILE_CANCEL (115) still stops a sender's pump mid-transfer (a gap, a chunk
+//   for a transfer the receiver does not have, the 30 s timeout), and from the
+//   sender it frees the receiver's slot. FILE_PROGRESS (114) remains reserved.
 //
 // - Boot-time cleanup: deletes /espnow/received/.part-* on init (orphaned RAM-path
 //   staging temps AND streaming .part files from a transfer that died mid-flight).
@@ -79,6 +86,11 @@ constexpr const char* kFileSlotErrTooBig   = "TOO_BIG";    // exceeds per-file b
 // (VFS::admitBulkWrite). The caller answers it like every other allocation
 // error, with FILE_CANCEL_REJECTED: no new frame, no new reason on the wire.
 constexpr const char* kFileSlotErrStorage  = "NO_SPACE";
+
+// The longest file name a slot keeps: FILE_START's nameLen limit (F7; equal to
+// ESPNOW_V4_FILE_NAME_MAX, asserted in System_ESPNow.cpp). A longer name is
+// refused at FILE_START (kTooLarge), never cut.
+constexpr size_t kFileSlotNameMax = 96;
 
 // Per-file PSRAM cap for the whole-file-in-PSRAM receive path. 128 KB; with 4 slots
 // that's 512 KB peak PSRAM — fine on an 8 MB part.
@@ -133,9 +145,9 @@ bool fileSlotsInit();
 
 // Boot-time cleanup. Walks /espnow/received and deletes files whose basename
 // starts with ".part-" — staging temps left over from a previous boot that
-// crashed mid-transfer (both the RAM path's ".part-<mac>-<hash>-<msgId>" and
+// crashed mid-transfer (both the RAM path's ".part-<mac>-<hash>-<transferId>" and
 // streaming's ".part-strm-<mac>-<hash>-<slot>"; also sweeps the older
-// msgId-keyed names from
+// older id-keyed names from
 // pre-integrity-pass firmware, since the prefix match doesn't care about the
 // suffix). Idempotent; safe to call before any transfer activity.
 void fileSlotsBootCleanup();
@@ -145,9 +157,9 @@ void fileSlotsBootCleanup();
 // (one of the kFileSlotErr* constants).
 //
 // Conflict handling (integrity pass): a FILE_START from the SAME peer whose
-// msgId OR filename-hash matches an active slot supersedes that slot — the
-// old transfer is dead (duplicate START of this attempt, a sender-side retry
-// with a fresh msgId, or a hash collision; all three mean the old stream will
+// transferId OR filename-hash matches an active slot supersedes that slot — the
+// old transfer is dead (a sender-side retry with a fresh transferId, or a hash
+// collision; both mean the old stream will
 // never complete). RAM slots are released inline; streaming slots are failed
 // via the cmd_exec deferral (their .part/buffers may be mid-write) and the new
 // transfer takes a DIFFERENT free slot. Different peers never conflict — the
@@ -162,27 +174,28 @@ void fileSlotsBootCleanup();
 // streaming slot gets two PSRAM half-buffers instead and leaves dataBuffer
 // null — its .part is opened later, lazily, on cmd_exec.
 FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
-                                     uint32_t msgId,
+                                     uint32_t transferId,
                                      const char* filename,
                                      uint32_t fileSize,
                                      uint16_t chunkCount,
                                      uint16_t chunkSize,
+                                     uint8_t kind,
                                      const char** errOut);
 
-// Why fileSlotsFindByMsg returned what it did.
+// Why fileSlotsFindByTransfer returned what it did.
 enum FileSlotLookup : uint8_t {
   FILE_SLOT_LOOKUP_FOUND     = 0,
-  FILE_SLOT_LOOKUP_NOT_FOUND = 1,  // the table was read; no slot owns (peer, msgId)
+  FILE_SLOT_LOOKUP_NOT_FOUND = 1,  // the table was read; no slot owns (peer, transferId)
   FILE_SLOT_LOOKUP_BUSY      = 2,  // the table lock was not obtained in the bounded
                                    // wait — NOTHING is known about the transfer, so
                                    // the caller must not answer it with FILE_CANCEL
 };
 
-// Lookup the slot that owns an incoming chunk by (peerMac, msgId).
+// Lookup the slot that owns an incoming frame by (peerMac, transferId).
 // Returns nullptr if no slot matches OR the table was busy; *resultOut (if
 // non-null) tells the two apart. Runs on espnow_task with a bounded wait.
-FileTransferSlot* fileSlotsFindByMsg(const uint8_t peerMac[6], uint32_t msgId,
-                                     FileSlotLookup* resultOut = nullptr);
+FileTransferSlot* fileSlotsFindByTransfer(const uint8_t peerMac[6], uint32_t transferId,
+                                          FileSlotLookup* resultOut = nullptr);
 
 // Write a chunk into the slot's buffer at offset = chunkIdx * chunkSize.
 // RAM-path slots ONLY — a streaming slot returns false here; those go through
@@ -255,14 +268,15 @@ const uint8_t* fileSlotsGetSenderMac(const FileTransferSlot* slot);
 uint16_t       fileSlotsGetReceivedChunks(const FileTransferSlot* slot);
 uint16_t       fileSlotsGetTotalChunks(const FileTransferSlot* slot);
 uint32_t       fileSlotsGetTotalSize(const FileTransferSlot* slot);
-uint32_t       fileSlotsGetMsgId(const FileTransferSlot* slot);
+uint32_t       fileSlotsGetTransferId(const FileTransferSlot* slot);
+uint8_t        fileSlotsGetKind(const FileTransferSlot* slot);  // FILE_START's kind
 // Running esp_crc32_le over the chunks accepted so far (streaming slots only —
 // RAM slots compute one-shot over the whole buffer at FILE_END instead, since
 // their chunks can arrive out of order). Final once fileSlotsIsComplete().
 uint32_t       fileSlotsGetReceivedCrc(const FileTransferSlot* slot);
 // True while the slot is in RECEIVING. v4h_file_end uses this to drop a
 // duplicated FILE_END for a streaming slot already handed to its cmd_exec
-// finalize/abort job (fileSlotsFindByMsg matches COMPLETING slots too, and
+// finalize/abort job (fileSlotsFindByTransfer matches COMPLETING slots too, and
 // re-entering the teardown path there would emit a spurious FILE_CANCEL for a
 // transfer that is actually succeeding).
 bool           fileSlotsIsReceiving(const FileTransferSlot* slot);
@@ -297,16 +311,36 @@ void fileSlotsMarkTeardownPending(FileTransferSlot* slot);
 // FILE_CANCEL. Filled by fileSlotsTimeoutSweep when an `out` array is passed.
 struct FileSlotExpiry {
   uint8_t  peerMac[6];
-  uint32_t msgId;
+  uint32_t transferId;
 };
 
 // Periodic stale-slot sweep. Called from the espnow heartbeat tick.
 // Slots with no frame in kFileSlotTimeoutMs are released. Returns the number
-// of expired (peerMac,msgId) pairs actually RECORDED into `out` (never more
+// of expired (peerMac,transferId) pairs actually RECORDED into `out` (never more
 // than outCap — expired slots beyond the cap are still torn down, just not
 // reported), so the caller can send each recorded sender a
 // FILE_CANCEL(TIMEOUT). Pass nullptr/0 to skip collection.
+// Each expired transfer's verdict (timeout) is also remembered for a late FILE_END.
 uint8_t fileSlotsTimeoutSweep(uint32_t nowMs, FileSlotExpiry* out = nullptr, uint8_t outCap = 0);
+
+// ---- Result memory (1.0 step 7) ---------------------------------------------
+// The last kFileResultMemos verdicts this device sent as FILE_RESULT, each for
+// kFileResultMemoryMs: a copy of FILE_END for a transfer whose slot is gone is
+// answered with the same FILE_RESULT again (the sender asks again when the
+// first FILE_RESULT did not reach it). Remembering waits for the slot lock (any
+// task); the lookup is the receive path's bounded wait.
+constexpr uint32_t kFileResultMemoryMs = 60000;
+constexpr uint8_t  kFileResultTimeoutStatus = 10;  // espnowanswer::kTimeout (asserted in System_ESPNow.cpp)
+void fileSlotsRememberResult(const uint8_t peerMac[6], uint32_t transferId, uint8_t status, uint32_t bytesStored);
+enum FileResultLookup : uint8_t {
+  FILE_RESULT_LOOKUP_FOUND     = 0,
+  FILE_RESULT_LOOKUP_NOT_FOUND = 1,
+  FILE_RESULT_LOOKUP_BUSY      = 2,  // the table lock was not obtained in the bounded wait
+};
+FileResultLookup fileSlotsFindResult(const uint8_t peerMac[6], uint32_t transferId, uint8_t* statusOut,
+                                     uint32_t* bytesOut);
+// ESP-NOW closes: nothing remembered survives into the next start.
+void fileSlotsForgetResults();
 
 // ---- Diagnostics ------------------------------------------------------------
 
@@ -316,8 +350,9 @@ uint8_t fileSlotsActiveCount();
 struct FileTransferSlotInfo {
   uint8_t  state;             // FileSlotState
   uint8_t  peerMac[6];
-  uint32_t msgId;
-  char     filename[64];
+  uint32_t transferId;
+  char     filename[kFileSlotNameMax + 1];
+  uint8_t  kind;
   uint32_t totalSize;
   uint32_t receivedBytes;
   uint16_t totalChunks;

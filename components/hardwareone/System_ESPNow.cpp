@@ -3861,8 +3861,10 @@ V4SendResult v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint1
   // already took would be shown twice under a second msgId, so a long TEXT is
   // never sent again as a whole; its sender sees the refusal. A CMD answered
   // busy ends Busy (DESIGN 3.5: terminal, shown at once); the person sends it
-  // again.
-  const bool wholeRetryOk = type != ESPNOW_V4_TYPE_TEXT && type != ESPNOW_V4_TYPE_CMD;
+  // again. A FILE_START refused (no slot) ends the file send at once (DESIGN
+  // 3.6); FILE_END keeps the retry (a busy slot table).
+  const bool wholeRetryOk = type != ESPNOW_V4_TYPE_TEXT && type != ESPNOW_V4_TYPE_CMD &&
+                            type != ESPNOW_V4_TYPE_FILE_START;
   // A tracked request (USER_SYNC) that may go once more: its busy ACK is not
   // its end; the final outcome below is (remoteCmdSettle).
   if (wholeRetryOk) remoteCmdHold(dst, msgId);
@@ -4083,18 +4085,37 @@ bool v4_emit_ack(const uint8_t* dst, uint16_t classFlag, uint16_t sessionId, con
   return v4_radio_emit(dst, frame, sizeof(frame), /*allowRoute=*/true);
 }
 
-// Tell a sender that a file transfer it started will not complete.
-// The sender is fire-and-forget (it returns "sent" once frames are handed off,
-// without waiting for completion), so this is a post-hoc failure notice. An
-// answer (rule F3): reqId = the transfer's FILE_START msgId, status = the
-// reason; the frame's own header msgId is fresh, so it is never taken for a
-// duplicate of a frame this device sent under the same number. Same session
-// AEAD path as FILE_START/DATA/END — RX requires REQ_SESSION_ENC.
-static bool v4_send_file_cancel(const uint8_t* dst, uint32_t transferMsgId, uint8_t reason) {
+// Stop a transfer (FILE_CANCEL, either direction): the receiver tells the
+// sender its pump can stop (a gap, a chunk for a transfer it does not have,
+// the timeout); the sender tells the receiver it gave the transfer up. An
+// answer (rule F3): reqId = the transferId, status = the reason; the frame's
+// own header msgId is fresh. Same session AEAD path as the other FILE_*
+// frames — RX requires REQ_SESSION_ENC. Not waited for.
+static bool v4_send_file_cancel(const uint8_t* dst, uint32_t transferId, uint8_t reason) {
   V4PayloadFileCancel p = {};
-  p.reqId = transferMsgId;
+  p.reqId = transferId;
   p.status = reason;
   return v4_send_payload_smart(dst, ESPNOW_V4_TYPE_FILE_CANCEL, 0, generateMessageId(),
+                               (const uint8_t*)&p, sizeof(p), 1);
+}
+
+// The receiver's verdict on a transfer (FILE_RESULT, 1.0 step 7): status 0 =
+// stored (renamed into place, or a bond answer processed), else why not.
+// Remembered first (fileSlotsRememberResult), so a copy of FILE_END that comes
+// after the slot is gone gets the same answer. Sealed, ACK_REQ, sent through
+// the smart path (queued: callable from espnow_task and cmd_exec); the sender
+// asks again with a FILE_END copy if it does not arrive.
+static_assert(kFileSlotNameMax == (size_t)ESPNOW_V4_FILE_NAME_MAX, "a slot keeps the longest name FILE_START may carry");
+static_assert(kFileResultTimeoutStatus == espnowanswer::kTimeout, "the swept transfer's remembered verdict is timeout");
+static_assert(kEspNowFileKindFile == V4_FILE_KIND_FILE && kEspNowFileKindBond == V4_FILE_KIND_BOND,
+              "System_ESPNow.h names FILE_START's kinds");
+static bool v4_send_file_result(const uint8_t* dst, uint32_t transferId, uint8_t status, uint32_t bytesStored) {
+  fileSlotsRememberResult(dst, transferId, status, bytesStored);
+  V4PayloadFileResult p = {};
+  p.reqId = transferId;
+  p.status = status;
+  p.bytesStored = espnowanswer::isOk(status) ? bytesStored : 0;
+  return v4_send_payload_smart(dst, ESPNOW_V4_TYPE_FILE_RESULT, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
                                (const uint8_t*)&p, sizeof(p), 1);
 }
 
@@ -6952,24 +6973,30 @@ static V4Verdict v4h_stream(const V4RxCtx& ctx) {
   return ctx.accepted();
 }
 
-// FILE_START — initialize a file transfer; allocate PSRAM buffer + chunk bitmap.
-// Routes into the multi-slot file-transfer table (up to kFileSlots
-// concurrent transfers); the single global gActiveFileTransfer pointer and
-// gFileTransferLocked flag are long gone.
+// FILE_START — a transfer begins (1.0 step 7, the Q26 layout, DESIGN 3.6).
+// Payload: {transferId, totalSize, chunkSize, kind, nameLen} then the name's
+// bytes. The slot is keyed by (peer, transferId); every frame of the transfer
+// carries the transferId, and has a header msgId of its own.
+// Routes into the multi-slot file-transfer table (up to kFileSlots concurrent
+// transfers).
 //
 // Conflict contract (see fileSlotsAllocate):
-//   - same peer + same msgId + identical file params  → IDEMPOTENT, the
-//     existing slot is reused (FILE_* frames bypass the dedup ring, so a
-//     MAC-layer retransmit of FILE_START lands here verbatim)
-//   - same peer + same filename-hash, different msgId → SUPERSEDES the old
-//     transfer (a sender retry mints a fresh msgId), provided a slot is free
-//   - different peers                                 → never conflict; the
-//     destination inbox is per-peer (/espnow/received/<mac>/)
-// Remaining rejections are BUSY / BAD_ARGS / ALLOC / TOO_BIG, and each now
-// answers the sender with FILE_CANCEL(REJECTED) so it stops pumping.
+//   - same peer + same transferId + identical file params → IDEMPOTENT, the
+//     existing slot is reused (a copy the accept memory did not catch)
+//   - same peer + same filename-hash, different transferId → SUPERSEDES the
+//     old transfer (a sender retry draws a fresh transferId), provided a slot
+//     is free
+//   - different peers → never conflict; the destination inbox is per-peer
+//     (/espnow/received/<mac>/)
+// A refusal is answered on the FILE_START's ACK, with its reason: a name over
+// 96 bytes (or over what the inbox can store) kTooLarge (F7: never cut), a
+// file over the transfer limit kTooLarge, no slot / no memory kNoSlot, no
+// room on flash kIoError, a malformed start kBadRequest, an unknown kind
+// kUnsupported, a bond answer from anyone but the online bond partner
+// kRefused. The sender waits for that ACK and stops at once.
 //
 // RX gated REQ_PAIRED|REQ_SESSION_ENC (dispatch table) — MAC pairing alone is
-// not enough; TX already encrypt-or-fails via v4_send_payload_smart.
+// not enough; TX encrypt-or-fails too.
 // The shared status (System_ESPNow_AnswerCore.h) for a fileSlotsAllocate refusal.
 static uint8_t v4FileStartRefusalStatus(const char* err) {
   if (!err) return espnowanswer::kRefused;
@@ -6981,140 +7008,221 @@ static uint8_t v4FileStartRefusalStatus(const char* err) {
   return espnowanswer::kRefused;
 }
 
+// The longest name the inbox can store as one path component: LittleFS keeps
+// CONFIG_LITTLEFS_OBJ_NAME_LEN - 1 (63 on the shipped images), below the
+// wire's 96. A name the inbox cannot hold is refused at FILE_START (kTooLarge)
+// rather than failing at the rename after the whole file came.
+#ifdef CONFIG_LITTLEFS_OBJ_NAME_LEN
+static constexpr size_t kFileInboxNameMax = (CONFIG_LITTLEFS_OBJ_NAME_LEN - 1) < ESPNOW_V4_FILE_NAME_MAX
+                                                ? (size_t)(CONFIG_LITTLEFS_OBJ_NAME_LEN - 1)
+                                                : (size_t)ESPNOW_V4_FILE_NAME_MAX;
+#else
+static constexpr size_t kFileInboxNameMax = 63;
+#endif
+
+// One path component: no '/', '\\' or NUL inside, not "." or "..".
+static bool v4FileNameIsPlain(const char* name, size_t len) {
+  if (len == 0) return false;
+  if (memchr(name, '\0', len) || memchr(name, '/', len) || memchr(name, '\\', len)) return false;
+  if ((len == 1 && name[0] == '.') || (len == 2 && name[0] == '.' && name[1] == '.')) return false;
+  return true;
+}
+
+// The bond answers a FILE_START of kind 1 may carry.
+[[maybe_unused]] static bool v4FileIsBondAnswerName(const char* name) {
+  return strcmp(name, "_manifest_out.json") == 0 || strcmp(name, "_settings_out.json") == 0 ||
+         strcmp(name, "_schema_out.json") == 0;
+}
+
+#if ENABLE_BONDED_MODE
+// Bond answers (kind 1) are accepted only from the configured bond peer while
+// bond mode is on and the peer is online. Session AEAD is already required by
+// the FILE_* dispatch flags; this blocks a different paired+session mesh peer
+// from poisoning the bond settings cache.
+static bool v4FileBondMagicAllowed(const uint8_t* sndMac, const char* filename) {
+  if (!sndMac || !filename) return false;
+  if (!gSettings.bondModeEnabled || !gEspNow || !gEspNow->bondPeerOnline) {
+    WARN_ESPNOWF("[V4_FILE] Rejected bond file '%s': bond mode inactive or peer offline", filename);
+    return false;
+  }
+  if (!isBondPeerMac(sndMac)) {
+    WARN_ESPNOWF("[V4_FILE] Rejected bond file '%s' from non-bond peer", filename);
+    return false;
+  }
+  return true;
+}
+#endif
+
 static V4Verdict v4h_file_start(const V4RxCtx& ctx) {
-  V4PayloadFileStart fsv;
-  ctx.read(fsv);
-  const V4PayloadFileStart* fs = &fsv;
+  V4PayloadFileStart fs;
+  ctx.read(fs);
+  size_t nameAvail = 0;
+  const uint8_t* nameBytes = ctx.tail(sizeof(V4PayloadFileStart), &nameAvail);
+  if (fs.transferId == 0 || fs.nameLen == 0 || !nameBytes || nameAvail < fs.nameLen) {
+    WARN_ESPNOWF("[V4_FILE] FILE_START from %s refused: malformed (transferId=%lu, nameLen=%u, %u name bytes)",
+                 ctx.deviceName, (unsigned long)fs.transferId, (unsigned)fs.nameLen, (unsigned)nameAvail);
+    return ctx.refuseWith(espnowanswer::kBadRequest);
+  }
+  // F7: a name over the limit is refused, never cut.
+  const size_t nameMax = fs.kind == V4_FILE_KIND_FILE ? kFileInboxNameMax : (size_t)ESPNOW_V4_FILE_NAME_MAX;
+  if (fs.nameLen > ESPNOW_V4_FILE_NAME_MAX || fs.nameLen > nameMax) {
+    ERROR_ESPNOWF("[V4_FILE] FILE_START from %s refused: the name is %u bytes, the limit is %u",
+                  ctx.deviceName, (unsigned)fs.nameLen, (unsigned)nameMax);
+    return ctx.refuseWith(espnowanswer::kTooLarge);
+  }
+  char name[kFileSlotNameMax + 1];
+  memcpy(name, nameBytes, fs.nameLen);
+  name[fs.nameLen] = '\0';
+  if (!v4FileNameIsPlain(name, fs.nameLen)) {
+    WARN_ESPNOWF("[V4_FILE] FILE_START from %s refused: the name is not a plain file name", ctx.deviceName);
+    return ctx.refuseWith(espnowanswer::kBadRequest);
+  }
+  if (fs.kind > V4_FILE_KIND_BOND) {
+    WARN_ESPNOWF("[V4_FILE] FILE_START from %s refused: kind %u is not known here", ctx.deviceName,
+                 (unsigned)fs.kind);
+    return ctx.refuseWith(espnowanswer::kUnsupported);
+  }
+  if (fs.kind == V4_FILE_KIND_BOND) {
+#if ENABLE_BONDED_MODE
+    if (!v4FileIsBondAnswerName(name)) return ctx.refuseWith(espnowanswer::kBadRequest);
+    if (!v4FileBondMagicAllowed(ctx.recv_info->src_addr, name)) return ctx.refuse();
+#else
+    return ctx.refuseWith(espnowanswer::kUnsupported);  // no bond mode in this build
+#endif
+  }
+  // The chunk count the receiver keeps is 16-bit (a 4 MB file at the routed
+  // 138-byte chunk is 30,395 chunks); a chunk must fit one FILE_DATA.
+  if (fs.totalSize > 0 && (fs.chunkSize == 0 || fs.chunkSize > ESPNOW_V4_FILE_CHUNK_DIRECT)) {
+    return ctx.refuseWith(espnowanswer::kBadRequest);
+  }
+  const uint32_t chunkCount = fs.totalSize > 0 ? (fs.totalSize + fs.chunkSize - 1) / fs.chunkSize : 0;
+  if (chunkCount > 0xFFFFu) {
+    if (fs.totalSize > kFileSlotMaxStreamSize) return ctx.refuseWith(espnowanswer::kTooLarge);
+    return ctx.refuseWith(espnowanswer::kBadRequest);
+  }
 
   const char* err = nullptr;
-  FileTransferSlot* slot = fileSlotsAllocate(ctx.recv_info->src_addr,
-                                              ctx.h->msgId,
-                                              fs->filename,
-                                              fs->fileSize,
-                                              fs->chunkCount,
-                                              fs->chunkSize,
-                                              &err);
+  FileTransferSlot* slot = fileSlotsAllocate(ctx.recv_info->src_addr, fs.transferId, name, fs.totalSize,
+                                             (uint16_t)chunkCount, fs.chunkSize, fs.kind, &err);
   if (!slot) {
     if (err && strcmp(err, kFileSlotErrTooBig) == 0) {
-      ERROR_ESPNOWF("[V4_FILE] FILE_START rejected: '%.64s' is %lu bytes, exceeds the %lu MB transfer limit (from %s)",
-                    fs->filename, (unsigned long)fs->fileSize,
+      ERROR_ESPNOWF("[V4_FILE] FILE_START rejected: '%s' is %lu bytes, exceeds the %lu MB transfer limit (from %s)",
+                    name, (unsigned long)fs.totalSize,
                     (unsigned long)(kFileSlotMaxStreamSize / (1024UL * 1024UL)), ctx.deviceName);
     } else {
-      ERROR_ESPNOWF("[V4_FILE] FILE_START rejected for '%.64s' from %s: %s",
-                    fs->filename, ctx.deviceName, err ? err : "(unknown)");
+      ERROR_ESPNOWF("[V4_FILE] FILE_START rejected for '%s' from %s: %s",
+                    name, ctx.deviceName, err ? err : "(unknown)");
     }
-    // Tell the sender. Without this, a rejected-at-start transfer was the
-    // WORST dead-transfer case: the fire-and-forget sender pumped the entire
-    // file into the void (every FILE_DATA finding no slot) and then reported
-    // success. The cancel lets the sender's abort matcher (peer + msgId,
-    // which echoes this FILE_START's msgId) stop within one chunk.
-    v4_send_file_cancel(ctx.recv_info->src_addr, ctx.h->msgId, FILE_CANCEL_REJECTED);
-    // The ACK names the reason too (1.0 step 5b); a capacity refusal is not
-    // remembered, so a FILE_START sent again is tried again.
+    // The ACK names the reason; the sender waits for it and stops at once. A
+    // capacity refusal is not remembered, so a FILE_START sent again is tried
+    // again.
     return ctx.refuseWith(v4FileStartRefusalStatus(err));
   }
-  DEBUG_ESPNOWF("[V4_FILE_RX] FILE_START: %s (%lu bytes, %u chunks, chunkSize=%u) from %s",
-               fs->filename, (unsigned long)fs->fileSize, fs->chunkCount, fs->chunkSize, ctx.deviceName);
+  DEBUG_ESPNOWF("[V4_FILE_RX] FILE_START: %s (%lu bytes, %lu chunks, chunkSize=%u, kind=%u, transferId=%lu) from %s",
+               name, (unsigned long)fs.totalSize, (unsigned long)chunkCount, fs.chunkSize, (unsigned)fs.kind,
+               (unsigned long)fs.transferId, ctx.deviceName);
   return ctx.accepted();
 }
 
 // The slot table could not be read (or written) within the receive path's
 // bounded wait, so one FILE_* frame was dropped. Deliberately NOT answered with
 // FILE_CANCEL: "busy" says nothing about the transfer, and a cancel here would
-// make the sender abort a healthy one (it used to: the lookup returned null for
-// a lock miss and null was read as "no such transfer"). The protocol has no
-// retransmission, so the frame is lost; what happens next is decided by the
-// code that does know the slot's state — a RAM-path transfer is found
-// incomplete at FILE_END, a streaming one sees the gap at the next chunk, a
-// lost FILE_END leaves the slot to the 30 s sweep — and each of those tells the
-// sender the real reason, once. The defence is that this cannot practically
-// happen: the slot lock is never held across filesystem work or any other wait
-// (see FileSlotsLockGuard), so a 50 ms miss needs the holder starved for 50 ms.
-// Rate-limited: a stuck holder would otherwise log once per chunk.
-static void v4FileNoteSlotTableBusy(const char* frame, const V4RxCtx& ctx) {
+// make the sender abort a healthy one. A chunk is not retransmitted, so it is
+// lost; what happens next is decided by the code that does know the slot's
+// state — a RAM-path transfer is found incomplete at FILE_END, a streaming one
+// sees the gap at the next chunk, a FILE_END answered busy is sent again by the
+// sender — and each of those tells the sender the real reason, once. The
+// defence is that this cannot practically happen: the slot lock is never held
+// across filesystem work or any other wait (see FileSlotsLockGuard), so a 50 ms
+// miss needs the holder starved for 50 ms. Rate-limited: a stuck holder would
+// otherwise log once per chunk.
+static void v4FileNoteSlotTableBusy(const char* frame, uint32_t transferId, const V4RxCtx& ctx) {
   static uint32_t sLastLogMs = 0;
   static bool     sLogged    = false;
   const uint32_t nowMs = (uint32_t)millis();
   if (sLogged && (nowMs - sLastLogMs) < 1000) return;
   sLogged    = true;
   sLastLogMs = nowMs;
-  WARN_ESPNOWF("[V4_FILE] %s msgId=%lu from %s dropped: slot table busy (no cancel sent; the transfer is not known to have failed)",
-               frame, (unsigned long)ctx.h->msgId, ctx.deviceName);
+  WARN_ESPNOWF("[V4_FILE] %s transferId=%lu from %s dropped: slot table busy (no cancel sent; the transfer is not known to have failed)",
+               frame, (unsigned long)transferId, ctx.deviceName);
 }
 
 // FILE_DATA — route the chunk to its owning slot in the multi-slot table.
-// Pairing + session AEAD enforced by dispatch flags (see FILE_START note).
+// Payload {transferId, chunkIndex u32} then the chunk's bytes. No ACK_REQ: the
+// verdict only counts. Pairing + session AEAD enforced by dispatch flags.
 static V4Verdict v4h_file_data(const V4RxCtx& ctx) {
+  // The 8 header bytes (the table's minLen guarantees them); the chunk's bytes
+  // come from tail() below.
+  uint32_t transferId = 0, chunkIndex32 = 0;
+  if (!ctx.payload || ctx.payloadLen < offsetof(V4PayloadFileData, data)) {
+    return ctx.refuseWith(espnowanswer::kBadRequest);
+  }
+  memcpy(&transferId, ctx.payload + offsetof(V4PayloadFileData, transferId), sizeof(transferId));
+  memcpy(&chunkIndex32, ctx.payload + offsetof(V4PayloadFileData, chunkIndex), sizeof(chunkIndex32));
   FileSlotLookup lookup = FILE_SLOT_LOOKUP_NOT_FOUND;
-  FileTransferSlot* slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId, &lookup);
+  FileTransferSlot* slot = fileSlotsFindByTransfer(ctx.recv_info->src_addr, transferId, &lookup);
   if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) {
-    v4FileNoteSlotTableBusy("FILE_DATA", ctx);
+    v4FileNoteSlotTableBusy("FILE_DATA", transferId, ctx);
     return ctx.refuseWith(espnowanswer::kBusy);
   }
   if (!slot) {
-    DEBUG_ESPNOWF("[V4_FILE_RX] FILE_DATA ignored: no slot for msgId=%lu from %s",
-                 (unsigned long)ctx.h->msgId, ctx.deviceName);
-    // No transfer for this chunk (FILE_START was rejected, or the slot timed
-    // out / was superseded). Tell the sender so its abort matcher stops the
-    // pump even if the FILE_START-time cancel was lost on air — repeating it
-    // is what makes the abort robust against a single dropped cancel frame.
+    DEBUG_ESPNOWF("[V4_FILE_RX] FILE_DATA ignored: no slot for transferId=%lu from %s",
+                 (unsigned long)transferId, ctx.deviceName);
+    // No transfer for this chunk (the slot timed out, was superseded or was
+    // cancelled). Tell the sender so its pump stops; repeating it is what
+    // makes the stop robust against a single dropped cancel frame.
     //
-    // Rate-limited per (peer, msgId) rather than one-per-chunk: an honest
-    // sender's chunks all carry the SAME msgId and are ~15 ms apart, so it
-    // still gets a cancel within one window and aborts promptly; a peer
-    // spraying FILE_DATA with random msgIds can no longer force one AEAD seal
-    // + TX per received frame on espnow_task (the RX drain task).
+    // Rate-limited per (peer, transferId) rather than one-per-chunk: an honest
+    // sender's chunks all carry the SAME transferId and are ~15 ms apart, so it
+    // still gets a cancel within one window and stops promptly; a peer
+    // spraying FILE_DATA with random ids cannot force one AEAD seal + TX per
+    // received frame on espnow_task (the RX drain task).
     {
       static uint8_t  sLastCancelMac[6] = {0};
-      static uint32_t sLastCancelMsgId  = 0;
+      static uint32_t sLastCancelId     = 0;
       static uint32_t sLastCancelMs     = 0;
       const uint32_t nowMs = (uint32_t)millis();
-      const bool sameTarget = (sLastCancelMsgId == ctx.h->msgId) &&
+      const bool sameTarget = (sLastCancelId == transferId) &&
                               (memcmp(sLastCancelMac, ctx.recv_info->src_addr, 6) == 0);
       if (!sameTarget || (nowMs - sLastCancelMs) >= 100) {
         memcpy(sLastCancelMac, ctx.recv_info->src_addr, 6);
-        sLastCancelMsgId = ctx.h->msgId;
-        sLastCancelMs    = nowMs;
-        v4_send_file_cancel(ctx.recv_info->src_addr, ctx.h->msgId, FILE_CANCEL_REJECTED);
+        sLastCancelId = transferId;
+        sLastCancelMs = nowMs;
+        v4_send_file_cancel(ctx.recv_info->src_addr, transferId, FILE_CANCEL_REJECTED);
       }
     }
     return ctx.refuse();
   }
-  // The chunk's bytes run from offset 2 to the end of the payload (the last
+  // The chunk's bytes run from offset 8 to the end of the payload (the last
   // chunk is shorter than the others).
   size_t chunkLen = 0;
   const uint8_t* chunkData = ctx.tail(offsetof(V4PayloadFileData, data), &chunkLen);
-  if (!chunkData) return ctx.refuseWith(espnowanswer::kBadRequest);
-  uint16_t chunkIndex = 0;
-  memcpy(&chunkIndex, ctx.payload + offsetof(V4PayloadFileData, chunkIndex), sizeof(chunkIndex));
+  if (!chunkData || chunkIndex32 > 0xFFFFu) return ctx.refuseWith(espnowanswer::kBadRequest);
+  const uint16_t chunkIndex = (uint16_t)chunkIndex32;
   const uint16_t dataLen = (uint16_t)chunkLen;
 
   // Streaming slot (file > 128 KB): espnow_task ONLY memcpy's the chunk into a
   // double-buffer — the flash write is deferred to cmd_exec so the RX drain is never
-  // blocked on flash (that's what was dropping chunks at ~87). A gap / writer-
-  // backpressure / queue-full aborts the transfer (cleanup is queued on cmd_exec by
-  // the append); we just tell the fire-and-forget sender to stop.
+  // blocked on flash. A gap / writer-backpressure / queue-full aborts the transfer
+  // (cleanup is queued on cmd_exec by the append); we tell the sender to stop.
   if (fileSlotsIsStreaming(slot)) {
     StreamAppendResult r = fileSlotsStreamAppend(slot, chunkIndex, chunkData, dataLen);
     // STREAM_APPEND_FINALIZING (a late/duplicate chunk for a slot already
     // finalizing SUCCESSFULLY) deliberately falls through silently — cancelling
-    // there would match the sender's abort slot and turn a good transfer into a
-    // reported failure.
+    // there would turn a good transfer into a reported failure.
     // STREAM_APPEND_BUSY (slot table busy; the chunk was not buffered and the
     // slot is NOT failing) gets no cancel either — see v4FileNoteSlotTableBusy.
     if (r == STREAM_APPEND_BUSY) {
-      v4FileNoteSlotTableBusy("FILE_DATA", ctx);
+      v4FileNoteSlotTableBusy("FILE_DATA", transferId, ctx);
       return ctx.refuseWith(espnowanswer::kBusy);
     }
     if (r == STREAM_APPEND_FAIL || r == STREAM_APPEND_ALREADY_FAILED) {
       // Use the frame's src_addr (== this slot's peer) for the cancel so we don't
       // race cmd_exec, which may already be tearing the slot down. The cancel is a
       // single unreliable frame, so we re-send it per in-flight chunk to raise the
-      // odds the fire-and-forget sender hears it.
-      v4_send_file_cancel(ctx.recv_info->src_addr, ctx.h->msgId, FILE_CANCEL_INCOMPLETE);
+      // odds the sender hears it.
+      v4_send_file_cancel(ctx.recv_info->src_addr, transferId, FILE_CANCEL_INCOMPLETE);
       // Durable RECV_FAILED exactly once — on the FIRST failing chunk (STREAM_APPEND_FAIL).
-      // Every later in-flight chunk returns ALREADY_FAILED, so an aborted big-file
-      // transfer logs one line, not one per remaining chunk (~1700 on a 343 KB file).
       if (r == STREAM_APPEND_FAIL) {
         String senderMacStr = macToDisplayStr(ctx.recv_info->src_addr);
         logFileTransferEvent((uint8_t*)ctx.recv_info->src_addr, senderMacStr.c_str(),
@@ -7139,16 +7247,9 @@ static V4Verdict v4h_file_data(const V4RxCtx& ctx) {
   return ctx.accepted();
 }
 
-// cmd_exec finalize for a STREAMING receive (submitted by v4h_file_end). Drains any
-// buffers still in flight, closes the .part, renames it into the inbox (the
-// FILE_END was ACKed when it was accepted; a failure here sends FILE_CANCEL),
-// logs, and releases the slot — all OFF espnow_task so the RX drain is never
-// blocked on flash. arg = the FileTransferSlot* (stable until released
-// here; the slot is COMPLETING, so nothing else touches it). Mirrors the old inline
-// FILE_END streaming publish, just moved to cmd_exec.
 // A file of the bond's own sync from the bond partner (fileRxIsBondSync):
 // its arrival is not a user-visible file event.
-static bool fileRxBondSync(const uint8_t* mac, const char* filename) {
+[[maybe_unused]] static bool fileRxBondSync(const uint8_t* mac, const char* filename) {
 #if ENABLE_BONDED_MODE
   uint8_t partner[6];
   const bool fromPartner = mac && gSettings.bondPeerMac.length() > 0 &&
@@ -7161,16 +7262,22 @@ static bool fileRxBondSync(const uint8_t* mac, const char* filename) {
 #endif
 }
 
+// cmd_exec finalize for a STREAMING receive (submitted by v4h_file_end). Drains any
+// buffers still in flight, closes the .part, renames it into the inbox, sends the
+// sender its FILE_RESULT (stored, or io_error), logs, and releases the slot — all
+// OFF espnow_task so the RX drain is never blocked on flash. arg = the
+// FileTransferSlot* (stable until released here; the slot is COMPLETING, so
+// nothing else touches it).
 static void fileWriterFinalizeJob(void* arg) {
   FileTransferSlot* slot = (FileTransferSlot*)arg;
   if (!slot) return;
   // Snapshot identity before any teardown (the slot is wiped at the end).
   uint8_t  sndMac[6];
   memcpy(sndMac, fileSlotsGetSenderMac(slot), 6);
-  char filename[64];
+  char filename[kFileSlotNameMax + 1];
   strlcpy(filename, fileSlotsGetFilename(slot), sizeof(filename));
-  uint32_t recvBytes = fileSlotsGetReceivedBytes(slot);
-  uint32_t msgId     = fileSlotsGetMsgId(slot);
+  uint32_t recvBytes  = fileSlotsGetReceivedBytes(slot);
+  uint32_t transferId = fileSlotsGetTransferId(slot);
   String   senderMacStr = macToDisplayStr(sndMac);
 
   bool ok = fileSlotsStreamFinalizeWrite(slot);  // drain remaining buffers + close .part
@@ -7202,54 +7309,31 @@ static void fileWriterFinalizeJob(void* arg) {
     }
 #endif
     if (gEspNow) gEspNow->fileTransfersReceived++;
+    v4_send_file_result(sndMac, transferId, espnowanswer::kOk, recvBytes);
   } else {
-    // Drained/closed/renamed but something failed — correct the fire-and-forget
-    // sender instead of letting it assume success.
-    v4_send_file_cancel(sndMac, msgId, FILE_CANCEL_WRITE_FAILED);
+    v4_send_file_result(sndMac, transferId, espnowanswer::kIoError, 0);
     logFileTransferEvent(sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
   }
   fileSlotsRelease(slot);
 }
 
-#if ENABLE_BONDED_MODE
-// Bond magic filenames (_settings_out.json, etc.) are accepted only from the
-// configured bond peer while bond mode is on and the peer is online. Session
-// AEAD is already required by the FILE_* dispatch flags; this blocks a
-// different paired+session mesh peer from poisoning the bond settings cache.
-static bool v4FileBondMagicAllowed(const uint8_t* sndMac, const char* filename) {
-  if (!sndMac || !filename) return false;
-  if (!gSettings.bondModeEnabled || !gEspNow || !gEspNow->bondPeerOnline) {
-    WARN_ESPNOWF("[V4_FILE] Rejected bond file '%s': bond mode inactive or peer offline", filename);
-    return false;
-  }
-  if (!isBondPeerMac(sndMac)) {
-    WARN_ESPNOWF("[V4_FILE] Rejected bond file '%s' from non-bond peer", filename);
-    return false;
-  }
-  return true;
-}
-#endif
-
 // The work of a complete, CRC-checked small (RAM-path) file, after its
 // FILE_END was accepted and ACKed (1.0 step 5b: heavy work leaves the ACK
 // path). Runs on espnow_task, from the loop (fileRamFinalizeTick) or inline
-// when the short queue is full: bond sync files go to their processors, any
-// other file is written to the inbox (staged, then renamed), then the slot is
-// released. A write failure still tells the sender with FILE_CANCEL.
+// when the short queue is full: a bond answer (kind 1) goes to its processor,
+// any other file is written to the inbox (staged, then renamed), then the
+// sender gets its FILE_RESULT (1.0 step 7) and the slot is released.
 static void fileRamFinalize(FileTransferSlot* slot) {
   if (!slot || !fileSlotsIsRamFinalizing(slot)) return;
   const uint8_t* sndMac    = fileSlotsGetSenderMac(slot);
   const char*    filename  = fileSlotsGetFilename(slot);
   const uint8_t* dataBuf   = fileSlotsGetBuffer(slot);
   uint32_t       recvBytes = fileSlotsGetReceivedBytes(slot);
-  const uint32_t transferMsgId = fileSlotsGetMsgId(slot);
+  const uint32_t transferId = fileSlotsGetTransferId(slot);
   String senderMacStr = macToDisplayStr(sndMac);
-  const bool senderComplete = true;  // only complete files are queued here
-  if (senderComplete && dataBuf) {
+  if (dataBuf) {
 #if ENABLE_BONDED_MODE
-    if (strcmp(filename, "_manifest_out.json") == 0 ||
-        strcmp(filename, "_settings_out.json") == 0 ||
-        strcmp(filename, "_schema_out.json") == 0) {
+    if (fileSlotsGetKind(slot) == V4_FILE_KIND_BOND) {
       if (strcmp(filename, "_manifest_out.json") == 0) {
         processBondModeManifestResp((uint8_t*)sndMac, senderMacStr, (const char*)dataBuf, recvBytes);
         BROADCAST_PRINTF("[V4_FILE] Manifest processed: %lu bytes", (unsigned long)recvBytes);
@@ -7273,32 +7357,25 @@ static void fileRamFinalize(FileTransferSlot* slot) {
       snprintf(deviceDir, sizeof(deviceDir), "/espnow/received/%s", senderToken);
       char filepath[160];
       snprintf(filepath, sizeof(filepath), "%s/%s", deviceDir, filename);
-      // Atomic publish: stage to a flat ".part-<mac>-<nameHash>" temp in the
-      // inbox root, verify the FULL write, then rename into place. The rename is
-      // the only mutation of `filepath`, so a crash / ENOSPC / short write never
-      // leaves a truncated destination. (The old path wrote straight to
-      // `filepath` with "w" — truncating on open — and ACKed success even when
-      // write() failed.) Keyed by (peer, filename-hash) like the streaming
-      // .part-strm names — the file's identity, not the attempt's msgId, which
-      // reboot-resets and collided the old names. Recomputing the hash from the
-      // slot's terminated filename copy matches fileSlotsAllocate's bounded
-      // hash exactly. Short form (no "strm") keeps it under the buffer size.
-      // msgId is appended purely to keep two concurrent RAM receives of the
-      // same (peer, file) from sharing a staging path; unlike the streaming
-      // path this temp exists only for the duration of this one synchronous
-      // write+rename, so it needs no cross-attempt stability.
+      // Atomic publish: stage to a flat ".part-<mac>-<nameHash>-<transferId>"
+      // temp in the inbox root, verify the FULL write, then rename into place.
+      // The rename is the only mutation of `filepath`, so a crash / ENOSPC /
+      // short write never leaves a truncated destination. The transferId only
+      // keeps two concurrent RAM receives of the same (peer, file) from sharing
+      // a staging path; this temp exists only for this one write+rename.
       char tmpPath[80];
       snprintf(tmpPath, sizeof(tmpPath), "/espnow/received/.part-%s-%08lx-%08lx",
                senderToken,
                (unsigned long)esp_crc32_le(0, (const uint8_t*)filename, strlen(filename)),
-               (unsigned long)transferMsgId);
+               (unsigned long)transferId);
       AuthContext wrCtx = VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_write");
       bool wrote = false;
       {
         FsLockGuard guard("v4file.write");
         // /espnow is created at boot; confine every inbound-file write to the
         // received inbox so a (peer-controlled) filename can never direct a write
-        // outside it — defense-in-depth on top of normalize()'s ".." rejection.
+        // outside it — defense-in-depth on top of the plain-name check at
+        // FILE_START and normalize()'s ".." rejection.
         VFS::mkdirGuarded("/espnow/received", VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_write_mkdir"));
         VFS::mkdirGuarded(deviceDir, VFS::systemAuth(VFS::Scopes::ESPNOW_RECEIVED, "espnow.v4_file_write_mkdir"));
         File f = VFS::openGuarded(tmpPath, "w", wrCtx, true);
@@ -7322,8 +7399,8 @@ static void fileRamFinalize(FileTransferSlot* slot) {
         }
       }
       if (!wrote) {
-        // Don't ACK success; tell the fire-and-forget sender it actually failed.
-        v4_send_file_cancel(sndMac, transferMsgId, FILE_CANCEL_WRITE_FAILED);
+        // Not stored: the sender's FILE_RESULT says so.
+        v4_send_file_result(sndMac, transferId, espnowanswer::kIoError, 0);
         logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
         fileSlotsRelease(slot);
         return;
@@ -7367,6 +7444,7 @@ static void fileRamFinalize(FileTransferSlot* slot) {
       }
     }
 
+    v4_send_file_result(sndMac, transferId, espnowanswer::kOk, recvBytes);
     logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_SUCCESS);
 #if ENABLE_OLED_DISPLAY
     if (!fileRxBondSync(sndMac, filename)) {
@@ -7380,6 +7458,7 @@ static void fileRamFinalize(FileTransferSlot* slot) {
 #endif
     if (gEspNow) gEspNow->fileTransfersReceived++;
   } else {
+    v4_send_file_result(sndMac, transferId, espnowanswer::kIoError, 0);
     logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
   }
 
@@ -7410,8 +7489,8 @@ static void fileRamFinalizeTick() {
 }
 
 // ESP-NOW is closing with small files accepted but not yet written: their
-// FILE_END was ACKed, so each is recorded as a failed receive (with the
-// sender's FILE_CANCEL) instead of vanishing, and its slot released. Not
+// FILE_END was ACKed, so each is recorded as a failed receive (the sender's
+// FILE_RESULT says io_error) instead of vanishing, and its slot released. Not
 // written here: the bond processors run only on espnow_task.
 static void fileRamFinalizeDropAll() {
   while (sFileRamFinalizeCount > 0) {
@@ -7421,86 +7500,98 @@ static void fileRamFinalizeDropAll() {
     String senderMacStr = macToDisplayStr(sndMac);
     WARN_ESPNOWF("[V4_FILE] '%s' was received but ESP-NOW closed before it was written",
                  fileSlotsGetFilename(slot));
-    v4_send_file_cancel(sndMac, fileSlotsGetMsgId(slot), FILE_CANCEL_WRITE_FAILED);
+    v4_send_file_result(sndMac, fileSlotsGetTransferId(slot), espnowanswer::kIoError, 0);
     logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), fileSlotsGetFilename(slot),
                          MSG_FILE_RECV_FAILED);
     fileSlotsRelease(slot);
   }
 }
 
-// FILE_END — finalize the slot's transfer; route manifest/settings to bond
-// processors, otherwise write to filesystem (after the ACK: fileRamFinalize).
-// Slot identity: (peerMac, msgId) — the FILE_START's msgId is the transferId
-// used by every chunk and the FILE_END itself.
+// FILE_END — the sender sent every chunk (status 0) or stopped (status != 0).
+// Payload {transferId, chunkCount, crc32, status}. ACK_REQ: the ACK says the
+// FILE_END was taken; the verdict on the file is the FILE_RESULT that follows
+// (1.0 step 7): stored once the file is renamed into place (after the ACK, off
+// the ACK path), or incomplete / crc_mismatch / io_error. A copy of FILE_END
+// for a transfer still finishing is answered as taken (its FILE_RESULT is on
+// the way); for a transfer already finished, with the remembered FILE_RESULT
+// again (the sender asks again when the first one did not reach it).
 static V4Verdict v4h_file_end(const V4RxCtx& ctx) {
-  // One retry on a busy table, FILE_END only: this frame decides the whole file
-  // and no further frame of the transfer follows it, so a second bounded wait
-  // costs the RX drain little and a dropped FILE_END costs everything received.
-  FileSlotLookup lookup = FILE_SLOT_LOOKUP_NOT_FOUND;
-  FileTransferSlot* slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId, &lookup);
-  if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) {
-    slot = fileSlotsFindByMsg(ctx.recv_info->src_addr, ctx.h->msgId, &lookup);
-  }
-  if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) {
-    // Still busy: drop it without a verdict. The slot keeps what it received;
-    // the timeout sweep reclaims it and sends the sender FILE_CANCEL(TIMEOUT).
-    v4FileNoteSlotTableBusy("FILE_END", ctx);
-    return ctx.refuseWith(espnowanswer::kBusy);
-  }
-  if (!slot) {
-    ERROR_ESPNOWF("[V4_FILE] FILE_END for unknown msgId=%lu from %s — slot already released or never started",
-                  (unsigned long)ctx.h->msgId, ctx.deviceName);
-    return ctx.refuse();
-  }
-  // The receive table drops a FILE_END shorter than its 5 bytes (the CRC
-  // gates below make fev.crc32 an accept/reject-deciding input).
   V4PayloadFileEnd fev;
   ctx.read(fev);
+  const uint8_t* src = ctx.recv_info->src_addr;
   // status 0: the sender sent the whole file (0 = ok in every status byte,
   // rule F3); anything else: it stopped the transfer itself.
   const bool senderComplete = espnowanswer::isOk(fev.status);
+  // One retry on a busy table, FILE_END only: this frame decides the whole file
+  // and no further frame of the transfer follows it, so a second bounded wait
+  // costs the RX drain little.
+  FileSlotLookup lookup = FILE_SLOT_LOOKUP_NOT_FOUND;
+  FileTransferSlot* slot = fileSlotsFindByTransfer(src, fev.transferId, &lookup);
+  if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) {
+    slot = fileSlotsFindByTransfer(src, fev.transferId, &lookup);
+  }
+  if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) {
+    // Still busy: answered busy (not remembered); the sender sends it again.
+    v4FileNoteSlotTableBusy("FILE_END", fev.transferId, ctx);
+    return ctx.refuseWith(espnowanswer::kBusy);
+  }
+  if (!slot) {
+    // Finished already? Then this is the sender asking for its verdict again.
+    uint8_t status = 0;
+    uint32_t bytes = 0;
+    const FileResultLookup r = fileSlotsFindResult(src, fev.transferId, &status, &bytes);
+    if (r == FILE_RESULT_LOOKUP_BUSY) return ctx.refuseWith(espnowanswer::kBusy);
+    if (r == FILE_RESULT_LOOKUP_FOUND) {
+      DEBUG_ESPNOWF("[V4_FILE_RX] FILE_END for finished transferId=%lu from %s: FILE_RESULT %u again",
+                    (unsigned long)fev.transferId, ctx.deviceName, (unsigned)status);
+      v4_send_file_result(src, fev.transferId, status, bytes);
+      return ctx.accepted();
+    }
+    if (!senderComplete) return ctx.accepted();  // a stop for a transfer we do not have: nothing to do
+    ERROR_ESPNOWF("[V4_FILE] FILE_END for unknown transferId=%lu from %s — never started or forgotten",
+                  (unsigned long)fev.transferId, ctx.deviceName);
+    return ctx.refuse();
+  }
   const uint8_t* sndMac    = fileSlotsGetSenderMac(slot);
   const char*    filename  = fileSlotsGetFilename(slot);
   const uint8_t* dataBuf   = fileSlotsGetBuffer(slot);
   uint32_t       recvBytes = fileSlotsGetReceivedBytes(slot);
   String senderMacStr = macToDisplayStr(sndMac);
+  // The sender's chunk count must be the one FILE_START implied.
+  const bool countOk = fev.chunkCount == (uint32_t)fileSlotsGetTotalChunks(slot);
 
-  DEBUG_ESPNOWF("[V4_FILE_RX] FILE_END: %s (%lu bytes, %u/%u chunks, status=%u)",
+  DEBUG_ESPNOWF("[V4_FILE_RX] FILE_END: %s (%lu bytes, %u/%u chunks, sender count %lu, status=%u)",
                filename, (unsigned long)recvBytes,
                fileSlotsGetReceivedChunks(slot),
                fileSlotsGetTotalChunks(slot),
+               (unsigned long)fev.chunkCount,
                (unsigned)fev.status);
 
   // ---- Streaming slot (file > 128 KB): bytes are buffered to a .part on flash via
-  // cmd_exec. FILE_END hands finalize (drain remaining buffers, close, rename, ACK,
-  // release) to cmd_exec too, so espnow_task does no FS here. A streaming slot is
-  // never a bond config file (those are small → RAM path below) → no special
-  // processing: stream files are plain inbox files. dataBuf is null here. ----
+  // cmd_exec. FILE_END hands finalize (drain remaining buffers, close, rename,
+  // FILE_RESULT, release) to cmd_exec too, so espnow_task does no FS here. A
+  // streaming slot is never a bond answer (those are small → RAM path below). ----
   if (fileSlotsIsStreaming(slot)) {
-    // Duplicate-FILE_END guard: fileSlotsFindByMsg matches COMPLETING slots
-    // too, so a MAC-layer-duplicated FILE_END could re-enter here while the
-    // cmd_exec finalize/abort job owns the slot — and the else-branch below
-    // would emit a spurious FILE_CANCEL for a transfer that is succeeding.
-    // The first FILE_END already chose this slot's fate; drop the echo.
+    // A copy of FILE_END while the cmd_exec finalize/abort job owns the slot:
+    // the first FILE_END already chose this slot's fate.
     if (!fileSlotsIsReceiving(slot)) {
-      DEBUG_ESPNOWF("[V4_FILE_RX] duplicate FILE_END for '%s' (slot already COMPLETING) — ignored", filename);
-      // A copy of a FILE_END that was taken is answered as taken; a transfer
-      // already failing (its FILE_CANCEL went out) is refused.
+      DEBUG_ESPNOWF("[V4_FILE_RX] duplicate FILE_END for '%s' (slot already COMPLETING) — taken", filename);
+      // Taken (its FILE_RESULT is coming); a transfer already failing (its
+      // FILE_CANCEL went out at the gap) is refused.
       return fileSlotsIsStreamFailing(slot) ? ctx.refuse() : ctx.accepted();
     }
-    bool complete = fileSlotsIsComplete(slot);
+    bool complete = fileSlotsIsComplete(slot) && countOk;
     // CRC verdict MUST be decided before fileSlotsStreamBeginFinalize: that
     // call flips the slot to COMPLETING, and the failure teardown below
-    // (fileSlotsStreamFail) only acts on RECEIVING slots — a CRC check placed
-    // after it would leak the slot, both PSRAM buffers, and the open .part
-    // handle permanently on mismatch. The accumulator is final here: every
-    // chunk was appended by earlier v4h_file_data calls on this same task.
+    // (fileSlotsStreamFail) only acts on RECEIVING slots. The accumulator is
+    // final here: every chunk was appended by earlier v4h_file_data calls on
+    // this same task.
     bool crcOk = complete && (fileSlotsGetReceivedCrc(slot) == fev.crc32);
     if (complete && senderComplete && crcOk && fileSlotsStreamBeginFinalize(slot)) {
-      // Off-task finalize: the job owns drain + close + rename + ACK + release.
+      // Off-task finalize: the job owns drain + close + rename + FILE_RESULT + release.
       if (!submitDeferredToCmdExec(fileWriterFinalizeJob, slot)) {
         ERROR_ESPNOWF("[V4_FILE] stream finalize submit failed (queue full) — aborting '%s'", filename);
-        v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_WRITE_FAILED);
+        v4_send_file_result(sndMac, fev.transferId, espnowanswer::kIoError, 0);
         logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
         // Slot is COMPLETING; free it via a plain abort job. If that submit
         // also fails, park it as teardown-pending for the sweep to retry —
@@ -7508,162 +7599,210 @@ static V4Verdict v4h_file_end(const V4RxCtx& ctx) {
         // cmd_exec may be mid-write on this slot's buffers/.part handle.
         if (!submitDeferredToCmdExec(fileSlotsStreamAbortJob, slot)) fileSlotsMarkTeardownPending(slot);
       }
-    } else {
-      if (!complete) {
-        BROADCAST_PRINTF("[V4_FILE] REJECTED incomplete stream '%s': %u/%u chunks, %lu/%lu bytes",
-                     filename,
-                     (unsigned)fileSlotsGetReceivedChunks(slot),
-                     (unsigned)fileSlotsGetTotalChunks(slot),
-                     (unsigned long)recvBytes,
-                     (unsigned long)fileSlotsGetTotalSize(slot));
-      } else if (senderComplete && !crcOk) {
-        BROADCAST_PRINTF("[V4_FILE] REJECTED stream '%s': CRC mismatch (got %08lx, declared %08lx)",
-                     filename,
-                     (unsigned long)fileSlotsGetReceivedCrc(slot),
-                     (unsigned long)fev.crc32);
-      }
-      // Cancel echo ONLY when the sender still believes the transfer is alive.
-      // When the sender reports it stopped (status != 0), it initiated this abort and already knows —
-      // echoing a cancel back would just double-log the failure on its side.
-      if (senderComplete) {
-        v4_send_file_cancel(sndMac, ctx.h->msgId,
-                            !complete ? FILE_CANCEL_INCOMPLETE
-                                      : (!crcOk ? FILE_CANCEL_CRC_MISMATCH
-                                                : FILE_CANCEL_WRITE_FAILED));
-      }
-      logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
-      fileSlotsStreamFail(slot);  // queue close/delete/free on cmd_exec
-      // A sender's own stop (status != 0) was taken; an incomplete or corrupt
-      // file is refused (the FILE_CANCEL above names the reason).
-      return senderComplete ? ctx.refuse() : ctx.accepted();
+      return ctx.accepted();
     }
-    return ctx.accepted();
+    if (!complete) {
+      BROADCAST_PRINTF("[V4_FILE] REJECTED incomplete stream '%s': %u/%u chunks, %lu/%lu bytes",
+                   filename,
+                   (unsigned)fileSlotsGetReceivedChunks(slot),
+                   (unsigned)fileSlotsGetTotalChunks(slot),
+                   (unsigned long)recvBytes,
+                   (unsigned long)fileSlotsGetTotalSize(slot));
+    } else if (senderComplete && !crcOk) {
+      BROADCAST_PRINTF("[V4_FILE] REJECTED stream '%s': CRC mismatch (got %08lx, declared %08lx)",
+                   filename,
+                   (unsigned long)fileSlotsGetReceivedCrc(slot),
+                   (unsigned long)fev.crc32);
+    }
+    // The verdict goes back ONLY when the sender still believes the transfer is
+    // alive; one that reports it stopped (status != 0) already knows.
+    if (senderComplete) {
+      v4_send_file_result(sndMac, fev.transferId,
+                          !complete ? espnowanswer::kFileIncomplete
+                                    : (!crcOk ? espnowanswer::kFileCrcMismatch : espnowanswer::kIoError),
+                          0);
+    }
+    logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
+    fileSlotsStreamFail(slot);  // queue close/delete/free on cmd_exec
+    return ctx.accepted();      // taken; the FILE_RESULT names the reason
   }
 
-  if (!fileSlotsIsComplete(slot)) {
+  // A copy of a FILE_END whose file is being written (the RAM path's finish
+  // after the ACK): taken, its FILE_RESULT follows.
+  if (fileSlotsIsRamFinalizing(slot)) {
+    DEBUG_ESPNOWF("[V4_FILE_RX] duplicate FILE_END for '%s' (already finishing) — taken", filename);
+    return ctx.accepted();
+  }
+  if (!senderComplete) {
+    // The sender stopped the transfer itself: taken, nothing to store.
+    logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
+    fileSlotsRelease(slot);
+    return ctx.accepted();
+  }
+  if (!fileSlotsIsComplete(slot) || !countOk) {
     BROADCAST_PRINTF("[V4_FILE] REJECTED incomplete transfer '%s': %u/%u chunks, %lu/%lu bytes",
                  filename,
                  (unsigned)fileSlotsGetReceivedChunks(slot),
                  (unsigned)fileSlotsGetTotalChunks(slot),
                  (unsigned long)recvBytes,
                  (unsigned long)fileSlotsGetTotalSize(slot));
-    // Tell the sender — but only if it still believes the transfer is alive.
-    // When the sender reports it stopped (status != 0), it aborted this transfer itself and already
-    // knows; echoing a cancel back would double-log the failure on its side.
-    if (senderComplete) {
-      v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_INCOMPLETE);
-    }
+    v4_send_file_result(sndMac, fev.transferId, espnowanswer::kFileIncomplete, 0);
     logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
     fileSlotsRelease(slot);
-    return senderComplete ? ctx.refuse() : ctx.accepted();
+    return ctx.accepted();
   }
 
-  // Whole-file CRC gate (integrity pass). One-shot over the assembled buffer —
-  // RAM-path chunks can arrive out of order, so unlike the streaming path there
-  // is no running accumulator; the full file is resident here anyway. Placed
-  // BEFORE the bond-magic dispatch below so a corrupt _settings_out.json /
-  // _manifest_out.json can never reach processBondSettings & co. — bond config
-  // previously had no content check at all. Worst case (128 KB) is a few ms of
-  // ROM table lookups on espnow_task, small next to the synchronous flash write
-  // this same branch already performs inline. RAM-path teardown shape (inline
-  // release) is correct here — only streaming slots defer teardown to cmd_exec.
-  if (senderComplete && dataBuf) {
+  // Whole-file CRC gate. One-shot over the assembled buffer — RAM-path chunks
+  // can arrive out of order, so unlike the streaming path there is no running
+  // accumulator; the full file is resident here anyway. Placed BEFORE the bond
+  // answer dispatch so a corrupt _settings_out.json / _manifest_out.json can
+  // never reach processBondSettings & co. Worst case (128 KB) is a few ms of
+  // ROM table lookups on espnow_task.
+  if (dataBuf) {
     uint32_t gotCrc = esp_crc32_le(0, dataBuf, recvBytes);
     if (gotCrc != fev.crc32) {
       BROADCAST_PRINTF("[V4_FILE] REJECTED '%s': CRC mismatch (got %08lx, declared %08lx)",
                        filename, (unsigned long)gotCrc, (unsigned long)fev.crc32);
-      v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_CRC_MISMATCH);
+      v4_send_file_result(sndMac, fev.transferId, espnowanswer::kFileCrcMismatch, 0);
       logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
       fileSlotsRelease(slot);
-      return ctx.refuse();
+      return ctx.accepted();
     }
   }
 
 #if ENABLE_BONDED_MODE
-  if (senderComplete && dataBuf &&
-      (strcmp(filename, "_manifest_out.json") == 0 || strcmp(filename, "_settings_out.json") == 0 ||
-       strcmp(filename, "_schema_out.json") == 0) &&
-      !v4FileBondMagicAllowed(sndMac, filename)) {
-    v4_send_file_cancel(sndMac, ctx.h->msgId, FILE_CANCEL_WRITE_FAILED);
+  // The bond partner may have gone offline since FILE_START.
+  if (fileSlotsGetKind(slot) == V4_FILE_KIND_BOND && !v4FileBondMagicAllowed(sndMac, filename)) {
     logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
     fileSlotsRelease(slot);
     return ctx.refuse();
   }
 #endif
-  if (!senderComplete || !dataBuf) {
-    // The sender stopped the transfer itself: taken, nothing to store.
+  if (!dataBuf) {
+    v4_send_file_result(sndMac, fev.transferId, espnowanswer::kIoError, 0);
     logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
     fileSlotsRelease(slot);
     return ctx.accepted();
   }
   // Accepted: the file is complete and checked. The flash write, the bond
   // processors and the JSON summary run after this frame's ACK, from the
-  // espnow_task loop (1.0 step 5b). The slot leaves RECEIVING, so a copy of
-  // this FILE_END is not processed again and no chunk can change it.
+  // espnow_task loop (1.0 step 5b); FILE_RESULT follows them. The slot leaves
+  // RECEIVING, so a copy of this FILE_END is not processed again and no chunk
+  // can change it.
   if (!fileSlotsBeginRamFinalize(slot)) {
-    DEBUG_ESPNOWF("[V4_FILE_RX] duplicate FILE_END for '%s' (already finishing) — ignored", filename);
+    DEBUG_ESPNOWF("[V4_FILE_RX] duplicate FILE_END for '%s' (already finishing) — taken", filename);
     return ctx.accepted();
   }
   if (!fileRamFinalizeQueue(slot)) fileRamFinalize(slot);  // queue full: finish it now
   return ctx.accepted();
 }
 
-// A peer we sent a file TO reports the transfer
-// failed on its end (timeout, staging-write failure, missing chunks, CRC
-// mismatch, or rejected-at-start). Two jobs:
-//   1. Correct the record — surface it to the operator, count a failed send.
-//   2. ABORT the in-flight send: if (peer, msgId) matches the transfer that
-//      sendFileToMac is pumping right now on cmd_exec, publish the msgId
-//      into fileSendAbortMsgId so its chunk loop stops within one chunk
-//      instead of burning the rest of the file's airtime into a dead slot.
-// reqId (rule F3) is the original FILE_START's msgId, so correlation is
-// exact; the cancel's own header msgId is the canceller's and is not used.
+// FILE_RESULT (113) — the receiver's verdict on a file this device sent
+// (1.0 step 7). When (peer, transferId) is the send sendFileToMac is waiting
+// on (cmd_exec), the status and bytes are published for it, then the id; the
+// loop compares the id against its own transferId. A result for a send that
+// already ended (it reported Unknown) is shown as a late result, once.
+static V4Verdict v4h_file_result(const V4RxCtx& ctx) {
+  V4PayloadFileResult res;
+  ctx.read(res);
+  if (gEspNow && gEspNow->fileSendInProgress && res.reqId != 0 &&
+      memcmp(gEspNow->fileSendPeer, ctx.recv_info->src_addr, 6) == 0 &&
+      gEspNow->fileSendTransferId == res.reqId) {
+    gEspNow->fileSendResultStatus = res.status;
+    gEspNow->fileSendResultBytes  = res.bytesStored;
+    __asm__ __volatile__("" ::: "memory");   // status and bytes before the id that publishes them
+    gEspNow->fileSendResultTransferId = res.reqId;
+    return ctx.accepted();
+  }
+  // Not waited on: a result that came after its send reported Unknown, or a
+  // copy. Shown once per (peer, transfer).
+  static uint8_t  sLastMac[6] = {0};
+  static uint32_t sLastId     = 0;
+  if (sLastId == res.reqId && memcmp(sLastMac, ctx.recv_info->src_addr, 6) == 0) return ctx.accepted();
+  memcpy(sLastMac, ctx.recv_info->src_addr, 6);
+  sLastId = res.reqId;
+  const char* word = espnowanswer::isOk(res.status) ? "stored"
+                     : espnowanswer::statusName(ESPNOW_V4_TYPE_FILE_RESULT, res.status);
+  BROADCAST_PRINTF("[V4_FILE_TX] late result from %s for transfer %lu: %s (status %u, %lu bytes)",
+                   ctx.deviceName, (unsigned long)res.reqId, word ? word : "failed", (unsigned)res.status,
+                   (unsigned long)res.bytesStored);
+  return ctx.accepted();
+}
+
+// FILE_CANCEL — either side stops a transfer (reqId = transferId; the cancel's
+// own header msgId is the canceller's and is not used).
+//   From the receiver of a file this device is sending: the transfer will not
+//     complete (a gap, a chunk for a transfer it does not have, its 30 s
+//     timeout). If (peer, transferId) matches the send sendFileToMac is
+//     pumping on cmd_exec, the reason and then the id are published, so the
+//     pump stops within one chunk and reports Failed(reason).
+//   From the sender of a file this device is receiving (it gave the transfer
+//     up, e.g. its FILE_START was not answered): the slot is freed at once
+//     instead of after the 30 s timeout.
 static V4Verdict v4h_file_cancel(const V4RxCtx& ctx) {
   V4PayloadFileCancel cancel;
   ctx.read(cancel);
-  const uint32_t transferMsgId = cancel.reqId;
+  const uint32_t transferId = cancel.reqId;
   const uint8_t reason = cancel.status;
+  const uint8_t* src = ctx.recv_info->src_addr;
   const char* statusWord = espnowanswer::statusName(ESPNOW_V4_TYPE_FILE_CANCEL, reason);
   const char* why = (reason == FILE_CANCEL_REJECTED) ? "rejected by receiver"
                     : statusWord                      ? statusWord : "unknown";
-  // Abort matcher. Gate on fileSendInProgress FIRST — peer/msgId are stale
+  // Abort matcher. Gate on fileSendInProgress FIRST — peer/id are stale
   // between sends (the guard dtor only clears the flag). The stored value is
-  // the msgId itself, not a bool: the sender's loop compares it against its
-  // OWN transferId, so even the theoretical stale-store race (this handler
-  // preempted between check and store while transfer A ends and B begins on
-  // cmd_exec) is harmless — a late store of A's id can never equal B's id.
-  if (gEspNow && gEspNow->fileSendInProgress &&
-      memcmp(gEspNow->fileSendPeer, ctx.recv_info->src_addr, 6) == 0 &&
-      gEspNow->fileSendMsgId == transferMsgId) {
-    gEspNow->fileSendAbortMsgId = transferMsgId;
+  // the transferId itself, not a bool: the sender's loop compares it against
+  // its OWN transferId, so a late store of A's id can never stop B.
+  const bool ourSend = gEspNow && gEspNow->fileSendInProgress &&
+                       memcmp(gEspNow->fileSendPeer, src, 6) == 0 &&
+                       gEspNow->fileSendTransferId == transferId;
+  if (ourSend) {
+    gEspNow->fileSendAbortStatus = reason;
+    __asm__ __volatile__("" ::: "memory");   // the reason before the id that publishes it
+    gEspNow->fileSendAbortTransferId = transferId;
+  } else {
+    // The sender of a transfer this device is receiving gives it up.
+    FileSlotLookup lookup = FILE_SLOT_LOOKUP_NOT_FOUND;
+    FileTransferSlot* slot = fileSlotsFindByTransfer(src, transferId, &lookup);
+    if (!slot && lookup == FILE_SLOT_LOOKUP_BUSY) return ctx.refuseWith(espnowanswer::kBusy);
+    if (slot) {
+      if (fileSlotsIsReceiving(slot)) {
+        String macStr = macToDisplayStr(src);
+        WARN_ESPNOWF("[V4_FILE_RX] the sender %s cancelled '%s' (%s)", macStr.c_str(),
+                     fileSlotsGetFilename(slot), why);
+        logFileTransferEvent((uint8_t*)src, macStr.c_str(), fileSlotsGetFilename(slot), MSG_FILE_RECV_FAILED);
+        if (fileSlotsIsStreaming(slot)) fileSlotsStreamFail(slot);  // teardown on cmd_exec
+        else fileSlotsRelease(slot);
+      }
+      return ctx.accepted();  // a slot already finishing keeps its course
+    }
   }
   // Report ONCE per (peer, transfer). The receiver deliberately repeats
-  // cancels so the abort survives a dropped frame; each repeat has its own
-  // header msgId (rule F3), so the frame-level dedup ring passes them all and
-  // this memo is what keeps a repeat from appending a second identical
+  // cancels so the stop survives a dropped frame; each repeat has its own
+  // header msgId (rule F3), so the accept memory passes them all and this
+  // memo is what keeps a repeat from appending a second identical
   // "FAILED on receiver" record to the peer history. The abort store above
   // stays unconditional; only operator-visible reporting is deduped.
   {
     static uint8_t  sLastRepMac[6] = {0};
-    static uint32_t sLastRepMsgId  = 0;
+    static uint32_t sLastRepId     = 0;
     static uint32_t sLastRepMs     = 0;
     const uint32_t nowMs = (uint32_t)millis();
-    const bool dup = (sLastRepMsgId == transferMsgId) &&
-                     (memcmp(sLastRepMac, ctx.recv_info->src_addr, 6) == 0) &&
+    const bool dup = (sLastRepId == transferId) &&
+                     (memcmp(sLastRepMac, src, 6) == 0) &&
                      ((nowMs - sLastRepMs) < 5000);
     if (dup) {
-      DEBUG_ESPNOWF("[V4_FILE_TX] duplicate cancel for msgId=%lu (%s) — not re-logged",
-                    (unsigned long)transferMsgId, why);
+      DEBUG_ESPNOWF("[V4_FILE_TX] duplicate cancel for transferId=%lu (%s) — not re-logged",
+                    (unsigned long)transferId, why);
       return ctx.accepted();
     }
-    memcpy(sLastRepMac, ctx.recv_info->src_addr, 6);
-    sLastRepMsgId = transferMsgId;
-    sLastRepMs    = nowMs;
+    memcpy(sLastRepMac, src, 6);
+    sLastRepId = transferId;
+    sLastRepMs = nowMs;
   }
-  String macStr = macToDisplayStr(ctx.recv_info->src_addr);
-  BROADCAST_PRINTF("[V4_FILE_TX] file to %s FAILED on receiver (msgId=%lu): %s",
-                   macStr.c_str(), (unsigned long)transferMsgId, why);
-  logFileTransferEvent((uint8_t*)ctx.recv_info->src_addr, macStr.c_str(), "(remote)", MSG_FILE_SEND_FAILED);
+  String macStr = macToDisplayStr(src);
+  BROADCAST_PRINTF("[V4_FILE_TX] file to %s FAILED on receiver (transferId=%lu): %s",
+                   macStr.c_str(), (unsigned long)transferId, why);
+  logFileTransferEvent((uint8_t*)src, macStr.c_str(), "(remote)", MSG_FILE_SEND_FAILED);
   return ctx.accepted();
 }
 
@@ -8812,12 +8951,13 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   { ESPNOW_V4_TYPE_METADATA_RESP,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_METADATA_RESP, v4h_metadata_resp_push},
   { ESPNOW_V4_TYPE_METADATA_PUSH,    V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_METADATA_PUSH, v4h_metadata_resp_push},
   { ESPNOW_V4_TYPE_STREAM,           V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_STREAM, v4h_stream            },
-  // FILE_*: TX encrypt-or-fails via v4_send_payload_smart; RX requires matching
-  // session AEAD so a spoofed paired MAC cannot inject plaintext transfers
-  // (including bond magic filenames on FILE_END) or forged cancel notices.
+  // FILE_*: TX encrypt-or-fails; RX requires matching session AEAD so a
+  // spoofed paired MAC cannot inject plaintext transfers (including bond
+  // answers), forged results or forged cancel notices.
   { ESPNOW_V4_TYPE_FILE_START,       V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FILE_START, v4h_file_start        },
   { ESPNOW_V4_TYPE_FILE_DATA,        V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FILE_DATA, v4h_file_data         },
   { ESPNOW_V4_TYPE_FILE_END,         V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FILE_END, v4h_file_end          },
+  { ESPNOW_V4_TYPE_FILE_RESULT,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FILE_RESULT, v4h_file_result       },
   { ESPNOW_V4_TYPE_FILE_CANCEL,      V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_FILE_CANCEL, v4h_file_cancel       },
   // Remote filesystem (FsList) — browse/stat/fetch a peer's files over an active
   // encrypted session. The rows carry REQ_PAIRED + REQ_SESSION_ENC and no
@@ -9708,10 +9848,13 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // fragment sent again after its message completed is answered from here.
   // Answers carry the request's number in their payload (reqId, rule F3) and
   // a fresh header msgId of their own, so STREAM and CMD_RESP are remembered
-  // like every other frame. Two kinds are not:
-  // FILE_START/DATA/END are multi-frame under the transfer's one msgId (each
-  // FILE_DATA chunk repeats it), until FILE_START carries a transfer id (1.0
-  // step 7). RELAY_DATA: an envelope carries the INNER message's msgId, while
+  // like every other frame. Every FILE_* frame has its own msgId (1.0 step
+  // 7: the transfer is named by the transferId in the payload), so FILE_START
+  // and FILE_END are remembered too. Two kinds are not:
+  // FILE_DATA: no ACK_REQ (nothing to answer again), a copy is harmless (the
+  // chunk is written again, or skipped as old on a streaming slot), and a
+  // transfer's 50-odd chunks a second would push everything else out of the
+  // ring inside its 5 s. RELAY_DATA: an envelope carries the INNER message's msgId, while
   // its origin is rewritten to the current forwarder, so a legitimate
   // retransmission of the same inner message arrives with an identical
   // (origin, msgId) pair. Loop protection for envelopes comes from ttl and the
@@ -9719,9 +9862,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // after unwrapping (keyed on its true origin). msgId 0 is never remembered.
   const bool remembered = h->msgId != 0 &&
                           h->type != ESPNOW_V4_TYPE_RELAY_DATA &&
-                          h->type != ESPNOW_V4_TYPE_FILE_START &&
-                          h->type != ESPNOW_V4_TYPE_FILE_DATA &&
-                          h->type != ESPNOW_V4_TYPE_FILE_END;
+                          h->type != ESPNOW_V4_TYPE_FILE_DATA;
   const V4AcceptKey acceptKey = v4_accept_key(recv_info->src_addr, h, wasAuthenticated,
                                               wasSessionEncrypted, gEspNowInRelayDelivery);
   if (remembered) {
@@ -11062,14 +11203,15 @@ static void sendBondSettings(const uint8_t* peerMac) {
 
   // Send via file transfer
   DEBUG_ESPNOWF("[SETTINGS_SEND] Calling sendFileToMac for %s", tempPath.c_str());
-  bool sent = sendFileToMac(peerMac, tempPath);
+  const FileSendOutcome settingsOut = sendFileToMacResult(peerMac, tempPath, kEspNowFileKindBond);
+  const bool sent = settingsOut.result == FileSendResult::Stored;
 
   if (sent) {
-    DEBUG_ESPNOWF("[SETTINGS_SEND] SUCCESS: File transfer initiated (%d bytes)",
-                  settingsLen);
+    DEBUG_ESPNOWF("[SETTINGS_SEND] processed by the partner (%d bytes)", settingsLen);
     // Session token computed in processBondSettings() when sync is confirmed
   } else {
-    ERROR_ESPNOWF("[SETTINGS_SEND] sendFileToMac failed");
+    ERROR_ESPNOWF("[SETTINGS_SEND] settings not taken: %s%s%s", fileSendResultWord(settingsOut.result),
+                  settingsOut.why[0] ? ", " : "", settingsOut.why);
   }
   
   // Cleanup temp file
@@ -11086,18 +11228,18 @@ static void sendBondSettings(const uint8_t* peerMac) {
   // this device has configured.
   // Receiver side is already handled: FILE_END saves automations.json to
   // /espnow/received/<mac>/automations.json and broadcasts a formatted summary.
-  // Gated on the settings send having succeeded (integrity pass): if the peer
-  // just cancelled/failed the settings transfer, immediately pumping a second
-  // file at it wastes the exact airtime the abort machinery is there to save —
-  // the master's sync tick will re-request settings and we'll retry both.
+  // Gated on the settings having been processed (its FILE_RESULT): if the
+  // peer refused or failed the settings transfer, immediately pumping a second
+  // file at it wastes the airtime — the master's sync tick will re-request
+  // settings and we'll retry both.
   if (sent) {
     if (filesystemReady && VFS::existsGuarded(AUTOMATIONS_JSON_FILE, VFS::systemAuth(VFS::Scopes::SYSTEM_STATE, "espnow.bond_automations_check"))) {
       vTaskDelay(pdMS_TO_TICKS(200));  // Brief gap between transfers
       bool autoSent = sendFileToMac(peerMac, String(AUTOMATIONS_JSON_FILE));
       if (autoSent) {
-        BROADCAST_PRINTF("[BOND] Automation list sent to peer");
+        BROADCAST_PRINTF("[BOND] Automation list stored on the peer");
       } else {
-        DEBUG_ESPNOWF("[BOND] Automation list send failed (non-critical)");
+        DEBUG_ESPNOWF("[BOND] Automation list not stored on the peer (non-critical)");
       }
     } else {
       DEBUG_ESPNOWF("[BOND] No automation list to send (file absent or fs not ready)");
@@ -11213,11 +11355,12 @@ static void sendBondSchema(const uint8_t* peerMac) {
   }
 
   DEBUG_ESPNOWF("[SCHEMA_SEND] Calling sendFileToMac for %s", tempPath.c_str());
-  bool sent = sendFileToMac(peerMac, tempPath);
-  if (sent) {
-    DEBUG_ESPNOWF("[SCHEMA_SEND] SUCCESS: File transfer initiated (%d bytes)", schemaLen);
+  const FileSendOutcome schemaOut = sendFileToMacResult(peerMac, tempPath, kEspNowFileKindBond);
+  if (schemaOut.result == FileSendResult::Stored) {
+    DEBUG_ESPNOWF("[SCHEMA_SEND] processed by the partner (%d bytes)", schemaLen);
   } else {
-    ERROR_ESPNOWF("[SCHEMA_SEND] sendFileToMac failed");
+    ERROR_ESPNOWF("[SCHEMA_SEND] schema not taken: %s%s%s", fileSendResultWord(schemaOut.result),
+                  schemaOut.why[0] ? ", " : "", schemaOut.why);
   }
 
   {
@@ -11317,8 +11460,9 @@ static void sendBondManifest(const uint8_t* peerMac) {
   }
   BROADCAST_PRINTF("[BOND] manifest-send: wrote %s len=%u", tempPath.c_str(), (unsigned)manifestLen);
 
-  bool fileSent = sendFileToMac(peerMac, tempPath);
-  BROADCAST_PRINTF("[BOND] manifest-send: sendFileToMac rc=%d", (int)fileSent);
+  const FileSendOutcome manifestOut = sendFileToMacResult(peerMac, tempPath, kEspNowFileKindBond);
+  BROADCAST_PRINTF("[BOND] manifest-send: %s%s%s", fileSendResultWord(manifestOut.result),
+                   manifestOut.why[0] ? ", " : "", manifestOut.why);
 
   {
     FsLockGuard guard("bond.manifest.cleanup");
@@ -14261,8 +14405,8 @@ void processMeshHeartbeats() {
   sendStatusSweep((uint32_t)millis());
   // 1d. Stale file-transfer slot sweep. Slots with no frame in
   // kFileSlotTimeoutMs (30s) are released, freeing their PSRAM buffer. Each
-  // expired transfer's sender gets a FILE_CANCEL(TIMEOUT) so it stops assuming
-  // the (fire-and-forget) send landed. The same sweep also retries any
+  // expired transfer's sender gets a FILE_CANCEL(TIMEOUT) (and a late FILE_END
+  // the remembered timeout FILE_RESULT). The same sweep also retries any
   // streaming teardown whose cmd_exec job couldn't be queued while the queue
   // was full — only cmd_exec may free a streaming slot's buffers/.part handle,
   // so such slots park in COMPLETING until a submit lands here.
@@ -14270,15 +14414,15 @@ void processMeshHeartbeats() {
     FileSlotExpiry expiredSlots[4];
     uint8_t nExpired = fileSlotsTimeoutSweep((uint32_t)millis(), expiredSlots, 4);
     for (uint8_t i = 0; i < nExpired && i < 4; i++) {
-      v4_send_file_cancel(expiredSlots[i].peerMac, expiredSlots[i].msgId, FILE_CANCEL_TIMEOUT);
+      v4_send_file_cancel(expiredSlots[i].peerMac, expiredSlots[i].transferId, FILE_CANCEL_TIMEOUT);
       // Durable RECV_FAILED for the timeout path too — the sweep is the "sender
       // vanished / sustained RF loss" abort (the most common real failure), and
       // without this it was the one receive-failure kind with no [EVENT] record.
       // Once per expired slot (slot then released), so no flood. Filename isn't
-      // retained in the expiry record, so report by MAC + msgId.
+      // retained in the expiry record, so report by MAC + transferId.
       String toMacStr = macToDisplayStr(expiredSlots[i].peerMac);
-      logSystemEvent("ESPNOW", "file receive FAILED (timeout — sender stopped) from %s msgId=%lu",
-                     toMacStr.c_str(), (unsigned long)expiredSlots[i].msgId);
+      logSystemEvent("ESPNOW", "file receive FAILED (timeout — sender stopped) from %s transferId=%lu",
+                     toMacStr.c_str(), (unsigned long)expiredSlots[i].transferId);
     }
   }
   // 1d2. Drive the FS_LIST protocol: build deferred replies +
@@ -16287,10 +16431,10 @@ static bool deinitEspNow(bool publishOffEvent) {
       for (uint8_t i = 0; i < fileSlotsSlotCount(); i++) {
         FileTransferSlotInfo info;
         if (!fileSlotsSnapshot(i, &info)) continue;
-        // Re-find the slot by (mac, msgId) and release. The handle-by-index
+        // Re-find the slot by (mac, transferId) and release. The handle-by-index
         // option would be cleaner but the public API is intentionally
-        // opaque; the find-by-msg lookup is fine for shutdown cost.
-        FileTransferSlot* slot = fileSlotsFindByMsg(info.peerMac, info.msgId);
+        // opaque; the lookup is fine for shutdown cost.
+        FileTransferSlot* slot = fileSlotsFindByTransfer(info.peerMac, info.transferId);
         if (slot) fileSlotsRelease(slot);
       }
       char msg[80];
@@ -16298,6 +16442,7 @@ static bool deinitEspNow(bool publishOffEvent) {
                (unsigned)active, active == 1 ? "" : "s");
       broadcastOutput(msg);
     }
+    fileSlotsForgetResults();  // a later start answers no FILE_END from before
   }
 
   // Frames waiting for a session cannot go out any more (the task that drains
@@ -21041,18 +21186,19 @@ const char* cmd_espnow_broadcast(const String& argsInput) {
   return "Broadcast sent";
 }
 
-// Send a file to a specific MAC address (FILE_START / FILE_DATA / FILE_END).
-// Used by FILE_BROWSE fetch and other internal functions
+// Send a file to a specific MAC address (FILE_START / FILE_DATA / FILE_END,
+// then the receiver's FILE_RESULT; 1.0 step 7).
 // RAII flag set around an outbound file send so the rekey scheduler can see it
 // (the slot table only tracks INBOUND transfers). Peer + start-time are published
 // BEFORE the flag so a concurrent reader that sees the flag sees a valid peer.
 // Consumed by espnowFileTransferActiveWithPeer (defined up by the rekey trigger).
 struct FileSendActiveGuard {
-  explicit FileSendActiveGuard(const uint8_t* mac, uint32_t msgId) {
+  explicit FileSendActiveGuard(const uint8_t* mac, uint32_t transferId) {
     if (gEspNow && mac) {
       memcpy(gEspNow->fileSendPeer, mac, 6);
-      gEspNow->fileSendMsgId = msgId;       // abort matcher key (v4h_file_cancel)
-      gEspNow->fileSendAbortMsgId = 0;      // hygiene; the loop compares by value
+      gEspNow->fileSendTransferId = transferId;  // matcher key (v4h_file_cancel, v4h_file_result)
+      gEspNow->fileSendAbortTransferId = 0;      // hygiene; the loop compares by value
+      gEspNow->fileSendResultTransferId = 0;
       gEspNow->fileSendStartedMs = (uint32_t)millis();
       // Compiler barrier: `volatile` only orders volatile accesses against each
       // other, so without this the non-volatile fileSendPeer memcpy could sink
@@ -21115,25 +21261,54 @@ static bool espnowSessionActiveOrKick(const uint8_t* mac, bool* outOpening = nul
   return false;
 }
 
-FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath) {
+// How long the sender waits for the receiver's FILE_RESULT after FILE_END,
+// and when it asks again (a FILE_END copy under a new msgId: the receiver
+// answers with the remembered FILE_RESULT). DESIGN 3.6.
+static constexpr uint32_t kFileResultWaitMs     = 10000;
+static constexpr uint32_t kFileResultAskAgainMs = 4000;
+
+const char* fileSendResultWord(FileSendResult result) {
+  return result == FileSendResult::Stored ? "stored" : result == FileSendResult::Unknown ? "unknown"
+       : result == FileSendResult::NoSession ? "no session" : "failed";
+}
+
+// A transfer's number: random, nonzero (DESIGN 3.6).
+static uint32_t v4FileNewTransferId() {
+  uint32_t id = 0;
+  while (id == 0) id = esp_random();
+  return id;
+}
+
+// The reason word for a status from the receiver (an ACK or FILE_RESULT).
+static const char* v4FileStatusWhy(uint8_t status) {
+  const char* w = espnowanswer::statusName(ESPNOW_V4_TYPE_FILE_RESULT, status);
+  return w ? w : "refused by the receiver";
+}
+
+FileSendOutcome sendFileToMacResult(const uint8_t* mac, const String& localPath, uint8_t kind) {
+  auto failed = [](uint8_t status, const char* why) {
+    return FileSendOutcome{FileSendResult::Failed, status, 0, why};
+  };
   if (!gEspNow || !gEspNow->initialized) {
-    return FileSendResult::Failed;
+    return failed(espnowanswer::kNotReady, "ESP-NOW is not running");
   }
 
-  // Every frame of a transfer goes through v4_send_payload_smart, one
-  // SESSION_FRAME each (a FILE_DATA chunk is 200 data + 2 chunkIdx + 16 AEAD tag
-  // = 218 = MAX_PAYLOAD). Without an ACTIVE session smart parks a frame in the
-  // pending store (4 per peer, System_ESPNow_PendingQueue.h) and returns true —
-  // fine for a message, fatal for a file: the fifth chunk is refused, the first
-  // four wait at most 5 s, and the pump would report a send of which the peer
-  // saw at most the first few chunks (it used to be one frame per peer, each
-  // chunk replacing the one before it). So a frame is only
-  // handed to smart while the session is ACTIVE; fileSendFrame refuses
+  // Every frame of a transfer is sealed in the session, one SESSION_FRAME
+  // each. Without an ACTIVE session the smart path parks a frame in the
+  // pending store (4 per peer) — fine for a message, fatal for a file. So a
+  // frame is only sent while the session is ACTIVE; fileSendFrame refuses
   // otherwise, which the loops below treat as a failed send.
   auto fileSendFrame = [&](uint8_t type, uint16_t flags, uint32_t id,
                            const uint8_t* p, uint16_t len) -> bool {
     if (!espnowSessionActiveWith(mac)) return false;
     return v4_send_payload_smart(mac, type, flags, id, p, len, 1);
+  };
+  // A frame that waits for its ACK (FILE_START, FILE_END): one frame, up to
+  // three tries 200 ms apart, the receiver's verdict on it.
+  auto fileSendAcked = [&](uint8_t type, const uint8_t* p, uint16_t len) -> V4SendResult {
+    if (!espnowSessionActiveWith(mac)) return V4SendResult{V4SendOutcome::NotSent, 0};
+    return v4_send_encrypted_chunked(mac, type, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(), p, len, 1,
+                                     /*ackSingle=*/true);
   };
 
   // Security: Block sending sensitive files (credentials, passwords, keys).
@@ -21143,14 +21318,14 @@ FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath) 
   if (!canRead(localPath, currentAuthContext())) {
     DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] SECURITY: Blocked sending sensitive file: %s", localPath.c_str());
     broadcastOutput("[ESP-NOW] SECURITY: Cannot send file containing credentials: " + localPath);
-    return FileSendResult::Failed;
+    return failed(espnowanswer::kRefused, "this file may not be sent");
   }
 
   {
     FsLockGuard guard("espnow.send_file.exists");
     if (!VFS::existsGuarded(localPath, currentAuthContext())) {
       DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] File not found: %s", localPath.c_str());
-      return FileSendResult::Failed;
+      return failed(espnowanswer::kNotFound, "file not found");
     }
   }
 
@@ -21167,18 +21342,17 @@ FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath) 
       WARN_ESPNOWF("[V4_FILE_TX] not started: no secure session with %s and none could be opened "
                    "(no shared mesh passphrase, no free session slot or a radio failure) - %s",
                    macToDisplayStr(mac).c_str(), localPath.c_str());
-      return FileSendResult::Failed;
+      return failed(espnowanswer::kNotReady, "no secure session could be opened");
     }
     WARN_ESPNOWF("[V4_FILE_TX] not started: no secure session with %s yet (one is being opened) - %s",
                  macToDisplayStr(mac).c_str(), localPath.c_str());
-    return FileSendResult::NoSession;
+    return FileSendOutcome{FileSendResult::NoSession, 0, 0, "no secure session yet"};
   }
 
   // Open + size under the FS lock, then RELEASE it. The send loop below runs for
   // many seconds (paced 15-50 ms/chunk); holding the FS lock across the whole
-  // transfer (as this used to) starves every other FS user — web, OLED, a concurrent
-  // inbound streaming write — for its entire duration. Re-take the lock only briefly
-  // around each chunk read instead. The File handle stays valid across the gaps (it's
+  // transfer starves every other FS user. Re-take the lock only briefly around
+  // each chunk read instead. The File handle stays valid across the gaps (it's
   // a private local; nothing else touches it).
   File file;
   uint32_t fileSize = 0;
@@ -21187,213 +21361,240 @@ FileSendResult sendFileToMacResult(const uint8_t* mac, const String& localPath) 
     file = VFS::openGuarded(localPath, "r", currentAuthContext());
     if (!file) {
       DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] Cannot open file: %s", localPath.c_str());
-      return FileSendResult::Failed;
+      return failed(espnowanswer::kIoError, "cannot open the file");
     }
     fileSize = file.size();
   }
-  
-  // Chunk size aligned to ESPNOW_V4_MAX_PLAINTEXT so that the
-  // V4PayloadFileData.data[] declared size (200) matches what we put on the
-  // wire. Old code used MAX_PAYLOAD - 2 = 216, which only "worked" because
-  // the surrounding stack buffer was MAX_PAYLOAD-sized and we wrote past
-  // the struct's declared bounds (UB in C++). The 200 + 2 (chunkIndex) =
-  // 202 bytes plaintext fits ESPNOW_V4_MAX_PLAINTEXT, so once wrapped in
-  // SESSION_FRAME each chunk's 202 + 16 (AEAD tag) = 218 hits the wire
-  // payload budget exactly. FILE_START/DATA/END go through v4_send_payload_smart
-  // (strict encrypt-or-fail / queue-and-handshake). RX requires REQ_SESSION_ENC.
-  const uint16_t v4ChunkSize = ESPNOW_V4_MAX_PLAINTEXT - 2;  // 200 bytes
-  uint32_t maxFileSize = 65535 * v4ChunkSize;  // 16-bit chunk count max
-  if (fileSize > maxFileSize) {
-    { FsLockGuard guard("espnow.send_file.close"); file.close(); }
+  auto closeFile = [&]() { FsLockGuard guard("espnow.send_file.close"); file.close(); };
+  if (fileSize > kFileSlotMaxStreamSize) {
+    closeFile();
     DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] File too large: %lu bytes (max %lu)",
-           (unsigned long)fileSize, (unsigned long)maxFileSize);
-    return FileSendResult::Failed;
+           (unsigned long)fileSize, (unsigned long)kFileSlotMaxStreamSize);
+    return failed(espnowanswer::kTooLarge, "over the transfer limit");
   }
-  
+
   String filename = localPath;
   int lastSlash = localPath.lastIndexOf('/');
   if (lastSlash >= 0) {
     filename = localPath.substring(lastSlash + 1);
   }
-  
-  uint16_t totalChunks = (fileSize > 0) ? (uint16_t)((fileSize + v4ChunkSize - 1) / v4ChunkSize) : 0;
-  
-  uint32_t transferId = generateMessageId();
+  // The chunk fills one sealed frame less FILE_DATA's 8-byte header: 194 bytes
+  // to a direct peer, 138 through a relay (DESIGN 3.6).
+  const uint16_t frameCap = v4_single_frame_cap(mac);
+  const uint16_t chunkSize = (uint16_t)(frameCap - offsetof(V4PayloadFileData, data));
+  // The name goes whole or not at all (F7): the receiver refuses one over 96
+  // bytes (or over what its inbox can store) with kTooLarge; one that does not
+  // even fit the frame is refused here.
+  const size_t nameLen = filename.length();
+  if (nameLen == 0) {
+    closeFile();
+    return failed(espnowanswer::kBadRequest, "no file name");
+  }
+  if (nameLen > 255 || sizeof(V4PayloadFileStart) + nameLen > frameCap) {
+    closeFile();
+    WARN_ESPNOWF("[V4_FILE_TX] not sent: the name of %s is %u bytes, too long for FILE_START",
+                 localPath.c_str(), (unsigned)nameLen);
+    return failed(espnowanswer::kTooLarge, "the file name is too long");
+  }
 
-  // Mark this peer as "send in progress" for the whole START→DATA→END window so
-  // the rekey scheduler defers a key rotation until we're done (a big send is what
-  // crosses the 10k tx threshold), and publish (peer, transferId) so an inbound
-  // FILE_CANCEL can abort this send. Cleared on every exit path via the dtor.
+  const uint32_t totalChunks = fileSize > 0 ? (fileSize + chunkSize - 1) / chunkSize : 0;
+  const uint32_t transferId = v4FileNewTransferId();
+
+  // Mark this peer as "send in progress" for the whole START→RESULT window so
+  // the rekey scheduler defers a key rotation until we're done, and publish
+  // (peer, transferId) so an inbound FILE_CANCEL or FILE_RESULT is matched to
+  // this send. Cleared on every exit path via the dtor.
   FileSendActiveGuard sendGuard(mac, transferId);
 
-  // Build and send FILE_START
-  V4PayloadFileStart startPayload = {};
-  startPayload.fileSize = fileSize;
-  startPayload.chunkCount = totalChunks;
-  startPayload.chunkSize = v4ChunkSize;
-  strncpy(startPayload.filename, filename.c_str(), sizeof(startPayload.filename) - 1);
-  
-  // The session was ACTIVE at the gate above; fileSendFrame re-checks it for
-  // every frame and sends session-wrapped or not at all — a file frame never
-  // goes to the pending store.
-  if (!fileSendFrame(ESPNOW_V4_TYPE_FILE_START, ESPNOW_V4_FLAG_ACK_REQ, transferId,
-                     (const uint8_t*)&startPayload, sizeof(startPayload))) {
-    { FsLockGuard guard("espnow.send_file.close"); file.close(); }
-    DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] Failed to send FILE_START");
-    return FileSendResult::Failed;
+  // FILE_START, waited for (about 600 ms): a refusal or no answer ends the send
+  // at once, before a single chunk is spent.
+  uint8_t startPayload[ESPNOW_V4_MAX_PLAINTEXT] = {};
+  {
+    V4PayloadFileStart fs = {};
+    fs.transferId = transferId;
+    fs.totalSize  = fileSize;
+    fs.chunkSize  = chunkSize;
+    fs.kind       = kind;
+    fs.nameLen    = (uint8_t)nameLen;
+    memcpy(startPayload, &fs, sizeof(fs));
+    memcpy(startPayload + sizeof(fs), filename.c_str(), nameLen);
   }
-  
-  DEBUG_ESPNOWF("[V4_FILE_TX] START: %s (%lu bytes, %u chunks, chunkSize=%u) to %s, transferId=%lu",
-         filename.c_str(), (unsigned long)fileSize, totalChunks, v4ChunkSize, macToDisplayStr(mac).c_str(), (unsigned long)transferId);
-  DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] Transfer initiated: %s -> %s", filename.c_str(), macToDisplayStr(mac).c_str());
-  
-  vTaskDelay(pdMS_TO_TICKS(100));  // Give receiver more time to set up
-  
-  // Send chunks - use stack buffer sized for payload.
-  // The loop can ABORT (integrity pass) on any of three causes; on exit,
-  // chunkIdx < totalChunks is the single source of truth for "aborted":
-  //   1. receiver cancelled — v4h_file_cancel (espnow_task) published our
-  //      transferId into fileSendAbortMsgId (rejection at FILE_START, gap,
-  //      timeout, write failure, CRC mismatch). Previously the sender pumped
-  //      the entire remaining file into a dead slot.
-  //   2. chunk unqueueable after 3 attempts — session/clerk-level failure
-  //      (note: on-air loss is invisible here; the MAC layer's own ack/retry
-  //      is the only per-frame delivery signal, and it doesn't reach us).
-  //      Previously logged and CONTINUED, then reported success.
-  //   3. short read — FS error or the file shrank mid-send. Previously broke
-  //      out silently and still sent FILE_END success=1.
-  //   4. the session stopped being ACTIVE mid-transfer (closed, or reset by a
-  //      fresh handshake). The remaining chunks would only replace each other
-  //      in the pending store; stop and say so.
+  const V4SendResult startResult =
+      fileSendAcked(ESPNOW_V4_TYPE_FILE_START, startPayload, (uint16_t)(sizeof(V4PayloadFileStart) + nameLen));
+  if (startResult.outcome != V4SendOutcome::Delivered) {
+    closeFile();
+    if (startResult.outcome == V4SendOutcome::Refused) {
+      WARN_ESPNOWF("[V4_FILE_TX] %s refused by %s at FILE_START: %s", filename.c_str(),
+                   macToDisplayStr(mac).c_str(), v4FileStatusWhy(startResult.status));
+      return failed(startResult.status, v4FileStatusWhy(startResult.status));
+    }
+    if (startResult.outcome == V4SendOutcome::NoAnswer) {
+      // The receiver may have taken it and only the ACK was lost: free that
+      // slot now instead of after its 30 s timeout.
+      v4_send_file_cancel(mac, transferId, espnowanswer::kCancelled);
+      WARN_ESPNOWF("[V4_FILE_TX] %s: no answer from %s to FILE_START", filename.c_str(),
+                   macToDisplayStr(mac).c_str());
+      return failed(espnowanswer::kTimeout, "no answer from the receiver");
+    }
+    return failed(0, "FILE_START could not be sent");
+  }
+
+  DEBUG_ESPNOWF("[V4_FILE_TX] START: %s (%lu bytes, %lu chunks, chunkSize=%u, kind=%u) to %s, transferId=%lu",
+         filename.c_str(), (unsigned long)fileSize, (unsigned long)totalChunks, chunkSize, (unsigned)kind,
+         macToDisplayStr(mac).c_str(), (unsigned long)transferId);
+
+  // The chunks. The loop can stop on any of four causes; on exit,
+  // chunkIdx < totalChunks or abortWhy is set:
+  //   1. the receiver cancelled — v4h_file_cancel (espnow_task) published our
+  //      transferId into fileSendAbortTransferId (a gap, its timeout, ...).
+  //   2. a chunk could not be queued after 3 attempts.
+  //   3. short read — FS error or the file shrank mid-send.
+  //   4. the session stopped being ACTIVE mid-transfer.
   uint8_t chunkPayload[ESPNOW_V4_MAX_PAYLOAD];
-  uint16_t chunkIdx = 0;
+  uint32_t chunkIdx = 0;
   uint32_t runningCrc = 0;               // esp_crc32_le over bytes read == bytes sent
   const char* abortWhy = nullptr;
+  uint8_t abortStatus = 0;
   while (chunkIdx < totalChunks) {
-    // Abort check: value-compare against OUR transferId (not a bool), so a
-    // stale store from a previous transfer's late cancel can never match.
-    if (gEspNow->fileSendAbortMsgId == transferId) {
-      abortWhy = "receiver cancelled the transfer";
+    // Value-compare against OUR transferId (not a bool), so a stale store from
+    // a previous transfer's late cancel can never match.
+    if (gEspNow->fileSendAbortTransferId == transferId) {
+      abortStatus = gEspNow->fileSendAbortStatus;
+      abortWhy = "the receiver cancelled the transfer";
       break;
     }
     if (!espnowSessionActiveWith(mac)) {
-      abortWhy = "secure session with the receiver ended mid-transfer";
+      abortWhy = "the secure session ended mid-transfer";
       break;
     }
-    V4PayloadFileData* fd = (V4PayloadFileData*)chunkPayload;
-    fd->chunkIndex = chunkIdx;
+    memcpy(chunkPayload + offsetof(V4PayloadFileData, transferId), &transferId, sizeof(transferId));
+    memcpy(chunkPayload + offsetof(V4PayloadFileData, chunkIndex), &chunkIdx, sizeof(chunkIdx));
+    uint8_t* data = chunkPayload + offsetof(V4PayloadFileData, data);
 
     // Re-take the FS lock only for the read itself (not across the send/pacing
     // delays below), so other tasks can use the filesystem between chunks.
     int bytesRead;
     {
       FsLockGuard guard("espnow.send_file.read");
-      bytesRead = file.read(fd->data, v4ChunkSize);
+      bytesRead = file.read(data, chunkSize);
     }
     if (bytesRead <= 0) {
-      abortWhy = "file read failed / file truncated mid-send";
+      abortWhy = "the file could not be read (or shrank) mid-send";
+      abortStatus = espnowanswer::kIoError;
       break;
     }
-    runningCrc = esp_crc32_le(runningCrc, fd->data, (size_t)bytesRead);
+    runningCrc = esp_crc32_le(runningCrc, data, (size_t)bytesRead);
 
-    uint16_t payloadLen = 2 + bytesRead;  // chunkIndex (2) + data
-
+    const uint16_t payloadLen = (uint16_t)(offsetof(V4PayloadFileData, data) + bytesRead);
     bool sent = false;
     for (int attempt = 0; attempt < 3 && !sent; attempt++) {
-      // Each chunk: 200 data + 2 chunkIdx = 202 plaintext, fits SESSION_FRAME
-      // single-frame (202 + 16 tag = 218 = MAX_PAYLOAD) when encrypted.
-      sent = fileSendFrame(ESPNOW_V4_TYPE_FILE_DATA, 0, transferId,
-                           chunkPayload, payloadLen);
+      // Each chunk under a msgId of its own; no ACK_REQ (DESIGN 3.6).
+      sent = fileSendFrame(ESPNOW_V4_TYPE_FILE_DATA, 0, generateMessageId(), chunkPayload, payloadLen);
       if (!sent) {
-        DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] Chunk %u send failed, retry %d", chunkIdx, attempt + 1);
+        DEBUG_ESPNOW_ROUTERF("[V4_FILE_TX] Chunk %lu send failed, retry %d", (unsigned long)chunkIdx, attempt + 1);
         vTaskDelay(pdMS_TO_TICKS(20));
-      } else {
-        DEBUG_ESPNOWF("[V4_FILE_TX] Chunk %u sent: %u bytes (attempt %d)", chunkIdx, payloadLen, attempt + 1);
       }
     }
-
     if (!sent) {
-      abortWhy = "chunk send failed after 3 attempts";
+      abortWhy = "a chunk could not be sent";
       break;
     }
 
     chunkIdx++;
 
-    // Pace chunks - SLOWER for reliability (ESP-NOW can drop packets if sent too fast)
+    // Pace chunks (ESP-NOW can drop frames sent too fast).
     vTaskDelay(pdMS_TO_TICKS(15));
-
-    // Yield every 10 chunks with longer delay for receiver to process
     if ((chunkIdx % 10) == 0) {
-      DEBUG_ESPNOWF("[V4_FILE_TX] Progress: %u/%u chunks sent", chunkIdx, totalChunks);
+      DEBUG_ESPNOWF("[V4_FILE_TX] Progress: %lu/%lu chunks sent", (unsigned long)chunkIdx, (unsigned long)totalChunks);
       vTaskDelay(pdMS_TO_TICKS(50));
     }
   }
-  { FsLockGuard guard("espnow.send_file.close"); file.close(); }
+  closeFile();
 
-  // Small delay before FILE_END to ensure last chunks are processed
+  // A cancel provoked by the last chunks (a gap on the last stretch) typically
+  // lands in this short settling window: look once more.
   vTaskDelay(pdMS_TO_TICKS(100));
-
-  // Re-check the abort slot AFTER the settling delay: a cancel provoked by the
-  // final chunk (backpressure / gap on the last stretch) is emitted by the
-  // receiver immediately, and typically lands inside this very window. Checking
-  // only before the delay would let those transfers report success.
-  //
-  // ONE snapshot feeds both flags. Reading the volatile twice here would let a
-  // cancel landing between the reads produce aborted=false + receiverKilled=true
-  // — which skips the ABORTED log, skips FILE_END, and returns false with no
-  // reason recorded anywhere.
-  const uint32_t abortSeen = gEspNow->fileSendAbortMsgId;
-  const bool receiverKilled = (abortSeen == transferId);
-  if (!abortWhy && receiverKilled) {
-    abortWhy = "receiver cancelled after the last chunk";
+  if (!abortWhy && gEspNow->fileSendAbortTransferId == transferId) {
+    abortStatus = gEspNow->fileSendAbortStatus;
+    abortWhy = "the receiver cancelled the transfer";
   }
-  const bool aborted = (chunkIdx < totalChunks) || (abortWhy != nullptr);
-  if (aborted) {
-    ERROR_ESPNOWF("[V4_FILE_TX] ABORTED at chunk %u/%u: %s (%s to %s)",
-                  chunkIdx, totalChunks, abortWhy ? abortWhy : "(unknown)",
+  if (abortWhy) {
+    const bool receiverStopped = gEspNow->fileSendAbortTransferId == transferId;
+    ERROR_ESPNOWF("[V4_FILE_TX] ABORTED at chunk %lu/%lu: %s (%s to %s)",
+                  (unsigned long)chunkIdx, (unsigned long)totalChunks, abortWhy,
                   filename.c_str(), macToDisplayStr(mac).c_str());
-  }
-
-  // Send FILE_END with retries for reliability. success=0 on a self-detected
-  // abort lets the receiver tear its slot down immediately instead of waiting
-  // out the 30 s sweep (it suppresses its cancel-echo for success=0 — we
-  // already know). crc32 is the whole-file esp_crc32_le; the receiver rejects
-  // on mismatch.
-  //
-  // SKIPPED entirely when the receiver is the one that cancelled: it provably
-  // has no slot for this msgId, so the frame carries nothing it can use and
-  // would land in its "FILE_END for unknown msgId" ERROR log — making a
-  // correctly-handled rejection look like a fault on every failed transfer.
-  // Also skipped when the session is no longer ACTIVE: the frame could not be
-  // sent, and the receiver's slot is reclaimed by its own timeout sweep.
-  bool endSent = false;
-  if (!receiverKilled && espnowSessionActiveWith(mac)) {
-    V4PayloadFileEnd endPayload = {};
-    endPayload.crc32 = runningCrc;
-    endPayload.status = aborted ? espnowanswer::kCancelled : espnowanswer::kOk;
-    for (int attempt = 0; attempt < 3 && !endSent; attempt++) {
-      endSent = fileSendFrame(ESPNOW_V4_TYPE_FILE_END, ESPNOW_V4_FLAG_ACK_REQ, transferId,
-                              (const uint8_t*)&endPayload, sizeof(endPayload));
-      if (!endSent) {
-        WARN_ESPNOWF("[V4_FILE_TX] FILE_END send failed, retry %d", attempt + 1);
-        vTaskDelay(pdMS_TO_TICKS(50));
-      }
+    // Our own stop: FILE_END with status cancelled lets the receiver free the
+    // slot now (it sends no FILE_RESULT for it). Not when the receiver is the
+    // one that stopped: it has no slot for this transfer any more.
+    if (!receiverStopped && espnowSessionActiveWith(mac)) {
+      V4PayloadFileEnd stop = {};
+      stop.transferId = transferId;
+      stop.chunkCount = chunkIdx;
+      stop.crc32      = runningCrc;
+      stop.status     = espnowanswer::kCancelled;
+      fileSendFrame(ESPNOW_V4_TYPE_FILE_END, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
+                    (const uint8_t*)&stop, sizeof(stop));
     }
+    if (receiverStopped) return failed(abortStatus, v4FileStatusWhy(abortStatus));
+    return failed(abortStatus, abortWhy);
   }
 
-  DEBUG_ESPNOWF("[V4_FILE_TX] %s: %s (%u/%u chunks, crc=%08lx) to %s, END_sent=%d%s",
-         aborted ? "ABORTED" : "COMPLETE",
-         filename.c_str(), chunkIdx, totalChunks, (unsigned long)runningCrc,
-         macToDisplayStr(mac).c_str(), endSent,
-         receiverKilled ? " (FILE_END skipped — receiver cancelled)" : "");
-  // Honest result: Failed when the transfer aborted OR FILE_END could not even
-  // be queued. Still sender-side truth only — Sent means every frame was
-  // handed to the radio, not that the receiver verified and stored the file.
-  return (!aborted && endSent) ? FileSendResult::Sent : FileSendResult::Failed;
+  // FILE_END, waited for: the ACK says it was taken; the verdict on the file is
+  // the FILE_RESULT that follows.
+  V4PayloadFileEnd endPayload = {};
+  endPayload.transferId = transferId;
+  endPayload.chunkCount = totalChunks;
+  endPayload.crc32      = runningCrc;
+  endPayload.status     = espnowanswer::kOk;
+  const V4SendResult endResult = fileSendAcked(ESPNOW_V4_TYPE_FILE_END, (const uint8_t*)&endPayload,
+                                               sizeof(endPayload));
+  if (endResult.outcome == V4SendOutcome::Refused) {
+    WARN_ESPNOWF("[V4_FILE_TX] %s: FILE_END refused by %s: %s", filename.c_str(), macToDisplayStr(mac).c_str(),
+                 v4FileStatusWhy(endResult.status));
+    return failed(endResult.status, v4FileStatusWhy(endResult.status));
+  }
+  if (endResult.outcome == V4SendOutcome::NotSent) {
+    // Nothing more can reach the receiver; it drops the transfer at its timeout.
+    return failed(0, "FILE_END could not be sent");
+  }
+  // Delivered, or no ACK (it may still have arrived): wait for FILE_RESULT.
+  // Asked again once under a new msgId (the receiver answers a copy of
+  // FILE_END with its remembered verdict).
+  const uint32_t waitStart = millis();
+  bool askedAgain = false;
+  for (;;) {
+    if (gEspNow->fileSendResultTransferId == transferId) {
+      const uint8_t status = gEspNow->fileSendResultStatus;
+      const uint32_t bytes = gEspNow->fileSendResultBytes;
+      if (espnowanswer::isOk(status)) {
+        DEBUG_ESPNOWF("[V4_FILE_TX] STORED: %s (%lu bytes, crc=%08lx) on %s", filename.c_str(), (unsigned long)bytes,
+                      (unsigned long)runningCrc, macToDisplayStr(mac).c_str());
+        return FileSendOutcome{FileSendResult::Stored, 0, bytes, ""};
+      }
+      WARN_ESPNOWF("[V4_FILE_TX] %s not stored on %s: %s", filename.c_str(), macToDisplayStr(mac).c_str(),
+                   v4FileStatusWhy(status));
+      return failed(status, v4FileStatusWhy(status));
+    }
+    if (gEspNow->fileSendAbortTransferId == transferId) {
+      const uint8_t status = gEspNow->fileSendAbortStatus;
+      return failed(status, v4FileStatusWhy(status));
+    }
+    const uint32_t waited = (uint32_t)(millis() - waitStart);
+    if (waited >= kFileResultWaitMs) break;
+    if (!askedAgain && waited >= kFileResultAskAgainMs) {
+      askedAgain = true;
+      fileSendFrame(ESPNOW_V4_TYPE_FILE_END, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
+                    (const uint8_t*)&endPayload, sizeof(endPayload));
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+  WARN_ESPNOWF("[V4_FILE_TX] %s: every chunk sent to %s, but no FILE_RESULT in %lu s: stored or not is unknown",
+               filename.c_str(), macToDisplayStr(mac).c_str(), (unsigned long)(kFileResultWaitMs / 1000));
+  return FileSendOutcome{FileSendResult::Unknown, 0, 0, "no result from the receiver"};
 }
 
-bool sendFileToMac(const uint8_t* mac, const String& localPath) {
-  return sendFileToMacResult(mac, localPath) == FileSendResult::Sent;
+bool sendFileToMac(const uint8_t* mac, const String& localPath, uint8_t kind) {
+  return sendFileToMacResult(mac, localPath, kind).result == FileSendResult::Stored;
 }
 
 #if ENABLE_BONDED_MODE
@@ -21518,9 +21719,8 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
 
   // Pre-check against the receiver's hard ceiling. Files <= 128 KB are buffered
   // whole in PSRAM on the receiver; larger files stream chunk-by-chunk straight
-  // to flash (up to kFileSlotMaxStreamSize). Past that the receiver rejects at
-  // FILE_START — which (integrity pass) now sends FILE_CANCEL(REJECTED) back,
-  // so the sender would abort within a chunk anyway. Still worth failing fast
+  // to flash (up to kFileSlotMaxStreamSize). Past that the receiver refuses
+  // FILE_START (kTooLarge on its ACK) before any chunk. Still worth failing fast
   // here: it saves the START round-trip entirely and the command result (and
   // the relayed espnowfetch result the user actually sees) says WHY instead of
   // a generic "receiver cancelled".
@@ -21538,33 +21738,35 @@ const char* cmd_espnow_sendfile(const String& argsInput) {
   BROADCAST_PRINTF("[ESP-NOW] Sending file to %s: %s (%lu bytes)", deviceName.c_str(), filename.c_str(), (unsigned long)fileSize);
 
   // Use unified file transfer
-  const FileSendResult sendResult = sendFileToMacResult(mac, filepath);
-  if (sendResult == FileSendResult::NoSession) {
+  // One answer per send (1.0 step 7): the receiver's FILE_RESULT decides it.
+  // The reply starts with its word — "Stored", "Unknown" or "Error:" — which
+  // the web device card and a remote espnowfetch read.
+  const FileSendOutcome out = sendFileToMacResult(mac, filepath);
+  if (out.result == FileSendResult::NoSession) {
     // Nothing was sent. Also what a remote espnowfetch gets back as its result.
     snprintf(sendfileBuffer, sizeof(sendfileBuffer), ESPNOW_NO_SESSION_REPLY_FMT, deviceName.c_str());
     return sendfileBuffer;
   }
-  if (sendResult != FileSendResult::Sent) {
-    // Name the file in the failure text. This branch is now COMMON (receiver
-    // cancel / chunk-send failure / short read all land here, where the old
-    // code always returned true once FILE_START was away). The web ESP-NOW
-    // device card and the OLED toast render this string verbatim, so a
-    // nameless "Failed to send file" loses which of several queued sends
-    // actually failed. (It does NOT feed the fetch poller — that reads peer
-    // history, and an espnowfetch's sending side is the remote peer's FS_GET
-    // handler, which never runs this command.)
+  if (out.result == FileSendResult::Unknown) {
     snprintf(sendfileBuffer, sizeof(sendfileBuffer),
-             "Error: Failed to send file '%s' — not started or aborted (no secure session could be "
-             "opened, the receiver cancelled, or a frame failed). Check 'espnowsessions' and retry.",
-             filename.c_str());
+             "Unknown: every part of '%s' went to %s, but it did not confirm within 10 s that the file is "
+             "stored. Check its inbox (/espnow/received/) before sending again.",
+             filename.c_str(), deviceName.c_str());
+    return sendfileBuffer;
+  }
+  if (out.result != FileSendResult::Stored) {
+    // Name the file and the reason: the web ESP-NOW device card and the OLED
+    // toast render this string verbatim.
+    snprintf(sendfileBuffer, sizeof(sendfileBuffer), "Error: '%s' was not stored on %s: %s.",
+             filename.c_str(), deviceName.c_str(), out.why && out.why[0] ? out.why : "failed");
     return sendfileBuffer;
   }
 
   gEspNow->fileTransfersSent++;
   logFileTransferEvent(mac, deviceName.c_str(), filename.c_str(), MSG_FILE_SEND_SUCCESS);
-  
-  snprintf(sendfileBuffer, sizeof(sendfileBuffer), "File sent successfully: %s (%lu bytes)",
-           filename.c_str(), (unsigned long)fileSize);
+
+  snprintf(sendfileBuffer, sizeof(sendfileBuffer), "Stored on %s: %s (%lu bytes)",
+           deviceName.c_str(), filename.c_str(), (unsigned long)out.bytesStored);
   return sendfileBuffer;
 }
 
@@ -24349,7 +24551,7 @@ extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Communication ----
   { "espnowsend", "Send message to one peer, relayed over multiple hops if it is out of radio range: 'espnowsend [json] <name_or_mac> <message>'. Requires ESP-NOW encryption enabled. (async send; delivery only, no reply)", false, cmd_espnow_send, "Usage: espnowsend [json] <name_or_mac> <message>\n       Requires ESP-NOW encryption (set a mesh passphrase first); plaintext send was removed.\n       Leading 'json' flag returns {schema,ok,msgId} for delivery-status polling (\"queued\":true while it waits).\n       Returns OK when sent, or queued until the session with the peer opens (sent then, or failed after 5 s; up to 4 wait per peer); one-way message, no result comes back.\n       Out-of-range peers are reached via relays when a route exists ('espnowmeshroutes');\n       a relayed message is split at ~146 chars per piece instead of ~200." },
   { "espnowbroadcast", "Broadcast message: 'espnowbroadcast <message>'. (async send; delivery only, no reply)", false, cmd_espnow_broadcast, "Usage: espnowbroadcast <message>   (single frame, <= 202 bytes while any enabled mesh has a passphrase, 218 otherwise; longer text is refused)\n       Fails when the frame reached no peer. There is no per-device delivery count and no per-device reply." },
-  { "espnowsendfile", "Send file: 'espnowsendfile <name_or_mac> \"<filepath>\"'. (synchronous send; fails if the receiver rejects/cancels mid-transfer)", true, cmd_espnow_sendfile, "Usage: espnowsendfile <name_or_mac> \"<filepath>\"\n       Blocks until the file is sent. 'success' means every chunk was transmitted and the receiver did not cancel; final storage is confirmed by the receiver's CRC check, which is not reported back here." },
+  { "espnowsendfile", "Send file: 'espnowsendfile <name_or_mac> \"<filepath>\"'. Waits for the receiver's answer: Stored, Error (not stored, with the reason) or Unknown.", true, cmd_espnow_sendfile, "Usage: espnowsendfile <name_or_mac> \"<filepath>\"\n       Blocks until the receiver answers (up to about 10 s after the last chunk). 'Stored' means the receiver checked the file's CRC and renamed it into its /espnow/received/<sender>/ inbox; 'Error: ... not stored' names the reason (refused, no slot, too large, incomplete, crc_mismatch, io_error, ...); 'Unknown' means no answer came, so check the inbox before sending again. File names over 96 bytes (63 on a LittleFS inbox) are refused, never cut." },
   { "espnowbrowse", "Browse a peer's files; user/pass are an account ON THE TARGET: 'espnowbrowse <target> <target-user> <target-pass> [\"path\"]'. (async - result via espnowmessages json)", true, cmd_espnow_browse, "Usage: espnowbrowse <target> <target-user> <target-pass> [\"path\"] [json]\n       Credentials are verified ON THE TARGET device, not this one.\n       Returns OK on delivery; the remote listing arrives later - read with 'espnowmessages json' (match the reqId)." },
   { "espnowfetch", "Fetch a file from a peer; user/pass are an account ON THE TARGET: 'espnowfetch <target> <target-user> <target-pass> \"<path>\"'. (async - status via espnowmessages json; file saved on this device)", true, cmd_espnow_fetch, "Usage: espnowfetch <target> <target-user> <target-pass> \"<path>\"\n       Credentials are verified ON THE TARGET device, not this one.\n       Returns OK on delivery; status lands in 'espnowmessages json'; the fetched file is written to this device's filesystem." },
   { "espnowremote", "Execute a command on a peer: 'espnowremote <target> <target-user> <target-pass> <cmd>'. user/pass are an account ON THE TARGET (verified there), not this device. (async - result via espnowmessages json)", true, cmd_espnow_remote, "Usage: espnowremote <target> <target-user> <target-pass> <command>\n       <target-user>/<target-pass> are credentials ON THE TARGET device, not this one.\n       Async: returns a reqId once sent; its one result (the output, or Busy, Refused, No answer, or No result after 30 s) arrives later in 'espnowmessages json 0 <target-mac>' (match the reqId)." },
@@ -25450,7 +25652,7 @@ void logFileTransferEvent(
       snprintf(message, sizeof(message), "Sending file: %s", filename);
       break;
     case MSG_FILE_SEND_SUCCESS:
-      snprintf(message, sizeof(message), "File sent: %s", filename);
+      snprintf(message, sizeof(message), "File stored: %s", filename);  // the receiver's FILE_RESULT said so
       break;
     case MSG_FILE_SEND_FAILED:
       snprintf(message, sizeof(message), "Failed to send: %s", filename);

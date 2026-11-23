@@ -725,19 +725,27 @@ struct EspNowSendFileJob { uint8_t mac[6]; char path[FILE_MANAGER_MAX_PATH]; };
 static void runEspNowSendFile(void* arg) {
   EspNowSendFileJob* j = (EspNowSendFileJob*)arg;
   if (!j) return;
-  FileSendResult result;
+  FileSendOutcome out;
   {
     SYSTEM_IDENTITY_SCOPE("oled.espnow.sendfile");  // read the local file at device level
-    result = sendFileToMacResult(j->mac, String(j->path));
+    out = sendFileToMacResult(j->mac, String(j->path));
   }
-  // Completion confirmation (cmd_exec task). NoSession: nothing went out, the
-  // encrypted session is still being opened — a retry in a few seconds works.
-  const bool sent = result == FileSendResult::Sent;
-  oledToastShow(sent                                  ? "File sent"
-                : result == FileSendResult::NoSession ? "No session yet. Try again."
-                                                      : "Send failed",
-                sent ? 2500 : oled_message::kErrorDurationMs,
-                sent ? OledUiIcon::SUCCESS : OledUiIcon::ERROR);
+  // Completion confirmation (cmd_exec task), the receiver's answer (1.0 step
+  // 7): Stored, Not stored (with the reason when it fits the toast), or
+  // Unknown (no answer: check the peer's inbox). NoSession: nothing went out,
+  // the encrypted session is still being opened — a retry in a few seconds
+  // works.
+  const bool stored = out.result == FileSendResult::Stored;
+  char failText[48];
+  snprintf(failText, sizeof(failText), "Not stored: %s", out.why && out.why[0] ? out.why : "failed");
+  const char* text = stored                                       ? "File stored"
+                   : out.result == FileSendResult::NoSession      ? "No session yet. Try again."
+                   : out.result == FileSendResult::Unknown        ? "Sent, no answer. Check peer."
+                                                                  : failText;
+  oledToastShow(text,
+                stored ? 2500 : oled_message::kErrorDurationMs,
+                stored ? OledUiIcon::SUCCESS
+                       : out.result == FileSendResult::Unknown ? OledUiIcon::WARNING : OledUiIcon::ERROR);
   free(j);
 }
 
@@ -754,7 +762,7 @@ static void espnowSendOnPicked(const char* fullPath, bool cancelled) {
   memcpy(j->mac, mac, 6);
   strlcpy(j->path, fullPath, sizeof(j->path));
   if (!submitDeferredToCmdExec(runEspNowSendFile, j)) { free(j); oledToastShow("Send failed", oled_message::kErrorDurationMs, OledUiIcon::ERROR); return; }
-  oledToastShow("Sending file...");  // instant feedback; "File sent" follows on completion
+  oledToastShow("Sending file...");  // instant feedback; the receiver's answer follows on completion
 }
 
 // ----------------------------------------------------------------------------

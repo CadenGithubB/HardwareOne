@@ -913,20 +913,15 @@ send_ack: ;
   DEBUG_ESPNOWF("[FSLIST] Sent GET ACK reqId=%u status=%u fileSize=%u",
                 ack.reqId, ack.status, ack.fileSize);
 
-  // Initiate the actual file transfer if the ACK was OK. sendFileToMac is
-  // synchronous: it pumps FILE_START/DATA/END with fixed pacing delays (no
-  // per-frame ACK waits — MAC-layer ack/retry is the only delivery signal),
-  // so this blocks for several seconds on large files. Runs on cmd_exec
-  // (deferred from espnow_task via submitDeferredToCmdExec — see
+  // Initiate the actual file transfer if the ACK was OK. sendFileToMacResult
+  // is synchronous: FILE_START waits for its ACK, the chunks are paced, then
+  // it waits up to 10 s for the requester's FILE_RESULT (1.0 step 7), so this
+  // blocks for several seconds on large files. Runs on cmd_exec (deferred
+  // from espnow_task via submitDeferredToCmdExec — see
   // runDeferredFsOpOnCmdExec) which leaves espnow_task free to drain RX —
-  // including any FILE_CANCEL that aborts this very send. A false result here
-  // is NOT propagated to the requesting peer, and its FS_GET pending slot was
-  // already cleared when the ACK arrived (fsGetOnAckReceived), so fsListTick's
-  // sweep does NOT cover this — it only covers a lost ACK. Requester-side
-  // recovery is its own message poller (the setInterval inside the web ESP-NOW
-  // page's fetchRemoteFile), which watches peer history for the receive result
-  // and otherwise gives up after ~15 polls; the OLED just leaves its
-  // "Downloading..." banner up.
+  // including the FILE_RESULT and any FILE_CANCEL for this very send. The
+  // outcome is logged here; the requester itself knows it from its own
+  // receive (its history line, the web page's fetch poller, the OLED toast).
   if (ack.status == FS_LIST_STATUS_OK) {
     // `served` is necessarily true here. sendFileToMac re-resolves the role
     // at transfer time (canRead under the installed identity), so a bond
@@ -934,9 +929,10 @@ send_ack: ;
     // filesystem.
     ExecIdentityGuard identity(peerCtx);
     String filePath = VFS::normalize(req.path);
-    bool ok = sendFileToMac(srcMac, filePath);
-    DEBUG_ESPNOWF("[FSLIST] GET transfer for reqId=%u path='%s' result=%d",
-                  req.reqId, filePath.c_str(), (int)ok);
+    const FileSendOutcome out = sendFileToMacResult(srcMac, filePath);
+    DEBUG_ESPNOWF("[FSLIST] GET transfer for reqId=%u path='%s': %s%s%s",
+                  req.reqId, filePath.c_str(), fileSendResultWord(out.result),
+                  out.why && out.why[0] ? ", " : "", out.why ? out.why : "");
   }
 }
 

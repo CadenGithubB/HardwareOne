@@ -31,7 +31,8 @@
 //     PEER_LIST (V4PayloadPeerListHeader, V4PayloadPeerListEntry),
 //     SENSOR_ENVELOPE and BOND_SENSOR_DATA (V4PayloadSensorReading, then a
 //     part of the reading), CMD_RESP (V4PayloadCmdRespHeader, then text),
-//     STREAM (V4PayloadStreamHeader, then text), FILE_DATA
+//     STREAM (V4PayloadStreamHeader, then text), FILE_START
+//     (V4PayloadFileStart, then the name), FILE_DATA
 //     (V4PayloadFileData), FS_LIST_REPLY (V4PayloadFsListReplyHeader,
 //     V4PayloadFsEntry), and the text-only TEXT, BOOT, CMD and USER_SYNC.
 //     Each of those structs is marked "Fixed header: cannot grow".
@@ -72,8 +73,8 @@
 //     of that frame alone. The header msgId of every frame, answers included,
 //     is the sender's own fresh number: no frame borrows the request's msgId.
 //     The answers are TOPO_START, TOPO_PEER, CMD_RESP, FS_LIST_REPLY,
-//     FS_STAT_REPLY, FS_GET_ACK, STREAM, FILE_CANCEL, CATCHUP_LIST_RESP and
-//     CATCHUP_READ_RESP.
+//     FS_STAT_REPLY, FS_GET_ACK, STREAM, FILE_RESULT, FILE_CANCEL,
+//     CATCHUP_LIST_RESP and CATCHUP_READ_RESP.
 //   - METADATA is exactly the 202-byte sealed budget, so it cannot grow (to a
 //     peer behind a relay it goes as sealed fragments: sendMetadata);
 //     FS_STAT_REPLY (164) has 38 bytes left, the routed frames their margins
@@ -167,7 +168,7 @@ static_assert(ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT == 202, "group-signed pay
 //                           CATCHUP_LIST_REQ=82, CATCHUP_LIST_RESP=83,
 //                           CATCHUP_READ_REQ=84, CATCHUP_READ_RESP=85; 86–89 free)
 //   90–109   Streaming     (STREAM; 91–93 earmarked MEDIA_START/DATA/END)
-//   110–129  Files         (FILE_START/DATA/END/CANCEL live; FILE_ACK=113,
+//   110–129  Files         (FILE_START/DATA/END/RESULT/CANCEL live, 110-113 and 115;
 //                           FILE_PROGRESS=114, FILE_NACK=116, FILE_RESUME_OK=117 reserved)
 //   130–149  Events        (EVENT_PUSH=132 live: one system event of the sender, a
 //                           session unicast to the masters named on it; 130 retired
@@ -301,8 +302,9 @@ enum EspNowV4Type : uint8_t {
   ESPNOW_V4_TYPE_FILE_START      = 110,
   ESPNOW_V4_TYPE_FILE_DATA       = 111,
   ESPNOW_V4_TYPE_FILE_END        = 112,
-  // 113=FILE_ACK, 114=FILE_PROGRESS reserved (transfer-feedback follow-ups)
-  ESPNOW_V4_TYPE_FILE_CANCEL     = 115,  // receiver→sender: transfer won't complete (post-hoc notice)
+  ESPNOW_V4_TYPE_FILE_RESULT     = 113,  // receiver→sender: the end-to-end verdict (1.0; was the FILE_ACK earmark)
+  // 114=FILE_PROGRESS reserved (transfer-feedback follow-up)
+  ESPNOW_V4_TYPE_FILE_CANCEL     = 115,  // either direction: stop the transfer named by transferId
   // 116=FILE_NACK (missing-chunk bitmap), 117=FILE_RESUME_OK reserved (resume work)
 
   // --- Events (130–149) ---
@@ -1327,75 +1329,117 @@ static_assert(offsetof(V4PayloadSessionRekey, sessionId) == 0 && offsetof(V4Payl
 static_assert(sizeof(V4PayloadSessionRekey) <= ESPNOW_V4_MAX_PAYLOAD,
               "REKEY is sent plaintext, signed under the identity key: it must fit one frame");
 
-// File transfer payloads
-struct __attribute__((packed)) V4PayloadFileStart {
-  uint32_t fileSize;      // 0  Total file size in bytes
-  uint16_t chunkCount;    // 4  Total number of chunks
-  uint16_t chunkSize;     // 6  Size of each chunk (except last)
-  char     filename[64];  // 8  Destination filename
-};
-static_assert(sizeof(V4PayloadFileStart) == 72, "V4PayloadFileStart layout");
-static_assert(offsetof(V4PayloadFileStart, fileSize) == 0 && offsetof(V4PayloadFileStart, chunkCount) == 4 &&
-              offsetof(V4PayloadFileStart, chunkSize) == 6 && offsetof(V4PayloadFileStart, filename) == 8,
-              "V4PayloadFileStart layout");
+// File transfer payloads (1.0 step 7: the Q26 transfer layout, DESIGN 3.6;
+// field names as WIRE_UNIFORMITY F28 so BLE and UART can take the same
+// contract). Every frame has its own header msgId; the transfer is named by
+// `transferId` (random, nonzero) in the payload of every one of them.
+//
+//   sender                                     receiver
+//     FILE_START {transferId, size, name}  ->  slot or ACK(status): no slot,
+//                                              too large (name over 96), ...
+//     FILE_DATA {transferId, chunkIndex} x N   (no ACK_REQ, paced)
+//                                          <-  FILE_CANCEL {transferId, why}
+//                                              (a gap, an unknown transfer)
+//     FILE_END {transferId, count, crc32}  ->  ACK, then the file is checked
+//                                              and written (renamed in place)
+//                                          <-  FILE_RESULT {transferId, status,
+//                                              bytesStored}: stored or why not
+//
+// The sender's answer is Stored, Failed(reason) or Unknown (no FILE_RESULT in
+// 10 s). A copy of FILE_END for a transfer already finished is answered with
+// the remembered FILE_RESULT again.
 
-// Chunk data sized for ESPNOW_V4_MAX_PLAINTEXT so encrypted
-// file transfers don't silently truncate every chunk by 16 bytes. Per-chunk
-// data is 200 B, and the struct also carries a
-// 2 B chunkIndex: 202 B plaintext + 16 B AEAD tag = 218 = MAX_PAYLOAD EXACTLY,
-// zero headroom. There is no room for another field — adding one trips the
-// static_assert below rather than corrupting the wire, so shrink data[] (or
-// widen the transport) instead of growing this struct.
-// 2026-05-19: FILE_START/DATA/END now route through
-// v4_send_payload_smart, so each chunk is session-encrypted when a session
-// exists and plaintext otherwise. Old firmware reading
-// V4PayloadFileStart.chunkSize adapts automatically.
+// What a transfer carries (FILE_START.kind).
+enum V4FileKind : uint8_t {
+  V4_FILE_KIND_FILE = 0,  // an ordinary file: lands in /espnow/received/<sender>/
+  V4_FILE_KIND_BOND = 1,  // a bond answer (_manifest/_settings/_schema_out.json): processed, not stored
+  // 2.. reserved (answered kUnsupported)
+};
+// The longest name FILE_START carries (F7): longer is answered kTooLarge, never cut.
+#define ESPNOW_V4_FILE_NAME_MAX 96
+
+// The name's bytes follow the header (nameLen of them, no terminator).
+// Fixed header: cannot grow (see the frame rules at the top of this file).
+struct __attribute__((packed)) V4PayloadFileStart {
+  uint32_t transferId;    // 0  random, nonzero: names the transfer in every frame
+  uint32_t totalSize;     // 4  file size in bytes
+  uint16_t chunkSize;     // 8  bytes per FILE_DATA (all but the last): <= 194 direct, <= 138 routed
+  uint8_t  kind;          // 10 V4FileKind
+  uint8_t  nameLen;       // 11 1..96; the name's bytes follow at offset 12
+};
+static_assert(sizeof(V4PayloadFileStart) == 12, "V4PayloadFileStart layout");
+static_assert(offsetof(V4PayloadFileStart, transferId) == 0 && offsetof(V4PayloadFileStart, totalSize) == 4 &&
+              offsetof(V4PayloadFileStart, chunkSize) == 8 && offsetof(V4PayloadFileStart, kind) == 10 &&
+              offsetof(V4PayloadFileStart, nameLen) == 11,
+              "V4PayloadFileStart layout");
+static_assert(sizeof(V4PayloadFileStart) + ESPNOW_V4_FILE_NAME_MAX <= ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT,
+              "FILE_START with the longest name fits the routed payload budget (108 <= 146)");
+
+// The chunk's bytes run to the end of the frame (the last chunk is shorter).
+// 8 + 194 = 202, the sealed single-frame budget.
 // Fixed header: cannot grow (see the frame rules at the top of this file).
 struct __attribute__((packed)) V4PayloadFileData {
-  uint16_t chunkIndex;    // Chunk index (0-based)
-  uint8_t  data[ESPNOW_V4_MAX_PLAINTEXT - 2];  // 200 bytes — fits a SESSION_FRAME
+  uint32_t transferId;    // 0
+  uint32_t chunkIndex;    // 4  0-based
+  uint8_t  data[ESPNOW_V4_MAX_PLAINTEXT - 8];  // 8  194 bytes
 };
 static_assert(sizeof(V4PayloadFileData) == ESPNOW_V4_MAX_PLAINTEXT && sizeof(V4PayloadFileData) == 202,
               "V4PayloadFileData must fit a SESSION_FRAME plaintext budget");
-static_assert(offsetof(V4PayloadFileData, chunkIndex) == 0 && offsetof(V4PayloadFileData, data) == 2,
+static_assert(offsetof(V4PayloadFileData, transferId) == 0 && offsetof(V4PayloadFileData, chunkIndex) == 4 &&
+              offsetof(V4PayloadFileData, data) == 8,
               "V4PayloadFileData layout (a chunk's bytes follow the index; the last chunk is shorter)");
+// The chunk sizes a sender uses: the frame budget less the 8-byte header.
+#define ESPNOW_V4_FILE_CHUNK_DIRECT (ESPNOW_V4_MAX_PLAINTEXT - 8)               // 194
+#define ESPNOW_V4_FILE_CHUNK_ROUTED (ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT - 8)   // 138
+static_assert(ESPNOW_V4_FILE_CHUNK_DIRECT == 194 && ESPNOW_V4_FILE_CHUNK_ROUTED == 138, "file chunk sizes");
 
 struct __attribute__((packed)) V4PayloadFileEnd {
-  uint32_t crc32;         // CRC32 of the entire file, computed with esp_crc32_le
-                          // (seed 0) on both ends. Receiver REJECTS on mismatch
-                          // (FILE_CANCEL_CRC_MISMATCH). Ignored when status != 0.
-                          // Flag day 2026-07: older firmware sent 0 here; both
-                          // peers must run post-CRC firmware or every non-empty
-                          // transfer fails.
-  uint8_t  status;        // 0 = transfer complete; anything else = the sender stopped it
-                          // mid-transfer (it sends espnowanswer::kCancelled). Was
-                          // `success` with 1 = complete: 0 means ok in every status
-                          // byte since 1.0 (rule F3)
+  uint32_t transferId;    // 0
+  uint32_t chunkCount;    // 4  chunks the sender sent (ceil(totalSize / chunkSize))
+  uint32_t crc32;         // 8  esp_crc32_le (seed 0) over the whole file; the
+                          //    receiver checks it before it stores anything
+  uint8_t  status;        // 12 0 = transfer complete; anything else = the sender
+                          //    stopped it (it sends espnowanswer::kCancelled)
+  uint8_t  reserved[3];   // 13 sent 0
 };
-static_assert(sizeof(V4PayloadFileEnd) == 5, "V4PayloadFileEnd layout");
-static_assert(offsetof(V4PayloadFileEnd, crc32) == 0 && offsetof(V4PayloadFileEnd, status) == 4,
-              "V4PayloadFileEnd layout");
+static_assert(sizeof(V4PayloadFileEnd) == 16, "V4PayloadFileEnd layout");
+static_assert(offsetof(V4PayloadFileEnd, transferId) == 0 && offsetof(V4PayloadFileEnd, chunkCount) == 4 &&
+              offsetof(V4PayloadFileEnd, crc32) == 8 && offsetof(V4PayloadFileEnd, status) == 12 &&
+              offsetof(V4PayloadFileEnd, reserved) == 13, "V4PayloadFileEnd layout");
 
-// FILE_CANCEL — the receiver tells the sender a transfer it started
-// will not complete. An answer (rule F3): reqId is the FILE_START's header
-// msgId (the transfer's number until FILE_START carries its own id); the
-// FILE_CANCEL's header msgId is the canceller's own. The sender matches
-// (peer, reqId) against its in-flight send and ABORTS the chunk loop, so a
-// cancel stops the remaining airtime spend (see fileSendAbortMsgId).
-// The reasons are status values of the shared table (espnowanswer); two are
-// this frame's own (16, 17).
+// FILE_RESULT (113) — the end-to-end verdict, sent by the receiver once the
+// file is renamed into place (or a bond answer processed), or once it knows
+// the file will not be stored. An answer (rule F3): reqId = transferId.
+// Sealed, with ACK_REQ.
+struct __attribute__((packed)) V4PayloadFileResult {
+  uint32_t reqId;         // 0  the transferId
+  uint8_t  status;        // 4  0 = stored; else a shared status (io_error, timeout, ...) or
+                          //    16 incomplete / 17 crc_mismatch (as FILE_CANCEL)
+  uint8_t  reserved[3];   // 5  sent 0
+  uint32_t bytesStored;   // 8  bytes written (0 when not stored)
+};
+static_assert(sizeof(V4PayloadFileResult) == 12 && offsetof(V4PayloadFileResult, reqId) == 0 &&
+              offsetof(V4PayloadFileResult, status) == 4 && offsetof(V4PayloadFileResult, reserved) == 5 &&
+              offsetof(V4PayloadFileResult, bytesStored) == 8, "V4PayloadFileResult layout");
+
+// FILE_CANCEL — either side stops a transfer (reqId = transferId; the frame's
+// own header msgId is the canceller's). From the receiver: the transfer will
+// not complete (a gap, FILE_DATA for a transfer it does not have, the 30 s
+// timeout); the sender stops its pump within one chunk. From the sender: it
+// gives the transfer up (its FILE_START was not answered); the receiver frees
+// the slot. The reasons are status values of the shared table
+// (espnowanswer); two are this frame's own (16, 17).
 // The numbers are those of espnowanswer (asserted after the answer structs).
 enum EspNowFileCancelReason : uint8_t {
   FILE_CANCEL_TIMEOUT      = 10,  // timeout: no frame arrived within the slot timeout
   FILE_CANCEL_WRITE_FAILED = 8,   // io_error: staging write / rename to flash failed
-  FILE_CANCEL_INCOMPLETE   = 16,  // incomplete (this frame's own): FILE_END arrived but chunks were missing
+  FILE_CANCEL_INCOMPLETE   = 16,  // incomplete (this frame's own): chunks are missing
   FILE_CANCEL_CRC_MISMATCH = 17,  // crc_mismatch (this frame's own): all chunks arrived but the whole-file
                                   // CRC32 didn't match FILE_END's declared value
-  FILE_CANCEL_REJECTED     = 2,   // refused: FILE_START rejected (no slot / alloc / too big), or a chunk
-                                  // arrived for an unknown transfer — receiver never had/lost the slot
+  FILE_CANCEL_REJECTED     = 2,   // refused: a chunk arrived for a transfer the receiver does not have
 };
 struct __attribute__((packed)) V4PayloadFileCancel {
-  uint32_t reqId;         // 0  the FILE_START's header msgId
+  uint32_t reqId;         // 0  the transferId
   uint8_t  status;        // 4  EspNowFileCancelReason (never 0)
 };
 static_assert(sizeof(V4PayloadFileCancel) == 5 && offsetof(V4PayloadFileCancel, reqId) == 0 &&
@@ -1799,6 +1843,7 @@ static_assert(espnowanswer::kOpTopoStart == ESPNOW_V4_TYPE_TOPO_START &&
               espnowanswer::kOpFsStatReply == ESPNOW_V4_TYPE_FS_STAT_REPLY &&
               espnowanswer::kOpFsGetAck == ESPNOW_V4_TYPE_FS_GET_ACK &&
               espnowanswer::kOpStream == ESPNOW_V4_TYPE_STREAM &&
+              espnowanswer::kOpFileResult == ESPNOW_V4_TYPE_FILE_RESULT &&
               espnowanswer::kOpFileCancel == ESPNOW_V4_TYPE_FILE_CANCEL &&
               espnowanswer::kOpCatchupListResp == ESPNOW_V4_TYPE_CATCHUP_LIST_RESP &&
               espnowanswer::kOpCatchupReadResp == ESPNOW_V4_TYPE_CATCHUP_READ_RESP,
@@ -1814,6 +1859,7 @@ static_assert(ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadTopoStart) &&
               ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFsListReplyHeader) &&
               ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFsStatReply) &&
               ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFsGetAck) &&
+              ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFileResult) &&
               ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadFileCancel) &&
               ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadCatchupListRespHeader) &&
               ESPNOW_V4_ANSWER_HEADER_AT_START(V4PayloadCatchupReadRespHeader),
@@ -1875,9 +1921,10 @@ static_assert(FILE_CANCEL_TIMEOUT == espnowanswer::kTimeout && FILE_CANCEL_WRITE
 #define ESPNOW_V4_MINLEN_METADATA_RESP       202
 #define ESPNOW_V4_MINLEN_METADATA_PUSH       202
 #define ESPNOW_V4_MINLEN_STREAM              6    // answer header {reqId, status} + at least one byte of the line
-#define ESPNOW_V4_MINLEN_FILE_START          72
-#define ESPNOW_V4_MINLEN_FILE_DATA           3    // chunk index 2 + at least one byte
-#define ESPNOW_V4_MINLEN_FILE_END            5
+#define ESPNOW_V4_MINLEN_FILE_START          13   // header 12 + at least one byte of the name
+#define ESPNOW_V4_MINLEN_FILE_DATA           9    // transferId 4 + chunkIndex 4 + at least one byte
+#define ESPNOW_V4_MINLEN_FILE_END            16
+#define ESPNOW_V4_MINLEN_FILE_RESULT         12
 #define ESPNOW_V4_MINLEN_FILE_CANCEL         5
 #define ESPNOW_V4_MINLEN_FS_LIST_REQ         144
 #define ESPNOW_V4_MINLEN_FS_LIST_REPLY       140  // header; entries follow (count checked by the handler)
@@ -1935,9 +1982,10 @@ static_assert(sizeof(V4PayloadSessionUnknown) == ESPNOW_V4_MINLEN_SESSION_UNKNOW
               sizeof(V4PayloadTopoPeer) == ESPNOW_V4_MINLEN_TOPO_PEER &&
               sizeof(V4PayloadMetadata) == ESPNOW_V4_MINLEN_METADATA_RESP &&
               sizeof(V4PayloadMetadata) == ESPNOW_V4_MINLEN_METADATA_PUSH &&
-              sizeof(V4PayloadFileStart) == ESPNOW_V4_MINLEN_FILE_START &&
+              sizeof(V4PayloadFileStart) + 1 == ESPNOW_V4_MINLEN_FILE_START &&
               offsetof(V4PayloadFileData, data) + 1 == ESPNOW_V4_MINLEN_FILE_DATA &&
               sizeof(V4PayloadFileEnd) == ESPNOW_V4_MINLEN_FILE_END &&
+              sizeof(V4PayloadFileResult) == ESPNOW_V4_MINLEN_FILE_RESULT &&
               sizeof(V4PayloadFileCancel) == ESPNOW_V4_MINLEN_FILE_CANCEL &&
               sizeof(V4PayloadStreamHeader) + 1 == ESPNOW_V4_MINLEN_STREAM &&
               sizeof(V4PayloadFsListReq) == ESPNOW_V4_MINLEN_FS_LIST_REQ &&
