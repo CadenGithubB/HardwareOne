@@ -841,7 +841,8 @@ inline void streamEspNowInner(httpd_req_t* req) {
           if (meshData.peers && meshData.peers.length > 0) {
             for (var i = 0; i < meshData.peers.length; i++) {
               var peer = meshData.peers[i];
-              var statusColor = peer.alive ? 'var(--success)' : 'var(--danger)';
+              var statusColor = peer.state === 'online' ? 'var(--success)'
+                              : (peer.state === 'connecting' ? 'var(--warning)' : 'var(--danger)');
               var statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + statusColor + ';margin-right:6px;"></span>';
               html += '<div style="margin-left:20px;color:var(--panel-fg);">├─ ' + statusDot + window.topologyEscapeHtml(peer.name) + ' (' + window.topologyEscapeHtml(peer.mac) + ')</div>';
             }

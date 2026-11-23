@@ -74,6 +74,7 @@ RETIRED_NAMES = {
     "cameraenabled": "cameraautostart",
     "debugespnow": "debugespnowcore",
     "eienable": "eiautostart",
+    "espnowbroadcaststats": "espnowmeshstatus",
     "espnowenabled": "espnowautostart",
     "espnowforget": "espnowunpair",
     "espnowpair": "espnowpairsecure",

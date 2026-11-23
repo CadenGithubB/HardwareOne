@@ -34,7 +34,7 @@
 //     STREAM (V4PayloadStreamHeader, then text), FILE_START
 //     (V4PayloadFileStart, then the name), FILE_DATA
 //     (V4PayloadFileData), FS_LIST_REPLY (V4PayloadFsListReplyHeader,
-//     V4PayloadFsEntry), and the text-only TEXT, BOOT, CMD and USER_SYNC.
+//     V4PayloadFsEntry), and the text-only TEXT, CMD and USER_SYNC.
 //     Each of those structs is marked "Fixed header: cannot grow".
 //   - Reserved bytes are sent as 0 and ignored by the receiver.
 //   - A receiver reads a payload with V4RxCtx::read(struct) (zero-fills what
@@ -158,8 +158,9 @@ static_assert(ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT == 202, "group-signed pay
 //   10–29    Crypto        (KEY_EX_* 10–12, SESSION_* 13–15;
 //                           16/17 free (released 1.0);
 //                           SESSION_UNKNOWN=18 live, 2026-11-18)
-//   30–49    Discovery     (HEARTBEAT, BOOT, TOPO_*, TIME_SYNC, PAIR_BEACON,
-//                           PEER_LIST=39 live; 37/38 free (released 1.0: the
+//   30–49    Discovery     (HEARTBEAT, TOPO_*, TIME_SYNC, PAIR_BEACON,
+//                           PEER_LIST=39 live; 31 retired (BOOT, removed in 1.0 —
+//                           do not reuse); 37/38 free (released 1.0: the
 //                           session caps word covers capability discovery))
 //   50–69    App unicast   (CMD, CMD_RESP, TEXT, METADATA_*, USER_SYNC)
 //   70–89    Remote FS     (FS_* read side live 70–75; 76–81 earmarked write
@@ -242,18 +243,9 @@ enum EspNowV4Type : uint8_t {
 
   // --- Discovery / timing (30–49) ---
   ESPNOW_V4_TYPE_HEARTBEAT       = 30,
-  ESPNOW_V4_TYPE_BOOT            = 31,  // Device boot/online notice — its OWN type so the RX files it as a system event, not chat.
-                                        //   JSON envelope, pld.boot = the sender's boot counter. Since 2026-11-18
-                                        //   sent group-signed (BROADCAST_AUTH, ttl 1) to each paired peer the
-                                        //   sender holds no live session with, so it arrives without a session: a
-                                        //   receiver that still holds a session with the sender closes it when the
-                                        //   counter is newer than the last one seen and the tag is of the sender's
-                                        //   mesh (System_ESPNow_PeerRestartCore.h); a copy (counter already seen or
-                                        //   older) is not filed again. Sealed to a peer the sender still holds a
-                                        //   live session with (ESP-NOW closed and opened again: sessions stay in
-                                        //   RAM), which ends nothing and only records the counter, and when no
-                                        //   group key is held for the peer's mesh. The row (REQ_AUTH_WHEN_KEYED)
-                                        //   is unchanged.
+  // 31 retired — BOOT (the JSON boot notice), removed in 1.0 step 8: the heartbeat's
+  //   bootCounter carries a restart (System_ESPNow_PeerRestartCore.h). It was on the
+  //   wire, so the number is never reused.
   ESPNOW_V4_TYPE_TOPO_REQ        = 32,
   ESPNOW_V4_TYPE_TOPO_START      = 33,
   ESPNOW_V4_TYPE_TOPO_PEER       = 34,
@@ -573,24 +565,40 @@ static_assert(sizeof(V4PayloadPeerListHeader)
               <= ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT,
               "a full PEER_LIST must fit one broadcast-authed frame");
 
-// HEARTBEAT (30). Every sender builds it with v4FillHeartbeat (the app ping too).
+// HEARTBEAT (30). Every sender builds it with v4FillHeartbeat (the app ping too)
+// and patches the per-peer fields with v4HeartbeatFor before each send.
 // chanInfo (System_ESPNow_ChannelFollowCore.h): bits 0-3 the sender's radio
-// channel (0 = not stated, older firmware), 0x10 probe (a hunting worker asks
-// its master to answer), 0x20 answer; 0xC0 sent 0, ignored.
+// channel (0 = not stated), 0x10 probe (a hunting worker asks its master to
+// answer), 0x20 answer; 0xC0 sent 0, ignored.
+// 1.0 step 8 (RC3, DESIGN 4.2): sealed in the session when one is ACTIVE with
+// the recipient, group-tagged otherwise; the periodic heartbeat asks no ACK.
+//   bootCounter - the sender's persisted boot counter (gBootCounter): a newer
+//                 one than seen before closes a stale session
+//                 (System_ESPNow_PeerRestartCore.h; replaces the BOOT frame 31);
+//   echoMsgId   - the msgId of the last heartbeat the sender heard from the
+//                 recipient within 30 s (0 = none). Sealed, it is two-way
+//                 evidence for the recipient (System_ESPNow_LinkCore.h);
+//   linkRssi    - the sender's RSSI of the recipient's last heartbeat (0 = none).
 struct __attribute__((packed)) V4PayloadHeartbeat {
   uint8_t  role;          // 0
   uint8_t  peerCount;     // 1
-  int8_t   rssi;          // 2
-  uint8_t  chanInfo;      // 3   channel + probe/answer bits (older firmware: 0, ignores it)
+  int8_t   rssi;          // 2   the sender's own AP RSSI (-127: not joined)
+  uint8_t  chanInfo;      // 3   channel + probe/answer bits
   uint32_t uptimeSec;     // 4
   uint32_t freeHeap;      // 8
   char     deviceName[32];  // 12  the sender's device name (System_DeviceName.h); NUL always present, rest 0
+  uint32_t bootCounter;   // 44
+  uint32_t echoMsgId;     // 48
+  int8_t   linkRssi;      // 52
+  uint8_t  reserved[3];   // 53  sent 0, ignored
 };
-static_assert(sizeof(V4PayloadHeartbeat) == 44, "V4PayloadHeartbeat must be 44 bytes");
+static_assert(sizeof(V4PayloadHeartbeat) == 56, "V4PayloadHeartbeat must be 56 bytes");
 static_assert(offsetof(V4PayloadHeartbeat, role) == 0 && offsetof(V4PayloadHeartbeat, peerCount) == 1 &&
               offsetof(V4PayloadHeartbeat, rssi) == 2 && offsetof(V4PayloadHeartbeat, chanInfo) == 3 &&
               offsetof(V4PayloadHeartbeat, uptimeSec) == 4 && offsetof(V4PayloadHeartbeat, freeHeap) == 8 &&
-              offsetof(V4PayloadHeartbeat, deviceName) == 12, "V4PayloadHeartbeat layout");
+              offsetof(V4PayloadHeartbeat, deviceName) == 12 && offsetof(V4PayloadHeartbeat, bootCounter) == 44 &&
+              offsetof(V4PayloadHeartbeat, echoMsgId) == 48 && offsetof(V4PayloadHeartbeat, linkRssi) == 52 &&
+              offsetof(V4PayloadHeartbeat, reserved) == 53, "V4PayloadHeartbeat layout");
 static_assert(sizeof(V4PayloadHeartbeat::deviceName) == devicename::kFieldLen, "V4PayloadHeartbeat name field");
 
 // WPS-style pairing beacon (ESPNOW_V4_TYPE_PAIR_BEACON). Sent group-signed
@@ -1663,7 +1671,7 @@ static_assert(sizeof(V4PayloadFsGetAck) <= ESPNOW_V4_MAX_PLAINTEXT,
 // A acts only when sessionId is its live (ACTIVE/REKEYING) session with B and
 // frameSeq is one it sealed in it (1..txSeqNext); then it closes that session,
 // marks msgId failed at once and starts a SESSION_OPEN. At most one such close
-// per peer per 10 s (shared with the BOOT notice rule). Nothing is accepted or
+// per peer per 10 s (shared with the heartbeat boot-counter rule). Nothing is accepted or
 // sent on the strength of the hint: the new session is the normal signed
 // SESSION_OPEN/CONFIRM. A forged hint (any mesh member holds the group key)
 // costs one fresh handshake per 10 s at most; a re-sent copy names a session
@@ -1899,12 +1907,11 @@ static_assert(FILE_CANCEL_TIMEOUT == espnowanswer::kTimeout && FILE_CANCEL_WRITE
 #define ESPNOW_V4_MINLEN_SESSION_UNKNOWN     12
 #define ESPNOW_V4_MINLEN_TIME_SYNC           16
 #define ESPNOW_V4_MINLEN_TEXT                1    // text, no terminator
-#define ESPNOW_V4_MINLEN_BOOT                1    // JSON envelope
 #define ESPNOW_V4_MINLEN_RELAY_DATA          40   // envelope 8 + an inner header 32
 #define ESPNOW_V4_MINLEN_PEER_LIST           4    // header; entries follow (count checked by the handler)
 #define ESPNOW_V4_MINLEN_CMD                 1
 #define ESPNOW_V4_MINLEN_CMD_RESP            5    // answer header {reqId, status}; text follows
-#define ESPNOW_V4_MINLEN_HEARTBEAT           44
+#define ESPNOW_V4_MINLEN_HEARTBEAT           56
 #define ESPNOW_V4_MINLEN_PAIR_BEACON         36
 #define ESPNOW_V4_MINLEN_PAIR_REQUEST        72   // control 40 + the requester key 32
 #define ESPNOW_V4_MINLEN_PAIR_ACCEPT         40

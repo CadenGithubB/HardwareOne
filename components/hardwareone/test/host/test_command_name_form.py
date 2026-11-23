@@ -58,6 +58,7 @@ REMOVED_NAMES: dict[str, str] = {
     "cameraenabled": "cameraautostart",
     "debugespnow": "debugespnowcore",
     "eienable": "eiautostart",
+    "espnowbroadcaststats": "espnowmeshstatus",
     "espnowenabled": "espnowautostart",
     "espnowforget": "espnowunpair",
     "espnowpair": "espnowpairsecure",

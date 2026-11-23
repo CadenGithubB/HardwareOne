@@ -1159,7 +1159,8 @@ bool sessionLiveState(const SessionState* s) {
 
 }  // namespace
 
-PeerBootVerdict sessionPeerBootNotice(const uint8_t peerMac[6], bool hasCounter, uint32_t bootCounter) {
+PeerBootVerdict sessionPeerBootCounter(const uint8_t peerMac[6], uint32_t bootCounter, bool* restartSeen) {
+  if (restartSeen) *restartSeen = false;
   if (!peerMac) return PeerBootVerdict::NoSession;
   const uint32_t nowMs = (uint32_t)millis();
   uint16_t closedId = 0;
@@ -1168,7 +1169,7 @@ PeerBootVerdict sessionPeerBootNotice(const uint8_t peerMac[6], bool hasCounter,
   {
     // Same lock as the seal (sessionWrapFrame) and the pending queue: a seal
     // on another task and this clear do not interleave.
-    EspNowTxGuard g("peerBootNotice");
+    EspNowTxGuard g("peerBootCounter");
     // Paired peers only (a stored identity): a mesh member that is not paired
     // with this device holds no session with it, and must not use up entries.
     if (!peerIdentityFindByMac(peerMac)) return PeerBootVerdict::NoSession;
@@ -1176,7 +1177,7 @@ PeerBootVerdict sessionPeerBootNotice(const uint8_t peerMac[6], bool hasCounter,
     SessionState* s = sessionForPeer(peerMac);
     const bool live = sessionLiveState(s);
     const uint32_t age = live ? (uint32_t)(nowMs - s->establishedAtMs) : 0;
-    verdict = peerRestartOnBootNotice(*gPeerRestart, peerMac, hasCounter, bootCounter, live, age, nowMs);
+    verdict = peerRestartOnBootCounter(*gPeerRestart, peerMac, bootCounter, live, age, nowMs, restartSeen);
     if (verdict == PeerBootVerdict::DropSession) {
       closedId = s->sessionId;
       sessionClear(s);
@@ -1184,13 +1185,13 @@ PeerBootVerdict sessionPeerBootNotice(const uint8_t peerMac[6], bool hasCounter,
     }
   }
   if (verdict != PeerBootVerdict::DropSession) return verdict;
-  // One line per restart: the next notice carries a newer counter or is
-  // refused by the 10 s limit.
+  // One line per restart: the next heartbeat carries the same counter, a newer
+  // one is refused by the 10 s limit.
   String name = getEspNowDeviceName(peerMac);
   char who[40];
   if (name.length() > 0) strlcpy(who, name.c_str(), sizeof(who));
   else snprintf(who, sizeof(who), MAC_FMT, MAC_ARGS(peerMac));
-  // A notice without a counter never ends a session (PeerBootVerdict::NoCounter).
+  // A counter of 0 never ends a session (PeerBootVerdict::NoCounter).
   BROADCAST_PRINTF("[ESP-NOW] %s restarted (boot #%lu): its session ended; the next message to it "
                    "opens a new one", who, (unsigned long)bootCounter);
   DEBUG_ESPNOWF("session: closed sessionId=%u with " MAC_FMT " (peer restarted)",
@@ -1201,17 +1202,11 @@ PeerBootVerdict sessionPeerBootNotice(const uint8_t peerMac[6], bool hasCounter,
   return verdict;
 }
 
-bool sessionLiveWithPeer(const uint8_t peerMac[6]) {
+bool sessionPeerBootSeen(const uint8_t peerMac[6], uint32_t bootCounter) {
   if (!peerMac) return false;
-  EspNowTxGuard g("sessLivePeer");
-  return sessionLiveState(sessionForPeer(peerMac));
-}
-
-void sessionPeerBootSeen(const uint8_t peerMac[6], uint32_t bootCounter) {
-  if (!peerMac) return;
   EspNowTxGuard g("peerBootSeen");
-  if (!peerIdentityFindByMac(peerMac) || !ensurePeerRestartAllocated()) return;
-  peerRestartBootSeen(*gPeerRestart, peerMac, bootCounter, (uint32_t)millis());
+  if (!peerIdentityFindByMac(peerMac) || !ensurePeerRestartAllocated()) return false;
+  return peerRestartBootSeen(*gPeerRestart, peerMac, bootCounter, (uint32_t)millis());
 }
 
 bool sessionUnknownFrameSeen(const uint8_t srcMac[6], const struct EspNowV4Header* h) {

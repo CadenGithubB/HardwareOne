@@ -25,6 +25,21 @@
     window.espnowIsMacText = function(value) {
       return typeof value === 'string' && /^[A-Fa-f0-9]{2}(:[A-Fa-f0-9]{2}){5}$/.test(value);
     };
+    // A meshstatus peer row's state for the device list (firmware 1.0 step 8):
+    // `state` online / connecting / offline and `link` twoWay / oneWay / none.
+    window.espnowPeerStateView = function(row) {
+      var state = row && typeof row.state === 'string' ? row.state : 'offline';
+      var link = row && typeof row.link === 'string' ? row.link : 'none';
+      var linkWord = link === 'twoWay' ? 'two-way' : (link === 'oneWay' ? 'one-way' : 'none');
+      if (state === 'online') return { color: 'var(--success)', label: 'Online', title: 'Online', link: linkWord };
+      if (state === 'connecting') {
+        return { color: 'var(--warning)', label: 'Connecting',
+                 title: link === 'oneWay' ? 'Connecting (one-way: it may not hear this device)' : 'Connecting',
+                 link: linkWord };
+      }
+      return { color: 'var(--danger)', label: 'Offline', title: 'Offline', link: linkWord };
+    };
+    var espnowPeerStateView = window.espnowPeerStateView;
     console.log('[ESP-NOW] Chunk 3A: listDevices function start');
     window.listDevices = function(preloadedBondStatus, preloadedList) {
       // bondStatus: the 'bondstatus json' reply; its 'peer' is the partner's MAC.
@@ -101,26 +116,13 @@
         var statusLabel = '';
         var statsLine = '';
         if (isMesh && health) {
-          var hbSec = (typeof health.secondsSinceHeartbeat === 'number') ? health.secondsSinceHeartbeat : null;
-          var actSec = (typeof health.secondsSinceActivity === 'number') ? health.secondsSinceActivity : null;
-          
-          // Consider device online if either heartbeat OR recent activity (ACKs) within timeout
-          var isOnline = health.alive || health.activityAlive;
-          var isFresh = (hbSec !== null && hbSec <= 15) || (actSec !== null && actSec <= 15);
-          
-          if (isOnline) {
-            if (isFresh) {
-              statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:6px" title="Online"></span>';
-              statusLabel = '<span style="color:var(--success);font-size:.8em;margin-left:6px">Online</span>';
-            } else {
-              statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warning);margin-right:6px" title="Online (Stale)"></span>';
-              statusLabel = '<span style="color:var(--warning);font-size:.8em;margin-left:6px">Online</span>';
-            }
-          } else {
-            statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--danger);margin-right:6px" title="Offline"></span>';
-            statusLabel = '<span style="color:var(--danger);font-size:.8em;margin-left:6px">Offline</span>';
-          }
-          statsLine = '<span style="color:var(--muted);font-size:.78em;margin-left:4px">HB: ' + (health.heartbeatCount || 0) + ' | ACKs: ' + (health.ackCount || 0) + '</span>';
+          // The peer state every surface shows (firmware 1.0: online = heard,
+          // proven both ways and a session up; connecting = heard only, or no
+          // session yet; offline = not heard for 30 s).
+          var pst = espnowPeerStateView(health);
+          statusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + pst.color + ';margin-right:6px" title="' + pst.title + '"></span>';
+          statusLabel = '<span style="color:' + pst.color + ';font-size:.8em;margin-left:6px">' + pst.label + '</span>';
+          statsLine = '<span style="color:var(--muted);font-size:.78em;margin-left:4px">HB: ' + (health.heartbeatCount || 0) + ' | link: ' + pst.link + '</span>';
         }
 
         var encText = isEncrypted ? 'Encrypted' : 'Unencrypted';
@@ -177,24 +179,10 @@
             var mp2 = meshOnly[j];
             var mmac = (mp2.mac || '').toUpperCase();
             var mname = mp2.name || 'Unknown';
-            var mStatusDot = '', mStatusLabel = '';
-            var mhbSec = (typeof mp2.secondsSinceHeartbeat === 'number') ? mp2.secondsSinceHeartbeat : null;
-            if (mp2.alive) {
-              if (mhbSec !== null && mhbSec <= 15) {
-                mStatusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--success);margin-right:6px" title="Online"></span>';
-                mStatusLabel = '<span style="color:var(--success);font-size:.8em;margin-left:6px">Online</span>';
-              } else {
-                mStatusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warning);margin-right:6px" title="Stale"></span>';
-                mStatusLabel = '<span style="color:var(--warning);font-size:.8em;margin-left:6px">Stale</span>';
-              }
-            } else if (mp2.activityAlive) {
-              mStatusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--warning);margin-right:6px" title="Stale"></span>';
-              mStatusLabel = '<span style="color:var(--warning);font-size:.8em;margin-left:6px">Stale</span>';
-            } else {
-              mStatusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--danger);margin-right:6px" title="Offline"></span>';
-              mStatusLabel = '<span style="color:var(--danger);font-size:.8em;margin-left:6px">Offline</span>';
-            }
-            var mStats = '<span style="color:var(--muted);font-size:.78em;margin-left:4px">HB: ' + (mp2.heartbeatCount || 0) + ' | ACKs: ' + (mp2.ackCount || 0) + '</span>';
+            var mpst = espnowPeerStateView(mp2);
+            var mStatusDot = '<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + mpst.color + ';margin-right:6px" title="' + mpst.title + '"></span>';
+            var mStatusLabel = '<span style="color:' + mpst.color + ';font-size:.8em;margin-left:6px">' + mpst.label + '</span>';
+            var mStats = '<span style="color:var(--muted);font-size:.78em;margin-left:4px">HB: ' + (mp2.heartbeatCount || 0) + ' | link: ' + mpst.link + '</span>';
 
             html += '<div class="device-item">';
             html += '<div style="flex:1;min-width:0">';

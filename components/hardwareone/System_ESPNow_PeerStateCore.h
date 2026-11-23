@@ -2,18 +2,20 @@
 //
 // One meaning on every surface that shows or counts ESP-NOW peers (owner
 // decision 2026-11-19, built for the OLED and the automation PEERS value on
-// 2026-11-21):
-//   online     - a mesh heartbeat within MESH_PEER_TIMEOUT_MS AND an ACTIVE
-//                encrypted session: commands to the peer work;
-//   connecting - a recent heartbeat, the session not up yet (a few seconds
+// 2026-11-21; sharpened by ESP-NOW 1.0 step 8, RC3):
+//   online     - heard within 30 s, the link proven both ways (MeshLink::TwoWay,
+//                System_ESPNow_LinkCore.h) AND an ACTIVE encrypted session:
+//                commands to the peer work;
+//   connecting - heard within 30 s, but not proven both ways yet (one-way: it
+//                may not hear this device) or no session yet (a few seconds
 //                after a restart, or while a session is rebuilt);
-//   offline    - no recent heartbeat (a session that outlived the heartbeats
-//                does not make a silent peer online).
+//   offline    - not heard within 30 s (a session that outlived the peer does
+//                not make a silent peer online).
 // The peers counted are the paired ones: gEspNow->devices[] without this
 // device's own entry, the set the lens "up/paired" count already walks.
 //
 // The rule is pure (no radio, no tables) so host suites can run it as is. The
-// accessors that feed it from the heartbeat table and the session table,
+// accessors that feed it from the link table and the session table,
 // espnowPeerState(mac) and espnowPeerCounts(), sit in System_ESPNow.h.
 #pragma once
 
@@ -21,10 +23,21 @@
 
 enum class EspNowPeerState : uint8_t { Offline, Connecting, Online };
 
-constexpr EspNowPeerState espnowPeerStateOf(bool heartbeatRecent, bool sessionUp) {
-  return !heartbeatRecent ? EspNowPeerState::Offline
-         : sessionUp      ? EspNowPeerState::Online
-                          : EspNowPeerState::Connecting;
+// A mesh peer's link (DESIGN 4.3): not heard within 30 s, heard only, or
+// proven both ways.
+enum class MeshLink : uint8_t { None, OneWay, TwoWay };
+
+constexpr EspNowPeerState espnowPeerStateOf(MeshLink link, bool sessionUp) {
+  return link == MeshLink::None                    ? EspNowPeerState::Offline
+         : (link == MeshLink::TwoWay && sessionUp) ? EspNowPeerState::Online
+                                                   : EspNowPeerState::Connecting;
+}
+
+// The link's word for status output and JSON (`link`).
+constexpr const char* meshLinkName(MeshLink link) {
+  return link == MeshLink::TwoWay   ? "twoWay"
+         : link == MeshLink::OneWay ? "oneWay"
+                                    : "none";
 }
 
 // The state's word, as screens and documents print it.

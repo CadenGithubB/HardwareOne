@@ -13,7 +13,7 @@
 // =============================================================================
 //
 // The primitives (getMeshPeerHealth, getMeshPeerMeta, isMeshPeerAlive,
-// isMeshPeerRecentlyActive) live in System_ESPNow.h. They expose raw structs
+// meshPeerLinkOf) live in System_ESPNow.h. They expose raw structs
 // so callers that need fine-grained field access can still reach them.
 //
 // This namespace exists for the *compound* queries — the ones currently
@@ -37,9 +37,10 @@ namespace MeshPeers {
 
 // ----- Compound state queries ---------------------------------------------
 
-// True if the peer is active AND any RX activity (not just heartbeat) is
-// recent — useful for "have we heard anything from this MAC lately" checks
-// (e.g., relay candidate selection). Not the peer's online state.
+// True if the link to the peer is proven both ways (meshPeerLinkOf ==
+// TwoWay, ESP-NOW 1.0 step 8): it hears this device and this device hears it
+// directly (e.g., relay candidate selection). Not the peer's online state
+// (that also needs the session: espnowPeerState).
 bool isReachable(const uint8_t mac[6]);
 
 // True if the peer has an active metadata slot. Independent of health —

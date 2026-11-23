@@ -767,10 +767,16 @@ static bool v4_routed_type_allowed(uint8_t type);
 // Forward declarations for the send helpers (non-static for external linkage)
 bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl);
 // The periodic mesh HEARTBEAT to every active peer slot, with the per-peer
-// back-off (meshHeartbeatMinInterval).
-bool v4_broadcast_heartbeat(uint16_t flags, uint32_t msgId,
-                            const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
-                            int* outAttempted = nullptr);
+// back-off (meshHeartbeatMinInterval); returns the heartbeats handed over.
+static int meshSendHeartbeats(const V4PayloadHeartbeat& base);
+// True while v4h_relay_data delivers an unwrapped inner frame (its synthetic
+// radio source is the origin): such a frame proves nothing about the direct link.
+extern bool gEspNowInRelayDelivery;
+// The per-peer heartbeat fields (echo, our RSSI of the peer) and the record of
+// the heartbeat's msgId for the peer's echo; then the send, sealed when a
+// session with the peer is ACTIVE, else group-tagged (1.0 step 8).
+static void v4HeartbeatFor(V4PayloadHeartbeat& hb, const uint8_t* mac, uint32_t msgId);
+static bool v4SendHeartbeatTo(const uint8_t* mac, const V4PayloadHeartbeat& hb, uint32_t msgId, bool ackReq);
 // (There is no plaintext multi-frame send: smart is strict encrypt-or-fail.)
 //
 // Longest AEAD plaintext that fits one frame to `dst` (146 B routed, 202 B
@@ -2114,56 +2120,6 @@ static int gV4DedupIdx = 0;
 EXT_RAM_BSS_ATTR static V4DedupEntry gV4DedupPlain[V4_DEDUP_PLAIN_SIZE];
 static int gV4DedupPlainIdx = 0;
 
-// Broadcast ACK tracking. ~1.2 KB of internal DRAM (touched from RX ACK
-// processing), allocated in initEspNow so devices with ESP-NOW off never pay
-// for it. closeespnow stops the RX drainer and waits guarded broadcasters
-// before freeing it; every reader still null-guards for partial init/failure.
-static BroadcastTracker* gBroadcastTrackers = nullptr;
-static uint32_t gBroadcastsTracked = 0;
-static uint32_t gBroadcastsCompleted = 0;
-static uint32_t gBroadcastsTimedOut = 0;
-
-
-// Find tracker by msgId, return nullptr if not found
-static BroadcastTracker* broadcast_tracker_find(uint32_t msgId) {
-  if (!gBroadcastTrackers) return nullptr;
-  for (int i = 0; i < BROADCAST_TRACKER_SLOTS; i++) {
-    if (gBroadcastTrackers[i].active && gBroadcastTrackers[i].msgId == msgId) {
-      return &gBroadcastTrackers[i];
-    }
-  }
-  return nullptr;
-}
-
-// Find free tracker slot, return nullptr if all busy
-static BroadcastTracker* broadcast_tracker_alloc() {
-  if (!gBroadcastTrackers) return nullptr;
-  for (int i = 0; i < BROADCAST_TRACKER_SLOTS; i++) {
-    if (!gBroadcastTrackers[i].active) {
-      gBroadcastTrackers[i].reset();
-      return &gBroadcastTrackers[i];
-    }
-  }
-  return nullptr;
-}
-
-// Record ACK from a peer for a broadcast msgId
-static void broadcast_tracker_record_ack(uint32_t msgId, const uint8_t* peerMac) {
-  BroadcastTracker* tracker = broadcast_tracker_find(msgId);
-  if (!tracker) return;
-  
-  // Find peer in expected list and mark as received
-  for (int i = 0; i < tracker->expectedCount; i++) {
-    if (memcmp(tracker->peerMacs[i], peerMac, 6) == 0 && !tracker->ackReceived[i]) {
-      tracker->ackReceived[i] = true;
-      tracker->receivedCount++;
-      DEBUG_ESPNOWF("[BROADCAST_TRACK] ACK %u/%u for msgId=%lu",
-             tracker->receivedCount, tracker->expectedCount, (unsigned long)msgId);
-      return;
-    }
-  }
-}
-
 static uint16_t v4_crc16_ccitt(const uint8_t* data, size_t len) {
   uint16_t crc = 0xFFFF;
   for (size_t i = 0; i < len; i++) {
@@ -2847,54 +2803,6 @@ static void v4_dedup_flush_origin(const uint8_t* origin) {
   }
 }
 
-// Check broadcast trackers for timeouts and report results
-static void broadcast_tracker_check_timeouts() {
-  if (!gBroadcastTrackers) return;
-  uint32_t now = millis();
-  for (int i = 0; i < BROADCAST_TRACKER_SLOTS; i++) {
-    BroadcastTracker* t = &gBroadcastTrackers[i];
-    if (!t->active || t->reported) continue;
-    
-    bool timedOut = (now - t->startMs) > BROADCAST_TRACKER_TIMEOUT_MS;
-    bool allReceived = (t->receivedCount == t->expectedCount);
-    
-    if (timedOut || allReceived) {
-      // Report results (skip if no peers — 0/0 is noise)
-      if (t->expectedCount == 0) {
-        // Silent completion — no peers to report on
-        gBroadcastsCompleted++;
-      } else if (allReceived) {
-        uint32_t rttMs = (uint32_t)(now - t->startMs);
-        BROADCAST_PRINTF("[Broadcast] msgId=%lu: %u/%u peers ACK'd (100%%) in %lums",
-                        (unsigned long)t->msgId, t->receivedCount, t->expectedCount,
-                        (unsigned long)rttMs);
-        // Feed the saturation sampler: this is our cleanest source of ACK RTT
-        // observations (one per completed broadcast). Sensor-stream traffic is
-        // broadcast-shaped, so this directly tracks the stress-test workload.
-        espnowSaturationNoteAckRtt(rttMs);
-        gBroadcastsCompleted++;
-      } else {
-        BROADCAST_PRINTF("[Broadcast] msgId=%lu: %u/%u peers ACK'd (%.1f%%) - timed out",
-                        (unsigned long)t->msgId, t->receivedCount, t->expectedCount,
-                        (t->expectedCount > 0) ? (100.0f * t->receivedCount / t->expectedCount) : 0.0f);
-        gBroadcastsTimedOut++;
-        
-        // List non-responsive peers
-        for (int j = 0; j < t->expectedCount; j++) {
-          if (!t->ackReceived[j]) {
-            char macStr[18];
-            macToDisplay(t->peerMacs[j], macStr, sizeof(macStr));
-            BROADCAST_PRINTF("  No ACK: %s", macStr);
-          }
-        }
-      }
-      
-      t->reported = true;
-      t->active = false;  // Free slot
-    }
-  }
-}
-
 // ============================================================================
 // SEND-PATH MAP — "which send function do I call?"  (Updated 2026-05; smart
 // is now strict encrypt-or-fail, plaintext fallback removed everywhere.)
@@ -2913,7 +2821,7 @@ static void broadcast_tracker_check_timeouts() {
 //   * Single frame that must WAIT for a session (queue + kick SESSION_OPEN, drain
 //     on CONFIRM)                       -> v4_send_encrypted_or_queue()
 //                                       Now also kicks KEY_EX when no peer identity.
-//   * Mesh-wide fan-out                 -> v4_broadcast() / v4_broadcast_heartbeat()
+//   * Mesh-wide fan-out                 -> v4_broadcast() / meshSendHeartbeats()
 //                                       Per-peer plaintext with BROADCAST_AUTH HMAC
 //                                       (no per-peer session exists for FF:FF:...).
 //                                       Authentication, not confidentiality.
@@ -3059,39 +2967,58 @@ static bool v4_send_frame_ex(const uint8_t* dst, uint8_t type, uint16_t flags, u
 //   1. Broadcast address        → always direct. Flooding is the relay
 //                                 mechanism for broadcast traffic; wrapping it
 //                                 would defeat the point.
-//   2. Live direct radio peer   → direct. "Live" means recent RX activity, not
-//                                 merely "in the peer table" — a peer we paired
-//                                 with months ago and cannot currently hear is
-//                                 exactly the case routing exists to solve.
+//   2. Two-way direct peer      → direct. Two-way (meshPeerLinkOf, 1.0 step 8)
+//                                 means it was heard within 30 s AND it proved
+//                                 it hears us (a sealed ACK or heartbeat echo) —
+//                                 not merely "in the peer table", and not merely
+//                                 heard: a one-way peer may not hear us at all.
 //   3. Known route (>= 2 hops)  → wrap in RELAY_DATA, send to the next hop.
 //   4. Anything else            → direct, best effort. Covers the freshly
-//                                 paired peer we have no telemetry for yet; the
-//                                 radio will tell us soon enough.
+//                                 paired peer we have no telemetry for yet and
+//                                 a one-way peer with no route; the radio will
+//                                 tell us soon enough.
+// Every frame that asks an ACK and goes out direct is remembered for its
+// destination (v4_note_direct_send): only the ACK of such a frame proves the
+// direct link both ways.
 //
 // Step 2 before step 3 is deliberate and it is also the fail-BACK path: as soon
 // as a peer we had been relaying to becomes audible again, its hops == 1 route
 // reappears and traffic returns to the direct link on the very next send.
+// A frame that asks an ACK went out direct to `dst`: its ACK (sealed, received
+// direct) will be two-way evidence (System_ESPNow_LinkCore.h). Any sending
+// task; a lost or torn entry only costs one evidence (msgIds are random).
+static void v4_note_direct_send(const uint8_t* dst, const uint8_t* frame, size_t len) {
+  if (len < sizeof(EspNowV4Header)) return;
+  const EspNowV4Header* h = (const EspNowV4Header*)frame;
+  if (!(h->flags & ESPNOW_V4_FLAG_ACK_REQ)) return;
+  MeshPeerHealth* ph = getMeshPeerHealth(dst, false);
+  if (ph) meshLinkNoteDirectSend(ph->link, h->msgId);
+}
+
+static bool v4_radio_emit_direct(const uint8_t* dst, const uint8_t* frame, size_t len) {
+  if (esp_now_send(dst, frame, len) != ESP_OK) return false;
+  v4_note_direct_send(dst, frame, len);
+  return true;
+}
+
 static bool v4_radio_emit(const uint8_t* dst, const uint8_t* frame, size_t len, bool allowRoute) {
   EspNowRuntimeOpGuard runtimeOp;
   if (!runtimeOp.held()) return false;
   if (!dst || !frame || len == 0) return false;
 
   static const uint8_t kBcast[6] = { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF };
+  if (memcmp(dst, kBcast, 6) == 0) return esp_now_send(dst, frame, len) == ESP_OK;
   // A short buffer can't be a V4 frame, so it can't be wrapped either (the
   // envelope reads the inner msgId out of its header). Send it as-is.
-  if (!allowRoute || len < sizeof(EspNowV4Header) || memcmp(dst, kBcast, 6) == 0) {
-    return esp_now_send(dst, frame, len) == ESP_OK;
+  if (!allowRoute || len < sizeof(EspNowV4Header)) {
+    return v4_radio_emit_direct(dst, frame, len);
   }
 
-  // Only relay when we know we CANNOT reach the destination directly. Reading
-  // health here (rather than trusting esp_now_is_peer_exist alone) is what
-  // distinguishes "paired and audible" from "paired and out of range".
-  const MeshPeerHealth* ph = getMeshPeerHealth(dst, false);
-  const bool directAlive =
-      esp_now_is_peer_exist(dst) && ph && ph->isActive && ph->everHeardDirect &&
-      ((uint32_t)((uint32_t)millis() - ph->lastRxActivityMs) < MESH_PEER_TIMEOUT_MS);
-  if (directAlive) {
-    return esp_now_send(dst, frame, len) == ESP_OK;
+  // Direct only on a two-way link (the one definition, meshPeerLinkFor). A
+  // one-way peer (heard, but it may not hear us) takes a learned route when
+  // there is one, else the direct best effort below.
+  if (esp_now_is_peer_exist(dst) && meshPeerLinkFor(dst) == MeshLink::TwoWay) {
+    return v4_radio_emit_direct(dst, frame, len);
   }
 
   // Refuse to wrap an opcode that the far end would refuse to unwrap. Deciding
@@ -3101,7 +3028,7 @@ static bool v4_radio_emit(const uint8_t* dst, const uint8_t* frame, size_t len, 
   // direct, which is the honest thing: "I am your neighbour" is a claim that
   // must not survive a relay hop.
   if (!v4_routed_type_allowed(((const EspNowV4Header*)frame)->type)) {
-    return esp_now_send(dst, frame, len) == ESP_OK;
+    return v4_radio_emit_direct(dst, frame, len);
   }
 
   // Note: NOT gated on gSettings.meshRelay. That setting governs carrying OTHER
@@ -3127,7 +3054,7 @@ static bool v4_radio_emit(const uint8_t* dst, const uint8_t* frame, size_t len, 
     // the direct attempt so the failure is the radio's honest one, not ours.
   }
 
-  return esp_now_send(dst, frame, len) == ESP_OK;
+  return v4_radio_emit_direct(dst, frame, len);
 }
 
 // Build the RELAY_DATA envelope: {finalDst, hopsUsed} + the byte-identical
@@ -3425,8 +3352,9 @@ bool v4_send_encrypted_or_queue(const uint8_t dst[6], uint8_t type, uint16_t bas
 
 /**
  * Broadcast message to all mesh peers
- * Sends to each active peer individually (ESP-NOW doesn't support true broadcast)
- * If ESPNOW_V4_FLAG_ACK_REQ is set, tracks ACKs for delivery confirmation
+ * Sends to each active peer individually (ESP-NOW doesn't support true broadcast).
+ * A broadcast asks no ACK (1.0 step 8: the broadcast ACK tracking went; a tagged
+ * ACK proves nothing about which member answered), so ACK_REQ is never set.
  */
 bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
   EspNowRuntimeOpGuard runtimeOp;
@@ -3435,30 +3363,12 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
   
   bool anySuccess = false;
   int sentCount = 0;
-  BroadcastTracker* tracker = nullptr;
-  
-  // If ACK requested, allocate tracker
-  if (flags & ESPNOW_V4_FLAG_ACK_REQ) {
-    tracker = broadcast_tracker_alloc();
-    if (tracker) {
-      tracker->msgId = msgId;
-      tracker->startMs = millis();
-      tracker->expectedCount = 0;
-      tracker->receivedCount = 0;
-      tracker->active = true;
-      tracker->reported = false;
-      gBroadcastsTracked++;
-      DEBUG_ESPNOWF("[BROADCAST_TRACK] Allocated tracker for msgId=%lu", (unsigned long)msgId);
-    } else {
-      WARN_ESPNOWF("[BROADCAST_TRACK] No free tracker slots for msgId=%lu", (unsigned long)msgId);
-    }
-  }
-  
+
   // OR in BROADCAST_AUTH so v4_send_frame appends an
   // HMAC tag keyed by the mesh group key. Receivers verify; outsiders' forged
   // broadcasts drop silently on bad HMAC. Skipped at TX time per-peer if
   // their meshFingerprint is 0 or we don't hold a key for that mesh.
-  uint16_t flagsAuthed = (uint16_t)(flags | ESPNOW_V4_FLAG_BROADCAST_AUTH);
+  uint16_t flagsAuthed = (uint16_t)((flags & ~ESPNOW_V4_FLAG_ACK_REQ) | ESPNOW_V4_FLAG_BROADCAST_AUTH);
 
   // Send to all active mesh peers
   for (int i = 0; i < gMeshPeerSlots; i++) {
@@ -3472,80 +3382,41 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
       if (sent) {
         anySuccess = true;
         sentCount++;
-        
-        // Record peer in tracker if allocated
-        if (tracker && tracker->expectedCount < BROADCAST_TRACKER_MAX_PEERS) {
-          memcpy(tracker->peerMacs[tracker->expectedCount], gMeshPeers[i].mac, 6);
-          tracker->ackReceived[tracker->expectedCount] = false;
-          tracker->expectedCount++;
-        }
       }
     }
   }
   
-  DEBUG_ESPNOW_ROUTERF("[V4_BROADCAST] Sent to %d peers (msgId=%lu type=%u tracked=%s)",
-         sentCount, (unsigned long)msgId, type, tracker ? "YES" : "NO");
+  DEBUG_ESPNOW_ROUTERF("[V4_BROADCAST] Sent to %d peers (msgId=%lu type=%u)",
+         sentCount, (unsigned long)msgId, type);
 
   return anySuccess;
 }
 
-// Per-peer heartbeat backoff schedule. A peer we've stopped hearing from gets
-// heartbeats less and less often (ramping the 5 s base up toward 30 s) so a
-// long-gone peer stops eating airtime and log lines — WITHOUT slowing the
-// heartbeat to healthy peers, which stay at the full 5 s rate. `silentMs` is the
-// time since that peer's last mesh HEARTBEAT (seeded from slot birth for peers
-// we've never heard). Any received heartbeat resets it, so recovery is automatic
-// (a returning peer is back at full rate within one slow interval, <= 30 s).
-// Returns the minimum ms between heartbeats to this peer; 0 = full rate (no throttle).
-static uint32_t meshHeartbeatMinInterval(uint32_t silentMs) {
-  if (silentMs < MESH_PEER_TIMEOUT_MS) return 0;      // < 30 s: alive, or the grace window
-  if (silentMs < 2u * 60u * 1000u)     return 10000;  // 30 s – 2 min
-  if (silentMs < 5u * 60u * 1000u)     return 20000;  // 2 min – 5 min
-  return 30000;                                        // > 5 min
-}
-
-// The heartbeat fan-out: like v4_broadcast, plus the per-peer back-off above
-// and the count of peers a frame was attempted for.
-bool v4_broadcast_heartbeat(uint16_t flags, uint32_t msgId,
-                            const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
-                            int* outAttempted) {
-  const uint8_t type = ESPNOW_V4_TYPE_HEARTBEAT;
+// The heartbeat fan-out (1.0 step 8, DESIGN 4.2 and 4.4). One heartbeat per
+// active peer slot, never to a revoked device, each with its own msgId and the
+// per-peer fields patched in (v4HeartbeatFor: the echo of the peer's last
+// heartbeat and our RSSI of it). Sealed (async sendAead) when a session with
+// the peer is ACTIVE, group-tagged otherwise. No ACK_REQ: the sealed echo is
+// the two-way evidence (E9), which also takes away the two ACKs per heartbeat.
+// Per-peer back-off (meshHeartbeatMinInterval, System_ESPNow_LinkCore.h): full
+// rate (every 5 s tick) while the peer was heard within 30 s, then one every
+// 10 s at most (E8, ceiling 10 s: a board that cannot hear us still reaches
+// us often enough that one lost heartbeat keeps our view of it inside the
+// 30 s window). The back-off clock lives in the durable meta slot.
+static int meshSendHeartbeats(const V4PayloadHeartbeat& base) {
   EspNowRuntimeOpGuard runtimeOp;
-  if (!runtimeOp.held()) return false;
-  if (outAttempted) *outAttempted = 0;
-  if (!gEspNow || !gEspNow->initialized) return false;
+  if (!runtimeOp.held()) return 0;
+  if (!gEspNow || !gEspNow->initialized || !gMeshPeers) return 0;
 
   const uint32_t now = (uint32_t)millis();
-  bool anySuccess = false;
   int sentCount = 0;
   int skippedCount = 0;
-  int attemptedCount = 0;  // peers we actually called v4_send_frame on (vs absent/skipped)
-  BroadcastTracker* tracker = nullptr;
-
-  if (flags & ESPNOW_V4_FLAG_ACK_REQ) {
-    tracker = broadcast_tracker_alloc();
-    if (tracker) {
-      tracker->msgId = msgId;
-      tracker->startMs = now;
-      tracker->expectedCount = 0;
-      tracker->receivedCount = 0;
-      tracker->active = true;
-      tracker->reported = false;
-      gBroadcastsTracked++;
-    }
-  }
-
-  uint16_t flagsAuthed = (uint16_t)(flags | ESPNOW_V4_FLAG_BROADCAST_AUTH);
-
   for (int i = 0; i < gMeshPeerSlots; i++) {
     if (!gMeshPeers[i].isActive || isSelfMac(gMeshPeers[i].mac)) continue;
     if (espnowRevokedMac(gMeshPeers[i].mac)) continue;   // never a heartbeat to a revoked device
-    // Per-peer heartbeat backoff: throttle the periodic HEARTBEAT to peers we've
-    // long stopped hearing from (ramps 5 s -> 30 s); healthy peers (silent
-    // < 30 s -> interval 0) always get it. State lives in the durable meta slot
-    // because this peer's health slot is memset every 5 s tick while it's offline.
+    const uint8_t* mac = gMeshPeers[i].mac;
     {
-      MeshPeerMeta* hbMeta = getMeshPeerMeta(gMeshPeers[i].mac, false);
+      MeshPeerMeta* hbMeta = getMeshPeerMeta(mac, false);
       if (hbMeta) {
         uint32_t silent = hbMeta->hbLastHeardMs ? (now - hbMeta->hbLastHeardMs) : 0;
         uint32_t iv = meshHeartbeatMinInterval(silent);
@@ -3556,28 +3427,13 @@ bool v4_broadcast_heartbeat(uint16_t flags, uint32_t msgId,
         hbMeta->hbLastSentMs = now;
       }
     }
-    attemptedCount++;
-    // allowRoute=false — same reasoning as v4_broadcast: broadcast reach is the
-    // flood's job. (This path also carries HEARTBEAT, which must never travel
-    // beyond one hop under any circumstances.)
-    bool sent = v4_send_frame_ex(gMeshPeers[i].mac, type, flagsAuthed, msgId,
-                                 payload, payloadLen, ttl, /*allowRoute=*/false);
-    if (sent) {
-      anySuccess = true;
-      sentCount++;
-      if (tracker && tracker->expectedCount < BROADCAST_TRACKER_MAX_PEERS) {
-        memcpy(tracker->peerMacs[tracker->expectedCount], gMeshPeers[i].mac, 6);
-        tracker->ackReceived[tracker->expectedCount] = false;
-        tracker->expectedCount++;
-      }
-    }
+    V4PayloadHeartbeat hb = base;
+    const uint32_t msgId = generateMessageId();
+    v4HeartbeatFor(hb, mac, msgId);
+    if (v4SendHeartbeatTo(mac, hb, msgId, /*ackReq=*/false)) sentCount++;
   }
-
-  DEBUG_ESPNOW_ROUTERF(
-         "[V4_BROADCAST_HB] msgId=%lu sent=%d backed off=%d",
-         (unsigned long)msgId, sentCount, skippedCount);
-  if (outAttempted) *outAttempted = attemptedCount;
-  return anySuccess;
+  DEBUG_ESPNOW_ROUTERF("[V4_HB] sent=%d backed off=%d", sentCount, skippedCount);
+  return sentCount;
 }
 
 // Longest AEAD plaintext that still fits one frame to `dst`. A routed
@@ -4738,7 +4594,7 @@ static constexpr uint8_t V4_OPC_FLAG_REQ_SESSION_ENC   = 0x08;
 // A keyless device still accepts plaintext so a fleet can bootstrap; once a
 // passphrase is set, a plaintext frame for this opcode is a spoof — legitimate
 // senders seal (v4_send_payload_smart) or sign (v4_broadcast /
-// v4_broadcast_heartbeat, BROADCAST_AUTH) whenever a key exists.
+// meshSendHeartbeats, BROADCAST_AUTH) whenever a key exists.
 static constexpr uint8_t V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED = 0x10;
 
 // The row's payload length must equal minLen (not only reach it): the six
@@ -4842,10 +4698,7 @@ static V4Verdict v4h_text(const V4RxCtx& ctx) {
       // old ENCRYPTED header bit 0x0002, never set and removed at 1.0, so the
       // web UI's message bubble always showed "not encrypted".)
       slot.encrypted = ctx.isSessionEncrypted;
-      // A frame that arrived under the dedicated BOOT type is a device/system
-      // notice, not chat — tag it so the drain stores MSG_SYSTEM_EVENT, as a
-      // readable line rather than the JSON (same class as the metadata snapshot).
-      slot.msgType = (ctx.h->type == ESPNOW_V4_TYPE_BOOT) ? MSG_SYSTEM_EVENT : MSG_TEXT;
+      slot.msgType = MSG_TEXT;
       // Carry the fragment tags so the drain can store this piece as its own
       // record. Single-frame text has fragCount==1 → stored as piece 1/1.
       slot.msgId     = ctx.h->msgId;
@@ -4855,10 +4708,6 @@ static V4Verdict v4h_text(const V4RxCtx& ctx) {
       gEspNow->textQueueHead = nextHead;
       DEBUG_ESPNOW_ROUTERF("[V4_RX] TEXT message enqueued slot=%d (encrypted=%s authenticated=%s)",
              head, slot.encrypted ? "YES" : "NO", slot.authenticated ? "YES" : "NO");
-      if (ctx.isPaired && meshEnabled()) {
-        noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::RxActivity, -128,
-                               ctx.recv_info->rx_ctrl ? ctx.recv_info->rx_ctrl->rssi : (int8_t)-128);
-      }
     } else {
       // Full ring: not taken. Answered busy (1.0 step 5b; the sender no longer
       // shows Delivered), and not remembered, so a retry is processed again.
@@ -4872,51 +4721,6 @@ static V4Verdict v4h_text(const V4RxCtx& ctx) {
   }
   DEBUG_ESPNOW_ROUTERF("[V4_RX] ========================================");
   return ctx.accepted();
-}
-
-// The boot counter of a BOOT notice (the JSON envelope buildBootNotification
-// makes: "type":"BOOT", pld.boot). Bounded parse of the received bytes; false
-// when it is not a well-formed BOOT notice with a counter.
-static bool bootNoticeCounter(const uint8_t* payload, uint16_t len, uint32_t* out) {
-  if (!payload || len == 0 || !out) return false;
-  PSRAM_JSON_DOC(doc);
-  if (deserializeJson(doc, reinterpret_cast<const char*>(payload), len)) return false;
-  JsonVariantConst type = doc["type"];
-  if (!type.is<const char*>() || strcmp(type.as<const char*>(), MSG_TYPE_BOOT) != 0) return false;
-  JsonVariantConst boot = doc["pld"]["boot"];
-  if (!boot.is<uint32_t>()) return false;
-  *out = boot.as<uint32_t>();
-  return true;
-}
-
-// BOOT — a paired peer started. If this device still holds a session with it,
-// that session is stale (sessions live in RAM): it ends now, so the next send
-// re-handshakes instead of sealing frames the peer cannot open (bench
-// 2026-11-18). Rules: System_ESPNow_PeerRestartCore.h. Only a frame that proved
-// a key counts, and only from the peer itself (the notice is sent link-local,
-// ttl 1):
-//   - group-signed (how a device that holds no session with us sends it): it
-//     counts only under the group tag of the peer's own mesh, and then the
-//     session rule decides (sessionPeerBootNotice). A counter already seen or
-//     an older one is a copy (a signed frame can be captured and played again
-//     by anyone in range): it is not filed again (peerBootNoticeFiled);
-//   - sealed in the session: the session works (the peer reopened ESP-NOW and
-//     kept its sessions, or an older firmware opened a new one to send it), so
-//     nothing ends; its counter becomes the reference (sessionPeerBootSeen).
-// Then filed like before (v4h_text).
-static V4Verdict v4h_boot(const V4RxCtx& ctx) {
-  if (ctx.isAuthenticated && memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) == 0 &&
-      peerRestartSignalScoped(ctx.isSessionEncrypted, ctx.h->meshFingerprint,
-                              fingerprintForPeer(ctx.h->origin))) {
-    uint32_t boot = 0;
-    const bool hasCounter = bootNoticeCounter(ctx.payload, ctx.payloadLen, &boot);
-    if (ctx.isSessionEncrypted) {
-      if (hasCounter) sessionPeerBootSeen(ctx.h->origin, boot);
-    } else if (!peerBootNoticeFiled(sessionPeerBootNotice(ctx.h->origin, hasCounter, boot))) {
-      return ctx.refuse();
-    }
-  }
-  return v4h_text(ctx);
 }
 
 // SESSION_UNKNOWN — the peer could not open a sealed frame of ours: it has no
@@ -5057,10 +4861,11 @@ static int8_t heartbeatStaRssi() {
   return (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) ? ap.rssi : (int8_t)-127;
 }
 
-// The one HEARTBEAT builder: every sender (the periodic broadcast, the
-// master's unicast to its backup, the pairing seeds and the app ping) sends
-// a full 44-byte payload, so none falls under the row's minimum. peerCount is
-// left 0; the periodic sender sets it.
+// The one HEARTBEAT builder: every sender (the periodic fan-out, the
+// master's unicast to its backup, the pairing seeds, the channel-follow probe
+// and answer, and the app ping) sends a full 56-byte payload, so none falls
+// under the row's minimum. peerCount is left 0; the periodic sender sets it.
+// The per-peer fields (echoMsgId, linkRssi) are patched by v4HeartbeatFor.
 static void v4FillHeartbeat(V4PayloadHeartbeat& hb) {
   memset(&hb, 0, sizeof(hb));
   hb.role      = gSettings.meshRole;
@@ -5071,6 +4876,36 @@ static void v4FillHeartbeat(V4PayloadHeartbeat& hb) {
   // channel (or a sweep dwell), never an RPC per heartbeat.
   hb.chanInfo  = espnowfollow::packChanInfo(gEspNow ? gEspNow->channel : 0, false, false);
   devicename::putField(hb.deviceName, gSettings.espnowDeviceName.c_str());
+  // The persisted boot counter: a peer that sees a newer one ends the stale
+  // session it holds with us (System_ESPNow_PeerRestartCore.h; was BOOT 31).
+  hb.bootCounter = gBootCounter;
+}
+
+// Patch the per-peer fields of a heartbeat to `mac` and remember its msgId:
+// the peer echoes it back in its next sealed heartbeat (two-way evidence,
+// System_ESPNow_LinkCore.h). espnow_task (the slot owner).
+static void v4HeartbeatFor(V4PayloadHeartbeat& hb, const uint8_t* mac, uint32_t msgId) {
+  hb.echoMsgId = 0;
+  hb.linkRssi = 0;
+  MeshPeerHealth* ph = getMeshPeerHealth(mac, false);
+  if (!ph) return;
+  const uint32_t now = (uint32_t)millis();
+  hb.echoMsgId = meshLinkEchoFor(ph->link, now);
+  hb.linkRssi = meshLinkRssiFor(ph->link, now);
+  meshLinkNoteHeartbeatSent(ph->link, msgId, now);
+}
+
+// One heartbeat to `mac`: sealed (async sendAead, safe from espnow_task) when a
+// session with it is ACTIVE, else group-tagged, ttl 1, never routed. Only the
+// channel-follow probe, the pairing seed and the app ping ask an ACK.
+static bool v4SendHeartbeatTo(const uint8_t* mac, const V4PayloadHeartbeat& hb, uint32_t msgId, bool ackReq) {
+  const uint16_t ack = ackReq ? (uint16_t)ESPNOW_V4_FLAG_ACK_REQ : (uint16_t)0;
+  if (espnowSessionUp(mac)) {
+    return espnowtx::sendAead(mac, ESPNOW_V4_TYPE_HEARTBEAT, ack, msgId,
+                              (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
+  }
+  return v4_send_frame_ex(mac, ESPNOW_V4_TYPE_HEARTBEAT, (uint16_t)(ack | ESPNOW_V4_FLAG_BROADCAST_AUTH), msgId,
+                          (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1, /*allowRoute=*/false);
 }
 
 // Master: answer a hunting worker's probe at once (channel follow):
@@ -5105,13 +4940,9 @@ static void espnowChFollowAnswerProbe(const uint8_t* dst) {
   V4PayloadHeartbeat hb;
   v4FillHeartbeat(hb);
   hb.chanInfo = espnowfollow::packChanInfo(gEspNow->channel, /*probe=*/false, /*answer=*/true);
-  if (espnowSessionUp(dst)) {
-    espnowtx::sendAead(dst, ESPNOW_V4_TYPE_HEARTBEAT, 0, generateMessageId(),
-                       (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
-  } else {
-    v4_send_frame_ex(dst, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_BROADCAST_AUTH, generateMessageId(),
-                     (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1, /*allowRoute=*/false);
-  }
+  const uint32_t msgId = generateMessageId();
+  v4HeartbeatFor(hb, dst, msgId);
+  (void)v4SendHeartbeatTo(dst, hb, msgId, /*ackReq=*/false);
 }
 
 // Channel follow, from v4h_heartbeat (System_ESPNow_ChannelFollowCore.h).
@@ -5138,6 +4969,41 @@ static void espnowChFollowOnHeartbeat(const V4RxCtx& ctx, const V4PayloadHeartbe
   }
 }
 
+// A paired peer restarted while this device ran (its heartbeat's boot
+// counter moved forward): one readable record in its history and one console
+// line (this replaced the BOOT notice's "Online (boot #N)" record). Not chat:
+// MSG_SYSTEM_EVENT, no group id. espnow_task.
+static void espnowFilePeerRestart(const uint8_t* mac, uint32_t bootCounter, bool encrypted) {
+  String name = getEspNowDeviceName(mac);
+  char who[40];
+  if (name.length() > 0) strlcpy(who, name.c_str(), sizeof(who));
+  else macToDisplay(mac, who, sizeof(who));
+  char text[40];
+  snprintf(text, sizeof(text), "Online (boot #%lu)", (unsigned long)bootCounter);
+  uint8_t peer[6];
+  memcpy(peer, mac, 6);
+  (void)storeMessageInPeerHistory(peer, who, text, encrypted, MSG_SYSTEM_EVENT, 0, 1, 1,
+                                  HistoryAttribution::Attributed);
+  BROADCAST_PRINTF("[ESP-NOW] %s is online (boot #%lu)", who, (unsigned long)bootCounter);
+}
+
+// RC3 (1.0 step 8, System_ESPNow_LinkCore.h): a heartbeat from `mac` that
+// proved its sender and came straight from it. Remember its msgId (our next
+// heartbeat echoes it) and our RSSI of it; a SEALED one whose echo names one
+// of our last two heartbeats to it within 30 s is two-way evidence. A tagged
+// echo is not (any holder of the group key can forge origin = B).
+static void meshLinkOnHeartbeat(const uint8_t* mac, uint32_t msgId, int8_t frameRssi,
+                                const V4PayloadHeartbeat& hb, bool sealed) {
+  MeshPeerHealth* ph = getMeshPeerHealth(mac, false);
+  if (!ph) return;
+  const uint32_t now = (uint32_t)millis();
+  meshLinkNoteHeartbeatHeard(ph->link, msgId, frameRssi == (int8_t)-128 ? (int8_t)0 : frameRssi,
+                             hb.linkRssi, now);
+  if (sealed && meshLinkEchoMatches(ph->link, hb.echoMsgId, now)) {
+    (void)meshLinkNoteTwoWay(ph->link, hb.echoMsgId, ph->lastRxActivityMs, now);
+  }
+}
+
 static V4Verdict v4h_heartbeat(const V4RxCtx& ctx) {
   V4PayloadHeartbeat hb;
   ctx.read(hb);
@@ -5152,11 +5018,39 @@ static V4Verdict v4h_heartbeat(const V4RxCtx& ctx) {
   // MACs of real mesh members and cannot fill the tables with invented ones.
   const bool senderProven = ctx.isSessionEncrypted ||
       (ctx.isAuthenticated && memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) == 0);
-  noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::MeshHeartbeat, hb.rssi,
-                         ctx.recv_info->rx_ctrl ? ctx.recv_info->rx_ctrl->rssi : (int8_t)-128,
+  // Straight from its sender: not a relay delivery (whose synthetic source is
+  // the origin), origin == radio source.
+  const bool direct = !gEspNowInRelayDelivery && memcmp(ctx.h->origin, ctx.recv_info->src_addr, 6) == 0;
+  const int8_t frameRssi = ctx.recv_info->rx_ctrl ? (int8_t)ctx.recv_info->rx_ctrl->rssi : (int8_t)-128;
+  noteMeshPeerRxActivity(ctx.recv_info->src_addr, EspNowMeshRxKind::MeshHeartbeat, hb.rssi, frameRssi,
                          senderProven);
+  if (senderProven && direct) {
+    meshLinkOnHeartbeat(ctx.recv_info->src_addr, ctx.h->msgId, frameRssi, hb, ctx.isSessionEncrypted);
+  }
   if (gEspNow) gEspNow->heartbeatsReceived++;
   espnowChFollowOnHeartbeat(ctx, hb, senderProven);  // channel follow: probe answer, master liveness
+
+  // Restart detection (System_ESPNow_PeerRestartCore.h; replaced BOOT 31). Only
+  // from the peer itself, under the group tag of its own mesh or sealed in its
+  // session:
+  //   - sealed: the session works, nothing ends; the counter becomes the
+  //     reference (sessionPeerBootSeen);
+  //   - group-tagged: a counter newer than the one known ends the stale
+  //     session this device holds (sessionPeerBootCounter). A copy (the counter
+  //     already seen or older; anyone in range can replay a tagged heartbeat)
+  //     ends nothing and is not recorded.
+  // A known counter that moved forward is filed once as "Online (boot #N)".
+  if (ctx.isAuthenticated && direct &&
+      peerRestartSignalScoped(ctx.isSessionEncrypted, ctx.h->meshFingerprint,
+                              fingerprintForPeer(ctx.h->origin))) {
+    bool restarted = false;
+    if (ctx.isSessionEncrypted) {
+      restarted = sessionPeerBootSeen(ctx.h->origin, hb.bootCounter);
+    } else {
+      (void)sessionPeerBootCounter(ctx.h->origin, hb.bootCounter, &restarted);
+    }
+    if (restarted) espnowFilePeerRestart(ctx.h->origin, hb.bootCounter, ctx.isSessionEncrypted);
+  }
 
   // Proactive session pre-warm. If this heartbeat is from a peer we've ALREADY
   // paired with (a long-term identity exists) and we don't yet have an ACTIVE
@@ -5957,8 +5851,8 @@ static V4Verdict v4h_bond_heartbeat(const V4RxCtx& ctx) {
 
   gEspNow->bondPeerBootCounter = hb.bootCounter;
   // Seen inside the live session: the partner's boot counter becomes the
-  // reference its next BOOT notice is compared with (recorded only; a
-  // heartbeat never ends a session). System_ESPNow_PeerRestartCore.h.
+  // reference its next tagged mesh heartbeat is compared with (recorded only;
+  // a sealed heartbeat never ends a session). System_ESPNow_PeerRestartCore.h.
   sessionPeerBootSeen(ctx.recv_info->src_addr, hb.bootCounter);
   gEspNow->bondPeerSettingsHash = hb.settingsHash;
   gEspNow->bondPeerUptime = hb.uptimeSec;
@@ -7974,7 +7868,6 @@ static bool v4_routed_type_allowed(uint8_t type) {
     case ESPNOW_V4_TYPE_SESSION_OPEN:
     case ESPNOW_V4_TYPE_SESSION_CONFIRM:
     case ESPNOW_V4_TYPE_SESSION_REKEY:
-    case ESPNOW_V4_TYPE_BOOT:
     case ESPNOW_V4_TYPE_TIME_SYNC:
     case ESPNOW_V4_TYPE_CMD:
     case ESPNOW_V4_TYPE_CMD_RESP:
@@ -8913,16 +8806,15 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // whether that sender is the master named here and whether this device has
   // a better source. Not bond-gated: mesh time is a paired-mesh feature.
   { ESPNOW_V4_TYPE_TIME_SYNC,        V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_TIME_SYNC, v4hTimeSync           },
-  // TEXT/BOOT: every legitimate sender seals (v4_send_text → v4_send_payload_smart,
-  // encrypt-or-fail) or signs (v4_broadcast_text, meshSendBootToPeers →
-  // BROADCAST_AUTH) once a mesh key exists, so a plaintext frame on a keyed
+  // TEXT: every legitimate sender seals (v4_send_text → v4_send_payload_smart,
+  // encrypt-or-fail) or signs (v4_broadcast_text → BROADCAST_AUTH) once a mesh
+  // key exists, so a plaintext frame on a keyed
   // device is a spoof: it can carry any origin MAC behind a non-secret CRC16.
   // Plaintext stays accepted only
   // while this device has no passphrase; v4h_text then files it under the MAC,
   // not a registry name, and the drain posts no text_rx event for it. No
   // REQ_PAIRED: flooded broadcasts and 2-hop members are unpaired senders.
   { ESPNOW_V4_TYPE_TEXT,             V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED, ESPNOW_V4_MINLEN_TEXT, v4h_text              },
-  { ESPNOW_V4_TYPE_BOOT,             V4_OPC_FLAG_REQ_AUTH_WHEN_KEYED, ESPNOW_V4_MINLEN_BOOT, v4h_boot              },  // boot/online notice: ends a stale session, then v4h_text tags it MSG_SYSTEM_EVENT
   // Multi-hop transport. Both carry the mesh group-key HMAC and NOTHING else —
   // REQ_AUTHENTICATED is the whole trust check, and it is the right one: holding
   // the group key is exactly what "member of this mesh" means. NOT REQ_PAIRED,
@@ -8935,11 +8827,12 @@ static const V4OpcodeEntry kV4HandlerTable[] = {
   // enforce that confidentiality/integrity invariant on receive as well.
   { ESPNOW_V4_TYPE_CMD,              V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_CMD, v4h_cmd               },
   { ESPNOW_V4_TYPE_CMD_RESP,         V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_SESSION_ENC, ESPNOW_V4_MINLEN_CMD_RESP, v4h_cmd_resp          },
-  // HEARTBEAT records liveness that routing reads (v4_radio_emit) and that the
+  // HEARTBEAT records liveness that routing reads (meshPeerLinkOf) and that the
   // online/offline events are built on. Every sender signs or seals it once a
-  // mesh key exists: the periodic one goes through v4_broadcast_heartbeat
-  // (BROADCAST_AUTH), the master-to-backup, pairing-seed and app-ping ones
-  // through v4_send_payload_smart (session frame, never plaintext). So on a
+  // mesh key exists: the periodic one (meshSendHeartbeats) is sealed when the
+  // session is ACTIVE and group-tagged otherwise, the master-to-backup,
+  // pairing-seed and app-ping ones go through v4_send_payload_smart (session
+  // frame, never plaintext). Only a sealed one can be two-way evidence. So on a
   // keyed device a plaintext heartbeat is a spoof; a keyless device still takes
   // it, and v4h_heartbeat then creates no slot for a MAC that is not paired.
   // The gate proves a key, not the radio source: v4h_heartbeat checks the
@@ -9353,11 +9246,20 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
                                        bool isPaired, bool isAuthenticated,
                                        bool isSessionEncrypted, const char* deviceName) {
   // An authenticated frame sent straight from its origin shows that peer is on
-  // the air: it ends the peer's handshake back-off if the peer had been quiet.
-  // (A relayed frame says nothing about the origin's own radio.)
+  // the air: it ends the peer's handshake back-off if the peer had been quiet,
+  // and it is one-way liveness (the heard clock of System_ESPNow_LinkCore.h;
+  // the heartbeat handler records its own kind). A relayed frame says nothing
+  // about the origin's own radio (noteMeshPeerRxActivity drops it). Only a
+  // sealed frame may create a slot here; a tagged one (a pairing beacon of a
+  // stranger in the same mesh) refreshes an existing slot only.
   if ((isSessionEncrypted || isAuthenticated) &&
       memcmp(h->origin, recv_info->src_addr, 6) == 0) {
     espnowHandshakeHeard(recv_info->src_addr);
+    if (h->type != ESPNOW_V4_TYPE_HEARTBEAT) {
+      noteMeshPeerRxActivity(recv_info->src_addr, EspNowMeshRxKind::RxActivity, -128,
+                             recv_info->rx_ctrl ? (int8_t)recv_info->rx_ctrl->rssi : (int8_t)-128,
+                             /*senderProven=*/isSessionEncrypted);
+    }
   }
   const V4OpcodeEntry* e = v4_dispatch_lookup(h->type);
   if (!e) {
@@ -9523,12 +9425,14 @@ static V4Verdict v4_dispatch_table_try(const esp_now_recv_info* recv_info, const
 //     expects (a sealed send: a sealed ACK from that peer's session);
 //   - tracked single sends (sendStatus*) and the app ping are sealed sends:
 //     sealed ACKs only;
-//   - broadcast ACK tracking and the channel-follow probe are group-tagged
-//     sends: tagged ACKs only.
+//   - the channel-follow probe is a group-tagged send: tagged ACKs only.
 // A tagged ACK proves mesh membership, not which member sent it, so it must at
 // least come from the device it names as its origin. That binds a direct ACK
 // to its radio address only; a relayed one (gEspNowInRelayDelivery) always
-// passes, so it feeds no broadcast tracking.
+// passes, so it proves nothing about a link.
+// RC3 (1.0 step 8): a SEALED ACK received direct (not relayed) for one of our
+// frames that went out direct is two-way evidence for the peer (any status: a
+// busy peer is reachable). A tagged or relayed ACK never is.
 static void v4_rx_ack(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
                       const uint8_t* payload, uint16_t payloadLen, bool sealed) {
   if (payloadLen != sizeof(V4PayloadAck)) {
@@ -9547,7 +9451,13 @@ static void v4_rx_ack(const esp_now_recv_info* recv_info, const EspNowV4Header* 
                 (unsigned)a.fragIndex + 1, (unsigned)a.fragCount, (unsigned)a.status);
 
   noteMeshPeerRxActivity(peer, EspNowMeshRxKind::Ack, -128,
-                         recv_info->rx_ctrl ? recv_info->rx_ctrl->rssi : (int8_t)-128);
+                         recv_info->rx_ctrl ? recv_info->rx_ctrl->rssi : (int8_t)-128, /*senderProven=*/sealed);
+  if (sealed && !gEspNowInRelayDelivery) {
+    MeshPeerHealth* ph = getMeshPeerHealth(peer, false);
+    if (ph && meshLinkSentDirect(ph->link, a.ackFor)) {
+      (void)meshLinkNoteTwoWay(ph->link, a.ackFor, ph->lastRxActivityMs, (uint32_t)millis());
+    }
+  }
 
   if (sealed) {
     // Tracked sends (web chat bubble, power/forward status) are all sealed.
@@ -9560,12 +9470,6 @@ static void v4_rx_ack(const esp_now_recv_info* recv_info, const EspNowV4Header* 
     // refused (1.0 step 6). Only the last fragment's ACK means the whole
     // message was taken.
     remoteCmdOnAck(peer, a.ackFor, a.status, a.fragIndex + 1 >= a.fragCount);
-  } else if (!gEspNowInRelayDelivery) {
-    // Broadcast ACK tracking takes direct tagged ACKs only. A relayed one
-    // always passes the origin check above (the relay delivery sets the radio
-    // source to the inner origin), and a tag proves only mesh membership, so
-    // any member could name another one through a relay.
-    broadcast_tracker_record_ack(a.ackFor, peer);
   }
 
   // Fragment waiters. Same lock as the sender's alloc/free (v4_frag_ack_alloc)
@@ -9584,6 +9488,9 @@ static void v4_rx_ack(const esp_now_recv_info* recv_info, const EspNowV4Header* 
       w.status = a.status;
       w.acked = true;
       matched = true;
+      // The link-pressure sampler's ACK round trip (it was fed by the
+      // broadcast ACK tracking, removed in 1.0 step 8).
+      espnowSaturationNoteAckRtt((uint32_t)millis() - w.sentMs);
       break;
     }
   }
@@ -13417,9 +13324,8 @@ void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hb
   // Everything this function records is LINK telemetry — "I can hear this node,
   // this well, this recently". A frame that reached us through a relay proves
   // none of that about its originator, so counting it here would be a lie with
-  // teeth: v4_radio_emit reads lastRxActivityMs to decide direct-vs-routed, and
-  // one relayed frame marking a far peer "directly audible" would send every
-  // subsequent message to it straight into the void until the entry aged out.
+  // teeth: the link (meshPeerLinkOf) reads lastRxActivityMs, and one relayed
+  // frame marking a far peer "directly audible" would hide that it is not.
   // (Heartbeats are ttl=1 and never relayed, so heartbeat-based aliveness and
   // the online/offline events built on it are untouched by this.)
   if (gEspNowInRelayDelivery) return;
@@ -13455,29 +13361,23 @@ void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hb
       peer->linkRssiEwma = (int16_t)(peer->linkRssiEwma + step);
     }
   }
-  // Every kind below except BootstrapLiveness describes a frame that really
-  // arrived over the air; that is what everHeardDirect records.
+  // Every kind is the heard clock (one-way evidence, System_ESPNow_LinkCore.h).
+  // Two-way evidence is recorded by the ACK and heartbeat handlers.
   switch (kind) {
     case EspNowMeshRxKind::MeshHeartbeat:
       peer->lastMeshHeartbeatMs = t;
       peer->lastRxActivityMs = t;
       peer->heartbeatCount++;
-      peer->everHeardDirect = true;
       if (hbRssi != (int8_t)-128) peer->rssi = hbRssi;
       break;
     case EspNowMeshRxKind::Ack:
-      peer->lastAckMs = t;
-      peer->lastRxActivityMs = t;
-      peer->ackCount++;
-      peer->everHeardDirect = true;
-      break;
     case EspNowMeshRxKind::RxActivity:
       peer->lastRxActivityMs = t;
-      peer->everHeardDirect = true;
       break;
     case EspNowMeshRxKind::BootstrapLiveness:
-      // Deliberately does NOT set everHeardDirect — this kind is the pairing
-      // seed, a claim about the future rather than a report of the past.
+      // The pairing seed: heard only (DESIGN 4.1). It gets the peer into the
+      // heartbeat fan-out; it is never two-way evidence, so no direct route
+      // or "online" follows from it.
       peer->lastMeshHeartbeatMs = t;
       peer->lastRxActivityMs = t;
       break;
@@ -13486,8 +13386,8 @@ void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hb
   }
   peer->isActive = true;
   // Mirror positive HEARTBEAT contact into the durable meta slot so per-peer
-  // heartbeat backoff resets to full rate on contact. The health slot above is
-  // memset on every 5 s bootstrap for an offline peer, so it can't carry this.
+  // heartbeat backoff resets to full rate on contact. The health slot of an
+  // unpaired member is given up when it goes silent, so it can't carry this.
   if (kind == EspNowMeshRxKind::MeshHeartbeat ||
       kind == EspNowMeshRxKind::BootstrapLiveness) {
     MeshPeerMeta* m = getMeshPeerMeta(mac, false);
@@ -13495,18 +13395,20 @@ void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hb
   }
 }
 
-// Check if a mesh peer is considered alive (mesh HEARTBEAT within timeout window)
-bool isMeshPeerAlive(const MeshPeerHealth* peer) {
-  if (!peer || !peer->isActive) return false;
-  if (peer->lastMeshHeartbeatMs == 0) return false;
-  return (millis() - peer->lastMeshHeartbeatMs) < MESH_PEER_TIMEOUT_MS;
+// The one link definition (DESIGN 4.3): the router, the radio chokepoint, the
+// peer state and meshstatus all read it.
+MeshLink meshPeerLinkOf(const MeshPeerHealth* peer) {
+  if (!peer || !peer->isActive) return MeshLink::None;
+  return meshLinkOf(peer->link, peer->lastRxActivityMs, (uint32_t)millis());
 }
 
-// Recent contact via any tracked RX (TEXT, ACK, HEARTBEAT, bootstrap)
-bool isMeshPeerRecentlyActive(const MeshPeerHealth* peer) {
-  if (!peer || !peer->isActive) return false;
-  if (peer->lastRxActivityMs == 0) return false;
-  return (millis() - peer->lastRxActivityMs) < MESH_PEER_TIMEOUT_MS;
+MeshLink meshPeerLinkFor(const uint8_t mac[6]) {
+  return meshPeerLinkOf(getMeshPeerHealth(mac, false));
+}
+
+// Heard within 30 s (any direct sealed or tagged frame, or the pairing seed).
+bool isMeshPeerAlive(const MeshPeerHealth* peer) {
+  return meshPeerLinkOf(peer) != MeshLink::None;
 }
 
 // Get device display name for a MAC (from runtime meta, then paired registry)
@@ -13603,6 +13505,9 @@ static void fillMeshStatusPeerJsonObject(JsonObject peer, uint32_t now, const ui
     String resolved = getEspNowDeviceName(mac);
     peer["name"] = resolved.length() ? resolved : String("Unknown");
   }
+  // RC3 (1.0 step 8): the peer state every surface shows, the link behind it
+  // and the age of the last two-way evidence replace lastAck / ackCount.
+  peer["state"] = espnowPeerStateName(espnowPeerState(mac));
   if (ph) {
     uint32_t elHb = now - ph->lastMeshHeartbeatMs;
     if (elHb > 0x80000000UL) elHb = 0;
@@ -13611,28 +13516,35 @@ static void fillMeshStatusPeerJsonObject(JsonObject peer, uint32_t now, const ui
       elAct = now - ph->lastRxActivityMs;
       if (elAct > 0x80000000UL) elAct = 0;
     }
-    peer["alive"] = isMeshPeerAlive(ph);
-    peer["activityAlive"] = isMeshPeerRecentlyActive(ph);
+    const MeshLink link = meshPeerLinkOf(ph);
+    peer["alive"] = link != MeshLink::None;
+    peer["link"] = meshLinkName(link);
+    if (ph->link.lastTwoWayMs) {
+      uint32_t elTwo = now - ph->link.lastTwoWayMs;
+      if (elTwo > 0x80000000UL) elTwo = 0;
+      peer["lastTwoWayAgeMs"] = elTwo;
+    } else {
+      peer["lastTwoWayAgeMs"] = nullptr;
+    }
     peer["lastHeartbeat"] = ph->lastMeshHeartbeatMs;
     peer["lastRxActivity"] = ph->lastRxActivityMs;
-    peer["lastAck"] = ph->lastAckMs;
     peer["heartbeatCount"] = ph->heartbeatCount;
-    peer["ackCount"] = ph->ackCount;
     peer["secondsSinceHeartbeat"] = elHb / 1000;
     peer["secondsSinceActivity"] = ph->lastRxActivityMs ? (elAct / 1000) : 0;
     // Quarter-dB fixed point -> whole dBm, round half away from zero.
     peer["linkRssi"] = (int)((ph->linkRssiEwma + (ph->linkRssiEwma >= 0 ? 2 : -2)) / 4);
+    peer["peerHeardRssi"] = (int)ph->link.peerHeardRssi;
   } else {
     peer["alive"] = false;
-    peer["activityAlive"] = false;
+    peer["link"] = meshLinkName(MeshLink::None);
+    peer["lastTwoWayAgeMs"] = nullptr;
     peer["lastHeartbeat"] = 0;
     peer["lastRxActivity"] = 0;
-    peer["lastAck"] = 0;
     peer["heartbeatCount"] = 0;
-    peer["ackCount"] = 0;
     peer["secondsSinceHeartbeat"] = 0;
     peer["secondsSinceActivity"] = 0;
     peer["linkRssi"] = 0;
+    peer["peerHeardRssi"] = 0;
   }
 }
 
@@ -13709,94 +13621,6 @@ void v2_init_envelope(JsonDocument& doc, const char* type, uint32_t msgId,
   doc["src"]  = src ? src : "";
   if (dst && dst[0]) doc["dst"] = dst;
   if (ttl >= 0)      doc["ttl"] = ttl;
-}
-
-// Boot/online notice — its OWN V4 type so the receiver files it as a system
-// event (MSG_SYSTEM_EVENT), not a chat bubble. (It used to ride
-// ESPNOW_V4_TYPE_TEXT, so every reboot showed up as a chat message on peers.)
-//
-// Group-signed (BROADCAST_AUTH, ttl 1) to each paired peer this device holds
-// no live session with, since 2026-11-18, no longer sealed: a device that just
-// started has no sessions, and a sealed notice had to open one first, so a
-// peer that still held the session from before the restart kept sealing into
-// it until its sends timed out (bench 2026-11-18). Signed, it arrives at once
-// and that peer ends the stale session (v4h_boot,
-// System_ESPNow_PeerRestartCore.h). Signed is authenticated, not encrypted:
-// anyone in range reads the name, boot counter and time it holds (the
-// group-signed mesh heartbeat already shows the name and uptime; the boot
-// counter is new on the air).
-// Sealed as before (bootNoticeSendMode) to a peer this device still holds a
-// live session with (ESP-NOW was closed and opened again: the sessions stayed
-// in RAM and the peer's is good, so the notice must not end it), and when no
-// group key for the peer's mesh is held yet (a signed frame would go out
-// plaintext and be refused) or the envelope does not fit a signed frame.
-void meshSendBootToPeers(const String& envelope) {
-  if (!gEspNow || !gEspNow->initialized || !gMeshPeers) return;
-  const uint8_t* data = (const uint8_t*)envelope.c_str();
-  const uint16_t len = (uint16_t)envelope.length();
-  const uint32_t msgId = generateMessageId();
-  for (int i = 0; i < gMeshPeerSlots; i++) {
-    if (!gMeshPeers[i].isActive || isSelfMac(gMeshPeers[i].mac)) continue;
-    const uint8_t* mac = gMeshPeers[i].mac;
-    const uint16_t fp = fingerprintForPeer(mac);
-    const MeshDerivedKeys* mk = fp ? meshKeysFindByFingerprint(fp) : nullptr;
-    if (bootNoticeSendMode(sessionLiveWithPeer(mac), mk && mk->valid,
-                           len <= ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT) == BootNoticeSend::Signed) {
-      v4_send_frame(mac, ESPNOW_V4_TYPE_BOOT, ESPNOW_V4_FLAG_BROADCAST_AUTH, msgId, data, len, 1);
-    } else {
-      v4_send_payload_smart(mac, ESPNOW_V4_TYPE_BOOT, 0, msgId, data, len, 3);
-    }
-  }
-}
-
-// Build a JSON boot notification string
-String buildBootNotification(uint32_t msgId, const char* src,
-                             uint32_t bootCounter, uint32_t timestamp) {
-  PSRAM_JSON_DOC(doc);
-  v2_init_envelope(doc, MSG_TYPE_BOOT, msgId, src, "", 3);
-  JsonObject pld = doc["pld"].to<JsonObject>();
-  pld["boot"] = bootCounter;
-  pld["ts"]   = timestamp;
-  String out;
-  serializeJson(doc, out);
-  return out;
-}
-
-// The history text and console line for a received system notice (the text of
-// a BOOT frame) from devName, the name resolved from the frame's authenticated
-// origin. The text is the peer's: it gets a bounded parse and only its boot
-// counter is used, never its "src" (a peer can put any name there). Anything
-// that is not a well-formed BOOT notice gets a neutral line, never the raw text.
-// Called by the text-queue drain on espnow_task.
-static void formatEspNowSystemNotice(const char* text, size_t textCap, const char* devName,
-                                     char* history, size_t historyLen,
-                                     char* line, size_t lineLen) {
-  bool isBoot = false;
-  bool hasCounter = false;
-  uint32_t bootCounter = 0;
-  if (text && textCap > 0) {
-    PSRAM_JSON_DOC(doc);
-    if (!deserializeJson(doc, text, strnlen(text, textCap))) {
-      JsonVariantConst type = doc["type"];
-      isBoot = type.is<const char*>() && strcmp(type.as<const char*>(), MSG_TYPE_BOOT) == 0;
-      JsonVariantConst boot = doc["pld"]["boot"];
-      if (isBoot && boot.is<uint32_t>()) {
-        hasCounter = true;
-        bootCounter = boot.as<uint32_t>();
-      }
-    }
-  }
-  const char* who = (devName && devName[0]) ? devName : "a peer";
-  if (isBoot && hasCounter) {
-    snprintf(history, historyLen, "Online (boot #%lu)", (unsigned long)bootCounter);
-    snprintf(line, lineLen, "[ESP-NOW] %s is online (boot #%lu)", who, (unsigned long)bootCounter);
-  } else if (isBoot) {
-    snprintf(history, historyLen, "Online");
-    snprintf(line, lineLen, "[ESP-NOW] %s is online", who);
-  } else {
-    snprintf(history, historyLen, "System notice");
-    snprintf(line, lineLen, "[ESP-NOW] System notice from %s", who);
-  }
 }
 
 // Send topology discovery requests to a stable snapshot of active peers.
@@ -14100,6 +13924,7 @@ static void espnowChFollowSendProbe(uint8_t ch) {
   v4FillHeartbeat(hb);
   hb.chanInfo = espnowfollow::packChanInfo(ch, /*probe=*/true, /*answer=*/false);
   const uint32_t msgId = generateMessageId();
+  v4HeartbeatFor(hb, gChFollowMasterMac, msgId);
   gChFollowProbeMsgId = msgId;
   if (!v4_send_frame_ex(gChFollowMasterMac, ESPNOW_V4_TYPE_HEARTBEAT,
                         (uint16_t)(ESPNOW_V4_FLAG_ACK_REQ | ESPNOW_V4_FLAG_BROADCAST_AUTH), msgId,
@@ -14608,7 +14433,7 @@ void processMeshHeartbeats() {
         activePeerCount++;
     }
     // Also count paired devices from registry (bootstrap case: after reboot, gMeshPeers is empty)
-    // and — crucially — create a mesh-health slot for each. v4_broadcast_heartbeat()
+    // and — crucially — create a mesh-health slot for each. meshSendHeartbeats()
     // below ONLY fans the heartbeat out to active gMeshPeers entries, so without
     // this the heartbeat is "sent" to an empty list (sent=0) and the mesh never
     // comes up after a reboot until the peers are manually re-paired. Bootstrapping
@@ -14624,8 +14449,7 @@ void processMeshHeartbeats() {
       hb.peerCount = activePeerCount > 0 ? activePeerCount : pairedDeviceCount;
       // With per-peer backoff a tick can legitimately reach nobody (every peer
       // backed off), so only count ticks that actually put a heartbeat on air.
-      if (v4_broadcast_heartbeat(ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
-                                 (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1)) {
+      if (meshSendHeartbeats(hb) > 0) {
         gEspNow->heartbeatsSent++;
       }
     }
@@ -14641,13 +14465,13 @@ void processMeshHeartbeats() {
         V4PayloadHeartbeat hb;
         v4FillHeartbeat(hb);
         hb.role      = MESH_ROLE_MASTER;
-        // 2026-05-19: route through smart-send so master→backup liveness rides
-        // SESSION_FRAME once KEY_EX has run. The receiver's backup-master
-        // tracking now requires ctx.isAuthenticated, so a plaintext fallback
-        // here is harmless (won't drive false failover state) but stays
-        // available for the pre-KEY_EX window.
-        v4_send_payload_smart(backupMac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ,
-                              generateMessageId(), (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
+        // Smart-send: master→backup liveness rides the session (the receiver's
+        // backup-master tracking requires an authenticated frame). Periodic,
+        // so no ACK_REQ (1.0 step 8, E9).
+        const uint32_t msgId = generateMessageId();
+        v4HeartbeatFor(hb, backupMac, msgId);
+        v4_send_payload_smart(backupMac, ESPNOW_V4_TYPE_HEARTBEAT, 0,
+                              msgId, (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
       }
     }
   }
@@ -14770,60 +14594,56 @@ void processMeshHeartbeats() {
   if (!bondTickHeld(hbEpoch)) bondAgreementTick(now);
 #endif // ENABLE_BONDED_MODE
 
-  // 3c. Log mesh peer online/offline transitions and reclaim stale slots.
-  //
-  // The durable event is edge-gated on onlineLogged, which tracks heartbeat-based
-  // ALIVENESS (isMeshPeerAlive), NOT isActive. isActive is re-armed by every RX
-  // frame (noteMeshPeerRxActivity) and by slot (re)creation, so gating the log on
-  // it flooded system-events.log: a powered-off peer that the 5 s bootstrap keeps
-  // re-creating, or a peer sending ACKs/TEXT but no heartbeats, produced one
-  // 'offline' line per sweep (100 Hz). onlineLogged only flips true when the peer
-  // is genuinely alive, so those cases never log a spurious offline; the natural
-  // 30 s heartbeat-timeout window bounds a flapping peer to ~1 pair per timeout.
-  // A reclaimed slot is memset by getMeshPeerHealth, so onlineLogged resets with it.
+  // 3c. Mesh peer link, online/offline events and slots (1.0 step 8, RC3;
+  // System_ESPNow_LinkCore.h).
+  //   - The link's hysteresis is settled here (and on each evidence).
+  //   - Heard edge (None -> heard): a peer that came back gets its next
+  //     automatic handshake start at once (it ends the handshake back-off).
+  //     An edge, so a peer heard all along does not end its back-off with
+  //     every heartbeat.
+  //   - Events follow the peer state every surface shows: online when it
+  //     becomes online (two-way + session), offline when it stops being
+  //     online (silent, or only connecting: one-way or no session). At most
+  //     one per peer per 30 s; the state at the end of the window is posted
+  //     (meshEventStep), so a flapping link cannot flood system-events.log.
+  //   - Slots: a paired peer keeps its slot while offline (its link memory,
+  //     event latch and the heartbeat back-off stay). A slot of an unpaired
+  //     mesh member (a relay) is reclaimed once it is silent and no online
+  //     event is left standing for it.
   if (gMeshPeers) {
     for (int i = 0; i < gMeshPeerSlots; i++) {
       MeshPeerHealth& p = gMeshPeers[i];
       if (!p.isActive) continue;
       const uint8_t* pm = p.mac;
-      if (isMeshPeerAlive(&p)) {
-        if (!p.onlineLogged) {
-          p.onlineLogged = true;
-          // Not heard -> heard: a peer that came back gets its next automatic
-          // handshake start at once. An edge, so a peer heard all along does
-          // not end its back-off with every heartbeat.
-          espnowHandshakeBackoffClear(pm);
-          logSystemEvent("MESH", "peer " MAC_FMT " online",
-                         MAC_ARGS(pm));
-          char macStr[18];
-          macToDisplay(pm, macStr, sizeof(macStr));
-          String peerName = getEspNowDeviceName(pm);
+      const MeshLink link = meshLinkSettle(p.link, p.lastRxActivityMs, now);
+      const bool heard = link != MeshLink::None;
+      if (heard && !p.heardLogged) espnowHandshakeBackoffClear(pm);
+      p.heardLogged = heard;
+      const EspNowPeerState state = espnowPeerStateOf(link, espnowSessionUp(pm));
+      const MeshPeerEvent ev = meshEventStep(p.events, state == EspNowPeerState::Online, now);
+      if (ev != MeshPeerEvent::None) {
+        char macStr[18];
+        macToDisplay(pm, macStr, sizeof(macStr));
+        String peerName = getEspNowDeviceName(pm);
+        if (ev == MeshPeerEvent::Online) {
+          logSystemEvent("MESH", "peer " MAC_FMT " online", MAC_ARGS(pm));
           systemEventPost(SYSEVT_PEER_ONLINE, peerName.length() ? peerName.c_str() : macStr, macStr);
-        }
-      } else {
-        if (p.onlineLogged) {
-          p.onlineLogged = false;
-          logSystemEvent("MESH", "peer " MAC_FMT " offline (heartbeat timeout)",
-                         MAC_ARGS(pm));
-          char macStr[18];
-          macToDisplay(pm, macStr, sizeof(macStr));
-          String peerName = getEspNowDeviceName(pm);
+        } else {
+          logSystemEvent("MESH", "peer " MAC_FMT " offline (%s)", MAC_ARGS(pm),
+                         link == MeshLink::None     ? "not heard for 30 s"
+                         : link == MeshLink::OneWay ? "connecting: one-way, it may not hear this device"
+                                                    : "connecting: no session");
           systemEventPost(SYSEVT_PEER_OFFLINE, peerName.length() ? peerName.c_str() : macStr, macStr);
         }
-        p.isActive = false;  // reclaim stale slot (unchanged from prior behavior)
+      }
+      if (!heard && !isPairedDevice(pm) && p.events.posted != (uint8_t)MeshPeerEvent::Online) {
+        p.isActive = false;  // an unpaired member that went silent: its slot is free again
       }
     }
   }
 
   // 4. Check topology collection window
   checkTopologyCollectionWindow();
-  
-  // 6. Check broadcast tracker timeouts
-  static uint32_t sLastBroadcastCheck = 0;
-  if (now - sLastBroadcastCheck >= 500) {  // Check every 500ms
-    sLastBroadcastCheck = now;
-    broadcast_tracker_check_timeouts();
-  }
   
   // 6b. Abandoned file-transfer cleanup is now driven by step 1d above
   // (fileSlotsTimeoutSweep) which handles all kFileSlots slots, not just
@@ -15356,36 +15176,23 @@ void processMeshHeartbeats() {
         // history, whatever name it claims.
         const HistoryAttribution attribution =
             entry.authenticated ? HistoryAttribution::Attributed : HistoryAttribution::Unattributed;
-        bool stored;
-        if (entry.msgType == MSG_SYSTEM_EVENT) {
-          // A system notice (BOOT) is stored and printed as a readable line,
-          // never as the peer's raw JSON, so every history reader (web, phone,
-          // G2, OLED) shows the line. One record with no group id: it is not
-          // chat, and a remote-command answer is matched by that id.
-          EXT_RAM_BSS_ATTR static char noticeText[40];
-          EXT_RAM_BSS_ATTR static char noticeLine[96];
-          formatEspNowSystemNotice(entry.content, sizeof(entry.content), devName.c_str(),
-                                   noticeText, sizeof(noticeText), noticeLine, sizeof(noticeLine));
-          stored = storeMessageInPeerHistory(entry.srcMac, devName.c_str(), noticeText,
-                                             entry.encrypted, entry.msgType, 0, 1, 1, attribution);
-          BROADCAST_PRINTF("%s", noticeLine);
+        // Store this piece as its own record. Group = msgId; piece = fragIndex+1
+        // of fragCount. Single-frame text is just piece 1/1. The client groups
+        // by reqId and stitches — the device never holds the whole message.
+        // (Only chat rides this queue since BOOT 31 went in 1.0 step 8: a
+        // peer's restart is filed by v4h_heartbeat, espnowFilePeerRestart.)
+        const bool stored = storeMessageInPeerHistory(entry.srcMac, devName.c_str(),
+                                                      entry.content, entry.encrypted,
+                                                      entry.msgType, entry.msgId,
+                                                      (uint8_t)(entry.fragIndex + 1), entry.fragCount,
+                                                      attribution);
+        if (entry.fragCount > 1) {
+          BROADCAST_PRINTF("[%s%s] (part %u/%u) %s", devName.c_str(),
+                           entry.encrypted ? " [enc]" : "",
+                           entry.fragIndex + 1, entry.fragCount, entry.content);
         } else {
-          // Store this piece as its own record. Group = msgId; piece = fragIndex+1
-          // of fragCount. Single-frame text is just piece 1/1. The client groups
-          // by reqId and stitches — the device never holds the whole message.
-          stored = storeMessageInPeerHistory(entry.srcMac, devName.c_str(),
-                                             entry.content, entry.encrypted,
-                                             entry.msgType, entry.msgId,
-                                             (uint8_t)(entry.fragIndex + 1), entry.fragCount,
-                                             attribution);
-          if (entry.fragCount > 1) {
-            BROADCAST_PRINTF("[%s%s] (part %u/%u) %s", devName.c_str(),
-                             entry.encrypted ? " [enc]" : "",
-                             entry.fragIndex + 1, entry.fragCount, entry.content);
-          } else {
-            BROADCAST_PRINTF("[%s%s] %s", devName.c_str(),
-                             entry.encrypted ? " [enc]" : "", entry.content);
-          }
+          BROADCAST_PRINTF("[%s%s] %s", devName.c_str(),
+                           entry.encrypted ? " [enc]" : "", entry.content);
         }
         // ESP-NOW App page push-kick: if the user is currently viewing the
         // inbox (merged or per-peer), enqueue a Redraw so the new entry
@@ -15401,9 +15208,7 @@ void processMeshHeartbeats() {
         // the device never assembles the full text, so the event carries
         // the final fragment's content as its (truncated) preview. Posted
         // whether or not the history kept the record (it can refuse when
-        // full or out of memory; the message still arrived). Chat
-        // only: BOOT/system notices ride this queue as MSG_SYSTEM_EVENT
-        // and must not fire text_rx automations or "Msg from" toasts.
+        // full or out of memory; the message still arrived). Chat only.
         // Authenticated only: a plaintext message (accepted on a keyless
         // device, filed under its MAC) must not drive a text_rx automation
         // or a "Msg from" toast as if a known peer had sent it.
@@ -15590,11 +15395,12 @@ bool espnowAppPingStart(const uint8_t* mac) {
 
   // 2026-05-19: smart-send so the app-ping rides SESSION_FRAME when a session
   // is up. Plaintext fallback for pre-KEY_EX pings preserves the liveness-probe
-  // usefulness. It carries a full heartbeat (the row's minimum is 44 bytes, so
-  // an empty one would be acknowledged and then dropped for its length); the
-  // receiver therefore counts it as a heartbeat from this device.
+  // usefulness. It carries a full heartbeat (the row's minimum is 56 bytes, so
+  // an empty one would be refused for its length); the receiver therefore
+  // counts it as a heartbeat from this device.
   V4PayloadHeartbeat pingHb;
   v4FillHeartbeat(pingHb);
+  v4HeartbeatFor(pingHb, mac, msgId);
   bool ok = v4_send_payload_smart(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ,
                                   msgId, (const uint8_t*)&pingHb, (uint16_t)sizeof(pingHb), /*ttl=*/1);
   if (!ok) {
@@ -16115,28 +15921,6 @@ static bool initEspNow() {
   // Apply persisted mesh/direct mode from settings (applySettings runs before gEspNow exists at boot)
   gEspNow->mode = gSettings.espnowmesh ? ESPNOW_MODE_MESH : ESPNOW_MODE_DIRECT;
 
-  // Initialize broadcast tracker. Internal DRAM — this is read and written from
-  // RX ACK processing. Non-fatal on failure: broadcasts still go out, they just
-  // lose their ACK accounting (every reader treats a null table as "no slots").
-  // The clear runs on every start, not just the first, so a restarted mesh
-  // doesn't inherit stale in-flight trackers from the previous session.
-  size_t trackerBytes = sizeof(BroadcastTracker) * BROADCAST_TRACKER_SLOTS;
-  if (!gBroadcastTrackers) {
-    gBroadcastTrackers = (BroadcastTracker*)ps_calloc(BROADCAST_TRACKER_SLOTS, sizeof(BroadcastTracker),
-                                                      AllocPref::PreferPsram,  // task context only, no critical section
-                                                      "espnow.broadcast.trackers");
-  }
-  if (gBroadcastTrackers) {
-    memset(gBroadcastTrackers, 0, trackerBytes);
-    BROADCAST_PRINTF("[ESP-NOW] Initialized broadcast tracker (%u bytes, %d slots)",
-                     (unsigned)trackerBytes, BROADCAST_TRACKER_SLOTS);
-  } else {
-    BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate broadcast tracker (%u bytes) — ACK stats disabled",
-                     (unsigned)trackerBytes);
-  }
-  gBroadcastsTracked = 0;
-  gBroadcastsCompleted = 0;
-  gBroadcastsTimedOut = 0;
 
   DEBUG_ESPNOW_STREAMF("[ESP-NOW] Initialized successfully on channel %d", gEspNow->channel);
   // Use BROADCAST_PRINTF for user-visible init message (safe, doesn't trigger streaming)
@@ -16245,20 +16029,13 @@ static bool initEspNow() {
   // their guard even if they forgot to check gEspNow->initialized.
   setEspNowRuntimeEnabled(true);
 
-  // Broadcast boot notification to all peers before starting the heartbeat
-  // task. The TX path is already live here. If task creation fails below, the
-  // bounded deinit path closes the dispatcher/callbacks/driver again so a later
-  // openespnow can retry instead of inheriting a half-initialized instance.
-  {
-    time_t now = time(nullptr);
-    uint32_t timestamp = Clock::isValidEpoch(now) ? (uint32_t)now : 0;
-    // The setting is the name's only source; receivers show the name they
-    // resolve for this device, not this text.
-    String bootMsg = buildBootNotification(generateMessageId(), gSettings.espnowDeviceName.c_str(),
-                                           gBootCounter, timestamp);
-    meshSendBootToPeers(bootMsg);
-    BROADCAST_PRINTF("[ESP-NOW] Boot notification sent (counter=%lu)", (unsigned long)gBootCounter);
-  }
+  // No boot notice (BOOT 31 went in 1.0 step 8): the first heartbeat tick
+  // carries gBootCounter to every paired peer. Due at once: the heartbeat
+  // clock restarts so a peer that held a session with this device learns of
+  // the restart within one tick, not 5 s later. If task creation fails below,
+  // the bounded deinit path closes the dispatcher/callbacks/driver again so a
+  // later openespnow can retry instead of inheriting a half-initialized instance.
+  gLastHeartbeatSentMs = (uint32_t)millis() - 5000u;
 
   // Start ESP-NOW heartbeat task (parallel processing)
   if (!startEspNowTask()) {
@@ -16541,13 +16318,6 @@ static bool deinitEspNow(bool publishOffEvent) {
   }
   gEspNowRxHead = 0;
   gEspNowRxTail = 0;
-  if (gBroadcastTrackers) {
-    heap_caps_free(gBroadcastTrackers);
-    gBroadcastTrackers = nullptr;
-  }
-  gBroadcastsTracked = 0;
-  gBroadcastsCompleted = 0;
-  gBroadcastsTimedOut = 0;
 
   // Reset state (keep the large PSRAM gEspNow struct allocated for re-init).
   // Routes describe radio reachability; with the radio down every one of them
@@ -16994,52 +16764,6 @@ const char* cmd_espnow_relayblock(const String& argsInput) {
            "'espnowrelayblock clear' or reboot lifts it.",
            macBuf);
   return getDebugBuffer();
-}
-
-// ESP-NOW broadcast tracking statistics command
-const char* cmd_espnow_broadcaststats(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  // Read-only status: see comment in cmd_espnow_status above.
-  if (!gEspNow) return "Error: ESP-NOW not initialized (run 'openespnow' first)";
-  
-  BROADCAST_PRINTF(
-    "Broadcast ACK Tracking Statistics:\n"
-    "  Broadcasts Tracked: %lu\n"
-    "  Broadcasts Completed (100%%): %lu\n"
-    "  Broadcasts Timed Out: %lu",
-    (unsigned long)gBroadcastsTracked,
-    (unsigned long)gBroadcastsCompleted,
-    (unsigned long)gBroadcastsTimedOut);
-  
-  if (gBroadcastsTracked > 0) {
-    float successRate = 100.0f * gBroadcastsCompleted / gBroadcastsTracked;
-    BROADCAST_PRINTF("  Success Rate: %.1f%%", successRate);
-  }
-  
-  broadcastOutput("\nActive Trackers:");
-  int activeCount = 0;
-  // gEspNow existing does not imply the tracker table does — the table is
-  // allocated later in init, and its alloc is allowed to fail without stopping
-  // the mesh. A null table simply has no active slots to list.
-  for (int i = 0; gBroadcastTrackers && i < BROADCAST_TRACKER_SLOTS; i++) {
-    if (gBroadcastTrackers[i].active) {
-      activeCount++;
-      uint32_t elapsed = millis() - gBroadcastTrackers[i].startMs;
-      BROADCAST_PRINTF("  [%d] msgId=%lu: %u/%u ACKs (%.1f%%) elapsed=%lums",
-                      i, (unsigned long)gBroadcastTrackers[i].msgId,
-                      gBroadcastTrackers[i].receivedCount,
-                      gBroadcastTrackers[i].expectedCount,
-                      (gBroadcastTrackers[i].expectedCount > 0) 
-                        ? (100.0f * gBroadcastTrackers[i].receivedCount / gBroadcastTrackers[i].expectedCount) : 0.0f,
-                      (unsigned long)elapsed);
-    }
-  }
-  
-  if (activeCount == 0) {
-    BROADCAST_PRINTF("  No active trackers");
-  }
-
-  return "OK";
 }
 
 // ESP-NOW link saturation command — see System_ESPNow_Saturation.h.
@@ -18566,7 +18290,11 @@ constexpr size_t kListingJsonTailBytes = sizeof(kListingJsonHint) + 64;
 // the per-peer metadata shape lives in exactly one place.
 void espnowSerializeMeshPeerMeta(JsonObject o, const MeshPeerMeta& m) {
   MeshPeerHealth* health = getMeshPeerHealth(m.mac, false);
-  bool alive = health ? isMeshPeerAlive(health) : false;
+  // One meaning on every surface (1.0 step 8): "online" is the online state
+  // (two-way link and a session); `state` says the rest (connecting covers a
+  // one-way link; espnowmeshstatus has the `link` detail). Kept short: a full
+  // table of 15 peers must fit one reply.
+  const EspNowPeerState state = espnowPeerState(m.mac);
   uint32_t lastContact = 0;
   if (health) {
     lastContact = health->lastMeshHeartbeatMs;
@@ -18583,7 +18311,8 @@ void espnowSerializeMeshPeerMeta(JsonObject o, const MeshPeerMeta& m) {
   // commands do not go by yet follows as pendingRoom / pendingTags.
   groupPendingToJson(o, m.mac, m.room, m.tags);
   o["stationary"]   = m.stationary;
-  o["online"]       = alive;
+  o["online"]       = state == EspNowPeerState::Online;
+  o["state"]        = espnowPeerStateName(state);
   o["lastSeenSec"]  = ageSec;
   o["source"]       = "mesh";
 }
@@ -18643,9 +18372,11 @@ const char* cmd_espnow_devices(const String& argsInput) {
       continue;
     }
 
-    // Determine online status from MeshPeerHealth
+    // The peer state every surface shows (online / connecting / offline)
     MeshPeerHealth* health = getMeshPeerHealth(gMeshPeerMeta[i].mac, false);
-    bool alive = health ? isMeshPeerAlive(health) : false;
+    const bool alive = health ? isMeshPeerAlive(health) : false;   // heard within 30 s
+    const EspNowPeerState state = espnowPeerState(gMeshPeerMeta[i].mac);
+    const MeshLink link = meshPeerLinkOf(health);
     uint32_t lastContact = 0;
     if (health) {
       lastContact = health->lastMeshHeartbeatMs;
@@ -18664,7 +18395,9 @@ const char* cmd_espnow_devices(const String& argsInput) {
                          gMeshPeerMeta[i].room[0] ? "" : "",
                          gMeshPeerMeta[i].room[0] ? gMeshPeerMeta[i].room : "unassigned",
                          zoneBuf,
-                         alive ? "(online" : "(offline");
+                         state == EspNowPeerState::Online ? "(online" :
+                         link == MeshLink::OneWay         ? "(connecting, one-way" :
+                         state == EspNowPeerState::Connecting ? "(connecting" : "(offline");
     if (alive && health) {
       appendTopologyOutput(cursor, remaining, ", %lus ago", (unsigned long)ageSec);
     }
@@ -18709,12 +18442,11 @@ const char* cmd_espnow_rooms(const String& argsInput) {
         if (!gMeshPeerMeta[j].isActive) continue;
         const char* r2 = gMeshPeerMeta[j].room[0] ? gMeshPeerMeta[j].room : "Unassigned";
         if (strcmp(r2, room) != 0) continue;
-        MeshPeerHealth* h = getMeshPeerHealth(gMeshPeerMeta[j].mac, false);
         JsonObject d = devs.add<JsonObject>();
         const char* dn = gMeshPeerMeta[j].friendlyName[0] ? gMeshPeerMeta[j].friendlyName : gMeshPeerMeta[j].name;
         d["name"]   = String(dn[0] ? dn : MAC_STR(gMeshPeerMeta[j].mac));
         d["tags"]   = gMeshPeerMeta[j].tags;
-        d["online"] = h ? isMeshPeerAlive(h) : false;
+        d["online"] = espnowPeerState(gMeshPeerMeta[j].mac) == EspNowPeerState::Online;
         // The rooms are the announced ones. "accepted" says whether a command
         // to this room reaches the device; "pendingTags", when there are any,
         // which of its tags a tag command does not go by yet.
@@ -18759,8 +18491,7 @@ const char* cmd_espnow_rooms(const String& argsInput) {
       const char* room = gMeshPeerMeta[i].room[0] ? gMeshPeerMeta[i].room : "Unassigned";
       if (strcmp(room, rooms[r]) != 0) continue;
 
-      MeshPeerHealth* health = getMeshPeerHealth(gMeshPeerMeta[i].mac, false);
-      bool alive = health ? isMeshPeerAlive(health) : false;
+      const EspNowPeerState state = espnowPeerState(gMeshPeerMeta[i].mac);
 
       const char* displayName = gMeshPeerMeta[i].friendlyName[0]
         ? gMeshPeerMeta[i].friendlyName : gMeshPeerMeta[i].name;
@@ -18777,7 +18508,7 @@ const char* cmd_espnow_rooms(const String& argsInput) {
       appendTopologyOutput(cursor, remaining, "  %s [%s] (%s)%s\n",
                            displayName,
                            gMeshPeerMeta[i].tags[0] ? gMeshPeerMeta[i].tags : "-",
-                           alive ? "online" : "offline", pendingMark);
+                           espnowPeerStateName(state), pendingMark);
     }
   }
 
@@ -22227,11 +21958,12 @@ const char* cmd_espnow_pairsecure(const String& argsInput) {
     noteMeshPeerRxActivity(mac, EspNowMeshRxKind::BootstrapLiveness);
     V4PayloadHeartbeat hb;
     v4FillHeartbeat(hb);
-    // 2026-05-19: smart-send so the post-pair seed heartbeat rides
-    // SESSION_FRAME if a session is already up (rare — usually KEY_EX hasn't
-    // run yet at this point, so this falls through to plaintext, which is
-    // what we want for bootstrap liveness).
-    v4_send_payload_smart(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ, generateMessageId(),
+    // Smart-send: the post-pair seed heartbeat waits for the session the
+    // pairing opens and goes sealed; its sealed ACK is the first two-way
+    // evidence (System_ESPNow_LinkCore.h).
+    const uint32_t seedId = generateMessageId();
+    v4HeartbeatFor(hb, mac, seedId);
+    v4_send_payload_smart(mac, ESPNOW_V4_TYPE_HEARTBEAT, ESPNOW_V4_FLAG_ACK_REQ, seedId,
                           (const uint8_t*)&hb, (uint16_t)sizeof(hb), 1);
   }
   bool devicesOk = saveEspNowDevices();
@@ -24542,7 +24274,6 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowstatus", "Show ESP-NOW status and configuration.", false, cmd_espnow_status },
   { "espnowstats", "Show ESP-NOW statistics (messages, errors, and received frames dropped by cause: too short for their type, an unknown must-understand flag, plaintext, an unknown mesh id; acknowledgements refused or not sent).", false, cmd_espnow_stats },
   { "espnowrouterstats", "Show message router statistics and metrics.", false, cmd_espnow_routerstats },
-  { "espnowbroadcaststats", "Show broadcast ACK tracking statistics.", false, cmd_espnow_broadcaststats },
   { "espnowresetstats", "Reset ESP-NOW statistics counters.", true, cmd_espnow_resetstats },
   { "espnowsaturation", "Show ESP-NOW link saturation: frames/sec, stream-queue depth, drops, ACK RTT (rolling 30s).", false, cmd_espnow_saturation },
   { "espnowsaturationreset", "Clear the saturation rolling window (use before a stress test).", false, cmd_espnow_saturationreset },
