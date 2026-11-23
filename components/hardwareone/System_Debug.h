@@ -302,11 +302,12 @@ void debugQueueBackpressure(int minFree = 32, uint32_t maxWaitMs = 200);
 void debugWaitOutputDrained(uint32_t maxWaitMs);
 extern volatile unsigned long gDebugDropped;
 extern volatile bool gDebugVerbose;
-// Every debug line passes its flag and level gate: debugverbose, or the boot
+// Every debug output passes its flag and level gate: debugverbose, or the boot
 // debug capture (System_BootDebug.h) from the top of setup() until setup()
-// ends or the boot buffer fills. Read by the line macros only; isDebugFlagSet() and getLogLevel() keep
-// answering for the saved flags (plus debugverbose), so code that acts on a
-// flag (the ESP-IDF tag levels, for one) is not changed by the boot capture.
+// ends. The line macros, isDebugFlagSet() and getLogLevel() all read it, so
+// every explicit gate is on during the capture too; the line path then sends a
+// line the saved settings would not show to the boot file only. Code that ACTS
+// on a flag (the ESP-IDF tag levels, for one) asks isDebugFlagSaved() instead.
 extern volatile bool gDebugLineForce;
 
 // ── Low-level stack/heap diagnostic trace (runtime-only) ────────────────────
@@ -345,8 +346,17 @@ inline DebugFlagMask getDebugFlags() { return gDebugFlags; }
 inline void setDebugFlags(DebugFlagMask flags) { DEBUG_MANAGER.setDebugFlags(flags); }
 inline void setDebugFlag(DebugFlagMask flag) { setDebugFlags(getDebugFlags() | flag); }
 inline void clearDebugFlag(DebugFlagMask flag) { setDebugFlags(getDebugFlags() & ~flag); }
-inline bool isDebugFlagSet(DebugFlagMask flag) { return gDebugVerbose || ((getDebugFlags() & flag) != (DebugFlagMask)0); }
-// The line macros' flag gate: isDebugFlagSet, with the boot capture's force.
+// An output gate: the flag (or debugverbose, or the boot capture's force).
+inline bool isDebugFlagSet(DebugFlagMask flag) {
+  return gDebugLineForce || gDebugVerbose || ((getDebugFlags() & flag) != (DebugFlagMask)0);
+}
+// The flag as saved (or debugverbose), without the boot capture's force: for
+// code that acts on a flag rather than printing, and for a gate whose own
+// output does not go through the line path (it sends a forced line to the boot
+// file only, bootDebugCaptureText). Outside the capture it equals
+// isDebugFlagSet.
+inline bool isDebugFlagSaved(DebugFlagMask flag) { return gDebugVerbose || ((getDebugFlags() & flag) != (DebugFlagMask)0); }
+// The line macros' flag gate.
 inline bool debugLineGate(DebugFlagMask flag) { return gDebugLineForce || ((getDebugFlags() & flag) != (DebugFlagMask)0); }
 
 // Apply a validated LOG_LEVEL_* severity to DebugManager and the Wi-Fi/PHY
@@ -480,7 +490,8 @@ void helpSuppressedTailDump();
 extern uint8_t gLogLevel;
 // Direct global read for the same reason as getDebugFlags() above:
 // DebugManager::getLogLevel() just returns gLogLevel (extern above).
-inline uint8_t getLogLevel() { return gDebugVerbose ? LOG_LEVEL_DEBUG : gLogLevel; }
+// The boot capture's force raises it to DEBUG too (gDebugLineForce).
+inline uint8_t getLogLevel() { return (gDebugVerbose || gDebugLineForce) ? LOG_LEVEL_DEBUG : gLogLevel; }
 
 // Use this predicate around any computation whose only consumer is a DEBUG
 // log. Keeping the work gate identical to the output gate prevents expensive

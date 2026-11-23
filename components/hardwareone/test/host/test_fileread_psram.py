@@ -61,6 +61,9 @@ def main() -> None:
     definitions = [read("System_JsonText.h").replace("#pragma once", ""),
                    extract_block(source, "bool normalizeFsPath("),
                    extract_block(source, "static bool filePathIsPrivateTranscript("),
+                   extract_block(source, "static void fileviewEmitLines("),
+                   extract_block(source, "static bool fileviewFileSize("),
+                   extract_block(source, "static const char* fileviewLargePage("),
                    extract_block(source, "const char* cmd_fileview(")]
     definitions += [extract_block(source, f"static {signature}(") for signature in (
         "bool bytesNeedBase64",

@@ -1262,27 +1262,41 @@ Available debug modules (type `help debug` on device for full list):
 
 ### Boot debug file
 
-Every boot runs with every debug flag on and every log level shown (the
-DEBUG, INFO and WARN lines included, whatever `loglevel` is saved), from the
-start of setup until boot finishes; the saved flags and log level are not
-changed and apply again once boot has finished (the defaults on a first
-boot). The debug lines of the boot go to a
-buffer, not to the console or the normal logs: a line your saved flags would
-show still appears as usual, the rest only in the buffer. When boot finishes
-the buffer is saved as `/system/sys_logs/boot-debug-1.log`; the two boots
-before it move to `boot-debug-2.log` and `boot-debug-3.log`. The buffer is
-56 KB in PSRAM (4 KB of internal memory on a board without PSRAM, freed after
-the save); a boot that writes more keeps its first lines and ends the file with
-a `[TRUNCATED]` line saying how much was left out. Once the buffer is full the
-forcing stops for the rest of that boot (nothing more could be kept), so the
-`[TRUNCATED]` count covers only the lines your saved flags show.
+Every boot runs with all debug output on, from the start of boot (right after
+the Arduino core starts, before the P4X-EYE's radio companion comes up) until
+boot finishes: every debug flag and sub-flag, every debug check in the code, the
+log level at `debug` (the DEBUG, INFO and WARN lines included, whatever
+`loglevel` is saved), and every ESP-IDF tag at the build's own level (the
+firmware's quieting of tags, `esplog` included, waits until boot finishes).
+The saved settings are not changed and apply again once boot has finished
+(the defaults on a first boot). Every line of the boot - debug lines, command
+and system output, system events and ESP-IDF lines - goes into a buffer; a
+line your saved settings would show still appears on the console and in the
+normal logs as usual, the rest only in the buffer, so the console looks as it
+always does.
+
+When boot finishes the buffer is saved as `boot-debug-1.log`: on the SD card
+in `/sd/system/sys_logs/` when a writable card is in (the two boots before it
+move to `boot-debug-2.log` and `boot-debug-3.log`), otherwise on flash in
+`/system/sys_logs/` (only the newest boot is kept there). The buffer is 256 KB
+in PSRAM (4 KB of internal memory on a board without PSRAM, freed after the
+save; such a board also leaves the ESP-IDF tags at their saved levels). A
+boot that writes more keeps the start of the boot and its newest lines, with
+a `[GAP]` line between them saying how many lines and bytes were dropped.
 
 The file starts with `#` lines: the boot number and reset reason, the uptime at
-the start and end of the capture, the bytes kept and dropped, and the CPU time
-spent in the capture (formatting and copying; the work of building each
-forced line's values is not included). Read it as an administrator with
-`fileview "/system/sys_logs/boot-debug-1.log"` (one page at a time) or in the
-web file browser. `system-events.log` records each save (size and time taken).
+the start and end of the capture, the lines and bytes in all (the dropped ones
+included), kept and dropped, and the wall-clock time spent in the capture path
+(formatting and copying; the work of building each forced line's values is not
+included). Read it as an administrator with `fileview "<path>"`, which pages a
+file of any size, or in the web file browser. `bootdebug` shows the setting and
+where this boot's file went; `system-events.log` records each save (size and
+time taken).
+
+`bootdebug off` turns the capture off (saved; from the next boot): nothing is
+forced or captured and no buffer is taken, the fastest boot. `bootdebug on`
+turns it back on. The setting is also under Debug settings on the web and
+OLED settings screens (Boot debug file).
 
 ---
 

@@ -89,6 +89,9 @@ static std::vector<std::string> sDenyLines;
     std::snprintf(line_, sizeof(line_), fmt, ##__VA_ARGS__);       \
     sDenyLines.push_back(line_);                                   \
   } while (0)
+// The boot debug capture (System_BootDebug.h) is not running here.
+static volatile bool gBootDebugCapturing = false;
+static void bootDebugCaptureF(const char*, ...) {}
 
 // INSERT_PRODUCTION
 

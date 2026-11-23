@@ -207,6 +207,7 @@ struct Settings {
       debugSrTuning(false),
       logLevel(3),                    // Default: LOG_LEVEL_DEBUG (show everything)
       espLogLevels(""),               // No ESP-IDF tag overrides (esplog)
+      bootDebugCapture(true),         // Boot debug file on (bootdebug)
       memorySampleIntervalSec(30),
       espnowmesh(false),
       espnowUserSyncEnabled(false),
@@ -757,6 +758,7 @@ struct Settings {
   bool webConsoleDebug;                // Enable browser console.log/warn/debug output in web UI (default: false)
   int logLevel;                        // Severity-based logging level (0=error, 1=warn, 2=info, 3=debug)
   String espLogLevels;                 // ESP-IDF log levels by tag, "tag:L,tag:L" (esplog; System_EspLogCore.h)
+  bool bootDebugCapture;               // Every debug output on during boot, into boot-debug-1.log (bootdebug; System_BootDebug.h)
   int memorySampleIntervalSec;  // Periodic memory sampling interval in seconds (0=disabled, default: 30)
   // ESP-NOW settings
   bool espnowmesh;

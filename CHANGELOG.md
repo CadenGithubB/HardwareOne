@@ -169,16 +169,24 @@ everything user-visible since the v0.99.99.1 tag.
   `tools/vendor_arduino.sh --compare` (G-25).
 
 ### Added
-- Boot debug file (owner decision B13): every boot runs with every debug flag on and every log
-  level shown until boot finishes (or the buffer fills), into a 56 KB PSRAM buffer (4 KB of internal memory on a board without PSRAM) instead
-  of the console or the normal logs; lines the saved flags would show still appear as usual. The
-  saved flags (the defaults on a first boot) apply again after boot. The buffer is saved as
-  `/system/sys_logs/boot-debug-1.log`, keeping the last three boots (`-2`, `-3`), with a header
-  that records the capture's start and end uptime, the bytes kept and dropped and the CPU time
-  spent capturing, and a `[TRUNCATED]` line when the buffer filled. Admin-only to read
-  (`fileview`, web file browser). P4X-EYE: the C6 console mirror now runs during every boot, with
-  the C6's boot messages shown at INFO, and stops when boot finishes unless `c6console on` or a
-  companion fault keeps it.
+- Boot debug file (owner decision B13): every boot runs with all debug output on until boot
+  finishes - every debug flag and sub-flag, every debug check, the log level at `debug` and every
+  ESP-IDF tag at the build's level (an esp_log hook catches its lines) - into a 256 KB PSRAM buffer
+  (4 KB of internal memory on a board without PSRAM) instead of the console or the normal logs;
+  lines the saved settings would show still appear as usual. The saved settings (the defaults on a
+  first boot) apply again after boot. A full buffer keeps the start of the boot and its newest
+  lines with a `[GAP]` line between them. The buffer is saved as `boot-debug-1.log` on a writable
+  SD card (`/sd/system/sys_logs/`, last three boots kept as `-2`, `-3`), otherwise on flash
+  (`/system/sys_logs/`, newest boot only), with a header that records the capture's start and end
+  uptime, the lines and bytes in all (dropped ones included), kept and dropped, and the
+  wall-clock time spent capturing. `bootdebug [on|off]` (also in the debug settings on the web and
+  OLED) turns it off for the fastest boot (on by default; from the next boot) and shows where this
+  boot's file went. Admin-only to read (`fileview`, web file browser). P4X-EYE: the capture starts
+  before the C6 companion's bring-up, so ESP-Hosted's lines of the whole boot are in the file; the C6 console
+  mirror now runs during every boot, with the C6's boot messages shown at INFO, and stops when boot
+  finishes unless `c6console on` or a companion fault keeps it.
+- `fileview` pages a file of any size: past 60000 B it reads one page at a time straight from the
+  file (JSON shown as stored there) instead of stopping at its read limit.
 - The LED commands take the light as an optional first word: `ledcolor [target] <colour>`,
   `ledeffect [target] <effect> ...`, `ledbrightness [target] <0..100>` (admin, saved per light),
   `ledclear [target]`, with the targets `onboard` (the board's NeoPixel), `encoder` (every pixel of

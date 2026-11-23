@@ -1446,10 +1446,10 @@ static bool bootNetHandOffServices() {
 
 void hardwareone_setup() {
 
-  // B13: every debug flag on for the boot, into the boot buffer (not the
-  // console or the normal logs); bootDebugFinish() at the end of setup()
-  // restores the saved flags and writes /system/sys_logs/boot-debug-1.log.
-  bootDebugBegin();
+  // B13: the boot debug capture is already running (app_main starts it right
+  // after initArduino(), before the radio companion); bootDebugFinish() at the
+  // end of setup() restores the saved settings and writes boot-debug-1.log (to
+  // the card when one is writable, else flash).
 
   // ========================================================================
   // 1. PRE-SERIAL — crash tracking from RTC memory (no Serial yet)
@@ -1847,7 +1847,7 @@ void hardwareone_setup() {
 
 #if ENABLE_I2C_SYSTEM
   initI2cBuses();
-  esp_log_level_set("i2c.master", ESP_LOG_WARN);  // Suppress routine NACK spam from FM radio RDS polling
+  bootDebugEspLogSet("i2c.master", ESP_LOG_WARN);  // Suppress routine NACK spam from FM radio RDS polling
 
   // Early silent RTC sync (zero-alloc I2C read + settimeofday) — verbose sync happens later
   #if ENABLE_RTC_SENSOR

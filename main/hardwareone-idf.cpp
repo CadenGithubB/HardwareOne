@@ -11,6 +11,7 @@
 
 #include "../components/hardwareone/HAL_Radio.h"
 #include "../components/hardwareone/System_AuthIdentity.h"
+#include "../components/hardwareone/System_BootDebug.h"
 #include "../components/hardwareone/System_OTASafety.h"
 #include "../components/hardwareone/System_RadioCompanion.h"
 #include "../components/hardwareone/System_TaskWdt.h"
@@ -107,6 +108,13 @@ extern "C" void app_main(void)
 
     // Initialize Arduino core (Serial, peripherals, etc.)
     initArduino();
+    // B13: the boot debug capture starts here (NVS is up), before the radio
+    // companion's bring-up: radioHalPrepare quiets the Hosted tags through
+    // bootDebugEspLogSet, which the capture records instead of lowering them,
+    // so the companion's whole bring-up is in the boot file. Nothing before
+    // this point sets an ESP-IDF tag level. bootDebugFinish() at the end of
+    // setup() stops it (System_BootDebug.h).
+    bootDebugBegin();
     // P4X-EYE: bring up the C6 radio companion before any Wi-Fi/BLE/ESP-NOW
     // use. Native-radio targets return immediately. A companion that does not
     // answer is not fatal: the firmware boots without its radio features and

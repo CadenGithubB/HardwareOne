@@ -44,6 +44,7 @@
 #include "System_CaptureCrypto.h" // reveal sealed captures for display (fileview is a presentation surface)
 #include "System_CatchupLedger.h"  // catchupNoteTrim/Restart: file catch-up ids survive capped-log trims
 #include "System_CommandRegistry.h"
+#include "System_BootDebug.h"  // the boot capture: forced [PERM] lines go to its file only
 #if ENABLE_BLUETOOTH
 #include "BLE_Server.h"  // bleSessionConfidential/bleSendBinaryToSession — raw-binary `fileread ... bin`
 #include "System_CommandTypes.h"  // CommandContext: the command's session epoch
@@ -903,6 +904,182 @@ static bool filePathIsPrivateTranscript(const String& path) {
           != TranscriptPathPolicy::Kind::Outside;
 }
 
+// Emits body[start, end) CHUNK-WISE: broadcastOutput clamps one call at 255 B
+// (no splitting — the old whole-String broadcast was silently cut to 255 B on
+// serial/SSE/BLE and only survived via the web bridge's capture buffer). Whole
+// lines are batched into <=240 B chunks so nothing ever trips the clamp while
+// keeping the call count (and debug-queue pressure) low.
+static void fileviewEmitLines(const char* body, size_t start, size_t end) {
+  char chunk[241];
+  size_t cl = 0;
+  for (size_t i = start; i < end; ) {
+    size_t le = i;
+    while (le < end && body[le] != '\n') le++;
+    size_t lineLen = le - i;                    // excl. '\n'; wrap caps it at 200
+    if (lineLen > sizeof(chunk) - 1) lineLen = sizeof(chunk) - 1;
+    if (cl > 0 && cl + 1 + lineLen > sizeof(chunk) - 1) {
+      chunk[cl] = '\0';
+      broadcastOutput(chunk);
+      cl = 0;
+    }
+    if (cl > 0) chunk[cl++] = '\n';
+    memcpy(chunk + cl, body + i, lineLen);
+    cl += lineLen;
+    i = (le < end) ? le + 1 : le;
+  }
+  if (cl > 0) {
+    chunk[cl] = '\0';
+    broadcastOutput(chunk);
+  }
+}
+
+// The stored size of a file the caller may read; false when it cannot be opened.
+static bool fileviewFileSize(const String& path, const AuthContext& ctx, size_t& size) {
+  FsLockGuard guard("fileview");
+  File f = VFS::openGuarded(path, "r", ctx);
+  if (!f) return false;
+  size = f.size();
+  f.close();
+  return true;
+}
+
+// A file past fileview's whole-file read is paged straight from the file: page
+// k shows the stored text from the line end after (k-1) * kFileviewStride to
+// the line end after k * kFileviewStride (filePageBoundary in
+// System_TextPager.h), read as one window per page, so a file of any size
+// pages to its end with pages the transports carry. JSON is shown as stored
+// (re-indenting needs the whole file). A sealed capture's rows are revealed
+// page by page: the magic first line is read with each later page.
+static const char* fileviewLargePage(const String& path, size_t fileSize, int page, bool raw,
+                                     const AuthContext& ctx) {
+  static constexpr size_t kFileviewStride = 2800;  // a page plus its wrap stays under the ~3.5 KB budget
+  static constexpr size_t kFileviewSearch = 600;
+  const size_t pageCount = filePageCount(fileSize, kFileviewStride);
+  if ((size_t)page > pageCount) {
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+    snprintf(getDebugBuffer(), 1024, "Error: page %d out of range — %s has %u pages",
+             page, path.c_str(), (unsigned)pageCount);
+    return getDebugBuffer();
+  }
+  const size_t k = (size_t)page - 1;
+  const size_t from = k * kFileviewStride;
+  size_t to = (k + 1) * kFileviewStride + kFileviewSearch;
+  if (to > fileSize) to = fileSize;
+  const size_t want = to - from;
+
+  // A sealed capture starts with its magic line; a later page reads it too.
+  static constexpr size_t kMagicMax = 64;
+  char* window = (char*)ps_alloc(kMagicMax + want + 2, AllocPref::PreferPsram, "fs.fileview.window");
+  if (!window) return "Error: fileview: buffer alloc failed";
+  char* text = window + kMagicMax;  // the page's bytes; the magic line goes just before them
+  size_t magicLen = 0, got = 0;
+  bool opened = false;
+  {
+    FsLockGuard guard("fileview");
+    File f = VFS::openGuarded(path, "r", ctx);
+    if (f) {
+      opened = true;
+      if (k > 0) {
+        char first[kMagicMax];
+        const size_t n = f.read((uint8_t*)first, sizeof(first) - 1);
+        first[n] = '\0';
+        char* nl = (char*)memchr(first, '\n', n);
+        if (nl) {
+          *nl = '\0';
+          if (captureCryptoIsMagicLine(first)) {
+            magicLen = (size_t)(nl - first) + 1;  // with its '\n'
+            memcpy(text - magicLen, first, magicLen - 1);
+            text[-1] = '\n';
+          }
+        }
+      }
+      if (f.seek((uint32_t)from)) {
+        while (got < want) {
+          const size_t n = f.read((uint8_t*)text + got, want - got);
+          if (n == 0) break;
+          got += n;
+        }
+      }
+      f.close();
+    }
+  }
+  if (!opened) {
+    free(window);
+    if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+    snprintf(getDebugBuffer(), 1024, "Error: Unable to open: %s", path.c_str());
+    return getDebugBuffer();
+  }
+
+  const size_t start = filePageBoundary(k, kFileviewStride, fileSize, text, got, kFileviewSearch) - from;
+  size_t end = got;  // the last page, or a short read: what came
+  if (k + 1 < pageCount && got > kFileviewStride) {
+    end = filePageBoundary(k + 1, kFileviewStride, fileSize, text + kFileviewStride, got - kFileviewStride,
+                           kFileviewSearch) - from;
+  }
+  if (end > got) end = got;
+  if (start > end) end = start;
+
+  // The page's text, with the magic line in front when the rows need it.
+  char* shown = text + start;
+  size_t shownLen = end - start;
+  if (magicLen) {
+    shown -= magicLen;
+    memmove(shown, text - magicLen, magicLen);  // (start == 0 keeps it where it is)
+    shownLen += magicLen;
+  }
+  char* revealed = nullptr;
+  if (shownLen >= 7 && captureCryptoIsMagicLine(shown)) {
+    shown[shownLen] = '\0';
+    const size_t need = captureCryptoRevealCapacity(shown, shownLen);
+    revealed = need ? (char*)ps_alloc(need, AllocPref::PreferPsram, "fs.fileview.reveal") : nullptr;
+    if (revealed) {
+      memcpy(revealed, shown, shownLen + 1);
+      size_t len = shownLen;
+      if (captureCryptoRevealText(revealed, len, need)) {
+        shown = revealed;
+        shownLen = len;
+      }
+    }
+    if (magicLen && shown == revealed) {  // drop the borrowed magic line again
+      const char* nl = (const char*)memchr(shown, '\n', shownLen);
+      const size_t cut = nl ? (size_t)(nl - shown) + 1 : shownLen;
+      shown += cut;
+      shownLen -= cut;
+    } else if (magicLen) {
+      shown += magicLen;
+      shownLen -= magicLen;
+    }
+  }
+
+  const size_t kCols = 200;
+  const size_t bodyCap = shownLen + (shownLen / kCols) + 16;
+  char* body = (char*)ps_alloc(bodyCap, AllocPref::PreferPsram, "fs.fileview.body");
+  if (!body) {
+    if (revealed) free(revealed);
+    free(window);
+    return "Error: fileview: buffer alloc failed";
+  }
+  TextWrapStream wrap(body, bodyCap, kCols, /*continuationIndent=*/0, /*stripControl=*/true);
+  for (size_t i = 0; i < shownLen; ++i) wrap.write(static_cast<uint8_t>(shown[i] ? shown[i] : ' '));
+  const size_t bodyLen = wrap.size();
+  if (revealed) free(revealed);
+  free(window);
+
+  const bool json = !raw && fileKindForName(path.c_str()) == FileKind::Json;
+  if (ensureDebugBuffer()) {
+    snprintf(getDebugBuffer(), 1024, "--- %s  page %d/%u (%u B, read page by page%s) ---",
+             path.c_str(), page, (unsigned)pageCount, (unsigned)fileSize,
+             json ? ", shown as stored" : "");
+    broadcastOutput(getDebugBuffer());
+  }
+  fileviewEmitLines(body, 0, bodyLen);
+  free(body);
+  if ((size_t)page < pageCount) {
+    cliHintf("next: fileview \"%s\" %d%s", path.c_str(), page + 1, raw ? " raw" : "");
+  }
+  return "[FS] File displayed";
+}
+
 const char* cmd_fileview(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!filesystemReady) return "Error: LittleFS not ready";
@@ -944,8 +1121,12 @@ const char* cmd_fileview(const String& argsInput) {
 
   // Read cap 60000 B: under the pager's 64 KB uint16_t-offset ceiling with
   // margin. Cap-hit is detected by length == cap (readTextLimited has no
-  // explicit truncation flag).
+  // explicit truncation flag). A larger file is paged straight from the file
+  // instead (fileviewLargePage), so a file of any size is shown to its end.
   const size_t kReadCap = 60000;
+  size_t fileSize = 0;
+  if (fileviewFileSize(path, ctx, fileSize) && fileSize > kReadCap)
+    return fileviewLargePage(path, fileSize, page, raw, ctx);
   String content;
   if (!readTextLimited(path.c_str(), content, kReadCap, ctx)) {
     if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
@@ -1024,35 +1205,7 @@ const char* cmd_fileview(const String& argsInput) {
     broadcastOutput(getDebugBuffer());
   }
 
-  if (pg.pageCount > 0) {
-    // Emit the page CHUNK-WISE: broadcastOutput clamps one call at 255 B (no
-    // splitting — the old whole-String broadcast was silently cut to 255 B on
-    // serial/SSE/BLE and only survived via the web bridge's capture buffer).
-    // Batch whole lines into <=240 B chunks so nothing ever trips the clamp
-    // while keeping the call count (and debug-queue pressure) low.
-    const size_t start = pg.pageOff[page - 1];
-    const size_t end   = pg.pageOff[page];
-    char chunk[241];
-    size_t cl = 0;
-    for (size_t i = start; i < end; ) {
-      size_t le = i;
-      while (le < end && body[le] != '\n') le++;
-      const size_t lineLen = le - i;              // excl. '\n'; wrap caps it at 200
-      if (cl > 0 && cl + 1 + lineLen > sizeof(chunk) - 1) {
-        chunk[cl] = '\0';
-        broadcastOutput(chunk);
-        cl = 0;
-      }
-      if (cl > 0) chunk[cl++] = '\n';
-      memcpy(chunk + cl, body + i, lineLen);
-      cl += lineLen;
-      i = (le < end) ? le + 1 : le;
-    }
-    if (cl > 0) {
-      chunk[cl] = '\0';
-      broadcastOutput(chunk);
-    }
-  }
+  if (pg.pageCount > 0) fileviewEmitLines(body, pg.pageOff[page - 1], pg.pageOff[page]);
   free(body);
 
   if (page < pageCount) {
@@ -2368,14 +2521,22 @@ bool canImport (const String& path, const AuthContext& ctx) {
 // refuse a read, IT calls this to record the security event.
 //
 // Gated by gDebugSubFlags.storagePermissions (default true). Allows muting
-// the denial audit trail independently of other Storage debug subflags.
+// the denial audit trail independently of other Storage debug subflags. The
+// boot debug capture forces the sub-flag too: while it is off in the saved
+// settings, its lines go to the boot file only.
 void logFsAccessDeny(const String& path, const AuthContext& ctx,
                      uint8_t needed, const char* op) {
-  if (!gDebugSubFlags.storagePermissions) return;
+  const bool subOn = gDebugSubFlags.storagePermissions;
+  if (!subOn && !gBootDebugCapturing) return;
+#define PERM_DENYF(fmt, ...)                                  \
+  do {                                                        \
+    if (subOn) DEBUG_STORAGEF(fmt, ##__VA_ARGS__);            \
+    else bootDebugCaptureF(fmt, ##__VA_ARGS__);               \
+  } while (0)
   FsRole role = resolveRole(ctx);
   if (role == FsRole::ANON) {
-    DEBUG_STORAGEF("[PERM] DENY %s '%s' role=anon user='' transport=%d (anonymous never permitted)",
-                   op, path.c_str(), (int)ctx.transport);
+    PERM_DENYF("[PERM] DENY %s '%s' role=anon user='' transport=%d (anonymous never permitted)",
+               op, path.c_str(), (int)ctx.transport);
     return;
   }
   // Re-check the special-case denials so the log line names the actual reason.
@@ -2383,19 +2544,20 @@ void logFsAccessDeny(const String& path, const AuthContext& ctx,
   bool sensitiveApplies = (needed & (PERM_READ | PERM_WRITE)) != 0;
   bool imageEditApplies = (needed == PERM_WRITE);
   if (sensitiveApplies && !rule.exemptSensitiveExt && !isUnrestrictedRole(role) && hasSensitiveExtension(path)) {
-    DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s reason=sensitive-extension",
-                   op, path.c_str(), roleName(role));
+    PERM_DENYF("[PERM] DENY %s '%s' role=%s reason=sensitive-extension",
+               op, path.c_str(), roleName(role));
     return;
   }
   if (imageEditApplies && !isUnrestrictedRole(role) && isImageFile(path)) {
-    DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s reason=image-not-editable",
-                   op, path.c_str(), roleName(role));
+    PERM_DENYF("[PERM] DENY %s '%s' role=%s reason=image-not-editable",
+               op, path.c_str(), roleName(role));
     return;
   }
   uint8_t granted = permsForRole(rule, role) &
                     transcriptPermissionMask(path, transcriptAccountId(path, ctx.user, role), role);
-  DEBUG_STORAGEF("[PERM] DENY %s '%s' role=%s granted=0x%02X needed=0x%02X",
-                 op, path.c_str(), roleName(role), (unsigned)granted, (unsigned)needed);
+  PERM_DENYF("[PERM] DENY %s '%s' role=%s granted=0x%02X needed=0x%02X",
+             op, path.c_str(), roleName(role), (unsigned)granted, (unsigned)needed);
+#undef PERM_DENYF
 }
 
 uint8_t getPermissions(const String& path, const AuthContext& ctx) {
