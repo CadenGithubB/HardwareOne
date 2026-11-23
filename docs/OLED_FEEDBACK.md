@@ -25,7 +25,8 @@ or terminal-result footer messages.
   shows "Busy" and runs nothing. A small hourglass shows in the header bar,
   left of the bell and the battery, while it runs (2026-11-22: it no longer
   covers the content area; nothing else in the bar moves when it comes or
-  goes, only the title gives up room, `OLED_HeaderCore.h`). A failure is the toast when it ends: the
+  goes, only the title gives up room, `OLED_HeaderCore.h`; on the on-screen
+  keyboard it shows on the keyboard's own top line). A failure is the toast when it ends: the
   refusal's reason, a full queue after 2 s or the 60 s timeout. A success
   shows no toast, because the screen shows the new state (owner, 2026-11-22),
   except where it does not: those call sites use

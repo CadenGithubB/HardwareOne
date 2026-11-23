@@ -7,6 +7,7 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
+#include <algorithm>
 #include <cstring>
 #include <string>
 
@@ -287,12 +288,91 @@ void pixelCases() {
           }
 }
 
+// ---- the keyboard line (second profile) -----------------------------------------
+void keyboardCases() {
+  const char* modes[] = {"", "abc", "PDM", "none", "Kq7mZp3", "Kq7mZp3Rv9"};
+  int cases = 0;
+  for (const char* mode : modes)
+    for (int rec = 0; rec < 2; ++rec)
+      for (int len = 0; len <= 31; ++len) {
+        std::string prompt(static_cast<size_t>(len), 'p');
+        kb::Frame base{};
+        for (int busy = 0; busy < 2; ++busy) {
+          kb::Frame f{};
+          kb::compose(prompt.c_str(), mode, rec, busy, f);
+          ++cases;
+          const std::string at = std::string("mode '") + mode + "' rec " + std::to_string(rec) + " busy " +
+                                 std::to_string(busy) + " prompt " + std::to_string(len);
+          int left = kWidth, prevRight = kWidth + kGap;
+          for (int i = 0; i < kb::kItemCount; ++i) {
+            if (f.x[i] < 0) continue;
+            check(f.x[i] + f.w[i] == prevRight - kGap, "keyboard slots packed 3 px apart: " + at);
+            prevRight = left = f.x[i];
+          }
+          const size_t modeLen = std::min<size_t>(strlen(mode), kb::kModeMaxGlyphs);
+          check((f.x[kb::kMode] >= 0) == (modeLen > 0), "mode shown when given: " + at);
+          if (modeLen > 0) {
+            check(f.x[kb::kMode] + f.w[kb::kMode] == kWidth, "mode pinned at the right edge: " + at);
+            check(f.w[kb::kMode] == std::max<int>(kb::kModeMinWidth, static_cast<int>(modeLen) * kCell),
+                  "mode slot 18 px or its text: " + at);
+            check(std::string(f.mode) == std::string(mode).substr(0, modeLen), "mode text: " + at);
+          }
+          check((f.x[kb::kRec] >= 0) == (rec != 0) && (f.x[kb::kBusy] >= 0) == (busy != 0),
+                "busy and rec never drop: " + at);
+          if (busy && rec) check(f.x[kb::kBusy] < f.x[kb::kRec], "busy left of rec: " + at);
+          check(f.title.cells * kCell <= left - kGap || left == kWidth, "prompt ends 3 px before the items: " + at);
+          if (left == kWidth) check(f.title.cells == std::min(len, kTitleMaxCells), "whole prompt: " + at);
+          if (len > f.title.cells && len <= kTitleMaxCells && busy == 0)
+            check(len * kCell > left - kGap, "prompt cut without need: " + at);
+          if (len > f.title.cells) check(f.title.ellipsisAt == f.title.cells - 1, "cut prompt ends in the mark: " + at);
+          if (busy == 0) {
+            base = f;
+          } else {
+            check(f.x[kb::kMode] == base.x[kb::kMode] && f.x[kb::kRec] == base.x[kb::kRec],
+                  "nothing moves when busy comes: " + at);
+            check(f.title.cells <= base.title.cells, "busy never widens the prompt: " + at);
+          }
+          // Pixels: rows 0-8 only, every lit pixel in one region.
+          Canvas g;
+          g.fillRect(0, 0, Canvas::W, Canvas::H, 1);
+          kb::draw(g, f, 0, 1, 0);
+          check(!g.wrapped && !g.outside, "keyboard line: no wrap, nothing outside: " + at);
+          check(g.row(9) == std::string(128, '#'), "keyboard line leaves row 9 (the preview box) alone: " + at);
+          for (int y = 0; y < kb::kLineHeight; ++y)
+            for (int x = 0; x < 128; ++x) {
+              if (!g.px[y][x]) continue;
+              int owners = x < f.title.cells * kCell ? 1 : 0;
+              for (int i = 0; i < kb::kItemCount; ++i)
+                if (f.x[i] >= 0 && x >= f.x[i] && x < f.x[i] + f.w[i]) ++owners;
+              check(owners == 1, "keyboard pixel owned by one region: " + at);
+            }
+        }
+      }
+  check(cases == 6 * 2 * 32 * 2, "keyboard case count");
+  // The addendum's example: "Enter Username:" + busy + mode fits whole.
+  kb::Frame f{};
+  kb::compose("Enter Username:", "abc", false, true, f);
+  check(titleText(f.title) == "Enter Username:", "Enter Username: fits beside busy and the mode");
+  kb::compose("Caf\xC3\xA9\x01 name:", "abc", false, false, f);
+  check(titleText(f.title) == "Cafe name:", "prompt through the sanitizer: " + titleText(f.title));
+}
+
 // ---- golden frames -----------------------------------------------------------
 void dump(const char* name, const OledHeaderSpec& s, const OledHeaderStatus& st) {
   Canvas g;
   Frame f{};
   compose(s, st, "", f);
   draw(g, f, 1, 0);
+  std::printf("%s\n", name);
+  for (int y = 0; y < kHeight; ++y) std::printf("%s\n", g.row(y).c_str());
+}
+
+// The keyboard line at y 0; row 9 (the preview box's top) is printed blank.
+void dumpKeyboard(const char* name, const char* prompt, const char* mode, bool rec, bool busy) {
+  Canvas g;
+  kb::Frame f{};
+  kb::compose(prompt, mode, rec, busy, f);
+  kb::draw(g, f, 0, 1, 0);
   std::printf("%s\n", name);
   for (int y = 0; y < kHeight; ++y) std::printf("%s\n", g.row(y).c_str());
 }
@@ -305,6 +385,10 @@ void goldens() {
   dump("M5", spec("", "Automations", OledTitleCut::End, "3/12"), status("9%", 0, false, false));
   dump("M6", spec("Files>", "/system/logs/boot", OledTitleCut::KeepPrefix), status("~42%", 1, false, false));
   dump("M7", spec("", "Microphone"), status("USB", 0, true, true));
+  dumpKeyboard("K1", "Enter Password:", "abc", false, false);
+  dumpKeyboard("K2", "Enter Password:", "abc", true, true);
+  dumpKeyboard("K3", "Name for the new saved network:", "ABC", false, true);
+  dumpKeyboard("K4", "Suggestions:", "alice42", false, false);
 }
 
 }  // namespace
@@ -314,6 +398,7 @@ int main() {
   titleCases();
   itemCases();
   pixelCases();
+  keyboardCases();
   if (gFailures) {
     std::fprintf(stderr, "%d of %d header checks failed\n", gFailures, gChecks);
     return 1;

@@ -1632,7 +1632,9 @@ oledupdateinterval <ms>         - Display update interval (10-1000ms)
 oleddefaultmode <status|thermal|off>     - Mode after boot animation
 oledbootduration <ms>           - Boot animation duration (500-10000ms)
 oledautostart <0|1>             - Bring the display up at boot
-oledthermalscale <1.0-10.0>     - Thermal image scale on OLED
+oledthermalscale <1.0-10.0>     - Thermal image scale on OLED (smaller when the image would
+                                  not fit between the header bar and the footer)
+oleddump [first-row] [rows]     - Screen as text ('#' lit, '.' dark), up to 31 rows per reply (admin)
 setgamepadpassword              - Set gamepad joystick unlock pattern
 ```
 </details>

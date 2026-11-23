@@ -32,6 +32,8 @@
 #include "OLED_ConsoleBuffer.h"
 #include "OLED_TextField.h"
 #include "OLED_HeaderCore.h"  // the header status bar: layout, title cut, drawing
+#include "System_Camera_DVP.h"  // cameraCaptureBusy: the header's capture dot
+#include "System_CommandLimits.h"  // CMD_RESULT_MAX: the oleddump reply
 #include "OLED_Mode_Transcription.h"
 #include "OLED_Mode_Camera.h"
 
@@ -304,6 +306,23 @@ static bool oledHeaderVisible() {
          !oledKeyboardIsActive();
 }
 
+// The capture dot: one mark for "the microphone or the camera is in use",
+// on every screen (owner, 2026-11-22). The microphone side is the audio HAL's
+// capture phase, so it covers every reader of the shared source: recordings,
+// dictation, local transcription, the wake word and the glasses' native
+// stream. The camera side is the camera module's own busy answer (an open
+// preview/stream session or a recording). Both are plain state reads.
+static bool oledCaptureLive() {
+  bool live = false;
+#if ENABLE_MICROPHONE
+  live = live || audioCaptureActive();
+#endif
+#if ENABLE_CAMERA_SENSOR
+  live = live || cameraCaptureBusy();
+#endif
+  return live;
+}
+
 // What the bar shows besides the title. The frame and the staleness poll
 // (oledIsDirty) both collect through here, so whatever the bar shows is
 // exactly what is watched. Display task only (the unread count refreshes the
@@ -317,7 +336,7 @@ static void oledHeaderCollect(OledHeaderStatus& status) {
   const int unread = oledNotificationUnreadCount();
   status.unread = (uint8_t)(unread > 255 ? 255 : (unread < 0 ? 0 : unread));
   status.busy = oledCommandBusy();
-  status.rec = false;  // the capture dot (microphone or camera) is a later step
+  status.rec = oledCaptureLive();
 }
 
 // Signature of the status the last drawn bar showed.
@@ -326,6 +345,20 @@ static uint32_t sHeaderDrawnSig = 0;
 static uint32_t oledHeaderSignatureNow() {
   OledHeaderStatus status;
   oledHeaderCollect(status);
+  return oled_header::signature(status);
+}
+
+// The keyboard's top line shows busy and the capture dot too (owner,
+// 2026-11-22); its own signature keeps it fresh while the bar is off. Only a
+// line the last frame drew is watched (a keyboard drawn outside the frame
+// loop must not keep the frame dirty).
+static uint32_t sKeyboardLineDrawnSig = 0;
+static bool sKeyboardLineShown = false;
+
+static uint32_t oledKeyboardLineSignatureNow() {
+  OledHeaderStatus status{};
+  status.busy = oledCommandBusy();
+  status.rec = oledCaptureLive();
   return oled_header::signature(status);
 }
 
@@ -366,6 +399,25 @@ static void oledHeaderDefaultSpec(OledHeaderSpec& spec) {
     const char* espnowTitle = oledEspNowHeaderTitle();
     if (espnowTitle && espnowTitle[0]) spec.text = espnowTitle;
 #endif
+  }
+}
+
+// DEBUG_DISPLAY only, before the bar draws: a screen that left ink in the
+// header band (y 0-9) is logged once per mode, since the bar would hide it.
+// This catches computed coordinates; the host guard (test_oled_header.py)
+// checks literal ones in the sources.
+static void oledHeaderBandCheck(Adafruit_SSD1306* display) {
+  if (!display || !isDebugFlagSet(DEBUG_DISPLAY)) return;
+  static uint32_t sReported[4] = {};  // one bit per mode id below 128
+  const int mode = (int)currentOledMode;
+  if (mode < 0 || mode >= 128 || (sReported[mode >> 5] & (1u << (mode & 31)))) return;
+  for (int y = 0; y < OLED_HEADER_HEIGHT; ++y) {
+    for (int x = 0; x < DISPLAY_WIDTH; ++x) {
+      if (!display->getPixel(x, y)) continue;
+      sReported[mode >> 5] |= 1u << (mode & 31);
+      DEBUG_DISPLAYF("[OLED_HEADER] mode %d drew in y0-9 (first lit pixel %d,%d)", mode, x, y);
+      return;
+    }
   }
 }
 
@@ -1554,6 +1606,22 @@ static void oledKeyboardPrintPreview(Adafruit_SSD1306* display, int maxChars,
   }
 }
 
+// The keyboard's top line: the header core's keyboard profile (prompt cut
+// with the one-cell mark; mode text at the right edge; busy and the capture
+// dot between). Rows y..y+8; the preview box or list below is its rule.
+static void oledKeyboardDrawLine(Adafruit_SSD1306* display, int y, const char* prompt,
+                                 const char* mode) {
+  OledHeaderStatus status{};
+  status.busy = oledCommandBusy();
+  status.rec = oledCaptureLive();
+  oled_header::kb::Frame frame;
+  oled_header::kb::compose(prompt, mode, status.rec, status.busy, frame);
+  oled_header::kb::draw(*display, frame, y, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_BLACK);
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+  sKeyboardLineDrawnSig = oled_header::signature(status);
+  sKeyboardLineShown = true;
+}
+
 void oledKeyboardDisplay(Adafruit_SSD1306* display) {
   if (!display) return;
   
@@ -1565,13 +1633,15 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
   
   // If showing suggestions, render suggestion list instead of keyboard
   if (gOledKeyboardState.showingSuggestions && gOledKeyboardState.suggestionCount > 0) {
-    // Title at top
-    display->setCursor(0, keyboardStartY);
-    display->print("Suggestions:");
-    
-    // Show current input
-    display->setCursor(75, keyboardStartY);
-    oledKeyboardPrintPreview(display, 8, true);
+    // Top line: "Suggestions:" and the start of what was typed (masked
+    // fields show '*') in the mode slot.
+    char typed[oled_header::kb::kModeMaxGlyphs + 1];
+    const int typedLen = (int)strlen(gOledKeyboardState.text);
+    const int shown = typedLen < oled_header::kb::kModeMaxGlyphs ? typedLen : oled_header::kb::kModeMaxGlyphs;
+    for (int i = 0; i < shown; ++i)
+      typed[i] = gOledKeyboardState.masked ? '*' : gOledKeyboardState.text[i];
+    typed[shown] = '\0';
+    oledKeyboardDrawLine(display, keyboardStartY, "Suggestions:", typed);
     
     // List suggestions (up to 5 visible with full screen)
     int visibleCount = min(gOledKeyboardState.suggestionCount, 5);
@@ -1612,9 +1682,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
   
   // Pattern mode display (replaces grid with compass/direction input)
   if (gOledKeyboardState.mode == KEYBOARD_MODE_PATTERN) {
-    // Title at top
-    display->setCursor(0, keyboardStartY);
-    display->print(gOledKeyboardState.title);
+    oledKeyboardDrawLine(display, keyboardStartY, gOledKeyboardState.title.c_str(), "PAT");
 
     // Text preview box - show pattern as arrow characters
     display->drawRect(0, keyboardStartY + 9, 128, 11, DISPLAY_COLOR_WHITE);
@@ -1649,18 +1717,14 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
 
   // Mic mode display (replaces grid with a record control + dictation state)
   if (gOledKeyboardState.mode == KEYBOARD_MODE_MIC) {
-    display->setCursor(0, keyboardStartY);
-    display->print(gOledKeyboardState.title);
-
     const DictationSnapshot snap = dictationSnapshotNow();
 
-    // Which mic is actually live, right-aligned where the mode indicator sits
-    // on the grid pages. The wearer needs to know whether they are talking to
+    // Which mic is actually live, in the mode slot where the grid pages show
+    // their page. The wearer needs to know whether they are talking to
     // the board or to the glasses — the answer changes where they should aim
     // their voice, and it can change between one dictation and the next.
-    const char* src = snap.sourceName;
-    display->setCursor(128 - ((int)strlen(src) * 6), keyboardStartY);
-    display->print(src);
+    oledKeyboardDrawLine(display, keyboardStartY, gOledKeyboardState.title.c_str(),
+                         snap.sourceName ? snap.sourceName : "MIC");
 
     // Text preview box, same geometry as every other keyboard page.
     display->drawRect(0, keyboardStartY + 9, 128, 11, DISPLAY_COLOR_WHITE);
@@ -1720,12 +1784,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
     return;
   }
 
-  // Normal keyboard display
-  // Draw title at top
-  display->setCursor(0, keyboardStartY);
-  display->print(gOledKeyboardState.title);
-
-  // Show mode indicator at right edge (compact format)
+  // Normal keyboard display: the prompt and the keyboard page on the top line
   const char* modeStr = "";
   switch (gOledKeyboardState.mode) {
     case KEYBOARD_MODE_UPPERCASE: modeStr = "ABC"; break;
@@ -1736,9 +1795,7 @@ void oledKeyboardDisplay(Adafruit_SSD1306* display) {
     case KEYBOARD_MODE_MIC: modeStr = "MIC"; break;  // drawn by its own block
     case KEYBOARD_MODE_COUNT: break; // Should never happen
   }
-  // Right-align mode indicator (3 chars + padding)
-  display->setCursor(128 - (strlen(modeStr) * 6), keyboardStartY);
-  display->print(modeStr);
+  oledKeyboardDrawLine(display, keyboardStartY, gOledKeyboardState.title.c_str(), modeStr);
   
   // Draw text preview box
   display->drawRect(0, keyboardStartY + 9, 128, 11, DISPLAY_COLOR_WHITE);
@@ -3523,6 +3580,8 @@ bool oledIsDirty() {
   // The header's battery, USB, unread count or busy mark changed since the bar
   // was drawn: repaint even a still screen. Producers never mark dirty for it.
   if (oledHeaderVisible() && oledHeaderSignatureNow() != sHeaderDrawnSig) return true;
+  if (sKeyboardLineShown && oledKeyboardIsActive() &&
+      oledKeyboardLineSignatureNow() != sKeyboardLineDrawnSig) return true;
   return false;
 }
 
@@ -4014,6 +4073,37 @@ static bool oledFrameCommitAllowed(TransportSessionEpoch& epochOut) {
 // (BeginUiSync or a snapshot would open a bypass session when the display is
 // logged out with display auth off); epoch zero is the logged-out login
 // screen, which only a boundary replaces.
+// ---- Screen dump (oleddump) ----------------------------------------------------
+// The display task copies the frame it has just committed when a dump was
+// asked for, as logical pixels (a flipped panel reads upright); the command
+// formats that copy as text. The copy is made at the first dump and kept.
+static constexpr size_t kOledDumpBytes = (size_t)SCREEN_WIDTH * SCREEN_HEIGHT / 8;
+static std::atomic<uint32_t> sOledDumpWanted{0};
+static std::atomic<uint32_t> sOledDumpTaken{0};
+static uint8_t* sOledDumpBits = nullptr;  // row-major, one bit per pixel
+static int16_t sOledDumpW = 0, sOledDumpH = 0;
+
+static void oledDumpCapture() {
+  const uint32_t wanted = sOledDumpWanted.load(std::memory_order_acquire);
+  if (wanted == sOledDumpTaken.load(std::memory_order_relaxed)) return;
+  if (!sOledDumpBits || !oledDisplay) return;
+  int w = oledDisplay->width(), h = oledDisplay->height();
+  if (w <= 0 || h <= 0) return;
+  if ((size_t)w * (size_t)h > kOledDumpBytes * 8) h = (int)(kOledDumpBytes * 8 / (size_t)w);
+  memset(sOledDumpBits, 0, kOledDumpBytes);
+  for (int y = 0; y < h; ++y) {
+    for (int x = 0; x < w; ++x) {
+      if (oledDisplay->getPixel(x, y)) {
+        const size_t bit = (size_t)y * (size_t)w + (size_t)x;
+        sOledDumpBits[bit >> 3] |= (uint8_t)(1u << (bit & 7));
+      }
+    }
+  }
+  sOledDumpW = (int16_t)w;
+  sOledDumpH = (int16_t)h;
+  sOledDumpTaken.store(wanted, std::memory_order_release);
+}
+
 static void oledCommitFrame() {
   TransportSessionEpoch commitEpoch = kNoTransportSessionEpoch;
   if (!oledFrameCommitAllowed(commitEpoch)) {
@@ -4021,6 +4111,7 @@ static void oledCommitFrame() {
     return;
   }
   displayUpdate();
+  oledDumpCapture();  // a no-op unless oleddump asked for this frame
   if (oledSessionBoundaryPending() ||
       (commitEpoch != kNoTransportSessionEpoch &&
        !transportSessionEpochIsLive(SOURCE_LOCAL_DISPLAY, commitEpoch))) {
@@ -4221,6 +4312,7 @@ void updateOledDisplay() {
     
     // Set cursor to content area start
     gDisplay->setCursor(0, showHeader ? OLED_CONTENT_START_Y : 0);
+    sKeyboardLineShown = false;  // set again if this frame draws the keyboard's top line
 
     // DEBUG: Track render for black flash investigation
     static unsigned long renderCount = 0;
@@ -4301,6 +4393,7 @@ void updateOledDisplay() {
 
     // Draw persistent header bar (after content, so it's always on top - same pattern as footer)
     if (showHeader) {
+      oledHeaderBandCheck(gDisplay);  // DEBUG_DISPLAY: did the screen draw in y 0-9?
       oledRenderHeader(gDisplay);  // the busy hourglass is part of the bar
     }
 
@@ -6660,6 +6753,79 @@ static const char* cmd_oled_landscape(const String& args) {
 }
 #endif
 
+// oleddump [first-row] [rows]: the display canvas as text, '#' lit and '.'
+// dark, one line per pixel row, so a screen can be checked over the console or
+// HTTP without anyone looking at it. A reply holds at most 31 rows of 128
+// (CMD_RESULT_MAX); the first line says which rows and how to ask for the next.
+// Every call takes a fresh frame.
+static const char* cmd_oleddump(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  static const char kUsage[] = "Usage: oleddump [first-row] [rows]";
+  String args = argsInput;
+  args.trim();
+  int first = 0, count = 0;
+  if (args.length() > 0) {
+    const int space = args.indexOf(' ');
+    String a = space < 0 ? args : args.substring(0, space);
+    String b = space < 0 ? String() : args.substring(space + 1);
+    b.trim();
+    if (!parseIntArg(a, first) || first < 0) return kUsage;
+    if (b.length() > 0 && (!parseIntArg(b, count) || count <= 0)) return kUsage;
+  }
+  if (!gOledRunning || !oledConnected || !oledDisplay) {
+    return "Error: The display is not running. Start it with openoled, then retry.";
+  }
+  if (!ensureDebugBuffer()) return "Error: Not enough memory for the dump. Retry in a moment.";
+  if (!sOledDumpBits) {
+    sOledDumpBits = (uint8_t*)ps_alloc(kOledDumpBytes, AllocPolicy::PreferPsram, "oled.dump");
+    if (!sOledDumpBits) return "Error: Not enough memory for the dump. Retry in a moment.";
+  }
+  // Ask the display task for its next committed frame (or take the current
+  // one when this already is the display task).
+  const uint32_t ticket = sOledDumpWanted.load(std::memory_order_relaxed) + 1;
+  sOledDumpWanted.store(ticket, std::memory_order_release);
+  if (oledIsOwnerTask()) {
+    oledDumpCapture();
+  } else {
+    oledMarkDirty();
+    const uint32_t start = millis();
+    while (sOledDumpTaken.load(std::memory_order_acquire) != ticket &&
+           (uint32_t)(millis() - start) < 1500) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+  }
+  if (sOledDumpTaken.load(std::memory_order_acquire) != ticket) {
+    return "Error: No frame reached the display within 1.5 s. Retry in a moment.";
+  }
+  const int w = sOledDumpW, h = sOledDumpH;
+  if (first >= h) return "Error: first-row is past the last row of the display.";
+  char* out = getDebugBuffer();
+  const size_t cap = GLOBAL_DEBUG_BUFFER_SIZE < CMD_RESULT_MAX ? GLOBAL_DEBUG_BUFFER_SIZE : CMD_RESULT_MAX;
+  const int fitRows = (int)((cap - 1 - 64) / (size_t)(w + 1));  // 64: room for the first line
+  int rows = h - first;
+  if (rows > fitRows) rows = fitRows;
+  if (count > 0 && count < rows) rows = count;
+  const int last = first + rows - 1;
+  int n;
+  if (last + 1 < h) {
+    n = snprintf(out, 64, "oleddump %dx%d rows %d-%d (next: oleddump %d)\n", w, h, first, last, last + 1);
+  } else {
+    n = snprintf(out, 64, "oleddump %dx%d rows %d-%d\n", w, h, first, last);
+  }
+  if (n < 0 || n >= 64) n = 0;
+  size_t pos = (size_t)n;
+  for (int y = first; y <= last; ++y) {
+    for (int x = 0; x < w; ++x) {
+      const size_t bit = (size_t)y * (size_t)w + (size_t)x;
+      out[pos++] = (sOledDumpBits[bit >> 3] & (1u << (bit & 7))) ? '#' : '.';
+    }
+    out[pos++] = '\n';
+  }
+  if (pos > 0) --pos;  // no trailing newline
+  out[pos] = '\0';
+  return out;
+}
+
 // Columns: name, help, requiresAdmin, handler, usage[, requiresSuperAdmin]
 const CommandEntry oledCommands[] = {
   { "oledcameraread", "Read the local camera preview state (JSON)", false, cmd_oledcameraread },
@@ -6684,6 +6850,10 @@ const CommandEntry oledCommands[] = {
   { "oledbrightness", "Display brightness: <0-255>", true, cmd_oled_brightness, "Usage: oledbrightness <0..255>" },
   { "oledflip",       "Flip display 180°: [on|off|toggle]", true, cmd_oled_flip, "Usage: oledflip [on|off|toggle]" },
   { "oledthermalscale", "Thermal image scale: <1.0-10.0>", true, cmd_oled_thermalscale, "Usage: oledthermalscale <1.0..10.0>" },
+  { "oleddump", "Display canvas as text ('#' lit, '.' dark): [first-row] [rows]", true, cmd_oleddump,
+    "Usage: oleddump [first-row] [rows]\n"
+    "Example: oleddump 0 10   (the header bar)\n"
+    "A reply holds up to 31 rows; its first line names the next first-row." },
 };
 
 const size_t oledCommandsCount = sizeof(oledCommands) / sizeof(oledCommands[0]);

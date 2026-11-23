@@ -518,10 +518,9 @@ void displaySystemStatusRendered() {
   if (!oledDisplay || !oledConnected) return;
   
   if (!systemStatusRenderData.valid) {
-    oledDisplay->clearDisplay();
     oledDisplay->setTextSize(1);
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
-    oledDisplay->setCursor(0, 0);
+    oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("System Error");
     return;
   }
