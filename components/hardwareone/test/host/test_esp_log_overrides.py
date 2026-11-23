@@ -168,7 +168,7 @@ def source_checks() -> None:
     rssi = extract_block(espnow, "static int8_t heartbeatStaRssi()")
     order(rssi, "WiFi.status() != WL_CONNECTED", "return (int8_t)-127;", "esp_wifi_sta_get_ap_info(&ap)")
     require(espnow.count("esp_wifi_sta_get_ap_info(") == 1, "System_ESPNow.cpp asks the AP in one place")
-    require("hb.rssi      = heartbeatStaRssi();" in extract_block(espnow, "static void v4FillHeartbeat("),
+    require("hb.rssi      = heartbeatStaRssi();" in extract_block(espnow, "static void v4FillHeartbeat(V4PayloadHeartbeat& hb)"),
             "the heartbeat builder uses the joined-only lookup")
     require("phb.rssi = heartbeatStaRssi();" in espnow, "the bond heartbeat uses the joined-only lookup")
     snap = settings[settings.index("// wifiPrimarySSID: runtime-only"):]

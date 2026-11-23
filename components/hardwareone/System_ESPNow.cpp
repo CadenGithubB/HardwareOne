@@ -782,7 +782,7 @@ bool gEspNowInRelayDelivery = false;
 // The per-peer heartbeat fields (echo, our RSSI of the peer) and the record of
 // the heartbeat's msgId for the peer's echo; then the send, sealed when a
 // session with the peer is ACTIVE, else group-tagged (1.0 step 8).
-static void v4FillHeartbeat(V4PayloadHeartbeat& hb);
+static void v4FillHeartbeat(V4PayloadHeartbeat&);
 static void v4HeartbeatFor(V4PayloadHeartbeat& hb, const uint8_t* mac);
 static void v4HeartbeatSent(const uint8_t* mac, uint32_t msgId);
 static bool v4SendHeartbeatTo(const uint8_t* mac, const V4PayloadHeartbeat& hb, uint32_t msgId, bool ackReq);
