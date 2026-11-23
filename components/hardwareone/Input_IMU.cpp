@@ -434,11 +434,14 @@ const char* cmd_imuinputtilt(const String& argsInput) {
   if (text.length() > 0) {
     int degrees = 0;
     if (!parseIntArg(text, degrees)) return kCommandReplyNotANumber;
-    if (degrees < 8 || degrees > 40) return "Error: The tilt angle must be 8..40 degrees.";
+    if (degrees < 8 || degrees > 40) return "Error: The tilt dead zone must be 8..40 degrees.";
     setSetting(gSettings.imuInputTiltDeg, degrees);
   }
-  snprintf(getDebugBuffer(), 1024, "[IMU input] Tilt angle: %d degrees from the centre pose moves the joystick",
-           gSettings.imuInputTiltDeg);
+  snprintf(getDebugBuffer(), 1024,
+           "[IMU input] Tilt dead zone: %d degrees. Leaning less than that from the centre pose does nothing; more "
+           "moves the joystick (it lets go again below %d). Larger: steadier, needs a bigger lean. Smaller: more "
+           "sensitive.",
+           gSettings.imuInputTiltDeg, gSettings.imuInputTiltDeg - 4);
   return getDebugBuffer();
 }
 
@@ -492,7 +495,7 @@ const CommandEntry imuInputCommands[] = {
   { "imuinputzero",    "Take the present pose as the joystick's centre (a shake does the same, with a prompt).", true, cmd_imuinputzero, "Usage: imuinputzero" },
   { "imuinputtapms",   "Tap window in ms: a button arrives this long after its last tap <200..800>", true, cmd_imuinputtapms, "Usage: imuinputtapms [200..800]" },
   { "imuinputtapmerge", "Tap flags closer than this many ms are one knock (its rebound) <0..300>", true, cmd_imuinputtapmerge, "Usage: imuinputtapmerge [0..300]" },
-  { "imuinputtilt",    "Tilt angle in degrees that moves the joystick <8..40>", true, cmd_imuinputtilt, "Usage: imuinputtilt [8..40]" },
+  { "imuinputtilt",    "Tilt dead zone in degrees: a smaller lean does nothing, a larger one moves the joystick <8..40>", true, cmd_imuinputtilt, "Usage: imuinputtilt [8..40]" },
   { "imuinputshake",   "A shake calibrates the tilt: set the device down, hold still 3 s [on|off]", true, cmd_imuinputshake, "Usage: imuinputshake [on|off]" },
   { "imuinputswapxy",  "Swap the tilt axes [on|off|toggle]", true, cmd_imuinputswapxy, "Usage: imuinputswapxy [on|off|toggle]" },
   { "imuinputinvertx", "Invert left/right tilt [on|off|toggle]", true, cmd_imuinputinvertx, "Usage: imuinputinvertx [on|off|toggle]" },
@@ -505,7 +508,7 @@ const size_t imuInputCommandsCount = sizeof(imuInputCommands) / sizeof(imuInputC
 static const SettingEntry imuInputSettingEntries[] = {
   { "imuInputTapWindowMs", SETTING_INT,  &gSettings.imuInputTapWindowMs, 450, 0, nullptr, 200, 800, "Tap window (ms)",       nullptr, false, nullptr, "imuinputtapms" },
   { "imuInputTapMergeMs",  SETTING_INT,  &gSettings.imuInputTapMergeMs,  0,   0, nullptr, 0,   300, "Tap merge (ms)",        nullptr, false, nullptr, "imuinputtapmerge" },
-  { "imuInputTiltDeg",     SETTING_INT,  &gSettings.imuInputTiltDeg,      15, 0, nullptr, 8,   40,  "Tilt angle (degrees)",  nullptr, false, nullptr, "imuinputtilt" },
+  { "imuInputTiltDeg",     SETTING_INT,  &gSettings.imuInputTiltDeg,      15, 0, nullptr, 8,   40,  "Tilt dead zone (degrees)", nullptr, false, nullptr, "imuinputtilt" },
   { "imuInputShakeCalibrate",  SETTING_BOOL, &gSettings.imuInputShakeCalibrate,    1, 0, nullptr, 0,   1,   "Shake calibrates tilt",        nullptr, false, nullptr, "imuinputshake" },
   { "imuInputSwapXY",      SETTING_BOOL, &gSettings.imuInputSwapXY,        0, 0, nullptr, 0,   1,   "Swap tilt axes",        nullptr, false, nullptr, "imuinputswapxy" },
   { "imuInputInvertX",     SETTING_BOOL, &gSettings.imuInputInvertX,       0, 0, nullptr, 0,   1,   "Invert left/right tilt", nullptr, false, nullptr, "imuinputinvertx" },

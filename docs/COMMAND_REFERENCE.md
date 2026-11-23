@@ -658,7 +658,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `imuinputswapxy` | A | Swap the tilt axes [on\|off\|toggle]<br/>`Usage: imuinputswapxy [on\|off\|toggle]` |
 | `imuinputtapmerge` | A | Tap flags closer than this many ms are one knock (its rebound) <0..300><br/>`Usage: imuinputtapmerge [0..300]` |
 | `imuinputtapms` | A | Tap window in ms: a button arrives this long after its last tap <200..800><br/>`Usage: imuinputtapms [200..800]` |
-| `imuinputtilt` | A | Tilt angle in degrees that moves the joystick <8..40><br/>`Usage: imuinputtilt [8..40]` |
+| `imuinputtilt` | A | Tilt dead zone in degrees: a smaller lean does nothing, a larger one moves the joystick <8..40><br/>`Usage: imuinputtilt [8..40]` |
 | `imuinputzero` | A | Take the present pose as the joystick's centre (a shake does the same, with a prompt).<br/>`Usage: imuinputzero` |
 
 ## apds
