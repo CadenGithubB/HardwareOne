@@ -533,18 +533,24 @@ static void v4_reasm_release(const uint8_t* src, uint32_t msgId) {
   }
 }
 
+// One fragment waiting for its ACK (1.0): matched on (peer, ackFor, fragIndex)
+// and the class the send expects (G5): a sealed send takes only a sealed ACK
+// in that peer's session, never a tagged one, whoever tags it.
 struct V4FragAckWait {
   bool     active;
   uint32_t msgId;
   uint8_t  fragIndex;
   uint8_t  dstMac[6];
+  bool     expectSealed;  // the class of ACK this send takes
+  volatile uint8_t status;  // the ACK's status (0 = accepted), valid once acked
   volatile bool acked;   // Set true by RX ACK handler; polled by TX task
   uint32_t sentMs;
 };
 
 EXT_RAM_BSS_ATTR static V4FragAckWait gV4FragAckWait[V4_FRAG_ACK_WAIT_MAX];  // PSRAM: espnow_task/sender tasks only; RX callback never touches it (verified 2026-08-19)
 
-static V4FragAckWait* v4_frag_ack_alloc(const uint8_t* dst, uint32_t msgId, uint8_t fragIdx) {
+static V4FragAckWait* v4_frag_ack_alloc(const uint8_t* dst, uint32_t msgId, uint8_t fragIdx,
+                                        bool expectSealed) {
   // Serialize the slot scan + claim against the RX ACK handler (which marks
   // acked under the same lock) and other fragmented senders. Fragmented sends
   // run off espnow_task (cmd_exec / SENSOR_BCAST_TASK), so this array is
@@ -556,6 +562,8 @@ static V4FragAckWait* v4_frag_ack_alloc(const uint8_t* dst, uint32_t msgId, uint
       gV4FragAckWait[i].msgId     = msgId;
       gV4FragAckWait[i].fragIndex = fragIdx;
       gV4FragAckWait[i].acked     = false;
+      gV4FragAckWait[i].status    = 0;
+      gV4FragAckWait[i].expectSealed = expectSealed;
       gV4FragAckWait[i].sentMs    = 0;
       memcpy(gV4FragAckWait[i].dstMac, dst, 6);
       gV4FragAckWait[i].active    = true;
@@ -755,6 +763,12 @@ static volatile uint32_t gEspNowRxDrops = 0;
 //     firmware does not know.
 //   rxRevokedDrops: a frame whose radio source (gate 1) or proven origin
 //     (gate 2) is on the revoked list (espnowrevoked).
+//   rxPlaintextDrops: a frame with neither a session seal nor a group tag
+//     whose opcode is not one of the six handshake frames (10-15): 1.0 sends
+//     nothing else plaintext (gate 1).
+//   rxAckRefused: an ACK that named a frame we wait for but came from another
+//     device or in the other class (a tagged ACK where a sealed one is
+//     expected), or a tagged ACK whose origin is not its radio sender.
 //   rxUnknownMeshIdDrops: a frame the mesh gate dropped because its mesh id is
 //     0 or none of this device's enabled meshes has it (a neighbouring fleet,
 //     or a device on this mesh with another passphrase or label), with the
@@ -762,6 +776,8 @@ static volatile uint32_t gEspNowRxDrops = 0;
 static uint32_t gEspNowRxLenDrops = 0;
 static uint32_t gEspNowRxMustUnderstandDrops = 0;
 static uint32_t gEspNowRxRevokedDrops = 0;
+static uint32_t gEspNowRxPlaintextDrops = 0;
+static uint32_t gEspNowRxAckRefused = 0;
 static uint32_t gEspNowRxUnknownMeshIdDrops = 0;
 static uint16_t gEspNowRxUnknownMeshIdLast = 0;
 static uint8_t gEspNowRxUnknownMeshIdLastMac[6] = {};
@@ -2772,6 +2788,14 @@ static bool v4_group_tag(uint8_t out[ESPNOW_V4_BROADCAST_AUTH_TAG_LEN], const ui
   return ok;
 }
 
+// The only opcodes that travel plaintext in 1.0 (no session seal, no group
+// tag): the six handshake frames, which carry their own HMAC or signature.
+// The receive path drops every other plaintext frame (gate 1) and the send
+// path never builds one (v4_send_frame_ex).
+static inline bool v4_plaintext_type_allowed(uint8_t type) {
+  return type >= ESPNOW_V4_TYPE_KEY_EX_HELLO && type <= ESPNOW_V4_TYPE_SESSION_REKEY;
+}
+
 bool v4_send_frame(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
                    const uint8_t* payload, uint16_t payloadLen, uint8_t ttl) {
   return v4_send_frame_ex(dst, type, flags, msgId, payload, payloadLen, ttl, /*allowRoute=*/true);
@@ -2811,6 +2835,12 @@ static bool v4_send_frame_ex(const uint8_t* dst, uint8_t type, uint16_t flags, u
   // mesh group key. Receivers verify and silently drop forgeries. Tag is part of
   // the on-wire payload (CRC covers it too, as a transport-level check).
   uint16_t finalPayloadLen = payloadLen;
+  if (!(h.flags & ESPNOW_V4_FLAG_BROADCAST_AUTH) && !v4_plaintext_type_allowed(type)) {
+    // 1.0: only the handshake goes out plaintext; a receiver drops any other
+    // plaintext frame. (Sealed frames are built by the session senders.)
+    DEBUG_ESPNOWF("[V4_TX] type=%u not sent: only the handshake frames go out without a group tag", type);
+    return false;
+  }
   if ((h.flags & ESPNOW_V4_FLAG_BROADCAST_AUTH) && h.meshFingerprint != 0) {
     const MeshDerivedKeys* mk = meshKeysFindByFingerprint(h.meshFingerprint);
     if (mk && mk->valid) {
@@ -2831,11 +2861,12 @@ static bool v4_send_frame_ex(const uint8_t* dst, uint8_t type, uint16_t flags, u
       }
       finalPayloadLen = (uint16_t)(payloadLen + ESPNOW_V4_BROADCAST_AUTH_TAG_LEN);
     } else {
-      // No mesh group key available — strip the flag and send plaintext.
-      // Happens during early-boot before mesh keys derive, or if the peer
-      // belongs to a mesh we don't have the passphrase for (shouldn't reach
-      // v4_broadcast in that case, but defensive).
-      h.flags = (uint16_t)(h.flags & ~ESPNOW_V4_FLAG_BROADCAST_AUTH);
+      // No mesh group key yet (early boot, before the keys derive): not sent.
+      // (Before 1.0 it went out plaintext instead, which every 1.0
+      // receiver drops at its plaintext gate.)
+      DEBUG_ESPNOWF("[V4_TX] type=%u not sent: no group key for mesh 0x%04X yet", type,
+                    (unsigned)h.meshFingerprint);
+      return false;
     }
   }
 
@@ -3530,11 +3561,10 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
         return false;
       }
 
-      // Allocate ACK wait slot — same machinery as plaintext fragmentation.
-      // ACKs themselves are plaintext (TYPE_ACK opcode), matched by
-      // (msgId, fragIndex). The encrypted-vs-plaintext distinction is
-      // invisible at the ACK layer.
-      V4FragAckWait* ackWait = v4_frag_ack_alloc(dst, msgId, fragIdx);
+      // Allocate the ACK wait slot. The answer is a sealed ACK in this
+      // peer's session naming (msgId, fragIdx) in its payload (1.0); a
+      // tagged ACK, or one from another device, does not complete it.
+      V4FragAckWait* ackWait = v4_frag_ack_alloc(dst, msgId, fragIdx, /*expectSealed=*/true);
       if (!ackWait) {
         WARN_ESPNOWF("[V4_ENC_FRAG_TX] no ACK slot for frag %u/%u", fragIdx + 1, fragCount);
         return false;
@@ -3555,16 +3585,25 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
       if (gEspNow) { gEspNow->routerMetrics.v4FragTx++; }
 
       uint32_t waitStart = millis();
+      uint8_t refusedStatus = 0;
       while ((millis() - waitStart) < ACK_TIMEOUT_MS) {
         if (ackWait->acked) {
-          fragSent = true;
-          DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] ✓ frag %u/%u ACK in %lu ms",
-                 fragIdx + 1, fragCount, (unsigned long)(millis() - waitStart));
+          refusedStatus = ackWait->status;
+          fragSent = refusedStatus == 0;
+          DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] frag %u/%u ACK in %lu ms (status %u)",
+                 fragIdx + 1, fragCount, (unsigned long)(millis() - waitStart), (unsigned)refusedStatus);
           break;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
       }
       { EspNowTxGuard g("fragAckFree"); ackWait->active = false; }  // free under lock (poll above was lock-free)
+      if (refusedStatus != 0) {
+        // The receiver answered and refused this fragment (an ACK with a
+        // status): sending it again would be refused again.
+        WARN_ESPNOWF("[V4_ENC_FRAG_TX] frag %u/%u refused by the receiver (status %u) — aborting send",
+                     fragIdx + 1, fragCount, (unsigned)refusedStatus);
+        return false;
+      }
 
       if (!fragSent) {
         WARN_ESPNOWF("[V4_ENC_FRAG_TX] ✗ frag %u/%u ACK timeout (retry %u)",
@@ -3679,13 +3718,92 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
   return false;
 }
 
-static bool v4_send_ack(const uint8_t* dst, uint32_t ackFor) {
-  char dstMac[18];
-  macToDisplay(dst, dstMac, sizeof(dstMac));
-  DEBUG_ESPNOWF("[V4_ACK_TX] Sending ACK to %s for msgId=%lu", dstMac, (unsigned long)ackFor);
-  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_ACK, 0, ackFor, nullptr, 0, 1);
-  DEBUG_ESPNOWF("[V4_ACK_TX] Result: %s", result ? "SUCCESS" : "FAILED");
-  return result;
+// ---- ACK (1.0, DESIGN 2.2) --------------------------------------------------
+// Every ACK is a frame of its own: its own msgId, an 8-byte V4PayloadAck naming
+// the frame answered (ackFor, fragIndex, fragCount, status), and the class of
+// the frame it answers. A sealed frame gets a sealed ACK in the same session; a
+// group-tagged frame a tagged ACK. There is no plaintext ACK, and a plaintext
+// frame (only the handshake, opcodes 10-15) is never ACKed.
+//
+// v4_queue_ack runs on the receive path (espnow_task, and cmd_exec for the
+// deferred handlers): it only fills the payload and hands it to the TX
+// dispatcher's ACK pool (espnowtx::sendAck), because sealing needs the session
+// TX lock and builds a frame. An ACK that finds no pool slot or no queue room is
+// silence (espnowstats txAckDropped). sessionId 0 asks the dispatcher for the
+// peer's current session (the deferred handlers no longer hold the frame's).
+static bool v4_queue_ack(const uint8_t* dst, bool sealed, uint16_t sessionId, uint32_t ackFor,
+                         uint8_t fragIndex, uint8_t fragCount, uint8_t status) {
+  if (!dst) return false;
+  V4PayloadAck a = {};
+  a.ackFor = ackFor;
+  a.fragIndex = fragIndex;
+  a.fragCount = fragCount ? fragCount : (uint8_t)1;
+  a.status = status;
+  a.flags = 0;
+  DEBUG_ESPNOWF("[V4_ACK_TX] %s ACK to " MAC_FMT " for msgId=%lu frag %u/%u status=%u",
+                sealed ? "sealed" : "tagged", MAC_ARGS(dst), (unsigned long)ackFor,
+                (unsigned)a.fragIndex + 1, (unsigned)a.fragCount, (unsigned)status);
+  return espnowtx::sendAck(dst, sealed ? (uint16_t)ESPNOW_V4_FLAG_SESSION_FRAME
+                                       : (uint16_t)ESPNOW_V4_FLAG_BROADCAST_AUTH,
+                           sessionId, reinterpret_cast<const uint8_t*>(&a));
+}
+
+// The ACK of a sealed single frame a deferred handler answers again after its
+// work (USER_SYNC, a completed file): same session class, the peer's current
+// session. (Step 5b removes these second ACKs.)
+static bool v4_queue_sealed_ack(const uint8_t* dst, uint32_t ackFor) {
+  return v4_queue_ack(dst, /*sealed=*/true, /*sessionId=*/0, ackFor, 0, 1, 0);
+}
+
+// Runs on the espnow_tx dispatcher (JOB_ACK). Builds the ACK frame with its own
+// msgId and sends it sealed or tagged, routed like any unicast (an ACK is
+// on the routed list; it is never flooded: ttl 1).
+bool v4_emit_ack(const uint8_t* dst, uint16_t classFlag, uint16_t sessionId, const uint8_t* ack) {
+  if (!dst || !ack) return false;
+  if (classFlag == ESPNOW_V4_FLAG_BROADCAST_AUTH) {
+    // Tagged: v4_send_frame appends the group tag; without a group key it
+    // refuses (no plaintext ACK, v4_send_frame_ex).
+    return v4_send_frame(dst, ESPNOW_V4_TYPE_ACK, ESPNOW_V4_FLAG_BROADCAST_AUTH, generateMessageId(),
+                         ack, (uint16_t)sizeof(V4PayloadAck), 1);
+  }
+  if (classFlag != ESPNOW_V4_FLAG_SESSION_FRAME) return false;
+  EspNowRuntimeOpGuard runtimeOp;
+  if (!runtimeOp.held()) return false;
+  SessionState* s = nullptr;
+  if (sessionId != 0) {
+    s = sessionFindBySessionId(sessionId, dst);
+  } else {
+    const PeerIdentity* pid = peerIdentityFindByMac(dst);
+    s = pid ? sessionFindByPeer(dst, pid->meshId) : nullptr;
+  }
+  if (!s) {
+    DEBUG_ESPNOWF("[V4_ACK_TX] no session %u with " MAC_FMT " any more: ACK not sent",
+                  (unsigned)sessionId, MAC_ARGS(dst));
+    return false;
+  }
+  const uint16_t meshId = fingerprintForPeer(dst);
+  if (meshId == 0) return false;
+  uint8_t frame[sizeof(EspNowV4Header) + sizeof(V4PayloadAck) + ESPNOW_V4_AEAD_TAG_LEN];
+  EspNowV4Header* h = reinterpret_cast<EspNowV4Header*>(frame);
+  memset(h, 0, sizeof(*h));
+  h->magic = (uint16_t)ESPNOW_V4_MAGIC;
+  h->ver = ESPNOW_V4_VERSION;
+  h->type = ESPNOW_V4_TYPE_ACK;
+  h->flags = 0;  // sessionWrapAck ORs in SESSION_FRAME; an ACK never carries ACK_REQ
+  h->headerLen = (uint8_t)sizeof(EspNowV4Header);
+  h->msgId = generateMessageId();
+  espnowSelfStaMac(h->origin);
+  h->ttl = 1;
+  h->fragIndex = 0;
+  h->fragCount = 1;
+  h->meshFingerprint = meshId;
+  // The ACK-only exception: sealed also while this session is REKEYING, under
+  // the current TX key, with frameSeq taken under the TX lock.
+  if (!sessionWrapAck(s, h, ack, (uint16_t)sizeof(V4PayloadAck), frame + sizeof(EspNowV4Header))) {
+    return false;
+  }
+  captureEspNowFrame("TX", dst, 0, frame, (int)sizeof(frame));
+  return v4_radio_emit(dst, frame, sizeof(frame), /*allowRoute=*/true);
 }
 
 // Tell a sender that a file transfer it started will not complete.
@@ -3703,50 +3821,6 @@ static bool v4_send_file_cancel(const uint8_t* dst, uint32_t transferMsgId, uint
                                (const uint8_t*)&p, sizeof(p), 1);
 }
 
-// Send ACK for a specific fragment
-static bool v4_send_frag_ack(const uint8_t* dst, uint32_t msgId, uint8_t fragIndex, uint8_t fragCount) {
-  char dstMac[18];
-  macToDisplay(dst, dstMac, sizeof(dstMac));
-  DEBUG_ESPNOWF("[V4_FRAG_ACK_TX] Sending fragment ACK to %s", dstMac);
-  DEBUG_ESPNOWF("[V4_FRAG_ACK_TX] msgId=%lu fragIdx=%u fragCnt=%u",
-         (unsigned long)msgId, fragIndex, fragCount);
-  
-  // Build ACK frame with fragment info in header
-  uint8_t myMac[6];
-  espnowSelfStaMac(myMac);
-  
-  EspNowV4Header h = {};
-  h.magic = (uint16_t)ESPNOW_V4_MAGIC;
-  h.ver = ESPNOW_V4_VERSION;
-  h.type = ESPNOW_V4_TYPE_ACK;
-  h.flags = 0;
-  h.headerLen = (uint8_t)sizeof(EspNowV4Header);
-  h.msgId = msgId;
-  memcpy(h.origin, myMac, 6);
-  h.ttl = 1;
-  h.fragIndex = fragIndex;
-  h.fragCount = fragCount;
-  h.meshFingerprint = fingerprintForPeer(dst);  // ACK rides the requester's mesh
-  if (h.meshFingerprint == 0) return false;  // no mesh id: receivers would drop it
-  h.crc16 = 0;
-
-  DEBUG_ESPNOWF("[V4_FRAG_ACK_TX] Calling esp_now_send: headerLen=%u", (unsigned)sizeof(h));
-  captureEspNowFrame("TX", dst, 0, (const uint8_t*)&h, (int)sizeof(h));
-  // ttl=1 above is the INNER frame's budget ("never flood an ACK"). When dst is
-  // a routed peer the envelope carries its own hop budget, so per-fragment ACKs
-  // still make it home over multiple hops.
-  esp_err_t result = v4_radio_emit(dst, (const uint8_t*)&h, sizeof(h), /*allowRoute=*/true)
-                         ? ESP_OK : ESP_FAIL;
-  
-  if (result == ESP_OK) {
-    DEBUG_ESPNOWF("[V4_FRAG_ACK_TX] ✓ Fragment ACK sent successfully");
-  } else {
-    DEBUG_ESPNOWF("[V4_FRAG_ACK_TX] ✗ Fragment ACK send failed: esp_err=%d", result);
-  }
-  
-  return (result == ESP_OK);
-}
-
 // Sender functions for mesh system messages
 
 // (TIME_SYNC is sent by espnowMeshTimeSendTick in System_ESPNow_MeshTime.cpp:
@@ -3762,11 +3836,11 @@ static bool v4_send_topo_request(const uint8_t* dst, uint32_t reqId) {
   macToDisplay(dst, dstMac, sizeof(dstMac));
   DEBUG_ESPNOW_TOPOF("[V4_TX_TOPO_REQ] Sending to %s msgId=%lu reqId=%lu",
          dstMac, (unsigned long)msgId, (unsigned long)reqId);
-  // Keep topology on its established plaintext V4 transport. Moving this
-  // multi-frame exchange through the one-deep encrypted pending queue would
-  // both break mixed-firmware discovery and overwrite START/PEER frames while
-  // a session is being established.
-  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_REQ, 0, msgId,
+  // Topology stays off the one-deep encrypted pending queue (it would
+  // overwrite START/PEER frames while a session is being established), but it
+  // is group-tagged: 1.0 receivers drop every plaintext frame but the
+  // handshake (step 9 seals TOPO_*).
+  bool result = v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_REQ, ESPNOW_V4_FLAG_BROADCAST_AUTH, msgId,
                               (const uint8_t*)&payload, sizeof(payload), 2);
   DEBUG_ESPNOW_TOPOF("[V4_TX_TOPO_REQ] Result: %s", result ? "SUCCESS" : "FAILED");
   return result;
@@ -4023,7 +4097,7 @@ static bool v4_send_topo_start(const uint8_t* dst, uint32_t reqId, uint8_t peerC
   memset(payload.reserved, 0, sizeof(payload.reserved));
   
   uint32_t msgId = generateMessageId();
-  return v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_START, 0, msgId,
+  return v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_START, ESPNOW_V4_FLAG_BROADCAST_AUTH, msgId,  // group-tagged (1.0)
                        (const uint8_t*)&payload, sizeof(payload), 2);
 }
 
@@ -4043,7 +4117,7 @@ static bool v4_send_topo_peer(const uint8_t* dst, uint32_t reqId, uint8_t peerIn
   devicename::putField(payload.name, peerName);
   
   uint32_t msgId = generateMessageId();
-  return v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_PEER, 0, msgId,
+  return v4_send_frame(dst, ESPNOW_V4_TYPE_TOPO_PEER, ESPNOW_V4_FLAG_BROADCAST_AUTH, msgId,  // group-tagged (1.0)
                        (const uint8_t*)&payload, sizeof(payload), 2);
 }
 
@@ -4830,10 +4904,8 @@ static void v4h_heartbeat(const V4RxCtx& ctx) {
       }
     }
   }
-  // Send ACK if requested
-  if (ctx.h->flags & ESPNOW_V4_FLAG_ACK_REQ) {
-    v4_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
-  }
+  // (No ACK here: the receive path answered ACK_REQ before dispatch, in the
+  // frame's own class. This second, plaintext ACK went in 1.0 step 5a.)
 }
 
 // SENSOR_STATUS: which sensors the sender has and is streaming. The receive
@@ -5956,7 +6028,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
   if (!w->isSessionEncrypted) {
     ERROR_ESPNOWF("[USER_SYNC] SECURITY: Rejected from %s — must be session-encrypted", deviceName);
     broadcastOutput("[ESP-NOW] SECURITY: User sync rejected - encryption required");
-    v4_send_ack(srcAddr, msgId);
+    v4_queue_sealed_ack(srcAddr, msgId);
     return;
   }
 
@@ -5964,7 +6036,7 @@ static void doUserSyncWork(const DeferredUserSyncWork* w) {
   if (!gSettings.espnowUserSyncEnabled) {
     WARN_ESPNOWF("[USER_SYNC] Disabled — rejecting from %s", deviceName);
     broadcastOutput("[ESP-NOW] User sync DISABLED - enable with 'espnowusersync on'");
-    v4_send_ack(srcAddr, msgId);
+    v4_queue_sealed_ack(srcAddr, msgId);
     return;
   }
 
@@ -6751,7 +6823,7 @@ static void fileWriterFinalizeJob(void* arg) {
     }
 #endif
     if (gEspNow) gEspNow->fileTransfersReceived++;
-    v4_send_ack(sndMac, msgId);
+    v4_queue_sealed_ack(sndMac, msgId);
   } else {
     // Drained/closed/renamed but something failed — correct the fire-and-forget
     // sender instead of letting it assume success.
@@ -7070,7 +7142,7 @@ static void v4h_file_end(const V4RxCtx& ctx) {
     logFileTransferEvent((uint8_t*)sndMac, senderMacStr.c_str(), filename, MSG_FILE_RECV_FAILED);
   }
 
-  v4_send_ack(ctx.recv_info->src_addr, ctx.h->msgId);
+  v4_queue_sealed_ack(ctx.recv_info->src_addr, ctx.h->msgId);
   fileSlotsRelease(slot);
 }
 
@@ -7165,11 +7237,14 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
 bool gEspNowInRelayDelivery = false;
 
 // Channel follow, from the ACK branch: the ACK of this worker's last probe to
-// its master. A plaintext ACK only parks the sweep on its dwell (Confirming);
-// a trusted frame must follow before the channel is locked.
-static void espnowChFollowNoteAck(const esp_now_recv_info* recv_info, uint32_t msgId) {
+// its master, matched on ackFor (1.0). The probe is group-tagged, so its ACK is
+// a tagged ACK from the master's radio address: that proves only mesh
+// membership, so it parks the sweep on its dwell (Confirming); a trusted
+// (sealed) frame must follow before the channel is locked.
+static void espnowChFollowNoteAck(const esp_now_recv_info* recv_info, uint32_t ackFor, bool sealed) {
   if (gEspNowInRelayDelivery) return;  // a probe is one radio hop: its ACK never arrives routed
-  if (!gChFollowProbeMsgId || msgId != gChFollowProbeMsgId || !gChFollowMasterRank ||
+  if (sealed) return;  // the probe is tagged: its ACK is tagged too
+  if (!gChFollowProbeMsgId || ackFor != gChFollowProbeMsgId || !gChFollowMasterRank ||
       memcmp(recv_info->src_addr, gChFollowMasterMac, 6) != 0) return;
   gChFollowProbeMsgId = 0;
   gChFollow.probeAcked((uint32_t)millis(), recv_info->rx_ctrl ? (uint8_t)recv_info->rx_ctrl->channel : 0);
@@ -8644,6 +8719,76 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
   return true;
 }
 
+// An ACK frame (1.0, DESIGN 2.2 and 3.3), after the plaintext gate, the
+// authentication and the revoked gates. `sealed`: it opened in a session with
+// its radio sender; otherwise it carried a valid group tag. Never answered,
+// deduplicated or flooded. Each waiter takes only the ACK it can trust:
+//   - a fragment waiter: (peer, ackFor, fragIndex) and the class its send
+//     expects (a sealed send: a sealed ACK from that peer's session);
+//   - tracked single sends (sendStatus*) and the app ping are sealed sends:
+//     sealed ACKs only;
+//   - broadcast ACK tracking and the channel-follow probe are group-tagged
+//     sends: tagged ACKs only.
+// A tagged ACK proves mesh membership, not which member sent it, so it must at
+// least come from the device it names as its origin.
+static void v4_rx_ack(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
+                      const uint8_t* payload, uint16_t payloadLen, bool sealed) {
+  if (payloadLen != sizeof(V4PayloadAck)) {
+    gEspNowRxLenDrops++;
+    return;
+  }
+  const uint8_t* peer = recv_info->src_addr;
+  if (!sealed && memcmp(h->origin, peer, 6) != 0) {
+    gEspNowRxAckRefused++;
+    return;
+  }
+  V4PayloadAck a;
+  memcpy(&a, payload, sizeof(a));
+  DEBUG_ESPNOWF("[V4_ACK_RX] %s ACK from " MAC_FMT " for msgId=%lu frag %u/%u status=%u",
+                sealed ? "sealed" : "tagged", MAC_ARGS(peer), (unsigned long)a.ackFor,
+                (unsigned)a.fragIndex + 1, (unsigned)a.fragCount, (unsigned)a.status);
+
+  noteMeshPeerRxActivity(peer, EspNowMeshRxKind::Ack, -128,
+                         recv_info->rx_ctrl ? recv_info->rx_ctrl->rssi : (int8_t)-128);
+
+  if (sealed) {
+    // Tracked sends (web chat bubble, power/forward status) are all sealed.
+    if (a.status == 0) sendStatusMarkDelivered(a.ackFor, peer);
+    else sendStatusMarkFailed(a.ackFor, peer);
+  } else {
+    broadcast_tracker_record_ack(a.ackFor, peer);
+  }
+
+  // Fragment waiters. Same lock as the sender's alloc/free (v4_frag_ack_alloc)
+  // so this scan can't match a slot mid-reclaim. Runs on espnow_task; it never
+  // blocks while holding the lock.
+  bool matched = false, refused = false;
+  {
+    EspNowTxGuard g("fragAckMark");
+    for (int i = 0; i < V4_FRAG_ACK_WAIT_MAX; i++) {
+      V4FragAckWait& w = gV4FragAckWait[i];
+      if (!w.active || w.msgId != a.ackFor || w.fragIndex != a.fragIndex) continue;
+      if (memcmp(w.dstMac, peer, 6) != 0 || w.expectSealed != sealed) {
+        refused = true;  // another device's, or the other class: not this waiter's answer
+        continue;
+      }
+      w.status = a.status;
+      w.acked = true;
+      matched = true;
+      break;
+    }
+  }
+  if (refused && !matched) {
+    gEspNowRxAckRefused++;
+    DEBUG_ESPNOWF("[V4_ACK_RX] ACK for msgId=%lu frag %u from " MAC_FMT " (%s) refused: not the device "
+                  "or class that send waits for", (unsigned long)a.ackFor, (unsigned)a.fragIndex + 1,
+                  MAC_ARGS(peer), sealed ? "sealed" : "tagged");
+  }
+
+  espnowAppPingNoteAck(peer, a.ackFor, sealed);
+  espnowChFollowNoteAck(recv_info, a.ackFor, sealed);  // channel follow: the ACK of a probe to the master
+}
+
 static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uint8_t* data, int len) {
   if (!recv_info || !data || len < (int)sizeof(EspNowV4Header)) return false;
   const EspNowV4Header* h = (const EspNowV4Header*)data;
@@ -8723,6 +8868,19 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
                    (unsigned)(h->flags & ESPNOW_V4_FLAGS_UNKNOWN_MUST_UNDERSTAND),
                    (unsigned long)gEspNowRxMustUnderstandDrops);
     }
+    return true;
+  }
+
+  // === Plaintext gate (gate 1, 1.0) ===
+  // Only the six handshake frames (KEY_EX_HELLO/REPLY/CONFIRM, SESSION_OPEN/
+  // CONFIRM/REKEY, opcodes 10-15) travel without a session seal or a group tag;
+  // they carry their own HMAC or signature. Any other plaintext frame is
+  // dropped here, before it is acknowledged, remembered or relayed. Every
+  // frame that reached this point carries the id of one of our meshes, and a
+  // mesh has an id only with a passphrase, so this device is keyed for it.
+  if ((h->flags & (ESPNOW_V4_FLAG_SESSION_FRAME | ESPNOW_V4_FLAG_BROADCAST_AUTH)) == 0 &&
+      !v4_plaintext_type_allowed(h->type)) {
+    gEspNowRxPlaintextDrops++;
     return true;
   }
 
@@ -8827,9 +8985,8 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // function). Sequential iteration through the
   // ring guarantees no overlap between invocations. Moving this off-stack
   // frees ~218 B of espnow_task stack on every encrypted RX — important
-  // because the call chain at dispatch time can be deep (v4_send_ack →
-  // v4_send_frame's own 250 B frame[] buffer is still on stack, plus the
-  // handler's own frame). Pairs with the FS_LIST defer-to-cmd_exec refactor
+  // because the call chain at dispatch time can be deep (a handler's own
+  // frame build plus its send path). Pairs with the FS_LIST defer-to-cmd_exec refactor
   // (see System_ESPNow_FsList.cpp::captureDeferred) — same stack-relief
   // theme.
   EXT_RAM_BSS_ATTR static uint8_t plainBuf[ESPNOW_V4_MAX_PAYLOAD];
@@ -8857,16 +9014,13 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
       // System_ESPNow_Sessions.cpp — so received frames can't trigger it.)
       return true;
     }
-    // Acknowledge requested ACK *only* for authenticated frames (we mustn't
-    // ACK a forged SESSION_FRAME — the AEAD verify is the gate). The plain-
-    // text ACK-send below still fires for non-SESSION frames; we replicate
-    // the per-fragment-or-not branch here for clarity.
-    if (h->flags & ESPNOW_V4_FLAG_ACK_REQ) {
-      if (h->fragCount > 1) {
-        v4_send_frag_ack(recv_info->src_addr, h->msgId, h->fragIndex, h->fragCount);
-      } else {
-        v4_send_ack(recv_info->src_addr, h->msgId);
-      }
+    // ACK_REQ is answered only after the AEAD verify (never a forged
+    // SESSION_FRAME), with a sealed ACK in this same session naming the frame
+    // and fragment (1.0). An ACK is never answered. The ACK still means
+    // "received" here (1.0 step 5b moves it after accept).
+    if ((h->flags & ESPNOW_V4_FLAG_ACK_REQ) && h->type != ESPNOW_V4_TYPE_ACK) {
+      v4_queue_ack(recv_info->src_addr, /*sealed=*/true, h->sessionId, h->msgId, h->fragIndex,
+                   h->fragCount, 0);
     }
     headerCopy = *h;
     headerCopy.flags &= ~ESPNOW_V4_FLAG_SESSION_FRAME;
@@ -8892,21 +9046,13 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
 
   // === V4 FRAGMENTATION REASSEMBLY ===
   //
-  // EXCLUDE ACK frames. v4_send_frag_ack() encodes the ORIGINAL message's
-  // fragIndex/fragCount into the ACK frame's header so the sender can match
-  // a per-fragment ACK waiter (gV4FragAckWait[].fragIndex). An ACK is never
-  // itself fragmented — it's a single 0-length frame. Without the type guard
-  // below, a frag-ACK (e.g. type=ACK msgId=38 fragIdx=0 fragCount=2) falls
-  // into this reassembly block, gets stored as a phantom "fragment 0", and
-  // NEVER reaches the ACK handler at the `h->type == ESPNOW_V4_TYPE_ACK`
-  // branch further down — so the matching V4FragAckWait slot never flips to
-  // acked and the V4_ENC_FRAG_TX sender times out + retries 3× + aborts.
-  // That broke every encrypted send larger than one frame (notably the
-  // 368-byte FS_LIST_REPLY → "io_error" in the bonded file browser). The
-  // per-fragment ACK machinery (waiter table with a fragIndex field, the
-  // ACK handler's fragIdx match, its fragCount>1 reassembly-cleanup branch)
-  // was all already written for exactly this path — it just couldn't be
-  // reached. This guard lets ACKs fall through to it.
+  // An ACK is never fragmented (1.0): it is one 8-byte frame (0/1 in its
+  // header) and names the fragment it answers in its payload, so it can never
+  // be taken for a fragment of a message. One that claims fragments is dropped.
+  if (h->type == ESPNOW_V4_TYPE_ACK && h->fragCount > 1) {
+    gEspNowRxLenDrops++;
+    return true;
+  }
   // TEXT is deliberately excluded from device-side reassembly: long text is
   // stored per-fragment (each fragment becomes its own small history record,
   // tagged msgId/fragIndex/fragCount) and reassembled CLIENT-side. This keeps
@@ -8931,8 +9077,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   // the SEND path only — RX does not bind a session frame to its destination
   // address (des_addr is never read in the V4 path), so do not read this guard as
   // proof that a broadcast cannot arrive session-encrypted.
-  if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_ACK &&
-      h->type != ESPNOW_V4_TYPE_TEXT && !wasSessionEncrypted) {
+  if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_TEXT && !wasSessionEncrypted) {
     DEBUG_ESPNOW_ROUTERF(
            "[V4_RX] plaintext multi-frame refused (type=%u msgId=%lu frag %u/%u) — "
            "splice defence", (unsigned)h->type, (unsigned long)h->msgId,
@@ -8940,7 +9085,7 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
     return true;
   }
 
-  if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_ACK && h->type != ESPNOW_V4_TYPE_TEXT) {
+  if (h->fragCount > 1 && h->type != ESPNOW_V4_TYPE_TEXT) {
     // Multi-fragment message - reassemble. On Complete the entry's buffer backs
     // `payload` until v4_dispatch_post_cleanup releases it after the handler ran.
     if (gEspNow) { gEspNow->routerMetrics.v4FragRx++; }
@@ -8953,75 +9098,21 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
   DEBUG_ESPNOW_ROUTERF("[V4_RX] Type=%u MsgId=%lu PayloadLen=%u Flags=0x%02X",
          h->type, (unsigned long)h->msgId, payloadLen, h->flags);
   
-  // Handle ACK (no dedup needed)
+  // An ACK (1.0): sealed or tagged by now (the plaintext gate dropped any
+  // other), matched by the sender side and never deduplicated, answered or
+  // relayed by flooding.
   if (h->type == ESPNOW_V4_TYPE_ACK) {
-    char srcMac[18];
-    macToDisplay(recv_info->src_addr, srcMac, sizeof(srcMac));
-    DEBUG_ESPNOWF("[V4_ACK_RX] ACK received from %s for msgId=%lu fragIdx=%u fragCnt=%u",
-           srcMac, (unsigned long)h->msgId, h->fragIndex, h->fragCount);
-    
-    // Update peer health ACK tracking
-    noteMeshPeerRxActivity(recv_info->src_addr, EspNowMeshRxKind::Ack, -128,
-                           recv_info->rx_ctrl ? recv_info->rx_ctrl->rssi : (int8_t)-128);
-    
-    // Check broadcast tracker
-    broadcast_tracker_record_ack(h->msgId, recv_info->src_addr);
-
-    // Mark any tracked CLI-originated send as delivered
-    // so the web UI's chat bubble can transition from ✓ Sent to ✓✓ Delivered
-    // on the next /api/espnow/messages poll cycle.
-    sendStatusMarkDelivered(h->msgId, recv_info->src_addr);
-    
-    // Check fragment ACK waiters. Same lock as the sender's alloc/free
-    // (v4_frag_ack_alloc) so this scan can't match a slot mid-reclaim. Runs on
-    // espnow_task; the brief hold may make a concurrent sender's seal wait a
-    // few microseconds — never the reverse (no deadlock: this path doesn't
-    // block while holding the lock).
-    bool foundV3 = false;
-    {
-      EspNowTxGuard g("fragAckMark");
-      for (int i = 0; i < V4_FRAG_ACK_WAIT_MAX; i++) {
-        if (gV4FragAckWait[i].active && gV4FragAckWait[i].msgId == h->msgId &&
-            gV4FragAckWait[i].fragIndex == h->fragIndex) {
-          gV4FragAckWait[i].acked = true;
-          foundV3 = true;
-          DEBUG_ESPNOWF("[V4_ACK_RX] Matched fragment ACK waiter slot %d (msgId=%lu fragIdx=%u)",
-                 i, (unsigned long)h->msgId, h->fragIndex);
-          break;
-        }
-      }
-    }
-
-    // ESP-NOW App page ping bookkeeping — see espnowAppPingStart below.
-    // One in-flight slot; we only match if the msgId AND source MAC line up.
-    // Stays in this branch (no early return above) because the per-peer
-    // health update + tracker recording above are still legitimate side
-    // effects of an ACK regardless of whether anyone is pinging.
-    espnowAppPingNoteAck(recv_info->src_addr, h->msgId);
-    espnowChFollowNoteAck(recv_info, h->msgId);  // channel follow: the ACK of a probe to the master
-
-    if (!foundV3) {
-      DEBUG_ESPNOWF("[V4_ACK_RX] No matching ACK waiter found (msgId=%lu fragIdx=%u)",
-             (unsigned long)h->msgId, h->fragIndex);
-    }
-    
-    // Cleanup reassembly buffer if this was a fragmented message
-    v4_dispatch_post_cleanup(recv_info, h);
+    v4_rx_ack(recv_info, h, payload, payloadLen, wasSessionEncrypted);
     return true;
   }
-  
-  // Send ACK if requested
-  if (h->flags & ESPNOW_V4_FLAG_ACK_REQ) {
-    // For fragmented messages, send fragment-specific ACK
-    if (h->fragCount > 1) {
-      v4_send_frag_ack(recv_info->src_addr, h->msgId, h->fragIndex, h->fragCount);
-      DEBUG_ESPNOW_ROUTERF("[V4_FRAG_ACK] Sent ACK for fragment %u/%u msgId=%lu",
-             h->fragIndex + 1, h->fragCount, (unsigned long)h->msgId);
-    } else {
-      v4_send_ack(recv_info->src_addr, h->msgId);
-    }
+
+  // Answer ACK_REQ on a group-tagged frame with a tagged ACK. A sealed frame
+  // was answered at its unwrap (its ACK_REQ is cleared in the header copy), and
+  // a plaintext frame (the handshake) is never ACKed.
+  if ((h->flags & ESPNOW_V4_FLAG_ACK_REQ) && wasAuthenticated && !wasSessionEncrypted) {
+    v4_queue_ack(recv_info->src_addr, /*sealed=*/false, 0, h->msgId, h->fragIndex, h->fragCount, 0);
   }
-  
+
   // Dedup check
   // Answers carry the request's number in their payload (reqId, rule F3) and
   // a fresh header msgId of their own, so STREAM and CMD_RESP are checked like
@@ -14584,9 +14675,9 @@ bool getEspNowTaskStackSnapshot(TaskHandle_t* outHandle,
 // ESP-NOW App ping — single-slot HEARTBEAT-with-ACK probe used by the on-glasses
 // ESP-NOW App page (see G2_Page_ESPNow). One round-trip in flight at a time.
 // =============================================================================
-// The ESPNOW_V4_TYPE_ACK branch of v4_try_handle_incoming (which runs on
-// espnow_task; onEspNowDataReceived only pushes frames into the RX ring) calls
-// espnowAppPingNoteAck() unconditionally — that function early-outs if the ping
+// The ACK handler v4_rx_ack (which runs on espnow_task; onEspNowDataReceived
+// only pushes frames into the RX ring) calls espnowAppPingNoteAck() with the
+// ACK's ackFor and class for every ACK — that function early-outs if the ping
 // slot is Idle, so the cost when nobody's pinging is one load + one compare.
 //
 // State machine: Idle → Pending (after Start) → Ok (rttMs set) | Timeout.
@@ -14640,9 +14731,10 @@ bool espnowAppPingStart(const uint8_t* mac) {
   return ok;
 }
 
-void espnowAppPingNoteAck(const uint8_t* src, uint32_t msgId) {
+void espnowAppPingNoteAck(const uint8_t* src, uint32_t ackFor, bool sealed) {
   if (gEspNowAppPing.state != EspNowAppPingState::Pending) return;
-  if (gEspNowAppPing.msgId != msgId) return;
+  if (!sealed) return;  // the ping is a sealed send (smart): only a sealed ACK answers it
+  if (gEspNowAppPing.msgId != ackFor) return;
   if (memcmp(gEspNowAppPing.peerMac, src, 6) != 0) return;
   gEspNowAppPing.rttMs = (uint32_t)millis() - gEspNowAppPing.startMs;
   gEspNowAppPing.state = EspNowAppPingState::Ok;
@@ -15850,6 +15942,13 @@ const char* cmd_espnow_stats(const String& argsInput) {
     doc["rxLengthDrops"]    = (unsigned long)gEspNowRxLenDrops;
     doc["rxMustUnderstandDrops"] = (unsigned long)gEspNowRxMustUnderstandDrops;
     doc["rxRevokedDrops"]        = (unsigned long)gEspNowRxRevokedDrops;
+    doc["rxPlaintextDrops"]      = (unsigned long)gEspNowRxPlaintextDrops;
+    doc["rxAckRefused"]          = (unsigned long)gEspNowRxAckRefused;
+    {
+      espnowtx::Stats tx;
+      espnowtx::getStats(&tx);
+      doc["txAckDropped"]        = (unsigned long)tx.ackDropped;
+    }
     doc["rxUnknownMeshIdDrops"]  = (unsigned long)gEspNowRxUnknownMeshIdDrops;
     if (gEspNowRxUnknownMeshIdDrops > 0) {
       char lastMac[18];
@@ -15894,6 +15993,14 @@ const char* cmd_espnow_stats(const String& argsInput) {
                    (unsigned long)gEspNowRxLenDrops,
                    (unsigned long)gEspNowRxMustUnderstandDrops,
                    (unsigned long)gEspNowRxRevokedDrops);
+  {
+    espnowtx::Stats tx;
+    espnowtx::getStats(&tx);
+    BROADCAST_PRINTF("  RX Plaintext Drops: %lu\n  RX ACKs Refused: %lu\n  TX ACKs Dropped: %lu",
+                     (unsigned long)gEspNowRxPlaintextDrops,
+                     (unsigned long)gEspNowRxAckRefused,
+                     (unsigned long)tx.ackDropped);
+  }
   if (gEspNowRxUnknownMeshIdDrops > 0) {
     char lastMac[18];
     macToDisplay(gEspNowRxUnknownMeshIdLastMac, lastMac, sizeof(lastMac));
@@ -16132,6 +16239,8 @@ const char* cmd_espnow_resetstats(const String& argsInput) {
   gEspNowRxDrops = 0;  // espnowstats shows it, so reset it too
   gEspNowRxLenDrops = 0;
   gEspNowRxMustUnderstandDrops = 0;
+  gEspNowRxPlaintextDrops = 0;
+  gEspNowRxAckRefused = 0;
   gEspNowRxUnknownMeshIdDrops = 0;
 
   gEspNow->routerMetrics = RouterMetrics();
@@ -23422,7 +23531,7 @@ const char* cmd_espnow_pairmode(const String& argsInput) {
 extern const CommandEntry espNowCommands[] = {
   // ---- ESP-NOW Status & Statistics ----
   { "espnowstatus", "Show ESP-NOW status and configuration.", false, cmd_espnow_status },
-  { "espnowstats", "Show ESP-NOW statistics (messages, errors, and received frames dropped by cause: too short for their type, an unknown must-understand flag, an unknown mesh id).", false, cmd_espnow_stats },
+  { "espnowstats", "Show ESP-NOW statistics (messages, errors, and received frames dropped by cause: too short for their type, an unknown must-understand flag, plaintext, an unknown mesh id; acknowledgements refused or not sent).", false, cmd_espnow_stats },
   { "espnowrouterstats", "Show message router statistics and metrics.", false, cmd_espnow_routerstats },
   { "espnowbroadcaststats", "Show broadcast ACK tracking statistics.", false, cmd_espnow_broadcaststats },
   { "espnowresetstats", "Reset ESP-NOW statistics counters.", true, cmd_espnow_resetstats },

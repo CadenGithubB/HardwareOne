@@ -23,11 +23,18 @@ broadcast is suppressed and forwarded once, also after a burst of forged
 plaintext; a duplicate relayed envelope is suppressed and a forged direct frame
 does not shadow the relayed one; a frame whose fragIndex does not fit its
 fragCount is refused before it is opened or acknowledged; HEARTBEAT needs a
-tagged or sealed frame once the device has a mesh passphrase and still works
-without one; plaintext frames from a MAC that is not paired create no health
-or metadata slot, and neither does a captured group-tagged HEARTBEAT replayed
+tagged or sealed frame (a plaintext one stops at the plaintext gate); plaintext
+frames create no health or metadata slot, and neither does a captured group-tagged HEARTBEAT replayed
 from an invented radio MAC; unpair releases the metadata slot; a full metadata table
 gives a slot to a newly paired peer and never takes one from a paired peer.
+The 1.0 ACK frame (step 5a): a sealed frame with ACK_REQ gets one sealed ACK
+in its session, a group-tagged frame one tagged ACK, each naming msgId and
+fragment in the 8-byte payload; an ACK is never answered; no plaintext frame
+is ever ACKed (all 256 opcodes), and only the six handshake frames pass the
+plaintext gate; a waiter takes only its peer's ACK in the class it expects (a
+tagged ACK where a sealed one is expected, another device's sealed ACK and a
+tagged ACK whose origin is not its radio sender are refused and counted); an
+ACK with a status reaches the waiter as a refusal; malformed ACKs are dropped.
 The relay hop rule (1.0): a hop passes on any inner opcode but the exact list
 of 1.0 link-local opcodes (unknown and later opcodes included, never a range),
 keeps its version, magic, ttl, route and meshRelay checks, and the final
@@ -115,7 +122,8 @@ def main():
         'struct __attribute__((packed)) EspNowV4Header',
         'struct __attribute__((packed)) V4PayloadRelayData',
         'struct __attribute__((packed)) V4PayloadHeartbeat',
-        'struct __attribute__((packed)) V4PayloadMetadata')])
+        'struct __attribute__((packed)) V4PayloadMetadata',
+        'struct __attribute__((packed)) V4PayloadAck')])
 
     # System_ESPNow.h holds an enabled and a disabled (stub) half; the first
     # definition of each type is the enabled one.
@@ -213,6 +221,14 @@ def main():
         sys.exit('FAIL extraction: the unknown-mesh-id counters are not in System_ESPNow.cpp')
     gate = (source[counters_at:counters_end] + 'static uint8_t gEspNowRxUnknownMeshIdLastMac[6] = {};\n\n'
             + one(source, 'static void espnowNoteUnknownMeshId('))
+    # The 1.0 ACK (step 5a): the plaintext rule, the queued sealed/tagged ACK
+    # (into the espnowtx::sendAck double), the fragment waiter record and the
+    # ACK handler v4_rx_ack.
+    ack_wait = one(source, 'struct V4FragAckWait') + ';'
+    ack = '\n\n'.join([one(source, 'static bool v4_queue_ack('),
+                        one(source, 'static void v4_rx_ack(')])
+    plaintext_rule = one(source, 'static inline bool v4_plaintext_type_allowed(')
+    relay.insert(0, plaintext_rule)
     harness = (HERE / 'espnow_rx_frontend_harness.cpp').read_text()
     for tag, value in [('// INSERT_WIRE', wire_types),
                        ('// INSERT_PEER_TYPES', peer_types),
@@ -228,6 +244,8 @@ def main():
                        ('// INSERT_DISPATCH', one(source, 'static bool v4_dispatch_table_try(')),
                        ('// INSERT_OUTCOME', one(source, 'enum class V4ReasmOutcome') + ';'),
                        ('// INSERT_MESH_ID_GATE', gate),
+                       ('// INSERT_ACK_WAIT', ack_wait),
+                       ('// INSERT_ACK', ack),
                        ('// INSERT_INCOMING', incoming)]:
         if harness.count(tag) != 1:
             sys.exit(f'FAIL: harness marker {tag} must appear exactly once')
@@ -284,6 +302,24 @@ def main():
                               'bool v4_broadcast_heartbeat(uint16_t flags')
     if 'espnowRevokedMac(gMeshPeers[i].mac)' not in heartbeat:
         failures.append('v4_broadcast_heartbeat may send a heartbeat to a revoked device')
+    # The 1.0 ACK frame (step 5a), the parts outside this harness: the plaintext
+    # ACK senders are gone, the ACK builder seals with the REKEYING exception or
+    # group-tags, no frame but the handshake is ever sent plaintext, the
+    # handshake frames carry no ACK_REQ, and TOPO_* is group-tagged.
+    for gone in ('v4_send_ack(', 'v4_send_frag_ack('):
+        if gone in source:
+            failures.append(f'the plaintext ACK path {gone[:-1]} is still in System_ESPNow.cpp')
+    emit = extract_block(source, 'bool v4_emit_ack(const uint8_t* dst, uint16_t classFlag')
+    if 'sessionWrapAck(s, h, ack' not in emit or 'ESPNOW_V4_FLAG_BROADCAST_AUTH, generateMessageId()' not in emit:
+        failures.append('v4_emit_ack does not seal with sessionWrapAck or tag the ACK under its own msgId')
+    frame_ex = extract_block(source[source.rindex('static bool v4_send_frame_ex('):], 'static bool v4_send_frame_ex(')
+    if '!v4_plaintext_type_allowed(type)' not in frame_ex or 'strip the flag' in frame_ex:
+        failures.append('v4_send_frame_ex can still put a non-handshake frame on the air plaintext')
+    if 'ESPNOW_V4_FLAG_ACK_REQ' in read('System_ESPNow_Handlers_Crypto.cpp'):
+        failures.append('a handshake frame (System_ESPNow_Handlers_Crypto.cpp) still asks for an ACK')
+    for topo in ('TOPO_REQ', 'TOPO_START', 'TOPO_PEER'):
+        if not re.search(r'v4_send_frame\(dst, ESPNOW_V4_TYPE_' + topo + r', ESPNOW_V4_FLAG_BROADCAST_AUTH,', source):
+            failures.append(f'{topo} is not sent group-tagged')
     for line in failures:
         print(f'FAIL: {line}')
     if failures:

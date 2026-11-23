@@ -335,7 +335,9 @@ static bool recordCancelFrame(const uint8_t* dst, uint32_t frameMsgId, const uin
 
 // ---- production: the FILE_CANCEL sender ----------------------------------------------------
 // INSERT_CANCEL_TX
-bool v4_send_ack(const uint8_t*, uint32_t ackFor) {
+// The sealed ACK a completed transfer queues (System_ESPNow.cpp
+// v4_queue_sealed_ack, 1.0: an 8-byte ACK naming the FILE_END msgId).
+bool v4_queue_sealed_ack(const uint8_t*, uint32_t ackFor) {
   acks.push_back(ackFor);
   return true;
 }

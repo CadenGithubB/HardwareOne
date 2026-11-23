@@ -21,8 +21,10 @@
 //  - Only a sealed frame may move the radio to another channel than the one it
 //    was heard on; a group-signed frame can only confirm the channel it
 //    arrived on, and a group-signed frame naming another channel is neither
-//    liveness nor a move (adjacent-channel leak or replay). A plaintext ACK
-//    only parks the sweep on its dwell for 12 s, then the sweep goes on.
+//    liveness nor a move (adjacent-channel leak or replay). The probe's ACK
+//    (group-tagged since 1.0, matched on its ackFor) proves only mesh
+//    membership: it parks the sweep on its dwell for 12 s, then the sweep
+//    goes on.
 //  - An older master (channel not stated) heard during a hunt is a candidate:
 //    the sweep dwells two more channels and locks on the strongest signal, so
 //    an adjacent-channel leak does not win.
@@ -299,7 +301,8 @@ class Follow {
     // bookkeeping only.
   }
 
-  // The caller matched (src, msgId) of the last probe (plaintext ACK).
+  // The caller matched the last probe: a tagged ACK from the master's radio
+  // address whose ackFor is the probe's msgId (1.0).
   void probeAcked(uint32_t nowMs, uint8_t rxChannel) {
     (void)rxChannel;  // the ACK arrives on the radio's channel, which is the dwell channel
     if (phase_ != Phase::Sweeping || !probeSent_) return;

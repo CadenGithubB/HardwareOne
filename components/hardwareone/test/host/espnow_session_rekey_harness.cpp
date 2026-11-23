@@ -574,9 +574,8 @@ int main() {
   use(A);
   check(espnowRekeyInitiate(B.mac) && A.outbox.size() == 2 && sessOf(A)->state == SESSION_REKEYING,
         "C2 A initiates: one REKEY sent, A REKEYING");
-  check(A.outbox.back().type == ESPNOW_V4_TYPE_SESSION_REKEY &&
-        A.outbox.back().flags == ESPNOW_V4_FLAG_ACK_REQ,
-        "C2 the REKEY is a plaintext ACK_REQ frame (no HANDSHAKE flag at 1.0)");
+  check(A.outbox.back().type == ESPNOW_V4_TYPE_SESSION_REKEY && A.outbox.back().flags == 0,
+        "C2 the REKEY is a plaintext frame without ACK_REQ (1.0: its reply is its answer)");
   deliver(take(A), B);
   check(B.outbox.size() == 2 && sessOf(B)->state == SESSION_ACTIVE, "C2 B replies once and is ACTIVE");
   deliver(take(B), A);

@@ -196,6 +196,21 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t, uint16_t, uint32_t,
 bool v4_send_frame(const uint8_t*, uint8_t, uint16_t, uint32_t, const uint8_t*, uint16_t, uint8_t) {
   return true;
 }
+// The ACK frame builder the JOB_ACK kind runs (System_ESPNow.cpp v4_emit_ack,
+// 1.0): recorded with the class flag, session id and 8 payload bytes.
+struct AckCall { uint8_t to[6]; uint16_t classFlag; uint16_t sessionId; uint8_t ack[8]; TaskHandle_t task; };
+static std::vector<AckCall> gAckCalls;
+bool v4_emit_ack(const uint8_t* dst, uint16_t classFlag, uint16_t sessionId, const uint8_t* ack) {
+  AckCall c{};
+  std::memcpy(c.to, dst, 6);
+  c.classFlag = classFlag;
+  c.sessionId = sessionId;
+  std::memcpy(c.ack, ack, 8);
+  c.task = gCurrentTask;
+  gAckCalls.push_back(c);
+  return true;
+}
+#define EXT_RAM_BSS_ATTR
 
 // INSERT_DISPATCHER
 
@@ -352,6 +367,43 @@ int main() {
   espnowtx::harnessDrain();
   CHECK(gRadio.size() == 1 && gRadio.front().task == DISPATCHER && gRadio.front().len == 210);
 
+  // J (1.0 step 5a): ACKs go through a fixed pool of kAckPoolSlots (16)
+  //    PSRAM payloads, not a ps_alloc each. Sixteen queued ACKs fit; the
+  //    seventeenth finds no slot and is counted as dropped (silence); the
+  //    dispatcher sends each with its class, session and 8 bytes, and the
+  //    slots come back for the next ACKs.
+  gAckCalls.clear();
+  espnowtx::getStats(&s);
+  const uint32_t ackDroppedBefore = s.ackDropped;
+  bool allQueued = true;
+  for (uint8_t i = 0; i < espnowtx::kAckPoolSlots; ++i) {
+    const uint8_t ack[8] = {i, 0, 0, 0, 0, 1, 0, 0};
+    allQueued = espnowtx::sendAck(kDirect, 0x0200, (uint16_t)(40 + i), ack) && allQueued;
+  }
+  CHECK(espnowtx::kAckPoolSlots == 16);
+  CHECK(allQueued);
+  const uint8_t extra[8] = {99, 0, 0, 0, 0, 1, 0, 0};
+  CHECK(!espnowtx::sendAck(kDirect, 0x0200, 99, extra));
+  espnowtx::getStats(&s);
+  CHECK(s.ackDropped == ackDroppedBefore + 1);
+  CHECK(gAckCalls.empty());
+  espnowtx::harnessDrain();
+  CHECK(gAckCalls.size() == 16);
+  bool inOrder = gAckCalls.size() == 16;
+  for (size_t i = 0; inOrder && i < gAckCalls.size(); ++i) {
+    inOrder = gAckCalls[i].task == DISPATCHER && gAckCalls[i].classFlag == 0x0200 &&
+              gAckCalls[i].sessionId == 40 + i && gAckCalls[i].ack[0] == i &&
+              std::memcmp(gAckCalls[i].to, kDirect, 6) == 0;
+  }
+  CHECK(inOrder);
+  gAckCalls.clear();
+  const uint8_t tagged[8] = {7, 0, 0, 0, 0, 1, 0, 0};
+  CHECK(espnowtx::sendAck(kRouted, 0x0100, 0, tagged));   // a slot came back
+  espnowtx::harnessDrain();
+  CHECK(gAckCalls.size() == 1 && gAckCalls[0].classFlag == 0x0100 && gAckCalls[0].ack[0] == 7);
+  // A queued ACK that stop() fails returns its slot too (16 fit again after).
+  CHECK(espnowtx::sendAck(kDirect, 0x0200, 1, tagged));
+
   // H: stop() with a queued job fails and frees it, then a multi-frame sync
   //    send is refused like any other job (lifecycle STOPPED).
   gRadio.clear();
@@ -360,7 +412,7 @@ int main() {
   CHECK(espnowtx::sendAead(kDirect, 7, 0, 10, small, sizeof small, 1));
   CHECK(espnowtx::stop(1000));
   espnowtx::getStats(&s);
-  CHECK(s.failed == failedBeforeStop + 1);
+  CHECK(s.failed == failedBeforeStop + 2);  // the queued AEAD job and the queued ACK
   CHECK(!espnowtx::sendAeadSync(kDirect, 9, 0, 11, big.data(), (uint16_t)big.size(), 1, 1000));
   CHECK(gRadio.empty());
 

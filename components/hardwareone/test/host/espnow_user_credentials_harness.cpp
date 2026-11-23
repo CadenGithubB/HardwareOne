@@ -162,7 +162,7 @@ enum : uint16_t { ESPNOW_V4_FLAG_ACK_REQ = 0x0001 };
 struct Reply { uint32_t msgId; bool ok; std::string text; uint8_t status; uint32_t frameMsgId; };
 static std::vector<Reply> replies;  // CMD_RESP frames, both senders
 static int acks = 0;
-static bool v4_send_ack(const uint8_t*, uint32_t) { ++acks; return true; }
+static bool v4_queue_sealed_ack(const uint8_t*, uint32_t) { ++acks; return true; }  // the 1.0 sealed ACK (System_ESPNow.cpp)
 bool v4_send_command_response(const uint8_t*, uint32_t reqId, uint8_t status, const char* text,
                               uint16_t length) {
   replies.push_back({reqId, status == 0, std::string(text, length), status, 0});

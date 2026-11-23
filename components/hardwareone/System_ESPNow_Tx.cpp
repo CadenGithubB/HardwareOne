@@ -1,6 +1,7 @@
 #include "System_ESPNow_Tx.h"
 
 #include <Arduino.h>
+#include <esp_attr.h>        // EXT_RAM_BSS_ATTR (the ACK pool)
 #include <esp_heap_caps.h>
 #include <freertos/event_groups.h>
 #include <freertos/FreeRTOS.h>
@@ -257,6 +258,46 @@ static bool runMultiFrameOnCaller(Job& job) {
   return ok;
 }
 
+// ---- ACK pool (1.0) ---------------------------------------------------------
+// kAckPoolSlots fixed 8-byte payloads in PSRAM, so an ACK costs no allocation
+// on the receive path. A JOB_ACK's payload points at one slot; runJob/failJob
+// hand it back instead of free()ing it.
+EXT_RAM_BSS_ATTR static uint8_t sAckPool[kAckPoolSlots][8];
+static bool sAckPoolUsed[kAckPoolSlots];
+static portMUX_TYPE sAckPoolLock = portMUX_INITIALIZER_UNLOCKED;
+
+static uint8_t* ackSlotTake() {
+  uint8_t* slot = nullptr;
+  taskENTER_CRITICAL(&sAckPoolLock);
+  for (uint8_t i = 0; i < kAckPoolSlots; ++i) {
+    if (!sAckPoolUsed[i]) {
+      sAckPoolUsed[i] = true;
+      slot = sAckPool[i];
+      break;
+    }
+  }
+  taskEXIT_CRITICAL(&sAckPoolLock);
+  return slot;
+}
+
+static void ackSlotGive(const uint8_t* slot) {
+  for (uint8_t i = 0; i < kAckPoolSlots; ++i) {
+    if (slot == sAckPool[i]) {
+      taskENTER_CRITICAL(&sAckPoolLock);
+      sAckPoolUsed[i] = false;
+      taskEXIT_CRITICAL(&sAckPoolLock);
+      return;
+    }
+  }
+}
+
+// A job's payload goes back where it came from: the ACK pool or the heap.
+static void releasePayload(const Job& job) {
+  if (!job.payload) return;
+  if (job.kind == JOB_ACK) ackSlotGive(job.payload);
+  else free(job.payload);
+}
+
 static void runJob(const Job& job) {
   bool ok = false;
   switch (job.kind) {
@@ -270,12 +311,16 @@ static void runJob(const Job& job) {
                          job.msgId, job.payload, job.payloadLen,
                          job.ttl);
       break;
+    case JOB_ACK:
+      ok = job.payload && job.payloadLen == 8 &&
+           v4_emit_ack(job.peerMac, job.flags, (uint16_t)job.msgId, job.payload);
+      break;
     // Future kinds (JOB_BROADCAST_AUTH, JOB_FRAG_ACK) land here.
   }
 
   statsBump(ok ? &Stats::sent : &Stats::failed);
 
-  if (job.payload) free(job.payload);
+  releasePayload(job);
   // Complete AFTER freeing the payload so a woken synchronous caller observes
   // a fully retired job. Fire-and-forget jobs leave completion null.
   completionFinish(job.completion, ok);
@@ -283,7 +328,7 @@ static void runJob(const Job& job) {
 
 static void failJob(const Job& job) {
   statsBump(&Stats::failed);
-  if (job.payload) free(job.payload);
+  releasePayload(job);
   completionFinish(job.completion, false);
 }
 
@@ -700,6 +745,31 @@ bool sendAead(const uint8_t mac[6], uint8_t type, uint16_t flags,
   if (!submit(job)) {
     // submit() does NOT take ownership on failure — caller frees.
     if (psBuf) free(psBuf);
+    return false;
+  }
+  return true;
+}
+
+bool sendAck(const uint8_t mac[6], uint16_t classFlag, uint16_t sessionId, const uint8_t ack[8]) {
+  if (!mac || !ack) return false;
+  uint8_t* slot = ackSlotTake();
+  if (!slot) {
+    statsBump(&Stats::ackDropped);
+    return false;
+  }
+  memcpy(slot, ack, 8);
+  Job job = {};
+  job.kind       = JOB_ACK;
+  memcpy(job.peerMac, mac, 6);
+  job.type       = 1;  // ESPNOW_V4_TYPE_ACK (the wire header is not included here)
+  job.flags      = classFlag;
+  job.msgId      = sessionId;
+  job.ttl        = 1;
+  job.payload    = slot;
+  job.payloadLen = 8;
+  if (!submit(job)) {
+    ackSlotGive(slot);  // submit() leaves the payload with the caller on failure
+    statsBump(&Stats::ackDropped);
     return false;
   }
   return true;
