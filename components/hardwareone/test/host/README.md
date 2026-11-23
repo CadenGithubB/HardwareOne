@@ -2196,7 +2196,8 @@ so the command guest surface decides. Every other POST (`/api/cli/batch`
 included) and the file, log, capture and admin GETs get one 403 whose JSON
 carries `code:"guest_forbidden"` and the sentence a page shows
 (`error:"Guest accounts are view-only"`). An unresolvable account is refused;
-users and administrators are never stopped by the gate.
+an administrator is never stopped by the gate, a user only by the admin-only
+reads (below).
 
 `web_guest_view_browser` runs the two shipping helper scripts every signed-in
 page gets (the role/theme script with `hw.applyGuestViewOnly`, the fetch
@@ -2208,6 +2209,37 @@ JSON; a refused page load (GET) is no popup and rejects with the sentence and
 403 for the page's own state; a non-guest 403 on a non-command POST and a
 `hwQuietRefusal` read are not popups. `--component <dir>` reads another tree;
 the pre-B6 sources fail both suites.
+
+### Guest privacy (owner, 2026-11-22)
+
+```sh
+python3 components/hardwareone/test/host/test_web_guest_settings_view.py
+python3 components/hardwareone/test/host/test_web_guest_private_pages.py
+```
+
+`web_guest_gate` also covers the private reads: for a guest the ESP-NOW
+message history, the ring's health status and the LLM chat (turns and the
+streamed answer) get a 403 with `code:"guest_private"` and
+`error:"Not available to guests"`; the message history is admin-only, so a
+user gets a 403 with `code:"admin_required"` there (and only there), and an
+administrator reads it.
+
+`web_guest_settings_view` compiles `guestview::reduceSettingsForGuest`
+(`WebServer_GuestSettingsView.h`) with the vendored ArduinoJson: the guest's
+`/api/settings` view drops `network.wifi.networks` and shows
+`(not shown to guests)` for the MQTT host and user name and the LLM gateway
+URL, leaving every other value; an empty value stays empty. Source checks pin
+the table's paths to the settings modules' sections and groups, the guest-only
+call in `handleSettingsGet`, and the MQTT page's guest-aware, escaped host and
+user cells.
+
+`web_guest_private_pages` runs the R1 Health page script and the ESP-NOW
+message poll on the shipping fetch helpers against a fake DOM and fetch (Node.js
+or `jsc`, 77 without): a guest's health page says "Health data is not available
+to guests." and starts no poll; the conversation logs say the history is not a
+guest's (or is for administrators only, for a user), polling stops, and the
+panels drawn later read the same sentence; an administrator's pages render and
+keep polling. The pre-change page scripts fail it.
 
 ## Continuous STT trim default
 

@@ -2140,6 +2140,23 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_web_guest_view_browser.py
           --node ${HW1_NODE_CMD})
 set_tests_properties(web_guest_view_browser PROPERTIES SKIP_RETURN_CODE 77)
+# Guest privacy (owner 2026-11-22, item 4): a guest's /api/settings and MQTT
+# page leave out the saved Wi-Fi networks, the MQTT host and user name and the
+# LLM gateway (WebServer_GuestSettingsView.h, vendored ArduinoJson).
+add_test(
+  NAME web_guest_settings_view
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_guest_settings_view.py
+          --cxx ${CMAKE_CXX_COMPILER})
+# Guest privacy items 1-2: the R1 Health and ESP-NOW message pages say the
+# data is not a guest's (or a user's) and stop polling (Node.js or macOS jsc;
+# 77 = skipped without).
+add_test(
+  NAME web_guest_private_pages
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_web_guest_private_pages.py
+          --node ${HW1_NODE_CMD})
+set_tests_properties(web_guest_private_pages PROPERTIES SKIP_RETURN_CODE 77)
 add_test(
   NAME setup_espnow_application
   COMMAND ${Python3_EXECUTABLE}

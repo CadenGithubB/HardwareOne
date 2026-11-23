@@ -325,8 +325,22 @@ static void streamR1HealthContent(httpd_req_t* req, const String& username) {
       setMsg(t||'queued');return hw.fetchJSON('/api/health/status');
     }).then(apply).catch(function(e){setMsg(String(e));hw.showCliError(e&&e.message);});
   }
-  hw.fetchJSON('/api/health/status').then(apply).catch(function(e){console.error('[R1H]',e);});
-  hw.pollJSON('/api/health/status',2000,apply);
+  // Health data is private from a guest (owner, guest privacy 2): its 403
+  // (code guest_private) is said on the page once and the poll stops.
+  var stopPoll=null,refused=false;
+  function refusal(e){
+    if(!e||e.status!==403||refused)return false;
+    refused=true;
+    if(stopPoll)stopPoll();
+    var code='';
+    try{code=(JSON.parse(e.reply||'{}')||{}).code||'';}catch(_){}
+    setMsg(code==='guest_private'?'Health data is not available to guests.':
+      ('Health data not available: '+e.message));
+    return true;
+  }
+  function startPoll(){stopPoll=hw.pollJSON('/api/health/status',2000,apply);}
+  hw.fetchJSON('/api/health/status').then(function(s){apply(s);startPoll();})
+    .catch(function(e){if(refusal(e))return;console.error('[R1H]',e);startPoll();});
 
   hw.on(hw.$('rh-poll'),'click',function(){action('poll');});
   hw.on(hw.$('rh-logging'),'click',function(){action('logging-toggle');});
