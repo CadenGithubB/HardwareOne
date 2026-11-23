@@ -479,10 +479,13 @@ const char* cmd_imustatus(const String& argsInput) {
     if (n > 0 && n < 1024) {
       snprintf(out + n, 1024 - n,
                ",\"hwTap\":%s,\"hwFreefall\":%s,\"hasMag\":%s,\"hasHeading\":%s,\"gyroOffset\":\"%s\","
-               "\"sampleMs\":%d,\"pollMs\":%d,\"autoStart\":%s,\"heldBy\":\"%s\",\"sampleHook\":%s}",
+               "\"sampleMs\":%d,\"pollMs\":%d,\"autoStart\":%s,\"heldBy\":\"%s\",\"sampleHook\":%s,"
+               "\"diag\":{\"chipTaps\":%lu,\"gapDropped\":%lu,\"gaps\":%lu,\"maxGapMs\":%lu}}",
                status.hasHwTap ? "true" : "false", status.hasHwFreefall ? "true" : "false",
                status.hasMag ? "true" : "false", status.hasHeading ? "true" : "false", offset, sampleMs, pollMs,
-               autoStart ? "true" : "false", heldBy, hooked ? "true" : "false");
+               autoStart ? "true" : "false", heldBy, hooked ? "true" : "false",
+               (unsigned long)sImuTapDiag.chipTaps, (unsigned long)sImuTapDiag.gapDropped,
+               (unsigned long)sImuTapDiag.gaps, (unsigned long)sImuTapDiag.maxGapMs);
     }
     return out;
   }
@@ -556,6 +559,10 @@ static MotionOrientationSettings imuOrientationSettings() {
   settings.yawOffset = gSettings.imuYawOffset;
   return settings;
 }
+// Tap diagnostics (single writer: the IMU task; read for imustatus json).
+struct ImuTapDiag { uint32_t lastReadMs, maxGapMs, gaps, chipTaps, gapDropped; };
+static ImuTapDiag sImuTapDiag = {0, 0, 0, 0, 0};
+
 
 // The detector on one sample; returns whether it is shaking after it
 // (defined below, with the detector).
@@ -627,6 +634,18 @@ static bool imuStoreSample(const MotionSample& sample, bool publish, unsigned lo
   // The gap rule runs on every sample, hooked or not, so a hook registered
   // mid-run starts from a known previous sample.
   const bool afterGap = motionHookAfterGap(sImuHookFeed, (uint32_t)readMs, (uint32_t)sampleMs);
+  {
+    // Diagnostics for `imustatus json`: chip taps, those dropped by the gap
+    // rule, and the sampling gaps themselves.
+    const uint32_t gapMs = sImuTapDiag.lastReadMs ? (uint32_t)readMs - sImuTapDiag.lastReadMs : 0;
+    sImuTapDiag.lastReadMs = (uint32_t)readMs;
+    if (gapMs > sImuTapDiag.maxGapMs) sImuTapDiag.maxGapMs = gapMs;
+    if (afterGap) ++sImuTapDiag.gaps;
+    if (sample.hwTap) {
+      ++sImuTapDiag.chipTaps;
+      if (afterGap) ++sImuTapDiag.gapDropped;
+    }
+  }
   if (motionHookRegistered(sImuHook)) {
     const MotionHookSample hooked =
         motionHookSample((uint32_t)readMs, sample.pitch, sample.roll, sample.accel,
