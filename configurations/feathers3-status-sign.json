@@ -32,11 +32,11 @@
     "ENABLE_UART_HOST_LINK": 0,
     "I2C_FEATURE_LEVEL": 4,
     "IMU_DEVICE_TYPE": 2,
-    "INPUT_DEVICE_TYPE": 2
+    "INPUT_DEVICE_TYPE": 5
   },
   "sdkconfig": {
     "CONFIG_BT_ENABLED": false
   },
-  "summary": "Two Adafruit 4991 encoder boards lit green or red, an ANO wheel for the OLED menus, an Adafruit 4517 motion sensor (tilt, flip, tap), a DS3231 clock, battery gauge and u.FL antenna; Wi-Fi, web interface with Sensors page, automations.",
+  "summary": "Two Adafruit 4991 encoder boards lit green or red, an Adafruit 4517 motion sensor that also drives the OLED menus (tap and tilt), a DS3231 clock, battery gauge and u.FL antenna; Wi-Fi, web interface with Sensors page, automations.",
   "title": "Meeting-room status sign (FeatherS3[D])"
 }

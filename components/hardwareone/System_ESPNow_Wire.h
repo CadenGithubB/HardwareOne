@@ -761,7 +761,7 @@ enum BondNoticeFlags : uint8_t {
 struct __attribute__((packed)) CapabilitySummary {
   uint8_t  reserved;           // 0   sent 0, ignored (was protoVersion, sent 1 and never read)
   uint8_t  role;               // 1   0=worker, 1=master
-  uint8_t  inputDeviceType;    // 2   INPUT_DEVICE_TYPE: 0 none, 1 Seesaw gamepad, 2 ANO encoder
+  uint8_t  inputDeviceType;    // 2   INPUT_DEVICE_TYPE: 0 none, 1 Seesaw gamepad, 2 ANO encoder, 3 GPIO encoder, 4 GT911 touch, 5 IMU taps and tilt
   uint8_t  chipModel;          // 3   esp_chip_info model
   uint32_t featureMask;        // 4   compile-time features (CAP_FEATURE_*)
   uint32_t serviceMask;        // 8   runtime services (CAP_SERVICE_*)

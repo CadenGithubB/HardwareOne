@@ -465,9 +465,11 @@ void streamBondInner(httpd_req_t* req) {
       //   0 = unknown/legacy  → "Input"
       //   1 = Seesaw gamepad  → "Gamepad"
       //   2 = ANO encoder     → "ANO Encoder"
+      //   5 = IMU taps + tilt → "IMU Input" (its reading has the gamepad's shape)
       const remoteInputType = (data.capabilities && data.capabilities.inputDeviceType) || 0;
       const remoteInputName = (remoteInputType === 2) ? 'ANO Encoder'
                             : (remoteInputType === 1) ? 'Gamepad'
+                            : (remoteInputType === 5) ? 'IMU Input'
                             : 'Input';
 
       // Each sensor's capability bit comes from the device (data.sensorBits,
@@ -584,6 +586,7 @@ void streamBondInner(httpd_req_t* req) {
         const localInputType = (data.localCapabilities && data.localCapabilities.inputDeviceType) || 0;
         const localInputName = (localInputType === 2) ? 'ANO Encoder'
                              : (localInputType === 1) ? 'Gamepad'
+                             : (localInputType === 5) ? 'IMU Input'
                              : 'Input';
         const lBits = data.sensorBits || {};
         const lDefs = [{k:'thermal',n:'Thermal'},{k:'tof',n:'ToF'},{k:'imu',n:'IMU'},{k:'input',n:localInputName},{k:'apds',n:'APDS'},{k:'gps',n:'GPS'},{k:'rtc',n:'RTC'},{k:'presence',n:'Presence'},{k:'fmradio',n:'FM Radio'}].map(function(d){d.m = lBits[d.k] || 0; return d;});

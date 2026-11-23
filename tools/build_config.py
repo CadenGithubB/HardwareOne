@@ -78,7 +78,7 @@ def choice_schema():
     features = {}
     for name in sorted(editable_choices()):
         maximum = 5 if name == "DISPLAY_TYPE" else 4 if name.endswith("_FEATURE_LEVEL") else (
-            4 if name == "INPUT_DEVICE_TYPE" else 2 if name == "IMU_DEVICE_TYPE" else 1)
+            5 if name == "INPUT_DEVICE_TYPE" else 2 if name == "IMU_DEVICE_TYPE" else 1)
         # The IMU's chip has no "none" value: 0 fails the build's #error rules.
         minimum = 1 if name == "IMU_DEVICE_TYPE" else 0
         features[name] = {"type": "integer", "minimum": minimum, "maximum": maximum}

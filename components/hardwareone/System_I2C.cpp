@@ -15,6 +15,7 @@
 #include "i2csensor_rda5807.h"
 #include "System_BuildConfig.h"
 #include "Input_GPIOEncoder.h"
+#include "Input_IMU.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_FirstTimeSetup.h"
@@ -779,6 +780,8 @@ const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName
                                    const char* hint, uint8_t n) {
 #if ENABLE_GPIO_ENCODER
   if (sensor == I2C_DEVICE_INPUT) return "Error: GPIO input is not an I2C device; use openinput";
+#elif ENABLE_IMU_INPUT
+  if (sensor == I2C_DEVICE_INPUT) return "Error: IMU input is not an I2C device of its own; use openinput";
 #endif
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
@@ -2380,6 +2383,8 @@ static void buildSensorsJson(JsonDocument& doc, bool includeData = true) {
   addSensorEntry(arr, "input", "GT911 single touch", SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, nullptr);
 #elif ENABLE_GPIO_ENCODER
   addSensorEntry(arr, "input",    "GPIO rotary encoder",    SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? gpioEncoderBuildDataJson : nullptr);
+#elif ENABLE_IMU_INPUT
+  addSensorEntry(arr, "input",    "IMU taps and tilt",      SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? imuInputBuildDataJson : nullptr);
 #endif
 #if ENABLE_THERMAL_SENSOR
   addSensorEntry(arr, "thermal",  "MLX90640 thermal",       SENSOR_KIND_STREAM, gThermalRunning, isSensorConnected("thermal"), includeData ? thermalBuildSummaryJson : nullptr);
@@ -2592,6 +2597,8 @@ static const SensorHeapCost sensorHeapCosts[] = {
   { "APDS Gesture",   "apds",    &gSettings.apdsAutoStart,     4 },  // APDS9960: gesture buffers
 #if ENABLE_GPIO_ENCODER
   { "GPIO Encoder",   "input",   &gSettings.inputAutoStart,    4 },
+#elif ENABLE_IMU_INPUT
+  { "IMU Input",      "input",   &gSettings.inputAutoStart,    1 },  // no task or buffer of its own (the IMU is its own row)
 #elif ENABLE_ANO_ENCODER
   { "ANO Encoder",    "input",   &gSettings.inputAutoStart,    2 },  // Adafruit ANO seesaw: minimal
 #else

@@ -512,8 +512,9 @@ static void testBusMove() {
 struct SignSetup {
   // Fresh settings of the sign build: everything on bus 0 except the OLED
   // (the FeatherS3[D]'s default OLED bus is 1). Encoder 1 starts at the
-  // encoder default 0x49, the ANO's address too; encoder 2 has no address.
-  uint8_t gaugeBus = 0, oledBus = 1, rtcBus = 0, inputBus = 0, imuBus = 0;
+  // encoder default 0x49; encoder 2 has no address. The input device is the
+  // motion sensor itself (INPUT_DEVICE_TYPE 5): it has no address of its own.
+  uint8_t gaugeBus = 0, oledBus = 1, rtcBus = 0, imuBus = 0;
   uint8_t encoderBus[2] = {0, 0};
   uint8_t encoderAddress[2] = {0x49, 0};
   I2cAddressUse uses[10];
@@ -529,7 +530,6 @@ struct SignSetup {
       uses[count++] = {encoderBus[n - 1], encoderAddress[n - 1], I2C_DEVICE_ENCODER, n, "Encoder",
                        "Adafruit 4991 Rotary Encoder, 1 RGB pixel", 14};
     }
-    uses[count++] = {inputBus, 0x49, I2C_DEVICE_INPUT, 1, "Seesaw", "ANO Rotary Encoder (default)", 3};
     uses[count++] = {imuBus, 0x6A, I2C_DEVICE_IMU, 1, "LSM6DSOX", "Accel + gyro (Adafruit 4517)", 0};
     uses[count++] = {imuBus, 0x1C, I2C_DEVICE_IMU, 1, "LIS3MDL", "Magnetometer (Adafruit 4517)", 1};
   }
@@ -548,7 +548,6 @@ struct SignSetup {
     return true;
   }
   bool encoderBusTo(uint8_t n, uint8_t to) { return setBus(encoderBus[n - 1], i2cInstanceOwner(I2C_DEVICE_ENCODER, n), to); }
-  bool inputBusTo(uint8_t to) { return setBus(inputBus, i2cInstanceOwner(I2C_DEVICE_INPUT, 1), to); }
   bool imuBusTo(uint8_t to) { return setBus(imuBus, i2cInstanceOwner(I2C_DEVICE_IMU, 1), to); }
 };
 
@@ -603,10 +602,10 @@ static bool applySignSetupLine(SignSetup& sign, const std::string& line, unsigne
     ++moves;
     return command == "encoderbus" ? sign.encoderBusTo(n, value) : sign.setEncoderAddress(n, value);
   }
-  if (command == "inputbus" || command == "imubus") {
+  if (command == "imubus") {
     assert(words.size() == 2);
     ++moves;
-    return command == "inputbus" ? sign.inputBusTo(number(words[1])) : sign.imuBusTo(number(words[1]));
+    return sign.imuBusTo(number(words[1]));
   }
   for (const char* other : {"encoderautostart", "inputautostart", "imuautostart", "oledautostart",
                             "wifiexternalantenna", "powersave", "reboot"}) {
@@ -629,17 +628,17 @@ static void testStatusSignSetup() {
       assert(false);
     }
   }
-  // Both encoder boards, the wheel and the motion sensor are placed, and the
-  // block ends with the reboot that applies the buses.
-  assert(moves >= 6 && !block.empty() && block.back() == "reboot");
+  // Both encoder boards and the motion sensor are placed, and the block ends
+  // with the reboot that applies the buses.
+  assert(moves >= 5 && !block.empty() && block.back() == "reboot");
   // The wiring found on the board: bus 0 (horizontal STEMMA QT) the gauge
   // 0x36, the DS3231 0x68 and the second 4991 0x37; bus 1 (vertical) the OLED
-  // 0x3D, the first 4991 0x36, the ANO 0x49 and the 4517 (0x6A + 0x1C).
+  // 0x3D, the first 4991 0x36 and the 4517 (0x6A + 0x1C).
   sign.walk();
   struct At { uint8_t bus, address; const char* name; };
   const At expected[] = {
       {0, 0x36, "MAX17048"}, {1, 0x3D, "SSD1306"}, {1, 0x3C, "SSD1306"}, {0, 0x68, "DS3231"},
-      {1, 0x36, "Encoder"}, {0, 0x37, "Encoder"}, {1, 0x49, "Seesaw"}, {1, 0x6A, "LSM6DSOX"}, {1, 0x1C, "LIS3MDL"},
+      {1, 0x36, "Encoder"}, {0, 0x37, "Encoder"}, {1, 0x6A, "LSM6DSOX"}, {1, 0x1C, "LIS3MDL"},
   };
   assert(sign.count == sizeof(expected) / sizeof(expected[0]));
   for (size_t i = 0; i < sign.count; ++i) {
@@ -660,10 +659,8 @@ static void testStatusSignSetup() {
   // 4991's address cannot be set before its bus: 0x36 on bus 0 is the gauge's.
   SignSetup early;
   assert(!early.setEncoderAddress(1, 0x36));
-  // And the ANO cannot follow the first 4991 to bus 1 while that board still
-  // holds the shared default 0x49 there.
-  assert(early.encoderBusTo(1, 1) && !early.inputBusTo(1));
-  assert(early.setEncoderAddress(1, 0x36) && early.inputBusTo(1));
+  // Once it is on bus 1 the address is free.
+  assert(early.encoderBusTo(1, 1) && early.setEncoderAddress(1, 0x36));
   // The second 4991 at the first one's address is refused on either bus it shares.
   SignSetup both;
   assert(both.encoderBusTo(1, 1) && both.setEncoderAddress(1, 0x36));

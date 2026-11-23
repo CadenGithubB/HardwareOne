@@ -295,6 +295,12 @@ struct Settings {
       anoEncoderInvert(false),
       anoEncoderSwapUpDown(true),     // Adafruit ANO breakout's silkscreen UP/DOWN map inverted by default
       anoEncoderSwapLeftRight(true),  // ditto LEFT/RIGHT — matches the typical assembled orientation
+      imuInputTapWindowMs(350),
+      imuInputTiltDeg(15),
+      imuInputShakeStart(true),
+      imuInputSwapXY(false),
+      imuInputInvertX(false),
+      imuInputInvertY(false),
       thermalAutoStart(false),
       tofAutoStart(false),
       imuAutoStart(false),
@@ -969,6 +975,12 @@ struct Settings {
   bool anoEncoderInvert;        // Flip rotation direction if encoder is mounted backwards
   bool anoEncoderSwapUpDown;    // Swap UP/DOWN button bits (for vertically-mirrored mounts)
   bool anoEncoderSwapLeftRight; // Swap LEFT/RIGHT button bits (for horizontally-mirrored mounts)
+  int  imuInputTapWindowMs;     // IMU input: a run of taps ends this long after its last tap (Input_IMU: imuinputtapms)
+  int  imuInputTiltDeg;         // IMU input: lean from the centre pose that deflects the joystick (imuinputtilt)
+  bool imuInputShakeStart;      // IMU input: a sustained shake is START (imuinputshake)
+  bool imuInputSwapXY;          // IMU input: swap the tilt axes (the sensor's mounting)
+  bool imuInputInvertX;         // IMU input: invert left/right tilt
+  bool imuInputInvertY;         // IMU input: invert up/down tilt
   bool thermalAutoStart;        // Auto-start thermal camera after boot
   bool tofAutoStart;            // Auto-start ToF distance sensor after boot
   bool imuAutoStart;            // Auto-start IMU after boot
@@ -1639,6 +1651,7 @@ extern const SettingsModule tofSettingsModule;
 extern const SettingsModule imuSettingsModule;
 extern const SettingsModule inputSettingsModule;
 extern const SettingsModule anoEncoderSettingsModule;
+extern const SettingsModule imuInputSettingsModule;
 extern const SettingsModule apdsSettingsModule;
 extern const SettingsModule gpsSettingsModule;
 extern const SettingsModule fmRadioSettingsModule;

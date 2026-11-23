@@ -195,7 +195,7 @@ String getOledTextInput(const char* prompt, bool isPassword,
         oledDisplay->setCursor(0, ftrY + 2);
         oledDisplay->print("A:Sel Y:Del B:");
         oledDrawBackArrowIcon(oledDisplay, ftrY + 2);
-#if ENABLE_GPIO_ENCODER
+#if ENABLE_GPIO_ENCODER || ENABLE_IMU_INPUT
         oledDisplay->print(" X:OK");
 #else
         oledDisplay->print(" S:OK");

@@ -265,8 +265,35 @@ Host-tested and built; not run on a device.
   is auto-disabled with a `sensor_fault` event after the usual number in a row; `openimu` starts
   it again.
 
-### Added (IMU: per-sample hook and holders, for the coming IMU input device)
-Host-tested and built; not run on a device. Nothing uses it yet.
+### Added (IMU as the input device: taps and tilt)
+Host-tested and built; not run on a device, so the thresholds below are first values.
+- A new input device, `INPUT_DEVICE_TYPE 5` ("Motion sensor: taps and tilt" in the guided setup):
+  the motion sensor drives the OLED menus and the on-screen keyboard, with no gamepad or wheel.
+  It needs the Adafruit 4517 (`IMU_DEVICE_TYPE 2`), whose chip detects taps; a build that
+  selects it with the BNO055 or without the IMU stops with an error.
+- Taps are the buttons: one tap is A, two are B, three are Y, four are X. A button arrives once
+  no further tap has followed for the tap window (`imuinputtapms`, 200..800 ms, default 350), so
+  every press is that much later than its last tap. Six or more taps do nothing.
+- Tilt is the joystick: leaning the device more than the tilt angle (`imuinputtilt`, 8..40
+  degrees, default 15) from its centre pose moves left, right, up or down, one direction at a
+  time, with the menus' usual repeat while it is held. The centre pose is the one the device is
+  in when the input starts; five taps or `imuinputzero` take the present pose instead, so a
+  device stood or hung another way does not scroll on its own. A lean of more than 60 degrees
+  centres the joystick until the next re-centre. `imuinputswapxy`, `imuinputinvertx` and
+  `imuinputinverty` fit the directions to how the sensor is mounted.
+- A sustained shake is START (`imuinputshake off` turns that off). SELECT has no gesture, so
+  what only SELECT does (Quick Settings from outside the menu, the keyboard's mode key) is not
+  reachable from this input.
+- `openinput` opens the IMU itself and keeps it open: `closeimu` refuses while the input runs.
+  `closeinput` stops the input and leaves the IMU open. `imuinputread [json]` shows the state,
+  the lean, the joystick and the taps being counted.
+- To other devices and to MQTT the input reads as a gamepad (`x`, `y`, `buttons` in the
+  gamepad's layout); its `inputDeviceType` is 5.
+- `feathers3-status-sign` uses it as its only input device in place of the ANO wheel; the
+  one-time setup block in `configurations/README.md` changed with it (no `inputbus` line).
+
+### Added (IMU: per-sample hook and holders, for the IMU input device)
+Host-tested and built; not run on a device. The IMU input device (above) is its first user.
 - A consumer can take every IMU sample instead of the reading published every `imudevicepollms`:
   one hook (`imuSampleHookRegister` / `imuSampleHookUnregister`, `HAL_Motion.h`), called by the IMU
   once per sample (50 Hz on the Adafruit 4517, every `imudevicepollms` on the BNO055) after the
