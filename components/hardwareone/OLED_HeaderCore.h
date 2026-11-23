@@ -23,6 +23,9 @@
 // The title reserves min(its length, 10) cells. While the items do not fit the
 // rest, the shown non-pinned item with the lowest priority drops; the
 // static_assert below guarantees that only Context can ever drop.
+//
+// The on-screen keyboard's top line (prompt + keyboard page) is a second
+// profile of the same rules (namespace kb at the end).
 #pragma once
 
 #include <math.h>
@@ -43,7 +46,7 @@ struct OledHeaderStatus {
   char power[6];   // "42%", "~42%", "~100%", "USB", "--%"; "" = no power item
   uint8_t unread;  // unread notifications (drawn as 1-9 or '+')
   bool busy;       // the OLED command in flight
-  bool rec;        // a capture is live (not collected yet: always false)
+  bool rec;        // the microphone or the camera is capturing (one dot for both)
 };
 
 // What the screen says. Filled with the default title chain, then handed to
@@ -93,16 +96,17 @@ constexpr Rule kRules[kItemCount] = {
 // future row that breaks this fails the build.
 constexpr uint8_t kGuaranteedPriority = 50;
 
-constexpr int guaranteedWidth() {
+constexpr int guaranteedWidth(const Rule* rules, int n) {
   int total = 0, count = 0;
-  for (const Rule& rule : kRules) {
-    if (rule.pinned || rule.priority >= kGuaranteedPriority) {
-      total += rule.maxWidth;
+  for (int i = 0; i < n; ++i) {
+    if (rules[i].pinned || rules[i].priority >= kGuaranteedPriority) {
+      total += rules[i].maxWidth;
       ++count;
     }
   }
   return total + (count > 0 ? (count - 1) * kGap : 0);
 }
+constexpr int guaranteedWidth() { return guaranteedWidth(kRules, kItemCount); }
 constexpr int itemBudget(int reserveCells) { return kWidth - kCell * reserveCells - kGap; }
 
 static_assert(guaranteedWidth() <= itemBudget(kTitleReserveMax),
@@ -121,31 +125,35 @@ constexpr int kEllipsisY = 7;  // three dots on the text baseline of one cell
 
 // ---- layout -------------------------------------------------------------------
 
-// One placement pass: drop by priority until the items fit, pack them from
-// the right, return the title room in cells.
-inline int place(const uint8_t widths[kItemCount], int titleGlyphs, int16_t x[kItemCount]) {
-  bool shown[kItemCount];
-  for (int i = 0; i < kItemCount; ++i) shown[i] = widths[i] > 0;
+// The most items any profile has (the bar 5, the keyboard line 3).
+constexpr int kMaxItems = 8;
+static_assert(kItemCount <= kMaxItems, "the bar fits the placement scratch");
+
+// One placement pass over a rule table: drop by priority until the items fit,
+// pack them from the right, return the title room in cells.
+inline int placeRules(const Rule* rules, int n, const uint8_t* widths, int titleGlyphs, int16_t* x) {
+  bool shown[kMaxItems];
+  for (int i = 0; i < n; ++i) shown[i] = widths[i] > 0;
   const int reserve = titleGlyphs < 0 ? 0 : (titleGlyphs < kTitleReserveMax ? titleGlyphs : kTitleReserveMax);
   const int budget = itemBudget(reserve);
   for (;;) {
     int total = 0, count = 0;
-    for (int i = 0; i < kItemCount; ++i) {
+    for (int i = 0; i < n; ++i) {
       if (shown[i]) { total += widths[i]; ++count; }
     }
     if (count > 0) total += (count - 1) * kGap;
     if (total <= budget) break;
     int drop = -1;
-    for (int i = 0; i < kItemCount; ++i) {
-      if (!shown[i] || kRules[i].pinned) continue;
-      if (drop < 0 || kRules[i].priority < kRules[drop].priority) drop = i;
+    for (int i = 0; i < n; ++i) {
+      if (!shown[i] || rules[i].pinned) continue;
+      if (drop < 0 || rules[i].priority < rules[drop].priority) drop = i;
     }
-    if (drop < 0) break;  // only pinned items left (the static_assert rules this out)
+    if (drop < 0) break;  // only pinned items left (the static_asserts rule this out)
     shown[drop] = false;
   }
   int right = kWidth;  // the next slot ends here
   bool any = false;
-  for (int i = 0; i < kItemCount; ++i) {
+  for (int i = 0; i < n; ++i) {
     x[i] = -1;
     if (!shown[i]) continue;
     if (any) right -= kGap;
@@ -160,20 +168,31 @@ inline int place(const uint8_t widths[kItemCount], int titleGlyphs, int16_t x[kI
   return cells;
 }
 
+// placeRules, and while the item `busy` is shown the title keeps at most the
+// room it has without it (it never grows back when Busy pushes an item out).
+inline int layoutRules(const Rule* rules, int n, const uint8_t* widths, int titleGlyphs, int16_t* x,
+                       int busy) {
+  int cells = placeRules(rules, n, widths, titleGlyphs, x);
+  if (widths[busy] > 0) {
+    uint8_t calm[kMaxItems];
+    int16_t ignored[kMaxItems];
+    memcpy(calm, widths, static_cast<size_t>(n));
+    calm[busy] = 0;
+    const int calmCells = placeRules(rules, n, calm, titleGlyphs, ignored);
+    if (calmCells < cells) cells = calmCells;
+  }
+  return cells;
+}
+
+inline int place(const uint8_t widths[kItemCount], int titleGlyphs, int16_t x[kItemCount]) {
+  return placeRules(kRules, kItemCount, widths, titleGlyphs, x);
+}
+
 // widths[i] = the slot item i asks for (0 = absent). Writes each shown item's
 // slot left edge to x[i] (-1 = not shown) and returns the title room in cells.
 // While busy the title keeps at most the room it has without Busy.
 inline int layout(const uint8_t widths[kItemCount], int titleGlyphs, int16_t x[kItemCount]) {
-  int cells = place(widths, titleGlyphs, x);
-  if (widths[kBusy] > 0) {
-    uint8_t calm[kItemCount];
-    int16_t ignored[kItemCount];
-    memcpy(calm, widths, sizeof calm);
-    calm[kBusy] = 0;
-    const int calmCells = place(calm, titleGlyphs, ignored);
-    if (calmCells < cells) cells = calmCells;
-  }
-  return cells;
+  return layoutRules(kRules, kItemCount, widths, titleGlyphs, x, kBusy);
 }
 
 // ---- title --------------------------------------------------------------------
@@ -359,5 +378,82 @@ inline void draw(Gfx& g, const Frame& f, uint16_t fg, uint16_t bg) {
   if (f.x[kBusy] >= 0) drawBits(g, f.x[kBusy], kTextY, kHourglass, kHourglassH, kHourglassW, fg);
   g.drawFastHLine(0, kRuleY, kWidth, fg);
 }
+
+
+// ---- the keyboard line ------------------------------------------------------
+// The on-screen keyboard owns the whole display (the bar is off while it is
+// up), and its top line is a second profile of the same rules: the prompt from
+// x 0 (cut with the one-cell mark), then from the right Mode, Rec, Busy, 3 px
+// apart. Mode is the keyboard page (abc ABC 123 sym PAT), the live microphone
+// on the dictation page (PDM, G2), or the start of the typed text beside
+// "Suggestions:". It sits at the right edge in an 18 px slot (wider only for
+// that text), and Busy is leftmost, so nothing moves when a command starts or
+// ends. All three are pinned; only the prompt gives up room. The line is rows
+// y..y+8 with the text on row y; the keyboard's preview box is its rule.
+namespace kb {
+
+enum Item : uint8_t { kMode = 0, kRec, kBusy, kItemCount };
+constexpr int kModeMinWidth = 18;
+constexpr int kModeMaxGlyphs = 7;
+constexpr int kLineHeight = 9;
+
+constexpr Rule kRules[kItemCount] = {
+    {kModeMaxGlyphs * kCell, 90, true},  // Mode: 18 px, up to 7 glyphs for the typed text
+    {kRecDotW, 110, true},               // Rec: 5x5 dot
+    {kHourglassW, 100, true},            // Busy: 7x7 hourglass
+};
+static_assert(kItemCount <= kMaxItems, "the keyboard line fits the placement scratch");
+static_assert(guaranteedWidth(kRules, kItemCount) <= itemBudget(kTitleReserveMax),
+              "the keyboard line's items must fit beside a 10-cell prompt");
+
+struct Frame {
+  int16_t x[kItemCount];  // slot left edge, -1 = not shown
+  uint8_t w[kItemCount];
+  Title title;
+  char mode[kModeMaxGlyphs + 1];
+};
+
+inline void compose(const char* prompt, const char* mode, bool rec, bool busy, Frame& f) {
+  char text[oled_text::kLabelMax];
+  const size_t tLen = oled_text::flatten(prompt ? prompt : "", text, sizeof text);
+  const size_t mLen = oled_text::flatten(mode ? mode : "", f.mode, sizeof f.mode);  // at most 7 glyphs
+  uint8_t widths[kItemCount] = {};
+  if (mLen > 0) {
+    const int w = static_cast<int>(mLen) * kCell;
+    widths[kMode] = static_cast<uint8_t>(w < kModeMinWidth ? kModeMinWidth : w);
+  }
+  if (rec) widths[kRec] = kRecDotW;
+  if (busy) widths[kBusy] = kHourglassW;
+  const int cells = layoutRules(kRules, kItemCount, widths, static_cast<int>(tLen), f.x, kBusy);
+  for (int i = 0; i < kItemCount; ++i) f.w[i] = f.x[i] >= 0 ? widths[i] : 0;
+  fitTitle("", 0, text, tLen, cells, OledTitleCut::End, f.title);
+}
+
+// Rows y..y+8: cleared, then the prompt, the mode text right-aligned in its
+// slot, the capture dot and the hourglass. Same calls as the bar's draw().
+template <class Gfx>
+inline void draw(Gfx& g, const Frame& f, int y, uint16_t fg, uint16_t bg) {
+  g.fillRect(0, y, kWidth, kLineHeight, bg);
+  g.setTextSize(1);
+  g.setTextColor(fg);
+  for (int i = 0; i < f.title.cells; ++i) {
+    const int x = i * kCell;
+    if (i == f.title.ellipsisAt) {
+      for (int d = 0; d < 3; ++d) g.drawPixel(x + 2 * d, y + kEllipsisY - kTextY, fg);
+      continue;
+    }
+    g.setCursor(x, y);
+    g.print(f.title.glyphs[i]);
+  }
+  if (f.x[kMode] >= 0) {
+    const int n = static_cast<int>(strlen(f.mode));
+    g.setCursor(f.x[kMode] + f.w[kMode] - n * kCell, y);
+    g.print(f.mode);
+  }
+  if (f.x[kRec] >= 0) drawBits(g, f.x[kRec], y + 1, kRecDot, kRecDotH, kRecDotW, fg);
+  if (f.x[kBusy] >= 0) drawBits(g, f.x[kBusy], y, kHourglass, kHourglassH, kHourglassW, fg);
+}
+
+}  // namespace kb
 
 }  // namespace oled_header

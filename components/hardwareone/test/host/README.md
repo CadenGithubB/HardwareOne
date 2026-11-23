@@ -37,6 +37,12 @@ the title cut (one-cell `…` mark, `KeepPrefix` for paths, the shared
 sanitizer), the Power text from the shared battery backend (hidden on a board
 with no battery measurement), the staleness signature, that every lit pixel in
 rows 1-8 belongs to exactly one region, and seven golden frames byte for byte.
+The on-screen keyboard's top line (the core's second profile: prompt, then
+Mode, Rec, Busy from the right) gets the same checks and four golden frames.
+The band guard scans the in-frame OLED painters for a draw at a literal y of
+0-9 (literal coordinates only; computed ones are caught on the device by the
+`DEBUG_DISPLAY` band check), and the wiring of the capture dot, the keyboard
+poll and `oleddump` is checked in the sources.
 The `oledIsDirty` side of the staleness poll is in `test_millis_deadlines.py`.
 
 ## OLED CLI Output and its console history

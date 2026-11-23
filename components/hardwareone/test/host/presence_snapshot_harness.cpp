@@ -62,6 +62,7 @@ static void renderingAllowed() {
   assert(!semaphore.held && !busHeld);
 #endif
 }
+#define OLED_CONTENT_START_Y 11
 struct FakeDisplay {
   std::string text;
   void clearDisplay() { renderingAllowed(); text.clear(); }

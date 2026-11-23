@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1030 commands across 60 modules (1030 registry entries).
+1031 commands across 60 modules (1031 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -26,7 +26,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`relay`](#relay) — 2 commands
 - [`filesystem`](#filesystem) — 10 commands
 - [`sd`](#sd) — 5 commands
-- [`oled`](#oled) — 15 commands
+- [`oled`](#oled) — 16 commands
 - [`speaker`](#speaker) — 1 commands
 - [`neopixel`](#neopixel) — 5 commands
 - [`led`](#led) — 5 commands
@@ -455,6 +455,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `oledcameraread` |  | Read the local camera preview state (JSON) |
 | `oledclear` | A | Clear OLED display. |
 | `oleddefaultmode` | A | OLED default mode: <logo\|status\|sensors\|thermal\|network\|mesh\|off><br/>`Usage: oleddefaultmode <logo\|status\|sensors\|thermal\|network\|mesh\|off>` |
+| `oleddump` | A | Display canvas as text ('#' lit, '.' dark): [first-row] [rows]<br/>`Usage: oleddump [first-row] [rows] Example: oleddump 0 10 (the header bar) A reply holds up to 31 rows; its first line names the next first-row.` |
 | `oledflip` | A | Flip display 180°: [on\|off\|toggle]<br/>`Usage: oledflip [on\|off\|toggle]` |
 | `oledlandscape` | A | Landscape UI with right-side controls: [0\|1]<br/>`Usage: oledlandscape [0\|1]` |
 | `oledmode` | A | Set display mode: <mode><br/>`Usage: oledmode <menu\|status\|sensordata\|sensorlist\|thermal\|camera\|network\|mesh\|gps\|text\|logo\|anim\|imuactions\|fmradio\|files\|logging\|automations\|espnow\|memory\|off> Example: oledmode memory Example: oledmode off` |

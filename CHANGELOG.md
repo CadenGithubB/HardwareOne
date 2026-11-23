@@ -64,6 +64,18 @@ everything user-visible since the v0.99.99.1 tag.
   gone. Boards with no battery measurement no longer show `--%`. The Automations page counter
   (`3/12`) shows in the bar (it was erased every frame). The bar now updates by itself when the
   battery, USB or unread count changes, also on a still screen.
+- A capture dot shows in the bar on every screen while the microphone or the camera is in use
+  (recording, dictation, transcription, the wake word, a camera stream or video recording).
+- No screen draws in the header rows any more: Presence, APDS, Thermal, Change Password, the
+  "System Error" fallback and the Map popups start under the bar, which shows their name (Map
+  popups: `Map Menu`, `Goto WP`, `Load Track`, a layer name...). The thermal image shrinks to fit
+  between the bar and the footer on the 64 px OLED. The Map track status no longer overprints
+  its first rows; its `B:OK` and the map info's are in the footer.
+- The on-screen keyboard's top line uses the same rules: a long prompt ends in the `…` mark
+  instead of running into the page label (`abc`, `ABC`, `123`, `sym`, `PAT`, the live mic), which
+  stays at the right edge; the busy hourglass and the capture dot show there too.
+- New admin command `oleddump [first-row] [rows]` prints the screen as text (`#` lit, `.` dark)
+  over the console or HTTP, up to 31 rows per reply.
 
 ### Changed (guest web view)
 - A guest (owner decision B6: guests view interfaces only) now sees every web page and every
