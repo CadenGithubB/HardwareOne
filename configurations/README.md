@@ -25,7 +25,7 @@ Fifteen configurations are kept, each a board and a job:
 | | `xiao-openclaw` | Assistant over HTTP or from a Raspberry Pi; Bluetooth and the on-board model off |
 | | `xiao-display` | An SSD1306 display on external I2C; camera, maps and the on-board model off |
 | | `xiao-status-sign` | Meeting-room status sign: two Adafruit 4991 encoder boards lit by the LED commands; Wi-Fi, web interface and automations only |
-| FeatherS3[D] | `feathers3-status-sign` | Meeting-room status sign: two Adafruit 4991 encoder boards on I2C bus 1, the OLED, battery gauge and u.FL antenna; Wi-Fi, web interface and automations only |
+| FeatherS3[D] | `feathers3-status-sign` | Meeting-room status sign: two Adafruit 4991 encoder boards on I2C bus 1, the OLED, a DS3231 clock, battery gauge and u.FL antenna; Wi-Fi, web interface and automations only |
 | QT Py ESP32 | `qtpy-sensors` | Sensor node: GPS, distance and presence sensors with a gamepad |
 | | `qtpy-oled` | Sensor node with an SSD1306 display and a gesture sensor |
 | | `qtpy-espnow` | The OLED sensor node plus the ESP-NOW mesh |
@@ -145,7 +145,9 @@ encryption: board `feathers3`, not `feathers3_fe`), with the handheld's SSD1306 
 an external antenna on the u.FL. It is `xiao-status-sign` with the board changed and the OLED and
 the Power page left on. The [D]'s MAX17048 fuel gauge sits at 0x36 on bus 0 (the horizontal STEMMA
 QT, with the OLED), the same address as the first 4991, so the two encoder boards go on bus 1 (the
-vertical STEMMA QT, I2C2), the second with its A0 pad bridged (0x37). Once after the first setup:
+vertical STEMMA QT, I2C2), the second with its A0 pad bridged (0x37). A DS3231 clock (`CUSTOM_ENABLE_RTC`)
+sits at 0x68 on bus 0 and starts at boot with the defaults (`rtcbus 0`, `rtcautostart on`), so it keeps
+the time through power loss and before Wi-Fi/NTP is up. Once after the first setup:
 
 ```text
 encoderbus 1

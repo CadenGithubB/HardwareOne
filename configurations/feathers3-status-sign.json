@@ -11,7 +11,7 @@
     "CUSTOM_ENABLE_NET_ESPNOW": 0,
     "CUSTOM_ENABLE_OLED": 1,
     "CUSTOM_ENABLE_PRESENCE": 0,
-    "CUSTOM_ENABLE_RTC": 0,
+    "CUSTOM_ENABLE_RTC": 1,
     "CUSTOM_ENABLE_SERVO": 0,
     "CUSTOM_ENABLE_THERMAL": 0,
     "CUSTOM_ENABLE_TOF": 0,
@@ -36,6 +36,6 @@
   "sdkconfig": {
     "CONFIG_BT_ENABLED": false
   },
-  "summary": "Two Adafruit 4991 encoder boards on I2C bus 1 lit green or red, the OLED, battery gauge and u.FL antenna; Wi-Fi, web interface and automations only.",
+  "summary": "Two Adafruit 4991 encoder boards lit green or red, the OLED, a DS3231 clock, battery gauge and u.FL antenna; Wi-Fi, web interface and automations only.",
   "title": "Meeting-room status sign (FeatherS3[D])"
 }

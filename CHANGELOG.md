@@ -97,7 +97,7 @@ everything user-visible since the v0.99.99.1 tag.
   camera, microphone, assistant, ESP-NOW, maps and the Raspberry Pi link are off. The boards'
   addresses (0x36, 0x37) are device settings, set once after setup (`configurations/README.md`).
 - `feathers3-status-sign`: the same sign on a FeatherS3[D] (no flash encryption) with the OLED,
-  the battery gauge and an external antenna; the encoder boards go on bus 1 because the fuel gauge
+  a DS3231 clock (0x68, bus 0), the battery gauge and an external antenna; the encoder boards go on bus 1 because the fuel gauge
   holds 0x36 on bus 0.
 - `wifiexternalantenna` (FeatherS3[D]): selects the u.FL antenna through the board's RF switch
   (GPIO41 high at boot, reboot required). Off by default, and the pin is then never driven, so an
