@@ -148,6 +148,7 @@ static ReceivedTextMessage* gWebMessagesBuf = nullptr;
  *     {"seq":123,"reqId":7,"piece":1,"of":1,"mac":"XX:XX:XX:XX:XX:XX",
  *      "name":"device","msg":"text","enc":true,"ts":12345,"type":0,
  *      "sent":false,"sendState":0,"result":"late"},
+ *     {... "sent":true,"sendState":5,"reason":"too_large"},
  *     ...
  *   ],
  *   "deliveries": [
@@ -297,6 +298,11 @@ static esp_err_t handleEspNowMessages(httpd_req_t* req) {
     // the deliveries[] flip. 0 on received rows.
     err = webEspNowSendChunkf(req, ",\"sendState\":%u", msg.isSent ? msg.sendState : 0);
     if (err != ESP_OK) break;
+    // A refused sent row keeps its reason (the ACK status word), also after a reload.
+    if (msg.isSent && msg.sendState == SEND_STATUS_REFUSED && espnowanswer::sharedStatusName(msg.sendStatus)) {
+      err = webEspNowSendChunkf(req, ",\"reason\":\"%s\"", espnowanswer::sharedStatusName(msg.sendStatus));
+      if (err != ESP_OK) break;
+    }
     // A received remote command row that is not a plain result (1.0 step 6):
     // busy, refused, noAnswer, noResult, or late (the result after "No result").
     if (!msg.isSent && espnowcmd::outcomeKey(msg.sendState)) {

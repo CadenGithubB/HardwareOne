@@ -365,6 +365,37 @@ static void testHeader() {
     CHECK(d.sendState == (st & 7));
   }
 
+  // The status byte (ESP-NOW 1.0 step 6): kept only on a refused sent record (1-15).
+  {
+    Header s = mk(3);
+    s.sent = true;
+    s.sendState = kRefusedState;
+    s.status = 4;
+    encodeHeader(s, p);
+    CHECK(decodeHeader(p, d) && d.status == 4 && d.sendState == kRefusedState);
+    s.sendState = 4;
+    encodeHeader(s, p);
+    CHECK(decodeHeader(p, d) && d.status == 0);
+    s.sent = false;
+    s.sendState = kRefusedState;
+    encodeHeader(s, p);
+    CHECK(decodeHeader(p, d) && d.status == 0);
+    s.sent = true;
+    s.status = 16;
+    encodeHeader(s, p);
+    CHECK(decodeHeader(p, d) && d.status == 0);
+    s.status = 4;
+    encodeHeader(s, p);
+    p[kOffZero] = 16;
+    p[kOffCheck] = headerCheck(p);
+    CHECK(!decodeHeader(p, d));
+    s.sendState = 2;
+    encodeHeader(s, p);
+    p[kOffZero] = 4;
+    p[kOffCheck] = headerCheck(p);
+    CHECK(!decodeHeader(p, d));
+  }
+
   // decodeCount counts every call, refused ones too.
   const uint32_t before = decodeCount();
   encodeHeader(mk(5), p);

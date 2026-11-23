@@ -4721,6 +4721,18 @@ four. `espnow_message_store` outcome_rows: a received result row keeps its outco
 in the record's state bits; a sent row's busy state (4) is stamped. `espnow_history_core_tests` and
 `espnow_history_stress_tests`: the state field has three bits (0-7; reserved bits 0xC0).
 
+Review fixes (step 6): `espnow_remote_cmd_core_tests` retryRename (a held request ignores a busy ACK, follows
+the retry to its new msgId, ends once by the sender's final outcome; busy twice is one Busy under the final msgId;
+a caller's cancel of the old msgId leaves it; Refused at once, No answer at the next tick, Not sent forgotten),
+sixteenEndingsOnePass (16 refusals in one pass all reported); ackOutcomes now reports Busy (with busy / no slot)
+and Refused once from tick; cancel drops only a request still Sending. `espnow_chunked_send` K3/K11: held before
+the first attempt (not for CMD) and settled once under the final msgId. `espnow_answers`: no store answers
+not_ready. `espnow_tx_multiframe`: sendAeadSync reports NotQueued (before init, on the dispatcher), Failed (ran
+and failed) and Sent. `espnow_history_core_tests`: byte 7 is a refused sent record's status (1-15), cleared on
+any other record, a forged one refused. `espnow_message_store`: a refused stamp keeps its status; espnowmessages
+json carries `reason`. `espnow_send_words`: the refusal's status reaches the history; source rules for the
+timed-out send, results before the tick, the store emptied at every start, not_ready without a store.
+
 ## ESP-NOW ACK after accept (1.0 step 5b)
 
 ```sh

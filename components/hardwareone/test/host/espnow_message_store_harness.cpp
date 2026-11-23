@@ -1269,6 +1269,15 @@ static void caseDelivery() {
     for (int i = 0; i < nb; i++) stamped = stamped || (busy[i].reqId == 43 && busy[i].sendState == 4);
     CHECK(stamped, "a busy send (state 4) is stamped and read back");
   }
+  // A refused send keeps its reason (the ACK status) with the record.
+  espnowUpdateSentDeliveryState(A, 43, 5, 4);
+  {
+    ReceivedTextMessage rf[8];
+    const int nf = getPeerMessages(A, rf, 8, 0);
+    bool kept = false;
+    for (int i = 0; i < nf; i++) kept = kept || (rf[i].reqId == 43 && rf[i].sendState == 5 && rf[i].sendStatus == 4);
+    CHECK(kept, "a refused send (state 5) keeps its status 4 (too large)");
+  }
   espnowUpdateSentDeliveryState(A, 43, 0);
   espnowUpdateSentDeliveryState(A, 42, 2);
   ReceivedTextMessage out[8];

@@ -55,7 +55,7 @@ static constexpr uint8_t kSessionSlots = 0;
 static constexpr uint8_t kSessionSendTimeoutsBeforeReestablish = 2;
 enum { SESSION_ACTIVE = 3 };
 static void sessionClear(SessionState*) {}
-struct Stamp { uint32_t msgId; uint8_t state; };
+struct Stamp { uint32_t msgId; uint8_t state; uint8_t status; };
 static std::vector<Stamp> gStamps;
 // INSERT_TYPES
 // INSERT_SENDSTATUS
@@ -89,7 +89,8 @@ int main() {
   sendStatusRegister(12, peer);
   sendStatusMarkRefused(12, peer, espnowanswer::kTooLarge);
   check(slotOf(12)->state == SEND_STATUS_REFUSED && slotOf(12)->status == espnowanswer::kTooLarge &&
-        stamped(12, 5), "too large is Refused (state 5) with its status");
+        stamped(12, 5) && gStamps.back().status == espnowanswer::kTooLarge,
+        "too large is Refused (state 5); the status goes into the history with it (the reason)");
   sendStatusRegister(13, peer);
   sendStatusMarkRefused(13, other, espnowanswer::kBusy);
   check(slotOf(13)->state == SEND_STATUS_PENDING, "an ACK from another device changes nothing");
@@ -140,7 +141,7 @@ def source_rules(read) -> list:
             if 'espnowRemoteCmdBegin(' not in before:
                 failures.append(f'{name}:{line}: a {m.group(2)} send is not registered (espnowRemoteCmdBegin) first')
             after = text[m.start():m.start() + 900]
-            if 'espnowRemoteCmdCancel(' not in after:
+            if 'espnowRemoteCmdCancel(' not in after and 'remoteCmdSyncSendFailed(' not in after:
                 failures.append(f'{name}:{line}: a failed {m.group(2)} send does not cancel its request')
     ack = extract_block(source, 'static void v4_rx_ack(')
     if 'remoteCmdOnAck(peer, a.ackFor, a.status, a.fragIndex + 1 >= a.fragCount);' not in ack:
@@ -149,6 +150,23 @@ def source_rules(read) -> list:
         failures.append('a STREAM line does not move its command\'s deadline')
     if source.count('remoteCmdDrain((uint32_t)millis());') != 1:
         failures.append('the espnow_task loop does not drain the remote-command results once per pass')
+    # Review of step 6: a send whose wait timed out may still go out: its
+    # request stays (item 3); due results are shown before the tick, so one that
+    # came in time is never "No result" first (item 4); the store is emptied at
+    # every start, outside the first-start block (item 5); no store answers
+    # not ready, not busy (item 6).
+    failed = extract_block(source, 'static void remoteCmdSyncSendFailed(')
+    if 'how != espnowtx::SyncOutcome::TimedOut' not in failed:
+        failures.append('a timed-out CMD send drops its request')
+    drain = extract_block(source, 'static void remoteCmdDrain(')
+    if not 0 <= drain.find('espnowcmd::front(') < drain.find('espnowcmd::tick('):
+        failures.append('remoteCmdDrain ticks before it shows the due results')
+    init_at = source.find('  (void)remoteCmdStoreInit();\n\n  // V4 reassembly buffers')
+    if init_at < 0 or source.count('remoteCmdStoreInit();') != 1:
+        failures.append('the remote-command store is not emptied at every start (next to the reassembly pool)')
+    resp = extract_block(source, 'static V4Verdict v4h_cmd_resp(')
+    if 'if (!gRemoteCmd) return ctx.refuseWith(espnowanswer::kNotReady);' not in resp:
+        failures.append('with no result store a CMD_RESP is not refused not ready')
     cmd = extract_block(source, 'static V4Verdict v4h_cmd(')
     if 'v4_send_cmd_resp_async' in cmd or 'ESPNOW_V4_TYPE_CMD_RESP' in cmd:
         failures.append('v4h_cmd still sends a CMD_RESP(busy): the ACK is the one answer')
@@ -176,8 +194,8 @@ def main() -> int:
         extract_block(sessions_h, 'enum SendStatusState : uint8_t') + ';',
         extract_block(sessions_h, 'struct SendStatus') + ';',
         'enum class V4SendOutcome : uint8_t { Delivered = 0, Refused = 1, NoAnswer = 2, NotSent = 3 };',
-        'static void espnowUpdateSentDeliveryState(const uint8_t*, uint32_t msgId, uint8_t state) '
-        '{ gStamps.push_back({msgId, state}); }',
+        'static void espnowUpdateSentDeliveryState(const uint8_t*, uint32_t msgId, uint8_t state, '
+        'uint8_t status = 0) { gStamps.push_back({msgId, state, status}); }',
     ])
     start = sessions.index('namespace {\n\nconstexpr uint8_t kSendStatusSlots')
     end = sessions.index('// ====', sessions.index('extern "C" const SendStatus* sendStatusAt('))

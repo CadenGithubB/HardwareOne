@@ -268,8 +268,10 @@ int main() {
   // F: before init() (lifecycle STOPPED) a multi-frame sync send is refused
   //    without touching the radio; the payload copy is still released (ASan).
   gRadio.clear();
-  CHECK(!espnowtx::sendAeadSync(kDirect, 9, 0, 7, big.data(), (uint16_t)big.size(), 1, 1000));
+  espnowtx::SyncOutcome how = espnowtx::SyncOutcome::Sent;
+  CHECK(!espnowtx::sendAeadSync(kDirect, 9, 0, 7, big.data(), (uint16_t)big.size(), 1, 1000, &how));
   CHECK(gRadio.empty());
+  CHECK(how == espnowtx::SyncOutcome::NotQueued);  // ESP-NOW 1.0 step 6: nothing left
 
   CHECK(espnowtx::init());
 
@@ -355,7 +357,9 @@ int main() {
   gRadioOk = false;
   espnowtx::getStats(&s);
   const uint32_t failedBefore = s.failed, submittedBefore = s.submitted, sentBefore = s.sent;
-  CHECK(!espnowtx::sendAeadSync(kDirect, 9, 0, 6, big.data(), (uint16_t)big.size(), 1, 1000));
+  how = espnowtx::SyncOutcome::Sent;
+  CHECK(!espnowtx::sendAeadSync(kDirect, 9, 0, 6, big.data(), (uint16_t)big.size(), 1, 1000, &how));
+  CHECK(how == espnowtx::SyncOutcome::Failed);  // it ran and failed (not a timeout)
   espnowtx::getStats(&s);
   CHECK(s.failed == failedBefore + 1);
   CHECK(s.submitted == submittedBefore + 1);
@@ -368,9 +372,14 @@ int main() {
   gCurrentTask = DISPATCHER;
   gRadio.clear();
   CHECK(!espnowtx::sendAeadSync(kDirect, 9, 0, 7, big.data(), (uint16_t)big.size(), 1, 1000));
-  CHECK(!espnowtx::sendAeadSync(kDirect, 9, 0, 8, small, sizeof small, 1, 1000));
+  how = espnowtx::SyncOutcome::Sent;
+  CHECK(!espnowtx::sendAeadSync(kDirect, 9, 0, 8, small, sizeof small, 1, 1000, &how));
+  CHECK(how == espnowtx::SyncOutcome::NotQueued);
   CHECK(gRadio.empty());
   gCurrentTask = CALLER;
+  how = espnowtx::SyncOutcome::NotQueued;
+  CHECK(espnowtx::sendAeadSync(kDirect, 9, 0, 9, small, sizeof small, 1, 1000, &how));
+  CHECK(how == espnowtx::SyncOutcome::Sent);
 
   // G: fire-and-forget submit() is unchanged: an over-cap sendAead is still
   //    queued and sent by the dispatcher (producers stay single-frame by their

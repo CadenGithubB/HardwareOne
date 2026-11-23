@@ -1882,7 +1882,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
     if (state === 5 || state === 'refused') return 'Refused';
     return '';
   }
-  function renderMessage(mac, text, partial, isSent, sendState, reqId, result) {
+  function renderMessage(mac, text, partial, isSent, sendState, reqId, result, reason) {
     if (typeof window.appendLogLine !== 'function') { console.error('[ESP-NOW] appendLogLine not available'); return; }
     if (!isSent) {
       // A remote command result that came after "No result" was shown.
@@ -1895,9 +1895,11 @@ inline void streamEspNowInner(httpd_req_t* req) {
     if (reqId) bubble.setAttribute('data-msg-id', reqId);
     var word = sendStateWord(sendState);
     if (word) {
+      // A refusal names its reason, kept with the record (also after a reload).
+      if (sendState === 5 && reason) word += ': ' + String(reason).replace(/_/g, ' ');
       var sd = bubble.querySelector('.message-status');
       if (sd) {
-        sd.innerHTML = '<span class="status-icon">✗</span>' + word;
+        sd.innerHTML = '<span class="status-icon">✗</span>' + hw.esc(word);
         bubble.classList.add('message-error');
       }
     }
@@ -1912,6 +1914,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
     var isSent = !!msg.sent;
     var sendState = msg.sendState || 0;
     var result = msg.result || '';
+    var reason = msg.reason || '';
     // Sent messages now come from the shared device history (so the OLED/BLE see
     // our sends and we see theirs). If this is the polled echo of a message WE
     // just sent from this browser, its optimistic bubble is already on screen
@@ -1921,15 +1924,16 @@ inline void streamEspNowInner(httpd_req_t* req) {
         hw.qs('.message-bubble[data-msg-id="' + reqId + '"]')) {
       return;
     }
-    if (of <= 1 || !reqId) { renderMessage(mac, text, false, isSent, sendState, reqId, result); return; }  // not chunked
+    if (of <= 1 || !reqId) { renderMessage(mac, text, false, isSent, sendState, reqId, result, reason); return; }  // not chunked
     var g = pendingGroups[reqId];
-    if (!g) { g = pendingGroups[reqId] = { of: of, mac: mac, parts: {}, count: 0, tick: pollTick, isSent: isSent, sendState: sendState, reqId: reqId, result: result }; }
+    if (!g) { g = pendingGroups[reqId] = { of: of, mac: mac, parts: {}, count: 0, tick: pollTick, isSent: isSent, sendState: sendState, reqId: reqId, result: result, reason: reason }; }
     g.sendState = sendState;  // latest fragment's state (all share it once resolved)
+    g.reason = reason;
     if (!(piece in g.parts)) { g.parts[piece] = text; g.count++; }
     if (g.count >= g.of) {  // all pieces in — join in order and render once
       var full = '';
       for (var k = 1; k <= g.of; k++) full += (g.parts[k] || '');
-      renderMessage(g.mac, full, false, g.isSent, g.sendState, g.reqId, g.result);
+      renderMessage(g.mac, full, false, g.isSent, g.sendState, g.reqId, g.result, g.reason);
       delete pendingGroups[reqId];
     }
   }
@@ -1942,7 +1946,7 @@ inline void streamEspNowInner(httpd_req_t* req) {
       if (pollTick - g.tick > 20) {
         var full = '';
         for (var k = 1; k <= g.of; k++) full += (g.parts[k] || '[missing] ');
-        renderMessage(g.mac, full, true, g.isSent, g.sendState, g.reqId, g.result);
+        renderMessage(g.mac, full, true, g.isSent, g.sendState, g.reqId, g.result, g.reason);
         delete pendingGroups[id];
       }
     }

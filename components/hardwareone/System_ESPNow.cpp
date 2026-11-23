@@ -279,15 +279,13 @@ bool espnowCmdResultGet(EspNowCmdResult& out) {
 // (remoteCmdDrain). One PSRAM block, allocated at the first start of ESP-NOW and
 // kept (like the reassembly pool); no fallback to internal SRAM.
 // Access: the table is begun from any sending task and resolved on espnow_task,
-// under gRemoteCmdLock (short copies only); the queue and the notices are
-// espnow_task only (v4h_cmd_resp / v4_rx_ack push, remoteCmdDrain pops).
+// under gRemoteCmdLock (short copies only); every ending (Busy, Refused, No
+// answer, No result) is reported from the table by remoteCmdDrain's tick, once.
+// The result queue is espnow_task only (v4h_cmd_resp pushes, remoteCmdDrain pops).
 namespace {
-constexpr uint8_t kRemoteCmdNotices = 8;   // ACK outcomes (Busy / Refused) waiting to be shown
 struct RemoteCmdStore {
   espnowcmd::RequesterTable requesters;
   espnowcmd::ResultQueue results;
-  espnowcmd::Expired notices[kRemoteCmdNotices];
-  uint8_t noticeCount;
   uint8_t ring[espnowcmd::kResultRingBytes];
 };
 }  // namespace
@@ -298,14 +296,15 @@ static portMUX_TYPE gRemoteCmdLock = portMUX_INITIALIZER_UNLOCKED;
 // only, 0 = off.
 static std::atomic<uint32_t> gRemoteCmdHoldMs{0};
 
-// Allocates the store once (PSRAM only) and empties it. False when there is no
-// PSRAM for it: remote command results are then refused busy and nothing is tracked.
+// Allocates the store once (PSRAM only; retried at every start until it works)
+// and empties it at every start of ESP-NOW. False when there is no PSRAM for it:
+// remote command results are then refused "not ready" and nothing is tracked.
 static bool remoteCmdStoreInit() {
   if (!gRemoteCmd) {
     gRemoteCmd = (RemoteCmdStore*)ps_alloc(sizeof(RemoteCmdStore), AllocPref::RequirePsram, "espnow.cmdResults");
     if (!gRemoteCmd) {
       BROADCAST_PRINTF("[ESP-NOW] WARNING: No PSRAM for the remote command results (%u bytes): results are "
-                       "answered busy", (unsigned)sizeof(RemoteCmdStore));
+                       "refused (not ready)", (unsigned)sizeof(RemoteCmdStore));
       return false;
     }
   }
@@ -313,7 +312,6 @@ static bool remoteCmdStoreInit() {
   memset(&gRemoteCmd->requesters, 0, sizeof(gRemoteCmd->requesters));
   taskEXIT_CRITICAL(&gRemoteCmdLock);
   espnowcmd::queueInit(gRemoteCmd->results, gRemoteCmd->ring, sizeof(gRemoteCmd->ring));
-  gRemoteCmd->noticeCount = 0;
   return true;
 }
 
@@ -350,6 +348,19 @@ void espnowRemoteCmdCancel(const uint8_t mac[6], uint32_t reqId) {
   taskEXIT_CRITICAL(&gRemoteCmdLock);
 }
 
+// A synchronous CMD send returned false. Nothing left (not queued, or the
+// send ran and failed): the request is cancelled. The wait timed out with the
+// job still in the dispatcher's hands: it may yet go out, so the request stays
+// tracked and ends in its result or "No answer" like any other (a hint says so).
+static void remoteCmdSyncSendFailed(const uint8_t mac[6], uint32_t reqId, espnowtx::SyncOutcome how) {
+  if (how != espnowtx::SyncOutcome::TimedOut) {
+    espnowRemoteCmdCancel(mac, reqId);
+    return;
+  }
+  cliHintf("the request may still go out: its result, or 'No answer', shows in the conversation (reqId %lu)",
+           (unsigned long)reqId);
+}
+
 // The whole message goes again under a new msgId (v4_send_encrypted_chunked):
 // a request of this table follows it. No-op for any other message.
 static void remoteCmdRenamed(const uint8_t mac[6], uint32_t oldId, uint32_t newId) {
@@ -359,25 +370,37 @@ static void remoteCmdRenamed(const uint8_t mac[6], uint32_t oldId, uint32_t newI
   taskEXIT_CRITICAL(&gRemoteCmdLock);
 }
 
+// The multi-frame sender takes a message it may send once more as a whole
+// (v4_send_encrypted_chunked): a tracked request is held, so a busy ACK does
+// not end it; the sender's final outcome does (remoteCmdSettle). No-op for any
+// other message.
+static void remoteCmdHold(const uint8_t mac[6], uint32_t reqId) {
+  if (!gRemoteCmd || !mac) return;
+  taskENTER_CRITICAL(&gRemoteCmdLock);
+  espnowcmd::hold(gRemoteCmd->requesters, mac, reqId);
+  taskEXIT_CRITICAL(&gRemoteCmdLock);
+}
+
+// The multi-frame sender's final outcome, under the message's final msgId.
+static void remoteCmdSettle(const uint8_t mac[6], uint32_t reqId, const V4SendResult& r) {
+  if (!gRemoteCmd || !mac) return;
+  espnowcmd::Settle how = espnowcmd::Settle::Delivered;
+  if (r.outcome == V4SendOutcome::Refused) how = espnowcmd::Settle::Refused;
+  else if (r.outcome == V4SendOutcome::NoAnswer) how = espnowcmd::Settle::NoAnswer;
+  else if (r.outcome == V4SendOutcome::NotSent) how = espnowcmd::Settle::NotSent;
+  taskENTER_CRITICAL(&gRemoteCmdLock);
+  espnowcmd::settle(gRemoteCmd->requesters, mac, reqId, how, r.status, (uint32_t)millis());
+  taskEXIT_CRITICAL(&gRemoteCmdLock);
+}
+
 // A sealed ACK (v4_rx_ack, espnow_task). For a fragmented request only a
 // refusal, or the last fragment's ACK (the whole message accepted), counts.
-// Busy / Refused are queued as notices for remoteCmdDrain to show.
+// Busy / Refused are reported by remoteCmdDrain's tick.
 static void remoteCmdOnAck(const uint8_t mac[6], uint32_t reqId, uint8_t status, bool lastFragment) {
   if (!gRemoteCmd || !mac || (status == 0 && !lastFragment)) return;
   taskENTER_CRITICAL(&gRemoteCmdLock);
-  const espnowcmd::State st = espnowcmd::onAck(gRemoteCmd->requesters, mac, reqId, status, (uint32_t)millis());
+  (void)espnowcmd::onAck(gRemoteCmd->requesters, mac, reqId, status, (uint32_t)millis());
   taskEXIT_CRITICAL(&gRemoteCmdLock);
-  if (st != espnowcmd::State::Busy && st != espnowcmd::State::Refused) return;
-  if (gRemoteCmd->noticeCount >= kRemoteCmdNotices) {
-    WARN_ESPNOWF("remote command #%lu: %s (not shown: too many at once)", (unsigned long)reqId,
-                 st == espnowcmd::State::Busy ? "busy" : "refused");
-    return;
-  }
-  espnowcmd::Expired& n = gRemoteCmd->notices[gRemoteCmd->noticeCount++];
-  memcpy(n.mac, mac, 6);
-  n.reqId = reqId;
-  n.status = status;
-  n.outcome = (uint8_t)(st == espnowcmd::State::Busy ? espnowcmd::Outcome::Busy : espnowcmd::Outcome::Refused);
 }
 
 // A STREAM line for the command `reqId` (v4h_stream, espnow_task): its result
@@ -3833,8 +3856,6 @@ V4SendResult v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint1
   if (!dst || (payloadLen > 0 && !payload)) return V4SendResult{V4SendOutcome::NotSent, 0};
 
   bool rekeyStall = false;
-  V4SendResult r = v4_send_chunked_attempt(dst, type, baseFlags, msgId, payload, payloadLen, ttl, &rekeyStall,
-                                           ackSingle);
   bool again = false;
   // TEXT is stored per fragment on the receiver (v4h_text): fragments it
   // already took would be shown twice under a second msgId, so a long TEXT is
@@ -3842,6 +3863,11 @@ V4SendResult v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint1
   // busy ends Busy (DESIGN 3.5: terminal, shown at once); the person sends it
   // again.
   const bool wholeRetryOk = type != ESPNOW_V4_TYPE_TEXT && type != ESPNOW_V4_TYPE_CMD;
+  // A tracked request (USER_SYNC) that may go once more: its busy ACK is not
+  // its end; the final outcome below is (remoteCmdSettle).
+  if (wholeRetryOk) remoteCmdHold(dst, msgId);
+  V4SendResult r = v4_send_chunked_attempt(dst, type, baseFlags, msgId, payload, payloadLen, ttl, &rekeyStall,
+                                           ackSingle);
   if (wholeRetryOk && r.outcome == V4SendOutcome::Refused &&
       (r.status == espnowanswer::kBusy || r.status == espnowanswer::kNoSlot)) {
     const uint32_t waitMs = 300 + (esp_random() % 501);
@@ -3864,9 +3890,10 @@ V4SendResult v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint1
     WARN_ESPNOWF("[V4_ENC_FRAG_TX] a rekey interrupted msgId=%lu: %s", (unsigned long)msgId,
                  again ? "sending the message again on the new keys" : "the session is not back, not sent");
   }
+  uint32_t retryId = 0;
   if (again) {
     rekeyStall = false;
-    const uint32_t retryId = generateMessageId();
+    retryId = generateMessageId();
     // A tracked request (USER_SYNC) follows its message to the new msgId: the
     // answer will name that one.
     remoteCmdRenamed(dst, msgId, retryId);
@@ -3875,6 +3902,8 @@ V4SendResult v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint1
   }
 
   sessionNoteSendOutcome(dst, r.outcome);
+  // The tracked request (if any) ends by this outcome, under the final msgId.
+  remoteCmdSettle(dst, retryId ? retryId : msgId, r);
   // A fragmented send is ACKed per fragment (the waiter above), which never
   // reaches the tracked-send ACK path that flips the web UI's delivery
   // bubble: mark it here by the caller's msgId. No-op for sends that were not
@@ -4933,7 +4962,8 @@ static V4Verdict v4h_cmd_resp(const V4RxCtx& ctx) {
   if (resultLen && result[resultLen - 1] == '\0') resultLen--;
   // The wire cannot deliver more than V4_REASM_MAX_MSG; the clamp states it.
   if (resultLen > V4_REASM_MAX_MSG) resultLen = V4_REASM_MAX_MSG;
-  if (!gRemoteCmd) return ctx.refuseWith(espnowanswer::kBusy);  // no store (no PSRAM): cannot keep it
+  // No store (no PSRAM at start): not a passing condition, so not "busy".
+  if (!gRemoteCmd) return ctx.refuseWith(espnowanswer::kNotReady);
   const uint32_t readyAt = (uint32_t)millis() + gRemoteCmdHoldMs.load(std::memory_order_relaxed);
   if (!espnowcmd::push(gRemoteCmd->results, ctx.recv_info->src_addr, ctx.deviceName, resp.reqId, resp.status,
                        reinterpret_cast<const char*>(result), resultLen, readyAt)) {
@@ -13915,8 +13945,12 @@ static void espnowChFollowLogTransitions() {
 static void remoteCmdOutcomeText(const espnowcmd::Expired& e, const char* who, char* out, size_t cap) {
   switch ((espnowcmd::Outcome)e.outcome) {
     case espnowcmd::Outcome::Busy:
-      snprintf(out, cap, "Busy: %s could not take the command now (another one is running). Send it again "
-               "in a few seconds.", who);
+      if (e.status == espnowanswer::kNoSlot) {
+        snprintf(out, cap, "Busy: %s had no room for a long message now. Send it again in a few seconds.", who);
+      } else {
+        snprintf(out, cap, "Busy: %s could not take the command now (another one is running). Send it again "
+                 "in a few seconds.", who);
+      }
       break;
     case espnowcmd::Outcome::Refused: {
       const char* why = espnowanswer::statusName(ESPNOW_V4_TYPE_CMD_RESP, e.status);
@@ -14007,24 +14041,15 @@ static void remoteCmdShowResult(const espnowcmd::ResultEntry& r, const char* tex
   systemEventPost(SYSEVT_REMOTE_CMD_RESULT, deviceName.c_str(), resDetail);
 }
 
-// espnow_task loop step 8: shows every request that ended without a result
-// (ACK busy / refused, no ACK, no result by the deadline) and the results
-// received (at most kRemoteCmdResultsPerPass per pass, oldest first; a held
-// one (lab hook) stops the pass until it is due). A result for a reqId this
-// device is not waiting on is logged only (DESIGN 3.5).
+// espnow_task loop step 8. First the results received (every one that is due,
+// oldest first; a held one, the lab hook, stops the pass until it is due), so a
+// result that came before its deadline is never shown as "No result" first; a
+// result for a reqId this device is not waiting on is logged only (DESIGN 3.5).
+// Then every request that ended without a result (ACK busy / refused, no ACK,
+// no result by the deadline), each reported once by the table's tick.
 static void remoteCmdDrain(uint32_t now) {
   if (!gRemoteCmd) return;
-  constexpr int kRemoteCmdResultsPerPass = 4;
-  // espnow_task only: PSRAM, off the task's stack.
-  EXT_RAM_BSS_ATTR static espnowcmd::Expired ended[espnowcmd::kRequesters];
-  taskENTER_CRITICAL(&gRemoteCmdLock);
-  const int n = espnowcmd::tick(gRemoteCmd->requesters, now, ended, espnowcmd::kRequesters);
-  taskEXIT_CRITICAL(&gRemoteCmdLock);
-  for (uint8_t i = 0; i < gRemoteCmd->noticeCount; i++) remoteCmdShowOutcome(gRemoteCmd->notices[i]);
-  gRemoteCmd->noticeCount = 0;
-  for (int i = 0; i < n; i++) remoteCmdShowOutcome(ended[i]);
-
-  for (int shown = 0; shown < kRemoteCmdResultsPerPass; shown++) {
+  for (int shown = 0; shown < espnowcmd::kResults; shown++) {
     const espnowcmd::ResultEntry* r = espnowcmd::front(gRemoteCmd->results, now);
     if (!r) break;
     taskENTER_CRITICAL(&gRemoteCmdLock);
@@ -14040,6 +14065,13 @@ static void remoteCmdDrain(uint32_t now) {
     }
     espnowcmd::pop(gRemoteCmd->results);
   }
+
+  // espnow_task only: PSRAM, off the task's stack.
+  EXT_RAM_BSS_ATTR static espnowcmd::Expired ended[espnowcmd::kRequesters];
+  taskENTER_CRITICAL(&gRemoteCmdLock);
+  const int n = espnowcmd::tick(gRemoteCmd->requesters, now, ended, espnowcmd::kRequesters);
+  taskEXIT_CRITICAL(&gRemoteCmdLock);
+  for (int i = 0; i < n; i++) remoteCmdShowOutcome(ended[i]);
 }
 
 void processMeshHeartbeats() {
@@ -15538,10 +15570,6 @@ static bool initEspNow() {
     } else {
       BROADCAST_PRINTF("[ESP-NOW] WARNING: Failed to allocate listBuffer");
     }
-    // Remote command results and the requester table (1.0 step 6): one PSRAM
-    // block, kept across restarts of ESP-NOW and emptied here.
-    (void)remoteCmdStoreInit();
-
     // STREAM ring for bonded/remote command output. A large burst (e.g. `help`,
     // ~24 frames in ~150ms) overflows a small ring and silently truncates. Use
     // 64 slots STRICTLY in PSRAM; if PSRAM is unavailable or the PSRAM alloc
@@ -15590,6 +15618,11 @@ static bool initEspNow() {
                         sizeof(MeshPeerMeta) * gMeshPeerSlots;
     BROADCAST_PRINTF("[ESP-NOW] Allocated state (%u bytes, %d peer slots)", (unsigned)totalBytes, gMeshPeerSlots);
   }
+
+  // Remote command results and the requester table (1.0 step 6): one PSRAM
+  // block, kept across restarts of ESP-NOW, emptied at every start (a failed
+  // allocation is tried again at the next start).
+  (void)remoteCmdStoreInit();
 
   // V4 reassembly buffers: V4_REASM_MAX entries of ~4.2 KB, PSRAM only (no
   // fallback to internal SRAM). Without them every fragment is answered
@@ -22125,12 +22158,13 @@ const char* cmd_espnow_browse(const String& argsInput) {
   // v4_send_encrypted_or_queue). Status-string distinction (immediate vs
   // queued-for-SESSION_OPEN) is no longer surfaced to the user.
   espnowRemoteCmdBegin(targetMac, msgId);  // tracked to one terminal result (1.0 step 6)
+  espnowtx::SyncOutcome how = espnowtx::SyncOutcome::NotQueued;
   bool sent = espnowtx::sendAeadSync(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                                (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1, 2000);
+                                (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1, 2000, &how);
 
   EXT_RAM_BSS_ATTR static char browseBuffer[256];
   if (!sent) {
-    espnowRemoteCmdCancel(targetMac, msgId);
+    remoteCmdSyncSendFailed(targetMac, msgId, how);
     return espnowAckErr(wantJson, "Error: Failed to send the browse request (send queue full or timeout). Retry in a few seconds.", "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}");
   }
 
@@ -22215,12 +22249,13 @@ const char* cmd_espnow_fetch(const String& argsInput) {
   // browse path above.
   uint32_t msgId = generateMessageId();
   espnowRemoteCmdBegin(targetMac, msgId);  // tracked to one terminal result (1.0 step 6)
+  espnowtx::SyncOutcome how = espnowtx::SyncOutcome::NotQueued;
   bool sent = espnowtx::sendAeadSync(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                                (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1, 2000);
+                                (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1, 2000, &how);
 
   EXT_RAM_BSS_ATTR static char fetchBuffer[256];
   if (!sent) {
-    espnowRemoteCmdCancel(targetMac, msgId);
+    remoteCmdSyncSendFailed(targetMac, msgId, how);
     return espnowAckErr(wantJson, "Error: Failed to send the fetch request (send queue full or timeout). Retry in a few seconds.", "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}");
   }
 
@@ -22335,12 +22370,13 @@ const char* cmd_espnow_remote(const String& argsInput) {
   // Tracked from here to one terminal result (1.0 step 6): its result, Busy,
   // Refused, No answer, or No result (then perhaps Result (late)).
   espnowRemoteCmdBegin(targetMac, msgId);
+  espnowtx::SyncOutcome how = espnowtx::SyncOutcome::NotQueued;
   bool success = espnowtx::sendAeadSync(targetMac, ESPNOW_V4_TYPE_CMD, ESPNOW_V4_FLAG_ACK_REQ, msgId,
-                                   (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1, 2000);
+                                   (const uint8_t*)cmdPayload, (uint16_t)payloadLen, 1, 2000, &how);
 
   EXT_RAM_BSS_ATTR static char remoteBuffer[256];
   if (!success) {
-    espnowRemoteCmdCancel(targetMac, msgId);
+    remoteCmdSyncSendFailed(targetMac, msgId, how);
     return espnowAckErr(wantJson, "Error: Failed to send remote command (send queue full or timeout). Retry in a few seconds.", "{\"schema\":1,\"ok\":false,\"error\":\"send failed\"}");
   }
 
@@ -22624,7 +22660,7 @@ const char* cmd_espnow_send(const String& argsInput) {
   {
     SendStatus st;
     if (sendStatusGet(msgId, &st) && st.state != SEND_STATUS_PENDING) {
-      espnowUpdateSentDeliveryState(mac, msgId, st.state);
+      espnowUpdateSentDeliveryState(mac, msgId, st.state, st.status);
     }
   }
   if (jsonMode) {
@@ -23935,6 +23971,10 @@ const char* cmd_espnow_messages(const String& argsInput) {
       // Sent rows: 0 pending, 1 delivered, 2 timeout, 3 failed (both "No answer"),
       // 4 busy, 5 refused. 0 on received rows.
       o["sendState"] = msgs[i].isSent ? msgs[i].sendState : 0;
+      // A refused sent row keeps its reason (the ACK status word, 1.0 step 6).
+      const char* reason = (msgs[i].isSent && msgs[i].sendState == SEND_STATUS_REFUSED)
+                               ? espnowanswer::sharedStatusName(msgs[i].sendStatus) : nullptr;
+      if (reason) o["reason"] = reason;
       // A received remote command row that is not a plain result (1.0 step 6).
       const char* result = msgs[i].isSent ? nullptr : espnowcmd::outcomeKey(msgs[i].sendState);
       if (result) o["result"] = result;
@@ -25497,6 +25537,7 @@ static void historyFillView(const PeerMessageHistory& b, const uint8_t* buf, uin
   out.isSent = h.sent;
   out.unattributed = h.unattributed;
   out.sendState = h.sendState;
+  out.sendStatus = h.status;
   out.length = (uint8_t)espnowhist::copyText(buf, off, h, out.message, sizeof(out.message));
 }
 
@@ -25747,7 +25788,7 @@ bool espnowCopyCollapsedHead(const CollapsedMsgRef& ref, ReceivedTextMessage* ou
   return found;
 }
 
-void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state) {
+void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state, uint8_t status) {
   if (!gEspNow || !peerMac || msgId == 0 || state > espnowhist::kSendStateMax) return;
   PeerHistoryReadNote note;
   {
@@ -25760,7 +25801,7 @@ void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8
       // Stamp every fragment of this message (all share msgId in reqId).
       historyRingCheck(*h, true, note.say);
       bool damaged = false;
-      espnowhist::setSendState(h->sent, h->sentBuf(), msgId, state, &damaged);
+      espnowhist::setSendState(h->sent, h->sentBuf(), msgId, state, &damaged, status);
       if (damaged) historyRingRepair(*h, true, note.say);
     }
     note.stop();

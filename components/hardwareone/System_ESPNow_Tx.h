@@ -194,7 +194,15 @@ bool submit(const Job& job);
 //
 // Safe to call from any task except an ISR. Must NOT be called from the
 // espnow_tx dispatcher task itself (would self-deadlock).
-bool submitSync(Job& job, uint32_t timeoutMs);
+// What became of a synchronous send (ESP-NOW 1.0 step 6), for a caller that
+// must tell "never left" from "still in the dispatcher's hands":
+//   Sent       the send ran and returned OK;
+//   Failed     the send ran and failed;
+//   NotQueued  nothing was queued (not running, queue full, no slot, no memory);
+//   TimedOut   the wait ended first: the dispatcher still holds the job and may
+//              yet send it.
+enum class SyncOutcome : uint8_t { Sent = 0, Failed = 1, NotQueued = 2, TimedOut = 3 };
+bool submitSync(Job& job, uint32_t timeoutMs, SyncOutcome* outcome = nullptr);
 
 // ----------------------------------------------------------------------------
 // Convenience helpers — build a JOB_AEAD_SMART Job from raw bytes and submit.
@@ -245,7 +253,7 @@ void drainAcksOnDispatcher();
 // (self-deadlock; submitSync's guard rejects this).
 bool sendAeadSync(const uint8_t mac[6], uint8_t type, uint16_t flags,
                   uint32_t msgId, const uint8_t* payload, uint16_t payloadLen,
-                  uint8_t ttl, uint32_t timeoutMs);
+                  uint8_t ttl, uint32_t timeoutMs, SyncOutcome* outcome = nullptr);
 
 // Diagnostic counters. Logged by the tx task every 10s; CLI / other code can
 // also read them via getStats().

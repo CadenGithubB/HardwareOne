@@ -16,6 +16,12 @@
 //      |--ACK(busy, no slot)--> Busy                                 (terminal)
 //      |--ACK(other status)---> Refused                              (terminal)
 //      '--no ACK in 10 s------> NoAnswer                             (terminal)
+// A message the multi-frame sender may send once more as a whole (busy / no
+// slot: a USER_SYNC or a CMD_RESP-like request, never a CMD) is held
+// (SendingRetry): a busy ACK then changes nothing, and the sender's final
+// outcome decides (settle), under the final msgId (rename). Busy and Refused
+// are entered as BusyNew / RefusedNew and become Busy / Refused when tick
+// reports them, so every ending is reported once, from one place.
 //   TimedOut --CMD_RESP--> Late: "Result (late)"                     (terminal)
 //   NoAnswer --CMD_RESP--> Late (the ACK was lost, the command ran)  (terminal)
 //
@@ -52,6 +58,9 @@ enum class State : uint8_t {
   NoAnswer,  // no ACK within kAckWaitMs (terminal; a result may still come: Late)
   TimedOut,  // accepted, no result by the deadline: "No result" was shown
   Late,      // the result came after "No result" / "No answer" was shown (terminal)
+  SendingRetry,  // Sending, held by the multi-frame sender: its final outcome decides
+  BusyNew,       // Busy, not yet reported by tick
+  RefusedNew,    // Refused, not yet reported by tick
 };
 
 // The outcome a received history row carries (3 bits of the record's state
@@ -106,6 +115,12 @@ struct RequesterTable {
   Requester e[kRequesters];
 };
 
+inline bool isSending(uint8_t s) {
+  return s == static_cast<uint8_t>(State::Sending) || s == static_cast<uint8_t>(State::SendingRetry);
+}
+
+// Ended and reported (BusyNew / RefusedNew wait for tick and are kept like a
+// timed-out entry until then).
 inline bool isTerminal(uint8_t s) {
   return s == static_cast<uint8_t>(State::Result) || s == static_cast<uint8_t>(State::Busy) ||
          s == static_cast<uint8_t>(State::Refused) || s == static_cast<uint8_t>(State::NoAnswer) ||
@@ -139,7 +154,10 @@ inline Requester* pick(RequesterTable& t, uint32_t now, bool* evictedOpen) {
   int32_t bestAge = 0;
   for (auto& r : t.e) {
     if (r.state == static_cast<uint8_t>(State::Free)) return &r;
-    const int rank = isTerminal(r.state) ? 0 : r.state == static_cast<uint8_t>(State::TimedOut) ? 1 : 2;
+    const bool unreported = r.state == static_cast<uint8_t>(State::TimedOut) ||
+                            r.state == static_cast<uint8_t>(State::BusyNew) ||
+                            r.state == static_cast<uint8_t>(State::RefusedNew);
+    const int rank = isTerminal(r.state) ? 0 : unreported ? 1 : 2;
     // Higher age = a better candidate: ended longest ago / nearest its deadline.
     const int32_t age = static_cast<int32_t>(now - r.deadlineMs);
     if (!best || rank < bestRank || (rank == bestRank && age > bestAge)) {
@@ -174,7 +192,48 @@ inline bool begin(RequesterTable& t, const uint8_t mac[6], uint32_t reqId, uint3
 inline void extendSending(RequesterTable& t, const uint8_t mac[6], uint32_t reqId, uint32_t now,
                           uint32_t waitMs) {
   Requester* r = find(t, mac, reqId);
-  if (r && r->state == static_cast<uint8_t>(State::Sending)) r->deadlineMs = now + waitMs;
+  if (r && isSending(r->state)) r->deadlineMs = now + waitMs;
+}
+
+// The multi-frame sender takes this message and may send it once more as a
+// whole: hold it (a busy ACK changes nothing until settle). False when it is
+// no open request.
+inline bool hold(RequesterTable& t, const uint8_t mac[6], uint32_t reqId) {
+  Requester* r = find(t, mac, reqId);
+  if (!r || !isSending(r->state)) return false;
+  r->state = static_cast<uint8_t>(State::SendingRetry);
+  return true;
+}
+
+// The multi-frame sender's final outcome for the request `reqId` (its final
+// msgId). Changes only a request still sending:
+//   Delivered  stays Sending (the last fragment's ACK accepts it);
+//   Refused    BusyNew / RefusedNew with the status;
+//   NoAnswer   ends at the next tick (No answer);
+//   NotSent    forgotten (nothing reached the air).
+// A settled request is held, so a caller's cancel after a failed send leaves it.
+enum class Settle : uint8_t { Delivered, Refused, NoAnswer, NotSent };
+inline void settle(RequesterTable& t, const uint8_t mac[6], uint32_t reqId, Settle how, uint8_t status,
+                   uint32_t now) {
+  Requester* r = find(t, mac, reqId);
+  if (!r || !isSending(r->state)) return;
+  switch (how) {
+    case Settle::Delivered:
+      r->state = static_cast<uint8_t>(State::SendingRetry);
+      break;
+    case Settle::Refused:
+      r->state = static_cast<uint8_t>(isBusyStatus(status) ? State::BusyNew : State::RefusedNew);
+      r->status = status;
+      r->deadlineMs = now;
+      break;
+    case Settle::NoAnswer:
+      r->state = static_cast<uint8_t>(State::SendingRetry);
+      r->deadlineMs = now;
+      break;
+    case Settle::NotSent:
+      memset(r, 0, sizeof(*r));
+      break;
+  }
 }
 
 // The sender sends the whole message once more under a new msgId (the
@@ -185,29 +244,34 @@ inline bool rename(RequesterTable& t, const uint8_t mac[6], uint32_t oldId, uint
   Requester* r = find(t, mac, oldId);
   if (!r) return false;
   r->reqId = newId;
-  r->state = static_cast<uint8_t>(State::Sending);
+  r->state = static_cast<uint8_t>(State::SendingRetry);  // the retry's outcome is settled by its sender
   r->status = 0;
   r->deadlineMs = now + kAckWaitMs;
   return true;
 }
 
-// The send failed on this device (nothing reached the air): forget it.
+// The send failed on this device (nothing reached the air): forget it. Only
+// a request still plainly Sending: one the multi-frame sender settled or
+// holds, or one already answered, stays.
 inline void cancel(RequesterTable& t, const uint8_t mac[6], uint32_t reqId) {
   Requester* r = find(t, mac, reqId);
-  if (r) memset(r, 0, sizeof(*r));
+  if (r && r->state == static_cast<uint8_t>(State::Sending)) memset(r, 0, sizeof(*r));
 }
 
-// A sealed ACK from `mac` for `reqId`. Only a Sending entry changes (a
-// duplicate ACK of an accepted request changes nothing). Returns the new state,
-// or Free when nothing changed.
+// A sealed ACK from `mac` for `reqId`. Only a sending entry changes (a
+// duplicate ACK of an accepted request changes nothing); a held one ignores a
+// busy ACK (its sender may send it once more). Returns the new state
+// (Accepted, BusyNew, RefusedNew), or Free when nothing changed.
 inline State onAck(RequesterTable& t, const uint8_t mac[6], uint32_t reqId, uint8_t status, uint32_t now) {
   Requester* r = find(t, mac, reqId);
-  if (!r || r->state != static_cast<uint8_t>(State::Sending)) return State::Free;
+  if (!r || !isSending(r->state)) return State::Free;
   if (status == 0) {
     r->state = static_cast<uint8_t>(State::Accepted);
     r->deadlineMs = now + kResultDeadlineMs;
+  } else if (isBusyStatus(status) && r->state == static_cast<uint8_t>(State::SendingRetry)) {
+    return State::Free;
   } else {
-    r->state = static_cast<uint8_t>(isBusyStatus(status) ? State::Busy : State::Refused);
+    r->state = static_cast<uint8_t>(isBusyStatus(status) ? State::BusyNew : State::RefusedNew);
     r->status = status;
     r->deadlineMs = now;
   }
@@ -220,9 +284,7 @@ inline State onAck(RequesterTable& t, const uint8_t mac[6], uint32_t reqId, uint
 inline bool onStream(RequesterTable& t, const uint8_t mac[6], uint32_t reqId, uint32_t now) {
   Requester* r = find(t, mac, reqId);
   if (!r) return false;
-  if (r->state != static_cast<uint8_t>(State::Sending) && r->state != static_cast<uint8_t>(State::Accepted)) {
-    return false;
-  }
+  if (!isSending(r->state) && r->state != static_cast<uint8_t>(State::Accepted)) return false;
   r->state = static_cast<uint8_t>(State::Accepted);
   r->deadlineMs = now + kStreamExtendMs;
   return true;
@@ -240,6 +302,7 @@ inline ResultKind onResult(RequesterTable& t, const uint8_t mac[6], uint32_t req
   if (!r) return ResultKind::Unknown;
   switch (static_cast<State>(r->state)) {
     case State::Sending:
+    case State::SendingRetry:
     case State::Accepted:
       r->state = static_cast<uint8_t>(State::Result);
       r->deadlineMs = now;
@@ -250,8 +313,8 @@ inline ResultKind onResult(RequesterTable& t, const uint8_t mac[6], uint32_t req
       r->deadlineMs = now;
       return ResultKind::Late;
     default:
-      // Result / Late: already has one. Busy / Refused: the peer said it did
-      // not take it, so a result for it is not this request's.
+      // Result / Late: already has one. Busy / Refused (reported or not): the
+      // peer said it did not take it, so a result for it is not this request's.
       return ResultKind::Duplicate;
   }
 }
@@ -265,32 +328,43 @@ struct Expired {
   uint32_t reqId;
 };
 
-// Moves every entry whose time is up: Sending -> NoAnswer, Accepted ->
-// TimedOut (kept kTimedOutKeepMs for a late result), TimedOut -> Free. Reports
-// up to `max` of the first two kinds in `out` (an entry not reported stays as it
-// is and is reported by a later call). Returns the count reported.
+// Reports every request that ended without a result, once: BusyNew ->
+// Busy and RefusedNew -> Refused (with the ACK status), Sending -> NoAnswer
+// when its ACK time is up, Accepted -> TimedOut (No result; kept
+// kTimedOutKeepMs for a late result). TimedOut past its keep time -> Free.
+// Reports up to `max` in `out` (an entry not reported stays as it is and is
+// reported by a later call). Returns the count reported.
 inline int tick(RequesterTable& t, uint32_t now, Expired* out, int max) {
   int n = 0;
   for (auto& r : t.e) {
-    if (r.state == static_cast<uint8_t>(State::TimedOut)) {
+    const State s = static_cast<State>(r.state);
+    if (s == State::TimedOut) {
       if (due(now, r.deadlineMs)) memset(&r, 0, sizeof(r));
       continue;
     }
-    const bool sending = r.state == static_cast<uint8_t>(State::Sending);
-    const bool accepted = r.state == static_cast<uint8_t>(State::Accepted);
-    if ((!sending && !accepted) || !due(now, r.deadlineMs)) continue;
+    Outcome o;
+    if (s == State::BusyNew) o = Outcome::Busy;
+    else if (s == State::RefusedNew) o = Outcome::Refused;
+    else if (isSending(r.state) && due(now, r.deadlineMs)) o = Outcome::NoAnswer;
+    else if (s == State::Accepted && due(now, r.deadlineMs)) o = Outcome::NoResult;
+    else continue;
     if (!out || n >= max) continue;
     memcpy(out[n].mac, r.mac, 6);
     out[n].reqId = r.reqId;
-    out[n].outcome = static_cast<uint8_t>(sending ? Outcome::NoAnswer : Outcome::NoResult);
-    out[n].status = 0;
+    out[n].outcome = static_cast<uint8_t>(o);
+    out[n].status = (o == Outcome::Busy || o == Outcome::Refused) ? r.status : 0;
     ++n;
-    if (sending) {
-      r.state = static_cast<uint8_t>(State::NoAnswer);
-      r.deadlineMs = now;
-    } else {
-      r.state = static_cast<uint8_t>(State::TimedOut);
-      r.deadlineMs = now + kTimedOutKeepMs;
+    switch (o) {
+      case Outcome::Busy: r.state = static_cast<uint8_t>(State::Busy); break;
+      case Outcome::Refused: r.state = static_cast<uint8_t>(State::Refused); break;
+      case Outcome::NoAnswer:
+        r.state = static_cast<uint8_t>(State::NoAnswer);
+        r.deadlineMs = now;
+        break;
+      default:
+        r.state = static_cast<uint8_t>(State::TimedOut);
+        r.deadlineMs = now + kTimedOutKeepMs;
+        break;
     }
   }
   return n;

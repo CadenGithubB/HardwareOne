@@ -269,7 +269,7 @@ static bool oledScrollAddItem(OledScrollState* s, const char* l1, const char* l2
 }
 static OledScrollState sEspNowMessageListScroll = {{}, 0, 0, 0, 4};
 struct { uint8_t selectedDeviceMac[6]; } gOledEspNowState = {{0x10, 0x20, 0x30, 0x40, 0x50, 0x60}};
-static struct { bool isSent; uint32_t msgId; uint8_t sendState; } gOledRowMeta[OLED_SCROLL_MAX_ITEMS];
+static struct { bool isSent; uint32_t msgId; uint8_t sendState; uint8_t sendStatus; } gOledRowMeta[OLED_SCROLL_MAX_ITEMS];
 
 // ---- production reader code --------------------------------------------------------------
 // INSERT_WEB

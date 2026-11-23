@@ -88,6 +88,11 @@ static void sendStatusMarkRefused(uint32_t msgId, const uint8_t*, uint8_t status
 // The remote-command requests follow a whole-message retry (1.0 step 6).
 static std::vector<std::pair<uint32_t, uint32_t>> gRenamed;
 static void remoteCmdRenamed(const uint8_t*, uint32_t oldId, uint32_t newId) { gRenamed.emplace_back(oldId, newId); }
+// Held at the start (types that may be sent again as a whole), settled once at the end under the final msgId.
+static std::vector<uint32_t> gHeld;
+static std::vector<std::pair<uint32_t, V4SendResult>> gSettled;
+static void remoteCmdHold(const uint8_t*, uint32_t reqId) { gHeld.push_back(reqId); }
+static void remoteCmdSettle(const uint8_t*, uint32_t reqId, const V4SendResult& r) { gSettled.emplace_back(reqId, r); }
 
 // INSERT_ACK_WAIT
 
@@ -134,6 +139,8 @@ static void reset() {
   gRefused.clear();
   gRefusedStatus.clear();
   gRenamed.clear();
+  gHeld.clear();
+  gSettled.clear();
   gReceiver = nullptr;
   gOnTick = nullptr;
   gSess.state = SESSION_ACTIVE;
@@ -184,6 +191,10 @@ int main() {
             gRefusedStatus == std::vector<uint8_t>{espnowanswer::kBusy});
   check("K3 a tracked request follows the retry to its new msgId (remote commands, 1.0 step 6)",
         gRenamed.size() == 1 && gRenamed[0].first == kId && gRenamed[0].second == gSent[1].msgId);
+  check("K3 the request is held before the first attempt and settled once, Refused(busy), under the final msgId",
+        gHeld == std::vector<uint32_t>{kId} && gSettled.size() == 1 && gSettled[0].first == gSent[1].msgId &&
+            gSettled[0].second.outcome == V4SendOutcome::Refused &&
+            gSettled[0].second.status == espnowanswer::kBusy);
 
   // K4: a policy refusal is final: no second attempt.
   reset();
@@ -259,9 +270,9 @@ int main() {
   reset();
   gReceiver = [](const Sent& s) { return s.fragIndex == 0 ? (int)espnowanswer::kBusy : 0; };
   r = v4_send_encrypted_chunked(kPeer, ESPNOW_V4_TYPE_CMD, 0, kId, kPayload, sizeof kPayload, 1);
-  check("K11 a long CMD refused busy is final: one attempt, Refused(busy)",
+  check("K11 a long CMD refused busy is final: one attempt, Refused(busy), not held (its busy ACK ends it)",
         r.outcome == V4SendOutcome::Refused && r.status == espnowanswer::kBusy && gSent.size() == 1 &&
-            gRenamed.empty());
+            gRenamed.empty() && gHeld.empty() && gSettled.size() == 1 && gSettled[0].first == kId);
 
   // K12: a one-frame CMD_RESP with ackSingle: one frame (fragment 1 of 1) that
   // waits for its ACK; a requester that is busy gets the whole result once

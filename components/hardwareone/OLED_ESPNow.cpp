@@ -56,7 +56,7 @@ EXT_RAM_BSS_ATTR static OledScrollState sEspNowMessageListScroll;
 // oledEspNowRefreshMessages and read by the device-detail renderer (left=received,
 // right=sent + live delivery status).
 // PSRAM .bss: CPU-only row metadata, written/read solely on the OLED task.
-EXT_RAM_BSS_ATTR static struct { bool isSent; uint32_t msgId; uint8_t sendState; } gOledRowMeta[OLED_SCROLL_MAX_ITEMS];
+EXT_RAM_BSS_ATTR static struct { bool isSent; uint32_t msgId; uint8_t sendState; uint8_t sendStatus; } gOledRowMeta[OLED_SCROLL_MAX_ITEMS];
 
 // Owner commands preserve their refusal through the shared reply mapping.
 static bool oledEspNowRunOwnerCommand(const char* cmd, const char* failToast) {
@@ -1007,6 +1007,16 @@ void oledEspNowDisplayDeviceDetail(Adafruit_SSD1306* display) {
         case SEND_STATUS_REFUSED:   label = "Refused"; icon = false; break;
         default:                    label = "Sent"; break;  // PENDING: awaiting ACK
       }
+      // "Refused: <reason>" when it fits the row at this rotation; else the word.
+      char refusedLabel[32];
+      if (gOledRowMeta[i].sendState == SEND_STATUS_REFUSED) {
+        const char* why = espnowanswer::sharedStatusName(gOledRowMeta[i].sendStatus);
+        if (why) {
+          snprintf(refusedLabel, sizeof(refusedLabel), "Refused: %s", why);
+          for (char* c = refusedLabel; *c; ++c) if (*c == '_') *c = ' ';
+          if ((int)strlen(refusedLabel) * 6 <= rightEdge - 4) label = refusedLabel;
+        }
+      }
       int iconW = icon ? (dbl ? 8 : 6) : 0;
       int lblW = (int)strlen(label) * 6 + iconW;
       int lx = max(4, rightEdge - lblW);
@@ -1760,6 +1770,7 @@ void oledEspNowRefreshMessages() {
     gOledRowMeta[m].isSent    = refs[i].isSent;
     gOledRowMeta[m].msgId     = refs[i].isSent ? head.reqId : 0;
     gOledRowMeta[m].sendState = head.sendState;  // durable; survives the 30s sendStatus sweep
+    gOledRowMeta[m].sendStatus = head.sendStatus;  // a refusal's reason (ACK status), durable too
 
     const char* meta;
     if (refs[i].isSent) {

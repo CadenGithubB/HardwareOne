@@ -711,6 +711,7 @@ struct ReceivedTextMessage {
   uint8_t  sendState;       // sent records: SendStatusState (0 pending, 1 delivered, 2 timeout,
                             // 3 failed, 4 busy, 5 refused); received remote-command rows: the
                             // outcome (espnowcmd::Outcome, 0 = a plain result); else 0
+  uint8_t  sendStatus;      // a refused sent record's ACK status (sendState 5), else 0
   uint8_t  length;          // text bytes in message
   char     message[espnowhist::kTextMax + 1];   // NUL-terminated
 };
@@ -1465,7 +1466,9 @@ bool storeReceivedMessageChunked(uint8_t* peerMac, const char* peerName, const c
 // resolved state long after the ephemeral sendStatus ring entry is swept. state
 // mirrors SendStatusState; a state above espnowhist::kSendStateMax is ignored. No-op if the peer/msgId isn't in
 // history.
-void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state);
+// `status`: a refused send's ACK status (SEND_STATUS_REFUSED), kept with the
+// record so "Refused: <reason>" survives the sweep; 0 otherwise.
+void espnowUpdateSentDeliveryState(const uint8_t* peerMac, uint32_t msgId, uint8_t state, uint8_t status = 0);
 void logFileTransferEvent(uint8_t* peerMac, const char* peerName, const char* filename, LogMessageType eventType);
 // getPeerMessages / getAllMessages merge BOTH rings (received + sent) of one peer
 // (getPeerMessages) or of every peer (getAllMessages, a k-way merge), ascending

@@ -120,7 +120,9 @@ Host-tested and built; not run on a device.
   the result once more. A command result now waits for its acknowledgement like a long one.
 - `espnowmessages json` and `/api/espnow/messages`: a received result row may carry `result`
   (`busy`, `refused`, `noAnswer`, `noResult`, `late`); `sendState` 4 is busy and 5 refused, and is 0
-  on received rows; the web delivery snapshot names `busy` and `refused` (with a `reason`).
+  on received rows; a refused sent row keeps its `reason` (also after a reload); the web delivery
+  snapshot names `busy` and `refused` (with a `reason`). A remote command whose send was not confirmed
+  within 2 s stays tracked (it may still go out) and ends in its result or No answer.
 - New bench command `espnowholdresult <seconds|off>` (admin, RAM only) holds every received command
   result that long before it is shown, to see "No result" and then "Result (late)".
   Reflash devices together.

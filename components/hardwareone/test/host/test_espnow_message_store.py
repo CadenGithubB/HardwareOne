@@ -213,12 +213,13 @@ def source_contracts(read, extract_block, component):
     keys = re.findall(r'o\["(\w+)"\]\s*=\s*([^;]+);', cli)
     # `result` (ESP-NOW 1.0 step 6): a received remote command row's outcome.
     want_keys = ['seq', 'reqId', 'piece', 'of', 'mac', 'name', 'msg', 'enc', 'ts', 'type', 'sent', 'sendState',
-                 'result']
+                 'reason', 'result']
     if [k for k, _ in keys] != want_keys:
         failures.append(f'espnowmessages json keys {[k for k, _ in keys]} != {want_keys}')
     values = dict(keys)
     for key, value in (('name', '(const char*)names[i]'),
                        ('sendState', 'msgs[i].isSent ? msgs[i].sendState : 0'), ('result', 'result'),
+                       ('reason', 'reason'),
                        ('sent', 'msgs[i].isSent'), ('seq', '(unsigned long)msgs[i].seqNum'),
                        ('reqId', '(unsigned long)msgs[i].reqId'), ('piece', 'msgs[i].piece'),
                        ('of', 'msgs[i].pieceTotal')):

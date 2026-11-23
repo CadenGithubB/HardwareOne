@@ -474,13 +474,14 @@ static void testCmdRespBurst() {
             lastQueuedText() == big,
         "burst: after two are shown, the next result wraps to the ring's start whole");
 
-  // No store (no PSRAM at init): every result is refused busy.
+  // No store (no PSRAM at start): every result is refused not ready (an
+  // honest refusal, not busy: a retry would not help).
   resetWorld();
   gRemoteCmd = nullptr;
   v4_send_command_response(kRequester, 950, espnowanswer::kOk, "x", 1);
   receive(air.at(0));
-  check(gLastReceiveVerdict.kind == V4VerdictKind::Refused && gLastReceiveVerdict.status == espnowanswer::kBusy,
-        "no result store: refused busy");
+  check(gLastReceiveVerdict.kind == V4VerdictKind::Refused && gLastReceiveVerdict.status == espnowanswer::kNotReady,
+        "no result store: refused not ready");
   gRemoteCmd = &gStore;
 
   // The lab hook holds a result: it is queued with a later ready time.
