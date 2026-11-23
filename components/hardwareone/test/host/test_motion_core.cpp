@@ -157,9 +157,70 @@ static void testShake() {
   }
   assert(feed.count(MotionEventKind::Shake) == 1);  // one event per shaking episode
   assert(feed.state.isShaking && feed.state.shakeCount == 1);
-  // Still again: the shake ends 500 ms after the last shaky sample.
+  // Still again: the shaky samples leave the 2 s window, and the shake ends
+  // 500 ms after the variance fell under the threshold.
   feed.run(still(), 40);
+  assert(feed.state.isShaking);  // 0.8 s: still in the window
+  feed.run(still(), 90);         // 2.6 s
   assert(!feed.state.isShaking && feed.state.shakeIntensity == 0.0f);
+}
+
+static MotionActionSample at50Hz(MotionActionSample s, bool hwFlags) {
+  s.periodMs = 20;
+  s.hasHwTap = s.hasHwFreefall = hwFlags;
+  return s;
+}
+
+// The 4517 at 50 Hz: a knock on the sign is one tap, not a shake and not a
+// walk, with the chip's tap flag (its spike and ringing are kept out of the
+// shake window and the steps) and without it (the 2 s window outweighs it,
+// and walking needs two steps).
+static void testKnockAt50Hz() {
+  const float ringing[] = {30.0f, 3.0f, 18.0f, 5.0f, 14.0f, 7.0f};
+  for (int pass = 0; pass < 2; ++pass) {
+    const bool hwFlags = pass == 0;
+    Feed feed;
+    feed.run(at50Hz(still(), hwFlags), 100);  // 2 s still
+    for (size_t i = 0; i < sizeof(ringing) / sizeof(ringing[0]); ++i) {
+      MotionActionSample s = at50Hz(still(), hwFlags);
+      s.az = ringing[i];
+      s.hwTap = hwFlags && i == 0;  // the chip latched the knock
+      feed.run(s);
+    }
+    feed.run(at50Hz(still(), hwFlags), 200);  // 4 s still
+    assert(feed.count(MotionEventKind::Tap) == 1 && feed.state.tapCount == 1);
+    assert(feed.count(MotionEventKind::Shake) == 0 && feed.state.shakeCount == 0);
+    assert(feed.count(MotionEventKind::Walking) == 0 && !feed.state.isWalking);
+    if (hwFlags) assert(feed.state.stepCount == 0);  // the ringing fell in the quiet time
+  }
+}
+
+// A real shake at 50 Hz still posts a shake (once), with the chip's flags in
+// play but no tap.
+static void testShakeAt50Hz() {
+  Feed feed;
+  feed.run(at50Hz(still(), true), 50);
+  MotionActionSample hard = at50Hz(still(), true), soft = at50Hz(still(), true);
+  hard.az = 22.0f;
+  soft.az = 2.5f;
+  for (int i = 0; i < 25; ++i) {  // 1 s
+    feed.run(hard);
+    feed.run(soft);
+  }
+  assert(feed.count(MotionEventKind::Shake) == 1 && feed.state.isShaking);
+  assert(feed.count(MotionEventKind::Tap) == 0);
+}
+
+// A slow poll keeps a window of 10 samples (one slot each), as before.
+static void testShakeWindowAtSlowPoll() {
+  Feed feed;
+  MotionActionSample s = still();
+  s.periodMs = 1000;
+  feed.run(s, 9, 1000);
+  MotionActionSample spike = s;
+  spike.az = 25.0f;
+  feed.run(spike, 1, 1000);
+  assert(feed.count(MotionEventKind::Shake) == 1);  // variance about 21 over 10 samples
 }
 
 static void testTap() {
@@ -299,6 +360,19 @@ static void testSteps() {
   assert(walking && std::strcmp(walking->subject, "started") == 0);
   feed.run(still(), 15, 200);  // 3 s without a step
   assert(!feed.state.isWalking && feed.count(MotionEventKind::Walking) == 2);
+
+  // One step alone is no walk.
+  Feed once;
+  once.run(still(), 3, 200);
+  once.run(peak, 1, 250);
+  once.run(valley, 1, 250);
+  once.run(still(), 15, 200);
+  assert(once.state.stepCount == 1 && once.count(MotionEventKind::Walking) == 0);
+  // Two steps too far apart are none either.
+  once.run(peak, 1, 250);
+  once.run(valley, 1, 250);
+  once.run(still(), 15, 200);
+  assert(once.state.stepCount == 2 && once.count(MotionEventKind::Walking) == 0);
 }
 
 static void testWithoutEvents() {
@@ -315,6 +389,9 @@ int main() {
   testStartIsNotAShake();
   testRotationIsRadPerSecond();
   testShake();
+  testKnockAt50Hz();
+  testShakeAt50Hz();
+  testShakeWindowAtSlowPoll();
   testTap();
   testFreefall();
   testTilt();
@@ -326,6 +403,7 @@ int main() {
   testSteps();
   testWithoutEvents();
   std::puts("motion core: open address latched, correction off by default and unclamped, rotation in rad/s, no shake at start, "
-            "tap, free fall, tilt, pose debounce (200 ms and 50 Hz), chip tap and free fall, sampling and steps passed");
+            "tap, free fall, tilt, pose debounce (200 ms and 50 Hz), chip tap and free fall, "
+            "knock at 50 Hz (no shake, no walk), shake at 50 Hz and at a slow poll, sampling and steps passed");
   return 0;
 }

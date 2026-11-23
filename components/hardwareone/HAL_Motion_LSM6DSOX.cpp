@@ -8,8 +8,10 @@
 // while holding the bus and ignore failed reads). Each register access of the
 // start is its own short transaction with every wait asleep and the bus
 // released (HAL_Motion_LSM6DSOXCore.h); each sample is one transaction per
-// chip, and a failed or short read fails the sample, so the health record and
-// auto-disable see it.
+// chip (lsm4517ReadSample: the magnetometer first, the LSM6DSOX and its
+// read-to-clear event flags last). A failed or short LSM6DSOX read fails the
+// sample; a failed magnetometer read keeps the sample with the last good
+// field. Both count in the chips' health records, and auto-disable sees them.
 //
 // First version: tilt, flip and tap. The magnetometer is read and reported,
 // but the fusion runs on the gyroscope and accelerometer only (6 axes), so
@@ -32,9 +34,10 @@
 namespace {
 
 constexpr uint32_t kClockHz = 400000;
-// A sample waits at most this for the bus; a busy bus fails the sample, and
-// the next tick (20 ms later) tries again.
-constexpr uint32_t kReadLockMs = 20;
+// A sample waits at most this for the bus per chip: longer than one OLED
+// frame on a shared bus (about 23 ms at 400 kHz); a busy bus fails the
+// sample, and the 20 ms schedule absorbs the late tick.
+constexpr uint32_t kReadLockMs = 35;
 // The layer samples every 20 ms (50 Hz) and publishes the cache every
 // imuDevicePollMs.
 constexpr uint16_t kSamplePeriodMs = 20;
@@ -47,8 +50,13 @@ struct Lsm4517State {
   MahonyFilter filter;
   GyroBiasEstimator bias;
   MagCalibration magCal;
+  Lsm4517SampleState sample;  // event flags and field carried between samples
   int64_t lastUs;
   bool fusing;  // the bias is in and the filter started
+  // Where the chips were started (for the power-down at stop); started is
+  // false until a start succeeded and again after the stop.
+  bool started;
+  uint8_t bus, address, secondAddress;
 };
 EXT_RAM_BSS_ATTR Lsm4517State sState;
 
@@ -127,33 +135,35 @@ bool motionBackendInit(uint8_t bus, uint8_t address, uint8_t secondAddress, char
   }
   i2cResetGracePeriod(address, bus);
   i2cResetGracePeriod(secondAddress, bus);
+  sState.bus = bus;
+  sState.address = address;
+  sState.secondAddress = secondAddress;
+  sState.started = true;
   return true;
 }
 
 bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, MotionSample& out) {
   TwoWire* wire = wireFor(bus);
   if (!wire) return false;
-  // One transaction per chip: ALL_INT_SRC (reading it clears the latched tap
-  // and free fall) and the 14-byte burst from the LSM6DSOX, then the 6-byte
-  // field from the LIS3MDL.
-  uint8_t intSrc = 0;
-  uint8_t data[kLsm6dsoxDataBytes];
-  uint8_t field[kLis3mdlDataBytes];
-  if (!i2cTaskWithTimeout(bus, address, kClockHz, kReadLockMs, [&]() -> bool {
-        return readRegs(*wire, address, kLsm6dsoxRegAllIntSrc, &intSrc, 1) &&
-               readRegs(*wire, address, kLsm6dsoxRegOutTemp, data, sizeof(data));
-      })) {
-    return false;
-  }
-  if (!i2cTaskWithTimeout(bus, secondAddress, kClockHz, kReadLockMs, [&]() -> bool {
-        return readRegs(*wire, secondAddress, kLis3mdlRegOutX | kLis3mdlAutoIncrement, field, sizeof(field));
-      })) {
-    return false;
-  }
-  const int64_t nowUs = esp_timer_get_time();
   Lsm4517Reading reading{};
-  lsm6dsoxDecode(data, intSrc, reading);
-  lis3mdlDecode(field, reading);
+  bool magFailed = false;
+  const bool ok = lsm4517ReadSample(
+      sState.sample,
+      [&](uint8_t* field) -> bool {
+        return i2cTaskWithTimeout(bus, secondAddress, kClockHz, kReadLockMs, [&]() -> bool {
+          return readRegs(*wire, secondAddress, kLis3mdlRegOutX | kLis3mdlAutoIncrement, field, kLis3mdlDataBytes);
+        });
+      },
+      [&](uint8_t* src, uint8_t* data, bool& srcRead) -> bool {
+        return i2cTaskWithTimeout(bus, address, kClockHz, kReadLockMs, [&]() -> bool {
+          srcRead = readRegs(*wire, address, kLsm6dsoxRegAllIntSrc, src, kLsm6dsoxIntSrcBytes);
+          return srcRead && readRegs(*wire, address, kLsm6dsoxRegOutTemp, data, kLsm6dsoxDataBytes);
+        });
+      },
+      reading, magFailed);
+  out.secondFailed = magFailed;
+  if (!ok) return false;
+  const int64_t nowUs = esp_timer_get_time();
   magCorrect(sState.magCal, reading.mag);  // the identity until the calibration lands
 
   for (int i = 0; i < 3; ++i) {
@@ -161,7 +171,7 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, Moti
     out.mag[i] = reading.mag[i];
   }
   out.temp = reading.temp;
-  out.hasMag = true;
+  out.hasMag = reading.hasMag;
   out.hasOrientation = true;
   out.hasHeading = false;  // 6-axis fusion: yaw is relative to the start
   out.hasCal = false;
@@ -197,8 +207,24 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, Moti
   return true;
 }
 
-// Nothing to release: the state is static. The chips keep measuring until the
-// next start resets them.
-void motionBackendStop() { sState.fusing = false; }
+// The state is static; nothing to free. Both chips are powered down (best
+// effort, NACK-tolerant: the chip may be gone, and the next start resets
+// them anyway), so a closed IMU stops drawing its measuring current.
+void motionBackendStop() {
+  sState.fusing = false;
+  if (!sState.started) return;
+  sState.started = false;
+  const uint8_t bus = sState.bus, address = sState.address, secondAddress = sState.secondAddress;
+  TwoWire* wire = wireFor(bus);
+  if (!wire) return;
+  i2cTransactionNackTolerant(bus, address, kClockHz, kReadLockMs, [&]() {
+    writeRegs(*wire, address, kLsm6dsoxRegCtrl1Xl, kLsm6dsoxPowerDown, sizeof(kLsm6dsoxPowerDown));
+  });
+  if (secondAddress != 0) {
+    i2cTransactionNackTolerant(bus, secondAddress, kClockHz, kReadLockMs, [&]() {
+      writeRegs(*wire, secondAddress, kLis3mdlRegCtrl3, &kLis3mdlPowerDown, 1);
+    });
+  }
+}
 
 #endif  // ENABLE_IMU_LSM6DSOX

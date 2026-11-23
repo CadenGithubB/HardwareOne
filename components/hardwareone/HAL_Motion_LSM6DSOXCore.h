@@ -48,8 +48,9 @@ constexpr uint8_t lis3mdlAddressFromSetting(long saved) {
 constexpr uint8_t kLsm6dsoxRegWhoAmI = 0x0F;
 constexpr uint8_t kLsm6dsoxRegCtrl1Xl = 0x10;   // CTRL1_XL, CTRL2_G, CTRL3_C follow
 constexpr uint8_t kLsm6dsoxRegCtrl3C = 0x12;
-constexpr uint8_t kLsm6dsoxRegCtrl9Xl = 0x18;
-constexpr uint8_t kLsm6dsoxRegAllIntSrc = 0x1A;
+constexpr uint8_t kLsm6dsoxRegCtrl8Xl = 0x17;   // CTRL8_XL, CTRL9_XL follow
+constexpr uint8_t kLsm6dsoxRegAllIntSrc = 0x1A; // ALL_INT_SRC, WAKE_UP_SRC, TAP_SRC follow
+constexpr uint8_t kLsm6dsoxIntSrcBytes = 3;
 constexpr uint8_t kLsm6dsoxRegOutTemp = 0x20;   // OUT_TEMP, OUTX/Y/Z_G, OUTX/Y/Z_A: 14 bytes
 constexpr uint8_t kLsm6dsoxRegTapCfg0 = 0x56;   // TAP_CFG0 .. MD1_CFG (0x5E): 9 bytes
 constexpr uint8_t kLsm6dsoxWhoAmI = 0x6C;
@@ -59,6 +60,13 @@ constexpr uint8_t kLsm6dsoxDataBytes = 14;
 constexpr uint8_t kLsm6dsoxOdr104Hz = 0x4;
 constexpr uint8_t kLsm6dsoxOdr416Hz = 0x6;
 constexpr uint8_t kLsm6dsoxFsXl4g = 0x2;
+constexpr uint8_t kLsm6dsoxLpf2XlEn = 0x02;
+// CTRL8_XL: HPCF_XL[7:5] (with HP_SLOPE_XL_EN[2] 0 and LPF2_XL_EN set: the
+// LPF2 cut-off; 010 = ODR/20, about 21 Hz at 416 Hz, under the 50 Hz read's
+// 25 Hz Nyquist limit, so vibration and knock ringing do not alias into the
+// samples). The tap and free-fall engines take the slope / LPF1 path, not
+// LPF2 (confirm on the bench).
+constexpr uint8_t kLsm6dsoxHpcfOdrDiv20 = 0x2;
 // CTRL2_G: ODR_G[7:4], FS_G[3:2] (00 250, 01 500, 10 1000, 11 2000 dps), FS_125[1].
 constexpr uint8_t kLsm6dsoxFsG500 = 0x1;
 // CTRL3_C bits.
@@ -132,11 +140,14 @@ constexpr float kLis3mdlLsbPerGauss = 6842.0f;
 // accelerometer runs at 416 Hz for the tap engine (ST's guidance for the
 // LSM6DSO family is ODR >= 417 Hz); BDU keeps each 50 Hz burst one coherent
 // sample. The gyroscope runs at 104 Hz.
-constexpr uint8_t kLsm6dsoxCtrl1Xl = (kLsm6dsoxOdr416Hz << 4) | (kLsm6dsoxFsXl4g << 2);
+constexpr uint8_t kLsm6dsoxCtrl1Xl = (kLsm6dsoxOdr416Hz << 4) | (kLsm6dsoxFsXl4g << 2) | kLsm6dsoxLpf2XlEn;
 constexpr uint8_t kLsm6dsoxCtrl2G = (kLsm6dsoxOdr104Hz << 4) | (kLsm6dsoxFsG500 << 2);
 constexpr uint8_t kLsm6dsoxCtrl3C = kLsm6dsoxCtrl3Bdu | kLsm6dsoxCtrl3IfInc;
 constexpr uint8_t kLsm6dsoxCtrlBurst[3] = {kLsm6dsoxCtrl1Xl, kLsm6dsoxCtrl2G, kLsm6dsoxCtrl3C};
+// CTRL8_XL (the LPF2 cut-off) and CTRL9_XL (I3C off) as one burst.
+constexpr uint8_t kLsm6dsoxCtrl8 = kLsm6dsoxHpcfOdrDiv20 << 5;
 constexpr uint8_t kLsm6dsoxCtrl9 = kLsm6dsoxCtrl9Reset | kLsm6dsoxCtrl9I3cDisable;
+constexpr uint8_t kLsm6dsoxCtrl89Burst[2] = {kLsm6dsoxCtrl8, kLsm6dsoxCtrl9};
 // TAP_CFG0 (0x56) .. MD1_CFG (0x5E): single tap on all three axes and free
 // fall, latched (LIR) and cleared by reading ALL_INT_SRC (INT_CLR_ON_READ).
 constexpr uint8_t kLsm6dsoxEventBurst[9] = {
@@ -174,8 +185,8 @@ constexpr uint32_t kLsm4517TransferTimeoutMs = 100;  // I2C_WIRE_IO_TIMEOUT_MS (
 constexpr uint32_t kLsm4517IoWorstMs = kLsm4517StepLockMs + 2 * kLsm4517TransferTimeoutMs;
 constexpr uint32_t kLsm4517InitDeadlineMs = kMotionInitBudgetMs;
 // The sequence: two identity reads, two reset writes, the reset wait, two
-// reset polls, four configuration writes and two read-backs.
-constexpr uint32_t kLsm4517Accesses = 12;
+// reset polls, four configuration writes and three read-backs.
+constexpr uint32_t kLsm4517Accesses = 13;
 static_assert(kLsm4517Accesses * kLsm4517IoWorstMs + kLsm4517ResetWaitMs <= kLsm4517InitDeadlineMs,
               "the start must fit its deadline with every access at its worst case");
 
@@ -274,7 +285,8 @@ inline bool lsm4517StartSequence(Io& io, uint8_t bus, uint8_t accelAddress, uint
     }
   };
   auto readBack = [&](uint8_t address, uint8_t reg, const uint8_t* expected, uint8_t len, uint32_t after) {
-    uint8_t got[8] = {};
+    uint8_t got[9] = {};
+    if (len > sizeof(got)) return false;
     if (!attempt([&]() { return io.read(address, reg, got, len); }, address, "read-back", after)) return false;
     for (uint8_t i = 0; i < len; ++i) {
       if (got[i] != expected[i]) {
@@ -288,28 +300,32 @@ inline bool lsm4517StartSequence(Io& io, uint8_t bus, uint8_t accelAddress, uint
     return true;
   };
 
-  if (!identify(accelAddress, kLsm6dsoxRegWhoAmI, kLsm6dsoxWhoAmI, "imuaddress", "accelerometer and gyroscope", 11))
+  if (!identify(accelAddress, kLsm6dsoxRegWhoAmI, kLsm6dsoxWhoAmI, "imuaddress", "accelerometer and gyroscope", 12))
     return false;
-  if (!identify(magAddress, kLis3mdlRegWhoAmI, kLis3mdlWhoAmI, "imumagaddress", "magnetometer", 10)) return false;
+  if (!identify(magAddress, kLis3mdlRegWhoAmI, kLis3mdlWhoAmI, "imumagaddress", "magnetometer", 11)) return false;
 
   const uint8_t accelReset = kLsm6dsoxCtrl3SwReset;
   const uint8_t magReset = kLis3mdlCtrl2SoftReset;
-  if (!write(accelAddress, kLsm6dsoxRegCtrl3C, &accelReset, 1, "reset", 9)) return false;
-  if (!write(magAddress, kLis3mdlRegCtrl2, &magReset, 1, "reset", 8)) return false;
-  if (!fits(kLsm4517ResetWaitMs, 8)) return lateWhy("reset");
+  if (!write(accelAddress, kLsm6dsoxRegCtrl3C, &accelReset, 1, "reset", 10)) return false;
+  if (!write(magAddress, kLis3mdlRegCtrl2, &magReset, 1, "reset", 9)) return false;
+  if (!fits(kLsm4517ResetWaitMs, 9)) return lateWhy("reset");
   io.sleepMs(kLsm4517ResetWaitMs);
-  if (!waitReset(accelAddress, kLsm6dsoxRegCtrl3C, kLsm6dsoxCtrl3SwReset, 7)) return false;
-  if (!waitReset(magAddress, kLis3mdlRegCtrl2, kLis3mdlCtrl2SoftReset, 6)) return false;
+  if (!waitReset(accelAddress, kLsm6dsoxRegCtrl3C, kLsm6dsoxCtrl3SwReset, 8)) return false;
+  if (!waitReset(magAddress, kLis3mdlRegCtrl2, kLis3mdlCtrl2SoftReset, 7)) return false;
 
   if (!write(accelAddress, kLsm6dsoxRegCtrl1Xl, kLsm6dsoxCtrlBurst, sizeof(kLsm6dsoxCtrlBurst),
-             "accelerometer and gyroscope", 5)) return false;
-  if (!write(accelAddress, kLsm6dsoxRegCtrl9Xl, &kLsm6dsoxCtrl9, 1, "I3C off", 4)) return false;
+             "accelerometer and gyroscope", 6)) return false;
+  if (!write(accelAddress, kLsm6dsoxRegCtrl8Xl, kLsm6dsoxCtrl89Burst, sizeof(kLsm6dsoxCtrl89Burst),
+             "filter and I3C off", 5)) return false;
   if (!write(accelAddress, kLsm6dsoxRegTapCfg0, kLsm6dsoxEventBurst, sizeof(kLsm6dsoxEventBurst),
-             "tap and free fall", 3)) return false;
+             "tap and free fall", 4)) return false;
   if (!write(magAddress, kLis3mdlRegCtrl1 | kLis3mdlAutoIncrement, kLis3mdlCtrlBurst, sizeof(kLis3mdlCtrlBurst),
-             "magnetometer", 2)) return false;
+             "magnetometer", 3)) return false;
 
-  if (!readBack(accelAddress, kLsm6dsoxRegCtrl1Xl, kLsm6dsoxCtrlBurst, sizeof(kLsm6dsoxCtrlBurst), 1)) return false;
+  if (!readBack(accelAddress, kLsm6dsoxRegCtrl1Xl, kLsm6dsoxCtrlBurst, sizeof(kLsm6dsoxCtrlBurst), 2)) return false;
+  // The event engines' bytes (INTERRUPTS_ENABLE, LIR, the thresholds): a lost
+  // write here would leave tap and free fall silently off.
+  if (!readBack(accelAddress, kLsm6dsoxRegTapCfg0, kLsm6dsoxEventBurst, sizeof(kLsm6dsoxEventBurst), 1)) return false;
   return readBack(magAddress, kLis3mdlRegCtrl1 | kLis3mdlAutoIncrement, kLis3mdlCtrlBurst,
                   sizeof(kLis3mdlCtrlBurst), 0);
 }
@@ -328,9 +344,11 @@ struct Lsm4517Reading {
   float temp;      // Celsius
   bool tap;        // the chip latched a single tap since the last read
   bool freefall;   // the chip latched a free fall since the last read
+  bool hasMag;     // mag holds a field (the latest good one; see lsm4517ReadSample)
 };
 
-// data: the 14 bytes from OUT_TEMP (0x20); intSrc: ALL_INT_SRC.
+// data: the 14 bytes from OUT_TEMP (0x20); intSrc: ALL_INT_SRC (the first of
+// the three source bytes read with it).
 inline void lsm6dsoxDecode(const uint8_t* data, uint8_t intSrc, Lsm4517Reading& out) {
   out.temp = lsm4517Le16(data) / 256.0f + 25.0f;
   const float gyroScale = kLsm6dsoxGyroMdpsPerLsb / 1000.0f * kMotionDegToRad;
@@ -357,3 +375,62 @@ inline void lis3mdlDecode(const uint8_t* data, Lsm4517Reading& out) {
   for (int i = 0; i < 3; ++i) raw[i] = lsm4517Le16(data + 2 * i) * 100.0f / kLis3mdlLsbPerGauss;
   for (int i = 0; i < 3; ++i) out.mag[i] = kLis3mdlAxisSign[i] * raw[kLis3mdlAxisMap[i]];
 }
+
+// ---- One sample ----------------------------------------------------------------------------
+// What a sample keeps for the next one: chip events read (and so cleared on
+// the chip) by a sample that then failed, and the last good field.
+struct Lsm4517SampleState {
+  bool pendingTap = false;
+  bool pendingFreefall = false;
+  bool haveMag = false;
+  float lastMag[3] = {0, 0, 0};
+};
+
+// One sample, one transaction per chip. The LIS3MDL is read first: that read
+// has no side effect. The LSM6DSOX goes last: its source bytes (ALL_INT_SRC,
+// WAKE_UP_SRC, TAP_SRC) clear the latched tap and free fall as they are read,
+// so a failure after them can lose nothing: the flags wait in `st` for the
+// next good sample. A failed magnetometer read keeps the sample (accel, gyro,
+// events) with the last good field, and sets magFailed for the caller's
+// health check.
+//   readMag(uint8_t field[6]) -> bool                    the LIS3MDL transaction
+//   readAccel(uint8_t src[3], uint8_t data[14], bool& srcRead) -> bool
+//       the LSM6DSOX transaction; srcRead: the source bytes were read
+// Returns false (out untouched) when the LSM6DSOX read failed.
+template <typename ReadMag, typename ReadAccel>
+inline bool lsm4517ReadSample(Lsm4517SampleState& st, ReadMag&& readMag, ReadAccel&& readAccel,
+                              Lsm4517Reading& out, bool& magFailed) {
+  uint8_t field[kLis3mdlDataBytes] = {};
+  const bool magOk = readMag(field);
+  uint8_t src[kLsm6dsoxIntSrcBytes] = {};
+  uint8_t data[kLsm6dsoxDataBytes] = {};
+  bool srcRead = false;
+  const bool accelOk = readAccel(src, data, srcRead);
+  if (srcRead) {
+    st.pendingTap = st.pendingTap || (src[0] & kLsm6dsoxSrcSingleTap) != 0;
+    st.pendingFreefall = st.pendingFreefall || (src[0] & kLsm6dsoxSrcFreefall) != 0;
+  }
+  magFailed = !magOk;
+  if (magOk) {
+    Lsm4517Reading field3{};
+    lis3mdlDecode(field, field3);
+    for (int i = 0; i < 3; ++i) st.lastMag[i] = field3.mag[i];
+    st.haveMag = true;
+  }
+  if (!accelOk) return false;
+  const uint8_t events = static_cast<uint8_t>((st.pendingTap ? kLsm6dsoxSrcSingleTap : 0) |
+                                              (st.pendingFreefall ? kLsm6dsoxSrcFreefall : 0));
+  lsm6dsoxDecode(data, events, out);
+  st.pendingTap = st.pendingFreefall = false;
+  for (int i = 0; i < 3; ++i) out.mag[i] = st.lastMag[i];
+  out.hasMag = st.haveMag;
+  return true;
+}
+
+// ---- Stop -------------------------------------------------------------------------------------
+// Power both chips down when the IMU closes (best effort; the next start
+// resets them anyway): LSM6DSOX CTRL1_XL and CTRL2_G to 0 (ODR off), LIS3MDL
+// CTRL_REG3 MD 11 (power-down).
+constexpr uint8_t kLsm6dsoxPowerDown[2] = {0x00, 0x00};
+constexpr uint8_t kLis3mdlRegCtrl3 = 0x22;
+constexpr uint8_t kLis3mdlPowerDown = 0x03;

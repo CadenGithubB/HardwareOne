@@ -169,12 +169,29 @@ static void testGyroBias() {
          near(still.bias[2], 0.005f, 0.0001f));
   assert(gyroBiasAdd(still, offset));  // done stays done
 
-  // Picked up while it started: no bias (the integral term handles it).
-  GyroBiasEstimator moving;
+  // Picked up while it started, then put down: the moving second is thrown
+  // away and the still one gives the bias.
+  GyroBiasEstimator settles;
   for (uint16_t i = 0; i < kGyroBiasSamples; ++i) {
     const float g[3] = {(i & 1) ? 0.5f : -0.5f, 0, 0};
-    gyroBiasAdd(moving, g);
+    assert(!gyroBiasAdd(settles, g));
   }
+  assert(!settles.done && settles.windows == 1 && settles.count == 0);
+  for (uint16_t i = 0; i + 1 < kGyroBiasSamples; ++i) assert(!gyroBiasAdd(settles, offset));
+  assert(gyroBiasAdd(settles, offset) && settles.still && settles.windows == 2);
+  assert(near(settles.bias[0], 0.01f, 0.0001f) && near(settles.bias[1], -0.02f, 0.0001f));
+
+  // Never still: after kGyroBiasMaxWindows seconds, no bias (the integral
+  // term handles the tilt axes).
+  GyroBiasEstimator moving;
+  int samples = 0;
+  while (true) {
+    const float g[3] = {(samples & 1) ? 0.5f : -0.5f, 0, 0};
+    ++samples;
+    if (gyroBiasAdd(moving, g)) break;
+    assert(samples < kGyroBiasSamples * kGyroBiasMaxWindows);
+  }
+  assert(samples == kGyroBiasSamples * kGyroBiasMaxWindows);
   assert(moving.done && !moving.still && moving.bias[0] == 0.0f && moving.bias[1] == 0.0f);
 }
 

@@ -112,7 +112,11 @@ everything user-visible since the v0.99.99.1 tag.
   equations) after measuring the gyroscope's offset for about a second at `openimu`; the reading
   readers see is refreshed every `imudevicepollms`, and the motion events see every sample. The
   LSM6DSOX detects taps and free falls on the chip (latched, read with each sample), so a short
-  knock is not missed between samples.
+  knock is not missed between samples, and a sample whose magnetometer read fails (an OLED frame
+  holding the shared bus) keeps its tap. The accelerometer's output is low-pass filtered at about
+  21 Hz so vibration does not alias into the 50 Hz samples. A board moved during the gyroscope
+  measurement is measured again (up to 5 s) before the offset is given up. `closeimu` powers both
+  chips down.
 - First version: tilt, flip and tap. The magnetometer is read (`mag` in `imuread json`) but not
   calibrated yet, so the yaw counts from the start (`imuread` says "Yaw (relative)") and there is no
   magnetic heading (`docs/APP_JSON_CONTRACT.md`).
@@ -127,6 +131,11 @@ everything user-visible since the v0.99.99.1 tag.
 - The `imu_orientation` and `imu_walking` events wait for the new state to hold for 3 readings and
   at least 200 ms (the same as before at the BNO055's 200 ms poll; at the 4517's 50 Hz three
   readings alone would be 60 ms).
+- `imu_shake` compares the variance of the readings of the last 2 s, whatever the reading rate (at
+  the BNO055's 200 ms poll the last 10 readings, as before; at 50 Hz a single knock no longer reads
+  as a shake). `imu_walking started` needs two steps in a row (at most 2 s apart) instead of one.
+  On the 4517 the knock's own readings (150 ms after a chip-detected tap) count neither toward a
+  shake nor as a step.
 - `imuread json` (and the `imu` entry of `sensors json` and the ESP-NOW reading) adds `"mag":{x,y,z}`
   (µT) and `"cal"` (the chip's calibration byte) when the chip has them; the BNO055 has both
   (`docs/APP_JSON_CONTRACT.md`). `imuread` shows the magnetometer too.

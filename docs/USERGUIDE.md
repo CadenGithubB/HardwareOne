@@ -2342,7 +2342,9 @@ With the Adafruit 4517 (`IMU_DEVICE_TYPE 2`: LSM6DSOX accelerometer and gyroscop
 magnetometer) the firmware fuses the readings itself at 50 Hz; `imudevicepollms` sets how often the
 reading readers see is refreshed, and the motion events see every sample. Keep the board still for
 about a second after `openimu`: the gyroscope's offset is measured then, and the first reading comes
-after it. Taps and drops are detected by the LSM6DSOX itself. The magnetometer is read (`mag` in
+after it (a board that moved is measured again, for up to 5 s; after that the offset is left at zero
+and yaw drifts faster). Taps and drops are detected by the LSM6DSOX itself. `closeimu` powers both
+chips down. The magnetometer is read (`mag` in
 `imuread json`) but not calibrated yet, so yaw counts from the start and drifts slowly (`imuread`
 says "Yaw (relative)"); pitch and roll are absolute. Pitch is positive when the board's +X end
 rises, roll when its +Y edge rises, and yaw grows clockwise seen from above.

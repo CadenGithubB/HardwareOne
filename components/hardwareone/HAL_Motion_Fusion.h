@@ -152,13 +152,17 @@ inline FusionEuler mahonyEuler(const MahonyFilter& f) {
 
 // ---- Gyro bias at start ------------------------------------------------------------
 // About a second of samples at the fusion rate (50 Hz). When the spread shows
-// the board was moving, no bias is taken (zero) and the filter's integral
-// term learns the tilt-axis part instead.
+// the board was moving, the second is thrown away and the next one measured,
+// up to kGyroBiasMaxWindows seconds; a board that never held still gets no
+// bias (zero, still false) and the filter's integral term learns the
+// tilt-axis part instead (yaw then drifts at the gyro's zero-rate offset).
 constexpr uint16_t kGyroBiasSamples = 50;
+constexpr uint8_t kGyroBiasMaxWindows = 5;
 constexpr float kGyroBiasMaxStdRadS = 0.02f;  // about 1.1 deg/s
 
 struct GyroBiasEstimator {
   uint16_t count = 0;
+  uint8_t windows = 0;  // windows measured so far (the moving ones thrown away)
   float sum[3] = {0, 0, 0};
   float sumSq[3] = {0, 0, 0};
   float bias[3] = {0, 0, 0};
@@ -180,6 +184,13 @@ inline bool gyroBiasAdd(GyroBiasEstimator& e, const float g[3]) {
     mean[i] = e.sum[i] / e.count;
     const float variance = e.sumSq[i] / e.count - mean[i] * mean[i];
     if (variance > kGyroBiasMaxStdRadS * kGyroBiasMaxStdRadS) still = false;
+  }
+  ++e.windows;
+  if (!still && e.windows < kGyroBiasMaxWindows) {
+    // Moving: measure the next second instead.
+    e.count = 0;
+    for (int i = 0; i < 3; ++i) e.sum[i] = e.sumSq[i] = 0.0f;
+    return false;
   }
   for (int i = 0; i < 3; ++i) e.bias[i] = still ? mean[i] : 0.0f;
   e.still = still;

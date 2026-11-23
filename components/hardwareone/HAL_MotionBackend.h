@@ -55,6 +55,9 @@ struct MotionSample {
   // False while the backend is still starting (the 4517's gyro bias): the
   // read worked, but there is nothing to publish or detect yet.
   bool ready = true;
+  // The second chip's read failed (the 4517's LIS3MDL): the sample stands
+  // with the last good field, and the task checks that chip's health.
+  bool secondFailed = false;
 };
 
 struct MotionBackendInfo {
@@ -79,9 +82,12 @@ uint8_t motionBackendSecondAddress(long savedSetting);
 // "Error: <reason>".
 bool motionBackendInit(uint8_t bus, uint8_t address, uint8_t secondAddress, char* why, size_t whyLen);
 
-// One sample, in its own short transaction(s), one per chip; false on any
-// failed or short read (the transaction records it for the health system).
+// One sample, in its own short transaction(s), one per chip; false on a
+// failed or short read of the main chip (the transaction records it for the
+// health system). A failed second-chip read sets out.secondFailed and keeps
+// the sample.
 bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, MotionSample& out);
 
-// Release whatever the backend holds; the chip may already be gone.
+// Release whatever the backend holds and power the chip(s) down, best
+// effort; the chip may already be gone.
 void motionBackendStop();

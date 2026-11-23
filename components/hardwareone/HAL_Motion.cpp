@@ -409,7 +409,7 @@ static MotionOrientationSettings imuOrientationSettings() {
 // One ready sample: publish it to the cache when `publish` (once per
 // imuDevicePollMs), and run the action detector on it either way. Called by
 // the IMU task after each successful read. Returns whether it was published.
-static bool imuStoreSample(const MotionSample& sample, bool publish) {
+static bool imuStoreSample(const MotionSample& sample, bool publish, unsigned long sampleMs) {
   float pitch = sample.pitch, roll = sample.roll, yaw = sample.yaw;
   motionApplyOrientationCorrection(imuOrientationSettings(), pitch, roll, yaw);
 
@@ -463,6 +463,7 @@ static bool imuStoreSample(const MotionSample& sample, bool publish) {
   actions.hwTap = sample.hwTap;
   actions.hasHwFreefall = sample.hasHwFreefall;
   actions.hwFreefall = sample.hwFreefall;
+  actions.periodMs = (uint16_t)(sampleMs < 0xFFFF ? sampleMs : 0xFFFF);
   imuUpdateActions(actions, /*postEvents=*/true);
   return updated;
 }
@@ -937,7 +938,7 @@ void imuTask(void* parameter) {
         bool published = false;
         if (result && sample.ready) {
           const bool publish = motionPublishDue(publishedOnce, lastPublish, nowMs, imuPollMs, sampleMs);
-          published = imuStoreSample(sample, publish);
+          published = imuStoreSample(sample, publish, sampleMs);
           if (published) {
             publishedOnce = true;
             lastPublish = nowMs;
@@ -952,7 +953,7 @@ void imuTask(void* parameter) {
 #endif
 
         // Auto-disable if too many consecutive failures (of either chip)
-        if (!result) {
+        if (!result || sample.secondFailed) {
           if (i2cShouldAutoDisable(address, imuBus) || (second != 0 && i2cShouldAutoDisable(second, imuBus))) {
             ERROR_IMUF("Too many consecutive IMU failures - auto-disabling");
             noteSensorAutoDisabled(I2C_DEVICE_IMU);  // before the flag: see System_I2C.h

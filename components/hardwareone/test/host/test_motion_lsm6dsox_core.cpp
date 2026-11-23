@@ -16,15 +16,24 @@ static bool near(float a, float b, float tolerance) { return std::fabs(a - b) <=
 
 // ---- Configuration bytes against the datasheets ------------------------------------
 static void testConfigurationBytes() {
-  // LSM6DSOX CTRL1_XL: ODR_XL 0110 (416 Hz), FS_XL 10 (+-4 g), LPF2 off.
-  assert(kLsm6dsoxCtrl1Xl == 0x68);
+  // LSM6DSOX CTRL1_XL: ODR_XL 0110 (416 Hz), FS_XL 10 (+-4 g), LPF2_XL_EN (bit 1).
+  assert(kLsm6dsoxCtrl1Xl == 0x6A);
   // CTRL2_G: ODR_G 0100 (104 Hz), FS_G 01 (+-500 dps), FS_125 off.
   assert(kLsm6dsoxCtrl2G == 0x44);
   // CTRL3_C: BDU (bit 6) + IF_INC (bit 2); SW_RESET is bit 0, BOOT bit 7.
   assert(kLsm6dsoxCtrl3C == 0x44 && kLsm6dsoxCtrl3SwReset == 0x01 && kLsm6dsoxCtrl3Boot == 0x80);
-  assert(kLsm6dsoxCtrlBurst[0] == 0x68 && kLsm6dsoxCtrlBurst[1] == 0x44 && kLsm6dsoxCtrlBurst[2] == 0x44);
+  assert(kLsm6dsoxCtrlBurst[0] == 0x6A && kLsm6dsoxCtrlBurst[1] == 0x44 && kLsm6dsoxCtrlBurst[2] == 0x44);
   // CTRL9_XL: reset value 0xE0 (DEN_X/Y/Z) plus I3C_DISABLE (bit 1).
   assert(kLsm6dsoxCtrl9 == 0xE2);
+  // CTRL8_XL: HPCF_XL 010 (LPF2 at ODR/20, about 21 Hz: under the 50 Hz
+  // read's Nyquist limit), HP_SLOPE_XL_EN 0, written with CTRL9_XL.
+  assert(kLsm6dsoxCtrl8 == 0x40 && kLsm6dsoxCtrl89Burst[0] == 0x40 && kLsm6dsoxCtrl89Burst[1] == 0xE2);
+  assert(kLsm6dsoxRegCtrl8Xl == 0x17 && 416.0f / 20.0f < 25.0f);
+  // The sample reads ALL_INT_SRC, WAKE_UP_SRC and TAP_SRC (0x1A..0x1C).
+  assert(kLsm6dsoxIntSrcBytes == 3);
+  // Power-down at stop: ODR_XL / ODR_G 0000; LIS3MDL CTRL_REG3 (0x22) MD 11.
+  assert(kLsm6dsoxPowerDown[0] == 0 && kLsm6dsoxPowerDown[1] == 0 && kLis3mdlRegCtrl3 == 0x22 &&
+         kLis3mdlPowerDown == 0x03);
   // The accelerometer runs at >= 416 Hz for the tap engine.
   assert((kLsm6dsoxCtrl1Xl >> 4) >= 0x6);
   // TAP_CFG0: INT_CLR_ON_READ (6) + TAP_X/Y/Z_EN (3..1) + LIR (0).
@@ -49,7 +58,7 @@ static void testConfigurationBytes() {
   assert(kLsm6dsoxSrcFreefall == 0x01 && kLsm6dsoxSrcSingleTap == 0x04);
   // Registers.
   assert(kLsm6dsoxRegWhoAmI == 0x0F && kLsm6dsoxWhoAmI == 0x6C && kLsm6dsoxRegCtrl1Xl == 0x10 &&
-         kLsm6dsoxRegCtrl3C == 0x12 && kLsm6dsoxRegCtrl9Xl == 0x18 && kLsm6dsoxRegAllIntSrc == 0x1A &&
+         kLsm6dsoxRegCtrl3C == 0x12 && kLsm6dsoxRegAllIntSrc == 0x1A &&
          kLsm6dsoxRegOutTemp == 0x20 && kLsm6dsoxDataBytes == 14);
 
   // LIS3MDL CTRL_REG1: OM 11 (ultra-high X/Y), DO 111 (80 Hz), FAST_ODR off.
@@ -187,11 +196,11 @@ static void testStartConfiguresBothChips() {
   // Order: identities, resets, one unlocked wait, reset polls, configuration, read-backs.
   const std::vector<std::string> expected = {
       "r 6A 0F 1", "r 1C 0F 1", "w 6A 12 1", "w 1C 21 1", "sleep 10", "r 6A 12 1", "r 1C 21 1",
-      "w 6A 10 3", "w 6A 18 1", "w 6A 56 9", "w 1C A0 5", "r 6A 10 3", "r 1C A0 5",
+      "w 6A 10 3", "w 6A 17 2", "w 6A 56 9", "w 1C A0 5", "r 6A 10 3", "r 6A 56 9", "r 1C A0 5",
   };
   assert(bus.log == expected);
-  assert(bus.accel.regs[0x10] == 0x68 && bus.accel.regs[0x11] == 0x44 && bus.accel.regs[0x12] == 0x44);
-  assert(bus.accel.regs[0x18] == 0xE2 && bus.accel.regs[0x56] == 0x4F && bus.accel.regs[0x5E] == 0x50);
+  assert(bus.accel.regs[0x10] == 0x6A && bus.accel.regs[0x11] == 0x44 && bus.accel.regs[0x12] == 0x44);
+  assert(bus.accel.regs[0x17] == 0x40 && bus.accel.regs[0x18] == 0xE2 && bus.accel.regs[0x56] == 0x4F && bus.accel.regs[0x5E] == 0x50);
   assert(bus.mag.regs[0x20] == 0x7C && bus.mag.regs[0x22] == 0x00 && bus.mag.regs[0x23] == 0x0C &&
          bus.mag.regs[0x24] == 0x40);
   assert(bus.now < 100);  // about 25 ms on a free bus
@@ -251,6 +260,13 @@ static void testConfigurationThatDoesNotStick() {
   assert(!start(bus, why));
   assert(why == "Error: The LSM6DSOX at 0x6A on bus 1 did not keep its settings (register 0x11 reads 0x00, "
                 "expected 0x44). Run 'openimu' again.");
+  // A lost event write (tap and free fall silently off) is caught too.
+  Bus events;
+  events.accel.ignoreWritesTo = true;
+  events.accel.ignoredReg = 0x58;  // TAP_CFG2: INTERRUPTS_ENABLE
+  assert(!start(events, why));
+  assert(why == "Error: The LSM6DSOX at 0x6A on bus 1 did not keep its settings (register 0x58 reads 0x00, "
+                "expected 0x88). Run 'openimu' again.");
   Bus mag;
   mag.mag.ignoreWritesTo = true;
   mag.mag.ignoredReg = 0x24;
@@ -315,6 +331,85 @@ static void testDecode() {
   assert(near(r.mag[0], 100.0f, 0.01f) && near(r.mag[1], -50.0f, 0.01f) && near(r.mag[2], 5.0f, 0.02f));
 }
 
+// ---- One sample: read order and nothing lost ----------------------------------------------
+struct SampleBus {
+  bool magOk = true;
+  bool srcOk = true;    // the LSM6DSOX transaction reads the source bytes
+  bool dataOk = true;   // ... then the 14-byte burst
+  uint8_t intSrc = 0;   // latched on the chip until the source bytes are read
+  int16_t accelZ = 8197;
+  int16_t magX = 6842;
+  std::vector<std::string> order;
+  bool readMag(uint8_t* field) {
+    order.push_back("mag");
+    if (!magOk) return false;
+    std::memset(field, 0, 6);
+    field[0] = static_cast<uint8_t>(magX & 0xFF);
+    field[1] = static_cast<uint8_t>((static_cast<uint16_t>(magX) >> 8) & 0xFF);
+    return true;
+  }
+  bool readAccel(uint8_t* src, uint8_t* data, bool& srcRead) {
+    order.push_back("accel");
+    if (!srcOk) return false;
+    src[0] = intSrc;
+    src[1] = src[2] = 0;
+    intSrc = 0;  // read-to-clear
+    srcRead = true;
+    if (!dataOk) return false;
+    std::memset(data, 0, 14);
+    data[12] = static_cast<uint8_t>(accelZ & 0xFF);
+    data[13] = static_cast<uint8_t>((static_cast<uint16_t>(accelZ) >> 8) & 0xFF);
+    return true;
+  }
+};
+
+static bool sample(SampleBus& bus, Lsm4517SampleState& st, Lsm4517Reading& r, bool& magFailed) {
+  return lsm4517ReadSample(
+      st, [&](uint8_t* field) { return bus.readMag(field); },
+      [&](uint8_t* src, uint8_t* data, bool& srcRead) { return bus.readAccel(src, data, srcRead); }, r, magFailed);
+}
+
+static void testSampleKeepsTheTap() {
+  Lsm4517SampleState st;
+  Lsm4517Reading r{};
+  bool magFailed = false;
+  SampleBus bus;
+  // The magnetometer first (no side effect), the read-to-clear chip last.
+  assert(sample(bus, st, r, magFailed) && !magFailed && r.hasMag && !r.tap);
+  assert((bus.order == std::vector<std::string>{"mag", "accel"}));
+  assert(near(r.mag[0], 100.0f, 0.01f) && near(r.accel[2], 9.81f, 0.01f));
+
+  // A knock while an OLED frame holds the bus: the magnetometer read times
+  // out, the accel/gyro sample and the tap still arrive, with the last field.
+  bus.intSrc = kLsm6dsoxSrcSingleTap;
+  bus.magOk = false;
+  bus.magX = 0;
+  assert(sample(bus, st, r, magFailed) && magFailed && r.tap && r.hasMag && near(r.mag[0], 100.0f, 0.01f));
+  bus.magOk = true;
+
+  // The source bytes read (the chip cleared its flags), then the burst
+  // failed: the sample fails, and the tap and free fall arrive with the next.
+  bus.intSrc = kLsm6dsoxSrcSingleTap | kLsm6dsoxSrcFreefall;
+  bus.dataOk = false;
+  assert(!sample(bus, st, r, magFailed) && bus.intSrc == 0 && st.pendingTap && st.pendingFreefall);
+  bus.dataOk = true;
+  assert(sample(bus, st, r, magFailed) && r.tap && r.freefall);
+  assert(sample(bus, st, r, magFailed) && !r.tap && !r.freefall);  // once
+
+  // The LSM6DSOX transaction never ran (bus busy): the flags stay on the chip.
+  bus.intSrc = kLsm6dsoxSrcSingleTap;
+  bus.srcOk = false;
+  assert(!sample(bus, st, r, magFailed) && bus.intSrc == kLsm6dsoxSrcSingleTap && !st.pendingTap);
+  bus.srcOk = true;
+  assert(sample(bus, st, r, magFailed) && r.tap);
+
+  // No good field yet: no magnetometer reading.
+  Lsm4517SampleState fresh;
+  SampleBus noMag;
+  noMag.magOk = false;
+  assert(sample(noMag, fresh, r, magFailed) && magFailed && !r.hasMag);
+}
+
 int main() {
   testConfigurationBytes();
   testAddresses();
@@ -324,6 +419,7 @@ int main() {
   testConfigurationThatDoesNotStick();
   testBusyBusAndDeadline();
   testDecode();
+  testSampleKeepsTheTap();
   std::puts("motion_lsm6dsox_core_tests: all passed");
   return 0;
 }
