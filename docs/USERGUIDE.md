@@ -875,7 +875,11 @@ make a device re-open the session. A copy of a frame that was already taken (bec
 acknowledgement was lost) is acknowledged again and not processed twice. Handshake frames ask for no
 acknowledgement: their answer is the next handshake frame. If the device is too busy to queue an acknowledgement, it sends none and
 counts it (`TX ACKs Dropped`); the sender retries as for a lost frame. The mesh topology view
-(`espnowmeshtopo`) is signed with the group key too. Clearing a passphrase disables the mesh and drops its id: a mesh without a
+(`espnowmeshtopo`) travels sealed in each peer's session: only paired peers in reach are asked. A
+remote command's login travels as a
+user name and a password of their own (lengths, not separators), so a password may contain `:`; a
+user name or password over 31 bytes is refused on the target, never cut. User sync (`usersync`) is
+taken only from a paired device, sealed. Clearing a passphrase disables the mesh and drops its id: a mesh without a
 passphrase sends and takes nothing (the default mesh is cleared only after another enabled mesh is
 made the default). Two
 meshes on one device never share an id: `espnowsetpassphrase`, `espnowmeshes rename` and
@@ -1595,7 +1599,7 @@ espnowmeshmetrics               - Show routing metrics (forwards, drops, route c
 espnowmeshroutes                - Show the route table (who's reachable, and via whom)
 espnowmeshttl [1-10]            - Hops a message may travel (1 = direct only)
 espnowmeshrelay [0|1]           - Carry other nodes' traffic through this one
-espnowmeshtopo                  - Discover mesh topology (master only)
+espnowmeshtopo                  - Discover mesh topology from the paired peers in reach (sealed)
 espnowtimesync                  - Master: send this device's clock to the paired devices now
 espnowtimestatus [json]         - Where this device's clock comes from; what was sent or last received
 espnowmeshtime [on|off]         - Mesh time on/off (default on)

@@ -99,6 +99,28 @@ Host-tested and built; not run on a device.
   revoked key is refused whatever address it comes from, and the accept prompt shows its keyId.
   KEY_EX_CONFIRM status 3 means "not accepted". Reflash devices together.
 
+### Changed (ESP-NOW 1.0: remaining wire and names)
+Host-tested and built; not run on a device.
+- **A password with `:` in it works for remote commands.** `espnowremote`, `espnowbrowse`,
+  `espnowfetch`, `espnowroomcmd`, `espnowtagcmd` and `usersync` send the login as a credential block
+  with lengths instead of `user:pass:command`, which split a password at its first `:` (the command
+  then failed as a wrong login or ran as something else). The bond `remote:` commands send the bond
+  token the same way. A login that does not fit is refused, never cut.
+- **The topology view is encrypted** (`espnowmeshtopo`, `espnowtoporesults`, the web topology): its
+  frames travel sealed in each peer's session instead of group-signed, so only paired peers are asked
+  and answer.
+- **User sync** (`usersync`, `espnowusersync`) is accepted only from a paired device, sealed.
+- Bond forwarding status (`bondforward json`): a master's answer `withdrawn` is gone (a withdrawal
+  that was done answers like an accepted one).
+- `espnowidentity` shows `createdEpochMs` (milliseconds; was `createdAtSec`). The stored ESP-NOW files
+  change format with no conversion (boards are erased at 1.0): `devices.json` no longer stores
+  `encrypted` or a per-device `key`, the per-peer `identity.json` has `"schema":1`, `pairedEpochMs`
+  and `lastSeenEpochMs`, and this device's `identity.json` has `createdEpochMs`.
+- `espnowbrowse` / the remote file list refuse a path over 127 bytes instead of cutting it.
+- **Wire change:** CMD and USER_SYNC carry the credential block; TOPO_REQ/START/PEER are sealed;
+  BOND_REQUEST/BOND_NOTICE carry a 32-bit request number first and the notice a status (0 = accepted);
+  FORWARD_LINK's result is 0 for ok. Reflash devices together.
+
 ### Changed (ESP-NOW 1.0: "online" means both devices hear each other)
 Host-tested and built; not run on a device.
 - **Online needs two-way proof.** A paired device is online only when it was heard in the last

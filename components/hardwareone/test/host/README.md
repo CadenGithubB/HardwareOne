@@ -4447,7 +4447,7 @@ check one receive style (no `System_ESPNow*.cpp` code casts a payload to a wire 
 list entries excepted; no handler compares `ctx.payloadLen` with a `sizeof` or subtracts from it, copies of a text
 tail into a local buffer excepted) and 32-bit sensor masks (no 16-bit `*Mask` in the sensor and forwarding code,
 `receivedPeerMask` excepted; `bondForwardSensors` is 32 bits). Fixed-header frames (RELAY_DATA, PEER_LIST,
-SENSOR_ENVELOPE / BOND_SENSOR_DATA, CMD_RESP, FILE_DATA, FS_LIST_REPLY and the text-only frames), whose payload ends
+SENSOR_ENVELOPE / BOND_SENSOR_DATA, CMD_RESP, FILE_DATA, FS_LIST_RESP and the text-only frames), whose payload ends
 in data or fixed-stride entries, never grow: the rules block and `docs/COMPATIBILITY.md` name them, each of their
 structs is marked "Fixed header: cannot grow", and every `ctx.tail()` read starts after one of them. The limits that
 follow from the 16-byte group tag (the signed-frame fit on send, the flood size check, the relay wrap, the
@@ -4549,7 +4549,7 @@ the number and the bond master sends it. W5: `espnow_wire_layout` (check_earmark
 
 ## ESP-NOW dispatch policy
 
-`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. Opcodes 130 (SUBSCRIBE_UPDATE) and 31 (BOOT, step 8), retired in ESP-NOW 1.0, have no row. TIME_SYNC, SENSOR_STATUS, SENSOR_REQ and SENSOR_ENVELOPE need one too, on a keyed and a keyless device, with no bond partner required; a signed broadcast is not enough for them. Once the device has a mesh passphrase, TEXT needs an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event. The retired opcode 150 has no row. USER_SYNC requires a session-sealed frame (F9): a plaintext or group-signed one from a paired peer reaches no handler, a session-sealed one does. Every zero-flag row is on an explicit allow-list (handshakes, TOPO_*); this is a subset check, so later items may only shrink the list (`V4_OPC_LEN_EXACT` is not a policy flag). The length column: every row has a minimum length equal to the 1.0 value in the driver's `EXPECTED_MINLEN` (these never rise), `V4_OPC_LEN_EXACT` is on exactly the six handshake rows, and for every row, with all its policy gates passed, one byte short is dropped before the handler and counted once in `gEspNowRxLenDrops`, the minimum passes, and a longer frame reaches the handler with its length intact (a handshake frame one byte long is dropped). An empty STREAM is dropped and counted (1.0 removed the empty STREAM_BEGIN / STREAM_END markers); a 24-byte SUBSCRIBE_UPDATE with reserved bytes set reaches the subscription store through the real handler, and a 20-byte SESSION_UNKNOWN reaches its rule. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
+`espnow_dispatch_policy` extracts the production V4 opcode table, its flag constants, the lookup, the dispatcher (`v4_dispatch_table_try`), `espnowOriginIsKnown`, `v4h_text` and the espnow_task text-queue drain from `System_ESPNow.cpp`. It also extracts `LogMessageType` and `TextQueueEntry` from `System_ESPNow.h`, the opcode/flag enums and header from `System_ESPNow_Wire.h`, and `V4RxCtx`. It generates one recording double per other handler named in the table and compiles the harness with `ENABLE_BONDED_MODE` 1 and 0. It checks the following. Opcodes 130 (SUBSCRIBE_UPDATE) and 31 (BOOT, step 8), retired in ESP-NOW 1.0, have no row. TIME_SYNC, SENSOR_STATUS, SENSOR_REQ and SENSOR_ENVELOPE need one too, on a keyed and a keyless device, with no bond partner required; a signed broadcast is not enough for them. Once the device has a mesh passphrase, TEXT needs an authenticated frame, and a plaintext one is dropped with one warning; a keyless device still accepts plaintext. Plaintext TEXT accepted on a keyless device is filed under its origin MAC, never a paired peer's name, and posts no `SYSEVT_TEXT_RX`. Authenticated text (BROADCAST_AUTH or session-encrypted, direct or relayed) keeps its registry name, encryption flag, per-fragment records and single bus event. The retired opcode 150 has no row. USER_SYNC requires a session-sealed frame (F9) from a paired sender (1.0 step 9): a plaintext or group-signed one from a paired peer and a sealed one from an unpaired sender reach no handler, a sealed one from a paired peer does. TOPO_REQ/START/PEER (step 9) need a paired, sealed frame: a group-signed one reaches no handler, a sealed one does. Every zero-flag row is on an explicit allow-list (the six handshakes; TOPO_* left it in step 9); this is a subset check, so later items may only shrink the list (`V4_OPC_LEN_EXACT` is not a policy flag). The length column: every row has a minimum length equal to the 1.0 value in the driver's `EXPECTED_MINLEN` (these never rise), `V4_OPC_LEN_EXACT` is on exactly the six handshake rows, and for every row, with all its policy gates passed, one byte short is dropped before the handler and counted once in `gEspNowRxLenDrops`, the minimum passes, and a longer frame reaches the handler with its length intact (a handshake frame one byte long is dropped). An empty STREAM is dropped and counted (1.0 removed the empty STREAM_BEGIN / STREAM_END markers); a 24-byte SUBSCRIBE_UPDATE with reserved bytes set reaches the subscription store through the real handler, and a 20-byte SESSION_UNKNOWN reaches its rule. `--component <component-directory>` or `--source-dir <overlay>` replays the pre-fix sources. It uses ASan/UBSan when `HW1_SANITIZE` is enabled and mocks history, the event bus and the radio.
 
 ## ESP-NOW fragment reassembly
 
@@ -4675,6 +4675,42 @@ P1, I6, I7, S1b): a passphrase change closes the mesh's sessions and says who re
 disables the mesh and drops its id on every slot (the default mesh only after another is the default); a cached
 key without `kdf` record 1 is not used. `espnow_wire_layout` and `espnow_dispatch_policy` pin the new sizes and
 minimum lengths (KEY_EX_CONFIRM 34, SESSION_OPEN 154, SESSION_CONFIRM 162 = the relay budget, SESSION_REKEY 146).
+
+## ESP-NOW 1.0 step 9: remaining wire and names
+
+DESIGN 5.3 / 5.4 and the step 9 row. Rules for the CMD / USER_SYNC credential block (E29):
+`System_ESPNow_CredentialCore.h`.
+
+`espnow_credential_core_tests` compiles that header as is: C1 a password with `:` (and a `:` in the user name and
+the command) comes back whole, where the pre-1.0 colon split took the wrong account and command; C2 an empty
+password (and an empty user name) parses, so the login check refuses it like any wrong password, and the shortest
+CMD is the row minimum (5); C3 a bond token is 16 raw bytes (a NUL and a `:` inside), a 15-byte token or a token
+block with a user name is refused; M1-M10 short headers, lengths past the payload, no command, a lone or inner
+NUL, an unknown kind, the reserved byte ignored, the old colon text refused; L1-L7 a 255-byte field packs, 256
+does not, no room is refused (never cut), an empty command and a NUL in a field are refused, a 32-byte name does
+not fit 32 bytes; U1-U6 USER_SYNC's two blocks and flags byte (with `:` in both passwords), no flags byte, bytes
+after the flags ignored, a bond token refused, the shortest USER_SYNC is the row minimum (9), the old JSON refused.
+
+Updated on purpose (listed before editing in the step notes): `espnow_user_credentials` (the remote commands go
+through `v4_handle_cmd` as credential blocks; a new scenario: a `:` password logs in and runs the whole command,
+the old split of the same text is a wrong password, an empty password is checked and refused, a `:` in the command
+stays in it, a bond token with a `:` byte runs under the bond identity; USER_SYNC is two blocks + flags);
+`espnow_answers` (v4h_cmd stores the block with its length and a NUL after it; the old colon text and a block
+with no command are refused bad_request on the ACK and never reach the slot); `espnow_rx_frontend` (TOPO_REQ:
+plaintext dropped at the gate, group-signed refused by the row, sealed delivered; TOPO_* are sent with
+`v4_send_payload_smart`); `espnow_dispatch_policy` (above); `espnow_wire_layout` (BondRequest {reqId u32 0, role 4,
+flags 5, reserved 6} and BondNotice {reqId 0, status 4, role 5, flags 6, reserved 7} goldens; no payload pointer
+cast left anywhere, the FS list entries are copied); `espnow_bond_agree_core_tests` (request numbers are 32 bit:
+wrap cases at 0xFFFFFFFF, no false wrap past 0xFFFF; the notice status mapping 0/16-19 both ways, an unknown
+status ignored); `espnow_bond_agreement` / `espnow_bond_partner_change` (frames read at the new offsets);
+`espnow_forward_core_tests` (result 0 = ok, 5 full, 6 bad_partner, 16-19, the old numbers read as a refusal this
+firmware does not know); `espnow_forward_rx` / `espnow_bond_forward` (a withdrawal answers 0);
+`espnow_fslist_locking` (the list reply's entries are copied to a PSRAM array); `espnow_identity_walk` /
+`espnow_identity_writes` / `espnow_keyex_hello` (the peer file is `"schema":1` with `pairedEpochMs` /
+`lastSeenEpochMs`, the own identity `createdEpochMs`, the hourly refresh in milliseconds);
+`espnow_group_membership` / `espnow_metadata_push` / `espnow_mesh_slots` (`addEspNowDevice` without the
+dead `encrypted` / `key`; a room command's frame is a credential block); `remote_command_authority` (the bond
+payload is built into a byte buffer); `credential_attempts`, `espnow_tx_multiframe` (the `v4_handle_cmd` slice).
 
 ## ESP-NOW two-way liveness (1.0 step 8, RC3)
 
