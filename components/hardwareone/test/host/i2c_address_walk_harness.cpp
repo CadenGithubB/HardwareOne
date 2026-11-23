@@ -144,6 +144,10 @@ int main() {
   scanned({{1, 0x28}});
   assert(!isSensorConnected("imu"));
   gSettings.imuAddress = 0x28;
+  // ...and set to 0x28, a chip (or a ToF) answering only at 0x29 is not the
+  // IMU: the other address is no hidden alternate.
+  scanned({{1, 0x29}});
+  assert(!isSensorConnected("imu"));
 
   // i2cRowOwnerByName: rows of devices without a queue type only.
   const I2cAddressOwner oled = i2cRowOwnerByName("SSD1306");

@@ -76,16 +76,20 @@ everything user-visible since the v0.99.99.1 tag.
 
 ### Fixed (IMU, BNO055)
 - A BNO055 strapped to 0x29 (ADR high) can be used: the new `imuaddress [0x28|0x29]` setting
-  (applies at the next `openimu`, refused when another device of the build holds the address on
-  the IMU bus) is the address the start check, the driver, every reading, the I2C health record,
-  the auto-disable, autostart and the RAM-flush resume all use. Before, the start check and every
-  poll looked only at 0x28.
+  (applies at the next `openimu`; a running IMU keeps reading the address it was opened at until
+  then; refused, by the command and again at `openimu`, when another device of the build holds
+  the address on the IMU bus) is the address the start check, the driver, every reading, the I2C
+  health record, the auto-disable, autostart and the RAM-flush resume all use. Before, the start
+  check and every poll looked only at 0x28, while `detect` also counted any answer at 0x29 (a
+  VL53L4CX ToF, say) as the IMU; it now looks only at the configured address.
 - Starting the BNO055 no longer holds the I2C bus for up to about 10 s: the driver talks to the
   chip's registers itself (the Adafruit library is no longer used), each register access is one
   short transaction and every wait (power-up, the 650 ms reset) sleeps with the bus released, so
-  the OLED, the fuel gauge and the encoders on the same bus keep running. The start ends within
-  2.5 s and a failure says why (`Error: No BNO055 answers at 0x29 on bus 1. ...`, another chip at
-  the address, no answer after its reset), instead of "timeout after 3s" whatever happened.
+  the OLED, the fuel gauge and the encoders on the same bus keep running. A step another device's
+  long transfer delays is tried again. The start takes about a second, ends within 4 s even with
+  every bus access at its worst case, and a failure says why (`Error: No BNO055 answers at 0x29 on
+  bus 1. ...`, another chip at the address, no answer after its reset, the bus staying busy),
+  instead of "timeout after 3s" whatever happened.
 - Rotation detection works: it compared the gyro (rad/s) with 100 as if it were deg/s, so it never
   fired; `imuactions` now shows the rate in deg/s, and the web card labels the gyro rad/s.
 - The web page's 3D view turns the right way: it was passed yaw, pitch, roll where it takes pitch,

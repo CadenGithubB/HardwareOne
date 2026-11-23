@@ -38,12 +38,14 @@
 
 // IMU (REMOTE_SENSOR_IMU): imuBuildDataJson, HAL_Motion.cpp. "ori" is an
 // object holding the three angles in degrees; "mag" (x/y/z in uT) is present
-// when the backend reads a magnetometer.
+// when the backend reads a magnetometer; "cal" (the chip's calibration
+// status byte) when the backend reports one.
 #define HW1_SK_ORI         "ori"
 #define HW1_SK_YAW         "yaw"
 #define HW1_SK_PITCH       "pitch"
 #define HW1_SK_ROLL        "roll"
 #define HW1_SK_MAG         "mag"
+#define HW1_SK_CAL         "cal"
 
 // Time of flight (REMOTE_SENSOR_TOF): tofBuildDataJson, i2csensor_vl53l4cx.cpp.
 // "objects" is an array of detected targets; each carries these two keys.

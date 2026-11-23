@@ -45,6 +45,13 @@ def main() -> None:
     production += [extract_block(controller, marker) for marker in (
         "bool isSensorConnected(const char* moduleName)", "I2cAddressOwner i2cRowOwnerByName(",
     )]
+    # The BNO055's one address is its imuAddress setting (addressAt): its row
+    # has no alternate, so detect, the boot scan and the sensor info never
+    # count an answer at the other address (or a ToF at 0x29) as the IMU.
+    bno055 = re.search(r'\{ 0x28, "BNO055", "9-DOF IMU", "Bosch", (\w+), (0x[0-9A-Fa-f]+),', controller)
+    require(bno055 is not None, "the BNO055 row of i2cSensors")
+    require(bno055[1] == "false" and int(bno055[2], 16) == 0,
+            "the BNO055 row must not name an alternate address (imuAddress replaces it)")
     harness = (HERE / "i2c_address_walk_harness.cpp").read_text()
     harness = (harness.replace("// INSERT_TYPES", "\n\n".join(types))
                .replace("// INSERT_PRODUCTION", "\n\n".join(production)))

@@ -51,10 +51,11 @@ struct FakeDriver {
 };
 FakeDriver *gVL53L4CX = nullptr, *gMLX90640 = nullptr, *gAPDS9960 = nullptr;
 // The IMU's backend keeps no driver object; a failed start releases it.
-constexpr unsigned long kMotionStartWaitMs = 3000;
+constexpr unsigned long kMotionStartWaitMs = 4500;
 char sImuInitWhy[160];
 unsigned imuBackendStops = 0;
 void motionBackendStop() { ++imuBackendStops; }
+void imuCloseTarget() {}  // HAL_Motion: forget the open bus and address
 void broadcastOutput(const char*) {}
 template <typename T> void ps_delete(T* value) { delete value; }
 struct TwoWire {} wire;
@@ -280,8 +281,11 @@ void testDeferredHandshakes() {
       scenario.handshake = outcome;
       assert(!owner.start());
       assert(!owner.running && owner.handle == &taskToken && scenario.creates == 1);
-      assert(scenario.now <= 13000);
-      if (outcome == Handshake::Timeout) assert(scenario.now == 13000);
+      // Each deferred start waits 3 s for its task; the IMU waits
+      // kMotionStartWaitMs (its backend's worst-case init, HAL_MotionCore.h).
+      const unsigned wait = std::strcmp(owner.name, "IMU") == 0 ? kMotionStartWaitMs : 3000;
+      assert(scenario.now <= 10000 + wait);
+      if (outcome == Handshake::Timeout) assert(scenario.now == 10000 + wait);
       // A timed-out task may still own an in-flight init. No next start can
       // reset its handshake or resources before it acknowledges cleanup.
       const unsigned effects = scenario.effects, creates = scenario.creates, delays = scenario.delays;

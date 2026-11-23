@@ -104,6 +104,8 @@ static bool beginResult(void* object) {
 }
 // The IMU's backend (HAL_MotionBackend.h): no object, only a release.
 static void motionBackendStop() { ++scenario.backendStops; }
+// HAL_Motion: the IMU forgets the bus and address it was opened at.
+static void imuCloseTarget() {}
 class Adafruit_APDS9960 {
  public:
   Adafruit_APDS9960() { constructed(this, "apds.obj"); }

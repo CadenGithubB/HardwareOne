@@ -221,7 +221,9 @@ const I2cSensorEntry i2cSensors[] = {
   // Sensors with CLI Modules
   // { addr, name, desc, mfr, multiAddr, altAddr, heapBytes, library, headerGuard, module, clockHz, timeoutMs }
   // The IMU's BNO055 backend (HAL_Motion_BNO055.cpp, register level: no library).
-  { 0x28, "BNO055", "9-DOF IMU", "Bosch", true, 0x29, 0, NULL, NULL, "imu", 100000, 300,
+  // One address, the imuAddress setting (0x28 or 0x29): no alternate, so
+  // discovery never counts a chip (or another device) at the other address.
+  { 0x28, "BNO055", "9-DOF IMU", "Bosch", false, 0x00, 0, NULL, NULL, "imu", 100000, 300,
     ENABLE_IMU_BNO055, [](uint8_t) -> int { return gSettings.imuBus; }, IMU_ADDRESS, I2C_DEVICE_IMU },
   { 0x39, "APDS9960", "RGB, Gesture & Proximity", "Adafruit", false, 0x00, 500, "Adafruit_APDS9960", "_ADAFRUIT_APDS9960_H_", "apds", 100000, 200,
     ENABLE_APDS_SENSOR, [](uint8_t) -> int { return gSettings.apdsBus; }, nullptr, I2C_DEVICE_APDS },

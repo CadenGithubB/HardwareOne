@@ -12,8 +12,14 @@
 #include "HAL_Motion_BNO055Core.h"
 
 // A BNO055 on a bus. Time moves only in sleepMs (the sequence's unlocked
-// waits) plus 1 ms per register access (one short transaction each).
+// waits) plus ioMs per register access (one short transaction each: 1 ms, or
+// kBno055IoWorstMs for a bus at its worst case).
 struct Chip {
+  uint32_t ioMs = 1;
+  uint8_t nackOnceTo = 0xFF;       // this register's first write is not acknowledged
+  uint32_t busyUntil = 0;          // the bus lock times out on every access before this
+  bool lastBusy = false;
+  std::vector<uint8_t> nacked;
   uint32_t now = 0;
   uint32_t answersFrom = 0;        // boot: no answer before this
   uint32_t resetFor = 400;         // after RST_SYS: no answer for this long
@@ -27,16 +33,30 @@ struct Chip {
   uint32_t longestAccess = 0, sleeps = 0;
 
   bool answering() const { return now >= answersFrom && now < silentFrom; }
+  bool busy() const { return lastBusy; }
+  // The lock wait: a busy bus costs the whole lock wait and never reaches the chip.
+  bool locked() {
+    lastBusy = now < busyUntil;
+    if (lastBusy) now += kBno055StepLockMs;
+    return !lastBusy;
+  }
   bool read(uint8_t reg, uint8_t* out, uint8_t len) {
-    now += 1;
+    if (!locked()) return false;
+    now += ioMs;
     if (!answering()) return false;
     assert(len == 1);
     *out = reg == kBno055RegChipId ? id : reg == kBno055RegOprMode ? mode : 0;
     return true;
   }
   bool write(uint8_t reg, uint8_t value) {
-    now += 1;
+    if (!locked()) return false;
+    now += ioMs;
     if (!answering() || reg == failWriteTo) return false;
+    if (reg == nackOnceTo) {
+      nackOnceTo = 0xFF;
+      nacked.push_back(reg);
+      return false;
+    }
     writes.emplace_back(reg, value);
     if (reg == kBno055RegOprMode && modeSticks) mode = value;
     if (reg == kBno055RegSysTrigger && (value & kBno055TriggerReset)) {
@@ -125,6 +145,101 @@ static void testStepFails() {
                 "'openimu'.");
 }
 
+// A write the chip misses once is tried again: the start goes on.
+static void testStepRetried() {
+  Chip chip;
+  chip.nackOnceTo = kBno055RegPwrMode;
+  std::string why;
+  assert(start(chip, why) && chip.mode == kBno055ModeNdof);
+  assert(chip.nacked.size() == 1 && chip.writes.size() == 6);
+}
+
+// Another device holding the bus past one lock wait does not fail the start.
+static void testBusBusyForAWhile() {
+  Chip chip;
+  chip.busyUntil = 300;
+  std::string why;
+  assert(start(chip, why) && chip.mode == kBno055ModeNdof);
+}
+
+// A bus that never frees is reported as busy, not as a missing chip.
+static void testBusStaysBusy() {
+  Chip chip;
+  chip.busyUntil = UINT32_MAX;
+  std::string why;
+  assert(!start(chip, why));
+  assert(why == "Error: I2C bus 1 stayed busy, so the BNO055 at 0x29 could not be started (chip id). Run "
+                "'openimu' again.");
+  assert(chip.now <= kBno055InitDeadlineMs && chip.writes.empty());
+}
+
+// The bus frees for the chip id and the first steps, then stays busy for
+// good: after the reset write (the poll meets it) or after the chip is back
+// (the power-mode step meets it). Each says the bus was busy, inside the
+// deadline.
+struct BusyLater {
+  Chip& c;
+  bool afterPoll;
+  bool resetSent = false;
+  bool read(uint8_t reg, uint8_t* out, uint8_t len) {
+    const bool ok = c.read(reg, out, len);
+    if (ok && resetSent && afterPoll) c.busyUntil = UINT32_MAX;
+    return ok;
+  }
+  bool write(uint8_t reg, uint8_t value) {
+    const bool ok = c.write(reg, value);
+    if (ok && reg == kBno055RegSysTrigger && (value & kBno055TriggerReset)) {
+      resetSent = true;
+      if (!afterPoll) c.busyUntil = UINT32_MAX;
+    }
+    return ok;
+  }
+  bool busy() const { return c.busy(); }
+  void sleepMs(uint32_t ms) { c.sleepMs(ms); }
+  uint32_t nowMs() { return c.nowMs(); }
+};
+
+static void testBusBusyLater() {
+  for (bool afterPoll : {false, true}) {
+    Chip chip;
+    BusyLater io{chip, afterPoll};
+    char text[160] = "";
+    assert(!bno055StartSequence(io, 1, 0x29, text, sizeof(text)));
+    const std::string why = text;
+    assert(why == (afterPoll ? "Error: I2C bus 1 stayed busy, so the BNO055 at 0x29 could not be started (power "
+                               "mode). Run 'openimu' again."
+                             : "Error: I2C bus 1 stayed busy, so the BNO055 at 0x29 could not be started (chip id "
+                               "after the reset). Run 'openimu' again."));
+    assert(chip.now <= kBno055InitDeadlineMs);
+  }
+}
+
+// Every access at its worst case, the chip answering only at the end of its
+// boot window and slow after its reset: the start still ends in the deadline,
+// so the start command reports the backend's own result.
+static void testWorstCaseFitsTheDeadline() {
+  Chip chip;
+  chip.ioMs = kBno055IoWorstMs;
+  chip.answersFrom = kBno055BootWaitMs - kBno055IoWorstMs;
+  chip.resetFor = 900;
+  std::string why;
+  assert(start(chip, why) && chip.now <= kBno055InitDeadlineMs);
+  static_assert(kBno055InitDeadlineMs + 200 <= kMotionStartWaitMs, "");
+}
+
+// A chip that stops answering in the tail at the worst access time: the
+// failure (with retries) still ends inside the deadline.
+static void testWorstCaseFailureFitsTheDeadline() {
+  for (uint8_t reg : {kBno055RegPwrMode, kBno055RegPageId, kBno055RegOprMode}) {
+    Chip chip;
+    chip.ioMs = kBno055IoWorstMs;
+    chip.failWriteTo = reg;
+    std::string why;
+    assert(!start(chip, why) && chip.now <= kBno055InitDeadlineMs);
+    assert(why.find("Error: The BNO055 at 0x29 on bus 1 ") == 0);
+  }
+}
+
 static void testModeDoesNotStick() {
   Chip chip;
   chip.modeSticks = false;
@@ -186,6 +301,12 @@ int main() {
   testNoReturnAfterReset();
   testSlowReset();
   testStepFails();
+  testStepRetried();
+  testBusBusyForAWhile();
+  testBusStaysBusy();
+  testBusBusyLater();
+  testWorstCaseFitsTheDeadline();
+  testWorstCaseFailureFitsTheDeadline();
   testModeDoesNotStick();
   testNoWhyBuffer();
   testDecode();

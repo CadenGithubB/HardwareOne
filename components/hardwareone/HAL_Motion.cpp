@@ -49,7 +49,10 @@ EXT_RAM_BSS_ATTR static char sImuInitWhy[160];
 EXT_RAM_BSS_ATTR static ImuCache sImuCache;
 static SemaphoreHandle_t sImuCacheMutex = nullptr;
 // The action detector's state: updated by the IMU task under the cache lock,
-// copied out by readers (imuActionsSnapshot).
+// copied out by readers (imuActionsSnapshot). NOLOAD PSRAM drops the member
+// initialisers: it is all-zero (no pose or direction codes) until
+// imuResetActions runs at the start of each task run; readers check
+// gImuRunning first.
 EXT_RAM_BSS_ATTR static MotionActionState sImuActions;
 
 bool imuCacheSnapshot(ImuCache& out, uint32_t timeoutMs) {
@@ -90,7 +93,16 @@ bool gImuConnected = false;
 unsigned long gImuLastStopTime = 0;
 TaskHandle_t gImuTaskHandle = nullptr;
 
-uint8_t imuDeviceAddress() { return motionBackendAddress(gSettings.imuAddress); }
+// The bus and address the IMU was opened at (HAL_MotionCore.h): written by
+// the IMU task when it opens and closes the chip, read by everyone else.
+static MotionOpenTarget sImuOpen;
+
+// The imuAddress setting, through the backend's rule: what the next open uses.
+static uint8_t imuConfiguredAddress() { return motionBackendAddress(gSettings.imuAddress); }
+// The address in use: the open one while the IMU is open, else the setting.
+uint8_t imuDeviceAddress() { return motionActiveAddress(sImuOpen, imuConfiguredAddress()); }
+static uint8_t imuDeviceBus() { return motionActiveBus(sImuOpen, (uint8_t)gSettings.imuBus); }
+static void imuCloseTarget() { sImuOpen.open = false; }
 const char* imuBackendName() { return motionBackendInfo().part; }
 
 // ============================================================================
@@ -208,6 +220,7 @@ bool imuStartInternal() {
     DEBUG_CLIF("Failed to create IMU task (insufficient memory or resources)");
     gImuRunning = false;  // Reset flag on failure
     gImuConnected = false;
+    imuCloseTarget();
     gImuInitRequested = false;
     gImuInitDone = false;
     gImuInitResult = false;
@@ -342,10 +355,23 @@ const char* cmd_imuactions(const String& argsInput) {
 // Start the backend's chip on the configured bus and address. Runs on the IMU
 // task, so the start command never blocks the bus itself.
 static bool imuInitBackend() {
+  imuCloseTarget();
   const uint8_t bus = (uint8_t)gSettings.imuBus;
-  const uint8_t address = imuDeviceAddress();
+  const uint8_t address = imuConfiguredAddress();
+  // The imuAddress setting can also arrive by a settings write, which checks
+  // only its range: refuse an address another device of this build holds.
+  char clash[112];
+  if (i2cAddressTakenBy(bus, address, I2C_DEVICE_IMU, 1, clash, sizeof(clash))) {
+    snprintf(sImuInitWhy, sizeof(sImuInitWhy), "%s Change 'imuaddress' or 'imubus', then 'openimu'.", clash);
+    return false;
+  }
+  // From here the IMU claims this bus and address until it closes.
+  sImuOpen.bus = bus;
+  sImuOpen.address = address;
+  sImuOpen.open = true;
   INFO_IMU_LIFECYCLEF("Starting %s at 0x%02X on bus %u", imuBackendName(), (unsigned)address, (unsigned)bus);
   if (!motionBackendInit(bus, address, sImuInitWhy, sizeof(sImuInitWhy))) {
+    imuCloseTarget();
     if (!sImuInitWhy[0]) {
       snprintf(sImuInitWhy, sizeof(sImuInitWhy), "Error: The %s at 0x%02X on bus %u did not start.",
                imuBackendName(), (unsigned)address, (unsigned)bus);
@@ -463,7 +489,7 @@ int imuBuildDataJson(char* buf, size_t bufSize) {
     pos += n;
   }
   if (reading.hasCal) {
-    n = snprintf(buf + pos, bufSize - pos, ",\"cal\":%u", (unsigned)reading.cal);
+    n = snprintf(buf + pos, bufSize - pos, "," HW1_SK_Q(HW1_SK_CAL) "%u", (unsigned)reading.cal);
     if (n < 0 || (size_t)n >= bufSize - pos) return 0;
     pos += n;
   }
@@ -661,9 +687,12 @@ const char* cmd_imuaddress(const String& argsInput) {
   String text = argsInput;
   text.trim();
   if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  // While open, the chip stays at its open address until the next openimu.
+  const bool openElsewhere = sImuOpen.open && sImuOpen.address != imuConfiguredAddress();
   if (text.length() == 0) {
-    snprintf(getDebugBuffer(), 1024, "[IMU] %s address: 0x%02X on I2C%u", imuBackendName(),
-             (unsigned)imuDeviceAddress(), (unsigned)gSettings.imuBus + 1);
+    snprintf(getDebugBuffer(), 1024, "[IMU] %s address: 0x%02X on I2C%u%s", imuBackendName(),
+             (unsigned)imuConfiguredAddress(), (unsigned)gSettings.imuBus + 1,
+             openElsewhere ? " (open at the old address until the next 'openimu')" : "");
     return getDebugBuffer();
   }
   int address = 0;
@@ -680,8 +709,13 @@ const char* cmd_imuaddress(const String& argsInput) {
     return getDebugBuffer();
   }
   setSetting(gSettings.imuAddress, address);
-  snprintf(getDebugBuffer(), 1024, "[IMU] Address 0x%02X saved; it applies at the next 'openimu'",
-           (unsigned)address);
+  if (sImuOpen.open && sImuOpen.address != address) {
+    snprintf(getDebugBuffer(), 1024, "[IMU] Address 0x%02X saved; it applies at the next 'openimu' (open at "
+             "0x%02X until then)", (unsigned)address, (unsigned)sImuOpen.address);
+  } else {
+    snprintf(getDebugBuffer(), 1024, "[IMU] Address 0x%02X saved; it applies at the next 'openimu'",
+             (unsigned)address);
+  }
   return getDebugBuffer();
 }
 
@@ -766,6 +800,7 @@ void imuTask(void* parameter) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
     if (!gImuRunning) {
       gImuConnected = false;
+      imuCloseTarget();
       if (!imuInvalidateCache()) {
         vTaskDelay(pdMS_TO_TICKS(10));
         continue;
@@ -810,7 +845,9 @@ void imuTask(void* parameter) {
       }
     }
 
-    const uint8_t imuBus = (uint8_t)gSettings.imuBus;
+    // The bus and address the chip was opened at (a changed imuaddress or
+    // imubus applies at the next openimu).
+    const uint8_t imuBus = imuDeviceBus();
     if (gImuRunning && gImuConnected && !pollPaused(imuBus)) {
       unsigned long imuPollMs = (gSettings.imuDevicePollMs > 0) ? (unsigned long)gSettings.imuDevicePollMs : 200;
       unsigned long nowMs = millis();

@@ -58,31 +58,68 @@ constexpr uint32_t kBno055ConfigModeMs = 25;
 constexpr uint32_t kBno055SettleMs = 50;       // after the reset answers, before configuring
 constexpr uint32_t kBno055ClockMs = 10;
 constexpr uint32_t kBno055FusionModeMs = 20;
-// The whole start ends within this, waits included (HAL_MotionCore.h).
+// One register access, worst case: the backend waits up to kBno055StepLockMs
+// for the bus, then a read is two transfers (address, then data), each of
+// which the I2C manager gives up on after kBno055TransferTimeoutMs.
+constexpr uint32_t kBno055StepLockMs = 50;
+constexpr uint32_t kBno055TransferTimeoutMs = 100;  // I2C_WIRE_IO_TIMEOUT_MS (System_I2C_Manager.cpp)
+constexpr uint32_t kBno055IoWorstMs = kBno055StepLockMs + 2 * kBno055TransferTimeoutMs;
+// A write the chip did not take (or that found the bus busy) is tried again
+// after this, while the deadline leaves room for it and for what follows.
+constexpr uint32_t kBno055StepRetryMs = 10;
+// The whole start ends within this, every access at its worst case included
+// (HAL_MotionCore.h).
 constexpr uint32_t kBno055InitDeadlineMs = kMotionInitBudgetMs;
-static_assert(kBno055BootWaitMs + kBno055ConfigModeMs + kBno055ResetWaitMs + kBno055SettleMs +
-                  kBno055ClockMs + kBno055FusionModeMs + 400 <= kBno055InitDeadlineMs,
-              "the reset poll needs room inside the init deadline");
+// Worst case of what follows each step (the reserve it leaves when it
+// retries): the configuration tail after the reset poll is the settle wait,
+// power mode, page, crystal, clock wait, fusion mode, fusion wait and the
+// mode read-back.
+constexpr uint32_t kBno055AfterNdofMs = kBno055FusionModeMs + kBno055IoWorstMs;
+constexpr uint32_t kBno055AfterCrystalMs = kBno055ClockMs + kBno055IoWorstMs + kBno055AfterNdofMs;
+constexpr uint32_t kBno055AfterPageMs = kBno055IoWorstMs + kBno055AfterCrystalMs;
+constexpr uint32_t kBno055AfterPowerMs = kBno055IoWorstMs + kBno055AfterPageMs;
+constexpr uint32_t kBno055TailMs = kBno055SettleMs + kBno055IoWorstMs + kBno055AfterPowerMs;
+// The reset write leaves room for the reset wait, one poll and the tail; the
+// config-mode write also for its wait and the reset write.
+constexpr uint32_t kBno055AfterResetMs = kBno055ResetWaitMs + kBno055IoWorstMs + kBno055TailMs;
+constexpr uint32_t kBno055AfterConfigMs = kBno055ConfigModeMs + kBno055IoWorstMs + kBno055AfterResetMs;
+// A chip that answers at the end of its boot window still gets a full start.
+static_assert(kBno055BootWaitMs + kBno055IoWorstMs + kBno055AfterConfigMs <= kBno055InitDeadlineMs,
+              "the start must fit its deadline with every access at its worst case");
 
 // ---- Start sequence ---------------------------------------------------------------
 // Io: one register access per call, each its own short bus transaction.
 //   bool read(uint8_t reg, uint8_t* out, uint8_t len);   false: no answer / short read
 //   bool write(uint8_t reg, uint8_t value);
+//   bool busy();        the last access never reached the chip (bus lock timed out)
 //   void sleepMs(uint32_t ms);                           with the bus lock released
 //   uint32_t nowMs();
 // Replaces Adafruit_BNO055::begin(), whose waits (and an unbounded chip-id
 // loop after its reset) ran while the caller held the bus. Returns true with
 // the chip fusing in NDOF mode on the external crystal; false with
-// "Error: <reason>" in why.
+// "Error: <reason>" in why. No access or wait starts unless it ends (at its
+// worst case) inside kBno055InitDeadlineMs.
 template <typename Io>
 inline bool bno055StartSequence(Io& io, uint8_t bus, uint8_t address, char* why, size_t whyLen) {
   const uint32_t start = io.nowMs();
   auto elapsed = [&]() -> uint32_t { return io.nowMs() - start; };
+  auto fits = [&](uint32_t ms) { return elapsed() + ms <= kBno055InitDeadlineMs; };
   const bool hasWhy = why && whyLen;
-  // Poll the chip id until it reads kBno055ChipId or `untilMs` (since start)
-  // passes; a booting chip may not answer, or answer another id, for a while.
-  // Returns 1 when it reads the id, 0 when the last poll got no answer, -1
-  // when the last poll answered another id (in *seen).
+  auto busyWhy = [&](const char* what) {
+    if (hasWhy) snprintf(why, whyLen, "Error: I2C bus %u stayed busy, so the BNO055 at 0x%02X could not be started "
+                         "(%s). Run 'openimu' again.", (unsigned)bus, (unsigned)address, what);
+    return false;
+  };
+  auto lateWhy = [&](const char* what) {
+    if (hasWhy) snprintf(why, whyLen, "Error: The BNO055 at 0x%02X on bus %u did not finish starting in time (%s). "
+                         "Run 'openimu' again.", (unsigned)address, (unsigned)bus, what);
+    return false;
+  };
+  // Poll the chip id until it reads kBno055ChipId or the next poll would end
+  // after `untilMs` (since start); a booting chip may not answer, or answer
+  // another id, for a while. Returns 1 when it reads the id, 0 when the last
+  // poll got no answer, -1 when the last poll answered another id (in *seen),
+  // -2 when the bus stayed busy.
   auto waitChipId = [&](uint32_t untilMs, uint8_t* seen) -> int {
     while (true) {
       uint8_t id = 0;
@@ -91,13 +128,23 @@ inline bool bno055StartSequence(Io& io, uint8_t bus, uint8_t address, char* why,
         if (id == kBno055ChipId) return 1;
         *seen = id;
         last = -1;
+      } else if (io.busy()) {
+        last = -2;
       }
-      if (elapsed() + kBno055PollEveryMs > untilMs) return last;
+      if (elapsed() + kBno055PollEveryMs + kBno055IoWorstMs > untilMs) return last;
       io.sleepMs(kBno055PollEveryMs);
     }
   };
-  auto step = [&](uint8_t reg, uint8_t value, const char* what) {
-    if (io.write(reg, value)) return true;
+  // One register write, tried again while the deadline leaves room for it
+  // and for `reserveMs` (the worst case of everything after it).
+  auto step = [&](uint8_t reg, uint8_t value, const char* what, uint32_t reserveMs) {
+    if (!fits(kBno055IoWorstMs + reserveMs)) return lateWhy(what);
+    while (true) {
+      if (io.write(reg, value)) return true;
+      if (!fits(kBno055StepRetryMs + kBno055IoWorstMs + reserveMs)) break;
+      io.sleepMs(kBno055StepRetryMs);
+    }
+    if (io.busy()) return busyWhy(what);
     if (hasWhy) {
       snprintf(why, whyLen, "Error: The BNO055 at 0x%02X on bus %u stopped answering (%s). Check its "
                "wiring, then 'openimu'.", (unsigned)address, (unsigned)bus, what);
@@ -107,6 +154,7 @@ inline bool bno055StartSequence(Io& io, uint8_t bus, uint8_t address, char* why,
 
   uint8_t seen = 0;
   int answer = waitChipId(kBno055BootWaitMs, &seen);
+  if (answer == -2) return busyWhy("chip id");
   if (answer == 0) {
     if (hasWhy) snprintf(why, whyLen, "Error: No BNO055 answers at 0x%02X on bus %u. Check the wiring, 'imubus' and "
                 "'imuaddress', then 'openimu'.", (unsigned)address, (unsigned)bus);
@@ -119,12 +167,13 @@ inline bool bno055StartSequence(Io& io, uint8_t bus, uint8_t address, char* why,
     return false;
   }
 
-  if (!step(kBno055RegOprMode, kBno055ModeConfig, "config mode")) return false;
+  if (!step(kBno055RegOprMode, kBno055ModeConfig, "config mode", kBno055AfterConfigMs)) return false;
   io.sleepMs(kBno055ConfigModeMs);
-  if (!step(kBno055RegSysTrigger, kBno055TriggerReset, "reset")) return false;
+  if (!step(kBno055RegSysTrigger, kBno055TriggerReset, "reset", kBno055AfterResetMs)) return false;
   io.sleepMs(kBno055ResetWaitMs);
-  const uint32_t tail = kBno055SettleMs + kBno055ClockMs + kBno055FusionModeMs;
-  answer = waitChipId(kBno055InitDeadlineMs - tail, &seen);
+  // The last poll ends with room for the whole tail at its worst case.
+  answer = waitChipId(kBno055InitDeadlineMs - kBno055TailMs, &seen);
+  if (answer == -2) return busyWhy("chip id after the reset");
   if (answer <= 0) {
     if (hasWhy) snprintf(why, whyLen, "Error: The BNO055 at 0x%02X on bus %u did not come back after its reset. Check its "
                 "power and wiring, then 'openimu'.", (unsigned)address, (unsigned)bus);
@@ -132,15 +181,16 @@ inline bool bno055StartSequence(Io& io, uint8_t bus, uint8_t address, char* why,
   }
   io.sleepMs(kBno055SettleMs);
 
-  if (!step(kBno055RegPwrMode, kBno055PowerNormal, "power mode")) return false;
-  if (!step(kBno055RegPageId, 0, "register page")) return false;
-  if (!step(kBno055RegSysTrigger, kBno055TriggerExtClock, "crystal")) return false;
+  if (!step(kBno055RegPwrMode, kBno055PowerNormal, "power mode", kBno055AfterPowerMs)) return false;
+  if (!step(kBno055RegPageId, 0, "register page", kBno055AfterPageMs)) return false;
+  if (!step(kBno055RegSysTrigger, kBno055TriggerExtClock, "crystal", kBno055AfterCrystalMs)) return false;
   io.sleepMs(kBno055ClockMs);
-  if (!step(kBno055RegOprMode, kBno055ModeNdof, "fusion mode")) return false;
+  if (!step(kBno055RegOprMode, kBno055ModeNdof, "fusion mode", kBno055AfterNdofMs)) return false;
   io.sleepMs(kBno055FusionModeMs);
 
   uint8_t mode = 0;
   if (!io.read(kBno055RegOprMode, &mode, 1) || mode != kBno055ModeNdof) {
+    if (io.busy()) return busyWhy("mode read-back");
     if (hasWhy) snprintf(why, whyLen, "Error: The BNO055 at 0x%02X on bus %u did not enter its fusion mode. Run "
                 "'openimu' again.", (unsigned)address, (unsigned)bus);
     return false;

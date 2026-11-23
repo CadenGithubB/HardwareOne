@@ -46,6 +46,20 @@ struct Feed {
   }
 };
 
+// imuaddress while the IMU runs: reads stay at the open address; the new
+// one counts once the IMU is closed (and so at the next open).
+static void testOpenAddressIsLatched() {
+  MotionOpenTarget target;
+  assert(motionActiveAddress(target, 0x28) == 0x28 && motionActiveBus(target, 1) == 1);
+  target.open = true;
+  target.bus = 1;
+  target.address = 0x28;
+  assert(motionActiveAddress(target, 0x29) == 0x28);  // imuaddress 0x29 saved while running
+  assert(motionActiveBus(target, 0) == 1);
+  target.open = false;
+  assert(motionActiveAddress(target, 0x29) == 0x29 && motionActiveBus(target, 0) == 0);
+}
+
 static void testOrientationCorrection() {
   MotionOrientationSettings settings;  // the defaults: off, mode 0
   assert(!settings.enabled && settings.mode == 0);
@@ -205,6 +219,7 @@ static void testWithoutEvents() {
 }
 
 int main() {
+  testOpenAddressIsLatched();
   testOrientationCorrection();
   testStartIsNotAShake();
   testRotationIsRadPerSecond();
@@ -215,7 +230,7 @@ int main() {
   testPoseDebounce();
   testSteps();
   testWithoutEvents();
-  std::puts("motion core: correction off by default and unclamped, rotation in rad/s, no shake at start, "
+  std::puts("motion core: open address latched, correction off by default and unclamped, rotation in rad/s, no shake at start, "
             "tap, free fall, tilt, pose debounce and steps passed");
   return 0;
 }

@@ -134,6 +134,18 @@ class PeripheralConfig(unittest.TestCase):
             with self.subTest(imu_device_type=value):
                 self.check_profile(dict(imu, IMU_DEVICE_TYPE=value), [], succeeds=False)
 
+    def test_build_config_accepts_only_imu_chip_values(self):
+        # The saved-selection tool refuses 0 (no chip) before a build would.
+        import sys
+        sys.path.insert(0, str(SOURCE.parents[1] / 'tools'))
+        import build_config
+        schema = build_config.choice_schema()['features']['IMU_DEVICE_TYPE']
+        self.assertEqual((schema['minimum'], schema['maximum']), (1, 2))
+        build_config.validate({'board': 'feathers3', 'features': {'IMU_DEVICE_TYPE': 1}})
+        for value in (0, 3):
+            with self.subTest(imu_device_type=value), self.assertRaises(ValueError):
+                build_config.validate({'board': 'feathers3', 'features': {'IMU_DEVICE_TYPE': value}})
+
     def test_imu_device_type_without_the_imu_is_rejected_in_a_saved_selection(self):
         # A saved configuration's chip choice has no effect without the IMU.
         board = SOURCE.parents[1] / 'boards/p4x_eye.features.h'

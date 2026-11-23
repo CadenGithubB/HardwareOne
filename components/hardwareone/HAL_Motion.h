@@ -81,8 +81,10 @@ extern TaskHandle_t gImuTaskHandle;
 // Internal function called by queue processor
 bool imuStartInternal();
 
-// The address the IMU opens (its imuAddress setting, through the backend's
-// rule), and the chip name of this build's backend ("BNO055").
+// The IMU's address: the one it was opened at while it is open (a changed
+// imuaddress applies at the next openimu), else its imuAddress setting
+// through the backend's rule; and the chip name of this build's backend
+// ("BNO055").
 uint8_t imuDeviceAddress();
 const char* imuBackendName();
 

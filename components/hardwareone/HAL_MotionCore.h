@@ -15,11 +15,30 @@
 // imuStartInternal() waits kMotionStartWaitMs for the IMU task's init. Every
 // backend's init ends by itself within kMotionInitBudgetMs (its own deadline,
 // waits outside the bus lock), so the start always reports the backend's own
-// reason and never a bare timeout while an init is still running.
-constexpr uint32_t kMotionStartWaitMs = 3000;
-constexpr uint32_t kMotionInitBudgetMs = 2500;
+// reason and never a bare timeout while an init is still running. The budget
+// counts the worst case of every bus access (a busy bus, a transfer that
+// times out), not only the nominal waits; a normal start takes under a second.
+constexpr uint32_t kMotionStartWaitMs = 4500;
+constexpr uint32_t kMotionInitBudgetMs = 4000;
 static_assert(kMotionInitBudgetMs + 200 <= kMotionStartWaitMs,
               "a backend init must end well inside the start wait");
+
+// ---- The open address ----------------------------------------------------------
+// While the IMU is open it reads, health-checks and claims the bus and
+// address it was opened at; a changed imuaddress applies at the next open
+// (as the ANO encoder's address does). Closed, the setting is what counts.
+struct MotionOpenTarget {
+  bool open = false;
+  uint8_t bus = 0;
+  uint8_t address = 0;
+};
+
+inline uint8_t motionActiveAddress(const MotionOpenTarget& target, uint8_t configured) {
+  return target.open ? target.address : configured;
+}
+inline uint8_t motionActiveBus(const MotionOpenTarget& target, uint8_t configured) {
+  return target.open ? target.bus : configured;
+}
 
 // Which backend filled a reading (ImuCache::backend). One backend per build
 // (IMU_DEVICE_TYPE in System_BuildConfig.h).

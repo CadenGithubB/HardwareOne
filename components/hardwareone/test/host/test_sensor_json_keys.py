@@ -48,7 +48,7 @@ INCLUDE = f'#include "{OWNER}"'
 KEYS = {
     'FIX': 'fix', 'QUALITY': 'quality', 'SATS': 'sats', 'LAT': 'lat', 'LON': 'lon',
     'ALT': 'alt', 'SPEED': 'speed',
-    'ORI': 'ori', 'YAW': 'yaw', 'PITCH': 'pitch', 'ROLL': 'roll', 'MAG': 'mag',
+    'ORI': 'ori', 'YAW': 'yaw', 'PITCH': 'pitch', 'ROLL': 'roll', 'MAG': 'mag', 'CAL': 'cal',
     'OBJECTS': 'objects', 'DISTANCE_MM': 'distance_mm', 'STATUS': 'status',
     'FREQUENCY': 'frequency', 'RSSI': 'rssi', 'STATION': 'station',
     'X': 'x', 'Y': 'y', 'BUTTONS': 'buttons', 'POS': 'pos', 'AXIS': 'axis',
@@ -63,7 +63,7 @@ SENDERS = [
       b',"fix":0,"quality":0,"sats":%d,"lat":0,"lon":0,"alt":0,"speed":0}']),
     # The body ends with "}" after the optional mag and cal parts (HAL_Motion.cpp).
     ('HAL_Motion.cpp', 'int imuBuildDataJson(',
-     {'ORI': 2, 'YAW': 1, 'PITCH': 1, 'ROLL': 1, 'MAG': 1},
+     {'ORI': 2, 'YAW': 1, 'PITCH': 1, 'ROLL': 1, 'MAG': 1, 'CAL': 1},
      [b',"accel":null,"gyro":null,"ori":null,"temp":null}',
       b',"accel":{"x":%.2f,"y":%.2f,"z":%.2f},"gyro":{"x":%.3f,"y":%.3f,"z":%.3f},'
       b'"ori":{"yaw":%.2f,"pitch":%.2f,"roll":%.2f},"temp":%d',

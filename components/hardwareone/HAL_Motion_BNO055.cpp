@@ -21,9 +21,9 @@ namespace {
 
 // The chip stretches the clock on some reads: 100 kHz, as before.
 constexpr uint32_t kClockHz = 100000;
-// Each start step waits at most this for the bus; a reading fails fast and
-// is retried at the next poll rather than waiting long.
-constexpr uint32_t kStepLockMs = 50;
+// Each start access waits at most kBno055StepLockMs for the bus (a busy
+// step is tried again inside the start's deadline, HAL_Motion_BNO055Core.h);
+// a reading fails fast and is retried at the next poll rather than waiting long.
 constexpr uint32_t kReadLockMs = 100;
 
 const MotionBackendInfo kInfo{kMotionBackendBno055, "BNO055", kClockHz};
@@ -52,23 +52,29 @@ TwoWire* wireFor(uint8_t bus) {
 
 // The start sequence's bus: one short transaction per register access. A
 // booting chip does not answer, so these do not count as device errors
-// (NACK-tolerant); the health record starts fresh once the chip is up.
+// (NACK-tolerant); the health record starts fresh once the chip is up. An
+// access whose operation never ran found the bus busy (lock timeout), which
+// the sequence reports apart from a chip that does not answer.
 struct StartIo {
   uint8_t bus;
   uint8_t address;
   TwoWire* wire;
+  bool lastBusy = false;
   bool read(uint8_t reg, uint8_t* out, uint8_t len) {
-    bool ok = false;
-    i2cTransactionNackTolerant(bus, address, kClockHz, kStepLockMs,
-                               [&]() { ok = readRegs(*wire, address, reg, out, len); });
+    bool ok = false, ran = false;
+    i2cTransactionNackTolerant(bus, address, kClockHz, kBno055StepLockMs,
+                               [&]() { ran = true; ok = readRegs(*wire, address, reg, out, len); });
+    lastBusy = !ran;
     return ok;
   }
   bool write(uint8_t reg, uint8_t value) {
-    bool ok = false;
-    i2cTransactionNackTolerant(bus, address, kClockHz, kStepLockMs,
-                               [&]() { ok = writeReg(*wire, address, reg, value); });
+    bool ok = false, ran = false;
+    i2cTransactionNackTolerant(bus, address, kClockHz, kBno055StepLockMs,
+                               [&]() { ran = true; ok = writeReg(*wire, address, reg, value); });
+    lastBusy = !ran;
     return ok;
   }
+  bool busy() const { return lastBusy; }
   void sleepMs(uint32_t ms) { vTaskDelay(pdMS_TO_TICKS(ms)); }
   uint32_t nowMs() { return millis(); }
 };
