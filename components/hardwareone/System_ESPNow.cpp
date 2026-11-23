@@ -769,9 +769,15 @@ bool v4_broadcast(uint8_t type, uint16_t flags, uint32_t msgId, const uint8_t* p
 // The periodic mesh HEARTBEAT to every active peer slot, with the per-peer
 // back-off (meshHeartbeatMinInterval); returns the heartbeats handed over.
 static int meshSendHeartbeats(const V4PayloadHeartbeat& base);
-// True while v4h_relay_data delivers an unwrapped inner frame (its synthetic
-// radio source is the origin): such a frame proves nothing about the direct link.
-extern bool gEspNowInRelayDelivery;
+// True while we are delivering a relayed frame to ourselves (v4h_relay_data
+// re-enters the dispatcher with a synthetic radio source: the origin). Read by
+// noteMeshPeerRxActivity and the two-way evidence (1.0 step 8), which must NOT
+// count such a frame as evidence that the originator is directly audible — it
+// isn't, that is why it came via a relay. Without this, one relayed TEXT would
+// mark the far peer "alive direct" and every subsequent send to it would go
+// straight into the void. Single-flag (not a counter) because nested relay
+// delivery is refused.
+bool gEspNowInRelayDelivery = false;
 // The per-peer heartbeat fields (echo, our RSSI of the peer) and the record of
 // the heartbeat's msgId for the peer's echo; then the send, sealed when a
 // session with the peer is ACTIVE, else group-tagged (1.0 step 8).
@@ -7778,13 +7784,8 @@ static V4Verdict v4h_file_cancel(const V4RxCtx& ctx) {
 // it just unwrapped (see the "synthetic source" note below).
 static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uint8_t* data, int len);
 
-// True while we are delivering a relayed frame to ourselves. Read by
-// noteMeshPeerRxActivity, which must NOT count such a frame as evidence that
-// the originator is directly audible — it isn't, that is why it came via a
-// relay. Without this, one relayed TEXT would mark the far peer "alive direct"
-// and every subsequent send to it would go straight into the void.
-// Single-flag (not a counter) because nested relay delivery is refused.
-bool gEspNowInRelayDelivery = false;
+// gEspNowInRelayDelivery (defined near the top of this file) is set while
+// v4h_relay_data delivers an unwrapped frame.
 
 // Channel follow, from the ACK branch: the ACK of this worker's last probe to
 // its master, matched on ackFor (1.0). The probe is group-tagged, so its ACK is
@@ -24301,7 +24302,7 @@ extern const CommandEntry espNowCommands[] = {
   { "espnowmessages", "Buffered message history as JSON: 'espnowmessages json [sinceSeq] [mac]' — async results of espnowremote/browse/fetch. Admin only: it carries remote command output.", true, cmd_espnow_messages, "Usage: espnowmessages [json] [<sinceSeq>] [<AA:BB:CC:DD:EE:FF>]" },
   
   // ---- ESP-NOW Mesh Configuration ----
-  { "espnowmeshstatus", "Show mesh peer health (heartbeats & ACKs).", false, cmd_espnow_meshstatus },
+  { "espnowmeshstatus", "Show mesh peer health: state (online/connecting/offline), two-way link, heartbeats.", false, cmd_espnow_meshstatus },
   { "espnowmeshmetrics", "Show multi-hop routing metrics (flood forwards, routed hops, drops, route churn).", false, cmd_espnow_meshmetrics },
   { "espnowmeshroutes", "Show the mesh route table: who this node can reach and via which neighbour.", false, cmd_espnow_meshroutes, "Usage: espnowmeshroutes [clear]\n       'via (direct)' = in radio range. Anything else is reached over one or more relay hops.\n       Multi-hop routes are learned from neighbours every 30s — allow a minute after boot." },
   { "espnowmeshes", "Manage multi-mesh slots: 'espnowmeshes [list|add|remove|delete|enable|setdefault|rename] ...'.", true, cmd_espnow_meshes, "Usage: espnowmeshes list\n       espnowmeshes add <label>          (then set passphrase via 'espnowsetpassphrase <label> <pw>')\n       espnowmeshes remove <label>       (disables it; the slot is kept)\n       espnowmeshes delete <label>       (frees the slot; unpair its devices first)\n       espnowmeshes enable <label>\n       espnowmeshes setdefault <label>\n       (set or clear its passphrase with 'espnowsetpassphrase <label> <passphrase|clear>')\n       espnowmeshes rename <oldLabel> <newLabel>" },
