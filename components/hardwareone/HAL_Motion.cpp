@@ -923,8 +923,8 @@ const char* cmd_imutapringms(const String& argsInput) {
 // The knock trace: every recent knock the software detector saw, how hard
 // and how long it was, and why it did or did not count, with a hint per
 // kind of miss. Its own PSRAM buffer: the table outgrows the debug buffer.
-static char* sTapTraceBuf = nullptr;
 static constexpr size_t kTapTraceBufLen = 4096;
+EXT_RAM_BSS_ATTR static char sTapTraceBuf[kTapTraceBufLen];
 
 const char* cmd_imutaptrace(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
@@ -936,8 +936,6 @@ const char* cmd_imutaptrace(const String& argsInput) {
     return "[IMU] Knock trace cleared.";
   }
   if (text.length() > 0 && !json) return "Error: invalid arguments — Usage: imutaptrace [json|clear]";
-  if (!sTapTraceBuf) sTapTraceBuf = (char*)ps_alloc(kTapTraceBufLen, AllocPolicy::PreferPsram, "imu.taptrace");
-  if (!sTapTraceBuf) return kCommandReplyOutOfMemory;
   EXT_RAM_BSS_ATTR static knock::Trace tr;  // PSRAM: too big for the command task's stack
   knock::Config cfg;
   const bool software = motionBackendKnockTrace(tr, cfg);
