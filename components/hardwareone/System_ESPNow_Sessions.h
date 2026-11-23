@@ -394,6 +394,12 @@ void sendStatusRegister(uint32_t msgId, const uint8_t peerMac[6]);
 // Match key is (msgId AND peerMac). No-op if no matching PENDING entry.
 void sendStatusMarkDelivered(uint32_t msgId, const uint8_t srcMac[6]);
 
+// Mark the matching tracked send FAILED because the peer answered it with a
+// sealed ACK carrying a status (a refusal, 1.0). Unlike sendStatusMarkFailed
+// it also counts the answer as proof that the session is alive (it clears the
+// no-answer run, as a delivery does): only silence counts toward a re-open.
+void sendStatusMarkRefused(uint32_t msgId, const uint8_t srcMac[6]);
+
 // Mark a tracked send as FAILED. Called from the pending-frame timeout sweep
 // when a queued encrypted frame gets dropped (handshake never completed).
 void sendStatusMarkFailed(uint32_t msgId, const uint8_t peerMac[6]);

@@ -897,6 +897,17 @@ void sendStatusMarkDelivered(uint32_t msgId, const uint8_t srcMac[6]) {
   sessionNoteSendResult(s->peerMac, /*delivered=*/true);  // a real ACK → session healthy, clear the run
 }
 
+void sendStatusMarkRefused(uint32_t msgId, const uint8_t srcMac[6]) {
+  if (!gSendStatus || msgId == 0 || !srcMac) return;
+  SendStatus* s = findByMsgId(msgId);
+  if (!s || s->state != SEND_STATUS_PENDING) return;
+  if (memcmp(s->peerMac, srcMac, 6) != 0) return;
+  s->state        = SEND_STATUS_FAILED;
+  s->resolvedAtMs = (uint32_t)millis();
+  espnowUpdateSentDeliveryState(s->peerMac, msgId, SEND_STATUS_FAILED);
+  sessionNoteSendResult(s->peerMac, /*delivered=*/true);  // an answer: the session is alive
+}
+
 void sendStatusMarkFailed(uint32_t msgId, const uint8_t peerMac[6]) {
   if (!gSendStatus || msgId == 0) return;
   SendStatus* s = findByMsgId(msgId);

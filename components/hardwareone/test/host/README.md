@@ -4668,8 +4668,13 @@ now expect the plaintext gate (and use tagged frames where a frame must arrive).
 TOPO_* is tagged. `espnow_session_rekey` C34: a six-fragment send across a rekey the receiver starts completes
 (the receiver seals only ACKs while REKEYING; an ACK sealed under the old key opens with the kept previous key);
 C2 and `espnow_rekey_retry` c1: the REKEY carries no ACK_REQ. `espnow_session_replay` compiles the seal through
-`sessionWrapImpl`. `espnow_tx_multiframe` J: 16 ACK jobs fit the PSRAM pool, the 17th is counted as dropped,
-the dispatcher sends each with its class and session and the slots come back (also through `stop()`).
+`sessionWrapImpl`. `espnow_tx_multiframe` J: ACKs have their own queue of 16 PSRAM slots; 16 fit, the 17th
+is counted as dropped, the dispatcher sends each with its class and session, oldest first, and the slots come
+back (also through `stop()`); J2: with the job queue full an ACK is still queued and goes out before every
+queued job; J3: an ACK queued while the dispatcher runs a fragmented send goes out inside that send's ACK wait
+(`drainAcksOnDispatcher`, a no-op on other tasks; `espnow_rx_frontend` pins the call in the wait loop).
+After review: a sealed refusal ACK marks the tracked send failed through `sendStatusMarkRefused`, which also
+counts the session as alive (pinned); a relayed tagged ACK feeds no broadcast tracking.
 `espnow_channel_core` S5 pins the follow's ACK hook on `ackFor` and tagged ACKs only; `espnow_wire_layout` pins
 `V4PayloadAck` (8 bytes); `espnow_file_transfer` and `espnow_user_credentials` count `v4_queue_sealed_ack`.
 

@@ -85,12 +85,11 @@
 //   JOB_RAW          — v4_send_frame raw plaintext (broadcast, KEY_EX). Live;
 //                      dispatched in runJob alongside JOB_AEAD_SMART.
 //
-//   JOB_ACK          — one 8-byte ACK (1.0), sealed in the answered frame's
-//                      session (also while it is REKEYING) or group-tagged
-//                      (v4_emit_ack). Its payload lives in a fixed pool of
-//                      kAckPoolSlots in PSRAM, not a ps_alloc per ACK; an ACK
-//                      that finds no slot or no queue room is silence,
-//                      counted in Stats::ackDropped.
+//   ACKs (1.0) are not jobs: sendAck puts them in their own queue of
+//                      kAckPoolSlots fixed PSRAM slots, which the dispatcher
+//                      empties before every job (and inside a fragmented
+//                      send's ACK wait, drainAcksOnDispatcher). A full pool
+//                      is silence, counted in Stats::ackDropped.
 //
 // COMPLETION SEMANTICS
 // --------------------
@@ -114,13 +113,9 @@ enum JobKind : uint8_t {
   JOB_AEAD_SMART = 0,    // -> v4_send_payload_smart  (encrypted, auto-session)
   JOB_RAW        = 1,    // -> v4_send_frame          (plaintext single frame:
                          //    KEY_EX handshake, plaintext broadcasts). FF×6 dst ok.
-  JOB_ACK        = 2,    // -> v4_emit_ack (sealed or tagged ACK; see sendAck).
-                         //    flags = the class (SESSION_FRAME or BROADCAST_AUTH),
-                         //    msgId = the session id of a sealed ACK, payload =
-                         //    an ACK pool slot (never free()d).
 };
 
-// ACK jobs in flight at once (their 8-byte payloads, PSRAM).
+// ACKs queued at once (fixed slots in PSRAM; sendAck).
 static constexpr uint8_t kAckPoolSlots = 16;
 
 struct Job {
@@ -225,8 +220,17 @@ bool sendAead(const uint8_t mac[6], uint8_t type, uint16_t flags,
 // ESPNOW_V4_FLAG_SESSION_FRAME (sealed in session `sessionId` with `mac`) or
 // ESPNOW_V4_FLAG_BROADCAST_AUTH (group-tagged; sessionId unused). Non-blocking
 // and safe from espnow_task: the RX path calls it. Returns false (and counts
-// Stats::ackDropped) when the pool or the queue is full: the ACK is silence.
+// Stats::ackDropped) when all kAckPoolSlots are queued: the ACK is silence.
+// ACKs have their own queue: a full job queue never holds one back, and the
+// dispatcher sends them before its next job.
 bool sendAck(const uint8_t mac[6], uint16_t classFlag, uint16_t sessionId, const uint8_t ack[8]);
+
+// Send every queued ACK now when called on the dispatcher task (no-op on any
+// other task, where the dispatcher is free to send them itself). The
+// fragment-wait loop of v4_send_encrypted_chunked calls it, so a multi-frame
+// job run by the dispatcher does not hold this device's ACKs until it ends
+// (two devices doing that to each other would each wait out the other).
+void drainAcksOnDispatcher();
 
 // Blocking AEAD send. Returns true iff the dispatcher reported the wire send
 // succeeded within timeoutMs. Worst-case blocking is ~2 × timeoutMs (queue
@@ -251,7 +255,7 @@ struct Stats {
   uint32_t failed;        // wire send returned error (v4_send_* false)
   uint32_t dropped;       // submit() couldn't queue (queue full)
   uint32_t queueDepthHwm; // max queue depth observed at submit() time
-  uint32_t ackDropped;    // sendAck() found no pool slot or no queue room
+  uint32_t ackDropped;    // sendAck() found every ACK slot queued
 };
 void getStats(Stats* out);
 

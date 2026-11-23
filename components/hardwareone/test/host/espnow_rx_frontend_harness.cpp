@@ -304,7 +304,8 @@ static void noteHook(std::vector<AckHook>& v, const uint8_t* peer, uint32_t ackF
 }
 static void broadcast_tracker_record_ack(uint32_t ackFor, const uint8_t* src) { noteHook(gTrackerAcks, src, ackFor, false); }
 static void sendStatusMarkDelivered(uint32_t ackFor, const uint8_t* src) { noteHook(gDelivered, src, ackFor, true); }
-static void sendStatusMarkFailed(uint32_t ackFor, const uint8_t* src) { noteHook(gFailedSends, src, ackFor, true); }
+// A refusal (sealed ACK with a status): the send failed, the session answered.
+static void sendStatusMarkRefused(uint32_t ackFor, const uint8_t* src) { noteHook(gFailedSends, src, ackFor, true); }
 static void espnowAppPingNoteAck(const uint8_t* src, uint32_t ackFor, bool sealed) {
   noteHook(gPingAcks, src, ackFor, sealed);
 }
@@ -1595,7 +1596,7 @@ static void testAckWaiterMatching() {
   deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 511, ackPayload(510, 0, 1, espnowanswer::kBusy), 0, 1, 0));
   check("an ACK with a status reaches the waiter with that status (a refusal)",
         w->acked && w->status == espnowanswer::kBusy);
-  check("and marks a tracked send failed, not delivered",
+  check("and marks a tracked send refused (failed, session alive: sendStatusMarkRefused), not delivered",
         gFailedSends.size() == 1 && gDelivered.empty() && gFailedSends[0].ackFor == 510);
 
   reset(true);
@@ -1608,6 +1609,16 @@ static void testAckWaiterMatching() {
   check("a tagged ACK reaches the broadcast tracker and the follow hook as tagged, not the tracked sends",
         gTrackerAcks.size() == 1 && gTrackerAcks[0].ackFor == 523 && gDelivered.size() == 1 &&
         gFollowAcks.size() == 2 && !gFollowAcks[1].sealed && std::memcmp(gFollowAcks[1].peer, gPeerC, 6) == 0);
+
+  // A relayed tagged ACK always passes the origin check (the relay delivery
+  // sets the radio source to the inner origin); a tag proves only membership,
+  // so it feeds no broadcast tracking. The direct one does.
+  reset(true);
+  deliver(gRelayR, envelope(gRelayR, groupFrame(ESPNOW_V4_TYPE_ACK, gFar, 524, ackPayload(525)), 524));
+  check("a relayed tagged ACK reaches the follow hook but not the broadcast tracker",
+        gTrackerAcks.empty() && gFollowAcks.size() == 1 && std::memcmp(gFollowAcks[0].peer, gFar, 6) == 0);
+  deliver(gFar, groupFrame(ESPNOW_V4_TYPE_ACK, gFar, 526, ackPayload(525)));
+  check("the same ACK direct from its sender reaches the broadcast tracker", gTrackerAcks.size() == 1);
 
   reset(true);
   deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 530, Frame(7, 0)));

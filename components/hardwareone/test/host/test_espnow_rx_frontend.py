@@ -320,6 +320,16 @@ def main():
     for topo in ('TOPO_REQ', 'TOPO_START', 'TOPO_PEER'):
         if not re.search(r'v4_send_frame\(dst, ESPNOW_V4_TYPE_' + topo + r', ESPNOW_V4_FLAG_BROADCAST_AUTH,', source):
             failures.append(f'{topo} is not sent group-tagged')
+    # Review of step 5a: the ACKs queued while a fragmented send waits go out
+    # from inside the wait (on the dispatcher), and a refusal ACK counts the
+    # session as alive.
+    chunked = extract_block(source[source.rindex('bool v4_send_encrypted_chunked('):], 'bool v4_send_encrypted_chunked(')
+    wait = chunked[chunked.find('while ((millis() - waitStart) < ACK_TIMEOUT_MS)'):]
+    if 'espnowtx::drainAcksOnDispatcher();' not in wait[:wait.find('vTaskDelay')]:
+        failures.append('the fragment-wait loop of v4_send_encrypted_chunked does not send the queued ACKs')
+    refused = extract_block(read('System_ESPNow_Sessions.cpp'), 'void sendStatusMarkRefused(')
+    if 'SEND_STATUS_FAILED' not in refused or 'sessionNoteSendResult(s->peerMac, /*delivered=*/true)' not in refused:
+        failures.append('sendStatusMarkRefused does not mark the send failed and the session alive')
     for line in failures:
         print(f'FAIL: {line}')
     if failures:

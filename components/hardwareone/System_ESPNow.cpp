@@ -3587,6 +3587,9 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
       uint32_t waitStart = millis();
       uint8_t refusedStatus = 0;
       while ((millis() - waitStart) < ACK_TIMEOUT_MS) {
+        // On the dispatcher, send the ACKs queued meanwhile now: this
+        // device's answers to the peer must not wait for this send to end.
+        espnowtx::drainAcksOnDispatcher();
         if (ackWait->acked) {
           refusedStatus = ackWait->status;
           fragSent = refusedStatus == 0;
@@ -3755,7 +3758,7 @@ static bool v4_queue_sealed_ack(const uint8_t* dst, uint32_t ackFor) {
   return v4_queue_ack(dst, /*sealed=*/true, /*sessionId=*/0, ackFor, 0, 1, 0);
 }
 
-// Runs on the espnow_tx dispatcher (JOB_ACK). Builds the ACK frame with its own
+// Runs on the espnow_tx dispatcher (espnowtx::sendAck's queue). Builds the ACK frame with its own
 // msgId and sends it sealed or tagged, routed like any unicast (an ACK is
 // on the routed list; it is never flooded: ttl 1).
 bool v4_emit_ack(const uint8_t* dst, uint16_t classFlag, uint16_t sessionId, const uint8_t* ack) {
@@ -8730,7 +8733,9 @@ static bool v4_dispatch_table_try(const esp_now_recv_info* recv_info, const EspN
 //   - broadcast ACK tracking and the channel-follow probe are group-tagged
 //     sends: tagged ACKs only.
 // A tagged ACK proves mesh membership, not which member sent it, so it must at
-// least come from the device it names as its origin.
+// least come from the device it names as its origin. That binds a direct ACK
+// to its radio address only; a relayed one (gEspNowInRelayDelivery) always
+// passes, so it feeds no broadcast tracking.
 static void v4_rx_ack(const esp_now_recv_info* recv_info, const EspNowV4Header* h,
                       const uint8_t* payload, uint16_t payloadLen, bool sealed) {
   if (payloadLen != sizeof(V4PayloadAck)) {
@@ -8753,9 +8758,15 @@ static void v4_rx_ack(const esp_now_recv_info* recv_info, const EspNowV4Header* 
 
   if (sealed) {
     // Tracked sends (web chat bubble, power/forward status) are all sealed.
+    // A sealed ACK with a status is a refusal: the send failed, but the
+    // session answered, so it counts as alive (sendStatusMarkRefused).
     if (a.status == 0) sendStatusMarkDelivered(a.ackFor, peer);
-    else sendStatusMarkFailed(a.ackFor, peer);
-  } else {
+    else sendStatusMarkRefused(a.ackFor, peer);
+  } else if (!gEspNowInRelayDelivery) {
+    // Broadcast ACK tracking takes direct tagged ACKs only. A relayed one
+    // always passes the origin check above (the relay delivery sets the radio
+    // source to the inner origin), and a tag proves only mesh membership, so
+    // any member could name another one through a relay.
     broadcast_tracker_record_ack(a.ackFor, peer);
   }
 
