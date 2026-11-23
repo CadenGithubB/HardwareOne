@@ -948,10 +948,16 @@ const char* cmd_imutaptrace(const String& argsInput) {
   };
   if (json) {
     put("{\"schema\":1,\"detector\":%s,\"thresholdMg\":%u,\"maxMs\":%u,\"ringMs\":%u,\"total\":%lu,"
-        "\"counts\":{\"tap\":%lu,\"soft\":%lu,\"long\":%lu,\"ring\":%lu},\"knocks\":[",
+        "\"counts\":{\"tap\":%lu,\"soft\":%lu,\"long\":%lu,\"ring\":%lu},"
+        "\"feed\":{\"reads\":%lu,\"failed\":%lu,\"empty\":%lu,\"samples\":%lu,\"overruns\":%lu,"
+        "\"unread\":%u,\"pattern\":%u,\"lastMg\":[%d,%d,%d],\"jumpMg\":%u,\"inKnock\":%s},\"knocks\":[",
         software ? "true" : "false", (unsigned)cfg.thresholdMg, (unsigned)cfg.maxMs, (unsigned)cfg.ringMs,
         (unsigned long)tr.seq, (unsigned long)tr.counts[0], (unsigned long)tr.counts[1],
-        (unsigned long)tr.counts[2], (unsigned long)tr.counts[3]);
+        (unsigned long)tr.counts[2], (unsigned long)tr.counts[3], (unsigned long)tr.feed.reads,
+        (unsigned long)tr.feed.failedReads, (unsigned long)tr.feed.emptyReads, (unsigned long)tr.feed.samples,
+        (unsigned long)tr.feed.overruns, (unsigned)tr.feed.lastUnread, (unsigned)tr.feed.lastPattern,
+        tr.feed.lastMg[0], tr.feed.lastMg[1], tr.feed.lastMg[2], (unsigned)tr.feed.lastDevMg,
+        tr.feed.inKnock ? "true" : "false");
     for (uint8_t i = 0; software && i < tr.count; ++i) {
       const knock::Event& e = tr.at(i);
       put("%s{\"n\":%lu,\"peakMg\":%u,\"durMs\":%u,\"gapMs\":%d,\"v\":\"%s\"}", i ? "," : "",
@@ -970,6 +976,12 @@ const char* cmd_imutaptrace(const String& argsInput) {
   put("Since the clear: %lu knocks: %lu tap, %lu soft, %lu long, %lu ring\n", (unsigned long)tr.seq,
       (unsigned long)tr.counts[0], (unsigned long)tr.counts[1], (unsigned long)tr.counts[2],
       (unsigned long)tr.counts[3]);
+  put("FIFO: %lu reads (%lu failed, %lu empty), %lu samples, %lu overruns; last: %u unread, pattern %u\n",
+      (unsigned long)tr.feed.reads, (unsigned long)tr.feed.failedReads, (unsigned long)tr.feed.emptyReads,
+      (unsigned long)tr.feed.samples, (unsigned long)tr.feed.overruns, (unsigned)tr.feed.lastUnread,
+      (unsigned)tr.feed.lastPattern);
+  put("Now: accel %d, %d, %d mg; jump %u mg%s\n", tr.feed.lastMg[0], tr.feed.lastMg[1], tr.feed.lastMg[2],
+      (unsigned)tr.feed.lastDevMg, tr.feed.inKnock ? " (inside a knock)" : "");
   put("%s", "    #  peak mg  ms  gap ms  verdict\n");
   for (uint8_t i = 0; i < tr.count; ++i) {
     const knock::Event& e = tr.at(i);

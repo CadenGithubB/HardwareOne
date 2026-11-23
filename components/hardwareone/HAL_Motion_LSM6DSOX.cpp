@@ -106,49 +106,72 @@ void knockTraceClear() {
 // A failed read loses nothing the chip still holds.
 void readKnockFifo(TwoWire& wire, uint8_t bus, uint8_t address) {
   uint8_t buf[kLsm6ds3FifoMaxWordsPerRead * 2];
-  uint16_t take = 0, left = 0;
+  uint16_t take = 0, left = 0, unread = 0, pattern = 0;
   bool overrun = false;
   const bool ok = i2cTaskWithTimeout(bus, address, kClockHz, kReadLockMs, [&]() -> bool {
     uint8_t st[4];
     if (!readRegs(wire, address, kLsm6ds3RegFifoStatus1, st, sizeof(st))) return false;
     uint16_t diff = (uint16_t)(st[0] | ((st[1] & 0x07) << 8));
+    unread = diff;
     overrun = (st[1] & 0x40) != 0;
-    const uint16_t pattern = (uint16_t)(st[2] | ((st[3] & 0x03) << 8));
+    pattern = (uint16_t)(st[2] | ((st[3] & 0x03) << 8));
     // Line up on an X word: drop the rest of a partly read sample.
     const uint8_t skip = (uint8_t)((3 - pattern % 3) % 3);
-    if (skip) {
-      if (diff < skip) return true;
-      uint8_t junk[4];
-      if (!readRegs(wire, address, kLsm6ds3RegFifoDataOut, junk, (uint8_t)(skip * 2))) return false;
-      diff = (uint16_t)(diff - skip);
+    for (uint8_t i = 0; i < skip && diff > 0; ++i, --diff) {
+      uint8_t junk[2];
+      if (!readRegs(wire, address, kLsm6ds3RegFifoDataOut, junk, 2)) return false;
     }
     take = (uint16_t)(diff / 3 * 3);
     if (take > kLsm6ds3FifoMaxWordsPerRead) take = kLsm6ds3FifoMaxWordsPerRead;
     left = (uint16_t)(diff - take);
-    return take == 0 || readRegs(wire, address, kLsm6ds3RegFifoDataOut, buf, (uint8_t)(take * 2));
+    // One word per read (FIFO_DATA_OUT_L/H): no reliance on the address
+    // rolling back inside a burst.
+    for (uint16_t w = 0; w < take; ++w) {
+      if (!readRegs(wire, address, kLsm6ds3RegFifoDataOut, buf + 2 * w, 2)) return false;
+    }
+    return true;
   });
-  if (!ok || take == 0) return;
-  if (overrun) sState.knock.reset();  // samples were lost: start the baseline over
+  const uint16_t n = ok ? take / 3 : 0;
   const knock::Config cfg = knockConfig();
-  const uint16_t n = take / 3;
+  if (ok && overrun) sState.knock.reset();  // samples were lost: start the baseline over
   // The newest sample read is `left / 3` samples older than now.
   const uint32_t nowUs = (uint32_t)esp_timer_get_time();
   const uint32_t lastUs = nowUs - (uint32_t)(left / 3) * kLsm6ds3FifoSampleUs;
+  knock::Event evs[4];
+  uint8_t nev = 0;
+  int16_t lastRaw[3] = {0, 0, 0};
   for (uint16_t i = 0; i < n; ++i) {
     float mg[3];
-    for (int a = 0; a < 3; ++a) mg[a] = lsm4517Le16(buf + 6 * i + 2 * a) * kLsm6dsoxAccelMgPerLsb;
+    for (int a = 0; a < 3; ++a) {
+      lastRaw[a] = lsm4517Le16(buf + 6 * i + 2 * a);
+      mg[a] = lastRaw[a] * kLsm6dsoxAccelMgPerLsb;
+    }
     const uint32_t tUs = lastUs - (uint32_t)(n - 1 - i) * kLsm6ds3FifoSampleUs;
     knock::Event ev;
     if (!sState.knock.add(cfg, mg, tUs, ev)) continue;
     if (ev.verdict == knock::Verdict::Tap && sState.pendingTaps < 8) ++sState.pendingTaps;
-    portENTER_CRITICAL(&sKnockMux);
-    if (!sKnockTraceLive) {
-      sKnockTrace.clear();
-      sKnockTraceLive = true;
-    }
-    sKnockTrace.push(ev);
-    portEXIT_CRITICAL(&sKnockMux);
+    if (nev < 4) evs[nev++] = ev;
   }
+  portENTER_CRITICAL(&sKnockMux);
+  if (!sKnockTraceLive) {
+    sKnockTrace.clear();
+    sKnockTraceLive = true;
+  }
+  knock::Trace::Feed& f = sKnockTrace.feed;
+  ++f.reads;
+  if (!ok) ++f.failedReads;
+  if (ok && n == 0) ++f.emptyReads;
+  if (ok && overrun) ++f.overruns;
+  f.samples += n;
+  f.lastUnread = unread;
+  f.lastPattern = pattern;
+  if (n) {
+    for (int a = 0; a < 3; ++a) f.lastMg[a] = (int16_t)(lastRaw[a] * kLsm6dsoxAccelMgPerLsb);
+  }
+  f.lastDevMg = (uint16_t)(sState.knock.lastDevMg() > 65535 ? 65535 : sState.knock.lastDevMg());
+  f.inKnock = sState.knock.inKnock();
+  for (uint8_t i = 0; i < nev; ++i) sKnockTrace.push(evs[i]);
+  portEXIT_CRITICAL(&sKnockMux);
 }
 
 Lsm6TapTuning tapTuningFrom(uint32_t packed) {

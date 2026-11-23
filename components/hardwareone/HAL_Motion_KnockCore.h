@@ -53,6 +53,9 @@ constexpr uint16_t kMinStartMg = 60;     // the start level never goes below thi
 class Detector {
  public:
   void reset() { *this = Detector{}; }
+  // For the trace's live view: the latest jump, and whether a knock is open.
+  float lastDevMg() const { return lastDev_; }
+  bool inKnock() const { return inKnock_; }
 
   // One accelerometer sample in mg at time tUs (microseconds, wrapping). True
   // when a knock ended with this sample; `ev` then holds it.
@@ -71,6 +74,7 @@ class Detector {
       d2 += d * d;
     }
     const float dev = sqrtf(d2);
+    lastDev_ = dev;
     uint16_t startMg = cfg.thresholdMg / 2;
     if (startMg < kMinStartMg) startMg = kMinStartMg;
 
@@ -130,6 +134,7 @@ class Detector {
   bool inKnock_ = false;
   uint32_t startUs_ = 0, lastAboveUs_ = 0;
   float peak_ = 0;
+  float lastDev_ = 0;
   bool havePrev_ = false;
   uint32_t prevStartUs_ = 0;
   bool haveTap_ = false;
@@ -147,6 +152,15 @@ struct Trace {
   uint16_t softMaxMg = 0;   // the strongest soft knock
   uint16_t longMaxMs = 0;   // the longest long knock
   uint16_t ringMinMs = 0xFFFF;  // the closest ring knock to its tap (start gap)
+
+  // The stream feeding the detector (filled by the backend).
+  struct Feed {
+    uint32_t reads = 0, failedReads = 0, samples = 0, overruns = 0, emptyReads = 0;
+    uint16_t lastUnread = 0, lastPattern = 0;
+    int16_t lastMg[3] = {0, 0, 0};
+    uint16_t lastDevMg = 0;
+    bool inKnock = false;
+  } feed;
 
   void clear() { *this = Trace{}; }
   void push(Event e) {
