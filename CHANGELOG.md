@@ -102,11 +102,31 @@ everything user-visible since the v0.99.99.1 tag.
   detector's state instead of running it again on the same reading, and a start no longer reads as
   a shake (the detector's history starts from the first reading).
 
+### Added (IMU, Adafruit 4517)
+- The Adafruit 4517 (LSM6DSOX accelerometer and gyroscope + LIS3MDL magnetometer) is the IMU's second
+  chip: `IMU_DEVICE_TYPE 2`, and "Adafruit 4517 (LSM6DSOX + LIS3MDL) on I2C" in the guided setup's
+  "Motion sensor" choice. Register level, no library: each chip is one short bus transaction per
+  sample, a failed read counts towards auto-disable, and the start (identity, reset, configuration,
+  read-back) never holds the bus while it waits.
+- The firmware fuses the 4517 itself at 50 Hz (a Mahony filter written from the published
+  equations) after measuring the gyroscope's offset for about a second at `openimu`; the reading
+  readers see is refreshed every `imudevicepollms`, and the motion events see every sample. The
+  LSM6DSOX detects taps and free falls on the chip (latched, read with each sample), so a short
+  knock is not missed between samples.
+- First version: tilt, flip and tap. The magnetometer is read (`mag` in `imuread json`) but not
+  calibrated yet, so the yaw counts from the start (`imuread` says "Yaw (relative)") and there is no
+  magnetic heading (`docs/APP_JSON_CONTRACT.md`).
+- `imumagaddress [0x1C|0x1E]` (4517 builds) sets the magnetometer's address; `imuaddress` takes 0x6A
+  or 0x6B there. Both chips' addresses are checked against the other devices of the build by
+  `imuaddress`, `imumagaddress`, `imubus` and `openimu`.
+
 ### Changed (IMU)
 - The IMU is a motion layer with one backend per build (`HAL_Motion`): `IMU_DEVICE_TYPE` picks the
-  chip (1 = BNO055, the default; 2 = Adafruit 4517 LSM6DSOX + LIS3MDL, whose backend comes in a
-  later change and is refused by the build until then). The guided setup shows a "Motion sensor"
-  choice (None / BNO055 on I2C). The commands and settings keep their names.
+  chip (1 = BNO055, the default; 2 = Adafruit 4517 LSM6DSOX + LIS3MDL). The guided setup shows a
+  "Motion sensor" choice (None / BNO055 / Adafruit 4517). The commands and settings keep their names.
+- The `imu_orientation` and `imu_walking` events wait for the new state to hold for 3 readings and
+  at least 200 ms (the same as before at the BNO055's 200 ms poll; at the 4517's 50 Hz three
+  readings alone would be 60 ms).
 - `imuread json` (and the `imu` entry of `sensors json` and the ESP-NOW reading) adds `"mag":{x,y,z}`
   (µT) and `"cal"` (the chip's calibration byte) when the chip has them; the BNO055 has both
   (`docs/APP_JSON_CONTRACT.md`). `imuread` shows the magnetometer too.

@@ -31,6 +31,7 @@ struct MotionOpenTarget {
   bool open = false;
   uint8_t bus = 0;
   uint8_t address = 0;
+  uint8_t secondAddress = 0;  // a two-chip backend's second chip (the 4517's LIS3MDL), else 0
 };
 
 inline uint8_t motionActiveAddress(const MotionOpenTarget& target, uint8_t configured) {
@@ -38,6 +39,25 @@ inline uint8_t motionActiveAddress(const MotionOpenTarget& target, uint8_t confi
 }
 inline uint8_t motionActiveBus(const MotionOpenTarget& target, uint8_t configured) {
   return target.open ? target.bus : configured;
+}
+inline uint8_t motionActiveSecondAddress(const MotionOpenTarget& target, uint8_t configured) {
+  return target.open ? target.secondAddress : configured;
+}
+
+// ---- Sampling ------------------------------------------------------------------
+// A backend that fuses on the chip (the BNO055) is read once per
+// imuDevicePollMs. A backend the layer fuses (the 4517) is read at its fixed
+// period, the detector runs on every sample, and the cache (and so every
+// reader) is refreshed once per imuDevicePollMs.
+inline unsigned long motionSamplePeriodMs(uint16_t backendPeriodMs, unsigned long pollMs) {
+  return backendPeriodMs ? backendPeriodMs : pollMs;
+}
+// Publish this sample? The first one always; then once pollMs has passed,
+// within half a sample period (the reads jitter by a tick or two, so a
+// sample read every pollMs is published every time).
+inline bool motionPublishDue(bool publishedBefore, unsigned long lastPublishMs, unsigned long now,
+                             unsigned long pollMs, unsigned long sampleMs) {
+  return !publishedBefore || now - lastPublishMs + sampleMs / 2 >= pollMs;
 }
 
 // Which backend filled a reading (ImuCache::backend). One backend per build
@@ -138,6 +158,11 @@ struct MotionActionSample {
   float ax = 0, ay = 0, az = 0;
   float gx = 0, gy = 0, gz = 0;
   float pitch = 0, roll = 0;
+  // A backend whose chip detects taps / free falls itself (the 4517's
+  // LSM6DSOX, latched between samples) declares it (hasHw*); its flags then
+  // replace the software rule, which a 50 Hz read would miss a ~10 ms knock by.
+  bool hasHwTap = false, hwTap = false;
+  bool hasHwFreefall = false, hwFreefall = false;
 };
 
 // Thresholds. Rotation is compared in rad/s, the unit the gyro is stored in.
@@ -151,7 +176,13 @@ constexpr float kMotionFreefallAccel = 2.0f;         // m/s^2
 constexpr unsigned long kMotionFreefallEventMs = 150;
 constexpr float kMotionStepPeak = 12.0f, kMotionStepValley = 8.0f;
 constexpr unsigned long kMotionStepMinMs = 200, kMotionStepMaxMs = 2000;
-constexpr uint8_t kMotionDebounceSamples = 3;        // pose and walking events
+// Pose and walking events wait for the new state to hold for 3 samples and at
+// least 200 ms (at the BNO055's 200 ms poll, 3 samples; at the 4517's 50 Hz,
+// about 11).
+constexpr uint8_t kMotionDebounceSamples = 3;
+constexpr unsigned long kMotionDebounceMs = 200;
+// A chip-detected tap has no strength reading: it reports as full strength.
+constexpr float kMotionHwTapStrength = 1.0f;
 constexpr int kMotionHistory = 10;
 
 // Detector state: what the commands and the OLED page show, plus the
@@ -192,6 +223,7 @@ struct MotionActionState {
   bool walkPosted = false;      // the walking state the last event announced
   bool walkCandidate = false;
   uint8_t walkStable = 0;
+  unsigned long walkCandidateMs = 0;  // when the candidate state was first seen
 
   // 'P'ortrait, 'L'andscape, 'U'pside-down, 'R'everse landscape, 'F'ace-up, 'D'own
   char orientation = 'F';
@@ -200,6 +232,7 @@ struct MotionActionState {
   char posePosted = 0;          // the pose the last event announced (0: none yet)
   char poseCandidate = 0;
   uint8_t poseStable = 0;
+  unsigned long poseCandidateMs = 0;  // when the candidate pose was first seen
 
   float accelHistory[kMotionHistory] = {};
   int accelHistoryIndex = 0;
@@ -292,12 +325,14 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
     s.tiltDirection = 'N';
   }
 
-  // 3. Tap / knock: a sharp |accel| spike, at most one per 200 ms.
-  if (accelMag > kMotionTapAccel && (now - s.lastTapMs) > 200) {
+  // 3. Tap / knock: a sharp |accel| spike (or the chip's latched tap), at
+  // most one per 200 ms.
+  const bool tapSeen = in.hasHwTap ? in.hwTap : accelMag > kMotionTapAccel;
+  if (tapSeen && (now - s.lastTapMs) > 200) {
     s.tapDetected = true;
     s.lastTapMs = now;
     s.tapCount++;
-    s.tapStrength = fminf((accelMag - kMotionTapAccel) / 20.0f, 1.0f);
+    s.tapStrength = in.hasHwTap ? kMotionHwTapStrength : fminf((accelMag - kMotionTapAccel) / 20.0f, 1.0f);
     if (events) {
       char text[12];
       snprintf(text, sizeof(text), "%.2f", (double)s.tapStrength);
@@ -326,16 +361,21 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
   }
 
   // 5. Free fall: near-zero |accel|. The event waits 150 ms, because a shake
-  // drives |accel| through zero at each reversal.
-  if (accelMag < kMotionFreefallAccel) {
+  // drives |accel| through zero at each reversal. A chip that latched a free
+  // fall applied the same wait itself (the 4517: FF_DUR), so its flag posts
+  // at once, reported as at least that long.
+  const bool chipFall = in.hasHwFreefall && in.hwFreefall;
+  if (accelMag < kMotionFreefallAccel || chipFall) {
     if (!s.isFreefalling) s.freefallStartMs = now;
     s.isFreefalling = true;
     s.freefallDurationMs = (uint32_t)(now - s.freefallStartMs);
-    if (!s.freefallPosted && s.freefallDurationMs >= kMotionFreefallEventMs) {
+    if (!s.freefallPosted && (s.freefallDurationMs >= kMotionFreefallEventMs || chipFall)) {
       s.freefallPosted = true;
       if (events) {
         char text[16];
-        snprintf(text, sizeof(text), "%lums", (unsigned long)s.freefallDurationMs);
+        const uint32_t shown = s.freefallDurationMs >= kMotionFreefallEventMs
+                                   ? s.freefallDurationMs : (uint32_t)kMotionFreefallEventMs;
+        snprintf(text, sizeof(text), "%lums", (unsigned long)shown);
         events->add(MotionEventKind::Freefall, text);
       }
     }
@@ -372,12 +412,12 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
   }
   s.lastAccelMag = accelMag;
 
-  // Walking started/stopped once the new state held for 3 samples.
+  // Walking started/stopped once the new state held (kMotionDebounce*).
   if (s.isWalking == s.walkPosted) {
     s.walkStable = 0;
     s.walkCandidate = s.isWalking;
-  } else if (s.isWalking == s.walkCandidate) {
-    if (++s.walkStable >= kMotionDebounceSamples) {
+  } else if (s.isWalking == s.walkCandidate && s.walkStable > 0) {
+    if (++s.walkStable >= kMotionDebounceSamples && now - s.walkCandidateMs >= kMotionDebounceMs) {
       s.walkPosted = s.isWalking;
       s.walkStable = 0;
       if (events) {
@@ -389,6 +429,7 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
   } else {
     s.walkCandidate = s.isWalking;
     s.walkStable = 1;
+    s.walkCandidateMs = now;
   }
 
   // 7. Pose: the axis nearest vertical.
@@ -405,14 +446,14 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
     s.orientation = pose;
     s.lastOrientationChangeMs = now;
   }
-  // The pose event once the new pose held for 3 samples (it chatters at the
-  // 45-degree boundaries). The first sample seeds it without an event.
+  // The pose event once the new pose held (kMotionDebounce*: it chatters at
+  // the 45-degree boundaries). The first sample seeds it without an event.
   if (s.posePosted == 0) s.posePosted = pose;
   if (pose == s.posePosted) {
     s.poseStable = 0;
     s.poseCandidate = 0;
   } else if (pose == s.poseCandidate) {
-    if (++s.poseStable >= kMotionDebounceSamples) {
+    if (++s.poseStable >= kMotionDebounceSamples && now - s.poseCandidateMs >= kMotionDebounceMs) {
       const char previous = s.posePosted;
       s.posePosted = pose;
       s.poseStable = 0;
@@ -422,5 +463,6 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
   } else {
     s.poseCandidate = pose;
     s.poseStable = 1;
+    s.poseCandidateMs = now;
   }
 }

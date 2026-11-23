@@ -26,7 +26,7 @@ constexpr uint32_t kClockHz = 100000;
 // a reading fails fast and is retried at the next poll rather than waiting long.
 constexpr uint32_t kReadLockMs = 100;
 
-const MotionBackendInfo kInfo{kMotionBackendBno055, "BNO055", kClockHz};
+const MotionBackendInfo kInfo{kMotionBackendBno055, "BNO055", kClockHz, 0, nullptr};
 
 // Raw register access on a bus the caller holds through one transaction.
 bool readRegs(TwoWire& wire, uint8_t address, uint8_t reg, uint8_t* out, uint8_t len) {
@@ -84,8 +84,9 @@ struct StartIo {
 const MotionBackendInfo& motionBackendInfo() { return kInfo; }
 
 uint8_t motionBackendAddress(long savedSetting) { return bno055AddressFromSetting(savedSetting); }
+uint8_t motionBackendSecondAddress(long) { return 0; }  // one chip
 
-bool motionBackendInit(uint8_t bus, uint8_t address, char* why, size_t whyLen) {
+bool motionBackendInit(uint8_t bus, uint8_t address, uint8_t, char* why, size_t whyLen) {
   TwoWire* wire = wireFor(bus);
   if (!wire) {
     if (why && whyLen) {
@@ -103,7 +104,7 @@ bool motionBackendInit(uint8_t bus, uint8_t address, char* why, size_t whyLen) {
   return true;
 }
 
-bool motionBackendRead(uint8_t bus, uint8_t address, MotionSample& out) {
+bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t, MotionSample& out) {
   TwoWire* wire = wireFor(bus);
   if (!wire) return false;
   uint8_t data[kBno055DataBytes];

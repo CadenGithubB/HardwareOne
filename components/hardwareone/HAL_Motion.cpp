@@ -99,8 +99,11 @@ static MotionOpenTarget sImuOpen;
 
 // The imuAddress setting, through the backend's rule: what the next open uses.
 static uint8_t imuConfiguredAddress() { return motionBackendAddress(gSettings.imuAddress); }
+// A two-chip backend's second chip (the 4517's LIS3MDL, imuMagAddress); 0 for one chip.
+static uint8_t imuConfiguredMagAddress() { return motionBackendSecondAddress(gSettings.imuMagAddress); }
 // The address in use: the open one while the IMU is open, else the setting.
 uint8_t imuDeviceAddress() { return motionActiveAddress(sImuOpen, imuConfiguredAddress()); }
+uint8_t imuMagDeviceAddress() { return motionActiveSecondAddress(sImuOpen, imuConfiguredMagAddress()); }
 static uint8_t imuDeviceBus() { return motionActiveBus(sImuOpen, (uint8_t)gSettings.imuBus); }
 static void imuCloseTarget() { sImuOpen.open = false; }
 const char* imuBackendName() { return motionBackendInfo().part; }
@@ -127,7 +130,10 @@ const char* cmd_imu(const String& argsInput) {
     ImuCache reading;
     if (imuCacheSnapshot(reading, 100)) {
       if (reading.imuDataValid) {
-        BROADCAST_PRINTF("Orientation - Yaw: %.1f° Pitch: %.1f° Roll: %.1f°",
+        // Without a heading (the 4517 before its magnetometer calibration),
+        // yaw counts from the start.
+        BROADCAST_PRINTF("Orientation - Yaw%s: %.1f° Pitch: %.1f° Roll: %.1f°",
+                         reading.hasHeading ? "" : " (relative)",
                          reading.oriYaw, reading.oriPitch, reading.oriRoll);
         BROADCAST_PRINTF("Acceleration - X: %.2f Y: %.2f Z: %.2f m/s²",
                          reading.accelX, reading.accelY, reading.accelZ);
@@ -358,19 +364,26 @@ static bool imuInitBackend() {
   imuCloseTarget();
   const uint8_t bus = (uint8_t)gSettings.imuBus;
   const uint8_t address = imuConfiguredAddress();
-  // The imuAddress setting can also arrive by a settings write, which checks
-  // only its range: refuse an address another device of this build holds.
+  const uint8_t second = imuConfiguredMagAddress();
+  // The address settings can also arrive by a settings write, which checks
+  // only their range: refuse an address another device of this build holds
+  // (each chip's, for a two-chip backend).
   char clash[104];  // with the advice below, fits sImuInitWhy
   if (i2cAddressTakenBy(bus, address, I2C_DEVICE_IMU, 1, clash, sizeof(clash))) {
     snprintf(sImuInitWhy, sizeof(sImuInitWhy), "%s Change 'imuaddress' or 'imubus', then 'openimu'.", clash);
     return false;
   }
-  // From here the IMU claims this bus and address until it closes.
+  if (second != 0 && i2cAddressTakenBy(bus, second, I2C_DEVICE_IMU, 1, clash, sizeof(clash))) {
+    snprintf(sImuInitWhy, sizeof(sImuInitWhy), "%s Change 'imumagaddress' or 'imubus', then 'openimu'.", clash);
+    return false;
+  }
+  // From here the IMU claims this bus and these addresses until it closes.
   sImuOpen.bus = bus;
   sImuOpen.address = address;
+  sImuOpen.secondAddress = second;
   sImuOpen.open = true;
   INFO_IMU_LIFECYCLEF("Starting %s at 0x%02X on bus %u", imuBackendName(), (unsigned)address, (unsigned)bus);
-  if (!motionBackendInit(bus, address, sImuInitWhy, sizeof(sImuInitWhy))) {
+  if (!motionBackendInit(bus, address, second, sImuInitWhy, sizeof(sImuInitWhy))) {
     imuCloseTarget();
     if (!sImuInitWhy[0]) {
       snprintf(sImuInitWhy, sizeof(sImuInitWhy), "Error: The %s at 0x%02X on bus %u did not start.",
@@ -393,14 +406,15 @@ static MotionOrientationSettings imuOrientationSettings() {
   return settings;
 }
 
-// Store one sample, then run the action detector on it. Called by the IMU
-// task after a successful read.
-static void imuStoreSample(const MotionSample& sample) {
+// One ready sample: publish it to the cache when `publish` (once per
+// imuDevicePollMs), and run the action detector on it either way. Called by
+// the IMU task after each successful read. Returns whether it was published.
+static bool imuStoreSample(const MotionSample& sample, bool publish) {
   float pitch = sample.pitch, roll = sample.roll, yaw = sample.yaw;
   motionApplyOrientationCorrection(imuOrientationSettings(), pitch, roll, yaw);
 
   bool updated = false;
-  {
+  if (publish) {
     // Pattern 3: take/write/release, then run imuUpdateActions WITHOUT the lock
     // (it takes its own short lock).
     SensorCacheGuard g(sImuCacheMutex, pdMS_TO_TICKS(50), "imu.pollWrite");
@@ -431,11 +445,26 @@ static void imuStoreSample(const MotionSample& sample) {
     }
   }
   if (updated) {
-    imuUpdateActions(/*postEvents=*/true);
     DEBUG_IMU_VALUESF("IMU data updated");
-  } else {
+  } else if (publish) {
     DEBUG_IMU_POLLINGF("imu sample: cache lock busy - skipping update");
   }
+  // Every sample reaches the detector (a 150 ms fall is 7 samples at 50 Hz).
+  MotionActionSample actions;
+  actions.ax = sample.accel[0];
+  actions.ay = sample.accel[1];
+  actions.az = sample.accel[2];
+  actions.gx = sample.gyro[0];
+  actions.gy = sample.gyro[1];
+  actions.gz = sample.gyro[2];
+  actions.pitch = pitch;
+  actions.roll = roll;
+  actions.hasHwTap = sample.hasHwTap;
+  actions.hwTap = sample.hwTap;
+  actions.hasHwFreefall = sample.hasHwFreefall;
+  actions.hwFreefall = sample.hwFreefall;
+  imuUpdateActions(actions, /*postEvents=*/true);
+  return updated;
 }
 
 // JSON Building
@@ -503,23 +532,15 @@ int imuBuildDataJson(char* buf, size_t bufSize) {
 // IMU Action Detection
 // ============================================================================
 
-// Run the detector on the newest sample. Only the IMU task calls this, once
-// per sample; postEvents posts the imu_* events it finds.
-void imuUpdateActions(bool postEvents) {
+// Run the detector on one new sample (after the orientation correction).
+// Only the IMU task calls this, once per sample, published or not;
+// postEvents posts the imu_* events it finds.
+void imuUpdateActions(const MotionActionSample& sample, bool postEvents) {
   if (!gImuRunning || !gImuConnected) return;
   MotionEvents events;
   {
     SensorCacheGuard guard(sImuCacheMutex, pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS), "imu.actions");
-    if (!guard.held || !sImuCache.imuDataValid) return;
-    MotionActionSample sample;
-    sample.ax = sImuCache.accelX;
-    sample.ay = sImuCache.accelY;
-    sample.az = sImuCache.accelZ;
-    sample.gx = sImuCache.gyroX;
-    sample.gy = sImuCache.gyroY;
-    sample.gz = sImuCache.gyroZ;
-    sample.pitch = sImuCache.oriPitch;
-    sample.roll = sImuCache.oriRoll;
+    if (!guard.held) return;
     motionActionsUpdate(sImuActions, sample, millis(), postEvents ? &events : nullptr);
   }
   // Posted after the lock is released.
@@ -719,6 +740,48 @@ const char* cmd_imuaddress(const String& argsInput) {
   return getDebugBuffer();
 }
 
+#if ENABLE_IMU_LSM6DSOX
+// imumagaddress [addr]: the 4517's magnetometer (LIS3MDL), 0x1C or 0x1E, hex
+// or decimal. Refused when another device of this build holds it on the IMU
+// bus; it applies at the next openimu.
+const char* cmd_imumagaddress(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String text = argsInput;
+  text.trim();
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  const uint8_t configured = imuConfiguredMagAddress();
+  const bool openElsewhere = sImuOpen.open && sImuOpen.secondAddress != configured;
+  const char* part = motionBackendInfo().secondPart;
+  if (text.length() == 0) {
+    snprintf(getDebugBuffer(), 1024, "[IMU] %s address: 0x%02X on I2C%u%s", part, (unsigned)configured,
+             (unsigned)gSettings.imuBus + 1,
+             openElsewhere ? " (open at the old address until the next 'openimu')" : "");
+    return getDebugBuffer();
+  }
+  int address = 0;
+  if (!parseAddressArg(text, 0x08, 0x77, address) || motionBackendSecondAddress(address) != address) {
+    snprintf(getDebugBuffer(), 1024, "Error: That is not a %s address (%s). Read the address with 'i2cscan'.",
+             part, IMU_MAG_ADDRESS_CHOICES_TEXT);
+    return getDebugBuffer();
+  }
+  char why[112];
+  if (i2cAddressTakenBy((uint8_t)gSettings.imuBus, (uint8_t)address, I2C_DEVICE_IMU, 1, why, sizeof(why))) {
+    snprintf(getDebugBuffer(), 1024, "%s Use the chip's other address or put the IMU on the other bus ('imubus').",
+             why);
+    return getDebugBuffer();
+  }
+  setSetting(gSettings.imuMagAddress, address);
+  if (sImuOpen.open && sImuOpen.secondAddress != address) {
+    snprintf(getDebugBuffer(), 1024, "[IMU] %s address 0x%02X saved; it applies at the next 'openimu' (open at "
+             "0x%02X until then)", part, (unsigned)address, (unsigned)sImuOpen.secondAddress);
+  } else {
+    snprintf(getDebugBuffer(), 1024, "[IMU] %s address 0x%02X saved; it applies at the next 'openimu'", part,
+             (unsigned)address);
+  }
+  return getDebugBuffer();
+}
+#endif
+
 const char* cmd_imuautostart(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   String arg = argsInput;
@@ -764,7 +827,12 @@ const CommandEntry imuCommands[] = {
   { "imupitchoffset", "IMU pitch offset in degrees: <-180..180>", true, cmd_imupitchoffset, "Usage: imupitchoffset <-180..180>" },
   { "imurolloffset", "IMU roll offset in degrees: <-180..180>", true, cmd_imurolloffset, "Usage: imurolloffset <-180..180>" },
   { "imuyawoffset", "IMU yaw offset in degrees: <-180..180>", true, cmd_imuyawoffset, "Usage: imuyawoffset <-180..180>" },
-  { "imuaddress", "IMU I2C address (next openimu): [" IMU_ADDRESS_CHOICES_TEXT "]", true, cmd_imuaddress, "Usage: imuaddress [" IMU_ADDRESS_CHOICES_TEXT "]" },
+  // The help names both chips (one text for every build); a refused value
+  // names this build's addresses.
+  { "imuaddress", "IMU I2C address (next openimu): [addr] (BNO055 0x28|0x29, Adafruit 4517 0x6A|0x6B)", true, cmd_imuaddress, "Usage: imuaddress [addr]" },
+#if ENABLE_IMU_LSM6DSOX
+  { "imumagaddress", "IMU magnetometer I2C address (next openimu): [" IMU_MAG_ADDRESS_CHOICES_TEXT "]", true, cmd_imumagaddress, "Usage: imumagaddress [" IMU_MAG_ADDRESS_CHOICES_TEXT "]" },
+#endif
 
   // Auto-start
   { "imuautostart", "Enable/disable IMU auto-start after boot [on|off]", true, cmd_imuautostart, "Usage: imuautostart [on|off]" },
@@ -778,8 +846,9 @@ const size_t imuCommandsCount = sizeof(imuCommands) / sizeof(imuCommands[0]);
 // ============================================================================
 // IMU Task - FreeRTOS Task Function
 // ============================================================================
-// Purpose: starts the backend's chip, then reads one sample every
-// imuDevicePollMs and runs the action detector on it
+// Purpose: starts the backend's chip, then reads a sample every
+// imuDevicePollMs (or at the backend's fixed rate, 50 Hz for the 4517), runs
+// the action detector on each and refreshes the cache every imuDevicePollMs
 // Stack: 4096 BYTES (4 KB) | Priority: 1 | Core: I2C_SENSOR_CORE
 // Lifecycle: Created by imuStartInternal, deleted when gImuRunning=false
 //
@@ -795,6 +864,8 @@ void imuTask(void* parameter) {
                 (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   imuResetActions();
   unsigned long lastImuRead = 0;
+  unsigned long lastPublish = 0;
+  bool publishedOnce = false;
   unsigned long lastStackLog = 0;
   while (true) {
     // CRITICAL: Check enabled flag FIRST for graceful shutdown
@@ -845,29 +916,44 @@ void imuTask(void* parameter) {
       }
     }
 
-    // The bus and address the chip was opened at (a changed imuaddress or
+    // The bus and addresses the chip was opened at (a changed imuaddress or
     // imubus applies at the next openimu).
     const uint8_t imuBus = imuDeviceBus();
     if (gImuRunning && gImuConnected && !pollPaused(imuBus)) {
-      unsigned long imuPollMs = (gSettings.imuDevicePollMs > 0) ? (unsigned long)gSettings.imuDevicePollMs : 200;
+      // The cache is refreshed every imuDevicePollMs; the chip is read then,
+      // or at the backend's own fixed rate when the layer fuses its samples
+      // (the 4517: 50 Hz, every sample through the detector).
+      const unsigned long imuPollMs =
+          (gSettings.imuDevicePollMs > 0) ? (unsigned long)gSettings.imuDevicePollMs : 200;
+      const unsigned long sampleMs = motionSamplePeriodMs(motionBackendInfo().samplePeriodMs, imuPollMs);
       unsigned long nowMs = millis();
-      if (nowMs - lastImuRead >= imuPollMs) {
+      if (nowMs - lastImuRead >= sampleMs) {
         const uint8_t address = imuDeviceAddress();
+        const uint8_t second = imuMagDeviceAddress();
         MotionSample sample;
-        const bool result = motionBackendRead(imuBus, address, sample);
-        lastImuRead = nowMs;
-        if (result) imuStoreSample(sample);
+        const bool result = motionBackendRead(imuBus, address, second, sample);
+        // A fixed rate keeps its schedule; a late tick starts a new one.
+        lastImuRead = (nowMs - lastImuRead < 2 * sampleMs) ? lastImuRead + sampleMs : nowMs;
+        bool published = false;
+        if (result && sample.ready) {
+          const bool publish = motionPublishDue(publishedOnce, lastPublish, nowMs, imuPollMs, sampleMs);
+          published = imuStoreSample(sample, publish);
+          if (published) {
+            publishedOnce = true;
+            lastPublish = nowMs;
+          }
+        }
 
         // Mark OLED dirty if IMU page is active (enables real-time display updates)
 #if ENABLE_OLED_DISPLAY
-        if (result && currentOledMode == OLED_IMU_ACTIONS) {
+        if (published && currentOledMode == OLED_IMU_ACTIONS) {
           oledMarkDirty();
         }
 #endif
 
-        // Auto-disable if too many consecutive failures
+        // Auto-disable if too many consecutive failures (of either chip)
         if (!result) {
-          if (i2cShouldAutoDisable(address, imuBus)) {
+          if (i2cShouldAutoDisable(address, imuBus) || (second != 0 && i2cShouldAutoDisable(second, imuBus))) {
             ERROR_IMUF("Too many consecutive IMU failures - auto-disabling");
             noteSensorAutoDisabled(I2C_DEVICE_IMU);  // before the flag: see System_I2C.h
             gImuRunning = false;
@@ -879,7 +965,10 @@ void imuTask(void* parameter) {
 
         // ESP-NOW broadcaster reads imuBuildDataJson() on demand from sImuCache.
       }
-      vTaskDelay(pdMS_TO_TICKS(10));
+      // Sleep until the next sample is due, at most 10 ms (a stop is seen soon).
+      const unsigned long since = millis() - lastImuRead;
+      const unsigned long wait = since < sampleMs ? sampleMs - since : 1;
+      vTaskDelay(pdMS_TO_TICKS(wait < 10 ? wait : 10));
     } else {
       vTaskDelay(pdMS_TO_TICKS(50));
     }
@@ -891,11 +980,17 @@ void imuTask(void* parameter) {
 // ============================================================================
 
 static const char kImuAddressOptions[] = IMU_ADDRESS_OPTIONS;
+#if ENABLE_IMU_LSM6DSOX
+static const char kImuMagAddressOptions[] = IMU_MAG_ADDRESS_OPTIONS;
+#endif
 
 // Columns: jsonKey, type, valuePtr, intDefault, floatDefault, stringDefault, minVal, maxVal, label, options[, isSecret[, group, cmdKey]]
 static const SettingEntry imuSettingEntries[] = {
   { "imuAutoStart", SETTING_BOOL, &gSettings.imuAutoStart, 0, 0, nullptr, 0, 1, "Auto-start after boot", nullptr, false, nullptr, "imuautostart" },
   { "imuAddress", SETTING_INT, &gSettings.imuAddress, IMU_ADDRESS_DEFAULT, 0, nullptr, IMU_ADDRESS_MIN, IMU_ADDRESS_MAX, "I2C address (next openimu)", kImuAddressOptions, false, nullptr, "imuaddress" },
+#if ENABLE_IMU_LSM6DSOX
+  { "imuMagAddress", SETTING_INT, &gSettings.imuMagAddress, IMU_MAG_ADDRESS_DEFAULT, 0, nullptr, IMU_MAG_ADDRESS_MIN, IMU_MAG_ADDRESS_MAX, "Magnetometer I2C address (next openimu)", kImuMagAddressOptions, false, nullptr, "imumagaddress" },
+#endif
   { "imuPollingMs", SETTING_INT, &gSettings.imuPollingMs, 200, 0, nullptr, 50, 2000, "Polling (ms)", nullptr, false, "timing", "imupollingms" },
   { "imuEWMAFactor", SETTING_FLOAT, &gSettings.imuEwmaFactor, 0, 0.1f, nullptr, 0, 1, "EWMA Factor", nullptr, false, "timing", "imuewmafactor" },
   { "imuTransitionMs", SETTING_INT, &gSettings.imuTransitionMs, 100, 0, nullptr, 0, 1000, "Transition (ms)", nullptr, false, "timing", "imutransitionms" },

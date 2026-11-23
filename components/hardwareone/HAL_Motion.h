@@ -4,7 +4,8 @@
 // The device type stays I2C_DEVICE_IMU (feature "imu", commands "imu*"). One
 // backend per build, chosen by IMU_DEVICE_TYPE (System_BuildConfig.h):
 //   1 = BNO055        HAL_Motion_BNO055.cpp (fuses on the chip)
-//   2 = Adafruit 4517 (LSM6DSOX + LIS3MDL), a later backend
+//   2 = Adafruit 4517 HAL_Motion_LSM6DSOX.cpp (LSM6DSOX + LIS3MDL, fused here
+//                     with HAL_Motion_Fusion.h at 50 Hz)
 // HAL_Motion.cpp owns the cache, the task, the start/stop lifecycle, the JSON
 // builder, the action detector, the commands and the settings; a backend only
 // starts its chip and reads one sample (HAL_MotionBackend.h).
@@ -43,6 +44,7 @@ struct ImuCache {
 // Forward declarations
 class String;
 struct MotionActionState;
+struct MotionActionSample;
 
 // IMU watermark tracking
 extern volatile UBaseType_t gImuWatermarkMin;
@@ -71,6 +73,9 @@ const char* cmd_imupitchoffset(const String& argsInput);
 const char* cmd_imurolloffset(const String& argsInput);
 const char* cmd_imuyawoffset(const String& argsInput);
 const char* cmd_imuaddress(const String& argsInput);
+#if ENABLE_IMU_LSM6DSOX
+const char* cmd_imumagaddress(const String& argsInput);
+#endif
 
 // IMU state and control
 extern bool gImuRunning;
@@ -84,14 +89,18 @@ bool imuStartInternal();
 // The IMU's address: the one it was opened at while it is open (a changed
 // imuaddress applies at the next openimu), else its imuAddress setting
 // through the backend's rule; and the chip name of this build's backend
-// ("BNO055").
+// ("BNO055", "LSM6DSOX").
 uint8_t imuDeviceAddress();
+// A two-chip backend's second address the same way (the Adafruit 4517's
+// LIS3MDL, imuMagAddress); 0 when the backend has one chip.
+uint8_t imuMagDeviceAddress();
 const char* imuBackendName();
 
-// The action detector runs once per sample on the IMU task (postEvents: the
-// task posts the imu_* events). Other callers read its state with
-// imuActionsSnapshot() and never run it, so renders do not count as samples.
-void imuUpdateActions(bool postEvents = false);
+// The action detector runs once per sample on the IMU task, on every sample
+// whether or not it refreshes the cache (postEvents: the task posts the imu_*
+// events). Other callers read its state with imuActionsSnapshot() and never
+// run it, so renders do not count as samples.
+void imuUpdateActions(const MotionActionSample& sample, bool postEvents = false);
 bool imuActionsSnapshot(MotionActionState& out, uint32_t timeoutMs = 10);
 
 // JSON building
@@ -111,7 +120,11 @@ inline bool gImuConnected = false;
 inline unsigned long gImuLastStopTime = 0;
 inline TaskHandle_t gImuTaskHandle = nullptr;
 inline bool imuStartInternal() { return false; }
-inline void imuUpdateActions(bool postEvents = false) { (void)postEvents; }
+struct MotionActionSample;
+inline void imuUpdateActions(const MotionActionSample& sample, bool postEvents = false) {
+  (void)sample;
+  (void)postEvents;
+}
 inline bool imuCacheSnapshot(ImuCache& out, uint32_t timeoutMs = 10) {
   (void)timeoutMs;
   out = {};

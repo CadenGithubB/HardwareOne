@@ -52,6 +52,16 @@ def main() -> None:
     require(bno055 is not None, "the BNO055 row of i2cSensors")
     require(bno055[1] == "false" and int(bno055[2], 16) == 0,
             "the BNO055 row must not name an alternate address (imuAddress replaces it)")
+    # The Adafruit 4517's two chips: each row at its own address setting
+    # (imuAddress, imuMagAddress) with no alternate, so the walk claims both
+    # chips and only the configured addresses.
+    for name, address_at in (("LSM6DSOX", "IMU_ADDRESS"), ("LIS3MDL", "IMU_MAG_ADDRESS")):
+        row = re.search(r'\{ 0x[0-9A-Fa-f]+, "' + name + r'", "[^"]*", "ST", (\w+), (0x[0-9A-Fa-f]+),[^\n]*\n([^\n]*)',
+                        controller)
+        require(row is not None, f"the {name} row of i2cSensors")
+        require(row[1] == "false" and int(row[2], 16) == 0, f"the {name} row must not name an alternate address")
+        require(f", {address_at}, I2C_DEVICE_IMU }}" in row[3] and "ENABLE_IMU_LSM6DSOX" in row[3],
+                f"the {name} row is the 4517 build's IMU row at its address setting ({address_at})")
     harness = (HERE / "i2c_address_walk_harness.cpp").read_text()
     harness = (harness.replace("// INSERT_TYPES", "\n\n".join(types))
                .replace("// INSERT_PRODUCTION", "\n\n".join(production)))

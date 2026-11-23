@@ -58,6 +58,38 @@ static void testOpenAddressIsLatched() {
   assert(motionActiveBus(target, 0) == 1);
   target.open = false;
   assert(motionActiveAddress(target, 0x29) == 0x29 && motionActiveBus(target, 0) == 0);
+  // A two-chip backend's second address (the 4517's magnetometer) the same way.
+  target.open = true;
+  target.secondAddress = 0x1C;
+  assert(motionActiveSecondAddress(target, 0x1E) == 0x1C);
+  target.open = false;
+  assert(motionActiveSecondAddress(target, 0x1E) == 0x1E);
+}
+
+// The chip-fused backend (BNO055) is read every imuDevicePollMs; the 4517 at
+// its own 20 ms, publishing the first sample and then once per poll period.
+static void testSamplingAndPublish() {
+  assert(motionSamplePeriodMs(0, 200) == 200 && motionSamplePeriodMs(20, 200) == 20);
+  assert(motionPublishDue(false, 0, 5, 200, 20));          // the first sample
+  assert(!motionPublishDue(true, 1000, 1180, 200, 20));    // 9 samples in: not yet
+  assert(motionPublishDue(true, 1000, 1200, 200, 20));
+  // Read every poll period, a late previous read does not skip a sample.
+  assert(motionPublishDue(true, 1205, 1400, 200, 200));
+  assert(!motionPublishDue(true, 1205, 1300, 200, 200));
+  // At 50 Hz with a 200 ms poll, one sample in ten is published, also with
+  // the reads a tick late now and then.
+  unsigned long last = 0;
+  bool once = false;
+  int published = 0;
+  for (unsigned long tick = 1000; tick < 3000; tick += 20) {
+    const unsigned long now = tick + ((tick / 20) % 3 == 0 ? 1 : 0);
+    if (motionPublishDue(once, last, now, 200, 20)) {
+      once = true;
+      last = now;
+      ++published;
+    }
+  }
+  assert(published == 10);
 }
 
 static void testOrientationCorrection() {
@@ -176,21 +208,80 @@ static void testTilt() {
   assert(!feed.state.isTilted && feed.state.tiltDirection == 'N');
 }
 
+// At the BNO055's 200 ms poll: three samples in a row.
 static void testPoseDebounce() {
   Feed feed;
-  feed.run(still(), 3);
+  feed.run(still(), 3, 200);
   MotionActionSample down = still();
   down.az = -9.81f;
-  feed.run(down, 2);
+  feed.run(down, 2, 200);
   assert(feed.state.orientation == 'D' && feed.count(MotionEventKind::Orientation) == 0);
-  feed.run(still());  // back before it held: no event
-  feed.run(down, 2);
+  feed.run(still(), 1, 200);  // back before it held: no event
+  feed.run(down, 2, 200);
   assert(feed.count(MotionEventKind::Orientation) == 0);
-  feed.run(down);  // the third sample in a row
+  feed.run(down, 1, 200);  // the third sample in a row
   const MotionEvent* pose = feed.first(MotionEventKind::Orientation);
   assert(pose && std::strcmp(pose->subject, "face-down") == 0 && std::strcmp(pose->detail, "face-up") == 0);
-  feed.run(down, 10);
+  feed.run(down, 10, 200);
   assert(feed.count(MotionEventKind::Orientation) == 1);
+}
+
+// At the 4517's 50 Hz: three samples (60 ms) are not enough; the pose must
+// hold for 200 ms, so a brief wobble across a boundary posts nothing.
+static void testPoseDebounceAt50Hz() {
+  Feed feed;
+  feed.run(still(), 5);
+  MotionActionSample down = still();
+  down.az = -9.81f;
+  feed.run(down, 5);  // 0..80 ms
+  feed.run(still(), 1);
+  feed.run(down, 10);  // 0..180 ms
+  assert(feed.count(MotionEventKind::Orientation) == 0);
+  feed.run(down, 1);  // 200 ms after it was first seen
+  assert(feed.count(MotionEventKind::Orientation) == 1);
+  feed.run(down, 50);
+  assert(feed.count(MotionEventKind::Orientation) == 1);
+}
+
+// The 4517's latched single tap replaces the |accel| rule: a knock the 50 Hz
+// read missed still counts, and a spike without the flag does not.
+static void testHardwareTap() {
+  Feed feed;
+  MotionActionSample s = still();
+  s.hasHwTap = true;
+  feed.run(s, 5);
+  s.hwTap = true;  // latched since the last sample; |accel| looks still
+  feed.run(s);
+  const MotionEvent* tap = feed.first(MotionEventKind::Tap);
+  assert(tap && std::strcmp(tap->subject, "1.00") == 0 && feed.state.tapCount == 1);
+  feed.run(s);  // 20 ms later: inside the 200 ms lockout
+  assert(feed.state.tapCount == 1);
+  s.hwTap = false;
+  s.az = 40.0f;  // a spike, but the chip says no tap
+  feed.run(s, 15);
+  assert(feed.state.tapCount == 1);
+}
+
+// The chip's latched free fall (it already waited FF_DUR) posts at once.
+static void testHardwareFreefall() {
+  Feed feed;
+  MotionActionSample s = still();
+  s.hasHwFreefall = true;
+  feed.run(s, 5);
+  s.hwFreefall = true;  // a short drop the 50 Hz read caught only as the flag
+  feed.run(s);
+  const MotionEvent* fall = feed.first(MotionEventKind::Freefall);
+  assert(fall && std::strcmp(fall->subject, "150ms") == 0);
+  feed.run(s, 3);
+  assert(feed.count(MotionEventKind::Freefall) == 1);  // once per fall
+  s.hwFreefall = false;
+  feed.run(s);
+  assert(!feed.state.isFreefalling);
+  // Without the flag a near-zero reading still counts as falling (both rules).
+  MotionActionSample low = s;
+  low.az = 0.5f;
+  feed.run(low, 9);
+  assert(feed.count(MotionEventKind::Freefall) == 2);
 }
 
 static void testSteps() {
@@ -228,9 +319,13 @@ int main() {
   testFreefall();
   testTilt();
   testPoseDebounce();
+  testPoseDebounceAt50Hz();
+  testHardwareTap();
+  testHardwareFreefall();
+  testSamplingAndPublish();
   testSteps();
   testWithoutEvents();
   std::puts("motion core: open address latched, correction off by default and unclamped, rotation in rad/s, no shake at start, "
-            "tap, free fall, tilt, pose debounce and steps passed");
+            "tap, free fall, tilt, pose debounce (200 ms and 50 Hz), chip tap and free fall, sampling and steps passed");
   return 0;
 }

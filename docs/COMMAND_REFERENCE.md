@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1034 commands across 60 modules (1034 registry entries).
+1035 commands across 60 modules (1035 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -35,7 +35,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`servo`](#servo) — 6 commands
 - [`thermal`](#thermal) — 23 commands
 - [`tof`](#tof) — 10 commands
-- [`imu`](#imu) — 17 commands
+- [`imu`](#imu) — 18 commands
 - [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
 - [`anoencoder`](#anoencoder) — 6 commands
@@ -586,17 +586,18 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## imu
 
-> The IMU is the motion sensor on I2C; the build picks its chip (a BNO055, which fuses absolute orientation on the chip). openimu starts it, imuread reports yaw/pitch/roll (degrees) plus acceleration, gyroscope, magnetometer and chip temperature, and closeimu stops it; imuautostart [on|off] persists launching it at boot, imubus and imuaddress say where it is wired. Beyond raw orientation, imuactions runs gesture/event detection derived from the motion data: shake, tilt (with direction), tap/knock, rotation (with axis), freefall, a step counter with cadence, and screen-style orientation. Because the chip can be mounted in any pose, imuorientationmode <0..8> applies a fixed remap (flip pitch/roll/yaw, 90-degree rotations, upside-down fixes), imuorientationcorrection <0|1> toggles that correction, and imupitchoffset/imurolloffset/imuyawoffset trim each axis in degrees.
+> The IMU is the motion sensor on I2C; the build picks its chip (a BNO055 or an Adafruit 4517 LSM6DSOX + LIS3MDL). openimu starts it, imuread reports yaw/pitch/roll (degrees) plus acceleration, gyroscope, magnetometer and chip temperature, and closeimu stops it; imuautostart [on|off] persists launching it at boot, imubus and imuaddress say where it is wired. Beyond raw orientation, imuactions runs gesture/event detection derived from the motion data: shake, tilt (with direction), tap/knock, rotation (with axis), freefall, a step counter with cadence, and screen-style orientation. Because the chip can be mounted in any pose, imuorientationmode <0..8> applies a fixed remap (flip pitch/roll/yaw, 90-degree rotations, upside-down fixes), imuorientationcorrection <0|1> toggles that correction, and imupitchoffset/imurolloffset/imuyawoffset trim each axis in degrees.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `closeimu` | A | Stop the IMU (motion sensor). |
 | `imuactions` |  | Show IMU action detection state. |
-| `imuaddress` | A | IMU I2C address (next openimu): [0x28\|0x29]<br/>`Usage: imuaddress [0x28\|0x29]` |
+| `imuaddress` | A | IMU I2C address (next openimu): [addr] (BNO055 0x28\|0x29, Adafruit 4517 0x6A\|0x6B)<br/>`Usage: imuaddress [addr]` |
 | `imuautostart` | A | Enable/disable IMU auto-start after boot [on\|off]<br/>`Usage: imuautostart [on\|off]` |
 | `imubus` | A | Route the IMU to bus: <0\|1> (reboot required)<br/>`Usage: imuBus <0\|1>` |
 | `imudevicepollms` | A | IMU device poll interval: <50..1000><br/>`Usage: imuDevicePollMs <50..1000>` |
 | `imuewmafactor` | A | IMU EWMA smoothing: <0.0..1.0><br/>`Usage: imuewmafactor <0.0..1.0>` |
+| `imumagaddress` | A | IMU magnetometer I2C address (next openimu): [0x1C\|0x1E]<br/>`Usage: imumagaddress [0x1C\|0x1E]` |
 | `imuorientationcorrection` | A | IMU orientation correction: <0\|1><br/>`Usage: imuorientationcorrection <0\|1>` |
 | `imuorientationmode` | A | IMU orientation mode: <0..8><br/>`Usage: imuorientationmode <0..8>` |
 | `imupitchoffset` | A | IMU pitch offset in degrees: <-180..180><br/>`Usage: imupitchoffset <-180..180>` |

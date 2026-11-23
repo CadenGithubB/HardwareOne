@@ -21,6 +21,21 @@
 #define IMU_ADDRESS_OPTIONS BNO055_ADDRESS_OPTIONS
 #define IMU_ADDRESS_CHOICES_TEXT "0x28|0x29"
 #endif
+// The Adafruit 4517: the LSM6DSOX is the IMU's address (imuAddress), the
+// LIS3MDL its second address (imuMagAddress).
+#if ENABLE_IMU_LSM6DSOX
+#include "HAL_Motion_LSM6DSOXCore.h"
+#define IMU_ADDRESS_DEFAULT kLsm6dsoxAddressDefault
+#define IMU_ADDRESS_MIN kLsm6dsoxAddressDefault
+#define IMU_ADDRESS_MAX kLsm6dsoxAddressAlt
+#define IMU_ADDRESS_OPTIONS LSM6DSOX_ADDRESS_OPTIONS
+#define IMU_ADDRESS_CHOICES_TEXT "0x6A|0x6B"
+#define IMU_MAG_ADDRESS_DEFAULT kLis3mdlAddressDefault
+#define IMU_MAG_ADDRESS_MIN kLis3mdlAddressDefault
+#define IMU_MAG_ADDRESS_MAX kLis3mdlAddressAlt
+#define IMU_MAG_ADDRESS_OPTIONS LIS3MDL_ADDRESS_OPTIONS
+#define IMU_MAG_ADDRESS_CHOICES_TEXT "0x1C|0x1E"
+#endif
 
 // One sample in the ImuCache units (HAL_Motion.h): accel m/s^2, gyro rad/s,
 // mag uT, Euler degrees before the orientation correction, temp Celsius.
@@ -32,25 +47,41 @@ struct MotionSample {
   float temp = 0;
   bool hasMag = false, hasOrientation = false, hasHeading = false, hasCal = false;
   uint8_t cal = 0;
+  // The chip's own event engines (hasHw*): a latched single tap / free fall
+  // since the previous sample. The action detector takes them in place of
+  // its software rule (HAL_MotionCore.h).
+  bool hasHwTap = false, hwTap = false;
+  bool hasHwFreefall = false, hwFreefall = false;
+  // False while the backend is still starting (the 4517's gyro bias): the
+  // read worked, but there is nothing to publish or detect yet.
+  bool ready = true;
 };
 
 struct MotionBackendInfo {
-  uint8_t id;          // kMotionBackend* (HAL_MotionCore.h)
-  const char* part;    // chip name for replies and the device table ("BNO055")
-  uint32_t clockHz;    // bus clock of its transactions
+  uint8_t id;               // kMotionBackend* (HAL_MotionCore.h)
+  const char* part;         // chip name for replies and the device table ("BNO055")
+  uint32_t clockHz;         // bus clock of its transactions
+  // 0: one sample every imuDevicePollMs (the chip fuses on its own). Else the
+  // layer samples at this fixed period (the backend fuses each sample) and
+  // publishes the cache every imuDevicePollMs.
+  uint16_t samplePeriodMs;
+  const char* secondPart;   // a second chip's name ("LIS3MDL"), or nullptr
 };
 const MotionBackendInfo& motionBackendInfo();
 
-// The address imuAddress names for this backend (its rule for a saved value).
+// The address imuAddress names for this backend (its rule for a saved value),
+// and the second chip's from imuMagAddress (0: the backend has one chip).
 uint8_t motionBackendAddress(long savedSetting);
+uint8_t motionBackendSecondAddress(long savedSetting);
 
-// Bring the chip up at (bus, address). Ends within kMotionInitBudgetMs
-// (HAL_MotionCore.h). On failure, why holds "Error: <reason>".
-bool motionBackendInit(uint8_t bus, uint8_t address, char* why, size_t whyLen);
+// Bring the chip(s) up at (bus, address[, secondAddress]). Ends within
+// kMotionInitBudgetMs (HAL_MotionCore.h). On failure, why holds
+// "Error: <reason>".
+bool motionBackendInit(uint8_t bus, uint8_t address, uint8_t secondAddress, char* why, size_t whyLen);
 
-// One sample, in its own short transaction(s); false on any failed or short
-// read (the transaction records it for the health system).
-bool motionBackendRead(uint8_t bus, uint8_t address, MotionSample& out);
+// One sample, in its own short transaction(s), one per chip; false on any
+// failed or short read (the transaction records it for the health system).
+bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, MotionSample& out);
 
 // Release whatever the backend holds; the chip may already be gone.
 void motionBackendStop();
