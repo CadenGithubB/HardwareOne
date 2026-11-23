@@ -182,7 +182,7 @@
 // Motion sensor (IMU): which chip the IMU (CUSTOM_ENABLE_IMU, or I2C level 3)
 // is. Exactly one backend compiles in (HAL_Motion_*.cpp, guarded in the file).
 //   1 = BNO055          (9-axis with on-chip fusion, 0x28 or 0x29)
-//   2 = ADAFRUIT_4517   (LSM6DSOX + LIS3MDL; its backend is not in the firmware yet)
+//   2 = ADAFRUIT_4517   (LSM6DSOX 0x6A/0x6B + LIS3MDL 0x1C/0x1E, fused in the firmware)
 // A build without the IMU keeps 1.
 #define IMU_DEVICE_TYPE         1
 
@@ -717,9 +717,6 @@
 #define ENABLE_IMU_LSM6DSOX (ENABLE_IMU_SENSOR && IMU_DEVICE_TYPE == IMU_DEVICE_TYPE_ADAFRUIT_4517)
 #if ENABLE_IMU_SENSOR && !ENABLE_IMU_BNO055 && !ENABLE_IMU_LSM6DSOX
   #error "IMU_DEVICE_TYPE must be 1 (BNO055) or 2 (Adafruit 4517) when the IMU is in the build"
-#endif
-#if ENABLE_IMU_LSM6DSOX
-  #error "IMU_DEVICE_TYPE 2 (Adafruit 4517) has no backend in this firmware yet; use 1 (BNO055)"
 #endif
 // A saved chip choice without the IMU has no effect: reject it.
 #if defined(HW1_FEATURE_CONFIG_HEADER) && !ENABLE_IMU_SENSOR && IMU_DEVICE_TYPE != IMU_DEVICE_TYPE_BNO055

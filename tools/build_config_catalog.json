@@ -194,7 +194,8 @@
      "summary": "Orientation and acceleration from an IMU board on I2C.",
      "values": [
        {"title": "None", "set": {"CUSTOM_ENABLE_IMU": 0, "IMU_DEVICE_TYPE": 1}},
-       {"title": "BNO055 on I2C", "set": {"CUSTOM_ENABLE_IMU": 1, "IMU_DEVICE_TYPE": 1}}
+       {"title": "BNO055 on I2C", "set": {"CUSTOM_ENABLE_IMU": 1, "IMU_DEVICE_TYPE": 1}},
+       {"title": "Adafruit 4517 (LSM6DSOX + LIS3MDL) on I2C", "set": {"CUSTOM_ENABLE_IMU": 1, "IMU_DEVICE_TYPE": 2}}
      ]},
     {"id": "speech_model", "group": "advanced", "title": "Speech-to-text model",
      "summary": "The acoustic model of speech-to-text on the board. One model per build.",

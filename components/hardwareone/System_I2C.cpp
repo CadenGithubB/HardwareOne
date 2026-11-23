@@ -206,8 +206,10 @@ int discoveryCount = 0;
 // The IMU's address is a setting (imuAddress), read through the backend's rule.
 #if ENABLE_IMU_SENSOR
 #define IMU_ADDRESS [](uint8_t) -> uint8_t { return imuDeviceAddress(); }
+#define IMU_MAG_ADDRESS [](uint8_t) -> uint8_t { return imuMagDeviceAddress(); }
 #else
 #define IMU_ADDRESS nullptr
+#define IMU_MAG_ADDRESS nullptr
 #endif
 #if ENABLE_ENCODER
 #define ENCODER_BUS       [](uint8_t n) -> int { return encoderInstanceBus(n); }
@@ -221,11 +223,23 @@ int discoveryCount = 0;
 const I2cSensorEntry i2cSensors[] = {
   // Sensors with CLI Modules
   // { addr, name, desc, mfr, multiAddr, altAddr, heapBytes, library, headerGuard, module, clockHz, timeoutMs }
+#if ENABLE_IMU_LSM6DSOX
+  // The IMU's Adafruit 4517 backend (HAL_Motion_LSM6DSOX.cpp, register level:
+  // no library): two chips on the IMU's bus, each at its own address setting
+  // (imuAddress 0x6A|0x6B, imuMagAddress 0x1C|0x1E), so the collision walk
+  // claims both. Only the build's backend has rows.
+  { 0x6A, "LSM6DSOX", "Accel + gyro (Adafruit 4517)", "ST", false, 0x00, 0, NULL, NULL, "imu", 400000, 100,
+    ENABLE_IMU_LSM6DSOX, [](uint8_t) -> int { return gSettings.imuBus; }, IMU_ADDRESS, I2C_DEVICE_IMU },
+  { 0x1C, "LIS3MDL", "Magnetometer (Adafruit 4517)", "ST", false, 0x00, 0, NULL, NULL, "imu", 400000, 100,
+    ENABLE_IMU_LSM6DSOX, [](uint8_t) -> int { return gSettings.imuBus; }, IMU_MAG_ADDRESS, I2C_DEVICE_IMU },
+#else
   // The IMU's BNO055 backend (HAL_Motion_BNO055.cpp, register level: no library).
   // One address, the imuAddress setting (0x28 or 0x29): no alternate, so
   // discovery never counts a chip (or another device) at the other address.
+  // A build without the IMU keeps this row (not compiled) for the type's name.
   { 0x28, "BNO055", "9-DOF IMU", "Bosch", false, 0x00, 0, NULL, NULL, "imu", 100000, 300,
     ENABLE_IMU_BNO055, [](uint8_t) -> int { return gSettings.imuBus; }, IMU_ADDRESS, I2C_DEVICE_IMU },
+#endif
   { 0x39, "APDS9960", "RGB, Gesture & Proximity", "Adafruit", false, 0x00, 500, "Adafruit_APDS9960", "_ADAFRUIT_APDS9960_H_", "apds", 100000, 200,
     ENABLE_APDS_SENSOR, [](uint8_t) -> int { return gSettings.apdsBus; }, nullptr, I2C_DEVICE_APDS },
   { 0x29, "VL53L4CX", "ToF Distance (up to 6m)", "Adafruit", false, 0x00, 1000, "VL53L4CX", "_VL53L4CX_CLASS_H_", "tof", 400000, 250,
@@ -297,6 +311,7 @@ const I2cSensorEntry i2cSensors[] = {
 };
 
 #undef IMU_ADDRESS
+#undef IMU_MAG_ADDRESS
 #undef MATRIX_BUS
 #undef MATRIX_ADDRESS
 #undef ENCODER_BUS

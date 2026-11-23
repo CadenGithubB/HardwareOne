@@ -31,6 +31,7 @@ struct MotionOpenTarget {
   bool open = false;
   uint8_t bus = 0;
   uint8_t address = 0;
+  uint8_t secondAddress = 0;  // a two-chip backend's second chip (the 4517's LIS3MDL), else 0
 };
 
 inline uint8_t motionActiveAddress(const MotionOpenTarget& target, uint8_t configured) {
@@ -38,6 +39,25 @@ inline uint8_t motionActiveAddress(const MotionOpenTarget& target, uint8_t confi
 }
 inline uint8_t motionActiveBus(const MotionOpenTarget& target, uint8_t configured) {
   return target.open ? target.bus : configured;
+}
+inline uint8_t motionActiveSecondAddress(const MotionOpenTarget& target, uint8_t configured) {
+  return target.open ? target.secondAddress : configured;
+}
+
+// ---- Sampling ------------------------------------------------------------------
+// A backend that fuses on the chip (the BNO055) is read once per
+// imuDevicePollMs. A backend the layer fuses (the 4517) is read at its fixed
+// period, the detector runs on every sample, and the cache (and so every
+// reader) is refreshed once per imuDevicePollMs.
+inline unsigned long motionSamplePeriodMs(uint16_t backendPeriodMs, unsigned long pollMs) {
+  return backendPeriodMs ? backendPeriodMs : pollMs;
+}
+// Publish this sample? The first one always; then once pollMs has passed,
+// within half a sample period (the reads jitter by a tick or two, so a
+// sample read every pollMs is published every time).
+inline bool motionPublishDue(bool publishedBefore, unsigned long lastPublishMs, unsigned long now,
+                             unsigned long pollMs, unsigned long sampleMs) {
+  return !publishedBefore || now - lastPublishMs + sampleMs / 2 >= pollMs;
 }
 
 // Which backend filled a reading (ImuCache::backend). One backend per build
@@ -138,11 +158,26 @@ struct MotionActionSample {
   float ax = 0, ay = 0, az = 0;
   float gx = 0, gy = 0, gz = 0;
   float pitch = 0, roll = 0;
+  // A backend whose chip detects taps / free falls itself (the 4517's
+  // LSM6DSOX, latched between samples) declares it (hasHw*); its flags then
+  // replace the software rule, which a 50 Hz read would miss a ~10 ms knock by.
+  bool hasHwTap = false, hwTap = false;
+  bool hasHwFreefall = false, hwFreefall = false;
+  // The time between samples (ms; 0: 200). The shake window's slot is at
+  // least one sample long, so a slow poll still sees 10 samples.
+  uint16_t periodMs = 0;
 };
 
 // Thresholds. Rotation is compared in rad/s, the unit the gyro is stored in.
 constexpr float kMotionDegToRad = 0.017453292519943295f;
-constexpr float kMotionShakeVariance = 15.0f;        // (m/s^2)^2 over the last 10 samples
+// Shake: the variance of |accel| over every sample of the last 10 slots of
+// max(200 ms, one sample) each: 2 s whatever the rate (at the BNO055's 200 ms
+// poll, the last 10 samples as before; at the 4517's 50 Hz, about 100, so a
+// single knock and its ringing weigh a tenth as much and stay under the
+// threshold, while a sustained shake has the same variance at either rate).
+constexpr float kMotionShakeVariance = 15.0f;        // (m/s^2)^2
+constexpr int kMotionShakeSlots = 10;
+constexpr unsigned long kMotionShakeSlotMs = 200;
 constexpr float kMotionTiltDeg = 30.0f;
 constexpr float kMotionTapAccel = 25.0f;             // m/s^2
 constexpr float kMotionRotationDps = 100.0f;         // deg/s
@@ -151,8 +186,19 @@ constexpr float kMotionFreefallAccel = 2.0f;         // m/s^2
 constexpr unsigned long kMotionFreefallEventMs = 150;
 constexpr float kMotionStepPeak = 12.0f, kMotionStepValley = 8.0f;
 constexpr unsigned long kMotionStepMinMs = 200, kMotionStepMaxMs = 2000;
-constexpr uint8_t kMotionDebounceSamples = 3;        // pose and walking events
-constexpr int kMotionHistory = 10;
+// Walking needs at least two steps, each within kMotionStepMaxMs of the last
+// (one peak-and-valley is also what a knock's ringing looks like).
+constexpr uint32_t kMotionWalkMinSteps = 2;
+// After a chip-detected tap, the knock's own samples (spike and ringing) are
+// kept out of the shake window and the step detector for this long.
+constexpr unsigned long kMotionTapQuietMs = 150;
+// Pose and walking events wait for the new state to hold for 3 samples and at
+// least 200 ms (at the BNO055's 200 ms poll, 3 samples; at the 4517's 50 Hz,
+// about 11).
+constexpr uint8_t kMotionDebounceSamples = 3;
+constexpr unsigned long kMotionDebounceMs = 200;
+// A chip-detected tap has no strength reading: it reports as full strength.
+constexpr float kMotionHwTapStrength = 1.0f;
 
 // Detector state: what the commands and the OLED page show, plus the
 // detector's own history and debounce. One owner (the IMU task) updates it;
@@ -184,6 +230,7 @@ struct MotionActionState {
   bool isWalking = false;
   uint32_t stepCount = 0;
   unsigned long lastStepMs = 0;
+  unsigned long prevStepMs = 0;  // the step before lastStepMs
   float stepFrequency = 0;  // steps per minute, over the last minute
   float lastAccelMag = 0;
   bool stepPeakDetected = false;
@@ -192,6 +239,7 @@ struct MotionActionState {
   bool walkPosted = false;      // the walking state the last event announced
   bool walkCandidate = false;
   uint8_t walkStable = 0;
+  unsigned long walkCandidateMs = 0;  // when the candidate state was first seen
 
   // 'P'ortrait, 'L'andscape, 'U'pside-down, 'R'everse landscape, 'F'ace-up, 'D'own
   char orientation = 'F';
@@ -200,11 +248,68 @@ struct MotionActionState {
   char posePosted = 0;          // the pose the last event announced (0: none yet)
   char poseCandidate = 0;
   uint8_t poseStable = 0;
+  unsigned long poseCandidateMs = 0;  // when the candidate pose was first seen
 
-  float accelHistory[kMotionHistory] = {};
-  int accelHistoryIndex = 0;
-  bool historySeeded = false;   // the first sample fills the history
+  // The shake window: per slot, the sum and sum of squares of (|accel| - g)
+  // and the sample count; shakeSlot is the current slot's number (time /
+  // slot length), shakeSlotLenMs the slot length it was counted in.
+  float shakeSum[kMotionShakeSlots] = {};
+  float shakeSumSq[kMotionShakeSlots] = {};
+  uint16_t shakeSamples[kMotionShakeSlots] = {};
+  unsigned long shakeSlot = 0;
+  unsigned long shakeSlotLenMs = 0;  // 0: no sample yet
+
+  bool seeded = false;  // the first sample seeds lastAccelMag (a start is not a step)
+
+  // A chip-detected tap's quiet time (kMotionTapQuietMs).
+  bool tapQuiet = false;
+  unsigned long tapQuietStartMs = 0;
 };
+
+// Add |accel| at `now` to the shake window and return the window's variance.
+// A start is not a shake: the window holds only real samples.
+inline float motionShakeWindowAdd(MotionActionState& s, float accelMag, unsigned long now, uint16_t periodMs,
+                                  bool add) {
+  const unsigned long slotMs = periodMs > kMotionShakeSlotMs ? periodMs : kMotionShakeSlotMs;
+  const unsigned long slot = now / slotMs;
+  if (s.shakeSlotLenMs != slotMs) {
+    // First sample, or the poll period changed: start the window again.
+    for (int i = 0; i < kMotionShakeSlots; ++i) {
+      s.shakeSum[i] = s.shakeSumSq[i] = 0.0f;
+      s.shakeSamples[i] = 0;
+    }
+    s.shakeSlotLenMs = slotMs;
+    s.shakeSlot = slot;
+  } else if (slot != s.shakeSlot) {
+    // Clear the slots the window moved past (all of them after a long gap).
+    const unsigned long moved = slot - s.shakeSlot;
+    const unsigned long clear = moved < (unsigned long)kMotionShakeSlots ? moved : (unsigned long)kMotionShakeSlots;
+    for (unsigned long k = 1; k <= clear; ++k) {
+      const int i = (int)((s.shakeSlot + k) % kMotionShakeSlots);
+      s.shakeSum[i] = s.shakeSumSq[i] = 0.0f;
+      s.shakeSamples[i] = 0;
+    }
+    s.shakeSlot = slot;
+  }
+  if (add) {
+    const int i = (int)(slot % kMotionShakeSlots);
+    const float d = accelMag - 9.80665f;  // around g: the sums stay small
+    s.shakeSum[i] += d;
+    s.shakeSumSq[i] += d * d;
+    if (s.shakeSamples[i] < 0xFFFF) s.shakeSamples[i]++;
+  }
+  float sum = 0.0f, sumSq = 0.0f;
+  uint32_t n = 0;
+  for (int i = 0; i < kMotionShakeSlots; ++i) {
+    sum += s.shakeSum[i];
+    sumSq += s.shakeSumSq[i];
+    n += s.shakeSamples[i];
+  }
+  if (n == 0) return 0.0f;
+  const float mean = sum / (float)n;
+  const float variance = sumSq / (float)n - mean * mean;
+  return variance > 0.0f ? variance : 0.0f;
+}
 
 enum class MotionEventKind : uint8_t { Shake, Tap, Freefall, Walking, Orientation };
 struct MotionEvent {
@@ -244,21 +349,23 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
                                 unsigned long now, MotionEvents* events) {
   const float accelMag = sqrtf(in.ax * in.ax + in.ay * in.ay + in.az * in.az);
 
-  // History of |accel|; the first sample fills it, so a start is not a shake.
-  if (!s.historySeeded) {
-    for (float& value : s.accelHistory) value = accelMag;
+  if (!s.seeded) {
     s.lastAccelMag = accelMag;
-    s.historySeeded = true;
+    s.seeded = true;
   }
-  s.accelHistory[s.accelHistoryIndex] = accelMag;
-  s.accelHistoryIndex = (s.accelHistoryIndex + 1) % kMotionHistory;
 
-  // 1. Shake: variance of |accel| over the history.
-  float mean = 0.0f, variance = 0.0f;
-  for (float value : s.accelHistory) mean += value;
-  mean /= kMotionHistory;
-  for (float value : s.accelHistory) variance += (value - mean) * (value - mean);
-  variance /= kMotionHistory;
+  // A chip-detected tap starts a quiet time: the knock's own samples (the
+  // spike and its ringing) stay out of the shake window and the steps.
+  if (in.hasHwTap && in.hwTap) {
+    s.tapQuiet = true;
+    s.tapQuietStartMs = now;
+    s.stepPeakDetected = false;
+  } else if (s.tapQuiet && now - s.tapQuietStartMs > kMotionTapQuietMs) {
+    s.tapQuiet = false;
+  }
+
+  // 1. Shake: variance of |accel| over the last 2 s (motionShakeWindowAdd).
+  const float variance = motionShakeWindowAdd(s, accelMag, now, in.periodMs, !s.tapQuiet);
   const float intensity = fminf(variance / 50.0f, 1.0f);
   if (variance > kMotionShakeVariance) {
     if (!s.isShaking) {
@@ -292,12 +399,14 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
     s.tiltDirection = 'N';
   }
 
-  // 3. Tap / knock: a sharp |accel| spike, at most one per 200 ms.
-  if (accelMag > kMotionTapAccel && (now - s.lastTapMs) > 200) {
+  // 3. Tap / knock: a sharp |accel| spike (or the chip's latched tap), at
+  // most one per 200 ms.
+  const bool tapSeen = in.hasHwTap ? in.hwTap : accelMag > kMotionTapAccel;
+  if (tapSeen && (now - s.lastTapMs) > 200) {
     s.tapDetected = true;
     s.lastTapMs = now;
     s.tapCount++;
-    s.tapStrength = fminf((accelMag - kMotionTapAccel) / 20.0f, 1.0f);
+    s.tapStrength = in.hasHwTap ? kMotionHwTapStrength : fminf((accelMag - kMotionTapAccel) / 20.0f, 1.0f);
     if (events) {
       char text[12];
       snprintf(text, sizeof(text), "%.2f", (double)s.tapStrength);
@@ -326,16 +435,21 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
   }
 
   // 5. Free fall: near-zero |accel|. The event waits 150 ms, because a shake
-  // drives |accel| through zero at each reversal.
-  if (accelMag < kMotionFreefallAccel) {
+  // drives |accel| through zero at each reversal. A chip that latched a free
+  // fall applied the same wait itself (the 4517: FF_DUR), so its flag posts
+  // at once, reported as at least that long.
+  const bool chipFall = in.hasHwFreefall && in.hwFreefall;
+  if (accelMag < kMotionFreefallAccel || chipFall) {
     if (!s.isFreefalling) s.freefallStartMs = now;
     s.isFreefalling = true;
     s.freefallDurationMs = (uint32_t)(now - s.freefallStartMs);
-    if (!s.freefallPosted && s.freefallDurationMs >= kMotionFreefallEventMs) {
+    if (!s.freefallPosted && (s.freefallDurationMs >= kMotionFreefallEventMs || chipFall)) {
       s.freefallPosted = true;
       if (events) {
         char text[16];
-        snprintf(text, sizeof(text), "%lums", (unsigned long)s.freefallDurationMs);
+        const uint32_t shown = s.freefallDurationMs >= kMotionFreefallEventMs
+                                   ? s.freefallDurationMs : (uint32_t)kMotionFreefallEventMs;
+        snprintf(text, sizeof(text), "%lums", (unsigned long)shown);
         events->add(MotionEventKind::Freefall, text);
       }
     }
@@ -345,17 +459,23 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
     s.freefallPosted = false;
   }
 
-  // 6. Steps: a peak above 12 m/s^2 then a valley below 8 m/s^2.
-  if (accelMag > kMotionStepPeak && s.lastAccelMag < kMotionStepPeak) {
-    if (!s.stepPeakDetected && (now - s.lastStepMs) > kMotionStepMinMs) s.stepPeakDetected = true;
+  // 6. Steps: a peak above 12 m/s^2 then a valley below 8 m/s^2 (none in a
+  // tap's quiet time). Walking: at least two steps, each within
+  // kMotionStepMaxMs of the one before, the last one recent.
+  if (!s.tapQuiet) {
+    if (accelMag > kMotionStepPeak && s.lastAccelMag < kMotionStepPeak) {
+      if (!s.stepPeakDetected && (now - s.lastStepMs) > kMotionStepMinMs) s.stepPeakDetected = true;
+    }
+    if (accelMag < kMotionStepValley && s.stepPeakDetected) {
+      s.stepCount++;
+      s.prevStepMs = s.lastStepMs;
+      s.lastStepMs = now;
+      s.stepPeakDetected = false;
+      s.stepsInWindow++;
+    }
   }
-  if (accelMag < kMotionStepValley && s.stepPeakDetected) {
-    s.stepCount++;
-    s.lastStepMs = now;
-    s.stepPeakDetected = false;
-    s.stepsInWindow++;
-  }
-  if (s.stepCount > 0 && now - s.lastStepMs < kMotionStepMaxMs) {
+  const bool stepsInRow = s.stepCount >= kMotionWalkMinSteps && s.lastStepMs - s.prevStepMs < kMotionStepMaxMs;
+  if (stepsInRow && now - s.lastStepMs < kMotionStepMaxMs) {
     s.isWalking = true;
     if (now - s.stepWindowStartMs > 60000) {
       s.stepFrequency = (float)s.stepsInWindow;
@@ -372,12 +492,12 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
   }
   s.lastAccelMag = accelMag;
 
-  // Walking started/stopped once the new state held for 3 samples.
+  // Walking started/stopped once the new state held (kMotionDebounce*).
   if (s.isWalking == s.walkPosted) {
     s.walkStable = 0;
     s.walkCandidate = s.isWalking;
-  } else if (s.isWalking == s.walkCandidate) {
-    if (++s.walkStable >= kMotionDebounceSamples) {
+  } else if (s.isWalking == s.walkCandidate && s.walkStable > 0) {
+    if (++s.walkStable >= kMotionDebounceSamples && now - s.walkCandidateMs >= kMotionDebounceMs) {
       s.walkPosted = s.isWalking;
       s.walkStable = 0;
       if (events) {
@@ -389,6 +509,7 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
   } else {
     s.walkCandidate = s.isWalking;
     s.walkStable = 1;
+    s.walkCandidateMs = now;
   }
 
   // 7. Pose: the axis nearest vertical.
@@ -405,14 +526,14 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
     s.orientation = pose;
     s.lastOrientationChangeMs = now;
   }
-  // The pose event once the new pose held for 3 samples (it chatters at the
-  // 45-degree boundaries). The first sample seeds it without an event.
+  // The pose event once the new pose held (kMotionDebounce*: it chatters at
+  // the 45-degree boundaries). The first sample seeds it without an event.
   if (s.posePosted == 0) s.posePosted = pose;
   if (pose == s.posePosted) {
     s.poseStable = 0;
     s.poseCandidate = 0;
   } else if (pose == s.poseCandidate) {
-    if (++s.poseStable >= kMotionDebounceSamples) {
+    if (++s.poseStable >= kMotionDebounceSamples && now - s.poseCandidateMs >= kMotionDebounceMs) {
       const char previous = s.posePosted;
       s.posePosted = pose;
       s.poseStable = 0;
@@ -422,5 +543,6 @@ inline void motionActionsUpdate(MotionActionState& s, const MotionActionSample& 
   } else {
     s.poseCandidate = pose;
     s.poseStable = 1;
+    s.poseCandidateMs = now;
   }
 }

@@ -299,6 +299,7 @@ struct Settings {
       tofAutoStart(false),
       imuAutoStart(false),
       imuAddress(0x28),  // the BNO055 default; the imu module's schema default applies at boot
+      imuMagAddress(0x1C),  // the Adafruit 4517's LIS3MDL default (its schema default applies at boot)
       gpsAutoStart(false),
       fmRadioAutoStart(false),
       apdsAutoStart(false),
@@ -972,6 +973,7 @@ struct Settings {
   bool tofAutoStart;            // Auto-start ToF distance sensor after boot
   bool imuAutoStart;            // Auto-start IMU after boot
   int  imuAddress;              // IMU I2C address, the backend's rule (HAL_Motion: imuaddress)
+  int  imuMagAddress;           // Adafruit 4517 magnetometer address (HAL_Motion: imumagaddress)
   bool gpsAutoStart;            // Auto-start GPS after boot
   bool fmRadioAutoStart;        // Auto-start FM radio after boot
   bool apdsAutoStart;           // Auto-start APDS gesture/color sensor after boot

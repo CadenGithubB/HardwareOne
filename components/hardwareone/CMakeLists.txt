@@ -407,6 +407,7 @@ if(HW_CFG_I2C_FEATURE_LEVEL GREATER 0)
         i2csensor_pa1010d.cpp
         HAL_Motion.cpp
         HAL_Motion_BNO055.cpp
+        HAL_Motion_LSM6DSOX.cpp
         i2csensor_mlx90640.cpp
         i2csensor_vl53l4cx.cpp
         i2csensor_rda5807.cpp

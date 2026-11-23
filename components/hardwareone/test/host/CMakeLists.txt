@@ -28,11 +28,17 @@ target_compile_options(ano_encoder_core_tests PRIVATE -Wall -Wextra -Werror -ped
 
 # The motion (IMU) layer's pure rules (HAL_MotionCore.h): the orientation
 # correction, the action detector (rotation in rad/s, tap, free fall, steps,
-# pose debounce); and the BNO055 backend's bounded start sequence and decode
-# (HAL_Motion_BNO055Core.h) over a scripted chip.
+# pose debounce, the chip's tap / free-fall flags), the sampling rate; the
+# BNO055 backend's bounded start sequence and decode (HAL_Motion_BNO055Core.h)
+# over a scripted chip; the Adafruit 4517 backend's configuration bytes,
+# start sequence over two scripted chips and decode
+# (HAL_Motion_LSM6DSOXCore.h); and the layer's Mahony fusion on known poses
+# (HAL_Motion_Fusion.h).
 add_executable(motion_core_tests test_motion_core.cpp)
 add_executable(motion_bno055_core_tests test_motion_bno055_core.cpp)
-foreach(target motion_core_tests motion_bno055_core_tests)
+add_executable(motion_lsm6dsox_core_tests test_motion_lsm6dsox_core.cpp)
+add_executable(motion_fusion_tests test_motion_fusion.cpp)
+foreach(target motion_core_tests motion_bno055_core_tests motion_lsm6dsox_core_tests motion_fusion_tests)
   set_target_properties(${target} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
   target_include_directories(${target} PRIVATE ../..)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -pedantic)
@@ -1806,6 +1812,8 @@ add_test(NAME encoder_light_tests COMMAND encoder_light_tests)
 add_test(NAME ano_encoder_core_tests COMMAND ano_encoder_core_tests)
 add_test(NAME motion_core_tests COMMAND motion_core_tests)
 add_test(NAME motion_bno055_core_tests COMMAND motion_bno055_core_tests)
+add_test(NAME motion_lsm6dsox_core_tests COMMAND motion_lsm6dsox_core_tests)
+add_test(NAME motion_fusion_tests COMMAND motion_fusion_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
 add_test(NAME factory_wipe_policy_tests COMMAND factory_wipe_policy_tests)

@@ -320,8 +320,8 @@ static constexpr CommandModule gCommandModules[] = {
     "controls how often the firmware reads the hardware.", tofCommands,          &tofCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("tof"); } },
 #endif
 #if ENABLE_IMU_SENSOR
-  { "imu",        "IMU (motion sensor)", "The IMU is the motion sensor on I2C; the build picks its chip (a BNO055, "
-    "which fuses absolute orientation on the chip). openimu starts it, imuread reports "
+  { "imu",        "IMU (motion sensor)", "The IMU is the motion sensor on I2C; the build picks its chip (a BNO055 "
+    "or an Adafruit 4517 LSM6DSOX + LIS3MDL). openimu starts it, imuread reports "
     "yaw/pitch/roll (degrees) plus acceleration, gyroscope, magnetometer and chip "
     "temperature, and closeimu stops it; imuautostart [on|off] persists launching it at "
     "boot, imubus and imuaddress say where it is wired. Beyond raw orientation, imuactions runs "

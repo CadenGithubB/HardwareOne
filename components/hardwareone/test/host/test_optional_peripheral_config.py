@@ -129,8 +129,11 @@ class PeripheralConfig(unittest.TestCase):
                            ['ENABLE_IMU_SENSOR == 0', 'ENABLE_IMU_BNO055 == 0', 'ENABLE_IMU_LSM6DSOX == 0'])
         # Level 3 turns every sensor on: the default backend with it.
         self.check_profile(dict(self.profile(), I2C_FEATURE_LEVEL=3), ['ENABLE_IMU_BNO055 == 1'])
-        # Out of range with the IMU on, and the Adafruit 4517 before its backend lands.
-        for value in (0, 2, 3):
+        # The Adafruit 4517 (LSM6DSOX + LIS3MDL) backend.
+        self.check_profile(dict(imu, IMU_DEVICE_TYPE=2),
+                           ['ENABLE_IMU_SENSOR == 1', 'ENABLE_IMU_BNO055 == 0', 'ENABLE_IMU_LSM6DSOX == 1'])
+        # Out of range with the IMU on.
+        for value in (0, 3):
             with self.subTest(imu_device_type=value):
                 self.check_profile(dict(imu, IMU_DEVICE_TYPE=value), [], succeeds=False)
 

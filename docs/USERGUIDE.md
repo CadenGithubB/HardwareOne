@@ -69,7 +69,7 @@ When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABL
 | ---- | ------ |
 | `CUSTOM_ENABLE_OLED` | SSD1306 OLED display |
 | `CUSTOM_ENABLE_GAMEPAD` | Seesaw gamepad |
-| `CUSTOM_ENABLE_IMU` | IMU (motion sensor); `IMU_DEVICE_TYPE` picks the chip: 1 = BNO055 (default), 2 = Adafruit 4517 (its backend comes later) |
+| `CUSTOM_ENABLE_IMU` | IMU (motion sensor); `IMU_DEVICE_TYPE` picks the chip: 1 = BNO055 (default), 2 = Adafruit 4517 (LSM6DSOX + LIS3MDL; tilt, flip and tap, yaw relative to the start until the magnetometer calibration lands) |
 | `CUSTOM_ENABLE_TOF` | VL53L4CX Time-of-Flight |
 | `CUSTOM_ENABLE_THERMAL` | MLX90640 thermal camera |
 | `CUSTOM_ENABLE_APDS` | APDS9960 gesture/proximity/light |
@@ -931,7 +931,7 @@ setting, regardless of which setting it was.
 | `presence_detected` / `presence_cleared` | IR presence trip / cleared (held ~2s) | value |
 | `gesture` | APDS swipe detected | UP\|DOWN\|LEFT\|RIGHT |
 | `imu_shake` / `imu_tap` / `imu_freefall` | device shaken / knocked / dropped | intensity |
-| `imu_orientation` | stable orientation change (3-frame debounce) | new / previous |
+| `imu_orientation` | stable orientation change (held for 3 readings and at least 200 ms) | new / previous |
 | `gps_fix` / `gps_lost` | fix acquired / lost (lost held 10s) | sats / lat,lon |
 | `button` | gamepad or encoder button PRESS (releases not posted) | button name |
 | `fm_rds_station` | RDS station name identified | name / frequency |
@@ -2338,12 +2338,25 @@ imuorientationcorrection <0|1>  - Apply orientation correction
 imupitchoffset <-180..180>      - Pitch offset correction
 imurolloffset <-180..180>       - Roll offset correction
 imuyawoffset <-180..180>        - Yaw offset correction
-imuaddress [0x28|0x29]          - BNO055 address (0x29 with ADR high); next openimu
-imubus <0|1>                    - The bus the IMU is on
+imuaddress [addr]               - IMU address; next openimu (BNO055: 0x28, 0x29 with ADR
+                                  high; Adafruit 4517 LSM6DSOX: 0x6A, 0x6B with SA0 high)
+imumagaddress [0x1C|0x1E]       - Adafruit 4517 builds: the LIS3MDL magnetometer's address
+imubus <0|1>                    - The bus the IMU is on (both 4517 chips are checked)
 imuewmafactor <0.0-1.0>         - EWMA smoothing factor
 imutransitionms <0-1000>        - Transition time
 imuwebmaxfps <1-30>             - Web UI max frame rate
 ```
+
+With the Adafruit 4517 (`IMU_DEVICE_TYPE 2`: LSM6DSOX accelerometer and gyroscope, LIS3MDL
+magnetometer) the firmware fuses the readings itself at 50 Hz; `imudevicepollms` sets how often the
+reading readers see is refreshed, and the motion events see every sample. Keep the board still for
+about a second after `openimu`: the gyroscope's offset is measured then, and the first reading comes
+after it (a board that moved is measured again, for up to 5 s; after that the offset is left at zero
+and yaw drifts faster). Taps and drops are detected by the LSM6DSOX itself. `closeimu` powers both
+chips down. The magnetometer is read (`mag` in
+`imuread json`) but not calibrated yet, so yaw counts from the start and drifts slowly (`imuread`
+says "Yaw (relative)"); pitch and roll are absolute. Pitch is positive when the board's +X end
+rises, roll when its +Y edge rises, and yaw grows clockwise seen from above.
 </details>
 
 <details>
