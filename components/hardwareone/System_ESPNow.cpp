@@ -94,7 +94,7 @@
 #include "i2csensor_pa1010d.h"
 #endif
 #if ENABLE_BONDED_MODE && ENABLE_IMU_SENSOR
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #endif
 #if ENABLE_BONDED_MODE && ENABLE_OLED_INPUT
 #include "i2csensor_seesaw.h"
@@ -113,7 +113,7 @@
 #endif
 #include "WebServer_Server.h"
 
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_mlx90640.h"
 
 // Forward declaration — definition is further down near onEspNowRawRecv. Used

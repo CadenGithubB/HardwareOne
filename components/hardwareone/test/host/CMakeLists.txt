@@ -26,6 +26,18 @@ set_target_properties(ano_encoder_core_tests PROPERTIES CXX_STANDARD 17 CXX_STAN
 target_include_directories(ano_encoder_core_tests PRIVATE ../..)
 target_compile_options(ano_encoder_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
+# The motion (IMU) layer's pure rules (HAL_MotionCore.h): the orientation
+# correction, the action detector (rotation in rad/s, tap, free fall, steps,
+# pose debounce); and the BNO055 backend's bounded start sequence and decode
+# (HAL_Motion_BNO055Core.h) over a scripted chip.
+add_executable(motion_core_tests test_motion_core.cpp)
+add_executable(motion_bno055_core_tests test_motion_bno055_core.cpp)
+foreach(target motion_core_tests motion_bno055_core_tests)
+  set_target_properties(${target} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+  target_include_directories(${target} PRIVATE ../..)
+  target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -pedantic)
+endforeach()
+
 # Compiles the REAL header from the firmware tree, not a copy of it — the same
 # rule updater/test/host/CMakeLists.txt states. System_LLMUtf8.h is kept
 # dependency-free so this is possible; if it ever gains an Arduino or ESP-IDF
@@ -1780,6 +1792,8 @@ add_test(NAME sdmmc_lifecycle
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME encoder_light_tests COMMAND encoder_light_tests)
 add_test(NAME ano_encoder_core_tests COMMAND ano_encoder_core_tests)
+add_test(NAME motion_core_tests COMMAND motion_core_tests)
+add_test(NAME motion_bno055_core_tests COMMAND motion_bno055_core_tests)
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
 add_test(NAME factory_wipe_policy_tests COMMAND factory_wipe_policy_tests)

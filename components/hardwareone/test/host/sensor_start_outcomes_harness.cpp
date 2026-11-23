@@ -49,7 +49,14 @@ struct FakeDriver {
   int VL53L4CX_StopMeasurement() { ++scenario.hardwareStops; return 0; }
   void enableColor(bool enabled) { if (!enabled) ++scenario.hardwareStops; }
 };
-FakeDriver *gVL53L4CX = nullptr, *gBNO055 = nullptr, *gMLX90640 = nullptr, *gAPDS9960 = nullptr;
+FakeDriver *gVL53L4CX = nullptr, *gMLX90640 = nullptr, *gAPDS9960 = nullptr;
+// The IMU's backend keeps no driver object; a failed start releases it.
+constexpr unsigned long kMotionStartWaitMs = 4500;
+char sImuInitWhy[160];
+unsigned imuBackendStops = 0;
+void motionBackendStop() { ++imuBackendStops; }
+void imuCloseTarget() {}  // HAL_Motion: forget the open bus and address
+void broadcastOutput(const char*) {}
 template <typename T> void ps_delete(T* value) { delete value; }
 struct TwoWire {} wire;
 struct BusManager { TwoWire* getWire(uint8_t) { return &wire; } } bus;
@@ -182,8 +189,9 @@ std::array<Owner, 10> owners = {{
 }};
 
 void reset() {
-  delete gVL53L4CX; delete gBNO055; delete gMLX90640; delete gAPDS9960;
-  gVL53L4CX = gBNO055 = gMLX90640 = gAPDS9960 = nullptr;
+  delete gVL53L4CX; delete gMLX90640; delete gAPDS9960;
+  gVL53L4CX = gMLX90640 = gAPDS9960 = nullptr;
+  imuBackendStops = 0; sImuInitWhy[0] = '\0';
   gpsDestroyObject();
   for (auto& owner : owners) { owner.running = false; owner.connected = false; owner.handle = nullptr; }
   gApdsColorRunning = gApdsProximityRunning = gApdsGestureRunning = false;
@@ -228,7 +236,6 @@ void testEveryOwner() {
     reset();
     scenario.createTask = false;
     // Exercise release of a retained object when task allocation fails too.
-    if (std::strcmp(owner.name, "IMU") == 0) gBNO055 = new FakeDriver;
     if (std::strcmp(owner.name, "Thermal") == 0) gMLX90640 = new FakeDriver;
     assert(!owner.start());
     assert(!owner.running && !owner.connected && owner.handle == nullptr && scenario.creates == 1);
@@ -236,13 +243,12 @@ void testEveryOwner() {
     assert(!gApdsColorRunning && !gApdsProximityRunning && !gApdsGestureRunning);
     assert(!gImuInitRequested && !gThermalInitRequested && !fmRadioInitRequested);
     assert(!gThermalPendingFirstFrame && gThermalArmAtMs == 0);
-    assert(gVL53L4CX == nullptr && gBNO055 == nullptr && gMLX90640 == nullptr && gAPDS9960 == nullptr && gPA1010D == nullptr);
+    assert(gVL53L4CX == nullptr && gMLX90640 == nullptr && gAPDS9960 == nullptr && gPA1010D == nullptr);
     if (std::strcmp(owner.name, "ToF") == 0 || std::strcmp(owner.name, "APDS") == 0) {
       assert(scenario.destroyed == 1 && scenario.hardwareStops == 1);
     }
-    if (std::strcmp(owner.name, "IMU") == 0 || std::strcmp(owner.name, "Thermal") == 0) {
-      assert(scenario.destroyed == 1);
-    }
+    if (std::strcmp(owner.name, "IMU") == 0) assert(imuBackendStops == 1);
+    if (std::strcmp(owner.name, "Thermal") == 0) assert(scenario.destroyed == 1);
     if (std::strcmp(owner.name, "GPS") == 0) assert(scenario.destroyed == 1 && scenario.releases == 1);
     if (std::strcmp(owner.name, "FM") == 0) assert(scenario.hardwareStops == 1);
     if (std::strcmp(owner.name, "Gamepad") == 0) assert(scenario.cacheInvalidations == 1);
@@ -275,8 +281,11 @@ void testDeferredHandshakes() {
       scenario.handshake = outcome;
       assert(!owner.start());
       assert(!owner.running && owner.handle == &taskToken && scenario.creates == 1);
-      assert(scenario.now <= 13000);
-      if (outcome == Handshake::Timeout) assert(scenario.now == 13000);
+      // Each deferred start waits 3 s for its task; the IMU waits
+      // kMotionStartWaitMs (its backend's worst-case init, HAL_MotionCore.h).
+      const unsigned wait = std::strcmp(owner.name, "IMU") == 0 ? kMotionStartWaitMs : 3000;
+      assert(scenario.now <= 10000 + wait);
+      if (outcome == Handshake::Timeout) assert(scenario.now == 10000 + wait);
       // A timed-out task may still own an in-flight init. No next start can
       // reset its handshake or resources before it acknowledges cleanup.
       const unsigned effects = scenario.effects, creates = scenario.creates, delays = scenario.delays;

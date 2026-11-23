@@ -23,7 +23,7 @@
 #include "System_BuildConfig.h"        // Conditional sensor configuration
 #include "i2csensor_mlx90640.h"     // ThermalCache, readings, thermalBuildDataJSON
 #include "i2csensor_vl53l4cx.h"         // tofBuildDataJSON
-#include "i2csensor_bno055.h"         // imuBuildDataJSON
+#include "HAL_Motion.h"         // imuBuildDataJSON
 #include "i2csensor_seesaw.h"     // gInputRunning, gInputConnected (gamepad build)
 #if ENABLE_ANO_ENCODER
   #include "i2csensor_ano_encoder.h"  // anoEncoderBuildDataJSON + gAnoEncoder*

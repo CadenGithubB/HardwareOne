@@ -58,7 +58,7 @@
 #endif
 #include "i2csensor_seesaw.h"
 #include "i2csensor_pa1010d.h"
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_vl53l4cx.h"
 #include "i2csensor_ds3231.h"
@@ -164,7 +164,7 @@ bool gI2cBusRunning = false;
 // Queue processor task handle
 TaskHandle_t queueProcessorTask = nullptr;
 
-// gImuTaskHandle and gImuLastStopTime are declared in i2csensor_bno055.h (included above)
+// gImuTaskHandle and gImuLastStopTime are declared in HAL_Motion.h (included above)
 // Clock management is now unified through I2cDeviceManager
 // Legacy i2cSetWire1Clock() removed - all sensors use i2cDeviceTransaction wrapper
 
@@ -203,6 +203,12 @@ int discoveryCount = 0;
 #endif
 // The encoder rows name every instance (System_I2CInstanceCore.h): instance
 // n's bus and address come from its settings, address 0 when it has none.
+// The IMU's address is a setting (imuAddress), read through the backend's rule.
+#if ENABLE_IMU_SENSOR
+#define IMU_ADDRESS [](uint8_t) -> uint8_t { return imuDeviceAddress(); }
+#else
+#define IMU_ADDRESS nullptr
+#endif
 #if ENABLE_ENCODER
 #define ENCODER_BUS       [](uint8_t n) -> int { return encoderInstanceBus(n); }
 #define ENCODER_ADDRESS   [](uint8_t n) -> uint8_t { return encoderInstanceAddress(n); }
@@ -215,8 +221,11 @@ int discoveryCount = 0;
 const I2cSensorEntry i2cSensors[] = {
   // Sensors with CLI Modules
   // { addr, name, desc, mfr, multiAddr, altAddr, heapBytes, library, headerGuard, module, clockHz, timeoutMs }
-  { 0x28, "BNO055", "9-DOF IMU", "Adafruit", true, 0x29, 1500, "Adafruit_BNO055", "_ADAFRUIT_BNO055_H_", "imu", 100000, 300,
-    ENABLE_IMU_SENSOR, [](uint8_t) -> int { return gSettings.imuBus; }, nullptr, I2C_DEVICE_IMU },
+  // The IMU's BNO055 backend (HAL_Motion_BNO055.cpp, register level: no library).
+  // One address, the imuAddress setting (0x28 or 0x29): no alternate, so
+  // discovery never counts a chip (or another device) at the other address.
+  { 0x28, "BNO055", "9-DOF IMU", "Bosch", false, 0x00, 0, NULL, NULL, "imu", 100000, 300,
+    ENABLE_IMU_BNO055, [](uint8_t) -> int { return gSettings.imuBus; }, IMU_ADDRESS, I2C_DEVICE_IMU },
   { 0x39, "APDS9960", "RGB, Gesture & Proximity", "Adafruit", false, 0x00, 500, "Adafruit_APDS9960", "_ADAFRUIT_APDS9960_H_", "apds", 100000, 200,
     ENABLE_APDS_SENSOR, [](uint8_t) -> int { return gSettings.apdsBus; }, nullptr, I2C_DEVICE_APDS },
   { 0x29, "VL53L4CX", "ToF Distance (up to 6m)", "Adafruit", false, 0x00, 1000, "VL53L4CX", "_VL53L4CX_CLASS_H_", "tof", 400000, 250,
@@ -287,6 +296,7 @@ const I2cSensorEntry i2cSensors[] = {
     ENABLE_ENCODER, ENCODER_BUS, ENCODER_ADDRESS, I2C_DEVICE_ENCODER, kSeesawProductRotaryEncoder, ENCODER_INSTANCES },
 };
 
+#undef IMU_ADDRESS
 #undef MATRIX_BUS
 #undef MATRIX_ADDRESS
 #undef ENCODER_BUS
@@ -344,7 +354,12 @@ static uint8_t i2cAddressForDeviceType(I2cDeviceType sensor, uint8_t n = 1) {
   switch (sensor) {
     case I2C_DEVICE_THERMAL:  return I2C_ADDR_THERMAL;
     case I2C_DEVICE_TOF:      return I2C_ADDR_TOF;
-    case I2C_DEVICE_IMU:      return I2C_ADDR_IMU;
+    case I2C_DEVICE_IMU:
+#if ENABLE_IMU_SENSOR
+      return imuDeviceAddress();  // the imuAddress setting, the backend's rule
+#else
+      return I2C_ADDR_IMU;
+#endif
     case I2C_DEVICE_INPUT:
 #if ENABLE_GT911_TOUCH
       return 0; // Backend probes 0x5d and 0x14 through the shared manager.
@@ -1612,7 +1627,7 @@ const char* cmd_i2cstats(const String& originalCmd) {
     broadcastOutput("  Gamepad (seesaw)");
   }
   if (gImuConnected) {
-    broadcastOutput("  IMU (BNO055)");
+    broadcastOutput("  IMU (motion sensor)");
   }
   if (gApdsConnected) {
     broadcastOutput("  APDS9960");
@@ -1644,7 +1659,7 @@ const char* cmd_i2cstats(const String& originalCmd) {
 
 // All sensor tasks moved to their respective modules for full modularization:
 // tofTask() -> i2csensor_vl53l4cx.cpp
-// imuTask() -> i2csensor_bno055.cpp
+// imuTask() -> HAL_Motion.cpp
 // thermalTask() -> i2csensor_mlx90640.cpp
 // inputTask() -> i2csensor_seesaw.cpp (gamepad) OR i2csensor_ano_encoder.cpp (ANO)
 // apdsTask() -> i2csensor_apds9960.cpp
@@ -2531,7 +2546,7 @@ struct SensorHeapCost {
 static const SensorHeapCost sensorHeapCosts[] = {
   { "Thermal Camera", "thermal", &gSettings.thermalAutoStart, 32 },  // MLX90640: large frame buffer
   { "ToF Distance",   "tof",     &gSettings.tofAutoStart,      8 },  // VL53L4CX: moderate
-  { "IMU",            "imu",     &gSettings.imuAutoStart,     12 },  // BNO055: calibration + buffers
+  { "IMU",            "imu",     &gSettings.imuAutoStart,     12 },  // IMU task + reading cache
   { "GPS",            "gps",     &gSettings.gpsAutoStart,      4 },  // PA1010D: NMEA parsing
   { "FM Radio",       "fmradio", &gSettings.fmRadioAutoStart,  2 },  // RDA5807: minimal
   { "APDS Gesture",   "apds",    &gSettings.apdsAutoStart,     4 },  // APDS9960: gesture buffers
@@ -3894,7 +3909,7 @@ extern const SettingsModule i2cSettingsModule = {
 // Note: autoStart settings are now in each sensor's own module:
 // - thermal (i2csensor_mlx90640.cpp)
 // - tof (i2csensor_vl53l4cx.cpp)
-// - imu (i2csensor_bno055.cpp)
+// - imu (HAL_Motion.cpp)
 // - gps (i2csensor_pa1010d.cpp)
 // - fmradio (i2csensor_rda5807.cpp)
 // - apds (i2csensor_apds9960.cpp)

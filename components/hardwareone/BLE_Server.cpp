@@ -52,7 +52,7 @@
 // Each header supplies the types and state names when its sensor is compiled out.
 #include "i2csensor_mlx90640.h"   // ThermalCache, readings, gThermalRunning/Connected
 #include "i2csensor_vl53l4cx.h"   // TofCache, readings, gTofRunning/Connected
-#include "i2csensor_bno055.h"     // ImuCache, readings, gImuRunning/Connected
+#include "HAL_Motion.h"     // ImuCache, readings, gImuRunning/Connected
 #include "System_SelfDevice.h"  // SelfDevice::firmwareVersion() for the Device Info BLE characteristic; deviceName()
 #include "System_DeviceName.h"  // the advertised name (29 of the name's up to 31 bytes)
 #include "System_Settings.h"

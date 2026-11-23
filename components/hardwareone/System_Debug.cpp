@@ -33,7 +33,7 @@
 #include "System_ESPSR.h"  // srSyncDebugLevel()
 #include "System_CommandRegistry.h"
 #include "System_Notifications.h"
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_rda5807.h"
 #include "i2csensor_vl53l4cx.h"
@@ -2839,7 +2839,7 @@ const CommandEntry debugCommands[] = {
   { "debugmicrophone", "Debug microphone operations.", true, cmd_debugmicrophone, "Usage: debugmicrophone <0|1> [temp|runtime]" },
   { "debuggps", "Debug GPS sensor (PA1010D).", true, cmd_debuggps, "Usage: debuggps <0|1> [temp|runtime]" },
   { "debugrtc", "Debug RTC sensor (DS3231).", true, cmd_debugrtc, "Usage: debugrtc <0|1> [temp|runtime]" },
-  { "debugimu", "Debug IMU sensor (BNO055).", true, cmd_debugimu, "Usage: debugimu <0|1> [temp|runtime]" },
+  { "debugimu", "Debug the IMU (motion sensor).", true, cmd_debugimu, "Usage: debugimu <0|1> [temp|runtime]" },
   { "debugthermal", "Debug thermal sensor (MLX90640).", true, cmd_debugthermal, "Usage: debugthermal <0|1> [temp|runtime]" },
   { "debugtof", "Debug ToF sensor (VL53L4CX).", true, cmd_debugtof, "Usage: debugtof <0|1> [temp|runtime]" },
   { "debuginput",      "Debug input abstraction layer (HAL_Input + OLED dispatch).", true, cmd_debuginput,      "Usage: debuginput <0|1> [temp|runtime]" },

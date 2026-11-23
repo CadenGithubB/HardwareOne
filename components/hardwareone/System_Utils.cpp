@@ -93,7 +93,7 @@ bool isEspNowInitialized() { return false; }
 #include "i2csensor_ds3231.h"  // RTC for time functions
 #include "System_Microphone.h"  // recording state, stopRecording
 // Additional sensor headers for the gXxxEnabled/gXxxConnected externs used by cmd_voltage.
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_vl53l4cx.h"
 #include "i2csensor_apds9960.h"
@@ -172,7 +172,7 @@ void secureClearString(String& s) {
 #include "System_VFS.h"  // For sdCommands (SD card management)
 #include "i2csensor_mlx90640.h"  // For thermalCommands
 #include "i2csensor_vl53l4cx.h"      // For tofCommands
-#include "i2csensor_bno055.h"      // For imuCommands
+#include "HAL_Motion.h"      // For imuCommands
 #include "i2csensor_seesaw.h"  // For gamepadCommands
 #include "System_RadioCompanion.h"  // companionCommands, sleep hooks, status (P4X-EYE); no-ops elsewhere
 #include "System_RestartQuiesceCore.h"  // hw1::restartq — SDMMC idle before an intentional restart
@@ -3412,7 +3412,7 @@ static void printMemoryReportImpl(bool atBoot) {
 #endif
 
 #if ENABLE_IMU_SENSOR
-  broadcastOutput("  [Y] IMU      | imuTask() in i2csensor_bno055.cpp");
+  broadcastOutput("  [Y] IMU      | imuTask() in HAL_Motion.cpp");
   enabled_count++;
 #else
   broadcastOutput("  [N] IMU      | Disabled (~12-18KB flash, ~8KB RAM saved)");

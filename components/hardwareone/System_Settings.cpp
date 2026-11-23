@@ -1184,7 +1184,7 @@ void settingsDefaults() {
   // - i2c (System_I2C.cpp): bus settings, clock speeds
   // - thermal (i2csensor_mlx90640.cpp): autoStart, polling, interpolation, EWMA, rotation
   // - tof (i2csensor_vl53l4cx.cpp): autoStart, polling, stability, transition
-  // - imu (i2csensor_bno055.cpp): autoStart, polling, EWMA, orientation correction
+  // - imu (HAL_Motion.cpp): autoStart, polling, EWMA, orientation correction
   // - gps (i2csensor_pa1010d.cpp): autoStart, polling
   // - apds (i2csensor_apds9960.cpp): autoStart, polling
   // - gamepad (i2csensor_seesaw.cpp): autoStart, polling

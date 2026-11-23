@@ -17,6 +17,7 @@
 #define OLED_CONTENT_HEIGHT 48
 #define DISPLAY_COLOR_WHITE 1
 #define ENABLE_OLED_DISPLAY 0
+#define EXT_RAM_BSS_ATTR
 using TickType_t = uint32_t;
 struct Semaphore { bool held = false; } semaphore;
 using SemaphoreHandle_t = Semaphore*;

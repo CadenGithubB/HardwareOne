@@ -341,7 +341,7 @@ field of `sensors json` - that object uses a `valid` flag (and often
 Same day, later: the optional `age` key was removed entirely; derive staleness from `ts`.)**
 Every builder object opens with the envelope: `{"valid":bool,"connected":bool,"ts":ms}` -
 `ts` is 0 when never sampled. `valid:false` variants keep the envelope. Then per-sensor value keys:
-- imu: `+ {"accel":{x,y,z},"gyro":{x,y,z},"ori":{yaw,pitch,roll},"temp"}`
+- imu: `+ {"accel":{x,y,z},"gyro":{x,y,z},"ori":{yaw,pitch,roll},"temp"[,"mag":{x,y,z}][,"cal"]}`. Units: `accel` m/s², `gyro` rad/s, `ori` degrees (yaw 0..360, pitch ±90, roll ±180, as the chip reports them unless `imuorientationcorrection` is on; never clamped), `temp` °C. Added 2026-11-22, present only when the build's IMU chip has them: `mag` (magnetometer, µT; the BNO055 has it) and `cal` (the chip's calibration byte; BNO055 CALIB_STAT: system, gyro, accel and magnetometer, two bits each from the top, 3 = calibrated). Ignore keys you do not know
 - gps: `+ {"fix","quality","sats","lat","lon","alt","speed"}`
 - apds: `+ {"r","g","b","c","proximity"}`
 - anoencoder: `+ {"pos","axis","buttons"}` *(was `{"schema":1,"connected","position",...}` - `schema` dropped, `position`->`pos`, envelope added)*. `axis` is always 0 (the wheel is the vertical axis); `buttons` is the device-native layout, active high: IN bit 0, UP 1, DOWN 2, LEFT 3, RIGHT 4 (START and SELECT are edges and never appear in it). `pos` counts the wheel's detents since the encoder was opened. `/api/sensors?sensor=anoencoder` answers this object in every case (closed: `valid` and `connected` false)

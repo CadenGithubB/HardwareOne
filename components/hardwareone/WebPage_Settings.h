@@ -1042,7 +1042,7 @@ window.SchemaPanel.render({
   // to recurse into the nested layout. Identity mappings kept here for
   // backwards compatibility with any older flat settings.json that lingers.
   var sensorSections = {'camera':'camera','microphone':'microphone','edgeimpulse':'edgeimpulse','espsr':'espsr','thermal':'thermal','tof':'tof','imu':'imu','gps':'gps','fmradio':'fmradio','apds':'apds','rtc':'rtc','presence':'presence','sensorlog':'sensorlog','power':'power','debug':'debug','output':'output','oled':'oled','gamepad':'gamepad','input':'input','anoencoder':'anoencoder','led':'led','llm':'llm','maps':'maps'};
-  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (BNO055)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',servo:'Servo Driver (PCA9685)',gamepad:'Gamepad (Seesaw)',input:'Input Device',anoencoder:'ANO Encoder (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',systemlog:'System Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels',oled:'OLED Display (SSD1306)',led:'LED Startup & Brightness',llm:'On-Device LLM',maps:'Maps',notifications:'Notifications'};
+  var moduleLabels = {camera:'Camera (OV2640/OV3660)',microphone:'Microphone (PDM)',edgeimpulse:'Machine Learning',espsr:'Voice Recognition (ESP-SR)',thermal:'Thermal Camera (MLX90640)',tof:'Time-of-Flight (VL53L4CX)',imu:'IMU (motion sensor)',gps:'GPS (PA1010D)',fmradio:'FM Radio (RDA5807)',servo:'Servo Driver (PCA9685)',gamepad:'Gamepad (Seesaw)',input:'Input Device',anoencoder:'ANO Encoder (Seesaw)',apds:'APDS (APDS9960)',rtc:'RTC Clock (DS3231)',presence:'IR Presence (STHS34PF80)',sensorlog:'Sensor Logging',systemlog:'System Logging',i2c:'I2C Bus Configuration',power:'Power Management',debug:'Debug Flags',output:'Output Channels',oled:'OLED Display (SSD1306)',led:'LED Startup & Brightness',llm:'On-Device LLM',maps:'Maps',notifications:'Notifications'};
   
   function inferType(val) {
     if (typeof val === 'boolean') return 'bool';
@@ -1867,10 +1867,10 @@ function saveNotifPolicy() {
     debugthermalpolling:"Logs per-frame capture timing — very noisy at higher frame rates.",
     debugthermalvalues:"Logs the raw pixel values / min-max-avg stats of each captured frame. Extremely verbose.",
     // imu
-    debugimu:"Master toggle for IMU (BNO055) debug.",
+    debugimu:"Master toggle for IMU (motion sensor) debug.",
     debugimulifecycle:"Logs IMU init, connect, and recovery.",
     debugimupolling:"Logs each IMU poll cycle (orientation + accel + gyro).",
-    debugimuvalues:"Logs the raw quaternion and Euler-angle values read from the sensor. Verbose.",
+    debugimuvalues:"Logs each stored IMU reading. Verbose.",
     // gamepad
     debuginput:"Master toggle for input-device debug (Seesaw gamepad / ANO encoder).",
     debuginputlifecycle:"Logs input-device init, connect, and auto-disable.",

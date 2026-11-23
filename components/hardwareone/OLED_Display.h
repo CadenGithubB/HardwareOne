@@ -483,7 +483,7 @@ void displayUnavailable();
 
 // Sensor mode functions (OLED_Mode_Sensors.cpp)
 void displaySensorData();
-// displayImuActions() - moved to i2csensor_bno055.cpp (modular OLED mode)
+// displayImuActions() - moved to HAL_Motion.cpp (modular OLED mode)
 // displayFmRadio() - moved to fm_radio.cpp (modular OLED mode)
 void displayFileBrowser();
 void displayAutomations();

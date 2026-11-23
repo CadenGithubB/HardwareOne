@@ -90,7 +90,7 @@ constexpr uint32_t THERMAL_STACK_WORDS = 6144;     // 6 KB (was annotated ~24KB 
                                                      // logging overflowed 16KB on ESP32-classic when
                                                      // frame reads fail (NACK retry storm). 24KB was the
                                                      // original pre-trim value.
-constexpr uint32_t IMU_STACK_WORDS = 4096;     // 4 KB (was ~16KB) — BNO055 init retries need extra stack
+constexpr uint32_t IMU_STACK_WORDS = 4096;     // 4 KB: the IMU task (backend start + reads + action detector)
 constexpr uint32_t TOF_STACK_WORDS = 4096;     // 4 KB. QT Py ESP32: normal polling used 2468 B;
                                            // 3 KB left 604 B and overflowed during I2C error logging.
 constexpr uint32_t FMRADIO_STACK_WORDS = 4608;     // 4.5 KB (was ~18KB)

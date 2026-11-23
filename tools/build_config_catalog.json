@@ -130,7 +130,6 @@
     {"switch": "CUSTOM_ENABLE_TOF", "group": "sensors", "title": "Distance sensor (VL53L4CX)", "summary": "Time-of-flight distance."},
     {"switch": "CUSTOM_ENABLE_PRESENCE", "group": "sensors", "title": "Presence sensor (STHS34PF80)", "summary": "Infrared presence and motion."},
     {"switch": "CUSTOM_ENABLE_APDS", "group": "sensors", "title": "Gesture and colour sensor (APDS9960)", "summary": "Gesture, colour and proximity."},
-    {"switch": "CUSTOM_ENABLE_IMU", "group": "sensors", "title": "Motion sensor (BNO055)", "summary": "Orientation and acceleration."},
     {"switch": "CUSTOM_ENABLE_THERMAL", "group": "sensors", "title": "Thermal camera (MLX90640)", "summary": "A 32 x 24 thermal image."},
     {"switch": "CUSTOM_ENABLE_RTC", "group": "sensors", "title": "Clock (DS3231)", "summary": "A battery-backed real-time clock."},
     {"switch": "CUSTOM_ENABLE_FM_RADIO", "group": "sensors", "title": "FM radio (RDA5807)", "summary": "An FM receiver."},
@@ -190,6 +189,12 @@
        {"title": "ANO rotary encoder on I2C", "set": {"INPUT_DEVICE_TYPE": 2, "CUSTOM_ENABLE_GAMEPAD": 0}},
        {"title": "Wheel and buttons on the board", "set": {"INPUT_DEVICE_TYPE": 3, "CUSTOM_ENABLE_GAMEPAD": 0}},
        {"title": "Touchscreen (GT911)", "set": {"INPUT_DEVICE_TYPE": 4, "CUSTOM_ENABLE_GAMEPAD": 0}}
+     ]},
+    {"id": "imu", "group": "sensors", "title": "Motion sensor",
+     "summary": "Orientation and acceleration from an IMU board on I2C.",
+     "values": [
+       {"title": "None", "set": {"CUSTOM_ENABLE_IMU": 0, "IMU_DEVICE_TYPE": 1}},
+       {"title": "BNO055 on I2C", "set": {"CUSTOM_ENABLE_IMU": 1, "IMU_DEVICE_TYPE": 1}}
      ]},
     {"id": "speech_model", "group": "advanced", "title": "Speech-to-text model",
      "summary": "The acoustic model of speech-to-text on the board. One model per build.",

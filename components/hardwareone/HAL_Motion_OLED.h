@@ -1,17 +1,14 @@
-// i2csensor_bno055_oled.h - BNO055 IMU OLED display functions
-// Include this at the end of i2csensor_bno055.cpp
-#ifndef I2CSENSOR_BNO055_OLED_H
-#define I2CSENSOR_BNO055_OLED_H
+// HAL_Motion_OLED.h - the IMU's OLED page (readings from the cache)
+// Include this at the end of HAL_Motion.cpp
+#ifndef HAL_MOTION_OLED_H
+#define HAL_MOTION_OLED_H
 
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include <Adafruit_SSD1306.h>
 
-// Forward declaration for IMU action detection
-extern void imuUpdateActions(bool postEvents);
-
-// IMU OLED display function - shows action detection
+// IMU OLED display function - shows the latest reading
 static void displayImuActions() {
   // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
   int y = OLED_CONTENT_START_Y;
@@ -24,9 +21,6 @@ static void displayImuActions() {
     oledDisplay->println("Press X to start");
     return;
   }
-
-  // Update detections
-  imuUpdateActions();
 
   // Show orientation and acceleration data from cache
   ImuCache reading{};
@@ -100,11 +94,13 @@ static const OledModeEntry imuOledModes[] = {
     imuInputHandler,         // inputFunc - X toggles sensor
     true,                    // showInMenu
     40,                      // menuOrder
-    nullptr                  // hints
+    nullptr,                 // hints
+    nullptr,                 // onEnterFunc
+    nullptr                  // headerFunc
   }
 };
 
 // Auto-register IMU OLED mode
 REGISTER_OLED_MODE_MODULE(imuOledModes, sizeof(imuOledModes) / sizeof(imuOledModes[0]), "IMU");
 
-#endif // I2CSENSOR_BNO055_OLED_H
+#endif // HAL_MOTION_OLED_H
