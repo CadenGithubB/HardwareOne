@@ -4676,6 +4676,51 @@ disables the mesh and drops its id on every slot (the default mesh only after an
 key without `kdf` record 1 is not used. `espnow_wire_layout` and `espnow_dispatch_policy` pin the new sizes and
 minimum lengths (KEY_EX_CONFIRM 34, SESSION_OPEN 154, SESSION_CONFIRM 162 = the relay budget, SESSION_REKEY 146).
 
+## ESP-NOW remote command results and capacity (1.0 step 6)
+
+```sh
+./build-host/espnow_remote_cmd_core_tests
+python3 components/hardwareone/test/host/test_espnow_answers.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_send_words.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_chunked_send.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_rx_frontend.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_reassembly.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_message_store.py
+```
+
+`espnow_remote_cmd_core_tests` (new) compiles `System_ESPNow_RemoteCmdCore.h` as is: the requester table (16
+entries of 16 bytes) and the CMD_RESP result queue (16 entries, texts in one 24 KB ring). Fan-out to 16 responders:
+16 requests open at once, each accepted by its own member's ACK (another member's ACK changes nothing), each
+answered once (a second answer is a duplicate, an answer to no request unknown); a 17th request pushes out the
+open one nearest its deadline (said aloud), and an ended one is reused before any open one. ACK busy and no slot
+are Busy, another status Refused with it, a later ACK changes neither. The deadline: "No result" exactly 30 s after
+acceptance, reported once, the entry kept 5 min; a result in that time is late; after it the answer is unknown.
+STREAM lines move the deadline to 30 s after the last line (a line while Sending proves acceptance; another
+device's line does nothing). No ACK in 10 s is No answer (longer for a frame that waits for its session), and a
+result after it is late. A whole-message retry renames the request to the new msgId. Deadlines across the 32-bit
+millis() wrap; tick reports at most its limit, the rest later, each once. The queue against a model (200 000
+random pushes up to 4200 bytes and shows): texts come back whole, a push is refused only with no entry or no
+contiguous room, the ring wraps; a held result (lab hook) holds the ones behind it.
+`espnow_answers` runs the production `v4h_cmd_resp` over the real queue: a burst of 16 results is taken, the 17th
+refused busy with nothing replaced; six 4 KB results fill the 24 KB ring and the seventh is refused busy; after
+two are shown the next wraps to the ring's start whole; no store (no PSRAM) answers busy; the lab hold queues a
+result with a later ready time. `v4h_cmd` with the slot taken answers by ACK only (no CMD_RESP on the air);
+every command result is sent through `v4_send_cmd_result` with an ACK wait (no session: the encrypt-or-wait
+sender; a requester still busy after the retry is logged once); each STREAM line reaches the deadline hook.
+`espnow_send_words` (new) compiles the tracked-send table of `System_ESPNow_Sessions.cpp`: a TEXT whose receiver's
+ring is full ends Busy (state 4, history stamp 4), never Delivered; no slot is Busy; too large is Refused (5) with
+its status; another device's ACK changes nothing; no ACK in 10 s is timeout. Source rules: the web snapshot names
+busy and refused and gives a refusal its reason, the page and the OLED use Busy / Refused / No answer and mark
+"Result (late)", every CMD and USER_SYNC send registers its request first and cancels it on failure, a sealed ACK,
+a STREAM line and the loop reach the requester table, `v4h_cmd` sends no CMD_RESP. `espnow_chunked_send` K3 (the
+request follows the retry), K11 (a long CMD answered busy is final), K12 (`ackSingle`: one frame, fragment 1 of
+1, waits for its ACK; busy sends it once more under a new msgId; no ACK is NoAnswer; without `ackSingle` it is not
+waited for). `espnow_rx_frontend`: a sealed ACK reaches the requester table by radio sender with its status and
+whether it is the last fragment; the kNoSlot case fills four entries. `espnow_reassembly` case 9 fills a pool of
+four. `espnow_message_store` outcome_rows: a received result row keeps its outcome (busy 1, late 5 on every piece)
+in the record's state bits; a sent row's busy state (4) is stamped. `espnow_history_core_tests` and
+`espnow_history_stress_tests`: the state field has three bits (0-7; reserved bits 0xC0).
+
 ## ESP-NOW ACK after accept (1.0 step 5b)
 
 ```sh
@@ -4698,7 +4743,7 @@ gates passed reaches its handler and returns its verdict, one byte short is kBad
 unpaired or unsealed sender is silent, every opcode without a row is kUnsupported; runBondCases adds that a bond
 frame from a paired peer that is not the partner is kRefused over its session and silent otherwise; TEXT into a
 full ring is refused busy and leaves the ring unchanged. `espnow_answers`: a CMD into the free slot is accepted,
-one while the slot is taken is refused busy (and still gets its CMD_RESP(busy) until step 6).
+one while the slot is taken is refused busy (its CMD_RESP(busy) went in step 6: the ACK is the one answer).
 `espnow_rx_frontend` now runs the real reassembler (constants, entry, helpers, `v4_reasm_accept`,
 `v4_reasm_step`) and the accept memory, with stub handlers whose verdict a case can set: testBusyThenRetry (a CMD
 refused busy is ACKed with status 1; its re-sealed retry is processed again and ACKed 0; a copy of the accepted

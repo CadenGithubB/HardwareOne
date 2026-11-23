@@ -80,7 +80,14 @@ static std::vector<V4SendOutcome> gNoted;
 static void sessionNoteSendOutcome(const uint8_t*, V4SendOutcome o) { gNoted.push_back(o); }
 static std::vector<uint32_t> gDelivered, gRefused;
 static void sendStatusMarkDelivered(uint32_t msgId, const uint8_t*) { gDelivered.push_back(msgId); }
-static void sendStatusMarkRefused(uint32_t msgId, const uint8_t*) { gRefused.push_back(msgId); }
+static std::vector<uint8_t> gRefusedStatus;
+static void sendStatusMarkRefused(uint32_t msgId, const uint8_t*, uint8_t status) {
+  gRefused.push_back(msgId);
+  gRefusedStatus.push_back(status);
+}
+// The remote-command requests follow a whole-message retry (1.0 step 6).
+static std::vector<std::pair<uint32_t, uint32_t>> gRenamed;
+static void remoteCmdRenamed(const uint8_t*, uint32_t oldId, uint32_t newId) { gRenamed.emplace_back(oldId, newId); }
 
 // INSERT_ACK_WAIT
 
@@ -109,6 +116,9 @@ static bool v4_radio_emit(const uint8_t*, const uint8_t* frame, size_t, bool) {
   return true;
 }
 
+V4SendResult v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t baseFlags, uint32_t msgId,
+                                       const uint8_t* payload, uint16_t payloadLen, uint8_t ttl,
+                                       bool ackSingle = false);
 // INSERT_SENDER
 
 static int gFailures = 0, gChecks = 0;
@@ -122,6 +132,8 @@ static void reset() {
   gNoted.clear();
   gDelivered.clear();
   gRefused.clear();
+  gRefusedStatus.clear();
+  gRenamed.clear();
   gReceiver = nullptr;
   gOnTick = nullptr;
   gSess.state = SESSION_ACTIVE;
@@ -167,8 +179,11 @@ int main() {
   r = v4_send_encrypted_chunked(kPeer, 51, 0, kId, kPayload, sizeof kPayload, 1);
   check("K3 busy twice: Refused(kBusy) after exactly two attempts",
         r.outcome == V4SendOutcome::Refused && r.status == espnowanswer::kBusy && gSent.size() == 2);
-  check("K3 a busy refusal tells the session it is alive (Refused), and marks the tracked send refused",
-        gNoted.size() == 1 && gNoted[0] == V4SendOutcome::Refused && gRefused == std::vector<uint32_t>{kId});
+  check("K3 a busy refusal tells the session it is alive (Refused), and marks the tracked send busy (its status)",
+        gNoted.size() == 1 && gNoted[0] == V4SendOutcome::Refused && gRefused == std::vector<uint32_t>{kId} &&
+            gRefusedStatus == std::vector<uint8_t>{espnowanswer::kBusy});
+  check("K3 a tracked request follows the retry to its new msgId (remote commands, 1.0 step 6)",
+        gRenamed.size() == 1 && gRenamed[0].first == kId && gRenamed[0].second == gSent[1].msgId);
 
   // K4: a policy refusal is final: no second attempt.
   reset();
@@ -238,6 +253,41 @@ int main() {
   r = v4_send_encrypted_chunked(kPeer, ESPNOW_V4_TYPE_TEXT, 0, kId + 1, kPayload, sizeof kPayload, 1);
   check("K10 a long TEXT cut by this device's rekey is not sent again either (NotSent)",
         r.outcome == V4SendOutcome::NotSent && gSent.size() == 1);
+
+  // K11 (1.0 step 6): a CMD answered busy ends Busy at once (DESIGN 3.5): no
+  // second attempt, no request renamed.
+  reset();
+  gReceiver = [](const Sent& s) { return s.fragIndex == 0 ? (int)espnowanswer::kBusy : 0; };
+  r = v4_send_encrypted_chunked(kPeer, ESPNOW_V4_TYPE_CMD, 0, kId, kPayload, sizeof kPayload, 1);
+  check("K11 a long CMD refused busy is final: one attempt, Refused(busy)",
+        r.outcome == V4SendOutcome::Refused && r.status == espnowanswer::kBusy && gSent.size() == 1 &&
+            gRenamed.empty());
+
+  // K12: a one-frame CMD_RESP with ackSingle: one frame (fragment 1 of 1) that
+  // waits for its ACK; a requester that is busy gets the whole result once
+  // more under a new msgId (its result queue was full).
+  static const uint8_t kShort[40] = {};
+  reset();
+  r = v4_send_encrypted_chunked(kPeer, 51, 0, kId, kShort, sizeof kShort, 1, /*ackSingle=*/true);
+  check("K12 ackSingle: one frame, fragment 1 of 1, Delivered on its ACK",
+        r.outcome == V4SendOutcome::Delivered && gSent.size() == 1 && gSent[0].fragCount == 1 &&
+            gSent[0].fragIndex == 0 && gSent[0].msgId == kId);
+  reset();
+  gReceiver = [](const Sent& s) { return s.msgId == kId ? (int)espnowanswer::kBusy : 0; };
+  r = v4_send_encrypted_chunked(kPeer, 51, 0, kId, kShort, sizeof kShort, 1, true);
+  check("K12 ackSingle busy: sent once more under a new msgId after 300-800 ms, Delivered",
+        r.outcome == V4SendOutcome::Delivered && gSent.size() == 2 && gSent[1].msgId != kId &&
+            gSent[1].atMs - gSent[0].atMs >= 300 && gSent[1].atMs - gSent[0].atMs <= 900);
+  reset();
+  gReceiver = [](const Sent&) { return -1; };
+  r = v4_send_encrypted_chunked(kPeer, 51, 0, kId, kShort, sizeof kShort, 1, true);
+  check("K12 ackSingle no ACK: three tries, NoAnswer (one session strike)",
+        r.outcome == V4SendOutcome::NoAnswer && gSent.size() == 3 && gNoted.size() == 1 &&
+            gNoted[0] == V4SendOutcome::NoAnswer);
+  reset();
+  r = v4_send_encrypted_chunked(kPeer, 51, 0, kId, kShort, sizeof kShort, 1);
+  check("K12 without ackSingle a one-frame payload is not waited for (the tracked-send path)",
+        r.outcome == V4SendOutcome::Delivered && gSent.empty());
 
   printf("espnow_chunked_send: %d checks, %d failures\n", gChecks, gFailures);
   return gFailures ? 1 : 0;

@@ -20,6 +20,8 @@
 
 #include "System_ESPNow_HistoryCore.h"
 #include "System_ESPNow_HistoryNames.h"
+#include "System_ESPNow_AnswerCore.h"
+#include "System_ESPNow_RemoteCmdCore.h"  // a remote command row's outcome (1.0 step 6)
 #include "System_JsonText.h"
 #include "System_MacText.h"
 
@@ -243,8 +245,11 @@ static esp_err_t httpd_query_key_value(const char* q, const char* key, char* val
 enum class AllocPref { PreferPsram, PreferInternal, RequirePsram, RequireInternal };
 static void* ps_alloc(size_t n, AllocPref, const char*) { return std::calloc(1, n); }
 static unsigned long millis() { return 5000; }
-struct SendStatus { bool inUse; uint8_t state; uint8_t peerMac[6]; uint32_t registeredAtMs; uint32_t msgId; };
-static SendStatus gSendStatus[2] = {{true, 1, {1, 2, 3, 4, 5, 6}, 4000, 42}, {false, 0, {0}, 0, 0}};
+struct SendStatus { bool inUse; uint8_t state; uint8_t peerMac[6]; uint32_t registeredAtMs; uint32_t msgId;
+                    uint8_t status; };
+enum { SEND_STATUS_PENDING = 0, SEND_STATUS_DELIVERED = 1, SEND_STATUS_TIMEOUT = 2, SEND_STATUS_FAILED = 3,
+       SEND_STATUS_BUSY = 4, SEND_STATUS_REFUSED = 5 };
+static SendStatus gSendStatus[2] = {{true, 1, {1, 2, 3, 4, 5, 6}, 4000, 42, 0}, {false, 0, {0}, 0, 0, 0}};
 static uint8_t sendStatusSlotCount() { return 2; }
 static const SendStatus* sendStatusAt(uint8_t i) { return i < 2 ? &gSendStatus[i] : nullptr; }
 

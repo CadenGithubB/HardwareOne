@@ -110,7 +110,10 @@ def main() -> int:
         for marker, what in (("const char* cmd_espnow_browse(const String& argsInput)", "espnowbrowse"),
                              ("const char* cmd_espnow_fetch(const String& argsInput)", "espnowfetch")):
             cmd = body(marker)
-            if cmd.count("pendingFrameIsWaiting(msgId, targetMac)") != 2 or "request queued until the session" not in cmd:
+            # One read of the pending queue (ESP-NOW 1.0 step 6), used by the text and the JSON reply.
+            if cmd.count("const bool queued = pendingFrameIsWaiting(msgId, targetMac);") != 1 or \
+                    'queued ? "\\"queued\\":true," : ""' not in cmd or "if (queued) {" not in cmd or \
+                    "request queued until the session" not in cmd:
                 failures.append(f"{what} does not answer from whether its frame waits for the session (text and json)")
         sensor = body("const char* cmd_espnow_sensorreq(const String& argsInput)")
         if "pendingFrameIsWaiting(msgId, mac)" not in sensor:

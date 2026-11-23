@@ -361,8 +361,9 @@ def main():
     if 'espnowtx::drainAcksOnDispatcher();' not in wait[:wait.find('vTaskDelay')]:
         failures.append('the fragment-wait loop of v4_send_encrypted_chunked does not send the queued ACKs')
     refused = extract_block(read('System_ESPNow_Sessions.cpp'), 'void sendStatusMarkRefused(')
-    if 'SEND_STATUS_FAILED' not in refused or 'sessionNoteSendResult(s->peerMac, /*delivered=*/true)' not in refused:
-        failures.append('sendStatusMarkRefused does not mark the send failed and the session alive')
+    if ('SEND_STATUS_BUSY' not in refused or 'SEND_STATUS_REFUSED' not in refused or
+            'sessionNoteSendResult(s->peerMac, /*delivered=*/true)' not in refused):
+        failures.append('sendStatusMarkRefused does not mark the send busy/refused and the session alive')
     for line in failures:
         print(f'FAIL: {line}')
     if failures:

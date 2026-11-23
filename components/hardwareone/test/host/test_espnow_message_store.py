@@ -76,7 +76,7 @@ import tempfile
 
 HERE = Path(__file__).resolve().parent
 CASES = ['ctor', 'roundtrip', 'growth', 'find_only', 'bounded', 'alloc', 'alloc_scratch', 'alloc_internal',
-         'budget', 'budget_bytes', 'slots_clamp', 'view_clamp', 'time_order', 'install_race', 'install_full', 'seq_wrap', 'isolation', 'damaged', 'names', 'intake', 'paging', 'delivery',
+         'budget', 'budget_bytes', 'slots_clamp', 'view_clamp', 'time_order', 'install_race', 'install_full', 'seq_wrap', 'isolation', 'damaged', 'names', 'intake', 'paging', 'delivery', 'outcome_rows',
          'lock_refusal', 'race']
 
 
@@ -211,11 +211,14 @@ def source_contracts(read, extract_block, component):
     # espnowmessages json: the same keys, in the same order, from the copied
     # record; "name" is the page's looked-up name, never the MAC text directly.
     keys = re.findall(r'o\["(\w+)"\]\s*=\s*([^;]+);', cli)
-    want_keys = ['seq', 'reqId', 'piece', 'of', 'mac', 'name', 'msg', 'enc', 'ts', 'type', 'sent', 'sendState']
+    # `result` (ESP-NOW 1.0 step 6): a received remote command row's outcome.
+    want_keys = ['seq', 'reqId', 'piece', 'of', 'mac', 'name', 'msg', 'enc', 'ts', 'type', 'sent', 'sendState',
+                 'result']
     if [k for k, _ in keys] != want_keys:
         failures.append(f'espnowmessages json keys {[k for k, _ in keys]} != {want_keys}')
     values = dict(keys)
-    for key, value in (('name', '(const char*)names[i]'), ('sendState', 'msgs[i].sendState'),
+    for key, value in (('name', '(const char*)names[i]'),
+                       ('sendState', 'msgs[i].isSent ? msgs[i].sendState : 0'), ('result', 'result'),
                        ('sent', 'msgs[i].isSent'), ('seq', '(unsigned long)msgs[i].seqNum'),
                        ('reqId', '(unsigned long)msgs[i].reqId'), ('piece', 'msgs[i].piece'),
                        ('of', 'msgs[i].pieceTotal')):

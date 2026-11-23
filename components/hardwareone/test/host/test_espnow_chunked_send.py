@@ -62,8 +62,10 @@ def main():
     if not relay or len(local) != 3:
         sys.exit('FAIL extraction: relay budget or the fragment constants not found')
     text_op = re.search(r'\bESPNOW_V4_TYPE_TEXT\s*=\s*(\d+)', wire).group(1)
+    cmd_op = re.search(r'\bESPNOW_V4_TYPE_CMD\s*=\s*(\d+)', wire).group(1)
     wire_part = '\n'.join(['static constexpr size_t CMD_RESULT_MAX = 4096;',
-                           f'static constexpr uint8_t ESPNOW_V4_TYPE_TEXT = {text_op};'] + defines + local)
+                           f'static constexpr uint8_t ESPNOW_V4_TYPE_TEXT = {text_op};',
+                           f'static constexpr uint8_t ESPNOW_V4_TYPE_CMD = {cmd_op};'] + defines + local)
     # The relay budget refers to wire constants this harness does not need; the
     # sender only reads it on a routed send, which the doubles never make.
     wire_part += '\n#define ESPNOW_V4_RELAY_MAX_INNER_PLAINTEXT 146\n'
