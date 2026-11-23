@@ -518,17 +518,20 @@ const char* cmd_imustatus(const String& argsInput) {
     return out;
   }
   char where[72];
+  const char* part = status.chipName ? status.chipName : info.part;
   if (info.secondPart) {
-    snprintf(where, sizeof(where), "%s at 0x%02X and %s at 0x%02X on I2C%u", info.part, address, info.secondPart,
+    snprintf(where, sizeof(where), "%s at 0x%02X and %s at 0x%02X on I2C%u", part, address, info.secondPart,
              second, bus + 1);
   } else {
-    snprintf(where, sizeof(where), "%s at 0x%02X on I2C%u", info.part, address, bus + 1);
+    snprintf(where, sizeof(where), "%s at 0x%02X on I2C%u", part, address, bus + 1);
   }
   snprintf(out, 1024,
            "[IMU] %s%s%s. Tap and free fall: %s. Heading: %s. Gyro offset: %s. Sampled every %d ms, published "
            "every %d ms. Open after boot: %s. %s%s%s%s",
            running ? "Connected: " : "Not connected (", where, running ? "" : ")",
-           status.hasHwTap ? "detected by the chip" : "detected from the readings",
+           status.tapsInSoftware ? "taps found by the firmware in the 416 Hz readings ('imutaptrace'), free fall by the chip"
+           : status.hasHwTap     ? "detected by the chip"
+                                 : "detected from the readings",
            status.hasHeading ? "yes, from magnetic north" : "no, yaw counts from the IMU's start",
            motionGyroOffsetText(offset), sampleMs, pollMs, autoStart ? "on" : "off",
            holders.count ? "Kept open for: " : "", heldBy, holders.count ? ". " : "",

@@ -130,5 +130,10 @@ struct MotionBackendStatus {
   bool measuresGyroOffset = false;
   bool gyroOffsetDone = false;   // the measurement of this start ended
   bool gyroOffsetStill = false;  // ...on a board that held still (false: no offset, yaw drifts faster)
+  // The chip this start found, when the backend serves more than one (null:
+  // MotionBackendInfo::part), and whether taps come from the software knock
+  // detector rather than the chip's own engine.
+  const char* chipName = nullptr;
+  bool tapsInSoftware = false;
 };
 void motionBackendStatus(MotionBackendStatus& out);

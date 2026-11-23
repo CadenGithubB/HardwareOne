@@ -298,6 +298,7 @@ static uint32_t gamepadWireButtons(uint8_t held) {
   if (held & imuinput::kButtonX) pressed |= 1u << 6;
   if (held & imuinput::kButtonY) pressed |= 1u << 2;
   if (held & imuinput::kButtonStart) pressed |= 1u << 16;
+  if (held & imuinput::kButtonSelect) pressed |= 1u << 0;  // the gamepad's SELECT (i2csensor_seesaw.h)
   return ~pressed;
 }
 

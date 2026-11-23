@@ -470,6 +470,8 @@ void motionBackendStatus(MotionBackendStatus& out) {
   out.hasHeading = false;
   out.measuresGyroOffset = true;
   if (sState.started) {
+    out.chipName = lsm6ChipName(sState.sample.chip);
+    out.tapsInSoftware = sState.knockFifo;
     out.gyroOffsetDone = sState.bias.done;
     out.gyroOffsetStill = sState.bias.done && sState.bias.still;
   }
