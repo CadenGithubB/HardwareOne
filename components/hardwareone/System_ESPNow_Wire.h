@@ -47,9 +47,15 @@
 //     unknown bits elsewhere (see the flag enum).
 //   - SESSION_OPEN and SESSION_CONFIRM carry each side's u32 capability
 //     word inside the signed transcript (System_ESPNow_SessionCapsCore.h).
-//   - An ACK means "received", not "accepted": the ACK goes out before the
-//     dispatcher, so a frame dropped for its length is visible only in
-//     rxLengthDrops on the receiver. (1.0 step 5b moves it after accept.)
+//   - An ACK means "accepted" (1.0): a receiver answers ACK_REQ only after
+//     the frame passed every gate and its handler took it (queued, stored or
+//     acted on), or, for a fragment, after reassembly stored it. A frame it
+//     cannot take is answered with a status instead (busy, no slot, too
+//     large, unsupported, bad request; kRefused for a policy refusal, to an
+//     authenticated session peer only). A policy refusal toward anyone else
+//     is silence. A copy of an accepted frame is answered again with
+//     flags.duplicate and not processed twice; a refusal is not remembered,
+//     so a retry is processed again.
 //   - The ACK (opcode 1, V4PayloadAck) has its own msgId and names the frame
 //     it answers in its payload (ackFor, fragIndex, fragCount). It is never
 //     plaintext: a sealed frame gets a sealed ACK in the same session, a

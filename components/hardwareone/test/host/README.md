@@ -4568,7 +4568,8 @@ python3 components/hardwareone/test/host/test_espnow_msgid_dedup.py --sanitize
 ```
 
 `espnow_msgid_dedup` compiles `System_ESPNow_MsgIdCore.h`, the production `generateMessageId()` and the
-production receive duplicate ring (`v4_dedup_ring_seen_and_insert` with its entry type and TTL) over a fake clock
+production receive duplicate ring (since step 5b the accept memory: `v4_accept_find`, `v4_accept_lookup`,
+`v4_accept_record` with the entry type and TTL; cases A1-A5 are in the step 5b section) over a fake clock
 (ESP-NOW 1.0, E21). The seed is never 0; the counter goes 0xFFFFFFFF -> 1 and never hands out 0; 300 frames from a
 random start across the wrap are all new to the receiver and each re-delivery is caught; fragments of one msgId
 stay distinct; a sender restarting within the 5 s TTL from a new random start loses no frame (a control run with
@@ -4675,6 +4676,74 @@ disables the mesh and drops its id on every slot (the default mesh only after an
 key without `kdf` record 1 is not used. `espnow_wire_layout` and `espnow_dispatch_policy` pin the new sizes and
 minimum lengths (KEY_EX_CONFIRM 34, SESSION_OPEN 154, SESSION_CONFIRM 162 = the relay budget, SESSION_REKEY 146).
 
+## ESP-NOW ACK after accept (1.0 step 5b)
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_rx_frontend.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_dispatch_policy.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_chunked_send.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_session_rekey.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_reassembly.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_msgid_dedup.py
+python3 components/hardwareone/test/host/test_espnow_file_transfer.py
+```
+
+Every `V4RxCtx` handler returns a `V4Verdict` (`System_ESPNow_Verdict.h`: Accepted, Refused with a shared status,
+Silent); the receive path ACKs only after it. Harnesses that paste `V4RxCtx` in paste `System_ESPNow_Verdict.h`
+with it (self-contained; `verdict_src` in the runners). `espnow_dispatch_policy`: the table walk (source) checks
+that every handler a `kV4HandlerTable` row names is defined as `V4Verdict name(const V4RxCtx&)` in the handler
+files (main file, Handlers_Crypto, Collect, Catchup, ForwardRx, MeshTime, PowerEvents), has no bare `return;` and
+ends with a return, and that no `void` handler of that name is left; runVerdictWalk: every non-bond row with its
+gates passed reaches its handler and returns its verdict, one byte short is kBadRequest, a gated row refused to an
+unpaired or unsealed sender is silent, every opcode without a row is kUnsupported; runBondCases adds that a bond
+frame from a paired peer that is not the partner is kRefused over its session and silent otherwise; TEXT into a
+full ring is refused busy and leaves the ring unchanged. `espnow_answers`: a CMD into the free slot is accepted,
+one while the slot is taken is refused busy (and still gets its CMD_RESP(busy) until step 6).
+`espnow_rx_frontend` now runs the real reassembler (constants, entry, helpers, `v4_reasm_accept`,
+`v4_reasm_step`) and the accept memory, with stub handlers whose verdict a case can set: testBusyThenRetry (a CMD
+refused busy is ACKed with status 1; its re-sealed retry is processed again and ACKed 0; a copy of the accepted
+retry is ACKed with flags.duplicate and not processed; a silent verdict gets no ACK and its copy neither),
+testAckFollowsHandler (the ACK is queued after the handler returned, in the same receive call, at the end of a
+7 ms handler on the fake clock; an opcode without a row is ACKed kUnsupported and a frame under its row minimum
+kBadRequest without a handler), testPolicyRefusals (a sealed bond frame from a non-partner is ACKed kRefused; a
+group-tagged CMD gets no answer, nor its copy), testFragmentVerdicts (each stored fragment is ACKed for itself,
+the handler runs once at completion with the whole message, a fragment sent again after completion is ACKed with
+flags.duplicate, not processed and opens no entry; with every entry in use a fragment is ACKed kNoSlot and opens
+none, and once an entry frees its retry is stored; a fragCount over the budget is kTooLarge; a fragment the row
+refuses takes no entry). `espnow_reassembly` checks the outcomes Duplicate, Pending, Mismatch, TooLarge and NoSlot
+(also with no table) and that the dispatcher feeds `v4_reasm_step` between the row gates and the length rule.
+`espnow_msgid_dedup` A1-A5: the accept memory remembers Accepted and Silent, a refused frame leaves no entry (its
+retry is processed, then remembered), class and fragment are in the key, an expired entry is forgotten and
+refreshed in place, the 21 fragments of a completed message are all remembered, the entry stays 20 bytes.
+`espnow_chunked_send` (new) runs the production `v4_send_encrypted_chunked` and `v4_send_chunked_attempt`
+against a scripted receiver: K1 Delivered; K2 busy on the last fragment sends the whole message once more under a
+new msgId at least 300 ms later and is Delivered (the tracked send marked by the caller's msgId); K3 busy twice is
+Refused(kBusy) after exactly two attempts, the session hears Refused (alive); K4 kRefused is final; K5 no ACK is
+NoAnswer after three tries (the only strike); K6 a rekey this device starts mid-send is waited for and the message
+sent again on the new keys; K7 one that does not apply within 1 s is NotSent and counts toward nothing; K8
+kNoSlot is retried like busy. `espnow_session_rekey` C35 (real `sessionNoteSendResult`/`sessionNoteSendOutcome`):
+a busy NACK between two unanswered sends keeps the session, NotSent counts toward nothing, refusals in a row
+never clear it, two unanswered sends in a row do. `espnow_file_transfer` records each handler's verdict (an
+accepted FILE_END is its ACK; the handlers send no ACK of their own) and adds ram-finish-after-ack: a small file's
+FILE_END is accepted before the file is written, the slot leaves RECEIVING, a copy of the FILE_END is answered as
+taken and a late chunk changes nothing, the loop's next pass (`fileRamFinalizeTick`) writes it once; a CRC
+mismatch is refused kRefused with its FILE_CANCEL; a FILE_START over the limit is refused kTooLarge.
+`espnow_user_credentials`: the deferred USER_SYNC work sends no second ACK, and `v4h_user_sync` refuses an
+unsealed or turned-off sync (kRefused) before it allocates or queues (source). `espnow_sensor_wire`,
+`espnow_answers`, `espnow_catchup_serve`, `espnow_bond_agreement`, `espnow_bond_partner_change`,
+`espnow_metadata_text`, `espnow_keyex_hello`, `espnow_wire_layout` and the handler markers of the other ESP-NOW
+suites follow the verdict signature.
+
+Review fixes (step 5b): `espnow_rx_frontend` testFragmentVerdicts adds that a reassembled message its handler
+refused (or that falls under its row minimum) answers its resent last fragment with the same status, opens no
+entry and does not run the handler (forgotten after the reassembly timeout), and testPolicyRefusals that a sealed
+CMD from a session peer not in the registry is kRefused; `espnow_dispatch_policy` runVerdictWalk checks kRefused
+for every REQ_PAIRED row from a sealed unpaired peer; `espnow_reassembly` reports a broken entry as Discarded;
+`espnow_chunked_send` K9 (no copy leaves the radio: NotSent, no strike) and K10 (a long TEXT is never sent again
+as a whole, after busy or a rekey); `espnow_answers`: a STREAM line into a full ring is refused busy;
+`espnow_file_transfer`: closing ESP-NOW after a small file's ACK reports it failed with FILE_CANCEL and frees the
+slot (`fileRamFinalizeDropAll`).
+
 ## ESP-NOW 1.0 step 5a: the ACK frame
 
 ```sh
@@ -4708,7 +4777,8 @@ queued job; J3: an ACK queued while the dispatcher runs a fragmented send goes o
 After review: a sealed refusal ACK marks the tracked send failed through `sendStatusMarkRefused`, which also
 counts the session as alive (pinned); a relayed tagged ACK feeds no broadcast tracking.
 `espnow_channel_core` S5 pins the follow's ACK hook on `ackFor` and tagged ACKs only; `espnow_wire_layout` pins
-`V4PayloadAck` (8 bytes); `espnow_file_transfer` and `espnow_user_credentials` count `v4_queue_sealed_ack`.
+`V4PayloadAck` (8 bytes); `espnow_file_transfer` and `espnow_user_credentials` counted `v4_queue_sealed_ack`
+(removed in step 5b).
 
 ## ESP-NOW session handshake freshness
 

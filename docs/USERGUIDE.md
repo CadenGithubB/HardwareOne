@@ -836,9 +836,18 @@ the frame it answers: a sealed frame gets a sealed acknowledgement in the same s
 session is being rekeyed), a signed frame a signed one. A sender takes only the acknowledgement it
 can trust: a long message or remote command result sent in fragments counts a fragment as delivered
 only on a sealed acknowledgement from that device's session; one from another device, or a signed one
-where a sealed one is expected, is refused and counted (`RX ACKs Refused`). An acknowledgement still
-means "received" (not yet "accepted"). Handshake frames ask for no acknowledgement: their answer is
-the next handshake frame. If the device is too busy to queue an acknowledgement, it sends none and
+where a sealed one is expected, is refused and counted (`RX ACKs Refused`). An acknowledgement means
+**accepted**: the device sends it only after the frame passed every check and was queued, stored or
+acted on (for a fragment of a long message: once the fragment is stored). A frame it cannot take is
+answered with the reason instead: busy, no free slot, too large, not supported by this build, or
+malformed; a paired device that sent a frame over its session that this device does not take from it
+(for example a bond frame from a device that is not its bond partner) is told "refused", and any other
+sender gets no answer. A sender shows Delivered only for an accepted message and Failed for a refused
+one; a long message or command result that meets busy or no slot is sent once more after a short pause.
+An answer of any kind shows that the session works: only sends that get no answer at all (two in a row)
+make a device re-open the session. A copy of a frame that was already taken (because its
+acknowledgement was lost) is acknowledged again and not processed twice. Handshake frames ask for no
+acknowledgement: their answer is the next handshake frame. If the device is too busy to queue an acknowledgement, it sends none and
 counts it (`TX ACKs Dropped`); the sender retries as for a lost frame. The mesh topology view
 (`espnowmeshtopo`) is signed with the group key too. Clearing a passphrase disables the mesh and drops its id: a mesh without a
 passphrase sends and takes nothing (the default mesh is cleared only after another enabled mesh is

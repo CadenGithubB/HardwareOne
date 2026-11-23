@@ -655,8 +655,9 @@ const char* cmd_espnow_forwardlinks(const String& argsInput) {
 
 // FORWARD_RX_HOST_END
 
-void v4hForwardLink(const V4RxCtx& ctx) {
+V4Verdict v4hForwardLink(const V4RxCtx& ctx) {
   forwardLinkIngest(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen);
+  return ctx.accepted();
 }
 
 #endif  // ENABLE_ESPNOW

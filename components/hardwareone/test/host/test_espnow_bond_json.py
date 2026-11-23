@@ -64,7 +64,7 @@ def main():
     send_schema = body(source, 'static void sendBondSchema(', 'System_ESPNow.cpp')
     show_manifest = body(source, 'const char* cmd_bond_showmanifest(', 'System_ESPNow.cpp')
     show_remote = body(source, 'const char* cmd_bond_showremotemanifest(', 'System_ESPNow.cpp')
-    file_end = body(source, 'static void v4h_file_end(', 'System_ESPNow.cpp')
+    file_end = body(source, 'static V4Verdict v4h_file_end(', 'System_ESPNow.cpp')
     web_manifest = body(web, 'static esp_err_t handleEspNowRemoteManifest(', 'WebPage_ESPNow.cpp')
     web_by_hash = body(web_manifest, 'if (strlen(fwHashParam) > 0)', 'handleEspNowRemoteManifest')
 

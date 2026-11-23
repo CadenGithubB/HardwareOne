@@ -27,6 +27,7 @@
 
 #include "System_ESPNow_ForwardCore.h"
 
+#include "System_ESPNow_Verdict.h"  // V4Verdict, what a handler returns (1.0 step 5b)
 struct V4RxCtx;
 
 // ForwardOrigin, ForwardResolve and ForwardTarget are in System_ESPNow_ForwardCore.h.
@@ -55,7 +56,7 @@ ForwardTarget espnowForwardRequestTarget(const char* who, const char* viaWho, ui
                                          uint8_t* outLinkGen);
 
 void espnowForwardRxTick(uint32_t nowMs);
-void v4hForwardLink(const V4RxCtx& ctx);
+V4Verdict v4hForwardLink(const V4RxCtx& ctx);
 
 const char* cmd_espnow_forwardlinks(const String& args);
 

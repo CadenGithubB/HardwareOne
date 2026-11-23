@@ -761,8 +761,9 @@ const char* cmd_espnow_timestatus(const String& argsInput) {
 
 // MESH_TIME_HOST_END
 
-void v4hTimeSync(const V4RxCtx& ctx) {
+V4Verdict v4hTimeSync(const V4RxCtx& ctx) {
   meshTimeKeepFrame(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);
+  return ctx.accepted();
 }
 
 #endif  // ENABLE_ESPNOW

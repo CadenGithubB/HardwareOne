@@ -141,7 +141,7 @@ def source_contract() -> None:
     # The caller answers every allocation error with the existing rejected
     # cancel; no new frame or reason goes on the wire.
     espnow = (COMPONENT / "System_ESPNow.cpp").read_text()
-    start = extract_block(espnow, "static void v4h_file_start(") if "static void v4h_file_start(" in espnow else espnow
+    start = extract_block(espnow, "static V4Verdict v4h_file_start(") if "static V4Verdict v4h_file_start(" in espnow else espnow
     require("FILE_CANCEL_REJECTED" in start, "FILE_START answers an allocation error with FILE_CANCEL_REJECTED")
     # Microphone: asked once before the file exists, with the stored figure
     # (no walk while the speaker waits), and the recording is limited to what

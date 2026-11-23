@@ -94,6 +94,46 @@ EXACT_LENGTH = ('KEY_EX_HELLO', 'KEY_EX_REPLY', 'KEY_EX_CONFIRM', 'SESSION_OPEN'
 ROW = r'\{\s*ESPNOW_V4_TYPE_(\w+)\s*,([^,]*),\s*(ESPNOW_V4_MINLEN_\w+)\s*,\s*(\w+)\s*\}'
 
 
+
+def verdict_src(rxctx_text):
+    """System_ESPNow_Verdict.h (1.0 step 5b) as text, for a harness that pastes
+    V4RxCtx in: its helpers return V4Verdict. Empty for a tree without it."""
+    p = Path(__file__).resolve().parents[2] / 'System_ESPNow_Verdict.h'
+    if 'System_ESPNow_Verdict.h' not in rxctx_text or not p.exists():
+        return ''
+    return p.read_text() + '\n'
+
+
+# Every file that defines a V4RxCtx handler (DESIGN 3.2: Collect, Catchup,
+# ForwardRx, FsList, Handlers_Crypto, MeshTime, PowerEvents and the main file).
+HANDLER_FILES = ('System_ESPNow.cpp', 'System_ESPNow_Handlers_Crypto.cpp', 'System_Collect.cpp',
+                 'System_ESPNow_Catchup.cpp', 'System_ESPNow_ForwardRx.cpp', 'System_ESPNow_MeshTime.cpp',
+                 'System_ESPNow_PowerEvents.cpp', 'System_ESPNow_FsList.cpp')
+
+
+def table_walk(read, handlers):
+    """1.0 step 5b, the table walk: every handler a kV4HandlerTable row names
+    returns a V4Verdict on every path. Each definition (a build may have two:
+    the real one and a not-built stub) is `V4Verdict name(const V4RxCtx&...)`,
+    has no bare `return;`, and ends with a return; no `void` handler of that
+    name is left in any file."""
+    texts = {f: read(f) for f in HANDLER_FILES}
+    for name in handlers:
+        defs = []
+        for f, text in texts.items():
+            assert not re.search(r'\bvoid\s+' + name + r'\s*\(\s*const V4RxCtx', text), \
+                f'{f}: {name} still returns void (every row must return a verdict)'
+            for m in re.finditer(r'^(?:static )?V4Verdict ' + name + r'\(const V4RxCtx&\s*\w*\)\s*\{', text, re.M):
+                body = extract_block(text[m.start():], m.group(0)[:-1].rstrip())
+                defs.append((f, body))
+        assert defs, f'the handler {name} of kV4HandlerTable has no V4Verdict definition in the handler files'
+        for f, body in defs:
+            assert not re.search(r'\breturn\s*;', body), f'{f}: {name} has a path that returns no verdict'
+            inner = body[body.index('{') + 1:body.rindex('}')]
+            assert re.search(r'(?:^|[;{}\n])\s*(?:return\b[^;]*;|#endif)\s*$', inner), \
+                f'{f}: {name} can fall off its end without a verdict'
+    print(f'ok   table walk: all {len(handlers)} handlers of kV4HandlerTable return a verdict on every path')
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -122,7 +162,12 @@ def main():
     minlen_defines = re.findall(r'^#define ESPNOW_V4_MINLEN_\w+\b.*$', wire, re.MULTILINE)
     assert minlen_defines, 'System_ESPNow_Wire.h has no ESPNOW_V4_MINLEN_* constants (the table has no minLen column)'
     types += '\n' + '\n'.join(minlen_defines)
-    ctx = extract_block(rxctx, 'struct V4RxCtx') + ';'
+    ctx = verdict_src(rxctx) + extract_block(rxctx, 'struct V4RxCtx') + ';'
+    # The shared statuses (dependency-free) the handlers and the dispatcher
+    # answer with (1.0 step 5b).
+    if 'System_ESPNow_Verdict.h' in rxctx:
+        ctx = ('#pragma GCC diagnostic ignored "-Wunused-const-variable"\n'
+               + read('System_ESPNow_AnswerCore.h').replace('#pragma once', '') + '\n' + ctx)
     # The policy slice carries every V4_OPC_FLAG_* constant, so the harness never
     # names one that the overlay may lack.
     policy = (source[source.index('using V4OpcodeHandler'):source.index('struct V4OpcodeEntry')]
@@ -130,26 +175,30 @@ def main():
     table = extract_block(source, 'static const V4OpcodeEntry kV4HandlerTable[]') + ';'
     size = 'static constexpr size_t kV4HandlerTableSize = sizeof(kV4HandlerTable) / sizeof(kV4HandlerTable[0]);'
     lookup = extract_block(source, 'static const V4OpcodeEntry* v4_dispatch_lookup(')
-    dispatch = extract_block(source, 'static bool v4_dispatch_table_try(')
+    dispatch = extract_block(source, 'static V4Verdict v4_dispatch_table_try(')
+    # 1.0 step 5b: the dispatcher returns a verdict; its policy-refusal helper
+    # comes with it.
+    if 'static V4Verdict v4_policy_refusal(' in source:
+        dispatch = extract_block(source, 'static V4Verdict v4_policy_refusal(') + '\n\n' + dispatch
     # The TEXT/BOOT receive path runs for real: the queue entry type, the
     # handler and the drain. The drain is an inline step of the espnow_task
     # loop, so its step comment is the marker and the harness wraps the block.
     for text, marker in ((header, 'enum LogMessageType'), (header, 'struct TextQueueEntry'),
                          (source, 'static bool espnowOriginIsKnown('),
-                         (source, 'static void v4h_text('),
+                         (source, 'static V4Verdict v4h_text('),
                          (source, '// 11. Drain text message queue')):
         assert text.count(marker) == 1, f'one definition required: {marker!r}'
     message_types = extract_block(header, 'enum LogMessageType') + ';'
     queue_entry = extract_block(header, 'struct TextQueueEntry') + ';'
     origin_known = extract_block(source, 'static bool espnowOriginIsKnown(')
-    text_handler = extract_block(source, 'static void v4h_text(')
+    text_handler = extract_block(source, 'static V4Verdict v4h_text(')
     # The BOOT row's handler (2026-11-18) runs for real when the tree has it:
     # it hands an authenticated notice from the peer itself to the session
     # rule (a recording double here; espnow_peer_restart_tests runs the rules)
     # and then files it through v4h_text.
     real_handlers = ['v4h_text']
-    if 'static void v4h_boot(' in source:
-        assert source.count('static void v4h_boot(') == 1, 'one definition required: v4h_boot'
+    if 'static V4Verdict v4h_boot(' in source:
+        assert source.count('static V4Verdict v4h_boot(') == 1, 'one definition required: v4h_boot'
         # The production rule header (peerRestartSignalScoped), dependency-free;
         # inlined because the unit is compiled alone.
         core = read('System_ESPNow_PeerRestartCore.h').replace('#pragma once', '')
@@ -160,17 +209,17 @@ def main():
                          '  ++gBootRuleCalls;\n  return static_cast<PeerBootVerdict>(gBootVerdict);\n}\n'
                          '[[maybe_unused]] static void sessionPeerBootSeen(const uint8_t*, uint32_t) {\n'
                          '  ++gBootSeenCalls;\n}\n'
-                         + extract_block(source, 'static void v4h_boot('))
+                         + extract_block(source, 'static V4Verdict v4h_boot('))
         real_handlers.append('v4h_boot')
     # The SESSION_UNKNOWN row's handler runs for real when the tree has it; the
     # rule behind it is a recording double (espnow_peer_restart_tests runs it).
-    if 'static void v4h_session_unknown(' in source:
-        assert source.count('static void v4h_session_unknown(') == 1, 'one definition required'
+    if 'static V4Verdict v4h_session_unknown(' in source:
+        assert source.count('static V4Verdict v4h_session_unknown(') == 1, 'one definition required'
         text_handler += ('\n\n' + extract_block(wire, 'struct __attribute__((packed)) V4PayloadSessionUnknown')
                          + ';\n'
                          'static int sessionUnknownHintReceived(const uint8_t*, const V4PayloadSessionUnknown*) {\n'
                          '  ++gHintRuleCalls;\n  return 0;\n}\n'
-                         + extract_block(source, 'static void v4h_session_unknown('))
+                         + extract_block(source, 'static V4Verdict v4h_session_unknown('))
         real_handlers.append('v4h_session_unknown')
     drain = 'static void drainTextQueueForTest() ' + extract_block(source, '// 11. Drain text message queue')
     # A drain that formats system notices calls formatEspNowSystemNotice;
@@ -209,6 +258,8 @@ def main():
         assert exact == (name in EXACT_LENGTH), f'V4_OPC_LEN_EXACT is on exactly the six handshake rows ({name})'
     handlers = sorted(set(r[3] for r in rows))
     assert handlers, 'no handler rows found in kV4HandlerTable'
+    if 'static V4Verdict v4_dispatch_table_try(' in source:
+        table_walk(read, handlers)
     bond_names = set(BOND_OPCODES) | set(BOND_AGREEMENT_OPCODES)
     def minlen_rows(names):
         return '\n'.join(f'  {{ ESPNOW_V4_TYPE_{n}, {EXPECTED_MINLEN[n]}, {"true" if n in EXACT_LENGTH else "false"} }},'
@@ -217,7 +268,7 @@ def main():
     expected_minlen = (minlen_rows(n for n in present if n not in bond_names) + '\n#if ENABLE_BONDED_MODE\n' +
                        minlen_rows(n for n in present if n in bond_names) + '\n#endif')
     assert 'v4h_text' in handlers, 'the TEXT row must name v4h_text'
-    stubs = '\n'.join(f'static void {name}(const V4RxCtx& ctx) {{ noteHandler("{name}", ctx); }}'
+    stubs = '\n'.join(f'static V4Verdict {name}(const V4RxCtx& ctx) {{ noteHandler("{name}", ctx); return ctx.accepted(); }}'
                       for name in handlers if name not in real_handlers)
     enum_block = extract_block(wire, 'enum EspNowV4Type')
     opcodes = re.findall(r'^\s*ESPNOW_V4_TYPE_(\w+)\s*=', enum_block, re.MULTILINE)

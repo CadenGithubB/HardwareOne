@@ -88,8 +88,8 @@ void notBuilt(const V4RxCtx& ctx, uint8_t op) {
 }
 }  // namespace
 
-void v4hCatchupListReq(const V4RxCtx& ctx) { notBuilt(ctx, ec::kOpListReq); }
-void v4hCatchupReadReq(const V4RxCtx& ctx) { notBuilt(ctx, ec::kOpReadReq); }
+V4Verdict v4hCatchupListReq(const V4RxCtx& ctx) { notBuilt(ctx, ec::kOpListReq); return ctx.accepted(); }
+V4Verdict v4hCatchupReadReq(const V4RxCtx& ctx) { notBuilt(ctx, ec::kOpReadReq); return ctx.accepted(); }
 void catchupServeTick(uint32_t) {}
 
 #else  // ENABLE_ESPNOW_SEND
@@ -507,16 +507,18 @@ void catchupServeJob(void*) {
 
 // ---- RX handlers and the tick (espnow_task) ---------------------------------
 
-void v4hCatchupListReq(const V4RxCtx& ctx) {
+V4Verdict v4hCatchupListReq(const V4RxCtx& ctx) {
   ec::ListReq r;
-  if (!ec::parseListReq(ctx.payload, ctx.payloadLen, &r)) return;   // the table checked minLen
+  if (!ec::parseListReq(ctx.payload, ctx.payloadLen, &r)) return ctx.refuseWith(espnowanswer::kBadRequest);   // the table checked minLen
   intake(ctx, ec::kOpListReq, r.reqId, r.link, r.fromFileId, &r, nullptr);
+  return ctx.accepted();
 }
 
-void v4hCatchupReadReq(const V4RxCtx& ctx) {
+V4Verdict v4hCatchupReadReq(const V4RxCtx& ctx) {
   ec::ReadReq r;
-  if (!ec::parseReadReq(ctx.payload, ctx.payloadLen, &r)) return;
+  if (!ec::parseReadReq(ctx.payload, ctx.payloadLen, &r)) return ctx.refuseWith(espnowanswer::kBadRequest);
   intake(ctx, ec::kOpReadReq, r.reqId, r.link, 1, nullptr, &r);
+  return ctx.accepted();
 }
 
 void catchupServeTick(uint32_t nowMs) {

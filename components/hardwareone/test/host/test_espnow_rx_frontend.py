@@ -77,6 +77,15 @@ HOP_RULE = 'static bool v4_relay_hop_refused(uint8_t type)'
 UNPAIR_SLOT_COMMENT = "// Clear the peer's mesh-liveness slot regardless of mode."
 
 
+
+def verdict_src(rxctx_text):
+    """System_ESPNow_Verdict.h (1.0 step 5b) as text, for a harness that pastes
+    V4RxCtx in: its helpers return V4Verdict. Empty for a tree without it."""
+    p = Path(__file__).resolve().parents[2] / 'System_ESPNow_Verdict.h'
+    if 'System_ESPNow_Verdict.h' not in rxctx_text or not p.exists():
+        return ''
+    return p.read_text() + '\n'
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -112,6 +121,9 @@ def main():
     defines = [m.group(0) for m in WIRE_DEFINES.finditer(wire)]
     if len(defines) != 6:
         sys.exit(f'FAIL extraction: expected six ESPNOW_V4_* #defines, found {len(defines)}')
+    dup_flag = re.search(r'^#define ESPNOW_V4_ACK_FLAG_DUPLICATE\b.*$', wire, re.MULTILINE)
+    if dup_flag:
+        defines.append(dup_flag.group(0))
     # The receive table's minimum lengths (one per opcode).
     defines += re.findall(r'^#define ESPNOW_V4_MINLEN_\w+\b.*$', wire, re.MULTILINE)
     hops = re.search(r'^#define MESH_ROUTE_MAX_HOPS\b.*$', router, re.MULTILINE)
@@ -137,7 +149,7 @@ def main():
         extract_block(header, 'struct MeshPeerHealth') + ';',
         extract_block(header, 'struct MeshPeerMeta') + ';',
         one(router, 'struct MeshRelayMetrics') + ';',
-        one(rxctx, 'struct V4RxCtx') + ';',
+        verdict_src(rxctx) + one(rxctx, 'struct V4RxCtx') + ';',
         note_decl.group(0)])
 
     # Duplicate rings: storage, then TTL + functions through v4_dedup_flush_origin.
@@ -155,7 +167,8 @@ def main():
     for name in REAL_HANDLERS:
         if name not in handlers:
             sys.exit(f'FAIL extraction: kV4HandlerTable does not name {name}')
-    stubs = '\n'.join(f'static void {name}(const V4RxCtx& ctx) {{ noteHandler("{name}", ctx); }}'
+    stubs = '\n'.join(f'static V4Verdict {name}(const V4RxCtx& ctx) {{ noteHandler("{name}", ctx); '
+                      f'return stubVerdict("{name}", ctx); }}'
                       for name in handlers if name not in REAL_HANDLERS)
 
     # Peer slots. The reclaim and release helpers exist only after the fix; a
@@ -202,7 +215,7 @@ def main():
     if HOP_RULE in source:
         relay.append(one(source, HOP_RULE))
     relay += [one(source, 'static void v4_relay_maybe_forward('),
-              one(source, 'static void v4h_relay_data(')]
+              one(source, 'static V4Verdict v4h_relay_data(')]
     incoming = source[source.rindex('static bool v4_try_handle_incoming('):]
     incoming = extract_block(incoming, 'static bool v4_try_handle_incoming(')
     # The must-understand drop counter (1.0 header flag classes), where the tree has it.
@@ -229,6 +242,22 @@ def main():
                         one(source, 'static void v4_rx_ack(')])
     plaintext_rule = one(source, 'static inline bool v4_plaintext_type_allowed(')
     relay.insert(0, plaintext_rule)
+    # The real reassembler (1.0 step 5b answers every fragment): its constants,
+    # entry, table pointer, helpers, v4_reasm_accept and the dispatcher's step.
+    reasm_constants = re.findall(r'^#define V4_(?:MAX_FRAGMENT_PAYLOAD|FRAG_MAX|REASM_MAX_MSG|REASM_MAX|'
+                                 r'REASM_TIMEOUT_MS)\b.*$', source, re.MULTILINE)
+    if len(reasm_constants) != 5:
+        sys.exit(f'FAIL extraction: expected five V4 reassembly #defines, found {len(reasm_constants)}')
+    table_ptr = re.search(r'^static V4ReasmEntry\* gV4Reasm = nullptr;.*$', source, re.MULTILINE)
+    reasm = '\n\n'.join(reasm_constants + [one(source, 'struct V4ReasmEntry') + ';', table_ptr.group(0)] + [
+        one(source, m) for m in ('static void v4_reasm_reset(V4ReasmEntry& e)', 'static void v4_reasm_gc(uint32_t nowMs)',
+                                 'static V4ReasmEntry* v4_reasm_find_or_alloc(', 'static void v4_reasm_release(',
+                                 'static V4ReasmOutcome v4_reasm_accept(')])
+    # The refused-message memory (review of step 5b), where the tree has it, then the step.
+    refused_at = source.find('// Messages whose reassembly ended in a refusal')
+    if refused_at >= 0:
+        reasm += '\n\n' + source[refused_at:source.index('static bool v4_reasm_step(')]
+    reasm += '\n\n' + one(source, 'static bool v4_reasm_step(')
     harness = (HERE / 'espnow_rx_frontend_harness.cpp').read_text()
     for tag, value in [('// INSERT_WIRE', wire_types),
                        ('// INSERT_PEER_TYPES', peer_types),
@@ -237,12 +266,14 @@ def main():
                        ('// INSERT_SLOTS', '\n\n'.join(slots)),
                        ('// INSERT_POLICY', policy),
                        ('// INSERT_RELAY', '\n\n'.join(relay)),
-                       ('// INSERT_HEARTBEAT', one(source, 'static void v4h_heartbeat(')),
+                       ('// INSERT_HEARTBEAT', one(source, 'static V4Verdict v4h_heartbeat(')),
                        ('// INSERT_HANDLER_STUBS', stubs),
                        ('// INSERT_TABLE', table + '\n' + size),
                        ('// INSERT_LOOKUP', one(source, 'static const V4OpcodeEntry* v4_dispatch_lookup(')),
-                       ('// INSERT_DISPATCH', one(source, 'static bool v4_dispatch_table_try(')),
+                       ('// INSERT_DISPATCH', one(source, 'static V4Verdict v4_dispatch_table_try(')),
                        ('// INSERT_OUTCOME', one(source, 'enum class V4ReasmOutcome') + ';'),
+                       ('// INSERT_REASM', reasm),
+                       ('// INSERT_REFUSAL_HELPER', one(source, 'static V4Verdict v4_policy_refusal(')),
                        ('// INSERT_MESH_ID_GATE', gate),
                        ('// INSERT_ACK_WAIT', ack_wait),
                        ('// INSERT_ACK', ack),
@@ -276,8 +307,8 @@ def main():
 
     # Source contracts (the behavioral run above is the evidence on a tree that
     # predates the helpers).
-    if 'v4_dedup_frame_seen(recv_info->src_addr, h, wasAuthenticated' not in incoming:
-        failures.append('v4_try_handle_incoming does not choose the duplicate ring by what the frame proved')
+    if 'v4_accept_key(recv_info->src_addr, h, wasAuthenticated' not in incoming:
+        failures.append('v4_try_handle_incoming does not choose the accept-memory ring by what the frame proved')
     # Secrets are compared in constant time: the group tag (the harness maps
     # sodium_memcmp to memcmp, so only the source can show which one is called)
     # and the bond session token.
@@ -323,7 +354,9 @@ def main():
     # Review of step 5a: the ACKs queued while a fragmented send waits go out
     # from inside the wait (on the dispatcher), and a refusal ACK counts the
     # session as alive.
-    chunked = extract_block(source[source.rindex('bool v4_send_encrypted_chunked('):], 'bool v4_send_encrypted_chunked(')
+    attempt = 'static V4SendResult v4_send_chunked_attempt('
+    chunked = (extract_block(source, attempt) if attempt in source else
+               extract_block(source[source.rindex('bool v4_send_encrypted_chunked('):], 'bool v4_send_encrypted_chunked('))
     wait = chunked[chunked.find('while ((millis() - waitStart) < ACK_TIMEOUT_MS)'):]
     if 'espnowtx::drainAcksOnDispatcher();' not in wait[:wait.find('vTaskDelay')]:
         failures.append('the fragment-wait loop of v4_send_encrypted_chunked does not send the queued ACKs')

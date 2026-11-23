@@ -83,7 +83,7 @@ def check_sources(component: Path) -> None:
                      "fwdPeerName(", "fwdNameOf(", "fwdQueryIfDue(", "fwdEntryFor("):
             require(call not in span, f"nothing that may send, print, allocate or look up pairing runs under the lock ({call})")
     require("forwardLinkIngest(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen);" in
-            extract_block(source, "void v4hForwardLink(const V4RxCtx& ctx)"), "v4hForwardLink hands the frame to the ingest")
+            extract_block(source, "V4Verdict v4hForwardLink(const V4RxCtx& ctx)"), "v4hForwardLink hands the frame to the ingest")
     send = strip_comments(extract_block(source, "static bool fwdSend(const uint8_t mac[6], const uint8_t* payload, uint16_t len)"))
     require("espnowtx::sendAead(mac, ESPNOW_V4_TYPE_FORWARD_LINK, 0, generateMessageId(), payload, len, 1)" in send,
             "a forward-link frame is a session unicast")

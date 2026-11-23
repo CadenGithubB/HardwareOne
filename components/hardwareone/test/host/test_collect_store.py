@@ -99,7 +99,7 @@ def glue_contract(glue: str) -> None:
                         (r"std::vector", "std::vector"), (r"\bJsonDocument\b", "a JSON document"),
                         (r"xTaskCreate", "a new task")):
         require(not re.search(banned, code), f"System_Collect.cpp: no {why}")
-    radio = ("void v4hCatchupListResp(const V4RxCtx& ctx)", "void v4hCatchupReadResp(const V4RxCtx& ctx)",
+    radio = ("V4Verdict v4hCatchupListResp(const V4RxCtx& ctx)", "V4Verdict v4hCatchupReadResp(const V4RxCtx& ctx)",
              "void tickLocked(uint32_t now)", "void stepListing(uint32_t now)", "void stepFetching(uint32_t now)",
              "void finishWindow(uint32_t now)", "void handleReadStatus(uint32_t now)", "void startNext(uint32_t now)",
              "void refreshPeers(uint32_t now)", "void jobFinished(uint32_t now)", "bool sendList(uint32_t now)",
@@ -108,7 +108,7 @@ def glue_contract(glue: str) -> None:
         body = extract_block(glue, marker)
         require("collectstore::" not in body and "openGuarded" not in body and "FsLockGuard" not in body,
                 f"{marker}: espnow_task never touches the card")
-    for marker in ("void v4hCatchupListResp(const V4RxCtx& ctx)", "void v4hCatchupReadResp(const V4RxCtx& ctx)"):
+    for marker in ("V4Verdict v4hCatchupListResp(const V4RxCtx& ctx)", "V4Verdict v4hCatchupReadResp(const V4RxCtx& ctx)"):
         body = extract_block(glue, marker)
         require("xSemaphoreTake" not in body and "sendAead" not in body, f"{marker}: copies only, no lock, no send")
     for marker in ("void runJob()", "void collectWriteTick()"):

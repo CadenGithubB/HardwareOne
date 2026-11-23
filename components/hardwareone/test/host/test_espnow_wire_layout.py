@@ -200,7 +200,7 @@ BUDGET_SITES = (
     ('the flood forward size check',
      r'payloadLen \+ ESPNOW_V4_BROADCAST_AUTH_TAG_LEN \+ sizeof\(EspNowV4Header\) > 250\) return;'),
     ('the relay wrap limit', r'innerLen > ESPNOW_V4_RELAY_MAX_INNER_FRAME\)'),
-    ('the PEER_LIST receive limit', r'hdr\.entryCount > ESPNOW_V4_PEER_LIST_MAX_ENTRIES\) return;'),
+    ('the PEER_LIST receive limit', r'hdr\.entryCount > ESPNOW_V4_PEER_LIST_MAX_ENTRIES\) return ctx\.refuse\(\);'),
     ('the signed BOOT limit', r'len <= ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT\)'),
 )
 

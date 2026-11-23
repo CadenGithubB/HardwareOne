@@ -284,6 +284,7 @@ static void resetWorld() {
 
 // Hands a recorded frame to a receive handler as the dispatcher would: the
 // frame's own header msgId, the answerer as source.
+static V4Verdict gLastReceiveVerdict{};
 static void receive(const AirFrame& f) {
   esp_now_recv_info info{};
   info.src_addr = kAnswerer;
@@ -297,8 +298,8 @@ static void receive(const AirFrame& f) {
   ctx.payloadLen = static_cast<uint16_t>(f.payload.size());
   ctx.isPaired = ctx.isAuthenticated = ctx.isSessionEncrypted = true;
   ctx.deviceName = "peerB";
-  if (f.type == ESPNOW_V4_TYPE_CMD_RESP) v4h_cmd_resp(ctx);
-  else if (f.type == ESPNOW_V4_TYPE_STREAM) v4h_stream(ctx);
+  if (f.type == ESPNOW_V4_TYPE_CMD_RESP) gLastReceiveVerdict = v4h_cmd_resp(ctx);
+  else if (f.type == ESPNOW_V4_TYPE_STREAM) gLastReceiveVerdict = v4h_stream(ctx);
   else check(false, "receive: unexpected frame type");
 }
 
@@ -414,9 +415,21 @@ static void testStreamLinesAreAnswers() {
   espnowanswer::packHeader(empty.payload.data(), 3, 0);
   receive(empty);
   check(gState.streamQueueHead == 0, "a header-only STREAM files nothing");
+
+  // A full stream ring: the line is dropped, counted and answered busy (1.0 step 5b).
+  resetWorld();
+  v4_send_stream_line(kRequester, 7, "x", 1);
+  gState.streamQueueTail = 0;
+  gState.streamQueueHead = 15;  // one short of the tail: full
+  receive(air[0]);
+  check(gLastReceiveVerdict.kind == V4VerdictKind::Refused && gLastReceiveVerdict.status == espnowanswer::kBusy &&
+            gState.streamQueueHead == 15,
+        "a STREAM line into a full ring is refused busy and not filed");
+  gState.streamQueueHead = gState.streamQueueTail = 0;
 }
 
 // A CMD frame as the dispatcher hands it to v4h_cmd.
+static V4Verdict gLastCmdVerdict{};
 static void receiveCmd(const uint8_t* from, uint32_t msgId, const char* text, bool sealed = true) {
   esp_now_recv_info info{};
   info.src_addr = const_cast<uint8_t*>(from);
@@ -431,7 +444,7 @@ static void receiveCmd(const uint8_t* from, uint32_t msgId, const char* text, bo
   ctx.isPaired = ctx.isAuthenticated = true;
   ctx.isSessionEncrypted = sealed;
   ctx.deviceName = "peerA";
-  v4h_cmd(ctx);
+  gLastCmdVerdict = v4h_cmd(ctx);
 }
 
 // The answer on the air is {reqId, status} under a msgId of the answerer's
@@ -458,11 +471,14 @@ static void testCmdSlotBusy() {
   check(air.empty() && gState.deferredCmdPending && gState.deferredCmdMsgId == 300 &&
             std::strcmp(gState.deferredCmdPayload, "admin:pw:status") == 0,
         "slot free: the CMD waits for the task, nothing is answered");
+  check(gLastCmdVerdict.kind == V4VerdictKind::Accepted, "slot free: the CMD is accepted (its ACK says 0)");
   receiveCmd(kRequester, 300, "admin:pw:status");
   check(air.empty(), "the waiting command again: no answer (it will run)");
   receiveCmd(kRequester, 301, "admin:pw:status", false);
   check(air.empty(), "an unsealed CMD while the slot is taken: no answer");
   receiveCmd(kRequester, 301, "admin:pw:uptime");
+  check(gLastCmdVerdict.kind == V4VerdictKind::Refused && gLastCmdVerdict.status == espnowanswer::kBusy,
+        "slot taken: the CMD is refused busy (its ACK says busy, 1.0 step 5b)");
   checkAnswer("slot taken", 301, espnowanswer::kBusy, "busy", false);
 }
 

@@ -96,7 +96,7 @@ def main():
         ctors.append(header[m.end():body.start()] if body else '')
     check('B3b the EspNowState constructor does not initialize a deviceName member',
           bool(ctors) and all(re.search(r'\bdeviceName\s*\(', c) is None for c in ctors))
-    text_handler = definition(source, 'static void v4h_text(', 'System_ESPNow.cpp')
+    text_handler = definition(source, 'static V4Verdict v4h_text(', 'System_ESPNow.cpp')
     check('B4 v4h_text still files BOOT frames as MSG_SYSTEM_EVENT',
           'slot.msgType = (ctx.h->type == ESPNOW_V4_TYPE_BOOT) ? MSG_SYSTEM_EVENT : MSG_TEXT;' in text_handler)
 

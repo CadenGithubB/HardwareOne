@@ -50,7 +50,7 @@ static void check(bool ok, const char* what) {
   ++checks;
   if (!ok) { ++failures; std::fprintf(stderr, "FAIL: %s\n", what); }
 }
-struct Fed { bool complete; const uint8_t* payload; uint16_t len; };
+struct Fed { bool complete; const uint8_t* payload; uint16_t len; int outcome; };  // outcome -1: not reported
 static Fed feed(const uint8_t* src, uint8_t type, uint32_t msgId, uint8_t idx, uint8_t cnt, uint16_t len, uint8_t fill) {
   std::vector<uint8_t> data(len, fill);
   EspNowV4Header h{};
@@ -110,13 +110,22 @@ static void reassemblyCases() {
   // 3 duplicate fragment ignored
   table(true);
   feed(A, ESPNOW_V4_TYPE_CMD_RESP, 12, 0, 3, 200, 1);
-  check(!feed(A, ESPNOW_V4_TYPE_CMD_RESP, 12, 0, 3, 200, 9).complete && gV4Reasm[0].received == 1,
-        "3: duplicate fragment ignored");
+  f = feed(A, ESPNOW_V4_TYPE_CMD_RESP, 12, 0, 3, 200, 9);
+  check(!f.complete && gV4Reasm[0].received == 1, "3: duplicate fragment ignored");
+#if HW1_REASM_OUTCOMES
+  check(f.outcome == (int)V4ReasmOutcome::Duplicate, "3: the duplicate is reported as Duplicate (answered again, 1.0 step 5b)");
+  check(feed(A, ESPNOW_V4_TYPE_CMD_RESP, 12, 1, 3, 200, 2).outcome == (int)V4ReasmOutcome::Pending,
+        "3: a new fragment of the message is Pending (ACK 0 for it)");
+#endif
 
   // 4 a fragment whose fragCount disagrees with its entry is dropped, the entry kept
   table(true);
   feed(A, ESPNOW_V4_TYPE_CMD_RESP, 13, 0, 3, 200, 1);
-  check(!feed(A, ESPNOW_V4_TYPE_CMD_RESP, 13, 1, 5, 200, 2).complete, "4: count-mismatch fragment not complete");
+  f = feed(A, ESPNOW_V4_TYPE_CMD_RESP, 13, 1, 5, 200, 2);
+  check(!f.complete, "4: count-mismatch fragment not complete");
+#if HW1_REASM_OUTCOMES
+  check(f.outcome == (int)V4ReasmOutcome::Mismatch, "4: a count mismatch is reported as Mismatch (kBadRequest)");
+#endif
   check(gV4Reasm[0].received == 1 && !gV4Reasm[0].have[1] && gV4Reasm[0].active,
         "4: count-mismatch fragment (frame 2/5 into a 3-fragment entry) dropped, entry kept");
   table(true);
@@ -133,7 +142,11 @@ static void reassemblyCases() {
 
   // 6 a fragCount above V4_FRAG_MAX gets no entry
   table(true);
-  check(!feed(A, ESPNOW_V4_TYPE_CMD_RESP, 15, 0, 30, 200, 1).complete, "6: 30-fragment message not complete");
+  f = feed(A, ESPNOW_V4_TYPE_CMD_RESP, 15, 0, 30, 200, 1);
+  check(!f.complete, "6: 30-fragment message not complete");
+#if HW1_REASM_OUTCOMES
+  check(f.outcome == (int)V4ReasmOutcome::TooLarge, "6: an over-budget fragCount is reported as TooLarge (kTooLarge)");
+#endif
   check(!gV4Reasm[0].active && !gV4Reasm[1].active, "6: 30-fragment message gets no reassembly entry");
 
   // 7 the finding: indices 0-18 at 202 B, index 20 at 160 B, then a frame claiming
@@ -145,6 +158,10 @@ static void reassemblyCases() {
   feed(B, ESPNOW_V4_TYPE_CMD_RESP, 16, 20, 21, 160, 1);
   f = feed(B, ESPNOW_V4_TYPE_CMD_RESP, 16, 19, 20, 202, 1);
   check(!f.complete, "7: index-19-of-20 frame must not complete a 21-fragment entry");
+#if HW1_REASM_OUTCOMES
+  check(f.outcome == (int)V4ReasmOutcome::Discarded || f.outcome == (int)V4ReasmOutcome::Mismatch,
+        "7: the inconsistent fragment is refused (Mismatch, or Discarded when it broke the entry)");
+#endif
   if (f.complete) {
     check(f.len <= gV4Reasm[1].bufferSize, "7: completed size within bufferSize");
     consume(f);
@@ -162,6 +179,9 @@ static void lateStrideCase() {
   for (uint8_t i = 0; i < 19; i++) feed(B, ESPNOW_V4_TYPE_CMD_RESP, 17, i, 21, 202, 1);
   const Fed f = feed(B, ESPNOW_V4_TYPE_CMD_RESP, 17, 19, 21, 202, 1);
   check(!f.complete, "8: completion larger than the buffer (20*202+200 = 4240 > 4200) is refused");
+#if HW1_REASM_OUTCOMES
+  check(f.outcome == (int)V4ReasmOutcome::Discarded, "8: and reported Discarded (the message is remembered refused)");
+#endif
   if (f.complete) {
     check(f.len <= gV4Reasm[1].bufferSize, "8: completed size within bufferSize");
     consume(f);
@@ -177,6 +197,14 @@ static void gcCase() {
   feed(B, ESPNOW_V4_TYPE_CMD_RESP, 19, 0, 3, 200, 1);
   clockMs += V4_REASM_TIMEOUT_MS + 1;
   check(!feed(C, ESPNOW_V4_TYPE_CMD_RESP, 20, 0, 2, 200, 1).complete, "9: third sender pending after GC");
+#if HW1_REASM_OUTCOMES
+  // Both entries in use and fresh: a third message gets no entry, and none is opened for it.
+  feed(A, ESPNOW_V4_TYPE_CMD_RESP, 22, 0, 3, 200, 1);
+  const Fed full = feed(B, ESPNOW_V4_TYPE_CMD_RESP, 23, 0, 3, 200, 1);
+  check(full.outcome == (int)V4ReasmOutcome::NoSlot && !(gV4Reasm[0].active && gV4Reasm[0].msgId == 23) &&
+        !(gV4Reasm[1].active && gV4Reasm[1].msgId == 23),
+        "9: a full pool reports NoSlot (kNoSlot) and opens no entry");
+#endif
   check(gV4Reasm[0].active && gV4Reasm[0].msgId == 20 && gEspNow->routerMetrics.v4FragRxGc == 2,
         "9: GC evicted both stale entries");
   table(false);
@@ -186,7 +214,11 @@ static void gcCase() {
 //    and the dispatch cleanup after a 2-fragment TEXT (which skips reassembly) returns.
 static void nullTableCase() {
   table(false);
-  check(!feed(A, ESPNOW_V4_TYPE_CMD_RESP, 21, 0, 2, 200, 1).complete, "10: no table: fragment dropped");
+  const Fed none = feed(A, ESPNOW_V4_TYPE_CMD_RESP, 21, 0, 2, 200, 1);
+  check(!none.complete, "10: no table: fragment dropped");
+#if HW1_REASM_OUTCOMES
+  check(none.outcome == (int)V4ReasmOutcome::NoSlot, "10: no table: every fragment is answered NoSlot");
+#endif
   EspNowV4Header t{};
   t.type = ESPNOW_V4_TYPE_TEXT; t.msgId = 21; t.fragCount = 2;
   esp_now_recv_info ri{const_cast<uint8_t*>(A), nullptr, nullptr};

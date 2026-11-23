@@ -1,6 +1,7 @@
 // Host harness for test_espnow_msgid_dedup.py: this device's message numbers
 // (System_ESPNow_MsgIdCore.h and the production generateMessageId) against the
-// production receive duplicate ring (v4_dedup_ring_seen_and_insert). The runner
+// production receive accept memory (v4_accept_lookup / v4_accept_record, the
+// classed duplicate ring with the verdict of 1.0 step 5b). The runner
 // pastes the production code at the INSERT markers; the doubles are a clock and
 // an EspNowState holding only the counter.
 #include <stdint.h>
@@ -31,13 +32,20 @@ static int gFailures = 0, gChecks = 0;
                               else { printf("PASS: " __VA_ARGS__); printf("\n"); } } while (0)
 
 static const uint8_t kSender[6] = {0x02, 0, 0, 0, 0, 0x11};
-static constexpr int kRing = 64;
+static constexpr int kRing = 128;
 static V4DedupEntry gRing[kRing];
 static int gRingIdx = 0;
 
 static void ringReset() { memset(gRing, 0, sizeof(gRing)); gRingIdx = 0; }
+static V4AcceptKey key(V4DedupClass cls = V4DedupClass::Sealed) {
+  return V4AcceptKey{gRing, kRing, &gRingIdx, cls, kSender};
+}
+// The receive path for an accepted frame: a copy is known, a new one is
+// processed and remembered as accepted.
 static bool seen(uint32_t id, uint8_t frag = 0) {
-  return v4_dedup_ring_seen_and_insert(gRing, kRing, gRingIdx, V4DedupClass::Sealed, kSender, id, frag);
+  if (v4_accept_lookup(key(), id, frag) != V4AcceptMemo::None) return true;
+  v4_accept_record(key(), id, frag, V4AcceptMemo::Accepted);
+  return false;
 }
 
 int main() {
@@ -111,6 +119,37 @@ int main() {
   CHECK(!seen(77) && seen(77), "D4 setup: 77 new, then a duplicate");
   gNowMs += V4_DEDUP_TTL_MS + 1;
   CHECK(!seen(77), "D4 after the TTL the same number is accepted again");
+
+  // A1-A5: the accept memory (1.0 step 5b, DESIGN 3.1 G4).
+  ringReset();
+  v4_accept_record(key(), 500, 0, V4AcceptMemo::Accepted);
+  v4_accept_record(key(), 501, 0, V4AcceptMemo::Silent);
+  CHECK(v4_accept_lookup(key(), 500, 0) == V4AcceptMemo::Accepted &&
+        v4_accept_lookup(key(), 501, 0) == V4AcceptMemo::Silent,
+        "A1 an accepted frame is remembered as accepted (re-ACKed), a silent one as silent (a retry stays silent)");
+  // A busy refusal is never recorded (the receive path records only Accepted
+  // and Silent): the retry finds nothing and is processed, then remembered.
+  CHECK(v4_accept_lookup(key(), 502, 0) == V4AcceptMemo::None, "A2 a refused frame leaves no entry");
+  v4_accept_record(key(), 502, 0, V4AcceptMemo::Accepted);  // the retry, accepted
+  CHECK(v4_accept_lookup(key(), 502, 0) == V4AcceptMemo::Accepted, "A2 its retry is processed and then remembered");
+  CHECK(v4_accept_lookup(key(V4DedupClass::Group), 500, 0) == V4AcceptMemo::None &&
+        v4_accept_lookup(key(), 500, 1) == V4AcceptMemo::None,
+        "A3 the class and the fragment are part of the key");
+  v4_accept_record(key(), 503, 2, V4AcceptMemo::Silent);
+  gNowMs += V4_DEDUP_TTL_MS + 1;
+  CHECK(v4_accept_lookup(key(), 503, 2) == V4AcceptMemo::None, "A4 an entry past the TTL is forgotten");
+  const int before = gRingIdx;
+  v4_accept_record(key(), 503, 2, V4AcceptMemo::Accepted);
+  CHECK(gRingIdx == before && v4_accept_lookup(key(), 503, 2) == V4AcceptMemo::Accepted,
+        "A4 recording it again refreshes the same entry with the new verdict");
+  // A5: every stored fragment of a 21-fragment message is remembered, so a
+  // fragment sent again after the message completed is answered from here.
+  ringReset();
+  for (uint8_t f = 0; f < 21; f++) v4_accept_record(key(), 600, f, V4AcceptMemo::Accepted);
+  bool allKnown = true;
+  for (uint8_t f = 0; f < 21; f++) allKnown = allKnown && v4_accept_lookup(key(), 600, f) == V4AcceptMemo::Accepted;
+  CHECK(allKnown, "A5 the fragments of a completed 21-fragment message are all remembered");
+  static_assert(sizeof(V4DedupEntry) == 20, "the verdict sits in the entry's tail padding");
 
   printf("espnow msgid dedup: %d/%d passed\n", gChecks - gFailures, gChecks);
   return gFailures ? 1 : 0;

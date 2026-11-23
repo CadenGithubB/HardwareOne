@@ -190,7 +190,7 @@ def check_sources(component: Path) -> None:
             "the forward code never takes this device's own streaming flags for the partner's streams")
     # The worker applies every stream switch of a loop: one per sensor, not
     # the last frame only (a bond master switches several back to back).
-    ctrl_rx = strip_comments(extract_block(espnow, "static void v4h_stream_ctrl(const V4RxCtx& ctx)"))
+    ctrl_rx = strip_comments(extract_block(espnow, "static V4Verdict v4h_stream_ctrl(const V4RxCtx& ctx)"))
     require("espnowsensor::streamCtrlPut(gEspNow->bondDeferredStreamCtrl, sc.sensorType, sc.enable != 0);" in ctrl_rx
             and ctrl_rx.count("bondDeferredStreamCtrl") == 1,
             "v4h_stream_ctrl adds the switch to the ones waiting, per sensor, and touches nothing else of them")
@@ -201,7 +201,7 @@ def check_sources(component: Path) -> None:
             "step 9f2 applies every pending switch, each sensor's own")
     require("bondDeferredStreamCtrlSensor" not in espnow and "bondDeferredStreamCtrlPending" not in espnow,
             "no single deferred stream-control slot is left")
-    status_rx = strip_comments(extract_block(espnow, "static void v4hBondSensorStatus(const V4RxCtx& ctx)"))
+    status_rx = strip_comments(extract_block(espnow, "static V4Verdict v4hBondSensorStatus(const V4RxCtx& ctx)"))
     require("remoteSensorIngestBondStatus(ctx.recv_info->src_addr" in status_rx, "185 goes to the bond status ingest")
 
 

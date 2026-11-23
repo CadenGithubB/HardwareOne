@@ -138,7 +138,7 @@ def main():
     init = body(espnow, 'bool initEspNow(', 'System_ESPNow.cpp')
     rollback_queue = body(espnow, 'void espnowPairRollbackRevoked(', 'System_ESPNow.cpp')
     rollback_job = body(espnow, 'static void runDeferredPairRollback(', 'System_ESPNow.cpp')
-    pair_request = body(espnow, 'static void v4h_pair_request(', 'System_ESPNow.cpp')
+    pair_request = body(espnow, 'static V4Verdict v4h_pair_request(', 'System_ESPNow.cpp')
     manifest_resp = body(espnow, 'static void processBondModeManifestResp(', 'System_ESPNow.cpp')
     forget_crypto = body(espnow, 'static bool espnowForgetPeerCrypto(', 'System_ESPNow.cpp')
 

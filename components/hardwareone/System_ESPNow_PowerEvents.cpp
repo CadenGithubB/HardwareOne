@@ -1350,23 +1350,27 @@ const char* cmd_espnow_events(const String& argsInput) {
 
 // POWER_EVENTS_HOST_END
 
-void v4hPowerStatus(const V4RxCtx& ctx) {
+V4Verdict v4hPowerStatus(const V4RxCtx& ctx) {
   powerEventsIngestPower(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen, /*bondLink=*/false);
+  return ctx.accepted();
 }
 
-void v4hEventPush(const V4RxCtx& ctx) {
+V4Verdict v4hEventPush(const V4RxCtx& ctx) {
   powerEventsIngestEvent(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen, /*bondLink=*/false);
+  return ctx.accepted();
 }
 
 #if ENABLE_BONDED_MODE
 // BOND_POWER_STATUS / BOND_EVENT_PUSH: the receive table let them through only
 // from the configured bond partner over its session (REQ_BOND_PEER).
-void v4hBondPowerStatus(const V4RxCtx& ctx) {
+V4Verdict v4hBondPowerStatus(const V4RxCtx& ctx) {
   powerEventsIngestPower(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen, /*bondLink=*/true);
+  return ctx.accepted();
 }
 
-void v4hBondEventPush(const V4RxCtx& ctx) {
+V4Verdict v4hBondEventPush(const V4RxCtx& ctx) {
   powerEventsIngestEvent(ctx.recv_info->src_addr, ctx.deviceName, ctx.payload, ctx.payloadLen, /*bondLink=*/true);
+  return ctx.accepted();
 }
 #endif
 

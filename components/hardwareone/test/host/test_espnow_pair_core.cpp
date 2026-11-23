@@ -386,7 +386,7 @@ static void sourceContract() {
   auto has = [](const std::string& s, const char* needle) { return s.find(needle) != std::string::npos; };
   CHECK(has(owner, "#include \"System_ESPNow_PairCore.h\""));
   CHECK(has(owner, "espnowpair::onRequest(gPair, mac, name, (uint32_t)millis(), paired, windowOpen)"));
-  CHECK(has(owner, "case espnowpair::Reply::Accept: sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_ACCEPT); return;"));
+  CHECK(has(owner, "case espnowpair::Reply::Accept: sendPairCtrl(mac, ESPNOW_V4_TYPE_PAIR_ACCEPT); return ctx.accepted();"));
   CHECK(has(owner, "espnowpair::onAnswer(gPair, mac, answer, (uint32_t)millis(), &ended)"));
   CHECK(has(owner, "const espnowpair::Tick t = espnowpair::tick(gPair, now);"));
   CHECK(has(owner, "if (t.resendRequest) sendPairCtrl(t.requestMac, ESPNOW_V4_TYPE_PAIR_REQUEST);"));

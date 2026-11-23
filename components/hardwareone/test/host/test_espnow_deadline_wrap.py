@@ -131,7 +131,7 @@ def main():
     if 'sensorLeaseLapsed(i, (uint32_t)now)' not in task or '>= gSensorLeaseExpiresAt' in task:
         failures.append('sensorBroadcasterTask compares the lease deadline with an absolute >= '
                         'instead of calling sensorLeaseLapsed(i, (uint32_t)now)')
-    heartbeat = one(espnow, 'static void v4h_heartbeat(', 'System_ESPNow.cpp')
+    heartbeat = one(espnow, 'static V4Verdict v4h_heartbeat(', 'System_ESPNow.cpp')
     if ('sessionPrewarmInCooldown(*pw, now)' not in heartbeat or
             'sessionPrewarmNoteAttempt(pw, now)' not in heartbeat or
             '>= pw->cooldownUntilMs' in heartbeat or '+ kSessionPrewarmCooldownMs' in heartbeat):

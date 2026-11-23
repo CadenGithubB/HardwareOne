@@ -13,6 +13,10 @@
 #include <string.h>
 #include <type_traits>
 #include "System_ESPNow_Wire.h"  // EspNowV4Header
+#include "System_ESPNow_Verdict.h"     // V4Verdict, the handlers' return type
+
+static_assert(kV4VerdictRefused == espnowanswer::kRefused && kV4VerdictSharedLast == espnowanswer::kSharedLast,
+              "System_ESPNow_Verdict.h uses the shared statuses");
 
 struct V4RxCtx {
   const esp_now_recv_info* recv_info;
@@ -58,6 +62,20 @@ struct V4RxCtx {
     if (len) *len = (size_t)payloadLen - off;
     return payload + off;
   }
+
+  // The verdict helpers handlers return (DESIGN 3.1 G2/G3).
+  // accepted(): the frame was taken.
+  V4Verdict accepted() const { return v4Accepted(); }
+  // refuse(): a policy refusal (status 2, kRefused). Answered only to an
+  // authenticated session peer (a sealed frame): it already proved who it is.
+  // Toward anyone else it is silence, so a refusal is no oracle.
+  V4Verdict refuse() const { return isSessionEncrypted ? v4RefusedStatus(kV4VerdictRefused) : v4Silent(); }
+  // refuseWith(): a capacity or support refusal (busy, no slot, too large,
+  // unsupported, bad request), answered to any sender whose frame earns an
+  // ACK (sealed or group-tagged; a plaintext frame is never answered).
+  V4Verdict refuseWith(uint8_t status) const { return v4RefusedStatus(status); }
+  // silent(): no answer, and a retry stays unanswered.
+  V4Verdict silent() const { return v4Silent(); }
 };
 
 #endif // SYSTEM_ESPNOW_RXCTX_H

@@ -208,11 +208,11 @@ def main():
     def body(text, marker):
         return extract_block(text, marker) if text.count(marker) == 1 else ''
 
-    reply = body(crypto, 'void v4hKeyExReply(const V4RxCtx& ctx)')
+    reply = body(crypto, 'V4Verdict v4hKeyExReply(const V4RxCtx& ctx)')
     clear_at = reply.find('espnowHandshakeBackoffClear(msg->responderMac);')
     pin(0 < reply.find('keyExClearInFlight(msg->responderMac);') < clear_at,
         'KEY_EX_REPLY (the peer answered) ends its back-off')
-    confirm = body(crypto, 'void v4hKeyExConfirm(const V4RxCtx& ctx)')
+    confirm = body(crypto, 'V4Verdict v4hKeyExConfirm(const V4RxCtx& ctx)')
     # The last status-0 branch: the initiator's CONFIRM ending an exchange we
     # answered (1.0 step 4: an earlier one refuses a status 0 that answers our HELLO).
     ok_branch = confirm[confirm.rfind('if (msg->status == 0) {'):]
@@ -223,7 +223,7 @@ def main():
     notify = body(espnow, 'void bondNotifySessionEstablished(const uint8_t* peerMac)')
     pin(0 <= notify.find('espnowHandshakeBackoffClear(peerMac)') < notify.find('#if ENABLE_BONDED_MODE'),
         'a session that comes up (any peer) ends its back-off')
-    dispatch = body(espnow, 'static bool v4_dispatch_table_try(')
+    dispatch = body(espnow, 'static V4Verdict v4_dispatch_table_try(')
     pin('espnowHandshakeHeard(recv_info->src_addr);' in dispatch and
         'memcmp(h->origin, recv_info->src_addr, 6) == 0' in dispatch,
         'an authenticated frame sent straight from its origin counts as hearing that peer')

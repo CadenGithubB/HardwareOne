@@ -64,7 +64,7 @@ static void checkSource(const char* path) {
   // S5: the channel follow's hooks are wired (the rx-frontend and
   // dispatch-policy harnesses stub them, so only these checks notice a
   // deleted call).
-  const std::string hb = between(src, "static void v4h_heartbeat(", "\n}\n");
+  const std::string hb = between(src, "static V4Verdict v4h_heartbeat(", "\n}\n");
   CHECK(hb.find("espnowChFollowOnHeartbeat(ctx, hb, senderProven);") != std::string::npos,
         "S5 v4h_heartbeat does not feed the channel follow");
   CHECK(hb.find("if (!espnowChFollowHunting()) {") != std::string::npos,
@@ -82,7 +82,7 @@ static void checkSource(const char* path) {
   CHECK(noteAck.find("if (sealed) return;") != std::string::npos &&
             noteAck.find("ackFor != gChFollowProbeMsgId") != std::string::npos,
         "S5 the follow's ACK hook does not match the probe on ackFor and take only a tagged ACK");
-  const std::string dispatch = between(src, "static bool v4_dispatch_table_try(", "\n}\n");
+  const std::string dispatch = between(src, "static V4Verdict v4_dispatch_table_try(", "\n}\n");
   CHECK(dispatch.find("if (isSessionEncrypted) espnowChFollowOnSealedFrame(recv_info, h->type);") != std::string::npos,
         "S5 the dispatcher does not report sealed frames to the channel follow");
   const std::string beats = between(src, "void processMeshHeartbeats() {", "\n}\n");

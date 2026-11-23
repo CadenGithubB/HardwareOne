@@ -259,12 +259,21 @@ inline bool isBondWorker() { return gSettings.bondRole == BOND_ROLE_WORKER; }
 
 struct RxCtrl { int8_t rssi; };
 struct esp_now_recv_info { const uint8_t* src_addr; const RxCtrl* rx_ctrl = nullptr; };
+// The shared statuses the extracted handlers answer with (System_ESPNow_AnswerCore.h).
+namespace espnowanswer {
+[[maybe_unused]] constexpr uint8_t kBusy = 1, kRefused = 2, kUnsupported = 3, kTooLarge = 4, kNoSlot = 5,
+                                 kBadRequest = 6;
+}
+// As System_ESPNow_Verdict.h (1.0 step 5b): what a handler did with its frame.
+enum class V4VerdictKind : uint8_t { Accepted = 0, Refused = 1, Silent = 2 };
+struct V4Verdict { V4VerdictKind kind; uint8_t status; uint8_t ackFlags; };
 struct V4RxCtx {
   const esp_now_recv_info* recv_info;
   const uint8_t* payload;
   uint16_t payloadLen;
   const char* deviceName;
   bool isPaired = true;
+  bool isSessionEncrypted = true;  // bond frames arrive sealed (REQ_SESSION_ENC)
   // As System_ESPNow_RxCtx.h: copy what the frame has, zero the rest.
   template <class T>
   void read(T& out) const {
@@ -272,6 +281,13 @@ struct V4RxCtx {
     const size_t n = payloadLen < sizeof(T) ? payloadLen : sizeof(T);
     if (payload && n) std::memcpy(&out, payload, n);
   }
+  // As System_ESPNow_RxCtx.h: the verdict helpers.
+  V4Verdict accepted() const { return V4Verdict{V4VerdictKind::Accepted, 0, 0}; }
+  V4Verdict refuse() const {
+    return isSessionEncrypted ? V4Verdict{V4VerdictKind::Refused, 2, 0} : V4Verdict{V4VerdictKind::Silent, 0, 0};
+  }
+  V4Verdict refuseWith(uint8_t status) const { return V4Verdict{V4VerdictKind::Refused, status, 0}; }
+  V4Verdict silent() const { return V4Verdict{V4VerdictKind::Silent, 0, 0}; }
 };
 
 // ---- Platform doubles ----------------------------------------------------------

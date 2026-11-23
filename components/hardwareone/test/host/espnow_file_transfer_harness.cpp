@@ -313,6 +313,8 @@ struct Cancel {
 };
 static std::vector<Cancel> cancels;
 static std::vector<uint32_t> acks;
+struct RxVerdict { uint8_t type; uint32_t msgId; V4Verdict v; };
+static std::vector<RxVerdict> verdicts;
 static bool loopback = false;  // receiver replies are delivered to the sender
 static void deliverCancelToSender(uint32_t frameMsgId, const uint8_t* payload, uint16_t len);
 bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags, uint32_t msgId,
@@ -335,12 +337,9 @@ static bool recordCancelFrame(const uint8_t* dst, uint32_t frameMsgId, const uin
 
 // ---- production: the FILE_CANCEL sender ----------------------------------------------------
 // INSERT_CANCEL_TX
-// The sealed ACK a completed transfer queues (System_ESPNow.cpp
-// v4_queue_sealed_ack, 1.0: an 8-byte ACK naming the FILE_END msgId).
-bool v4_queue_sealed_ack(const uint8_t*, uint32_t ackFor) {
-  acks.push_back(ackFor);
-  return true;
-}
+// 1.0 step 5b: no handler sends an ACK of its own. The FILE_END's ACK is the
+// receive path's answer to its verdict: rxFrame records an accepted FILE_END
+// in `acks` (and every verdict in `verdicts`).
 static unsigned cancelCount(uint32_t msgId) {
   unsigned n = 0;
   for (const auto& c : cancels) if (c.msgId == msgId) ++n;
@@ -356,6 +355,7 @@ static unsigned cancelCount(uint32_t msgId, uint8_t reason) {
 // INSERT_RX
 
 // One received frame, as the dispatcher hands it to a handler.
+static bool gHoldLoopPass = false;
 static void rxFrame(uint8_t type, uint8_t* src, uint32_t msgId, const uint8_t* payload, uint16_t len) {
   esp_now_recv_info info{};
   info.src_addr = src;
@@ -369,13 +369,21 @@ static void rxFrame(uint8_t type, uint8_t* src, uint32_t msgId, const uint8_t* p
   ctx.payloadLen = len;
   ctx.isPaired = ctx.isAuthenticated = ctx.isSessionEncrypted = true;
   ctx.deviceName = "peer";
+  V4Verdict v = v4Silent();
   switch (type) {
-    case ESPNOW_V4_TYPE_FILE_START:  v4h_file_start(ctx); break;
-    case ESPNOW_V4_TYPE_FILE_DATA:   v4h_file_data(ctx); break;
-    case ESPNOW_V4_TYPE_FILE_END:    v4h_file_end(ctx); break;
-    case ESPNOW_V4_TYPE_FILE_CANCEL: v4h_file_cancel(ctx); break;
+    case ESPNOW_V4_TYPE_FILE_START:  v = v4h_file_start(ctx); break;
+    case ESPNOW_V4_TYPE_FILE_DATA:   v = v4h_file_data(ctx); break;
+    case ESPNOW_V4_TYPE_FILE_END:    v = v4h_file_end(ctx); break;
+    case ESPNOW_V4_TYPE_FILE_CANCEL: v = v4h_file_cancel(ctx); break;
     default: check(false, "rxFrame: unexpected frame type");
   }
+  verdicts.push_back({type, msgId, v});
+  if (type == ESPNOW_V4_TYPE_FILE_END && v.kind == V4VerdictKind::Accepted) acks.push_back(msgId);
+#if HW1_HAVE_RAM_FINALIZE
+  // The espnow_task loop's next pass finishes a small file after its ACK
+  // (a case can hold that pass to look between the two).
+  if (type == ESPNOW_V4_TYPE_FILE_END && !gHoldLoopPass) fileRamFinalizeTick();
+#endif
 }
 static void deliverCancelToSender(uint32_t frameMsgId, const uint8_t* payload, uint16_t len) {
   rxFrame(ESPNOW_V4_TYPE_FILE_CANCEL, kReceiver, frameMsgId, payload, len);
@@ -672,7 +680,7 @@ static void resetWorld() {
   admitPeeks = admitRefreshes = admitRefused = 0;
   admitPeeksUnderFsLock = admitRefreshesWithoutFsLock = admitRefreshesUnderSlotLock = 0;
   admitAsks.clear();
-  cancels.clear(); acks.clear(); events.clear(); broadcasts.clear(); borrowedCancelIds = 0;
+  cancels.clear(); acks.clear(); verdicts.clear(); events.clear(); broadcasts.clear(); borrowedCancelIds = 0;
   air.clear(); pendingFrames.clear(); pendingParked = 0;
   loopback = false;
   gEspNowStorage = EspNowState{};
@@ -723,7 +731,7 @@ static void testStreamingReceiveArrives() {
   check(slotState(12) == FILE_SLOT_COMPLETING, "streaming: FILE_END hands the slot to the finalize job");
   runCmdExec();
   check(fake_vfs::fs().text(inboxPath(kSender, "big.bin")) == bytes, "streaming: the file arrives byte for byte");
-  check(acks.size() == 1 && acks[0] == 12, "streaming: the finalize job acknowledges once");
+  check(acks.size() == 1 && acks[0] == 12, "streaming: the accepted FILE_END is acknowledged once");
   check(cancels.empty(), "streaming: a healthy transfer gets no FILE_CANCEL");
   check(fileSlotsActiveCount() == 0, "streaming: the finalize job frees the slot");
   check(partFiles() == 0, "streaming: no staging file is left");
@@ -1423,6 +1431,61 @@ static void testCancelIsAnAnswer() {
   gEspNow->fileSendInProgress = false;
 }
 
+#if HW1_HAVE_RAM_FINALIZE
+// 1.0 step 5b: heavy work leaves the ACK path. A small file's FILE_END is
+// accepted (its ACK goes out) once the file is complete and its CRC checked;
+// the flash write runs on the espnow_task loop's next pass. Until then a copy
+// of the FILE_END is answered as taken and changes nothing, and no chunk can
+// reach the slot.
+static void testRamFinishAfterAck() {
+  resetWorld();
+  const std::string bytes = pattern(1000, 3);
+  rxStart(kSender, 15, "later.txt", bytes.size());
+  for (uint16_t i = 0; i < chunksOf(bytes.size()); i++) rxChunk(kSender, 15, bytes, i);
+  gHoldLoopPass = true;
+  rxEnd(kSender, 15, crcOf(bytes));
+  check(acks.size() == 1 && acks[0] == 15 && !fake_vfs::fs().exists(inboxPath(kSender, "later.txt")),
+        "RAM path: FILE_END is accepted before the file is written (the write is off the ACK path)");
+  check(slotState(15) == FILE_SLOT_COMPLETING, "RAM path: the accepted slot leaves RECEIVING");
+  rxEnd(kSender, 15, crcOf(bytes));
+  rxChunk(kSender, 15, bytes, 0);
+  check(acks.size() == 2 && cancels.empty() && slotState(15) == FILE_SLOT_COMPLETING,
+        "RAM path: a copy of the FILE_END is answered as taken and a late chunk changes nothing");
+  gHoldLoopPass = false;
+  fileRamFinalizeTick();
+  check(fake_vfs::fs().text(inboxPath(kSender, "later.txt")) == bytes && fileSlotsActiveCount() == 0 &&
+            eventCount(MSG_FILE_RECV_SUCCESS) == 1,
+        "RAM path: the loop's next pass writes the file once and releases the slot");
+  // ESP-NOW closes between the ACK and the loop pass: the accepted file is
+  // reported as a failed receive (with the sender's FILE_CANCEL), not lost silently.
+  resetWorld();
+  rxStart(kSender, 18, "closed.txt", bytes.size());
+  for (uint16_t i = 0; i < chunksOf(bytes.size()); i++) rxChunk(kSender, 18, bytes, i);
+  gHoldLoopPass = true;
+  rxEnd(kSender, 18, crcOf(bytes));
+  gHoldLoopPass = false;
+  fileRamFinalizeDropAll();
+  check(acks.size() == 1 && cancelCount(18, FILE_CANCEL_WRITE_FAILED) == 1 &&
+            eventCount(MSG_FILE_RECV_FAILED) == 1 && fileSlotsActiveCount() == 0 &&
+            !fake_vfs::fs().exists(inboxPath(kSender, "closed.txt")),
+        "RAM path: closing ESP-NOW after the ACK reports the file failed (FILE_CANCEL) and frees the slot");
+  // A CRC mismatch is decided before the ACK: refused, nothing queued.
+  resetWorld();
+  rxStart(kSender, 16, "bad.txt", bytes.size());
+  for (uint16_t i = 0; i < chunksOf(bytes.size()); i++) rxChunk(kSender, 16, bytes, i);
+  rxEnd(kSender, 16, crcOf(bytes) ^ 1u);
+  check(acks.empty() && !verdicts.empty() && verdicts.back().v.kind == V4VerdictKind::Refused &&
+            verdicts.back().v.status == espnowanswer::kRefused && cancelCount(16, FILE_CANCEL_CRC_MISMATCH) == 1,
+        "RAM path: a CRC mismatch is refused (kRefused) at FILE_END, with its FILE_CANCEL");
+  // A FILE_START the table cannot take names the reason on its ACK.
+  resetWorld();
+  rxStart(kSender, 17, "huge.bin", kFileSlotMaxStreamSize + 1);
+  check(!verdicts.empty() && verdicts.back().v.kind == V4VerdictKind::Refused &&
+            verdicts.back().v.status == espnowanswer::kTooLarge,
+        "FILE_START over the transfer limit is refused kTooLarge");
+}
+#endif
+
 int main(int argc, char** argv) {
   // With a case name, only that case runs (a case that leaves a slot behind on
   // a broken tree would otherwise blur the ones after it).
@@ -1448,6 +1511,9 @@ int main(int argc, char** argv) {
     {"callers", testCallersSayThereIsNoSession},
     {"bond-sync-quiet", testBondSyncFilesAreQuiet},
     {"cancel-answer", testCancelIsAnAnswer},
+#if HW1_HAVE_RAM_FINALIZE
+    {"ram-finish-after-ack", testRamFinishAfterAck},
+#endif
   };
   check(fileSlotsInit(), "slot table initialised");
   liveAllocations = 0;  // count transfer buffers only, not the table

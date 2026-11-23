@@ -390,6 +390,27 @@ struct SendStatus {
 // overflow).
 void sendStatusRegister(uint32_t msgId, const uint8_t peerMac[6]);
 
+// The result of an acknowledged send (1.0 step 5b, DESIGN 3.3), one type for
+// every sender that waits for the receiver's ACK:
+//   Delivered  the receiver accepted it (ACK status 0);
+//   Refused    the receiver answered with a status (busy, no slot, too large,
+//              unsupported, bad request, refused): not taken, but the session
+//              answered, so it counts as alive;
+//   NoAnswer   no ACK within the retry budget: the only outcome that counts
+//              toward the two-strike session re-open;
+//   NotSent    nothing reached the air (no session, over the size limit, seal
+//              refused): no answer was asked for, so it counts toward nothing.
+enum class V4SendOutcome : uint8_t { Delivered = 0, Refused = 1, NoAnswer = 2, NotSent = 3 };
+struct V4SendResult {
+  V4SendOutcome outcome;
+  uint8_t status;  // the ACK's status for Refused; 0 otherwise
+};
+
+// Session liveness from an acknowledged send's outcome: Delivered and Refused
+// clear the peer's no-answer run, NoAnswer adds to it (two in a row clear the
+// session, kSessionSendTimeoutsBeforeReestablish), NotSent changes nothing.
+void sessionNoteSendOutcome(const uint8_t peerMac[6], V4SendOutcome outcome);
+
 // Mark the matching tracked send as DELIVERED. Called from V4_ACK_RX.
 // Match key is (msgId AND peerMac). No-op if no matching PENDING entry.
 void sendStatusMarkDelivered(uint32_t msgId, const uint8_t srcMac[6]);

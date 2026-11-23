@@ -39,7 +39,7 @@ NORMALIZE_MARKERS = (
     'static void normalizeMetadataWireText(',
 )
 FUNCTION_MARKERS = (
-    'static void v4h_metadata_resp_push(',
+    'static V4Verdict v4h_metadata_resp_push(',
     'static void processMetadata(',
     'static const char* metaGetSet(',
 )
@@ -56,13 +56,22 @@ GROUP_MARKERS = (
 ANNOUNCE_REGION = ('// ---- Room and tag membership: what a peer announces -----',
                    '// ---- Room and tag membership: acceptance -----')
 INBOX_REGION = ('// ---- Metadata work waiting for espnow_task -----',
-                'static void v4h_metadata_req(const V4RxCtx& ctx) {')
+                'static V4Verdict v4h_metadata_req(const V4RxCtx& ctx) {')
 INBOX_MARKERS = (
-    'static void v4h_metadata_req(',
+    'static V4Verdict v4h_metadata_req(',
     'static bool metadataInboxHandleFrame(',
 )
 GROUP_INCLUDES = '#include "System_ESPNow_GroupCore.h"\n#include "System_MacText.h"'
 
+
+
+def verdict_src(rxctx_text):
+    """System_ESPNow_Verdict.h (1.0 step 5b) as text, for a harness that pastes
+    V4RxCtx in: its helpers return V4Verdict. Empty for a tree without it."""
+    p = Path(__file__).resolve().parents[2] / 'System_ESPNow_Verdict.h'
+    if 'System_ESPNow_Verdict.h' not in rxctx_text or not p.exists():
+        return ''
+    return p.read_text() + '\n'
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
@@ -92,10 +101,11 @@ def main():
         return extract_block(text, marker)
 
     types = [
+        '#include "System_ESPNow_AnswerCore.h"',
         'template <size_t Capacity>\n' + definition(header, 'class EspNowInlineText', 'System_ESPNow.h') + ';',
         definition(header, 'struct MeshPeerMeta', 'System_ESPNow.h') + ';',
         definition(wire, 'struct __attribute__((packed)) V4PayloadMetadata', 'System_ESPNow_Wire.h') + ';',
-        definition(rxctx, 'struct V4RxCtx', 'System_ESPNow_RxCtx.h') + ';',
+        verdict_src(rxctx) + definition(rxctx, 'struct V4RxCtx', 'System_ESPNow_RxCtx.h') + ';',
     ]
 
     pieces = []

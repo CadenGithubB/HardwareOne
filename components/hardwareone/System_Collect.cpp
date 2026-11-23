@@ -45,8 +45,8 @@
 namespace {
 EXT_RAM_BSS_ATTR uint32_t sCollectNotBuiltDropped;
 }  // namespace
-void v4hCatchupListResp(const V4RxCtx&) { ++sCollectNotBuiltDropped; }
-void v4hCatchupReadResp(const V4RxCtx&) { ++sCollectNotBuiltDropped; }
+V4Verdict v4hCatchupListResp(const V4RxCtx& ctx) { ++sCollectNotBuiltDropped; return ctx.refuseWith(espnowanswer::kUnsupported); }
+V4Verdict v4hCatchupReadResp(const V4RxCtx& ctx) { ++sCollectNotBuiltDropped; return ctx.refuseWith(espnowanswer::kUnsupported); }
 void collectTick(uint32_t) {}
 void collectWriteTick() {}
 
@@ -1080,14 +1080,14 @@ const char* statusOne(const Args& a, const uint8_t mac[6], char* reply, size_t c
 // The receive handlers (espnow_task): only what matches the one outstanding
 // request is taken.
 // ---------------------------------------------------------------------------
-void v4hCatchupListResp(const V4RxCtx& ctx) {
+V4Verdict v4hCatchupListResp(const V4RxCtx& ctx) {
   const uint8_t* src = ctx.recv_info->src_addr;
   cu::ListRespHeader h;
-  if (!cu::parseListRespHeader(ctx.payload, ctx.payloadLen, &h)) { ++sStats.malformed; return; }
+  if (!cu::parseListRespHeader(ctx.payload, ctx.payloadLen, &h)) { ++sStats.malformed; return ctx.refuseWith(espnowanswer::kBadRequest); }
   if (sClient.stage != Stage::Listing || sClient.op != cu::kOpListReq || sClient.pageReady || h.reqId != sClient.reqId ||
       memcmp(src, sClient.mac, 6) != 0) {
     ++sStats.unexpected;
-    return;
+    return ctx.refuse();
   }
   sClient.listStatus = h.status;
   sClient.listRetry = h.status == cu::kStBusy ? cu::busyRetryAfter(ctx.payload, ctx.payloadLen, h.headerLen) : 0;
@@ -1105,35 +1105,37 @@ void v4hCatchupListResp(const V4RxCtx& ctx) {
     }
   }
   sClient.pageReady = true;
+  return ctx.accepted();
 }
 
-void v4hCatchupReadResp(const V4RxCtx& ctx) {
+V4Verdict v4hCatchupReadResp(const V4RxCtx& ctx) {
   const uint8_t* src = ctx.recv_info->src_addr;
   cu::ReadRespHeader h;
   const uint8_t* data = nullptr;
   size_t dataLen = 0;
-  if (!cu::parseReadResp(ctx.payload, ctx.payloadLen, &h, &data, &dataLen)) { ++sStats.malformed; return; }
+  if (!cu::parseReadResp(ctx.payload, ctx.payloadLen, &h, &data, &dataLen)) { ++sStats.malformed; return ctx.refuseWith(espnowanswer::kBadRequest); }
   if (sClient.stage != Stage::Fetching || sClient.op != cu::kOpReadReq || h.reqId != sClient.reqId ||
       memcmp(src, sClient.mac, 6) != 0 || sClient.statusReady || sClient.digestReady) {
     ++sStats.unexpected;
-    return;
+    return ctx.refuse();
   }
   if (h.status != cu::kStOk) {
     sClient.readStatus = h.status;
     sClient.readOffset = h.offset;
     sClient.readRetry = h.status == cu::kStBusy ? cu::busyRetryAfter(ctx.payload, ctx.payloadLen, h.headerLen) : 0;
     sClient.statusReady = true;
-    return;
+    return ctx.accepted();  // the answer's status is stored for the client
   }
-  if (h.fileId != sClient.plan.fileId) { ++sStats.unexpected; return; }
+  if (h.fileId != sClient.plan.fileId) { ++sStats.unexpected; return ctx.refuse(); }
   if (sClient.plan.mode == cu::kModeDigest) {
-    if (!(h.flags & cu::kRfDigest) || dataLen < cu::kDigestLen) { ++sStats.malformed; return; }
+    if (!(h.flags & cu::kRfDigest) || dataLen < cu::kDigestLen) { ++sStats.malformed; return ctx.refuseWith(espnowanswer::kBadRequest); }
     memcpy(sClient.digest, data, cu::kDigestLen);
     sClient.digestReady = true;
-    return;
+    return ctx.accepted();
   }
   const cc::WindowAssembler::Took t = sWin.onFrame(h, data, dataLen, (uint32_t)millis());
   if (t == cc::WindowAssembler::Took::Ignored) ++sStats.unexpected;
+  return ctx.accepted();
 }
 
 // ---------------------------------------------------------------------------

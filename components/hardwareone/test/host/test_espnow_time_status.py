@@ -124,7 +124,7 @@ def check_sources(component: Path) -> None:
             "the step names mesh time by the master's source (NTP-backed or not) and reports a refusal")
     require("ESPNOW_V4_TYPE_TIME_SYNC, 0," in extract_block(mesh, "static bool mtSend("),
             "the frame goes out as a session unicast with no flags")
-    handler = extract_block(mesh, "void v4hTimeSync(const V4RxCtx& ctx)")
+    handler = extract_block(mesh, "V4Verdict v4hTimeSync(const V4RxCtx& ctx)")
     require("meshTimeKeepFrame(ctx.recv_info->src_addr, ctx.payload, ctx.payloadLen);" in handler and
             "settimeofday" not in handler, "the handler only keeps the frame for the main loop")
     hosted = strip_comments(production(component))

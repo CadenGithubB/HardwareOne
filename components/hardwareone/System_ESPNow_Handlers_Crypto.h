@@ -20,6 +20,7 @@
 
 #include <stdint.h>
 
+#include "System_ESPNow_Verdict.h"  // V4Verdict, what a handler returns (1.0 step 5b)
 struct V4RxCtx;  // defined in System_ESPNow_RxCtx.h (shared; forward-decl is enough here)
 
 // Receive-side handlers. Each:
@@ -34,9 +35,9 @@ struct V4RxCtx;  // defined in System_ESPNow_RxCtx.h (shared; forward-decl is en
 // recorded HELLO stays valid (its HMAC covers nothing fresh), so copies of
 // one are dropped after the HMAC check. The initiator's own retry comes
 // 1.5 s later and is answered.
-void v4hKeyExHello   (const V4RxCtx& ctx);
-void v4hKeyExReply   (const V4RxCtx& ctx);
-void v4hKeyExConfirm (const V4RxCtx& ctx);
+V4Verdict v4hKeyExHello(const V4RxCtx& ctx);
+V4Verdict v4hKeyExReply(const V4RxCtx& ctx);
+V4Verdict v4hKeyExConfirm(const V4RxCtx& ctx);
 
 // This image's session capability word (System_ESPNow_SessionCapsCore.h):
 // what its build can do, fixed for the boot. Sent in SESSION_OPEN and
@@ -108,8 +109,8 @@ void espnowHandshakeHeard(const uint8_t peerMac[6]);
 // Blake2b KDF and flip the SessionState to ACTIVE. An OPEN that proposes the
 // slot's live sessionId or one it held before is a re-delivered copy (a genuine
 // initiator always picks a fresh id): it is ignored and the live session kept.
-void v4hSessionOpen   (const V4RxCtx& ctx);
-void v4hSessionConfirm(const V4RxCtx& ctx);
+V4Verdict v4hSessionOpen(const V4RxCtx& ctx);
+V4Verdict v4hSessionConfirm(const V4RxCtx& ctx);
 
 // Initiator entrypoint. Requires the peer to already have an identity record
 // from a prior successful KEY_EX (Phase 3.3). Allocates / replaces the
@@ -150,7 +151,7 @@ bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel,
 // Handler runs on espnow_task: size-check + PSRAM copy + submitDeferredToCmdExec.
 // Heavy crypto (verify, ECDH, KDF, optional sign) runs on cmd_exec.
 
-void v4hSessionRekey(const V4RxCtx& ctx);
+V4Verdict v4hSessionRekey(const V4RxCtx& ctx);
 
 // Initiator entrypoint. Generates fresh ephemeral X25519 keypair, parks the
 // priv key in SessionState.rekeyEphPrivKey for the eventual ECDH when the
