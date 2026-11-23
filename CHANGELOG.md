@@ -99,6 +99,25 @@ Host-tested and built; not run on a device.
   revoked key is refused whatever address it comes from, and the accept prompt shows its keyId.
   KEY_EX_CONFIRM status 3 means "not accepted". Reflash devices together.
 
+### Changed (ESP-NOW 1.0: files, Stored / not stored / Unknown)
+Host-tested and built; not run on a device.
+- **A file send ends in the receiver's answer** (`espnowsendfile`, `imagesend`, the OLED file
+  browser's Send, the bond settings / manifest / schema and automation list, an `espnowfetch` served
+  by the peer): **Stored** once the receiver checked the whole file (CRC32) and renamed it into its
+  inbox, **Error: ... not stored: `<reason>`** (`no_slot`, `too_large`, `refused`, `incomplete`,
+  `crc_mismatch`, `io_error`, `timeout`), or **Unknown** when no answer came within 10 s of the last
+  chunk. "File sent successfully" (every chunk handed to the radio) is gone; the sender's conversation
+  says "File stored: <name>" only once the receiver said so.
+- A refused start ends the send at once, before any chunk: four transfers already running (no slot),
+  over 4 MB, no room on flash, or a name over 96 bytes (63 for a device's own storage), which is
+  refused, never shortened. A transfer the receiver cancels in the middle stops within one chunk.
+- **Wire change (files):** every file frame has its own message number and names its transfer by a
+  random transfer number; FILE_START carries the name's length and the kind (file or bond answer);
+  FILE_DATA carries 194 bytes (138 to a peer behind a relay); FILE_END carries the chunk count; the
+  new FILE_RESULT (opcode 113) is the receiver's verdict, and a FILE_END sent again after the
+  transfer finished is answered with the same verdict. FILE_CANCEL works both ways. Reflash devices
+  together.
+
 ### Changed (ESP-NOW 1.0: one word per meaning, and one result per remote command)
 Host-tested and built; not run on a device.
 - **One word per meaning** on the web page, the OLED conversation, the message history and the

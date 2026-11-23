@@ -300,6 +300,30 @@ int main() {
   check("K12 without ackSingle a one-frame payload is not waited for (the tracked-send path)",
         r.outcome == V4SendOutcome::Delivered && gSent.empty());
 
+  // K13 (1.0 step 7): a FILE_START refused (no slot) ends the file send at
+  // once (DESIGN 3.6): one frame, no second attempt.
+  reset();
+  gReceiver = [](const Sent&) { return (int)espnowanswer::kNoSlot; };
+  r = v4_send_encrypted_chunked(kPeer, ESPNOW_V4_TYPE_FILE_START, 0, kId, kShort, sizeof kShort, 1, true);
+  check("K13 FILE_START refused no_slot is final: one frame, Refused(no_slot)",
+        r.outcome == V4SendOutcome::Refused && r.status == espnowanswer::kNoSlot && gSent.size() == 1);
+
+  // ...but a FILE_START cut by this device's own rekey is sent again on the new keys.
+  reset();
+  gSealsBeforeRekey = 0;
+  {
+    const uint32_t at = gNowMs;
+    gOnTick = [at]() {
+      if (gSess.state == SESSION_REKEYING && gNowMs - at >= 60) {
+        gSess.state = SESSION_ACTIVE;
+        gSealsBeforeRekey = -1;
+      }
+    };
+  }
+  r = v4_send_encrypted_chunked(kPeer, ESPNOW_V4_TYPE_FILE_START, 0, kId, kShort, sizeof kShort, 1, true);
+  check("K13 FILE_START cut by a rekey this device started: sent again under a new msgId, Delivered",
+        r.outcome == V4SendOutcome::Delivered && gSent.size() == 1 && gSent[0].msgId != kId);
+
   printf("espnow_chunked_send: %d checks, %d failures\n", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

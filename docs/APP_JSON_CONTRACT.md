@@ -133,6 +133,14 @@ entry "Command replies" under Unreleased states what changed.
    `busy` row in that peer's history, written by this device. `sendState` on sent
    rows gains 4 (busy) and 5 (refused, with `reason`) and is 0 on received rows; the web `deliveries` snapshot
    names `busy` and `refused` (with `reason`). See sec. 5.
+18. **ESP-NOW file results (1.0 step 7, 2026-11-23, text only)** - no JSON key changed.
+   `espnowsendfile` and `imagesend` (text replies) now wait for the receiver's answer and
+   start with one word: `Stored on <device>: <name> (<n> bytes)` / `Stored <path> on
+   <device> (<n> bytes)`, `Unknown: ...` (no answer within 10 s; the file may or may not be
+   there), or `Error: '<name>' was not stored on <device>: <reason>.` (`<reason>` a status
+   word: `refused`, `no_slot`, `too_large`, `incomplete`, `crc_mismatch`, `io_error`,
+   `timeout`, ...). The sent-file history row (`type` 2, `msg`) reads `File stored: <name>`
+   (was `File sent: <name>`) and is written only once the receiver reported the file stored.
 
 ---
 

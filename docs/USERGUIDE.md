@@ -916,7 +916,21 @@ A group command says how many devices it left out: `Skipped 1 device(s) whose ro
 What was accepted is stored on this device and survives a restart. It is cleared for a peer when the peer is unpaired or revoked, and when a different identity key appears at its address. The lists that show a peer's room (`espnowdevices`, `espnowrooms`, `espnowfind`, the web Metadata tab, the OLED and glasses device lists) show the announced room and mark it (`[pending: ...]`, `(not accepted)` or `?`) while it is not accepted; the web Metadata tab has an **Accept** button.
 
 ### File Transfer
-Files can be transferred between paired devices via the web UI or CLI (`espnowsendfile <name_or_mac> "<filepath>"`). Used for syncing automations, settings, and manifests.
+Files can be transferred between paired devices via the web UI or CLI (`espnowsendfile <name_or_mac> "<filepath>"`, `imagesend` for photos, the OLED file browser's Send). Bond mode uses the same transfer for its settings, manifest and schema.
+
+A send waits for the receiver's answer and ends in one of three words:
+
+| Word | Meaning |
+|---|---|
+| Stored | the receiver checked the whole file (CRC32) and renamed it into its inbox, `/espnow/received/<sender>/` |
+| Error: ... not stored | the receiver refused it or could not store it; the reason follows: `no_slot` (four transfers already running), `too_large` (over 4 MB, or a name too long), `refused`, `incomplete` (chunks lost), `crc_mismatch`, `io_error` (no room on flash, or the write failed), `timeout` (no answer to the start) |
+| Unknown | every part went out but no answer came within 10 s (the receiver went off, or its answer was lost): look in its inbox before sending again |
+
+The send stops at once when the receiver refuses the start, and within one chunk when it cancels a
+transfer in the middle (a lost chunk on a large file). File names go whole or not at all: a name over 96
+bytes, or over the 63 bytes a device's own storage takes, is refused (`too_large`), never shortened.
+A received file is announced on the receiver with "Received file: <name>" in that device's conversation;
+the sender's conversation shows "File stored: <name>" once the receiver said so.
 
 ### File catch-up (device)
 A build with `ENABLE_ESPNOW_SEND` (the portable) offers its logs to the masters named on it
@@ -1522,7 +1536,7 @@ espnowunrevoke <name|mac|keyId> - Lift a revoke ('--all' lifts every one)
 espnowrevoked [json]            - List revoked devices and the keys stored here
 espnowsend <name_or_mac> <msg>  - Send a text message (relayed if the peer is out of range)
 espnowbroadcast <message>       - Broadcast to the whole mesh (flooded, up to the TTL)
-espnowsendfile <name_or_mac> "<path>"      - Send a file to a peer
+espnowsendfile <name_or_mac> "<path>"      - Send a file to a peer (one answer: Stored, Error: not stored, or Unknown)
 espnowbrowse <name_or_mac> <user> <pass> ["path"]  - Browse remote filesystem
 espnowfetch <name_or_mac> <user> <pass> "<path>"   - Fetch a file from a peer
 espnowremote <name_or_mac> <user> <pass> <cmd>   - Execute command on peer (one result: its output, Busy, Refused, No answer or No result)

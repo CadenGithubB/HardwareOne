@@ -5,7 +5,8 @@
 //   0  reqId   32 bit: the number of the request this answers. It is the
 //              request's own correlation number: the reqId field of a request
 //              that has one (FS_*_REQ, TOPO_REQ, SENSOR_REQ), otherwise the
-//              request frame's header msgId (CMD, USER_SYNC, FILE_START). 0 =
+//              request frame's header msgId (CMD, USER_SYNC); for a file,
+//              the transferId FILE_START carries (1.0 step 7). 0 =
 //              no request: a frame sent unasked (the startstream STREAM).
 //   4  status  0 ok; 1-15 the shared reasons below, the same number with the
 //              same meaning in every answer; 16 and up a reason of that frame
@@ -20,7 +21,7 @@
 //
 // Answer frames: TOPO_START (33), TOPO_PEER (34), CMD_RESP (51),
 // FS_LIST_REPLY (71), FS_STAT_REPLY (73), FS_GET_ACK (75), STREAM (90),
-// FILE_CANCEL (115), and since 2026-11-19 CATCHUP_LIST_RESP (83) and
+// FILE_RESULT (113, 1.0 step 7), FILE_CANCEL (115), and since 2026-11-19 CATCHUP_LIST_RESP (83) and
 // CATCHUP_READ_RESP (85) (file catch-up, System_ESPNow_CatchupCore.h). The shared code 1 (busy) lets a later firmware answer
 // "not now" in any answer, which is the NACK shape (opcode 2 stays reserved).
 //
@@ -59,8 +60,8 @@ constexpr uint8_t kFrameFirst  = 16;  // 16 and up: the per-frame reasons
 // The per-frame reasons (16 and up), by the answer opcode they come in.
 constexpr uint8_t kCmdFailed        = 16;  // CMD_RESP: the command ran and reported a failure
 constexpr uint8_t kFsNotADir        = 16;  // FS_*: the path is a file, a directory was asked for
-constexpr uint8_t kFileIncomplete   = 16;  // FILE_CANCEL: FILE_END came with chunks missing
-constexpr uint8_t kFileCrcMismatch  = 17;  // FILE_CANCEL: every chunk came; the file's CRC32 did not match
+constexpr uint8_t kFileIncomplete   = 16;  // FILE_RESULT / FILE_CANCEL: chunks are missing
+constexpr uint8_t kFileCrcMismatch  = 17;  // FILE_RESULT / FILE_CANCEL: every chunk came; the CRC32 did not match
 constexpr uint8_t kCatchupNoLink    = 16;  // CATCHUP_LIST_RESP: link != 0 (the bond proxy is not built)
 constexpr uint8_t kCatchupGone      = 16;  // CATCHUP_READ_RESP: no such file id, other ledger, or the file is gone
 constexpr uint8_t kCatchupTrimmed   = 17;  // CATCHUP_READ_RESP: the offset was trimmed off; offset = the new start
@@ -74,6 +75,7 @@ constexpr uint8_t kOpFsListReply = 71;
 constexpr uint8_t kOpFsStatReply = 73;
 constexpr uint8_t kOpFsGetAck    = 75;
 constexpr uint8_t kOpStream      = 90;
+constexpr uint8_t kOpFileResult  = 113;
 constexpr uint8_t kOpFileCancel  = 115;
 constexpr uint8_t kOpCatchupListResp = 83;
 constexpr uint8_t kOpCatchupReadResp = 85;
@@ -81,7 +83,7 @@ constexpr uint8_t kOpCatchupReadResp = 85;
 inline bool isAnswerOpcode(uint8_t opcode) {
   switch (opcode) {
     case kOpTopoStart: case kOpTopoPeer: case kOpCmdResp: case kOpFsListReply:
-    case kOpFsStatReply: case kOpFsGetAck: case kOpStream: case kOpFileCancel:
+    case kOpFsStatReply: case kOpFsGetAck: case kOpStream: case kOpFileResult: case kOpFileCancel:
     case kOpCatchupListResp: case kOpCatchupReadResp:
       return true;
     default:
@@ -116,7 +118,7 @@ inline const char* statusName(uint8_t opcode, uint8_t status) {
       return status == kCmdFailed ? "failed" : nullptr;
     case kOpFsListReply: case kOpFsStatReply: case kOpFsGetAck:
       return status == kFsNotADir ? "not_a_dir" : nullptr;
-    case kOpFileCancel:
+    case kOpFileResult: case kOpFileCancel:
       return status == kFileIncomplete ? "incomplete" : status == kFileCrcMismatch ? "crc_mismatch" : nullptr;
     case kOpCatchupListResp:
       return status == kCatchupNoLink ? "no_link" : nullptr;

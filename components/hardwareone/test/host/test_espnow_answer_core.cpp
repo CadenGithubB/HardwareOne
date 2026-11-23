@@ -77,7 +77,7 @@ static void one_name_table() {
   const char* shared[] = {"ok", "busy", "refused", "unsupported", "too_large", "no_slot",
                           "bad_request", "not_ready", "io_error", "not_found", "timeout", "cancelled"};
   const uint8_t answers[] = {kOpTopoStart, kOpTopoPeer, kOpCmdResp, kOpFsListReply,
-                             kOpFsStatReply, kOpFsGetAck, kOpStream, kOpFileCancel,
+                             kOpFsStatReply, kOpFsGetAck, kOpStream, kOpFileResult, kOpFileCancel,
                              kOpCatchupListResp, kOpCatchupReadResp};
   for (uint8_t st = 0; st < 12; ++st) {
     CHECK(is(sharedStatusName(st), shared[st]));
@@ -96,6 +96,10 @@ static void one_name_table() {
   CHECK(is(statusName(kOpFsGetAck, 16), "not_a_dir"));
   CHECK(is(statusName(kOpFileCancel, 16), "incomplete"));
   CHECK(is(statusName(kOpFileCancel, 17), "crc_mismatch"));
+  // FILE_RESULT (1.0 step 7) names the file's own reasons as FILE_CANCEL does.
+  CHECK(is(statusName(kOpFileResult, 16), "incomplete"));
+  CHECK(is(statusName(kOpFileResult, 17), "crc_mismatch"));
+  CHECK(statusName(kOpFileResult, 18) == nullptr);
   CHECK(statusName(kOpCmdResp, 17) == nullptr);
   CHECK(statusName(kOpFsListReply, 17) == nullptr);
   CHECK(statusName(kOpStream, 16) == nullptr);
@@ -120,13 +124,14 @@ static void answer_opcodes() {
   for (unsigned op = 0; op < 256; ++op) {
     if (isAnswerOpcode((uint8_t)op)) ++count;
   }
-  CHECK(count == 10);
+  CHECK(count == 11);
   CHECK(kOpCatchupListResp == 83 && kOpCatchupReadResp == 85 && !isAnswerOpcode(82) && !isAnswerOpcode(84));
   CHECK(kOpTopoStart == 33 && kOpTopoPeer == 34 && kOpCmdResp == 51 && kOpFsListReply == 71 &&
-        kOpFsStatReply == 73 && kOpFsGetAck == 75 && kOpStream == 90 && kOpFileCancel == 115);
+        kOpFsStatReply == 73 && kOpFsGetAck == 75 && kOpStream == 90 && kOpFileResult == 113 &&
+        kOpFileCancel == 115);
   // Requests are not answers.
   CHECK(!isAnswerOpcode(50) && !isAnswerOpcode(32) && !isAnswerOpcode(70) && !isAnswerOpcode(153) &&
-        !isAnswerOpcode(110) && !isAnswerOpcode(1));
+        !isAnswerOpcode(110) && !isAnswerOpcode(111) && !isAnswerOpcode(112) && !isAnswerOpcode(1));
 }
 
 int main() {

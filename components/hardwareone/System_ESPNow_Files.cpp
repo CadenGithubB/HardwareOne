@@ -7,6 +7,7 @@
 #include <Arduino.h>
 #include <string.h>
 
+#include <esp_attr.h>         // EXT_RAM_BSS_ATTR — the result memory
 #include <esp_crc.h>          // esp_crc32_le — whole-file CRC + filename hash
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -33,13 +34,14 @@ constexpr uint8_t  kFileStreamBufs    = 2;
 struct FileTransferSlotImpl {
   uint8_t  state;             // FileSlotState
   uint8_t  peerMac[6];
-  uint32_t msgId;
-  char     filename[64];
+  uint32_t transferId;
+  char     filename[kFileSlotNameMax + 1];
+  uint8_t  kind;          // FILE_START's kind: 0 file, 1 bond answer
   uint32_t filenameHash;  // esp_crc32_le over the (bounded) wire filename — the
                           // stable per-(peer,file) identity: keys the streaming
                           // .part name and the supersede-conflict check, both of
-                          // which must survive sender retries (fresh msgId) and
-                          // reboots (msgId counter restarts at 1)
+                          // which must survive sender retries (fresh transferId) and
+                          // reboots
   uint32_t totalSize;
   uint32_t receivedBytes;
   uint16_t totalChunks;
@@ -305,11 +307,12 @@ static uint32_t slotUnwrittenBytes(const FileTransferSlotImpl& s) {
 }
 
 FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
-                                     uint32_t msgId,
+                                     uint32_t transferId,
                                      const char* filename,
                                      uint32_t fileSize,
                                      uint16_t chunkCount,
                                      uint16_t chunkSize,
+                                     uint8_t kind,
                                      const char** errOut) {
   auto setErr = [&](const char* e) { if (errOut) *errOut = e; };
   if (!gFileSlots || !peerMac || !filename) {
@@ -335,36 +338,35 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
     return nullptr;
   }
 
-  // Filename identity hash. strnlen-bounded because the wire filename[64] has
-  // no guaranteed NUL from a (hostile) peer; the bound matches the strncpy
-  // below so the hash always describes exactly what the slot stores. This is
-  // the stable per-(peer,file) key: unlike msgId it survives sender retries
-  // (each sendFileToMac call mints a fresh msgId) and reboots (the msgId
-  // counter restarts at 1).
+  // Filename identity hash. strnlen-bounded to the slot's name buffer (the
+  // handler hands a terminated copy of at most kFileSlotNameMax bytes); the
+  // bound matches the strncpy below so the hash always describes exactly what
+  // the slot stores. This is the stable per-(peer,file) key: unlike
+  // transferId it survives sender retries (each sendFileToMac call draws a
+  // fresh transferId).
   const uint32_t nameHash = esp_crc32_le(0, (const uint8_t*)filename,
       strnlen(filename, sizeof(FileTransferSlotImpl::filename) - 1));
 
   // Slot scan: find a free slot and resolve conflicts with THIS peer's active
   // slots. Two distinct match kinds, and conflating them is transfer-fatal:
   //
-  //   same (peer, msgId)      = a DUPLICATE FILE_START of the transfer already
-  //                             in flight. FILE_* frames are deliberately
-  //                             exempt from the (origin,msgId) dedup ring
-  //                             (multi-frame under one id), so a MAC-layer
-  //                             retransmit of FILE_START reaches us verbatim.
+  //   same (peer, transferId) = a DUPLICATE FILE_START of the transfer already
+  //                             in flight: a copy the accept memory did not
+  //                             catch (sent again under a new msgId, or after
+  //                             the memory's 5 s).
   //                             Treat it as IDEMPOTENT: hand back the existing
   //                             slot untouched. Tearing it down here would
   //                             discard every chunk received so far, and for a
   //                             streaming slot would transiently leave TWO
-  //                             slots sharing (peer,msgId) — which
-  //                             fileSlotsFindByMsg cannot disambiguate, so the
+  //                             slots sharing (peer,transferId) — which
+  //                             fileSlotsFindByTransfer cannot disambiguate, so the
   //                             still-arriving chunks would route to the dead
   //                             one, emit FILE_CANCEL, and (with the abort
   //                             matcher) kill the sender's healthy transfer.
   //
   //   same (peer, nameHash),
-  //   DIFFERENT msgId         = a genuine sender RETRY (every sendFileToMac
-  //                             call mints a fresh msgId), or a CRC32 name
+  //   DIFFERENT transferId    = a genuine sender RETRY (every sendFileToMac
+  //                             call draws a fresh transferId), or a CRC32 name
   //                             collision. Either way the old stream can never
   //                             complete — SUPERSEDE it. RAM slots release
   //                             inline (espnow_task owns all their state);
@@ -396,27 +398,26 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
     // transfer is about to open — no interlock needed here.
     if (s.state != FILE_SLOT_RECEIVING) continue;
 
-    const bool sameId   = (s.msgId == msgId);
+    const bool sameId   = (s.transferId == transferId);
     const bool sameFile = (s.filenameHash == nameHash);
     if (!sameId && !sameFile) continue;
 
     // A true duplicate FILE_START must describe the SAME transfer in every
-    // field, not just carry the same msgId. msgId is per-boot (the counter
-    // restarts at 1), so a peer that resets mid-transfer can re-mint an id
-    // whose 30 s slot we still hold — adopting that slot would pour a
+    // field, not just carry the same transferId. The id is random, but a
+    // 32-bit draw can repeat — adopting that slot would pour a
     // different file into the old one's buffer at the old one's offsets and
     // then report the failure against the WRONG filename.
     if (sameId && sameFile && s.totalSize == fileSize &&
-        s.totalChunks == chunkCount && s.chunkSize == chunkSize) {
-      DEBUG_ESPNOWF("[FileSlots] duplicate FILE_START for slot %u (msgId=%lu) — reusing, %u/%u chunks so far",
-                    (unsigned)i, (unsigned long)msgId,
+        s.totalChunks == chunkCount && s.chunkSize == chunkSize && s.kind == kind) {
+      DEBUG_ESPNOWF("[FileSlots] duplicate FILE_START for slot %u (transferId=%lu) — reusing, %u/%u chunks so far",
+                    (unsigned)i, (unsigned long)transferId,
                     (unsigned)s.receivedChunks, (unsigned)s.totalChunks);
       s.lastFrameMs = (uint32_t)millis();   // don't let the dup age the slot out
       setErr(nullptr);
       return reinterpret_cast<FileTransferSlot*>(&s);
     }
     // Otherwise the incumbent is dead: either a genuine sender retry (same
-    // file, fresh msgId — sendFileToMac mints one per call) or a reused id
+    // file, fresh transferId — sendFileToMac draws one per call) or a reused id
     // describing a different file. Either way it can never complete.
     if (supersedeIdx < 0) supersedeIdx = (int)i;
   }
@@ -426,7 +427,7 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
   // above the log reserve together with what the other transfers in flight
   // will still write. This runs on espnow_task: the stored free figure only
   // (VFS::BulkFigure::Peek), never a volume walk. A refusal is answered by the
-  // caller like every other allocation error (FILE_CANCEL_REJECTED). A
+  // caller like every other allocation error (the FILE_START's ACK status). A
   // streaming transfer is asked again, with a fresh figure, when cmd_exec
   // opens its .part (streamDrainPending).
   {
@@ -446,15 +447,15 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
   if (supersedeIdx >= 0) {
     FileTransferSlotImpl& old = gFileSlots[supersedeIdx];
     if (!old.streaming) {
-      WARN_ESPNOWF("[FileSlots] FILE_START supersedes slot %u ('%s', old msgId=%lu, new msgId=%lu) — releasing old",
+      WARN_ESPNOWF("[FileSlots] FILE_START supersedes slot %u ('%s', old transferId=%lu, new transferId=%lu) — releasing old",
                    (unsigned)supersedeIdx, old.filename,
-                   (unsigned long)old.msgId, (unsigned long)msgId);
+                   (unsigned long)old.transferId, (unsigned long)transferId);
       releaseLocked(old);              // RAM slot: espnow_task owns all its state
       if (freeIdx < 0) freeIdx = supersedeIdx;
     } else if (freeIdx >= 0) {
-      WARN_ESPNOWF("[FileSlots] FILE_START supersedes slot %u ('%s', old msgId=%lu, new msgId=%lu) — failing old on cmd_exec",
+      WARN_ESPNOWF("[FileSlots] FILE_START supersedes slot %u ('%s', old transferId=%lu, new transferId=%lu) — failing old on cmd_exec",
                    (unsigned)supersedeIdx, old.filename,
-                   (unsigned long)old.msgId, (unsigned long)msgId);
+                   (unsigned long)old.transferId, (unsigned long)transferId);
       fileSlotsStreamFailLocked(old);  // -> COMPLETING; its abort job frees it
     } else {
       // Table full and the incumbent is streaming (we cannot reuse its index —
@@ -498,10 +499,9 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
     s.streamBufCap = kFileStreamBufSize;
     // Stage path = (peer, filenameHash, SLOT INDEX).
     //
-    // The (peer, filenameHash) part is the FILE's identity, replacing the old
-    // msgId suffix which named the ATTEMPT: a retry (fresh msgId) could never
-    // find its predecessor's partial, and the msgId counter restarts at 1 every
-    // boot, so partials would collide across boots and "w"-truncate each other.
+    // The (peer, filenameHash) part is the FILE's identity, not the attempt's
+    // id: a retry (fresh transferId) can find its predecessor's partial, and
+    // partials of different attempts never "w"-truncate each other.
     // A future resume can glob this prefix to find a candidate partial.
     //
     // The slot index makes the path unique among LIVE slots, which is load
@@ -546,7 +546,8 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
   }
 
   memcpy(s.peerMac, peerMac, 6);
-  s.msgId          = msgId;
+  s.transferId     = transferId;
+  s.kind           = kind;
   s.filenameHash   = nameHash;
   strncpy(s.filename, filename, sizeof(s.filename) - 1);
   s.filename[sizeof(s.filename) - 1] = '\0';
@@ -560,14 +561,14 @@ FileTransferSlot* fileSlotsAllocate(const uint8_t peerMac[6],
   s.state          = FILE_SLOT_RECEIVING;
 
   INFO_ESPNOWF("[FileSlots] slot %u allocated for '%.63s' from " MAC_FMT " "
-               "(msgId=%lu, %lu bytes, %u chunks)",
+               "(transferId=%lu, %lu bytes, %u chunks)",
                (unsigned)freeIdx, filename,
                MAC_ARGS(peerMac),
-               (unsigned long)msgId, (unsigned long)fileSize, (unsigned)chunkCount);
+               (unsigned long)transferId, (unsigned long)fileSize, (unsigned)chunkCount);
   return reinterpret_cast<FileTransferSlot*>(&s);
 }
 
-FileTransferSlot* fileSlotsFindByMsg(const uint8_t peerMac[6], uint32_t msgId,
+FileTransferSlot* fileSlotsFindByTransfer(const uint8_t peerMac[6], uint32_t transferId,
                                      FileSlotLookup* resultOut) {
   auto setResult = [&](FileSlotLookup r) { if (resultOut) *resultOut = r; };
   setResult(FILE_SLOT_LOOKUP_NOT_FOUND);
@@ -582,7 +583,7 @@ FileTransferSlot* fileSlotsFindByMsg(const uint8_t peerMac[6], uint32_t msgId,
   for (uint8_t i = 0; i < kFileSlots; i++) {
     FileTransferSlotImpl& s = gFileSlots[i];
     if (s.state == FILE_SLOT_FREE) continue;
-    if (s.msgId == msgId && memcmp(s.peerMac, peerMac, 6) == 0) {
+    if (s.transferId == transferId && memcmp(s.peerMac, peerMac, 6) == 0) {
       setResult(FILE_SLOT_LOOKUP_FOUND);
       return reinterpret_cast<FileTransferSlot*>(&s);
     }
@@ -950,8 +951,90 @@ uint32_t fileSlotsGetReceivedCrc(const FileTransferSlot* slot) {
 bool fileSlotsIsReceiving(const FileTransferSlot* slot) {
   return slot ? (implC(slot)->state == FILE_SLOT_RECEIVING) : false;
 }
-uint32_t fileSlotsGetMsgId(const FileTransferSlot* slot) {
-  return slot ? implC(slot)->msgId : 0;
+uint32_t fileSlotsGetTransferId(const FileTransferSlot* slot) {
+  return slot ? implC(slot)->transferId : 0;
+}
+uint8_t fileSlotsGetKind(const FileTransferSlot* slot) {
+  return slot ? implC(slot)->kind : 0;
+}
+uint32_t fileSlotsExpectedChunkLen(const FileTransferSlot* slot, uint32_t chunkIdx) {
+  if (!slot) return 0;
+  const FileTransferSlotImpl& s = *implC(slot);
+  if (s.chunkSize == 0 || chunkIdx >= s.totalChunks) return 0;
+  const uint64_t offset = (uint64_t)chunkIdx * s.chunkSize;
+  if (offset >= s.totalSize) return 0;
+  const uint64_t left = s.totalSize - offset;
+  return left < s.chunkSize ? (uint32_t)left : s.chunkSize;
+}
+
+// ---- Result memory (1.0 step 7) ----------------------------------------------
+// The last FILE_RESULTs this device sent, so a copy of FILE_END that arrives
+// after the slot was released (the sender did not hear the first FILE_RESULT
+// and asks again) gets the same verdict instead of a refusal. PSRAM .bss;
+// guarded by the slot-table lock (bounded wait on espnow_task, unbounded on
+// cmd_exec, like every other taker).
+namespace {
+struct FileResultMemo {
+  uint8_t  peerMac[6];
+  uint8_t  status;
+  uint8_t  used;
+  uint32_t transferId;
+  uint32_t bytesStored;
+  uint32_t atMs;
+};
+constexpr uint8_t kFileResultMemos = 8;
+EXT_RAM_BSS_ATTR FileResultMemo gFileResultMemos[kFileResultMemos];
+uint8_t gFileResultNext = 0;
+
+// CALLER HOLDS gFileSlotsMutex.
+void rememberResultLocked(const uint8_t peerMac[6], uint32_t transferId, uint8_t status, uint32_t bytesStored) {
+  FileResultMemo* slot = nullptr;
+  for (uint8_t i = 0; i < kFileResultMemos; i++) {  // the same transfer again: overwrite it
+    FileResultMemo& m = gFileResultMemos[i];
+    if (m.used && m.transferId == transferId && memcmp(m.peerMac, peerMac, 6) == 0) { slot = &m; break; }
+  }
+  if (!slot) {
+    slot = &gFileResultMemos[gFileResultNext];
+    gFileResultNext = (uint8_t)((gFileResultNext + 1) % kFileResultMemos);
+  }
+  memcpy(slot->peerMac, peerMac, 6);
+  slot->transferId  = transferId;
+  slot->status      = status;
+  slot->bytesStored = bytesStored;
+  slot->atMs        = (uint32_t)millis();
+  slot->used        = 1;
+}
+}  // namespace
+
+void fileSlotsRememberResult(const uint8_t peerMac[6], uint32_t transferId, uint8_t status, uint32_t bytesStored) {
+  if (!peerMac || transferId == 0) return;
+  FileSlotsLockGuard g(kFileSlotsLockWait);
+  if (!g.ok) return;
+  rememberResultLocked(peerMac, transferId, status, bytesStored);
+}
+
+FileResultLookup fileSlotsFindResult(const uint8_t peerMac[6], uint32_t transferId, uint8_t* statusOut,
+                                     uint32_t* bytesOut) {
+  if (!peerMac || transferId == 0) return FILE_RESULT_LOOKUP_NOT_FOUND;
+  FileSlotsLockGuard g;
+  if (!g.ok) return FILE_RESULT_LOOKUP_BUSY;
+  const uint32_t now = (uint32_t)millis();
+  for (uint8_t i = 0; i < kFileResultMemos; i++) {
+    const FileResultMemo& m = gFileResultMemos[i];
+    if (!m.used || m.transferId != transferId || memcmp(m.peerMac, peerMac, 6) != 0) continue;
+    if ((uint32_t)(now - m.atMs) >= kFileResultMemoryMs) return FILE_RESULT_LOOKUP_NOT_FOUND;
+    if (statusOut) *statusOut = m.status;
+    if (bytesOut) *bytesOut = m.bytesStored;
+    return FILE_RESULT_LOOKUP_FOUND;
+  }
+  return FILE_RESULT_LOOKUP_NOT_FOUND;
+}
+
+void fileSlotsForgetResults() {
+  FileSlotsLockGuard g(kFileSlotsLockWait);
+  if (!g.ok) return;
+  memset(gFileResultMemos, 0, sizeof(gFileResultMemos));
+  gFileResultNext = 0;
 }
 
 void fileSlotsRelease(FileTransferSlot* slot) {
@@ -1004,22 +1087,24 @@ uint8_t fileSlotsTimeoutSweep(uint32_t nowMs, FileSlotExpiry* out, uint8_t outCa
     if (s.state != FILE_SLOT_RECEIVING) continue;  // FREE, or COMPLETING (already tearing down)
     if ((nowMs - s.lastFrameMs) < kFileSlotTimeoutMs) continue;
     WARN_ESPNOWF("[FileSlots] slot %u TIMEOUT: '%s' from " MAC_FMT " "
-                 "(msgId=%lu, %u/%u chunks, no frame in %ums)",
+                 "(transferId=%lu, %u/%u chunks, no frame in %ums)",
                  (unsigned)i, s.filename,
                  MAC_ARGS(s.peerMac),
-                 (unsigned long)s.msgId,
+                 (unsigned long)s.transferId,
                  (unsigned)s.receivedChunks, (unsigned)s.totalChunks,
                  (unsigned)(nowMs - s.lastFrameMs));
-    // Record (peer,msgId) so the caller can FILE_CANCEL(TIMEOUT) the sender
+    // Record (peer,transferId) so the caller can FILE_CANCEL(TIMEOUT) the sender
     // before we wipe the slot. Count ONLY what is written — the return value
     // is the number of valid out[] entries (a slot expiring past outCap is
     // still torn down below, just not reported; previously the unconditional
     // increment could claim entries that were never written).
     if (out && expired < outCap) {
       memcpy(out[expired].peerMac, s.peerMac, 6);
-      out[expired].msgId = s.msgId;
+      out[expired].transferId = s.transferId;
       expired++;
     }
+    // A FILE_END that still comes (late) is answered with this verdict.
+    rememberResultLocked(s.peerMac, s.transferId, kFileResultTimeoutStatus, 0);
     // Streaming slots own a .part handle + buffers that cmd_exec may be mid-write
     // on — defer their teardown to cmd_exec (close/delete/free there). RAM slots
     // have no such handoff; release inline.
@@ -1046,7 +1131,8 @@ bool fileSlotsSnapshot(uint8_t slotIdx, FileTransferSlotInfo* out) {
   if (s.state == FILE_SLOT_FREE) return false;
   out->state          = s.state;
   memcpy(out->peerMac, s.peerMac, 6);
-  out->msgId          = s.msgId;
+  out->transferId     = s.transferId;
+  out->kind           = s.kind;
   strncpy(out->filename, s.filename, sizeof(out->filename) - 1);
   out->filename[sizeof(out->filename) - 1] = '\0';
   out->totalSize      = s.totalSize;

@@ -138,11 +138,14 @@ def source_contract() -> None:
             "the drain job ends on a failed stream instead of spinning")
     header = (COMPONENT / "System_ESPNow_Files.h").read_text()
     require('constexpr const char* kFileSlotErrStorage  = "NO_SPACE";' in header, "the storage reason has a name")
-    # The caller answers every allocation error with the existing rejected
-    # cancel; no new frame or reason goes on the wire.
+    # The caller answers every allocation error on the FILE_START's ACK (1.0
+    # step 7); the storage refusal is io_error there.
     espnow = (COMPONENT / "System_ESPNow.cpp").read_text()
-    start = extract_block(espnow, "static V4Verdict v4h_file_start(") if "static V4Verdict v4h_file_start(" in espnow else espnow
-    require("FILE_CANCEL_REJECTED" in start, "FILE_START answers an allocation error with FILE_CANCEL_REJECTED")
+    start = extract_block(espnow, "static V4Verdict v4h_file_start(")
+    refusal = extract_block(espnow, "static uint8_t v4FileStartRefusalStatus(")
+    require("return ctx.refuseWith(v4FileStartRefusalStatus(err));" in start and
+            "if (strcmp(err, kFileSlotErrStorage) == 0) return espnowanswer::kIoError;" in refusal,
+            "FILE_START answers an allocation error on its ACK (storage: io_error)")
     # Microphone: asked once before the file exists, with the stored figure
     # (no walk while the speaker waits), and the recording is limited to what
     # is above the reserve instead of being refused for a full 60 s.

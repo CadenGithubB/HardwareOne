@@ -94,7 +94,7 @@ struct Node{bool directory;size_t size;std::vector<std::string> children;};
 static std::map<std::string,Node> nodes={
     {"/",{true,0,{"/stt","/hello.txt"}}}, {"/sd",{true,0,{"/stt"}}},
     {"/stt",{true,0,{"/stt/u2"}}}, {"/stt/u2",{true,0,{"/stt/u2/secret.txt"}}},
-    {"/stt/u2/secret.txt",{false,900,{}}}, {"/hello.txt",{false,42,{}}},
+    {"/stt/u2/secret.txt",{false,900,{}}}, {"/hello.txt",{false,42,{}}}, {"/nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn.txt",{false,5,{}}},
     {"/ordinary",{true,0,{"/ordinary/note.txt"}}}, {"/ordinary/note.txt",{false,19,{}}},
     {"/sd/public.txt",{false,75,{}}}, {"/stt2/a.txt",{false,6,{}}}, {"/STT/a.txt",{false,7,{}}},
     // Device-private files: a wrongly served request would actually list or transfer these.
@@ -130,7 +130,11 @@ bool getStats(StorageType tier,uint64_t& total,uint64_t& used,uint64_t& free){as
 uint8_t getPermissions(const String&,const AuthContext&){assert(scopeDepth);++fsCalls;return identityMayRead()?0x3f:0;}
 String formatPath(const char* dir,const char* name){return String(dir)+(String(dir)=="/"?"":"/")+name;}
 // Reads under the installed identity (canRead), so a refused identity transfers nothing.
-bool sendFileToMac(const uint8_t*,const String& path){assert(scopeDepth);if(!identityMayRead())return false;++transfers;transferPath=path;return true;}
+// The 1.0 step 7 result: Stored once the requester's FILE_RESULT came.
+enum class FileSendResult:uint8_t{Stored=0,Failed=1,NoSession=2,Unknown=3};
+struct FileSendOutcome{FileSendResult result;uint8_t status;uint32_t bytesStored;const char* why;};
+const char* fileSendResultWord(FileSendResult r){return r==FileSendResult::Stored?"stored":"failed";}
+FileSendOutcome sendFileToMacResult(const uint8_t*,const String& path){assert(scopeDepth);if(!identityMayRead())return {FileSendResult::Failed,2,0,"refused"};++transfers;transferPath=path;return {FileSendResult::Stored,0,42,""};}
 // INSERT_PRODUCTION
 static void reset(){assert(scopeDepth==0);scopes=fsCalls=transfers=statsCalls=sdChecks=sends=0;response.clear();transferPath="";VFS::requestedTiers.clear();filesystemReady=sdAvailable=statsOkay=true;allocFails=openFails=false;bondConfigured=bondSession=true;installed.clear();lastInstalled=AuthContext{};}
 static const uint8_t mac[6]={1,2,3,4,5,6};        // the bonded peer (equals bondMac)
@@ -215,6 +219,10 @@ static std::string installedList(){std::string s;for(const auto& id:installed){i
 static void servedIdentity(){
     reset();auto g=request<V4PayloadFsGetReq>("/hello.txt");processGetDeferred(mac,g);auto ga=decoded<V4PayloadFsGetAck>(ESPNOW_V4_TYPE_FS_GET_ACK);
     ++servedChecks;if(!(ga.status==FS_LIST_STATUS_OK&&ga.fileSize==42&&transfers==1&&transferPath=="/hello.txt"&&scopes==2))servedFail("GET '/hello.txt' from the bonded peer: expected OK with one transfer under two identity installs");
+    // 1.0 step 7: a name the requester's inbox cannot hold (over 63 bytes) is refused before the OK.
+    {reset();auto lg=request<V4PayloadFsGetReq>("/nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn.txt");processGetDeferred(mac,lg);auto la=decoded<V4PayloadFsGetAck>(ESPNOW_V4_TYPE_FS_GET_ACK);
+     ++servedChecks;if(!(la.status==FS_LIST_STATUS_TOO_LARGE&&transfers==0))servedFail("GET of a 68-byte name: expected too_large and no transfer");
+     reset();g=request<V4PayloadFsGetReq>("/hello.txt");processGetDeferred(mac,g);}
     ++servedChecks;if(!onlyBondIdentity()){char msg[200];std::snprintf(msg,sizeof(msg),"expected bond-admin over SOURCE_ESPNOW, got %s",installedList().c_str());servedFail(msg);}
     ++servedChecks;if(!(lastInstalled.path=="/espnow/fs"&&lastInstalled.ip=="espnow:01:02:03:04:05:06"&&lastInstalled.scope==""&&lastInstalled.sid==""&&lastInstalled.opaque==nullptr))servedFail("expected the bond identity stamped path=/espnow/fs ip=espnow:<MAC>, unconfined");
     reset();auto l=request<V4PayloadFsListReq>("/");l.maxEntries=32;processListDeferred(mac,l);auto lr=decoded<V4PayloadFsListReplyHeader>(ESPNOW_V4_TYPE_FS_LIST_REPLY);

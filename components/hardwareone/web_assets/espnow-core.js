@@ -642,27 +642,32 @@
       
       hw.postFormText('/api/cli', { cmd: 'espnowsendfile ' + mac + ' "' + path + '"' })
         .then(t=>{
-          // An explicit "Error:" prefix always wins: several failure strings
-          // legitimately contain the word "sent" (e.g. "...; not sent"), which
-          // this substring sniff would otherwise paint as success.
-          const success = t.indexOf('Error') !== 0 &&
-                          (t.toLowerCase().indexOf('success') >= 0 || t.toLowerCase().indexOf('sent') >= 0);
-          
+          // The reply starts with its word (1.0 step 7): "Stored" (the
+          // receiver checked and stored the file), "Unknown" (no answer from
+          // the receiver: it may or may not be stored), anything else
+          // ("Error: ...") is a failure.
+          const success = t.indexOf('Stored') === 0;
+          const unknown = t.indexOf('Unknown') === 0;
+
           if (statDiv) {
             if (success) {
               statDiv.style.background = '#d4edda';
               statDiv.style.color = '#155724';
-              statDiv.textContent = t;
+            } else if (unknown) {
+              statDiv.style.background = '#fff3cd';
+              statDiv.style.color = '#856404';
             } else {
               statDiv.style.background = '#f8d7da';
               statDiv.style.color = '#721c24';
-              statDiv.textContent = t;
             }
+            statDiv.textContent = t;
           }
-          
+
           // Update message log with result
           if (success) {
-            appendLogLine('log-' + mac, 'RECEIVED', 'File sent: ' + filename, null);
+            appendLogLine('log-' + mac, 'RECEIVED', 'File stored: ' + filename, null);
+          } else if (unknown) {
+            appendLogLine('log-' + mac, 'ERROR', 'File sent, no answer (check the peer): ' + filename, null);
           } else {
             appendLogLine('log-' + mac, 'ERROR', 'File transfer failed: ' + t, null);
           }

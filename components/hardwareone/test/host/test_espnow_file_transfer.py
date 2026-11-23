@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Run the ESP-NOW file transfer, both ends, against host doubles.
+"""Run the ESP-NOW file transfer (1.0 step 7, the Q26 layout), both ends,
+against host doubles.
 
 The suite compiles the production receive slot table (the whole body of
-System_ESPNow_Files.cpp), the FILE_START/DATA/END/CANCEL handlers and the
-streaming finalize job, the sender pump (sendFileToMac) with its session gate,
+System_ESPNow_Files.cpp, with its result memory), every FILE_START / DATA /
+END / RESULT / CANCEL handler with the finalize jobs, the FILE_CANCEL and
+FILE_RESULT senders, the sender (sendFileToMacResult) with its session gate,
 and the callers that report a send to a person (espnowsendfile, espnowsend,
 imagesend, the OLED send job, with the real CommandArgs) into
 espnow_file_transfer_harness.cpp. The filesystem is the shared in-memory fake,
 the wire structs and MAC text helpers are the real headers. The doubles are the
 slot-table mutex, the filesystem lock, the command-task queue, the session
-table, the pending-frame store (one frame per peer, newest wins) and the radio,
-which loops the sender's frames into the receive handlers.
+table, the pending-frame store, the acknowledged send of FILE_START / FILE_END
+(the receive handler's verdict is the ACK) and the radio, which loops the
+sender's frames into the receive handlers and the receiver's FILE_RESULT /
+FILE_CANCEL back into the sender's.
 
 One thread plays every task. A task that waits (for the filesystem lock, or in
 a pacing delay) runs a hook in which the test plays the other task, and the
@@ -19,7 +23,12 @@ whose holder is waiting further up the stack misses, an unbounded one is a
 deadlock and is counted.
 
 It checks that a healthy transfer arrives byte for byte on the RAM path and the
-streaming path; that a send without an ACTIVE session is refused before the
+streaming path (and with 138-byte chunks to a routed peer) and ends Stored;
+Failed (the receiver's io_error, a bad CRC, a FILE_CANCEL mid-pump, a name
+over 96 bytes, FILE_START refused at once) and Unknown (no FILE_RESULT in
+10 s, after one FILE_END copy); that a FILE_END copy after the slot is gone
+gets the remembered FILE_RESULT; that every FILE_START refusal is its ACK's
+status; that a send without an ACTIVE session is refused before the
 first frame, starts the handshake once, and that every caller says so; that a
 session lost mid-transfer is reported; that a receive is not cancelled because
 the slot table was busy; that release and abort do no filesystem work, and do
@@ -77,15 +86,6 @@ def string_double():
                                      '{ return String(left) + right; }\n')
 
 
-def ram_finalize_queue(main_cpp: str) -> str:
-    """The small-file finalize queue and its loop step (1.0 step 5b), or ''."""
-    start = '// Complete small files waiting for fileRamFinalize'
-    end = '// FILE_END — finalize the slot'
-    if start not in main_cpp:
-        return ''
-    return main_cpp[main_cpp.index(start):main_cpp.index(end)]
-
-
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--cxx', default=os.environ.get('CXX') or shutil.which('clang++') or shutil.which('c++'))
@@ -112,9 +112,6 @@ def main():
             raise SystemExit(f'{where}: {marker!r} found {text.count(marker)} times')
         return extract_block(text, marker) + suffix
 
-    def optional(text, marker, where, suffix=''):
-        return body(text, marker, where, suffix) if marker in text else ''
-
     main_cpp = read('System_ESPNow.cpp')
     main_h = read('System_ESPNow.h')
     files_cpp = read('System_ESPNow_Files.cpp')
@@ -134,6 +131,8 @@ def main():
         if not re.search(r'\bsendFileToMac(Result)?\(', text):
             failures.append(f'{marker[:-1]} no longer sends through sendFileToMac, '
                             'so it does not inherit the session gate')
+        elif 'kEspNowFileKindBond' not in text:
+            failures.append(f'{marker[:-1]} does not send its file as a bond answer (kind 1)')
     # The bond's own sync files raise no user-visible file event (bench
     # 2026-11-18): logFileTransferEvent returns with a debug line before the
     # history line, the console line and the file_rx / file_rx_failed post,
@@ -148,9 +147,7 @@ def main():
     if ('fileRxIsBondSync(gSettings.bondModeEnabled, fromPartner, filename)' not in glue or
             'parseMacAddress(gSettings.bondPeerMac, partner)' not in glue):
         failures.append('fileRxBondSync does not ask the rule with bond mode and the bond partner')
-    ram_finish = ('static void fileRamFinalize(' if 'static void fileRamFinalize(' in main_cpp
-                  else 'static V4Verdict v4h_file_end(')
-    for marker in ('static void fileWriterFinalizeJob(', ram_finish):
+    for marker in ('static void fileWriterFinalizeJob(', 'static void fileRamFinalize('):
         if 'if (!fileRxBondSync(sndMac, filename)) {' not in body(main_cpp, marker, E):
             failures.append(f'{marker[12:-1]} shows a toast for a bond sync file')
     fslist = read('System_ESPNow_FsList.cpp')
@@ -158,6 +155,12 @@ def main():
     fs_get = extract_block(fslist[fslist.rindex(get_marker):], get_marker)
     if not re.search(r'\bsendFileToMac(Result)?\(', fs_get):
         failures.append('processGetDeferred no longer sends through sendFileToMac')
+    start_handler = body(main_cpp, 'static V4Verdict v4h_file_start(', E)
+    bond_part = start_handler[start_handler.index('if (fs.kind == V4_FILE_KIND_BOND) {'):]
+    if 'if (fs.totalSize > kFileSlotMaxFileSize) return ctx.refuseWith(espnowanswer::kTooLarge);' not in \
+            bond_part[:bond_part.index('#else')]:
+        failures.append('a bond answer over the RAM-path size is not refused kTooLarge at FILE_START '
+                        '(it would stream and never reach its processor)')
     if failures:
         for f in failures:
             print(f'espnow_file_transfer: {f}', file=sys.stderr)
@@ -173,37 +176,46 @@ def main():
         raise SystemExit('System_ESPNow_Files.cpp: implementation anchors not unique')
     slots_source = files_cpp[files_cpp.index(start):files_cpp.index(end)]
 
-    rx = '\n\n'.join(filter(None, (
-        optional(main_cpp, 'static uint8_t v4FileStartRefusalStatus(', E),
-        body(main_cpp, 'static V4Verdict v4h_file_start(', E),
-        optional(main_cpp, 'static void v4FileNoteSlotTableBusy(', E),
-        body(main_cpp, 'static V4Verdict v4h_file_data(', E),
-        body(main_cpp, 'static void fileWriterFinalizeJob(', E),
-        optional(main_cpp, 'static void fileRamFinalize(', E),
-        ram_finalize_queue(main_cpp),
-        body(main_cpp, 'static V4Verdict v4h_file_end(', E),
-        body(main_cpp, 'static V4Verdict v4h_file_cancel(', E),
-    )))
+    # Every file handler, the finalize jobs and the small-file queue: one run
+    # of System_ESPNow.cpp from the FILE_START refusal table to the end of
+    # v4h_file_cancel.
+    rx_start = '// The shared status (System_ESPNow_AnswerCore.h) for a fileSlotsAllocate refusal.'
+    rx_end_marker = 'static V4Verdict v4h_file_cancel('
+    if main_cpp.count(rx_start) != 1:
+        raise SystemExit(f'{E}: {rx_start!r} not unique')
+    rx_head = main_cpp[main_cpp.index(rx_start):main_cpp.index(rx_end_marker)]
+    rx = rx_head + body(main_cpp, rx_end_marker, E)
 
     # ---- send side ---------------------------------------------------------------
-    fixed = 'FileSendResult sendFileToMacResult(' in main_cpp
-    tx_parts = [body(main_cpp, 'struct FileSendActiveGuard', E, ';')]
-    if fixed:
-        tx_parts += [
-            body(main_cpp, 'static bool espnowSessionActiveWith(', E),
-            body(main_cpp, 'static bool espnowSessionActiveOrKick(', E),
-            body(main_cpp, 'FileSendResult sendFileToMacResult(', E),
-        ]
-    tx_parts.append(body(main_cpp, 'bool sendFileToMac(', E))
-    tx = '\n\n'.join(tx_parts)
+    tx_start = 'static constexpr uint32_t kFileResultWaitMs'
+    if main_cpp.count(tx_start) != 1:
+        raise SystemExit(f'{E}: {tx_start!r} not unique')
+    tx = '\n\n'.join((
+        body(main_cpp, 'struct FileSendActiveGuard', E, ';'),
+        body(main_cpp, 'static bool espnowSessionActiveWith(', E),
+        body(main_cpp, 'static bool espnowSessionActiveOrKick(', E),
+        main_cpp[main_cpp.index(tx_start):main_cpp.index('FileSendOutcome sendFileToMacResult(')],
+        body(main_cpp, 'FileSendOutcome sendFileToMacResult(', E),
+        body(main_cpp, 'bool sendFileToMac(', E),
+    ))
 
-    result_types = ''
-    if fixed:
-        result_types = body(main_h, 'enum class FileSendResult', 'System_ESPNow.h', ';')
-        fmt = re.search(r'^#define ESPNOW_NO_SESSION_REPLY_FMT \\\n[^\n]*\n', main_h, flags=re.M)
-        if not fmt:
-            raise SystemExit('System_ESPNow.h: ESPNOW_NO_SESSION_REPLY_FMT not found')
-        result_types += '\n' + fmt.group(0)
+    result_types = '\n'.join((
+        body(main_h, 'enum class FileSendResult', 'System_ESPNow.h', ';'),
+        body(main_h, 'struct FileSendOutcome', 'System_ESPNow.h', ';'),
+        'constexpr uint8_t kEspNowFileKindFile = 0;',
+        '[[maybe_unused]] constexpr uint8_t kEspNowFileKindBond = 1;',
+    ))
+    if 'constexpr uint8_t kEspNowFileKindFile = 0;' not in main_h or 'constexpr uint8_t kEspNowFileKindBond = 1;' not in main_h:
+        raise SystemExit('System_ESPNow.h: the FILE_START kind constants changed')
+    fmt = re.search(r'^#define ESPNOW_NO_SESSION_REPLY_FMT \\\n[^\n]*\n', main_h, flags=re.M)
+    if not fmt:
+        raise SystemExit('System_ESPNow.h: ESPNOW_NO_SESSION_REPLY_FMT not found')
+    result_types += '\n' + fmt.group(0)
+    # The declaration's default argument, as the callers see it.
+    result_types += ('\nFileSendOutcome sendFileToMacResult(const uint8_t* mac, const String& localPath, '
+                     'uint8_t kind = kEspNowFileKindFile);\n'
+                     'bool sendFileToMac(const uint8_t* mac, const String& localPath, uint8_t kind = kEspNowFileKindFile);\n'
+                     'const char* fileSendResultWord(FileSendResult result);\n')
 
     commands = '\n\n'.join((
         module_reply_constants(a.component),  # cmd_imagesend returns kFileReplyMissingOrDenied
@@ -222,8 +234,10 @@ def main():
     ))
 
     harness = (HERE / 'espnow_file_transfer_harness.cpp').read_text()
-    # Rule F3: the FILE_CANCEL sender as it is ({reqId, status} under a fresh msgId).
-    cancel_tx = body(main_cpp, 'static bool v4_send_file_cancel(', E)
+    # Rule F3: the FILE_CANCEL and FILE_RESULT senders as they are ({reqId,
+    # status} under a fresh msgId).
+    cancel_tx = (body(main_cpp, 'static bool v4_send_file_cancel(', E) + '\n' +
+                 body(main_cpp, 'static bool v4_send_file_result(', E))
     for tag, value in (('// INSERT_RESULT_TYPES', result_types), ('// INSERT_SLOTS_HEADER', slots_header),
                        ('// INSERT_SLOTS_SOURCE', slots_source), ('// INSERT_CANCEL_TX', cancel_tx),
                        ('// INSERT_RX', rx),
@@ -256,10 +270,6 @@ def main():
                '-DARDUINOJSON_ENABLE_ARDUINO_PRINT=0', '-DARDUINOJSON_ENABLE_PROGMEM=0',
                *sanitize, '-I', str(d), '-I', str(HERE), '-I', str(json_include),
                str(unit), '-o', str(exe)]
-        if not fixed:
-            cmd.insert(1, '-DHW1_FILE_SEND_BOOL_ONLY=1')
-        if 'static void fileRamFinalizeTick(' in main_cpp:
-            cmd.insert(1, '-DHW1_HAVE_RAM_FINALIZE=1')
         subprocess.run(cmd, check=True, timeout=300)
         result = subprocess.run([str(exe)] + ([a.case] if a.case else []), timeout=180)
         if result.returncode:

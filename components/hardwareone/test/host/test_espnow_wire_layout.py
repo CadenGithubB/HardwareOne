@@ -123,9 +123,12 @@ GOLDEN = {
     'V4PayloadSessionRekey': (146, [('sessionId', 0), ('senderMac', 2), ('receiverMac', 8), ('newEphX25519Pub', 14),
                                     ('nonceRekey', 46), ('prevTxSeqAtRekey', 62), ('signature', 66),
                                     ('meshTag', 130)]),
-    'V4PayloadFileStart': (72, [('fileSize', 0), ('chunkCount', 4), ('chunkSize', 6), ('filename', 8)]),
-    'V4PayloadFileData': (202, [('chunkIndex', 0), ('data', 2)]),
-    'V4PayloadFileEnd': (5, [('crc32', 0), ('status', 4)]),
+    # Files (1.0 step 7, the Q26 layout): every frame names its transfer.
+    'V4PayloadFileStart': (12, [('transferId', 0), ('totalSize', 4), ('chunkSize', 8), ('kind', 10),
+                                ('nameLen', 11)]),
+    'V4PayloadFileData': (202, [('transferId', 0), ('chunkIndex', 4), ('data', 8)]),
+    'V4PayloadFileEnd': (16, [('transferId', 0), ('chunkCount', 4), ('crc32', 8), ('status', 12), ('reserved', 13)]),
+    'V4PayloadFileResult': (12, [('reqId', 0), ('status', 4), ('reserved', 5), ('bytesStored', 8)]),
     'V4PayloadFileCancel': (5, [('reqId', 0), ('status', 4)]),
     'V4PayloadFsListReq': (144, [('reqId', 0), ('startIndex', 4), ('maxEntries', 6), ('path', 8), ('reserved', 136)]),
     'V4PayloadFsListReplyHeader': (140, [('reqId', 0), ('status', 4), ('entryCount', 5), ('hasMore', 6),
@@ -155,7 +158,7 @@ GOLDEN = {
 # 1-15 shared, 16+ per frame; System_ESPNow_AnswerCore.h). Frozen at 1.0.
 STATUS_GOLDEN = {
     'FS_LIST_STATUS_OK': 0, 'FS_LIST_STATUS_TOO_BUSY': 1, 'FS_LIST_STATUS_PERM_DENIED': 2,
-    'FS_LIST_STATUS_NOT_READY': 7, 'FS_LIST_STATUS_IO_ERROR': 8, 'FS_LIST_STATUS_NOT_FOUND': 9,
+    'FS_LIST_STATUS_NOT_READY': 7, 'FS_LIST_STATUS_TOO_LARGE': 4, 'FS_LIST_STATUS_IO_ERROR': 8, 'FS_LIST_STATUS_NOT_FOUND': 9,
     'FS_LIST_STATUS_NOT_A_DIR': 16,
     'FILE_CANCEL_REJECTED': 2, 'FILE_CANCEL_WRITE_FAILED': 8, 'FILE_CANCEL_TIMEOUT': 10,
     'FILE_CANCEL_INCOMPLETE': 16, 'FILE_CANCEL_CRC_MISMATCH': 17,
@@ -187,7 +190,8 @@ MASK_ALLOWED = ('receivedPeerMask',  # one bit per validated peer index, RAM onl
 FIXED_HEADER = {
     'V4PayloadRelayData': 'RELAY_DATA', 'V4PayloadPeerListHeader': 'PEER_LIST',
     'V4PayloadPeerListEntry': 'PEER_LIST', 'V4PayloadSensorReading': 'BOND_SENSOR_DATA',
-    'V4PayloadCmdRespHeader': 'CMD_RESP', 'V4PayloadStreamHeader': 'STREAM', 'V4PayloadFileData': 'FILE_DATA',
+    'V4PayloadCmdRespHeader': 'CMD_RESP', 'V4PayloadStreamHeader': 'STREAM', 'V4PayloadFileStart': 'FILE_START',
+    'V4PayloadFileData': 'FILE_DATA',
     'V4PayloadFsListReplyHeader': 'FS_LIST_REPLY', 'V4PayloadFsEntry': 'FS_LIST_REPLY',
 }
 TEXT_ONLY_FRAMES = ('SENSOR_ENVELOPE', 'TEXT', 'BOOT', 'CMD', 'USER_SYNC')

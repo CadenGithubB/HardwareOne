@@ -4676,6 +4676,50 @@ disables the mesh and drops its id on every slot (the default mesh only after an
 key without `kdf` record 1 is not used. `espnow_wire_layout` and `espnow_dispatch_policy` pin the new sizes and
 minimum lengths (KEY_EX_CONFIRM 34, SESSION_OPEN 154, SESSION_CONFIRM 162 = the relay budget, SESSION_REKEY 146).
 
+## ESP-NOW files: the Q26 transfer layout (1.0 step 7)
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_file_transfer.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_wire_layout.py
+python3 components/hardwareone/test/host/test_espnow_dispatch_policy.py
+python3 components/hardwareone/test/host/test_espnow_chunked_send.py --sanitize
+./build-host/espnow_answer_core_tests
+```
+
+`espnow_file_transfer` was rewritten for the transferId layout (25 cases). Every frame a test plays has its own
+msgId and names its transfer in the payload; FILE_START and FILE_END go through a double of the acknowledged send
+(the receive handler's verdict is the ACK), and the receiver's FILE_RESULT and FILE_CANCEL loop back into the
+sender's handlers. Sender results: Stored (RAM path, streaming path, a routed peer with 138-byte chunks; every frame
+its own msgId, one nonzero transferId, ACK_REQ on START and END only); Failed (the receiver's rename fails:
+io_error; a chunk changed on the way: crc_mismatch; a streaming gap: the receiver's FILE_CANCEL stops the pump within
+one chunk, incomplete, no FILE_END; no answer to FILE_START: timeout at once, and the sender's FILE_CANCEL frees the
+receiver's slot; a 97-byte name: too_large from the receiver's ACK, the name sent whole and no chunk; a name that
+cannot fit FILE_START: refused before any frame; four slots taken: no_slot with one frame, no retry and no wait);
+Unknown (no FILE_RESULT: one FILE_END copy at 4 s under a new msgId, Unknown at 10 s; a result after that is shown
+once as late); a lost first FILE_RESULT is brought again by the copy (Stored); a lost FILE_END ACK still ends
+Stored. Receive side: every FILE_START refusal is its ACK's status with no slot, buffer, FILE_CANCEL or FILE_RESULT
+(name over 96, over the 63-byte inbox limit, '/', '..', a NUL, kind 2, a bond answer without bond mode, transferId 0,
+a chunk over 194 bytes, over 65,535 chunks, over 4 MB, a name cut short, below the 13-byte minimum); incomplete,
+crc_mismatch, a wrong chunk count and io_error come in FILE_RESULT after a taken FILE_END; a FILE_END copy after the
+slot is released gets the remembered FILE_RESULT (stored or failed), another device and a stranger transfer get
+kRefused, a stop for an unknown transfer is taken, and after 60 s the memory has forgotten it; a FILE_END that comes
+after the 30 s sweep gets FILE_RESULT timeout. The storage-admission, writer, teardown, busy-table, contention and
+small-file-after-ACK cases from before are kept on the new layout (an admission refusal is the START's io_error).
+The callers' words: `espnowsendfile` "Stored on peerB: report.bin (1000 bytes)", "Unknown: ...", "Error: '<name>'
+was not stored on peerB: <reason>."; `imagesend` "Stored <path> on peerB (<n> bytes)"; the OLED "File stored",
+"Not stored: <reason>", "Sent, no answer. Check peer.". `espnow_wire_layout` pins the new FILE_START (12 + name),
+FILE_DATA (8 + 194), FILE_END (16) and FILE_RESULT (12) layouts, FILE_START as a fixed-header frame;
+`espnow_dispatch_policy` the minimum lengths 13 / 9 / 16 / 12 / 5 and the FILE_RESULT row; `espnow_chunked_send` K13:
+a FILE_START refused no_slot is not sent again; `espnow_answer_core` FILE_RESULT as the eleventh answer opcode.
+`espnow_fs_transcript_privacy` takes the FS_GET server's `sendFileToMacResult`; `log_overflow_latch` pins the
+storage refusal as the START's io_error. Review fixes (case `chunk-length-late`): a chunk that is not exactly
+chunkSize (the last one: the rest of totalSize) ends the transfer with FILE_CANCEL(bad_request) and writes nothing
+(a 3-byte chunk size with 194-byte chunks on a streamed file); a late chunk of a transfer that has its verdict draws
+no cancel; cancels for unknown transfers are one per peer per 100 ms; a "rejected" cancel during the result wait is
+not the verdict; names with CR/LF, an escape or DEL are bad_request; a bond answer over 128 KB is refused (source
+pin); `espnow_chunked_send` K13 also resends a FILE_START cut by this device's rekey; `espnow_fs_transcript_privacy`
+refuses an FS_GET of a name over 63 bytes with too_large before the OK.
+
 ## ESP-NOW remote command results and capacity (1.0 step 6)
 
 ```sh
@@ -4798,7 +4842,7 @@ CMD from a session peer not in the registry is kRefused; `espnow_dispatch_policy
 for every REQ_PAIRED row from a sealed unpaired peer; `espnow_reassembly` reports a broken entry as Discarded;
 `espnow_chunked_send` K9 (no copy leaves the radio: NotSent, no strike) and K10 (a long TEXT is never sent again
 as a whole, after busy or a rekey); `espnow_answers`: a STREAM line into a full ring is refused busy;
-`espnow_file_transfer`: closing ESP-NOW after a small file's ACK reports it failed with FILE_CANCEL and frees the
+`espnow_file_transfer`: closing ESP-NOW after a small file's ACK reports it failed (FILE_CANCEL then; FILE_RESULT io_error since step 7) and frees the
 slot (`fileRamFinalizeDropAll`).
 
 ## ESP-NOW 1.0 step 5a: the ACK frame
@@ -7628,7 +7672,7 @@ REPLY to a key exchange an unpair called off stores nothing, so the unpaired pee
 and a new key exchange afterwards is stored as usual.
 
 `espnow_file_transfer` compiles the receive slot table, the FILE_* handlers, the sender pump and the commands
-that report a send (12 cases): a send without an ACTIVE session is refused and every caller says so; `espnowsend`
+that report a send (since 1.0 step 7 the transferId layout and 25 cases; see that section): a send without an ACTIVE session is refused and every caller says so; `espnowsend`
 re-reads the send status after its history record is written and stamps a state that resolved during the send
 (peer, msgId, delivered), never a pending one; a send whose
 handshake cannot be started fails instead of saying "try again"; a busy slot table never cancels a healthy
