@@ -16,6 +16,7 @@
 
 #include "HAL_MotionBackend.h"
 #include "HAL_MotionCore.h"
+#include "HAL_MotionHookCore.h"
 #include "OLED_Display.h"
 #include "System_ArgParse.h"
 #include "System_Command.h"
@@ -107,6 +108,51 @@ uint8_t imuMagDeviceAddress() { return motionActiveSecondAddress(sImuOpen, imuCo
 static uint8_t imuDeviceBus() { return motionActiveBus(sImuOpen, (uint8_t)gSettings.imuBus); }
 static void imuCloseTarget() { sImuOpen.open = false; }
 const char* imuBackendName() { return motionBackendInfo().part; }
+
+// ============================================================================
+// Per-sample hook and holders (HAL_MotionHookCore.h)
+// ============================================================================
+// The one hook slot: the IMU task calls it once per sample (imuStoreSample).
+static MotionHookSlot sImuHook;
+// Who needs the IMU to stay open ('closeimu' refuses while anyone does).
+// Read and written under sImuHoldersMux, a few instructions at a time.
+EXT_RAM_BSS_ATTR static MotionHolders sImuHolders;
+static portMUX_TYPE sImuHoldersMux = portMUX_INITIALIZER_UNLOCKED;
+
+bool imuSampleHookRegister(MotionSampleHookFn fn, void* ctx) { return motionHookRegister(sImuHook, fn, ctx); }
+
+bool imuSampleHookUnregister(MotionSampleHookFn fn, void* ctx) {
+  // On the IMU task this is the hook giving itself up: its own call is in
+  // progress and is not waited for. Any other task sleeps a tick at a time
+  // until a call in progress has ended (a call is short and never blocks).
+  const TaskHandle_t imuTaskNow = gImuTaskHandle;
+  const bool fromHook = imuTaskNow != nullptr && xTaskGetCurrentTaskHandle() == imuTaskNow;
+  return motionHookUnregister(sImuHook, fn, ctx, fromHook, []() { vTaskDelay(1); });
+}
+
+bool imuHold(const char* who) {
+  portENTER_CRITICAL(&sImuHoldersMux);
+  const bool added = motionHoldAdd(sImuHolders, who);
+  portEXIT_CRITICAL(&sImuHoldersMux);
+  return added;
+}
+
+bool imuRelease(const char* who) {
+  portENTER_CRITICAL(&sImuHoldersMux);
+  const bool removed = motionHoldRemove(sImuHolders, who);
+  portEXIT_CRITICAL(&sImuHoldersMux);
+  return removed;
+}
+
+// A copy of the list, to format outside the critical section.
+static MotionHolders imuHoldersCopy() {
+  portENTER_CRITICAL(&sImuHoldersMux);
+  const MotionHolders copy = sImuHolders;
+  portEXIT_CRITICAL(&sImuHoldersMux);
+  return copy;
+}
+
+uint8_t imuHolderCount() { return imuHoldersCopy().count; }
 
 // ============================================================================
 // IMU Sensor Command Handlers
@@ -268,6 +314,13 @@ const char* cmd_imustart(const String& argsInput) {
 const char* cmd_imustop(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (const char* error = i2cOpenCloseArgError(I2C_DEVICE_IMU, argsInput, "closeimu")) return error;
+  // A consumer that needs the IMU open (the IMU input device) holds it:
+  // closing it under that consumer is refused, with who it is.
+  const MotionHolders holders = imuHoldersCopy();
+  if (holders.count > 0) {
+    if (!ensureDebugBuffer()) return "Error: The IMU is in use and stays open. Stop what uses it first.";
+    return motionHoldRefusal(holders, getDebugBuffer(), 1024);
+  }
   return cmd_sensorstop_queued(I2C_DEVICE_IMU, "IMU");
 }
 
@@ -378,6 +431,11 @@ const char* cmd_imustatus(const String& argsInput) {
   // The gyro offset of this start: the chip's own, or the backend's measurement.
   const char* offset = motionGyroOffsetState(status.measuresGyroOffset, running, status.gyroOffsetDone,
                                              status.gyroOffsetStill);
+  // Who holds the IMU open, and whether a consumer takes every sample.
+  const MotionHolders holders = imuHoldersCopy();
+  char heldBy[64];
+  motionHolderNames(holders, heldBy, sizeof(heldBy));
+  const bool hooked = motionHookRegistered(sImuHook);
   char* out = getDebugBuffer();
   if (json) {
     int n = snprintf(out, 1024, "{\"schema\":1,\"connected\":%s,\"backend\":\"%s\",\"bus\":%u,\"address\":%u",
@@ -388,10 +446,10 @@ const char* cmd_imustatus(const String& argsInput) {
     if (n > 0 && n < 1024) {
       snprintf(out + n, 1024 - n,
                ",\"hwTap\":%s,\"hwFreefall\":%s,\"hasMag\":%s,\"hasHeading\":%s,\"gyroOffset\":\"%s\","
-               "\"sampleMs\":%d,\"pollMs\":%d,\"autoStart\":%s}",
+               "\"sampleMs\":%d,\"pollMs\":%d,\"autoStart\":%s,\"heldBy\":\"%s\",\"sampleHook\":%s}",
                status.hasHwTap ? "true" : "false", status.hasHwFreefall ? "true" : "false",
                status.hasMag ? "true" : "false", status.hasHeading ? "true" : "false", offset, sampleMs, pollMs,
-               autoStart ? "true" : "false");
+               autoStart ? "true" : "false", heldBy, hooked ? "true" : "false");
     }
     return out;
   }
@@ -404,11 +462,12 @@ const char* cmd_imustatus(const String& argsInput) {
   }
   snprintf(out, 1024,
            "[IMU] %s%s%s. Tap and free fall: %s. Heading: %s. Gyro offset: %s. Sampled every %d ms, published "
-           "every %d ms. Open after boot: %s. %s",
+           "every %d ms. Open after boot: %s. %s%s%s%s",
            running ? "Connected: " : "Not connected (", where, running ? "" : ")",
            status.hasHwTap ? "detected by the chip" : "detected from the readings",
            status.hasHeading ? "yes, from magnetic north" : "no, yaw counts from the IMU's start",
            motionGyroOffsetText(offset), sampleMs, pollMs, autoStart ? "on" : "off",
+           holders.count ? "Kept open for: " : "", heldBy, holders.count ? ". " : "",
            running ? "Read it with 'imuread'." : "Start it with 'openimu'.");
   return out;
 }
@@ -465,10 +524,16 @@ static MotionOrientationSettings imuOrientationSettings() {
   return settings;
 }
 
-// One ready sample: publish it to the cache when `publish` (once per
-// imuDevicePollMs), and run the action detector on it either way. Called by
-// the IMU task after each successful read. Returns whether it was published.
-static bool imuStoreSample(const MotionSample& sample, bool publish, unsigned long sampleMs) {
+// The detector on one sample; returns whether it is shaking after it
+// (defined below, with the detector).
+static bool imuRunActions(const MotionActionSample& sample, bool postEvents);
+
+// One ready sample, read at readMs: publish it to the cache when `publish`
+// (once per imuDevicePollMs), run the action detector on it either way, then
+// hand it to the per-sample hook. Called by the IMU task after each
+// successful read. Returns whether it was published.
+static bool imuStoreSample(const MotionSample& sample, bool publish, unsigned long sampleMs,
+                           unsigned long readMs) {
   float pitch = sample.pitch, roll = sample.roll, yaw = sample.yaw;
   motionApplyOrientationCorrection(imuOrientationSettings(), pitch, roll, yaw);
 
@@ -523,7 +588,16 @@ static bool imuStoreSample(const MotionSample& sample, bool publish, unsigned lo
   actions.hasHwFreefall = sample.hasHwFreefall;
   actions.hwFreefall = sample.hwFreefall;
   actions.periodMs = (uint16_t)(sampleMs < 0xFFFF ? sampleMs : 0xFFFF);
-  imuUpdateActions(actions, /*postEvents=*/true);
+  const bool shaking = imuRunActions(actions, /*postEvents=*/true);
+  // The per-sample hook: after the detector, no lock held. Its tilt is the
+  // backend's, before the orientation correction above.
+  if (motionHookRegistered(sImuHook)) {
+    const MotionHookSample hooked =
+        motionHookSample((uint32_t)readMs, sample.pitch, sample.roll, sample.accel,
+                         sample.hasGravity ? sample.gravity : nullptr, sample.hasHwTap, sample.hwTap, shaking,
+                         kMotionTapAccel);
+    motionHookCall(sImuHook, hooked);
+  }
   return updated;
 }
 
@@ -622,13 +696,20 @@ int imuBuildLocalJson(char* buf, size_t bufSize) {
 // Run the detector on one new sample (after the orientation correction).
 // Only the IMU task calls this, once per sample, published or not;
 // postEvents posts the imu_* events it finds.
-void imuUpdateActions(const MotionActionSample& sample, bool postEvents) {
-  if (!gImuRunning || !gImuConnected) return;
+void imuUpdateActions(const MotionActionSample& sample, bool postEvents) { imuRunActions(sample, postEvents); }
+
+// The detector's shake state after the last sample it saw (the IMU task's own
+// copy: a sample that could not take the lock keeps the last one).
+static bool sImuShaking = false;
+
+static bool imuRunActions(const MotionActionSample& sample, bool postEvents) {
+  if (!gImuRunning || !gImuConnected) return false;
   MotionEvents events;
   {
     SensorCacheGuard guard(sImuCacheMutex, pdMS_TO_TICKS(CACHE_MUTEX_TIMEOUT_MS), "imu.actions");
-    if (!guard.held) return;
+    if (!guard.held) return sImuShaking;
     motionActionsUpdate(sImuActions, sample, millis(), postEvents ? &events : nullptr);
+    sImuShaking = sImuActions.isShaking;
   }
   // Posted after the lock is released.
   for (uint8_t i = 0; i < events.count; ++i) {
@@ -644,10 +725,12 @@ void imuUpdateActions(const MotionActionSample& sample, bool postEvents) {
         break;
     }
   }
+  return sImuShaking;
 }
 
 // A fresh detector for each run of the task (no history from a previous run).
 static void imuResetActions() {
+  sImuShaking = false;
   SensorCacheGuard guard(sImuCacheMutex, pdMS_TO_TICKS(100), "imu.actionsReset");
   if (guard.held) sImuActions = MotionActionState{};
 }
@@ -1025,7 +1108,7 @@ void imuTask(void* parameter) {
         bool published = false;
         if (result && sample.ready) {
           const bool publish = motionPublishDue(publishedOnce, lastPublish, nowMs, imuPollMs, sampleMs);
-          published = imuStoreSample(sample, publish, sampleMs);
+          published = imuStoreSample(sample, publish, sampleMs, nowMs);
           if (published) {
             publishedOnce = true;
             lastPublish = nowMs;

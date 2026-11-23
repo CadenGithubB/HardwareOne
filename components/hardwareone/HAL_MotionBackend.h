@@ -45,6 +45,11 @@ struct MotionSample {
   float mag[3] = {0, 0, 0};
   float yaw = 0, pitch = 0, roll = 0;
   float temp = 0;
+  // Which way is up in the sensor frame, a unit vector (hasGravity): for the
+  // per-sample hook (HAL_MotionHookCore.h). A backend that fuses here has it
+  // from its filter.
+  float gravity[3] = {0, 0, 0};
+  bool hasGravity = false;
   bool hasMag = false, hasOrientation = false, hasHeading = false, hasCal = false;
   uint8_t cal = 0;
   // The chip's own event engines (hasHw*): a latched single tap / free fall
