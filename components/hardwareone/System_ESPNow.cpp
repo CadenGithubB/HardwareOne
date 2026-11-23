@@ -641,11 +641,12 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
 // Encrypted multi-frame send. Splits payload into
 // fragments of ≤ESPNOW_V4_MAX_PLAINTEXT bytes, AEAD-seals each fragment
 // independently under the peer's session key, sends with fragIndex/fragCount
-// set in the outer header, ACK-waits per fragment with retry.
-bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,
-                               uint32_t msgId,
-                               const uint8_t* payload, uint16_t payloadLen,
-                               uint8_t ttl);
+// set in the outer header, ACK-waits per fragment with retry. Returns
+// Delivered / Refused(status) / NoAnswer / NotSent (V4SendOutcome).
+V4SendResult v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,
+                                       uint32_t msgId,
+                                       const uint8_t* payload, uint16_t payloadLen,
+                                       uint8_t ttl);
 bool v4_broadcast_topo_request(uint32_t reqId);
 bool v4_send_command_response(const uint8_t* dst, uint32_t reqId, uint8_t status, const char* resultText, uint16_t textLen);
 static bool v4_send_cmd_resp_async(const uint8_t* dst, uint32_t reqId, uint8_t status, const char* text);
@@ -3463,14 +3464,16 @@ uint16_t v4_single_frame_cap(const uint8_t* dst) {
 // Single-frame fast path: if payloadLen ≤ MAX_PLAINTEXT we just delegate to
 // v4_send_session_wrapped (no fragmentation overhead).
 //
-// Returns true only if every fragment was ACKed within retry budget.
-bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,
-                               uint32_t msgId,
-                               const uint8_t* payload, uint16_t payloadLen,
-                               uint8_t ttl) {
-  EspNowRuntimeOpGuard runtimeOp;
-  if (!runtimeOp.held()) return false;
-  if (!dst || (payloadLen > 0 && !payload)) return false;
+// One attempt of the whole message under `msgId` (v4_send_encrypted_chunked
+// runs at most two). Stops at the first fragment the receiver refuses (an ACK
+// with a status): sending it again would be refused again. `*rekeyStall` is
+// set when the seal was refused because this device started a rekey of the
+// session in the middle of the send.
+static V4SendResult v4_send_chunked_attempt(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,
+                                            uint32_t msgId,
+                                            const uint8_t* payload, uint16_t payloadLen,
+                                            uint8_t ttl, bool* rekeyStall) {
+  const V4SendResult kNotSent = {V4SendOutcome::NotSent, 0};
 
   // Routed destinations pay for the envelope out of every fragment, so both the
   // single-frame cutoff and the chunk size shrink. The RECEIVER needs no notion
@@ -3480,10 +3483,13 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
   const uint16_t singleFrameCap = v4_single_frame_cap(dst);
 
   // Single-frame fast path — no need to fragment.
+  // (Not waited for here: a single frame's own ACK is tracked by sendStatus.
+  // v4_send_payload_smart never sends a single frame through this path.)
   if (payloadLen <= singleFrameCap) {
     char err[64] = {0};
     return v4_send_session_wrapped(dst, type, baseFlags, msgId,
-                                   payload, payloadLen, ttl, err, sizeof(err));
+                                   payload, payloadLen, ttl, err, sizeof(err))
+               ? V4SendResult{V4SendOutcome::Delivered, 0} : kNotSent;
   }
 
   // fragIndex/fragCount are uint8_t so the wire would allow 255 fragments, but
@@ -3509,7 +3515,7 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
   if (fragCountU > V4_FRAG_MAX) {
     WARN_ESPNOWF("[V4_ENC_FRAG_TX] payload too large: %u bytes needs %u frags (receiver reassembles at most %u = %u B)",
                  payloadLen, (unsigned)fragCountU, (unsigned)V4_FRAG_MAX, (unsigned)V4_REASM_MAX_MSG);
-    return false;
+    return kNotSent;
   }
   uint8_t fragCount = (uint8_t)fragCountU;
 
@@ -3518,19 +3524,20 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
   const uint16_t meshId = fingerprintForPeer(dst);
   if (meshId == 0) {
     DEBUG_ESPNOWF("[V4_ENC_FRAG_TX] type=%u not sent: no mesh with a mesh id for this destination", type);
-    return false;
+    return kNotSent;
   }
 
   // Look up session up-front so we fail fast if encryption isn't set up.
   const PeerIdentity* pid = peerIdentityFindByMac(dst);
   if (!pid) {
     WARN_ESPNOWF("[V4_ENC_FRAG_TX] no peer identity for dst — cannot encrypt");
-    return false;
+    return kNotSent;
   }
   SessionState* s = sessionFindByPeer(dst, pid->meshId);
   if (!s || s->state != SESSION_ACTIVE) {
+    if (s && s->state == SESSION_REKEYING && rekeyStall) *rekeyStall = true;
     WARN_ESPNOWF("[V4_ENC_FRAG_TX] no ACTIVE session for dst — cannot encrypt");
-    return false;
+    return kNotSent;
   }
 
   char dstMac[18];
@@ -3578,9 +3585,13 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
 
       uint8_t* outPayload = frame + sizeof(EspNowV4Header);
       if (!sessionWrapFrame(s, h, payload + offset, fragLen, outPayload)) {
-        WARN_ESPNOWF("[V4_ENC_FRAG_TX] AEAD seal failed for frag %u/%u — aborting",
-                     fragIdx + 1, fragCount);
-        return false;
+        // A rekey this device started meanwhile refuses every seal until it
+        // applies (only ACKs are sealed while REKEYING): the caller waits
+        // for it and sends the whole message again under a new msgId.
+        if (s->state == SESSION_REKEYING && rekeyStall) *rekeyStall = true;
+        WARN_ESPNOWF("[V4_ENC_FRAG_TX] AEAD seal failed for frag %u/%u%s — aborting",
+                     fragIdx + 1, fragCount, s->state == SESSION_REKEYING ? " (rekey in progress)" : "");
+        return kNotSent;
       }
 
       // Allocate the ACK wait slot. The answer is a sealed ACK in this
@@ -3589,7 +3600,7 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
       V4FragAckWait* ackWait = v4_frag_ack_alloc(dst, msgId, fragIdx, /*expectSealed=*/true);
       if (!ackWait) {
         WARN_ESPNOWF("[V4_ENC_FRAG_TX] no ACK slot for frag %u/%u", fragIdx + 1, fragCount);
-        return false;
+        return kNotSent;
       }
       ackWait->acked = false;
       ackWait->sentMs = millis();
@@ -3627,7 +3638,7 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
         // status): sending it again would be refused again.
         WARN_ESPNOWF("[V4_ENC_FRAG_TX] frag %u/%u refused by the receiver (status %u) — aborting send",
                      fragIdx + 1, fragCount, (unsigned)refusedStatus);
-        return false;
+        return V4SendResult{V4SendOutcome::Refused, refusedStatus};
       }
 
       if (!fragSent) {
@@ -3640,7 +3651,9 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
       WARN_ESPNOWF("[V4_ENC_FRAG_TX] FAILED: frag %u/%u no ACK after %u retries — aborting send",
                    fragIdx + 1, fragCount, MAX_RETRIES);
       DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] ==============================");
-      return false;
+      // Sent at least once and never answered (a send that never left is
+      // retried above; all retries failing to leave still reads as silence).
+      return V4SendResult{V4SendOutcome::NoAnswer, 0};
     }
 
     offset += fragLen;
@@ -3648,13 +3661,87 @@ bool v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t base
 
   DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] ✓ SUCCESS: all %u fragments sent + ACKed", fragCount);
   DEBUG_ESPNOW_ROUTERF("[V4_ENC_FRAG_TX] ==============================");
-  // A fragmented send is ACKed per-fragment (the waiter above), which never
-  // reaches the broadcast-tracker ACK path that flips the web UI's delivery
-  // bubble. Mark it delivered here so a long (chunked) message shows
-  // ✓✓ Delivered instead of a false "No ACK (timeout)". No-op for sends that
-  // weren't registered via sendStatusRegister (only user TEXT sends are).
-  sendStatusMarkDelivered(msgId, dst);
-  return true;
+  return V4SendResult{V4SendOutcome::Delivered, 0};
+}
+
+// Wait on the sending task without holding up this device's own ACKs (on the
+// TX dispatcher they are sent from here meanwhile).
+static void v4_chunked_wait(uint32_t ms) {
+  const uint32_t t0 = millis();
+  while ((uint32_t)(millis() - t0) < ms) {
+    espnowtx::drainAcksOnDispatcher();
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+// The longest a long send waits for a rekey this device started to apply
+// before it sends the message again (a rekey answers in one round trip; its
+// own retry budget is 6 s, and the TX dispatcher must not stall that long).
+static constexpr uint32_t kChunkedRekeyWaitMs = 1000;
+
+// Encrypted multi-frame send (1.0 step 5b, DESIGN 3.3). Every fragment waits
+// for its sealed ACK. The result:
+//   Delivered  every fragment accepted (the last one: the whole message);
+//   Refused    the receiver refused a fragment (an ACK with a status);
+//   NoAnswer   a fragment got no ACK after its retries;
+//   NotSent    nothing could be sent (no session, too large, seal refused).
+// The whole message is sent once more, under a NEW msgId (the receiver
+// remembers nothing of a refused message and the old msgId's fragments it
+// accepted must not be taken for this one), when:
+//   - the receiver answered busy or no slot: after a jittered 300-800 ms;
+//   - this device started a rekey of the session in the middle of the send
+//     (every seal is refused until it applies): once the session is ACTIVE
+//     again, waiting at most kChunkedRekeyWaitMs.
+// Then the session hears of the result (Delivered and Refused: alive; only
+// NoAnswer counts toward the two-strike re-open), and a tracked send
+// (sendStatusRegister, by the caller's msgId) is marked delivered or failed.
+V4SendResult v4_send_encrypted_chunked(const uint8_t dst[6], uint8_t type, uint16_t baseFlags,
+                                       uint32_t msgId,
+                                       const uint8_t* payload, uint16_t payloadLen,
+                                       uint8_t ttl) {
+  EspNowRuntimeOpGuard runtimeOp;
+  if (!runtimeOp.held()) return V4SendResult{V4SendOutcome::NotSent, 0};
+  if (!dst || (payloadLen > 0 && !payload)) return V4SendResult{V4SendOutcome::NotSent, 0};
+
+  bool rekeyStall = false;
+  V4SendResult r = v4_send_chunked_attempt(dst, type, baseFlags, msgId, payload, payloadLen, ttl, &rekeyStall);
+  bool again = false;
+  if (r.outcome == V4SendOutcome::Refused &&
+      (r.status == espnowanswer::kBusy || r.status == espnowanswer::kNoSlot)) {
+    const uint32_t waitMs = 300 + (esp_random() % 501);
+    WARN_ESPNOWF("[V4_ENC_FRAG_TX] receiver %s (msgId=%lu): sending the message again in %lu ms",
+                 r.status == espnowanswer::kBusy ? "busy" : "had no slot", (unsigned long)msgId,
+                 (unsigned long)waitMs);
+    v4_chunked_wait(waitMs);
+    again = true;
+  } else if (r.outcome == V4SendOutcome::NotSent && rekeyStall) {
+    const uint32_t t0 = millis();
+    while ((uint32_t)(millis() - t0) < kChunkedRekeyWaitMs) {
+      const PeerIdentity* pid = peerIdentityFindByMac(dst);
+      SessionState* s = pid ? sessionFindByPeer(dst, pid->meshId) : nullptr;
+      if (!s || s->state != SESSION_REKEYING) break;  // applied, or torn down
+      v4_chunked_wait(20);
+    }
+    const PeerIdentity* pid = peerIdentityFindByMac(dst);
+    SessionState* s = pid ? sessionFindByPeer(dst, pid->meshId) : nullptr;
+    again = s && s->state == SESSION_ACTIVE;
+    WARN_ESPNOWF("[V4_ENC_FRAG_TX] a rekey interrupted msgId=%lu: %s", (unsigned long)msgId,
+                 again ? "sending the message again on the new keys" : "the session is not back, not sent");
+  }
+  if (again) {
+    rekeyStall = false;
+    r = v4_send_chunked_attempt(dst, type, baseFlags, generateMessageId(), payload, payloadLen, ttl,
+                                &rekeyStall);
+  }
+
+  sessionNoteSendOutcome(dst, r.outcome);
+  // A fragmented send is ACKed per fragment (the waiter above), which never
+  // reaches the tracked-send ACK path that flips the web UI's delivery
+  // bubble: mark it here by the caller's msgId. No-op for sends that were not
+  // registered via sendStatusRegister.
+  if (r.outcome == V4SendOutcome::Delivered) sendStatusMarkDelivered(msgId, dst);
+  else if (r.outcome == V4SendOutcome::Refused) sendStatusMarkRefused(msgId, dst);
+  return r;
 }
 
 // Encrypted dispatcher — STRICT encrypt-or-fail (2026-05, encrypt-or-wait
@@ -3716,7 +3803,8 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags,
   if (pid) {
     SessionState* s = sessionFindByPeer(dst, pid->meshId);
     if (s && s->state == SESSION_ACTIVE) {
-      if (v4_send_encrypted_chunked(dst, type, flags, msgId, payload, payloadLen, ttl)) {
+      if (v4_send_encrypted_chunked(dst, type, flags, msgId, payload, payloadLen, ttl).outcome ==
+          V4SendOutcome::Delivered) {
         return true;
       }
       DEBUG_ESPNOWF(

@@ -883,6 +883,15 @@ static void sessionNoteSendResult(const uint8_t peerMac[6], bool delivered) {
   }
 }
 
+void sessionNoteSendOutcome(const uint8_t peerMac[6], V4SendOutcome outcome) {
+  if (!peerMac) return;
+  if (outcome == V4SendOutcome::Delivered || outcome == V4SendOutcome::Refused) {
+    sessionNoteSendResult(peerMac, /*delivered=*/true);   // an answer: the session is alive
+  } else if (outcome == V4SendOutcome::NoAnswer) {
+    sessionNoteSendResult(peerMac, /*delivered=*/false);  // silence: one strike
+  }
+}
+
 void sendStatusMarkDelivered(uint32_t msgId, const uint8_t srcMac[6]) {
   if (!gSendStatus || msgId == 0 || !srcMac) return;
   SendStatus* s = findByMsgId(msgId);

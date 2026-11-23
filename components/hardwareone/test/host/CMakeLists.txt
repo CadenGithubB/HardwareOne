@@ -1153,6 +1153,19 @@ add_test(
           ${CMAKE_CURRENT_LIST_DIR}/test_espnow_msgid_dedup.py
           ${ESPNOW_MSGID_DEDUP_TEST_ARGS})
 
+# ESP-NOW encrypted multi-frame sender (README "ESP-NOW ACK after accept"): the
+# production v4_send_encrypted_chunked against a scripted receiver: Delivered /
+# Refused / NoAnswer / NotSent, the one whole-message retry under a new msgId.
+set(ESPNOW_CHUNKED_SEND_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
+if(HW1_SANITIZE)
+  list(APPEND ESPNOW_CHUNKED_SEND_TEST_ARGS --sanitize)
+endif()
+add_test(
+  NAME espnow_chunked_send
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_espnow_chunked_send.py
+          ${ESPNOW_CHUNKED_SEND_TEST_ARGS})
+
 # ESP-NOW session rekey retry (README "ESP-NOW session rekey retry"): production REKEY
 # initiator/responder/retry sweep and session lifecycle against modelled peers.
 set(ESPNOW_REKEY_RETRY_TEST_ARGS --cxx ${CMAKE_CXX_COMPILER})
