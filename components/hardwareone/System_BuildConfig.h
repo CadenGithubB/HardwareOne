@@ -805,6 +805,12 @@
 #if ENABLE_IMU_INPUT && !ENABLE_IMU_LSM6DSOX
   #error "IMU input (INPUT_DEVICE_TYPE 5) needs the IMU in the build with the Adafruit 4517 (CUSTOM_ENABLE_IMU 1 at I2C_FEATURE_LEVEL 4, IMU_DEVICE_TYPE 2): the BNO055 backend has no tap detection"
 #endif
+// The software knock detector and its settings, commands and trace
+// (HAL_Motion_KnockFeed.cpp): the 4517 (its LSM6DS3TR-C feeds it; an
+// LSM6DSOX keeps the chip's own tap engine).
+#define ENABLE_IMU_KNOCK_DETECTOR ENABLE_IMU_LSM6DSOX
+// The tap threshold's default (imuTapThresholdMg): the 4517's from the sign.
+#define IMU_TAP_THRESHOLD_DEFAULT_MG 1300
 // An input device that is not an I2C device of its own: it starts by a direct
 // call (inputStartInternal), not through the I2C sensor start queue.
 #define ENABLE_INPUT_DIRECT_START (ENABLE_GPIO_ENCODER || ENABLE_IMU_INPUT)

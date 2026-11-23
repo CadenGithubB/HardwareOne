@@ -1,13 +1,16 @@
 // HAL_Motion_KnockCore.h - knock (tap) detection in software from the
-// accelerometer at its full rate (416 Hz from the chip's FIFO), with a record
-// of every knock and why it did or did not count. Header-only, no Arduino:
+// accelerometer at its full rate, with a record of every knock and why it did
+// or did not count. Two feeds use it: the Adafruit 4517's LSM6DS3TR-C at
+// 416 Hz from its FIFO, and the BNO055's fusion accelerometer read at 100 Hz
+// (HAL_Motion_KnockFeed.cpp holds what both share). Header-only, no Arduino:
 // host-tested (test/host/test_motion_knock_core.cpp).
 //
 // A knock is the acceleration jumping away from its recent level (a slow
 // per-axis baseline, so gravity and tilting do not count) and settling again:
 //   - it starts when the jump passes half the threshold (so softer knocks are
 //     still recorded, as "soft": the trace shows how hard a missed knock was);
-//   - it ends once the jump stays under that level for kKnockQuietMs;
+//   - it ends once the jump stays under that level for the quiet time
+//     (knockQuietUs: kKnockQuietUs, or two sample periods at a slow rate);
 //   - it counts as a tap when its peak reached the threshold, it lasted at
 //     most maxMs (longer is handling, not a knock: "long"), and it did not
 //     start within ringMs of the previous hard knock's end (the board
@@ -31,6 +34,14 @@ inline const char* verdictName(Verdict v) {
   return "?";
 }
 
+// Default thresholds per feed (the imuTapThresholdMg setting's default). The
+// 4517's from the sign (bench 2026-11-23). The BNO055 filters its
+// accelerometer at 62.5 Hz and is read at 100 Hz, so a knock's short spike
+// reaches it at roughly a third of what the 416 Hz stream sees: the sign's
+// 1300 mg scaled by that, to be tuned live with 'imutaptrace'.
+constexpr uint16_t kKnockThresholdMg416Hz = 1300;
+constexpr uint16_t kKnockThresholdMg100Hz = 400;
+
 struct Config {
   uint16_t thresholdMg = 500;  // peak jump a tap must reach
   uint16_t maxMs = 120;        // longest a tap may last (bench 2026-11-23: knocks on the sign ring 45-95 ms)
@@ -42,6 +53,9 @@ struct Config {
   // 113-450 % of the next axis, face knocks at most 20 % of |Z|.
   uint8_t sideAxis = 1;
   uint16_t sidePct = 60;
+  // The feed's sample rate: the quiet time that ends a knock is at least two
+  // sample periods (knockQuietUs), and the trace names it.
+  uint16_t sampleHz = 416;
 };
 
 struct Event {
@@ -58,6 +72,18 @@ struct Event {
 constexpr float kBaselineTauMs = 40.0f;  // the slow level the jump is measured from
 constexpr uint32_t kKnockQuietUs = 8000; // under the start level this long ends a knock
 constexpr uint16_t kMinStartMg = 60;     // the start level never goes below this (noise)
+// At a slow rate the quiet time is at least this many sample periods: at
+// 100 Hz one period (10 ms) is already longer than kKnockQuietUs, and a single
+// sample under the start level inside a ringing knock would split it in two.
+constexpr uint32_t kKnockQuietSamples = 2;
+
+// The quiet time for a feed: kKnockQuietUs at 416 Hz (two periods are 4.8 ms),
+// 20 ms at 100 Hz.
+inline uint32_t knockQuietUs(uint16_t sampleHz) {
+  if (sampleHz == 0) return kKnockQuietUs;
+  const uint32_t periods = kKnockQuietSamples * 1000000u / sampleHz;
+  return periods > kKnockQuietUs ? periods : kKnockQuietUs;
+}
 
 class Detector {
  public:
@@ -102,7 +128,7 @@ class Detector {
       }
       if (dev >= startMg) {
         lastAboveUs_ = tUs;
-      } else if (static_cast<uint32_t>(tUs - lastAboveUs_) >= kKnockQuietUs) {
+      } else if (static_cast<uint32_t>(tUs - lastAboveUs_) >= knockQuietUs(cfg.sampleHz)) {
         ended = true;
         finish(cfg, ev);
       }
@@ -211,6 +237,7 @@ struct Trace {
     int16_t lastMg[3] = {0, 0, 0};
     uint16_t lastDevMg = 0;
     bool inKnock = false;
+    bool fifo = false;  // the 4517's FIFO (unread / pattern are its own); else one read per sample
   } feed;
 
   void clear() { *this = Trace{}; }
@@ -227,6 +254,82 @@ struct Trace {
   }
   // i = 0 is the oldest kept event.
   const Event& at(uint8_t i) const { return events[(head + kTraceLen - count + i) % kTraceLen]; }
+};
+
+// Taps the detector accepted, handed out one per sample (MotionSample::hwTap),
+// oldest first, with where each hit. At most kPendingMax wait; more are
+// dropped (eight taps inside one sample period is not a person).
+constexpr uint8_t kPendingMax = 8;
+struct PendingTaps {
+  uint8_t count = 0;
+  uint8_t sideBits = 0;  // bit i: the i-th waiting tap (oldest first) hit the side
+  void clear() { count = sideBits = 0; }
+  void push(bool side) {
+    if (count >= kPendingMax) return;
+    if (side) sideBits = static_cast<uint8_t>(sideBits | (1u << count));
+    ++count;
+  }
+  // The oldest waiting tap; false when none waits.
+  bool pop(bool& side) {
+    if (!count) return false;
+    side = (sideBits & 1u) != 0;
+    sideBits = static_cast<uint8_t>(sideBits >> 1);
+    --count;
+    return true;
+  }
+};
+
+// The samples' clock (microseconds, wrapping): it only moves forward, since
+// the detector's lengths and gaps are differences.
+struct SampleClock {
+  bool have = false;
+  uint32_t nextUs = 0;
+  void reset() { have = false; }
+  // A batch whose first sample is estimated at estimateUs (the FIFO): keep
+  // counting from the last batch unless the reads fell more than jumpUs
+  // behind the chip, then start from the estimate.
+  void sync(uint32_t estimateUs, uint32_t jumpUs = 20000) {
+    if (!have || static_cast<int32_t>(estimateUs - nextUs) > static_cast<int32_t>(jumpUs)) {
+      nextUs = estimateUs;
+      have = true;
+    }
+  }
+  // The next sample of a batch, periodUs after the one before.
+  uint32_t take(uint32_t periodUs) {
+    const uint32_t t = nextUs;
+    nextUs += periodUs;
+    return t;
+  }
+  // One sample read at nowUs (a feed without a FIFO): its read time, or just
+  // after the previous sample's when the clock would go back.
+  uint32_t at(uint32_t nowUs) {
+    const uint32_t t = (have && static_cast<int32_t>(nowUs - nextUs) < 0) ? nextUs : nowUs;
+    have = true;
+    nextUs = t + 1;
+    return t;
+  }
+};
+
+// What a backend feeds: the detector, the taps it accepted and the clock.
+// Owned by the IMU task (HAL_Motion_KnockFeed.cpp keeps one, in PSRAM).
+struct Feed {
+  Detector detector;
+  PendingTaps pending;
+  SampleClock clock;
+  void reset() { *this = Feed{}; }
+  // Samples were lost (a FIFO overrun): the baseline and the clock start
+  // over; taps already accepted still go out.
+  void restart() {
+    detector.reset();
+    clock.reset();
+  }
+  // One sample (mg at tUs); true when a knock ended, `ev` then holds it. A tap
+  // joins the pending taps.
+  bool add(const Config& cfg, const float mg[3], uint32_t tUs, Event& ev) {
+    if (!detector.add(cfg, mg, tUs, ev)) return false;
+    if (ev.verdict == Verdict::Tap) pending.push(ev.side);
+    return true;
+  }
 };
 
 }  // namespace knock
