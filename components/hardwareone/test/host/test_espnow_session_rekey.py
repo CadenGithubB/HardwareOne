@@ -15,8 +15,11 @@ handshakes must still converge; in a glare the A side sends its own OPEN once
 more, unchanged, so a peer that missed it yields at once. A SESSION_OPEN kick while a handshake or a
 rekey is in flight must leave the slot, its keys and its sessionId untouched
 and send nothing; a kick with no session, on a CLOSED or ACTIVE slot, or after
-the ESTABLISHING timeout must start a handshake. No radio or hardware is
-accessed.
+the ESTABLISHING timeout must start a handshake. A fragmented send that spans
+a rekey started by the receiver completes (1.0 step 5a): the receiver seals its
+ACKs while REKEYING (sessionWrapAck; any other frame is refused), and an ACK it
+sealed under the old key is opened with the kept previous key. No radio or
+hardware is accessed.
 """
 import argparse
 import os
@@ -126,6 +129,8 @@ def build_sessions(sessions):
                    'void sessionAbortRekey(', 'void sessionRekeyPrevKeysSweep('):
         pieces.append(one(sessions, marker, name))
     # Handshake-freshness helpers; absent on a pre-fix tree, where nothing calls them.
+    # The ACK-only seal during REKEYING (1.0 step 5a), where the tree has it.
+    pieces.append(optional(sessions, 'bool sessionWrapAck(', name))
     for marker in ('SessionPeerRekeyVerdict sessionClassifyPeerRekey(', 'void sessionNotePeerRekey(',
                    'void sessionHoldRekeyReply(', 'bool sessionOpenIdStale('):
         pieces.append(optional(sessions, marker, name))

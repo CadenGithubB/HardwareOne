@@ -4643,6 +4643,41 @@ disables the mesh and drops its id on every slot (the default mesh only after an
 key without `kdf` record 1 is not used. `espnow_wire_layout` and `espnow_dispatch_policy` pin the new sizes and
 minimum lengths (KEY_EX_CONFIRM 34, SESSION_OPEN 154, SESSION_CONFIRM 162 = the relay budget, SESSION_REKEY 146).
 
+## ESP-NOW 1.0 step 5a: the ACK frame
+
+```sh
+python3 components/hardwareone/test/host/test_espnow_rx_frontend.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_session_rekey.py --sanitize
+python3 components/hardwareone/test/host/test_espnow_tx_multiframe.py
+```
+
+`espnow_rx_frontend` compiles the production ACK path (`v4_queue_ack` into an `espnowtx::sendAck` double,
+`V4FragAckWait`, `v4_rx_ack`, `v4_plaintext_type_allowed`). testAckCounts: a sealed frame with ACK_REQ gets one
+sealed ACK in its session naming msgId, fragment 0/1 and status 0; two sealed TEXT fragments get two naming 0/2
+and 1/2; a group-tagged frame gets a tagged ACK; an ACK is never answered. testNoPlaintextFrameIsAcked: all 256
+opcodes sent plaintext with ACK_REQ get no ACK and only the six handshake frames (10-15) pass the plaintext gate
+(also inside a relay envelope); a plaintext TOPO_REQ is dropped and a tagged one delivered.
+testAckWaiterMatching: a waiter for B's sealed fragment refuses a tagged ACK from B, a sealed ACK from C (also one
+that writes B as origin), a tagged ACK naming B from another radio and a plaintext one, and takes B's sealed ACK
+for that fragment; an ACK with a status reaches the waiter as a refusal and marks a tracked send failed; sealed
+ACKs reach the tracked sends and the app ping, tagged ones the broadcast tracker and the channel follow; ACKs of
+the wrong length or with fragments are dropped. The earlier cases that sent plaintext HEARTBEAT and ACK frames
+now expect the plaintext gate (and use tagged frames where a frame must arrive). Source checks: no
+`v4_send_ack`/`v4_send_frag_ack`, `v4_emit_ack` seals with `sessionWrapAck` or tags under its own msgId,
+`v4_send_frame_ex` sends no plaintext but the handshake, `System_ESPNow_Handlers_Crypto.cpp` sets no ACK_REQ,
+TOPO_* is tagged. `espnow_session_rekey` C34: a six-fragment send across a rekey the receiver starts completes
+(the receiver seals only ACKs while REKEYING; an ACK sealed under the old key opens with the kept previous key);
+C2 and `espnow_rekey_retry` c1: the REKEY carries no ACK_REQ. `espnow_session_replay` compiles the seal through
+`sessionWrapImpl`. `espnow_tx_multiframe` J: ACKs have their own queue of 16 PSRAM slots; 16 fit, the 17th
+is counted as dropped, the dispatcher sends each with its class and session, oldest first, and the slots come
+back (also through `stop()`); J2: with the job queue full an ACK is still queued and goes out before every
+queued job; J3: an ACK queued while the dispatcher runs a fragmented send goes out inside that send's ACK wait
+(`drainAcksOnDispatcher`, a no-op on other tasks; `espnow_rx_frontend` pins the call in the wait loop).
+After review: a sealed refusal ACK marks the tracked send failed through `sendStatusMarkRefused`, which also
+counts the session as alive (pinned); a relayed tagged ACK feeds no broadcast tracking.
+`espnow_channel_core` S5 pins the follow's ACK hook on `ackFor` and tagged ACKs only; `espnow_wire_layout` pins
+`V4PayloadAck` (8 bytes); `espnow_file_transfer` and `espnow_user_credentials` count `v4_queue_sealed_ack`.
+
 ## ESP-NOW session handshake freshness
 
 `espnow_session_rekey` drives the production SESSION_OPEN / SESSION_CONFIRM / SESSION_REKEY handlers and

@@ -1,6 +1,7 @@
 #include "System_ESPNow_Tx.h"
 
 #include <Arduino.h>
+#include <esp_attr.h>        // EXT_RAM_BSS_ATTR (the ACK pool)
 #include <esp_heap_caps.h>
 #include <freertos/event_groups.h>
 #include <freertos/FreeRTOS.h>
@@ -257,6 +258,72 @@ static bool runMultiFrameOnCaller(Job& job) {
   return ok;
 }
 
+// ---- ACK queue (1.0) --------------------------------------------------------
+// ACKs do not share the job queue (review of step 5a): a burst of jobs could
+// fill it and drop sealed ACKs, and a multi-frame job waiting for its own
+// fragment ACKs would hold this device's outgoing ACKs behind it. Instead an
+// ACK takes one of kAckPoolSlots fixed slots in PSRAM (no allocation on the
+// receive path), queued in arrival order. The dispatcher sends every queued
+// ACK before it takes the next job, and the fragment-wait loop of
+// v4_send_encrypted_chunked calls drainAcksOnDispatcher, so an ACK never waits
+// behind a send in progress. A full pool is silence, counted (ackDropped).
+struct AckSlot {
+  uint8_t  state;      // 0 free, 1 queued, 2 being sent
+  uint32_t order;      // arrival order (FIFO among queued slots)
+  uint8_t  mac[6];
+  uint16_t classFlag;  // SESSION_FRAME (sealed) or BROADCAST_AUTH (tagged)
+  uint16_t sessionId;
+  uint8_t  ack[8];     // V4PayloadAck
+};
+EXT_RAM_BSS_ATTR static AckSlot sAckPool[kAckPoolSlots];
+static uint32_t sAckOrder = 0;
+static portMUX_TYPE sAckPoolLock = portMUX_INITIALIZER_UNLOCKED;
+
+// The oldest queued ACK, now marked "being sent"; -1 when none is queued.
+static int ackTakeOldest() {
+  int best = -1;
+  taskENTER_CRITICAL(&sAckPoolLock);
+  for (uint8_t i = 0; i < kAckPoolSlots; ++i) {
+    if (sAckPool[i].state != 1) continue;
+    if (best < 0 || (int32_t)(sAckPool[i].order - sAckPool[best].order) < 0) best = i;
+  }
+  if (best >= 0) sAckPool[best].state = 2;
+  taskEXIT_CRITICAL(&sAckPoolLock);
+  return best;
+}
+
+static void ackSlotFree(int i) {
+  taskENTER_CRITICAL(&sAckPoolLock);
+  sAckPool[i].state = 0;
+  taskEXIT_CRITICAL(&sAckPoolLock);
+}
+
+// Send every queued ACK, oldest first (dispatcher only).
+static void runPendingAcks() {
+  for (int i = ackTakeOldest(); i >= 0; i = ackTakeOldest()) {
+    AckSlot& a = sAckPool[i];
+    const bool ok = v4_emit_ack(a.mac, a.classFlag, a.sessionId, a.ack);
+    statsBump(ok ? &Stats::sent : &Stats::failed);
+    ackSlotFree(i);
+  }
+}
+
+// Fail every queued ACK (CLOSING).
+static void failPendingAcks() {
+  for (int i = ackTakeOldest(); i >= 0; i = ackTakeOldest()) {
+    statsBump(&Stats::failed);
+    ackSlotFree(i);
+  }
+}
+
+static bool ackQueueEmpty() {
+  bool empty = true;
+  taskENTER_CRITICAL(&sAckPoolLock);
+  for (uint8_t i = 0; i < kAckPoolSlots; ++i) empty = empty && sAckPool[i].state == 0;
+  taskEXIT_CRITICAL(&sAckPoolLock);
+  return empty;
+}
+
 static void runJob(const Job& job) {
   bool ok = false;
   switch (job.kind) {
@@ -304,20 +371,25 @@ static void txTask(void* param) {
         failJob(queued);
         ++cancelled;
       }
+      failPendingAcks();
 
       // No producer can claim the queue after CLOSING. Once every producer
       // that claimed it while RUNNING has left xQueueSend and the queue is
       // empty, no future enqueue is possible and the dispatcher can join.
       if (closingAndNoSubmitters() && uxQueueMessagesWaiting(queue) == 0 &&
-          completionPoolIdle()) {
+          ackQueueEmpty() && completionPoolIdle()) {
         break;
       }
       vTaskDelay(1);
       continue;
     }
 
+    // ACKs first, then one job; sleep only when both are empty. Every
+    // enqueue (job or ACK) gives the task a notification, so one that lands
+    // after the checks below makes the wait return at once.
+    runPendingAcks();
     Job job;
-    if (xQueueReceive(queue, &job, pdMS_TO_TICKS(1000)) == pdTRUE) {
+    if (xQueueReceive(queue, &job, 0) == pdTRUE) {
       // CLOSING may have won immediately after xQueueReceive. Treat that job
       // as queued work (fail/wake/free), not as a new radio operation.
       if (lifecycleIsClosing()) {
@@ -326,6 +398,8 @@ static void txTask(void* param) {
       } else {
         runJob(job);
       }
+    } else {
+      (void)ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
     }
 
     const unsigned long now = millis();
@@ -555,7 +629,8 @@ bool stop(uint32_t timeoutMs) {
 
 bool submit(const Job& job) {
   QueueHandle_t queue = nullptr;
-  if (!claimRunningQueue(&queue)) return false;
+  TaskHandle_t txTask = nullptr;
+  if (!claimRunningQueue(&queue, &txTask)) return false;
 
   statsBump(&Stats::submitted);
 
@@ -565,6 +640,7 @@ bool submit(const Job& job) {
     return false;
   }
 
+  if (txTask) xTaskNotifyGive(txTask);  // wake the dispatcher
   // Sample depth AFTER the send so the observation reflects post-enqueue
   // state. Lock-free fast path inside statsObserveDepth keeps this cheap.
   statsObserveDepth(uxQueueMessagesWaiting(queue));
@@ -618,6 +694,7 @@ bool submitSync(Job& job, uint32_t timeoutMs) {
     completionDiscard(completion);
     return false;
   }
+  if (txTaskHandle) xTaskNotifyGive(txTaskHandle);  // wake the dispatcher
   statsObserveDepth(uxQueueMessagesWaiting(queue));
   releaseQueueClaim();
 
@@ -703,6 +780,45 @@ bool sendAead(const uint8_t mac[6], uint8_t type, uint16_t flags,
     return false;
   }
   return true;
+}
+
+bool sendAck(const uint8_t mac[6], uint16_t classFlag, uint16_t sessionId, const uint8_t ack[8]) {
+  if (!mac || !ack) return false;
+  QueueHandle_t queue = nullptr;
+  TaskHandle_t txTask = nullptr;
+  if (!claimRunningQueue(&queue, &txTask)) return false;
+  statsBump(&Stats::submitted);
+  int slot = -1;
+  taskENTER_CRITICAL(&sAckPoolLock);
+  for (uint8_t i = 0; i < kAckPoolSlots; ++i) {
+    if (sAckPool[i].state == 0) { slot = i; break; }
+  }
+  if (slot >= 0) {
+    AckSlot& a = sAckPool[slot];
+    memcpy(a.mac, mac, 6);
+    a.classFlag = classFlag;
+    a.sessionId = sessionId;
+    memcpy(a.ack, ack, 8);
+    a.order = ++sAckOrder;
+    a.state = 1;
+  }
+  taskEXIT_CRITICAL(&sAckPoolLock);
+  if (slot < 0) {
+    statsBump(&Stats::ackDropped);
+    releaseQueueClaim();
+    return false;
+  }
+  if (txTask) xTaskNotifyGive(txTask);  // wake the dispatcher
+  releaseQueueClaim();
+  return true;
+}
+
+void drainAcksOnDispatcher() {
+  TaskHandle_t txTask = nullptr;
+  taskENTER_CRITICAL(&sStateLock);
+  if (sLifecycle == Lifecycle::RUNNING) txTask = sTxTaskHandle;
+  taskEXIT_CRITICAL(&sStateLock);
+  if (txTask && xTaskGetCurrentTaskHandle() == txTask) runPendingAcks();
 }
 
 bool sendAeadSync(const uint8_t mac[6], uint8_t type, uint16_t flags,

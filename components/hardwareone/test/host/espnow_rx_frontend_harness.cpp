@@ -251,9 +251,30 @@ static unsigned gRevokedCount = 0;
 static void revoke(const uint8_t* mac) { std::memcpy(gRevokedMacs[gRevokedCount++], mac, 6); }
 
 // ---- Radio, ACK bookkeeping, route table and reassembler doubles ------------
+// The TX dispatcher's ACK queue (espnowtx::sendAck): the production
+// v4_queue_ack fills the 8-byte V4PayloadAck and hands it here. Every ACK is
+// recorded with its class; gAcksSent counts ACKs of single frames,
+// gFragAcksSent ACKs of fragments (fragCount > 1 in the payload).
 static unsigned gAcksSent = 0, gFragAcksSent = 0, gFanouts = 0, gCleanups = 0, gRelayForwards = 0;
-static bool v4_send_ack(const uint8_t*, uint32_t) { ++gAcksSent; return true; }
-static bool v4_send_frag_ack(const uint8_t*, uint32_t, uint8_t, uint8_t) { ++gFragAcksSent; return true; }
+struct SentAck {
+  uint8_t to[6];
+  bool sealed;
+  uint16_t sessionId;
+  V4PayloadAck ack;
+};
+static std::vector<SentAck> gSentAcks;
+namespace espnowtx {
+static bool sendAck(const uint8_t mac[6], uint16_t classFlag, uint16_t sessionId, const uint8_t ack[8]) {
+  SentAck a{};
+  std::memcpy(a.to, mac, 6);
+  a.sealed = classFlag == ESPNOW_V4_FLAG_SESSION_FRAME;
+  a.sessionId = sessionId;
+  std::memcpy(&a.ack, ack, sizeof a.ack);
+  gSentAcks.push_back(a);
+  if (a.ack.fragCount > 1) ++gFragAcksSent; else ++gAcksSent;
+  return true;
+}
+}  // namespace espnowtx
 static size_t gLastFanoutLen = 0;
 static void v4_relay_fanout(const uint8_t*, size_t len, const uint8_t*, const uint8_t*, uint16_t) {
   ++gFanouts;
@@ -270,15 +291,32 @@ static bool meshRouterLookup(const uint8_t*, uint8_t* nextHop, uint8_t* hops) {
 }
 static bool v4_relay_wrap_and_send(const uint8_t*, const uint8_t*, const uint8_t*, size_t, uint8_t, uint8_t,
                                    uint32_t) { ++gRelayForwards; return true; }
-static void broadcast_tracker_record_ack(uint32_t, const uint8_t*) {}
-static void sendStatusMarkDelivered(uint32_t, const uint8_t*) {}
-static void espnowAppPingNoteAck(const uint8_t*, uint32_t) {}
+// The sender-side hooks an ACK reaches (v4_rx_ack): recorded with the
+// (peer, ackFor, class) they were called with.
+struct AckHook { uint8_t peer[6]; uint32_t ackFor; bool sealed; };
+static std::vector<AckHook> gTrackerAcks, gDelivered, gFailedSends, gPingAcks, gFollowAcks;
+static void noteHook(std::vector<AckHook>& v, const uint8_t* peer, uint32_t ackFor, bool sealed) {
+  AckHook h{};
+  std::memcpy(h.peer, peer, 6);
+  h.ackFor = ackFor;
+  h.sealed = sealed;
+  v.push_back(h);
+}
+static void broadcast_tracker_record_ack(uint32_t ackFor, const uint8_t* src) { noteHook(gTrackerAcks, src, ackFor, false); }
+static void sendStatusMarkDelivered(uint32_t ackFor, const uint8_t* src) { noteHook(gDelivered, src, ackFor, true); }
+// A refusal (sealed ACK with a status): the send failed, the session answered.
+static void sendStatusMarkRefused(uint32_t ackFor, const uint8_t* src) { noteHook(gFailedSends, src, ackFor, true); }
+static void espnowAppPingNoteAck(const uint8_t* src, uint32_t ackFor, bool sealed) {
+  noteHook(gPingAcks, src, ackFor, sealed);
+}
 // Channel follow hooks (System_ESPNow.cpp): no follower in this harness.
-static void espnowChFollowNoteAck(const esp_now_recv_info*, uint32_t) {}
+static void espnowChFollowNoteAck(const esp_now_recv_info* ri, uint32_t ackFor, bool sealed) {
+  noteHook(gFollowAcks, ri->src_addr, ackFor, sealed);
+}
 static void espnowChFollowOnSealedFrame(const esp_now_recv_info*, uint8_t) {}
 struct EspNowTxGuard { explicit EspNowTxGuard(const char*) {} };
 #define V4_FRAG_ACK_WAIT_MAX 8
-struct V4FragAckWait { bool active; uint32_t msgId; uint8_t fragIndex; bool acked; };
+// INSERT_ACK_WAIT
 static V4FragAckWait gV4FragAckWait[V4_FRAG_ACK_WAIT_MAX];
 static void v4_dispatch_post_cleanup(const esp_now_recv_info*, const EspNowV4Header*) { ++gCleanups; }
 
@@ -334,6 +372,8 @@ static void noteHandler(const char* name, const V4RxCtx& ctx) {
 
 // The receive-drop counters of System_ESPNow.cpp (espnowstats).
 static uint32_t gEspNowRxLenDrops = 0;
+static uint32_t gEspNowRxPlaintextDrops = 0;
+static uint32_t gEspNowRxAckRefused = 0;
 
 // INSERT_POLICY
 
@@ -370,6 +410,7 @@ static bool pairModeIsPaired(const uint8_t* mac) {
   return false;
 }
 // INSERT_MESH_ID_GATE
+// INSERT_ACK
 // INSERT_INCOMING
 
 // ============================================================================
@@ -420,6 +461,10 @@ static void reset(bool keyed) {
   gSessionCount = 0;
   gCalls.clear();
   gWarns = gAcksSent = gFragAcksSent = gFanouts = gCleanups = gRelayForwards = 0;
+  gSentAcks.clear();
+  for (auto* v : {&gTrackerAcks, &gDelivered, &gFailedSends, &gPingAcks, &gFollowAcks}) v->clear();
+  std::memset(gV4FragAckWait, 0, sizeof gV4FragAckWait);
+  gEspNowRxPlaintextDrops = gEspNowRxAckRefused = gEspNowRxLenDrops = 0;
   gUnwrapCalls = gReplayRejects = gRegistrySaves = 0;
   gUnknownSessionAsks = 0;
   gUnknownSessionLastId = 0;
@@ -472,11 +517,14 @@ static Frame plainFrame(uint8_t type, const uint8_t* origin, uint32_t msgId, con
   return assemble(h, payload, true);
 }
 // BROADCAST_AUTH frame under the mesh group key.
-static Frame groupFrame(uint8_t type, const uint8_t* origin, uint32_t msgId, const Frame& payload, uint8_t ttl = 1) {
+static Frame groupFrame(uint8_t type, const uint8_t* origin, uint32_t msgId, const Frame& payload, uint8_t ttl = 1,
+                        uint16_t flags = 0, uint8_t fragIndex = 0, uint8_t fragCount = 1) {
   EspNowV4Header h = baseHeader(type, origin, msgId);
-  h.flags = ESPNOW_V4_FLAG_BROADCAST_AUTH;
+  h.flags = (uint16_t)(flags | ESPNOW_V4_FLAG_BROADCAST_AUTH);
   h.meshFingerprint = kMeshFp;
   h.ttl = ttl;
+  h.fragIndex = fragIndex;
+  h.fragCount = fragCount;
   uint8_t tag[32];
   groupTagFor(tag, &h, payload.data(), payload.size());
   Frame body = payload;
@@ -519,6 +567,17 @@ static Frame heartbeatPayload() {
   return f;
 }
 static Frame text(const char* s) { return Frame(s, s + std::strlen(s)); }
+// A 1.0 ACK payload (V4PayloadAck, 8 bytes).
+static Frame ackPayload(uint32_t ackFor, uint8_t fragIndex = 0, uint8_t fragCount = 1, uint8_t status = 0) {
+  V4PayloadAck a{};
+  a.ackFor = ackFor;
+  a.fragIndex = fragIndex;
+  a.fragCount = fragCount;
+  a.status = status;
+  Frame f(sizeof a);
+  std::memcpy(f.data(), &a, sizeof a);
+  return f;
+}
 // A KEY_EX_HELLO payload of its exact length (the receive table admits no other).
 static Frame helloPayload() { return Frame(ESPNOW_V4_MINLEN_KEY_EX_HELLO, 0x48); }
 
@@ -731,13 +790,13 @@ static void testRelayedLoopSuppression() {
 }
 
 static void testFragmentIndexConsistency() {
-  reset(false);
-  deliver(gPeerB, plainFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 110, heartbeatPayload(), 1, 1));
+  reset(true);
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 110, heartbeatPayload(), 1, 0, 1, 1));
   check("single frame with fragIndex 1 of 1 is refused (no handler)", gState.heartbeatsReceived == 0);
-  reset(false);
-  deliver(gPeerB, plainFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 111, heartbeatPayload(), 0, 0));
+  reset(true);
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 111, heartbeatPayload(), 1, 0, 0, 0));
   check("fragCount 0 with fragIndex 0 is still read as a single frame", gState.heartbeatsReceived == 1);
-  deliver(gPeerB, plainFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 112, heartbeatPayload(), 0, 1));
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 112, heartbeatPayload(), 1, 0, 0, 1));
   check("fragIndex 0 of 1 is accepted", gState.heartbeatsReceived == 2);
 
   reset(true);
@@ -760,8 +819,8 @@ static void testFragmentIndexConsistency() {
 static void testHeartbeatPolicy() {
   reset(true);
   deliver(gPeerB, plainFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 120, heartbeatPayload()));
-  check("keyed: plaintext HEARTBEAT from a paired MAC is dropped before v4h_heartbeat",
-        gState.heartbeatsReceived == 0 && gWarns == 1);
+  check("keyed: plaintext HEARTBEAT from a paired MAC is dropped at the plaintext gate (1.0)",
+        gState.heartbeatsReceived == 0 && gEspNowRxPlaintextDrops == 1 && gCalls.empty());
   check("keyed: the dropped HEARTBEAT records no liveness",
         health(gPeerB) == nullptr || health(gPeerB)->lastMeshHeartbeatMs == 0);
   reset(true);
@@ -773,21 +832,22 @@ static void testHeartbeatPolicy() {
   check("keyed: sealed HEARTBEAT is accepted",
         gState.heartbeatsReceived == 2 && health(gPeerB) && health(gPeerB)->heartbeatCount == 2);
 
+  // 1.0: a frame carrying one of our mesh ids is on a keyed mesh (an id exists
+  // only with a passphrase), so the gate does not ask encryptionEnabled.
   reset(false);
   deliver(gPeerB, plainFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 123, heartbeatPayload()));
-  check("keyless: plaintext HEARTBEAT from a paired peer is accepted and records liveness",
-        gState.heartbeatsReceived == 1 && gWarns == 0 && health(gPeerB) &&
-        health(gPeerB)->lastMeshHeartbeatMs == gNowMs && meta(gPeerB) != nullptr);
+  check("without encryptionEnabled a plaintext HEARTBEAT is dropped at the plaintext gate too",
+        gState.heartbeatsReceived == 0 && gEspNowRxPlaintextDrops == 1 && health(gPeerB) == nullptr);
 }
 
 static void testSlotCreation() {
-  // Keyless device: the HEARTBEAT row lets plaintext through, the slot owner
-  // must not create anything for a MAC that is not paired.
+  // A plaintext HEARTBEAT stops at the plaintext gate (1.0), so it reaches no
+  // handler and creates nothing, whatever the MAC.
   reset(false);
   deliver(gAttacker, plainFrame(ESPNOW_V4_TYPE_HEARTBEAT, gAttacker, 130, heartbeatPayload()));
-  check("keyless: plaintext HEARTBEAT from an unknown MAC reaches the handler", gState.heartbeatsReceived == 1);
-  check("keyless: plaintext HEARTBEAT from an unknown MAC creates no health slot", health(gAttacker) == nullptr);
-  check("keyless: plaintext HEARTBEAT from an unknown MAC creates no metadata slot",
+  check("plaintext HEARTBEAT from an unknown MAC reaches no handler", gState.heartbeatsReceived == 0);
+  check("plaintext HEARTBEAT from an unknown MAC creates no health slot", health(gAttacker) == nullptr);
+  check("plaintext HEARTBEAT from an unknown MAC creates no metadata slot",
         meta(gAttacker) == nullptr && activeMeta() == 0);
 
   reset(true);
@@ -802,15 +862,18 @@ static void testSlotCreation() {
 
   // What must keep working (also on a tree where the burst above filled the tables).
   reset(true);
-  deliver(gPeerB, plainFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 180));
-  check("plaintext ACK from a paired peer creates its slots and counts the ACK",
+  deliver(gPeerB, plainFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 179, ackPayload(9)));
+  check("a plaintext ACK from a paired peer is dropped at the plaintext gate (no plaintext ACK in 1.0)",
+        health(gPeerB) == nullptr && gEspNowRxPlaintextDrops == 1);
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 180, ackPayload(10)));
+  check("a tagged ACK from a paired peer creates its slots and counts the ACK",
         health(gPeerB) && health(gPeerB)->ackCount == 1 && meta(gPeerB));
 
   deliver(gFar, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gFar, 181, heartbeatPayload()));
   check("group-tagged HEARTBEAT from an unpaired same-mesh neighbour creates its slots",
         health(gFar) && meta(gFar) && health(gFar)->heartbeatCount == 1);
-  deliver(gFar, plainFrame(ESPNOW_V4_TYPE_ACK, gFar, 182));
-  check("a later plaintext ACK from that neighbour refreshes the existing slot",
+  deliver(gFar, groupFrame(ESPNOW_V4_TYPE_ACK, gFar, 182, ackPayload(11)));
+  check("a later tagged ACK from that neighbour refreshes the existing slot",
         health(gFar) && health(gFar)->ackCount == 1);
 }
 
@@ -1418,6 +1481,153 @@ static void testRevokedDrops() {
 #endif
 }
 
+// ---- 1.0 step 5a: the ACK frame ---------------------------------------------
+static const V4FragAckWait* armWaiter(int slot, const uint8_t* peer, uint32_t msgId, uint8_t fragIndex, bool sealed) {
+  V4FragAckWait& w = gV4FragAckWait[slot];
+  w = V4FragAckWait{};
+  w.active = true;
+  w.msgId = msgId;
+  w.fragIndex = fragIndex;
+  std::memcpy(w.dstMac, peer, 6);
+  w.expectSealed = sealed;
+  return &w;
+}
+
+// What the receive path sends for a frame with ACK_REQ: one ACK, in the class
+// of the frame, naming msgId and fragment in its payload.
+static void testAckCounts() {
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD, gPeerB, 400, text("status")));
+  check("sealed CMD with ACK_REQ: exactly one ACK, sealed in B's session",
+        gSentAcks.size() == 1 && gSentAcks[0].sealed && gSentAcks[0].sessionId == gSessB->sessionId &&
+        std::memcmp(gSentAcks[0].to, gPeerB, 6) == 0);
+  check("the sealed ACK names msgId 400, fragment 0 of 1, status 0, no flags",
+        gSentAcks.size() == 1 && gSentAcks[0].ack.ackFor == 400 && gSentAcks[0].ack.fragIndex == 0 &&
+        gSentAcks[0].ack.fragCount == 1 && gSentAcks[0].ack.status == 0 && gSentAcks[0].ack.flags == 0);
+
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_TEXT, gPeerB, 401, text("part one "), 0, 2));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_TEXT, gPeerB, 401, text("part two"), 1, 2));
+  check("two sealed TEXT fragments: two sealed ACKs naming fragments 0/2 and 1/2",
+        gFragAcksSent == 2 && gSentAcks.size() == 2 && gSentAcks[0].sealed && gSentAcks[1].sealed &&
+        gSentAcks[0].ack.ackFor == 401 && gSentAcks[0].ack.fragIndex == 0 && gSentAcks[0].ack.fragCount == 2 &&
+        gSentAcks[1].ack.ackFor == 401 && gSentAcks[1].ack.fragIndex == 1 && gSentAcks[1].ack.fragCount == 2);
+
+  reset(true);
+  deliver(gPeerC, groupFrame(ESPNOW_V4_TYPE_TEXT, gPeerC, 402, text("hi"), 1, ESPNOW_V4_FLAG_ACK_REQ));
+  check("group-tagged TEXT with ACK_REQ: one tagged ACK to its sender naming msgId 402",
+        gSentAcks.size() == 1 && !gSentAcks[0].sealed && std::memcmp(gSentAcks[0].to, gPeerC, 6) == 0 &&
+        gSentAcks[0].ack.ackFor == 402 && calls("v4h_text") == 1);
+
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_CMD, gPeerB, 403, text("status"), 0, 1, 0));
+  deliver(gPeerC, groupFrame(ESPNOW_V4_TYPE_TEXT, gPeerC, 404, text("hi")));
+  check("frames without ACK_REQ get no ACK", gSentAcks.empty() && calls("v4h_cmd") == 1);
+
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 405, ackPayload(1)));
+  deliver(gPeerC, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerC, 406, ackPayload(2), 1, ESPNOW_V4_FLAG_ACK_REQ));
+  check("an ACK that asks for an ACK is never answered (sealed or tagged)", gSentAcks.empty());
+}
+
+// No plaintext frame is ever ACKed: every opcode, sent plaintext with
+// ACK_REQ, gets no ACK. Only the six handshake frames reach a handler.
+static void testNoPlaintextFrameIsAcked() {
+  reset(true);
+  unsigned handled = 0;
+  for (unsigned type = 0; type < 256; ++type) {
+    Frame payload(type >= ESPNOW_V4_TYPE_KEY_EX_HELLO && type <= ESPNOW_V4_TYPE_SESSION_REKEY ? 0 : 16, 0x33);
+    switch (type) {
+      case ESPNOW_V4_TYPE_KEY_EX_HELLO: payload.assign(ESPNOW_V4_MINLEN_KEY_EX_HELLO, 0x48); break;
+      case ESPNOW_V4_TYPE_KEY_EX_REPLY: payload.assign(ESPNOW_V4_MINLEN_KEY_EX_REPLY, 0x48); break;
+      case ESPNOW_V4_TYPE_KEY_EX_CONFIRM: payload.assign(ESPNOW_V4_MINLEN_KEY_EX_CONFIRM, 0x48); break;
+      case ESPNOW_V4_TYPE_SESSION_OPEN: payload.assign(ESPNOW_V4_MINLEN_SESSION_OPEN, 0x48); break;
+      case ESPNOW_V4_TYPE_SESSION_CONFIRM: payload.assign(ESPNOW_V4_MINLEN_SESSION_CONFIRM, 0x48); break;
+      case ESPNOW_V4_TYPE_SESSION_REKEY: payload.assign(ESPNOW_V4_MINLEN_SESSION_REKEY, 0x48); break;
+      default: break;
+    }
+    const size_t before = gCalls.size();
+    deliver(gPeerB, plainFrame((uint8_t)type, gPeerB, 1000 + type, payload, 0, 1, ESPNOW_V4_FLAG_ACK_REQ));
+    handled += gCalls.size() != before;
+  }
+  check("256 plaintext opcodes with ACK_REQ: no ACK of any class", gSentAcks.empty());
+  check("only the six handshake frames passed the plaintext gate",
+        handled == 6 && calls("v4hKeyExHello") == 1 && calls("v4hSessionRekey") == 1 &&
+        gEspNowRxPlaintextDrops == 250);
+  reset(true);
+  Frame hello = plainFrame(ESPNOW_V4_TYPE_KEY_EX_HELLO, gFar, 1300, helloPayload(), 0, 1, ESPNOW_V4_FLAG_ACK_REQ);
+  deliver(gRelayR, envelope(gRelayR, hello, 1300));
+  check("a relayed plaintext handshake frame with ACK_REQ: delivered, not ACKed",
+        calls("v4hKeyExHello") == 1 && gSentAcks.empty());
+  reset(true);
+  deliver(gPeerB, plainFrame(ESPNOW_V4_TYPE_TOPO_REQ, gPeerB, 1301, Frame(ESPNOW_V4_MINLEN_TOPO_REQ, 0)));
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_TOPO_REQ, gPeerB, 1302, Frame(ESPNOW_V4_MINLEN_TOPO_REQ, 0)));
+  check("TOPO_REQ: plaintext dropped, group-tagged delivered (1.0 step 5a tags TOPO_*)",
+        calls("v4h_topo_req") == 1 && gEspNowRxPlaintextDrops == 1);
+}
+
+// The sender side: a waiter takes only the ACK it can trust.
+static void testAckWaiterMatching() {
+  reset(true);
+  const V4FragAckWait* w = armWaiter(0, gPeerB, 500, 1, /*sealed=*/true);
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 501, ackPayload(500, 1, 3)));
+  check("a tagged ACK from B is refused where a sealed one is expected",
+        !w->acked && gEspNowRxAckRefused == 1);
+  deliver(gPeerC, sealedFrame(gSessC, ESPNOW_V4_TYPE_ACK, gPeerC, 502, ackPayload(500, 1, 3), 0, 1, 0));
+  check("a sealed ACK from another device (C) naming B's msgId is ignored",
+        !w->acked && gEspNowRxAckRefused == 2);
+  deliver(gPeerC, sealedFrame(gSessC, ESPNOW_V4_TYPE_ACK, gPeerB, 503, ackPayload(500, 1, 3), 0, 1, 0));
+  check("a sealed ACK in C's session that writes B as origin is still C's: ignored",
+        !w->acked && gEspNowRxAckRefused == 3);
+  const size_t hooks = gTrackerAcks.size() + gDelivered.size() + gPingAcks.size() + gFollowAcks.size();
+  deliver(gRelayR, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 504, ackPayload(500, 1, 3)));
+  check("a tagged ACK naming B as origin from another radio (R) is dropped before any hook",
+        !w->acked && gEspNowRxAckRefused == 4 &&
+        gTrackerAcks.size() + gDelivered.size() + gPingAcks.size() + gFollowAcks.size() == hooks);
+  deliver(gAttacker, plainFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 505, ackPayload(500, 1, 3)));
+  check("a plaintext ACK naming B is dropped at the plaintext gate", !w->acked && gEspNowRxPlaintextDrops == 1);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 506, ackPayload(500, 0, 3), 0, 1, 0));
+  check("B's sealed ACK for another fragment does not complete this one", !w->acked);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 507, ackPayload(500, 1, 3), 0, 1, 0));
+  check("B's sealed ACK naming (500, fragment 1) completes the waiter with status 0", w->acked && w->status == 0);
+
+  reset(true);
+  w = armWaiter(3, gPeerB, 510, 0, true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 511, ackPayload(510, 0, 1, espnowanswer::kBusy), 0, 1, 0));
+  check("an ACK with a status reaches the waiter with that status (a refusal)",
+        w->acked && w->status == espnowanswer::kBusy);
+  check("and marks a tracked send refused (failed, session alive: sendStatusMarkRefused), not delivered",
+        gFailedSends.size() == 1 && gDelivered.empty() && gFailedSends[0].ackFor == 510);
+
+  reset(true);
+  w = armWaiter(1, gPeerB, 520, 0, true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 521, ackPayload(520), 0, 1, 0));
+  check("a sealed ACK reaches the tracked sends and the ping as sealed, not the broadcast tracker",
+        w->acked && gDelivered.size() == 1 && gDelivered[0].ackFor == 520 && gTrackerAcks.empty() &&
+        gPingAcks.size() == 1 && gPingAcks[0].sealed && gFollowAcks.size() == 1 && gFollowAcks[0].sealed);
+  deliver(gPeerC, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerC, 522, ackPayload(523)));
+  check("a tagged ACK reaches the broadcast tracker and the follow hook as tagged, not the tracked sends",
+        gTrackerAcks.size() == 1 && gTrackerAcks[0].ackFor == 523 && gDelivered.size() == 1 &&
+        gFollowAcks.size() == 2 && !gFollowAcks[1].sealed && std::memcmp(gFollowAcks[1].peer, gPeerC, 6) == 0);
+
+  // A relayed tagged ACK always passes the origin check (the relay delivery
+  // sets the radio source to the inner origin); a tag proves only membership,
+  // so it feeds no broadcast tracking. The direct one does.
+  reset(true);
+  deliver(gRelayR, envelope(gRelayR, groupFrame(ESPNOW_V4_TYPE_ACK, gFar, 524, ackPayload(525)), 524));
+  check("a relayed tagged ACK reaches the follow hook but not the broadcast tracker",
+        gTrackerAcks.empty() && gFollowAcks.size() == 1 && std::memcmp(gFollowAcks[0].peer, gFar, 6) == 0);
+  deliver(gFar, groupFrame(ESPNOW_V4_TYPE_ACK, gFar, 526, ackPayload(525)));
+  check("the same ACK direct from its sender reaches the broadcast tracker", gTrackerAcks.size() == 1);
+
+  reset(true);
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 530, Frame(7, 0)));
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 531, Frame(9, 0)));
+  check("an ACK of 7 or 9 bytes is dropped for its length", gEspNowRxLenDrops == 2 && gTrackerAcks.empty());
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 532, ackPayload(1), 0, 2, 0));
+  check("an ACK that claims fragments is dropped", gEspNowRxLenDrops == 3 && gDelivered.empty());
+}
+
 int main() {
   std::setvbuf(stdout, nullptr, _IOLBF, 0);  // keep the case lines if a pre-fix tree aborts
   testMeshIdGate();
@@ -1439,6 +1649,9 @@ int main() {
   testMustUnderstandFlags();
   testRelayHopOpcodeRule();
   testRevokedDrops();
+  testAckCounts();
+  testNoPlaintextFrameIsAcked();
+  testAckWaiterMatching();
   std::printf("espnow_rx_frontend: %u failure%s\n", gFailures, gFailures == 1 ? "" : "s");
   return gFailures ? 1 : 0;
 }

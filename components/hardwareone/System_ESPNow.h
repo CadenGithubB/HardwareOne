@@ -73,6 +73,11 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t type, uint16_t flags, uin
 // Longest AEAD plaintext that still fits one frame to `dst` (a routed peer has
 // a smaller budget than a direct one).
 uint16_t v4_single_frame_cap(const uint8_t* dst);
+// One ACK (opcode 1, 8-byte V4PayloadAck in `ack`), built with its own msgId
+// and sealed in session `sessionId` with `dst` (classFlag SESSION_FRAME, also
+// while that session is REKEYING) or group-tagged (classFlag BROADCAST_AUTH).
+// Never plaintext. Runs on the espnow_tx dispatcher (espnowtx::sendAck).
+bool v4_emit_ack(const uint8_t* dst, uint16_t classFlag, uint16_t sessionId, const uint8_t* ack);
 
 #if ENABLE_ESPNOW
 
@@ -1629,7 +1634,7 @@ EspNowAppPingState espnowAppPingPoll(uint32_t* outRttMs,
                                      uint8_t* outPeerMac /* may be null */,
                                      uint32_t timeoutMs = 2000);
 void espnowAppPingClear();
-void espnowAppPingNoteAck(const uint8_t* src, uint32_t msgId);
+void espnowAppPingNoteAck(const uint8_t* src, uint32_t ackFor, bool sealed);
 
 #else // !ENABLE_ESPNOW
 

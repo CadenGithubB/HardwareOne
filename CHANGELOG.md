@@ -71,6 +71,22 @@ Host-tested and built; not run on a device.
   revoked key is refused whatever address it comes from, and the accept prompt shows its keyId.
   KEY_EX_CONFIRM status 3 means "not accepted". Reflash devices together.
 
+### Changed (ESP-NOW 1.0 acknowledgement frame)
+Host-tested and built; not run on a device.
+- **Acknowledgements are authenticated (wire change).** An ESP-NOW acknowledgement is now a frame of
+  its own: its own message number, an 8-byte body naming the frame and fragment it answers and a
+  status, sealed in the same session as a sealed frame (also while the session is being rekeyed) or
+  signed with the group key for a signed frame. There is no plaintext acknowledgement any more, and a
+  sender takes an acknowledgement only from the device it sent to and in the class it expects, so a
+  forged or misplaced one no longer completes a long message, a remote command result or a file
+  frame. An acknowledgement still means "received".
+- **Plaintext frames are dropped.** Apart from the six handshake frames (which no longer ask for an
+  acknowledgement), a frame that is neither sealed nor signed is dropped on arrival and never
+  acknowledged; the topology request and its answers are signed with the group key. A frame that
+  cannot be signed yet (no group key early in a start) is not sent instead of going out plaintext.
+- `espnowstats` adds `RX Plaintext Drops`, `RX ACKs Refused` and `TX ACKs Dropped` (JSON
+  `rxPlaintextDrops`, `rxAckRefused`, `txAckDropped`). Reflash devices together.
+
 ### Changed (ESP-NOW 1.0 handshake crypto and passphrase change)
 Host-tested and built; not run on a device.
 - **Changing a mesh passphrase now cuts off devices that do not get the new one.** Every session

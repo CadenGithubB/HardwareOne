@@ -227,7 +227,7 @@ removed `espnowenabled` switch. `running` says whether ESP-NOW runs now.
 | `espnowidentity` | `{"schema":1,"valid","mac","pub","createdAtSec","regenCount"}` |
 | `espnowmeshmetrics` | `{"schema":1,"mode","activePeers","ttl","adaptiveTtl"}` |
 | `ring status` | `{"schema":1,"connected","name","mtu","rx","upMs","scanFound"}` (no address) |
-| `espnowmeshstatus` / `espnowlist` / `espnowstats` | already JSON (pre-existing). `espnowstats json` adds `rxLengthDrops`, `rxMustUnderstandDrops`, `rxRevokedDrops` (frames from a revoked radio source or relayed from a revoked origin), `rxUnknownMeshIdDrops` and, once it is nonzero, `rxUnknownMeshIdLast` (the last mesh id dropped) and `rxUnknownMeshIdLastMac` |
+| `espnowmeshstatus` / `espnowlist` / `espnowstats` | already JSON (pre-existing). `espnowstats json` adds `rxLengthDrops`, `rxMustUnderstandDrops`, `rxRevokedDrops` (frames from a revoked radio source or relayed from a revoked origin), `rxPlaintextDrops` (frames neither sealed nor group-signed that are not handshake frames), `rxAckRefused` (acknowledgements from the wrong device or in the wrong class), `txAckDropped` (acknowledgements not sent: queue full), `rxUnknownMeshIdDrops` and, once it is nonzero, `rxUnknownMeshIdLast` (the last mesh id dropped) and `rxUnknownMeshIdLastMac` |
 
 ### ESP-NOW peer metadata is pull-only
 - **Self** = `espnowdeviceinfo json`; **peers** = `espnowdevices json`.

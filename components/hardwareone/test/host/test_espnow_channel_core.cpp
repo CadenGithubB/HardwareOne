@@ -69,9 +69,19 @@ static void checkSource(const char* path) {
         "S5 v4h_heartbeat does not feed the channel follow");
   CHECK(hb.find("if (!espnowChFollowHunting()) {") != std::string::npos,
         "S5 the session pre-warm is not skipped while the channel follow hunts");
+  // 1.0 step 5a: the ACK carries its own msgId and names the probe in its
+  // payload; the ACK handler v4_rx_ack reports ackFor and the class, and the
+  // follow takes only a tagged ACK (the probe is group-tagged).
   const std::string incoming = between(src, "static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uint8_t* data, int len) {", "\n}\n");
-  CHECK(incoming.find("espnowChFollowNoteAck(recv_info, h->msgId);") != std::string::npos,
-        "S5 the ACK branch does not report probe ACKs to the channel follow");
+  CHECK(incoming.find("v4_rx_ack(recv_info, h, payload, payloadLen, wasSessionEncrypted);") != std::string::npos,
+        "S5 the receive path does not hand ACK frames to v4_rx_ack");
+  const std::string rxAck = between(src, "static void v4_rx_ack(", "\n}\n");
+  CHECK(rxAck.find("espnowChFollowNoteAck(recv_info, a.ackFor, sealed);") != std::string::npos,
+        "S5 the ACK handler does not report probe ACKs (ackFor, class) to the channel follow");
+  const std::string noteAck = between(src, "static void espnowChFollowNoteAck(", "\n}\n");
+  CHECK(noteAck.find("if (sealed) return;") != std::string::npos &&
+            noteAck.find("ackFor != gChFollowProbeMsgId") != std::string::npos,
+        "S5 the follow's ACK hook does not match the probe on ackFor and take only a tagged ACK");
   const std::string dispatch = between(src, "static bool v4_dispatch_table_try(", "\n}\n");
   CHECK(dispatch.find("if (isSessionEncrypted) espnowChFollowOnSealedFrame(recv_info, h->type);") != std::string::npos,
         "S5 the dispatcher does not report sealed frames to the channel follow");

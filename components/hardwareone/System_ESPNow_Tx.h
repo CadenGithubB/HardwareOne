@@ -85,8 +85,11 @@
 //   JOB_RAW          — v4_send_frame raw plaintext (broadcast, KEY_EX). Live;
 //                      dispatched in runJob alongside JOB_AEAD_SMART.
 //
-// Future kinds (not implemented — runJob has no case for these):
-//   JOB_FRAG_ACK     — tiny plaintext frag-ack (high priority).
+//   ACKs (1.0) are not jobs: sendAck puts them in their own queue of
+//                      kAckPoolSlots fixed PSRAM slots, which the dispatcher
+//                      empties before every job (and inside a fragmented
+//                      send's ACK wait, drainAcksOnDispatcher). A full pool
+//                      is silence, counted in Stats::ackDropped.
 //
 // COMPLETION SEMANTICS
 // --------------------
@@ -111,6 +114,9 @@ enum JobKind : uint8_t {
   JOB_RAW        = 1,    // -> v4_send_frame          (plaintext single frame:
                          //    KEY_EX handshake, plaintext broadcasts). FF×6 dst ok.
 };
+
+// ACKs queued at once (fixed slots in PSRAM; sendAck).
+static constexpr uint8_t kAckPoolSlots = 16;
 
 struct Job {
   JobKind  kind;
@@ -210,6 +216,22 @@ bool sendAead(const uint8_t mac[6], uint8_t type, uint16_t flags,
               uint32_t msgId, const uint8_t* payload, uint16_t payloadLen,
               uint8_t ttl);
 
+// Queue one ACK (1.0). `ack` is the 8-byte V4PayloadAck; classFlag is
+// ESPNOW_V4_FLAG_SESSION_FRAME (sealed in session `sessionId` with `mac`) or
+// ESPNOW_V4_FLAG_BROADCAST_AUTH (group-tagged; sessionId unused). Non-blocking
+// and safe from espnow_task: the RX path calls it. Returns false (and counts
+// Stats::ackDropped) when all kAckPoolSlots are queued: the ACK is silence.
+// ACKs have their own queue: a full job queue never holds one back, and the
+// dispatcher sends them before its next job.
+bool sendAck(const uint8_t mac[6], uint16_t classFlag, uint16_t sessionId, const uint8_t ack[8]);
+
+// Send every queued ACK now when called on the dispatcher task (no-op on any
+// other task, where the dispatcher is free to send them itself). The
+// fragment-wait loop of v4_send_encrypted_chunked calls it, so a multi-frame
+// job run by the dispatcher does not hold this device's ACKs until it ends
+// (two devices doing that to each other would each wait out the other).
+void drainAcksOnDispatcher();
+
 // Blocking AEAD send. Returns true iff the dispatcher reported the wire send
 // succeeded within timeoutMs. Worst-case blocking is ~2 × timeoutMs (queue
 // enqueue + completion wait both honor the timeout).
@@ -233,6 +255,7 @@ struct Stats {
   uint32_t failed;        // wire send returned error (v4_send_* false)
   uint32_t dropped;       // submit() couldn't queue (queue full)
   uint32_t queueDepthHwm; // max queue depth observed at submit() time
+  uint32_t ackDropped;    // sendAck() found every ACK slot queued
 };
 void getStats(Stats* out);
 

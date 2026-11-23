@@ -483,7 +483,7 @@ static void sendKeyExConfirm(const uint8_t peerMac[6], uint16_t meshFingerprint,
     return;
   }
   v4_send_frame(peerMac, ESPNOW_V4_TYPE_KEY_EX_CONFIRM,
-                ESPNOW_V4_FLAG_ACK_REQ,
+                0,  // no ACK_REQ: a handshake frame's reply is its answer (1.0)
                 generateMessageId(),
                 reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
 }
@@ -718,7 +718,7 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
   keyExNoteReply(msg->senderMac, msg->meshFingerprint, msg->nonce, reply.nonce, msg->senderPubEd25519);
 
   v4_send_frame(msg->senderMac, ESPNOW_V4_TYPE_KEY_EX_REPLY,
-                ESPNOW_V4_FLAG_ACK_REQ,
+                0,  // no ACK_REQ: a handshake frame's reply is its answer (1.0)
                 generateMessageId(),
                 reinterpret_cast<const uint8_t*>(&reply), sizeof(reply), 1);
 }
@@ -1009,7 +1009,7 @@ static bool keyExSendHello(const uint8_t peerMac[6], int slot, KeyExInFlight* e)
   }
 
   bool ok = v4_send_frame(peerMac, ESPNOW_V4_TYPE_KEY_EX_HELLO,
-                          ESPNOW_V4_FLAG_ACK_REQ,
+                          0,  // no ACK_REQ: a handshake frame's reply is its answer (1.0)
                           generateMessageId(),
                           reinterpret_cast<const uint8_t*>(&hello), sizeof(hello), 1);
   if (ok) {
@@ -1323,7 +1323,7 @@ bool sessionOpenSendAgain(SessionState* s, const uint8_t peerMac[6]) {
   s->openResent = 1;
   s->lastUseMs = (uint32_t)millis();
   return v4_send_frame(peerMac, ESPNOW_V4_TYPE_SESSION_OPEN,
-                       ESPNOW_V4_FLAG_ACK_REQ,
+                       0,  // no ACK_REQ: a handshake frame's reply is its answer (1.0)
                        generateMessageId(),
                        reinterpret_cast<const uint8_t*>(&open), sizeof(open), 1);
 }
@@ -1509,7 +1509,7 @@ void runDeferredSessionOpen(void* arg) {
                (unsigned)msg->sessionId, s->myDirection == 0 ? 'A' : 'B');
 
   v4_send_frame(msg->initiatorMac, ESPNOW_V4_TYPE_SESSION_CONFIRM,
-                ESPNOW_V4_FLAG_ACK_REQ,
+                0,  // no ACK_REQ: a handshake frame's reply is its answer (1.0)
                 generateMessageId(),
                 reinterpret_cast<const uint8_t*>(&conf), sizeof(conf), 1);
   // Frames this device queued for the peer (our own SESSION_OPEN lost the
@@ -1786,7 +1786,7 @@ bool espnowSessionOpenInitiate(const uint8_t peerMac[6], const char* meshLabel,
   }
 
   bool ok = v4_send_frame(peerMac, ESPNOW_V4_TYPE_SESSION_OPEN,
-                          ESPNOW_V4_FLAG_ACK_REQ,
+                          0,  // no ACK_REQ: a handshake frame's reply is its answer (1.0)
                           generateMessageId(),
                           reinterpret_cast<const uint8_t*>(&open), sizeof(open), 1);
   if (ok) {
@@ -1992,7 +1992,7 @@ bool sendRekey(SessionState* s, const uint8_t peerMac[6], bool armRetry) {
 
   const uint32_t msgId = generateMessageId();
   bool ok = v4_send_frame(peerMac, ESPNOW_V4_TYPE_SESSION_REKEY,
-                          ESPNOW_V4_FLAG_ACK_REQ,
+                          0,  // no ACK_REQ: a handshake frame's reply is its answer (1.0)
                           msgId,
                           reinterpret_cast<const uint8_t*>(&rk), sizeof(rk), 1);
   if (ok) {
@@ -2250,7 +2250,7 @@ void rekeyRetrySweep(uint32_t nowMs) {
                  MAC_ARGS(resend.peerMac),
                  (unsigned)resend.retriesLeft);
     v4_send_frame(resend.peerMac, ESPNOW_V4_TYPE_SESSION_REKEY,
-                  ESPNOW_V4_FLAG_ACK_REQ, resend.msgId,
+                  0, resend.msgId,  // no ACK_REQ (1.0)
                   reinterpret_cast<const uint8_t*>(&resend.frame), sizeof(resend.frame), 1);
   }
 }

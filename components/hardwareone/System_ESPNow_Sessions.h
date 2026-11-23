@@ -218,6 +218,16 @@ bool sessionWrapFrame(SessionState* s,
                       const uint8_t* plaintext, uint16_t plaintextLen,
                       uint8_t* outCipherWithTag);
 
+// The ACK-only exception (1.0, DESIGN 2.2): an ACK frame is also sealed while
+// the session is REKEYING, under the current TX key, so a frame that arrives
+// during a rekey is still answered (the receive side opens sealed frames in
+// ACTIVE and REKEYING). The state is checked and frameSeq taken under the
+// session TX lock. Any other frame keeps sessionWrapFrame's ACTIVE-only rule.
+bool sessionWrapAck(SessionState* s,
+                    struct EspNowV4Header* headerInOut,
+                    const uint8_t* plaintext, uint16_t plaintextLen,
+                    uint8_t* outCipherWithTag);
+
 // Unwrap a received SESSION_FRAME. Verifies the AEAD tag (last 16 bytes of
 // the payload region), then runs the replay check against the sliding
 // 64-frame window of the key that opened the frame: the current key's window,
@@ -383,6 +393,12 @@ void sendStatusRegister(uint32_t msgId, const uint8_t peerMac[6]);
 // Mark the matching tracked send as DELIVERED. Called from V4_ACK_RX.
 // Match key is (msgId AND peerMac). No-op if no matching PENDING entry.
 void sendStatusMarkDelivered(uint32_t msgId, const uint8_t srcMac[6]);
+
+// Mark the matching tracked send FAILED because the peer answered it with a
+// sealed ACK carrying a status (a refusal, 1.0). Unlike sendStatusMarkFailed
+// it also counts the answer as proof that the session is alive (it clears the
+// no-answer run, as a delivery does): only silence counts toward a re-open.
+void sendStatusMarkRefused(uint32_t msgId, const uint8_t srcMac[6]);
 
 // Mark a tracked send as FAILED. Called from the pending-frame timeout sweep
 // when a queued encrypted frame gets dropped (handshake never completed).

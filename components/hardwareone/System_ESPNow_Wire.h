@@ -49,7 +49,14 @@
 //     word inside the signed transcript (System_ESPNow_SessionCapsCore.h).
 //   - An ACK means "received", not "accepted": the ACK goes out before the
 //     dispatcher, so a frame dropped for its length is visible only in
-//     rxLengthDrops on the receiver.
+//     rxLengthDrops on the receiver. (1.0 step 5b moves it after accept.)
+//   - The ACK (opcode 1, V4PayloadAck) has its own msgId and names the frame
+//     it answers in its payload (ackFor, fragIndex, fragCount). It is never
+//     plaintext: a sealed frame gets a sealed ACK in the same session, a
+//     group-tagged frame a tagged ACK. A plaintext frame is never ACKed, and
+//     only the six handshake frames (10-15) travel plaintext; every other
+//     plaintext frame is dropped on receipt. Handshake frames carry no
+//     ACK_REQ: their reply is their answer.
 //   - Answers (rule F3, System_ESPNow_AnswerCore.h): every answer frame
 //     starts {u32 reqId, u8 status} (V4PayloadAnswerHeader). reqId is the
 //     request's correlation number (its reqId field, or its header msgId when
@@ -203,7 +210,7 @@ static_assert(ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT == 202, "group-signed pay
 
 enum EspNowV4Type : uint8_t {
   // --- Transport (1–9) ---
-  ESPNOW_V4_TYPE_ACK             = 1,
+  ESPNOW_V4_TYPE_ACK             = 1,  // V4PayloadAck (8 bytes, exact); sealed or group-tagged, never plaintext
   // 2 free (was the NACK earmark; released 1.0). 3–4 reserved FRAG_REQ / FRAG_REPLY
   // (selective retransmit, after 1.0)
   ESPNOW_V4_TYPE_RELAY_DATA      = 5,  // Routed-unicast envelope: BROADCAST_AUTH outer frame carrying
@@ -442,6 +449,30 @@ static_assert(sizeof(V4PayloadAnswerHeader) == 5 && sizeof(V4PayloadAnswerHeader
               "V4PayloadAnswerHeader is 5 bytes on the wire");
 static_assert(offsetof(V4PayloadAnswerHeader, reqId) == 0 && offsetof(V4PayloadAnswerHeader, status) == 4,
               "V4PayloadAnswerHeader layout (espnowanswer::packHeader writes these offsets)");
+
+// ---- ACK (ESPNOW_V4_TYPE_ACK, 1.0) ------------------------------------------
+// The answer to a frame sent with ACK_REQ. The ACK's header msgId is the
+// sender's own fresh number (never the answered frame's); its fragIndex /
+// fragCount are 0 / 1 and the fragment it answers is named here. Its
+// authenticity mirrors the frame answered: sealed in the same session (32 + 8
+// + 16 = 56 bytes) or group-tagged (56). It never carries ACK_REQ and is never
+// flooded. Fixed length: it never grows; later meaning goes into the reserved
+// flag bits or a new opcode.
+struct __attribute__((packed)) V4PayloadAck {
+  uint32_t ackFor;     // 0  msgId of the frame answered
+  uint8_t  fragIndex;  // 4  fragment answered (0 for a single frame)
+  uint8_t  fragCount;  // 5  1 for a single frame
+  uint8_t  status;     // 6  0 = accepted; else a shared status 1-15 (espnowanswer::k*)
+  uint8_t  flags;      // 7  ESPNOW_V4_ACK_FLAG_*; other bits reserved, sent 0
+};
+static_assert(sizeof(V4PayloadAck) == 8, "V4PayloadAck is 8 bytes on the wire");
+static_assert(offsetof(V4PayloadAck, ackFor) == 0 && offsetof(V4PayloadAck, fragIndex) == 4 &&
+              offsetof(V4PayloadAck, fragCount) == 5 && offsetof(V4PayloadAck, status) == 6 &&
+              offsetof(V4PayloadAck, flags) == 7,
+              "V4PayloadAck layout");
+// flags bit 0: a duplicate of a frame accepted before (not processed again).
+// Defined for 5b's accept memory; not set in 1.0 step 5a.
+#define ESPNOW_V4_ACK_FLAG_DUPLICATE 0x01
 
 // ---- Multi-hop: routed unicast envelope (ESPNOW_V4_TYPE_RELAY_DATA) --------
 //
@@ -1810,6 +1841,7 @@ static_assert(FILE_CANCEL_TIMEOUT == espnowanswer::kTimeout && FILE_CANCEL_WRITE
 #define ESPNOW_V4_MINLEN_SESSION_OPEN        154  // exact
 #define ESPNOW_V4_MINLEN_SESSION_CONFIRM     162  // exact
 #define ESPNOW_V4_MINLEN_SESSION_REKEY       146  // exact
+#define ESPNOW_V4_MINLEN_ACK                 8    // exact (handled before the table: no row)
 #define ESPNOW_V4_MINLEN_SESSION_UNKNOWN     12
 #define ESPNOW_V4_MINLEN_TIME_SYNC           16
 #define ESPNOW_V4_MINLEN_TEXT                1    // text, no terminator
@@ -1875,6 +1907,7 @@ static_assert(sizeof(V4PayloadKeyExHello) == ESPNOW_V4_MINLEN_KEY_EX_HELLO &&
               sizeof(V4PayloadSessionConfirm) == ESPNOW_V4_MINLEN_SESSION_CONFIRM &&
               sizeof(V4PayloadSessionRekey) == ESPNOW_V4_MINLEN_SESSION_REKEY,
               "a handshake frame is exact-length: its minimum is its size, and it never grows");
+static_assert(sizeof(V4PayloadAck) == ESPNOW_V4_MINLEN_ACK, "the ACK is exact-length and never grows");
 static_assert(sizeof(V4PayloadSessionUnknown) == ESPNOW_V4_MINLEN_SESSION_UNKNOWN &&
               sizeof(V4PayloadTimeSync) == ESPNOW_V4_MINLEN_TIME_SYNC &&
               sizeof(V4PayloadRelayData) + ESPNOW_V4_HEADER_LEN == ESPNOW_V4_MINLEN_RELAY_DATA &&

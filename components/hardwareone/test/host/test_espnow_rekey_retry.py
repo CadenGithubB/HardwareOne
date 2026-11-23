@@ -52,8 +52,8 @@ def build_types(sessions_h, wire, ident):
              extract_block(wire, 'struct __attribute__((packed)) V4PayloadSessionRekey') + ';',
              match(wire, r'^static_assert\(sizeof\(V4PayloadSessionRekey\) == \d+[^;]*;',
                    'REKEY payload size assert').group(0)]
-    for name, ctype in (('ESPNOW_V4_TYPE_SESSION_REKEY', 'uint8_t'),
-                        ('ESPNOW_V4_FLAG_ACK_REQ', 'uint16_t')):
+    # (1.0 step 5a: the REKEY carries no ACK_REQ, so the flag is not needed.)
+    for name, ctype in (('ESPNOW_V4_TYPE_SESSION_REKEY', 'uint8_t'),):
         value = match(wire, r'\b' + name + r'\s*=\s*(0x[0-9A-Fa-f]+|\d+)', name).group(1)
         types.append(f'constexpr {ctype} {name} = {value};')
     types.append(extract_block(ident, 'struct EspNowIdentity') + ';')

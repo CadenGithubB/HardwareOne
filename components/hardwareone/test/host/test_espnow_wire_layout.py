@@ -73,6 +73,7 @@ GOLDEN = {
     'V4PayloadTimeSync': (16, [('epochMs', 0), ('source', 8), ('flags', 9), ('sinceSetMin', 10), ('reserved', 12)]),
     'V4PayloadTopoReq': (8, [('reqId', 0), ('reserved', 4)]),
     'V4PayloadAnswerHeader': (5, [('reqId', 0), ('status', 4)]),
+    'V4PayloadAck': (8, [('ackFor', 0), ('fragIndex', 4), ('fragCount', 5), ('status', 6), ('flags', 7)]),
     'V4PayloadTopoStart': (8, [('reqId', 0), ('status', 4), ('peerCount', 5), ('reserved', 6)]),
     'V4PayloadTopoPeer': (47, [('reqId', 0), ('status', 4), ('peerIndex', 5), ('isLast', 6), ('mac', 7),
                                ('rssi', 13), ('encrypted', 14), ('name', 15)]),

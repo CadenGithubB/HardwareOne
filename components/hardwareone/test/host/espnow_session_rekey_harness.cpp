@@ -503,6 +503,56 @@ static void pairIdentities() {
   }
 }
 
+// ---- 1.0 step 5a: sealed fragments and their sealed ACKs ----------------------
+struct SealedFrame { EspNowV4Header h; std::vector<uint8_t> body; };
+// Seal on `d` toward its peer: a fragment (sessionWrapFrame) or an ACK
+// (sessionWrapAck, the only frame sealed while REKEYING).
+static bool sealOn(Device& d, bool ack, uint32_t msgId, uint8_t fragIndex, uint8_t fragCount,
+                   const std::vector<uint8_t>& plain, SealedFrame& out) {
+  SessionState* s = sessOf(d);
+  if (!s) return false;
+  out.h = EspNowV4Header{};
+  out.h.magic = 0x3148;
+  out.h.ver = 4;
+  out.h.type = ack ? 1 : 52;  // ESPNOW_V4_TYPE_ACK, ESPNOW_V4_TYPE_TEXT
+  out.h.flags = ack ? 0 : ESPNOW_V4_FLAG_ACK_REQ;
+  out.h.headerLen = 32;
+  out.h.msgId = msgId;
+  std::memcpy(out.h.origin, d.mac, 6);
+  out.h.ttl = 1;
+  out.h.fragIndex = fragIndex;
+  out.h.fragCount = fragCount;
+  out.body.assign(plain.size() + 16, 0);
+  use(d);
+  return ack ? sessionWrapAck(s, &out.h, plain.data(), (uint16_t)plain.size(), out.body.data())
+             : sessionWrapFrame(s, &out.h, plain.data(), (uint16_t)plain.size(), out.body.data());
+}
+// Open on `to` what `from` sealed, as the receive path does (session by id and
+// sender, current key, else the kept previous key).
+static bool openOn(Device& to, const Device& from, const SealedFrame& f, std::vector<uint8_t>& plain) {
+  use(to);
+  SessionState* r = sessionFindBySessionId(f.h.sessionId, from.mac);
+  plain.assign(f.body.size(), 0);
+  uint16_t n = 0;
+  if (!r || !sessionUnwrapFrame(r, &f.h, f.body.data(), (uint16_t)f.body.size(), plain.data(), &n)) return false;
+  plain.resize(n);
+  return true;
+}
+// The 8-byte V4PayloadAck: ackFor, fragIndex, fragCount, status, flags.
+static std::vector<uint8_t> ackPayload(uint32_t ackFor, uint8_t fragIndex, uint8_t fragCount) {
+  std::vector<uint8_t> a(8, 0);
+  std::memcpy(a.data(), &ackFor, 4);
+  a[4] = fragIndex;
+  a[5] = fragCount;
+  return a;
+}
+static bool ackNames(const std::vector<uint8_t>& a, uint32_t msgId, uint8_t fragIndex) {
+  uint32_t ackFor = 0;
+  if (a.size() != 8) return false;
+  std::memcpy(&ackFor, a.data(), 4);
+  return ackFor == msgId && a[4] == fragIndex && a[6] == 0;
+}
+
 int main() {
   makeDevice(A, "A", 0x0A);  // numerically lower MAC: the A side
   makeDevice(B, "B", 0x0B);
@@ -524,9 +574,8 @@ int main() {
   use(A);
   check(espnowRekeyInitiate(B.mac) && A.outbox.size() == 2 && sessOf(A)->state == SESSION_REKEYING,
         "C2 A initiates: one REKEY sent, A REKEYING");
-  check(A.outbox.back().type == ESPNOW_V4_TYPE_SESSION_REKEY &&
-        A.outbox.back().flags == ESPNOW_V4_FLAG_ACK_REQ,
-        "C2 the REKEY is a plaintext ACK_REQ frame (no HANDSHAKE flag at 1.0)");
+  check(A.outbox.back().type == ESPNOW_V4_TYPE_SESSION_REKEY && A.outbox.back().flags == 0,
+        "C2 the REKEY is a plaintext frame without ACK_REQ (1.0: its reply is its answer)");
   deliver(take(A), B);
   check(B.outbox.size() == 2 && sessOf(B)->state == SESSION_ACTIVE, "C2 B replies once and is ACTIVE");
   deliver(take(B), A);
@@ -1233,6 +1282,57 @@ int main() {
     deliver(f, B);
     check(B.outbox.empty() && logsContaining(B, "WARN", "signature") == 1,
           "C33 a changed openEpochMs fails the signature");
+  }
+
+
+  // C34 (1.0 step 5a): a fragmented send that spans a rekey completes. A sends
+  // six sealed fragments; B opens each and answers with a sealed ACK naming
+  // the fragment. B starts a rekey after fragment 1 (REKEYING): its ACKs are
+  // still sealed (sessionWrapAck, current key) while any other frame is
+  // refused. A gets B's REKEY only after B sealed the ACK of fragment 3: A
+  // answers and applies the new keys, then opens that late ACK with its kept
+  // previous key. B applies A's reply; fragments 4-5 and their ACKs run on the
+  // new keys.
+  resetDevices();
+  check(establish(), "C34 setup: session up");
+  gNow += kRekeyAgeThresholdMs;
+  {
+    const uint32_t msgId = 0x5A5A0001u;
+    const uint8_t count = 6;
+    unsigned acked = 0;
+    bool refusedOther = false, oldKeyAckOpened = false;
+    Frame rekey{};
+    for (uint8_t i = 0; i < count; ++i) {
+      SealedFrame frag, ack;
+      std::vector<uint8_t> got, ackPlain;
+      if (!sealOn(A, false, msgId, i, count, std::vector<uint8_t>(40, (uint8_t)(0x30 + i)), frag)) break;
+      if (!openOn(B, A, frag, got) || got.size() != 40 || got[0] != (uint8_t)(0x30 + i)) break;
+      if (!sealOn(B, true, msgId + 100 + i, 0, 1, ackPayload(msgId, i, count), ack)) break;
+      if (i == 1) {
+        use(B);
+        if (!espnowRekeyInitiate(A.mac) || sessOf(B)->state != SESSION_REKEYING) break;
+        rekey = take(B);
+        SealedFrame other;
+        refusedOther = !sealOn(B, false, 0x77, 0, 1, std::vector<uint8_t>(8, 1), other);
+      }
+      if (i == 3) {
+        deliver(rekey, A);                 // A answers the REKEY and applies the new keys
+        if (A.outbox.empty() || sessOf(A)->state != SESSION_ACTIVE) break;
+        Frame reply = take(A);
+        oldKeyAckOpened = openOn(A, B, ack, ackPlain) && ackNames(ackPlain, msgId, i);
+        if (!oldKeyAckOpened) break;
+        deliver(reply, B);                 // B applies A's reply
+        if (sessOf(B)->state != SESSION_ACTIVE) break;
+        ++acked;
+        continue;
+      }
+      if (!openOn(A, B, ack, ackPlain) || !ackNames(ackPlain, msgId, i)) break;
+      ++acked;
+    }
+    check(refusedOther, "C34 while REKEYING, B refuses to seal anything but an ACK");
+    check(oldKeyAckOpened, "C34 an ACK B sealed under the old key opens on A after A applied the rekey");
+    check(acked == count, "C34 every fragment of the send across the rekey is ACKed (the send completes)");
+    check(keysMirror(), "C34 after the send both sides hold the new keys");
   }
 
   check(gGuardDepth == 0, "no lock left held");

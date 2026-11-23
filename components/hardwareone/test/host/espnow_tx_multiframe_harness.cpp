@@ -156,6 +156,10 @@ void vTaskDelay(TickType_t) {
   }
 }
 void vTaskSuspend(TaskHandle_t) {}
+// The dispatcher's wake-up (every job or ACK enqueue gives one).
+static unsigned gNotifies = 0;
+BaseType_t xTaskNotifyGive(TaskHandle_t) { ++gNotifies; return pdTRUE; }
+uint32_t ulTaskNotifyTake(BaseType_t, TickType_t) { return 0; }
 UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t) { return 0; }
 int xPortGetCoreID() { return 0; }
 
@@ -181,9 +185,12 @@ static std::vector<RadioCall> gRadio;
 static uint32_t gAckDelayMs = 200;
 static bool gRadioOk = true;
 static void (*gProducerHook)() = nullptr;  // other tasks get CPU during an ACK wait
+// Event order across the radio and the ACK builder (case J).
+static std::vector<std::string> gEvents;
 bool v4_send_payload_smart(const uint8_t* dst, uint8_t, uint16_t, uint32_t,
                            const uint8_t*, uint16_t payloadLen, uint8_t) {
   gRadio.push_back({payloadLen, gCurrentTask});
+  gEvents.push_back("job " + std::to_string(payloadLen));
   if (payloadLen > v4_single_frame_cap(dst)) {
     const unsigned frags = (payloadLen + kFragment - 1) / kFragment;
     for (unsigned i = 0; i < frags; ++i) {
@@ -191,17 +198,40 @@ bool v4_send_payload_smart(const uint8_t* dst, uint8_t, uint16_t, uint32_t,
       if (gProducerHook) gProducerHook();
     }
   }
+  gEvents.push_back("job end " + std::to_string(payloadLen));
   return gRadioOk;
 }
 bool v4_send_frame(const uint8_t*, uint8_t, uint16_t, uint32_t, const uint8_t*, uint16_t, uint8_t) {
   return true;
 }
+// The ACK frame builder the JOB_ACK kind runs (System_ESPNow.cpp v4_emit_ack,
+// 1.0): recorded with the class flag, session id and 8 payload bytes.
+struct AckCall { uint8_t to[6]; uint16_t classFlag; uint16_t sessionId; uint8_t ack[8]; TaskHandle_t task; };
+static std::vector<AckCall> gAckCalls;
+bool v4_emit_ack(const uint8_t* dst, uint16_t classFlag, uint16_t sessionId, const uint8_t* ack) {
+  AckCall c{};
+  std::memcpy(c.to, dst, 6);
+  c.classFlag = classFlag;
+  c.sessionId = sessionId;
+  std::memcpy(c.ack, ack, 8);
+  c.task = gCurrentTask;
+  gAckCalls.push_back(c);
+  gEvents.push_back("ack " + std::to_string(ack[0]));
+  return true;
+}
+#define EXT_RAM_BSS_ATTR
 
 // INSERT_DISPATCHER
 
 namespace espnowtx {
 // The dispatcher's turn: drain whatever is queued, as txTask would.
 void harnessDrain() {
+  {
+    TaskHandle_t prev = gCurrentTask;
+    gCurrentTask = DISPATCHER;
+    runPendingAcks();  // ACKs before any job, as txTask does
+    gCurrentTask = prev;
+  }
   Job job;
   while (sJobQueue && xQueueReceive(sJobQueue, &job, 0) == pdTRUE) {
     TaskHandle_t prev = gCurrentTask;
@@ -352,6 +382,90 @@ int main() {
   espnowtx::harnessDrain();
   CHECK(gRadio.size() == 1 && gRadio.front().task == DISPATCHER && gRadio.front().len == 210);
 
+  // J (1.0 step 5a, after review): ACKs have their own queue of
+  //    kAckPoolSlots (16) PSRAM slots, sent before any job. Sixteen fit; the
+  //    seventeenth is counted as dropped (silence); the dispatcher sends each
+  //    with its class, session and 8 bytes, oldest first, and the slots come
+  //    back.
+  gAckCalls.clear();
+  gEvents.clear();
+  espnowtx::getStats(&s);
+  const uint32_t ackDroppedBefore = s.ackDropped;
+  bool allQueued = true;
+  for (uint8_t i = 0; i < espnowtx::kAckPoolSlots; ++i) {
+    const uint8_t ack[8] = {i, 0, 0, 0, 0, 1, 0, 0};
+    allQueued = espnowtx::sendAck(kDirect, 0x0200, (uint16_t)(40 + i), ack) && allQueued;
+  }
+  CHECK(espnowtx::kAckPoolSlots == 16);
+  CHECK(allQueued);
+  const uint8_t extra[8] = {99, 0, 0, 0, 0, 1, 0, 0};
+  CHECK(!espnowtx::sendAck(kDirect, 0x0200, 99, extra));
+  espnowtx::getStats(&s);
+  CHECK(s.ackDropped == ackDroppedBefore + 1);
+  CHECK(gAckCalls.empty());
+  espnowtx::harnessDrain();
+  CHECK(gAckCalls.size() == 16);
+  bool inOrder = gAckCalls.size() == 16;
+  for (size_t i = 0; inOrder && i < gAckCalls.size(); ++i) {
+    inOrder = gAckCalls[i].task == DISPATCHER && gAckCalls[i].classFlag == 0x0200 &&
+              gAckCalls[i].sessionId == 40 + i && gAckCalls[i].ack[0] == i &&
+              std::memcmp(gAckCalls[i].to, kDirect, 6) == 0;
+  }
+  CHECK(inOrder);
+
+  // J2: a full job queue still lets an ACK out, and the ACK goes before every
+  //     queued job.
+  gAckCalls.clear();
+  gEvents.clear();
+  gRadio.clear();
+  unsigned queuedJobs = 0;
+  uint8_t line[50] = {8};
+  while (espnowtx::sendAead(kDirect, 7, 0, 2000 + queuedJobs, line, sizeof line, 1)) ++queuedJobs;
+  CHECK(queuedJobs == 32);   // the job queue is full
+  const uint8_t urgent[8] = {7, 0, 0, 0, 0, 1, 0, 0};
+  const unsigned notifiesBefore = gNotifies;
+  CHECK(espnowtx::sendAck(kRouted, 0x0100, 0, urgent));
+  CHECK(gNotifies == notifiesBefore + 1);  // the ACK wakes the dispatcher
+  espnowtx::harnessDrain();
+  if (!(gAckCalls.size() == 1 && !gEvents.empty() && gEvents.front() == "ack 7" &&
+        gAckCalls[0].classFlag == 0x0100 && gRadio.size() == 32)) {
+    std::fprintf(stderr, "FAIL J2: with the job queue full the ACK was not sent first\n");
+    ++failures;
+  }
+
+  // J3: an ACK queued while the dispatcher runs a fragmented send goes out
+  //     during that send's ACK wait (v4_send_encrypted_chunked calls
+  //     drainAcksOnDispatcher there; test_espnow_rx_frontend pins the call),
+  //     not after it. From another task the drain does nothing.
+  gAckCalls.clear();
+  gEvents.clear();
+  gRadio.clear();
+  static bool sAckDuringWait = false;
+  sAckDuringWait = false;
+  gProducerHook = [] {
+    if (sAckDuringWait) return;
+    sAckDuringWait = true;
+    const uint8_t mid[8] = {5, 0, 0, 0, 0, 1, 0, 0};
+    TaskHandle_t prev = gCurrentTask;
+    gCurrentTask = HTTPD;  // the receive path (espnow_task) queues it
+    espnowtx::sendAck(kDirect, 0x0200, 9, mid);
+    espnowtx::drainAcksOnDispatcher();  // not the dispatcher: nothing sent
+    gCurrentTask = prev;
+    espnowtx::drainAcksOnDispatcher();  // the wait loop on the dispatcher
+  };
+  CHECK(espnowtx::sendAead(kDirect, 7, 0, 3000, big.data(), 600, 1));
+  espnowtx::harnessDrain();
+  gProducerHook = nullptr;
+  const bool ackInside = gEvents.size() == 3 && gEvents[0] == "job 600" && gEvents[1] == "ack 5" &&
+                         gEvents[2] == "job end 600" && gAckCalls.size() == 1 &&
+                         gAckCalls[0].task == DISPATCHER;
+  if (!ackInside) {
+    std::fprintf(stderr, "FAIL J3: the ACK queued during a fragmented send did not go out before it ended\n");
+    ++failures;
+  }
+  // A queued ACK that stop() fails returns its slot too.
+  CHECK(espnowtx::sendAck(kDirect, 0x0200, 1, urgent));
+
   // H: stop() with a queued job fails and frees it, then a multi-frame sync
   //    send is refused like any other job (lifecycle STOPPED).
   gRadio.clear();
@@ -360,7 +474,7 @@ int main() {
   CHECK(espnowtx::sendAead(kDirect, 7, 0, 10, small, sizeof small, 1));
   CHECK(espnowtx::stop(1000));
   espnowtx::getStats(&s);
-  CHECK(s.failed == failedBeforeStop + 1);
+  CHECK(s.failed == failedBeforeStop + 2);  // the queued AEAD job and the queued ACK
   CHECK(!espnowtx::sendAeadSync(kDirect, 9, 0, 11, big.data(), (uint16_t)big.size(), 1, 1000));
   CHECK(gRadio.empty());
 
