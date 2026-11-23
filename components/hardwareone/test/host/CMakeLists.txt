@@ -131,7 +131,7 @@ target_include_directories(uart_link_framing_tests PRIVATE ../..)
 target_compile_options(uart_link_framing_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
 # When a peer restarted, the session with it ends (System_ESPNow_PeerRestartCore.h):
-# the BOOT notice's counter (newer, same, older/erased, 0, across the wrap), the
+# the heartbeat boot counter (newer, same, older/erased, 0, across the wrap), the
 # SESSION_UNKNOWN hint (live id, sealed sequence), one forced close per peer per
 # 10 s shared by both, one hint per peer per second (bench 2026-11-18: three
 # messages lost into the session a restarted P4 no longer had). The production
@@ -141,6 +141,19 @@ set_target_properties(espnow_peer_restart_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
 target_include_directories(espnow_peer_restart_tests PRIVATE ../..)
 target_compile_options(espnow_peer_restart_tests PRIVATE -Wall -Wextra -Werror -pedantic)
+
+# ESP-NOW 1.0 step 8 (RC3): two-way liveness. The link definition (heard /
+# two-way with hysteresis, distinct evidence, 30 s windows, wrap-safe), the
+# heartbeat echo memory, the direct sends an ACK can prove, the 10 s back-off
+# ceiling, the one-event-per-30-s rate limit, the peer state from the link,
+# and a two-board simulation: both ways online, the one-way case for 10
+# minutes without a flap or an event, one lost heartbeat. The production
+# dependency-free headers (System_ESPNow_LinkCore.h, System_ESPNow_PeerStateCore.h).
+add_executable(espnow_link_core_tests test_espnow_link_core.cpp)
+set_target_properties(espnow_link_core_tests PROPERTIES
+  CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+target_include_directories(espnow_link_core_tests PRIVATE ../..)
+target_compile_options(espnow_link_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 
 # The one checked number parser for command arguments (System_ArgParse.h):
 # decimal whole tokens; only a bus address and a bit mask may be written in
@@ -1935,6 +1948,7 @@ add_test(NAME clock_confirm_policy_tests COMMAND clock_confirm_policy_tests)
 add_test(NAME clock_core_tests COMMAND clock_core_tests)
 add_test(NAME espnow_pending_queue_tests COMMAND espnow_pending_queue_tests)
 add_test(NAME espnow_peer_restart_tests COMMAND espnow_peer_restart_tests)
+add_test(NAME espnow_link_core_tests COMMAND espnow_link_core_tests)
 add_test(NAME uart_link_framing_tests COMMAND uart_link_framing_tests)
 add_test(NAME arg_parse_tests COMMAND arg_parse_tests)
 add_test(NAME config_load_tests COMMAND config_load_tests)

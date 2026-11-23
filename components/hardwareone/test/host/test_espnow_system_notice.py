@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
-"""Run the ESP-NOW text-queue drain on BOOT notices and check the boot notice's name.
+"""Run the record a peer's restart leaves and the ESP-NOW text-queue drain.
 
-Compiled part: extracts LogMessageType, MSG_TYPE_BOOT and TextQueueEntry from
-System_ESPNow.h and, from System_ESPNow.cpp, v2_init_envelope,
-buildBootNotification, formatEspNowSystemNotice and the espnow_task text-queue
-drain ("// 11. Drain text message queue"), and runs them with the vendored
-ArduinoJson against recording doubles for history, the console and the event
-bus. A BOOT notice is printed as "[ESP-NOW] <name> is online (boot #N)" and
-stored as one MSG_SYSTEM_EVENT record with a readable text and no group id; the
-name is the one resolved from the authenticated origin, never the notice's
-"src"; malformed, unterminated or non-BOOT system events get a neutral line and
-never echo their text; chat is printed and stored as before; and the notice
-buildBootNotification makes round-trips.
+ESP-NOW 1.0 step 8 retired the BOOT frame (31): a paired peer's restart is
+seen in its heartbeat's boot counter (System_ESPNow_PeerRestartCore.h) and
+v4h_heartbeat files it with espnowFilePeerRestart.
 
-Source part (initEspNow needs the radio): the boot notice is built from
-gSettings.espnowDeviceName, EspNowState has no deviceName copy and nothing
-refers to one, and v4h_text still files BOOT frames as MSG_SYSTEM_EVENT.
+Compiled part: extracts LogMessageType and TextQueueEntry from System_ESPNow.h
+and, from System_ESPNow.cpp, espnowFilePeerRestart and the espnow_task
+text-queue drain ("// 11. Drain text message queue"), and runs them against
+recording doubles for history, the console, the device names and the event
+bus. A restart is printed as "[ESP-NOW] <name> is online (boot #N)" and stored
+as one attributed MSG_SYSTEM_EVENT record "Online (boot #N)" with no group id;
+the name is the registry name, else the MAC text; chat is printed and stored as
+before, and the drain parses nothing.
+
+Source part: EspNowState has no deviceName copy and nothing refers to one;
+v4h_text files every frame as chat; v4h_heartbeat files a restart only when a
+known counter moved forward (restartSeen), and nothing names the BOOT frame.
 
 --source-dir replays other production sources (for example the tree before the
 fix), which compile with the same doubles and fail the checks that name the
@@ -32,7 +33,6 @@ import tempfile
 
 HERE = Path(__file__).resolve().parent
 
-NOTICE = 'static void formatEspNowSystemNotice('
 
 
 def main():
@@ -74,10 +74,6 @@ def main():
             failed += 1
             print(f'FAIL {name}')
 
-    init = definition(source, 'static bool initEspNow() ', 'System_ESPNow.cpp')
-    call = re.search(r'buildBootNotification\(\s*generateMessageId\(\)\s*,\s*([^,]+?)\s*,', init)
-    check('B1 the boot notice is built from the device-name setting',
-          call is not None and call.group(1) == 'gSettings.espnowDeviceName.c_str()')
     # Both EspNowState definitions (ESP-NOW on, and the stub for builds without it)
     # are in the header; no other type there has a String deviceName member.
     check('B2 EspNowState keeps no copy of the device name',
@@ -97,30 +93,31 @@ def main():
     check('B3b the EspNowState constructor does not initialize a deviceName member',
           bool(ctors) and all(re.search(r'\bdeviceName\s*\(', c) is None for c in ctors))
     text_handler = definition(source, 'static V4Verdict v4h_text(', 'System_ESPNow.cpp')
-    check('B4 v4h_text still files BOOT frames as MSG_SYSTEM_EVENT',
-          'slot.msgType = (ctx.h->type == ESPNOW_V4_TYPE_BOOT) ? MSG_SYSTEM_EVENT : MSG_TEXT;' in text_handler)
+    check('B4 v4h_text files every frame as chat (BOOT 31 retired in 1.0 step 8)',
+          'slot.msgType = MSG_TEXT;' in text_handler and 'MSG_SYSTEM_EVENT' not in text_handler)
+    heartbeat = definition(source, 'static V4Verdict v4h_heartbeat(', 'System_ESPNow.cpp')
+    check('B5 v4h_heartbeat files a restart only for a known counter that moved forward',
+          'if (restarted) espnowFilePeerRestart(ctx.h->origin, hb.bootCounter, ctx.isSessionEncrypted);'
+          in heartbeat and 'sessionPeerBootCounter(ctx.h->origin, hb.bootCounter, &restarted)' in heartbeat)
+    check('B6 nothing names the BOOT frame or its JSON notice',
+          all(name not in source and name not in header for name in
+              ('ESPNOW_V4_TYPE_BOOT', 'MSG_TYPE_BOOT', 'buildBootNotification', 'meshSendBootToPeers',
+               'formatEspNowSystemNotice')))
 
     # ---- Compiled part ------------------------------------------------------
-    have_notice = NOTICE in source
     message_types = definition(header, 'enum LogMessageType', 'System_ESPNow.h') + ';'
-    boot_define = re.search(r'^#define MSG_TYPE_BOOT .*$', header, re.MULTILINE)
-    assert boot_define, 'MSG_TYPE_BOOT is not defined in System_ESPNow.h'
     queue_entry = definition(header, 'struct TextQueueEntry', 'System_ESPNow.h') + ';'
-    pieces = [definition(source, 'void v2_init_envelope(JsonDocument& doc,', 'System_ESPNow.cpp'),
-              definition(source, 'String buildBootNotification(uint32_t msgId,', 'System_ESPNow.cpp')]
-    if have_notice:
-        pieces.append(definition(source, NOTICE, 'System_ESPNow.cpp'))
+    pieces = [definition(source, 'static void espnowFilePeerRestart(', 'System_ESPNow.cpp')]
     drain = extract_block(source, '// 11. Drain text message queue')
     assert source.count('// 11. Drain text message queue') == 1, 'one drain marker required'
 
     harness = (HERE / 'espnow_system_notice_harness.cpp').read_text()
-    for tag, value in (('// INSERT_MESSAGE_TYPES', message_types + '\n' + boot_define.group(0)),
+    for tag, value in (('// INSERT_MESSAGE_TYPES', message_types),
                        ('// INSERT_TEXT_QUEUE_ENTRY', queue_entry),
                        ('// INSERT_PRODUCTION', '\n\n'.join(pieces)),
                        ('// INSERT_DRAIN', drain)):
         assert harness.count(tag) == 1, tag
         harness = harness.replace(tag, value)
-    print(f'system notice formatter: {"present" if have_notice else "absent"}', flush=True)
 
     json_include = a.component.parent / 'hardwareone_libs' / 'ArduinoJson' / 'src'
     with tempfile.TemporaryDirectory(prefix='hw1-espnow-system-notice-') as tmp:
@@ -131,7 +128,6 @@ def main():
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pedantic', '-Wno-unused-function',
                '-DARDUINOJSON_ENABLE_ARDUINO_STRING=1', '-DARDUINOJSON_ENABLE_ARDUINO_STREAM=0',
                '-DARDUINOJSON_ENABLE_ARDUINO_PRINT=0', '-DARDUINOJSON_ENABLE_PROGMEM=0',
-               f'-DHW1_HAVE_NOTICE={1 if have_notice else 0}',
                '-I', tmp, '-I', str(json_include), str(unit), '-o', str(exe)]
         if a.sanitize:
             cmd[1:1] = ['-fsanitize=address,undefined', '-fno-sanitize-recover=undefined',

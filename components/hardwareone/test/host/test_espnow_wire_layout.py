@@ -34,7 +34,7 @@ Source rules:
     (0-127 sensor type, 0xF0 battery, 0xF1 events) is in the header, and
     docs/COMPATIBILITY.md states them;
   * ESP-NOW 1.0 step 2: 130 (SUBSCRIBE_UPDATE) and 150 are retired (no enum
-    value, the map says so), the earmarks 2, 16/17, 37/38, 131 and 133-135 are
+    value, the map says so; step 8 retires 31, BOOT, and grows HEARTBEAT to 56), the earmarks 2, 16/17, 37/38, 131 and 133-135 are
     released (not allocated, no longer named), SUBSCRIBE_UPDATE and its
     subscription state are gone from the sources, and BOND_HEARTBEAT bytes
     12-15 are reserved (not filled).
@@ -65,8 +65,10 @@ GOLDEN = {
     'V4PayloadRelayData': (8, [('finalDst', 0), ('hopsUsed', 6), ('reserved', 7)]),
     'V4PayloadPeerListHeader': (4, [('entryCount', 0), ('role', 1), ('seq', 2), ('reserved', 3)]),
     'V4PayloadPeerListEntry': (8, [('mac', 0), ('hops', 6), ('metric', 7)]),
-    'V4PayloadHeartbeat': (44, [('role', 0), ('peerCount', 1), ('rssi', 2), ('chanInfo', 3), ('uptimeSec', 4),
-                                ('freeHeap', 8), ('deviceName', 12)]),
+    # 1.0 step 8 (RC3): + bootCounter (BOOT 31's job), echoMsgId, linkRssi, reserved[3].
+    'V4PayloadHeartbeat': (56, [('role', 0), ('peerCount', 1), ('rssi', 2), ('chanInfo', 3), ('uptimeSec', 4),
+                                ('freeHeap', 8), ('deviceName', 12), ('bootCounter', 44), ('echoMsgId', 48),
+                                ('linkRssi', 52), ('reserved', 53)]),
     'V4PayloadPairBeacon': (36, [('role', 0), ('flags', 1), ('reserved', 2), ('deviceName', 4)]),
     'V4PayloadPairCtrl': (40, [('targetMac', 0), ('role', 6), ('reserved', 7), ('deviceName', 8)]),
     'V4PayloadPairRequest': (72, [('ctrl', 0), ('senderPub', 40)]),
@@ -194,7 +196,7 @@ FIXED_HEADER = {
     'V4PayloadFileData': 'FILE_DATA',
     'V4PayloadFsListReplyHeader': 'FS_LIST_REPLY', 'V4PayloadFsEntry': 'FS_LIST_REPLY',
 }
-TEXT_ONLY_FRAMES = ('SENSOR_ENVELOPE', 'TEXT', 'BOOT', 'CMD', 'USER_SYNC')
+TEXT_ONLY_FRAMES = ('SENSOR_ENVELOPE', 'TEXT', 'CMD', 'USER_SYNC')
 FIXED_MARK = '// Fixed header: cannot grow'
 
 # Sites whose limit follows from the group tag's length (System_ESPNow.cpp).
@@ -205,7 +207,6 @@ BUDGET_SITES = (
      r'payloadLen \+ ESPNOW_V4_BROADCAST_AUTH_TAG_LEN \+ sizeof\(EspNowV4Header\) > 250\) return;'),
     ('the relay wrap limit', r'innerLen > ESPNOW_V4_RELAY_MAX_INNER_FRAME\)'),
     ('the PEER_LIST receive limit', r'hdr\.entryCount > ESPNOW_V4_PEER_LIST_MAX_ENTRIES\) return ctx\.refuse\(\);'),
-    ('the signed BOOT limit', r'len <= ESPNOW_V4_MAX_BROADCAST_AUTHED_PLAINTEXT\)'),
 )
 
 failures: list[str] = []
@@ -396,7 +397,7 @@ CATCHUP_MINLEN = {'CATCHUP_LIST_REQ': 16, 'CATCHUP_LIST_RESP': 24, 'CATCHUP_READ
 EARMARK_FREE = (86, 87, 88, 89, 159)
 # ESP-NOW 1.0 step 2 (E20): numbers that were on the wire are retired forever;
 # earmarks that never were are released (free for a later frame).
-RETIRED = {130: 'SUBSCRIBE_UPDATE', 150: 'SENSOR_BROADCAST'}
+RETIRED = {31: 'BOOT', 130: 'SUBSCRIBE_UPDATE', 150: 'SENSOR_BROADCAST'}  # 31: step 8
 RELEASED = (2, 16, 17, 37, 38, 131, 133, 134, 135)
 RELEASED_NAMES = ('NACK', 'SESSION_AUTH', 'CAP_REQ', 'CAP_RESP', 'UNSUBSCRIBE_ALL', 'SUB_LIST', 'EVENT_SUB')
 

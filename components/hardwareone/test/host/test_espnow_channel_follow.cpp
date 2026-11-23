@@ -7,8 +7,11 @@
 // probes and plays the master's answers. F1-F23 follow the spec's case list;
 // F21-F23 are extra (stale stamps, a resumed sweep after a leak, the zero
 // default state); F24-F33 cover the 2026-11-19 review fixes and the mutants
-// the first suite let through.
+// the first suite let through. F30 is bench check B8 (ESP-NOW 1.0 step 8): a
+// master that cannot hear its worker backs off to the 10 s ceiling, so the
+// worker's 30 s silence clock never runs out.
 #include "System_ESPNow_ChannelFollowCore.h"
+#include "System_ESPNow_LinkCore.h"  // meshHeartbeatMinInterval: the master's back-off (B8)
 
 #include <cstdio>
 #include <cstring>
@@ -881,6 +884,53 @@ void f29Edges() {
 
 }  // namespace
 
+// F30 (B8, one-way link): the master never hears the worker, so its heartbeats
+// to the worker back off (meshHeartbeatMinInterval, System_ESPNow_LinkCore.h,
+// 5 s tick). The worker hears every one of them (group-signed: no session on a
+// one-way link) on the master's channel. With the 1.0 ceiling (10 s) the worker
+// never starts a sweep in 10 minutes; with the pre-1.0 back-off (30 s after
+// 5 min) it hunted once per master heartbeat.
+template <typename Interval>
+int b8Sweeps(uint32_t start, Interval interval) {
+  Rig r(6, start);
+  r.in.maxChannel = 13;
+  r.in.dwellMs = 150;
+  uint32_t lastSent = start;
+  uint32_t lastTick = start;
+  const uint32_t masterSilentSince = start;  // the master never hears the worker
+  int sweeps = 0;
+  Phase prev = Phase::Following;
+  for (uint32_t t = 0; t < 600000; t += kLap) {
+    r.now += kLap;
+    // The master's heartbeat tick: "5 s since the last one", seen on a loop
+    // lap, so a little over 5 s (the bench saw 30-35 s gaps at the old 30 s step).
+    if (r.now - lastTick > 5000) {
+      lastTick = r.now;
+      const uint32_t iv = interval(r.now - masterSilentSince);
+      if (iv == 0 || r.now - lastSent >= iv) {
+        lastSent = r.now;
+        r.hear(1, /*sealed=*/false, r.radio ? r.radio : 6, packChanInfo(6, false, false));
+      }
+    }
+    const Out o = r.step();
+    if (o.phase == Phase::Sweeping && prev != Phase::Sweeping) sweeps++;
+    prev = o.phase;
+  }
+  return sweeps;
+}
+
+void f30OneWayB8(uint32_t start) {
+  const int now10 = b8Sweeps(start, [](uint32_t silent) { return meshHeartbeatMinInterval(silent); });
+  CHECK(now10 == 0, "F30 [%08x] B8: no sweep in 10 min with the 10 s ceiling (%d)", start, now10);
+  const int before = b8Sweeps(start, [](uint32_t silent) -> uint32_t {
+    if (silent < 30000) return 0;
+    if (silent < 120000) return 10000;
+    if (silent < 300000) return 20000;
+    return 30000;
+  });
+  CHECK(before > 0, "F30 [%08x] B8: the pre-1.0 back-off made the worker hunt (%d sweeps)", start, before);
+}
+
 int main() {
   f1ChanInfo();
   f2SweepOrder();
@@ -917,6 +967,8 @@ int main() {
   f27ConfirmHolds();
   f28Timing();
   f29Edges();
+  f30OneWayB8(1000);
+  f30OneWayB8(0xFFFF0000u);
 
   if (gFailures) {
     std::printf("espnow_channel_follow_tests: %d failure(s) of %d checks\n", gFailures, gChecks);

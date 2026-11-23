@@ -146,6 +146,8 @@ def main():
     peer_types = '\n'.join([
         extract_block(header, 'enum class EspNowMeshRxKind') + ';',
         'template <size_t Capacity>\n' + one(header, 'class EspNowInlineText') + ';',
+        '#include "System_ESPNow_LinkCore.h"  // MeshLinkState (1.0 step 8; copied beside this unit)',
+        '#include "System_ESPNow_PeerRestartCore.h"  // the restart rules (copied beside this unit)',
         extract_block(header, 'struct MeshPeerHealth') + ';',
         extract_block(header, 'struct MeshPeerMeta') + ';',
         one(router, 'struct MeshRelayMetrics') + ';',
@@ -154,7 +156,7 @@ def main():
 
     # Duplicate rings: storage, then TTL + functions through v4_dedup_flush_origin.
     storage = source[source.index('// EspNowV4Header, V4PayloadCmdResp, V4PayloadFile* moved to System_ESPNow_Wire.h'):
-                     source.index('// Broadcast ACK tracking.')]
+                     source.index('static uint16_t v4_crc16_ccitt(const uint8_t* data, size_t len) {')]
     flush = one(source, 'static void v4_dedup_flush_origin(')
     start = source.index('static constexpr uint32_t V4_DEDUP_TTL_MS')
     dedup = storage + source[start:source.index(flush) + len(flush)]
@@ -266,6 +268,7 @@ def main():
                        ('// INSERT_SLOTS', '\n\n'.join(slots)),
                        ('// INSERT_POLICY', policy),
                        ('// INSERT_RELAY', '\n\n'.join(relay)),
+                       ('// INSERT_LINK_GLUE', one(source, 'static void meshLinkOnHeartbeat(')),
                        ('// INSERT_HEARTBEAT', one(source, 'static V4Verdict v4h_heartbeat(')),
                        ('// INSERT_HANDLER_STUBS', stubs),
                        ('// INSERT_TABLE', table + '\n' + size),
@@ -293,6 +296,8 @@ def main():
             (HERE.parents[1] / 'System_ESPNow_HandshakeCore.h').read_text())
         (unit.parent / 'System_ESPNow_GroupCore.h').write_text(
             (HERE.parents[1] / 'System_ESPNow_GroupCore.h').read_text())
+        for core in ('System_ESPNow_LinkCore.h', 'System_ESPNow_PeerStateCore.h', 'System_ESPNow_PeerRestartCore.h'):
+            (unit.parent / core).write_text((HERE.parents[1] / core).read_text())
         unit.write_text(harness)
         cmd = [a.cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror',
                '-Wno-unused-function', '-Wno-unused-parameter',
@@ -329,10 +334,31 @@ def main():
     advert = extract_block(read('System_ESPNow_Router.cpp'), 'void meshRouterIngestAdvert(')
     if advert.count('espnowRevokedMac(') != 2:
         failures.append('meshRouterIngestAdvert does not refuse revoked advertisers and revoked destinations')
-    heartbeat = extract_block(source[source.rindex('bool v4_broadcast_heartbeat(uint16_t flags'):],
-                              'bool v4_broadcast_heartbeat(uint16_t flags')
+    heartbeat = extract_block(source[source.rindex('static int meshSendHeartbeats(const V4PayloadHeartbeat& base)'):],
+                              'static int meshSendHeartbeats(const V4PayloadHeartbeat& base)')
     if 'espnowRevokedMac(gMeshPeers[i].mac)' not in heartbeat:
-        failures.append('v4_broadcast_heartbeat may send a heartbeat to a revoked device')
+        failures.append('meshSendHeartbeats may send a heartbeat to a revoked device')
+    # 1.0 step 8 (RC3), the parts outside this harness: the periodic heartbeat
+    # asks no ACK and goes sealed when the session is up; the broadcast ACK
+    # tracking is gone; the router installs adverts only from a two-way
+    # neighbour; the radio chokepoint goes direct only on a two-way link.
+    if 'v4SendHeartbeatTo(mac, hb, msgId, /*ackReq=*/false)' not in heartbeat:
+        failures.append('meshSendHeartbeats asks an ACK or does not send through v4SendHeartbeatTo')
+    send_to = extract_block(source[source.rindex('static bool v4SendHeartbeatTo('):], 'static bool v4SendHeartbeatTo(')
+    if 'espnowSessionUp(mac)' not in send_to or 'espnowtx::sendAead(mac, ESPNOW_V4_TYPE_HEARTBEAT' not in send_to:
+        failures.append('v4SendHeartbeatTo does not seal the heartbeat when the session is up')
+    for gone in ('BroadcastTracker', 'broadcast_tracker_', 'cmd_espnow_broadcaststats'):
+        if gone in source:
+            failures.append(f'{gone} is still in System_ESPNow.cpp (removed in 1.0 step 8)')
+    if 'if (!neighbourAlive(fromMac, nowMs)) return;' not in advert:
+        failures.append('meshRouterIngestAdvert installs an advert from a neighbour that is not two-way')
+    alive = extract_block(read('System_ESPNow_Router.cpp'), 'bool neighbourAlive(')
+    if 'meshPeerLinkOf(getMeshPeerHealth(mac, false)) == MeshLink::TwoWay' not in alive:
+        failures.append('neighbourAlive does not ask for a two-way link')
+    emit = extract_block(source[source.rindex('static bool v4_radio_emit(const uint8_t* dst'):],
+                         'static bool v4_radio_emit(const uint8_t* dst')
+    if 'meshPeerLinkFor(dst) == MeshLink::TwoWay' not in emit or 'everHeardDirect' in emit:
+        failures.append('v4_radio_emit goes direct on something other than a two-way link')
     # The 1.0 ACK frame (step 5a), the parts outside this harness: the plaintext
     # ACK senders are gone, the ACK builder seals with the REKEYING exception or
     # group-tags, no frame but the handshake is ever sent plaintext, the
