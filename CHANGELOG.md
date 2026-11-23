@@ -44,6 +44,35 @@ Host-tested and built; not run on a device.
   no longer has its first frames dropped as duplicates of its numbers from before the restart.
   Devices with this change and devices without it should be reflashed together.
 
+### Added (ESP-NOW 1.0 revocation)
+Host-tested and built; not run on a device.
+- **An unpaired device stays out.** A device stores another device's key only while that device is
+  in its device list; a key exchange from any other device is answered "not accepted" and leaves
+  nothing behind (no stored key, no radio peer). After `espnowpairsecure` the other device's first
+  key is accepted for 10 minutes. `espnowunpair` saves the device list before it deletes the key,
+  and also clears a master or backup pin that names the device's key, `espnowmeshmaster` when it
+  names the device, the channel-follow master, the sensor leases it holds and a pending pair
+  request. At start-up a stored key whose device is not in the device list is removed (not when the
+  device list was damaged or not read). `espnowunpair <mac>` also removes what a device no longer in
+  the list left behind.
+- **`espnowrevoke <name|mac>` (super admin)** unpairs a device and refuses it by its address and its
+  key until `espnowunrevoke <name|mac|keyId>` (super admin; `--all` lifts every revoke): its frames
+  are dropped before anything else (also when another device relays them), it gets no heartbeat,
+  health slot, route or answer, and pairing it is refused (`Error: <name> was revoked on <date>. Run
+  espnowunrevoke <name> first.`). `espnowrevoked [json]` (admin) lists the revoked devices and the
+  keys stored on this device. The list (32 devices) is kept in `/system/espnow/revoked.json`; a file
+  that cannot be read refuses new keys and pairing instead of starting empty. For a lost or stolen
+  device, revoke it on every remaining device, then change the passphrase of every mesh it knew
+  (USERGUIDE, "Unpairing and revoking a device").
+- `espnowstats` counts the dropped frames (`RX Revoked Drops`, JSON `rxRevokedDrops`).
+- **Wire change:** PAIR_REQUEST carries the requester's key (40 -> 72 bytes), so a request from a
+  revoked key is refused whatever address it comes from, and the accept prompt shows its keyId.
+  KEY_EX_CONFIRM status 3 means "not accepted". Reflash devices together.
+
+### Removed (ESP-NOW 1.0 revocation)
+- `espnowforget` is gone: `espnowunpair` (and the start-up check) cover it. The warnings that named it
+  now say "run espnowunpair, then pair again on both sides".
+
 ### Changed (logs on the SD card are sealed)
 Host-tested and built; not run on a device or with a card.
 - **Logs go to the SD card first.** While a card takes writes, has more than 8 MB free and the

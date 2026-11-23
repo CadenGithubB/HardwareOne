@@ -614,6 +614,20 @@ Every pairing is encrypted: both devices need the same mesh passphrase first (`e
 
 Once paired, devices appear in each other's peer list.
 
+A device stores another device's key only when that device is in its own device list. A key exchange from a device that is not listed (or was unpaired) is answered "not accepted" and nothing is stored; the other side shows `not accepted - pair from both sides`. After `espnowpairsecure`, the other device's first key is accepted for 10 minutes; after that, run `espnowpairsecure` again. When a key is stored, the log shows its keyId (the first 16 hex digits of the key).
+
+### Unpairing and revoking a device
+- **Unpair** (`espnowunpair <name_or_mac>`, super admin): this device forgets the other one: its entry in the device list, its key, its session, its cached files and manifest, a master pin that names its key, and the sensor leases it holds here. It does not come back by itself: pairing it again needs a pairing action (`espnowpairsecure`, or discovery and accept). If the other device still lists this one, running `espnowpairsecure` here alone pairs again. `espnowunpair <mac>` also removes what a device that is no longer in the list left behind (a stored key the start-up log names).
+- **Revoke** (`espnowrevoke <name_or_mac>`, super admin): unpair, and also drop everything the device sends (also when another device relays it) and refuse it, by its address and by its key, until `espnowunrevoke <name|mac|keyId>` (super admin). Pairing a revoked device says `Error: <name> was revoked on <date>. Run espnowunrevoke <name> first.`; a pairing request from it is refused without a prompt. The list holds up to 32 devices: when it is full, `espnowrevoke` still unpairs and says so, and asks you to lift an old entry first.
+- `espnowrevoked` (admin) lists the revoked devices (name, keyId, address, date) and every key stored on this device, with whether the device list still has it. `espnowrevoked json` gives the same as JSON.
+
+If the revoked list file (`/system/espnow/revoked.json`) is there but cannot be read, the device refuses new keys and every pairing (it does not start with an empty list, which would lift every revoke) and says so at start-up. `espnowunrevoke --all` moves the file aside and starts an empty list; revoke those devices again afterwards.
+
+**A lost or stolen device.**
+1. On each remaining device: `espnowrevoke <device>`. Its frames are dropped and it cannot be paired again by mistake.
+2. On each remaining device: `espnowsetpassphrase <mesh> <new passphrase>` for **every mesh the lost device knew**. This step is required: until it is done, the lost device (which holds the old passphrase) can still be heard and relayed by devices that did not revoke it.
+3. Devices with the new passphrase reconnect by themselves; nothing needs to be paired again.
+
 ### Radio channel
 Devices only hear each other on the same radio channel. `espnowchannel` shows the preference, the radio's actual channel, the channel it should be on and a check; `espnowchannel <1-13>` pins a channel for when the device is not joined to Wi-Fi, `espnowchannel auto` (the default) lets the device choose, and `espnowchannel resync` puts the radio back on the right channel now.
 
@@ -805,7 +819,7 @@ espnowroomcmd Kitchen admin <pass> status
 ```
 A group command says how many devices it left out: `Skipped 1 device(s) whose room is pending (announced, not accepted here): Lamp. Accept with 'espnowgroupaccept <name_or_mac|all>'`. `espnowtagcmd` takes one tag; a list such as `light,door` is refused, run the command once per tag. Commands sent over MQTT to `room:<name>` or `tag:<name>` follow the same rules.
 
-What was accepted is stored on this device and survives a restart. It is cleared for a peer when the peer is unpaired, when `espnowforget` is run for it, and when a different identity key appears at its address. The lists that show a peer's room (`espnowdevices`, `espnowrooms`, `espnowfind`, the web Metadata tab, the OLED and glasses device lists) show the announced room and mark it (`[pending: ...]`, `(not accepted)` or `?`) while it is not accepted; the web Metadata tab has an **Accept** button.
+What was accepted is stored on this device and survives a restart. It is cleared for a peer when the peer is unpaired or revoked, and when a different identity key appears at its address. The lists that show a peer's room (`espnowdevices`, `espnowrooms`, `espnowfind`, the web Metadata tab, the OLED and glasses device lists) show the announced room and mark it (`[pending: ...]`, `(not accepted)` or `?`) while it is not accepted; the web Metadata tab has an **Accept** button.
 
 ### File Transfer
 Files can be transferred between paired devices via the web UI or CLI (`espnowsendfile <name_or_mac> "<filepath>"`). Used for syncing automations, settings, and manifests.
@@ -1409,6 +1423,9 @@ espnowstats                     - Show message/error counters (RX Length Drops: 
 espnowlist                      - List all paired peers
 espnowpairrequest <mac_or_name> - Ask a discovered device to pair (it accepts)
 espnowunpair <name_or_mac>      - Remove a paired peer
+espnowrevoke <name_or_mac>      - Unpair and refuse a device (lost or stolen), then change the passphrase
+espnowunrevoke <name|mac|keyId> - Lift a revoke ('--all' lifts every one)
+espnowrevoked [json]            - List revoked devices and the keys stored here
 espnowsend <name_or_mac> <msg>  - Send a text message (relayed if the peer is out of range)
 espnowbroadcast <message>       - Broadcast to the whole mesh (flooded, up to the TTL)
 espnowsendfile <name_or_mac> "<path>"      - Send a file to a peer

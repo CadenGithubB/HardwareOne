@@ -221,11 +221,12 @@ removed `espnowenabled` switch. `running` says whether ESP-NOW runs now.
 | `espnowgroups` (or `espnowgroups json <name_or_mac>`; admin) | `{"schema":1,"peers":[{"mac","name","room","tags","acceptedRoom","acceptedTags","pendingRoom","pendingTags"}],"count","pendingCount","notShown"?}` |
 | `espnowgroupaccept json <name_or_mac\|all>` / `espnowgroupdrop json <name_or_mac\|all>` (admin; `json` leads) | `{"schema":1,"peers":[{"mac","name","room","tags","acceptedRoom","acceptedTags","pendingRoom","pendingTags","changed"}],"ok","count","changed","saved","error"?,"notShown"?}` |
 | `espnowsessions` | `{"schema":1,"selfCaps":[...],"sessions":[{"slot","mac","meshId","sessionId","dir","state","ageMs","txSeq","rxHwm","caps"?,"capsWord"?}],"more"?}` - `meshId` is the mesh slot index. `selfCaps` / `caps`: the names of the capability bits set in this device's / the peer's session word (`bond`, `remote_fs`, `file_receive`, `sensor_send`, `collect`, `relay_forward`, `time_master`, `session_unknown`, and the 1.x names `backlog_serve`, `files_serve`, which a 1.0 build never sets but shows when a peer does; a bit with no name is left out of the list and kept in `capsWord`); `caps` and `capsWord` (the whole 32-bit word, reserved bits included) only for an ACTIVE or REKEY session. `more`?: present only when the list did not fit the reply (about 13 sessions with every capability set); the number of sessions left out at the end |
+| `espnowrevoked json` (admin) | `{"schema":1,"locked","max","revoked":[{"name","mac","keyId","meshSlot","revokedEpochMs"}],"identities":[{"mac","name","keyId","meshSlot","inDeviceList"}]}` - `locked`: revoked.json is there but cannot be read (new keys and pairing are refused). `keyId`: the first 16 hex digits of the key, `null` for a device revoked by address with no stored key. `revokedEpochMs`: UTC epoch ms, `null` when the clock was not set. `identities`: every peer key stored on this device; `name` is `""` and `inDeviceList` false for one whose device is not in the device list. A reply that does not fit is `{"schema":1,"ok":false,"error":"too large"}` |
 | `espnowrouterstats` | `{"schema":1,"messagesSent","messagesReceived","messagesFailed","v4FragTx","v4FragRx","reassembled","reassemblyGc","reassemblyTimeouts","nextMessageId"}` |
 | `espnowidentity` | `{"schema":1,"valid","mac","pub","createdAtSec","regenCount"}` |
 | `espnowmeshmetrics` | `{"schema":1,"mode","activePeers","ttl","adaptiveTtl"}` |
 | `ring status` | `{"schema":1,"connected","name","mtu","rx","upMs","scanFound"}` (no address) |
-| `espnowmeshstatus` / `espnowlist` / `espnowstats` | already JSON (pre-existing). `espnowstats json` adds `rxLengthDrops`, `rxMustUnderstandDrops`, `rxUnknownMeshIdDrops` and, once it is nonzero, `rxUnknownMeshIdLast` (the last mesh id dropped) and `rxUnknownMeshIdLastMac` |
+| `espnowmeshstatus` / `espnowlist` / `espnowstats` | already JSON (pre-existing). `espnowstats json` adds `rxLengthDrops`, `rxMustUnderstandDrops`, `rxRevokedDrops` (frames from a revoked radio source or relayed from a revoked origin), `rxUnknownMeshIdDrops` and, once it is nonzero, `rxUnknownMeshIdLast` (the last mesh id dropped) and `rxUnknownMeshIdLastMac` |
 
 ### ESP-NOW peer metadata is pull-only
 - **Self** = `espnowdeviceinfo json`; **peers** = `espnowdevices json`.
@@ -366,7 +367,7 @@ feature is compiled out). Treat accordingly.
   `g2info` / `g2protostats` / `g2sensors`.
 - **Edge data not yet covered** (ask if you need them): `imuactions` (IMU action
   detection), `sensorinfo <name>` (static chip catalog).
-- **Actions / setters / help:** `banuser`, `espnowforget`, `blestream`, `bondstream`,
+- **Actions / setters / help:** `banuser`, `espnowrevoke`, `espnowunrevoke`, `blestream`, `bondstream`,
   `oleddefaultmode`, `g2` toggles, module summaries.
 
 ---

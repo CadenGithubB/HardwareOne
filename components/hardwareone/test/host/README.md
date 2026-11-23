@@ -4571,6 +4571,32 @@ frame is sent under `EspNowTxGuard`. It also runs the espnow tick's REKEY auto-t
 `espnowRekeyInitiate` would refuse gets no log line per tick. `--source-dir <component-directory>` replays the former stranded-REKEYING
 behaviour. It does not qualify libsodium primitives or radio timing.
 
+## ESP-NOW revocation
+
+ESP-NOW 1.0 step 3 (design section 5.1 A + B). `espnow_revoked_core_tests` compiles
+`System_ESPNow_RevokedCore.h` as it is, with the vendored ArduinoJson: the revoked list by MAC and by key under
+any MAC ("no key" never matches an all-zero key), a full list of 32, unrevoke by name, MAC or keyId prefix;
+`revoked.json` written and read back the same (schema 1, lowercase hex), and nine kinds of unreadable file
+(truncated, not JSON, another schema, no list, a bad MAC or key, more than 32 entries) that lock the list (fail
+closed) instead of reading as empty; rule A (`espnowrevoke::admit`: an identity only for a registry entry, a
+first key only inside its first-key window, no answer to a revoked MAC or key, nothing new while the list is
+locked); the boot identity check allowed after an Ok load or with no registry file, and skipped for a
+quarantined, partial or unread registry; the 10-minute first-key window across the millis() wrap and across a
+restart.
+
+The handlers that use it are run by their own suites: `espnow_keyex_hello` (K14-K19: a HELLO from a non-registry
+MAC stores nothing, is answered KEY_EX_CONFIRM status 3 and leaves no radio peer; a revoked key is refused under any
+MAC with no answer and the waiting pairsecure entry is rolled back; the first-key window; a REPLY under the same
+rules; a locked list), `espnow_rx_frontend` (testRevokedDrops: gate 1 drops a frame from a revoked radio source
+before ACK, unwrap and dispatch; gate 2 drops a frame a member relays from a revoked origin before the flood relay;
+no routed delivery from, and no envelope to, a revoked device; no health or metadata slot for a revoked MAC; source
+checks that SESSION_UNKNOWN goes to registry peers only, the router takes no advert from and no route to a revoked
+device, and the heartbeat skips one), `espnow_session_rekey` (C29: the three session handlers drop a revoked
+sender, or one with no stored identity, on espnow_task before anything is queued to cmd_exec), `espnow_peer_files`
+(the unpair teardown's write order and stores, `espnowrevoke` writing the list first) and
+`espnow_command_privileges` (`espnowrevoke` and `espnowunrevoke` super admin, `espnowrevoked` admin, `espnowforget`
+gone).
+
 ## ESP-NOW session handshake freshness
 
 `espnow_session_rekey` drives the production SESSION_OPEN / SESSION_CONFIRM / SESSION_REKEY handlers and
@@ -7438,7 +7464,7 @@ the cache accessors over the shared in-memory filesystem: a readable identity lo
 directory counts as read; an unmounted filesystem or a peers path that will not open does not; folders without an
 `identity.json` are skipped; an `identity.json` that stays out of the cache (unreadable, another address inside, a
 17th when the 16 slots are full) leaves `peerIdentitiesLoaded()` false with a warning that names the address and
-`espnowforget`, while the readable ones still load and nothing is written past the cache; a forget whose file will
+`espnowunpair` (which removes it; `espnowforget` is gone since ESP-NOW 1.0 step 3), while the readable ones still load and nothing is written past the cache; a forget whose file will
 not go away marks the cache incomplete; the next walk recomputes the mark. An identity whose `meshId` is not a slot
 of this firmware (4 and up, too large for a byte, negative, text, missing) stays out of the cache like an
 unreadable one. Only a folder spelled as `macToPathToken` writes it is a peer folder: a lower- or mixed-case twin
@@ -7457,10 +7483,14 @@ firmware keep it until both are unpaired; folders that cannot be listed keep it)
 the hash it named before, so the cache holds one file per peer. A manifest the bond sync finds already cached is
 recorded for that peer as well, so a second device on the same firmware keeps it, and one cached before the
 references is named at the next sync. A file that will not go is reported. The reply line names what went and where
-received files are, within its buffer. Source checks pin the order inside `cmd_espnow_unpair`, keep `espnowforget`
-away from the caches, record a reference only for a manifest that reached the cache, and route the sync's cache
+received files are, within its buffer. Source checks pin the order inside the unpair teardown
+(`espnowUnpairTeardown`, shared by `espnowunpair` and `espnowrevoke`), that `espnowforget` is gone, the write order
+(the registry is saved before the identity is deleted), that the teardown clears every other store (the named master
+and backup pins, `meshMasterMac` and the channel-follow master while the identity still holds the key, the sensor
+leases, the candidate list, a pending pair request either way, the re-key window, the slots) and that
+`espnowrevoke` writes the revoked list before the teardown; they record a reference only for a manifest that reached the cache, and route the sync's cache
 lookup through `manifestCacheHit`. 40 of its 72 checks fail on cca36fa9. Two more source checks pin that
-`cmd_espnow_unpair` ends the bond with the partner (compared with the partner setting itself) before it deletes the
+the unpair teardown ends the bond with the partner (compared with the partner setting itself) before it deletes the
 peer, and calls off its key exchange and the queued frames before the identity goes.
 
 `espnow_start_order` runs the production slot 0 bootstrap and its `PrimaryMeshBootstrap` guard on the production
@@ -7710,8 +7740,8 @@ since 2026-11-18 a member whose frame waits for its session is listed "queued un
 counts them ("(1 of them queued until their session opens)") and, when none went out yet, reads "Queued '<cmd>'
 for N device(s) in <room> until their sessions open".
 Source rules: `processMetadata` updates the registry record before it looks for a cache slot, the registry writer and reader call the two field
-functions, every place that fills a new record starts it empty, unpair removes the record, `espnowforget`,
-`espnowregenidentity` and both KEY_EX handlers clear the acceptance, `groupCommandRun` sends in one place after the
+functions, every place that fills a new record starts it empty, the unpair teardown removes the record, forgetting an identity
+(`espnowForgetPeerCrypto`), `espnowregenidentity` and both KEY_EX handlers clear the acceptance, `groupCommandRun` sends in one place after the
 membership check and does not read the mesh cache, and the five commands are admin rows.
 
 `espnow_metadata_text` and `espnow_rx_frontend` compile `processMetadata` with the announcement functions and the
