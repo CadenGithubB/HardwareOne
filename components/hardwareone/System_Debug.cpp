@@ -3157,8 +3157,7 @@ void logTimeSyncedMarkerIfReady(const char* source) {
     return;
   }
 
-  time_t t = time(nullptr);
-  if (t <= 0) {
+  if (!Clock::isSynced()) {
     return;
   }
 

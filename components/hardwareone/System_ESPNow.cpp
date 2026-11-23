@@ -9518,7 +9518,7 @@ static void captureEspNowFrame(const char* direction, const uint8_t* peerMac,
   }
 
   time_t now = time(nullptr);
-  if (now <= 0) now = (time_t)(millis() / 1000);  // fallback if NTP not synced yet
+  if (!Clock::isValidEpoch(now)) now = (time_t)(millis() / 1000);  // uptime seconds while the clock is not set
 
   // Resolve peer name (meta first, paired registry fallback).
   String peerName = peerMac ? getEspNowDeviceName(peerMac) : String();

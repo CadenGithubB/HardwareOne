@@ -21,7 +21,6 @@ struct WifiNetwork {
   String password;
   int priority = 1;
   bool hidden = false;
-  uint32_t lastConnected = 0;
   uint32_t id = 0;
 };
 
@@ -71,7 +70,6 @@ bool copyRecord(const WifiNetwork& from, WifiNetwork& to, bool includePassword) 
   if (includePassword) to.password = from.password;
   to.priority = from.priority;
   to.hidden = from.hidden;
-  to.lastConnected = from.lastConnected;
   to.id = from.id;
   return to.ssid == from.ssid && (!includePassword || to.password == from.password);
 }
@@ -153,7 +151,6 @@ bool wifiNetworkSnapshot(WifiNetworkSnapshot& out) {
     copy.id = network.id;
     copy.priority = network.priority;
     copy.hidden = network.hidden;
-    copy.lastConnected = network.lastConnected;
   }
   out.count = sCount;
   return true;
@@ -323,12 +320,6 @@ bool wifiNetworkConnectionBySsid(const String& ssid, WifiConnectionTarget& out) 
   return guard && copyConnectionLocked(findBySsidLocked(ssid), out);
 }
 
-void wifiNetworkMarkConnected(uint32_t id, uint32_t when) {
-  NetworkGuard guard;
-  const int index = guard ? findByIdLocked(id) : -1;
-  if (index >= 0) sNetworks[index].lastConnected = when;
-}
-
 bool wifiNetworksWriteJson(JsonDocument& doc, bool excludePasswords) {
   WifiNetwork saved[MAX_WIFI_NETWORKS];
   ScrubOnExit scrubSaved{saved, MAX_WIFI_NETWORKS};  // Plaintext copies, all paths.
@@ -369,7 +360,6 @@ bool wifiNetworksWriteJson(JsonDocument& doc, bool excludePasswords) {
     }
     net["priority"] = saved[i].priority;
     net["hidden"] = saved[i].hidden;
-    net["lastConnected"] = saved[i].lastConnected;
   }
   return !doc.overflowed();
 }
@@ -403,7 +393,6 @@ unsigned wifiNetworksReadJson(const JsonDocument& doc) {
     }
     record.priority = net["priority"] | 99;
     record.hidden = net["hidden"] | false;
-    record.lastConnected = net["lastConnected"] | 0;
   }
   {
     NetworkGuard guard;

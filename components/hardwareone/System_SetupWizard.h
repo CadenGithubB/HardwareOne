@@ -10,6 +10,7 @@
 
 #include <Arduino.h>
 #include "System_BuildConfig.h"  // feature flags (ENABLE_WIFI, ...) used below
+#include "System_ClockCore.h"    // clockcore::TimezoneEntry: the one timezone table
 
 // ============================================================================
 // Wizard Pages and State
@@ -75,12 +76,9 @@ struct WizardMenuItem {
   uint16_t heapKb;
 };
 
-// Timezone entry
-struct TimezoneEntry {
-  const char* abbrev;
-  const char* name;
-  int offsetMinutes;
-};
+// A timezone entry: the clock's one table (System_ClockCore.h), with the
+// fields abbrev, place, offsetMinutes and daylight.
+using TimezoneEntry = clockcore::TimezoneEntry;
 
 // "Enable feature -> pick one of N modes" sub-choice, shared by BOTH wizard
 // engines (the blocking runSetupWizard FTS path and the non-blocking CLI-mode

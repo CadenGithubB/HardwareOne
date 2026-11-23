@@ -145,10 +145,9 @@ def generated(component: Path) -> str:
     # System_Clock's "is this a real epoch", which the due cache and the pass ask.
     # It goes in as ClockOwner; the harness's Clock::isValidEpoch asks it
     # unless a case counts small numbers as a set clock (clockForcedSet).
+    # (The bound itself is System_ClockCore.h's, the device-free rules.)
     clock = (component / "System_Clock.cpp").read_text()
-    threshold = re.search(r"^static constexpr int kSyncedTmYearThreshold = \d+;", clock, re.M)
-    require(threshold is not None, "System_Clock.cpp holds the year threshold")
-    clock_owner = ("namespace ClockOwner {\n" + threshold.group(0) + "\n" +
+    clock_owner = ('#include "System_ClockCore.h"\nnamespace ClockOwner {\n' +
                    extract_block(clock, "bool isValidEpoch(time_t t)") + "\n}  // namespace ClockOwner")
     require("automationVolatileSet(" in reschedule and "if (notify) notifyAutomationScheduler();" in reschedule,
             "rescheduleAfterFire keeps short intervals in RAM and notifies without a write")
@@ -207,6 +206,7 @@ def main() -> None:
              "-Wno-sign-compare", "-DARDUINOJSON_ENABLE_ARDUINO_STRING=1",
              "-DARDUINOJSON_ENABLE_ARDUINO_STREAM=0", "-DARDUINOJSON_ENABLE_ARDUINO_PRINT=0",
              "-DARDUINOJSON_ENABLE_PROGMEM=0", "-I", str(HERE / "web_batch_stubs"),
+             "-I", str(component), "-I", str(COMPONENT),
              "-I", str(COMPONENT.parent / "hardwareone_libs/ArduinoJson/src")]
     if args.sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-g"]

@@ -887,7 +887,8 @@ static void wizardMode_onExit(void* /*ud*/) {
     if (applied) {
       broadcastOutput("");
       broadcastOutput("Feature configuration complete.");
-      broadcastOutput(String("Timezone: ") + sWizard.result.timezoneAbbrev);
+      // The same line as the first-time wizard prints (clockcore::kTimezoneDstNote).
+      broadcastOutput(String("Timezone: ") + sWizard.result.timezoneAbbrev + " (no automatic daylight saving)");
     }
   } else {
     broadcastOutput("Feature setup cancelled. No changes saved.");

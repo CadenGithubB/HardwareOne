@@ -73,7 +73,7 @@ static auto dispatchWifi = unexpectedDispatch;
                       "static CliModeInputResult dispatchModePage("),
         extract_block(mode, "static CliModeInputResult wizardMode_onInput("),
     ])
-    return ('#include "System_BuildConfig.h"\n' + unit + adapter_types + adapter_boundaries + adapter_code +
+    return ('#include "System_BuildConfig.h"\n#include "System_ClockCore.h"\n' + unit + adapter_types + adapter_boundaries + adapter_code +
             (HERE / "setup_menu_layout_harness.cpp").read_text())
 
 

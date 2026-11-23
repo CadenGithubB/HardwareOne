@@ -1572,7 +1572,7 @@ static void rebuildAutomationsCache() {
               strcmp(t["type"] | "", "interval") == 0) {
             const uint32_t intervalMs = t["intervalMs"] | uint32_t(0);
             na = clockSet ? automationVolatileNextAt(gAutomationsCache[n].id, (uint8_t)slot, intervalMs,
-                                                     na, now, now > 0)
+                                                     na, now, clockSet)
                           : automationUptimeIntervalAt(gAutomationsCache[n].id, (uint8_t)slot,
                                                        intervalMs, upNow);
           } else if (!clockSet) {
@@ -2723,8 +2723,10 @@ const char* cmd_automation_add(const String& argsInput) {
   // Compute initial nextAt for a given trigger body (wraps into a temporary
   // automation object so computeNextRunTime can parse it).
   auto computeInitialNextAt = [&](const String& body) -> time_t {
+    // No next run without a set clock: time() then counts up from 1970, and
+    // a next run computed from it would be stored as a date.
     time_t now = time(nullptr);
-    if (now <= 0) return 0;
+    if (!Clock::isValidEpoch(now)) return 0;
     String tmp = "{\"triggers\":[{\n" + body + "\n    }]}";
     return computeNextRunTime(tmp.c_str(), now);
   };
@@ -3508,7 +3510,9 @@ const char* cmd_automation(const String& argsInput) {
     }
   } else if (subCmd == "recompute") {
     time_t now = time(nullptr);
-    if (now <= 0) return "Error: no valid system time for recompute";
+    if (!Clock::isValidEpoch(now)) {
+      return "Error: the clock is not set, so next run times cannot be recomputed. Set it with NTP or 'timeset' and retry.";
+    }
 
     int skipped = 0;
     const int rewritten = automationRecomputeAllClockTriggers(now, &skipped);
@@ -3734,8 +3738,9 @@ static int triggersFromJson(const char* automationJson, Trigger* out, int maxCou
                        : tmp.type == Trigger::MANUAL ? automationUptimeArmedAt(id, tmp.slot)
                                                      : 0;
         } else if (tmp.type == Trigger::INTERVAL) {
+          // Not on uptime here, so `now` is the wall clock and it is set.
           tmp.nextAt = automationVolatileNextAt(id, tmp.slot, tmp.intervalMs, tmp.nextAt,
-                                                now, now > 0);
+                                                now, !onUptime);
         }
       } else {
         tmp.slot = 255;  // never matches a RAM entry

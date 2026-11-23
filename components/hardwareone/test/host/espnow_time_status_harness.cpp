@@ -132,14 +132,17 @@ static bool mtLastSetAgo(uint32_t* agoSeconds) {
   if (agoSeconds) *agoSeconds = (gUptimeMs - gLastStepUptimeMs) / 1000;
   return true;
 }
-static void mtSetClock(int64_t epochMs) {
-  // settimeofday, then Clock::clockStepped(Clock::SYNC_MESH, before).
+static bool gRefuseMeshStep = false;     // Clock::step answers RefusedOutranked
+static bool mtSetClock(int64_t epochMs, uint8_t wireSource) {
+  // Clock::step(SYNC_MESH or SYNC_MESH_NTP, ...): settimeofday, then the chores.
+  if (gRefuseMeshStep) return false;
   gMeshStepBeforeMs = gClockMs;
   gClockMs = epochMs;
-  gSource = meshtime::OwnSource::Mesh;
+  gSource = meshtime::frameClockSource(wireSource);
   gStepSerial++;
   gLastStepUptimeMs = gUptimeMs;
   gMeshSteps++;
+  return true;
 }
 static void mtFormatLocal(int64_t epochMs, char* out, size_t cap) {
   std::snprintf(out, cap, "epoch %lld", (long long)(epochMs / 1000));
@@ -306,13 +309,13 @@ static void testFollower() {
   check(gMeshSteps == 1, "one step through the chokepoint (clockStepped with the mesh source)");
   check(gClockMs == kT0 + 40, "the clock is the frame's time plus its wait");
   check(gMeshStepBeforeMs < 1000000, "the step was told the clock from before it");
-  check(gSource == meshtime::OwnSource::Mesh, "the source is mesh");
+  check(gSource == meshtime::OwnSource::MeshNtp, "the source is mesh time backed by NTP (the master's source is ntp)");
   check(gConsole.size() == 1 && has(gConsole[0], "Clock set from mesh time") && has(gConsole[0], "from hub") &&
         has(gConsole[0], "its source: ntp"), "one console line names the sender and its source");
   espnowMeshTimeApplyTick();
   check(gMeshSteps == 1, "a frame is applied once");
   std::string s = status();
-  check(has(s, "This device's clock: set, from mesh, last set 0 s ago"), "status: set, from mesh");
+  check(has(s, "This device's clock: set, from mesh-ntp, last set 0 s ago"), "status: set, from mesh-ntp");
   check(has(s, "Role: worker. Takes time from the master named on this device when it has no better source"),
         "status: role worker");
   check(has(s, "Last time frame: 0 s ago from hub (its source: ntp). Applied."), "status: last frame applied");
@@ -322,8 +325,8 @@ static void testFollower() {
   check(has(s, "last set 42 s ago") && has(s, "Last time frame: 42 s ago"), "status counts from the step, not from boot");
   std::string j = status("json");
   check(has(j, "\"schema\":1,\"meshTime\":true,\"role\":\"worker\",\"masterNamed\":true,\"clockSet\":true,"
-               "\"clockSource\":\"mesh\",\"clockSetAgoS\":42"),
-        "json: clock set from mesh, 42 s ago");
+               "\"clockSource\":\"mesh-ntp\",\"clockSetAgoS\":42"),
+        "json: clock set from mesh-ntp, 42 s ago");
   check(has(j, "\"sends\":false,\"sendsWhyNot\":\"not_master\""), "json: a worker does not send");
   check(has(j, "\"lastFrame\":{\"mac\":\"AA:BB:CC:00:00:01\",\"name\":\"hub\",\"agoS\":42,\"source\":\"ntp\",\"sinceSetMin\":3,"
                "\"result\":\"applied\",\"differenceS\":0}"), "json: the last frame");
@@ -347,18 +350,64 @@ static void testFollower() {
   check(gMeshSteps == before, "a short TIME_SYNC payload sets nothing");
   check(has(status(), "1 refused"), "and is counted as refused");
 
-  // A better source of its own: the frame is not used.
-  for (meshtime::OwnSource source : { meshtime::OwnSource::Rtc, meshtime::OwnSource::Ntp, meshtime::OwnSource::Manual,
-                                      meshtime::OwnSource::Cm5 }) {
+  // A better source of its own: the frame is not used. The clock's rank
+  // table decides: this device's own NTP and a manual time outrank a master
+  // whose time is from NTP; the CM5, the chip and the ring outrank any other
+  // master's time.
+  struct Better { meshtime::OwnSource own; uint8_t frameSource; };
+  for (const Better& b : { Better{ meshtime::OwnSource::Ntp, meshtime::kSrcNtp },
+                           Better{ meshtime::OwnSource::Manual, meshtime::kSrcNtp },
+                           Better{ meshtime::OwnSource::Ntp, meshtime::kSrcRtc },
+                           Better{ meshtime::OwnSource::Manual, meshtime::kSrcManual },
+                           Better{ meshtime::OwnSource::Cm5, meshtime::kSrcRtc },
+                           Better{ meshtime::OwnSource::Rtc, meshtime::kSrcManual },
+                           Better{ meshtime::OwnSource::Ring, meshtime::kSrcCm5 } }) {
     resetAll();
     addPeer(kHub, "hub", true);
-    otherSourceSets(source, kT0);
-    receive(kHub, kT0 + 120000);
+    otherSourceSets(b.own, kT0);
+    receive(kHub, kT0 + 120000, b.frameSource);
     espnowMeshTimeApplyTick();
     check(gMeshSteps == 0 && gClockMs == kT0, "a device with a better source ignores mesh time");
     check(has(status(), "Not used: this device has a better source ("), "status says which source is better");
     check(has(status("json"), "\"result\":\"ignored_better_source\",\"differenceS\":120"), "json: ignored_better_source");
   }
+  // A master whose time is from NTP replaces the CM5's and the chip's time.
+  for (meshtime::OwnSource own : { meshtime::OwnSource::Cm5, meshtime::OwnSource::Rtc }) {
+    resetAll();
+    addPeer(kHub, "hub", true);
+    otherSourceSets(own, kT0);
+    receive(kHub, kT0 + 120000, meshtime::kSrcNtp);
+    espnowMeshTimeApplyTick();
+    check(gMeshSteps == 1 && gClockMs == kT0 + 120000 && gSource == meshtime::OwnSource::MeshNtp,
+          "an NTP-backed master's time replaces cm5 and rtc time");
+  }
+  // A master without NTP is followed by a clock that mesh time set, and the
+  // source says so; an NTP-backed frame is followed again afterwards.
+  resetAll();
+  addPeer(kHub, "hub", true);
+  receive(kHub, kT0, meshtime::kSrcRtc);
+  espnowMeshTimeApplyTick();
+  check(gMeshSteps == 1 && gSource == meshtime::OwnSource::Mesh, "a master without NTP sets plain mesh time");
+  check(has(status("json"), "\"clockSource\":\"mesh\""), "json: clock set from mesh");
+  pass(60000);
+  receive(kHub, gClockMs + 60000, meshtime::kSrcNtp);
+  espnowMeshTimeApplyTick();
+  check(gMeshSteps == 2 && gSource == meshtime::OwnSource::MeshNtp, "the master gained NTP: followed, now NTP-backed");
+  pass(60000);
+  receive(kHub, gClockMs + 60000, meshtime::kSrcManual);
+  espnowMeshTimeApplyTick();
+  check(gMeshSteps == 3 && gSource == meshtime::OwnSource::Mesh,
+        "the master's source changed to manual: its follower still follows it");
+  // The clock's owner refuses the step (another source set the clock on
+  // another task after the decision): nothing is set, the frame is not used.
+  resetAll();
+  addPeer(kHub, "hub", true);
+  gRefuseMeshStep = true;
+  receive(kHub, kT0);
+  espnowMeshTimeApplyTick();
+  gRefuseMeshStep = false;
+  check(gMeshSteps == 0 && has(status("json"), "\"result\":\"ignored_better_source\""),
+        "a step the clock refuses is recorded as not used");
   // Ring time and a clock carried over a restart are replaced.
   resetAll();
   addPeer(kHub, "hub", true);
@@ -765,7 +814,8 @@ static void testHardening() {
   check(Clock::sourceWritesRtc(Clock::SYNC_NTP) && Clock::sourceWritesRtc(Clock::SYNC_MANUAL) &&
         Clock::sourceWritesRtc(Clock::SYNC_RING) && Clock::sourceWritesRtc(Clock::SYNC_CM5),
         "ntp, timeset, the ring and cm5 are written into the RTC chip");
-  check(!Clock::sourceWritesRtc(Clock::SYNC_MESH) && !Clock::sourceWritesRtc(Clock::SYNC_NONE) &&
+  check(!Clock::sourceWritesRtc(Clock::SYNC_MESH) && !Clock::sourceWritesRtc(Clock::SYNC_MESH_NTP) &&
+        !Clock::sourceWritesRtc(Clock::SYNC_NONE) &&
         !Clock::sourceWritesRtc(Clock::SYNC_RTC), "mesh time, a carried clock and the chip's own are not");
 }
 

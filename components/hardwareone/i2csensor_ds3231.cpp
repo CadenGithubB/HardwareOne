@@ -19,6 +19,7 @@
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_I2C.h"
 #include "System_MemoryMonitor.h"
+#include "System_MemUtil.h"  // ps_alloc: the refusal text of a clock step
 #include "System_Mutex.h"
 #include "System_Settings.h"
 #include "System_TaskUtils.h"
@@ -138,12 +139,25 @@ bool rtcReadDateTime(RtcDateTime* dt) {
   return true;
 }
 
+// The chip's "oscillator stopped" flag (status register bit 7): set by the
+// chip when it lost power or its battery ran empty, so the time it shows was
+// not kept. It stays set until a time is written (rtcWriteDateTime clears it).
+static constexpr uint8_t kRtcStatusOscillatorStopped = 0x80;
+
+// True when the flag could be read; *stopped is then its state.
+static bool rtcReadOscillatorStopped(bool* stopped) {
+  uint8_t status = 0;
+  if (!rtcReadRegisters(DS3231_REG_STATUS, &status, 1)) return false;
+  *stopped = (status & kRtcStatusOscillatorStopped) != 0;
+  return true;
+}
+
 bool rtcWriteDateTime(const RtcDateTime* dt) {
   if (!dt) return false;
   uint8_t bus; TwoWire* w;
   if (!rtcResolveBus(&bus, &w)) return false;
 
-  return i2cDeviceTransaction(bus, I2C_ADDR_DS3231, 100000, 100, [&]() -> bool {
+  const bool written = i2cDeviceTransaction(bus, I2C_ADDR_DS3231, 100000, 100, [&]() -> bool {
     w->beginTransmission(I2C_ADDR_DS3231);
     w->write(DS3231_REG_SECONDS);
     w->write(decToBcd(dt->second));
@@ -155,6 +169,14 @@ bool rtcWriteDateTime(const RtcDateTime* dt) {
     w->write(decToBcd(dt->year - 2000));
     return w->endTransmission() == 0;
   });
+  if (!written) return false;
+  // The chip holds a time again: the "oscillator stopped" flag has done its
+  // work. Left set after a failed read or write; the next write retries.
+  uint8_t status = 0;
+  if (rtcReadRegisters(DS3231_REG_STATUS, &status, 1) && (status & kRtcStatusOscillatorStopped)) {
+    rtcWriteRegister(DS3231_REG_STATUS, status & (uint8_t)~kRtcStatusOscillatorStopped);
+  }
+  return true;
 }
 
 float rtcReadTemperature() {
@@ -203,11 +225,84 @@ static inline bool rtcDateTimePlausible(const RtcDateTime* dt) {
   return dt->year >= 2020 && dt->year <= 2099;
 }
 
-bool rtcEarlyBootSync() {
-  // Called early at boot to sync system time from RTC before NTP
-  // This works even if the RTC sensor task isn't running yet
-  // Just needs I2C to be initialized
-  
+// ---- The chip's time -> the system clock -------------------------------------
+//
+// Whether the chip's time is taken is two questions:
+//
+//   Is the chip trusted? Its time is real only when something set it and it
+//   has kept time since. "Something set it" is gSettings.rtcTimeHasBeenSet
+//   (this firmware wrote the chip from NTP, timeset, rtcset, the ring or the
+//   CM5); "kept time since" is the chip's own oscillator-stopped flag. A chip
+//   that is plausible but not trusted (a module fresh from a drawer with some
+//   earlier owner's time, a chip whose battery ran empty and whose registers
+//   held) is NOT adopted automatically: the boot, the RTC task and the NTP
+//   fallback all ask rtcChipDistrust(). `rtcsync to` is the operator vouching
+//   for a chip whose oscillator has not stopped: it is taken and marked set.
+//
+//   May the RTC set the clock now? Clock::step asks the rank table: the RTC
+//   fills a clock that is not set and corrects the ring, mesh time without
+//   NTP and a clock carried over a restart; it yields to NTP, a manual time,
+//   an NTP-backed mesh master and the CM5.
+
+enum class RtcAdopt : uint8_t { Automatic, OperatorAsked };
+
+static const char kRtcWhyUnreadable[] = "Error: [RTC] Could not read the RTC. Check wiring and retry.";
+static const char kRtcWhyImplausible[] =
+    "Error: [RTC] RTC time is implausible (dead battery?). Set it with 'rtcset', or with 'rtcsync from' once the system clock is right.";
+static const char kRtcWhyOscillatorStopped[] =
+    "Error: [RTC] The RTC lost power since it was set (its oscillator-stopped flag is up), so its time is not used. "
+    "Set it with 'rtcset', or with 'rtcsync from' once the system clock is right.";
+static const char kRtcWhyNeverSet[] =
+    "Error: [RTC] This device has not set the RTC yet, so its time is not adopted on its own. "
+    "'rtcsync to' takes it by hand; NTP, 'timeset' or 'rtcset' set it.";
+
+// The reason the chip's time is not trusted, or nullptr when it is.
+static const char* rtcChipDistrust(RtcAdopt how) {
+  bool stopped = false;
+  if (!rtcReadOscillatorStopped(&stopped)) return kRtcWhyUnreadable;
+  if (stopped) return kRtcWhyOscillatorStopped;
+  if (how == RtcAdopt::Automatic && !gSettings.rtcTimeHasBeenSet) return kRtcWhyNeverSet;
+  return nullptr;
+}
+
+// The one place the chip's time sets the system clock. False with *whyNot
+// (an "Error: ..." line) when it did not.
+static bool rtcAdoptToSystem(RtcAdopt how, const char** whyNot, RtcDateTime* adopted = nullptr) {
+  const char* fallback = nullptr;
+  if (!whyNot) whyNot = &fallback;
+
+  RtcDateTime dt;
+  if (!rtcReadDateTime(&dt)) { *whyNot = kRtcWhyUnreadable; return false; }
+  if (!rtcDateTimePlausible(&dt)) { *whyNot = kRtcWhyImplausible; return false; }
+  if (const char* distrust = rtcChipDistrust(how)) { *whyNot = distrust; return false; }
+
+  const Clock::StepResult result = Clock::step(Clock::SYNC_RTC, rtcDateTimeToEpochUtc(&dt));
+  if (result != Clock::StepResult::Stepped) {
+    // The refusal names the source that outranks the chip; the text lives
+    // for the rest of the boot (replies are returned by pointer).
+    static char* refusal = nullptr;
+    if (!refusal) refusal = (char*)ps_alloc(160, AllocPref::PreferPsram, "rtc.step.refusal");
+    if (!refusal) { *whyNot = "Error: [RTC] The system clock was not changed"; return false; }
+    char why[112];
+    snprintf(refusal, 160, "Error: [RTC] System time not changed: %s",
+             Clock::stepRefusalText(result, Clock::SYNC_RTC, why, sizeof(why)));
+    *whyNot = refusal;
+    return false;
+  }
+  // The operator vouched for the chip: later boots adopt it on their own.
+  if (how == RtcAdopt::OperatorAsked && !gSettings.rtcTimeHasBeenSet) {
+    setSetting(gSettings.rtcTimeHasBeenSet, true);
+  }
+  if (adopted) *adopted = dt;
+  return true;
+}
+
+bool rtcEarlyBootSync(const char** whyNot) {
+  // Called early at boot to set the system time from the RTC before NTP.
+  // Works before the RTC sensor task runs: it needs only the I2C bus.
+  const char* fallback = nullptr;
+  if (!whyNot) whyNot = &fallback;
+
   // Quick probe on the RTC's configured bus (mutex-protected). Reads
   // gSettings.rtcBus rather than defaulting to bus 0 so an RTC on the
   // secondary STEMMA QT gets found during early-boot system-time sync.
@@ -215,49 +310,27 @@ bool rtcEarlyBootSync() {
   if (!i2cPingAddress(I2C_ADDR_DS3231, 100000, 200, rtcBus)) {
     DEBUG_RTC_LIFECYCLEF("[RTC] Early boot sync: RTC not detected at 0x%02X on bus %u",
                          I2C_ADDR_DS3231, rtcBus);
+    *whyNot = nullptr;  // no chip: nothing to say
     return false;
   }
-  
+
   RtcDateTime dt;
-  if (!rtcReadDateTime(&dt)) {
-    DEBUG_RTC_LIFECYCLEF("[RTC] Early boot sync: Failed to read RTC");
+  if (!rtcAdoptToSystem(RtcAdopt::Automatic, whyNot, &dt)) {
+    DEBUG_RTC_LIFECYCLEF("[RTC] Early boot sync: %s", *whyNot ? *whyNot : "not adopted");
     return false;
   }
-  
-  if (!rtcDateTimePlausible(&dt)) {
-    DEBUG_RTC_LIFECYCLEF("[RTC] Early boot sync: RTC time invalid (year=%d)", dt.year);
-    return false;
-  }
-
-  const time_t t = rtcDateTimeToEpochUtc(&dt);
-  const time_t before = time(nullptr);
-  struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
-  settimeofday(&tv, nullptr);
-  Clock::clockStepped(Clock::SYNC_RTC, before);  // duties drain on the first loop lap
-
-  INFO_RTC_LIFECYCLEF("Early boot sync: System time set to %s", rtcDateTimeToString(&dt).c_str());
+  INFO_RTC_LIFECYCLEF("Early boot sync: System time set to %s UTC", rtcDateTimeToString(&dt).c_str());
   return true;
 }
 
-bool rtcSyncToSystem(const char** whyNot) {
+bool rtcSyncToSystem(const char** whyNot, bool operatorAsked) {
+  const char* why = nullptr;
   RtcDateTime dt;
-  if (!rtcReadDateTime(&dt)) {
-    if (whyNot) *whyNot = "Error: [RTC] Could not read the RTC. Check wiring and retry.";
-    else broadcastOutput("[RTC] Failed to read RTC for sync");
+  if (!rtcAdoptToSystem(operatorAsked ? RtcAdopt::OperatorAsked : RtcAdopt::Automatic, &why, &dt)) {
+    if (whyNot) *whyNot = why;
+    else if (why) broadcastOutput(why);
     return false;
   }
-  if (!rtcDateTimePlausible(&dt)) {
-    if (whyNot) *whyNot = "Error: [RTC] RTC time is implausible (dead battery?). Set it with 'rtcset', or with 'rtcsync from' once the system clock is right.";
-    else broadcastOutput("[RTC] RTC time implausible (dead battery?) — not adopting");
-    return false;
-  }
-
-  const time_t t = rtcDateTimeToEpochUtc(&dt);
-  const time_t before = time(nullptr);
-  struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
-  settimeofday(&tv, nullptr);
-  Clock::clockStepped(Clock::SYNC_RTC, before);
-
   DEBUG_RTC_VALUESF("[RTC] Synced system time from RTC: %s", rtcDateTimeToString(&dt).c_str());
   return true;
 }
@@ -392,6 +465,9 @@ RtcDateTime rtcLocalTime(const RtcDateTime* utc) {
 // JSON building for ESP-NOW streaming
 // ============================================================================
 
+// The date and time fields are the chip's: UTC. "utc":true says so in the
+// reply itself (`time json` and the web sensors page show local time, and
+// nothing in this object told a reader that it does not).
 int rtcBuildDataJson(char* buf, size_t bufSize) {
   if (!buf || bufSize == 0) return 0;
   
@@ -402,7 +478,7 @@ int rtcBuildDataJson(char* buf, size_t bufSize) {
     int pos = sensorEnvelopeBegin(buf, bufSize, false, gRtcConnected, 0);
     if (pos == 0) return 0;
     int n = snprintf(buf + pos, bufSize - pos,
-                     ",\"year\":0,\"month\":0,\"day\":0,\"hour\":0,\"minute\":0,\"second\":0,\"temp\":0}");
+                     ",\"utc\":true,\"year\":0,\"month\":0,\"day\":0,\"hour\":0,\"minute\":0,\"second\":0,\"temp\":0}");
     if (n < 0 || (size_t)n >= bufSize - pos) return 0;
     return pos + n;
   }
@@ -410,7 +486,7 @@ int rtcBuildDataJson(char* buf, size_t bufSize) {
   int pos = sensorEnvelopeBegin(buf, bufSize, reading.dataValid, gRtcConnected, reading.lastUpdate);
   if (pos == 0) return 0;
   int n = snprintf(buf + pos, bufSize - pos,
-                   ",\"year\":%u,\"month\":%u,\"day\":%u,"
+                   ",\"utc\":true,\"year\":%u,\"month\":%u,\"day\":%u,"
                    "\"hour\":%u,\"minute\":%u,\"second\":%u,\"temp\":%.1f}",
                    reading.dateTime.year, reading.dateTime.month, reading.dateTime.day,
                    reading.dateTime.hour, reading.dateTime.minute, reading.dateTime.second,
@@ -473,9 +549,14 @@ void rtcTask(void* pvParameters) {
       DEBUG_RTC_LIFECYCLEF("[RTC] System time already valid from RTC early boot - no sync needed");
     }
   } else {
-    // No valid system time yet - sync FROM RTC to system
-    if (rtcSyncToSystem()) {
+    // No valid system time yet: take the chip's time when the chip is
+    // trusted (set by this device, oscillator not stopped since). An
+    // untrusted chip waits for NTP, timeset, rtcset or 'rtcsync to'.
+    const char* whyNot = nullptr;
+    if (rtcSyncToSystem(&whyNot)) {
       broadcastOutput("[RTC] System time synchronized from RTC");
+    } else if (whyNot) {
+      DEBUG_RTC_LIFECYCLEF("[RTC] System time not taken from the RTC: %s", whyNot);
     }
   }
   
@@ -556,14 +637,16 @@ bool rtcInit() {
     }
   }
   
-  // Clear oscillator stop flag if set (indicates power loss)
-  uint8_t status;
-  if (rtcReadRegisters(DS3231_REG_STATUS, &status, 1)) {
-    if (status & 0x80) {  // OSF bit
-      DEBUG_RTC_LIFECYCLEF("[RTC] Oscillator was stopped - RTC time may be invalid");
-      systemEventPost(SYSEVT_RTC_POWER_LOSS, "lost", "RTC battery");
-      rtcWriteRegister(DS3231_REG_STATUS, status & ~0x80);
-    }
+  // The oscillator-stopped flag says the chip lost power: the time it shows
+  // was not kept. The flag is left up (the boot and the RTC task read it and
+  // do not adopt the chip) until a time is written, and the chip is no longer
+  // "set by this device". Before 2026-11-22 the flag was cleared here, so the
+  // next boot took the chip's time as good.
+  bool oscillatorStopped = false;
+  if (rtcReadOscillatorStopped(&oscillatorStopped) && oscillatorStopped) {
+    DEBUG_RTC_LIFECYCLEF("[RTC] Oscillator was stopped - RTC time is not used until it is set again");
+    systemEventPost(SYSEVT_RTC_POWER_LOSS, "lost", "RTC battery");
+    if (gSettings.rtcTimeHasBeenSet) setSetting(gSettings.rtcTimeHasBeenSet, false);
   }
   
   gRtcConnected = true;
@@ -711,92 +794,51 @@ const char* cmd_rtc(const String& argsInput) {
 
 const char* cmd_rtcset(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
+
   static String response;
   response = "";
-  
+
   if (!gRtcConnected) {
     return "Error: [RTC] Not connected. Use 'openrtc' first.";
   }
 
-  String arg = argsInput;
-  arg.trim();
+  // The same reading as timeset (clockcore::parseTypedTime): a date and time
+  // is device-local unless the word utc follows it, a Unix timestamp is UTC,
+  // the result lies within 2020-2099 (the years the boot code adopts from the
+  // chip). Before 2026-11-22 this command read the same text as UTC while
+  // timeset read it as local.
+  clockcore::TypedTime typed = { 0, false };
+  const clockcore::TypedTimeError problem =
+      clockcore::parseTypedTime(argsInput.c_str(), Clock::tzOffsetMinutes(), &typed);
+  if (problem != clockcore::TypedTimeError::None) return clockcore::typedTimeErrorText(problem);
 
-  // Parse: YYYY-MM-DD HH:MM:SS or unix timestamp. The chip keeps UTC, so the
-  // typed date and time are taken as UTC. Only 2020..2099 is accepted, the
-  // years the boot code adopts from the chip (rtcDateTimePlausible).
-  if (arg.length() == 0) {
-    return "Error: invalid arguments — Usage: rtcset YYYY-MM-DD HH:MM:SS (UTC)  or  rtcset <unix_timestamp>";
-  }
-  
+  // The chip keeps UTC.
+  const time_t t = (time_t)typed.epoch;
   RtcDateTime dt;
-  
-  // Check if it's a unix timestamp (all digits)
-  bool isUnix = true;
-  for (size_t i = 0; i < arg.length(); i++) {
-    if (!isDigit(arg[i])) {
-      isUnix = false;
-      break;
-    }
+  unixTimeToRtc((uint32_t)typed.epoch, &dt);
+  if (!rtcWriteDateTime(&dt)) {
+    return "Error: [RTC] Could not write the RTC. Check wiring and retry.";
   }
-  
-  if (isUnix) {
-    // All digits, so the only way this fails is the range.
-    uint32_t unixTime = 0;
-    if (!parseIntArg(arg, 1577836800LL, 4102444799LL, unixTime)) {
-      return "Error: [RTC] Timestamp out of range. Use a Unix time from 1577836800 (year 2020) to 4102444799 (year 2099).";
-    }
-    unixTimeToRtc(unixTime, &dt);
-  } else {
-    // Exactly YYYY-MM-DD HH:MM:SS: digits everywhere but the five separators,
-    // nothing before or after.
-    static const char kShape[] = "dddd-dd-dd dd:dd:dd";
-    bool shapeOk = (arg.length() == sizeof(kShape) - 1);
-    for (size_t i = 0; shapeOk && i < sizeof(kShape) - 1; i++) {
-      shapeOk = (kShape[i] == 'd') ? isDigit(arg[i]) : (arg[i] == kShape[i]);
-    }
-    if (!shapeOk) {
-      return "Error: [RTC] Invalid format. Use: YYYY-MM-DD HH:MM:SS";
-    }
-    auto twoDigits = [&arg](unsigned int at) { return (arg[at] - '0') * 10 + (arg[at + 1] - '0'); };
-    const int year = twoDigits(0) * 100 + twoDigits(2);
-    const int month = twoDigits(5);
-    const int day = twoDigits(8);
-    const int hour = twoDigits(11);
-    const int minute = twoDigits(14);
-    const int second = twoDigits(17);
-    // Month before day: rtcDaysInMonth() indexes its table by the month.
-    if (year < 2020 || year > 2099 || month < 1 || month > 12 ||
-        day < 1 || day > rtcDaysInMonth(month, year) ||
-        hour > 23 || minute > 59 || second > 59) {
-      return "Error: [RTC] Date or time out of range. Use YYYY-MM-DD HH:MM:SS (UTC) with a year from 2020 to 2099.";
-    }
 
-    dt.year = year;
-    dt.month = month;
-    dt.day = day;
-    dt.hour = hour;
-    dt.minute = minute;
-    dt.second = second;
-    
-    // Calculate day of week
-    struct tm timeinfo = {0};
-    timeinfo.tm_year = year - 1900;
-    timeinfo.tm_mon = month - 1;
-    timeinfo.tm_mday = day;
-    mktime(&timeinfo);
-    dt.dayOfWeek = timeinfo.tm_wday + 1;
+  char local[40], utc[24];
+  Clock::formatDateTimeLocal(t, local, sizeof(local), true, true);
+  Clock::formatIso8601Utc(t, utc, sizeof(utc));
+  response = String("[RTC] Time set to: ") + local + " (" + utc + "), read as " +
+             (typed.wasUtc ? "UTC" : "local time");
+  // Mark RTC as calibrated so future boots trust RTC first
+  if (!gSettings.rtcTimeHasBeenSet) {
+    setSetting(gSettings.rtcTimeHasBeenSet, true);
+    response += "\n[RTC] Marked as calibrated for future boots";
   }
-  
-  if (rtcWriteDateTime(&dt)) {
-    response = "[RTC] Time set to: " + rtcDateTimeToString(&dt) + " UTC";
-    // Mark RTC as calibrated so future boots trust RTC first
-    if (!gSettings.rtcTimeHasBeenSet) {
-      setSetting(gSettings.rtcTimeHasBeenSet, true);
-      response += "\n[RTC] Marked as calibrated for future boots";
-    }
+
+  // The system clock follows: a time typed by the operator is a manual time
+  // for the whole device, not for the chip alone (it used to stay unchanged
+  // until the next boot or 'rtcsync to').
+  if (Clock::step(Clock::SYNC_MANUAL, t) == Clock::StepResult::Stepped) {
+    Clock::clockDutiesFlush();
+    response += "\n[RTC] System time set to the same time";
   } else {
-    response = "Error: [RTC] Failed to set time";
+    response += "\n[RTC] The system time was not changed (the system refused it); run 'rtcsync to'";
   }
 
   return response.c_str();
@@ -813,12 +855,16 @@ const char* cmd_rtcsync(const String& argsInput) {
   arg.trim();
 
   if (arg == "tosystem" || arg == "to" || arg.length() == 0) {
-    // RTC -> System (default)
+    // RTC -> System (default). The operator asks for the chip's time: a
+    // chip this device has not set itself is taken too (and marked set), as
+    // long as its oscillator has not stopped. The clock's rank table still
+    // decides: the reply says which source outranks the RTC when it does.
     const char* whyNot = "Error: [RTC] Sync failed";
-    if (rtcSyncToSystem(&whyNot)) {
+    if (rtcSyncToSystem(&whyNot, true)) {
+      Clock::clockDutiesFlush();
       return "[RTC] System time updated from RTC";
     }
-    return whyNot;
+    return whyNot ? whyNot : "Error: [RTC] Sync failed";
   }
   
   if (arg == "fromsystem" || arg == "from") {
@@ -957,8 +1003,10 @@ const CommandEntry rtcCommands[] = {
   { "openrtc",  "Start DS3231 RTC sensor.",                    true, cmd_rtcstart },
   { "closertc", "Stop DS3231 RTC sensor.",                     true, cmd_rtcstop },
   { "rtcread",   "Read RTC status [status|temp]",               false, cmd_rtc,      "Usage: rtcread [status|temp] [json]" },
-  { "rtcset",   "Set RTC time: <datetime|timestamp>",          true,  cmd_rtcset,   "Usage: rtcset YYYY-MM-DD HH:MM:SS (UTC)  or  rtcset <unix_timestamp>" },
-  { "rtcsync",  "Sync time: [to|from]",                        true,  cmd_rtcsync,  "Usage: rtcsync [to|from] (to=RTC->system, from=system->RTC)" },
+  { "rtcset",   "Set the RTC chip and the system clock: a local date and time (add utc for UTC) or a Unix timestamp.", true,  cmd_rtcset,
+    "Usage: rtcset <YYYY-MM-DD HH:MM:SS> [utc|local] | <unix_timestamp>  (local when no word is given; a Unix timestamp is UTC; years 2020-2099)" },
+  { "rtcsync",  "Copy time between the RTC chip and the system clock: [to|from]", true,  cmd_rtcsync,
+    "Usage: rtcsync [to|from] (to=RTC->system, the default; from=system->RTC). 'to' is refused while the clock is set from a source that outranks the RTC (ntp, manual, mesh-ntp, cm5)." },
   
   // Auto-start
   { "rtcautostart", "Enable/disable RTC auto-start after boot [on|off]", true, cmd_rtcautostart, "Usage: rtcautostart [on|off]" },

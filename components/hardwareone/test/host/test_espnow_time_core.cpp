@@ -77,14 +77,20 @@ static void testFrame() {
   CHECK(wireSourceFor(OwnSource::Rtc) == kSrcRtc && wireSourceFor(OwnSource::Ntp) == kSrcNtp &&
         wireSourceFor(OwnSource::Manual) == kSrcManual && wireSourceFor(OwnSource::Cm5) == kSrcCm5);
   CHECK(wireSourceFor(OwnSource::None) == 0 && wireSourceFor(OwnSource::Ring) == 0 &&
-        wireSourceFor(OwnSource::Mesh) == 0);
+        wireSourceFor(OwnSource::Mesh) == 0 && wireSourceFor(OwnSource::MeshNtp) == 0);
+  // A frame is NTP-backed mesh time when the master's clock is from NTP.
+  CHECK(frameClockSource(kSrcNtp) == OwnSource::MeshNtp && frameClockSource(kSrcRtc) == OwnSource::Mesh &&
+        frameClockSource(kSrcManual) == OwnSource::Mesh && frameClockSource(kSrcCm5) == OwnSource::Mesh &&
+        frameClockSource(200) == OwnSource::Mesh);
+  CHECK(!ownSourceIsReal(OwnSource::Mesh) && !ownSourceIsReal(OwnSource::MeshNtp) && !ownSourceIsReal(OwnSource::Ring) &&
+        !ownSourceIsReal(OwnSource::None) && ownSourceIsReal(OwnSource::Rtc) && ownSourceIsReal(OwnSource::Cm5));
   CHECK(epochMsPlausible(kNow) && epochMsPlausible(kEpochMinMs) && !epochMsPlausible(kEpochMinMs - 1) &&
         !epochMsPlausible(kEpochMaxMs) && !epochMsPlausible(0) && !epochMsPlausible(-5));
 }
 
 static void testSender() {
   const OwnSource sources[] = { OwnSource::None, OwnSource::Rtc, OwnSource::Ntp, OwnSource::Manual,
-                                OwnSource::Ring, OwnSource::Cm5, OwnSource::Mesh };
+                                OwnSource::Ring, OwnSource::Cm5, OwnSource::Mesh, OwnSource::MeshNtp };
   unsigned sending = 0;
   // Every combination of the six inputs.
   for (int bits = 0; bits < 32; ++bits) {
@@ -321,15 +327,28 @@ static void testFollowerRows() {
   // 5 and 8 to 11 for every own source.
   {
     const OwnSource sources[] = { OwnSource::None, OwnSource::Rtc, OwnSource::Ntp, OwnSource::Manual,
-                                  OwnSource::Ring, OwnSource::Cm5, OwnSource::Mesh };
+                                  OwnSource::Ring, OwnSource::Cm5, OwnSource::Mesh, OwnSource::MeshNtp };
     for (OwnSource source : sources) {
-      const bool better = ownSourceIsReal(source);
-      CHECK(better == (source == OwnSource::Rtc || source == OwnSource::Ntp || source == OwnSource::Manual ||
-                       source == OwnSource::Cm5));
+      // The clock's rank table (System_ClockCore.h): a master whose time is
+      // from NTP outranks the CM5, the chip and the ring; this device's own
+      // NTP and a manual time outrank it.
+      const bool ownOutranksNtpMaster = source == OwnSource::Ntp || source == OwnSource::Manual;
+      // Any other master's time is last: only a clock that mesh time set, or
+      // one carried over a restart, takes it.
+      const bool ownOutranksPlainMaster = !(source == OwnSource::None || source == OwnSource::Mesh ||
+                                            source == OwnSource::MeshNtp);
+      CHECK(frameMayCorrect(kSrcNtp, source) == !ownOutranksNtpMaster);
+      for (uint8_t plain : { kSrcRtc, kSrcManual, kSrcCm5, (uint8_t)5, (uint8_t)127 }) {
+        CHECK(frameMayCorrect(plain, source) == !ownOutranksPlainMaster);
+        Follower other;
+        other.in.ownSource = source;
+        CHECK(other.frame(kHub, kNow + 60000, 0, plain).verdict ==
+              (ownOutranksPlainMaster ? Verdict::IgnoredBetterSource : Verdict::Applied));
+      }
       Follower f;
       f.in.ownSource = source;
       const Decision d = f.frame(kHub, kNow + 60000);
-      CHECK(d.verdict == (better ? Verdict::IgnoredBetterSource : Verdict::Applied));
+      CHECK(d.verdict == (ownOutranksNtpMaster ? Verdict::IgnoredBetterSource : Verdict::Applied));
       CHECK(d.candidateEpochMs == kNow + 60000 && d.differenceMs == 60000);
       // A clock that is not set takes the time whatever its source field says.
       Follower dark;

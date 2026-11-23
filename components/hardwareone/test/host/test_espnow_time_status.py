@@ -83,13 +83,12 @@ def production(component: Path) -> str:
 
 def clock_questions(component: Path) -> str:
     clock = (component / "System_Clock.cpp").read_text()
-    threshold = re.search(r"^static constexpr int kSyncedTmYearThreshold = \d+;", clock, re.M)
-    require(threshold is not None, "System_Clock.cpp holds the year threshold")
     header = (component / "System_Clock.h").read_text()
     sources = re.search(r"^enum SyncSource : uint8_t \{[^}]*\};", header, re.M)
     writes = re.search(r"^constexpr bool sourceWritesRtc\(SyncSource s\) \{[^\n]*\}$", header, re.M)
     require(sources is not None and writes is not None, "System_Clock.h holds SyncSource and sourceWritesRtc")
-    return "\n".join([threshold.group(0), sources.group(0), writes.group(0), extract_block(clock, "bool isSynced()"),
+    return "\n".join([sources.group(0), writes.group(0), "bool isValidEpoch(time_t t);",
+                      extract_block(clock, "bool isSynced()"),
                       extract_block(clock, "bool isValidEpoch(time_t t)")])
 
 
@@ -116,11 +115,13 @@ def check_sources(component: Path) -> None:
 
     mesh = (component / "System_ESPNow_MeshTime.cpp").read_text()
     code = strip_comments(mesh)
-    require(code.count("settimeofday(") == 1 and code.count("Clock::clockStepped(Clock::SYNC_MESH, before)") == 1,
-            "one place sets the clock from mesh time, through the chokepoint with the mesh source")
-    setter = extract_block(mesh, "static void mtSetClock(int64_t epochMs)")
-    require(setter.index("settimeofday(") < setter.index("Clock::clockStepped("),
-            "the chokepoint is called after settimeofday")
+    require(code.count("settimeofday(") == 0 and code.count("Clock::clockStepped(") == 0 and
+            code.count("Clock::step(") == 1,
+            "one place sets the clock from mesh time, through Clock::step (plausibility, the rank table, the chores)")
+    setter = strip_comments(extract_block(mesh, "static bool mtSetClock(int64_t epochMs, uint8_t wireSource)"))
+    require("meshtime::frameClockSource(wireSource)" in setter and "Clock::step(source," in setter and
+            "Clock::StepResult::Stepped" in setter,
+            "the step names mesh time by the master's source (NTP-backed or not) and reports a refusal")
     require("ESPNOW_V4_TYPE_TIME_SYNC, 0," in extract_block(mesh, "static bool mtSend("),
             "the frame goes out as a session unicast with no flags")
     handler = extract_block(mesh, "void v4hTimeSync(const V4RxCtx& ctx)")
@@ -148,11 +149,12 @@ def check_sources(component: Path) -> None:
             "Clock::sourceWritesRtc(Clock::syncSource()) && rtcSyncFromSystem()" in task,
             "the RTC task calibrates an uncalibrated chip from the system clock only when its source may be written "
             "(not mesh time, not a clock carried over a restart)")
-    require("src != SYNC_RING && src != SYNC_MESH && src != SYNC_NONE" in stepped,
+    require("src != SYNC_RING && src != SYNC_MESH && src != SYNC_MESH_NTP && src != SYNC_NONE" in stepped,
             "mesh time is no reference for the confirmed clock")
     require("sStepSerial++;" in stepped, "every step is counted (Clock::stepSerial)")
     header = (component / "System_Clock.h").read_text()
-    require("SYNC_CM5, SYNC_MESH };" in header, "SYNC_MESH is the last clock source")
+    require("SYNC_CM5, SYNC_MESH, SYNC_MESH_NTP };" in header, "the two mesh sources are the last clock sources")
+    require('case SYNC_MESH_NTP: return "mesh-ntp";' in clock, "syncSourceName names NTP-backed mesh time")
 
     loop = (component / "HardwareOne.cpp").read_text()
     ntp = loop.index("  ntpSyncDrainTick();")

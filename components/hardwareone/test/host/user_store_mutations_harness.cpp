@@ -110,6 +110,9 @@ static time_t testWallTime(time_t*) { return wallTime; }
 namespace Clock {
 static bool isValidEpoch(time_t epoch) { return epoch >= 1577836800; }  // 2020-01-01
 static time_t epochSeconds() { return wallTime; }
+static bool isSynced() { return isValidEpoch(wallTime); }
+// The stamp of a stored <what>EpochMs field: 0 while the clock is not set.
+static int64_t epochMillisOrZero() { return isSynced() ? (int64_t)wallTime * 1000 + 250 : 0; }
 }  // namespace Clock
 
 static AuthContext gAuth;
@@ -562,8 +565,8 @@ static void uniqueIdWithoutNextId() {
 }
 
 static void putPending(fake_vfs::Fs& fs, bool two) {
-  std::string json = "[{\"username\":\"erin\",\"password\":\"hash:erin-secret\",\"timestamp\":1}";
-  if (two) json += ",{\"username\":\"frank\",\"password\":\"hash:frank-secret\",\"timestamp\":2}";
+  std::string json = "[{\"username\":\"erin\",\"password\":\"hash:erin-secret\",\"requestedAtEpochMs\":1795357805000}";
+  if (two) json += ",{\"username\":\"frank\",\"password\":\"hash:frank-secret\",\"requestedAtEpochMs\":null}";
   fs.put(PENDING_USERS_FILE, json + "]");
 }
 
@@ -766,6 +769,21 @@ static void requestNeverReplacesAnUnreadList() {
   const std::string newest = fs.text(kept1);
   check(submitAccountRequest("judy", "judy-secret1") == AccountRequestResult::Submitted);
   check(pendingHas("judy") && fs.text(kept1) == newest);
+  // The request carries when it was made as UTC epoch ms, and null while the
+  // clock is not set (2026-11-22 time audit, B5: it was "timestamp", the
+  // uptime in ms, which means nothing after a restart).
+  {
+    const time_t before = wallTime;
+    wallTime = 0;
+    fs.put(PENDING_USERS_FILE, "");
+    check(submitAccountRequest("kate", "kate-secret1") == AccountRequestResult::Submitted);
+    check(fs.text(PENDING_USERS_FILE).find("\"requestedAtEpochMs\":null") != std::string::npos);
+    wallTime = 1795357805;
+    check(submitAccountRequest("liam", "liam-secret1") == AccountRequestResult::Submitted);
+    check(fs.text(PENDING_USERS_FILE).find("\"requestedAtEpochMs\":1795357805250") != std::string::npos);
+    check(fs.text(PENDING_USERS_FILE).find("\"timestamp\"") == std::string::npos);
+    wallTime = before;
+  }
   noPlaintextAnywhere();
   check(fs.liveHandles() == 0);
 }

@@ -4,8 +4,11 @@
 // session: when the session has come up, every 10 minutes, and when its own
 // clock was set. A device that names that master (espnowmasterfingerprint,
 // or espnowbackupfingerprint for the backup acting as master) and has no
-// better source of its own (RTC, NTP, timeset, CM5) sets its clock from it;
-// a device that names no master takes no mesh time. Times are UTC. Pure
+// better source of its own sets its clock from it; a device that names no
+// master takes no mesh time. "Better" is the clock's one rank table
+// (System_ClockCore.h): a master whose own time is from NTP ranks above the
+// CM5, the RTC chip and the ring and below this device's own NTP and a
+// manual time; a master's time from anything else ranks below them all. Times are UTC. Pure
 // logic on caller-owned state: no heap, no OS, no logging
 // (test/host/test_espnow_time_core.cpp). The owner (System_ESPNow.cpp) holds
 // the state, reads the clock and sets it.
@@ -27,6 +30,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+
+#include "System_ClockCore.h"  // the rank table and the plausible-time bounds
 
 namespace meshtime {
 
@@ -59,11 +64,29 @@ inline const char* wireSourceName(uint8_t source) {
 
 // What last set this device's own clock. The values are those of
 // Clock::SyncSource (System_Clock.h); System_ESPNow.cpp asserts it.
-enum class OwnSource : uint8_t { None = 0, Rtc, Ntp, Manual, Ring, Cm5, Mesh };
+enum class OwnSource : uint8_t { None = 0, Rtc, Ntp, Manual, Ring, Cm5, Mesh, MeshNtp };
 
-// A source a clock can be passed on from, and that mesh time does not
-// replace. Not the ring, not mesh time itself, and not a clock that was only
-// carried over a soft restart (None while set).
+// What a frame's time is to the clock that takes it: mesh time backed by NTP
+// when the master says its own clock came from NTP, plain mesh time for every
+// other source the master names.
+constexpr OwnSource frameClockSource(uint8_t wireSource) {
+  return wireSource == kSrcNtp ? OwnSource::MeshNtp : OwnSource::Mesh;
+}
+static_assert((int)OwnSource::None == (int)clockcore::Source::None && (int)OwnSource::Rtc == (int)clockcore::Source::Rtc &&
+              (int)OwnSource::Ntp == (int)clockcore::Source::Ntp && (int)OwnSource::Manual == (int)clockcore::Source::Manual &&
+              (int)OwnSource::Ring == (int)clockcore::Source::Ring && (int)OwnSource::Cm5 == (int)clockcore::Source::Cm5 &&
+              (int)OwnSource::Mesh == (int)clockcore::Source::Mesh && (int)OwnSource::MeshNtp == (int)clockcore::Source::MeshNtp,
+              "meshtime::OwnSource mirrors clockcore::Source");
+
+// May a frame with this wire source correct a clock that `own` set? The
+// clock's rank table decides (clockcore::sourceMayCorrect).
+constexpr bool frameMayCorrect(uint8_t wireSource, OwnSource own) {
+  return clockcore::sourceMayCorrect((clockcore::Source)frameClockSource(wireSource), (clockcore::Source)own, true);
+}
+
+// A source a clock can be passed on from by a master. Not the ring, not mesh
+// time itself, and not a clock that was only carried over a soft restart
+// (None while set).
 constexpr bool ownSourceIsReal(OwnSource s) {
   return s == OwnSource::Rtc || s == OwnSource::Ntp || s == OwnSource::Manual || s == OwnSource::Cm5;
 }
@@ -109,8 +132,8 @@ constexpr uint16_t sinceSetMinutes(uint32_t seconds) {
 }
 
 // 2020-01-01 to 2100-01-01, the bounds of Clock::isPlausibleEpoch.
-constexpr int64_t kEpochMinMs = 1577836800LL * 1000;
-constexpr int64_t kEpochMaxMs = 4102444800LL * 1000;
+constexpr int64_t kEpochMinMs = clockcore::kEpoch2020 * 1000;
+constexpr int64_t kEpochMaxMs = clockcore::kEpoch2100 * 1000;
 constexpr bool epochMsPlausible(int64_t ms) { return ms >= kEpochMinMs && ms < kEpochMaxMs; }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +267,8 @@ inline void peerSent(PeerSendState& p, const RoundState& r, uint32_t established
 //    3  no master is named on this device                   ignored_no_master
 //   3b  the sender is not the master named here             ignored_not_named
 //    4  source 0, or the time is not within 2020-2099       refused_bad_time
-//    5  own clock set from rtc, ntp, manual or cm5          ignored_better_source
+//    5  own clock set from a source that outranks the       ignored_better_source
+//       frame's (the rank table, below)
 //    6  a weak source while the own clock is set            ignored_weak_source
 //    7  another sender's time is being followed             ignored_other_master
 //    8  own clock not set                                   applied
@@ -264,6 +288,19 @@ inline void peerSent(PeerSendState& p, const RoundState& r, uint32_t established
 // (7) and the claim it holds (12) before it judges the frame, whatever the
 // verdict: a newly named master is followed with its first frame, not after
 // kStickyMs, and a claim from a master no longer named is never confirmed.
+//
+// 5: the frame's time is "mesh-ntp" when the master's own clock is from NTP
+// (source 2) and "mesh" otherwise. The clock's rank table
+// (System_ClockCore.h) is ntp > manual > mesh-ntp > cm5 > rtc > ring > mesh >
+// carried over a restart, and a clock takes an equal or higher source:
+//
+//   own clock set from          frame from an NTP master   any other frame
+//   ntp, manual                 ignored_better_source      ignored_better_source
+//   cm5, rtc, ring              judged (8 to 12)           ignored_better_source
+//   mesh, mesh-ntp, carried     judged                     judged
+//
+// A clock that mesh time set follows the named master whatever that master's
+// source is now.
 //
 // 3: mesh time comes only from the master named on this device: the primary
 // (espnowmasterfingerprint), or the backup (espnowbackupfingerprint), which
@@ -431,7 +468,7 @@ inline Decision followerDecide(FollowerState& st, const FollowerInputs& in, cons
     d.verdict = Verdict::RefusedBadTime;
     return d;
   }
-  if (in.clockSet && ownSourceIsReal(in.ownSource)) { d.verdict = Verdict::IgnoredBetterSource; return d; }
+  if (in.clockSet && !frameMayCorrect(f.source, in.ownSource)) { d.verdict = Verdict::IgnoredBetterSource; return d; }
   if (in.clockSet && f.source >= kSrcWeakFirst) { d.verdict = Verdict::IgnoredWeakSource; return d; }
 
   const uint8_t rank = senderRank(in);

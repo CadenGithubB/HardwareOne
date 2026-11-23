@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "System_ClockCore.h"  // the rules themselves: validity, rank table, formatters, timezone table
+
 // =============================================================================
 // Clock — time / sync state / timezone / formatting accessors
 // =============================================================================
@@ -31,31 +33,34 @@ namespace Clock {
 
 // ----- Wall-clock state ---------------------------------------------------
 
-// Seconds since UNIX epoch. Wraps time(NULL). Returns 0 if not yet synced
-// (i.e., when the system clock is still at boot epoch). Use with isSynced()
-// when you need to distinguish "haven't synced" from "actually epoch=0".
+// Seconds since UNIX epoch. Wraps time(NULL). A clock that was never set
+// counts up from 1970, so the value is small but not 0: ask isSynced() (or
+// isValidEpoch of the value) before storing or showing it as a date.
 inline time_t epochSeconds() { return time(nullptr); }
 
-// True if the system clock has been synced to real wall-clock time. Uses
-// the "tm_year >= 120" check (year >= 2020) which is the same heuristic the
-// scattered call sites use — anything before 2020 is assumed to be the
-// boot epoch (1970) or close to it.
+// ----- The validity vocabulary --------------------------------------------
+//
+// Three questions, and no other way to ask them (no `time(nullptr) > 0`, no
+// year literal, no tm_year test):
+//
+//   isSynced()          is THIS device's clock set?  = isValidEpoch(now)
+//   isValidEpoch(t)     is `t` a real time (2020 or later)? For the device's
+//                       own clock and values it wrote itself.
+//   isPlausibleEpoch(t) is `t` within [2020, 2100)? For a time from outside:
+//                       a peer, a chip, a typed value, where garbage is as
+//                       easily large as small.
+//
+// A time that fails the question is stored as 0 / JSON null, never as the
+// 1970-based number.
+
+// 2020-01-01 00:00:00 UTC, the lower bound of all three questions.
+constexpr time_t kEpoch2020 = (time_t)clockcore::kEpoch2020;
+// 2100-01-01 00:00:00 UTC, the upper bound of isPlausibleEpoch.
+constexpr time_t kEpoch2100 = (time_t)clockcore::kEpoch2100;
+
 bool isSynced();
-
-// True if `t` looks like a real epoch (>= 2020-01-01). Same check as
-// isSynced() but applied to an arbitrary timestamp — useful when validating
-// data read from peers or settings files.
 bool isValidEpoch(time_t t);
-
-// 2100-01-01 — the shared upper bound for "could this possibly be a real
-// wall-clock time on this device". One constant instead of the 4102444800
-// literal scattered per call site.
-constexpr time_t kEpoch2100 = 4102444800LL;
-
-// isValidEpoch with the upper bound applied: [2020, 2100). Use when the
-// value comes from an external device or user input, where garbage can be
-// large as easily as small.
-inline bool isPlausibleEpoch(time_t t) { return isValidEpoch(t) && t < kEpoch2100; }
+inline bool isPlausibleEpoch(time_t t) { return clockcore::isPlausibleEpoch((int64_t)t); }
 
 // Format the CONFIGURED tz offset as "UTC+H:MM" / "UTC-H:MM" into `out`.
 // Sign comes from the full offset, not the hours division — the hand-rolled
@@ -68,6 +73,11 @@ const char* formatTzOffsetLabel(char* out, size_t outSize);
 // (e.g. the sensor-log CSV row stamp falls back to millis()). 64-bit —
 // epoch-ms (~1.75e12) silently truncates in any 32-bit type.
 int64_t epochMillis();
+
+// What a stored or sent `<what>EpochMs` field holds for "now": the epoch in
+// milliseconds when the clock is set, 0 when it is not (written as JSON null
+// or left out; never the 1970-based number, never uptime).
+int64_t epochMillisOrZero();
 
 // ----- Timezone (unit names baked in) -------------------------------------
 
@@ -113,33 +123,79 @@ inline uint32_t ageMs(uint32_t pastMs) {
 }
 
 // ----- Formatting ---------------------------------------------------------
+//
+// The one formatter family (System_ClockCore.h holds the rules and the host
+// tests run them). Stored and sent text is UTC; shown text is device-local,
+// 24 hour. "Local" is the configured fixed offset (tzOffsetMinutes), computed
+// here without localtime_r, so these are safe from any task. Each returns the
+// number of characters written (excluding NUL), and 0 with "" in `out` when
+// `t` is not a valid epoch or the text does not fit: no cut strings.
 
-// Format epoch `t` as ISO-8601 ("2026-05-23T15:04:05") into `out`. Uses
-// LOCAL time (localtime_r, honest only because applyTimezone() has run) so
-// the string reflects the device's configured timezone. Returns the number
-// of bytes written (excluding NUL). Returns 0 and writes "" if `t` is not a
-// valid epoch — caller can detect with the return value rather than
-// checking isValidEpoch up front.
+// Stored / sent: "2026-11-22T14:30:05Z" (UTC, 20 characters).
+size_t formatIso8601Utc(time_t t, char* out, size_t outSize);
+// Reads exactly that shape back. False leaves *out untouched.
+bool parseIso8601Utc(const char* text, time_t* out);
+// Names and ids: "20261122T143005Z" (UTC, 16 characters).
+size_t formatCompactUtc(time_t t, char* out, size_t outSize);
+
+// Shown: "2026-11-22 14:30:05" (or "... 14:30" without seconds), device-local;
+// with `tzLabel` the offset follows: "2026-11-22 14:30:05 UTC+1:00". Put the
+// label on a full date and time that stands alone (a command reply, a status
+// line); leave it off inside a list whose heading names the zone.
+size_t formatDateTimeLocal(time_t t, char* out, size_t outSize, bool withSeconds = true, bool tzLabel = false);
+// "2026-11-22": the local date. Daily files are named by it and roll at
+// local midnight.
+size_t formatDateLocal(time_t t, char* out, size_t outSize);
+// "14:30": a clock face, device-local.
+size_t formatHHMMLocal(time_t t, char* out, size_t outSize);
+// File names: "20261122_143005", device-local, filename-safe.
+size_t formatFileStampLocal(time_t t, char* out, size_t outSize);
+// The prefix of a stored log line, device-local WITH the UTC offset:
+// "[2026-11-22 14:30:05.123 +01:00] | ". `epochMs` is Clock::epochMillis().
+size_t formatLogPrefixLocal(int64_t epochMs, char* out, size_t outSize);
+
+// "2026-05-23T15:04:05": local, T-separated, no zone. Kept for the callers
+// that print it beside formatTzOffsetLabel; new code uses formatDateTimeLocal.
 size_t formatIso8601Local(time_t t, char* out, size_t outSize);
 
-// Format epoch `t` as filename-safe "YYYYMMDD_HHMMSS" into `out`. Same
-// local-time + invalid-handling behavior as formatIso8601Local. Used for
-// log filenames, capture filenames, etc. where colons aren't allowed.
-size_t formatFilenameLocal(time_t t, char* out, size_t outSize);
+// Lengths of time and ages, one wording for the whole firmware:
+//   formatDuration(185, DurationStyle::Compact) -> "3m 5s"
+//   formatDuration(185, DurationStyle::Long)    -> "3 minutes 5 seconds"
+//   formatAge(185, DurationStyle::Compact)      -> "3m ago"   ("just now" under 5 s)
+using DurationStyle = clockcore::DurationStyle;
+inline size_t formatDuration(uint64_t seconds, DurationStyle style, char* out, size_t outSize) {
+  return clockcore::formatDuration(seconds, style, out, outSize);
+}
+inline size_t formatAge(uint64_t seconds, DurationStyle style, char* out, size_t outSize) {
+  return clockcore::formatAge(seconds, style, out, outSize);
+}
 
-// Format epoch `t` as "HH:MM" into `out`. Local time. Convenient for status
-// displays that just want a clock face.
-size_t formatHHMMLocal(time_t t, char* out, size_t outSize);
+// ----- The timezone table --------------------------------------------------
+//
+// One table (clockcore::kTimezones) feeds the setup wizard and the settings
+// list. The device keeps a fixed offset: there is no automatic daylight
+// saving (clockcore::kTimezoneDstNote), a zone's summer time is its own entry.
+
+// The settings list built from the table: "minutes|label" pairs, one per
+// offset. Built once into PSRAM; "" when that allocation fails.
+const char* timezoneOptionsText();
 
 // ----- Clock-step chokepoint ----------------------------------------------
 //
-// Seven things can set this system's clock: NTP, the DS3231 RTC, `timeset`,
-// the R1 ring (dark-boot adoption), the CM5 carrier's battery-backed RTC
-// (SYNC_CM5, pushed over the UART host link), the ESP-NOW mesh master
-// (SYNC_MESH, taken only from the master named on the device, by a device
-// with no better source of its own;
-// System_ESPNow_TimeCore.h), and lwIP's background SNTP daemon. Each
-// step owes the same follow-up chores — post the TIME_SYNCED event on the
+// Seven things can set this system's clock: NTP, the DS3231 RTC, `timeset`
+// and `rtcset`, the R1 ring (dark-boot adoption), the CM5 carrier's
+// battery-backed RTC (SYNC_CM5, pushed over the UART host link), the ESP-NOW
+// mesh master (SYNC_MESH / SYNC_MESH_NTP, taken only from the master named on
+// the device; System_ESPNow_TimeCore.h), and lwIP's background SNTP daemon.
+//
+// Clock::step() is the one way to set the clock: it checks that the time is
+// plausible, asks the rank table whether this source may replace the one that
+// set the clock, calls settimeofday() and runs clockStepped(). No other code
+// calls settimeofday(). The one exception is lwIP's SNTP client, which sets
+// the clock inside lwIP; System_NTP reports that step through clockStepped()
+// from its main-loop drain.
+//
+// Each step owes the same follow-up chores — post the TIME_SYNCED event on the
 // first valid clock, write/refresh the boot anchor, resolve pending user
 // timestamps, wake the automation scheduler, push the time into the RTC,
 // log large corrections. Historically every source hand-rolled its own
@@ -151,19 +207,64 @@ size_t formatHHMMLocal(time_t t, char* out, size_t outSize);
 // are pended and drained by clockDutiesTick() on the main loop (or
 // clockDutiesFlush() synchronously from big-stack contexts).
 
-enum SyncSource : uint8_t { SYNC_NONE = 0, SYNC_RTC, SYNC_NTP, SYNC_MANUAL, SYNC_RING, SYNC_CM5, SYNC_MESH };
+// SYNC_MESH: the mesh master's time, when the master's own clock is not from
+// NTP. SYNC_MESH_NTP: the same, when it is (the TIME_SYNC frame's source says
+// ntp). The numbers are stored and sent (power events, sensor arrival
+// records): new sources go at the end.
+enum SyncSource : uint8_t { SYNC_NONE = 0, SYNC_RTC, SYNC_NTP, SYNC_MANUAL, SYNC_RING, SYNC_CM5, SYNC_MESH, SYNC_MESH_NTP };
+
+static_assert((int)SYNC_NONE == (int)clockcore::Source::None && (int)SYNC_RTC == (int)clockcore::Source::Rtc &&
+              (int)SYNC_NTP == (int)clockcore::Source::Ntp && (int)SYNC_MANUAL == (int)clockcore::Source::Manual &&
+              (int)SYNC_RING == (int)clockcore::Source::Ring && (int)SYNC_CM5 == (int)clockcore::Source::Cm5 &&
+              (int)SYNC_MESH == (int)clockcore::Source::Mesh && (int)SYNC_MESH_NTP == (int)clockcore::Source::MeshNtp,
+              "Clock::SyncSource mirrors clockcore::Source");
 
 // Last source that stepped the clock THIS boot. SYNC_NONE with isSynced()
 // true means the time was carried across a soft reboot in the RTC domain.
 SyncSource syncSource();
-const char* syncSourceName(SyncSource s);  // "none|rtc|ntp|manual|ring|cm5|mesh"
+const char* syncSourceName(SyncSource s);  // "none|rtc|ntp|manual|ring|cm5|mesh|mesh-ntp"
 
 // True for a source whose time may be written into the RTC chip. Not the
 // chip itself, not mesh time (after the next boot it would read back as
-// "rtc": the device would stop following the mesh for good, and as a master
-// pass the time on as a source of its own), and not a clock carried over a
-// soft restart (SYNC_NONE while set: it may have come from the mesh).
-constexpr bool sourceWritesRtc(SyncSource s) { return s != SYNC_NONE && s != SYNC_RTC && s != SYNC_MESH; }
+// "rtc": as a master the device would pass the time on as a source of its
+// own), and not a clock carried over a soft restart (SYNC_NONE while set: it
+// may have come from the mesh).
+constexpr bool sourceWritesRtc(SyncSource s) { return s != SYNC_NONE && s != SYNC_RTC && s != SYNC_MESH && s != SYNC_MESH_NTP; }
+
+// ----- Setting the clock ---------------------------------------------------
+//
+// The rank table (clockcore::sourceRank, owner decision 2026-11-22),
+// strongest first:
+//
+//   ntp > manual > mesh-ntp > cm5 > rtc > ring > mesh > (carried over a restart)
+//
+//   - A clock that is not set takes any source.
+//   - A clock that is set takes a source that ranks equal or higher than the
+//     one that set it; a lower one is refused (RefusedOutranked).
+//   - An operator command (SYNC_MANUAL: timeset, rtcset) always sets the
+//     clock; NTP replaces that time at its next reply.
+//   - Mesh time corrects mesh time, with or without NTP behind it.
+//   - The time must be within 2020-2099, whoever offers it.
+enum class StepResult : uint8_t {
+  Stepped = 0,
+  RefusedImplausible,  // not within 2020-2099
+  RefusedOutranked,    // the clock is set from a source that ranks higher
+  RefusedNoSource,     // SYNC_NONE sets nothing
+  Failed,              // settimeofday() failed
+};
+
+// Sets the clock to `epoch` (+ `usec`) from `src` when the rank table allows
+// it, then runs clockStepped(). Any normal task (the callers that own
+// filesystem chores drain them: see clockDutiesTick / clockDutiesFlush); not
+// from lwIP or BLE callbacks, not from an ISR.
+StepResult step(SyncSource src, time_t epoch, uint32_t usec = 0);
+
+// The same answer without setting anything.
+StepResult stepVerdict(SyncSource src, time_t epoch);
+
+// Why a step was refused, as the text after "Error: " in a reply, e.g.
+// "the clock is set from ntp, which outranks rtc". "" for Stepped.
+const char* stepRefusalText(StepResult result, SyncSource src, char* out, size_t outSize);
 
 // Counts the clock steps of this boot (every clockStepped call). A reader
 // that decided something from the clock's state compares it before acting:
@@ -174,9 +275,11 @@ uint32_t stepSerial();
 // False when nothing has set the clock this boot.
 bool lastStep(SyncSource* src, uint32_t* agoSeconds);
 
-// Call immediately AFTER a successful settimeofday(), passing the pre-step
-// epoch. Inline-cheap; safe from any normal task. NOT for lwIP/BLE
-// callbacks — those store what they know and let a drain call this.
+// The chores after a step, passing the pre-step epoch. Clock::step() calls
+// it; the only other caller is System_NTP's main-loop drain, which reports
+// the step lwIP's SNTP client has already made. Inline-cheap; safe from any
+// normal task. NOT for lwIP/BLE callbacks: those store what they know and
+// let a drain call this.
 void clockStepped(SyncSource src, time_t before);
 
 // Main-loop drain for the filesystem-touching chores clockStepped() pends.

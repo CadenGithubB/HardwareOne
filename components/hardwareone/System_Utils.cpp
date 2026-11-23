@@ -1938,10 +1938,18 @@ const char* cmd_time(const String& argsInput) {
     static char* buf = nullptr;
     if (!buf) buf = (char*)ps_alloc(256, AllocPref::PreferPsram, "time.json");
     if (!buf) return kCommandReplyOutOfMemory;
+    // "time" is device-local text. timeEpochMs is the same clock as UTC epoch
+    // ms (null while it is not set) and tzOffsetMinutes the device's fixed
+    // offset: with these two a reader shows device-local time itself.
+    char epochText[24] = "null";
+    const int64_t nowEpochMs = Clock::epochMillisOrZero();
+    if (nowEpochMs > 0) snprintf(epochText, sizeof(epochText), "%lld", (long long)nowEpochMs);
     int p = snprintf(buf, 256,
-      "{\"schema\":1,\"synced\":%s,\"source\":\"%s\",\"time\":\"%s\",\"uptime_ms\":%lu",
+      "{\"schema\":1,\"synced\":%s,\"source\":\"%s\",\"time\":\"%s\",\"timeEpochMs\":%s,"
+      "\"tzOffsetMinutes\":%d,\"uptime_ms\":%lu",
       Clock::isSynced() ? "true" : "false",
-      Clock::syncSourceName(Clock::syncSource()), timeBuf,
+      Clock::syncSourceName(Clock::syncSource()), timeBuf, epochText,
+      Clock::tzOffsetMinutes(),
       (unsigned long)millis());
     if (haveTemp && p > 0 && p < 256) {
       p += snprintf(buf + p, 256 - p, ",\"rtc_temp_c\":%.1f", temp);
@@ -2000,85 +2008,31 @@ const char* cmd_time(const String& argsInput) {
 
 const char* cmd_timeset(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
-  
-  String arg = argsInput;
-  arg.trim();
-  
-  if (arg.length() == 0) {
-    return "Error: invalid arguments — Usage: timeset YYYY-MM-DD HH:MM:SS  or  timeset <unix_timestamp>";
-  }
-  
-  struct tm timeinfo = {0};
-  time_t t;
-  
-  // Check if it's a unix timestamp (all digits)
-  bool isUnix = true;
-  for (size_t i = 0; i < arg.length(); i++) {
-    if (!isDigit(arg[i])) {
-      isUnix = false;
-      break;
-    }
-  }
-  
-  if (isUnix) {
-    // strtoll, not String::toInt (32-bit — silently wraps past 2038), and
-    // range-checked before the time_t cast.
-    char* endp = nullptr;
-    const long long v = strtoll(arg.c_str(), &endp, 10);
-    if (!endp || *endp != '\0') {
-      return "Error: Invalid format. Use: YYYY-MM-DD HH:MM:SS or unix timestamp";
-    }
-    t = (time_t)v;
-  } else {
-    // Parse YYYY-MM-DD HH:MM:SS: the whole text, nothing after the seconds.
-    static const char kNotADateTime[] =
-        "Error: Not a valid date and time. Use YYYY-MM-DD HH:MM:SS, for example 2026-11-17 14:30:00.";
-    int year, month, day, hour, minute, second, used = 0;
-    if (sscanf(arg.c_str(), "%d-%d-%d %d:%d:%d%n",
-               &year, &month, &day, &hour, &minute, &second, &used) != 6 ||
-        used != (int)arg.length()) {
-      return "Error: Invalid format. Use: YYYY-MM-DD HH:MM:SS or unix timestamp";
-    }
-    if (month < 1 || month > 12 || day < 1 || day > 31 || hour < 0 || hour > 23 ||
-        minute < 0 || minute > 59 || second < 0 || second > 59) {
-      return kNotADateTime;
-    }
 
-    timeinfo.tm_year = year - 1900;
-    timeinfo.tm_mon = month - 1;
-    timeinfo.tm_mday = day;
-    timeinfo.tm_hour = hour;
-    timeinfo.tm_min = minute;
-    timeinfo.tm_sec = second;
-    timeinfo.tm_isdst = -1;
-    t = mktime(&timeinfo);
-    // mktime turns a day the month does not have (31 February) into a later
-    // date; that is not the time the user typed.
-    if (timeinfo.tm_mday != day || timeinfo.tm_mon != month - 1) return kNotADateTime;
-  }
+  // One reading for timeset and rtcset (clockcore::parseTypedTime): a date
+  // and time is device-local unless the word utc follows it; a Unix
+  // timestamp is always UTC; the result lies within 2020-2099 (`timeset 100`
+  // used to un-set a good clock).
+  clockcore::TypedTime typed = { 0, false };
+  const clockcore::TypedTimeError problem =
+      clockcore::parseTypedTime(argsInput.c_str(), Clock::tzOffsetMinutes(), &typed);
+  if (problem != clockcore::TypedTimeError::None) return clockcore::typedTimeErrorText(problem);
 
-  // Plausibility gate on BOTH branches: isValidEpoch alone has no upper
-  // bound, and `timeset 100` used to silently un-sync a good clock.
-  if (!Clock::isPlausibleEpoch(t)) {
-    return "Error: timestamp must be within 2020-2099";
+  // Clock::step: an operator command always sets the clock (NTP replaces
+  // the time at its next reply), and the standard chores follow (event, boot
+  // anchor, pending-user resolve, scheduler wake, RTC write-back). Flush
+  // them so the side effects are visible before the prompt returns (the
+  // cmd_exec task has the stack for it).
+  const time_t t = (time_t)typed.epoch;
+  if (Clock::step(Clock::SYNC_MANUAL, t) != Clock::StepResult::Stepped) {
+    return "Error: the system refused the new time";
   }
-
-  // Set system time, then run the standard post-step duties (event, boot
-  // anchor, pending-user resolve, scheduler wake, RTC write-back) through
-  // the shared chokepoint — this command used to skip all of them. Flush
-  // synchronously so the side effects are visible before the prompt returns
-  // (cmd_exec task has the stack for it).
-  const time_t before = time(nullptr);
-  struct timeval tv = { .tv_sec = t, .tv_usec = 0 };
-  settimeofday(&tv, nullptr);
-  Clock::clockStepped(Clock::SYNC_MANUAL, before);
   Clock::clockDutiesFlush();
 
-  char timeBuf[32];
-  struct tm setTm;
-  localtime_r(&t, &setTm);
-  strftime(timeBuf, sizeof(timeBuf), "%Y-%m-%dT%H:%M:%S", &setTm);
-  BROADCAST_PRINTF("Time set to: %s", timeBuf);
+  char local[40], utc[24];
+  Clock::formatDateTimeLocal(t, local, sizeof(local), true, true);
+  Clock::formatIso8601Utc(t, utc, sizeof(utc));
+  BROADCAST_PRINTF("Time set to: %s (%s), read as %s", local, utc, typed.wasUtc ? "UTC" : "local time");
 
   return "OK";
 }
@@ -2801,9 +2755,9 @@ extern const CommandEntry commands[] = {
   { "bootcount", "Show boot count (NVS), crash count, last reset reason. 'bootcount reset' zeroes it (admin). (add 'json')", false, cmd_bootcount,
     "Usage: bootcount [reset|json]" },
   { "uptime", "Show device uptime. (add 'json' for JSON output)", false, cmd_uptime },
-  { "time", "Show device time (uptime + NTP if synced). (add 'json' for JSON output)", false, cmd_time },
-  { "timeset", "Set time manually: timeset YYYY-MM-DD HH:MM:SS or <unix_timestamp>.", true, cmd_timeset,
-    "Usage: timeset <YYYY-MM-DD HH:MM:SS>|<unix_timestamp>" },
+  { "time", "Show the device's local time, its source and the uptime. (add 'json' for JSON output)", false, cmd_time },
+  { "timeset", "Set the clock by hand: a local date and time (add utc for UTC) or a Unix timestamp. NTP replaces it at its next reply.", true, cmd_timeset,
+    "Usage: timeset <YYYY-MM-DD HH:MM:SS> [utc|local] | <unix_timestamp>  (local when no word is given; a Unix timestamp is UTC; years 2020-2099)" },
   { "memsample", "Memory snapshot with component requirements. Use 'memsample track [on|off|reset|status]' for allocation tracking.", false, cmd_memsample,
     "Usage: memsample [track <on|off|reset|status>]" },
   { "memreport", "Comprehensive memory report (Task Manager style). (add 'json' for JSON output)", false, cmd_memreport },

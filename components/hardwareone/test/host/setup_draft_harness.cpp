@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "System_ClockCore.h"  // clockcore::kTimezones: the wizard's timezone table
+
 static bool failReserve;
 class String : public std::string {
  public:

@@ -141,7 +141,8 @@ void clearLoginAttempts(const char* ip);
 struct IpBanEntry {
   char ip[40];             // IPv4/IPv6 as C-string; ip[0]=='\0' means unused
   char reason[80];         // optional admin note
-  unsigned long bannedAt;  // millis() when ban was created (for display only)
+  int64_t bannedAtEpochMs; // when the ban was made, UTC epoch ms; 0 = the clock was not set then.
+                           // (Was `bannedAt`, an uptime in ms that meant nothing after a restart.)
 };
 
 // Load ban list from flash into memory (called once at server start).

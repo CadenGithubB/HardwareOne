@@ -45,7 +45,8 @@ static_assert((int)meshtime::OwnSource::None == (int)Clock::SYNC_NONE &&
               (int)meshtime::OwnSource::Manual == (int)Clock::SYNC_MANUAL &&
               (int)meshtime::OwnSource::Ring == (int)Clock::SYNC_RING &&
               (int)meshtime::OwnSource::Cm5 == (int)Clock::SYNC_CM5 &&
-              (int)meshtime::OwnSource::Mesh == (int)Clock::SYNC_MESH,
+              (int)meshtime::OwnSource::Mesh == (int)Clock::SYNC_MESH &&
+              (int)meshtime::OwnSource::MeshNtp == (int)Clock::SYNC_MESH_NTP,
               "meshtime::OwnSource mirrors Clock::SyncSource");
 static_assert((int)MESH_ROLE_MASTER == 1 && (int)MESH_ROLE_BACKUP_MASTER == 2,
               "the role numbers this file reads");
@@ -71,14 +72,14 @@ static bool mtClockHeld() { return Clock::confirmedClockHeld(); }
 static uint32_t mtStepSerial() { return Clock::stepSerial(); }
 // Seconds since the clock was last set this boot; false when nothing set it.
 static bool mtLastSetAgo(uint32_t* agoSeconds) { return Clock::lastStep(nullptr, agoSeconds); }
-// The one place mesh time sets the clock: settimeofday, then the chokepoint.
-static void mtSetClock(int64_t epochMs) {
-  const time_t before = time(nullptr);
-  struct timeval tv;
-  tv.tv_sec = (time_t)(epochMs / 1000);
-  tv.tv_usec = (suseconds_t)((epochMs % 1000) * 1000);
-  settimeofday(&tv, nullptr);
-  Clock::clockStepped(Clock::SYNC_MESH, before);
+// The one place mesh time sets the clock, through Clock::step: as mesh time
+// backed by NTP when the master's own clock is from NTP (`wireSource`), as
+// plain mesh time otherwise. False when the clock's rank table refused it
+// (another source set the clock since the frame was judged).
+static bool mtSetClock(int64_t epochMs, uint8_t wireSource) {
+  const Clock::SyncSource source = (Clock::SyncSource)meshtime::frameClockSource(wireSource);
+  return Clock::step(source, (time_t)(epochMs / 1000), (uint32_t)((epochMs % 1000) * 1000)) ==
+         Clock::StepResult::Stepped;
 }
 static void mtFormatLocal(int64_t epochMs, char* out, size_t cap) {
   char iso[24];
@@ -264,7 +265,12 @@ static void meshTimeJudge(const MeshTimeStash& stash) {
       decision.verdict = meshtime::Verdict::IgnoredTooSoon;
       continue;
     }
-    mtSetClock(decision.candidateEpochMs);
+    if (!mtSetClock(decision.candidateEpochMs, stash.rx.frame.source)) {
+      // The clock's owner refused the step: a better source set the clock
+      // on another task after the check above. The trial state is dropped.
+      decision.verdict = meshtime::Verdict::IgnoredBetterSource;
+      break;
+    }
     sMeshTime.follower = trial;
     break;
   }
@@ -434,6 +440,7 @@ static const char* meshTimeOwnSourceText(bool clockSet, meshtime::OwnSource sour
     case meshtime::OwnSource::Ring:   return "ring";
     case meshtime::OwnSource::Cm5:    return "cm5";
     case meshtime::OwnSource::Mesh:   return "mesh";
+    case meshtime::OwnSource::MeshNtp: return "mesh-ntp";
   }
   return "?";
 }

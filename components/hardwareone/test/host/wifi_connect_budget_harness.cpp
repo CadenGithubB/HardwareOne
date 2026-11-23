@@ -215,7 +215,6 @@ struct SavedWifiNetwork {
   String ssid;
   int priority = 0;
   bool hidden = false;
-  uint32_t lastConnected = 0;
 };
 struct WifiNetworkSnapshot {
   SavedWifiNetwork entries[MAX_WIFI_NETWORKS];
@@ -262,7 +261,6 @@ static int gRehuntConnectFailedNotes = 0;
 void wifiRehuntNoteConnectFailed() { ++gRehuntConnectFailedNotes; }
 void sortWifiByPriority() {}
 bool saveWifiNetworks() { return true; }
-void wifiNetworkMarkConnected(uint32_t, uint32_t) {}
 // ESP-NOW radio ownership (System_ESPNow): initialized, or a timed-out
 // closeespnow that still retains its runtime and the driver.
 static bool gEspNowInitialized = false;

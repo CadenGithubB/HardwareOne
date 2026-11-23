@@ -94,7 +94,7 @@ def main() -> None:
         command = [args.cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
                    "-Wno-unused-parameter", "-Wno-unused-function",
                    f"-DHAVE_SLOT_GENERATION={int(has_generation)}",
-                   "-I", str(directory), str(unit), "-o", str(binary)]
+                   "-I", str(directory), "-I", str(COMPONENT), str(unit), "-o", str(binary)]
         if args.sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-fno-sanitize-recover=all",
                             "-fno-omit-frame-pointer", "-g"]

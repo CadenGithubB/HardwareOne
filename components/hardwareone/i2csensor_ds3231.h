@@ -67,10 +67,16 @@ constexpr float kRtcTemperatureUnavailable = -999.0f;
 float rtcReadTemperature();
 
 // Time sync with ESP32 system time
-bool rtcEarlyBootSync();     // Called at boot before NTP - syncs system time from RTC
+// Called at boot before NTP: sets the system time from the chip when the chip
+// is trusted (this device set it, gSettings.rtcTimeHasBeenSet, and its
+// oscillator has not stopped since). False with *whyNot = an "Error: ..." line
+// when a chip answered but its time was not taken, nullptr when no chip did.
+bool rtcEarlyBootSync(const char** whyNot = nullptr);
 // A command passes `whyNot` and gets the failure as its reply text; without it
-// the reason is printed on the output stream.
-bool rtcSyncToSystem(const char** whyNot = nullptr);      // RTC -> ESP32 system time
+// the reason is printed on the output stream. Both go through Clock::step
+// (the rank table). `operatorAsked` ('rtcsync to'): a chip this device has not
+// set is taken as well, and is marked set; automatic callers leave it false.
+bool rtcSyncToSystem(const char** whyNot = nullptr, bool operatorAsked = false);  // RTC -> ESP32 system time
 bool rtcSyncFromSystem(const char** whyNot = nullptr);    // ESP32 system time -> RTC
 
 // Utility functions

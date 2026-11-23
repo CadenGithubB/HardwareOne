@@ -13,6 +13,7 @@
 #include <esp_now.h>
 #include <esp_wifi.h>
 
+#include "System_ClockCore.h"       // clockcore::isValidEpoch: bondedAt is stored only when the clock is set
 #include "System_Debug.h"
 #include "System_ESPNow.h"          // EspNowState (gEspNow); V4RxCtx comes from System_ESPNow_RxCtx.h
 #include "System_ESPNow_Crypto.h"
@@ -330,7 +331,7 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
     confirmStatus = 2;
   } else {
     time_t now = time(nullptr);
-    uint32_t bondedAt = (uint32_t)((now > 0) ? now : 0);
+    uint32_t bondedAt = (uint32_t)(clockcore::isValidEpoch((int64_t)now) ? now : 0);  // 0 while the clock is not set
     // Event-log gate: a re-sent HELLO with the same key comes through here
     // routinely (peerIdentityPersist then writes nothing, bar the hourly
     // lastSeenSec refresh). Only log the event when the stored identity
@@ -442,7 +443,7 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   }
 
   time_t now = time(nullptr);
-  uint32_t bondedAt = (uint32_t)((now > 0) ? now : 0);
+  uint32_t bondedAt = (uint32_t)(clockcore::isValidEpoch((int64_t)now) ? now : 0);  // 0 while the clock is not set
   // Event-log gate: only log when the stored identity actually changes (first
   // pairing or authorized key replacement) — a duplicate REPLY presents the
   // same key routinely (nothing is rewritten then) and must not log. Computed

@@ -1067,6 +1067,28 @@ cleared; after three attempts the request is dropped and reported. The flash
 and NVS calls in `System_FactoryWipe.cpp` and the first-time setup that follows
 are not covered and have not been run on hardware.
 
+## Clock rules (System_ClockCore.h)
+
+`clock_core_tests` runs `System_ClockCore.h`, the device-free rules behind
+`System_Clock`, as they are (time rules stage 1, 2026-11-22). Covered: the
+validity bounds (2020 for the own clock, 2020-2099 for a time from outside);
+the source rank table of `Clock::step` for every pair of sources, set and not
+set (ntp > manual > mesh-ntp > cm5 > rtc > ring > mesh > carried; an operator
+command always sets; mesh time corrects mesh time; an implausible time is
+refused first); civil time against the C library for every day of 2020-2099
+and with a fixed offset across a date line; the formatters (ISO UTC and its
+parser round trip, compact UTC, local date and time with and without seconds
+and the `UTC+H:MM` label, local date, file stamp, the log prefix with its
+numeric offset, the offset labels) with a clock that is not set and a buffer
+one byte short; durations and ages in both styles; the time `timeset` and
+`rtcset` read (local by default, `utc`, `local`, a Unix time, every refusal
+and the edges of the range); the timezone table (unique abbreviations,
+quarter-hour offsets, the limits of the setting, an offset re-opening on its
+standard-time entry, the settings list built from it). Not covered: the live
+clock, `settimeofday`, the chores after a step and the settings buffer
+(`System_Clock.cpp`); the mesh follower's use of the rank table is in
+`espnow_time_core_tests` and `espnow_time_status`.
+
 ## Ring clock confirmation
 
 `clock_confirm_policy_tests` runs `System_ClockConfirmPolicy.h`, the rule that decides
