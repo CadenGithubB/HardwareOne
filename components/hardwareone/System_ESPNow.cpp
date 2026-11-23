@@ -7877,7 +7877,7 @@ static portMUX_TYPE gPairLock = portMUX_INITIALIZER_UNLOCKED;
 // The key the pending incoming request carried (V4PayloadPairRequest.senderPub),
 // under gPairLock with gPair.in: an accept binds the key exchange that follows
 // to it (pairKeyBind).
-static uint8_t gPairInPub[32] = {};
+EXT_RAM_BSS_ATTR static uint8_t gPairInPub[32];
 static uint8_t gPairInPubMac[6] = {};
 static bool gPairInPubValid = false;
 
@@ -20970,6 +20970,13 @@ espnowrevoke::Admit espnowKeyExAdmit(const uint8_t mac[6], const uint8_t pub[32]
     return espnowrevoke::Admit::NotAccepted;
   }
   return verdict;
+}
+
+bool espnowLocalPairingOpen(const uint8_t mac[6]) {
+  if (!mac) return false;
+  const EspNowDevice* dev = groupRecordOf(mac);
+  return pairingWindowOpenFor(mac) ||
+         (dev && espnowrevoke::firstKeyOpen(dev->awaitingKeyUntilMs, (uint32_t)millis()));
 }
 
 void espnowFirstKeyBound(const uint8_t mac[6]) {

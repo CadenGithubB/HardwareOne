@@ -152,6 +152,10 @@ static espnowrevoke::Admit espnowKeyExAdmit(const uint8_t mac[6], const uint8_t 
 static void pairKeyUnbind(const uint8_t mac[6]);
 static void espnowFirstKeyBound(const uint8_t* mac) { ++gBound; pairKeyUnbind(mac); }
 static void espnowPairRollbackRevoked(const uint8_t*) { ++gRollbacks; }
+// A local pairing action for the MAC (espnowpairsecure's window or the first-key
+// window; production espnowLocalPairingOpen): only then may a stored key move slot.
+static bool gLocalPairing = false;
+static bool espnowLocalPairingOpen(const uint8_t*) { return gLocalPairing; }
 
 struct Sent { uint8_t dst[6]; uint8_t type; std::vector<uint8_t> payload; };
 static std::vector<Sent> gOutbox;
@@ -363,6 +367,7 @@ static void reset() {
   gFirstKeyWindow = true;
   gListLocked = false;
   gBound = gRollbacks = 0;
+  gLocalPairing = false;
   std::memset(gPairKeyBind, 0, sizeof gPairKeyBind);
   gBackoffClears = 0;
   gNowMs += 100000;
@@ -481,13 +486,48 @@ int main() {
         peerIdentityFindByMac(a.mac)->lastSeenSec == (uint32_t)(paired + 3600),
         "K6 then not again, and not with an unset clock (FAILS ON BASE)");
 
-  // K7 — the same peer and key seen on another mesh slot is a change and is written.
+  // K7 (1.0 step 4 review) — the same key on another mesh slot does not move
+  // the stored identity by itself: both sides key the session under that slot.
+  // It moves only while a local pairing action is open, and only by the
+  // exchange the lower address started.
   reset();
   hello(a, 0);
   gNowMs += kLimitMs;
   hello(a, 1);
-  check(gWrites == 2 && replies() == 2 && peerIdentityFindByMac(a.mac)->meshId == 1,
-        "K7 a HELLO on another mesh updates and writes the record (preserved)");
+  check(gWrites == 1 && replies() == 2 && peerIdentityFindByMac(a.mac)->meshId == 0,
+        "K7 a HELLO for another mesh with no pairing action open is answered; the key stays on its slot, no write");
+  gLocalPairing = true;
+  gNowMs += kLimitMs;
+  hello(a, 1);
+  check(gWrites == 1 && peerIdentityFindByMac(a.mac)->meshId == 0,
+        "K7 with a pairing action open, a HELLO from the higher address does not move it either");
+  {
+    Peer low = peer(1, 0x31);
+    low.mac[0] = 0x00;   // below this device's 02:00:00:00:00:01
+    gLocalPairing = false;
+    hello(low, 0);
+    gNowMs += kLimitMs;
+    hello(low, 1);
+    check(peerIdentityFindByMac(low.mac)->meshId == 0, "K7 the lower address, no pairing action: not moved");
+    gLocalPairing = true;
+    gNowMs += kLimitMs;
+    hello(low, 1);
+    check(peerIdentityFindByMac(low.mac)->meshId == 1 && gWrites == 3,
+          "K7 the lower address's exchange with a pairing action open moves it (and writes)");
+  }
+  // Our own exchange (a REPLY): this device is the lower address, so its
+  // exchange decides while pairing; the peer's later HELLO for the other mesh
+  // does not move it back. The two sides of a pairing from both ends end on
+  // the same slot whatever arrives first.
+  reset();
+  gLocalPairing = true;
+  hello(a, 1);                     // the peer's exchange (its default mesh) arrives first
+  helloOut(a.mac, false);
+  replyFrom(a, 0);                 // our exchange on our default mesh
+  check(peerIdentityFindByMac(a.mac)->meshId == 0, "K7 our (lower) exchange moves the key to our mesh");
+  gNowMs += kLimitMs;
+  hello(a, 1);
+  check(peerIdentityFindByMac(a.mac)->meshId == 0, "K7 the peer's exchange does not move it back");
 
   // K8 — a failed file write: no REPLY, and the cache stays equal to the file,
   // so the next HELLO writes instead of finding the key "unchanged".
@@ -547,11 +587,11 @@ int main() {
   hello(a, 0);
   gNowMs += 30;
   hello(a, 1);
-  check(replies() == 2 && gWrites == 2 && peerIdentityFindByMac(a.mac)->meshId == 1,
-        "K12 two HELLOs for two meshes 30 ms apart are both answered; the record ends on the second mesh");
+  check(replies() == 2 && gWrites == 1 && peerIdentityFindByMac(a.mac)->meshId == 0,
+        "K12 two HELLOs for two meshes 30 ms apart are both answered; the key stays on the first slot");
   gNowMs += 30;
   hello(a, 1);
-  check(replies() == 2 && gWrites == 2, "K12 a copy of the second one inside the interval is still dropped");
+  check(replies() == 2 && gWrites == 1, "K12 a copy of the second one inside the interval is still dropped");
 
   // K13 — finding X4 (round 3): a REPLY to a key exchange that an unpair
   // called off stores nothing, so the unpaired peer's identity (and its
@@ -834,6 +874,33 @@ int main() {
 #else
   check(false, "the tree's CONFIRM handler keeps the retries (review finding 3)");
 #endif
+
+  // K26 (1.0 step 4 review) — a new sender takes an unused slot of the HELLO
+  // table, not the live record of a sender acted on more than a second ago, so
+  // that sender's answered nonces are still known and its recorded HELLO is
+  // still a copy. With every slot used, the one acted on longest ago goes.
+  reset();
+  {
+    const Peer p1 = peer(31, 0x31), p2 = peer(32, 0x32);
+    hello(p1);
+    uint8_t n1[16];
+    std::memcpy(n1, gLastHelloNonce, 16);
+    gNowMs += 2000;
+    hello(p2);
+    gNowMs += 2000;
+    hello(p1, 0, false, n1);   // the recorded HELLO of p1
+    check(replies() == 2, "K26 a second sender does not take the first one's record: its recorded HELLO is still a copy");
+    reset();
+    for (uint8_t n = 1; n <= 16; n++) { hello(peer(n, (uint8_t)(0x60 + n))); gNowMs += 10; }
+    uint8_t lastNonce[16];
+    std::memcpy(lastNonce, gLastHelloNonce, 16);   // sender 16, acted on last
+    gNowMs += 2000;
+    hello(peer(40, 0x40));                          // a 17th sender: takes sender 1's slot (oldest)
+    gNowMs += 2000;
+    const unsigned before = replies();
+    hello(peer(16, 0x70), 0, false, lastNonce);     // sender 16's recorded HELLO
+    check(replies() == before, "K26 with every slot used, the oldest goes: sender 16's copy is still dropped");
+  }
 
   std::printf("%u failure(s)\n", gFailures);
   return gFailures ? 1 : 0;

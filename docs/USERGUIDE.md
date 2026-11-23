@@ -638,7 +638,9 @@ If the revoked list file (`/system/espnow/revoked.json`) is there but cannot be 
 Devices that get the same new passphrase open new sessions by themselves (they keep their keys and
 are not paired again); a device that does not have it cannot open or renew a session any more, even
 with modified firmware. A session frame from a device with another passphrase shows in the log as
-`mesh key mismatch`. A typo in the new passphrase on one device cuts that device off until it is
+`mesh key mismatch` (naming the mesh its stored key is on). A device's stored key stays on the
+mesh it was paired on: a key exchange on another shared mesh moves it only during a pairing action on
+this device, and when both devices pair from both ends the lower address's mesh is used. A typo in the new passphrase on one device cuts that device off until it is
 corrected. Renaming a mesh (`espnowmeshes rename`) closes its sessions too.
 
 ### Radio channel

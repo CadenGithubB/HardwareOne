@@ -142,7 +142,7 @@ def build_keyex(crypto):
                    'gKeyExHelloSeen'),
               one(crypto, 'enum class HelloVerdict', name) + ';']
     for marker in ('KeyExHelloSeen* keyExHelloSlotFor(', 'HelloVerdict keyExHelloAdmit(', 'void keyExNoteReply(',
-                   'bool keyExConfirmMatchesReply('):
+                   'bool keyExConfirmMatchesReply(', 'uint8_t keyExStoreSlot('):
         parts.append(one(crypto, marker, name))
     # The in-flight table (nonces of our HELLOs), then its accessors.
     parts += [line(crypto, r'^constexpr uint8_t\s+kKeyExInFlightSlots\s*=.*;', 'kKeyExInFlightSlots'),
@@ -259,6 +259,9 @@ def main():
     if 'pairKeyUnbind(mac);' not in extract_block(espnow, 'void espnowFirstKeyBound(const uint8_t mac[6])') or \
             'pairKeyUnbind(mac);' not in extract_block(espnow, 'static void espnowUnpairClearPairing(const uint8_t mac[6])'):
         fail('a binding does not end when the key binds or the device is unpaired')
+    local = extract_block(espnow, 'bool espnowLocalPairingOpen(const uint8_t mac[6])')
+    if 'pairingWindowOpenFor(mac)' not in local or 'espnowrevoke::firstKeyOpen(' not in local:
+        fail('espnowLocalPairingOpen is not the pairsecure window or the first-key window')
     print('test_espnow_keyex_hello: all cases passed')
 
 

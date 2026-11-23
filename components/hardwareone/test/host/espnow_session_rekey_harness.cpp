@@ -1176,6 +1176,8 @@ int main() {
   check(B.outbox.empty() && sessOf(B) == nullptr, "C30 the OPEN gets no CONFIRM and no slot");
   check(logsContaining(B, "WARN", "mesh key mismatch") == 1 && logsContaining(B, "WARN", "signature") == 0,
         "C30 B logs 'mesh key mismatch', not a signature failure");
+  check(logsContaining(B, "WARN", "mesh 'mesh' (slot 0") == 1 && logsContaining(B, "WARN", "or the frame was altered") == 1,
+        "C30 the line names the mesh slot in use and says the frame may have been altered");
   // The other way round: B's OPEN (tagged under B's key) is refused at A too.
   use(B);
   check(espnowSessionOpenInitiate(A.mac, "mesh") && B.outbox.size() == 1, "C30 setup: B sends OPEN");

@@ -4622,7 +4622,9 @@ bytes, `openEpochMs`), the C1 mesh tags, the C2 session keys and bond token, and
 checks tie the handlers, `sessionDeriveKeyMaterial`, the rekey derivation, `v4_group_tag`, the stretch and the
 settings `kdf` record to those builders. Run the vectors script to print the vectors after a deliberate change.
 
-`espnow_keyex_hello` (K2, K20-K25): a replayed HELLO (a nonce already answered) gets no REPLY; a forged CONFIRM
+`espnow_keyex_hello` (K7, K12, K26 after the step 4 review: a same-key exchange on another mesh does not move the
+stored slot unless a local pairing action is open and the lower address started it; a new sender takes an unused
+HELLO-table slot, else the oldest; K2, K20-K25): a replayed HELLO (a nonce already answered) gets no REPLY; a forged CONFIRM
 refusal leaves the HELLO retries armed; an authenticated status 3 ends the key exchange in flight and keeps the
 back-off, and is ignored with none in flight or over another HELLO's nonce; the status 3 this device sends is 34
 bytes and tagged over the HELLO it refuses; a REPLY with no exchange in flight, or a recorded one over an older

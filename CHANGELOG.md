@@ -89,6 +89,10 @@ Host-tested and built; not run on a device.
   16-byte tag over both addresses, nonces and keys): an authenticated "not accepted" ends this
   device's key exchange in flight (the automatic tries keep backing off), and a forged one is
   ignored.
+- A stored key stays on the mesh it was paired on: a key exchange on another mesh both devices share
+  moves it only while a pairing action is open on this device, and when two devices pair from both
+  ends with different default meshes both end on the lower address's mesh (both sides key the
+  session under that mesh).
 - After `espnowaccept`, the key exchange that follows must present the key the pair request carried
   (the keyId shown with the prompt); another key is answered "not accepted".
 - SESSION_OPEN carries the sender's clock (`openEpochMs`, signed; 0 when the clock is not set).

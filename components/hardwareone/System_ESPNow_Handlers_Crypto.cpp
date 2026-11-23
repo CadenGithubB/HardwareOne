@@ -227,6 +227,8 @@ KeyExHelloSeen* keyExHelloSlotFor(const uint8_t mac[6], uint16_t meshFp) {
 // What to do with a verified HELLO from `mac` for mesh `meshFp` carrying
 // `nonce`; notes it when it is acted on.
 HelloVerdict keyExHelloAdmit(const uint8_t mac[6], uint16_t meshFp, const uint8_t nonce[16], uint32_t nowMs) {
+  // A new sender takes an unused slot first; only when there is none, the
+  // lapsed slot acted on longest ago (its nonce memory and REPLYs go with it).
   KeyExHelloSeen* spare = nullptr;
   for (auto& e : gKeyExHelloSeen) {
     const bool lapsed = !e.used || (uint32_t)(nowMs - e.actedMs) >= kKeyExHelloMinIntervalMs;
@@ -240,7 +242,9 @@ HelloVerdict keyExHelloAdmit(const uint8_t mac[6], uint16_t meshFp, const uint8_
       if (e.nonceCount < kKeyExHelloNonceMemory) e.nonceCount++;
       return HelloVerdict::Act;
     }
-    if (lapsed && !spare) spare = &e;
+    if (!lapsed) continue;
+    if (!spare) { spare = &e; continue; }
+    if (spare->used && (!e.used || (uint32_t)(nowMs - e.actedMs) > (uint32_t)(nowMs - spare->actedMs))) spare = &e;
   }
   if (!spare) return HelloVerdict::NoSlot;
   memset(spare, 0, sizeof(*spare));
@@ -290,6 +294,34 @@ bool keyExConfirmMatchesReply(const V4PayloadKeyExConfirm& conf, const uint8_t s
     }
   }
   return false;
+}
+
+// The mesh slot a verified KEY_EX stores for `peerMac` and `pub`. Both sides
+// key the session (C1 tag, C2 keys) under the slot their identity names, so
+// they must agree, and a key exchange on another mesh does not move a stored
+// identity of the same key by itself:
+//   - no stored identity, or another key (first key, re-key window): the
+//     frame's slot;
+//   - same key, same slot: unchanged;
+//   - same key, another slot: moved only while a local pairing action for
+//     the MAC is open (espnowLocalPairingOpen), and only by the exchange the
+//     lower MAC started, so two devices that pair from both sides with
+//     different default meshes end on the same slot (the lower MAC's). A
+//     replayed HELLO for another mesh moves nothing (and writes nothing).
+// `weInitiated`: this device sent the HELLO (a REPLY); otherwise the peer did.
+uint8_t keyExStoreSlot(const uint8_t peerMac[6], const uint8_t pub[32], uint8_t frameSlot, bool weInitiated) {
+  const PeerIdentity* existing = peerIdentityFindByMac(peerMac);
+  if (!existing || memcmp(existing->longTermPub, pub, 32) != 0 || existing->meshId == frameSlot) return frameSlot;
+  uint8_t selfMac[6]; espnowSelfStaMac(selfMac);
+  const bool lowerStarted = weInitiated ? memcmp(selfMac, peerMac, 6) < 0 : memcmp(peerMac, selfMac, 6) < 0;
+  if (lowerStarted && espnowLocalPairingOpen(peerMac)) return frameSlot;
+  static uint32_t sSlotKeptLogMs = 0;
+  if (logCooldownOk(sSlotKeptLogMs, 30000)) {
+    INFO_ESPNOWF("KEY_EX with " MAC_FMT " on mesh slot %u: its key stays on mesh slot %u (%s)",
+                 MAC_ARGS(peerMac), (unsigned)frameSlot, (unsigned)existing->meshId,
+                 lowerStarted ? "no local pairing action is open" : "the lower address's exchange decides");
+  }
+  return existing->meshId;
 }
 
 }  // namespace
@@ -640,7 +672,8 @@ void v4hKeyExHello(const V4RxCtx& ctx) {
     // points into.
     bool identityNewOrReplaced = !existing ||
         memcmp(existing->longTermPub, msg->senderPubEd25519, 32) != 0;
-    if (!peerIdentityPersist(msg->senderMac, (uint8_t)meshSlot,
+    const uint8_t storeSlot = keyExStoreSlot(msg->senderMac, msg->senderPubEd25519, (uint8_t)meshSlot, false);
+    if (!peerIdentityPersist(msg->senderMac, storeSlot,
                              msg->senderPubEd25519, bondedAt)) {
       ERROR_ESPNOWF("KEY_EX_HELLO: identity persist failed; not replying");
       return;
@@ -805,7 +838,8 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   // BEFORE persist mutates the slot `existing` points into.
   bool identityNewOrReplaced = !existing ||
       memcmp(existing->longTermPub, msg->responderPubEd25519, 32) != 0;
-  if (!peerIdentityPersist(msg->responderMac, (uint8_t)meshSlot,
+  const uint8_t storeSlot = keyExStoreSlot(msg->responderMac, msg->responderPubEd25519, (uint8_t)meshSlot, true);
+  if (!peerIdentityPersist(msg->responderMac, storeSlot,
                            msg->responderPubEd25519, bondedAt)) {
     ERROR_ESPNOWF("KEY_EX_REPLY: identity persist failed");
     return;
@@ -839,7 +873,7 @@ void v4hKeyExReply(const V4RxCtx& ctx) {
   // kick then leaves it alone. One that finds the session already ACTIVE (a
   // late answer) must not replace it, which a kick on an ACTIVE session does:
   // what is waiting goes out over the live session.
-  const SessionState* live = sessionFindByPeer(msg->responderMac, (uint8_t)meshSlot);
+  const SessionState* live = sessionFindByPeer(msg->responderMac, storeSlot);
   if (live && live->state == SESSION_ACTIVE) {
     pendingFrameDrainForPeer(msg->responderMac);
   } else if (pendingFrameHasForPeer(msg->responderMac)) {
@@ -1226,10 +1260,11 @@ bool sessionSealRekey(V4PayloadSessionRekey& m, uint8_t slot, const uint8_t sec[
 void logMeshKeyMismatch(const char* what, const uint8_t mac[6], uint8_t slot) {
   uint16_t n = sessionRejectLogCount(mac);
   if (!n) return;
-  WARN_ESPNOWF("%s from " MAC_FMT " rejected (x%u in 30s): mesh key mismatch - it does not hold the current "
-               "passphrase of mesh '%s'. Set the same passphrase on both ('espnowsetpassphrase').",
+  WARN_ESPNOWF("%s from " MAC_FMT " rejected (x%u in 30s): mesh key mismatch on mesh '%s' (slot %u, the one "
+               "its stored key names) - it does not hold that mesh's current passphrase (or the frame was "
+               "altered). Set the same passphrase on both ('espnowsetpassphrase').",
                what, MAC_ARGS(mac), (unsigned)n,
-               slot < Settings::N_MESHES ? gSettings.meshes[slot].label.c_str() : "?");
+               slot < Settings::N_MESHES ? gSettings.meshes[slot].label.c_str() : "?", (unsigned)slot);
 }
 
 }  // namespace
