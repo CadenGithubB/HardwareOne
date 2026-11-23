@@ -341,7 +341,38 @@ void testFeedRestartKeepsTaps() {
 
 }  // namespace
 
+// A baseline taken from a wrong first reading (zeros, or a pose changed while
+// starting) must not leave the detector inside a knock for good.
+static void testStuckBaselineRecovers() {
+  Config cfg;
+  Detector d;
+  Event ev;
+  float zero[3] = {0, 0, 0};
+  assert(!d.add(cfg, zero, 1000, ev));  // ignored: no measurement
+  float still[3] = {0, 0, 1000};
+  // A baseline far from the still pose: force one by feeding an offset first.
+  float off[3] = {1000, 0, 0};
+  d.add(cfg, off, 2000, ev);
+  bool sawLong = false;
+  uint32_t t = 2000;
+  for (int i = 0; i < 1000; ++i) {
+    t += 2404;
+    if (d.add(cfg, still, t, ev) && ev.verdict == knock::Verdict::Long) sawLong = true;
+  }
+  assert(sawLong && !d.inKnock() && d.lastDevMg() < 50);
+  // And a real tap after it still counts.
+  std::vector<Event> evs;
+  for (uint32_t k = 0; k < 200; ++k) {
+    t += 2404;
+    float mg[3] = {0, 0, 1000};
+    knockAt(k * 2.404f, 100, 900, 25, mg);
+    if (d.add(cfg, mg, t, ev)) evs.push_back(ev);
+  }
+  assert(!evs.empty() && evs.back().verdict == knock::Verdict::Tap);
+}
+
 int main() {
+  testStuckBaselineRecovers();
   testQuietTimePerRate();
   testSingleTap100();
   testFourTapRun100();

@@ -71,6 +71,11 @@ struct Event {
 
 constexpr float kBaselineTauMs = 40.0f;  // the slow level the jump is measured from
 constexpr uint32_t kKnockQuietUs = 8000; // under the start level this long ends a knock
+// A knock still open after this long is no knock: the baseline was wrong (a
+// first reading taken before the chip had data, or a new pose held still).
+// It ends as "long" and the baseline restarts from the present reading, so
+// the detector can never stay "inside a knock" for good.
+constexpr uint32_t kKnockMaxOpenUs = 1000000;
 constexpr uint16_t kMinStartMg = 60;     // the start level never goes below this (noise)
 // At a slow rate the quiet time is at least this many sample periods: at
 // 100 Hz one period (10 ms) is already longer than kKnockQuietUs, and a single
@@ -95,6 +100,8 @@ class Detector {
   // One accelerometer sample in mg at time tUs (microseconds, wrapping). True
   // when a knock ended with this sample; `ev` then holds it.
   bool add(const Config& cfg, const float mg[3], uint32_t tUs, Event& ev) {
+    // An all-zero reading is no measurement (a chip still starting): never a baseline.
+    if (mg[0] == 0.0f && mg[1] == 0.0f && mg[2] == 0.0f) return false;
     if (!haveBase_) {
       for (int i = 0; i < 3; ++i) base_[i] = mg[i];
       haveBase_ = true;
@@ -131,6 +138,14 @@ class Detector {
       } else if (static_cast<uint32_t>(tUs - lastAboveUs_) >= knockQuietUs(cfg.sampleHz)) {
         ended = true;
         finish(cfg, ev);
+      }
+      if (!ended && static_cast<uint32_t>(tUs - startUs_) >= kKnockMaxOpenUs) {
+        lastAboveUs_ = tUs;
+        ended = true;
+        finish(cfg, ev);
+        for (int i = 0; i < 3; ++i) base_[i] = mg[i];  // restart the baseline here
+        lastUs_ = tUs;
+        return true;
       }
     }
     // The baseline follows slow changes (tilt) but holds still during a knock.
