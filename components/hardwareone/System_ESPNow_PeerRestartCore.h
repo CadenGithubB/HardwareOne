@@ -8,14 +8,14 @@
 // a SESSION_OPEN glare.
 //
 // Two independent signals end such a session at once:
-//   1. The BOOT notice a device sends to its paired peers at every start
-//      (group-signed, so it arrives without a session). It carries the peer's
-//      boot counter; a counter newer than the last one seen from that peer
-//      closes the session this device holds with it. A device that still holds
-//      a live session with a peer when it sends its notice (ESP-NOW was closed
-//      and opened again: sessions stay in RAM) seals the notice in that session
-//      instead (bootNoticeSendMode); a sealed notice proves the session works,
-//      so it closes nothing and only records the counter.
+//   1. The boot counter in every mesh heartbeat (ESP-NOW 1.0 step 8; it
+//      replaced the BOOT frame 31). A device that holds no ACTIVE session with
+//      a peer sends its heartbeats group-tagged, so they arrive without a
+//      session; a counter newer than the last one seen from that peer closes
+//      the session this device holds with it. A device that still holds a live
+//      session with the peer (ESP-NOW was closed and opened again: sessions
+//      stay in RAM) seals its heartbeats in it; a sealed heartbeat proves the
+//      session works, so it closes nothing and only records the counter.
 //   2. The SESSION_UNKNOWN hint: a device that receives a sealed frame for a
 //      session it does not have answers once (group-signed, rate-limited) with
 //      the session id and frame sequence it could not open. The sender closes
@@ -26,35 +26,37 @@
 // as always.
 //
 // Both signals are only group-signed (any member of the peer's mesh could
-// forge one; a captured notice can be re-sent by anyone in range, the dedup
+// forge one; a captured heartbeat can be re-sent by anyone in range, the dedup
 // ring forgets it after 5 s), so:
 //   - only a group tag of the peer's own mesh counts (peerRestartSignalScoped):
 //     a member of another mesh this device is in cannot end the session;
 //   - a forced close happens at most once per peer per
 //     kPeerRestartDropMinIntervalMs, shared by both signals;
-//   - a notice with the counter already seen, an older one, or none closes
-//     nothing and is not recorded: re-sent copies of old notices (two from
+//   - a heartbeat with the counter already seen, an older one, or 0 closes
+//     nothing and is not recorded: re-sent copies of old heartbeats (two from
 //     different starts played in turn included) can never close a session
-//     again, and the counter a notice records only ever moves forward;
+//     again, and the counter a heartbeat records only ever moves forward;
 //   - a session younger than kPeerRestartFreshSessionMs is kept: a restarted
-//     device sends its notice before anything else, so a session that young
+//     device heartbeats before it opens a session, so a session that young
 //     was opened after the restart;
 //   - a hint closes only the live session it names, and only when the
 //     sequence is one this device sealed in it (1..last sent).
 //
 // Boot counters are compared wrap-safe: newer means 0 < (notice - known) as a
 // signed 32-bit difference. A counter seen in a sealed frame of the live
-// session (the bond heartbeat, a sealed notice) cannot be a copy, so it
-// becomes the known counter outright, lower ones included. A peer whose count
-// was erased (it starts at 1 again) is therefore not locked out: its notices
-// close nothing until a sealed frame of it shows the new count (a bond
-// partner: its first heartbeat) or this device restarts, and meanwhile the
-// SESSION_UNKNOWN hint ends each stale session on the first message sent into
-// it. A counter of 0 (the peer could not read its count) or a notice without
-// one closes nothing either (the hint covers that peer). The table lives in
-// RAM only: after this device restarts every peer starts unknown, and its
-// first notice with a counter counts as a restart (a copy of an old one can
-// thus close a session once per peer per start of this device).
+// session (a sealed mesh heartbeat, the bond heartbeat) cannot be a copy, so
+// it becomes the known counter outright, lower ones included. A peer whose
+// count was erased (it starts at 1 again) is therefore not locked out: its
+// tagged heartbeats close nothing until a sealed one shows the new count or
+// this device restarts, and meanwhile the SESSION_UNKNOWN hint ends each stale
+// session on the first message sent into it. A counter of 0 (the peer could
+// not read its count) closes nothing either (the hint covers that peer). The
+// table lives in RAM only: after this device restarts every peer starts
+// unknown, and its first heartbeat with a counter counts as a restart for the
+// session rule (a copy of an old one can thus close a session once per peer
+// per start of this device). A restart is reported only from sealed counters
+// (peerRestartBootSeen): the first sealed counter after this device's start
+// reports nothing, a later sealed one that moved forward reports once.
 //
 // Pure logic on a small fixed table (no heap, no lock, no clock); the owner
 // (System_ESPNow_Sessions.cpp) holds the instance in PSRAM and the lock.
@@ -66,10 +68,10 @@
 
 // One entry per paired device (MESH_PEER_MAX = 16).
 constexpr uint8_t  kPeerRestartSlots = 16;
-// A forced close (notice or hint) per peer at most this often. A forged signal
-// costs at most one fresh handshake per peer per 10 s.
+// A forced close (boot counter or hint) per peer at most this often. A forged
+// signal costs at most one fresh handshake per peer per 10 s.
 constexpr uint32_t kPeerRestartDropMinIntervalMs = 10000;
-// A session this young when a notice arrives was opened after the restart.
+// A session this young when a newer counter arrives was opened after the restart.
 constexpr uint32_t kPeerRestartFreshSessionMs = 2000;
 // A device answers sealed frames for a session it does not have with at most
 // one hint per peer this often (a burst of frames gets one).
@@ -80,6 +82,8 @@ struct PeerRestartEntry {
   bool     haveBoot;      // `boot` holds the last counter seen from this peer
   uint8_t  mac[6];
   uint32_t boot;
+  bool     haveConfirmed; // `confirmedBoot` holds the last counter seen SEALED
+  uint32_t confirmedBoot; // (only the peer can send it: restart reports go by it)
   uint32_t lastDropMs;    // 0 = no forced close yet
   uint32_t lastHintTxMs;  // 0 = no hint sent yet
   uint32_t lastUseMs;
@@ -131,38 +135,31 @@ inline void peerRestartNoteDrop(PeerRestartEntry& e, uint32_t nowMs) {
   e.lastDropMs = nowMs ? nowMs : 1;
 }
 
-// A counter seen in a sealed frame of the live session (the bond heartbeat, a
-// notice sealed in the session): only the peer can send it and it cannot be
+// A counter seen in a sealed frame of the live session (a sealed mesh
+// heartbeat, the bond heartbeat): only the peer can send it and it cannot be
 // replayed, so it becomes the reference outright, also when lower (the peer's
-// count was erased). It never closes anything.
-inline void peerRestartBootSeen(PeerRestartTable& t, const uint8_t mac[6], uint32_t boot, uint32_t nowMs) {
-  if (boot == 0) return;
+// count was erased). It never closes anything. True when it moved the last
+// SEALED counter forward: the peer restarted since this device last saw its
+// count in a session. Only this reports a restart (the "Online (boot #N)"
+// record): a group-tagged counter can be sent by any member of the mesh, so
+// reporting on it would let one file a record per forged counter.
+inline bool peerRestartBootSeen(PeerRestartTable& t, const uint8_t mac[6], uint32_t boot, uint32_t nowMs) {
+  if (boot == 0) return false;
   PeerRestartEntry* e = peerRestartClaim(t, mac, nowMs);
+  const bool restarted = e->haveConfirmed && bootCounterNewer(boot, e->confirmedBoot);
   e->boot = boot;
   e->haveBoot = true;
+  e->confirmedBoot = boot;
+  e->haveConfirmed = true;
+  return restarted;
 }
 
-// A notice or hint that is only group-signed counts when its tag is of the
+// A heartbeat or hint that is only group-signed counts when its tag is of the
 // peer's own mesh (the header fingerprint the tag was checked under equals the
 // fingerprint of the mesh the peer is paired in). A sealed one came over the
 // peer's own session.
 inline bool peerRestartSignalScoped(bool sessionSealed, uint16_t frameFingerprint, uint16_t peerFingerprint) {
   return sessionSealed || (frameFingerprint != 0 && frameFingerprint == peerFingerprint);
-}
-
-enum class BootNoticeSend : uint8_t {
-  Signed = 0,  // group-signed (BROADCAST_AUTH), ttl 1: arrives without a session
-  Sealed = 1,  // in the session (v4_send_payload_smart: sealed, or queued until one opens)
-};
-
-// How the BOOT notice goes to one paired peer. Sealed when this device still
-// holds a live (ACTIVE or REKEYING) session with it (ESP-NOW was closed and
-// opened again; the peer's session is still good and must not be ended), and
-// when no group key for its mesh is held or the notice does not fit a signed
-// frame. Signed otherwise: this device has no session with the peer, so any
-// session the peer holds with it is stale.
-inline BootNoticeSend bootNoticeSendMode(bool sessionLive, bool groupKeyHeld, bool fitsSigned) {
-  return (!sessionLive && groupKeyHeld && fitsSigned) ? BootNoticeSend::Signed : BootNoticeSend::Sealed;
 }
 
 enum class PeerBootVerdict : uint8_t {
@@ -172,18 +169,17 @@ enum class PeerBootVerdict : uint8_t {
   RateLimited  = 3,  // a restart, but a forced close happened less than 10 s ago
   SameBoot     = 4,  // the counter already seen: this start was handled
   OlderBoot    = 5,  // the counter went back (a copy, or an erased peer): nothing closed or recorded
-  NoCounter    = 6,  // no usable counter (none, or 0): nothing closed or recorded
+  NoCounter    = 6,  // no usable counter (0): nothing closed or recorded
 };
 
-// A group-signed BOOT notice from `mac` (tag of the peer's mesh checked, the
-// peer is paired). `hasCounter` is false when the notice carries no usable
-// counter. `sessionLive` says whether this device holds an ACTIVE (or
-// REKEYING) session with the peer, opened or rekeyed `sessionAgeMs` ago.
-inline PeerBootVerdict peerRestartOnBootNotice(PeerRestartTable& t, const uint8_t mac[6],
-                                               bool hasCounter, uint32_t boot,
-                                               bool sessionLive, uint32_t sessionAgeMs,
-                                               uint32_t nowMs) {
-  if (!hasCounter || boot == 0) return PeerBootVerdict::NoCounter;
+// The boot counter of a group-tagged heartbeat from `mac` (tag of the peer's
+// mesh checked, the peer is paired). `sessionLive` says whether this device
+// holds an ACTIVE (or REKEYING) session with the peer, opened or rekeyed
+// `sessionAgeMs` ago. Never reports a restart (peerRestartBootSeen does, on
+// the sealed counter that follows).
+inline PeerBootVerdict peerRestartOnBootCounter(PeerRestartTable& t, const uint8_t mac[6], uint32_t boot,
+                                                bool sessionLive, uint32_t sessionAgeMs, uint32_t nowMs) {
+  if (boot == 0) return PeerBootVerdict::NoCounter;
   PeerRestartEntry* e = peerRestartClaim(t, mac, nowMs);
   if (e->haveBoot) {
     if (boot == e->boot) return PeerBootVerdict::SameBoot;
@@ -196,15 +192,6 @@ inline PeerBootVerdict peerRestartOnBootNotice(PeerRestartTable& t, const uint8_
   if (!peerRestartDropAllowed(*e, nowMs)) return PeerBootVerdict::RateLimited;
   peerRestartNoteDrop(*e, nowMs);
   return PeerBootVerdict::DropSession;
-}
-
-// Whether the notice is filed (history, console) after the rule ran. A counter
-// already seen or an older one is a copy of a notice this device already
-// filed or a re-sent old one (anyone in range can capture a group-signed frame
-// and play it again once the 5 s dedup forgets it): not filed again, so
-// re-sent notices make no false "started" entries. Everything else is filed.
-inline bool peerBootNoticeFiled(PeerBootVerdict v) {
-  return v != PeerBootVerdict::SameBoot && v != PeerBootVerdict::OlderBoot;
 }
 
 enum class UnknownSessionReply : uint8_t {

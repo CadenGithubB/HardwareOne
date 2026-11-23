@@ -42,15 +42,15 @@ inline int8_t linkMetricOf(const MeshPeerHealth* ph) {
 
 // The single definition of "I can hand a frame to this neighbour right now".
 // Everything else in this file defers to it, which is what keeps failover and
-// fail-back symmetric.
+// fail-back symmetric. 1.0 step 8 (RC3): the link must be proven both ways
+// (meshPeerLinkOf == TwoWay, System_ESPNow_LinkCore.h). Hearing a neighbour is
+// not enough: it may not hear us (one-way), and the pairing bootstrap seeds
+// the heard clock with a guess. A one-way neighbour gets no direct route, so
+// a learned path through a relay that hears it both ways wins.
 bool neighbourAlive(const uint8_t mac[6], uint32_t nowMs) {
+  (void)nowMs;   // the link reads its own clock
   if (!esp_now_is_peer_exist(mac)) return false;
-  const MeshPeerHealth* ph = getMeshPeerHealth(mac, false);
-  // everHeardDirect, not lastRxActivityMs != 0: the pairing bootstrap seeds the
-  // timestamp optimistically, and installing a direct route on that guess would
-  // shadow the real (relayed) path to a peer we cannot actually hear.
-  if (!ph || !ph->isActive || !ph->everHeardDirect) return false;
-  return (uint32_t)(nowMs - ph->lastRxActivityMs) < MESH_PEER_TIMEOUT_MS;
+  return meshPeerLinkOf(getMeshPeerHealth(mac, false)) == MeshLink::TwoWay;
 }
 
 MeshRoute* findRoute(const uint8_t dst[6]) {
@@ -212,8 +212,14 @@ void meshRouterIngestAdvert(const uint8_t* fromMac, int8_t linkMetric,
 
   const uint32_t nowMs = (uint32_t)millis();
   gMetrics.advertsReceived++;
+  // The advert rule (1.0 step 8, DESIGN 4.3): an advert from a neighbour whose
+  // link is not proven both ways is not installed. It cannot be a direct route
+  // (it may not hear us), and it cannot be a next hop for the routes it lists
+  // either (meshRouterSyncDirect withdraws any route whose next hop is not
+  // direct). Its next advert, once two-way, is taken.
+  if (!neighbourAlive(fromMac, nowMs)) return;
 
-  // Hearing from them IS the freshest possible direct-reachability evidence.
+  // A two-way neighbour's advert refreshes its direct entry.
   noteDirect(fromMac, linkMetric, nowMs);
 
   for (uint8_t i = 0; i < count; i++) {

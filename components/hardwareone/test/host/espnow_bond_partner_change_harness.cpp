@@ -460,7 +460,10 @@ static std::vector<uint32_t> gWatchedSends;
 [[maybe_unused]] static void v4_dedup_flush_origin(const uint8_t*) {}
 // The partner's boot counter recorded for the peer-restart rule
 // (espnow_peer_restart_tests runs it).
-[[maybe_unused]] static void sessionPeerBootSeen(const uint8_t*, uint32_t) {}
+// A sealed boot counter (1.0 step 8: returns whether it moved past the last
+// sealed one; then the restart is filed). Never a restart here.
+[[maybe_unused]] static bool sessionPeerBootSeen(const uint8_t*, uint32_t) { return false; }
+[[maybe_unused]] static void espnowFilePeerRestart(const uint8_t*, uint32_t, bool) {}
 // The auth log: the reason text of every record (bondNotifySessionEstablished
 // writes one per bond session).
 static std::vector<std::string> gAuthLines;

@@ -110,12 +110,12 @@ bool v4_emit_ack(const uint8_t* dst, uint16_t classFlag, uint16_t sessionId, con
 #include "System_ESPNow_Sensors.h"  // RemoteSensorType
 #include "System_ESPNow_HistoryCore.h"  // per-peer message-history byte rings (espnowhist::)
 #include "System_ESPNow_Wire.h"  // CapabilitySummary, BondPeerStatus (wire structs)
+#include "System_ESPNow_LinkCore.h"  // MeshLinkState: two-way liveness (1.0 step 8)
 
 // Settings persistence (broadcastOutput is provided by System_Debug.h).
 bool writeSettingsJson();
 
 // Message types
-#define MSG_TYPE_BOOT "BOOT"  // the BOOT notice (opcode 31) JSON type; goes with BOOT
 
 // Bond roles (stored as uint8_t in gSettings.bondRole when ENABLE_BONDED_MODE).
 // When bonded mode is compiled out, helpers are false/"none" stubs so mesh-only
@@ -319,22 +319,20 @@ extern int gMeshPeerSlots;
 // Peer membership vs telemetry:
 //   - Paired remotes live in gEspNow->devices[] (and esp_now peer table).
 //   - MeshPeerHealth is RX telemetry keyed by MAC (mesh HB, ACK, TEXT, etc.).
-//   - lastMeshHeartbeatMs = only V3 HEARTBEAT frames; lastRxActivityMs = any tracked RX
-//     (see noteMeshPeerRxActivity). meshstatus JSON merges devices + health (buildMeshStatusPeersJson).
+//   - lastMeshHeartbeatMs = only HEARTBEAT frames; lastRxActivityMs = the heard
+//     clock: any sealed or group-tagged frame received directly (not relayed),
+//     or the pairing seed (see noteMeshPeerRxActivity). `link` adds the two-way
+//     evidence (System_ESPNow_LinkCore.h, 1.0 step 8); meshPeerLinkOf is the one
+//     definition. meshstatus JSON merges devices + health (buildMeshStatusPeersJson).
 
 struct MeshPeerHealth {
   uint8_t mac[6];
-  bool onlineLogged;             // Edge latch for the [EVENT][MESH] online/offline pair.
-                                 // Keyed on heartbeat-based aliveness, NOT isActive (which
-                                 // any RX frame re-arms) — so a powered-off / ACK-only peer
-                                 // that never heartbeats never logs a spurious 'offline'.
+  bool heardLogged;              // Edge latch: the peer is heard (link != None). Its rising
+                                 // edge ends the peer's handshake back-off.
   uint8_t _pad[1];               // Padding for alignment
-  uint32_t lastMeshHeartbeatMs;  // Last V3 HEARTBEAT from this peer (mesh sync / isMeshPeerAlive)
-  uint32_t lastRxActivityMs;     // Last ACK, HEARTBEAT, TEXT, or bootstrap liveness bump
-  uint32_t lastAckMs;            // Last ACK from this peer
+  uint32_t lastMeshHeartbeatMs;  // Last HEARTBEAT from this peer (telemetry, automation age)
+  uint32_t lastRxActivityMs;     // The heard clock (see above); the pairing seed sets it too
   uint32_t heartbeatCount;       // HEARTBEAT frames received (not pairing bootstrap)
-  uint32_t ackCount;             // ACKs received
-  uint32_t lastBootCounter;      // Last known boot counter from this peer
   int8_t rssi;                   // Last RSSI from heartbeat payload
   int16_t linkRssiEwma;          // EWMA (alpha 1/4) of OUR radio's per-frame RSSI for
                                  // frames from this peer — the true A<->B link quality.
@@ -347,17 +345,8 @@ struct MeshPeerHealth {
                                  // Later route metrics key on this
                                  // (docs/ESPNOW_RELAY_RESTORE_PLAN.md).
   bool isActive;                 // true if this slot is in use
-  // True once a frame from this peer has actually been received over the radio.
-  // Distinct from lastRxActivityMs != 0, because BootstrapLiveness SEEDS that
-  // timestamp at pairing time to get the peer into broadcast fan-out — an
-  // optimistic guess, not an observation. Multi-hop routing asks "can I reach
-  // this peer directly?" and must not be fooled by the guess: a peer paired by
-  // MAC while out of range would look audible for a full timeout window, and
-  // every frame sent to it in that window (starting with the KEY_EX that
-  // completes the pairing) would go out on a link that isn't there.
-  // Never set for relayed frames — noteMeshPeerRxActivity returns early for
-  // those, since they prove nothing about the direct link.
-  bool everHeardDirect;
+  MeshLinkState link;            // two-way evidence, heartbeat echo, direct sends (RC3)
+  MeshEventLatch events;         // online/offline events, one per 30 s (RC3)
 };
 
 // hbRssi: pass RSSI from V4PayloadHeartbeat; use -128 to leave peer->rssi unchanged.
@@ -374,10 +363,14 @@ void noteMeshPeerRxActivity(const uint8_t* mac, EspNowMeshRxKind kind, int8_t hb
                             int8_t linkRssi = -128, bool senderProven = false);
 
 // Fills JsonArray for espnow meshstatus: union of active gMeshPeers + paired remotes not yet in slots.
-// JSON keys: mac, name, alive (mesh HB), activityAlive, lastHeartbeat (mesh HB ms), lastRxActivity,
-// lastAck, heartbeatCount, ackCount, secondsSinceHeartbeat, secondsSinceActivity,
-// linkRssi (locally-measured per-frame EWMA dBm; 0 = no sample yet).
-void buildMeshStatusPeersJson(JsonArray peers, uint32_t nowMillis, int* outTotalPeers);
+// JSON keys: mac, name, alive (heard within 30 s), state (online/connecting/offline), link
+// (twoWay/oneWay/none), lastTwoWayAgeMs (null: no two-way evidence yet), heartbeatCount,
+// secondsSinceHeartbeat, secondsSinceActivity, linkRssi (locally-measured per-frame EWMA dBm;
+// 0 = no sample yet), peerHeardRssi (the RSSI the peer reports for our heartbeats; 0 = none).
+// Rows are added while `doc` still fits a command result (CMD_RESULT_MAX) with `tailBytes` kept
+// for the fields after the list; the rest are counted in *outNotShown.
+void buildMeshStatusPeersJson(JsonDocument& doc, JsonArray peers, uint32_t nowMillis, int* outTotalPeers,
+                              int* outNotShown, size_t tailBytes);
 
 // ==========================
 // Mesh Peer Metadata (device organization for rooms/zones/tags)
@@ -394,9 +387,10 @@ struct MeshPeerMeta {
   bool stationary;         // From espnowStationary
   uint32_t sensorMask;     // From CapabilitySummary or workerStatus
   uint32_t lastMetaUpdate; // millis() when metadata last received
-  // Per-peer heartbeat backoff timing. Lives here (not in MeshPeerHealth)
-  // because a dead peer's health slot is memset on every 5 s bootstrap, so it
-  // can't hold state; this meta slot is durable. See meshHeartbeatMinInterval.
+  // Per-peer heartbeat backoff timing (meshHeartbeatMinInterval,
+  // System_ESPNow_LinkCore.h). Lives here (not in MeshPeerHealth) because the
+  // health slot of an unpaired member is given up when it goes silent (a
+  // paired peer's is kept since ESP-NOW 1.0 step 8); this meta slot is durable.
   uint32_t hbLastHeardMs;  // millis() of last received mesh HEARTBEAT, seeded to
                            // slot birth so a never-heard peer still ages. Any
                            // received heartbeat resets it -> full rate resumes.
@@ -459,34 +453,6 @@ struct MeshSeenEntry {
   uint32_t msgId;
 };
 
-// ==========================
-// Broadcast ACK Tracking
-// ==========================
-#define BROADCAST_TRACKER_SLOTS 8
-#define BROADCAST_TRACKER_MAX_PEERS 20
-#define BROADCAST_TRACKER_TIMEOUT_MS 3000
-
-struct BroadcastTracker {
-  uint32_t msgId;                                     // Message ID being tracked
-  uint32_t startMs;                                  // When broadcast started
-  uint8_t peerMacs[BROADCAST_TRACKER_MAX_PEERS][6]; // MACs we sent to
-  bool ackReceived[BROADCAST_TRACKER_MAX_PEERS];     // Which peers ACK'd
-  uint8_t expectedCount;                             // Number of peers we sent to
-  uint8_t receivedCount;                             // Number of ACKs received
-  bool active;                                       // Tracker slot in use
-  bool reported;                                     // Results already reported
-  
-  void reset() {
-    msgId = 0;
-    startMs = 0;
-    memset(peerMacs, 0, sizeof(peerMacs));
-    memset(ackReceived, 0, sizeof(ackReceived));
-    expectedCount = 0;
-    receivedCount = 0;
-    active = false;
-    reported = false;
-  }
-};
 
 // ==========================
 // Unpaired Device Tracking
@@ -1212,6 +1178,9 @@ uint32_t espnowPairModeRemainingMs();
 bool espnowBackupPromoted();
 // An ACTIVE session with a paired peer; *establishedAtMs: when it went ACTIVE.
 bool espnowSessionUp(const uint8_t* mac, uint32_t* establishedAtMs = nullptr);
+// The session with `mac` is ACTIVE or REKEYING (it works; a rekey keeps it
+// usable). The peer state (espnowPeerState) counts it as up. Any task (a read).
+bool espnowSessionLive(const uint8_t* mac);
 // True on a mesh worker while its master session is ACTIVE and a sealed frame
 // from the master came within 30 s (channel follow): the Wi-Fi rehunt waits.
 // Any task (an atomic read).
@@ -1322,18 +1291,24 @@ inline bool shouldStreamSensorToRemote() {
 extern MeshPeerHealth* gMeshPeers;   // Dynamically allocated [gMeshPeerSlots] at init
 
 // Mesh helper utilities (moved from .ino)
+// The one link definition (DESIGN 4.3, System_ESPNow_LinkCore.h): None (not
+// heard within 30 s), OneWay (heard, not proven both ways), TwoWay. Reads
+// only, any task (the reader risk of gMeshPeers).
+MeshLink meshPeerLinkOf(const MeshPeerHealth* peer);
+MeshLink meshPeerLinkFor(const uint8_t mac[6]);
+// Heard within 30 s (meshPeerLinkOf != None).
 bool isMeshPeerAlive(const MeshPeerHealth* peer);
-bool isMeshPeerRecentlyActive(const MeshPeerHealth* peer);
 MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing = false);
 // Compare against the checked STA identity cached for this ESP-NOW instance.
 // While stopped, a checked driver query preserves the existing helper behavior.
 bool isSelfMac(const uint8_t* mac);
-// A peer's state (System_ESPNow_PeerStateCore.h): its mesh heartbeat
-// (isMeshPeerAlive) and its encrypted session (espnowSessionUp), as every
-// surface reads them. Reads only, any task (the reader risk of gMeshPeers).
+// A peer's state (System_ESPNow_PeerStateCore.h): its link (meshPeerLinkOf)
+// and its encrypted session (espnowSessionLive: ACTIVE or REKEYING, so a rekey
+// does not make a peer connecting), as every surface reads them. Reads only,
+// any task (the reader risk of gMeshPeers).
 inline EspNowPeerState espnowPeerState(const uint8_t mac[6]) {
   const MeshPeerHealth* health = getMeshPeerHealth(mac, false);
-  return espnowPeerStateOf(health && isMeshPeerAlive(health), espnowSessionUp(mac));
+  return espnowPeerStateOf(health ? meshPeerLinkOf(health) : MeshLink::None, espnowSessionLive(mac));
 }
 // The paired peers (gEspNow->devices[] without this device) by state; all
 // zero while ESP-NOW is stopped.
@@ -1377,13 +1352,8 @@ int requestTopologyDiscovery();  // peers that took the request; -1 when none wa
 void sendTopologyResponse(uint32_t reqId, const uint8_t masterMac[6], JsonArray requestPath);
 void checkTopologyCollectionWindow();  // Check collection window and finalize when timeout expires
 
-void meshSendBootToPeers(const String& envelope);  // boot notice via ESPNOW_V4_TYPE_BOOT — RX stores it as MSG_SYSTEM_EVENT, not chat
-
 // Topology state (for auto-discovery check in loop)
 extern uint32_t gLastTopoRequest;
-
-// Mesh message builders
-String buildBootNotification(uint32_t msgId, const char* src, uint32_t bootCounter, uint32_t timestamp);
 
 // V2 envelope builder (for user sync and other features)
 void v2_init_envelope(JsonDocument& doc, const char* type, uint32_t msgId, const char* src, const char* dst, int ttl);
@@ -1680,8 +1650,8 @@ void espnowAppPingNoteAck(const uint8_t* src, uint32_t ackFor, bool sealed);
 //
 // DESIGN NOTE — stub field divergence is intentional:
 //   The real MeshPeerHealth/MeshTopoNode (above, under #if ENABLE_ESPNOW)
-//   carry full telemetry fields (lastMeshHeartbeatMs, lastRxActivityMs, heartbeatCount, ackCount,
-//   lastBootCounter, _pad, etc.).  The stubs below are deliberately minimal —
+//   carry full telemetry fields (lastMeshHeartbeatMs, lastRxActivityMs, heartbeatCount, link,
+//   events, _pad, etc.).  The stubs below are deliberately minimal —
 //   they only need to satisfy the compiler for *declarations* and for the few
 //   inline no-op stubs that accept MeshPeerHealth* parameters.
 //
@@ -1727,7 +1697,6 @@ inline const char* cmd_espnow_init(const String& argsInput) { return "ESP-NOW di
 inline void sendEspNowStreamMessage(const char* topic, const char* payload) {}
 inline bool isSelfMac(const uint8_t* mac) { return false; }
 inline bool isMeshPeerAlive(const MeshPeerHealth* peer) { return false; }
-inline bool isMeshPeerRecentlyActive(const MeshPeerHealth*) { return false; }
 inline void noteMeshPeerRxActivity(const uint8_t*, EspNowMeshRxKind, int8_t = -128, int8_t = -128, bool = false) {}
 inline bool meshEnabled() { return false; }
 inline bool resolveDeviceNameOrMac(const String& nameOrMac, uint8_t* outMac) {

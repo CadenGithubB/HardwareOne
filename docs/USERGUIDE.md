@@ -242,7 +242,7 @@ deeper still: **Camera settings** is reached from Hardware -> sensor list -> `CA
 
 | App | Notes |
 | --- | ----- |
-| **ESP-NOW** | Peer messaging. Distinct from Connect -> ESP-NOW, which owns the settings. `Peers (2/3 up)` counts the paired devices other than this one and how many are online (a mesh heartbeat within 30 s and an encrypted session up); `Peers (2/3 up +1 conn)` adds the peers still connecting (heartbeat, no session yet), and the rest are offline. The status line's `ESPNow: 2/3 up` and the other Peers rows count the same way |
+| **ESP-NOW** | Peer messaging. Distinct from Connect -> ESP-NOW, which owns the settings. `Peers (2/3 up)` counts the paired devices other than this one and how many are online (heard within 30 s, proven two-way and an encrypted session up; see "Peer states" under ESP-NOW Mesh); `Peers (2/3 up +1 conn)` adds the peers still connecting (heard, but one-way or no session yet), and the rest are offline. The status line's `ESPNow: 2/3 up` and the other Peers rows count the same way |
 | **Files** | Browse, view, rename, delete. Folders carry an item-count badge |
 | **Notes** | Private spoken notes (QuickNote): `● New note`, your newest notes, read and delete (requires `ENABLE_QUICKNOTE`) - see [QUICKNOTE.md](QUICKNOTE.md) |
 | **Maps** | Pan/zoom offline map viewer. Row reads `Maps (none)` when no map files are present (requires `ENABLE_MAPS`) |
@@ -884,6 +884,52 @@ another passphrase or label). If two meshes have one id anyway (an edited or res
 one in the higher slot sends and receives nothing until its passphrase or label changes, with one warning
 at each start of the device.
 
+### Peer states: online, connecting, offline
+Every surface (the web page, the OLED, the G2 lens, the automation `PEERS` value, metrics, MQTT and
+`espnowmeshstatus`) shows a paired device in one of three states:
+
+| State | Meaning |
+|---|---|
+| online | heard in the last 30 s, **and it proved it hears this device too** (two-way), and an encrypted session is up. Commands and messages work |
+| connecting | heard in the last 30 s, but not proven two-way yet, or no session yet (a few seconds after a restart). A device this one can hear but that cannot hear back stays connecting (one-way) |
+| offline | not heard for 30 s |
+
+Two-way proof comes only from encrypted frames: an encrypted acknowledgement of a frame this device
+sent straight to it, or an encrypted heartbeat that echoes one of this device's heartbeats. A device
+becomes two-way after two such proofs within 30 s and stays two-way while one comes every 30 s; with
+sessions up both devices send an encrypted heartbeat every 5 s, so a working pair is online within
+about 10 s. Group-signed frames (before a session) and frames that came through a relay show only that
+the device is heard.
+
+`espnowmeshstatus` gives each peer's `state`, its `link` (`twoWay`, `oneWay` or `none`), how long ago
+the last two-way proof came (`lastTwoWayAgeMs`) and `peerHeardRssi` (how strongly the peer hears this
+device's heartbeats). The reply always fits one command result: in a large mesh with long names the
+rows that do not fit are counted in `peersNotShown` / `unpairedNotShown` (paired peers come first). `espnowdevices` prints the state, `(connecting, one-way` for a peer heard only one
+way. The web page's device list shows Online, Connecting or Offline with the link.
+
+- **Messages to a one-way peer** do not go straight to it when a relay can reach it both ways; with no
+  such relay they are still tried directly. A relay is used only when this device's link to the relay
+  is two-way, which needs a session: the relay must be paired with this device.
+- **Heartbeats to a silent peer** slow down after 30 s without hearing it, to one every 10 s (it was up to
+  one every 30 s). A device that cannot hear this one therefore still hears from it at least every 10 s,
+  so it does not go offline and back between heartbeats, and a mesh worker does not start a channel hunt
+  because its master cannot hear it.
+- **A restart** is seen in the peer's heartbeat: it carries the device's boot count. A newer count than
+  before ends the session this device still held with it (the next message opens a new one) and leaves
+  one `Online (boot #N)` line in that device's conversation, written once the device's first encrypted
+  heartbeat after the restart shows the new count. A copy of an old heartbeat played back by someone in
+  range ends nothing and writes nothing. (The separate boot notice frame of earlier builds is gone.)
+- **Events** `peer_online` / `peer_offline` follow the online state: online when the peer becomes online,
+  offline when it stops being online (silent, or only connecting). At most one per peer per 30 s; a
+  change that is undone within the 30 s posts nothing, otherwise the state at the end of the 30 s is
+  posted. The log line says why (`not heard for 30 s`, `connecting: one-way ...`, `connecting: no session`).
+- A paired device keeps its place in the peer table while it is offline. A key renewal (rekey) does
+  not make a device connecting.
+- Limits: someone in radio range who relays this device's and the other device's encrypted frames
+  in real time (without any key) can make a one-way link look two-way; they cannot read or change
+  anything, the worst case is a message that goes unanswered. Someone who replays a paired device's
+  old group-signed frames can keep it shown as connecting after it was switched off (never online).
+
 ### Rooms, tags and group commands
 `espnowroomcmd <room> <user> <pass> <command>` and `espnowtagcmd <tag> <user> <pass> <command>` run a command on every device of a room or with a tag. The user and password are an account on the target devices and travel with the command, encrypted for each device.
 
@@ -1008,7 +1054,7 @@ setting, regardless of which setting it was.
 
 | Kind | Fires when | subject / detail |
 |---|---|---|
-| `peer_online` / `peer_offline` | mesh peer heartbeat appears / times out (30s) | peer name / MAC |
+| `peer_online` / `peer_offline` | mesh peer becomes online (heard, two-way, session up) / stops being online (silent for 30 s, or only connecting); at most one per peer per 30 s | peer name / MAC |
 | `peer_paired` | a peer is saved as paired (`espnowpairsecure`, or an accepted `espnowpairrequest`); pairing mode only discovers; it does not pair by itself | peer name / MAC |
 | `text_rx` | ESP-NOW text message received | sender / text preview |
 | `file_rx` | ESP-NOW file received (not the bond's own sync files: the partner's settings, manifest, schema and automation list) | sender / filename |
@@ -1107,7 +1153,7 @@ Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum vari
 | System | `CHIPTEMP` | numeric | SoC temperature, C; the condition is false when the chip has no reading |
 | Network | `WIFI` `BLE` | enum | `CONNECTED` / `NONE` |
 | Network | `RSSI` | numeric | WiFi signal, dBm (negative; only while connected) |
-| Network | `PEERS` | numeric | paired ESP-NOW peers that are online: a mesh heartbeat within 30 s and an encrypted session up (a peer with a heartbeat but no session yet is connecting and not counted) |
+| Network | `PEERS` | numeric | paired ESP-NOW peers that are online: heard within 30 s, proven two-way and an encrypted session up (a peer heard one way only, or with no session yet, is connecting and not counted) |
 | Location | `GPS` | enum | `FIX` / `NOFIX` |
 | Location | `SPEED` `SATS` | numeric | GPS ground speed (knots) / satellites in view |
 | Location | `WP_DIST:<name>` | numeric | meters from current GPS fix to a named map waypoint (case-insensitive name; fail-closed if no fix, maps off, or waypoint missing) |
@@ -1195,8 +1241,8 @@ nearest target). The device names its board as model and its firmware as softwar
 peer bridged by the master has neither, shows Last Seen, and appears as `peer-B2C3` when it has no
 name.
 A bridged peer is available in Home Assistant (`<base>/devices/hardwareone_<MAC>/availability` is
-`online`, retained) only while it is online: a mesh heartbeat within 30 s and an encrypted session
-up. A peer still connecting (heartbeat, no session yet) and a silent one are `offline`, so its
+`online`, retained) only while it is online: heard within 30 s, proven two-way and an encrypted
+session up. A peer still connecting (one-way or no session yet) and a silent one are `offline`, so its
 entities show unavailable; the master refreshes the availability of every known peer each publish
 interval, also when the peer sent no new reading. The peer's state document has `system.online`
 (`true` only while online) and `system.state` (`online`, `connecting` or `offline`).
@@ -1544,7 +1590,7 @@ espnowholdresult <seconds|off>  - Bench test: hold each received command result 
 
 --- Mesh ---
 espnowmode [direct|mesh]        - Get/set routing mode
-espnowmeshstatus                - Show mesh peer health (heartbeats, ACKs)
+espnowmeshstatus                - Show mesh peer health (state, two-way link, heartbeats)
 espnowmeshmetrics               - Show routing metrics (forwards, drops, route churn)
 espnowmeshroutes                - Show the route table (who's reachable, and via whom)
 espnowmeshttl [1-10]            - Hops a message may travel (1 = direct only)
@@ -2366,7 +2412,7 @@ fragments), sent one at a time, which is why the page-open cadence is 10 s rathe
 clear, so the tile can be blank for a second or two. `g2 stats feed off` clears the widget. The default metrics, in order, are `CPU,HEAP,PSRM,SD,LFS,CLK,LINK,MESH,RING` (CPU load,
 internal RAM used, PSRAM used, SD card used, flash storage used, CPU clock in MHz with a chart up to
 the chip's top clock (400 on the P4, 240 on the ESP32 and S3), BLE links in use, ESP-NOW peers online
-(heartbeat and encrypted session; a peer still connecting is not counted) out of the paired peers,
+(heard, two-way and an encrypted session; a peer still connecting is not counted) out of the paired peers,
 R1 ring battery); `TEMP` (chip temperature), `CPU0`, `CPU1` (per core) and `HBLK` (largest internal
 RAM block, KB) can be chosen too, e.g. `g2 stats metrics cpu,heap,psrm,temp`. A device whose saved
 list is still the earlier default (`TEMP` in the place of `CLK`) shows the new default; any other

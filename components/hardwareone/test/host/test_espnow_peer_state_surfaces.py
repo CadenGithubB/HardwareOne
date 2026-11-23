@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """The system metric and the MQTT / Home Assistant peer values use the one peer state.
 
-An ESP-NOW peer is online (a mesh heartbeat within 30 s AND an encrypted
-session up), connecting (the heartbeat, no session yet) or offline (no recent
-heartbeat): System_ESPNow_PeerStateCore.h, read through espnowPeerState /
+An ESP-NOW peer is online (heard within 30 s, the link proven both ways AND an
+encrypted session up), connecting (heard, but one-way or no session yet) or
+offline (not heard within 30 s): System_ESPNow_PeerStateCore.h (ESP-NOW 1.0
+step 8 added the two-way link, meshPeerLinkOf), read through espnowPeerState /
 espnowPeerCounts in System_ESPNow.h (owner decision 2026-11-20, "three states
 on every surface"). The OLED and the automation PEERS value moved first
 (test_oled_espnow_remote_actions), the lens rows in test_g2_espnow_peer_rows.
@@ -11,11 +12,11 @@ This suite covers the rest:
 
 Part one compiles the production accessors (System_ESPNow.h), readMesh and its
 Raw reading (System_Metrics.cpp) and meshPeerAvailability (System_MQTT.cpp)
-against doubles of the paired registry, the heartbeat table and the session
+against doubles of the paired registry, the link table and the session
 table:
 - the MESH metric is the online peers out of the paired ones; a connecting
-  peer, a session without a heartbeat, this device's own registry entry and an
-  unpaired peer are never counted online; it is unavailable while ESP-NOW is
+  peer, a one-way peer with a session, a session without a heartbeat, this
+  device's own registry entry and an unpaired peer are never counted online; it is unavailable while ESP-NOW is
   stopped;
 - a peer's Home Assistant availability is "online" for an online peer only;
   connecting and offline are both "offline".
@@ -85,7 +86,7 @@ static EspNowState espnow;
 static EspNowState* gEspNow = &espnow;
 static const uint8_t selfMac[6] = {0x02, 0, 0, 0, 0, 0xEE};
 static bool isSelfMac(const uint8_t* mac) { return std::memcmp(mac, selfMac, 6) == 0; }
-struct MeshPeerHealth { uint8_t id; bool recent; };
+struct MeshPeerHealth { uint8_t id; bool recent; bool oneWay; };
 static std::vector<MeshPeerHealth> heartbeats;
 static std::vector<uint8_t> sessions;
 static MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing) {
@@ -93,10 +94,17 @@ static MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMiss
   for (auto& slot : heartbeats) if (slot.id == mac[5]) return &slot;
   return nullptr;
 }
-static bool isMeshPeerAlive(const MeshPeerHealth* slot) { return slot && slot->recent; }
-static bool espnowSessionUp(const uint8_t* mac, uint32_t* = nullptr) {
+static MeshLink meshPeerLinkOf(const MeshPeerHealth* slot) {
+  return !slot || !slot->recent ? MeshLink::None : slot->oneWay ? MeshLink::OneWay : MeshLink::TwoWay;
+}
+static std::vector<uint8_t> rekeying;   // sessions in REKEYING (still usable)
+[[maybe_unused]] static bool espnowSessionUp(const uint8_t* mac, uint32_t* = nullptr) {
   for (uint8_t id : sessions) if (mac[5] == id) return true;
   return false;
+}
+static bool espnowSessionLive(const uint8_t* mac) {
+  for (uint8_t id : rekeying) if (mac[5] == id) return true;
+  return espnowSessionUp(mac);
 }
 static void paired(std::initializer_list<uint8_t> ids) {
   espnow = EspNowState();
@@ -109,7 +117,7 @@ static void paired(std::initializer_list<uint8_t> ids) {
 }
 static void heard(std::initializer_list<uint8_t> ids) {
   heartbeats.clear();
-  for (uint8_t id : ids) heartbeats.push_back({id, true});
+  for (uint8_t id : ids) heartbeats.push_back({id, true, false});
 }
 static const uint8_t* macOf(uint8_t id) {
   static uint8_t mac[6];
@@ -148,7 +156,9 @@ int main() {
   heard({1});                                // sessions that outlived the heartbeats
   sessions = {1, 2, 3};
   CHECK(mesh(1, 3));
-  heartbeats = {{1, true}, {2, false}, {3, false}};
+  heartbeats = {{1, true, false}, {2, false, false}, {3, false, false}};
+  CHECK(mesh(1, 3));
+  heartbeats = {{1, true, false}, {2, true, true}, {3, true, true}};   // 2 and 3 heard one-way only
   CHECK(mesh(1, 3));
   paired({0xEE, 1});                         // 4 and 5 heard with sessions, not paired
   heard({1, 4, 5, 0xEE});
@@ -173,6 +183,18 @@ int main() {
   // The document's system.state words.
   CHECK(std::strcmp(espnowPeerStateName(espnowPeerState(macOf(2))), "connecting") == 0);
   CHECK(std::strcmp(espnowPeerStateName(espnowPeerState(macOf(3))), "offline") == 0);
+  // A rekey keeps the peer online (review fix 2: no offline / online events
+  // around every rekey).
+  heartbeats = {{1, true, false}};
+  sessions.clear();
+  rekeying = {1};
+  CHECK(espnowPeerState(macOf(1)) == EspNowPeerState::Online);
+  CHECK(mesh(1, 3));
+  rekeying.clear();
+  sessions = {1};
+  heartbeats = {{1, true, true}};                         // one-way with a session: connecting
+  CHECK(std::strcmp(espnowPeerStateName(espnowPeerState(macOf(1))), "connecting") == 0);
+  CHECK(std::strcmp(meshPeerAvailability(espnowPeerState(macOf(1))), "offline") == 0);
   std::printf("%u\n", checks);
   return 0;
 }
@@ -206,7 +228,7 @@ def source_failures(component: Path) -> list[str]:
     failures: list[str] = []
     metrics = code_of((component / "System_Metrics.cpp").read_text(encoding="utf-8"))
     mesh = extract_block(metrics, "Raw readMesh()")
-    if "espnowPeerCounts()" not in mesh or re.search(r"espnowSessionUp\(|isMeshPeerAlive\(|gMeshPeers", mesh):
+    if "espnowPeerCounts()" not in mesh or re.search(r"espnowSessionUp\(|isMeshPeerAlive\(|meshPeerLinkOf\(|gMeshPeers", mesh):
         failures.append("System_Metrics.cpp readMesh does not count with espnowPeerCounts()")
 
     mqtt = code_of((component / "System_MQTT.cpp").read_text(encoding="utf-8"))

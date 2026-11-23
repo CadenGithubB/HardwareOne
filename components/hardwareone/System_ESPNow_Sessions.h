@@ -538,22 +538,20 @@ bool sessionOpenIdStale(const SessionState* s, uint16_t sessionId);
 // EspNowTxGuard), the session close and the lines. All run on espnow_task
 // (RX dispatch), never in the radio callback.
 
-// A group-signed BOOT notice from paired `peerMac` (the caller checked the tag
-// is of the peer's mesh; a sealed notice goes to sessionPeerBootSeen). `hasCounter` false when the notice carries no boot counter. On
-// a restart it closes the ACTIVE/REKEYING session this device holds with the
-// peer (sends after it queue and open a new one; frames that already wait
-// stay queued and go out on the new session) and prints one line naming the
-// peer. Returns the verdict.
-PeerBootVerdict sessionPeerBootNotice(const uint8_t peerMac[6], bool hasCounter, uint32_t bootCounter);
+// The boot counter of a group-tagged mesh heartbeat from paired `peerMac` (the
+// caller checked the tag is of the peer's mesh; a sealed heartbeat goes to
+// sessionPeerBootSeen). On a restart it closes the ACTIVE/REKEYING session
+// this device holds with the peer (sends after it queue and open a new one;
+// frames that already wait stay queued and go out on the new session) and
+// prints one line naming the peer. It reports no restart record
+// (sessionPeerBootSeen does, on the sealed counter). Returns the verdict.
+PeerBootVerdict sessionPeerBootCounter(const uint8_t peerMac[6], uint32_t bootCounter);
 
-// A boot counter seen in a sealed frame of the live session (bond heartbeat, a
-// BOOT notice sealed in the session): becomes the reference outright (lower
-// ones included: the peer's count was erased); never ends a session.
-void sessionPeerBootSeen(const uint8_t peerMac[6], uint32_t bootCounter);
-
-// This device holds an ACTIVE or REKEYING session with paired `peerMac` (the
-// slot of its identity's mesh). meshSendBootToPeers seals the notice then.
-bool sessionLiveWithPeer(const uint8_t peerMac[6]);
+// A boot counter seen in a sealed frame of the live session (a sealed mesh
+// heartbeat, the bond heartbeat): becomes the reference outright (lower ones
+// included: the peer's count was erased); never ends a session. True when a
+// counter this device knew moved forward (the peer restarted meanwhile).
+bool sessionPeerBootSeen(const uint8_t peerMac[6], uint32_t bootCounter);
 
 // The receive path found no ACTIVE/REKEYING session for a sealed frame from
 // `srcMac`: answers with a SESSION_UNKNOWN hint when the rules say so (the

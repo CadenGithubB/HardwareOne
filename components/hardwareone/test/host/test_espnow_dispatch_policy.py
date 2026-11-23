@@ -8,11 +8,11 @@ LogMessageType and TextQueueEntry from System_ESPNow.h, the opcode/flag enums
 and header from System_ESPNow_Wire.h and V4RxCtx from System_ESPNow_RxCtx.h,
 generates one recording double per other handler named in the table, and
 compiles the harness once with ENABLE_BONDED_MODE 1 and once with 0. The cases
-check that opcode 130 (SUBSCRIBE_UPDATE, retired in 1.0) has no row, that
+check that opcodes 130 (SUBSCRIBE_UPDATE) and 31 (BOOT), retired in 1.0, have no row, that
 TIME_SYNC, SENSOR_STATUS, SENSOR_REQ, SENSOR_ENVELOPE, POWER_STATUS,
 EVENT_PUSH and FORWARD_LINK need one too (keyed or keyless device, a signed broadcast is not
 enough, no bond partner required), that
-HEARTBEAT, TEXT and BOOT need an authenticated frame once the device has a
+HEARTBEAT and TEXT need an authenticated frame once the device has a
 mesh passphrase (plaintext stays accepted on a keyless device), that plaintext
 TEXT accepted on a keyless device is filed under its MAC rather than a paired
 peer's name and posts no SYSEVT_TEXT_RX, that authenticated text keeps its
@@ -74,8 +74,8 @@ EXPECTED_MINLEN = {
     'KEY_EX_HELLO': 72, 'KEY_EX_REPLY': 72, 'KEY_EX_CONFIRM': 34,
     'SESSION_OPEN': 154, 'SESSION_CONFIRM': 162, 'SESSION_REKEY': 146,
     'SESSION_UNKNOWN': 12, 'TIME_SYNC': 16,
-    'TEXT': 1, 'BOOT': 1, 'CMD': 1, 'CMD_RESP': 5, 'USER_SYNC': 1, 'STREAM': 6,
-    'RELAY_DATA': 40, 'PEER_LIST': 4, 'HEARTBEAT': 44, 'PAIR_BEACON': 36,
+    'TEXT': 1, 'CMD': 1, 'CMD_RESP': 5, 'USER_SYNC': 1, 'STREAM': 6,
+    'RELAY_DATA': 40, 'PEER_LIST': 4, 'HEARTBEAT': 56, 'PAIR_BEACON': 36,
     'PAIR_REQUEST': 72, 'PAIR_ACCEPT': 40, 'PAIR_REJECT': 40,
     'SENSOR_STATUS': 16, 'SENSOR_REQ': 20, 'BOND_SENSOR_STATUS': 16,
     'SENSOR_ENVELOPE': 13, 'BOND_SENSOR_DATA': 13,
@@ -215,6 +215,8 @@ def main():
     # rule behind it is a recording double (espnow_peer_restart_tests runs it).
     if 'static V4Verdict v4h_session_unknown(' in source:
         assert source.count('static V4Verdict v4h_session_unknown(') == 1, 'one definition required'
+        if 'v4h_boot' not in real_handlers:   # the rule header (peerRestartSignalScoped) came with BOOT before 1.0 step 8
+            text_handler += '\n\n' + read('System_ESPNow_PeerRestartCore.h').replace('#pragma once', '')
         text_handler += ('\n\n' + extract_block(wire, 'struct __attribute__((packed)) V4PayloadSessionUnknown')
                          + ';\n'
                          'static int sessionUnknownHintReceived(const uint8_t*, const V4PayloadSessionUnknown*) {\n'

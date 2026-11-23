@@ -4,15 +4,16 @@
 // sent three messages into it; all three were lost, and the XIAO noticed only
 // after two send timeouts (~10 s).
 //
-// Cases: a BOOT notice with a newer counter (or a first one) closes a live
-// session; the same counter, an older one (never recorded: copies of old
-// notices played in turn close nothing), a missing session or a session opened
-// after the restart close nothing; a counter from a sealed frame becomes the
-// reference outright (an erased peer is not locked out); counters compare
-// across the 32-bit wrap; a counter of 0 or none closes nothing; only a group
-// tag of the peer's own mesh counts; a notice is sealed when a live session is
-// held; a forged notice forces at most one close per peer per 10 s, shared
-// with the hint; the device without
+// Cases: a group-tagged heartbeat whose boot counter is newer (or a first one)
+// closes a live session (1.0 step 8; this was the BOOT notice 31); the same
+// counter, an older one (never recorded: copies of old heartbeats played in
+// turn close nothing), a missing session or a session opened after the restart
+// close nothing; a counter from a sealed frame becomes the reference outright
+// (an erased peer is not locked out); counters compare across the 32-bit wrap;
+// a counter of 0 closes nothing; only a group tag of the peer's own mesh
+// counts; only a sealed counter past the last sealed one is reported as a
+// restart; a forged heartbeat forces at most one close per peer per
+// 10 s, shared with the hint; the device without
 // the session answers at most one hint per peer per second and none for its own
 // handshake or a replaced session; a hint closes only the live session it
 // names, for a sequence this device sealed; the table gives up its oldest entry
@@ -46,22 +47,22 @@ static const uint32_t kOld = 60000;  // age of a session opened long before the 
 // holds a session with it; the P4 restarts and its notice arrives.
 static void benchRestart() {
   PeerRestartTable t = {};
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 133, true, kOld, 50000) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 133, true, kOld, 50000) == V::DropSession);
   // The notice is recorded: the same start seen again changes nothing.
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 133, true, kOld, 70000) == V::SameBoot);
+  CHECK(peerRestartOnBootCounter(t, kP4, 133, true, kOld, 70000) == V::SameBoot);
   // The next restart closes the session opened in between.
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 134, true, kOld, 200000) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 134, true, kOld, 200000) == V::DropSession);
 }
 
 static void nothingToClose() {
   PeerRestartTable t = {};
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 10, false, 0, 1000) == V::NoSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 10, false, 0, 1000) == V::NoSession);
   // Recorded anyway: the session opened afterwards is not closed by a copy.
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 10, true, kOld, 90000) == V::SameBoot);
+  CHECK(peerRestartOnBootCounter(t, kP4, 10, true, kOld, 90000) == V::SameBoot);
   // A session opened after the restart (younger than the notice can be) stays.
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 11, true, kPeerRestartFreshSessionMs - 1, 200000) ==
+  CHECK(peerRestartOnBootCounter(t, kP4, 11, true, kPeerRestartFreshSessionMs - 1, 200000) ==
         V::FreshSession);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 12, true, kPeerRestartFreshSessionMs, 300000) ==
+  CHECK(peerRestartOnBootCounter(t, kP4, 12, true, kPeerRestartFreshSessionMs, 300000) ==
         V::DropSession);
 }
 
@@ -70,15 +71,15 @@ static void nothingToClose() {
 // different starts played in turn, for as long as they are played.
 static void replayedNotice() {
   PeerRestartTable t = {};
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 40, true, kOld, 1000) == V::DropSession);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 41, true, kOld, 100000) == V::DropSession);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 41, true, kOld, 200000) == V::SameBoot);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 40, true, kOld, 300000) == V::OlderBoot);
+  CHECK(peerRestartOnBootCounter(t, kP4, 40, true, kOld, 1000) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 41, true, kOld, 100000) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 41, true, kOld, 200000) == V::SameBoot);
+  CHECK(peerRestartOnBootCounter(t, kP4, 40, true, kOld, 300000) == V::OlderBoot);
   unsigned drops = 0;
   uint32_t now = 300000;
   for (int i = 0; i < 20; ++i) {  // 40, 41, 40, 41 ... one every 11 s (past the 10 s limit)
     now += 11000;
-    if (peerRestartOnBootNotice(t, kP4, true, (i & 1) ? 41 : 40, true, kOld, now) == V::DropSession) ++drops;
+    if (peerRestartOnBootCounter(t, kP4, (i & 1) ? 41 : 40, true, kOld, now) == V::DropSession) ++drops;
   }
   CHECK(drops == 0);  // FAILS ON the re-baselining rule: one forced handshake every 22 s
   CHECK(peerRestartFind(t, kP4)->boot == 41);
@@ -91,20 +92,20 @@ static void replayedNotice() {
 // Meanwhile the SESSION_UNKNOWN hint ends each stale session (hintRules).
 static void counterReset() {
   PeerRestartTable t = {};
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 500, true, kOld, 1000) == V::DropSession);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 1, true, kOld, 100000) == V::OlderBoot);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 2, true, kOld, 200000) == V::OlderBoot);
+  CHECK(peerRestartOnBootCounter(t, kP4, 500, true, kOld, 1000) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 1, true, kOld, 100000) == V::OlderBoot);
+  CHECK(peerRestartOnBootCounter(t, kP4, 2, true, kOld, 200000) == V::OlderBoot);
   CHECK(peerRestartFind(t, kP4)->boot == 500);
   peerRestartBootSeen(t, kP4, 2, 210000);  // its heartbeat in the new session
   CHECK(peerRestartFind(t, kP4)->boot == 2);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 3, true, kOld, 300000) == V::DropSession);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 4, true, kOld, 400000) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 3, true, kOld, 300000) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 4, true, kOld, 400000) == V::DropSession);
   // A captured notice from before the erase reads as newer: it forces one
   // handshake, and then the reference is past it, so no copy of it or of any
   // older one closes anything again (each captured counter at most once).
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 500, true, kOld, 500000) == V::DropSession);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 499, true, kOld, 600000) == V::OlderBoot);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 500, true, kOld, 700000) == V::SameBoot);
+  CHECK(peerRestartOnBootCounter(t, kP4, 500, true, kOld, 500000) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 499, true, kOld, 600000) == V::OlderBoot);
+  CHECK(peerRestartOnBootCounter(t, kP4, 500, true, kOld, 700000) == V::SameBoot);
 }
 
 // Counters compare as a signed 32-bit difference: across the wrap, and a jump
@@ -117,9 +118,9 @@ static void counterWrap() {
   CHECK(bootCounterNewer(0x7FFFFFFFu, 0));
   CHECK(!bootCounterNewer(0x80000000u, 0));
   PeerRestartTable t = {};
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 0xFFFFFFFFu, true, kOld, 1000) == V::DropSession);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 1, true, kOld, 100000) == V::DropSession);  // wrapped: newer
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 0xFFFFFFFFu, true, kOld, 200000) == V::OlderBoot);
+  CHECK(peerRestartOnBootCounter(t, kP4, 0xFFFFFFFFu, true, kOld, 1000) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 1, true, kOld, 100000) == V::DropSession);  // wrapped: newer
+  CHECK(peerRestartOnBootCounter(t, kP4, 0xFFFFFFFFu, true, kOld, 200000) == V::OlderBoot);
 }
 
 // A peer that could not read its count sends 0 (or a notice without one): no
@@ -128,18 +129,18 @@ static void counterWrap() {
 // peer). An unknown peer included: it takes no table entry.
 static void noCounter() {
   PeerRestartTable t = {};
-  CHECK(peerRestartOnBootNotice(t, kXiao, true, 0, true, kOld, 500) == V::NoCounter);
-  CHECK(peerRestartOnBootNotice(t, kXiao, false, 0, true, kOld, 600) == V::NoCounter);
+  CHECK(peerRestartOnBootCounter(t, kXiao, 0, true, kOld, 500) == V::NoCounter);
+  CHECK(peerRestartOnBootCounter(t, kXiao, 0, true, kOld, 600) == V::NoCounter);
   CHECK(peerRestartFind(t, kXiao) == nullptr);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 7, true, kOld, 1000) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 7, true, kOld, 1000) == V::DropSession);
   unsigned drops = 0;
   for (uint32_t now = 100000; now < 400000; now += 11000) {
-    if (peerRestartOnBootNotice(t, kP4, true, 0, true, kOld, now) == V::DropSession) ++drops;
-    if (peerRestartOnBootNotice(t, kP4, false, 0, true, kOld, now + 5) == V::DropSession) ++drops;
+    if (peerRestartOnBootCounter(t, kP4, 0, true, kOld, now) == V::DropSession) ++drops;
+    if (peerRestartOnBootCounter(t, kP4, 0, true, kOld, now + 5) == V::DropSession) ++drops;
   }
   CHECK(drops == 0);  // FAILS ON the counts-as-a-restart rule: one every 11 s
   // 7 is still the reference.
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 7, true, kOld, 500000) == V::SameBoot);
+  CHECK(peerRestartOnBootCounter(t, kP4, 7, true, kOld, 500000) == V::SameBoot);
   CHECK(peerRestartFind(t, kP4)->boot == 7);
 }
 
@@ -154,27 +155,23 @@ static void signalScope() {
   CHECK(peerRestartSignalScoped(true, 0x77C0, 0x4A21));
 }
 
-// A notice whose counter was already seen, or an older one, is not filed
-// again; every other verdict is (a restart, or one this device cannot judge).
-static void noticeFiled() {
-  CHECK(!peerBootNoticeFiled(V::SameBoot));
-  CHECK(!peerBootNoticeFiled(V::OlderBoot));
-  CHECK(peerBootNoticeFiled(V::DropSession));
-  CHECK(peerBootNoticeFiled(V::NoSession));
-  CHECK(peerBootNoticeFiled(V::FreshSession));
-  CHECK(peerBootNoticeFiled(V::RateLimited));
-  CHECK(peerBootNoticeFiled(V::NoCounter));
-}
 
-// The notice goes group-signed only to a peer this device holds no live
-// session with: after closeespnow/openespnow the sessions are still in RAM and
-// the peer's session is good, so it is sealed in it and ends nothing.
-static void noticeSendMode() {
-  using S = BootNoticeSend;
-  CHECK(bootNoticeSendMode(false, true, true) == S::Signed);   // a start: no sessions
-  CHECK(bootNoticeSendMode(true, true, true) == S::Sealed);    // ESP-NOW reopened, session kept
-  CHECK(bootNoticeSendMode(false, false, true) == S::Sealed);  // no group key for the peer's mesh
-  CHECK(bootNoticeSendMode(false, true, false) == S::Sealed);  // too long for a signed frame
+// Restart reports (1.0 step 8, review fix 3): only a SEALED counter that moved
+// past the last sealed one reports a restart (the "Online (boot #N)" record).
+// Tagged counters (any group-key holder can send them) never report; the first
+// sealed counter after this device's start, a copy and an older one do not.
+static void restartReports() {
+  PeerRestartTable t = {};
+  CHECK(!peerRestartBootSeen(t, kXiao, 3, 1000));             // first sealed: the reference
+  CHECK(peerRestartOnBootCounter(t, kXiao, 4, true, kOld, 2000) == V::DropSession);  // tagged, newer
+  for (uint32_t c = 5; c < 50; c++) (void)peerRestartOnBootCounter(t, kXiao, c, false, 0, 2000 + c * 11000);
+  CHECK(peerRestartFind(t, kXiao)->boot == 49 && peerRestartFind(t, kXiao)->confirmedBoot == 3);
+  CHECK(peerRestartBootSeen(t, kXiao, 4, 900000));             // sealed past the last sealed: one report
+  CHECK(!peerRestartBootSeen(t, kXiao, 4, 901000));            // the same again: none
+  CHECK(!peerRestartBootSeen(t, kXiao, 1, 902000));            // erased: the reference, not a restart
+  CHECK(peerRestartFind(t, kXiao)->boot == 1 && peerRestartFind(t, kXiao)->confirmedBoot == 1);
+  CHECK(!peerRestartBootSeen(t, kXiao, 0, 903000) && peerRestartFind(t, kXiao)->boot == 1);
+  CHECK(peerRestartBootSeen(t, kXiao, 2, 904000));
 }
 
 // A mesh member forging notices with ever newer counters closes the session at
@@ -183,16 +180,16 @@ static void noticeSendMode() {
 static void forgedNotices() {
   PeerRestartTable t = {};
   uint32_t now = 1000;
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 100, true, kOld, now) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 100, true, kOld, now) == V::DropSession);
   unsigned drops = 0;
   for (uint32_t c = 101; c < 141; ++c) {  // one every 500 ms for 20 s
     now += 500;
-    if (peerRestartOnBootNotice(t, kP4, true, c, true, kOld, now) == V::DropSession) ++drops;
+    if (peerRestartOnBootCounter(t, kP4, c, true, kOld, now) == V::DropSession) ++drops;
   }
   CHECK(drops == 2);  // at 10 s and 20 s after the first
   CHECK(peerRestartFind(t, kP4)->boot == 140);
-  CHECK(peerRestartOnBootNotice(t, kXiao, true, 9, true, kOld, now) == V::DropSession);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 200, true, kOld, now + 1) == V::RateLimited);
+  CHECK(peerRestartOnBootCounter(t, kXiao, 9, true, kOld, now) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 200, true, kOld, now + 1) == V::RateLimited);
 }
 
 // The device without the session: one hint per peer per second, none for its
@@ -228,12 +225,12 @@ static void hintRules() {
 // The limit is shared: a notice and a hint together close at most once per 10 s.
 static void sharedLimit() {
   PeerRestartTable t = {};
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 5, true, kOld, 1000) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 5, true, kOld, 1000) == V::DropSession);
   CHECK(peerRestartOnHint(t, kP4, true, 22, 9, 22, 9, 3000) == H::RateLimited);
   CHECK(peerRestartOnHint(t, kP4, true, 22, 9, 22, 9, 11000) == H::DropSession);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 6, true, kOld, 12000) == V::RateLimited);
+  CHECK(peerRestartOnBootCounter(t, kP4, 6, true, kOld, 12000) == V::RateLimited);
   // The counter was recorded even so: a copy of it later closes nothing.
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 6, true, kOld, 40000) == V::SameBoot);
+  CHECK(peerRestartOnBootCounter(t, kP4, 6, true, kOld, 40000) == V::SameBoot);
 }
 
 // A counter seen in a sealed frame of the session (bond heartbeat, a sealed
@@ -245,10 +242,10 @@ static void bootSeenInSession() {
   CHECK(peerRestartFind(t, kP4) == nullptr);
   peerRestartBootSeen(t, kP4, 20, 1000);
   CHECK(peerRestartFind(t, kP4)->boot == 20);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 20, true, kOld, 3000) == V::SameBoot);
+  CHECK(peerRestartOnBootCounter(t, kP4, 20, true, kOld, 3000) == V::SameBoot);
   peerRestartBootSeen(t, kP4, 19, 4000);
   CHECK(peerRestartFind(t, kP4)->boot == 19);  // FAILS ON the newer-only rule
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 20, true, kOld, 5000) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 20, true, kOld, 5000) == V::DropSession);
 }
 
 // Sixteen peers fit; a seventeenth takes the entry used longest ago, which then
@@ -258,27 +255,27 @@ static void tableFull() {
   uint8_t mac[6] = {0x02, 0, 0, 0, 0, 0};
   for (uint8_t i = 0; i < kPeerRestartSlots; ++i) {
     mac[5] = i;
-    CHECK(peerRestartOnBootNotice(t, mac, true, 50, false, 0, 1000u + i) == V::NoSession);
+    CHECK(peerRestartOnBootCounter(t, mac, 50, false, 0, 1000u + i) == V::NoSession);
   }
   mac[5] = 0;
-  CHECK(peerRestartOnBootNotice(t, mac, true, 50, false, 0, 5000) == V::SameBoot);  // refreshes peer 0
+  CHECK(peerRestartOnBootCounter(t, mac, 50, false, 0, 5000) == V::SameBoot);  // refreshes peer 0
   mac[5] = 99;
-  CHECK(peerRestartOnBootNotice(t, mac, true, 50, false, 0, 6000) == V::NoSession);
+  CHECK(peerRestartOnBootCounter(t, mac, 50, false, 0, 6000) == V::NoSession);
   mac[5] = 1;  // the oldest, given up
   CHECK(peerRestartFind(t, mac) == nullptr);
   mac[5] = 0;
   CHECK(peerRestartFind(t, mac) != nullptr && peerRestartFind(t, mac)->boot == 50);
   mac[5] = 1;
-  CHECK(peerRestartOnBootNotice(t, mac, true, 50, true, kOld, 7000) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, mac, 50, true, kOld, 7000) == V::DropSession);
 }
 
 // Every time compare is a wrap-safe difference.
 static void millisWrap() {
   PeerRestartTable t = {};
   const uint32_t nearWrap = 0xFFFFF000u;
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 3, true, kOld, nearWrap) == V::DropSession);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 4, true, kOld, nearWrap + 5000) == V::RateLimited);
-  CHECK(peerRestartOnBootNotice(t, kP4, true, 5, true, kOld, nearWrap + kPeerRestartDropMinIntervalMs) ==
+  CHECK(peerRestartOnBootCounter(t, kP4, 3, true, kOld, nearWrap) == V::DropSession);
+  CHECK(peerRestartOnBootCounter(t, kP4, 4, true, kOld, nearWrap + 5000) == V::RateLimited);
+  CHECK(peerRestartOnBootCounter(t, kP4, 5, true, kOld, nearWrap + kPeerRestartDropMinIntervalMs) ==
         V::DropSession);
   // A drop stamped at 0 is kept as 1, never read as "none".
   PeerRestartTable u = {};
@@ -299,8 +296,7 @@ int main() {
   counterWrap();
   noCounter();
   signalScope();
-  noticeSendMode();
-  noticeFiled();
+  restartReports();
   forgedNotices();
   unknownSessionReplies();
   hintRules();

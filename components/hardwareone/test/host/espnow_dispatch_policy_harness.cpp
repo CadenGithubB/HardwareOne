@@ -80,7 +80,7 @@ static EspNowState* gEspNow = &gState;
 // ---- Mesh, registry, history and event-bus doubles --------------------------
 enum class EspNowMeshRxKind : uint8_t { RxActivity, MeshHeartbeat };
 static bool meshEnabled() { return false; }
-static void noteMeshPeerRxActivity(const uint8_t*, EspNowMeshRxKind, int8_t, int8_t) {}
+static void noteMeshPeerRxActivity(const uint8_t*, EspNowMeshRxKind, int8_t, int8_t, bool = false) {}
 static bool meshRouterLookup(const uint8_t*, uint8_t*, uint8_t*) { return false; }
 static String macToDisplayStr(const uint8_t* mac) {  // System_Utils.h
   char b[18];
@@ -265,7 +265,7 @@ static bool run(uint8_t type, bool paired, bool authed, bool enc, bool keyed) {
   return claimed && gHandlerCalls == 1;
 }
 
-// ---- TEXT/BOOT receive path: dispatcher -> real v4h_text -> real drain ------
+// ---- TEXT receive path: dispatcher -> real v4h_text -> real drain -----------
 // Locally administered test addresses: gPeerA is paired with registry name
 // "alpha"; gStranger was never paired.
 static uint8_t gPeerA[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x01};
@@ -412,66 +412,9 @@ static unsigned runTextCases() {
   check("TEXT plaintext keyless from a stranger: stored, no SYSEVT_TEXT_RX posted",
         gStored.size() == 1 && gEvents.empty());
 
-  // BOOT shares the TEXT policy.
-  resetText(true);
-  check("BOOT plaintext keyed from a paired MAC: claimed by the BOOT row",
-        deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gPeerA, "{\"type\":\"boot\"}", false, false));
-  check("BOOT plaintext keyed from a paired MAC: dropped (nothing queued, one WARN)",
-        queued() == 0 && gWarns == 1);
-  check("BOOT plaintext keyed: the session rule is not asked", gBootRuleCalls == 0);
-
-  // A plaintext BOOT on a keyless device is filed, but closes no session.
-  resetText(false);
-  gBootRuleCalls = 0;
-  deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gPeerA, "{\"type\":\"boot\"}", false, false);
-  check("BOOT plaintext keyless: filed, the session rule is not asked",
-        queued() == 1 && gBootRuleCalls == 0);
-
-  // A group-signed BOOT (how the notice is sent since 2026-11-18) is filed and
-  // asks the session rule once; one relayed in (origin not the radio sender)
-  // is filed but asks nothing.
-  resetText(true);
-  gBootRuleCalls = 0;
-  deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gPeerA, "{\"type\":\"boot\"}", true, false);
-  check("BOOT group-signed keyed: queued as MSG_SYSTEM_EVENT and the session rule asked once",
-        queued() == 1 && queuedAt(0).msgType == MSG_SYSTEM_EVENT && gBootRuleCalls == 1);
-  resetText(true);
-  gBootRuleCalls = 0;
-  deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gStranger, "{\"type\":\"boot\"}", true, false);
-  check("BOOT whose origin is not the radio sender: the session rule is not asked", gBootRuleCalls == 0);
-
-  // A group-signed notice whose counter was already seen, or an older one, is
-  // a copy (anyone in range can capture a signed frame and play it again once
-  // the 5 s dedup forgets it): it is not filed again, so a re-sent notice makes
-  // no false "started" entry.
-  for (int verdict : {4, 5}) {
-    resetText(true);
-    gBootVerdict = verdict;
-    deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gPeerA, "{\"type\":\"boot\"}", true, false);
-    check(verdict == 4 ? "BOOT group-signed copy (counter already seen): not filed again "
-                         "(FAILS ON the handler that files every copy)"
-                       : "BOOT group-signed older counter (a re-sent old notice): not filed "
-                         "(FAILS ON the handler that files every copy)",
-          gBootRuleCalls == 1 && queued() == 0);
-  }
-
-  // Only the group tag of the peer's own mesh counts: a member of another mesh
-  // this device is in holds that mesh's key, not this one. The notice is
-  // still filed.
-  resetText(true);
-  gFrameFp = kOtherMeshFp;
-  deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gPeerA, "{\"type\":\"boot\"}", true, false);
-  check("BOOT group-signed under another mesh's tag: filed, the session rule is not asked "
-        "(FAILS ON the unscoped handler)",
-        queued() == 1 && gBootRuleCalls == 0 && gBootSeenCalls == 0);
-
-  // A notice sealed in the session shows the session works (the peer reopened
-  // ESP-NOW and kept it): nothing ends, the counter is only recorded.
-  resetText(true);
-  deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gPeerA, "{\"type\":\"boot\"}", true, true);
-  check("BOOT sealed in the session: filed, the counter recorded, the session rule not asked "
-        "(FAILS ON the handler that ends a working session)",
-        queued() == 1 && gBootRuleCalls == 0 && gBootSeenCalls == 1);
+  // BOOT (31) was retired in ESP-NOW 1.0 step 8: the heartbeat's boot counter
+  // carries a restart. No row, so a frame of it is refused as unknown.
+  check("opcode 31 (BOOT, retired in 1.0) has no row", v4_dispatch_lookup(31) == nullptr);
 
   // SESSION_UNKNOWN (when the tree has the row): only from the peer itself,
   // under its own mesh's tag.
@@ -514,16 +457,6 @@ static unsigned runTextCases() {
           "(FAILS ON the unscoped handler)", gHintRuleCalls == 0);
   }
 
-  // A session-encrypted BOOT is a system notice, never a chat event.
-  resetText(true);
-  check("BOOT session-encrypted keyed: claimed",
-        deliver(ESPNOW_V4_TYPE_BOOT, gPeerA, gPeerA, "{\"type\":\"boot\"}", true, true));
-  check("BOOT session-encrypted keyed: queued as MSG_SYSTEM_EVENT",
-        queued() == 1 && queuedAt(0).msgType == MSG_SYSTEM_EVENT);
-  drainTextQueueForTest();
-  check("BOOT session-encrypted keyed: stored as a system event, no SYSEVT_TEXT_RX",
-        gStored.size() == 1 && gStored[0].type == MSG_SYSTEM_EVENT && gEvents.empty());
-
   // Relayed text: an unknown origin is dropped by espnowOriginIsKnown, a known
   // origin is attributed to that origin.
   resetText(false);
@@ -550,13 +483,11 @@ static unsigned runTextCases() {
         gEvents.size() == 1 && gEvents[0].detail == "part two");
   check("TEXT two session-encrypted fragments: drain consumes the queue", queued() == 0);
 
-  // Table policy for the two chat rows. The flag's own name is not used so the
-  // harness also compiles against a table that predates it.
+  // Table policy for the chat row (BOOT, which shared it, was retired in 1.0
+  // step 8). The flag's own name is not used so the harness also compiles
+  // against a table that predates it.
   const V4OpcodeEntry* textRow = v4_dispatch_lookup(ESPNOW_V4_TYPE_TEXT);
-  const V4OpcodeEntry* bootRow = v4_dispatch_lookup(ESPNOW_V4_TYPE_BOOT);
   check("TEXT row carries a receive policy (non-zero flags)", textRow && textRow->flags != 0);
-  check("BOOT row carries a receive policy (non-zero flags)", bootRow && bootRow->flags != 0);
-  check("TEXT and BOOT rows share one policy", textRow && bootRow && textRow->flags == bootRow->flags);
   check("TEXT row has no unconditional REQ_PAIRED/REQ_AUTHENTICATED/REQ_SESSION_ENC (keyless bootstrap)",
         textRow && (textRow->flags & (V4_OPC_FLAG_REQ_PAIRED | V4_OPC_FLAG_REQ_AUTHENTICATED |
                                       V4_OPC_FLAG_REQ_SESSION_ENC)) == 0);

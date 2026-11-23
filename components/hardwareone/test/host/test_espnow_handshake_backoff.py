@@ -228,9 +228,10 @@ def main():
         'memcmp(h->origin, recv_info->src_addr, 6) == 0' in dispatch,
         'an authenticated frame sent straight from its origin counts as hearing that peer')
     tick = body(espnow, 'void processMeshHeartbeats()')
-    edge = tick[tick.find('if (!p.onlineLogged) {'):]
-    edge = edge[:edge.find('} else {')] if '} else {' in edge else ''
-    pin('espnowHandshakeBackoffClear(pm);' in edge, 'the mesh table seeing a peer come online ends its back-off')
+    # 1.0 step 8: the edge is "heard again" (the link left None), not the online
+    # event, which now waits for two-way proof and a session.
+    pin('if (heard && !p.heardLogged) espnowHandshakeBackoffClear(pm);' in tick,
+        'the mesh table hearing a peer again ends its back-off')
     forget = body(espnow, 'static bool espnowForgetPeerCrypto(const uint8_t mac[6]')  # the signature grew an optional out-parameter
     pin('espnowHandshakeBackoffClear(mac);' in forget, 'unpair / forget drops the peer\'s back-off entry')
     for marker, what in (('const char* cmd_espnow_keyex(const String& argsInput)', 'espnowkeyex'),

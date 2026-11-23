@@ -1,14 +1,13 @@
 // Host harness for test_espnow_system_notice.py.
 //
-// The runner pastes LogMessageType, MSG_TYPE_BOOT and TextQueueEntry from
-// System_ESPNow.h, and from System_ESPNow.cpp v2_init_envelope,
-// buildBootNotification, formatEspNowSystemNotice (when the tree has it) and the
+// The runner pastes LogMessageType and TextQueueEntry from System_ESPNow.h,
+// and from System_ESPNow.cpp espnowFilePeerRestart (the record a peer's
+// restart leaves since the BOOT frame went in ESP-NOW 1.0 step 8) and the
 // espnow_task text-queue drain ("// 11. Drain text message queue") at the
-// INSERT_* tags. ArduinoJson is the vendored library and String is the shared
-// host stub. History, the console, the event bus and the G2 push-kick are
-// recording doubles; no radio is touched.
+// INSERT_* tags. String is the shared host stub. History, the console, the
+// device names, the event bus and the G2 push-kick are recording doubles; no
+// radio is touched.
 #include <Arduino.h>
-#include <ArduinoJson.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -17,10 +16,6 @@
 #include <string>
 #include <vector>
 #include "System_MacText.h"  // production MAC text helpers (copied beside this unit)
-
-#ifndef HW1_HAVE_NOTICE
-#error "HW1_HAVE_NOTICE must be defined by the runner"
-#endif
 
 void webBatchTestStringAppend() {}
 
@@ -37,7 +32,6 @@ static int gFailures = 0;
     }                                                                 \
   } while (0)
 
-#define PSRAM_JSON_DOC(name) JsonDocument name
 #define EXT_RAM_BSS_ATTR
 
 // Console double: every BROADCAST_PRINTF line, formatted.
@@ -83,6 +77,9 @@ static bool storeMessageInPeerHistory(uint8_t*, const char* name, const char* me
                      attribution});
   return true;
 }
+// Device names (System_ESPNow.cpp): the registry name of a paired peer.
+static std::string gName;
+static String getEspNowDeviceName(const uint8_t*) { return String(gName.c_str()); }
 static unsigned gPushKicks = 0;
 static void g2EspNowAppOnRxText(const uint8_t*) { ++gPushKicks; }
 static constexpr uint8_t SYSEVT_TEXT_RX = 7;
@@ -143,98 +140,55 @@ static bool anyOutputHas(const char* needle) {
 }
 static const char* lastLine() { return gPrinted.empty() ? "(none)" : gPrinted.back().c_str(); }
 
-// One system notice in, one record and one console line out, no chat event.
+// One restart in, one record and one console line out, no chat event.
 static bool oneNotice() {
   return gStored.size() == 1 && gPrinted.size() == 1 && gStored[0].type == MSG_SYSTEM_EVENT &&
-         gStored[0].reqId == 0 && gStored[0].piece == 1 && gStored[0].of == 1 && gTextEvents == 0;
+         gStored[0].reqId == 0 && gStored[0].piece == 1 && gStored[0].of == 1 && gTextEvents == 0 &&
+         gStored[0].attribution == HistoryAttribution::Attributed;
 }
 
 int main() {
-  // N1: the bench notice (empty src) reads as a line naming the sender.
+  // N1: a paired peer's restart (its heartbeat's boot counter moved forward)
+  // reads as a line naming the sender and one "Online (boot #N)" record.
   reset();
-  queue(MSG_SYSTEM_EVENT, "benchxiao",
-        "{\"type\":\"BOOT\",\"id\":308,\"src\":\"\",\"ttl\":3,\"pld\":{\"boot\":42,\"ts\":0}}", 308);
-  drainTextQueueForTest();
+  gName = "benchxiao";
+  espnowFilePeerRestart(kPeer, 42, false);
   CHECK(oneNotice(), "N1 stored=%zu printed=%zu events=%u", gStored.size(), gPrinted.size(), gTextEvents);
   CHECK(!gPrinted.empty() && gPrinted[0] == "[ESP-NOW] benchxiao is online (boot #42)", "N1 line: %s", lastLine());
-  CHECK(!gStored.empty() && gStored[0].content == "Online (boot #42)" && gStored[0].name == "benchxiao",
+  CHECK(!gStored.empty() && gStored[0].content == "Online (boot #42)" && gStored[0].name == "benchxiao" &&
+            !gStored[0].encrypted,
         "N1 history text: %s", gStored.empty() ? "(none)" : gStored[0].content.c_str());
-  CHECK(!anyOutputHas("{") && !anyOutputHas("\"type\""), "N1 the raw JSON reached the console or history");
-  CHECK(gPushKicks == 1, "N1 the G2 inbox was not kicked");
 
-  // N2: the notice's own "src" is never shown; the name is the resolved one.
+  // N2: sealed (the counter came in a sealed heartbeat) is marked encrypted.
   reset();
-  queue(MSG_SYSTEM_EVENT, "benchxiao",
-        "{\"type\":\"BOOT\",\"id\":9,\"src\":\"admin-console\",\"ttl\":3,\"pld\":{\"boot\":7,\"ts\":0}}", 9);
-  drainTextQueueForTest();
-  CHECK(oneNotice() && !anyOutputHas("admin-console") && printedHas("benchxiao is online (boot #7)"),
-        "N2 line: %s", lastLine());
+  espnowFilePeerRestart(kPeer, 7, true);
+  CHECK(oneNotice() && gStored[0].encrypted && printedHas("benchxiao is online (boot #7)"), "N2 line: %s",
+        lastLine());
 
-  // N3: malformed JSON gets the neutral line, not the text.
+  // N3: the largest counter fits the record and the line.
   reset();
-  queue(MSG_SYSTEM_EVENT, "benchxiao", "{\"type\":\"BOOT\",\"pld\":{\"boot\":4", 10);
-  drainTextQueueForTest();
-  CHECK(oneNotice() && gPrinted[0] == "[ESP-NOW] System notice from benchxiao" &&
-        gStored[0].content == "System notice", "N3 line: %s", lastLine());
+  espnowFilePeerRestart(kPeer, 4294967295u, false);
+  CHECK(oneNotice() && gStored[0].content == "Online (boot #4294967295)", "N3 history: %s",
+        gStored.empty() ? "(none)" : gStored[0].content.c_str());
 
-  // N4: a well-formed notice of another type gets the neutral line.
+  // N8: with no registry name the MAC text is used, as for chat.
   reset();
-  queue(MSG_SYSTEM_EVENT, "benchxiao", "{\"type\":\"REBOOT_ALL\",\"pld\":{\"boot\":4}}", 11);
-  drainTextQueueForTest();
-  CHECK(oneNotice() && gPrinted[0] == "[ESP-NOW] System notice from benchxiao" && !anyOutputHas("REBOOT_ALL"),
-        "N4 line: %s", lastLine());
-
-  // N5: plain text queued as a system event is not echoed either.
-  reset();
-  queue(MSG_SYSTEM_EVENT, "benchxiao", "run espnowsetname clear", 12);
-  drainTextQueueForTest();
-  CHECK(oneNotice() && !anyOutputHas("espnowsetname"), "N5 line: %s", lastLine());
-
-  // N6: a BOOT whose counter is not an unsigned number says "online" without one.
-  const char* badCounters[] = {
-    "{\"type\":\"BOOT\",\"pld\":{\"boot\":-1}}",
-    "{\"type\":\"BOOT\",\"pld\":{\"boot\":\"42\"}}",
-    "{\"type\":\"BOOT\",\"pld\":{\"boot\":99999999999}}",
-    "{\"type\":\"BOOT\"}",
-  };
-  for (const char* text : badCounters) {
-    reset();
-    queue(MSG_SYSTEM_EVENT, "benchxiao", text, 13);
-    drainTextQueueForTest();
-    CHECK(oneNotice() && gPrinted[0] == "[ESP-NOW] benchxiao is online" && gStored[0].content == "Online",
-          "N6 %s -> %s", text, lastLine());
-  }
-
-  // N7: content that fills the field with no terminator is read within it
-  // (the sanitizer build fails on an over-read) and gets the neutral line.
-  reset();
-  queue(MSG_SYSTEM_EVENT, "benchxiao", nullptr, 14, 'x');
-  drainTextQueueForTest();
-  CHECK(oneNotice() && gPrinted[0] == "[ESP-NOW] System notice from benchxiao", "N7 line: %s", lastLine());
-
-  // N8: with no resolved name the MAC text is used, as for chat.
-  reset();
-  queue(MSG_SYSTEM_EVENT, "", "{\"type\":\"BOOT\",\"pld\":{\"boot\":3}}", 15);
-  drainTextQueueForTest();
+  gName.clear();
+  espnowFilePeerRestart(kPeer, 3, false);
   {
     char mac[18];
     macToDisplay(kPeer, mac, sizeof mac);
     const std::string want = std::string("[ESP-NOW] ") + mac + " is online (boot #3)";
-    CHECK(oneNotice() && gPrinted[0] == want, "N8 line: %s", lastLine());
+    CHECK(oneNotice() && gPrinted[0] == want && gStored[0].name == mac, "N8 line: %s", lastLine());
   }
 
-  // N9: the sender's notice, as buildBootNotification makes it, round-trips.
+  // N9: a long name is cut to the record's name field, never overrun.
   reset();
-  {
-    const String built = buildBootNotification(308, "benchxiao", 42, 0);
-    JsonDocument doc;
-    CHECK(!deserializeJson(doc, built.c_str()) && std::strcmp(doc["src"] | "", "benchxiao") == 0 &&
-          std::strcmp(doc["type"] | "", "BOOT") == 0 && (doc["pld"]["boot"] | 0u) == 42u,
-          "N9 built notice: %s", built.c_str());
-    queue(MSG_SYSTEM_EVENT, "benchxiao", built.c_str(), 308);
-    drainTextQueueForTest();
-    CHECK(oneNotice() && gPrinted[0] == "[ESP-NOW] benchxiao is online (boot #42)", "N9 line: %s", lastLine());
-  }
+  gName = std::string(60, 'n');
+  espnowFilePeerRestart(kPeer, 5, false);
+  CHECK(oneNotice() && gStored[0].name.size() < 40, "N9 name length %zu",
+        gStored.empty() ? (size_t)0 : gStored[0].name.size());
+  gName = "benchxiao";
 
   // N10: chat is unchanged: printed with its sender, stored per fragment under
   // its msgId, one text event at the last fragment.
@@ -250,22 +204,12 @@ int main() {
         "N10 chat records");
   CHECK(gTextEvents == 2, "N10 text events %u", gTextEvents);
 
-#if HW1_HAVE_NOTICE
-  // N11: the formatter truncates into small buffers without overflow.
-  {
-    char history[6];
-    char line[12];
-    const char* text = "{\"type\":\"BOOT\",\"pld\":{\"boot\":4294967295}}";
-    formatEspNowSystemNotice(text, std::strlen(text) + 1, "a-rather-long-device-name",
-                             history, sizeof(history), line, sizeof(line));
-    CHECK(std::strlen(history) == sizeof(history) - 1 && std::strlen(line) == sizeof(line) - 1,
-          "N11 truncated '%s' '%s'", history, line);
-    formatEspNowSystemNotice(nullptr, 0, nullptr, history, sizeof(history), line, sizeof(line));
-    CHECK(std::strcmp(history, "Syste") == 0, "N11 null text: '%s'", history);
-  }
-#else
-  CHECK(false, "N11 formatEspNowSystemNotice is absent");
-#endif
+  // N11: the drain stores what the queue holds; nothing in it parses JSON any
+  // more (a frame of the retired BOOT type has no row and never reaches it).
+  reset();
+  queue(MSG_TEXT, "benchxiao", "{\"type\":\"BOOT\",\"pld\":{\"boot\":4}}", 31);
+  drainTextQueueForTest();
+  CHECK(gStored.size() == 1 && gStored[0].type == MSG_TEXT && gTextEvents == 1, "N11 chat stays chat");
 
   std::printf("espnow_system_notice: %d checks, %d failed\n", gChecks, gFailures);
   return gFailures ? 1 : 0;

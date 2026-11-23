@@ -323,7 +323,8 @@ win.__pairedDevices = [
   { mac: '02:00:00:00:00:01', name: '<img src=x onerror=alert(1)>', encrypted: true, meshId: -1 }
 ];
 win.__meshPeers = [
-  { mac: '02:00:00:00:00:02', name: '<svg onload=alert(2)>', alive: true, secondsSinceHeartbeat: 1, heartbeatCount: 3, ackCount: 1 }
+  { mac: '02:00:00:00:00:02', name: '<svg onload=alert(2)>', alive: true, state: 'connecting', link: 'oneWay',
+    secondsSinceHeartbeat: 1, heartbeatCount: 3 }
 ];
 win.__meshUnpaired = [
   { mac: '02:00:00:00:00:03', name: 'a"b\'c<i>d', rssi: -50, secondsSinceLastSeen: 2 }
@@ -338,6 +339,9 @@ check(list.indexOf('<img') < 0, 'R1 paired device name is not rendered as an <im
 check(list.indexOf('&lt;img src=x onerror=alert(1)&gt;') >= 0, 'R1 paired device name is shown as literal text');
 check(list.indexOf('<svg') < 0, 'R1 mesh peer name is not rendered as an <svg> element');
 check(list.indexOf('&lt;svg onload=alert(2)&gt;') >= 0, 'R1 mesh peer name is shown as literal text');
+// Firmware 1.0 step 8: the row shows the peer state and the link, not ACK counts.
+check(list.indexOf('>Connecting<') >= 0 && list.indexOf('link: one-way') >= 0 && list.indexOf('ACKs') < 0,
+      'R1 a one-way mesh peer shows Connecting and its link');
 check(list.indexOf('<i>') < 0, 'R1 discovered device name is not rendered as an <i> element');
 check(countOf(list, '<button') === 4, 'R1 device list keeps its four buttons', countOf(list, '<button'));
 var pair = list.match(/onclick="pairUnpairedDevice\(([^"]*)\)"/);

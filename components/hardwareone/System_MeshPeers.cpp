@@ -8,7 +8,7 @@ namespace MeshPeers {
 
 bool isReachable(const uint8_t mac[6]) {
   MeshPeerHealth* h = getMeshPeerHealth(mac, false);
-  return h && isMeshPeerRecentlyActive(h);
+  return h && meshPeerLinkOf(h) == MeshLink::TwoWay;
 }
 
 bool isKnown(const uint8_t mac[6]) {

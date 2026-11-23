@@ -187,11 +187,17 @@ static MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool) {
   for (auto& health : sHealth) if (std::memcmp(health.mac, mac, 6) == 0) return &health;
   return nullptr;
 }
-static bool isMeshPeerAlive(const MeshPeerHealth* health) { return health && health->heartbeatRecent; }
+// The link (1.0 step 8): heard and proven both ways while heartbeatRecent here
+// (one-way is covered by espnow_link_core_tests and the peer-state surfaces).
+static MeshLink meshPeerLinkOf(const MeshPeerHealth* health) {
+  return health && health->heartbeatRecent ? MeshLink::TwoWay : MeshLink::None;
+}
 static bool espnowSessionUp(const uint8_t* mac, uint32_t* = nullptr) {
   for (const auto& session : sSessions) if (std::memcmp(session.data(), mac, 6) == 0) return true;
   return false;
 }
+// ACTIVE or REKEYING (the peer state reads this since 1.0 step 8): the same set here.
+[[maybe_unused]] static bool espnowSessionLive(const uint8_t* mac) { return espnowSessionUp(mac); }
 static bool isSelfMac(const uint8_t* mac) { return std::memcmp(mac, sSelf, 6) == 0; }
 
 // INSERT_PEER_STATE
@@ -612,10 +618,13 @@ int main() {
   // session; a heartbeat alone is connecting; no heartbeat is offline, also
   // with a session left over.
   currentCase = "P1 peer-state rule";
-  CHECK(espnowPeerStateOf(true, true) == EspNowPeerState::Online, "heartbeat + session = online");
-  CHECK(espnowPeerStateOf(true, false) == EspNowPeerState::Connecting, "heartbeat, no session = connecting");
-  CHECK(espnowPeerStateOf(false, true) == EspNowPeerState::Offline, "a session without heartbeat = offline");
-  CHECK(espnowPeerStateOf(false, false) == EspNowPeerState::Offline, "nothing = offline");
+  CHECK(espnowPeerStateOf(MeshLink::TwoWay, true) == EspNowPeerState::Online, "two-way + session = online");
+  CHECK(espnowPeerStateOf(MeshLink::TwoWay, false) == EspNowPeerState::Connecting,
+        "two-way, no session = connecting");
+  CHECK(espnowPeerStateOf(MeshLink::OneWay, true) == EspNowPeerState::Connecting,
+        "one-way with a session = connecting (1.0 step 8)");
+  CHECK(espnowPeerStateOf(MeshLink::None, true) == EspNowPeerState::Offline, "a session, not heard = offline");
+  CHECK(espnowPeerStateOf(MeshLink::None, false) == EspNowPeerState::Offline, "nothing = offline");
   CHECK(std::string(espnowPeerStateName(EspNowPeerState::Online)) == "online" &&
         std::string(espnowPeerStateName(EspNowPeerState::Connecting)) == "connecting" &&
         std::string(espnowPeerStateName(EspNowPeerState::Offline)) == "offline", "the state words");

@@ -201,6 +201,11 @@ static MeshPeerHealth* getMeshPeerHealth(const uint8_t*, bool) {
   return &gHealth;
 }
 static bool isMeshPeerAlive(const MeshPeerHealth*) { return true; }
+// ...and online: proven both ways with a session (System_ESPNow_PeerStateCore.h,
+// the production rule; 1.0 step 8).
+#include "System_ESPNow_PeerStateCore.h"
+static MeshLink meshPeerLinkOf(const MeshPeerHealth*) { return MeshLink::TwoWay; }
+static EspNowPeerState espnowPeerState(const uint8_t*) { return EspNowPeerState::Online; }
 
 // ---- The encrypted send: destination and plaintext of every frame handed over.
 struct SentFrame {

@@ -100,8 +100,10 @@ static bool espnowSessionUp(const uint8_t* mac, uint32_t* = nullptr) {
   for (uint8_t id : sessionsUp) if (mac[5] == id) return true;
   return false;
 }
+// ACTIVE or REKEYING (the peer state reads this since 1.0 step 8): the same set here.
+[[maybe_unused]] static bool espnowSessionLive(const uint8_t* mac) { return espnowSessionUp(mac); }
 // The heartbeat table: a slot per peer heard, by the last address byte, and
-// whether its heartbeat is within the 30 s window (isMeshPeerAlive).
+// whether it was heard within the 30 s window (meshPeerLinkOf).
 struct MeshPeerHealth { uint8_t id; bool recent; };
 static std::vector<MeshPeerHealth> heartbeats;
 static MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMissing) {
@@ -110,7 +112,11 @@ static MeshPeerHealth* getMeshPeerHealth(const uint8_t mac[6], bool createIfMiss
   for (auto& slot : heartbeats) if (slot.id == mac[5]) return &slot;
   return nullptr;
 }
-static bool isMeshPeerAlive(const MeshPeerHealth* slot) { return slot && slot->recent; }
+// The link (1.0 step 8): heard and proven both ways here (one-way is covered by
+// test_espnow_peer_state_surfaces and espnow_link_core_tests).
+static MeshLink meshPeerLinkOf(const MeshPeerHealth* slot) {
+  return slot && slot->recent ? MeshLink::TwoWay : MeshLink::None;
+}
 static void heard(std::initializer_list<uint8_t> ids) {  // recent heartbeats from these peers only
   heartbeats.clear();
   for (uint8_t id : ids) heartbeats.push_back({id, true});

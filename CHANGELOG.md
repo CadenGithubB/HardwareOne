@@ -99,6 +99,37 @@ Host-tested and built; not run on a device.
   revoked key is refused whatever address it comes from, and the accept prompt shows its keyId.
   KEY_EX_CONFIRM status 3 means "not accepted". Reflash devices together.
 
+### Changed (ESP-NOW 1.0: "online" means both devices hear each other)
+Host-tested and built; not run on a device.
+- **Online needs two-way proof.** A paired device is online only when it was heard in the last
+  30 s, proved it hears this device too (an encrypted acknowledgement of a frame sent straight to it,
+  or an encrypted heartbeat echoing this device's heartbeat; two within 30 s to become online, one
+  every 30 s to stay) and a session is up. A device this one hears but that cannot hear back shows as
+  **connecting** (one-way), no longer online. Same on every surface: the web page, OLED, lens,
+  `PEERS`, metrics, MQTT availability, `espnowdevices` / `espnowrooms` (`online`, and `state` in
+  their JSON).
+- `espnowmeshstatus` JSON: each peer gains `state`, `link` (`twoWay` / `oneWay` / `none`),
+  `lastTwoWayAgeMs` and `peerHeardRssi`; `lastAck`, `ackCount`, `activityAlive`, `lastHeartbeat` and
+  `lastRxActivity` are gone. The reply always fits one command result (it could answer "response too
+  large" with about 12 peers); rows that do not fit are counted in `peersNotShown` /
+  `unpairedNotShown`.
+- Messages go straight to a peer only on a two-way link; a one-way peer is reached through a relay
+  that hears it both ways when there is one (a relay must be paired with this device). Route adverts
+  from a neighbour that is not two-way are ignored.
+- Heartbeats to a silent peer slow to one every 10 s at most (was up to every 30 s), so a peer that
+  cannot hear this device no longer flaps between offline and back, and a mesh worker no longer
+  hunts for a master that only cannot hear it. Heartbeats ask no acknowledgement any more (about two
+  frames fewer per peer per 5 s) and go encrypted once a session is up.
+- `peer_online` / `peer_offline` follow the online state, at most one per peer per 30 s; a key
+  renewal (rekey) no longer counts as a state change.
+- A peer's restart is seen in its heartbeat (its boot count): the stale session ends and one
+  `Online (boot #N)` line is filed, now only for a real restart, once the peer's first encrypted
+  heartbeat shows the new count (forged group-signed counts write nothing).
+- Heartbeats to many peers are spread over about 200 ms and leave room in the send queue.
+- **Removed:** the boot notice frame (opcode 31, retired) and `espnowbroadcaststats` with the broadcast
+  acknowledgement tracking (use `espnowmeshstatus`).
+- **Wire change:** HEARTBEAT is 56 bytes (+ boot count, echo, link RSSI). Reflash devices together.
+
 ### Changed (ESP-NOW 1.0: files, Stored / not stored / Unknown)
 Host-tested and built; not run on a device.
 - **A file send ends in the receiver's answer** (`espnowsendfile`, `imagesend`, the OLED file

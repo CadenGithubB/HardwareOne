@@ -299,7 +299,7 @@ static bool v4_relay_wrap_and_send(const uint8_t*, const uint8_t*, const uint8_t
 // The sender-side hooks an ACK reaches (v4_rx_ack): recorded with the
 // (peer, ackFor, class) they were called with.
 struct AckHook { uint8_t peer[6]; uint32_t ackFor; bool sealed; };
-static std::vector<AckHook> gTrackerAcks, gDelivered, gFailedSends, gPingAcks, gFollowAcks;
+static std::vector<AckHook> gDelivered, gFailedSends, gPingAcks, gFollowAcks;
 static void noteHook(std::vector<AckHook>& v, const uint8_t* peer, uint32_t ackFor, bool sealed) {
   AckHook h{};
   std::memcpy(h.peer, peer, 6);
@@ -307,7 +307,9 @@ static void noteHook(std::vector<AckHook>& v, const uint8_t* peer, uint32_t ackF
   h.sealed = sealed;
   v.push_back(h);
 }
-static void broadcast_tracker_record_ack(uint32_t ackFor, const uint8_t* src) { noteHook(gTrackerAcks, src, ackFor, false); }
+// The link-pressure sampler (System_ESPNow_Saturation.cpp): fed by a matched fragment waiter.
+static unsigned gAckRtts = 0;
+static void espnowSaturationNoteAckRtt(uint32_t) { ++gAckRtts; }
 static void sendStatusMarkDelivered(uint32_t ackFor, const uint8_t* src) { noteHook(gDelivered, src, ackFor, true); }
 // A refusal (sealed ACK with a status): the send failed, the session answered.
 static std::vector<uint8_t> gFailedStatus;
@@ -426,6 +428,30 @@ static bool v4_try_handle_incoming(const esp_now_recv_info* recv_info, const uin
 // INSERT_RELAY
 
 static void espnowChFollowOnHeartbeat(const V4RxCtx&, const V4PayloadHeartbeat&, bool) {}
+// Restart detection behind v4h_heartbeat (1.0 step 8): the production rules
+// (System_ESPNow_PeerRestartCore.h) over one table; a live session is one in
+// gSessions, opened long ago. Session closes and filed restarts are counted.
+static uint16_t fingerprintForPeer(const uint8_t* mac) { return isPairedDevice(mac) ? kMeshFp : 0; }
+static PeerRestartTable gRestart;
+static unsigned gSessionDrops = 0;
+static std::vector<uint32_t> gRestartsFiled;
+static bool sessionLiveFor(const uint8_t* mac) {
+  for (int i = 0; i < gSessionCount; i++) {
+    if (std::memcmp(gSessions[i].peerMac, mac, 6) == 0 && gSessions[i].state == SESSION_ACTIVE) return true;
+  }
+  return false;
+}
+static bool espnowSessionLive(const uint8_t* mac) { return sessionLiveFor(mac); }
+static PeerBootVerdict sessionPeerBootCounter(const uint8_t* mac, uint32_t boot) {
+  const PeerBootVerdict v = peerRestartOnBootCounter(gRestart, mac, boot, sessionLiveFor(mac), 600000, gNowMs);
+  if (v == PeerBootVerdict::DropSession) ++gSessionDrops;
+  return v;
+}
+static bool sessionPeerBootSeen(const uint8_t* mac, uint32_t boot) {
+  return peerRestartBootSeen(gRestart, mac, boot, gNowMs);
+}
+static void espnowFilePeerRestart(const uint8_t*, uint32_t boot, bool) { gRestartsFiled.push_back(boot); }
+// INSERT_LINK_GLUE
 static bool espnowChFollowHunting() { return false; }  // never hunting: the pre-warm runs as before
 
 // INSERT_HEARTBEAT
@@ -517,7 +543,11 @@ static void reset(bool keyed) {
   gStubOverrideName.clear();
   gStubOverrideLeft = 0;
   gStubTakesMs = gHandlerEndMs = 0;
-  for (auto* v : {&gTrackerAcks, &gDelivered, &gFailedSends, &gPingAcks, &gFollowAcks}) v->clear();
+  for (auto* v : {&gDelivered, &gFailedSends, &gPingAcks, &gFollowAcks}) v->clear();
+  gAckRtts = 0;
+  gRestart = PeerRestartTable{};
+  gSessionDrops = 0;
+  gRestartsFiled.clear();
   gFailedStatus.clear();
   gRemoteAcks.clear();
   std::memset(gV4FragAckWait, 0, sizeof gV4FragAckWait);
@@ -616,9 +646,12 @@ static Frame envelope(const uint8_t* relay, const Frame& inner, uint32_t msgId) 
   std::memcpy(body.data() + sizeof env, inner.data(), inner.size());
   return groupFrame(ESPNOW_V4_TYPE_RELAY_DATA, relay, msgId, body, 2);
 }
-static Frame heartbeatPayload() {
+static Frame heartbeatPayload(uint32_t boot = 0, uint32_t echo = 0, int8_t linkRssi = 0) {
   V4PayloadHeartbeat hb{};
   hb.rssi = -60;
+  hb.bootCounter = boot;
+  hb.echoMsgId = echo;
+  hb.linkRssi = linkRssi;
   std::snprintf(hb.deviceName, sizeof hb.deviceName, "peer");
   Frame f(sizeof hb);
   std::memcpy(f.data(), &hb, sizeof hb);
@@ -885,7 +918,7 @@ static void testHeartbeatPolicy() {
   deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 121, heartbeatPayload()));
   check("keyed: group-tagged HEARTBEAT is accepted and records liveness",
         gState.heartbeatsReceived == 1 && health(gPeerB) && health(gPeerB)->lastMeshHeartbeatMs == gNowMs &&
-        health(gPeerB)->everHeardDirect && health(gPeerB)->rssi == -60);
+        health(gPeerB)->lastRxActivityMs == gNowMs && health(gPeerB)->rssi == -60);
   deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 122, heartbeatPayload()));
   check("keyed: sealed HEARTBEAT is accepted",
         gState.heartbeatsReceived == 2 && health(gPeerB) && health(gPeerB)->heartbeatCount == 2);
@@ -924,15 +957,17 @@ static void testSlotCreation() {
   check("a plaintext ACK from a paired peer is dropped at the plaintext gate (no plaintext ACK in 1.0)",
         health(gPeerB) == nullptr && gEspNowRxPlaintextDrops == 1);
   deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 180, ackPayload(10)));
-  check("a tagged ACK from a paired peer creates its slots and counts the ACK",
-        health(gPeerB) && health(gPeerB)->ackCount == 1 && meta(gPeerB));
+  check("a tagged ACK from a paired peer creates its slots and is heard (one-way only)",
+        health(gPeerB) && health(gPeerB)->lastRxActivityMs == gNowMs && health(gPeerB)->link.lastTwoWayMs == 0 &&
+        meta(gPeerB));
 
   deliver(gFar, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gFar, 181, heartbeatPayload()));
   check("group-tagged HEARTBEAT from an unpaired same-mesh neighbour creates its slots",
         health(gFar) && meta(gFar) && health(gFar)->heartbeatCount == 1);
+  gNowMs += 1000;
   deliver(gFar, groupFrame(ESPNOW_V4_TYPE_ACK, gFar, 182, ackPayload(11)));
   check("a later tagged ACK from that neighbour refreshes the existing slot",
-        health(gFar) && health(gFar)->ackCount == 1);
+        health(gFar) && health(gFar)->lastRxActivityMs == gNowMs);
 }
 
 static void testUnpairReleasesMetadata() {
@@ -1637,11 +1672,11 @@ static void testAckWaiterMatching() {
   deliver(gPeerC, sealedFrame(gSessC, ESPNOW_V4_TYPE_ACK, gPeerB, 503, ackPayload(500, 1, 3), 0, 1, 0));
   check("a sealed ACK in C's session that writes B as origin is still C's: ignored",
         !w->acked && gEspNowRxAckRefused == 3);
-  const size_t hooks = gTrackerAcks.size() + gDelivered.size() + gPingAcks.size() + gFollowAcks.size();
+  const size_t hooks = gDelivered.size() + gPingAcks.size() + gFollowAcks.size();
   deliver(gRelayR, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 504, ackPayload(500, 1, 3)));
   check("a tagged ACK naming B as origin from another radio (R) is dropped before any hook",
         !w->acked && gEspNowRxAckRefused == 4 &&
-        gTrackerAcks.size() + gDelivered.size() + gPingAcks.size() + gFollowAcks.size() == hooks);
+        gDelivered.size() + gPingAcks.size() + gFollowAcks.size() == hooks);
   deliver(gAttacker, plainFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 505, ackPayload(500, 1, 3)));
   check("a plaintext ACK naming B is dropped at the plaintext gate", !w->acked && gEspNowRxPlaintextDrops == 1);
   deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 506, ackPayload(500, 0, 3), 0, 1, 0));
@@ -1674,28 +1709,25 @@ static void testAckWaiterMatching() {
   reset(true);
   w = armWaiter(1, gPeerB, 520, 0, true);
   deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 521, ackPayload(520), 0, 1, 0));
-  check("a sealed ACK reaches the tracked sends and the ping as sealed, not the broadcast tracker",
-        w->acked && gDelivered.size() == 1 && gDelivered[0].ackFor == 520 && gTrackerAcks.empty() &&
+  check("a sealed ACK reaches the tracked sends and the ping as sealed; the waiter feeds the RTT sampler",
+        w->acked && gDelivered.size() == 1 && gDelivered[0].ackFor == 520 && gAckRtts == 1 &&
         gPingAcks.size() == 1 && gPingAcks[0].sealed && gFollowAcks.size() == 1 && gFollowAcks[0].sealed);
   deliver(gPeerC, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerC, 522, ackPayload(523)));
-  check("a tagged ACK reaches the broadcast tracker and the follow hook as tagged, not the tracked sends",
-        gTrackerAcks.size() == 1 && gTrackerAcks[0].ackFor == 523 && gDelivered.size() == 1 &&
+  check("a tagged ACK reaches the follow hook as tagged, not the tracked sends",
+        gDelivered.size() == 1 &&
         gFollowAcks.size() == 2 && !gFollowAcks[1].sealed && std::memcmp(gFollowAcks[1].peer, gPeerC, 6) == 0);
 
   // A relayed tagged ACK always passes the origin check (the relay delivery
-  // sets the radio source to the inner origin); a tag proves only membership,
-  // so it feeds no broadcast tracking. The direct one does.
+  // sets the radio source to the inner origin); a tag proves only membership.
   reset(true);
   deliver(gRelayR, envelope(gRelayR, groupFrame(ESPNOW_V4_TYPE_ACK, gFar, 524, ackPayload(525)), 524));
-  check("a relayed tagged ACK reaches the follow hook but not the broadcast tracker",
-        gTrackerAcks.empty() && gFollowAcks.size() == 1 && std::memcmp(gFollowAcks[0].peer, gFar, 6) == 0);
-  deliver(gFar, groupFrame(ESPNOW_V4_TYPE_ACK, gFar, 526, ackPayload(525)));
-  check("the same ACK direct from its sender reaches the broadcast tracker", gTrackerAcks.size() == 1);
+  check("a relayed tagged ACK reaches the follow hook (which drops relayed ACKs itself)",
+        gFollowAcks.size() == 1 && std::memcmp(gFollowAcks[0].peer, gFar, 6) == 0);
 
   reset(true);
   deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 530, Frame(7, 0)));
   deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 531, Frame(9, 0)));
-  check("an ACK of 7 or 9 bytes is dropped for its length", gEspNowRxLenDrops == 2 && gTrackerAcks.empty());
+  check("an ACK of 7 or 9 bytes is dropped for its length", gEspNowRxLenDrops == 2 && gFollowAcks.empty());
   deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 532, ackPayload(1), 0, 2, 0));
   check("an ACK that claims fragments is dropped", gEspNowRxLenDrops == 3 && gDelivered.empty());
 }
@@ -1863,7 +1895,151 @@ static void testFragmentVerdicts() {
         ackIs(lastAck(), 561, 0, 2, espnowanswer::kRefused, 0) && !reasmHolds(561));
 }
 
+// ---- 1.0 step 8 (RC3): two-way evidence and the heartbeat boot counter -----
+static bool twoWayRecorded(const uint8_t* mac) {
+  const MeshPeerHealth* p = health(mac);
+  return p && p->link.lastTwoWayMs != 0;
+}
+// Our heartbeat `id` to `mac` went out (what v4HeartbeatFor records).
+static void sentHeartbeat(const uint8_t* mac, uint32_t id) {
+  MeshPeerHealth* p = getMeshPeerHealth(mac, true);
+  meshLinkNoteHeartbeatSent(p->link, id, gNowMs);
+}
+static void sentDirect(const uint8_t* mac, uint32_t id) {
+  MeshPeerHealth* p = getMeshPeerHealth(mac, true);
+  meshLinkNoteDirectSend(p->link, id);
+}
+
+static void testTwoWayEvidence() {
+  // A sealed heartbeat echoing one of our last two heartbeats to B is two-way
+  // evidence; two distinct ones make the link two-way.
+  reset(true);
+  sentHeartbeat(gPeerB, 0xAB01);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 800, heartbeatPayload(5, 0xAB01, -61), 0, 1, 0));
+  check("a sealed heartbeat echoing our heartbeat is two-way evidence", twoWayRecorded(gPeerB) &&
+        meshLinkHits(health(gPeerB)->link, gNowMs) == 1 && health(gPeerB)->link.peerHeardRssi == -61);
+  check("one evidence does not make the link two-way yet",
+        meshLinkOf(health(gPeerB)->link, health(gPeerB)->lastRxActivityMs, gNowMs) == MeshLink::OneWay);
+  check("its msgId is remembered for our next echo", meshLinkEchoFor(health(gPeerB)->link, gNowMs) == 800);
+  gNowMs += 5000;
+  sentHeartbeat(gPeerB, 0xAB02);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 801, heartbeatPayload(5, 0xAB02), 0, 1, 0));
+  check("a second distinct echo: two-way",
+        meshLinkOf(health(gPeerB)->link, health(gPeerB)->lastRxActivityMs, gNowMs) == MeshLink::TwoWay);
+
+  // A tagged echo (any group-key holder can forge origin = B) is not evidence.
+  reset(true);
+  sentHeartbeat(gPeerB, 0xAC01);
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 810, heartbeatPayload(5, 0xAC01)));
+  check("a tagged heartbeat echoing our heartbeat is not two-way evidence (FAILS ON trusting a tagged echo)",
+        health(gPeerB) && health(gPeerB)->lastRxActivityMs == gNowMs && !twoWayRecorded(gPeerB));
+  // A sealed echo of an id we never sent, or 0, is not either.
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 811, heartbeatPayload(5, 0xDEAD), 0, 1, 0));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 812, heartbeatPayload(5, 0), 0, 1, 0));
+  check("a sealed echo of an id we never sent, or none, is not evidence", !twoWayRecorded(gPeerB));
+  // An echo older than 30 s does not count.
+  sentHeartbeat(gPeerB, 0xAC02);
+  gNowMs += 30000;
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 813, heartbeatPayload(5, 0xAC02), 0, 1, 0));
+  check("an echo of a heartbeat sent 30 s ago is not evidence", !twoWayRecorded(gPeerB));
+
+  // A sealed ACK, received direct, for a frame of ours that went out direct.
+  reset(true);
+  sentDirect(gPeerB, 900);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 820, ackPayload(901), 0, 1, 0));
+  check("a sealed ACK for a frame we did not send direct is not evidence", !twoWayRecorded(gPeerB));
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 821, ackPayload(900), 0, 1, 0));
+  check("a sealed direct ACK for our direct send is two-way evidence", twoWayRecorded(gPeerB));
+  reset(true);
+  sentDirect(gPeerB, 902);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_ACK, gPeerB, 822, ackPayload(902, 0, 1, espnowanswer::kBusy), 0, 1, 0));
+  check("a busy ACK is evidence too (a busy peer is reachable)", twoWayRecorded(gPeerB));
+  reset(true);
+  sentDirect(gPeerB, 903);
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_ACK, gPeerB, 823, ackPayload(903)));
+  check("a tagged ACK is not evidence", !twoWayRecorded(gPeerB));
+  // A relayed ACK proves nothing about the direct link: C's sealed ACK for our
+  // direct send to C, delivered through relay R, counts for nobody.
+  reset(true);
+  sentDirect(gPeerC, 904);
+  deliver(gRelayR, envelope(gRelayR, sealedFrame(gSessC, ESPNOW_V4_TYPE_ACK, gPeerC, 824, ackPayload(904), 0, 1, 0), 825));
+  check("a relayed sealed ACK is not two-way evidence (FAILS ON counting a relayed ACK)",
+        !twoWayRecorded(gPeerC) && !twoWayRecorded(gRelayR));
+  check("and does not refresh the heard clock of C",
+        !health(gPeerC) || health(gPeerC)->lastRxActivityMs != gNowMs);
+}
+
+static void testHeartbeatBootCounter() {
+  // The known counter 6 (a sealed heartbeat); then copies of B's earlier
+  // tagged heartbeats are played back: an old start (5) or the same one (6)
+  // closes nothing and files nothing; a newer start (7) closes the stale
+  // session once. A restart is filed only from a SEALED counter that moved
+  // past the last sealed one (review fix 3: a tagged counter can be forged by
+  // any group-key holder, one record per forged counter).
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 830, heartbeatPayload(6), 0, 1, 0));
+  check("the first sealed counter is recorded, no restart filed",
+        peerRestartFind(gRestart, gPeerB) && peerRestartFind(gRestart, gPeerB)->boot == 6 &&
+        gRestartsFiled.empty() && gSessionDrops == 0);
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 831, heartbeatPayload(5)));
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 832, heartbeatPayload(6)));
+  check("a replayed old-boot or same-boot heartbeat closes nothing and files nothing",
+        gSessionDrops == 0 && gRestartsFiled.empty() && peerRestartFind(gRestart, gPeerB)->boot == 6);
+  // From another radio address (a replay as someone else): not even asked.
+  deliver(gAttacker, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 833, heartbeatPayload(9)));
+  check("a heartbeat naming B from another radio closes nothing", gSessionDrops == 0 &&
+        peerRestartFind(gRestart, gPeerB)->boot == 6);
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 834, heartbeatPayload(7)));
+  check("a tagged heartbeat with a newer counter closes the stale session once and files nothing",
+        gSessionDrops == 1 && gRestartsFiled.empty());
+  // A group-key holder's forged counters 8, 9, 10 ... (11 s apart, past the
+  // drop limit): each may cost a handshake, none writes a record.
+  for (uint32_t c = 8; c < 18; c++) {
+    gNowMs += 11000;
+    deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 900 + c, heartbeatPayload(c)));
+  }
+  check("forged ever-newer tagged counters file no restart record (FAILS ON filing on a tagged counter)",
+        gRestartsFiled.empty());
+  // The session reopened; the peer's first sealed heartbeat shows its new
+  // counter (past the last sealed 6): filed once, nothing closed.
+  const unsigned drops = gSessionDrops;
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 836, heartbeatPayload(7), 0, 1, 0));
+  check("a sealed counter past the last sealed one is filed once and closes nothing",
+        gSessionDrops == drops && gRestartsFiled.size() == 1 && gRestartsFiled[0] == 7);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 837, heartbeatPayload(7), 0, 1, 0));
+  check("its next sealed heartbeats file nothing more", gRestartsFiled.size() == 1);
+  // This device's first counter for a peer after its own start is no restart.
+  reset(true);
+  deliver(gPeerC, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerC, 840, heartbeatPayload(3)));
+  deliver(gPeerC, sealedFrame(gSessC, ESPNOW_V4_TYPE_HEARTBEAT, gPeerC, 841, heartbeatPayload(3), 0, 1, 0));
+  check("the first counters seen close the stale session but file no restart",
+        gSessionDrops == 1 && gRestartsFiled.empty());
+}
+
+// Review fix 1: while a session with the peer is up, a tagged heartbeat (a
+// replayed copy needs no key) does not change what our next heartbeat echoes.
+static void testTaggedHeartbeatDoesNotPoisonEcho() {
+  reset(true);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 850, heartbeatPayload(4, 0, -55), 0, 1, 0));
+  check("a sealed heartbeat sets the echo", meshLinkEchoFor(health(gPeerB)->link, gNowMs) == 850 &&
+        health(gPeerB)->link.peerHeardRssi == -55);
+  gNowMs += 1000;
+  deliver(gPeerB, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 851, heartbeatPayload(4, 0, -90)));
+  check("a tagged heartbeat between two sealed ones does not change the echo or the RSSI "
+        "(FAILS ON the echo poisoning)",
+        meshLinkEchoFor(health(gPeerB)->link, gNowMs) == 850 && health(gPeerB)->link.peerHeardRssi == -55);
+  deliver(gPeerB, sealedFrame(gSessB, ESPNOW_V4_TYPE_HEARTBEAT, gPeerB, 852, heartbeatPayload(4), 0, 1, 0));
+  check("the next sealed heartbeat sets it", meshLinkEchoFor(health(gPeerB)->link, gNowMs) == 852);
+  // Without a session a tagged heartbeat is all there is: it sets the echo.
+  deliver(gFar, groupFrame(ESPNOW_V4_TYPE_HEARTBEAT, gFar, 853, heartbeatPayload(1)));
+  check("with no session, a tagged heartbeat sets the echo",
+        health(gFar) && meshLinkEchoFor(health(gFar)->link, gNowMs) == 853);
+}
+
 int main() {
+  testTwoWayEvidence();
+  testHeartbeatBootCounter();
+  testTaggedHeartbeatDoesNotPoisonEcho();
   std::setvbuf(stdout, nullptr, _IOLBF, 0);  // keep the case lines if a pre-fix tree aborts
   testMeshIdGate();
   testForgedPlaintextDoesNotShadowSealed();

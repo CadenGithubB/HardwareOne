@@ -17,7 +17,7 @@ Source part (initEspNow needs the radio, so its order is pinned in the source):
 the "already running" answer and the device-name check come before the first
 allocation and before the radio identity cache is cleared; initEspNow no longer
 calls the bootstrap itself; the guard is constructed after esp_now_init and
-before the callbacks, the passphrase restore and the boot notice; the start
+before the callbacks, the passphrase restore and the first heartbeat; the start
 keeps it only on success or when cleanup is still pending; a later start keeps
 the peer-array size the arrays were allocated with; and the openespnow reply
 does not say "Error:" twice.
@@ -104,9 +104,12 @@ def main():
     check('A4 the guard runs after esp_now_init and before the callbacks are registered',
           init.count('PrimaryMeshBootstrap meshBootstrap;') == 1 and
           at(init, 'esp_now_init()') < guard < at(init, 'esp_now_register_recv_cb('))
-    check('A5 the guard runs before the passphrase restore, peer restore and boot notice',
+    check('A5 the guard runs before the passphrase restore, peer restore and the first heartbeat '
+          '(the boot counter rides it since BOOT 31 went in ESP-NOW 1.0 step 8)',
           guard < at(init, '// Restore the encryption passphrase') and
-          guard < at(init, 'restoreEspNowPeers();') and guard < at(init, 'buildBootNotification('))
+          guard < at(init, 'restoreEspNowPeers();') and
+          guard < init.find('gLastHeartbeatSentMs = (uint32_t)millis() - 5000u;') and
+          'buildBootNotification(' not in init)
     tail = init[init.rfind('meshBootstrap.keep();'):]
     check('A6 only a successful start keeps "primary" (keep() just before the ON event)',
           init.count('meshBootstrap.keep();') == 3 and

@@ -155,7 +155,7 @@ def source_failures(component: Path) -> list[str]:
                         "g2EspNowPeerCounts() (\"ESPNow: %s\")")
     for path in sorted(component.glob("G2_*.cpp")):
         code = code_of(path.read_text())
-        if re.search(r"\bespnowSessionUp\(|\bisMeshPeerAlive\(|\bgMeshPeers\b", code):
+        if re.search(r"\bespnowSessionUp\(|\bisMeshPeerAlive\(|\bmeshPeerLinkOf\(|\bgMeshPeers\b", code):
             failures.append(f"{path.name} reads the session or heartbeat table; a peer's state comes "
                             "from espnowPeerState / espnowPeerCounts")
     # The two blocks the Network host suites lift as the page's local state.
