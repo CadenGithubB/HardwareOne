@@ -313,6 +313,15 @@ static void cliCases() {
   reset(); stageSucceeds = false;
   for (const char* value : {"c", "new-label", "new-device", "new-room", "new-zone", "s"}) cli(value);
   patch("new-label", "new-device", "new-room", "new-zone"); assert(nextCalls == 0);
+  // SET-5: a refused page starts its fields again from the label (the refused
+  // text is not kept, so a retry is not the same refusal), and the next
+  // answers stage.
+  assert(sWizard.subMode == WizardSubMode::ESPNOW_NAME);
+  assert(sWizard.result.espnowFriendlyName.empty() && sWizard.result.deviceName.empty());
+  assert(sWizard.result.espnowRoom.empty() && sWizard.result.espnowZone.empty());
+  staged.clear(); stageSucceeds = true;
+  for (const char* value : {"label-2", "device-2", "room-2", "zone-2", "s"}) cli(value);
+  patch("label-2", "device-2", "room-2", "zone-2"); assert(nextCalls == 1);
   for (const char* skip : {"", "n", "next"}) {
     reset(); cli(skip); unchanged(); assert(!draftEnabled && gSettings.espnowAutoStart && nextCalls == 1);
   }

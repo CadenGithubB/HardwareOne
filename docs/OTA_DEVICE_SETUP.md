@@ -235,6 +235,9 @@ cancel
 
 `status` should report `littlefsReadOnly: true` - the updater mounted the blank
 image that was just flashed. No format step is needed or available.
+`status` (and the recovery network's `/status`) also names the last finished
+update: `resultCode` (the words of `otastatus json`, `none` before the first),
+`resultSequence` and `resultDetail`.
 
 `setpin` stores the recovery credential. It is currently BOTH the WPA2 PSK for
 `HW1-Recovery-XXXX` and the HTTP Basic password (username `admin`);

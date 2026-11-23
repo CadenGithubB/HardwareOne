@@ -27,8 +27,7 @@ never 0; a receiver drops 0 and every id no enabled mesh of its own has. Devices
 stamp CRC16 of the label and drop, and are dropped by, devices after it at the mesh gate: reflash the
 fleet together. The `SYSEVT_SETTING_CHANGED` key for the name is now `deviceName` (was
 `espnowDeviceName`), its settings path `system.device.deviceName` (was `espnow.deviceName`), and the
-`bluetoothDeviceName` setting is gone (a settings file with the old keys gives its name to the new one
-once at load, converted to the rule when needed, and loses the old keys: `System_DeviceNameLegacy.h`);
+`bluetoothDeviceName` setting is gone (1.0 reads only the new key; boards start erased);
 `bleinfo json` keeps `deviceName`, now the device name. Without a stored name the device uses
 `HardwareOne-` and the last two bytes of its address (`HardwareOne-B2C3`; builds before 2026-11-20 used
 three), and replies with the name gain `deviceNameSet` (false for that fallback); a name stored earlier,
@@ -62,8 +61,6 @@ bundle formats and the ESP-IDF and Arduino core it was built with (`versions jso
 - **Within 1.x**: settings, user accounts, saved Wi-Fi networks and automations are kept across an
   app update (OTA or cable app-only write). A renamed setting or event name gets an alias, or the
   change is listed under "Changed" in CHANGELOG with the migration step.
-  - `g2_worn` (event) was renamed `g2_plugin_alive` in 64713c0d; saved automations and notification
-    rules that still say `g2_worn` resolve to the new kind (alias in `systemEventKindFromName`).
   - Every command alias was removed before 1.0 (one name per command); `c6_console` is now only
     `c6console`. CHANGELOG "Changed" lists each removed name and the name to use.
   - New settings keys (2026-11-20), each with a default equal to the behaviour before it, so a

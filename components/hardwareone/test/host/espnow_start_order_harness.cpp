@@ -2,7 +2,7 @@
 //
 // The runner pastes the production Settings::MeshIdentity record into the
 // Settings double, and meshIdRefreshAll,
-// initPrimaryMeshFromLegacySettings and (when the tree has it) the
+// initPrimaryMesh and (when the tree has it) the
 // PrimaryMeshBootstrap guard at the production marker. ENABLE_BONDED_MODE comes
 // from the command line (compiled once per value). A "start" here is what
 // initEspNow does with slot 0: construct the guard, let a command run while the
@@ -101,7 +101,7 @@ static void startAttempt(bool succeeds, bool stretch = false, During during = nu
 }
 #else
 static void startAttempt(bool, bool stretch = false, During during = nullptr) {
-  initPrimaryMeshFromLegacySettings();
+  initPrimaryMesh();
   meshIdRefreshAll();
   if (stretch) stretchSlot0();
   if (during) during();

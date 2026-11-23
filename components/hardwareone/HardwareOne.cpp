@@ -1540,7 +1540,7 @@ void hardwareone_setup() {
 
   // Filesystem FIRST to enable early allocation logging
   if (!initFilesystem()) {
-    Serial.println("FATAL: Filesystem initialization failed");
+    Serial.printf("FATAL: Filesystem initialization failed. %s\n", filesystemMountFailureHelp());
     // Never auto-format retained data. On the OTA layout, a committed main
     // image that cannot mount LittleFS parks in the factory updater so the
     // operator can recover over serial/authenticated SoftAP.

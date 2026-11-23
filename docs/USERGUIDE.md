@@ -760,15 +760,6 @@ name. A received name that breaks the rule is not used or cleaned: the sender is
 `espnowpairrequest` refuses it and asks for the MAC). The free-text display label is separate:
 `espnowfriendlyname` (up to 47 bytes).
 
-A device updated from a build before the one device name (which had `espnowsetname` and a separate
-Bluetooth name) keeps its name: the first start after the update takes its old ESP-NOW name, or, when
-it had none, its old Bluetooth name unless that was the default `HardwareOne`. A name that breaks the
-rule is converted: spaces and `_` become `-`, other characters are dropped, runs of `-` are joined, the
-name is cut to 31 bytes and `-` is trimmed at the ends (`Living_Room` becomes `Living-Room`). The system
-log has one line naming the name taken and where it came from; when nothing valid is left the old name
-is dropped and the line says to set one with `devicename <name>`. This happens once and never replaces a
-device name that is already stored; the old settings are removed from `settings.json`.
-
 ### Mesh id
 Every ESP-NOW frame carries a 16-bit mesh id, which a receiver matches against its own meshes. The id
 comes from the mesh key (the label and the passphrase), so a mesh has none until its passphrase is set,
@@ -978,13 +969,13 @@ Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum vari
 | Category | Variables | Type | Notes |
 |---|---|---|---|
 | Sensors | `TEMP` `DISTANCE` `LIGHT` | numeric | thermal C / ToF cm / ambient light |
-| Sensors | `MOTION` | enum | `DETECTED` / `NONE` |
+| Sensors | `MOTION` | enum | `DETECTED` / `NONE`, from the STHS34PF80 presence sensor's motion flag |
 | Sensors | `IMU_PITCH` `IMU_ROLL` `IMU_TILT` | numeric | the motion sensor's tilt, degrees (after the mounting correction); `IMU_TILT` is the larger of the two, without its sign |
 | Sensors | `IMU_POSE` | enum | `FACE-UP` `FACE-DOWN` `PORTRAIT` `PORTRAIT-INV` `LANDSCAPE-R` `LANDSCAPE-L`: the pose the last `imu_orientation` event announced (held for 3 readings and at least 200 ms); `IMU_POSE=FACE-DOWN` is "flipped over" |
 | Sensors | `IMU_TAP_AGE` | numeric | seconds since the last tap or knock, for an hour after it; false before the first tap after `openimu` and once the tap is more than an hour old |
-| Time | `TIME` | enum | `MORNING` `AFTERNOON` `EVENING` `NIGHT` |
-| Time | `HOUR` | numeric | local hour, 0-23 |
-| Time | `DAY` | enum | `SUN` `MON` `TUE` `WED` `THU` `FRI` `SAT` |
+| Time | `TIME` | enum | `MORNING` `AFTERNOON` `EVENING` `NIGHT`; false until the clock holds a real date |
+| Time | `HOUR` | numeric | local hour, 0-23; false until the clock holds a real date |
+| Time | `DAY` | enum | `SUN` `MON` `TUE` `WED` `THU` `FRI` `SAT`; false until the clock holds a real date |
 | Time | `NTP` | enum | `SYNCED` / `NONE` (clock holds a real date) |
 | System | `BATTERY` | numeric | charge estimate; ADC values are approximate, unavailable/stale readings do not satisfy the condition |
 | System | `HEAP` `PSRAM` `FSFREE` | numeric | free internal DRAM / PSRAM / storage, in KB |
