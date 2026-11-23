@@ -56,7 +56,7 @@ def generated(baseline: Path | None = None) -> str:
                   *web_executor, *reply_text,
                   extract_block(web, "static esp_err_t handleGpsLiveTrackAction("),
                   handler, action, extract_block(oled, "static void drawTrackStatus(")]
-    harness = (HERE / "map_live_ui_harness.cpp").read_text()
+    harness = (HERE / "map_live_ui_harness.cpp").read_text().replace('#include "OLED_Layout.h"', (COMPONENT / "OLED_Layout.h").read_text().replace("#pragma once", ""))
     require(harness.count("// INSERT_PRODUCTION") == 1, "missing production marker")
     require(harness.count("// INSERT_TRACK_TYPES") == 1, "missing track types marker")
     types = maps[maps.index("#define MAX_TRACK_POINTS"):maps.index("// GPS Track management")]

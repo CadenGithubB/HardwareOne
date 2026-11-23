@@ -108,9 +108,13 @@ def source_contracts(component: Path) -> list[str]:
         failures.append("OLED action menu: no Pretty View dispatch")
     prepare = extract_block(oled, "void prepareFileBrowserData(")
     case = prepare.find("case FileBrowserPendingAction::LOAD_PRETTY_VIEW:")
-    fill_call = prepare.find("fbFillView(content.c_str(), content.length(), pretty);")
+    # The view keeps the file as read (fbOpenView) so a turn of the screen can
+    # wrap it again; it fills through fbFillView with the same pretty flag.
+    fill_call = prepare.find("fbOpenView(content, pretty);")
     if not 0 <= case < fill_call:
         failures.append("prepareFileBrowserData: LOAD_PRETTY_VIEW does not reach fbFillView")
+    if "fbFillView(sFbViewRaw, sFbViewRawLen, pretty);" not in extract_block(oled, "static void fbOpenView("):
+        failures.append("fbOpenView does not fill the view with its pretty flag")
     elif "== FileBrowserPendingAction::LOAD_PRETTY_VIEW" not in prepare[case:fill_call]:
         failures.append("prepareFileBrowserData: pretty flag not taken from LOAD_PRETTY_VIEW")
     return failures

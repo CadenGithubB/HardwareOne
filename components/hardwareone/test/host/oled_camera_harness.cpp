@@ -17,8 +17,27 @@
 #define ENABLE_OLED_DISPLAY 1
 #define ENABLE_CAMERA_SENSOR 1
 #define DISPLAY_WIDTH 128
+#define DISPLAY_HEIGHT TEST_HEIGHT
 #define OLED_CONTENT_HEIGHT (TEST_HEIGHT-21)
 #define OLED_CONTENT_START_Y 11
+// The live OLED layout, landscape only: the firmware reads it at run time
+// (HAL_Display.h); this harness draws the landscape canvas, so the portrait
+// branches compile but are never taken.
+#include "OLED_Layout.h"
+#ifndef SCREEN_WIDTH
+#ifdef DISPLAY_WIDTH
+#define SCREEN_WIDTH DISPLAY_WIDTH
+#else
+#define SCREEN_WIDTH 128
+#endif
+#endif
+#define oledPortrait() (false)
+#define oledCols() (SCREEN_WIDTH / 6)
+#define oledContentBottom() (OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 2)
+#define oledKvRow(...) (0)
+#define oledPrintWrapped(...) (0)
+#define oledHeroCard(...) ((void)0)
+#define oledMeter(...) ((void)0)
 #define DISPLAY_COLOR_WHITE 1
 #define EXT_RAM_BSS_ATTR
 #define RETURN_VALID_IF_VALIDATE_CSTR() do { if(validateOnly)return "VALID"; } while(0)
@@ -105,6 +124,7 @@ bool oledRunCommandAsync(const char* cmd,OledCommandDoneFn fn,const void* contex
 }
 struct Display {
   void setTextSize(int){}void setCursor(int,int){}void print(const char*){}void println(const char*){}
+  void drawPixel(int,int,int){}  // the portrait half-scale preview (not drawn here)
   void drawBitmap(int x,int y,const uint8_t*,unsigned w,unsigned h,int){
     assert(!criticalDepth&&x==0&&w==128&&y>=OLED_CONTENT_START_Y&&y+h<=OLED_CONTENT_START_Y+OLED_CONTENT_HEIGHT);
   }

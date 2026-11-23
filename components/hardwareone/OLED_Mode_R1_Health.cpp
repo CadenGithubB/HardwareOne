@@ -260,6 +260,9 @@ static void displayR1Health() {
   const int r1 = OLED_CONTENT_START_Y + 8;
   const int r2 = OLED_CONTENT_START_Y + 16;
   const int r3 = OLED_CONTENT_START_Y + 24;
+  // The right column: x64 beside the left one, or under it in portrait.
+  const bool tall = oledPortrait();
+  const int rx = tall ? 0 : 64, ry = tall ? 24 : 0;
 
   oledDisplay->setCursor(0, r1);
   if (t.hrValid) {
@@ -268,7 +271,7 @@ static void displayR1Health() {
   } else {
     oledDisplay->print("HR --");
   }
-  oledDisplay->setCursor(64, r1);
+  oledDisplay->setCursor(rx, r1 + ry);
   if (t.hrvValid) {
     snprintf(v, sizeof(v), "V %d", (int)t.hrv);
     oledDisplay->print(v);
@@ -283,7 +286,7 @@ static void displayR1Health() {
   } else {
     oledDisplay->print("O2 --");
   }
-  oledDisplay->setCursor(64, r2);
+  oledDisplay->setCursor(rx, r2 + ry);
   if (t.batteryValid) {
     snprintf(v, sizeof(v), "B %u%%", (unsigned)t.battery);
     oledDisplay->print(v);
@@ -300,7 +303,7 @@ static void displayR1Health() {
   } else {
     oledDisplay->print("T --");
   }
-  oledDisplay->setCursor(64, r3);
+  oledDisplay->setCursor(rx, r3 + ry);
   // Wear + one shared recentness (not per-vital ages).
   const char* wear = g2RingWearName(t.wearValid, t.wear);
   if (age[0]) snprintf(v, sizeof(v), "%s %s", wear, age);
@@ -312,8 +315,8 @@ static void displayR1Health() {
   G2HealthHistorySummary history = {};
   g2HealthHistoryGetSummary(history);
 
-  const int a0 = OLED_CONTENT_START_Y + 32;
-  sHealthActions.visibleLines = oledVisibleRows(8, 32);
+  const int a0 = OLED_CONTENT_START_Y + 32 + ry;
+  sHealthActions.visibleLines = tall ? (oledContentBottom() + 1 - a0) / 8 : oledVisibleRows(8, 32);
   oledScrollClearKeepSelection(&sHealthActions);
   sHealthActions.selectedIndex = sHealthSel;
   for (uint8_t action = 0; action < HEALTH_ACTION_COUNT; ++action) {

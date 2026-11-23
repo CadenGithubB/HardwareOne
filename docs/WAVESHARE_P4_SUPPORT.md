@@ -406,7 +406,8 @@ The underlying page-packed UI is 128x88: it retains 128-pixel text wrapping and
 adds 24 logical rows compared with the previous 128x64 canvas. Portrait also
 uses the taller canvas, scaled 5x into 640x440 at (40,380); the original portrait
 control positions remain below it. Other display backends retain their canvas
-sizes. `oledflip` remains the independent 180-degree logical-UI option.
+sizes. `oledrotation 0|180` remains the independent 180-degree logical-UI option (90 and 270,
+portrait, are for the SSD1306 OLED only).
 
 The native panel/framebuffer and GT911 diagnostic coordinates stay 720x1280.
 The HAL owns the surface transform; touch hit-testing applies its inverse, and

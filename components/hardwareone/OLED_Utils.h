@@ -15,7 +15,7 @@
 #include "HAL_Display.h"
 #include "OLED_Layout.h"
 
-inline constexpr int oledVisibleRows(int rowHeight, int reservedHeight = 0, int baselineRows = 0) {
+inline int oledVisibleRows(int rowHeight, int reservedHeight = 0, int baselineRows = 0) {
   return oled_layout::visibleRows(OLED_CONTENT_HEIGHT, rowHeight, reservedHeight, baselineRows);
 }
 
@@ -102,6 +102,25 @@ void oledRenderFooter(Adafruit_SSD1306* display, const OledFooterHints* hints);
 void oledDrawBar(Adafruit_SSD1306* display, int x, int y, int width, int height,
                  int value, int maxValue, const char* label = nullptr);
 
+// ---- Portrait building blocks (64 x 128; OLED_Layout.h has the grid) -------
+// The hero card (ToF, RTC, FM, Mic): the label at size 1 on y23, the value at
+// size 2 on y35 (at most 5 glyphs; ink-centred, or from x1 when leftAligned)
+// and the unit or seconds centred on y53. The band from y64 down is the
+// screen's.
+void oledHeroCard(Adafruit_SSD1306* display, const char* label, const char* value, const char* unit,
+                  bool leftAligned = false);
+// A label/value row on the 10-cell grid: the pair shares the row when it fits
+// (value right-aligned to x59), otherwise the value goes right-aligned on the
+// next row. Returns the y of the row after it (8 px rows).
+int oledKvRow(Adafruit_SSD1306* display, int y, const char* label, const char* value);
+// Text wrapped at the row's cells (at a space where it can be) from (x, y),
+// one row per `pitch` px, at most maxLines; returns the y after the last row.
+// The stacked-rows fallback for lines written for the 21-cell landscape row.
+int oledPrintWrapped(Adafruit_SSD1306* display, int x, int y, const char* text, int maxLines = 6,
+                     int pitch = 8);
+// A full-width meter frame (x1..w-4) with value/max filled inside.
+void oledMeter(Adafruit_SSD1306* display, int y, int height, long value, long maxValue);
+
 // ============= Content Area System =============
 
 // Content area rendering context for scrollable content
@@ -178,6 +197,13 @@ struct OledScrollState {
   // it. nullptr = draw the icon only (the default for every existing user).
   void (*rightPaneDraw)(Adafruit_SSD1306* display, OledScrollItem* selected,
                         int areaX, int iconY, int iconSize);
+  // The row count the screen asked for, kept while a portrait renderer sets
+  // its own (0 = the list has not been drawn in portrait since).
+  int landscapeVisibleLines;
+  // The list was set up while the screen was portrait, so its row count was
+  // worked out for 64 x 128: the first landscape frame fits it to the rows
+  // that are there (oledScrollFitRows).
+  bool initInPortrait;
 };
 
 void oledScrollInit(OledScrollState* state, const char* title = nullptr, int visibleLines = oledVisibleRows(10, 1, 4));
@@ -226,6 +252,10 @@ bool oledScrollHandleNav(OledScrollState* state, bool leftRightNav = false);
 
 // Configure split-pane layout (list on left, icon on right)
 void oledScrollSetSplitPane(OledScrollState* state, int listWidth, int separatorX, int iconSize = 32);
+// For a hand-drawn list of rowHeight rows from topY: its row count, worked
+// out again for the live layout (the screen may have turned since the list
+// was set up), selection kept in view.
+void oledScrollFitRowsTo(OledScrollState* state, int rowHeight, int topY);
 
 // ============= Virtual Keyboard =============
 

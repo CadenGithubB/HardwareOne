@@ -1,5 +1,6 @@
 #include "i2csensor_ano_encoder.h"
 #include "HAL_InputInternal.h"
+#include "HAL_Input.h"  // inputScreenQuarterTurns: the ring turns with the screen
 #include "System_Mutex.h"
 #include "System_Events.h"  // systemEventPost — event register producer
 #include "System_BuildConfig.h"
@@ -380,25 +381,22 @@ const char* cmd_anoencoderstatus(const String& argsInput) {
   const unsigned bus = running ? sAnoBus : (unsigned)gSettings.inputBus;
   const unsigned address = running ? sAnoAddress : anoEncoderAddress();
   const int pollMs = gSettings.inputDevicePollMs;
-  const bool invert = gSettings.anoEncoderInvert;
-  const bool swapUd = gSettings.anoEncoderSwapUpDown;
-  const bool swapLr = gSettings.anoEncoderSwapLeftRight;
+  const int mount = gSettings.anoMount;
   const bool autoStart = gSettings.inputAutoStart;
   if (argWantsJson(argsInput)) {
     snprintf(getDebugBuffer(), 1024,
              "{\"schema\":1,\"connected\":%s,\"product\":%u,\"bus\":%u,\"address\":%u,\"pollMs\":%d,"
-             "\"invert\":%s,\"swapUpDown\":%s,\"swapLeftRight\":%s,\"autoStart\":%s}",
+             "\"mount\":%d,\"mirror\":%s,\"autoStart\":%s}",
              running ? "true" : "false", running ? (unsigned)kSeesawProductAnoEncoder : 0u, bus, address,
-             pollMs, invert ? "true" : "false", swapUd ? "true" : "false", swapLr ? "true" : "false",
-             autoStart ? "true" : "false");
+             pollMs, input_rotation::mountDegrees(mount),
+             input_rotation::mountFromCode(mount).mirror ? "true" : "false", autoStart ? "true" : "false");
     return getDebugBuffer();
   }
   snprintf(getDebugBuffer(), 1024,
-           "[ANO] %s (I2C%u address 0x%02X). Poll %d ms. Rotation %s; UP/DOWN %s; LEFT/RIGHT %s. "
+           "[ANO] %s (I2C%u address 0x%02X). Poll %d ms. Mount %s. "
            "Open after boot: %s. %s",
            running ? "Connected: Adafruit 5740 ANO encoder" : "Not connected", bus + 1, address, pollMs,
-           invert ? "inverted" : "normal", swapUd ? "swapped" : "normal", swapLr ? "swapped" : "normal",
-           autoStart ? "on" : "off",
+           input_rotation::mountName(mount), autoStart ? "on" : "off",
            running ? "Read it with 'anoencoderread'." : "Start it with 'openinput'.");
   return getDebugBuffer();
 }
@@ -433,41 +431,27 @@ const char* cmd_anoencoderi2caddr(const String& argsInput) {
   return getDebugBuffer();
 }
 
-// One on/off (or toggle) setting of the ANO: no value shows it.
-static const char* anoBoolSetting(bool& field, const String& argsInput, bool allowToggle,
-                                  const char* onReply, const char* offReply) {
+// anomount [0|90|180|270 [mirror]]: how the ring sits against the panel at
+// rotation 0, in the screen's terms (Input_RotationCore.h). The turn moves the
+// direction buttons; mirror exchanges LEFT and RIGHT and turns the wheel the
+// other way (the ring seen from behind). The screen's own rotation
+// (oledrotation) is applied after it. Replaces anoencoderinvert /
+// anoencoderswapud / anoencoderswaplr: both swaps were 180, one swap is a
+// mirror.
+const char* cmd_anomount(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
   String arg = argsInput;
   arg.trim();
   if (arg.length() > 0) {
-    bool value = false;
-    if (allowToggle && arg.equalsIgnoreCase("toggle")) {
-      value = !field;
-    } else {
-      const int parsed = parseBoolArg(arg);
-      if (parsed < 0) return allowToggle ? "Error: Not an on/off value. Use on, off or toggle." : kCommandReplyNotOnOff;
-      value = parsed == 1;
+    int code = 0;
+    if (!input_rotation::parseMountArg(arg.c_str(), code)) {
+      return "Error: The mount is 0, 90, 180 or 270, optionally followed by mirror. Usage: anomount [0|90|180|270] [mirror]";
     }
-    setSetting(field, value);
+    setSetting(gSettings.anoMount, code);
   }
-  return field ? onReply : offReply;
-}
-
-const char* cmd_anoencoderinvert(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return anoBoolSetting(gSettings.anoEncoderInvert, argsInput, false, "[ANO] Rotation: inverted",
-                        "[ANO] Rotation: normal");
-}
-
-const char* cmd_anoencoderswapud(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return anoBoolSetting(gSettings.anoEncoderSwapUpDown, argsInput, true, "[ANO] UP/DOWN buttons: swapped",
-                        "[ANO] UP/DOWN buttons: normal");
-}
-
-const char* cmd_anoencoderswaplr(const String& argsInput) {
-  RETURN_VALID_IF_VALIDATE_CSTR();
-  return anoBoolSetting(gSettings.anoEncoderSwapLeftRight, argsInput, true,
-                        "[ANO] LEFT/RIGHT buttons: swapped", "[ANO] LEFT/RIGHT buttons: normal");
+  snprintf(getDebugBuffer(), 1024, "[ANO] Mount: %s", input_rotation::mountName(gSettings.anoMount));
+  return getDebugBuffer();
 }
 
 // ============================================================================
@@ -476,11 +460,10 @@ const char* cmd_anoencoderswaplr(const String& argsInput) {
 // the I2C module.
 // ============================================================================
 static const char kAnoAddressOptions[] = ANO_ADDRESS_OPTIONS;
+static const char kAnoMountOptions[] = INPUT_MOUNT_OPTIONS;
 static const SettingEntry anoEncoderSettingEntries[] = {
   { "anoEncoderI2cAddr",       SETTING_INT,  &gSettings.anoEncoderI2cAddr,       kAnoAddressDefault, 0, nullptr, kAnoAddressMin, kAnoAddressMax, "I2C address (next openinput)", kAnoAddressOptions, false, nullptr, "anoencoderi2caddr" },
-  { "anoEncoderInvert",        SETTING_BOOL, &gSettings.anoEncoderInvert,        0,                  0, nullptr, 0, 1,   "Invert rotation",       nullptr, false, nullptr, "anoencoderinvert" },
-  { "anoEncoderSwapUpDown",    SETTING_BOOL, &gSettings.anoEncoderSwapUpDown,    1,                  0, nullptr, 0, 1,   "Swap UP/DOWN buttons",  nullptr, false, nullptr, "anoencoderswapud" },
-  { "anoEncoderSwapLeftRight", SETTING_BOOL, &gSettings.anoEncoderSwapLeftRight, 1,                  0, nullptr, 0, 1,   "Swap LEFT/RIGHT buttons", nullptr, false, nullptr, "anoencoderswaplr" },
+  { "anoMount",                SETTING_INT,  &gSettings.anoMount,                180,                0, nullptr, 0, 271, "Mount (degrees, mirror)", kAnoMountOptions, false, nullptr, "anomount" },
 };
 
 static bool isAnoEncoderConnected() { return gAnoEncoderConnected; }
@@ -502,9 +485,7 @@ const CommandEntry anoEncoderCommands[] = {
   { "anoencoderread",    "Read the ANO encoder: wheel position and buttons. (add 'json' for JSON output)", false, cmd_anoencoder },
   { "anoencoderstatus",  "ANO encoder status: bus, address, settings. (add 'json' for JSON output)", false, cmd_anoencoderstatus, "Usage: anoencoderstatus [json]" },
   { "anoencoderi2caddr", "Set the ANO I2C address [0x49-0x50] (next openinput)", true,  cmd_anoencoderi2caddr, "Usage: anoencoderi2caddr <0x49..0x50>" },
-  { "anoencoderinvert",  "Invert rotation direction [on|off]",       true, cmd_anoencoderinvert,  "Usage: anoencoderinvert [on|off]" },
-  { "anoencoderswapud",  "Swap UP/DOWN buttons [on|off|toggle]",     true, cmd_anoencoderswapud,  "Usage: anoencoderswapud [on|off|toggle]" },
-  { "anoencoderswaplr",  "Swap LEFT/RIGHT buttons [on|off|toggle]",  true, cmd_anoencoderswaplr,  "Usage: anoencoderswaplr [on|off|toggle]" },
+  { "anomount",          "How the ring sits, in the screen's terms: [0|90|180|270] [mirror]", true, cmd_anomount, "Usage: anomount [0|90|180|270] [mirror]" },
 };
 const size_t anoEncoderCommandsCount = sizeof(anoEncoderCommands) / sizeof(anoEncoderCommands[0]);
 
@@ -572,8 +553,8 @@ void inputTask(void* parameter) {
           return reads.deltaOk;
         });
 
-        const AnoPollResult r = anoPoll(pollState, reads, gSettings.anoEncoderSwapUpDown,
-                                        gSettings.anoEncoderSwapLeftRight, gSettings.anoEncoderInvert);
+        const AnoPollResult r = anoPoll(pollState, reads, input_rotation::mountFromCode(gSettings.anoMount),
+                                        inputScreenQuarterTurns());
 
         const bool pollChanged = (reads.bulk != lastLoggedBulk) || reads.intFlags || r.rawDelta;
         const bool pollHeartbeat = (nowMs - lastPollLogMs) >= POLL_LOG_HEARTBEAT_MS;
@@ -589,9 +570,9 @@ void inputTask(void* parameter) {
         // Turns read off the chip count even when a button part failed.
         position += r.rawDelta;
         if (r.rawDelta != 0) {
-          DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] rotate raw=%ld -> detent=%ld (invert=%d) pos=%ld",
+          DEBUG_ANO_ENCODER_VALUESF("[ANO_VAL] rotate raw=%ld -> detent=%ld (mount=%d) pos=%ld",
                                     (long)r.rawDelta, (long)r.detents,
-                                    gSettings.anoEncoderInvert ? 1 : 0, (long)position);
+                                    gSettings.anoMount, (long)position);
         }
 
         if (r.buttonsValid) {

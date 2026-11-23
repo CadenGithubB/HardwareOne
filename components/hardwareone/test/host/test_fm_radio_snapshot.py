@@ -54,7 +54,7 @@ def generated(component: Path, baseline: bool) -> str:
         functions += [extract_block(owner, marker) for marker in [
             'void updateFmRadio() ', 'const char* cmd_fmradio_tune(', 'const char* cmd_fmradio_seek(',
             'const char* cmd_fmradio_volume(', 'const char* cmd_fmradio_mute(']]
-    unit = ((HERE / 'fm_radio_snapshot_harness.cpp').read_text()
+    unit = ((HERE / 'fm_radio_snapshot_harness.cpp').read_text().replace('#include "OLED_Layout.h"', (COMPONENT / 'OLED_Layout.h').read_text().replace('#pragma once', ''))
             .replace('// INSERT_TYPES', types).replace('// INSERT_STATE', state)
             .replace('// INSERT_FUNCTIONS', '\n\n'.join(functions)))
     # The mute command reads its on/off value with the shared parser.

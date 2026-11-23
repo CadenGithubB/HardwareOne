@@ -42,18 +42,22 @@ enum class CliView : uint8_t { LIVE, PAUSED, READER };
 // Geometry: an 8-pixel status row, then 8-pixel record rows; one column each
 // for the selection cursor and the scroll marks. 4 rows on the 128x64 OLED,
 // 7 on the 128x88 Waveshare canvas, 12 on the P4X-EYE's 128x128 canvas.
-static const int CLI_COLS        = DISPLAY_WIDTH / 6;
-static const int CLI_LIST_COLS   = CLI_COLS - 2;
-static const int CLI_READER_COLS = CLI_COLS - 1;
+// The live layout (10 columns and 9 rows in portrait); buffers are sized for
+// the widest canvas and the most rows.
+static const int CLI_COLS_MAX    = DISPLAY_WIDTH / 6;
+static const int CLI_ROWS_MAX    = 24;
+#define CLI_COLS        (SCREEN_WIDTH / 6)
+#define CLI_LIST_COLS   (CLI_COLS - 2)
+#define CLI_READER_COLS (CLI_COLS - 1)
 static const int CLI_ROW_H       = 8;
 static const int CLI_STATUS_H    = 9;
-static const int CLI_ROWS        = oledVisibleRows(CLI_ROW_H, CLI_STATUS_H);
-static const int CLI_ROWS_Y      = OLED_CONTENT_START_Y + CLI_STATUS_H;
-static const int CLI_GUTTER_X    = (CLI_COLS - 1) * 6;
+#define CLI_ROWS        (min(CLI_ROWS_MAX, (oledContentBottom() + 1 - OLED_CONTENT_START_Y - CLI_STATUS_H) / CLI_ROW_H))
+#define CLI_ROWS_Y      (OLED_CONTENT_START_Y + CLI_STATUS_H)
+#define CLI_GUTTER_X    ((CLI_COLS - 1) * 6)
 // Soft wraps add at most one '\n' per CLI_READER_COLS characters.
 static const size_t CLI_READER_WRAP_CAP =
     oled_console::kRecordTextMax + oled_console::kRecordTextMax / 8 + 2;
-static_assert(CLI_LIST_COLS + 2 <= (int)oled_console::kPreviewMax,
+static_assert(CLI_COLS_MAX <= (int)oled_console::kPreviewMax,
               "list previews must fit the console's preview copies");
 
 static CliView  sView = CliView::LIVE;
@@ -201,7 +205,7 @@ static void cliReaderNeighbor(bool newer, bool fromEnd, const oled_console::Stat
 // Status row: at most CLI_COLS glyphs so it never wraps into the rows.
 static const size_t CLI_STATUS_SCRATCH = 48;  // holds any status before the column cut
 static void cliDrawStatus(const char* text) {
-  char row[CLI_COLS + 1];
+  char row[CLI_COLS_MAX + 1];
   snprintf(row, sizeof(row), "%.*s", CLI_COLS, text);
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
   oledDisplay->print(row);
@@ -239,7 +243,7 @@ static void cliDrawList(const oled_console::Status& st) {
     sWindowTopId = st.oldestId + (uint32_t)top;
   }
 
-  oled_console::Preview rows[CLI_ROWS];
+  oled_console::Preview rows[CLI_ROWS_MAX];
   bool busy = false;
   const size_t shown = gOledConsole.tryCopyWindow(st.oldestId + (uint32_t)top, CLI_ROWS,
                                                   CLI_LIST_COLS, rows, &busy);
@@ -309,7 +313,7 @@ static void cliDrawReader(const oled_console::Status& st) {
     oledDisplay->setCursor(0, CLI_ROWS_Y);
     oledDisplay->print("(empty)");
   }
-  char line[CLI_READER_COLS + 1];
+  char line[CLI_COLS_MAX + 1];
   for (int row = 0; row < CLI_ROWS && sReaderTop + row < lines; ++row) {
     cliReaderLine(wrapped, sReaderTop + row, line, sizeof(line));
     oledDisplay->setCursor(0, CLI_ROWS_Y + row * CLI_ROW_H);

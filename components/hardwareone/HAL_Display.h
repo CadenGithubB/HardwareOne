@@ -228,6 +228,20 @@
 // These map old SCREEN_* names to new DISPLAY_* names for backward compatibility.
 // New code should use DISPLAY_* macros directly.
 
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+  // The SSD1306 turns at run time (`oledrotation`): the layout names read the
+  // live logical geometry, which the render task refreshes when it applies a
+  // rotation (displaySetRotation). DISPLAY_WIDTH / DISPLAY_HEIGHT stay the
+  // physical 128 x 64 panel (the library's buffer and the 1024 B frame).
+  extern oled_layout::Geometry gOledGeometry;
+  #define SCREEN_WIDTH          (static_cast<int>(gOledGeometry.width))
+  #define SCREEN_HEIGHT         (static_cast<int>(gOledGeometry.height))
+  #define OLED_HEADER_HEIGHT    (static_cast<int>(gOledGeometry.headerHeight))
+  #define OLED_FOOTER_HEIGHT    (static_cast<int>(gOledGeometry.footerHeight))
+  #define OLED_CONTENT_HEIGHT   (static_cast<int>(gOledGeometry.contentHeight))
+  #define OLED_CONTENT_START_Y  (static_cast<int>(gOledGeometry.contentY))
+#endif
+
 #if DISPLAY_ENABLED
   #ifndef SCREEN_WIDTH
     #define SCREEN_WIDTH          DISPLAY_WIDTH
@@ -247,6 +261,24 @@
   #ifndef OLED_CONTENT_START_Y
     #define OLED_CONTENT_START_Y  DISPLAY_CONTENT_START_Y
   #endif
+#endif
+
+// The live layout (logical size, bars, content rows, portrait or not). On the
+// SSD1306 it follows the applied rotation; other canvases are fixed.
+#if DISPLAY_ENABLED
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+inline const oled_layout::Geometry& oledGeometry() { return gOledGeometry; }
+#else
+inline const oled_layout::Geometry& oledGeometry() {
+  static constexpr oled_layout::Geometry kFixed = oled_layout::geometryFor(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+  return kFixed;
+}
+#endif
+inline bool oledPortrait() { return oledGeometry().portrait; }
+// The last row a screen puts ink on (the row above the footer's blank row).
+inline int oledContentBottom() { return oledGeometry().contentBottom; }
+// Size-1 text cells per row.
+inline int oledCols() { return oledGeometry().cols; }
 #endif
 
 // =============================================================================
@@ -289,6 +321,12 @@ bool displayPaintSurface(void (*paint)(Adafruit_GFX&));
 // Setter returns true only when the layout changed.
 bool displaySetLandscape(bool landscape);
 bool displayIsLandscape();
+// Render owner only: turns the logical canvas (GFX rotation 0-3) and refreshes
+// the live geometry. Displays that only flip accept 0 and 2; false for a
+// rotation the display cannot take (nothing changes then).
+bool displaySetRotation(int rotation);
+// The GFX rotation last applied (0 before the display starts).
+int displayRotation();
 bool displayIsReady();
 void displayStop();
 bool displaySetPower(bool on);            // Whether the power operation ran
@@ -305,6 +343,8 @@ inline bool displayInit() { return false; }
 inline bool displayPaintSurface(void (*)(Adafruit_GFX&)) { return false; }
 inline bool displaySetLandscape(bool) { return false; }
 inline bool displayIsLandscape() { return false; }
+inline bool displaySetRotation(int) { return false; }
+inline int displayRotation() { return 0; }
 inline bool displayIsReady() { return false; }
 inline void displayStop() {}
 inline bool displaySetPower(bool) { return false; }

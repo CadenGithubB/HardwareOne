@@ -70,7 +70,7 @@ def generated(component: Path, baseline: bool) -> str:
         task = extract_block(owner, "void thermalTask(void* parameter)")
         functions.append("static void runStopBranch() { while (true) {\n" +
                          extract_block(task, "if (!gThermalRunning)") + "\nbreak; } }")
-    harness = (HERE / "thermal_snapshot_harness.cpp").read_text()
+    harness = (HERE / "thermal_snapshot_harness.cpp").read_text().replace('#include "OLED_Layout.h"', (COMPONENT / "OLED_Layout.h").read_text().replace("#pragma once", ""))
     return (harness.replace("// INSERT_TYPES", types).replace("// INSERT_STATE", state)
             .replace("// INSERT_FUNCTIONS", "\n\n".join(functions)))
 

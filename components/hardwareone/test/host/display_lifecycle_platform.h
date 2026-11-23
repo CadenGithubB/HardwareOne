@@ -35,7 +35,7 @@ struct DisplayTestPlatform {
   int commands = 0, dims = 0, powerCalls = 0, ends = 0;
 };
 inline DisplayTestPlatform platform;
-struct Settings { int oledBus = 0; uint8_t oledBrightness = 128; bool oledFlipped = false; };
+struct Settings { int oledBus = 0; uint8_t oledBrightness = 128; int oledRotation = 0; };
 inline Settings gSettings;
 
 inline void pinMode(int pin, int) { platform.events.push_back("pin:" + std::to_string(pin)); }
@@ -113,23 +113,29 @@ class Adafruit_SSD1306 {
     return result;
   }
   void clearDisplay() { platform.events.push_back("clear"); }
+  // The GFX rotation (oledrotation): portrait turns swap the logical size.
+  void setRotation(uint8_t r) { rotation_ = r & 3; }
+  uint8_t getRotation() const { return rotation_; }
+  int16_t width() const { return (rotation_ & 1) ? 64 : 128; }
+  int16_t height() const { return (rotation_ & 1) ? 128 : 64; }
   void display() { hardware(); ++platform.updates; platform.events.push_back("display"); }
   void dim(bool) { hardware(); ++platform.dims; }
   void ssd1306_command(uint8_t value) {
     hardware(); ++platform.commands;
     platform.events.push_back("cmd:" + std::to_string(value));
   }
-  void setRotation(uint8_t) {}
  private:
   void hardware() const {
     assert(platform.locked && wire_->bus == platform.transactionBus);
     assert(platform.transactionClock == 400000);
   }
   TwoWire* wire_;
+  uint8_t rotation_ = 0;
 };
 
 class P4EyeDisplay {
  public:
+  void setRotation(uint8_t) {}
   bool setLandscape(bool) { return false; }
   bool isLandscape() const { return false; }
   bool paintSurface(void (*)(class Adafruit_GFX&)) { return true; }

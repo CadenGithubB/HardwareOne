@@ -21,6 +21,11 @@ static int canvasHeight = 64;
 #define DISPLAY_COLOR_WHITE 1
 #define DISPLAY_COLOR_BLACK 0
 #define OLED_SCROLL_MAX_ITEMS 32
+// Landscape here: the portrait branches of the shared renderers are not taken.
+static bool gHarnessPortrait = false;  // set only while a list is set up "in portrait"
+bool oledPortrait() { return gHarnessPortrait; }
+int oledContentBottom() { return OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 2; }
+int oledCols() { return SCREEN_WIDTH / 6; }
 int oledVisibleRows(int rowHeight, int reservedHeight=0, int baselineRows=0) {
   return oled_layout::visibleRows(OLED_CONTENT_HEIGHT,rowHeight,reservedHeight,baselineRows);
 }
@@ -46,6 +51,7 @@ struct Adafruit_SSD1306 {
     vsnprintf(text,sizeof(text),format,args);va_end(args);print(text);
   }
   void drawFastVLine(int px,int py,int h,int value){fillRect(px,py,1,h,value);}
+  void drawFastHLine(int px,int py,int w,int value){fillRect(px,py,w,1,value);}
   void setTextSize(int size){assert(size==1);}
   void setTextColor(int value,int bg=-1){color=value;background=bg;}
   void setCursor(int px,int py){x=px;y=py;}
@@ -317,10 +323,49 @@ int main(int argc,char** argv) {
     // Exercise the shipping map packer over both sizes, including the last row.
     std::vector<uint8_t> shades(128*height), packed(128*((height+7)/8),0xaa);
     shades.back()=15; shades[64*128-1]=1;
+#ifdef BASELINE_LAYOUT
     packShadeBufTo1Bit(shades.data(),packed.data());
+#else
+    packShadeBufTo1Bit(shades.data(),packed.data(),128,height);
+#endif
     assert(packed.back()==0x80);
     for(int yy=0;yy<height;++yy) for(int xx=0;xx<128;++xx)
       assert(((packed[(yy/8)*128+xx]>>(yy&7))&1)==(shades[yy*128+xx]!=0));
   }
+#ifndef BASELINE_LAYOUT
+  if (canvasHeight == 64) {
+    // A list set up while the screen was portrait (oledVisibleRows gave a
+    // 64 x 128 count) and then drawn in landscape gets the rows that fit, with
+    // the selection kept in view (booting at 90, then oledrotation 0).
+    static const char* names[10]={"a","b","c","d","e","f","g","h","i","j"};
+    gHarnessPortrait=true;
+    OledScrollState simple;oledScrollInit(&simple,nullptr,10);
+    OledScrollState split;oledScrollInit(&split,nullptr,8);
+    gHarnessPortrait=false;
+    oledScrollSetSplitPane(&split,68,74,32);
+    for(auto* n:names){oledScrollAddItem(&simple,n,nullptr,true,nullptr);oledScrollAddItem(&split,n,nullptr,true,nullptr);}
+    simple.selectedIndex=7;split.selectedIndex=7;
+    Adafruit_SSD1306 a;oledScrollRenderSimple(&a,&simple,true,OLED_CONTENT_START_Y);
+    assert(simple.visibleLines==5 && simple.scrollOffset==3);
+    Adafruit_SSD1306 b;oledScrollRender(&b,&split,true,true,nullptr);
+    assert(split.visibleLines==4 && split.scrollOffset==4);
+    // A list set up in landscape keeps its own count.
+    OledScrollState kept;oledScrollInit(&kept,nullptr,3);
+    for(auto* n:names) oledScrollAddItem(&kept,n,nullptr,true,nullptr);
+    Adafruit_SSD1306 c;oledScrollRenderSimple(&c,&kept,true,OLED_CONTENT_START_Y);
+    assert(kept.visibleLines==3);
+    oledTextFieldReset();
+  }
+  {
+    // A portrait raster (64 x 128 logical, oledrotation 90/270) packs into the
+    // same 1024 bytes in its own pages: 16 pages of 64 columns.
+    std::vector<uint8_t> shades(64*128), packed(1024,0xaa);
+    shades[0]=3; shades[127*64+63]=1; shades[70*64+5]=9;
+    packShadeBufTo1Bit(shades.data(),packed.data(),64,128);
+    for(int yy=0;yy<128;++yy) for(int xx=0;xx<64;++xx)
+      assert(((packed[(yy/8)*64+xx]>>(yy&7))&1)==(shades[yy*64+xx]!=0));
+    assert(packed[1023]==0x80 && packed[0]==0x01);
+  }
+#endif
   std::puts("OLED/P4 layout, performance-monitor rows/scrolling, map packing and render bounds passed");
 }

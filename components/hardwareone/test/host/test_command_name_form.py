@@ -45,6 +45,9 @@ CMD_KEY_FIELD = 12  # SettingEntry: the 13th field
 # Removed command name -> the name that stays (CONTRIBUTING.md, "Command names").
 # Keep this table in step with RETIRED_NAMES in tools/command_registry.py.
 REMOVED_NAMES: dict[str, str] = {
+    "anoencoderinvert": "anomount",
+    "anoencoderswaplr": "anomount",
+    "anoencoderswapud": "anomount",
     "apdsenabled": "apdsautostart",
     "automationadd": "automation add",
     "automationrun": "automation run",
@@ -66,11 +69,15 @@ REMOVED_NAMES: dict[str, str] = {
     "httpenabled": "httpautostart",
     "httpread": "httpstatus",
     "imuenabled": "imuautostart",
+    "imuinputinvertx": "imuinputmount",
+    "imuinputinverty": "imuinputmount",
+    "imuinputswapxy": "imuinputmount",
     "inputenabled": "inputautostart",
     "llmenabled": "llmautostart",
     "micenabled": "micautostart",
     "mqttclientenabled": "mqttautostart",
     "oledenabled": "oledautostart",
+    "oledflip": "oledrotation",
     "oledread": "oledstatus",
     "oledstart": "openoled",
     "oledstop": "closeoled",

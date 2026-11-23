@@ -29,6 +29,9 @@
 #ifndef OLED_CONTENT_HEIGHT
 #define OLED_CONTENT_HEIGHT 43   // 128x64 OLED: 64 - 10 header - 10 footer - 1
 #endif
+#ifndef OLED_CONTENT_START_Y
+#define OLED_CONTENT_START_Y 11  // 10 px header + 1 px gap
+#endif
 #define LLM_CHAT_TURN_MAX_BYTES (16u * 1024u)
 
 using ChatRunToken = uint64_t;
@@ -74,6 +77,24 @@ int chatReadRun(ChatRunToken run, int offset, char* buf, int maxLen, bool* done)
   return copyOut(gReply, offset, buf, maxLen);
 }
 
+// The live OLED layout, landscape only: the firmware reads it at run time
+// (HAL_Display.h); this harness draws the landscape canvas, so the portrait
+// branches compile but are never taken.
+#include "OLED_Layout.h"
+#ifndef SCREEN_WIDTH
+#ifdef DISPLAY_WIDTH
+#define SCREEN_WIDTH DISPLAY_WIDTH
+#else
+#define SCREEN_WIDTH 128
+#endif
+#endif
+#define oledPortrait() (false)
+#define oledCols() (SCREEN_WIDTH / 6)
+#define oledContentBottom() (OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 2)
+#define oledKvRow(...) (0)
+#define oledPrintWrapped(...) (0)
+#define oledHeroCard(...) ((void)0)
+#define oledMeter(...) ((void)0)
 // INSERT_PRODUCTION_DEFINITIONS
 
 static std::string line(int i) {

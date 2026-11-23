@@ -137,7 +137,7 @@ static void umDrawUserRow(int x, int y, const UserRosterEntry& u, bool selected)
   snprintf(role, sizeof(role), "(%s)", u.role);
   int roleW = (int)strlen(role) * 6;
   if (roleW > 60) roleW = 60;
-  const int roleX = 120 - roleW;
+  const int roleX = SCREEN_WIDTH - 8 - roleW;
   oledTextFieldDraw(oledDisplay, x, y, roleX - 6 - x, u.username,
                     DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, selected, gUsers);
   oledTextFieldDraw(oledDisplay, roleX, y, roleW, role,
@@ -152,10 +152,10 @@ static void umDrawRole(int y, int cursor, int maxRank, int curRank, const char* 
     oledDisplay->setCursor(0, yy);
     oledDisplay->print(rank == cursor ? "> " : "  ");
     // Role label in a bounded field; the current-role marker keeps its column.
-    oledTextFieldDraw(oledDisplay, 12, yy, 114 - 12 - 6, kUserRoleNames[rank],
+    oledTextFieldDraw(oledDisplay, 12, yy, SCREEN_WIDTH - 14 - 12 - 6, kUserRoleNames[rank],
                       DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, rank == cursor, kUserRoleNames);
     if (rank == curRank) {
-      oledDisplay->setCursor(114, yy);
+      oledDisplay->setCursor(SCREEN_WIDTH - 14, yy);
       oledDisplay->print("*");
     }
     yy += 10;
@@ -191,7 +191,7 @@ void displayUserManager() {
       oledDisplay->setCursor(0, ry);
       oledDisplay->print(selected ? "> " : "  ");
       if (i == gUmCount) {
-        oledTextFieldDraw(oledDisplay, 12, ry, 122 - 12, "+ Add User",
+        oledTextFieldDraw(oledDisplay, 12, ry, SCREEN_WIDTH - 6 - 12, "+ Add User",
                           DISPLAY_COLOR_WHITE, DISPLAY_COLOR_WHITE, false, gUsers);
       } else {
         // The whole username in its own field (scrolling when selected); the
@@ -199,9 +199,9 @@ void displayUserManager() {
         umDrawUserRow(12, ry, gUsers[i], selected);
       }
     }
-    if (gUmScroll > 0) { oledDisplay->setCursor(122, y); oledDisplay->print("\x18"); }
+    if (gUmScroll > 0) { oledDisplay->setCursor(SCREEN_WIDTH - 6, y); oledDisplay->print("\x18"); }
     if (gUmScroll + visible < total) {
-      oledDisplay->setCursor(122, y + OLED_CONTENT_HEIGHT - 8); oledDisplay->print("\x19");
+      oledDisplay->setCursor(SCREEN_WIDTH - 6, y + OLED_CONTENT_HEIGHT - 8); oledDisplay->print("\x19");
     }
   } else if (gUmLevel == UM_ACTIONS) {
     const UserRosterEntry& u = gUsers[gUmTarget];

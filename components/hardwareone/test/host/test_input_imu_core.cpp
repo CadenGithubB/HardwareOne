@@ -358,27 +358,134 @@ static void testTiltThresholds() {
   assert(d.last.joyX == kJoyCentre && d.last.joyY > kJoyCentre);
 }
 
+// The mount (imuinputmount): mirrored first, then turned the way oledrotation
+// turns the screen. The 8 mounts give the 8 cases the old swap and inversion
+// flags gave.
 static void testTiltSettings() {
-  Rig r;
-  r.cfg.invertX = true;
-  r.start();
-  r.flatLean(20, 0);
-  r.run(200);
-  assert(r.last.joyX < kJoyCentre);
+  struct Case { uint8_t turns; bool mirror; float rightDeg, upDeg; int wantX, wantY; };
+  // Leaning the device's right (+X end drops) shows as...
+  const Case cases[] = {
+      {0, false, 20, 0, +1, 0},  {1, false, 20, 0, 0, +1}, {2, false, 20, 0, -1, 0},
+      {3, false, 20, 0, 0, -1},  {0, true, 20, 0, -1, 0},  {1, true, 20, 0, 0, -1},
+      {2, true, 20, 0, +1, 0},   {3, true, 20, 0, 0, +1},  {0, false, 0, 20, 0, +1},
+      {1, false, 0, 20, -1, 0},  {0, true, 0, 20, 0, +1},  {3, true, 0, 20, +1, 0},
+  };
+  for (const Case& c : cases) {
+    Rig r;
+    r.cfg.mountTurns = c.turns;
+    r.cfg.mountMirror = c.mirror;
+    r.start();
+    r.flatLean(c.rightDeg, c.upDeg);
+    r.run(200);
+    const int dx = r.last.joyX > kJoyCentre ? 1 : r.last.joyX < kJoyCentre ? -1 : 0;
+    const int dy = r.last.joyY > kJoyCentre ? 1 : r.last.joyY < kJoyCentre ? -1 : 0;
+    assert(dx == c.wantX && dy == c.wantY);
+  }
+}
 
-  Rig y;
-  y.cfg.invertY = true;
-  y.start();
-  y.flatLean(0, 20);
-  y.run(200);
-  assert(y.last.joyY < kJoyCentre);
-
-  Rig s;
-  s.cfg.swapXY = true;
-  s.start();
-  s.flatLean(20, 0);
-  s.run(200);
-  assert(s.last.joyX == kJoyCentre && s.last.joyY > kJoyCentre);
+// The teach step: the first lean held past the engage angle, in the device's
+// own frame, is reported; the mount it gives shows that lean as up on the
+// screen for each of the 8 mounts and each screen rotation. No lean: it ends
+// quietly after the timeout and reports nothing.
+static void testLearnMount() {
+  using input_rotation::Dir;
+  using input_rotation::Mount;
+  const float leans[4][2] = {{0, 20}, {20, 0}, {0, -20}, {-20, 0}};  // device up, right, down, left
+  static const int kCodes[] = {0, 1, 90, 91, 180, 181, 270, 271};
+  for (int code : kCodes) {
+    for (int screen = 0; screen < 4; ++screen) {
+      // A device mounted `code` relative to the panel: its own frame is the
+      // straight frame un-turned and un-mirrored. "The top of the screen" in
+      // the device's frame is the direction that maps to up.
+      const Mount truth = input_rotation::mountFromCode(code);
+      int topDir = -1;
+      for (int d = 0; d < 4; ++d) {
+        float x = leans[d][0], y = leans[d][1];
+        input_rotation::orientVector(truth, screen, x, y);
+        if (x == 0 && y > 0) topDir = d;
+      }
+      assert(topDir >= 0);
+      Rig r;
+      r.start();
+      r.engine.startLearn(r.ms);
+      r.run(200);
+      assert(r.engine.learning() && r.last.joyX == kJoyCentre && r.last.joyY == kJoyCentre);
+      r.flatLean(leans[topDir][0], leans[topDir][1]);
+      uint8_t learned = 255;
+      for (int i = 0; i < 20 && learned == 255; ++i) {
+        r.step();
+        if (r.last.learnEvent == kLearnDone) learned = r.last.learnDir;
+      }
+      assert(learned == topDir && !r.engine.learning());
+      const int turns = input_rotation::learnQuarterTurns(static_cast<Dir>(learned), truth.mirror, screen);
+      assert(input_rotation::mountCode(turns * 90, truth.mirror) == code);
+    }
+  }
+  // No lean: a quiet timeout, nothing learned, and the joystick works again.
+  Rig idle;
+  idle.start();
+  idle.engine.startLearn(idle.ms);
+  bool timedOut = false, done = false;
+  for (uint32_t t = 0; t < kLearnTimeoutMs + 200; t += 20) {
+    idle.step();
+    timedOut |= idle.last.learnEvent == kLearnTimedOut;
+    done |= idle.last.learnEvent == kLearnDone;
+  }
+  assert(timedOut && !done && !idle.engine.learning());
+  idle.flatLean(20, 0);
+  idle.run(200);
+  assert(idle.last.joyX > kJoyCentre);
+  // After a calibration the step is only offered (when the caller asks for
+  // it): the joystick works at once, a side tap is still a button, the offer
+  // lapses quietly, and only a face tap in the window arms the step.
+  auto calibrated = [](Rig& r) {
+    r.cfg.learnAfterCalibration = true;
+    r.start();
+    for (int i = 0; i < 40; ++i) r.step(false, (i % 2) ? 14.0f : -14.0f);
+    bool offered = false;
+    for (int i = 0; i < 300 && !offered; ++i) {
+      r.step();
+      offered = r.last.learnEvent == kLearnOffered;
+    }
+    assert(offered && r.engine.learnOffered() && !r.engine.learning() && r.calEvents[kCalDone] == 1);
+  };
+  Rig lean;
+  calibrated(lean);
+  lean.flatLean(20, 0);
+  lean.run(200);
+  assert(lean.last.joyX > kJoyCentre && !lean.engine.learning());  // no re-mount, navigation at once
+  Rig side;
+  calibrated(side);
+  side.take();
+  side.tap();
+  side.run(400);
+  assert(side.take() == kButtonA && !side.engine.learning());
+  Rig lapse;
+  calibrated(lapse);
+  bool any = false;
+  for (uint32_t t = 0; t < kLearnOfferMs + 400; t += 20) {
+    lapse.step();
+    any |= lapse.last.learnEvent != kLearnNone;
+  }
+  assert(!any && !lapse.engine.learnOffered() && !lapse.engine.learning());
+  Rig face;
+  calibrated(face);
+  face.take();
+  face.kind = kTapFace;
+  face.step(true, 15.0f);
+  bool started = false;
+  for (int i = 0; i < 40 && !started; ++i) {
+    face.step();
+    started = face.last.learnEvent == kLearnStarted;
+  }
+  assert(started && face.engine.learning() && face.take() == 0);
+  // A shake ends a running step, and says so.
+  bool cancelled = false;
+  for (int i = 0; i < 40; ++i) {
+    face.step(false, (i % 2) ? 14.0f : -14.0f);
+    cancelled |= face.last.learnEvent == kLearnCancelled;
+  }
+  assert(cancelled && !face.engine.learning());
 }
 
 static void testTapDoesNotMoveTheJoystick() {
@@ -532,6 +639,7 @@ int main() {
   testTiltDirections();
   testTiltThresholds();
   testTiltSettings();
+  testLearnMount();
   testTapDoesNotMoveTheJoystick();
   testRecentreAnyPose();
   testCentreWaitsForCalm();

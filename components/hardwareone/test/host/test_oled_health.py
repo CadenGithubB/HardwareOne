@@ -53,7 +53,7 @@ void oledScrollInit(OledScrollState*,const char* =nullptr,int=4);
 bool oledScrollAddItem(OledScrollState*,const char*,const char* =nullptr,bool=true,void* =nullptr);
 void oledScrollRenderSimple(Adafruit_SSD1306*,OledScrollState*,bool=true,int=OLED_CONTENT_START_Y);
 '''
-    lists+='\n'.join(extract_block(utils,x) for x in ('void oledScrollInit(', 'bool oledScrollAddItem(', 'void oledScrollClearKeepSelection(', 'void oledScrollClampSelection(', 'void oledScrollUp(', 'void oledScrollDown(', 'void oledScrollRenderSimple('))
+    lists+='\n'.join(extract_block(utils,x) for x in ('void oledScrollInit(', 'bool oledScrollAddItem(', 'void oledScrollClearKeepSelection(', 'void oledScrollClampSelection(', 'void oledScrollUp(', 'void oledScrollDown(', 'static void oledScrollFitRows(', 'static void oledScrollDrawPortraitBar(', 'void oledScrollRenderSimple('))
     page=read('OLED_Mode_R1_Health.cpp'); page=page[page.index('enum HealthAction'):page.index('static const OledModeEntry')]
     harness=(HERE/'oled_health_harness.cpp').read_text()
     stub='namespace disabled {\n'+extract_block(header,'inline bool g2HealthGraphSnapshot(')+'\n}\n'

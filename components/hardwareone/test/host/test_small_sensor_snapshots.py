@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import tempfile
 from test_web_batch_handlers import extract_block, require
+from oled_landscape_stubs import LANDSCAPE_STUBS
 
 HERE = Path(__file__).resolve().parent
 COMPONENT = HERE.parents[1]
@@ -64,7 +65,10 @@ def generate(component: Path, baseline: bool) -> str:
         functions.append(extract_block(owner, f'int {short}BuildDataJson('))
         oled = {'apds':'void displayApdsData()', 'imu':'static void displayImuActions()',
                 'tof':'static void displayTofData()', 'rtc':'static void displayRtcData()'}[short]
-        functions.append(extract_block((component / source(file, '_oled.h')).read_text(), oled))
+        oled_source = (component / source(file, '_oled.h')).read_text()
+        if short == 'imu' and 'static int imuOledRow(' in oled_source:
+            functions.append(extract_block(oled_source, 'static int imuOledRow('))
+        functions.append(extract_block(oled_source, oled))
         if short == 'apds':
             functions += [extract_block(owner, marker) for marker in ['uint8_t apdsGetProximity(',
                           *[f'uint16_t apdsGetColor{c}(' for c in 'RGBC']]]
@@ -77,7 +81,8 @@ def generate(component: Path, baseline: bool) -> str:
     # RTC display calls rtcLocalTime before its definition in the generated unit.
     state.append('RtcDateTime rtcLocalTime(const RtcDateTime*);')
     return ((HERE / 'small_sensor_snapshot_harness.cpp').read_text()
-            .replace('// INSERT_TYPES', '\n'.join(types)).replace('// INSERT_STATE', '\n'.join(state))
+            .replace('// INSERT_TYPES', '\n'.join(types) + '\n' +
+                      (component / 'OLED_Layout.h').read_text().replace('#pragma once', '') + LANDSCAPE_STUBS).replace('// INSERT_STATE', '\n'.join(state))
             .replace('// INSERT_FUNCTIONS', '\n\n'.join(functions)))
 
 
