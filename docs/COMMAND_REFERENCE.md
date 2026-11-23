@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1042 commands across 61 modules (1042 registry entries).
+1043 commands across 61 modules (1043 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -35,7 +35,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`servo`](#servo) — 6 commands
 - [`thermal`](#thermal) — 23 commands
 - [`tof`](#tof) — 10 commands
-- [`imu`](#imu) — 27 commands
+- [`imu`](#imu) — 28 commands
 - [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
 - [`anoencoder`](#anoencoder) — 4 commands
@@ -604,6 +604,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `imutapshock` | A | IMU tap shock window: [0..3]<br/>`Usage: imutapshock [0..3]` |
 | `imutapsideaxis` | A | IMU side knocks: the axis a side knock hits along (software knock detector): [x\|y\|z]<br/>`Usage: imutapsideaxis [x\|y\|z]` |
 | `imutapsideratio` | A | IMU side knocks: the side axis's share of the largest other axis, in %, that makes a side tap: [10..1000]<br/>`Usage: imutapsideratio [10..1000]` |
+| `imutapteach` | A | IMU side or face: teach each surface with 5 knocks, forget them, or show them (software knock detector)<br/>`Usage: imutapteach [side\|face\|clear\|status]` |
 | `imutapthreshold` | A | IMU tap threshold in mg: [50..4000]<br/>`Usage: imutapthreshold [50..4000]` |
 | `imutaptrace` |  | Every recent knock: how hard, how long, and why it did or did not count, with tuning hints. (add 'json' for JSON output)<br/>`Usage: imutaptrace [json\|clear]` |
 | `imutransitionms` | A | IMU transition time: <0..1000><br/>`Usage: imutransitionms <0..1000>` |

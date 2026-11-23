@@ -36,6 +36,13 @@ bool sKnockTraceLive = false;  // false: nothing written yet (the PSRAM bytes ar
 // sets it.
 EXT_RAM_BSS_ATTR knock::Feed sFeed;
 
+// The taught surfaces and the teach step: set by commands and the main loop,
+// read by the IMU task at each sample, the step's knocks added by it. A short
+// critical section each way (a few dozen bytes; internal RAM, initialised).
+knock::Surfaces sSurfaces;
+knock::Teacher sTeacher;
+portMUX_TYPE sTeachMux = portMUX_INITIALIZER_UNLOCKED;
+
 void traceClear() {
   portENTER_CRITICAL(&sKnockMux);
   sKnockTrace.clear();
@@ -66,10 +73,22 @@ knock::Config knockFeedConfig() {
   c.sideAxis = (uint8_t)(side & 0xFF);
   c.sidePct = (uint16_t)(side >> 8);
   c.sampleHz = sSampleHz.load();
+  portENTER_CRITICAL(&sTeachMux);
+  c.surfaces = sSurfaces;
+  portEXIT_CRITICAL(&sTeachMux);
   return c;
 }
 
 void knockFeedRecord(const KnockFeedRead& read, const knock::Event* events, uint8_t count) {
+  // A teach step under way takes the taps as its examples; they press nothing.
+  bool teaching = false;
+  portENTER_CRITICAL(&sTeachMux);
+  if (sTeacher.state == knock::TeachState::Recording) {
+    teaching = true;
+    for (uint8_t i = 0; i < count; ++i) sTeacher.add(events[i]);
+  }
+  portEXIT_CRITICAL(&sTeachMux);
+  if (teaching) sFeed.pending.clear();
   const float dev = sFeed.detector.lastDevMg();
   const bool inKnock = sFeed.detector.inKnock();
   portENTER_CRITICAL(&sKnockMux);
@@ -103,6 +122,40 @@ bool knockFeedTakeTap(uint8_t& kind) {
   }
   kind = side ? kMotionTapKindSide : kMotionTapKindFace;
   return true;
+}
+
+void knockFeedSetSurfaces(const knock::Surfaces& s) {
+  portENTER_CRITICAL(&sTeachMux);
+  sSurfaces = s;
+  portEXIT_CRITICAL(&sTeachMux);
+}
+
+knock::Surfaces knockFeedSurfaces() {
+  portENTER_CRITICAL(&sTeachMux);
+  const knock::Surfaces s = sSurfaces;
+  portEXIT_CRITICAL(&sTeachMux);
+  return s;
+}
+
+void knockFeedTeachStart(bool side, uint32_t nowMs) {
+  portENTER_CRITICAL(&sTeachMux);
+  sTeacher.start(side, nowMs);
+  portEXIT_CRITICAL(&sTeachMux);
+}
+
+void knockFeedTeachCancel() {
+  portENTER_CRITICAL(&sTeachMux);
+  sTeacher.cancel();
+  portEXIT_CRITICAL(&sTeachMux);
+}
+
+knock::Teacher knockFeedTeachPoll(uint32_t nowMs, bool consume) {
+  portENTER_CRITICAL(&sTeachMux);
+  sTeacher.expire(nowMs);
+  const knock::Teacher t = sTeacher;
+  if (consume && (t.state == knock::TeachState::Done || t.state == knock::TeachState::TimedOut)) sTeacher.cancel();
+  portEXIT_CRITICAL(&sTeachMux);
+  return t;
 }
 
 // ---- The backend API's knock part (HAL_MotionBackend.h) ----------------------------

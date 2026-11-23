@@ -1,10 +1,13 @@
 // Host test for HAL_Motion_KnockCore.h: knocks found from 416 Hz samples (the
-// 4517's FIFO) and from 100 Hz samples (the BNO055 with IMU input), and the
-// shared feed's pending taps and clock (HAL_Motion_KnockFeed.cpp uses them).
+// 4517's FIFO) and from 100 Hz samples (the BNO055 with IMU input), the
+// shared feed's pending taps and clock (HAL_Motion_KnockFeed.cpp uses them),
+// and side or face by taught surfaces (imutapteach) or the ratio rule.
 //   clang++ -std=c++17 -I. -Itest/host -o /tmp/t test/host/test_motion_knock_core.cpp && /tmp/t
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <vector>
 
@@ -371,6 +374,255 @@ static void testStuckBaselineRecovers() {
   assert(!evs.empty() && evs.back().verdict == knock::Verdict::Tap);
 }
 
+// ---- Taught surfaces (imutapteach) ------------------------------------------------
+using knock::Surface;
+using knock::Surfaces;
+using knock::Teacher;
+using knock::TeachState;
+
+struct Vec { int16_t v[3]; };
+
+// A tap event with this peak jump.
+Event tapWith(const Vec& p, Verdict verdict = Verdict::Tap) {
+  Event e;
+  e.verdict = verdict;
+  for (int i = 0; i < 3; ++i) e.peakVec[i] = p.v[i];
+  return e;
+}
+
+// A teach step's knocks (fewer than five leave it recording; the model is
+// built from what it holds either way).
+Teacher stepWith(const std::vector<Vec>& knocks, bool side) {
+  Teacher t;
+  t.start(side, 1000);
+  for (const Vec& k : knocks) t.add(tapWith(k));
+  assert(t.got.count == (knocks.size() < knock::kTeachKnocks ? knocks.size() : knock::kTeachKnocks));
+  return t;
+}
+
+// Surfaces taught from these side and face knocks.
+Surfaces teachBoth(const std::vector<Vec>& side, const std::vector<Vec>& face, uint16_t* faceAgree = nullptr) {
+  uint16_t agree = 0;
+  Surfaces s = knock::withTaught(Surfaces{}, stepWith(side, true), agree);
+  s = knock::withTaught(s, stepWith(face, false), agree);
+  if (faceAgree) *faceAgree = agree;
+  assert(s.taught());
+  return s;
+}
+
+bool sortsSide(const Surfaces& s, const Vec& k) {
+  Config cfg;
+  cfg.surfaces = s;
+  Event e;
+  knock::classifySurface(cfg, k.v, e);
+  assert(e.taught);
+  return e.side;
+}
+
+Vec flipped(const Vec& k) { return {{int16_t(-k.v[0]), int16_t(-k.v[1]), int16_t(-k.v[2])}}; }
+
+void testCos() {
+  const int16_t z[3] = {0, 0, 0}, a[3] = {0, 0, 700}, b[3] = {0, 0, -1300}, c[3] = {500, 0, 0};
+  int16_t u[3];
+  assert(!knock::unitMilli(z, u));
+  assert(knock::unitMilli(b, u) && u[0] == 0 && u[1] == 0 && u[2] == -1000);
+  assert(knock::cosMilli(a, b) == -1000 && knock::absCosMilli(a, b) == 1000);
+  assert(knock::cosMilli(a, c) == 0 && knock::cosMilli(a, z) == 0);
+  const int16_t d[3] = {707, 707, 0};
+  assert(knock::cosMilli(c, d) >= 706 && knock::cosMilli(c, d) <= 708);  // 45 degrees
+}
+
+void testTeacher() {
+  Teacher t;
+  assert(t.state == TeachState::Idle);
+  assert(!t.add(tapWith({{0, 900, 0}})));  // not recording
+  t.start(true, 5000);
+  assert(t.state == TeachState::Recording && t.side && t.msLeft(5000) == knock::kTeachTimeoutMs);
+  // Only taps count, and a zero jump teaches nothing.
+  assert(!t.add(tapWith({{0, 900, 0}}, Verdict::Soft)));
+  assert(!t.add(tapWith({{0, 900, 0}}, Verdict::Ring)));
+  assert(!t.add(tapWith({{0, 0, 0}})));
+  for (int k = 0; k < 4; ++k) assert(t.add(tapWith({{0, int16_t(-900 - k), 100}})));
+  assert(t.state == TeachState::Recording && t.got.count == 4);
+  // Side or face verdict does not matter: any tap is an example.
+  Event e = tapWith({{0, 0, 2000}});
+  e.side = false;
+  assert(t.add(e) && t.state == TeachState::Done && t.got.count == 5);
+  assert(t.got.ex[0][1] < -990 && t.got.ex[4][2] == 1000);
+  assert(!t.add(tapWith({{0, 900, 0}})) && t.got.count == 5);  // full
+  assert(!t.expire(5000 + knock::kTeachTimeoutMs * 2));          // done is done
+  // The time-out: 30 s without five taps, across the clock's wrap.
+  t.start(false, 0xFFFFF000u);
+  t.add(tapWith({{0, 0, 900}}));
+  assert(!t.expire(0xFFFFF000u + knock::kTeachTimeoutMs - 1));
+  assert(t.msLeft(0xFFFFF000u + 1000) == knock::kTeachTimeoutMs - 1000);
+  assert(t.expire(0xFFFFF000u + knock::kTeachTimeoutMs) && t.state == TeachState::TimedOut);
+  assert(!t.expire(0xFFFFF000u + knock::kTeachTimeoutMs + 5) && t.msLeft(0) == 0);
+  assert(!t.add(tapWith({{0, 0, 900}})));
+  t.cancel();
+  assert(t.state == TeachState::Idle && t.got.count == 0);
+}
+
+void testUntaughtKeepsTheRatioRule() {
+  Config cfg;  // side axis Y, 60 %
+  const Vec side = {{100, -900, 300}}, face = {{100, 200, 1200}};
+  Event e;
+  knock::classifySurface(cfg, side.v, e);
+  assert(e.side && !e.taught && e.cosSide == 0 && e.cosFace == 0);
+  knock::classifySurface(cfg, face.v, e);
+  assert(!e.side && !e.taught);
+  // One surface taught is not enough: still the ratio rule, even where the
+  // taught face (along -Y) would have said otherwise.
+  uint16_t agree = 0;
+  cfg.surfaces = knock::withTaught(Surfaces{}, stepWith({{{0, -1000, 0}}, {{0, -900, 50}}, {{0, -1000, 0}}}, false), agree);
+  assert(cfg.surfaces.haveFace && !cfg.surfaces.haveSide && !cfg.surfaces.taught());
+  knock::classifySurface(cfg, side.v, e);
+  assert(e.side && !e.taught);
+  assert(knock::ratioSide(cfg, side.v) && !knock::ratioSide(cfg, face.v));
+}
+
+// The owner's pod, BNO055 glued down (bench 2026-11-23, x,y,z mg at the peak).
+// Side: five single side knocks plus one more (the first is soft). Face: five
+// single face knocks, always +Z with Y about -0.45 of Z.
+const std::vector<Vec> kPodSide = {{{-54, -242, 83}}, {{40, -639, -194}}, {{57, 362, -485}},
+                                   {{-49, 311, -465}}, {{53, 629, 303}}};
+const Vec kPodSideMore = {{1, 529, -362}};
+const std::vector<Vec> kPodFace = {{{19, -1214, 2243}}, {{-378, -1023, 1750}}, {{-240, -476, 2127}},
+                                   {{432, -1062, 1893}}, {{361, -1238, 2552}}};
+
+void testPodSurfaces() {
+  uint16_t agree = 0;
+  const Surfaces s = teachBoth(kPodSide, kPodFace, &agree);
+  assert(agree > 950);  // the face knocks agree in sign
+  for (const Vec& k : kPodSide) assert(sortsSide(s, k));
+  assert(sortsSide(s, kPodSideMore));
+  for (const Vec& k : kPodFace) assert(!sortsSide(s, k));
+  // A face knock read the other way round is no face knock. (A side knock
+  // read the other way round can land on the face's direction itself:
+  // (-57,-362,+485) would be the face, as on any rule that keeps the face's
+  // sign.)
+  for (const Vec& k : kPodFace) assert(sortsSide(s, flipped(k)));
+  // Why the face keeps its sign: this side knock points against the face
+  // (signed cos about -0.98) and would read as the face with |cos|.
+  const Vec against = kPodSide[2];
+  assert(knock::cosMilli(against.v, s.face) < -950);
+  assert(knock::absCosMilli(against.v, s.face) > knock::absCosMilli(against.v, s.side));
+  Config cfg;
+  cfg.surfaces = s;
+  Event e;
+  knock::classifySurface(cfg, against.v, e);
+  assert(e.side && e.cosFace < -950 && e.cosSide > 600);
+  knock::classifySurface(cfg, kPodFace[0].v, e);
+  assert(!e.side && e.cosFace > 950 && e.cosSide < 800);
+  // Each knock left out of its own surface's teaching still sorts right.
+  for (size_t out = 0; out < kPodFace.size(); ++out) {
+    std::vector<Vec> rest;
+    for (size_t i = 0; i < kPodFace.size(); ++i)
+      if (i != out) rest.push_back(kPodFace[i]);
+    assert(!sortsSide(teachBoth(kPodSide, rest), kPodFace[out]));
+  }
+  for (size_t out = 0; out < kPodSide.size(); ++out) {
+    std::vector<Vec> rest;
+    for (size_t i = 0; i < kPodSide.size(); ++i)
+      if (i != out) rest.push_back(kPodSide[i]);
+    assert(sortsSide(teachBoth(rest, kPodFace), kPodSide[out]));
+  }
+  // The teach step's report: none of the taught knocks sorts the other way,
+  // the surfaces are well apart.
+  assert(knock::teachMisfits(stepWith(kPodSide, true), s) == 0);
+  assert(knock::teachMisfits(stepWith(kPodFace, false), s) == 0);
+  const knock::TeachReport r = knock::teachReport(s);
+  assert(!r.close && r.sepDeg >= 40);
+}
+
+// The meeting sign (4517 at 416 Hz): side knocks along Y (either sign), face
+// knocks along -Z.
+const std::vector<Vec> kSignSide = {{{40, -1300, 200}}, {{-60, 1500, -150}}, {{90, -1100, 300}}, {{0, 1250, 100}},
+                                    {{-120, -1400, -250}}};
+const std::vector<Vec> kSignFace = {{{80, 150, -1600}}, {{-100, -60, -1400}}, {{30, 200, -1800}}, {{60, -90, -1500}},
+                                    {{-40, 120, -1700}}};
+
+void testSignSurfaces() {
+  const Surfaces s = teachBoth(kSignSide, kSignFace);
+  for (const Vec& k : kSignSide) assert(sortsSide(s, k));
+  for (const Vec& k : kSignFace) assert(!sortsSide(s, k));
+  for (const Vec& k : std::vector<Vec>{{{100, -1200, 250}}, {{-30, 1700, 0}}, {{250, 900, -300}}})
+    assert(sortsSide(s, k));
+  for (const Vec& k : std::vector<Vec>{{{100, 250, -1200}}, {{-30, 0, -1700}}, {{250, -300, -900}}})
+    assert(!sortsSide(s, k));
+  const knock::TeachReport r = knock::teachReport(s);
+  assert(!r.close && r.sepDeg > 75);
+  // Through the detector at 100 Hz: the knock's peak jump is sorted by the
+  // taught surfaces, with the margin on the event. Gravity is +Z here, so the
+  // knock's first swing goes -Z.
+  Config c100 = cfg100();
+  c100.surfaces = s;
+  auto ev = run100(c100, 600, [](float t, float* mg) {
+    float k = 0;
+    knock100At(t, 200, 800, 40, &k);
+    mg[2] -= k;
+    mg[1] += k / 5;
+  });
+  assert(ev.size() == 1 && ev[0].verdict == Verdict::Tap && !ev[0].side && ev[0].taught);
+  assert(ev[0].cosFace > 900 && ev[0].cosSide < 500);
+  ev = run100(c100, 600, [](float t, float* mg) {
+    float k = 0;
+    knock100At(t, 200, 800, 40, &k);
+    mg[1] -= k;
+    mg[2] += k / 4;
+  });
+  assert(ev.size() == 1 && ev[0].side && ev[0].taught && ev[0].cosFace < static_cast<int16_t>(ev[0].cosSide));
+}
+
+void testTeachWarnings() {
+  // Face knocks that disagree in sign: a short mean, warned about.
+  uint16_t agree = 0;
+  Surfaces s = teachBoth(kSignSide, {{{0, 0, 1500}}, {{0, 0, -1500}}, {{50, 0, 1400}}, {{0, 30, -1600}}, {{0, 0, 1500}}},
+                         &agree);
+  assert(agree < knock::kTeachAgreeMin);
+  // Side and face along nearly the same line: too close to tell apart.
+  s = teachBoth({{{0, 1000, 200}}, {{0, 1000, 150}}, {{0, -1000, -250}}, {{50, 1000, 200}}, {{0, 1000, 200}}},
+                {{{0, 1000, 500}}, {{0, 1000, 450}}, {{0, 1000, 550}}, {{-50, 1000, 500}}, {{0, 1000, 500}}});
+  knock::TeachReport r = knock::teachReport(s);
+  assert(r.close && r.sepDeg < knock::kTeachCloseDeg && r.sepDeg > 5);
+  // A teach step whose knocks the result sorts the other way is counted.
+  const Teacher mixed = stepWith({{{0, 1000, 500}}, {{0, 1000, 200}}, {{0, 1000, 450}}, {{0, 1000, 550}}, {{0, 1000, 500}}},
+                                 false);
+  assert(knock::teachMisfits(mixed, s) >= 1);
+  // Far apart: no warning. One surface only: no report.
+  s = teachBoth(kSignSide, kSignFace);
+  assert(!knock::teachReport(s).close);
+  s.haveFace = false;
+  r = knock::teachReport(s);
+  assert(!r.close && r.sepDeg == 0 && knock::teachMisfits(mixed, s) == 0);
+}
+
+void testDirectionText() {
+  const Surfaces s = teachBoth(kPodSide, kPodFace);
+  char text[knock::kTaughtTextMax];
+  knock::formatDirection(true, s.face, text, sizeof(text));
+  bool have = false;
+  int16_t back[3];
+  assert(knock::parseDirection(text, have, back) && have);
+  for (int i = 0; i < 3; ++i) assert(abs(back[i] - s.face[i]) <= 1);  // re-normalised
+  // The longest text fits.
+  const int16_t big[3] = {-1000, -1000, -1000};
+  knock::formatDirection(true, big, text, sizeof(text));
+  assert(strcmp(text, "-1000,-1000,-1000") == 0);
+  // Untaught is "", spaces are fine, junk forgets the direction.
+  knock::formatDirection(false, big, text, sizeof(text));
+  assert(text[0] == 0);
+  assert(knock::parseDirection("", have, back) && !have);
+  assert(knock::parseDirection("  ", have, back) && !have);
+  assert(knock::parseDirection(nullptr, have, back) && !have);
+  assert(knock::parseDirection(" 0, -1000 ,0", have, back) && have && back[1] == -1000);
+  assert(knock::parseDirection("3,0,4", have, back) && have && back[0] == 600 && back[2] == 800);
+  for (const char* bad : {"1,2", "1,2,3;", "a,b,c", "0,0,0", "1001,0,0", "1,2,3,4", "1.5,2,3", "1,,3", "1,2,3;4,5,6"}) {
+    have = true;
+    assert(!knock::parseDirection(bad, have, back) && !have);
+  }
+}
+
 int main() {
   testStuckBaselineRecovers();
   testQuietTimePerRate();
@@ -387,6 +639,13 @@ int main() {
   testRingingAfterTap();
   testHandlingIsLongAndTiltIgnored();
   testTrace();
+  testCos();
+  testTeacher();
+  testUntaughtKeepsTheRatioRule();
+  testPodSurfaces();
+  testSignSurfaces();
+  testTeachWarnings();
+  testDirectionText();
   puts("motion_knock_core: ok");
   return 0;
 }

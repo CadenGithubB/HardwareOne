@@ -7,7 +7,8 @@
 // each sample), the knock trace (PSRAM, under a short critical section each
 // way) and the IMU task's feed (detector, pending taps, clock; PSRAM). It
 // also defines the knock part of the backend API (HAL_MotionBackend.h):
-// motionBackendSetKnockTuning / SetKnockSide / KnockTrace / KnockTraceClear.
+// motionBackendSetKnockTuning / SetKnockSide / KnockTrace / KnockTraceClear,
+// and keeps the taught surfaces and the teach step (imutapteach).
 #pragma once
 
 #include <stdint.h>
@@ -45,5 +46,21 @@ bool knockFeedTakeTap(uint8_t& kind);
 // ---- Any task -------------------------------------------------------------------
 // Whether this start feeds the detector (imustatus: taps found by the firmware).
 bool knockFeedActive();
+
+// The taught surfaces the detector sorts side and face by (knockFeedConfig
+// carries them to each sample). Set from the saved imuTapSideTaught /
+// imuTapFaceTaught by the main loop (imuKnockTick), never by the IMU task.
+void knockFeedSetSurfaces(const knock::Surfaces& s);
+knock::Surfaces knockFeedSurfaces();
+
+// The teach step (imutapteach): start one for the side or the face (any
+// step under way is replaced), or cancel it. While it records, the knocks it
+// takes are not handed out as taps (they press no button).
+void knockFeedTeachStart(bool side, uint32_t nowMs);
+void knockFeedTeachCancel();
+// The teach step now, its time-out applied at nowMs. With consume, a
+// finished step (Done or TimedOut) is handed out this once and the step goes
+// back to Idle: the main loop saves it; 'imutapteach status' only looks.
+knock::Teacher knockFeedTeachPoll(uint32_t nowMs, bool consume);
 
 #endif  // ENABLE_IMU_KNOCK_DETECTOR

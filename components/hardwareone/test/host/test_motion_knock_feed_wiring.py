@@ -13,6 +13,9 @@ The pure parts (knock::Feed, PendingTaps, SampleClock, the detector at 416 and
   block every 100 ms, the tap from the pending queue, gravity, and taps
   reported as found in software. Without IMU input the BNO055 reads as before.
 - The IMU input hands the engine its samples through the decimator.
+- The taught surfaces (imutapteach): the IMU task adds a teach step's knocks
+  and drops their taps, never touches settings; the main loop (imuKnockTick)
+  saves a finished step and hands the saved surfaces to the detector.
 """
 from __future__ import annotations
 
@@ -88,6 +91,25 @@ def main() -> None:
     shock = table.index('{ "imutapshock"')
     require(table.rindex("#if ENABLE_IMU_LSM6DSOX", 0, shock) > table.rindex("#if ENABLE_IMU_KNOCK_DETECTOR", 0, shock),
             "imutapshock stays LSM6-only")
+
+    # Taught surfaces (imutapteach): the IMU task collects the knocks, the
+    # main loop saves them and hands the saved surfaces to the detector.
+    require("knock::Teacher sTeacher;" in feed and "sTeacher.add(events[i])" in feed,
+            "the feed's record step (IMU task) adds the teach step's knocks")
+    require("sFeed.pending.clear()" in extract_block(feed, "void knockFeedRecord("),
+            "a teach step's knocks press no button")
+    require("c.surfaces = sSurfaces;" in extract_block(feed, "knock::Config knockFeedConfig()"),
+            "each sample's config carries the taught surfaces")
+    for gone in ("setSetting", "gSettings"):
+        require(gone not in feed, f"the feed (IMU task) never touches settings ({gone})")
+    tick = extract_block(owner, "void imuKnockTick()")
+    require("knockFeedSetSurfaces(" in tick and "knockFeedTeachPoll(now, true)" in tick,
+            "the main loop applies the saved surfaces and takes a finished step")
+    require("setSetting(" in extract_block(owner, "static void teachFinished("), "a finished step is saved there")
+    require("imuKnockTick();" in read("HardwareOne.cpp"), "the main loop calls imuKnockTick")
+    teach = table.index('{ "imutapteach"')
+    require(table.rindex("#if ENABLE_IMU_KNOCK_DETECTOR", 0, teach) > table.rindex("#endif", 0, teach),
+            "imutapteach is registered with the detector")
 
     # The input: the decimator in front of the engine.
     body = extract_block(hook, "static void imuInputHook(")

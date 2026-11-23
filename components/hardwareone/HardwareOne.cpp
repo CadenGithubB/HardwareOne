@@ -2753,6 +2753,9 @@ void hardwareone_loop() {
   encoderTick();
   // IMU input: save a mount its teach step learned (no-op elsewhere).
   imuInputTick();
+  // IMU knocks: the taught side and face reach the detector, a finished
+  // teach step is saved (no-op without the knock detector).
+  imuKnockTick();
 
   // ESP32-C6 radio companion (P4X-EYE): drain transport events, run the
   // heartbeat watchdog and the retry/recovery policy. No-op elsewhere.

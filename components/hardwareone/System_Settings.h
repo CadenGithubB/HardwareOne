@@ -565,6 +565,8 @@ struct Settings {
   int imuTapRingMs;       // ...a knock this soon after a tap is its ringing (imutapringms)
   int imuTapSideAxis;     // ...side or face: the axis (0 X, 1 Y, 2 Z) a side knock hits along (imutapsideaxis)
   int imuTapSidePct;      // ...and its share of the largest other axis, in %, that makes it a side knock (imutapsideratio)
+  String imuTapSideTaught;  // ...taught side knocks, "x,y,z" unit axis in milli-units, "" untaught (imutapteach)
+  String imuTapFaceTaught;  // ...taught face direction (signed), the same form (imutapteach)
   int gpsDevicePollMs;
   int apdsDevicePollMs;
   int inputDevicePollMs;

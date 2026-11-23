@@ -88,7 +88,18 @@ apart, all four waiting as side taps; a ring 50 ms after a tap and a tap
 200 ms after; side and face on Y, Z and X), the quiet time per rate (8 ms at
 416 Hz, 20 ms at 100 Hz), and the shared feed's parts: the pending taps (order,
 kinds, the cap), the forward-only sample clock (per read and per FIFO batch,
-across the wrap) and the feed's restart that keeps accepted taps.
+across the wrap) and the feed's restart that keeps accepted taps; and side or
+face by taught surfaces (`imutapteach`): the signed and folded cos, the teach
+step (taps only, any side or face verdict, five then done, the 30 s time-out
+across the clock's wrap), the ratio rule kept until both surfaces are taught,
+the owner's pod knocks with the BNO055 glued down (the exact bench vectors: six
+side knocks and five face knocks all sort right, each also when left out of
+its surface's teaching, a face knock read the other way round is no face, and
+the side knock (+57,+362,-485) that a sign-blind rule reads as the face), the
+sign's Y side and -Z face knocks (also through the 100 Hz detector, with the
+margin on the event), the warnings (face knocks of opposite signs, surfaces
+under 25 degrees apart, a step's knocks that sort the other way), and the saved
+text form (round trip, the longest form fits, malformed text forgets it).
 `motion_bno055_core_tests` adds the fast path's decode: the ACC_DATA / GRV_DATA
 / TEMP addresses, 100 LSB per m/s^2, m/s^2 to mg, gravity as a direction (the
 zeros of a fusion that has not started are refused) and the full block every

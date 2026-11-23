@@ -80,6 +80,7 @@ const char* cmd_imutapringms(const String& argsInput);
 const char* cmd_imutaptrace(const String& argsInput);
 const char* cmd_imutapsideaxis(const String& argsInput);
 const char* cmd_imutapsideratio(const String& argsInput);
+const char* cmd_imutapteach(const String& argsInput);
 const char* cmd_imuorientationmode(const String& argsInput);
 const char* cmd_imuorientationcorrection(const String& argsInput);
 const char* cmd_imupitchoffset(const String& argsInput);
@@ -221,4 +222,12 @@ inline bool imuRelease(const char* who) {
 inline uint8_t imuHolderCount() { return 0; }
 inline size_t imuCacheStorageBytes() { return 0; }
 #endif // ENABLE_IMU_SENSOR
+
+// Main loop: hands the saved taught surfaces (imutapteach) to the knock
+// detector and saves a finished teach step; its progress on the screen.
+#if ENABLE_IMU_KNOCK_DETECTOR
+void imuKnockTick();
+#else
+inline void imuKnockTick() {}
+#endif
 #endif // HAL_MOTION_H

@@ -33,7 +33,12 @@
 #include "HAL_Motion_LSM6DSOXCore.h"  // Lsm6TapTuning: the tap commands' replies
 #endif
 #if ENABLE_IMU_KNOCK_DETECTOR
-#include "HAL_Motion_KnockFeed.h"  // knockFeedActive: the tap commands' replies
+#include <atomic>
+#include <string.h>
+#include "HAL_Motion_KnockFeed.h"  // knockFeedActive: the tap commands' replies; the taught surfaces
+#if ENABLE_OLED_DISPLAY
+#include "OLED_UI.h"  // oledToastUpdate: the teach step's progress
+#endif
 #endif
 
 // The tap settings last handed to the backend: a changed one (a command, the
@@ -970,10 +975,228 @@ const char* cmd_imutapsideratio(const String& argsInput) {
                               "side tap, else a face tap");
 }
 
+// ---- Taught surfaces (imutapteach) ---------------------------------------------
+// Five knocks on the side and five on the face teach the detector which is
+// which (HAL_Motion_KnockCore.h: the face's signed direction against the
+// side's folded axis). The IMU task only collects the knocks; the main loop
+// (imuKnockTick) saves a finished step and hands the saved surfaces to the
+// detector; the command starts, clears and reports.
+
+// The last finished teach step, for 'imutapteach status': written by the main
+// loop. state (knock::TeachState; Idle = none since boot) | side << 8 |
+// knocks << 16 | misfits << 24.
+static std::atomic<uint32_t> sTeachLast{0};
+// The saved surfaces' text the detector was last given (main loop only).
+EXT_RAM_BSS_ATTR static char sAppliedTaught[2][knock::kTaughtTextMax];
+static bool sAppliedOnce = false;
+
+static const char* surfaceWord(bool side) { return side ? "side" : "face"; }
+
+// The saved surfaces (a malformed text reads as untaught).
+static knock::Surfaces savedSurfaces() {
+  knock::Surfaces s;
+  knock::parseDirection(gSettings.imuTapSideTaught.c_str(), s.haveSide, s.side);
+  knock::parseDirection(gSettings.imuTapFaceTaught.c_str(), s.haveFace, s.face);
+  return s;
+}
+
+static void teachToast(const char* text, uint32_t ms, bool done, bool warn) {
+  INFO_IMUF("%s", text);
+#if ENABLE_OLED_DISPLAY
+  constexpr uint32_t kTeachToastTag = 0x494D544Bu;  // "IMTK"
+  oledToastUpdate(kTeachToastTag, text, ms,
+                  warn ? OledUiIcon::WARNING : done ? OledUiIcon::SUCCESS : OledUiIcon::INFO);
+#else
+  (void)ms;
+  (void)done;
+  (void)warn;
+#endif
+}
+
+// A finished step: save the surface, then say how it sits against the other.
+static void teachFinished(const knock::Teacher& t) {
+  uint16_t agree = 1000;
+  const knock::Surfaces s = knock::withTaught(savedSurfaces(), t, agree);
+  char text[knock::kTaughtTextMax];
+  if (t.side) {
+    knock::formatDirection(s.haveSide, s.side, text, sizeof(text));
+    setSetting(gSettings.imuTapSideTaught, text);
+  } else {
+    knock::formatDirection(s.haveFace, s.face, text, sizeof(text));
+    setSetting(gSettings.imuTapFaceTaught, text);
+  }
+  const knock::TeachReport r = knock::teachReport(s);
+  const uint8_t misfits = knock::teachMisfits(t, s);
+  sTeachLast.store((uint32_t)knock::TeachState::Done | ((uint32_t)t.side << 8) | ((uint32_t)t.got.count << 16) |
+                   ((uint32_t)misfits << 24));
+  const char* name = t.side ? "Side" : "Face";
+  char msg[96];
+  bool warn = true;
+  if (!t.side && agree < knock::kTeachAgreeMin) {
+    snprintf(msg, sizeof(msg), "Face taught, but its knocks point opposite ways: teach it again");
+  } else if (!s.taught()) {
+    snprintf(msg, sizeof(msg), "%s taught. Now teach the %s", name, surfaceWord(!t.side));
+    warn = false;
+  } else if (r.close) {
+    snprintf(msg, sizeof(msg), "%s taught, but only %u deg from the %s: they can't be told apart", name,
+             (unsigned)r.sepDeg, surfaceWord(!t.side));
+  } else if (misfits) {
+    snprintf(msg, sizeof(msg), "%s taught: %u of %u knocks would sort as the %s", name, (unsigned)misfits,
+             (unsigned)t.got.count, surfaceWord(!t.side));
+  } else {
+    snprintf(msg, sizeof(msg), "%s taught: %u deg from the %s", name, (unsigned)r.sepDeg, surfaceWord(!t.side));
+    warn = false;
+  }
+  teachToast(msg, warn ? 8000 : 3000, true, warn);
+}
+
+void imuKnockTick() {
+  static uint32_t lastMs = 0;
+  const uint32_t now = millis();
+  if (sAppliedOnce && (uint32_t)(now - lastMs) < 50) return;
+  lastMs = now;
+  // The saved surfaces reach the detector: at boot, after a teach step or a
+  // clear, after a settings import.
+  const char* sideText = gSettings.imuTapSideTaught.c_str();
+  const char* faceText = gSettings.imuTapFaceTaught.c_str();
+  if (!sAppliedOnce || strncmp(sideText, sAppliedTaught[0], knock::kTaughtTextMax - 1) != 0 ||
+      strncmp(faceText, sAppliedTaught[1], knock::kTaughtTextMax - 1) != 0) {
+    knock::Surfaces s;
+    if (!knock::parseDirection(sideText, s.haveSide, s.side))
+      WARN_IMUF("imuTapSideTaught is not a direction (\"%s\"): side untaught", sideText);
+    if (!knock::parseDirection(faceText, s.haveFace, s.face))
+      WARN_IMUF("imuTapFaceTaught is not a direction (\"%s\"): face untaught", faceText);
+    knockFeedSetSurfaces(s);
+    strlcpy(sAppliedTaught[0], sideText, sizeof(sAppliedTaught[0]));
+    strlcpy(sAppliedTaught[1], faceText, sizeof(sAppliedTaught[1]));
+    if (sAppliedOnce || s.haveSide || s.haveFace)
+      INFO_IMUF("Knock surfaces: side %s, face %s: %s", s.haveSide ? "taught" : "untaught",
+                s.haveFace ? "taught" : "untaught", s.taught() ? "sorted by them" : "the ratio rule until both are taught");
+    sAppliedOnce = true;
+  }
+  // The teach step: its progress on the screen, its outcome saved.
+  static uint32_t shownStart = 0;
+  static int shownCount = -1;
+  const knock::Teacher t = knockFeedTeachPoll(now, true);
+  if (t.state == knock::TeachState::Recording) {
+    if (t.got.count != shownCount || t.startMs != shownStart) {
+      shownCount = t.got.count;
+      shownStart = t.startMs;
+      char msg[48];
+      snprintf(msg, sizeof(msg), "Knock the %s: %u of %u", surfaceWord(t.side), (unsigned)t.got.count,
+               (unsigned)knock::kTeachKnocks);
+      teachToast(msg, t.msLeft(now) + 500, false, false);
+    }
+    return;
+  }
+  shownCount = -1;
+  if (t.state == knock::TeachState::Done) {
+    teachFinished(t);
+  } else if (t.state == knock::TeachState::TimedOut) {
+    sTeachLast.store((uint32_t)t.state | ((uint32_t)t.side << 8) | ((uint32_t)t.got.count << 16));
+    char msg[64];
+    snprintf(msg, sizeof(msg), "No %u knocks in %u s: %s unchanged", (unsigned)knock::kTeachKnocks,
+             (unsigned)(knock::kTeachTimeoutMs / 1000), surfaceWord(t.side));
+    teachToast(msg, 5000, true, true);
+  }
+}
+
+// imutapteach status: the taught surfaces, how far apart, the step under way.
+static const char* teachStatus() {
+  char* b = getDebugBuffer();
+  size_t n = 0;
+  auto put = [&](const char* fmt, auto... args) {
+    if (n < 1024) n += (size_t)snprintf(b + n, 1024 - n, fmt, args...);
+  };
+  const knock::Surfaces s = knockFeedSurfaces();
+  if (s.taught()) {
+    put("%s", "[IMU] Side or face: by the taught surfaces (a knock is the face when it points along the face's "
+              "direction more than along the side's axis).\n");
+  } else {
+    put("[IMU] Side or face: by the ratio rule (axis %c, %d %%) until both surfaces are taught.\n",
+        (char)('X' + (gSettings.imuTapSideAxis & 3)), gSettings.imuTapSidePct);
+  }
+  if (s.haveSide)
+    put("Side: taught, axis %+.2f %+.2f %+.2f (x y z, either way round)\n", s.side[0] / 1000.0, s.side[1] / 1000.0,
+        s.side[2] / 1000.0);
+  else
+    put("%s", "Side: not taught ('imutapteach side')\n");
+  if (s.haveFace)
+    put("Face: taught, direction %+.2f %+.2f %+.2f (x y z)\n", s.face[0] / 1000.0, s.face[1] / 1000.0,
+        s.face[2] / 1000.0);
+  else
+    put("%s", "Face: not taught ('imutapteach face')\n");
+  if (s.taught()) {
+    const knock::TeachReport r = knock::teachReport(s);
+    put("Apart: %u degrees.\n", (unsigned)r.sepDeg);
+    if (r.close)
+      put("Warning: under %u degrees: the side and the face can't be told apart. Teach both again, knocking the "
+          "middle of each surface the way you will use it.\n", (unsigned)knock::kTeachCloseDeg);
+  }
+  const uint32_t now = millis();
+  const knock::Teacher t = knockFeedTeachPoll(now, false);
+  if (t.state == knock::TeachState::Recording) {
+    put("Teaching the %s: %u of %u knocks, %lu s left.\n", surfaceWord(t.side), (unsigned)t.got.count,
+        (unsigned)knock::kTeachKnocks, (unsigned long)((t.msLeft(now) + 999) / 1000));
+  } else {
+    const uint32_t last = sTeachLast.load();
+    const knock::TeachState st = (knock::TeachState)(last & 0xFF);
+    const bool side = (last >> 8) & 1;
+    const unsigned knocks = (last >> 16) & 0xFF, misfits = (last >> 24) & 0xFF;
+    if (st == knock::TeachState::Done && misfits)
+      put("Last teach step: the %s, taught; %u of its %u knocks would sort as the %s.\n", surfaceWord(side), misfits,
+          knocks, surfaceWord(!side));
+    else if (st == knock::TeachState::Done)
+      put("Last teach step: the %s, taught; all %u knocks sort as the %s.\n", surfaceWord(side), knocks,
+          surfaceWord(side));
+    else if (st == knock::TeachState::TimedOut)
+      put("Last teach step: the %s, timed out after %u of %u knocks (unchanged).\n", surfaceWord(side), knocks,
+          (unsigned)knock::kTeachKnocks);
+  }
+  put("%s", "Each knock's margin: 'imutaptrace' (cos s/f).");
+  return b;
+}
+
+const char* cmd_imutapteach(const String& argsInput) {
+  RETURN_VALID_IF_VALIDATE_CSTR();
+  String text = argsInput;
+  text.trim();
+  text.toLowerCase();
+  if (!ensureDebugBuffer()) return kCommandReplyOutOfMemory;
+  if (text.length() == 0 || text == "status") return teachStatus();
+  if (text == "clear") {
+    knockFeedTeachCancel();
+    setSetting(gSettings.imuTapSideTaught, "");
+    setSetting(gSettings.imuTapFaceTaught, "");
+    snprintf(getDebugBuffer(), 1024,
+             "[IMU] Taught knocks cleared: side or face by the ratio rule again (axis %c, %d %%; "
+             "imutapsideaxis, imutapsideratio).",
+             (char)('X' + (gSettings.imuTapSideAxis & 3)), gSettings.imuTapSidePct);
+    return getDebugBuffer();
+  }
+  if (text != "side" && text != "face") return "Error: invalid arguments — Usage: imutapteach [side|face|clear|status]";
+  const bool side = text == "side";
+  if (!gImuRunning) return "Error: The IMU is not running. Open it with 'openimu' (or 'openinput'), then teach.";
+  if (!knockFeedActive())
+    return "Error: This IMU finds taps with its own chip engine, which cannot be taught. Use 'imutapthreshold'.";
+  knockFeedTeachStart(side, millis());
+  snprintf(getDebugBuffer(), 1024,
+           "[IMU] Knock the %s %u times within %u s, the way you will use it. These knocks press no button. "
+           "Progress: 'imutapteach status'%s.",
+           surfaceWord(side), (unsigned)knock::kTeachKnocks, (unsigned)(knock::kTeachTimeoutMs / 1000),
+#if ENABLE_OLED_DISPLAY
+           " and the screen"
+#else
+           ""
+#endif
+  );
+  return getDebugBuffer();
+}
+
 // The knock trace: every recent knock the software detector saw, how hard
 // and how long it was, and why it did or did not count, with a hint per
 // kind of miss. Its own PSRAM buffer: the table outgrows the debug buffer.
-static constexpr size_t kTapTraceBufLen = 4096;
+static constexpr size_t kTapTraceBufLen = 6144;
 EXT_RAM_BSS_ATTR static char sTapTraceBuf[kTapTraceBufLen];
 
 const char* cmd_imutaptrace(const String& argsInput) {
@@ -995,11 +1218,14 @@ const char* cmd_imutaptrace(const String& argsInput) {
     if (n < kTapTraceBufLen) n += (size_t)snprintf(b + n, kTapTraceBufLen - n, fmt, args...);
   };
   if (json) {
-    put("{\"schema\":1,\"detector\":%s,\"sampleHz\":%u,\"thresholdMg\":%u,\"maxMs\":%u,\"ringMs\":%u,\"total\":%lu,"
+    put("{\"schema\":1,\"detector\":%s,\"sampleHz\":%u,\"thresholdMg\":%u,\"maxMs\":%u,\"ringMs\":%u,"
+        "\"rule\":\"%s\",\"taught\":{\"side\":%s,\"face\":%s},\"total\":%lu,"
         "\"counts\":{\"tap\":%lu,\"soft\":%lu,\"long\":%lu,\"ring\":%lu},"
         "\"feed\":{\"reads\":%lu,\"failed\":%lu,\"empty\":%lu,\"samples\":%lu,\"overruns\":%lu,"
         "\"unread\":%u,\"pattern\":%u,\"lastMg\":[%d,%d,%d],\"jumpMg\":%u,\"inKnock\":%s},\"knocks\":[",
         software ? "true" : "false", (unsigned)cfg.sampleHz, (unsigned)cfg.thresholdMg, (unsigned)cfg.maxMs, (unsigned)cfg.ringMs,
+        cfg.surfaces.taught() ? "taught" : "ratio", cfg.surfaces.haveSide ? "true" : "false",
+        cfg.surfaces.haveFace ? "true" : "false",
         (unsigned long)tr.seq, (unsigned long)tr.counts[0], (unsigned long)tr.counts[1],
         (unsigned long)tr.counts[2], (unsigned long)tr.counts[3], (unsigned long)tr.feed.reads,
         (unsigned long)tr.feed.failedReads, (unsigned long)tr.feed.emptyReads, (unsigned long)tr.feed.samples,
@@ -1012,10 +1238,18 @@ const char* cmd_imutaptrace(const String& argsInput) {
       uint8_t share = 0;
       knock::knockDirection(e, dir, share);
       put("%s{\"n\":%lu,\"peakMg\":%u,\"durMs\":%u,\"gapMs\":%d,\"v\":\"%s\",\"vec\":[%d,%d,%d],"
-          "\"dir\":\"%s\",\"share\":%u,\"hit\":\"%s\"}", i ? "," : "",
+          "\"dir\":\"%s\",\"share\":%u,\"hit\":\"%s\"", i ? "," : "",
           (unsigned long)e.seq, (unsigned)e.peakMg, (unsigned)e.durMs, e.gapMs == 0xFFFF ? -1 : (int)e.gapMs,
           knock::verdictName(e.verdict), e.peakVec[0], e.peakVec[1], e.peakVec[2], dir, (unsigned)share,
           e.side ? "side" : "face");
+      // Sorted by the taught surfaces: |cos| to the side's axis (0..1) and
+      // the signed cos to the face's direction (-1..1).
+      if (e.taught) {
+        const unsigned face = (unsigned)(e.cosFace < 0 ? -e.cosFace : e.cosFace);
+        put(",\"cosSide\":%u.%03u,\"cosFace\":%s%u.%03u", (unsigned)(e.cosSide / 1000), (unsigned)(e.cosSide % 1000),
+            e.cosFace < 0 ? "-" : "", face / 1000, face % 1000);
+      }
+      put("%s", "}");
     }
     put("%s", "]}");
     return b;
@@ -1030,6 +1264,15 @@ const char* cmd_imutaptrace(const String& argsInput) {
   }
   put("[IMU] Knock trace: threshold %u mg, max %u ms, ring %u ms (%u Hz, software)\n", (unsigned)cfg.thresholdMg,
       (unsigned)cfg.maxMs, (unsigned)cfg.ringMs, (unsigned)cfg.sampleHz);
+  if (cfg.surfaces.taught()) {
+    put("%s", "Side or face: by the taught surfaces ('imutapteach'); cos s/f is how well each knock lines up "
+              "with the side's axis (either way round, 0..1) and the face's direction (-1..1); the face wins when "
+              "its value is the larger\n");
+  } else {
+    put("Side or face: by the ratio rule (axis %c, %u %%)%s\n", (char)('X' + (cfg.sideAxis & 3)), (unsigned)cfg.sidePct,
+        cfg.surfaces.haveSide || cfg.surfaces.haveFace ? "; teach the other surface to sort by the taught surfaces"
+                                                           : "; 'imutapteach' teaches the surfaces");
+  }
   put("Since the clear: %lu knocks: %lu tap, %lu soft, %lu long, %lu ring\n", (unsigned long)tr.seq,
       (unsigned long)tr.counts[0], (unsigned long)tr.counts[1], (unsigned long)tr.counts[2],
       (unsigned long)tr.counts[3]);
@@ -1044,7 +1287,7 @@ const char* cmd_imutaptrace(const String& argsInput) {
   }
   put("Now: accel %d, %d, %d mg; jump %u mg%s\n", tr.feed.lastMg[0], tr.feed.lastMg[1], tr.feed.lastMg[2],
       (unsigned)tr.feed.lastDevMg, tr.feed.inKnock ? " (inside a knock)" : "");
-  put("%s", "    #  peak mg  ms  gap ms  verdict  hit   dir (share)   x/y/z mg\n");
+  put("%s", "    #  peak mg  ms  gap ms  verdict  hit   cos s/f    dir (share)   x/y/z mg\n");
   for (uint8_t i = 0; i < tr.count; ++i) {
     const knock::Event& e = tr.at(i);
     char gap[8];
@@ -1052,8 +1295,15 @@ const char* cmd_imutaptrace(const String& argsInput) {
     char dir[3];
     uint8_t share = 0;
     knock::knockDirection(e, dir, share);
-    put("%5lu  %7u %3u  %6s  %-7s  %-4s  %s (%3u%%)   %d/%d/%d\n", (unsigned long)e.seq, (unsigned)e.peakMg,
-        (unsigned)e.durMs, gap, knock::verdictName(e.verdict), e.side ? "side" : "face", dir, (unsigned)share,
+    char margin[16];
+    if (e.taught) {
+      const unsigned face = (unsigned)(e.cosFace < 0 ? -e.cosFace : e.cosFace);
+      snprintf(margin, sizeof(margin), "%u.%02u/%s%u.%02u", (unsigned)(e.cosSide / 1000), (unsigned)(e.cosSide % 1000 / 10),
+               e.cosFace < 0 ? "-" : "", face / 1000, face % 1000 / 10);
+    } else
+      snprintf(margin, sizeof(margin), "-");
+    put("%5lu  %7u %3u  %6s  %-7s  %-4s  %-9s  %s (%3u%%)   %d/%d/%d\n", (unsigned long)e.seq, (unsigned)e.peakMg,
+        (unsigned)e.durMs, gap, knock::verdictName(e.verdict), e.side ? "side" : "face", margin, dir, (unsigned)share,
         e.peakVec[0], e.peakVec[1], e.peakVec[2]);
   }
   // Hints: the value that would have let each kind of missed knock count.
@@ -1302,6 +1552,7 @@ const CommandEntry imuCommands[] = {
   { "imutapringms", "IMU tap ring window in ms (software knock detector): [0..500]", true, cmd_imutapringms, "Usage: imutapringms [0..500]" },
   { "imutapsideaxis", "IMU side knocks: the axis a side knock hits along (software knock detector): [x|y|z]", true, cmd_imutapsideaxis, "Usage: imutapsideaxis [x|y|z]" },
   { "imutapsideratio", "IMU side knocks: the side axis's share of the largest other axis, in %, that makes a side tap: [10..1000]", true, cmd_imutapsideratio, "Usage: imutapsideratio [10..1000]" },
+  { "imutapteach", "IMU side or face: teach each surface with 5 knocks, forget them, or show them (software knock detector)", true, cmd_imutapteach, "Usage: imutapteach [side|face|clear|status]" },
   { "imutaptrace", "Every recent knock: how hard, how long, and why it did or did not count, with tuning hints. (add 'json' for JSON output)", false, cmd_imutaptrace, "Usage: imutaptrace [json|clear]" },
 #endif
   { "imudevicepollms", "IMU device poll interval: <50..1000>", true, cmd_imudevicepollms, "Usage: imuDevicePollMs <50..1000>" },
@@ -1498,6 +1749,11 @@ static const SettingEntry imuSettingEntries[] = {
   { "imuTapSideAxis", SETTING_INT, &gSettings.imuTapSideAxis, 1, 0, nullptr, 0, 2, "Side knock axis", "0:X,1:Y,2:Z", false, "tap", "imutapsideaxis" },
   { "imuTapSidePct", SETTING_INT, &gSettings.imuTapSidePct, 60, 0, nullptr, 10, 1000, "Side knock ratio (%)", nullptr, false, "tap", "imutapsideratio" },
   { "imuTapRingMs", SETTING_INT, &gSettings.imuTapRingMs, 80, 0, nullptr, 0, 500, "Tap ring window (ms)", nullptr, false, "tap", "imutapringms" },
+  // The taught surfaces, "x,y,z" unit vectors in milli-units: display-only
+  // rows (readOnly, no cmdKey) that load and save them; 'imutapteach' is the
+  // writer.
+  { "imuTapSideTaught", SETTING_STRING, &gSettings.imuTapSideTaught, 0, 0, "", 0, 0, "Taught side knocks (imutapteach)", nullptr, false, "tap", nullptr, true },
+  { "imuTapFaceTaught", SETTING_STRING, &gSettings.imuTapFaceTaught, 0, 0, "", 0, 0, "Taught face knocks (imutapteach)", nullptr, false, "tap", nullptr, true },
 #endif
   { "imuOrientationMode", SETTING_INT, &gSettings.imuOrientationMode, 0, 0, nullptr, 0, 8, "Orientation Mode", "0:Normal,1:Flip Pitch,2:Flip Roll,3:Flip Yaw,4:Flip Pitch+Roll,5:Roll 180 Fix,6:Rotate 90 CCW,7:Alt Extreme Pitch,8:Upside Down", false, "orientation", "imuorientationmode" },
   { "imuOrientationCorrectionEnabled", SETTING_BOOL, &gSettings.imuOrientationCorrectionEnabled, false, 0, nullptr, 0, 1, "Orientation Correction", nullptr, false, "orientation", "imuorientationcorrection" },
