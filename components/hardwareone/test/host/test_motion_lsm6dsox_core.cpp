@@ -239,8 +239,8 @@ static void testMissingOrWrongChips() {
   Bus other;
   other.accel.id = 0x69;
   assert(!start(other, why));
-  assert(why == "Error: The device at 0x6A on bus 1 is not an LSM6DSOX (WHO_AM_I 0x69, expected 0x6C). "
-                "Check 'imuaddress'.");
+  assert(why == "Error: The device at 0x6A on bus 1 is not an LSM6DSOX or LSM6DS3TR-C (WHO_AM_I 0x69, expected "
+                "0x6C or 0x6A). Check 'imuaddress'.");
   Bus otherMag;
   otherMag.mag.id = 0x33;
   assert(!start(otherMag, why));
@@ -382,6 +382,42 @@ static bool sample(SampleBus& bus, Lsm4517SampleState& st, Lsm4517Reading& r, bo
       [&](uint8_t* src, uint8_t* data, bool& srcRead) { return bus.readAccel(src, data, srcRead); }, r, magFailed);
 }
 
+// The same board with an LSM6DS3TR-C (WHO_AM_I 0x6A): CTRL1_XL without the
+// LPF2 bit, CTRL8/9_XL untouched, the tap engine at TAP_CFG (0x58).
+static void testDs3trcVariant() {
+  Bus bus;
+  bus.accel.id = 0x6A;
+  std::string why;
+  Lsm6Chip chip = Lsm6Chip::Dsox;
+  char buf[256] = {};
+  assert(lsm4517StartSequence(bus, 1, bus.accelAddress, bus.magAddress, buf, sizeof(buf), &chip));
+  assert(chip == Lsm6Chip::Ds3trc && buf[0] == 0);
+  const std::vector<std::string> expected = {
+      "r 6A 0F 1", "r 1C 0F 1", "w 6A 12 1", "w 1C 21 1", "sleep 10", "r 6A 12 1", "r 1C 21 1",
+      "w 6A 10 3", "w 6A 58 7", "w 1C A0 5", "r 6A 10 3", "r 6A 58 7", "r 1C A0 5",
+  };
+  assert(bus.log == expected);
+  assert(bus.accel.regs[0x10] == 0x68 && bus.accel.regs[0x58] == 0x8F && bus.accel.regs[0x59] == 0x08 &&
+         bus.accel.regs[0x5B] == 0x00 && bus.accel.regs[0x5E] == 0x50);
+  assert(bus.accel.regs[0x17] == 0 && bus.accel.regs[0x56] == 0);  // not written
+  // Events come from WAKE_UP_SRC (src[1]) and TAP_SRC (src[2]).
+  Lsm4517SampleState st;
+  st.chip = Lsm6Chip::Ds3trc;
+  Lsm4517Reading r{};
+  bool magFailed = false;
+  uint8_t field[6] = {0x5A, 0x02, 0, 0, 0, 0};
+  uint8_t data[14] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x8F, 0x13};
+  auto readMag = [&](uint8_t* f) { memcpy(f, field, 6); return true; };
+  uint8_t srcBytes[3] = {0x00, 0x00, kLsm6ds3SrcSingleTap};
+  auto readAccel = [&](uint8_t* src, uint8_t* d, bool& srcRead) {
+    memcpy(src, srcBytes, 3); srcRead = true; memcpy(d, data, 14); return true; };
+  assert(lsm4517ReadSample(st, readMag, readAccel, r, magFailed) && r.tap && !r.freefall);
+  srcBytes[2] = 0; srcBytes[1] = kLsm6ds3SrcFreefall;
+  assert(lsm4517ReadSample(st, readMag, readAccel, r, magFailed) && !r.tap && r.freefall);
+  srcBytes[1] = 0; srcBytes[0] = 0x04;  // MASTER_CONFIG bits are not events on this chip
+  assert(lsm4517ReadSample(st, readMag, readAccel, r, magFailed) && !r.tap && !r.freefall);
+}
+
 static void testSampleKeepsTheTap() {
   Lsm4517SampleState st;
   Lsm4517Reading r{};
@@ -453,6 +489,7 @@ int main() {
   testBusyBusAndDeadline();
   testDecode();
   testSampleKeepsTheTap();
+  testDs3trcVariant();
   std::puts("motion_lsm6dsox_core_tests: all passed");
   return 0;
 }

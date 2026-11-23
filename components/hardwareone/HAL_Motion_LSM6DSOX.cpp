@@ -127,7 +127,9 @@ bool motionBackendInit(uint8_t bus, uint8_t address, uint8_t secondAddress, char
   i2cResetGracePeriod(address, bus);
   i2cResetGracePeriod(secondAddress, bus);
   StartIo io{bus, wire};
-  if (!lsm4517StartSequence(io, bus, address, secondAddress, why, whyLen)) return false;
+  Lsm6Chip chip = Lsm6Chip::Dsox;
+  if (!lsm4517StartSequence(io, bus, address, secondAddress, why, whyLen, &chip)) return false;
+  sState.sample.chip = chip;
   // Name both health records after their chips, and start their counts fresh.
   if (I2cDeviceManager* mgr = I2cDeviceManager::getInstance()) {
     mgr->registerDevice(address, kInfo.part, bus);
