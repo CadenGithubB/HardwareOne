@@ -10,9 +10,17 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <initializer_list>
 #include <string>
+#include <vector>
 
 #include "System_I2CInstanceCore.h"
+
+// The repository's root, for the files a test reads (CMakeLists.txt sets it).
+#ifndef HW1_REPO_ROOT
+#error "define HW1_REPO_ROOT (the repository root) for test_i2c_instance_core.cpp"
+#endif
 
 static std::string str(const char* text, size_t len) { return std::string(text, len); }
 
@@ -495,6 +503,229 @@ static void testBusMove() {
   assert(i2cOwnerBusClash(uses, count, i2cRowOwner(-1), 1) == nullptr);
 }
 
+// The status sign's one-time setup, read from configurations/README.md
+// (feathers3-status-sign) and replayed from fresh settings through the rules
+// its commands apply: a bus setter checks every address its owner holds on the
+// new bus (i2cOwnerBusClash), an address setter checks the address on the
+// owner's bus (i2cAddressTakenBy). Every command of the block is accepted in
+// the block's order, and the wiring it ends in has no address twice on a bus.
+struct SignSetup {
+  // Fresh settings of the sign build: everything on bus 0 except the OLED
+  // (the FeatherS3[D]'s default OLED bus is 1). Encoder 1 starts at the
+  // encoder default 0x49; encoder 2 has no address. The input device is the
+  // motion sensor itself (INPUT_DEVICE_TYPE 5): it has no address of its own.
+  uint8_t gaugeBus = 0, oledBus = 1, rtcBus = 0, imuBus = 0;
+  uint8_t encoderBus[2] = {0, 0};
+  uint8_t encoderAddress[2] = {0x49, 0};
+  I2cAddressUse uses[10];
+  size_t count = 0;
+  void walk() {
+    count = 0;
+    uses[count++] = {gaugeBus, 0x36, I2C_DEVICE_COUNT, 0, "MAX17048", "LiPo Fuel Gauge", 10};
+    uses[count++] = {oledBus, 0x3D, I2C_DEVICE_COUNT, 0, "SSD1306", "OLED 128x64 Display", 11};
+    uses[count++] = {oledBus, 0x3C, I2C_DEVICE_COUNT, 0, "SSD1306", "OLED 128x64 Display", 11};
+    uses[count++] = {rtcBus, 0x68, I2C_DEVICE_RTC, 1, "DS3231", "Precision RTC", 9};
+    for (uint8_t n = 1; n <= 2; ++n) {
+      if (encoderAddress[n - 1] == 0) continue;  // an instance without an address holds none
+      uses[count++] = {encoderBus[n - 1], encoderAddress[n - 1], I2C_DEVICE_ENCODER, n, "Encoder",
+                       "Adafruit 4991 Rotary Encoder, 1 RGB pixel", 14};
+    }
+    uses[count++] = {imuBus, 0x6A, I2C_DEVICE_IMU, 1, "LSM6DSOX", "Accel + gyro (Adafruit 4517)", 0};
+    uses[count++] = {imuBus, 0x1C, I2C_DEVICE_IMU, 1, "LIS3MDL", "Magnetometer (Adafruit 4517)", 1};
+  }
+  // A bus setter: true when accepted (and then applied).
+  bool setBus(uint8_t& bus, const I2cAddressOwner& owner, uint8_t to) {
+    walk();
+    if (i2cOwnerBusClash(uses, count, owner, to) != nullptr) return false;
+    bus = to;
+    return true;
+  }
+  // 'encoderaddress [n] <address>'.
+  bool setEncoderAddress(uint8_t n, uint8_t address) {
+    walk();
+    if (i2cAddressTakenBy(uses, count, encoderBus[n - 1], address, I2C_DEVICE_ENCODER, n) != nullptr) return false;
+    encoderAddress[n - 1] = address;
+    return true;
+  }
+  bool encoderBusTo(uint8_t n, uint8_t to) { return setBus(encoderBus[n - 1], i2cInstanceOwner(I2C_DEVICE_ENCODER, n), to); }
+  bool imuBusTo(uint8_t to) { return setBus(imuBus, i2cInstanceOwner(I2C_DEVICE_IMU, 1), to); }
+};
+
+// The sign's setup block as configurations/README.md prints it: the lines of
+// the first ```text block after the feathers3-status-sign paragraph begins.
+static std::vector<std::string> signSetupBlock() {
+  const std::string path = std::string(HW1_REPO_ROOT) + "/configurations/README.md";
+  std::ifstream file(path);
+  if (!file) {
+    std::fprintf(stderr, "cannot read %s\n", path.c_str());
+    assert(false);
+  }
+  std::vector<std::string> lines;
+  std::string line;
+  int state = 0;  // 0: before the sign's paragraph, 1: in it, 2: in its block
+  while (std::getline(file, line)) {
+    if (state == 0 && line.rfind("`feathers3-status-sign` is the same sign", 0) == 0) state = 1;
+    else if (state == 1 && line == "```text") state = 2;
+    else if (state == 2 && line == "```") break;
+    else if (state == 2 && !line.empty()) lines.push_back(line);
+  }
+  return lines;
+}
+
+// One line of the block applied to the sign: a bus or address command goes
+// through its collision rule; the others (autostart, antenna, power saving,
+// reboot) move no address. False when the command is refused; a command this
+// test does not know fails it, so a new line in the block is looked at.
+static bool applySignSetupLine(SignSetup& sign, const std::string& line, unsigned& moves) {
+  std::vector<std::string> words;
+  size_t start = 0;
+  while (start < line.size()) {
+    const size_t end = line.find(' ', start);
+    const std::string word = line.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    if (!word.empty()) words.push_back(word);
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  assert(!words.empty());
+  const std::string& command = words[0];
+  const auto number = [](const std::string& text) { return static_cast<uint8_t>(std::stoul(text, nullptr, 0)); };
+  // "<command> <value>" is instance 1; "<command> <n> <value>" names the instance.
+  const auto instanceAndValue = [&](uint8_t& n, uint8_t& value) {
+    assert(words.size() == 2 || words.size() == 3);
+    n = words.size() == 3 ? number(words[1]) : 1;
+    value = number(words.back());
+    assert(n >= 1 && n <= 2);
+  };
+  if (command == "encoderbus" || command == "encoderaddress") {
+    uint8_t n = 0, value = 0;
+    instanceAndValue(n, value);
+    ++moves;
+    return command == "encoderbus" ? sign.encoderBusTo(n, value) : sign.setEncoderAddress(n, value);
+  }
+  if (command == "imubus") {
+    assert(words.size() == 2);
+    ++moves;
+    return sign.imuBusTo(number(words[1]));
+  }
+  for (const char* other : {"encoderautostart", "inputautostart", "imuautostart", "oledautostart",
+                            "wifiexternalantenna", "powersave", "reboot"}) {
+    if (command == other) return true;
+  }
+  std::fprintf(stderr, "the sign's setup block has a command this test does not know: %s\n", line.c_str());
+  assert(false);
+  return false;
+}
+
+static void testStatusSignSetup() {
+  if (i2cMaxInstances(I2C_DEVICE_ENCODER) < 2) return;  // the sign has two encoder boards
+  SignSetup sign;
+  // The README's block, line by line in its order: every command is accepted.
+  const std::vector<std::string> block = signSetupBlock();
+  unsigned moves = 0;
+  for (const std::string& line : block) {
+    if (!applySignSetupLine(sign, line, moves)) {
+      std::fprintf(stderr, "the sign's setup block: '%s' is refused by the address check\n", line.c_str());
+      assert(false);
+    }
+  }
+  // Both encoder boards and the motion sensor are placed, and the block ends
+  // with the reboot that applies the buses.
+  assert(moves >= 5 && !block.empty() && block.back() == "reboot");
+  // The wiring found on the board: bus 0 (horizontal STEMMA QT) the gauge
+  // 0x36, the DS3231 0x68 and the second 4991 0x37; bus 1 (vertical) the OLED
+  // 0x3D, the first 4991 0x36 and the 4517 (0x6A + 0x1C).
+  sign.walk();
+  struct At { uint8_t bus, address; const char* name; };
+  const At expected[] = {
+      {0, 0x36, "MAX17048"}, {1, 0x3D, "SSD1306"}, {1, 0x3C, "SSD1306"}, {0, 0x68, "DS3231"},
+      {1, 0x36, "Encoder"}, {0, 0x37, "Encoder"}, {1, 0x6A, "LSM6DSOX"}, {1, 0x1C, "LIS3MDL"},
+  };
+  assert(sign.count == sizeof(expected) / sizeof(expected[0]));
+  for (size_t i = 0; i < sign.count; ++i) {
+    assert(sign.uses[i].bus == expected[i].bus && sign.uses[i].address == expected[i].address &&
+           std::strcmp(sign.uses[i].name, expected[i].name) == 0);
+    for (size_t j = i + 1; j < sign.count; ++j) {
+      assert(!(sign.uses[i].bus == sign.uses[j].bus && sign.uses[i].address == sign.uses[j].address));
+    }
+  }
+  // Running the block a second time changes nothing and is accepted again.
+  for (const std::string& line : block) assert(applySignSetupLine(sign, line, moves));
+  sign.walk();
+  for (size_t i = 0; i < sign.count; ++i) {
+    assert(sign.uses[i].bus == expected[i].bus && sign.uses[i].address == expected[i].address);
+  }
+
+  // The order matters, and the checks say why. On fresh settings the first
+  // 4991's address cannot be set before its bus: 0x36 on bus 0 is the gauge's.
+  SignSetup early;
+  assert(!early.setEncoderAddress(1, 0x36));
+  // Once it is on bus 1 the address is free.
+  assert(early.encoderBusTo(1, 1) && early.setEncoderAddress(1, 0x36));
+  // The second 4991 at the first one's address is refused on either bus it shares.
+  SignSetup both;
+  assert(both.encoderBusTo(1, 1) && both.setEncoderAddress(1, 0x36));
+  assert(both.encoderBusTo(2, 1) && !both.setEncoderAddress(2, 0x36) && both.setEncoderAddress(2, 0x37));
+  // ...and bus 0 has the gauge at 0x36: only 0x37 (A0 bridged) works there.
+  assert(both.encoderBusTo(2, 0) && !both.setEncoderAddress(2, 0x36));
+  // The IMU back to bus 0 stays possible (0x6A and 0x1C are free there); the
+  // gauge to bus 1 is not (the first 4991's 0x36).
+  assert(sign.imuBusTo(0) && sign.imuBusTo(1));
+  assert(!sign.setBus(sign.gaugeBus, i2cRowOwner(10), 1));
+}
+
+// A module's device names for the web pages: every row of the module, each
+// name once, in table order, as a JavaScript object literal.
+struct NamedRow {
+  const char* name;
+  const char* moduleName;
+};
+static void testModuleDeviceNames() {
+  // The Adafruit 4517 build: two chips of the "imu" module.
+  const NamedRow lsm[] = {
+    {"LSM6DSOX", "imu"}, {"LIS3MDL", "imu"}, {"VL53L4CX", "tof"}, {"Seesaw", "input"}, {"Seesaw", "input"},
+    {"SSD1306", nullptr}, {"", "imu"}, {nullptr, "imu"},
+  };
+  const size_t lsmCount = sizeof(lsm) / sizeof(lsm[0]);
+  char out[64];
+  assert(i2cModuleDeviceNamesJs(lsm, lsmCount, "imu", out, sizeof(out)) == std::strlen("{'LSM6DSOX':1,'LIS3MDL':1}"));
+  assert(std::string(out) == "{'LSM6DSOX':1,'LIS3MDL':1}");
+  assert(std::string(i2cModuleFirstDeviceName(lsm, lsmCount, "imu")) == "LSM6DSOX");
+  // Two rows with one name (the seesaw at its two addresses): once.
+  i2cModuleDeviceNamesJs(lsm, lsmCount, "input", out, sizeof(out));
+  assert(std::string(out) == "{'Seesaw':1}");
+  // The BNO055 build (and a build without the IMU, which keeps that row).
+  const NamedRow bno[] = {{"BNO055", "imu"}, {"VL53L4CX", "tof"}};
+  i2cModuleDeviceNamesJs(bno, 2, "imu", out, sizeof(out));
+  assert(std::string(out) == "{'BNO055':1}");
+  assert(std::string(i2cModuleFirstDeviceName(bno, 2, "imu")) == "BNO055");
+  // No row of the module, no module, no table: an empty object, no name.
+  assert(i2cModuleDeviceNamesJs(bno, 2, "gps", out, sizeof(out)) == 2 && std::string(out) == "{}");
+  assert(i2cModuleDeviceNamesJs(bno, 2, nullptr, out, sizeof(out)) == 2 && std::string(out) == "{}");
+  assert(i2cModuleDeviceNamesJs(static_cast<const NamedRow*>(nullptr), 0, "imu", out, sizeof(out)) == 2);
+  assert(i2cModuleFirstDeviceName(bno, 2, "gps") == nullptr && i2cModuleFirstDeviceName(bno, 2, nullptr) == nullptr);
+  // A name that could end the page's string or script is left out.
+  const NamedRow odd[] = {{"A'B", "imu"}, {"C\\D", "imu"}, {"E<F", "imu"}, {"OK", "imu"}};
+  i2cModuleDeviceNamesJs(odd, 4, "imu", out, sizeof(out));
+  assert(std::string(out) == "{'OK':1}");
+  // Every size: the whole list or, when it does not fit, an empty object
+  // (0 returned); never a cut list, never a write past the end.
+  const std::string whole = "{'LSM6DSOX':1,'LIS3MDL':1}";
+  for (size_t cap = 0; cap <= whole.size() + 2; ++cap) {
+    char guarded[64];
+    std::memset(guarded, 'Z', sizeof(guarded));
+    const size_t n = i2cModuleDeviceNamesJs(lsm, lsmCount, "imu", guarded + 1, cap);
+    assert(guarded[0] == 'Z' && guarded[cap + 1] == 'Z');
+    if (cap > whole.size()) {
+      assert(n == whole.size() && whole == guarded + 1);
+    } else {
+      assert(n == 0);
+      if (cap >= 3) assert(std::string(guarded + 1) == "{}");
+      else if (cap >= 1) assert(guarded[1] == '\0');
+    }
+  }
+  assert(i2cModuleDeviceNamesJs(lsm, lsmCount, "imu", nullptr, 16) == 0);
+}
+
 // Instance 1's extra rows: a row of the type with its own address setting
 // claims its configured address; a fixed or alternate-only row claims nothing.
 struct TypedRow {
@@ -554,6 +785,8 @@ int main() {
   testAddressCollisions();
   testOwners();
   testBusMove();
+  testStatusSignSetup();
+  testModuleDeviceNames();
   testExtraRowAddresses();
 #ifdef HW1_HOST_I2C_TEST_ENCODER_MAX
   testEncoderFour();

@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1035 commands across 60 modules (1035 registry entries).
+1044 commands across 61 modules (1044 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -35,10 +35,11 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`servo`](#servo) — 6 commands
 - [`thermal`](#thermal) — 23 commands
 - [`tof`](#tof) — 10 commands
-- [`imu`](#imu) — 18 commands
+- [`imu`](#imu) — 19 commands
 - [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
 - [`anoencoder`](#anoencoder) — 6 commands
+- [`imuinput`](#imuinput) — 8 commands
 - [`apds`](#apds) — 9 commands
 - [`gps`](#gps) — 6 commands
 - [`fmradio`](#fmradio) — 9 commands
@@ -586,7 +587,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## imu
 
-> The IMU is the motion sensor on I2C; the build picks its chip (a BNO055 or an Adafruit 4517 LSM6DSOX + LIS3MDL). openimu starts it, imuread reports yaw/pitch/roll (degrees) plus acceleration, gyroscope, magnetometer and chip temperature, and closeimu stops it; imuautostart [on|off] persists launching it at boot, imubus and imuaddress say where it is wired. Beyond raw orientation, imuactions runs gesture/event detection derived from the motion data: shake, tilt (with direction), tap/knock, rotation (with axis), freefall, a step counter with cadence, and screen-style orientation. Because the chip can be mounted in any pose, imuorientationmode <0..8> applies a fixed remap (flip pitch/roll/yaw, 90-degree rotations, upside-down fixes), imuorientationcorrection <0|1> toggles that correction, and imupitchoffset/imurolloffset/imuyawoffset trim each axis in degrees.
+> The IMU is the motion sensor on I2C; the build picks its chip (a BNO055 or an Adafruit 4517 LSM6DSOX + LIS3MDL). openimu starts it, imuread reports yaw/pitch/roll (degrees) plus acceleration, gyroscope, magnetometer and chip temperature, and closeimu stops it; imuautostart [on|off] persists launching it at boot, imubus and imuaddress say where it is wired, and imustatus shows the chip, its bus and addresses and whether yaw is a magnetic heading. Beyond raw orientation, imuactions runs gesture/event detection derived from the motion data: shake, tilt (with direction), tap/knock, rotation (with axis), freefall, a step counter with cadence, and screen-style orientation. Because the chip can be mounted in any pose, imuorientationmode <0..8> applies a fixed remap (flip pitch/roll/yaw, 90-degree rotations, upside-down fixes), imuorientationcorrection <0|1> toggles that correction, and imupitchoffset/imurolloffset/imuyawoffset trim each axis in degrees.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -604,6 +605,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `imupollingms` | A | IMU UI polling interval: <50..2000><br/>`Usage: imupollingms <50..2000>` |
 | `imuread` |  | Read IMU sensor data. (add 'json' for JSON output) |
 | `imurolloffset` | A | IMU roll offset in degrees: <-180..180><br/>`Usage: imurolloffset <-180..180>` |
+| `imustatus` |  | IMU status: chip, bus, addresses, tap and heading, gyro offset. (add 'json' for JSON output)<br/>`Usage: imustatus [json]` |
 | `imutransitionms` | A | IMU transition time: <0..1000><br/>`Usage: imutransitionms <0..1000>` |
 | `imuwebmaxfps` | A | IMU web max FPS: <1..30><br/>`Usage: imuwebmaxfps <1..30>` |
 | `imuyawoffset` | A | IMU yaw offset in degrees: <-180..180><br/>`Usage: imuyawoffset <-180..180>` |
@@ -611,7 +613,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## input
 
-> Device-agnostic abstraction for the OLED input controller, which is either the Seesaw gamepad, ANO encoder or GPIO rotary encoder -- chosen at compile time via INPUT_DEVICE_TYPE and mutually exclusive, so exactly one driver is present per firmware. These commands operate on whichever driver was built in: openinput starts it, closeinput stops it, inputautostart [on|off] persists boot auto-start, and inputdevicepollms <10-1000> sets the polling interval in milliseconds (default 90 for I2C devices; GPIO input uses a fixed 5 ms button sample). Driver-specific debugging and tuning live in the gamepad and anoencoder modules; this module holds only the shared settings (poll interval and auto-start).
+> Device-agnostic abstraction for the OLED input controller, which is the Seesaw gamepad, ANO encoder, GPIO rotary encoder, GT911 touchscreen or the IMU (taps and tilt) -- chosen at compile time via INPUT_DEVICE_TYPE and mutually exclusive, so exactly one driver is present per firmware. These commands operate on whichever driver was built in: openinput starts it, closeinput stops it, inputautostart [on|off] persists boot auto-start, and inputdevicepollms <10-1000> sets the polling interval in milliseconds (default 90 for I2C devices; GPIO input uses a fixed 5 ms button sample). Driver-specific debugging and tuning live in the gamepad and anoencoder modules; this module holds only the shared settings (poll interval and auto-start).
 
 | Command | | Description |
 | ------- | :-: | ----------- |
@@ -642,6 +644,21 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `anoencoderstatus` |  | ANO encoder status: bus, address, settings. (add 'json' for JSON output)<br/>`Usage: anoencoderstatus [json]` |
 | `anoencoderswaplr` | A | Swap LEFT/RIGHT buttons [on\|off\|toggle]<br/>`Usage: anoencoderswaplr [on\|off\|toggle]` |
 | `anoencoderswapud` | A | Swap UP/DOWN buttons [on\|off\|toggle]<br/>`Usage: anoencoderswapud [on\|off\|toggle]` |
+
+## imuinput
+
+> The motion sensor used as the OLED navigation input (INPUT_DEVICE_TYPE 5; it needs the Adafruit 4517, whose chip detects taps). Tap the device: one tap is A, two are B, three are Y, four are X; the button arrives once no further tap has followed for the tap window (imuinputtapms <200..800>, default 350 ms). Five taps take the device's present pose as the joystick's centre, as does imuinputzero; six or more taps do nothing. Tilting the device away from that centre pose by more than the tilt angle (imuinputtilt <8..40> degrees, default 15) deflects the joystick left, right, up or down, one direction at a time, and returning releases it; a lean of more than 60 degrees is taken as a new pose and centres the joystick until the next re-centre. imuinputswapxy, imuinputinvertx and imuinputinverty [on|off|toggle] fit the directions to how the sensor sits in its enclosure. A sustained shake is START (imuinputshake [on|off]); SELECT has no gesture. imuinputread [json] shows the state, the lean in degrees, the joystick and the taps being counted. The open/close/autostart lifecycle lives under the input module: openinput also opens the IMU and holds it open (closeimu refuses while the input runs), closeinput leaves the IMU open.
+
+| Command | | Description |
+| ------- | :-: | ----------- |
+| `imuinputinvertx` | A | Invert left/right tilt [on\|off\|toggle]<br/>`Usage: imuinputinvertx [on\|off\|toggle]` |
+| `imuinputinverty` | A | Invert up/down tilt [on\|off\|toggle]<br/>`Usage: imuinputinverty [on\|off\|toggle]` |
+| `imuinputread` |  | IMU input: state, lean, joystick and taps. (add 'json' for JSON output)<br/>`Usage: imuinputread [json]` |
+| `imuinputshake` | A | A shake is the START button [on\|off]<br/>`Usage: imuinputshake [on\|off]` |
+| `imuinputswapxy` | A | Swap the tilt axes [on\|off\|toggle]<br/>`Usage: imuinputswapxy [on\|off\|toggle]` |
+| `imuinputtapms` | A | Tap window in ms: a button arrives this long after its last tap <200..800><br/>`Usage: imuinputtapms [200..800]` |
+| `imuinputtilt` | A | Tilt angle in degrees that moves the joystick <8..40><br/>`Usage: imuinputtilt [8..40]` |
+| `imuinputzero` | A | Take the present pose as the joystick's centre (the same as five taps).<br/>`Usage: imuinputzero` |
 
 ## apds
 
@@ -920,12 +937,12 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `inputbus` | A | Route input device to bus: <0\|1> (reboot required; the ANO: next openinput)<br/>`Usage: inputBus <0\|1>` |
 | `oledbus` | A | Route OLED to bus: <0\|1> (reboot required)<br/>`Usage: oledBus <0\|1>` |
 | `sensorautostart` | A | Sensor auto-start: [sensor] [n] [on\|off]<br/>`Usage: sensorautostart [sensor] [n] [on\|off] sensorautostart all [on\|off] Sensors: thermal, tof, imu, gps, fmradio, apds, input, rtc, presence, encoder (n: encoder 1..4)` |
-| `sensorinfo` |  | Sensor details: <name><br/>`Usage: sensorinfo <sensor_name> Example: sensorinfo BNO055` |
+| `sensorinfo` |  | Sensor details: <name><br/>`Usage: sensorinfo <sensor_name> Example: sensorinfo DS3231` |
 | `sensors` |  | List I2C sensors [filter]<br/>`Usage: sensors [filter] - filter by name, description, or manufacturer sensors json [brief] - live state (+readings; 'brief' = state only, no data) Example: sensors temperature, sensors json brief` |
 
 ## automation
 
-> The automation module runs saved jobs (stored in automations.json) that execute one or more CLI commands on a schedule, condition, or system event. Every automation has one of four trigger types: atTime (fires daily at time=HH:MM, optionally limited to days=Mon,Tue,...), afterDelay (fires once after delayms milliseconds), interval (fires repeatedly every intervalms milliseconds), or event (fires when a system event occurs: on=<kind> with an optional match=<text> filter against the event's subject/detail — run 'events' to see recent kinds like peer_online, text_rx, battery_low, login_fail); jobs can also carry runatboot=1 to fire at startup. The primary entry point is automation <subcommand> (list, add, enable, disable, delete, run, trigger, sanitize, recompute); automationlist lists the jobs for any signed-in user. Note the important distinction: automation run id=<id> executes a job commands immediately, whereas automation trigger id=<id> only arms an afterDelay/manual timer so it fires after its delay; and automation system enable|disable|status is the global master switch that gates whether the scheduler runs at all, independent of each job own enabled flag. Jobs may also include an optional condition expression, and conditional commands use an IF <expr> THEN <command> [ELSE <command>] form (e.g. IF temp>75 THEN ledcolor red). Conditions can check sensors (temp, distance, light, motion), time (time, hour, day, ntp), system state (battery, heap, psram, fsfree, uptime, chiptemp), connectivity (wifi, rssi, peers, ble), ESP-NOW/bond (espnow, bond_mode, bond_paired, bond_online, bond_synced, bond_role, bond_rssi, bond_peer_heap, bond_peer_uptime, pairmode, pairmode_secs, peersknown, stalestpeerage), location (gps, speed, sats, wp_dist:<name>), the on-device model (llm), and ESP-NOW metadata (room, zone, tags); numeric variables use the > < = >= <= != operators and string/enum variables use = != CONTAINS. A true condition fires every time its trigger is due. Supporting commands: validateconditions checks conditional syntax without running it, autolog records automation activity to a file, and print <message> broadcasts text to all outputs.
+> The automation module runs saved jobs (stored in automations.json) that execute one or more CLI commands on a schedule, condition, or system event. Every automation has one of four trigger types: atTime (fires daily at time=HH:MM, optionally limited to days=Mon,Tue,...), afterDelay (fires once after delayms milliseconds), interval (fires repeatedly every intervalms milliseconds), or event (fires when a system event occurs: on=<kind> with an optional match=<text> filter against the event's subject/detail — run 'events' to see recent kinds like peer_online, text_rx, battery_low, login_fail); jobs can also carry runatboot=1 to fire at startup. The primary entry point is automation <subcommand> (list, add, enable, disable, delete, run, trigger, sanitize, recompute); automationlist lists the jobs for any signed-in user. Note the important distinction: automation run id=<id> executes a job commands immediately, whereas automation trigger id=<id> only arms an afterDelay/manual timer so it fires after its delay; and automation system enable|disable|status is the global master switch that gates whether the scheduler runs at all, independent of each job own enabled flag. Jobs may also include an optional condition expression, and conditional commands use an IF <expr> THEN <command> [ELSE <command>] form (e.g. IF temp>75 THEN ledcolor red). Conditions can check sensors (temp, distance, light, motion, and the IMU: imu_pitch, imu_roll, imu_tilt, imu_pose, imu_tap_age), time (time, hour, day, ntp), system state (battery, heap, psram, fsfree, uptime, chiptemp), connectivity (wifi, rssi, peers, ble), ESP-NOW/bond (espnow, bond_mode, bond_paired, bond_online, bond_synced, bond_role, bond_rssi, bond_peer_heap, bond_peer_uptime, pairmode, pairmode_secs, peersknown, stalestpeerage), location (gps, speed, sats, wp_dist:<name>), the on-device model (llm), and ESP-NOW metadata (room, zone, tags); numeric variables use the > < = >= <= != operators and string/enum variables use = != CONTAINS. A true condition fires every time its trigger is due. Supporting commands: validateconditions checks conditional syntax without running it, autolog records automation activity to a file, and print <message> broadcasts text to all outputs.
 
 | Command | | Description |
 | ------- | :-: | ----------- |

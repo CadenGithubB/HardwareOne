@@ -127,6 +127,8 @@ extern const CommandEntry gamepadCommands[];
 extern const size_t gamepadCommandsCount;
 extern const CommandEntry anoEncoderCommands[];
 extern const size_t anoEncoderCommandsCount;
+extern const CommandEntry imuInputCommands[];
+extern const size_t imuInputCommandsCount;
 extern const CommandEntry apdsCommands[];
 extern const size_t apdsCommandsCount;
 extern const CommandEntry gpsCommands[];

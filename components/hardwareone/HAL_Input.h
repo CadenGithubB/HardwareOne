@@ -9,6 +9,9 @@
  *   - INPUT_TYPE_SEESAW_GAMEPAD: Adafruit Seesaw gamepad (I2C)
  *   - INPUT_TYPE_CLICK_WHEEL: Rotary encoder with buttons
  *   - INPUT_TYPE_CUSTOM: User-defined button mappings
+ *   - INPUT_TYPE_ANO_ENCODER, INPUT_TYPE_GPIO_ENCODER: rotary encoders
+ *   - INPUT_TYPE_GT911_TOUCH: single-contact touchscreen
+ *   - INPUT_TYPE_IMU: the motion sensor (taps are buttons, tilt is the joystick)
  */
 
 #ifndef HAL_INPUT_H
@@ -51,6 +54,7 @@ inline uint32_t inputNavButtons(const InputCache& c) { return c.buttons | c.navH
 #define INPUT_TYPE_ANO_ENCODER     4
 #define INPUT_TYPE_GPIO_ENCODER    5
 #define INPUT_TYPE_GT911_TOUCH     6
+#define INPUT_TYPE_IMU             7
 
 // Default input type. BuildConfig owns the user-visible INPUT_DEVICE_TYPE
 // flag; this internal INPUT_TYPE is derived from it so HAL code has a single
@@ -58,6 +62,8 @@ inline uint32_t inputNavButtons(const InputCache& c) { return c.buttons | c.navH
 #ifndef INPUT_TYPE
   #if ENABLE_GT911_TOUCH
     #define INPUT_TYPE INPUT_TYPE_GT911_TOUCH
+  #elif ENABLE_IMU_INPUT
+    #define INPUT_TYPE INPUT_TYPE_IMU
   #elif defined(INPUT_DEVICE_TYPE) && INPUT_DEVICE_TYPE == 3  /* INPUT_DEVICE_TYPE_GPIO_ENCODER */
     #define INPUT_TYPE  INPUT_TYPE_GPIO_ENCODER
   #elif defined(INPUT_DEVICE_TYPE) && INPUT_DEVICE_TYPE == 2  /* INPUT_DEVICE_TYPE_ANO_ENCODER */
@@ -77,6 +83,11 @@ inline uint32_t inputNavButtons(const InputCache& c) { return c.buttons | c.navH
 #if INPUT_TYPE == INPUT_TYPE_GT911_TOUCH
   #define INPUT_TASK_NAME "input_touch"
   #define INPUT_TASK_TAG "touch"
+#elif INPUT_TYPE == INPUT_TYPE_IMU
+  // No task: the IMU input runs in the IMU task's per-sample hook. The name
+  // is only the (empty) row of the known-task table.
+  #define INPUT_TASK_NAME "input_imu"
+  #define INPUT_TASK_TAG  "imuinput"
 #elif INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
   #define INPUT_TASK_NAME "input_encoder"
   #define INPUT_TASK_TAG  "encoder"
@@ -98,6 +109,7 @@ inline uint32_t inputNavButtons(const InputCache& c) { return c.buttons | c.navH
 #include "i2csensor_seesaw.h"
 #include "i2csensor_ano_encoder.h"
 #include "Input_GPIOEncoder.h"
+#include "Input_IMU.h"
 
 // =============================================================================
 // Logical Button Identifiers (hardware-agnostic)
@@ -123,7 +135,8 @@ enum InputControllerType {
   INPUT_CONTROLLER_CUSTOM,          // Custom controller mapping
   INPUT_CONTROLLER_ANO_ENCODER,     // Adafruit ANO rotary encoder breakout
   INPUT_CONTROLLER_GPIO_ENCODER,    // Direct GPIO quadrature + push switch
-  INPUT_CONTROLLER_GT911_TOUCH      // Single-contact touchscreen
+  INPUT_CONTROLLER_GT911_TOUCH,     // Single-contact touchscreen
+  INPUT_CONTROLLER_IMU              // Motion sensor: taps and tilt
 };
 
 // =============================================================================

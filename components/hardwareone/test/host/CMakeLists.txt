@@ -32,17 +32,28 @@ target_compile_options(ano_encoder_core_tests PRIVATE -Wall -Wextra -Werror -ped
 # BNO055 backend's bounded start sequence and decode (HAL_Motion_BNO055Core.h)
 # over a scripted chip; the Adafruit 4517 backend's configuration bytes,
 # start sequence over two scripted chips and decode
-# (HAL_Motion_LSM6DSOXCore.h); and the layer's Mahony fusion on known poses
-# (HAL_Motion_Fusion.h).
+# (HAL_Motion_LSM6DSOXCore.h); the layer's Mahony fusion on known poses
+# (HAL_Motion_Fusion.h); and the per-sample hook and holder list
+# (HAL_MotionHookCore.h): one slot, an unregister that waits for a call in
+# progress and the register/unregister race, run with real threads.
 add_executable(motion_core_tests test_motion_core.cpp)
 add_executable(motion_bno055_core_tests test_motion_bno055_core.cpp)
 add_executable(motion_lsm6dsox_core_tests test_motion_lsm6dsox_core.cpp)
 add_executable(motion_fusion_tests test_motion_fusion.cpp)
-foreach(target motion_core_tests motion_bno055_core_tests motion_lsm6dsox_core_tests motion_fusion_tests)
+add_executable(motion_hook_core_tests test_motion_hook_core.cpp)
+# The same hook test under ThreadSanitizer (it cannot share a build with
+# ASan): the data-race check of the slot's register / unregister / call.
+add_executable(motion_hook_core_tsan_tests test_motion_hook_core.cpp)
+# The IMU as an input device: taps as buttons, tilt as a joystick (Input_IMUCore.h).
+add_executable(input_imu_core_tests test_input_imu_core.cpp)
+foreach(target motion_core_tests motion_bno055_core_tests motion_lsm6dsox_core_tests motion_fusion_tests
+        motion_hook_core_tests motion_hook_core_tsan_tests input_imu_core_tests)
   set_target_properties(${target} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
   target_include_directories(${target} PRIVATE ../..)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -pedantic)
 endforeach()
+target_link_libraries(motion_hook_core_tests PRIVATE Threads::Threads)
+target_link_libraries(motion_hook_core_tsan_tests PRIVATE Threads::Threads)
 
 # Compiles the REAL header from the firmware tree, not a copy of it — the same
 # rule updater/test/host/CMakeLists.txt states. System_LLMUtf8.h is kept
@@ -563,6 +574,9 @@ foreach(target i2c_instance_core_tests i2c_instance_core_four_tests)
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
   target_include_directories(${target} PRIVATE ../..)
   target_compile_options(${target} PRIVATE -Wall -Wextra -Werror -pedantic)
+  # The status sign's setup block is read from configurations/README.md.
+  target_compile_definitions(${target} PRIVATE
+    HW1_REPO_ROOT="${CMAKE_CURRENT_LIST_DIR}/../../../..")
 endforeach()
 target_compile_definitions(i2c_instance_core_four_tests PRIVATE HW1_HOST_I2C_TEST_ENCODER_MAX=4)
 
@@ -692,6 +706,13 @@ target_compile_options(stt_raw_replay PRIVATE -O2 -Wall -Wextra -Werror -pedanti
 # buffer, and an earlier draft ran off the front. Without ASan that is invisible.
 option(HW1_SANITIZE "Build the host tests with ASan/UBSan" ON)
 if(HW1_SANITIZE)
+  # The per-sample hook's slot: consumers come and go under a running caller.
+  target_compile_options(motion_hook_core_tests PRIVATE -fsanitize=address,undefined -g)
+  target_link_options(motion_hook_core_tests PRIVATE -fsanitize=address,undefined)
+  target_compile_options(input_imu_core_tests PRIVATE -fsanitize=address,undefined -g)
+  target_link_options(input_imu_core_tests PRIVATE -fsanitize=address,undefined)
+  target_compile_options(motion_hook_core_tsan_tests PRIVATE -fsanitize=thread -g)
+  target_link_options(motion_hook_core_tsan_tests PRIVATE -fsanitize=thread)
   target_compile_options(llm_utf8_tests PRIVATE -fsanitize=address,undefined -g)
   target_compile_options(stt_raw_ring_tests PRIVATE -fsanitize=address,undefined -g)
   target_link_options(stt_raw_ring_tests PRIVATE -fsanitize=address,undefined)
@@ -1826,6 +1847,11 @@ add_test(NAME motion_core_tests COMMAND motion_core_tests)
 add_test(NAME motion_bno055_core_tests COMMAND motion_bno055_core_tests)
 add_test(NAME motion_lsm6dsox_core_tests COMMAND motion_lsm6dsox_core_tests)
 add_test(NAME motion_fusion_tests COMMAND motion_fusion_tests)
+add_test(NAME motion_hook_core_tests COMMAND motion_hook_core_tests)
+add_test(NAME input_imu_core_tests COMMAND input_imu_core_tests)
+add_test(NAME motion_hook_core_tsan_tests COMMAND motion_hook_core_tsan_tests)
+# ThreadSanitizer reports a race and goes on: make a report fail the test.
+set_tests_properties(motion_hook_core_tsan_tests PROPERTIES ENVIRONMENT "TSAN_OPTIONS=halt_on_error=1:exitcode=66")
 add_test(NAME llm_utf8_tests COMMAND llm_utf8_tests)
 add_test(NAME dictation_policy_tests COMMAND dictation_policy_tests)
 add_test(NAME factory_wipe_policy_tests COMMAND factory_wipe_policy_tests)
@@ -2149,12 +2175,20 @@ add_test(
   NAME logging_system_config_browser
   COMMAND ${HW1_NODE_CMD}
           ${CMAKE_CURRENT_LIST_DIR}/logging_system_config_browser_test.js)
+# The web pages find the IMU by the device table's names (window.__hwImu),
+# whichever chip the build has: the Sensors page, the dashboard and the IMU
+# card's shipping scripts, run for the BNO055 and the Adafruit 4517 builds.
+add_test(
+  NAME imu_web_surfaces
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_imu_web_surfaces.py
+          --node ${HW1_NODE_CMD})
 if(NOT HW1_NODE_EXECUTABLE)
   set_tests_properties(map_live_browser g2_status_browser sensor_mic_card
-                       logging_system_config_browser
+                       logging_system_config_browser imu_web_surfaces
                        PROPERTIES DISABLED TRUE)
-  message(WARNING "Node.js not found: map_live_browser, g2_status_browser, sensor_mic_card "
-                  "and logging_system_config_browser are registered but disabled; "
+  message(WARNING "Node.js not found: map_live_browser, g2_status_browser, sensor_mic_card, "
+                  "logging_system_config_browser and imu_web_surfaces are registered but disabled; "
                   "pass -DHW1_NODE_EXECUTABLE=/path/to/node")
 endif()
 # The Python tool suites run here too (P0-1c): the OTA tools, the web UI page
@@ -3637,6 +3671,23 @@ add_test(
   NAME automation_condition_bounds
   COMMAND ${Python3_EXECUTABLE}
           ${CMAKE_CURRENT_LIST_DIR}/test_automation_condition_bounds.py
+          ${SETUP_MQTT_TEST_ARGS})
+# Automation conditions on the IMU (IMU_PITCH, IMU_ROLL, IMU_TILT, IMU_POSE,
+# IMU_TAP_AGE): the parse, the IMU_ branch and the comparisons of
+# evaluateCondition run over the motion layer's rule and detector; a closed
+# IMU, no reading, no tap yet or an unknown IMU_ name is false.
+add_test(
+  NAME automation_imu_conditions
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_automation_imu_conditions.py
+          ${SETUP_MQTT_TEST_ARGS})
+# The IMU's holders and per-sample hook as HAL_Motion.cpp wires them:
+# `closeimu` refuses while a consumer holds the IMU (run on the host), and
+# the hook is called per stored sample, after the detector, outside the lock.
+add_test(
+  NAME motion_hook_wiring
+  COMMAND ${Python3_EXECUTABLE}
+          ${CMAKE_CURRENT_LIST_DIR}/test_motion_hook_wiring.py
           ${SETUP_MQTT_TEST_ARGS})
 # Uptime: SelfDevice::uptimeSeconds() counts on past the millis() wrap, and the
 # places that show, send or compare uptime ask it instead of millis() / 1000.

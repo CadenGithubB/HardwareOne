@@ -82,6 +82,55 @@ static void testKnownPoses() {
   assert(!mahonyInitFromAccel(none, 0, 0, 0));
 }
 
+// Which way is up, in the sensor frame (the per-sample hook's gravity vector):
+// what the accelerometer reads at rest over g, a unit vector in every pose,
+// unmoved by a knock on the accelerometer and following a turn of the board.
+static void testGravityVector() {
+  struct Pose { float pitch, roll; };
+  const Pose poses[] = {{0, 0}, {30, 0}, {-30, 0}, {0, 30}, {0, -45}, {20, 40}, {60, -10}, {0, 150}, {0, 180}, {85, 0}};
+  for (const Pose& pose : poses) {
+    float a[3], up[3];
+    stillAccel(pose.pitch, pose.roll, a);
+    MahonyFilter f;
+    assert(mahonyInitFromAccel(f, a[0], a[1], a[2]));
+    mahonyGravity(f, up);
+    for (int i = 0; i < 3; ++i) assert(near(up[i], a[i] / kG, 0.002f));
+    assert(near(up[0] * up[0] + up[1] * up[1] + up[2] * up[2], 1.0f, 0.001f));
+    // Still, it stays there; yaw turns do not change it.
+    const float still[3] = {0, 0, 0};
+    run(f, still, a, 200);
+    mahonyGravity(f, up);
+    for (int i = 0; i < 3; ++i) assert(near(up[i], a[i] / kG, 0.005f));
+  }
+  // Flat face up: +Z; the +X end raised: +X.
+  MahonyFilter flat;
+  float up[3];
+  assert(mahonyInitFromAccel(flat, 0, 0, kG));
+  mahonyGravity(flat, up);
+  assert(near(up[0], 0.0f, 0.001f) && near(up[1], 0.0f, 0.001f) && near(up[2], 1.0f, 0.001f));
+  // A knock (3 g on Z for two samples) is outside the accelerometer gate:
+  // the vector does not jump with it, as the raw accelerometer does.
+  const float still[3] = {0, 0, 0};
+  const float knock[3] = {12.0f, 0.0f, 3.0f * kG};
+  run(flat, still, knock, 2);
+  mahonyGravity(flat, up);
+  assert(near(up[0], 0.0f, 0.01f) && near(up[2], 1.0f, 0.01f));
+  // Turning the board about +Y by 30 degrees (the gyro alone, accelerometer
+  // following): the vector follows to the new pose.
+  float tilted[3];
+  stillAccel(-30, 0, tilted);  // a positive turn about +Y tips the +X end down
+  const float turn[3] = {0, rad(30.0f) / (50 * kDt), 0};
+  MahonyFilter turning;
+  assert(mahonyInitFromAccel(turning, 0, 0, kG));
+  for (int i = 0; i < 50; ++i) {
+    float now[3];
+    stillAccel(-30.0f * (i + 1) / 50.0f, 0, now);
+    assert(mahonyUpdate(turning, turn[0], turn[1], turn[2], now[0], now[1], now[2], kDt));
+  }
+  mahonyGravity(turning, up);
+  for (int i = 0; i < 3; ++i) assert(near(up[i], tilted[i] / kG, 0.02f));
+}
+
 // From a level start the filter follows the accelerometer to a tilted pose.
 static void testConvergesFromWrongStart() {
   MahonyFilter f;  // identity: believes the board is flat
@@ -210,6 +259,7 @@ static void testMagHook() {
 int main() {
   testFlat();
   testKnownPoses();
+  testGravityVector();
   testConvergesFromWrongStart();
   testGyroTurn();
   testBadStepsAreIgnored();

@@ -42,6 +42,8 @@
 #include "i2csensor_ano_encoder.h"   // anoEncoderBuildDataJSON — the ANO input builder
 #elif ENABLE_GPIO_ENCODER
 #include "Input_GPIOEncoder.h"
+#elif ENABLE_IMU_INPUT
+#include "Input_IMU.h"
 #endif
 #include "i2csensor_pa1010d.h"
 #include "HAL_Motion.h"
@@ -300,6 +302,10 @@ static const SensorBroadcastSpec gSensorSpecs[REMOTE_SENSOR_MAX] = {
   [REMOTE_SENSOR_INPUT]    = { anoEncoderBuildDataJson,     100,  128  },
 #elif ENABLE_GPIO_ENCODER
   [REMOTE_SENSOR_INPUT]    = { gpioEncoderBuildDataJson,    100,  256  },
+#elif ENABLE_IMU_INPUT
+  // The IMU as the input device travels in the gamepad's shape and button
+  // layout ({"x","y","buttons"}), so a peer draws it with its gamepad widget.
+  [REMOTE_SENSOR_INPUT]    = { imuInputBuildDataJson,       100,  128  },
 #else
   [REMOTE_SENSOR_INPUT]    = { nullptr, 0, 0 },
 #endif

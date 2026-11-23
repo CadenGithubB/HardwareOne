@@ -5028,11 +5028,20 @@ static void buildSensorDataJson(char* buf, size_t bufSize) {
       // imuTemp, shifting everything after it: "heading" read imuTemp (streamed
       // TEMPERATURE), pitch read oriYaw, roll read oriPitch, and oriRoll was never
       // sent at all. JSON keys kept (heading == yaw) so the wire format is stable.
-      pos += snprintf(buf + pos, bufSize - pos,
-                      "\"imu\":{\"heading\":%.1f,\"pitch\":%.1f,\"roll\":%.1f,\"valid\":true},",
-                      imu.oriYaw,
-                      imu.oriPitch,
-                      imu.oriRoll);
+      // A yaw that is no heading (no calibrated magnetometer: it counts from
+      // the IMU's start) is not sent as one: the key stays, its value is null.
+      if (imu.hasHeading) {
+        pos += snprintf(buf + pos, bufSize - pos,
+                        "\"imu\":{\"heading\":%.1f,\"pitch\":%.1f,\"roll\":%.1f,\"valid\":true},",
+                        imu.oriYaw,
+                        imu.oriPitch,
+                        imu.oriRoll);
+      } else {
+        pos += snprintf(buf + pos, bufSize - pos,
+                        "\"imu\":{\"heading\":null,\"pitch\":%.1f,\"roll\":%.1f,\"valid\":true},",
+                        imu.oriPitch,
+                        imu.oriRoll);
+      }
     }
   }
   #endif

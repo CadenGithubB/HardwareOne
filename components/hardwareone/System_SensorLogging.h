@@ -67,6 +67,7 @@ struct SensorCacheSnapshot {
   bool tofValid;
   bool gImuRunning;
   bool gImuConnected;
+  bool imuValid;       // the IMU has a reading (false: open but nothing published yet)
   bool gInputRunning;
   bool gInputConnected;
   bool inputValid;

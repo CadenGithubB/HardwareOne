@@ -96,7 +96,8 @@ def main() -> None:
             path = work / (name + '.cpp'); path.write_text(source)
             subprocess.run([args.cxx, *flags, *extra, str(path), '-o', str(work / name)], check=True, timeout=60)
             return subprocess.check_output([str(work / name)], text=True, timeout=60)
-        output = run('current', generate(COMPONENT, False), ['-DTEST_BASELINE=0'])
+        # -I: the OLED IMU page reads the pure motion header (HAL_MotionCore.h).
+        output = run('current', generate(COMPONENT, False), ['-DTEST_BASELINE=0', '-I', str(COMPONENT)])
         fixture = HERE / 'fixtures/small_sensor_snapshot_expected.json'
         require(output == ''.join(json.loads(fixture.read_text())), 'characterized sensor output changed')
         if args.baseline:

@@ -324,7 +324,8 @@ static constexpr CommandModule gCommandModules[] = {
     "or an Adafruit 4517 LSM6DSOX + LIS3MDL). openimu starts it, imuread reports "
     "yaw/pitch/roll (degrees) plus acceleration, gyroscope, magnetometer and chip "
     "temperature, and closeimu stops it; imuautostart [on|off] persists launching it at "
-    "boot, imubus and imuaddress say where it is wired. Beyond raw orientation, imuactions runs "
+    "boot, imubus and imuaddress say where it is wired, and imustatus shows the chip, its bus and "
+    "addresses and whether yaw is a magnetic heading. Beyond raw orientation, imuactions runs "
     "gesture/event detection derived from the motion data: shake, tilt (with "
     "direction), tap/knock, rotation (with axis), freefall, a step counter with "
     "cadence, and screen-style orientation. Because the chip can be mounted in any "
@@ -334,8 +335,8 @@ static constexpr CommandModule gCommandModules[] = {
     "degrees.", imuCommands,          &imuCommandsCount, CMD_MODULE_SENSOR, []() { return isSensorConnected("imu"); } },
 #endif
 #if ENABLE_OLED_INPUT
-  { "input",      "Input device (gamepad or rotary encoder)", "Device-agnostic abstraction for the OLED input controller, which is either the "
-    "Seesaw gamepad, ANO encoder or GPIO rotary encoder -- chosen at compile time via "
+  { "input",      "Input device (gamepad, encoder, touch or IMU)", "Device-agnostic abstraction for the OLED input controller, which is the "
+    "Seesaw gamepad, ANO encoder, GPIO rotary encoder, GT911 touchscreen or the IMU (taps and tilt) -- chosen at compile time via "
     "INPUT_DEVICE_TYPE and mutually exclusive, so exactly one driver is present per "
     "firmware. These commands operate on whichever driver was built in: openinput "
     "starts it, closeinput stops it, inputautostart [on|off] persists boot auto-start, "
@@ -370,6 +371,20 @@ static constexpr CommandModule gCommandModules[] = {
     "the buttons, the seesaw's change flags (so taps shorter than one poll are kept) and the "
     "wheel's detents in one checked transaction. Mutually exclusive at build time with "
     "the Seesaw gamepad.", anoEncoderCommands, &anoEncoderCommandsCount, CMD_MODULE_SENSOR, []() { return gAnoEncoderConnected; } },
+#endif
+#if ENABLE_IMU_INPUT
+  { "imuinput",   "IMU as the input device — taps are buttons, tilt is the joystick", "The motion sensor used as the OLED navigation "
+    "input (INPUT_DEVICE_TYPE 5; it needs the Adafruit 4517, whose chip detects taps). Tap the device: one tap is A, two are B, "
+    "three are Y, four are X; the button arrives once no further tap has followed for the tap window (imuinputtapms "
+    "<200..800>, default 350 ms). Five taps take the device's present pose as the joystick's centre, as does "
+    "imuinputzero; six or more taps do nothing. Tilting the device away from that centre pose by more than the tilt angle "
+    "(imuinputtilt <8..40> degrees, default 15) deflects the joystick left, right, up or down, one direction at a time, "
+    "and returning releases it; a lean of more than 60 degrees is taken as a new pose and centres the joystick until the "
+    "next re-centre. imuinputswapxy, imuinputinvertx and imuinputinverty [on|off|toggle] fit the directions to how the "
+    "sensor sits in its enclosure. A sustained shake is START (imuinputshake [on|off]); SELECT has no gesture. "
+    "imuinputread [json] shows the state, the lean in degrees, the joystick and the taps being counted. The "
+    "open/close/autostart lifecycle lives under the input module: openinput also opens the IMU and holds it open "
+    "(closeimu refuses while the input runs), closeinput leaves the IMU open.", imuInputCommands, &imuInputCommandsCount, CMD_MODULE_SENSOR, []() { return gInputConnected; } },
 #endif
 #if ENABLE_APDS_SENSOR
   { "apds",       "APDS9960 color, proximity, gesture sensor", "The APDS9960 is a combined RGB color, proximity, and gesture sensor. openapds "
@@ -560,7 +575,8 @@ static constexpr CommandModule gCommandModules[] = {
     "of each job own enabled flag. Jobs may also include an optional condition "
     "expression, and conditional commands use an IF <expr> THEN <command> [ELSE "
     "<command>] form (e.g. IF temp>75 THEN ledcolor red). Conditions can check sensors "
-    "(temp, distance, light, motion), time (time, hour, day, ntp), system state "
+    "(temp, distance, light, motion, and the IMU: imu_pitch, imu_roll, imu_tilt, imu_pose, "
+    "imu_tap_age), time (time, hour, day, ntp), system state "
     "(battery, heap, psram, fsfree, uptime, chiptemp), connectivity (wifi, rssi, peers, "
     "ble), ESP-NOW/bond (espnow, bond_mode, bond_paired, bond_online, bond_synced, "
     "bond_role, bond_rssi, bond_peer_heap, bond_peer_uptime, pairmode, pairmode_secs, "

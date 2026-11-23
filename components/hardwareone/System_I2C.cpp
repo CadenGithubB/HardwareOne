@@ -15,6 +15,7 @@
 #include "i2csensor_rda5807.h"
 #include "System_BuildConfig.h"
 #include "Input_GPIOEncoder.h"
+#include "Input_IMU.h"
 #include "System_Command.h"
 #include "System_Debug.h"
 #include "System_FirstTimeSetup.h"
@@ -335,6 +336,14 @@ const char* i2cModuleNameForDeviceType(I2cDeviceType type) {
     if (i2cSensors[i].deviceType == type) return i2cSensors[i].moduleName;
   }
   return nullptr;
+}
+
+size_t i2cModuleDeviceNamesJs(const char* moduleName, char* out, size_t cap) {
+  return i2cModuleDeviceNamesJs(i2cSensors, i2cSensorsCount, moduleName, out, cap);
+}
+
+const char* i2cModuleFirstDeviceName(const char* moduleName) {
+  return i2cModuleFirstDeviceName(i2cSensors, i2cSensorsCount, moduleName);
 }
 
 // Initialize queue mutex (called from setup())
@@ -771,6 +780,8 @@ const char* cmd_sensorstart_queued(I2cDeviceType sensor, const char* displayName
                                    const char* hint, uint8_t n) {
 #if ENABLE_GPIO_ENCODER
   if (sensor == I2C_DEVICE_INPUT) return "Error: GPIO input is not an I2C device; use openinput";
+#elif ENABLE_IMU_INPUT
+  if (sensor == I2C_DEVICE_INPUT) return "Error: IMU input is not an I2C device of its own; use openinput";
 #endif
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
 
@@ -872,6 +883,16 @@ static bool sensorStopHasWork(I2cDeviceType sensor, uint8_t n) {
   if (sensor == I2C_DEVICE_RTC && gRtcConnected) return true;
 #endif
   return false;
+}
+
+bool i2cSensorStopHasWork(I2cDeviceType sensor, uint8_t n) { return sensorStopHasWork(sensor, n); }
+
+bool i2cSensorStopPending(I2cDeviceType sensor, uint8_t n) {
+  // As requestSensorStop(): with the bus disabled nothing is queued, and the
+  // manager is not allocated to find that out.
+  if (!gI2cBusRunning) return false;
+  I2cDeviceManager* mgr = I2cDeviceManager::getInstance();
+  return mgr && mgr->hasPendingDeviceStop(sensor, n);
 }
 
 // Command wrapper for a queued stop: the one place that renders its outcome.
@@ -2330,7 +2351,14 @@ static void buildSensorsJson(JsonDocument& doc, bool includeData = true) {
   addSensorEntry(arr, "tof",      "VL53L4CX distance",      SENSOR_KIND_VECTOR, gTofRunning, isSensorConnected("tof"), includeData ? tofBuildDataJson : nullptr);
 #endif
 #if ENABLE_IMU_SENSOR
-  addSensorEntry(arr, "imu",      "BNO055 orientation",     SENSOR_KIND_VECTOR, gImuRunning, isSensorConnected("imu"), includeData ? imuBuildDataJson : nullptr);
+  // Named after the build's chip (a literal: the document keeps the pointer).
+  // The reading is the local form: "hdg" says whether its yaw is a heading.
+#if ENABLE_IMU_LSM6DSOX
+  static const char kImuSensorName[] = "LSM6DSOX orientation";
+#else
+  static const char kImuSensorName[] = "BNO055 orientation";
+#endif
+  addSensorEntry(arr, "imu",      kImuSensorName,           SENSOR_KIND_VECTOR, gImuRunning, isSensorConnected("imu"), includeData ? imuBuildLocalJson : nullptr);
 #endif
 #if ENABLE_GPS_SENSOR
   addSensorEntry(arr, "gps",      "PA1010D GPS",            SENSOR_KIND_VECTOR, gGpsRunning, isSensorConnected("gps"), includeData ? gpsBuildDataJson : nullptr);
@@ -2355,6 +2383,8 @@ static void buildSensorsJson(JsonDocument& doc, bool includeData = true) {
   addSensorEntry(arr, "input", "GT911 single touch", SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, nullptr);
 #elif ENABLE_GPIO_ENCODER
   addSensorEntry(arr, "input",    "GPIO rotary encoder",    SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? gpioEncoderBuildDataJson : nullptr);
+#elif ENABLE_IMU_INPUT
+  addSensorEntry(arr, "input",    "IMU taps and tilt",      SENSOR_KIND_SCALAR, gInputRunning, gInputConnected, includeData ? imuInputBuildDataJson : nullptr);
 #endif
 #if ENABLE_THERMAL_SENSOR
   addSensorEntry(arr, "thermal",  "MLX90640 thermal",       SENSOR_KIND_STREAM, gThermalRunning, isSensorConnected("thermal"), includeData ? thermalBuildSummaryJson : nullptr);
@@ -2462,7 +2492,7 @@ const char* cmd_sensorinfo(const String& argsInput) {
   args.trim();
 
   if (args.length() == 0) {
-    return "Usage: sensorinfo <sensor_name>\nExample: sensorinfo BNO055";
+    return "Usage: sensorinfo <sensor_name>\nExample: sensorinfo DS3231";
   }
 
   // Find sensor by name (case insensitive)
@@ -2567,6 +2597,8 @@ static const SensorHeapCost sensorHeapCosts[] = {
   { "APDS Gesture",   "apds",    &gSettings.apdsAutoStart,     4 },  // APDS9960: gesture buffers
 #if ENABLE_GPIO_ENCODER
   { "GPIO Encoder",   "input",   &gSettings.inputAutoStart,    4 },
+#elif ENABLE_IMU_INPUT
+  { "IMU Input",      "input",   &gSettings.inputAutoStart,    1 },  // no task or buffer of its own (the IMU is its own row)
 #elif ENABLE_ANO_ENCODER
   { "ANO Encoder",    "input",   &gSettings.inputAutoStart,    2 },  // Adafruit ANO seesaw: minimal
 #else
@@ -2968,7 +3000,7 @@ const CommandEntry i2cCommands[] = {
   
   // Device Registry
   { "sensors", "List I2C sensors [filter]", false, cmd_sensors, "Usage: sensors [filter] - filter by name, description, or manufacturer\n       sensors json [brief] - live state (+readings; 'brief' = state only, no data)\nExample: sensors temperature, sensors json brief" },
-  { "sensorinfo", "Sensor details: <name>", false, cmd_sensorinfo, "Usage: sensorinfo <sensor_name>\nExample: sensorinfo BNO055" },
+  { "sensorinfo", "Sensor details: <name>", false, cmd_sensorinfo, "Usage: sensorinfo <sensor_name>\nExample: sensorinfo DS3231" },
   { "devices", "Show discovered I2C device registry. (add 'json' for JSON output)", false, cmd_devices },
   { "discover", "Re-scan and register I2C devices.", false, cmd_discover },
   { "devicefile", "Show device registry JSON file.", false, cmd_devicefile },
@@ -3055,6 +3087,15 @@ static bool& sensorStopAwaitingCleanup(uint8_t slot) {
 static void applySensorStop(I2cDeviceType sensor, uint8_t n) {
   const uint8_t slot = i2cSlot(sensor, n);
   if (slot == kI2cNoSlot) return;
+#if ENABLE_IMU_SENSOR
+  // 'closeimu' refuses while a consumer holds the IMU, but it looks when it
+  // is issued: a hold taken after this stop was queued is honoured here, and
+  // the stop is dropped with the IMU (and a start on its way) untouched.
+  if (sensor == I2C_DEVICE_IMU && imuHolderCount() > 0) {
+    BROADCAST_PRINTF("[IMU] Close dropped: the IMU is in use now and stays open ('imustatus' names what uses it).");
+    return;
+  }
+#endif
   // Only a sensor that was running, still has a task, was initialized without
   // one (FM tune/boot, RTC), or had an admitted start this stop cancels gets a
   // cleanup latch and a stop event. Stopping an idle sensor publishes nothing.

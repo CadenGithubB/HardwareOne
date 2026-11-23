@@ -513,8 +513,8 @@ static uint16_t mqttCompiledSections() {
 #endif
   // The input builder ladder of System_ESPNow_Sensors.cpp (one device per
   // build; GT911 touch has no builder).
-#if ENABLE_GAMEPAD_SENSOR
-  sections |= mqttpayload::kInputPad;
+#if ENABLE_GAMEPAD_SENSOR || ENABLE_IMU_INPUT
+  sections |= mqttpayload::kInputPad;  // the IMU input travels in the gamepad's shape
 #elif ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER
   sections |= mqttpayload::kInputEncoder;
 #endif
@@ -1538,8 +1538,10 @@ void publishMqttSensorData() {
   int (*const inputBuilder)(char*, size_t) = anoEncoderBuildDataJson;
 #elif ENABLE_GPIO_ENCODER
   int (*const inputBuilder)(char*, size_t) = gpioEncoderBuildDataJson;
+#elif ENABLE_IMU_INPUT
+  int (*const inputBuilder)(char*, size_t) = imuInputBuildDataJson;
 #endif
-#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER
+#if ENABLE_GAMEPAD_SENSOR || ENABLE_ANO_ENCODER || ENABLE_GPIO_ENCODER || ENABLE_IMU_INPUT
   if (gSettings.mqttPublishInput && gInputRunning && gInputConnected &&
       !mqttAddBuilt(doc, "input", inputBuilder, jsonBuf, cap)) dropped |= 1u << 7;
 #endif

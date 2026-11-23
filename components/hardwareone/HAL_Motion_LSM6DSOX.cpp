@@ -157,7 +157,10 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, Moti
       [&](uint8_t* src, uint8_t* data, bool& srcRead) -> bool {
         return i2cTaskWithTimeout(bus, address, kClockHz, kReadLockMs, [&]() -> bool {
           srcRead = readRegs(*wire, address, kLsm6dsoxRegAllIntSrc, src, kLsm6dsoxIntSrcBytes);
-          return srcRead && readRegs(*wire, address, kLsm6dsoxRegOutTemp, data, kLsm6dsoxDataBytes);
+          // An all-zero burst (the chip lost power and came back in
+          // power-down) fails the transaction, so it counts as a device error.
+          return srcRead && readRegs(*wire, address, kLsm6dsoxRegOutTemp, data, kLsm6dsoxDataBytes) &&
+                 lsm6dsoxBurstAlive(data);
         });
       },
       reading, magFailed);
@@ -203,6 +206,8 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, Moti
   out.yaw = euler.yaw;
   out.pitch = euler.pitch;
   out.roll = euler.roll;
+  mahonyGravity(sState.filter, out.gravity);
+  out.hasGravity = true;
   out.ready = true;
   return true;
 }
@@ -224,6 +229,21 @@ void motionBackendStop() {
     i2cTransactionNackTolerant(bus, secondAddress, kClockHz, kReadLockMs, [&]() {
       writeRegs(*wire, secondAddress, kLis3mdlRegCtrl3, &kLis3mdlPowerDown, 1);
     });
+  }
+}
+
+// Tap and free fall come from the LSM6DSOX; no heading until the magnetometer
+// calibration lands. The gyro offset is this start's (flags the IMU task
+// writes; read here without a lock).
+void motionBackendStatus(MotionBackendStatus& out) {
+  out = MotionBackendStatus{};
+  out.hasHwTap = out.hasHwFreefall = true;
+  out.hasMag = true;
+  out.hasHeading = false;
+  out.measuresGyroOffset = true;
+  if (sState.started) {
+    out.gyroOffsetDone = sState.bias.done;
+    out.gyroOffsetStill = sState.bias.done && sState.bias.still;
   }
 }
 

@@ -9,7 +9,7 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${hw_cfg_file}")
 # compile errors) and easy to spot in build output.
 set(HW_CFG_I2C_FEATURE_LEVEL 0)
 set(HW_CFG_DISPLAY_TYPE 0)
-set(HW_CFG_INPUT_DEVICE_TYPE 0)  # 0 = NONE; header values 1/2 select a driver
+set(HW_CFG_INPUT_DEVICE_TYPE 0)  # 0 = NONE; header values 1..5 select a driver
 set(HW_CFG_ENABLE_MQTT 0)
 set(HW_CFG_ENABLE_SPEAKER 0)
 set(HW_CFG_ENABLE_LLM_BACKEND 0)         # the LLM feature (registry/chat/commands/surfaces)
@@ -442,6 +442,12 @@ endif()
 # GPIO input and SPI display are independent of the optional I2C bus.
 if(HW_CFG_INPUT_DEVICE_TYPE EQUAL 3)
     list(APPEND hardwareone_srcs Input_GPIOEncoder.cpp)
+endif()
+# The IMU as the input device: no chip of its own, it reads the motion layer
+# (System_BuildConfig.h refuses the build when the IMU is not in it).
+if(HW_CFG_INPUT_DEVICE_TYPE EQUAL 5)
+    list(APPEND hardwareone_srcs Input_IMU.cpp)
+    message(STATUS "Input device: IMU taps and tilt")
 endif()
 if(HW_CFG_DISPLAY_TYPE EQUAL 4)
     list(APPEND hardwareone_srcs HAL_Display_P4Eye.cpp)

@@ -181,6 +181,15 @@ esp_err_t webSendBodyReadError(httpd_req_t* req, WebBodyStatus status, bool json
 // sendJsonError sends {"success":false,"error":<message>}.
 esp_err_t sendJsonError(httpd_req_t* req, const String& message);
 
+// One script statement that tells a page which devices of the scan are this
+// build's IMU, from the device table (the "imu" module's rows), so no page
+// names a chip:
+//   window.__hwImu={names:{'LSM6DSOX':1,'LIS3MDL':1},part:'LSM6DSOX',label:'IMU (LSM6DSOX)'};
+//   window.__hwImu.has=function(n){...};   // n is one of names (an own key)
+// A build without the IMU still names the table's row (a chip that is found
+// but not compiled in is reported). Send it inside a <script> element.
+void webStreamImuIdentityJs(httpd_req_t* req);
+
 #if ENABLE_HTTPS
 // The HTTPS certificate and private key the web server presents. Both the
 // main server and the restore-only server read them through this one loader.

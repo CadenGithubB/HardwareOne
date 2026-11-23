@@ -10,6 +10,9 @@
 #if ENABLE_ANO_ENCODER
 #include "i2csensor_ano_encoder.h"
 #endif
+#if ENABLE_IMU_INPUT
+#include "HAL_Motion.h"  // gImuRunning: the openinput reply says whether the IMU is open yet
+#endif
 #if ENABLE_OLED_INPUT
 #include "System_Command.h"
 #include "System_Settings.h"
@@ -53,12 +56,28 @@ size_t inputCacheStorageBytes() {
 #endif
 }
 
+#if ENABLE_IMU_INPUT
+// The IMU input publishes on every motion sample (20 ms) and has no task of
+// its own to notice when the samples stop (a paused bus, the IMU closed). Its
+// last deflection must not go on scrolling a menu, so a reading older than
+// this is handed out centred and released. Latched presses are kept.
+static constexpr uint32_t kImuInputStaleMs = 250;
+static void imuInputExpire(InputCache& reading) {
+  if (static_cast<uint32_t>(millis() - reading.lastUpdate) <= kImuInputStaleMs) return;
+  reading.joyX = reading.joyY = JOYSTICK_CENTER;
+  reading.buttons = UINT32_MAX;
+}
+#endif
+
 bool inputCacheSnapshot(InputCache& out, uint32_t timeoutMs) {
   out = {};
 #if ENABLE_OLED_INPUT
   SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(timeoutMs), "input.snapshot");
   if (!guard.held) return false;
   out = sInputCache;
+#if ENABLE_IMU_INPUT
+  imuInputExpire(out);
+#endif
   return true;
 #else
   (void)timeoutMs;
@@ -73,6 +92,9 @@ bool inputConsumeSnapshot(InputCache& out, uint32_t timeoutMs) {
   if (!guard.held || !gInputRunning || !sInputCache.dataValid) return false;
   out = sInputCache;
   sInputCache.buttonPressedAccum = 0;
+#if ENABLE_IMU_INPUT
+  imuInputExpire(out);
+#endif
   return true;
 #else
   (void)timeoutMs;
@@ -132,15 +154,15 @@ static void publishInputLocked(uint32_t buttons, int joyX, int joyY,
 
 bool inputPublishState(uint32_t buttons, int joyX, int joyY,
                        uint32_t pressedEdges, bool activity, unsigned long stamp,
-                       uint32_t navHidden) {
+                       uint32_t navHidden, uint32_t waitMs) {
 #if ENABLE_OLED_INPUT
-  SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(50), "input.publish");
+  SensorCacheGuard guard(sInputCacheMutex, pdMS_TO_TICKS(waitMs), "input.publish");
   if (!guard.held) return false;
   publishInputLocked(buttons, joyX, joyY, pressedEdges, activity, stamp, navHidden);
   return true;
 #else
   (void)buttons; (void)joyX; (void)joyY; (void)pressedEdges; (void)activity; (void)stamp;
-  (void)navHidden;
+  (void)navHidden; (void)waitMs;
   return false;
 #endif
 }
@@ -178,6 +200,8 @@ bool inputPublishGamepadState(uint32_t buttons, int joyX, int joyY,
 // Runtime inputSetControllerType() can still change this later.
 #if INPUT_TYPE == INPUT_TYPE_GT911_TOUCH
 static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_GT911_TOUCH;
+#elif INPUT_TYPE == INPUT_TYPE_IMU
+static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_IMU;
 #elif INPUT_TYPE == INPUT_TYPE_GPIO_ENCODER
 static InputControllerType gCurrentControllerType = INPUT_CONTROLLER_GPIO_ENCODER;
 #elif INPUT_TYPE == INPUT_TYPE_ANO_ENCODER
@@ -226,6 +250,12 @@ static const uint32_t gGpioEncoderMapping[] = {
   1u, 2u, 4u, 8u, ENABLE_GPIO_ENCODER_BUTTONS ? 16u : 0u, 32u
 };
 
+// IMU input (Input_IMUCore.h) publishes HAL logical bit positions: one tap
+// = A, two = B, three = Y, four = X, a shake = START. SELECT has no gesture.
+static const uint32_t gImuInputMapping[] = {
+  1u, 2u, 4u, 8u, 16u, 0u
+};
+
 // ANO rotary encoder button mappings. The 4 directional buttons are action
 // buttons; the wheel does the up/down navigation. Layout:
 //   IN     → A (primary / type char)
@@ -270,6 +300,8 @@ void inputAbstractionInit() {
   // Set default controller type based on compile-time INPUT_TYPE
 #if INPUT_TYPE == INPUT_TYPE_GT911_TOUCH
   gCurrentControllerType = INPUT_CONTROLLER_GT911_TOUCH;
+#elif INPUT_TYPE == INPUT_TYPE_IMU
+  gCurrentControllerType = INPUT_CONTROLLER_IMU;
 #elif INPUT_TYPE == INPUT_TYPE_SEESAW_GAMEPAD
   gCurrentControllerType = INPUT_CONTROLLER_GAMEPAD_SEESAW;
 #elif INPUT_TYPE == INPUT_TYPE_CLICK_WHEEL
@@ -323,6 +355,9 @@ uint32_t inputGetButtonMask(InputButton button) {
 
     case INPUT_CONTROLLER_GPIO_ENCODER:
       return gGpioEncoderMapping[button];
+
+    case INPUT_CONTROLLER_IMU:
+      return gImuInputMapping[button];
 
     case INPUT_CONTROLLER_CUSTOM:
       return gCustomMapping[button];
@@ -448,7 +483,7 @@ uint32_t inputConsumeButtonPresses(uint32_t& previousActiveLow, bool& initialize
 // Driver-internal CLIs that dump raw device state stay in their own driver
 // files (gamepadread, anoencoderread).
 
-#if !ENABLE_GPIO_ENCODER
+#if !ENABLE_INPUT_DIRECT_START
 static const char* inputDeviceLabel() {
 #if ENABLE_GT911_TOUCH
   return "GT911 Touch";
@@ -492,6 +527,15 @@ static const char* cmd_openinput(const String& argsInput) {
       return "Error: GPIO encoder task could not be created. Free memory and retry openinput.";
   }
   return "[Input] GPIO encoder started";
+#elif ENABLE_IMU_INPUT
+  if (gInputRunning && gInputConnected) {
+    return "Error: IMU input is already running. Stop it first with 'closeinput' to restart it.";
+  }
+  if (const char* why = imuInputStartReply()) return why;
+  return gImuRunning && gImuConnected
+             ? "[Input] IMU input started: tap for buttons, tilt for the joystick; to read it, run 'imuinputread'"
+             : "[Input] IMU input started; the IMU is opening and taps and tilt work from its first sample "
+               "(to read it, run 'imuinputread')";
 #else
   // The device starts asynchronously and this command returns no button state —
   // point at the driver read command so the next step is to read live input.
@@ -516,6 +560,13 @@ static const char* cmd_closeinput(const String& argsInput) {
   }
   gpioEncoderStop();
   return gInputRunning ? "Error: GPIO encoder is busy; retry closeinput" : "[Input] GPIO encoder stopped";
+#elif ENABLE_IMU_INPUT
+  if (!gInputRunning) {
+    return "Error: IMU input is not running. Start it with 'openinput'.";
+  }
+  imuInputStop();
+  return gInputRunning ? "Error: IMU input is busy; retry closeinput"
+                       : "[Input] IMU input stopped. The IMU stays open; close it with 'closeimu'.";
 #else
   // Same replies as every sensor stop: an Error when the input is not running
   // (bus disabled or nothing open), an Error when the request queue is missing.
@@ -548,6 +599,11 @@ static const char* cmd_inputdevicepollms(const String& argsInput) {
     return "Error: The GPIO encoder has no poll interval. Nothing to set.";
   }
   return "[Input] GPIO encoder uses interrupts and a fixed 5 ms switch sample; poll interval applies to I2C input only";
+#elif ENABLE_IMU_INPUT
+  if (CommandArgs(argsInput).count() > 0) {
+    return "Error: IMU input has no poll interval of its own: it reads every sample of the IMU. Nothing to set.";
+  }
+  return "[Input] IMU input reads every sample of the IMU (20 ms on the Adafruit 4517)";
 #else
   CommandArgs a(argsInput);
   if (a.count() == 0) {
@@ -605,7 +661,7 @@ const size_t inputCommandsCount = sizeof(inputCommands) / sizeof(inputCommands[0
 // rotation and swaps) live in anoEncoderSettingsModule.
 static const SettingEntry inputSettingEntries[] = {
   { "inputAutoStart",    SETTING_BOOL, &gSettings.inputAutoStart,     0, 0, nullptr, 0,  1,    "Auto-start after boot", nullptr, false, nullptr, "inputautostart" },
-#if !ENABLE_GPIO_ENCODER && !ENABLE_GT911_TOUCH
+#if !ENABLE_INPUT_DIRECT_START && !ENABLE_GT911_TOUCH
   { "inputDevicePollMs", SETTING_INT,  &gSettings.inputDevicePollMs, 90, 0, nullptr, 10, 1000, "Poll Interval (ms)",   nullptr, false, nullptr, "inputdevicepollms" },
 #endif
 };
@@ -620,7 +676,7 @@ extern const SettingsModule inputSettingsModule = {
   inputSettingEntries,
   sizeof(inputSettingEntries) / sizeof(inputSettingEntries[0]),
   isInputConnected,
-  "Local display input device (Seesaw, ANO or GPIO encoder)"
+  "Local display input device (gamepad, encoder, touch or IMU)"
 };
 
 #endif // ENABLE_OLED_INPUT

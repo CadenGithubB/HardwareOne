@@ -6,7 +6,9 @@
 #include "OLED_Display.h"
 #include "OLED_Utils.h"
 #include "HAL_Motion.h"
+#include "HAL_MotionCore.h"  // motionCompassPoint
 #include <Adafruit_SSD1306.h>
+#include <math.h>
 
 // IMU OLED display function - shows the latest reading
 static void displayImuActions() {
@@ -22,34 +24,70 @@ static void displayImuActions() {
     return;
   }
 
-  // Show orientation and acceleration data from cache
+  // The latest reading from the cache: the chip, the angles, the
+  // acceleration, and a heading line only when yaw is a heading.
   ImuCache reading{};
   if (imuCacheSnapshot(reading)) {
+    char line[32];
+    if (!reading.imuDataValid) {
+      // Open, no reading yet (the 4517 measures its gyro offset first).
+      oledDisplay->setCursor(0, y);
+      oledDisplay->println(imuBackendName());
+      oledDisplay->println("Waiting for data...");
+      return;
+    }
+    // Row 1: which chip, and its temperature.
+    snprintf(line, sizeof(line), "%s %dC", imuBackendName(), (int)reading.imuTemp);
     oledDisplay->setCursor(0, y);
-    oledDisplay->print("Y:");
-    oledDisplay->print((int)reading.oriYaw);
-    oledDisplay->print(" P:");
-    oledDisplay->print((int)reading.oriPitch);
-    oledDisplay->print(" R:");
-    oledDisplay->println((int)reading.oriRoll);
+    oledDisplay->println(line);
     y += 10;
 
+    // Row 2: the angles. Yaw is shown in 0..359 (at most three characters),
+    // whatever the mounting correction made of it. Without a heading, yaw
+    // counts from the IMU's start: it goes last and is marked relative, with
+    // the shorter mark when the row would pass the panel's 21 characters
+    // (pitch and roll both at -100 or beyond: the correction's extreme modes).
+    const int yawShown = motionYawForDisplay(reading.oriYaw);
+    if (reading.hasHeading) {
+      snprintf(line, sizeof(line), "Y:%d P:%d R:%d", yawShown, (int)reading.oriPitch, (int)reading.oriRoll);
+    } else {
+      const int n = snprintf(line, sizeof(line), "P:%d R:%d Yrel:%d", (int)reading.oriPitch,
+                             (int)reading.oriRoll, yawShown);
+      if (n > kMotionOledColumns) {
+        snprintf(line, sizeof(line), "P:%d R:%d Yr:%d", (int)reading.oriPitch, (int)reading.oriRoll, yawShown);
+      }
+    }
     oledDisplay->setCursor(0, y);
-    oledDisplay->print("Ax:");
-    oledDisplay->print(reading.accelX, 1);
-    oledDisplay->print(" Ay:");
-    oledDisplay->println(reading.accelY, 1);
+    oledDisplay->println(line);
     y += 10;
 
+    // Row 3: acceleration, m/s^2: one decimal while the row fits (up to
+    // about 10 g on every axis), else whole numbers.
+    if (snprintf(line, sizeof(line), "A %.1f %.1f %.1f", (double)reading.accelX, (double)reading.accelY,
+                 (double)reading.accelZ) > kMotionOledColumns) {
+      snprintf(line, sizeof(line), "A %.0f %.0f %.0f", (double)reading.accelX, (double)reading.accelY,
+               (double)reading.accelZ);
+    }
     oledDisplay->setCursor(0, y);
-    oledDisplay->print("Az:");
-    oledDisplay->print(reading.accelZ, 1);
+    oledDisplay->println(line);
     y += 10;
 
-    oledDisplay->setCursor(0, y);
-    oledDisplay->print("Temp:");
-    oledDisplay->print(reading.imuTemp, 1);
-    oledDisplay->print("C");
+    // Row 4: the heading with its compass point, the magnetometer's
+    // calibration when the chip reports one (BNO055: c0..c3) and the field
+    // strength. Only with a heading.
+    if (reading.hasHeading) {
+      int n = snprintf(line, sizeof(line), "Hdg:%d %s", yawShown, motionCompassPoint(reading.oriYaw));
+      if (reading.hasCal && n > 0 && n < (int)sizeof(line)) {
+        n += snprintf(line + n, sizeof(line) - n, " c%u", (unsigned)(reading.cal & 0x03));
+      }
+      if (reading.hasMag && n > 0 && n < (int)sizeof(line)) {
+        const float field = sqrtf(reading.magX * reading.magX + reading.magY * reading.magY +
+                                  reading.magZ * reading.magZ);
+        snprintf(line + n, sizeof(line) - n, " %duT", (int)field);
+      }
+      oledDisplay->setCursor(0, y);
+      oledDisplay->println(line);
+    }
   } else {
     oledDisplay->setCursor(0, y);
     oledDisplay->println("Reading...");

@@ -959,6 +959,9 @@ IF WIFI=CONNECTED THEN PRINT online
 IF DAY=SAT THEN ledbrightness 30
 IF HOUR>=22 THEN oleddim
 IF TAGS CONTAINS outdoor THEN PRINT Outdoor device
+IF IMU_POSE=FACE-DOWN THEN ledcolor encoder red
+IF IMU_TILT>30 THEN PRINT tilted
+IF IMU_TAP_AGE<5 THEN ledcolor encoder green
 ```
 
 Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum variables compare with `=`, `!=`, `CONTAINS`. Values are case-insensitive.
@@ -967,6 +970,9 @@ Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum vari
 |---|---|---|---|
 | Sensors | `TEMP` `DISTANCE` `LIGHT` | numeric | thermal C / ToF cm / ambient light |
 | Sensors | `MOTION` | enum | `DETECTED` / `NONE`, from the STHS34PF80 presence sensor's motion flag |
+| Sensors | `IMU_PITCH` `IMU_ROLL` `IMU_TILT` | numeric | the motion sensor's tilt, degrees (after the mounting correction); `IMU_TILT` is the larger of the two, without its sign |
+| Sensors | `IMU_POSE` | enum | `FACE-UP` `FACE-DOWN` `PORTRAIT` `PORTRAIT-INV` `LANDSCAPE-R` `LANDSCAPE-L`: the pose the last `imu_orientation` event announced (held for 3 readings and at least 200 ms); `IMU_POSE=FACE-DOWN` is "flipped over" |
+| Sensors | `IMU_TAP_AGE` | numeric | seconds since the last tap or knock, for an hour after it; false before the first tap after `openimu` and once the tap is more than an hour old |
 | Time | `TIME` | enum | `MORNING` `AFTERNOON` `EVENING` `NIGHT`; false until the clock holds a real date |
 | Time | `HOUR` | numeric | local hour, 0-23; false until the clock holds a real date |
 | Time | `DAY` | enum | `SUN` `MON` `TUE` `WED` `THU` `FRI` `SAT`; false until the clock holds a real date |
@@ -992,6 +998,13 @@ Numeric variables compare with `>`, `<`, `=`, `>=`, `<=`, `!=`. String/enum vari
 | ESP-NOW | `ROOM` `ZONE` `TAGS` | string | THIS device's metadata (`gSettings.espnowRoom/Zone/Tags`); `NONE` if unset |
 
 A variable whose subsystem is disabled or absent evaluates to false, so the condition simply never matches.
+
+The `IMU_` variables need the motion sensor open (`openimu`, or `imuautostart on`) and a current
+reading; until then they are false, and they turn false again when the sensor stops delivering
+readings (older than two `imudevicepollms` periods and a second). They are states, checked when the automation's trigger is due: to act
+the moment the device is tapped or turned over, use the `imu_tap` and `imu_orientation` event
+triggers (`type=event on=imu_orientation match=face-down`). There is no compass-heading variable
+yet.
 
 Example - leave-home radio power save (create a map waypoint named `Home` first; keep GPS on and that map loaded):
 
@@ -2380,10 +2393,13 @@ toftransitionms <0-5000>        - Reading transition time
 
 ```
 openimu                         - Start IMU sensor
-closeimu                        - Stop IMU sensor
+closeimu                        - Stop IMU sensor (refused, with who, while something that
+                                  needs the IMU open is using it; 'imustatus' names it)
 imuread                         - Read orientation data
 imuautostart [on|off]           - Auto-start on boot
 imuactions                      - Show action detection state (tap, shake, etc.)
+imustatus [json]                - The chip, its bus and addresses, tap on the chip, heading
+                                  or relative yaw, and how the gyroscope offset was taken
 imupollingms <50-2000>          - UI polling interval
 imudevicepollms <50-1000>       - Sensor hardware poll interval
 imuorientationmode <0-8>        - Orientation mode
@@ -2410,6 +2426,13 @@ chips down. The magnetometer is read (`mag` in
 `imuread json`) but not calibrated yet, so yaw counts from the start and drifts slowly (`imuread`
 says "Yaw (relative)"); pitch and roll are absolute. Pitch is positive when the board's +X end
 rises, roll when its +Y edge rises, and yaw grows clockwise seen from above.
+
+Every surface marks such a yaw: the OLED IMU page shows `Yrel:` and no heading line, the web card
+"Yaw (relative)", the G2 lens leaves yaw out of its row and writes `rel` in its readout, and
+`imuread json` carries `"hdg":false`. `imustatus` says which chip the build reads, where it is, and
+whether the gyroscope offset of this start was measured on a still board (`Gyro offset: measured
+while the board was still`) or not taken because it moved; in that case hold the board still and
+run `closeimu`, then `openimu`.
 </details>
 
 <details>
