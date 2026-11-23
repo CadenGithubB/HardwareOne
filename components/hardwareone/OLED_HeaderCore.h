@@ -34,6 +34,7 @@
 #include <string.h>
 
 #include "OLED_TextFieldCore.h"  // oled_text::flatten (the shared sanitizer), 6x8 cell metrics
+#include "OLED_Layout.h"         // the portrait grid (oled_layout::portrait)
 
 // How a title that does not fit is cut. End keeps the start ("Set>notif…");
 // KeepPrefix keeps the whole prefix and the END of the text ("Files>…gs/boot"),
@@ -455,5 +456,98 @@ inline void draw(Gfx& g, const Frame& f, int y, uint16_t fg, uint16_t bg) {
 }
 
 }  // namespace kb
+
+// ---- portrait (64 x 128, `oledrotation 90|270`) ----------------------------------
+// The agreed hybrid layout: a status row of fixed slots (y 0-8) that never
+// move on any screen, Busy x1, Rec x11, Notify (bell x19, count x26) and
+// Power right-aligned to end on x62; the title on its own row (y 9-18, 10
+// cells from x1, cut by oled_layout::fitPortraitTitle: whole, then the leaf,
+// then 9 glyphs and the one-cell mark; a path keeps its tail); the rule on
+// y19. There is no Context slot in portrait (a page counter has no room).
+// The keyboard profile keeps Busy, Rec and Notify, shows the keyboard page in
+// the Power slot and the prompt on the title row; its preview box is the rule.
+namespace tall {
+
+namespace P = oled_layout::portrait;
+constexpr int kHeight = P::kHeaderHeight;  // rows 0-19
+
+struct Frame {
+  char power[8];   // or the keyboard page
+  char notify;     // '1'-'9', '+', '\0'
+  bool busy;
+  bool rec;
+  char title[P::kTitleCells + 1];
+  int ellipsisAt;  // cell of the mark, -1 = none
+  int titleLen;
+};
+
+inline void composeTitle(const char* prefixRaw, const char* textRaw, bool keepTail, Frame& f) {
+  char prefix[16];
+  char text[oled_text::kLabelMax];
+  const size_t pLen = oled_text::flatten(prefixRaw ? prefixRaw : "", prefix, sizeof prefix);
+  const size_t tLen = oled_text::flatten(textRaw ? textRaw : "", text, sizeof text);
+  f.titleLen = oled_layout::fitPortraitTitle(prefix, pLen, text, tLen, P::kTitleCells, keepTail, f.title,
+                                             f.ellipsisAt);
+}
+
+inline void compose(const OledHeaderSpec& spec, const OledHeaderStatus& status, const char* modeName,
+                    Frame& f) {
+  f.power[0] = '\0';
+  f.notify = '\0';
+  if (!(spec.hide & (1u << kPower)) && status.power[0]) {
+    const size_t n = strnlen(status.power, sizeof status.power - 1);
+    memcpy(f.power, status.power, n);
+    f.power[n] = '\0';
+  }
+  if (!(spec.hide & (1u << kNotify))) f.notify = notifyGlyph(status.unread);
+  f.busy = status.busy;
+  f.rec = status.rec;
+  composeTitle(spec.prefix, spec.text ? spec.text : (modeName ? modeName : ""),
+               spec.cut == OledTitleCut::KeepPrefix, f);
+}
+
+// The keyboard's top rows: the prompt on the title row, the page in the
+// Power slot (at most 7 glyphs), Busy, Rec and Notify in their slots.
+inline void composeKeyboard(const char* prompt, const char* mode, bool rec, bool busy, uint8_t unread,
+                            Frame& f) {
+  const size_t n = oled_text::flatten(mode ? mode : "", f.power, sizeof f.power);
+  f.power[n] = '\0';
+  f.notify = notifyGlyph(unread);
+  f.busy = busy;
+  f.rec = rec;
+  composeTitle("", prompt, false, f);
+}
+
+// Rows 0..(rule ? 19 : 18): cleared, the status slots, the title and the rule.
+template <class Gfx>
+inline void draw(Gfx& g, const Frame& f, int width, uint16_t fg, uint16_t bg, bool rule = true) {
+  g.fillRect(0, 0, width, rule ? kHeight : kHeight - 1, bg);
+  g.setTextSize(1);
+  g.setTextColor(fg);
+  if (f.busy) drawBits(g, P::kBusyX, P::kStatusTextY, kHourglass, kHourglassH, kHourglassW, fg);
+  if (f.rec) drawBits(g, P::kRecX, P::kStatusTextY + 1, kRecDot, kRecDotH, kRecDotW, fg);
+  if (f.notify) {
+    drawBits(g, P::kBellX, P::kStatusTextY, kBell, kBellH, kBellW, fg);
+    g.setCursor(P::kNotifyCountX, P::kStatusTextY);
+    g.print(f.notify);
+  }
+  if (f.power[0]) {
+    const int n = static_cast<int>(strlen(f.power));
+    g.setCursor(width - kCell * n, P::kStatusTextY);
+    g.print(f.power);
+  }
+  for (int i = 0; i < f.titleLen; ++i) {
+    const int x = P::kTitleX + i * kCell;
+    if (i == f.ellipsisAt) {
+      for (int d = 0; d < 3; ++d) g.drawPixel(x + 2 * d, P::kTitleY + kEllipsisY - kTextY, fg);
+      continue;
+    }
+    g.setCursor(x, P::kTitleY);
+    g.print(f.title[i]);
+  }
+  if (rule) g.drawFastHLine(0, P::kHeaderRuleY, width, fg);
+}
+
+}  // namespace tall
 
 }  // namespace oled_header

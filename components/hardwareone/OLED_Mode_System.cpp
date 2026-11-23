@@ -59,7 +59,21 @@ void displayUnavailable() {
   oledDisplay->println(unavailableOledTitle);
   y += 10;
 
-  if (unavailableOledReason.length() == 0) {
+  if (oledPortrait()) {
+    // Portrait: the title is already in the header; each reason line wraps
+    // at the 10-cell row.
+    y = OLED_CONTENT_START_Y;
+    oledDisplay->fillRect(0, y, SCREEN_WIDTH, 10, DISPLAY_COLOR_BLACK);
+    const String reason = unavailableOledReason.length() ? unavailableOledReason : String("Not available");
+    int start = 0;
+    while (start <= (int)reason.length() && y < oledContentBottom() - 8) {
+      int nl = reason.indexOf('\n', start);
+      const String line = nl < 0 ? reason.substring(start) : reason.substring(start, nl);
+      y = oledPrintWrapped(oledDisplay, 0, y, line.c_str(), 4, 9) + 1;
+      if (nl < 0) break;
+      start = nl + 1;
+    }
+  } else if (unavailableOledReason.length() == 0) {
     oledDisplay->setCursor(0, y);
     oledDisplay->println("Not available");
   } else {
@@ -172,6 +186,30 @@ void displayMemoryStatsRendered() {
   const int barX = 0;
   const int barWidth = SCREEN_WIDTH - 22;  // Leave room for percentage text
   const int barHeight = 6;
+
+  if (oledPortrait()) {
+    // Portrait: each pool as a row (free/total K), then its bar and percent.
+    char value[16];
+    snprintf(value, sizeof(value), "%u/%uK", (unsigned)(memoryRenderData.freeHeap / 1024),
+             (unsigned)(memoryRenderData.totalHeap / 1024));
+    y = oledKvRow(oledDisplay, y, "Heap", value) + 1;
+    oledMeter(oledDisplay, y, 8, memoryRenderData.heapPercent, 100);
+    y += 10;
+    snprintf(value, sizeof(value), "%d%% used", memoryRenderData.heapPercent);
+    y = oledKvRow(oledDisplay, y, "", value) + 4;
+    if (memoryRenderData.hasPsram) {
+      snprintf(value, sizeof(value), "%u/%uK", (unsigned)(memoryRenderData.freePsram / 1024),
+               (unsigned)(memoryRenderData.totalPsram / 1024));
+      y = oledKvRow(oledDisplay, y, "PSRAM", value) + 1;
+      oledMeter(oledDisplay, y, 8, memoryRenderData.psramPercent, 100);
+      y += 10;
+      snprintf(value, sizeof(value), "%d%% used", memoryRenderData.psramPercent);
+      oledKvRow(oledDisplay, y, "", value);
+    } else {
+      oledKvRow(oledDisplay, y, "PSRAM", "none");
+    }
+    return;
+  }
   
   // --- Heap (DRAM) ---
   oledDisplay->setCursor(0, y);
@@ -241,7 +279,8 @@ void displayMemoryStatsRendered() {
 #define PERF_MAX_TASKS 24
 // Each task row is 9px; reserve one 9px summary row above the list.
 // Preserve the established four-row OLED view, and fill taller canvases.
-#define PERF_VISIBLE_ROWS oledVisibleRows(9, 9, 4)
+// Portrait gives a CPU row two lines (name, then bar), the stack rows one.
+#define PERF_VISIBLE_ROWS (oledPortrait() ? (oledContentBottom() + 1 - OLED_CONTENT_START_Y - 9) / (sPerfPage == 0 ? 18 : 9) : oledVisibleRows(9, 9, 4))
 // Live-refresh cadence: read the shared sampler twice a second (2 Hz), the
 // sampler's own cadence (TASK_CPU_SAMPLE_MS).
 #define PERF_SAMPLE_MS TASK_CPU_SAMPLE_MS
@@ -348,7 +387,10 @@ static void displayPerfStatsRendered() {
     // value that rises and falls, not the ever-climbing since-boot total —
     // matches the other two live metrics on this line).
     oledDisplay->setCursor(0, y);
-    if (perfRenderData.loopValid) {
+    if (perfRenderData.loopValid && oledPortrait()) {
+      oledDisplay->printf("%lu/s st%lu", (unsigned long)perfRenderData.lapsPerSec,
+                          (unsigned long)perfRenderData.stalls5s);
+    } else if (perfRenderData.loopValid) {
       oledDisplay->printf("Loop %lu/s %lums st%lu",
                           (unsigned long)perfRenderData.lapsPerSec,
                           (unsigned long)perfRenderData.avgMs,
@@ -369,14 +411,23 @@ static void displayPerfStatsRendered() {
         sCpuScroll = perfRenderData.cpuCount - PERF_VISIBLE_ROWS;
       }
       if (sCpuScroll < 0) sCpuScroll = 0;
-      const int barX = 50, barW = 46, barH = 6;
+      // Portrait: the name (6 glyphs), a short bar and the percent.
+      const bool tall = oledPortrait();
+      const int barX = tall ? 0 : 50, barW = tall ? 30 : 46, barH = 6;
       for (int row = 0; row < PERF_VISIBLE_ROWS; row++) {
         int r = sCpuScroll + row;
         if (r >= perfRenderData.cpuCount) break;
         char nm[9];
         strncpy(nm, perfRenderData.cpuName[r], 8); nm[8] = '\0';
-        oledDisplay->setCursor(0, y);
-        oledDisplay->print(nm);
+        if (tall) {
+          // Two rows per task in portrait: the name, then bar and percent.
+          oledDisplay->setCursor(0, y);
+          oledDisplay->print(nm);
+          y += 9;
+        } else {
+          oledDisplay->setCursor(0, y);
+          oledDisplay->print(nm);
+        }
         oledDisplay->drawRect(barX, y, barW, barH, DISPLAY_COLOR_WHITE);
         int fill = (perfRenderData.cpuPct[r] * (barW - 2)) / 100;
         if (fill > 0) oledDisplay->fillRect(barX + 1, y + 1, fill, barH - 2, DISPLAY_COLOR_WHITE);
@@ -385,11 +436,11 @@ static void displayPerfStatsRendered() {
         y += 9;
       }
       if (sCpuScroll > 0) {
-        oledDisplay->setCursor(120, OLED_CONTENT_START_Y + 9);
+        oledDisplay->setCursor(SCREEN_WIDTH - 8, OLED_CONTENT_START_Y + 9);
         oledDisplay->print("\x18");
       }
       if (sCpuScroll + PERF_VISIBLE_ROWS < perfRenderData.cpuCount) {
-        oledDisplay->setCursor(120, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 8);
+        oledDisplay->setCursor(SCREEN_WIDTH - 8, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 8);
         oledDisplay->print("\x19");
       }
     }
@@ -398,7 +449,8 @@ static void displayPerfStatsRendered() {
     // (post-4x-fix units — display raw, never *4). '!' = under 512 B free
     // (note the tiny kernel tasks ipc0/ipc1 always live near their mark).
     oledDisplay->setCursor(0, y);
-    oledDisplay->printf("Min free stack  %d", perfRenderData.stkCount);
+    if (oledPortrait()) oledDisplay->printf("Stack %d", perfRenderData.stkCount);
+    else oledDisplay->printf("Min free stack  %d", perfRenderData.stkCount);
     y += 9;
     if (sStkScroll > perfRenderData.stkCount - PERF_VISIBLE_ROWS) {
       sStkScroll = perfRenderData.stkCount - PERF_VISIBLE_ROWS;
@@ -408,17 +460,24 @@ static void displayPerfStatsRendered() {
       int r = sStkScroll + row;
       if (r >= perfRenderData.stkCount) break;
       oledDisplay->setCursor(0, y);
+      if (oledPortrait()) {
+        // Portrait: the name cut to 4 glyphs, then the bytes (5 cells) and the mark.
+        oledDisplay->printf("%-4.4s%5lu%s", perfRenderData.stkName[r], (unsigned long)perfRenderData.stkFree[r],
+                            perfRenderData.stkFree[r] < 512 ? "!" : "");
+        y += 9;
+        continue;
+      }
       oledDisplay->printf("%-10.10s %5lu%s", perfRenderData.stkName[r],
                           (unsigned long)perfRenderData.stkFree[r],
                           perfRenderData.stkFree[r] < 512 ? "!" : "");
       y += 9;
     }
     if (sStkScroll > 0) {
-      oledDisplay->setCursor(120, OLED_CONTENT_START_Y + 9);
+      oledDisplay->setCursor(SCREEN_WIDTH - 8, OLED_CONTENT_START_Y + 9);
       oledDisplay->print("\x18");
     }
     if (sStkScroll + PERF_VISIBLE_ROWS < perfRenderData.stkCount) {
-      oledDisplay->setCursor(120, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 8);
+      oledDisplay->setCursor(SCREEN_WIDTH - 8, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 8);
       oledDisplay->print("\x19");
     }
   }
@@ -527,6 +586,33 @@ void displaySystemStatusRendered() {
   
   // Header shows "System Status", no need for title here
   oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
+
+  if (oledPortrait()) {
+    // Portrait: 8 px key/value rows; a pair that does not fit 10 cells
+    // stacks its value right-aligned under the label. Compact numbers.
+    const BatteryState& b = systemStatusRenderData.battery;
+    char v[16];
+    int y = OLED_CONTENT_START_Y;
+    if (!b.voltageAvailable || !b.voltageValid) {
+      y = oledKvRow(oledDisplay, y, "Batt", b.voltageAvailable ? "unknown" : "n/a");
+    } else {
+      snprintf(v, sizeof(v), "%.2fV", b.voltage);
+      y = oledKvRow(oledDisplay, y, "Batt", v);
+      if (b.percentageValid) {
+        snprintf(v, sizeof(v), "%s%d%%", b.percentageEstimated ? "~" : "", (int)b.percentage);
+        y = oledKvRow(oledDisplay, y, "Level", v);
+      }
+      if (b.usbKnown) y = oledKvRow(oledDisplay, y, "Power", b.usbPresent ? "USB" : "batt");
+    }
+    y = oledKvRow(oledDisplay, y, "Radio", systemStatusRenderData.radioOn ? "ON" : "OFF");
+    y = oledKvRow(oledDisplay, y, "WiFi", systemStatusRenderData.wifiConnected ? systemStatusRenderData.ssid : "off");
+    snprintf(v, sizeof(v), "%uK", (unsigned)(systemStatusRenderData.freeHeap / 1024));
+    y = oledKvRow(oledDisplay, y, "Heap", v);
+    snprintf(v, sizeof(v), "%luh%lum", (unsigned long)systemStatusRenderData.uptimeHours,
+             (unsigned long)systemStatusRenderData.uptimeMinutes);
+    oledKvRow(oledDisplay, y, "Up", v);
+    return;
+  }
 
   // Show measured voltage and mark ADC charge estimates. Missing telemetry
   // must not become a fabricated USB indication or an empty/full battery.

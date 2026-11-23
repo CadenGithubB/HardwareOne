@@ -34,7 +34,7 @@
 // Draw FTS footer at the standard position (matching drawOledFooter in the normal program)
 static void drawFtsFooter(const char* text) {
   const int footerY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
-  oledDisplay->drawFastHLine(0, footerY, 128, SSD1306_WHITE);
+  oledDisplay->drawFastHLine(0, footerY, SCREEN_WIDTH, SSD1306_WHITE);
   oledDisplay->setCursor(0, footerY + 2);
   oledDisplay->setTextSize(1);
   oledDisplay->setTextColor(SSD1306_WHITE);
@@ -189,7 +189,7 @@ String getOledTextInput(const char* prompt, bool isPassword,
       // Draw keyboard footer matching main keyboard style
       {
         const int ftrY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
-        oledDisplay->drawFastHLine(0, ftrY, 128, SSD1306_WHITE);
+        oledDisplay->drawFastHLine(0, ftrY, SCREEN_WIDTH, SSD1306_WHITE);
         oledDisplay->setTextSize(1);
         oledDisplay->setTextColor(SSD1306_WHITE);
         oledDisplay->setCursor(0, ftrY + 2);
@@ -308,27 +308,31 @@ bool getOledYesNoPrompt(const char* prompt, bool defaultYes) {
         lineStart = lineEnd + 1;  // Skip past the newline
       }
       
-      // Draw options
+      // Draw options (two 40 px boxes on the 128 px row; narrower on the 64 px portrait row)
       int optionY = 35;
+      const bool tall = oledPortrait();
+      const int optW = tall ? 28 : 40;  // (separate statements: inside OLED_TRANSACTION)
+      const int yesX = tall ? 2 : 10;
+      const int noX = tall ? 34 : 70;
       
       // Yes option
       if (selection == 0) {
-        oledDisplay->fillRect(10, optionY - 2, 40, 12, DISPLAY_COLOR_WHITE);
+        oledDisplay->fillRect(yesX, optionY - 2, optW, 12, DISPLAY_COLOR_WHITE);
         oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
       } else {
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
       }
-      oledDisplay->setCursor(20, optionY);
+      oledDisplay->setCursor(yesX + (tall ? 6 : 10), optionY);
       oledDisplay->print("Yes");
       
       // No option
       if (selection == 1) {
-        oledDisplay->fillRect(70, optionY - 2, 40, 12, DISPLAY_COLOR_WHITE);
+        oledDisplay->fillRect(noX, optionY - 2, optW, 12, DISPLAY_COLOR_WHITE);
         oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
       } else {
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
       }
-      oledDisplay->setCursor(82, optionY);
+      oledDisplay->setCursor(noX + (tall ? 8 : 12), optionY);
       oledDisplay->print("No");
       
       // Footer at standard position
@@ -592,7 +596,7 @@ bool getOledWifiSelection(String& outSsid) {
           const int idx = scrollOffset + i;
           const int y = startY + i * itemHeight;
           if (idx == selection) {
-            oledDisplay->fillRect(0, y - 1, 128, itemHeight,
+            oledDisplay->fillRect(0, y - 1, SCREEN_WIDTH, itemHeight,
                                   DISPLAY_COLOR_WHITE);
             oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
           } else {
@@ -609,11 +613,11 @@ bool getOledWifiSelection(String& outSsid) {
 
         oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
         if (scrollOffset > 0) {
-          oledDisplay->setCursor(120, 12);
+          oledDisplay->setCursor(SCREEN_WIDTH - 8, 12);
           oledDisplay->print("^");
         }
         if (scrollOffset + maxVisible < displayCount) {
-          oledDisplay->setCursor(120, 12 + (maxVisible - 1) * 10);
+          oledDisplay->setCursor(SCREEN_WIDTH - 8, 12 + (maxVisible - 1) * 10);
           oledDisplay->print("v");
         }
         oledDisplay->display();

@@ -21,8 +21,8 @@ static void displayGamepadVisual() {
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y);
     oledDisplay->println("Gamepad not active");
     oledDisplay->println();
-    oledDisplay->println("Use 'openinput'");
-    oledDisplay->println("to enable");
+    oledDisplay->println("Use");
+    oledDisplay->println("'openinput'");
     return;
   }
   
@@ -32,7 +32,7 @@ static void displayGamepadVisual() {
   bool dataValid = false;
   
   InputCache reading;
-  if (inputCacheSnapshot(reading, 10) && reading.dataValid) {
+  if (inputNavSnapshot(reading, 10) && reading.dataValid) {  // the stick as the screen sees it
     joyX = reading.joyX;
     joyY = reading.joyY;
     buttons = reading.buttons;
@@ -51,16 +51,20 @@ static void displayGamepadVisual() {
   // Center layout vertically in content area
   // Content area: OLED_CONTENT_START_Y to OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT (43px)
   // Total layout height: ~40px (text 8 + gap 2 + joystick/buttons 28 + meta buttons)
+  // Portrait stacks the parts: the numbers, the joystick box, the ABXY
+  // diamond, then SELECT and START side by side (y21-105).
+  const bool tall = oledPortrait();
   const int layoutHeight = 40;
-  const int layoutTopY = OLED_CONTENT_START_Y + (OLED_CONTENT_HEIGHT - layoutHeight) / 2;
+  const int layoutTopY = tall ? OLED_CONTENT_START_Y : OLED_CONTENT_START_Y + (OLED_CONTENT_HEIGHT - layoutHeight) / 2;
   
   // X:nnn Y:nnn text at top of layout
   oledDisplay->setCursor(0, layoutTopY);
   oledDisplay->setTextSize(1);
-  oledDisplay->printf("X:%4d Y:%4d", joyX, joyY);
+  if (tall) oledDisplay->printf("%4d %4d", joyX, joyY);
+  else oledDisplay->printf("X:%4d Y:%4d", joyX, joyY);
   
   // Draw joystick position (left side)
-  const int joyBoxX = 5, joyBoxY = layoutTopY + 10, joyBoxSize = 28;
+  const int joyBoxX = tall ? 18 : 5, joyBoxY = layoutTopY + 10, joyBoxSize = 28;
   oledDisplay->drawRect(joyBoxX, joyBoxY, joyBoxSize, joyBoxSize, DISPLAY_COLOR_WHITE);
   
   // Map joystick (0-1023) to box position
@@ -76,7 +80,7 @@ static void displayGamepadVisual() {
   //       B
   //  [SELECT] [START]
   
-  const int btnBaseX = 85, btnBaseY = layoutTopY + 5;
+  const int btnBaseX = tall ? 17 : 85, btnBaseY = tall ? 67 : layoutTopY + 5;
   const int btnR = 5;  // Button radius
   
   // X button (top) - logical INPUT_BUTTON_X
@@ -111,6 +115,24 @@ static void displayGamepadVisual() {
   oledDisplay->setCursor(btnBaseX + 13, btnBaseY + 21);
   oledDisplay->print("B");
   
+  if (tall) {
+    // SELECT and START under the diamond, side by side.
+    const bool sel = pressed & (1 << GAMEPAD_BUTTON_SEL);
+    const bool sta = INPUT_CHECK(pressed, INPUT_BUTTON_START);
+    if (sel) oledDisplay->fillRoundRect(1, 97, 30, 9, 2, DISPLAY_COLOR_WHITE);
+    else oledDisplay->drawRoundRect(1, 97, 30, 9, 2, DISPLAY_COLOR_WHITE);
+    if (sta) oledDisplay->fillRoundRect(33, 97, 30, 9, 2, DISPLAY_COLOR_WHITE);
+    else oledDisplay->drawRoundRect(33, 97, 30, 9, 2, DISPLAY_COLOR_WHITE);
+    oledDisplay->setTextColor(sel ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE);
+    oledDisplay->setCursor(7, 98);
+    oledDisplay->print("SEL");
+    oledDisplay->setTextColor(sta ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE);
+    oledDisplay->setCursor(39, 98);
+    oledDisplay->print("STA");
+    oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+    return;
+  }
+
   // SELECT and START moved into the middle gap between joystick and ABXY
   const int metaBtnX = 38;
   const int metaBtnY = layoutTopY + 30;

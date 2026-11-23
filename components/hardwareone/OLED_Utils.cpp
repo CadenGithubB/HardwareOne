@@ -42,6 +42,7 @@
 #if ENABLE_OLED_DISPLAY
 #include "i2csensor_ds3231.h"
 #include "i2csensor_sths34pf80.h"
+#include "i2csensor_vl53l4cx.h"
 #endif
 
 #if ENABLE_OLED_DISPLAY
@@ -127,17 +128,19 @@ const OledFooterHints FOOTER_DONE_BACK = { "Done", "Back", nullptr, nullptr };
 void oledRenderFooter(Adafruit_SSD1306* display, const OledFooterHints* hints) {
   if (!display || !hints) return;
   
-  // Draw separator line at top of footer area
-  display->drawFastHLine(0, DISPLAY_CONTENT_HEIGHT, DISPLAY_WIDTH, DISPLAY_COLOR_WHITE);
+  // The footer band: the rule where the global footer draws its own, the
+  // rows under it cleared. Portrait leaves this to the global footer's chips.
+  if (oledPortrait()) return;
+  const int ruleY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
+  display->drawFastHLine(0, ruleY, SCREEN_WIDTH, DISPLAY_COLOR_WHITE);
   
   // Clear footer area (below separator line)
-  display->fillRect(0, DISPLAY_CONTENT_HEIGHT + 1, DISPLAY_WIDTH, 
-                    DISPLAY_FOOTER_HEIGHT - 1, DISPLAY_COLOR_BLACK);
+  display->fillRect(0, ruleY + 1, SCREEN_WIDTH, SCREEN_HEIGHT - ruleY - 1, DISPLAY_COLOR_BLACK);
   
   // Render button hints in compact format: "A:Sel B:Back Y:Set"
   display->setTextSize(1);
   display->setTextColor(DISPLAY_COLOR_WHITE);
-  display->setCursor(0, DISPLAY_CONTENT_HEIGHT + 2);
+  display->setCursor(0, ruleY + 2);
   
   bool needSpace = false;
   
@@ -172,6 +175,72 @@ void oledRenderFooter(Adafruit_SSD1306* display, const OledFooterHints* hints) {
 // =============================================================================
 // Shared Drawing Utilities
 // =============================================================================
+
+void oledHeroCard(Adafruit_SSD1306* display, const char* label, const char* value, const char* unit,
+                  bool leftAligned) {
+  namespace P = oled_layout::portrait;
+  if (!display) return;
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+  display->setTextSize(1);
+  if (label && label[0]) {
+    display->setCursor(P::kTextX, P::kHeroLabelY);
+    display->print(label);
+  }
+  if (value && value[0]) {
+    char shown[P::kHeroValueMaxGlyphs + 1];
+    snprintf(shown, sizeof(shown), "%s", value);
+    const int n = (int)strlen(shown);
+    display->setTextSize(2);
+    display->setCursor(leftAligned ? P::kTextX : P::heroValueX(n), P::kHeroValueY);
+    display->print(shown);
+    display->setTextSize(1);
+  }
+  if (unit && unit[0]) {
+    const int n = (int)strlen(unit);
+    display->setCursor(leftAligned ? P::kTextX : P::heroUnitX(n), P::kHeroUnitY);
+    display->print(unit);
+  }
+}
+
+int oledKvRow(Adafruit_SSD1306* display, int y, const char* label, const char* value) {
+  namespace P = oled_layout::portrait;
+  if (!display) return y + 8;
+  const int cols = oledCols();
+  const int lastX = SCREEN_WIDTH - 5;  // x59 in portrait
+  const int ln = label ? (int)strlen(label) : 0;
+  int vn = value ? (int)strlen(value) : 0;
+  if (vn > cols) vn = cols;
+  display->setTextSize(1);
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+  if (ln) {
+    display->setCursor(P::kTextX, y);
+    display->printf("%.*s", cols, label);
+  }
+  if (!vn) return y + 8;
+  if (oled_layout::kvRows(ln, vn, cols) == 2) y += 8;
+  display->setCursor(oled_layout::rightAlignX(vn, lastX), y);
+  display->printf("%.*s", vn, value);
+  return y + 8;
+}
+
+int oledPrintWrapped(Adafruit_SSD1306* display, int x, int y, const char* text, int maxLines, int pitch) {
+  if (!display || !text) return y;
+  const auto lines = oled_message::wrap(text, oled_layout::cellsIn(SCREEN_WIDTH - x), maxLines);
+  for (int i = 0; i < lines.count; ++i) {
+    display->setCursor(x, y);
+    display->print(lines.text[i]);
+    y += pitch;
+  }
+  return y;
+}
+
+void oledMeter(Adafruit_SSD1306* display, int y, int height, long value, long maxValue) {
+  if (!display || height < 3) return;
+  const int x = 1, w = SCREEN_WIDTH - 4;
+  display->drawRect(x, y, w, height, DISPLAY_COLOR_WHITE);
+  const int fill = oled_layout::gaugeFill(value, maxValue, w - 4);
+  if (fill > 0) display->fillRect(x + 2, y + 2, fill, height - 4, DISPLAY_COLOR_WHITE);
+}
 
 void oledDrawBar(Adafruit_SSD1306* display, int x, int y, int width, int height,
                  int value, int maxValue, const char* label) {
@@ -359,6 +428,11 @@ static uint32_t oledKeyboardLineSignatureNow() {
   OledHeaderStatus status{};
   status.busy = oledCommandBusy();
   status.rec = oledCaptureLive();
+  if (oledPortrait()) {
+    // The portrait keyboard keeps the Notify slot of the status row.
+    const int unread = oledNotificationUnreadCount();
+    status.unread = (uint8_t)(unread > 255 ? 255 : (unread < 0 ? 0 : unread));
+  }
   return oled_header::signature(status);
 }
 
@@ -403,27 +477,31 @@ static void oledHeaderDefaultSpec(OledHeaderSpec& spec) {
 }
 
 // DEBUG_DISPLAY only, before the bar draws: a screen that left ink in the
-// header band (y 0-9) is logged once per mode, since the bar would hide it.
-// This catches computed coordinates; the host guard (test_oled_header.py)
-// checks literal ones in the sources.
+// header band (y 0-9; y 0-19 in portrait) is logged once per mode and
+// orientation, since the bar would hide it. getPixel reads logical
+// coordinates, so the band is the one the viewer sees at any rotation. This
+// catches computed coordinates; the host guard (test_oled_header.py) checks
+// literal ones in the sources.
 static void oledHeaderBandCheck(Adafruit_SSD1306* display) {
   if (!display || !isDebugFlagSet(DEBUG_DISPLAY)) return;
-  static uint32_t sReported[4] = {};  // one bit per mode id below 128
+  static uint32_t sReported[2][4] = {};  // [portrait] one bit per mode id below 128
   const int mode = (int)currentOledMode;
-  if (mode < 0 || mode >= 128 || (sReported[mode >> 5] & (1u << (mode & 31)))) return;
-  for (int y = 0; y < OLED_HEADER_HEIGHT; ++y) {
-    for (int x = 0; x < DISPLAY_WIDTH; ++x) {
+  uint32_t* reported = sReported[oledPortrait() ? 1 : 0];
+  if (mode < 0 || mode >= 128 || (reported[mode >> 5] & (1u << (mode & 31)))) return;
+  const int band = OLED_HEADER_HEIGHT;
+  for (int y = 0; y < band; ++y) {
+    for (int x = 0; x < SCREEN_WIDTH; ++x) {
       if (!display->getPixel(x, y)) continue;
-      sReported[mode >> 5] |= 1u << (mode & 31);
-      DEBUG_DISPLAYF("[OLED_HEADER] mode %d drew in y0-9 (first lit pixel %d,%d)", mode, x, y);
+      reported[mode >> 5] |= 1u << (mode & 31);
+      DEBUG_DISPLAYF("[OLED_HEADER] mode %d drew in y0-%d (first lit pixel %d,%d)", mode, band - 1, x, y);
       return;
     }
   }
 }
 
 int oledRenderHeader(Adafruit_SSD1306* display) {
-  static_assert(DISPLAY_WIDTH == oled_header::kWidth && OLED_HEADER_HEIGHT == oled_header::kHeight,
-                "the header bar is laid out for a 128 x 10 band");
+  static_assert(DISPLAY_WIDTH == oled_header::kWidth && oled_layout::kHeaderHeight == oled_header::kHeight,
+                "the landscape header bar is laid out for a 128 x 10 band");
   if (!display) return OLED_HEADER_HEIGHT;
   OledHeaderSpec spec;
   oledHeaderDefaultSpec(spec);
@@ -431,6 +509,13 @@ int oledRenderHeader(Adafruit_SSD1306* display) {
   if (entry && entry->headerFunc) entry->headerFunc(spec);
   OledHeaderStatus status;
   oledHeaderCollect(status);
+  if (oledPortrait()) {
+    oled_header::tall::Frame tall;
+    oled_header::tall::compose(spec, status, oledGetCurrentModeName(), tall);
+    oled_header::tall::draw(*display, tall, SCREEN_WIDTH, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_BLACK);
+    sHeaderDrawnSig = oled_header::signature(status);
+    return OLED_HEADER_HEIGHT;
+  }
   oled_header::Frame frame;
   oled_header::compose(spec, status, oledGetCurrentModeName(), frame);
   oled_header::draw(*display, frame, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_BLACK);
@@ -571,13 +656,13 @@ static void ncDraw() {
         // "[x] kind" — checkbox from my mute mask
         oledDisplay->print(eventKindMaskTest(
             sNcViewer.muteMask, static_cast<uint8_t>(kind.id)) ? "[x] " : "[ ] ");
-        oledDisplay->printf("%.15s", kind.name);
+        oledDisplay->printf("%.*s", max(1, oledCols() - 6), kind.name);
       } else {
         // "kind" + right-aligned level token
-        oledDisplay->printf("%.13s", kind.name);
         const char* tok = notifLevelToken(
             notifDeviceKindLevel(static_cast<uint8_t>(kind.id)));
-        oledDisplay->setCursor(128 - (int)strlen(tok) * 6, y);
+        oledDisplay->printf("%.*s", max(1, oledCols() - 2 - (int)strlen(tok)), kind.name);
+        oledDisplay->setCursor(SCREEN_WIDTH - (int)strlen(tok) * 6, y);
         oledDisplay->print(tok);
       }
     }
@@ -661,7 +746,7 @@ void displayNotifications() {
   // Content starts after header
   int startY = OLED_CONTENT_START_Y;
   int lineHeight = 10;
-  int maxVisible = (OLED_CONTENT_HEIGHT) / lineHeight;  // ~4 items
+  int maxVisible = (oledContentBottom() + 1 - startY) / lineHeight;  // 4 items; 8 in portrait
   
   if (count == 0) {
     oledDisplay->setCursor(0, startY + 10);
@@ -695,12 +780,15 @@ void displayNotifications() {
     char counterBuf[8];
     snprintf(counterBuf, sizeof(counterBuf), "%d/%d",
              sNotificationsSelectedIndex + 1, count);
-    int counterX = 128 - (int)strlen(counterBuf) * 6;
+    int counterX = SCREEN_WIDTH - (int)strlen(counterBuf) * 6;
     oledDisplay->setCursor(counterX, y);
     oledDisplay->print(counterBuf);
 
     oledDisplay->setCursor(0, y);
     oledDisplay->print(getNotificationSourceName(notif->source));
+    // Portrait: the age goes on its own row (the counter shares the first).
+    if (oledPortrait()) y += 9;
+    oledDisplay->setCursor(oledPortrait() ? 0 : oledDisplay->getCursorX(), y);
 
     // Show elapsed time
     uint32_t elapsed = (millis() - notif->timestampMs) / 1000;
@@ -718,24 +806,26 @@ void displayNotifications() {
     // Line 2: Subsource (IP/device/MAC) if present
     if (notif->subsource[0]) {
       oledDisplay->setCursor(0, y);
-      oledDisplay->print("From: ");
+      if (!oledPortrait()) oledDisplay->print("From: ");
+      const int room = oledPortrait() ? oledCols() : 19;
       char subsourceBuf[20];
-      strncpy(subsourceBuf, notif->subsource, 19);
-      subsourceBuf[19] = '\0';
+      strncpy(subsourceBuf, notif->subsource, room);
+      subsourceBuf[room] = '\0';
       oledDisplay->print(subsourceBuf);
       y += 9;
     }
     
     // Separator
-    oledDisplay->drawFastHLine(0, y, 128, DISPLAY_COLOR_WHITE);
+    oledDisplay->drawFastHLine(0, y, SCREEN_WIDTH, DISPLAY_COLOR_WHITE);
     y += 2;
     
-    // Message (word-wrapped, up to 3 lines)
+    // Message (word-wrapped, up to 3 lines; as many as fit in portrait)
     oledDisplay->setCursor(0, y);
-    int charsPerLine = 21;
+    int charsPerLine = oledCols();
+    const int maxLines = oledPortrait() ? (oledContentBottom() + 1 - y) / 8 : 3;
     int linesShown = 0;
     int msgLen = strlen(notif->message);
-    for (int i = 0; i < msgLen && linesShown < 3; ) {
+    for (int i = 0; i < msgLen && linesShown < maxLines; ) {
       int lineEnd = i + charsPerLine;
       if (lineEnd >= msgLen) {
         // Last line
@@ -783,7 +873,7 @@ void displayNotifications() {
     
     // Highlight selected item
     if (isSelected) {
-      oledDisplay->fillRect(0, y, 118, lineHeight - 1, DISPLAY_COLOR_WHITE);
+      oledDisplay->fillRect(0, y, SCREEN_WIDTH - 10, lineHeight - 1, DISPLAY_COLOR_WHITE);
       oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
     } else {
       oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -804,10 +894,11 @@ void displayNotifications() {
     oledDisplay->print(levelChar);
     oledDisplay->print(' ');
     
-    // Truncate message to fit
+    // Truncate message to fit (18 glyphs; 7 in portrait)
+    const int room = oledCols() - 3;
     char msgBuf[20];
-    strncpy(msgBuf, notif->message, 18);
-    msgBuf[18] = '\0';
+    strncpy(msgBuf, notif->message, room);
+    msgBuf[room] = '\0';
     oledDisplay->print(msgBuf);
     
     oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -815,11 +906,11 @@ void displayNotifications() {
   
   // Scroll indicators
   if (sNotificationsScrollOffset > 0) {
-    oledDisplay->setCursor(120, startY);
+    oledDisplay->setCursor(SCREEN_WIDTH - 8, startY);
     oledDisplay->print("\x18");  // Up arrow
   }
   if (sNotificationsScrollOffset + maxVisible < count) {
-    oledDisplay->setCursor(120, startY + (maxVisible - 1) * lineHeight);
+    oledDisplay->setCursor(SCREEN_WIDTH - 8, startY + (maxVisible - 1) * lineHeight);
     oledDisplay->print("\x19");  // Down arrow
   }
   
@@ -942,6 +1033,12 @@ REGISTER_OLED_MODE_MODULE(sNotificationsModes, sizeof(sNotificationsModes) / siz
 // Content Area System Implementation
 // =============================================================================
 
+// The content rows a scrolling page shows: the whole content area in
+// landscape, y21-105 in portrait (y106 stays blank above the footer rule).
+static int oledContentViewH() {
+  return oledPortrait() ? oledContentBottom() - OLED_CONTENT_START_Y + 1 : OLED_CONTENT_HEIGHT;
+}
+
 void oledContentInit(OledContentArea* ctx, Adafruit_SSD1306* display) {
   if (!ctx) return;
   
@@ -958,7 +1055,7 @@ void oledContentBegin(OledContentArea* ctx) {
   if (!ctx || !ctx->display) return;
 
   // Clear content area only (between header and footer)
-  ctx->display->fillRect(0, OLED_CONTENT_START_Y, DISPLAY_WIDTH, DISPLAY_CONTENT_HEIGHT, DISPLAY_COLOR_BLACK);
+  ctx->display->fillRect(0, OLED_CONTENT_START_Y, SCREEN_WIDTH, oledContentViewH(), DISPLAY_COLOR_BLACK);
 
   // cursorY is content-relative (0 = top of content area).
   // scrollOffset is how many pixels of content are hidden above the top edge.
@@ -976,7 +1073,7 @@ void oledContentEnd(OledContentArea* ctx) {
 
   // Draw scroll indicators using SSD1306 font arrows
   if (ctx->needsScroll) {
-    const int indicatorX = DISPLAY_WIDTH - 6;
+    const int indicatorX = SCREEN_WIDTH - 6;
     ctx->display->setTextColor(DISPLAY_COLOR_WHITE);
 
     // Up arrow at top of content area when not at the beginning
@@ -987,7 +1084,7 @@ void oledContentEnd(OledContentArea* ctx) {
 
     // Down arrow at bottom of content area when more content remains
     if (!ctx->scrollAtBottom) {
-      ctx->display->setCursor(indicatorX, OLED_CONTENT_START_Y + DISPLAY_CONTENT_HEIGHT - 8);
+      ctx->display->setCursor(indicatorX, OLED_CONTENT_START_Y + oledContentViewH() - 8);
       ctx->display->print('\x19');  // ↓
     }
   }
@@ -999,7 +1096,7 @@ void oledContentSetCursor(OledContentArea* ctx, int16_t x, int16_t y) {
   // y is content-relative; translate to screen coordinates
   int16_t screenY = OLED_CONTENT_START_Y + y - ctx->scrollOffset;
   const int16_t topClip    = OLED_CONTENT_START_Y - 8;
-  const int16_t bottomClip = OLED_CONTENT_START_Y + DISPLAY_CONTENT_HEIGHT;
+  const int16_t bottomClip = OLED_CONTENT_START_Y + oledContentViewH();
 
   if (screenY >= topClip && screenY < bottomClip) {
     ctx->display->setCursor(x, screenY);
@@ -1014,7 +1111,25 @@ void oledContentPrint(OledContentArea* ctx, const char* text, bool newline) {
   // Translate content-relative cursorY to screen Y
   int16_t screenY = OLED_CONTENT_START_Y + ctx->cursorY - ctx->scrollOffset;
   const int16_t topClip    = OLED_CONTENT_START_Y - 8;
-  const int16_t bottomClip = OLED_CONTENT_START_Y + DISPLAY_CONTENT_HEIGHT;
+  const int16_t bottomClip = OLED_CONTENT_START_Y + oledContentViewH();
+
+  if (oledPortrait()) {
+    // Portrait: a line longer than the 10-cell row continues on the rows
+    // under it (wrapped at a space where it can be), each its own 8 px row,
+    // so nothing runs off the 64 px width.
+    const auto lines = oled_message::wrap(text, oledCols(), 6);
+    const int count = lines.count ? lines.count : 1;
+    for (int i = 0; i < lines.count; ++i) {
+      const int16_t rowY = screenY + 8 * i;
+      if (rowY >= topClip && rowY < bottomClip) {
+        ctx->display->setCursor(0, rowY);
+        ctx->display->print(lines.text[i]);
+      }
+    }
+    ctx->cursorY += 8 * count;
+    if (ctx->cursorY > ctx->contentHeight) ctx->contentHeight = ctx->cursorY;
+    return;
+  }
 
   if (screenY >= topClip && screenY < bottomClip) {
     ctx->display->setCursor(0, screenY);
@@ -1040,7 +1155,7 @@ void oledContentPrintAt(OledContentArea* ctx, int16_t x, int16_t y, const char* 
   // y is content-relative; translate to screen coordinates
   int16_t screenY = OLED_CONTENT_START_Y + y - ctx->scrollOffset;
   const int16_t topClip    = OLED_CONTENT_START_Y - 8;
-  const int16_t bottomClip = OLED_CONTENT_START_Y + DISPLAY_CONTENT_HEIGHT;
+  const int16_t bottomClip = OLED_CONTENT_START_Y + oledContentViewH();
 
   if (screenY >= topClip && screenY < bottomClip) {
     ctx->display->setCursor(x, screenY);
@@ -1071,7 +1186,7 @@ void oledContentScrollDown(OledContentArea* ctx, int lines) {
 
   ctx->scrollOffset += (lines * 8);
 
-  int maxOffset = ctx->contentHeight - DISPLAY_CONTENT_HEIGHT;
+  int maxOffset = ctx->contentHeight - oledContentViewH();
   if (maxOffset < 0) maxOffset = 0;
   if (ctx->scrollOffset > maxOffset) ctx->scrollOffset = maxOffset;
 
@@ -1081,10 +1196,10 @@ void oledContentScrollDown(OledContentArea* ctx, int lines) {
 void oledContentUpdateScroll(OledContentArea* ctx) {
   if (!ctx) return;
 
-  ctx->needsScroll   = (ctx->contentHeight > DISPLAY_CONTENT_HEIGHT);
+  ctx->needsScroll   = (ctx->contentHeight > oledContentViewH());
   ctx->scrollAtTop   = (ctx->scrollOffset == 0);
 
-  int maxOffset = ctx->contentHeight - DISPLAY_CONTENT_HEIGHT;
+  int maxOffset = ctx->contentHeight - oledContentViewH();
   if (maxOffset < 0) maxOffset = 0;
   ctx->scrollAtBottom = (ctx->scrollOffset >= maxOffset);
 }
@@ -1111,6 +1226,8 @@ void oledScrollInit(OledScrollState* state, const char* title, int visibleLines)
   state->iconSize = 32;
   state->singleLineItems = false;
   state->rightPaneDraw = nullptr;
+  state->landscapeVisibleLines = 0;
+  state->initInPortrait = oledPortrait();
 
   // Clear all items
   for (int i = 0; i < OLED_SCROLL_MAX_ITEMS; i++) {
@@ -1275,6 +1392,15 @@ int oledScrollCalculateVisibleLines(int displayHeight, int textSize, bool hasTit
   return max(1, availableHeight / itemHeight);
 }
 
+void oledScrollFitRowsTo(OledScrollState* state, int rowHeight, int topY) {
+  if (!state || rowHeight <= 0) return;
+  const int fit = max(1, (oledContentBottom() - topY + 1) / rowHeight);
+  if (state->visibleLines != fit) {
+    state->visibleLines = fit;
+    oledScrollClampSelection(state);
+  }
+}
+
 void oledScrollSetSplitPane(OledScrollState* state, int listWidth, int separatorX, int iconSize) {
   if (!state) return;
   state->listWidth = listWidth;
@@ -1283,10 +1409,128 @@ void oledScrollSetSplitPane(OledScrollState* state, int listWidth, int separator
   state->singleLineItems = true;  // Split-pane defaults to single-line items
 }
 
+// The list's row count for the orientation it is drawn in: a portrait
+// renderer sets its own count and keeps the screen's, which comes back as soon
+// as the list is drawn in landscape again. Navigation reads visibleLines, so
+// it pages by the rows on the screen.
+static void oledScrollFitRows(OledScrollState* state, int portraitRows, int landscapeFit) {
+  const int before = state->visibleLines;
+  if (portraitRows > 0) {
+    if (state->landscapeVisibleLines == 0) state->landscapeVisibleLines = state->visibleLines;
+    state->visibleLines = portraitRows;
+  } else {
+    if (state->landscapeVisibleLines > 0) {
+      state->visibleLines = state->landscapeVisibleLines;
+      state->landscapeVisibleLines = 0;
+    }
+    // A list set up in portrait asked for portrait rows: in landscape it gets
+    // at most the rows that fit (its own count was never a landscape one).
+    if (state->initInPortrait) {
+      if (landscapeFit > 0 && state->visibleLines > landscapeFit) state->visibleLines = landscapeFit;
+      state->initInPortrait = false;
+    }
+  }
+  if (state->visibleLines != before) oledScrollClampSelection(state);
+}
+
+// Portrait scrollbar: a 1 px track at x63 and a 2 px thumb at x62-63 over
+// [top, top + span), drawn only when the list overflows.
+static void oledScrollDrawPortraitBar(Adafruit_SSD1306* display, int top, int span, int visible,
+                                      int total, int first) {
+  if (total <= visible) return;
+  const auto thumb = oled_layout::scrollThumb(top, span, visible, total, first);
+  const int x = SCREEN_WIDTH - 1;
+  if (thumb.y > top) display->drawFastVLine(x, top, thumb.y - top, DISPLAY_COLOR_WHITE);
+  display->fillRect(x - 1, thumb.y, 2, thumb.h, DISPLAY_COLOR_WHITE);
+  const int below = top + span - (thumb.y + thumb.h);
+  if (below > 0) display->drawFastVLine(x, thumb.y + thumb.h, below, DISPLAY_COLOR_WHITE);
+}
+
+// Portrait lists (64 x 128). The split pane turns into a stacked pane: the
+// selected item's 32 x 32 icon at (16, 22) with its badge and status dot to
+// the right, a rule on y55, then 10 px rows from y57 (5 visible). Full-width
+// lists keep their two-line items, 16 px each (5 visible), the selected one
+// inverted across x0-60. Text sits on the 10-cell grid from x1.
+static void oledScrollRenderPortrait(Adafruit_SSD1306* display, OledScrollState* state,
+                                     bool showScrollbar, bool showSelection) {
+  namespace P = oled_layout::portrait;
+  const bool splitPane = state->listWidth > 0;
+  const int bottom = oledContentBottom();
+  display->setTextSize(1);
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+  if (splitPane) {
+    const int top = P::kPaneListY;
+    const int rows = (bottom - top + 2) / P::kListRowH;
+    oledScrollFitRows(state, rows, 0);
+    if (state->itemCount > 0) {
+      OledScrollItem* selected = &state->items[state->selectedIndex];
+      if (selected->iconName && selected->iconName[0] != '\0') {
+        oledDrawIcon(display, selected->iconName, P::kPaneIconX, P::kPaneIconY, DISPLAY_COLOR_WHITE);
+      }
+      // The decorator puts its badge column 3 px right of areaX - 4.
+      if (state->rightPaneDraw) state->rightPaneDraw(display, selected, P::kPaneBadgeX + 1, P::kPaneIconY, 32);
+    }
+    display->drawFastHLine(0, P::kPaneRuleY, SCREEN_WIDTH, DISPLAY_COLOR_WHITE);
+    const int end = min(state->itemCount, state->scrollOffset + state->visibleLines);
+    int y = top;
+    for (int i = state->scrollOffset; i < end; ++i, y += P::kListRowH) {
+      const bool inverse = showSelection && i == state->selectedIndex;
+      if (inverse) display->fillRect(0, y, P::kListSelectW, P::kListRowH - 1, DISPLAY_COLOR_WHITE);
+      const uint16_t ink = inverse ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
+      oledTextFieldDraw(display, P::kTextX, y + 1, P::kListSelectW - P::kTextX - 1, state->items[i].line1,
+                        ink, ink, inverse, state);
+    }
+    display->setTextColor(DISPLAY_COLOR_WHITE);
+    oledScrollDrawPortraitBar(display, top, bottom - top + 1, state->visibleLines, state->itemCount,
+                              state->scrollOffset);
+    return;
+  }
+  int top = OLED_CONTENT_START_Y;
+  if (state->title && state->title[0] != '\0') {
+    oledTextFieldDraw(display, P::kTextX, top, P::kTextLastX, state->title, DISPLAY_COLOR_WHITE,
+                      DISPLAY_COLOR_WHITE, false, state);
+    top += 10;
+  }
+  const int itemH = 16;
+  const int rows = max(1, (bottom - top + 1) / itemH);
+  oledScrollFitRows(state, rows, 0);
+  const int end = min(state->itemCount, state->scrollOffset + state->visibleLines);
+  int y = top;
+  for (int i = state->scrollOffset; i < end; ++i, y += itemH) {
+    OledScrollItem* item = &state->items[i];
+    const bool inverse = showSelection && i == state->selectedIndex;
+    if (inverse) display->fillRect(0, y, P::kListSelectW, itemH, DISPLAY_COLOR_WHITE);
+    const uint16_t ink = inverse ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE;
+    const int textW = P::kListSelectW - P::kTextX - 1;
+    oledTextFieldDraw(display, P::kTextX, y, textW,
+                      (item->line1 && item->line1[0] != '\0') ? item->line1 : "---", ink, ink, inverse, state);
+    oledTextFieldDraw(display, P::kTextX, y + 8, textW, item->line2, ink, ink, inverse, state);
+  }
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+  if (showScrollbar) {
+    oledScrollDrawPortraitBar(display, top, bottom - top + 1, state->visibleLines, state->itemCount,
+                              state->scrollOffset);
+  }
+}
+
 void oledScrollRender(Adafruit_SSD1306* display, OledScrollState* state, 
                       bool showScrollbar, bool showSelection,
                       const OledFooterHints* footerHints) {
   if (!display || !state) return;
+  if (oledPortrait()) {
+    oledScrollRenderPortrait(display, state, showScrollbar, showSelection);
+    if (footerHints) oledRenderFooter(display, footerHints);
+    return;
+  }
+  {
+    // The rows that fit this landscape canvas: 10 px rows in a split pane,
+    // 16 px items (under an optional title) in a full-width list.
+    const bool split = state->listWidth > 0;
+    const bool titled = !split && state->title && state->title[0] != '\0';
+    const int top = OLED_CONTENT_START_Y + (split ? 1 : (titled ? 10 : 0));
+    const int fit = split ? (oledContentBottom() - top + 2) / 10 : (oledContentBottom() - top + 1) / 16;
+    oledScrollFitRows(state, 0, max(1, fit));
+  }
   
   bool splitPane = (state->listWidth > 0);
   int lineHeight = 8;  // For text size 1
@@ -1370,7 +1614,7 @@ void oledScrollRender(Adafruit_SSD1306* display, OledScrollState* state,
     int iconAreaX = state->separatorX + 4;
     int iconY = OLED_CONTENT_START_Y + (OLED_CONTENT_HEIGHT - state->iconSize) / 2;
     if (selected->iconName && selected->iconName[0] != '\0') {
-      int iconX = iconAreaX + (128 - iconAreaX - state->iconSize) / 2;
+      int iconX = iconAreaX + (SCREEN_WIDTH - iconAreaX - state->iconSize) / 2;
       oledDrawIcon(display, selected->iconName, iconX, iconY, DISPLAY_COLOR_WHITE);
     }
     // Right-pane decorator (e.g. availability badge + status text). Drawn after
@@ -1430,6 +1674,30 @@ void oledScrollRenderSimple(Adafruit_SSD1306* display, OledScrollState* state,
 
   display->setTextSize(1);
   display->setTextColor(DISPLAY_COLOR_WHITE);
+
+  if (oledPortrait()) {
+    // Portrait: the rows run to the content bottom, the selected one marked
+    // with '>' in its first cell; the label has the other 9 cells.
+    namespace P = oled_layout::portrait;
+    const int top = max(startY, (int)OLED_CONTENT_START_Y);
+    const int bottom = oledContentBottom();
+    oledScrollFitRows(state, max(1, (bottom - top + 1) / 8), 0);
+    const int end = min(state->itemCount, state->scrollOffset + state->visibleLines);
+    int y = top;
+    for (int i = state->scrollOffset; i < end; ++i, y += 8) {
+      const bool selected = showSelection && i == state->selectedIndex;
+      if (selected) {
+        display->setCursor(0, y);
+        display->print(">");
+      }
+      oledTextFieldDraw(display, 7, y, P::kListSelectW - 7, state->items[i].line1, DISPLAY_COLOR_WHITE,
+                        DISPLAY_COLOR_WHITE, selected, state);
+    }
+    oledScrollDrawPortraitBar(display, top, state->visibleLines * 8, state->visibleLines, state->itemCount,
+                              state->scrollOffset);
+    return;
+  }
+  oledScrollFitRows(state, 0, max(1, (oledContentBottom() - startY + 1) / 8));
 
   const int lineHeight = 8;
   int visibleStart = state->scrollOffset;
@@ -1622,11 +1890,178 @@ static void oledKeyboardDrawLine(Adafruit_SSD1306* display, int y, const char* p
   sKeyboardLineShown = true;
 }
 
+// Portrait keyboard (64 x 128): the status row keeps Busy, Rec and Notify and
+// shows the page in the Power slot; the prompt has the title row; the preview
+// box rect(0,20,64,11) shows the last 9 characters and the cursor; the 30
+// keys sit in a 5 x 6 grid of 12 x 11 cells (x 2.., y 33..) with an inverted
+// 11 x 11 cursor; the length counter is right-aligned on y99.
+static void oledKeyboardDrawTop(Adafruit_SSD1306* display, const char* prompt, const char* mode) {
+  OledHeaderStatus status{};
+  status.busy = oledCommandBusy();
+  status.rec = oledCaptureLive();
+  const int unread = oledNotificationUnreadCount();
+  status.unread = (uint8_t)(unread > 255 ? 255 : (unread < 0 ? 0 : unread));
+  oled_header::tall::Frame frame;
+  oled_header::tall::composeKeyboard(prompt, mode, status.rec, status.busy, status.unread, frame);
+  oled_header::tall::draw(*display, frame, SCREEN_WIDTH, DISPLAY_COLOR_WHITE, DISPLAY_COLOR_BLACK, false);
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+  sKeyboardLineDrawnSig = oled_header::signature(status);
+  sKeyboardLineShown = true;
+}
+
+static void oledKeyboardDrawPreviewPortrait(Adafruit_SSD1306* display) {
+  display->drawRect(0, 20, SCREEN_WIDTH, 11, DISPLAY_COLOR_WHITE);
+  display->setCursor(2, 22);
+  oledKeyboardPrintPreview(display, oled_layout::cellsIn(SCREEN_WIDTH - 4) - 1, false);
+  if ((millis() / 500) % 2 == 0) display->print("_");
+}
+
+static void oledKeyboardDisplayPortrait(Adafruit_SSD1306* display) {
+  namespace P = oled_layout::portrait;
+  const int w = SCREEN_WIDTH;
+  if (gOledKeyboardState.showingSuggestions && gOledKeyboardState.suggestionCount > 0) {
+    char typed[8];
+    const int typedLen = (int)strlen(gOledKeyboardState.text);
+    const int shown = typedLen < 7 ? typedLen : 7;
+    for (int i = 0; i < shown; ++i) typed[i] = gOledKeyboardState.masked ? '*' : gOledKeyboardState.text[i];
+    typed[shown] = '\0';
+    oledKeyboardDrawTop(display, "Suggestions:", typed);
+    const int rows = (P::kContentBottom + 1 - P::kContentY) / P::kListRowH;
+    const int count = gOledKeyboardState.suggestionCount;
+    int first = gOledKeyboardState.selectedSuggestion >= rows ? gOledKeyboardState.selectedSuggestion - rows + 1 : 0;
+    for (int i = 0; i < rows && first + i < count; ++i) {
+      const int idx = first + i;
+      const int y = P::kContentY + i * P::kListRowH;
+      const bool selected = idx == gOledKeyboardState.selectedSuggestion;
+      if (selected) display->fillRect(0, y, P::kListSelectW, P::kListRowH - 1, DISPLAY_COLOR_WHITE);
+      const char* suggestion = gOledKeyboardState.suggestions[idx];
+      if (suggestion) {
+        oledTextFieldDraw(display, P::kTextX, y + 1, P::kListSelectW - 2, suggestion,
+                          selected ? DISPLAY_COLOR_BLACK : DISPLAY_COLOR_WHITE,
+                          selected ? DISPLAY_COLOR_WHITE : DISPLAY_COLOR_BLACK, selected,
+                          &gOledKeyboardState);
+      }
+    }
+    display->setTextColor(DISPLAY_COLOR_WHITE);
+    return;
+  }
+
+  if (gOledKeyboardState.mode == KEYBOARD_MODE_PATTERN) {
+    oledKeyboardDrawTop(display, gOledKeyboardState.title.c_str(), "PAT");
+    oledKeyboardDrawPreviewPortrait(display);
+    const int cx = w / 2 - 3;
+    const int cy = 46;
+    display->setCursor(cx, cy); display->print("^");
+    display->setCursor(cx - 14, cy + 12); display->print("<");
+    display->setCursor(cx, cy + 12); display->print("+");
+    display->setCursor(cx + 14, cy + 12); display->print(">");
+    display->setCursor(cx, cy + 24); display->print("v");
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%d moves", gOledKeyboardState.textLength);
+    display->setCursor(oled_layout::centerX((int)strlen(buf), w), 92);
+    display->print(buf);
+    return;
+  }
+
+  if (gOledKeyboardState.mode == KEYBOARD_MODE_MIC) {
+    const DictationSnapshot snap = dictationSnapshotNow();
+    oledKeyboardDrawTop(display, gOledKeyboardState.title.c_str(), snap.sourceName ? snap.sourceName : "MIC");
+    oledKeyboardDrawPreviewPortrait(display);
+    const int y = 36;
+    display->setCursor(P::kTextX, y);
+    if (snap.ownerSource != SOURCE_LOCAL_DISPLAY &&
+        (snap.state == DictationState::RECORDING || snap.state == DictationState::WAITING)) {
+      display->print("Mic busy");
+      display->setCursor(P::kTextX, y + 9);
+      display->print("on G2");
+      return;
+    }
+    switch (snap.state) {
+      case DictationState::RECORDING: {
+        if (snap.preparing) { display->print("Starting.."); break; }
+        display->fillCircle(4, y + 3, 3, DISPLAY_COLOR_WHITE);
+        display->setCursor(12, y);
+        char buf[16];
+        snprintf(buf, sizeof(buf), "REC %lus", (unsigned long)(snap.elapsedMs / 1000));
+        display->print(buf);
+        const int barX = 1, barW = w - 4, barH = 7;
+        display->drawRect(barX, y + 14, barW, barH, DISPLAY_COLOR_WHITE);
+        const int fill = (snap.level * (barW - 2)) / 100;
+        if (fill > 0) display->fillRect(barX + 1, y + 15, fill, barH - 2, DISPLAY_COLOR_WHITE);
+        break;
+      }
+      case DictationState::WAITING:
+        display->print(snap.continuous ? "Finishing" : "Working");
+        display->setCursor(P::kTextX, y + 9);
+        for (uint32_t i = 0; i < ((millis() / 400) % 4); ++i) display->print(".");
+        break;
+      case DictationState::FAILED: {
+        display->print("Failed:");
+        const auto lines = oled_message::wrap(snap.failure[0] ? snap.failure : "unknown", P::kCols, 4);
+        for (int i = 0; i < lines.count; ++i) {
+          display->setCursor(P::kTextX, y + 9 * (i + 1));
+          display->print(lines.text[i]);
+        }
+        break;
+      }
+      case DictationState::IDLE:
+      default:
+        if (gOledKeyboardState.textLength >= gOledKeyboardState.maxLength) {
+          display->print("Text full");
+        } else {
+          display->print("A: start");
+          display->setCursor(P::kTextX, y + 9);
+          display->print("speaking");
+        }
+        break;
+    }
+    return;
+  }
+
+  const char* modeStr = "";
+  switch (gOledKeyboardState.mode) {
+    case KEYBOARD_MODE_UPPERCASE: modeStr = "ABC"; break;
+    case KEYBOARD_MODE_LOWERCASE: modeStr = "abc"; break;
+    case KEYBOARD_MODE_NUMBERS: modeStr = "123"; break;
+    case KEYBOARD_MODE_SYMBOLS: modeStr = "sym"; break;
+    default: break;
+  }
+  oledKeyboardDrawTop(display, gOledKeyboardState.title.c_str(), modeStr);
+  oledKeyboardDrawPreviewPortrait(display);
+  const int cellW = 12, cellH = 11, gridX = 2, gridY = 33;
+  const int cursorIndex = gOledKeyboardState.cursorY * OLED_KEYBOARD_COLS + gOledKeyboardState.cursorX;
+  for (int index = 0; index < OLED_KEYBOARD_ROWS * OLED_KEYBOARD_COLS; ++index) {
+    const int x = gridX + (index % oled_layout::kKeyboardPortraitCols) * cellW;
+    const int y = gridY + (index / oled_layout::kKeyboardPortraitCols) * cellH;
+    const char c = getCharAt(index / OLED_KEYBOARD_COLS, index % OLED_KEYBOARD_COLS);
+    if (index == cursorIndex) {
+      display->fillRect(x, y, cellW - 1, cellH, DISPLAY_COLOR_WHITE);
+      display->setTextColor(DISPLAY_COLOR_BLACK);
+    } else {
+      display->setTextColor(DISPLAY_COLOR_WHITE);
+    }
+    display->setCursor(x + 3, y + 2);
+    if (c == CHAR_SPACE) display->print("_");
+    else if (c == CHAR_BACK) display->print("<");
+    else if (c == CHAR_MODE) display->print("*");
+    else display->print(c);
+  }
+  display->setTextColor(DISPLAY_COLOR_WHITE);
+  char counter[12];
+  snprintf(counter, sizeof(counter), "%d/%d", gOledKeyboardState.textLength, gOledKeyboardState.maxLength);
+  display->setCursor(oled_layout::rightAlignX((int)strlen(counter), P::kTextLastX), 99);
+  display->print(counter);
+}
+
 void oledKeyboardDisplay(Adafruit_SSD1306* display) {
   if (!display) return;
   
   display->setTextSize(1);
   display->setTextColor(DISPLAY_COLOR_WHITE);
+  if (oledPortrait()) {
+    oledKeyboardDisplayPortrait(display);
+    return;
+  }
   
   // Keyboard uses full screen (no header when active)
   const int keyboardStartY = 0;
@@ -2195,37 +2630,18 @@ bool oledKeyboardIsCancelled() {
   return gOledKeyboardState.cancelled;
 }
 
-void oledKeyboardMoveUp() {
-  if (gOledKeyboardState.cursorY > 0) {
-    gOledKeyboardState.cursorY--;
-  } else {
-    gOledKeyboardState.cursorY = OLED_KEYBOARD_ROWS - 1;  // Wrap to bottom
-  }
+// The cursor steps on the grid as it is drawn: 10 x 3 in landscape, the same
+// 30 keys re-wrapped 5 x 6 in portrait (oled_layout::keyboardStep). Both wrap
+// around the edges.
+static void oledKeyboardStep(int dCol, int dRow) {
+  oled_layout::keyboardStep(gOledKeyboardState.cursorX, gOledKeyboardState.cursorY, dCol, dRow,
+                            OLED_KEYBOARD_COLS, OLED_KEYBOARD_ROWS, oledPortrait());
 }
 
-void oledKeyboardMoveDown() {
-  if (gOledKeyboardState.cursorY < OLED_KEYBOARD_ROWS - 1) {
-    gOledKeyboardState.cursorY++;
-  } else {
-    gOledKeyboardState.cursorY = 0;  // Wrap to top
-  }
-}
-
-void oledKeyboardMoveLeft() {
-  if (gOledKeyboardState.cursorX > 0) {
-    gOledKeyboardState.cursorX--;
-  } else {
-    gOledKeyboardState.cursorX = OLED_KEYBOARD_COLS - 1;  // Wrap to right
-  }
-}
-
-void oledKeyboardMoveRight() {
-  if (gOledKeyboardState.cursorX < OLED_KEYBOARD_COLS - 1) {
-    gOledKeyboardState.cursorX++;
-  } else {
-    gOledKeyboardState.cursorX = 0;  // Wrap to left
-  }
-}
+void oledKeyboardMoveUp() { oledKeyboardStep(0, -1); }
+void oledKeyboardMoveDown() { oledKeyboardStep(0, 1); }
+void oledKeyboardMoveLeft() { oledKeyboardStep(-1, 0); }
+void oledKeyboardMoveRight() { oledKeyboardStep(1, 0); }
 
 // Row-major / linear scan across the keyboard.
 //   • Normal char grid: treat the grid as a single linear strip of
@@ -2598,8 +3014,58 @@ static bool oledConfirmHandleInput(uint32_t newlyPressed) {
   return handled;
 }
 
+// Portrait (64 x 128): the box covers the content zone (y21-105, y106 stays
+// blank above the footer rule); the question wraps at 10 cells from x2 at a
+// 9 px pitch, the detail after a 4 px break; two full-width 58 x 13 bars,
+// Yes at y72 and No at y88, the selected one filled.
+static void oledConfirmRenderPortrait() {
+  namespace P = oled_layout::portrait;
+  const int w = SCREEN_WIDTH;
+  const int boxH = P::kContentBottom - P::kContentY + 1;
+  oledDisplay->fillRect(0, P::kContentY, w, boxH, DISPLAY_COLOR_BLACK);
+  oledDisplay->drawRect(0, P::kContentY, w, boxH, DISPLAY_COLOR_WHITE);
+  oledDisplay->setTextSize(1);
+  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+  const int cols = oled_layout::cellsIn(w - 4);
+  int y = P::kContentY + 4;
+  auto printLines = [&](const char* text) {
+    const auto lines = oled_message::wrap(text, cols, 3);
+    for (int i = 0; i < lines.count; ++i) {
+      oledDisplay->setCursor(2, y);
+      oledDisplay->print(lines.text[i]);
+      y += 9;
+    }
+  };
+  if (gOledConfirmState.line1) printLines(gOledConfirmState.line1);
+  if (gOledConfirmState.line2) {
+    y += 4;
+    printLines(gOledConfirmState.line2);
+  }
+  const int barX = 3, barW = w - 6, barH = 13;
+  const int yesY = 72, noY = 88;
+  auto bar = [&](int by, const char* label, bool selected) {
+    if (selected) {
+      oledDisplay->fillRect(barX, by, barW, barH, DISPLAY_COLOR_WHITE);
+      oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
+    } else {
+      oledDisplay->drawRect(barX, by, barW, barH, DISPLAY_COLOR_WHITE);
+      oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+    }
+    const int n = (int)strlen(label);
+    oledDisplay->setCursor(barX + (barW - oled_layout::textWidth(n)) / 2, by + 3);
+    oledDisplay->print(label);
+  };
+  bar(yesY, "Yes", gOledConfirmState.selectYes);
+  bar(noY, "No", !gOledConfirmState.selectYes);
+  oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+}
+
 static void oledConfirmRender() {
   if (!gOledConfirmState.active || !oledDisplay) return;
+  if (oledPortrait()) {
+    oledConfirmRenderPortrait();
+    return;
+  }
 
   // Fill the content region (between the header and footer bars). Both bars are
   // drawn ON TOP of content afterwards, so keeping the box within
@@ -2715,13 +3181,14 @@ void drawOledFooter() {
   // Footer starts after header + content area
   const int footerStartY = OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT;
   const int footerY = footerStartY + 2;  // Text position (2px below separator)
+  const bool portrait = oledPortrait();
   
   // Clear footer area (prevents content from leaking through)
-  oledDisplay->fillRect(0, footerStartY, SCREEN_WIDTH, OLED_FOOTER_HEIGHT, DISPLAY_COLOR_BLACK);
+  oledDisplay->fillRect(0, footerStartY, SCREEN_WIDTH, SCREEN_HEIGHT - footerStartY, DISPLAY_COLOR_BLACK);
   
   // Draw separator line above footer
   // For logo mode, draw shorter line with vertical box around "Back" text
-  if (currentOledMode == OLED_LOGO) {
+  if (currentOledMode == OLED_LOGO && !portrait) {
     // Horizontal line - only 1/3 width from left
     oledDisplay->drawFastHLine(0, footerStartY, SCREEN_WIDTH / 3, DISPLAY_COLOR_WHITE);
     // Vertical line down from end of horizontal line
@@ -2736,36 +3203,29 @@ void drawOledFooter() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   oledDisplay->setCursor(0, footerY);
 
-  if (oledConfirmIsActive()) {
-    oledDisplay->print("A:Select B:Cancel");
-    return;
-  }
-  
-  // Check if keyboard is active - override mode hints with keyboard hints
-  if (oledKeyboardIsActive()) {
-    if (gOledKeyboardState.mode == KEYBOARD_MODE_PATTERN) {
-      oledDisplay->print("A:Done Y:Undo B:");
-      drawBackArrowIcon(oledDisplay, footerY);
-    } else if (gOledKeyboardState.mode == KEYBOARD_MODE_MIC) {
-      oledDisplay->print("A:Rec Y:Del X:OK B:");
-      drawBackArrowIcon(oledDisplay, footerY);
-    } else if (gOledKeyboardState.showingSuggestions) {
-      oledDisplay->print("A:Pick B:");
-      drawBackArrowIcon(oledDisplay, footerY);
-      oledDisplay->print("\x1e\x1f:Nav");
-    } else if (gOledKeyboardState.autocompleteFunc) {
-      oledDisplay->print("A:Sel Y:Del S:OK");
-    } else {
-      oledDisplay->print("A:Sel Y:Del B:");
-      drawBackArrowIcon(oledDisplay, footerY);
-      oledDisplay->print(" S:OK");
-    }
-    return;
-  }
-  
-  // Check registered mode hints first (avoids central switch for self-describing modes)
   const char* hints = nullptr;
-  {
+  if (oledConfirmIsActive()) {
+    // B closes the dialog as No; portrait names that outcome on its chip.
+    hints = portrait ? "A:Select B:No" : "A:Select B:Cancel";
+  } else if (oledKeyboardIsActive()) {
+    // Keyboard hints override the mode's. Landscape spells them as before
+    // ("B:Back" draws as B: and the back arrow); portrait gives each button
+    // its slot, and X completes the text as START does.
+    if (gOledKeyboardState.mode == KEYBOARD_MODE_PATTERN) {
+      hints = portrait ? "A:Done B:Cancel Y:Undo" : "A:Done Y:Undo B:Back";
+    } else if (gOledKeyboardState.mode == KEYBOARD_MODE_MIC) {
+      hints = portrait ? "A:Rec B:Cancel X:OK Y:Del" : "A:Rec Y:Del X:OK B:Back";
+    } else if (gOledKeyboardState.showingSuggestions) {
+      hints = portrait ? "A:Pick B:Cancel" : "A:Pick B:Back\x1e\x1f:Nav";
+    } else if (gOledKeyboardState.autocompleteFunc) {
+      hints = portrait ? "A:Select X:OK Y:Delete" : "A:Sel Y:Del S:OK";
+    } else {
+      hints = portrait ? "A:Select B:Cancel X:OK Y:Delete" : "A:Sel Y:Del B:Back S:OK";
+    }
+  }
+
+  // Check registered mode hints first (avoids central switch for self-describing modes)
+  if (!hints) {
     const OledModeEntry* regMode = findOledMode(currentOledMode);
     if (regMode && regMode->hints) {
       hints = regMode->hints;
@@ -2856,11 +3316,16 @@ void drawOledFooter() {
     case OLED_RTC_DATA:
 #if ENABLE_RTC_SENSOR
       {
-        hints = (gRtcRunning && gRtcConnected) ? "X:Stop B:Back" : "X:Start B:Back";
+        // Y syncs the clock over NTP (rtcInputHandler).
+        hints = (gRtcRunning && gRtcConnected) ? "X:Stop Y:NTP B:Back" : "X:Start B:Back";
       }
 #else
       hints = "B:Back";
 #endif
+      break;
+
+    case OLED_TOF_DATA:
+      hints = (gTofRunning && gTofConnected) ? "X:Stop B:Back" : "X:Start B:Back";
       break;
 
     case OLED_PRESENCE_DATA:
@@ -2945,6 +3410,36 @@ void drawOledFooter() {
       break;
   }
   
+  // Portrait: two rows of four fixed chips (A B / X Y), each an inverted
+  // letter and a verb of at most 3 glyphs; a button with no action leaves its
+  // slot blank, so the chips never move.
+  if (portrait) {
+    namespace L = oled_layout;
+    L::FooterChips chips;
+    L::parseFooterHints(hints, chips);
+    // B goes back on every screen that does not take it (an unhandled B pops
+    // the screen), so its chip shows even where a landscape hint had no room
+    // for it. Not on the login screen (no way back while a login is needed)
+    // and not over the keyboard or a confirmation, which name B themselves.
+    if (!chips.verb[L::kSlotB][0] && currentOledMode != OLED_LOGIN && !oledConfirmIsActive() &&
+        !oledKeyboardIsActive() && currentOledMode != OLED_LOGO) {
+      memcpy(chips.verb[L::kSlotB], "Bck", 4);
+    }
+    static const char kLetters[L::kSlotCount] = {'A', 'B', 'X', 'Y'};
+    for (int slot = 0; slot < L::kSlotCount; ++slot) {
+      if (!chips.verb[slot][0]) continue;
+      const int cx = L::chipX(slot), cy = L::chipY(slot);
+      oledDisplay->fillRect(cx, cy, L::portrait::kChipW, L::portrait::kChipH, DISPLAY_COLOR_WHITE);
+      oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
+      oledDisplay->setCursor(cx + 1, cy + 1);
+      oledDisplay->print(kLetters[slot]);
+      oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
+      oledDisplay->setCursor(cx + L::portrait::kChipW + 1, cy + 1);
+      oledDisplay->print(chips.verb[slot]);
+    }
+    return;
+  }
+
   // Draw the hint text, replacing "B:Back" with B: + curved arrow icon
   if (hints) {
     const char* backStr = strstr(hints, "B:Back");
@@ -3530,10 +4025,36 @@ static uint32_t oledFrameDirtySeq = 0;
 static uint32_t oledFrameGamepadSeq = 0;
 static unsigned long oledFrameSensorSeq = 0;
 
-// Pending display-rotation request (oledflip). setRotation() and the framebuffer
-// belong to the render task; applyOledRotation() can be called from any task, so
-// it records the request here and the next frame applies it at a safe boundary.
+// Pending display-rotation request (oledrotation). setRotation() and the
+// framebuffer belong to the render task; applyOledRotation() can be called from
+// any task, so it records the request here and the next frame applies it at a
+// safe boundary.
 static volatile bool oledRotationPending = false;
+// A stick held across a turn of the screen now points another way: it is
+// ignored until it is let go (no press of the new direction).
+static bool sNavHeldAcrossTurn = false;
+
+// The GFX rotation the saved setting asks for on this display: a value that is
+// not 0/90/180/270, or a portrait turn on a display that only flips, is 0.
+static int oledSavedRotation() {
+  int rotation = oled_layout::rotationFromDegrees(gSettings.oledRotation);
+  if (rotation < 0) rotation = 0;
+#if DISPLAY_TYPE != DISPLAY_TYPE_SSD1306
+  if (oled_layout::rotationIsPortrait(rotation)) rotation = 0;
+#endif
+  return rotation;
+}
+
+// Render task only: turn the canvas to the saved rotation. Switching between
+// landscape and portrait changes every row and column count, so the text
+// fields' scroll state restarts.
+static void oledApplySavedRotationNow() {
+  const bool wasPortrait = oledPortrait();
+  const int before = displayRotation();
+  displaySetRotation(oledSavedRotation());
+  if (displayRotation() != before) sNavHeldAcrossTurn = true;
+  if (wasPortrait != oledPortrait()) oledTextFieldReset();
+}
 
 // Manual dirty flag for non-sensor changes (menu state, settings, etc.)
 void oledMarkDirty() {
@@ -3937,7 +4458,7 @@ bool initOledDisplay() {
     
     // Show initial splash screen
     gDisplay->clearDisplay();
-    gDisplay->setRotation(gSettings.oledFlipped ? 2 : 0);
+    oledApplySavedRotationNow();
     displaySetBrightness(gSettings.oledBrightness);
     gDisplay->setTextSize(1);
     gDisplay->setTextColor(DISPLAY_COLOR_WHITE);
@@ -4075,9 +4596,11 @@ static bool oledFrameCommitAllowed(TransportSessionEpoch& epochOut) {
 // screen, which only a boundary replaces.
 // ---- Screen dump (oleddump) ----------------------------------------------------
 // The display task copies the frame it has just committed when a dump was
-// asked for, as logical pixels (a flipped panel reads upright); the command
-// formats that copy as text. The copy is made at the first dump and kept.
-static constexpr size_t kOledDumpBytes = (size_t)SCREEN_WIDTH * SCREEN_HEIGHT / 8;
+// asked for, as logical pixels (getPixel undoes the rotation, so a flipped or
+// portrait panel reads upright, 64 wide in portrait); the command formats that
+// copy as text. The copy is made at the first dump and kept. Every rotation
+// has the panel's pixel count.
+static constexpr size_t kOledDumpBytes = (size_t)DISPLAY_WIDTH * DISPLAY_HEIGHT / 8;
 static std::atomic<uint32_t> sOledDumpWanted{0};
 static std::atomic<uint32_t> sOledDumpTaken{0};
 static uint8_t* sOledDumpBits = nullptr;  // row-major, one bit per pixel
@@ -4236,14 +4759,14 @@ void updateOledDisplay() {
 
 #endif
 
-  // Apply a pending rotation (oledflip) here, at a frame boundary, rather than
+  // Apply a pending rotation (oledrotation) here, at a frame boundary, rather than
   // in the task that asked for it — swapping the GFX coordinate transform out
   // from under a render already in progress would tear the frame. No clear is
   // needed first: the full-screen fill below repaints every pixel, so nothing
   // survives in the old orientation.
   if (oledRotationPending) {
     oledRotationPending = false;
-    gDisplay->setRotation(gSettings.oledFlipped ? 2 : 0);
+    oledApplySavedRotationNow();
   }
 
   // Pre-gather data OUTSIDE I2C transaction to avoid blocking gamepad
@@ -4475,30 +4998,43 @@ const char* cmd_oled_brightness(const String& argsInput) {
   if (!parseIntArg(_arg, v)) return kCommandReplyNotANumber;
   if (v < 0 || v > 255) return "Error: OLED brightness must be 0..255";
   setSetting(gSettings.oledBrightness, (int)v);
-  applyOledBrightness();   // same live-apply oledflip does; the setting alone
+  applyOledBrightness();   // same live-apply oledrotation does; the setting alone
                            // only reached the panel on the next reboot / wake
   snprintf(getDebugBuffer(), 1024, "OLED brightness set to %d", v);
   return getDebugBuffer();
 }
 
-// Flip the OLED 180° (and live-apply by re-rotating the active display).
-// Persisted via oledFlipped so the same orientation comes back on the next boot.
-const char* cmd_oled_flip(const String& argsInput) {
+// The display's rotation in degrees (oledRotation), applied live at the next
+// frame and kept for the next boot. 0 and 180 are landscape; 90 and 270 turn
+// the SSD1306 to portrait (a 64 x 128 layout). Navigation turns with it.
+static const char* oledRotationName(int degrees) {
+  switch (degrees) {
+    case 90: return "portrait";
+    case 180: return "landscape, flipped";
+    case 270: return "portrait, flipped";
+    default: return "landscape";
+  }
+}
+
+const char* cmd_oled_rotation(const String& argsInput) {
   RETURN_VALID_IF_VALIDATE_CSTR();
   if (!ensureDebugBuffer()) return "Error: Debug buffer unavailable";
-  String arg = argsInput; arg.trim(); arg.toLowerCase();
+  String arg = argsInput; arg.trim();
   if (arg.length() == 0) {
-    snprintf(getDebugBuffer(), 1024, "OLED flip: %s", gSettings.oledFlipped ? "on (rotated 180°)" : "off (normal)");
+    const int shown = oled_layout::degreesFromRotation(oledSavedRotation());
+    snprintf(getDebugBuffer(), 1024, "OLED rotation: %d degrees (%s)", shown, oledRotationName(shown));
     return getDebugBuffer();
   }
-  bool target;
-  if (argIsOn(arg))       target = true;
-  else if (argIsOff(arg)) target = false;
-  else if (arg == "toggle")                              target = !gSettings.oledFlipped;
-  else return "Error: invalid arguments — Usage: oledflip [on|off|toggle]";
-  setSetting(gSettings.oledFlipped, target);
+  int degrees = 0;
+  if (!parseIntArg(arg, degrees)) return kCommandReplyNotANumber;
+  const int rotation = oled_layout::rotationFromDegrees(degrees);
+  if (rotation < 0) return "Error: OLED rotation must be 0, 90, 180 or 270";
+#if DISPLAY_TYPE != DISPLAY_TYPE_SSD1306
+  if (oled_layout::rotationIsPortrait(rotation)) return "Error: this display turns 0 or 180 only";
+#endif
+  setSetting(gSettings.oledRotation, degrees);
   applyOledRotation();
-  snprintf(getDebugBuffer(), 1024, "OLED flip: %s", target ? "on (rotated 180°)" : "off (normal)");
+  snprintf(getDebugBuffer(), 1024, "OLED rotation set to %d degrees (%s)", degrees, oledRotationName(degrees));
   return getDebugBuffer();
 }
 
@@ -4848,8 +5384,9 @@ const char* cmd_oledstatus(const String& argsInput) {
       doc["panelWidth"] = DISPLAY_PANEL_WIDTH;
       doc["panelHeight"] = DISPLAY_PANEL_HEIGHT;
 #endif
-      doc["width"]   = SCREEN_WIDTH;
+      doc["width"]   = SCREEN_WIDTH;   // logical: 64 x 128 in portrait
       doc["height"]  = SCREEN_HEIGHT;
+      doc["rotation"] = oled_layout::degreesFromRotation(displayRotation());
       doc["enabled"] = gOledRunning;
       const char* modeStr;
       switch (currentOledMode) {
@@ -5317,7 +5854,7 @@ bool earlyOledInit() {
   oledConnected = true;
   gOledRunning = true;
   gOledConsole.init();
-  gDisplay->setRotation(gSettings.oledFlipped ? 2 : 0);
+  oledApplySavedRotationNow();
   displaySetBrightness(gSettings.oledBrightness);
   inputAbstractionInit();
   currentBootPhase = BOOT_PHASE_ANIMATION;
@@ -6017,7 +6554,7 @@ void updateInputState() {
   gNavEvents = {false, false, false, false, 0, 0, 0};
   gInputStateValid = false;
   InputCache input{};
-  if (inputConsumeSnapshot(input)) {
+  if (inputNavConsume(input)) {
     gCurrentJoyX = input.joyX;
     gCurrentJoyY = input.joyY;
     gCurrentButtons = inputNavButtons(input);
@@ -6216,7 +6753,7 @@ bool processOledInput() {
   }
   
   InputCache input{};
-  const bool snapshotAvailable = inputCacheSnapshot(input);
+  const bool snapshotAvailable = inputNavSnapshot(input);
   const bool dataValid = snapshotAvailable && input.dataValid;
   int joyX = input.joyX, joyY = input.joyY;
   uint32_t buttons = inputNavButtons(input);
@@ -6249,6 +6786,10 @@ bool processOledInput() {
   // Check if there's any meaningful input
   bool deflectedX = abs(deltaX) > JOYSTICK_DEADZONE;
   bool deflectedY = abs(deltaY) > JOYSTICK_DEADZONE;
+  if (sNavHeldAcrossTurn) {
+    if (deflectedX || deflectedY) deflectedX = deflectedY = false;  // still the old hold
+    else sNavHeldAcrossTurn = false;
+  }
   bool hasJoystickInput = deflectedX || deflectedY;
   bool hasButtonChange = (buttons != lastButtonState) || latchedPresses != 0;
   
@@ -6292,7 +6833,7 @@ bool processOledInput() {
   
   // Consume only after all early exits. Short click pulses must remain latched
   // across navigation debounce and the first-read initialization frame.
-  if (!inputConsumeSnapshot(input)) return false;
+  if (!inputNavConsume(input)) return false;
   // Pair the latch with the same raw sample so a newly arrived press is
   // delivered once, even if it arrived after the peek above.
   buttons = inputNavButtons(input);
@@ -6848,7 +7389,7 @@ const CommandEntry oledCommands[] = {
   { "oledbootduration", "Boot animation duration (ms): <500-10000>", true, cmd_oled_bootduration, "Usage: oledbootduration <500..10000>" },
   { "oledupdateinterval", "Display update interval (ms): <10-1000>", true, cmd_oled_updateinterval, "Usage: oledupdateinterval <10..1000>" },
   { "oledbrightness", "Display brightness: <0-255>", true, cmd_oled_brightness, "Usage: oledbrightness <0..255>" },
-  { "oledflip",       "Flip display 180°: [on|off|toggle]", true, cmd_oled_flip, "Usage: oledflip [on|off|toggle]" },
+  { "oledrotation", "Display rotation in degrees: [0|90|180|270] (90/270: portrait, SSD1306 OLED only)", true, cmd_oled_rotation, "Usage: oledrotation [0|90|180|270]" },
   { "oledthermalscale", "Thermal image scale: <1.0-10.0>", true, cmd_oled_thermalscale, "Usage: oledthermalscale <1.0..10.0>" },
   { "oleddump", "Display canvas as text ('#' lit, '.' dark): [first-row] [rows]", true, cmd_oleddump,
     "Usage: oleddump [first-row] [rows]\n"
@@ -6935,11 +7476,11 @@ void applyOledBrightness() {
 #endif
 }
 
-// Apply oledFlipped live by re-rotating the active display.
+// Apply oledRotation live by re-rotating the active display.
 //
 // This only REQUESTS the rotation: the render task applies it at the top of the
 // next frame (see oledRotationPending in updateOledDisplay). Callers are on
-// other tasks — cmd_exec for `oledflip` and the on-device settings editor,
+// other tasks — cmd_exec for `oledrotation` and the on-device settings editor,
 // the sleep-resume path — and both setRotation() and the framebuffer belong to
 // the render task.
 //

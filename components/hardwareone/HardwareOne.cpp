@@ -1,5 +1,6 @@
 #include "Arduino.h"
 #include "System_CommandReply.h"  // the reply words and how to read them
+#include "Input_IMU.h"  // imuInputTick: the teach step's save
 #include <atomic>
 #include <utility>
 #include <esp_attr.h>
@@ -2750,6 +2751,8 @@ void hardwareone_loop() {
   // The encoder board's pixels: one frame when due (changed colours only,
   // about 30 fps at most, a busy bus skips the frame). No-op when closed.
   encoderTick();
+  // IMU input: save a mount its teach step learned (no-op elsewhere).
+  imuInputTick();
 
   // ESP32-C6 radio companion (P4X-EYE): drain transport events, run the
   // heartbeat watchdog and the retry/recovery policy. No-op elsewhere.

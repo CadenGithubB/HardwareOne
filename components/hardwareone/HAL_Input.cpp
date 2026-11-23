@@ -4,6 +4,8 @@
 
 #include "HAL_Input.h"
 #include "HAL_InputInternal.h"
+#include "HAL_Display.h"         // displayRotation: navigation turns with the screen
+#include "Input_RotationCore.h"
 #include "System_Mutex.h"
 #include "System_Debug.h"
 #include "i2csensor_seesaw.h"
@@ -399,6 +401,31 @@ uint32_t inputGetCustomButtonMapping(InputButton button) {
 // previous gamepadGetX/Y/Buttons functions in i2csensor_seesaw.cpp are
 // gamepad-only by virtue of where they live; this generalisation lives in
 // the HAL so it's available regardless of which driver is compiled.
+
+// Navigation turns with the screen (HAL_Input.h).
+int inputScreenQuarterTurns() {
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+  return displayRotation() & 3;
+#else
+  return 0;
+#endif
+}
+
+static void inputTurnToScreen(InputCache& reading) {
+  input_rotation::rotateStick(inputScreenQuarterTurns(), JOYSTICK_CENTER, reading.joyX, reading.joyY);
+}
+
+bool inputNavSnapshot(InputCache& out, uint32_t timeoutMs) {
+  const bool ok = inputCacheSnapshot(out, timeoutMs);
+  if (ok) inputTurnToScreen(out);
+  return ok;
+}
+
+bool inputNavConsume(InputCache& out, uint32_t timeoutMs) {
+  const bool ok = inputConsumeSnapshot(out, timeoutMs);
+  if (ok) inputTurnToScreen(out);
+  return ok;
+}
 
 int inputGetX() {
   InputCache reading;

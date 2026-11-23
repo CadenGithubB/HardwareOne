@@ -80,7 +80,7 @@ static void displayLoginMode() {
   
   // Username field
   if (currentField == FIELD_USERNAME) {
-    oledDisplay->fillRect(0, fieldY1, 128, 8, DISPLAY_COLOR_WHITE);
+    oledDisplay->fillRect(0, fieldY1, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
   }
   oledDisplay->setCursor(0, fieldY1);
@@ -91,7 +91,7 @@ static void displayLoginMode() {
   
   // Password field
   if (currentField == FIELD_PASSWORD) {
-    oledDisplay->fillRect(0, fieldY2, 128, 8, DISPLAY_COLOR_WHITE);
+    oledDisplay->fillRect(0, fieldY2, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
   }
   oledDisplay->setCursor(0, fieldY2);
@@ -108,7 +108,7 @@ static void displayLoginMode() {
   
   // Login button
   if (currentField == FIELD_LOGIN_BUTTON) {
-    oledDisplay->fillRect(0, fieldY3, 128, 8, DISPLAY_COLOR_WHITE);
+    oledDisplay->fillRect(0, fieldY3, SCREEN_WIDTH, 8, DISPLAY_COLOR_WHITE);
     oledDisplay->setTextColor(DISPLAY_COLOR_BLACK);
   }
   oledDisplay->setCursor(0, fieldY3);

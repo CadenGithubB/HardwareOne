@@ -21,9 +21,9 @@ static void displayMicrophone() {
   
   if (!gMicRunning) {
     // Show muted volume icon when mic is off
-    oledDrawIcon(48, y + 2, "vol_mute", 16);
-    oledDisplay->setCursor(20, y + 22);
-    oledDisplay->println("Mic not active");
+    oledDrawIcon((SCREEN_WIDTH - 32) / 2, y + 2, "vol_mute", 16);
+    oledDisplay->setCursor(oledPortrait() ? 0 : 20, y + 22);
+    oledDisplay->println(oledPortrait() ? "Mic is off" : "Mic not active");
     return;
   }
   
@@ -34,6 +34,21 @@ static void displayMicrophone() {
   // Get current audio level (0-100)
   int level = getAudioLevel();
   
+  if (oledPortrait()) {
+    // Portrait hero: LEVEL, the percentage at size 2, the state under it,
+    // then a full-width meter and the sample rate. (The capture dot in the
+    // status row already says a recording runs.)
+    namespace P = oled_layout::portrait;
+    char value[6];
+    snprintf(value, sizeof(value), "%d", level);
+    oledHeroCard(oledDisplay, "LEVEL", value, micRecordingBusy() ? "REC" : "%");
+    oledMeter(oledDisplay, P::kHeroBandY + 2, 10, level, 100);
+    char rate[12];
+    snprintf(rate, sizeof(rate), "%dHz", micSampleRate);
+    oledKvRow(oledDisplay, P::kHeroBandY + 16, "Rate", rate);
+    return;
+  }
+
   // Recording indicator (blinking if recording)
   if (micRecordingBusy()) {
     static bool blinkState = false;
@@ -129,7 +144,7 @@ static const OledModeEntry microphoneOledModes[] = {
     microphoneInputHandler,      // inputFunc
     true,                        // showInMenu
     65,                          // menuOrder (after FM Radio at 60)
-    nullptr                      // hints
+    "X:Power Y:Rec B:Back"       // hints: X opens/closes the mic, Y records
   }
 };
 

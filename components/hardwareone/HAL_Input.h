@@ -173,6 +173,19 @@ bool inputCacheSnapshot(InputCache& out, uint32_t timeoutMs = 10);
 bool inputConsumeSnapshot(InputCache& out, uint32_t timeoutMs = 10);
 // On failure, preserve the caller's last sequence (no synthetic activity).
 bool inputActivitySequence(uint32_t& out, uint32_t timeoutMs = 10);
+
+// Navigation turns with the screen (owner, 2026-11-23): with the SSD1306
+// turned by `oledrotation`, up on the joystick, the IMU tilt and the ANO ring
+// is up on the screen as it is seen. The quarter turns the screen is turned
+// by (0 off the SSD1306; the P4 canvases keep today's input).
+int inputScreenQuarterTurns();
+// The OLED navigation's reads: inputCacheSnapshot / inputConsumeSnapshot with
+// the joystick turned to the screen. `buttons` stays the physical state for
+// every other reader (the ANO's direction buttons are turned where its pins
+// become buttons, i2csensor_ano_encoder_core.h). The wheel is never turned:
+// clockwise stays clockwise at any rotation.
+bool inputNavSnapshot(InputCache& out, uint32_t timeoutMs = 10);
+bool inputNavConsume(InputCache& out, uint32_t timeoutMs = 10);
 size_t inputCacheStorageBytes();
 
 // Raw panel coordinates, independent of button/joystick data. One UI consumer.

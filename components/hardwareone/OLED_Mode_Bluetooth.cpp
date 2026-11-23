@@ -210,6 +210,13 @@ static int btRowsLeft() {
 
 // One row cut at 21 columns: Adafruit wraps a longer one onto the next row.
 static void btRow(const char* label, const char* value) {
+  // Portrait: the label on one row and the value right-aligned under it
+  // when the pair is wider than the 10-cell row.
+  if (oledPortrait()) {
+    const int y = oledKvRow(oledDisplay, oledDisplay->getCursorY(), label, value);
+    oledDisplay->setCursor(0, y);
+    return;
+  }
   char line[22];
   snprintf(line, sizeof(line), "%s%s", label, value);
   oledDisplay->println(line);
@@ -400,6 +407,7 @@ static void displayBluetoothStatus() {
   // Decorated single-line render from the scroll state (honors the scroll
   // window), with the original inline state indicators.
   const int lineHeight = 8;
+  oledScrollFitRowsTo(&sBtMenuScroll, lineHeight, OLED_CONTENT_START_Y);
   int visEnd = sBtMenuScroll.scrollOffset + sBtMenuScroll.visibleLines;
   if (visEnd > sBtMenuScroll.itemCount) visEnd = sBtMenuScroll.itemCount;
   int row = 0;
@@ -419,11 +427,11 @@ static void displayBluetoothStatus() {
 
   // Scroll indicators
   if (sBtMenuScroll.scrollOffset > 0) {
-    oledDisplay->setCursor(120, OLED_CONTENT_START_Y);
+    oledDisplay->setCursor(SCREEN_WIDTH - 8, OLED_CONTENT_START_Y);
     oledDisplay->print("\x18");
   }
   if (visEnd < sBtMenuScroll.itemCount) {
-    oledDisplay->setCursor(120, OLED_CONTENT_START_Y + (sBtMenuScroll.visibleLines - 1) * lineHeight);
+    oledDisplay->setCursor(SCREEN_WIDTH - 8, OLED_CONTENT_START_Y + (sBtMenuScroll.visibleLines - 1) * lineHeight);
     oledDisplay->print("\x19");
   }
 }
@@ -857,6 +865,7 @@ static void displayPhone() {
 
   const int lineHeight = 8;
   const int top = OLED_CONTENT_START_Y + kPhoneHeaderLines * lineHeight;
+  oledScrollFitRowsTo(&sPhoneScroll, lineHeight, top);
   int visEnd = sPhoneScroll.scrollOffset + sPhoneScroll.visibleLines;
   if (visEnd > sPhoneScroll.itemCount) visEnd = sPhoneScroll.itemCount;
   int row = 0;
@@ -879,11 +888,11 @@ static void displayPhone() {
     }
   }
   if (sPhoneScroll.scrollOffset > 0) {
-    oledDisplay->setCursor(120, top);
+    oledDisplay->setCursor(SCREEN_WIDTH - 8, top);
     oledDisplay->print("\x18");
   }
   if (visEnd < sPhoneScroll.itemCount) {
-    oledDisplay->setCursor(120, top + (sPhoneScroll.visibleLines - 1) * lineHeight);
+    oledDisplay->setCursor(SCREEN_WIDTH - 8, top + (sPhoneScroll.visibleLines - 1) * lineHeight);
     oledDisplay->print("\x19");
   }
 }

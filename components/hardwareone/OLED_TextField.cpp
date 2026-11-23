@@ -21,6 +21,11 @@
 #include "OLED_TextFieldCore.h"
 
 // BEGIN_TEXT_FIELD_IMPL — host tests splice from here to END_TEXT_FIELD_IMPL.
+// The live canvas width (64 in portrait); a harness that only names the
+// panel's width clips to that.
+#ifndef SCREEN_WIDTH
+#define SCREEN_WIDTH DISPLAY_WIDTH
+#endif
 namespace {
 
 // Forwards drawPixel inside one rectangle. Adafruit_GFX::drawChar clips to the
@@ -65,7 +70,7 @@ void oledTextFieldDraw(Adafruit_GFX* display, int x, int y, int w, const char* t
   const int top = OLED_CONTENT_START_Y;
   const int bottom = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT;
   const int cx0 = x > 0 ? x : 0;
-  const int cx1 = (x + w < DISPLAY_WIDTH) ? x + w : DISPLAY_WIDTH;
+  const int cx1 = (x + w < SCREEN_WIDTH) ? x + w : SCREEN_WIDTH;
   const int cy0 = y > top ? y : top;
   const int cy1 = (y + oled_text::kGlyphH < bottom) ? y + oled_text::kGlyphH : bottom;
   if (cx0 >= cx1 || cy0 >= cy1) return;

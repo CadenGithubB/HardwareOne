@@ -104,7 +104,7 @@ EDITOR_FUNCTIONS = (
 def editor(read) -> str:
     source = read("OLED_SettingsEditor.cpp")
     # The editor's row geometry constants, as the production file defines them.
-    parts = re.findall(r"(?m)^static constexpr int kSe\w+ = \d+;$", source)
+    parts = re.findall(r"(?m)^static constexpr int kSe\w+ = \d+;$|^#define kSe\w+ \(.+\)$", source)
     for marker, standin in EDITOR_FUNCTIONS:
         if marker in source:
             parts.append(unique(source, marker, "OLED_SettingsEditor.cpp"))

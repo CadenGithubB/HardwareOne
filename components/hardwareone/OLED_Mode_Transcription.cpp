@@ -188,7 +188,7 @@ static unsigned lines(const char* text) {
   for(size_t at=0;text[at];) {
     char ch; at=nextGlyph(text,at,ch);
     if(ch=='\r') continue;
-    if(ch=='\n' || ++col==21) { ++count; col=0; }
+    if(ch=='\n' || ++col==(unsigned)oledCols()) { ++count; col=0; }
   }
   return count;
 }
@@ -199,7 +199,7 @@ static void drawText(const char* text) {
     char ch; at=nextGlyph(text,at,ch);
     if(ch=='\r') continue;
     if(row>=v.line && ch!='\n') oledDisplay->write(ch);
-    if(ch=='\n' || ++col==21) {
+    if(ch=='\n' || ++col==(unsigned)oledCols()) {
       ++row; col=0;
       if(row>v.line) y+=8;
       oledDisplay->setCursor(0,y);
@@ -223,7 +223,7 @@ static void displayTranscriptionHome() {
   const char* status=v.active?(v.saveEnabled?"Active; saving":"Active; not saving"):
       (v.continuous?"Local continuous":"Pi: one recording");
   const int available=oledVisibleRows(8)-2; // Keep at least two menu rows.
-  const auto wrapped=oled_message::wrap(v.message[0]?v.message:status,21,
+  const auto wrapped=oled_message::wrap(v.message[0]?v.message:status,oledCols(),
       available<1?1:(available>3?3:available));
   for(int i=0;i<wrapped.count;++i) {
     oledDisplay->setCursor(0,OLED_CONTENT_START_Y+i*8);

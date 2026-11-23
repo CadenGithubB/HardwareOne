@@ -26,7 +26,7 @@ static void displayRtcData() {
     oledDisplay->setCursor(0, y);
     oledDisplay->println("RTC not active");
     oledDisplay->println();
-    oledDisplay->println("Press X to start");
+    oledDisplay->println(oledPortrait() ? "X: start" : "Press X to start");
     return;
   }
   
@@ -48,6 +48,26 @@ static void displayRtcData() {
     return;
   }
   
+  const char* days[] = {"", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  if (oledPortrait()) {
+    // Portrait hero: TIME, hh:mm at size 2, the seconds under it; then the
+    // date and the day centred and the DS3231's temperature as a row.
+    char hm[6], sec[4], date[12], tempText[10];
+    snprintf(hm, sizeof(hm), "%02d:%02d", dt.hour, dt.minute);
+    snprintf(sec, sizeof(sec), ":%02d", dt.second);
+    oledHeroCard(oledDisplay, "TIME", hm, sec);
+    snprintf(date, sizeof(date), "%04d-%02d-%02d", dt.year, dt.month, dt.day);
+    oledDisplay->setCursor(oled_layout::centerX((int)strlen(date), SCREEN_WIDTH), 66);
+    oledDisplay->print(date);
+    if (dt.dayOfWeek >= 1 && dt.dayOfWeek <= 7) {
+      oledDisplay->setCursor(oled_layout::centerX(3, SCREEN_WIDTH), 76);
+      oledDisplay->print(days[dt.dayOfWeek]);
+    }
+    snprintf(tempText, sizeof(tempText), "%.1fC", temp);
+    oledKvRow(oledDisplay, 90, "Temp", tempText);
+    return;
+  }
+
   // Display date
   oledDisplay->setCursor(0, y);
   oledDisplay->print(dt.year);
@@ -59,7 +79,6 @@ static void displayRtcData() {
   oledDisplay->print(dt.day);
   
   // Day of week on same line
-  const char* days[] = {"", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
   if (dt.dayOfWeek >= 1 && dt.dayOfWeek <= 7) {
     oledDisplay->print("  ");
     oledDisplay->println(days[dt.dayOfWeek]);

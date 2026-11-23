@@ -20,9 +20,9 @@ static void displayFmRadio() {
   oledDisplay->setTextSize(1);
   
   if (!gFmRadioConnected || !gRadioInitialized) {
-    oledDrawIcon(48, y + 2, "vol_mute", 16);
-    oledDisplay->setCursor(16, y + 22);
-    oledDisplay->println("FM Radio not active");
+    oledDrawIcon((SCREEN_WIDTH - 32) / 2, y + 2, "vol_mute", 16);
+    oledDisplay->setCursor(oledPortrait() ? 0 : 16, y + 22);
+    oledDisplay->println(oledPortrait() ? "FM is off" : "FM Radio not active");
     oledDisplay->setCursor(0, OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 8);
     oledDisplay->print("X: Start");
     return;
@@ -33,6 +33,41 @@ static void displayFmRadio() {
     oledDisplay->setCursor(0, y);
     oledDisplay->print("FM reading unavailable");
     oledMarkDirty();
+    return;
+  }
+
+  if (oledPortrait()) {
+    // Portrait hero: FREQ (the stereo flag right-aligned on its row), the
+    // frequency at size 2 and MHz under it ("Seek" and up/dn while seeking);
+    // then RSSI as a row and a meter, the volume ladder, and the RDS name.
+    namespace P = oled_layout::portrait;
+    char value[8];
+    if (snap.seekInProgress) {
+      oledHeroCard(oledDisplay, "FREQ", "Seek", snap.seekDirUp ? "up" : "dn");
+    } else {
+      snprintf(value, sizeof(value), "%.1f",
+               oledValueScrollShown(sFmTuneScroll, (int32_t)snap.frequency) / 100.0);
+      oledHeroCard(oledDisplay, "FREQ", value, "MHz");
+    }
+    oledDisplay->setCursor(oled_layout::rightAlignX(2, P::kTextLastX), P::kHeroLabelY);
+    oledDisplay->print(snap.stereo ? "ST" : "MO");
+    char rssi[8];
+    snprintf(rssi, sizeof(rssi), "%d", snap.rssi);
+    int ry = oledKvRow(oledDisplay, P::kHeroBandY + 1, "RSSI", rssi);
+    oledMeter(oledDisplay, ry + 1, 7, snap.rssi, 64);
+    ry += 10;
+    oledDisplay->setCursor(P::kTextX, ry);
+    if (snap.muted) {
+      oledDisplay->print("MUTED");
+    } else {
+      oledDisplay->print("Vol");
+      oledDrawLevelBars(22, ry, (snap.volume + 1) / 2, 8, 8);
+    }
+    ry += 10;
+    oledDisplay->setCursor(P::kTextX, ry);
+    if (strlen(snap.stationName) > 0) oledDisplay->printf("%.10s", snap.stationName);
+    else oledDisplay->print("No RDS");
+    if (snap.seekInProgress) oledMarkDirty();
     return;
   }
 

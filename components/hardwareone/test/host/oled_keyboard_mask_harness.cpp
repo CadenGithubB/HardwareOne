@@ -54,6 +54,7 @@ class Adafruit_SSD1306 {
   void setCursor(int, int y) { row = y; }
   void drawRect(int, int, int, int, int) {}
   void fillRect(int, int, int, int, int) {}
+  void drawFastHLine(int, int, int, int) {}
   void drawPixel(int, int, int) {}
   void fillCircle(int, int, int, int) {}
   void print(const char* text) { rows[row] += text; }
@@ -88,6 +89,13 @@ static bool oledCommandBusy() { return false; }
 static bool oledCaptureLive() { return false; }
 static uint32_t sKeyboardLineDrawnSig = 0;
 static bool sKeyboardLineShown = false;
+// The portrait keyboard (oledrotation 90/270) is compiled, not drawn here:
+// this display is the landscape canvas.
+static int oledNotificationUnreadCount() { return 0; }
+#define SCREEN_WIDTH 128
+#define oledPortrait() (false)
+template <class... Args> static void oledTextFieldDraw(Args...) {}
+#include "OLED_MessageText.h"
 
 // INSERT_KEYBOARD
 

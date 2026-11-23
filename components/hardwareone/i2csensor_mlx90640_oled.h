@@ -50,8 +50,15 @@ static void displayThermalVisual() {
   if (thermalHeight > 0 && scale * thermalHeight > OLED_CONTENT_HEIGHT) {
     scale = (float)OLED_CONTENT_HEIGHT / (float)thermalHeight;
   }
+  // Portrait (64 px wide): the image fills the width and the readings go
+  // under it.
+  const bool tall = oledPortrait();
+  if (tall && thermalWidth > 0 && scale * thermalWidth > SCREEN_WIDTH) {
+    scale = (float)SCREEN_WIDTH / (float)thermalWidth;
+  }
   const int imageWidth = (int)(thermalWidth * scale);
-  const int textStartX = imageWidth + 2;
+  const int textStartX = tall ? 0 : imageWidth + 2;
+  const int textTop = tall ? imageTop + (int)(thermalHeight * scale) + 2 : imageTop;
 
   // Temperature range for mapping
   float tempRange = maxTemp - minTemp;
@@ -94,16 +101,16 @@ static void displayThermalVisual() {
 
   // Temperatures on the right side, inside the content area (the header bar
   // names the screen).
-  int lineStep = (OLED_CONTENT_HEIGHT - 8) / 2;
+  int lineStep = tall ? 9 : (OLED_CONTENT_HEIGHT - 8) / 2;
   if (lineStep > 16) lineStep = 16;
   oledDisplay->setTextSize(1);
-  oledDisplay->setCursor(textStartX, imageTop);
+  oledDisplay->setCursor(textStartX, textTop);
   oledDisplay->print("Min:");
   oledDisplay->print((int)minTemp);
-  oledDisplay->setCursor(textStartX, imageTop + lineStep);
+  oledDisplay->setCursor(textStartX, textTop + lineStep);
   oledDisplay->print("Avg:");
   oledDisplay->print((int)avgTemp);
-  oledDisplay->setCursor(textStartX, imageTop + 2 * lineStep);
+  oledDisplay->setCursor(textStartX, textTop + 2 * lineStep);
   oledDisplay->print("Max:");
   oledDisplay->print((int)maxTemp);
 }

@@ -97,6 +97,32 @@ bool displayIsLandscape() {
 #endif
 }
 
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+// The live logical layout behind SCREEN_WIDTH and friends (HAL_Display.h).
+// Landscape until the render task applies another rotation.
+oled_layout::Geometry gOledGeometry = oled_layout::geometryFor(DISPLAY_WIDTH, DISPLAY_HEIGHT);
+#endif
+namespace {
+int sDisplayRotation = 0;
+}
+
+bool displaySetRotation(int rotation) {
+  if (rotation < 0 || rotation > 3) return false;
+#if DISPLAY_TYPE != DISPLAY_TYPE_SSD1306
+  // The P4 canvases keep their landscape layout; they only flip.
+  if (oled_layout::rotationIsPortrait(rotation)) return false;
+#endif
+  if (!gDisplay) return false;
+  gDisplay->setRotation(static_cast<uint8_t>(rotation));
+  sDisplayRotation = rotation;
+#if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
+  gOledGeometry = oled_layout::geometryFor(gDisplay->width(), gDisplay->height());
+#endif
+  return true;
+}
+
+int displayRotation() { return sDisplayRotation; }
+
 bool displayIsReady() { return displayReady.load(); }
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306
 uint8_t gDisplayI2cAddress = DISPLAY_I2C_ADDR_ALT;

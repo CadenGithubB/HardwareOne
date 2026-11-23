@@ -21,6 +21,34 @@ dated from each version's commit. Dates are YYYY-MM-DD.
 The version stays 0.99.99.1 until the 1.0 gate in `RELEASING.md` is met; this section collects
 everything user-visible since the v0.99.99.1 tag.
 
+### Added (OLED rotation and portrait)
+Built and host-tested; not yet run on a device.
+- **`oledrotation 0|90|180|270`** turns the SSD1306 OLED at run time, applied at the next frame and
+  kept for the next boot (also in Settings > oled). 90 and 270 show a 64 x 128 portrait layout:
+  fixed status slots, the title on its own row, stacked rows, the selected item's icon above the
+  menu lists, large readings for ToF (with a vertical gauge), RTC, FM radio and the microphone,
+  key/value pages that stack a long value under its label, a 5 x 6 keyboard, and a two-line footer
+  with one A/B/X/Y chip each. The P4 displays take 0 and 180. **Breaking:** `oledflip` is removed;
+  `oledrotation 180` is the flipped screen (no saved value is carried over).
+- Navigation turns with the screen: the joystick, the IMU tilt and the ANO ring's buttons mean up
+  on the screen as it is seen at every rotation, including 180 (the ANO wheel keeps its
+  direction). `oledstatus json` reports the logical `width` and `height` and the `rotation`.
+- The Map draws its raster at every rotation (it used to be copied unturned, upside down on a
+  flipped screen), and `oleddump` dumps the screen as it is seen (64 columns in portrait).
+
+### Changed (input device mounts)
+- **`imuinputmount 0|90|180|270 [mirror]`** and **`anomount 0|90|180|270 [mirror]`** say how the
+  input device sits against the screen; they are applied before the screen's rotation, so turning
+  the screen keeps a mount fix. **Breaking:** they replace `imuinputswapxy`, `imuinputinvertx`,
+  `imuinputinverty`, `anoencoderinvert`, `anoencoderswapud` and `anoencoderswaplr` (both ANO swaps
+  are `anomount 180`, the default; one swap is a mirror, which also turns the wheel the other way).
+  `imuinputread json` and `anoencoderstatus json` show `mount` and `mirror` in place of the flags.
+- **`imuinputlearn`**: answers at once; tilt the sign toward the top of the screen within 10 s and
+  the lean sets `imuinputmount` (keeping its mirror), confirmed on the screen and shown by
+  `imuinputread` (`lastLearn`, `mount`). After a shake calibration the step is offered ("Tap the
+  face to teach which way is up"): only a face tap within about 4 s starts it; otherwise nothing
+  changes and the menus work at once. A shake or a calibration cancels a running step.
+
 ### Removed (ESP-NOW 1.0 clean-out)
 Host-tested and built; not run on a device.
 - **`espnowpair` is gone: every pairing is encrypted.** Pair by discovery (`espnowpairmode` on

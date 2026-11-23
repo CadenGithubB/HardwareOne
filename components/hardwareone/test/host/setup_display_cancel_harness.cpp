@@ -63,6 +63,7 @@ struct SerialBoundary {
 volatile bool gWizardOwnsSerial = true;
 static bool gOledRunning = true, oledConnected = true;
 static constexpr int OLED_HEADER_HEIGHT = 10, OLED_CONTENT_HEIGHT = 43;
+static constexpr int SCREEN_WIDTH = 128;  // the landscape canvas (the firmware reads the live layout)
 static constexpr int DISPLAY_COLOR_WHITE = 1, DISPLAY_COLOR_BLACK = 0, SSD1306_WHITE = 1;
 static constexpr int OLED_KEYBOARD_MAX_LENGTH = 128, JOYSTICK_DEADZONE = 20;
 #define EXT_RAM_BSS_ATTR

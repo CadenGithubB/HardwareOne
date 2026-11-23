@@ -86,7 +86,7 @@ static bool oledEspNowRunOwnerCommand(const char* cmd, const char* failToast) {
 // lockstep with what actually fits. Hardcoding it (the old visibleLines=3 / yPos<56)
 // let a scrolled-to row spill into and below the footer, which also made the list
 // look stuck because the cursor lived in a slot that wasn't physically on screen.
-static constexpr int kMsgListTopY  = OLED_CONTENT_START_Y;  // first row Y, below the global header
+#define kMsgListTopY (OLED_CONTENT_START_Y)  // first row Y, below the global header
 static constexpr int kMsgRowHeight = 16;  // two 8px lines per message row
 static inline int oledEspNowMsgFooterTopY() { return OLED_HEADER_HEIGHT + OLED_CONTENT_HEIGHT; }
 static inline int oledEspNowMsgVisibleRows() {

@@ -66,7 +66,7 @@ int  anoEncoderBuildDataJson(char* buf, size_t bufSize);
 const char* cmd_anoencoder(const String& argsInput);
 const char* cmd_anoencoderstatus(const String& argsInput);
 const char* cmd_anoencoderi2caddr(const String& argsInput);
-const char* cmd_anoencoderinvert(const String& argsInput);
+const char* cmd_anomount(const String& argsInput);
 
 #else
 inline bool anoEncoderCacheSnapshot(AnoEncoderCache& out, uint32_t timeoutMs = 10) {

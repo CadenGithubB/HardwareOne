@@ -11,6 +11,7 @@ toggle keeps the other saved categories, and that Back returns to the row it
 came from.
 """
 from __future__ import annotations
+from oled_landscape_stubs import LANDSCAPE_STUBS, portrait_scroll_helpers
 
 import argparse
 import os
@@ -50,9 +51,9 @@ def generate(read) -> str:
              extract_block(utils_h, "struct OledScrollItem") + ";",
              extract_block(utils_h, "struct OledScrollState") + ";",
              read("OLED_Layout.h").replace("#pragma once", ""),
-             extract_block(utils_h, "inline constexpr int oledVisibleRows(")]
+             extract_block(utils_h, "inline int oledVisibleRows(")]
 
-    production = []
+    production = [LANDSCAPE_STUBS, portrait_scroll_helpers(utils, render=False)]
     for source, name, marker in ([(debug, "System_Debug.cpp", m) for m in DEBUG_FUNCTIONS] +
                                  [(utils, "OLED_Utils.cpp", m) for m in SCROLL_FUNCTIONS]):
         require(source.count(marker) == 1, f"{name}: marker missing or not unique: {marker}")

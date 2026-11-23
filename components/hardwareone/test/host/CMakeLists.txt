@@ -22,6 +22,12 @@ target_compile_definitions(encoder_light_tests PRIVATE
 # swaps, the address rule, taps from the change flags, RIGHT tap = SELECT at
 # release, RIGHT+IN = START only, the wheel and failed reads.
 add_executable(ano_encoder_core_tests test_ano_encoder_core.cpp)
+# The OLED's runtime rotation (OLED_Layout.h) and input directions that
+# follow the screen and the device's mount (Input_RotationCore.h).
+add_executable(oled_rotation_core_tests test_oled_rotation_core.cpp)
+set_target_properties(oled_rotation_core_tests PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+target_include_directories(oled_rotation_core_tests PRIVATE ../..)
+target_compile_options(oled_rotation_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
 set_target_properties(ano_encoder_core_tests PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 target_include_directories(ano_encoder_core_tests PRIVATE ../..)
 target_compile_options(ano_encoder_core_tests PRIVATE -Wall -Wextra -Werror -pedantic)
@@ -1883,6 +1889,7 @@ add_test(NAME sdmmc_lifecycle
 add_test(NAME ht16k33_geometry_tests COMMAND ht16k33_geometry_tests)
 add_test(NAME encoder_light_tests COMMAND encoder_light_tests)
 add_test(NAME ano_encoder_core_tests COMMAND ano_encoder_core_tests)
+add_test(NAME oled_rotation_core_tests COMMAND oled_rotation_core_tests)
 add_test(NAME motion_core_tests COMMAND motion_core_tests)
 add_test(NAME motion_bno055_core_tests COMMAND motion_bno055_core_tests)
 add_test(NAME motion_lsm6dsox_core_tests COMMAND motion_lsm6dsox_core_tests)

@@ -330,6 +330,21 @@ REGISTER_OLED_MODE_MODULE(sSensorMenuModes, sizeof(sSensorMenuModes) / sizeof(sS
 // ============================================================================
 
 void displayLogo() {
+  const bool tall = oledPortrait();
+  if (tall) {
+    // Portrait: the name stacked and centred, the version under it, the
+    // turning device below.
+    oledDisplay->setTextSize(1);
+    oledDisplay->setCursor(oled_layout::centerX(8, SCREEN_WIDTH), 12);
+    oledDisplay->print("Hardware");
+    oledDisplay->setTextSize(2);
+    oledDisplay->setCursor(oled_layout::centerX(3, SCREEN_WIDTH, 2), 22);
+    oledDisplay->print("One");
+    oledDisplay->setTextSize(1);
+    char version[40];
+    snprintf(version, sizeof(version), "v%s", esp_app_get_description()->version);
+    oledPrintWrapped(oledDisplay, 0, 42, version, 2);
+  } else {
   // Text on the left
   oledDisplay->setTextSize(2);
   oledDisplay->setCursor(0, 10);
@@ -339,6 +354,7 @@ void displayLogo() {
   oledDisplay->setCursor(0, 44);
   oledDisplay->print("v");
   oledDisplay->println(esp_app_get_description()->version);
+  }
 
   // Animated 3D device model on the right
   static unsigned long animStartTime = 0;
@@ -351,8 +367,8 @@ void displayLogo() {
   float angleX = 0.15;
   float angleZ = 0;
 
-  const int deviceX = 112;
-  const int deviceY = 32;
+  const int deviceX = tall ? SCREEN_WIDTH / 2 : 112;
+  const int deviceY = tall ? 84 : 32;
   const float width = 12.5;
   const float height = 25.0;
   const float depth = 5.0;

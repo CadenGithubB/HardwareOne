@@ -22,6 +22,7 @@ static unsigned checks = 0, failures = 0;
   std::fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #condition); } } while (false)
 
 #define EXT_RAM_BSS_ATTR
+#define oledCols() 21  // the landscape row (the firmware reads the live layout)
 
 // --- OLED browser: viewer state, body builder, action rows ------------------
 // INSERT_OLED_VIEW_STATE

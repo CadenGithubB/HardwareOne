@@ -25,8 +25,12 @@
 #include <new>
 
 namespace {
+// The preview raster keeps the landscape content size (the panel's width,
+// the landscape content rows less the status row); portrait shows it at half
+// scale across the 64 px width.
 constexpr unsigned kWidth = DISPLAY_WIDTH;
-constexpr unsigned kHeight = OLED_CONTENT_HEIGHT - 9;
+constexpr unsigned kHeight =
+    DISPLAY_HEIGHT - oled_layout::kHeaderHeight - oled_layout::kFooterHeight - oled_layout::kContentGap - 9;
 constexpr size_t kBytes = ((kWidth + 7) / 8) * kHeight;
 constexpr uint32_t kIntervalMs = 400;
 static_assert(kHeight > 0 && kWidth <= 256 && kHeight <= 256, "Camera preview viewport is bounded");
@@ -239,7 +243,20 @@ static void draw() {
   const auto state = view;
   if (state.ready) memcpy(painting, front, sizeof(painting));
   portEXIT_CRITICAL(&mutex);
-  if (state.ready) oledDisplay->drawBitmap(0, OLED_CONTENT_START_Y + 9, painting, kWidth, kHeight, DISPLAY_COLOR_WHITE);
+  if (state.ready && oledPortrait()) {
+    // Half scale: one dot per 2 x 2 block (lit when any of the four is).
+    const int top = OLED_CONTENT_START_Y + 18;
+    const unsigned rowBytes = (kWidth + 7) / 8;
+    auto lit = [&](unsigned x, unsigned y) {
+      return x < kWidth && y < kHeight && (painting[y * rowBytes + x / 8] & (0x80u >> (x & 7)));
+    };
+    for (unsigned y = 0; y < kHeight; y += 2)
+      for (unsigned x = 0; x < kWidth; x += 2)
+        if (lit(x, y) || lit(x + 1, y) || lit(x, y + 1) || lit(x + 1, y + 1))
+          oledDisplay->drawPixel((int)(x / 2), top + (int)(y / 2), DISPLAY_COLOR_WHITE);
+  } else if (state.ready) {
+    oledDisplay->drawBitmap(0, OLED_CONTENT_START_Y + 9, painting, kWidth, kHeight, DISPLAY_COLOR_WHITE);
+  }
   if (state.ready) {
     char status[24];
     snprintf(status, sizeof(status), "%s %s C%+d X:Off", state.frozen ? "Held" : "Live", state.dither ? "Dither" : "Mono", state.contrast);

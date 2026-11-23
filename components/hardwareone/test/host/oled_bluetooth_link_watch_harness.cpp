@@ -43,6 +43,24 @@ static uint32_t millis() { return gMillis; }
 // ---- Display: size-1 text as Adafruit_GFX lays it out (6x8 cells, wrap at 128) --
 #define SSD1306_WHITE 1
 #define OLED_CONTENT_START_Y 11
+// The live OLED layout, landscape only: the firmware reads it at run time
+// (HAL_Display.h); this harness draws the landscape canvas, so the portrait
+// branches compile but are never taken.
+#include "OLED_Layout.h"
+#ifndef SCREEN_WIDTH
+#ifdef DISPLAY_WIDTH
+#define SCREEN_WIDTH DISPLAY_WIDTH
+#else
+#define SCREEN_WIDTH 128
+#endif
+#endif
+#define oledPortrait() (false)
+#define oledCols() (SCREEN_WIDTH / 6)
+#define oledContentBottom() (OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 2)
+#define oledKvRow(...) (0)
+#define oledPrintWrapped(...) (0)
+#define oledHeroCard(...) ((void)0)
+#define oledMeter(...) ((void)0)
 static constexpr int kContentEnd = OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT;
 static constexpr bool kTall = OLED_CONTENT_HEIGHT > oled_layout::kOledContentHeight;
 
@@ -123,6 +141,11 @@ static void oledScrollClampSelection(OledScrollState* st) {
     st->scrollOffset = st->selectedIndex - st->visibleLines + 1;
 }
 static bool oledScrollHandleNav(OledScrollState*) { return false; }
+// OLED_Utils.cpp oledScrollFitRowsTo: the rows a hand-drawn list has from topY.
+static void oledScrollFitRowsTo(OledScrollState* st, int rowHeight, int topY) {
+  const int fit = std::max(1, (OLED_CONTENT_START_Y + OLED_CONTENT_HEIGHT - 2 - topY + 1) / rowHeight);
+  if (st->visibleLines != fit) { st->visibleLines = fit; oledScrollClampSelection(st); }
+}
 // OLED_Utils.cpp oledScrollRenderSimple: one 8 px row per visible item, "> " on
 // the selection. Its scrollbar is pixels, not text, so it is left out here.
 static void oledScrollRenderSimple(FakeDisplay* display, OledScrollState* state,

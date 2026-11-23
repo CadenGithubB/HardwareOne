@@ -35,8 +35,20 @@
 //   right  the +X end drops          left  the +X end rises
 //   up     the device turns about its +X axis so that its +Y side rises
 //          (lying flat: the far edge lifts)
-// swapXY / invertX / invertY fit that to how the board sits in its enclosure.
-// A device re-centred with its X axis vertical uses Y in X's place.
+// The mount (Config::mountTurns / mountMirror, `imuinputmount`) fits that to
+// how the board sits against the panel: mirrored first, then turned, as
+// Input_RotationCore.h does it for every input device. The screen's own
+// rotation is applied later, by the input layer. A device re-centred with its
+// X axis vertical uses Y in X's place.
+//
+// Teach step (`imuinputlearn`, or offered after a shake calibration): the
+// user tilts toward the top of the screen; the first lean past the engage
+// angle held for the dwell, in the device's own frame, is reported
+// (Output::learnEvent / learnDir) and the caller sets the mount from it
+// (input_rotation::learnQuarterTurns). No lean within kLearnTimeoutMs: it ends
+// and nothing changes; a shake or a calibration cancels it. After a
+// calibration the step is only offered: a face tap within kLearnOfferMs arms
+// it, anything else leaves the mount alone and the joystick works at once.
 //
 // The rates are the Adafruit 4517's: one sample every 20 ms. The windows that
 // are counted in samples (strong samples, the dwell, the centre capture)
@@ -47,6 +59,8 @@
 
 #include <math.h>
 #include <stdint.h>
+
+#include "Input_RotationCore.h"
 
 namespace imuinput {
 
@@ -76,6 +90,16 @@ constexpr uint32_t kCalStillMs = 3000;
 constexpr uint32_t kCalTimeoutMs = 20000;
 // Still, for the calibration: acceleration without gravity under this.
 constexpr float kCalStillAccel = 1.2f;  // m/s^2
+
+// The teach step: the stages Output::learnEvent reports.
+constexpr uint8_t kLearnNone = 0;
+constexpr uint8_t kLearnStarted = 1;   // tilt toward the top of the screen
+constexpr uint8_t kLearnDone = 2;      // learnDir is the lean, in the device's frame
+constexpr uint8_t kLearnTimedOut = 3;  // no lean: nothing changes
+constexpr uint8_t kLearnOffered = 4;   // after a calibration: a face tap arms the step
+constexpr uint8_t kLearnCancelled = 5; // a shake or a calibration ended it
+constexpr uint32_t kLearnTimeoutMs = 10000;
+constexpr uint32_t kLearnOfferMs = 4000;
 
 // The joystick's scale, the Seesaw gamepad's (i2csensor_seesaw.h): 0..1023,
 // centre 512, and the navigation's dead zone of 200 around it.
@@ -130,9 +154,9 @@ struct Config {
   float engageDeg = 15.0f;     // lean that deflects the joystick
   float releaseDeg = 11.0f;    // lean under which it returns to centre
   float fullDeg = 30.0f;       // lean of a full deflection
-  bool swapXY = false;
-  bool invertX = false;
-  bool invertY = false;
+  uint8_t mountTurns = 0;    // the mount: quarter turns (imuinputmount)
+  bool mountMirror = false;  // and mirrored
+  bool learnAfterCalibration = false;  // a finished calibration offers the teach step
   bool shakeCalibrate = true;  // a shake starts a calibration (off: a shake does nothing)
 };
 
@@ -154,6 +178,8 @@ struct Output {
   bool recentred = false; // a new reference pose was taken on this sample
   uint8_t calEvent = kCalNone;  // a calibration stage reached on this sample
   uint8_t calSecondsLeft = 0;   // with kCalCountdown
+  uint8_t learnEvent = kLearnNone;  // a teach-step stage reached on this sample
+  uint8_t learnDir = 0;             // with kLearnDone: input_rotation::Dir in the device's frame
 };
 
 // Why a run of taps made no button (Engine::lastDrop).
@@ -238,6 +264,20 @@ class Engine {
  public:
   // Forget everything, the reference pose included (input was started).
   void reset() { *this = Engine(); }
+
+  // Start the teach step (or start it over): the next lean held past the
+  // engage angle is reported as the top of the screen.
+  void startLearn(uint32_t ms, Output* out = nullptr) {
+    learning_ = true;
+    offering_ = false;
+    learnStartMs_ = ms;
+    learnDwell_ = 0;
+    learnDwellDir_ = -1;
+    releaseJoystick();
+    if (out) out->learnEvent = kLearnStarted;
+  }
+  bool learning() const { return learning_; }
+  bool learnOffered() const { return offering_; }
 
   // Take the present pose as the centre, from the next calm samples.
   void recentre() {
@@ -339,7 +379,9 @@ class Engine {
       // A tap of the other kind ends the run in progress: its button goes out
       // now (unless the device was being moved about), and this tap starts a
       // new run.
-      if (tapCount_ > 0 && face != runFace_) {
+      if (tapCount_ > 0 && face != runFace_ && takeOffer(out, s.ms, movedSinceKnock)) {
+        tapCount_ = 0;
+      } else if (tapCount_ > 0 && face != runFace_) {
         const uint8_t what = movedSinceKnock ? 0 : buttonForTaps(tapCount_, runFace_);
         if (!what) noteDrop(movedSinceKnock ? kDropNeverCalm : kDropNoButton);
         tapCount_ = 0;
@@ -358,6 +400,8 @@ class Engine {
       if (since > cfg.tapWindowMs + kTapPatienceMs) {
         noteDrop(kDropNeverCalm);
         tapCount_ = 0;  // never calm enough to mean it
+      } else if (since > cfg.tapWindowMs && takeOffer(out, s.ms, movedSinceKnock)) {
+        tapCount_ = 0;
       } else if (since > cfg.tapWindowMs && !movedSinceKnock) {
         const uint8_t what = buttonForTaps(tapCount_, runFace_);
         if (!what) noteDrop(kDropNoButton);
@@ -388,6 +432,12 @@ class Engine {
             if (calState_ == CalState::Capturing) {
               calState_ = CalState::Idle;
               out.calEvent = kCalDone;
+              if (cfg.learnAfterCalibration) {
+                // Only an offer: a face tap within kLearnOfferMs arms the step.
+                offering_ = true;
+                offerUntilMs_ = s.ms + kLearnOfferMs;
+                out.learnEvent = kLearnOffered;
+              }
             }
           } else {  // not a direction (the samples cancelled out): try again
             captured_ = 0;
@@ -397,19 +447,49 @@ class Engine {
       }
     }
 
+    // ---- The teach step ----------------------------------------------------
+    if (offering_ && (inShake_ || calState_ != CalState::Idle ||
+                      (tapCount_ == 0 && static_cast<int32_t>(s.ms - offerUntilMs_) >= 0))) {
+      offering_ = false;  // the offer lapses quietly (a face run in progress may still take it)
+    }
+    if (learning_) {
+      if (inShake_ || calState_ != CalState::Idle) {
+        learning_ = false;  // a new shake or calibration ends it
+        out.learnEvent = kLearnCancelled;
+      } else if (static_cast<uint32_t>(s.ms - learnStartMs_) > kLearnTimeoutMs) {
+        learning_ = false;
+        out.learnEvent = kLearnTimedOut;
+      } else if (haveRef_ && !capturing_ && !moving && !frozen_) {
+        float x = 0, y = 0;
+        int dir = -1;
+        if (leanDegrees(s.up, up0_, e1_, e2_, x, y)) {
+          const bool xLeads = fabsf(x) >= fabsf(y);
+          const float v = xLeads ? x : y;
+          if (fabsf(v) >= cfg.engageDeg) {
+            dir = xLeads ? (v > 0 ? input_rotation::kRight : input_rotation::kLeft)
+                         : (v > 0 ? input_rotation::kUp : input_rotation::kDown);
+          }
+        }
+        if (dir >= 0 && dir == learnDwellDir_) {
+          if (++learnDwell_ >= kDwellSamples) {
+            learning_ = false;
+            out.learnEvent = kLearnDone;
+            out.learnDir = static_cast<uint8_t>(dir);
+          }
+        } else {
+          learnDwellDir_ = static_cast<int8_t>(dir);
+          learnDwell_ = dir >= 0 ? 1 : 0;
+        }
+      }
+    }
+
     // ---- Tilt -------------------------------------------------------------
-    if (!haveRef_ || capturing_ || moving || inShake_ || calState_ != CalState::Idle) {
+    if (!haveRef_ || capturing_ || moving || inShake_ || calState_ != CalState::Idle || learning_) {
       releaseJoystick();
     } else if (!frozen_) {
       float x = 0, y = 0;
       const bool inRange = leanDegrees(s.up, up0_, e1_, e2_, x, y);
-      if (cfg.swapXY) {
-        const float t = x;
-        x = y;
-        y = t;
-      }
-      if (cfg.invertX) x = -x;
-      if (cfg.invertY) y = -y;
+      input_rotation::orientVector(input_rotation::Mount{cfg.mountTurns, cfg.mountMirror}, 0, x, y);
       leanX_ = x;
       leanY_ = y;
       if (!inRange) {
@@ -465,11 +545,19 @@ class Engine {
   uint8_t lastDropTaps() const { return lastDropTaps_; }
   bool lastDropFace() const { return lastDropFace_; }
   uint8_t lastDrop() const { return lastDrop_; }
-  float leanX() const { return leanX_; }  // degrees, after the swap and the inversions
+  float leanX() const { return leanX_; }  // degrees, after the mount
   float leanY() const { return leanY_; }
   const float* reference() const { return up0_; }
 
  private:
+  // A finished run of face taps while the teach step is on offer arms it
+  // (instead of being a button).
+  bool takeOffer(Output& out, uint32_t ms, bool moved) {
+    if (!offering_ || !runFace_ || moved) return false;
+    offering_ = false;
+    startLearn(ms, &out);
+    return true;
+  }
   void noteDrop(uint8_t why) {
     ++drops_;
     lastDropTaps_ = tapCount_;
@@ -557,6 +645,13 @@ class Engine {
   int8_t dwellAxis_ = 0;
   int8_t dwellSign_ = 0;
   float leanX_ = 0.0f, leanY_ = 0.0f;
+
+  bool learning_ = false;
+  bool offering_ = false;
+  uint32_t offerUntilMs_ = 0;
+  uint32_t learnStartMs_ = 0;
+  int learnDwell_ = 0;
+  int8_t learnDwellDir_ = 0;
 };
 
 }  // namespace imuinput

@@ -1759,14 +1759,16 @@ bool OffscreenMapRenderer::shouldRenderFeature(uint8_t type, uint8_t subtype) {
 #if ENABLE_OLED_DISPLAY
 
 OledMapRenderer::OledMapRenderer(Adafruit_SSD1306* display) : _display(display) {
-  _width = DISPLAY_WIDTH;
-  _height = DISPLAY_CONTENT_HEIGHT;  // Content area only (between header and footer)
-  _offsetY = DISPLAY_CONTENT_START_Y;  // Offset to content area start
+  _width = SCREEN_WIDTH;
+  _height = OLED_CONTENT_HEIGHT;  // Content area only (between header and footer)
+  _offsetY = OLED_CONTENT_START_Y;  // Offset to content area start
 }
 
+// The content area of the live layout (it turns with `oledrotation`).
 void OledMapRenderer::setViewport(int width, int height) {
   _width = width;
   _height = height;
+  _offsetY = OLED_CONTENT_START_Y;
 }
 
 void OledMapRenderer::clear() {

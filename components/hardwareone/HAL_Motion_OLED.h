@@ -10,6 +10,15 @@
 #include <Adafruit_SSD1306.h>
 #include <math.h>
 
+// One reading row at y; returns the next row's y. A row wider than the
+// 64 px portrait row continues on the rows under it.
+static int imuOledRow(const char* line, int y) {
+  if (oledPortrait()) return oledPrintWrapped(oledDisplay, 0, y, line, 3, 8) + 2;
+  oledDisplay->setCursor(0, y);
+  oledDisplay->println(line);
+  return y + 10;
+}
+
 // IMU OLED display function - shows the latest reading
 static void displayImuActions() {
   // Header is rendered by the system - content starts at OLED_CONTENT_START_Y
@@ -20,7 +29,7 @@ static void displayImuActions() {
     oledDisplay->setCursor(0, y);
     oledDisplay->println("IMU not active");
     oledDisplay->println();
-    oledDisplay->println("Press X to start");
+    oledDisplay->println(oledPortrait() ? "X: start" : "Press X to start");
     return;
   }
 
@@ -38,9 +47,7 @@ static void displayImuActions() {
     }
     // Row 1: which chip, and its temperature.
     snprintf(line, sizeof(line), "%s %dC", imuBackendName(), (int)reading.imuTemp);
-    oledDisplay->setCursor(0, y);
-    oledDisplay->println(line);
-    y += 10;
+    y = imuOledRow(line, y);
 
     // Row 2: the angles. Yaw is shown in 0..359 (at most three characters),
     // whatever the mounting correction made of it. Without a heading, yaw
@@ -57,9 +64,7 @@ static void displayImuActions() {
         snprintf(line, sizeof(line), "P:%d R:%d Yr:%d", (int)reading.oriPitch, (int)reading.oriRoll, yawShown);
       }
     }
-    oledDisplay->setCursor(0, y);
-    oledDisplay->println(line);
-    y += 10;
+    y = imuOledRow(line, y);
 
     // Row 3: acceleration, m/s^2: one decimal while the row fits (up to
     // about 10 g on every axis), else whole numbers.
@@ -68,9 +73,7 @@ static void displayImuActions() {
       snprintf(line, sizeof(line), "A %.0f %.0f %.0f", (double)reading.accelX, (double)reading.accelY,
                (double)reading.accelZ);
     }
-    oledDisplay->setCursor(0, y);
-    oledDisplay->println(line);
-    y += 10;
+    y = imuOledRow(line, y);
 
     // Row 4: the heading with its compass point, the magnetometer's
     // calibration when the chip reports one (BNO055: c0..c3) and the field
@@ -85,8 +88,7 @@ static void displayImuActions() {
                                   reading.magZ * reading.magZ);
         snprintf(line + n, sizeof(line) - n, " %duT", (int)field);
       }
-      oledDisplay->setCursor(0, y);
-      oledDisplay->println(line);
+      imuOledRow(line, y);
     }
   } else {
     oledDisplay->setCursor(0, y);

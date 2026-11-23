@@ -87,7 +87,8 @@ static void displayCliResult() {
   oledDisplay->setTextColor(DISPLAY_COLOR_WHITE);
   oledDisplay->setCursor(0, y);
   String cmdLine = "> " + sLastCommand;
-  if (cmdLine.length() > 21) cmdLine = cmdLine.substring(0, 21);
+  const int cols = oledCols();  // 21 on the 128 px row, 10 in portrait
+  if ((int)cmdLine.length() > cols) cmdLine = cmdLine.substring(0, cols);
   oledDisplay->print(cmdLine);
   y += 11;
 
@@ -102,8 +103,8 @@ static void displayCliResult() {
   y += 11;
 
   // Result message, wrapped across the remaining content lines.
-  const int kMaxCols  = 21;
-  const int kMaxLines = 2;
+  const int kMaxCols  = cols;
+  const int kMaxLines = oledPortrait() ? 6 : 2;
   int pos = 0;
   int line = 0;
   int len = (int)sLastResult.length();
@@ -116,7 +117,7 @@ static void displayCliResult() {
   }
   if (pos < len) {
     // Signal that the message was truncated (full text is on CLI Output page).
-    oledDisplay->setCursor(122, y - 10);
+    oledDisplay->setCursor(SCREEN_WIDTH - 6, y - 10);
     oledDisplay->print("~");
   }
 }
