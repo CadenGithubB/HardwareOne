@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1031 commands across 60 modules (1031 registry entries).
+1032 commands across 60 modules (1032 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -35,7 +35,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`servo`](#servo) — 6 commands
 - [`thermal`](#thermal) — 23 commands
 - [`tof`](#tof) — 10 commands
-- [`imu`](#imu) — 16 commands
+- [`imu`](#imu) — 17 commands
 - [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
 - [`anoencoder`](#anoencoder) — 6 commands
@@ -585,14 +585,15 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## imu
 
-> The BNO055 is a 9-DOF inertial measurement unit providing fused absolute orientation. openimu starts it, imuread reports yaw/pitch/roll (degrees) plus acceleration, gyroscope, and chip temperature, and closeimu stops it; imuautostart [on|off] persists launching it at boot, and it runs on the fixed secondary I2C bus (Wire1) using the board external crystal. Beyond raw orientation, imuactions runs gesture/event detection derived from the motion data: shake, tilt (with direction), tap/knock, rotation (with axis), freefall, a step counter with cadence, and screen-style orientation. Because the chip can be mounted in any pose, imuorientationmode <0..8> applies a fixed remap (flip pitch/roll/yaw, 90-degree rotations, upside-down fixes), imuorientationcorrection <0|1> toggles that correction, and imupitchoffset/imurolloffset/imuyawoffset trim each axis in degrees.
+> The IMU is the motion sensor on I2C; the build picks its chip (a BNO055, which fuses absolute orientation on the chip). openimu starts it, imuread reports yaw/pitch/roll (degrees) plus acceleration, gyroscope, magnetometer and chip temperature, and closeimu stops it; imuautostart [on|off] persists launching it at boot, imubus and imuaddress say where it is wired. Beyond raw orientation, imuactions runs gesture/event detection derived from the motion data: shake, tilt (with direction), tap/knock, rotation (with axis), freefall, a step counter with cadence, and screen-style orientation. Because the chip can be mounted in any pose, imuorientationmode <0..8> applies a fixed remap (flip pitch/roll/yaw, 90-degree rotations, upside-down fixes), imuorientationcorrection <0|1> toggles that correction, and imupitchoffset/imurolloffset/imuyawoffset trim each axis in degrees.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
-| `closeimu` | A | Stop BNO055 IMU sensor. |
+| `closeimu` | A | Stop the IMU (motion sensor). |
 | `imuactions` |  | Show IMU action detection state. |
+| `imuaddress` | A | IMU I2C address (next openimu): [0x28\|0x29]<br/>`Usage: imuaddress [0x28\|0x29]` |
 | `imuautostart` | A | Enable/disable IMU auto-start after boot [on\|off]<br/>`Usage: imuautostart [on\|off]` |
-| `imubus` | A | Route BNO055 IMU to bus: <0\|1> (reboot required)<br/>`Usage: imuBus <0\|1>` |
+| `imubus` | A | Route the IMU to bus: <0\|1> (reboot required)<br/>`Usage: imuBus <0\|1>` |
 | `imudevicepollms` | A | IMU device poll interval: <50..1000><br/>`Usage: imuDevicePollMs <50..1000>` |
 | `imuewmafactor` | A | IMU EWMA smoothing: <0.0..1.0><br/>`Usage: imuewmafactor <0.0..1.0>` |
 | `imuorientationcorrection` | A | IMU orientation correction: <0\|1><br/>`Usage: imuorientationcorrection <0\|1>` |
@@ -604,7 +605,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `imutransitionms` | A | IMU transition time: <0..1000><br/>`Usage: imutransitionms <0..1000>` |
 | `imuwebmaxfps` | A | IMU web max FPS: <1..30><br/>`Usage: imuwebmaxfps <1..30>` |
 | `imuyawoffset` | A | IMU yaw offset in degrees: <-180..180><br/>`Usage: imuyawoffset <-180..180>` |
-| `openimu` | A | Start BNO055 IMU sensor. |
+| `openimu` | A | Start the IMU (motion sensor). |
 
 ## input
 
@@ -1024,7 +1025,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `debugi2cautostart` | A | Debug I2C sensor auto-start orchestration + init results.<br/>`Usage: debugi2cautostart <0\|1> [temp\|runtime]` |
 | `debugi2cbus` | A | Debug I2C bus lifecycle, polling pause/resume, status bumps.<br/>`Usage: debugi2cbus <0\|1> [temp\|runtime]` |
 | `debugi2cdiscovery` | A | Debug I2C device probing, registry, scan results.<br/>`Usage: debugi2cdiscovery <0\|1> [temp\|runtime]` |
-| `debugimu` | A | Debug IMU sensor (BNO055).<br/>`Usage: debugimu <0\|1> [temp\|runtime]` |
+| `debugimu` | A | Debug the IMU (motion sensor).<br/>`Usage: debugimu <0\|1> [temp\|runtime]` |
 | `debugimulifecycle` | A | Debug IMU init/connect/recovery.<br/>`Usage: debugimulifecycle <0\|1> [temp\|runtime]` |
 | `debugimupolling` | A | Debug IMU poll cadence.<br/>`Usage: debugimupolling <0\|1> [temp\|runtime]` |
 | `debugimuvalues` | A | Debug IMU orientation/acceleration values.<br/>`Usage: debugimuvalues <0\|1> [temp\|runtime]` |

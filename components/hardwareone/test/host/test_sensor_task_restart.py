@@ -48,14 +48,15 @@ def main() -> None:
         ("seesaw", "INPUT", "gInputTaskHandle"),
         ("ano_encoder", "INPUT", "gInputTaskHandle"),
         ("mlx90640", "THERMAL", "gThermalTaskHandle"),
-        ("bno055", "IMU", "gImuTaskHandle"),
+        ("HAL_Motion", "IMU", "gImuTaskHandle"),
         ("vl53l4cx", "TOF", "gTofTaskHandle"),
         ("rda5807", "FMRADIO", "gFmRadioTaskHandle"),
         ("apds9960", "APDS", "gApdsTaskHandle"),
         ("sths34pf80", "PRESENCE", "gPresenceTaskHandle"),
         ("pa1010d", "GPS", "gGpsTaskHandle"),
     ):
-        driver = (COMPONENT / f"i2csensor_{file}.cpp").read_text()
+        name = f"{file}.cpp" if file.startswith("HAL_") else f"i2csensor_{file}.cpp"
+        driver = (COMPONENT / name).read_text()
         code = re.sub(r"//[^\n]*|/\*.*?\*/", "", driver, flags=re.S)
         calls = re.findall(r"SENSOR_TASK_EXIT\s*\(([^)]+)\)\s*;", code)
         require(calls == [f"{subsystem}, {handle}"],

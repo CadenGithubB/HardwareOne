@@ -48,7 +48,7 @@ INCLUDE = f'#include "{OWNER}"'
 KEYS = {
     'FIX': 'fix', 'QUALITY': 'quality', 'SATS': 'sats', 'LAT': 'lat', 'LON': 'lon',
     'ALT': 'alt', 'SPEED': 'speed',
-    'ORI': 'ori', 'YAW': 'yaw', 'PITCH': 'pitch', 'ROLL': 'roll',
+    'ORI': 'ori', 'YAW': 'yaw', 'PITCH': 'pitch', 'ROLL': 'roll', 'MAG': 'mag',
     'OBJECTS': 'objects', 'DISTANCE_MM': 'distance_mm', 'STATUS': 'status',
     'FREQUENCY': 'frequency', 'RSSI': 'rssi', 'STATION': 'station',
     'X': 'x', 'Y': 'y', 'BUTTONS': 'buttons', 'POS': 'pos', 'AXIS': 'axis',
@@ -61,11 +61,13 @@ SENDERS = [
      {'FIX': 2, 'QUALITY': 2, 'SATS': 2, 'LAT': 2, 'LON': 2, 'ALT': 2, 'SPEED': 2},
      [b',"fix":1,"quality":%d,"sats":%d,"lat":%.6f,"lon":%.6f,"alt":%.2f,"speed":%.2f}',
       b',"fix":0,"quality":0,"sats":%d,"lat":0,"lon":0,"alt":0,"speed":0}']),
-    ('i2csensor_bno055.cpp', 'int imuBuildDataJson(',
-     {'ORI': 2, 'YAW': 1, 'PITCH': 1, 'ROLL': 1},
+    # The body ends with "}" after the optional mag and cal parts (HAL_Motion.cpp).
+    ('HAL_Motion.cpp', 'int imuBuildDataJson(',
+     {'ORI': 2, 'YAW': 1, 'PITCH': 1, 'ROLL': 1, 'MAG': 1},
      [b',"accel":null,"gyro":null,"ori":null,"temp":null}',
       b',"accel":{"x":%.2f,"y":%.2f,"z":%.2f},"gyro":{"x":%.3f,"y":%.3f,"z":%.3f},'
-      b'"ori":{"yaw":%.2f,"pitch":%.2f,"roll":%.2f},"temp":%d}']),
+      b'"ori":{"yaw":%.2f,"pitch":%.2f,"roll":%.2f},"temp":%d',
+      b',"mag":{"x":%.2f,"y":%.2f,"z":%.2f}', b',"cal":%u']),
     ('i2csensor_vl53l4cx.cpp', 'int tofBuildDataJson(',
      {'OBJECTS': 3, 'DISTANCE_MM': 1, 'STATUS': 1},
      [b',"objects":[]}', b',"objects":[',

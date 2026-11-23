@@ -23,7 +23,7 @@
 // names them here. HAL_Input.h and the sensor headers below were included for
 // that; they stay until a board build shows nothing else in this file reaches
 // a name through them.
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_vl53l4cx.h"
 #include "i2csensor_seesaw.h"

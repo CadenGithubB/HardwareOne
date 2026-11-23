@@ -6,7 +6,7 @@
 #include "System_User.h"  // For isAdminUser declaration
 #if ENABLE_WEB_SENSORS
   #if ENABLE_IMU_SENSOR
-    #include "i2csensor_bno055_web.h"
+    #include "HAL_Motion_Web.h"
   #endif
   #if ENABLE_THERMAL_SENSOR
     #include "i2csensor_mlx90640_web.h"
@@ -483,7 +483,7 @@ inline void streamDashboardInner(httpd_req_t* req, const String& username) {
   httpd_resp_send_chunk(req, "<script>window.__dashSensorDefs=window.__dashSensorDefs||[];</script>", HTTPD_RESP_USE_STRLEN);
  #if ENABLE_IMU_SENSOR
   httpd_resp_send_chunk(req, "<script>", HTTPD_RESP_USE_STRLEN);
-  streamBNO055ImuDashboardDef(req);
+  streamImuDashboardDef(req);
   httpd_resp_send_chunk(req, "</script>", HTTPD_RESP_USE_STRLEN);
  #endif
  #if ENABLE_THERMAL_SENSOR

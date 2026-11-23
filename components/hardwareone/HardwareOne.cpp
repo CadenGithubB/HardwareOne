@@ -118,7 +118,7 @@ void getClientIp(httpd_req_t* req, char* ipBuf, size_t bufSize);
 // sensor_config.h included early (before WiFi)
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_vl53l4cx.h"
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_seesaw.h"
 #include "i2csensor_apds9960.h"
 #include "i2csensor_pa1010d.h"
@@ -1875,7 +1875,7 @@ void hardwareone_setup() {
     broadcastOutput("  [N] TOF      | Disabled (~25-30KB flash, ~10KB RAM saved)");
 #endif
 #if ENABLE_IMU_SENSOR
-    broadcastOutput("  [Y] IMU      | BNO055 9-DOF orientation sensor");
+    broadcastOutput("  [Y] IMU      | motion sensor (orientation, acceleration)");
 #else
     broadcastOutput("  [N] IMU      | Disabled (~12-18KB flash, ~8KB RAM saved)");
 #endif

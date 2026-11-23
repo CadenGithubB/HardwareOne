@@ -69,7 +69,7 @@ When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABL
 | ---- | ------ |
 | `CUSTOM_ENABLE_OLED` | SSD1306 OLED display |
 | `CUSTOM_ENABLE_GAMEPAD` | Seesaw gamepad |
-| `CUSTOM_ENABLE_IMU` | BNO055 9-DoF IMU |
+| `CUSTOM_ENABLE_IMU` | IMU (motion sensor); `IMU_DEVICE_TYPE` picks the chip: 1 = BNO055 (default), 2 = Adafruit 4517 (its backend comes later) |
 | `CUSTOM_ENABLE_TOF` | VL53L4CX Time-of-Flight |
 | `CUSTOM_ENABLE_THERMAL` | MLX90640 thermal camera |
 | `CUSTOM_ENABLE_APDS` | APDS9960 gesture/proximity/light |
@@ -2298,7 +2298,7 @@ toftransitionms <0-5000>        - Reading transition time
 </details>
 
 <details>
-<summary><strong>imu - BNO055 9-DoF IMU</strong></summary>
+<summary><strong>imu - IMU (motion sensor)</strong></summary>
 
 ```
 openimu                         - Start IMU sensor
@@ -2313,6 +2313,8 @@ imuorientationcorrection <0|1>  - Apply orientation correction
 imupitchoffset <-180..180>      - Pitch offset correction
 imurolloffset <-180..180>       - Roll offset correction
 imuyawoffset <-180..180>        - Yaw offset correction
+imuaddress [0x28|0x29]          - BNO055 address (0x29 with ADR high); next openimu
+imubus <0|1>                    - The bus the IMU is on
 imuewmafactor <0.0-1.0>         - EWMA smoothing factor
 imutransitionms <0-1000>        - Transition time
 imuwebmaxfps <1-30>             - Web UI max frame rate
@@ -2467,8 +2469,8 @@ Supports up to 4 simultaneous distance measurements. Range up to 6m. Polling rat
 ### MLX90640 (Thermal)
 32x24 IR thermal camera. Web UI displays interpolated heatmap with HSL color mapping. Configurable palette, interpolation steps, and frame rate. High memory footprint - uses PSRAM.
 
-### BNO055 (IMU)
-9-DoF orientation (accel + gyro + magnetometer fusion). Orientation correction configurable via settings (`imuOrientationMode`, `imuPitchOffset`, etc.).
+### IMU (motion sensor)
+One chip per build (`IMU_DEVICE_TYPE`). The BNO055 fuses accel, gyro and magnetometer on the chip (NDOF mode) and is read at 0x28, or at 0x29 (`imuaddress 0x29`) when its ADR pin is high. `imuread` shows orientation (yaw/pitch/roll in degrees), acceleration (m/s²), gyro (rad/s), magnetometer (µT) and temperature; `imuread json` adds `mag` and the chip's calibration byte `cal`. The readings are the chip's own: the mounting correction (`imuorientationcorrection`, `imuorientationmode`, `imuPitchOffset`, etc.) is off by default, and nothing clamps the stored pitch (the web page's 3D view clamps only its drawing). Starting the BNO055 takes about a second and never holds the I2C bus while it waits, so the OLED and the other devices on the same bus keep working; a start that fails says why (no answer at the address, another chip there, no answer after its reset).
 
 ### APDS9960
 Three independent modes: color/RGB (`apdscolor`), proximity (`apdsproximity`), gesture up/down/left/right (`apdsgesture`). Each can be run independently.

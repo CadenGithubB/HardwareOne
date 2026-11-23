@@ -117,6 +117,29 @@ class PeripheralConfig(unittest.TestCase):
                            ['ENABLE_GT911_TOUCH == 1', 'ENABLE_OLED_DISPLAY == 0'],
                            board_profile=board)
 
+    def test_imu_backend_follows_imu_device_type(self):
+        # IMU_DEVICE_TYPE picks the IMU's backend; exactly one compiles.
+        imu = dict(self.profile(), I2C_FEATURE_LEVEL=4, CUSTOM_ENABLE_IMU=1)
+        self.check_profile(dict(imu, IMU_DEVICE_TYPE=1),
+                           ['ENABLE_IMU_SENSOR == 1', 'ENABLE_IMU_BNO055 == 1', 'ENABLE_IMU_LSM6DSOX == 0'])
+        # The shared default is the BNO055.
+        self.check_profile(dict(imu), ['IMU_DEVICE_TYPE == 1', 'ENABLE_IMU_BNO055 == 1'])
+        # No IMU: neither backend.
+        self.check_profile(dict(imu, CUSTOM_ENABLE_IMU=0),
+                           ['ENABLE_IMU_SENSOR == 0', 'ENABLE_IMU_BNO055 == 0', 'ENABLE_IMU_LSM6DSOX == 0'])
+        # Level 3 turns every sensor on: the default backend with it.
+        self.check_profile(dict(self.profile(), I2C_FEATURE_LEVEL=3), ['ENABLE_IMU_BNO055 == 1'])
+        # Out of range with the IMU on, and the Adafruit 4517 before its backend lands.
+        for value in (0, 2, 3):
+            with self.subTest(imu_device_type=value):
+                self.check_profile(dict(imu, IMU_DEVICE_TYPE=value), [], succeeds=False)
+
+    def test_imu_device_type_without_the_imu_is_rejected_in_a_saved_selection(self):
+        # A saved configuration's chip choice has no effect without the IMU.
+        board = SOURCE.parents[1] / 'boards/p4x_eye.features.h'
+        self.check_profile({'IMU_DEVICE_TYPE': 1}, ['ENABLE_IMU_SENSOR == 0'], board_profile=board)
+        self.check_profile({'IMU_DEVICE_TYPE': 2}, [], succeeds=False, board_profile=board)
+
     def test_touch_requires_supported_board_and_i2c(self):
         self.check_profile(self.profile(wheel=4), [], succeeds=False)
         board = SOURCE.parents[1] / 'boards/waveshare_p4_touch_lcd_5.features.h'

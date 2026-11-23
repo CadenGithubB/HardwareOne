@@ -105,7 +105,7 @@ static void oledApplyPendingOwnerRequests();
 #include "i2csensor_ano_encoder.h"
 #endif
 #endif
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_mlx90640.h"
 #include "i2csensor_vl53l4cx.h"
 #include "i2csensor_ds3231.h"
@@ -3976,7 +3976,7 @@ void projectCubePoint(float x, float y, float z, int& screenX, int& screenY, int
 
 // displayLogo() moved to OLED_Mode_Menu.cpp
 
-// displayImuActions() moved to i2csensor_bno055.cpp (modular OLED mode)
+// displayImuActions() moved to HAL_Motion.cpp (modular OLED mode)
 
 // displayTofData() moved to i2csensor_vl53l4cx.cpp (modular OLED mode)
 
@@ -4248,7 +4248,7 @@ void updateOledDisplay() {
 
       // OLED_LOGO handled by registered mode in OLED_Mode_Menu.cpp
       // OLED_ANIMATION handled by registered mode in OLED_Mode_Animations.cpp
-      // OLED_IMU_ACTIONS handled by registered mode in i2csensor_bno055.cpp
+      // OLED_IMU_ACTIONS handled by registered mode in HAL_Motion.cpp
       // OLED_GPS_DATA handled by registered mode in i2csensor_pa1010d.cpp
       // OLED_FM_RADIO handled by registered mode in fm_radio.cpp
       // OLED_FILE_BROWSER handled by registered mode in OLED_Mode_FileBrowser.cpp
@@ -5640,12 +5640,10 @@ static MenuAvailability oledModeFeatureState(OledMode mode, String* outReason) {
       if (gImuConnected) {
         return MenuAvailability::AVAILABLE;
       }
-      // Check if hardware was detected during I2C scan (address 0x28)
-      for (int i = 0; i < connectedDeviceCount; i++) {
-        if (connectedDevices[i].address == I2C_ADDR_IMU && connectedDevices[i].isConnected) {
-          if (outReason) *outReason = "Disabled\nPress X to start";
-          return MenuAvailability::UNINITIALIZED;
-        }
+      // The scan found it at its configured bus and address (imuaddress).
+      if (isSensorConnected("imu")) {
+        if (outReason) *outReason = "Disabled\nPress X to start";
+        return MenuAvailability::UNINITIALIZED;
       }
       if (outReason) *outReason = "Not detected";
       return MenuAvailability::NOT_DETECTED;

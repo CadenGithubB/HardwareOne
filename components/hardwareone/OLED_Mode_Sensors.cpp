@@ -17,7 +17,7 @@
 
 #include "i2csensor_sths34pf80.h"
 
-#include "i2csensor_bno055.h"     // gImuRunning / gImuConnected
+#include "HAL_Motion.h"     // gImuRunning / gImuConnected
 #include "i2csensor_vl53l4cx.h"   // gTofRunning / gTofConnected
 #include "i2csensor_mlx90640.h"   // gThermalRunning / gThermalConnected
 #include "i2csensor_pa1010d.h"    // gGpsRunning / gGpsConnected

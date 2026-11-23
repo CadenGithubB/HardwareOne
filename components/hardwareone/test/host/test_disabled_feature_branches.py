@@ -38,7 +38,7 @@ COMPONENT = HERE.parents[1]
 OWNERS: dict[str, str] = {
     "i2csensor_mlx90640.h": "ENABLE_THERMAL_SENSOR",
     "i2csensor_vl53l4cx.h": "ENABLE_TOF_SENSOR",
-    "i2csensor_bno055.h": "ENABLE_IMU_SENSOR",
+    "HAL_Motion.h": "ENABLE_IMU_SENSOR",
     "i2csensor_apds9960.h": "ENABLE_APDS_SENSOR",
     "i2csensor_pa1010d.h": "ENABLE_GPS_SENSOR",
     "i2csensor_rda5807.h": "ENABLE_FM_RADIO",

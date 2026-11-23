@@ -31,7 +31,7 @@
 // Conditional sensor includes (same approach as main .ino)
 #include "System_BuildConfig.h"
 #include "i2csensor_mlx90640.h"
-#include "i2csensor_bno055.h"
+#include "HAL_Motion.h"
 #include "i2csensor_vl53l4cx.h"
 #if ENABLE_OLED_INPUT
   #include "HAL_Input.h"   // readings, gInputRunning/Connected — populated by either driver

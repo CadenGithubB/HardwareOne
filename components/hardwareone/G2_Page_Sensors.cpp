@@ -33,7 +33,7 @@
 // Each sensor owns its readings and synchronization. Formatters request
 // snapshots and render locally; lifecycle flags still describe runtime state.
 
-#include "i2csensor_bno055.h"     // readings + gImuRunning / gImuConnected
+#include "HAL_Motion.h"     // readings + gImuRunning / gImuConnected
 #include "i2csensor_vl53l4cx.h"   // readings + gTofRunning / gTofConnected
 #include "i2csensor_mlx90640.h"   // readings + gThermalRunning / gThermalConnected
 #include "i2csensor_seesaw.h"     // readings + gInputRunning / gInputConnected
