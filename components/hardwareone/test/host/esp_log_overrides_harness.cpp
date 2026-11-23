@@ -25,6 +25,9 @@ static const char* const kEspNames[] = {"NONE", "ERROR", "WARN", "INFO", "DEBUG"
 void esp_log_level_set(const char* tag, esp_log_level_t level) {
   events.push_back(std::string("esp:") + tag + "=" + kEspNames[level]);
 }
+// The firmware sets its tags through the boot debug capture
+// (System_BootDebug.h), which is esp_log_level_set outside the boot.
+#define bootDebugEspLogSet esp_log_level_set
 #define CONFIG_LOG_MAXIMUM_LEVEL 3
 
 struct HostSettings { String espLogLevels; } gSettings;

@@ -994,8 +994,8 @@ static inline __attribute__((always_inline)) void debugQueueVPrintf(DebugFlagMas
   if (currentTask == gTofTaskHandle && !gTofRunning) return;
   if (currentTask == gFmRadioTaskHandle && !gFmRadioRunning) return;
 
-  // A forced line that passed its gate just before the full buffer stopped
-  // the force: nothing would keep it, so it is not formatted.
+  // A forced line that passed its gate just before the capture ended: nothing
+  // would keep it, so it is not formatted.
   if (capturing && !shownWithoutCapture && !gDebugLineForce) return;
 
   // Format into a stack line, then hand to the shared enqueue primitive
@@ -1076,6 +1076,8 @@ void logSystemEvent(const char* category, const char* fmt, ...) {
   va_end(args);
   if (wn < 0) return;
   size_t llen = strnlen(line, sizeof(line) - 1);
+  // The boot debug capture keeps the boot's events (they are shown anyway).
+  if (gBootDebugCapturing) bootDebugCaptureLine(line, llen, /*shown=*/true, 0);
 
   if (gDebugOutputQueue && gDebugFreeQueue) {
     enqueueChunk(line, llen, MSG_ROUTE_ALL | MSG_ROUTE_ALLOW_IN_HELP, 0,
@@ -1172,6 +1174,10 @@ static void broadcastOutputCore(const char* text, size_t len, uint8_t routeOverr
   if (currentTask == gThermalTaskHandle && !gThermalRunning) return;
   if (currentTask == gImuTaskHandle && !gImuRunning) return;
   if (currentTask == gTofTaskHandle && !gTofRunning) return;
+
+  // 4. The boot debug capture keeps every broadcast line of the boot (all of
+  //    them are shown, so they go on below as well).
+  if (gBootDebugCapturing) bootDebugCaptureLine(text, len, /*shown=*/true, 0);
 
   // 5. Compute per-message route mask
   uint8_t route;
@@ -1294,9 +1300,16 @@ void broadcastOutputCore_Routed(const char* text, size_t len, uint8_t route) {
 // it makes NO ESP_LOG calls, so it cannot recurse. ISR / queue-not-ready
 // callers fall back to the previous (default) handler. Default OFF; armed via
 // the `loglink` command so it can be A/B'd on hardware without reflashing.
+//
+// The same hook serves the boot debug capture (System_BootDebug.h): while it
+// runs every ESP-IDF line is formatted once more here, copied into the boot
+// buffer, and printed only when the saved tag levels would have shown it. The
+// hook is installed while either wants it (idfLogHookRefresh).
 // ============================================================================
 static vprintf_like_t s_prevLogVprintf = nullptr;
 static volatile bool  s_idfBridgeOn    = false;
+static bool           s_idfHookInstalled = false;
+static portMUX_TYPE   s_idfHookMux = portMUX_INITIALIZER_UNLOCKED;
 
 // Strip ANSI CSI (color) escape sequences in place: ESC '[' params final-byte.
 static void stripAnsiInPlace(char* s) {
@@ -1317,6 +1330,23 @@ static void stripAnsiInPlace(char* s) {
 }
 
 static int idfLogVprintf(const char* fmt, va_list ap) {
+  // The boot debug capture: format a copy (ap stays unread for the paths
+  // below), keep it, and stop here when only the capture's force made it.
+  if (bootDebugEspLogWanted() && !xPortInIsrContext()) {
+    const int64_t startUs = esp_timer_get_time();
+    char line[DEBUG_MSG_SIZE];
+    va_list copy;
+    va_copy(copy, ap);
+    const int cn = vsnprintf(line, sizeof(line), fmt, copy);
+    va_end(copy);
+    if (cn >= 0) {
+      size_t len = strnlen(line, sizeof(line) - 1);
+      while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = '\0';
+      stripAnsiInPlace(line);
+      len = strlen(line);
+      if (len > 0 && !bootDebugEspLogLine(line, len, startUs)) return cn;
+    }
+  }
   // Decide BEFORE consuming ap (a va_list can only be walked once). In ISR
   // context, or before the queue exists, behave exactly like the old handler.
   if (!s_idfBridgeOn || xPortInIsrContext() || !gDebugOutputQueue || !gDebugFreeQueue) {
@@ -1335,15 +1365,31 @@ static int idfLogVprintf(const char* fmt, va_list ap) {
   return n;
 }
 
+// Installs the hook while the bridge or the boot debug capture wants it and
+// puts the previous handler back when neither does.
+void idfLogHookRefresh() {
+  portENTER_CRITICAL(&s_idfHookMux);
+  const bool want = s_idfBridgeOn || bootDebugEspLogWanted();
+  const bool install = want && !s_idfHookInstalled;
+  const bool uninstall = !want && s_idfHookInstalled;
+  if (install || uninstall) s_idfHookInstalled = want;
+  portEXIT_CRITICAL(&s_idfHookMux);
+  if (install) {
+    s_prevLogVprintf = esp_log_set_vprintf(idfLogVprintf);
+  } else if (uninstall) {
+    esp_log_set_vprintf(s_prevLogVprintf ? s_prevLogVprintf : vprintf);
+  }
+}
+
 // Install (or restore) the bridge. Arms the flag BEFORE swapping the handler
 // so a log racing the install never sees a half-armed state.
 static void setIdfLogBridge(bool enable) {
   if (enable && !s_idfBridgeOn) {
     s_idfBridgeOn = true;
-    s_prevLogVprintf = esp_log_set_vprintf(idfLogVprintf);
+    idfLogHookRefresh();
   } else if (!enable && s_idfBridgeOn) {
-    esp_log_set_vprintf(s_prevLogVprintf ? s_prevLogVprintf : vprintf);
     s_idfBridgeOn = false;
+    idfLogHookRefresh();
   }
 }
 
@@ -1460,9 +1506,9 @@ void applyLogLevel(uint8_t level) {
     case LOG_LEVEL_INFO:  espLevel = ESP_LOG_INFO;  break;
     default:             espLevel = ESP_LOG_DEBUG; break;
   }
-  esp_log_level_set("wifi", espLevel);
-  esp_log_level_set("wifi_init", espLevel);
-  esp_log_level_set("phy_init", espLevel);
+  bootDebugEspLogSet("wifi", espLevel);
+  bootDebugEspLogSet("wifi_init", espLevel);
+  bootDebugEspLogSet("phy_init", espLevel);
   applyEspLogOverrides(false);  // a saved esplog entry for these tags wins
 }
 
@@ -1473,10 +1519,10 @@ void applyLogLevel(uint8_t level) {
 // verbose=true → DEBUG. Owned by DEBUG_HTTPS.
 void applyHttpsLogLevels(bool verbose) {
   esp_log_level_t lvl = verbose ? ESP_LOG_DEBUG : ESP_LOG_NONE;
-  esp_log_level_set("esp-tls-mbedtls", lvl);
-  esp_log_level_set("esp_https_server", lvl);
-  esp_log_level_set("httpd", lvl);
-  esp_log_level_set("httpd_txrx", lvl);
+  bootDebugEspLogSet("esp-tls-mbedtls", lvl);
+  bootDebugEspLogSet("esp_https_server", lvl);
+  bootDebugEspLogSet("httpd", lvl);
+  bootDebugEspLogSet("httpd_txrx", lvl);
   applyEspLogOverrides(false);  // a saved esplog entry for these tags wins
 }
 
@@ -1515,7 +1561,7 @@ static bool radioLogStackPresent(radiolog::Stack stack) {
 // do not: as for the rest of their families, a parent does not switch its
 // children's output on.
 static bool radioLogWifiDriverOn() { return gDebugVerbose || gDebugSubFlags.wifiDriver; }
-static bool radioLogBluetoothCoreOn() { return isDebugFlagSet(DEBUG_BLUETOOTH_CORE); }
+static bool radioLogBluetoothCoreOn() { return isDebugFlagSaved(DEBUG_BLUETOOTH_CORE); }
 
 // ---- esplog: the saved string's lock -----------------------------------------
 // gSettings.espLogLevels is written by esplog on the command task and read by
@@ -1580,8 +1626,8 @@ void applyEspLogOverrides(bool includeWildcard) {
     if (all >= 0) {
       // Resets every tag's level, the firmware's quieted ones too; the tag
       // entries below go on top. HTTP_CLIENT keeps its ceiling.
-      esp_log_level_set("*", static_cast<esp_log_level_t>(all));
-      esp_log_level_set(kEspLogCredentialTag, espLogLevelFor(kEspLogCredentialTag, all));
+      bootDebugEspLogSet("*", static_cast<esp_log_level_t>(all));
+      bootDebugEspLogSet(kEspLogCredentialTag, espLogLevelFor(kEspLogCredentialTag, all));
       // "*" dropped every tag's own level: a radio stack tag whose debug flag
       // is on gets its stock level back (the flag wins over the wildcard).
       applyRadioStackLogLevels();
@@ -1592,7 +1638,7 @@ void applyEspLogOverrides(bool includeWildcard) {
     char name[esplog::kMaxTagLen + 1];
     memcpy(name, tag, len);
     name[len] = '\0';
-    esp_log_level_set(name, espLogLevelFor(name, level));
+    bootDebugEspLogSet(name, espLogLevelFor(name, level));
   });
 }
 
@@ -1710,7 +1756,7 @@ const char* cmd_esplog(const String& argsInput) {
              "*: %s (saved). Every tag was set, the firmware's quieted ones too; saved tag levels "
              "were applied again%s", esplog::kNames[level], espLogBuildNote(level));
   } else {
-    esp_log_level_set(tag.c_str(), espLogLevelFor(tag.c_str(), level));
+    bootDebugEspLogSet(tag.c_str(), espLogLevelFor(tag.c_str(), level));
     snprintf(gDebugBuffer, 1024, "%s: %s (saved)%s", tag.c_str(), esplog::kNames[level],
              espLogBuildNote(level));
   }
@@ -1732,7 +1778,7 @@ void applyRadioStackLogLevels() {
   const bool bluetoothCore = radioLogBluetoothCoreOn();
   for (const radiolog::TagRow& row : radiolog::kTags) {
     if (!radioLogStackPresent(row.stack)) continue;
-    esp_log_level_set(row.tag, espLogLevelFor(row.tag, radiolog::levelFor(row, wifiDriver, bluetoothCore, stored)));
+    bootDebugEspLogSet(row.tag, espLogLevelFor(row.tag, radiolog::levelFor(row, wifiDriver, bluetoothCore, stored)));
   }
   espLogUnlock();
 }
@@ -1744,7 +1790,7 @@ void applyRadioStackLogLevels() {
 // unchanged bit leaves a saved esplog wildcard's level on them).
 void applyDebugMaskLogLevels(DebugFlagMask before) {
   applyRadioStackLogLevels();
-  if (((before ^ gDebugFlags) & DEBUG_HTTPS) != (DebugFlagMask)0) applyHttpsLogLevels(isDebugFlagSet(DEBUG_HTTPS));
+  if (((before ^ gDebugFlags) & DEBUG_HTTPS) != (DebugFlagMask)0) applyHttpsLogLevels(isDebugFlagSaved(DEBUG_HTTPS));
 }
 
 const char* cmd_debugverbose(const String& argsInput) {
@@ -2027,7 +2073,7 @@ static void dbgApplyHook(DbgFlagIdx idx, bool modeTemp, int v, bool* settingPtr)
       // Drive ESP-IDF TLS/HTTPS tag verbosity. Skipped during the CLI
       // validation pass (dbgFlagCmd short-circuits before the hook, so
       // gCliValidateOnly is false here — guarded anyway to match pre-C3).
-      if (!gCliValidateOnly) applyHttpsLogLevels(isDebugFlagSet(DEBUG_HTTPS));
+      if (!gCliValidateOnly) applyHttpsLogLevels(isDebugFlagSaved(DEBUG_HTTPS));
       break;
     }
     case DBG_SR:
@@ -2936,6 +2982,10 @@ const CommandEntry debugCommands[] = {
     "  clear: remove every saved level" },
   { "log", "System-wide logging to file.", true, cmd_log, "Usage: log <start|stop|status|autostart>\n  start [\"filepath\"] [flags=0x...] [tags=0|1]: Begin system logging\n    filepath: Log file path, quoted (auto-generated if omitted)\n    flags: Debug flag mask, up to 64 hex digits (bit map in System_Debug.h)\n    tags: Prefix lines with category tags (0|1, default 1)\n  stop / status [json]: Stop logging / show logging status (json: one JSON object)\n  maxsize <bytes> / rotations <0-9>: Rotate the file at this size, keeping that many old files (.1, .2, ...)\n  autostart [on|off]: Toggle logging auto-start on boot (bare = toggle)" },
   { "webconsole", "Enable/disable browser-side debug console output in the web UI.", true, cmd_webconsole, "Usage: webconsole <0|1>" },
+  { "bootdebug", "Boot debug file: every debug output on during boot, saved as boot-debug-1.log (on by default).", true, cmd_bootdebug,
+    "Usage: bootdebug [on|off]\n"
+    "  (bare): the setting, and where this boot's file went\n"
+    "  on|off: save the setting; it applies from the next boot (off: no forcing, no capture, fastest boot)" },
 };
 
 const size_t debugCommandsCount = sizeof(debugCommands) / sizeof(debugCommands[0]);
@@ -2948,10 +2998,10 @@ const size_t debugCommandsCount = sizeof(debugCommands) / sizeof(debugCommands[0
 // two feature-gated table spans: 6 LLM flag rows, 7 debugg2* + 7 debugring*
 // flag rows (both under ENABLE_BLUETOOTH && ENABLE_G2_GLASSES), and the
 // outg2 hand row.
-static constexpr size_t kDbgHandCmdRows = 15;  // notifstats,
+static constexpr size_t kDbgHandCmdRows = 16;  // notifstats,
   // debugverbose, debugbuffer, debugflags, loglink, debugstack,
   // commandmodulesummary, settingsmodulesummary, outg2, outble,
-  // memorysampleintervalsec, loglevel, esplog, log, webconsole
+  // memorysampleintervalsec, loglevel, esplog, log, webconsole, bootdebug
 static constexpr size_t kDbgGenCmdRowsInTable =
     (size_t)(DBG_FLAG_COUNT - 1) + (size_t)DBG_SUBBOOL_COUNT
 #if !ENABLE_LLM_SOURCE_ONBOARD

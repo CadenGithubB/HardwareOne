@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1030 commands across 60 modules (1030 registry entries).
+1031 commands across 60 modules (1031 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -54,7 +54,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`i2c`](#i2c) — 24 commands
 - [`automation`](#automation) — 5 commands
 - [`battery`](#battery) — 3 commands
-- [`debug`](#debug) — 181 commands
+- [`debug`](#debug) — 182 commands
 - [`settings`](#settings) — 19 commands
 - [`sensorlog`](#sensorlog) — 3 commands
 - [`health`](#health) — 2 commands
@@ -947,6 +947,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 | Command | | Description |
 | ------- | :-: | ----------- |
+| `bootdebug` | A | Boot debug file: every debug output on during boot, saved as boot-debug-1.log (on by default).<br/>`Usage: bootdebug [on\|off] (bare): the setting, and where this boot's file went on\|off: save the setting; it applies from the next boot (off: no forcing, no capture, fastest boot)` |
 | `commandmodulesummary` | A | Show command module summary. |
 | `debuganoencoder` | A | Debug ANO rotary encoder driver internals.<br/>`Usage: debuganoencoder <0\|1> [temp\|runtime]` |
 | `debuganoencoderlifecycle` | A | Debug ANO encoder init/connect/recovery.<br/>`Usage: debuganoencoderlifecycle <0\|1> [temp\|runtime]` |

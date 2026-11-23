@@ -90,6 +90,9 @@ static unsigned long sDebugLines = 0;
     std::snprintf(line_, sizeof(line_), fmt, ##__VA_ARGS__);       \
     ++sDebugLines;                                                 \
   } while (0)
+// The boot debug capture (System_BootDebug.h) is not running here.
+static volatile bool gBootDebugCapturing = false;
+static void bootDebugCaptureF(const char*, ...) {}
 
 // The backends: every call is recorded with the path it was handed. A path
 // "exists" when its length is even, so write opens take both permission

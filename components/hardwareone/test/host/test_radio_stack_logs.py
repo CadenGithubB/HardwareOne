@@ -138,8 +138,8 @@ def source_checks() -> None:
     # the parents are not read.
     require("static bool radioLogWifiDriverOn() { return gDebugVerbose || gDebugSubFlags.wifiDriver; }" in debug,
             "debugwifidriver's runtime layer (or debugverbose)")
-    require("static bool radioLogBluetoothCoreOn() { return isDebugFlagSet(DEBUG_BLUETOOTH_CORE); }" in debug,
-            "debugbluetoothcore's live bit (isDebugFlagSet includes debugverbose)")
+    require("static bool radioLogBluetoothCoreOn() { return isDebugFlagSaved(DEBUG_BLUETOOTH_CORE); }" in debug,
+            "debugbluetoothcore's live bit (isDebugFlagSaved includes debugverbose, not the boot capture's force)")
     present = extract_block(debug, "static bool radioLogStackPresent(radiolog::Stack stack)")
     for part in ("return HW1_RADIO_COMPANION;", "CONFIG_BT_BLUEDROID_ENABLED", "return ENABLE_BLE_COEX_RECORDS;",
                  "!CONFIG_IDF_TARGET_ESP32", "&& CONFIG_IDF_TARGET_ESP32"):
@@ -163,18 +163,18 @@ def source_checks() -> None:
           "gDebugVerbose = (v == 1);", "applyRadioStackLogLevels();")
     # The wildcard drops every tag's level: the radio tags are set again.
     overrides = extract_block(debug, "void applyEspLogOverrides(bool includeWildcard)")
-    order(overrides, 'esp_log_level_set("*", static_cast<esp_log_level_t>(all));', "applyRadioStackLogLevels();",
+    order(overrides, 'bootDebugEspLogSet("*", static_cast<esp_log_level_t>(all));', "applyRadioStackLogLevels();",
           "esplog::forEach(stored,")
 
     # The apply runs whole under the esplog lock (the loop task applies too).
     order(extract_block(debug, APPLY_FN), "espLogLock();", "const char* stored = espLogStored();",
-          "const bool bluetoothCore = radioLogBluetoothCoreOn();", "esp_log_level_set(row.tag,", "espLogUnlock();")
+          "const bool bluetoothCore = radioLogBluetoothCoreOn();", "bootDebugEspLogSet(row.tag,", "espLogUnlock();")
     # The paths that replace the whole live mask run the flag hooks:
     # `log start flags=`, and the saved mask (log start, log autostart,
     # systemlogflags) through systemLogApplyPersistedFlags.
     mask = extract_block(debug, "void applyDebugMaskLogLevels(DebugFlagMask before)")
     order(mask, "applyRadioStackLogLevels();",
-          "if (((before ^ gDebugFlags) & DEBUG_HTTPS) != (DebugFlagMask)0) applyHttpsLogLevels(isDebugFlagSet(DEBUG_HTTPS));")
+          "if (((before ^ gDebugFlags) & DEBUG_HTTPS) != (DebugFlagMask)0) applyHttpsLogLevels(isDebugFlagSaved(DEBUG_HTTPS));")
     order(extract_block(debug, "bool systemLogApplyPersistedFlags()"), "const DebugFlagMask before = gDebugFlags;",
           "gDebugFlags = restored;", "applyDebugMaskLogLevels(before);", "return true;")
     start = debug[debug.index("    if (flagsSet) {\n      const DebugFlagMask before"):]
@@ -216,7 +216,7 @@ def source_checks() -> None:
     require(prepare.count("radioHalConsoleMirror(") == 1, "radioHalPrepare has one mirror start, for the boot")
     # The C6's boot lines are I lines: C6> shows INFO for the boot's first
     # start (applySettings sets the saved levels after it).
-    order(prepare, "quietHostedLogs();", "esp_log_level_set(radiolog::kC6ConsoleTag, "
+    order(prepare, "quietHostedLogs();", "bootDebugEspLogSet(radiolog::kC6ConsoleTag, "
           "static_cast<esp_log_level_t>(radiolog::kInfo));", "radioHalConsoleMirror(true);")
     require("quietRpcLogs" not in radio and radio.count('"C6>"') == 0, "the C6 tag comes from the table")
     task = extract_block(radio, "void consoleTask(void*)")
@@ -234,6 +234,19 @@ def source_checks() -> None:
     order(extract_block(runtime, "void appendConnect(const ConnectRecord& record)"), "gLog.addConnect(record);",
           "if (linesOn()) {", 'ESP_LOGI(kTag, "connect #%lu %s"')
     require("isDebugFlagSet" not in runtime, "no flag read of its own")
+
+    # The boot debug capture (System_BootDebug.h) records every firmware tag
+    # level while the boot runs and replays the record when it ends: no other
+    # firmware file sets a level past it (the LLM worker's per-request pin on
+    # HTTP_CLIENT, which never runs during setup, aside).
+    for path in sorted(COMPONENT.glob("*.cpp")) + sorted(COMPONENT.glob("*.h")):
+        if path.name in ("System_BootDebug.cpp", "System_LLMHttp.cpp"):
+            continue
+        code = re.sub(r"/\*.*?\*/", "", re.sub(r"//[^\n]*", "", path.read_text(errors="ignore")), flags=re.S)
+        require("esp_log_level_set(" not in code,
+                f"{path.name} sets an ESP-IDF tag level past the boot capture (use bootDebugEspLogSet)")
+    # The action gates read the saved flags, not the capture's force.
+    require("applyHttpsLogLevels(isDebugFlagSet(" not in debug, "the HTTPS tag levels follow the saved flag")
 
     # Help text names what the flags bring back.
     for name in ("debugwifidriver", "debugbluetoothcore"):

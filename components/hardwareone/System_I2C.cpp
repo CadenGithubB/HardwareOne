@@ -9,6 +9,7 @@
 #include <atomic>
 #include <Wire.h>
 #include <esp_log.h>   // esp_log_level_set — quiet probe NACKs during detect scan
+#include "System_BootDebug.h"  // bootDebugEspLogSet/Get: the boot capture records tag levels
 #include <soc/soc_caps.h>  // SOC_GPIO_PIN_COUNT — board's GPIO count for pin-range limits
 
 #include "i2csensor_rda5807.h"
@@ -1662,8 +1663,8 @@ void detectHardware(DetectionResult& out) {
   // Also silence the i2c_master NACK error log for the scan: probing absent
   // addresses NACKs by design, which would otherwise spam red errors.
   static const uint32_t kProbeClockHz = 100000;
-  const esp_log_level_t prevI2cLog = esp_log_level_get("i2c.master");
-  esp_log_level_set("i2c.master", ESP_LOG_NONE);
+  const esp_log_level_t prevI2cLog = bootDebugEspLogGet("i2c.master");
+  bootDebugEspLogSet("i2c.master", ESP_LOG_NONE);
 
   for (uint8_t bus = 0; bus < POLL_NUM_BUSES; bus++) {
     PollPauseGuard guard(bus);
@@ -1694,7 +1695,7 @@ void detectHardware(DetectionResult& out) {
     }
   }
 
-  esp_log_level_set("i2c.master", prevI2cLog);
+  bootDebugEspLogSet("i2c.master", prevI2cLog);
 
   auto addEntry = [&](uint8_t addr, uint8_t bus, const char* name, const char* mod,
                       uint16_t kb, DetectStatus st, uint8_t instance) {

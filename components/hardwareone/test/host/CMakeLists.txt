@@ -905,8 +905,10 @@ if(HW1_SANITIZE)
 endif()
 
 # The boot debug capture (owner decision B13, System_BootDebugCore.h): whole
-# stamped lines, the first lines kept once the buffer is full, the truncation
-# counted and marked, the header's measurements, three kept boots.
+# stamped lines, the start of the boot and its newest lines kept with a
+# counted gap mark between, the header's measurements, three kept boots on a
+# card and one on flash, the recorded ESP-IDF tag levels and line shape; and
+# fileview's byte-range page boundaries (System_TextPager.h).
 add_executable(boot_debug_core_tests test_boot_debug_core.cpp)
 set_target_properties(boot_debug_core_tests PROPERTIES
   CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)

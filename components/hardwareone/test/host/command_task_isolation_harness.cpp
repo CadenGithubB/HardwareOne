@@ -46,6 +46,9 @@ typedef void* TaskHandle_t;
 bool gCliValidateOnly = false;
 bool gInHelpRender = false;
 bool gThermalRunning = true, gImuRunning = true, gTofRunning = true;
+// The boot debug capture (System_BootDebug.h) is not running here.
+static volatile bool gBootDebugCapturing = false;
+static void bootDebugCaptureLine(const char*, size_t, bool, int64_t) {}
 TaskHandle_t gThermalTaskHandle = nullptr, gImuTaskHandle = nullptr, gTofTaskHandle = nullptr;
 
 static thread_local CommandContext* tTaskContext = nullptr;
