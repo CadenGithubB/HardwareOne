@@ -60,6 +60,9 @@ struct MotionSample {
   // Where the tap hit (kMotionTapKind*): the software knock detector tells
   // side from face; a chip's own tap engine cannot (Unknown).
   uint8_t hwTapKind = 0;
+  // ...and its peak jump (mg, sensor frame; zero when unknown): the shake
+  // configuration teaches the side and the face from it.
+  int16_t hwTapVec[3] = {0, 0, 0};
   bool hasHwFreefall = false, hwFreefall = false;
   // False while the backend is still starting (the 4517's gyro bias): the
   // read worked, but there is nothing to publish or detect yet.
@@ -104,10 +107,14 @@ bool motionBackendRead(uint8_t bus, uint8_t address, uint8_t secondAddress, Moti
 void motionBackendSetTapTuning(long thresholdMg, long shock, long quiet);
 
 // The software knock detector (HAL_Motion_KnockCore.h), on a backend that
-// streams the accelerometer at full rate (the LSM6DS3TR-C). Its tuning is
-// taken at the next sample; the trace is every recent knock with its verdict.
-// motionBackendKnockTrace is false on a backend without the detector (it
-// uses the chip's own tap engine, or none). Any task may call these.
+// reads the accelerometer fast enough for it: the 4517's LSM6DS3TR-C (416 Hz
+// from its FIFO) and the BNO055 in a build with IMU input (100 Hz). One body
+// for both (HAL_Motion_KnockFeed.cpp, ENABLE_IMU_KNOCK_DETECTOR); a build
+// without the detector has empty ones. Its tuning is taken at the next
+// sample; the trace is every recent knock with its verdict.
+// motionBackendKnockTrace is false while the detector is not fed (the
+// 4517's LSM6DSOX uses the chip's own tap engine; no start yet; no
+// detector). Any task may call these.
 void motionBackendSetKnockTuning(long thresholdMg, long maxMs, long ringMs);
 void motionBackendSetKnockSide(long axis, long sidePct);
 bool motionBackendKnockTrace(knock::Trace& out, knock::Config& cfg);
@@ -135,5 +142,6 @@ struct MotionBackendStatus {
   // detector rather than the chip's own engine.
   const char* chipName = nullptr;
   bool tapsInSoftware = false;
+  uint16_t knockHz = 0;  // with tapsInSoftware: the rate of the readings it searches
 };
 void motionBackendStatus(MotionBackendStatus& out);

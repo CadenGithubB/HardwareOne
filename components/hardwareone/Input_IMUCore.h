@@ -12,11 +12,24 @@
 //            of one kind: a tap of the other kind ends it (its button goes
 //            out) and starts a new run. (Every button arrives tapWindowMs
 //            after its last tap.)
-//   Shake    a sustained shake starts a calibration (shakeCalibrate): the
-//            device is to be set down in the pose it will be used in; once
-//            it has been still for kCalStillMs the pose is the new centre.
-//            Taps and the joystick are off meanwhile; it gives up after
-//            kCalTimeoutMs. Output::calEvent reports each stage for a prompt.
+//   Shake    a sustained shake starts the configuration (shakeCalibrate),
+//            one flow in stages, each reported by Output::calEvent for a
+//            prompt:
+//              settle  set the device down in the pose it will be used in;
+//                      still for kCalStillMs: that pose is the new centre
+//                      (not yet in use). Never still within kCalTimeoutMs:
+//                      cancelled.
+//              side    (Config::teachKnocks) the next kTeachKnocks taps are
+//                      side examples (knock::Teacher, as imutapteach side);
+//              face    then kTeachKnocks face ("top") examples. Each knock
+//                      stage gives up after knock::kTeachTimeoutMs.
+//            Only when every stage is done is anything changed: the centre
+//            goes into use here and the caller saves both surfaces (from
+//            sideTeach() / faceTeach()) off the IMU task. A cancel or a
+//            time-out changes nothing. Taps press no button and the joystick
+//            is off throughout. A shake during the configuration cancels it,
+//            and the next configuration can start only from a shake that
+//            begins kCalRearmMs after that one ended.
 //            A shake here is strong acceleration for more than half of the
 //            last 500 ms, counted from the samples themselves: a run of taps
 //            is a few single strong samples and never reaches it. (The
@@ -41,18 +54,20 @@
 // rotation is applied later, by the input layer. A device re-centred with its
 // X axis vertical uses Y in X's place.
 //
-// Teach step (`imuinputlearn`, or offered after a shake calibration): the
-// user tilts toward the top of the screen; the first lean past the engage
-// angle held for the dwell, in the device's own frame, is reported
-// (Output::learnEvent / learnDir) and the caller sets the mount from it
-// (input_rotation::learnQuarterTurns). No lean within kLearnTimeoutMs: it ends
-// and nothing changes; a shake or a calibration cancels it. After a
-// calibration the step is only offered: a face tap within kLearnOfferMs arms
-// it, anything else leaves the mount alone and the joystick works at once.
+// Teach step (`imuinputlearn`): the user tilts toward the top of the screen;
+// the first lean past the engage angle held for the dwell, in the device's
+// own frame, is reported (Output::learnEvent / learnDir) and the caller sets
+// the mount from it (input_rotation::learnQuarterTurns). No lean within
+// kLearnTimeoutMs: it ends and nothing changes; a shake or a configuration
+// cancels it. (It is no longer offered after a shake configuration: its face
+// tap would be taken by the face stage.)
 //
-// The rates are the Adafruit 4517's: one sample every 20 ms. The windows that
-// are counted in samples (strong samples, the dwell, the centre capture)
-// assume about that; the times are real milliseconds from each sample.
+// The engine runs at one sample every 20 ms (kEnginePeriodMs, the Adafruit
+// 4517's rate). The windows that are counted in samples (strong samples, the
+// dwell, the centre capture) assume about that; the times are real
+// milliseconds from each sample. A faster feed (the BNO055 with IMU input: one
+// sample every 10 ms) goes through the Decimator below, which hands the engine
+// every second sample and carries each tap, with its kind, to the next one.
 //
 // Pure header (C library only); host-tested by test_input_imu_core.cpp.
 #pragma once
@@ -60,6 +75,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "HAL_Motion_KnockCore.h"  // knock::Teacher: the configuration's knock stages
 #include "Input_RotationCore.h"
 
 namespace imuinput {
@@ -79,15 +95,42 @@ constexpr uint8_t kTapUnknown = 0;
 constexpr uint8_t kTapSide = 1;
 constexpr uint8_t kTapFace = 2;
 
-// Calibration (a shake): the stages Output::calEvent reports.
+// The configuration (a shake): what Output::calEvent reports.
 constexpr uint8_t kCalNone = 0;
 constexpr uint8_t kCalStarted = 1;    // set the device down in the pose to use
 constexpr uint8_t kCalCountdown = 2;  // still: calSecondsLeft to go
 constexpr uint8_t kCalMoved = 3;      // it moved during the countdown: waiting again
-constexpr uint8_t kCalDone = 4;       // the new centre is taken
-constexpr uint8_t kCalCancelled = 5;  // never still long enough
+constexpr uint8_t kCalDone = 4;       // configured: the new centre is in use (and, with teachKnocks, both
+                                      // surfaces are in sideTeach() / faceTeach() for the caller to save)
+constexpr uint8_t kCalCancelled = 5;  // never still long enough: nothing changed
+constexpr uint8_t kCalSideStart = 6;  // the centre is taken (not yet in use): knock the side
+constexpr uint8_t kCalSideKnock = 7;  // a side knock taken: calKnocks so far
+constexpr uint8_t kCalFaceStart = 8;  // the side is done: knock the top (the face)
+constexpr uint8_t kCalFaceKnock = 9;  // a face knock taken: calKnocks so far
+constexpr uint8_t kCalTimedOut = 10;  // a knock stage (calStage) had too few knocks in time: nothing changed
+constexpr uint8_t kCalShakeCancelled = 11;  // a shake during the configuration (calStage): nothing changed
 constexpr uint32_t kCalStillMs = 3000;
 constexpr uint32_t kCalTimeoutMs = 20000;
+// After a shake cancelled a configuration, a new one starts only from a shake
+// that begins this long after that shake ended (and so on: every shake in the
+// meantime pushes it on).
+constexpr uint32_t kCalRearmMs = 2000;
+
+// The configuration's stages (Engine::calStage, Output::calStage).
+constexpr uint8_t kStageNone = 0;
+constexpr uint8_t kStageSettle = 1;  // waiting for the device to be still
+constexpr uint8_t kStageCentre = 2;  // taking the centre from calm samples
+constexpr uint8_t kStageSide = 3;    // side knocks
+constexpr uint8_t kStageFace = 4;    // face ("top") knocks
+inline const char* stageName(uint8_t stage) {
+  switch (stage) {
+    case kStageSettle: return "settle";
+    case kStageCentre: return "centre";
+    case kStageSide: return "side";
+    case kStageFace: return "face";
+    default: return "none";
+  }
+}
 // Still, for the calibration: acceleration without gravity under this.
 constexpr float kCalStillAccel = 1.2f;  // m/s^2
 
@@ -96,10 +139,8 @@ constexpr uint8_t kLearnNone = 0;
 constexpr uint8_t kLearnStarted = 1;   // tilt toward the top of the screen
 constexpr uint8_t kLearnDone = 2;      // learnDir is the lean, in the device's frame
 constexpr uint8_t kLearnTimedOut = 3;  // no lean: nothing changes
-constexpr uint8_t kLearnOffered = 4;   // after a calibration: a face tap arms the step
-constexpr uint8_t kLearnCancelled = 5; // a shake or a calibration ended it
+constexpr uint8_t kLearnCancelled = 5; // a shake or a configuration ended it
 constexpr uint32_t kLearnTimeoutMs = 10000;
-constexpr uint32_t kLearnOfferMs = 4000;
 
 // The joystick's scale, the Seesaw gamepad's (i2csensor_seesaw.h): 0..1023,
 // centre 512, and the navigation's dead zone of 200 around it.
@@ -156,8 +197,11 @@ struct Config {
   float fullDeg = 30.0f;       // lean of a full deflection
   uint8_t mountTurns = 0;    // the mount: quarter turns (imuinputmount)
   bool mountMirror = false;  // and mirrored
-  bool learnAfterCalibration = false;  // a finished calibration offers the teach step
-  bool shakeCalibrate = true;  // a shake starts a calibration (off: a shake does nothing)
+  bool shakeCalibrate = true;  // a shake starts the configuration (off: a shake does nothing)
+  // The configuration also teaches the side and the face from knocks (the
+  // feed's taps carry Sample::tapVec: the firmware's knock detector). Off: it
+  // takes the centre only.
+  bool teachKnocks = false;
 };
 
 // One sample (the fields of MotionHookSample this core reads).
@@ -167,6 +211,7 @@ struct Sample {
   float accel[3] = {0, 0, 0};  // m/s^2, sensor frame
   bool tap = false;            // at least one single tap since the previous sample
   uint8_t tapKind = kTapUnknown;  // where it hit
+  int16_t tapVec[3] = {0, 0, 0};  // with tap: the knock's peak jump (mg, sensor frame); zero when unknown
 };
 
 struct Output {
@@ -176,8 +221,10 @@ struct Output {
   int joyY = kJoyCentre;
   bool activity = false; // something a user did: a press, or the joystick deflected
   bool recentred = false; // a new reference pose was taken on this sample
-  uint8_t calEvent = kCalNone;  // a calibration stage reached on this sample
+  uint8_t calEvent = kCalNone;  // a configuration stage reached on this sample
   uint8_t calSecondsLeft = 0;   // with kCalCountdown
+  uint8_t calKnocks = 0;        // with kCalSideKnock / kCalFaceKnock / kCalTimedOut: knocks taken in the stage
+  uint8_t calStage = kStageNone;  // with kCalTimedOut / kCalShakeCancelled / kCalCancelled: the stage it ended in
   uint8_t learnEvent = kLearnNone;  // a teach-step stage reached on this sample
   uint8_t learnDir = 0;             // with kLearnDone: input_rotation::Dir in the device's frame
 };
@@ -186,7 +233,7 @@ struct Output {
 constexpr uint8_t kDropNone = 0;
 constexpr uint8_t kDropNeverCalm = 1;  // the device never got calm within kTapPatienceMs
 constexpr uint8_t kDropGap = 2;        // the samples stopped (a gap)
-constexpr uint8_t kDropShake = 3;      // a shake or a calibration started
+constexpr uint8_t kDropShake = 3;      // a shake or a configuration started
 constexpr uint8_t kDropNoButton = 4;   // the count has no button (1 face tap, 5+ side taps)
 inline const char* dropName(uint8_t why) {
   switch (why) {
@@ -260,6 +307,68 @@ inline int deflectionFor(float deg, const Config& cfg) {
   return kJoyMinDeflection + static_cast<int>(t * (kJoyMaxDeflection - kJoyMinDeflection) + 0.5f);
 }
 
+// ---- Decimation ---------------------------------------------------------------
+// The engine's sample period, and how many samples of a feed make one engine
+// update: 1 at 20 ms and slower, 2 at 10 ms (a backend's samplePeriodMs; 0:
+// it samples every imuDevicePollMs, slower than this).
+constexpr uint32_t kEnginePeriodMs = 20;
+inline uint8_t decimationFor(uint16_t samplePeriodMs) {
+  if (samplePeriodMs == 0 || samplePeriodMs * 3u >= kEnginePeriodMs * 2u) return 1;  // 14 ms and slower
+  const uint32_t n = (kEnginePeriodMs + samplePeriodMs / 2u) / samplePeriodMs;
+  return static_cast<uint8_t>(n > 8 ? 8 : n);
+}
+
+// Hands every `factor`-th sample to the engine. No tap is lost: a tap on a
+// sample that is not handed over waits, with its kind and peak jump, for the
+// next one that is; taps waiting there go out one per engine update, oldest
+// first (two taps within one engine period are two knocks the detector told
+// apart). With factor 1 every sample passes unchanged. A gap (kGapMs) drops
+// what waits, as the engine drops its run.
+class Decimator {
+ public:
+  void reset() { *this = Decimator(); }
+  // True when `s` makes an engine update: `out` is then the sample to feed.
+  bool add(const Sample& s, uint8_t factor, Sample& out) {
+    if (have_ && static_cast<uint32_t>(s.ms - lastMs_) > kGapMs) {
+      count_ = 0;
+      since_ = 0;
+    }
+    have_ = true;
+    lastMs_ = s.ms;
+    if (s.tap && count_ < kMaxWaiting) {
+      kinds_[count_] = s.tapKind;
+      for (int i = 0; i < 3; ++i) vecs_[count_][i] = s.tapVec[i];
+      ++count_;
+    }
+    if (++since_ < (factor ? factor : 1)) return false;
+    since_ = 0;
+    out = s;
+    out.tap = count_ > 0;
+    out.tapKind = kTapUnknown;
+    for (int i = 0; i < 3; ++i) out.tapVec[i] = 0;
+    if (out.tap) {
+      out.tapKind = kinds_[0];
+      for (int i = 0; i < 3; ++i) out.tapVec[i] = vecs_[0][i];
+      for (uint8_t k = 1; k < count_; ++k) {
+        kinds_[k - 1] = kinds_[k];
+        for (int i = 0; i < 3; ++i) vecs_[k - 1][i] = vecs_[k][i];
+      }
+      --count_;
+    }
+    return true;
+  }
+  uint8_t waiting() const { return count_; }
+
+ private:
+  static constexpr uint8_t kMaxWaiting = 8;
+  bool have_ = false;
+  uint32_t lastMs_ = 0;
+  uint8_t since_ = 0;    // samples since the last engine update
+  uint8_t count_ = 0;    // taps waiting, oldest first:
+  uint8_t kinds_[kMaxWaiting] = {};      // their kinds
+  int16_t vecs_[kMaxWaiting][3] = {};    // and peak jumps
+};
+
 class Engine {
  public:
   // Forget everything, the reference pose included (input was started).
@@ -269,7 +378,6 @@ class Engine {
   // engage angle is reported as the top of the screen.
   void startLearn(uint32_t ms, Output* out = nullptr) {
     learning_ = true;
-    offering_ = false;
     learnStartMs_ = ms;
     learnDwell_ = 0;
     learnDwellDir_ = -1;
@@ -277,7 +385,6 @@ class Engine {
     if (out) out->learnEvent = kLearnStarted;
   }
   bool learning() const { return learning_; }
-  bool learnOffered() const { return offering_; }
 
   // Take the present pose as the centre, from the next calm samples.
   void recentre() {
@@ -289,7 +396,7 @@ class Engine {
 
   Output update(const Sample& s, const Config& cfg) {
     Output out;
-    if (have_ && static_cast<uint32_t>(s.ms - lastMs_) > kGapMs) dropRun();
+    if (have_ && static_cast<uint32_t>(s.ms - lastMs_) > kGapMs) dropRun(s.ms);
     if (!have_) recentre();  // the first sample: the pose input starts in
     have_ = true;
     lastMs_ = s.ms;
@@ -324,23 +431,32 @@ class Engine {
       inShake_ = true;
       if (tapCount_ > 0) noteDrop(kDropShake);
       tapCount_ = 0;
-      if (calState_ != CalState::Idle) calState_ = CalState::Idle;  // a new shake starts over
+      if (calState_ != CalState::Idle) {
+        // A shake during the configuration cancels it (nothing changes), and
+        // this shake does not start a new one.
+        cancelConfig(out, kCalShakeCancelled);
+        calBlocked_ = true;
+      }
     } else if (inShake_ && strongCount <= kShakeEndCount) {
       inShake_ = false;
+      shakeEndMs_ = s.ms;
       tapsFromMs_ = s.ms + kAfterShakeMs;
       tapsBlocked_ = true;
-      if (cfg.shakeCalibrate) {
+      if (cfg.shakeCalibrate && !calBlocked_) {
         calState_ = CalState::Waiting;
         calStartMs_ = s.ms;
         calStillSinceMs_ = s.ms;
         calStill_ = false;
         calShown_ = 0;
+        sideTeach_.cancel();
+        faceTeach_.cancel();
         out.calEvent = kCalStarted;
       }
     }
+    if (calBlocked_ && !inShake_ && static_cast<uint32_t>(s.ms - shakeEndMs_) >= kCalRearmMs) calBlocked_ = false;
     if (tapsBlocked_ && static_cast<int32_t>(s.ms - tapsFromMs_) >= 0) tapsBlocked_ = false;
 
-    // ---- Calibration ------------------------------------------------------
+    // ---- Configuration: settle ---------------------------------------------
     if (calState_ == CalState::Waiting) {
       const bool still = !s.tap && dot3(lin, lin) < kCalStillAccel * kCalStillAccel;
       if (!still) {
@@ -364,8 +480,39 @@ class Engine {
         }
       }
       if (calState_ == CalState::Waiting && static_cast<uint32_t>(s.ms - calStartMs_) > kCalTimeoutMs) {
-        calState_ = CalState::Idle;
-        out.calEvent = kCalCancelled;
+        cancelConfig(out, kCalCancelled);
+      }
+    }
+
+    // ---- Configuration: the knock stages ------------------------------------
+    // Every tap is an example of the stage's surface (as imutapteach takes
+    // them), whichever surface the detector sorted it to; none is a button
+    // (the one that finishes the configuration neither).
+    bool tapTaken = false;
+    if (calState_ == CalState::Side || calState_ == CalState::Face) {
+      tapTaken = s.tap;
+      const bool side = calState_ == CalState::Side;
+      knock::Teacher& t = side ? sideTeach_ : faceTeach_;
+      if (s.tap) {
+        knock::Event e;
+        e.verdict = knock::Verdict::Tap;
+        for (int i = 0; i < 3; ++i) e.peakVec[i] = s.tapVec[i];
+        if (t.add(e)) {
+          out.calEvent = side ? kCalSideKnock : kCalFaceKnock;
+          out.calKnocks = t.got.count;
+        }
+      }
+      if (t.state == knock::TeachState::Done) {
+        if (side) {
+          calState_ = CalState::Face;
+          faceTeach_.start(false, s.ms);
+          out.calEvent = kCalFaceStart;
+          out.calKnocks = 0;
+        } else {
+          finishConfig(out);
+        }
+      } else if (t.expire(s.ms)) {
+        cancelConfig(out, kCalTimedOut);
       }
     }
     const bool calibrating = calState_ != CalState::Idle;
@@ -374,14 +521,12 @@ class Engine {
     if (inShake_ || calibrating) {
       if (tapCount_ > 0) noteDrop(kDropShake);
       tapCount_ = 0;
-    } else if (s.tap && !tapsBlocked_) {
+    } else if (s.tap && !tapsBlocked_ && !tapTaken) {
       const bool face = s.tapKind == kTapFace;
       // A tap of the other kind ends the run in progress: its button goes out
       // now (unless the device was being moved about), and this tap starts a
       // new run.
-      if (tapCount_ > 0 && face != runFace_ && takeOffer(out, s.ms, movedSinceKnock)) {
-        tapCount_ = 0;
-      } else if (tapCount_ > 0 && face != runFace_) {
+      if (tapCount_ > 0 && face != runFace_) {
         const uint8_t what = movedSinceKnock ? 0 : buttonForTaps(tapCount_, runFace_);
         if (!what) noteDrop(movedSinceKnock ? kDropNeverCalm : kDropNoButton);
         tapCount_ = 0;
@@ -400,8 +545,6 @@ class Engine {
       if (since > cfg.tapWindowMs + kTapPatienceMs) {
         noteDrop(kDropNeverCalm);
         tapCount_ = 0;  // never calm enough to mean it
-      } else if (since > cfg.tapWindowMs && takeOffer(out, s.ms, movedSinceKnock)) {
-        tapCount_ = 0;
       } else if (since > cfg.tapWindowMs && !movedSinceKnock) {
         const uint8_t what = buttonForTaps(tapCount_, runFace_);
         if (!what) noteDrop(kDropNoButton);
@@ -424,20 +567,25 @@ class Engine {
           if (n > 0.5f * kCentreSamples) {
             for (int i = 0; i < 3; ++i) up0[i] = sum_[i] / n;
           }
-          if (leanAxes(up0, e1_, e2_)) {
-            for (int i = 0; i < 3; ++i) up0_[i] = up0[i];
-            haveRef_ = true;
+          float e1[3], e2[3];
+          if (leanAxes(up0, e1, e2)) {
             capturing_ = false;
-            out.recentred = true;
             if (calState_ == CalState::Capturing) {
-              calState_ = CalState::Idle;
-              out.calEvent = kCalDone;
-              if (cfg.learnAfterCalibration) {
-                // Only an offer: a face tap within kLearnOfferMs arms the step.
-                offering_ = true;
-                offerUntilMs_ = s.ms + kLearnOfferMs;
-                out.learnEvent = kLearnOffered;
+              // The configuration's centre: kept aside until every stage is done.
+              for (int i = 0; i < 3; ++i) {
+                candUp0_[i] = up0[i];
+                candE1_[i] = e1[i];
+                candE2_[i] = e2[i];
               }
+              if (cfg.teachKnocks) {
+                calState_ = CalState::Side;
+                sideTeach_.start(true, s.ms);
+                out.calEvent = kCalSideStart;
+              } else {
+                finishConfig(out);
+              }
+            } else {
+              useReference(up0, e1, e2, out);
             }
           } else {  // not a direction (the samples cancelled out): try again
             captured_ = 0;
@@ -448,13 +596,9 @@ class Engine {
     }
 
     // ---- The teach step ----------------------------------------------------
-    if (offering_ && (inShake_ || calState_ != CalState::Idle ||
-                      (tapCount_ == 0 && static_cast<int32_t>(s.ms - offerUntilMs_) >= 0))) {
-      offering_ = false;  // the offer lapses quietly (a face run in progress may still take it)
-    }
     if (learning_) {
       if (inShake_ || calState_ != CalState::Idle) {
-        learning_ = false;  // a new shake or calibration ends it
+        learning_ = false;  // a new shake or configuration ends it
         out.learnEvent = kLearnCancelled;
       } else if (static_cast<uint32_t>(s.ms - learnStartMs_) > kLearnTimeoutMs) {
         learning_ = false;
@@ -539,6 +683,29 @@ class Engine {
   bool capturing() const { return capturing_; }
   bool shaking() const { return inShake_; }
   bool calibrating() const { return calState_ != CalState::Idle; }
+  // The configuration's stage (kStage*) and, in a knock stage, its knocks so
+  // far and the time it has left.
+  uint8_t calStage() const {
+    switch (calState_) {
+      case CalState::Waiting: return kStageSettle;
+      case CalState::Capturing: return kStageCentre;
+      case CalState::Side: return kStageSide;
+      case CalState::Face: return kStageFace;
+      default: return kStageNone;
+    }
+  }
+  uint8_t calKnocks() const {
+    return calState_ == CalState::Side ? sideTeach_.got.count : calState_ == CalState::Face ? faceTeach_.got.count : 0;
+  }
+  uint32_t calMsLeft(uint32_t ms) const {
+    return calState_ == CalState::Side ? sideTeach_.msLeft(ms) : calState_ == CalState::Face ? faceTeach_.msLeft(ms) : 0;
+  }
+  // A shake would not start a configuration now (one was just cancelled by a shake).
+  bool calBlocked() const { return calBlocked_; }
+  // After kCalDone with Config::teachKnocks: the two finished steps (Done),
+  // for the caller to save (knock::judgeTaught). Otherwise not Done.
+  const knock::Teacher& sideTeach() const { return sideTeach_; }
+  const knock::Teacher& faceTeach() const { return faceTeach_; }
   bool runOnFace() const { return runFace_; }
   // The last run of taps that made no button, and why (kDrop*).
   uint32_t drops() const { return drops_; }
@@ -550,13 +717,39 @@ class Engine {
   const float* reference() const { return up0_; }
 
  private:
-  // A finished run of face taps while the teach step is on offer arms it
-  // (instead of being a button).
-  bool takeOffer(Output& out, uint32_t ms, bool moved) {
-    if (!offering_ || !runFace_ || moved) return false;
-    offering_ = false;
-    startLearn(ms, &out);
-    return true;
+  void useReference(const float up0[3], const float e1[3], const float e2[3], Output& out) {
+    for (int i = 0; i < 3; ++i) {
+      up0_[i] = up0[i];
+      e1_[i] = e1[i];
+      e2_[i] = e2[i];
+    }
+    haveRef_ = true;
+    out.recentred = true;
+  }
+  // Every stage done: the centre goes into use (the caller saves the surfaces).
+  void finishConfig(Output& out) {
+    calState_ = CalState::Idle;
+    useReference(candUp0_, candE1_, candE2_, out);
+    releaseJoystick();
+    // The last knock's echo is no tap either (as after a shake).
+    tapsBlocked_ = true;
+    tapsFromMs_ = lastMs_ + kAfterShakeMs;
+    out.calEvent = kCalDone;
+  }
+  // Ended before every stage was done: nothing changes (the old centre stays
+  // in use, the taught steps are dropped).
+  void cancelConfig(Output& out, uint8_t event) {
+    out.calEvent = event;
+    out.calStage = calStage();
+    out.calKnocks = calKnocks();
+    if (calState_ == CalState::Capturing && capturing_) {
+      capturing_ = false;
+      captured_ = 0;
+      sum_[0] = sum_[1] = sum_[2] = 0.0f;
+    }
+    calState_ = CalState::Idle;
+    sideTeach_.cancel();
+    faceTeach_.cancel();
   }
   void noteDrop(uint8_t why) {
     ++drops_;
@@ -577,17 +770,20 @@ class Engine {
     dwellAxis_ = 0;
     dwellSign_ = 0;
   }
-  // After a gap: nothing that was being counted is still true.
-  void dropRun() {
+  // After a gap: nothing that was being counted is still true. nowMs is this
+  // sample, not the one before the gap: the gap is not time held still, and
+  // a shake the gap cut short rearms from here.
+  void dropRun(uint32_t nowMs) {
     if (tapCount_ > 0) noteDrop(kDropGap);
     tapCount_ = 0;
     if (calState_ == CalState::Waiting) {  // the countdown starts over
       calStill_ = false;
       calShown_ = 0;
-      calStillSinceMs_ = lastMs_;
+      calStillSinceMs_ = nowMs;
     }
     strongBits_ = 0;
     afterKnock_ = strongAfterKnock_ = 0;
+    if (inShake_) shakeEndMs_ = nowMs;
     inShake_ = false;
     tapsBlocked_ = false;
     frozen_ = false;
@@ -617,8 +813,14 @@ class Engine {
   uint8_t lastDrop_ = kDropNone;
   uint32_t lastTapMs_ = 0;
 
-  enum class CalState : uint8_t { Idle = 0, Waiting, Capturing };
+  enum class CalState : uint8_t { Idle = 0, Waiting, Capturing, Side, Face };
   CalState calState_ = CalState::Idle;
+  bool calBlocked_ = false;  // a shake cancelled a configuration: none starts until kCalRearmMs after the last shake
+  uint32_t shakeEndMs_ = 0;
+  knock::Teacher sideTeach_, faceTeach_;  // the knock stages (Idle = 0: fine zero-filled)
+  float candUp0_[3] = {0, 0, 0};  // the configuration's centre, until every stage is done
+  float candE1_[3] = {0, 0, 0};
+  float candE2_[3] = {0, 0, 0};
   uint32_t calStartMs_ = 0, calStillSinceMs_ = 0;
   bool calStill_ = false;
   uint8_t calShown_ = 0;  // the countdown second last reported
@@ -647,8 +849,6 @@ class Engine {
   float leanX_ = 0.0f, leanY_ = 0.0f;
 
   bool learning_ = false;
-  bool offering_ = false;
-  uint32_t offerUntilMs_ = 0;
   uint32_t learnStartMs_ = 0;
   int learnDwell_ = 0;
   int8_t learnDwellDir_ = 0;

@@ -40,7 +40,7 @@ Feature flags are declared, with their defaults, in `components/hardwareone/Syst
 | `NETWORK_FEATURE_LEVEL` | How much of the network stack is compiled: `0`=disabled, `1`=WiFi only, `2`=WiFi+HTTP, `3`=WiFi+HTTP+ESP-NOW, `4`=custom |
 | `WEB_FEATURE_LEVEL` | How much of the web UI is compiled: `0`=disabled, `1`=core UI, `2`=standard modules, `3`=all modules, `4`=custom |
 | `DISPLAY_TYPE` | Which panel driver is compiled: `0`=none, `1`=SSD1306 OLED, `2`=generic ST7789 TFT, `3`=generic ILI9341 TFT, `4`=ST7789 240×240 LCD of the ESP32-P4X-EYE, `5`=HX8394 720×1280 DSI panel of the Waveshare ESP32-P4 Touch LCD 5. `4` and `5` are set by those boards' feature files. SSD1306 is the tested path for the other boards; `2` and `3` are example branches without board wiring, and a saved configuration that selects them is refused at compile time |
-| `INPUT_DEVICE_TYPE` | Which physical input controller is compiled, mutually exclusive: `0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder, `3`=GPIO wheel and buttons (ESP32-P4X-EYE), `4`=GT911 touch panel (Waveshare ESP32-P4 Touch LCD 5). `3` and `4` are set by those boards' feature files |
+| `INPUT_DEVICE_TYPE` | Which physical input controller is compiled, mutually exclusive: `0`=none, `1`=Seesaw gamepad, `2`=ANO rotary encoder, `3`=GPIO wheel and buttons (ESP32-P4X-EYE), `4`=GT911 touch panel (Waveshare ESP32-P4 Touch LCD 5), `5`=the motion sensor (taps are buttons, tilt is the joystick; needs the IMU, either chip). `3` and `4` are set by those boards' feature files |
 | `ENABLE_HTTPS` | Set to `1` for TLS on the web server; certs in `/system/certs/`. Runtime toggle: `httpsenabled` |
 | `ENABLE_MAPS` | Set to `1` to build offline maps and waypoints |
 | `ENABLE_GAMES` | Set to `1` with `ENABLE_WEB_GAME_DARKROOM=1` to build A Dark Room and its browser launcher |
@@ -69,7 +69,7 @@ When `I2C_FEATURE_LEVEL = 4`, individual sensors are controlled by `CUSTOM_ENABL
 | ---- | ------ |
 | `CUSTOM_ENABLE_OLED` | SSD1306 OLED display |
 | `CUSTOM_ENABLE_GAMEPAD` | Seesaw gamepad |
-| `CUSTOM_ENABLE_IMU` | IMU (motion sensor); `IMU_DEVICE_TYPE` picks the chip: 1 = BNO055 (default), 2 = Adafruit 4517 (LSM6DSOX + LIS3MDL; tilt, flip and tap, yaw relative to the start until the magnetometer calibration lands) |
+| `CUSTOM_ENABLE_IMU` | IMU (motion sensor); `IMU_DEVICE_TYPE` picks the chip: 1 = BNO055 (default), 2 = Adafruit 4517 (LSM6DSOX + LIS3MDL; tilt, flip and tap, yaw relative to the start until the magnetometer calibration lands). Either can be the input device (`INPUT_DEVICE_TYPE 5`: taps and tilt) |
 | `CUSTOM_ENABLE_TOF` | VL53L4CX Time-of-Flight |
 | `CUSTOM_ENABLE_THERMAL` | MLX90640 thermal camera |
 | `CUSTOM_ENABLE_APDS` | APDS9960 gesture/proximity/light |
@@ -207,9 +207,9 @@ screen as you see it, at every rotation (the ANO wheel keeps its direction). How
 itself sits against the screen is a separate setting, applied first: `imuinputmount` and `anomount`
 take `0|90|180|270` and an optional `mirror`. `imuinputlearn` teaches the IMU's: it answers at
 once, then tilt the sign toward the top of the screen within 10 s and the lean sets the mount (the
-screen confirms it; `imuinputread` shows `lastLearn` and the mount). After a shake calibration the
-step is offered ("Tap the face to teach which way is up"): a face tap within about 4 s starts it,
-anything else leaves the mount alone and the menus work at once.
+screen confirms it; `imuinputread` shows `lastLearn` and the mount). The shake configuration no
+longer offers it afterwards (its face tap would land in the configuration's top-knock stage): run
+`imuinputlearn` when the mount needs teaching.
 
 ---
 
@@ -2592,6 +2592,19 @@ imuaddress [addr]               - IMU address; next openimu (BNO055: 0x28, 0x29 
                                   high; Adafruit 4517 LSM6DSOX: 0x6A, 0x6B with SA0 high)
 imumagaddress [0x1C|0x1E]       - Adafruit 4517 builds: the LIS3MDL magnetometer's address
 imubus <0|1>                    - The bus the IMU is on (both 4517 chips are checked)
+imutapthreshold [50-4000]       - Tap threshold in mg (default 1300 on the 4517, 300 on the
+                                  BNO055); lower catches softer taps
+imutapmaxms [5-500]             - Longest a tap may last (default 120 ms; longer is handling)
+imutapringms [0-500]            - A knock this soon after a tap is its ringing (default 80 ms)
+imutapsideaxis [x|y|z]          - The axis a side tap hits along (default y)
+imutapsideratio [10-1000]       - Side tap: that axis is at least this % of the largest other
+imutapteach [side|face|clear|status] - Teach side and face with 5 knocks each (used once both
+                                  are taught, in place of the two above); clear forgets them.
+                                  A shake (imuinputshake) teaches both in its configuration
+imutaptrace [json|clear]        - Every recent knock: how hard, how long, why it did or did
+                                  not count, with a tuning hint per kind of miss
+imutapshock [0-3]               - Adafruit 4517 with an LSM6DSOX: its chip's tap engine
+imutapquiet [0-3]                 (shock and quiet windows)
 imuewmafactor <0.0-1.0>         - EWMA smoothing factor
 imutransitionms <0-1000>        - Transition time
 imuwebmaxfps <1-30>             - Web UI max frame rate
@@ -2607,6 +2620,19 @@ chips down. The magnetometer is read (`mag` in
 `imuread json`) but not calibrated yet, so yaw counts from the start and drifts slowly (`imuread`
 says "Yaw (relative)"); pitch and roll are absolute. Pitch is positive when the board's +X end
 rises, roll when its +Y edge rises, and yaw grows clockwise seen from above.
+
+Taps found by the firmware: the 4517's LSM6DS3TR-C streams its accelerometer at 416 Hz to a
+software knock detector, and in a build with the IMU as the input device (`INPUT_DEVICE_TYPE 5`)
+the BNO055 is read every 10 ms (its fusion rate) for the same detector: each read is the
+accelerometer and the fusion's gravity (12 bytes), with the rest of the reading (orientation,
+heading, gyroscope, magnetometer, calibration) every 100 ms. A BNO055 build without IMU input is
+read every `imudevicepollms` as before, with no tap detection of its own. The BNO055 filters its
+accelerometer at 62.5 Hz, so a knock reads about a third as strong as on the 4517: its default
+threshold is 300 mg against the 4517's 1300 mg. To tune it, tap the device the way it will be used
+and run `imutaptrace`: each knock is listed with its peak, length and verdict (`tap`, `soft` under
+the threshold, `long` over `imutapmaxms`, `ring` inside `imutapringms`), and a hint names the
+setting that would have counted the missed ones. `imustatus` says where taps come from ("taps
+found by the firmware in the 416 Hz readings", or 100 Hz on the BNO055).
 
 Every surface marks such a yaw: the OLED IMU page shows `Yrel:` and no heading line, the web card
 "Yaw (relative)", the G2 lens leaves yaw out of its row and writes `rel` in its readout, and
@@ -2750,6 +2776,64 @@ The address is the A0-A2 jumpers' (0x49..0x50, hex or decimal); an address or a 
 device of this build uses there is refused (`anoencoderi2caddr`, `inputbus` and the open), and
 `anoencoderread` answers an error until the encoder is open (`openinput`, or `inputautostart on`
 for every boot, with or without the OLED).
+
+The motion sensor as the input device (`INPUT_DEVICE_TYPE 5`, with either IMU chip): side taps
+are A (1), B (2), Y (3) and X (4); face taps are START (2) and SELECT (3); tilting from the centre
+pose is the joystick, and a sustained shake starts the configuration (below). `imuinputread [json]`
+shows what it makes of the motion, `imuinputtapms`,
+`imuinputtilt`, `imuinputmount` and `imuinputlearn` tune it, and `imutaptrace` (under imu) shows
+every knock. On the BNO055 the input reads the chip every 10 ms; the tap and tilt rules see a
+sample every 20 ms on both chips, and every tap reaches them.
+
+**Configuring by shaking.** Shake the device for about a second, then follow the screen; one
+message is updated in place as you go:
+
+1. "Set the sign down and hold still": set it down the way you will use it and keep it still for
+   3 s ("Hold still: 3, 2, 1"). That pose becomes the tilt's centre. Never still within 20 s:
+   "Configuration cancelled: it never held still".
+2. "Knock the side 5 times": knock the side 5 times, a second or so apart, the way you will use it
+   ("Side: 2 of 5").
+3. "Knock the top 5 times": knock the top (the face) 5 times ("Top: 3 of 5").
+4. "Configured: side and top 64 deg apart", or a warning: the side and top are under 25 degrees
+   apart (they can't be told apart), the top knocks pointed opposite ways, or some knocks would sort
+   as the other surface. The values are saved even with a warning: shake to configure again.
+
+Nothing changes until the last top knock: only then do the new centre and both taught surfaces
+(as `imutapteach` would teach them) take effect. A knock stage without its 5 knocks within 30 s
+cancels the whole configuration ("No 5 knocks on the side in 30 s: configuration cancelled"), and
+the previous centre and surfaces stay. The knocks in the configuration press no button. Shaking
+the device while it runs cancels it ("Configuration cancelled", nothing changes); that shake does
+not start a new one: let the device rest 2 s, then shake again. `imuinputshake off` turns the
+whole thing off (a shake then does nothing); `imuinputread json` shows the stage (`configStage`,
+`configKnocks`) and how the last one ended (`lastConfig`). With an IMU whose own chip finds the
+taps (the LSM6DSOX on a 4517) the knocks carry no direction, and the configuration is the tilt
+centre only. `imutapteach` waits while a configuration runs.
+
+**Teaching side and face by command.** Out of the box a knock is a side tap when it hits mostly along one
+axis (`imutapsideaxis`, `imutapsideratio`), which suits the meeting sign. Where that does not
+work (on the pod side knocks come either way round), teach the device its two surfaces, by the
+shake configuration above or by command (both teach and judge the surfaces the same way):
+
+1. Open the IMU (`openinput` or `openimu`).
+2. `imutapteach side`, then within 30 s knock the side 5 times, the way you will use it, a second
+   or so apart. The screen counts them ("Knock the side: 2 of 5"); `imutapteach status` shows the
+   same. These knocks press no button.
+3. `imutapteach face`, then knock the face 5 times.
+4. `imutapteach status`: the side's axis, the face's direction and how many degrees apart they
+   are. Under 25 degrees the two can't be told apart (a warning says so: teach both again,
+   knocking the middle of each surface). The message at the end of a step also warns when the face
+   knocks pointed opposite ways or some of the step's knocks would sort as the other surface.
+5. Test: knock and run `imutaptrace`. Each tap shows `side` or `face` and `cos s/f`: how well it
+   lines up with the side's axis (either way round, 0 to 1) and with the face's direction (-1 to
+   1, negative when it points away from the face). The face wins when its value is the larger; a
+   close call (say 0.81/0.78) is a knock between the two.
+
+The face keeps its sign and the side does not: on the pod a face knock always hits the same way,
+while side knocks come either way round, some pointing straight against the face. Teaching one
+surface again replaces only that surface; a step that does not get its 5 knocks within 30 s
+changes nothing. `imutapteach clear` forgets both and goes back to the ratio rule. The taught
+surfaces are saved settings (`imuTapSideTaught`, `imuTapFaceTaught`, shown in the settings but set
+only by `imutapteach`), so they survive a restart.
 
 > `opengamepad`, `closegamepad`, and `gamepadautostart` no longer exist - they
 > were replaced by the device-agnostic `openinput` / `closeinput` /

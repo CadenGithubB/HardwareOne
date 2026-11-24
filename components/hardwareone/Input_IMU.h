@@ -11,13 +11,18 @@
 // Input_IMUCore.h on it and publishes into the shared input reading, where
 // the menus and the on-screen keyboard read it like a gamepad.
 //
-//   1 tap = A   2 = B   3 = Y   4 = X   5 = this pose is the centre
-//   a sustained shake = START (imuinputshake)   SELECT has no gesture
+//   side taps: 1 = A   2 = B   3 = Y   4 = X
+//   face taps: 2 = START   3 = SELECT
+//   a sustained shake starts the configuration (imuinputshake): set it down
+//   and hold still (the tilt centre), knock the side 5 times, knock the top
+//   (face) 5 times; nothing changes unless every stage is done, and a shake
+//   during it cancels it
 //   tilt left / right / up / down from the centre pose = the joystick
 //
-// It needs an IMU whose chip detects taps and that gives the direction of
-// gravity: the Adafruit 4517 (IMU_DEVICE_TYPE 2). While it is open it holds
-// the IMU open ('closeimu' refuses and names "input").
+// Either IMU backend: the firmware's knock detector finds the taps (the
+// Adafruit 4517 at 416 Hz, the BNO055 at 100 Hz in a build with IMU input) and
+// the backend gives the direction of gravity. While it is open it holds the
+// IMU open ('closeimu' refuses and names "input").
 class String;
 
 // Start the input. nullptr: started (the IMU may still be opening; taps and
@@ -45,9 +50,12 @@ const char* cmd_imuinputtilt(const String& argsInput);
 const char* cmd_imuinputshake(const String& argsInput);
 const char* cmd_imuinputmount(const String& argsInput);
 const char* cmd_imuinputlearn(const String& argsInput);
-// Main loop: saves a mount the teach step learned (imuinputlearn, or the step
-// offered after a shake calibration).
+// Main loop: saves a mount the teach step learned (imuinputlearn) and the
+// knock surfaces a finished shake configuration taught.
 void imuInputTick();
+// A shake configuration is under way (imutapteach waits for it).
+bool imuInputConfiguring();
 #else
 inline void imuInputTick() {}
+inline bool imuInputConfiguring() { return false; }
 #endif

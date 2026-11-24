@@ -58,7 +58,7 @@ struct Settings {
       thermalDevicePollMs(100),
       tofDevicePollMs(220),
       imuDevicePollMs(200),
-      imuTapThresholdMg(1300),
+      imuTapThresholdMg(IMU_TAP_THRESHOLD_DEFAULT_MG),
       imuTapShock(2),
       imuTapQuiet(1),
       imuTapMaxMs(120),
@@ -558,13 +558,15 @@ struct Settings {
   int thermalDevicePollMs;
   int tofDevicePollMs;
   int imuDevicePollMs;
-  int imuTapThresholdMg;  // LSM6 tap engine: threshold in mg, 125 mg steps (imutapthreshold)
+  int imuTapThresholdMg;  // tap threshold in mg: the knock detector, or the LSM6DSOX tap engine in 125 mg steps (imutapthreshold)
   int imuTapShock;        // ...shock window 0..3 (imutapshock)
   int imuTapQuiet;        // ...quiet window 0..3 (imutapquiet)
   int imuTapMaxMs;        // software knock detector: longest a tap may last (imutapmaxms)
   int imuTapRingMs;       // ...a knock this soon after a tap is its ringing (imutapringms)
   int imuTapSideAxis;     // ...side or face: the axis (0 X, 1 Y, 2 Z) a side knock hits along (imutapsideaxis)
   int imuTapSidePct;      // ...and its share of the largest other axis, in %, that makes it a side knock (imutapsideratio)
+  String imuTapSideTaught;  // ...taught side knocks, "x,y,z" unit axis in milli-units, "" untaught (imutapteach)
+  String imuTapFaceTaught;  // ...taught face direction (signed), the same form (imutapteach)
   int gpsDevicePollMs;
   int apdsDevicePollMs;
   int inputDevicePollMs;
@@ -985,7 +987,7 @@ struct Settings {
   int  imuInputTapWindowMs;     // IMU input: a run of taps ends this long after its last tap (Input_IMU: imuinputtapms)
   int  imuInputTapMergeMs;      // IMU input: tap flags closer than this are one knock (its rebound) (imuinputtapmerge)
   int  imuInputTiltDeg;         // IMU input: lean from the centre pose that deflects the joystick (imuinputtilt)
-  bool imuInputShakeCalibrate;  // IMU input: a sustained shake starts a tilt calibration (imuinputshake)
+  bool imuInputShakeCalibrate;  // IMU input: a sustained shake starts the configuration: tilt centre, side and top knocks (imuinputshake)
   int imuInputMount;            // IMU input: how the sensor sits: 0/90/180/270, +1 mirrored (imuinputmount)
   bool thermalAutoStart;        // Auto-start thermal camera after boot
   bool tofAutoStart;            // Auto-start ToF distance sensor after boot

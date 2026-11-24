@@ -4,7 +4,7 @@
 > Regenerate with `python3 tools/command_registry.py reference`.
 > Source of truth is the `CommandEntry` tables in `components/hardwareone/*.cpp`.
 
-1042 commands across 61 modules (1042 registry entries).
+1043 commands across 61 modules (1043 registry entries).
 
 Commands are matched case-insensitively, and lookup uses longest-prefix matching, so `automation list` resolves to the `automation` dispatcher with `list` as its argument.
 
@@ -35,7 +35,7 @@ Legend: **A** = requires admin &nbsp; **S** = requires super admin
 - [`servo`](#servo) — 6 commands
 - [`thermal`](#thermal) — 23 commands
 - [`tof`](#tof) — 10 commands
-- [`imu`](#imu) — 27 commands
+- [`imu`](#imu) — 28 commands
 - [`input`](#input) — 6 commands
 - [`gamepad`](#gamepad) — 1 commands
 - [`anoencoder`](#anoencoder) — 4 commands
@@ -604,6 +604,7 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 | `imutapshock` | A | IMU tap shock window: [0..3]<br/>`Usage: imutapshock [0..3]` |
 | `imutapsideaxis` | A | IMU side knocks: the axis a side knock hits along (software knock detector): [x\|y\|z]<br/>`Usage: imutapsideaxis [x\|y\|z]` |
 | `imutapsideratio` | A | IMU side knocks: the side axis's share of the largest other axis, in %, that makes a side tap: [10..1000]<br/>`Usage: imutapsideratio [10..1000]` |
+| `imutapteach` | A | IMU side or face: teach each surface with 5 knocks, forget them, or show them (software knock detector)<br/>`Usage: imutapteach [side\|face\|clear\|status]` |
 | `imutapthreshold` | A | IMU tap threshold in mg: [50..4000]<br/>`Usage: imutapthreshold [50..4000]` |
 | `imutaptrace` |  | Every recent knock: how hard, how long, and why it did or did not count, with tuning hints. (add 'json' for JSON output)<br/>`Usage: imutaptrace [json\|clear]` |
 | `imutransitionms` | A | IMU transition time: <0..1000><br/>`Usage: imutransitionms <0..1000>` |
@@ -645,18 +646,18 @@ _`relayCommands` has `#if` alternatives in `BLE_PhonePipe.cpp`; this table is th
 
 ## imuinput
 
-> The motion sensor used as the OLED navigation input (INPUT_DEVICE_TYPE 5; it needs the Adafruit 4517, whose chip detects taps). Tap the side: one tap is A, two are B, three are Y, four are X; tap the face: two taps are START, three SELECT (one does nothing). The button arrives once no further tap has followed for the tap window (imuinputtapms <200..800>, default 450 ms); a tap on the other side ends the run. Side or face comes from the knock's direction (imutapsideaxis, imutapsideratio; 'imutaptrace' shows each knock); a chip that cannot tell counts every tap as a side tap. Tilting the device away from that centre pose by more than the tilt angle (imuinputtilt <8..40> degrees, default 15) deflects the joystick left, right, up or down, one direction at a time, and returning releases it; a lean of more than 60 degrees is taken as a new pose and centres the joystick until the next re-centre. imuinputmount [0|90|180|270] [mirror] fits the directions to how the sensor sits against the screen (the screen's own rotation, oledrotation, is applied after it); imuinputlearn teaches it: tilt the sign toward the top of the screen within 10 s and the lean sets the mount. A sustained shake calibrates the tilt (imuinputshake [on|off]): set the device down the way it will be used and hold it still for 3 s, and that pose is the new centre (imuinputzero takes it at once); the teach step is then offered: a face tap within 4 s starts it, anything else leaves the mount alone. imuinputread [json] shows the state, the lean in degrees, the joystick and the taps being counted. The open/close/autostart lifecycle lives under the input module: openinput also opens the IMU and holds it open (closeimu refuses while the input runs), closeinput leaves the IMU open.
+> The motion sensor used as the OLED navigation input (INPUT_DEVICE_TYPE 5, with either motion sensor: the firmware finds the taps in its readings, the Adafruit 4517's at 416 Hz, the BNO055's at 100 Hz). Tap the side: one tap is A, two are B, three are Y, four are X; tap the face: two taps are START, three SELECT (one does nothing). The button arrives once no further tap has followed for the tap window (imuinputtapms <200..800>, default 450 ms); a tap on the other side ends the run. Side or face comes from the knock's direction (imutapsideaxis, imutapsideratio; 'imutaptrace' shows each knock); a chip that cannot tell counts every tap as a side tap. Tilting the device away from that centre pose by more than the tilt angle (imuinputtilt <8..40> degrees, default 15) deflects the joystick left, right, up or down, one direction at a time, and returning releases it; a lean of more than 60 degrees is taken as a new pose and centres the joystick until the next re-centre. imuinputmount [0|90|180|270] [mirror] fits the directions to how the sensor sits against the screen (the screen's own rotation, oledrotation, is applied after it); imuinputlearn teaches it: tilt the sign toward the top of the screen within 10 s and the lean sets the mount. A sustained shake configures the tilt (imuinputshake [on|off]): hold still for 3 s, then knock the side 5 times and the top 5 times. Nothing is saved until the last top knock; a shake during it cancels it, and another starts only after 2 s still (imuinputzero takes the centre at once). imuinputread [json] shows the state, the lean in degrees, the joystick and the taps being counted. The open/close/autostart lifecycle lives under the input module: openinput also opens the IMU and holds it open (closeimu refuses while the input runs), closeinput leaves the IMU open.
 
 | Command | | Description |
 | ------- | :-: | ----------- |
 | `imuinputlearn` | A | Teach the mount: tilt the sign toward the top of the screen within 10 s<br/>`Usage: imuinputlearn` |
 | `imuinputmount` | A | How the sensor sits, in the screen's terms: [0\|90\|180\|270] [mirror]<br/>`Usage: imuinputmount [0\|90\|180\|270] [mirror]` |
 | `imuinputread` |  | IMU input: state, lean, joystick and taps. (add 'json' for JSON output)<br/>`Usage: imuinputread [json]` |
-| `imuinputshake` | A | A shake calibrates the tilt: set the device down, hold still 3 s [on\|off]<br/>`Usage: imuinputshake [on\|off]` |
+| `imuinputshake` | A | A shake configures: hold still 3 s (tilt centre), knock the side 5x, the top 5x [on\|off]<br/>`Usage: imuinputshake [on\|off]` |
 | `imuinputtapmerge` | A | Tap flags closer than this many ms are one knock (its rebound) <0..300><br/>`Usage: imuinputtapmerge [0..300]` |
 | `imuinputtapms` | A | Tap window in ms: a button arrives this long after its last tap <200..800><br/>`Usage: imuinputtapms [200..800]` |
 | `imuinputtilt` | A | Tilt dead zone in degrees: a smaller lean does nothing, a larger one moves the joystick <8..40><br/>`Usage: imuinputtilt [8..40]` |
-| `imuinputzero` | A | Take the present pose as the joystick's centre (a shake does the same, with a prompt).<br/>`Usage: imuinputzero` |
+| `imuinputzero` | A | Take the present pose as the joystick's centre (a shake's configuration takes it too, with prompts).<br/>`Usage: imuinputzero` |
 
 ## apds
 

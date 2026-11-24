@@ -380,7 +380,8 @@ static constexpr CommandModule gCommandModules[] = {
 #endif
 #if ENABLE_IMU_INPUT
   { "imuinput",   "IMU as the input device — taps are buttons, tilt is the joystick", "The motion sensor used as the OLED navigation "
-    "input (INPUT_DEVICE_TYPE 5; it needs the Adafruit 4517, whose chip detects taps). Tap the side: one tap is A, two are B, "
+    "input (INPUT_DEVICE_TYPE 5, with either motion sensor: the firmware finds the taps in its readings, the Adafruit 4517's "
+    "at 416 Hz, the BNO055's at 100 Hz). Tap the side: one tap is A, two are B, "
     "three are Y, four are X; tap the face: two taps are START, three SELECT (one does nothing). The button arrives "
     "once no further tap has followed for the tap window (imuinputtapms <200..800>, default 450 ms); a tap on the "
     "other side ends the run. Side or face comes from the knock's direction (imutapsideaxis, imutapsideratio; "
@@ -389,8 +390,7 @@ static constexpr CommandModule gCommandModules[] = {
     "and returning releases it; a lean of more than 60 degrees is taken as a new pose and centres the joystick until the "
     "next re-centre. imuinputmount [0|90|180|270] [mirror] fits the directions to how the sensor sits against the "
     "screen (the screen's own rotation, oledrotation, is applied after it); imuinputlearn teaches it: tilt the sign "
-    "toward the top of the screen within 10 s and the lean sets the mount. A sustained shake calibrates the tilt (imuinputshake [on|off]): set the device down the way it will be used and hold it still for 3 s, and that pose is the new centre (imuinputzero takes it at once); the teach step is then offered: "
-    "a face tap within 4 s starts it, anything else leaves the mount alone. "
+    "toward the top of the screen within 10 s and the lean sets the mount. A sustained shake configures the tilt (imuinputshake [on|off]): hold still for 3 s, then knock the side 5 times and the top 5 times. Nothing is saved until the last top knock; a shake during it cancels it, and another starts only after 2 s still (imuinputzero takes the centre at once). "
     "imuinputread [json] shows the state, the lean in degrees, the joystick and the taps being counted. The "
     "open/close/autostart lifecycle lives under the input module: openinput also opens the IMU and holds it open "
     "(closeimu refuses while the input runs), closeinput leaves the IMU open.", imuInputCommands, &imuInputCommandsCount, CMD_MODULE_SENSOR, []() { return gInputConnected; } },

@@ -7,8 +7,9 @@
 //
 // The contract, for whoever registers a hook:
 //   - When: the IMU task calls it once per sample that has a reading (50 Hz
-//     on the Adafruit 4517, every imuDevicePollMs on the BNO055), after the
-//     action detector has seen the sample, with no lock held.
+//     on the Adafruit 4517; on the BNO055 100 Hz in a build with IMU input,
+//     else every imuDevicePollMs), after the action detector has seen the
+//     sample, with no lock held.
 //   - Where: on the IMU task. Its stack is 4 KB and the task's own frames are
 //     on it: keep the hook's use under about 512 bytes (no large locals, no
 //     formatting of floats, no logging of more than a short line). It must
@@ -20,7 +21,9 @@
 //     `ms` is when it was read: a consumer that needs continuity compares it
 //     with the previous one and treats a jump as a gap (drop what it was
 //     tracking). After a gap of more than kMotionHookGapMs the chip's latched
-//     tap is dropped from the first sample (it may be as old as the gap).
+//     tap is dropped from the first sample (it may be as old as the gap). A
+//     tap the software detector computed from this sample is kept: it is not
+//     a stale latch.
 //   - The end: when the IMU closes ('closeimu', auto-disable after repeated
 //     bus failures, a start that failed) the hook gets one last call with
 //     `stopped` true; its other fields are not a reading. Calls begin again
@@ -71,6 +74,7 @@ struct MotionHookSample {
   // Without hasHwTap it is this sample's acceleration spike.
   bool tapLatched = false;
   uint8_t tapKind = kMotionTapKindUnknown;  // with tapLatched: side, face, or unknown
+  int16_t tapVec[3] = {0, 0, 0};  // with tapLatched and hasHwTap: the knock's peak jump (mg), zero when unknown
   bool isShaking = false;      // the action detector's state after this sample
   // What the build's chip provides.
   bool hasHwTap = false;       // taps are detected by the chip (latched between samples)
@@ -200,9 +204,13 @@ inline bool motionHookAfterGap(MotionHookFeed& feed, uint32_t ms, uint32_t perio
 // The raw tap of one sample: the chip's latched flag when the chip detects
 // taps (not on the first sample after a gap: the latch may be stale), else an
 // acceleration spike above the detector's threshold (tapAccelThreshold:
-// kMotionTapAccel, m/s^2). No lockout.
-inline bool motionRawTap(bool hasHwTap, bool hwTap, bool afterGap, const float accel[3], float tapAccelThreshold) {
-  if (hasHwTap) return hwTap && !afterGap;
+// kMotionTapAccel, m/s^2). softwareTap: the flag was computed from this
+// sample by the software knock detector, so a gap does not make it stale
+// (a 105-130 ms pause on the bus the OLED shares used to throw the tap away
+// after the detector had already taken it off its queue). No lockout.
+inline bool motionRawTap(bool hasHwTap, bool hwTap, bool afterGap, const float accel[3], float tapAccelThreshold,
+                         bool softwareTap = false) {
+  if (hasHwTap) return hwTap && (softwareTap || !afterGap);
   return sqrtf(accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2]) > tapAccelThreshold;
 }
 
@@ -212,7 +220,8 @@ inline bool motionRawTap(bool hasHwTap, bool hwTap, bool afterGap, const float a
 inline MotionHookSample motionHookSample(uint32_t ms, float pitchDeg, float rollDeg, const float accel[3],
                                          const float* gravity, bool hasHwTap, bool hwTap, bool afterGap,
                                          bool isShaking, float tapAccelThreshold,
-                                         uint8_t hwTapKind = kMotionTapKindUnknown) {
+                                         uint8_t hwTapKind = kMotionTapKindUnknown,
+                                         const int16_t* hwTapVec = nullptr, bool softwareTap = false) {
   MotionHookSample out;
   out.ms = ms;
   out.pitchDeg = pitchDeg;
@@ -227,8 +236,10 @@ inline MotionHookSample motionHookSample(uint32_t ms, float pitchDeg, float roll
     }
   }
   out.hasHwTap = hasHwTap;
-  out.tapLatched = motionRawTap(hasHwTap, hwTap, afterGap, accel, tapAccelThreshold);
+  out.tapLatched = motionRawTap(hasHwTap, hwTap, afterGap, accel, tapAccelThreshold, softwareTap);
   out.tapKind = (out.tapLatched && hasHwTap) ? hwTapKind : kMotionTapKindUnknown;
+  if (out.tapLatched && hasHwTap && hwTapVec)
+    for (int i = 0; i < 3; ++i) out.tapVec[i] = hwTapVec[i];
   out.isShaking = isShaking;
   return out;
 }

@@ -293,7 +293,60 @@ static void testAddressRule() {
   assert(std::strcmp(BNO055_ADDRESS_OPTIONS, "40|0x28 (default),41|0x29 (ADR high)") == 0);
 }
 
+// The fast path's reads (a build with IMU input): ACC_DATA and GRV_DATA,
+// 100 LSB per m/s^2, the accelerometer in mg for the knock detector, gravity
+// as a direction, the full block every 100 ms.
+static void testFastSampling() {
+  // Page 0 registers (datasheet register map): ACC_DATA 0x08..0x0D, GRV_DATA
+  // 0x2E..0x33, TEMP 0x34 and CALIB_STAT 0x35.
+  static_assert(kBno055RegAccelData == 0x08 && kBno055RegGravityData == 0x2E && kBno055RegTemp == 0x34, "");
+  static_assert(kBno055VectorBytes == 6 && kBno055RegGravityData + kBno055VectorBytes == kBno055RegTemp, "");
+  static_assert(kBno055FastPeriodMs == 10 && kBno055FastHz == 100 && kBno055FullEveryMs == 100, "");
+  // Flat, face up: gravity 9.81 m/s^2 on +Z (981 LSB); a knock adds -2.45
+  // m/s^2 on Y (-245 LSB, two's complement 0xFF0B).
+  const uint8_t acc[6] = {0x00, 0x00, 0x0B, 0xFF, 0xD5, 0x03};  // x 0, y -245, z 981
+  float ms2[3];
+  bno055DecodeVector(acc, ms2);
+  assert(ms2[0] == 0.0f && std::fabs(ms2[1] + 2.45f) < 1e-4f && std::fabs(ms2[2] - 9.81f) < 1e-4f);
+  float mg[3];
+  bno055AccelToMg(ms2, mg);
+  assert(std::fabs(mg[2] - 1000.34f) < 0.05f);   // 9.81 m/s^2 is 1000.3 mg
+  assert(std::fabs(mg[1] + 249.83f) < 0.05f);    // -2.45 m/s^2 is -249.8 mg
+  // The full block's accelerometer is the same 6 bytes, so both paths agree.
+  uint8_t block[kBno055DataBytes] = {};
+  std::memcpy(block, acc, sizeof(acc));
+  const uint8_t status[2] = {25, 0xFF};
+  const Bno055Reading r = bno055Decode(block, status);
+  for (int i = 0; i < 3; ++i) assert(r.accel[i] == ms2[i]);
+  // Gravity: a direction in g.
+  const uint8_t grv[6] = {0x00, 0x00, 0x00, 0x00, 0xD5, 0x03};  // z 9.81 m/s^2
+  float g[3];
+  bno055DecodeVector(grv, g);
+  float up[3] = {7, 7, 7};
+  assert(bno055GravityUp(g, up));
+  assert(std::fabs(up[0]) < 1e-6f && std::fabs(up[2] - 1.0003f) < 1e-3f);
+  // Upside down on its side (-X), and the zeros of a fusion that has not started.
+  const uint8_t side[6] = {0x2B, 0xFC, 0x00, 0x00, 0x00, 0x00};  // x -981
+  bno055DecodeVector(side, g);
+  assert(bno055GravityUp(g, up) && std::fabs(up[0] + 1.0003f) < 1e-3f);
+  const uint8_t zeros[6] = {};
+  bno055DecodeVector(zeros, g);
+  float keep[3] = {0, 0, 1};
+  assert(!bno055GravityUp(g, keep) && keep[2] == 1.0f);  // unchanged
+  const float huge[3] = {0, 0, 40.0f};
+  assert(!bno055GravityUp(huge, keep));
+  // The full block: the first sample, then every 100 ms (reads jitter by a
+  // few ms either way).
+  assert(bno055FullDue(false, 0, 12345));
+  assert(!bno055FullDue(true, 1000, 1010));
+  assert(!bno055FullDue(true, 1000, 1090));
+  assert(bno055FullDue(true, 1000, 1096));
+  assert(bno055FullDue(true, 1000, 1100));
+  assert(bno055FullDue(true, 0xFFFFFFF0u, 0x0000005Au));  // across the millisecond wrap (106 ms)
+}
+
 int main() {
+  testFastSampling();
   testStartsInOrder();
   testBootingChip();
   testNothingAnswers();

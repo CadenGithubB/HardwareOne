@@ -36,6 +36,89 @@ Built and host-tested; not yet run on a device.
 - The Map draws its raster at every rotation (it used to be copied unturned, upside down on a
   flipped screen), and `oleddump` dumps the screen as it is seen (64 columns in portrait).
 
+### Fixed (IMU taps after a pause, and the shake configuration's timers)
+Host-tested; not yet run on a device.
+- A tap the firmware just found (the BNO055 at 100 Hz, and the meeting sign's FIFO detector) is kept when the previous sample was more than 100 ms earlier. A chip latch (the LSM6DSOX's own tap engine) is still dropped after that gap: it may be as old as the pause. A pause of 105–130 ms on the bus shared with the OLED used to throw the pod's tap away after the detector had already taken it off its queue, so a button or a configuration knock never arrived.
+- A sample gap during a shake that cancelled a configuration starts the 2 s rearm from that sample, so the rest of the same motion cannot start a new configuration.
+- A sample gap while waiting to hold still does not count as time held still.
+- An open knock ends after 1 s even when the readings are all zero, and those zeros are not the new baseline.
+- The `imuinput` command summary matches the shake configuration (the face-tap teach offer after the 3 s hold is gone).
+- Starting the side-knock stage cancels an `imutapteach` step only while it is still recording, so a step that just finished can still be saved.
+
+### Changed (IMU input: a shake configures tilt, side and top)
+Host-tested and built (`feathers3-pod`, `feathers3-status-sign`, `xiao-default`); not yet run on a
+device.
+- **A shake starts one configuration in stages**, each prompted on the OLED in one message updated
+  in place: "Set the sign down and hold still" (3 s still: the tilt centre; never still within
+  20 s cancels), "Knock the side 5 times" ("Side: 2 of 5"), "Knock the top 5 times" ("Top: 3 of
+  5"), then "Configured: side and top N deg apart" or the teach warnings (under 25 degrees apart,
+  top knocks pointing opposite ways, knocks that would sort as the other surface). Nothing changes
+  until the last top knock: then the new centre is used and both surfaces are saved (the main
+  loop saves them; the IMU task only collects). A knock stage without its 5 knocks within 30 s
+  cancels the whole configuration and keeps the previous centre and surfaces. The knocks press no
+  button, including the last one. With an IMU whose chip finds the taps itself (no knock
+  direction) the configuration is the tilt centre only.
+- **A shake during the configuration cancels it** ("Configuration cancelled"; nothing changes),
+  and does not start a new one: the next configuration starts only from a shake that begins 2 s
+  after the last shake ended. (Before, a shake during a calibration started it over.)
+- The mount teach step is **no longer offered after the shake** ("Tap the face to teach which way
+  is up" is gone: its face tap would be a top knock); `imuinputlearn` still runs it.
+  `imuinputshake on|off` still turns the shake off.
+- `imutapteach` and the configuration share one save and one judgement (the same warnings);
+  `imutapteach side|face` is refused while a configuration runs, and `imutapteach status` reports
+  a configuration as the last teach. Each tap now carries its peak jump from the knock detector to
+  the input (backend sample, hook sample, decimator).
+- `imuinputread json`: added `configStage` (`"none"`, `"settle"`, `"centre"`, `"side"`, `"face"`),
+  `configKnocks`, `lastConfig` (`"none"`, `"configured"`, `"cancelled"`, `"timeout"`,
+  `"never-still"`) and `lastConfigStage`; removed `learnOffered`. `state` stays `"calibrating"`
+  for the whole configuration. The text reply adds the stage while one runs.
+
+### Added (IMU knocks: taught side and face)
+Host-tested and built (`feathers3-pod`, `feathers3-status-sign`, `xiao-default`); not yet run on a
+device.
+- **`imutapteach side|face|clear|status`** teaches the knock detector the device's two surfaces:
+  `side` (or `face`) takes the next 5 taps within 30 s as examples of that surface (they press no
+  button meanwhile; the OLED counts them, "Knock the side: 2 of 5"), `status` shows the taught
+  side axis and face direction and the angle between them (a warning under 25 degrees: the
+  surfaces can't be told apart), and `clear` forgets both. The face is kept as the signed mean
+  direction of its knocks, the side as the axis of its knocks with the sign folded away; once both
+  are taught a knock is the face when its signed cos to the face direction beats its |cos| to the
+  side axis, else the side. Until then the ratio rule (`imutapsideaxis`, `imutapsideratio`) stays.
+  For the pod (bench 2026-11-23, BNO055 glued down): face knocks always hit +Z, side knocks are
+  Y-dominant with Y and Z of either sign, some pointing straight against the face, so a rule that
+  ignored the sign read them as face knocks. The teach step's outcome (screen and log) warns when
+  the face knocks point opposite ways or some taught knocks would sort as the other surface.
+- The taught surfaces are saved settings, `imuTapSideTaught` and `imuTapFaceTaught` (display-only
+  rows, "x,y,z" unit vectors in thousandths; `imutapteach` writes them). The main loop hands them
+  to the detector and saves a finished step; the IMU task only collects the knocks.
+- `imutaptrace` says which rule sorts the knocks and shows `cos s/f` per knock (|cos| to the side
+  axis, signed cos to the face direction); `imutaptrace json` adds `rule` (`"taught"` or
+  `"ratio"`), `taught` (`{"side","face"}` booleans) and per knock `cosSide` (0..1) / `cosFace`
+  (-1..1) when the taught surfaces sorted it.
+
+### Added (IMU input with the BNO055)
+Host-tested and built (`feathers3-pod`); not yet run on the pod.
+- **The BNO055 can be the input device** (`INPUT_DEVICE_TYPE 5`, taps and tilt), which the build
+  used to refuse. In a build with IMU input the BNO055 is read every 10 ms (its fusion rate), each
+  read the accelerometer (`ACC_DATA`) and the fusion's gravity (`GRV_DATA`), 12 bytes in one short
+  transaction, with the rest of the reading every 100 ms; the firmware's knock detector finds the
+  taps in that stream, as it does in the Adafruit 4517's 416 Hz stream, side and face included.
+  Without IMU input a BNO055 build reads the chip every `imudevicepollms` as before.
+- `imutapthreshold`, `imutapmaxms`, `imutapringms`, `imutapsideaxis`, `imutapsideratio` and
+  `imutaptrace` exist in those BNO055 builds too (`imutapshock` and `imutapquiet` stay with the
+  4517's LSM6DSOX). The BNO055's default threshold is 300 mg (the 4517's stays 1300 mg): its
+  accelerometer is filtered at 62.5 Hz, so a knock reads about a third as strong (pod bench
+  2026-11-23: soft side taps peaked 255-472 mg; their 230-300 mg echoes 70-100 ms later fall in
+  the ring window). `imustatus`
+  says "taps found by the firmware in the 100 Hz readings".
+- `imutaptrace json` adds `sampleHz` (416 or 100); on the BNO055 `feed` counts one read per
+  sample (`unread` and `pattern` stay 0, they are the 4517's FIFO status).
+- The knock detector ends a knock after at least two quiet samples, so a 100 Hz knock that dips
+  under the start level for one sample while it rings is not split in two (unchanged at 416 Hz).
+- The IMU input's tap and tilt rules count some windows in samples (the shake, the dwell, the
+  centre); a 10 ms feed reaches them every second sample, each tap carried to the next one.
+- `feathers3-pod` builds the BNO055 as its input device.
+
 ### Changed (input device mounts)
 - **`imuinputmount 0|90|180|270 [mirror]`** and **`anomount 0|90|180|270 [mirror]`** say how the
   input device sits against the screen; they are applied before the screen's rotation, so turning
@@ -45,9 +128,8 @@ Built and host-tested; not yet run on a device.
   `imuinputread json` and `anoencoderstatus json` show `mount` and `mirror` in place of the flags.
 - **`imuinputlearn`**: answers at once; tilt the sign toward the top of the screen within 10 s and
   the lean sets `imuinputmount` (keeping its mirror), confirmed on the screen and shown by
-  `imuinputread` (`lastLearn`, `mount`). After a shake calibration the step is offered ("Tap the
-  face to teach which way is up"): only a face tap within about 4 s starts it; otherwise nothing
-  changes and the menus work at once. A shake or a calibration cancels a running step.
+  `imuinputread` (`lastLearn`, `mount`). A shake or a configuration cancels a running step. (It
+  was briefly offered after a shake calibration; that offer is gone again, see above.)
 
 ### Removed (ESP-NOW 1.0 clean-out)
 Host-tested and built; not run on a device.

@@ -353,6 +353,15 @@ static void testSampleFields() {
   assert(!motionHookSample(1, 0, 0, accel, none, true, false, false, false, kMotionTapAccel).hasGravity);
   const float bad[3] = {NAN, 0, 1};
   assert(!motionHookSample(1, 0, 0, accel, bad, true, false, false, false, kMotionTapAccel).hasGravity);
+  // A tap from the knock detector carries its kind and peak jump; a sample
+  // without a tap, or a stale latch after a gap, carries neither.
+  const int16_t jump[3] = {-54, -242, 83};
+  s = motionHookSample(1, 0, 0, accel, gravity, true, true, false, false, kMotionTapAccel, kMotionTapKindSide, jump);
+  assert(s.tapLatched && s.tapKind == kMotionTapKindSide && s.tapVec[0] == -54 && s.tapVec[1] == -242 && s.tapVec[2] == 83);
+  s = motionHookSample(1, 0, 0, accel, gravity, true, false, false, false, kMotionTapAccel, kMotionTapKindSide, jump);
+  assert(!s.tapLatched && s.tapKind == kMotionTapKindUnknown && s.tapVec[0] == 0 && s.tapVec[1] == 0 && s.tapVec[2] == 0);
+  s = motionHookSample(1, 0, 0, accel, gravity, true, true, true, false, kMotionTapAccel, kMotionTapKindFace, jump);
+  assert(!s.tapLatched && s.tapVec[1] == 0);
 }
 
 // The raw tap has no lockout. Knocks 60 ms apart: the hook sees each, while
@@ -424,6 +433,13 @@ static void testGapDropsTheLatchedTap() {
   assert(motionHookAfterGap(slow, 6401, 200));
   // Without a tap engine the tap is the sample's own spike: not stale, kept.
   assert(motionHookSample(0, 0, 0, spike, nullptr, false, false, true, false, kMotionTapAccel).tapLatched);
+  // A software-detector tap (the BNO055, or the LSM6 FIFO) was computed from
+  // this sample. A gap keeps it; a chip latch on the same sample is dropped.
+  assert(!motionRawTap(true, true, true, accel, kMotionTapAccel));
+  assert(motionRawTap(true, true, true, accel, kMotionTapAccel, true));
+  assert(motionHookSample(0, 0, 0, accel, nullptr, true, true, true, false, kMotionTapAccel, kMotionTapKindSide,
+                          nullptr, true)
+             .tapLatched);
   // Across the 32-bit clock's wrap a period is still a period.
   MotionHookFeed wrap;
   assert(motionHookAfterGap(wrap, 0xFFFFFFF0u, 20) && !motionHookAfterGap(wrap, 0x00000004u, 20));
