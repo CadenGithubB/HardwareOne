@@ -257,8 +257,16 @@ class Detector {
   // One accelerometer sample in mg at time tUs (microseconds, wrapping). True
   // when a knock ended with this sample; `ev` then holds it.
   bool add(const Config& cfg, const float mg[3], uint32_t tUs, Event& ev) {
-    // An all-zero reading is no measurement (a chip still starting): never a baseline.
-    if (mg[0] == 0.0f && mg[1] == 0.0f && mg[2] == 0.0f) return false;
+    // An all-zero reading is no measurement (a chip still starting): never a
+    // baseline. A knock already open still ends at the 1 s cap, or zeros
+    // would hold it open for as long as they continued.
+    if (mg[0] == 0.0f && mg[1] == 0.0f && mg[2] == 0.0f) {
+      if (!inKnock_ || static_cast<uint32_t>(tUs - startUs_) < kKnockMaxOpenUs) return false;
+      lastAboveUs_ = tUs;
+      finish(cfg, ev);
+      haveBase_ = false;  // the next real reading is the baseline; zeros are not
+      return true;
+    }
     if (!haveBase_) {
       for (int i = 0; i < 3; ++i) base_[i] = mg[i];
       haveBase_ = true;

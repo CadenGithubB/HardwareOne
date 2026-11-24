@@ -21,7 +21,9 @@
 //     `ms` is when it was read: a consumer that needs continuity compares it
 //     with the previous one and treats a jump as a gap (drop what it was
 //     tracking). After a gap of more than kMotionHookGapMs the chip's latched
-//     tap is dropped from the first sample (it may be as old as the gap).
+//     tap is dropped from the first sample (it may be as old as the gap). A
+//     tap the software detector computed from this sample is kept: it is not
+//     a stale latch.
 //   - The end: when the IMU closes ('closeimu', auto-disable after repeated
 //     bus failures, a start that failed) the hook gets one last call with
 //     `stopped` true; its other fields are not a reading. Calls begin again
@@ -202,9 +204,13 @@ inline bool motionHookAfterGap(MotionHookFeed& feed, uint32_t ms, uint32_t perio
 // The raw tap of one sample: the chip's latched flag when the chip detects
 // taps (not on the first sample after a gap: the latch may be stale), else an
 // acceleration spike above the detector's threshold (tapAccelThreshold:
-// kMotionTapAccel, m/s^2). No lockout.
-inline bool motionRawTap(bool hasHwTap, bool hwTap, bool afterGap, const float accel[3], float tapAccelThreshold) {
-  if (hasHwTap) return hwTap && !afterGap;
+// kMotionTapAccel, m/s^2). softwareTap: the flag was computed from this
+// sample by the software knock detector, so a gap does not make it stale
+// (a 105-130 ms pause on the bus the OLED shares used to throw the tap away
+// after the detector had already taken it off its queue). No lockout.
+inline bool motionRawTap(bool hasHwTap, bool hwTap, bool afterGap, const float accel[3], float tapAccelThreshold,
+                         bool softwareTap = false) {
+  if (hasHwTap) return hwTap && (softwareTap || !afterGap);
   return sqrtf(accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2]) > tapAccelThreshold;
 }
 
@@ -215,7 +221,7 @@ inline MotionHookSample motionHookSample(uint32_t ms, float pitchDeg, float roll
                                          const float* gravity, bool hasHwTap, bool hwTap, bool afterGap,
                                          bool isShaking, float tapAccelThreshold,
                                          uint8_t hwTapKind = kMotionTapKindUnknown,
-                                         const int16_t* hwTapVec = nullptr) {
+                                         const int16_t* hwTapVec = nullptr, bool softwareTap = false) {
   MotionHookSample out;
   out.ms = ms;
   out.pitchDeg = pitchDeg;
@@ -230,7 +236,7 @@ inline MotionHookSample motionHookSample(uint32_t ms, float pitchDeg, float roll
     }
   }
   out.hasHwTap = hasHwTap;
-  out.tapLatched = motionRawTap(hasHwTap, hwTap, afterGap, accel, tapAccelThreshold);
+  out.tapLatched = motionRawTap(hasHwTap, hwTap, afterGap, accel, tapAccelThreshold, softwareTap);
   out.tapKind = (out.tapLatched && hasHwTap) ? hwTapKind : kMotionTapKindUnknown;
   if (out.tapLatched && hasHwTap && hwTapVec)
     for (int i = 0; i < 3; ++i) out.tapVec[i] = hwTapVec[i];

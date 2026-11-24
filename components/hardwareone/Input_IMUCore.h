@@ -396,7 +396,7 @@ class Engine {
 
   Output update(const Sample& s, const Config& cfg) {
     Output out;
-    if (have_ && static_cast<uint32_t>(s.ms - lastMs_) > kGapMs) dropRun();
+    if (have_ && static_cast<uint32_t>(s.ms - lastMs_) > kGapMs) dropRun(s.ms);
     if (!have_) recentre();  // the first sample: the pose input starts in
     have_ = true;
     lastMs_ = s.ms;
@@ -770,17 +770,20 @@ class Engine {
     dwellAxis_ = 0;
     dwellSign_ = 0;
   }
-  // After a gap: nothing that was being counted is still true.
-  void dropRun() {
+  // After a gap: nothing that was being counted is still true. nowMs is this
+  // sample, not the one before the gap: the gap is not time held still, and
+  // a shake the gap cut short rearms from here.
+  void dropRun(uint32_t nowMs) {
     if (tapCount_ > 0) noteDrop(kDropGap);
     tapCount_ = 0;
     if (calState_ == CalState::Waiting) {  // the countdown starts over
       calStill_ = false;
       calShown_ = 0;
-      calStillSinceMs_ = lastMs_;
+      calStillSinceMs_ = nowMs;
     }
     strongBits_ = 0;
     afterKnock_ = strongAfterKnock_ = 0;
+    if (inShake_) shakeEndMs_ = nowMs;
     inShake_ = false;
     tapsBlocked_ = false;
     frozen_ = false;

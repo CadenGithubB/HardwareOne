@@ -398,6 +398,24 @@ static void testStuckBaselineRecovers() {
   assert(!evs.empty() && evs.back().verdict == knock::Verdict::Tap);
 }
 
+// Zeros are not a measurement, but they must not hold a knock open past 1 s,
+// and they must not become the baseline the next real reading is judged from.
+static void testOpenKnockEndsOnZeros() {
+  Config cfg;
+  Detector d;
+  Event ev;
+  float still[3] = {0, 0, 1000};
+  assert(!d.add(cfg, still, 0, ev));
+  float hit[3] = {0, 2000, 1000};
+  assert(!d.add(cfg, hit, 10000, ev) && d.inKnock());
+  float zero[3] = {0, 0, 0};
+  assert(!d.add(cfg, zero, 10000 + 500000, ev) && d.inKnock());
+  assert(d.add(cfg, zero, 10000 + 1000000, ev));
+  assert(ev.verdict == knock::Verdict::Long && !d.inKnock());
+  assert(!d.add(cfg, still, 10000 + 1100000, ev) && !d.inKnock());
+  assert(!d.add(cfg, still, 10000 + 1200000, ev) && d.lastDevMg() < 50);
+}
+
 // ---- Taught surfaces (imutapteach) ------------------------------------------------
 using knock::Surface;
 using knock::Surfaces;
@@ -688,6 +706,7 @@ void testDirectionText() {
 
 int main() {
   testStuckBaselineRecovers();
+  testOpenKnockEndsOnZeros();
   testQuietTimePerRate();
   testSingleTap100();
   testFourTapRun100();

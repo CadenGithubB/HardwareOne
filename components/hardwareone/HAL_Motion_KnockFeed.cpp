@@ -150,6 +150,12 @@ void knockFeedTeachCancel() {
   portEXIT_CRITICAL(&sTeachMux);
 }
 
+void knockFeedTeachCancelRecording() {
+  portENTER_CRITICAL(&sTeachMux);
+  if (sTeacher.state == knock::TeachState::Recording) sTeacher.cancel();
+  portEXIT_CRITICAL(&sTeachMux);
+}
+
 knock::Teacher knockFeedTeachPoll(uint32_t nowMs, bool consume) {
   portENTER_CRITICAL(&sTeachMux);
   sTeacher.expire(nowMs);

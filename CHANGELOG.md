@@ -36,6 +36,15 @@ Built and host-tested; not yet run on a device.
 - The Map draws its raster at every rotation (it used to be copied unturned, upside down on a
   flipped screen), and `oleddump` dumps the screen as it is seen (64 columns in portrait).
 
+### Fixed (IMU taps after a pause, and the shake configuration's timers)
+Host-tested; not yet run on a device.
+- A tap the firmware just found (the BNO055 at 100 Hz, and the meeting sign's FIFO detector) is kept when the previous sample was more than 100 ms earlier. A chip latch (the LSM6DSOX's own tap engine) is still dropped after that gap: it may be as old as the pause. A pause of 105–130 ms on the bus shared with the OLED used to throw the pod's tap away after the detector had already taken it off its queue, so a button or a configuration knock never arrived.
+- A sample gap during a shake that cancelled a configuration starts the 2 s rearm from that sample, so the rest of the same motion cannot start a new configuration.
+- A sample gap while waiting to hold still does not count as time held still.
+- An open knock ends after 1 s even when the readings are all zero, and those zeros are not the new baseline.
+- The `imuinput` command summary matches the shake configuration (the face-tap teach offer after the 3 s hold is gone).
+- Starting the side-knock stage cancels an `imutapteach` step only while it is still recording, so a step that just finished can still be saved.
+
 ### Changed (IMU input: a shake configures tilt, side and top)
 Host-tested and built (`feathers3-pod`, `feathers3-status-sign`, `xiao-default`); not yet run on a
 device.

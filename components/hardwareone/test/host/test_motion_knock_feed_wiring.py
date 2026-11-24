@@ -127,15 +127,16 @@ def main() -> None:
     require("motionBackendInfo().samplePeriodMs" in body, "the factor follows the backend's sample period")
     # Each tap's peak jump travels with it to the engine.
     require("out.tapVec[i] = hwTapVec[i]" in read("HAL_MotionHookCore.h"), "the hook sample carries the peak jump")
-    require("sample.hwTapKind, sample.hwTapVec)" in owner, "the motion task hands the backend's peak jump to the hook")
+    require("sample.hwTapKind, sample.hwTapVec, softwareTap)" in owner,
+            "the motion task hands the backend's peak jump to the hook, and a software tap survives a gap")
     require("raw.tapVec[i] = sample.tapVec[i]" in body, "the hook hands it to the engine's sample")
 
     # The shake configuration: collected on the IMU task, saved on the main loop.
     for gone in ("setSetting(", "imuKnockSaveTaught("):
         require(gone not in body, f"the hook (IMU task) never saves ({gone})")
     require("EXT_RAM_BSS_ATTR static ConfigTaught sConfigTaught;" in hook, "the hand-over is in PSRAM")
-    require("sConfigTaughtReady.store(true)" in body and "knockFeedTeachCancel()" in body,
-            "the hook hands the finished steps over and stops an imutapteach step at the side stage")
+    require("sConfigTaughtReady.store(true)" in body and "knockFeedTeachCancelRecording()" in body,
+            "the hook hands the finished steps over and stops an imutapteach step that is still recording")
     tick = extract_block(hook, "void imuInputTick()")
     require("imuKnockSaveTaught(&taught.side, &taught.face" in tick and "sConfigTaughtReady.store(false)" in tick,
             "the main loop saves both surfaces")

@@ -496,6 +496,40 @@ static void testConfigurationShakeCancels() {
   assertShakeCancels(tilt, kStageSettle);
 }
 
+// A gap in the middle of the shake that cancelled a configuration is not the
+// end of that shake's quiet period: the rearm starts at the gap's sample, so
+// the rest of the same motion cannot start another configuration.
+static void testGapDuringCancellingShakeRearms() {
+  Rig r;
+  r.cfg.teachKnocks = true;
+  r.start();
+  r.shake();
+  assert(r.until([&] { return r.engine.calStage() == kStageSettle && !r.engine.shaking(); }, 1000));
+  const int started = r.calEvents[kCalStarted];
+  for (int i = 0; i < 130; ++i) r.step(false, (i % 2) ? 14.0f : -14.0f);  // past the 2 s rearm
+  assert(r.engine.shaking() && r.calEvents[kCalShakeCancelled] == 1 && r.engine.calBlocked());
+  r.ms += 400;
+  r.step(false, 14.0f);
+  assert(r.engine.calBlocked() && r.calEvents[kCalStarted] == started);
+  for (int i = 0; i < 40; ++i) r.step(false, (i % 2) ? 14.0f : -14.0f);
+  r.run(1000);
+  assert(r.calEvents[kCalStarted] == started && r.engine.calBlocked());
+}
+
+// A gap while waiting to hold still is not time held still, however long it is.
+static void testGapDuringSettleIsNotStill() {
+  Rig r;
+  r.cfg.teachKnocks = true;
+  r.start();
+  r.shake();
+  assert(r.until([&] { return r.engine.calStage() == kStageSettle && !r.engine.shaking(); }, 1000));
+  r.run(200);
+  r.ms += 4000;
+  r.step();
+  assert(r.engine.calStage() == kStageSettle && r.calEvents[kCalSideStart] == 0);
+  assert(r.until([&] { return r.engine.calStage() == kStageCentre; }, 4000));
+}
+
 static void testConfigurationKnocksPressNothing() {
   // Every count of side or face knocks, quick or slow, in either stage: no
   // button, no drop counted as a run, no joystick.
@@ -1110,6 +1144,8 @@ int main() {
   testConfigurationHappyPath();
   testConfigurationTimeouts();
   testConfigurationShakeCancels();
+  testGapDuringCancellingShakeRearms();
+  testGapDuringSettleIsNotStill();
   testConfigurationKnocksPressNothing();
   testTapsWaitForCalm();
   testTiltDirections();

@@ -347,7 +347,7 @@ static void imuInputHook(const MotionHookSample& sample, void*) {
     switch (out.calEvent) {
 #if ENABLE_IMU_KNOCK_DETECTOR
       case imuinput::kCalSideStart:
-        knockFeedTeachCancel();  // an imutapteach step would take the knocks (it drops their taps)
+        knockFeedTeachCancelRecording();  // a step still recording would take the knocks; a finished one can still be saved
         break;
 #endif
       case imuinput::kCalDone:

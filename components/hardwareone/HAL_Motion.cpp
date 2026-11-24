@@ -678,6 +678,11 @@ static bool imuStoreSample(const MotionSample& sample, bool publish, unsigned lo
   // The gap rule runs on every sample, hooked or not, so a hook registered
   // mid-run starts from a known previous sample.
   const bool afterGap = motionHookAfterGap(sImuHookFeed, (uint32_t)readMs, (uint32_t)sampleMs);
+  // A software tap was computed from the read that just finished. A chip
+  // latch may have been set before the gap, so only that one is dropped.
+  MotionBackendStatus tapStatus;
+  motionBackendStatus(tapStatus);
+  const bool softwareTap = tapStatus.tapsInSoftware;
   {
     // Diagnostics for `imustatus json`: chip taps, those dropped by the gap
     // rule, and the sampling gaps themselves.
@@ -687,14 +692,14 @@ static bool imuStoreSample(const MotionSample& sample, bool publish, unsigned lo
     if (afterGap) ++sImuTapDiag.gaps;
     if (sample.hwTap) {
       ++sImuTapDiag.chipTaps;
-      if (afterGap) ++sImuTapDiag.gapDropped;
+      if (afterGap && !softwareTap) ++sImuTapDiag.gapDropped;
     }
   }
   if (motionHookRegistered(sImuHook)) {
     const MotionHookSample hooked =
         motionHookSample((uint32_t)readMs, sample.pitch, sample.roll, sample.accel,
                          sample.hasGravity ? sample.gravity : nullptr, sample.hasHwTap, sample.hwTap, afterGap,
-                         shaking, kMotionTapAccel, sample.hwTapKind, sample.hwTapVec);
+                         shaking, kMotionTapAccel, sample.hwTapKind, sample.hwTapVec, softwareTap);
     motionHookCall(sImuHook, hooked);
   }
   return updated;

@@ -59,6 +59,9 @@ knock::Surfaces knockFeedSurfaces();
 // takes are not handed out as taps (they press no button).
 void knockFeedTeachStart(bool side, uint32_t nowMs);
 void knockFeedTeachCancel();
+// Cancel a step that is still collecting knocks. A step that just finished
+// (Done) is left for the main loop to save.
+void knockFeedTeachCancelRecording();
 // The teach step now, its time-out applied at nowMs. With consume, a
 // finished step (Done or TimedOut) is handed out this once and the step goes
 // back to Idle: the main loop saves it; 'imutapteach status' only looks.

@@ -433,6 +433,13 @@ static void testGapDropsTheLatchedTap() {
   assert(motionHookAfterGap(slow, 6401, 200));
   // Without a tap engine the tap is the sample's own spike: not stale, kept.
   assert(motionHookSample(0, 0, 0, spike, nullptr, false, false, true, false, kMotionTapAccel).tapLatched);
+  // A software-detector tap (the BNO055, or the LSM6 FIFO) was computed from
+  // this sample. A gap keeps it; a chip latch on the same sample is dropped.
+  assert(!motionRawTap(true, true, true, accel, kMotionTapAccel));
+  assert(motionRawTap(true, true, true, accel, kMotionTapAccel, true));
+  assert(motionHookSample(0, 0, 0, accel, nullptr, true, true, true, false, kMotionTapAccel, kMotionTapKindSide,
+                          nullptr, true)
+             .tapLatched);
   // Across the 32-bit clock's wrap a period is still a period.
   MotionHookFeed wrap;
   assert(motionHookAfterGap(wrap, 0xFFFFFFF0u, 20) && !motionHookAfterGap(wrap, 0x00000004u, 20));
