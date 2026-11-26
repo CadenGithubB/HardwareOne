@@ -481,6 +481,8 @@ lost:
 - With a second administrator account: that admin signs in and runs
   `userresetpassword <user> <pass>` (the user chooses a new password at the next
   login), or, if that account is a super admin, `factoryreset` to start over.
+  `userresetpassword` refuses the owner account (the first account), so a lost
+  owner password needs `factoryreset` from a second super admin or the erase below.
 - With a single admin account and no other way in: erase the device over the
   cable (`tools/build_board.sh <board> -p PORT erase-flash`, or erase just the LittleFS region) and
   flash again. This removes settings and captured data as well; keep backups

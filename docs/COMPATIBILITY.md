@@ -123,9 +123,11 @@ bundle formats and the ESP-IDF and Arduino core it was built with (`versions jso
 
 ## Account recovery
 
-A lost admin password on a single-account device cannot be recovered in place (`factoryreset`
-needs a super-admin login). A second admin can reset it with `userresetpassword`; otherwise erase the
-LittleFS region over the cable, which also removes settings and captures. An owner login file that
+A lost owner password cannot be recovered in place: `factoryreset` needs a super-admin login, and
+`userresetpassword` refuses the owner account, also from another admin. A second super admin can run
+`factoryreset` (every account is deleted); otherwise erase the LittleFS region over the cable, which also
+removes settings and captures. A second admin can reset any other account's
+password with `userresetpassword`. An owner login file that
 can no longer be read (`/system/users/user_settings/1.json`) is moved aside to `1.json.corrupt-1`,
 and the next boot asks on the console or display for a new owner password; other accounts and
 settings stay as they are. First-time setup refuses
