@@ -27,6 +27,9 @@
 #include "System_AuthIdentity.h"
 #include "System_BootDebug.h"  // bootDebugInProgress: the console mirror's boot window (B13)
 #include "System_BuildConfig.h"
+#if ENABLE_WIFI
+#include <WiFi.h>  // own include: System_ESPNow.h brings it only when ENABLE_ESPNOW is on
+#endif
 #include "System_Clock.h"
 #include "System_Command.h"
 #include "System_CommandTypes.h"
