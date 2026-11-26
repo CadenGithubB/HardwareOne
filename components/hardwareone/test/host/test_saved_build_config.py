@@ -26,7 +26,7 @@ class SavedConfiguration(unittest.TestCase):
         self.patch = patch.object(build_config, "REPO", self.root)
         self.patch.start()
         self.addCleanup(self.patch.stop)
-        for source in ("boards/xiao_s3.defaults", "boards/feathers3.defaults",
+        for source in ("boards/xiao_s3.defaults", "boards/feathers3.defaults", "boards/qtpy_esp32.defaults",
                        "presets/sdkconfig.defaults",
                        "components/hardwareone/System_BuildConfig.h"):
             destination = self.root / source

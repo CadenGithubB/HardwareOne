@@ -267,16 +267,22 @@ def cstr(field: str) -> str:
     return " ".join(out.split())
 
 
-def iter_initializers(body: str):
-    """Yield each top-level `{...}` initializer inside an array body."""
+def iter_initializers_at(body: str):
+    """Yield (offset in body, text) for each top-level `{...}` initializer."""
     k = 0
     while k < len(body):
         if body[k] == "{" and k > 0:
             end = match_brace(body, k)
-            yield body[k:end + 1]
+            yield k, body[k:end + 1]
             k = end + 1
             continue
         k += 1
+
+
+def iter_initializers(body: str):
+    """Yield each top-level `{...}` initializer inside an array body."""
+    for _, item in iter_initializers_at(body):
+        yield item
 
 
 # ============================================================================
@@ -365,10 +371,19 @@ def parse_commands_and_alternates():
                 alternates.append((path.name, array, line + 1, alt_names))
                 continue
             kept[array].append(here)
-            for item in iter_initializers(body):
+            # A row may itself sit in an #if/#else inside the table (one name,
+            # a help text per build). Its alternative is the same command, not
+            # a duplicate: keep the first branch's row.
+            row_paths: dict[str, list[tuple]] = collections.defaultdict(list)
+            for offset, item in iter_initializers_at(body):
                 nm = NAME_RE.match(item)
                 if not nm:
                     continue
+                row_line = src.count("\n", 0, start + offset)
+                row_here = paths[row_line] if row_line < len(paths) else ()
+                if any(mutually_exclusive(row_here, q) for q in row_paths[nm.group(1)]):
+                    continue
+                row_paths[nm.group(1)].append(row_here)
                 f = split_fields(item)
                 help_ = cstr(f[1]) if len(f) > 1 and f[1].startswith('"') else ""
                 usage = next((cstr(x) for x in f[4:] if x.startswith('"Usage:')), "")

@@ -7,7 +7,7 @@ shipping health page, list renderer and graph snapshot with ASan/UBSan at
 64/88/128 pixels. It checks P4 list capacity, OLED scrolling, graph bounds,
 empty/offline series, owned chronological snapshots, rollover, guest navigation,
 poll gating and nested Back behavior. `--preview-dir <path>` writes synthetic
-PGM render previews. See [OLED Health](../../../../docs/OLED_HEALTH.md).
+PGM render previews.
 
 ## OLED list text bounds and scrolling
 
@@ -22,8 +22,7 @@ resets on selection/label/width/owner/mode changes, view and modal pauses,
 clock rollover and hostile text. `test_oled_layout.py` adds overflow cases
 through the shipping compact, split-pane and two-line renderers; the health
 and logging-UI suites run those renderers through the same primitive
-(`oled_text_field_op_double.h` for op-recording canvases). See
-[OLED list text](../../../../docs/OLED_LIST_TEXT.md).
+(`oled_text_field_op_double.h` for op-recording canvases).
 
 ## OLED header status bar
 
@@ -159,8 +158,7 @@ hostile text, busy-ring retry frames, dropped-output reporting and session
 reset. Its framebuffer double rejects any draw outside the content area, any
 row that would wrap, and any draw while the ring's lock is held.
 `--preview-dir <path>` writes PGM renders. Both are registered as
-`oled_console_buffer` and `oled_cli_output`. See
-[OLED CLI Output](../../../../docs/OLED_CLI_OUTPUT.md).
+`oled_console_buffer` and `oled_cli_output`.
 
 ## Shared OLED feedback
 
@@ -174,7 +172,7 @@ pause to the dirty poll and clearing to display-session replacement.
 `test_oled_command_feedback.py --sanitize`, `test_oled_remote_settings.py
 --sanitize`, `test_oled_automation_wizard.py --sanitize`,
 `test_oled_espnow_ownership.py --sanitize` and `test_oled_pair_prompt.py
---sanitize` cover shared results at their real callers. See [OLED feedback](../../../../docs/OLED_FEEDBACK.md).
+--sanitize` cover shared results at their real callers.
 
 ## Cross-board power policy
 
@@ -184,9 +182,8 @@ PLL/revision branches with I2C enabled/disabled (eight variants).
 branches, UART constraints and STT gates (240 fresh-process scenarios).
 Both standalone Python runners accept `--sanitize`. Hardware/RTOS boundaries
 are controlled: these suites do not establish real radio connection retention,
-sleep residency or current draw. See the
-[shared power-policy investigation](../../../../docs/CROSS_BOARD_POWER_POLICY.md)
-for native-radio versus Hosted qualification requirements.
+sleep residency or current draw; native-radio and Hosted boards each need
+that qualified on hardware.
 
 ## Transferred Terminal and P4 regressions
 

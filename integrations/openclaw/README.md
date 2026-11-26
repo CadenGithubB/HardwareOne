@@ -2,8 +2,7 @@
 
 This first Wi-Fi integration packages a portable skill and a standard-library
 Python 3.9+ device client. It reads existing Hardware One APIs; it does not install
-OpenClaw or configure a gateway. The separate optional ESP-to-agent source and
-its setup are documented in [OpenClaw setup](../../docs/OPENCLAW_SETUP.md).
+OpenClaw or configure a gateway.
 It needs no firmware API changes. There are no mutation commands in this version.
 
 An optional [HTTPS chat relay](relay/README.md) serves the other direction:
