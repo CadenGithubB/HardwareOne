@@ -282,13 +282,12 @@ tools/build_board.sh xiao_s3 --config xiao-default -p PORT flash monitor
 
 Always build through `tools/build_board.sh` (or `tools/build_config.py build` /
 `tools/build_deployment.sh`, which also pass a board and a per-build sdkconfig).
-A bare `idf.py` in the repository root is not a supported build: it reads the
-tracked `config/sdkconfig`, which is set up for the XIAO ESP32-S3 (8 MB flash,
-octal PSRAM), while with no `HW_BOARD` the root `CMakeLists.txt` picks the
-default board for the chip (`feathers3` for esp32s3, `qtpy_esp32` for esp32) and
-that board's partition table. The two do not fit together (for esp32s3, a 16 MB
-table in an 8 MB flash setting), so configure stops before touching the tracked
-`config/sdkconfig`, with a message naming `tools/build_board.sh`.
+A bare `idf.py` in the repository root is not a supported build: it would use one
+shared `config/sdkconfig` (not in the repository) for every board, while with no
+`HW_BOARD` the root `CMakeLists.txt` picks the default board for the chip
+(`feathers3` for esp32s3, `qtpy_esp32` for esp32) and that board's partition
+table, so settings saved for one board would meet another's table. Configure
+stops before writing it, with a message naming `tools/build_board.sh`.
 
 Checked-in deployment profiles add a second, independent axis on top of the
 physical board. For example, paired Headless Node updater/main releases are:

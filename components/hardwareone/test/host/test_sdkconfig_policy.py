@@ -239,7 +239,7 @@ class LittleFsLookahead(unittest.TestCase):
     def test_value_is_a_multiple_of_eight_everywhere(self):
         # The allocator keeps one bit per block in whole bytes and the
         # component's Kconfig asks for a multiple of 8.
-        files = [REPO / "config/sdkconfig", REPO / "config/sdkconfig.defaults",
+        files = [REPO / "config/sdkconfig.defaults",
                  *sorted((REPO / "config").glob("sdkconfig.defaults.*")),
                  *sorted((REPO / "boards").glob("*.defaults"))]
         seen = 0
@@ -249,14 +249,10 @@ class LittleFsLookahead(unittest.TestCase):
                 continue
             seen += 1
             self.assertTrue(value.isdigit() and int(value) > 0 and int(value) % 8 == 0, f"{path}: {value}")
-        self.assertGreaterEqual(seen, 2)
+        self.assertGreaterEqual(seen, 1)
 
-    def test_tracked_sdkconfig_matches_the_default(self):
-        # config/sdkconfig serves a bare idf.py (XIAO S3, 8 MB tables); a saved
-        # value is never overridden by a default, so it is kept equal by hand.
-        default = config_value(REPO / "config/sdkconfig.defaults", LOOKAHEAD_KEY)
-        self.assertEqual(config_value(REPO / "config/sdkconfig", LOOKAHEAD_KEY), default)
-        self.assertEqual(default, "320")
+    def test_shared_default_value(self):
+        self.assertEqual(config_value(REPO / "config/sdkconfig.defaults", LOOKAHEAD_KEY), "320")
 
     def test_sizes_come_from_the_size_column(self):
         # The comments of four tables state sizes the columns no longer have.
@@ -363,13 +359,6 @@ class LittleFsMmap(unittest.TestCase):
         for path in others:
             self.assertNotIn(f"{MMAP_KEY}=", path.read_text(), path.relative_to(REPO).as_posix())
             self.assertNotIn(f"# {MMAP_KEY} is not set", path.read_text(), path.relative_to(REPO).as_posix())
-
-    def test_tracked_sdkconfig_matches_the_default(self):
-        # A saved value is never overridden by a default: config/sdkconfig (the
-        # bare idf.py S3 build) is kept equal by hand, and an existing build
-        # folder needs the line changed (or a fresh sdkconfig) once.
-        self.assertEqual(config_value(REPO / "config/sdkconfig", MMAP_KEY), "y")
-        self.assertNotIn(f"# {MMAP_KEY} is not set", (REPO / "config/sdkconfig").read_text())
 
     def check_tables(self, target):
         boards, tables = table_users()

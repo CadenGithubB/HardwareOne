@@ -4,8 +4,9 @@
 Runs the real cmake/HW1BoardGuard.cmake helper with cmake -P (no ESP-IDF) and
 checks that the root CMakeLists.txt calls it before anything writes the
 sdkconfig. Without the guard, a bare `idf.py reconfigure` in a clean clone
-defaulted the board to feathers3 (16 MB table) on top of the tracked XIAO
-config/sdkconfig (8 MB) and rewrote that tracked file.
+defaulted the board to feathers3 (16 MB table) on top of the XIAO config/sdkconfig
+(8 MB) the repository then tracked, and rewrote it. The file is no longer tracked;
+the guard still refuses that shared default path.
 """
 
 from pathlib import Path
@@ -36,13 +37,18 @@ hw1_check_board_selection("{REPO}" "{sdkconfig}" {explicit} "{board}" "{board_fi
                                 capture_output=True, text=True)
         return result.returncode, result.stdout + result.stderr
 
-    def test_tracked_sdkconfig_with_defaulted_board_is_refused(self):
-        tracked = REPO / "config" / "sdkconfig"
-        before = tracked.read_bytes()
-        code, out = self.run_guard(tracked, "FALSE")
+    def test_shared_default_sdkconfig_with_defaulted_board_is_refused(self):
+        shared = REPO / "config" / "sdkconfig"
+        existed = shared.exists()
+        code, out = self.run_guard(shared, "FALSE")
         self.assertNotEqual(code, 0, out)
         self.assertIn("tools/build_board.sh", out)
-        self.assertEqual(tracked.read_bytes(), before)
+        self.assertEqual(shared.exists(), existed)
+
+    def test_shared_default_sdkconfig_is_not_tracked(self):
+        tracked = subprocess.run(["git", "-C", str(REPO), "ls-files", "--error-unmatch",
+                                  "config/sdkconfig"], capture_output=True)
+        self.assertNotEqual(tracked.returncode, 0, "config/sdkconfig must stay untracked")
 
     def test_sdkconfig_saved_for_another_board_is_refused(self):
         sdk = self.root / "sdkconfig"

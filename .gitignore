@@ -12,7 +12,9 @@ managed_components/
 # that must never be published from this repo.
 .scratch/
 
-# SDK config backups + per-target snapshots
+# SDK config backups + per-target snapshots. config/sdkconfig is the shared
+# default a direct idf.py would write; supported builds use build-<board>/sdkconfig.
+config/sdkconfig
 sdkconfig.old
 sdkconfig.bak
 sdkconfig.esp32

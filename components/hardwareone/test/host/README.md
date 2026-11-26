@@ -1589,8 +1589,8 @@ covered: command names in prose elsewhere and argument syntax. Run with
 
 `bare_idf_guard` runs `cmake/HW1BoardGuard.cmake` with `cmake -P` (no ESP-IDF).
 With no `HW_BOARD` and no deployment, configure must stop with a message naming
-`tools/build_board.sh` when the sdkconfig is the tracked `config/sdkconfig`
-(left byte-for-byte unchanged) or was saved for another Arduino variant or flash
+`tools/build_board.sh` when the sdkconfig is the shared default `config/sdkconfig`
+(not created by the refusal, and not tracked by git) or was saved for another Arduino variant or flash
 size than the defaulted board; a fresh or matching sdkconfig and any explicit
 board pass. It also checks that the root `CMakeLists.txt` calls the guard before
 its first write to the sdkconfig. Run with

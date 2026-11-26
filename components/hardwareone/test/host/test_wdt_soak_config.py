@@ -64,12 +64,6 @@ class DefaultsStayUnchanged(unittest.TestCase):
                                              "CONFIG_ESP_TASK_WDT_INIT": "y",
                                              "CONFIG_ESP_TASK_WDT_PANIC": "y"})
 
-    def test_tracked_sdkconfig_does_not_panic(self):
-        settings = wdt_settings(REPO / "config/sdkconfig")
-        self.assertIn("CONFIG_ESP_TASK_WDT_PANIC", settings)
-        self.assertIsNone(settings["CONFIG_ESP_TASK_WDT_PANIC"], "panic must stay unset")
-        self.assertEqual(settings.get("CONFIG_ESP_TASK_WDT_TIMEOUT_S"), "5")
-
     def test_saved_configurations_do_not_select_watchdog_keys(self):
         for path in sorted((REPO / "configurations").glob("*.json")):
             sdk = json.loads(path.read_text()).get("sdkconfig", {})

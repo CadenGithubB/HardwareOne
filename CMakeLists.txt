@@ -191,7 +191,7 @@ else()
                    "using CONFIG_ARDUINO_VARIANT from sdkconfig.defaults.${_inferred_target}")
 endif()
 
-# A defaulted board must not be combined with the tracked config/sdkconfig or a
+# A defaulted board must not be combined with the shared config/sdkconfig or a
 # sdkconfig saved for another board. Runs before anything below writes the
 # sdkconfig (the partition-path and reconcile steps in section 4).
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/HW1BoardGuard.cmake")
@@ -439,7 +439,7 @@ else()
 endif()
 
 if(_ota_layout)
-    # Keep OTA configuration isolated from the ordinary tracked sdkconfig. A
+    # Keep OTA configuration isolated from the ordinary shared sdkconfig. A
     # cached default SDKCONFIG from an older ordinary configure must be replaced
     # too; otherwise explicit `# ... is not set` lines defeat OTA defaults.
     get_filename_component(_ordinary_sdkconfig

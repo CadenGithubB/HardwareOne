@@ -4,9 +4,9 @@
 #
 # A bare `idf.py build` (no HW_BOARD, no deployment) defaults the board per
 # target (feathers3 on esp32s3), but IDF keeps every value already saved in the
-# sdkconfig: the tracked config/sdkconfig is a XIAO (8 MB) configuration, so the
-# result combined XIAO settings with the FeatherS3 16 MB partition table and
-# rewrote the tracked file. Supported builds go through tools/build_board.sh or
+# sdkconfig: the then-tracked config/sdkconfig was a XIAO (8 MB) configuration,
+# so the result combined XIAO settings with the FeatherS3 16 MB partition table
+# and rewrote it. The file is no longer tracked, but the shared path stays refused. Supported builds go through tools/build_board.sh or
 # tools/build_deployment.sh, which always name the board and use a per-build
 # sdkconfig.
 #
@@ -29,7 +29,7 @@ function(hw1_check_board_selection _repo _sdkconfig _board_explicit _board _boar
     if(_used STREQUAL _tracked)
         message(FATAL_ERROR
             "A bare idf.py configure (no HW_BOARD) would use and rewrite the "
-            "tracked config/sdkconfig and default the board to '${_board}'. "
+            "shared config/sdkconfig and default the board to '${_board}'. "
             ${_hint})
     endif()
     if(NOT _board_file OR NOT EXISTS "${_board_file}" OR NOT EXISTS "${_used}")

@@ -115,10 +115,10 @@ the board's `boards/<board>.features.h` for any flag it defines, since that
 profile outranks the shared header.
 
 A bare `idf.py` in the repository root (no `HW_BOARD`, shared `./build/`) is
-not a supported build. It would use the tracked `config/sdkconfig` (a XIAO,
-8 MB configuration) with the per-target default board (FeatherS3, 16 MB table)
-and rewrite that tracked file, so configure stops with a message pointing at
-`tools/build_board.sh`. The board files, `HW_BOARD` rules and menuconfig tables
+not a supported build. It would use one shared `config/sdkconfig` (not in the
+repository; ESP-IDF creates it) for whatever board it last saw, with the
+per-target default board (FeatherS3, 16 MB table), so configure stops with a
+message pointing at `tools/build_board.sh`. The board files, `HW_BOARD` rules and menuconfig tables
 below are reference for what `tools/build_board.sh` selects; every command in
 them goes through the wrapper.
 
@@ -189,7 +189,7 @@ that marker, so the two always agree.
 
 When `HW_BOARD` is unset, the board defaults per target: `feathers3` for
 esp32s3, `qtpy_esp32` for esp32. Configure then stops (naming
-`tools/build_board.sh`) if the sdkconfig in use is the tracked
+`tools/build_board.sh`) if the sdkconfig in use is the shared
 `config/sdkconfig`, or was saved for a different Arduino variant or flash size
 than that default board — the combination that used to produce a XIAO
 configuration with the FeatherS3 16 MB partition table.

@@ -176,12 +176,10 @@ Each build directory points directly at its selected checked-in partition table.
 Each successful build also writes `build-<board>/BUILD_INFO.md`: a manifest of what that image actually contains - every feature flag as the compiler resolved it, chip / PSRAM / flash settings, image size and partition headroom, and the git commit it came from.
 
 Do not run a bare `idf.py build` / `idf.py flash` in the repository root. Without
-`HW_BOARD` it reads the tracked `config/sdkconfig`, which is set up for the XIAO
-ESP32-S3 (8 MB flash), while the root `CMakeLists.txt` defaults the board to
-`feathers3` for esp32s3 (`qtpy_esp32` for esp32) and picks that board's
-partition table, so the two do not fit together; configure stops there, before
-touching the tracked `config/sdkconfig`, with a message naming
-`tools/build_board.sh`. `tools/build_board.sh` (and the
+`HW_BOARD` it would use one shared `config/sdkconfig` for every board, while the
+root `CMakeLists.txt` defaults the board to `feathers3` for esp32s3 (`qtpy_esp32`
+for esp32), so settings saved for one board would meet another board's partition
+table; configure stops there with a message naming `tools/build_board.sh`. `tools/build_board.sh` (and the
 `tools/build_config.py build` and `tools/build_deployment.sh` front ends) always
 pass the board and a per-build sdkconfig.
 

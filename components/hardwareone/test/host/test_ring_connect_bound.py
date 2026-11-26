@@ -7,7 +7,7 @@ fake BLEClient outcome: 25 s, under Bluedroid's 30 s link timer
 (CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT); a clean open-timeout gives the link slot
 back without the shared quarantine (which would arm a whole-stack recycle and
 take the temples down). The static_assert must refuse a timer at or under the
-bound, and every checked-in sdkconfig must keep the timer above it.
+bound, and every build must keep the timer above it.
 
 The text checks pin what the unit cannot run: both connect calls use the
 constant, a failed link touches no glasses state, the ring asks for no
@@ -102,18 +102,27 @@ def check_text(component: Path) -> None:
 
 
 def check_sdkconfigs(component: Path) -> None:
-    """Every checked-in build keeps Bluedroid's link timer above the ring bound."""
-    repo = component.parents[1]
-    seen = 0
-    for path in sorted([repo / 'config' / 'sdkconfig', *repo.glob('build-config-*/sdkconfig')]):
-        if not path.exists():
-            continue
-        match = re.search(r'^CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT=(\d+)$', path.read_text(), re.M)
-        if match:
-            seen += 1
-            assert int(match[1]) * 1000 > 25000, (path, match[0])
-    assert seen, 'no sdkconfig sets CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT'
+    """Every build keeps Bluedroid's link timer above the ring bound.
 
+    No defaults layer sets the timer, so builds take ESP-IDF's Kconfig default;
+    any layer that sets it, and any local build folder, must stay above the bound.
+    """
+    repo = component.parents[1]
+    key = 'CONFIG_BT_BLE_ESTAB_LINK_CONN_TOUT'
+    layers = [*sorted((repo / 'config').glob('sdkconfig*.defaults*')),
+              *sorted((repo / 'boards').glob('*.defaults')),
+              *sorted(repo.glob('deployments/*/boards/*/sdkconfig.defaults')),
+              *sorted(repo.glob('build-config-*/sdkconfig'))]
+    for path in layers:
+        match = re.search(rf'^{key}=(\d+)$', path.read_text(), re.M)
+        if match:
+            assert int(match[1]) * 1000 > 25000, (path, match[0])
+    idf = Path(os.environ.get('IDF_PATH') or Path.home() / 'esp' / 'esp-idf')
+    kconfig = idf / 'components' / 'bt' / 'host' / 'bluedroid' / 'Kconfig.in'
+    if kconfig.exists():
+        block = kconfig.read_text().split('config BT_BLE_ESTAB_LINK_CONN_TOUT', 1)[1]
+        default = re.search(r'^\s*default (\d+)$', block, re.M)
+        assert default and int(default[1]) * 1000 > 25000, (kconfig, default)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

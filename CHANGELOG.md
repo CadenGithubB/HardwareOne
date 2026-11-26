@@ -28,6 +28,8 @@ dated from each version's commit. Dates are YYYY-MM-DD.
   the private archive.
 - The optional SDK feature layer moved from `presets/sdkconfig.defaults` to
   `config/sdkconfig.features.defaults`; its contents and its place in the layering are unchanged.
+- `config/sdkconfig` is no longer tracked: no supported build reads it (each board writes its own
+  `build-<board>/sdkconfig`), and a direct `idf.py` is still refused.
 - `KNOWN_ISSUES.md` moved into `docs/`, and the Arduino core patches from `docs/arduino-local-patches/`
   to `tools/arduino-local-patches/`: they are a build input, not a document. The maintainer's release checklist (`RELEASING.md`) left the
   repository; it is kept in the private archive.

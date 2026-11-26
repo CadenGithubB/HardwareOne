@@ -1,10 +1,15 @@
-# HardwareOne recovery-OTA security contract (ESP32-S3, ESP-IDF 5.5.x).
+# HardwareOne recovery-OTA security contract (ESP-IDF 5.5.x). Used by the main
+# application and by the recovery updater (tools/updater) on every board with a
+# recovery-OTA layout: FeatherS3, FeatherS3 FE, XIAO ESP32-S3, Feather ESP32 V2
+# and QT Py ESP32. The classic-ESP32 boards add boards/<board>.ota.defaults on top
+# (silicon revision 3, which RSA signing needs). The P4 boards have no OTA layout.
 #
-# This file is layered only when HW_OTA_LAYOUT=1.  The signing key is deliberately
-# not tracked; create ota_signing_key.pem locally or pass HW1_OTA_SIGNING_KEY to
-# the OTA build wrapper.  Signed-app verification is software-only: it protects
-# the network update path without enabling Secure Boot or burning Secure Boot
-# eFuses.
+# This file is layered only when HW_OTA_LAYOUT=1. The root CMakeLists.txt refuses
+# an OTA configure whose signing, rollback or table-offset settings below did not
+# take effect. The signing key is deliberately not tracked; create
+# ota_signing_key.pem locally or pass HW1_OTA_SIGNING_KEY to the OTA build wrapper.
+# Signed-app verification is software-only: it protects the network update path
+# without enabling Secure Boot or burning Secure Boot eFuses.
 CONFIG_PARTITION_TABLE_OFFSET=0x9000
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK=n
