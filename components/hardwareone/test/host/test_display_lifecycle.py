@@ -39,14 +39,15 @@ def check_ui_boundary() -> None:
                 f"{marker} must delegate hardware lifecycle to {operation}")
         require(re.search(r"(?:->\s*(?:begin|end|ssd1306_command)\s*\(|"
                           r"\bi2cProbeAddress\s*\(|\bnew\s+Adafruit_SSD1306\b|"
-                          r"\bdigitalWrite\s*\(\s*I2C2_POWER_PIN)", body) is None,
+                          r"\bdigitalWrite\s*\(\s*I2C2_POWER_PIN|\bboardI2c2Rail\w*\s*\()", body) is None,
                 f"{marker}: hardware initialization/power belongs in HAL_Display")
 
 
 def compile_and_run(cxx: str, sanitize: bool, display_type: int, power_pin: bool) -> None:
     with tempfile.TemporaryDirectory(prefix="hw1-display-hal-") as directory:
         work = Path(directory)
-        for name in ("HAL_Display.cpp", "HAL_Display.h", "HAL_Display_P4EyePixels.h", "HAL_Display_WavesharePixels.h", "OLED_Layout.h"):
+        for name in ("HAL_Display.cpp", "HAL_Display.h", "HAL_Display_P4EyePixels.h", "HAL_Display_WavesharePixels.h", "OLED_Layout.h",
+                     "HAL_Board.h", "HAL_Board.cpp"):
             shutil.copy2(COMPONENT / name, work / name)
         for name in ("display_lifecycle_platform.h", "display_lifecycle_harness.cpp"):
             shutil.copy2(HERE / name, work / name)
@@ -63,11 +64,12 @@ def compile_and_run(cxx: str, sanitize: bool, display_type: int, power_pin: bool
 #define DISPLAY_TYPE_HX8394_WAVESHARE 5
 """
         config += f"#define DISPLAY_TYPE {display_type}\n"
-        if power_pin:
-            config += "#define I2C2_POWER_PIN 39\n"
+        # The production HAL_Board.cpp drives the rail; its other pins are absent here.
+        config += "#define WIFI_ANTENNA_SWITCH_PIN -1\n"
+        config += "#define I2C2_POWER_PIN 39\n" if power_pin else "#define I2C2_POWER_PIN -1\n"
         (work / "System_BuildConfig.h").write_text(config)
         command = [cxx, "-std=c++17", "-Wall", "-Wextra", "-Werror", "-pedantic",
-                   "-I", str(work), str(work / "HAL_Display.cpp"),
+                   "-I", str(work), str(work / "HAL_Display.cpp"), str(work / "HAL_Board.cpp"),
                    str(work / "display_lifecycle_harness.cpp"), "-o", str(work / "checks")]
         if sanitize:
             command[1:1] = ["-fsanitize=address,undefined", "-g"]

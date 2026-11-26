@@ -5,8 +5,7 @@
 //
 // A rail or enable line that feeds one peripheral stays with that peripheral's
 // HAL (the microphone, camera and SD card power pins; the SPI card's chip
-// select). HAL_Display.cpp still drives the bus-1 rail itself when it removes
-// and restores the panel's power around sleep.
+// select).
 //
 // Threading: boot and the bus owner call these; none is safe from an ISR.
 #ifndef HAL_BOARD_H
@@ -21,8 +20,12 @@ void boardPowerRailInit();
 // The switchable supply of I2C bus 1 (I2C2_POWER_PIN; the FeatherS3's LDO2).
 // boardI2c2RailOn drives it high and returns the GPIO, or -1 on a board
 // without one; the caller owns the settling delay before it clocks the bus.
+// boardI2c2RailOff drives it low (the display removes the panel's power
+// around sleep); everything on bus 1 loses power, and the caller owns the
+// decay delay and the bus recovery after the next On.
 bool boardHasI2c2Rail();
 int boardI2c2RailOn();
+void boardI2c2RailOff();
 
 // The software RF switch (WIFI_ANTENNA_SWITCH_PIN; the FeatherS3[D]).
 // boardAntennaSelectExternal drives the switch to the external (u.FL)

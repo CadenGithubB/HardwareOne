@@ -6,6 +6,7 @@
  */
 
 #include "HAL_Display.h"
+#include "HAL_Board.h"  // the bus-1 rail (boardI2c2RailOn/Off)
 #include "System_BuildConfig.h"
 #include <atomic>
 
@@ -62,8 +63,7 @@ bool beginOled(DisplayDriver* display, uint8_t bus, uint8_t address, uint32_t wa
 void restoreDisplayRail() {
 #if defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
   if (displayRailOff) {
-    pinMode(I2C2_POWER_PIN, OUTPUT);
-    digitalWrite(I2C2_POWER_PIN, HIGH);
+    boardI2c2RailOn();
     delay(100);  // Retain the panel's power-on settling interval.
     if (auto* mgr = i2c()) mgr->performBusRecovery(1);
     displayRailOff = false;
@@ -406,7 +406,7 @@ void displayPrepareForSleep() {
   }
 #if DISPLAY_TYPE == DISPLAY_TYPE_SSD1306 && defined(I2C2_POWER_PIN) && (I2C2_POWER_PIN >= 0)
   if (displayI2cBus() == 1 && !displayRailOff) {
-    digitalWrite(I2C2_POWER_PIN, LOW);
+    boardI2c2RailOff();
     delay(200);  // Preserve the existing rail decay / power-on-reset interval.
     displayRailOff = true;
     oledNeedsInit = gDisplay != nullptr;

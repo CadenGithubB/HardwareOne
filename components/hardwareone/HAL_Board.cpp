@@ -23,6 +23,12 @@ int boardI2c2RailOn() {
   return I2C2_POWER_PIN;
 }
 
+void boardI2c2RailOff() {
+#if I2C2_POWER_PIN >= 0
+  digitalWrite(I2C2_POWER_PIN, LOW);
+#endif
+}
+
 bool boardHasAntennaSwitch() { return WIFI_ANTENNA_SWITCH_PIN >= 0; }
 
 int boardAntennaSelectExternal() {
