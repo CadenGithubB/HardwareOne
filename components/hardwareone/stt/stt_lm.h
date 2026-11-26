@@ -2,7 +2,8 @@
 #include <cstddef>
 #include <cstdint>
 // HW1LM1 word n-gram language model and CTC prefix beam search. The binding
-// contract is experiments/stt_train/lm/FORMAT.md; the host builder/reference
+// contract is the speech-to-text repository's
+// tools/stt_train/lm/FORMAT.md; the host builder/reference
 // decoder and this implementation must agree on its parity fixtures.
 // No filesystem, logging or task API here. ESP-IDF builds hash with mbedTLS,
 // allocate the decode workspace in PSRAM and yield; host builds are portable.

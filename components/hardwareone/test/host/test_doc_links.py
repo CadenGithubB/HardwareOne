@@ -27,7 +27,7 @@ from urllib.parse import unquote
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[3]
 
-SKIPPED_PREFIXES = ("components/hardwareone_libs/", "experiments/", "managed_components/")
+SKIPPED_PREFIXES = ("components/hardwareone_libs/", "managed_components/")
 LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 FENCE = re.compile(r"```.*?```", re.S)
 CODE_SPAN = re.compile(r"`[^`\n]*`")

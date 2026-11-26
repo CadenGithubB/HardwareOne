@@ -73,7 +73,8 @@ void putUnsupportedStatus(JsonDocument& doc) {
   doc["micPdm"] = audioSourceAvailable(AUDIO_SRC_LOCAL_PDM);
   doc["micG2"] = audioSourceAvailable(AUDIO_SRC_G2_LEFT);
   // Without a lease putStatus reported this build capability, not session
-  // state; the USB bench tool (experiments/stt_p4/tools/transcription_ui_usb.py)
+  // state; the USB bench tool (the speech-to-text repository's
+  // tools/stt_p4/tools/transcription_ui_usb.py)
   // reads it over serial, so keep it.
   doc["continuous"] = bool(ENABLE_LOCAL_STT);
 }

@@ -5,8 +5,8 @@
 // literal `#define NAME value` per setting (CMake cannot evaluate #if here).
 // A deployment profile, if selected, is applied after this file.
 //
-// This is the configuration qualified on hardware in experiments/stt_p4 and its
-// predecessors (LCD, wheel/buttons, camera, PDM mic, battery, BLE/G2/R1 and
+// This is the configuration qualified on hardware in the P4 bench
+// experiments (LCD, wheel/buttons, camera, PDM mic, battery, BLE/G2/R1 and
 // Wi-Fi/ESP-NOW through the onboard C6, local speech-to-text). The 16 MB image
 // is close to its app-partition limit; enabling more features may not fit.
 #pragma once

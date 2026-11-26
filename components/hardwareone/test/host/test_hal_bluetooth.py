@@ -2,7 +2,7 @@
 """Compile the REAL HAL_Bluetooth.cpp against controlled native and Hosted
 driver substitutes and check the app/backend contract.
 
-Ported from experiments/p4_connectivity/test_hal_bluetooth.py so the HAL that
+Ported from the P4 connectivity bench experiment so the HAL that
 ships on every Bluetooth board is covered by the tracked suite. The checks
 prove the interface (incomplete startup, uncertain remote state, failed or
 incomplete teardown, restart, native power error propagation and explicit

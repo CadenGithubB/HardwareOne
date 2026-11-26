@@ -566,7 +566,7 @@
 // too. The microphone pins exist only in the Sense board block, so that
 // combination is rejected here. The camera pins are fixed in
 // System_Camera_DVP.cpp and a Sense board built without its SD card and
-// microphone may keep the camera (experiments/camera_portable), so the camera
+// microphone may keep the camera (bench-checked on such a board), so the camera
 // is left to the profile: a base XIAO sets ENABLE_CAMERA_SENSOR 0.
 #if defined(ARDUINO_XIAO_ESP32S3_DEV) && !defined(ARDUINO_XIAO_ESP32S3_SENSE_DEV) && !XIAO_ESP32S3_SENSE_ENABLED && ENABLE_MICROPHONE_SENSOR
   #error "XIAO_ESP32S3_SENSE_ENABLED 0 needs ENABLE_MICROPHONE_SENSOR 0 (and ENABLE_CAMERA_SENSOR 0 on a base XIAO); see configurations/xiao-base.json"
@@ -1899,7 +1899,7 @@
 #endif
 
 // Word n-gram language-model beam search for the local STT backend
-// (stt/stt_lm.h; format experiments/stt_train/lm/FORMAT.md). Defaults to the
+// (stt/stt_lm.h; format: the speech-to-text repository's tools/stt_train/lm/FORMAT.md). Defaults to the
 // backend's own switch, after the deployment profile has set it; a profile may
 // define 0 to keep greedy CTC only. At runtime /STT Models/meeting.lm is read
 // into PSRAM once per session; a missing or invalid file or a memory shortfall

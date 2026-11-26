@@ -2006,8 +2006,8 @@ this gate fails with one hit (a home subnet quoted in the readiness appendix).
 python3 components/hardwareone/test/host/test_doc_links.py
 ```
 
-`doc_links` reads every tracked Markdown file (not `components/hardwareone_libs`,
-managed components or `experiments/`), skips fenced code, and fails on a
+`doc_links` reads every tracked Markdown file (not `components/hardwareone_libs`
+or managed components), skips fenced code, and fails on a
 `[text](target)` link that is an absolute path (`/private/tmp/...`) or a
 relative path with no tracked file or folder behind it. URLs and in-page
 anchors are not checked. A file a tool makes (not tracked) is named in code
@@ -3518,11 +3518,7 @@ so they do not qualify electrical I2C timing or physical sleep/wake.
 ```sh
 ctest --test-dir /path/to/host-build --output-on-failure \
   -R '^(power_cpu_frequency|power_save_tick)$'
-HW1_POWER_TEST_APP="$PWD" python3 experiments/p4_ble_roles/tests/test_power_profile.py
 ```
-
-The existing experiment profile test additionally checks power JSON and CPU menu
-labels against the selected application's production source.
 
 ## Icon lookup and rendering ownership
 
@@ -6892,7 +6888,7 @@ noted once and never read.
 
 `stt_lm_tests` compiles the production `stt/stt_lm.cpp` (host SHA-256 and
 allocation path) against HW1LM1 files the test writes itself
-(`stt_lm_testlib.h`), per `experiments/stt_train/lm/FORMAT.md`. It covers SHA-256
+(`stt_lm_testlib.h`), per `tools/stt_train/lm/FORMAT.md` in the speech-to-text repository. It covers SHA-256
 vectors; header/section/padding/digest/string-order/n-gram-order/word-id
 rejection behind a valid digest; ARPA backoff scoring; custom-word
 normalisation, limits and de-duplication; and the prefix beam search: blanks,
@@ -6903,7 +6899,7 @@ with the independent map-based float64 reference decoder in `stt_lm_testlib.h`;
 a case is skipped only when some beam cut or final pick is within 1e-6 nats and
 is not a structural tie (equal LM parts): exact real-number coincidences reached
 through different arithmetic round differently in any two implementations. Both
-decoders follow the readings `experiments/stt_train/lm/hw1lm.py` documents:
+decoders follow the readings the speech-to-text repository's `tools/stt_train/lm/hw1lm.py` documents:
 `char_prune` never prunes the repeat of a prefix's last symbol (space after space
 is blank-like), and custom-word lines split like Python `str.splitlines()`.
 

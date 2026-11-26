@@ -34,7 +34,6 @@ ALLOWED_SUBNETS = {
     0: "generic example address",
     1: "generic example address",
     4: "ESP-IDF SoftAP default (192.168.4.1)",
-    5: "experiments/p4_connectivity test access point",
     77: "recovery updater SoftAP (updater/main/Kconfig.projbuild)",
     100: "host-test fixture",
 }

@@ -125,21 +125,6 @@ static_assert(MIC_POWER_PIN == EXPECT_POWER, "board microphone power");
     print('Waveshare codec wiring and microphone disable override passed')
     print('Audio board wiring and disable overrides: 10 PDM/default configurations passed')
 
-    # Use the actual deployment headers too: defaults-only checks miss an
-    # override that enables the microphone while suppressing its board wiring.
-    for target, board, sense in (('p4', boards[0], 0), ('s3', boards[1], 1)):
-        _, definitions, available, clk, data, power = board
-        profile = REPOSITORY / 'experiments/audio_portable' / f'features-{target}.h'
-        cmd = [cxx, '-std=c++17', '-Wall', '-Wextra', '-Werror', '-Wno-cpp',
-               '-I', str(COMPONENT), '-fsyntax-only', str(source),
-               f'-DHW1_DEPLOYMENT_CONFIG_HEADER="{profile}"',
-               f'-DEXPECT_MIC={available}', f'-DEXPECT_CLK={clk}',
-               f'-DEXPECT_DATA={data}', f'-DEXPECT_POWER={power}',
-               f'-DEXPECT_DEPLOYMENT_SENSE={sense}']
-        cmd.extend('-D' + value for value in definitions)
-        subprocess.run(cmd, check=True)
-    print('Actual audio deployment profiles: P4 and S3 microphone sources/pins passed')
-
 
 if __name__ == '__main__':
     main()

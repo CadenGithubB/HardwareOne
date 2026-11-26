@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Decode the HW1LM1 parity fixtures with the production decoder.
 
-fixtures/stt_lm/ is written by experiments/stt_train/lm/make_fixtures.py from
+fixtures/stt_lm/ is written by the speech-to-text repository's
+tools/stt_train/lm/make_fixtures.py from
 the host reference decoder (hw1lm.py; contract FORMAT.md): tiny.lm, raw int8
 [frames x 29] logits per case, custom_words.txt and manifest.json
 (format hw1lm-parity-1). stt_lm_tool (stt/stt_lm.cpp and the production greedy
@@ -62,7 +63,7 @@ def main():
     args = parser.parse_args()
     manifest_path = args.fixtures / 'manifest.json'
     if not manifest_path.is_file():
-        print(f'SKIP: no {manifest_path} (written by experiments/stt_train/lm/make_fixtures.py)')
+        print(f'SKIP: no {manifest_path} (written by tools/stt_train/lm/make_fixtures.py in the speech-to-text repository)')
         return SKIP
     manifest = json.loads(manifest_path.read_text())
     if manifest.get('format') != 'hw1lm-parity-1':
