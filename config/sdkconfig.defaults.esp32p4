@@ -112,7 +112,9 @@ CONFIG_ESP_VIDEO_ENABLE_HW_JPEG_DEC_VIDEO_DEVICE=n
 
 # LittleFS reads through the flash memory map (S-1; the reasons are in
 # sdkconfig.defaults.esp32s3). The P4 maps flash into its own 64 MB window
-# (PSRAM has another); the largest table uses 32 MB of it. A build folder made
+# (PSRAM has another), but only flash addresses below 16 MB: a board whose
+# littlefs partition ends above that turns this off in its board file
+# (waveshare_p4_touch_lcd_5). A build folder made
 # before this line keeps its saved "is not set": use a fresh folder or change
 # that line once.
 CONFIG_LITTLEFS_MMAP_PARTITION=y

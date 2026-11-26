@@ -8,6 +8,12 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=360
 CONFIG_ESPTOOLPY_FLASHSIZE_32MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="32MB"
+# LittleFS reads go through esp_partition_read on this board, not the flash
+# memory map: its 24 MB littlefs partition ends at 32 MB, and the P4 cache
+# maps flash addresses below 16 MB only (24-bit; the 32-bit mapping is an
+# experimental ESP-IDF option). Mapped, the mount fails with "out of range
+# for 24bit flash mapping" and the device has no filesystem.
+CONFIG_LITTLEFS_MMAP_PARTITION=n
 CONFIG_SECURE_BOOT=n
 CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=n
 CONFIG_SECURE_FLASH_ENC_ENABLED=n

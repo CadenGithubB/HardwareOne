@@ -350,13 +350,15 @@ class LittleFsMmap(unittest.TestCase):
         for family in MMAP_FAMILIES:
             self.assertEqual(config_value(REPO / f"config/sdkconfig.defaults.{family}", MMAP_KEY), "y", family)
         # Every other layer leaves it alone: the shared file (it would reach the
-        # classic ESP32), the classic family file, OTA/soak overlays, board files,
-        # the feature file and the deployment overlays.
+        # classic ESP32), the classic family file, OTA/soak overlays, the feature
+        # file and the deployment overlays. A board file may only turn it off
+        # (a littlefs partition above the 16 MB mapping limit, below).
+        for path in sorted((REPO / "boards").glob("*.defaults")):
+            self.assertIn(config_value(path, MMAP_KEY), (None, "n"), path.relative_to(REPO).as_posix())
         others = [REPO / "config/sdkconfig.defaults",
                   *[path for path in sorted((REPO / "config").glob("sdkconfig.defaults.*"))
                     if path.suffix.lstrip(".") not in MMAP_FAMILIES],
                   *sorted((REPO / "config").glob("sdkconfig.*.defaults")),
-                  *sorted((REPO / "boards").glob("*.defaults")),
                   *sorted((REPO / "deployments").glob("*/boards/*/sdkconfig.defaults"))]
         for path in others:
             self.assertNotIn(f"{MMAP_KEY}=", path.read_text(), path.relative_to(REPO).as_posix())
@@ -413,6 +415,23 @@ class LittleFsMmap(unittest.TestCase):
                     APP_SPLIT_PAGES)
             with self.subTest(table=table.name, boards=users):
                 self.assertLessEqual(used, P4_FLASH_WINDOW, f"{table.name}: {used / MIB:.2f} MB")
+
+    def test_mapped_littlefs_ends_below_the_16mb_flash_mapping_limit(self):
+        # The S3 and P4 caches map flash addresses below 16 MB only (24-bit;
+        # the 32-bit mapping is an experimental ESP-IDF option). A mapped
+        # littlefs partition that ends above it fails the mount at boot
+        # ("out of range for 24bit flash mapping"), so such a board must turn
+        # the mapping off in its board file.
+        mapped_boards = {name for name in board_targets()
+                         if config_value(REPO / "boards" / f"{name}.defaults", MMAP_KEY) != "n"}
+        for target in MMAP_FAMILIES:
+            for table, users, littlefs, models, app in self.check_tables(target):
+                end = littlefs[3] + littlefs[4]
+                for board in users:
+                    with self.subTest(table=table.name, board=board):
+                        if board in mapped_boards:
+                            self.assertLessEqual(end, 16 * MIB, f"{table.name}: littlefs ends at {end / MIB:.2f} MB")
+        self.assertNotIn("waveshare_p4_touch_lcd_5", mapped_boards)
 
     def test_page_arithmetic(self):
         self.assertEqual(mapped_bytes(0x10000, 0x10000), MMU_PAGE)
